@@ -1,0 +1,36 @@
+# --- Core config & utils ---
+python-dotenv
+PyYAML
+requests
+httpx
+
+# --- LLM providers (matches keys already in .env) ---
+anthropic
+openai
+google-genai
+tavily-python
+
+# --- Data / Quant (Research, Quant/Backtest departments) ---
+pandas
+numpy
+scipy
+pandas-ta
+
+# --- API & realtime (initial stack per HEDGE_FUND_MASTER_PLAN.md 13.1) ---
+fastapi
+uvicorn[standard]
+websockets
+
+# --- Storage clients ---
+psycopg2-binary
+redis
+pgvector
+
+# --- Observability ---
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+prometheus-client
+
+# NOTE: The Hermes agent runtime itself (NousResearch/hermes-agent) is a separate
+# CLI/orchestrator that these department .yaml files target — it is not a PyPI
+# package and is not listed here; install it per its own repo instructions.

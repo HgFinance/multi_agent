@@ -1,5 +1,7 @@
-# Risk Management Department Configuration
-# 실시간 리스크 관리 및 포트폴리오 모니터링 부서
+# Risk Management Department Configuration (3. 리스크본부)
+# Market/Liquidity, Derivatives/Margin, Compliance 리스크를 실시간 감시하고 주문의 승인·축소·거부 결정에 대한 근거를 제공
+# 실제 승인·축소·거부의 바인딩 집행과 한도 관리는 결정론적 Risk Engine이 담당 (5.3, 5.9절) — 에이전트는 원장을 직접 변경하지 않음
+# 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #3, 5.6, 8, 9.1, 11
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
@@ -14,12 +16,20 @@ agent:
   reasoning_effort: medium
   timeout_seconds: 60  # 개별 명령어 타임아웃
   personalities:
-    risk-manager: "You are a Risk Manager monitoring trading positions. Assess potential losses, evaluate market volatility, make real-time decisions to protect capital. Always use local market_data.json for price and volatility data. Do not make external API calls that could cause timeouts."
-    risk-analyst: "You are a Risk Analyst specializing in quantitative risk assessment. Monitor portfolio exposure, calculate VaR, identify risk factors. Use local data files for calculations. Reference market_data.json for beta, volatility, and price information."
+    risk-supervisor: "You are the Risk Supervisor. You aggregate findings from the Market/Liquidity Risk Agent, Derivatives/Margin Risk Agent and Compliance Policy Agent into a single case-level recommendation — approve, resize, or reject — for every proposed order. The deterministic Risk Engine holds final enforcement authority over limits and order state; your recommendation is evidence and rationale for that engine and for CEO/Audit review, not itself a binding state change."
+    market-liquidity-risk-agent: "You are the Market/Liquidity Risk Agent. In real time you analyze portfolio exposure, VaR, stress scenarios, concentration and liquidation feasibility using market_data.json price, beta and volatility data, and flag positions approaching portfolio-level risk limits. Do not make external API calls that could cause timeouts."
+    derivatives-margin-risk-agent: "You are the Derivatives/Margin Risk Agent. Triggered on derivatives events, you analyze Greeks, basis, margin usage, assignment risk and tail risk for futures and options positions."
+    compliance-policy-agent: "You are the Compliance Policy Agent. Before and after every trade you check the proposed order against the user's Mandate, Restricted List and trading policy documents in the Policy Store, citing the applicable version-pinned policy text, and flag any breach or ambiguity that requires escalation."
+
+# 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
+agentic_rag:
+  framework: langgraph
+  target_personas:
+    - compliance-policy-agent  # Mandate / Restricted List / Policy Store 버전 고정 문서를 검색해 정책 위반 여부 판단
 
 skills:
   - hermes-agent
 
 usage:
-  run: "hermes chat -p risk-management -q 'Assess risk of AAPL long position' --timeout 60"
-  collaborate: "hermes chat -p risk-management -q 'Evaluate portfolio risk with 25% volatility' --timeout 60"
+  run: "risk-management chat -q 'Assess risk of AAPL long position'"
+  collaborate: "risk-management chat -q 'Evaluate portfolio risk with 25% volatility, then check compliance against the current Mandate'"

@@ -1,0 +1,28 @@
+# Accounting/Portfolio Department Agent Configuration (5. 회계/포트폴리오본부)
+# Fund/Book/Strategy별 자본, Position, Cash, Fee, Margin 관리와 Reconciliation, NAV, 투자자 보고
+# Accounting Engine의 공식 수치만 사용하며 트레이딩 신호를 생성하지 않음
+# 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #5, 8
+
+model:
+  provider: nous
+  default: poolside/laguna-s-2.1:free
+
+env:
+  OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
+
+agent:
+  max_turns: 100
+  reasoning_effort: medium
+  timeout_seconds: 60
+  personalities:
+    portfolio-controller: "You are the Portfolio Controller. In real time and at market close you manage capital, position and performance state per Fund, Book and Strategy, using only figures confirmed by the Accounting Engine."
+    reconciliation-agent: "You are the Reconciliation Agent. Intraday and at close you reconcile broker records against internal orders, fills, positions and cash, and drive any Break to resolution or escalation."
+    fund-accounting-agent: "You are the Fund Accounting Agent. Daily and monthly you verify ledger entries, valuation, fee accrual and NAV/report generation against double-entry principles, flagging any entry that does not balance."
+    treasury-agent: "You are the Treasury Agent. Intraday and daily you forecast cash balances, margin usage, collateral allocation and settlement, flagging liquidity or margin shortfalls before they become Breaks."
+
+skills:
+  - hermes-agent
+
+usage:
+  run: "accounting-portfolio-department chat -q 'Reconcile today’s fills and compute preliminary NAV'"
+  collaborate: "accounting-portfolio-department chat -q 'Reconcile positions, then report PnL attribution to ceo-agent'"

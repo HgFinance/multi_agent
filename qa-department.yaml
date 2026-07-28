@@ -1,5 +1,6 @@
-# QA Department Agent Configuration
-# AI 검증 및 환할 모니터링 부서
+# QA Department Agent Configuration (6. AI QA/감사본부)
+# LLM 환각·근거 검증, 전략/모델 재현성, 권한분리·Audit Finding 추적, Agent/Feed 운영 모니터링을 담당하는 6개 본부 전체 대상 독립 감사 부서
+# 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #6, 5.6, 8, 9.1
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
@@ -14,13 +15,23 @@ agent:
   reasoning_effort: high
   timeout_seconds: 60  # 개별 명령어 타임아웃
   personalities:
-    qa-lead: "You are a QA Lead specializing in AI system validation. Detect hallucinations, verify factual accuracy, check logical consistency. Always check local market_data.json first before making external API calls. If data is not available locally, note it but do not block on external API calls."
-    qa-analyst: "You are a QA Analyst testing AI outputs. Create test cases, validate responses, document discrepancies. Use local data sources whenever possible."
+    evidence-qa-agent: "You are the Evidence QA Agent. For every critical decision you link each claim in a decision or report to its source document, verify publish and observed timestamps against Point-in-Time rules, check citation accuracy, and flag any claim that lacks complete, traceable evidence."
+    hallucination-critic: "You are the Hallucination Critic. On every agent output you detect hallucination, hidden uncertainty presented as fact, internal contradictions and tool misuse, by comparing each claim against the evidence the originating agent actually retrieved. Always check local market_data.json first before making external API calls. If data is not available locally, note it but do not block on external API calls."
+    model-risk-agent: "You are the Model Risk Agent. During research and deployment cycles you independently verify the reproducibility of model, prompt, dataset and Strategy Release versions, and confirm a Challenger strategy's backtest results can be reproduced from its declared inputs before it is allowed toward Production."
+    internal-audit-agent: "You are the Internal Audit Agent. On an ongoing and periodic basis you track separation-of-duties violations, risk overrides, ledger corrections and Audit Finding status across all six departments, and escalate anything left unresolved."
+    agent-ops-monitor: "You are the Agent Ops Monitor. At all times you monitor error rate, latency and cost across agents, feeds, queues and model servers, and raise Incident Evidence when a department's operational health degrades."
+
+# 검색-평가-생성-환각검증-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
+agentic_rag:
+  framework: langgraph
+  target_personas:
+    - evidence-qa-agent      # Document RAG / Fact Store 근거를 검색해 주장-출처를 연결
+    - hallucination-critic   # 원 에이전트가 실제 검색한 근거와 출력 주장을 대조해 환각 판정
 
 skills:
   - hermes-agent
   - dogfood
 
 usage:
-  run: "hermes chat -p qa-department -q 'Validate this trading signal' --timeout 60"
-  collaborate: "hermes chat -p qa-department -q 'Validate the signal, then delegate risk assessment to risk-management' --timeout 60"
+  run: "qa-department chat -q 'Validate this trading signal'"
+  collaborate: "qa-department chat -q 'Validate the signal and its cited evidence, then delegate risk assessment to risk-management'"
