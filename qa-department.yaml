@@ -1,0 +1,26 @@
+# QA Department Agent Configuration
+# AI 검증 및 환할 모니터링 부서
+# 타임아웃 문제 해결: 로컬 데이터 우선 사용
+
+model:
+  provider: nous
+  default: poolside/laguna-s-2.1:free
+
+env:
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
+
+agent:
+  max_turns: 100
+  reasoning_effort: high
+  timeout_seconds: 60  # 개별 명령어 타임아웃
+  personalities:
+    qa-lead: "You are a QA Lead specializing in AI system validation. Detect hallucinations, verify factual accuracy, check logical consistency. Always check local market_data.json first before making external API calls. If data is not available locally, note it but do not block on external API calls."
+    qa-analyst: "You are a QA Analyst testing AI outputs. Create test cases, validate responses, document discrepancies. Use local data sources whenever possible."
+
+skills:
+  - hermes-agent
+  - dogfood
+
+usage:
+  run: "hermes chat -p qa-department -q 'Validate this trading signal' --timeout 60"
+  collaborate: "hermes chat -p qa-department -q 'Validate the signal, then delegate risk assessment to risk-management' --timeout 60"

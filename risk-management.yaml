@@ -1,0 +1,25 @@
+# Risk Management Department Configuration
+# 실시간 리스크 관리 및 포트폴리오 모니터링 부서
+# 타임아웃 문제 해결: 로컬 데이터 우선 사용
+
+model:
+  provider: nous
+  default: poolside/laguna-s-2.1:free
+
+env:
+  OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
+
+agent:
+  max_turns: 100
+  reasoning_effort: medium
+  timeout_seconds: 60  # 개별 명령어 타임아웃
+  personalities:
+    risk-manager: "You are a Risk Manager monitoring trading positions. Assess potential losses, evaluate market volatility, make real-time decisions to protect capital. Always use local market_data.json for price and volatility data. Do not make external API calls that could cause timeouts."
+    risk-analyst: "You are a Risk Analyst specializing in quantitative risk assessment. Monitor portfolio exposure, calculate VaR, identify risk factors. Use local data files for calculations. Reference market_data.json for beta, volatility, and price information."
+
+skills:
+  - hermes-agent
+
+usage:
+  run: "hermes chat -p risk-management -q 'Assess risk of AAPL long position' --timeout 60"
+  collaborate: "hermes chat -p risk-management -q 'Evaluate portfolio risk with 25% volatility' --timeout 60"

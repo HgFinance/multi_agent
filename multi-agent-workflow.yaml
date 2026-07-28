@@ -1,0 +1,45 @@
+# Multi-Agent Workflow Configuration
+# QA 부서와 리스크 관리 부서 간 협업 워크플로우
+# 타임아웃 문제 해결: 로컬 데이터 소스 사용, Tavily API 통합
+
+model:
+  provider: nous
+  default: poolside/laguna-s-2.1:free
+
+workflow:
+  name: "AI 트레이딩 신호 검증 프로세스"
+  timeout_seconds: 120
+  data_source: "local"
+  data_file: "market_data.json"
+  news_source: "tavily"
+  news_script: "fetch_news.py"
+  steps:
+    - step: 1
+      department: qa-department
+      task: "AI 생성 신호의 환할 여부 검사, 논리적 일관성 평가, 사실적 정확성 검증. market_data.json에서 현재 가격 정보를 참조하고, fetch_news.py를 통해 관련 뉴스 및 공시자료를 확인"
+      timeout_seconds: 60
+    - step: 2
+      department: risk-management
+      task: "포지션 리스크 평가, 포트폴리오 노출도 분석, 변동성 영향 분석. market_data.json의 베타값과 변동성 데이터를 사용하여 리스크 계산. Tavily 뉴스 검색 결과를 참고하여 시장 심리 분석"
+      timeout_seconds: 60
+    - step: 3
+      department: ceo-agent
+      task: "최종 의사결정"
+      timeout_seconds: 30
+
+usage:
+  single_department:
+    qa: "hermes chat -p qa-department -q 'Validate: [AI 신호 내용]' --timeout 60"
+    risk: "hermes chat -p risk-management -q 'Assess risk: [포지션 정보]' --timeout 60"
+  multi_agent:
+    collaboration: "hermes chat -p qa-department -q 'Validate the signal, then delegate risk assessment to risk-management' --timeout 120"
+  news_search:
+    local: "python3 fetch_news.py '[검색어]'"
+    tavily: "python3 fetch_news.py '[검색어]'"
+
+files:
+  qa_department: "qa-department.yaml"
+  risk_management: "risk-management.yaml"
+  workflow: "multi-agent-workflow.yaml"
+  market_data: "market_data.json"
+  news_script: "fetch_news.py"
