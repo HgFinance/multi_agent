@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 대부분 설계 단계다. Application Scaffold도 테스트 프레임워크도 아직 없다.
 
 1. `docs/` — 설계 문서. 이 저장소의 Source of Truth.
-2. 루트의 8개 `*.yaml` — Hermes Agent Runtime이 읽는 부서 Profile.
+2. `orchestration/hermes/<department>/` — 8개 부서 Profile(`config.yaml` + `SOUL.md`).
+   Hermes Agent Runtime이 실제로 읽는 `~/.hermes/profiles/<department>/`와는 별개 사본이며,
+   `scripts/sync_hermes_profiles.sh`로 동기화한다 (아래 "부서 Profile 규약" 참고).
 3. 실행 가능한 코드 — `fetch_news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
    거래 생명주기 구현(`db/`, `trading/contracts.py`, `execution/`, `accounting/`).
 
@@ -113,14 +115,15 @@ python accounting/reconciliation.py # 대사 12개
 
 ### 부서 Profile `.yaml` 규약
 
-8개 파일이 같은 형태다 — `model` / `env` / `agent.personalities` / `skills` / `usage`.
+부서마다 폴더 하나, 폴더마다 `config.yaml` + `SOUL.md` — `orchestration/hermes/<department>/`. 8개 폴더가 같은 형태다 (`config.yaml`: `model` / `env` / `agent.personalities` / `skills` / `usage`, `SOUL.md`: Role/Key Responsibilities/Working Style/Hard Boundaries).
 
+- **저장소 사본과 실제 런타임은 별개 경로다.** `orchestration/hermes/<department>/`는 git으로 관리되는 저장소 사본, `~/.hermes/profiles/<department>/`는 Hermes Runtime이 실제로 읽는 로컬 상태(+ `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*` 등 머신별 파일 포함, 이들은 git에 올리지 않는다). `git pull` 후에는 `./scripts/sync_hermes_profiles.sh push`로 로컬 Hermes에 반영하고, 로컬에서 Profile을 고쳤으면 `./scripts/sync_hermes_profiles.sh pull`로 저장소에 반영한 뒤 커밋한다.
 - 페르소나 프롬프트는 영어 2인칭(`You are the ...`), 파일 상단 주석·설명은 한국어.
 - 상단 주석에 담당자와 `HEDGE_FUND_MASTER_PLAN.md` 절 번호를 남긴다.
 - **`env:`가 부서마다 다르다.** `ANTHROPIC_API_KEY` — ceo, research, qa, quant-backtest / `OPENAI_API_KEY` — trading, risk, accounting, hr. 아무 키나 넣지 않는다. `skills/agentic-rag`가 OpenAI를 쓰는 것도 risk-management가 OpenAI에 배정돼 있기 때문이다.
 - `model`은 8개 파일 모두 `provider: nous` / `poolside/laguna-s-2.1:free`로 동일. 바꾸려면 8개를 함께 바꾼다.
 - `agent.timeout_seconds`는 `multi-agent-workflow.yaml`의 해당 step 값과 맞춘다.
-- 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management.yaml](risk-management.yaml), [qa-department.yaml](qa-department.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
+- 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](orchestration/hermes/risk-management/config.yaml), [qa-department/config.yaml](orchestration/hermes/qa-department/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
 
 ### `skills/agentic-rag`
 
@@ -155,10 +158,10 @@ python accounting/reconciliation.py # 대사 12개
 
 | 담당 | 영역 | Profile | 팀 가이드 |
 |---|---|---|---|
-| 재일 | 리서치 / 퀀트·백테스트 | `research-department.yaml`, `quant-backtest-department.yaml` | [TEAM_JAEIL](docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) |
-| 도현 | 트레이딩 / 회계·포트폴리오 | `trading-department.yaml`, `accounting-portfolio-department.yaml` | [TEAM_DOHYUN](docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) |
-| 동규 | 리스크 / AI QA·감사 | `risk-management.yaml`, `qa-department.yaml` | [TEAM_DONGGYU](docs/05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) |
-| 영주 | CEO / Agent 인사팀 | `ceo-agent.yaml`, `hr-department.yaml` | [TEAM_YOUNGJU](docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) |
+| 재일 | 리서치 / 퀀트·백테스트 | `orchestration/hermes/research-department/`, `orchestration/hermes/quant-backtest-department/` | [TEAM_JAEIL](docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) |
+| 도현 | 트레이딩 / 회계·포트폴리오 | `orchestration/hermes/trading-department/`, `orchestration/hermes/accounting-portfolio-department/` | [TEAM_DOHYUN](docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) |
+| 동규 | 리스크 / AI QA·감사 | `orchestration/hermes/risk-management/`, `orchestration/hermes/qa-department/` | [TEAM_DONGGYU](docs/05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) |
+| 영주 | CEO / Agent 인사팀 | `orchestration/hermes/ceo-agent/`, `orchestration/hermes/hr-department/` | [TEAM_YOUNGJU](docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) |
 
 같은 담당자가 서로 견제해야 하는 두 본부를 함께 맡는 경우가 있다(동규: 리스크 ↔ QA, 도현: 트레이딩 ↔ 회계). 담당자가 같다는 이유로 두 본부의 권한을 합치지 않는다.
 
