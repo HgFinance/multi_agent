@@ -21,6 +21,11 @@ fastapi
 uvicorn[standard]
 websockets
 
+# --- Contracts (trading/contracts.py) ---
+# Agent와 결정론적 서비스의 경계에서 입력을 검증한다. fastapi가 끌어오지만
+# 계약 모듈이 직접 의존하므로 명시한다.
+pydantic>=2
+
 # --- Storage clients ---
 psycopg2-binary
 redis
