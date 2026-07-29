@@ -23,7 +23,8 @@ env/
 *.egg-info/
 
 # 개인 작업 노트 (팀 공유 대상 아님)
-CLAUDE.md
+# CLAUDE.md는 팀 공용으로 main에서 추적된다. 개인 노트는 .local로 분리한다.
+CLAUDE.local.md
 
 # Generated embedding caches (recomputed from corpus content hash on next run)
 .embedding_cache.json
