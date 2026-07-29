@@ -68,17 +68,25 @@ python accounting/reconciliation.py # 대사 12개
 
 ## 아키텍처
 
-### 부서 토폴로지와 3개 주기
+### 부서 토폴로지와 5개 흐름
 
-[multi-agent-workflow.yaml](multi-agent-workflow.yaml)에는 **서로 분리된 세 흐름**이 있다. 섞지 않는다.
+[multi-agent-workflow.yaml](multi-agent-workflow.yaml)에는 **서로 분리된 다섯 흐름**이 있다. 섞지 않는다.
 
-| 주기 | 순서 | 타임아웃 |
+| 흐름 | 순서 | 타임아웃 |
 |---|---|---|
 | `workflow` (실시간 신호) | research → trading → risk → qa → accounting → ceo | 420s |
 | `strategy_research_cycle` (전략 연구) | quant-backtest → qa → ceo | 180s |
-| `workforce_management_cycle` (인사) | hr → hr → qa → ceo → hr | 300s |
+| `workforce_management_cycle` (인사 — 신규 채용) | hr → hr → qa → ceo → hr | 300s |
+| `agent_evolution_cycle` (인사 — 기존 Agent 개선) | hr → hr → qa → ceo → hr | 300s |
+| `event_routing` (동적 라우팅) | 이벤트 유형별 필요한 페르소나만 선택 호출, 고정 순서 없음 | — |
 
 전략 연구 주기는 실시간 파이프라인과 분리돼 있다. 검증된 불변 Strategy Bundle만 트레이딩본부로 넘어가며, 실시간 운용 중 전략 코드를 직접 수정하지 않는다.
+
+**`workforce_management_cycle`과 `agent_evolution_cycle`은 다른 목적이다.** 전자는 신규 채용, 후자는 이미 활성화된 Agent Profile 개선(프롬프트 수정 포함)이다. "이미 배포됐다"는 이유로 후자가 QA 독립검증·CEO 승인을 건너뛰지 않는다 — 프롬프트 한 줄을 고치는 것도 Agent Profile Version을 올리는 변경이다.
+
+**모든 step은 `retry.max_attempts`와 `on_failure`를 가진다.** 실패를 통과로 취급해 다음 단계로 넘기지 않는다 — 안전한 기본값(REJECT/HOLD/DENY/ESCALATE/ROLLBACK)으로 떨어지며, 승인·승격·권한부여 방향으로 자동 fallback하지 않는다(`skills/agentic-rag`의 `grounded: false` 처리와 같은 원칙).
+
+**`event_routing`은 8.1절 동적 라우팅(Expert Pool 패턴)을 구현한다.** 6.4절 이벤트 탐지가 발화시키며, `call: []`인 이벤트(예: `stale_market_data`, `loss_limit_approach`)는 에이전트를 부르지 않고 결정론적 코드가 즉시 처리한다는 뜻이다.
 
 `hr-department`는 **제7의 투자 본부가 아니라 CEO 직속 Shared Service**다. 투자 본부는 리서치·트레이딩·리스크·퀀트/백테스트·회계/포트폴리오·AI QA/감사 6개뿐이다.
 
