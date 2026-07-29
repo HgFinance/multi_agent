@@ -4,24 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 현재 상태
 
-대부분 설계 단계다. Application Scaffold도 테스트 프레임워크도 아직 없다.
+설계 중심의 초기 구현 단계다. 완전한 Application Scaffold와 End-to-End 서비스는 아직 없지만 실행 가능한 Prototype, Migration과 Schema Test는 존재한다.
 
-1. `docs/` — 설계 문서. 이 저장소의 Source of Truth.
+1. `docs/` — 설계 문서. 이 저장소의 Source of Truth. 목표 폴더 구조는 [REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
 2. `orchestration/hermes/<department>/` — 8개 부서 Profile(`config.yaml` + `SOUL.md`).
    Hermes Agent Runtime이 실제로 읽는 `~/.hermes/profiles/<department>/`와는 별개 사본이며,
    `scripts/sync_hermes_profiles.sh`로 동기화한다 (아래 "부서 Profile 규약" 참고).
 3. 실행 가능한 코드 — `fetch_news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
    거래 생명주기 구현(`db/`, `trading/contracts.py`, `execution/`, `accounting/`).
 
-트레이딩·회계본부만 Sprint D0~D2가 구현돼 있다(계약·스키마·Paper OMS·원장·대사).
-다른 본부는 아직 Profile과 설계 문서뿐이다. 어느 본부의 코드를 찾다가 없으면
-"아직 없는 것"이 맞다 — 다른 경로에 있는지 헤매지 않아도 된다.
+트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
 
 트레이딩·회계 코드는 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전이라
-재작업 예정이다. 각 부서 yaml의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
+재작업 예정이다. 각 부서 `config.yaml`의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
 표시한다.
 
-[docs/README.md](docs/README.md)의 "예상 저장소 구조"(`apps/`, `services/`, `contracts/` …)는 **아직 만들어지지 않은 목표 구조**다. 실재하는 경로처럼 참조하거나 import하지 않는다.
+[REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 `departments/` 구조는 **아직 만들어지지 않은 목표 구조**다. 현재 경로 표를 우선하고, 실제 이동 PR 전에는 목표 경로를 import하거나 실행 경로로 사용하지 않는다.
 
 ## 명령어
 
@@ -32,7 +30,7 @@ pip install -r requirements.txt
 Hermes Runtime(`NousResearch/hermes-agent`)은 PyPI 패키지가 아니라 `requirements.txt`에 없다. 별도 저장소 지침대로 설치한다.
 
 ```bash
-# 부서 단독 실행 — 각 .yaml의 usage: 블록에 예시 있음
+# 부서 단독 실행 — 각 config.yaml의 usage: 블록에 예시 있음
 research-department chat -q 'Build a Research Packet for AAPL'
 risk-management     chat -q 'Assess risk of AAPL long position'
 ceo-agent           chat -q 'Summarize current portfolio decisions and open risks'
@@ -45,18 +43,16 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
 python3 fetch_news.py 'AAPL Apple stock'
 ```
 
-DB 마이그레이션 (로컬 PostgreSQL 또는 Supabase). 002는 001의 `execution.funds`/`books`를
-참조하므로 순서를 지킨다.
+Canonical 운영 DB Migration은 `supabase/migrations/`, 시장 시계열 Migration은 `timescaledb/migrations/`다.
 
 ```bash
-psql -d <db> -f db/001_execution.sql -f db/002_accounting.sql \
-             -f db/003_roles.sql -f db/004_seed.sql
+supabase db reset
+python -m unittest discover -s tests/schema -p "test_*.py" -v
 ```
 
-RLS가 fail-closed다. **조회가 이유 없이 0건이면 `SET app.fund_id`를 빠뜨린 것**이다.
+루트 `db/001_execution.sql`부터 `db/004_seed.sql`은 D0-D2 Prototype 전용이다. `supabase/migrations/`와 같은 Database에 함께 적용하지 않는다. 두 계열은 Fund/Book과 거래·회계 Table 계약이 다르며, 통합 절차는 [Database Schema Foundation](docs/database/README.md)의 Migration 권위 규칙을 따른다.
 
-**테스트 프레임워크는 아직 없다.** 다만 트레이딩·회계 모듈은 각 파일의 `__main__`에
-assert 기반 자체 점검을 두고 있어 그대로 실행하면 검증된다.
+전체 Application Test Suite는 아직 없지만 `tests/schema/`의 `unittest` 계약 검사와 PostgreSQL/Timescale Runtime Smoke SQL이 있다. 트레이딩·회계 모듈도 각 파일의 `__main__`에 assert 기반 자체 점검을 둔다.
 
 ```bash
 python trading/contracts.py        # 계약 6개 영역
@@ -96,7 +92,7 @@ python accounting/reconciliation.py # 대사 12개
 
 **부서는 Hermes로 돌아가고, 부서 안의 직원(개별 페르소나)은 LangGraph로 작동한다.** 이 둘을 같은 층으로 섞지 않는다.
 
-- Hermes Profile(8개 `.yaml` = 8개 Supervisor)이 부서 단위 오케스트레이션·Queue·Memory Namespace·Tool Allowlist를 맡는다.
+- Hermes Profile(8개 `config.yaml` = 8개 Supervisor)이 부서 단위 오케스트레이션·Queue·Memory Namespace·Tool Allowlist를 맡는다.
 - 부서 소속 직원(예: `market-liquidity-risk-agent`, `evidence-qa-agent`)은 사건별로 동적 실행되는 LangGraph Node가 실제 구현이어야 한다(`HEDGE_FUND_MASTER_PLAN.md` 5.5절).
 - **현재 격차**: 지금 8개 Profile의 `agent.personalities`는 전부 prompt-only 텍스트이고, 실제 LangGraph로 구현된 직원은 `compliance-policy-agent`(`skills/agentic-rag`) 하나뿐이다. 나머지 직원을 prompt만으로 이미 완성된 것처럼 다루지 않는다.
 - **현재 우선순위**: 나머지 직원의 LangGraph 구현을 서두르기 전에 **Hermes 엔지니어링(Profile 구성, 부서 간 계약, 권한 경계)을 먼저 완성**한다. 순서를 건너뛰지 않는다.
@@ -113,7 +109,7 @@ python accounting/reconciliation.py # 대사 12개
 - `quant-backtest-department`는 Production 승격을 직접 하지 않는다. CEO·Risk·QA 승인이 필요하다.
 - LLM은 관련성 판단과 서술 작성에만 쓴다. Point-in-Time 필터, 인용 검증, 한도 검사 같은 규칙 판정은 결정론적 Python이 한다 (`skills/agentic-rag/src/nodes.py`가 구현 예시).
 
-### 부서 Profile `.yaml` 규약
+### 부서 Profile 규약
 
 부서마다 폴더 하나, 폴더마다 `config.yaml` + `SOUL.md` — `orchestration/hermes/<department>/`. 8개 폴더가 같은 형태다 (`config.yaml`: `model` / `env` / `agent.personalities` / `skills` / `usage`, `SOUL.md`: Role/Key Responsibilities/Working Style/Hard Boundaries).
 
@@ -122,7 +118,7 @@ python accounting/reconciliation.py # 대사 12개
 - 상단 주석에 담당자와 `HEDGE_FUND_MASTER_PLAN.md` 절 번호를 남긴다.
 - **`env:`가 부서마다 다르다.** `ANTHROPIC_API_KEY` — ceo, research, qa, quant-backtest / `OPENAI_API_KEY` — trading, risk, accounting, hr. 아무 키나 넣지 않는다. `skills/agentic-rag`가 OpenAI를 쓰는 것도 risk-management가 OpenAI에 배정돼 있기 때문이다.
 - `model`은 8개 파일 모두 `provider: nous` / `poolside/laguna-s-2.1:free`로 동일. 바꾸려면 8개를 함께 바꾼다.
-- `agent.timeout_seconds`는 `multi-agent-workflow.yaml`의 해당 step 값과 맞춘다.
+- `agent.timeout_seconds`는 부서 단독 명령의 기본 한도다. `multi-agent-workflow.yaml`의 Step Timeout은 Case별 Orchestrator 한도이므로 더 길 수 있으며 Workflow 실행에서는 Step 값이 우선한다.
 - 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](orchestration/hermes/risk-management/config.yaml), [qa-department/config.yaml](orchestration/hermes/qa-department/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
 
 ### `skills/agentic-rag`
@@ -144,15 +140,16 @@ python accounting/reconciliation.py # 대사 12개
 1. `HEDGE_FUND_MASTER_PLAN.md` — 제품 정의, 조직, 통제 원칙, 출시 단계
 2. `MINIMUM_SERVICE_UNIT_SPEC.md`의 Domain Contract, `DATA_GOVERNANCE_GUIDE.md`의 데이터 통제
 3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계
-4. `HEDGE_FUND_CORE_PLAN.md`, `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위와 완료 조건
-5. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드
-6. `README.md`
+4. `REPOSITORY_DEPARTMENT_STRUCTURE.md`의 현재·목표 경로, 소유권과 이전 규칙
+5. `HEDGE_FUND_CORE_PLAN.md`, `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위와 완료 조건
+6. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드
+7. `README.md`
 
 하위 문서는 마스터 플랜을 구체화할 수는 있어도 **변경할 수는 없다.** 마스터 플랜 자체를 바꾸려면 ADR로 근거를 승인한 뒤 영향받는 문서를 같은 변경에서 함께 갱신한다. ADR 승인 전에 후보 기술이나 확장안을 새 Markdown으로 추가하지 않는다.
 
 **아직 미결정이므로 임의로 정하지 않는다:** Paper/Live Broker, Frontend Framework, Cloud Provider, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 Paper 승인 방식.
 
-현재 hermes 8개 Profile의 `provider: nous`는 **베이스라인일 뿐 확정이 아니다** — 필요하면 바뀐다. 일부 팀 가이드가 언급하는 Bedrock 등도 후보일 뿐, 지금 nous를 쓴다고 Cloud/모델 Provider가 확정된 것으로 취급하지 않는다.
+현재 Hermes 8개 Profile의 `provider: nous`는 로컬 Profile baseline이다. Core 목표 Model Gateway의 주 통합 모델은 `TECH_STACK_DECISIONS.md`가 정한 Amazon Bedrock Claude이고 Ollama는 로컬·저비용 보조 모델이다. 애플리케이션 Hosting Cloud는 아직 미정이므로 Bedrock 사용과 전체 Cloud Provider 선정을 같은 결정으로 취급하지 않는다.
 
 ## 담당자
 

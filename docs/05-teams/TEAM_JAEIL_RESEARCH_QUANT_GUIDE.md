@@ -1,6 +1,6 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.2  
+> 문서 상태: Team Handoff v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
@@ -9,6 +9,7 @@
 > 참고 구현: [traderjaeil-lgtm/krx-tick-collector](https://github.com/traderjaeil-lgtm/krx-tick-collector)  
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [DATA_GOVERNANCE_GUIDE.md](../03-data/DATA_GOVERNANCE_GUIDE.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리서치·퀀트 경계
 
 ---
 
@@ -36,6 +37,29 @@
 - Position, Ledger, PnL와 NAV 확정
 - 자기 전략의 Production 승격 최종 승인
 - Agent가 임의로 외부 Website나 Vendor API를 호출하는 기능
+
+### 저장소 소유권
+
+| 구분 | 현재 경로 | 목표 경로 |
+|---|---|---|
+| 리서치 Hermes | `orchestration/hermes/research-department/` | `departments/01-research/hermes/` |
+| 뉴스 수집 Baseline | `fetch_news.py` | `departments/01-research/collectors/news.py` |
+| LS API 계약 | `docs/06-integrations/ls-openapi/` | 문서 위치 유지, 리서치본부가 내용 Owner |
+| 시장 시계열 Migration | `timescaledb/migrations/` | 도구 표준 경로 유지, 리서치본부가 Schema Owner |
+| 퀀트 Hermes | `orchestration/hermes/quant-backtest-department/` | `departments/04-quant-backtest/hermes/` |
+| 연구 자료 | `references/` | 저작권·공유 범위 ADR 전까지 현재 위치 유지 |
+
+실제 파일 이동 전에는 현재 경로가 실행 기준이다. `supabase/migrations/`와 `timescaledb/migrations/`는 본부별로 복제하지 않는다.
+
+### Hermes 자기 개선 책임
+
+- 리서치 Hermes는 누락 Source, 중복 문서, 잘못된 Entity Mapping과 인용 실패를 `ImprovementCandidate`로 등록한다.
+- 퀀트 Hermes는 Dataset Drift, 재현 실패, 비용 모델 오차와 Backtest-Live 차이를 근거와 함께 등록한다.
+- 두 본부의 Memory에는 공식 시장 수치나 Backtest 결과 원문을 복제하지 않고 `dataset_id`, `experiment_id`, `evidence_id`와 재검사 Checklist만 남긴다.
+- 승인된 수집·검증 절차만 Versioned Skill로 배포하며, 자신의 Strategy 또는 Skill 후보를 스스로 Paper/Production에 승격하지 않는다.
+- 효과는 데이터 품질, PIT 재현율, 인용 정확도, 처리 지연과 비용으로 평가한다. 수익률 하나만으로 Skill을 채택하지 않는다.
+
+조직 공통 상태 전이와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.1 Multi-Strategy 책임
 

@@ -1,6 +1,6 @@
 # Personal Hedge Fund Agent - Technology Stack Decisions
 
-> 문서 상태: Core Stack v1.2  
+> 문서 상태: Core Stack v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: Core Paper Trading 구현  
 > 원칙: 사용자가 지정한 필수 도구를 유지하되 기능 중복과 Vendor Lock-in을 최소화한다.  
@@ -110,6 +110,28 @@
 - 대용량 문서·Feature는 Graph State가 아니라 ID Reference만 저장한다.
 
 LangGraph는 PostgreSQL Checkpointer를 지원하므로 Supabase PostgreSQL에 별도 Schema를 만들 수 있다. Checkpoint에는 큰 Payload를 넣지 않고 Event, Feature와 Document ID만 기록한다.
+
+### Hermes Memory와 자기 개선 경계
+
+Hermes를 채택하는 핵심 이유는 대화 Interface만이 아니다. 각 본부장이 이전 업무에서 얻은 교훈을 다음 업무에 재사용하고, 반복되는 절차를 Version이 있는 Skill 후보로 만들 수 있기 때문이다. 이때 세 가지 저장 수단을 구분한다.
+
+| 수단 | 용도 | 저장하지 않는 것 |
+|---|---|---|
+| Hermes Memory | 본부 Mandate, 반복되는 업무 교훈, 사용자 Preference와 짧은 운영 원칙 | 현재 Position, Cash, PnL, Risk Limit과 주문 상태 |
+| Session Search | 과거 작업의 근거와 맥락을 다시 찾는 보조 수단 | 공식 감사 원장과 최신 운영 상태 |
+| Hermes Skill | 검증된 조사·분석·보고 절차를 재사용하는 절차적 Memory | 승인되지 않은 전략 코드와 Production 권한 변경 |
+
+Hermes가 관찰한 개선점은 즉시 자기 Prompt나 Tool 권한에 반영하지 않는다. `ImprovementCandidate`로 구조화해 근거, 예상 효과, 위험, 영향받는 Profile·Skill·Workflow Version과 Rollback 대상을 기록한다. AI QA/감사본부의 고정 Eval, 인사팀의 Build-vs-Extend 검토, Shadow 실행과 승인 Gate를 통과한 Version만 활성화한다.
+
+따라서 재귀적 자기 개선은 다음 폐쇄 루프로 구현한다.
+
+```text
+업무 실행 -> 결과·오류 관찰 -> 개선 후보 등록 -> 독립 Eval
+         -> Shadow/Champion-Challenger -> 승인된 Version 배포
+         -> 운영 지표 관찰 -> 유지 | Rollback | 다음 개선 후보
+```
+
+공식 수치와 상태의 Source of Truth는 항상 Supabase·TimescaleDB·OMS·Ledger다. Hermes Memory는 해당 Record와 Evidence ID를 가리킬 수 있지만 이를 대체하지 않는다. 조직 전체 단계와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선), 저장 규칙은 [데이터 거버넌스 지침 18.5](../03-data/DATA_GOVERNANCE_GUIDE.md#185-hermes-memorysession-searchskill-거버넌스)를 따른다.
 
 ## 3. LLM과 Embedding 구성
 

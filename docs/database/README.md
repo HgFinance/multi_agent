@@ -1,6 +1,7 @@
 # Database Schema Foundation
 
 > 개인형 멀티 에이전트 헤지펀드의 전체 데이터 구조 기준선. Supabase 운영 원장과 TimescaleDB 시장 데이터 Plane을 물리적으로 분리한다.
+> 저장소 경계: [Department-Oriented Repository Structure](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
 
 ## 1. 이 구조가 해결하는 것
 
@@ -106,6 +107,20 @@ Agent Decision, Signal, OrderIntent, Risk Decision, Broker Order와 Fill은 서�
 - Raw Case, Order, Fill, Tool Call과 상태 Event는 Append-only다.
 
 ## 6. Migration 구조
+
+### Migration 권위와 Prototype 경계
+
+운영 DB의 통합 기준은 `supabase/migrations/`, 시장 시계열 기준은 `timescaledb/migrations/`다. 루트 `db/001_execution.sql`부터 `db/004_seed.sql`까지는 통합 Schema 이전에 작성된 D0-D2 거래·회계 Prototype이다.
+
+`db/`와 `supabase/migrations/`는 같은 빈 Database에 함께 적용하지 않는다. 두 계열은 `Fund`, `Book`, `Order`, `Ledger Account` 등 같은 개념을 서로 다른 Schema와 계약으로 표현하므로 적용 순서를 바꾸거나 둘을 합쳐 실행해도 통합 Migration이 되지 않는다.
+
+Prototype의 OMS·Ledger 기능을 통합 기준으로 옮길 때는 다음을 포함한 별도 Migration PR이 필요하다.
+
+1. Table·Column·Constraint·Trigger와 Service Role의 Schema Diff
+2. Prototype 데이터가 존재할 경우 변환과 Reconciliation 계획
+3. Supabase RLS와 `api` View/RPC 권한 검증
+4. OMS Replay, 이중분개, Posted Journal 불변성과 RLS Runtime Test
+5. `db/` Archive 또는 제거 시점과 이전 CLI 호환 계획
 
 ### Supabase
 

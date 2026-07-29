@@ -1,6 +1,6 @@
 # Production Hedge Fund Data Collection and Governance Guide
 
-> 문서 상태: Draft v1.1  
+> 문서 상태: Draft v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 적용 대상: Research, Shadow, Paper, Limited Live, Production Proprietary 및 External Capital 환경  
 > 목적: 수집해야 할 데이터, 데이터의 소유권·품질·시점·계보·보안·보존·사용권과 운영 절차를 정의한다.  
@@ -622,6 +622,37 @@ production_authorized
 - Prompt Injection과 Secret 요청 Pattern 표시
 - Untrusted Content와 System Policy를 분리
 - 인용 없는 중요 수치와 주장 차단
+
+### 18.5 Hermes Memory·Session Search·Skill 거버넌스
+
+Hermes의 지속 Memory는 Agent가 다음 Session에서도 역할과 교훈을 이어 가기 위한 작은 지식 저장소다. 원시 Market Data, 문서 전체, 최신 Position 또는 공식 의사결정 원장을 복제하는 용도로 사용하지 않는다.
+
+| 분류 | 허용 예 | 금지 예 | 공식 저장소 |
+|---|---|---|---|
+| 역할 Memory | Mandate 요약, 담당 Queue, 보고 형식 | Tool 권한을 우회하는 지시 | Versioned Agent Profile |
+| 사용자 Preference | 보고 주기, 선호하는 설명 수준 | 인증정보, 개인정보 원문 | Supabase `governance` |
+| 업무 교훈 | 실패 유형, 다음 실행 시 확인할 Checklist | 근거 없는 시장 사실과 수치 | `audit` Evidence와 원본 Record |
+| Session Search | 과거 Case와 Trace를 찾는 검색 단서 | 감사 원장 대체, 최신 상태 판정 | Supabase `audit`·`governance` |
+| Skill | 승인된 수집·검증·보고 절차 | 자동 주문, Risk 우회, 자기 권한 확대 | Skill Registry와 Git Version |
+
+Memory 항목에는 가능한 경우 `source_record_id`, `evidence_id`, `observed_at`, `owner`, `classification`, `expires_at`을 함께 둔다. 시간에 따라 변하는 사실은 값 자체보다 공식 Read API와 Snapshot ID를 기억한다. Secret, Broker Token, 개인정보 원문, 미공개 중요정보, 현재 주문·Position·Cash·NAV·Risk Limit은 Memory에 기록하지 않는다.
+
+Skill과 Profile 변경은 다음 상태를 거친다.
+
+```text
+CANDIDATE -> EVIDENCE_VERIFIED -> EVAL_READY -> SHADOW
+          -> APPROVED -> ACTIVE -> MONITORED
+          -> ROLLED_BACK | RETIRED
+```
+
+- Candidate를 만든 Agent가 자신의 변경을 단독 승인할 수 없다.
+- AI QA/감사본부가 Golden·Adversarial·Regression Eval 결과를 Append-only로 기록한다.
+- 인사팀은 기존 Skill 확장과 새 Agent 채용 중 무엇이 적절한지 검토한다.
+- CEO Agent는 예산·Mandate·조직 영향이 있는 변경만 승인하며 Risk Policy 변경은 리스크본부 동의가 필요하다.
+- 활성 Version은 이전 Version, 배포 시각, 승인 Decision, Dataset·Prompt·Model·Tool Version과 Rollback Target을 가진다.
+- Memory 삭제·만료·정정도 Audit Event로 남기며, 파생 요약이 삭제된 원문을 계속 노출하지 않는지 검사한다.
+
+전체 조직 학습 Loop와 본부별 권한은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ## 19. Trading, Position과 Ledger 데이터
 
