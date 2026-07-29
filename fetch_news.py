@@ -24,7 +24,7 @@ def fetch_news(query, max_results=5):
     if not api_key:
         return {"error": "TAVILY_API_KEY not found in environment or .env file"}
     
-    url = 'https://api.tavily.ai/search'
+    url = 'https://api.tavily.com/search'
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {api_key}'
