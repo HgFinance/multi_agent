@@ -25,6 +25,19 @@ agent:
 skills:
   - hermes-agent
 
+# 대상 시장과 집행 철학 프리셋. 집행 파라미터 튜닝은 philosophies.yaml에서만 한다.
+# 시그널 생성과 시세 수집은 본부 밖(재일 소유)이므로 여기서 참조만 한다.
+config:
+  markets: [KOSPI, KOSDAQ]
+  philosophies: trading/philosophies.yaml       # 집행 프리셋 - 본부 소유
+  oms_state_machine: TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.3
+  # 본부 밖에서 받아오는 입력. 시세와 시그널은 직접 수집하지 않는다.
+  consumes:
+    signals: strategy-registry-api
+    market_snapshot: market-api
+    research_packet: research-api
+    risk_decision: risk-api
+
 usage:
   run: "trading-department chat -q 'Turn this Research Packet into a trade proposal for AAPL'"
   collaborate: "trading-department chat -q 'Run Bull/Bear debate, then submit the trade proposal to risk-management'"

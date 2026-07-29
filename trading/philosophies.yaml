@@ -1,0 +1,85 @@
+# 트레이딩본부 - 철학별 집행(Execution) 프리셋
+# 소유: 도현 (trading, accounting-portfolio)
+# 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #2, 19.8(Execution Desk)
+#       TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 3.1, 4.2(execution_plans)
+#
+# 시그널 임계값은 여기 없다 -> strategy_factory/signal_params.yaml (재일 소유)
+# 이 파일은 "승인된 시그널을 어떤 방식으로 체결시킬 것인가"만 다룬다.
+# Execution Agent는 투자 방향이 아니라 체결 품질을 관리한다 (마스터플랜 19.8).
+
+market:
+  exchanges: [KOSPI, KOSDAQ]
+  currency: KRW
+  session: "09:00-15:30 Asia/Seoul"
+  fee_bps: 1.5                    # 편도 위탁수수료 가정
+  sell_tax_bps: 15                # 매도 시 증권거래세+농어촌특별세
+  # ponytail: 세율/수수료는 연도·증권사별로 바뀜. Paper 단계에선 이 값으로 충분,
+  #           Limited Live 전에 실제 Broker 요율로 교체할 것.
+  price_limit_pct: 0.30           # 상/하한가 - 주문 유효성 검사에 사용
+
+# 모든 철학이 공유하는 집행 하한선. 개별 철학이 덮어쓸 수 있다.
+execution_defaults: &execution_defaults
+  order_type: limit               # 시장가 금지가 기본 (KOSDAQ 스프레드 방어)
+  max_participation_rate: 0.03    # 해당 종목 거래량 대비 최대 참여율
+  slippage_budget_bps: 30         # 초과 시 Execution Agent가 잔량 취소 제안
+  slices: 3
+  cancel_after_min: 30
+  max_weight: 0.03                # 종목당 목표 비중 상한 (마스터플랜 2.3)
+
+philosophies:
+
+  trend_following:
+    name: 추세추종
+    execution:
+      <<: *execution_defaults
+      urgency: high               # 돌파는 늦으면 엣지 소멸
+      limit_offset_bps: 20        # 현재가 대비 추격 허용폭
+      max_participation_rate: 0.05
+      slices: 2
+    prompt: >
+      추세추종 포지션을 집행한다. 이 철학에서는 속도가 엣지의 일부이므로
+      분할을 적게 쓰고 추격 매수를 허용한다. 단 슬리피지 예산을 넘기면
+      진입 자체의 기대수익이 사라지므로, 예산 초과 시 잔량을 취소하고
+      미체결로 남기는 편이 낫다. 체결 못 한 것은 손실이 아니다.
+
+  value:
+    name: 가치투자
+    execution:
+      <<: *execution_defaults
+      urgency: low                # 급할 이유가 없다
+      limit_offset_bps: -10       # 현재가보다 낮게 걸고 기다린다
+      max_participation_rate: 0.01
+      slices: 10
+      cancel_after_min: 390       # 하루 종일 깔아둠
+      max_weight: 0.05
+    prompt: >
+      가치투자 포지션을 집행한다. 서두르지 않는다 - 원하는 가격에 안 오면
+      안 사는 것이 정답이다. 호가를 올려 따라가지 않으며, 시장이 공포에 빠져
+      스프레드가 벌어질 때 유동성을 공급하는 쪽에 선다.
+      장기 보유가 전제이므로 하루 이틀의 미체결은 비용이 아니다.
+
+  momentum:
+    name: 모멘텀/상대강도
+    execution:
+      <<: *execution_defaults
+      urgency: medium
+      limit_offset_bps: 10
+      slices: 5
+    prompt: >
+      모멘텀 리밸런싱을 집행한다. 정해진 리밸런싱 날에 교체가 몰리므로
+      시장충격 분산이 관건이다. 회전율이 높은 전략이라 집행 비용이 곧
+      알파의 차감분이며, TCA 결과를 다음 리밸런싱 파라미터로 환류한다.
+      리밸런싱 날짜를 임의로 당기거나 미루지 않는다.
+
+  mean_reversion:
+    name: 역발상/평균회귀
+    execution:
+      <<: *execution_defaults
+      urgency: medium
+      limit_offset_bps: -15       # 하락 중 매수 - 더 낮게 받는다
+      slices: 4
+    prompt: >
+      역발상 포지션을 집행한다. 하락 중인 종목을 분할로 받으므로
+      한 번에 전량을 채우지 않는다. 최대 보유일을 넘기면 논리 실패로 간주하고
+      청산한다. 하락이 펀더멘털 훼손 때문이라는 리서치 판단이 들어오면
+      잔여 분할 매수를 중단한다.

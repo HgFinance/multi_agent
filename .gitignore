@@ -3,6 +3,16 @@
 .env.*
 !.env.example
 
+# Hermes Profile - 설치자(개인) 영역. 배포 대상에서 하드 제외.
+# 담당자 배포 영역(distribution.yaml, SOUL.md, config.yaml, skills/, cron/, mcp.json)은 커밋한다.
+# 참고: HEDGE_FUND_MASTER_PLAN.md 5.10
+auth.json
+memories/
+sessions/
+state.db
+state.db-*
+logs/
+
 # Python
 __pycache__/
 *.pyc
@@ -11,6 +21,9 @@ __pycache__/
 venv/
 env/
 *.egg-info/
+
+# 개인 작업 노트 (팀 공유 대상 아님)
+CLAUDE.md
 
 # OS
 .DS_Store
