@@ -165,3 +165,16 @@ python accounting/reconciliation.py # 대사 12개
 ## 참고 문헌
 
 `references/references.md`에 설계 근거가 된 논문 8편이 정리돼 있다 (Bull/Bear 토론, Agentic RAG, Hallucination 탐지, Finance Agent 감사 등). 설계 근거를 물어보면 여기부터 확인한다.
+
+## 개발 원칙
+
+1. Agent보다 데이터 계약과 Risk/OMS를 먼저 안정화한다.
+2. LLM 출력은 항상 Pydantic Schema로 검증한다.
+3. Agent Decision과 Order를 같은 객체로 취급하지 않는다.
+4. 모든 주문은 결정론적 Risk Engine을 통과한다.
+5. 미래 데이터가 Backtest와 과거 Replay에 들어가지 않게 한다.
+6. Position은 Fill 또는 승인된 Adjustment로만 변경한다.
+7. Replay 환경은 실제 Broker Credential을 가질 수 없다.
+8. 새 Library는 기존 Stack으로 해결할 수 없는 문제와 제거 기준을 함께 기록한다.
+9. 위험한 기능은 실패 시 거래 확대가 아니라 Entry 차단 방향으로 동작한다.
+10. 구현 완료는 코드 작성이 아니라 Acceptance Scenario 통과를 의미한다.
