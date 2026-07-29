@@ -2,7 +2,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Database Schema](database/README.md)
 
 ## 현재 상태
 
@@ -382,7 +382,8 @@ docs/
 ├─ 02-engineering/                   # 구현 Backlog와 기술 결정
 ├─ 03-data/                          # 데이터 수집·품질·저장·사용 기준
 ├─ 04-organization/                  # Agent 조직과 직원 Profile
-└─ 05-teams/                         # 담당자별 실행·인수인계 가이드
+├─ 05-teams/                         # 담당자별 실행·인수인계 가이드
+└─ database/                         # Supabase·TimescaleDB Schema와 ERD
 ```
 
 | 문서 | 언제 읽는가 |
@@ -394,13 +395,14 @@ docs/
 | [Technology Stack](02-engineering/TECH_STACK_DECISIONS.md) | Library, Runtime과 서비스 경계를 확인할 때 |
 | [Data Governance](03-data/DATA_GOVERNANCE_GUIDE.md) | 데이터 Schema, 시점, 품질과 보존을 설계할 때 |
 | [Data Sources and Libraries](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md) | 본부별 수집·생성 데이터, API와 권장 Library를 확인할 때 |
+| [Database Schema Foundation](database/README.md) | Supabase·TimescaleDB Migration, 테이블 소유권, 불변식과 적용 순서를 확인할 때 |
 | [Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md) | 8개 Hermes Supervisor와 전문 Agent 직원의 역할·권한·Eval을 구현할 때 |
 | [재일님 팀 가이드](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) | 리서치·퀀트 수집, TimescaleDB와 전략 연구를 구현할 때 |
 | [도현님 팀 가이드](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) | Trading, OMS, Ledger, Position과 NAV를 구현할 때 |
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README와 Master Plan을 포함한 13개 Markdown이 현재 확정 문서 전체다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README와 Master Plan, Database 기준서와 ERD를 포함한 15개 Markdown이 현재 확정 문서 전체다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 
