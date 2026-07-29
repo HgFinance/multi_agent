@@ -1,11 +1,13 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.0  
+> 문서 상태: Team Handoff v1.2  
+> 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부  
 > 핵심 결정: 모든 공식 거래·원장 데이터는 Supabase PostgreSQL에 저장하고 시계열 DB를 직접 사용하지 않음  
 > 시장 데이터 접근: 재일님 팀의 `market-api`와 Redis Snapshot을 통해 조회  
-> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](AGENT_EMPLOYEE_PROFILES.md)
+> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
+> 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 
 ---
 
@@ -34,6 +36,19 @@
 - 주문 Risk 승인과 Limit 변경
 - Strategy Candidate 검증·승격 승인
 - QA Finding 종료와 감사 증빙 삭제
+
+### 1.1 Multi-Strategy 책임
+
+도현님 팀은 전략의 수익 논리를 판단하지 않고, **승인된 전략을 방향과 Leg 수에 관계없이 정확한 주문·장부 상태로 변환**한다.
+
+- `OrderIntent`는 `strategy_family`, `directionality`, `intent_group_id`, `position_effect`와 `capability_profile_id`를 가진다.
+- OMS는 단일 Long뿐 아니라 Short, Pair, Basket, Hedge와 향후 Multi-leg를 같은 상태 머신 확장 규칙으로 처리한다.
+- Paper Broker는 Version이 있는 Borrow Availability·Fee·Recall과 Margin Scenario를 모의한다.
+- 일부 Leg 체결 시 전략 정책에 따라 전체 취소, Hedge, Retry 또는 Reduce-only로 전환하며 상태를 숨기지 않는다.
+- Ledger는 Long/Short Position, Borrow/Financing Cost, Margin, Premium, Settlement와 Strategy별 PnL을 분리 기록한다.
+- 실행·회계 Capability가 없는 Strategy Version은 승인 신호가 있어도 주문 접수 단계에서 차단한다.
+
+P0는 Long/Short Pair와 Basket Fixture를 포함하고, 실제 공매도·선물·옵션은 Broker와 Risk/Accounting Certification 후 별도 활성화한다.
 
 ---
 
@@ -151,7 +166,8 @@ fund_id uuid
 book_id uuid
 strategy_id uuid
 strategy_version text
-instrument_id uuid
+strategy_family text
+primary_instrument_id uuid null
 research_packet_id uuid
 signal_id uuid
 case_status text
@@ -163,13 +179,32 @@ trace_id text
 created_at timestamptz
 ```
 
+`trade_case_instruments`는 `trade_case_id`, `instrument_id`, `role`, `target_weight`를 저장해 단일 종목, Pair와 Basket을 같은 Case에 연결한다.
+
+#### `intent_groups`
+
+```text
+intent_group_id uuid primary key
+trade_case_id uuid
+strategy_capability_profile_id uuid
+atomicity_policy text
+failure_policy text
+group_status text
+gross_target numeric
+net_target numeric
+created_at timestamptz
+```
+
 #### `order_intents`
 
 ```text
 order_intent_id uuid primary key
 trade_case_id uuid
+intent_group_id uuid
 instrument_id uuid
 side text
+position_effect text
+leg_index integer
 order_type text
 quantity numeric
 limit_price numeric
@@ -181,6 +216,7 @@ intent_status text
 idempotency_key text unique
 schema_version text
 created_at timestamptz
+unique(intent_group_id, leg_index)
 ```
 
 `quantity`와 `limit_price`는 Float로 저장하지 않는다. Instrument별 Lot, Tick Size와 Currency Precision을 검증한 뒤 `numeric`을 사용한다.
@@ -231,18 +267,22 @@ unique(broker_adapter, broker_event_id)
 | `tca_results` | Arrival/Mid/VWAP 대비 Slippage와 비용 |
 | `execution_exceptions` | Reject, Stuck Order, Cancel 불일치와 처리 상태 |
 
-### 4.3 OMS 상태 머신
+### 4.3 OrderIntent와 OMS 상태 머신
 
 ```text
-DRAFT
-  -> RISK_PENDING
-  -> APPROVED | RESIZED | REJECTED
-  -> READY_TO_SUBMIT
-  -> SUBMITTED
-  -> ACKNOWLEDGED
-  -> PARTIALLY_FILLED
-  -> FILLED | CANCELLED | REJECTED | EXPIRED
+OrderIntent:
+DRAFT -> RISK_PENDING -> APPROVED | RESIZED | REJECTED | EXPIRED
+APPROVED | RESIZED -> READY_TO_SUBMIT
+
+Broker Order:
+CREATED -> SUBMITTED -> ACKNOWLEDGED -> PARTIALLY_FILLED -> FILLED
+CREATED | SUBMITTED | ACKNOWLEDGED | PARTIALLY_FILLED -> CANCEL_PENDING -> CANCELLED
+SUBMITTED -> REJECTED
+CREATED | ACKNOWLEDGED -> EXPIRED
+BROKER_STATE_AMBIGUOUS -> UNKNOWN
 ```
+
+`RISK_APPROVED`는 Broker Order 상태가 아니라 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 OrderIntent 흐름에 `USER_PENDING -> USER_APPROVED`를 추가한다. `UNKNOWN`에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
 
 필수 규칙:
 
@@ -261,10 +301,12 @@ DRAFT
 |---|---|
 | `funds` | `fund_id`, `base_currency`, `inception_date`, `status` |
 | `books` | `book_id`, `fund_id`, `book_type`, `manager`, `status` |
-| `strategy_allocations` | `book_id`, `strategy_id`, `capital_limit`, `effective_from/to` |
+| `strategy_allocations` | `book_id`, `strategy_id`, `capital_limit`, `effective_from/to`, `governance_allocation_id` |
 | `ledger_accounts` | `account_id`, `account_code`, `account_type`, `currency`, `parent_id` |
 
 #### 이중분개 원장
+
+`governance.capital_allocations`는 CEO/위원회의 승인된 자본 배분 결정이며, `accounting.strategy_allocations`는 회계·포트폴리오 Service가 실제 Book에 적용한 결과다. 적용 Record는 반드시 원 결정의 `governance_allocation_id`를 보존한다.
 
 `journals`:
 

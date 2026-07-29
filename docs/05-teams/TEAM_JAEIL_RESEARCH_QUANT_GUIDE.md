@@ -1,12 +1,14 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.0  
+> 문서 상태: Team Handoff v1.2  
+> 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
 > 핵심 결정: Supabase를 전사 업무 DB로 사용하고, 고빈도 시장 시계열만 별도 TimescaleDB에 저장  
 > 가격 Source: LS증권 Open API  
 > 참고 구현: [traderjaeil-lgtm/krx-tick-collector](https://github.com/traderjaeil-lgtm/krx-tick-collector)  
-> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [DATA_GOVERNANCE_GUIDE.md](DATA_GOVERNANCE_GUIDE.md)
+> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [DATA_GOVERNANCE_GUIDE.md](../03-data/DATA_GOVERNANCE_GUIDE.md)
+> 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 
 ---
 
@@ -34,6 +36,18 @@
 - Position, Ledger, PnL와 NAV 확정
 - 자기 전략의 Production 승격 최종 승인
 - Agent가 임의로 외부 Website나 Vendor API를 호출하는 기능
+
+### 1.1 Multi-Strategy 책임
+
+재일님 팀은 특정 전략을 미리 고르는 팀이 아니라 **각 전략이 실제로 연구 가능한지 데이터로 증명하는 팀**이다.
+
+- Strategy Candidate마다 `required_data_product_ids`와 최소 History를 등록한다.
+- Long/Short에는 Borrow·공매도 데이터, Event Driven에는 공시·조건·상태 시각, Pair에는 동기화 가격과 Corporate Action, Derivatives에는 Contract·Margin·Chain 입력을 연결한다.
+- Strategy Family별 Dataset Builder와 Backtest Adapter는 달라도 Dataset Manifest, PIT 검사, 비용 모델과 결과 Schema는 공통으로 유지한다.
+- 데이터 Coverage, 사용권, 품질 또는 Live Parity가 부족하면 `RESEARCH_BLOCKED`, `SHADOW_ONLY` 또는 `PAPER_ONLY` 사유를 Strategy Registry에 반환한다.
+- 수집 데이터로 만들 수 있는 전략 가설은 Catalog에 계속 추가하되, 자신의 Backtest 결과만으로 Paper/Live 승격을 확정하지 않는다.
+
+P0 완료 시 Long/Short Equity, Market Neutral/Pairs, Event Driven과 Quant Trend·Mean Reversion의 대표 Fixture를 같은 Dataset/Experiment 계약으로 재현해야 한다.
 
 ---
 
@@ -238,8 +252,9 @@ Timescale Raw를 삭제하기 전에 `exported`, `verified`, `manifest_signed`�
 | `quant.experiments` | `experiment_id`, `hypothesis_id`, `dataset_id`, `code_version`, `seed`, `status` | 재현 단위 |
 | `quant.experiment_metrics` | `experiment_id`, `split`, `metric`, `value`, `cost_model_version` | Train/Validation/Test 분리 |
 | `quant.model_artifacts` | `model_id`, `experiment_id`, `artifact_path`, `signature`, `limitations` | Binary는 Storage |
-| `strategy.candidates` | `candidate_id`, `experiment_id`, `mandate`, `risk_assumptions`, `status` | Release 후보 |
-| `strategy.versions` | `strategy_id`, `version`, `artifact_hash`, `effective_from/to`, `deployment_state` | 승인 후 불변 Version |
+| `strategy.candidates` | `candidate_id`, `experiment_id`, `strategy_family`, `directionality`, `mandate`, `risk_assumptions`, `status` | Release 후보 |
+| `strategy.capability_profiles` | `profile_id`, `required_data`, `instruments`, `execution`, `risk`, `accounting`, `environment_status` | 환경별 실행 적격성 |
+| `strategy.versions` | `strategy_id`, `version`, `family`, `artifact_hash`, `capability_profile_id`, `effective_from/to`, `deployment_state` | 승인 후 불변 Version |
 
 ### 5.4 Private Storage Bucket
 

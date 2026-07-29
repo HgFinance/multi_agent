@@ -1,11 +1,13 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.0  
+> 문서 상태: Team Handoff v1.2  
+> 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
 > 핵심 결정: 회사 의사결정과 Agent 조직 데이터는 Supabase PostgreSQL에 저장하고 시계열 DB를 사용하지 않음  
 > Agent Runtime: CEO와 인사팀장은 서로 다른 Hermes Supervisor, Service Identity와 Memory Namespace 사용  
-> 공통 기준: [AGENT_EMPLOYEE_PROFILES.md](AGENT_EMPLOYEE_PROFILES.md), [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
+> 공통 기준: [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md), [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
+> 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 
 ---
 
@@ -34,6 +36,17 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 - Risk 승인, Limit 변경과 Kill Switch 단독 해제
 - Ledger, Position, PnL와 NAV 수정·확정
 - 자기 Candidate의 QA 최종 승인과 IAM 권한 직접 부여
+
+### 1.1 Multi-Strategy 책임
+
+영주님 팀은 전략을 직접 만들거나 승인 수치를 계산하지 않는다. CEO Agent는 여러 Strategy Book을 사용자의 Mandate 안에서 조정하고, 인사팀은 전략군별 Skill·Capacity 공백을 관리한다.
+
+- CEO는 Strategy Family별 상태, Risk Budget, 상관관계, Capacity와 중단 사유를 하나의 Portfolio View로 설명한다.
+- Capital Allocation 제안은 개별 전략 수익률뿐 아니라 Drawdown, 공통 Factor, Liquidity, Borrow·Margin과 운영 신뢰도를 포함한다.
+- 새 전략군의 활성화 요청은 Data, Execution, Risk, Accounting, Compliance와 QA 서명이 모두 있는 Committee Case로 처리한다.
+- 인사팀은 `strategy_family x required_skill` Matrix로 기존 Agent Coverage를 먼저 검사한다.
+- 새 Specialist는 반복적 Skill Gap과 Eval Fixture가 있을 때만 채용하고, 특정 유명 투자자의 말투나 의견만으로 권한을 부여하지 않는다.
+- CEO와 인사팀 모두 Strategy Registry의 Capability 결과를 덮어쓰거나 Risk 거부를 해제할 수 없다.
 
 ---
 
@@ -163,9 +176,10 @@ Mandate의 자연어 원문과 구조화 정책을 함께 보존한다. 실제 S
 
 | Table | 핵심 Column |
 |---|---|
-| `cases` | `case_id`, `case_type`, `priority`, `status`, `owner_department`, `due_at`, `trace_id` |
-| `case_artifacts` | `case_id`, `artifact_type`, `artifact_id`, `version`, `producer`, `created_at` |
-| `case_events` | `event_id`, `case_id`, `from/to_status`, `actor`, `reason`, `occurred_at` |
+| `cases` | `case_id uuid`, `display_id`, `case_type`, `priority`, `status`, `owner_department`, `due_at`, `trace_id` |
+| `investment_cases` | `case_id PK/FK`, Trigger·Mandate·Snapshot·Decision·Order Pointer | 투자 Case 전용 Subtype |
+| `case_artifacts` | `case_id`, `artifact_type`, `artifact_id`, `artifact_version`, `producer`, `created_at` |
+| `case_events` | `event_id`, `case_id`, `sequence`, `from/to_status`, `actor`, `reason`, `idempotency_key`, `payload`, `occurred_at` |
 | `committee_sessions` | `session_id`, `committee_type`, `case_id`, `opened/closed_at`, `status` |
 | `committee_votes` | `session_id`, `department`, `decision`, `conditions`, `artifact_ids` |
 | `committee_decisions` | `decision_id`, `session_id`, `decision`, `scope`, `valid_until`, `dissent`, `approvals` |
@@ -182,6 +196,8 @@ Mandate의 자연어 원문과 구조화 정책을 함께 보존한다. 실제 S
 | `notifications` | `notification_id`, `event_type`, `recipient`, `dedup_key`, `sent_at`, `status` |
 
 CEO는 `capital_allocations`을 승인 제안할 수 있지만 Position이나 Broker Cash를 직접 수정하지 않는다. 실제 Book Allocation 반영은 회계/포트폴리오 Service가 승인 Event를 소비해 수행한다.
+
+Case Schema의 필드·키·Event 불변식은 [Minimum Service Unit Specification](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)을 Canonical Contract로 사용한다. `governance.cases`를 별도로 복제하지 않는다.
 
 ### 4.3 `workforce` 핵심 Table
 
@@ -432,11 +448,9 @@ Leaver:
 
 | API | 주요 Method | 소비자 |
 |---|---|---|
-| `governance-api` | `get_mandate`, `create_case`, `record_decision`, `request_approval` | CEO, 본부장, Risk, QA |
-| `committee-api` | `open_session`, `submit_vote`, `get_quorum`, `close_session` | 위원회 Workflow |
+| `governance-api` | `get_mandate`, `create_case`, `record_decision`, `request_approval`, `open/close_session`, `submit_vote` | CEO, 본부장, Risk, QA, 위원회 Workflow |
 | `reporting-api` | `request_report`, `get_report`, `get_source_snapshots` | 사용자, CEO |
-| `workforce-api` | `get_roster`, `request_hire`, `submit_profile`, `request_access`, `change_status` | CEO, HR, QA, 본부장 |
-| `cost-capacity-api` | `get_department_scorecard`, `get_skill_gap` | HR, CEO |
+| `workforce-api` | `get_roster`, `request_hire`, `submit_profile`, `request_access`, `change_status`, `get_department_scorecard`, `get_skill_gap` | CEO, HR, QA, 본부장 |
 
 ### 8.2 소비 Event
 

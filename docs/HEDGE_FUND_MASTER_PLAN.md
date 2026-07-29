@@ -1,16 +1,18 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v2.5  
-> 제품 정의: 사용자를 대신해 전략을 발굴·검증·배포·운용하는 개인형 Hedge Fund Investment Agent  
+> 문서 상태: Production Plan v2.7  
+> 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
+> 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
 > 목표: 연구용 Paper Fund를 거쳐 제한된 자기자본 실거래와 규제·운영 요건을 갖춘 Production Hedge Fund Service까지 단계적으로 구축  
 > 전제: 실거래 및 외부 투자자 자금 운용은 관할 법률 자문, 등록·신고, 계약, 수탁·브로커·관리회사 준비와 Production Launch Gate를 모두 통과한 뒤에만 시작한다.
-> 단기 구현 범위: [Personal Hedge Fund Agent Core Implementation Plan](HEDGE_FUND_CORE_PLAN.md)
-> Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
-> Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](TECH_STACK_DECISIONS.md)
-> Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](AGENT_EMPLOYEE_PROFILES.md)
+> 단기 구현 범위: [Personal Hedge Fund Agent Core Implementation Plan](01-product/HEDGE_FUND_CORE_PLAN.md)
+> Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
+> Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
+> Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](04-organization/AGENT_EMPLOYEE_PROFILES.md)
+> 전사 데이터·부서별 Library: [헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
+> 팀별 구현 가이드: [재일](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
 > 
-
 ## 1. 프로젝트 개요
 
 본 프로젝트는 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)를 에이전트 운영 계층으로 사용하고, [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)의 전문 분석가, Bull/Bear 토론, Trader, Risk, Portfolio Manager 구조를 투자 의사결정 패턴으로 참고한다.
@@ -146,6 +148,30 @@
 
 각 단계는 독립적인 승격 기준과 롤백 조건을 가지며 수익률만으로 승격하지 않는다.
 
+### 2.5 Strategy Universe 원칙
+
+제품은 특정 전략 하나를 하드코딩하지 않는다. 수집 데이터로 Point-in-Time 검증이 가능하고 현재 Instrument, Broker, Risk, OMS, Accounting와 Compliance 능력으로 처리할 수 있는 전략을 `Strategy Universe`에 등록한다.
+
+전략의 범위는 세 층으로 구분한다.
+
+| 층 | 의미 | 허용 동작 |
+|---|---|---|
+| Research Catalog | 아이디어와 필요한 Data/Capability가 정의됨 | Dataset 생성과 Backtest 요청 |
+| Deployable Universe | 데이터·실행·위험·회계 Gate를 충족함 | Shadow와 Paper 배포 |
+| Capital-Eligible Universe | Broker·법률·운영·사용자 승인까지 충족함 | 승인된 환경과 한도에서만 Live 후보 |
+
+`모든 전략을 채택한다`는 Research Catalog를 전략 유형에 대해 열어 둔다는 의미다. 데이터가 있다는 이유만으로 주문 권한이 생기지는 않는다. 각 전략은 다음 Capability Gate를 모두 선언하고 검증해야 한다.
+
+1. `Data Gate`: 필요한 Raw/Feature/Document가 사용권, 시점, 품질과 충분한 History를 갖는다.
+2. `Instrument Gate`: 전략이 요구하는 주식, ETF, 선물, 옵션, FX, 금리 또는 기타 상품이 Universe에 있다.
+3. `Execution Gate`: Long/Short, Borrow, Basket, Multi-leg, Roll, Exercise/Assignment를 OMS가 처리할 수 있다.
+4. `Risk Gate`: Gross/Net, Factor, Basis, Liquidity, Leverage, Margin, Greeks와 Tail Stress를 계산한다.
+5. `Accounting Gate`: Position, Fee, Borrow Cost, Margin, Settlement와 PnL을 Ledger/NAV가 재현한다.
+6. `Compliance Gate`: 시장, 계정, 공매도, 파생상품, 데이터 사용권과 사용자 Mandate가 허용한다.
+7. `Capacity Gate`: 거래비용, Market Impact, 자본 규모와 동시 전략 상관관계가 한도 안에 있다.
+
+Capability 하나라도 `UNKNOWN` 또는 `UNSUPPORTED`면 해당 전략은 Research 또는 Shadow 상태에 머물며 주문을 만들 수 없다.
+
 ## 3. Universe 정의
 
 `Universe`는 시스템이 투자 후보로 관리하는 종목 집합이다. 전 종목 처리를 유지하되 계산 및 추론 자원을 계층적으로 배분한다.
@@ -265,11 +291,11 @@ Hermes는 연구 작업을 예약하고 여러 연구 에이전트를 병렬 실
 
 ### 5.5 실제 헤지펀드 Operating Model
 
-본부별 Charter, Agent/Service 경계, 입력·산출물, 운영 주기, KPI, 구현 Backlog와 Launch Gate의 상세 기준은 [DEPARTMENT_OPERATING_PLANS.md](DEPARTMENT_OPERATING_PLANS.md)를 따른다.
+본부별 Agent/Service 경계, 권한과 직원 역할은 [AGENT_EMPLOYEE_PROFILES.md](04-organization/AGENT_EMPLOYEE_PROFILES.md)와 팀별 실행 가이드를 따른다.
 
 사용자 관점에서 최종 제품은 하나의 개인형 Hedge Fund Investment Agent다. 그러나 내부 구현은 하나의 거대한 모델이 아니라 권한과 책임이 분리된 헤지펀드 회사의 Digital Twin이다. CEO 에이전트가 사용자 Mandate와 통합 결과를 대표하고, 6개 본부는 독립된 Agent, 결정론적 Service와 Policy Gate로 역할을 수행한다.
 
-CEO와 6개 본부장은 각각 독립된 Hermes Supervisor Agent로 구현한다. 각 본부장은 고유한 Memory Namespace, Department Queue, Skill Manifest, Tool Allowlist와 Service Identity를 가지고 본부 내 Specialist Agent를 지휘한다. Specialist는 사건별 LangGraph Node로 동적 실행하며, 상세 직원 구성과 권한은 [AGENT_EMPLOYEE_PROFILES.md](AGENT_EMPLOYEE_PROFILES.md)를 따른다.
+CEO와 6개 본부장은 각각 독립된 Hermes Supervisor Agent로 구현한다. 각 본부장은 고유한 Memory Namespace, Department Queue, Skill Manifest, Tool Allowlist와 Service Identity를 가지고 본부 내 Specialist Agent를 지휘한다. Specialist는 사건별 LangGraph Node로 동적 실행하며, 상세 직원 구성과 권한은 [AGENT_EMPLOYEE_PROFILES.md](04-organization/AGENT_EMPLOYEE_PROFILES.md)를 따른다.
 
 CEO 직속 Shared Service로 `Agent Workforce 인사팀`을 둔다. 인사팀장도 독립 Hermes Supervisor로 구현하며, 6개 본부의 Queue·SLA·비용·Eval·Incident를 분석해 Agent 채용, Skill 보강, 교육, 역할 변경과 비활성화를 관리한다. 인사팀은 제7의 투자 본부가 아니며 투자 판단, Production 권한 부여 또는 자기 후보의 최종 QA 승인을 수행하지 않는다.
 
@@ -370,6 +396,8 @@ flowchart TB
 - Work Queue, Case Orchestration, Entitlement, Audit와 Observability
 - Secret 관리, Disaster Recovery, Model Serving과 CI/CD
 
+외부 시장·공시·뉴스·거시 Source는 중앙 Data Platform이 한 번만 수집한다. 트레이딩·리스크·퀀트·회계·QA·인사팀은 부서별 Domain API로 이를 참조하고, 주문·위험·실험·원장·감사·Agent Lifecycle처럼 자기 업무에서 발생한 데이터만 공식 System of Record에 생성한다. 본부별 입력 Data Product, 출력 계약, Library와 Raw DB 접근 제한은 [전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)의 6장을 따른다.
+
 초기에는 한 개 PM Pod와 한 개 Fund를 구현하되 모든 데이터 모델은 다중 Fund, 다중 Book, 다중 Strategy를 지원하도록 설계한다.
 
 ### 5.6 권한 분리 원칙
@@ -447,26 +475,6 @@ Investor Capital
 - 공식 PnL과 성과 귀속 계산
 
 에이전트의 서술은 공식 원장을 변경할 수 없으며, 검증된 Command와 승인 절차를 통해서만 상태 변경을 요청할 수 있다.
-
-### 5.10 본부 Hermes Profile 배포 (Distribution)
-
-CEO, 6개 본부장과 Agent Workforce 인사팀장은 각각 독립된 Hermes Profile로 구현된다(5.5, 5.9절). 담당자는 로컬에서 만든 Profile을 Hermes Profile Distribution 기능으로 packaging해 git repo로 팀과 공유한다 — Profile이 "공유 가능한 형태로 패키징된 것"이 Distribution이다.
-
-| Profile | 담당자 |
-|---|---|
-| `ceo-agent`, `hr-department` | 영주 |
-| `risk-management`, `qa-department` | 동규 |
-| `trading-department`, `accounting-portfolio-department` | 도현 |
-| `research-department`, `quant-backtest-department` | 재일 |
-
-| 구분 | 대상 | 성격 |
-|---|---|---|
-| 담당자(배포) 영역 — `hermes profile update`로 교체됨 | `distribution.yaml`, `SOUL.md`, `config.yaml`, `skills/`, `cron/`, `mcp.json` | Git repo로 버전 관리, 담당자가 Tag/Push |
-| 설치자(개인) 영역 — 업데이트해도 절대 보존 | `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*`, `logs/` | 설치자 로컬에만 존재, 배포 대상에서 하드 제외 |
-
-담당자가 새 Version을 Tag·Push하면 다른 팀원은 `hermes profile update <profile>`로 SOUL/Skill/Cron/MCP 설정만 최신화하고, 각자의 memories·sessions·API Key는 그대로 유지된다. 새 팀원 Onboarding이나 새 개발 머신 세팅도 `hermes profile install <repo> --alias` 한 줄로 끝나며, 이는 19.4절 인사팀 Joiner Workflow의 "Service Identity, Queue, Memory와 Tool Scope 요청" 단계에서 실제 Agent 실행 환경을 준비하는 구체적 수단이 된다. Distribution은 서명되지 않으므로 사내에서도 Private Repo와 팀 Git 인증을 사용하고, 설치 전 SOUL.md와 `skills/`를 리뷰한 뒤 실행한다.
-
-Distribution은 14절의 `agents/<본부>/`, `orchestration/hermes/<본부>/`가 담는 Agent/Persona 코드를 실제로 팀원 간 배포·버전관리하는 수단이며, `risk/`, `execution/`, `fund_operations/` 같은 결정론적 서비스 코드는 일반 애플리케이션 저장소(git repo 자체)로 배포한다 — 둘은 서로 다른 배포 경로를 갖는다.
 
 ## 6. 실시간 처리 파이프라인
 
@@ -698,7 +706,7 @@ SymbolState
 
 ## 9. RAG 및 메모리 설계
 
-수집 대상, Data Contract, Point-in-Time, 품질, Lineage, 보존과 운영 절차의 상세 기준은 [DATA_GOVERNANCE_GUIDE.md](DATA_GOVERNANCE_GUIDE.md)를 따른다.
+수집 대상, Data Contract, Point-in-Time, 품질, Lineage, 보존과 운영 절차의 상세 기준은 [DATA_GOVERNANCE_GUIDE.md](03-data/DATA_GOVERNANCE_GUIDE.md)를 따른다.
 
 ### 9.1 저장 계층
 
@@ -769,9 +777,14 @@ embedding_version
 {
   "decision_id": "dec_01J...",
   "event_id": "evt_01J...",
-  "symbol": "SYMBOL",
-  "action": "increase",
-  "target_weight": 0.03,
+  "scope_instrument_ids": ["inst_long", "inst_short"],
+  "strategy_family": "EQUITY_MARKET_NEUTRAL",
+  "directionality": "LONG_SHORT",
+  "action": "rebalance",
+  "target_portfolio": [
+    {"instrument_id": "inst_long", "target_weight": 0.03},
+    {"instrument_id": "inst_short", "target_weight": -0.03}
+  ],
   "confidence": 0.74,
   "time_horizon": "intraday",
   "entry_condition": "price_above_vwap",
@@ -797,7 +810,7 @@ embedding_version
 - `hold`
 - `watch`
 
-초기 MVP에서 공매도를 지원하지 않으면 `open_short`를 정책 계층에서 비활성화한다.
+`open_short`는 Paper에서도 대차 가능 수량, Borrow Fee, Recall, Uptick/주문 표시와 Settlement 정책을 가진 전략만 사용할 수 있다. 실제 계정에서는 Broker와 규제 Capability가 확인되지 않으면 정책 계층에서 비활성화한다.
 
 ## 11. Risk Engine
 
@@ -813,6 +826,8 @@ Risk Engine은 제안된 목표 비중을 검증하고 `approve`, `resize`, `rej
 - 종목별 포지션 한도
 - 섹터 및 팩터 한도
 - 총 Gross/Net Exposure
+- Short Availability, Borrow Fee, Recall과 공매도 주문 규칙
+- Strategy Book별 Leverage, Margin과 Financing 한도
 - 현금 및 매수 가능 금액
 - 예상 거래 비용과 유동성
 - 일일 손실 및 Drawdown
@@ -841,14 +856,22 @@ Kill Switch 상태:
 
 ## 12. OMS 및 체결
 
-### 12.1 주문 상태
+### 12.1 OrderIntent와 Broker Order 상태
 
 ```text
-CREATED -> RISK_APPROVED -> SUBMITTED -> ACKNOWLEDGED
-        -> PARTIALLY_FILLED -> FILLED
-        -> CANCEL_PENDING -> CANCELED
-        -> REJECTED / EXPIRED / UNKNOWN
+OrderIntent:
+DRAFT -> RISK_PENDING -> APPROVED | RESIZED | REJECTED | EXPIRED
+APPROVED | RESIZED -> READY_TO_SUBMIT
+
+Broker Order:
+CREATED -> SUBMITTED -> ACKNOWLEDGED -> PARTIALLY_FILLED -> FILLED
+CREATED | SUBMITTED | ACKNOWLEDGED | PARTIALLY_FILLED -> CANCEL_PENDING -> CANCELLED
+SUBMITTED -> REJECTED
+CREATED | ACKNOWLEDGED -> EXPIRED
+BROKER_STATE_AMBIGUOUS -> UNKNOWN
 ```
+
+`RISK_APPROVED`는 Broker Order 상태가 아니라 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 OrderIntent 승인 흐름에만 `USER_PENDING -> USER_APPROVED`를 추가한다. `UNKNOWN` 상태에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
 
 ### 12.2 필수 기능
 
@@ -901,7 +924,7 @@ Paper/Live OMS의 예상 Position 계산과 별개로 Fund Ledger를 유지한�
 - 결제일과 미결제 거래
 - 유동성 Buffer와 환매 Stress
 
-초기 Long-only MVP에서는 Borrow를 비활성화할 수 있지만 인터페이스와 데이터 모델은 유지한다.
+Paper 환경은 Version이 있는 Borrow Availability와 Borrow Fee Scenario를 제공한다. 실제 Borrow Feed나 Broker 계약이 없는 환경에서는 보수적인 가상 한도를 사용하며, Live 공매도는 `UNKNOWN` 상태에서 항상 차단한다.
 
 ## 13. 저장소 및 인프라
 
@@ -912,12 +935,12 @@ Paper/Live OMS의 예상 Position 계산과 별개로 Fund Ledger를 유지한�
 | 언어 | Python 3.12 | 병목 구간 Rust |
 | API | FastAPI | 서비스 분리 유지 |
 | 실시간 통신 | WebSocket | 공급자별 Adapter |
-| Event Bus | Redis Streams 또는 NATS | Managed Kafka 또는 동등한 Replay 가능 Event Bus |
+| Event Bus | Redis Streams | Managed Kafka 또는 동등한 Replay 가능 Event Bus |
 | Hot State | Redis | Managed Redis 호환 Cluster |
-| 관계형 DB | PostgreSQL | Multi-AZ/Zone HA PostgreSQL |
+| 관계형 DB | Supabase PostgreSQL | Multi-AZ/Zone HA PostgreSQL 또는 검증된 Supabase 운영 구성 |
 | Vector Search | pgvector | Managed pgvector 또는 Hybrid Search Engine |
-| 시계열 | TimescaleDB | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
-| Object Storage | 로컬 S3 호환 저장소 | Versioning/Object Lock 지원 Object Storage |
+| 시계열 | 별도 TimescaleDB, 리서치·퀀트 직접 접근 | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
+| Object Storage | Supabase private Storage | Versioning/Object Lock 지원 Object Storage |
 | 에이전트 상태 | 명시적 State Graph | 체크포인트 저장 |
 | 관측성 | OpenTelemetry + Prometheus + Grafana | Cloud-neutral Telemetry + 선택 Cloud의 Managed Monitoring |
 | 배포 | Docker Compose | Managed Container Platform, Kubernetes는 필요성 입증 후 검토 |
@@ -1017,7 +1040,7 @@ Capacity 증설보다 먼저 Load Shedding 우선순위를 정의한다. Positio
 - Agent와 LLM Provider 장애는 Risk, OMS, Kill Switch와 Ledger 가용성에 영향을 주지 않아야 한다.
 - Region Failover는 자동 주문 재개가 아니라 Trade Authority Fencing, Broker 대사, `ENTRY_BLOCKED`와 `REDUCE_ONLY` 단계를 거친다.
 - 공급자는 Broker/Data Vendor 지연, 3년 TCO, 운영 난이도, 데이터 소재지, 보안·감사, Managed Kafka/PostgreSQL/AI 가용성, Egress와 Exit Plan을 점수화해 선정한다.
-- AWS는 현재 후보 중 하나이며, AWS 선택 시 상세 구현 예시는 [AWS Candidate Reference Architecture](AWS_ARCHITECTURE_PLAN.md)를 사용한다.
+- AWS는 현재 후보 중 하나이며, Cloud 공급자가 확정되면 별도 ADR과 공급자별 Architecture 문서를 작성한다.
 
 ## 14. 권장 저장소 구조
 
@@ -1030,25 +1053,14 @@ multi-agent-hedge-fund/
 │   ├── investor_portal/
 │   └── paper_trader/
 ├── agents/
-│   ├── ceo/
-│   ├── hr/
-│   ├── research/
-│   ├── trading/
-│   ├── risk/
-│   ├── quant_backtest/
-│   ├── accounting_portfolio/
-│   ├── qa/
+│   ├── analysts/
+│   ├── committee/
+│   ├── strategy_committee/
+│   ├── portfolio/
+│   ├── auditor/
 │   └── schemas/
 ├── orchestration/
 │   ├── hermes/
-│   │   ├── ceo/
-│   │   ├── hr/
-│   │   ├── research/
-│   │   ├── trading/
-│   │   ├── risk/
-│   │   ├── quant_backtest/
-│   │   ├── accounting_portfolio/
-│   │   └── qa/
 │   ├── routing/
 │   └── workflows/
 ├── market_data/
@@ -1087,6 +1099,13 @@ multi-agent-hedge-fund/
 │   ├── labels/
 │   ├── experiments/
 │   ├── backtests/
+│   ├── plugins/
+│   │   ├── equity/
+│   │   ├── event_driven/
+│   │   ├── relative_value/
+│   │   ├── macro_futures/
+│   │   └── volatility/
+│   ├── capabilities/
 │   ├── validation/
 │   ├── registry/
 │   ├── deployment/
@@ -1166,8 +1185,6 @@ multi-agent-hedge-fund/
 ├── docs/
 └── docker-compose.yml
 ```
-
-`agents/`와 `orchestration/hermes/`만 부서 기준(CEO, 인사팀, 리서치·트레이딩·리스크·퀀트/백테스트·회계·포트폴리오·AI QA/감사)으로 조직하고, 나머지는 기능/레이어 기준을 유지한다. `market_data/`, `risk/`, `execution/`, `fund_operations/`, `strategy_factory/`, `department_automation/` 등은 여러 본부가 공유하거나(5.9절) 결정론적 서비스로 에이전트 런타임과 분리되어야 하는 영역이라 특정 부서 폴더에 종속시키지 않는다. 위원회(Investment Committee, Strategy Planning Committee)는 8절에서 정의한 대로 상설 본부가 아닌 Cross-Department Workflow이므로 `agents/committee/`가 아니라 `orchestration/workflows/`에 위치한다. `agents/schemas/`는 10절의 구조화된 의사결정 계약처럼 전 부서가 공유하는 스키마이므로 부서 폴더 밖에 유지한다.
 
 ## 15. 운영 및 관측성
 
@@ -1575,18 +1592,26 @@ Dataset Manifest 필수 항목:
 
 ### 18.6 모델 및 전략 유형
 
-Strategy Factory는 한 종류의 모델에 종속되지 않는다.
+Strategy Factory는 한 종류의 모델이나 Long-only 방향에 종속되지 않는다. SEC Form PF의 주요 전략 분류인 Equity, Relative Value, Event Driven, Macro, Managed Futures/CTA, Credit와 Multi-Strategy를 상위 Taxonomy로 참고하되, 실제 채택 범위는 프로젝트가 확보한 데이터와 거래 Capability로 제한한다.
 
-- 명시적 규칙 기반 전략
-- 횡단면 Ranking 모델
-- 시계열 Forecast 모델
-- 이벤트 지속성 분류 모델
-- Market Regime 모델
-- 거래 비용 및 Slippage 모델
-- 종목별 신호를 결합하는 Ensemble
-- 전략별 자본을 배분하는 Meta Allocator
+| 전략군 | 프로젝트의 연구 후보 | 핵심 입력 | 주요 추가 Gate |
+|---|---|---|---|
+| Equity Directional | Long/Short, Long/Short Bias, Sector/Thematic, Momentum, Mean Reversion | 주식·ETF 가격, 호가, 재무, 수급, 뉴스 | Borrow, Gross/Net, 공매도 규칙 |
+| Equity Market Neutral | Factor Neutral, Statistical Arbitrage, Pairs, Cross-sectional Ranking | 동기화 가격, Factor, Sector, Borrow | 중립화, Basket Execution, Crowding |
+| Fundamental Equity | Value, Quality, Growth, Earnings Revision | DART 재무, Corporate Action, Consensus | PIT 재무, 추정치 사용권, Rebalance 비용 |
+| Event Driven | Earnings/Disclosure, Merger/Risk Arbitrage, Special Situation, Index Rebalance | 공시, 뉴스, Deal Terms, Corporate Action | Event 상태, Deal Break, Halt, Borrow |
+| Relative Value | ETF/Index, Cash-Futures Basis, Calendar/Intermarket Spread, Convertible 후보 | 복수 Instrument 가격과 Reference Terms | Multi-leg, Basis Stress, Leg Risk |
+| Quantitative Trading | Trend, Breakout, Intraday Reversal, Order-flow와 Liquidity Signal | Tick, Quote, Bar, Microstructure Feature | 지연·비용·용량, HFT 제외 |
+| Macro/Managed Futures | Index·Rate·FX·Commodity Trend, Carry, Regime | 선물 Curve, 거시, FX, 금리, 상품 데이터 | Margin, Roll, 글로벌 Calendar |
+| Options/Volatility | Long Vol, Skew, Term Structure, Defined-Risk Spread, Dispersion 후보 | Option Chain, IV Surface, Greeks, Underlying | Multi-leg, Margin, Exercise/Assignment |
+| Portfolio Hedge/Tail | Beta Hedge, Protective Put, Collar, Dynamic Hedge | Portfolio Exposure, Futures/Options, Stress | Hedge 효과, Basis, Cost와 Tail Scenario |
+| Multi-Strategy Allocation | Risk Parity, Vol Target, Regime Allocation, Meta Allocator | 전략별 Return/Risk/Capacity/Correlation | 전략 상관 붕괴, 자본·Risk Budget |
 
-LLM은 시장 데이터의 직접 수치 예측기보다 가설 발굴, 비정형 데이터 구조화, 실패 분석 및 전략 조합에 우선 사용한다.
+Credit, Convertible, Private Market, Real Estate, Digital Asset와 OTC 전략은 Taxonomy에는 둘 수 있지만, 해당 Data Product, 계약, Pricing, Venue, Custody와 Risk/Accounting 능력이 없으면 `UNSUPPORTED`다. 이름만 등록된 전략을 “지원”으로 표시하지 않는다.
+
+모델 유형은 명시적 규칙, 횡단면 Ranking, 시계열 Forecast, Event 분류, Regime, Statistical Model, Machine Learning, Ensemble과 Meta Allocator를 허용한다. LLM은 직접 가격 숫자를 생성하기보다 가설 발굴, 비정형 데이터 구조화, 반론, 실패 분석과 전략 조합에 우선 사용한다.
+
+모든 `StrategyVersion`은 최소한 `strategy_family`, `directionality`, `required_data_products`, `required_instruments`, `required_capabilities`, `holding_horizon`, `execution_model`, `risk_model`, `accounting_model`과 `capacity_limit`을 선언한다. Registry는 Capability Profile과 현재 Environment를 비교해 `RESEARCH_ONLY`, `SHADOW_ELIGIBLE`, `PAPER_ELIGIBLE`, `LIVE_ELIGIBLE` 중 하나를 계산한다.
 
 ### 18.7 실험 및 백테스트 표준
 
@@ -2918,7 +2943,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 
 ### Phase 0: 설계 확정 - 1주
 
-- 대상 시장과 데이터 공급자 확정
+- 초기 시장은 한국 주식, 가격·체결·호가 공급자는 LS증권 Open API로 확정
+- 리서치 공시·뉴스·거시 Source와 Production 사용권 확정
 - 종목 마스터 및 거래 시간 정의
 - 이벤트, 결정 및 주문 스키마 확정
 - 위험 한도 초안 작성
@@ -2989,6 +3015,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 결정론적 Risk Engine
 - Portfolio Construction
 - Paper OMS와 모의 체결
+- Long/Short, Pair와 Basket Intent Group
+- Strategy Capability 평가와 Short/Borrow Simulation
 - Kill Switch 및 Reconciliation
 
 완료 기준:
@@ -2996,6 +3024,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - LLM이 Risk Engine을 우회할 수 없음
 - 중복 주문 및 한도 초과 주문 차단
 - 주문부터 PnL까지 감사 가능
+- 일부 Leg 체결과 Capability 부족 상황이 안전하게 복구 또는 차단됨
 
 ### Phase 6: Strategy Factory 기반 - 11~12주
 
@@ -3004,12 +3033,14 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - Hypothesis Spec과 Experiment Runner
 - 비용 포함 Walk-Forward Backtest
 - Strategy 및 Model Registry
+- Strategy Capability Profile과 전략군별 Backtest Adapter
 
 완료 기준:
 
 - 동일 Dataset과 설정으로 실험 재현
 - 데이터 누수 및 Survivorship Bias 자동 검사
 - Strategy Bundle 생성
+- Long/Short, Market Neutral, Event Driven과 Quant 대표 Fixture 재현
 
 ### Phase 7: 전략 검증과 자동 배포 - 13~15주
 
@@ -3017,6 +3048,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - Red Team과 Model Risk Gate
 - Champion/Challenger 비교
 - Shadow와 Paper 자동 배포
+- Capability 충족 전략만 환경별 Deployable Universe에 포함
 - Drift 감지, 자동 중단 및 롤백
 
 완료 기준:
@@ -3256,7 +3288,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 | Legal/Regulatory | 1~52주 이상 | Applicability Matrix, 법인, 등록·면제, 계약 |
 | Counterparty | 12~42주 | Broker/FCM/Data/Custody/Admin 연결과 Certification |
 | Security/Resilience | 20~52주 | IAM, SIEM, Threat Model, DR와 Control Evidence |
-| Cloud Platform | 1~26주 | 공급자 평가·PoC, Landing Zone, Network, Compute/Event/DB, Data Lake, CI/CD와 DR |
+| Cloud Platform | 1~26주 | 공급자 평가·사전 검증, Landing Zone, Network, Compute/Event/DB, Data Lake, CI/CD와 DR |
 | Operations/Finance | 16~52주 | Reconciliation, NAV, Treasury, Tax와 Runbook |
 | Investor Operations | 40~52주 이상 | Onboarding, Capital Activity와 Reporting |
 
@@ -3276,6 +3308,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 장중 세션을 Replay하여 데이터와 판단 과정을 조사할 수 있다.
 - 모델, 프롬프트, 데이터, 정책 및 코드 버전을 Audit Log에서 확인할 수 있다.
 - 수집 데이터로 만든 신규 전략을 재현 가능하게 검증하고 Shadow 및 Paper 환경에 배포할 수 있다.
+- Strategy Family를 사전 제한하지 않고 Data·Instrument·Execution·Risk·Accounting Capability로 환경별 적격성을 계산한다.
+- Long/Short, Market Neutral, Event Driven과 Quant 대표 전략이 공통 Strategy/Decision/Intent 계약으로 동작한다.
 - 전략 성능 저하 시 자동 중단과 롤백이 동작한다.
 - Fund, Pod, Book 및 Strategy별 자본과 PnL을 분리한다.
 - 사전 Risk와 Compliance를 통과한 주문만 Execution Desk에 도달한다.
@@ -3447,16 +3481,22 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 
 ## 27. 다음 의사결정 항목
 
-구현 시작 전에 다음 항목을 확정해야 한다.
+아래 항목 중 가격 Data Plane은 확정됐으며, 나머지는 구현 또는 Production 전환 전에 결정한다.
 
-- 초기 시장: 한국 주식 또는 미국 주식
-- 실시간 데이터 및 Paper Broker 공급자
-- Tick, Quote, Orderbook 중 MVP 데이터 범위
-- 초기 Long-only 여부
-- Event Bus 초기 선택
-- TimescaleDB와 ClickHouse 중 시계열 저장소
+- 확정: 초기 시장은 한국 주식
+- 확정: 실시간 가격·체결·호가는 LS증권 Open API
+- 확정: Core Release는 Tick과 10단계 Quote/Orderbook을 수집
+- 확정: 초기 Event Bus는 Redis Streams, Hot State는 Redis
+- 확정: 전사 업무 DB는 Supabase PostgreSQL을 사용하고 Schema를 본부별로 분리
+- 확정: 리서치·퀀트 Data Plane만 별도 TimescaleDB를 사용하고 Parquet 장기 Archive를 추가
+- 확정: 그 외 본부는 TimescaleDB Credential 없이 `market-api`의 Snapshot·Bar·Feature Endpoint로 조회
+- 확정: 초기 Core는 한국 상장주식·ETF의 Multi-Strategy Paper 연구를 지원하며 Long/Short, Market Neutral, Event Driven과 Quant 전략을 사전 배제하지 않음
+- 확정: 실제 공매도와 파생상품은 Borrow·Margin·OMS·Risk·Accounting Capability Gate 통과 후 환경별로 활성화
+- 미정: Paper/Live Broker와 주문 API 운영 계정
+- TimescaleDB의 Chunk, 압축, Retention과 장기 Archive 정책
+- ClickHouse는 TimescaleDB가 부하·비용 SLO를 충족하지 못할 때 Benchmark
 - Cloud Provider: AWS, Azure, GCP 또는 Hybrid 후보 평가
-- Primary/Secondary Region과 Broker/Data Vendor 지연 검증
+- Primary/Secondary Region과 Broker·LS Endpoint·보조 Research Vendor 지연 검증
 - Managed Container Platform과 Kubernetes 재검토 조건
 - Managed Kafka/Event Bus의 Partition, Retention, Replay와 Cross-Region 정책
 - HA PostgreSQL의 Cluster 분리, RTO/RPO와 Global Replication 범위
@@ -3464,15 +3504,15 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - LLM Provider와 Quick/Deep Model 조합
 - 하루 LLM 비용 상한
 - 초기 포지션 및 손실 한도
-- 초기 전략 유형: 규칙 기반, Ranking 또는 이벤트 분류
+- 첫 활성 Strategy Portfolio와 전략군별 최소 Champion 수
 - Strategy Promotion Gate의 최소 기준
 - Shadow 및 Paper Challenger 최소 관찰 기간
 - 전략별 Risk Budget과 최대 동시 Champion 수
 - 자동 재학습 주기와 Drift 임계값
 - Fund, Pod, Book 및 Strategy 초기 계층
 - CEO 에이전트의 권한 한계와 리스크본부·AI QA/감사본부의 독립 거부권 정책
-- Prime Broker, Margin, Collateral 및 Borrow 시뮬레이션 범위
 - Daily Close Cut-off와 Official Paper NAV 정책
+- Prime Broker, Margin, Collateral 및 Borrow 시뮬레이션 범위
 - 관리보수, 성과보수, High-Water Mark 및 Hurdle 적용 여부
 - 본부별 초기 자동화 등급
 - 자동 실행 가능한 금액과 Risk 임계값
@@ -3511,16 +3551,20 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - [CFTC Intermediary Registration](https://www.cftc.gov/IndustryOversight/Intermediaries/registration.html)
 - [CFTC Commodity Pool Operators](https://www.cftc.gov/IndustryOversight/Intermediaries/CPOs/index.htm)
 - [FINRA Algorithmic Trading Supervision](https://www.finra.org/rules-guidance/key-topics/algorithmic-trading)
+- [SEC Form PF Strategy Classification](https://www.sec.gov/file/form-pf)
+- [SEC Private Fund Statistics](https://www.sec.gov/data-research/statistics-data-visualizations/private-fund-statistics)
+- [KRX Short Selling Rules](https://global.krx.co.kr/contents/GLB/06/0602/0602010204/GLB0602010204T5.jsp)
+- [CME Futures Spread Overview](https://www.cmegroup.com/education/courses/understanding-futures-spreads/futures-spread-overview)
 - [NIST Cybersecurity Framework 2.0](https://www.nist.gov/cyberframework)
-- [프로젝트 Data Collection and Governance Guide](DATA_GOVERNANCE_GUIDE.md)
-- [프로젝트 Department Operating Plans](DEPARTMENT_OPERATING_PLANS.md)
-- [프로젝트 AWS Candidate Reference Architecture](AWS_ARCHITECTURE_PLAN.md)
-- [프로젝트 Personal Hedge Fund Agent Core Plan](HEDGE_FUND_CORE_PLAN.md)
-- [프로젝트 Personal Hedge Fund Agent Core Feature Backlog](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
-- [프로젝트 Personal Hedge Fund Agent Technology Stack Decisions](TECH_STACK_DECISIONS.md)
+- [프로젝트 Data Collection and Governance Guide](03-data/DATA_GOVERNANCE_GUIDE.md)
+- [프로젝트 Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md)
+- [프로젝트 Data Sources and Libraries](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
+- [프로젝트 Personal Hedge Fund Agent Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md)
+- [프로젝트 Personal Hedge Fund Agent Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
+- [프로젝트 Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
 - [AWS Well-Architected Financial Services Industry Lens](https://docs.aws.amazon.com/wellarchitected/latest/financial-services-industry-lens/financial-services-industry-lens.html)
 - [AWS Control Tower Multi-account Landing Zone](https://docs.aws.amazon.com/controltower/latest/userguide/aws-multi-account-landing-zone.html)
 
 ## 29. 최종 목표 문장
 
-> 사용자의 Mandate와 자본을 받아 전략 발굴, 검증, 배포, 포트폴리오 운용, 위험 통제와 성과 보고를 대신 수행하는 개인형 Hedge Fund Investment Agent를 구축한다. 제품은 CEO 에이전트를 단일 인터페이스로 사용하지만 내부에는 1. 리서치본부, 2. 트레이딩본부, 3. 리스크본부, 4. 퀀트/백테스트본부, 5. 회계/포트폴리오본부, 6. AI QA/감사본부로 구성된 헤지펀드 Digital Twin을 둔다. CEO 에이전트는 전사를 조정하되 주문·위험 승인·원장·감사를 직접 통제하지 않으며, 리스크본부와 AI QA/감사본부가 독립 거부권을 행사한다. 주식 전 종목과 선택된 선물·옵션을 실시간 분석하고 Strategy Book별 자본, Greeks, Margin과 Risk Budget을 운용하며, 결정론적 Risk/OMS/Ledger가 모든 Agent의 권한을 제한한다. Paper, Broker Certification, Live Dry Run과 Limited Live를 거쳐 사용자의 자기자본을 안전하고 재현 가능하게 운용하고, 법률·운영 Gate를 통과한 경우에만 Production Fund와 외부자금 서비스로 확장한다.
+> 사용자의 Mandate와 자본을 받아 전략 발굴, 검증, 배포, 포트폴리오 운용, 위험 통제와 성과 보고를 대신 수행하는 개인형 Multi-Strategy Hedge Fund Investment Agent를 구축한다. 제품은 CEO 에이전트를 단일 인터페이스로 사용하지만 내부에는 1. 리서치본부, 2. 트레이딩본부, 3. 리스크본부, 4. 퀀트/백테스트본부, 5. 회계/포트폴리오본부, 6. AI QA/감사본부로 구성된 헤지펀드 Digital Twin을 둔다. CEO 에이전트는 전사를 조정하되 주문·위험 승인·원장·감사를 직접 통제하지 않으며, 리스크본부와 AI QA/감사본부가 독립 거부권을 행사한다. 주식 전 종목과 선택된 선물·옵션을 실시간 분석하고, 수집 데이터와 환경별 Capability가 뒷받침하는 Equity Long/Short, Market Neutral, Event Driven, Relative Value, Macro/Managed Futures, Volatility와 Hedge 전략을 Strategy Book으로 운용한다. Strategy Book별 자본, Gross/Net Exposure, Greeks, Margin과 Risk Budget을 관리하며, 결정론적 Risk/OMS/Ledger가 모든 Agent의 권한을 제한한다. Paper, Broker Certification, Live Dry Run과 Limited Live를 거쳐 사용자의 자기자본을 안전하고 재현 가능하게 운용하고, 법률·운영 Gate를 통과한 경우에만 Production Fund와 외부자금 서비스로 확장한다.
