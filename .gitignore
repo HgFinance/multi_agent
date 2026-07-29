@@ -25,6 +25,9 @@ env/
 # 개인 작업 노트 (팀 공유 대상 아님)
 CLAUDE.md
 
+# Generated embedding caches (recomputed from corpus content hash on next run)
+.embedding_cache.json
+
 # OS
 .DS_Store
 
