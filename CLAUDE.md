@@ -4,11 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 현재 상태
 
-구현 전 설계 단계다. Application Scaffold도 테스트 스위트도 없다. 이 저장소에 실제로 존재하는 것은 셋뿐이다.
+대부분 설계 단계다. Application Scaffold도 테스트 프레임워크도 아직 없다.
 
 1. `docs/` — 13개 설계 문서. 이 저장소의 Source of Truth.
 2. 루트의 8개 `*.yaml` — Hermes Agent Runtime이 읽는 부서 Profile.
-3. 실행 가능한 코드 — `fetch_news.py`와 `skills/agentic-rag/`. 이 둘이 전부다.
+3. 실행 가능한 코드 — `fetch_news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
+   거래 생명주기 구현(`db/`, `trading/contracts.py`, `execution/`, `accounting/`).
+
+트레이딩·회계본부만 Sprint D0~D2가 구현돼 있다(계약·스키마·Paper OMS·원장·대사).
+다른 본부는 아직 Profile과 설계 문서뿐이다. 어느 본부의 코드를 찾다가 없으면
+"아직 없는 것"이 맞다 — 다른 경로에 있는지 헤매지 않아도 된다.
+
+트레이딩·회계 코드는 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전이라
+재작업 예정이다. 각 부서 yaml의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
+표시한다.
 
 [docs/README.md](docs/README.md)의 "예상 저장소 구조"(`apps/`, `services/`, `contracts/` …)는 **아직 만들어지지 않은 목표 구조**다. 그 경로가 실재하는 것처럼 참조하거나 import하지 않는다.
 
@@ -45,7 +54,28 @@ python3 skills/agentic-rag/main.py \
 python3 fetch_news.py 'AAPL Apple stock'
 ```
 
-**테스트와 린트는 아직 없다.** 목표 스택은 [TECH_STACK_DECISIONS.md](docs/02-engineering/TECH_STACK_DECISIONS.md)가 정한 `pytest + pytest-asyncio + Hypothesis + respx + testcontainers`와 `ruff + pyright + pip-audit + bandit`이다. 실제로 도입하면 이 절을 함께 갱신한다.
+DB 마이그레이션 (로컬 PostgreSQL 또는 Supabase). 002는 001의 `execution.funds`/`books`를
+참조하므로 순서를 지킨다.
+
+```bash
+psql -d <db> -f db/001_execution.sql -f db/002_accounting.sql \
+             -f db/003_roles.sql -f db/004_seed.sql
+```
+
+RLS가 fail-closed다. **조회가 이유 없이 0건이면 `SET app.fund_id`를 빠뜨린 것**이다.
+
+**테스트 프레임워크는 아직 없다.** 다만 트레이딩·회계 모듈은 각 파일의 `__main__`에
+assert 기반 자체 점검을 두고 있어 그대로 실행하면 검증된다.
+
+```bash
+python trading/contracts.py        # 계약 6개 영역
+python execution/oms.py            # OMS 불변식 10개
+python execution/paper_broker.py   # Paper Broker 4개 영역
+python accounting/ledger.py        # 원장 불변식 10개
+python accounting/reconciliation.py # 대사 12개
+```
+
+목표 스택은 [TECH_STACK_DECISIONS.md](docs/02-engineering/TECH_STACK_DECISIONS.md)가 정한 `pytest + pytest-asyncio + Hypothesis + respx + testcontainers`와 `ruff + pyright + pip-audit + bandit`이다. 실제로 도입하면 위 자체 점검을 pytest로 옮기고 이 절을 갱신한다.
 
 ## 아키텍처
 
