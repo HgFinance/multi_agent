@@ -26,6 +26,9 @@ psycopg2-binary
 redis
 pgvector
 
+# --- Agentic RAG (skills/agentic-rag — evidence-qa-agent, hallucination-critic, compliance-policy-agent) ---
+langgraph
+
 # --- Observability ---
 opentelemetry-sdk
 opentelemetry-exporter-otlp

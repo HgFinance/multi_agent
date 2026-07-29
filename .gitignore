@@ -12,6 +12,9 @@ venv/
 env/
 *.egg-info/
 
+# Generated embedding caches (recomputed from corpus content hash on next run)
+.embedding_cache.json
+
 # OS
 .DS_Store
 

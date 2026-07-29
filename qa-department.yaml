@@ -23,11 +23,18 @@ agent:
     agent-ops-monitor: "You are the Agent Ops Monitor. At all times you monitor error rate, latency and cost across agents, feeds, queues and model servers, and raise Incident Evidence when a department's operational health degrades."
 
 # 검색-평가-생성-환각검증-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
+# baseline은 risk-management의 compliance-policy-agent부터 구현됨 (skills/agentic-rag/, 코드는 risk/qa 공용)
+# 이 두 명은 다음 확장 대상 — corpus/evidence/ 추가 후 main.py PERSONA_CORPUS에 등록하면 됨
 agentic_rag:
   framework: langgraph
+  status: "미구현 — compliance-policy-agent 베이스라인 안정화 후 확장 예정"
   target_personas:
     - evidence-qa-agent      # Document RAG / Fact Store 근거를 검색해 주장-출처를 연결
     - hallucination-critic   # 원 에이전트가 실제 검색한 근거와 출력 주장을 대조해 환각 판정
+
+# 백로그 (2026-07-29, Finyul MAS 아티클 비교에서 도출 — 아직 미구현, 기록만)
+# evidence-qa-agent: 완전성 검증 실패 시 지금은 Flag만 하는데, 자동 Block으로 격상하는 "3단 방어"
+# (Parse -> Validate -> Fallback Hold) 적용 검토. risk-management.yaml에도 동일 백로그 기록됨.
 
 skills:
   - hermes-agent
