@@ -170,8 +170,15 @@ class OrderIntent(Base):
 class RiskDecision(Base):
     """리스크본부(risk-api)가 돌려주는 판정.
 
-    order_intent_id, 승인 수량, 만료가 반드시 있어야 한다 (팀 가이드 10장 Handoff).
-    이 셋이 없으면 OMS가 무엇을 얼마나 언제까지 보내도 되는지 알 수 없다.
+    **우리가 만드는 것이 아니라 받아서 검증하는 것이다.** 판정 권한은 리스크본부에
+    있고, 트레이딩본부는 `risk.decision.v1`을 소비해(팀 가이드 6.2) Decision ID를
+    저장하고(3.1) 전송 직전에 Scope와 만료를 다시 확인한다(4.3).
+    이 모델은 그 역직렬화 대상이며, 필드는 팀 가이드 10장이 요구하는 최소 집합이다:
+    order_intent_id, 승인된 최대 수량·가격, 만료. 이 셋이 없으면 OMS가 무엇을
+    얼마나 언제까지 보내도 되는지 알 수 없다.
+
+    동규님 스키마 확정 시 필드명이 바뀔 수 있다. 그때 고칠 곳은 여기와
+    execution/oms.py의 apply_risk_decision / submit 두 군데다.
     """
 
     risk_decision_id: UUID = Field(default_factory=uuid4)
