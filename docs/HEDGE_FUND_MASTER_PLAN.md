@@ -328,6 +328,9 @@ flowchart TB
     QNT -.->|"Dataset · Model · Release"| QAA
     ACC -.->|"Ledger · NAV Evidence"| QAA
     QAA -.->|"Finding · Block · Escalation"| CEO
+
+    QAA -.->|"Workforce Signal: Idle · 저성과 · Repeat Finding"| HR
+    HR -.->|"Workforce Plan · Hiring/Lifecycle Status"| CEO
 ```
 
 #### CEO 에이전트
@@ -338,6 +341,15 @@ flowchart TB
 - 본부별 결과를 통합해 사용자에게 하나의 결정과 설명으로 제공
 - 중대한 자본 재배분, 전략 중단, Drawdown 대응안을 사용자 승인 범위에 맞춰 상신
 - 독립 리스크 및 감사 거부권을 우회하지 않으며 공식 원장을 직접 변경하지 않음
+
+#### CEO 직속 Agent Workforce 인사팀
+
+- 제7의 투자 본부가 아닌 CEO 직속 Shared Service — 투자 판단, Production 권한 부여, 자기 후보의 최종 QA 승인을 수행하지 않음
+- 6개 본부의 Queue Depth, SLA, 비용과 Capacity Headroom을 취합해 채용 우선순위와 주간 Workforce Plan 수립
+- AI QA/감사본부로부터 Idle(낮은 Queue 활용률)과 저성과(반복 Finding, 낮은 Eval 점수) 신호를 받아 교육, 역할 변경 또는 비활성화 후보를 식별 — 인사팀이 직접 성과를 측정하지 않고 QA의 독립 Evidence를 근거로 판단
+- Hiring Requisition에 대한 Job Profile(Mission, Skill, Tool, 금지 권한, Eval 기준) 설계
+- Golden/Adversarial Eval과 Shadow 수습으로 신규·개정 후보를 검증하며, 신규 채용과 기존 Agent 개정에 동일한 검증 기준을 적용
+- Joiner/Mover/Leaver Lifecycle 관리 — Queue 배정, Memory Namespace와 권한 요청까지만 수행하며 실제 Identity/권한 생성은 Platform/IAM Service가 전담
 
 #### 1. 리서치본부
 
