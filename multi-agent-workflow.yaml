@@ -1,6 +1,7 @@
 # Multi-Agent Workflow Configuration
 # CEO 에이전트 + 6개 본부(리서치/트레이딩/리스크/퀀트·백테스트/회계·포트폴리오/AI QA·감사) 협업 워크플로우
-# 참고: HEDGE_FUND_MASTER_PLAN.md 4, 5.5, 5.8, 8 (실시간 신호 파이프라인과 전략 연구 주기는 분리된 흐름)
+# + CEO 직속 Agent Workforce 인사팀(hr-department, Shared Service — 제7의 투자 본부 아님)의 별도 workforce_management_cycle
+# 참고: HEDGE_FUND_MASTER_PLAN.md 4, 5.5, 5.8, 8, 19.4(1829행) (실시간 신호 파이프라인/전략 연구 주기/인사 주기는 서로 분리된 흐름)
 # 타임아웃 문제 해결: 로컬 데이터 소스 사용, Tavily API 통합
 
 model:
@@ -57,6 +58,31 @@ strategy_research_cycle:
       task: "리스크본부·QA 승인 결과를 반영해 Paper Champion 승격 여부 결정"
       timeout_seconds: 30
 
+workforce_management_cycle:
+  description: "실시간 신호 파이프라인·전략 연구 주기와 분리된 인사팀 주기. 인사팀은 후보를 설계·평가만 하며 권한 부여는 AI QA/감사본부 독립 검증과 CEO 예산·조직 승인을 거쳐야 하고, 실제 Identity/권한 생성은 Platform/IAM Service만 수행"
+  timeout_seconds: 300
+  steps:
+    - step: 1
+      department: hr-department
+      task: "6개 본부의 Queue·SLA·비용·Eval·Incident를 분석해 채용 우선순위 산정 후 Hiring Requisition에 대한 Job Profile(Mission, Skill, Tool, 금지 권한, Eval 기준) 설계"
+      timeout_seconds: 90
+    - step: 2
+      department: hr-department
+      task: "Golden/Adversarial Eval과 Shadow 수습을 통해 후보를 평가"
+      timeout_seconds: 90
+    - step: 3
+      department: qa-department
+      task: "후보의 Model/Prompt/Tool 권한 요청을 독립 검증 — 인사팀은 자기 후보를 스스로 최종 승인할 수 없음"
+      timeout_seconds: 60
+    - step: 4
+      department: ceo-agent
+      task: "예산과 조직 변경(신규 채용, 역할 변경, 비활성화)을 승인. 실제 Identity/권한 생성은 여기서 하지 않으며 Platform/IAM Service로 요청만 전달"
+      timeout_seconds: 30
+    - step: 5
+      department: hr-department
+      task: "승인된 Joiner/Mover/Leaver를 반영해 Queue 배정, Memory Namespace, 권한 요청을 Lifecycle Coordinator가 정리"
+      timeout_seconds: 30
+
 usage:
   single_department:
     research: "research-department chat -q 'Build a Research Packet for [종목]'"
@@ -66,15 +92,18 @@ usage:
     quant: "quant-backtest-department chat -q 'Backtest [전략 가설]'"
     accounting: "accounting-portfolio-department chat -q 'Reconcile fills and compute PnL'"
     ceo: "ceo-agent chat -q 'Summarize current portfolio decisions and open risks'"
+    hr: "hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'"
   multi_agent:
     signal_pipeline: "research-department chat -q 'Build a Research Packet for [종목], then delegate to trading-department, risk-management, qa-department, accounting-portfolio-department and ceo-agent in sequence'"
     strategy_cycle: "quant-backtest-department chat -q 'Backtest [전략 가설], then delegate release review to qa-department and promotion decision to ceo-agent'"
+    workforce_cycle: "hr-department chat -q 'Design a Job Profile for [채용 요청], then delegate permission verification to qa-department and budget/org approval to ceo-agent'"
   news_search:
     local: "python3 fetch_news.py '[검색어]'"
     tavily: "python3 fetch_news.py '[검색어]'"
 
 files:
   ceo_agent: "ceo-agent.yaml"
+  hr_department: "hr-department.yaml"
   research_department: "research-department.yaml"
   trading_department: "trading-department.yaml"
   risk_management: "risk-management.yaml"

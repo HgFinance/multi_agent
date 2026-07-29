@@ -1,4 +1,5 @@
 # Risk Management Department Configuration (3. 리스크본부)
+# 담당: 동규 (risk, qa)
 # Market/Liquidity, Derivatives/Margin, Compliance 리스크를 실시간 감시하고 주문의 승인·축소·거부 결정에 대한 근거를 제공
 # 실제 승인·축소·거부의 바인딩 집행과 한도 관리는 결정론적 Risk Engine이 담당 (5.3, 5.9절) — 에이전트는 원장을 직접 변경하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #3, 5.6, 8, 9.1, 11

@@ -1,4 +1,5 @@
 # Research Department Agent Configuration (1. 리서치본부)
+# 담당: 재일 (quant-backtest, research)
 # Universe, Market/Microstructure, Technical, Fundamental, News, Sentiment, Sector, Macro/Regime 분석
 # 트레이딩본부에 구조화된 Research Packet을 전달하며 주문이나 포지션 크기는 결정하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #1, 8

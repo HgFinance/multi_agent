@@ -1,4 +1,5 @@
 # Accounting/Portfolio Department Agent Configuration (5. 회계/포트폴리오본부)
+# 담당: 도현 (trading, accounting-portfolio)
 # Fund/Book/Strategy별 자본, Position, Cash, Fee, Margin 관리와 Reconciliation, NAV, 투자자 보고
 # Accounting Engine의 공식 수치만 사용하며 트레이딩 신호를 생성하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #5, 8

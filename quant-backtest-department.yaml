@@ -1,4 +1,5 @@
 # Quant/Backtest Department Agent Configuration (4. 퀀트/백테스트본부)
+# 담당: 재일 (quant-backtest, research)
 # 전략 가설, Feature, Label, Dataset, Point-in-Time Backtest, Champion/Challenger 검증
 # 검증된 불변 Strategy Bundle만 Shadow/Paper 배포 후보로 제출하며, 실시간 운용 중 전략 코드를 직접 수정하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #4, 8

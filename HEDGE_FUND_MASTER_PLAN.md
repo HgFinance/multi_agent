@@ -8,6 +8,8 @@
 > 단기 구현 범위: [Personal Hedge Fund Agent Core Implementation Plan](HEDGE_FUND_CORE_PLAN.md)
 > Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](TECH_STACK_DECISIONS.md)
+> Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](AGENT_EMPLOYEE_PROFILES.md)
+> 
 
 ## 1. 프로젝트 개요
 
@@ -267,18 +269,23 @@ Hermes는 연구 작업을 예약하고 여러 연구 에이전트를 병렬 실
 
 사용자 관점에서 최종 제품은 하나의 개인형 Hedge Fund Investment Agent다. 그러나 내부 구현은 하나의 거대한 모델이 아니라 권한과 책임이 분리된 헤지펀드 회사의 Digital Twin이다. CEO 에이전트가 사용자 Mandate와 통합 결과를 대표하고, 6개 본부는 독립된 Agent, 결정론적 Service와 Policy Gate로 역할을 수행한다.
 
+CEO와 6개 본부장은 각각 독립된 Hermes Supervisor Agent로 구현한다. 각 본부장은 고유한 Memory Namespace, Department Queue, Skill Manifest, Tool Allowlist와 Service Identity를 가지고 본부 내 Specialist Agent를 지휘한다. Specialist는 사건별 LangGraph Node로 동적 실행하며, 상세 직원 구성과 권한은 [AGENT_EMPLOYEE_PROFILES.md](AGENT_EMPLOYEE_PROFILES.md)를 따른다.
+
+CEO 직속 Shared Service로 `Agent Workforce 인사팀`을 둔다. 인사팀장도 독립 Hermes Supervisor로 구현하며, 6개 본부의 Queue·SLA·비용·Eval·Incident를 분석해 Agent 채용, Skill 보강, 교육, 역할 변경과 비활성화를 관리한다. 인사팀은 제7의 투자 본부가 아니며 투자 판단, Production 권한 부여 또는 자기 후보의 최종 QA 승인을 수행하지 않는다.
+
 CEO 에이전트는 전사 목표, 업무 우선순위, 본부 간 Case와 Escalation을 조정하지만 주문 전송, Risk 승인, 원장 수정, NAV 확정 또는 Audit Finding 종료 권한을 갖지 않는다. 리스크본부는 거래 거부권을, AI QA/감사본부는 AI 산출물·전략 Release·통제 Evidence에 대한 독립 차단 및 감사 권한을 가진다.
 
 ```mermaid
 flowchart TB
-    CEO["CEO Agent<br/>Mandate · Priority · Escalation"]
+    CEO["CEO Hermes Supervisor<br/>Mandate · Priority · Escalation"]
 
-    CEO --> RES["1. 리서치본부<br/>정보 수집 · RAG · 시장 해석"]
-    CEO --> TRD["2. 트레이딩본부<br/>시그널 · 포지션 제안 · 집행"]
-    CEO --> RSK["3. 리스크본부<br/>실시간 심사 · 한도 · 거래 거부"]
-    CEO --> QNT["4. 퀀트/백테스트본부<br/>전략 검증 · 최적화 · 배포 후보"]
-    CEO --> ACC["5. 회계/포트폴리오본부<br/>성과 · 잔고 · 원장 · NAV"]
-    CEO --> QAA["6. AI QA/감사본부<br/>환각 검증 · 모니터링 · 감사"]
+    CEO --> HR["CEO 직속 Agent Workforce 인사팀장 Hermes<br/>채용 · Skill · 평가 · Lifecycle"]
+    CEO --> RES["1. 리서치본부장 Hermes<br/>정보 수집 · RAG · 시장 해석"]
+    CEO --> TRD["2. 트레이딩본부장 Hermes<br/>시그널 · 포지션 제안 · 집행"]
+    CEO --> RSK["3. 리스크본부장 Hermes<br/>실시간 심사 · 한도 · 거래 거부"]
+    CEO --> QNT["4. 퀀트/백테스트본부장 Hermes<br/>전략 검증 · 최적화 · 배포 후보"]
+    CEO --> ACC["5. 회계/포트폴리오본부장 Hermes<br/>성과 · 잔고 · 원장 · NAV"]
+    CEO --> QAA["6. AI QA/감사본부장 Hermes<br/>환각 검증 · 모니터링 · 감사"]
 
     RES -->|"Evidence & Thesis"| TRD
     QNT -->|"Approved Strategy Bundle"| TRD
@@ -591,11 +598,16 @@ priority =
 
 ## 8. 멀티 에이전트 조직
 
-아래 표는 확정된 `CEO 에이전트 + 6개 본부`를 실행 Agent 수준으로 분해한 것이다. 위원회는 별도 상설 본부가 아니라 여러 본부의 Agent가 동일한 Case와 Evidence를 검토하는 승인 Workflow다.
+아래 표는 확정된 `CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부`를 실행 Agent 수준으로 분해한 것이다. 인사팀은 투자 본부가 아닌 Shared Service이며, 위원회는 별도 상설 본부가 아니라 여러 본부의 Agent가 동일한 Case와 Evidence를 검토하는 승인 Workflow다.
 
 | 조직 | 에이전트 | 주요 책임 | 기본 실행 시점 |
 |---|---|---|---|
 | CEO Agent | Executive Orchestrator | Mandate 해석, 본부 라우팅, 예산, SLA와 Escalation | 항상 |
+| CEO 직속 Agent Workforce 인사팀 | Agent Workforce Supervisor | 본부별 채용 수요, Roster, Skill Gap, 수습과 비활성화 통합 | 주간/채용 사건 |
+| CEO 직속 Agent Workforce 인사팀 | Workforce Planning Agent | Queue, SLA, 품질, 비용과 Capacity로 채용 우선순위 산정 | 일일/주간 |
+| CEO 직속 Agent Workforce 인사팀 | Profile Architect | Mission, Skill, Tool, 금지 권한과 Eval이 있는 Job Profile 설계 | 채용 요청 |
+| CEO 직속 Agent Workforce 인사팀 | Selection/Performance Agent | Golden/Adversarial Eval, Shadow 수습, 교육과 성과 개선 | 채용/정기 |
+| CEO 직속 Agent Workforce 인사팀 | Lifecycle Coordinator | Identity, Queue, Memory, 권한 요청과 Joiner/Mover/Leaver 관리 | 입사/이동/퇴직 |
 | 1. 리서치본부 | Research Supervisor | 분석 과제 분해, Evidence 품질과 Research Packet 통합 | 이벤트/정기 |
 | 1. 리서치본부 | Universe Manager | 거래 가능 종목과 관심 종목 선정 | 장전/장중 |
 | 1. 리서치본부 | Market Data Steward | 시세 정규화, 중복·지연·결측과 Symbol Mapping 검사 | 실시간 |
@@ -1814,6 +1826,8 @@ OPEN
 | 5. 회계/포트폴리오본부 | Portfolio Control, Middle Office, Reconciliation, Fund Accounting, Treasury, Reporting | 공식 잔고·원장·NAV 산출 |
 | 6. AI QA/감사본부 | Hallucination QA, Evidence QA, Model Risk, SRE Monitoring, Internal Audit | AI 산출물·Release 차단, Finding 발행 |
 
+Agent Workforce 인사팀은 CEO 직속 Shared Service로서 위 6개 본부의 채용 수요, Job Profile, Skill/Eval, Roster와 Joiner/Mover/Leaver를 관리한다. 요청 본부장이 Hiring Requisition을 제출하고 인사팀이 Build-vs-Extend와 후보를 설계하며, AI QA/감사본부가 Model·Prompt·Tool 권한을 독립 검증하고 CEO가 예산·조직을 승인한다. 실제 Identity와 권한은 Platform/IAM Service만 생성한다.
+
 전략기획위원회와 투자위원회는 상설 제7·제8 본부가 아니다. 전략기획위원회는 리서치·퀀트/백테스트·리스크·AI QA/감사본부가 참여하는 Research-to-Production Gate이고, 투자위원회는 CEO·리서치·트레이딩·리스크·회계/포트폴리오본부가 중요 투자 Case를 검토하는 Cross-Department Workflow다.
 
 ### 19.5 CEO 에이전트 자동화
@@ -2070,7 +2084,7 @@ Data Price Anomaly
 ### 19.22 본부 자동화 MVP 완료 기준
 
 - 모든 본부 업무가 공통 Work Item 상태와 Audit 형식을 사용한다.
-- 6개 본부 Supervisor의 Tool 권한과 자율 등급이 분리되어 있다.
+- 6개 본부 Supervisor와 Agent Workforce 인사팀장의 Tool 권한, Memory와 자율 등급이 분리되어 있다.
 - 승인 없는 Agent Command가 결정론적 서비스에서 차단된다.
 - 6개 본부의 핵심 Case가 자동 생성되고 소유 본부가 지정된다.
 - 본부 간 Case Handoff에서 Evidence와 SLA가 유지된다.

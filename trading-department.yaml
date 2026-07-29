@@ -1,4 +1,5 @@
 # Trading Department Agent Configuration (2. 트레이딩본부)
+# 담당: 도현 (trading, accounting-portfolio)
 # 승인된 전략, Research Packet과 현재 포트폴리오 상태를 Signal 및 Portfolio Intent로 변환
 # 리스크본부의 Risk/Compliance Gate 승인 전에는 어떤 에이전트도 OMS로 주문을 전송할 수 없음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #2, 8
