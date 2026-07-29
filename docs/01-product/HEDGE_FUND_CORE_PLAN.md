@@ -1,6 +1,6 @@
 # Personal Hedge Fund Agent - Core Implementation Plan
 
-> 문서 상태: Lean Core Plan v1.2  
+> 문서 상태: Lean Core Plan v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 제품 안내: [README.md](../README.md)  
 > Domain 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](MINIMUM_SERVICE_UNIT_SPEC.md)  
@@ -58,6 +58,7 @@ Core는 다음 질문에 실제 동작으로 답할 수 있어야 한다.
 | 판단 주기 | Tick 수신, 1초 집계, 1분 전략 판단 |
 | Agent | Research Analyst, Bull/Bear Reviewer, Portfolio Agent |
 | RAG | 한 종류의 승인 문서 Source와 Point-in-Time 검색 |
+| 조직 학습 | 본부별 Hermes Memory 경계와 승인형 Improvement Candidate 1개 End-to-End |
 | 전략 | Strategy Universe에 등록된 모든 데이터 적격 전략, Core에서는 대표 전략군 Fixture로 계약 검증 |
 | Strategy Factory | 가설, Backtest, Registry, Shadow, Paper, Rollback |
 | Risk | Position, 주문금액, 일손실, Gross/Net·종목·섹터·Factor Exposure, Borrow/Leverage, Staleness |
@@ -78,6 +79,7 @@ Core는 다음 질문에 실제 동작으로 답할 수 있어야 한다.
 - 초단타/HFT와 Microsecond Latency
 - 복수 Market Data Vendor와 복수 Broker Failover
 - 모바일 앱과 외부 고객용 Portal
+- 검증·승인 없이 Agent가 자신의 Prompt, Skill, Tool 또는 권한을 바꾸는 기능
 
 제외 항목은 삭제한 요구사항이 아니라 Core 성공 후 검토할 확장 Backlog다.
 
@@ -91,6 +93,23 @@ Core는 전략 이름을 제한하지 않지만 모든 전략을 16주 안에 �
 - `Live Eligible`: 실제 Borrow, Margin, Broker, 법률과 운영 Gate까지 통과한 전략만 별도 승인한다.
 
 새 전략은 새 Agent 조직을 만드는 대신 `StrategyPlugin`과 `StrategyCapabilityProfile`을 추가하는 방식으로 채택한다.
+
+### 3.4 Core에서 증명할 최소 자기 개선
+
+Core는 거대한 자율 조직 전체를 한 번에 구현하지 않는다. 대신 Hermes를 쓰는 이유가 실제로 검증되도록 다음 한 개의 폐쇄 루프를 필수 범위로 둔다.
+
+```text
+Research 또는 QA 업무 완료
+  -> Hermes가 근거가 있는 ImprovementCandidate 생성
+  -> QA Golden/Adversarial Eval
+  -> 인사팀 Build-vs-Extend 검토
+  -> Shadow 실행
+  -> 승인된 Skill 또는 Profile Version 배포
+  -> 품질·비용·지연 관찰
+  -> 유지 또는 Rollback
+```
+
+첫 대상은 주문 판단보다 위험이 낮고 성공 기준이 명확한 `Research 문서 검증 Skill` 또는 `QA 인용 검사 Skill` 중 하나로 고정한다. 현재 Position, PnL, Risk Limit과 주문 상태는 Hermes Memory가 아니라 공식 Service에서 매번 조회한다. 전략 자동 생성과 조직 전체 자동 재편은 이 Loop가 재현 가능하게 동작한 뒤 확장한다.
 
 ## 4. 최소 사용자 경험
 
@@ -422,6 +441,8 @@ P0 Event Bus는 Redis Streams로 고정한다. Process 내부 Queue는 Unit Test
 - Point-in-Time Retrieval
 - Research/Bull-Bear/Portfolio Workflow
 - 구조화 Decision과 Audit
+- 본부별 Hermes Memory Namespace와 금지 데이터 정책
+- ImprovementCandidate → QA Eval → Shadow → 승인 Skill Version의 최소 자기 개선 Loop
 - 완료 기준: Event-to-Decision 재현과 Evidence 추적
 
 ### Phase 4. Risk, OMS와 Portfolio - 9~10주
@@ -466,6 +487,8 @@ P0 Event Bus는 Redis Streams로 고정한다. Process 내부 Queue는 Unit Test
 - [ ] OMS가 재시작 후 주문과 Position을 복구한다.
 - [ ] Feed/Position/Risk 이상 시 Entry가 자동 차단된다.
 - [ ] Kill Switch와 미체결 주문 취소가 검증된다.
+- [ ] Hermes Memory를 비워도 공식 Position·Cash·PnL·Risk 상태가 손실되지 않는다.
+- [ ] 개선 후보 한 건이 독립 Eval, Shadow, 승인, 배포와 Rollback까지 같은 ID로 추적된다.
 - [ ] 10거래일 연속 치명적 장애 없이 Paper Dry Run을 완료한다.
 - [ ] 일일 Report에서 전략별 PnL, Drawdown, Turnover와 오류를 확인할 수 있다.
 

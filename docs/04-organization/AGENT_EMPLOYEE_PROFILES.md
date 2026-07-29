@@ -1,12 +1,13 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> 문서 상태: Agent Organization v1.2  
+> 문서 상태: Agent Organization v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 대상 조직: CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부  
 > 목적: 어떤 디지털 직원을 채용하고, 어떤 Skill과 Tool 권한을 부여하며, 각 직원이 실제 업무를 어떻게 수행할지 정의  
 > 상위 구현 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 공통 Domain 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)  
 > 기술 스택 기준: [TECH_STACK_DECISIONS.md](../02-engineering/TECH_STACK_DECISIONS.md)  
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
 > 부서별 입력 데이터·Data Product·Library: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 실행 가이드: [재일](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](../05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](../05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](../05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
 
@@ -41,6 +42,21 @@
 ```
 
 **CEO, 6개 본부장과 Agent Workforce 인사팀장은 각각 독립된 Hermes Agent로 구현한다.** 인사팀은 제7의 투자 본부가 아니라 CEO 직속 Shared Service다. 각 Hermes Agent는 고유한 `agent_id`, Service Identity, Memory Namespace, Department Queue, Skill Manifest, Tool Allowlist와 Token Budget을 가진다. 같은 Bedrock Claude 또는 Ollama Endpoint를 공유할 수 있지만 다른 조직의 기억·권한·승인 상태를 공유해서는 안 된다.
+
+### Hermes Memory와 조직 학습 역할
+
+Hermes Supervisor는 Case를 처리한 뒤 다음 업무에 재사용할 가치가 있는 교훈을 Memory·Skill·Profile 개선 후보로 정리한다. Specialist가 실패를 경험했다고 해서 자기 Prompt나 Tool 권한을 즉시 바꾸지는 않는다.
+
+| 단계 | 책임자 | Output |
+|---|---|---|
+| 경험 관측 | 각 본부 Hermes | Case 결과, 오류, 비용, 반복 패턴과 `candidate_id` |
+| 절차 후보 | 본부 Owner | Memory·Skill·Runbook Candidate와 근거 Case |
+| Profile 후보 | Agent Workforce 인사팀 | Prompt, Skill Bundle, Model, Tool Allowlist의 새 Version |
+| 독립 검증 | AI QA/감사본부 | Golden/Adversarial Eval, 권한·회귀 Finding |
+| Shadow·승인 | 요청 본부 + CEO/Risk/QA 권한별 Gate | 승인 또는 거부된 불변 Version |
+| 운영 측정 | QA + 본부 Scorecard | Champion 대비 품질·통제·비용 변화와 Rollback 조건 |
+
+Hermes Memory는 공식 Position, PnL, 주문, Risk Limit과 Policy의 대체 저장소가 아니다. 이러한 값은 ID만 기억하고 담당 API에서 다시 조회한다. 다른 본부와 공유할 교훈은 Raw Memory 복사가 아니라 QA가 검증한 `ImprovementCandidate` 또는 Versioned Skill로 전달한다. 상세 재귀 루프와 적용 순서는 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.2 직원 Runtime 유형
 

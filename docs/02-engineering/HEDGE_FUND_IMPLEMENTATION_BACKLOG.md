@@ -1,11 +1,11 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.2  
+> 문서 상태: Implementation Backlog v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 확정 기술 스택: [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md)  
-> 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문과 성과 평가까지 필요한 기능만 구현한다.
+> 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문, 성과 평가와 최소 조직 학습 Loop까지 구현한다.
 
 ## 1. 우선순위
 
@@ -39,6 +39,7 @@ P0가 모두 동작하기 전 P2 기능을 구현하지 않는다.
 | F16 | Audit/Replay | 판단부터 체결까지 추적·재현 |
 | F17 | Operator Control | Entry Block, Pause와 Kill Switch |
 | F18 | Dashboard | 시장·전략·주문·위험 상태 조회 |
+| F19 | Governed Self-Improvement | Hermes의 개선 후보를 Eval·Shadow·승인 Version으로 배포 |
 
 ## 3. P0 기능 명세
 
@@ -412,22 +413,44 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 - Dashboard 장애가 Trading Process에 영향을 주지 않는다.
 - 위험한 Command는 확인과 사유를 요구한다.
 
+### F19. 승인형 Hermes 자기 개선
+
+**Core 대상**: `Research 문서 검증 Skill` 또는 `QA 인용 검사 Skill` 중 한 개
+
+**구현 기능**
+
+- 본부별 Hermes Memory Namespace와 저장 금지 항목 적용
+- Case, Incident, Eval 또는 사용자 교정에서 `ImprovementCandidate` 생성
+- Candidate에 근거 ID, 대상 Artifact·현재 Version, 예상 효과, 위험과 Rollback Target 기록
+- Golden·Adversarial·Regression Eval과 Champion/Challenger 비교
+- Read-only 또는 Mock Tool만 허용하는 Shadow 실행
+- 인사팀 Build-vs-Extend 검토와 QA·Owner 승인
+- 승인된 Skill/Profile Version 배포, Scorecard 관찰과 Rollback
+
+**완료 조건**
+
+- Candidate 작성자가 자신의 변경을 단독 승인할 수 없다.
+- Memory 삭제 후에도 Position, Cash, PnL, Risk Limit과 주문 상태가 공식 Service에서 복구된다.
+- 한 Candidate를 관찰부터 Eval, Shadow, 승인, 배포, 관찰과 Rollback까지 같은 ID로 재현한다.
+- 개선 Version이 정확도, 재현성, 비용, 지연, 권한과 Risk 불변식을 기존 Champion과 같은 Fixture에서 통과한다.
+- Session 중 Prompt, Skill, Model 또는 Tool 권한을 조용히 덮어쓰지 않는다.
+
 ## 4. P1 기능
 
 | ID | 기능 | 목적 |
 |---|---|---|
-| F19 | Shadow 비교 | 신규 전략을 주문 없이 평가 |
-| F20 | Drift Monitor | Feature·Signal·성과 변화 탐지 |
-| F21 | 자동 Strategy Pause | 손실·오류 초과 시 중단 |
-| F22 | Daily Report | 전략별 PnL, Drawdown, 비용과 오류 |
-| F23 | Notification | Feed, Risk, Order Incident 알림 |
-| F24 | Corporate Action | Split, Dividend와 Symbol 변경 |
-| F25 | Benchmark/Sector | 상대성과와 Exposure 개선 |
-| F26 | LLM Budget | 호출량, 비용과 Degradation 관리 |
-| F27 | Strategy Family Adapter | Event, Ranking, Pair, Basket, Futures와 Options 전략을 공통 계약에 연결 |
-| F28 | Borrow/Short Simulator | 공매도 가능 수량, 비용, Recall과 주문 규칙 Simulation |
-| F29 | Multi-leg Execution | Leg 관계, 부분 체결 복구와 Atomicity Policy |
-| F30 | Derivatives Capability | Contract, Margin, Greeks, Roll과 Exercise/Assignment |
+| F20 | Shadow 비교 | 신규 전략을 주문 없이 평가 |
+| F21 | Drift Monitor | Feature·Signal·성과 변화 탐지 |
+| F22 | 자동 Strategy Pause | 손실·오류 초과 시 중단 |
+| F23 | Daily Report | 전략별 PnL, Drawdown, 비용과 오류 |
+| F24 | Notification | Feed, Risk, Order Incident 알림 |
+| F25 | Corporate Action | Split, Dividend와 Symbol 변경 |
+| F26 | Benchmark/Sector | 상대성과와 Exposure 개선 |
+| F27 | LLM Budget | 호출량, 비용과 Degradation 관리 |
+| F28 | Strategy Family Adapter | Event, Ranking, Pair, Basket, Futures와 Options 전략을 공통 계약에 연결 |
+| F29 | Borrow/Short Simulator | 공매도 가능 수량, 비용, Recall과 주문 규칙 Simulation |
+| F30 | Multi-leg Execution | Leg 관계, 부분 체결 복구와 Atomicity Policy |
+| F31 | Derivatives Capability | Contract, Margin, Greeks, Roll과 Exercise/Assignment |
 
 ## 5. 최소 데이터 모델
 
@@ -438,6 +461,7 @@ RawMarketEvent / NormalizedMarketEvent
 FeatureSnapshot / AnalysisRequest
 Document / DocumentChunk
 AgentDecision
+ImprovementCandidate / EvalRun / AgentProfileVersion / SkillVersion
 Strategy / StrategyVersion / StrategyCapabilityProfile / BacktestRun
 Signal / TargetPortfolio / IntentGroup / OrderIntent / RiskDecision
 Order / Fill
@@ -474,6 +498,11 @@ POST /control/trading-state
 POST /control/kill-switch
 POST /replay
 GET  /audit/{trace_id}
+POST /improvements
+GET  /improvements/{id}
+POST /improvements/{id}/evaluate
+POST /improvements/{id}/promote
+POST /improvements/{id}/rollback
 ```
 
 API는 Domain Service를 호출하며 Database Table에 직접 쓰지 않는다.
@@ -498,6 +527,10 @@ execution.fill.v1
 portfolio.position_updated.v1
 portfolio.snapshot.v1
 risk.trading_state.v1
+workforce.improvement_candidate_created.v1
+audit.improvement_evaluated.v1
+workforce.artifact_version_activated.v1
+workforce.artifact_version_rolled_back.v1
 ```
 
 Event 이름은 `<domain>.<event>.v<major>` 규칙을 사용한다. 초기 Transport는 Redis Streams로 고정한다. Process Queue는 Unit Test와 단일 Process 개발 Profile에서만 사용하며 Event Contract는 Transport와 분리한다.
@@ -510,8 +543,8 @@ Event 이름은 `<domain>.<event>.v<major>` 규칙을 사용한다. 초기 Trans
 | 3 | F05, F06, Market View | 전 종목에서 분석 후보 생성 |
 | 4 | F07, F08, Decision View | Evidence가 연결된 Agent Decision |
 | 5 | F11~F17, Order/Portfolio View | Decision부터 Paper Fill과 PnL |
-| 6~7 | F09, F10, F19, Strategy View | 대표 전략군과 Capability를 Backtest에서 Shadow/Paper로 승격 |
-| 8 | F20~F23 일부, 장애·부하 Test | 10거래일 Paper Dry Run 시작 |
+| 6~7 | F09, F10, F20, Strategy View | 대표 전략군과 Capability를 Backtest에서 Shadow/Paper로 승격 |
+| 8 | F19, F21~F24 일부, 장애·부하 Test | 최소 자기 개선 Loop 재현과 10거래일 Paper Dry Run 시작 |
 
 ## 9. End-to-End Acceptance Scenario
 
@@ -526,10 +559,12 @@ Event 이름은 `<domain>.<event>.v<major>` 규칙을 사용한다. 초기 Trans
 9. Dashboard에서 전체 Trace를 조회한다.
 10. Feed를 중단하면 신규 진입이 자동 차단된다.
 11. Kill Switch가 신규 주문을 막고 미체결 주문을 취소한다.
+12. 반복된 인용 오류에서 개선 후보를 만들고 Eval·Shadow·승인 Version을 배포한다.
+13. 개선 Version에 Regression을 주입하면 이전 Champion으로 Rollback한다.
 
 ## 10. Definition of Done
 
-- [ ] F01~F18의 완료 조건을 통과했다.
+- [ ] F01~F19의 완료 조건을 통과했다.
 - [ ] 전 종목 Feed가 예상 Peak 2배에서 동작한다.
 - [ ] Agent 장애가 Streaming, Risk와 OMS를 중단하지 않는다.
 - [ ] 미래 데이터가 RAG와 Backtest에 유입되지 않는다.
@@ -540,6 +575,7 @@ Event 이름은 `<domain>.<event>.v<major>` 규칙을 사용한다. 초기 Trans
 - [ ] Capability 미충족 Strategy가 Paper 주문을 만들지 못한다.
 - [ ] 재시작 후 주문, Position과 Trading State를 복구한다.
 - [ ] Kill Switch와 Entry Block을 검증했다.
+- [ ] 개선 후보 한 건의 근거, Eval, 승인, 배포, Scorecard와 Rollback을 재현했다.
 - [ ] 10거래일 연속 Paper Dry Run을 완료했다.
 
 ## 11. 구현하지 않을 기능

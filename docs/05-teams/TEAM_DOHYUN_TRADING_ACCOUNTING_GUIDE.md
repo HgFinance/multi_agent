@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.2  
+> 문서 상태: Team Handoff v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부  
@@ -8,6 +8,7 @@
 > 시장 데이터 접근: 재일님 팀의 `market-api`와 Redis Snapshot을 통해 조회  
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
 
 ---
 
@@ -36,6 +37,29 @@
 - 주문 Risk 승인과 Limit 변경
 - Strategy Candidate 검증·승격 승인
 - QA Finding 종료와 감사 증빙 삭제
+
+### 저장소 소유권
+
+| 구분 | 현재 경로 | 목표 경로 |
+|---|---|---|
+| 트레이딩 Hermes | `orchestration/hermes/trading-department/` | `departments/02-trading/hermes/` |
+| 계약·OMS·Paper Broker | `trading/`, `execution/` | `departments/02-trading/` 하위 Domain |
+| 회계 Hermes | `orchestration/hermes/accounting-portfolio-department/` | `departments/05-accounting-portfolio/hermes/` |
+| Ledger·Reconciliation | `accounting/` | `departments/05-accounting-portfolio/` 하위 Domain |
+| D0-D2 SQL Prototype | `db/` | Supabase 통합 후 Archive 또는 제거 |
+| 운영 DB Migration | `supabase/migrations/` | 도구 표준 경로 유지, Schema별 Domain Owner 지정 |
+
+`db/`와 `supabase/migrations/`는 같은 Database에 함께 적용하지 않는다. 현재 Python Prototype을 Canonical Schema로 옮길 때 Schema Diff, RLS와 Runtime Test를 포함한 별도 PR이 필요하다.
+
+### Hermes 자기 개선 책임
+
+- 트레이딩 Hermes는 Reject, Partial Fill, Slippage, Cancel 지연과 Reconciliation Break를 개선 후보의 근거로 사용한다.
+- 회계 Hermes는 원장 불일치, Valuation 예외, 누락 Fee와 Report 재작성 원인을 개선 후보로 등록한다.
+- Memory에는 현재 주문·Position·Cash·PnL을 저장하지 않고 `order_id`, `fill_id`, `ledger_event_id`, `break_id`와 재확인 절차만 남긴다.
+- Hermes는 OMS 상태 머신, Risk Decision 또는 Ledger를 직접 바꾸지 않는다. 변경 후보는 회귀 Test, Shadow/Paper, QA 검증과 승인 후 새 Version으로 배포한다.
+- 효과는 중복 주문 0건, Break 해결 시간, TCA 품질, 회계 마감 시간과 Rollback 가능성으로 평가한다.
+
+조직 공통 상태 전이와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.1 Multi-Strategy 책임
 
