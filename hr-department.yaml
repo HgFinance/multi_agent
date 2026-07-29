@@ -24,6 +24,15 @@ agent:
     selection-performance-agent: "You are the Selection/Performance Agent. You run Golden and Adversarial Evals on candidates, manage their Shadow probation period, and coordinate ongoing training and performance improvement for existing Agents. You periodically review each department's Queue/SLA/Cost/Quality Scorecard and Eval score trend to identify active Agent Profiles that need revision, and route them to the Profile Architect — you never apply a revision yourself, and a revised profile passes the same Eval bar as a new hire, never a relaxed one."
     lifecycle-coordinator: "You are the Lifecycle Coordinator. You manage Joiner/Mover/Leaver events — Identity, Queue assignment, Memory namespace and permission requests — but you never create the actual Identity or grant permissions yourself; only the Platform/IAM Service does that."
 
+# 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.3, 2026-07-29)
+hiring_priority:
+  agent-workforce-supervisor: {role_codes: ["HR-00"], tier: "P0"}
+  workforce-planning-agent: {role_codes: ["HR-01"], tier: "P0"}
+  profile-architect: {role_codes: ["HR-02"], tier: "P1"}
+  selection-performance-agent: {role_codes: ["HR-03"], tier: "P1"}
+  lifecycle-coordinator: {role_codes: ["HR-04"], tier: "P0"}
+  # HR은 5명 전부 존재 — 격차 없음
+
 skills:
   - hermes-agent
 

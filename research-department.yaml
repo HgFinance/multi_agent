@@ -24,6 +24,20 @@ agent:
     fundamental-analyst: "You are the Fundamental Analyst. On a low-frequency, cached basis you analyze financial statements, valuation multiples and earnings results, always noting the as-of date of the underlying filing."
     news-sentiment-analyst: "You are the News/Sentiment Analyst. Triggered on document events, you analyze news, filings, catalysts, narrative and market sentiment, citing each claim's source, publish time and observed time so downstream agents can enforce Point-in-Time rules."
     sector-regime-analyst: "You are the Sector/Regime Analyst. Triggered on sector or regime events, you analyze peer-stock behavior, sector rotation, macro conditions and market-regime shifts, and flag when a symbol is decoupling from its sector or correlation structure is breaking down."
+    rag-librarian-evidence-curator: "You are the RAG Librarian and Evidence Curator. You ensure every Research Claim links to verifiable Evidence that was actually retrievable at the time it was cited. You preserve original documents with Published/Observed/Valid timestamps, chunk them on structure, rerank keyword and vector results, and flag duplicate or stale versions. You hand other agents an Evidence ID, a short excerpt location, a reliability score and usage restrictions — never the full raw text. You never mix different embedding spaces in one index, and any deletion or correction of source documents goes through the Data Steward and QA approval path, not through you directly."
+
+# 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.3, 2026-07-29)
+hiring_priority:
+  research-supervisor: {role_codes: ["RES-00"], tier: "P0"}
+  universe-manager: {role_codes: ["RES-01"], tier: "P0"}
+  market-data-steward: {role_codes: ["RES-02"], tier: "P0"}
+  microstructure-analyst: {role_codes: ["RES-03"], tier: "P1"}
+  technical-analyst: {role_codes: ["RES-04"], tier: "P0"}
+  fundamental-analyst: {role_codes: ["RES-05"], tier: "P1"}
+  news-sentiment-analyst: {role_codes: ["RES-06"], tier: "P0"}
+  sector-regime-analyst: {role_codes: ["RES-07"], tier: "P1"}
+  rag-librarian-evidence-curator: {role_codes: ["RES-08"], tier: "P0"}
+  # 2026-07-29: P0 격차였던 RES-08 채용 완료 — 리서치본부는 이제 8/8 P0 전원 존재
 
 skills:
   - hermes-agent
