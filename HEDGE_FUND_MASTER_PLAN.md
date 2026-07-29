@@ -448,6 +448,26 @@ Investor Capital
 
 에이전트의 서술은 공식 원장을 변경할 수 없으며, 검증된 Command와 승인 절차를 통해서만 상태 변경을 요청할 수 있다.
 
+### 5.10 본부 Hermes Profile 배포 (Distribution)
+
+CEO, 6개 본부장과 Agent Workforce 인사팀장은 각각 독립된 Hermes Profile로 구현된다(5.5, 5.9절). 담당자는 로컬에서 만든 Profile을 Hermes Profile Distribution 기능으로 packaging해 git repo로 팀과 공유한다 — Profile이 "공유 가능한 형태로 패키징된 것"이 Distribution이다.
+
+| Profile | 담당자 |
+|---|---|
+| `ceo-agent`, `hr-department` | 영주 |
+| `risk-management`, `qa-department` | 동규 |
+| `trading-department`, `accounting-portfolio-department` | 도현 |
+| `research-department`, `quant-backtest-department` | 재일 |
+
+| 구분 | 대상 | 성격 |
+|---|---|---|
+| 담당자(배포) 영역 — `hermes profile update`로 교체됨 | `distribution.yaml`, `SOUL.md`, `config.yaml`, `skills/`, `cron/`, `mcp.json` | Git repo로 버전 관리, 담당자가 Tag/Push |
+| 설치자(개인) 영역 — 업데이트해도 절대 보존 | `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*`, `logs/` | 설치자 로컬에만 존재, 배포 대상에서 하드 제외 |
+
+담당자가 새 Version을 Tag·Push하면 다른 팀원은 `hermes profile update <profile>`로 SOUL/Skill/Cron/MCP 설정만 최신화하고, 각자의 memories·sessions·API Key는 그대로 유지된다. 새 팀원 Onboarding이나 새 개발 머신 세팅도 `hermes profile install <repo> --alias` 한 줄로 끝나며, 이는 19.4절 인사팀 Joiner Workflow의 "Service Identity, Queue, Memory와 Tool Scope 요청" 단계에서 실제 Agent 실행 환경을 준비하는 구체적 수단이 된다. Distribution은 서명되지 않으므로 사내에서도 Private Repo와 팀 Git 인증을 사용하고, 설치 전 SOUL.md와 `skills/`를 리뷰한 뒤 실행한다.
+
+Distribution은 14절의 `agents/<본부>/`, `orchestration/hermes/<본부>/`가 담는 Agent/Persona 코드를 실제로 팀원 간 배포·버전관리하는 수단이며, `risk/`, `execution/`, `fund_operations/` 같은 결정론적 서비스 코드는 일반 애플리케이션 저장소(git repo 자체)로 배포한다 — 둘은 서로 다른 배포 경로를 갖는다.
+
 ## 6. 실시간 처리 파이프라인
 
 ### 6.1 데이터 수신
@@ -1010,14 +1030,25 @@ multi-agent-hedge-fund/
 │   ├── investor_portal/
 │   └── paper_trader/
 ├── agents/
-│   ├── analysts/
-│   ├── committee/
-│   ├── strategy_committee/
-│   ├── portfolio/
-│   ├── auditor/
+│   ├── ceo/
+│   ├── hr/
+│   ├── research/
+│   ├── trading/
+│   ├── risk/
+│   ├── quant_backtest/
+│   ├── accounting_portfolio/
+│   ├── qa/
 │   └── schemas/
 ├── orchestration/
 │   ├── hermes/
+│   │   ├── ceo/
+│   │   ├── hr/
+│   │   ├── research/
+│   │   ├── trading/
+│   │   ├── risk/
+│   │   ├── quant_backtest/
+│   │   ├── accounting_portfolio/
+│   │   └── qa/
 │   ├── routing/
 │   └── workflows/
 ├── market_data/
@@ -1135,6 +1166,8 @@ multi-agent-hedge-fund/
 ├── docs/
 └── docker-compose.yml
 ```
+
+`agents/`와 `orchestration/hermes/`만 부서 기준(CEO, 인사팀, 리서치·트레이딩·리스크·퀀트/백테스트·회계·포트폴리오·AI QA/감사)으로 조직하고, 나머지는 기능/레이어 기준을 유지한다. `market_data/`, `risk/`, `execution/`, `fund_operations/`, `strategy_factory/`, `department_automation/` 등은 여러 본부가 공유하거나(5.9절) 결정론적 서비스로 에이전트 런타임과 분리되어야 하는 영역이라 특정 부서 폴더에 종속시키지 않는다. 위원회(Investment Committee, Strategy Planning Committee)는 8절에서 정의한 대로 상설 본부가 아닌 Cross-Department Workflow이므로 `agents/committee/`가 아니라 `orchestration/workflows/`에 위치한다. `agents/schemas/`는 10절의 구조화된 의사결정 계약처럼 전 부서가 공유하는 스키마이므로 부서 폴더 밖에 유지한다.
 
 ## 15. 운영 및 관측성
 
