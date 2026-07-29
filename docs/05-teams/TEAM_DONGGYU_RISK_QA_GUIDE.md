@@ -1,11 +1,13 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.0  
+> 문서 상태: Team Handoff v1.2  
+> 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
 > 핵심 결정: 공식 Risk Decision과 Audit Finding은 Supabase PostgreSQL에 Append하고 시계열 DB를 직접 사용하지 않음  
-> 시장 데이터 접근: 재일님 팀의 `market-api`와 Feature API 사용  
-> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](AGENT_EMPLOYEE_PROFILES.md)
+> 시장 데이터 접근: 재일님 팀의 `market-api` Snapshot·Bar·Feature Endpoint 사용  
+> 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
+> 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 
 ---
 
@@ -47,6 +49,21 @@
 | QA Service | Artifact·Trace·권한·Release 검증 | 주문 승인, Limit·Ledger 수정 |
 | QA Hermes | Finding 작성, Block·Rollback 권고 | 운영 Command 실행, 자기 Finding 단독 종료 |
 
+### 1.2 Multi-Strategy 책임
+
+전략 종류가 늘어날수록 하나의 공통 Position Limit만으로는 부족하다. 동규님 팀은 Strategy Capability Profile에 따라 필요한 Risk Module과 QA Fixture를 선택한다.
+
+| 전략군 | 추가 Risk 검사 |
+|---|---|
+| Equity Long/Short | Gross/Net, Factor, Sector, Borrow, Recall과 Short Squeeze |
+| Market Neutral·Pairs | 관계 붕괴, Beta Drift, Crowding, Leg Liquidity와 Basket Concentration |
+| Event Driven | Deal Break, Gap/Halt, 일정 변경, 공시 신뢰도와 Position Exit 가능성 |
+| Futures·Macro | Leverage, Basis, Roll, Initial/Variation Margin과 Limit Move |
+| Options·Volatility | Greeks, Surface Staleness, Vol Shock, Pin·Exercise·Assignment와 Leg Risk |
+| Multi-Strategy | 전략 상관 붕괴, 중복 Exposure, 공통 Factor, Liquidity와 Risk Budget 합산 |
+
+QA는 Strategy Family마다 Golden Dataset, Backtest 재현 Fixture, 금지된 미래 데이터, 비용 누락과 Capability 우회 Test를 유지한다. 지원하지 않는 Risk Module이 하나라도 필요한 전략은 Fail Closed한다.
+
 ---
 
 ## 2. 전체 처리 흐름
@@ -62,7 +79,7 @@ flowchart LR
 
     MKT --> LIVE["Intraday Risk Monitor"]
     PORT --> LIVE
-    LIVE --> STATE["Normal · Reduce Only · Entry Blocked · Killed"]
+    LIVE --> STATE["NORMAL · ENTRY_BLOCKED · REDUCE_ONLY · HALTED"]
 
     ART["Research · Trading · Strategy · Accounting Artifact"] --> QA["QA/Eval Pipeline"]
     TRACE["Agent · Model · Tool · IAM · Deployment Trace"] --> QA
@@ -83,7 +100,7 @@ Pre-trade Hot Path는 LLM 호출 없이 끝나야 한다. Agent는 계산 결과
 | 참조 | Order Intent, Pending Order | `oms-api` | 주문마다 | Request ID만 연결 | Pre-trade 심사 |
 | 참조 | Official Position, Cash, PnL, NAV | `portfolio-api` | Event/장중 | Risk Snapshot 입력 | Exposure·Drawdown |
 | 참조 | Market Snapshot, Spread, Depth, DQ | `market-api` | 주문·Risk Tick | Snapshot Reference | Mark·Liquidity·Stale 검사 |
-| 참조 | Historical Return/Volatility/Correlation | Feature API | 일일·필요 시 | Feature Version | VaR·Stress·집중도 |
+| 참조 | Historical Return/Volatility/Correlation | `market-api` Feature Endpoint | 일일·필요 시 | Feature Version | VaR·Stress·집중도 |
 | 참조 | Instrument, Issuer, Sector, Corporate Action | `reference-api` | 변경 Event | Reference Version | Look-through·거래 제한 |
 | 참조 | Strategy Mandate와 Risk Assumption | Strategy Registry | Version 변경 | Strategy Version | 승인 범위 검사 |
 | 수집 | Restricted List와 Compliance Policy | 승인된 내부 정책·공식 Source | 변경 시 | `risk.policies`, `restricted_items` | 거래 가능성 검사 |
@@ -194,13 +211,11 @@ REDUCE_ONLY
 
 ```text
 risk_request_id uuid primary key
-order_intent_id uuid unique
+intent_group_id uuid unique
 fund_id uuid
 book_id uuid
 strategy_id uuid
-instrument_id uuid
-requested_quantity numeric
-requested_price numeric
+strategy_capability_profile_id uuid
 market_snapshot_id text
 portfolio_snapshot_id uuid
 policy_version text
@@ -209,14 +224,18 @@ expires_at timestamptz
 trace_id text
 ```
 
+`risk_request_items`는 `risk_request_id`, `order_intent_id`, `instrument_id`, `side`, `position_effect`, `requested_quantity`, `requested_price`와 `leg_index`를 저장한다. Risk Engine은 Leg별 결과와 합산 Portfolio 영향을 모두 계산한다.
+
 `risk_decisions`:
 
 ```text
 risk_decision_id uuid primary key
 risk_request_id uuid
 decision text
-approved_quantity numeric
+approved_quantity numeric null
 max_price numeric null
+approved_legs jsonb
+aggregate_exposure jsonb
 valid_until timestamptz
 reason_codes text[]
 check_results jsonb
@@ -228,6 +247,8 @@ unique(risk_request_id, calculation_version)
 ```
 
 Decision Explanation을 별도 JSON/Text로 저장할 수 있지만, 실제 승인 효력은 구조화된 Field와 Reason Code에만 있다.
+
+`approved_quantity`와 `max_price`는 단일 Leg 호환 필드다. Pair·Basket·Multi-leg에서는 `approved_legs`가 공식 승인 수량이며 모든 Leg와 합산 Exposure가 함께 유효해야 한다.
 
 ### 5.3 Exposure, Stress와 Breach
 
@@ -351,8 +372,7 @@ LLM-as-a-Judge는 보조 신호다. Schema, Exact Match, Citation Location, 수�
 
 | API | 주요 Method | 소비자 |
 |---|---|---|
-| `risk-api` | `check_order`, `get_decision`, `get_limits`, `get_snapshot`, `get_trading_state` | OMS, Trading, CEO, Accounting |
-| `policy-api` | `get_effective_policy`, `propose_change`, `get_restricted_state` | Risk/CEO/QA |
+| `risk-api` | `check_order`, `get_decision`, `get_limits`, `get_snapshot`, `get_trading_state`, `get_effective_policy`, `propose_policy_change`, `get_restricted_state` | OMS, Trading, CEO, Accounting, QA |
 | `audit-api` | `submit_artifact`, `get_qa_decision`, `list_findings`, `get_incident` | 전 본부·CEO·인사 |
 | `eval-api` | `start_eval`, `get_result`, `compare_champion` | Quant, HR, QA |
 
@@ -528,7 +548,7 @@ QA/Audit:
 - [ ] Decision을 입력·Policy·Calculation Version으로 재현할 수 있다.
 - [ ] Agent가 Limit을 확대하거나 Hard Limit을 Override할 수 없다.
 - [ ] 최신 Risk 상태는 Redis, 공식 Decision/Breach는 Supabase에 남는다.
-- [ ] Risk/QA는 TimescaleDB를 직접 조회하지 않고 Market/Feature API를 사용한다.
+- [ ] Risk/QA는 TimescaleDB를 직접 조회하지 않고 `market-api`의 Snapshot·Bar·Feature Endpoint를 사용한다.
 - [ ] 중요 Claim마다 Evidence와 PIT 검사가 수행된다.
 - [ ] Model/Prompt/Strategy Release가 Versioned Eval을 통과한다.
 - [ ] 원 작성 본부가 QA Finding을 수정·종료할 수 없다.
