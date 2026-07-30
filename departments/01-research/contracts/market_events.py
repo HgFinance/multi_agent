@@ -103,6 +103,10 @@ class QualityFlag(StrEnum):
     CROSSED_QUOTE = "CROSSED_QUOTE"
     STALE = "STALE"
     CORRECTED = "CORRECTED"
+    # Calendar 가 비거래일로 판정한 날에 Event 가 들어왔다. 버리지 않는 이유 -
+    # Calendar 가 관측 역산이라 틀릴 수 있고(임시 개장), 실제 Event 가 더 강한 증거다.
+    # 소비 쪽에서 Flag 를 보고 제외 여부를 정한다.
+    NON_TRADING_DAY = "NON_TRADING_DAY"
 
 
 class QuarantineReason(StrEnum):

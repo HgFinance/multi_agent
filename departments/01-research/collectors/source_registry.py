@@ -105,12 +105,25 @@ class SourceDomain(StrEnum):
 class SourceStatus(StrEnum):
     """Source 사용 가능 여부. 판정은 오직 Registry 가 한다.
 
-    KEY_MISSING 과 NOT_CONTRACTED 를 구분하는 이유 - 전자는 발급만 받으면 되고
-    후자는 계약·라이선스 검토가 선행이다. 둘을 뭉치면 우선순위를 못 정한다.
+    네 가지를 구분하는 이유 - 조치 주체와 방법이 다 다르다.
+      KEY_MISSING     발급만 받으면 된다
+      NOT_AUTHORIZED  키는 유효한데 해당 서비스 이용 승인이 없다
+      NOT_CONTRACTED  계약·라이선스 검토가 선행이다
+      DISABLED        우리가 의도적으로 껐다
+    뭉치면 우선순위를 못 정한다.
+
+    NOT_AUTHORIZED 를 따로 둔 계기 - KRX Open API 는 인증키 발급과 **서비스별 활용
+    신청 승인**이 별개다. 키가 .env 에 있어도 승인 전에는 401 이 온다. 실측(2026-07-30)
+    에서 헤더 AUTH_KEY 로 호출하면 "Unauthorized API Call"(키는 인식됨, 호출 권한 없음),
+    잘못된 헤더면 "Unauthorized Key"(키 자체를 못 찾음)로 응답이 갈렸다.
+
+    Registry 는 키 **존재**만 판정할 수 있다. 실제 호출 권한은 호출해 봐야 알기 때문에
+    관측 결과를 NOT_AUTHORIZED_OBSERVED 에 근거와 함께 기록한다.
     """
 
     AVAILABLE = "AVAILABLE"
     KEY_MISSING = "KEY_MISSING"
+    NOT_AUTHORIZED = "NOT_AUTHORIZED"
     NOT_CONTRACTED = "NOT_CONTRACTED"
     DISABLED = "DISABLED"
 
@@ -218,7 +231,13 @@ SOURCES: tuple[SourceSpec, ...] = (
         raw_bucket="research-documents-private",
         normalized_target="research.documents / research.financial_facts",
         doc_ref="docs/06-integrations/opendart/, TEAM_JAEIL 3.1",
-        note="요청 파라미터명은 crtfc_key. rcept_no Unique 와 정정 관계 누락 0 이 DQ 기준(가이드 8.2)",
+        note=(
+            "요청 파라미터명은 crtfc_key. rcept_no Unique 와 정정 관계 누락 0 이 DQ 기준"
+            "(가이드 8.2). ▶ PIT 한계: list.json 의 rcept_dt 는 날짜뿐이고 접수 시각이 "
+            "없다(실측 2026-07-30). published_at 정밀도가 DAY 이므로 Backtest·Agent 는 "
+            "observed_at 을 기준으로 판단해야 한다(가이드 4.2). 정확한 시각이 필요하면 "
+            "공시원문 API 2019003 이나 별도 Source 가 필요하다"
+        ),
     ),
     SourceSpec(
         source_id="krx_openapi",
@@ -347,6 +366,23 @@ SOURCES: tuple[SourceSpec, ...] = (
 )
 
 
+# 키는 있지만 실제 호출이 거부된 Source. 관측 사실이라 근거와 날짜를 함께 남긴다.
+# 승인이 떨어지면 여기서 항목을 지우는 것으로 해제된다 - 코드 수정이 아니라 사실 갱신이다.
+NOT_AUTHORIZED_OBSERVED: dict[str, str] = {
+    "kosis": (
+        "2026-07-30 실측: statisticsList.do 호출 시 {'err': '11', 'errMsg': "
+        "'유효하지않은 인증KEY입니다.'}. 키가 .env 에 있으나 KOSIS 가 거부한다 - "
+        "발급처(kosis.kr/openapi)에서 키 유효성과 활용 신청 상태를 확인할 것"
+    ),
+    "krx_openapi": (
+        "2026-07-30 실측: 헤더 AUTH_KEY 로 https://data-dbg.krx.co.kr/svc/apis/sto/"
+        "stk_bydd_trd 호출 시 401 'Unauthorized API Call'. 키는 인식되나(잘못된 헤더는 "
+        "'Unauthorized Key' 로 다르게 응답) 서비스 이용 승인이 없다. "
+        "openapi.krx.co.kr 에서 사용할 서비스별로 'API 활용 신청' 후 관리자 승인 필요"
+    ),
+}
+
+
 class SourceRegistry:
     """Source 상태 판정과 조회. 수집기는 반드시 이 클래스를 통해 Source 를 얻는다."""
 
@@ -385,8 +421,12 @@ class SourceRegistry:
             return SourceStatus.DISABLED
         if not s.contracted:
             return SourceStatus.NOT_CONTRACTED
-        missing = self.missing_env(source_id)
-        return SourceStatus.KEY_MISSING if missing else SourceStatus.AVAILABLE
+        if self.missing_env(source_id):
+            return SourceStatus.KEY_MISSING
+        # 키는 있다. 실제 호출이 거부된 관측이 있으면 그것이 사실이다.
+        if source_id in NOT_AUTHORIZED_OBSERVED:
+            return SourceStatus.NOT_AUTHORIZED
+        return SourceStatus.AVAILABLE
 
     def missing_env(self, source_id: str) -> tuple[str, ...]:
         """빈 문자열도 미확보로 본다. .env 에 이름만 있고 값이 없는 상태가 대부분이다."""
@@ -409,6 +449,8 @@ class SourceRegistry:
         s = self.spec(source_id)
         if st is SourceStatus.KEY_MISSING:
             detail = f"환경변수 미확보: {', '.join(self.missing_env(source_id))}"
+        elif st is SourceStatus.NOT_AUTHORIZED:
+            detail = f"키는 있으나 호출 권한 없음 - {NOT_AUTHORIZED_OBSERVED[source_id]}"
         elif st is SourceStatus.NOT_CONTRACTED:
             detail = f"계약·라이선스 미확보 ({s.note or '도입 조건 확인 필요'})"
         else:
@@ -458,6 +500,8 @@ class SourceRegistry:
                 extra = ""
                 if st is SourceStatus.KEY_MISSING:
                     extra = f" <- {', '.join(self.missing_env(s.source_id))}"
+                elif st is SourceStatus.NOT_AUTHORIZED:
+                    extra = " <- 키 있음, 서비스 이용 승인 필요"
                 lines.append(f"    {s.tier.value} {s.source_id:18} {s.display_name}{extra}")
         blocked = self.blocked_p0_domains()
         lines.append(
@@ -554,6 +598,21 @@ def _check_status():
         raise AssertionError("미등록 source_id 가 통과했다")
     except KeyError:
         pass
+    # 키가 있어도 호출 권한 관측이 있으면 NOT_AUTHORIZED 다
+    r2 = SourceRegistry(env={**_FAKE_ENV, "KRX_API_KEY": "k" * 40})
+    assert r2.status("krx_openapi") is SourceStatus.NOT_AUTHORIZED, "키만 보고 AVAILABLE 로 판정했다"
+    try:
+        r2.require("krx_openapi")
+        raise AssertionError("NOT_AUTHORIZED 가 통과했다")
+    except SourceUnavailable as e:
+        assert "호출 권한 없음" in str(e) and "활용 신청" in str(e)
+
+    # 승인이 떨어지면 관측 기록을 지우는 것으로 해제된다
+    saved = NOT_AUTHORIZED_OBSERVED.pop("krx_openapi")
+    try:
+        assert r2.status("krx_openapi") is SourceStatus.AVAILABLE
+    finally:
+        NOT_AUTHORIZED_OBSERVED["krx_openapi"] = saved
     print("  상태 판정             OK")
 
 
@@ -612,9 +671,19 @@ def _check_blocked_domains():
     # INSTRUMENT_MASTER 는 LS + KRX 인데 LS 가 살아 있으므로 Blocked 가 아니다
     assert SourceDomain.INSTRUMENT_MASTER not in blocked
 
-    # 키를 채우면 Blocked 가 풀려야 한다 - 확장 시 회귀 방지
+    # KRX 키를 채워도 서비스 이용 승인이 없으면 CALENDAR 는 여전히 Blocked 다.
+    # 키 존재만으로 풀리면 안 된다 - 승인 전에 호출하면 401 이고, 그걸 빈 결과로
+    # 취급하면 휴장일을 추정하게 된다.
     r2 = SourceRegistry(env={**_FAKE_ENV, "KRX_API_KEY": "krx-key"})
-    assert SourceDomain.CALENDAR not in r2.blocked_p0_domains()
+    assert r2.status("krx_openapi") is SourceStatus.NOT_AUTHORIZED
+    assert SourceDomain.CALENDAR in r2.blocked_p0_domains(), "승인 없이 CALENDAR 가 풀렸다"
+
+    # 승인이 떨어지면(관측 기록 제거) 풀린다 - 확장 시 회귀 방지
+    saved = NOT_AUTHORIZED_OBSERVED.pop("krx_openapi")
+    try:
+        assert SourceDomain.CALENDAR not in r2.blocked_p0_domains()
+    finally:
+        NOT_AUTHORIZED_OBSERVED["krx_openapi"] = saved
     print("  Blocked Domain        OK")
 
 

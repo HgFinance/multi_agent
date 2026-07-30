@@ -31,7 +31,7 @@
 - 현재 기준 시계열 DB의 우선안은 수집기와 동일한 **별도 TimescaleDB**다. Supabase PostgreSQL 17의 TimescaleDB Extension에 종속하지 않고 `MarketDataRepository` Interface를 유지한다.
 - 모든 Tick을 RAG나 Supabase에 넣지 않는다. Agent는 Raw Tick이 아니라 Feature/Snapshot API를 조회한다.
 - 공시·재무·기업 기본정보는 [OpenDART](../06-integrations/opendart/README.md)를 P0 Source로 사용한다.
-- 거래소 통계·지수·증권상품·파생상품 Reference는 [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)를 우선 검토한다.
+- 거래소 통계·지수·증권상품·파생상품 Reference는 [KRX Data Marketplace Open API 전체 참조](../06-integrations/krx-openapi/README.md)를 기준으로 검토한다. 공개 약관의 비상업 목적과 제3자 제공 제한 때문에 별도 상업 이용 계약이 확인되기 전에는 연구·내부 검증 Source로만 취급한다.
 - 한국 거시지표는 [한국은행 ECOS](https://ecos.bok.or.kr/api/)와 [KOSIS Open API](https://kosis.kr/openapi/index/index.jsp)를 사용한다.
 - 뉴스는 기사 검색 결과만 저장하는 것으로 끝내지 않는다. Story 중복 제거, 원출처, 게시·최초 관측 시각과 본문 저장 권한을 함께 관리한다.
 - 무료 뉴스 API와 Website Scraping은 서비스 단계에서 그대로 사용할 수 있다고 가정하지 않는다. 본문 저장, RAG, 재배포와 모델 입력 권한을 계약별로 확인한다.
@@ -319,9 +319,11 @@ FnGuide DataGuide는 재무·주가·컨센서스 등 전문 데이터를 제공
 
 ### 5.3 KRX Open API와 KIND
 
-**결정:** 거래소 Reference, 일별 통계, 시장조치와 DART에 없는 거래소 고유 공시의 보완 Source.
+**결정:** KRX Open API는 거래소 Reference와 일별 통계 Source로 사용하고, KIND는 시장조치와 DART에 없는 거래소 고유 공시의 보완 Source로 검토한다. KRX Open API의 Production 사용은 별도 이용권 확인 전 보류한다.
 
-[KRX Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)는 지수, 주식, 증권상품, 채권, 파생상품, 일반상품과 ESG 범주를 제공한다. 필요한 Dataset이 API 목록에 실제 존재하는지 먼저 확인하고, 미제공 데이터는 Website 내부 호출을 역공학하지 않는다.
+[KRX Open API 전체 개발 참조](../06-integrations/krx-openapi/README.md)는 공식 화면에서 확인한 지수 5개, 주식 8개, 증권상품 3개, 채권 3개, 파생상품 6개, 일반상품 3개와 ESG 3개 등 총 31개 API의 요청·응답 계약을 정리한다. 이 데이터는 LS증권 WebSocket을 대체하는 실시간 Feed가 아니라 종목기본정보, 거래소 일별 통계, EOD 대사와 Quant Dataset을 보강한다. 미제공 데이터는 Website 내부 호출을 역공학하지 않는다.
+
+공개 약관상 비상업적 이용, KRX 정보의 제3자 제공 금지, 화면 출처 표시와 키당 일 10,000회 제한이 적용된다. 따라서 상업 서비스, 사용자 결과 노출, 모델 학습·임베딩과 파생 데이터 제공 범위는 KRX와 별도 확인하고, 계약 승인 전에는 Production Source로 승격하지 않는다.
 
 [KIND](https://kind.krx.co.kr/common/JLDDST35000.html)는 거래소 고유 수시·공정·자율 공시, 투자유의사항, IR 자료와 상장법인 정보를 제공한다. 안정적인 공식 API나 계약 Feed가 없는 항목은 Production 자동 Scraping 대상으로 확정하지 않고 Source Owner와 수집 허용 방식을 확인한다.
 
@@ -1208,6 +1210,7 @@ Collector가 이미 사용 중인 실제 Package와 Version은 Repository Lockfi
 - [OpenDART 전체 개발 참조](../06-integrations/opendart/README.md)
 - [Open DART 공식 개발가이드](https://opendart.fss.or.kr/guide/main.do)
 - [Open DART 정기보고서 재무정보](https://opendart.fss.or.kr/guide/main.do?apiGrpCd=DS003)
+- [KRX Open API 전체 개발 참조](../06-integrations/krx-openapi/README.md)
 - [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)
 - [KRX KIND](https://kind.krx.co.kr/)
 - [한국은행 ECOS Open API](https://ecos.bok.or.kr/api/)

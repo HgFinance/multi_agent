@@ -48,6 +48,8 @@
 | 수집 Source Registry | `departments/01-research/collectors/source_registry.py` | — (신규, Sprint J1) |
 | 실시간 구독 계획 | `departments/01-research/collectors/subscription_plan.py` | — (신규, Sprint J1) |
 | 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
+| LS REST Client | `departments/01-research/collectors/ls_client.py` | — (신규, Sprint J1) |
+| Reference Repository | `departments/01-research/repository/reference_repository.py` | — (신규, Sprint J1) |
 | 로컬 시계열 DB 구성 | `docker-compose.yml`, `timescaledb/local-dev/` | — (신규, 로컬 개발 전용) |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
@@ -250,6 +252,24 @@ Timescale Raw를 삭제하기 전에 `exported`, `verified`, `manifest_signed`�
 ## 5. Supabase Schema와 Table
 
 ### 5.1 `reference` Schema
+
+> 관례 (2026-07-30 확정). 마이그레이션에 CHECK가 없는 자유 텍스트 Column이라 여기서
+> 고정한다. `reference_repository.py`가 이 값을 쓴다.
+>
+> | Column | 값 | 근거 |
+> |---|---|---|
+> | `market` | `KRX` | TimescaleDB `market.market_ticks.market`과 같은 축이라 Application 계층 Join이 성립한다. `market_calendar_versions.market`도 KRX 단위다 |
+> | `venue` | `KOSPI` / `KOSDAQ` | 세부 시장(Board). LS 실시간 TR 선택 축이다 |
+> | `asset_class` | `EQUITY` | |
+> | `instrument_type` | `STOCK` / `ETF` / `ETN` | `t8436.etfgubun` 1:ETF 2:ETN |
+> | `currency` | `KRW` | |
+>
+> `tick_size`는 채우지 않는다 — KRX 호가단위는 가격대별로 달라 단일값이 아니고 `t8436`에도
+> 없다. 추정값을 넣으면 주문 검증이 조용히 틀어진다.
+>
+> `instruments.isin`이 `unique nulls not distinct`다. **NULL도 전체에서 하나만 허용**되므로
+> ISIN(`t8436.expcode`)이 없는 종목은 적재하지 않고 개수를 세어 돌려준다.
+
 
 | Table | 핵심 Column | 쓰기 주체 | 비고 |
 |---|---|---|---|
@@ -467,15 +487,48 @@ Quant:
     payload identity로 결정론적 해시를 만들고, 적재는 마이그레이션의
     `primary key (event_time, source_event_id)`에 `on conflict do nothing`으로 붙는다.
     재적재 건수를 `WriteResult.duplicates`로 세어 돌려주므로 중복과 Gap을 구분할 수 있다.
-  - **부분** Instrument Mapping — 구독 계획이 요구하는 (시장, 자산군) 분류 축과 Universe
-    정의 계층은 만들었다(`subscription_plan.py`의 `Venue`/`AssetClass`/`ProductGroup`/
-    `UniverseSpec`). `reference.instrument_symbols` 조회 구현과 LS 마스터 수집은 미착수다.
+  - **완료** Instrument Mapping — LS `t8436`으로 전 종목 마스터를 받아 Supabase
+    `reference.instruments` + `instrument_symbols`에 적재했다. 실측 **4,293종목**
+    (KOSPI 주식 945 / ETF 1,155 / ETN 372, KOSDAQ 주식 1,821), 분류 실패 0.
+    `instrument_id`는 DB가 발급하고(`gen_random_uuid()`) LS 종목코드는
+    `instrument_symbols`의 Alias로 내려간다 — 종목코드를 영구 PK로 쓰지 않는다(가이드 8.1).
+    재적재는 멱등이다(2회차 0 신규 / 4,293 갱신, `instrument_id` 불변).
   - **부분** DQ Metric — `find_sequence_gaps()`와 `Snapshot.freshness`/`quality_flags`가 있다.
     Shard Heartbeat, Event Rate, Timescale↔Parquet Row Count 비교는 미착수다.
 - **완료** Tick/Quote Hypertable과 1분 Bar. 위 J0 항목의 마이그레이션 적용에 포함된다.
 - **미착수** Redis 최신 Snapshot과 `market-api`.
   `Snapshot` 계약과 Repository 조회(`get_snapshot`)까지는 있고 Redis·HTTP 계층이 없다.
 - **미착수** Parquet Archive + Manifest.
+
+**거래 Calendar (P0)** — `departments/01-research/collectors/calendar_collector.py`.
+**거래 Calendar를 직접 주는 공식 API가 없다.** KRX Open API 31개 서비스(지수·주식·증권상품·
+채권·파생·일반상품·ESG)는 전부 일별 시세와 기본정보이고 Calendar/휴장일 서비스가 목록에
+없다. LS의 `nday`(조회영업일수)는 요청 파라미터일 뿐 Source가 아니다.
+
+그래서 **LS `t8410`(API전용주식차트) 일봉이 존재하는 날 = 거래일**로 역산한다. "거래가
+있었다"는 관측이 휴장일 목록보다 강한 증거이므로 과거 Calendar로는 신뢰할 수 있다.
+장 개장·폐장 시각은 `t8410OutBlock.s_time`/`e_time`(090000/153000)에서 온다.
+
+단일 종목의 거래정지일을 비거래일로 오판하지 않으려고 **유동성 상위 3종목(005930,
+000660, 005380)의 합집합**을 쓰고, 일부 종목만 바가 없는 날은 `metadata.absent_symbols`에
+남긴다. 비거래일도 `is_trading_day=false`로 적재한다 — "행이 없음"(미수집)과 "비거래일"을
+구분해야 한다.
+
+**실측 결과 (2026-01-01~07-30 적재 완료)**: 전체 211일 중 거래일 141일, 평일 비거래일
+10일. 9개는 알려진 공휴일과 일치했다(신정, 설날 3일, 삼일절 대체, 근로자의날, 어린이날,
+부처님오신날 대체, 지방선거). **`2026-07-17`은 제헌절이며 공휴일이 아닌데 비거래일로
+관측됐다 — 임시휴장인지 데이터 공백인지 현재 Source로 판별할 수 없다.** 교차 검증
+Source가 필요한 지점이다.
+
+**이 방법의 한계 (숨기지 않고 기록한다)**
+1. **미래 거래일을 알 수 없다.** 관측은 과거만 준다. 만기·정산일 계산이 필요해지면 별도
+   Source가 필요하고 그때까지 fail-closed로 막는다. 관측 없는 구간을 요청하면 "거래일 0일"
+   이라는 명백히 이상한 결과가 나오도록 계약에 고정했다 — 평일을 추정해 채우지 않는다.
+2. 단축 거래일은 반영되지 않는다. `s_time`/`e_time`이 조회 시점 값이라 과거 특정일의
+   단축 거래를 알 수 없다.
+3. 교차 검증 후보로 **공공데이터포털 한국천문연구원 특일 정보**(천문법 근거 공휴일, 무료)와
+   **금융위원회 주식시세정보**(KRX 시세 무료 개방, 다음 영업일 13시 이후 갱신)가 있다.
+   둘 다 활용신청이 필요하며 아직 미도입이다.
 
 **구독 계획 (`departments/01-research/collectors/subscription_plan.py`)** — LS 실시간은
 `tr_key`로 종목 하나를 지정하는 **종목별 구독**이고 "전 종목 구독" 단일 요청은 없다.
@@ -538,11 +591,19 @@ KONEX와 KRX 야간파생은 등록하지 않았다. KONEX는 TR이 문서에 �
 금지 사항은 `UseScope`로 강제한다. Source 추가는 `SOURCES`에 한 줄 등록 + `Collector`
 Protocol 구현으로 끝난다.
 
-2026-07-30 기준 판정: `AVAILABLE` 8개(LS WS/REST, Open DART, KRX, ECOS, KOSIS, FRED,
-Tavily), `KEY_MISSING` 2개(BIGKinds, NAVER),
+2026-07-30 기준 판정: `AVAILABLE` 7개(LS WS/REST, Open DART, ECOS, KOSIS, FRED, Tavily),
+`KEY_MISSING` 2개(BIGKinds, NAVER), `NOT_AUTHORIZED` 1개(KRX),
 `NOT_CONTRACTED` 3개(KIND, 공매도·대차, Consensus).
-**P0 Blocked Domain은 `NEWS` 하나만 남았다** — BIGKinds/NAVER 키를 받기 전까지 뉴스는
-수집하지 않는다. KRX 키로 `CALENDAR`가, ECOS·KOSIS·FRED로 `MACRO`가 풀렸다.
+
+**KRX는 키가 유효한데 호출이 401로 거부된다.** 실측(2026-07-30): 헤더 `AUTH_KEY`로
+`https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd` 호출 시 `Unauthorized API Call`,
+잘못된 헤더명은 `Unauthorized Key`로 응답이 갈렸다 — 키는 인식되고 **서비스 이용 승인이
+없다**. KRX는 인증키 발급과 서비스별 "API 활용 신청" 승인이 별개다. 그래서 Registry에
+`NOT_AUTHORIZED` 상태를 추가했다. Registry는 키 **존재**만 판정할 수 있으므로 실제 호출
+권한은 관측 결과를 `NOT_AUTHORIZED_OBSERVED`에 근거와 함께 기록한다.
+
+**P0 Blocked Domain은 `NEWS`와 `CALENDAR`다.** 단 `CALENDAR`는 KRX 승인을 받아도 Calendar
+API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관측 역산으로 대응했다.
 
 완료 기준:
 
@@ -553,10 +614,63 @@ Tavily), `KEY_MISSING` 2개(BIGKinds, NAVER),
 
 ### Sprint J2: DART와 Research Metadata
 
-- Corp Code/Instrument Mapping.
-- 공시 원본 Archive, Version, 정정 관계.
-- Financial Fact와 PIT Query.
-- `research-api` Evidence 조회.
+- **부분** Corp Code/Instrument Mapping. 공시검색 응답의 `corp_code`로
+  `reference.issuers` 315건을 적재했다(2026-07-27~30 유가 기준). `stock_code`도 869건 전부
+  들어와 `instrument_symbols`와 연결 가능하다. `industry_code`·`fiscal_month`는 기업개황
+  API(2019002)가 회사별 1회 호출이라 미수집이며 **NULL로 두고 추정하지 않았다**.
+  `legal_name`은 `corp_name`을 넣고 `metadata.legal_name_verified=false`로 표시했다 —
+  법인명과 표시명이 다를 수 있어 기업개황 수집 시 갱신해야 한다.
+- **부분** 공시 원본 Archive, Version, 정정 관계.
+  `research.documents` 869건 적재(ACTIVE 793 / CORRECTED 76). 정정은 `report_nm` 앞
+  표기(`[기재정정]`, `[첨부정정]` 등)로 탐지하고 **원본을 덮어쓰지 않는다** — `rcept_no`가
+  달라 별개 문서로 들어간다. 멱등 키는 `unique nulls not distinct (source_id, external_id)`이며
+  재적재 시 869 전부 갱신으로 처리된다.
+  **`document_versions`는 만들지 않았다** — `object_path`·`content_hash`가 NOT NULL인데
+  원문 파일(API 2019003)을 받지 않았고, 없는 경로를 조작해 넣지 않는다.
+  `document_relations`(정정↔원본 연결)도 `rcept_no`만으로는 알 수 없어 후속이다.
+- **부분** Financial Fact와 PIT Query.
+  `fnlttMultiAcnt.json`(2019017 다중회사 주요계정)으로 `research.financial_facts` **1,133건**
+  적재(발행사 40개, CONSOLIDATED 545 / SEPARATE 588). corp_code를 콤마로 묶어 배치
+  조회하므로 회사별 1회 호출이 필요 없다. 재적재는 멱등이다.
+
+  **결정이 필요했던 것 둘 — 근거를 코드에 남겼다.**
+
+  1. **`account_code`가 응답에 없다.** 다중회사 주요계정은 `account_nm`(한글 계정명)만
+     주고 표준 계정코드를 주지 않는다(단일회사 전체 재무제표 2019020은 `account_id`를 준다).
+     `financial_facts.account_code`가 NOT NULL이라 값을 만들어야 했다. `{sj_div}:{account_nm}`
+     형태(`BS:유동자산`)를 쓰고 **`metadata.account_code_scheme="dart_major_account_nm"`으로
+     IFRS 표준코드가 아님을 명시**했다. 표준코드가 필요하면 2019020이나 XBRL 택사노미(2020001)로
+     보강한다.
+  2. **당기만 적재한다.** 응답은 당기·전기·전전기를 한 번에 주는데, 전기를 같이 넣으면 같은
+     `period_end`를 두 보고서가 서로 다른 시점에 보고하는 상황이 생긴다(2025 사업보고서의
+     전기 = 2024, 2024 사업보고서의 당기 = 2024). 지금 unique key로는 어느 것이 나중
+     개정본인지 구분되지 않으므로 **revision 규칙을 정하기 전까지 당기만** 넣고 전기·전전기는
+     `metadata.prior_periods`에 참고로 남긴다.
+
+  **DART 응답 자체에 중복이 있다.** 실측에서 `IS:당기순이익(손실)`이 **값까지 같은 채로 두 번**
+  온다(1,210건 수신 → 유니크 1,133건, 중복 77건). `ON CONFLICT DO UPDATE`는 같은 명령에서
+  같은 행을 두 번 건드릴 수 없어 수집 단계에서 걸러야 한다. **값이 같은 중복과 값이 상충하는
+  중복을 구분해서 센다** — 전자는 정보 손실이 없지만 후자는 어느 값이 맞는지 알 수 없어
+  조사 대상이다. `revision`은 1로 고정했다(정정 재무제표 판정 규칙 미정).
+
+- **미착수** `research-api` Evidence 조회.
+
+**⚠ PIT 한계 (실측 2026-07-30, 반드시 인지할 것)**
+`list.json`의 `rcept_dt`는 **YYYYMMDD 날짜뿐이고 접수 시각이 없다.** `rcept_no` 앞 8자리도
+날짜이고 뒤는 순번이라 시각이 아니다. 가이드 3.1이 요구하는 "공시 시각"을 이 API는 주지
+않는다.
+
+`published_at`을 그날 00:00 KST로 두면 **09:00 판단에 15:00 공시가 미래 정보로 새어든다.**
+그래서 **Backtest와 Agent는 `observed_at`을 기준으로 판단해야 한다**(가이드 4.2가 정확히
+이를 요구한다). `research.documents`에 `metadata` Column이 없어 이 한계는 Source 속성으로
+`reference.data_sources.license_terms`에 기록했다. 정확한 시각이 필요하면 공시원문
+API(2019003)나 별도 Source가 필요하다.
+
+**`reference.data_sources` 동기화** — Source Registry 13개를 DB로 옮겼다
+(`sync_data_sources`). 문서에 "Registry는 `data_sources`의 Git 쪽 선언"이라고 적어뒀는데
+실제 동기화 코드가 없었고, `research.documents.source_id`가 NOT NULL FK라 이것이 선행
+조건이었다. `allowed_uses`와 `prohibited_uses`를 함께 넣어 DB만 보는 사람도 라이선스
+경계를 알 수 있게 했다.
 
 ### Sprint J3: News/RAG
 

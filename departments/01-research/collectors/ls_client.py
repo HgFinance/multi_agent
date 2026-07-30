@@ -174,7 +174,14 @@ class LsRestClient:
         tr_cont: str = "N",
         tr_cont_key: str = "",
     ) -> dict:
-        """TR 한 건 호출. in_block 은 {"t8436InBlock": {...}} 형태 그대로 넣는다."""
+        """TR 한 건 호출. in_block 은 {"t8436InBlock": {...}} 형태 그대로 넣는다.
+
+        ▶ **LS API 는 필드 타입을 엄격히 본다.** 문서 필드표의 종류가 Number 인 것은
+          JSON 숫자로 보내야 한다. 문자열로 보내면 HTTP 500 과 함께
+          "IGW40011 ... data type을 확인하세요" 가 온다(실측 2026-07-30:
+          t8410 의 qrycnt, t1305 의 dwmcode 를 문자열로 보내 실패).
+          401 이 아니라 500 이므로 인증 문제로 오진하기 쉽다.
+        """
         limiter = self._limiters.setdefault(tr_cd, RateLimiter(rate_limit_per_sec))
         limiter.wait()
 

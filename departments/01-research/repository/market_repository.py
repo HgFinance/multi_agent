@@ -287,8 +287,13 @@ class TimescaleMarketRepository(MarketDataRepository):
             f"returning 1"
         )
         with self._conn.cursor() as cur:
-            self._execute_values(cur, sql, values, page_size=500)
-            inserted = len(cur.fetchall())
+            # fetch=True 가 필수다. execute_values 는 page_size 단위로 INSERT 를 여러
+            # 문장으로 쪼개는데, 그냥 cur.fetchall() 을 하면 **마지막 문장의 RETURNING
+            # 만** 잡힌다. 500건 이하 배치에서는 맞아 보이다가 그 이상에서 조용히
+            # 어긋난다(실측: 4293건 넣고 293건으로 셌다). 그러면 없는 중복이
+            # 보고되어 DQ 경보가 잘못 뜬다.
+            returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
+            inserted = len(returned)
         self._conn.commit()
         return WriteResult(len(rows), inserted, len(rows) - inserted)
 
@@ -570,6 +575,16 @@ def _run_integration() -> int:
             )
             assert int(cur.fetchone()[0]) == 7, "hypertable 7개가 아니다"
         print("  hypertable 7개 확인          OK")
+
+        # execute_values page_size(500) 를 넘는 배치에서 삽입 건수가 정확한지 확인한다.
+        # fetch=True 를 빼면 마지막 page 만 세어 없는 중복이 보고된다 - 실제로 겪은 버그다.
+        big_fx = Fixture.isolated()
+        big = [make_tick(big_fx, i) for i in range(1, 1201)]
+        r = repo.write_ticks(big)
+        assert (r.attempted, r.inserted, r.duplicates) == (1200, 1200, 0), f"대량 배치 {r}"
+        r2 = repo.write_ticks(big)
+        assert (r2.inserted, r2.duplicates) == (0, 1200), f"대량 배치 재적재 {r2}"
+        print("  대량 배치(1200건) 카운트     OK")
 
         # append-only 불변식이 실제로 살아 있는지 확인한다. 이게 막히지 않으면
         # 마이그레이션의 reject_raw_mutation 트리거가 사라진 것이다.

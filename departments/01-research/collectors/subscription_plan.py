@@ -636,15 +636,26 @@ def _check_constituents_fail_closed():
     import source_registry as sr
 
     real = sr.SourceRegistry
+    ls_env = {"LS_APP_KEY": "x", "LS_APP_SECRET_KEY": "y"}
     try:
-        sr.SourceRegistry = lambda: real(env={"LS_APP_KEY": "x", "LS_APP_SECRET_KEY": "y"})
+        sr.SourceRegistry = lambda: real(env=ls_env)
         assert by_id["kospi200"].resolved_source() is ConstituentSource.LS_ETF_PDF, "KRX 없으면 근사"
 
-        sr.SourceRegistry = lambda: real(
-            env={"LS_APP_KEY": "x", "LS_APP_SECRET_KEY": "y", "KRX_API_KEY": "k"}
+        # 키만 있고 서비스 이용 승인이 없으면(NOT_AUTHORIZED) 여전히 근사다.
+        # 키 존재만으로 정확한 출처로 올라가면 승인 전에 401 을 맞고, 그 빈 결과를
+        # 정상으로 취급하면 잘못된 Universe 가 만들어진다.
+        sr.SourceRegistry = lambda: real(env={**ls_env, "KRX_API_KEY": "k"})
+        assert by_id["kospi200"].resolved_source() is ConstituentSource.LS_ETF_PDF, (
+            "KRX 승인 없이 정확한 출처로 올라갔다"
         )
-        assert by_id["kospi200"].resolved_source() is ConstituentSource.KRX_INDEX, "KRX 있으면 정확"
-        assert by_id["kosdaq150"].resolved_source() is ConstituentSource.KRX_INDEX
+
+        # 승인이 떨어지면(관측 기록 제거) 정확한 출처를 쓴다
+        saved = sr.NOT_AUTHORIZED_OBSERVED.pop("krx_openapi")
+        try:
+            assert by_id["kospi200"].resolved_source() is ConstituentSource.KRX_INDEX
+            assert by_id["kosdaq150"].resolved_source() is ConstituentSource.KRX_INDEX
+        finally:
+            sr.NOT_AUTHORIZED_OBSERVED["krx_openapi"] = saved
     finally:
         sr.SourceRegistry = real
     print("  구성종목 출처 연동        OK")
