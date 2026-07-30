@@ -14,6 +14,7 @@ import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./g
 import { CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { COMPANY, STORAGE_LINK } from "../company.config";
+import OpsPanel from "./ops/OpsPanel";
 
 type View = "live" | "dashboard";
 
@@ -947,6 +948,8 @@ function DashboardView({
           </section>
         </div>
       </section>
+
+      <OpsPanel />
 
       <section className="win storage">
         <div className="win-bar">
