@@ -111,7 +111,4 @@ Node 버전이 낮은 경우입니다. `node -v` 로 확인해서 22 미만이�
 
 ---
 
-이 툴은 **갓생맘 🎀** 이 만들었어요.
-📷 [@godseng.mom](https://www.instagram.com/godseng.mom/) — 더 많은 크리에이터 툴 보러가기
-
-자유롭게 쓰고 고치되, 무단 재판매는 하지 말아주세요.
+HgFinance AI Office — 개인형 헤지펀드 관제 화면.

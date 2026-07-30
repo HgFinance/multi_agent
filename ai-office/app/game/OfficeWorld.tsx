@@ -4,15 +4,24 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Agent, Company, DeptStatus, Snapshot } from "./sim";
 import {
   CEO_ROOM,
-  ENTRANCE,
+  ELEVATOR_SIZE,
+  FLOOR_NAME,
+  FLOORS,
   MEETING_ROOM,
   PROPS,
   ROOMS,
   TILE,
   WORLD_H,
   WORLD_W,
+  floorBand,
+  floorOfY,
+  elevatorAt,
   roomOf,
+  type Floor,
 } from "./world";
+
+/** 카메라가 층 범위 밖으로 나갈 수 있는 여유(px). 세로 이동이 답답하지 않을 만큼만. */
+const CAM_SLACK_Y = 10 * TILE;
 
 const STATUS_CLASS: Record<DeptStatus, string> = {
   "완료": "done",
@@ -86,10 +95,10 @@ const AgentLayer = memo(function AgentLayer({
   );
 });
 
-const PropLayer = memo(function PropLayer() {
+const PropLayer = memo(function PropLayer({ floor }: { floor: Floor }) {
   return (
     <>
-      {PROPS.map((prop, i) => (
+      {PROPS.filter((prop) => floorOfY(prop.y) === floor).map((prop, i) => (
         <div
           key={i}
           className={`pr pr-${prop.kind}`}
@@ -105,10 +114,15 @@ const PropLayer = memo(function PropLayer() {
         </div>
       ))}
       <div
-        className="entrance-mat"
-        style={{ left: 34 * TILE, top: 55 * TILE, width: 5 * TILE, height: 2 * TILE }}
+        className="elevator-mat"
+        style={{
+          left: (elevatorAt(floor).x - 2) * TILE,
+          top: elevatorAt(floor).y * TILE,
+          width: ELEVATOR_SIZE.w * TILE,
+          height: ELEVATOR_SIZE.h * TILE,
+        }}
       >
-        ENTRANCE
+        🛗 ELEVATOR
       </div>
     </>
   );
@@ -123,6 +137,7 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
   const selectedRef = useRef<string | null>(selectedId);
   const dragRef = useRef({ on: false, px: 0, py: 0, moved: false });
   const [zoom, setZoom] = useState<"fit" | "close">("fit");
+  const [floor, setFloor] = useState<Floor>(1);
 
   useEffect(() => {
     selectedRef.current = selectedId;
@@ -140,11 +155,13 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
   const focus = useMemo(() => {
     if (hotRoom) {
       const room = roomOf(hotRoom);
-      return { x: (room.x + room.w / 2) * TILE, y: (room.y + room.h / 2) * TILE };
+      if (room.floor === floor) {
+        return { x: (room.x + room.w / 2) * TILE, y: (room.y + room.h / 2) * TILE };
+      }
     }
-    if (snap.phaseIndex <= 1) return { x: ENTRANCE.x * TILE, y: (ENTRANCE.y - 6) * TILE };
+    if (snap.phaseIndex <= 1) return { x: elevatorAt(floor).x * TILE, y: elevatorAt(floor).y * TILE };
     return null;
-  }, [hotRoom, snap.phaseIndex]);
+  }, [hotRoom, snap.phaseIndex, floor]);
 
   const register = useCallback((id: string, el: HTMLDivElement | null) => {
     if (el) agentRefs.current.set(id, el);
@@ -165,20 +182,30 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
 
     const compute = () => {
       const rect = viewport.getBoundingClientRect();
-      const fit = Math.min(rect.width / WORLD_W, rect.height / WORLD_H);
+      // 층이 실제로 쓰는 영역에만 화면을 배분한다. 빈 띠는 계산에 넣지 않는다.
+      const band = floorBand(floor);
+      const bandMid = band.top + band.height / 2;
+      const fit = Math.min(rect.width / WORLD_W, rect.height / band.height);
       if (zoom === "fit") {
-        targetRef.current = { x: WORLD_W / 2, y: WORLD_H / 2, scale: fit };
+        targetRef.current = { x: WORLD_W / 2, y: bandMid, scale: fit };
         return;
       }
       const scale = Math.max(fit * 1.9, 0.95);
-      targetRef.current = follow && focus ? { ...focus, scale } : { ...targetRef.current, scale };
+      // 따라가기 대상이 없으면 층 한가운데를 확대한다. 이전 좌표를 유지하면
+      // 층을 바꾼 뒤 엉뚱한 빈 곳이 확대돼 보인다.
+      targetRef.current = follow && focus ? { ...focus, scale } : { x: WORLD_W / 2, y: bandMid, scale };
     };
 
     compute();
     const observer = new ResizeObserver(compute);
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [zoom, follow, focus]);
+  }, [zoom, follow, focus, floor]);
+
+  const floorRef = useRef(floor);
+  useEffect(() => {
+    floorRef.current = floor;
+  }, [floor]);
 
   // 페인트 루프
   useEffect(() => {
@@ -194,6 +221,14 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
         cam.scale += (target.scale - cam.scale) * 0.08;
 
         const rect = viewport.getBoundingClientRect();
+        // 층 밖은 렌더되지 않아 빈 공간으로 보인다. 다만 완전히 가두면 답답해서
+        // 위아래로 SLACK 만큼은 넘어갈 수 있게 둔다.
+        const band = floorBand(floorRef.current);
+        const halfH = rect.height / 2 / (cam.scale || 1);
+        const lo = band.top + halfH - CAM_SLACK_Y;
+        const hi = band.top + band.height - halfH + CAM_SLACK_Y;
+        cam.y = lo <= hi ? Math.min(Math.max(cam.y, lo), hi) : band.top + band.height / 2;
+
         const ox = rect.width / 2 - cam.x * cam.scale;
         const oy = rect.height / 2 - cam.y * cam.scale;
         stage.style.transform = `translate3d(${ox}px, ${oy}px, 0) scale(${cam.scale})`;
@@ -279,7 +314,7 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
         <div className="world-stage" ref={stageRef} style={{ width: WORLD_W, height: WORLD_H }}>
           <div className="world-floor" />
 
-          {ROOMS.map((room) => {
+          {ROOMS.filter((room) => room.floor === floor).map((room) => {
             const status = snap.deptStatus[room.id];
             return (
               <div
@@ -300,20 +335,16 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
                   </b>
                   {status ? <i className={`rm-dot ${STATUS_CLASS[status]}`} title={status} /> : null}
                 </span>
-                <span className="rm-code">{room.short}</span>
-                {room.doors.map((door) => (
-                  <span
-                    key={`${door.x}-${door.y}`}
-                    className="rm-door"
-                    style={{ left: (door.x - room.x) * TILE, top: (door.y - room.y) * TILE }}
-                  />
-                ))}
               </div>
             );
           })}
 
-          <PropLayer />
-          <AgentLayer agents={engine.agents} register={register} onPick={onPick} />
+          <PropLayer floor={floor} />
+          <AgentLayer
+            agents={engine.agents.filter((agent) => floorOfY(agent.y) === floor)}
+            register={register}
+            onPick={onPick}
+          />
         </div>
 
         <div className="world-hud">
@@ -323,6 +354,16 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
           <button className={zoom === "close" ? "on" : ""} onClick={() => setZoom("close")}>
             🔍 가까이
           </button>
+          {FLOORS.map((value) => (
+            <button
+              key={value}
+              className={floor === value ? "on" : ""}
+              onClick={() => setFloor(value)}
+              title={FLOOR_NAME[value]}
+            >
+              {value === 1 ? "🏢 1층" : "🏢 2층"}
+            </button>
+          ))}
         </div>
         <div className="world-hint">드래그로 둘러보기 · 직원 클릭하면 프로필</div>
       </div>
