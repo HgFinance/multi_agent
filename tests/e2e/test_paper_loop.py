@@ -6,7 +6,7 @@
     PortfolioSnapshot(NAV, 보유수량)
       -> StrategySignal
       -> OrderIntent            (F11 build_order_intent)
-      -> RiskDecision           ** 리스크본부 산출물. 여기서는 대역 **
+      -> RiskDecision           (F12 RiskEngine.check_order - 동규님 리스크본부)
       -> BrokerOrder            (F14 create_broker_order, submit)
       -> ack / fill             (F13 PaperBroker)
       -> Journal                (원장 post_fill)
@@ -15,9 +15,10 @@
 각 모듈의 자체 점검은 자기 자리만 본다. 이 파일은 **모듈 사이의 배선**을 본다 -
 한쪽 출력이 다른 쪽 입력으로 실제로 들어가는지, 한 바퀴 돈 뒤 상태가 수렴하는지.
 
-RiskDecision은 동규님 리스크본부의 산출물이라 우리가 만들 수 없다. 여기서는
-승인 판정을 대역으로 세우되 **OMS가 그것 없이는 진행하지 못한다는 사실**을
-같이 검증한다(test_risk_gate_blocks_unapproved_order).
+판정은 대역이 아니라 실제 RiskEngine이 낸다. 우리는 Mandate와 한도를 입력으로
+줄 뿐이고 approve/resize/reject 판단에는 관여하지 않는다. RiskEngine이 요구하는
+PortfolioState는 "portfolio-api가 줄 값의 스텁"이라 주석돼 있는데, 그 portfolio-api가
+바로 F15다 - _risk_context()가 그 어댑터다.
 
 실행: python -m unittest discover -s tests/e2e
       (tests/에 __init__.py가 없어 상위에서 discover하면 0건이 나온다.
@@ -37,6 +38,7 @@ for _p in (
     ROOT / "departments" / "02-trading" / "contracts",
     ROOT / "departments" / "02-trading" / "oms",
     ROOT / "departments" / "02-trading" / "broker",
+    ROOT / "departments" / "03-risk" / "engine",
     ROOT / "departments" / "05-accounting-portfolio" / "ledger",
     ROOT / "departments" / "05-accounting-portfolio" / "portfolio",
 ):
@@ -46,7 +48,6 @@ from contracts import (  # noqa: E402
     BrokerOrderState,
     IntentState,
     MarketSnapshot,
-    RiskDecision,
     RiskVerdict,
     Side,
     StrategySignal,
@@ -56,6 +57,17 @@ from ledger import Ledger, Position  # noqa: E402
 from oms import OMS, OMSError  # noqa: E402
 from paper_broker import PaperBroker, Quote  # noqa: E402
 from portfolio import MarkPrice, value_portfolio  # noqa: E402
+from risk_engine import (  # noqa: E402
+    CounterpartyHealth,
+    CounterpartyStatus,
+    LimitSet,
+    MandateScope,
+    MarketStatus,
+    PortfolioState,
+    RiskContext,
+    RiskEngine,
+    TradingState,
+)
 
 CAPITAL = D("1000000000")   # 10억
 PRICE = D("70000")
@@ -69,6 +81,7 @@ class PaperLoopTest(unittest.TestCase):
         self.presets = load_presets()
         self.broker = PaperBroker()
         self.oms = OMS()
+        self.engine = RiskEngine()
 
         self.ledger = Ledger(fund_id=self.fund, book_id=self.book)
         self.ledger.post_capital(CAPITAL, self.now, "capital_seed")
@@ -101,20 +114,56 @@ class PaperLoopTest(unittest.TestCase):
             trade_case_id=uuid4(), now=self.now,
         )
 
-    def approve(self, intent):
-        """리스크본부 대역. 실제로는 risk.decision.v1 이벤트로 받는다."""
-        return RiskDecision(
-            order_intent_id=intent.order_intent_id, verdict=RiskVerdict.APPROVE,
-            approved_quantity=intent.quantity,
-            expires_at=self.now + timedelta(minutes=5),
-            decided_by="risk-supervisor(대역)", decided_at=self.now,
+    def _risk_context(self, limits=None, mandate=None, trading_state=TradingState.ENABLED):
+        """F15 스냅샷을 리스크본부가 요구하는 PortfolioState로 옮긴다.
+
+        RiskEngine은 포지션을 직접 집계하지 않는다(팀 가이드 3.1). 회계본부가
+        확정한 수치를 받아서 검사할 뿐이다. 이 어댑터가 그 경계다.
+        """
+        snap = self.snapshot()
+        return RiskContext(
+            mandate=mandate or MandateScope(
+                fund_id=self.fund, allowed_instrument_ids=None,
+                min_order_notional=D("1"), max_order_notional=D("1000000000"),
+            ),
+            # 집중도 한도를 100%로 열어둔다. RiskEngine의 집중도 분모가
+            # gross_exposure라서 보유가 없는 첫 주문은 정의상 항상 100%가 되고,
+            # 어떤 현실적인 한도로도 통과할 수 없다(test_concentration_is_gross_based).
+            # 이 파일의 목적은 배선 검증이므로 그 검사만 열고 나머지는 살려둔다.
+            # 분모를 NAV로 볼지 gross로 볼지는 미해결 - PR 참조.
+            limits=limits or LimitSet(
+                soft_single_issuer_pct=D("1"), hard_single_issuer_pct=D("1"),
+                max_daily_turnover_notional=D("1000000000"), max_daily_order_count=100,
+                max_daily_loss=D("100000000"), max_drawdown_pct=D("0.20"),
+            ),
+            restricted_items=(),
+            portfolio=PortfolioState(
+                fund_id=self.fund,
+                cash=snap.cash,
+                buying_power=snap.cash,          # Long-only, 신용 없음
+                gross_exposure=snap.gross_exposure,
+                positions={p.instrument_id: p.quantity for p in snap.positions},
+                realized_pnl_today=snap.realized_pnl,
+                unrealized_pnl_today=snap.unrealized_pnl,
+                equity=snap.nav,
+                peak_equity=max(snap.nav, CAPITAL),
+            ),
+            market_status=MarketStatus(tradable=True),
+            counterparty=CounterpartyStatus("paper", CounterpartyHealth.OK),
+            trading_state=trading_state,
+            as_of=self.now,
         )
 
-    def route(self, intent):
+    def assess(self, intent, **ctx_kwargs):
+        """실제 Risk Engine 판정. 우리는 입력만 주고 판단에는 관여하지 않는다."""
+        return self.engine.check_order(intent, self._risk_context(**ctx_kwargs))
+
+    def route(self, intent, **ctx_kwargs):
         """Intent를 심사 통과시키고 브로커에 전송한다."""
+        decision = self.assess(intent, **ctx_kwargs).decision
         rec = self.oms.register_intent(intent)
         self.oms.request_risk_review(rec)
-        self.oms.apply_risk_decision(rec, self.approve(intent))
+        self.oms.apply_risk_decision(rec, decision)
         order = self.oms.create_broker_order(rec, intent)
         self.oms.submit(order, rec)
         ev = self.broker.accept(order)
@@ -243,6 +292,33 @@ class PaperLoopTest(unittest.TestCase):
         self.assertEqual(sum(self.ledger.trial_balance().values()), D("0"))
 
     # -- 경계 -----------------------------------------------------------------
+
+    def test_concentration_is_gross_based_not_nav_based(self):
+        """집중도 분모가 NAV가 아니라 gross_exposure다. 미해결 항목을 고정해 둔다.
+
+        F11은 NAV 대비 2%로 수량을 정하는데(philosophies.yaml max_weight),
+        RiskEngine은 gross_exposure 대비로 집중도를 본다. 보유가 없으면
+        분모가 그 주문 자체라 첫 주문은 언제나 100%가 되고, 10% Hard Limit 같은
+        현실적인 값으로는 포트폴리오를 시작할 수 없다.
+
+        정의가 정해지면 이 테스트가 먼저 깨진다. 그때 함께 고친다.
+        """
+        realistic = LimitSet(
+            soft_single_issuer_pct=D("0.05"), hard_single_issuer_pct=D("0.10"),
+            max_daily_turnover_notional=D("1000000000"), max_daily_order_count=100,
+            max_daily_loss=D("100000000"), max_drawdown_pct=D("0.20"),
+        )
+        intent = self.build_intent(self.signal(), self.snapshot())
+
+        # NAV 대비로는 2%다 - 어떤 상식적인 한도도 넘지 않는다
+        nav_pct = intent.quantity * intent.limit_price / self.snapshot().nav
+        self.assertLess(nav_pct, D("0.03"))
+
+        # 그런데 gross 대비로는 100%라 Hard Limit에서 거부된다
+        assessment = self.assess(intent, limits=realistic)
+        self.assertIs(assessment.decision.verdict, RiskVerdict.REJECT)
+        self.assertIn("concentration_limit_hard",
+                      [r.value for r in assessment.reason_codes])
 
     def test_risk_gate_blocks_unapproved_order(self):
         """Risk 판정 없이는 Broker Order 자체가 생기지 않는다."""
