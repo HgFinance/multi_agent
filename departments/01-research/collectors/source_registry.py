@@ -180,7 +180,11 @@ SOURCES: tuple[SourceSpec, ...] = (
         raw_bucket="market-archive-private",
         normalized_target="market.market_ticks / market.market_quotes",
         doc_ref="docs/06-integrations/ls-openapi/, TEAM_JAEIL 3.1",
-        note="가격·체결·호가의 확정 Source. 다른 Source 가격을 같은 price 에 섞지 않는다(가이드 3.3)",
+        note=(
+            "가격·체결·호가의 확정 Source. 다른 Source 가격을 같은 price 에 섞지 않는다"
+            "(가이드 3.3). 동시 구독 상한은 무제한(재일님 확인 2026-07-30, 벤더 문서에는"
+            " 명시 없음) - 체결·호가는 tr_key 종목별 구독이며 subscription_plan.py 참고"
+        ),
     ),
     SourceSpec(
         source_id="ls_openapi_rest",

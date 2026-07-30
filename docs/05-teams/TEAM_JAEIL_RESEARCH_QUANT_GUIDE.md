@@ -46,6 +46,7 @@
 | 리서치 Hermes | `departments/01-research/hermes/` | `orchestration/hermes/research-department/` |
 | Market Event 계약 | `departments/01-research/contracts/market_events.py` | — (신규, Sprint J0) |
 | 수집 Source Registry | `departments/01-research/collectors/source_registry.py` | — (신규, Sprint J1) |
+| 실시간 구독 계획 | `departments/01-research/collectors/subscription_plan.py` | — (신규, Sprint J1) |
 | 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
 | 로컬 시계열 DB 구성 | `docker-compose.yml`, `timescaledb/local-dev/` | — (신규, 로컬 개발 전용) |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
@@ -466,13 +467,69 @@ Quant:
     payload identity로 결정론적 해시를 만들고, 적재는 마이그레이션의
     `primary key (event_time, source_event_id)`에 `on conflict do nothing`으로 붙는다.
     재적재 건수를 `WriteResult.duplicates`로 세어 돌려주므로 중복과 Gap을 구분할 수 있다.
-  - **미착수** Instrument Mapping (`reference.instrument_symbols` 조회 계층).
+  - **부분** Instrument Mapping — 구독 계획이 요구하는 (시장, 자산군) 분류 축과 Universe
+    정의 계층은 만들었다(`subscription_plan.py`의 `Venue`/`AssetClass`/`ProductGroup`/
+    `UniverseSpec`). `reference.instrument_symbols` 조회 구현과 LS 마스터 수집은 미착수다.
   - **부분** DQ Metric — `find_sequence_gaps()`와 `Snapshot.freshness`/`quality_flags`가 있다.
     Shard Heartbeat, Event Rate, Timescale↔Parquet Row Count 비교는 미착수다.
 - **완료** Tick/Quote Hypertable과 1분 Bar. 위 J0 항목의 마이그레이션 적용에 포함된다.
 - **미착수** Redis 최신 Snapshot과 `market-api`.
   `Snapshot` 계약과 Repository 조회(`get_snapshot`)까지는 있고 Redis·HTTP 계층이 없다.
 - **미착수** Parquet Archive + Manifest.
+
+**구독 계획 (`departments/01-research/collectors/subscription_plan.py`)** — LS 실시간은
+`tr_key`로 종목 하나를 지정하는 **종목별 구독**이고 "전 종목 구독" 단일 요청은 없다.
+동시 구독 상한은 **무제한**이다(재일님 확인 2026-07-30, 벤더 문서에는 명시 없음).
+TR은 (시장, 자산군, 데이터종류)마다 다르며 수집 문서에서 확인한 18개 조합을 등록했다.
+
+| 시장 | 자산군 | 체결 | 호가 | WebSocket |
+|---|---|---|---|---|
+| KOSPI | 주식 | `S3_` | `H1_` | `/websocket/stock` |
+| KOSDAQ | 주식 | `K3_` | `HA_` | `/websocket/stock` |
+| 미국 | 주식 | `GSC` | `GSH` | `/websocket/overseas-stock` |
+| KRX 파생 | 지수선물 | `FC9` | `FH9` | `/websocket/futureoption` |
+| KRX 파생 | 지수옵션 | `OC0` | `OH0` | `/websocket/futureoption` |
+| KRX 파생 | 주식선물 | `JC0` | `JH0` | `/websocket/futureoption` |
+| 해외파생 | 해외선물 | `OVC` | `OVH` | `/websocket/overseas-futureoption` |
+| 해외파생 | 해외옵션 | `WOC` | `WOH` | `/websocket/overseas-futureoption` |
+
+KONEX와 KRX 야간파생은 등록하지 않았다. KONEX는 TR이 문서에 없고, 야간파생은 체결 TR이
+`DC0`와 `C02`로 나뉘어 있어 무엇을 골라야 하는지 근거가 없다 — 유사 TR로 대체하지 않는다.
+
+해외선물은 한 TR(`OVC`/`OVH`)로 들어오지만 **국채·금리, 주가지수, 에너지, 금속, 농산물,
+통화**가 섞여 있고 계약단위·증거금·만기·거래시간이 상품군마다 다르다. 그래서 `ProductGroup`
+으로 갈라 저장한다. 마스터 응답의 어느 필드가 상품군인지는 미확인이라 `UNCLASSIFIED`로
+두고 추정하지 않는다.
+
+**두 개의 Gate를 걸었다.**
+
+- **범위 Gate** — [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)가 "단일
+  주식시장의 전 종목"을 전제하므로 국내 주식만 범위 안이다. 해외주식·파생은 `ADR_REQUIRED`이며
+  호출자가 `approved_scopes`에 명시하지 않으면 계획 생성이 거부된다. **TR이 존재하는 것과
+  우리가 수집해도 되는 것은 다른 문제다.**
+- **구성종목 Gate** — 출처가 없으면 Universe를 만들지 않는다. 추정 목록으로 만들면 `as_of`
+  없는 사실이 되고 PIT 재현이 깨진다.
+
+**요청받은 Universe의 실제 가용성 (2026-07-30, KRX·ECOS·KOSIS·FRED 키 확보 후 갱신)**
+
+| Universe | 규모 | 상태 |
+|---|---|---|
+| KOSPI 200 | 200 | **가능** — KRX Data Marketplace 지수 구성종목 |
+| KOSDAQ 150 | 150 | **가능** — 같은 출처 |
+| NASDAQ 100 / S&P 500 / DJIA | 630 | **불가** — 지수 사업자 라이선스 대상, 대체 출처 없음 |
+| KRX 지수선물·옵션 | 가변 | 가능 — `t8467`/`t8433` 마스터 |
+| 해외선물 / 해외옵션 | 가변 | 가능 — `o3101`/`o3121` 마스터 |
+
+**지수 구성종목을 주는 LS TR은 없다.** 확인한 것은 종목 마스터(`t8430`/`t8436`/`t9945`,
+해외 `g3190`/`g3104`), ETF 구성종목 조회(`t1904`), 해외선물 마스터(`o3101`/`o3121`)뿐이다.
+국내 지수는 `KRX_API_KEY`가 이를 해결했고(그전에는 `t1904` KODEX 200 ETF PDF 근사가
+유일한 우회로였다), 미국 지수는 여전히 라이선스가 없어 불가다. 파생은 LS 마스터로 전체
+상품을 받을 수 있어 이 제약이 없다.
+
+출처 가용성은 `subscription_plan.py`가 판정하지 않고 **Source Registry의 키 확보 상태를
+따른다**. 같은 사실을 두 곳에 두면 키가 들어와도 한쪽만 갱신되는 드리프트가 생긴다 —
+실제로 KRX 키가 들어온 뒤에도 하드코딩된 값 때문에 KOSPI200이 ETF 근사에 머무는 문제가
+있었고, Registry 연동으로 고쳤다.
 
 또한 J1 기반으로 수집 Source Registry를 추가했다 —
 `departments/01-research/collectors/source_registry.py`. 3.1/3.2의 Source를 선언적으로
@@ -481,11 +538,11 @@ Quant:
 금지 사항은 `UseScope`로 강제한다. Source 추가는 `SOURCES`에 한 줄 등록 + `Collector`
 Protocol 구현으로 끝난다.
 
-2026-07-30 기준 판정: `AVAILABLE` 4개(LS WS/REST, Open DART, Tavily),
-`KEY_MISSING` 6개(KRX, BIGKinds, NAVER, ECOS, KOSIS, FRED),
+2026-07-30 기준 판정: `AVAILABLE` 8개(LS WS/REST, Open DART, KRX, ECOS, KOSIS, FRED,
+Tavily), `KEY_MISSING` 2개(BIGKinds, NAVER),
 `NOT_CONTRACTED` 3개(KIND, 공매도·대차, Consensus).
-**P0 Blocked Domain은 `CALENDAR`, `NEWS`, `MACRO`** — 키를 받기 전까지 이 세 Domain은
-수집하지 않는다. 휴장·장 구간을 추정으로 채우지 않는다.
+**P0 Blocked Domain은 `NEWS` 하나만 남았다** — BIGKinds/NAVER 키를 받기 전까지 뉴스는
+수집하지 않는다. KRX 키로 `CALENDAR`가, ECOS·KOSIS·FRED로 `MACRO`가 풀렸다.
 
 완료 기준:
 
