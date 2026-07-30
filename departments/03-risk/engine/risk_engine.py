@@ -850,12 +850,15 @@ if __name__ == "__main__":
     # 22. 통합 - RiskEngine의 RiskDecision이 실제 OMS Gate를 그대로 통과하는지 (파이프라인 전체 검증)
     intent = make_intent(key="idem_r_final")
     assessment = engine.check_order(intent, base_context())
+    # OMS 상태 머신이 v1.2에서 둘로 분리돼 호출 순서가 바뀌었다.
+    # Intent를 심사 통과시킨 뒤 별도의 Broker Order를 만든다 - 상태 전이가 아니다.
     oms = OMS()
-    order = oms.create_order(intent)
-    oms.request_risk_review(order)
-    oms.apply_risk_decision(order, assessment.decision, intent)
-    oms.submit(order, intent)
-    from contracts import OrderState  # noqa: E402
-    assert order.state is OrderState.SUBMITTED, "RiskEngine 판정이 OMS Risk Gate를 통과해야 한다"
+    rec = oms.register_intent(intent)
+    oms.request_risk_review(rec)
+    oms.apply_risk_decision(rec, assessment.decision)
+    order = oms.create_broker_order(rec, intent)
+    oms.submit(order, rec)
+    from contracts import BrokerOrderState  # noqa: E402
+    assert order.state is BrokerOrderState.SUBMITTED, "RiskEngine 판정이 OMS Risk Gate를 통과해야 한다"
 
     print("ok - P0 Pre-trade Risk Gate 22개 시나리오 점검 통과")
