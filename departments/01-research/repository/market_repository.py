@@ -319,9 +319,26 @@ class TimescaleMarketRepository(MarketDataRepository):
 
         같은 폐장 Snapshot 을 여러 번 수집해도 event_time 이 폐장 시각으로 고정되므로
         두 번째부터는 conflict 로 걸러진다(수집기 쪽 event_time 규칙 참고).
+
+        ▶ do nothing 의 대가 - 먼저 쓰인 행이 영구히 이긴다
+          같은 (event_time, market, source) 에 대해 나중 수집은 값이 무엇이든 조용히
+          버려지고 duplicates 로만 집계된다. 그래서 **불량 행이 절대 들어오면 안 된다.**
+          호출자가 quality_status='FAIL' 을 걸러서 넘기며, 여기서도 한 번 더 막는다 -
+          Repository 는 계약을 지키는 마지막 지점이다.
+
+          거래소가 Breadth 를 정정하는 경우는 이 구조로 반영할 수 없다. 정정 판정
+          규칙(무엇을 나중 개정본으로 볼 것인가)이 없는 상태에서 do update 로 바꾸면
+          잘못된 재수집이 정상 데이터를 덮어쓴다. 규칙이 생기면 그때 바꾼다.
         """
         if not rows:
             return WriteResult(0, 0, 0)
+
+        bad = [r for r in rows if r.get("quality_status") == "FAIL"]
+        if bad:
+            raise ValueError(
+                f"market_breadth: quality_status=FAIL 행 {len(bad)}건은 적재할 수 없다 - "
+                f"on conflict do nothing 이라 같은 좌표의 정상 데이터가 영구히 막힌다"
+            )
 
         import json as _json
 

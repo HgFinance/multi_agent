@@ -128,37 +128,70 @@ INDEX_SPECS: tuple[BreadthIndex, ...] = (
 # 타입 섞인 응답 파싱
 # ---------------------------------------------------------------------------
 
+# market.market_breadth 의 종목수 Column 이 integer 다. 이 범위를 넘는 값은 애초에
+# 저장할 수 없으므로 '읽을 수 없는 값'으로 취급한다 - 여기서 통과시키면 DQ 를 다
+# 지나간 뒤 INSERT 에서 터진다.
+INT32_MIN, INT32_MAX = -2_147_483_648, 2_147_483_647
+
+
 def _as_int(raw: object) -> int | None:
-    """String 으로 오든 Number 로 오든 정수로. 못 읽으면 None 이고 0 이 아니다."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
+    """String 으로 오든 Number 로 오든 정수로. 못 읽으면 None 이고 0 이 아니다.
+
+    NaN/Infinity 를 None 으로 떨어뜨린다 - Decimal('NaN') 은 유효한 Decimal 이라
+    그냥 두면 int() 에서 계약 밖 예외가 나거나 NaN 이 그대로 저장된다.
+    integer Column 범위를 넘는 값도 None 이다(위 INT32 주석 참고).
+    """
+    if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, int):
-        return raw
+        return raw if INT32_MIN <= raw <= INT32_MAX else None
     if isinstance(raw, float):
-        return int(raw)
+        # math.isfinite 대신 자기 비교로 NaN 을, 범위로 inf 를 거른다
+        if raw != raw or raw in (float("inf"), float("-inf")):
+            return None
+        v = int(raw)
+        return v if INT32_MIN <= v <= INT32_MAX else None
     s = str(raw).strip().replace(",", "")
     if not s:
         return None
     try:
-        return int(Decimal(s))
+        d = Decimal(s)
     except (InvalidOperation, ValueError):
         return None
+    if not d.is_finite():
+        return None
+    try:
+        v = int(d)
+    except (InvalidOperation, OverflowError, ValueError):
+        return None
+    return v if INT32_MIN <= v <= INT32_MAX else None
+
+
+# market.market_breadth 의 금액 Column 이 numeric(38,10) 이라 정수부가 28자리를
+# 넘으면 저장할 수 없다. _as_int 의 INT32 경계와 같은 이유로 여기서 막는다.
+_NUMERIC_ABS_MAX = Decimal(10) ** 28
 
 
 def _as_decimal(raw: object) -> Decimal | None:
-    if raw is None:
+    """못 읽으면 None. NaN/Infinity 와 numeric(38,10) 범위 밖도 None 이다.
+
+    NaN·Infinity 는 유효한 Decimal 이지만 값이 아니고, 범위 밖은 값이지만 저장할
+    수 없다. 둘 다 '읽을 수 없음' 으로 모아야 DQ 가 한 곳에서 잡는다.
+    """
+    if raw is None or isinstance(raw, bool):
         return None
-    if isinstance(raw, bool):
+    if isinstance(raw, float) and (raw != raw or raw in (float("inf"), float("-inf"))):
         return None
     s = str(raw).strip().replace(",", "")
     if not s:
         return None
     try:
-        return Decimal(s)
-    except InvalidOperation:
+        d = Decimal(s)
+    except (InvalidOperation, ValueError):
         return None
+    if not d.is_finite():
+        return None
+    return d if abs(d) < _NUMERIC_ABS_MAX else None
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +201,22 @@ def _as_decimal(raw: object) -> Decimal | None:
 def derive_open_time_of_day(
     sessions: list[tuple[date, datetime | None, datetime | None]]
 ) -> time | None:
-    """최근 세션들의 개장 시각(UTC 기준 시:분)이 모두 같으면 그 값.
+    """최근 세션들의 개장 시각(**KST 기준** 시:분)이 모두 같으면 그 값.
 
     하나라도 다르면 None 이다 - 개장 시각이 바뀐 이력이 있다는 뜻이고, 그때는
     '오늘 개장 예정 시각' 을 추정하면 안 된다. 상수로 09:00 을 박지 않는 이유다.
+
+    ▶ KST 로 정규화하는 이유 (2026-07-31 수정)
+      호출부가 이 값을 `datetime.combine(today, tod)` 로 쓰는데 today 는 **KST 달력
+      날짜** 다. UTC 로 정규화하면 09:00 KST = 00:00 UTC 라서 우연히 맞을 뿐이고,
+      개장이 09:00 KST 보다 이르면(예: 08:30 -> 23:30 UTC, 전날 날짜) expected_open
+      이 정확히 24시간 늦게 계산된다. 그러면 "개장 시각을 지났으면 거부" 가드가 그
+      KST 하루 내내 발동하지 않아 **fail-closed 가 fail-open 으로 뒤집힌다.**
+      Calendar 는 t8410 의 s_time 을 구간 전체에 일괄 적용하므로 재빌드 한 번이면
+      최근 세션 전부가 동시에 바뀐다 - "값이 섞이면 None" 안전밸브가 정작 이
+      경우에는 발동할 수 없다.
     """
-    tods = {s[1].astimezone(timezone.utc).timetz() for s in sessions if s[1] is not None}
+    tods = {s[1].astimezone(KST).timetz() for s in sessions if s[1] is not None}
     return None if len(tods) != 1 else tods.pop()
 
 
@@ -348,6 +391,23 @@ def parse_breadth(
     if total_count == 0:
         flags.append("BREADTH_ALL_ZERO")
 
+    # 음수 종목수는 파싱이나 공급자 어느 쪽이 깨져도 나올 수 있다. 합계만 보면
+    # 양수와 상쇄돼 0 이 아니어서 BREADTH_ALL_ZERO 를 빠져나간다.
+    if any(v is not None and v < 0 for v in (advancers, decliners, unchanged)):
+        flags.append("BREADTH_NEGATIVE")
+
+    # 상승도 하락도 0 인데 전부 보합인 상태. 합계는 상장수와 같아서 위 검사를
+    # 통과하지만 실제로는 장 시작 전 리셋 상태이거나 응답이 깨진 것이다.
+    # 폐장 스냅샷에서 이 값이 나오면 그 날 아무도 안 움직였다는 뜻이라 사실상 없다.
+    if advancers == 0 and decliners == 0:
+        flags.append("BREADTH_NO_MOVEMENT")
+
+    # 알 수 없는 sign 코드. 이게 있으면 signed_change 가 None 이 되어 아래 부호
+    # 교차검증이 통째로 꺼진다 - 검사가 막으려던 실패 모드가 검사를 끄는 조건이므로
+    # 반드시 흔적을 남긴다.
+    if sign not in SIGN_TO_DIRECTION:
+        flags.append("SIGN_CODE_UNKNOWN")
+
     # 부호 교차검증 - sign 과 등락률의 방향이 어긋나면 둘 중 하나를 잘못 읽은 것이다.
     if signed_change is not None and change_pct is not None:
         if (signed_change > 0) != (change_pct > 0) and change_pct != 0 and signed_change != 0:
@@ -359,8 +419,13 @@ def parse_breadth(
         coverage = round(total_count / listed_count, 4)
         if not (COVERAGE_WARN_LOW <= coverage <= COVERAGE_WARN_HIGH):
             flags.append("COVERAGE_OUT_OF_BAND")
+    else:
+        # **검사를 통과한 것과 검사를 못 한 것을 같은 값으로 기록하지 않는다.**
+        # listed_count 가 None 이든 0 이든 등락종목수를 검증할 수단이 없는 상태다.
+        flags.append("COVERAGE_UNVERIFIED")
 
-    if "BREADTH_COUNT_MISSING" in flags or "BREADTH_ALL_ZERO" in flags:
+    fatal = {"BREADTH_COUNT_MISSING", "BREADTH_ALL_ZERO", "BREADTH_NEGATIVE"}
+    if fatal & set(flags):
         quality = "FAIL"
     elif flags:
         quality = "WARN"
@@ -564,24 +629,90 @@ def _check_mixed_types():
 def _check_quality_flags():
     c, ob = _ctx(SessionPhase.POST_CLOSE, _dt(2026, 7, 30, 6, 30)), _dt(2026, 7, 30, 8, 0)
 
-    missing = {**_SAMPLE_KOSPI, "highjo": None}
-    s = parse_breadth(missing, INDEX_SPECS[0], context=c, observed_at=ob)
+    def q(patch, listed=950):
+        return parse_breadth({**_SAMPLE_KOSPI, **patch}, INDEX_SPECS[0],
+                             context=c, observed_at=ob, listed_count=listed)
+
+    s = q({"highjo": None})
     assert s.quality_status == "FAIL" and "BREADTH_COUNT_MISSING" in s.values["flags"]
 
-    zero = {**_SAMPLE_KOSPI, "highjo": 0, "lowjo": 0, "unchgjo": 0}
-    s = parse_breadth(zero, INDEX_SPECS[0], context=c, observed_at=ob)
+    s = q({"highjo": 0, "lowjo": 0, "unchgjo": 0})
     assert s.quality_status == "FAIL" and "BREADTH_ALL_ZERO" in s.values["flags"]
 
+    # 음수는 합계가 0 이 아니라서 ALL_ZERO 를 빠져나간다. 따로 잡아야 한다.
+    s = q({"highjo": -605})
+    assert s.quality_status == "FAIL" and "BREADTH_NEGATIVE" in s.values["flags"]
+
+    # 상승·하락 0, 전부 보합 - 합계는 상장수와 같아 예전엔 PASS 로 통과했다
+    s = q({"highjo": 0, "lowjo": 0, "unchgjo": 941})
+    assert "BREADTH_NO_MOVEMENT" in s.values["flags"], s.values["flags"]
+    assert s.quality_status == "WARN"
+
     # sign 은 상승인데 등락률은 음수 - 둘 중 하나를 잘못 읽은 것이다
-    mism = {**_SAMPLE_KOSPI, "sign": "2"}
-    s = parse_breadth(mism, INDEX_SPECS[0], context=c, observed_at=ob)
+    s = q({"sign": "2"})
     assert s.quality_status == "WARN" and "SIGN_DIRECTION_MISMATCH" in s.values["flags"]
 
+    # 모르는 sign 코드는 부호 교차검증을 통째로 끈다. 흔적을 반드시 남긴다.
+    for bad_sign in ("", "9", "X"):
+        s = q({"sign": bad_sign})
+        assert "SIGN_CODE_UNKNOWN" in s.values["flags"], bad_sign
+        assert s.quality_status == "WARN"
+        assert s.values["change"] is None and s.values["direction"] is None
+
     # 상장 수의 10% 밖에 안 잡히면 WARN
-    s = parse_breadth(_SAMPLE_KOSPI, INDEX_SPECS[0], context=c, observed_at=ob,
-                      listed_count=9410)
+    s = q({}, listed=9410)
     assert s.quality_status == "WARN" and "COVERAGE_OUT_OF_BAND" in s.values["flags"]
+
+    # **검사를 못 한 것과 통과한 것을 같게 기록하지 않는다.** None 과 0 둘 다.
+    for listed in (None, 0):
+        s = q({}, listed=listed)
+        assert "COVERAGE_UNVERIFIED" in s.values["flags"], listed
+        assert s.quality_status == "WARN" and s.values["coverage_ratio"] is None
+
+    # 정상은 여전히 PASS 여야 한다(플래그를 늘리다 정상까지 WARN 으로 만들면 안 된다)
+    assert q({}).quality_status == "PASS"
     print("  DQ Flag                  OK")
+
+
+def _check_numeric_edges():
+    """NaN/Infinity/거대수가 계약을 깨지 않는지. 계약은 '못 읽으면 None' 이다."""
+    for bad in (float("nan"), float("inf"), float("-inf"), "NaN", "Infinity", "-Infinity",
+                "nan", "1e999", True, False, [], {}):
+        assert _as_int(bad) is None, f"_as_int({bad!r}) -> {_as_int(bad)!r}"
+        assert _as_decimal(bad) is None, f"_as_decimal({bad!r}) -> {_as_decimal(bad)!r}"
+
+    # 정상값은 그대로 통과
+    assert _as_int("1,234") == 1234 and _as_int(605) == 605 and _as_int(605.9) == 605
+    assert _as_decimal("5593.56") == Decimal("5593.56")
+    assert _as_decimal("-1.23") == Decimal("-1.23")
+    assert _as_int("") is None and _as_int(None) is None
+
+    # NaN 이 섞여 들어와도 예외 없이 FAIL 로 떨어져야 한다
+    s = parse_breadth({**_SAMPLE_KOSPI, "highjo": float("nan")}, INDEX_SPECS[0],
+                      context=_ctx(SessionPhase.POST_CLOSE, _dt(2026, 7, 30, 6, 30)),
+                      observed_at=_dt(2026, 7, 30, 8, 0), listed_count=950)
+    assert s.quality_status == "FAIL" and "BREADTH_COUNT_MISSING" in s.values["flags"]
+    print("  수치 경계값              OK")
+
+
+def _check_fail_not_written():
+    """FAIL 행은 Repository 가 거부해야 한다 - do nothing 이라 한 번 들어가면 끝이다."""
+    from market_repository import TimescaleMarketRepository
+
+    s = parse_breadth({**_SAMPLE_KOSPI, "highjo": 0, "lowjo": 0, "unchgjo": 0},
+                      INDEX_SPECS[0],
+                      context=_ctx(SessionPhase.POST_CLOSE, _dt(2026, 7, 30, 6, 30)),
+                      observed_at=_dt(2026, 7, 30, 8, 0))
+    assert s.quality_status == "FAIL"
+
+    # 연결 없이 검증부만 태운다
+    repo = TimescaleMarketRepository.__new__(TimescaleMarketRepository)
+    try:
+        TimescaleMarketRepository.write_market_breadth(repo, [s.to_row()])
+        raise AssertionError("FAIL 행이 Repository 를 통과했다")
+    except ValueError as e:
+        assert "FAIL" in str(e)
+    print("  FAIL 적재 차단           OK")
 
 
 def _check_session_resolution():
@@ -631,10 +762,29 @@ def _check_session_resolution():
     assert r(None, _dt(2026, 7, 30, 15, 42), today=t31, recent=[]).phase \
         is SessionPhase.CALENDAR_MISSING
 
-    # 개장 시각이 일정해야만 '오늘 개장 예정' 을 유도한다
-    assert derive_open_time_of_day(_RECENT) == time(0, 0, tzinfo=timezone.utc)
+    # 개장 시각이 일정해야만 '오늘 개장 예정' 을 유도한다. KST 기준으로 돌려준다.
+    assert derive_open_time_of_day(_RECENT) == time(9, 0, tzinfo=KST)
     mixed = _RECENT[:2] + [(date(2026, 7, 28), _dt(2026, 7, 28, 1, 0), _dt(2026, 7, 28, 6, 30))]
     assert derive_open_time_of_day(mixed) is None
+
+    # ▶ 회귀: 개장이 09:00 KST 보다 이르면 UTC 정규화가 날짜를 하루 밀어
+    #   "개장 지났으면 거부" 가드를 하루 내내 무력화했다(적대적 검토 2026-07-31).
+    early = [
+        (date(2026, 7, d),
+         datetime.combine(date(2026, 7, d), time(8, 30, tzinfo=KST)),
+         datetime.combine(date(2026, 7, d), time(15, 30, tzinfo=KST)))
+        for d in (30, 29, 28, 27, 24)
+    ]
+    assert derive_open_time_of_day(early) == time(8, 30, tzinfo=KST)
+    t31 = date(2026, 7, 31)
+    # KST 07-31 11:00 = 장중. Calendar 에 오늘이 없으므로 거부돼야 한다.
+    midday = datetime.combine(t31, time(11, 0, tzinfo=KST)).astimezone(timezone.utc)
+    assert r(None, midday, today=t31, recent=early).phase is SessionPhase.CALENDAR_MISSING, (
+        "이른 개장에서 장중 수집이 PRIOR_CLOSE 로 새어나갔다"
+    )
+    # 같은 Calendar 로 개장 전(07-31 07:00 KST)은 여전히 직전 종가로 떨어진다
+    before_open = datetime.combine(t31, time(7, 0, tzinfo=KST)).astimezone(timezone.utc)
+    assert r(None, before_open, today=t31, recent=early).phase is SessionPhase.PRIOR_CLOSE
     print("  세션 판정                OK")
 
 
@@ -738,6 +888,19 @@ def _collect_and_report() -> int:
         if v["flags"]:
             print(f"      flags: {v['flags']}")
 
+    # ▶ FAIL 은 적재하지 않는다 (2026-07-31)
+    #   PK 가 (event_time, market, source) 이고 on conflict do nothing 이라 **같은
+    #   세션에 대해 먼저 쓰인 행이 영구히 이긴다.** 불량 행을 한 번 넣으면 이후 정상
+    #   수집이 duplicates 로 집계되어 조용히 버려지고, 그 세션은 영영 복구되지 않는다.
+    #   그래서 불량은 저장이 아니라 차단이다(개발 원칙 9).
+    bad = [s for s in snaps if s.quality_status == "FAIL"]
+    if bad:
+        raise BreadthError(
+            "quality_status=FAIL 스냅샷이 있어 적재하지 않는다 - 한 번 들어가면 같은 "
+            "세션의 정상 데이터가 영구히 막힌다: "
+            + "; ".join(f"{s.market} {s.values['flags']}" for s in bad)
+        )
+
     dsn = env.get("TIMESCALE_DATABASE_URL")
     if not dsn:
         print("\n  TIMESCALE_DATABASE_URL 이 없어 적재는 건너뛴다")
@@ -772,7 +935,9 @@ if __name__ == "__main__":
     _check_parsing()
     _check_mixed_types()
     _check_quality_flags()
+    _check_numeric_edges()
     _check_session_resolution()
     _check_collect_refuses()
     _check_row_contract()
-    print("Breadth 6개 영역 통과. 실제 수집은 --collect")
+    _check_fail_not_written()
+    print("Breadth 8개 영역 통과. 실제 수집은 --collect")

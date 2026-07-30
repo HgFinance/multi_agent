@@ -184,6 +184,9 @@ class SupabaseReferenceRepository(ReferenceRepository):
 
         register_uuid()
         self._execute_values = execute_values
+        # upsert_news_documents 가 채운다. 공급자가 정정한 기사의 external_id 다 -
+        # 저장은 최초 관측본을 유지하므로(PIT) 정정 사실은 여기로만 드러난다.
+        self.last_revisions: tuple[str, ...] = ()
         self._conn = psycopg2.connect(
             dsn or load_project_env()["DATABASE_URL"], connect_timeout=20
         )
@@ -517,6 +520,22 @@ class SupabaseReferenceRepository(ReferenceRepository):
         if not rows:
             return 0, 0, {}
 
+        # 이미 있는 문서의 제목을 미리 읽는다. 공급자가 기사를 정정하면 external_id 는
+        # 그대로인 채 headline 만 바뀌는데, 그걸 그냥 덮어쓰면 정정 전 시점의
+        # Backtest 가 정정 후 문장을 보게 된다(개발 원칙 5).
+        exts = [r.external_id for r in records]
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "select external_id, title from research.documents "
+                "where source_id = %s and external_id = any(%s)",
+                (source_id, exts),
+            )
+            stored_title = dict(cur.fetchall())
+        self.last_revisions = tuple(
+            r.external_id for r in records
+            if r.external_id in stored_title and stored_title[r.external_id] != r.title
+        )
+
         before = self._count("research.documents")
         with self._conn.cursor() as cur:
             returned = self._execute_values(
@@ -527,9 +546,16 @@ class SupabaseReferenceRepository(ReferenceRepository):
                    issuer_id, published_at, observed_at, status)
                 values %s
                 on conflict (source_id, external_id) do update set
-                  title = excluded.title,
-                  canonical_url = excluded.canonical_url,
-                  published_at = excluded.published_at,
+                  -- **title 과 published_at 을 덮어쓰지 않는다.** 최초 관측 문장을
+                  -- 유지해야 observed_at <= decision_time 재현이 성립한다. 정정본을
+                  -- 반영하려면 document_versions 가 필요한데 object_path/content_hash
+                  -- 가 NOT NULL 이라 제목만 있는 뉴스로는 만들 수 없다. 그래서 정정은
+                  -- 저장하는 대신 last_revisions 로 **드러낸다**.
+                  --
+                  -- canonical_url 은 coalesce 다. normalize() 가 url 없음을 허용하므로
+                  -- 무조건 대입하면 있던 URL 이 NULL 로 지워진다.
+                  canonical_url = coalesce(excluded.canonical_url,
+                                           research.documents.canonical_url),
                   status = excluded.status,
                   -- 한 번 붙은 issuer 를 NULL 로 되돌리지 않는다. 판정 규칙이 좋아져서
                   -- 새로 붙는 것은 허용하되, 못 붙였다고 지우지는 않는다.
