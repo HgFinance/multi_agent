@@ -211,7 +211,7 @@ export const STAFF_LIST: StaffEntry[] = [
     colors: ["#7a3f58", "#c9b8ff", "#ff8fc0"],
     thoughts: ["Bull/Bear 토론 없이 바로 주문 제안 안 나가요.", "여러 종목이면 trade_case_id 하나로 묶어요."] },
   { dept: "strategy2", rank: "member", name: "이현서", role: "Bull 리서처",
-    colors: ["#d88d68", "#c9b8ff", "#c9b8ff"],
+    colors: ["#4a2e1c", "#c9b8ff", "#c9b8ff"],
     thoughts: [
       "정훈이가 또 딴지 걸겠지. 근거부터 챙기자.",
       "리서치본부가 준 근거만 씁니다. 그래야 싸울 때 안 밀려요.",
@@ -281,7 +281,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["배당·분할은 기준일부터 확인해요.", "불완전한 통지로는 최종 분개 안 올려요."] },
 
   // ── AI QA·감사본부 (qa-department) ───────────────────────
-  { dept: "qa", rank: "lead", name: "김동규", role: "QA·감사본부 팀장", callsign: "윤규아",
+  { dept: "qa", rank: "lead", name: "김동규", role: "QA·감사본부 팀장", callsign: "남감사",
     colors: ["#5a3450", "#fff3b0", "#ff8fc0"],
     thoughts: ["압박 있어도 게이트는 그대로 유지해요.", "제 Finding은 저 혼자 못 닫아요."] },
   { dept: "qa", rank: "member", name: "강태오", role: "근거(Evidence) 검증",
@@ -307,8 +307,8 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["관찰한 사실이랑 추론은 나눠서 적어요.", "증거 없이 한 명 탓 안 해요."] },
 
   // ── Agent Workforce 인사팀 (hr-department) ───────────────
-  { dept: "review", rank: "lead", name: "류영주", role: "인사팀 팀장", callsign: "남궁인사",
-    colors: ["#d88d68", "#c9b8ff", "#c9b8ff"],
+  { dept: "review", rank: "lead", name: "류영주", role: "인사팀 팀장", callsign: "류인사",
+    colors: ["#3d2818", "#c9b8ff", "#c9b8ff"],
     thoughts: ["투자 판단은 제 일이 아니에요.", "제 후보는 제가 최종 승인 못 해요."] },
   { dept: "review", rank: "member", name: "임도훈", role: "채용 우선순위 기획",
     colors: ["#3a2f4d", "#ffe6f2", "#ff8fc0"],
@@ -324,7 +324,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["Identity 생성은 Platform/IAM 몫이지 제가 아니에요.", "승인 났는데 정리 안 된 채로 안 놔둬요."] },
 
   // ── CEO Office 지원팀 (Chief-of-Staff, executive-orchestrator 보조) ──
-  { dept: "secretary", rank: "lead", name: "박유안", role: "Chief of Staff 지원", callsign: "유대표",
+  { dept: "secretary", rank: "lead", name: "박유안", role: "Chief of Staff 지원", callsign: "박비서",
     colors: ["#313b56", "#fff3b0", "#fff3b0"],
     thoughts: ["6개 본부 결과를 하나의 설명으로 묶어요.", "주문 전송·리스크 승인 권한은 저희한테 없어요."] },
   { dept: "secretary", rank: "member", name: "박지현", role: "회의록·Action Item 추적",
