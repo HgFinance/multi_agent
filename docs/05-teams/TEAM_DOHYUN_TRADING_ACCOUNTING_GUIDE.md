@@ -41,7 +41,7 @@
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
+| 구분 | 현재 경로 | 구 경로 |
 |---|---|---|
 | 트레이딩 Hermes | `departments/02-trading/hermes/` | `orchestration/hermes/trading-department/` |
 | 계약·OMS·Paper Broker | `departments/02-trading/{contracts,oms,broker}/` | `trading/`, `execution/` |
@@ -51,8 +51,8 @@
 | 운영 DB Migration | `supabase/migrations/` | — (도구 표준 경로 유지, Schema별 Domain Owner 지정) |
 
 11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/02-trading/`,
-`departments/05-accounting-portfolio/`가 실행 기준이다. 구 경로는 `runpy` 기반 임시 CLI 호환 Wrapper로
-남아 있으며(2026-10-31 제거 예정), 5개 자체 점검 스크립트 모두 새 경로·구 경로 양쪽에서 통과 확인함.
+`departments/05-accounting-portfolio/`가 실행 기준이다. 구 경로(`runpy` 기반 임시 CLI 호환 Wrapper)는
+예정(2026-10-31)보다 일찍 삭제됐다 — 더 이상 존재하지 않는다. 5개 자체 점검 스크립트 모두 통과 확인함.
 `db/`와 `supabase/migrations/`는 같은 Database에 함께 적용하지 않는다. 현재 Python Prototype을 Canonical
 Schema로 옮길 때 Schema Diff, RLS와 Runtime Test를 포함한 별도 PR이 필요하다.
 

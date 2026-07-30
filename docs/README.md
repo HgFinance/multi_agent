@@ -364,7 +364,6 @@ multi_agent/
 │   ├── 06-ai-qa-audit/hermes/
 │   └── 07-agent-workforce/hermes/
 ├── skills/agentic-rag/      # 현재 Compliance RAG baseline (공용 skills 경계 유지)
-├── trading/, execution/, accounting/, fetch_news.py  # 구 경로 — 임시 CLI 호환 Wrapper (2026-10-31 제거 예정)
 ├── db/                      # 현재 D0-D2 Prototype SQL, 통합 DB와 병행 적용 금지
 ├── supabase/migrations/     # 전사 운영 DB Canonical Migration
 ├── timescaledb/migrations/  # 시장 시계열 Canonical Migration

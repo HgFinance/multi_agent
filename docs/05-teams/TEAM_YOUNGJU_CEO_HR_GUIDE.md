@@ -41,7 +41,7 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
+| 구분 | 현재 경로 | 구 경로 |
 |---|---|---|
 | CEO Hermes | `departments/00-ceo-office/hermes/` | `orchestration/hermes/ceo-agent/` |
 | Agent Workforce Hermes | `departments/07-agent-workforce/hermes/` | `orchestration/hermes/hr-department/` |
@@ -50,7 +50,7 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 | Governance·Workforce Schema | `supabase/migrations/` | — (도구 표준 경로 유지, CEO·인사팀이 Domain Owner) |
 
 11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/00-ceo-office/`,
-`departments/07-agent-workforce/`가 실행 기준이다. 구 경로는 빈 폴더로 남아 있다. `07-agent-workforce`는
+`departments/07-agent-workforce/`가 실행 기준이다. 구 경로(`orchestration/hermes/`)는 완전히 삭제됐다. `07-agent-workforce`는
 정렬용 번호일 뿐 제7의 투자 본부를 뜻하지 않는다. CEO와 인사팀 Profile, Memory와 권한은 계속 분리한다.
 
 ### Hermes 자기 개선 책임

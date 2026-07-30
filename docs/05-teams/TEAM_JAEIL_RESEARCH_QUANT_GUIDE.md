@@ -41,7 +41,7 @@
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
+| 구분 | 현재 경로 | 구 경로 |
 |---|---|---|
 | 리서치 Hermes | `departments/01-research/hermes/` | `orchestration/hermes/research-department/` |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
@@ -51,7 +51,7 @@
 | 연구 자료 | `references/` | — (저작권·공유 범위 ADR 전까지 현재 위치 유지, 이동 안 함) |
 
 11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/01-research/`가 실행 기준이다.
-구 경로는 `runpy` 기반 임시 CLI 호환 Wrapper로 남아 있으며 2026-10-31 제거 예정이다.
+구 경로(`runpy` 기반 임시 CLI 호환 Wrapper)는 예정(2026-10-31)보다 일찍 삭제됐다 — 더 이상 존재하지 않는다.
 `supabase/migrations/`와 `timescaledb/migrations/`는 본부별로 복제하지 않는다.
 
 ### Hermes 자기 개선 책임

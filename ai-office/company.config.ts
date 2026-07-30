@@ -17,24 +17,24 @@
 /** 회사 기본 정보 */
 export const COMPANY = {
   /** 좌측 상단 헤더에 뜨는 회사 이름 */
-  name: "MY AI COMPANY",
+  name: "HgFinance",
   /** 헤더 로고 배지에 들어갈 글자 1개 (이모지도 됩니다) */
-  logoLetter: "M",
+  logoLetter: "F",
   /** 화면 상단 큰 제목 (앞부분) */
-  titlePrefix: "나의",
+  titlePrefix: "자동화",
   /** 화면 상단 큰 제목 (강조되는 뒷부분) */
   titleAccent: "AI Office",
   /** 브라우저 탭 제목 */
-  pageTitle: "My AI Company — 나의 AI 사무실",
+  pageTitle: "AI Company - AI 사무실",
   /** 검색·공유될 때 뜨는 설명 */
-  description: "12개 AI 팀이 조사·기획·제작·보고까지 돌아가는 1인 크리에이터용 AI 오피스",
+  description: "12개 AI 팀이 조사·분석·감사·리스크관리까지 돌아가는 AI 오피스",
   /** 창 하단 파일명 느낌의 라벨 */
-  windowLabel: "my_ai_company.exe — 대표실",
+  windowLabel: "HgFinance.exe — 대표실",
   /** 일일 브리핑 제목에 들어갈 이름 */
   reportName: "AI Office",
 } as const;
 
-/** 대표(나) — 사무실 대표실에 앉아 있는 캐릭터 */
+/** 대표 — 사무실 대표실에 앉아 있는 캐릭터 */
 export const CEO_PROFILE = {
   name: "김대표",
   callsign: "대표님",

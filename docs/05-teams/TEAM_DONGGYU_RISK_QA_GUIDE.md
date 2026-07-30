@@ -42,7 +42,7 @@
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
+| 구분 | 현재 경로 | 구 경로 |
 |---|---|---|
 | 리스크 Hermes | `departments/03-risk/hermes/` | `orchestration/hermes/risk-management/` |
 | Compliance RAG Baseline | `skills/agentic-rag/` | — (위치 유지, 이동 안 함 — 공용 skills 경계 유지, Risk Source·공용 Artifact 분리는 ADR 후 결정) |
@@ -51,7 +51,7 @@
 | Schema Test | `tests/schema/` | — (공통 Test 경계 유지, 이동 안 함) |
 
 11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/03-risk/`,
-`departments/06-ai-qa-audit/`가 실행 기준이다. 구 경로는 빈 폴더로 남아 있다. 동규님이 두 폴더를 함께
+`departments/06-ai-qa-audit/`가 실행 기준이다. 구 경로(`orchestration/hermes/`)는 완전히 삭제됐다. 동규님이 두 폴더를 함께
 관리해도 Risk 승인과 QA 독립 검증은 별도 Service Identity, Database Role과 Review Gate를 유지한다.
 
 ### Hermes 자기 개선 책임

@@ -16,14 +16,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. 실행 가능한 코드 — `departments/01-research/collectors/news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
    거래 생명주기 구현(`db/`, `departments/02-trading/{contracts,oms,broker}/`, `departments/05-accounting-portfolio/{ledger,reconciliation}/`).
 
-트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있https://github.com/HgFinance/multi_agent/pull/5/conflict?name=docs%252F02-engineering%252FREPOSITORY_DEPARTMENT_STRUCTURE.md&ancestor_oid=c586455b97a03d7cd7cc64f435ce653018825381&base_oid=0c262b96cea33af5b733379fcbf11c210d3b7881&head_oid=92e3c25d0fa63de7e047cd96246e473a83ac9264고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
+트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
 
 트레이딩·회계 코드는 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전이라
 재작업 예정이다. 각 부서 `config.yaml`의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
 표시한다.
 
-`orchestration/hermes/<department>/`, 루트 `trading/`, `execution/`, `accounting/`, 루트 `fetch_news.py`는 위 새 경로로 이동한 뒤 남은
-**임시 CLI 호환 Wrapper**다(2026-10-31 제거 예정, [REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 11절 단계 3). 새 코드는 이 구 경로를 참조하지 않는다.
+구 경로 `orchestration/hermes/<department>/`, 루트 `trading/`, `execution/`, `accounting/`, 루트 `fetch_news.py`는
+이동 후 삭제됐다 — 위 새 경로가 유일한 실행 경로다. 임시 CLI 호환 Wrapper는 예정보다 일찍(2026-07-30) 제거됐다.
 DB Prototype 통합(단계 4)과 구조 Gate(단계 5)는 아직 진행 전이며, `db/`와 `references/`는 그대로다.
 
 Frontend의 현재 실행 경로는 `ai-office/`이고 목표 경로는 `apps/operator-web/`다. 이름만 바꿔 현재 Demo를 금융 상태처럼 사용하지 않는다. 8개 조직, REST Snapshot, FastAPI WebSocket, Mode 분리와 Command 경계는 [AI Office Frontend Plan](docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
@@ -68,8 +68,6 @@ python departments/02-trading/broker/paper_broker.py                  # Paper Br
 python departments/05-accounting-portfolio/ledger/ledger.py           # 원장 불변식 10개
 python departments/05-accounting-portfolio/reconciliation/reconciliation.py  # 대사 12개
 ```
-
-(구 경로 `python trading/contracts.py` 등도 호환 Wrapper로 동일하게 동작한다.)
 
 목표 스택은 [TECH_STACK_DECISIONS.md](docs/02-engineering/TECH_STACK_DECISIONS.md)가 정한 `pytest + pytest-asyncio + Hypothesis + respx + testcontainers`와 `ruff + pyright + pip-audit + bandit`이다. 실제로 도입하면 위 자체 점검을 pytest로 옮기고 이 절을 갱신한다.
 
