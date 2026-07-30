@@ -8,7 +8,7 @@ import {
   CEO_SEAT,
   COLS,
   DEPT_ROOMS,
-  ENTRANCE,
+  ELEVATOR,
   LOUNGE_ROOM,
   MEETING_SEATS,
   doorApproach,
@@ -141,25 +141,19 @@ const PHASES = [
   "업무 종료",
 ];
 
-const BLOCKED_DEPTS = new Set(["brand", "partner", "finance"]);
+const BLOCKED_DEPTS = new Set<string>([]);
 
 /** 연동 대기 부서가 멈춰 있는 진짜 이유 */
 const BLOCK_REASON: Record<string, string> = {
-  brand: "Instagram 계정이 아직 연동 전이라 지표를 읽을 수 없어요. 없는 숫자를 만들지는 않습니다. 연동만 되면 바로 돌려요.",
-  partner: "Gmail 연동 전이라 협업 메일을 못 읽어요. 연결되면 답장 초안까지 준비해둡니다.",
   finance: "재무 현황 파일이 아직 안 왔어요. 대표님이 파일만 주시면 그날 안에 정리합니다.",
 };
 
 /** 지시창에서 부서를 찾을 때 쓰는 키워드 — 구체적인 것부터 검사한다 */
 const DEPT_KEYWORDS: [string, string[]][] = [
   ["qa", ["qa", "큐아", "검수", "금칙어", "윤규아"]],
-  ["brand", ["인텔", "페르소나", "박보라", "브랜드 인텔"]],
   ["strategy1", ["전략 1", "전략1", "기획", "아이디어", "최아름", "톱3", "top 3"]],
   ["strategy2", ["전략 2", "전략2", "대본", "한도빈", "스크립트"]],
   ["research", ["시장조사", "리서치", "조사팀", "뉴스", "김서연"]],
-  ["reels", ["릴스", "영상", "편집", "송리원"]],
-  ["carousel", ["캐러셀", "카드뉴스", "canva", "칸바", "이가림"]],
-  ["partner", ["파트너", "협찬", "광고 제안", "메일", "정파랑"]],
   ["finance", ["재무", "정산", "입금", "돈", "오재민"]],
   ["review", ["성과", "리뷰", "지표", "강성아"]],
   ["ops", ["자동화", "운영팀", "스케줄", "안도현"]],
@@ -239,8 +233,8 @@ export class Company {
 
     for (const seed of STAFF) {
       const pool = seats.get(seed.deptId);
-      const home = pool?.shift() ?? { x: ENTRANCE.x, y: ENTRANCE.y - 2 };
-      this.spawn(seed, home, { x: ENTRANCE.x, y: ENTRANCE.y });
+      const home = pool?.shift() ?? { x: ELEVATOR.x, y: ELEVATOR.y - 2 };
+      this.spawn(seed, home, { x: ELEVATOR.x, y: ELEVATOR.y });
     }
     this.spawn(CEO, CEO_SEAT, CEO_SEAT);
 
@@ -252,7 +246,7 @@ export class Company {
     for (const room of DEPT_ROOMS) {
       this.deptStatus[room.id] = BLOCKED_DEPTS.has(room.id) ? "연동 대기" : "대기";
     }
-    this.pushLog("🎀", "대표실 준비 완료. 출근 버튼을 기다리는 중이에요.", "lav");
+    this.pushLog("👑", "대표실 준비 완료. 출근 버튼을 기다리는 중이에요.", "lav");
     this.pushChat("staff", "김세리", "대표님, 비서실장 김세리입니다. 궁금한 건 여기에 바로 물어보세요.");
   }
 
@@ -389,15 +383,7 @@ export class Company {
     this.phaseIndex = 2;
     yield* this.runDept("research", "AI 뉴스·공식 출처 검증", 6.5, "오늘 검증된 후보 5개를 뽑았어요.");
 
-    // ③ 브랜드 분석 — 연동 대기라 라운지로
     this.phaseIndex = 3;
-    const bora = this.agentById.get("brand-lead")!;
-    this.stand(bora);
-    this.say(bora, "Instagram 미연동이라 수치는 못 만들어요.", 3);
-    this.pushLog("🧬", "브랜드 인텔리전스팀: Instagram 미연동 → 분석값을 만들지 않고 기록만 남김", "lav");
-    this.goto(bora, rand(LOUNGE_ROOM.loiter), "휴식");
-    this.enqueue(bora, { k: "wait", dur: 4 }, { k: "fn", fn: () => this.say(bora, "연결되면 바로 돌립니다.", 2.4) });
-    this.sitAtDesk(bora);
     this.pushLog("💌", "파트너십·재무팀: Gmail·재무 파일 연동 전이라 오늘은 대기합니다.", "lav");
 
     // ④ 회의 1 — 시장조사 → 전략1 → QA 인수인계
@@ -481,19 +467,12 @@ export class Company {
     yield this.allFree([...approvers, ceo]);
     this.unlock([...approvers, ceo]);
 
-    // ⑨ 대본 작성
+    // ⑨ Bull·Bear 토론 -> 대본 작성
     this.phaseIndex = 8;
+    yield* this.debate();
     yield* this.runDept("strategy2", "릴스·캐러셀 대본 집필", 7, "대본 2종 완성했어요. 결론까지 단정형으로 닫았어요.");
 
-    // ⑩ 제작 인수인계 → 릴스·캐러셀 동시 작업
     this.phaseIndex = 9;
-    yield* this.deliver("strategy2-lead", "reels", "릴스 대본 넘길게요. 30초 컷이에요.", "받았어요! 무음컷부터 칠게요.");
-    yield* this.deliver("strategy2-lead", "carousel", "캐러셀 원고예요. 9장 분량!", "표지 3안부터 뽑을게요.");
-
-    this.startDept("reels", "Drive 원본 접수·초안 편집", 8);
-    this.startDept("carousel", "Canva 페이지 복제·텍스트 교체", 8);
-    yield () => this.deptStatus.reels === "완료" && this.deptStatus.carousel === "완료";
-    this.pushLog("🎬", "릴스 초안 1건 · 캐러셀 9장 제작 완료 (원본 마스터는 그대로 보존)", "mint");
 
     // ⑪ 저장 + 성과 기록
     this.phaseIndex = 10;
@@ -526,7 +505,7 @@ export class Company {
     this.phaseIndex = 12;
     this.dayComplete = true;
     this.running = false;
-    this.pushLog("🎀", "오늘 업무 종료. 직원들이 라운지로 이동합니다.", "yellow");
+    this.pushLog("👑", "오늘 업무 종료. 직원들이 라운지로 이동합니다.", "yellow");
 
     for (const agent of workers) {
       if (Math.random() < 0.45) {
@@ -618,6 +597,57 @@ export class Company {
   }
 
   /** 부서 간 전달 — 직접 걸어가서 말하고 돌아온다 */
+  /** Bull·Bear 리서처가 마주 보고 티격태격한다.
+   *
+   * 서로 헐뜯는 게 아니라 같은 팀이라 말이 편하다 — 근거는 리서치본부 것만 쓰고,
+   * 마지막엔 무효화 조건에 합의한다. TradingAgents의 Bull/Bear 토론 구조를
+   * 화면에서 보이게 만든 것이다.
+   */
+  private *debate() {
+    const bull = this.agents.find((agent) => agent.role === "Bull 리서처");
+    const bear = this.agents.find((agent) => agent.role === "Bear 리서처");
+    if (!bull || !bear) return;
+
+    const rounds: [Agent, string][] = [
+      [bull, "이건 진짜 간다니까? 거래량이 3배야."],
+      [bear, "또 시작이네. 그 거래량 어제 공시 때문이잖아."],
+      [bull, "공시가 이유면 더 좋은 거 아냐?"],
+      [bear, "일회성이면 다음 주에 빠져. 내기할래?"],
+      [bull, "콜. 대신 지면 커피 사기다."],
+      [bear, "좋아. 근데 무효화 조건은 같이 적자."],
+      [bull, "그건 인정. 네 지적이 늘 거기서 맞더라."],
+      [bear, "이번엔 나도 네 쪽이 맞았으면 좋겠어."],
+    ];
+
+    this.lock([bull, bear]);
+    this.stand(bull);
+    this.stand(bear);
+    // 서로 마주 보게 세운다
+    this.goto(bull, { x: bear.home.x - 1, y: bear.home.y + 1 }, "회의 중");
+    yield this.allFree([bull]);
+    bull.facing = "right";
+    bear.facing = "left";
+    this.pushLog("⚔️", "Bull·Bear 리서처 토론 시작 — 같은 근거로 반대 결론을 만든다", "yellow");
+
+    for (const [speaker, line] of rounds) {
+      speaker.anim = "talk";
+      this.say(speaker, line, 2.4);
+      yield 1.5;
+      speaker.anim = "idle";
+    }
+
+    this.pushChat(
+      "staff",
+      bear.name,
+      `${bull.name}님이랑 오늘도 한판 했습니다. 무효화 조건까지는 합의했어요.`,
+    );
+    this.pushLog("🤝", "토론 종료 — 상승·하락 논리와 무효화 조건이 함께 기록됨", "mint");
+    this.sitAtDesk(bull);
+    this.sitAtDesk(bear);
+    yield this.allFree([bull, bear]);
+    this.unlock([bull, bear]);
+  }
+
   private *deliver(fromId: string, toDeptId: string, line: string, reply: string) {
     const from = this.agentById.get(fromId)!;
     const toLead = this.agentById.get(DEPT_LEAD[toDeptId].id)!;
@@ -865,7 +895,7 @@ export class Company {
       this.say(agent, rand(["감사합니다 🩷", "힘나요!", "더 잘할게요 ✨"]), 3.2);
     }
     this.pushChat("staff", "김세리", "대표님 한마디에 사무실 분위기가 확 살았어요 🩷");
-    this.pushLog("🎀", "대표 격려 — 전 직원 사기 상승", "pink");
+    this.pushLog("👑", "대표 격려 — 전 직원 사기 상승", "pink");
   }
 
   private convene() {
