@@ -18,6 +18,10 @@
 /.vinext/
 /out/
 
+# vite (dev server dependency pre-bundling cache — 매번 자동 재생성됨)
+/.vite/
+**/.vite/
+
 # misc
 .DS_Store
 *.pem
