@@ -26,12 +26,28 @@ agent:
 
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
-# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)은 다음 확장 대상
+# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
 agentic_rag:
   framework: langgraph
   status: "compliance-policy-agent baseline 구현됨 (skills/agentic-rag/)"
   target_personas:
     - compliance-policy-agent  # Mandate / Restricted List / Policy Store 버전 고정 문서를 검색해 정책 위반 여부 판단
+
+# 2026-07-30 기법 배정 결정 (동규님, "내 부서에 한해서만" 범위) — 아직 미구현인 항목도 기록만 해둔다.
+# Risk 페르소나 중 검색-근거-생성 루프가 필요한 건 compliance-policy-agent 하나뿐이고, 나머지
+# 4개(market-liquidity/derivatives-margin/pre-trade/operational-counterparty)는 정형 데이터 계산이라
+# RAG 대상이 아니다 — risk_engine.py/trading_state_store.py 같은 결정론적 서비스로 남는다.
+rag_technique_assignment:
+  compliance-policy-agent:
+    technique: agentic_rag
+    status: implemented
+    note: "skills/agentic-rag/ baseline. corpus/compliance/ 문서 검색 -> grade -> generate -> hallucination_check"
+  # LightRAG(Entity-level + Summary-level dual retrieval)은 compliance-policy-agent의 차기 백엔드
+  # 후보 — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면
+  # nodes.py를 고치지 않고 교체 가능(CLAUDE.md skills/agentic-rag 절 참고). Mandate/Restricted List
+  # 버전 이력이 늘어나 단일 문서 검색으로 정확도가 떨어질 때 재검토한다. 지금은 근거 없음(백로그).
+  # Neo4j/Hypergraph는 Risk 쪽에 그래프 형태 스키마가 없어 배정하지 않는다(QA의 audit.artifact_lineage와
+  # 다름) — 배정하려면 먼저 그래프 형 데이터(예: Position-Strategy-Signal 관계)가 있어야 한다.
 
 # 결정론적 서비스. 에이전트는 이 계층을 우회할 수 없고, Pre-trade Hot Path는 LLM 호출 없이
 # 끝난다 (팀 가이드 2절). risk-supervisor/pre-trade-risk-analyst는 이 엔진의 판정을 해석·

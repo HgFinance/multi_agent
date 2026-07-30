@@ -38,6 +38,8 @@ python departments/06-ai-qa-audit/audit/ops_health_monitor.py
 python departments/06-ai-qa-audit/audit/trace_recorder.py
 python departments/06-ai-qa-audit/audit/tool_permission_check.py
 python departments/06-ai-qa-audit/audit/incident_timeline.py
+python3 skills/agentic-rag/main.py --persona evidence-qa-agent \
+  --query "SYMBOL_A Q2 2026 revenue grew 14.2% year-over-year" --as-of 2026-07-29
 ```
 
 ## 테스트
@@ -55,6 +57,11 @@ python departments/06-ai-qa-audit/audit/incident_timeline.py
 - `audit/incident_timeline.py` — Incident Timeline/Corrective Action 9개 시나리오 자체 점검
   (Fact/Inference 분리, occurred_at 순 재현, 상태 순서 강제, 본인 검증 금지).
 - `bandit`/`pip-audit` 스캔 완료 — 실제 이슈 0건 (2026-07-30).
+- `skills/agentic-rag/` `--persona evidence-qa-agent` — `corpus/evidence/`의 SAMPLE_PLACEHOLDER 문서
+  (Earnings Release, Analyst Note, PIT 만료가 있는 News Article)로 실제 OpenAI 호출까지 포함한
+  End-to-End 샘플 테스트 완료(2026-07-30): 근거로 뒷받침되는 주장 → SUPPORTED, 근거 없는 주장 →
+  UNSUPPORTED(escalate), `effective_to`를 지난 `as_of`로 조회 → 해당 문서가 PIT 필터에 걸러져
+  UNSUPPORTED. 기존 `compliance-policy-agent` 페르소나도 리팩터 후 회귀 없음 확인.
 
 ## Handoff
 
@@ -76,6 +83,12 @@ python departments/06-ai-qa-audit/audit/incident_timeline.py
 - `audit/incident_timeline.py` — DoD 10번. `audit.incident_events`(FACT/INFERENCE 분리 기록,
   발생 시각 순 재현), `audit.corrective_actions`(OPEN→IN_PROGRESS→VERIFYING→COMPLETED만 허용,
   담당자 본인이 스스로 검증·종료 불가 — "QA 검증 후 Close" 불변식).
+- `evidence-qa-agent`의 Agentic RAG는 `skills/agentic-rag/`(공용 skills 경계 유지, Risk가 Domain Owner,
+  QA는 재사용)에 구현됨 — `corpus/evidence/`의 SAMPLE_PLACEHOLDER 근거 문서를 검색해 Claim의 출처를
+  인용한다. 최종 PASS/WARN/FAIL 판정은 여전히 `evidence_qa_engine.py`가 하며, 이 RAG는 근거 인용
+  보조 도구일 뿐이다. `hallucination-critic`은 이 grounded 판정을 재사용할 예정이라 별도 corpus 없이
+  미착수 상태. 기법 배정 전체 결정(Neo4j/Hypergraph 포함)은 `hermes/config.yaml`의
+  `rag_technique_assignment:` 참고.
 - Eval, Model-Risk 모듈은 아직 미구현(P1 tier: model-risk-agent, internal-audit-agent,
   incident-postmortem-agent) — 코드가 생기면 `evals/`, `model-risk/`에 배치.
 - 미착수(기술적으로 지금 불가능한 것과 범위 밖인 것을 구분해서 기록): Agent/Tool Trace 실제 저장과

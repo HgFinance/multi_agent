@@ -40,7 +40,8 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
   연결, 미설정/설정/덮어쓰기/해제, Redis 장애 시 예외와 fail-closed(HALTED) 구분,
   `risk_engine.RiskEngine`과의 End-to-End 통합 — Redis의 ENTRY_BLOCKED가 실제 주문을 막음).
 - `compliance-policy-agent`의 Agentic RAG baseline은 `skills/agentic-rag/`(공용 skills 경계 유지, 이 본부가
-  Domain Owner) 참고.
+  Domain Owner) 참고. 나머지 4개 페르소나는 정형 데이터 계산이라 RAG 대상이 아니다 — 기법 배정 결정과
+  LightRAG 백엔드 교체 후보 기록은 `hermes/config.yaml`의 `rag_technique_assignment:` 참고.
 
 ## Handoff
 
