@@ -28,6 +28,8 @@ Schema/필수 Field 위반(팀 가이드 7.1 #1)은 여기서 생성 시점에 �
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -238,7 +240,11 @@ class FindingDraft:
 
 @dataclass(frozen=True)
 class QaAssessment:
-    """audit.qa_decisions 1행 + 딸린 claim_checks/findings."""
+    """audit.qa_decisions 1행 + 딸린 claim_checks/findings.
+
+    calculation_version/input_hash는 risk_engine.py의 RiskAssessment와 같은 원칙(팀 가이드
+    DoD "Decision을 입력·Policy·Calculation Version으로 재현할 수 있다")이지만, audit.qa_decisions
+    테이블 자체엔 이 두 컬럼이 없다 - DB에 쓸 때는 conditions jsonb 안에 넣는다."""
 
     qa_decision_id: UUID
     artifact_version_id: UUID
@@ -250,10 +256,61 @@ class QaAssessment:
     decided_by: str
     trace_id: UUID
     decided_at: datetime
+    calculation_version: str
+    input_hash: str
 
     @property
     def blocked(self) -> bool:
         return self.decision is QaDecisionValue.FAIL
+
+
+def _claim_hash_payload(claim: Claim) -> dict:
+    return {
+        "claim_index": claim.claim_index, "text": claim.text, "kind": claim.kind.value,
+        "subject": claim.subject,
+        "numeric_value": str(claim.numeric_value) if claim.numeric_value is not None else None,
+        "unit": claim.unit, "evidence_ids": sorted(str(e) for e in claim.evidence_ids),
+        "acknowledges_uncertainty": claim.acknowledges_uncertainty, "tool_source": claim.tool_source,
+    }
+
+
+def _evidence_hash_payload(store: EvidenceStore, evidence_ids: set[UUID]) -> list[dict]:
+    # 이 Artifact가 실제로 인용한 근거만 해시에 넣는다 - EvidenceStore 전체를 넣으면 이
+    # Artifact와 무관한 근거가 추가돼도 해시가 바뀌어버려 재현성 판단이 왜곡된다.
+    payload = []
+    for eid in sorted(evidence_ids, key=str):
+        chunk, access = store.lookup(eid)
+        if chunk is None:
+            payload.append({"evidence_id": str(eid), "found": False})
+            continue
+        payload.append({
+            "evidence_id": str(eid), "found": True, "granted": access.granted,
+            "published_at": chunk.published_at.isoformat(), "observed_at": chunk.observed_at.isoformat(),
+            "numeric_value": str(chunk.numeric_value) if chunk.numeric_value is not None else None,
+            "unit": chunk.unit,
+        })
+    return payload
+
+
+def _context_hash(artifact: Artifact, ctx: QaContext) -> str:
+    """같은 Artifact·같은 근거 상태·같은 Checker Version이면 항상 같은 해시 - 판정
+    재현성의 근거다(risk_engine.py의 _context_hash와 같은 목적)."""
+    all_evidence_ids = {e for c in artifact.claims for e in c.evidence_ids}
+    payload = {
+        "artifact_version_id": str(artifact.artifact_version_id),
+        "artifact_type": artifact.artifact_type,
+        "claims": [_claim_hash_payload(c) for c in artifact.claims],
+        "tool_results": [
+            {"tool_name": t.tool_name, "output_values": {k: str(v) for k, v in t.output_values.items()}}
+            for t in artifact.tool_results
+        ],
+        "evidence": _evidence_hash_payload(ctx.evidence_store, all_evidence_ids),
+        "decision_time": ctx.decision_time.isoformat(),
+        "checker_version": ctx.checker_version,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
 
 
 class EvidenceQaEngine:
@@ -321,6 +378,8 @@ class EvidenceQaEngine:
             decided_by=self.service_identity,
             trace_id=artifact.trace_id,
             decided_at=ctx.decision_time,
+            calculation_version=ctx.checker_version,
+            input_hash=_context_hash(artifact, ctx),
         )
 
     @staticmethod
@@ -608,10 +667,16 @@ if __name__ == "__main__":
     except ValidationError:
         pass
 
-    # 17. 재현성 - 같은 Artifact·Context를 두 번 평가하면 같은 판정
+    # 17. 재현성 - 같은 Artifact·Context를 두 번 평가하면 같은 판정과 같은 input_hash
     r17a = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     r17b = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     assert r17a.decision is r17b.decision
     assert [c.result for c in r17a.claim_checks] == [c.result for c in r17b.claim_checks]
+    assert r17a.input_hash == r17b.input_hash, "같은 Artifact·Context인데 input_hash가 다름"
+    assert r17a.calculation_version == CHECKER_VERSION
 
-    print("ok - Evidence QA Engine 17개 시나리오 점검 통과")
+    # 18. 다른 Artifact(다른 Claim 내용)면 input_hash도 달라야 한다
+    r18 = engine.check_artifact(a2, ctx_with(EvidenceStore()))
+    assert r18.input_hash != r17a.input_hash, "다른 Artifact인데 input_hash가 같음"
+
+    print("ok - Evidence QA Engine 18개 시나리오 점검 통과")

@@ -37,21 +37,23 @@ agentic_rag:
 # 끝난다 (팀 가이드 2절). risk-supervisor/pre-trade-risk-analyst는 이 엔진의 판정을 해석·
 # Escalation만 하고, Limit을 계산하거나 판정을 바꾸지 않는다.
 deterministic_services:
-  risk_engine: departments/03-risk/engine/risk_engine.py  # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
+  risk_engine: departments/03-risk/engine/risk_engine.py                 # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
+  trading_state_store: departments/03-risk/engine/trading_state_store.py # Redis 최신 Trading State — 장애 시 HALTED로 fail-closed
 
 implementation:
-  status: "Sprint K1 P0 Pre-trade Risk Gate 구현됨 (팀 가이드 4.1, 12절). K0 Supabase 배선·K2-K4는 미착수"
+  status: "Sprint K1 P0 Pre-trade Risk Gate + Redis Trading State 구현됨 (팀 가이드 4.1, 12절, DoD 4번 Redis 절반). Supabase 쪽(risk 스키마 실기록)·K2-K4는 미착수"
   done:
     - "10단계 순서 검사 (Data Freshness, Market 거래가능, Mandate, Restricted List, Notional, Buying Power/Oversell, Concentration Soft/Hard, Turnover/주문건수, Trading State/Loss/Drawdown, Counterparty Health)"
     - "Soft Limit은 RESIZE, Hard Limit은 REJECT — 실패는 항상 축소·차단 방향"
     - "ENTRY_BLOCKED/REDUCE_ONLY/HALTED에서 청산(Reducing) 주문만 예외로 통과"
     - "input_hash 기반 재현성 — 같은 Intent·Context·Policy Version이면 같은 판정"
     - "트레이딩본부 OMS.apply_risk_decision/submit과 End-to-End 파이프라인 검증"
+    - "Redis 최신 Trading State (2026-07-30) — 실제 Redis Cloud에 연결해 scope별 현재 상태 Get/Set. Key 없음(=제한한 적 없음)은 ENABLED, Redis 장애는 예외 또는 HALTED로 fail-closed — ENABLED로 잘못 추정하지 않음. RiskEngine.check_order와 End-to-End 통합 검증(Redis의 ENTRY_BLOCKED가 실제 주문을 막음)"
   in_progress: []
   not_started:
-    - "Sprint K0: Supabase risk/audit/api Schema 실배선, RLS, Append-only Trigger (스키마 자체는 supabase/migrations/20260729000400에 이미 있음)"
-    - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역"
-    - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow"
+    - "Sprint K0: Supabase risk 스키마 실기록(risk.risk_decisions/breaches/trading_states) — accounting.funds가 비어 있어 risk.policies부터 fund_id FK로 막힘(회계본부 영역, QA의 audit 스키마와 달리 risk 테이블 대부분이 fund_id NOT NULL). RLS는 의도적으로 보류(담당자 결정)"
+    - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역, departments/06-ai-qa-audit 참고"
+    - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow(risk.kill_switch_events 이력 기록) — Redis 현재 상태는 됐지만 Supabase 이력은 위 Fund 의존으로 막힘"
     - "Sprint K4: Release/Access Audit, Agent Candidate Eval"
     - "P1 Risk Metric(VaR, Correlation Shock 등)과 P2 파생상품 Greeks — 팀 가이드 4.2/4.3"
     - "market-api/portfolio-api/Governance Service 실연동 — 지금은 RiskContext가 스텁 값"

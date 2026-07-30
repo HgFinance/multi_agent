@@ -38,32 +38,37 @@ agentic_rag:
 # 결정론적 서비스. LLM은 관련성 판단과 서술 작성에만 쓴다 - Schema, Citation, PIT, Threshold
 # 판정은 이 두 모듈이 한다 (CLAUDE.md, 팀 가이드 7절 "LLM-as-a-Judge는 보조 신호다").
 deterministic_services:
-  evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py  # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL
-  ops_health_monitor: departments/06-ai-qa-audit/audit/ops_health_monitor.py     # P0 Ops Threshold — HEALTHY/DEGRADED/CRITICAL, Incident 초안
-  trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py            # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls
+  evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py    # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL, input_hash 재현성
+  ops_health_monitor: departments/06-ai-qa-audit/audit/ops_health_monitor.py       # P0 Ops Threshold — HEALTHY/DEGRADED/CRITICAL, Incident 초안
+  trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py              # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls
+  tool_permission_check: departments/06-ai-qa-audit/audit/tool_permission_check.py # Tool Allowlist 위반 탐지 — 결정론적 집합 소속 검사, LLM 없음
+  incident_timeline: departments/06-ai-qa-audit/audit/incident_timeline.py        # Incident Fact/Inference Timeline, Corrective Action(QA 검증 후 Close)
 
 implementation:
-  status: "Sprint K2 P0(Evidence QA + Trace 수집) + agent-ops-monitor P0 Threshold 구현됨 (팀 가이드 7.1, 12절). Evidence QA/Ops Incident 경로는 실제 Supabase에 배선 완료. Agent/Tool Trace 저장·K3/K4는 미착수"
+  status: "Sprint K2 P0 전체(Evidence QA + Trace 수집 + Tool 권한 탐지) + agent-ops-monitor P0 + Incident Timeline 구현됨. Evidence QA/Ops Incident 경로는 실제 Supabase에 배선 완료. Agent/Tool Trace 실저장·K3 나머지·K4는 미착수"
   done:
     - "8단계 순서 검사 (Schema, Evidence 존재·권한, PIT, 숫자·단위 인용 일치, Fact/Inference 구분, 상충 근거, Tool 요약 변형, Unsupported Block)"
     - "Claim/Artifact/EvidenceChunk를 Pydantic으로 검증 — LLM 출력 신뢰 경계는 트레이딩본부 contracts.py와 같은 원칙 (CLAUDE.md 개발 원칙 2번)"
     - "근거 일부만 무효하면 PARTIAL(WARN), 전부 무효하거나 상충/변형이면 FAIL — 결과가 항상 판정을 낮추는 방향"
     - "UNSUPPORTED/CONTRADICTED Claim마다 Finding 자동 초안 생성 (원 작성 본부가 못 닫음)"
+    - "QaAssessment에 calculation_version/input_hash 추가 — risk_engine.py와 같은 재현성 원칙 (DoD 2번)"
     - "Agent Ops Health Threshold (에러율/지연/비용) — Soft는 DEGRADED(SEV3), Critical은 CRITICAL(SEV2), 동시 Critical은 SEV1"
     - "Agent/Tool Trace 기록 (audit.agent_runs/tool_calls) — Run 멱등 시작, 미해결 Tool Call 있으면 Run 종료 차단(fail-closed), TIMED_OUT을 FAILED로 추정하지 않음"
-    - "audit.claim_checks/qa_decisions/findings/incidents/agent_runs/tool_calls 컬럼·Enum 값과 이름 맞춤"
+    - "Tool Allowlist 위반 탐지 (DoD 9번) — Allowlist 집합 소속 여부만 보는 결정론적 판정, LLM 미사용. record_and_check_tool_call로 Trace 기록과 동시에 판정, count_unauthorized_calls로 11.4절 핵심 Metric 집계"
+    - "Incident Timeline/Corrective Action (DoD 10번) — FACT/INFERENCE 분리 기록, Timeline은 occurred_at 순 재현. Corrective Action은 OPEN→IN_PROGRESS→VERIFYING→COMPLETED만 허용하고 담당자 본인이 스스로 검증·종료 못 함(QA 검증 후 Close 불변식)"
+    - "audit.claim_checks/qa_decisions/findings/incidents/agent_runs/tool_calls/incident_events/corrective_actions 컬럼·Enum 값과 이름 맞춤"
     - "bandit/pip-audit 스캔 — 실제 보안 이슈 0건 확인 (assert 사용 경고, PASS 오탐만 있음)"
     - "Supabase 실제 배선 (2026-07-30) — Evidence QA Engine·Ops Health Monitor 실행 결과를 audit.artifact_versions/claim_checks/qa_decisions/findings/incidents에 직접 INSERT해 검증함. fund_id는 accounting.funds가 아직 비어 있어 전부 NULL로 기록(가짜 Fund를 참조하는 척 안 함). .env의 DATABASE_URL 자체가 깨져 있던 것(스킴 누락 + 비밀번호 내 '@' 미인코딩, IPv6 전용 Direct Connection 대신 IPv4 Session Pooler로 전환)도 같이 고침"
   in_progress: []
   not_started:
-    - "Agent/Tool Trace 실제 저장(audit.agent_runs/tool_calls) — workforce.agent_profiles/agent_profile_versions가 아직 비어 있어 FK를 못 채움 (accounting.funds와 같은 종류의 막힘, 이번엔 인사팀 영역이라 임의로 Seed 안 함)"
-    - "Sprint K3: Stress Scenario, Kill Switch 연동, Incident Correlation across Feed/Broker/Model"
-    - "Sprint K4: Strategy/Agent Candidate Eval, Dataset/Model/Prompt Lineage, Tool/Data Permission Review, Release Review"
+    - "Agent/Tool Trace 실제 저장(audit.agent_runs/tool_calls), audit.qa_decisions에 calculation_version/input_hash 실제 컬럼 추가 — 후자는 스키마 변경(DDL)이라 별도 Migration PR 필요"
+    - "workforce.agent_profiles/agent_profile_versions가 아직 비어 있어 실제 Tool Allowlist·Agent Run 기록의 FK를 못 채움 (accounting.funds와 같은 종류의 막힘, 인사팀 영역이라 임의로 Seed 안 함) — tool_permission_check.py/trace_recorder.py 자체는 스텁 Policy로 완결·검증됨"
+    - "Sprint K3 나머지: Stress Scenario, Kill Switch 연동, Feed/Broker/Model 장애 Correlation"
+    - "Sprint K4: Strategy/Agent Candidate Eval, Dataset/Model/Prompt Lineage, Release Review"
     - "LLM-as-a-Judge 보조 신호 (팀 가이드 7절) — 지금은 순수 규칙 판정만, Semantic 근거 검증은 의도적으로 P0 이후 백로그"
-    - "Tool Allowlist 위반 판정 — trace_recorder.py는 기록만 하고 승인/거부는 안 함, tool-permission-security-reviewer(P1) 영역"
     - "rag-librarian-evidence-curator/Model Gateway Trace 실연동 — 지금은 EvidenceStore/AgentHealthMetrics/TraceRecorder가 전부 스텁이거나 인메모리"
     - "실시간 Telemetry 배선(OpenTelemetry/Prometheus), 부하 테스트(locust/testcontainers) — 관찰·테스트할 실제 실행 중인 서비스가 없어 지금은 불가능"
-    - "Model Risk(model-risk-agent), Internal Audit(internal-audit-agent), Tool/Permission Review, Incident Postmortem — P1 tier, 이번엔 범위 밖"
+    - "Model Risk(model-risk-agent), Internal Audit(internal-audit-agent), Incident Postmortem — P1 tier, 이번엔 범위 밖"
 
 # 백로그 (2026-07-29, Finyul MAS 아티클 비교에서 도출 — 아직 미구현, 기록만)
 # evidence-qa-agent: 완전성 검증 실패 시 지금은 Flag만 하는데, 자동 Block으로 격상하는 "3단 방어"
