@@ -160,7 +160,7 @@ export default function Home() {
     engine.start();
     setBriefing(false);
     setView("live");
-    showToast("07:00 — AI 직원 32명이 출근합니다 ✨");
+    showToast(`07:00 — AI 직원 ${STAFF.length}명이 출근합니다 ✨`);
   };
 
   const approve = () => {
@@ -749,7 +749,7 @@ function DashboardView({
             <h1>
               오늘 회사가 어떻게 움직이는지 <em className="highlight">한눈에</em> 보여드려요
             </h1>
-            <p>AI는 비서, 결정은 대표님. 12개 팀 32명의 조사부터 제작·저장·브리핑까지 한 흐름으로 관리해요.</p>
+            <p>AI는 비서, 결정은 대표님. {teams.length}개 팀 {STAFF.length}명의 조사부터 제작·저장·브리핑까지 한 흐름으로 관리해요.</p>
           </div>
           <div className="hero-actions">
             <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
@@ -763,7 +763,7 @@ function DashboardView({
       <section className="summary-grid" aria-label="오늘 업무 요약">
         <article className="metric yellow">
           <span>AI 직원</span>
-          <strong>32</strong>
+          <strong>{STAFF.length}</strong>
           <small>STAFF</small>
         </article>
         <article className="metric mint">
@@ -849,7 +849,7 @@ function DashboardView({
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">LIVE OFFICE</p>
-                  <h2>12개 부서 · 팀장 12명 근무 현황</h2>
+                  <h2>{teams.length}개 부서 · 팀장 {teams.length}명 근무 현황</h2>
                 </div>
                 <div className="filter-tabs" role="group" aria-label="팀 상태 필터">
                   {(["전체", "진행 중", "완료", "승인 대기", "연동 대기"] as const).map((item) => (
@@ -987,7 +987,7 @@ function DashboardView({
       </section>
 
       <p className="dash-note">
-        대표 {CEO.name}({CEO.callsign}) · AI 직원 {teams.length}개 부서 32명 · 이 화면은 라이브 오피스와 같은 상태를
+        대표 {CEO.name}({CEO.callsign}) · AI 직원 {teams.length}개 부서 {STAFF.length}명 · 이 화면은 라이브 오피스와 같은 상태를
         공유해요.
       </p>
     </>
