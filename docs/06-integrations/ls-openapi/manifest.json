@@ -1,0 +1,532 @@
+{
+    "source":  "https://openapi.ls-sec.co.kr/apiservice",
+    "collectedAt":  "2026-07-29 14:37:54 +09:00",
+    "scope":  "Public API metadata and complete request/response field schemas",
+    "counts":  {
+                   "groups":  8,
+                   "apis":  42,
+                   "trs":  365,
+                   "properties":  16141,
+                   "propertyFailures":  0,
+                   "documentationGaps":  2
+               },
+    "propertyTypes":  {
+                          "A0002":  "Array",
+                          "A0004":  "Number",
+                          "A0003":  "Object",
+                          "A0001":  "String",
+                          "A0005":  "Object Array"
+                      },
+    "groups":  [
+                   {
+                       "id":  "ffd2def7-a118-40f7-a0ab-cd4c6a538a90",
+                       "name":  "OAuth 인증",
+                       "folder":  "01-oauth",
+                       "apiCount":  2,
+                       "trCount":  2,
+                       "apis":  [
+                                    {
+                                        "id":  "33bd887a-6652-4209-88cd-5324bc7c5e36",
+                                        "name":  "접근토큰 발급",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/oauth2/token",
+                                        "file":  "01-oauth/01-33bd887a.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=ffd2def7-a118-40f7-a0ab-cd4c6a538a90\u0026api_id=33bd887a-6652-4209-88cd-5324bc7c5e36",
+                                        "trCount":  1
+                                    },
+                                    {
+                                        "id":  "2d923333-f816-4df9-932d-ad390437b66f",
+                                        "name":  "접근토큰 폐기",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/oauth2/revoke",
+                                        "file":  "01-oauth/02-2d923333.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=ffd2def7-a118-40f7-a0ab-cd4c6a538a90\u0026api_id=2d923333-f816-4df9-932d-ad390437b66f",
+                                        "trCount":  1
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "f82999f4-eb1a-4ead-a0b1-a4386e8721ab",
+                       "name":  "업종",
+                       "folder":  "02-industry",
+                       "apiCount":  3,
+                       "trCount":  9,
+                       "apis":  [
+                                    {
+                                        "id":  "88a7c0d3-fb4f-48ef-bc9b-4c47ac72a87b",
+                                        "name":  "[업종] 시세",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/indtp/market-data",
+                                        "file":  "02-industry/01-88a7c0d3.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=f82999f4-eb1a-4ead-a0b1-a4386e8721ab\u0026api_id=88a7c0d3-fb4f-48ef-bc9b-4c47ac72a87b",
+                                        "trCount":  5
+                                    },
+                                    {
+                                        "id":  "5b483d74-407c-4760-8452-1b2b1dc1dcde",
+                                        "name":  "[업종] 차트",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/indtp/chart",
+                                        "file":  "02-industry/02-5b483d74.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=f82999f4-eb1a-4ead-a0b1-a4386e8721ab\u0026api_id=5b483d74-407c-4760-8452-1b2b1dc1dcde",
+                                        "trCount":  3
+                                    },
+                                    {
+                                        "id":  "3c2b0280-6663-41e2-8995-a179de99e074",
+                                        "name":  "[업종] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/indtp",
+                                        "file":  "02-industry/03-3c2b0280.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=f82999f4-eb1a-4ead-a0b1-a4386e8721ab\u0026api_id=3c2b0280-6663-41e2-8995-a179de99e074",
+                                        "trCount":  1
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "73142d9f-1983-48d2-8543-89b75535d34c",
+                       "name":  "주식",
+                       "folder":  "03-stock",
+                       "apiCount":  16,
+                       "trCount":  197,
+                       "apis":  [
+                                    {
+                                        "id":  "54a99b02-dbba-4057-8756-9ac759c9a2ed",
+                                        "name":  "[주식] 시세",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/market-data",
+                                        "file":  "03-stock/01-54a99b02.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=54a99b02-dbba-4057-8756-9ac759c9a2ed",
+                                        "trCount":  25
+                                    },
+                                    {
+                                        "id":  "3dbce945-a73c-475c-9758-88d9922ab94e",
+                                        "name":  "[주식] 거래원",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/exchange",
+                                        "file":  "03-stock/02-3dbce945.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=3dbce945-a73c-475c-9758-88d9922ab94e",
+                                        "trCount":  3
+                                    },
+                                    {
+                                        "id":  "580d2770-a7a9-49e3-9ec1-49ed8bc734a2",
+                                        "name":  "[주식] 투자정보",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/investinfo",
+                                        "file":  "03-stock/03-580d2770.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=580d2770-a7a9-49e3-9ec1-49ed8bc734a2",
+                                        "trCount":  8
+                                    },
+                                    {
+                                        "id":  "6b554636-7b2a-4e1a-a615-54b0c131a558",
+                                        "name":  "[주식] 프로그램",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/program",
+                                        "file":  "03-stock/04-6b554636.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=6b554636-7b2a-4e1a-a615-54b0c131a558",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "c148a42f-51a7-4446-b6df-10d6056dd75b",
+                                        "name":  "[주식] 투자자",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/investor",
+                                        "file":  "03-stock/05-c148a42f.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=c148a42f-51a7-4446-b6df-10d6056dd75b",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "90378c39-f93e-4f95-9670-f76e5c924cc6",
+                                        "name":  "[주식] 외인/기관",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/frgr-itt",
+                                        "file":  "03-stock/06-90378c39.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=90378c39-f93e-4f95-9670-f76e5c924cc6",
+                                        "trCount":  3
+                                    },
+                                    {
+                                        "id":  "3d58c125-8b45-46b4-baf2-6f98d0373131",
+                                        "name":  "[주식] ELW",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/elw",
+                                        "file":  "03-stock/07-3d58c125.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=3d58c125-8b45-46b4-baf2-6f98d0373131",
+                                        "trCount":  20
+                                    },
+                                    {
+                                        "id":  "30b6dfd6-b0bd-4e63-a510-7d5d94edc740",
+                                        "name":  "[주식] ETF",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/etf",
+                                        "file":  "03-stock/08-30b6dfd6.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=30b6dfd6-b0bd-4e63-a510-7d5d94edc740",
+                                        "trCount":  5
+                                    },
+                                    {
+                                        "id":  "8f027fa6-4177-43e3-9a7a-a76873efd47c",
+                                        "name":  "[주식] 섹터",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/sector",
+                                        "file":  "03-stock/09-8f027fa6.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=8f027fa6-4177-43e3-9a7a-a76873efd47c",
+                                        "trCount":  5
+                                    },
+                                    {
+                                        "id":  "6b67369a-dc7a-4cc7-8c33-71bb6336b6bf",
+                                        "name":  "[주식] 종목검색",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/item-search",
+                                        "file":  "03-stock/10-6b67369a.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=6b67369a-dc7a-4cc7-8c33-71bb6336b6bf",
+                                        "trCount":  8
+                                    },
+                                    {
+                                        "id":  "d3d0ef41-6a0f-4bda-9e28-160071f66206",
+                                        "name":  "[주식] 상위종목",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/high-item",
+                                        "file":  "03-stock/11-d3d0ef41.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=d3d0ef41-6a0f-4bda-9e28-160071f66206",
+                                        "trCount":  9
+                                    },
+                                    {
+                                        "id":  "12320341-ad85-429a-90bd-5b3771c5e89f",
+                                        "name":  "[주식] 차트",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/chart",
+                                        "file":  "03-stock/12-12320341.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=12320341-ad85-429a-90bd-5b3771c5e89f",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "316495d3-6109-45a6-baaf-9e8a0261f30a",
+                                        "name":  "[주식] 기타",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/etc",
+                                        "file":  "03-stock/13-316495d3.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=316495d3-6109-45a6-baaf-9e8a0261f30a",
+                                        "trCount":  10
+                                    },
+                                    {
+                                        "id":  "37d22d4d-83cd-40a4-a375-81b010a4a627",
+                                        "name":  "[주식] 계좌",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/accno",
+                                        "file":  "03-stock/14-37d22d4d.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=37d22d4d-83cd-40a4-a375-81b010a4a627",
+                                        "trCount":  12
+                                    },
+                                    {
+                                        "id":  "d0e216e0-10d9-479f-8a4d-e175b8bae307",
+                                        "name":  "[주식] 주문",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/stock/order",
+                                        "file":  "03-stock/15-d0e216e0.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=d0e216e0-10d9-479f-8a4d-e175b8bae307",
+                                        "trCount":  3
+                                    },
+                                    {
+                                        "id":  "9a2800c3-9bf2-4d67-8d83-905074f06646",
+                                        "name":  "[주식] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/stock",
+                                        "file":  "03-stock/16-9a2800c3.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=73142d9f-1983-48d2-8543-89b75535d34c\u0026api_id=9a2800c3-9bf2-4d67-8d83-905074f06646",
+                                        "trCount":  65
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "2f1eea77-5606-4512-93c6-31b21d2ece90",
+                       "name":  "선물/옵션",
+                       "folder":  "04-derivatives",
+                       "apiCount":  7,
+                       "trCount":  91,
+                       "apis":  [
+                                    {
+                                        "id":  "9f467798-6ce6-4d31-ab93-5a0e2860f89f",
+                                        "name":  "[선물/옵션] 시세",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/market-data",
+                                        "file":  "04-derivatives/01-9f467798.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=9f467798-6ce6-4d31-ab93-5a0e2860f89f",
+                                        "trCount":  30
+                                    },
+                                    {
+                                        "id":  "47005ce6-8500-4a3d-ad6c-f96ec3251669",
+                                        "name":  "[선물/옵션] 투자자",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/investor",
+                                        "file":  "04-derivatives/02-47005ce6.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=47005ce6-8500-4a3d-ad6c-f96ec3251669",
+                                        "trCount":  4
+                                    },
+                                    {
+                                        "id":  "a9b39b08-25c2-427d-848b-675c6228a92b",
+                                        "name":  "[선물/옵션] 차트",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/chart",
+                                        "file":  "04-derivatives/03-a9b39b08.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=a9b39b08-25c2-427d-848b-675c6228a92b",
+                                        "trCount":  5
+                                    },
+                                    {
+                                        "id":  "09a668df-d7e8-4b5c-977f-91d1429b931a",
+                                        "name":  "[선물/옵션] 계좌",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/accno",
+                                        "file":  "04-derivatives/04-09a668df.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=09a668df-d7e8-4b5c-977f-91d1429b931a",
+                                        "trCount":  13
+                                    },
+                                    {
+                                        "id":  "b579d38a-3ce5-4b1b-b94e-b0c4bbbf1d27",
+                                        "name":  "[선물/옵션] 주문",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/order",
+                                        "file":  "04-derivatives/05-b579d38a.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=b579d38a-3ce5-4b1b-b94e-b0c4bbbf1d27",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "98373ce4-042a-4fc8-85ef-b9b8f64101ce",
+                                        "name":  "[선물/옵션] 기타",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/futureoption/etc",
+                                        "file":  "04-derivatives/06-98373ce4.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=98373ce4-042a-4fc8-85ef-b9b8f64101ce",
+                                        "trCount":  1
+                                    },
+                                    {
+                                        "id":  "57936c91-b49d-4702-b7f6-3935c6859462",
+                                        "name":  "[선물/옵션] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/futureoption",
+                                        "file":  "04-derivatives/07-57936c91.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=2f1eea77-5606-4512-93c6-31b21d2ece90\u0026api_id=57936c91-b49d-4702-b7f6-3935c6859462",
+                                        "trCount":  31
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39",
+                       "name":  "해외선물",
+                       "folder":  "05-overseas-futures",
+                       "apiCount":  5,
+                       "trCount":  35,
+                       "apis":  [
+                                    {
+                                        "id":  "d61d4f85-9845-41ef-b915-4efa8fd0aad1",
+                                        "name":  "[해외선물] 시세",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-futureoption/market-data",
+                                        "file":  "05-overseas-futures/01-d61d4f85.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39\u0026api_id=d61d4f85-9845-41ef-b915-4efa8fd0aad1",
+                                        "trCount":  14
+                                    },
+                                    {
+                                        "id":  "44c1c082-c899-48fb-bc66-bb5be2f0ab4e",
+                                        "name":  "[해외선물] 계좌",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-futureoption/accno",
+                                        "file":  "05-overseas-futures/02-44c1c082.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39\u0026api_id=44c1c082-c899-48fb-bc66-bb5be2f0ab4e",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "b820f925-e189-4553-a7d1-8e5f2750fe08",
+                                        "name":  "[해외선물] 주문",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-futureoption/order",
+                                        "file":  "05-overseas-futures/03-b820f925.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39\u0026api_id=b820f925-e189-4553-a7d1-8e5f2750fe08",
+                                        "trCount":  3
+                                    },
+                                    {
+                                        "id":  "906d2d0a-7a6d-4ecc-b574-ca2154a70bca",
+                                        "name":  "[해외선물] 차트",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-futureoption/chart",
+                                        "file":  "05-overseas-futures/04-906d2d0a.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39\u0026api_id=906d2d0a-7a6d-4ecc-b574-ca2154a70bca",
+                                        "trCount":  4
+                                    },
+                                    {
+                                        "id":  "3dc1c51b-5ff2-456d-ad2a-055e78ba2b03",
+                                        "name":  "[해외선물] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/overseas-futureoption",
+                                        "file":  "05-overseas-futures/05-3dc1c51b.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=c1ef0e8b-4666-4d8c-a77f-6ab488cfdb39\u0026api_id=3dc1c51b-5ff2-456d-ad2a-055e78ba2b03",
+                                        "trCount":  7
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "cdb7e1bc-f7c5-425c-8248-aa83dbb6919f",
+                       "name":  "해외주식",
+                       "folder":  "06-overseas-stock",
+                       "apiCount":  5,
+                       "trCount":  24,
+                       "apis":  [
+                                    {
+                                        "id":  "45b5abe1-a6e1-4833-a9cb-7eb0c408dba3",
+                                        "name":  "[해외주식] 계좌",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-stock/accno",
+                                        "file":  "06-overseas-stock/01-45b5abe1.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cdb7e1bc-f7c5-425c-8248-aa83dbb6919f\u0026api_id=45b5abe1-a6e1-4833-a9cb-7eb0c408dba3",
+                                        "trCount":  4
+                                    },
+                                    {
+                                        "id":  "06f2b1bc-7f44-4368-a564-207658af552d",
+                                        "name":  "[해외주식] 시세",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-stock/market-data",
+                                        "file":  "06-overseas-stock/02-06f2b1bc.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cdb7e1bc-f7c5-425c-8248-aa83dbb6919f\u0026api_id=06f2b1bc-7f44-4368-a564-207658af552d",
+                                        "trCount":  5
+                                    },
+                                    {
+                                        "id":  "0c023f96-5137-48cf-8682-8dd30bbc81be",
+                                        "name":  "[해외주식] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/overseas-stock",
+                                        "file":  "06-overseas-stock/03-0c023f96.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cdb7e1bc-f7c5-425c-8248-aa83dbb6919f\u0026api_id=0c023f96-5137-48cf-8682-8dd30bbc81be",
+                                        "trCount":  7
+                                    },
+                                    {
+                                        "id":  "6bafc43c-6080-4541-bfc2-c2608b269ca0",
+                                        "name":  "[해외주식] 주문",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-stock/order",
+                                        "file":  "06-overseas-stock/04-6bafc43c.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cdb7e1bc-f7c5-425c-8248-aa83dbb6919f\u0026api_id=6bafc43c-6080-4541-bfc2-c2608b269ca0",
+                                        "trCount":  4
+                                    },
+                                    {
+                                        "id":  "4903400b-731d-42b0-98c7-6d50fc504894",
+                                        "name":  "[해외주식] 차트",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/overseas-stock/chart",
+                                        "file":  "06-overseas-stock/05-4903400b.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cdb7e1bc-f7c5-425c-8248-aa83dbb6919f\u0026api_id=4903400b-731d-42b0-98c7-6d50fc504894",
+                                        "trCount":  4
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "6ad419a5-f0ce-47c2-a52a-91685fa86a31",
+                       "name":  "기타",
+                       "folder":  "07-misc",
+                       "apiCount":  3,
+                       "trCount":  4,
+                       "apis":  [
+                                    {
+                                        "id":  "3c452f0d-715e-43b5-a140-3e26f73dec76",
+                                        "name":  "[기타] 시간조회",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/etc/time-search",
+                                        "file":  "07-misc/01-3c452f0d.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=6ad419a5-f0ce-47c2-a52a-91685fa86a31\u0026api_id=3c452f0d-715e-43b5-a140-3e26f73dec76",
+                                        "trCount":  1
+                                    },
+                                    {
+                                        "id":  "eddd61f7-d595-4370-b9c3-49c4c6178096",
+                                        "name":  "[기타] 실시간 시세",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/etc",
+                                        "file":  "07-misc/02-eddd61f7.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=6ad419a5-f0ce-47c2-a52a-91685fa86a31\u0026api_id=eddd61f7-d595-4370-b9c3-49c4c6178096",
+                                        "trCount":  2
+                                    },
+                                    {
+                                        "id":  "507f87b5-b580-4934-94f4-cb77d423519d",
+                                        "name":  "[기타] 핀테크인",
+                                        "protocolType":  "REST",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/etc/fintechin",
+                                        "file":  "07-misc/03-507f87b5.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=6ad419a5-f0ce-47c2-a52a-91685fa86a31\u0026api_id=507f87b5-b580-4934-94f4-cb77d423519d",
+                                        "trCount":  1
+                                    }
+                                ]
+                   },
+                   {
+                       "id":  "cd909627-82e5-40c9-b313-1a8fd2d7b119",
+                       "name":  "실시간 시세 투자정보",
+                       "folder":  "08-realtime-investment",
+                       "apiCount":  1,
+                       "trCount":  3,
+                       "apis":  [
+                                    {
+                                        "id":  "d67d0790-4b26-447b-82eb-e9642f66057c",
+                                        "name":  "[실시간 시세 투자정보] 투자정보",
+                                        "protocolType":  "WEBSOCKET",
+                                        "httpMethod":  "POST",
+                                        "accessUrl":  "/websocket/investinfo",
+                                        "file":  "08-realtime-investment/01-d67d0790.md",
+                                        "sourceUrl":  "https://openapi.ls-sec.co.kr/apiservice?group_id=cd909627-82e5-40c9-b313-1a8fd2d7b119\u0026api_id=d67d0790-4b26-447b-82eb-e9642f66057c",
+                                        "trCount":  3
+                                    }
+                                ]
+                   }
+               ],
+    "failures":  [
+
+                 ],
+    "documentationGaps":  [
+                              {
+                                  "group":  "기타",
+                                  "api":  "[기타] 핀테크인",
+                                  "apiId":  "507f87b5-b580-4934-94f4-cb77d423519d",
+                                  "reason":  "API 상세 엔드포인트가 오류를 반환해 공개 목록 메타데이터를 사용함"
+                              },
+                              {
+                                  "group":  "기타",
+                                  "api":  "[기타] 핀테크인",
+                                  "apiId":  "507f87b5-b580-4934-94f4-cb77d423519d",
+                                  "trCode":  "CLNAQ06000",
+                                  "reason":  "TR 코드는 공개 목록에 있으나 상세 필드 엔드포인트가 내용을 제공하지 않음"
+                              }
+                          ]
+}

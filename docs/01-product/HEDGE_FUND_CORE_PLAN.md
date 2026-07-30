@@ -1,11 +1,12 @@
 # Personal Hedge Fund Agent - Core Implementation Plan
 
-> 문서 상태: Lean Core Plan v1.2  
+> 문서 상태: Lean Core Plan v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 제품 안내: [README.md](../README.md)  
 > Domain 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](MINIMUM_SERVICE_UNIT_SPEC.md)  
 > 기능 구현 Backlog: [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](../02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)  
 > 기술 스택 결정: [TECH_STACK_DECISIONS.md](../02-engineering/TECH_STACK_DECISIONS.md)  
+> 운영 Frontend: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 한 명의 사용자를 위한 전 종목 실시간 Multi-Strategy Paper Trading Investment Agent의 핵심 폐쇄 루프를 16주 안에 완성한다.  
 > 원칙: 장기 비전은 버리지 않되, 수익 아이디어 발굴부터 Paper 주문과 사후평가까지 하나의 폐쇄 루프를 먼저 완성한다.
 
@@ -58,6 +59,7 @@ Core는 다음 질문에 실제 동작으로 답할 수 있어야 한다.
 | 판단 주기 | Tick 수신, 1초 집계, 1분 전략 판단 |
 | Agent | Research Analyst, Bull/Bear Reviewer, Portfolio Agent |
 | RAG | 한 종류의 승인 문서 Source와 Point-in-Time 검색 |
+| 조직 학습 | 본부별 Hermes Memory 경계와 승인형 Improvement Candidate 1개 End-to-End |
 | 전략 | Strategy Universe에 등록된 모든 데이터 적격 전략, Core에서는 대표 전략군 Fixture로 계약 검증 |
 | Strategy Factory | 가설, Backtest, Registry, Shadow, Paper, Rollback |
 | Risk | Position, 주문금액, 일손실, Gross/Net·종목·섹터·Factor Exposure, Borrow/Leverage, Staleness |
@@ -78,6 +80,7 @@ Core는 다음 질문에 실제 동작으로 답할 수 있어야 한다.
 - 초단타/HFT와 Microsecond Latency
 - 복수 Market Data Vendor와 복수 Broker Failover
 - 모바일 앱과 외부 고객용 Portal
+- 검증·승인 없이 Agent가 자신의 Prompt, Skill, Tool 또는 권한을 바꾸는 기능
 
 제외 항목은 삭제한 요구사항이 아니라 Core 성공 후 검토할 확장 Backlog다.
 
@@ -91,6 +94,23 @@ Core는 전략 이름을 제한하지 않지만 모든 전략을 16주 안에 �
 - `Live Eligible`: 실제 Borrow, Margin, Broker, 법률과 운영 Gate까지 통과한 전략만 별도 승인한다.
 
 새 전략은 새 Agent 조직을 만드는 대신 `StrategyPlugin`과 `StrategyCapabilityProfile`을 추가하는 방식으로 채택한다.
+
+### 3.4 Core에서 증명할 최소 자기 개선
+
+Core는 거대한 자율 조직 전체를 한 번에 구현하지 않는다. 대신 Hermes를 쓰는 이유가 실제로 검증되도록 다음 한 개의 폐쇄 루프를 필수 범위로 둔다.
+
+```text
+Research 또는 QA 업무 완료
+  -> Hermes가 근거가 있는 ImprovementCandidate 생성
+  -> QA Golden/Adversarial Eval
+  -> 인사팀 Build-vs-Extend 검토
+  -> Shadow 실행
+  -> 승인된 Skill 또는 Profile Version 배포
+  -> 품질·비용·지연 관찰
+  -> 유지 또는 Rollback
+```
+
+첫 대상은 주문 판단보다 위험이 낮고 성공 기준이 명확한 `Research 문서 검증 Skill` 또는 `QA 인용 검사 Skill` 중 하나로 고정한다. 현재 Position, PnL, Risk Limit과 주문 상태는 Hermes Memory가 아니라 공식 Service에서 매번 조회한다. 전략 자동 생성과 조직 전체 자동 재편은 이 Loop가 재현 가능하게 동작한 뒤 확장한다.
 
 ## 4. 최소 사용자 경험
 
@@ -134,16 +154,20 @@ Core는 전략 이름을 제한하지 않지만 모든 전략을 16주 안에 �
 
 ### 4.3 필수 화면
 
-하나의 운영 Dashboard에 다음 View만 구현한다.
+현재 `ai-office/`의 Pixel Office를 Core 운영 Frontend Baseline으로 사용한다. 첫 화면은 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀의 Queue·Agent·승인·Incident 상태를 보여주는 `Live Office`다. 현재 12개 고정 부서와 Scripted Simulation은 `DEMO` Mode로만 유지하고 실제 서비스 상태로 오인되지 않게 한다.
 
-- `Market`: Feed 상태, 전 종목 처리량, 상위 이벤트
-- `Portfolio`: Position, Cash, Exposure, PnL
-- `Strategies`: Draft, Backtest, Shadow, Paper, Paused 상태
-- `Decisions`: Agent 분석, 근거, Risk 승인·거절
-- `Orders`: 주문, 체결, 취소와 오류
-- `Control`: Entry Block, Reduce-only, Kill Switch
+Core는 다음 View를 구현한다.
 
-화려한 투자자 Portal보다 운영자가 상태를 빠르게 판단하고 통제할 수 있는 화면을 우선한다.
+- `Live Office`: 8개 조직, Agent 상태, 업무 Queue, Handoff와 Incident
+- `Market`: LS Feed 상태, 전 종목 처리량, Gap·Stale과 상위 이벤트
+- `Research/Decisions`: Agent 분석, RAG 근거, Bull/Bear 논거, Risk 승인·거절
+- `Strategies`: Draft, Backtest, Shadow, Paper, Paused와 Promotion 상태
+- `Portfolio`: Position, Cash, Exposure, PnL과 Reconciliation
+- `Orders`: Order Intent, 주문, 체결, 취소, 거절과 오류
+- `Control`: Trading State, Entry Block, Reduce-only와 Kill Switch
+- `Audit/Workforce`: Trace, Finding, Agent Version, 비용과 개선 후보
+
+운영자가 상태를 빠르게 판단하고 통제할 수 있는 화면을 우선한다. Pixel Animation은 공식 상태의 시각 표현이며, Backend Event 없이 업무 상태를 추정하거나 Position·Risk·PnL을 계산하지 않는다. 모든 화면은 `DEMO/PAPER/LIVE`, 마지막 갱신 시각, 연결 상태와 Trading State를 항상 표시한다.
 
 ## 5. Core Architecture
 
@@ -384,7 +408,7 @@ Cloud Provider와 Managed Service는 Core 시작 전에 확정할 필요가 없�
 | Agent Orchestration | Hermes Agent Adapter |
 | Workflow | LangGraph StateGraph + 결정론적 Domain State Machine |
 | Backtest | vectorbt Adapter 우선, Dataset Manifest 고정 |
-| UI | 미정, Next.js + TypeScript를 우선 후보로 평가 |
+| UI | `ai-office` 기반 Next.js + React + TypeScript |
 | 관측성 | 구조화 Log + OpenTelemetry + Prometheus |
 | 배포 | Docker Compose, CI |
 
@@ -422,6 +446,8 @@ P0 Event Bus는 Redis Streams로 고정한다. Process 내부 Queue는 Unit Test
 - Point-in-Time Retrieval
 - Research/Bull-Bear/Portfolio Workflow
 - 구조화 Decision과 Audit
+- 본부별 Hermes Memory Namespace와 금지 데이터 정책
+- ImprovementCandidate → QA Eval → Shadow → 승인 Skill Version의 최소 자기 개선 Loop
 - 완료 기준: Event-to-Decision 재현과 Evidence 추적
 
 ### Phase 4. Risk, OMS와 Portfolio - 9~10주
@@ -466,6 +492,8 @@ P0 Event Bus는 Redis Streams로 고정한다. Process 내부 Queue는 Unit Test
 - [ ] OMS가 재시작 후 주문과 Position을 복구한다.
 - [ ] Feed/Position/Risk 이상 시 Entry가 자동 차단된다.
 - [ ] Kill Switch와 미체결 주문 취소가 검증된다.
+- [ ] Hermes Memory를 비워도 공식 Position·Cash·PnL·Risk 상태가 손실되지 않는다.
+- [ ] 개선 후보 한 건이 독립 Eval, Shadow, 승인, 배포와 Rollback까지 같은 ID로 추적된다.
 - [ ] 10거래일 연속 치명적 장애 없이 Paper Dry Run을 완료한다.
 - [ ] 일일 Report에서 전략별 PnL, Drawdown, Turnover와 오류를 확인할 수 있다.
 
@@ -524,13 +552,14 @@ Core Launch Gate 통과 후 다음 순서로 Capability를 넓힌다.
 1. 첫 시장과 자산: 한국 상장주식·ETF Multi-Strategy Paper, 실제 Short·Derivatives는 Capability Gate 적용
 2. 가격 공급자와 초기 Feed: LS증권 Open API의 Tick 체결과 10단계 호가 WebSocket
 3. 저장소 경계: Supabase 운영 원장, 별도 TimescaleDB 리서치·퀀트 전용, Redis Streams P0
+4. Frontend Baseline: `ai-office`의 Next.js·React·TypeScript와 Pixel Office를 8개 조직의 실시간 Operator Control Plane으로 발전
 
 **미확정**
 
 1. Paper/Live Broker와 주문 Adapter
 2. 첫 활성 Strategy Portfolio의 구성과 전략군별 Champion 수
 3. 자동 Paper 주문 여부와 사용자 승인 방식
-4. Frontend Framework
+4. 전체 Cloud Provider와 Frontend Production Hosting
 5. 16주 동안 허용할 월별 Data, LLM과 Infrastructure 예산
 
 Cloud Provider, 파생상품, 외부자금 법인 구조와 전체 부서 설계는 Core 개발의 선행조건이 아니다.

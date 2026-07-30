@@ -2,11 +2,21 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md)
 
 ## 현재 상태
 
-이 저장소는 **구현 전 설계 단계**다. 현재는 구현에 직접 필요한 확정 문서만 유지하며 실행 가능한 Application Code는 아직 없다.
+이 저장소는 **설계 중심의 초기 구현 단계**다. 완전한 Application Scaffold와 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 이미 존재한다.
+
+- CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
+- 실시간 판단, 전략 연구, 인사, Agent 개정과 Event Routing을 정의한 Workflow Prototype
+- `compliance-policy-agent`용 Agentic RAG baseline
+- Order Contract, Paper OMS, Paper Broker, Ledger와 Reconciliation D0-D2 Prototype
+- Supabase 운영 DB와 TimescaleDB 시장 데이터 Migration, RLS와 Schema Test
+- LS증권 Open API의 REST·WebSocket 개발 참조 문서
+- Next.js·React·TypeScript 기반 `ai-office` Pixel Office Frontend Prototype
+
+이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`는 현재 12개 고정 부서와 Scripted Simulation을 사용하는 Demo이며 금융 Backend와 연결되지 않았다. 서비스 API, 전 종목 WebSocket Runtime, 결정론적 Risk Engine, Strategy Factory, 8개 조직 기반 통합 UI와 운영 배포는 아직 Core Backlog에 있다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
 
 첫 번째 목표는 실제 자금 운용이 아니다. 단일 사용자와 단일 주식시장을 대상으로 다음 폐쇄 루프를 완성하는 것이다.
 
@@ -196,7 +206,7 @@ Core는 아래 P0 기능만 구현한다. 세부 완료 조건은 [Core Feature 
 
 ```mermaid
 flowchart TB
-    UI["Operator UI - Framework TBD"] --> API["FastAPI + Pydantic"]
+    UI["AI Office - Next.js + React + TypeScript"] --> API["FastAPI + Pydantic"]
     HERMES["Hermes Agent"] --> API
     API --> LANG["LangGraph"]
     LANG --> BEDROCK["Amazon Bedrock Claude"]
@@ -224,15 +234,35 @@ flowchart TB
 | Docker | 서비스별 Runtime 격리 |
 | FastAPI | 위험한 Command를 포함한 Backend API |
 | Polars/Parquet/DuckDB | Market Data, Feature와 Backtest Dataset 처리 |
-| Frontend | Framework 미정, Next.js + TypeScript 우선 후보 |
+| Frontend | `ai-office` 기반 Next.js + React + TypeScript, Pixel Office + 운영 Dashboard |
 
 자세한 선택 근거와 Package 목록은 [Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)에 있다.
+
+`ai-office` 화면은 Supabase·TimescaleDB·OMS·Ledger·Risk Engine의 공식 상태를 REST Snapshot과 FastAPI WebSocket으로 보여주는 Projection이다. 캐릭터 이동이나 Browser Memory를 실제 Agent·주문·Risk 상태로 간주하지 않으며, 전 종목 Tick 원문을 Pixel Office로 전송하지 않는다. 화면 구조, Mode 분리와 명령 보안 기준은 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
 ### Hermes와 LangGraph의 차이
 
 - Hermes는 사용자의 요청을 이해하고 필요한 Workflow를 시작하는 상위 Supervisor다.
 - LangGraph는 Research, Review와 Portfolio 판단의 순서와 상태를 관리한다.
 - 두 도구 모두 Risk Limit이나 OMS Database를 직접 수정하지 않는다.
+
+### 왜 Hermes를 사용하는가
+
+Hermes의 장점은 본부장 Agent가 세션을 넘어 정제된 Memory를 유지하고, 반복 업무에서 검증된 절차를 Skill로 재사용하며, 과거 Session을 찾아 새로운 Case에 연결할 수 있다는 점이다. 이 프로젝트는 그 기능을 다음과 같은 조직 학습 루프로 사용한다.
+
+```text
+운영 Case와 Incident
+  -> 결과·오류·비용·QA Finding 회고
+  -> Memory·Skill·Profile·Strategy 개선 후보
+  -> 인사팀/퀀트 설계
+  -> AI QA 독립 Eval
+  -> Shadow와 승인
+  -> 새 Version 배포
+  -> 성과·통제 재측정
+  -> 다음 개선 후보
+```
+
+Agent가 자기 Prompt, Tool 권한, Risk Limit이나 Strategy Champion을 직접 바꾸지는 않는다. Hermes는 경험을 기억하고 후보를 만드는 역할을 하며, 인사팀·퀀트·리스크·QA·CEO가 각 권한에 따라 검증하고 승인한다. 가격, Position, PnL과 주문 상태는 Memory가 아니라 공식 API와 원장에서 매번 다시 조회한다. 전체 구조와 단계별 구현은 [마스터 플랜 5.10](HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### Supabase의 경계
 
@@ -289,16 +319,16 @@ Risk 승인은 Broker Order 상태가 아니라 `risk_decision_id` 제출 전제
 
 ## 개발 시작 순서
 
-아직 Application Scaffold가 없으므로 현재는 다음 순서로 설계를 확인한다.
+완전한 Application Scaffold가 아직 없으므로 기존 Prototype을 확장하기 전에 다음 순서로 기준을 확인한다.
 
 1. 이 README로 제품과 금융 흐름을 이해한다.
 2. [Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)에서 P0 완료 조건을 확인한다.
 3. [Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)에서 서비스 경계와 Package를 확인한다.
-4. 확정된 한국 주식·LS증권 Feed를 기준으로 Paper Broker와 주문 Adapter를 결정한다.
-5. Event, Decision, Risk와 Order Schema를 코드로 먼저 만든다.
-6. `Market Event -> Paper Fill -> PnL`의 가장 얇은 수직 기능을 구현한다.
-7. 그 위에 LangGraph와 RAG를 연결한다.
-8. 마지막에 Hermes Supervisor와 Dashboard를 연결한다.
+4. [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)에서 현재 경로, 목표 경로와 본부 소유권을 확인한다.
+5. 확정된 한국 주식·LS증권 Feed를 기준으로 Paper Broker와 주문 Adapter를 결정한다.
+6. 기존 D0-D2 Prototype과 Supabase 통합 Schema의 차이를 먼저 해소한다.
+7. `Market Event -> Paper Fill -> PnL`의 가장 얇은 수직 기능을 구현한다.
+8. 그 위에 LangGraph, RAG, Hermes Supervisor와 Dashboard를 연결한다.
 
 예상 구현 순서는 다음과 같다.
 
@@ -315,43 +345,36 @@ Repository Scaffold
   -> Replay, 부하와 장애 테스트
 ```
 
-## 예상 저장소 구조
+## 저장소 구조
 
-다음은 구현 시 사용할 최소 구조다. 현재 생성 완료된 구조를 의미하지 않는다.
+`departments/00-ceo-office`부터 `departments/07-agent-workforce`까지 조직 단위로 Hermes Profile과
+본부 소유 코드를 묶는다([저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 11절 단계 1~3 완료).
+공통 Contract, Orchestration, Integration과 Migration은 아직 공유 경계로 추출되지 않아 `db/`, `supabase/migrations/`,
+`timescaledb/migrations/`, `skills/`는 최상위에 그대로 있다.
 
 ```text
-personal-hedge-fund-agent/
-├── apps/
-│   ├── api/
-│   └── web/
-├── services/
-│   ├── streaming/
-│   ├── agent_workflow/
-│   ├── strategy_factory/
-│   ├── strategy_plugins/
-│   ├── risk/
-│   ├── oms/
-│   └── portfolio/
-├── integrations/
-│   ├── market_data/
-│   ├── paper_broker/
-│   ├── bedrock/
-│   ├── ollama/
-│   ├── hermes/
-│   └── supabase/
-├── contracts/
-│   ├── strategy/
-│   └── execution/
-├── migrations/
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   ├── replay/
-│   └── e2e/
-├── infrastructure/
-├── docker-compose.yml
-└── README.md
+multi_agent/
+├── departments/
+│   ├── 00-ceo-office/hermes/
+│   ├── 01-research/{hermes/, collectors/}       # 뉴스 수집: collectors/news.py
+│   ├── 02-trading/{hermes/, contracts/, oms/, broker/}
+│   ├── 03-risk/hermes/
+│   ├── 04-quant-backtest/hermes/
+│   ├── 05-accounting-portfolio/{hermes/, ledger/, reconciliation/}
+│   ├── 06-ai-qa-audit/hermes/
+│   └── 07-agent-workforce/hermes/
+├── skills/agentic-rag/      # 현재 Compliance RAG baseline (공용 skills 경계 유지)
+├── db/                      # 현재 D0-D2 Prototype SQL, 통합 DB와 병행 적용 금지
+├── supabase/migrations/     # 전사 운영 DB Canonical Migration
+├── timescaledb/migrations/  # 시장 시계열 Canonical Migration
+├── tests/schema/            # Schema Contract와 Runtime Smoke Test
+├── ai-office/               # 현재 Pixel Office Frontend Prototype
+└── docs/
 ```
+
+남은 목표(단계 4: DB Prototype 통합, 단계 5: 구조 Gate)와 `contracts/`, `orchestration/workflows/`,
+`integrations/`, `apps/` 등 공유 경계 추출은 아직 진행 전이다. 상세 목표 트리와 단계별 이전 순서는
+[저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
 
 ## 첫 번째 완료 시나리오
 
@@ -382,7 +405,9 @@ docs/
 ├─ 02-engineering/                   # 구현 Backlog와 기술 결정
 ├─ 03-data/                          # 데이터 수집·품질·저장·사용 기준
 ├─ 04-organization/                  # Agent 조직과 직원 Profile
-└─ 05-teams/                         # 담당자별 실행·인수인계 가이드
+├─ 05-teams/                         # 담당자별 실행·인수인계 가이드
+├─ 06-integrations/                  # 외부 서비스 API 계약과 수집 문서
+└─ database/                         # Supabase·TimescaleDB Schema와 ERD
 ```
 
 | 문서 | 언제 읽는가 |
@@ -392,15 +417,19 @@ docs/
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
 | [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) | 기능 구현과 완료 조건을 확인할 때 |
 | [Technology Stack](02-engineering/TECH_STACK_DECISIONS.md) | Library, Runtime과 서비스 경계를 확인할 때 |
+| [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) | Pixel Office를 8개 조직의 실시간 운영·승인 Control Plane으로 구현할 때 |
+| [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) | 본부별 소유 폴더, 현재/목표 경로, 이전 순서와 Review 경계를 확인할 때 |
 | [Data Governance](03-data/DATA_GOVERNANCE_GUIDE.md) | 데이터 Schema, 시점, 품질과 보존을 설계할 때 |
 | [Data Sources and Libraries](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md) | 본부별 수집·생성 데이터, API와 권장 Library를 확인할 때 |
+| [Database Schema Foundation](database/README.md) | Supabase·TimescaleDB Migration, 테이블 소유권, 불변식과 적용 순서를 확인할 때 |
+| [LS Open API 전체 참조](06-integrations/ls-openapi/README.md) | LS증권 REST·WebSocket API, TR 코드와 요청·응답 필드를 구현할 때 |
 | [Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md) | 8개 Hermes Supervisor와 전문 Agent 직원의 역할·권한·Eval을 구현할 때 |
 | [재일님 팀 가이드](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) | 리서치·퀀트 수집, TimescaleDB와 전략 연구를 구현할 때 |
 | [도현님 팀 가이드](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) | Trading, OMS, Ledger, Position과 NAV를 구현할 때 |
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README와 Master Plan을 포함한 13개 Markdown이 현재 확정 문서 전체다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준서와 ERD를 포함한 17개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 
@@ -408,14 +437,15 @@ README와 Master Plan을 포함한 13개 Markdown이 현재 확정 문서 전체
 
 1. `HEDGE_FUND_MASTER_PLAN.md`의 제품 정의, 조직, 통제 원칙, 출시 단계와 확장 경계
 2. `MINIMUM_SERVICE_UNIT_SPEC.md`의 Domain Contract와 `DATA_GOVERNANCE_GUIDE.md`의 데이터 통제
-3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계
-4. `HEDGE_FUND_CORE_PLAN.md`와 `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위, 구현 순서와 완료 조건
-5. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드의 역할·권한·세부 구현
-6. `README.md`의 문서 지도와 현재 상태 요약
+3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계와 `AI_OFFICE_FRONTEND_PLAN.md`의 Frontend 계약
+4. `REPOSITORY_DEPARTMENT_STRUCTURE.md`의 현재·목표 경로, 소유권과 이전 규칙
+5. `HEDGE_FUND_CORE_PLAN.md`와 `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위, 구현 순서와 완료 조건
+6. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드의 역할·권한·세부 구현
+7. `README.md`의 문서 지도와 현재 상태 요약
 
 하위 문서가 마스터 플랜의 기준을 더 구체화할 수는 있지만 변경할 수는 없다. 불일치를 발견하면 하위 문서를 먼저 수정하고, 마스터 플랜 자체의 변경이 필요한 경우에는 결정 근거를 ADR로 승인한 뒤 관련 문서를 같은 변경에서 함께 갱신한다.
 
-현재 미결정 항목은 Paper/Live Broker, Frontend Framework, Cloud Provider, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
+현재 미결정 항목은 Paper/Live Broker, 전체 Cloud Provider와 Frontend Production Hosting, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
 
 ## 개발 원칙
 

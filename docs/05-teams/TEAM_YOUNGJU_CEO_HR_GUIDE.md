@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.2  
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -8,6 +8,8 @@
 > Agent Runtime: CEO와 인사팀장은 서로 다른 Hermes Supervisor, Service Identity와 Memory Namespace 사용  
 > 공통 기준: [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md), [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View
 
 ---
 
@@ -36,6 +38,30 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 - Risk 승인, Limit 변경과 Kill Switch 단독 해제
 - Ledger, Position, PnL와 NAV 수정·확정
 - 자기 Candidate의 QA 최종 승인과 IAM 권한 직접 부여
+
+### 저장소 소유권
+
+| 구분 | 현재 경로 | 구 경로 |
+|---|---|---|
+| CEO Hermes | `departments/00-ceo-office/hermes/` | `orchestration/hermes/ceo-agent/` |
+| Agent Workforce Hermes | `departments/07-agent-workforce/hermes/` | `orchestration/hermes/hr-department/` |
+| 전사 Workflow | `multi-agent-workflow.yaml` | — (`files:` 블록만 새 경로로 갱신, `orchestration/workflows/`로의 Workflow별 분리는 미착수) |
+| Profile 동기화 | `scripts/sync_hermes_profiles.sh` | — (완료 — dept:folder Mapping으로 갱신됨) |
+| Governance·Workforce Schema | `supabase/migrations/` | — (도구 표준 경로 유지, CEO·인사팀이 Domain Owner) |
+
+11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/00-ceo-office/`,
+`departments/07-agent-workforce/`가 실행 기준이다. 구 경로(`orchestration/hermes/`)는 완전히 삭제됐다. `07-agent-workforce`는
+정렬용 번호일 뿐 제7의 투자 본부를 뜻하지 않는다. CEO와 인사팀 Profile, Memory와 권한은 계속 분리한다.
+
+### Hermes 자기 개선 책임
+
+- CEO Hermes는 전사 개선 후보의 우선순위, 예산, Mandate 영향과 부서 간 충돌을 조정한다.
+- 인사팀장 Hermes는 새 Agent 채용 전에 기존 Profile, Skill, Tool 또는 Workflow 확장으로 해결 가능한지 검토한다.
+- 두 Agent 모두 자신의 Profile·권한·예산 변경을 단독 승인하지 않으며 QA Evidence와 분리된 승인자를 요구한다.
+- 회사 공통 교훈은 개인 Memory에만 묻어 두지 않고 `ImprovementCandidate`와 Versioned Artifact로 승격시킨다.
+- 성과는 조직 전체 품질, Incident 재발률, 비용, 지연과 Rollback 성공률로 평가한다.
+
+세부 운영 흐름은 이 문서의 6.5와 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.1 Multi-Strategy 책임
 
@@ -395,6 +421,40 @@ Leaver:
 - 열린 Case와 Artifact Owner 이전.
 - Revocation Evidence와 종료 시각 기록.
 
+### 6.5 조직 재귀적 자기 개선 Workflow
+
+인사팀은 Agent 수를 늘리는 부서가 아니라 조직 능력을 Version 단위로 관리하는 부서다. 부서 Hermes가 업무를 마친 뒤 남긴 회고는 바로 Production에 반영되지 않고 다음 절차를 거친다.
+
+```text
+Case·Incident·성과 결과
+  -> 부서 Hermes의 ImprovementCandidate
+  -> QA Evidence 검증과 위험 분류
+  -> HR Build-vs-Extend-vs-Hire 판단
+  -> Skill | Profile | Workflow | Agent 후보 생성
+  -> 고정 Eval과 Shadow/Champion-Challenger
+  -> 권한에 맞는 승인
+  -> Version 배포와 Scorecard 관찰
+  -> 유지 | Rollback | Retire | 다음 Candidate
+```
+
+| 후보 유형 | 주 Owner | 필수 Gate |
+|---|---|---|
+| Memory 정정·만료 | 해당 본부장 Hermes | Source 확인, Audit Event |
+| Skill 변경 | 해당 본부 + 인사팀 | QA Regression Eval, Shadow, Rollback Version |
+| Agent Profile 변경 | 인사팀 | Tool/Data Scope Review, QA Eval, CEO 승인 |
+| Workflow 변경 | CEO Office + 영향 본부 | 계약 Test, 권한 분리 검토, End-to-End Replay |
+| Strategy 변경 | 리서치·퀀트 | Risk·QA Gate, Shadow/Paper, 전략위원회 승인 |
+
+운영 불변식:
+
+- Agent가 자기 Prompt, Skill, Model, Tool Allowlist, Memory Scope 또는 Production 권한을 직접 활성화하지 않는다.
+- 후보를 만든 본부와 QA Evidence 작성·승인 역할을 분리한다. QA 자신의 후보도 독립 Reviewer가 필요하다.
+- 현재 Position, Cash, PnL, Risk Limit과 주문 상태는 공식 API에서 조회하며 Hermes Memory를 Source of Truth로 사용하지 않는다.
+- 활성 Version은 이전 Champion, 승인 Decision, Eval Dataset, 배포 시각과 즉시 실행 가능한 Rollback Target을 가진다.
+- KPI는 수익률뿐 아니라 정확도, 재현성, Incident 재발률, 비용, 지연, 권한 위반과 Rollback 성공률을 포함한다.
+
+현재 저장소에는 부서별 Hermes Profile과 `multi-agent-workflow.yaml` Prototype이 있다. `ImprovementCandidate` Registry, Eval Runner, Shadow Router, 승인·배포 Adapter와 Scorecard는 아직 구현 대상이며, [Core Plan의 최소 자기 개선](../01-product/HEDGE_FUND_CORE_PLAN.md#34-core에서-증명할-최소-자기-개선)부터 연결한다.
+
 ---
 
 ## 7. Supabase Auth, 권한과 RLS
@@ -484,6 +544,14 @@ report.ready.v1
 
 CEO Summary Event에 본부별 전체 Payload를 복사하지 않는다. 공식 Artifact ID, Version, 결정, 조건과 Trace만 포함한다.
 
+### 8.4 AI Office 제공 계약
+
+- Live Office의 8개 조직, Agent Roster, Queue, SLA, Handoff, Approval과 Incident 집계 Read Model을 제공한다.
+- Agent 상세에는 Profile·Prompt·Skill·Tool·Model Version, 현재 `case_id`, Heartbeat, 비용, Eval과 Permission 만료를 제공한다.
+- `DEMO`, `PAPER`, `LIVE` Mode는 Backend Session과 Fund 권한으로 결정하고 Browser Local State로 전환하지 않는다.
+- CEO 승인, Strategy Promotion과 Workforce Lifecycle Command는 `governance-api`·`workforce-api`로 받고 사유, 멱등 키, 예상 Version과 Audit 결과를 보존한다.
+- CEO와 인사팀 화면은 Risk·QA Block을 숨기거나 해제할 수 없다.
+
 ---
 
 ## 9. 권장 라이브러리
@@ -570,7 +638,7 @@ Supabase DB Backup에는 Storage Object 복구가 별도라는 전제로 Private
 
 ## 11. 화면과 운영 View
 
-영주님 담당 Dashboard 최소 화면:
+영주님 담당 화면은 현재 `ai-office/` Pixel Office를 8개 조직 기반 Live Office로 바꾸고, 아래 업무용 View를 함께 제공한다.
 
 1. **CEO Overview:** NAV, PnL, Cash, Risk State, Strategy, Incident.
 2. **Decision Inbox:** 사용자 승인, 위원회 안건, Escalation과 만료.
@@ -654,6 +722,7 @@ Supabase DB Backup에는 Storage Object 복구가 별도라는 전제로 Private
 - [ ] 인사팀이 자기 Candidate를 단독 Production 활성화할 수 없다.
 - [ ] 사용자·Fund·Agent별 Supabase RLS가 통합 Test를 통과한다.
 - [ ] CEO/HR Agent에 Raw Market DB와 `service_role` Credential이 없다.
+- [ ] AI Office의 8개 조직, Agent 상태와 승인 Inbox가 공식 Read Model에서 생성되고 `DEMO/PAPER/LIVE`가 명확히 분리된다.
 
 ---
 

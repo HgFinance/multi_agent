@@ -1,6 +1,6 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v2.7  
+> 문서 상태: Production Plan v2.9
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
@@ -10,6 +10,8 @@
 > Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
 > Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](04-organization/AGENT_EMPLOYEE_PROFILES.md)
+> 저장소 조직 경계: [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
+> 운영 Frontend 기준: [AI Office Frontend and Operator Control Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 전사 데이터·부서별 Library: [헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 구현 가이드: [재일](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
 > 
@@ -328,6 +330,9 @@ flowchart TB
     QNT -.->|"Dataset · Model · Release"| QAA
     ACC -.->|"Ledger · NAV Evidence"| QAA
     QAA -.->|"Finding · Block · Escalation"| CEO
+
+    QAA -.->|"Workforce Signal: Idle · 저성과 · Repeat Finding"| HR
+    HR -.->|"Workforce Plan · Hiring/Lifecycle Status"| CEO
 ```
 
 #### CEO 에이전트
@@ -338,6 +343,15 @@ flowchart TB
 - 본부별 결과를 통합해 사용자에게 하나의 결정과 설명으로 제공
 - 중대한 자본 재배분, 전략 중단, Drawdown 대응안을 사용자 승인 범위에 맞춰 상신
 - 독립 리스크 및 감사 거부권을 우회하지 않으며 공식 원장을 직접 변경하지 않음
+
+#### CEO 직속 Agent Workforce 인사팀
+
+- 제7의 투자 본부가 아닌 CEO 직속 Shared Service — 투자 판단, Production 권한 부여, 자기 후보의 최종 QA 승인을 수행하지 않음
+- 6개 본부의 Queue Depth, SLA, 비용과 Capacity Headroom을 취합해 채용 우선순위와 주간 Workforce Plan 수립
+- AI QA/감사본부로부터 Idle(낮은 Queue 활용률)과 저성과(반복 Finding, 낮은 Eval 점수) 신호를 받아 교육, 역할 변경 또는 비활성화 후보를 식별 — 인사팀이 직접 성과를 측정하지 않고 QA의 독립 Evidence를 근거로 판단
+- Hiring Requisition에 대한 Job Profile(Mission, Skill, Tool, 금지 권한, Eval 기준) 설계
+- Golden/Adversarial Eval과 Shadow 수습으로 신규·개정 후보를 검증하며, 신규 채용과 기존 Agent 개정에 동일한 검증 기준을 적용
+- Joiner/Mover/Leaver Lifecycle 관리 — Queue 배정, Memory Namespace와 권한 요청까지만 수행하며 실제 Identity/권한 생성은 Platform/IAM Service가 전담
 
 #### 1. 리서치본부
 
@@ -475,6 +489,150 @@ Investor Capital
 - 공식 PnL과 성과 귀속 계산
 
 에이전트의 서술은 공식 원장을 변경할 수 없으며, 검증된 Command와 승인 절차를 통해서만 상태 변경을 요청할 수 있다.
+
+### 5.10 Hermes Memory 기반 조직 재귀적 자기 개선
+
+Hermes를 본부장 Runtime으로 사용하는 핵심 이유는 단순한 대화 UI가 아니다. Hermes는 세션을 넘어 유지되는 정제 Memory, 과거 Session Search와 절차 지식인 Skill을 통해 반복 업무에서 배운 내용을 다음 업무에 재사용할 수 있다. 이 프로젝트는 그 기능을 개인 Agent의 무제한 자기 수정이 아니라 **권한이 분리된 조직 학습 시스템**으로 사용한다.
+
+Hermes의 기본 기능과 회사의 공식 기록은 구분한다.
+
+| 계층 | 의미 | 이 프로젝트의 사용법 |
+|---|---|---|
+| Hermes Memory | 항상 기억해야 하는 작고 지속적인 사실·선호·운영 교훈 | 사용자 선호, 본부 Convention, Case/Finding Pointer와 검증된 짧은 교훈 |
+| Session Search | 과거 대화와 Tool 수행 내역의 검색 | 재현할 Session을 찾는 보조 수단, 공식 Evidence로 직접 인용하지 않음 |
+| Hermes Skill | 필요할 때 불러오는 재사용 가능한 절차 지식 | 검증된 수집, 분석, 장애대응, 보고 절차의 Versioned Candidate |
+| Decision Memory | Case, 판단, 주문, 결과와 회고의 전사 기록 | Supabase의 Version·Evidence·Lineage가 있는 공식 조직 기억 |
+| Policy Store | Mandate, Risk Limit, Restricted List와 승인 규칙 | Agent Memory보다 우선하는 Version 고정 통제 기준 |
+| Audit Store | Tool Call, Eval, Finding, 승인과 Rollback Evidence | Append-only 검증 기록 |
+
+Hermes Memory에는 현재 가격, Position, Cash, PnL, NAV, Risk Limit 또는 주문 상태를 사실값으로 저장하지 않는다. 이런 값은 빠르게 변하고 공식 Source가 따로 있으므로 ID와 조회 방법만 기억하고 매 Case마다 담당 API에서 다시 읽는다. Secret, Broker Token, 고객 개인정보와 다른 본부의 Raw Memory도 저장하지 않는다.
+
+#### 5.10.1 조직 학습 폐쇄 루프
+
+```mermaid
+flowchart LR
+    RUN["운영 Case · Strategy Run · Incident"] --> OBS["결과·오류·비용·Finding 관측"]
+    OBS --> REF["Hermes 회고와 개선 후보 생성"]
+    REF --> MEM["Memory Candidate"]
+    REF --> SKL["Skill Candidate"]
+    REF --> PRF["Profile/Workflow Candidate"]
+    REF --> STR["Strategy Candidate"]
+
+    MEM --> QA["AI QA 독립 검증"]
+    SKL --> QA
+    PRF --> HR["Agent Workforce 설계·Eval"]
+    STR --> QNT["퀀트/백테스트 검증"]
+    HR --> QA
+    QNT --> QA
+
+    QA --> SHD["Shadow · Replay · Adversarial Eval"]
+    SHD --> GATE["CEO · Risk · QA 권한별 승인"]
+    GATE --> VER["불변 Version 배포"]
+    VER --> MON["성과·통제·비용 재측정"]
+    MON --> RUN
+    MON -->|"Regression"| RB["Rollback · Retire"]
+    RB --> REF
+```
+
+이 구조가 재귀적인 이유는 개선된 Agent, Skill, Workflow와 Strategy가 다음 Case를 처리하고, 그 결과가 다시 새로운 관측과 개선 후보를 만들기 때문이다. 그러나 재귀적이라는 말은 Agent가 자기 Prompt, Tool 권한, Risk Limit 또는 Production 코드를 직접 바꾼다는 뜻이 아니다. **후보 생성은 자동화할 수 있지만 검증, 승인, 활성화와 Rollback 권한은 다른 조직이 가진다.**
+
+#### 5.10.2 다섯 개의 개선 루프
+
+| 루프 | 입력 | 개선 대상 | 검증·승인 | 예시 |
+|---|---|---|---|---|
+| Case 학습 루프 | Research Case, 주문, PnL, 무효화 결과 | Decision Memory, 검색 Cue, 실패 분류 | 담당 본부 + QA | 같은 Regime의 유사 실패를 다음 분석에 제시 |
+| 절차 Skill 루프 | 반복 Tool Call, 오류 후 성공 경로, 사용자 교정 | Hermes Skill·Runbook | 본부 Owner + QA Write Gate | LS 재연결·Gap 복구 절차를 Skill Candidate로 저장 |
+| Agent Profile 루프 | Eval, Hallucination, Tool Misuse, SLA·비용 | Prompt, Skill Bundle, Model Routing, Tool Allowlist | 인사팀 설계 + QA Eval + CEO 조직 승인 | Citation 누락이 반복된 Analyst Profile 개정 |
+| Strategy 루프 | Backtest, Shadow/Paper 성과, Drift와 Capacity | Feature, Parameter, Strategy Bundle | 퀀트 검증 + Risk + QA + CEO Gate | 비용 반영 후 약해진 전략을 Challenger로 재설계 |
+| 조직·Workflow 루프 | Queue, Handoff 지연, Incident, Break와 Finding Aging | Routing, 병렬성, 역할 분리, 채용·비활성화 | 인사팀 + 관련 본부 + QA + CEO | QA 적체를 Worker 확장으로 해결하고 권한은 유지 |
+
+Risk Policy와 회계 원칙은 성과가 나쁘다는 이유로 자동 완화하지 않는다. 한도·권한·원장 불변식의 변경은 자기 개선이 아니라 통제 변경이며 별도 승인과 Migration, Regression Test가 필요하다.
+
+#### 5.10.3 본부별 학습 기여
+
+| 조직 | 조직 Memory에 제공하는 것 | 직접 바꾸지 못하는 것 |
+|---|---|---|
+| CEO Office | Mandate 해석 이력, 위원회 결정, Escalation 결과와 우선순위 | Risk 승인, 공식 원장, Audit Finding |
+| 리서치본부 | 출처 품질, 검색 성공·실패, Entity 오류, 유효했던 Research Pattern | 주문 방향·수량, Strategy 승격 |
+| 트레이딩본부 | 제안 대비 체결, Slippage, Partial Fill과 TCA 교훈 | Risk Limit, Position·NAV 원본 |
+| 리스크본부 | Breach, Stress, 거부·축소 사유와 False Positive 후보 | 자기 Limit 완화, QA Finding 종료 |
+| 퀀트/백테스트본부 | 실패를 포함한 Experiment, OOS, Regime, Capacity와 Drift | Champion 직접 덮어쓰기, Production 승격 |
+| 회계/포트폴리오본부 | Reconciliation Break, PnL Attribution, Valuation Exception | 투자 Signal, Posted Journal 수정 |
+| AI QA/감사본부 | Finding 유형, Eval 결과, Regression, Tool·권한 위반 | 감사 대상 원본 수정, 자기 Finding 단독 종료 |
+| Agent Workforce 인사팀 | Skill Gap, Profile Version, 교육·수습·비활성화 결과 | 자기 Candidate의 최종 QA, 실제 권한 생성 |
+
+각 본부 Hermes는 자기 Memory Namespace만 쓴다. 전사 공유가 필요한 교훈은 원문 Memory를 복제하지 않고 `ImprovementCandidate`로 제출한다. QA가 Evidence, 기밀성, Point-in-Time과 권한 경계를 검증한 뒤 승인된 요약만 Shared Skill 또는 공식 Decision Memory로 승격한다.
+
+#### 5.10.4 개선 Candidate 상태와 불변 규칙
+
+```text
+OBSERVED
+  -> CANDIDATE
+  -> EVIDENCE_VERIFIED
+  -> EVAL_READY
+  -> SHADOW
+  -> APPROVED
+  -> ACTIVE
+  -> MONITORED
+  -> ROLLED_BACK | RETIRED | SUPERSEDED
+```
+
+불변 규칙:
+
+1. Memory·Skill·Prompt·Model·Tool 변경은 모두 `candidate_id`, `profile_version`, 작성자, 근거 Case와 Content Hash를 가진다.
+2. 자기 산출물을 만든 Agent는 최종 Eval과 Production 승인을 단독 수행하지 않는다.
+3. 개선 전 Champion과 개선 후 Challenger를 같은 고정 Eval Set, Replay와 비용 한도로 비교한다.
+4. 수익률만 좋아지고 Citation, Risk, Latency, Cost 또는 권한 준수가 나빠진 Candidate는 개선으로 보지 않는다.
+5. Shadow에서 실제 Command 권한을 주지 않는다. Tool Call은 Mock 또는 Read-only 환경을 사용한다.
+6. 승인된 Version만 Runtime에 배포하며 Session 중 Prompt·Skill·전략 코드를 조용히 덮어쓰지 않는다.
+7. 모든 Version은 이전 Version, Rollback 조건, 적용 시각과 영향 Case를 추적한다.
+8. 반복 실패가 지식 부족인지, Tool·Data·Workflow·정책·인력 Capacity 문제인지 분류한 뒤 가장 작은 변경을 선택한다.
+
+#### 5.10.5 평가 지표
+
+조직의 자기 개선은 다음 지표를 함께 낮추거나 높여야 한다.
+
+- 역할별 Task Success와 Schema Validity
+- Citation Coverage, Groundedness와 Hallucination Escape
+- 동일 유형 Finding 재발률과 Finding Aging
+- Case SLA, Queue 대기, Timeout, 재작업률과 Token·Infra Cost
+- Strategy OOS·Shadow/Paper 성과, Drawdown, Turnover와 Capacity
+- 주문 Reject·Unknown·Duplicate, Slippage와 Partial Fill Recovery
+- Reconciliation Break, 원장 재구축 차이와 NAV Exception
+- 권한 위반, 다른 본부 Memory 접근과 미승인 Tool Call
+- Rollback 빈도와 개선 후 Regression Escape
+
+지표는 역할별 Baseline과 비교한다. 서로 다른 역할을 단일 수익률 순위로 평가하지 않으며 통제 본부의 거부·차단 횟수가 많다는 이유만으로 저성과로 분류하지 않는다.
+
+#### 5.10.6 현재 구현과 단계적 적용
+
+현재 존재하는 기반:
+
+- 독립된 8개 Hermes Profile과 `SOUL.md`
+- 본부별 Memory·Service Identity 분리 원칙
+- `multi-agent-workflow.yaml`의 신규 채용과 `agent_evolution_cycle` Prototype
+- `workforce.agent_profile_versions`, Eval, Audit와 Decision Memory용 Supabase Schema
+- `compliance-policy-agent`용 Agentic RAG baseline
+
+아직 구현되지 않은 것:
+
+- Hermes Memory 후보를 공식 `ImprovementCandidate`로 내보내는 Adapter
+- Skill Write Approval과 Git Version·QA Eval의 연결
+- 역할별 Golden/Adversarial Eval Harness와 Champion/Challenger 자동 비교
+- Shadow Profile Router, 승인된 Version 배포와 자동 Rollback
+- 본부별 반복 Finding, Queue, 비용과 개선 효과를 연결하는 Scorecard
+- Session Search 결과의 기밀성, 보존, 삭제와 Audit 정책
+
+적용 순서는 다음과 같다.
+
+1. CEO와 각 본부의 Memory Namespace, 저장 금지 항목과 Retention을 먼저 고정한다.
+2. 리스크본부 `compliance-policy-agent`에서 Memory가 아닌 Versioned Policy·Evidence 기반 Eval을 완성한다.
+3. QA가 반복 Finding을 `ImprovementCandidate`로 만들고 인사팀이 Profile 개정 후보를 설계한다.
+4. 한 개 Research Skill과 한 개 Incident Runbook을 Write Approval이 있는 Shadow Skill로 시험한다.
+5. Agent Profile Champion/Challenger와 Rollback을 구현한 뒤 다른 본부로 확대한다.
+6. 마지막에 Strategy·Agent·Workflow 개선 결과를 CEO Scorecard에서 연결한다.
+
+설계의 기반이 되는 Hermes 공식 기능은 [Persistent Memory](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md), [Skills System](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md)과 [Tools Reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/tools-reference.md)를 따른다. 회사 차원의 Gate, Version, RLS, Audit와 승인 분리는 본 프로젝트가 그 위에 추가하는 금융 통제다.
 
 ## 6. 실시간 처리 파이프라인
 
@@ -1044,147 +1202,102 @@ Capacity 증설보다 먼저 Load Shedding 우선순위를 정의한다. Positio
 
 ## 14. 권장 저장소 구조
 
+저장소의 최상위 업무 경계는 `CEO Office + 6개 본부 + CEO 직속 Agent Workforce 인사팀`이다. 본부가 소유하는 Agent Profile, 결정론적 Service와 Test는 같은 본부 폴더에 두고, 여러 본부가 공유하는 Contract, Orchestration, Integration, Migration과 Infrastructure는 공통 경계에 둔다.
+
+이 구조는 목표안이다. 현재 실행 경로와 단계별 이전 지도는 [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 단일 기준으로 사용한다. 문서만 먼저 확정한 뒤 Profile, 본부 코드, DB Prototype 순서로 별도 PR에서 이동하며, 기능 변경과 경로 변경을 한 PR에 섞지 않는다.
+
 ```text
-multi-agent-hedge-fund/
-├── apps/
-│   ├── api/
-│   ├── dashboard/
-│   ├── operator_control/
-│   ├── investor_portal/
-│   └── paper_trader/
-├── agents/
-│   ├── analysts/
-│   ├── committee/
-│   ├── strategy_committee/
-│   ├── portfolio/
-│   ├── auditor/
-│   └── schemas/
+multi_agent/
+├── departments/
+│   ├── 00-ceo-office/
+│   │   ├── hermes/
+│   │   ├── workflows/
+│   │   ├── src/
+│   │   └── tests/
+│   ├── 01-research/
+│   │   ├── hermes/
+│   │   ├── collectors/
+│   │   ├── services/
+│   │   ├── rag/
+│   │   └── tests/
+│   ├── 02-trading/
+│   │   ├── hermes/
+│   │   ├── contracts/
+│   │   ├── oms/
+│   │   ├── execution/
+│   │   └── tests/
+│   ├── 03-risk/
+│   │   ├── hermes/
+│   │   ├── engine/
+│   │   ├── compliance/
+│   │   ├── stress/
+│   │   └── tests/
+│   ├── 04-quant-backtest/
+│   │   ├── hermes/
+│   │   ├── datasets/
+│   │   ├── experiments/
+│   │   ├── backtests/
+│   │   ├── registry/
+│   │   └── tests/
+│   ├── 05-accounting-portfolio/
+│   │   ├── hermes/
+│   │   ├── ledger/
+│   │   ├── portfolio/
+│   │   ├── reconciliation/
+│   │   ├── nav/
+│   │   └── tests/
+│   ├── 06-ai-qa-audit/
+│   │   ├── hermes/
+│   │   ├── evidence/
+│   │   ├── evals/
+│   │   ├── model-risk/
+│   │   ├── audit/
+│   │   └── tests/
+│   └── 07-agent-workforce/
+│       ├── hermes/
+│       ├── profiles/
+│       ├── evals/
+│       ├── improvements/
+│       ├── deployments/
+│       ├── lifecycle/
+│       └── tests/
 ├── orchestration/
-│   ├── hermes/
+│   ├── workflows/
 │   ├── routing/
-│   └── workflows/
-├── market_data/
-│   ├── adapters/
-│   ├── normalization/
-│   ├── features/
-│   ├── derivatives/
-│   │   ├── futures/
-│   │   ├── option_chains/
-│   │   └── subscriptions/
-│   └── events/
-├── universe/
-├── rag/
-│   ├── ingestion/
-│   ├── retrieval/
-│   ├── memory/
-│   └── point_in_time/
-├── risk/
-│   ├── greeks/
-│   ├── margin/
-│   ├── stress/
-│   └── derivatives/
-├── compliance/
-├── portfolio/
-├── derivatives/
-│   ├── instruments/
-│   ├── pricing/
-│   ├── volatility_surface/
-│   ├── futures_roll/
-│   ├── expiry/
-│   └── strategies/
-├── strategy_factory/
-│   ├── hypotheses/
-│   ├── datasets/
-│   ├── features/
-│   ├── labels/
-│   ├── experiments/
-│   ├── backtests/
-│   ├── plugins/
-│   │   ├── equity/
-│   │   ├── event_driven/
-│   │   ├── relative_value/
-│   │   ├── macro_futures/
-│   │   └── volatility/
-│   ├── capabilities/
-│   ├── validation/
-│   ├── registry/
-│   ├── deployment/
-│   └── monitoring/
-├── execution/
-│   ├── oms/
-│   ├── multi_leg/
-│   └── brokers/
-├── middle_office/
-│   ├── trade_control/
-│   ├── reconciliation/
-│   ├── valuation/
-│   └── performance_attribution/
-├── fund_operations/
-│   ├── accounting/
-│   ├── nav/
-│   ├── treasury/
-│   ├── collateral/
-│   ├── fees/
-│   └── investor_reporting/
-├── department_automation/
-│   ├── work_items/
-│   ├── supervisors/
-│   ├── policy_gates/
-│   ├── approvals/
-│   ├── escalations/
-│   ├── sla/
-│   └── audit/
-├── reference_data/
-│   ├── security_master/
-│   ├── calendars/
-│   └── corporate_actions/
-├── infrastructure/
-│   ├── cloud/
-│   │   ├── provider-neutral/
-│   │   ├── provider-candidates/
-│   │   ├── landing-zone/
-│   │   ├── modules/
-│   │   └── policies/
-│   ├── environments/
-│   ├── network/
-│   ├── databases/
-│   ├── event_bus/
-│   ├── disaster_recovery/
-│   └── capacity/
-├── security/
-│   ├── iam/
-│   ├── secrets/
-│   ├── policies/
-│   ├── monitoring/
-│   └── incident_response/
-├── operations/
-│   ├── runbooks/
-│   ├── on_call/
-│   ├── incidents/
-│   ├── daily_close/
-│   └── launch_gates/
-├── legal_compliance/
-│   ├── applicability/
-│   ├── registrations/
-│   ├── records_retention/
-│   └── investor_documents/
-├── vendor_management/
-│   ├── register/
-│   ├── contracts/
-│   ├── entitlements/
-│   └── exit_plans/
-├── storage/
-├── replay/
-├── observability/
-├── config/
+│   └── schemas/
+├── contracts/
+├── skills/
+│   ├── catalog/
+│   ├── packages/
+│   └── eval-fixtures/
+├── integrations/
+├── apps/
+├── supabase/
+│   └── migrations/
+├── timescaledb/
+│   └── migrations/
 ├── tests/
-│   ├── unit/
+│   ├── contract/
 │   ├── integration/
 │   ├── replay/
-│   └── load/
+│   └── e2e/
+├── infrastructure/
+├── scripts/
 ├── docs/
-└── docker-compose.yml
+└── references/
 ```
+
+구조 규칙은 다음과 같다.
+
+1. `departments/`는 조직별 Agent, 업무 Service와 본부 Test의 소유 경계다.
+2. `orchestration/`은 본부를 호출하고 연결하지만 본부의 업무 규칙을 복제하지 않는다.
+3. `contracts/`는 본부 간 공유 Schema의 기준이며 생산·소비 본부와 AI QA가 함께 검토한다.
+4. `supabase/`와 `timescaledb/`는 Migration Tool 표준 경로를 유지한다. Schema의 논리적 소유권은 본부별로 구분한다.
+5. 인사팀은 `07-agent-workforce/`에 위치해도 제7의 투자 본부가 아니며 투자 판단 권한을 갖지 않는다.
+6. 같은 담당자가 두 본부를 맡아도 폴더, Service Identity, Database Role과 Review Gate를 합치지 않는다.
+7. 현재 `db/` Prototype과 `supabase/migrations/`는 함께 적용하지 않는다. 통합 Schema 기준은 `supabase/migrations/`다.
+8. `skills/`에는 Version이 있는 절차 Package와 Eval Fixture만 두고 Runtime Memory·Session·Secret은 저장하지 않는다.
+9. 개선 후보 상태는 Supabase `workforce`·`audit`, 코드는 Git, 실행 상태는 Deployment Event가 각각 기준이며 하나의 Markdown이나 Hermes Memory로 대체하지 않는다.
 
 ## 15. 운영 및 관측성
 
@@ -1260,29 +1373,35 @@ multi-agent-hedge-fund/
 - Worker 사용률
 - 오류율과 재시도율
 
-### 15.2 대시보드 화면
+### 15.2 AI Office와 대시보드 화면
 
-- Market Feed Health
-- 전 종목 Heatmap 및 Attention Universe
-- Agent Queue와 현재 분석 종목
-- 종목별 사건, 논거 및 결정 타임라인
-- 포지션, 주문, PnL 및 Exposure
-- Risk Limit과 Kill Switch
-- LLM 비용과 호출 지연
-- Replay 제어 및 의사결정 비교
-- Strategy Registry와 Champion/Challenger 상태
-- 실험, 검증, 배포 및 롤백 이력
-- Fund/Pod/Book별 자본 배분과 Risk Budget
-- Reconciliation Break와 Daily Close 상태
-- NAV, Cash, Margin, Collateral 및 Fee 원장
-- Strategy/Book/Pod별 Performance Attribution
-- 본부별 Work Queue, SLA 및 Escalation
-- 자동화 등급별 실행과 승인 현황
-- 본부 간 Case Timeline과 미해결 Action Item
-- Futures Curve와 Roll Calendar
-- Option Chain, IV Surface, Skew 및 Term Structure
-- Greeks, Margin 및 파생상품 Stress Scenario
-- Multi-leg Order와 Leg Risk 상태
+현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 이를 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 **조직 관제·탐색 화면**으로 발전시킨다. 현재 12개 고정 방과 Scripted Simulation은 프로젝트 조직이나 실시간 업무 상태의 기준이 아니며, 8개 조직과 Backend Event를 사용하는 데이터 기반 구조로 교체한다.
+
+첫 화면의 Live Office에서 Agent, 본부, Queue, Approval과 Incident를 보고, 다음 업무용 View로 이동한다.
+
+- `CEO Command Center`: Mandate, 승인 Inbox, 자본 배분, Incident와 Daily Brief
+- `Market and Universe`: LS Feed Health, 전 종목 처리량, Heatmap과 Attention Universe
+- `Research Case`: 종목별 사건, RAG Evidence, Bull/Bear 논거와 결정 타임라인
+- `Strategy Factory`: Candidate, Dataset, Backtest, Champion/Challenger, Shadow/Paper 배포와 롤백
+- `Risk Center`: Risk Limit, Exposure, Breach, Stress, Trading State와 Kill Switch
+- `Trading and OMS`: Order Intent, Risk Decision, 주문, 체결, 거절, 취소와 TCA
+- `Portfolio and Close`: Position, PnL, NAV, Cash, Margin, Collateral, Fee와 Reconciliation
+- `AI QA and Audit`: Finding, Eval, Version, Trace, Replay와 Evidence Export
+- `Agent Workforce`: 본부별 Work Queue, SLA, Agent 상태, Skill Gap, 비용과 자기 개선 이력
+- `Derivatives`: Futures Curve, Roll Calendar, Option Chain, IV Surface, Greeks와 Multi-leg Leg Risk
+
+Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 캐릭터의 움직임은 공식 Agent Runtime Event의 Projection이고, Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
+
+### 15.2.1 실시간 Frontend 계약
+
+1. 화면은 `GET /ui/snapshot`으로 권한 범위의 기준 상태를 먼저 읽는다.
+2. FastAPI의 `/ws/operations`에서 필터링된 Domain Event를 받는다.
+3. Event는 `event_id`, `event_type`, `schema_version`, `sequence`, `occurred_at`, `server_time`, `fund_id`와 `trace_id`를 가진다.
+4. Client는 Heartbeat, 지수형 재연결, Sequence Gap과 Staleness를 감지한다.
+5. 누락 Event는 추측하지 않고 Snapshot을 다시 읽어 복구한다.
+6. `DEMO`, `PAPER`, `LIVE`는 Backend Session으로 분리하고 모든 화면에 현재 Mode를 표시한다.
+
+Frontend는 Supabase Service Role, Broker와 LS Credential을 갖지 않으며 Risk 계산, OMS 전이와 Ledger Posting을 수행하지 않는다. 승인, Pause와 Kill Switch는 FastAPI Command로만 요청하고 사용자 Identity, 사유, 영향 Preview, 멱등 키, 예상 Version과 Audit Event를 남긴다. 상세 UX, 상태 계약과 구현 순서는 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
 ### 15.3 Alerting과 On-call
 
@@ -2899,6 +3018,8 @@ Critical Vendor는 최소 연 1회 Evidence와 BCP를 재검토하고 계약 변
 - 읽기 전용 Incident Snapshot과 Evidence Export
 
 모든 관리 Action은 Preview, 영향 범위, 필요한 승인, 멱등성 Key와 결과 검증을 제공한다.
+
+`ai-office`는 이 Control Plane의 사용자-facing Shell이 될 수 있지만 Backend 통제 계층을 대체하지 않는다. Pixel Office와 상세 Dashboard가 중단되어도 Market Worker, Risk Engine, OMS와 Ledger는 계속 동작해야 하며, UI 재연결 후 공식 Snapshot으로 상태를 복구한다. 현재 `vinext`·Cloudflare Worker 배포는 Frontend Prototype Baseline일 뿐 전체 Cloud Provider 결정이 아니다.
 
 ### 21.20 Production Launch Gate
 

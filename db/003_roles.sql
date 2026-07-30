@@ -46,10 +46,9 @@ GRANT SELECT ON accounting.positions, accounting.cash_balances TO svc_trading_wo
 
 -- --- svc_oms: 주문 생명주기 ---------------------------------------------------
 GRANT SELECT, INSERT, UPDATE ON execution.orders TO svc_oms;
-GRANT SELECT, INSERT ON execution.order_events, execution.intent_events, execution.fills,
+GRANT SELECT, INSERT ON execution.order_events, execution.fills,
                         execution.execution_plans, execution.execution_exceptions TO svc_oms;
-GRANT SELECT ON execution.order_intents, execution.intent_state_transitions,
-                execution.broker_order_state_transitions,
+GRANT SELECT ON execution.order_intents, execution.order_state_transitions,
                 execution.funds, execution.books TO svc_oms;
 GRANT UPDATE (intent_status, risk_request_id) ON execution.order_intents TO svc_oms;
 -- 원장 접근 없음. 회계 수치는 svc_ledger만 만든다.

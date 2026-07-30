@@ -28,14 +28,21 @@ Use this skill whenever a persona needs to answer a question that must be ground
 
 ## How to run it
 
-Invoke via the terminal tool:
+Invoke via the terminal tool. Resolve the path from the repo root with `git rev-parse
+--show-toplevel` instead of hardcoding a machine-specific path — this works no matter
+where the `multi_agent` repo is cloned or which machine/profile is running it:
 
 ```bash
-python3 /Users/baiohelseu/Desktop/Project/multi_agent/skills/agentic-rag/main.py \
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+python3 "$REPO_ROOT/skills/agentic-rag/main.py" \
   --persona compliance-policy-agent \
   --query "Can we open a new long position in SYMBOL_A today?" \
   --as-of 2026-07-29
 ```
+
+(This only works from a working directory inside the repo. If the terminal tool's cwd
+is outside it, `cd` into the repo clone first — check `terminal.cwd` in the profile's
+`config.yaml`.)
 
 Output is JSON on stdout:
 

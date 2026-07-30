@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.2  
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부  
@@ -8,6 +8,8 @@
 > 시장 데이터 접근: 재일님 팀의 `market-api`와 Redis Snapshot을 통해 조회  
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View
 
 ---
 
@@ -36,6 +38,33 @@
 - 주문 Risk 승인과 Limit 변경
 - Strategy Candidate 검증·승격 승인
 - QA Finding 종료와 감사 증빙 삭제
+
+### 저장소 소유권
+
+| 구분 | 현재 경로 | 구 경로 |
+|---|---|---|
+| 트레이딩 Hermes | `departments/02-trading/hermes/` | `orchestration/hermes/trading-department/` |
+| 계약·OMS·Paper Broker | `departments/02-trading/{contracts,oms,broker}/` | `trading/`, `execution/` |
+| 회계 Hermes | `departments/05-accounting-portfolio/hermes/` | `orchestration/hermes/accounting-portfolio-department/` |
+| Ledger·Reconciliation | `departments/05-accounting-portfolio/{ledger,reconciliation}/` | `accounting/` |
+| D0-D2 SQL Prototype | `db/` | — (Supabase 통합 후 Archive 또는 제거, 11절 단계 4 — 아직 진행 전) |
+| 운영 DB Migration | `supabase/migrations/` | — (도구 표준 경로 유지, Schema별 Domain Owner 지정) |
+
+11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/02-trading/`,
+`departments/05-accounting-portfolio/`가 실행 기준이다. 구 경로(`runpy` 기반 임시 CLI 호환 Wrapper)는
+예정(2026-10-31)보다 일찍 삭제됐다 — 더 이상 존재하지 않는다. 5개 자체 점검 스크립트 모두 통과 확인함.
+`db/`와 `supabase/migrations/`는 같은 Database에 함께 적용하지 않는다. 현재 Python Prototype을 Canonical
+Schema로 옮길 때 Schema Diff, RLS와 Runtime Test를 포함한 별도 PR이 필요하다.
+
+### Hermes 자기 개선 책임
+
+- 트레이딩 Hermes는 Reject, Partial Fill, Slippage, Cancel 지연과 Reconciliation Break를 개선 후보의 근거로 사용한다.
+- 회계 Hermes는 원장 불일치, Valuation 예외, 누락 Fee와 Report 재작성 원인을 개선 후보로 등록한다.
+- Memory에는 현재 주문·Position·Cash·PnL을 저장하지 않고 `order_id`, `fill_id`, `ledger_event_id`, `break_id`와 재확인 절차만 남긴다.
+- Hermes는 OMS 상태 머신, Risk Decision 또는 Ledger를 직접 바꾸지 않는다. 변경 후보는 회귀 Test, Shadow/Paper, QA 검증과 승인 후 새 Version으로 배포한다.
+- 효과는 중복 주문 0건, Break 해결 시간, TCA 품질, 회계 마감 시간과 Rollback 가능성으로 평가한다.
+
+조직 공통 상태 전이와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.1 Multi-Strategy 책임
 
@@ -444,6 +473,14 @@ nav.official.v1
 
 Event Payload에는 전체 Statement나 보고서를 넣지 않고 `object_path`, `hash`, `record_id`를 넣는다.
 
+### 6.4 AI Office 제공 계약
+
+- `Trading and OMS`에 Order Intent, Risk Decision Ref, Order·Fill 상태, Reject·Cancel Reason, Broker Session과 TCA Read Model을 제공한다.
+- `Portfolio and Close`에 Position, Cash, Exposure, PnL, NAV 상태, Reconciliation Break와 `as_of`를 제공한다.
+- Order와 Fill은 동일한 `case_id`, `trace_id`, `order_intent_id`와 `internal_order_id`로 상세 화면에서 연결된다.
+- 화면의 Cancel·Paper 승인 요청은 `oms-api` Command로 받고 사용자 Identity, 사유, 멱등 키와 예상 Version을 검사한다.
+- Frontend는 `execution`·`accounting` Table, OMS 상태 머신과 Journal Posting을 직접 수정하지 않는다.
+
 ---
 
 ## 7. 권장 라이브러리
@@ -595,6 +632,7 @@ Accounting:
 - [ ] PnL과 NAV가 가격·FX·Fee Source까지 재현된다.
 - [ ] Supabase RLS로 Fund/Book/Service 권한이 분리된다.
 - [ ] 트레이딩·회계 Agent에 TimescaleDB와 `service_role` Credential이 없다.
+- [ ] AI Office의 Order·Position·PnL·NAV 상태를 공식 Read Model과 Event Chain에서 재구성하고 Browser가 거래·원장 Table을 직접 수정하지 않는다.
 
 ---
 

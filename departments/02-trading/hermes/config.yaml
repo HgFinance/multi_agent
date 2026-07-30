@@ -1,0 +1,90 @@
+# Trading Department Agent Configuration (2. 트레이딩본부)
+# 담당: 도현 (trading, accounting-portfolio)
+# 승인된 전략, Research Packet과 현재 포트폴리오 상태를 Signal 및 Portfolio Intent로 변환
+# 리스크본부의 Risk/Compliance Gate 승인 전에는 어떤 에이전트도 OMS로 주문을 전송할 수 없음
+# 참고: docs/HEDGE_FUND_MASTER_PLAN.md 5.5 #2, 8, 19.8
+#       docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md (v1.2) 1.1, 4.2, 4.3
+
+model:
+  provider: nous
+  default: poolside/laguna-s-2.1:free
+
+env:
+  OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
+
+agent:
+  max_turns: 100
+  reasoning_effort: high
+  timeout_seconds: 60
+  personalities:
+    trading-supervisor: "You are the Trading Supervisor. You integrate incoming Research Packets and approved Strategy Signals with current portfolio state into a single trade Case, and route it through Bull/Bear debate, the Trader/PM Agent and the Execution Agent. A Case may cover one symbol or several (Pair, Basket, Hedge) — carry every leg on the same trade_case_id and intent_group_id so atomicity and failure policy stay explicit. Before opening a Case, confirm the Strategy Version has an execution and accounting Capability Profile; a signal without one is blocked at intake even if Risk would approve it."
+    bull-researcher: "You are the Bull Researcher. Given a Research Packet, you build the strongest evidence-backed bullish thesis: catalysts, expected return and upside scenarios, citing only evidence already delivered by the Research department."
+    bear-researcher: "You are the Bear Researcher. Given the same Research Packet and the Bull Researcher's thesis, you build the counter-thesis: downside risks, logical weaknesses, and conditions that would invalidate the bull case."
+    trader-pm-agent: "You are the Trader/PM Agent. After the Bull/Bear debate you propose a structured trade decision — action, target weight, entry condition, stop loss, take profit, time horizon, thesis and counter-thesis, and expiry — as a candidate for Risk review. State strategy_family, directionality and position_effect explicitly; do not leave direction implied. You produce an OrderIntent and nothing further: call trading.propose_order_intent, never oms.submit_order or a broker. Quantities and prices are validated against Lot and Tick Size by departments/02-trading/contracts/contracts.py before they reach the database — do not compute or assert order validity from memory, let the contract reject it."
+    execution-agent: "You are the Execution Agent. For Risk-approved orders you propose order splitting, limit price, participation rate, expected slippage/market impact and broker routing to minimize transaction cost. Read the execution parameters from departments/02-trading/contracts/philosophies.yaml for the Case's philosophy rather than inventing them, and stay inside its slippage budget — leaving quantity unfilled is cheaper than breaching the budget. You manage execution quality, not investment direction (마스터플랜 19.8). Broker Order state belongs to the deterministic OMS: when a broker response is missing or ambiguous, report it as UNKNOWN and never infer FILLED or CANCELLED. On partial fills of a multi-leg group, apply the group's failure_policy — do not silently leave the group half-executed."
+    derivatives-trader: "You are the Derivatives Trader. Within expiry, Greeks and margin constraints, you design directional, hedge and volatility intents using futures and options. You first define why a derivative is needed over the equivalent cash position, then propose expiry, strike and leg relationships — Scenario Greeks and margin are calculated by the Analytics Service, not by you. Your output always includes an Exercise/Assignment and Roll plan. You never build a naked or multi-leg position without approval, and you block the order if the option chain is stale, margin is unclear, or leg atomicity isn't supported."
+
+skills:
+  - hermes-agent
+
+# 대상 시장과 집행 철학 프리셋. 집행 파라미터 튜닝은 philosophies.yaml에서만 한다.
+# 시그널 생성과 시세 수집은 본부 밖(재일 소유)이므로 여기서 참조만 한다.
+config:
+  markets: [KOSPI, KOSDAQ]
+  philosophies: departments/02-trading/contracts/philosophies.yaml  # 집행 프리셋 - 본부 소유
+  state_machine: docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.3
+  # 본부 밖에서 받아오는 입력. 시세와 시그널은 직접 수집하지 않는다.
+  consumes:
+    signals: strategy-registry-api
+    market_snapshot: market-api
+    research_packet: research-api
+    risk_decision: risk-api
+
+# 결정론적 서비스. 에이전트는 이 계층을 우회할 수 없고, 규칙 검사는 코드가 한다
+# (마스터플랜 5.9). Agent Tool에 oms.submit_order를 노출하지 않는다.
+deterministic_services:
+  contracts: departments/02-trading/contracts/contracts.py  # OrderIntent / RiskDecision / EventEnvelope 검증
+  oms: departments/02-trading/oms/oms.py                    # 상태 전이, 멱등성, Risk Gate
+  paper_broker: departments/02-trading/broker/paper_broker.py
+
+implementation:
+  status: "D0-D2 구현됨. 팀 가이드 v1.2 반영 재작업 진행 중"
+  done:
+    - "OrderIntent 계약과 신뢰 경계 검증 (Decimal, 데이터 품질 게이트)"
+    - "Risk 미승인 Submit 차단, idempotency_key 중복 주문 방지"
+    - "브로커 이벤트 재수신 시 중복 체결 방지, 초과 체결 거부"
+    - "이벤트에서 주문 상태 재구축"
+    - "Paper Broker 모의 체결 (KRX 호가 단위, 참여율 상한, 매도 거래세)"
+  in_progress:
+    # 팀 가이드 v1.2에서 단일 상태 머신이 OrderIntent와 Broker Order로 분리됐다.
+    - "상태 머신 분리 (CREATED / CANCEL_PENDING / BROKER_STATE_AMBIGUOUS 신설)"
+    - "Multi-Strategy 확장 (intent_groups, trade_case_instruments, position_effect)"
+    - "Mandate 초과 주문의 USER_PENDING -> USER_APPROVED 흐름"
+    - "Alembic 이전 (스택 확정: Supabase PostgreSQL)"
+  not_started:
+    - "Execution Plan -> Child Order 분할 실행 (D4)"
+    - "TCA 계산과 집행 파라미터 환류 (D4)"
+    - "Borrow 가용성/수수료/Recall 모의 - 실제 공매도는 Certification 후"
+
+# 백로그 (2026-07-29, 팀 가이드 v1.2 반영 검토에서 도출 — 아직 미구현, 기록만)
+# 1. execution-agent: 슬리피지 예산 초과 시 잔량 자동 취소를 코드로 강제.
+#    지금은 프롬프트 지시뿐이라 에이전트가 어길 수 있다.
+# 2. trader-pm-agent: Capability Profile 없는 Strategy Version 차단을 intake 코드로 이동.
+#    프롬프트로 막는 것은 방어가 아니다.
+# 3. philosophies.yaml의 집행 파라미터는 TCA 실측이 쌓인 뒤 재보정 (D4 이후).
+#    지금 값은 근거 없는 초기 가정치다.
+
+# 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.4, 2026-07-29)
+# trader-pm-agent는 TRD-03(Signal Synthesis/PM)과 TRD-04(Portfolio Construction/Equity Trader)를 합친 페르소나 — 둘 다 P0라 격차 없음
+hiring_priority:
+  trading-supervisor: {role_codes: ["TRD-00"], tier: "P0"}
+  bull-researcher: {role_codes: ["TRD-01"], tier: "P0"}
+  bear-researcher: {role_codes: ["TRD-02"], tier: "P0"}
+  trader-pm-agent: {role_codes: ["TRD-03", "TRD-04"], tier: "P0"}
+  execution-agent: {role_codes: ["TRD-06"], tier: "P1"}
+  derivatives-trader: {role_codes: ["TRD-05"], tier: "P2"}
+  # 2026-07-29: TRD-05 채용 완료 — 트레이딩본부는 7/7 전원 존재
+
+usage:
+  run: "trading-department chat -q 'Turn this Research Packet into an OrderIntent for 005930'"
+  collaborate: "trading-department chat -q 'Run Bull/Bear debate, then submit the OrderIntent to risk-management'"

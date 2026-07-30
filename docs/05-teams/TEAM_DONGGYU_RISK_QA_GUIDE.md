@@ -1,6 +1,6 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.2  
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -8,6 +8,8 @@
 > 시장 데이터 접근: 재일님 팀의 `market-api` Snapshot·Bar·Feature Endpoint 사용  
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
+> 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리스크·AI QA 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Risk·Control·AI QA·Audit View
 
 ---
 
@@ -37,6 +39,30 @@
 - Strategy/Agent 후보를 자신이 만들고 자신이 최종 승인
 - Risk Limit을 Agent 판단만으로 확대
 - QA Finding을 작성자가 직접 종료
+
+### 저장소 소유권
+
+| 구분 | 현재 경로 | 구 경로 |
+|---|---|---|
+| 리스크 Hermes | `departments/03-risk/hermes/` | `orchestration/hermes/risk-management/` |
+| Compliance RAG Baseline | `skills/agentic-rag/` | — (위치 유지, 이동 안 함 — 공용 skills 경계 유지, Risk Source·공용 Artifact 분리는 ADR 후 결정) |
+| AI QA Hermes | `departments/06-ai-qa-audit/hermes/` | `orchestration/hermes/qa-department/` |
+| Risk·Audit Schema | `supabase/migrations/` | — (도구 표준 경로 유지, 리스크·QA가 각 Schema Owner) |
+| Schema Test | `tests/schema/` | — (공통 Test 경계 유지, 이동 안 함) |
+
+11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/03-risk/`,
+`departments/06-ai-qa-audit/`가 실행 기준이다. 구 경로(`orchestration/hermes/`)는 완전히 삭제됐다. 동규님이 두 폴더를 함께
+관리해도 Risk 승인과 QA 독립 검증은 별도 Service Identity, Database Role과 Review Gate를 유지한다.
+
+### Hermes 자기 개선 책임
+
+- Risk Hermes는 반복 Breach, 오탐·미탐, Stress 사각지대와 Escalation 지연을 개선 후보로 등록하되 Limit을 직접 확대하지 않는다.
+- QA Hermes는 모든 본부의 후보에 Golden·Adversarial·Regression Eval을 적용하고 결과를 Append-only Evidence로 남긴다.
+- Candidate 작성자와 승인자를 분리한다. QA가 만든 QA Skill 후보는 별도 Reviewer와 CEO/인사팀 Gate를 거쳐 자기 승인 문제를 막는다.
+- Memory에는 Finding과 Incident 원문 대신 `finding_id`, `incident_id`, `eval_run_id`와 반복 방지 Checklist를 남긴다.
+- 품질이 나빠지거나 권한·Risk 불변식을 위반하면 이전 Champion Version으로 자동 Rollback을 권고하고 Finding을 연다.
+
+AI QA/감사본부는 재귀적 자기 개선의 속도를 높이는 부서가 아니라 **잘못된 개선이 조직 전체로 증폭되지 않게 하는 독립 Gate**다. 공통 상태 전이와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
 ### 1.1 같은 담당자 안의 권한 분리
 
@@ -405,6 +431,14 @@ incident.action.v1
 
 Risk Decision Event는 OMS가 재검증할 수 있도록 `input_hash`, `policy_version`, `calculation_version`, `valid_until`을 포함한다.
 
+### 9.4 AI Office 제공 계약
+
+- `Risk Center`에 Trading State, Limit, Exposure Snapshot, Breach, Stress, Policy·Calculation Version과 Staleness를 제공한다.
+- `AI QA and Audit`에 Finding, Eval, Incident, Trace, Release Block과 Evidence Export 상태를 제공한다.
+- Risk Badge와 캐릭터 상태는 `risk.trading_state.v1`, `risk.breach.v1`, `qa.finding.v1` 같은 공식 Event에서만 바뀐다.
+- Entry Block, Reduce Only와 Kill Switch 요청은 `risk-api` Command로 받고 사용자 Identity, 사유, 영향 Preview, 멱등 키와 예상 Version을 검증한다.
+- UI는 Risk 수치를 다시 계산하거나 Agent·CEO 권고만으로 Block을 해제하지 않는다.
+
 ---
 
 ## 10. 권장 라이브러리와 도구
@@ -554,6 +588,7 @@ QA/Audit:
 - [ ] 원 작성 본부가 QA Finding을 수정·종료할 수 없다.
 - [ ] Agent와 Tool의 권한 위반을 Trace에서 탐지한다.
 - [ ] Incident Timeline과 Corrective Action을 Evidence로 재현할 수 있다.
+- [ ] AI Office가 공식 Risk·QA Event만 표시하고 Browser 계산이나 캐릭터 움직임으로 Trading State를 바꾸지 않는다.
 
 ---
 

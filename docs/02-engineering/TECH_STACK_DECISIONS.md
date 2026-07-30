@@ -1,11 +1,12 @@
 # Personal Hedge Fund Agent - Technology Stack Decisions
 
-> 문서 상태: Core Stack v1.2  
+> 문서 상태: Core Stack v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: Core Paper Trading 구현  
 > 원칙: 사용자가 지정한 필수 도구를 유지하되 기능 중복과 Vendor Lock-in을 최소화한다.  
 > 관련 문서: [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > 전사 데이터·부서별 Library 구현: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
+> Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 
 ## 1. 확정 스택 요약
 
@@ -20,7 +21,7 @@
 | Supabase | 필수 | PostgreSQL, pgvector, Auth, 문서·Artifact Storage |
 | Docker | 필수 | 서비스별 Runtime 격리와 재현 가능한 개발 환경 |
 | Render | 보류 | 초기 Demo 배포 후보, 실시간 Worker 적합성 검증 전 미확정 |
-| Frontend | 미정, Next.js + TypeScript 우선 후보 | 운영 Dashboard와 사용자 Control Plane, ADR 후 확정 |
+| Frontend | `ai-office` 기반 Next.js + React + TypeScript | Pixel Office와 운영 Dashboard를 결합한 Operator Control Plane |
 
 ### 1.2 추가 확정 권장 도구
 
@@ -45,13 +46,14 @@
 | Logging | structlog | P0 필수 |
 | Telemetry | OpenTelemetry + Prometheus Client | P1 필수 |
 | Error Tracking | Sentry | P1 권장 |
-| Frontend Framework | 미정, Next.js + TypeScript 우선 후보 | UI 착수 전 ADR |
-| Server State | TanStack Query | Next.js 선택 시 후보 |
-| Table | TanStack Table | Next.js 선택 시 후보 |
-| Chart | TradingView Lightweight Charts | Web Dashboard 선택 시 후보 |
-| UI Primitive | shadcn/ui + Radix UI | Next.js 선택 시 후보 |
-| Icon | lucide-react | React 계열 선택 시 필수 |
-| Frontend Test | Playwright, Framework Unit Test는 선택 후 결정 | P0 E2E 필수 |
+| Frontend Framework | Next.js + React + TypeScript, 현재 `ai-office` Baseline | P0 확정 |
+| Server State | TanStack Query | P0 확정 |
+| Runtime Schema | Zod | P0 확정 |
+| Table | TanStack Table | P0 확정 |
+| Chart | TradingView Lightweight Charts | Market View P0 확정 |
+| UI Primitive | shadcn/ui + Radix UI | P0 권장, 기존 Pixel UI와 함께 사용 |
+| Icon | lucide-react | P0 필수 |
+| Frontend Test | Vitest + React Testing Library + Playwright | P0 필수 |
 | Backend Test | pytest + pytest-asyncio + Hypothesis | P0 필수 |
 | Integration Test | Testcontainers | P0 권장 |
 | Load Test | Locust | P1 필수 |
@@ -110,6 +112,28 @@
 - 대용량 문서·Feature는 Graph State가 아니라 ID Reference만 저장한다.
 
 LangGraph는 PostgreSQL Checkpointer를 지원하므로 Supabase PostgreSQL에 별도 Schema를 만들 수 있다. Checkpoint에는 큰 Payload를 넣지 않고 Event, Feature와 Document ID만 기록한다.
+
+### Hermes Memory와 자기 개선 경계
+
+Hermes를 채택하는 핵심 이유는 대화 Interface만이 아니다. 각 본부장이 이전 업무에서 얻은 교훈을 다음 업무에 재사용하고, 반복되는 절차를 Version이 있는 Skill 후보로 만들 수 있기 때문이다. 이때 세 가지 저장 수단을 구분한다.
+
+| 수단 | 용도 | 저장하지 않는 것 |
+|---|---|---|
+| Hermes Memory | 본부 Mandate, 반복되는 업무 교훈, 사용자 Preference와 짧은 운영 원칙 | 현재 Position, Cash, PnL, Risk Limit과 주문 상태 |
+| Session Search | 과거 작업의 근거와 맥락을 다시 찾는 보조 수단 | 공식 감사 원장과 최신 운영 상태 |
+| Hermes Skill | 검증된 조사·분석·보고 절차를 재사용하는 절차적 Memory | 승인되지 않은 전략 코드와 Production 권한 변경 |
+
+Hermes가 관찰한 개선점은 즉시 자기 Prompt나 Tool 권한에 반영하지 않는다. `ImprovementCandidate`로 구조화해 근거, 예상 효과, 위험, 영향받는 Profile·Skill·Workflow Version과 Rollback 대상을 기록한다. AI QA/감사본부의 고정 Eval, 인사팀의 Build-vs-Extend 검토, Shadow 실행과 승인 Gate를 통과한 Version만 활성화한다.
+
+따라서 재귀적 자기 개선은 다음 폐쇄 루프로 구현한다.
+
+```text
+업무 실행 -> 결과·오류 관찰 -> 개선 후보 등록 -> 독립 Eval
+         -> Shadow/Champion-Challenger -> 승인된 Version 배포
+         -> 운영 지표 관찰 -> 유지 | Rollback | 다음 개선 후보
+```
+
+공식 수치와 상태의 Source of Truth는 항상 Supabase·TimescaleDB·OMS·Ledger다. Hermes Memory는 해당 Record와 Evidence ID를 가리킬 수 있지만 이를 대체하지 않는다. 조직 전체 단계와 승인 책임은 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선), 저장 규칙은 [데이터 거버넌스 지침 18.5](../03-data/DATA_GOVERNANCE_GUIDE.md#185-hermes-memorysession-searchskill-거버넌스)를 따른다.
 
 ## 3. LLM과 Embedding 구성
 
@@ -203,7 +227,7 @@ index_version
 - Connection Pool 상한과 PostgreSQL 최대 연결 수를 함께 관리한다.
 - SQLAlchemy Pool 위에 무분별하게 외부 Pool을 겹치지 않는다.
 - Migration은 Supabase Dashboard 수동 변경이 아니라 Alembic으로 수행한다.
-- Frontend는 공개 조회만 Supabase Client를 사용하고 거래 Write는 FastAPI를 통한다.
+- Frontend는 Supabase Auth로 사용자 Identity를 얻고 금융 상태 조회와 모든 Command는 FastAPI BFF를 통한다.
 - Row Level Security를 활성화하되 Service Role Key를 Browser에 노출하지 않는다.
 
 Supabase Realtime은 Dashboard 상태 알림에는 사용할 수 있지만 Market Data 전송 계층으로 사용하지 않는다.
@@ -315,9 +339,9 @@ quality:
 
 Vendor Market Data와 Broker SDK는 공급자 확정 후 Adapter Package로 추가한다.
 
-## 8. Frontend 후보와 확정 절차
+## 8. AI Office Frontend 결정
 
-Frontend Framework는 아직 확정하지 않았다. 초기 Integration Slice는 CLI 또는 최소 운영 화면으로 진행할 수 있으며, Web Dashboard를 채택할 경우 다음 구성을 우선 후보로 검증한다.
+현재 `ai-office/`의 Next.js·React·TypeScript Pixel Office를 Frontend Baseline으로 확정한다. 이는 조직 상태를 탐색하는 시각 Shell이며, 현재 12개 고정 부서와 Scripted Simulation을 그대로 금융 운영에 사용하는 결정은 아니다. 8개 조직 단위, 실제 Agent 상태와 FastAPI REST·WebSocket Adapter로 단계적으로 교체한다.
 
 ```text
 Next.js + TypeScript
@@ -327,10 +351,12 @@ TradingView Lightweight Charts
 shadcn/ui + Radix UI
 lucide-react
 Zod
-Vitest + Playwright
+Vitest + React Testing Library + Playwright
 ```
 
-UI 착수 전 ADR에서 실시간 Chart 성능, 인증 연동, 배포 방식, 팀 숙련도와 운영 비용을 비교해 Framework를 확정한다. 다만 어떤 Framework를 선택해도 아래 책임과 금지사항은 동일하다.
+현재 `vinext`, Vite, Cloudflare Worker와 Wrangler 구성은 Prototype Hosting Baseline으로만 유지한다. 전체 Cloud Provider, 금융 Backend Hosting과 Production Frontend Hosting은 별도 결정이며 Cloudflare D1·Drizzle을 금융 Source of Truth로 사용하지 않는다.
+
+실시간 연결은 `GET /ui/snapshot` 다음 FastAPI `/ws/operations` 순서다. WebSocket Event는 Sequence, Schema Version과 Server Time을 포함하고 Client는 Heartbeat, 재연결, Gap Recovery와 Staleness를 구현한다. 전 종목 Tick을 Pixel Office로 직접 전송하지 않고 Feed Health와 집계 Event를 제공한다.
 
 ### Frontend 책임
 
@@ -340,6 +366,9 @@ UI 착수 전 ADR에서 실시간 Chart 성능, 인증 연동, 배포 방식, �
 - Strategy 상태, Backtest와 Promotion 승인
 - Order와 Fill 조회
 - Trading State, Strategy Pause와 Kill Switch
+- CEO Office, 6개 본부와 Agent Workforce의 Queue·SLA·Handoff·Incident
+- Agent Profile·Skill·Tool·Model Version, Trace와 개선 후보
+- `DEMO/PAPER/LIVE`, 연결 상태와 마지막 갱신 시각의 상시 표시
 
 ### Frontend 금지
 
@@ -348,6 +377,8 @@ UI 착수 전 ADR에서 실시간 Chart 성능, 인증 연동, 배포 방식, �
 - Risk 계산과 주문 상태 결정
 - Broker Credential 보관
 - Database Table 직접 거래 Write
+- 캐릭터 Animation이나 Browser State를 공식 Agent·Risk·주문 상태로 간주
+- `DEMO`, `PAPER`와 `LIVE` 데이터 혼합
 
 FastAPI가 모든 위험한 Command의 유일한 Backend Entry Point다.
 
@@ -360,7 +391,7 @@ api                 FastAPI, Risk, OMS, Portfolio
 streaming-worker    WebSocket, Normalize, Feature, Event
 agent-worker        LangGraph Workflow
 hermes              CIO/Supervisor Runtime
-frontend            선택된 운영 Dashboard, Framework 미정
+frontend            ai-office 기반 Next.js Operator Control Plane
 redis               Queue와 Hot State
 ollama               Local Model
 otel-collector      Trace와 Metric
@@ -446,7 +477,7 @@ LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 
 10. RAG와 pgvector
 11. Backtest Adapter와 Strategy Registry
 12. Risk/OMS/Portfolio
-13. Frontend ADR 후 Dashboard와 Operator Control
+13. AI Office 조직 Projection, Snapshot·WebSocket와 Operator Control
 14. Observability, Security Scan와 E2E Test
 
 ## 15. 기술 선택 완료 조건
@@ -457,6 +488,8 @@ LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 
 - [ ] Supabase에 Tick Stream을 Row 단위로 적재하지 않는다.
 - [ ] Redis 장애 후 Source of Truth에서 상태를 재구성한다.
 - [ ] Frontend가 Risk, OMS와 Database 거래 상태를 직접 수정하지 않는다.
+- [ ] AI Office가 8개 조직과 `DEMO/PAPER/LIVE` Mode를 구분하고 공식 Backend 상태만 표시한다.
+- [ ] WebSocket Sequence Gap과 재연결 후 Snapshot 정합성 회복을 E2E로 검증한다.
 - [ ] Python과, Frontend를 도입한 경우 JavaScript Dependency가 Lockfile로 고정된다.
 - [ ] 모든 서비스가 Docker Healthcheck를 가진다.
 - [ ] Unit, Property, Integration과 Browser E2E Test가 CI에서 실행된다.
@@ -475,4 +508,4 @@ LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 
 
 ## 17. 최종 결정
 
-> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase는 Transaction·Vector·Auth·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend Framework는 ADR 전까지 미정이며 어떤 UI를 선택해도 조회와 승인만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
+> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase는 Transaction·Vector·Auth·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
