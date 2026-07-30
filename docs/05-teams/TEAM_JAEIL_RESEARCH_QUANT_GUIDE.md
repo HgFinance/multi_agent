@@ -59,7 +59,9 @@
 | 거시경제 수집기 | `departments/01-research/collectors/macro_collector.py` | — (신규, Sprint J2) |
 | 로컬 시계열 DB 구성 | `docker-compose.yml`, `timescaledb/local-dev/` | — (신규, 로컬 개발 전용) |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
-| 해외 뉴스 수집기 (P1) | `departments/01-research/collectors/alpaca_news_collector.py` | — (신규, Sprint J3 선행) |
+| 뉴스 Stream 계약 | `departments/01-research/contracts/news_events.py` | — (신규, Sprint J3) |
+| 국내 뉴스 수집기 (P0) | `departments/01-research/collectors/naver_news_collector.py` | — (신규, Sprint J3) |
+| 해외 뉴스 수집기 (P1) | `departments/01-research/collectors/alpaca_news_collector.py` | — (신규, Sprint J3) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -721,9 +723,69 @@ API(2019003)나 별도 Source가 필요하다.
 
 - **부분** Provider Adapter, License Registry와 Raw 권한.
   License Registry는 `UseScope`로 Source별 허용 용도를 강제한다. Provider Adapter는
-  Tavily(P1 탐색 전용)와 Alpaca(P1 해외)가 있고 **국내 P0 Source는 아직 없다.**
-- **미착수** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
+  NAVER(P0 국내), Alpaca(P1 해외), Tavily(P1 탐색 전용)가 있다. **BIGKinds는 아직
+  `KEY_MISSING`이며 API 이용이 유료 회원(월 5만원대)이다.**
+- **부분** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
+  중복 제거는 `news_events.admit`의 Cursor + ID 창으로 Stream 계층에서 한다.
+  **Story Cluster와 Near Duplicate는 미착수**다.
 - **미착수** Chunk, Embedding, Citation와 Retraction 전파.
+
+**뉴스 Stream 계약 — 폴링을 WebSocket처럼** (`contracts/news_events.py`, 2026-07-31)
+
+한국 P0 Source 중 **WebSocket을 주는 곳이 없다.** NAVER는 REST GET뿐이고 BIGKinds도
+REST(JSON/XML)다. 그렇다고 호출부가 Source마다 다른 모양으로 붙으면 Source를 바꿀 때
+하류가 전부 깨진다. 그래서 전송 방식을 Adapter 안으로 감추고 호출부는 항상
+`run(on_record=...)` push로만 받는다. `PollingNewsStream`이 Cursor를 들고 새 기사만
+밀어 올리며, Alpaca WebSocket과 **같은 `NewsStream` Protocol**을 만족한다.
+
+폴링을 Stream으로 바꿀 때 지킨 것 넷:
+1. **중복을 하류로 내보내지 않는다** — Cursor 시각 + 최근 ID 창(2,000건). 시각만
+   보면 같은 초에 발행된 기사가 여러 건일 때 경계에서 하나가 빠지거나 겹친다.
+2. **빈 응답과 실패를 구분한다** — 폴링 실패를 0건으로 바꾸지 않고 예외를 올린다.
+3. **관측 지연을 숨기지 않는다** — `StreamStats.max_lag`.
+4. **본문을 계약에 담지 않는다** — `NewsRecord`에 `content`/`summary` 필드가 없다.
+   있었는지 여부만 `had_content`/`had_summary`로 남긴다(3.3).
+
+**NAVER 뉴스 (P0 국내)** — `collectors/naver_news_collector.py`. 2026-07-31 키 확보로
+**P0 NEWS Domain Blocked가 해제됐다**(남은 Blocked는 `CALENDAR` 하나).
+
+실측으로 확인한 규격:
+- item 필드는 `title`, `originallink`, `link`, `description`, `pubDate` **다섯 개뿐이고
+  기사 ID가 없다.** 그래서 `external_id`를 URL로 만든다 — 제목은 정정되면 바뀌므로
+  키가 될 수 없다. `originallink`(언론사 원문) 우선이며 `link`(네이버 미러)를 쓰면
+  같은 기사가 둘로 갈린다.
+- `title`/`description`에 검색어가 `<b>` 태그로 감싸여 온다. 그대로 두면 같은 기사가
+  검색어에 따라 다른 문자열이 되어 중복 판정이 깨진다(`clean_title`).
+- `display` 최대 100, `start` 최대 1000. `start=1001`은 HTTP 400. 즉 **한 쿼리로 최대
+  1,000건까지만** 거슬러 갈 수 있어 전수 수집이 아니라 최신 구간 감시용이다.
+- 일 25,000회와 **별개로 초당 버스트 제한**이 있다. 20종목을 연속으로 던지자 HTTP 429
+  `errorCode:012`. 초당 4회로 제한하고 429는 지수 백오프로 3회까지만 재시도한다.
+
+**Alpaca와 결정적으로 다른 점** — NAVER는 **우리가 종목명으로 질의**하므로 어느 종목의
+기사인지가 처음부터 확실하다. 그 사실을 `NewsRecord.symbols`에 실어 넘겨 연결 코드를
+Alpaca와 같은 모양으로 유지한다. 한 기사가 여러 종목 질의에 걸리면 Cursor가 두 번째를
+중복으로 걸러 **종목 하나를 잃으므로** 페이지 안에서 심볼을 먼저 합친다.
+
+관련도는 제목 포함 여부로만 가른다 — 질의로 나온 이상 관련은 있으므로 최소
+`MENTIONS`(0.5)이고, 제목에 종목명이 있으면 `DEDICATED`(0.9)다.
+
+**Watchlist의 한계** — 코스피200·코스닥150 구성종목을 쓸 수 없다(KRX 승인 없음).
+대리지표로 공시 건수를 쓰는데 **증권사로 쏠린다** — ELS·DLS 발행 공시를 대량으로 내서
+상위 15개 중 10개가 증권사였다. 시가총액 Source가 생기기 전까지는 `--symbols`로 명시
+지정하는 쪽이 낫다. 승인이 떨어지면 `load_watchlist` 하나만 갈아끼우면 된다.
+
+**실적재 (2026-07-31)**: 8종목 명시 지정 → 기사 214건, `document_instruments` 210건
+연결(전용 30, 복수종목 21), 멱등 재시도 0. `research.documents` 누계는 opendart 869 /
+naver 378 / alpaca 192다.
+
+**검토한 뒤 도입하지 않은 것 — `whdghk1907/mcp-news-collector`**
+WebSocket을 표방하지만 **`src/server/websocket_server.py`가 저장소에 없다**(HTTP 404).
+테스트만 있고 구현이 없다. NAVER Collector는 우리와 같은 `openapi.naver.com` REST를
+쓰므로 그 WebSocket은 어차피 자기가 폴링한 것을 자기 FastAPI 서버로 재방송하는
+구조일 수밖에 없다 — NAVER가 WS를 주지 않기 때문이다. 더구나 `_fetch_full_content`가
+BeautifulSoup으로 **기사 본문을 스크래핑**하는데 이는 3.3의 "기사 본문 사용권 없이
+전문을 Storage·Vector DB에 적재" 금지에 정면으로 걸린다. Star 1 / Commit 1 / Phase 4
+75%인 WIP이기도 하다.
 
 **뉴스 WebSocket API 5종 조사 (2026-07-31)** — Polygon.io(현 Massive), finlight.me,
 Finnhub, Alpha Vantage, Alpaca를 ①KRX 커버리지 ②저장·임베딩 권리 ③무료 플랜 실체
@@ -808,10 +870,12 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
 - [ ] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
 - [ ] 뉴스 중복과 라이선스 Scope를 관리한다.
       → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily·Alpaca는 탐색
-      전용, BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). 여기에 `MarketScope`를
-      더해 범위 밖 Source가 P0 Blocked를 풀지 못하게 했다(2026-07-31). **중복 제거와 Story
-      Cluster는 미착수**이며 뉴스 P0 Source(BIGKinds/NAVER) 키가 아직 없다 — 5종 조사 결과
-      해외 무료 API로는 대체 불가로 확인됐다(9절 Sprint J3).
+      전용, NAVER·BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). 여기에
+      `MarketScope`를 더해 범위 밖 Source가 P0 Blocked를 풀지 못하게 했다(2026-07-31).
+      **Exact 중복 제거는 완료** — `news_events.admit`이 Cursor + ID 창으로 Stream 계층에서
+      막고, 페이지 안 심볼 병합으로 종목 연결이 사라지지 않게 한다. **Near Duplicate와
+      Story Cluster는 미착수**다. NAVER 키 확보로 P0 NEWS Blocked는 해제됐고 BIGKinds는
+      여전히 `KEY_MISSING`이다(API 이용이 유료 회원).
 - [ ] Backtest가 PIT Dataset Manifest로 재현된다.
 - [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
 - [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
