@@ -28,6 +28,9 @@ pydantic>=2
 
 # --- Storage clients ---
 psycopg2-binary
+# asyncpg: governance/workforce 도메인 서비스의 비동기 Repository 드라이버
+# (TEAM_YOUNGJU 9.1, TECH_STACK_DECISIONS 316행). F01/F19 asyncpg Repository 가 사용.
+asyncpg
 redis
 pgvector
 

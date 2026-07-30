@@ -33,11 +33,18 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
     (`supabase/migrations/20260730000600_...`)의 DDL check 제약과 동일 규칙을 강제한다.
   - `workflow.py` — 후보 생명주기 상태 머신 + **권한 분리 게이트**. 작성자는 자기 후보를 단독
     승인할 수 없고(자기승인 차단), 승인엔 독립 승인자 + QA Eval 근거가 필요하다. 모든 전이는 같은
-    `candidate_id`로 Append-only Event(`workforce.improvement_candidate_events`)에 기록. Event
-    Ledger 실 구현(asyncpg)은 후속.
+    `candidate_id`로 Append-only Event(`workforce.improvement_candidate_events`)에 기록.
+  - `repository.py` — asyncpg 실 저장 계층(`PostgresImprovementRepository`). 위 도메인 타입을
+    `workforce.improvement_candidates`/`improvement_candidate_events` 컬럼과 1:1 매핑. `.env` 의
+    `DATABASE_URL` 사용, 비밀번호/service_role Key 는 로그에 남기지 않는다.
 
-미구현(후속): asyncpg Repository 로 위 두 테이블 연결, Eval Runner/Shadow Router 실체
-연결(QA·audit 소유), CEO 예산·조직 승인과 Scorecard 관찰의 실제 API 배선.
+**실 DB 검증 미완**: `repository.py` 는 import·구조까지 확인했으나, 대상 테이블(migration 600)이
+아직 이 DB에 적용되지 않아 live round-trip 검증은 보류 상태다. `supabase db push`(또는 동등한
+방법)로 20260730000600 을 적용한 뒤 검증한다. asyncpg 는 `requirements.txt` 에 있으므로 팀원은
+각자 프로젝트 환경(Hermes Runtime venv 아님)에 `pip install -r requirements.txt` 로 설치한다.
+
+미구현(후속): 위 검증, Eval Runner/Shadow Router 실체 연결(QA·audit 소유), CEO 예산·조직 승인과
+Scorecard 관찰의 실제 API 배선.
 
 ## 테스트
 
