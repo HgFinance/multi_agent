@@ -40,22 +40,28 @@ agentic_rag:
 deterministic_services:
   evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py  # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL
   ops_health_monitor: departments/06-ai-qa-audit/audit/ops_health_monitor.py     # P0 Ops Threshold — HEALTHY/DEGRADED/CRITICAL, Incident 초안
+  trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py            # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls
 
 implementation:
-  status: "Sprint K2 P0 Evidence QA + agent-ops-monitor P0 Threshold 구현됨 (팀 가이드 7.1, 12절). K0 Supabase 배선·K3/K4는 미착수"
+  status: "Sprint K2 P0(Evidence QA + Trace 수집) + agent-ops-monitor P0 Threshold 구현됨 (팀 가이드 7.1, 12절). K0 Supabase 배선·K3/K4는 미착수"
   done:
     - "8단계 순서 검사 (Schema, Evidence 존재·권한, PIT, 숫자·단위 인용 일치, Fact/Inference 구분, 상충 근거, Tool 요약 변형, Unsupported Block)"
+    - "Claim/Artifact/EvidenceChunk를 Pydantic으로 검증 — LLM 출력 신뢰 경계는 트레이딩본부 contracts.py와 같은 원칙 (CLAUDE.md 개발 원칙 2번)"
     - "근거 일부만 무효하면 PARTIAL(WARN), 전부 무효하거나 상충/변형이면 FAIL — 결과가 항상 판정을 낮추는 방향"
     - "UNSUPPORTED/CONTRADICTED Claim마다 Finding 자동 초안 생성 (원 작성 본부가 못 닫음)"
     - "Agent Ops Health Threshold (에러율/지연/비용) — Soft는 DEGRADED(SEV3), Critical은 CRITICAL(SEV2), 동시 Critical은 SEV1"
-    - "audit.claim_checks/audit.qa_decisions/audit.findings/audit.incidents 컬럼·Enum 값과 이름 맞춤"
+    - "Agent/Tool Trace 기록 (audit.agent_runs/tool_calls) — Run 멱등 시작, 미해결 Tool Call 있으면 Run 종료 차단(fail-closed), TIMED_OUT을 FAILED로 추정하지 않음"
+    - "audit.claim_checks/qa_decisions/findings/incidents/agent_runs/tool_calls 컬럼·Enum 값과 이름 맞춤"
+    - "bandit/pip-audit 스캔 — 실제 보안 이슈 0건 확인 (assert 사용 경고, PASS 오탐만 있음)"
   in_progress: []
   not_started:
-    - "Sprint K0: Supabase risk/audit/api Schema 실배선, RLS (스키마 자체는 supabase/migrations/20260729000500에 이미 있음)"
+    - "Sprint K0: Supabase risk/audit/api Schema 실배선, RLS (스키마 자체는 supabase/migrations/20260729000500에 이미 있음, QA는 fund_id가 nullable이라 Risk와 달리 Fund Seed 의존 없음)"
     - "Sprint K3: Stress Scenario, Kill Switch 연동, Incident Correlation across Feed/Broker/Model"
     - "Sprint K4: Strategy/Agent Candidate Eval, Dataset/Model/Prompt Lineage, Tool/Data Permission Review, Release Review"
-    - "LLM-as-a-Judge 보조 신호 (팀 가이드 7절) — 지금은 순수 규칙 판정만, Semantic 근거 검증은 백로그"
-    - "rag-librarian-evidence-curator/Model Gateway Trace 실연동 — 지금은 EvidenceStore/AgentHealthMetrics가 스텁"
+    - "LLM-as-a-Judge 보조 신호 (팀 가이드 7절) — 지금은 순수 규칙 판정만, Semantic 근거 검증은 의도적으로 P0 이후 백로그"
+    - "Tool Allowlist 위반 판정 — trace_recorder.py는 기록만 하고 승인/거부는 안 함, tool-permission-security-reviewer(P1) 영역"
+    - "rag-librarian-evidence-curator/Model Gateway Trace 실연동 — 지금은 EvidenceStore/AgentHealthMetrics/TraceRecorder가 전부 스텁이거나 인메모리"
+    - "실시간 Telemetry 배선(OpenTelemetry/Prometheus), 부하 테스트(locust/testcontainers) — 관찰·테스트할 실제 실행 중인 서비스가 없어 지금은 불가능"
     - "Model Risk(model-risk-agent), Internal Audit(internal-audit-agent), Tool/Permission Review, Incident Postmortem — P1 tier, 이번엔 범위 밖"
 
 # 백로그 (2026-07-29, Finyul MAS 아티클 비교에서 도출 — 아직 미구현, 기록만)
