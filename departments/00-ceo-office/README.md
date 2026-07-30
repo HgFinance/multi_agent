@@ -32,17 +32,26 @@ ceo-agent chat -q 'Summarize current portfolio decisions and open risks'
     의 `governance.mandate_versions.risk_bounds / universe_policy / approval_rules` jsonb 컬럼 **내부
     형태를 정의**하고, 값 범위와 상호 모순을 결정론적으로 검증한다 (F01 완료조건: 잘못된 한도 조합 저장 불가).
   - `service.py` — Version/Effective Time 발급, `content_hash` 중복 방지, 장중 변경 방향 판정
-    (`TIGHTEN`=완화 즉시 / `LOOSEN`=확대 사용자 재승인). `MandateVersionRepository` 는 인터페이스이며
+    (`TIGHTEN`=완화 / `LOOSEN`=확대 / `NEUTRAL`). `MandateVersionRepository` 는 인터페이스이며
     현재 In-Memory 구현만 있다. asyncpg 실 구현은 Y1 에서 붙인다.
+  - `lifecycle.py` — Version 활성화 상태 전이 (§5.1). 완화/중립은 즉시 활성화, 확대와 최초
+    활성화는 사용자 승인 필요. 활성화 시 이전 Version `effective_to` 종료 + `mandates.current_version`
+    갱신 + `mandate_decisions` APPROVE 기록.
 
-미구현(Y1 잔여): asyncpg Repository, §5.1 Mandate 변경 Workflow(Risk/QA 검토·사용자 승인 Interrupt),
-F01 완료조건 2("Signal/Risk Decision 이 mandate_version_id 기록")는 트레이딩·리스크 본부 의존.
+자본(base_capital) 위치: README(docs) 상 "얼마의 자본을 운용할지"는 Mandate 입력이므로 `risk_bounds`
+안에 **선언 값**으로 둔다. 비율 한도의 **live 집행 분모**(NAV/allocated)는 회계 API 소유이며 Risk Engine 이
+결정 시점에 조회한다 — 이 계약은 트레이딩(도현)·리스크(동규)와 별도 확정 대상.
+
+미구현(Y1 잔여): asyncpg Repository, §5.1 변경 Workflow 의 Risk/QA 사전 검토 단계와 사용자 승인
+Interrupt/Resume(LangGraph), F01 완료조건 2("Signal/Risk Decision 이 mandate_version_id 기록")는
+트레이딩·리스크 본부 의존.
 
 ## 테스트
 
 ```bash
-python departments/00-ceo-office/src/mandate/policy.py    # 정책 검증·상호 모순
-python departments/00-ceo-office/src/mandate/service.py   # Version·방향 판정·hash
+python departments/00-ceo-office/src/mandate/policy.py     # 정책 검증·상호 모순
+python departments/00-ceo-office/src/mandate/service.py    # Version·방향 판정·hash
+python departments/00-ceo-office/src/mandate/lifecycle.py  # 활성화·재승인 게이트·감사
 ```
 
 `__main__` assert 자체 점검 (`CLAUDE.md` 명령어 절의 트레이딩·회계 모듈 관례와 동일). pytest 이전은

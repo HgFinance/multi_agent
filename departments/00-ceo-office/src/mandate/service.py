@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -143,6 +144,24 @@ class MandateVersionRow:
     created_by: str | None
 
 
+@dataclass(frozen=True)
+class MandateDecisionRow:
+    """governance.mandate_decisions 한 행. 컬럼명과 1:1.
+
+    SQL 구현은 (mandate_id, version)을 mandate_versions 의 mandate_version_id FK 로
+    해석한다 (in-memory 는 UUID 를 만들지 않고 자연키로 참조).
+    """
+
+    mandate_id: str
+    version: int
+    decision: str  # APPROVE | REJECT | SUSPEND | RETIRE (DDL check)
+    conditions: dict
+    reason: str | None
+    approved_by: str | None
+    trace_id: str
+    decided_at: datetime
+
+
 def to_version_row(
     *,
     mandate_id: str,
@@ -188,7 +207,7 @@ def to_version_row(
 
 
 class MandateVersionRepository:
-    """persist 인터페이스. 실제 구현은 mandate_versions 테이블에 insert 한다."""
+    """persist 인터페이스. 실제 구현은 mandate_versions/mandate_decisions/mandates 에 반영한다."""
 
     def latest_version(self, mandate_id: str) -> int:
         raise NotImplementedError
@@ -199,10 +218,30 @@ class MandateVersionRepository:
     def insert(self, row: MandateVersionRow) -> None:
         raise NotImplementedError
 
+    # --- 활성화(Effective Time) / 결정 기록 (5.1) ---
+
+    def get_mandate_current(self, mandate_id: str) -> tuple[int, str]:
+        """(current_version, status). 아직 활성 Version 이 없으면 (0, 'DRAFT')."""
+        raise NotImplementedError
+
+    def set_mandate_current(self, mandate_id: str, version: int, status: str) -> None:
+        """mandates.current_version 과 status 갱신."""
+        raise NotImplementedError
+
+    def set_effective_to(self, mandate_id: str, version: int, ts: datetime) -> None:
+        """이전 활성 Version 의 effective_to 를 닫는다 (덮어쓰기 아님, 종료 시각 부여)."""
+        raise NotImplementedError
+
+    def record_decision(self, decision: MandateDecisionRow) -> None:
+        """mandate_decisions append (감사 기록, Append-only)."""
+        raise NotImplementedError
+
 
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
         self._rows: list[MandateVersionRow] = []
+        self._decisions: list[MandateDecisionRow] = []
+        self._mandate_state: dict[str, tuple[int, str]] = {}
 
     def latest_version(self, mandate_id: str) -> int:
         versions = [r.version for r in self._rows if r.mandate_id == mandate_id]
@@ -230,6 +269,29 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
             if r.mandate_id == mandate_id and r.version == version:
                 return r
         return None
+
+    def get_mandate_current(self, mandate_id: str) -> tuple[int, str]:
+        return self._mandate_state.get(mandate_id, (0, "DRAFT"))
+
+    def set_mandate_current(self, mandate_id: str, version: int, status: str) -> None:
+        self._mandate_state[mandate_id] = (version, status)
+
+    def set_effective_to(self, mandate_id: str, version: int, ts: datetime) -> None:
+        for i, r in enumerate(self._rows):
+            if r.mandate_id == mandate_id and r.version == version:
+                if r.effective_to is not None:
+                    raise ValueError(f"이미 종료된 Version: {mandate_id} v{version}")
+                if ts <= r.effective_from:
+                    raise ValueError("effective_to 는 effective_from 이후여야 한다")
+                self._rows[i] = replace(r, effective_to=ts)
+                return
+        raise ValueError(f"존재하지 않는 Version: {mandate_id} v{version}")
+
+    def record_decision(self, decision: MandateDecisionRow) -> None:
+        self._decisions.append(decision)
+
+    def decisions_for(self, mandate_id: str) -> list[MandateDecisionRow]:
+        return [d for d in self._decisions if d.mandate_id == mandate_id]
 
 
 @dataclass(frozen=True)
