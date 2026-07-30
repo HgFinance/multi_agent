@@ -206,7 +206,7 @@ a.integration-row:hover { border-color: var(--pink-deep); }
 .decision-box { padding: 12px; border: 1.5px solid var(--ink); border-radius: 9px; background: var(--yellow); }
 .decision-box strong { display: block; font-size: 12px; line-height: 1.6; }
 
-.storage { margin-top: 18px; }
+.storage, .ops-snap { margin-top: 18px; }
 .btn-small { min-height: 40px; background: var(--mint); }
 .result-table { overflow: hidden; border: 1.5px solid var(--pink-line); border-radius: 10px; }
 .result-row { display: grid; grid-template-columns: 2fr 1fr .75fr .6fr; gap: 12px; min-height: 48px; align-items: center; padding: 9px 12px; border-bottom: 1.5px dashed var(--pink-line); font-size: 11px; }

@@ -77,7 +77,7 @@ export default function OpsPanel() {
   const snap = snapshot;
   if (!snap) {
     return (
-      <section className="win">
+      <section className="win ops-snap">
         <div className="win-bar">
           <span>📉 trading_portfolio.snapshot</span>
           <span className="window-controls">—　▢　✕</span>
@@ -98,7 +98,7 @@ export default function OpsPanel() {
   const { portfolio, trading, ledger, mode } = snap;
 
   return (
-    <section className="win">
+    <section className="win ops-snap">
       <div className="win-bar">
         <span>📉 trading_portfolio.snapshot</span>
         <span className="window-controls">—　▢　✕</span>
