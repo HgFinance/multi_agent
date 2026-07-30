@@ -58,7 +58,8 @@
 | `timescaledb/migrations/` | 고빈도 시장 시계열 DB Migration 기준 | Canonical |
 | `tests/schema/` | DB 정적 계약과 Runtime Smoke Test | 사용 중 |
 | `docs/06-integrations/ls-openapi/` | LS증권 공개 API 계약 참조 | 사용 중 |
-| `ai-office/` | Next.js·React·TypeScript Pixel Office와 Scripted Simulation | Frontend Prototype |
+| `ai-office/` | 8개 조직·2개 층 Pixel Office, Trading/Portfolio DEMO Panel과 Scripted Simulation | Frontend Prototype |
+| `apps/api/main.py` | 테스트 Paper Loop 기반 `/ui/snapshot`과 기본 차단된 `/agent/ask` | Read-only DEMO BFF Prototype |
 
 구 경로 `orchestration/hermes/`, `trading/`, `execution/`, `accounting/`, `fetch_news.py`는 임시 CLI 호환
 Wrapper와 함께 완전히 삭제됐다(2026-07-30, 예정보다 빠름). 위 `departments/<n>/` 경로만 존재한다.
@@ -198,7 +199,7 @@ multi_agent/
 | `supabase/migrations/` | Schema 소유 본부 | DB Owner + Risk/QA, 회계 관련 시 회계본부 | 단일 순서, RLS, Rollback 계획 |
 | `timescaledb/migrations/` | 리서치본부 | 퀀트본부 + AI QA | Point-in-Time, Dedup, Retention |
 | `integrations/ls-openapi/` | 리서치본부 | 트레이딩·리스크 소비 계약 검토 | Raw 이벤트와 Canonical Event 분리 |
-| `apps/` | 공통 Frontend·서비스 운영 Owner | 모든 Command·Read Model 소유 본부 | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
+| `apps/` | 도현님(공통 Frontend Platform 기술 DRI), 영주님(Live Office Business Owner) | 모든 Command·Read Model 소유 본부, 동규님 Risk·QA | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
 | `infrastructure/` | Platform Owner | Security + 서비스 Owner | Secret과 Service Identity 분리 |
 
 한 명이 두 본부를 담당해도 두 본부 폴더와 승인 역할을 합치지 않는다. 도현님이 트레이딩과 회계를 담당해도 주문 생성과 공식 원장 확정은 별도 PR Review와 Service Identity를 사용한다. 동규님이 리스크와 QA를 담당해도 Risk Decision과 Audit Finding의 승인 권한을 하나로 합치지 않는다.
@@ -368,8 +369,8 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 | `agent_evolution_cycle`과 Hermes 조직 학습 | 부분 정합, 비 MD | Profile 개선 Prototype은 존재하나 Improvement Registry, Skill Write Gate, 독립 Eval Runner와 Scorecard 연결 필요 |
 | Bedrock/Ollama 목표와 현재 Nous Profile | 상태 구분 필요 | 현재 Profile은 개발 Runtime, Bedrock/Ollama는 목표 Model Gateway임을 문서에 명시 |
 | LS Open API 문서 | 정합 | REST·WebSocket 42개 API 묶음과 365개 TR 참조가 문서 지도에 연결됨 |
-| `ai-office`와 8개 조직 | 불일치 | 현재 12개 고정 Creator 부서는 Demo Baseline으로 분류하고 8개 조직·실시간 Backend Projection으로의 이전 기준을 확정 |
-| `ai-office`와 금융 Source of Truth | 미연결 | Browser Simulation을 공식 상태로 사용하지 않고 FastAPI Snapshot·WebSocket, Supabase·OMS·Ledger·Risk Read Model을 사용하도록 경계 확정 |
+| `ai-office`와 8개 조직 | 부분 정합 | 8개 조직·2개 층 전환 완료, Backend 조직 Registry 기반 배치는 미완료 |
+| `ai-office`와 금융 Source of Truth | 부분 연결 | DEMO BFF·Trading/Portfolio Fixture는 존재하나 Supabase Auth, 공식 Snapshot·WebSocket와 Kanban Status Bridge는 미완료 |
 
 ## 13. 완료 기준
 

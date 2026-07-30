@@ -322,7 +322,14 @@ class SupabaseReferenceRepository(ReferenceRepository):
         이걸 먼저 채워야 문서를 적재할 수 있다.
 
         license/retention 의 최종 판단은 Data Steward 가 한다. 이 함수는 Registry 의
-        선언을 옮기는 것이지 승인을 대신하지 않는다 - status 를 건드리지 않는 이유다.
+        선언을 옮기는 것이지 승인을 대신하지 않는다.
+
+        ▶ status 를 한 방향으로만 움직인다 (2026-07-31)
+          Registry 가 DISABLED 인데 DB 가 ACTIVE 로 남으면 **DB 만 보는 사람은 쓸 수
+          있다고 오해한다.** 그래서 DISABLED 는 SUSPENDED 로 내린다. 반대로 올리지는
+          않는다 - 재활성화는 Data Steward 의 판단이고, 코드가 자동으로 되돌리면
+          사람이 내린 중단 결정을 덮어쓴다. 차단 방향으로만 움직이는 게 안전하다
+          (개발 원칙 9).
         """
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "collectors"))
         from source_registry import SOURCES, SourceRegistry
@@ -342,6 +349,7 @@ class SupabaseReferenceRepository(ReferenceRepository):
                         {
                             "tier": s.tier.value,
                             "registry_status": registry.status(s.source_id).value,
+                            "disabled_reason": s.disabled_reason,
                             "doc_ref": s.doc_ref,
                             "note": s.note,
                             "rate_limit_per_sec": float(s.rate_limit_per_sec)
@@ -355,6 +363,7 @@ class SupabaseReferenceRepository(ReferenceRepository):
                     # 명시적으로 허용하지 않은 용도는 금지다. 두 목록을 함께 넣어
                     # DB 만 보는 사람도 경계를 알 수 있게 한다.
                     [u.value for u in UseScope if u not in s.allowed_uses],
+                    "SUSPENDED" if s.disabled_reason else "ACTIVE",
                 )
             )
 
@@ -365,13 +374,18 @@ class SupabaseReferenceRepository(ReferenceRepository):
                 """
                 insert into reference.data_sources
                   (source_code, name, source_type, owner, license_terms,
-                   retention_policy, allowed_uses, prohibited_uses)
+                   retention_policy, allowed_uses, prohibited_uses, status)
                 values %s
                 on conflict (source_code) do update set
                   name = excluded.name,
                   license_terms = excluded.license_terms,
                   allowed_uses = excluded.allowed_uses,
                   prohibited_uses = excluded.prohibited_uses,
+                  -- 차단 방향으로만 움직인다. Registry 가 DISABLED 면 SUSPENDED 로
+                  -- 내리고, 그 반대(SUSPENDED -> ACTIVE)는 하지 않는다 - 사람이
+                  -- 내린 중단 결정을 코드가 자동으로 되돌리면 안 된다.
+                  status = case when excluded.status = 'SUSPENDED' then 'SUSPENDED'
+                                else reference.data_sources.status end,
                   updated_at = now()
                 """,
                 rows,

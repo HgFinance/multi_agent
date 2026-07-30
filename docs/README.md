@@ -2,23 +2,26 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md)
 
 ## 현재 상태
 
-이 저장소는 **설계 중심의 초기 구현 단계**다. 완전한 Application Scaffold와 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 이미 존재한다.
+이 저장소는 **본부별 Prototype을 통합하는 초기 구현 단계**다. 완전한 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 존재한다. 세부 현황과 남은 작업은 [Project Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md)를 기준으로 확인한다.
 
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
-- 실시간 판단, 전략 연구, 인사, Agent 개정과 Event Routing을 정의한 Workflow Prototype
-- `compliance-policy-agent`용 Agentic RAG baseline
-- Order Contract, Paper OMS, Paper Broker, Ledger와 Reconciliation D0-D2 Prototype
-- Supabase 운영 DB와 TimescaleDB 시장 데이터 Migration, RLS와 Schema Test
+- Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
+- LS 종목 Master·구독 계획·실시간 Payload 정규화, DART·거시·Calendar·Corporate Action·뉴스 수집 Adapter
+- Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
+- 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype
+- Evidence QA, Trace, Tool Permission, Ops Health, Incident와 `compliance-policy-agent` Agentic RAG Baseline
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
 - OpenDART 85개 API의 공시·재무·지분·주요사항 요청·응답 참조 문서
 - KRX Data Marketplace 31개 API의 지수·주식·증권상품·채권·파생상품·일반상품·ESG 요청·응답 참조 문서
-- Next.js·React·TypeScript 기반 `ai-office` Pixel Office Frontend Prototype
+- 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot과 Read-only FastAPI BFF
+- Hermes Kanban을 Agent 상태 Source로 사용하는 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
+- 공식 X API 기반 유명 인사 Social Insight Watchlist와 교차 검증 계획(P1, 미구현)
 
-이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`는 현재 12개 고정 부서와 Scripted Simulation을 사용하는 Demo이며 금융 Backend와 연결되지 않았다. 서비스 API, 전 종목 WebSocket Runtime, 결정론적 Risk Engine, Strategy Factory, 8개 조직 기반 통합 UI와 운영 배포는 아직 Core Backlog에 있다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
+이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`의 조직 화면은 8개 단위로 바뀌었지만 직원 업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반 DEMO다. 상시 LS WebSocket Worker, Redis Event Bus, 공식 Read Model API, Kanban Status Bridge, Strategy Factory, Auth와 10거래일 Paper Dry Run은 아직 남아 있다. `/agent/ask`는 인증·Tool Allowlist 전까지 기본 비활성화한다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
 
 첫 번째 목표는 실제 자금 운용이 아니다. 단일 사용자와 단일 주식시장을 대상으로 다음 폐쇄 루프를 완성하는 것이다.
 
@@ -403,6 +406,7 @@ Core 구현은 다음 Scenario가 통과하면 기능적으로 연결됐다고 �
 docs/
 ├─ README.md                         # 문서 지도와 현재 상태
 ├─ HEDGE_FUND_MASTER_PLAN.md         # 최상위 제품·조직·운영 기준
+├─ PROJECT_IMPLEMENTATION_STATUS.md  # 팀별 실제 구현·통합 상태
 ├─ 01-product/                       # 제품 범위와 Domain Contract
 ├─ 02-engineering/                   # 구현 Backlog와 기술 결정
 ├─ 03-data/                          # 데이터 수집·품질·저장·사용 기준
@@ -415,6 +419,7 @@ docs/
 | 문서 | 언제 읽는가 |
 |---|---|
 | [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | 제품의 전체 비전, 실제 서비스 전환과 장기 확장 경계를 확인할 때 |
+| [Project Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) | 팀원별 구현 결과, GitHub 통합 상태와 다음 작업을 확인할 때 |
 | [Investment Case Specification](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) | 서비스 최소 단위의 상태, 증거, API와 완료 기준을 구현할 때 |
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
 | [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) | 기능 구현과 완료 조건을 확인할 때 |
@@ -433,7 +438,7 @@ docs/
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준서와 ERD를 포함한 17개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을, `06-integrations/krx-openapi/`에는 31개 API를 분류한 8개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README, Master Plan, Implementation Status, AI Office Frontend, Accepted ADR, Repository Structure, Database 기준서와 ERD를 포함한 19개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을, `06-integrations/krx-openapi/`에는 31개 API를 분류한 8개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 
@@ -449,7 +454,7 @@ README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준
 
 하위 문서가 마스터 플랜의 기준을 더 구체화할 수는 있지만 변경할 수는 없다. 불일치를 발견하면 하위 문서를 먼저 수정하고, 마스터 플랜 자체의 변경이 필요한 경우에는 결정 근거를 ADR로 승인한 뒤 관련 문서를 같은 변경에서 함께 갱신한다.
 
-현재 미결정 항목은 Paper/Live Broker, 전체 Cloud Provider와 Frontend Production Hosting, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
+현재 미결정 항목은 Paper/Live Broker, 전체 Cloud Provider와 Frontend Production Hosting, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript, 공통 Frontend Platform 기술 DRI는 도현님, Live Office Business Owner는 영주님으로 확정됐다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
 
 ## 개발 원칙
 

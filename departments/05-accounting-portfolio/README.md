@@ -22,13 +22,18 @@ Reconciliation과 PnL 계산을 수행한다. Accounting Engine의 공식 수치
 ```bash
 accounting-portfolio-department chat -q 'Reconcile fills and compute PnL'
 python departments/05-accounting-portfolio/ledger/ledger.py
+python departments/05-accounting-portfolio/portfolio/portfolio.py
+python departments/05-accounting-portfolio/portfolio/ui_read_model.py
 python departments/05-accounting-portfolio/reconciliation/reconciliation.py
+python apps/api/main.py
 ```
 
 ## 테스트
 
 - `ledger/ledger.py` — 원장 불변식 10개 자체 점검
 - `reconciliation/reconciliation.py` — 대사 12개 자체 점검
+- `portfolio/ui_read_model.py` — OMS·Ledger·Portfolio DEMO Snapshot 계약
+- `apps/api/main.py` — `/health`, `/ui/snapshot` BFF 6개 영역 점검
 
 ## Handoff
 
@@ -37,4 +42,6 @@ python departments/05-accounting-portfolio/reconciliation/reconciliation.py
   2026-07-30에 삭제됐다
 - `reconciliation/` — OMS/Fill/Ledger Reconciliation(Sprint D2). 구 경로 `accounting/reconciliation.py`는
   2026-07-30에 삭제됐다
+- `portfolio/ui_read_model.py` — 공식 수치를 다시 계산하지 않고 화면 계약으로 옮기는 DEMO Projection
+- `apps/api/main.py` — 공통 Frontend Platform의 Read-only DEMO BFF. `/agent/ask`는 Auth·Tool Allowlist 전까지 기본 비활성화
 - D2 Prototype 단계이며 팀 가이드 v1.2 반영 전 재작업 예정

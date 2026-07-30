@@ -26,7 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 이동 후 삭제됐다 — 위 새 경로가 유일한 실행 경로다. 임시 CLI 호환 Wrapper는 예정보다 일찍(2026-07-30) 제거됐다.
 DB Prototype 통합(단계 4)과 구조 Gate(단계 5)는 아직 진행 전이며, `db/`와 `references/`는 그대로다.
 
-Frontend의 현재 실행 경로는 `ai-office/`이고 목표 경로는 `apps/operator-web/`다. 이름만 바꿔 현재 Demo를 금융 상태처럼 사용하지 않는다. 8개 조직, REST Snapshot, FastAPI WebSocket, Mode 분리와 Command 경계는 [AI Office Frontend Plan](docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
+Frontend의 현재 실행 경로는 `ai-office/`이고 목표 경로는 `apps/operator-web/`다. 이름만 바꿔 현재 Demo를 금융 상태처럼 사용하지 않는다. 8개 조직, REST Snapshot, FastAPI WebSocket, Mode 분리와 Command 경계는 [AI Office Frontend Plan](docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다. Agent 업무 상태는 [ADR-0001](docs/02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)에 따라 Hermes Kanban을 읽기 전용 Bridge로 연결한다. 공통 Frontend Platform 기술 DRI는 도현님, Live Office Business Owner는 영주님, Risk·QA Reviewer는 동규님이다.
 
 ## 명령어
 
@@ -67,6 +67,7 @@ python departments/02-trading/oms/oms.py                              # OMS 불�
 python departments/02-trading/broker/paper_broker.py                  # Paper Broker 4개 영역
 python departments/05-accounting-portfolio/ledger/ledger.py           # 원장 불변식 10개
 python departments/05-accounting-portfolio/reconciliation/reconciliation.py  # 대사 12개
+python apps/api/main.py                                          # Read-only DEMO BFF 6개 영역
 ```
 
 목표 스택은 [TECH_STACK_DECISIONS.md](docs/02-engineering/TECH_STACK_DECISIONS.md)가 정한 `pytest + pytest-asyncio + Hypothesis + respx + testcontainers`와 `ruff + pyright + pip-audit + bandit`이다. 실제로 도입하면 위 자체 점검을 pytest로 옮기고 이 절을 갱신한다.

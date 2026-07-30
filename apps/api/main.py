@@ -6,9 +6,9 @@
 
 경계 두 개를 코드로 강제한다.
 
-1. **Read-only다.** 이 서비스에는 주문 제출·분개 Posting·상태 변경 경로가 없다.
+1. **금융 상태는 Read-only다.** 이 서비스에는 주문 제출·분개 Posting·상태 변경 경로가 없다.
    계획 6절의 위험 Command(SET_TRADING_STATE 등)는 인증·승인·Audit가 붙기 전까지
-   여기 열지 않는다.
+   여기 열지 않는다. Hermes chat은 Tool을 실행할 수 있으므로 기본 비활성화한다.
 2. **Agent 응답은 수치가 아니다.** `/agent/ask`가 돌려주는 것은 Hermes CLI의 텍스트고,
    공식 Position·PnL·NAV는 오직 `/ui/snapshot`에서만 나온다
    (팀 가이드 원칙 5: 회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,12 @@ from ui_read_model import build_ui_snapshot  # noqa: E402
 DEPARTMENTS = {
     "trading-department": "departments/02-trading/hermes/config.yaml",
     "accounting-portfolio-department": "departments/05-accounting-portfolio/hermes/config.yaml",
+}
+
+# Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
+# 권한과 Tool Allowlist가 붙기 전에는 명시적인 로컬 개발 Opt-in 없이는 열지 않는다.
+ENABLE_AGENT_ASK = os.getenv("ENABLE_AGENT_ASK", "false").strip().lower() in {
+    "1", "true", "yes", "on",
 }
 
 app = FastAPI(title="AI Office BFF", version="0.1.0")
@@ -71,7 +78,11 @@ def _demo_state():
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "mode": "DEMO"}
+    return {
+        "status": "ok",
+        "mode": "DEMO",
+        "agent_ask_enabled": ENABLE_AGENT_ASK,
+    }
 
 
 @app.get("/ui/snapshot")
@@ -93,7 +104,12 @@ class AgentAsk(BaseModel):
 
 @app.post("/agent/ask")
 def agent_ask(req: AgentAsk) -> dict:
-    """Hermes 부서 Agent에 질의한다. 텍스트 응답만 돌려주고 아무것도 실행하지 않는다."""
+    """명시적으로 허용된 로컬 개발 환경에서만 Hermes 부서 Agent에 질의한다."""
+    if not ENABLE_AGENT_ASK:
+        raise HTTPException(
+            503,
+            "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",
+        )
     if req.department not in DEPARTMENTS:
         raise HTTPException(404, f"알 수 없는 부서: {req.department}")
 
@@ -133,7 +149,9 @@ if __name__ == "__main__":
 
     c = TestClient(app)
 
-    assert c.get("/health").json()["status"] == "ok"
+    health_payload = c.get("/health").json()
+    assert health_payload["status"] == "ok"
+    assert health_payload["agent_ask_enabled"] is False
 
     snap = c.get("/ui/snapshot").json()
     assert snap["mode"] == "DEMO", "BFF Snapshot은 DEMO여야 한다"
@@ -144,15 +162,15 @@ if __name__ == "__main__":
     # 두 번 불러도 같은 Snapshot이다. Read-only가 상태를 바꾸면 안 된다
     assert c.get("/ui/snapshot").json()["portfolio"]["nav"] == snap["portfolio"]["nav"]
 
-    # 다른 본부 Agent는 이 BFF로 부를 수 없다
-    assert c.post("/agent/ask", json={"department": "risk-management", "query": "x"}).status_code == 404
-    assert c.post("/agent/ask", json={"department": "ceo-agent", "query": "x"}).status_code == 404
+    # 인증·Tool Allowlist가 없는 기본 환경에서는 모든 Agent 호출이 닫혀 있다.
+    assert c.post("/agent/ask", json={"department": "risk-management", "query": "x"}).status_code == 503
+    assert c.post("/agent/ask", json={"department": "ceo-agent", "query": "x"}).status_code == 503
     # 빈 질의는 스키마에서 걸린다
     assert c.post("/agent/ask", json={"department": "trading-department", "query": ""}).status_code == 422
-    # 우리 부서는 통과하되 Hermes 미설치 환경에선 503이다 (500이 아니라)
+    # 우리 부서도 명시적 Opt-in 전에는 503이다.
     assert c.post(
         "/agent/ask", json={"department": "accounting-portfolio-department", "query": "NAV?"}
-    ).status_code in (200, 503, 502, 504)
+    ).status_code == 503
 
     assert _timeout_of("accounting-portfolio-department") == 60
 

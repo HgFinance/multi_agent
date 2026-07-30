@@ -1,13 +1,15 @@
 # ADR-0001: Hermes Kanban을 AI Office Agent 상태의 Event 소스로 연결
 
-> **Status: Proposed — 아직 승인되지 않았다.** 이 문서는 팀 검토·결정을 요청하는 제안서다.
-> 승인 전까지 [AI_OFFICE_FRONTEND_PLAN.md](../AI_OFFICE_FRONTEND_PLAN.md) 등 확정 문서를 변경하지 않는다.
-> 승인되면 CLAUDE.md 문서 규칙대로 이 ADR과 영향받는 문서(AI_OFFICE_FRONTEND_PLAN.md §5.2/§5.4)를
-> 같은 PR에서 함께 갱신한다.
+> **Status: Accepted — 2026-07-31 채택.**
+> [AI_OFFICE_FRONTEND_PLAN.md](../AI_OFFICE_FRONTEND_PLAN.md) §5.2/§5.4와
+> [PROJECT_IMPLEMENTATION_STATUS.md](../../PROJECT_IMPLEMENTATION_STATUS.md)에 같은 결정이 반영됐다.
 >
 > - 작성: 동규님 (Risk/QA)
 > - 작성일: 2026-07-30
-> - 검토 요청 대상: 팀 리더, 특히 영주님(Live Office Business Owner), 공통 Frontend Platform 담당(미지정)
+> - 결정일: 2026-07-31
+> - Business Owner: 영주님
+> - 기술 DRI·구현 PR Owner: 도현님
+> - Risk·QA Contract Reviewer: 동규님
 
 ---
 
@@ -33,7 +35,7 @@ AI Office(프론트) → FastAPI BFF → Redis Streams(Domain Event) + Supabase 
 
 이건 §5.2가 필요로 하는 "부서/Agent별 지금 상태" 데이터를 이미 구조화해서 들고 있는 시스템이다 — 새로 안 만들어도 된다.
 
-## 3. 제안 — kanban 상태를 §5.4 Agent 상태 계약에 매핑
+## 3. 결정 — kanban 상태를 §5.4 Agent 상태 계약에 매핑
 
 | kanban Task 상태 | → §5.4 Agent 상태 | 비고 |
 |---|---|---|
@@ -45,20 +47,37 @@ AI Office(프론트) → FastAPI BFF → Redis Streams(Domain Event) + Supabase 
 | `--failure-limit` 소진으로 Dispatcher가 자동 block | `ERROR` | |
 | Hermes Profile 프로세스/Gateway 자체가 안 떠 있음 | `OFFLINE` | kanban과 별개로 Profile 상태 자체를 확인해야 함 |
 
-## 4. 제안 — §5.2 연결 순서에 추가할 것
+`DEGRADED`는 Kanban Task 상태가 아니라 Runtime·Tool·Model Gateway의 Health Event에서 만든다.
+한 Agent에 Task가 여러 개면 `ERROR > WAITING_APPROVAL > BLOCKED > RUNNING > QUEUED > IDLE`
+순으로 대표 상태를 정하고, 화면에는 상태별 Task 수를 함께 제공한다. Runtime Heartbeat가 없으면
+Task 상태와 무관하게 `OFFLINE`으로 표시한다.
 
-새 컴포넌트 하나만 추가한다. **BFF·WebSocket·프론트는 무엇도 안 바뀐다.**
+## 4. 결정 — §5.2 연결 순서에 추가할 것
+
+Kanban을 새 업무 시스템으로 다시 만들지 않는다. 읽기 전용 Bridge와 기존 Event Projection 경계를 추가한다.
 
 ```
-[신규] Kanban Event Publisher (작은 Adapter)
+[신규] Kanban Status Bridge (작은 Adapter)
   - hermes kanban watch 또는 task_events 테이블 polling으로 상태 변화 감지
   - §5.3 UI Event Envelope 형식으로 변환해 Redis Streams에 publish
       event_type: "agent.status.v1"
-      payload: { task_id, dept_id, agent_status, task_title }
-  - 여기까지만 하고 끝 — 이후는 기존 §5.2 파이프라인(BFF → WebSocket)이 그대로 처리
+      payload: { task_id, parent_task_id, department_id, profile_id,
+                 source_status, agent_status, blocked_kind, task_title,
+                 board_updated_at }
+
+[기존 공통 Projection 경계]
+  - Redis Streams의 agent.status.v1을 멱등 소비
+  - Supabase Agent Status Read Model 갱신
+  - BFF의 GET /ui/snapshot과 /ws/operations가 같은 Version을 제공
 ```
 
-이 Adapter는 **읽기 전용 상태 발행자**다. kanban에 명령을 내리는 방향(Task 생성/할당)은 이 흐름과 분리한다.
+Bridge는 **읽기 전용 상태 발행자**다. Kanban에 명령을 내리는 방향(Task 생성/할당)은 이 흐름과
+분리한다. Browser는 SQLite를 직접 읽지 않으며, Redis Event 누락·재시작 후에는 Supabase Read Model로
+복구한다. Event만 발행하고 Snapshot 원천을 만들지 않으면 Phase UI-1의 Gap Recovery를 만족할 수 없으므로
+Projector와 Read Model을 필수 범위로 확정한다.
+
+Event 멱등 키는 `kanban_board_id + task_id + source_version/status_updated_at`에서 만들고, 원문 Task 제목은
+Secret·개인정보·미공개 주문 정보를 포함하지 않도록 작성 정책과 Payload Sanitizer를 적용한다.
 
 ## 5. 이 제안이 건드리지 않는 것 (경계 확인)
 
@@ -69,7 +88,7 @@ AI Office(프론트) → FastAPI BFF → Redis Streams(Domain Event) + Supabase 
   - `swarm`의 `--verifier`는 그 Task를 만든 부서 자신이 될 수 없음 (자기 산출물 자기 검증 금지)
   - 각 부서 Hermes Profile의 `tool_allowlist`/`forbidden_tools`가 실제 실행 권한의 1차 방화벽 (Risk/QA엔 아직 이 필드가 없어 별도로 채워야 함 — 이 ADR과 별개 작업)
 
-## 6. 소유권과 열린 질문 (§11 기준)
+## 6. 소유권 결정 (§11 기준)
 
 AI_OFFICE_FRONTEND_PLAN.md §11 소유권 표에 이 제안이 걸치는 영역:
 
@@ -77,20 +96,23 @@ AI_OFFICE_FRONTEND_PLAN.md §11 소유권 표에 이 제안이 걸치는 영역:
 |---|---|---|
 | Live Office·CEO·Workforce | 영주님 | Agent 상태 Projection에 kanban 소스가 섞이는 것을 승인해야 함 |
 | Risk·Audit·Incident | 동규님(본인) | Risk/QA Task의 Event Contract는 직접 설계 가능 (본 ADR 범위) |
-| 공통 Frontend Platform | **미지정** | Kanban Event Publisher를 실제로 만들 담당자가 없다 — 이 ADR 승인 전에 정해져야 함 |
+| 공통 Frontend Platform | **도현님** | Kanban Status Bridge, Agent Status Projector, BFF/WebSocket와 Frontend Store 구현 |
 
-**팀 리더에게 요청하는 결정 3가지:**
-1. 이 방향(kanban을 Agent 상태 소스로 씀)을 채택할지 여부.
-2. 채택한다면 "공통 Frontend Platform" 담당자를 지정할지.
-3. 채택 시 AI_OFFICE_FRONTEND_PLAN.md §5.2/§5.4에 이 내용을 반영하는 후속 PR을 누가 낼지 (본 ADR과 같은 PR로 처리하는 게 CLAUDE.md 문서 규칙에 맞다).
+결정 결과:
 
-## 7. 채택 시 구현 순서 (제안)
+1. Hermes Kanban을 Agent 업무 상태 Source로 채택한다.
+2. 영주님은 Live Office Business Owner, 도현님은 공통 Frontend Platform 기술 DRI를 맡는다.
+3. 동규님은 상태 매핑, 권한 분리와 오표시 방지 Test를 Review한다.
+4. 확정 문서 반영은 ADR 채택과 같은 변경에서 처리하고, 후속 구현 PR은 도현님이 낸다.
+
+## 7. 구현 순서
 
 1. Risk/QA `config.yaml`에 `tool_allowlist`/`forbidden_tools` 채우기 (선행 조건, 이 ADR과 무관하게 필요)
-2. Risk/QA 부서 것부터 실제 kanban Task 1~2개로 소규모 시범(예: Evidence QA Case 하나) — Task graph에 §5 원칙 적용
-3. Kanban Event Publisher Adapter 프로토타입 (읽기 전용, Redis Streams에 `agent.status.v1` 발행까지만)
-4. AI_OFFICE_FRONTEND_PLAN.md §5.2 다이어그램·§5.4 표에 반영 + 이 ADR을 `Accepted`로 갱신
-5. 나머지 6개 부서로 확장은 각 담당자가 자기 부서 것부터
+2. `agent.status.v1` Schema, 상태 우선순위, 멱등 키와 Supabase Projection Contract Test 확정
+3. Risk/QA 부서부터 실제 Kanban Task 1~2개로 소규모 시범(예: Evidence QA Case 하나)
+4. Kanban Status Bridge Prototype과 Redis Stream 발행
+5. Agent Status Projector, `/ui/snapshot`과 `/ws/operations` 연결 및 Gap Recovery Test
+6. 나머지 6개 조직으로 확장하되 각 담당자가 자기 부서 Task 의미·민감도를 검토
 
 ## 8. 대안과 기각 사유
 

@@ -239,6 +239,7 @@ flowchart LR
 | 기업 Event | 배당, 증자, 분할, 자사주, 합병, 주요주주 | DART + KRX | Event | PostgreSQL | RES-05/06 |
 | 뉴스 Metadata | 제목, 언론사, URL, 게시시각, Snippet | BIGKinds/API 계약 Source | 30초~2분 | PostgreSQL | RES-06 |
 | 뉴스 Story | 중복 Cluster, 원출처, Entity, Novelty | 내부 처리 | Event | PostgreSQL + pgvector | RES-06/08 |
+| Social Insight | 승인 계정의 Post ID, 작성자, 게시·관측 시각, 종목·주제 연결 | X API 승인 Watchlist | 준실시간 | PostgreSQL + 권한별 RAG | RES-06/08 |
 | 국내 거시 | 기준금리, 국고채, 환율, 물가, 통화, 산업 | ECOS + KOSIS | 발표 일정/일별 | 시계열 + PostgreSQL | RES-07 |
 | 거래 Calendar | 거래일, 휴장, Session | KRX + `exchange-calendars` 보조 | 월간/공지 시 | PostgreSQL | RES-01/02 |
 
@@ -257,6 +258,7 @@ Open DART는 공시검색, 기업개황, 원문파일, 고유번호와 XBRL 기�
 | Global Macro | 미국 금리·물가·고용·유동성 | FRED/ALFRED | 발표 일정 | Vintage/Revisions 보존 |
 | 산업 통계 | 생산, 재고, 수출입, 지역·산업 지표 | KOSIS/공공데이터포털 | 일·월·분기 | 단위·계절조정·Revision 기록 |
 | Governance/ESG | 지배구조, 밸류업, ESG 공시 | DART/KRX | Event/연간 | 평가 점수와 원자료 분리 |
+| X 유명 인사 Watchlist | 정책 당국자, 기업 경영진·IR, 펀드매니저, 산업 전문가의 공개 Post | X API Filtered Stream | 준실시간 | 승인 계정만 수집하고 단독 거래 근거로 사용 금지 |
 
 [FRED API](https://fred.stlouisfed.org/docs/api/fred/overview.html)는 Series와 Release 단위 조회를 제공하고, ALFRED/Vintage Date를 통해 과거 시점의 값과 Revision을 다룰 수 있으므로 Global Macro Backtest에 적합하다.
 
@@ -352,7 +354,49 @@ Production에서는 뉴스 Vendor가 다음을 제공하는지 계약 전에 확
 - Embedding/LLM 처리 허용 여부
 - 호출 한도, 지연 SLO와 Historical Backfill
 
-### 5.5 ECOS, KOSIS와 FRED/ALFRED
+### 5.5 X Social Insight Watchlist
+
+**결정:** 서비스에서 말하는 "팔로우"는 X 계정에 자동 Follow 요청을 보내는 기능이 아니라, 리서치본부가 승인한 공개 계정을 내부 Watchlist에 등록해 관찰하는 기능이다. X 계정의 실제 Follow/Unfollow는 사용자 동의가 필요한 별도 Write Action이므로 Collector가 수행하지 않는다.
+
+초기 계정 범주는 다음과 같다.
+
+- 중앙은행·정부·감독기관의 공식 계정과 정책 당국자
+- 상장사 공식 계정, CEO·CFO·IR 책임자
+- 검증된 펀드매니저, Short Seller, Macro·Sector 투자자
+- 금융 기자, 거래소·연구기관과 산업 전문가
+
+유명세만으로 계정을 채택하지 않는다. `social_source_accounts` Registry에서 `platform_user_id`, 현재 Handle, 계정 범주, 연결 기업·산업, 언어, 신뢰 Tier, 승인자, 활성 기간, 수집 목적과 License Scope를 Version 관리한다. Handle 변경에 대비해 Platform User ID를 식별자로 사용하고, 실명·소속 연결은 공개 정보에 근거해 검토한다.
+
+[X Filtered Stream](https://docs.x.com/x-api/posts/filtered-stream/introduction)은 `from:` 사용자 규칙을 포함한 Filter Rule로 일치 Post를 준실시간 전달한다. 구현은 공식 X API만 사용하며 다음 구성으로 제한한다.
+
+```text
+Approved Social Account Registry
+  -> X Filter Rule Builder (`from:user`, 언어·Repost 제외 규칙)
+  -> Persistent Filtered Stream + reconnect/backoff
+  -> Raw Envelope + observed_at
+  -> Entity/Cashtag/Topic Linker
+  -> Social Story Dedup + Claim Classifier
+  -> Evidence QA와 News/DART/Market 교차 검증
+  -> Point-in-Time RAG 또는 Investment Case Trigger
+```
+
+Post는 `UNVERIFIED_SOCIAL` Evidence로 시작한다. 원문 주장, 작성자의 의견, 타인 인용과 추측을 분리하고, 단일 Post만으로 Order Intent나 Strategy Promotion을 만들지 않는다. 다음 중 하나 이상으로 확인된 경우에만 `CORROBORATED_SOCIAL`로 승격한다.
+
+- DART·거래소·기업 IR 등 1차 자료 확인
+- 독립된 승인 뉴스 Source의 동일 사실 보도
+- 해당 주장과 시간상 일치하는 시장·수급 Event와 Analyst 검토
+
+최소 저장 필드는 `platform_post_id`, `author_user_id`, `created_at`, `observed_at`, `matching_rule_ids`, `entity_ids`, `claim_type`, `verification_status`, `source_url`, `content_hash`, `edit_or_delete_status`다. 본문, Embedding과 장기 Archive는 승인된 X 이용 범위에서만 저장한다. [X Developer Policy](https://docs.x.com/developer-terms/policy)에 따라 수정·삭제·비공개 전환을 반영하는 Compliance Sync와 Tombstone 처리를 운영하고, 외부 재배포는 Post/User ID 중심으로 제한한다. 삭제된 본문은 Backtest 재현을 이유로 보존하지 않는다.
+
+도입 Gate:
+
+1. X Developer Access, 예상 호출량·비용과 상업적 내부 분석 사용 범위를 확인한다.
+2. 계정 승인·정기 재검토·비활성화 Workflow를 만든다.
+3. Filter Rule 수, 연결 상태, 지연, 누락과 Rate Limit을 관측한다.
+4. 수정·삭제 Compliance Sync와 RAG 삭제 전파를 검증한다.
+5. Social 단독 주문 금지와 Evidence QA 교차 검증을 E2E Test로 고정한다.
+
+### 5.6 ECOS, KOSIS와 FRED/ALFRED
 
 **결정:** 국내 Macro는 ECOS/KOSIS, 국제 Macro는 FRED/ALFRED부터 시작한다.
 
@@ -381,7 +425,7 @@ revision_number
 source_release_id
 ```
 
-### 5.6 기업 IR와 공식 Website
+### 5.7 기업 IR와 공식 Website
 
 기업 실적자료와 Presentation은 DART 첨부, KIND IR 자료실 또는 회사 공식 IR Domain을 Source Registry에 등록해 수집한다.
 

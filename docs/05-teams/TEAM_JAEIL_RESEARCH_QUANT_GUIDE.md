@@ -159,6 +159,7 @@ Supabase PostgreSQL은 Instrument, 문서 Metadata, 재무 Fact, Dataset Manifes
 | 기업정보 | 법인코드, 업종, 결산월, 대표자, 주소 | Open DART/KRX | 일일·변경 | Object Raw | `reference.issuers` |
 | Corporate Action | 배당, 분할·병합, 증자, 합병, 상장폐지 | DART/KRX | Event + 일일 확인 | Object Raw | `reference.corporate_actions` |
 | 뉴스 | 제목, URL, 출처, 게시·수정 시각, 허용된 본문 | BIGKinds/NAVER API HUB/계약 Vendor | 1~5분 또는 Provider Event | 권한별 Storage | `research.documents` |
+| X Social Insight | 승인 유명 인사·공식 계정의 Post ID, 작성자, 게시·관측 시각, 종목·주제, 검증 상태 | X API Filtered Stream | 준실시간 | 권한별 Storage | `research.documents` + Source Registry |
 | 거시경제 | 금리, 환율, 물가, 고용, 생산, 수출입 | ECOS/KOSIS/FRED | 발표 Calendar + 일일 확인 | Raw JSON | `research.macro_observations` |
 | 기업 IR | 실적 Presentation, IR 공지와 첨부 | DART/KIND/회사 공식 IR | Event/일일 | Private Storage | `research.documents` |
 
@@ -172,6 +173,7 @@ Supabase PostgreSQL은 Instrument, 문서 Metadata, 재무 Fact, Dataset Manifes
 | 외국인·기관 수급 세분 | Flow 전략과 Regime | PIT History와 데이터 정의 확인 |
 | ETF 구성종목 | Look-through Exposure | 변경 이력과 Effective Time 제공 |
 | 신용등급·채권·CDS | Credit Risk와 Funding Regime | 라이선스와 Coverage 확인 |
+| X 유명 인사 Watchlist | 정책·기업·투자·산업의 빠른 Narrative와 촉매 탐지 | 공식 API 권한, 비용, 승인 계정 Registry와 삭제 Compliance 검증 |
 | Supply Chain/Alternative Data | Event·산업 선행지표 | Incremental Alpha와 비용 검증 |
 
 ### 3.3 수집하지 말아야 할 것
@@ -723,8 +725,13 @@ API(2019003)나 별도 Source가 필요하다.
 
 - **부분** Provider Adapter, License Registry와 Raw 권한.
   License Registry는 `UseScope`로 Source별 허용 용도를 강제한다. Provider Adapter는
-  NAVER(P0 국내), Alpaca(P1 해외), Tavily(P1 탐색 전용)가 있다. **BIGKinds는 아직
-  `KEY_MISSING`이며 API 이용이 유료 회원(월 5만원대)이다.**
+  NAVER(P0 국내), Alpaca(P1 해외), Tavily(P1 탐색 전용)가 있다.
+
+  **BIGKinds는 도입하지 않는다** (재일님 결정 2026-07-31). API 이용이 유료 회원(월
+  5만원대)이고 국내 뉴스 P0는 NAVER로 충족된다. `KEY_MISSING`이 아니라
+  `DISABLED`로 둔 이유 — `KEY_MISSING`은 "발급만 받으면 된다"는 뜻이라 사실과
+  다르고, 상태마다 조치 주체와 방법이 다르다. 재검토 조건은 "NAVER 커버리지가
+  부족하다는 실측 근거"이며 사유를 `disabled_reason`에 남겼다.
 - **부분** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
   중복 제거는 `news_events.admit`의 Cursor + ID 창으로 Stream 계층에서 한다.
   **Story Cluster와 Near Duplicate는 미착수**다.
@@ -875,7 +882,8 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
       **Exact 중복 제거는 완료** — `news_events.admit`이 Cursor + ID 창으로 Stream 계층에서
       막고, 페이지 안 심볼 병합으로 종목 연결이 사라지지 않게 한다. **Near Duplicate와
       Story Cluster는 미착수**다. NAVER 키 확보로 P0 NEWS Blocked는 해제됐고 BIGKinds는
-      여전히 `KEY_MISSING`이다(API 이용이 유료 회원).
+      비용 대비 필요성이 확인될 때까지 `DISABLED`다. X Watchlist는 P1 계획이며 Collector,
+      승인 계정 Registry, 삭제 Compliance와 교차 검증 Test는 아직 미구현이다.
 - [ ] Backtest가 PIT Dataset Manifest로 재현된다.
 - [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
 - [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
@@ -894,6 +902,8 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
 - [LS증권 Open API](https://openapi.ls-sec.co.kr/)
 - [Open DART 개발가이드](https://opendart.fss.or.kr/guide/main.do)
 - [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)
+- [X API Filtered Stream](https://docs.x.com/x-api/posts/filtered-stream/introduction)
+- [X Developer Policy](https://docs.x.com/developer-terms/policy)
 - [Supabase Database](https://supabase.com/docs/guides/database/overview)
 - [Supabase Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
 - [Supabase Storage Access Control](https://supabase.com/docs/guides/storage/security/access-control)

@@ -304,6 +304,15 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P0,
         required_env=("BIGKINDS_API_KEY",),
+        # ▶ 재일님 결정 2026-07-31: 도입하지 않는다.
+        #   KEY_MISSING 으로 두지 않는 이유 - 그 상태는 "발급만 받으면 된다" 는
+        #   뜻인데 BIGKinds 는 API 이용이 유료 회원(월 5만원대)이라 사실과 다르다.
+        #   조치 주체와 방법이 다르므로 상태를 구분한다(SourceStatus docstring).
+        #   NAVER 가 P0 NEWS 를 덮고 있어 이 Source 없이도 Domain 은 열려 있다.
+        disabled_reason=(
+            "2026-07-31 도입 보류 - API 이용이 유료 회원(월 5만원대). 국내 뉴스 P0 는 "
+            "NAVER 로 충족 중이다. 재검토 조건: NAVER 커버리지가 부족하다는 실측 근거"
+        ),
         # 저작권상 본문이 첫 200자로 제한될 수 있다(.env 주석, 가이드 3.1).
         # 전문 저장·Embedding 권한은 별도 확인 전까지 부여하지 않는다.
         allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
@@ -719,13 +728,30 @@ def _check_require_fails_closed():
     r = SourceRegistry(env=_FAKE_ENV)
     assert r.require("opendart").source_id == "opendart"
 
-    for sid in ("krx_openapi", "bigkinds", "ecos", "kind"):
+    # 사용 불가 사유가 네 가지 다 있어야 한다 - 조치 주체와 방법이 다르므로
+    # require 가 사유를 구분해서 알려줘야 운영 중에 판단할 수 있다.
+    # NOT_AUTHORIZED 는 키가 있을 때만 나온다 - 키가 없으면 KEY_MISSING 이 맞다.
+    cases = [
+        ("krx_openapi", SourceStatus.NOT_AUTHORIZED, {"KRX_API_KEY": "k"}),  # 승인 필요
+        ("ecos", SourceStatus.KEY_MISSING, {}),            # 발급만 하면 됨
+        ("kind", SourceStatus.NOT_CONTRACTED, {}),         # 계약 검토 선행
+        ("bigkinds", SourceStatus.DISABLED, {}),           # 우리가 의도적으로 끔
+    ]
+    for sid, expected, extra in cases:
+        rr = SourceRegistry(env={**_FAKE_ENV, **extra}) if extra else r
+        assert rr.status(sid) is expected, f"{sid}: {rr.status(sid)} != {expected}"
         try:
-            r.require(sid)
+            rr.require(sid)
             raise AssertionError(f"{sid} 가 사용 불가인데 통과했다")
         except SourceUnavailable as e:
-            # 메시지에 원인이 들어 있어야 운영 중에 판단할 수 있다
-            assert sid in str(e) and ("미확보" in str(e))
+            msg = str(e)
+            assert sid in msg and expected.value in msg, msg
+            # 사유가 비어 있으면 무엇을 해야 할지 알 수 없다
+            assert len(msg.split(expected.value, 1)[1].strip(". ")) > 5, msg
+
+    # DISABLED 는 키가 생겨도 풀리지 않는다 - 우리가 끈 것이지 못 쓰는 게 아니다
+    r2 = SourceRegistry(env={**_FAKE_ENV, "BIGKINDS_API_KEY": "k"})
+    assert r2.status("bigkinds") is SourceStatus.DISABLED
     print("  Fail-closed           OK")
 
 

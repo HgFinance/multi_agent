@@ -1,114 +1,97 @@
-# 나의 AI 회사 (AI Office)
+# HgFinance AI Office
 
-AI 직원들이 출근하고, 자리에 앉아 일하고, 회의실에 모이고, 대표실로 보고하러 오는 **픽셀 사무실**입니다.
+`AI Office`는 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 개인형
+헤지펀드 운영 Frontend다. 현재는 **8개 조직·2개 층의 DEMO Prototype**이며 실제 Agent·시장·주문
+상태의 Source of Truth가 아니다.
 
-혼자 일하는 사람이 "나도 회사가 있으면 좋겠다" 싶을 때 쓰라고 만들었어요.
-설치하면 바로 돌아갑니다. **연동 하나도 안 해도 됩니다.**
+전체 제품·권한·실시간 계약은
+[AI Office Frontend Plan](../docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
----
+## 현재 구현
 
-## 1. 실행하기 (5분)
+- Next.js, React, TypeScript 기반 Pixel Office.
+- CEO Office, 리서치, 트레이딩, 리스크, 퀀트/백테스트, 회계/포트폴리오, AI QA/감사와
+  Agent Workforce 등 8개 조직.
+- 1층·2층 전환, 조직별 직원과 Bull/Bear 토론 DEMO.
+- Trading/Portfolio Snapshot Panel과 `DEMO` Mode 표시.
+- `../apps/api/main.py`의 `GET /ui/snapshot` Read-only DEMO BFF.
 
-**필요한 것**: Node.js 22 이상 ([nodejs.org](https://nodejs.org)에서 설치)
+직원 이동과 업무 흐름은 아직 `app/game/sim.ts`의 Scripted Simulation이다. Trading/Portfolio
+Snapshot도 Supabase 운영 데이터가 아니라 테스트 Paper Loop로 만든 DEMO Projection이다.
 
-터미널을 열고 이 폴더에서:
+## 실행
+
+Node.js 22 이상을 사용한다.
 
 ```bash
+cd ai-office
 npm install
 npm run dev
 ```
 
-브라우저에서 **http://localhost:3000** 을 엽니다. 끝이에요.
+기본 주소는 `http://localhost:3000`이다.
 
-> 창을 닫으면 서버도 꺼집니다. 다시 보려면 `npm run dev`를 다시 실행하세요.
+DEMO BFF는 저장소 루트에서 별도로 실행한다.
 
----
+```bash
+uvicorn apps.api.main:app --reload --port 8000
+```
 
-## 2. 내 회사로 바꾸기
+`POST /agent/ask`는 Hermes가 Tool을 실행할 수 있으므로 기본 비활성화 상태다. 로컬 개발에서도
+Profile Tool Allowlist와 질의 영향을 확인한 경우에만 `ENABLE_AGENT_ASK=true`로 명시적으로 연다.
+Production에서는 Supabase Auth, 사용자별 권한과 Audit가 연결되기 전까지 활성화하지 않는다.
 
-**`company.config.ts` 파일 하나만 고치면 됩니다.** 다른 파일은 안 건드려도 돼요.
+## 목표 연결 구조
 
-그 안에 이런 게 들어 있습니다:
+```text
+Hermes Kanban + Runtime Heartbeat
+  -> Kanban Status Bridge
+  -> Redis Streams: agent.status.v1
+  -> Supabase Agent Status Read Model
+  -> FastAPI GET /ui/snapshot + WS /ws/operations
+  -> AI Office Projection
 
-| 고칠 것 | 어디 |
+LS Market Worker / Risk / OMS / Ledger / QA
+  -> Domain Event + Read Model
+  -> 같은 BFF와 WebSocket
+```
+
+Agent 업무 상태는 Hermes Kanban을 재사용한다. 상태 매핑과 소유권은
+[ADR-0001](../docs/02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
+Browser는 Kanban SQLite, Supabase 거래 Table, OMS나 Ledger를 직접 읽거나 수정하지 않는다.
+
+## 소유권
+
+| 영역 | Owner |
 |---|---|
-| 회사 이름, 로고 글자, 화면 제목 | `COMPANY` |
-| 대표(나) 이름·성격·머리색 | `CEO_PROFILE` |
-| 부서 12개 이름·아이콘·하는 일 | `DEPARTMENTS` |
-| 직원 이름·직책·색·혼잣말 | `STAFF_LIST` |
-| "연동 대기"로 표시할 팀 | `PENDING_INTEGRATIONS` |
-| 결과물 보관함 링크 | `STORAGE_LINK` |
+| Live Office 제품·업무 의미 | 영주님 |
+| 공통 Frontend Platform 기술 DRI | 도현님 |
+| Risk·QA 상태 계약 Review | 동규님 |
+| Market·Research·Strategy 계약 | 재일님 |
+| Trading·Portfolio·Close 계약 | 도현님 |
 
-저장하면 화면이 자동으로 새로고침됩니다.
+각 본부는 자기 Read Model과 Event 의미를 소유한다. Frontend 구현자가 금융 상태의 의미를 새로
+계산하거나 추정하지 않는다.
 
-### ⚠️ 딱 2가지만 지키세요
+## 검증
 
-1. **부서 `id`는 바꾸지 마세요** (`research`, `brand`, `strategy1` …)
-   시뮬레이션 엔진이 이 id로 캐릭터를 움직입니다. 바꾸면 직원들이 길을 잃어요.
-   → 바꿔도 되는 건 `name`(부서 이름) · `icon` · `short` 입니다.
+```bash
+cd ai-office
+npx tsc --noEmit
+npm run build
+node --test tests/rendered-html.test.mjs
 
-2. **부서는 12개를 유지하세요.**
-   사무실 배치가 4열 3행 = 12칸 고정입니다.
-   안 쓰는 부서는 지우지 말고 **이름만 바꿔서** 쓰세요.
-
-직원 수는 자유입니다. 늘려도 줄여도 되고, 한 팀에 팀장(`lead`) 1명만 두면 됩니다.
-
----
-
-## 3. AI한테 시키는 법 (제일 편한 방법)
-
-직접 고치기 귀찮으면, Claude Code나 Codex 같은 AI 코딩 도구에 이 폴더를 열고
-아래를 그대로 복붙하세요.
-
-```
-company.config.ts 파일만 고쳐줘. 다른 파일은 건드리지 마.
-
-내 직업: [예: 유튜브 채널 운영자]
-내 이름: [예: 박지우]
-회사 이름: [예: 지우 스튜디오]
-
-이 일에 맞게 부서 12개 이름과 직원들을 다시 지어줘.
-- 부서 id는 절대 바꾸지 말고, name·icon·short·task·report만 바꿔.
-- 부서는 12개 그대로 유지해.
-- 직원 이름은 한국 이름으로, 각자 성격이 드러나는 혼잣말을 2~3개씩 넣어줘.
-- 색깔(colors)은 지금 쓰는 파스텔 톤에서 벗어나지 않게 해줘.
+cd ..
+python apps/api/main.py
 ```
 
----
+현재 Cloudflare/Vinext 관련 기존 TypeScript 환경 오류와 실제 신규 오류를 구분해 기록한다.
+`DEMO`, `PAPER`, `LIVE` 데이터는 같은 화면에서 섞지 않는다.
 
-## 4. 나중에 진짜로 연동하고 싶다면
+## 다음 작업
 
-기본 상태에서는 화면의 연동 항목이 **"미설정"** 으로 뜹니다. 정상이에요.
-(연결 안 된 걸 연결됐다고 표시하지 않는 게 이 툴의 원칙입니다.)
-
-진짜 Notion·Discord로 보고서를 보내고 싶으면:
-
-1. `.dev.vars.example` 파일을 복사해서 `.dev.vars` 라는 이름으로 저장
-2. 그 안에 값 채우기 (파일 안에 방법이 적혀 있어요)
-3. `npm run dev` 다시 실행
-
-**Notion 하나만 붙여도 충분히 재밌습니다.** 2분이면 되고, 붙는 순간 내 AI 회사가
-진짜 내 노션에 일일 브리핑을 씁니다.
-
-> 🔒 `.dev.vars` 는 절대 남에게 주거나 인터넷에 올리지 마세요. 비밀번호와 같습니다.
-> 이 폴더를 남에게 줄 때도 `.dev.vars` 는 빼고 주세요.
-
----
-
-## 5. 자주 막히는 곳
-
-**`npm install` 에서 에러가 나요**
-Node 버전이 낮은 경우입니다. `node -v` 로 확인해서 22 미만이면 새로 설치하세요.
-
-**3000번 포트가 이미 쓰이고 있대요**
-다른 포트로 띄우면 됩니다: `npx vinext dev --port 3001`
-
-**직원이 안 움직여요**
-화면 위쪽 **"오늘 업무 시작하기"** 를 눌러야 하루가 시작됩니다.
-
-**부서를 지웠더니 화면이 깨져요**
-12개를 유지해야 합니다. 되돌리고 이름만 바꾸세요.
-
----
-
-HgFinance AI Office — 개인형 헤지펀드 관제 화면.
+1. Supabase Auth와 공식 `/ui/snapshot` Read Model 연결.
+2. `/ws/operations`, Heartbeat, Sequence Gap과 Snapshot Recovery.
+3. Kanban Status Bridge와 `agent.status.v1` Projector.
+4. Market, Research, Strategy, Risk, Trading, Portfolio, Audit와 Workforce Workbench.
+5. 위험 Command의 Preview, 사유, 멱등 키, Backend 재검증과 Audit.
