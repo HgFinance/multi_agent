@@ -527,7 +527,7 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .pixel-arm.right { right: 2px; transform: rotate(-8deg); }
 .pixel-face { position: absolute; z-index: 3; top: 8px; left: 10px; width: 23px; height: 24px; border: 2px solid var(--ink); background: #f3bd9d; }
 .pixel-eyes { position: absolute; top: 10px; left: 4px; width: 3px; height: 3px; background: var(--ink); box-shadow: 10px 0 var(--ink), 5px 7px 0 -1px #c07a56; }
-.pixel-hair { position: absolute; z-index: 4; top: 2px; left: 7px; width: 29px; height: 12px; border: 2px solid var(--ink); background: var(--pixel-hair); box-shadow: -3px 8px 0 -1px var(--pixel-hair), 21px 8px 0 -1px var(--pixel-hair); }
+.pixel-hair { position: absolute; z-index: 4; top: 2px; left: 7px; width: 29px; height: 12px; border: 2px solid var(--ink); background: var(--pixel-hair); box-shadow: -3px 8px 0 -1px var(--pixel-hair), 3px 8px 0 -1px var(--pixel-hair); }
 .pixel-headset { position: absolute; z-index: 5; top: 12px; right: 4px; width: 5px; height: 11px; border: 2px solid var(--ink); background: var(--mint); }
 .mini-pixel { display: grid; width: 38px; height: 42px; place-items: end center; overflow: hidden; border: 1.5px solid var(--ink); border-radius: 7px; background: var(--mint); }
 .mini-pixel .pixel-employee { transform: scale(.58); transform-origin: bottom center; }
