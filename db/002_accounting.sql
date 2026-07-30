@@ -1,6 +1,6 @@
 -- Sprint D0: accounting 스키마
 -- 소유: 도현 (회계/포트폴리오본부)
--- 근거: docs/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.4, 8.2
+-- 근거: docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.4, 8.2
 --       docs/HEDGE_FUND_MASTER_PLAN.md 12.3(Fund Ledger), 12.4(NAV Close)
 --
 -- 원칙:

@@ -37,6 +37,6 @@ python departments/02-trading/broker/paper_broker.py
 
 - `hermes/` — Git 기준 Hermes Profile 사본
 - `contracts/` — OrderIntent / RiskDecision / EventEnvelope 계약(Sprint D0), `philosophies.yaml`(철학별 집행 프리셋)
-- `oms/` — 결정론적 OMS(Sprint D1). 구 경로 `execution/oms.py`는 호환 Wrapper로 유지
-- `broker/` — Paper Broker(Sprint D1). 구 경로 `execution/paper_broker.py`는 호환 Wrapper로 유지
+- `oms/` — 결정론적 OMS(Sprint D1). 구 경로 `execution/oms.py`는 2026-07-30에 삭제됐다
+- `broker/` — Paper Broker(Sprint D1). 구 경로 `execution/paper_broker.py`는 2026-07-30에 삭제됐다
 - D0-D2 Prototype 단계이며 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전 재작업 예정

@@ -28,6 +28,6 @@ python3 departments/01-research/collectors/news.py 'AAPL Apple stock'
 ## Handoff
 
 - `hermes/` — Git 기준 Hermes Profile 사본
-- `collectors/news.py` — Tavily 뉴스 조회 (구 경로 `fetch_news.py`는 호환 Wrapper로 유지, 제거 예정일은
-  파일 상단 주석 참고)
+- `collectors/news.py` — Tavily 뉴스 조회. 구 경로 `fetch_news.py`와 임시 호환 Wrapper는 2026-07-30에
+  삭제됐다 — 이 경로가 유일한 실행 경로다
 - `references/` 이전 여부는 미결정 — [REPOSITORY_DEPARTMENT_STRUCTURE.md](../../docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 7절 참고

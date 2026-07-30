@@ -2,7 +2,7 @@
 -- 소유: 도현
 -- 근거: docs/HEDGE_FUND_MASTER_PLAN.md 5.7(Fund/Book 계층), 1.2(자본은 사용자가 정한다)
 --
--- account_code는 accounting/ledger.py의 상수와 반드시 일치한다.
+-- account_code는 departments/05-accounting-portfolio/ledger/ledger.py의 상수와 반드시 일치한다.
 -- 한쪽만 바꾸면 분개가 존재하지 않는 계정을 참조하게 된다.
 
 -- ---------------------------------------------------------------------------
