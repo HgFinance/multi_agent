@@ -44,6 +44,10 @@
 | 구분 | 현재 경로 | 구 경로 |
 |---|---|---|
 | 리서치 Hermes | `departments/01-research/hermes/` | `orchestration/hermes/research-department/` |
+| Market Event 계약 | `departments/01-research/contracts/market_events.py` | — (신규, Sprint J0) |
+| 수집 Source Registry | `departments/01-research/collectors/source_registry.py` | — (신규, Sprint J1) |
+| 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
+| 로컬 시계열 DB 구성 | `docker-compose.yml`, `timescaledb/local-dev/` | — (신규, 로컬 개발 전용) |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
@@ -422,31 +426,73 @@ Quant:
 
 ## 9. 첫 구현 순서
 
+> 진행 상황 갱신: 2026-07-30. 아래 각 항목에 실제 상태를 붙인다. 상태는 코드와 검증
+> 결과만 근거로 한다 — "파일이 있다"를 완료로 적지 않는다.
+
 ### Sprint J0: 저장소 경계
 
-- Supabase `reference`, `research`, `quant`, `strategy`, `api` Schema Migration.
-- 별도 TimescaleDB Container와 `MarketDataRepository` Interface.
-- Private Storage Bucket과 RLS.
-- 공통 `instrument_id`, Time, Event Envelope Package.
+- **부분** Supabase `reference`, `research`, `quant`, `strategy`, `api` Schema Migration.
+  `supabase/migrations/` 5개 파일에 `reference` 9 / `research` 14 / `quant` 12 / `strategy` 9개
+  테이블이 정의돼 있다. 원격 Supabase Project 적용과 `api` Schema View/RPC는 미착수다.
+- **완료** 별도 TimescaleDB Container와 `MarketDataRepository` Interface.
+  `docker-compose.yml`(compose 프로젝트 `hedgefund`, 호스트 포트 5434)로 로컬 컨테이너를
+  띄우고 PG 17.10 / TimescaleDB 2.29.0에 `001_initial_market_data.sql`을 적용했다 —
+  hypertable 7개, 압축 정책 5개, Continuous Aggregate `bars_1m` 생성과
+  `tests/schema/timescale_runtime_smoke.sql` 통과를 확인했다.
+  Interface는 `departments/01-research/repository/market_repository.py`의
+  `MarketDataRepository`(ABC)이고 `InMemoryMarketRepository`와
+  `TimescaleMarketRepository` 두 구현이 같은 계약 점검을 통과한다.
+- **미착수** Private Storage Bucket과 RLS.
+- **완료** 공통 `instrument_id`, Time, Event Envelope Package.
+  `departments/01-research/contracts/market_events.py` — `InstrumentRef`(영구 `instrument_id`,
+  공급자 코드는 Alias), `ObservationTimes`(4.2의 시각 규칙), `MarketTick`/`MarketQuote`,
+  `build_source_event_id`(멱등 ID), `QuarantinedEvent`, `ResearchEventEnvelope`(6.2 필드).
 
 완료 기준:
 
-- Supabase에서 Raw Tick Table이 생성되지 않는다.
-- 다른 본부 Credential로 TimescaleDB에 접속할 수 없다.
-- Storage Bucket은 익명 접근이 거부된다.
+- **확인** Supabase에서 Raw Tick Table이 생성되지 않는다.
+  `supabase/migrations/`에 `market_ticks`/`market_quotes`/`raw_tick` 생성 구문이 없다.
+- **부분** 다른 본부 Credential로 TimescaleDB에 접속할 수 없다.
+  `timescaledb/local-dev/001_dev_roles.sql`로 `market_reader`/`market_writer`를 만들고
+  마이그레이션 grant 블록을 적용했다. 검증 결과 reader는 insert 불가, writer는 delete
+  불가(append-only), `public`은 `market` 스키마 usage 없음이다. 실제 Credential 발급·배포
+  정책은 Infrastructure/IAM 소관이라 이 문서 범위 밖이다.
+- **미확인** Storage Bucket은 익명 접근이 거부된다.
 
 ### Sprint J1: LS Market Plane
 
 - Collector의 멱등 Event ID, Instrument Mapping과 DQ Metric.
-- Tick/Quote Hypertable과 1분 Bar.
-- Redis 최신 Snapshot과 `market-api`.
-- Parquet Archive + Manifest.
+  - **완료** 멱등 Event ID — `build_source_event_id()`가 provider·symbol·`event_time`(UTC 정규화)·
+    payload identity로 결정론적 해시를 만들고, 적재는 마이그레이션의
+    `primary key (event_time, source_event_id)`에 `on conflict do nothing`으로 붙는다.
+    재적재 건수를 `WriteResult.duplicates`로 세어 돌려주므로 중복과 Gap을 구분할 수 있다.
+  - **미착수** Instrument Mapping (`reference.instrument_symbols` 조회 계층).
+  - **부분** DQ Metric — `find_sequence_gaps()`와 `Snapshot.freshness`/`quality_flags`가 있다.
+    Shard Heartbeat, Event Rate, Timescale↔Parquet Row Count 비교는 미착수다.
+- **완료** Tick/Quote Hypertable과 1분 Bar. 위 J0 항목의 마이그레이션 적용에 포함된다.
+- **미착수** Redis 최신 Snapshot과 `market-api`.
+  `Snapshot` 계약과 Repository 조회(`get_snapshot`)까지는 있고 Redis·HTTP 계층이 없다.
+- **미착수** Parquet Archive + Manifest.
+
+또한 J1 기반으로 수집 Source Registry를 추가했다 —
+`departments/01-research/collectors/source_registry.py`. 3.1/3.2의 Source를 선언적으로
+등록하고 API Key 확보 상태에 따라 `AVAILABLE`/`KEY_MISSING`/`NOT_CONTRACTED`를 판정한다.
+사용 불가 Source 호출은 예외이며(빈 결과를 정상으로 취급하지 않는다) 3.3의 라이선스
+금지 사항은 `UseScope`로 강제한다. Source 추가는 `SOURCES`에 한 줄 등록 + `Collector`
+Protocol 구현으로 끝난다.
+
+2026-07-30 기준 판정: `AVAILABLE` 4개(LS WS/REST, Open DART, Tavily),
+`KEY_MISSING` 6개(KRX, BIGKinds, NAVER, ECOS, KOSIS, FRED),
+`NOT_CONTRACTED` 3개(KIND, 공매도·대차, Consensus).
+**P0 Blocked Domain은 `CALENDAR`, `NEWS`, `MACRO`** — 키를 받기 전까지 이 세 Domain은
+수집하지 않는다. 휴장·장 구간을 추정으로 채우지 않는다.
 
 완료 기준:
 
-- 장중 재접속 후 중복·Gap을 식별한다.
-- 특정 종목·시간 구간을 Parquet로 재현한다.
-- 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
+- **부분** 장중 재접속 후 중복·Gap을 식별한다. 멱등 적재와 Sequence Gap 조회는 되지만
+  실제 LS WebSocket 재접속 경로가 없어 장중 검증은 하지 못했다.
+- **미착수** 특정 종목·시간 구간을 Parquet로 재현한다.
+- **미착수** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
 
 ### Sprint J2: DART와 Research Metadata
 
@@ -484,16 +530,30 @@ Quant:
 
 ## 11. 완료 Definition of Done
 
+> 2026-07-30 기준. 부분 달성은 체크하지 않고 남은 조건을 적는다 — 체크박스를 미리
+> 채우면 무엇이 실제로 검증됐는지 알 수 없게 된다.
+
 - [ ] LS Tick/Quote가 멱등하게 TimescaleDB에 적재된다.
+      → 멱등 적재 자체는 완료(`build_source_event_id` + `on conflict do nothing`, 두 Repository
+      구현이 재적재를 전부 `duplicates`로 셈). **LS WebSocket 수집기가 없어서** 아직 LS Tick이
+      아니라 Fixture 로만 검증됐다.
 - [ ] Raw Market Data가 검증된 Parquet로 Archive된다.
-- [ ] Supabase에는 Reference/Research/Quant Metadata만 저장된다.
+- [x] Supabase에는 Reference/Research/Quant Metadata만 저장된다.
+      → `supabase/migrations/`에 Tick/Quote 등 Raw 시계열 Table 생성 구문이 없음을 확인했다.
 - [ ] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
 - [ ] 뉴스 중복과 라이선스 Scope를 관리한다.
+      → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily는 탐색 전용,
+      BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). **중복 제거와 Story Cluster는
+      미착수**이며 뉴스 P0 Source(BIGKinds/NAVER) 키가 아직 없다.
 - [ ] Backtest가 PIT Dataset Manifest로 재현된다.
 - [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
 - [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
+      → DB 쪽 최소권한은 준비됨(`market_reader`/`market_writer`, `public`은 스키마 usage 없음).
+      **`market-api`가 없어서** 다른 본부가 읽을 경로 자체가 아직 없다.
 - [ ] AI Office가 집계 Market Health와 Research·Strategy Read Model을 조회하며 Tick 원문과 TimescaleDB Credential을 받지 않는다.
 - [ ] Agent와 Notebook에 Production DB/Vendor Secret이 노출되지 않는다.
+      → `TIMESCALE_DATABASE_URL`은 `.env`(gitignore)에만 있고 Hermes Profile에 복사하지 않았다.
+      Notebook 권한 분리와 Agent Container 정책은 미착수다.
 - [ ] Backup에서 거래일 하나를 복구해 Replay할 수 있다.
 
 ---
