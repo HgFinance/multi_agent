@@ -311,7 +311,7 @@ function LiveView({
     <>
       <header className="live-hero">
         <div>
-          <p className="eyebrow">LIVE OFFICE · 32 AI STAFF · REAL-TIME</p>
+          <p className="eyebrow">LIVE OFFICE · {STAFF.length} AI STAFF · REAL-TIME</p>
           <h1>
             {COMPANY.titlePrefix} <em className="highlight">{COMPANY.titleAccent}</em>
           </h1>
