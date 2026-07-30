@@ -21,24 +21,24 @@ P0가 모두 동작하기 전 P2 기능을 구현하지 않는다.
 
 | ID | 기능 | 핵심 결과 |
 |---|---|---|
-| F01 | 사용자 Mandate | 자본과 Risk 한도 저장·검증 |
-| F02 | Instrument Universe | 거래 가능 전 종목 유지 |
-| F03 | Market WebSocket | 실시간 시세 수신과 재연결 |
-| F04 | Event 정규화 | 공급자 Payload를 공통 Schema로 변환 |
-| F05 | Feature Engine | 전 종목 특징과 Snapshot 계산 |
-| F06 | Event Priority | Agent가 분석할 종목 선별 |
-| F07 | Point-in-Time RAG | 승인 문서를 판단 시점 기준으로 검색 |
-| F08 | Investment Agent | 근거 있는 구조화 판단 생성 |
-| F09 | Strategy/Capability Registry | 전략 상태, Version과 환경별 실행 가능 여부 관리 |
-| F10 | Backtest | 전략 성과와 Risk Metric 계산 |
-| F11 | Signal/Target Portfolio | 단일 Position, Pair와 Basket 목표·주문 의도 생성 |
-| F12 | Risk Engine | 주문 승인·축소·거절 |
-| F13 | Paper Broker | 주문 접수와 모의 체결 |
-| F14 | OMS | 주문 상태와 멱등성 관리 |
-| F15 | Portfolio/PnL | Cash, Position과 성과 계산 |
-| F16 | Audit/Replay | 판단부터 체결까지 추적·재현 |
-| F17 | Operator Control | Entry Block, Pause와 Kill Switch |
-| F18 | Dashboard | 시장·전략·주문·위험 상태 조회 |
+| F01 | 사용자 Mandate | 자본과 Risk 한도 저장·검증 (ceo-agent) |
+| F02 | Instrument Universe | 거래 가능 전 종목 유지 (research-department) |
+| F03 | Market WebSocket | 실시간 시세 수신과 재연결 (research-department) |
+| F04 | Event 정규화 | 공급자 Payload를 공통 Schema로 변환 (research-department) |
+| F05 | Feature Engine | 전 종목 특징과 Snapshot 계산 (research-department) |
+| F06 | Event Priority | Agent가 분석할 종목 선별 (research-department) |
+| F07 | Point-in-Time RAG | 승인 문서를 판단 시점 기준으로 검색 (research-department, compliance 코퍼스는 risk-management) |
+| F08 | Investment Agent | 근거 있는 구조화 판단 생성 (research-department) |
+| F09 | Strategy/Capability Registry | 전략 상태, Version과 환경별 실행 가능 여부 관리 (quant-backtest-department) |
+| F10 | Backtest | 전략 성과와 Risk Metric 계산 (quant-backtest-department) |
+| F11 | Signal/Target Portfolio | 단일 Position, Pair와 Basket 목표·주문 의도 생성 (Signal은 quant-backtest-department, OrderIntent 변환은 trading-department) |
+| F12 | Risk Engine | 주문 승인·축소·거절 (risk-management) |
+| F13 | Paper Broker | 주문 접수와 모의 체결 (trading-department) |
+| F14 | OMS | 주문 상태와 멱등성 관리 (trading-department) |
+| F15 | Portfolio/PnL | Cash, Position과 성과 계산 (accounting-portfolio-department) |
+| F16 | Audit/Replay | 판단부터 체결까지 추적·재현 (qa-department) |
+| F17 | Operator Control | Entry Block, Pause와 Kill Switch (risk-management) |
+| F18 | Dashboard | 시장·전략·주문·위험 상태 조회 (공통 — Frontend Framework 미정, 본부별 조회 API는 각 소유 본부) |
 
 ## 3. P0 기능 명세
 
