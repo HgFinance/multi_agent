@@ -49,9 +49,17 @@
 | 실시간 구독 계획 | `departments/01-research/collectors/subscription_plan.py` | — (신규, Sprint J1) |
 | 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
 | LS REST Client | `departments/01-research/collectors/ls_client.py` | — (신규, Sprint J1) |
+| LS 실시간 정규화 Adapter | `departments/01-research/collectors/ls_realtime_adapter.py` | — (신규, Sprint J1 / F04) |
+| 거래 Calendar 수집기 | `departments/01-research/collectors/calendar_collector.py` | — (신규, Sprint J1) |
+| 시장 상태 수집기 | `departments/01-research/collectors/market_breadth_collector.py` | — (신규, Sprint J1) |
 | Reference Repository | `departments/01-research/repository/reference_repository.py` | — (신규, Sprint J1) |
+| 공시 수집기 | `departments/01-research/collectors/opendart_collector.py` | — (신규, Sprint J2) |
+| 재무 수집기 | `departments/01-research/collectors/opendart_financial.py` | — (신규, Sprint J2) |
+| Corporate Action 수집기 | `departments/01-research/collectors/corporate_action_collector.py` | — (신규, Sprint J2) |
+| 거시경제 수집기 | `departments/01-research/collectors/macro_collector.py` | — (신규, Sprint J2) |
 | 로컬 시계열 DB 구성 | `docker-compose.yml`, `timescaledb/local-dev/` | — (신규, 로컬 개발 전용) |
 | 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
+| 해외 뉴스 수집기 (P1) | `departments/01-research/collectors/alpaca_news_collector.py` | — (신규, Sprint J3 선행) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -520,6 +528,43 @@ Quant:
 관측됐다 — 임시휴장인지 데이터 공백인지 현재 Source로 판별할 수 없다.** 교차 검증
 Source가 필요한 지점이다.
 
+**⚠ 역산 방식의 구조적 한계 (2026-07-31 확인)** — 일봉 관측 역산이므로 **당일과 미래
+날짜를 원리상 채울 수 없다.** 거래가 일어난 뒤에야 그 날이 거래일이었음을 알 수 있다.
+따라서 장 시작 전에 "오늘이 거래일인가"를 Calendar에 물으면 항상 행이 없다. 아래
+시장 상태 수집기가 이 때문에 세션 판정을 날짜가 아니라 **세션 기준**으로 한다.
+근본 해결은 Calendar를 관측이 아니라 **선언적으로**(공휴일 규칙 + KRX 휴장일 공고)
+채우는 것이고, 이는 KRX 서비스 이용 승인 또는 별도 Source가 선행이다.
+
+**시장 상태 / Breadth (P0)** — `departments/01-research/collectors/market_breadth_collector.py`.
+KRX 지수 API 5종(`krx_dd_trd`, `kospi_dd_trd`, `kosdaq_dd_trd`, `bon_dd_trd`,
+`drvprod_dd_trd`)이 등락종목수를 주지만 **승인 경로와 샘플 경로(`/svc/sample/apis/...`)
+둘 다 401**이다(실측 2026-07-31). 그래서 LS `t1511`(업종현재가)이 유일한 경로다.
+업종코드는 `t8424`(전체업종)로 확인하며 종합지수는 코스피 `001`, 코스닥 `301`이다
+(gubun1=1 → 58개, 2 → 32개).
+
+`market.market_breadth`에 `advancers`/`decliners`/`unchanged`/`total_value`를 넣는다.
+**t1511이 주지 않는 `new_highs`/`new_lows`/`up_volume`/`down_volume`은 NULL로 둔다** —
+0으로 채우면 "신고가 종목이 없었다"는 거짓이 된다. `universe_version_id`도 NULL이다
+(거래소가 상장 전체로 계산한 값이라 우리 구독 Universe와 무관하다).
+
+**event_time 규칙** — t1511 응답에 서버 시각이 없어 관측에서 유도한다. 장중은 관측
+시각(초 절삭), 폐장 후·개장 전은 해당 세션의 **폐장 시각으로 고정**한다. 그래야 같은
+종가 상태를 여러 번 수집해도 PK `(event_time, market, source)` 충돌로 1행만 남는다.
+유도 근거는 `values.event_time_origin`에 남긴다. Calendar에 오늘이 없고 **이미 개장
+시각을 지난** 경우는 오늘 장중인지 휴장인지 응답만으로 구분할 수 없어 **수집을 거부**한다.
+
+**실측 (2026-07-30 종가 기준)**: KOSPI 5,593.56(−1.23%) 상승 605 / 하락 278 / 보합 58,
+KOSDAQ 644.78(−2.70%) 상승 728 / 하락 938 / 보합 151. 등락종목수 합이
+`reference.instruments`의 상장 보통주 수와 **0.4% 이내로 일치**(941/945, 1817/1821)해
+독립 Source 두 개가 서로를 검증한다 — 이 비율을 `coverage_ratio` DQ로 상시 확인한다.
+거래대금 `value`는 t1511 문서에 단위 표기가 없지만 LS 타 TR이 일관되게
+"거래대금(백만)"으로 적고 규모도 맞아 원 단위로 환산하되 **원본을 `total_value_raw`에
+보존**한다.
+
+**`market_breadth.market`은 `KOSPI`/`KOSDAQ`이다.** `reference.instruments`가
+`market='KRX'` / `venue='KOSPI'`를 쓰는 것과 층위가 다르다 — Breadth Table에 venue
+Column이 없고 Breadth는 지수 단위로만 의미가 있기 때문이다. 조인할 때 주의한다.
+
 **이 방법의 한계 (숨기지 않고 기록한다)**
 1. **미래 거래일을 알 수 없다.** 관측은 과거만 준다. 만기·정산일 계산이 필요해지면 별도
    Source가 필요하고 그때까지 fail-closed로 막는다. 관측 없는 구간을 요청하면 "거래일 0일"
@@ -674,9 +719,58 @@ API(2019003)나 별도 Source가 필요하다.
 
 ### Sprint J3: News/RAG
 
-- Provider Adapter, License Registry와 Raw 권한.
-- Exact/Near Duplicate, Story Cluster와 Entity Resolution.
-- Chunk, Embedding, Citation와 Retraction 전파.
+- **부분** Provider Adapter, License Registry와 Raw 권한.
+  License Registry는 `UseScope`로 Source별 허용 용도를 강제한다. Provider Adapter는
+  Tavily(P1 탐색 전용)와 Alpaca(P1 해외)가 있고 **국내 P0 Source는 아직 없다.**
+- **미착수** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
+- **미착수** Chunk, Embedding, Citation와 Retraction 전파.
+
+**뉴스 WebSocket API 5종 조사 (2026-07-31)** — Polygon.io(현 Massive), finlight.me,
+Finnhub, Alpha Vantage, Alpaca를 ①KRX 커버리지 ②저장·임베딩 권리 ③무료 플랜 실체
+④도입 비용 순으로 평가했다. **5종 모두 국내 P0 뉴스를 대체하지 못한다.**
+
+| 서비스 | 무료 뉴스 WS | KRX 종목 | 한국어 | 본문 저장·임베딩 |
+|---|---|---|---|---|
+| Polygon(Massive) | 없음(뉴스 WS 자체가 부재, REST뿐) | *"only support US markets"* | 없음 | ToS §5(d) non-display 금지 |
+| finlight.me | 무료는 REST 전용(WS는 Pro↑) | 불명 | 9개 언어에 포함 | 무료는 티커·엔티티도 제외 |
+| Finnhub | Premium 전용 | 심볼 `005930.KS` 존재 | 뉴스는 US·캐나다 한정 | Personal Use 라이선스 |
+| Alpha Vantage | 없음(문서에 websocket 0회) | MARKET_STATUS 14개 지역에 한국 없음 | 없음 | 본문 필드 자체가 없음 |
+| Alpaca | **있음** | exchange enum에 KRX 없음 | 없음 | *"personal and noncommercial"* |
+
+**구조적 결론** — 한국어를 커버하는 곳(Marketaux, finlight, APITube)은 무료 티어가 전부
+REST고, 뉴스 WebSocket을 가진 곳(Finnhub, Alpaca, EODHD)은 미국·영어권 전용이거나 유료
+게이트 뒤다. WebSocket은 지속 연결이라 리소스 집약적이어서 모든 벤더가 예외 없이 과금한다.
+**(KRX ∧ 한국어 ∧ 무료 ∧ WebSocket)의 교집합은 과금 모델상 구조적으로 비어 있다.**
+국내 뉴스는 3.1이 정한 정규 경로(BIGKinds / NAVER / 계약 Vendor)로만 해결된다.
+
+**Alpaca를 P1 / `FOREIGN_MARKET`으로 도입** (재일님 결정 2026-07-31) —
+`departments/01-research/collectors/alpaca_news_collector.py`. 무료 플랜에 뉴스
+WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 후보였다.
+경계를 셋 둔다.
+
+1. **P0 NEWS Blocked를 풀지 못한다.** Registry의 Scope Gate가 막는다(아래).
+2. **본문을 저장하지 않는다.** `allowed_uses`가 `SEARCH_ONLY`뿐이라 REST 호출에
+   `include_content`를 보내지 않고 정규화 계약(`NewsRecord`)에 `content` 필드가 없다.
+   본문 저장·Embedding 승격은 Data Steward 판단이며 상업 계약이 선행이다.
+3. **심볼을 instrument로 연결하지 않는다.** `research.document_instruments.instrument_id`가
+   `reference.instruments` FK인데 미국 심볼이 거기 없다. 없는 종목을 만들지 않고
+   **미해결 심볼 수를 세어 보고**한다. Instrument Master의 미국 확장은 ADR 사안이다.
+
+`published_at`은 `created_at`이다 — `updated_at`을 쓰면 기사가 수정될 때마다 과거 시점
+판단의 근거 시각이 미래로 움직여 PIT 재현이 깨진다(4.2).
+
+**Source Registry에 `MarketScope` 축 추가 (2026-07-31)** — 조사 중 실재하는 구멍을
+발견했다. `SourceSpec`에 `domains`는 있어도 **어느 시장을 덮는지가 없어서**, 미국 전용
+뉴스 Source를 P0 NEWS로 한 줄 등록하면 한국 종목 뉴스가 0건인데도
+`blocked_p0_domains()`가 NEWS Blocked를 해제했다. 그러면 "데이터 장애 시 신규 진입 자동
+차단"(CORE_PLAN 성공 조건)이 조용히 무너진다.
+
+`MarketScope`(`KR_MARKET` / `MACRO_BACKGROUND` / `FOREIGN_MARKET`)를 필수 필드로 넣고
+`IN_SCOPE_FOR_P0`에 드는 Source만 Blocked 해제 자격을 갖게 했다. 기본값을 두지 않아
+새 Source 추가 시 반드시 선언하게 강제한다. FRED가 미국 지표인데도 범위 안인 이유는
+특정 종목이 아니라 배경 변수(`MACRO_BACKGROUND`)이기 때문이다 — 시장 범위 확장이 아니다.
+이는 `subscription_plan.py`가 LS 해외 TR을 `ScopeNotApproved`로 막는 것과 같은 기준이며,
+**두 계층의 방어 수준이 달라서는 안 된다**는 것이 이 변경의 요지다.
 
 ### Sprint J4: Quant Factory
 
@@ -713,9 +807,11 @@ API(2019003)나 별도 Source가 필요하다.
       → `supabase/migrations/`에 Tick/Quote 등 Raw 시계열 Table 생성 구문이 없음을 확인했다.
 - [ ] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
 - [ ] 뉴스 중복과 라이선스 Scope를 관리한다.
-      → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily는 탐색 전용,
-      BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). **중복 제거와 Story Cluster는
-      미착수**이며 뉴스 P0 Source(BIGKinds/NAVER) 키가 아직 없다.
+      → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily·Alpaca는 탐색
+      전용, BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). 여기에 `MarketScope`를
+      더해 범위 밖 Source가 P0 Blocked를 풀지 못하게 했다(2026-07-31). **중복 제거와 Story
+      Cluster는 미착수**이며 뉴스 P0 Source(BIGKinds/NAVER) 키가 아직 없다 — 5종 조사 결과
+      해외 무료 API로는 대체 불가로 확인됐다(9절 Sprint J3).
 - [ ] Backtest가 PIT Dataset Manifest로 재현된다.
 - [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
 - [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.

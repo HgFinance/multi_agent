@@ -305,6 +305,63 @@ class TimescaleMarketRepository(MarketDataRepository):
             "market.market_quotes", self._QUOTE_COLUMNS, [q.to_row() for q in quotes]
         )
 
+    # market.market_breadth 의 Column 순서. Tick/Quote 와 달리 ABC 에 올리지 않는다 -
+    # ABC 는 실시간 Tick/Quote 계약이고 InMemory 구현은 그 계약의 대조군이다. 시장
+    # Breadth 는 REST Snapshot 이라 성격이 다르므로 Timescale 구현에만 둔다.
+    _BREADTH_COLUMNS = (
+        "event_time", "observed_at", "market", "universe_version_id",
+        "advancers", "decliners", "unchanged", "new_highs", "new_lows",
+        "up_volume", "down_volume", "total_value", "values", "source", "quality_status",
+    )
+
+    def write_market_breadth(self, rows: list[dict]) -> WriteResult:
+        """시장 Breadth Snapshot 을 적재한다. PK 는 (event_time, market, source) 다.
+
+        같은 폐장 Snapshot 을 여러 번 수집해도 event_time 이 폐장 시각으로 고정되므로
+        두 번째부터는 conflict 로 걸러진다(수집기 쪽 event_time 규칙 참고).
+        """
+        if not rows:
+            return WriteResult(0, 0, 0)
+
+        import json as _json
+
+        values = []
+        for r in rows:
+            missing = set(self._BREADTH_COLUMNS) - set(r)
+            if missing:
+                raise ValueError(f"market_breadth: Column 누락 {sorted(missing)}")
+            extra = set(r) - set(self._BREADTH_COLUMNS)
+            if extra:
+                raise ValueError(f"market_breadth: 계약 밖 Column {sorted(extra)}")
+            values.append(
+                tuple(
+                    _json.dumps(r[c], ensure_ascii=False) if c == "values" else r[c]
+                    for c in self._BREADTH_COLUMNS
+                )
+            )
+
+        sql = (
+            f"insert into market.market_breadth ({', '.join(self._BREADTH_COLUMNS)}) values %s "
+            f"on conflict (event_time, market, source) do nothing "
+            f"returning 1"
+        )
+        with self._conn.cursor() as cur:
+            # _insert 와 같은 이유로 fetch=True 다.
+            returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
+            inserted = len(returned)
+        self._conn.commit()
+        return WriteResult(len(rows), inserted, len(rows) - inserted)
+
+    def count_market_breadth(self, market: str | None = None) -> int:
+        with self._conn.cursor() as cur:
+            if market is None:
+                cur.execute("select count(*) from market.market_breadth")
+            else:
+                cur.execute(
+                    "select count(*) from market.market_breadth where market = %s", (market,)
+                )
+            return int(cur.fetchone()[0])
+
     def get_snapshot(self, instrument_id: UUID, *, now: datetime | None = None) -> Snapshot | None:
         now = now or datetime.now(timezone.utc)
         with self._conn.cursor() as cur:

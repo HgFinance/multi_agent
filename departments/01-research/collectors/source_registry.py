@@ -102,6 +102,37 @@ class SourceDomain(StrEnum):
     IR = "IR"
 
 
+class MarketScope(StrEnum):
+    """Source 가 실제로 덮는 시장. Domain 과 별개 축이다.
+
+    ▶ 왜 필요한가 (2026-07-31 추가)
+      Domain 만으로 판정하면 **미국 전용 뉴스 Source 를 P0 NEWS 로 한 줄 등록하는
+      순간 한국 종목 뉴스가 0건인데도 NEWS Blocked 가 풀린다.** 그러면 "데이터
+      장애 시 신규 진입이 자동 차단된다"(HEDGE_FUND_CORE_PLAN.md 성공 조건)는 방어가
+      조용히 무너진다. 뉴스 API 5종 조사(2026-07-31)에서 실재하는 구멍으로 확인됐다.
+
+      subscription_plan 의 approved_scopes Gate 가 구독 계획 계층에서 하던 방어를
+      Source Registry 계층에도 둔다 - 두 계층의 방어 수준이 달라서는 안 된다.
+
+    KR_MARKET        - 한국 시장의 종목·기업을 대상으로 하는 데이터. CORE_PLAN 3.1 의 대상.
+    MACRO_BACKGROUND - 특정 종목이 아닌 거시 변수. 시장 범위 확장이 아니라 배경이므로
+                       미국 지표(FRED)라도 범위 안이다.
+    FOREIGN_MARKET   - 해외 개별종목·거래소 대상. 범위 밖이며 ADR 없이는 P0 가 될 수 없다.
+                       (subscription_plan 이 LS 해외 TR 을 ScopeNotApproved 로 막는 것과 같은 기준)
+    """
+
+    KR_MARKET = "KR_MARKET"
+    MACRO_BACKGROUND = "MACRO_BACKGROUND"
+    FOREIGN_MARKET = "FOREIGN_MARKET"
+
+
+# P0 Domain 을 채운 것으로 인정되는 Scope. 여기 없는 Scope 만 가진 Source 는
+# 아무리 AVAILABLE 이어도 그 Domain 의 Blocked 를 풀지 못한다.
+IN_SCOPE_FOR_P0: frozenset[MarketScope] = frozenset(
+    {MarketScope.KR_MARKET, MarketScope.MACRO_BACKGROUND}
+)
+
+
 class SourceStatus(StrEnum):
     """Source 사용 가능 여부. 판정은 오직 Registry 가 한다.
 
@@ -153,6 +184,10 @@ class SourceSpec(BaseModel):
     domains: tuple[SourceDomain, ...] = Field(min_length=1)
     tier: SourceTier
 
+    # 이 Source 가 실제로 덮는 시장. 기본값을 두지 않는다 - 기본값이 있으면 범위 밖
+    # Source 를 추가할 때 아무도 이 필드를 안 보고 지나간다.
+    market_scopes: tuple[MarketScope, ...] = Field(min_length=1)
+
     # 이 Source 를 쓰기 위해 반드시 있어야 하는 환경변수. 하나라도 비면 KEY_MISSING 이다.
     required_env: tuple[str, ...] = ()
     # 없어도 동작하지만 있으면 기능이 늘어나는 것. 상태 판정에 넣지 않는다.
@@ -184,6 +219,9 @@ class SourceSpec(BaseModel):
 SOURCES: tuple[SourceSpec, ...] = (
     SourceSpec(
         source_id="ls_openapi_ws",
+        # LS 는 해외 TR 도 갖고 있지만 우리가 승인받은 범위는 국내다. subscription_plan
+        # 의 ScopeNotApproved Gate 와 같은 기준으로 국내만 선언한다.
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="LS증권 Open API WebSocket",
         domains=(SourceDomain.REALTIME_PRICE, SourceDomain.REALTIME_QUOTE, SourceDomain.MARKET_STATE),
         tier=SourceTier.P0,
@@ -201,6 +239,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="ls_openapi_rest",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="LS증권 Open API REST",
         domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE),
         tier=SourceTier.P0,
@@ -213,6 +252,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="opendart",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="Open DART",
         domains=(
             SourceDomain.DISCLOSURE,
@@ -241,6 +281,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="krx_openapi",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="KRX Data Marketplace Open API",
         domains=(
             SourceDomain.CALENDAR,
@@ -258,6 +299,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="bigkinds",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="BIGKinds",
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P0,
@@ -272,6 +314,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="naver_apihub",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="NAVER API HUB",
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P0,
@@ -284,6 +327,9 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="tavily",
+        # 한국어 쿼리가 되므로 국내 범위다. 미국 전용 뉴스 API 들과 갈리는 지점이다
+        # (2026-07-31 조사: Polygon/Finnhub/AlphaVantage/Alpaca 는 전부 FOREIGN_MARKET).
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="Tavily Search",
         domains=(SourceDomain.NEWS,),
         # 가이드 3.1의 뉴스 Source 는 BIGKinds/NAVER/계약 Vendor 다. Tavily 는
@@ -300,7 +346,35 @@ SOURCES: tuple[SourceSpec, ...] = (
         ),
     ),
     SourceSpec(
+        source_id="alpaca_news",
+        display_name="Alpaca Market News (Benzinga)",
+        domains=(SourceDomain.NEWS,),
+        # ▶ 왜 P1 / FOREIGN_MARKET 인가 (재일님 지시 2026-07-31로 도입, 범위는 정직하게)
+        #   2026-07-31 뉴스 API 5종 조사에서 '무료 + 뉴스 WebSocket' 을 동시에 만족하는
+        #   유일한 곳이었다(Finnhub 는 Premium, Polygon·AlphaVantage 는 WS 자체가 없음).
+        #   다만 Get Assets 의 exchange enum 이 AMEX/ARCA/BATS/NYSE/NASDAQ/NYSEARCA/OTC/
+        #   CRYPTO 뿐이라 KRX 종목은 조회되지 않는다. 그래서 국내 P0 NEWS 를 대체하지
+        #   못하며, P0 로 올리면 BIGKinds/NAVER 없이 NEWS Blocked 가 거짓으로 풀린다.
+        tier=SourceTier.P1,
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        required_env=("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"),
+        optional_env=("ALPACA_NEWS_WS_URL", "ALPACA_DATA_BASE_URL"),
+        # 약관이 "personal and noncommercial access and use" 이고 "encoded" 를 금지
+        # 행위로 열거한다. 본문 저장·Embedding·재배포는 상업 계약 없이는 부여하지
+        # 않는다(가이드 3.3). 승격은 Data Steward 판단이며 이 파일이 대신하지 않는다.
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        raw_bucket=None,
+        normalized_target="research.documents (제목·URL·시각만)",
+        doc_ref="docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md 3.2, 5.4",
+        note=(
+            "미국 종목 전용. KRX 미커버라 국내 P0 를 대체하지 않는다. 심볼이 "
+            "reference.instruments 에 없으므로 document_instruments 연결이 불가하며 "
+            "미해결 심볼은 날조하지 않고 카운트만 한다. 본문 저장은 라이선스 확보 후"
+        ),
+    ),
+    SourceSpec(
         source_id="ecos",
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
         display_name="한국은행 ECOS",
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
@@ -313,6 +387,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="kosis",
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
         display_name="KOSIS Open API",
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
@@ -324,6 +399,8 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="fred",
+        # 미국 지표지만 특정 종목이 아니라 배경 변수다. 시장 범위 확장이 아니다.
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
         display_name="FRED / ALFRED",
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
@@ -336,6 +413,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="kind",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="KRX KIND",
         domains=(SourceDomain.IR, SourceDomain.DISCLOSURE),
         tier=SourceTier.P1,
@@ -347,6 +425,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     # --- 가이드 3.2 P1 후보. 계약 전이므로 NOT_CONTRACTED 로 남긴다 ---
     SourceSpec(
         source_id="short_interest",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="공매도·대차·대주",
         domains=(SourceDomain.MARKET_STATE,),
         tier=SourceTier.P1,
@@ -356,6 +435,7 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="consensus",
+        market_scopes=(MarketScope.KR_MARKET,),
         display_name="Consensus·실적 추정치",
         domains=(SourceDomain.FINANCIAL,),
         tier=SourceTier.P1,
@@ -378,7 +458,9 @@ NOT_AUTHORIZED_OBSERVED: dict[str, str] = {
         "2026-07-30 실측: 헤더 AUTH_KEY 로 https://data-dbg.krx.co.kr/svc/apis/sto/"
         "stk_bydd_trd 호출 시 401 'Unauthorized API Call'. 키는 인식되나(잘못된 헤더는 "
         "'Unauthorized Key' 로 다르게 응답) 서비스 이용 승인이 없다. "
-        "openapi.krx.co.kr 에서 사용할 서비스별로 'API 활용 신청' 후 관리자 승인 필요"
+        "openapi.krx.co.kr 에서 사용할 서비스별로 'API 활용 신청' 후 관리자 승인 필요. "
+        "2026-07-31 추가 실측: /svc/sample/apis/{category}/{api_id} 샘플 경로도 401 이다 - "
+        "승인 없이 우회할 경로는 없다"
     ),
 }
 
@@ -480,13 +562,30 @@ class SourceRegistry:
 
         Domain 하나에 P0 Source 가 여러 개면(예: INSTRUMENT_MASTER 는 LS + KRX)
         하나만 살아 있어도 Blocked 가 아니다.
+
+        ▶ Scope 를 함께 본다 (2026-07-31)
+          Domain 만 보면 **범위 밖 Source 하나로 Blocked 가 풀린다.** 예를 들어
+          미국 전용 뉴스 API 를 P0 NEWS 로 등록하면 한국 종목 뉴스가 0건인데도
+          NEWS 가 Blocked 에서 빠진다. IN_SCOPE_FOR_P0 에 드는 Scope 를 가진
+          Source 만 Blocked 해제 자격이 있다.
         """
         blocked = []
         for d in SourceDomain:
-            p0 = [s for s in self.by_domain(d) if s.tier is SourceTier.P0]
+            p0 = [
+                s for s in self.by_domain(d)
+                if s.tier is SourceTier.P0 and IN_SCOPE_FOR_P0.intersection(s.market_scopes)
+            ]
             if p0 and not any(self.is_available(s.source_id) for s in p0):
                 blocked.append(d)
         return tuple(blocked)
+
+    def out_of_scope_p0_sources(self) -> tuple[str, ...]:
+        """P0 인데 범위 밖 Scope 만 가진 Source. 등록 자체가 모순이므로 드러낸다."""
+        return tuple(
+            s.source_id
+            for s in self._specs.values()
+            if s.tier is SourceTier.P0 and not IN_SCOPE_FOR_P0.intersection(s.market_scopes)
+        )
 
     def report(self) -> str:
         """DQ Status 와 AI Office Market View 에 그대로 실을 수 있는 요약(가이드 6.3)."""
@@ -687,6 +786,50 @@ def _check_blocked_domains():
     print("  Blocked Domain        OK")
 
 
+def _check_scope_gate():
+    """범위 밖 Source 가 P0 Blocked 를 풀지 못하는지 (2026-07-31 뉴스 API 조사 결과).
+
+    Polygon/Finnhub/AlphaVantage/Alpaca 를 조사했을 때 넷 다 미국 전용이었다. 이런
+    Source 를 P0 NEWS 로 등록하면 한국 종목 뉴스가 0건인데 NEWS Blocked 가 풀린다.
+    그러면 '데이터 장애 시 신규 진입 자동 차단' 이 조용히 무너진다.
+    """
+    env_with_news = {**_FAKE_ENV, "FOREIGN_NEWS_API_KEY": "k"}
+
+    foreign = SourceSpec(
+        source_id="foreign_news_probe",
+        display_name="가상 해외 뉴스 API",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P0,
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        required_env=("FOREIGN_NEWS_API_KEY",),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        doc_ref="self-check",
+    )
+    r = SourceRegistry(env=env_with_news, specs=SOURCES + (foreign,))
+    assert r.status("foreign_news_probe") is SourceStatus.AVAILABLE, "전제가 깨졌다"
+    assert SourceDomain.NEWS in r.blocked_p0_domains(), (
+        "미국 전용 뉴스 Source 가 NEWS Blocked 를 풀었다 - Scope Gate 가 동작하지 않는다"
+    )
+    assert "foreign_news_probe" in r.out_of_scope_p0_sources()
+
+    # 같은 Source 가 국내 범위였다면 풀려야 한다(Gate 가 Scope 로만 판단하는지 확인)
+    domestic = foreign.model_copy(update={"market_scopes": (MarketScope.KR_MARKET,)})
+    r2 = SourceRegistry(env=env_with_news, specs=SOURCES + (domestic,))
+    assert SourceDomain.NEWS not in r2.blocked_p0_domains()
+    assert not r2.out_of_scope_p0_sources()
+
+    # 실제 카탈로그에는 범위 밖 P0 가 없어야 한다
+    assert not SourceRegistry(env=_FAKE_ENV).out_of_scope_p0_sources()
+    # market_scopes 는 기본값이 없다 - 새 Source 추가 시 반드시 선언하게 한다
+    try:
+        SourceSpec(source_id="no_scope", display_name="x", domains=(SourceDomain.NEWS,),
+                   tier=SourceTier.P1, doc_ref="self-check")
+        raise AssertionError("market_scopes 없이 SourceSpec 이 만들어졌다")
+    except Exception as e:
+        assert "market_scopes" in str(e)
+    print("  Scope Gate            OK")
+
+
 def _check_rate_limit_not_invented():
     """한도를 추측해서 넣지 않았는지 확인한다(가이드 7절).
 
@@ -709,6 +852,7 @@ if __name__ == "__main__":
     _check_require_fails_closed()
     _check_license_scope()
     _check_blocked_domains()
+    _check_scope_gate()
     _check_rate_limit_not_invented()
     print("Registry 6개 영역 통과\n")
     print(SourceRegistry().report())

@@ -35,7 +35,7 @@ import json
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import UUID
@@ -484,6 +484,55 @@ class SupabaseReferenceRepository(ReferenceRepository):
         self._conn.commit()
         return after - before, len(rows) - (after - before), unlinked
 
+    def upsert_news_documents(
+        self, records: list, *, source_id: UUID
+    ) -> tuple[int, int]:
+        """뉴스 기사를 research.documents 에 적재한다. (신규, 갱신).
+
+        upsert_documents 와 나눈 이유 - 그쪽은 DART 전용이라 language 를 'ko' 로
+        고정하고 corp_code 로 issuer 를 붙인다. 뉴스는 언어가 Source 마다 다르고
+        발행사가 issuer 가 아니다.
+
+        **issuer_id 를 채우지 않는다.** 기사에 실린 심볼은 발행기업 식별자가 아니고,
+        해외 심볼은 reference.issuers 에 아예 없다. 없는 것을 추정해 붙이지 않는다.
+
+        본문(content)은 여기 넣지 않는다. document_versions/evidence_chunks 로 가야
+        하는데 그건 Source 의 allowed_uses 에 FULLTEXT_STORE 가 있어야 한다 -
+        호출자가 Registry.check_use 로 먼저 확인한다.
+        """
+        rows = [
+            (
+                source_id, r.external_id, r.document_type, r.canonical_url, r.title,
+                r.language, r.published_at, r.observed_at, r.status,
+            )
+            for r in records
+        ]
+        if not rows:
+            return 0, 0
+
+        before = self._count("research.documents")
+        with self._conn.cursor() as cur:
+            self._execute_values(
+                cur,
+                """
+                insert into research.documents
+                  (source_id, external_id, document_type, canonical_url, title, language,
+                   published_at, observed_at, status)
+                values %s
+                on conflict (source_id, external_id) do update set
+                  title = excluded.title,
+                  canonical_url = excluded.canonical_url,
+                  published_at = excluded.published_at,
+                  status = excluded.status,
+                  updated_at = now()
+                """,
+                rows,
+                page_size=500,
+            )
+        after = self._count("research.documents")
+        self._conn.commit()
+        return after - before, len(rows) - (after - before)
+
     def upsert_financial_facts(self, facts: list, *, source_id: UUID) -> tuple[int, int, int]:
         """research.financial_facts 에 적재한다. (신규, 갱신, issuer 미연결).
 
@@ -834,6 +883,76 @@ class SupabaseReferenceRepository(ReferenceRepository):
             )
         self._conn.commit()
         return version_id, len(rows), True
+
+    def market_session(
+        self, trade_date: date, *, market: str = MARKET_KRX, session_type: str = "REGULAR"
+    ) -> tuple[bool, datetime | None, datetime | None] | None:
+        """최신 Version 에서 그 날의 (거래일 여부, 개장, 폐장).
+
+        Calendar 에 그 날짜가 아예 없으면 None 이다. **None 을 '비거래일'로 바꾸지
+        않는다** - Calendar 가 아직 그 날까지 안 채워진 것과 실제 휴장은 다른 사실이고,
+        섞으면 수집기가 조용히 아무 것도 안 하게 된다(개발 원칙 9).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select s.is_trading_day, s.opens_at, s.closes_at
+                from reference.market_sessions s
+                where s.calendar_version_id = (
+                    select calendar_version_id from reference.market_calendar_versions
+                    where market = %s order by version desc limit 1
+                )
+                  and s.market = %s and s.trade_date = %s and s.session_type = %s
+                """,
+                (market, market, trade_date, session_type),
+            )
+            r = cur.fetchone()
+            return None if r is None else (bool(r[0]), r[1], r[2])
+
+    def recent_trading_sessions(
+        self,
+        *,
+        market: str = MARKET_KRX,
+        session_type: str = "REGULAR",
+        limit: int = 20,
+    ) -> list[tuple[date, datetime | None, datetime | None]]:
+        """최신 Version 의 거래일 세션을 최신순으로. 개장 시각 일관성 확인에도 쓴다.
+
+        Calendar 가 관측 역산이라 **당일과 미래 날짜는 들어 있지 않다.** 그래서
+        '오늘' 이 없을 때 직전 세션을 찾는 경로가 필요하다.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select s.trade_date, s.opens_at, s.closes_at
+                from reference.market_sessions s
+                where s.calendar_version_id = (
+                    select calendar_version_id from reference.market_calendar_versions
+                    where market = %s order by version desc limit 1
+                )
+                  and s.market = %s and s.session_type = %s and s.is_trading_day
+                order by s.trade_date desc
+                limit %s
+                """,
+                (market, market, session_type, limit),
+            )
+            return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+    def listed_counts(self, *, market: str = MARKET_KRX) -> dict[str, int]:
+        """venue 별 상장 보통주 수. Breadth 합계가 그럴듯한지 보는 교차검증용이다.
+
+        ETF/ETN 은 업종 등락종목수에 안 들어가므로 instrument_type='STOCK' 만 센다.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select venue, count(*) from reference.instruments
+                where market = %s and instrument_type = 'STOCK' and status = 'ACTIVE'
+                group by venue
+                """,
+                (market,),
+            )
+            return {str(v): int(n) for v, n in cur.fetchall()}
 
     def trading_days(self, market: str = MARKET_KRX) -> tuple[int, int]:
         """최신 Version 의 (거래일, 전체일). Calendar 적재 확인용이다."""
