@@ -29,14 +29,14 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
 
 - `improvements/` — **F19 승인형 Hermes 자기 개선** 앱 레이어 (agent_evolution_cycle).
   - `candidate.py` — `ImprovementCandidate` 계약. 근거·대상·예상효과·위험·롤백 대상을 갖춰야
-    하며 근거/롤백 없는 후보는 만들 수 없다. **스키마 격차**: `workforce.improvement_candidates`
-    테이블이 아직 없다 (배포 대상 `agent_profile_versions`, QA Eval `audit.eval_runs`만 존재). 이
-    계약대로 후속 마이그레이션에서 테이블을 만든다.
+    하며 근거/롤백 없는 후보는 만들 수 없다. 대응 테이블 `workforce.improvement_candidates`
+    (`supabase/migrations/20260730000600_...`)의 DDL check 제약과 동일 규칙을 강제한다.
   - `workflow.py` — 후보 생명주기 상태 머신 + **권한 분리 게이트**. 작성자는 자기 후보를 단독
     승인할 수 없고(자기승인 차단), 승인엔 독립 승인자 + QA Eval 근거가 필요하다. 모든 전이는 같은
-    `candidate_id`로 Append-only Event 에 기록(같은 ID 재현). Event Ledger 는 현재 In-Memory.
+    `candidate_id`로 Append-only Event(`workforce.improvement_candidate_events`)에 기록. Event
+    Ledger 실 구현(asyncpg)은 후속.
 
-미구현(후속): `workforce.improvement_candidates` 마이그레이션, Eval Runner/Shadow Router 실체
+미구현(후속): asyncpg Repository 로 위 두 테이블 연결, Eval Runner/Shadow Router 실체
 연결(QA·audit 소유), CEO 예산·조직 승인과 Scorecard 관찰의 실제 API 배선.
 
 ## 테스트

@@ -1,6 +1,6 @@
 # Database ERD
 
-> 전체 145개 Table을 한 그림에 넣지 않고 Domain Root와 실제 투자·주문 흐름을 중심으로 표시한다.
+> 전체 147개 Table을 한 그림에 넣지 않고 Domain Root와 실제 투자·주문 흐름을 중심으로 표시한다.
 
 ## 1. Domain 관계
 

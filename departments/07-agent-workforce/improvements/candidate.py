@@ -2,11 +2,12 @@
 # 근거: HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19(승인형 Hermes 자기 개선),
 #       TEAM_YOUNGJU_CEO_HR_GUIDE.md 6.5(조직 재귀적 자기 개선), HEDGE_FUND_MASTER_PLAN.md 5.10
 #
-# F19 "ImprovementCandidate" 의 Canonical 계약.
+# F19 "ImprovementCandidate" 의 Canonical 앱 레이어 계약.
 #
-# 현재 스키마 격차: supabase/migrations 에 workforce.improvement_candidates 테이블이 아직
-# 없다 (agent_profile_versions=배포 대상, audit.eval_runs=QA 평가만 존재). 이 파일이 개선
-# 후보의 앱 레이어 계약을 정의하고, 실제 테이블은 후속 마이그레이션에서 이 형태로 만든다.
+# 대응 테이블: workforce.improvement_candidates (+ improvement_candidate_events) —
+# supabase/migrations/20260730000600_workforce_improvement_candidates.sql. 이 Pydantic
+# 계약과 DDL check 제약(근거·롤백·상태 enum)은 동일 규칙을 강제한다. asyncpg Repository 로
+# 실제 테이블에 연결하는 것은 후속 작업.
 #
 # 원칙(CLAUDE.md 절대 깨면 안 되는 권한 분리, F19 완료조건):
 #   - 근거(evidence) 없는 후보는 만들 수 없다.
