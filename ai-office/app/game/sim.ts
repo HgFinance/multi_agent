@@ -353,8 +353,8 @@ export class Company {
   private *dayScript(): Generator<number | (() => boolean), void, void> {
     // ① 07:00 출근
     this.phaseIndex = 1;
-    this.pushLog("🚪", "07:00 자동 출근을 시작합니다. AI 직원 32명 입장!", "yellow");
     const workers = this.agents.filter((a) => a.rank !== "ceo");
+    this.pushLog("🚪", `07:00 자동 출근을 시작합니다. AI 직원 ${workers.length}명 입장!`, "yellow");
     this.lock(workers);
     for (const agent of workers) {
       this.enqueue(
