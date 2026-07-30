@@ -66,6 +66,9 @@ class IntentState(StrEnum):
     APPROVED = "APPROVED"
     RESIZED = "RESIZED"
     REJECTED = "REJECTED"
+    # Mandate 초과 시 사용자 승인 경로 (가이드 4.3 괄호).
+    USER_PENDING = "USER_PENDING"
+    USER_APPROVED = "USER_APPROVED"
     READY_TO_SUBMIT = "READY_TO_SUBMIT"
     EXPIRED = "EXPIRED"
 
@@ -359,14 +362,13 @@ class EventEnvelope(Base):
 
 
 # 허용 상태 전이. 최종 강제 지점은 Supabase의
-# supabase/migrations/20260729000400_execution_risk_accounting.sql -
-# execution.validate_order_state_transition() 트리거다.
-# 여기 있는 사본은 DB 왕복 없이 사전 검증하기 위한 것.
+# supabase/migrations/20260729000400_execution_risk_accounting.sql이다.
+#   BROKER_TRANSITIONS <- execution.validate_order_state_transition() 트리거
+#   INTENT_TRANSITIONS <- execution.order_intents.intent_status CHECK (값 집합만)
+# 여기 있는 사본은 DB 왕복 없이 사전 검증하기 위한 것이며 DB와 일치해야 한다.
 #
-# 현재 BROKER_TRANSITIONS와 그 트리거가 4개 간선에서 다르다. 정합 확인 전까지
-# **DB가 기준이다** - 여기서만 허용되는 전이는 COMMIT에서 거부된다.
-#   여기만 있음: CREATED->CANCEL_PENDING, PARTIALLY_FILLED->EXPIRED, UNKNOWN->EXPIRED
-#   DB만 있음:   CREATED->CANCELLED
+# intent_status는 DB에 전이 트리거가 없고 CHECK로 값 집합만 강제한다. 전이 규칙은
+# 아래 표가 유일한 정의이므로, DB에 트리거가 생기면 이 표를 원본으로 삼는다.
 #
 # v1.2에서 하나였던 표가 둘로 갈렸다. 두 표 사이에는 전이가 없다 - Intent가
 # READY_TO_SUBMIT에 도달하면 별도의 Broker Order를 만들 뿐, 상태가 이어지지 않는다.
@@ -384,19 +386,30 @@ INTENT_TRANSITIONS: frozenset[tuple[IntentState, IntentState]] = frozenset(
         (_I.APPROVED, _I.EXPIRED),
         (_I.RESIZED, _I.EXPIRED),
         (_I.READY_TO_SUBMIT, _I.EXPIRED),  # Risk 승인 만료 후 미전송
+        # Mandate 초과 경로. Risk가 승인해도 Mandate를 넘으면 사용자가 직접 승인해야 한다.
+        (_I.APPROVED, _I.USER_PENDING),
+        (_I.RESIZED, _I.USER_PENDING),
+        (_I.USER_PENDING, _I.USER_APPROVED),
+        (_I.USER_PENDING, _I.REJECTED),    # 사용자가 거부
+        (_I.USER_PENDING, _I.EXPIRED),     # 사용자가 응답하지 않음
+        (_I.USER_APPROVED, _I.READY_TO_SUBMIT),
+        (_I.USER_APPROVED, _I.EXPIRED),
     }
 )
 
-# ponytail: Mandate 초과 시의 USER_PENDING -> USER_APPROVED는 넣지 않았다(가이드 4.3 괄호).
-#           Mandate 초과 판정은 리스크본부 몫이고 그 계약이 아직 없다. RiskDecision에
-#           해당 verdict가 생기면 IntentState에 두 상태와 전이 4개를 추가한다.
+# ponytail: USER_PENDING으로 보내는 명령은 아직 없다. Mandate 초과 판정 주체는
+#           리스크본부인데 RiskDecision에 해당 verdict가 없다. 상태와 전이만 DB
+#           (order_intents.intent_status CHECK)와 맞춰뒀고, verdict가 생기면
+#           apply_risk_decision에 분기를 추가한다.
 
 _B = BrokerOrderState
 BROKER_TRANSITIONS: frozenset[tuple[BrokerOrderState, BrokerOrderState]] = frozenset(
     {
         (_B.CREATED, _B.SUBMITTED),
+        # 미전송 주문은 브로커가 모르므로 취소 확인을 기다릴 대상이 없다.
+        # CANCEL_PENDING을 거치지 않고 바로 종료된다.
+        (_B.CREATED, _B.CANCELLED),
         (_B.CREATED, _B.EXPIRED),
-        (_B.CREATED, _B.CANCEL_PENDING),
         (_B.SUBMITTED, _B.ACKNOWLEDGED),
         (_B.SUBMITTED, _B.REJECTED),        # Broker 거부
         (_B.SUBMITTED, _B.CANCEL_PENDING),
@@ -406,12 +419,11 @@ BROKER_TRANSITIONS: frozenset[tuple[BrokerOrderState, BrokerOrderState]] = froze
         (_B.ACKNOWLEDGED, _B.EXPIRED),
         (_B.ACKNOWLEDGED, _B.CANCEL_PENDING),
         (_B.ACKNOWLEDGED, _B.UNKNOWN),
+        # 같은 상태로의 전이는 DB 트리거가 no-op으로 통과시킨다(new.state = old.state).
         (_B.PARTIALLY_FILLED, _B.PARTIALLY_FILLED),
         (_B.PARTIALLY_FILLED, _B.FILLED),
+        # 부분체결 잔량은 EXPIRED로 못 간다. 잔량 소멸도 취소 확인을 거친다.
         (_B.PARTIALLY_FILLED, _B.CANCEL_PENDING),
-        # 가이드 4.3의 화살표 목록에 없지만 넣었다. DAY 주문이 부분체결 잔량을 남긴 채
-        # 장이 끝나면 갈 곳이 필요하다. 취소요청 없이 거래소가 잔량을 소멸시키는 경우다.
-        (_B.PARTIALLY_FILLED, _B.EXPIRED),
         (_B.PARTIALLY_FILLED, _B.UNKNOWN),
         # 취소 요청과 체결이 교차한다. 취소를 넣었다고 체결이 안 온다고 가정하지 않는다.
         (_B.CANCEL_PENDING, _B.CANCELLED),
@@ -424,7 +436,6 @@ BROKER_TRANSITIONS: frozenset[tuple[BrokerOrderState, BrokerOrderState]] = froze
         (_B.UNKNOWN, _B.FILLED),
         (_B.UNKNOWN, _B.CANCELLED),
         (_B.UNKNOWN, _B.REJECTED),
-        (_B.UNKNOWN, _B.EXPIRED),
     }
 )
 
@@ -569,12 +580,43 @@ if __name__ == "__main__":
     assert not can_transition(_B.SUBMITTED, _I.APPROVED), "Broker 상태가 Intent로 넘어갔다"
     assert not can_transition(_B.CREATED, _B.ACKNOWLEDGED), "전송 없이 접수됐다"
     assert not can_transition(_B.CREATED, _B.FILLED), "전송 없이 체결됐다"
-    # 취소는 반드시 CANCEL_PENDING을 거친다. 브로커 확인 없는 취소 확정 금지.
+    # 브로커에 나간 주문의 취소는 CANCEL_PENDING을 거친다. 확인 없는 취소 확정 금지.
     assert not can_transition(_B.ACKNOWLEDGED, _B.CANCELLED), "CANCEL_PENDING을 건너뛰었다"
     assert not can_transition(_B.PARTIALLY_FILLED, _B.CANCELLED), "CANCEL_PENDING을 건너뛰었다"
+    # 미전송 주문은 예외다. 브로커가 모르는 주문이라 기다릴 확인이 없다.
+    assert can_transition(_B.CREATED, _B.CANCELLED)
     assert can_transition(_B.CANCEL_PENDING, _B.FILLED), "취소 요청 중 체결을 못 받는다"
     assert _B.UNKNOWN not in BROKER_TERMINAL_STATES, "UNKNOWN을 종료 상태로 취급했다"
     for terminal in BROKER_TERMINAL_STATES:
         assert not any(f == terminal for f, _ in BROKER_TRANSITIONS), f"{terminal}에서 나가는 전이"
 
-    print("ok - 계약 7개 영역 점검 통과")
+    # 8. DB가 최종 강제 지점이다. 코드 표가 DB와 어긋나면 COMMIT에서 거부된다.
+    #    마이그레이션을 파싱해 두 정의가 실제로 같은지 확인한다.
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    migration = (root / "supabase" / "migrations"
+                 / "20260729000400_execution_risk_accounting.sql").read_text(encoding="utf-8")
+
+    db_edges = {
+        (frm, to)
+        for frm, tos in re.findall(
+            r"when '([A-Z_]+)' then new\.state in \(([^)]*)\)", migration
+        )
+        for to in re.findall(r"'([A-Z_]+)'", tos)
+    }
+    code_edges = {(str(f), str(t)) for f, t in BROKER_TRANSITIONS if f != t}
+    assert code_edges == db_edges, (
+        f"DB와 불일치 - 코드에만: {sorted(code_edges - db_edges)}, "
+        f"DB에만: {sorted(db_edges - code_edges)}"
+    )
+
+    db_intent_states = set(re.search(
+        r"intent_status in \(([^)]*)\)", migration
+    ).group(1).replace("'", "").replace(" ", "").split(","))
+    assert {str(s) for s in IntentState} == db_intent_states, (
+        f"IntentState 불일치: {sorted({str(s) for s in IntentState} ^ db_intent_states)}"
+    )
+
+    print("ok - 계약 8개 영역 점검 통과 (DB 전이표 정합 포함)")

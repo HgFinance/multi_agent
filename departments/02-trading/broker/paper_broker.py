@@ -152,16 +152,21 @@ class PaperBroker:
                            when or datetime.now(timezone.utc), {"leaves": str(leaves)})
 
     def expire(self, order, when: datetime | None = None) -> BrokerEvent | None:
-        """장 마감으로 DAY 주문 잔량이 소멸한다. 잔량이 없으면 None.
+        """장 마감으로 미체결 DAY 주문이 소멸한다. 소멸시킬 것이 없으면 None.
 
         취소와 다른 사건이다. 우리가 요청하지 않았고 CANCEL_PENDING도 거치지 않는다.
+
+        **한 건도 체결되지 않은 주문에만 쓴다.** 부분체결 주문의 잔량 소멸은 상태
+        머신에 EXPIRED 경로가 없다 - 취소 요청을 넣고 CANCELLED로 확정해야 한다
+        (execution.validate_order_state_transition()의 PARTIALLY_FILLED 분기).
+        일부가 체결된 주문을 EXPIRED로 덮으면 그 체결의 귀속이 사라진다.
 
         ponytail: 장 마감 시각을 여기서 판단하지 않는다. 호출자가 정한다.
                   거래소 캘린더(반장, 임시 휴장)는 시세를 가진 리서치본부 소관이고
                   market-api가 생기면 그쪽 영업일 정보로 스케줄링한다.
         """
         leaves = order.requested_quantity - order.filled_quantity
-        if leaves <= 0:
+        if leaves <= 0 or order.filled_quantity > 0:
             return None
         return BrokerEvent("expire", self._next_id("exp"),
                            when or datetime.now(timezone.utc),
@@ -277,15 +282,27 @@ if __name__ == "__main__":
     assert broker.cancel(order) is None, "전량 체결된 주문에 취소 이벤트가 생성됐다"
     assert broker.expire(order) is None, "전량 체결된 주문에 만료 이벤트가 생성됐다"
 
-    # 7. DAY 주문 잔량은 장 마감으로 소멸한다. 취소와 다른 사건이다
+    # 7. 미체결 DAY 주문은 장 마감으로 소멸한다. 취소와 다른 사건이다
     oms_e, order_e, _ = build(key="idem_p005")
     ev = broker.accept(order_e)
     oms_e.on_broker_event(order_e, "ack", ev.broker_event_id, now, ev.payload)
-    part = broker.try_fill(order_e, Quote(D("69900"), D("70000"), D("600"), D("600")))
-    oms_e.on_broker_event(order_e, "fill", part.broker_event_id, now, part.payload)
     exp = broker.expire(order_e, now + timedelta(hours=6))
-    assert exp is not None and exp.payload["leaves"] == "70"
+    assert exp is not None and exp.payload["leaves"] == "100"
     oms_e.on_broker_event(order_e, "expire", exp.broker_event_id, now + timedelta(hours=6), exp.payload)
-    assert order_e.state is BrokerOrderState.EXPIRED and order_e.filled_quantity == D("30")
+    assert order_e.state is BrokerOrderState.EXPIRED and order_e.filled_quantity == D("0")
 
-    print("ok - Paper Broker 7개 영역 점검 통과")
+    # 8. 부분체결 주문은 EXPIRED로 갈 수 없다. 잔량 소멸도 취소 경로로 확정한다
+    #    체결이 있는 주문을 EXPIRED로 덮으면 그 체결의 귀속이 사라진다.
+    oms_p, order_p, _ = build(key="idem_p006")
+    ev = broker.accept(order_p)
+    oms_p.on_broker_event(order_p, "ack", ev.broker_event_id, now, ev.payload)
+    part = broker.try_fill(order_p, Quote(D("69900"), D("70000"), D("600"), D("600")))
+    oms_p.on_broker_event(order_p, "fill", part.broker_event_id, now, part.payload)
+    assert order_p.state is BrokerOrderState.PARTIALLY_FILLED
+    assert broker.expire(order_p) is None, "부분체결 주문에 만료 이벤트가 생성됐다"
+    oms_p.request_cancel(order_p, "장 마감 - 잔량 취소")
+    cxl = broker.cancel(order_p)
+    oms_p.on_broker_event(order_p, "cancel", cxl.broker_event_id, now, cxl.payload)
+    assert order_p.state is BrokerOrderState.CANCELLED and order_p.filled_quantity == D("30")
+
+    print("ok - Paper Broker 8개 영역 점검 통과")
