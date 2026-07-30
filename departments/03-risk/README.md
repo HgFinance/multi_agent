@@ -27,6 +27,7 @@ Pre/Post-Trade Risk, Compliance와 Kill State를 담당한다. 포지션 리스�
 ```bash
 risk-management chat -q 'Assess risk of AAPL long position'
 python departments/03-risk/engine/risk_engine.py
+python departments/03-risk/engine/trading_state_store.py   # REDIS_URL 필요 (.env)
 python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
   --query "Can we open a new long position in SYMBOL_A today?" --as-of 2026-07-29
 ```
@@ -35,8 +36,12 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
 
 - `engine/risk_engine.py` — P0 Pre-trade Risk Gate 22개 시나리오 자체 점검(팀 가이드 4.1 10단계 검사
   전부 + Hard/Soft 우선순위 + Trading State 예외 + 재현성 + 트레이딩본부 OMS End-to-End 통합).
+- `engine/trading_state_store.py` — Redis Trading State 8개 시나리오 자체 점검(실제 Redis Cloud
+  연결, 미설정/설정/덮어쓰기/해제, Redis 장애 시 예외와 fail-closed(HALTED) 구분,
+  `risk_engine.RiskEngine`과의 End-to-End 통합 — Redis의 ENTRY_BLOCKED가 실제 주문을 막음).
 - `compliance-policy-agent`의 Agentic RAG baseline은 `skills/agentic-rag/`(공용 skills 경계 유지, 이 본부가
-  Domain Owner) 참고.
+  Domain Owner) 참고. 나머지 4개 페르소나는 정형 데이터 계산이라 RAG 대상이 아니다 — 기법 배정 결정과
+  LightRAG 백엔드 교체 후보 기록은 `hermes/config.yaml`의 `rag_technique_assignment:` 참고.
 
 ## Handoff
 
@@ -44,8 +49,13 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
 - `engine/risk_engine.py` — Sprint K1 P0 Pre-trade Risk Gate. 팀 가이드 4.1(10단계 검사), 5.2(Risk
   Request/Decision), 5.3(Trading State) 구현. LLM 호출 없음(팀 가이드 2절). Hard Limit 위반은 REJECT,
   Soft Limit 위반은 RESIZE — 실패는 항상 축소·차단 방향이지 확대 방향이 아니다.
+- `engine/trading_state_store.py` — Sprint K1 "Redis 최신 Trading State"(DoD 4번 절반). scope별
+  현재 Trading State를 Redis에서 Get/Set. Key 없음은 ENABLED(제한한 적 없음), Redis 장애는
+  ENABLED로 잘못 추정하지 않고 예외를 올리거나(`get_state`) HALTED로 fail-closed한다
+  (`get_state_fail_closed`, Pre-trade Hot Path 전용).
 - Compliance, Stress 모듈은 아직 미구현 — 코드가 생기면 `compliance/`, `stress/`에 배치.
   Compliance는 이미 `skills/agentic-rag/`의 `compliance-policy-agent`가 담당 중이므로 중복 구현하지 않는다.
-- 미착수: Sprint K0(Supabase 실배선 — 스키마 자체는 이미 존재), K2(Evidence QA), K3(Intraday
-  Snapshot/Stress/Kill Switch), K4(Release/Access Audit), P1 Risk Metric, P2 파생상품 Greeks.
+- 미착수: Sprint K0(Supabase `risk` 스키마 실기록 — `accounting.funds`가 비어 있어 `risk.policies`부터
+  fund_id FK로 막힘, 회계본부 영역), K2(Evidence QA — AI QA/감사본부 영역), K3(Kill Switch 이력 기록,
+  Stress), K4(Release/Access Audit), P1 Risk Metric, P2 파생상품 Greeks. RLS는 담당자가 의도적으로 보류.
   자세한 진행 상태는 `hermes/config.yaml`의 `implementation:` 블록 참고.

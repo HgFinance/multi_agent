@@ -51,10 +51,15 @@ def build_compliance_graph(corpus_dir: Path):
     return graph.compile()
 
 
-def run_compliance_check(query: str, as_of: str, corpus_dir: Path | None = None) -> dict:
+def run_compliance_check(
+    query: str,
+    as_of: str,
+    corpus_dir: Path | None = None,
+    persona: str = "compliance-policy-agent",
+) -> dict:
     corpus_dir = corpus_dir or (Path(__file__).resolve().parent.parent / "corpus" / "compliance")
     app = build_compliance_graph(corpus_dir)
-    final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1})
+    final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
     return {
         "answer": final_state.get("answer"),
         "grounded": final_state.get("grounded"),

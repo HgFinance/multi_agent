@@ -46,12 +46,12 @@ Supabase와 TimescaleDB 사이에는 Foreign Key를 만들 수 없다. 두 DB는
 
 ## 3. Supabase Schema 지도
 
-초기 Migration은 10개 내부 업무 Schema, 145개 Table과 제한된 `api` View/RPC를 만든다.
+초기 Migration은 10개 내부 업무 Schema, 147개 Table과 제한된 `api` View/RPC를 만든다.
 
 | Schema | Table | 책임 | 대표 Root |
 |---|---:|---|---|
 | `governance` | 20 | 사용자 Mandate, 전사 Case, 위원회, 승인, 자본 | `cases`, `mandates` |
-| `workforce` | 16 | Agent 조직, Profile Version, Skill, Tool 권한, 채용·평가 | `agent_profiles` |
+| `workforce` | 18 | Agent 조직, Profile Version, Skill, Tool 권한, 채용·평가, 자기 개선 후보 | `agent_profiles` |
 | `reference` | 9 | 종목, Symbol, 발행사, 파생 계약, 거래일, Source | `instruments` |
 | `research` | 14 | 뉴스·공시 중복 제거, Version, PIT RAG, Research Packet | `documents`, `research_packets` |
 | `quant` | 12 | Universe, Feature, Dataset, 실험, Backtest와 Model Artifact | `dataset_manifests`, `experiments` |
@@ -132,6 +132,7 @@ Prototype의 OMS·Ledger 기능을 통합 기준으로 옮길 때는 다음을 �
 | 3 | `20260729000300_research_quant_strategy.sql` | 수집·RAG, Dataset, Backtest, Strategy와 Signal |
 | 4 | `20260729000400_execution_risk_accounting.sql` | OMS, Risk Gate, 이중분개, Position, NAV와 대사 |
 | 5 | `20260729000500_audit_api_security.sql` | Audit, Lineage, Eval, RLS, Read View와 RPC |
+| 6 | `20260730000600_workforce_improvement_candidates.sql` | F19 자기 개선 후보와 Append-only 전이 Event |
 
 Migration은 파일명 순서대로 한 번만 적용한다. 적용 후 기존 Migration을 수정하지 않고 새 Timestamp Migration을 추가한다.
 

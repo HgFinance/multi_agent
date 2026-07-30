@@ -39,6 +39,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260729000300_research_quant_strategy.sql",
                 "20260729000400_execution_risk_accounting.sql",
                 "20260729000500_audit_api_security.sql",
+                "20260730000600_workforce_improvement_candidates.sql",
             ],
         )
         for path, sql in self.files:
@@ -57,7 +58,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "research": 14,
             "risk": 16,
             "strategy": 9,
-            "workforce": 16,
+            "workforce": 18,
         }
         actual_counts = {
             schema: sum(1 for table_schema, _ in self.tables if table_schema == schema)
