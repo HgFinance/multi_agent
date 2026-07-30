@@ -6,12 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 설계 중심의 초기 구현 단계다. 완전한 Application Scaffold와 End-to-End 서비스는 아직 없지만 실행 가능한 Prototype, Migration과 Schema Test는 존재한다.
 
+[REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 11절 "단계적 이전 계획"의 단계 1~3(Department Scaffold, Hermes Profile 이동, 본부 코드 이동)이 완료됐다.
+`departments/<n>/` 8개 폴더가 실행 기준이며, Hermes Profile과 트레이딩·회계·리서치 코드가 여기로 옮겨졌다.
+
 1. `docs/` — 설계 문서. 이 저장소의 Source of Truth. 목표 폴더 구조는 [REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
-2. `orchestration/hermes/<department>/` — 8개 부서 Profile(`config.yaml` + `SOUL.md`).
+2. `departments/<n>/hermes/` — 8개 부서 Profile(`config.yaml` + `SOUL.md`).
    Hermes Agent Runtime이 실제로 읽는 `~/.hermes/profiles/<department>/`와는 별개 사본이며,
    `scripts/sync_hermes_profiles.sh`로 동기화한다 (아래 "부서 Profile 규약" 참고).
-3. 실행 가능한 코드 — `fetch_news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
-   거래 생명주기 구현(`db/`, `trading/contracts.py`, `execution/`, `accounting/`).
+3. 실행 가능한 코드 — `departments/01-research/collectors/news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
+   거래 생명주기 구현(`db/`, `departments/02-trading/{contracts,oms,broker}/`, `departments/05-accounting-portfolio/{ledger,reconciliation}/`).
 
 트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
 
@@ -19,7 +22,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 재작업 예정이다. 각 부서 `config.yaml`의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
 표시한다.
 
-[REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 `departments/` 구조는 **아직 만들어지지 않은 목표 구조**다. 현재 경로 표를 우선하고, 실제 이동 PR 전에는 목표 경로를 import하거나 실행 경로로 사용하지 않는다.
+`orchestration/hermes/<department>/`, 루트 `trading/`, `execution/`, `accounting/`, 루트 `fetch_news.py`는 위 새 경로로 이동한 뒤 남은
+**임시 CLI 호환 Wrapper**다(2026-10-31 제거 예정, [REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 11절 단계 3). 새 코드는 이 구 경로를 참조하지 않는다.
+DB Prototype 통합(단계 4)과 구조 Gate(단계 5)는 아직 진행 전이며, `db/`와 `references/`는 그대로다.
 
 ## 명령어
 
@@ -40,7 +45,7 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
   --query "Can we open a new long position in SYMBOL_A today?" --as-of 2026-07-29
 
 # 뉴스 조회 (TAVILY_API_KEY 필요)
-python3 fetch_news.py 'AAPL Apple stock'
+python3 departments/01-research/collectors/news.py 'AAPL Apple stock'
 ```
 
 Canonical 운영 DB Migration은 `supabase/migrations/`, 시장 시계열 Migration은 `timescaledb/migrations/`다.
@@ -55,12 +60,14 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 전체 Application Test Suite는 아직 없지만 `tests/schema/`의 `unittest` 계약 검사와 PostgreSQL/Timescale Runtime Smoke SQL이 있다. 트레이딩·회계 모듈도 각 파일의 `__main__`에 assert 기반 자체 점검을 둔다.
 
 ```bash
-python trading/contracts.py        # 계약 6개 영역
-python execution/oms.py            # OMS 불변식 10개
-python execution/paper_broker.py   # Paper Broker 4개 영역
-python accounting/ledger.py        # 원장 불변식 10개
-python accounting/reconciliation.py # 대사 12개
+python departments/02-trading/contracts/contracts.py                 # 계약 6개 영역
+python departments/02-trading/oms/oms.py                              # OMS 불변식 10개
+python departments/02-trading/broker/paper_broker.py                  # Paper Broker 4개 영역
+python departments/05-accounting-portfolio/ledger/ledger.py           # 원장 불변식 10개
+python departments/05-accounting-portfolio/reconciliation/reconciliation.py  # 대사 12개
 ```
+
+(구 경로 `python trading/contracts.py` 등도 호환 Wrapper로 동일하게 동작한다.)
 
 목표 스택은 [TECH_STACK_DECISIONS.md](docs/02-engineering/TECH_STACK_DECISIONS.md)가 정한 `pytest + pytest-asyncio + Hypothesis + respx + testcontainers`와 `ruff + pyright + pip-audit + bandit`이다. 실제로 도입하면 위 자체 점검을 pytest로 옮기고 이 절을 갱신한다.
 
@@ -111,15 +118,15 @@ python accounting/reconciliation.py # 대사 12개
 
 ### 부서 Profile 규약
 
-부서마다 폴더 하나, 폴더마다 `config.yaml` + `SOUL.md` — `orchestration/hermes/<department>/`. 8개 폴더가 같은 형태다 (`config.yaml`: `model` / `env` / `agent.personalities` / `skills` / `usage`, `SOUL.md`: Role/Key Responsibilities/Working Style/Hard Boundaries).
+부서마다 폴더 하나, 폴더마다 `config.yaml` + `SOUL.md` — `departments/<n>/hermes/`. 8개 폴더가 같은 형태다 (`config.yaml`: `model` / `env` / `agent.personalities` / `skills` / `usage`, `SOUL.md`: Role/Key Responsibilities/Working Style/Hard Boundaries).
 
-- **저장소 사본과 실제 런타임은 별개 경로다.** `orchestration/hermes/<department>/`는 git으로 관리되는 저장소 사본, `~/.hermes/profiles/<department>/`는 Hermes Runtime이 실제로 읽는 로컬 상태(+ `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*` 등 머신별 파일 포함, 이들은 git에 올리지 않는다). `git pull` 후에는 `./scripts/sync_hermes_profiles.sh push`로 로컬 Hermes에 반영하고, 로컬에서 Profile을 고쳤으면 `./scripts/sync_hermes_profiles.sh pull`로 저장소에 반영한 뒤 커밋한다.
+- **저장소 사본과 실제 런타임은 별개 경로다.** `departments/<n>/hermes/`는 git으로 관리되는 저장소 사본, `~/.hermes/profiles/<department>/`는 Hermes Runtime이 실제로 읽는 로컬 상태(+ `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*` 등 머신별 파일 포함, 이들은 git에 올리지 않는다). `git pull` 후에는 `./scripts/sync_hermes_profiles.sh push`로 로컬 Hermes에 반영하고, 로컬에서 Profile을 고쳤으면 `./scripts/sync_hermes_profiles.sh pull`로 저장소에 반영한 뒤 커밋한다.
 - 페르소나 프롬프트는 영어 2인칭(`You are the ...`), 파일 상단 주석·설명은 한국어.
 - 상단 주석에 담당자와 `HEDGE_FUND_MASTER_PLAN.md` 절 번호를 남긴다.
 - **`env:`가 부서마다 다르다.** `ANTHROPIC_API_KEY` — ceo, research, qa, quant-backtest / `OPENAI_API_KEY` — trading, risk, accounting, hr. 아무 키나 넣지 않는다. `skills/agentic-rag`가 OpenAI를 쓰는 것도 risk-management가 OpenAI에 배정돼 있기 때문이다.
 - `model`은 8개 파일 모두 `provider: nous` / `poolside/laguna-s-2.1:free`로 동일. 바꾸려면 8개를 함께 바꾼다.
 - `agent.timeout_seconds`는 부서 단독 명령의 기본 한도다. `multi-agent-workflow.yaml`의 Step Timeout은 Case별 Orchestrator 한도이므로 더 길 수 있으며 Workflow 실행에서는 Step 값이 우선한다.
-- 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](orchestration/hermes/risk-management/config.yaml), [qa-department/config.yaml](orchestration/hermes/qa-department/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
+- 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](departments/03-risk/hermes/config.yaml), [qa-department/config.yaml](departments/06-ai-qa-audit/hermes/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
 
 ### `skills/agentic-rag`
 
@@ -155,10 +162,10 @@ python accounting/reconciliation.py # 대사 12개
 
 | 담당 | 영역 | Profile | 팀 가이드 |
 |---|---|---|---|
-| 재일 | 리서치 / 퀀트·백테스트 | `orchestration/hermes/research-department/`, `orchestration/hermes/quant-backtest-department/` | [TEAM_JAEIL](docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) |
-| 도현 | 트레이딩 / 회계·포트폴리오 | `orchestration/hermes/trading-department/`, `orchestration/hermes/accounting-portfolio-department/` | [TEAM_DOHYUN](docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) |
-| 동규 | 리스크 / AI QA·감사 | `orchestration/hermes/risk-management/`, `orchestration/hermes/qa-department/` | [TEAM_DONGGYU](docs/05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) |
-| 영주 | CEO / Agent 인사팀 | `orchestration/hermes/ceo-agent/`, `orchestration/hermes/hr-department/` | [TEAM_YOUNGJU](docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) |
+| 재일 | 리서치 / 퀀트·백테스트 | `departments/01-research/hermes/`, `departments/04-quant-backtest/hermes/` | [TEAM_JAEIL](docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) |
+| 도현 | 트레이딩 / 회계·포트폴리오 | `departments/02-trading/hermes/`, `departments/05-accounting-portfolio/hermes/` | [TEAM_DOHYUN](docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) |
+| 동규 | 리스크 / AI QA·감사 | `departments/03-risk/hermes/`, `departments/06-ai-qa-audit/hermes/` | [TEAM_DONGGYU](docs/05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) |
+| 영주 | CEO / Agent 인사팀 | `departments/00-ceo-office/hermes/`, `departments/07-agent-workforce/hermes/` | [TEAM_YOUNGJU](docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) |
 
 같은 담당자가 서로 견제해야 하는 두 본부를 함께 맡는 경우가 있다(동규: 리스크 ↔ QA, 도현: 트레이딩 ↔ 회계). 담당자가 같다는 이유로 두 본부의 권한을 합치지 않는다.
 

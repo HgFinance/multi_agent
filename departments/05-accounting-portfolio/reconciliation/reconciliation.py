@@ -18,7 +18,7 @@ Break는 자동 생성되고 임의로 숨겨지지 않는다 (팀 가이드 DoD
 가장 위험한 것은 "브로커에는 있는데 우리에겐 없는 체결"이다. 모르는 포지션을
 들고 있다는 뜻이므로 무조건 material이다.
 
-자체 점검: python accounting/reconciliation.py
+자체 점검: python departments/05-accounting-portfolio/reconciliation/reconciliation.py
 """
 from __future__ import annotations
 
@@ -30,9 +30,12 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 트레이딩본부 contracts.py를 직접 참조한다. contracts/가 아직 공용 최상위 경계로
+# 분리되지 않았기 때문이며(REPOSITORY_DEPARTMENT_STRUCTURE.md 4절), 그 전까지는
+# 본부 간 의존 방향이 이 파일에 그대로 남는다.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
 
-from trading.contracts import Side  # noqa: E402
+from contracts import Side  # noqa: E402
 
 ZERO = Decimal("0")
 DEFAULT_TIME_WINDOW = timedelta(minutes=5)

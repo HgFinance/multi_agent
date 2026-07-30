@@ -3,12 +3,17 @@
 > 문서 상태: Confirmed Target Structure v1.1
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 적용 범위: CEO Office, CEO 직속 Agent Workforce 인사팀, 6개 투자 본부와 공통 Platform
-> 현재 변경 범위: Markdown 기준 확정만 수행하며 실제 코드·YAML·SQL·폴더 이동은 별도 PR에서 단계적으로 실행
+> 현재 변경 범위: 11절 단계 1~3(Department Scaffold, Hermes Profile 이동, 본부 코드 이동) 완료.
+> 구 경로는 임시 CLI 호환 Wrapper로 유지된다(2026-10-31 제거 예정). 단계 4(DB Prototype 통합)와
+> 단계 5(구조 Gate)는 아직 진행 전이다.
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
 
 ## 1. 이 구조가 필요한 이유
 
-현재 저장소는 설계에서 구현으로 넘어가는 과도기다. Hermes Profile은 `orchestration/hermes/` 아래 본부별 폴더로 정리됐지만, 실행 코드는 `trading/`, `execution/`, `accounting/`, `skills/`, `db/`와 루트 스크립트에 흩어져 있다. 이 상태에서는 다음 문제가 생긴다.
+현재 저장소는 설계에서 구현으로 넘어가는 과도기다. Hermes Profile과 트레이딩·회계·리서치 본부의 실행
+코드는 `departments/<n>/` 아래 본부별 폴더로 이동했지만(11절 단계 1~3), 공통 계약·Skill·DB Migration은
+아직 `skills/`, `db/`, `supabase/`, `timescaledb/` 최상위 경로에 남아 공유 경계로 추출되지 않았다.
+이 상태에서는 다음 문제가 생긴다.
 
 - 담당자가 자기 본부 변경 범위를 한눈에 파악하기 어렵다.
 - Profile, 결정론적 Service, Test와 운영 문서의 소유자가 달라질 수 있다.
@@ -35,16 +40,19 @@
 
 ## 3. 현재 저장소의 사실 기준
 
-현재 실제 경로는 목표 구조와 다르다. 파일 이동 PR이 완료되기 전에는 아래 경로가 실행 기준이다.
+11절 단계 1~3이 완료되어 아래 `departments/<n>/` 경로가 실행 기준이다. 단계 4(DB Prototype 통합)와
+단계 5(구조 Gate)는 아직 적용 전이므로 `db/`, `supabase/`, `timescaledb/`, `skills/`는 최상위에 그대로
+있다.
 
 | 현재 경로 | 현재 역할 | 상태 |
 |---|---|---|
-| `orchestration/hermes/<profile>/` | 8개 Hermes `config.yaml`과 `SOUL.md`의 Git 기준 사본 | 사용 중 |
-| `multi-agent-workflow.yaml` | 5개 전사 Workflow와 Event Routing 설정 | Prototype |
-| `fetch_news.py` | Tavily 기반 뉴스 조회 스크립트 | Baseline |
-| `skills/agentic-rag/` | `compliance-policy-agent`용 Agentic RAG baseline | Baseline |
-| `trading/`, `execution/` | 계약, Paper OMS와 Paper Broker | D0-D2 Prototype |
-| `accounting/` | Ledger와 Reconciliation | D2 Prototype |
+| `departments/<n>/hermes/` | 8개 Hermes `config.yaml`과 `SOUL.md`의 Git 기준 사본 | 사용 중 |
+| `multi-agent-workflow.yaml` | 5개 전사 Workflow와 Event Routing 설정. `files:` 블록이 `departments/<n>/hermes/config.yaml`을 가리킨다 | Prototype |
+| `departments/01-research/collectors/news.py` | Tavily 기반 뉴스 조회 스크립트 | Baseline |
+| `skills/agentic-rag/` | `compliance-policy-agent`용 Agentic RAG baseline (공용 skills 경계 유지, Domain Owner는 리스크본부) | Baseline |
+| `departments/02-trading/{contracts,oms,broker}/` | 계약, Paper OMS와 Paper Broker | D0-D2 Prototype |
+| `departments/05-accounting-portfolio/{ledger,reconciliation}/` | Ledger와 Reconciliation | D2 Prototype |
+| `orchestration/hermes/`, `trading/`, `execution/`, `accounting/`, `fetch_news.py` | 구 경로 — 임시 CLI 호환 Wrapper(`runpy`로 새 경로 위임) | 제거 예정 (2026-10-31) |
 | `db/` | 트레이딩·회계 초기 Prototype SQL | Transitional |
 | `supabase/migrations/` | 전사 운영 DB의 통합 Migration 기준 | Canonical |
 | `timescaledb/migrations/` | 고빈도 시장 시계열 DB Migration 기준 | Canonical |
@@ -193,23 +201,23 @@ multi_agent/
 
 ## 7. 현재 경로에서 목표 경로로의 이전 지도
 
-| 현재 | 목표 | 소유자 | 이전 시 필수 조치 |
-|---|---|---|---|
-| `orchestration/hermes/ceo-agent/` | `departments/00-ceo-office/hermes/` | 영주님 | Workflow와 Sync Script 경로 동시 수정 |
-| `orchestration/hermes/research-department/` | `departments/01-research/hermes/` | 재일님 | Runtime Profile 동기화 검증 |
-| `fetch_news.py` | `departments/01-research/collectors/news.py` | 재일님 | CLI 호환 Wrapper와 테스트 추가 |
-| `references/` | `departments/01-research/references/` 또는 공용 `references/` | 재일님 | 저작권·출처 Registry 확인 후 결정 |
-| `orchestration/hermes/trading-department/` | `departments/02-trading/hermes/` | 도현님 | Workflow 참조 동시 수정 |
-| `trading/`, `execution/` | `departments/02-trading/` 하위 Domain | 도현님 | Import 호환층과 OMS Replay Test |
-| `orchestration/hermes/risk-management/` | `departments/03-risk/hermes/` | 동규님 | Risk Tool Allowlist 재검증 |
-| `skills/agentic-rag/` | 공용 `skills/` 경계 유지, Package별 Domain Owner Metadata 추가 | 동규님 | Risk Source와 QA 재사용 Eval을 분리하고 Registry Version 연결 |
-| `orchestration/hermes/quant-backtest-department/` | `departments/04-quant-backtest/hermes/` | 재일님 | Dataset·Registry 경계와 함께 이동 |
-| `orchestration/hermes/accounting-portfolio-department/` | `departments/05-accounting-portfolio/hermes/` | 도현님 | Ledger 권한과 Service Identity 재검증 |
-| `accounting/` | `departments/05-accounting-portfolio/` 하위 Domain | 도현님 | 분개 재구축·대사 Test 유지 |
-| `orchestration/hermes/qa-department/` | `departments/06-ai-qa-audit/hermes/` | 동규님 | 독립 Reviewer와 Finding 권한 유지 |
-| `orchestration/hermes/hr-department/` | `departments/07-agent-workforce/hermes/` | 영주님 | 제7 투자 본부로 오해하지 않도록 README 유지 |
-| `multi-agent-workflow.yaml` | `orchestration/workflows/investment-case.yaml` 등으로 분리 | 영주님 + 관련 본부 | 5개 Workflow를 개별 파일로 분리하고 Contract Test 추가 |
-| `db/` | 제거 또는 본부 Prototype Archive | 도현님 + DB Owner | Supabase 기준과 차이 분석 후에만 처리 |
+| 구 경로 | 목표 | 소유자 | 이전 시 필수 조치 | 상태 |
+|---|---|---|---|---|
+| `orchestration/hermes/ceo-agent/` | `departments/00-ceo-office/hermes/` | 영주님 | Workflow와 Sync Script 경로 동시 수정 | 완료, 구 경로는 빈 폴더 |
+| `orchestration/hermes/research-department/` | `departments/01-research/hermes/` | 재일님 | Runtime Profile 동기화 검증 | 완료 (`sync_hermes_profiles.sh push`로 검증) |
+| `fetch_news.py` | `departments/01-research/collectors/news.py` | 재일님 | CLI 호환 Wrapper와 테스트 추가 | 완료, 구 경로는 `runpy` 호환 Wrapper |
+| `references/` | `departments/01-research/references/` 또는 공용 `references/` | 재일님 | 저작권·출처 Registry 확인 후 결정 | 미결정 — 이동하지 않음 |
+| `orchestration/hermes/trading-department/` | `departments/02-trading/hermes/` | 도현님 | Workflow 참조 동시 수정 | 완료 |
+| `trading/`, `execution/` | `departments/02-trading/{contracts,oms,broker}/` | 도현님 | Import 호환층과 OMS Replay Test | 완료, 구 경로는 `runpy` 호환 Wrapper. Replay Test는 여전히 자체 점검 스크립트뿐 |
+| `orchestration/hermes/risk-management/` | `departments/03-risk/hermes/` | 동규님 | Risk Tool Allowlist 재검증 | 완료, Tool Allowlist 재검증은 별도 확인 필요 |
+| `skills/agentic-rag/` | 공용 `skills/` 경계 유지, Package별 Domain Owner Metadata 추가 | 동규님 | Risk Source와 QA 재사용 Eval을 분리하고 Registry Version 연결 | 미착수 — 경로는 그대로, Metadata 추가 안 함 |
+| `orchestration/hermes/quant-backtest-department/` | `departments/04-quant-backtest/hermes/` | 재일님 | Dataset·Registry 경계와 함께 이동 | 완료 (Dataset·Registry는 아직 코드 없음) |
+| `orchestration/hermes/accounting-portfolio-department/` | `departments/05-accounting-portfolio/hermes/` | 도현님 | Ledger 권한과 Service Identity 재검증 | 완료, Service Identity 재검증은 별도 확인 필요 |
+| `accounting/` | `departments/05-accounting-portfolio/{ledger,reconciliation}/` | 도현님 | 분개 재구축·대사 Test 유지 | 완료, 자체 점검 통과 확인함 |
+| `orchestration/hermes/qa-department/` | `departments/06-ai-qa-audit/hermes/` | 동규님 | 독립 Reviewer와 Finding 권한 유지 | 완료 |
+| `orchestration/hermes/hr-department/` | `departments/07-agent-workforce/hermes/` | 영주님 | 제7 투자 본부로 오해하지 않도록 README 유지 | 완료, README에 명시 |
+| `multi-agent-workflow.yaml` | `orchestration/workflows/investment-case.yaml` 등으로 분리 | 영주님 + 관련 본부 | 5개 Workflow를 개별 파일로 분리하고 Contract Test 추가 | 미착수 — 내부 경로 참조만 갱신, 파일 분리는 안 함 |
+| `db/` | 제거 또는 본부 Prototype Archive | 도현님 + DB Owner | Supabase 기준과 차이 분석 후에만 처리 | 미착수 (11절 단계 4) |
 
 ## 8. 의존성 방향
 
@@ -284,30 +292,36 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 
 ## 11. 단계적 이전 계획
 
-### 단계 0. 문서 기준 확정
+### 단계 0. 문서 기준 확정 — 완료
 
 - 이 문서와 마스터 플랜에 목표 구조와 소유권을 확정한다.
 - 현재 경로와 목표 경로를 명확히 구분한다.
 - 실행 파일은 이동하지 않는다.
 
-### 단계 1. Department Scaffold
+### 단계 1. Department Scaffold — 완료
 
 - `departments/`와 8개 조직 폴더를 만든다.
 - 각 폴더에 Owner, Mission, Input/Output, Test와 Handoff를 담은 `README.md`를 둔다.
 - 공용 `skills/`와 인사팀 `improvements/`, `deployments/`, QA `evals/`의 빈 경계만 만들고 Runtime Memory는 옮기지 않는다.
-- 빈 Python Package를 대량 생성하지 않는다.
+- 빈 Python Package를 대량 생성하지 않는다. — 실제 코드가 있는 `hermes/`, `contracts/`, `oms/`, `broker/`,
+  `ledger/`, `reconciliation/`, `collectors/`만 만들었고 나머지(`engine/`, `evals/`, `profiles/` 등)는 코드가
+  생길 때까지 비워둔다.
 
-### 단계 2. Hermes Profile 이동
+### 단계 2. Hermes Profile 이동 — 완료
 
 - Profile을 조직 폴더의 `hermes/`로 이동한다.
 - `multi-agent-workflow.yaml`, `scripts/sync_hermes_profiles.sh`, `CLAUDE.md`와 CI 참조를 같은 PR에서 수정한다.
-- 8개 `config.yaml`과 `SOUL.md` 존재, YAML Parse, Timeout·Persona 참조를 자동 검사한다.
+- 8개 `config.yaml`과 `SOUL.md` 존재, YAML Parse, Timeout·Persona 참조를 자동 검사한다. — YAML Parse는
+  수동으로 8개 전부 확인함. Timeout·Persona 참조 자동 검사(CI)는 단계 5로 남는다.
 
-### 단계 3. 본부 코드 이동
+### 단계 3. 본부 코드 이동 — 완료
 
 - Research, Trading, Accounting 순으로 현재 구현이 있는 코드부터 이동한다.
-- 기존 CLI 경로는 임시 Wrapper로 유지하고 제거 날짜를 기록한다.
-- Import와 실행 명령을 바꾼 뒤 Unit·Replay Test를 통과한다.
+- 기존 CLI 경로는 임시 Wrapper로 유지하고 제거 날짜를 기록한다. — `runpy.run_path` 기반 Wrapper, 제거일
+  2026-10-31로 각 파일 상단에 기록.
+- Import와 실행 명령을 바꾼 뒤 Unit·Replay Test를 통과한다. — 5개 자체 점검 스크립트(계약/OMS/Paper
+  Broker/원장/대사) 전부 새 경로와 구 경로(Wrapper) 양쪽에서 통과 확인함. `tests/schema/`는 이동 대상이
+  아니라 영향 없음.
 
 ### 단계 4. DB Prototype 통합
 

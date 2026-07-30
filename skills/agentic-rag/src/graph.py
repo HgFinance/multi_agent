@@ -1,7 +1,8 @@
 """LangGraph definition: retrieve -> grade -> generate -> hallucination-check -> retry.
 
 This is the baseline Agentic RAG loop referenced in HEDGE_FUND_MASTER_PLAN.md 5.10 and
-in risk-management.yaml / qa-department.yaml's "Note on Agentic RAG". It intentionally
+in departments/03-risk/hermes/config.yaml / departments/06-ai-qa-audit/hermes/config.yaml's
+"Note on Agentic RAG". It intentionally
 does NOT include query rewriting, reranking, fusion, or a semantic cache — those are
 backlog items to add once this loop is proven, not day-one scope (see
 HEDGE_FUND_MASTER_PLAN.md 13.1: don't over-proliferate services early).

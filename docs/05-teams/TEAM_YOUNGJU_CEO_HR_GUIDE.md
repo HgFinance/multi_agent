@@ -40,15 +40,17 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 목표 경로 |
+| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
 |---|---|---|
-| CEO Hermes | `orchestration/hermes/ceo-agent/` | `departments/00-ceo-office/hermes/` |
-| Agent Workforce Hermes | `orchestration/hermes/hr-department/` | `departments/07-agent-workforce/hermes/` |
-| 전사 Workflow | `multi-agent-workflow.yaml` | `orchestration/workflows/`에서 Workflow별 분리 |
-| Profile 동기화 | `scripts/sync_hermes_profiles.sh` | Profile 이동과 같은 PR에서 Mapping 수정 |
-| Governance·Workforce Schema | `supabase/migrations/` | 도구 표준 경로 유지, CEO·인사팀이 Domain Owner |
+| CEO Hermes | `departments/00-ceo-office/hermes/` | `orchestration/hermes/ceo-agent/` |
+| Agent Workforce Hermes | `departments/07-agent-workforce/hermes/` | `orchestration/hermes/hr-department/` |
+| 전사 Workflow | `multi-agent-workflow.yaml` | — (`files:` 블록만 새 경로로 갱신, `orchestration/workflows/`로의 Workflow별 분리는 미착수) |
+| Profile 동기화 | `scripts/sync_hermes_profiles.sh` | — (완료 — dept:folder Mapping으로 갱신됨) |
+| Governance·Workforce Schema | `supabase/migrations/` | — (도구 표준 경로 유지, CEO·인사팀이 Domain Owner) |
 
-목표 경로의 `07-agent-workforce`는 정렬용 번호일 뿐 제7의 투자 본부를 뜻하지 않는다. CEO와 인사팀 Profile, Memory와 권한은 계속 분리한다.
+11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/00-ceo-office/`,
+`departments/07-agent-workforce/`가 실행 기준이다. 구 경로는 빈 폴더로 남아 있다. `07-agent-workforce`는
+정렬용 번호일 뿐 제7의 투자 본부를 뜻하지 않는다. CEO와 인사팀 Profile, Memory와 권한은 계속 분리한다.
 
 ### Hermes 자기 개선 책임
 
