@@ -25,9 +25,28 @@ CEO는 주문 제출, 리스크 승인, 원장 수정, NAV 확정, Audit Finding
 ceo-agent chat -q 'Summarize current portfolio decisions and open risks'
 ```
 
+## src/
+
+- `src/mandate/` — **F01 사용자 Mandate** 앱 레이어 (Sprint Y0~Y1).
+  - `policy.py` — 구조화 정책 Pydantic 계약. `supabase/migrations/20260729000200_governance_workforce.sql`
+    의 `governance.mandate_versions.risk_bounds / universe_policy / approval_rules` jsonb 컬럼 **내부
+    형태를 정의**하고, 값 범위와 상호 모순을 결정론적으로 검증한다 (F01 완료조건: 잘못된 한도 조합 저장 불가).
+  - `service.py` — Version/Effective Time 발급, `content_hash` 중복 방지, 장중 변경 방향 판정
+    (`TIGHTEN`=완화 즉시 / `LOOSEN`=확대 사용자 재승인). `MandateVersionRepository` 는 인터페이스이며
+    현재 In-Memory 구현만 있다. asyncpg 실 구현은 Y1 에서 붙인다.
+
+미구현(Y1 잔여): asyncpg Repository, §5.1 Mandate 변경 Workflow(Risk/QA 검토·사용자 승인 Interrupt),
+F01 완료조건 2("Signal/Risk Decision 이 mandate_version_id 기록")는 트레이딩·리스크 본부 의존.
+
 ## 테스트
 
-없음 — prompt-only Profile 단계 (`CLAUDE.md` "Hermes(부서) vs LangGraph(직원) 실행 계층" 참고).
+```bash
+python departments/00-ceo-office/src/mandate/policy.py    # 정책 검증·상호 모순
+python departments/00-ceo-office/src/mandate/service.py   # Version·방향 판정·hash
+```
+
+`__main__` assert 자체 점검 (`CLAUDE.md` 명령어 절의 트레이딩·회계 모듈 관례와 동일). pytest 이전은
+`TECH_STACK_DECISIONS.md` 도입 시점에 맞춘다.
 
 ## Handoff
 
