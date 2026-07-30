@@ -26,32 +26,50 @@ agent:
 
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
-# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)은 다음 확장 대상
+# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
 agentic_rag:
   framework: langgraph
   status: "compliance-policy-agent baseline 구현됨 (skills/agentic-rag/)"
   target_personas:
     - compliance-policy-agent  # Mandate / Restricted List / Policy Store 버전 고정 문서를 검색해 정책 위반 여부 판단
 
+# 2026-07-30 기법 배정 결정 (동규님, "내 부서에 한해서만" 범위) — 아직 미구현인 항목도 기록만 해둔다.
+# Risk 페르소나 중 검색-근거-생성 루프가 필요한 건 compliance-policy-agent 하나뿐이고, 나머지
+# 4개(market-liquidity/derivatives-margin/pre-trade/operational-counterparty)는 정형 데이터 계산이라
+# RAG 대상이 아니다 — risk_engine.py/trading_state_store.py 같은 결정론적 서비스로 남는다.
+rag_technique_assignment:
+  compliance-policy-agent:
+    technique: agentic_rag
+    status: implemented
+    note: "skills/agentic-rag/ baseline. corpus/compliance/ 문서 검색 -> grade -> generate -> hallucination_check"
+  # LightRAG(Entity-level + Summary-level dual retrieval)은 compliance-policy-agent의 차기 백엔드
+  # 후보 — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면
+  # nodes.py를 고치지 않고 교체 가능(CLAUDE.md skills/agentic-rag 절 참고). Mandate/Restricted List
+  # 버전 이력이 늘어나 단일 문서 검색으로 정확도가 떨어질 때 재검토한다. 지금은 근거 없음(백로그).
+  # Neo4j/Hypergraph는 Risk 쪽에 그래프 형태 스키마가 없어 배정하지 않는다(QA의 audit.artifact_lineage와
+  # 다름) — 배정하려면 먼저 그래프 형 데이터(예: Position-Strategy-Signal 관계)가 있어야 한다.
+
 # 결정론적 서비스. 에이전트는 이 계층을 우회할 수 없고, Pre-trade Hot Path는 LLM 호출 없이
 # 끝난다 (팀 가이드 2절). risk-supervisor/pre-trade-risk-analyst는 이 엔진의 판정을 해석·
 # Escalation만 하고, Limit을 계산하거나 판정을 바꾸지 않는다.
 deterministic_services:
-  risk_engine: departments/03-risk/engine/risk_engine.py  # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
+  risk_engine: departments/03-risk/engine/risk_engine.py                 # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
+  trading_state_store: departments/03-risk/engine/trading_state_store.py # Redis 최신 Trading State — 장애 시 HALTED로 fail-closed
 
 implementation:
-  status: "Sprint K1 P0 Pre-trade Risk Gate 구현됨 (팀 가이드 4.1, 12절). K0 Supabase 배선·K2-K4는 미착수"
+  status: "Sprint K1 P0 Pre-trade Risk Gate + Redis Trading State 구현됨 (팀 가이드 4.1, 12절, DoD 4번 Redis 절반). Supabase 쪽(risk 스키마 실기록)·K2-K4는 미착수"
   done:
     - "10단계 순서 검사 (Data Freshness, Market 거래가능, Mandate, Restricted List, Notional, Buying Power/Oversell, Concentration Soft/Hard, Turnover/주문건수, Trading State/Loss/Drawdown, Counterparty Health)"
     - "Soft Limit은 RESIZE, Hard Limit은 REJECT — 실패는 항상 축소·차단 방향"
     - "ENTRY_BLOCKED/REDUCE_ONLY/HALTED에서 청산(Reducing) 주문만 예외로 통과"
     - "input_hash 기반 재현성 — 같은 Intent·Context·Policy Version이면 같은 판정"
     - "트레이딩본부 OMS.apply_risk_decision/submit과 End-to-End 파이프라인 검증"
+    - "Redis 최신 Trading State (2026-07-30) — 실제 Redis Cloud에 연결해 scope별 현재 상태 Get/Set. Key 없음(=제한한 적 없음)은 ENABLED, Redis 장애는 예외 또는 HALTED로 fail-closed — ENABLED로 잘못 추정하지 않음. RiskEngine.check_order와 End-to-End 통합 검증(Redis의 ENTRY_BLOCKED가 실제 주문을 막음)"
   in_progress: []
   not_started:
-    - "Sprint K0: Supabase risk/audit/api Schema 실배선, RLS, Append-only Trigger (스키마 자체는 supabase/migrations/20260729000400에 이미 있음)"
-    - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역"
-    - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow"
+    - "Sprint K0: Supabase risk 스키마 실기록(risk.risk_decisions/breaches/trading_states) — accounting.funds가 비어 있어 risk.policies부터 fund_id FK로 막힘(회계본부 영역, QA의 audit 스키마와 달리 risk 테이블 대부분이 fund_id NOT NULL). RLS는 의도적으로 보류(담당자 결정)"
+    - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역, departments/06-ai-qa-audit 참고"
+    - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow(risk.kill_switch_events 이력 기록) — Redis 현재 상태는 됐지만 Supabase 이력은 위 Fund 의존으로 막힘"
     - "Sprint K4: Release/Access Audit, Agent Candidate Eval"
     - "P1 Risk Metric(VaR, Correlation Shock 등)과 P2 파생상품 Greeks — 팀 가이드 4.2/4.3"
     - "market-api/portfolio-api/Governance Service 실연동 — 지금은 RiskContext가 스텁 값"

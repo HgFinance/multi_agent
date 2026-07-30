@@ -14,6 +14,7 @@ import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./g
 import { CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { COMPANY, STORAGE_LINK } from "../company.config";
+import OpsPanel from "./ops/OpsPanel";
 
 type View = "live" | "dashboard";
 
@@ -251,12 +252,7 @@ export default function Home() {
         )}
 
         <footer>
-          이 툴은 갓생맘 🎀이 만들었어요
-          <br />
-          <a href="https://www.instagram.com/godseng.mom/" target="_blank" rel="noreferrer">
-            📷 @godseng.mom — 더 많은 크리에이터 툴 보러가기 →
-          </a>
-          <br />© godseng.mom · 자유롭게 쓰되 무단 재판매 금지
+          {COMPANY.name} · {COMPANY.titlePrefix} {COMPANY.titleAccent}
         </footer>
       </div>
 
@@ -555,7 +551,7 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
           <input
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="예: 캐러셀팀 지금 뭐해? / 왜 늦어져?"
+            placeholder="예: 리서치팀 지금 뭐해?"
             aria-label="대표 지시 입력"
           />
           <button type="submit">지시</button>
@@ -742,7 +738,7 @@ function DashboardView({
     <>
       <header className="win hero">
         <div className="win-bar">
-          <span>🎀 {COMPANY.windowLabel}</span>
+          <span>👑 {COMPANY.windowLabel}</span>
           <span className="window-controls" aria-hidden="true">
             —　▢　✕
           </span>
@@ -947,6 +943,8 @@ function DashboardView({
           </section>
         </div>
       </section>
+
+      <OpsPanel />
 
       <section className="win storage">
         <div className="win-bar">

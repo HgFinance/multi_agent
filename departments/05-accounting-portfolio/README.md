@@ -34,7 +34,7 @@ python departments/05-accounting-portfolio/reconciliation/reconciliation.py
 
 - `hermes/` — Git 기준 Hermes Profile 사본
 - `ledger/` — 이중분개 원장과 Position/Cash Projection(Sprint D2). 구 경로 `accounting/ledger.py`는
-  호환 Wrapper로 유지
+  2026-07-30에 삭제됐다
 - `reconciliation/` — OMS/Fill/Ledger Reconciliation(Sprint D2). 구 경로 `accounting/reconciliation.py`는
-  호환 Wrapper로 유지
+  2026-07-30에 삭제됐다
 - D2 Prototype 단계이며 팀 가이드 v1.2 반영 전 재작업 예정

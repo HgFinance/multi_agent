@@ -2,7 +2,7 @@
 """
 Tavily API를 통해 금융 관련 뉴스 및 공시자료를 가져오는 스크립트
 사용법: python3 departments/01-research/collectors/news.py [검색어]
-(구 경로 python3 fetch_news.py 는 호환 Wrapper로 유지)
+(구 경로 fetch_news.py 와 임시 호환 Wrapper는 2026-07-30에 삭제됐다)
 """
 import json
 import sys

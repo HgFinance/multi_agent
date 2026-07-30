@@ -2,7 +2,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md)
 
 ## 현재 상태
 
@@ -14,6 +14,7 @@
 - Order Contract, Paper OMS, Paper Broker, Ledger와 Reconciliation D0-D2 Prototype
 - Supabase 운영 DB와 TimescaleDB 시장 데이터 Migration, RLS와 Schema Test
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
+- OpenDART 85개 API의 공시·재무·지분·주요사항 요청·응답 참조 문서
 - Next.js·React·TypeScript 기반 `ai-office` Pixel Office Frontend Prototype
 
 이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`는 현재 12개 고정 부서와 Scripted Simulation을 사용하는 Demo이며 금융 Backend와 연결되지 않았다. 서비스 API, 전 종목 WebSocket Runtime, 결정론적 Risk Engine, Strategy Factory, 8개 조직 기반 통합 UI와 운영 배포는 아직 Core Backlog에 있다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
@@ -423,13 +424,14 @@ docs/
 | [Data Sources and Libraries](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md) | 본부별 수집·생성 데이터, API와 권장 Library를 확인할 때 |
 | [Database Schema Foundation](database/README.md) | Supabase·TimescaleDB Migration, 테이블 소유권, 불변식과 적용 순서를 확인할 때 |
 | [LS Open API 전체 참조](06-integrations/ls-openapi/README.md) | LS증권 REST·WebSocket API, TR 코드와 요청·응답 필드를 구현할 때 |
+| [OpenDART Open API 전체 참조](06-integrations/opendart/README.md) | 공시·기업·재무·지분·주요사항 85개 API와 수집·저장·RAG 계약을 구현할 때 |
 | [Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md) | 8개 Hermes Supervisor와 전문 Agent 직원의 역할·권한·Eval을 구현할 때 |
 | [재일님 팀 가이드](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) | 리서치·퀀트 수집, TimescaleDB와 전략 연구를 구현할 때 |
 | [도현님 팀 가이드](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) | Trading, OMS, Ledger, Position과 NAV를 구현할 때 |
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준서와 ERD를 포함한 17개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준서와 ERD를 포함한 17개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 

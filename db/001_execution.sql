@@ -1,6 +1,6 @@
 -- Sprint D0: execution 스키마
 -- 소유: 도현 (트레이딩본부)
--- 근거: docs/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.2, 4.3
+-- 근거: docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.2, 4.3
 --       docs/HEDGE_FUND_MASTER_PLAN.md 5.7(Fund/Book 계층), 12(OMS)
 --
 -- 원칙:
@@ -246,7 +246,7 @@ CREATE OR REPLACE RULE order_events_no_delete AS ON DELETE TO execution.order_ev
 CREATE TABLE IF NOT EXISTS execution.execution_plans (
     execution_plan_id      uuid PRIMARY KEY,
     order_id               uuid        NOT NULL REFERENCES execution.orders(order_id),
-    philosophy             text        NOT NULL,   -- trading/philosophies.yaml 키
+    philosophy             text        NOT NULL,   -- departments/02-trading/contracts/philosophies.yaml 키
     urgency                text        NOT NULL,
     slices                 integer     NOT NULL,
     limit_offset_bps       numeric(10, 2) NOT NULL,

@@ -1,6 +1,6 @@
 -- Sprint D0: Service Role, Grant, RLS
 -- 소유: 도현
--- 근거: docs/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 5.1, 5.2
+-- 근거: docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 5.1, 5.2
 --       docs/HEDGE_FUND_MASTER_PLAN.md 5.6(권한 분리 원칙)
 --
 -- 스택 메모: 팀 가이드는 Supabase 기준이지만 스택은 마스터플랜 13.1(PostgreSQL)로

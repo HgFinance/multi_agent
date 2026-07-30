@@ -30,7 +30,7 @@
 - 가격·체결·호가의 Primary Source는 [LS증권 Open API](https://openapi.ls-sec.co.kr/)다.
 - 현재 기준 시계열 DB의 우선안은 수집기와 동일한 **별도 TimescaleDB**다. Supabase PostgreSQL 17의 TimescaleDB Extension에 종속하지 않고 `MarketDataRepository` Interface를 유지한다.
 - 모든 Tick을 RAG나 Supabase에 넣지 않는다. Agent는 Raw Tick이 아니라 Feature/Snapshot API를 조회한다.
-- 공시·재무·기업 기본정보는 [Open DART](https://opendart.fss.or.kr/guide/main.do)를 P0 Source로 사용한다.
+- 공시·재무·기업 기본정보는 [OpenDART](../06-integrations/opendart/README.md)를 P0 Source로 사용한다.
 - 거래소 통계·지수·증권상품·파생상품 Reference는 [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)를 우선 검토한다.
 - 한국 거시지표는 [한국은행 ECOS](https://ecos.bok.or.kr/api/)와 [KOSIS Open API](https://kosis.kr/openapi/index/index.jsp)를 사용한다.
 - 뉴스는 기사 검색 결과만 저장하는 것으로 끝내지 않는다. Story 중복 제거, 원출처, 게시·최초 관측 시각과 본문 저장 권한을 함께 관리한다.
@@ -295,6 +295,8 @@ FnGuide DataGuide는 재무·주가·컨센서스 등 전문 데이터를 제공
 ### 5.2 Open DART
 
 **결정:** 공시·기업·재무의 P0 Source.
+
+구현 시 85개 API의 URL, 요청 인자와 응답 필드는 [OpenDART Open API 전체 참조](../06-integrations/opendart/README.md)를 기준으로 사용한다.
 
 우선 구현 Endpoint 범주:
 
@@ -1203,7 +1205,8 @@ Collector가 이미 사용 중인 실제 Package와 Version은 Repository Lockfi
 
 - [LS증권 Open API](https://openapi.ls-sec.co.kr/)
 - [KRX Tick Collector Reference](https://github.com/traderjaeil-lgtm/krx-tick-collector)
-- [Open DART 개발가이드](https://opendart.fss.or.kr/guide/main.do)
+- [OpenDART 전체 개발 참조](../06-integrations/opendart/README.md)
+- [Open DART 공식 개발가이드](https://opendart.fss.or.kr/guide/main.do)
 - [Open DART 정기보고서 재무정보](https://opendart.fss.or.kr/guide/main.do?apiGrpCd=DS003)
 - [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)
 - [KRX KIND](https://kind.krx.co.kr/)

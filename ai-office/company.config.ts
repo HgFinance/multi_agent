@@ -5,11 +5,10 @@
 //  다른 파일은 건드리지 않아도 됩니다.
 //
 //  ⚠️ 딱 2가지 규칙
-//   1. 부서 id(research, brand, ...)는 절대 바꾸지 마세요. 시뮬레이션 엔진이
+//   1. 부서 id(research, strategy1, ...)는 절대 바꾸지 마세요. 시뮬레이션 엔진이
 //      이 id로 움직입니다. 바꾸면 캐릭터가 길을 잃어요.
 //      → 바꿔도 되는 건 name(부서 이름) · icon · short 입니다.
-//   2. 부서는 12개를 유지하세요. 사무실 배치가 4열 3행 = 12칸 고정입니다.
-//      안 쓰는 부서는 지우지 말고 이름만 바꿔서 쓰세요.
+//   2. 부서는 8개다. 1층 4개(2열 2행) + 2층 4개(2열 2행)로 배치된다.
 //
 //  직원 수는 자유롭게 늘리고 줄여도 됩니다. 한 팀에 팀장(lead) 1명은 두세요.
 // ============================================================
@@ -17,13 +16,9 @@
 //  HgFinance 헤지펀드 조직으로 맞춘 버전.
 //  실제 조직은 CEO Office + 6개 투자본부(리서치/트레이딩/리스크/퀀트·백테스트/
 //  회계·포트폴리오/AI QA·감사) + CEO 직속 Agent Workforce 인사팀 = 8개 단위인데
-//  이 오피스 엔진은 12개 고정 슬롯이라 정확히 맞아떨어지지 않는다.
+//  DEPARTMENTS는 그중 7개(6개 투자본부 + 인사팀)와 CEO Office 지원팀 = 8개다.
 //    - CEO는 DEPARTMENTS 배열이 아니라 CEO_PROFILE(대표실)로 별도 표현된다.
-//    - 나머지 7개 단위(6개 투자본부 + 인사팀)를 12개 슬롯 중 7개에 배치하고,
-//      비서실 슬롯(secretary)은 CEO 지원팀으로 재활용했다.
-//    - 남는 4개 슬롯(brand/reels/carousel/partner)은 실제로 없는 부서를
-//      지어내지 않고 "예비" 그대로 뒀다 — REPOSITORY_DEPARTMENT_STRUCTURE.md에
-//      없는 조직을 화면에 만들어내지 않기 위함.
+//    - 1층에 리서치·퀀트·트레이딩·리스크, 2층에 회계·QA감사·인사·CEO지원을 둔다.
 //  직원 이름·프로필은 각 본부 Hermes Profile(departments/<n>/hermes/config.yaml)의
 //  실제 페르소나(agent.personalities)를 그대로 옮긴 것이다. 이 오피스는 여전히
 //  브라우저 안에서만 도는 Scripted Simulation이고 실제 Hermes Runtime이나 Risk/
@@ -53,7 +48,7 @@ export const COMPANY = {
 
 /** 대표 — 사무실 대표실에 앉아 있는 캐릭터 (CEO Agent / executive-orchestrator) */
 export const CEO_PROFILE = {
-  name: "대표",
+  name: "홍진표",
   callsign: "대표님",
   role: "CEO Agent · Mandate 해석과 본부 조율",
   hair: "#42283a",
@@ -68,7 +63,7 @@ export const CEO_PROFILE = {
 };
 
 /**
- * 부서 12개.
+ * 부서 8개. 배열 순서가 배치 순서다 — 앞 4개가 1층, 뒤 4개가 2층.
  * id = 고정(엔진용) / name·short·icon = 자유롭게 변경
  * task = 오늘 하는 일 / report = 팀장 한줄보고
  */
@@ -76,7 +71,7 @@ export const DEPARTMENTS = [
   {
     id: "research",
     name: "리서치본부",
-    short: "research.desk",
+    short: "",
     icon: "🔎",
     task: "종목별 Research Packet 작성 — 근거·촉매·무효화 조건",
     report: "출처와 시점을 확인한 것만 트레이딩본부로 넘겨요.",
@@ -137,38 +132,6 @@ export const DEPARTMENTS = [
     task: "본부 결과 통합, 회의록·Action Item 추적",
     report: "대표님이 결정할 것만 추려서 올려요.",
   },
-  {
-    id: "brand",
-    name: "예비 부서 A",
-    short: "reserve.a",
-    icon: "🗃️",
-    task: "확장 준비 중",
-    report: "아직 배정된 업무가 없어요.",
-  },
-  {
-    id: "reels",
-    name: "예비 부서 B",
-    short: "reserve.b",
-    icon: "🗃️",
-    task: "확장 준비 중",
-    report: "아직 배정된 업무가 없어요.",
-  },
-  {
-    id: "carousel",
-    name: "예비 부서 C",
-    short: "reserve.c",
-    icon: "🗃️",
-    task: "확장 준비 중",
-    report: "아직 배정된 업무가 없어요.",
-  },
-  {
-    id: "partner",
-    name: "예비 부서 D",
-    short: "reserve.d",
-    icon: "🗃️",
-    task: "확장 준비 중",
-    report: "아직 배정된 업무가 없어요.",
-  },
 ] as const;
 
 /**
@@ -192,28 +155,28 @@ export type StaffEntry = {
 
 export const STAFF_LIST: StaffEntry[] = [
   // ── 리서치본부 (research-department) ──────────────────────
-  { dept: "research", rank: "lead", name: "오채린", role: "리서치본부 팀장", callsign: "오리서",
+  { dept: "research", rank: "lead", name: "조재일", role: "리서치본부 팀장", callsign: "오리서",
     colors: ["#6b3d34", "#fff3b0", "#ff8fc0"],
     thoughts: ["Research Packet엔 근거·촉매·무효화 조건이 다 있어야 넘겨요.", "주문 방향은 저희가 정하는 게 아니에요."] },
-  { dept: "research", rank: "member", name: "남지원", role: "Universe Manager",
+  { dept: "research", rank: "member", name: "워런 버핏", role: "Universe Manager",
     colors: ["#2f2a3d", "#c9b8ff", "#b8f0dd"],
     thoughts: ["거래정지·저유동성 종목은 오늘 대상에서 빼요.", "장중에도 계속 갱신해야 해요."] },
-  { dept: "research", rank: "member", name: "백하은", role: "시세 데이터 관리",
+  { dept: "research", rank: "member", name: "찰리 멍거", role: "시세 데이터 관리",
     colors: ["#8a4a3c", "#b8f0dd", "#ff8fc0"],
     thoughts: ["같은 틱이 두 번 들어오면 바로 걸러내요.", "심볼 매핑 어긋난 건 내려보내기 전에 잡아야죠."] },
-  { dept: "research", rank: "member", name: "조은솔", role: "Microstructure 분석",
+  { dept: "research", rank: "member", name: "피터 린치", role: "Microstructure 분석",
     colors: ["#372b4a", "#c9b8ff", "#c9b8ff"],
     thoughts: ["호가창 불균형부터 봅니다.", "체결 프린트가 이상하면 스프레드부터 확인해요."] },
-  { dept: "research", rank: "member", name: "서도윤", role: "Technical 분석",
+  { dept: "research", rank: "member", name: "벤저민 그레이엄", role: "Technical 분석",
     colors: ["#3c3a4f", "#ffe6f2", "#c9b8ff"],
     thoughts: ["돌파인지 소음인지 상대거래량으로 걸러요.", "실현변동성부터 보고 갑니다."] },
-  { dept: "research", rank: "member", name: "유하람", role: "Fundamental 분석",
+  { dept: "research", rank: "member", name: "하워드 막스", role: "Fundamental 분석",
     colors: ["#5a3450", "#fff3b0", "#ff8fc0"],
     thoughts: ["공시 기준일부터 적어둬요.", "밸류에이션은 매번 새로 안 돌려도 돼요."] },
-  { dept: "research", rank: "member", name: "문가은", role: "News·Sentiment 분석",
+  { dept: "research", rank: "member", name: "존 템플턴", role: "News·Sentiment 분석",
     colors: ["#c26e4b", "#ff8fc0", "#fff3b0"],
     thoughts: ["출처·발표시각·관측시각 다 남겨야 PIT 검증이 돼요.", "재포장 기사는 원문부터 찾아요."] },
-  { dept: "research", rank: "member", name: "임태경", role: "Sector·Regime 분석",
+  { dept: "research", rank: "member", name: "김소원", role: "Sector·Regime 분석",
     colors: ["#7b4a2f", "#b8f0dd", "#ff8fc0"],
     thoughts: ["섹터에서 혼자 튀는 종목은 표시해둬요.", "상관구조 깨지는 신호는 놓치면 안 돼요."] },
   { dept: "research", rank: "member", name: "한소이", role: "근거 큐레이터 (RAG)",
@@ -221,16 +184,16 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["Evidence ID랑 신뢰도 점수만 넘겨요, 원문 통째로는 안 줘요.", "출처 삭제는 QA 승인 거쳐야 해요."] },
 
   // ── 퀀트·백테스트본부 (quant-backtest-department) ───────────
-  { dept: "strategy1", rank: "lead", name: "강도현", role: "퀀트본부 팀장", callsign: "강퀀트",
+  { dept: "strategy1", rank: "lead", name: "김나연", role: "퀀트본부 팀장", callsign: "강퀀트",
     colors: ["#2d4b46", "#b8f0dd", "#b8f0dd"],
     thoughts: ["실패한 실험도 Registry에 다 남겨요.", "Production 코드는 제가 직접 안 건드려요."] },
-  { dept: "strategy1", rank: "member", name: "표유진", role: "전략 가설 리서치",
+  { dept: "strategy1", rank: "member", name: "박민성", role: "전략 가설 리서치",
     colors: ["#463227", "#ffe6f2", "#b8f0dd"],
     thoughts: ["반증 가능한 가설로 좁혀야 다음 단계로 가요.", "범위가 애매하면 다시 씁니다."] },
   { dept: "strategy1", rank: "member", name: "신라온", role: "Feature·Dataset",
     colors: ["#6c3a55", "#c9b8ff", "#fff3b0"],
     thoughts: ["미래 정보가 한 행이라도 섞이면 전부 다시 만들어요.", "PIT 안전한지부터 체크해요."] },
-  { dept: "strategy1", rank: "member", name: "방시온", role: "Backtest·Optimizer",
+  { dept: "strategy1", rank: "member", name: "방시혁", role: "Backtest·Optimizer",
     colors: ["#8b534a", "#fff3b0", "#ff8fc0"],
     thoughts: ["비용·슬리피지 안 넣은 백테스트는 안 믿어요.", "과적합 냄새나면 바로 걸러요."] },
   { dept: "strategy1", rank: "member", name: "진하율", role: "전략 릴리스",
@@ -244,15 +207,23 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["룰베이스보다 나은 게 증명될 때만 씁니다.", "드리프트 감지되면 재학습 전에 일단 멈춰요."] },
 
   // ── 트레이딩본부 (trading-department) ────────────────────
-  { dept: "strategy2", rank: "lead", name: "정민준", role: "트레이딩본부 팀장", callsign: "정트레",
+  { dept: "strategy2", rank: "lead", name: "윤도현", role: "트레이딩본부 팀장", callsign: "정트레",
     colors: ["#7a3f58", "#c9b8ff", "#ff8fc0"],
     thoughts: ["Bull/Bear 토론 없이 바로 주문 제안 안 나가요.", "여러 종목이면 trade_case_id 하나로 묶어요."] },
-  { dept: "strategy2", rank: "member", name: "배지안", role: "Bull 리서처",
+  { dept: "strategy2", rank: "member", name: "이현서", role: "Bull 리서처",
     colors: ["#d88d68", "#c9b8ff", "#c9b8ff"],
-    thoughts: ["리서치본부가 준 근거만 씁니다.", "제일 강한 상승 논리로 붙여요."] },
-  { dept: "strategy2", rank: "member", name: "홍시우", role: "Bear 리서처",
-    colors: ["#3a2f4d", "#ffe6f2", "#ff8fc0"],
-    thoughts: ["Bull 논리의 약점부터 찾아요.", "무효화 조건이 핵심이에요."] },
+    thoughts: [
+      "정훈이가 또 딴지 걸겠지. 근거부터 챙기자.",
+      "리서치본부가 준 근거만 씁니다. 그래야 싸울 때 안 밀려요.",
+      "오늘은 커피 얻어먹는다.",
+    ] },
+  { dept: "strategy2", rank: "member", name: "장정훈", role: "Bear 리서처",
+    colors: ["#3a2f4d", "#efe6da", "#a9714b"],
+    thoughts: [
+      "현서 논리 약점부터 찾습니다. 미워서가 아니라 그게 제 일이라서요.",
+      "무효화 조건 없는 상승 논리는 그냥 기대예요.",
+      "이번엔 현서가 맞았으면 좋겠는데.",
+    ] },
   { dept: "strategy2", rank: "member", name: "양서준", role: "Trader/PM",
     colors: ["#274a44", "#fff3b0", "#b8f0dd"],
     thoughts: ["OrderIntent까지만 만들고 전송은 안 해요.", "수량·가격은 계약이 검증하게 두고 제가 우기지 않아요."] },
@@ -264,7 +235,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["승인 없이 멀티레그 안 엮어요.", "옵션체인 stale하면 일단 막아요."] },
 
   // ── 리스크본부 (risk-management) ─────────────────────────
-  { dept: "ops", rank: "lead", name: "조은비", role: "리스크본부 팀장", callsign: "조리스",
+  { dept: "ops", rank: "lead", name: "이예주", role: "리스크본부 팀장", callsign: "조리스",
     colors: ["#313b56", "#fff3b0", "#fff3b0"],
     thoughts: ["approve/resize/reject 근거는 제가 만들고 집행은 엔진이 해요.", "본부 간 신호 충돌은 CEO·감사로 바로 올려요."] },
   { dept: "ops", rank: "member", name: "문가온", role: "시장·유동성 리스크",
@@ -284,7 +255,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["브로커 상태 불명이면 새 주문보다 확인이 먼저예요.", "현금·주문 안 맞으면 회계본부랑 같이 봐요."] },
 
   // ── 회계·포트폴리오본부 (accounting-portfolio-department) ──
-  { dept: "finance", rank: "lead", name: "임채원", role: "회계본부 팀장", callsign: "임포트",
+  { dept: "finance", rank: "lead", name: "김승리", role: "회계본부 팀장", callsign: "임포트",
     colors: ["#573049", "#fff3b0", "#ff8fc0"],
     thoughts: ["대사·평가·Accrual·손익·NAV 순서를 지켜요.", "Break는 숨기지 않고 바로 올려요."] },
   { dept: "finance", rank: "member", name: "지수아", role: "포지션·현금 관리",
@@ -310,7 +281,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["배당·분할은 기준일부터 확인해요.", "불완전한 통지로는 최종 분개 안 올려요."] },
 
   // ── AI QA·감사본부 (qa-department) ───────────────────────
-  { dept: "qa", rank: "lead", name: "윤태리", role: "QA·감사본부 팀장", callsign: "윤규아",
+  { dept: "qa", rank: "lead", name: "김동규", role: "QA·감사본부 팀장", callsign: "윤규아",
     colors: ["#5a3450", "#fff3b0", "#ff8fc0"],
     thoughts: ["압박 있어도 게이트는 그대로 유지해요.", "제 Finding은 저 혼자 못 닫아요."] },
   { dept: "qa", rank: "member", name: "강태오", role: "근거(Evidence) 검증",
@@ -336,7 +307,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["관찰한 사실이랑 추론은 나눠서 적어요.", "증거 없이 한 명 탓 안 해요."] },
 
   // ── Agent Workforce 인사팀 (hr-department) ───────────────
-  { dept: "review", rank: "lead", name: "남궁예린", role: "인사팀 팀장", callsign: "남궁인사",
+  { dept: "review", rank: "lead", name: "류영주", role: "인사팀 팀장", callsign: "남궁인사",
     colors: ["#d88d68", "#c9b8ff", "#c9b8ff"],
     thoughts: ["투자 판단은 제 일이 아니에요.", "제 후보는 제가 최종 승인 못 해요."] },
   { dept: "review", rank: "member", name: "임도훈", role: "채용 우선순위 기획",
@@ -353,39 +324,20 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["Identity 생성은 Platform/IAM 몫이지 제가 아니에요.", "승인 났는데 정리 안 된 채로 안 놔둬요."] },
 
   // ── CEO Office 지원팀 (Chief-of-Staff, executive-orchestrator 보조) ──
-  { dept: "secretary", rank: "lead", name: "유하빈", role: "Chief of Staff 지원", callsign: "유대표",
+  { dept: "secretary", rank: "lead", name: "박유안", role: "Chief of Staff 지원", callsign: "유대표",
     colors: ["#313b56", "#fff3b0", "#fff3b0"],
     thoughts: ["6개 본부 결과를 하나의 설명으로 묶어요.", "주문 전송·리스크 승인 권한은 저희한테 없어요."] },
-  { dept: "secretary", rank: "member", name: "김로하", role: "회의록·Action Item 추적",
+  { dept: "secretary", rank: "member", name: "박지현", role: "회의록·Action Item 추적",
     colors: ["#4b3b2c", "#b8f0dd", "#c9b8ff"],
     thoughts: ["기한 지난 안건은 자동으로 다시 올려요.", "결정된 것만 대표님께 남겨드려요."] },
 
-  // ── 예비 부서 A/B/C/D ─────────────────────────────────────
-  // 실제 존재하지 않는 조직을 지어내지 않기 위해 자리만 비워둔다.
-  { dept: "brand", rank: "lead", name: "빈자리 A", role: "채용 예정",
-    colors: ["#2c2638", "#fff3b0", "#c9b8ff"],
-    thoughts: ["아직 배정된 업무가 없어요."] },
-  { dept: "reels", rank: "lead", name: "빈자리 B", role: "채용 예정",
-    colors: ["#372b4a", "#c9b8ff", "#c9b8ff"],
-    thoughts: ["아직 배정된 업무가 없어요."] },
-  { dept: "carousel", rank: "lead", name: "빈자리 C", role: "채용 예정",
-    colors: ["#3c3a4f", "#ffe6f2", "#c9b8ff"],
-    thoughts: ["아직 배정된 업무가 없어요."] },
-  { dept: "partner", rank: "lead", name: "빈자리 D", role: "채용 예정",
-    colors: ["#5a3450", "#fff3b0", "#ff8fc0"],
-    thoughts: ["아직 배정된 업무가 없어요."] },
 ];
 
 /**
  * 외부 연동을 아직 안 붙인 팀 → 화면에 "연동 대기"로 표시됩니다.
  * 연동을 다 붙였거나, 그냥 전부 초록불로 보고 싶으면 빈 배열 []로 두세요.
  */
-export const PENDING_INTEGRATIONS: Record<string, string> = {
-  brand: "예비 부서 — 확장 예정",
-  reels: "예비 부서 — 확장 예정",
-  carousel: "예비 부서 — 확장 예정",
-  partner: "예비 부서 — 확장 예정",
-};
+export const PENDING_INTEGRATIONS: Record<string, string> = {};
 
 /**
  * 결과 보관함 링크 (Notion 등). 비워두면 화면에서 링크 버튼이 숨겨집니다.

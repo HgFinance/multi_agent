@@ -80,5 +80,5 @@
 
 ## 만들어진 배경
 
-이 툴은 **갓생맘 🎀 (@godseng.mom)** 이 만들어 배포한 것입니다.
-화면 하단의 크레딧은 지우지 마세요.
+HgFinance 헤지펀드 Digital Twin의 관제 화면이다.
+기준 문서는 docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md 다.

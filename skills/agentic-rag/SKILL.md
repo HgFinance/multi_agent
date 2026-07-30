@@ -13,13 +13,15 @@ metadata:
 
 ## Overview
 
-This skill runs a small LangGraph pipeline — retrieve → grade → generate → hallucination-check, with a bounded retry loop — over a local document corpus, and returns a structured JSON verdict. It exists so that `compliance-policy-agent` (and later `evidence-qa-agent` / `hallucination-critic`) never answer from the model's own memory of "what the Mandate probably says" — every claim must trace back to a retrieved, Point-in-Time-valid document chunk.
+This skill runs a small LangGraph pipeline — retrieve → grade → generate → hallucination-check, with a bounded retry loop — over a local document corpus, and returns a structured JSON verdict. It exists so that `compliance-policy-agent` and `evidence-qa-agent` (and later `hallucination-critic`) never answer from the model's own memory of "what the Mandate probably says" or "what the source probably said" — every claim must trace back to a retrieved, Point-in-Time-valid document chunk.
 
 Baseline scope only (see HEDGE_FUND_MASTER_PLAN.md 5.10 and 13.1's "don't over-build early" principle): no query rewriting, reranking, fusion, or semantic cache yet. Those are backlog items once this loop is proven in real use.
 
 ## When to use
 
-Use this skill whenever a persona needs to answer a question that must be grounded in a specific, versioned policy document rather than general knowledge — currently: `compliance-policy-agent` checking a proposed order against the Mandate, Restricted List, or Policy Store.
+Use this skill whenever a persona needs to answer a question that must be grounded in a specific, versioned document rather than general knowledge or model memory — currently:
+- `compliance-policy-agent` checking a proposed order against the Mandate, Restricted List, or Policy Store (`--persona compliance-policy-agent`, `corpus/compliance/`).
+- `evidence-qa-agent` checking a claim from a Research/Trading Artifact against the Evidence Store (`--persona evidence-qa-agent`, `corpus/evidence/`). This is a citation-grounding aid only — the final PASS/WARN/FAIL gate decision still comes from `departments/06-ai-qa-audit/evidence/evidence_qa_engine.py`, which this skill does not call and does not replace.
 
 ## Prerequisites
 
@@ -37,6 +39,11 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 python3 "$REPO_ROOT/skills/agentic-rag/main.py" \
   --persona compliance-policy-agent \
   --query "Can we open a new long position in SYMBOL_A today?" \
+  --as-of 2026-07-29
+
+python3 "$REPO_ROOT/skills/agentic-rag/main.py" \
+  --persona evidence-qa-agent \
+  --query "SYMBOL_A Q2 2026 revenue grew 14.2% year-over-year" \
   --as-of 2026-07-29
 ```
 
@@ -65,7 +72,7 @@ Present `answer.rationale` and `answer.cited_documents` to the user; never resta
 
 ## Corpus
 
-`corpus/compliance/` holds **sample placeholder** policy documents (Mandate, Restricted List, Concentration Policy) so the pipeline is testable today. Replace their content with the real, sourced versions before relying on this for anything beyond development — they are marked `status: SAMPLE_PLACEHOLDER` in their frontmatter for exactly this reason. Each document's frontmatter (`document_id`, `version`, `effective_from`/`effective_to`) drives the deterministic Point-in-Time filter in `src/nodes.py` — keep that frontmatter accurate when you add real documents.
+`corpus/compliance/` holds **sample placeholder** policy documents (Mandate, Restricted List, Concentration Policy) so the pipeline is testable today. `corpus/evidence/` holds **sample placeholder** evidence-source documents (an earnings release, an analyst note, a time-bound news article) for `evidence-qa-agent` testing, using the same fictional `SYMBOL_A`/`SYMBOL_B` placeholders as `corpus/compliance/`. Replace their content with the real, sourced versions before relying on either for anything beyond development — they are marked `status: SAMPLE_PLACEHOLDER` in their frontmatter for exactly this reason. Each document's frontmatter (`document_id`, `version`, `effective_from`/`effective_to`) drives the deterministic Point-in-Time filter in `src/nodes.py` — keep that frontmatter accurate when you add real documents.
 
 ## Architecture
 
@@ -87,4 +94,6 @@ Retrieval math and citation-grounding checks are plain Python (`src/nodes.py`, `
 
 ## Extending to other personas
 
-To wire in `evidence-qa-agent` / `hallucination-critic`, add a corpus directory (e.g. `corpus/evidence/`) and register it in `PERSONA_CORPUS` in `main.py`. The graph and retriever are already generic — nothing persona-specific is hardcoded outside `main.py`'s corpus mapping and the compliance-flavored system prompts in `nodes.py` (those two prompts should move to a small per-persona prompt table when a second persona is added, rather than being copy-pasted).
+`evidence-qa-agent` is wired in (`corpus/evidence/`, registered in `PERSONA_CORPUS` in `main.py`). System prompts and verdict vocabulary per persona live in `PERSONA_PROMPTS` in `src/nodes.py` — the graph, retriever and node functions are persona-agnostic; only that table and `main.py`'s corpus mapping change per persona.
+
+To wire in `hallucination-critic` next: add a `PERSONA_PROMPTS` entry in `src/nodes.py` (grade/generate system prompts, a `no_evidence_verdict`, and query/docs labels), then either point it at `corpus/evidence/` (reusing `evidence-qa-agent`'s corpus, since a Hallucination Critic checks the same underlying evidence) or a new corpus directory, and register it in `main.py`'s `PERSONA_CORPUS`.
