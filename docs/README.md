@@ -347,15 +347,24 @@ Repository Scaffold
 
 ## 저장소 구조
 
-현재는 Profile, Prototype과 통합 Migration이 서로 다른 경로에 있다.
+`departments/00-ceo-office`부터 `departments/07-agent-workforce`까지 조직 단위로 Hermes Profile과
+본부 소유 코드를 묶는다([저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) 11절 단계 1~3 완료).
+공통 Contract, Orchestration, Integration과 Migration은 아직 공유 경계로 추출되지 않아 `db/`, `supabase/migrations/`,
+`timescaledb/migrations/`, `skills/`는 최상위에 그대로 있다.
 
 ```text
 multi_agent/
-├── orchestration/hermes/    # 현재 8개 Hermes Profile
-├── skills/agentic-rag/      # 현재 Compliance RAG baseline
-├── trading/                 # 현재 Contract Prototype
-├── execution/               # 현재 OMS/Paper Broker Prototype
-├── accounting/              # 현재 Ledger/Reconciliation Prototype
+├── departments/
+│   ├── 00-ceo-office/hermes/
+│   ├── 01-research/{hermes/, collectors/}       # 뉴스 수집: collectors/news.py
+│   ├── 02-trading/{hermes/, contracts/, oms/, broker/}
+│   ├── 03-risk/hermes/
+│   ├── 04-quant-backtest/hermes/
+│   ├── 05-accounting-portfolio/{hermes/, ledger/, reconciliation/}
+│   ├── 06-ai-qa-audit/hermes/
+│   └── 07-agent-workforce/hermes/
+├── skills/agentic-rag/      # 현재 Compliance RAG baseline (공용 skills 경계 유지)
+├── trading/, execution/, accounting/, fetch_news.py  # 구 경로 — 임시 CLI 호환 Wrapper (2026-10-31 제거 예정)
 ├── db/                      # 현재 D0-D2 Prototype SQL, 통합 DB와 병행 적용 금지
 ├── supabase/migrations/     # 전사 운영 DB Canonical Migration
 ├── timescaledb/migrations/  # 시장 시계열 Canonical Migration
@@ -364,7 +373,9 @@ multi_agent/
 └── docs/
 ```
 
-목표 구조는 `departments/00-ceo-office`부터 `departments/07-agent-workforce`까지 조직 단위로 Agent, Service와 Test를 묶는다. 공통 Contract, Orchestration, Integration과 Migration은 공유 경계에 둔다. `ai-office/`는 이전 완료 전 실행 기준이며 이후 `apps/operator-web/`로 단계적으로 이동한다. 이번 문서 정리에서는 실제 파일을 이동하지 않으며, 상세 목표 트리와 단계별 이전 순서는 [저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
+남은 목표(단계 4: DB Prototype 통합, 단계 5: 구조 Gate)와 `contracts/`, `orchestration/workflows/`,
+`integrations/`, `apps/` 등 공유 경계 추출은 아직 진행 전이다. 상세 목표 트리와 단계별 이전 순서는
+[저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
 
 ## 첫 번째 완료 시나리오
 

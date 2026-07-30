@@ -14,18 +14,20 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-SRC_ROOT="$REPO_ROOT/orchestration/hermes"
+SRC_ROOT="$REPO_ROOT/departments"
 DEST_ROOT="$HOME/.hermes/profiles"
 
+# dept -> departments/<n>/hermes 매핑. 순서는 CLAUDE.md 담당자 표와 무관하며
+# REPOSITORY_DEPARTMENT_STRUCTURE.md 2절 조직 번호를 따른다.
 DEPARTMENTS=(
-  ceo-agent
-  hr-department
-  research-department
-  trading-department
-  risk-management
-  quant-backtest-department
-  accounting-portfolio-department
-  qa-department
+  "ceo-agent:00-ceo-office"
+  "hr-department:07-agent-workforce"
+  "research-department:01-research"
+  "trading-department:02-trading"
+  "risk-management:03-risk"
+  "quant-backtest-department:04-quant-backtest"
+  "accounting-portfolio-department:05-accounting-portfolio"
+  "qa-department:06-ai-qa-audit"
 )
 
 MODE="${1:-push}"   # push (repo -> ~/.hermes, default) | pull (~/.hermes -> repo)
@@ -53,14 +55,16 @@ sync_one() {
 case "$MODE" in
   push)
     echo "Syncing repo -> ~/.hermes/profiles (config.yaml, SOUL.md only)"
-    for dept in "${DEPARTMENTS[@]}"; do
-      sync_one "$dept" "$SRC_ROOT/$dept" "$DEST_ROOT/$dept"
+    for entry in "${DEPARTMENTS[@]}"; do
+      dept="${entry%%:*}"; folder="${entry##*:}"
+      sync_one "$dept" "$SRC_ROOT/$folder/hermes" "$DEST_ROOT/$dept"
     done
     ;;
   pull)
     echo "Syncing ~/.hermes/profiles -> repo (config.yaml, SOUL.md only)"
-    for dept in "${DEPARTMENTS[@]}"; do
-      sync_one "$dept" "$DEST_ROOT/$dept" "$SRC_ROOT/$dept"
+    for entry in "${DEPARTMENTS[@]}"; do
+      dept="${entry%%:*}"; folder="${entry##*:}"
+      sync_one "$dept" "$DEST_ROOT/$dept" "$SRC_ROOT/$folder/hermes"
     done
     echo "Review with 'git diff' before committing."
     ;;

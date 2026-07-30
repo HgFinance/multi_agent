@@ -12,7 +12,7 @@
   4. Position과 Cash는 projection이다. 분개에서 재계산할 수 있어야 한다.
   5. 회계 수치는 체결·원장 이벤트에서만 나온다. LLM 문장에서 추출하지 않는다.
 
-자체 점검: python accounting/ledger.py
+자체 점검: python departments/05-accounting-portfolio/ledger/ledger.py
 """
 from __future__ import annotations
 
@@ -23,9 +23,12 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 트레이딩본부 contracts.py를 직접 참조한다. contracts/가 아직 공용 최상위 경계로
+# 분리되지 않았기 때문이며(REPOSITORY_DEPARTMENT_STRUCTURE.md 4절), 그 전까지는
+# 본부 간 의존 방향이 이 파일에 그대로 남는다.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
 
-from trading.contracts import Side  # noqa: E402
+from contracts import Side  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 계정과목 (최소 세트)

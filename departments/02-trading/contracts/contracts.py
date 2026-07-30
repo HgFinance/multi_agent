@@ -11,7 +11,7 @@ Broker를 직접 호출하지 않는다. LLM이 만든 값이 그대로 DB로 �
 
 가격·수량은 float를 쓰지 않는다. Decimal만 사용한다(팀 가이드 4.2, 7.1).
 
-자체 점검: python trading/contracts.py
+자체 점검: python departments/02-trading/contracts/contracts.py
 """
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ class RiskDecision(Base):
     얼마나 언제까지 보내도 되는지 알 수 없다.
 
     동규님 스키마 확정 시 필드명이 바뀔 수 있다. 그때 고칠 곳은 여기와
-    execution/oms.py의 apply_risk_decision / submit 두 군데다.
+    departments/02-trading/oms/oms.py의 apply_risk_decision / submit 두 군데다.
     """
 
     risk_decision_id: UUID = Field(default_factory=uuid4)

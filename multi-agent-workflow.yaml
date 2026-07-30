@@ -21,11 +21,11 @@ workflow:
   name: "AI 트레이딩 신호 검증 및 집행 프로세스"
   timeout_seconds: 420
   news_source: "tavily"
-  news_script: "fetch_news.py"
+  news_script: "departments/01-research/collectors/news.py"
   steps:
     - step: 1
       department: research-department
-      task: "Universe/Technical/Microstructure/News 등 관련 Analyst를 소집해 종목별 Research Packet(근거, 촉매, 무효화 조건) 생성. 실시간 가격·베타·변동성 데이터를 참조하고 fetch_news.py로 관련 뉴스 및 공시자료를 확인"
+      task: "Universe/Technical/Microstructure/News 등 관련 Analyst를 소집해 종목별 Research Packet(근거, 촉매, 무효화 조건) 생성. 실시간 가격·베타·변동성 데이터를 참조하고 departments/01-research/collectors/news.py로 관련 뉴스 및 공시자료를 확인"
       timeout_seconds: 90
       retry:
         max_attempts: 3
@@ -235,17 +235,17 @@ usage:
     strategy_cycle: "quant-backtest-department chat -q 'Backtest [전략 가설], then delegate release review to qa-department and promotion decision to ceo-agent'"
     workforce_cycle: "hr-department chat -q 'Design a Job Profile for [채용 요청], then delegate permission verification to qa-department and budget/org approval to ceo-agent'"
   news_search:
-    local: "python3 fetch_news.py '[검색어]'"
-    tavily: "python3 fetch_news.py '[검색어]'"
+    local: "python3 departments/01-research/collectors/news.py '[검색어]'"
+    tavily: "python3 departments/01-research/collectors/news.py '[검색어]'"
 
 files:
-  ceo_agent: "orchestration/hermes/ceo-agent/config.yaml"
-  hr_department: "orchestration/hermes/hr-department/config.yaml"
-  research_department: "orchestration/hermes/research-department/config.yaml"
-  trading_department: "orchestration/hermes/trading-department/config.yaml"
-  risk_management: "orchestration/hermes/risk-management/config.yaml"
-  quant_backtest_department: "orchestration/hermes/quant-backtest-department/config.yaml"
-  accounting_portfolio_department: "orchestration/hermes/accounting-portfolio-department/config.yaml"
-  qa_department: "orchestration/hermes/qa-department/config.yaml"
+  ceo_agent: "departments/00-ceo-office/hermes/config.yaml"
+  hr_department: "departments/07-agent-workforce/hermes/config.yaml"
+  research_department: "departments/01-research/hermes/config.yaml"
+  trading_department: "departments/02-trading/hermes/config.yaml"
+  risk_management: "departments/03-risk/hermes/config.yaml"
+  quant_backtest_department: "departments/04-quant-backtest/hermes/config.yaml"
+  accounting_portfolio_department: "departments/05-accounting-portfolio/hermes/config.yaml"
+  qa_department: "departments/06-ai-qa-audit/hermes/config.yaml"
   workflow: "multi-agent-workflow.yaml"
-  news_script: "fetch_news.py"
+  news_script: "departments/01-research/collectors/news.py"

@@ -41,16 +41,18 @@
 
 ### 저장소 소유권
 
-| 구분 | 현재 경로 | 목표 경로 |
+| 구분 | 현재 경로 | 구 경로(호환 Wrapper) |
 |---|---|---|
-| 리서치 Hermes | `orchestration/hermes/research-department/` | `departments/01-research/hermes/` |
-| 뉴스 수집 Baseline | `fetch_news.py` | `departments/01-research/collectors/news.py` |
-| LS API 계약 | `docs/06-integrations/ls-openapi/` | 문서 위치 유지, 리서치본부가 내용 Owner |
-| 시장 시계열 Migration | `timescaledb/migrations/` | 도구 표준 경로 유지, 리서치본부가 Schema Owner |
-| 퀀트 Hermes | `orchestration/hermes/quant-backtest-department/` | `departments/04-quant-backtest/hermes/` |
-| 연구 자료 | `references/` | 저작권·공유 범위 ADR 전까지 현재 위치 유지 |
+| 리서치 Hermes | `departments/01-research/hermes/` | `orchestration/hermes/research-department/` |
+| 뉴스 수집 Baseline | `departments/01-research/collectors/news.py` | `fetch_news.py` |
+| LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
+| 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
+| 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
+| 연구 자료 | `references/` | — (저작권·공유 범위 ADR 전까지 현재 위치 유지, 이동 안 함) |
 
-실제 파일 이동 전에는 현재 경로가 실행 기준이다. `supabase/migrations/`와 `timescaledb/migrations/`는 본부별로 복제하지 않는다.
+11절 단계 1~3(REPOSITORY_DEPARTMENT_STRUCTURE.md)이 완료되어 `departments/01-research/`가 실행 기준이다.
+구 경로는 `runpy` 기반 임시 CLI 호환 Wrapper로 남아 있으며 2026-10-31 제거 예정이다.
+`supabase/migrations/`와 `timescaledb/migrations/`는 본부별로 복제하지 않는다.
 
 ### Hermes 자기 개선 책임
 

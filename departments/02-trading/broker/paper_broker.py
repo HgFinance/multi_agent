@@ -12,7 +12,7 @@ OMS와 분리된 별도 모듈이다. 팀 가이드 5.1에서 svc_oms와 svc_bro
 이 클래스는 OMS를 호출하지 않는다. 이벤트를 만들어 돌려주고, 그걸 OMS에
 넣는 것은 호출자의 몫이다. 브로커가 우리 주문 상태를 직접 바꿀 수 없어야 한다.
 
-자체 점검: python execution/paper_broker.py
+자체 점검: python departments/02-trading/broker/paper_broker.py
 """
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ from datetime import datetime, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 
-from trading.contracts import OrderType, Side  # noqa: E402
+from contracts import OrderType, Side  # noqa: E402
 
 WON = Decimal("1")
 QTY_UNIT = Decimal("1")  # 국내 주식은 1주 단위
@@ -89,7 +89,7 @@ class PaperBroker:
 
     def __init__(self, fee_bps: Decimal = Decimal("1.5"), sell_tax_bps: Decimal = Decimal("15"),
                  max_participation: Decimal = Decimal("0.05")) -> None:
-        # 기본값은 trading/philosophies.yaml의 market 블록과 같은 값이다.
+        # 기본값은 departments/02-trading/contracts/philosophies.yaml의 market 블록과 같은 값이다.
         self.fee_bps = fee_bps
         self.sell_tax_bps = sell_tax_bps
         self.max_participation = max_participation
@@ -174,8 +174,9 @@ if __name__ == "__main__":
     from decimal import Decimal as D
     from uuid import uuid4
 
-    from trading.contracts import MarketSnapshot, OrderIntent, OrderState, RiskDecision, RiskVerdict
+    from contracts import MarketSnapshot, OrderIntent, OrderState, RiskDecision, RiskVerdict
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "oms"))
     from oms import OMS  # noqa: E402
 
     now = datetime.now(timezone.utc)

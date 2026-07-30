@@ -16,7 +16,7 @@ Agent 런타임이 죽어도 이 모듈은 계속 동작해야 한다.
   5. 상태는 event store에서 재구축 가능하다.
   6. 응답이 없으면 UNKNOWN이다. FILLED나 CANCELLED로 추정하지 않는다.
 
-자체 점검: python execution/oms.py
+자체 점검: python departments/02-trading/oms/oms.py
 """
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 
-from trading.contracts import (  # noqa: E402
+from contracts import (  # noqa: E402
     TERMINAL_STATES,
     OrderIntent,
     OrderState,
@@ -358,7 +358,7 @@ class OMS:
 if __name__ == "__main__":
     from datetime import timedelta
 
-    from trading.contracts import (
+    from contracts import (
         MarketSnapshot,
         OrderType,
         RiskVerdict,
