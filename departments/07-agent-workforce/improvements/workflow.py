@@ -1,15 +1,20 @@
-# 담당자: 영주 (Agent Workforce 인사팀)
-# 근거: HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19(승인형 Hermes 자기 개선),
-#       TEAM_YOUNGJU_CEO_HR_GUIDE.md 6.5(조직 재귀적 자기 개선), 10.2(승인과 감사)
-#
-# F19 개선 후보 생명주기 상태 머신 + 권한 분리(Separation of Duties) 게이트.
-#
-# 핵심 통제(F19 완료조건):
-#   - 후보를 만든 author 는 자기 후보를 단독 승인할 수 없다 (자기승인 차단).
-#   - 승인(APPROVED)에는 독립 승인자 + QA Eval 근거가 있어야 한다.
-#   - 모든 전이는 같은 candidate_id 로 Append-only Event 에 기록된다 (같은 ID 재현).
-#   - 허용되지 않은 상태 전이는 막는다 (조용한 덮어쓰기 금지).
+#!/usr/bin/env python3
+"""F19: 개선 후보 생명주기 상태 머신 + 권한 분리(Separation of Duties) 게이트.
 
+소유: 영주 (Agent Workforce 인사팀)
+근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19,
+      docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 6.5, 10.2(승인과 감사)
+
+여기서 승인 판정은 결정론적 코드만 한다. LLM이 상태를 바꾸지 않는다.
+
+불변식:
+  1. 후보를 만든 author 는 자기 후보를 단독 승인할 수 없다 (자기승인 차단).
+  2. 승인(APPROVED)에는 독립 승인자 + QA Eval 근거가 있어야 한다.
+  3. 모든 전이는 같은 candidate_id 로 Append-only Event 에 기록된다 (같은 ID 재현).
+  4. 허용되지 않은 상태 전이와 종료 상태 재전이는 막는다 (조용한 덮어쓰기 금지).
+
+자체 점검: python departments/07-agent-workforce/improvements/workflow.py
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -251,4 +256,4 @@ if __name__ == "__main__":
     except IllegalTransition:
         pass
 
-    print("workflow.py 자체 점검 통과")
+    print("ok - improvement workflow 상태머신·권한분리 점검 통과")

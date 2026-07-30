@@ -1,19 +1,22 @@
-# 담당자: 영주 (Agent Workforce 인사팀)
-# 근거: HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19(승인형 Hermes 자기 개선),
-#       TEAM_YOUNGJU_CEO_HR_GUIDE.md 6.5(조직 재귀적 자기 개선), HEDGE_FUND_MASTER_PLAN.md 5.10
-#
-# F19 "ImprovementCandidate" 의 Canonical 앱 레이어 계약.
-#
-# 대응 테이블: workforce.improvement_candidates (+ improvement_candidate_events) —
-# supabase/migrations/20260730000600_workforce_improvement_candidates.sql. 이 Pydantic
-# 계약과 DDL check 제약(근거·롤백·상태 enum)은 동일 규칙을 강제한다. asyncpg Repository 로
-# 실제 테이블에 연결하는 것은 후속 작업.
-#
-# 원칙(CLAUDE.md 절대 깨면 안 되는 권한 분리, F19 완료조건):
-#   - 근거(evidence) 없는 후보는 만들 수 없다.
-#   - 롤백 대상(rollback_target)이 없는 후보는 만들 수 없다.
-#   - 후보를 만든 주체(author)는 workflow.py 에서 자기 후보를 단독 승인할 수 없다.
+#!/usr/bin/env python3
+"""F19: 자기 개선 후보(ImprovementCandidate) 계약.
 
+소유: 영주 (Agent Workforce 인사팀)
+근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19(승인형 Hermes 자기 개선),
+      docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 6.5, docs/HEDGE_FUND_MASTER_PLAN.md 5.10
+
+이 Pydantic 계약과 대응 테이블 workforce.improvement_candidates 의 DDL check 제약(근거·롤백·
+상태 enum)은 같은 규칙을 강제한다
+(supabase/migrations/20260730000600_workforce_improvement_candidates.sql).
+
+불변식:
+  1. 근거(evidence) 없는 후보는 만들 수 없다.
+  2. 롤백 대상(rollback_target) 없는 후보는 만들 수 없다.
+  3. 롤백 대상은 현재 Version 이하의 실재 Version 이어야 한다.
+  4. 후보 작성자(author)는 자기 후보를 단독 승인할 수 없다 (workflow.py 에서 강제).
+
+자체 점검: python departments/07-agent-workforce/improvements/candidate.py
+"""
 from __future__ import annotations
 
 from enum import Enum
@@ -167,4 +170,4 @@ if __name__ == "__main__":
         lambda: ImprovementCandidate(**_valid(evidence_ids=["f1", "f1"])),
     )
 
-    print("candidate.py 자체 점검 통과")
+    print("ok - ImprovementCandidate 계약 점검 통과")

@@ -1,14 +1,20 @@
-# 담당자: 영주 (Agent Workforce 인사팀)
-# 근거: HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19, database/README.md 7절(적용 방법)
-#
-# F19 개선 후보의 asyncpg 실 저장 계층.
-#   candidate.py / workflow.py 의 In-Memory 도메인 타입(ImprovementCandidate,
-#   CandidateEvent)을 workforce.improvement_candidates / improvement_candidate_events
-#   테이블에 매핑한다 (컬럼과 1:1).
-#
-# 접속 문자열은 .env 의 DATABASE_URL 을 쓰며 이 모듈은 값을 로그로 남기지 않는다.
-# service_role Key 나 비밀번호를 코드/로그에 넣지 않는다 (TEAM_YOUNGJU 7.2, 10.3).
+#!/usr/bin/env python3
+"""F19: 개선 후보의 asyncpg 실 저장 계층.
 
+소유: 영주 (Agent Workforce 인사팀)
+근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F19,
+      docs/database/README.md 7절(적용 방법)
+
+candidate.py / workflow.py 의 도메인 타입(ImprovementCandidate, CandidateEvent)을
+workforce.improvement_candidates / improvement_candidate_events 테이블에 1:1 매핑한다.
+
+불변식:
+  1. 접속 문자열은 .env 의 DATABASE_URL 만 쓴다.
+  2. 비밀번호와 service_role Key 를 코드·로그에 남기지 않는다 (TEAM_YOUNGJU 7.2, 10.3).
+  3. 전이 Event 는 append 만 한다 (workforce.improvement_candidate_events 는 DB 트리거로도 강제).
+
+이 모듈은 live DB 를 요구하므로 __main__ 자체 점검이 없다. 검증은 DB 적용 후 통합 테스트로 한다.
+"""
 from __future__ import annotations
 
 import json
