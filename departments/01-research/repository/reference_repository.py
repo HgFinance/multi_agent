@@ -49,6 +49,10 @@ REPOSITORY_VERSION = "research-reference-repository-v1"
 
 MARKET_KRX = "KRX"
 PROVIDER_LS = "LS"
+
+# document_instruments.extraction_version 에 남길 값. 언급 관계 판정 규칙이 바뀌면
+# 올린다 - 어떤 규칙으로 붙인 관계인지 나중에 구분할 수 있어야 한다.
+NEWS_LINK_VERSION = "news-symbol-map-v1"
 CURRENCY_KRW = "KRW"
 
 
@@ -485,53 +489,112 @@ class SupabaseReferenceRepository(ReferenceRepository):
         return after - before, len(rows) - (after - before), unlinked
 
     def upsert_news_documents(
-        self, records: list, *, source_id: UUID
-    ) -> tuple[int, int]:
-        """뉴스 기사를 research.documents 에 적재한다. (신규, 갱신).
+        self, records: list, *, source_id: UUID, issuer_by_external_id: dict | None = None
+    ) -> tuple[int, int, dict[str, UUID]]:
+        """뉴스 기사를 research.documents 에 적재한다. (신규, 갱신, external_id -> document_id).
 
         upsert_documents 와 나눈 이유 - 그쪽은 DART 전용이라 language 를 'ko' 로
         고정하고 corp_code 로 issuer 를 붙인다. 뉴스는 언어가 Source 마다 다르고
         발행사가 issuer 가 아니다.
 
-        **issuer_id 를 채우지 않는다.** 기사에 실린 심볼은 발행기업 식별자가 아니고,
-        해외 심볼은 reference.issuers 에 아예 없다. 없는 것을 추정해 붙이지 않는다.
+        **issuer_id 는 호출자가 판정해서 넘긴 것만 채운다.** 기사에 실린 심볼은 그 자체로
+        발행기업 식별자가 아니다. 한 기사가 여러 기업을 언급할 수 있는데 issuer_id 는
+        단수이므로, 호출자가 "이 기사는 이 발행사 전용" 이라고 판정한 것만 넘긴다.
+        나머지 언급 관계는 link_documents_to_instruments 로 간다.
 
         본문(content)은 여기 넣지 않는다. document_versions/evidence_chunks 로 가야
         하는데 그건 Source 의 allowed_uses 에 FULLTEXT_STORE 가 있어야 한다 -
         호출자가 Registry.check_use 로 먼저 확인한다.
         """
+        by_ext = issuer_by_external_id or {}
         rows = [
             (
                 source_id, r.external_id, r.document_type, r.canonical_url, r.title,
-                r.language, r.published_at, r.observed_at, r.status,
+                r.language, by_ext.get(r.external_id), r.published_at, r.observed_at, r.status,
             )
             for r in records
         ]
         if not rows:
-            return 0, 0
+            return 0, 0, {}
 
         before = self._count("research.documents")
         with self._conn.cursor() as cur:
-            self._execute_values(
+            returned = self._execute_values(
                 cur,
                 """
                 insert into research.documents
                   (source_id, external_id, document_type, canonical_url, title, language,
-                   published_at, observed_at, status)
+                   issuer_id, published_at, observed_at, status)
                 values %s
                 on conflict (source_id, external_id) do update set
                   title = excluded.title,
                   canonical_url = excluded.canonical_url,
                   published_at = excluded.published_at,
                   status = excluded.status,
+                  -- 한 번 붙은 issuer 를 NULL 로 되돌리지 않는다. 판정 규칙이 좋아져서
+                  -- 새로 붙는 것은 허용하되, 못 붙였다고 지우지는 않는다.
+                  issuer_id = coalesce(excluded.issuer_id, research.documents.issuer_id),
                   updated_at = now()
+                returning external_id, document_id
                 """,
                 rows,
                 page_size=500,
+                fetch=True,
             )
         after = self._count("research.documents")
         self._conn.commit()
-        return after - before, len(rows) - (after - before)
+        # fetch=True 가 필수다. page_size 로 쪼개진 문장의 마지막 것만 잡히면 앞쪽
+        # document_id 를 통째로 잃는다(market_repository 와 같은 함정).
+        id_by_ext = {ext: did for ext, did in returned}
+        return after - before, len(rows) - (after - before), id_by_ext
+
+    def issuer_for_symbol(
+        self, symbol: str, *, provider: str = PROVIDER_LS, market: str = MARKET_KRX
+    ) -> UUID | None:
+        """종목코드 -> issuer_id. 연결이 없으면 None 이고 만들지 않는다."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select i.issuer_id
+                from reference.instrument_symbols s
+                join reference.instruments i using (instrument_id)
+                where s.symbol = %s and s.provider = %s and i.market = %s
+                  and i.issuer_id is not null
+                limit 1
+                """,
+                (symbol, provider, market),
+            )
+            r = cur.fetchone()
+            return None if r is None else r[0]
+
+    def link_documents_to_instruments(self, links: list[tuple]) -> int:
+        """research.document_instruments 에 언급 관계를 넣는다.
+
+        links 는 (document_id, instrument_id, relation_type, confidence) 다.
+        instrument_id 가 reference.instruments FK 이므로 **우리 Instrument Master 에
+        있는 종목만** 넣을 수 있다. 해외 심볼은 여기 들어오지 못한다 - 호출자가
+        걸러서 넘긴다.
+        """
+        if not links:
+            return 0
+        before = self._count("research.document_instruments")
+        with self._conn.cursor() as cur:
+            self._execute_values(
+                cur,
+                """
+                insert into research.document_instruments
+                  (document_id, instrument_id, relation_type, confidence, extraction_version)
+                values %s
+                on conflict (document_id, instrument_id, relation_type) do update set
+                  confidence = excluded.confidence,
+                  extraction_version = excluded.extraction_version
+                """,
+                [(d, i, rt, c, NEWS_LINK_VERSION) for d, i, rt, c in links],
+                page_size=500,
+            )
+        after = self._count("research.document_instruments")
+        self._conn.commit()
+        return after - before
 
     def upsert_financial_facts(self, facts: list, *, source_id: UUID) -> tuple[int, int, int]:
         """research.financial_facts 에 적재한다. (신규, 갱신, issuer 미연결).
