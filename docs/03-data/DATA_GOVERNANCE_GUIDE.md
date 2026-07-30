@@ -1,12 +1,13 @@
 # Production Hedge Fund Data Collection and Governance Guide
 
-> 문서 상태: Draft v1.2
+> 문서 상태: Draft v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 적용 대상: Research, Shadow, Paper, Limited Live, Production Proprietary 및 External Capital 환경  
 > 목적: 수집해야 할 데이터, 데이터의 소유권·품질·시점·계보·보안·보존·사용권과 운영 절차를 정의한다.  
 > 주의: 법정 보존기간, 개인정보, 투자자 기록 및 거래소 데이터 사용권은 관할과 계약에 따라 달라지므로 법률·Compliance 검토 후 확정한다.
 > 전사 Source, 부서별 Data Product와 Library 구현안: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 데이터 구현 가이드: [재일](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](../05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](../05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](../05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
+> Frontend 데이터 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 
 ## 1. 문서 목적
 
@@ -207,6 +208,8 @@ Alternative Data는 개인정보, 이용약관, 대표성, Revision과 Survivors
 - 장기 연구용 Derived Table
 - 실험 중인 Feature
 - 비공식 Commentary
+
+AI Office의 캐릭터 위치, 선택 Tab과 화면 Cache도 Tier 3 Projection이다. Agent, 주문, Position, PnL, NAV와 Trading State의 공식 값으로 승격하지 않는다. UI Event는 원본 Domain Event를 대체하지 않으며 재연결 시 공식 Snapshot에서 다시 만든다. 전 종목 Tick 원문은 Pixel Office로 복제하지 않고 필요한 집계 값과 Artifact Reference만 전달한다.
 
 ## 6. 데이터 중요도와 보안 분류
 

@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.3
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -9,6 +9,7 @@
 > 공통 기준: [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md), [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View
 
 ---
 
@@ -543,6 +544,14 @@ report.ready.v1
 
 CEO Summary Event에 본부별 전체 Payload를 복사하지 않는다. 공식 Artifact ID, Version, 결정, 조건과 Trace만 포함한다.
 
+### 8.4 AI Office 제공 계약
+
+- Live Office의 8개 조직, Agent Roster, Queue, SLA, Handoff, Approval과 Incident 집계 Read Model을 제공한다.
+- Agent 상세에는 Profile·Prompt·Skill·Tool·Model Version, 현재 `case_id`, Heartbeat, 비용, Eval과 Permission 만료를 제공한다.
+- `DEMO`, `PAPER`, `LIVE` Mode는 Backend Session과 Fund 권한으로 결정하고 Browser Local State로 전환하지 않는다.
+- CEO 승인, Strategy Promotion과 Workforce Lifecycle Command는 `governance-api`·`workforce-api`로 받고 사유, 멱등 키, 예상 Version과 Audit 결과를 보존한다.
+- CEO와 인사팀 화면은 Risk·QA Block을 숨기거나 해제할 수 없다.
+
 ---
 
 ## 9. 권장 라이브러리
@@ -629,7 +638,7 @@ Supabase DB Backup에는 Storage Object 복구가 별도라는 전제로 Private
 
 ## 11. 화면과 운영 View
 
-영주님 담당 Dashboard 최소 화면:
+영주님 담당 화면은 현재 `ai-office/` Pixel Office를 8개 조직 기반 Live Office로 바꾸고, 아래 업무용 View를 함께 제공한다.
 
 1. **CEO Overview:** NAV, PnL, Cash, Risk State, Strategy, Incident.
 2. **Decision Inbox:** 사용자 승인, 위원회 안건, Escalation과 만료.
@@ -713,6 +722,7 @@ Supabase DB Backup에는 Storage Object 복구가 별도라는 전제로 Private
 - [ ] 인사팀이 자기 Candidate를 단독 Production 활성화할 수 없다.
 - [ ] 사용자·Fund·Agent별 Supabase RLS가 통합 Test를 통과한다.
 - [ ] CEO/HR Agent에 Raw Market DB와 `service_role` Credential이 없다.
+- [ ] AI Office의 8개 조직, Agent 상태와 승인 Inbox가 공식 Read Model에서 생성되고 `DEMO/PAPER/LIVE`가 명확히 분리된다.
 
 ---
 

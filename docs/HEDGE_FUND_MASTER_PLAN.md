@@ -1,6 +1,6 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v2.8
+> 문서 상태: Production Plan v2.9
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
@@ -11,6 +11,7 @@
 > Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
 > Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 저장소 조직 경계: [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
+> 운영 Frontend 기준: [AI Office Frontend and Operator Control Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 전사 데이터·부서별 Library: [헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 구현 가이드: [재일](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
 > 
@@ -1372,29 +1373,35 @@ multi_agent/
 - Worker 사용률
 - 오류율과 재시도율
 
-### 15.2 대시보드 화면
+### 15.2 AI Office와 대시보드 화면
 
-- Market Feed Health
-- 전 종목 Heatmap 및 Attention Universe
-- Agent Queue와 현재 분석 종목
-- 종목별 사건, 논거 및 결정 타임라인
-- 포지션, 주문, PnL 및 Exposure
-- Risk Limit과 Kill Switch
-- LLM 비용과 호출 지연
-- Replay 제어 및 의사결정 비교
-- Strategy Registry와 Champion/Challenger 상태
-- 실험, 검증, 배포 및 롤백 이력
-- Fund/Pod/Book별 자본 배분과 Risk Budget
-- Reconciliation Break와 Daily Close 상태
-- NAV, Cash, Margin, Collateral 및 Fee 원장
-- Strategy/Book/Pod별 Performance Attribution
-- 본부별 Work Queue, SLA 및 Escalation
-- 자동화 등급별 실행과 승인 현황
-- 본부 간 Case Timeline과 미해결 Action Item
-- Futures Curve와 Roll Calendar
-- Option Chain, IV Surface, Skew 및 Term Structure
-- Greeks, Margin 및 파생상품 Stress Scenario
-- Multi-leg Order와 Leg Risk 상태
+현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 이를 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 **조직 관제·탐색 화면**으로 발전시킨다. 현재 12개 고정 방과 Scripted Simulation은 프로젝트 조직이나 실시간 업무 상태의 기준이 아니며, 8개 조직과 Backend Event를 사용하는 데이터 기반 구조로 교체한다.
+
+첫 화면의 Live Office에서 Agent, 본부, Queue, Approval과 Incident를 보고, 다음 업무용 View로 이동한다.
+
+- `CEO Command Center`: Mandate, 승인 Inbox, 자본 배분, Incident와 Daily Brief
+- `Market and Universe`: LS Feed Health, 전 종목 처리량, Heatmap과 Attention Universe
+- `Research Case`: 종목별 사건, RAG Evidence, Bull/Bear 논거와 결정 타임라인
+- `Strategy Factory`: Candidate, Dataset, Backtest, Champion/Challenger, Shadow/Paper 배포와 롤백
+- `Risk Center`: Risk Limit, Exposure, Breach, Stress, Trading State와 Kill Switch
+- `Trading and OMS`: Order Intent, Risk Decision, 주문, 체결, 거절, 취소와 TCA
+- `Portfolio and Close`: Position, PnL, NAV, Cash, Margin, Collateral, Fee와 Reconciliation
+- `AI QA and Audit`: Finding, Eval, Version, Trace, Replay와 Evidence Export
+- `Agent Workforce`: 본부별 Work Queue, SLA, Agent 상태, Skill Gap, 비용과 자기 개선 이력
+- `Derivatives`: Futures Curve, Roll Calendar, Option Chain, IV Surface, Greeks와 Multi-leg Leg Risk
+
+Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 캐릭터의 움직임은 공식 Agent Runtime Event의 Projection이고, Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
+
+### 15.2.1 실시간 Frontend 계약
+
+1. 화면은 `GET /ui/snapshot`으로 권한 범위의 기준 상태를 먼저 읽는다.
+2. FastAPI의 `/ws/operations`에서 필터링된 Domain Event를 받는다.
+3. Event는 `event_id`, `event_type`, `schema_version`, `sequence`, `occurred_at`, `server_time`, `fund_id`와 `trace_id`를 가진다.
+4. Client는 Heartbeat, 지수형 재연결, Sequence Gap과 Staleness를 감지한다.
+5. 누락 Event는 추측하지 않고 Snapshot을 다시 읽어 복구한다.
+6. `DEMO`, `PAPER`, `LIVE`는 Backend Session으로 분리하고 모든 화면에 현재 Mode를 표시한다.
+
+Frontend는 Supabase Service Role, Broker와 LS Credential을 갖지 않으며 Risk 계산, OMS 전이와 Ledger Posting을 수행하지 않는다. 승인, Pause와 Kill Switch는 FastAPI Command로만 요청하고 사용자 Identity, 사유, 영향 Preview, 멱등 키, 예상 Version과 Audit Event를 남긴다. 상세 UX, 상태 계약과 구현 순서는 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
 ### 15.3 Alerting과 On-call
 
@@ -3011,6 +3018,8 @@ Critical Vendor는 최소 연 1회 Evidence와 BCP를 재검토하고 계약 변
 - 읽기 전용 Incident Snapshot과 Evidence Export
 
 모든 관리 Action은 Preview, 영향 범위, 필요한 승인, 멱등성 Key와 결과 검증을 제공한다.
+
+`ai-office`는 이 Control Plane의 사용자-facing Shell이 될 수 있지만 Backend 통제 계층을 대체하지 않는다. Pixel Office와 상세 Dashboard가 중단되어도 Market Worker, Risk Engine, OMS와 Ledger는 계속 동작해야 하며, UI 재연결 후 공식 Snapshot으로 상태를 복구한다. 현재 `vinext`·Cloudflare Worker 배포는 Frontend Prototype Baseline일 뿐 전체 Cloud Provider 결정이 아니다.
 
 ### 21.20 Production Launch Gate
 

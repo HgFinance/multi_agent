@@ -1,11 +1,12 @@
 # Personal Hedge Fund Agent - Core Implementation Plan
 
-> 문서 상태: Lean Core Plan v1.3
+> 문서 상태: Lean Core Plan v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 제품 안내: [README.md](../README.md)  
 > Domain 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](MINIMUM_SERVICE_UNIT_SPEC.md)  
 > 기능 구현 Backlog: [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](../02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)  
 > 기술 스택 결정: [TECH_STACK_DECISIONS.md](../02-engineering/TECH_STACK_DECISIONS.md)  
+> 운영 Frontend: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 한 명의 사용자를 위한 전 종목 실시간 Multi-Strategy Paper Trading Investment Agent의 핵심 폐쇄 루프를 16주 안에 완성한다.  
 > 원칙: 장기 비전은 버리지 않되, 수익 아이디어 발굴부터 Paper 주문과 사후평가까지 하나의 폐쇄 루프를 먼저 완성한다.
 
@@ -153,16 +154,20 @@ Research 또는 QA 업무 완료
 
 ### 4.3 필수 화면
 
-하나의 운영 Dashboard에 다음 View만 구현한다.
+현재 `ai-office/`의 Pixel Office를 Core 운영 Frontend Baseline으로 사용한다. 첫 화면은 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀의 Queue·Agent·승인·Incident 상태를 보여주는 `Live Office`다. 현재 12개 고정 부서와 Scripted Simulation은 `DEMO` Mode로만 유지하고 실제 서비스 상태로 오인되지 않게 한다.
 
-- `Market`: Feed 상태, 전 종목 처리량, 상위 이벤트
-- `Portfolio`: Position, Cash, Exposure, PnL
-- `Strategies`: Draft, Backtest, Shadow, Paper, Paused 상태
-- `Decisions`: Agent 분석, 근거, Risk 승인·거절
-- `Orders`: 주문, 체결, 취소와 오류
-- `Control`: Entry Block, Reduce-only, Kill Switch
+Core는 다음 View를 구현한다.
 
-화려한 투자자 Portal보다 운영자가 상태를 빠르게 판단하고 통제할 수 있는 화면을 우선한다.
+- `Live Office`: 8개 조직, Agent 상태, 업무 Queue, Handoff와 Incident
+- `Market`: LS Feed 상태, 전 종목 처리량, Gap·Stale과 상위 이벤트
+- `Research/Decisions`: Agent 분석, RAG 근거, Bull/Bear 논거, Risk 승인·거절
+- `Strategies`: Draft, Backtest, Shadow, Paper, Paused와 Promotion 상태
+- `Portfolio`: Position, Cash, Exposure, PnL과 Reconciliation
+- `Orders`: Order Intent, 주문, 체결, 취소, 거절과 오류
+- `Control`: Trading State, Entry Block, Reduce-only와 Kill Switch
+- `Audit/Workforce`: Trace, Finding, Agent Version, 비용과 개선 후보
+
+운영자가 상태를 빠르게 판단하고 통제할 수 있는 화면을 우선한다. Pixel Animation은 공식 상태의 시각 표현이며, Backend Event 없이 업무 상태를 추정하거나 Position·Risk·PnL을 계산하지 않는다. 모든 화면은 `DEMO/PAPER/LIVE`, 마지막 갱신 시각, 연결 상태와 Trading State를 항상 표시한다.
 
 ## 5. Core Architecture
 
@@ -403,7 +408,7 @@ Cloud Provider와 Managed Service는 Core 시작 전에 확정할 필요가 없�
 | Agent Orchestration | Hermes Agent Adapter |
 | Workflow | LangGraph StateGraph + 결정론적 Domain State Machine |
 | Backtest | vectorbt Adapter 우선, Dataset Manifest 고정 |
-| UI | 미정, Next.js + TypeScript를 우선 후보로 평가 |
+| UI | `ai-office` 기반 Next.js + React + TypeScript |
 | 관측성 | 구조화 Log + OpenTelemetry + Prometheus |
 | 배포 | Docker Compose, CI |
 
@@ -547,13 +552,14 @@ Core Launch Gate 통과 후 다음 순서로 Capability를 넓힌다.
 1. 첫 시장과 자산: 한국 상장주식·ETF Multi-Strategy Paper, 실제 Short·Derivatives는 Capability Gate 적용
 2. 가격 공급자와 초기 Feed: LS증권 Open API의 Tick 체결과 10단계 호가 WebSocket
 3. 저장소 경계: Supabase 운영 원장, 별도 TimescaleDB 리서치·퀀트 전용, Redis Streams P0
+4. Frontend Baseline: `ai-office`의 Next.js·React·TypeScript와 Pixel Office를 8개 조직의 실시간 Operator Control Plane으로 발전
 
 **미확정**
 
 1. Paper/Live Broker와 주문 Adapter
 2. 첫 활성 Strategy Portfolio의 구성과 전략군별 Champion 수
 3. 자동 Paper 주문 여부와 사용자 승인 방식
-4. Frontend Framework
+4. 전체 Cloud Provider와 Frontend Production Hosting
 5. 16주 동안 허용할 월별 Data, LLM과 Infrastructure 예산
 
 Cloud Provider, 파생상품, 외부자금 법인 구조와 전체 부서 설계는 Core 개발의 선행조건이 아니다.

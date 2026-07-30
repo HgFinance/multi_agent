@@ -1,9 +1,10 @@
 # Investment Case - Minimum Service Unit Specification
 
-> 문서 상태: Confirmed Core Domain and Service Specification v1.2  
+> 문서 상태: Confirmed Core Domain and Service Specification v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 결정: 우리 서비스의 최소 가치 단위는 `Investment Case`다.  
 > 상위 구현 범위: [HEDGE_FUND_CORE_PLAN.md](HEDGE_FUND_CORE_PLAN.md), [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](../02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)  
+> Frontend 표현 기준: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 목적: Event부터 평가까지 반드시 함께 구현해야 하는 기능, 데이터와 책임을 하나의 단위로 고정한다.
 
 ## 1. 최종 정의
@@ -176,6 +177,12 @@ Position이 종료되면 사용자는 다음 보고를 받는다.
 거래하지 않은 Case도 이후 가격 경로를 표본 평가해 `놓친 기회`, `정확한 PASS`, `Risk가 방지한 손실`을 구분한다.
 
 ## 사용자에게 보이는 서비스 화면
+
+### 0. Live Office
+
+**목적**: CEO Office, 6개 본부와 Agent Workforce 인사팀 중 어느 조직이 Case를 처리하고 어디에서 승인·차단·Handoff가 발생했는지 보여준다.
+
+Pixel Office의 Agent 이동은 `case_id`, Department Queue, Workflow State와 Heartbeat의 시각 Projection이다. 움직임 자체가 Case 상태를 바꾸지 않으며, 사용자가 방이나 Agent를 선택하면 아래 Market Radar, Case Inbox와 Case Detail로 이동한다.
 
 ### 1. Market Radar
 
@@ -898,6 +905,8 @@ primary key(case_id, artifact_type, artifact_id, artifact_version)
 ## 13. 사용자 화면의 최소 단위
 
 사용자는 Investment Case 한 건을 다음 구조로 본다.
+
+AI Office, 상세 Dashboard와 Hermes는 모두 같은 `case_id`, `case_version`과 Domain Event를 사용한다. 화면은 `DEMO/PAPER/LIVE`, 마지막 갱신 시각과 Stale 상태를 표시하며 재연결 후 공식 Snapshot과 정합성을 회복한다.
 
 ```text
 Investment Case IC-20260728-0001

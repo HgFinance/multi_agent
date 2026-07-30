@@ -2,6 +2,7 @@
 
 > 개인형 멀티 에이전트 헤지펀드의 전체 데이터 구조 기준선. Supabase 운영 원장과 TimescaleDB 시장 데이터 Plane을 물리적으로 분리한다.
 > 저장소 경계: [Department-Oriented Repository Structure](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
+> Frontend 조회 경계: [AI Office Frontend Plan](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 
 ## 1. 이 구조가 해결하는 것
 
@@ -163,7 +164,7 @@ supabase db reset
 supabase db push
 ```
 
-Frontend에는 `api` Schema만 노출한다. `service_role` Key는 Backend Secret Manager에만 두며 Browser, Agent Prompt, Log와 Dataset에 넣지 않는다.
+Frontend는 Supabase Auth로 사용자 Identity를 얻고 FastAPI BFF가 권한에 맞게 조합한 `api` Read Model을 조회한다. Browser에 내부 Domain Schema와 금융 상태 쓰기 권한을 직접 노출하지 않는다. `service_role` Key는 Backend Secret Manager에만 두며 Browser, Agent Prompt, Log와 Dataset에 넣지 않는다. 현재 `ai-office`의 Drizzle/D1 Schema는 금융 Source of Truth가 아니다.
 
 ### TimescaleDB
 

@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.3
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부  
@@ -9,6 +9,7 @@
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View
 
 ---
 
@@ -472,6 +473,14 @@ nav.official.v1
 
 Event Payload에는 전체 Statement나 보고서를 넣지 않고 `object_path`, `hash`, `record_id`를 넣는다.
 
+### 6.4 AI Office 제공 계약
+
+- `Trading and OMS`에 Order Intent, Risk Decision Ref, Order·Fill 상태, Reject·Cancel Reason, Broker Session과 TCA Read Model을 제공한다.
+- `Portfolio and Close`에 Position, Cash, Exposure, PnL, NAV 상태, Reconciliation Break와 `as_of`를 제공한다.
+- Order와 Fill은 동일한 `case_id`, `trace_id`, `order_intent_id`와 `internal_order_id`로 상세 화면에서 연결된다.
+- 화면의 Cancel·Paper 승인 요청은 `oms-api` Command로 받고 사용자 Identity, 사유, 멱등 키와 예상 Version을 검사한다.
+- Frontend는 `execution`·`accounting` Table, OMS 상태 머신과 Journal Posting을 직접 수정하지 않는다.
+
 ---
 
 ## 7. 권장 라이브러리
@@ -623,6 +632,7 @@ Accounting:
 - [ ] PnL과 NAV가 가격·FX·Fee Source까지 재현된다.
 - [ ] Supabase RLS로 Fund/Book/Service 권한이 분리된다.
 - [ ] 트레이딩·회계 Agent에 TimescaleDB와 `service_role` Credential이 없다.
+- [ ] AI Office의 Order·Position·PnL·NAV 상태를 공식 Read Model과 Event Chain에서 재구성하고 Browser가 거래·원장 Table을 직접 수정하지 않는다.
 
 ---
 
