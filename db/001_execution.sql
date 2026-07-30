@@ -121,48 +121,108 @@ CREATE INDEX IF NOT EXISTS order_intents_pending_idx ON execution.order_intents 
     WHERE intent_status IN ('DRAFT', 'RISK_PENDING');
 
 -- ---------------------------------------------------------------------------
--- OMS 상태 머신 (팀 가이드 4.3)
+-- OMS 상태 머신 (팀 가이드 v1.2 4.3)
 -- 전이 규칙을 트리거 코드가 아니라 참조 테이블 + FK로 강제한다.
 -- 코드로 검사하면 우회 경로가 생기지만, FK는 우회할 수 없다.
+--
+-- v1.2에서 표가 둘로 갈렸다. Intent(우리 심사 절차)와 Broker Order(브로커의 사실)를
+-- 한 표에 두면 리스크본부 거부와 브로커 거부가 같은 REJECTED로 뭉개진다.
+-- 두 표 사이의 전이는 없다. 두 표를 잇는 것은 orders.order_intent_id FK뿐이다.
+-- 대응 코드: trading/contracts.py의 INTENT_TRANSITIONS / BROKER_TRANSITIONS.
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS execution.order_state_transitions (
+CREATE TABLE IF NOT EXISTS execution.intent_state_transitions (
     from_state text NOT NULL,
     to_state   text NOT NULL,
     PRIMARY KEY (from_state, to_state)
 );
 
-INSERT INTO execution.order_state_transitions (from_state, to_state) VALUES
+INSERT INTO execution.intent_state_transitions (from_state, to_state) VALUES
     ('DRAFT',            'RISK_PENDING'),
+    ('DRAFT',            'EXPIRED'),      -- 심사 요청 전에도 valid_until은 지난다
     ('RISK_PENDING',     'APPROVED'),
     ('RISK_PENDING',     'RESIZED'),      -- 리스크본부의 수량 축소
-    ('RISK_PENDING',     'REJECTED'),
+    ('RISK_PENDING',     'REJECTED'),     -- 리스크본부의 거부. 브로커 거부와 다른 사건이다
+    ('RISK_PENDING',     'EXPIRED'),
     ('APPROVED',         'READY_TO_SUBMIT'),
     ('RESIZED',          'READY_TO_SUBMIT'),
-    ('READY_TO_SUBMIT',  'SUBMITTED'),
-    ('READY_TO_SUBMIT',  'EXPIRED'),      -- Risk 승인 만료 후 미전송
+    ('APPROVED',         'EXPIRED'),
+    ('RESIZED',          'EXPIRED'),
+    ('READY_TO_SUBMIT',  'EXPIRED')       -- Risk 승인 만료 후 미전송
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS execution.broker_order_state_transitions (
+    from_state text NOT NULL,
+    to_state   text NOT NULL,
+    PRIMARY KEY (from_state, to_state)
+);
+
+INSERT INTO execution.broker_order_state_transitions (from_state, to_state) VALUES
+    ('CREATED',          'SUBMITTED'),
+    ('CREATED',          'EXPIRED'),
+    ('CREATED',          'CANCEL_PENDING'),
     ('SUBMITTED',        'ACKNOWLEDGED'),
     ('SUBMITTED',        'REJECTED'),     -- Broker 거부
+    ('SUBMITTED',        'CANCEL_PENDING'),
     ('SUBMITTED',        'UNKNOWN'),      -- 응답 없음. 추정 금지 (팀 가이드 2장 원칙 3)
     ('ACKNOWLEDGED',     'PARTIALLY_FILLED'),
     ('ACKNOWLEDGED',     'FILLED'),
-    ('ACKNOWLEDGED',     'CANCELLED'),
     ('ACKNOWLEDGED',     'EXPIRED'),
+    ('ACKNOWLEDGED',     'CANCEL_PENDING'),
     ('ACKNOWLEDGED',     'UNKNOWN'),
     ('PARTIALLY_FILLED', 'PARTIALLY_FILLED'),
     ('PARTIALLY_FILLED', 'FILLED'),
-    ('PARTIALLY_FILLED', 'CANCELLED'),
-    ('PARTIALLY_FILLED', 'EXPIRED'),
+    ('PARTIALLY_FILLED', 'CANCEL_PENDING'),
+    ('PARTIALLY_FILLED', 'EXPIRED'),      -- DAY 주문 잔량이 장 마감으로 소멸
     ('PARTIALLY_FILLED', 'UNKNOWN'),
-    ('UNKNOWN',          'ACKNOWLEDGED'), -- 조회로 상태 복구
+    -- 취소는 반드시 CANCEL_PENDING을 거친다. 브로커 확인 없이 CANCELLED로 쓰지 않는다.
+    -- 취소 요청과 체결은 교차한다. 요청했다고 체결이 안 온다고 가정하지 않는다.
+    ('CANCEL_PENDING',   'CANCELLED'),
+    ('CANCEL_PENDING',   'PARTIALLY_FILLED'),
+    ('CANCEL_PENDING',   'FILLED'),
+    ('CANCEL_PENDING',   'UNKNOWN'),
+    ('UNKNOWN',          'ACKNOWLEDGED'), -- Broker Reconciliation 확정으로만 탈출
     ('UNKNOWN',          'PARTIALLY_FILLED'),
     ('UNKNOWN',          'FILLED'),
     ('UNKNOWN',          'CANCELLED'),
-    ('UNKNOWN',          'REJECTED')
+    ('UNKNOWN',          'REJECTED'),
+    ('UNKNOWN',          'EXPIRED')
 ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------
--- Orders: Risk 승인을 통과한 주문만 존재한다.
+-- Intent Events: 심사 절차의 append-only 로그. order_intents.intent_status는
+-- 여기서 재구축 가능한 projection이다.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS execution.intent_events (
+    intent_event_id uuid PRIMARY KEY,
+    order_intent_id uuid        NOT NULL REFERENCES execution.order_intents(order_intent_id),
+    event_type      text        NOT NULL,
+    sequence        bigint      NOT NULL,
+
+    event_time      timestamptz NOT NULL,
+    received_at     timestamptz NOT NULL DEFAULT now(),
+    processed_at    timestamptz,
+
+    from_state      text        NOT NULL,
+    to_state        text        NOT NULL,
+    payload         jsonb       NOT NULL,
+    trace_id        text        NOT NULL,
+
+    FOREIGN KEY (from_state, to_state)
+        REFERENCES execution.intent_state_transitions (from_state, to_state),
+    UNIQUE (order_intent_id, sequence)
+);
+
+CREATE OR REPLACE RULE intent_events_no_update AS ON UPDATE TO execution.intent_events DO INSTEAD NOTHING;
+CREATE OR REPLACE RULE intent_events_no_delete AS ON DELETE TO execution.intent_events DO INSTEAD NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Orders: 브로커에 실재하는 주문. Risk 승인을 통과한 Intent에서만 생성된다.
+--
+-- v1.2 기준으로 이 테이블에는 심사 단계 상태(DRAFT/RISK_PENDING/APPROVED...)가
+-- 없다. 그 상태들은 order_intents.intent_status가 갖는다. 여기 행이 존재한다는
+-- 것 자체가 "Risk 승인을 통과했다"는 뜻이다.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS execution.orders (
@@ -171,10 +231,11 @@ CREATE TABLE IF NOT EXISTS execution.orders (
     client_order_id    text        NOT NULL UNIQUE,
     broker_order_id    text,
     broker_adapter     text        NOT NULL,
-    state              text        NOT NULL DEFAULT 'DRAFT',
+    state              text        NOT NULL DEFAULT 'CREATED',
 
-    -- Risk 승인 없이 SUBMITTED로 갈 수 없다 (팀 가이드 2장 원칙 2, DoD 2번).
-    risk_decision_id   uuid,
+    -- Risk 승인 없이는 이 행이 만들어질 수 없다 (팀 가이드 2장 원칙 2, DoD 2번).
+    -- v1.2에서 NOT NULL로 조인다. RISK_APPROVED는 상태가 아니라 전제조건이다.
+    risk_decision_id   uuid        NOT NULL,
     risk_approved_qty  numeric(20, 4),
     risk_decision_expires_at timestamptz,
 
@@ -188,10 +249,6 @@ CREATE TABLE IF NOT EXISTS execution.orders (
     CONSTRAINT orders_qty_chk CHECK (requested_quantity > 0),
     -- 체결 수량이 주문 수량을 넘을 수 없다 (팀 가이드 4.3).
     CONSTRAINT orders_fill_chk CHECK (filled_quantity >= 0 AND filled_quantity <= requested_quantity),
-    -- 전송된 주문에는 반드시 Risk Decision이 붙어 있어야 한다.
-    CONSTRAINT orders_risk_required_chk CHECK (
-        state IN ('DRAFT', 'RISK_PENDING', 'REJECTED') OR risk_decision_id IS NOT NULL
-    ),
     -- 승인 수량을 초과해 주문할 수 없다.
     CONSTRAINT orders_risk_qty_chk CHECK (
         risk_approved_qty IS NULL OR requested_quantity <= risk_approved_qty
@@ -200,6 +257,11 @@ CREATE TABLE IF NOT EXISTS execution.orders (
 
 CREATE INDEX IF NOT EXISTS orders_open_idx ON execution.orders (state, last_event_at)
     WHERE state NOT IN ('FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED');
+
+-- UNKNOWN 주문이 하나라도 있으면 그 Fund의 신규 주문을 막는다 (가이드 4.3).
+-- fund_id는 order_intents에 있으므로 조인 없이 걸러낼 수 있게 부분 인덱스를 둔다.
+CREATE INDEX IF NOT EXISTS orders_unknown_idx ON execution.orders (order_intent_id)
+    WHERE state = 'UNKNOWN';
 
 -- ---------------------------------------------------------------------------
 -- Order Events: append-only. orders.state는 여기서 재구축 가능해야 한다.
@@ -227,7 +289,7 @@ CREATE TABLE IF NOT EXISTS execution.order_events (
 
     -- 허용된 전이가 아니면 INSERT 자체가 실패한다.
     FOREIGN KEY (from_state, to_state)
-        REFERENCES execution.order_state_transitions (from_state, to_state),
+        REFERENCES execution.broker_order_state_transitions (from_state, to_state),
     -- 같은 브로커 이벤트를 두 번 받아도 한 번만 기록된다 (멱등성).
     UNIQUE (broker_adapter, broker_event_id),
     UNIQUE (order_id, sequence)
