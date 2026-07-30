@@ -155,7 +155,7 @@ export type StaffEntry = {
 
 export const STAFF_LIST: StaffEntry[] = [
   // ── 리서치본부 (research-department) ──────────────────────
-  { dept: "research", rank: "lead", name: "조재일", role: "리서치본부 팀장", callsign: "오리서",
+  { dept: "research", rank: "lead", name: "조재일", role: "리서치본부 팀장", callsign: "조리서",
     colors: ["#6b3d34", "#fff3b0", "#ff8fc0"],
     thoughts: ["Research Packet엔 근거·촉매·무효화 조건이 다 있어야 넘겨요.", "주문 방향은 저희가 정하는 게 아니에요."] },
   { dept: "research", rank: "member", name: "워런 버핏", role: "Universe Manager",
@@ -184,7 +184,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["Evidence ID랑 신뢰도 점수만 넘겨요, 원문 통째로는 안 줘요.", "출처 삭제는 QA 승인 거쳐야 해요."] },
 
   // ── 퀀트·백테스트본부 (quant-backtest-department) ───────────
-  { dept: "strategy1", rank: "lead", name: "김나연", role: "퀀트본부 팀장", callsign: "강퀀트",
+  { dept: "strategy1", rank: "lead", name: "김나연", role: "퀀트본부 팀장", callsign: "김퀀트",
     colors: ["#2d4b46", "#b8f0dd", "#b8f0dd"],
     thoughts: ["실패한 실험도 Registry에 다 남겨요.", "Production 코드는 제가 직접 안 건드려요."] },
   { dept: "strategy1", rank: "member", name: "박민성", role: "전략 가설 리서치",
@@ -207,7 +207,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["룰베이스보다 나은 게 증명될 때만 씁니다.", "드리프트 감지되면 재학습 전에 일단 멈춰요."] },
 
   // ── 트레이딩본부 (trading-department) ────────────────────
-  { dept: "strategy2", rank: "lead", name: "윤도현", role: "트레이딩본부 팀장", callsign: "정트레",
+  { dept: "strategy2", rank: "lead", name: "윤도현", role: "트레이딩본부 팀장", callsign: "윤트레",
     colors: ["#7a3f58", "#c9b8ff", "#ff8fc0"],
     thoughts: ["Bull/Bear 토론 없이 바로 주문 제안 안 나가요.", "여러 종목이면 trade_case_id 하나로 묶어요."] },
   { dept: "strategy2", rank: "member", name: "이현서", role: "Bull 리서처",
@@ -235,7 +235,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["승인 없이 멀티레그 안 엮어요.", "옵션체인 stale하면 일단 막아요."] },
 
   // ── 리스크본부 (risk-management) ─────────────────────────
-  { dept: "ops", rank: "lead", name: "이예주", role: "리스크본부 팀장", callsign: "조리스",
+  { dept: "ops", rank: "lead", name: "이예주", role: "리스크본부 팀장", callsign: "이리스",
     colors: ["#313b56", "#fff3b0", "#fff3b0"],
     thoughts: ["approve/resize/reject 근거는 제가 만들고 집행은 엔진이 해요.", "본부 간 신호 충돌은 CEO·감사로 바로 올려요."] },
   { dept: "ops", rank: "member", name: "문가온", role: "시장·유동성 리스크",
@@ -255,7 +255,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["브로커 상태 불명이면 새 주문보다 확인이 먼저예요.", "현금·주문 안 맞으면 회계본부랑 같이 봐요."] },
 
   // ── 회계·포트폴리오본부 (accounting-portfolio-department) ──
-  { dept: "finance", rank: "lead", name: "김승리", role: "회계본부 팀장", callsign: "임포트",
+  { dept: "finance", rank: "lead", name: "김승리", role: "회계본부 팀장", callsign: "김회계",
     colors: ["#573049", "#fff3b0", "#ff8fc0"],
     thoughts: ["대사·평가·Accrual·손익·NAV 순서를 지켜요.", "Break는 숨기지 않고 바로 올려요."] },
   { dept: "finance", rank: "member", name: "지수아", role: "포지션·현금 관리",
@@ -281,7 +281,7 @@ export const STAFF_LIST: StaffEntry[] = [
     thoughts: ["배당·분할은 기준일부터 확인해요.", "불완전한 통지로는 최종 분개 안 올려요."] },
 
   // ── AI QA·감사본부 (qa-department) ───────────────────────
-  { dept: "qa", rank: "lead", name: "김동규", role: "QA·감사본부 팀장", callsign: "남감사",
+  { dept: "qa", rank: "lead", name: "김동규", role: "QA·감사본부 팀장", callsign: "김감사",
     colors: ["#5a3450", "#fff3b0", "#ff8fc0"],
     thoughts: ["압박 있어도 게이트는 그대로 유지해요.", "제 Finding은 저 혼자 못 닫아요."] },
   { dept: "qa", rank: "member", name: "강태오", role: "근거(Evidence) 검증",
