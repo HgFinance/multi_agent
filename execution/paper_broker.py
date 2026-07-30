@@ -24,10 +24,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from trading.contracts import OrderType, Side  # noqa: E402
+from trading.contracts import (  # noqa: E402
+    LOT_SIZE as QTY_UNIT,
+)
+from trading.contracts import (  # noqa: E402
+    OrderType,
+    Side,
+    is_valid_tick,
+    tick_size,
+)
 
 WON = Decimal("1")
-QTY_UNIT = Decimal("1")  # 국내 주식은 1주 단위
 
 
 @dataclass(frozen=True)
@@ -46,32 +53,6 @@ class Quote:
     ask: Decimal
     bid_size: Decimal
     ask_size: Decimal
-
-
-def tick_size(price: Decimal) -> Decimal:
-    """KRX 호가 단위. 가격대별로 다르다.
-
-    2023-01 개편 기준. 이 값이 틀리면 지정가가 거래소에서 거부되므로
-    실거래 전에 반드시 최신 규정과 대조해야 한다.
-    """
-    p = int(price)
-    if p < 2_000:
-        return Decimal("1")
-    if p < 5_000:
-        return Decimal("5")
-    if p < 20_000:
-        return Decimal("10")
-    if p < 50_000:
-        return Decimal("50")
-    if p < 200_000:
-        return Decimal("100")
-    if p < 500_000:
-        return Decimal("500")
-    return Decimal("1000")
-
-
-def is_valid_tick(price: Decimal) -> bool:
-    return price % tick_size(price) == 0
 
 
 class PaperBroker:
@@ -163,10 +144,35 @@ class PaperBroker:
             },
         )
 
-    def cancel(self, order, when: datetime | None = None) -> BrokerEvent:
+    def cancel(self, order, when: datetime | None = None) -> BrokerEvent | None:
+        """취소 확정 이벤트. 취소할 잔량이 없으면 None.
+
+        v1.2에서 OMS가 CANCEL_PENDING을 먼저 거치므로, 이 이벤트는 "취소 요청"이
+        아니라 **브로커가 취소를 받아들였다는 사실**이다. 잔량이 이미 다 체결됐다면
+        브로커는 취소해 줄 것이 없다 - 그때 cancel 이벤트를 만들어 돌려주면
+        체결된 주문을 취소로 덮어쓰게 된다.
+        """
+        leaves = order.requested_quantity - order.filled_quantity
+        if leaves <= 0:
+            return None
         return BrokerEvent("cancel", self._next_id("cxl"),
+                           when or datetime.now(timezone.utc), {"leaves": str(leaves)})
+
+    def expire(self, order, when: datetime | None = None) -> BrokerEvent | None:
+        """장 마감으로 DAY 주문 잔량이 소멸한다. 잔량이 없으면 None.
+
+        취소와 다른 사건이다. 우리가 요청하지 않았고 CANCEL_PENDING도 거치지 않는다.
+
+        ponytail: 장 마감 시각을 여기서 판단하지 않는다. 호출자가 정한다.
+                  거래소 캘린더(반장, 임시 휴장)는 시세를 가진 리서치본부 소관이고
+                  market-api가 생기면 그쪽 영업일 정보로 스케줄링한다.
+        """
+        leaves = order.requested_quantity - order.filled_quantity
+        if leaves <= 0:
+            return None
+        return BrokerEvent("expire", self._next_id("exp"),
                            when or datetime.now(timezone.utc),
-                           {"leaves": str(order.requested_quantity - order.filled_quantity)})
+                           {"leaves": str(leaves), "reason": "DAY 주문 장 마감"})
 
 
 if __name__ == "__main__":
@@ -174,7 +180,13 @@ if __name__ == "__main__":
     from decimal import Decimal as D
     from uuid import uuid4
 
-    from trading.contracts import MarketSnapshot, OrderIntent, OrderState, RiskDecision, RiskVerdict
+    from trading.contracts import (
+        BrokerOrderState,
+        MarketSnapshot,
+        OrderIntent,
+        RiskDecision,
+        RiskVerdict,
+    )
 
     from oms import OMS  # noqa: E402
 
@@ -197,14 +209,15 @@ if __name__ == "__main__":
             snapshot=snap, idempotency_key=key, created_by="pm", trace_id="t", created_at=now,
         )
         oms = OMS()
-        order = oms.create_order(intent)
-        oms.request_risk_review(order)
-        oms.apply_risk_decision(order, RiskDecision(
+        rec = oms.register_intent(intent)
+        oms.request_risk_review(rec)
+        oms.apply_risk_decision(rec, RiskDecision(
             order_intent_id=intent.order_intent_id, verdict=RiskVerdict.APPROVE,
             approved_quantity=D(qty), expires_at=now + timedelta(minutes=5),
             decided_by="risk", decided_at=now,
-        ), intent)
-        oms.submit(order, intent)
+        ))
+        order = oms.create_broker_order(rec, intent)
+        oms.submit(order, rec)
         return oms, order, intent
 
     # 2. 호가 단위 위반 주문은 브로커가 거부한다
@@ -212,7 +225,7 @@ if __name__ == "__main__":
     ev = broker.accept(order)
     assert ev.event_type == "reject" and "호가 단위" in ev.payload["reason"]
     oms.on_broker_event(order, ev.event_type, ev.broker_event_id, now, ev.payload)
-    assert order.state is OrderState.REJECTED
+    assert order.state is BrokerOrderState.REJECTED
 
     # 3. 정상 주문 ack -> 체결
     oms, order, _ = build(key="idem_p002")
@@ -228,13 +241,13 @@ if __name__ == "__main__":
     fill = broker.try_fill(order, Quote(D("69900"), D("70000"), D("1000"), D("1000")))
     assert fill is not None and fill.payload["quantity"] == "50", fill
     oms.on_broker_event(order, "fill", fill.broker_event_id, now, fill.payload)
-    assert order.state is OrderState.PARTIALLY_FILLED and order.filled_quantity == D("50")
+    assert order.state is BrokerOrderState.PARTIALLY_FILLED and order.filled_quantity == D("50")
 
     # 잔량 전부 체결
     fill2 = broker.try_fill(order, Quote(D("69900"), D("70000"), D("5000"), D("5000")))
     assert fill2.payload["quantity"] == "50", "잔량 초과 체결 시도"
     oms.on_broker_event(order, "fill", fill2.broker_event_id, now, fill2.payload)
-    assert order.state is OrderState.FILLED
+    assert order.state is BrokerOrderState.FILLED
     assert broker.try_fill(order, Quote(D("69900"), D("70000"), D("5000"), D("5000"))) is None
 
     # 4. 매수에는 거래세가 없고 매도에는 있다
@@ -249,4 +262,36 @@ if __name__ == "__main__":
     assert D(sell.payload["tax"]) > 0, "매도에 거래세가 없다"
     assert D(sell.payload["price"]) == D("69900"), "매도가 ask에 체결됐다"
 
-    print("ok - Paper Broker 4개 영역 점검 통과")
+    # 5. 취소는 CANCEL_PENDING을 거친다. 브로커 확인 전에는 취소가 아니다
+    oms_c, order_c, _ = build(key="idem_p004")
+    ev = broker.accept(order_c)
+    oms_c.on_broker_event(order_c, "ack", ev.broker_event_id, now, ev.payload)
+    part = broker.try_fill(order_c, Quote(D("69900"), D("70000"), D("400"), D("400")))
+    oms_c.on_broker_event(order_c, "fill", part.broker_event_id, now, part.payload)
+    assert order_c.filled_quantity == D("20")
+
+    oms_c.request_cancel(order_c, "장 마감 임박")
+    assert order_c.state is BrokerOrderState.CANCEL_PENDING, "요청만으로 취소가 확정됐다"
+    cxl = broker.cancel(order_c)
+    assert cxl is not None and cxl.payload["leaves"] == "80"
+    oms_c.on_broker_event(order_c, "cancel", cxl.broker_event_id, now, cxl.payload)
+    assert order_c.state is BrokerOrderState.CANCELLED
+    assert order_c.filled_quantity == D("20"), "취소가 체결분을 지웠다"
+
+    # 6. 잔량 없는 주문은 브로커가 취소해 줄 것이 없다
+    #    여기서 cancel 이벤트를 만들면 체결된 주문이 취소로 덮인다.
+    assert broker.cancel(order) is None, "전량 체결된 주문에 취소 이벤트가 생성됐다"
+    assert broker.expire(order) is None, "전량 체결된 주문에 만료 이벤트가 생성됐다"
+
+    # 7. DAY 주문 잔량은 장 마감으로 소멸한다. 취소와 다른 사건이다
+    oms_e, order_e, _ = build(key="idem_p005")
+    ev = broker.accept(order_e)
+    oms_e.on_broker_event(order_e, "ack", ev.broker_event_id, now, ev.payload)
+    part = broker.try_fill(order_e, Quote(D("69900"), D("70000"), D("600"), D("600")))
+    oms_e.on_broker_event(order_e, "fill", part.broker_event_id, now, part.payload)
+    exp = broker.expire(order_e, now + timedelta(hours=6))
+    assert exp is not None and exp.payload["leaves"] == "70"
+    oms_e.on_broker_event(order_e, "expire", exp.broker_event_id, now + timedelta(hours=6), exp.payload)
+    assert order_e.state is BrokerOrderState.EXPIRED and order_e.filled_quantity == D("30")
+
+    print("ok - Paper Broker 7개 영역 점검 통과")

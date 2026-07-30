@@ -54,18 +54,37 @@ class SnapshotQuality(StrEnum):
     SUSPECT = "suspect"
 
 
-class OrderState(StrEnum):
+class IntentState(StrEnum):
+    """Order Intent 생명주기. 우리 쪽 심사 절차만 표현한다 (팀 가이드 v1.2 4.3).
+
+    브로커는 이 상태를 모른다. 여기 REJECTED는 리스크본부의 거부이며
+    브로커 거부(BrokerOrderState.REJECTED)와 다른 사건이다.
+    """
+
     DRAFT = "DRAFT"
     RISK_PENDING = "RISK_PENDING"
     APPROVED = "APPROVED"
     RESIZED = "RESIZED"
     REJECTED = "REJECTED"
     READY_TO_SUBMIT = "READY_TO_SUBMIT"
+    EXPIRED = "EXPIRED"
+
+
+class BrokerOrderState(StrEnum):
+    """브로커에 실재하는 주문의 상태. 브로커가 알려준 사실로만 바꾼다.
+
+    CREATED는 우리가 주문 객체를 만들었지만 아직 보내지 않은 상태다.
+    UNKNOWN은 "브로커 상태 불명"이며 종료 상태가 아니다 - Reconciliation으로만 벗어난다.
+    """
+
+    CREATED = "CREATED"
     SUBMITTED = "SUBMITTED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
+    CANCEL_PENDING = "CANCEL_PENDING"
     CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
     UNKNOWN = "UNKNOWN"
 
@@ -76,13 +95,52 @@ class RiskVerdict(StrEnum):
     REJECT = "reject"
 
 
-TERMINAL_STATES = frozenset(
-    {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.EXPIRED}
+INTENT_TERMINAL_STATES = frozenset({IntentState.REJECTED, IntentState.EXPIRED})
+BROKER_TERMINAL_STATES = frozenset(
+    {
+        BrokerOrderState.FILLED,
+        BrokerOrderState.CANCELLED,
+        BrokerOrderState.REJECTED,
+        BrokerOrderState.EXPIRED,
+    }
 )
 
 
 class Base(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+
+
+# --- KRX 시장 규칙 -----------------------------------------------------------
+# 브로커가 정하는 값이 아니라 거래소 규칙이라 계약 계층에 둔다.
+# Intent를 만들 때(F11)와 Paper 체결(F13) 양쪽이 같은 표를 봐야 한다.
+
+LOT_SIZE = Decimal("1")  # 국내 주식은 1주 단위
+
+
+def tick_size(price: Decimal) -> Decimal:
+    """KRX 호가 단위. 가격대별로 다르다.
+
+    2023-01 개편 기준. 이 값이 틀리면 지정가가 거래소에서 거부되므로
+    실거래 전에 반드시 최신 규정과 대조해야 한다.
+    """
+    p = int(price)
+    if p < 2_000:
+        return Decimal("1")
+    if p < 5_000:
+        return Decimal("5")
+    if p < 20_000:
+        return Decimal("10")
+    if p < 50_000:
+        return Decimal("50")
+    if p < 200_000:
+        return Decimal("100")
+    if p < 500_000:
+        return Decimal("500")
+    return Decimal("1000")
+
+
+def is_valid_tick(price: Decimal) -> bool:
+    return price % tick_size(price) == 0
 
 
 class MarketSnapshot(Base):
@@ -221,6 +279,50 @@ class RiskDecision(Base):
         )
 
 
+class StrategySignal(Base):
+    """전략이 만든 목표 비중. **우리가 만드는 것이 아니라 받아서 검증하는 것이다.**
+
+    시그널·전략 생성은 퀀트/백테스트본부 소관이고, 트레이딩본부는
+    strategy-registry-api가 승격한 시그널을 소비만 한다. 그래도 신뢰 경계이므로
+    여기서 다시 검증한다 - 승격 안 된 전략의 시그널이 흘러들어오면 막아야 한다.
+
+    Signal은 OrderIntent가 아니다. 목표 상태(비중)만 말하고, 그 목표에 도달하기
+    위한 주문 수량은 현재 포지션을 알아야 정해진다 - 그 계산이 F11이다.
+
+    재일님 스키마 확정 시 필드명이 바뀔 수 있다. 그때 고칠 곳은 여기와
+    trading/intent_builder.py 두 군데다.
+    """
+
+    signal_id: UUID = Field(default_factory=uuid4)
+    strategy_id: UUID
+    strategy_version: str = Field(min_length=1)
+    fund_id: UUID
+    book_id: UUID
+    instrument_id: UUID
+    philosophy: str = Field(min_length=1)
+
+    # Long-only. 음수 비중(공매도)은 정책 계층에서 비활성이다 (마스터플랜 10장).
+    target_weight: Decimal = Field(ge=0, le=1, max_digits=10, decimal_places=6)
+    stage: str = Field(min_length=1)   # research | shadow | paper | live
+    as_of: datetime
+    valid_until: datetime
+    trace_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.valid_until <= self.as_of:
+            raise ValueError("valid_until이 as_of보다 앞섭니다")
+        return self
+
+    def is_tradable_at(self, when: datetime, env: str) -> bool:
+        """이 시그널로 주문을 만들어도 되는가.
+
+        stage가 환경과 맞아야 한다. Shadow 전략은 신호만 만들고 주문을 내지 않는다
+        (마스터플랜 23장 승격 Gate). research 단계는 어떤 환경에서도 주문 대상이 아니다.
+        """
+        return self.stage == env and env in ("paper", "live") and when < self.valid_until
+
+
 class EventEnvelope(Base):
     """본부 간 전달 이벤트의 공통 봉투 (팀 가이드 6.2, 6.3, 8.1).
 
@@ -256,43 +358,77 @@ class EventEnvelope(Base):
         return self
 
 
-# OMS 허용 상태 전이. db/001_execution.sql의 order_state_transitions와 같은 내용이며
-# DB가 최종 강제 지점이다. 여기 있는 사본은 DB 왕복 없이 사전 검증하기 위한 것.
-_S = OrderState
-ALLOWED_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
+# 허용 상태 전이. db/001_execution.sql의 참조 테이블과 같은 내용이며 DB가 최종 강제
+# 지점이다. 여기 있는 사본은 DB 왕복 없이 사전 검증하기 위한 것.
+#
+# v1.2에서 하나였던 표가 둘로 갈렸다. 두 표 사이에는 전이가 없다 - Intent가
+# READY_TO_SUBMIT에 도달하면 별도의 Broker Order를 만들 뿐, 상태가 이어지지 않는다.
+_I = IntentState
+INTENT_TRANSITIONS: frozenset[tuple[IntentState, IntentState]] = frozenset(
     {
-        (_S.DRAFT, _S.RISK_PENDING),
-        (_S.RISK_PENDING, _S.APPROVED),
-        (_S.RISK_PENDING, _S.RESIZED),
-        (_S.RISK_PENDING, _S.REJECTED),
-        (_S.APPROVED, _S.READY_TO_SUBMIT),
-        (_S.RESIZED, _S.READY_TO_SUBMIT),
-        (_S.READY_TO_SUBMIT, _S.SUBMITTED),
-        (_S.READY_TO_SUBMIT, _S.EXPIRED),
-        (_S.SUBMITTED, _S.ACKNOWLEDGED),
-        (_S.SUBMITTED, _S.REJECTED),
-        (_S.SUBMITTED, _S.UNKNOWN),
-        (_S.ACKNOWLEDGED, _S.PARTIALLY_FILLED),
-        (_S.ACKNOWLEDGED, _S.FILLED),
-        (_S.ACKNOWLEDGED, _S.CANCELLED),
-        (_S.ACKNOWLEDGED, _S.EXPIRED),
-        (_S.ACKNOWLEDGED, _S.UNKNOWN),
-        (_S.PARTIALLY_FILLED, _S.PARTIALLY_FILLED),
-        (_S.PARTIALLY_FILLED, _S.FILLED),
-        (_S.PARTIALLY_FILLED, _S.CANCELLED),
-        (_S.PARTIALLY_FILLED, _S.EXPIRED),
-        (_S.PARTIALLY_FILLED, _S.UNKNOWN),
-        (_S.UNKNOWN, _S.ACKNOWLEDGED),
-        (_S.UNKNOWN, _S.PARTIALLY_FILLED),
-        (_S.UNKNOWN, _S.FILLED),
-        (_S.UNKNOWN, _S.CANCELLED),
-        (_S.UNKNOWN, _S.REJECTED),
+        (_I.DRAFT, _I.RISK_PENDING),
+        (_I.DRAFT, _I.EXPIRED),           # valid_until 경과. 심사 요청 전에도 만료된다
+        (_I.RISK_PENDING, _I.APPROVED),
+        (_I.RISK_PENDING, _I.RESIZED),    # 리스크본부의 수량 축소
+        (_I.RISK_PENDING, _I.REJECTED),
+        (_I.RISK_PENDING, _I.EXPIRED),    # 심사 중 만료
+        (_I.APPROVED, _I.READY_TO_SUBMIT),
+        (_I.RESIZED, _I.READY_TO_SUBMIT),
+        (_I.APPROVED, _I.EXPIRED),
+        (_I.RESIZED, _I.EXPIRED),
+        (_I.READY_TO_SUBMIT, _I.EXPIRED),  # Risk 승인 만료 후 미전송
+    }
+)
+
+# ponytail: Mandate 초과 시의 USER_PENDING -> USER_APPROVED는 넣지 않았다(가이드 4.3 괄호).
+#           Mandate 초과 판정은 리스크본부 몫이고 그 계약이 아직 없다. RiskDecision에
+#           해당 verdict가 생기면 IntentState에 두 상태와 전이 4개를 추가한다.
+
+_B = BrokerOrderState
+BROKER_TRANSITIONS: frozenset[tuple[BrokerOrderState, BrokerOrderState]] = frozenset(
+    {
+        (_B.CREATED, _B.SUBMITTED),
+        (_B.CREATED, _B.EXPIRED),
+        (_B.CREATED, _B.CANCEL_PENDING),
+        (_B.SUBMITTED, _B.ACKNOWLEDGED),
+        (_B.SUBMITTED, _B.REJECTED),        # Broker 거부
+        (_B.SUBMITTED, _B.CANCEL_PENDING),
+        (_B.SUBMITTED, _B.UNKNOWN),         # 응답 없음. 추정 금지 (가이드 2장 원칙 3)
+        (_B.ACKNOWLEDGED, _B.PARTIALLY_FILLED),
+        (_B.ACKNOWLEDGED, _B.FILLED),
+        (_B.ACKNOWLEDGED, _B.EXPIRED),
+        (_B.ACKNOWLEDGED, _B.CANCEL_PENDING),
+        (_B.ACKNOWLEDGED, _B.UNKNOWN),
+        (_B.PARTIALLY_FILLED, _B.PARTIALLY_FILLED),
+        (_B.PARTIALLY_FILLED, _B.FILLED),
+        (_B.PARTIALLY_FILLED, _B.CANCEL_PENDING),
+        # 가이드 4.3의 화살표 목록에 없지만 넣었다. DAY 주문이 부분체결 잔량을 남긴 채
+        # 장이 끝나면 갈 곳이 필요하다. 취소요청 없이 거래소가 잔량을 소멸시키는 경우다.
+        (_B.PARTIALLY_FILLED, _B.EXPIRED),
+        (_B.PARTIALLY_FILLED, _B.UNKNOWN),
+        # 취소 요청과 체결이 교차한다. 취소를 넣었다고 체결이 안 온다고 가정하지 않는다.
+        (_B.CANCEL_PENDING, _B.CANCELLED),
+        (_B.CANCEL_PENDING, _B.PARTIALLY_FILLED),
+        (_B.CANCEL_PENDING, _B.FILLED),
+        (_B.CANCEL_PENDING, _B.UNKNOWN),
+        # UNKNOWN 탈출은 Broker Reconciliation의 확정 결과로만 일어난다.
+        (_B.UNKNOWN, _B.ACKNOWLEDGED),
+        (_B.UNKNOWN, _B.PARTIALLY_FILLED),
+        (_B.UNKNOWN, _B.FILLED),
+        (_B.UNKNOWN, _B.CANCELLED),
+        (_B.UNKNOWN, _B.REJECTED),
+        (_B.UNKNOWN, _B.EXPIRED),
     }
 )
 
 
-def can_transition(from_state: OrderState, to_state: OrderState) -> bool:
-    return (from_state, to_state) in ALLOWED_TRANSITIONS
+def can_transition(from_state, to_state) -> bool:
+    """두 머신 공용. 서로 다른 머신의 상태를 섞어 넣으면 False다."""
+    if isinstance(from_state, IntentState) and isinstance(to_state, IntentState):
+        return (from_state, to_state) in INTENT_TRANSITIONS
+    if isinstance(from_state, BrokerOrderState) and isinstance(to_state, BrokerOrderState):
+        return (from_state, to_state) in BROKER_TRANSITIONS
+    return False
 
 
 if __name__ == "__main__":
@@ -411,13 +547,27 @@ if __name__ == "__main__":
                                   idempotency_key="idem_0001",
                                   object_path="s3://x"), "object_path에 hash 없음")
 
-    # 6. 상태 전이 - Risk 우회 경로가 막혀 있는가
-    assert can_transition(_S.READY_TO_SUBMIT, _S.SUBMITTED)
-    assert not can_transition(_S.DRAFT, _S.SUBMITTED), "Risk 심사를 건너뛰었다"
-    assert not can_transition(_S.RISK_PENDING, _S.SUBMITTED), "승인 없이 전송됐다"
-    assert not can_transition(_S.APPROVED, _S.SUBMITTED), "READY_TO_SUBMIT을 건너뛰었다"
-    assert not can_transition(_S.REJECTED, _S.READY_TO_SUBMIT), "거부된 주문이 되살아났다"
-    for terminal in TERMINAL_STATES:
-        assert not any(f == terminal for f, _ in ALLOWED_TRANSITIONS), f"{terminal}에서 나가는 전이 존재"
+    # 6. Intent 상태 머신 - Risk 우회 경로가 막혀 있는가
+    assert can_transition(_I.APPROVED, _I.READY_TO_SUBMIT)
+    assert not can_transition(_I.DRAFT, _I.APPROVED), "심사 없이 승인됐다"
+    assert not can_transition(_I.DRAFT, _I.READY_TO_SUBMIT), "Risk 심사를 건너뛰었다"
+    assert not can_transition(_I.RISK_PENDING, _I.READY_TO_SUBMIT), "판정 없이 전송 준비됐다"
+    assert not can_transition(_I.REJECTED, _I.READY_TO_SUBMIT), "거부된 의도가 되살아났다"
+    for terminal in INTENT_TERMINAL_STATES:
+        assert not any(f == terminal for f, _ in INTENT_TRANSITIONS), f"{terminal}에서 나가는 전이"
 
-    print("ok - 계약 6개 영역 점검 통과")
+    # 7. Broker 상태 머신 - 두 머신이 분리돼 있는가 (v1.2 4.3)
+    assert can_transition(_B.CREATED, _B.SUBMITTED)
+    assert not can_transition(_I.READY_TO_SUBMIT, _B.SUBMITTED), "두 머신이 이어져 있다"
+    assert not can_transition(_B.SUBMITTED, _I.APPROVED), "Broker 상태가 Intent로 넘어갔다"
+    assert not can_transition(_B.CREATED, _B.ACKNOWLEDGED), "전송 없이 접수됐다"
+    assert not can_transition(_B.CREATED, _B.FILLED), "전송 없이 체결됐다"
+    # 취소는 반드시 CANCEL_PENDING을 거친다. 브로커 확인 없는 취소 확정 금지.
+    assert not can_transition(_B.ACKNOWLEDGED, _B.CANCELLED), "CANCEL_PENDING을 건너뛰었다"
+    assert not can_transition(_B.PARTIALLY_FILLED, _B.CANCELLED), "CANCEL_PENDING을 건너뛰었다"
+    assert can_transition(_B.CANCEL_PENDING, _B.FILLED), "취소 요청 중 체결을 못 받는다"
+    assert _B.UNKNOWN not in BROKER_TERMINAL_STATES, "UNKNOWN을 종료 상태로 취급했다"
+    for terminal in BROKER_TERMINAL_STATES:
+        assert not any(f == terminal for f, _ in BROKER_TRANSITIONS), f"{terminal}에서 나가는 전이"
+
+    print("ok - 계약 7개 영역 점검 통과")
