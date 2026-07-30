@@ -1,6 +1,6 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.3
+> 문서 상태: Team Handoff v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -9,6 +9,7 @@
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리스크·AI QA 경계
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Risk·Control·AI QA·Audit View
 
 ---
 
@@ -428,6 +429,14 @@ incident.action.v1
 
 Risk Decision Event는 OMS가 재검증할 수 있도록 `input_hash`, `policy_version`, `calculation_version`, `valid_until`을 포함한다.
 
+### 9.4 AI Office 제공 계약
+
+- `Risk Center`에 Trading State, Limit, Exposure Snapshot, Breach, Stress, Policy·Calculation Version과 Staleness를 제공한다.
+- `AI QA and Audit`에 Finding, Eval, Incident, Trace, Release Block과 Evidence Export 상태를 제공한다.
+- Risk Badge와 캐릭터 상태는 `risk.trading_state.v1`, `risk.breach.v1`, `qa.finding.v1` 같은 공식 Event에서만 바뀐다.
+- Entry Block, Reduce Only와 Kill Switch 요청은 `risk-api` Command로 받고 사용자 Identity, 사유, 영향 Preview, 멱등 키와 예상 Version을 검증한다.
+- UI는 Risk 수치를 다시 계산하거나 Agent·CEO 권고만으로 Block을 해제하지 않는다.
+
 ---
 
 ## 10. 권장 라이브러리와 도구
@@ -577,6 +586,7 @@ QA/Audit:
 - [ ] 원 작성 본부가 QA Finding을 수정·종료할 수 없다.
 - [ ] Agent와 Tool의 권한 위반을 Trace에서 탐지한다.
 - [ ] Incident Timeline과 Corrective Action을 Evidence로 재현할 수 있다.
+- [ ] AI Office가 공식 Risk·QA Event만 표시하고 Browser 계산이나 캐릭터 움직임으로 Trading State를 바꾸지 않는다.
 
 ---
 

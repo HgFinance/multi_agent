@@ -1,10 +1,11 @@
 # Department-Oriented Repository Structure
 
-> 문서 상태: Confirmed Target Structure v1.1
+> 문서 상태: Confirmed Target Structure v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 적용 범위: CEO Office, CEO 직속 Agent Workforce 인사팀, 6개 투자 본부와 공통 Platform
 > 현재 변경 범위: Markdown 기준 확정만 수행하며 실제 코드·YAML·SQL·폴더 이동은 별도 PR에서 단계적으로 실행
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
+> Frontend 경계: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 
 ## 1. 이 구조가 필요한 이유
 
@@ -50,6 +51,7 @@
 | `timescaledb/migrations/` | 고빈도 시장 시계열 DB Migration 기준 | Canonical |
 | `tests/schema/` | DB 정적 계약과 Runtime Smoke Test | 사용 중 |
 | `docs/06-integrations/ls-openapi/` | LS증권 공개 API 계약 참조 | 사용 중 |
+| `ai-office/` | Next.js·React·TypeScript Pixel Office와 Scripted Simulation | Frontend Prototype |
 
 `~/.hermes/profiles/`는 로컬 Runtime 상태이며 Git 저장소가 아니다. 저장소 사본과의 동기화는 현재 `scripts/sync_hermes_profiles.sh`가 담당한다.
 
@@ -144,7 +146,7 @@ multi_agent/
 │   └── supabase/
 ├── apps/
 │   ├── api/
-│   └── operator-web/
+│   └── operator-web/       # ai-office를 단계적으로 이전할 운영 Frontend
 ├── supabase/
 │   └── migrations/
 ├── timescaledb/
@@ -186,7 +188,7 @@ multi_agent/
 | `supabase/migrations/` | Schema 소유 본부 | DB Owner + Risk/QA, 회계 관련 시 회계본부 | 단일 순서, RLS, Rollback 계획 |
 | `timescaledb/migrations/` | 리서치본부 | 퀀트본부 + AI QA | Point-in-Time, Dedup, Retention |
 | `integrations/ls-openapi/` | 리서치본부 | 트레이딩·리스크 소비 계약 검토 | Raw 이벤트와 Canonical Event 분리 |
-| `apps/` | 서비스 운영 Owner | 모든 Command 소유 본부 | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
+| `apps/` | 공통 Frontend·서비스 운영 Owner | 모든 Command·Read Model 소유 본부 | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
 | `infrastructure/` | Platform Owner | Security + 서비스 Owner | Secret과 Service Identity 분리 |
 
 한 명이 두 본부를 담당해도 두 본부 폴더와 승인 역할을 합치지 않는다. 도현님이 트레이딩과 회계를 담당해도 주문 생성과 공식 원장 확정은 별도 PR Review와 Service Identity를 사용한다. 동규님이 리스크와 QA를 담당해도 Risk Decision과 Audit Finding의 승인 권한을 하나로 합치지 않는다.
@@ -210,6 +212,7 @@ multi_agent/
 | `orchestration/hermes/hr-department/` | `departments/07-agent-workforce/hermes/` | 영주님 | 제7 투자 본부로 오해하지 않도록 README 유지 |
 | `multi-agent-workflow.yaml` | `orchestration/workflows/investment-case.yaml` 등으로 분리 | 영주님 + 관련 본부 | 5개 Workflow를 개별 파일로 분리하고 Contract Test 추가 |
 | `db/` | 제거 또는 본부 Prototype Archive | 도현님 + DB Owner | Supabase 기준과 차이 분석 후에만 처리 |
+| `ai-office/` | `apps/operator-web/` | 공통 Frontend Owner, 현재 지정 필요 | 12개 고정 방·Scripted Simulation을 8개 조직·REST Snapshot·WebSocket Projection으로 교체하고 배포·E2E를 함께 이동 |
 
 ## 8. 의존성 방향
 
@@ -321,6 +324,14 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 - CODEOWNERS 또는 동등한 Review 정책을 실제 GitHub 계정과 합의 후 추가한다.
 - 문서 링크, Workflow Profile 경로, Mermaid, YAML, Python Import와 SQL Migration을 CI에서 검사한다.
 
+### 단계 6. AI Office Frontend 이전
+
+- 이전 완료 전에는 `ai-office/`를 실행 기준으로 유지하고 `apps/operator-web/`를 동시에 운영하지 않는다.
+- `DEMO` Mode를 동결한 뒤 8개 조직, REST Snapshot, WebSocket Event Store와 Supabase Auth를 연결한다.
+- `apps/operator-web/` 이동은 Import, Lockfile, Cloudflare·Hosting 설정, Docker와 CI 경로를 같은 PR에서 수정한다.
+- Pixel Office는 Domain Event의 Projection만 담당하고 Browser에서 Risk, OMS, Ledger와 거래 DB를 직접 수정하지 않는다.
+- 상세 단계와 완료 조건은 [AI Office Frontend Plan](AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
+
 ## 12. 전체 교차 점검 결과
 
 이번 점검은 Markdown만 수정한다. 따라서 비 Markdown 파일에서 발견한 문제는 문서에 공개하되 이 변경에서 고치지 않는다.
@@ -341,6 +352,8 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 | `agent_evolution_cycle`과 Hermes 조직 학습 | 부분 정합, 비 MD | Profile 개선 Prototype은 존재하나 Improvement Registry, Skill Write Gate, 독립 Eval Runner와 Scorecard 연결 필요 |
 | Bedrock/Ollama 목표와 현재 Nous Profile | 상태 구분 필요 | 현재 Profile은 개발 Runtime, Bedrock/Ollama는 목표 Model Gateway임을 문서에 명시 |
 | LS Open API 문서 | 정합 | REST·WebSocket 42개 API 묶음과 365개 TR 참조가 문서 지도에 연결됨 |
+| `ai-office`와 8개 조직 | 불일치 | 현재 12개 고정 Creator 부서는 Demo Baseline으로 분류하고 8개 조직·실시간 Backend Projection으로의 이전 기준을 확정 |
+| `ai-office`와 금융 Source of Truth | 미연결 | Browser Simulation을 공식 상태로 사용하지 않고 FastAPI Snapshot·WebSocket, Supabase·OMS·Ledger·Risk Read Model을 사용하도록 경계 확정 |
 
 ## 13. 완료 기준
 
@@ -352,5 +365,6 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 - 모든 Markdown 상대 링크가 존재한다.
 - 전체 Markdown에 H1 하나와 균형 잡힌 코드 펜스가 있다.
 - 비 Markdown 후속 문제는 담당과 수정 조건이 기록되어 있다.
+- `ai-office/`의 현재 Demo 경계와 `apps/operator-web/` 목표 경로가 구분되고 Frontend가 금융 Source of Truth가 아님이 명시된다.
 
 실제 구조 이전은 이 문서의 단계 1부터 별도 PR로 진행하며, 각 단계가 끝날 때 현재 경로 표와 이전 지도를 갱신한다.

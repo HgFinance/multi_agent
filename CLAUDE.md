@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    `scripts/sync_hermes_profiles.sh`로 동기화한다 (아래 "부서 Profile 규약" 참고).
 3. 실행 가능한 코드 — `fetch_news.py`, `skills/agentic-rag/`, 그리고 트레이딩·회계본부의
    거래 생명주기 구현(`db/`, `trading/contracts.py`, `execution/`, `accounting/`).
+4. `ai-office/` — Next.js·React·TypeScript Pixel Office Frontend Prototype. 현재 12개 고정 부서와 Scripted Simulation이며 금융 Backend와 아직 연결되지 않았다.
 
 트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
 
@@ -20,6 +21,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 표시한다.
 
 [REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 `departments/` 구조는 **아직 만들어지지 않은 목표 구조**다. 현재 경로 표를 우선하고, 실제 이동 PR 전에는 목표 경로를 import하거나 실행 경로로 사용하지 않는다.
+
+Frontend의 현재 실행 경로는 `ai-office/`이고 목표 경로는 `apps/operator-web/`다. 이름만 바꿔 현재 Demo를 금융 상태처럼 사용하지 않는다. 8개 조직, REST Snapshot, FastAPI WebSocket, Mode 분리와 Command 경계는 [AI Office Frontend Plan](docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
 ## 명령어
 
@@ -41,6 +44,12 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
 
 # 뉴스 조회 (TAVILY_API_KEY 필요)
 python3 fetch_news.py 'AAPL Apple stock'
+
+# AI Office Frontend Prototype (Node.js 22 이상)
+cd ai-office
+npm install
+npm run dev
+npm test
 ```
 
 Canonical 운영 DB Migration은 `supabase/migrations/`, 시장 시계열 Migration은 `timescaledb/migrations/`다.
@@ -139,7 +148,7 @@ python accounting/reconciliation.py # 대사 12개
 
 1. `HEDGE_FUND_MASTER_PLAN.md` — 제품 정의, 조직, 통제 원칙, 출시 단계
 2. `MINIMUM_SERVICE_UNIT_SPEC.md`의 Domain Contract, `DATA_GOVERNANCE_GUIDE.md`의 데이터 통제
-3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계
+3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계와 `AI_OFFICE_FRONTEND_PLAN.md`의 Frontend 계약
 4. `REPOSITORY_DEPARTMENT_STRUCTURE.md`의 현재·목표 경로, 소유권과 이전 규칙
 5. `HEDGE_FUND_CORE_PLAN.md`, `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위와 완료 조건
 6. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드
@@ -147,7 +156,9 @@ python accounting/reconciliation.py # 대사 12개
 
 하위 문서는 마스터 플랜을 구체화할 수는 있어도 **변경할 수는 없다.** 마스터 플랜 자체를 바꾸려면 ADR로 근거를 승인한 뒤 영향받는 문서를 같은 변경에서 함께 갱신한다. ADR 승인 전에 후보 기술이나 확장안을 새 Markdown으로 추가하지 않는다.
 
-**아직 미결정이므로 임의로 정하지 않는다:** Paper/Live Broker, Frontend Framework, Cloud Provider, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 Paper 승인 방식.
+**아직 미결정이므로 임의로 정하지 않는다:** Paper/Live Broker, 전체 Cloud Provider와 Frontend Production Hosting, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 Paper 승인 방식.
+
+Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. 현재 `vinext`·Cloudflare Worker 구성은 Prototype Hosting Baseline일 뿐 Backend와 전체 Cloud Provider 결정이 아니다. Frontend는 금융 상태의 Projection이며 Supabase Service Role, Broker·LS Credential, Risk 계산, OMS 상태 전이와 Ledger Posting을 소유하지 않는다.
 
 현재 Hermes 8개 Profile의 `provider: nous`는 로컬 Profile baseline이다. Core 목표 Model Gateway의 주 통합 모델은 `TECH_STACK_DECISIONS.md`가 정한 Amazon Bedrock Claude이고 Ollama는 로컬·저비용 보조 모델이다. 애플리케이션 Hosting Cloud는 아직 미정이므로 Bedrock 사용과 전체 Cloud Provider 선정을 같은 결정으로 취급하지 않는다.
 

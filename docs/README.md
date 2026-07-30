@@ -2,7 +2,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md)
 
 ## 현재 상태
 
@@ -14,8 +14,9 @@
 - Order Contract, Paper OMS, Paper Broker, Ledger와 Reconciliation D0-D2 Prototype
 - Supabase 운영 DB와 TimescaleDB 시장 데이터 Migration, RLS와 Schema Test
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
+- Next.js·React·TypeScript 기반 `ai-office` Pixel Office Frontend Prototype
 
-이 구현을 Production 준비 상태로 해석하면 안 된다. 서비스 API, 전 종목 WebSocket Runtime, 결정론적 Risk Engine, Strategy Factory, 통합 UI와 운영 배포는 아직 Core Backlog에 있으며, 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
+이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`는 현재 12개 고정 부서와 Scripted Simulation을 사용하는 Demo이며 금융 Backend와 연결되지 않았다. 서비스 API, 전 종목 WebSocket Runtime, 결정론적 Risk Engine, Strategy Factory, 8개 조직 기반 통합 UI와 운영 배포는 아직 Core Backlog에 있다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
 
 첫 번째 목표는 실제 자금 운용이 아니다. 단일 사용자와 단일 주식시장을 대상으로 다음 폐쇄 루프를 완성하는 것이다.
 
@@ -205,7 +206,7 @@ Core는 아래 P0 기능만 구현한다. 세부 완료 조건은 [Core Feature 
 
 ```mermaid
 flowchart TB
-    UI["Operator UI - Framework TBD"] --> API["FastAPI + Pydantic"]
+    UI["AI Office - Next.js + React + TypeScript"] --> API["FastAPI + Pydantic"]
     HERMES["Hermes Agent"] --> API
     API --> LANG["LangGraph"]
     LANG --> BEDROCK["Amazon Bedrock Claude"]
@@ -233,9 +234,11 @@ flowchart TB
 | Docker | 서비스별 Runtime 격리 |
 | FastAPI | 위험한 Command를 포함한 Backend API |
 | Polars/Parquet/DuckDB | Market Data, Feature와 Backtest Dataset 처리 |
-| Frontend | Framework 미정, Next.js + TypeScript 우선 후보 |
+| Frontend | `ai-office` 기반 Next.js + React + TypeScript, Pixel Office + 운영 Dashboard |
 
 자세한 선택 근거와 Package 목록은 [Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)에 있다.
+
+`ai-office` 화면은 Supabase·TimescaleDB·OMS·Ledger·Risk Engine의 공식 상태를 REST Snapshot과 FastAPI WebSocket으로 보여주는 Projection이다. 캐릭터 이동이나 Browser Memory를 실제 Agent·주문·Risk 상태로 간주하지 않으며, 전 종목 Tick 원문을 Pixel Office로 전송하지 않는다. 화면 구조, Mode 분리와 명령 보안 기준은 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
 
 ### Hermes와 LangGraph의 차이
 
@@ -357,10 +360,11 @@ multi_agent/
 ├── supabase/migrations/     # 전사 운영 DB Canonical Migration
 ├── timescaledb/migrations/  # 시장 시계열 Canonical Migration
 ├── tests/schema/            # Schema Contract와 Runtime Smoke Test
+├── ai-office/               # 현재 Pixel Office Frontend Prototype
 └── docs/
 ```
 
-목표 구조는 `departments/00-ceo-office`부터 `departments/07-agent-workforce`까지 조직 단위로 Agent, Service와 Test를 묶는다. 공통 Contract, Orchestration, Integration과 Migration은 공유 경계에 둔다. 이번 문서 정리에서는 실제 파일을 이동하지 않으며, 상세 목표 트리와 단계별 이전 순서는 [저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
+목표 구조는 `departments/00-ceo-office`부터 `departments/07-agent-workforce`까지 조직 단위로 Agent, Service와 Test를 묶는다. 공통 Contract, Orchestration, Integration과 Migration은 공유 경계에 둔다. `ai-office/`는 이전 완료 전 실행 기준이며 이후 `apps/operator-web/`로 단계적으로 이동한다. 이번 문서 정리에서는 실제 파일을 이동하지 않으며, 상세 목표 트리와 단계별 이전 순서는 [저장소 구조 기준서](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)를 따른다.
 
 ## 첫 번째 완료 시나리오
 
@@ -403,6 +407,7 @@ docs/
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
 | [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) | 기능 구현과 완료 조건을 확인할 때 |
 | [Technology Stack](02-engineering/TECH_STACK_DECISIONS.md) | Library, Runtime과 서비스 경계를 확인할 때 |
+| [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) | Pixel Office를 8개 조직의 실시간 운영·승인 Control Plane으로 구현할 때 |
 | [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) | 본부별 소유 폴더, 현재/목표 경로, 이전 순서와 Review 경계를 확인할 때 |
 | [Data Governance](03-data/DATA_GOVERNANCE_GUIDE.md) | 데이터 Schema, 시점, 품질과 보존을 설계할 때 |
 | [Data Sources and Libraries](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md) | 본부별 수집·생성 데이터, API와 권장 Library를 확인할 때 |
@@ -414,7 +419,7 @@ docs/
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README와 Master Plan, Repository Structure, Database 기준서와 ERD를 포함한 16개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README와 Master Plan, AI Office Frontend, Repository Structure, Database 기준서와 ERD를 포함한 17개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 
@@ -422,7 +427,7 @@ README와 Master Plan, Repository Structure, Database 기준서와 ERD를 포함
 
 1. `HEDGE_FUND_MASTER_PLAN.md`의 제품 정의, 조직, 통제 원칙, 출시 단계와 확장 경계
 2. `MINIMUM_SERVICE_UNIT_SPEC.md`의 Domain Contract와 `DATA_GOVERNANCE_GUIDE.md`의 데이터 통제
-3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계
+3. `TECH_STACK_DECISIONS.md`의 Runtime·Library·저장소 경계와 `AI_OFFICE_FRONTEND_PLAN.md`의 Frontend 계약
 4. `REPOSITORY_DEPARTMENT_STRUCTURE.md`의 현재·목표 경로, 소유권과 이전 규칙
 5. `HEDGE_FUND_CORE_PLAN.md`와 `HEDGE_FUND_IMPLEMENTATION_BACKLOG.md`의 단기 범위, 구현 순서와 완료 조건
 6. `AGENT_EMPLOYEE_PROFILES.md`와 팀별 가이드의 역할·권한·세부 구현
@@ -430,7 +435,7 @@ README와 Master Plan, Repository Structure, Database 기준서와 ERD를 포함
 
 하위 문서가 마스터 플랜의 기준을 더 구체화할 수는 있지만 변경할 수는 없다. 불일치를 발견하면 하위 문서를 먼저 수정하고, 마스터 플랜 자체의 변경이 필요한 경우에는 결정 근거를 ADR로 승인한 뒤 관련 문서를 같은 변경에서 함께 갱신한다.
 
-현재 미결정 항목은 Paper/Live Broker, Frontend Framework, Cloud Provider, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
+현재 미결정 항목은 Paper/Live Broker, 전체 Cloud Provider와 Frontend Production Hosting, 첫 활성 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor와 자동 Paper 승인 방식이다. Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. Master Plan은 Core의 확정 계약을 덮어쓰지 않는다. 후보 기술이나 추가 확장안은 ADR 승인 전까지 새로운 Markdown으로 추가하지 않으며, 결정이 바뀌면 README와 영향을 받는 계약·팀 가이드를 같은 PR에서 수정한다.
 
 ## 개발 원칙
 

@@ -1,6 +1,6 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> 문서 상태: Agent Organization v1.3
+> 문서 상태: Agent Organization v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 대상 조직: CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부  
 > 목적: 어떤 디지털 직원을 채용하고, 어떤 Skill과 Tool 권한을 부여하며, 각 직원이 실제 업무를 어떻게 수행할지 정의  
@@ -8,6 +8,7 @@
 > 공통 Domain 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)  
 > 기술 스택 기준: [TECH_STACK_DECISIONS.md](../02-engineering/TECH_STACK_DECISIONS.md)  
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
+> 조직 Frontend: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 부서별 입력 데이터·Data Product·Library: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 실행 가이드: [재일](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](../05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](../05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](../05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
 
@@ -1192,7 +1193,7 @@ ML Quant는 파생상품 전용 역할은 아니지만 Core Strategy Factory와 
 7. Model Gateway: Bedrock Claude/Ollama Routing, Timeout, Token Budget와 Fallback.
 8. Tool Gateway: FastAPI/MCP Allowlist, Request Signing, Audit Log와 Idempotency.
 9. Eval Harness: 역할별 Golden Case, Adversarial Case, Replay와 Regression Scorecard.
-10. Dashboard: 본부 Queue, Agent Run, Handoff, Risk/QA Block, 비용과 SLA 화면.
+10. AI Office Dashboard: 8개 조직, 본부 Queue, Agent Run·Heartbeat, Handoff, Risk/QA Block, 비용과 SLA를 공식 Event와 Read Model로 표시.
 11. Agent Workforce Registry: 채용 요청, Job Profile, Eval, 수습, 교육, 성과와 Joiner/Mover/Leaver 상태.
 
 ---

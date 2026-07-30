@@ -1,10 +1,11 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.3
+> 문서 상태: Implementation Backlog v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 확정 기술 스택: [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md)  
+> Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문, 성과 평가와 최소 조직 학습 Loop까지 구현한다.
 
 ## 1. 우선순위
@@ -38,7 +39,7 @@ P0가 모두 동작하기 전 P2 기능을 구현하지 않는다.
 | F15 | Portfolio/PnL | Cash, Position과 성과 계산 |
 | F16 | Audit/Replay | 판단부터 체결까지 추적·재현 |
 | F17 | Operator Control | Entry Block, Pause와 Kill Switch |
-| F18 | Dashboard | 시장·전략·주문·위험 상태 조회 |
+| F18 | AI Office Dashboard | 8개 조직의 실시간 업무·시장·전략·주문·위험 상태 조회와 통제 요청 |
 | F19 | Governed Self-Improvement | Hermes의 개선 후보를 Eval·Shadow·승인 Version으로 배포 |
 
 ## 3. P0 기능 명세
@@ -396,22 +397,49 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 - 상태 상향은 사용자 승인을 요구한다.
 - 모든 Command를 Audit에 기록한다.
 
-### F18. 운영 Dashboard
+### F18. AI Office 운영 Dashboard
+
+**현재 Baseline**
+
+- `ai-office/`의 Next.js·React·TypeScript Pixel Office와 Demo Simulation.
+- 12개 고정 부서, 고정 Room Layout과 Browser Memory는 실제 조직·업무 상태로 사용하지 않는다.
+
+**구현 기능**
 
 | View | 표시 기능 |
 |---|---|
-| Market | 연결, 처리량, Gap, Stale 종목과 상위 Event |
-| Portfolio | Cash, Position, Exposure, PnL과 Drawdown |
-| Strategies | 상태, Version, Backtest와 Paper 성과 |
-| Decisions | Thesis, Evidence, Confidence와 Risk 결과 |
-| Orders | 상태, Fill, Reject와 Cancel Reason |
-| Control | Trading State, Strategy Pause와 Kill Switch |
+| Live Office | CEO Office, 6개 본부, Agent Workforce의 Queue, SLA, Handoff, 승인과 Incident |
+| Market | LS 연결, 구독 수, 처리량, Gap, Stale 종목과 Attention Event |
+| Research/Decisions | Case, Thesis, Evidence, Citation, Confidence와 Risk 결과 |
+| Strategies | Candidate, Dataset, 상태, Version, Backtest, Shadow와 Paper 성과 |
+| Portfolio | Cash, Position, Exposure, PnL, Drawdown과 Reconciliation |
+| Trading/Orders | Order Intent, Risk Decision, Order, Fill, Reject와 Cancel Reason |
+| Risk/Control | Trading State, Limit, Breach, Strategy Pause와 Kill Switch |
+| Audit/Workforce | Trace, Finding, Agent Version, Queue, 비용, Eval과 개선 후보 |
+
+**실시간 계약**
+
+- `GET /ui/snapshot`으로 기준 상태를 받은 뒤 `/ws/operations`를 연결한다.
+- UI Event는 `event_id`, `event_type`, `schema_version`, `sequence`, `server_time`, `fund_id`와 `trace_id`를 포함한다.
+- Client는 Zod 검증, Heartbeat, 지수형 재연결, Sequence Gap과 Staleness를 처리한다.
+- Gap 또는 재연결 후 누락 상태를 추측하지 않고 Snapshot을 다시 읽는다.
+- 전 종목 Tick 원문 대신 1초 이상 집계 Feed Health와 상위 Event를 표시한다.
+- Agent 상태는 `OFFLINE`, `IDLE`, `QUEUED`, `RUNNING`, `WAITING_APPROVAL`, `BLOCKED`, `DEGRADED`, `ERROR`를 사용한다.
+
+**Command 계약**
+
+- 위험 Command는 FastAPI에 사용자 Identity, 사유, 멱등 키와 예상 Version을 보낸다.
+- Backend가 권한, Policy, 영향 범위와 상태 전이를 다시 검증하고 Audit Event를 기록한다.
+- Browser에서 Risk, OMS, Ledger와 Database 거래 상태를 직접 수정하지 않는다.
 
 **완료 조건**
 
-- 5초 이내 운영 상태를 갱신한다.
-- Dashboard 장애가 Trading Process에 영향을 주지 않는다.
-- 위험한 Command는 확인과 사유를 요구한다.
+- `DEMO`, `PAPER`, `LIVE` Mode와 연결·Stale·Trading State가 항상 보인다.
+- 공식 Event 또는 Read Model 없이 캐릭터 이동만으로 업무 상태를 생성하지 않는다.
+- Backend Event 발생 후 5초 이내 운영 상태를 갱신한다.
+- 재연결과 Sequence Gap 후 Snapshot과 화면 상태가 일치한다.
+- Dashboard 장애가 Market Worker, Risk Engine, OMS와 Ledger에 영향을 주지 않는다.
+- 권한 없음, 중복 제출, 낡은 Version과 Backend 거절 Command가 안전하게 실패한다.
 
 ### F19. 승인형 Hermes 자기 개선
 
@@ -478,6 +506,8 @@ GET  /health
 GET  /market/status
 GET  /market/events
 GET  /universe
+GET  /ui/snapshot
+WS   /ws/operations
 GET  /mandates/current
 POST /mandates
 GET  /decisions
