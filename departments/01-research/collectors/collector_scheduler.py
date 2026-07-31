@@ -84,6 +84,10 @@ JOBS: tuple[Job, ...] = (
         daily_at=time(16, 20)),
     Job("macro", ("collectors/macro_collector.py", "--collect"),
         daily_at=time(7, 30)),
+    # 시세 평면 심박·품질 감사 - 개장 전, 밤 배치가 다 끝난 뒤 (FAIL 이면 exit 1
+    # 로 스케줄러 로그에 남는다 - 개장 전에 눈에 띄는 것이 목적)
+    Job("data-steward", ("collectors/market_data_steward.py", "--audit"),
+        daily_at=time(7, 10)),
     # --limit 명시: CLI 기본값(재무 20, CA 40)은 프로브용이라 스케줄이 그대로 쓰면
     # 발행사 1,049곳 중 꼬리만 돌게 된다 (2026-07-31 점검에서 발견).
     # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
@@ -207,7 +211,10 @@ def _check_job_table():
     for j in JOBS:
         assert Path(__file__).resolve().parent.parent.joinpath(j.argv[0]).exists(), \
             f"{j.name}: {j.argv[0]} 이 없다"
-        assert "--collect" in j.argv, f"{j.name}: --collect 가 없다 - 자체점검만 돌게 된다"
+        # 실행 플래그가 없으면 수집기 규약상 자체점검만 돌게 된다.
+        # --collect(수집) 외에 --audit(Steward 감사)도 유효한 실행 동사다.
+        assert {"--collect", "--audit"} & set(j.argv), \
+            f"{j.name}: 실행 플래그(--collect/--audit)가 없다 - 자체점검만 돌게 된다"
     try:
         Job("bad", ("x.py", "--collect"))
         raise AssertionError("every/daily 둘 다 없는 Job 이 통과했다")
