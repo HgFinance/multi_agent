@@ -87,13 +87,16 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:?.env 에 NAVER_CLIENT_ID 가 필요하다}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:?.env 에 NAVER_CLIENT_SECRET 이 필요하다}
-      # 감시 종목은 watchlist_builder.py 가 만든 파일이 기준이다 (LS t1444 시가총액
-      # 상위 - 증권사 쏠림 없음). 갱신: 호스트에서 --build 후 restart. 임시로 몇
+      # 감시 종목은 watchlist_builder.py --basket 이 만든 파일이 기준이다
+      # (코스피200 + 코스닥150 구성종목 - LS t1444 를 지수 업종코드 101/405 로 열거,
+      #  재일님 지시 2026-07-31). 갱신: 호스트에서 --basket 후 up -d. 임시로 몇
       # 종목만 보려면 .env 의 NEWS_WATCH_SYMBOLS 가 파일보다 우선한다.
       NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-}
       NEWS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
-      # 70종목 × 288회/일 = 20,160 < 한도의 90%(22,500). 간격을 줄이려면 종목도 줄일 것.
-      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-300}
+      # 350종목 × 57회/일 = 19,950 < 한도의 90%(22,500). 종목이 많아 간격이 길다 -
+      # 간격을 줄이려면 종목을 줄여야 한다(뉴스 지연은 NAVER 색인이 지배하므로
+      # 넓은 커버리지 쪽이 남는 장사라는 판단).
+      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1500}
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -110,7 +113,8 @@ services:
 
   # ── 상주형 LS 실시간 시세 수집 (재일님 지시 2026-07-31: 호가·체결도 Docker 로) ──
   # 컨테이너는 24시간, 소켓은 세션 창(동시호가 35분 전~마감 +10분)에서만 연다.
-  # 뉴스와 같은 watchlist 70종목 = 140구독(S3_/H1_/K3_/HA_), 소켓 1개.
+  # ⚠ 뉴스와 파일이 다르다: 뉴스는 바스켓 350종목이지만 시세는 700구독이 되어
+  #   소켓 한도(200)를 넘는다 - 시세는 ls_watchlist.txt(시총 상위 70 = 140구독).
   ls-realtime:
     build:
       context: departments/01-research
@@ -136,6 +140,7 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      LS_WATCH_SYMBOLS_FILE: config/ls_watchlist.txt
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro

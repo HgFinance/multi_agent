@@ -50,7 +50,20 @@ T1444_PATH = "/stock/high-item"
 T1444_RATE_LIMIT = 2.0  # 문서 "초당 호출 제한: 2"
 T1444_PAGE = 20         # 실측 2026-07-31: idx 페이징, 페이지당 20행
 
-UPCODE = {"KOSPI": "001", "KOSDAQ": "301"}  # market_breadth_collector 와 동일
+# 001/301 은 market_breadth_collector 와 동일. 101/405 는 t8424 전체업종에서
+# 실측(2026-07-31)으로 확인한 지수 업종코드다 - t1444 에 이 코드를 주면
+# **지수 구성종목이 시총순으로 전부 나온다** (K200 정확히 200, KQ150 정확히 150).
+# KRX 구성종목 API 승인 없이도 바스켓을 만들 수 있는 경로다.
+UPCODE = {
+    "KOSPI": "001",
+    "KOSDAQ": "301",
+    "KOSPI200": "101",
+    "KOSDAQ150": "405",
+}
+
+# 구성종목 수가 이 밑으로 나오면 열거가 중간에 끊긴 것이다 (지수 정기변경으로
+# ±수 종목 변동은 정상이라 정확히 200/150 을 강제하지 않는다)
+BASKET_MIN = {"KOSPI200": 190, "KOSDAQ150": 140}
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "config" / "news_watchlist.txt"
 
@@ -235,6 +248,72 @@ def _build(kospi: int, kosdaq: int, interval: float, output: Path) -> int:
     return 0
 
 
+def _build_basket(interval: float, output: Path) -> int:
+    """코스피200 + 코스닥150 구성종목 전체를 뉴스 감시 목록으로 만든다.
+
+    350종목이면 NAVER 일 한도 때문에 폴링 간격이 길어진다(기본 1,500초 = 25분).
+    시세(ls-realtime)는 이 파일을 쓰면 안 된다 - 700구독은 소켓 한도(200)를
+    넘는다. 시세용은 config/ls_watchlist.txt 로 분리한다.
+    """
+    from ls_client import LsRestClient
+    from reference_repository import SupabaseReferenceRepository
+
+    client = LsRestClient()
+    ranked: list[RankedSymbol] = []
+    for venue in ("KOSPI200", "KOSDAQ150"):
+        got = fetch_top_mcap(client, venue=venue, count=300)
+        if len(got) < BASKET_MIN[venue]:
+            raise WatchlistBuildError(
+                f"{venue} 구성종목이 {len(got)}개뿐이다 (기대 {BASKET_MIN[venue]}+) - "
+                f"연속조회가 끊겼는지 확인할 것"
+            )
+        print(f"  {venue}: {len(got)}종목")
+        ranked += got
+
+    ensure_quota_headroom(len(ranked), interval)
+
+    ref = SupabaseReferenceRepository()
+    try:
+        with ref._conn.cursor() as cur:
+            cur.execute(
+                """
+                select s.symbol, i.issuer_id
+                from reference.instruments i
+                join reference.instrument_symbols s using (instrument_id)
+                where i.market = 'KRX' and i.instrument_type = 'STOCK'
+                  and i.status = 'ACTIVE' and s.symbol = any(%s)
+                """,
+                ([r.symbol for r in ranked],),
+            )
+            found = dict(cur.fetchall())
+    finally:
+        ref.close()
+
+    missing = [r for r in ranked if r.symbol not in found]
+    ranked = [r for r in ranked if r.symbol in found]
+    if missing:
+        print(f"  ⚠ Instrument Master 에 없어 제외 {len(missing)}건: "
+              f"{', '.join(f'{r.name}({r.symbol})' for r in missing[:6])}")
+    if len(missing) > 10:
+        raise WatchlistBuildError(
+            f"Master 미등재가 {len(missing)}건이나 된다 - 기준정보 수집부터 확인할 것"
+        )
+
+    kept, dropped = dedupe_by_issuer(ranked, found)
+    if dropped:
+        print(f"  같은 발행사 중복 제외 {len(dropped)}건")
+
+    ensure_quota_headroom(len(kept), interval)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        render_file(kept, interval_seconds=interval, built_at=datetime.now(KST)),
+        encoding="utf-8",
+    )
+    print(f"  {output} 에 {len(kept)}종목 (바스켓: 코스피200 + 코스닥150)")
+    print("  적용: docker compose up -d news-watcher")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 - 호출·DB 없이
 # ---------------------------------------------------------------------------
@@ -332,16 +411,24 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    if "--build" in sys.argv:
-        def opt(name: str, default):
-            if name in sys.argv:
-                return type(default)(sys.argv[sys.argv.index(name) + 1])
-            return default
+    def opt(name: str, default):
+        if name in sys.argv:
+            return type(default)(sys.argv[sys.argv.index(name) + 1])
+        return default
 
+    if "--basket" in sys.argv:
+        print(f"{BUILDER_VERSION} 바스켓 생성 (코스피200 + 코스닥150)")
+        raise SystemExit(_build_basket(
+            interval=opt("--interval", 1500.0),
+            output=Path(opt("--output", str(DEFAULT_OUTPUT))),
+        ))
+
+    if "--build" in sys.argv:
         print(f"{BUILDER_VERSION} 생성")
         raise SystemExit(_build(
             kospi=opt("--kospi", 55), kosdaq=opt("--kosdaq", 15),
-            interval=opt("--interval", 300.0), output=DEFAULT_OUTPUT,
+            interval=opt("--interval", 300.0),
+            output=Path(opt("--output", str(DEFAULT_OUTPUT))),
         ))
 
     print(f"{BUILDER_VERSION} 자체 점검 (호출 없음)")
