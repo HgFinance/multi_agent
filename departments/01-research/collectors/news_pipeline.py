@@ -60,6 +60,7 @@ class SinkStats:
     issuers_linked: int = 0
     revisions: int = 0
     flushes: int = 0
+    title_dups: int = 0           # 제목 창이 걸러낸 재전송·재게재
     unresolved_symbols: set = field(default_factory=set)
 
     def summary(self) -> str:
@@ -71,6 +72,8 @@ class SinkStats:
             base += f" issuer {self.issuers_linked}"
         if self.revisions:
             base += f" 정정 {self.revisions}"
+        if self.title_dups:
+            base += f" 제목중복 {self.title_dups}"
         if self.unresolved_symbols:
             n = len(self.unresolved_symbols)
             sample = ", ".join(sorted(self.unresolved_symbols)[:6])
@@ -100,6 +103,7 @@ class NewsSink:
         max_delay_seconds: float = DEFAULT_MAX_DELAY_SECONDS,
         clock=None,
         on_flush=None,
+        title_dedup_window: int = 0,
     ) -> None:
         if max_batch < 1:
             raise ValueError("max_batch 는 1 이상이어야 한다")
@@ -121,6 +125,13 @@ class NewsSink:
         self._buf_started: float | None = None
         self._closed = False
         self.stats = SinkStats()
+        # 제목 기반 중복 창 (재일님 지적 2026-07-31: LS 재전송·NAVER 재게재가
+        # 다른 external_id 로 들어와 소스 내 중복 270행이 쌓였다 - DB 소급 제거
+        # 후 재발을 여기서 막는다). 키 = (제목, 게시 날짜). 0 이면 비활성.
+        from collections import deque
+        self._title_window = title_dedup_window
+        self._seen_titles: deque = deque(maxlen=max(title_dedup_window, 1))
+        self._seen_title_set: set = set()
 
     # -- callable: on_record 로 그대로 넘길 수 있다 ---------------------------
 
@@ -130,6 +141,16 @@ class NewsSink:
     def add(self, record: NewsRecord) -> None:
         if self._closed:
             raise NewsSinkError("닫힌 Sink 에 기사를 넣으려 했다")
+
+        if self._title_window:
+            key = (record.title, record.published_at.date())
+            if key in self._seen_title_set:
+                self.stats.title_dups += 1
+                return
+            if len(self._seen_titles) == self._seen_titles.maxlen:
+                self._seen_title_set.discard(self._seen_titles[0])
+            self._seen_titles.append(key)
+            self._seen_title_set.add(key)
 
         now = self._now()
         self._buf.append(record)
@@ -644,6 +665,28 @@ def _check_batch_dedup():
     print("  배치 내 중복 제거        OK")
 
 
+def _check_title_dedup_window():
+    """같은 (제목, 게시일) 재전송을 적재 전에 거르는지 - DB 중복 270행 재발 방지."""
+    ref = _FakeRef()
+    sink = NewsSink(ref, source_id="s", max_batch=1, clock=lambda: 0.0,
+                    title_dedup_window=100)
+    sink.add(_rec(1, title="아이텍, 자기 전환사채 만기전 취득 결정"))
+    # 같은 제목·같은 날, external_id 만 다른 재전송(LS 실측 x14 사례)
+    dup = NewsRecord(external_id="t:999", title="아이텍, 자기 전환사채 만기전 취득 결정",
+                     canonical_url=None,
+                     published_at=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+                     observed_at=datetime(2026, 7, 31, 1, 2, tzinfo=timezone.utc),
+                     language="ko", provider="t")
+    sink.add(dup)
+    assert len(ref.docs) == 1, "재전송이 적재됐다"
+    assert sink.stats.title_dups == 1 and "제목중복 1" in sink.stats.summary()
+    # 창 0 이면 기존 동작 그대로
+    s2 = NewsSink(_FakeRef(), source_id="s", max_batch=1, clock=lambda: 0.0)
+    s2.add(_rec(1)); s2.add(dup)
+    assert s2.stats.title_dups == 0
+    print("  제목 중복 창             OK")
+
+
 def _check_title_standalone():
     names = {"두산", "두산에너빌리티", "LG", "LG전자"}
     # 긴 이름의 부분 문자열은 독립 등장이 아니다
@@ -772,9 +815,10 @@ if __name__ == "__main__":
     _check_failure_not_swallowed()
     _check_rebind()
     _check_batch_dedup()
+    _check_title_dedup_window()
     _check_title_standalone()
     _check_aliases()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 12개 영역 통과")
+    print("Sink 13개 영역 통과")

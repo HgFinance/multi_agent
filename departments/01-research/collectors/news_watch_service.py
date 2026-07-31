@@ -286,6 +286,7 @@ def main() -> int:
     sink = NewsSink(
         ref, source_id=source_id, link_resolver=resolver,
         max_batch=cfg.max_batch, max_delay_seconds=cfg.max_delay_seconds,
+        title_dedup_window=5000,  # 같은 기사 다른 URL 재게재 차단 (중복 270행 재발 방지)
     )
 
     quota_state = DailyQuotaTracker(client)
