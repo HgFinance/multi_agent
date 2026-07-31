@@ -21,6 +21,8 @@ Pre/Post-Trade Risk, Compliance와 Kill State를 담당한다. 포지션 리스�
   `workflow` step 3에서 OMS(`departments/02-trading/oms/oms.py`)로 직접 전달, QA본부(step 4)로도 근거 전달.
   감사용 상세(`RiskAssessment`: check_results/reason_codes/calculation_version/input_hash)는
   `risk.risk_decisions`(`supabase/migrations/20260729000400_execution_risk_accounting.sql`) 컬럼과 이름을 맞췄다.
+- 이 결정론적 서비스를 FastAPI로 감싸는 API 설계와 부서 내·부서 간 통신 계약은
+  [RISK_QA_DOMAIN_API_SPEC.md](../../docs/02-engineering/RISK_QA_DOMAIN_API_SPEC.md) 참고.
 
 ## 실행법
 

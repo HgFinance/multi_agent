@@ -28,6 +28,9 @@ PASS/WARN/FAIL 판정과 Ops Incident 심각도는 `evidence/evidence_qa_engine.
   `audit.qa_decisions`/`audit.findings` 컬럼과 이름을 맞췄다), `OpsAssessment`(HEALTHY/DEGRADED/
   CRITICAL + Incident 초안, `audit.incidents`와 이름을 맞췄다), `AgentRunRecord`/`ToolCallRecord`
   (`audit.agent_runs`/`audit.tool_calls`와 이름을 맞췄다) → `workflow` step 4에서 근거로 전달
+- 이 결정론적 서비스를 FastAPI로 감싸는 API 설계와 부서 내·부서 간 통신 계약은
+  [RISK_QA_DOMAIN_API_SPEC.md](../../docs/02-engineering/RISK_QA_DOMAIN_API_SPEC.md) 참고 —
+  Case 단위 QA 게이트(`qa-check`)는 아직 팀 승인 대기 중인 제안이다.
 
 ## 실행법
 
