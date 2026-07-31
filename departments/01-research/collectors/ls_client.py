@@ -245,10 +245,21 @@ class LsRestClient:
             # 문서상 필수지만 법인 전용이다. 개인 계정은 빈 값으로 보낸다.
             "mac_address": "",
         }
-        return self._post(
-            path, data=json.dumps(in_block, ensure_ascii=False).encode("utf-8"),
-            headers=headers, return_headers=return_headers,
-        )
+        data = json.dumps(in_block, ensure_ascii=False).encode("utf-8")
+        try:
+            return self._post(path, data=data, headers=headers,
+                              return_headers=return_headers)
+        except LsApiError as e:
+            # IGW00201(호출 거래건수 초과)은 문서의 초당 제한과 별개인 순간 버스트
+            # 제한이다(실측 2026-07-31: breadth 가 10분 주기에서 간헐 실패 - 성공과
+            # 교대). 대부분 수 초면 풀리므로 **이 코드에 한해 한 번만** 쉬고
+            # 재시도한다. 다른 오류는 재시도가 원인을 가리므로 그대로 올린다.
+            if "IGW00201" not in str(e):
+                raise
+            time.sleep(10.0)
+            limiter.wait()
+            return self._post(path, data=data, headers=headers,
+                              return_headers=return_headers)
 
 
 # ---------------------------------------------------------------------------
