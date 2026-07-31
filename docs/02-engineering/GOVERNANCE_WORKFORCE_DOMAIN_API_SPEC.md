@@ -417,8 +417,8 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
 
 | Method/Path | 상태 |
 |---|---|
-| `POST /workforce/v1/access-requests` | `request_access` ✅ / **저장 테이블 없음** |
-| `GET /workforce/v1/agents/{agent_id}/access` | 제안 / **저장 테이블 없음** |
+| `POST /workforce/v1/access-requests` | `request_access` ✅ |
+| `GET /workforce/v1/agents/{agent_id}/access` | 제안 |
 
 ```json
 {
@@ -430,8 +430,15 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
 }
 ```
 
-> **요청을 기록할 뿐 권한을 부여하지 않는다.** `workforce.access_requests`/`access_assignments` 테이블은
-> Y4에서 만든다 — 그 전까지 타입만 확정 상태이며 구현하지 않는다.
+> **요청을 기록할 뿐 권한을 부여하지 않는다.** 실제 Identity·권한 생성은 Platform/IAM Service 만 하고,
+> 그 결과를 `provisioning_ref` 로 되받아 `workforce.access_assignments` 에 기록한다.
+>
+> 세 테이블의 역할이 다르다 — 중복 저장하지 않는다.
+> `agent_tool_permissions`(가질 수 있는 권한 선언) / `access_requests`(요청·승인 절차) /
+> `access_assignments`(실제 부여·회수 증거). 도구 부여는 `tool_permission_id` 로 기존 행을 가리킨다.
+>
+> 만료 없는 권한 요청은 만들 수 없고(`expires_at` 필수), 부여는 요청의 `expires_at` 을 넘길 수 없다.
+> 회수는 `revocation_evidence` 없이 완료되지 않는다.
 
 ### 3.6 인사팀 부서 내 통신 (intra-department)
 
@@ -609,7 +616,7 @@ Agent 상태(`OFFLINE|IDLE|QUEUED|RUNNING|WAITING_APPROVAL|BLOCKED|DEGRADED|ERRO
 | Mandate Version/Activate 엔드포인트 | 🟡 제안 |
 | Improvement Candidate 엔드포인트 (§3.3) | 🟡 제안 |
 | Case timeline·Escalation·Candidate 조회 등 보조 엔드포인트 | 🟡 제안 |
-| `request_access` (§3.5) | ⚠️ 저장소 미구현 — `access_requests`/`access_assignments` 없음 (Y4) |
+| `request_access` (§3.5) | ✅ 구현 — `20260731000700_workforce_access_lifecycle.sql` |
 | Scorecard `quality` 일부 | ⚠️ 저장소 미구현 — `quality_snapshots` 없음 |
 | Workforce Plan 저장 | ⚠️ 저장소 미구현 — `workforce_plans` 없음 |
 | 위원회 (§2.3) | ⚠️ 로직 미구현 (테이블은 있음, Y2) |

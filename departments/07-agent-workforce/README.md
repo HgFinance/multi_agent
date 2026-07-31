@@ -48,17 +48,58 @@ Scorecard 관찰의 실제 API 배선.
 
 ## Profile Seed
 
-- `supabase/seed.sql`은 P0 직원 HR-00·HR-01·HR-04의 DRAFT Profile Version을 멱등 등록한다.
+- `supabase/seed.sql`은 HR-00~HR-04 5명의 DRAFT Profile Version을 멱등 등록한다.
+  P0는 HR-00·HR-01·HR-04, P1은 HR-02·HR-03이다. 모델 티어는 판단이 산출물인 역할
+  (HR-00·02·03)이 Deep(Bedrock), 결정론 인접 역할(HR-01·04)이 Quick(Ollama)이다.
 - `prompt_artifact_path`의 Anchor는 직원 코드가 아니라 `hermes/config.yaml`의 실제 personality 이름인
   `display_name`을 사용한다.
 - Supervisor `model` 설정과 개별 직원의 `agent_profile_versions.model_id`는 다른 계층이다. 어느 쪽도
   QA Eval과 CEO 승인 없이 Production 활성화하지 않는다.
+
+## scorecard/
+
+- `scorecard/cost.py` — **F27 LLM Budget** 중 인사팀 담당분.
+  F27은 두 부서가 나눠 맡는다. **플랫폼/인프라**가 토큰 측정·과금·성능저하 차단(집행),
+  **인사팀**이 에이전트별 예산(`agent_profile_versions.token_budget`) 설정과 비용 귀속
+  (`workforce.cost_snapshots`), Scorecard, 조치 **권고**를 맡는다. 인사팀은 집행하지 않는다.
+  - `assess_budget()` — 예산 대비 사용률과 조치 권고
+  - `build_department_scorecard()` — `get_department_scorecard` 응답 조립
+    (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC §3.4)
+
+주의 두 가지:
+- **통제 부서(03-risk, 06-ai-qa-audit)는 예산을 초과해도 기능 축소를 권고하지 않는다.**
+  CEO Escalation 으로 보낸다 — 비용 절감이 Risk/QA 독립성을 없애면 안 된다(팀 가이드 10.3).
+- **Snapshot 이 없으면 0으로 채우지 않는다.** `UNKNOWN`으로 두고 측정 누락을 조사한다 —
+  0으로 채우면 "예산 여유 있음"으로 잘못 보인다.
+
+`quality.eval_score`는 QA/감사본부 소유(`audit.eval_runs`)라 항상 `None`으로 두고 audit-api가 채운다.
+
+## lifecycle/
+
+- `lifecycle/access.py` — **Y4 Access Lifecycle** (HR-04 Lifecycle Coordinator).
+  대응 테이블 `workforce.access_requests`·`access_assignments`
+  (`supabase/migrations/20260731000700_...`).
+  - `approve_request()` / `provision()` / `revoke()` / `find_expired()`
+
+세 테이블의 역할이 다르다 — 중복 저장하지 않는다.
+
+| 테이블 | 의미 |
+|---|---|
+| `agent_tool_permissions` | Profile Version이 **가질 수 있는** 도구 권한 선언 (설계) |
+| `access_requests` | 권한 요청과 승인 워크플로 (절차) |
+| `access_assignments` | Platform/IAM이 **실제로 부여·회수한** 사실 (증거) |
+
+**인사팀은 요청까지만 한다.** Identity·권한 생성은 Platform/IAM Service만 하고, 그 결과를
+`provisioning_ref`로 되받아 기록한다. 만료 없는 권한 요청은 만들 수 없고, 부여는 요청의
+`expires_at`을 넘길 수 없으며, 회수는 `revocation_evidence` 없이 완료되지 않는다.
 
 ## 테스트
 
 ```bash
 python departments/07-agent-workforce/improvements/candidate.py  # 후보 계약·근거·롤백 검증
 python departments/07-agent-workforce/improvements/workflow.py   # 상태 머신·자기승인 차단·감사
+python departments/07-agent-workforce/scorecard/cost.py          # 예산·비용 Scorecard
+python departments/07-agent-workforce/lifecycle/access.py        # 권한 요청·부여·회수 불변식
 ```
 
 `__main__` assert 자체 점검 (F01 CEO Office 모듈과 동일 관례).

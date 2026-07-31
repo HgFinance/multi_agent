@@ -149,6 +149,7 @@ if __name__ == "__main__":
         return {"style": "growth"}
 
     repo = InMemoryMandateVersionRepository()
+    repo.set_fund_base_currency("m1", "KRW")  # accounting.funds.base_currency (결정 4-A)
     vsvc = MandateVersionService(repo)
     asvc = MandateActivationService(repo)
 
