@@ -512,6 +512,61 @@ Quant:
   `Snapshot` 계약과 Repository 조회(`get_snapshot`)까지는 있고 Redis·HTTP 계층이 없다.
 - **미착수** Parquet Archive + Manifest.
 
+**F03 실시간 Worker (2026-07-31 장중 실측 완료)** — `collectors/ls_realtime_worker.py`.
+
+**WebSocket 경로가 문서와 다르다 — 이게 제일 큰 함정이었다.**
+문서 README의 `/websocket/stock`, `/websocket/indtp`, `/websocket/futureoption`은 REST
+경로 표기 관례를 따른 것이고 **실제 경로가 아니다.** 실제로는 `/websocket` 하나뿐이며
+카테고리는 `tr_cd`가 가른다. 잘못된 경로로 붙으면 **TLS는 성립하는데 WebSocket
+업그레이드에서 타임아웃**이라 인증 문제로 오진하기 쉽다.
+
+| URL | 결과 |
+|---|---|
+| `wss://…:29443/websocket` | 핸드셰이크 성공 |
+| `wss://…:29443/websocket/stock` | 타임아웃 |
+| `wss://…:9443/websocket` | 핸드셰이크 성공 |
+| `wss://…:9443/websocket/stock` | 타임아웃 |
+
+같은 소켓에서 `S3_`(코스피 체결)·`K3_`(코스닥 체결)·`H1_`(호가)·`BM_`(업종)이 전부
+`rsp_cd=00000`으로 등록됐다. `subscription_plan.WEBSOCKET_PATH`가 Venue별 dict였던 것을
+단일 상수로 고치고, 소켓 분할은 경로가 아니라 `SUBSCRIPTIONS_PER_SOCKET`(200) 단위로 한다.
+
+구독 메시지는 `{"header":{"token","tr_type"},"body":{"tr_cd","tr_key"}}`이고 `tr_type=3`이
+등록, `4`가 해제다. **ack와 실시간 데이터가 같은 `tr_cd`로 오므로 `rsp_cd` 유무로
+구분한다** — 안 그러면 ack를 정규화하려다 전부 Quarantine된다.
+
+**실측 (2026-07-31 09:50 KST, 모의 Domain, 삼성전자·SK하이닉스 체결+호가 4구독)**
+```
+수신 953  체결 605  호가 348  격리 0  적재 605+326  중복 22  Flush 16  재접속 0
+```
+가격 검증: 삼성전자 248,000~250,500(스프레드 500), SK하이닉스 1,653,000~1,658,000.
+호가 중복 22건은 같은 상태가 반복돼 `source_event_id`가 같은 것으로 설계대로다.
+
+**실측이 잡아낸 결함 셋**
+
+1. **`NON_TRADING_DAY`가 733건 전부에 잘못 붙었다.** Calendar가 일봉 관측 역산이라
+   당일이 절대 안 들어 있는데 `d in trading_days`로 판정해 오늘을 휴장으로 단정했다.
+   **거래가 일어나는 중에 "비거래일"로 기록되는, 사실과 정반대인 데이터**였다.
+   `make_trading_day_check`가 "Calendar가 아는 마지막 날 이후는 판정 불가지 휴장이
+   아니다"로 고치고, 간주했다는 사실을 `stats.calendar_unverified`에 남긴다. 수정 후
+   `quality_flags: []`로 깨끗해졌다.
+2. **모듈이 두 번 로드돼 `isinstance`가 전부 False였다.** 어댑터는
+   `contracts.market_events`로, Worker는 `market_events`로 임포트해 같은 파일이 다른
+   모듈 객체가 됐다. 정규화 결과를 타입으로 분기하는 코드에서는 **모든 이벤트가
+   조용히 버려지는 형태로** 터진다.
+3. **관찰용 콜백 예외가 '재접속'으로 위장됐다.** `on_event`의 `AttributeError`가
+   세션을 죽여 30초에 5회 재접속했는데, 로그만 보면 네트워크 문제로 보였다.
+   `disconnect_reasons`를 남기게 하자 즉시 원인이 드러났다. 관찰 콜백은 격리하되
+   `observer_errors`로 센다 — 소비자 버그가 수집을 죽이면 안 되고, 죽었다는 사실을
+   숨겨서도 안 된다.
+
+**뉴스 실시간 적재** — `collectors/news_pipeline.py`. Stream에서 밀려온 즉시 DB로 넣는다.
+크기(`max_batch`) 또는 시간(`max_delay_seconds`) 중 먼저 오는 쪽으로 Flush해 지연을
+상한으로 묶고, `max_batch=1`이면 건건이 넣는다. `MarketSink`(F03)와 같은 원칙 셋을
+지킨다 — 남은 버퍼를 잃지 않고, 적재 실패를 삼키지 않으며, 배치 안 중복을 미리 제거한다
+(같은 `external_id`가 두 번 있으면 upsert가 같은 행을 두 번 건드려 실패한다).
+Provider별 종목 매핑은 `link_resolver`로 주입받아 Sink가 모른다.
+
 **거래 Calendar (P0)** — `departments/01-research/collectors/calendar_collector.py`.
 **거래 Calendar를 직접 주는 공식 API가 없다.** KRX Open API 31개 서비스(지수·주식·증권상품·
 채권·파생·일반상품·ESG)는 전부 일별 시세와 기본정보이고 Calendar/휴장일 서비스가 목록에
@@ -867,10 +922,11 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
 > 2026-07-30 기준. 부분 달성은 체크하지 않고 남은 조건을 적는다 — 체크박스를 미리
 > 채우면 무엇이 실제로 검증됐는지 알 수 없게 된다.
 
-- [ ] LS Tick/Quote가 멱등하게 TimescaleDB에 적재된다.
-      → 멱등 적재 자체는 완료(`build_source_event_id` + `on conflict do nothing`, 두 Repository
-      구현이 재적재를 전부 `duplicates`로 셈). **LS WebSocket 수집기가 없어서** 아직 LS Tick이
-      아니라 Fixture 로만 검증됐다.
+- [x] LS Tick/Quote가 멱등하게 TimescaleDB에 적재된다.
+      → 2026-07-31 09:50 KST 장중 실측으로 관통 확인. `ls_realtime_worker.py`가 실제 LS
+      WebSocket에서 체결 605건·호가 326건을 받아 적재했고, 호가 중복 22건이 `duplicates`로
+      걸러졌다(같은 상태 반복 → `source_event_id` 동일). 격리 0, 재접속 0,
+      `quality_flags: []`. 장시간 실행 Worker와 재구독 Runtime(F03 나머지)은 별도다.
 - [ ] Raw Market Data가 검증된 Parquet로 Archive된다.
 - [x] Supabase에는 Reference/Research/Quant Metadata만 저장된다.
       → `supabase/migrations/`에 Tick/Quote 등 Raw 시계열 Table 생성 구문이 없음을 확인했다.

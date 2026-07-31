@@ -135,16 +135,25 @@ TR_MATRIX: dict[tuple[Venue, AssetClass, DataKind], str] = {
     (Venue.OVERSEAS_DERIV, AssetClass.OVERSEAS_OPTION, DataKind.QUOTE): "WOH",
 }
 
-# WebSocket 접속 경로가 시장별로 다르다. 한 소켓에 다 붙이지 않는다.
-WEBSOCKET_PATH: dict[Venue, str] = {
-    Venue.KOSPI: "/websocket/stock",
-    Venue.KOSDAQ: "/websocket/stock",
-    Venue.KONEX: "/websocket/stock",
-    Venue.KRX_DERIV: "/websocket/futureoption",
-    Venue.KRX_NIGHT: "/websocket/futureoption",
-    Venue.US_EQUITY: "/websocket/overseas-stock",
-    Venue.OVERSEAS_DERIV: "/websocket/overseas-futureoption",
-}
+# ▶ 실측 2026-07-31: **WebSocket 접속 경로는 `/websocket` 하나뿐이다.**
+#   문서 README 의 `/websocket/stock`, `/websocket/indtp`, `/websocket/futureoption`
+#   같은 표기는 REST 경로 관례를 따라 적어둔 것이고 실제 경로가 아니다. 그 경로로
+#   접속하면 **TLS 는 붙는데 WebSocket 업그레이드에서 타임아웃** 이라 원인을 찾기
+#   어렵다(연결 실패가 아니라 무응답이다).
+#
+#   확인 방법과 결과:
+#     wss://openapi.ls-sec.co.kr:29443/websocket        -> 핸드셰이크 성공
+#     wss://openapi.ls-sec.co.kr:29443/websocket/stock  -> 타임아웃
+#     wss://openapi.ls-sec.co.kr:9443/websocket         -> 핸드셰이크 성공
+#     wss://openapi.ls-sec.co.kr:9443/websocket/stock   -> 타임아웃
+#   같은 소켓에서 S3_(코스피 체결), K3_(코스닥 체결), H1_(호가), BM_(업종)이 전부
+#   rsp_cd=00000 으로 등록됐다. 즉 카테고리 구분은 경로가 아니라 tr_cd 가 한다.
+WEBSOCKET_PATH = "/websocket"
+
+# 소켓 하나에 몇 건까지 붙일지. LS 는 동시 구독 상한을 문서에 적어두지 않았고
+# 재일님이 무제한이라고 확인했지만(2026-07-30), 한 소켓에 수천 건을 몰면 재접속 때
+# 복구가 오래 걸린다. 운영상 나누기 위한 값이며 벤더 제한이 아니다.
+SUBSCRIPTIONS_PER_SOCKET = 200
 
 
 class ScopeStatus(StrEnum):
@@ -388,7 +397,8 @@ class SubscriptionRequest:
 
     @property
     def websocket_path(self) -> str:
-        return WEBSOCKET_PATH[self.venue]
+        # Venue 와 무관하게 하나다(WEBSOCKET_PATH 주석의 실측 근거 참고).
+        return WEBSOCKET_PATH
 
     def to_payload(self) -> dict:
         """LS 요청 Body. header 의 token 은 인증 계층이 채운다."""
@@ -410,12 +420,32 @@ class SubscriptionPlan:
     def by_kind(self, kind: DataKind) -> tuple[SubscriptionRequest, ...]:
         return tuple(r for r in self.requests if r.kind == kind)
 
-    def by_socket(self) -> dict[str, int]:
-        """소켓별 구독 수. 연결을 몇 개 열어야 하는지가 여기서 나온다."""
+    def by_venue(self) -> dict[str, int]:
+        """Venue 별 구독 수. 무엇을 얼마나 받는지 확인용이다."""
         out: dict[str, int] = {}
         for r in self.requests:
-            out[r.websocket_path] = out.get(r.websocket_path, 0) + 1
+            out[r.venue.value] = out.get(r.venue.value, 0) + 1
         return dict(sorted(out.items()))
+
+    def by_socket(self) -> dict[str, int]:
+        """소켓별 구독 수.
+
+        경로가 하나뿐이라 **경로로는 소켓을 나눌 수 없다.** 그래서 순서대로
+        SUBSCRIPTIONS_PER_SOCKET 씩 잘라 소켓 번호를 붙인다. 이건 벤더 제한이
+        아니라 재접속 복구 시간을 줄이기 위한 운영상 분할이다.
+        """
+        out: dict[str, int] = {}
+        for i in range(0, self.count, SUBSCRIPTIONS_PER_SOCKET):
+            n = min(SUBSCRIPTIONS_PER_SOCKET, self.count - i)
+            out[f"{WEBSOCKET_PATH}#{i // SUBSCRIPTIONS_PER_SOCKET}"] = n
+        return out
+
+    def socket_batches(self) -> tuple[tuple[SubscriptionRequest, ...], ...]:
+        """소켓 하나가 맡을 구독 묶음. 수집기가 이 단위로 연결을 연다."""
+        return tuple(
+            tuple(self.requests[i : i + SUBSCRIPTIONS_PER_SOCKET])
+            for i in range(0, self.count, SUBSCRIPTIONS_PER_SOCKET)
+        )
 
     def summary(self) -> str:
         lines = [
@@ -601,7 +631,12 @@ def _check_requested_universe_scale():
     kr = [*_m(200, Venue.KOSPI), *_m(150, Venue.KOSDAQ)]
     plan_kr = build_plan(kr, (DataKind.TICK, DataKind.QUOTE))
     assert plan_kr.count == 700, plan_kr.count
-    assert plan_kr.by_socket() == {"/websocket/stock": 700}
+    assert plan_kr.by_venue() == {"KOSPI": 400, "KOSDAQ": 300}, plan_kr.by_venue()
+    # 경로는 하나뿐이라 200건씩 잘라 소켓을 나눈다(실측 근거는 WEBSOCKET_PATH 주석)
+    batches = plan_kr.socket_batches()
+    assert len(batches) == 4 and sum(len(b) for b in batches) == 700
+    assert all(len(b) <= SUBSCRIPTIONS_PER_SOCKET for b in batches)
+    assert sum(plan_kr.by_socket().values()) == 700
 
     # 미국은 지수 3개 합집합. 중복 제거 전 630, 실제로는 S&P500 이 DJIA 를 거의 포함한다
     us = _m(530, Venue.US_EQUITY)
@@ -610,8 +645,10 @@ def _check_requested_universe_scale():
         approved_scopes=frozenset({Venue.US_EQUITY}),
     )
     assert plan_all.count == 700 + 1060
-    # 소켓이 갈린다 - 연결을 두 개 열어야 한다
-    assert set(plan_all.by_socket()) == {"/websocket/stock", "/websocket/overseas-stock"}
+    # 국내·해외가 같은 소켓 경로를 쓴다 - 갈리는 것은 경로가 아니라 tr_cd 다
+    assert {r.websocket_path for r in plan_all.requests} == {WEBSOCKET_PATH}
+    assert plan_all.by_venue()["US_EQUITY"] == 1060
+    assert sum(plan_all.by_socket().values()) == plan_all.count
     print("  요청 Universe 규모        OK")
 
 
@@ -675,9 +712,10 @@ def _check_derivatives_plan():
     assert plan.count == 12
     codes = {r.tr_cd for r in plan.requests}
     assert codes == {"FC9", "FH9", "OC0", "OH0", "OVC", "OVH"}, codes
-    assert set(plan.by_socket()) == {
-        "/websocket/futureoption", "/websocket/overseas-futureoption"
-    }
+    # 파생도 같은 소켓 경로다. 문서가 /websocket/futureoption 이라고 적어뒀지만
+    # 실측에서 그 경로는 업그레이드 타임아웃이었다(WEBSOCKET_PATH 주석 참고).
+    assert {r.websocket_path for r in plan.requests} == {WEBSOCKET_PATH}
+    assert plan.by_venue() == {"KRX_DERIV": 10, "OVERSEAS_DERIV": 2}, plan.by_venue()
     print("  파생 구독 계획            OK")
 
 
