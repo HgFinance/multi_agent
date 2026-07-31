@@ -71,5 +71,36 @@ services:
       retries: 10
       start_period: 30s
 
+  # ── 상주형 뉴스 수집 (재일님 지시 2026-07-31: 수집기 컨테이너로 DB 즉시 적재) ──
+  # NAVER 폴링 -> NewsSink -> Supabase(research.documents). 적재 지연은
+  # research.news_ingest_latency(_hourly) View 로 확인한다.
+  news-watcher:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-news-watcher
+    restart: unless-stopped
+
+    # ▶ env_file 로 .env 전체를 넣지 않는다 - LS·OpenAI 등 이 컨테이너가 쓸 일
+    #   없는 Credential 까지 흘러든다. 필요한 것만 명시 주입한다.
+    #   ${...} 값은 compose 가 저장소 루트 .env 에서 읽는다.
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:?.env 에 NAVER_CLIENT_ID 가 필요하다}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:?.env 에 NAVER_CLIENT_SECRET 이 필요하다}
+      # 감시 종목 - .env 로 덮을 수 있다. 기본값은 2026-07-31 실측에 쓴 8종목
+      # (Watchlist 공시건수 대리지표는 증권사로 쏠려 명시 지정이 낫다 - 가이드 J3)
+      NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-005930,000660,005380,017670,034220,005490,055550,316140}
+      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-120}
+
+    # 뉴스 폴링은 가볍다 - TimescaleDB 와 달리 상한을 좁게 잡는다
+    mem_limit: 384m
+    mem_reservation: 64m
+    cpus: 0.5
+    pids_limit: 64
+
+    # SIGTERM 후 Sink 꼬리 Flush 가 끝날 시간을 준다 (기본 10초로도 충분하지만
+    # DB 재시도 백오프와 겹칠 때를 위해 여유를 둔다)
+    stop_grace_period: 30s
+
 volumes:
   tsdb_data:

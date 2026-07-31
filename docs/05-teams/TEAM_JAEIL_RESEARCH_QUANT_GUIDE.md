@@ -869,6 +869,34 @@ Provider 값·최초 관측본 유지), `observed_at`(수집기가 처음 본 �
 훑었기 때문이지 지연이 아니다 — 상주 수집(Watch Mode)이 돌기 시작하면 폴링 주기
 근처로 수렴한 뒤부터 읽는다(View 주석에 해석 주의 3항 기록).
 
+**상주 수집은 Docker Container 로 돈다** (재일님 지시 2026-07-31,
+`collectors/news_watch_service.py` + `departments/01-research/Dockerfile` +
+compose `news-watcher`)
+
+`docker compose up -d news-watcher` 하나로 NAVER 폴링 → Sink → Supabase 즉시
+적재가 상주한다. 설계에서 지킨 것:
+
+- **sweep 간격은 서비스가 소유한다.** `stream.run(max_seconds=0.1)`은 내부 sleep
+  직전에 반환해 정확히 한 sweep만 돌므로, 간격 대기가 `stop_event.wait()`가 되어
+  SIGTERM이 즉시 깨운다. 종료 경로에서 `Sink.close()`가 버퍼 꼬리를 밀어 넣는다.
+- **일 한도(25,000회)의 90%를 넘기지 않는다.** 시작 전 검산(`ensure_quota_headroom`
+  — 켜자마자 한도로 달려가는 설정은 기동 거부)과 실행 중 Guard 둘 다다. 사용량
+  기준은 루프 밖 `DailyQuotaTracker`에 산다 — 루프 안에서 잡으면 **오류 재진입마다
+  사용량이 0으로 리셋**되어 장애가 반복되는 날일수록 Guard가 무력해진다(자체
+  점검이 잡은 버그).
+- **장애 경로는 하나다.** NAVER든 DB든 예외로 올라오고 지수 백오프 후 Repository만
+  재접속해 `NewsSink.rebind()`로 갈아끼운다 — Sink를 새로 만들면 flush 실패로
+  남아 있던 버퍼를 잃는다.
+- **Credential은 필요한 것만 주입한다.** compose가 `env_file`로 .env 전체를 넣지
+  않고 `DATABASE_URL`·NAVER 키만 명시 전달한다 — LS·OpenAI 키가 뉴스 컨테이너로
+  흘러들지 않는다.
+
+**컨테이너 실측 (2026-07-31 10:38~10:47 KST, 8종목 120초 간격)**: 첫 sweep 140건
+백필 후, **10:38~10:42에 게시된 기사들이 `detect_lag` 284~524초(NAVER 검색 색인
+지연 + 폴링 주기), `ingest_lag` 2.4~2.6초로 적재**됐다. 즉 기사 게시부터 DB까지
+5~9분이며, 그중 우리 몫(관측→적재)은 3초 미만이다. 남은 지연은 NAVER 색인이
+지배하므로 폴링을 더 조여도 줄지 않는다.
+
 **검토한 뒤 도입하지 않은 것 — `whdghk1907/mcp-news-collector`**
 WebSocket을 표방하지만 **`src/server/websocket_server.py`가 저장소에 없다**(HTTP 404).
 테스트만 있고 구현이 없다. NAVER Collector는 우리와 같은 `openapi.naver.com` REST를

@@ -211,6 +211,22 @@ class NewsSink:
         if self._on_flush is not None:
             self._on_flush(records, new, updated, added)
 
+    @property
+    def pending(self) -> int:
+        """아직 DB 로 나가지 못한 버퍼 건수. 종료 경로가 유실을 셀 때 쓴다."""
+        return len(self._buf)
+
+    def rebind(self, ref) -> None:
+        """DB 재접속 후 Repository 를 갈아끼운다.
+
+        상주 서비스에서 접속이 죽으면 flush 가 실패하며 버퍼는 남는다(위 flush
+        참고). 새 접속으로 갈아끼우면 **버퍼가 그대로 다음 flush 에서 재시도**된다
+        - Sink 를 새로 만들면 버퍼와 통계를 잃으므로 그렇게 하지 않는다.
+        """
+        if self._closed:
+            raise NewsSinkError("닫힌 Sink 는 rebind 할 수 없다")
+        self._ref = ref
+
     def close(self) -> None:
         """남은 버퍼를 반드시 밀어 넣고 닫는다."""
         if self._closed:
@@ -457,6 +473,34 @@ def _check_failure_not_swallowed():
     print("  실패 전파/재시도         OK")
 
 
+def _check_rebind():
+    """DB 재접속 시 버퍼·통계를 잃지 않고 새 접속으로 이어가는지 (상주 서비스용)."""
+    bad = _FakeRef(fail_on=1)
+    sink = NewsSink(bad, source_id="s", max_batch=2, clock=lambda: 0.0)
+    sink.add(_rec(0))
+    try:
+        sink.add(_rec(1))
+        raise AssertionError("장애가 조용히 지나갔다")
+    except NewsSinkError:
+        pass
+    assert len(sink._buf) == 2
+
+    good = _FakeRef()
+    sink.rebind(good)
+    sink.flush()
+    assert len(good.docs) == 2 and len(sink._buf) == 0, "rebind 후 재시도가 안 됐다"
+    assert sink.stats.received == 2 and sink.stats.documents_new == 2
+
+    # 닫힌 Sink 는 rebind 도 거부한다
+    sink.close()
+    try:
+        sink.rebind(_FakeRef())
+        raise AssertionError("닫힌 Sink 가 rebind 됐다")
+    except NewsSinkError:
+        pass
+    print("  재접속 rebind            OK")
+
+
 def _check_batch_dedup():
     """같은 기사가 한 배치에 두 번 오면 upsert 가 같은 행을 두 번 건드려 실패한다."""
     seen = {}
@@ -563,8 +607,9 @@ if __name__ == "__main__":
     _check_immediate_mode()
     _check_tail_not_lost()
     _check_failure_not_swallowed()
+    _check_rebind()
     _check_batch_dedup()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 9개 영역 통과")
+    print("Sink 10개 영역 통과")
