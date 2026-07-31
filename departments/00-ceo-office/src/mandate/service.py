@@ -9,6 +9,9 @@
 #       * TIGHTEN  -> 즉시 적용        ("장중 Risk 완화는 즉시 적용")
 #       * LOOSEN   -> 사용자 재승인 필요 ("장중 Risk 확대는 사용자 재승인")
 #       * 혼합/모호 -> LOOSEN 취급 (CLAUDE.md 개발 원칙 9: 위험은 확대가 아니라 차단 방향)
+#   - Mandate 통화가 Fund 기준 통화(accounting.funds.base_currency)와 일치하는지 저장 시점에
+#     검증한다 (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 기준 자본 계약, 결정 4-A).
+#     Fund 통화를 확인할 수 없으면 저장하지 않는다.
 #
 # 이 모듈은 DB 에 직접 접근하지 않는다. Repository 는 인터페이스로만 두고, 값 매핑
 # (to_version_row)은 governance.mandate_versions 컬럼과 1:1로 맞춘다. asyncpg 연결은
@@ -236,12 +239,30 @@ class MandateVersionRepository:
         """mandate_decisions append (감사 기록, Append-only)."""
         raise NotImplementedError
 
+    def get_fund_base_currency(self, mandate_id: str) -> str | None:
+        """mandates.fund_id -> accounting.funds.base_currency.
+
+        Mandate 가 속한 Fund 의 기준 통화. Fund 를 찾을 수 없으면 None.
+        SQL 구현: select f.base_currency from accounting.funds f
+                  join governance.mandates m on m.fund_id = f.fund_id
+                  where m.mandate_id = $1
+        """
+        raise NotImplementedError
+
 
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
         self._rows: list[MandateVersionRow] = []
         self._decisions: list[MandateDecisionRow] = []
         self._mandate_state: dict[str, tuple[int, str]] = {}
+        self._fund_currency: dict[str, str] = {}
+
+    def set_fund_base_currency(self, mandate_id: str, currency: str) -> None:
+        """테스트·개발용 seed. 실 구현에서는 accounting.funds 를 조회한다."""
+        self._fund_currency[mandate_id] = currency
+
+    def get_fund_base_currency(self, mandate_id: str) -> str | None:
+        return self._fund_currency.get(mandate_id)
 
     def latest_version(self, mandate_id: str) -> int:
         versions = [r.version for r in self._rows if r.mandate_id == mandate_id]
@@ -301,6 +322,22 @@ class VersionResult:
     requires_user_reapproval: bool
 
 
+class CurrencyMismatchError(ValueError):
+    """Mandate 통화가 Fund 기준 통화와 다르다.
+
+    GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 기준 자본 계약(2026-07-31 결정 4-A):
+    통화 일치는 governance 가 저장 시점에 검증한다. 한도는 전부 비율이고 기준 자본은
+    회계의 Fund 통화로 표시되므로, 통화가 어긋나면 한도 금액이 잘못 계산된다.
+    """
+
+
+class FundNotFoundError(ValueError):
+    """Mandate 가 속한 Fund 의 기준 통화를 확인할 수 없다.
+
+    확인 불가 시 저장을 막는다 — 개발 원칙 9(위험한 기능은 실패 시 확대가 아니라 차단).
+    """
+
+
 class MandateVersionService:
     """F01 Version 발급 서비스.
 
@@ -326,6 +363,18 @@ class MandateVersionService:
         execution_rules: dict | None = None,
         created_by: str | None = None,
     ) -> VersionResult:
+        # 통화 검증 (결정 4-A). Fund 통화를 확인할 수 없으면 저장하지 않는다.
+        fund_currency = self._repo.get_fund_base_currency(mandate_id)
+        if fund_currency is None:
+            raise FundNotFoundError(
+                f"Fund 기준 통화를 확인할 수 없어 Mandate 를 저장하지 않는다: {mandate_id}"
+            )
+        if policy.risk_bounds.currency != fund_currency:
+            raise CurrencyMismatchError(
+                "mandate.currency 가 Fund 기준 통화와 다르다 "
+                f"(mandate={policy.risk_bounds.currency}, fund={fund_currency})"
+            )
+
         next_version = self._repo.latest_version(mandate_id) + 1
 
         if previous_policy is None:
@@ -431,6 +480,7 @@ if __name__ == "__main__":
 
     # 4) Version 발급 서비스.
     repo = InMemoryMandateVersionRepository()
+    repo.set_fund_base_currency("m1", "KRW")  # accounting.funds.base_currency
     svc = MandateVersionService(repo)
     r1 = svc.propose_version(
         mandate_id="m1",
@@ -466,6 +516,48 @@ if __name__ == "__main__":
         )
         raise AssertionError("중복 content_hash 인데 통과함")
     except ValueError:
+        pass
+
+    # 5-1) 통화 불일치 거부 (결정 4-A). Fund 는 USD 인데 Mandate 가 KRW.
+    repo_usd = InMemoryMandateVersionRepository()
+    repo_usd.set_fund_base_currency("m2", "USD")
+    svc_usd = MandateVersionService(repo_usd)
+    try:
+        svc_usd.propose_version(
+            mandate_id="m2",
+            policy=base,  # currency=KRW
+            objective_text="x",
+            objective={},
+            effective_from=now,
+        )
+        raise AssertionError("통화 불일치인데 통과함")
+    except CurrencyMismatchError:
+        pass
+    assert repo_usd.latest_version("m2") == 0, "거부된 Version 이 저장됐다"
+
+    # 5-2) 통화가 맞으면 통과.
+    r_usd = svc_usd.propose_version(
+        mandate_id="m2",
+        policy=_policy(risk={"currency": "USD"}),
+        objective_text="x",
+        objective={},
+        effective_from=now,
+    )
+    assert r_usd.row.version == 1
+
+    # 5-3) Fund 통화를 확인할 수 없으면 저장하지 않는다 (차단 방향).
+    repo_unknown = InMemoryMandateVersionRepository()
+    svc_unknown = MandateVersionService(repo_unknown)
+    try:
+        svc_unknown.propose_version(
+            mandate_id="m-없는펀드",
+            policy=base,
+            objective_text="x",
+            objective={},
+            effective_from=now,
+        )
+        raise AssertionError("Fund 미확인인데 통과함")
+    except FundNotFoundError:
         pass
 
     # 6) Row 가 mandate_versions 컬럼과 맞는지.

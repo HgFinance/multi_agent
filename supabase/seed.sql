@@ -70,13 +70,17 @@ from (values
 cross join (select department_id from workforce.departments where department_code = 'AGENT-WORKFORCE') d
 on conflict (role_code) do nothing;
 
--- 4) Agent Roster (P0 3명: HR-00, HR-01, HR-04) — CANDIDATE 상태
+-- 4) Agent Roster (P0 3명 + P1 2명) — CANDIDATE 상태
 insert into workforce.agent_profiles (employee_code, department_id, role_id, display_name, runtime, employment_status)
 select v.employee_code, d.department_id, r.role_id, v.display_name, 'HERMES', 'CANDIDATE'
 from (values
+  -- P0
   ('HR-00', 'HR-00', 'agent-workforce-supervisor'),
   ('HR-01', 'HR-01', 'workforce-planning-agent'),
-  ('HR-04', 'HR-04', 'lifecycle-coordinator')
+  ('HR-04', 'HR-04', 'lifecycle-coordinator'),
+  -- P1
+  ('HR-02', 'HR-02', 'profile-architect'),
+  ('HR-03', 'HR-03', 'selection-performance-agent')
 ) as v(employee_code, role_code, display_name)
 join workforce.departments d on d.department_code = 'AGENT-WORKFORCE'
 join workforce.role_templates r on r.role_code = v.role_code
@@ -123,7 +127,27 @@ from (values
    '{"per_case_tokens":40000,"daily_tokens":800000}',
    '{"provisioning_lead_time_hours":4}',
    '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
-   '["iam_admin_direct","assign_self_as_approver"]')
+   '["iam_admin_direct","assign_self_as_approver"]'),
+  -- HR-02 -> Deep(Bedrock). Profile/Prompt/Tool 설계가 산출물이라 판단 품질이 필요하다.
+  ('HR-02', 'bedrock', 'claude-deep',
+   '{"required":["HR-02","HR-03"]}',
+   '{"read":["role_templates","skills","tools","models","agent_profiles","agent_profile_versions"],"propose":["candidates","agent_profile_versions","improvement_candidates"]}',
+   '{"workforce":"read"}',
+   'workforce/hr-02',
+   '{"per_case_tokens":150000,"daily_tokens":1500000}',
+   '{"profile_draft_latency_hours":12}',
+   '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
+   '["change_eval_after_results","request_broad_tool_scope_for_convenience"]'),
+  -- HR-03 -> Deep(Bedrock). Eval 판정·Calibration 이 Critic 성격이라 강한 모델이 필요하다.
+  ('HR-03', 'bedrock', 'claude-deep',
+   '{"required":["HR-04","HR-05","QAA-04"]}',
+   '{"read":["candidates","selection_reviews","performance_reviews","capacity_snapshots","agent_profile_versions"],"propose":["selection_reviews","performance_reviews","improvement_candidates"]}',
+   '{"workforce":"read","audit":"read-via-api"}',
+   'workforce/hr-03',
+   '{"per_case_tokens":150000,"daily_tokens":1500000}',
+   '{"eval_turnaround_hours":24}',
+   '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
+   '["production_approve_on_own_eval","skip_qaa04_independent_gate"]')
 ) as v(employee_code, model_provider, model_name, skill_manifest, tool_allowlist, data_scopes, memory_ns, token_budget, sla, eval_req, forbidden)
 join workforce.agent_profiles ap on ap.employee_code = v.employee_code
 join workforce.models m on m.provider = v.model_provider and m.model_name = v.model_name

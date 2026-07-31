@@ -48,7 +48,9 @@ Scorecard 관찰의 실제 API 배선.
 
 ## Profile Seed
 
-- `supabase/seed.sql`은 P0 직원 HR-00·HR-01·HR-04의 DRAFT Profile Version을 멱등 등록한다.
+- `supabase/seed.sql`은 HR-00~HR-04 5명의 DRAFT Profile Version을 멱등 등록한다.
+  P0는 HR-00·HR-01·HR-04, P1은 HR-02·HR-03이다. 모델 티어는 판단이 산출물인 역할
+  (HR-00·02·03)이 Deep(Bedrock), 결정론 인접 역할(HR-01·04)이 Quick(Ollama)이다.
 - `prompt_artifact_path`의 Anchor는 직원 코드가 아니라 `hermes/config.yaml`의 실제 personality 이름인
   `display_name`을 사용한다.
 - Supervisor `model` 설정과 개별 직원의 `agent_profile_versions.model_id`는 다른 계층이다. 어느 쪽도
