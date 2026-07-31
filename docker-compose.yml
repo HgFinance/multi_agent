@@ -193,5 +193,26 @@ services:
     # 다음 주기가 이어받는다. 짧게 정리하고 내린다.
     stop_grace_period: 20s
 
+  # ── research-api: Evidence 읽기 전용 조회면 (에이전트 배선의 시작점) ──
+  # PIT(as_of) 기본, DB 세션 자체가 read-only. 뉴스/공시/재무 Evidence 를
+  # LangGraph 직원 tool 이 여기서 읽는다 (DB 직접 접근 금지 - CLAUDE.md 원칙 1).
+  research-api:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-research-api
+    restart: unless-stopped
+    working_dir: /app/departments/01-research/api
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8035"]
+
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+
+    ports:
+      - "127.0.0.1:8035:8035"   # 로컬 전용 - 외부 노출 금지
+
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
 volumes:
   tsdb_data:

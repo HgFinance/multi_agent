@@ -68,6 +68,7 @@
 | 뉴스 상주 서비스 | `departments/01-research/collectors/news_watch_service.py` | — (신규, Sprint J3) |
 | 감시 Watchlist 생성기 | `departments/01-research/collectors/watchlist_builder.py`, `config/` | — (신규, Sprint J3) |
 | 수집기 Container Image | `departments/01-research/Dockerfile` | — (신규, 2026-07-31) |
+| research-api (Evidence 조회면) | `departments/01-research/api/main.py` | — (신규, Sprint J2) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -832,7 +833,18 @@ Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메�
   IR 서비스가 없으며, 서드파티 스크래퍼는 가이드 3.3(Agent 직접 크롤링 금지) 위반이라
   쓰지 않는다(Registry `kind` note에 근거 기록). 남은 것은 첨부 원본(2019003 → Private
   Storage)인데 이는 아래 공시 원본 Archive와 같은 백로그다.
-- **미착수** `research-api` Evidence 조회.
+- **부분** `research-api` Evidence 조회 (2026-07-31, `departments/01-research/api/main.py`
+  + compose `research-api`, `127.0.0.1:8035`). 에이전트가 DB에 직접 붙지 않고
+  Evidence를 읽는 조회면 — LangGraph 직원 tool이 여기 붙는 것이 다음 단계다.
+  경계 셋을 코드로 강제: ① **읽기 전용**(쓰기 Endpoint 없음 + DB 세션
+  `default_transaction_read_only=on` + 자체 점검이 GET 외 메서드 존재를 거부)
+  ② **PIT 기본** — 모든 질의가 `as_of`(tz 필수, naive 거부 — 추측하면 9시간
+  샌다)를 받아 `observed_at <= as_of`만 반환. 가중치도 View의 now()가 아니라
+  as_of 기준 재계산이라 백테스트가 실시간과 같은 API를 쓴다. 실측: as_of=당일
+  06:00로 뉴스 42건 전부 관측시각 이내(PIT 회귀 통과) ③ **본문 없음**(3.3).
+  Endpoint: `/health`(도메인별 freshness), `/evidence/news`(가중치 포함),
+  `/evidence/disclosures`, `/evidence/financials`. Chunk/Embedding/Citation은
+  RAG 백로그(Sprint J3)와 함께 간다.
 
 **⚠ PIT 한계 (실측 2026-07-30, 반드시 인지할 것)**
 `list.json`의 `rcept_dt`는 **YYYYMMDD 날짜뿐이고 접수 시각이 없다.** `rcept_no` 앞 8자리도

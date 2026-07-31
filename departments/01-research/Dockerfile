@@ -18,7 +18,7 @@
 
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1
+RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0"
 
 # 저장소의 departments/01-research 경로 구조를 그대로 유지한다 - 수집기들이
 # Path(__file__) 상대로 contracts/repository 를 sys.path 에 넣기 때문이다.
@@ -26,6 +26,7 @@ WORKDIR /app/departments/01-research
 COPY collectors ./collectors
 COPY contracts ./contracts
 COPY repository ./repository
+COPY api ./api
 
 ENV PYTHONUNBUFFERED=1
 
