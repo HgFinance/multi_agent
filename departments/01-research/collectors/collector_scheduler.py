@@ -84,8 +84,10 @@ JOBS: tuple[Job, ...] = (
         daily_at=time(18, 10)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect"),
         daily_at=time(18, 30)),
-    # 신규 상장 등으로 개황이 빈 issuer 만 소량 보강 (전량 보강은 이미 완료)
-    Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "100"),
+    # 개황이 빈 issuer 보강 (전량 보강은 완료 - 이후는 신규 필러 몫).
+    # 300: 공시 백필 하루치가 신규 143 corp 를 만든 실측(2026-07-31) + 여유.
+    # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
+    Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
 )
 
