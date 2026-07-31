@@ -50,7 +50,9 @@
 | 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
 | LS REST Client | `departments/01-research/collectors/ls_client.py` | — (신규, Sprint J1) |
 | LS 실시간 정규화 Adapter | `departments/01-research/collectors/ls_realtime_adapter.py` | — (신규, Sprint J1 / F04) |
-| 거래 Calendar 수집기 | `departments/01-research/collectors/calendar_collector.py` | — (신규, Sprint J1) |
+| 거래 Calendar 수집기 (관측 역산) | `departments/01-research/collectors/calendar_collector.py` | — (신규, Sprint J1) |
+| 거래 Calendar 선언 생성 (당일·미래) | `departments/01-research/collectors/calendar_declared.py` | — (신규, Sprint J1) |
+| LS 실시간 상주 서비스 | `departments/01-research/collectors/ls_realtime_worker.py`, `ls_realtime_service.py` | — (신규, Sprint J1 / F03) |
 | 시장 상태 수집기 | `departments/01-research/collectors/market_breadth_collector.py` | — (신규, Sprint J1) |
 | Reference Repository | `departments/01-research/repository/reference_repository.py` | — (신규, Sprint J1) |
 | 공시 수집기 | `departments/01-research/collectors/opendart_collector.py` | — (신규, Sprint J2) |
@@ -62,6 +64,10 @@
 | 뉴스 Stream 계약 | `departments/01-research/contracts/news_events.py` | — (신규, Sprint J3) |
 | 국내 뉴스 수집기 (P0) | `departments/01-research/collectors/naver_news_collector.py` | — (신규, Sprint J3) |
 | 해외 뉴스 수집기 (P1) | `departments/01-research/collectors/alpaca_news_collector.py` | — (신규, Sprint J3) |
+| 뉴스 즉시 적재 Sink | `departments/01-research/collectors/news_pipeline.py` | — (신규, Sprint J3) |
+| 뉴스 상주 서비스 | `departments/01-research/collectors/news_watch_service.py` | — (신규, Sprint J3) |
+| 감시 Watchlist 생성기 | `departments/01-research/collectors/watchlist_builder.py`, `config/` | — (신규, Sprint J3) |
+| 수집기 Container Image | `departments/01-research/Dockerfile` | — (신규, 2026-07-31) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -583,16 +589,26 @@ Provider별 종목 매핑은 `link_resolver`로 주입받아 Sink가 모른다.
 
 **실측 결과 (2026-01-01~07-30 적재 완료)**: 전체 211일 중 거래일 141일, 평일 비거래일
 10일. 9개는 알려진 공휴일과 일치했다(신정, 설날 3일, 삼일절 대체, 근로자의날, 어린이날,
-부처님오신날 대체, 지방선거). **`2026-07-17`은 제헌절이며 공휴일이 아닌데 비거래일로
-관측됐다 — 임시휴장인지 데이터 공백인지 현재 Source로 판별할 수 없다.** 교차 검증
-Source가 필요한 지점이다.
+부처님오신날 대체, 지방선거). `2026-07-17` 미스터리는 아래 선언 Calendar 작업에서
+풀렸다 — **제헌절이 18년 만에 공휴일로 재지정**(2026-04-28 국무회의)된 것이었다.
 
-**⚠ 역산 방식의 구조적 한계 (2026-07-31 확인)** — 일봉 관측 역산이므로 **당일과 미래
-날짜를 원리상 채울 수 없다.** 거래가 일어난 뒤에야 그 날이 거래일이었음을 알 수 있다.
-따라서 장 시작 전에 "오늘이 거래일인가"를 Calendar에 물으면 항상 행이 없다. 아래
-시장 상태 수집기가 이 때문에 세션 판정을 날짜가 아니라 **세션 기준**으로 한다.
-근본 해결은 Calendar를 관측이 아니라 **선언적으로**(공휴일 규칙 + KRX 휴장일 공고)
-채우는 것이고, 이는 KRX 서비스 이용 승인 또는 별도 Source가 선행이다.
+**선언 Calendar — 당일·미래 거래일 (완료 2026-07-31)** —
+`collectors/calendar_declared.py` (재일님 지시 "캘린더는 알아서 수집, API 없이 괜찮음").
+역산의 구조적 한계(당일·미래를 원리상 못 채움)를 **공표 휴장일 선언 + 관측 검증**으로
+풀었다. 2026년 평일 휴장 17건(하반기: 8/17 광복절 대체, 추석 9/24~25, 10/5 개천절
+대체, 10/9 한글날, 12/25, 12/31 연말 휴장)과 특이 세션(1/2 개장식 10시, 11/19 수능일
+10:00~16:30)을 선언 목록으로 만들고:
+
+- **관측과 겹치는 전 구간(211일)이 하루라도 다르면 적재를 거부**한다(fail-closed).
+  실적재에서 211일 전부 일치 확인 후 Version 2(365행, 거래일 244일)로 들어갔다.
+- **관측이 부정한 것도 회귀 테스트다** — 6/6 현충일(토)은 대체공휴일이 없고(6/8 월
+  정상 거래 관측), 설·추석 대체는 일요일 겹침만이라 9/28(월)은 거래일이다.
+- **2027년은 만들지 않는다** — 설·추석(음력)과 임시공휴일은 규칙으로 확정할 수 없어
+  매년 공표를 보고 목록을 갱신한다(`DECLARED_THROUGH`가 다음 해 생성을 거부).
+- Registry에 `krx_public_notice`(무키, AVAILABLE)로 등록 — **P0 Blocked Domain이
+  전부 해소됐다.** `recent_trading_sessions`는 오늘(KST)까지만 돌려주도록 가드를
+  넣었다 — 선언 Calendar가 미래 행을 갖게 되면서 "직전 세션" 탐색이 미래를 집으면
+  안 되기 때문이다(미래 조회는 `market_session(날짜)`).
 
 **시장 상태 / Breadth (P0)** — `departments/01-research/collectors/market_breadth_collector.py`.
 KRX 지수 API 5종(`krx_dd_trd`, `kospi_dd_trd`, `kosdaq_dd_trd`, `bon_dd_trd`,
@@ -706,8 +722,10 @@ Protocol 구현으로 끝난다.
 `NOT_AUTHORIZED` 상태를 추가했다. Registry는 키 **존재**만 판정할 수 있으므로 실제 호출
 권한은 관측 결과를 `NOT_AUTHORIZED_OBSERVED`에 근거와 함께 기록한다.
 
-**P0 Blocked Domain은 `NEWS`와 `CALENDAR`다.** 단 `CALENDAR`는 KRX 승인을 받아도 Calendar
-API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관측 역산으로 대응했다.
+**P0 Blocked Domain은 전부 해소됐다 (2026-07-31).** `NEWS`는 NAVER 키 확보로,
+`CALENDAR`는 선언 Calendar(`krx_public_notice` — KRX 승인을 받아도 Calendar API
+자체가 없으므로 이 경로가 유일했다)로 풀렸다. KRX/KOSIS `NOT_AUTHORIZED`는 해당
+Source 자체의 문제로 남아 있지만 P0 Domain 을 막지는 않는다.
 
 **장시간 실행 Runtime — Docker 상주** (재일님 지시 2026-07-31 "호가·체결 수집기도
 Docker 에", `collectors/ls_realtime_service.py` + compose `ls-realtime`)
@@ -858,10 +876,14 @@ Alpaca와 같은 모양으로 유지한다. 한 기사가 여러 종목 질의�
 관련도는 제목 포함 여부로만 가른다 — 질의로 나온 이상 관련은 있으므로 최소
 `MENTIONS`(0.5)이고, 제목에 종목명이 있으면 `DEDICATED`(0.9)다.
 
-**Watchlist의 한계** — 코스피200·코스닥150 구성종목을 쓸 수 없다(KRX 승인 없음).
-대리지표로 공시 건수를 쓰는데 **증권사로 쏠린다** — ELS·DLS 발행 공시를 대량으로 내서
-상위 15개 중 10개가 증권사였다. 시가총액 Source가 생기기 전까지는 `--symbols`로 명시
-지정하는 쪽이 낫다. 승인이 떨어지면 `load_watchlist` 하나만 갈아끼우면 된다.
+**Watchlist의 한계 → 해소 (2026-07-31)** — 처음엔 코스피200·코스닥150 구성종목을
+쓸 수 없다고 판단했다(KRX 구성종목 API 승인 없음). 공시 건수 대리지표는 **증권사로
+쏠렸다**(ELS·DLS 발행 공시 때문에 상위 15개 중 10개가 증권사). 그런데 **LS 업종
+체계에 지수가 업종코드로 존재한다** — t8424 전체업종에서 실측으로 확인:
+`101=KOSPI200`, `405=KOSDAQ 150`. 이 코드를 t1444(시가총액상위)에 주면 **구성종목이
+시총순으로 전부 나온다**(K200 정확히 200, KQ150 정확히 150 실측). KRX 승인 없이
+바스켓을 만드는 경로다 — `watchlist_builder.py --basket`. `load_watchlist`의 공시건수
+대리지표는 파일도 명시 지정도 없을 때의 마지막 fallback으로만 남는다.
 
 **실적재 (2026-07-31)**: 8종목 명시 지정 → 기사 214건, `document_instruments` 210건
 연결(전용 30, 복수종목 21), 멱등 재시도 0. `research.documents` 누계는 opendart 869 /
@@ -912,13 +934,19 @@ compose `news-watcher`)
 5~9분이며, 그중 우리 몫(관측→적재)은 3초 미만이다. 남은 지연은 NAVER 색인이
 지배하므로 폴링을 더 조여도 줄지 않는다.
 
-**감시 종목 확장 — 시가총액 상위 70종목** (재일님 지적 2026-07-31 "구독 종목수가
-적네", `collectors/watchlist_builder.py`)
+**감시 종목 확장 — 시총 상위 70 → 코스피200+코스닥150 바스켓 350** (재일님 지적
+2026-07-31 "구독 종목수가 적네" → "코스피200 코스닥150 바스켓으로 수집",
+`collectors/watchlist_builder.py`)
 
-공시건수 대리지표의 증권사 쏠림을 **LS t1444(시가총액상위)** 로 해결했다.
-KOSPI 55 + KOSDAQ 15 = 70종목 / 300초 간격 = 일 20,160회로 NAVER 한도의 90%
-안이다("종목 수 × 폴링 횟수"의 균형 — 지연은 NAVER 색인이 지배하므로 간격을
-늘려 종목을 늘리는 쪽이 남는 장사다). 실측으로 확정한 규격 둘:
+1차로 **LS t1444(시가총액상위)** 시총 상위 70종목(300초 간격), 2차로 지수
+업종코드(101/405)를 이용해 **바스켓 구성종목 전체 350종목**으로 확장했다. NAVER
+일 한도 때문에 350종목은 폴링 간격이 1,500초(25분)가 된다 — "종목 수 × 폴링
+횟수"의 균형이며, 뉴스 지연은 NAVER 색인이 지배하므로 넓은 커버리지 쪽을 택했다.
+**파일이 둘로 갈라진 이유**: 시세(ls-realtime)가 350종목을 따라가면 700구독으로
+소켓 한도(200)를 넘는다 — 뉴스는 `config/news_watchlist.txt`(바스켓), 시세는
+`config/ls_watchlist.txt`(시총 상위 70 = 140구독)를 쓴다. t1444에는 문서의 초당
+2회와 **별개의 호출 건수 제한이 있다**(IGW00201 실측 2회) — 빌더를 연속으로
+돌리면 걸리므로 몇 분 쿨다운 후 재시도한다. 실측으로 확정한 규격 둘:
 
 - **t1444 연속조회는 응답 헤더가 계약이다.** InBlock `idx`만으로 다음 페이지를
   청하면 서버 세션 상태에 따라 2페이지가 오기도, 1페이지가 반복되기도 한다

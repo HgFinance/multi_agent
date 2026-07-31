@@ -35,7 +35,7 @@ import json
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import UUID
@@ -1086,12 +1086,17 @@ class SupabaseReferenceRepository(ReferenceRepository):
         market: str = MARKET_KRX,
         session_type: str = "REGULAR",
         limit: int = 20,
+        through: date | None = None,
     ) -> list[tuple[date, datetime | None, datetime | None]]:
         """최신 Version 의 거래일 세션을 최신순으로. 개장 시각 일관성 확인에도 쓴다.
 
-        Calendar 가 관측 역산이라 **당일과 미래 날짜는 들어 있지 않다.** 그래서
-        '오늘' 이 없을 때 직전 세션을 찾는 경로가 필요하다.
+        **오늘(KST)까지만 돌려준다.** 선언 Calendar(calendar_declared)가 미래
+        거래일을 갖게 되면서 이 가드가 필요해졌다 - 호출부(직전 세션 탐색,
+        make_trading_day_check)는 전부 '이미 지난 세션'을 전제하므로 미래 날짜가
+        섞이면 PRIOR_CLOSE 가 미래를 집는다. 미래 조회는 market_session(날짜)로 한다.
         """
+        if through is None:
+            through = datetime.now(timezone(timedelta(hours=9))).date()
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -1102,10 +1107,11 @@ class SupabaseReferenceRepository(ReferenceRepository):
                     where market = %s order by version desc limit 1
                 )
                   and s.market = %s and s.session_type = %s and s.is_trading_day
+                  and s.trade_date <= %s
                 order by s.trade_date desc
                 limit %s
                 """,
-                (market, market, session_type, limit),
+                (market, market, session_type, through, limit),
             )
             return [(r[0], r[1], r[2]) for r in cur.fetchall()]
 

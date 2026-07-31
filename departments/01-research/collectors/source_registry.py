@@ -295,7 +295,26 @@ SOURCES: tuple[SourceSpec, ...] = (
         raw_bucket="research-raw-private",
         normalized_target="reference.market_calendars / reference.corporate_actions",
         doc_ref="TEAM_JAEIL 3.1, RESEARCH_DATA_SOURCES 5.x",
-        note="거래 Calendar 의 공식 기준. 키 미확보 상태이므로 휴장·장 구간을 추정하지 않는다",
+        note="거래 Calendar 의 공식 기준. 키 미확보 상태이므로 휴장·장 구간을 추정하지 않는다"
+             " (CALENDAR Domain 자체는 krx_public_notice 선언 경로가 덮는다 - 2026-07-31)",
+    ),
+    SourceSpec(
+        source_id="krx_public_notice",
+        market_scopes=(MarketScope.KR_MARKET,),
+        display_name="KRX 휴장일 공표 (선언 Calendar)",
+        domains=(SourceDomain.CALENDAR,),
+        tier=SourceTier.P0,
+        # API 가 아니라서 키가 없다 - 공표된 휴장일(사실 정보)을 선언 목록으로
+        # 유지하고, calendar_declared 가 관측 Calendar(t8410 역산)와 **전 구간
+        # 일치를 강제**한다. 불일치·검증불능이면 적재 자체가 거부된다(fail-closed).
+        required_env=(),
+        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
+        raw_bucket="research-raw-private",
+        normalized_target="reference.market_calendar_versions (calendar_declared.py)",
+        doc_ref="TEAM_JAEIL 3.1, Sprint J1 선언 Calendar",
+        note="2026-07-31 도입 (재일님 지시 '캘린더는 알아서 수집, API 없이 괜찮음'). "
+             "설·추석(음력)과 임시공휴일은 규칙으로 못 만들므로 매년 공표를 보고 "
+             "목록을 갱신한다 - DECLARED_THROUGH 가 다음 해 생성을 막는다",
     ),
     SourceSpec(
         source_id="bigkinds",
@@ -788,8 +807,12 @@ def _check_license_scope():
 def _check_blocked_domains():
     r = SourceRegistry(env=_FAKE_ENV)
     blocked = r.blocked_p0_domains()
+    # CALENDAR 는 키가 하나도 없어도 Blocked 가 아니다 - krx_public_notice(선언 +
+    # 관측 검증, 2026-07-31)가 키 없이 덮는다. calendar_declared 가 fail-closed 를
+    # 맡으므로 Registry 는 경로 존재만 본다.
+    assert SourceDomain.CALENDAR not in blocked, "선언 Calendar 가 있는데 CALENDAR 가 막혔다"
+    assert r.status("krx_public_notice") is SourceStatus.AVAILABLE
     # 키가 없어서 지금 막힌 Domain
-    assert SourceDomain.CALENDAR in blocked, "KRX 키가 없으면 CALENDAR 는 Blocked 여야 한다"
     assert SourceDomain.MACRO in blocked
     assert SourceDomain.NEWS in blocked, "BIGKinds/NAVER 둘 다 없으면 NEWS 는 Blocked 다"
     # LS 로 덮이는 Domain 은 막히지 않는다
@@ -801,17 +824,16 @@ def _check_blocked_domains():
     # INSTRUMENT_MASTER 는 LS + KRX 인데 LS 가 살아 있으므로 Blocked 가 아니다
     assert SourceDomain.INSTRUMENT_MASTER not in blocked
 
-    # KRX 키를 채워도 서비스 이용 승인이 없으면 CALENDAR 는 여전히 Blocked 다.
+    # KRX API 자체는 키를 채워도 서비스 이용 승인이 없으면 NOT_AUTHORIZED 다.
     # 키 존재만으로 풀리면 안 된다 - 승인 전에 호출하면 401 이고, 그걸 빈 결과로
-    # 취급하면 휴장일을 추정하게 된다.
+    # 취급하면 데이터를 추정하게 된다. (CALENDAR Blocked 와는 이제 무관하다)
     r2 = SourceRegistry(env={**_FAKE_ENV, "KRX_API_KEY": "krx-key"})
     assert r2.status("krx_openapi") is SourceStatus.NOT_AUTHORIZED
-    assert SourceDomain.CALENDAR in r2.blocked_p0_domains(), "승인 없이 CALENDAR 가 풀렸다"
 
-    # 승인이 떨어지면(관측 기록 제거) 풀린다 - 확장 시 회귀 방지
+    # 승인이 떨어지면(관측 기록 제거) AVAILABLE 로 돌아온다 - 회귀 방지
     saved = NOT_AUTHORIZED_OBSERVED.pop("krx_openapi")
     try:
-        assert SourceDomain.CALENDAR not in r2.blocked_p0_domains()
+        assert r2.status("krx_openapi") is SourceStatus.AVAILABLE
     finally:
         NOT_AUTHORIZED_OBSERVED["krx_openapi"] = saved
     print("  Blocked Domain        OK")
