@@ -75,6 +75,10 @@ JOBS: tuple[Job, ...] = (
     # 시장 Breadth - 세션 판정은 수집기 자신이 한다 (휴장이면 exit 2 = SKIP)
     Job("breadth", ("collectors/market_breadth_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 30), time(16, 10))),
+    # KOSPI200 파생 스냅샷 - 파생 세션(주식 ±15분)은 수집기가 판정, 밖이면 SKIP.
+    # 창 상한 17:00: 수능일 파생 마감 16:45 까지 덮는다. 호출 4회/실행이라 가볍다.
+    Job("derivatives", ("collectors/derivatives_collector.py", "--collect"),
+        every_minutes=10, window=(time(8, 40), time(17, 0))),
     # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 20)),

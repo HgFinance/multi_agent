@@ -91,6 +91,7 @@ class SourceDomain(StrEnum):
     REALTIME_PRICE = "REALTIME_PRICE"
     REALTIME_QUOTE = "REALTIME_QUOTE"
     MARKET_STATE = "MARKET_STATE"
+    DERIVATIVE = "DERIVATIVE"
     INSTRUMENT_MASTER = "INSTRUMENT_MASTER"
     CALENDAR = "CALENDAR"
     DISCLOSURE = "DISCLOSURE"
@@ -241,14 +242,16 @@ SOURCES: tuple[SourceSpec, ...] = (
         source_id="ls_openapi_rest",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="LS증권 Open API REST",
-        domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE),
+        domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE,
+                 SourceDomain.DERIVATIVE),
         tier=SourceTier.P0,
         required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
         allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
         raw_bucket="research-raw-private",
         normalized_target="reference.instruments",
-        doc_ref="docs/06-integrations/ls-openapi/01-oauth, 03-stock",
-        note="모의투자 REST Domain 은 수집 문서 기준 전부 '-'(미제공)이다",
+        doc_ref="docs/06-integrations/ls-openapi/01-oauth, 03-stock, 04-derivatives",
+        note="모의투자 REST Domain 은 수집 문서 기준 전부 '-'(미제공)이다. "
+             "파생 시세(t2301/t2111 등)는 실전 키에 기본 개방 - 2026-07-31 실측",
     ),
     SourceSpec(
         source_id="opendart",
@@ -830,10 +833,19 @@ def _check_blocked_domains():
     assert r.status("krx_public_notice") is SourceStatus.AVAILABLE
     # 키가 없어서 지금 막힌 Domain
     assert SourceDomain.MACRO in blocked
-    assert SourceDomain.NEWS in blocked, "BIGKinds/NAVER 둘 다 없으면 NEWS 는 Blocked 다"
+    # NEWS 는 2026-07-31 부로 ls_news(LS 키) 가 P0 로 덮는다 - NAVER/BIGKinds 가
+    # 없어도 LS 키가 살아 있으면 Blocked 가 아니다. (이 자리에 있던 이전 단언은
+    # ls_news 등재 전의 세계를 박제한 것이라 갱신했다)
+    assert SourceDomain.NEWS not in blocked, "ls_news 가 살아 있는데 NEWS 가 막혔다"
     # LS 로 덮이는 Domain 은 막히지 않는다
     assert SourceDomain.REALTIME_PRICE not in blocked
     assert SourceDomain.REALTIME_QUOTE not in blocked
+    assert SourceDomain.DERIVATIVE not in blocked, "파생은 ls_openapi_rest 가 덮는다"
+    # LS 키마저 사라지면 LS 단독 Domain 은 전부 막힌다 - NEWS 도 그때는 Blocked
+    no_ls = SourceRegistry(env={**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": ""})
+    b2 = no_ls.blocked_p0_domains()
+    assert SourceDomain.NEWS in b2, "뉴스 경로가 하나도 없는데 NEWS 가 안 막혔다"
+    assert SourceDomain.DERIVATIVE in b2 and SourceDomain.REALTIME_PRICE in b2
     # DART 로 덮이는 Domain
     assert SourceDomain.DISCLOSURE not in blocked
     assert SourceDomain.FINANCIAL not in blocked
@@ -862,7 +874,10 @@ def _check_scope_gate():
     Source 를 P0 NEWS 로 등록하면 한국 종목 뉴스가 0건인데 NEWS Blocked 가 풀린다.
     그러면 '데이터 장애 시 신규 진입 자동 차단' 이 조용히 무너진다.
     """
-    env_with_news = {**_FAKE_ENV, "FOREIGN_NEWS_API_KEY": "k"}
+    # LS 키를 비운다 - ls_news(2026-07-31 등재)가 NEWS 를 덮으면 "다른 경로가
+    # 없는데 해외 Source 가 풀어버리는가"라는 이 검사의 전제가 성립하지 않는다
+    env_with_news = {**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": "",
+                     "FOREIGN_NEWS_API_KEY": "k"}
 
     foreign = SourceSpec(
         source_id="foreign_news_probe",
