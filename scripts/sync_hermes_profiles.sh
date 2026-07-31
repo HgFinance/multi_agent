@@ -15,7 +15,10 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SRC_ROOT="$REPO_ROOT/departments"
-DEST_ROOT="$HOME/.hermes/profiles"
+# Hermes Profile 실제 위치는 OS마다 다르다. Windows 설치본은 ~/.hermes가 아니라
+# AppData/Local/hermes를 쓴다 - 여기가 틀리면 8개 부서가 전부 조용히 skip된다.
+DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
+[[ -d "$DEST_ROOT" ]] || DEST_ROOT="$HOME/AppData/Local/hermes/profiles"
 
 # dept -> departments/<n>/hermes 매핑. 순서는 CLAUDE.md 담당자 표와 무관하며
 # REPOSITORY_DEPARTMENT_STRUCTURE.md 2절 조직 번호를 따른다.
