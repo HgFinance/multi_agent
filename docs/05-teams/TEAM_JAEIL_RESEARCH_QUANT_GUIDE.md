@@ -878,6 +878,18 @@ API(2019003)나 별도 Source가 필요하다.
   충당한다.** `KEY_MISSING`이 아니라 `DISABLED`로 둔 이유 — `KEY_MISSING`은
   "발급만 받으면 된다"는 뜻이라 사실과 다르다. 재검토 조건은 가입 여건 변화 또는
   헤드라인 분석의 한계 실측이며 사유를 `disabled_reason`에 남겼다.
+
+  **3.3 예외 — 판단 시점 열람, 비저장** (재일님 승인 2026-07-31,
+  `agents/article_reader.py`). "Agent 직접 크롤링 금지"에 하나의 예외를 둔다:
+  에이전트가 **판단 시점에** 전용(DEDICATED 0.9) 기사만 URL로 열람해 읽고,
+  본문은 어디에도 저장하지 않고 버리며, 우리가 생성한 판단·요약(파생
+  저작물)만 남긴다 — 사람 애널리스트의 브라우징(저작권법 35조의2 일시적 복제)을
+  자동화한 것이다. 안전장치는 전부 코드다: robots.txt 준수(읽기 실패 시
+  fail-closed 불허), 도메인당 20초 간격, 실행당 5건 상한, 저장 경로 부재를 AST
+  검사로 강제, evidence 구조에 body 필드가 없음을 자체 점검이 회귀로 잡는다.
+  **as_of 재현(백테스트)에서는 열람하지 않는다** — 지금의 웹페이지는 그때의
+  지면이 아니므로 PIT가 깨진다. 이 예외는 수집기·스케줄에 넣지 않는다(대량이
+  되는 순간 브라우징이 아니라 크롤링이다). 리스크본부 검토 대상으로 남긴다.
 - **부분** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
   중복 제거는 `news_events.admit`의 Cursor + ID 창으로 Stream 계층에서 한다.
   **Story Cluster와 Near Duplicate는 미착수**다.

@@ -128,7 +128,9 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
     payload = [
         {"document_id": a["document_id"], "title": a["title"],
          "relation": a.get("relation_type"), "published_kst":
-             a["published_at"][:16]}
+             a["published_at"][:16],
+         # 판단 시점 열람으로 붙은 본문(메모리뿐). 프롬프트 재료로만 쓰고 버린다
+         **({"body": a["body"][:1500]} if a.get("body") else {})}
         for a in articles
     ]
     prompt = (f"Stock: {symbol}\nArticles ({len(payload)}):\n"
@@ -210,18 +212,55 @@ def verify_and_aggregate(
     )
 
 
+def attach_bodies(articles: list[dict], *, reader=None,
+                  min_confidence: float = 0.9) -> tuple[list[dict], str]:
+    """전용(DEDICATED 고신뢰) 기사만 판단 시점에 열람해 body 를 **메모리에만** 붙인다.
+
+    재일님 승인(2026-07-31) 패턴: 열람 -> 판단 -> 본문 폐기. body 는 LLM 프롬프트
+    재료로만 쓰이고 evidence·DB 어디에도 실리지 않는다(아래 verify_and_aggregate 의
+    evidence 구조에 body 키가 없고, 자체 점검이 이를 강제한다). 열람 실패는
+    헤드라인 판단으로 자연 폴백된다 - 본문이 없다고 판단을 멈추지 않는다.
+    """
+    from article_reader import ArticleReader
+
+    r = reader or ArticleReader()
+    for a in articles:
+        conf = float(a.get("confidence") or 0)
+        if conf >= min_confidence and a.get("url"):
+            body = r.read(a["url"])
+            if body:
+                a["body"] = body  # 메모리뿐 - 저장 경로 없음
+    return articles, r.stats.summary()
+
+
 def run(symbol: str, *, hours: float = 24.0, as_of: Optional[datetime] = None,
-        llm=None, api_base: str = RESEARCH_API) -> SentimentReport:
+        llm=None, api_base: str = RESEARCH_API, reader=None,
+        read_bodies: bool = True) -> SentimentReport:
     ts = as_of or datetime.now(timezone.utc)
     articles = fetch_evidence(symbol, hours=hours, as_of=as_of, api_base=api_base)
     if not articles:
         return SentimentReport(symbol, ts, "NO_EVIDENCE", None, 0, 0, (),
                                "창 안에 기사가 없다")
+    read_note = ""
+    if read_bodies:
+        # as_of 재현(백테스트)에서는 열람하지 않는다 - 지금의 웹페이지는 그때의
+        # 지면이 아니므로 PIT 가 깨진다. 실시간 판단에서만 연다.
+        if as_of is None:
+            articles, read_note = attach_bodies(articles, reader=reader)
+        else:
+            read_note = "as_of 재현이라 열람 생략(PIT)"
     try:
         batch = judge_articles(symbol, articles, llm=llm)
     except RuntimeError as e:
         return SentimentReport(symbol, ts, "INCONCLUSIVE", None, 0, 0, (), str(e))
-    return verify_and_aggregate(symbol, ts, articles, batch)
+    report = verify_and_aggregate(symbol, ts, articles, batch)
+    if read_note:
+        report = SentimentReport(
+            report.symbol, report.as_of, report.verdict, report.score,
+            report.articles_used, report.articles_dropped, report.evidence,
+            (report.detail + " | 열람: " + read_note).strip(" |"),
+        )
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +330,28 @@ def _check_schema_retry():
     print("  Schema 검증/재시도       OK")
 
 
+def _check_body_never_persists():
+    """열람 본문이 판단 재료로만 쓰이고 evidence(저장 대상)에 새지 않는지."""
+    ts = datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc)
+    art = {**_art(1, 1.0), "confidence": 0.9, "url": "https://x.invalid/1"}
+
+    class _FakeReader:
+        def __init__(self):
+            from types import SimpleNamespace
+            self.stats = SimpleNamespace(summary=lambda: "열람 1")
+        def read(self, url):
+            return "본문 텍스트 " * 50
+
+    arts, note = attach_bodies([art], reader=_FakeReader())
+    assert arts[0].get("body"), "본문이 안 붙었다"
+    batch = JudgementBatch(judgements=[
+        ArticleJudgement(document_id="d1", sentiment=1, salience=0.9, reason="ok")])
+    r = verify_and_aggregate("005930", ts, arts, batch)
+    for e in r.evidence:
+        assert "body" not in e, "열람 본문이 evidence(저장 대상)로 샜다 - 비저장 계약 위반"
+    print("  본문 비저장 계약         OK")
+
+
 def _check_no_evidence():
     r = run("005930", llm=lambda s, u: "안 불려야 한다",
             api_base="http://127.0.0.1:1",  # 닫힌 포트 - fetch 실패는 예외로 드러난다
@@ -323,10 +384,11 @@ if __name__ == "__main__":
     _check_aggregate()
     _check_hallucinated_citation()
     _check_schema_retry()
+    _check_body_never_persists()
     try:
         _check_no_evidence()
     except AssertionError as e:
         raise
     except Exception:
         print("  API 장애 fail-closed     OK")  # URLError 등 - 조용히 0점 내지 않는다
-    print("직원 에이전트 4개 영역 통과. 실행은 --run <종목코드>")
+    print("직원 에이전트 6개 영역 통과. 실행은 --run <종목코드>")
