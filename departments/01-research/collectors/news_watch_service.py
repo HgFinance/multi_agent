@@ -61,7 +61,11 @@ from naver_news_collector import (  # noqa: E402
     load_watchlist,
     make_watch_stream,
 )
-from news_pipeline import NewsSink, krx_symbol_resolver  # noqa: E402
+from news_pipeline import (  # noqa: E402
+    NewsSink,
+    krx_symbol_resolver,
+    seed_title_window_from_db,
+)
 from source_registry import load_project_env  # noqa: E402
 
 SERVICE_VERSION = "research-news-watch-service-v1"
@@ -288,6 +292,9 @@ def main() -> int:
         max_batch=cfg.max_batch, max_delay_seconds=cfg.max_delay_seconds,
         title_dedup_window=5000,  # 같은 기사 다른 URL 재게재 차단 (중복 270행 재발 방지)
     )
+    # 재기동 예열 - 창이 빈 첫 몇 분이 중복 구멍이 되지 않게 (07-31 재배포 때 42행)
+    seeded = seed_title_window_from_db(sink, ref._conn, source_id)
+    print(f"제목 창 예열 {seeded:,}건", flush=True)
 
     quota_state = DailyQuotaTracker(client)
     backoff = 5.0
