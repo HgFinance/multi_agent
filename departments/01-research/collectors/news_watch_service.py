@@ -270,9 +270,18 @@ def main() -> int:
         client, items, display=cfg.display,
         interval_seconds=cfg.interval_seconds,
     )
+    # '더 긴 이름' 오탐 검사는 감시 목록이 아니라 전 상장사 이름으로 한다 -
+    # 제목의 '두산로보틱스' 가 감시 밖이어도 '두산' DEDICATED 를 막아야 한다.
+    with ref._conn.cursor() as cur:
+        cur.execute(
+            "select display_name from reference.instruments "
+            "where market = 'KRX' and instrument_type = 'STOCK' and status = 'ACTIVE'"
+        )
+        known_names = {r[0] for r in cur.fetchall()}
     resolver = krx_symbol_resolver(
         {it.symbol: it.instrument_id for it in items},
         dedicated_names={it.symbol: it.name for it in items},
+        known_names=known_names,
     )
     sink = NewsSink(
         ref, source_id=source_id, link_resolver=resolver,

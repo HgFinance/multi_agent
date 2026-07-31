@@ -285,17 +285,21 @@ class WatchItem:
 #   NAVER 는 **우리가 종목명으로 질의** 하므로 어떤 종목의 기사인지가 처음부터
 #   확실하다. 대신 동명이의(예: 한화 - 그룹/종목)를 우리가 걸러야 한다.
 #
-#   질의어가 종목명 그대로면 오탐이 섞인다. 지금은 종목명을 그대로 쓰되 **제목에
-#   종목명이 없으면 MENTIONS 로 낮춘다** - Alpaca 쪽 classify_korea 와 같은 원칙이다.
+#   질의어가 종목명 그대로면 오탐이 섞인다. 판정은 news_pipeline 의
+#   title_has_standalone 을 쓴다 - '두산에너빌리티' 제목에서 '두산' 이 DEDICATED
+#   가 되는 부분 문자열 오탐과, 본문 매칭 추정(제목 미포함)의 과신(0.5)을
+#   2026-07-31 재일님 지적으로 고쳤다.
 DEDICATED_CONFIDENCE = "0.9"
-MENTIONS_CONFIDENCE = "0.5"
 
 
-def relation_for(record: NewsRecord, item: WatchItem) -> tuple[str, str]:
-    """(relation_type, confidence). 제목에 종목명이 있으면 전용으로 본다."""
-    if item.name in record.title:
+def relation_for(record: NewsRecord, item: WatchItem,
+                 all_names=()) -> tuple[str, str]:
+    """(relation_type, confidence). 제목에 종목명이 **독립 등장**하면 전용이다."""
+    from news_pipeline import BODY_MATCH_CONFIDENCE, title_has_standalone
+
+    if title_has_standalone(item.name, record.title, set(all_names) - {item.name}):
         return "DEDICATED", DEDICATED_CONFIDENCE
-    return "MENTIONS", MENTIONS_CONFIDENCE
+    return "MENTIONS", BODY_MATCH_CONFIDENCE
 
 
 def _watchlist_for(ref, symbols: tuple[str, ...]) -> list[WatchItem]:
@@ -523,12 +527,21 @@ def _check_client_limits():
 
 
 def _check_relation():
+    from news_pipeline import BODY_MATCH_CONFIDENCE
+
     r = parse_item(_SAMPLE, observed_at=_ob())
     it = WatchItem(None, "005930", "삼성전자")
     assert relation_for(r, it) == ("DEDICATED", DEDICATED_CONFIDENCE)
-    # 제목에 종목명이 없으면 낮춘다
+    # 제목에 종목명이 없으면 본문 매칭 추정으로 낮춘다
     other = parse_item({**_SAMPLE, "title": "코스피 상승 마감"}, observed_at=_ob())
-    assert relation_for(other, it) == ("MENTIONS", MENTIONS_CONFIDENCE)
+    assert relation_for(other, it) == ("MENTIONS", BODY_MATCH_CONFIDENCE)
+    # 부분 문자열 오탐 - 긴 종목명의 일부는 전용이 아니다 (재일님 지적 2026-07-31)
+    dsn = WatchItem(None, "000150", "두산")
+    ener = parse_item({**_SAMPLE, "title": "두산에너빌리티 대규모 수주"}, observed_at=_ob())
+    assert relation_for(ener, dsn, all_names={"두산", "두산에너빌리티"}) \
+        == ("MENTIONS", BODY_MATCH_CONFIDENCE), "부분 문자열이 DEDICATED 로 샜다"
+    both = parse_item({**_SAMPLE, "title": "두산에너빌리티와 두산 동반 상승"}, observed_at=_ob())
+    assert relation_for(both, dsn, all_names={"두산", "두산에너빌리티"})[0] == "DEDICATED"
     print("  관련도 판정              OK")
 
 
@@ -646,7 +659,9 @@ def _collect(top: int = 40, symbols: tuple[str, ...] = ()) -> int:
             for sym in r.symbols:
                 it = by_symbol.get(sym)
                 if it is not None:
-                    rel.setdefault(r.external_id, []).append((it, *relation_for(r, it)))
+                    rel.setdefault(r.external_id, []).append(
+                        (it, *relation_for(r, it, all_names={w.name for w in items}))
+                    )
         ded = sum(1 for v in rel.values() if any(x[1] == "DEDICATED" for x in v))
         multi = sum(1 for v in rel.values() if len(v) > 1)
         print(

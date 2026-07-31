@@ -278,13 +278,55 @@ def run_pipeline(
 # Provider 별 link_resolver
 # ---------------------------------------------------------------------------
 
-def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | None = None):
+def title_has_standalone(name: str, title: str, other_names) -> bool:
+    """제목에 종목명이 **독립적으로** 등장하는가.
+
+    `name in title` 만 보면 '두산에너빌리티 수주' 제목에서 '두산'(000150)이
+    DEDICATED 가 된다 - 짧은 이름이 더 긴 다른 종목명의 부분 문자열인 오탐이다
+    (재일님 지적 2026-07-31: 종목코드와 내용이 안 맞는 연결). 등장 위치마다,
+    그 위치를 덮는 더 긴 이름이 감시 목록에 있으면 그 등장은 무효로 친다.
+    '두산에너빌리티와 두산 동반 상승' 처럼 둘 다 나오면 둘 다 유효다.
+    """
+    longer = [n for n in other_names if len(n) > len(name) and name in n]
+    start = 0
+    while True:
+        i = title.find(name, start)
+        if i < 0:
+            return False
+        covered = False
+        for ln in longer:
+            off = ln.find(name)
+            while off >= 0 and not covered:
+                j = i - off
+                if j >= 0 and title.startswith(ln, j):
+                    covered = True
+                off = ln.find(name, off + 1)
+            if covered:
+                break
+        if not covered:
+            return True
+        start = i + 1
+
+
+# 제목에 종목명이 없는 연결의 신뢰도. NAVER 는 본문까지 검색하므로 질의에 걸렸어도
+# 제목에 이름이 없으면 '본문 어딘가에서 언급' 추정일 뿐이다 - 0.5 는 과신이었다
+# (재일님 지적 2026-07-31). 본문은 저장하지 않으므로(3.3) 더 확인할 수 없고,
+# 확인 못 하는 것을 높게 치지 않는다.
+BODY_MATCH_CONFIDENCE = "0.3"
+
+
+def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | None = None,
+                        known_names=None):
     """record.symbols 가 KRX 종목코드일 때(NAVER).
 
-    dedicated_names 는 {symbol: 종목명} 이며, 제목에 이름이 있으면 DEDICATED 로
-    올린다. 없으면 전부 MENTIONS 다 - 질의로 나온 이상 관련은 있다.
+    dedicated_names 는 {symbol: 종목명}. 제목에 이름이 **독립 등장**하면
+    DEDICATED(0.9), 아니면 MENTIONS(0.3 - 본문 매칭 추정)다.
+    known_names 는 '더 긴 이름' 검사의 모집단이다 - 감시 목록만 주면 감시 밖
+    회사(두산로보틱스 등)가 제목에 있을 때 못 거르므로 **전 상장사 이름**을
+    주는 쪽이 맞다.
     """
     names = dedicated_names or {}
+    all_names = set(known_names) if known_names else set(names.values())
 
     def resolve(record: NewsRecord):
         out = []
@@ -293,10 +335,10 @@ def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | N
             if iid is None:
                 continue
             name = names.get(sym)
-            if name and name in record.title:
+            if name and title_has_standalone(name, record.title, all_names - {name}):
                 out.append((iid, "DEDICATED", "0.9"))
             else:
-                out.append((iid, "MENTIONS", "0.5"))
+                out.append((iid, "MENTIONS", BODY_MATCH_CONFIDENCE))
         return out
 
     return resolve
@@ -520,6 +562,22 @@ def _check_batch_dedup():
     print("  배치 내 중복 제거        OK")
 
 
+def _check_title_standalone():
+    names = {"두산", "두산에너빌리티", "LG", "LG전자"}
+    # 긴 이름의 부분 문자열은 독립 등장이 아니다
+    assert not title_has_standalone("두산", "두산에너빌리티 대규모 수주", names - {"두산"})
+    assert title_has_standalone("두산에너빌리티", "두산에너빌리티 대규모 수주",
+                                names - {"두산에너빌리티"})
+    # 둘 다 나오면 둘 다 유효
+    assert title_has_standalone("두산", "두산에너빌리티와 두산 동반 상승", names - {"두산"})
+    # 독립 등장
+    assert title_has_standalone("두산", "두산, 3분기 흑자 전환", names - {"두산"})
+    assert not title_has_standalone("LG", "LG전자 실적 발표", names - {"LG"})
+    assert title_has_standalone("LG", "LG그룹주 강세", names - {"LG"})  # 'LG그룹' 은 목록에 없다
+    assert not title_has_standalone("두산", "반도체 업황 개선", names - {"두산"})
+    print("  제목 독립 등장 판정      OK")
+
+
 def _check_link_resolvers():
     ref = _FakeRef()
     inst = {"005930": "iid-samsung", "000660": "iid-hynix"}
@@ -609,7 +667,8 @@ if __name__ == "__main__":
     _check_failure_not_swallowed()
     _check_rebind()
     _check_batch_dedup()
+    _check_title_standalone()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 10개 영역 통과")
+    print("Sink 11개 영역 통과")
