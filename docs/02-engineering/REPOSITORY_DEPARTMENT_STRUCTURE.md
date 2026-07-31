@@ -9,6 +9,7 @@
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
 > Frontend 경계: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > Backend·Event·Docker 연결 경계: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)
+> 본부별 Ollama Model 경계: [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 
 ## 1. 이 구조가 필요한 이유
 
@@ -191,6 +192,7 @@ multi_agent/
 |---|---|---|
 | `README.md` | Mission, Owner, 입력·출력 계약, 실행법, 테스트와 Handoff | Secret, 개인 환경값 |
 | `hermes/` | Git으로 관리하는 `config.yaml`, `SOUL.md` | `auth.json`, `.env`, Memory, Session, Runtime DB |
+| `Modelfile` | Local Model의 Base Model과 최소 역할 요약 | Agent 권한, Secret, Runtime Memory, 미승인 투자자 Persona |
 | `src/` 또는 Domain 하위 폴더 | 해당 본부가 독점 소유하는 결정론적 Service | 다른 본부 DB 직접 접근 코드 |
 | `tests/` | 본부 Unit·Contract Test와 Failure Fixture | 외부 실거래 Credential |
 | `config/`가 필요한 경우 | Version 관리 가능한 비밀이 아닌 정책·Preset | API Key, Broker Token |

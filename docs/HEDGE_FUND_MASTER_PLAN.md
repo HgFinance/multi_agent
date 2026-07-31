@@ -1,6 +1,6 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v2.9
+> 문서 상태: Production Plan v3.0
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
@@ -9,6 +9,7 @@
 > 단기 구현 범위: [Personal Hedge Fund Agent Core Implementation Plan](01-product/HEDGE_FUND_CORE_PLAN.md)
 > Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
+> 전사 고도화 Gate와 기술 도입 연구: [Personal Hedge Fund Agent 전사 고도화 연구 로드맵](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)
 > Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 저장소 조직 경계: [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
 > 운영 Frontend 기준: [AI Office Frontend and Operator Control Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
@@ -3068,6 +3069,12 @@ External Capital 전 추가:
 Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, Incident, Model Risk와 Operations 상태에 따라 동결될 수 있다.
 
 ## 22. 52주 개발 및 Production 전환 로드맵
+
+아래 주차는 목표 기능을 이해하기 위한 계획 기준이며 자동 출시 일자가 아니다. 실제 환경 승격은
+[전사 고도화 연구 로드맵](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)의 `Canonical Truth`,
+`Integrated Paper Case`, `Measured Paper Fund`, `Scientific Strategy Factory`,
+`Self-Improving Organization`, `Limited Live` Gate를 순서대로 통과해야 한다. 앞 Gate의 증거가
+부족하면 일정이 지났더라도 다음 단계로 승격하지 않는다.
 
 ### Phase 0: 설계 확정 - 1주
 

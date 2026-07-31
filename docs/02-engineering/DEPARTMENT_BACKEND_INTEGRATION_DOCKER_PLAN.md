@@ -5,6 +5,8 @@
 > 기준일: 2026-07-31
 >
 > 적용 범위: CEO Office, 6개 본부, Agent Workforce 인사팀, AI Office와 공통 Platform
+>
+> 본부별 Local Model 기준: [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 
 ## 1. 이 문서가 결정하는 것
 
@@ -221,7 +223,7 @@ flowchart LR
 
 Supabase Cloud를 사용하는 환경에서는 별도 PostgreSQL Container를 항상 띄우지 않는다. Schema Integration Test가 필요할 때만 Supabase CLI 또는 Testcontainers Profile을 사용한다.
 
-Ollama Container를 본부마다 하나씩 만들지 않는다. 공통 `ollama` Runtime 하나에 8개 Modelfile을 서로 다른 Model Alias로 등록하고 `model-gateway`가 본부·업무·비용 정책에 따라 호출한다. `Modelfile`의 `SYSTEM`은 로컬 보조 역할 요약이며, 권위 있는 Agent Profile과 권한은 각 `hermes/config.yaml`, `hermes/SOUL.md`와 Workforce Registry가 결정한다.
+Ollama Container를 본부마다 하나씩 만들지 않는다. 공통 `ollama` Runtime 하나에 8개 Modelfile을 서로 다른 Model Alias로 등록하고 `model-gateway`가 본부·업무·비용 정책에 따라 호출한다. `Modelfile`의 `SYSTEM`은 로컬 보조 역할 요약이며, 권위 있는 Agent Profile과 권한은 각 `hermes/config.yaml`, `hermes/SOUL.md`와 Workforce Registry가 결정한다. 실제 Alias, Build, Eval과 Version 기준은 [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## 6. 본부별 Container와 연결 계약
 
@@ -1173,6 +1175,7 @@ Lint/Type
 - [마스터 플랜](../HEDGE_FUND_MASTER_PLAN.md)
 - [저장소 본부 구조](REPOSITORY_DEPARTMENT_STRUCTURE.md)
 - [기술 스택 결정](TECH_STACK_DECISIONS.md)
+- [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 - [Risk·QA Domain API](RISK_QA_DOMAIN_API_SPEC.md)
 - [Governance·Workforce Domain API](GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md)
 - [AI Office Frontend](AI_OFFICE_FRONTEND_PLAN.md)
