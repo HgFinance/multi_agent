@@ -869,11 +869,15 @@ API(2019003)나 별도 Source가 필요하다.
   License Registry는 `UseScope`로 Source별 허용 용도를 강제한다. Provider Adapter는
   NAVER(P0 국내), Alpaca(P1 해외), Tavily(P1 탐색 전용)가 있다.
 
-  **BIGKinds는 도입하지 않는다** (재일님 결정 2026-07-31). API 이용이 유료 회원(월
-  5만원대)이고 국내 뉴스 P0는 NAVER로 충족된다. `KEY_MISSING`이 아니라
-  `DISABLED`로 둔 이유 — `KEY_MISSING`은 "발급만 받으면 된다"는 뜻이라 사실과
-  다르고, 상태마다 조치 주체와 방법이 다르다. 재검토 조건은 "NAVER 커버리지가
-  부족하다는 실측 근거"이며 사유를 `disabled_reason`에 남겼다.
+  **BIGKinds는 도입하지 않는다** (재일님 결정 2026-07-31, 같은 날 가입 불가로
+  최종 확정). API 이용이 유료 회원(월 5만원대)이고 가입이 어렵다. 이에 따라
+  **뉴스 분석은 헤드라인 기반으로 확정** — 기사 본문은 NAVER API가 주지도 않고
+  무단 크롤링·저장은 저작권 침해라(3.3) 합법 경로가 유료 계약뿐인데 그 문이
+  닫혔으므로, 제목+메타(전용/언급 신뢰도, 시간감쇠 가중치)가 뉴스 분석의 전부다.
+  **본문이 필요한 분석은 전문 저장·임베딩 권리가 있는 공시 원문(DART 2019003)으로
+  충당한다.** `KEY_MISSING`이 아니라 `DISABLED`로 둔 이유 — `KEY_MISSING`은
+  "발급만 받으면 된다"는 뜻이라 사실과 다르다. 재검토 조건은 가입 여건 변화 또는
+  헤드라인 분석의 한계 실측이며 사유를 `disabled_reason`에 남겼다.
 - **부분** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
   중복 제거는 `news_events.admit`의 Cursor + ID 창으로 Stream 계층에서 한다.
   **Story Cluster와 Near Duplicate는 미착수**다.
