@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -55,11 +56,19 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 
 
+@lru_cache(maxsize=1)
 def _demo_state():
     """Scripted Paper Loop 한 바퀴. Snapshot의 DEMO 원천이다.
 
     Supabase Read Model이 붙기 전까지의 원천이며, 손으로 쓴 Fixture 대신
     실제 OMS/Ledger를 돌린다 - 백엔드가 바뀌면 여기가 같이 깨져야 한다.
+
+    ponytail: Scripted Loop는 입력이 고정이라 매번 같은 결과가 나온다. 요청마다
+              OMS와 원장을 처음부터 다시 돌릴 이유가 없어 프로세스 수명 동안
+              한 번만 계산한다. **Supabase Read Model로 바꿀 때 이 데코레이터를
+              반드시 떼야 한다** - 실제 장부는 변하는데 캐시가 옛 값을 물고 있으면
+              화면이 조용히 낡은 NAV를 보여준다. 그때는 캐시가 아니라 Read Model의
+              snapshot_version으로 신선도를 판단한다.
     """
     from test_paper_loop import PaperLoopTest
 
@@ -111,6 +120,12 @@ if __name__ == "__main__":
 
     # 두 번 불러도 같은 Snapshot이다. Read-only가 상태를 바꾸면 안 된다
     assert c.get("/ui/snapshot").json()["portfolio"]["nav"] == snap["portfolio"]["nav"]
+
+    # 요청마다 Paper Loop를 통째로 다시 돌리지 않는다. 같은 객체를 재사용한다
+    assert _demo_state() is _demo_state(), "요청마다 OMS·원장이 재실행된다"
+    assert _demo_state.cache_info().currsize == 1
+    # 캐시했어도 server_time은 매 요청 갱신된다 - 화면이 신선도를 판단해야 한다
+    assert c.get("/ui/snapshot").json()["server_time"] >= snap["server_time"]
 
     # 인증·Tool Allowlist가 없는 기본 환경에서는 Agent 호출이 전부 닫혀 있다
     assert c.post("/accounting/agent/ask", json={"query": "NAV?"}).status_code == 503
