@@ -80,9 +80,12 @@ JOBS: tuple[Job, ...] = (
         daily_at=time(16, 20)),
     Job("macro", ("collectors/macro_collector.py", "--collect"),
         daily_at=time(7, 30)),
-    Job("financial", ("collectors/opendart_financial.py", "--collect"),
+    # --limit 명시: CLI 기본값(재무 20, CA 40)은 프로브용이라 스케줄이 그대로 쓰면
+    # 발행사 1,049곳 중 꼬리만 돌게 된다 (2026-07-31 점검에서 발견).
+    # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
+    Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1200"),
         daily_at=time(18, 10)),
-    Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect"),
+    Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "400"),
         daily_at=time(18, 30)),
     # 개황이 빈 issuer 보강 (전량 보강은 완료 - 이후는 신규 필러 몫).
     # 300: 공시 백필 하루치가 신규 143 corp 를 만든 실측(2026-07-31) + 여유.
