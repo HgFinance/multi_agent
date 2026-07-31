@@ -221,6 +221,27 @@ services:
     pids_limit: 64
     stop_grace_period: 20s
 
+  # ── market-api: 시세 읽기 전용 조회면 (F03 "DB 없이 Snapshot API" + 통합계획 6.2) ──
+  # 트레이딩·리스크·팀원은 TSDB Credential 없이 이 API 로 Snapshot/Bar/Breadth/DQ 조회.
+  market-api:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-market-api
+    restart: unless-stopped
+    working_dir: /app/departments/01-research/api
+    command: ["uvicorn", "market_api:app", "--host", "0.0.0.0", "--port", "8036"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?}   # 심볼<->instrument 매핑(기동 시 1회)
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+    ports:
+      - "0.0.0.0:8036:8036"   # 팀원 조회용 - Tailscale/사설망 전제, 포트포워딩 금지
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
   # ── research-api: Evidence 읽기 전용 조회면 (에이전트 배선의 시작점) ──
   # PIT(as_of) 기본, DB 세션 자체가 read-only. 뉴스/공시/재무 Evidence 를
   # LangGraph 직원 tool 이 여기서 읽는다 (DB 직접 접근 금지 - CLAUDE.md 원칙 1).
