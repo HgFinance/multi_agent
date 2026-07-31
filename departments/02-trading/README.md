@@ -1,5 +1,7 @@
 # 트레이딩본부 (Trading)
 
+전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
+
 ## Mission
 
 Trade Case, Signal, OrderIntent 생성과 집행을 담당한다. Research Packet을 기반으로 Bull/Bear 토론 후

@@ -8,6 +8,7 @@
 > 단계 4(DB Prototype 통합)와 단계 5(구조 Gate)는 아직 진행 전이다.
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
 > Frontend 경계: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
+> Backend·Event·Docker 연결 경계: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)
 
 ## 1. 이 구조가 필요한 이유
 
@@ -168,12 +169,19 @@ multi_agent/
 │   ├── replay/
 │   └── e2e/
 ├── infrastructure/
+│   └── compose/
+│       ├── core.yaml
+│       ├── observability.yaml
+│       └── local-llm.yaml
+├── compose.yaml
 ├── scripts/
 ├── docs/
 └── references/
 ```
 
 `supabase/`와 `timescaledb/`는 CLI와 Migration Tool의 표준 경로를 유지한다. Schema의 논리적 소유자는 본부별로 나누되 Migration 파일을 본부 폴더로 복제하지 않는다.
+
+각 `departments/<department>/`는 목표적으로 `Dockerfile`과 `compose.yaml`을 소유한다. 루트 `compose.yaml`은 Docker Compose `include`로 본부별 Fragment를 조립하며 API, Worker와 Hermes를 하나의 Process에 합치지 않는다. 현재 루트 `docker-compose.yml`의 Research Collector는 [Backend 연결 계획 Phase B1](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md#phase-b1-compose-modularization)에서 동작 검증을 유지한 채 이동한다.
 
 ## 5. 본부 폴더 표준
 

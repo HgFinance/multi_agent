@@ -1,5 +1,7 @@
 # 리서치본부 (Research)
 
+전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
+
 ## Mission
 
 데이터 수집, RAG Evidence와 Research Packet 생성을 담당한다. Universe/Technical/Microstructure/News

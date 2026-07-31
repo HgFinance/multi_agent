@@ -1,5 +1,7 @@
 # 회계/포트폴리오본부 (Accounting & Portfolio)
 
+전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
+
 ## Mission
 
 Ledger, Position, Cash, NAV와 Reconciliation을 담당한다. 승인된 주문의 체결·포지션·현금 반영,

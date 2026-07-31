@@ -1,5 +1,7 @@
 # CEO Office
 
+전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
+
 ## Mission
 
 전사 조정, Mandate 관리, 위원회와 Escalation을 담당한다. 리서치·트레이딩·리스크·QA·회계 결과를
