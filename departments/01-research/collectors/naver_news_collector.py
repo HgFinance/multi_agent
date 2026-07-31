@@ -294,10 +294,14 @@ DEDICATED_CONFIDENCE = "0.9"
 
 def relation_for(record: NewsRecord, item: WatchItem,
                  all_names=()) -> tuple[str, str]:
-    """(relation_type, confidence). 제목에 종목명이 **독립 등장**하면 전용이다."""
-    from news_pipeline import BODY_MATCH_CONFIDENCE, title_has_standalone
+    """(relation_type, confidence). 제목에 종목명(별칭 포함)이 **독립 등장**하면 전용."""
+    from news_pipeline import (
+        BODY_MATCH_CONFIDENCE, expand_aliases, names_for, title_has_standalone,
+    )
 
-    if title_has_standalone(item.name, record.title, set(all_names) - {item.name}):
+    own = set(names_for(item.name))
+    universe = expand_aliases(set(all_names) | {item.name}) - own
+    if any(title_has_standalone(n, record.title, universe) for n in own):
         return "DEDICATED", DEDICATED_CONFIDENCE
     return "MENTIONS", BODY_MATCH_CONFIDENCE
 

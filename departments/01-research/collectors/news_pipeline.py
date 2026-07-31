@@ -314,6 +314,85 @@ def title_has_standalone(name: str, title: str, other_names) -> bool:
 # 확인 못 하는 것을 높게 치지 않는다.
 BODY_MATCH_CONFIDENCE = "0.3"
 
+# ── 종목명 별칭 체계 (재일님 지적 2026-07-31: 'LG CNS' 기사가 LG씨엔에스가
+#    아니라 'LG' 오탐으로 물림 - Master 한글 표기와 기사 표기의 불일치) ──
+#
+# 3단 구조로 관리한다:
+#  1. 규칙 자동 파생(아래 derive_roman_aliases) - 한글 음차를 로마자로 되돌린다.
+#     'LG씨엔에스' -> 'LG CNS'/'LGCNS', '케이티앤지' -> 'KT&G'. 결정론이고
+#     종목이 늘어도 손댈 게 없다.
+#  2. 수동 확정 목록(NAME_ALIASES) - 규칙으로 못 만드는 통용 표기만. 속어·약칭
+#     추정은 넣지 않는다(오탐 제조기가 된다).
+#  3. (승격 예정) reference DB - 별칭이 자산이 되면 instrument_symbols 의
+#     NAME_ALIAS 유형 또는 issuers.metadata 로 옮기고 수집기는 읽기만 한다.
+
+# 한글 음차 -> 로마자. **2음절 이상 연속으로 매핑될 때만** 변환한다 -
+# '이수페타시스' 의 '이' 한 글자를 E 로 바꾸는 오탐을 막는다. 긴 것부터 매칭.
+_ROMAN_SYLLABLES: tuple[tuple[str, str], ...] = (
+    ("더블유", "W"), ("에이치", "H"), ("에프", "F"), ("에스", "S"), ("에이", "A"),
+    ("엠", "M"), ("엔", "N"), ("엘", "L"), ("알", "R"), ("아이", "I"),
+    ("제이", "J"), ("제트", "Z"), ("케이", "K"), ("큐", "Q"), ("티", "T"),
+    ("피", "P"), ("브이", "V"), ("와이", "Y"), ("엑스", "X"), ("유", "U"),
+    ("비", "B"), ("씨", "C"), ("디", "D"), ("지", "G"), ("오", "O"), ("이", "E"),
+    ("앤", "&"),
+)
+
+NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "현대차": ("현대자동차",),
+    "POSCO홀딩스": ("포스코홀딩스",),
+    "LG에너지솔루션": ("LG엔솔",),   # 언론 통용 축약 - 공식에 준해 확정
+}
+
+
+def derive_roman_aliases(name: str) -> set[str]:
+    """한글 음차 구간(2음절 이상 연속 매핑)을 로마자로 되돌린 별칭들.
+
+    'LG씨엔에스' -> {'LGCNS', 'LG CNS'} (붙임/띄어쓰기 둘 다 - 기사 표기가 갈린다).
+    매핑이 안 되는 글자가 섞이면 그 구간은 건드리지 않는다.
+    """
+    out: set[str] = set()
+    i = 0
+    prefix = name
+    # 가장 이른 위치의 연속 매핑 구간 하나를 찾아 변환한다(종목명에 구간이 둘
+    # 이상인 경우는 실측에서 없다 - 나오면 그때 확장한다)
+    while i < len(name):
+        j, letters = i, []
+        while j < len(name):
+            for syl, rom in _ROMAN_SYLLABLES:
+                if name.startswith(syl, j):
+                    letters.append(rom)
+                    j += len(syl)
+                    break
+            else:
+                break
+        if len(letters) >= 2:
+            head, tail = name[:i], name[j:]
+            roman = "".join(letters)
+            out.add(head + roman + tail)
+            if head or tail:
+                out.add((head + " " + roman + " " + tail).strip())
+            break
+        i += 1
+    out.discard(name)
+    return out
+
+
+def names_for(display_name: str) -> tuple[str, ...]:
+    """판정에 쓸 이름 집합: Master 표기 + 자동 파생 + 수동 확정."""
+    return (display_name,
+            *sorted(derive_roman_aliases(display_name)),
+            *NAME_ALIASES.get(display_name, ()))
+
+
+def expand_aliases(names) -> set[str]:
+    """이름 모집단에 별칭을 전부 합친다 - '더 긴 이름' 가드가 별칭도 알아야
+    제목의 'LG CNS' 가 'LG' 의 DEDICATED 오탐을 덮는다."""
+    out = set(names)
+    for n in list(out):
+        out.update(derive_roman_aliases(n))
+        out.update(NAME_ALIASES.get(n, ()))
+    return out
+
 
 def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | None = None,
                         known_names=None):
@@ -326,7 +405,7 @@ def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | N
     주는 쪽이 맞다.
     """
     names = dedicated_names or {}
-    all_names = set(known_names) if known_names else set(names.values())
+    all_names = expand_aliases(known_names if known_names else names.values())
 
     def resolve(record: NewsRecord):
         out = []
@@ -335,10 +414,13 @@ def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | N
             if iid is None:
                 continue
             name = names.get(sym)
-            if name and title_has_standalone(name, record.title, all_names - {name}):
-                out.append((iid, "DEDICATED", "0.9"))
-            else:
-                out.append((iid, "MENTIONS", BODY_MATCH_CONFIDENCE))
+            if name:
+                own = set(names_for(name))
+                if any(title_has_standalone(n, record.title, all_names - own)
+                       for n in own):
+                    out.append((iid, "DEDICATED", "0.9"))
+                    continue
+            out.append((iid, "MENTIONS", BODY_MATCH_CONFIDENCE))
         return out
 
     return resolve
@@ -578,6 +660,29 @@ def _check_title_standalone():
     print("  제목 독립 등장 판정      OK")
 
 
+def _check_aliases():
+    # 음차 자동 파생
+    assert derive_roman_aliases("LG씨엔에스") == {"LGCNS", "LG CNS"}, \
+        derive_roman_aliases("LG씨엔에스")
+    assert "KT&G" in derive_roman_aliases("케이티앤지")
+    assert derive_roman_aliases("이수페타시스") == set(), "한 음절 '이' 를 E 로 바꿨다"
+    assert derive_roman_aliases("삼성전자") == set()
+
+    # LG CNS 실측 회귀 (2026-07-31): 'LG CNS 상반기 매출' 제목에서
+    #  - LG(003550) 는 DEDICATED 가 아니어야 하고 (별칭 'LG CNS' 가 덮는다)
+    #  - LG씨엔에스(064400) 는 별칭으로 DEDICATED 여야 한다
+    inst = {"003550": "iid-lg", "064400": "iid-lgcns"}
+    dedicated = {"003550": "LG", "064400": "LG씨엔에스"}
+    resolver = krx_symbol_resolver(inst, dedicated_names=dedicated,
+                                   known_names={"LG", "LG씨엔에스", "LG전자"})
+    rec = _rec(0, symbols=("003550", "064400"),
+               title="LG CNS 상반기 매출 2.8조…AI·클라우드 성장")
+    got = {iid: (rel, conf) for iid, rel, conf in resolver(rec)}
+    assert got["iid-lg"][0] == "MENTIONS", f"LG 오탐이 살아있다: {got}"
+    assert got["iid-lgcns"] == ("DEDICATED", "0.9"), f"별칭 전용 판정 실패: {got}"
+    print("  별칭 파생/판정           OK")
+
+
 def _check_link_resolvers():
     ref = _FakeRef()
     inst = {"005930": "iid-samsung", "000660": "iid-hynix"}
@@ -668,7 +773,8 @@ if __name__ == "__main__":
     _check_rebind()
     _check_batch_dedup()
     _check_title_standalone()
+    _check_aliases()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 11개 영역 통과")
+    print("Sink 12개 영역 통과")
