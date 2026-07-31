@@ -25,6 +25,30 @@ agent:
     tool-permission-security-reviewer: "You are the Tool Permission and Security Reviewer. You check that each Agent's Tool, data, Fund and environment permissions match its Job Profile and that separation of duties holds — detecting out-of-allowlist Tool calls, cross-department Memory access, Production credential use, and anyone holding both approval and execution authority for the same action. You periodically verify that role changes and deactivated Agents have had their permissions revoked. You never expand your own permissions or print a Secret value; a suspicious call gets that Identity isolated and reported to the department head, not quietly logged."
     incident-postmortem-agent: "You are the Incident and Postmortem Analyst. You reconstruct the factual timeline of outages, bad decisions, bad trades and data incidents, separating what was actually observed from what is inferred. You classify root causes as technical, data, model, procedural or authorization-related, and you propose guardrails and tests rather than relying on human attentiveness alone. You never attribute blame to one Agent or person without evidence, and any incident with capital or regulatory impact goes to the CEO, Risk and Compliance immediately."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다.
+  # 경로-Tool 매핑과 "누가 무엇을 호출하는지"는 RISK_QA_DOMAIN_API_SPEC.md 3.9절을 그대로 옮긴 것 —
+  # 새로 지어낸 권한이 아니다. departments/06-ai-qa-audit/api/app.py가 실제로 감싸는 엔드포인트만 대상.
+  # `/qa/v1/runs/*`(3.3절 Trace 기록)는 QA 자신이 아니라 6개 본부 Supervisor 전원이 호출하는 부서간
+  # 공통 진입점이라 이 부서 tool_allowlist엔 없다 — 각 호출 부서 config.yaml에 넣을 몫이라 범위 밖.
+  tool_allowlist:
+    qa-audit-supervisor: [case.read, case.delegate]  # risk-supervisor와 같은 패턴 — 하위 결과 종합·해석만
+    evidence-qa-agent: [case.read, qa.case.check, qa.evidence.check]
+      # qa.case.check(POST qa-check)는 3.1절 [제안] — MINIMUM_SERVICE_UNIT_SPEC.md §8/§11에 아직 미등록,
+      # 팀 승인 전까지 그 상위 문서는 안 고친다. 엔진 코드·API는 이미 동작하고 self-check도 통과함.
+    hallucination-critic: [case.read]  # 3.9절: qa-check 결과(UNSUPPORTED/CONTRADICTED) 재사용, 자체 호출 없음
+    model-risk-agent: []  # 3.9절: 미구현(Eval Harness 없음), 이번 범위 밖
+    internal-audit-agent: []  # 3.9절: 미구현, 이번 범위 밖
+    agent-ops-monitor: [case.read, qa.ops.evaluate]
+    tool-permission-security-reviewer: [case.read, qa.tool_permission.check, qa.tool_permission.unauthorized_count.read]
+    incident-postmortem-agent:
+      [case.read, qa.incident.event.write, qa.incident.timeline.read, qa.corrective_action.open,
+       qa.corrective_action.start, qa.corrective_action.submit_for_verification,
+       qa.corrective_action.verify_and_close, qa.corrective_action.cancel]
+      # extract-hypergraph(3.8절)는 [제안]·미구현이라 제외
+  # 부서 전체 공통 금지 — 주문 제출/원장 기록/Risk Limit·Kill Switch 실행은 QA의 권한이 아니다
+  # (CLAUDE.md: QA는 근거 검증·감사만, 바인딩 집행은 절대 대신하지 않는다).
+  forbidden_tools: [oms.submit, ledger.write, risk.limit.write, risk.trading_state.write, risk.trading_state.clear]
+
 # 검색-평가-생성-환각검증-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline은 risk-management의 compliance-policy-agent부터 구현됨 (skills/agentic-rag/, 코드는 risk/qa 공용)
 # evidence-qa-agent는 corpus/evidence/ 추가 + main.py PERSONA_CORPUS 등록으로 확장 완료(2026-07-30, 샘플
@@ -103,6 +127,7 @@ implementation:
     - "audit.claim_checks/qa_decisions/findings/incidents/agent_runs/tool_calls/incident_events/corrective_actions 컬럼·Enum 값과 이름 맞춤"
     - "bandit/pip-audit 스캔 — 실제 보안 이슈 0건 확인 (assert 사용 경고, PASS 오탐만 있음)"
     - "Supabase 실제 배선 (2026-07-30) — Evidence QA Engine·Ops Health Monitor 실행 결과를 audit.artifact_versions/claim_checks/qa_decisions/findings/incidents에 직접 INSERT해 검증함. fund_id는 accounting.funds가 아직 비어 있어 전부 NULL로 기록(가짜 Fund를 참조하는 척 안 함). .env의 DATABASE_URL 자체가 깨져 있던 것(스킴 누락 + 비밀번호 내 '@' 미인코딩, IPv6 전용 Direct Connection 대신 IPv4 Session Pooler로 전환)도 같이 고침"
+    - "QA Domain API (2026-07-31) — departments/06-ai-qa-audit/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 3.2~3.6절 FastAPI로 래핑(ops/trace/tool-permission/incident/corrective-action/evidence-check). verify-and-close는 엔진 자체 검증 위에 API 레이어 인증주체 재검증 추가(3.5절 명시 요구). 새 판정 로직 없음, TestClient self-check 5개 영역 통과. 3.1절 qa-check는 코드로는 구현했지만 여전히 [제안] — MINIMUM_SERVICE_UNIT_SPEC.md 미등록. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
   in_progress: []
   not_started:
     - "Agent/Tool Trace 실제 저장(audit.agent_runs/tool_calls), audit.qa_decisions에 calculation_version/input_hash 실제 컬럼 추가 — 후자는 스키마 변경(DDL)이라 별도 Migration PR 필요"
