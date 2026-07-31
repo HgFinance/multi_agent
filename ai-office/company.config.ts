@@ -15,7 +15,7 @@
 //
 //  HgFinance 헤지펀드 조직으로 맞춘 버전.
 //  실제 조직은 CEO Office + 6개 투자본부(리서치/트레이딩/리스크/퀀트·백테스트/
-//  회계·포트폴리오/AI QA·감사) + CEO 직속 Agent Workforce 인사팀 = 8개 단위인데
+//  회계·포트폴리오/AI QA·감사) + CEO 직속 인사팀 = 8개 단위인데
 //  DEPARTMENTS는 그중 7개(6개 투자본부 + 인사팀)와 CEO Office 지원팀 = 8개다.
 //    - CEO는 DEPARTMENTS 배열이 아니라 CEO_PROFILE(대표실)로 별도 표현된다.
 //    - 1층에 리서치·퀀트·트레이딩·리스크, 2층에 회계·QA감사·인사·CEO지원을 둔다.
@@ -39,7 +39,7 @@ export const COMPANY = {
   /** 브라우저 탭 제목 */
   pageTitle: "HgFinance - AI 헤지펀드 오피스",
   /** 검색·공유될 때 뜨는 설명 */
-  description: "리서치·트레이딩·리스크·퀀트/백테스트·회계/포트폴리오·AI QA/감사 6개 본부와 Agent Workforce 인사팀이 함께 돌아가는 AI 헤지펀드 오피스",
+  description: "리서치·트레이딩·리스크·퀀트/백테스트·회계/포트폴리오·AI QA/감사 6개 본부와 인사팀이 함께 돌아가는 AI 헤지펀드 오피스",
   /** 창 하단 파일명 느낌의 라벨 */
   windowLabel: "HgFinance.exe — 대표실",
   /** 일일 브리핑 제목에 들어갈 이름 */
@@ -118,7 +118,7 @@ export const DEPARTMENTS = [
   },
   {
     id: "review",
-    name: "Agent Workforce 인사팀",
+    name: "인사팀",
     short: "workforce.hr",
     icon: "🧑‍💼",
     task: "Agent 채용·평가·교육·Lifecycle 관리",
@@ -306,7 +306,7 @@ export const STAFF_LIST: StaffEntry[] = [
     colors: ["#7a3f58", "#c9b8ff", "#ff8fc0"],
     thoughts: ["관찰한 사실이랑 추론은 나눠서 적어요.", "증거 없이 한 명 탓 안 해요."] },
 
-  // ── Agent Workforce 인사팀 (hr-department) ───────────────
+  // ── 인사팀 (hr-department) ───────────────
   { dept: "review", rank: "lead", name: "류영주", role: "인사팀 팀장", callsign: "류인사",
     colors: ["#3d2818", "#c9b8ff", "#c9b8ff"],
     thoughts: ["투자 판단은 제 일이 아니에요.", "제 후보는 제가 최종 승인 못 해요."] },
