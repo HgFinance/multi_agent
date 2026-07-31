@@ -61,9 +61,9 @@ qa_internal_pipeline = builder.compile()
 # 2. QA 부서장 (Hermes Agent)
 # ==========================================
 
+# AIAgent 초기화 시 미지원되는 파라미터(custom_instructions 등) 제거
 hermes_qa_head = AIAgent(
-    model="anthropic/claude-sonnet-4.6",
-    custom_instructions="당신은 QA 부서장 Hermes입니다. 부서 실무진(LangGraph)의 검증 결과를 총괄/정제하여 최종 대외 보고서를 작성합니다.",
+    model="poolside/laguna-s-2.1:free",
     quiet_mode=True
 )
 
@@ -83,9 +83,17 @@ def run_qa_department(input_report: str) -> str:
     draft_audit = internal_res["draft_audit"]
     
     print("[QA 부서] 2. Hermes 부서장 최종 검토 및 정제 중...")
-    final_audit_report = hermes_qa_head.chat(
-        f"팀원들의 감사 초안입니다. 이를 바탕으로 최종 결재용 QA 감사 보고서를 정리해 주세요:\n{draft_audit}"
-    )
+    
+    # QA 부서장 지시사항(역할 부여)을 prompt에 포함시켜 전달
+    prompt = f"""
+당신은 QA 부서장 Hermes입니다. 부서 실무진(LangGraph)의 검증 결과를 총괄/정제하여 최종 대외 보고서를 작성해야 합니다.
+
+[팀원들의 감사 초안]:
+{draft_audit}
+
+위 초안을 바탕으로 CEO 또는 타 부서에 제출할 최종 결재용 QA 감사 보고서를 깔끔하게 정리해 주세요.
+"""
+    final_audit_report = hermes_qa_head.chat(prompt)
     
     return final_audit_report
 
