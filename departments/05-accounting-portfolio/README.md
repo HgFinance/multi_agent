@@ -19,6 +19,9 @@ Reconciliation과 PnL 계산을 수행한다. Accounting Engine의 공식 수치
 
 - 입력: OMS/브로커 체결(Fill) — 트레이딩본부(`departments/02-trading/`)가 소유하는 계약을 소비
 - 출력: 분개(Journal), Position/Cash Projection, Reconciliation Break → `workflow` step 6 CEO로 전달
+- 출력: `portfolio-api` — `GET /accounting/v1/portfolio-snapshot?fund_id=&as_of=` →
+  `{snapshot_id, as_of}`. CEO Daily Report의 `SnapshotRef(portfolio)` 원천이다.
+  **수치는 주지 않는다** — 참조만 넘기고 값은 원장이 소유한다
 
 ## 실행법
 
