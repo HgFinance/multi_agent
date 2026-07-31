@@ -709,10 +709,25 @@ Protocol 구현으로 끝난다.
 **P0 Blocked Domain은 `NEWS`와 `CALENDAR`다.** 단 `CALENDAR`는 KRX 승인을 받아도 Calendar
 API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관측 역산으로 대응했다.
 
+**장시간 실행 Runtime — Docker 상주** (재일님 지시 2026-07-31 "호가·체결 수집기도
+Docker 에", `collectors/ls_realtime_service.py` + compose `ls-realtime`)
+
+컨테이너는 24시간 떠 있고 **소켓은 세션 창에서만 연다**(동시호가 35분 전 ~ 마감
++10분). 뉴스와 같은 watchlist 70종목 = 140구독(S3_/H1_/K3_/HA_ 혼합, 소켓당 한도
+200 이내 1소켓)이며, venue별 tr_cd는 `subscription_plan.TR_MATRIX`가 권위다 —
+기존 프로브는 KOSPI만 써서 S3_/H1_ 고정이 안 걸렸지만 KOSDAQ 15종목은 K3_/HA_로
+가야 한다. 세션 판정은 Calendar를 따르되 Calendar가 오늘을 모르면 평일은 거래일로
+간주하고 `calendar_unverified`로 드러낸다(주말은 비거래 단정 — KRX 개장 전례 없음).
+시세 적재는 컨테이너 안에서 서비스 이름(`timescaledb:5432`)으로 간다 — 호스트의
+`127.0.0.1:5434`는 컨테이너에서 안 통한다.
+
+**장중 실측 (2026-07-31 11:19~ KST)**: 기동 즉시 세션 창 안이라 접속, 140건 구독
+ack 후 **5분간 체결 5,071행 + 호가 6,111행, 70종목 전부** TimescaleDB에 유입.
+
 완료 기준:
 
-- **부분** 장중 재접속 후 중복·Gap을 식별한다. 멱등 적재와 Sequence Gap 조회는 되지만
-  실제 LS WebSocket 재접속 경로가 없어 장중 검증은 하지 못했다.
+- **완료** 장시간 실행 Runtime — 세션 인지 상주(위). 장중 재접속·중복·Gap 식별은
+  worker의 재접속 경로(MAX_RECONNECTS + disconnect_reasons)와 멱등 적재가 맡는다.
 - **미착수** 특정 종목·시간 구간을 Parquet로 재현한다.
 - **미착수** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
 

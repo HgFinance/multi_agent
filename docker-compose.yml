@@ -108,5 +108,45 @@ services:
     # DB 재시도 백오프와 겹칠 때를 위해 여유를 둔다)
     stop_grace_period: 30s
 
+  # ── 상주형 LS 실시간 시세 수집 (재일님 지시 2026-07-31: 호가·체결도 Docker 로) ──
+  # 컨테이너는 24시간, 소켓은 세션 창(동시호가 35분 전~마감 +10분)에서만 연다.
+  # 뉴스와 같은 watchlist 70종목 = 140구독(S3_/H1_/K3_/HA_), 소켓 1개.
+  ls-realtime:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-ls-realtime
+    restart: unless-stopped
+    command: ["python", "collectors/ls_realtime_service.py"]
+
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+    environment:
+      # Reference(세션·종목)는 Supabase, 시세 적재는 같은 compose 의 TimescaleDB.
+      # 호스트의 127.0.0.1:5434 는 컨테이너 안에서 안 통한다 - 서비스 이름으로 간다.
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
+      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+
+    # 장중 140구독 스트림 - 뉴스보다 처리량이 크다
+    mem_limit: 768m
+    mem_reservation: 128m
+    cpus: 1.0
+    pids_limit: 64
+
+    stop_grace_period: 30s
+
 volumes:
   tsdb_data:
