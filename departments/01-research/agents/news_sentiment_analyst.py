@@ -48,8 +48,17 @@ AGENT_VERSION = "research-news-sentiment-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
-# 리서치본부 배정 키는 ANTHROPIC 이다 (CLAUDE.md env 규약 - 아무 키나 쓰지 않는다)
-MODEL = os.environ.get("NEWS_SENTIMENT_MODEL", "claude-sonnet-5")
+# LLM 백엔드 (2026-07-31 재일님 지시로 Ollama 추가):
+#   ollama    - 부서 로컬 모델 (TECH_STACK: Ollama 는 로컬·저비용 보조 모델로 승인)
+#               팀 표준은 departments/01-research/Modelfile 의 agent-research.
+#               로컬에 없으면 NEWS_SENTIMENT_MODEL 로 기존 모델(qwen3:8b 등) 지정.
+#   anthropic - ANTHROPIC_API_KEY 확보 시 (리서치본부 배정 키 - 아무 키나 안 쓴다)
+LLM_BACKEND = os.environ.get("NEWS_LLM_BACKEND", "ollama").strip().lower()
+OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+MODEL = os.environ.get(
+    "NEWS_SENTIMENT_MODEL",
+    "agent-research" if LLM_BACKEND == "ollama" else "claude-sonnet-5",
+)
 MAX_ARTICLES = 40  # 한 판정에 넣는 기사 상한 - 초과분은 가중치 상위만
 
 
@@ -119,24 +128,35 @@ Rules:
   Sector roundups or mere mentions get low salience (<=0.3).
 - Use ONLY the given headlines. Do not invent facts. Keep reason short, Korean.
 - Return judgements for every article, same document_id as given.
-Respond with JSON only: {"judgements":[{"document_id":...,"sentiment":...,"salience":...,"reason":...}]}"""
+- Do NOT echo the input fields. Each judgement MUST contain exactly:
+  document_id (copy), sentiment (integer -1|0|1), salience (number 0.0~1.0),
+  reason (short Korean string).
+Example output (2 articles):
+{"judgements":[
+ {"document_id":"abc-1","sentiment":1,"salience":0.8,"reason":"호재: 실적 상회"},
+ {"document_id":"abc-2","sentiment":0,"salience":0.2,"reason":"업계 동향 언급"}]}
+Respond with that JSON shape only. No other text."""
 
 
 def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementBatch:
     """기사 묶음을 LLM 으로 판정한다. Schema 불합격이면 한 번 고쳐 부르고, 또
     실패하면 예외다 - 판정을 지어내지 않는다(호출부가 INCONCLUSIVE 처리)."""
+    # ▶ 소형 로컬 모델은 UUID 를 정확히 복사하지 못한다 (실측 2026-07-31:
+    #   qwen3:8b 가 전 판정을 환각 인용으로 만들었다). 프롬프트에는 1,2,3
+    #   인덱스만 주고, 응답을 실제 document_id 로 되돌린다 - 표준 기법이다.
+    idx_to_doc = {str(i + 1): a["document_id"] for i, a in enumerate(articles)}
     payload = [
-        {"document_id": a["document_id"], "title": a["title"],
+        {"document_id": str(i + 1), "title": a["title"],
          "relation": a.get("relation_type"), "published_kst":
              a["published_at"][:16],
          # 판단 시점 열람으로 붙은 본문(메모리뿐). 프롬프트 재료로만 쓰고 버린다
          **({"body": a["body"][:1500]} if a.get("body") else {})}
-        for a in articles
+        for i, a in enumerate(articles)
     ]
     prompt = (f"Stock: {symbol}\nArticles ({len(payload)}):\n"
               + json.dumps(payload, ensure_ascii=False, indent=1))
 
-    call = llm or _anthropic_call
+    call = llm or (_ollama_call if LLM_BACKEND == "ollama" else _anthropic_call)
     last_err = None
     for attempt in range(2):
         text = call(_SYSTEM, prompt if attempt == 0 else
@@ -145,10 +165,40 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
         try:
             start = text.find("{")
             end = text.rfind("}")
-            return JudgementBatch.model_validate_json(text[start:end + 1])
+            batch = JudgementBatch.model_validate_json(text[start:end + 1])
+            # 인덱스 -> 실제 document_id. 모르는 인덱스는 그대로 둔다 -
+            # verify 단계가 환각 인용으로 세고 버린다(조용히 버리지 않는다).
+            return JudgementBatch(judgements=[
+                j.model_copy(update={"document_id": idx_to_doc.get(j.document_id,
+                                                                    j.document_id)})
+                for j in batch.judgements
+            ])
         except (ValidationError, ValueError) as e:
             last_err = str(e)[:200]
     raise RuntimeError(f"LLM 판정이 Schema 를 두 번 어겼다: {last_err}")
+
+
+def _ollama_call(system: str, user: str) -> str:
+    """로컬/팀 Ollama (OpenAI 호환). 모델이 없으면 사유가 그대로 예외로 올라온다.
+
+    qwen3 계열은 <think> 사고 텍스트를 앞에 붙일 수 있는데, 호출부 파서가
+    첫 '{'~마지막 '}' 만 취하므로 그대로 견딘다.
+    """
+    req = urllib.request.Request(
+        OLLAMA_BASE + "/v1/chat/completions", method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
+        data=json.dumps({
+            "model": MODEL,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "temperature": 0.1,
+            # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 무시한다
+            "response_format": {"type": "json_object"},
+        }).encode(),
+    )
+    with urllib.request.urlopen(req, timeout=600) as r:
+        out = json.loads(r.read())
+    return out["choices"][0]["message"]["content"]
 
 
 def _anthropic_call(system: str, user: str) -> str:
