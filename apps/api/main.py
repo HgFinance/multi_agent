@@ -140,7 +140,25 @@ if __name__ == "__main__":
     # 하나라도 늘면 여기서 깨진다 - 늘리려면 이 목록을 고쳐야 하고 Diff에 남는다
     assert set(c.get("/openapi.json").json()["paths"]) == {
         "/health", "/ui/snapshot", "/accounting/agent/ask", "/trading/agent/ask",
+        "/accounting/v1/portfolio-snapshot",
     }, c.get("/openapi.json").json()["paths"].keys()
+
+    # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다
+    schema = c.get("/openapi.json").json()
+    ref = schema["paths"]["/accounting/v1/portfolio-snapshot"]
+    assert set(ref) == {"get"}, "읽기 전용이어야 한다"
+    # fund_id는 필수, as_of는 생략 가능(현재 시각)
+    params = {p["name"]: p["required"] for p in ref["get"]["parameters"]}
+    assert params == {"fund_id": True, "as_of": False}, params
+    # 없는 Fund는 404다. 가장 가까운 것을 대신 주지 않는다
+    missing = c.get("/accounting/v1/portfolio-snapshot",
+                    params={"fund_id": "00000000-0000-0000-0000-000000000000"})
+    assert missing.status_code in (404, 503), missing.status_code
+    if missing.status_code == 404:
+        assert "snapshot_id" not in missing.json(), "404인데 참조를 지어냈다"
+    # UUID가 아니면 스키마에서 걸린다
+    assert c.get("/accounting/v1/portfolio-snapshot",
+                 params={"fund_id": "not-a-uuid"}).status_code == 422
 
     assert hermes_cli.timeout_of(accounting.CONFIG) == 60
 
