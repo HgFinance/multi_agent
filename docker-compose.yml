@@ -43,9 +43,13 @@ services:
       POSTGRES_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?.env 에 HEDGEFUND_TSDB_PASSWORD 를 설정할 것}
 
     ports:
-      # 127.0.0.1 바인딩 — 외부 노출 금지. 원격 호스트로 옮길 때도 이 원칙을 유지하고
-      # 방화벽/사설망으로만 접근을 허용한다.
-      - "127.0.0.1:5434:5432"
+      # ▶ 팀원 조회 개방 (재일님 결정 2026-07-31, VPS 이전 전까지의 임시 체제)
+      #   0.0.0.0 바인딩이지만 **공유기 NAT 뒤라 인터넷에는 노출되지 않는다.**
+      #   절대 공유기 포트포워딩을 하지 않는다 - 팀원 접근은 Tailscale(사설망)
+      #   IP 로만 한다. 팀원에게 주는 계정은 hedgefund_ro (읽기 전용, market
+      #   스키마 SELECT 만 - INSERT 거부 검증됨). 관리자 계정은 리서치·퀀트만
+      #   갖는다는 경계는 유지된다. VPS 이전 시 이 주석과 함께 재검토.
+      - "0.0.0.0:5434:5432"
 
     volumes:
       - tsdb_data:/home/postgres/pgdata/data

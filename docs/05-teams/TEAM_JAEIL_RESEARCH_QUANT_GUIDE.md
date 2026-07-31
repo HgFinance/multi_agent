@@ -493,6 +493,11 @@ Quant:
 - **확인** Supabase에서 Raw Tick Table이 생성되지 않는다.
   `supabase/migrations/`에 `market_ticks`/`market_quotes`/`raw_tick` 생성 구문이 없다.
 - **부분** 다른 본부 Credential로 TimescaleDB에 접속할 수 없다.
+  **팀원 조회 개방(임시 체제, 재일님 결정 2026-07-31)**: `hedgefund_ro` 읽기 전용
+  계정(market 스키마 SELECT만 — INSERT 거부 검증)을 만들어 Tailscale 사설망
+  IP로만 조회를 연다. 공유기 포트포워딩 금지(NAT 뒤라 인터넷 비노출), 관리자
+  계정 경계는 유지. VPS 이전이 본질 해결이며 이건 그때까지의 다리다.
+  F03의 "DB 없이 Snapshot API 조회"(market-api)는 여전히 목표 상태다.
   `timescaledb/local-dev/001_dev_roles.sql`로 `market_reader`/`market_writer`를 만들고
   마이그레이션 grant 블록을 적용했다. 검증 결과 reader는 insert 불가, writer는 delete
   불가(append-only), `public`은 `market` 스키마 usage 없음이다. 실제 Credential 발급·배포
