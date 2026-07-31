@@ -125,7 +125,11 @@ def resolve_window(
 def build_subscriptions(
     rows: list[tuple[str, str]],  # (symbol, venue)
 ) -> list[tuple[str, str]]:
-    """venue 별 tr_cd 로 (tr_cd, 종목) 구독 목록을 만든다. 모르는 venue 는 즉시 실패."""
+    """venue 별 tr_cd 로 (tr_cd, 종목) 구독 목록을 만든다. 모르는 venue 는 즉시 실패.
+
+    한 종목의 체결·호가가 항상 이웃한 쌍으로 나온다 - shard_subscriptions 가 이
+    순서에 기대어 쌍을 같은 소켓에 둔다.
+    """
     subs: list[tuple[str, str]] = []
     for symbol, venue_raw in rows:
         try:
@@ -138,12 +142,32 @@ def build_subscriptions(
             raise LsRealtimeError(f"TR_MATRIX 에 {venue} EQUITY 매핑이 없다 ({symbol})")
         subs.append((tick, symbol))
         subs.append((quote, symbol))
-    if len(subs) > SUBSCRIPTIONS_PER_SOCKET:
-        raise LsRealtimeError(
-            f"구독 {len(subs)}건이 소켓 한도 {SUBSCRIPTIONS_PER_SOCKET}를 넘는다 - "
-            f"종목을 줄이거나 socket_batches 분할을 붙여야 한다"
-        )
     return subs
+
+
+def shard_subscriptions(
+    subs: list[tuple[str, str]], *, per_socket: int = SUBSCRIPTIONS_PER_SOCKET
+) -> list[list[tuple[str, str]]]:
+    """소켓당 한도(200)로 나눈다. 코스피200+코스닥150 = 700구독 -> 소켓 4개.
+
+    바스켓 전 종목 구독은 재일님 지시(2026-07-31)이고, 대규모 동시 구독 자체는
+    재일님의 krx-tick-collector 가 2,600종목으로 실증했다(세션 한도는 분산으로
+    대응). 같은 종목의 체결·호가 쌍은 반드시 같은 소켓에 둔다 - 쌍이 갈라지면
+    한 소켓 장애가 "체결만 있고 호가만 없는" 종목을 만든다.
+    """
+    if per_socket < 2:
+        raise LsRealtimeError("per_socket 은 쌍(2) 이상이어야 한다")
+    shards: list[list[tuple[str, str]]] = []
+    cur: list[tuple[str, str]] = []
+    for i in range(0, len(subs), 2):
+        pair = subs[i:i + 2]
+        if len(cur) + len(pair) > per_socket:
+            shards.append(cur)
+            cur = []
+        cur.extend(pair)
+    if cur:
+        shards.append(cur)
+    return shards
 
 
 def load_symbols(env: dict) -> tuple[str, ...]:
@@ -212,44 +236,53 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
     iid_by_symbol, venue_rows, trading_days, _ = _fetch_reference(symbols)
     subs = build_subscriptions(venue_rows)
-    print(f"  구독 {len(subs)}건 ({len(iid_by_symbol)}종목, 소켓 1개) {mode} {ws_url}",
-          flush=True)
+    shards = shard_subscriptions(subs)
+    print(f"  구독 {len(subs)}건 ({len(iid_by_symbol)}종목) -> 소켓 {len(shards)}개 "
+          f"(소켓당 최대 {SUBSCRIPTIONS_PER_SOCKET}) {mode} {ws_url}", flush=True)
 
     client = LsRestClient()
     while not stop.is_set():
         remaining = (window.ends_at - datetime.now(KST)).total_seconds()
         if remaining <= 0:
             return
-        repo = TimescaleMarketRepository(dsn)
+        repos = [TimescaleMarketRepository(dsn) for _ in shards]
+        sinks = [MarketSink(r) for r in repos]
         try:
-            with MarketSink(repo) as sink:
-                worker = LsRealtimeWorker(
-                    subscriptions=subs,
+            workers = [
+                LsRealtimeWorker(
+                    subscriptions=shard,
                     token_provider=client.token,
                     ws_url=ws_url,
                     resolve_instrument=lambda s: iid_by_symbol.get(s),
                     sink=sink,
                     is_trading_day=make_trading_day_check(trading_days, stats=sink.stats),
                 )
-                run_task = asyncio.create_task(worker.run(max_seconds=remaining))
-                stop_task = asyncio.create_task(stop.wait())
-                done, pending = await asyncio.wait(
-                    {run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for t in pending:
-                    t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                if run_task in done:
-                    run_task.result()  # 재접속 소진 예외를 여기서 드러낸다
-            # with 블록이 닫히며 Sink 꼬리가 나간다
-            print(f"  세션 통계: {sink.stats.summary()}", flush=True)
+                for shard, sink in zip(shards, sinks)
+            ]
+            run_tasks = [
+                asyncio.create_task(w.run(max_seconds=remaining)) for w in workers
+            ]
+            stop_task = asyncio.create_task(stop.wait())
+            # 소켓 하나가 죽으면(재접속 소진) 전체를 세우고 함께 재구축한다 -
+            # 부분 생존을 허용하면 "절반만 수집되는" 상태가 조용히 지속된다.
+            done, pending = await asyncio.wait(
+                {*run_tasks, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            for t in run_tasks:
+                if t in done:
+                    t.result()  # 재접속 소진 예외를 여기서 드러낸다
+            for i, s in enumerate(sinks):
+                print(f"  소켓{i}: {s.stats.summary()}", flush=True)
             if stop.is_set():
                 return
             # max_seconds 만료로 정상 반환 - 창도 끝났는지 위에서 재확인한다
-        except (LsRealtimeError, Exception) as e:
+        except Exception as e:
             print(f"  ⚠ 수집 오류: {type(e).__name__}: {e} - "
                   f"{SESSION_RETRY_BACKOFF:.0f}초 후 재시작", flush=True)
             try:
@@ -258,7 +291,17 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             except asyncio.TimeoutError:
                 pass
         finally:
-            repo.close()
+            for i, s in enumerate(sinks):
+                try:
+                    s.close()  # 꼬리 Flush - 정상 경로에선 이미 비어 있다
+                except Exception as e:
+                    print(f"  ⚠ 소켓{i} 종료 Flush 실패 - {s._pending()}건 유실: {e}",
+                          flush=True)
+            for r in repos:
+                try:
+                    r.close()
+                except Exception:
+                    pass
 
 
 async def main_async() -> int:
@@ -350,12 +393,20 @@ def _check_subscriptions():
         raise AssertionError("모르는 venue 가 통과했다")
     except LsRealtimeError:
         pass
-    try:
-        build_subscriptions([(f"{i:06d}", "KOSPI") for i in range(101)])  # 202건
-        raise AssertionError("소켓 한도 초과가 통과했다")
-    except LsRealtimeError:
-        pass
-    print("  구독 생성/한도           OK")
+
+    # 바스켓 350종목 = 700구독 -> 소켓 4개, 쌍은 갈라지지 않는다
+    big = build_subscriptions([(f"{i:06d}", "KOSPI") for i in range(350)])
+    shards = shard_subscriptions(big)
+    assert [len(s) for s in shards] == [200, 200, 200, 100], [len(s) for s in shards]
+    for shard in shards:
+        assert len(shard) % 2 == 0, "체결·호가 쌍이 소켓 경계에서 갈라졌다"
+        for i in range(0, len(shard), 2):
+            assert shard[i][1] == shard[i + 1][1], "쌍이 다른 종목과 섞였다"
+    assert sum(len(s) for s in shards) == 700
+    # 70종목이면 소켓 1개 그대로
+    small = build_subscriptions([(f"{i:06d}", "KOSPI") for i in range(70)])
+    assert [len(s) for s in shard_subscriptions(small)] == [140]
+    print("  구독 생성/샤딩           OK")
 
 
 def _check_symbols_precedence(tmp_path: Path):

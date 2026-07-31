@@ -396,10 +396,12 @@ def _check_license_scope():
     print("  라이선스 Scope              OK")
 
 
-def _collect_and_report(start: date, end: date, corp_cls: str | None) -> int:
+def _collect_and_report(start: date, end: date, corp_cls: str | None,
+                        max_pages: int = 5) -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     client = OpenDartClient()
-    r = collect_disclosures(client, start=start, end=end, corp_cls=corp_cls, max_pages=5)
+    r = collect_disclosures(client, start=start, end=end, corp_cls=corp_cls,
+                            max_pages=max_pages)
     print(f"  {r.summary()}")
     for rec in r.records[:5]:
         mark = f" {rec.metadata['correction_marker']}" if rec.metadata["correction_marker"] else ""
@@ -417,8 +419,11 @@ if __name__ == "__main__":
         s = _parse_rcept_dt(opt("--from", (datetime.now(KST) - timedelta(days=3)).strftime("%Y%m%d")))
         e = _parse_rcept_dt(opt("--to", datetime.now(KST).strftime("%Y%m%d")))
         cls = opt("--cls", None)
-        print(f"{COLLECTOR_VERSION} 실제 수집 {s} ~ {e} cls={cls or '전체'}")
-        raise SystemExit(_collect_and_report(s, e, cls))
+        # 기본 5 는 수동 프로브용이다. 3일 창 전체를 놓치지 않으려면 30 이 필요했다
+        # (실측 2026-07-31: 3일 창이 25페이지 - 스케줄러가 --max-pages 30 을 넘긴다)
+        pages = int(opt("--max-pages", "5"))
+        print(f"{COLLECTOR_VERSION} 실제 수집 {s} ~ {e} cls={cls or '전체'} pages<={pages}")
+        raise SystemExit(_collect_and_report(s, e, cls, max_pages=pages))
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (외부 호출 없음)")
     _check_record_mapping()

@@ -113,8 +113,8 @@ services:
 
   # ── 상주형 LS 실시간 시세 수집 (재일님 지시 2026-07-31: 호가·체결도 Docker 로) ──
   # 컨테이너는 24시간, 소켓은 세션 창(동시호가 35분 전~마감 +10분)에서만 연다.
-  # ⚠ 뉴스와 파일이 다르다: 뉴스는 바스켓 350종목이지만 시세는 700구독이 되어
-  #   소켓 한도(200)를 넘는다 - 시세는 ls_watchlist.txt(시총 상위 70 = 140구독).
+  # 구독은 뉴스와 같은 바스켓(코스피200+코스닥150 = 700구독)을 소켓 4개로 샤딩
+  # (재일님 지시 "바스켓 종목만 구독" - 대규모 동시 구독은 krx-tick-collector 실증).
   ls-realtime:
     build:
       context: departments/01-research
@@ -140,7 +140,7 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
-      LS_WATCH_SYMBOLS_FILE: config/ls_watchlist.txt
+      LS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -152,6 +152,46 @@ services:
     pids_limit: 64
 
     stop_grace_period: 30s
+
+  # ── 배치 수집기 스케줄러 (재일님 지시 2026-07-31: 나머지 수집기도 컨테이너로) ──
+  # 공시(10분)·Breadth(10분, 세션은 수집기가 판정)·관측 Calendar·거시·재무·CA·
+  # 기업개황(각 일 1회)을 한 컨테이너가 순차 실행한다. 전부 멱등 적재라 재시작
+  # 후 재실행이 안전하다. 주기 근거는 TEAM_JAEIL 가이드 3.1 표.
+  batch-collectors:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-batch-collectors
+    restart: unless-stopped
+    command: ["python", "collectors/collector_scheduler.py"]
+
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      KOSIS_API_KEY: ${KOSIS_API_KEY:-}
+      # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+
+    mem_limit: 512m
+    mem_reservation: 64m
+    cpus: 0.5
+    pids_limit: 64
+
+    # 진행 중 Job(최대 30분 timeout)을 마치게 두진 않는다 - 어차피 멱등이라
+    # 다음 주기가 이어받는다. 짧게 정리하고 내린다.
+    stop_grace_period: 20s
 
 volumes:
   tsdb_data:
