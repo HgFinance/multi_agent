@@ -39,6 +39,12 @@ implementation:
     - "lifecycle.py — Version 활성화 상태 전이(5.1). 완화·중립은 즉시, 확대(LOOSEN)와 최초 활성화는 사용자 승인 없으면 차단. 이전 Version effective_to 종료 + mandates.current_version 갱신 + mandate_decisions APPROVE 기록"
     - "기준 자본 계약 확정 (2026-07-31, PR #26) — 한도 집행 기준은 회계 nav_runs.total_nav의 당일 장 시작 시점 값. base_capital은 Paper 시작 자본 선언값이자 첫날 회계 초기 현금 근거로만 쓰고 한도 분모로 쓰지 않는다"
     - "governance-api 입출력 타입 정의 — docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2절"
+    - "F23 Daily Report (CEO 절반) — departments/00-ceo-office/src/reporting/daily_report.py. 본부별
+       공식 Snapshot ID를 governance.report_runs 행으로 조립. 필수 Section(portfolio/risk) 누락 시
+       FAILED, 선택 Section(research/execution/strategy/qa) 없음은 정상 진행. content_hash로 동일
+       구성 재요청 시 중복 삽입 방지. Repository는 인터페이스+In-Memory뿐, asyncpg 배선은 미착수.
+       회계 절반(전략별 PnL·Drawdown 수치 계산)은
+       departments/05-accounting-portfolio/reporting/daily_report.py가 별도로 완료"
   in_progress: []
   not_started:
     - "asyncpg Repository 실 구현 — MandateVersionRepository는 인터페이스와 In-Memory 구현만 있다. 실제 governance.mandate_versions 배선은 미착수"
@@ -46,7 +52,10 @@ implementation:
     - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 지금은 방향 판정과 활성화 게이트만 있고 위원회 경유 경로가 없다"
     - "Y1 나머지 — CEO Case 생성·Escalation·Daily Summary. governance.cases/escalations 테이블은 있고 로직이 없다"
     - "Y2 위원회·승인 — committee_sessions/votes/decisions, approvals 테이블은 있고 Quorum·SoD 판정 로직이 없다. Y3(인사팀 Registry)를 먼저 해서 순서가 밀렸다"
-    - "F23 Daily Report — governance.report_runs는 있으나 각 본부 Snapshot API(portfolio/risk/strategy)가 아직 없어 반쪽만 가능. 회계본부와 공동 작업"
+    - "F23 Daily Report 실 연동 — portfolio-api/risk-api/research-api/strategy-registry-api/audit-api가
+       아직 Snapshot 조회 엔드포인트를 안 갖고 있어 daily_report.py의 SnapshotRef는 호출자가 직접
+       채워야 한다. reporting-api(POST /reporting/v1/reports 등) 엔드포인트와 실제 렌더링(Reporting
+       Worker, object_path 생성)도 미구현"
     - "F24 Notification — governance.notifications 테이블만 있음"
     - "POST /governance/v1/... FastAPI 엔드포인트 — 타입만 정의됐고 서비스가 없다"
 
