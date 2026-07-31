@@ -35,3 +35,9 @@ CLAUDE.local.md
 # Editors
 .vscode/
 .idea/
+
+# AI 코딩 도구 로컬 상태 (headroom wrap claude / graphify / Serena MCP)
+.claude/settings.local.json
+.claude/.headroom_wrap_marker.json
+.serena/
+graphify-out/

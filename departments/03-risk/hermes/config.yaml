@@ -42,10 +42,13 @@ rag_technique_assignment:
     technique: agentic_rag
     status: implemented
     note: "skills/agentic-rag/ baseline. corpus/compliance/ 문서 검색 -> grade -> generate -> hallucination_check"
-  # LightRAG(Entity-level + Summary-level dual retrieval)은 compliance-policy-agent의 차기 백엔드
-  # 후보 — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면
-  # nodes.py를 고치지 않고 교체 가능(CLAUDE.md skills/agentic-rag 절 참고). Mandate/Restricted List
-  # 버전 이력이 늘어나 단일 문서 검색으로 정확도가 떨어질 때 재검토한다. 지금은 근거 없음(백로그).
+    future_backend: "LightRAG(Entity-level + Summary-level dual retrieval) — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면 nodes.py 무수정 교체 가능"
+    trigger: "Mandate/Restricted List/Policy Store 문서가 실 데이터로 교체돼 버전 이력이 늘어나고, 단일 임베딩 검색으로 recall이 부족해질 때. 지금은 근거 없음(백로그)."
+    # 2026-07-30: Evidence corpus(QA)와 달리 compliance corpus는 실 데이터가 돼도 GraphRAG 계열
+    # 트리거가 걸릴 만큼 안 커진다고 판단 — 한 펀드의 정책 문서는 성숙해도 수십~100건 안팎이고
+    # 구조가 버전 체인(Mandate v1 -> v2 -> ...)이지 엔티티 관계망(기업-경영진-딜)이 아니다. 재평가
+    # 시점은 문서 수 100건 초과 또는 문서 간 실제 상호 참조가 빈번해질 때 — 그 전까지 LightRAG 이상
+    # 단계(PIKE-RAG 계열, Neo4j, Hypergraph)는 이 페르소나에 배정하지 않는다.
   # Neo4j/Hypergraph는 Risk 쪽에 그래프 형태 스키마가 없어 배정하지 않는다(QA의 audit.artifact_lineage와
   # 다름) — 배정하려면 먼저 그래프 형 데이터(예: Position-Strategy-Signal 관계)가 있어야 한다.
 

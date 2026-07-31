@@ -89,7 +89,7 @@ insert into workforce.agent_profile_versions
    artifact_hash, effective_from, status)
 select
   ap.agent_id, 1, m.model_id,
-  'departments/07-agent-workforce/hermes/config.yaml#' || ap.employee_code,
+  'departments/07-agent-workforce/hermes/config.yaml#' || ap.display_name,
   v.skill_manifest::jsonb, v.tool_allowlist::jsonb, v.data_scopes::jsonb, v.memory_ns,
   v.token_budget::jsonb, v.sla::jsonb, v.eval_req::jsonb, v.forbidden::jsonb,
   md5(ap.employee_code || ':v1'), now(), 'DRAFT'

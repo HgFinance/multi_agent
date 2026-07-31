@@ -6,6 +6,9 @@
 # 신규 채용(workforce_management_cycle)과 기존 Agent 개선(agent_evolution_cycle)은 별도 흐름이다 —
 # 후자도 동일한 QA 독립검증·CEO 승인 게이트를 거친다. multi-agent-workflow.yaml 참고.
 
+# 부서 supervisor 모델(8개 Profile 공통 baseline). 개별 직원(HR-00 등)의 모델은 별도
+# 레이어인 workforce.agent_profile_versions.model_id 에 배정된다(예: HR-00=Bedrock Deep,
+# HR-01/04=Ollama Quick). 이 값 변경은 8개 Profile 공통 + ADR 대상이다(CLAUDE.md 참고).
 model:
   provider: nous
   default: poolside/laguna-s-2.1:free

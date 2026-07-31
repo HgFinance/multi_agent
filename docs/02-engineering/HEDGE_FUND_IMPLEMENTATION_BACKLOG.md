@@ -1,6 +1,6 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.4
+> 문서 상태: Implementation Backlog v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
@@ -39,7 +39,7 @@ P0가 모두 동작하기 전 P2 기능을 구현하지 않는다.
 | F15 | Portfolio/PnL | Cash, Position과 성과 계산 (accounting-portfolio-department) |
 | F16 | Audit/Replay | 판단부터 체결까지 추적·재현 (qa-department) |
 | F17 | Operator Control | Entry Block, Pause와 Kill Switch (risk-management) |
-| F18 | AI Office Dashboard | 8개 조직의 실시간 업무·시장·전략·주문·위험 상태 조회와 통제 요청 (공통 — Frontend는 ai-office, 본부별 조회 API는 각 소유 본부) |
+| F18 | AI Office Dashboard | 8개 조직의 실시간 업무·시장·전략·주문·위험 상태 조회와 통제 요청 (도현님: 공통 Frontend Platform 기술 DRI, 영주님: Live Office Business Owner, 각 본부: 조회 계약) |
 | F19 | Governed Self-Improvement | Hermes의 개선 후보를 Eval·Shadow·승인 Version으로 배포 (ceo-agent + qa-department 승인, hr-department 운영) |
 
 ## 3. P0 기능 명세
@@ -401,8 +401,9 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 
 **현재 Baseline**
 
-- `ai-office/`의 Next.js·React·TypeScript Pixel Office와 Demo Simulation.
-- 12개 고정 부서, 고정 Room Layout과 Browser Memory는 실제 조직·업무 상태로 사용하지 않는다.
+- `ai-office/`의 Next.js·React·TypeScript Pixel Office는 CEO Office, 6개 본부와 Agent Workforce 등 8개 조직·2개 층으로 전환됐다.
+- Trading/Portfolio DEMO Snapshot Panel과 `apps/api/main.py`의 `/ui/snapshot` Read-only BFF가 있다.
+- 직원 이동·업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반이다. 운영 Backend 연결로 간주하지 않는다.
 
 **구현 기능**
 
@@ -425,6 +426,9 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 - Gap 또는 재연결 후 누락 상태를 추측하지 않고 Snapshot을 다시 읽는다.
 - 전 종목 Tick 원문 대신 1초 이상 집계 Feed Health와 상위 Event를 표시한다.
 - Agent 상태는 `OFFLINE`, `IDLE`, `QUEUED`, `RUNNING`, `WAITING_APPROVAL`, `BLOCKED`, `DEGRADED`, `ERROR`를 사용한다.
+- Hermes Kanban Task/Assignee 상태를 읽기 전용 Status Bridge로 `agent.status.v1`에 매핑한다.
+- Agent Status Projector가 Event를 멱등 소비해 Supabase Read Model을 갱신하고 Snapshot 복구 원천으로 사용한다.
+- Browser와 BFF는 Kanban SQLite를 직접 읽거나 수정하지 않는다.
 
 **Command 계약**
 
@@ -479,6 +483,7 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 | F29 | Borrow/Short Simulator | 공매도 가능 수량, 비용, Recall과 주문 규칙 Simulation |
 | F30 | Multi-leg Execution | Leg 관계, 부분 체결 복구와 Atomicity Policy |
 | F31 | Derivatives Capability | Contract, Margin, Greeks, Roll과 Exercise/Assignment |
+| F32 | X Social Insight Watchlist | 승인 유명 인사·공식 계정의 Post를 준실시간 수집하고 교차 검증된 Evidence로 연결 |
 
 ## 5. 최소 데이터 모델
 
@@ -557,6 +562,7 @@ execution.fill.v1
 portfolio.position_updated.v1
 portfolio.snapshot.v1
 risk.trading_state.v1
+agent.status.v1
 workforce.improvement_candidate_created.v1
 audit.improvement_evaluated.v1
 workforce.artifact_version_activated.v1

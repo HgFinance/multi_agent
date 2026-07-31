@@ -120,6 +120,11 @@ Long/Short 전략에는 가격 데이터 외에 Borrow Availability, Borrow Fee,
 - Supply Chain, Shipping 또는 Satellite 계열 데이터
 
 Alternative Data는 개인정보, 이용약관, 대표성, Revision과 Survivorship Bias를 별도 검토한 뒤 사용한다.
+X 공개 Post는 승인된 계정 Watchlist와 공식 API로만 수집한다. Platform User ID, Post ID,
+게시·최초 관측 시각, 수정·삭제 상태와 수집 목적을 보존하고, 본문·Embedding·장기 Archive는
+계약상 허용된 범위에서만 처리한다. 삭제나 비공개 전환은 RAG와 Cache까지 전파한다.
+유명 인사의 의견은 `UNVERIFIED_SOCIAL`로 분류하며 공시, 독립 뉴스 또는 시장 데이터로
+교차 검증되기 전에는 주문이나 전략 배포의 단독 근거가 될 수 없다.
 
 ### 4.6 Trading and Execution Data
 

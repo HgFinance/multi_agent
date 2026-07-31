@@ -1,0 +1,75 @@
+# 로컬 개발용 시장 시계열 DB
+#
+# 담당: 재일 (리서치/퀀트)
+# 근거: docs/database/README.md 2절(저장소 분리), 7절(적용 방법)
+#       docs/01-product/HEDGE_FUND_CORE_PLAN.md 413행 "배포: Docker Compose, CI"
+#
+# ▶ 이 파일은 로컬 개발 전용이다. 나중에 VPS/AWS로 옮길 때 같은 파일을 그대로 쓰고
+#   ports 바인딩과 비밀번호만 환경에 맞게 바꾼다.
+#
+# ▶ 같은 머신의 다른 프로젝트(Trading_bot: compose 프로젝트 `trading`, 컨테이너 10개)와
+#   충돌하지 않도록 아래를 전부 분리했다. 두 프로젝트의 DB를 절대 공유하지 않는다 —
+#   Canonical Migration 계열이 다르므로 같은 DB에 얹으면 계약이 깨진다.
+#
+#     프로젝트 이름  hedgefund          (trading 과 분리)
+#     컨테이너      hedgefund-*         (trading-* 과 분리)
+#     호스트 포트    5434               (trading-timescaledb 가 5432, trading-postgres 가 5433)
+#     볼륨          hedgefund_tsdb_data (named volume)
+#     네트워크      hedgefund_default   (compose 가 자동 생성)
+#
+# ▶ 볼륨은 반드시 named volume이다. bind mount로 이 저장소 경로에 두면 안 된다 —
+#   저장소가 OneDrive 동기화 대상이라 Postgres 데이터 디렉터리가 동기화되면 손상된다.
+#
+# 사용법
+#   docker compose up -d
+#   docker compose logs -f timescaledb
+#   docker compose down            # 컨테이너만 제거, 데이터는 볼륨에 남는다
+#   docker compose down -v         # 데이터까지 삭제
+#
+# 마이그레이션 적용 (docs/database/README.md 7절)
+#   docker compose exec -T timescaledb \
+#     psql -U postgres -d market -v ON_ERROR_STOP=1 < timescaledb/migrations/001_initial_market_data.sql
+
+name: hedgefund
+
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg17
+    container_name: hedgefund-timescaledb
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: market
+      POSTGRES_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?.env 에 HEDGEFUND_TSDB_PASSWORD 를 설정할 것}
+
+    ports:
+      # 127.0.0.1 바인딩 — 외부 노출 금지. 원격 호스트로 옮길 때도 이 원칙을 유지하고
+      # 방화벽/사설망으로만 접근을 허용한다.
+      - "127.0.0.1:5434:5432"
+
+    volumes:
+      - tsdb_data:/home/postgres/pgdata/data
+
+    # ── 자원 격리 ──────────────────────────────────────────────────────────
+    # Docker Desktop(Windows)은 모든 컨테이너를 단일 WSL2 VM 안에서 돌린다.
+    # 따라서 CPU/RAM은 기본적으로 한 풀을 공유하며, 격리는 cgroup 상한으로 만든다.
+    # 아래 값은 "이 컨테이너가 다른 프로젝트를 굶기지 않는다"를 보장한다.
+    # 역방향 보호(다른 프로젝트가 우리를 굶기지 않기)는 그쪽에도 상한이 있어야 한다.
+    #
+    # 서버로 옮길 때는 cpuset 을 지우고 호스트 코어 수에 맞춰 cpus 만 조정한다.
+    mem_limit: 4g              # 하드 상한. 초과 시 이 컨테이너만 OOM
+    mem_reservation: 1g        # 소프트 보장 — 메모리 압박 시 커널이 우선 유지
+    cpus: 2.0                  # 24코어 중 2코어 상당으로 제한
+    cpuset: "22,23"            # 마지막 2코어에 핀 고정 (0~23 중)
+    pids_limit: 512
+    shm_size: 256mb            # 병렬 쿼리용 공유 메모리 (기본 64MB는 부족)
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d market"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  tsdb_data:

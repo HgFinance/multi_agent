@@ -341,7 +341,7 @@ Vendor Market Data와 Broker SDK는 공급자 확정 후 Adapter Package로 추�
 
 ## 8. AI Office Frontend 결정
 
-현재 `ai-office/`의 Next.js·React·TypeScript Pixel Office를 Frontend Baseline으로 확정한다. 이는 조직 상태를 탐색하는 시각 Shell이며, 현재 12개 고정 부서와 Scripted Simulation을 그대로 금융 운영에 사용하는 결정은 아니다. 8개 조직 단위, 실제 Agent 상태와 FastAPI REST·WebSocket Adapter로 단계적으로 교체한다.
+현재 `ai-office/`의 Next.js·React·TypeScript Pixel Office를 Frontend Baseline으로 확정한다. 원본 12개 부서는 8개 조직·2개 층으로 전환됐고 Trading/Portfolio DEMO Snapshot과 `apps/api/main.py` BFF가 추가됐다. 다만 Scripted Simulation과 테스트 Paper Loop를 금융 운영 상태로 사용하지 않는다. 실제 Agent 상태는 Hermes Kanban Status Bridge의 `agent.status.v1`, Supabase Read Model과 FastAPI REST·WebSocket Adapter로 단계적으로 교체한다.
 
 ```text
 Next.js + TypeScript
@@ -357,6 +357,11 @@ Vitest + React Testing Library + Playwright
 현재 `vinext`, Vite, Cloudflare Worker와 Wrangler 구성은 Prototype Hosting Baseline으로만 유지한다. 전체 Cloud Provider, 금융 Backend Hosting과 Production Frontend Hosting은 별도 결정이며 Cloudflare D1·Drizzle을 금융 Source of Truth로 사용하지 않는다.
 
 실시간 연결은 `GET /ui/snapshot` 다음 FastAPI `/ws/operations` 순서다. WebSocket Event는 Sequence, Schema Version과 Server Time을 포함하고 Client는 Heartbeat, 재연결, Gap Recovery와 Staleness를 구현한다. 전 종목 Tick을 Pixel Office로 직접 전송하지 않고 Feed Health와 집계 Event를 제공한다.
+
+Hermes Kanban은 Agent 업무 상태 Source로 재사용한다. 같은 Runtime 경계의 읽기 전용 Bridge가
+Task·Assignee 변경을 `agent.status.v1`로 Redis Streams에 발행하고 Projector가 Supabase Agent Status
+Read Model을 갱신한다. Browser·BFF의 SQLite 직접 접근과 Task 수정은 금지한다. 공통 Frontend Platform
+기술 DRI는 도현님, Live Office Business Owner는 영주님, Risk·QA Reviewer는 동규님이다.
 
 ### Frontend 책임
 

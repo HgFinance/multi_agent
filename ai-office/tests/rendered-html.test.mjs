@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-
-const developmentPreviewMeta =
-  /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
-const templateRoot = new URL("../", import.meta.url);
-const previewRoot = new URL("../app/_sites-preview/", import.meta.url);
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -28,64 +23,55 @@ async function render() {
   );
 }
 
-test("server-renders the starter loading skeleton", async () => {
+test("server-renders the HgFinance eight-organization office", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, developmentPreviewMeta);
-  assert.match(html, /<title>Your site is taking shape<\/title>/i);
-  assert.match(html, /Building your site/);
-  assert.match(html, /Your site is taking shape/);
-  assert.match(
-    html,
-    /Your first version will appear here automatically when it’s ready\./,
-  );
-  assert.doesNotMatch(html, /Codex/);
-  assert.match(html, /react-loading-skeleton/);
-  assert.match(html, /role="status"/);
+  assert.match(html, /<html lang="ko">/i);
+  assert.match(html, /<title>HgFinance - AI 헤지펀드 오피스<\/title>/i);
+  assert.match(html, /개인형 헤지펀드/);
+  assert.match(html, /리서치본부/);
+  assert.match(html, /퀀트·백테스트본부/);
+  assert.match(html, /트레이딩본부/);
+  assert.match(html, /리스크본부/);
+  assert.match(html, /회계·포트폴리오본부/);
+  assert.match(html, /AI QA·감사본부/);
+  assert.match(html, /Agent Workforce 인사팀/);
+  assert.match(html, /CEO Office 지원팀/);
+  assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
 
-test("keeps the loading skeleton scoped and disposable", async () => {
-  const [preview, css, page, layout, packageJson, files] = await Promise.all([
-    readFile(new URL("SkeletonPreview.tsx", previewRoot), "utf8"),
-    readFile(new URL("preview.css", previewRoot), "utf8"),
+test("keeps organization configuration wired to the live office", async () => {
+  const [config, page, layout, staff, world, packageJson] = await Promise.all([
+    readFile(new URL("../company.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/game/staff.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/game/world.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readdir(previewRoot),
   ]);
 
-  assert.deepEqual(files.sort(), ["SkeletonPreview.tsx", "preview.css"]);
-  assert.match(preview, /from "react-loading-skeleton"/);
-  assert.match(preview, /baseColor="#eceae7"/);
-  assert.match(preview, /highlightColor="#f9f8f6"/);
-  assert.match(preview, /duration=\{2\.8\}/);
-  assert.match(preview, /sites-skeleton-search-placeholder/);
-  assert.match(packageJson, /"react-loading-skeleton": "3\.5\.0"/);
-
-  const shellIndex = preview.indexOf('className="sites-skeleton-shell"');
-  const statusIndex = preview.indexOf('className="sites-skeleton-status"');
-  assert.ok(shellIndex >= 0 && statusIndex > shellIndex);
-  assert.match(css, /position:\s*fixed/);
-  assert.match(css, /inset:\s*0/);
-  assert.match(css, /opacity:\s*0\.52/);
-  assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.doesNotMatch(css, /#020617|canvas|pets|progress/i);
-  assert.doesNotMatch(
-    preview,
-    /loading-spinner|status-mark|status-progress|canvas|cookie|random/i,
+  const departmentBlock = config.match(
+    /export const DEPARTMENTS = \[(?<departments>[\s\S]*?)\] as const;/,
+  );
+  assert.ok(departmentBlock?.groups?.departments);
+  assert.equal(
+    [...departmentBlock.groups.departments.matchAll(/^\s+id:\s*"[^"]+",/gm)].length,
+    8,
   );
 
-  assert.match(page, /export const metadata:\s*Metadata/);
-  assert.match(page, /"codex-preview": "development"/);
-  assert.match(page, /<SkeletonPreview \/>/);
-  assert.match(layout, /title:\s*"Starter Project"/);
-  assert.doesNotMatch(layout, /codex-preview|_sites-preview|themeColor|\bViewport\b/);
-  assert.doesNotMatch(css, /(^|\s)(html|body)\s*\{/m);
-
-  await assert.rejects(
-    access(new URL("public/_sites-preview", templateRoot)),
-  );
+  assert.match(config, /name:\s*"HgFinance"/);
+  assert.match(config, /pageTitle:\s*"HgFinance - AI 헤지펀드 오피스"/);
+  assert.match(page, /new Company\(\)/);
+  assert.match(page, /<OfficeWorld/);
+  assert.match(page, /<OpsPanel/);
+  assert.match(layout, /title:\s*COMPANY\.pageTitle/);
+  assert.match(layout, /<html lang="ko">/);
+  assert.match(staff, /STAFF_LIST\.map/);
+  assert.match(world, /DEPARTMENTS\.map/);
+  assert.match(world, /FLOORS = \[1, 2\] as const/);
+  assert.match(packageJson, /"name": "hgfinance-ai-office"/);
+  assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
