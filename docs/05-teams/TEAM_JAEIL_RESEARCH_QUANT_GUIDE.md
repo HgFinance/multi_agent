@@ -74,6 +74,9 @@
 | 파생 스냅샷 수집기 (K200 선물·옵션 체인) | `departments/01-research/collectors/derivatives_collector.py` | — (신규, 2026-07-31) |
 | PIT Dataset Builder (Manifest·Leakage Check) | `departments/04-quant-backtest/pipeline/pit_dataset.py` | — (신규, 2026-07-31) |
 | Backtest Runner v1 (비용·Ledger·재현 해시) | `departments/04-quant-backtest/pipeline/backtest_runner.py` | — (신규, 2026-07-31) |
+| Walk-Forward 검증 (QNT-04, Fragility 판정) | `departments/04-quant-backtest/pipeline/walk_forward.py` | — (신규, 2026-07-31) |
+| Market Data Steward (심박·품질·지연 감사) | `departments/01-research/collectors/market_data_steward.py` | — (신규, 2026-07-31) |
+| Evidence Bundle 조립기 (결정론 가격 컨텍스트) | `departments/01-research/evidence/bundle.py` | — (신규, 2026-07-31) |
 | 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
 | LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3) |
 | 공시 원문 Archive 수집기 | `departments/01-research/collectors/opendart_document_collector.py` | — (신규, Sprint J2) |
