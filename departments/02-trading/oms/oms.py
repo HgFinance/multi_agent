@@ -35,12 +35,15 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
+_DEPT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_DEPT / "contracts"))
+sys.path.insert(0, str(_DEPT / "multileg"))
+sys.path.insert(0, str(_DEPT / "capability"))
 
 from contracts import (  # noqa: E402
     BROKER_TERMINAL_STATES,
@@ -51,6 +54,19 @@ from contracts import (  # noqa: E402
     Side,
     can_transition,
 )
+from derivatives import (  # noqa: E402
+    CERTIFICATION_REQUIRED,
+    CapabilityProfile,
+    DerivativeContract,
+    check_order_capability,
+)
+from intent_group import (  # noqa: E402
+    GroupStatus,
+    IntentGroup,
+    LegOutcome,
+    RecoveryPlan,
+)
+from intent_group import evaluate_group as _evaluate_group  # noqa: E402
 
 
 class OMSError(Exception):
@@ -162,13 +178,26 @@ class OrderStore:
         self.intents: dict[UUID, OrderIntentRecord] = {}
         self.orders: dict[UUID, BrokerOrder] = {}
         self.events: list[StateEvent] = []
+        self.groups: dict[UUID, IntentGroup] = {}
         self._by_idempotency: dict[str, UUID] = {}
         self._order_by_intent: dict[UUID, UUID] = {}
         self._seen_broker_events: set[tuple[str, str]] = set()
+        self._group_by_idempotency: dict[str, UUID] = {}
+        # (intent_group_id, leg_index) -> order_id. F30 판정이 실제 주문 상태를
+        # 읽으려면 Leg와 BrokerOrder가 연결돼 있어야 한다.
+        self._order_by_leg: dict[tuple[UUID, int], UUID] = {}
 
     def find_intent_by_idempotency(self, key: str) -> OrderIntentRecord | None:
         intent_id = self._by_idempotency.get(key)
         return self.intents.get(intent_id) if intent_id else None
+
+    def find_group_by_idempotency(self, key: str) -> IntentGroup | None:
+        group_id = self._group_by_idempotency.get(key)
+        return self.groups.get(group_id) if group_id else None
+
+    def find_order_by_leg(self, group_id: UUID, leg_index: int) -> BrokerOrder | None:
+        order_id = self._order_by_leg.get((group_id, leg_index))
+        return self.orders.get(order_id) if order_id else None
 
     def find_order_by_intent(self, intent_id: UUID) -> BrokerOrder | None:
         order_id = self._order_by_intent.get(intent_id)
@@ -192,18 +221,35 @@ def _now() -> datetime:
 
 
 class OMS:
-    def __init__(self, store: OrderStore | None = None, adapter: str = "paper") -> None:
+    def __init__(self, store: OrderStore | None = None, adapter: str = "paper",
+                 capability: CapabilityProfile | None = None) -> None:
         self.store = store or OrderStore()
         self.adapter = adapter
+        # F31. 선언이 없으면 현물(EQUITY)만 받는다 - 파생·공매도는 Profile과
+        # Certification이 있어야 열린다. 없는 것이 곧 허용이 되지 않게 한다.
+        self.capability = capability
 
     # -- 1단계: Order Intent 심사 ------------------------------------------------
 
-    def register_intent(self, intent: OrderIntent) -> OrderIntentRecord:
+    def register_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        asset_class: str = "EQUITY",
+        contract: DerivativeContract | None = None,
+        as_of: date | None = None,
+    ) -> OrderIntentRecord:
         """Agent가 만든 Intent를 심사 대기로 등록한다.
 
         같은 idempotency_key로 다시 부르면 기존 기록을 그대로 돌려준다.
         네트워크 재시도로 주문이 두 배가 나가는 사고를 막는다.
+
+        **여기가 F31 Capability 게이트다.** 팀 가이드 1.1: "실행·회계 Capability가
+        없는 Strategy Version은 승인 신호가 있어도 주문 접수 단계에서 차단한다."
+        Risk 승인보다 앞이라, 막히면 Risk 심사 자체가 시작되지 않는다.
         """
+        self._check_capability(asset_class, contract, as_of)
+
         existing = self.store.find_intent_by_idempotency(intent.idempotency_key)
         if existing is not None:
             return existing
@@ -221,6 +267,26 @@ class OMS:
                      IntentState.DRAFT, IntentState.DRAFT,
                      {"trace_id": intent.trace_id, "evidence_hash": intent.evidence_hash()})
         return rec
+
+    def _check_capability(
+        self, asset_class: str, contract: DerivativeContract | None, as_of: date | None
+    ) -> None:
+        """접수 게이트. 막히면 Intent가 만들어지지 않는다."""
+        if self.capability is None:
+            # Profile 선언이 없다 = 아무것도 인증되지 않았다. 현물만 통과시킨다.
+            # 초기 시장은 KOSPI/KOSDAQ 현물 Long-only다(마스터플랜 10장).
+            if asset_class in CERTIFICATION_REQUIRED:
+                raise OMSError(
+                    f"{asset_class}는 Capability Profile 없이 주문할 수 없습니다. "
+                    "Broker/Risk/Accounting Certification이 선행 조건입니다"
+                )
+            return
+
+        verdict = check_order_capability(
+            self.capability, asset_class, contract=contract, as_of=as_of
+        )
+        if not verdict.allowed:
+            raise OMSError(f"Capability 게이트 차단: {verdict.reason}")
 
     def request_risk_review(self, rec: OrderIntentRecord) -> OrderIntentRecord:
         return self._move_intent(rec, IntentState.RISK_PENDING, "risk_requested", {})
@@ -299,6 +365,65 @@ class OMS:
                      {"order_intent_id": str(rec.order_intent_id),
                       "risk_decision_id": str(rec.risk_decision_id)})
         return order
+
+    # -- Multi-leg (F30) --------------------------------------------------------
+
+    def register_group(self, group: IntentGroup) -> IntentGroup:
+        """Intent Group을 등록한다. 같은 idempotency_key면 기존 것을 돌려준다."""
+        existing = self.store.find_group_by_idempotency(group.idempotency_key)
+        if existing is not None:
+            return existing
+
+        self.store.groups[group.intent_group_id] = group
+        self.store._group_by_idempotency[group.idempotency_key] = group.intent_group_id
+        self._append("intent_group", group.intent_group_id, "group_registered",
+                     GroupStatus.DRAFT, GroupStatus.DRAFT,
+                     {"atomicity": str(group.atomicity_policy),
+                      "failure_policy": str(group.failure_policy),
+                      "leg_count": group.leg_count})
+        return group
+
+    def link_leg(self, group: IntentGroup, leg_index: int, order: BrokerOrder) -> None:
+        """Leg와 Broker Order를 연결한다. 판정이 실제 주문 상태를 읽으려면 필요하다."""
+        group.leg_at(leg_index)  # 없는 leg_index면 여기서 걸린다
+        key = (group.intent_group_id, leg_index)
+        linked = self.store._order_by_leg.get(key)
+        if linked is not None and linked != order.order_id:
+            raise OMSError(f"leg {leg_index}에 이미 다른 주문이 연결돼 있습니다")
+        self.store._order_by_leg[key] = order.order_id
+
+    def evaluate_group(self, group: IntentGroup) -> RecoveryPlan:
+        """연결된 Broker Order 상태를 읽어 그룹 판정을 낸다.
+
+        결과를 지어내지 않는다 - 아직 연결 안 된 Leg는 판정에서 빠지고,
+        그러면 evaluate_group이 EXECUTING을 돌려준다. 덜 온 결과를
+        "미체결"로 읽어 성급하게 복구를 시작하지 않기 위해서다.
+        """
+        outcomes: dict[int, LegOutcome] = {}
+        for leg in group.legs:
+            order = self.store.find_order_by_leg(group.intent_group_id, leg.leg_index)
+            if order is None:
+                continue
+            outcomes[leg.leg_index] = LegOutcome(
+                leg_index=leg.leg_index,
+                filled_quantity=order.filled_quantity,
+                requested_quantity=order.requested_quantity,
+                is_terminal=order.is_terminal,
+                state=str(order.state),
+            )
+
+        plan = _evaluate_group(group, outcomes)
+        if plan.group_status is not group.status:
+            self._append("intent_group", group.intent_group_id, "group_evaluated",
+                         group.status, plan.group_status,
+                         {"reason": plan.reason,
+                          "cancel": list(plan.cancel_leg_indexes),
+                          "unwind": list(plan.unwind_leg_indexes),
+                          "retry": list(plan.retry_leg_indexes),
+                          "reduce_only": plan.reduce_only})
+            group.status = plan.group_status
+            group.version += 1
+        return plan
 
     def submit(self, order: BrokerOrder, rec: OrderIntentRecord,
                when: datetime | None = None) -> BrokerOrder:
@@ -531,10 +656,10 @@ if __name__ == "__main__":
             decided_by="risk-supervisor", decided_at=now,
         )
 
-    def raises(fn, why):
+    def raises(fn, why, exc=OMSError):
         try:
             fn()
-        except OMSError:
+        except exc:
             return
         raise AssertionError(f"막혔어야 함: {why}")
 
@@ -665,4 +790,116 @@ if __name__ == "__main__":
         assert oms_i.rebuild_state("intent", rec_i.order_intent_id) == str(rec_i.state)
         assert oms_i.rebuild_state("broker_order", ord_i.order_id) == str(ord_i.state)
 
-    print("ok - OMS 불변식 11개 점검 통과")
+    # 12. F31 Capability 게이트 — Profile이 없으면 파생·공매도가 접수에서 막힌다
+    from derivatives import (  # noqa: E402
+        DERIVATIVE_CERTIFIERS,
+        ContractKind,
+        ProfileStatus,
+        SettlementType,
+    )
+
+    plain = OMS()
+    for blocked_class in ("FUTURE", "OPTION", "SHORT", "WARRANT"):
+        raises(lambda a=blocked_class: plain.register_intent(
+            make_intent(f"idem_cap_{a}"), asset_class=a),
+            f"Profile 없이 {blocked_class} 접수")
+    # 현물은 그대로 통과한다 (초기 시장 KOSPI/KOSDAQ 현물)
+    assert plain.register_intent(make_intent("idem_cap_eq")).state is IntentState.DRAFT
+
+    # Certification이 다 있어야 파생이 열린다
+    def cap(**kw) -> CapabilityProfile:
+        base = dict(capability_profile_id=uuid4(), profile_code="p", version=1,
+                    status=ProfileStatus.ACTIVE,
+                    required_instruments=frozenset({"EQUITY", "FUTURE"}),
+                    execution_capabilities=frozenset({"limit"}),
+                    risk_capabilities=frozenset({"position_limit"}),
+                    accounting_capabilities=frozenset({"double_entry"}))
+        return CapabilityProfile(**{**base, **kw})
+
+    half = OMS(capability=cap(certified_by=frozenset({"broker"})))
+    raises(lambda: half.register_intent(make_intent("idem_cap_half"),
+                                        asset_class="FUTURE"),
+           "일부만 Certification된 파생 접수")
+
+    full = OMS(capability=cap(certified_by=DERIVATIVE_CERTIFIERS))
+    assert full.register_intent(make_intent("idem_cap_full"), asset_class="FUTURE")
+
+    # 만기 지난 계약은 Certification이 있어도 막힌다
+    expired = DerivativeContract(
+        instrument_id=uuid4(), contract_kind=ContractKind.FUTURE,
+        expiry_date=date(2020, 1, 1), contract_multiplier=Decimal("250000"),
+        settlement_type=SettlementType.CASH)
+    raises(lambda: full.register_intent(make_intent("idem_cap_exp"),
+                                        asset_class="FUTURE", contract=expired,
+                                        as_of=date(2026, 7, 31)), "만기 지난 계약 접수")
+
+    # 게이트에서 막히면 Intent 자체가 안 생긴다 — Risk 심사가 시작되지 않는다
+    assert plain.store.find_intent_by_idempotency("idem_cap_FUTURE") is None, \
+        "차단됐는데 Intent가 저장됐다"
+
+    # 13. F30 Multi-leg 배선 — 실제 Broker Order 상태에서 판정이 나온다
+    from intent_group import (  # noqa: E402
+        AtomicityPolicy,
+        FailurePolicy,
+        Leg,
+        PositionEffect,
+    )
+
+    oms8 = OMS()
+    inst_a, inst_b = uuid4(), uuid4()
+    i8a, rec8a, o8a = approved_order(oms8, "idem_leg_a")
+    i8b, rec8b, o8b = approved_order(oms8, "idem_leg_b")
+
+    grp = IntentGroup(
+        intent_group_id=uuid4(), trade_case_id=uuid4(), fund_id=i8a.fund_id,
+        atomicity_policy=AtomicityPolicy.ALL_OR_NONE,
+        failure_policy=FailurePolicy.CANCEL_ALL,
+        idempotency_key="grp_wired",
+        legs=(Leg(leg_index=0, instrument_id=inst_a, side=Side.BUY,
+                  quantity=Decimal("100"), position_effect=PositionEffect.OPEN),
+              Leg(leg_index=1, instrument_id=inst_b, side=Side.SELL,
+                  quantity=Decimal("100"), position_effect=PositionEffect.OPEN)),
+    )
+    oms8.register_group(grp)
+    # 멱등 — 같은 키로 다시 부르면 같은 그룹이다
+    assert oms8.register_group(grp).intent_group_id == grp.intent_group_id
+    assert len(oms8.store.groups) == 1
+
+    oms8.link_leg(grp, 0, o8a)
+    oms8.link_leg(grp, 1, o8b)
+    # 계약 위반은 MultiLegError 그대로 올라온다 - OMSError로 감싸 사유를 흐리지 않는다
+    from intent_group import MultiLegError  # noqa: E402
+    raises(lambda: oms8.link_leg(grp, 9, o8a), "없는 leg_index 연결", MultiLegError)
+
+    # 아직 아무 체결도 없다 -> 판정을 서두르지 않는다
+    assert oms8.evaluate_group(grp).group_status is GroupStatus.EXECUTING
+
+    oms8.submit(o8a, rec8a)
+    oms8.submit(o8b, rec8b)
+    oms8.on_broker_event(o8a, "ack", "wf_a_ack", now)
+    oms8.on_broker_event(o8b, "ack", "wf_b_ack", now)
+    oms8.on_broker_event(o8a, "fill", "wf_a", now, {"quantity": "100", "price": "70000"})
+    oms8.request_cancel(o8b, "짝 Leg가 안 채워짐")
+    oms8.on_broker_event(o8b, "cancel", "wf_b", now, {"leaves": "100"})
+
+    # 한쪽만 체결 -> COMPLETED가 아니라 PARTIAL_RECOVERY (상태를 숨기지 않는다)
+    plan = oms8.evaluate_group(grp)
+    assert plan.group_status is GroupStatus.PARTIAL_RECOVERY, plan.group_status
+    assert plan.unwind_leg_indexes == (0,), plan.unwind_leg_indexes
+    assert grp.status is GroupStatus.PARTIAL_RECOVERY, "그룹 상태가 갱신 안 됐다"
+
+    # 그룹 전이도 event store에 남는다. 중간 상태를 건너뛰지 않는다
+    group_events = oms8.store.events_for("intent_group", grp.intent_group_id)
+    assert [(e.from_state, e.to_state) for e in group_events] == [
+        ("DRAFT", "DRAFT"),                    # group_registered
+        ("DRAFT", "EXECUTING"),                # 연결만 되고 체결 전
+        ("EXECUTING", "PARTIAL_RECOVERY"),     # 한쪽만 체결
+    ], [(e.event_type, e.from_state, e.to_state) for e in group_events]
+
+    # 같은 상태로 다시 판정해도 중복 이벤트가 쌓이지 않는다
+    before = len(group_events)
+    oms8.evaluate_group(grp)
+    assert len(oms8.store.events_for("intent_group", grp.intent_group_id)) == before, \
+        "상태가 안 바뀌었는데 이벤트가 쌓였다"
+
+    print("ok - OMS 불변식 13개 점검 통과")
