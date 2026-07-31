@@ -2,7 +2,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md)
 
 ## 현재 상태
 
