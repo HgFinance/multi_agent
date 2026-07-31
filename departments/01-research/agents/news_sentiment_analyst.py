@@ -40,7 +40,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
-from pydantic import BaseModel, Field, ValidationError  # noqa: E402
+from pydantic import BaseModel, Field, ValidationError, field_validator  # noqa: E402
 
 from source_registry import load_project_env  # noqa: E402
 
@@ -68,6 +68,13 @@ MAX_ARTICLES = 40  # 한 판정에 넣는 기사 상한 - 초과분은 가중치
 
 class ArticleJudgement(BaseModel):
     document_id: str = Field(description="입력에 있던 document_id 그대로")
+
+    # 소형 모델이 "1" 대신 1(정수)로 내는 경우가 흔하다(실험 1 실측) - 문자열로
+    # 정규화해 받아들인다. 모르는 값은 여전히 verify 가 환각으로 버린다.
+    @field_validator("document_id", mode="before")
+    @classmethod
+    def _coerce_id(cls, v):
+        return str(v).strip()
     sentiment: int = Field(ge=-1, le=1, description="-1 악재 / 0 중립 / +1 호재")
     salience: float = Field(ge=0.0, le=1.0, description="이 종목에 얼마나 중대한가")
     reason: str = Field(max_length=200)
@@ -129,12 +136,13 @@ Rules:
 - Use ONLY the given headlines. Do not invent facts. Keep reason short, Korean.
 - Return judgements for every article, same document_id as given.
 - Do NOT echo the input fields. Each judgement MUST contain exactly:
-  document_id (copy), sentiment (integer -1|0|1), salience (number 0.0~1.0),
-  reason (short Korean string).
-Example output (2 articles):
+  document_id (the SAME id string given for that article - "1", "2", ...),
+  sentiment (integer -1|0|1), salience (number 0.0~1.0), reason (short Korean).
+- document_id MUST be one of the given ids. Never invent other ids.
+Example output when given articles with ids "1" and "2":
 {"judgements":[
- {"document_id":"abc-1","sentiment":1,"salience":0.8,"reason":"호재: 실적 상회"},
- {"document_id":"abc-2","sentiment":0,"salience":0.2,"reason":"업계 동향 언급"}]}
+ {"document_id":"1","sentiment":1,"salience":0.8,"reason":"호재: 실적 상회"},
+ {"document_id":"2","sentiment":0,"salience":0.2,"reason":"업계 동향 언급"}]}
 Respond with that JSON shape only. No other text."""
 
 
