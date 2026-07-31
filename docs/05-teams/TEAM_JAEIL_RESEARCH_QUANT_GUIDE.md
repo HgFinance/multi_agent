@@ -69,6 +69,13 @@
 | 감시 Watchlist 생성기 | `departments/01-research/collectors/watchlist_builder.py`, `config/` | — (신규, Sprint J3) |
 | 수집기 Container Image | `departments/01-research/Dockerfile` | — (신규, 2026-07-31) |
 | research-api (Evidence 조회면) | `departments/01-research/api/main.py` | — (신규, Sprint J2) |
+| market-api (시세 조회면) | `departments/01-research/api/market_api.py` | — (신규, F03) |
+| 차트 백필 수집기 | `departments/01-research/collectors/chart_backfill_collector.py` | — (신규, 2026-07-31) |
+| 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
+| LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3) |
+| 공시 원문 Archive 수집기 | `departments/01-research/collectors/opendart_document_collector.py` | — (신규, Sprint J2) |
+| 직원 에이전트 (실구현) | `departments/01-research/agents/` (universe_manager, news_sentiment_analyst, article_reader) | — (신규, 2026-07-31) |
+| 본부 LangGraph 파이프라인 | `departments/01-research/scripts.py` | — (신규, 2026-07-31 - QA 부서 패턴) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -783,7 +790,12 @@ Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메�
 - **완료** 장시간 실행 Runtime — 세션 인지 상주(위). 장중 재접속·중복·Gap 식별은
   worker의 재접속 경로(MAX_RECONNECTS + disconnect_reasons)와 멱등 적재가 맡는다.
 - **미착수** 특정 종목·시간 구간을 Parquet로 재현한다.
-- **미착수** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
+- **완료** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다 — `market-api`
+  (2026-07-31, `api/market_api.py`, :8036). Snapshot/Bars(백필+파생 통합)/
+  Breadth/DQ 요약, TSDB read-only 세션, GET 전용 표면. 통합 계획 6.2의 목표
+  이름과 일치. 차트 백필(t8410/t8412 → `market_bars` source='ls_chart')로
+  일봉 2024년~ 216,885행 + 분봉 4개월이 뒤를 받친다 — 백테스트는 이 API 또는
+  `market_bars` 하나만 본다.
 
 ### Sprint J2: DART와 Research Metadata
 
@@ -798,7 +810,14 @@ Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메�
   계약(`CompanyProfile`)에 필드 자체가 없다** — 개인정보를 수집하지 않으며, 자체 점검이
   metadata로 새는 경로까지 검사한다. 재적용은 `IS DISTINCT FROM` 가드로 실변경 0을
   확인했다(멱등).
-- **부분** 공시 원본 Archive, Version, 정정 관계.
+- **완료(원본 확보)** 공시 원본 Archive — `opendart_document_collector.py`
+  (2026-07-31). 2019003 원본 ZIP → Supabase Private Storage
+  (`research-documents-private`, 왕복 검증) → `document_versions`(sha256
+  지문·경로·크기, license_scope=PRIVATE_ARCHIVE). 실측 함정: 갓 나온 공시는
+  원문 미생성(XML status 014) → 2시간 유예 + 다음 실행 자연 재시도. 백필
+  355건+ 후 매일 20:00 Job(한도 600)이 잇는다. 남은 후속: 원문 파서
+  (`parser_name` 채우기), 정정↔원본 `document_relations`, RAG 재료화.
+- **부분(구버전 항목)** Version, 정정 관계.
   `research.documents` 869건 적재(ACTIVE 793 / CORRECTED 76). 정정은 `report_nm` 앞
   표기(`[기재정정]`, `[첨부정정]` 등)로 탐지하고 **원본을 덮어쓰지 않는다** — `rcept_no`가
   달라 별개 문서로 들어간다. 멱등 키는 `unique nulls not distinct (source_id, external_id)`이며
@@ -867,6 +886,28 @@ API(2019003)나 별도 Source가 필요하다.
 실제 동기화 코드가 없었고, `research.documents.source_id`가 NOT NULL FK라 이것이 선행
 조건이었다. `allowed_uses`와 `prohibited_uses`를 함께 넣어 DB만 보는 사람도 라이선스
 경계를 알 수 있게 했다.
+
+### Sprint J4 (신설 2026-07-31): 본부 에이전트 — 무료 로컬 모델 체계
+
+ANTHROPIC 키 없이 **로컬 Ollama(RTX 5080, qwen3:14b)** 로 에이전트 층을 열었다.
+비용 0, 전부 실측 검증:
+
+- **모델 기반**: 부서 Modelfile 2종(research/quant)을 실계약 프롬프트로 정교화해
+  `agent-research`/`agent-quant` 생성. 8개 부서 모델 전부 로컬 재현(팀 서버는
+  사설망이라 미도달 — Tailscale 후 전환 가능).
+- **직원 실구현 2 + 도구 1** (`agents/`): `universe_manager`(결정론 — t1404/t1405
+  6목록, 실전 347/3), `news_sentiment_analyst`(fetch→judge→verify→aggregate,
+  **10종목 연속 SCORED·환각 인용 0%** — 소형 모델은 UUID 를 못 베끼므로 인덱스
+  인용+역매핑이 핵심), `article_reader`(판단 시점 열람·비저장 — 3.3 예외).
+- **본부 파이프라인** (`scripts.py`, QA 부서 패턴 적용): `run_research_department
+  (symbol)` → universe(결정론, 거래불가 조기종료) → Evidence 조립(API 2종만) →
+  sentiment → supervisor 페르소나 Packet 초안(JSON, 필수 키 코드 검증). 실측:
+  실데이터 Packet 에 인용·촉매·무효화 포함 생성. **research-hermes 컨테이너의
+  원형**이다.
+- **페르소나**: config.yaml 9종을 RES-00~08 직무기술서(미션·산출물·금지·
+  Escalation)로 전면 강화. 퀀트 7종(QNT)은 후속.
+- 원칙 재확인: 에이전트는 DB Credential 없이 API 만(통합 계획 6.2와 일치),
+  LLM 은 판단·서술만, 부족하면 insufficient_evidence.
 
 ### Sprint J3: News/RAG
 
