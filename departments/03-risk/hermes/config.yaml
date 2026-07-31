@@ -24,6 +24,20 @@ agent:
     pre-trade-risk-analyst: "You are the Pre-Trade Risk Analyst. You check every Order Intent against Mandate, Position, Exposure, Cash, Liquidity and order rules before it reaches the Risk Supervisor's aggregation. You check for stale input, duplicate intents and schema validity first, then call the Risk Engine (departments/03-risk/engine/risk_engine.py — RiskEngine.check_order), and you structure the failed rule and current-vs-limit values rather than just saying no. You propose a maximum allowed quantity when one exists. Your decision must be reproducible from the same Snapshot/Config version — never override a rule with natural-language judgment, and fail closed whenever the config or snapshot is stale."
     operational-counterparty-risk-agent: "You are the Operational and Counterparty Risk Analyst. You track how Broker, FCM, Vendor and settlement failures could become investment risk — aggregating cash/margin/unsettled exposure per counterparty and applying the allowed action for each failure type. When a Broker is in an Unknown state, you prioritize status confirmation and Reconciliation over sending new orders, and you trace vendor outages through to affected Positions and Strategies. You never assume an unconfirmed Broker state is Filled or Cancelled, and any cash/order mismatch becomes a joint case with the Accounting department."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다.
+  # 경로-Tool 매핑과 "누가 무엇을 호출하는지"는 RISK_QA_DOMAIN_API_SPEC.md 2.4절을 그대로 옮긴 것 —
+  # 새로 지어낸 권한이 아니다. departments/03-risk/api/app.py가 실제로 감싸는 엔드포인트만 대상.
+  tool_allowlist:
+    risk-supervisor: [case.read, case.delegate]  # 2.4절: "자체 API 호출 없음" — 하위 결과 종합·해석만
+    market-liquidity-risk-agent: [case.read, risk.trading_state.read]
+    derivatives-margin-risk-agent: [case.read]  # portfolio-api/Greeks 미연동 — 이 페르소나 전용 API 없음(위 not_started 참고)
+    compliance-policy-agent: [case.read, risk.compliance.check]
+    pre-trade-risk-analyst: [case.read, risk.case.check]
+    operational-counterparty-risk-agent: [case.read, risk.trading_state.record.read]
+  # 부서 전체 공통 금지 — Kill Switch 실행(PUT/DELETE trading-state)은 스펙 2.2 "LLM이 이 엔드포인트를
+  # 직접 호출하지 않는다" 원칙, 주문 제출/원장 기록은 트레이딩/회계본부 전속 권한이다.
+  forbidden_tools: [oms.submit, ledger.write, risk.trading_state.write, risk.trading_state.clear]
+
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
 # compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
@@ -68,6 +82,7 @@ implementation:
     - "input_hash 기반 재현성 — 같은 Intent·Context·Policy Version이면 같은 판정"
     - "트레이딩본부 OMS.apply_risk_decision/submit과 End-to-End 파이프라인 검증"
     - "Redis 최신 Trading State (2026-07-30) — 실제 Redis Cloud에 연결해 scope별 현재 상태 Get/Set. Key 없음(=제한한 적 없음)은 ENABLED, Redis 장애는 예외 또는 HALTED로 fail-closed — ENABLED로 잘못 추정하지 않음. RiskEngine.check_order와 End-to-End 통합 검증(Redis의 ENTRY_BLOCKED가 실제 주문을 막음)"
+    - "Risk Domain API (2026-07-31) — departments/03-risk/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 2절 그대로 FastAPI로 래핑(risk-check/trading-state/compliance-check). 새 판정 로직 없음, TestClient self-check 4개 시나리오 통과. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
   in_progress: []
   not_started:
     - "Sprint K0: Supabase risk 스키마 실기록(risk.risk_decisions/breaches/trading_states) — accounting.funds가 비어 있어 risk.policies부터 fund_id FK로 막힘(회계본부 영역, QA의 audit 스키마와 달리 risk 테이블 대부분이 fund_id NOT NULL). RLS는 의도적으로 보류(담당자 결정)"
