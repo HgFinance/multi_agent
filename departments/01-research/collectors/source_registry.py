@@ -501,11 +501,8 @@ SOURCES: tuple[SourceSpec, ...] = (
 # 키는 있지만 실제 호출이 거부된 Source. 관측 사실이라 근거와 날짜를 함께 남긴다.
 # 승인이 떨어지면 여기서 항목을 지우는 것으로 해제된다 - 코드 수정이 아니라 사실 갱신이다.
 NOT_AUTHORIZED_OBSERVED: dict[str, str] = {
-    "kosis": (
-        "2026-07-30 실측: statisticsList.do 호출 시 {'err': '11', 'errMsg': "
-        "'유효하지않은 인증KEY입니다.'}. 키가 .env 에 있으나 KOSIS 가 거부한다 - "
-        "발급처(kosis.kr/openapi)에서 키 유효성과 활용 신청 상태를 확인할 것"
-    ),
+    # kosis: 2026-07-31 재일님 키 갱신 후 실측 통과(소비자물가 DT_1J22042 수신)로
+    #        해제. err 11 이 다시 관측되면 여기 기록을 되살린다.
     "krx_openapi": (
         "2026-07-30 실측: 헤더 AUTH_KEY 로 https://data-dbg.krx.co.kr/svc/apis/sto/"
         "stk_bydd_trd 호출 시 401 'Unauthorized API Call'. 키는 인식되나(잘못된 헤더는 "
