@@ -92,6 +92,9 @@ export type TradingSnapshot = {
 /** 이 파일이 아는 Major Version. 다르면 적용하지 않는다 (계획 5.3). */
 export const SUPPORTED_SCHEMA_VERSION = 1;
 
+/** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 넘긴다. */
+export const BFF = process.env.NEXT_PUBLIC_BFF_URL ?? "http://localhost:8000";
+
 /**
  * Snapshot 형태 검증.
  *

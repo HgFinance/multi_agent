@@ -10,8 +10,12 @@
 // 표시한다. 그래서 mode·snapshot 시각을 항상 같이 띄운다 — 어떤 데이터를 보고
 // 있는지 화면에서 구분되지 않으면 DEMO를 실거래로 착각하게 된다(계획 4절, 8절).
 
+import { useEffect, useState } from "react";
+
+import AgentAsk from "./AgentAsk";
 import rawSnapshot from "./trading-snapshot.json";
 import {
+  BFF,
   parseSnapshot,
   percent,
   won,
@@ -19,14 +23,20 @@ import {
   type TradingSnapshot,
 } from "./readModel";
 
-/** 모듈 로드 시 1회 검증. 계약이 깨지면 숫자를 그리지 않고 사유를 띄운다. */
-let snapshot: TradingSnapshot | null = null;
-let loadError = "";
+/**
+ * 번들된 Fixture. BFF가 안 뜬 상태에서도 화면이 비지 않게 하는 **대체재**이며
+ * 최신 상태가 아니다. 그래서 아래에서 출처 배지를 항상 같이 띄운다 —
+ * 어제 Fixture를 오늘 장부로 착각하는 것이 이 화면의 최악 실패다(계획 4절).
+ */
+let fixture: TradingSnapshot | null = null;
+let fixtureError = "";
 try {
-  snapshot = parseSnapshot(rawSnapshot);
+  fixture = parseSnapshot(rawSnapshot);
 } catch (error) {
-  loadError = String(error instanceof Error ? error.message : error);
+  fixtureError = String(error instanceof Error ? error.message : error);
 }
+
+type Source = "fixture" | "bff";
 
 /** 주문 상태 → 기존 오피스 색 토큰. 색만으로 구분하지 않고 글자를 함께 쓴다(계획 8절). */
 const orderTone: Record<string, string> = {
@@ -74,7 +84,32 @@ function OrderRow({ order }: { order: BrokerOrderRow }) {
 }
 
 export default function OpsPanel() {
-  const snap = snapshot;
+  // Fixture로 먼저 그리고, BFF가 응답하면 그걸로 갈아끼운다. BFF가 없거나
+  // 계약이 깨지면 Fixture에 머무르되 배지를 "번들 Fixture"로 유지한다 —
+  // 실패를 조용히 통과시켜 오래된 수치를 최신처럼 보여주지 않기 위해서다.
+  const [snap, setSnap] = useState<TradingSnapshot | null>(fixture);
+  const [source, setSource] = useState<Source>("fixture");
+  const [loadError, setLoadError] = useState(fixtureError);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`${BFF}/ui/snapshot`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((raw) => {
+        if (!alive) return;
+        setSnap(parseSnapshot(raw));
+        setSource("bff");
+        setLoadError("");
+      })
+      .catch((error) => {
+        if (!alive) return;
+        setLoadError(`BFF 조회 실패 — ${String(error instanceof Error ? error.message : error)}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   if (!snap) {
     return (
       <section className="win ops-snap">
@@ -111,9 +146,21 @@ export default function OpsPanel() {
           </div>
           <div className="filter-tabs" role="group" aria-label="데이터 출처">
             <span className={`status-pill ${mode === "DEMO" ? "waiting" : "done"}`}>{mode}</span>
+            {/* mode(DEMO/PAPER/LIVE)와 출처는 다른 축이다. DEMO Fixture와 DEMO
+                BFF 응답이 같은 배지로 보이면 어느 쪽을 보는지 알 수 없다. */}
+            <span className={`status-pill ${source === "bff" ? "done" : "waiting"}`}>
+              {source === "bff" ? "실시간 조회" : "번들 Fixture"}
+            </span>
             <span className="status-pill">v{snap.snapshot_version}</span>
           </div>
         </div>
+
+        {loadError && (
+          <p className="dash-note">
+            ⚠️ {loadError} — 아래는 <b>번들 Fixture</b>이며 최신 상태가 아닙니다. BFF를 띄우세요:{" "}
+            <code>uvicorn apps.api.main:app --port 8000</code>
+          </p>
+        )}
 
         <p className="dash-note">
           픽셀 오피스의 캐릭터 움직임과 <b>다른 데이터</b>입니다. 아래 수치는 OMS·원장·평가가 확정한
@@ -246,6 +293,7 @@ export default function OpsPanel() {
           {won(portfolio.fees)} · 세금 {won(portfolio.taxes)}
         </p>
       </div>
+      <AgentAsk />
     </section>
   );
 }
