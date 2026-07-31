@@ -897,6 +897,45 @@ compose `news-watcher`)
 5~9분이며, 그중 우리 몫(관측→적재)은 3초 미만이다. 남은 지연은 NAVER 색인이
 지배하므로 폴링을 더 조여도 줄지 않는다.
 
+**감시 종목 확장 — 시가총액 상위 70종목** (재일님 지적 2026-07-31 "구독 종목수가
+적네", `collectors/watchlist_builder.py`)
+
+공시건수 대리지표의 증권사 쏠림을 **LS t1444(시가총액상위)** 로 해결했다.
+KOSPI 55 + KOSDAQ 15 = 70종목 / 300초 간격 = 일 20,160회로 NAVER 한도의 90%
+안이다("종목 수 × 폴링 횟수"의 균형 — 지연은 NAVER 색인이 지배하므로 간격을
+늘려 종목을 늘리는 쪽이 남는 장사다). 실측으로 확정한 규격 둘:
+
+- **t1444 연속조회는 응답 헤더가 계약이다.** InBlock `idx`만으로 다음 페이지를
+  청하면 서버 세션 상태에 따라 2페이지가 오기도, 1페이지가 반복되기도 한다
+  (실측: 같은 idx=20 요청이 시점에 따라 다른 페이지를 줌). 헤더의
+  `tr_cont`/`tr_cont_key`를 되돌려줘야 결정적이다 — `ls_client.call_tr`에
+  `return_headers`를 추가했다.
+- **우선주 필터는 두 겹이다.** 같은 issuer 연결이면 제거하되, 우선주는 issuer
+  연결이 없는 경우가 많다(DART corp_code 매핑이 보통주 stock_code만 줘서
+  삼성전자우가 살아남은 실측). 이름 규칙(목록 내 다른 이름 + '우'/'2우B' 등
+  **접미사 정확 일치**)을 보조로 쓴다 — startswith만 쓰면 'LG'를 보고
+  'LG디스플레이'를 버린다.
+
+생성은 **호스트에서 오프라인으로** 한다(`--build` → `config/news_watchlist.txt` →
+컨테이너는 읽기 전용 mount). news-watcher에 LS Credential을 주지 않기 위해서다.
+ETF(KODEX 200 등)는 Instrument Master의 STOCK 필터가 걸러낸다.
+
+**최신 기사 가중치 — 실시간 분석 입력** (재일님 지시 2026-07-31,
+`supabase/migrations/20260731000800_news_recency_weight.sql`)
+
+뉴스 수집은 장 여부와 무관하게 24시간 상주다(컨테이너 `restart: unless-stopped`,
+한도는 하루에 고르게 분배). 분석 계층이 바로 쓸 수 있게
+`research.news_recent_weighted` View가 **지수 시간감쇠 가중치**를 준다:
+`weight = 2^(-age_hours/6)` (반감기 6시간), `weighted_confidence = 종목 연결
+confidence × weight`. `age_hours`를 함께 내보내므로 다른 반감기가 필요하면
+소비자가 재계산하면 된다. 적용 직후 실측: 5분 전 기사 weight 0.99, 전용 기사
+weighted_confidence 0.89.
+
+⚠ **백테스트가 이 View를 흉내낼 때**: weight의 기준은 `published_at`(사건
+시각)이지만 **그 기사가 보였는지는 `observed_at`으로 가려야 한다** — 게시→관측
+5~9분 공백을 published_at 재생은 미래 정보로 앞당긴다(가이드 4.2). 실시간
+소비자는 이미 관측된 것만 보므로 그대로 쓰면 된다.
+
 **검토한 뒤 도입하지 않은 것 — `whdghk1907/mcp-news-collector`**
 WebSocket을 표방하지만 **`src/server/websocket_server.py`가 저장소에 없다**(HTTP 404).
 테스트만 있고 구현이 없다. NAVER Collector는 우리와 같은 `openapi.naver.com` REST를

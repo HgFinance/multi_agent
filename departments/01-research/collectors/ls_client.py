@@ -124,12 +124,22 @@ class LsRestClient:
     def environment(self) -> str:
         return self._env.name
 
-    def _post(self, path: str, *, data: bytes, headers: dict[str, str]) -> dict:
+    def _post(
+        self, path: str, *, data: bytes, headers: dict[str, str],
+        return_headers: bool = False,
+    ):
         url = f"{self._env.rest_base_url}{path}"
         req = urllib.request.Request(url, data=data, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return json.loads(resp.read())
+                body = json.loads(resp.read())
+                if return_headers:
+                    # 연속조회(tr_cont/tr_cont_key)는 응답 **헤더** 로만 온다.
+                    # 실측 2026-07-31(t1444): InBlock idx 만으로 다음 페이지를 청하면
+                    # 서버 세션 상태에 따라 2페이지가 오기도 하고 1페이지가 반복되기도
+                    # 한다 - 헤더의 tr_cont_key 를 되돌려줘야 결정적이다.
+                    return body, {k.lower(): v for k, v in resp.headers.items()}
+                return body
         except urllib.error.HTTPError as e:
             body = e.read()[:400].decode("utf-8", "replace")
             # 응답 본문에 Key 가 실릴 수 있으므로 그대로 올리지 않고 요약만 남긴다.
@@ -173,7 +183,8 @@ class LsRestClient:
         rate_limit_per_sec: float = DEFAULT_RATE_LIMIT_PER_SEC,
         tr_cont: str = "N",
         tr_cont_key: str = "",
-    ) -> dict:
+        return_headers: bool = False,
+    ):
         """TR 한 건 호출. in_block 은 {"t8436InBlock": {...}} 형태 그대로 넣는다.
 
         ▶ **LS API 는 필드 타입을 엄격히 본다.** 문서 필드표의 종류가 Number 인 것은
@@ -181,6 +192,10 @@ class LsRestClient:
           "IGW40011 ... data type을 확인하세요" 가 온다(실측 2026-07-30:
           t8410 의 qrycnt, t1305 의 dwmcode 를 문자열로 보내 실패).
           401 이 아니라 500 이므로 인증 문제로 오진하기 쉽다.
+
+        ▶ 연속조회가 필요하면 return_headers=True 로 (body, headers) 를 받아
+          headers["tr_cont"] == "Y" 일 때 tr_cont="Y" / tr_cont_key 를 다음 호출에
+          되돌려준다. InBlock 의 idx 류만으로는 페이징이 결정적이지 않다(_post 주석).
         """
         limiter = self._limiters.setdefault(tr_cd, RateLimiter(rate_limit_per_sec))
         limiter.wait()
@@ -195,7 +210,8 @@ class LsRestClient:
             "mac_address": "",
         }
         return self._post(
-            path, data=json.dumps(in_block, ensure_ascii=False).encode("utf-8"), headers=headers
+            path, data=json.dumps(in_block, ensure_ascii=False).encode("utf-8"),
+            headers=headers, return_headers=return_headers,
         )
 
 

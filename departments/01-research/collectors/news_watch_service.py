@@ -24,9 +24,13 @@
   않는다** - 만들면 flush 실패로 남아 있던 버퍼를 잃는다.
 
 환경변수 (전부 선택, .env 보다 프로세스 환경변수가 우선)
-  NEWS_WATCH_SYMBOLS            쉼표 구분 KRX 종목코드. 비우면 공시건수 상위
-                                NEWS_WATCH_TOP 종목 (⚠ 증권사로 쏠린다 - 명시 권장)
-  NEWS_WATCH_TOP                기본 20
+  NEWS_WATCH_SYMBOLS            쉼표 구분 KRX 종목코드 (최우선)
+  NEWS_WATCH_SYMBOLS_FILE       watchlist 파일 경로 (watchlist_builder.py 가 생성 -
+                                시가총액 상위). 상대 경로는 실행 위치(부서 루트) 기준.
+                                지정했는데 파일이 없거나 비어 있으면 **기동 거부**한다
+                                - 조용히 다른 목록으로 대체하지 않는다.
+  NEWS_WATCH_TOP                위 둘 다 없을 때 공시건수 상위 N, 기본 20
+                                (⚠ 증권사로 쏠린다 - 위 두 방법 권장)
   NEWS_WATCH_DISPLAY            페이지당 기사 수, 기본 20
   NEWS_POLL_INTERVAL_SECONDS    sweep 간격, 기본 120 (일 한도 검산과 묶여 있다)
   NEWS_SINK_MAX_BATCH           기본 20
@@ -89,6 +93,21 @@ class WatchConfig:
         return len(self.symbols) if self.symbols else self.top
 
 
+def parse_watchlist_file(text: str) -> tuple[str, ...]:
+    """news_watchlist.txt -> 종목코드 튜플. 한 줄에 하나, # 뒤는 주석이다.
+
+    생성은 watchlist_builder.py 가 한다(LS t1444 시가총액 상위). 파서가 여기 있는
+    이유: builder 가 이 모듈의 한도 검산을 import 하므로 역방향 import 를 만들지
+    않기 위해서다.
+    """
+    symbols = []
+    for line in text.splitlines():
+        body = line.split("#", 1)[0].strip()
+        if body:
+            symbols.append(body)
+    return tuple(symbols)
+
+
 def parse_config(env: dict) -> WatchConfig:
     def _num(key: str, default, cast, minimum):
         raw = (env.get(key) or "").strip()
@@ -105,6 +124,14 @@ def parse_config(env: dict) -> WatchConfig:
     symbols = tuple(
         s.strip() for s in (env.get("NEWS_WATCH_SYMBOLS") or "").split(",") if s.strip()
     )
+    symbols_file = (env.get("NEWS_WATCH_SYMBOLS_FILE") or "").strip()
+    if not symbols and symbols_file:
+        path = Path(symbols_file)
+        if not path.exists():
+            raise NaverNewsError(f"NEWS_WATCH_SYMBOLS_FILE 이 없다: {path}")
+        symbols = parse_watchlist_file(path.read_text(encoding="utf-8"))
+        if not symbols:
+            raise NaverNewsError(f"NEWS_WATCH_SYMBOLS_FILE 이 비어 있다: {path}")
     return WatchConfig(
         symbols=symbols,
         top=_num("NEWS_WATCH_TOP", 20, int, 1),
@@ -354,6 +381,28 @@ def _check_config():
         try:
             parse_config(bad)
             raise AssertionError(f"{bad} 가 통과했다")
+        except NaverNewsError:
+            pass
+
+    # watchlist 파일 경로 - 있으면 읽고, 명시 SYMBOLS 가 이기고, 없거나 비면 거부
+    import os
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("# 주석\n005930  # 삼성전자\n000660\n")
+        cfg = parse_config({"NEWS_WATCH_SYMBOLS_FILE": path})
+        assert cfg.symbols == ("005930", "000660"), cfg.symbols
+        cfg = parse_config({"NEWS_WATCH_SYMBOLS_FILE": path,
+                            "NEWS_WATCH_SYMBOLS": "017670"})
+        assert cfg.symbols == ("017670",), "명시 SYMBOLS 가 파일에 졌다"
+    finally:
+        os.unlink(path)
+    for bad_env in ({"NEWS_WATCH_SYMBOLS_FILE": path},):  # 방금 지운 경로
+        try:
+            parse_config(bad_env)
+            raise AssertionError("없는 watchlist 파일이 통과했다")
         except NaverNewsError:
             pass
     print("  설정 파싱                OK")

@@ -87,10 +87,16 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:?.env 에 NAVER_CLIENT_ID 가 필요하다}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:?.env 에 NAVER_CLIENT_SECRET 이 필요하다}
-      # 감시 종목 - .env 로 덮을 수 있다. 기본값은 2026-07-31 실측에 쓴 8종목
-      # (Watchlist 공시건수 대리지표는 증권사로 쏠려 명시 지정이 낫다 - 가이드 J3)
-      NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-005930,000660,005380,017670,034220,005490,055550,316140}
-      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-120}
+      # 감시 종목은 watchlist_builder.py 가 만든 파일이 기준이다 (LS t1444 시가총액
+      # 상위 - 증권사 쏠림 없음). 갱신: 호스트에서 --build 후 restart. 임시로 몇
+      # 종목만 보려면 .env 의 NEWS_WATCH_SYMBOLS 가 파일보다 우선한다.
+      NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-}
+      NEWS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
+      # 70종목 × 288회/일 = 20,160 < 한도의 90%(22,500). 간격을 줄이려면 종목도 줄일 것.
+      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-300}
+
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
 
     # 뉴스 폴링은 가볍다 - TimescaleDB 와 달리 상한을 좁게 잡는다
     mem_limit: 384m
