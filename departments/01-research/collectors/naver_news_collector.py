@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 from news_events import (  # noqa: E402
+    DEDUP_WINDOW,
     NewsRecord,
     NewsStreamError,
     PollingNewsStream,
@@ -405,6 +406,13 @@ def make_watch_stream(
 
     fetch_page.raw_items = 0
     fetch_page.merged = 0
+
+    if cursor is None:
+        # dedup 창은 한 sweep(종목수 × display)보다 커야 한다. 기본 창(2,000)으로
+        # 바스켓 350종목을 돌리면 직전 sweep 가 창에서 밀려나 매번 재방출된다
+        # (실측 2026-07-31: sweep 2 재방출 3,585건/신규 314건). ×2 는 sweep 사이에
+        # 새 기사가 끼어들어도 직전 sweep 전체가 창 안에 남게 하는 여유다.
+        cursor = StreamCursor.sized(max(DEDUP_WINDOW, len(items) * display * 2))
 
     return PollingNewsStream(
         source_id=SOURCE_ID,

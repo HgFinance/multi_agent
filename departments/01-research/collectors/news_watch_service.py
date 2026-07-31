@@ -61,7 +61,6 @@ from naver_news_collector import (  # noqa: E402
     load_watchlist,
     make_watch_stream,
 )
-from news_events import StreamCursor  # noqa: E402
 from news_pipeline import NewsSink, krx_symbol_resolver  # noqa: E402
 from source_registry import load_project_env  # noqa: E402
 
@@ -264,9 +263,12 @@ def main() -> int:
     print(f"  감시: {preview}{' ...' if len(items) > 10 else ''}", flush=True)
 
     client = NaverNewsClient()
+    # cursor 는 make_watch_stream 이 sweep 규모에 맞게 만든다 - 여기서 기본
+    # StreamCursor() 를 넘기면 창 2,000짜리가 바스켓 sweep(최대 7,000)에 밀려
+    # 매번 재방출된다 (news_events.StreamCursor.sized 주석).
     stream = make_watch_stream(
         client, items, display=cfg.display,
-        interval_seconds=cfg.interval_seconds, cursor=StreamCursor(),
+        interval_seconds=cfg.interval_seconds,
     )
     resolver = krx_symbol_resolver(
         {it.symbol: it.instrument_id for it in items},
