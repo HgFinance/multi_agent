@@ -429,7 +429,12 @@ SOURCES: tuple[SourceSpec, ...] = (
         contracted=False,
         allowed_uses=(),
         doc_ref="TEAM_JAEIL 3.1(기업 IR)",
-        note="공식 API 확인 전. Website 비공개 Endpoint 를 공식 API 처럼 쓰지 않는다(가이드 3.3)",
+        note=(
+            "2026-07-31 조사: KIND 자체 공식 Open API 는 없다. KRX 의 공식 경로는 "
+            "Data Marketplace Open API(krx_openapi)뿐이며 거기에도 IR/공시 서비스는 없다. "
+            "서드파티 스크래퍼(Apify 등)는 가이드 3.3 금지 경로다. IR 공지는 DART "
+            "공시(기업설명회 개최)로 이미 들어오므로 KIND 는 대체 경로 확보 전까지 미사용"
+        ),
     ),
     # --- 가이드 3.2 P1 후보. 계약 전이므로 NOT_CONTRACTED 로 남긴다 ---
     SourceSpec(

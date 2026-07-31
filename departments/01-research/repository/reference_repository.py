@@ -588,6 +588,74 @@ class SupabaseReferenceRepository(ReferenceRepository):
         id_by_ext = {ext: did for ext, did in returned}
         return after - before, len(rows) - (after - before), id_by_ext
 
+    def issuers_needing_profile(self, *, limit: int | None = None) -> list[tuple[UUID, str]]:
+        """기업개황 보강이 필요한 (issuer_id, corp_code).
+
+        industry_code 나 fiscal_month 가 비어 있는 발행사만이며, **instrument 에
+        연결된 발행사를 먼저** 준다 - 기업개황이 회사별 1회 호출이라 호출 예산을
+        Universe 에 실제로 쓰이는 회사부터 쓴다.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select iss.issuer_id, iss.corp_code,
+                       count(i.instrument_id) as linked
+                from reference.issuers iss
+                left join reference.instruments i on i.issuer_id = iss.issuer_id
+                where iss.corp_code is not null
+                  and (iss.industry_code is null or iss.fiscal_month is null)
+                group by iss.issuer_id, iss.corp_code
+                order by linked desc, iss.corp_code
+                limit %s
+                """,
+                (limit,),
+            )
+            return [(r[0], r[1]) for r in cur.fetchall()]
+
+    def apply_company_profiles(self, profiles: list) -> tuple[int, int]:
+        """기업개황(2019002) 결과를 issuers 에 반영한다. (실변경, 시도).
+
+        - legal_name 은 기업개황의 corp_name(정식명칭)으로 **검증하며 갱신** 한다.
+          upsert_issuers 가 공시의 corp_name 을 임시로 넣고 legal_name_verified=false
+          로 표시해 뒀는데, 이 API 의 corp_name 이 바로 그 검증 근거다.
+        - display_name 은 건드리지 않는다. 표시명은 종목명 계열이라 층위가 다르다.
+        - **실변경만 센다.** IS DISTINCT FROM 가드가 없으면 재실행마다 전부
+          갱신으로 집계되어 멱등 여부를 확인할 수 없다.
+        """
+        if not profiles:
+            return 0, 0
+        rows = [
+            (
+                p.corp_code, p.legal_name, p.industry_code, p.fiscal_month,
+                json.dumps(p.metadata_patch(), ensure_ascii=False),
+            )
+            for p in profiles
+        ]
+        with self._conn.cursor() as cur:
+            returned = self._execute_values(
+                cur,
+                """
+                update reference.issuers as iss
+                set legal_name = coalesce(nullif(v.legal_name, ''), iss.legal_name),
+                    industry_code = coalesce(v.industry_code, iss.industry_code),
+                    fiscal_month = coalesce(v.fiscal_month::smallint, iss.fiscal_month),
+                    metadata = iss.metadata || v.metadata::jsonb,
+                    updated_at = now()
+                from (values %s) as v(corp_code, legal_name, industry_code, fiscal_month, metadata)
+                where iss.corp_code = v.corp_code
+                  and (iss.legal_name is distinct from coalesce(nullif(v.legal_name, ''), iss.legal_name)
+                       or iss.industry_code is distinct from coalesce(v.industry_code, iss.industry_code)
+                       or iss.fiscal_month is distinct from coalesce(v.fiscal_month::smallint, iss.fiscal_month)
+                       or not iss.metadata @> v.metadata::jsonb)
+                returning iss.corp_code
+                """,
+                rows,
+                page_size=200,
+                fetch=True,
+            )
+        self._conn.commit()
+        return len(returned), len(rows)
+
     def issuer_for_symbol(
         self, symbol: str, *, provider: str = PROVIDER_LS, market: str = MARKET_KRX
     ) -> UUID | None:

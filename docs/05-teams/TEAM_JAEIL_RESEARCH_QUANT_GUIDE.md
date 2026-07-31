@@ -156,7 +156,7 @@ Supabase PostgreSQL은 Instrument, 문서 Metadata, 재무 Fact, Dataset Manifes
 | 거래 Calendar | 휴장, 장 구간, 동시호가, 만기 | KRX 공식 기준 | 연간 + 변경 확인 | Object Raw | `reference.market_calendars` |
 | 공시 | 접수번호, 제목, 공시 시각, 정정 관계, 원문 | Open DART | 장중 증분 Polling | Private Storage | `research.documents` |
 | 재무 | 연결/별도 재무제표와 주요 계정 | Open DART XBRL | 공시 Event 후 | XBRL/XML | `research.financial_facts` |
-| 기업정보 | 법인코드, 업종, 결산월, 대표자, 주소 | Open DART/KRX | 일일·변경 | Object Raw | `reference.issuers` |
+| 기업정보 | 법인코드, 업종, 결산월, 홈페이지·IR URL | Open DART/KRX | 일일·변경 | Object Raw | `reference.issuers` |
 | Corporate Action | 배당, 분할·병합, 증자, 합병, 상장폐지 | DART/KRX | Event + 일일 확인 | Object Raw | `reference.corporate_actions` |
 | 뉴스 | 제목, URL, 출처, 게시·수정 시각, 허용된 본문 | BIGKinds/NAVER API HUB/계약 Vendor | 1~5분 또는 Provider Event | 권한별 Storage | `research.documents` |
 | X Social Insight | 승인 유명 인사·공식 계정의 Post ID, 작성자, 게시·관측 시각, 종목·주제, 검증 상태 | X API Filtered Stream | 준실시간 | 권한별 Storage | `research.documents` + Source Registry |
@@ -718,12 +718,17 @@ API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관�
 
 ### Sprint J2: DART와 Research Metadata
 
-- **부분** Corp Code/Instrument Mapping. 공시검색 응답의 `corp_code`로
-  `reference.issuers` 315건을 적재했다(2026-07-27~30 유가 기준). `stock_code`도 869건 전부
-  들어와 `instrument_symbols`와 연결 가능하다. `industry_code`·`fiscal_month`는 기업개황
-  API(2019002)가 회사별 1회 호출이라 미수집이며 **NULL로 두고 추정하지 않았다**.
-  `legal_name`은 `corp_name`을 넣고 `metadata.legal_name_verified=false`로 표시했다 —
-  법인명과 표시명이 다를 수 있어 기업개황 수집 시 갱신해야 한다.
+- **완료** Corp Code/Instrument Mapping과 기업정보 보강(`opendart_company_collector.py`,
+  2026-07-31). 공시검색 응답의 `corp_code`로 `reference.issuers`를 적재하고 `stock_code`
+  교차검증으로 `instrument_symbols`와 연결했다. 기업개황 API(2019002, 회사별 1회 호출·2건/초
+  제한)를 **871건 전부 호출**해(프로브 5 + 본수집 866, 무데이터 0, 형식 Flag 0) **업종코드
+  871/871, 결산월 869/871**을 채웠다. 결산월 NULL 2건은 '유가증권시장본부'·'코스닥시장본부' —
+  기업이 아니라 거래소 공시 주체라 결산월이 없는 게 맞고, 추정하지 않았다. `legal_name`은
+  기업개황의 정식명칭으로 검증·교체했다(`legal_name_verified=true` 871건). 부수로 홈페이지
+  772건, IR URL 107건이 metadata에 들어왔다. **대표자명·법인/사업자등록번호·주소·연락처는
+  계약(`CompanyProfile`)에 필드 자체가 없다** — 개인정보를 수집하지 않으며, 자체 점검이
+  metadata로 새는 경로까지 검사한다. 재적용은 `IS DISTINCT FROM` 가드로 실변경 0을
+  확인했다(멱등).
 - **부분** 공시 원본 Archive, Version, 정정 관계.
   `research.documents` 869건 적재(ACTIVE 793 / CORRECTED 76). 정정은 `report_nm` 앞
   표기(`[기재정정]`, `[첨부정정]` 등)로 탐지하고 **원본을 덮어쓰지 않는다** — `rcept_no`가
@@ -757,6 +762,13 @@ API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관�
   중복을 구분해서 센다** — 전자는 정보 손실이 없지만 후자는 어느 값이 맞는지 알 수 없어
   조사 대상이다. `revision`은 1로 고정했다(정정 재무제표 판정 규칙 미정).
 
+- **부분** 기업 IR (실측 2026-07-31). **IR 공지는 별도 수집기 없이 DART 공시로 이미
+  커버된다** — "기업설명회(IR)개최" 공시 60건이 기존 공시 수집으로 유입돼 전부 issuer와
+  연결돼 있다. 회사별 공식 IR 페이지 포인터는 기업개황의 `ir_url`(107건)로 적재됐다.
+  **KIND 자체 공식 API는 없는 것으로 확정** — KRX 공식 경로는 Data Marketplace뿐이고
+  IR 서비스가 없으며, 서드파티 스크래퍼는 가이드 3.3(Agent 직접 크롤링 금지) 위반이라
+  쓰지 않는다(Registry `kind` note에 근거 기록). 남은 것은 첨부 원본(2019003 → Private
+  Storage)인데 이는 아래 공시 원본 Archive와 같은 백로그다.
 - **미착수** `research-api` Evidence 조회.
 
 **⚠ PIT 한계 (실측 2026-07-30, 반드시 인지할 것)**
