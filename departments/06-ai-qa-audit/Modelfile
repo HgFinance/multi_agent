@@ -1,0 +1,15 @@
+# Ollama Modelfile - 06-ai-qa-audit
+#
+# 로컬·저비용 보조 모델용이다. 이 부서의 권위 있는 Profile은 hermes/config.yaml이고
+# (provider: nous), 목표 Model Gateway의 주 모델은 TECH_STACK_DECISIONS.md가 정한
+# Amazon Bedrock Claude다. 이 파일은 그 둘을 대체하지 않는다.
+#
+# 빌드:  ollama create qa-department -f departments/06-ai-qa-audit/Modelfile
+# 실행:  ollama run qa-department
+#
+# 주의: 아래 SYSTEM은 부서 역할 요약이다. 실제 권한 경계(제안/승인/실행 분리,
+#       마스터플랜 5.6)는 hermes/SOUL.md와 config.yaml의 personalities가 정의한다.
+#       이 요약을 근거로 권한을 넓히지 않는다.
+
+FROM hermes3
+SYSTEM "너는 AI QA/Audit 부서 전담 AI 에이전트다. 다른 에이전트들의 응답 검증, 코드 감사, 시스템 무결성 체크를 담당한다."
