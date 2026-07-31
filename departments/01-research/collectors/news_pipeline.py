@@ -211,6 +211,22 @@ class NewsSink:
         if self._on_flush is not None:
             self._on_flush(records, new, updated, added)
 
+    @property
+    def pending(self) -> int:
+        """아직 DB 로 나가지 못한 버퍼 건수. 종료 경로가 유실을 셀 때 쓴다."""
+        return len(self._buf)
+
+    def rebind(self, ref) -> None:
+        """DB 재접속 후 Repository 를 갈아끼운다.
+
+        상주 서비스에서 접속이 죽으면 flush 가 실패하며 버퍼는 남는다(위 flush
+        참고). 새 접속으로 갈아끼우면 **버퍼가 그대로 다음 flush 에서 재시도**된다
+        - Sink 를 새로 만들면 버퍼와 통계를 잃으므로 그렇게 하지 않는다.
+        """
+        if self._closed:
+            raise NewsSinkError("닫힌 Sink 는 rebind 할 수 없다")
+        self._ref = ref
+
     def close(self) -> None:
         """남은 버퍼를 반드시 밀어 넣고 닫는다."""
         if self._closed:
@@ -262,13 +278,134 @@ def run_pipeline(
 # Provider 별 link_resolver
 # ---------------------------------------------------------------------------
 
-def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | None = None):
+def title_has_standalone(name: str, title: str, other_names) -> bool:
+    """제목에 종목명이 **독립적으로** 등장하는가.
+
+    `name in title` 만 보면 '두산에너빌리티 수주' 제목에서 '두산'(000150)이
+    DEDICATED 가 된다 - 짧은 이름이 더 긴 다른 종목명의 부분 문자열인 오탐이다
+    (재일님 지적 2026-07-31: 종목코드와 내용이 안 맞는 연결). 등장 위치마다,
+    그 위치를 덮는 더 긴 이름이 감시 목록에 있으면 그 등장은 무효로 친다.
+    '두산에너빌리티와 두산 동반 상승' 처럼 둘 다 나오면 둘 다 유효다.
+    """
+    longer = [n for n in other_names if len(n) > len(name) and name in n]
+    start = 0
+    while True:
+        i = title.find(name, start)
+        if i < 0:
+            return False
+        covered = False
+        for ln in longer:
+            off = ln.find(name)
+            while off >= 0 and not covered:
+                j = i - off
+                if j >= 0 and title.startswith(ln, j):
+                    covered = True
+                off = ln.find(name, off + 1)
+            if covered:
+                break
+        if not covered:
+            return True
+        start = i + 1
+
+
+# 제목에 종목명이 없는 연결의 신뢰도. NAVER 는 본문까지 검색하므로 질의에 걸렸어도
+# 제목에 이름이 없으면 '본문 어딘가에서 언급' 추정일 뿐이다 - 0.5 는 과신이었다
+# (재일님 지적 2026-07-31). 본문은 저장하지 않으므로(3.3) 더 확인할 수 없고,
+# 확인 못 하는 것을 높게 치지 않는다.
+BODY_MATCH_CONFIDENCE = "0.3"
+
+# ── 종목명 별칭 체계 (재일님 지적 2026-07-31: 'LG CNS' 기사가 LG씨엔에스가
+#    아니라 'LG' 오탐으로 물림 - Master 한글 표기와 기사 표기의 불일치) ──
+#
+# 3단 구조로 관리한다:
+#  1. 규칙 자동 파생(아래 derive_roman_aliases) - 한글 음차를 로마자로 되돌린다.
+#     'LG씨엔에스' -> 'LG CNS'/'LGCNS', '케이티앤지' -> 'KT&G'. 결정론이고
+#     종목이 늘어도 손댈 게 없다.
+#  2. 수동 확정 목록(NAME_ALIASES) - 규칙으로 못 만드는 통용 표기만. 속어·약칭
+#     추정은 넣지 않는다(오탐 제조기가 된다).
+#  3. (승격 예정) reference DB - 별칭이 자산이 되면 instrument_symbols 의
+#     NAME_ALIAS 유형 또는 issuers.metadata 로 옮기고 수집기는 읽기만 한다.
+
+# 한글 음차 -> 로마자. **2음절 이상 연속으로 매핑될 때만** 변환한다 -
+# '이수페타시스' 의 '이' 한 글자를 E 로 바꾸는 오탐을 막는다. 긴 것부터 매칭.
+_ROMAN_SYLLABLES: tuple[tuple[str, str], ...] = (
+    ("더블유", "W"), ("에이치", "H"), ("에프", "F"), ("에스", "S"), ("에이", "A"),
+    ("엠", "M"), ("엔", "N"), ("엘", "L"), ("알", "R"), ("아이", "I"),
+    ("제이", "J"), ("제트", "Z"), ("케이", "K"), ("큐", "Q"), ("티", "T"),
+    ("피", "P"), ("브이", "V"), ("와이", "Y"), ("엑스", "X"), ("유", "U"),
+    ("비", "B"), ("씨", "C"), ("디", "D"), ("지", "G"), ("오", "O"), ("이", "E"),
+    ("앤", "&"),
+)
+
+NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "현대차": ("현대자동차",),
+    "POSCO홀딩스": ("포스코홀딩스",),
+    "LG에너지솔루션": ("LG엔솔",),   # 언론 통용 축약 - 공식에 준해 확정
+}
+
+
+def derive_roman_aliases(name: str) -> set[str]:
+    """한글 음차 구간(2음절 이상 연속 매핑)을 로마자로 되돌린 별칭들.
+
+    'LG씨엔에스' -> {'LGCNS', 'LG CNS'} (붙임/띄어쓰기 둘 다 - 기사 표기가 갈린다).
+    매핑이 안 되는 글자가 섞이면 그 구간은 건드리지 않는다.
+    """
+    out: set[str] = set()
+    i = 0
+    prefix = name
+    # 가장 이른 위치의 연속 매핑 구간 하나를 찾아 변환한다(종목명에 구간이 둘
+    # 이상인 경우는 실측에서 없다 - 나오면 그때 확장한다)
+    while i < len(name):
+        j, letters = i, []
+        while j < len(name):
+            for syl, rom in _ROMAN_SYLLABLES:
+                if name.startswith(syl, j):
+                    letters.append(rom)
+                    j += len(syl)
+                    break
+            else:
+                break
+        if len(letters) >= 2:
+            head, tail = name[:i], name[j:]
+            roman = "".join(letters)
+            out.add(head + roman + tail)
+            if head or tail:
+                out.add((head + " " + roman + " " + tail).strip())
+            break
+        i += 1
+    out.discard(name)
+    return out
+
+
+def names_for(display_name: str) -> tuple[str, ...]:
+    """판정에 쓸 이름 집합: Master 표기 + 자동 파생 + 수동 확정."""
+    return (display_name,
+            *sorted(derive_roman_aliases(display_name)),
+            *NAME_ALIASES.get(display_name, ()))
+
+
+def expand_aliases(names) -> set[str]:
+    """이름 모집단에 별칭을 전부 합친다 - '더 긴 이름' 가드가 별칭도 알아야
+    제목의 'LG CNS' 가 'LG' 의 DEDICATED 오탐을 덮는다."""
+    out = set(names)
+    for n in list(out):
+        out.update(derive_roman_aliases(n))
+        out.update(NAME_ALIASES.get(n, ()))
+    return out
+
+
+def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | None = None,
+                        known_names=None):
     """record.symbols 가 KRX 종목코드일 때(NAVER).
 
-    dedicated_names 는 {symbol: 종목명} 이며, 제목에 이름이 있으면 DEDICATED 로
-    올린다. 없으면 전부 MENTIONS 다 - 질의로 나온 이상 관련은 있다.
+    dedicated_names 는 {symbol: 종목명}. 제목에 이름이 **독립 등장**하면
+    DEDICATED(0.9), 아니면 MENTIONS(0.3 - 본문 매칭 추정)다.
+    known_names 는 '더 긴 이름' 검사의 모집단이다 - 감시 목록만 주면 감시 밖
+    회사(두산로보틱스 등)가 제목에 있을 때 못 거르므로 **전 상장사 이름**을
+    주는 쪽이 맞다.
     """
     names = dedicated_names or {}
+    all_names = expand_aliases(known_names if known_names else names.values())
 
     def resolve(record: NewsRecord):
         out = []
@@ -277,10 +414,13 @@ def krx_symbol_resolver(instrument_by_symbol: dict, *, dedicated_names: dict | N
             if iid is None:
                 continue
             name = names.get(sym)
-            if name and name in record.title:
-                out.append((iid, "DEDICATED", "0.9"))
-            else:
-                out.append((iid, "MENTIONS", "0.5"))
+            if name:
+                own = set(names_for(name))
+                if any(title_has_standalone(n, record.title, all_names - own)
+                       for n in own):
+                    out.append((iid, "DEDICATED", "0.9"))
+                    continue
+            out.append((iid, "MENTIONS", BODY_MATCH_CONFIDENCE))
         return out
 
     return resolve
@@ -457,6 +597,34 @@ def _check_failure_not_swallowed():
     print("  실패 전파/재시도         OK")
 
 
+def _check_rebind():
+    """DB 재접속 시 버퍼·통계를 잃지 않고 새 접속으로 이어가는지 (상주 서비스용)."""
+    bad = _FakeRef(fail_on=1)
+    sink = NewsSink(bad, source_id="s", max_batch=2, clock=lambda: 0.0)
+    sink.add(_rec(0))
+    try:
+        sink.add(_rec(1))
+        raise AssertionError("장애가 조용히 지나갔다")
+    except NewsSinkError:
+        pass
+    assert len(sink._buf) == 2
+
+    good = _FakeRef()
+    sink.rebind(good)
+    sink.flush()
+    assert len(good.docs) == 2 and len(sink._buf) == 0, "rebind 후 재시도가 안 됐다"
+    assert sink.stats.received == 2 and sink.stats.documents_new == 2
+
+    # 닫힌 Sink 는 rebind 도 거부한다
+    sink.close()
+    try:
+        sink.rebind(_FakeRef())
+        raise AssertionError("닫힌 Sink 가 rebind 됐다")
+    except NewsSinkError:
+        pass
+    print("  재접속 rebind            OK")
+
+
 def _check_batch_dedup():
     """같은 기사가 한 배치에 두 번 오면 upsert 가 같은 행을 두 번 건드려 실패한다."""
     seen = {}
@@ -474,6 +642,45 @@ def _check_batch_dedup():
     sink.add(_rec(1))
     assert len(ref.docs) == 2
     print("  배치 내 중복 제거        OK")
+
+
+def _check_title_standalone():
+    names = {"두산", "두산에너빌리티", "LG", "LG전자"}
+    # 긴 이름의 부분 문자열은 독립 등장이 아니다
+    assert not title_has_standalone("두산", "두산에너빌리티 대규모 수주", names - {"두산"})
+    assert title_has_standalone("두산에너빌리티", "두산에너빌리티 대규모 수주",
+                                names - {"두산에너빌리티"})
+    # 둘 다 나오면 둘 다 유효
+    assert title_has_standalone("두산", "두산에너빌리티와 두산 동반 상승", names - {"두산"})
+    # 독립 등장
+    assert title_has_standalone("두산", "두산, 3분기 흑자 전환", names - {"두산"})
+    assert not title_has_standalone("LG", "LG전자 실적 발표", names - {"LG"})
+    assert title_has_standalone("LG", "LG그룹주 강세", names - {"LG"})  # 'LG그룹' 은 목록에 없다
+    assert not title_has_standalone("두산", "반도체 업황 개선", names - {"두산"})
+    print("  제목 독립 등장 판정      OK")
+
+
+def _check_aliases():
+    # 음차 자동 파생
+    assert derive_roman_aliases("LG씨엔에스") == {"LGCNS", "LG CNS"}, \
+        derive_roman_aliases("LG씨엔에스")
+    assert "KT&G" in derive_roman_aliases("케이티앤지")
+    assert derive_roman_aliases("이수페타시스") == set(), "한 음절 '이' 를 E 로 바꿨다"
+    assert derive_roman_aliases("삼성전자") == set()
+
+    # LG CNS 실측 회귀 (2026-07-31): 'LG CNS 상반기 매출' 제목에서
+    #  - LG(003550) 는 DEDICATED 가 아니어야 하고 (별칭 'LG CNS' 가 덮는다)
+    #  - LG씨엔에스(064400) 는 별칭으로 DEDICATED 여야 한다
+    inst = {"003550": "iid-lg", "064400": "iid-lgcns"}
+    dedicated = {"003550": "LG", "064400": "LG씨엔에스"}
+    resolver = krx_symbol_resolver(inst, dedicated_names=dedicated,
+                                   known_names={"LG", "LG씨엔에스", "LG전자"})
+    rec = _rec(0, symbols=("003550", "064400"),
+               title="LG CNS 상반기 매출 2.8조…AI·클라우드 성장")
+    got = {iid: (rel, conf) for iid, rel, conf in resolver(rec)}
+    assert got["iid-lg"][0] == "MENTIONS", f"LG 오탐이 살아있다: {got}"
+    assert got["iid-lgcns"] == ("DEDICATED", "0.9"), f"별칭 전용 판정 실패: {got}"
+    print("  별칭 파생/판정           OK")
 
 
 def _check_link_resolvers():
@@ -563,8 +770,11 @@ if __name__ == "__main__":
     _check_immediate_mode()
     _check_tail_not_lost()
     _check_failure_not_swallowed()
+    _check_rebind()
     _check_batch_dedup()
+    _check_title_standalone()
+    _check_aliases()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 9개 영역 통과")
+    print("Sink 12개 영역 통과")

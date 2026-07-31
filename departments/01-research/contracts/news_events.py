@@ -157,6 +157,22 @@ class StreamCursor:
     _seen: deque = field(default_factory=lambda: deque(maxlen=DEDUP_WINDOW))
     _seen_set: set = field(default_factory=set)
 
+    @classmethod
+    def sized(cls, window: int) -> "StreamCursor":
+        """dedup 창 크기를 지정한 Cursor.
+
+        기본 창(DEDUP_WINDOW=2,000)은 단일 질의용 가정이다. Watch sweep 는
+        종목수 × display 가 한 번에 흐르므로 **창이 한 sweep 보다 작으면 직전
+        sweep 기사가 창에서 밀려나 매번 재방출된다** - 실측 2026-07-31: 바스켓
+        350종목 sweep 2 가 3,585건을 다시 밀어냈고 신규는 314건뿐이었다
+        (멱등 upsert 라 데이터는 안 깨지지만 하루 19만 회의 헛 UPDATE 가 된다).
+        """
+        if window < 1:
+            raise ValueError(f"dedup 창은 1 이상이어야 한다: {window}")
+        c = cls()
+        c._seen = deque(maxlen=window)
+        return c
+
     def has_seen(self, external_id: str) -> bool:
         return external_id in self._seen_set
 
@@ -463,6 +479,22 @@ def _check_cursor_window():
     # 가장 오래된 것은 잊어야 한다(창 밖이므로 다시 받아들여진다)
     assert not cur.has_seen("t:0")
     assert cur.has_seen(f"t:{DEDUP_WINDOW + 499}")
+
+    # sized(): 큰 sweep 용 창. 기본 창이면 밀려났을 ID 가 창 안에 남아야 한다
+    big = StreamCursor.sized(DEDUP_WINDOW + 1000)
+    st2 = StreamStats("t", Transport.POLLING)
+    for i in range(DEDUP_WINDOW + 500):
+        r = NewsRecord(external_id=f"b:{i}", title=f"y{i}", canonical_url=None,
+                       published_at=_dt(10, 0), observed_at=_dt(10, 1),
+                       language="ko", provider="t")
+        admit(r, big, st2, now=now)
+    assert big.size == DEDUP_WINDOW + 500
+    assert big.has_seen("b:0"), "sized 창인데 첫 sweep 가 밀려났다 - 재방출 회귀"
+    try:
+        StreamCursor.sized(0)
+        raise AssertionError("창 0 이 통과했다")
+    except ValueError:
+        pass
     print("  Cursor 창 관리           OK")
 
 

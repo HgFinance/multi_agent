@@ -396,10 +396,15 @@ def _check_license_scope():
     print("  라이선스 Scope              OK")
 
 
-def _collect_and_report(start: date, end: date, corp_cls: str | None) -> int:
+def _collect_and_report(start: date, end: date, corp_cls: str | None,
+                        max_pages: int = 5) -> int:
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "repository"))
+    from reference_repository import SupabaseReferenceRepository
+
     client = OpenDartClient()
-    r = collect_disclosures(client, start=start, end=end, corp_cls=corp_cls, max_pages=5)
+    r = collect_disclosures(client, start=start, end=end, corp_cls=corp_cls,
+                            max_pages=max_pages)
     print(f"  {r.summary()}")
     for rec in r.records[:5]:
         mark = f" {rec.metadata['correction_marker']}" if rec.metadata["correction_marker"] else ""
@@ -407,6 +412,34 @@ def _collect_and_report(start: date, end: date, corp_cls: str | None) -> int:
         print(f"      {rec.title[:60]}")
     if r.records and "coverage_truncated" in r.records[0].metadata:
         print(f"  ⚠ 페이지 절단: {r.records[0].metadata['coverage_truncated']}")
+
+    # ▶ 적재 - 조회·보고로 끝나면 이 수집기는 수집기가 아니다 (2026-07-31 실측:
+    #   스케줄러가 10분마다 OK 를 찍는데 Supabase 는 하루째 0건이었다. --collect 가
+    #   fetch-and-report 프로브였던 것. 신규 corp 는 issuer 로 먼저 만들고 문서를
+    #   연결한다 - 이후 daily company-profile Job 이 개황을 채우는 구조다.)
+    if not r.records:
+        print("  적재할 것이 없다")
+        return 0
+    repo = SupabaseReferenceRepository()
+    try:
+        _, _, src = repo.sync_data_sources()
+        if "opendart" not in src:
+            raise OpenDartError("data_sources 에 opendart 가 없다")
+        corps = sorted({(rec.corp_code, rec.corp_name) for rec in r.records if rec.corp_code})
+        ni, _ui, issuer_by_corp = repo.upsert_issuers(list(corps))
+        n, u, unlinked = repo.upsert_documents(
+            list(r.records), source_id=src["opendart"], issuer_by_corp=issuer_by_corp
+        )
+        print(f"  research.documents: 신규 {n} 갱신 {u} "
+              f"(issuer 신규 {ni}, 미연결 {unlinked})")
+        n2, _u2, _ = repo.upsert_documents(
+            list(r.records), source_id=src["opendart"], issuer_by_corp=issuer_by_corp
+        )
+        if n2:
+            raise OpenDartError(f"재적재가 새 행을 만들었다: {n2} - 멱등 키 확인")
+        print("  멱등 재시도: 신규 0")
+    finally:
+        repo.close()
     return 0
 
 
@@ -417,8 +450,11 @@ if __name__ == "__main__":
         s = _parse_rcept_dt(opt("--from", (datetime.now(KST) - timedelta(days=3)).strftime("%Y%m%d")))
         e = _parse_rcept_dt(opt("--to", datetime.now(KST).strftime("%Y%m%d")))
         cls = opt("--cls", None)
-        print(f"{COLLECTOR_VERSION} 실제 수집 {s} ~ {e} cls={cls or '전체'}")
-        raise SystemExit(_collect_and_report(s, e, cls))
+        # 기본 5 는 수동 프로브용이다. 3일 창 전체를 놓치지 않으려면 30 이 필요했다
+        # (실측 2026-07-31: 3일 창이 25페이지 - 스케줄러가 --max-pages 30 을 넘긴다)
+        pages = int(opt("--max-pages", "5"))
+        print(f"{COLLECTOR_VERSION} 실제 수집 {s} ~ {e} cls={cls or '전체'} pages<={pages}")
+        raise SystemExit(_collect_and_report(s, e, cls, max_pages=pages))
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (외부 호출 없음)")
     _check_record_mapping()

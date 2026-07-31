@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 from news_events import (  # noqa: E402
+    DEDUP_WINDOW,
     NewsRecord,
     NewsStreamError,
     PollingNewsStream,
@@ -284,17 +285,25 @@ class WatchItem:
 #   NAVER 는 **우리가 종목명으로 질의** 하므로 어떤 종목의 기사인지가 처음부터
 #   확실하다. 대신 동명이의(예: 한화 - 그룹/종목)를 우리가 걸러야 한다.
 #
-#   질의어가 종목명 그대로면 오탐이 섞인다. 지금은 종목명을 그대로 쓰되 **제목에
-#   종목명이 없으면 MENTIONS 로 낮춘다** - Alpaca 쪽 classify_korea 와 같은 원칙이다.
+#   질의어가 종목명 그대로면 오탐이 섞인다. 판정은 news_pipeline 의
+#   title_has_standalone 을 쓴다 - '두산에너빌리티' 제목에서 '두산' 이 DEDICATED
+#   가 되는 부분 문자열 오탐과, 본문 매칭 추정(제목 미포함)의 과신(0.5)을
+#   2026-07-31 재일님 지적으로 고쳤다.
 DEDICATED_CONFIDENCE = "0.9"
-MENTIONS_CONFIDENCE = "0.5"
 
 
-def relation_for(record: NewsRecord, item: WatchItem) -> tuple[str, str]:
-    """(relation_type, confidence). 제목에 종목명이 있으면 전용으로 본다."""
-    if item.name in record.title:
+def relation_for(record: NewsRecord, item: WatchItem,
+                 all_names=()) -> tuple[str, str]:
+    """(relation_type, confidence). 제목에 종목명(별칭 포함)이 **독립 등장**하면 전용."""
+    from news_pipeline import (
+        BODY_MATCH_CONFIDENCE, expand_aliases, names_for, title_has_standalone,
+    )
+
+    own = set(names_for(item.name))
+    universe = expand_aliases(set(all_names) | {item.name}) - own
+    if any(title_has_standalone(n, record.title, universe) for n in own):
         return "DEDICATED", DEDICATED_CONFIDENCE
-    return "MENTIONS", MENTIONS_CONFIDENCE
+    return "MENTIONS", BODY_MATCH_CONFIDENCE
 
 
 def _watchlist_for(ref, symbols: tuple[str, ...]) -> list[WatchItem]:
@@ -406,6 +415,13 @@ def make_watch_stream(
     fetch_page.raw_items = 0
     fetch_page.merged = 0
 
+    if cursor is None:
+        # dedup 창은 한 sweep(종목수 × display)보다 커야 한다. 기본 창(2,000)으로
+        # 바스켓 350종목을 돌리면 직전 sweep 가 창에서 밀려나 매번 재방출된다
+        # (실측 2026-07-31: sweep 2 재방출 3,585건/신규 314건). ×2 는 sweep 사이에
+        # 새 기사가 끼어들어도 직전 sweep 전체가 창 안에 남게 하는 여유다.
+        cursor = StreamCursor.sized(max(DEDUP_WINDOW, len(items) * display * 2))
+
     return PollingNewsStream(
         source_id=SOURCE_ID,
         fetch_page=fetch_page,
@@ -515,12 +531,21 @@ def _check_client_limits():
 
 
 def _check_relation():
+    from news_pipeline import BODY_MATCH_CONFIDENCE
+
     r = parse_item(_SAMPLE, observed_at=_ob())
     it = WatchItem(None, "005930", "삼성전자")
     assert relation_for(r, it) == ("DEDICATED", DEDICATED_CONFIDENCE)
-    # 제목에 종목명이 없으면 낮춘다
+    # 제목에 종목명이 없으면 본문 매칭 추정으로 낮춘다
     other = parse_item({**_SAMPLE, "title": "코스피 상승 마감"}, observed_at=_ob())
-    assert relation_for(other, it) == ("MENTIONS", MENTIONS_CONFIDENCE)
+    assert relation_for(other, it) == ("MENTIONS", BODY_MATCH_CONFIDENCE)
+    # 부분 문자열 오탐 - 긴 종목명의 일부는 전용이 아니다 (재일님 지적 2026-07-31)
+    dsn = WatchItem(None, "000150", "두산")
+    ener = parse_item({**_SAMPLE, "title": "두산에너빌리티 대규모 수주"}, observed_at=_ob())
+    assert relation_for(ener, dsn, all_names={"두산", "두산에너빌리티"}) \
+        == ("MENTIONS", BODY_MATCH_CONFIDENCE), "부분 문자열이 DEDICATED 로 샜다"
+    both = parse_item({**_SAMPLE, "title": "두산에너빌리티와 두산 동반 상승"}, observed_at=_ob())
+    assert relation_for(both, dsn, all_names={"두산", "두산에너빌리티"})[0] == "DEDICATED"
     print("  관련도 판정              OK")
 
 
@@ -638,7 +663,9 @@ def _collect(top: int = 40, symbols: tuple[str, ...] = ()) -> int:
             for sym in r.symbols:
                 it = by_symbol.get(sym)
                 if it is not None:
-                    rel.setdefault(r.external_id, []).append((it, *relation_for(r, it)))
+                    rel.setdefault(r.external_id, []).append(
+                        (it, *relation_for(r, it, all_names={w.name for w in items}))
+                    )
         ded = sum(1 for v in rel.values() if any(x[1] == "DEDICATED" for x in v))
         multi = sum(1 for v in rel.values() if len(v) > 1)
         print(

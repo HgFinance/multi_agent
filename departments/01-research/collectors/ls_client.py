@@ -124,12 +124,22 @@ class LsRestClient:
     def environment(self) -> str:
         return self._env.name
 
-    def _post(self, path: str, *, data: bytes, headers: dict[str, str]) -> dict:
+    def _post(
+        self, path: str, *, data: bytes, headers: dict[str, str],
+        return_headers: bool = False,
+    ):
         url = f"{self._env.rest_base_url}{path}"
         req = urllib.request.Request(url, data=data, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return json.loads(resp.read())
+                body = json.loads(resp.read())
+                if return_headers:
+                    # 연속조회(tr_cont/tr_cont_key)는 응답 **헤더** 로만 온다.
+                    # 실측 2026-07-31(t1444): InBlock idx 만으로 다음 페이지를 청하면
+                    # 서버 세션 상태에 따라 2페이지가 오기도 하고 1페이지가 반복되기도
+                    # 한다 - 헤더의 tr_cont_key 를 되돌려줘야 결정적이다.
+                    return body, {k.lower(): v for k, v in resp.headers.items()}
+                return body
         except urllib.error.HTTPError as e:
             body = e.read()[:400].decode("utf-8", "replace")
             # 응답 본문에 Key 가 실릴 수 있으므로 그대로 올리지 않고 요약만 남긴다.
@@ -137,11 +147,40 @@ class LsRestClient:
         except urllib.error.URLError as e:
             raise LsApiError(f"{path} 연결 실패: {e.reason}") from None
 
+    def _token_cache_path(self) -> "Path":
+        """프로세스 밖 토큰 캐시 파일 경로. 앱키·환경별로 나눈다(PAPER/LIVE 혼동 방지)."""
+        import hashlib
+        import os
+        import tempfile
+        from pathlib import Path
+
+        key_id = hashlib.sha256(self._env.app_key.encode()).hexdigest()[:12]
+        base = os.environ.get("LS_TOKEN_CACHE_DIR") or tempfile.gettempdir()
+        return Path(base) / f"ls_token_{self._env.name}_{key_id}.json"
+
     def token(self) -> str:
-        """토큰을 발급/재사용한다. 만료 시각은 응답에 없어 TOKEN_TTL 로 관리한다."""
+        """토큰을 발급/재사용한다. 만료 시각은 응답에 없어 TOKEN_TTL 로 관리한다.
+
+        ▶ **프로세스 밖 파일 캐시를 함께 쓴다** (2026-07-31). 스케줄러가 수집기를
+          subprocess 로 돌리므로 메모리 캐시만으로는 10분마다 새 토큰을 발급하게
+          된다(하루 ~50회 인증 호출 - krx-tick-collector 는 하루 1회 갱신·재사용).
+          캐시 파일은 임시 디렉터리(컨테이너 경계 안)이고, 읽기·쓰기 실패는
+          조용히 발급 경로로 떨어진다 - 캐시는 최적화지 정합성 조건이 아니다.
+        """
         now = datetime.now(timezone.utc)
         if self._token and self._token_expires_at and now < self._token_expires_at:
             return self._token
+
+        cache = self._token_cache_path()
+        try:
+            d = json.loads(cache.read_text(encoding="utf-8"))
+            exp = datetime.fromisoformat(d["expires_at"])
+            if now + timedelta(seconds=60) < exp and d.get("token"):
+                self._token = d["token"]
+                self._token_expires_at = exp
+                return self._token
+        except (OSError, KeyError, ValueError):
+            pass
 
         body = urllib.parse.urlencode(
             {
@@ -162,6 +201,13 @@ class LsRestClient:
 
         self._token = tok
         self._token_expires_at = now + TOKEN_TTL
+        try:
+            cache.write_text(
+                json.dumps({"token": tok, "expires_at": self._token_expires_at.isoformat()}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # 캐시 실패는 기능 실패가 아니다
         return tok
 
     def call_tr(
@@ -173,7 +219,8 @@ class LsRestClient:
         rate_limit_per_sec: float = DEFAULT_RATE_LIMIT_PER_SEC,
         tr_cont: str = "N",
         tr_cont_key: str = "",
-    ) -> dict:
+        return_headers: bool = False,
+    ):
         """TR 한 건 호출. in_block 은 {"t8436InBlock": {...}} 형태 그대로 넣는다.
 
         ▶ **LS API 는 필드 타입을 엄격히 본다.** 문서 필드표의 종류가 Number 인 것은
@@ -181,6 +228,10 @@ class LsRestClient:
           "IGW40011 ... data type을 확인하세요" 가 온다(실측 2026-07-30:
           t8410 의 qrycnt, t1305 의 dwmcode 를 문자열로 보내 실패).
           401 이 아니라 500 이므로 인증 문제로 오진하기 쉽다.
+
+        ▶ 연속조회가 필요하면 return_headers=True 로 (body, headers) 를 받아
+          headers["tr_cont"] == "Y" 일 때 tr_cont="Y" / tr_cont_key 를 다음 호출에
+          되돌려준다. InBlock 의 idx 류만으로는 페이징이 결정적이지 않다(_post 주석).
         """
         limiter = self._limiters.setdefault(tr_cd, RateLimiter(rate_limit_per_sec))
         limiter.wait()
@@ -194,9 +245,21 @@ class LsRestClient:
             # 문서상 필수지만 법인 전용이다. 개인 계정은 빈 값으로 보낸다.
             "mac_address": "",
         }
-        return self._post(
-            path, data=json.dumps(in_block, ensure_ascii=False).encode("utf-8"), headers=headers
-        )
+        data = json.dumps(in_block, ensure_ascii=False).encode("utf-8")
+        try:
+            return self._post(path, data=data, headers=headers,
+                              return_headers=return_headers)
+        except LsApiError as e:
+            # IGW00201(호출 거래건수 초과)은 문서의 초당 제한과 별개인 순간 버스트
+            # 제한이다(실측 2026-07-31: breadth 가 10분 주기에서 간헐 실패 - 성공과
+            # 교대). 대부분 수 초면 풀리므로 **이 코드에 한해 한 번만** 쉬고
+            # 재시도한다. 다른 오류는 재시도가 원인을 가리므로 그대로 올린다.
+            if "IGW00201" not in str(e):
+                raise
+            time.sleep(10.0)
+            limiter.wait()
+            return self._post(path, data=data, headers=headers,
+                              return_headers=return_headers)
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,8 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -210,6 +212,18 @@ def _on_incident_timeline_error(request, exc: IncidentTimelineError):
     return JSONResponse(
         status_code=409,
         content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+def _on_validation_error(request, exc: RequestValidationError):
+    # 스펙 1.4 에러 봉투를 요청 스키마 검증 실패에도 그대로 적용 (Risk API와 동일 패턴)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error_code": "RequestValidationError", "message": "요청 스키마 검증 실패",
+            "detail": {"errors": jsonable_encoder(exc.errors())}, "trace_id": None,
+        },
     )
 
 
@@ -441,6 +455,11 @@ if __name__ == "__main__":
     r3 = client.post("/qa/v1/ops/evaluate", json=ops_body)
     assert r3.json()["status"] == "critical", r3.json()
     assert r3.json()["incident"]["severity"] == "SEV2"
+
+    # 필수 필드 누락 -> 422, 스펙 1.4 에러 봉투 확인
+    r3_bad = client.post("/qa/v1/ops/evaluate", json={"metrics": ops_body["metrics"]})
+    assert r3_bad.status_code == 422, r3_bad.text
+    assert r3_bad.json()["error_code"] == "RequestValidationError", r3_bad.json()
 
     # --- 3.3 Agent/Tool Trace ------------------------------------------------------------
     agent_id, profile_id, trace_id = uuid4(), uuid4(), uuid4()

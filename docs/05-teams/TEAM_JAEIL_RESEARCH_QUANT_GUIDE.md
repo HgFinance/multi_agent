@@ -50,7 +50,9 @@
 | 시장 시계열 Repository | `departments/01-research/repository/market_repository.py` | — (신규, Sprint J0) |
 | LS REST Client | `departments/01-research/collectors/ls_client.py` | — (신규, Sprint J1) |
 | LS 실시간 정규화 Adapter | `departments/01-research/collectors/ls_realtime_adapter.py` | — (신규, Sprint J1 / F04) |
-| 거래 Calendar 수집기 | `departments/01-research/collectors/calendar_collector.py` | — (신규, Sprint J1) |
+| 거래 Calendar 수집기 (관측 역산) | `departments/01-research/collectors/calendar_collector.py` | — (신규, Sprint J1) |
+| 거래 Calendar 선언 생성 (당일·미래) | `departments/01-research/collectors/calendar_declared.py` | — (신규, Sprint J1) |
+| LS 실시간 상주 서비스 | `departments/01-research/collectors/ls_realtime_worker.py`, `ls_realtime_service.py` | — (신규, Sprint J1 / F03) |
 | 시장 상태 수집기 | `departments/01-research/collectors/market_breadth_collector.py` | — (신규, Sprint J1) |
 | Reference Repository | `departments/01-research/repository/reference_repository.py` | — (신규, Sprint J1) |
 | 공시 수집기 | `departments/01-research/collectors/opendart_collector.py` | — (신규, Sprint J2) |
@@ -62,6 +64,11 @@
 | 뉴스 Stream 계약 | `departments/01-research/contracts/news_events.py` | — (신규, Sprint J3) |
 | 국내 뉴스 수집기 (P0) | `departments/01-research/collectors/naver_news_collector.py` | — (신규, Sprint J3) |
 | 해외 뉴스 수집기 (P1) | `departments/01-research/collectors/alpaca_news_collector.py` | — (신규, Sprint J3) |
+| 뉴스 즉시 적재 Sink | `departments/01-research/collectors/news_pipeline.py` | — (신규, Sprint J3) |
+| 뉴스 상주 서비스 | `departments/01-research/collectors/news_watch_service.py` | — (신규, Sprint J3) |
+| 감시 Watchlist 생성기 | `departments/01-research/collectors/watchlist_builder.py`, `config/` | — (신규, Sprint J3) |
+| 수집기 Container Image | `departments/01-research/Dockerfile` | — (신규, 2026-07-31) |
+| research-api (Evidence 조회면) | `departments/01-research/api/main.py` | — (신규, Sprint J2) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -156,7 +163,7 @@ Supabase PostgreSQL은 Instrument, 문서 Metadata, 재무 Fact, Dataset Manifes
 | 거래 Calendar | 휴장, 장 구간, 동시호가, 만기 | KRX 공식 기준 | 연간 + 변경 확인 | Object Raw | `reference.market_calendars` |
 | 공시 | 접수번호, 제목, 공시 시각, 정정 관계, 원문 | Open DART | 장중 증분 Polling | Private Storage | `research.documents` |
 | 재무 | 연결/별도 재무제표와 주요 계정 | Open DART XBRL | 공시 Event 후 | XBRL/XML | `research.financial_facts` |
-| 기업정보 | 법인코드, 업종, 결산월, 대표자, 주소 | Open DART/KRX | 일일·변경 | Object Raw | `reference.issuers` |
+| 기업정보 | 법인코드, 업종, 결산월, 홈페이지·IR URL | Open DART/KRX | 일일·변경 | Object Raw | `reference.issuers` |
 | Corporate Action | 배당, 분할·병합, 증자, 합병, 상장폐지 | DART/KRX | Event + 일일 확인 | Object Raw | `reference.corporate_actions` |
 | 뉴스 | 제목, URL, 출처, 게시·수정 시각, 허용된 본문 | BIGKinds/NAVER API HUB/계약 Vendor | 1~5분 또는 Provider Event | 권한별 Storage | `research.documents` |
 | X Social Insight | 승인 유명 인사·공식 계정의 Post ID, 작성자, 게시·관측 시각, 종목·주제, 검증 상태 | X API Filtered Stream | 준실시간 | 권한별 Storage | `research.documents` + Source Registry |
@@ -583,16 +590,26 @@ Provider별 종목 매핑은 `link_resolver`로 주입받아 Sink가 모른다.
 
 **실측 결과 (2026-01-01~07-30 적재 완료)**: 전체 211일 중 거래일 141일, 평일 비거래일
 10일. 9개는 알려진 공휴일과 일치했다(신정, 설날 3일, 삼일절 대체, 근로자의날, 어린이날,
-부처님오신날 대체, 지방선거). **`2026-07-17`은 제헌절이며 공휴일이 아닌데 비거래일로
-관측됐다 — 임시휴장인지 데이터 공백인지 현재 Source로 판별할 수 없다.** 교차 검증
-Source가 필요한 지점이다.
+부처님오신날 대체, 지방선거). `2026-07-17` 미스터리는 아래 선언 Calendar 작업에서
+풀렸다 — **제헌절이 18년 만에 공휴일로 재지정**(2026-04-28 국무회의)된 것이었다.
 
-**⚠ 역산 방식의 구조적 한계 (2026-07-31 확인)** — 일봉 관측 역산이므로 **당일과 미래
-날짜를 원리상 채울 수 없다.** 거래가 일어난 뒤에야 그 날이 거래일이었음을 알 수 있다.
-따라서 장 시작 전에 "오늘이 거래일인가"를 Calendar에 물으면 항상 행이 없다. 아래
-시장 상태 수집기가 이 때문에 세션 판정을 날짜가 아니라 **세션 기준**으로 한다.
-근본 해결은 Calendar를 관측이 아니라 **선언적으로**(공휴일 규칙 + KRX 휴장일 공고)
-채우는 것이고, 이는 KRX 서비스 이용 승인 또는 별도 Source가 선행이다.
+**선언 Calendar — 당일·미래 거래일 (완료 2026-07-31)** —
+`collectors/calendar_declared.py` (재일님 지시 "캘린더는 알아서 수집, API 없이 괜찮음").
+역산의 구조적 한계(당일·미래를 원리상 못 채움)를 **공표 휴장일 선언 + 관측 검증**으로
+풀었다. 2026년 평일 휴장 17건(하반기: 8/17 광복절 대체, 추석 9/24~25, 10/5 개천절
+대체, 10/9 한글날, 12/25, 12/31 연말 휴장)과 특이 세션(1/2 개장식 10시, 11/19 수능일
+10:00~16:30)을 선언 목록으로 만들고:
+
+- **관측과 겹치는 전 구간(211일)이 하루라도 다르면 적재를 거부**한다(fail-closed).
+  실적재에서 211일 전부 일치 확인 후 Version 2(365행, 거래일 244일)로 들어갔다.
+- **관측이 부정한 것도 회귀 테스트다** — 6/6 현충일(토)은 대체공휴일이 없고(6/8 월
+  정상 거래 관측), 설·추석 대체는 일요일 겹침만이라 9/28(월)은 거래일이다.
+- **2027년은 만들지 않는다** — 설·추석(음력)과 임시공휴일은 규칙으로 확정할 수 없어
+  매년 공표를 보고 목록을 갱신한다(`DECLARED_THROUGH`가 다음 해 생성을 거부).
+- Registry에 `krx_public_notice`(무키, AVAILABLE)로 등록 — **P0 Blocked Domain이
+  전부 해소됐다.** `recent_trading_sessions`는 오늘(KST)까지만 돌려주도록 가드를
+  넣었다 — 선언 Calendar가 미래 행을 갖게 되면서 "직전 세션" 탐색이 미래를 집으면
+  안 되기 때문이다(미래 조회는 `market_session(날짜)`).
 
 **시장 상태 / Breadth (P0)** — `departments/01-research/collectors/market_breadth_collector.py`.
 KRX 지수 API 5종(`krx_dd_trd`, `kospi_dd_trd`, `kosdaq_dd_trd`, `bon_dd_trd`,
@@ -706,24 +723,76 @@ Protocol 구현으로 끝난다.
 `NOT_AUTHORIZED` 상태를 추가했다. Registry는 키 **존재**만 판정할 수 있으므로 실제 호출
 권한은 관측 결과를 `NOT_AUTHORIZED_OBSERVED`에 근거와 함께 기록한다.
 
-**P0 Blocked Domain은 `NEWS`와 `CALENDAR`다.** 단 `CALENDAR`는 KRX 승인을 받아도 Calendar
-API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관측 역산으로 대응했다.
+**P0 Blocked Domain은 전부 해소됐다 (2026-07-31).** `NEWS`는 NAVER 키 확보로,
+`CALENDAR`는 선언 Calendar(`krx_public_notice` — KRX 승인을 받아도 Calendar API
+자체가 없으므로 이 경로가 유일했다)로 풀렸다. KRX/KOSIS `NOT_AUTHORIZED`는 해당
+Source 자체의 문제로 남아 있지만 P0 Domain 을 막지는 않는다.
+
+**장시간 실행 Runtime — Docker 상주** (재일님 지시 2026-07-31 "호가·체결 수집기도
+Docker 에", `collectors/ls_realtime_service.py` + compose `ls-realtime`)
+
+컨테이너는 24시간 떠 있고 **소켓은 세션 창에서만 연다**(동시호가 35분 전 ~ 마감
++10분). 구독은 **코스피200+코스닥150 바스켓 350종목 = 700구독을 소켓 4개로
+샤딩**한다(재일님 지시 "바스켓 종목만 구독" — 소켓당 한도 200, 같은 종목의
+체결·호가 쌍은 반드시 같은 소켓, 소켓 하나가 죽으면 전체를 세우고 함께
+재구축한다 — 부분 생존은 "절반만 수집되는" 상태를 조용히 지속시킨다). 대규모
+동시 구독 자체는 재일님의 krx-tick-collector(2,600종목, 일 체결 1,500만 행)가
+실증했다. venue별 tr_cd는 `subscription_plan.TR_MATRIX`가 권위다 — 기존 프로브는
+KOSPI만 써서 S3_/H1_ 고정이 안 걸렸지만 코스닥은 K3_/HA_로 가야 한다. 세션
+판정은 Calendar를 따르되 Calendar가 오늘을 모르면 평일은 거래일로 간주하고
+`calendar_unverified`로 드러낸다(주말은 비거래 단정 — KRX 개장 전례 없음).
+시세 적재는 컨테이너 안에서 서비스 이름(`timescaledb:5432`)으로 간다 — 호스트의
+`127.0.0.1:5434`는 컨테이너에서 안 통한다.
+
+**장중 실측 (2026-07-31 11:19~ KST)**: 기동 즉시 세션 창 안이라 접속, 140건 구독
+ack 후 **5분간 체결 5,071행 + 호가 6,111행, 70종목 전부** TimescaleDB에 유입.
+바스켓 350종목 확장 후에는 60초에 수신 2.4만·적재 2만 행 수준이다(심박 로그).
+
+**적재 지연 실측 (2026-07-31, 5분 표본 36,682행)**: 우리 구간(소켓 수신→DB
+적재)은 **p50 0.80초 / p95 1.98초 / max 2.2초** — Sink 배치 Flush 설계값
+그대로다. 마이크로초급 HFT가 아니라 **초 단위 저지연**이며, 집행 경로가 아닌
+신호·리서치용이므로 이 수준이 적정이다(더 조이려면 Sink max_delay를 줄이면
+되지만 DB 왕복이 늘어난다). 거래소→수신 구간은 LS가 체결 시각을 초 단위로만
+줘서 정밀 측정에 한계가 있다. **개발 PC 시계가 표준시보다 1.46초 느린 것을
+이 측정에서 발견**(음수 지연으로 드러남 — Supabase now() 교차 측정)해 w32time
+서비스 기동 + NTP 피어 설정으로 **동기화 완료했다(잔차 -0.01초, 2026-07-31)**.
+같은 날 12:37 이전의 모든 시각 스탬프에는 약 -1.5초 계통 오차가 남아 있다.
+
+**배치 수집기 스케줄러 — 나머지 수집기 전부 컨테이너로** (재일님 지시 2026-07-31,
+`collectors/collector_scheduler.py` + compose `batch-collectors`)
+
+공시·Breadth·관측 Calendar·거시·재무·CA·기업개황은 배치형이라 상주가 아니라
+스케줄 실행이 맞다 — 컨테이너 하나가 같은 Image 안의 수집기를 subprocess로 돌린다.
+주기는 3.1 표를 따른다: 공시 10분(증분, 기본 최근 3일 창), Breadth 10분(세션
+판정은 수집기 자신 — 휴장이면 **exit 2 = SKIP**, 실패 1과 구분), 관측 Calendar
+16:20(선언 Calendar 검증 폭을 매일 늘림), 거시 07:30, 재무 18:10, CA 18:30,
+기업개황 19:00(빈 issuer만 소량). 지킨 것: **순차 실행**(DART 계열이 키·Rate
+Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메모리뿐**(재시작 후
+일일 Job 재실행은 전 수집기가 멱등 적재라 안전 — 그래서 상태 볼륨을 안 만들었다),
+연속 실패 3회부터 ⚠ 표시하되 스케줄러는 계속 돈다(한 Source 장애가 나머지를
+멈추지 않는다). `watchlist_builder`는 여기 없다 — t1444 호출 건수 제한(IGW00201)과
+결과 파일의 커밋 관리 때문에 주 1회 호스트 수동이다.
 
 완료 기준:
 
-- **부분** 장중 재접속 후 중복·Gap을 식별한다. 멱등 적재와 Sequence Gap 조회는 되지만
-  실제 LS WebSocket 재접속 경로가 없어 장중 검증은 하지 못했다.
+- **완료** 장시간 실행 Runtime — 세션 인지 상주(위). 장중 재접속·중복·Gap 식별은
+  worker의 재접속 경로(MAX_RECONNECTS + disconnect_reasons)와 멱등 적재가 맡는다.
 - **미착수** 특정 종목·시간 구간을 Parquet로 재현한다.
 - **미착수** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
 
 ### Sprint J2: DART와 Research Metadata
 
-- **부분** Corp Code/Instrument Mapping. 공시검색 응답의 `corp_code`로
-  `reference.issuers` 315건을 적재했다(2026-07-27~30 유가 기준). `stock_code`도 869건 전부
-  들어와 `instrument_symbols`와 연결 가능하다. `industry_code`·`fiscal_month`는 기업개황
-  API(2019002)가 회사별 1회 호출이라 미수집이며 **NULL로 두고 추정하지 않았다**.
-  `legal_name`은 `corp_name`을 넣고 `metadata.legal_name_verified=false`로 표시했다 —
-  법인명과 표시명이 다를 수 있어 기업개황 수집 시 갱신해야 한다.
+- **완료** Corp Code/Instrument Mapping과 기업정보 보강(`opendart_company_collector.py`,
+  2026-07-31). 공시검색 응답의 `corp_code`로 `reference.issuers`를 적재하고 `stock_code`
+  교차검증으로 `instrument_symbols`와 연결했다. 기업개황 API(2019002, 회사별 1회 호출·2건/초
+  제한)를 **871건 전부 호출**해(프로브 5 + 본수집 866, 무데이터 0, 형식 Flag 0) **업종코드
+  871/871, 결산월 869/871**을 채웠다. 결산월 NULL 2건은 '유가증권시장본부'·'코스닥시장본부' —
+  기업이 아니라 거래소 공시 주체라 결산월이 없는 게 맞고, 추정하지 않았다. `legal_name`은
+  기업개황의 정식명칭으로 검증·교체했다(`legal_name_verified=true` 871건). 부수로 홈페이지
+  772건, IR URL 107건이 metadata에 들어왔다. **대표자명·법인/사업자등록번호·주소·연락처는
+  계약(`CompanyProfile`)에 필드 자체가 없다** — 개인정보를 수집하지 않으며, 자체 점검이
+  metadata로 새는 경로까지 검사한다. 재적용은 `IS DISTINCT FROM` 가드로 실변경 0을
+  확인했다(멱등).
 - **부분** 공시 원본 Archive, Version, 정정 관계.
   `research.documents` 869건 적재(ACTIVE 793 / CORRECTED 76). 정정은 `report_nm` 앞
   표기(`[기재정정]`, `[첨부정정]` 등)로 탐지하고 **원본을 덮어쓰지 않는다** — `rcept_no`가
@@ -757,7 +826,25 @@ API 자체가 없어 풀리지 않는다 — 위 거래 Calendar 항목의 관�
   중복을 구분해서 센다** — 전자는 정보 손실이 없지만 후자는 어느 값이 맞는지 알 수 없어
   조사 대상이다. `revision`은 1로 고정했다(정정 재무제표 판정 규칙 미정).
 
-- **미착수** `research-api` Evidence 조회.
+- **부분** 기업 IR (실측 2026-07-31). **IR 공지는 별도 수집기 없이 DART 공시로 이미
+  커버된다** — "기업설명회(IR)개최" 공시 60건이 기존 공시 수집으로 유입돼 전부 issuer와
+  연결돼 있다. 회사별 공식 IR 페이지 포인터는 기업개황의 `ir_url`(107건)로 적재됐다.
+  **KIND 자체 공식 API는 없는 것으로 확정** — KRX 공식 경로는 Data Marketplace뿐이고
+  IR 서비스가 없으며, 서드파티 스크래퍼는 가이드 3.3(Agent 직접 크롤링 금지) 위반이라
+  쓰지 않는다(Registry `kind` note에 근거 기록). 남은 것은 첨부 원본(2019003 → Private
+  Storage)인데 이는 아래 공시 원본 Archive와 같은 백로그다.
+- **부분** `research-api` Evidence 조회 (2026-07-31, `departments/01-research/api/main.py`
+  + compose `research-api`, `127.0.0.1:8035`). 에이전트가 DB에 직접 붙지 않고
+  Evidence를 읽는 조회면 — LangGraph 직원 tool이 여기 붙는 것이 다음 단계다.
+  경계 셋을 코드로 강제: ① **읽기 전용**(쓰기 Endpoint 없음 + DB 세션
+  `default_transaction_read_only=on` + 자체 점검이 GET 외 메서드 존재를 거부)
+  ② **PIT 기본** — 모든 질의가 `as_of`(tz 필수, naive 거부 — 추측하면 9시간
+  샌다)를 받아 `observed_at <= as_of`만 반환. 가중치도 View의 now()가 아니라
+  as_of 기준 재계산이라 백테스트가 실시간과 같은 API를 쓴다. 실측: as_of=당일
+  06:00로 뉴스 42건 전부 관측시각 이내(PIT 회귀 통과) ③ **본문 없음**(3.3).
+  Endpoint: `/health`(도메인별 freshness), `/evidence/news`(가중치 포함),
+  `/evidence/disclosures`, `/evidence/financials`. Chunk/Embedding/Citation은
+  RAG 백로그(Sprint J3)와 함께 간다.
 
 **⚠ PIT 한계 (실측 2026-07-30, 반드시 인지할 것)**
 `list.json`의 `rcept_dt`는 **YYYYMMDD 날짜뿐이고 접수 시각이 없다.** `rcept_no` 앞 8자리도
@@ -782,11 +869,27 @@ API(2019003)나 별도 Source가 필요하다.
   License Registry는 `UseScope`로 Source별 허용 용도를 강제한다. Provider Adapter는
   NAVER(P0 국내), Alpaca(P1 해외), Tavily(P1 탐색 전용)가 있다.
 
-  **BIGKinds는 도입하지 않는다** (재일님 결정 2026-07-31). API 이용이 유료 회원(월
-  5만원대)이고 국내 뉴스 P0는 NAVER로 충족된다. `KEY_MISSING`이 아니라
-  `DISABLED`로 둔 이유 — `KEY_MISSING`은 "발급만 받으면 된다"는 뜻이라 사실과
-  다르고, 상태마다 조치 주체와 방법이 다르다. 재검토 조건은 "NAVER 커버리지가
-  부족하다는 실측 근거"이며 사유를 `disabled_reason`에 남겼다.
+  **BIGKinds는 도입하지 않는다** (재일님 결정 2026-07-31, 같은 날 가입 불가로
+  최종 확정). API 이용이 유료 회원(월 5만원대)이고 가입이 어렵다. 이에 따라
+  **뉴스 분석은 헤드라인 기반으로 확정** — 기사 본문은 NAVER API가 주지도 않고
+  무단 크롤링·저장은 저작권 침해라(3.3) 합법 경로가 유료 계약뿐인데 그 문이
+  닫혔으므로, 제목+메타(전용/언급 신뢰도, 시간감쇠 가중치)가 뉴스 분석의 전부다.
+  **본문이 필요한 분석은 전문 저장·임베딩 권리가 있는 공시 원문(DART 2019003)으로
+  충당한다.** `KEY_MISSING`이 아니라 `DISABLED`로 둔 이유 — `KEY_MISSING`은
+  "발급만 받으면 된다"는 뜻이라 사실과 다르다. 재검토 조건은 가입 여건 변화 또는
+  헤드라인 분석의 한계 실측이며 사유를 `disabled_reason`에 남겼다.
+
+  **3.3 예외 — 판단 시점 열람, 비저장** (재일님 승인 2026-07-31,
+  `agents/article_reader.py`). "Agent 직접 크롤링 금지"에 하나의 예외를 둔다:
+  에이전트가 **판단 시점에** 전용(DEDICATED 0.9) 기사만 URL로 열람해 읽고,
+  본문은 어디에도 저장하지 않고 버리며, 우리가 생성한 판단·요약(파생
+  저작물)만 남긴다 — 사람 애널리스트의 브라우징(저작권법 35조의2 일시적 복제)을
+  자동화한 것이다. 안전장치는 전부 코드다: robots.txt 준수(읽기 실패 시
+  fail-closed 불허), 도메인당 20초 간격, 실행당 5건 상한, 저장 경로 부재를 AST
+  검사로 강제, evidence 구조에 body 필드가 없음을 자체 점검이 회귀로 잡는다.
+  **as_of 재현(백테스트)에서는 열람하지 않는다** — 지금의 웹페이지는 그때의
+  지면이 아니므로 PIT가 깨진다. 이 예외는 수집기·스케줄에 넣지 않는다(대량이
+  되는 순간 브라우징이 아니라 크롤링이다). 리스크본부 검토 대상으로 남긴다.
 - **부분** Exact/Near Duplicate, Story Cluster와 Entity Resolution.
   중복 제거는 `news_events.admit`의 Cursor + ID 창으로 Stream 계층에서 한다.
   **Story Cluster와 Near Duplicate는 미착수**다.
@@ -828,17 +931,121 @@ REST(JSON/XML)다. 그렇다고 호출부가 Source마다 다른 모양으로 �
 Alpaca와 같은 모양으로 유지한다. 한 기사가 여러 종목 질의에 걸리면 Cursor가 두 번째를
 중복으로 걸러 **종목 하나를 잃으므로** 페이지 안에서 심볼을 먼저 합친다.
 
-관련도는 제목 포함 여부로만 가른다 — 질의로 나온 이상 관련은 있으므로 최소
-`MENTIONS`(0.5)이고, 제목에 종목명이 있으면 `DEDICATED`(0.9)다.
+관련도 판정은 두 번 고쳐졌다(재일님 지적 2026-07-31 "종목코드와 내용이 안 맞는
+연결" — `news_pipeline.title_has_standalone`):
 
-**Watchlist의 한계** — 코스피200·코스닥150 구성종목을 쓸 수 없다(KRX 승인 없음).
-대리지표로 공시 건수를 쓰는데 **증권사로 쏠린다** — ELS·DLS 발행 공시를 대량으로 내서
-상위 15개 중 10개가 증권사였다. 시가총액 Source가 생기기 전까지는 `--symbols`로 명시
-지정하는 쪽이 낫다. 승인이 떨어지면 `load_watchlist` 하나만 갈아끼우면 된다.
+- **부분 문자열 오탐 차단** — `name in title`만 보면 '두산에너빌리티 수주' 제목이
+  '두산'(000150)의 DEDICATED가 된다. 등장 위치를 덮는 **더 긴 종목명**이 있으면
+  그 등장은 무효로 친다('두산에너빌리티와 두산 동반 상승'처럼 둘 다 나오면 둘 다
+  유효). 긴 이름의 모집단은 감시 목록이 아니라 **전 상장사 이름 4,293개**다 —
+  감시 밖 회사가 제목에 있어도 걸러야 하기 때문.
+- **본문 매칭 추정 하향** — NAVER는 본문까지 검색하므로 제목에 이름이 없는
+  기사는 '본문 어딘가 언급' 추정일 뿐이다. 0.5는 과신이라 **0.3**으로 내렸다
+  (본문은 저장하지 않으므로(3.3) 더 확인할 수 없고, 확인 못 하는 것을 높게 치지
+  않는다). 기존 적재분도 같은 함수로 소급 재계산했다(`news-symbol-map-v2`).
+
+**Watchlist의 한계 → 해소 (2026-07-31)** — 처음엔 코스피200·코스닥150 구성종목을
+쓸 수 없다고 판단했다(KRX 구성종목 API 승인 없음). 공시 건수 대리지표는 **증권사로
+쏠렸다**(ELS·DLS 발행 공시 때문에 상위 15개 중 10개가 증권사). 그런데 **LS 업종
+체계에 지수가 업종코드로 존재한다** — t8424 전체업종에서 실측으로 확인:
+`101=KOSPI200`, `405=KOSDAQ 150`. 이 코드를 t1444(시가총액상위)에 주면 **구성종목이
+시총순으로 전부 나온다**(K200 정확히 200, KQ150 정확히 150 실측). KRX 승인 없이
+바스켓을 만드는 경로다 — `watchlist_builder.py --basket`. `load_watchlist`의 공시건수
+대리지표는 파일도 명시 지정도 없을 때의 마지막 fallback으로만 남는다.
 
 **실적재 (2026-07-31)**: 8종목 명시 지정 → 기사 214건, `document_instruments` 210건
 연결(전용 30, 복수종목 21), 멱등 재시도 0. `research.documents` 누계는 opendart 869 /
 naver 378 / alpaca 192다.
+
+**수집 지연을 DB에서 바로 확인한다** (재일님 요구 2026-07-31,
+`supabase/migrations/20260731000700_news_ingest_latency.sql`)
+
+세 시각은 `research.documents`가 끝까지 보존한다 — `published_at`(기사 게시,
+Provider 값·최초 관측본 유지), `observed_at`(수집기가 처음 본 시각), `created_at`(DB
+최초 적재, upsert가 덮지 않음). View 두 개가 차이를 바로 보여준다:
+
+- `research.news_ingest_latency` — 문서별 `detect_lag`(게시→관측),
+  `ingest_lag`(관측→적재), `total_lag`(게시→적재)
+- `research.news_ingest_latency_hourly` — Source별·시간대별 p50/p95/max와
+  `future_skew`(미래 게시 시각) 카운트. 상주 수집기 상태판 질의용
+
+적용 직후 실측: **`ingest_lag`(관측→적재, Sink 배치 지연)는 NAVER 1.7초 / Alpaca
+1.0초 평균**이다. `detect_lag`는 수 시간~수 일로 크게 나오는데 이는 일회성 백필을
+훑었기 때문이지 지연이 아니다 — 상주 수집(Watch Mode)이 돌기 시작하면 폴링 주기
+근처로 수렴한 뒤부터 읽는다(View 주석에 해석 주의 3항 기록).
+
+**상주 수집은 Docker Container 로 돈다** (재일님 지시 2026-07-31,
+`collectors/news_watch_service.py` + `departments/01-research/Dockerfile` +
+compose `news-watcher`)
+
+`docker compose up -d news-watcher` 하나로 NAVER 폴링 → Sink → Supabase 즉시
+적재가 상주한다. 설계에서 지킨 것:
+
+- **sweep 간격은 서비스가 소유한다.** `stream.run(max_seconds=0.1)`은 내부 sleep
+  직전에 반환해 정확히 한 sweep만 돌므로, 간격 대기가 `stop_event.wait()`가 되어
+  SIGTERM이 즉시 깨운다. 종료 경로에서 `Sink.close()`가 버퍼 꼬리를 밀어 넣는다.
+- **일 한도(25,000회)의 90%를 넘기지 않는다.** 시작 전 검산(`ensure_quota_headroom`
+  — 켜자마자 한도로 달려가는 설정은 기동 거부)과 실행 중 Guard 둘 다다. 사용량
+  기준은 루프 밖 `DailyQuotaTracker`에 산다 — 루프 안에서 잡으면 **오류 재진입마다
+  사용량이 0으로 리셋**되어 장애가 반복되는 날일수록 Guard가 무력해진다(자체
+  점검이 잡은 버그).
+- **장애 경로는 하나다.** NAVER든 DB든 예외로 올라오고 지수 백오프 후 Repository만
+  재접속해 `NewsSink.rebind()`로 갈아끼운다 — Sink를 새로 만들면 flush 실패로
+  남아 있던 버퍼를 잃는다.
+- **Credential은 필요한 것만 주입한다.** compose가 `env_file`로 .env 전체를 넣지
+  않고 `DATABASE_URL`·NAVER 키만 명시 전달한다 — LS·OpenAI 키가 뉴스 컨테이너로
+  흘러들지 않는다.
+
+**컨테이너 실측 (2026-07-31 10:38~10:47 KST, 8종목 120초 간격)**: 첫 sweep 140건
+백필 후, **10:38~10:42에 게시된 기사들이 `detect_lag` 284~524초(NAVER 검색 색인
+지연 + 폴링 주기), `ingest_lag` 2.4~2.6초로 적재**됐다. 즉 기사 게시부터 DB까지
+5~9분이며, 그중 우리 몫(관측→적재)은 3초 미만이다. 남은 지연은 NAVER 색인이
+지배하므로 폴링을 더 조여도 줄지 않는다.
+
+**감시 종목 확장 — 시총 상위 70 → 코스피200+코스닥150 바스켓 350** (재일님 지적
+2026-07-31 "구독 종목수가 적네" → "코스피200 코스닥150 바스켓으로 수집",
+`collectors/watchlist_builder.py`)
+
+1차로 **LS t1444(시가총액상위)** 시총 상위 70종목(300초 간격), 2차로 지수
+업종코드(101/405)를 이용해 **바스켓 구성종목 전체 350종목**으로 확장했다. NAVER
+일 한도 때문에 350종목은 폴링 간격이 1,500초(25분)가 된다 — "종목 수 × 폴링
+횟수"의 균형이며, 뉴스 지연은 NAVER 색인이 지배하므로 넓은 커버리지 쪽을 택했다.
+**파일이 둘로 갈라진 이유**: 시세(ls-realtime)가 350종목을 따라가면 700구독으로
+소켓 한도(200)를 넘는다 — 뉴스는 `config/news_watchlist.txt`(바스켓), 시세는
+`config/ls_watchlist.txt`(시총 상위 70 = 140구독)를 쓴다. t1444에는 문서의 초당
+2회와 **별개의 호출 건수 제한이 있다**(IGW00201 실측 2회) — 빌더를 연속으로
+돌리면 걸리므로 몇 분 쿨다운 후 재시도한다. 실측으로 확정한 규격 둘:
+
+- **t1444 연속조회는 응답 헤더가 계약이다.** InBlock `idx`만으로 다음 페이지를
+  청하면 서버 세션 상태에 따라 2페이지가 오기도, 1페이지가 반복되기도 한다
+  (실측: 같은 idx=20 요청이 시점에 따라 다른 페이지를 줌). 헤더의
+  `tr_cont`/`tr_cont_key`를 되돌려줘야 결정적이다 — `ls_client.call_tr`에
+  `return_headers`를 추가했다.
+- **우선주 필터는 두 겹이다.** 같은 issuer 연결이면 제거하되, 우선주는 issuer
+  연결이 없는 경우가 많다(DART corp_code 매핑이 보통주 stock_code만 줘서
+  삼성전자우가 살아남은 실측). 이름 규칙(목록 내 다른 이름 + '우'/'2우B' 등
+  **접미사 정확 일치**)을 보조로 쓴다 — startswith만 쓰면 'LG'를 보고
+  'LG디스플레이'를 버린다.
+
+생성은 **호스트에서 오프라인으로** 한다(`--build` → `config/news_watchlist.txt` →
+컨테이너는 읽기 전용 mount). news-watcher에 LS Credential을 주지 않기 위해서다.
+ETF(KODEX 200 등)는 Instrument Master의 STOCK 필터가 걸러낸다.
+
+**최신 기사 가중치 — 실시간 분석 입력** (재일님 지시 2026-07-31,
+`supabase/migrations/20260731000800_news_recency_weight.sql`)
+
+뉴스 수집은 장 여부와 무관하게 24시간 상주다(컨테이너 `restart: unless-stopped`,
+한도는 하루에 고르게 분배). 분석 계층이 바로 쓸 수 있게
+`research.news_recent_weighted` View가 **지수 시간감쇠 가중치**를 준다:
+`weight = 2^(-age_hours/6)` (반감기 6시간), `weighted_confidence = 종목 연결
+confidence × weight`. `age_hours`를 함께 내보내므로 다른 반감기가 필요하면
+소비자가 재계산하면 된다. 적용 직후 실측: 5분 전 기사 weight 0.99, 전용 기사
+weighted_confidence 0.89.
+
+⚠ **백테스트가 이 View를 흉내낼 때**: weight의 기준은 `published_at`(사건
+시각)이지만 **그 기사가 보였는지는 `observed_at`으로 가려야 한다** — 게시→관측
+5~9분 공백을 published_at 재생은 미래 정보로 앞당긴다(가이드 4.2). 실시간
+소비자는 이미 관측된 것만 보므로 그대로 쓰면 된다.
 
 **검토한 뒤 도입하지 않은 것 — `whdghk1907/mcp-news-collector`**
 WebSocket을 표방하지만 **`src/server/websocket_server.py`가 저장소에 없다**(HTTP 404).

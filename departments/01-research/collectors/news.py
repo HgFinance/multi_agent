@@ -34,10 +34,13 @@ def fetch_news(query, max_results=5):
         'Authorization': f'Bearer {api_key}'
     }
     
-    search_query = f"{query} stock news analysis financial"
-    
+    # 검색어를 그대로 보낸다. 예전에는 ' stock news analysis financial' 을 강제로
+    # 붙였는데, 한국어 검색어("삼성전자 실적")에 영어 접미사가 붙으면 국내 기사
+    # 순위가 밀려서 오히려 결과가 나빠졌다. 뉴스 한정은 접미사가 아니라
+    # topic='news' 가 맡는다(응답에 published_date 도 함께 온다).
     data = json.dumps({
-        'query': search_query,
+        'query': query,
+        'topic': 'news',
         'search_depth': 'basic',
         'max_results': max_results,
         'include_raw_content': False
