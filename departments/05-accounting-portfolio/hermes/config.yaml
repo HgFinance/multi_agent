@@ -34,6 +34,8 @@ skills:
 deterministic_services:
   ledger: departments/05-accounting-portfolio/ledger/ledger.py                  # 체결 -> 분개, projection, reversal
   reconciliation: departments/05-accounting-portfolio/reconciliation/reconciliation.py  # OMS/Fill/Ledger 대사와 Break
+  corporate_actions: departments/05-accounting-portfolio/corporate_actions/corporate_actions.py  # F25 배당·분할·종목변경
+  daily_report: departments/05-accounting-portfolio/reporting/daily_report.py   # F23 전략별 PnL/Drawdown/비용/오류
   schema: db/002_accounting.sql
   seed: db/004_seed.sql                         # 계정과목, 초기 Fund/Book, 자본 납입
 
@@ -52,6 +54,8 @@ implementation:
     - "같은 체결 이벤트 중복 반영 방지"
     - "Position/Cash Projection과 분개로부터의 재구축"
     - "OMS/Fill/Ledger 대사, Break 생성과 Severity 분류"
+    - "F25 Corporate Action - 배당·분할·종목변경 분개. Announcement 거부, 선택형 승인 게이트"
+    - "F23 Daily Report - PnL/Drawdown/비용/오류, NAV 항등식 검산과 미설명 손익 노출"
   in_progress:
     - "Long/Short Position 분리, Borrow/Financing Cost 계정 (팀 가이드 v1.2 1.1)"
     - "strategy_allocations.governance_allocation_id - CEO 승인 결정과 회계 적용 분리 추적"
@@ -65,10 +69,17 @@ implementation:
 # 1. projection과 분개 재계산의 일일 자동 대조. 지금은 rebuild()를 불러야 확인된다.
 #    어긋난 채로 하루가 지나면 NAV가 틀린 값으로 확정된다.
 # 2. Break Aging과 SLA. Break가 열린 뒤 방치되는 것을 탐지하는 장치가 없다.
-# 3. Corporate Action(배당·분할) 분개 규칙. Announcement가 아니라 Effective Event로
-#    Posting해야 하는데 규칙이 아직 없다.
+# 3. (2026-07-31 해소) Corporate Action 분개 규칙 -> corporate_actions.py로 구현됨.
+#    남은 것: 계정 4200(배당수익) 신설. 지금은 배당을 실현손익(4000)에 넣어서
+#    매매손익과 배당이 한 계정에 섞이고 성과기여도 분해가 안 된다. DB 담당 델타.
+#    단주 현금지급, 유상증자·합병 비율 배정도 아직 없다.
 # 4. Material Break 발생 시 리스크본부·QA로의 실제 이벤트 발행.
 #    지금은 escalates 플래그만 세우고 전달 경로가 없다.
+# 5. Daily Report의 전략별 분해가 호출자가 주는 매핑에 의존한다(daily_report.py).
+#    분개에 전략 차원이 없어서인데, supabase의 accounting.journals도 fund/book까지다.
+#    journal_lines.strategy_version_id 추가 또는 fill -> order_intent 조인이 근본 해결.
+# 6. Drawdown이 넘겨받은 스냅샷 구간 안에서만 계산된다. 여러 날에 걸친 Drawdown은
+#    스냅샷 저장소가 생겨야 한다 - 함수는 그대로 두고 더 긴 시계열만 넣으면 된다.
 
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.3, 2026-07-29)
 hiring_priority:
