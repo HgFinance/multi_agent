@@ -71,6 +71,12 @@
 | research-api (Evidence 조회면) | `departments/01-research/api/main.py` | — (신규, Sprint J2) |
 | market-api (시세 조회면) | `departments/01-research/api/market_api.py` | — (신규, F03) |
 | 차트 백필 수집기 | `departments/01-research/collectors/chart_backfill_collector.py` | — (신규, 2026-07-31) |
+| 파생 스냅샷 수집기 (K200 선물·옵션 체인) | `departments/01-research/collectors/derivatives_collector.py` | — (신규, 2026-07-31) |
+| PIT Dataset Builder (Manifest·Leakage Check) | `departments/04-quant-backtest/pipeline/pit_dataset.py` | — (신규, 2026-07-31) |
+| Backtest Runner v1 (비용·Ledger·재현 해시) | `departments/04-quant-backtest/pipeline/backtest_runner.py` | — (신규, 2026-07-31) |
+| Walk-Forward 검증 (QNT-04, Fragility 판정) | `departments/04-quant-backtest/pipeline/walk_forward.py` | — (신규, 2026-07-31) |
+| Market Data Steward (심박·품질·지연 감사) | `departments/01-research/collectors/market_data_steward.py` | — (신규, 2026-07-31) |
+| Evidence Bundle 조립기 (결정론 가격 컨텍스트) | `departments/01-research/evidence/bundle.py` | — (신규, 2026-07-31) |
 | 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
 | LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3) |
 | 공시 원문 Archive 수집기 | `departments/01-research/collectors/opendart_document_collector.py` | — (신규, Sprint J2) |
@@ -1193,7 +1199,10 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
       Story Cluster는 미착수**다. NAVER 키 확보로 P0 NEWS Blocked는 해제됐고 BIGKinds는
       비용 대비 필요성이 확인될 때까지 `DISABLED`다. X Watchlist는 P1 계획이며 Collector,
       승인 계정 Registry, 삭제 Compliance와 교차 검증 Test는 아직 미구현이다.
-- [ ] Backtest가 PIT Dataset Manifest로 재현된다.
+- [x] Backtest가 PIT Dataset Manifest로 재현된다. (v1 2026-07-31: pipeline/pit_dataset.py
+      Manifest·Partition 해시 + backtest_runner.py 가 로드 시 해시 재대조·불일치 거부,
+      input_hash unique 로 같은 실험 중복 등록 차단 실측. 유니버스 생존 편향은
+      SURVIVORSHIP_BIAS_DECLARED 로 선언 - 과거 구성 이력 확보가 후속)
 - [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
 - [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
       → DB 쪽 최소권한은 준비됨(`market_reader`/`market_writer`, `public`은 스키마 usage 없음).

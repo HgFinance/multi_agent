@@ -7,7 +7,9 @@
 
 QA 패턴과의 차이 - **노드가 프롬프트가 아니라 실구현 직원이다**:
   check_universe      universe_manager (결정론 - LS 공식 목록, 실전 검증 347/3)
-  assemble_evidence   Evidence Bundle 조립기 (읽기 전용 API 2종에서 수집 - 결정론)
+  assemble_evidence   evidence/bundle.py 조립기 (읽기 전용 API 2종 + 결정론
+                      price_context - qwen 이 +27% 급등을 하락으로 서술한 실측
+                      사고 후 등락률 계산을 코드로 이관)
   analyze_sentiment   news_sentiment_analyst (로컬 LLM + 환각 검증, 10/10 실측)
   draft_packet        research-supervisor 페르소나 (hermes/config.yaml 원문 사용)
 
@@ -33,6 +35,7 @@ from pathlib import Path
 from typing import Optional, TypedDict
 
 _BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도 찾도록
 sys.path.insert(0, str(_BASE / "collectors"))
 sys.path.insert(0, str(_BASE / "agents"))
 
@@ -72,21 +75,13 @@ def check_universe(state: ResearchState) -> dict:
     return {"universe": {"tradable": True, "as_of": d.as_of.isoformat()}}
 
 
-# ── 노드 2: Evidence Bundle 조립 (결정론 - API 만) ─────────────────────────
+# ── 노드 2: Evidence Bundle 조립 (결정론 - evidence/bundle.py) ─────────────
 def assemble_evidence(state: ResearchState) -> dict:
-    sym = state["symbol"]
-    bars = _get(f"{MARKET_API}/bars/{sym}?interval=1D&limit=5")
-    snap = _get(f"{MARKET_API}/snapshot/{sym}")
-    news = _get(f"{RESEARCH_API}/evidence/news?symbol={sym}&hours=24&limit=8")
-    disc = _get(f"{RESEARCH_API}/evidence/disclosures?symbol={sym}&days=7&limit=5")
-    return {"evidence": {
-        "daily_closes_recent": [(b["bucket_time"][:10], float(b["close"])) for b in bars],
-        "last_trade": snap.get("last_trade"),
-        "news_headlines": [{"id": i + 1, "title": n["title"],
-                            "relation": n["relation_type"]}
-                           for i, n in enumerate(news)],
-        "disclosures_7d": [d_["title"] for d_ in disc],
-    }}
+    # 수집·등락률 계산은 전부 모듈이 한다 - 노드는 배선만 (계약: 기존 키 유지)
+    from evidence.bundle import assemble_bundle
+
+    return {"evidence": assemble_bundle(state["symbol"], market_api=MARKET_API,
+                                        research_api=RESEARCH_API, get=_get)}
 
 
 # ── 노드 3: Sentiment (검증된 LLM 직원) ────────────────────────────────────
@@ -106,8 +101,13 @@ def _supervisor_persona() -> str:
 
 
 def draft_packet(state: ResearchState, *, llm=None) -> dict:
+    evidence = dict(state["evidence"])
+    # 가격 수치는 코드가 계산한 확정값 - qwen 이 +27% 급등을 하락으로 서술한
+    # 실측 사고 재발 방지로, LLM 이 재계산하지 못하게 별도 블록으로 분리 주입
+    price_ctx = evidence.pop("price_context", None) or {
+        "status": "UNAVAILABLE", "reason": "evidence 에 price_context 가 없다"}
     bundle = {"symbol": state["symbol"], "universe": state["universe"],
-              "sentiment": state["sentiment"], **state["evidence"]}
+              "sentiment": state["sentiment"], **evidence}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
 {{"symbol": "...", "thesis": "1-2 sentences, facts first",
@@ -116,6 +116,15 @@ Schema (JSON only):
  "catalysts": ["upcoming checkpoints"],
  "invalidation": ["conditions that would kill the thesis"],
  "evidence_quality": "sufficient | partial | insufficient_evidence"}}
+
+CONFIRMED PRICE FIGURES (deterministic, computed by code - NOT by you):
+{json.dumps(price_ctx, ensure_ascii=False, indent=1)}
+Rules for these figures - non-negotiable:
+- Quote them verbatim. Do NOT recompute returns or infer price direction
+  yourself from headlines or any other source.
+- change_1d_pct > 0 means the price ROSE (상승); < 0 means it FELL (하락).
+  Follow the sign exactly.
+- If status is UNAVAILABLE or a field is null, write "미확인" - never guess.
 
 Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
@@ -205,6 +214,40 @@ def _check_packet_guard():
     print("  Packet 스키마 가드       OK")
 
 
+def _check_price_context_injection():
+    # +27% 사고 재발 방지 - 확정 수치 블록과 "재계산 금지" 지시가 프롬프트에
+    # 실제로 들어가는지, evidence 에 price_context 가 없으면 UNAVAILABLE 로
+    # 명시되는지 코드로 확인한다
+    captured = {}
+
+    def fake_llm(system, user):
+        captured["user"] = user
+        return json.dumps({"symbol": "X", "thesis": "t", "facts": [],
+                           "interpretation": [], "catalysts": [],
+                           "invalidation": [], "evidence_quality": "partial"})
+
+    draft_packet({"symbol": "X", "universe": {}, "sentiment": {},
+                  "evidence": {"price_context": {
+                      "status": "OK", "change_1d_pct": 27.0,
+                      "direction_1d": "상승"}}}, llm=fake_llm)
+    u = captured["user"]
+    assert "CONFIRMED PRICE FIGURES" in u and "27.0" in u and "상승" in u
+    assert "Do NOT recompute" in u
+
+    draft_packet({"symbol": "X", "universe": {}, "sentiment": {},
+                  "evidence": {}}, llm=fake_llm)
+    assert '"UNAVAILABLE"' in captured["user"]
+    print("  가격 컨텍스트 주입       OK")
+
+
+def _check_evidence_module():
+    # 조립기 모듈 자체 점검을 파이프라인 점검에 포함 - 계약이 함께 지켜지는지
+    from evidence import bundle as eb
+
+    eb._check_surge_plus27()
+    eb._check_bundle_contract()
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -220,4 +263,6 @@ if __name__ == "__main__":
     _check_graph_shape()
     _check_halt_short_circuit()
     _check_packet_guard()
-    print("본부 파이프라인 3개 영역 통과. 실행은 --run <종목>")
+    _check_price_context_injection()
+    _check_evidence_module()
+    print("본부 파이프라인 6개 영역 통과. 실행은 --run <종목>")

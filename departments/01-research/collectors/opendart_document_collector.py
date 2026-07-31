@@ -159,15 +159,23 @@ def _collect(limit: int) -> int:
                 stats.note("UPLOAD_" + type(e).__name__)
                 continue
             with ref._conn.cursor() as cur:
+                # on conflict: 스케줄러 재기동 재실행과 수동 만회 실행이 겹치면
+                # 같은 후보를 둘 다 처리한다 - 2026-07-31 실측에서 UniqueViolation
+                # 으로 잡 전체가 죽었다. 멱등 계약(겹쳐도 안전)을 여기서 지킨다.
                 cur.execute("""
                     insert into research.document_versions
                       (document_id, version, content_hash, object_path, media_type,
                        byte_size, license_scope, published_at, observed_at)
                     values (%s, 1, %s, %s, 'application/zip', %s, %s, %s, %s)
+                    on conflict (document_id, version) do nothing
                 """, (doc_id, digest, path, len(data), LICENSE_SCOPE,
                       published_at, datetime.now(timezone.utc)))
+                inserted = cur.rowcount
             ref._conn.commit()
-            stats.archived += 1
+            if inserted:
+                stats.archived += 1
+            else:
+                stats.note("VERSION_EXISTS")  # 동시 실행이 먼저 적재 - 멱등 통과
             if i % 20 == 0 or i == len(cands):
                 print(f"    [{i}/{len(cands)}] {stats.summary()}")
     finally:

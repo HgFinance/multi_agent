@@ -179,6 +179,10 @@ services:
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
       KOSIS_API_KEY: ${KOSIS_API_KEY:-}
+      # 20:00 document-archive 가 공시 원문 ZIP 을 Storage 에 올린다 - 이 두 개가
+      # 빠지면 upload() 가 KeyError 로 전건 실패한다 (2026-07-31 실측 597건)
+      SUPABASE_URL: ${SUPABASE_URL:?.env 에 SUPABASE_URL 이 필요하다}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?.env 에 SUPABASE_SERVICE_ROLE_KEY 가 필요하다}
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
       LS_ENV: ${LS_ENV:-PAPER}
       LS_APP_KEY: ${LS_APP_KEY:-}

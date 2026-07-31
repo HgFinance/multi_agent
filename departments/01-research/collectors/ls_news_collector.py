@@ -84,7 +84,7 @@ async def run_service(stop: asyncio.Event) -> int:
 
     from ls_client import LsRestClient
     from ls_realtime_worker import build_subscribe_message, classify_message
-    from news_pipeline import NewsSink, krx_symbol_resolver
+    from news_pipeline import NewsSink, krx_symbol_resolver, seed_title_window_from_db
     from reference_repository import SupabaseReferenceRepository
 
     env = load_project_env()
@@ -112,10 +112,12 @@ async def run_service(stop: asyncio.Event) -> int:
     resolver = krx_symbol_resolver(inst_by_symbol, dedicated_names=names,
                                    known_names=set(names.values()))
     sink = NewsSink(ref, source_id=source_id, link_resolver=resolver,
-                    max_batch=10, max_delay_seconds=3.0)
+                    max_batch=10, max_delay_seconds=3.0,
+                    title_dedup_window=5000)  # 같은 뉴스 재전송(새 realkey) 차단
+    seeded = seed_title_window_from_db(sink, ref._conn, source_id)
     client = LsRestClient()
     print(f"{COLLECTOR_VERSION}: {mode} {ws_url} - 전 종목 뉴스 push, "
-          f"연결 가능 심볼 {len(inst_by_symbol):,}", flush=True)
+          f"연결 가능 심볼 {len(inst_by_symbol):,}, 제목 창 예열 {seeded:,}", flush=True)
 
     received = stored_mark = 0
     attempt = 0
