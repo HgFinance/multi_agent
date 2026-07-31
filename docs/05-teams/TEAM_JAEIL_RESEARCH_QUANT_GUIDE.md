@@ -852,6 +852,23 @@ Alpaca와 같은 모양으로 유지한다. 한 기사가 여러 종목 질의�
 연결(전용 30, 복수종목 21), 멱등 재시도 0. `research.documents` 누계는 opendart 869 /
 naver 378 / alpaca 192다.
 
+**수집 지연을 DB에서 바로 확인한다** (재일님 요구 2026-07-31,
+`supabase/migrations/20260731000700_news_ingest_latency.sql`)
+
+세 시각은 `research.documents`가 끝까지 보존한다 — `published_at`(기사 게시,
+Provider 값·최초 관측본 유지), `observed_at`(수집기가 처음 본 시각), `created_at`(DB
+최초 적재, upsert가 덮지 않음). View 두 개가 차이를 바로 보여준다:
+
+- `research.news_ingest_latency` — 문서별 `detect_lag`(게시→관측),
+  `ingest_lag`(관측→적재), `total_lag`(게시→적재)
+- `research.news_ingest_latency_hourly` — Source별·시간대별 p50/p95/max와
+  `future_skew`(미래 게시 시각) 카운트. 상주 수집기 상태판 질의용
+
+적용 직후 실측: **`ingest_lag`(관측→적재, Sink 배치 지연)는 NAVER 1.7초 / Alpaca
+1.0초 평균**이다. `detect_lag`는 수 시간~수 일로 크게 나오는데 이는 일회성 백필을
+훑었기 때문이지 지연이 아니다 — 상주 수집(Watch Mode)이 돌기 시작하면 폴링 주기
+근처로 수렴한 뒤부터 읽는다(View 주석에 해석 주의 3항 기록).
+
 **검토한 뒤 도입하지 않은 것 — `whdghk1907/mcp-news-collector`**
 WebSocket을 표방하지만 **`src/server/websocket_server.py`가 저장소에 없다**(HTTP 404).
 테스트만 있고 구현이 없다. NAVER Collector는 우리와 같은 `openapi.naver.com` REST를
