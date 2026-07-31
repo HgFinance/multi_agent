@@ -1,15 +1,15 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.4
+> 문서 상태: Team Handoff v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
-> 담당 조직: 트레이딩본부, 회계/포트폴리오본부  
+> 담당 조직: 트레이딩본부, 회계/포트폴리오본부, 공통 Frontend Platform 기술 DRI
 > 핵심 결정: 모든 공식 거래·원장 데이터는 Supabase PostgreSQL에 저장하고 시계열 DB를 직접 사용하지 않음  
 > 시장 데이터 접근: 재일님 팀의 `market-api`와 Redis Snapshot을 통해 조회  
 > 공통 기준: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md), [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
-> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View와 공통 Platform, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 
 ---
 
@@ -30,6 +30,8 @@
 - Position, Cash, Valuation, PnL, Fee와 NAV
 - OMS/Broker/Ledger Reconciliation과 Break 처리
 - `oms-api`, `portfolio-api`, `nav-reporting-api` 제공
+- 공통 Frontend Platform의 FastAPI BFF, Realtime Store, WebSocket와 E2E 기술 통합
+- Hermes Kanban Status Bridge와 `agent.status.v1` Projector 구현
 
 담당하지 않는 범위:
 
@@ -47,6 +49,7 @@
 | 계약·OMS·Paper Broker | `departments/02-trading/{contracts,oms,broker}/` | `trading/`, `execution/` |
 | 회계 Hermes | `departments/05-accounting-portfolio/hermes/` | `orchestration/hermes/accounting-portfolio-department/` |
 | Ledger·Reconciliation | `departments/05-accounting-portfolio/{ledger,reconciliation}/` | `accounting/` |
+| 공통 Frontend Platform | `ai-office/`, `apps/api/` | — (각 본부가 Domain Read Model·Event 의미를 소유) |
 | D0-D2 SQL Prototype | `db/` | — (Supabase 통합 후 Archive 또는 제거, 11절 단계 4 — 아직 진행 전) |
 | 운영 DB Migration | `supabase/migrations/` | — (도구 표준 경로 유지, Schema별 Domain Owner 지정) |
 
@@ -475,11 +478,14 @@ Event Payload에는 전체 Statement나 보고서를 넣지 않고 `object_path`
 
 ### 6.4 AI Office 제공 계약
 
+- 도현님은 공통 Frontend Platform 기술 DRI로서 Auth, API Client, Realtime Store, WebSocket, Kanban Status Bridge와 Frontend E2E를 통합한다. Live Office의 제품·업무 Owner는 영주님이며, Domain 상태의 의미는 각 본부 Owner가 정한다.
 - `Trading and OMS`에 Order Intent, Risk Decision Ref, Order·Fill 상태, Reject·Cancel Reason, Broker Session과 TCA Read Model을 제공한다.
 - `Portfolio and Close`에 Position, Cash, Exposure, PnL, NAV 상태, Reconciliation Break와 `as_of`를 제공한다.
 - Order와 Fill은 동일한 `case_id`, `trace_id`, `order_intent_id`와 `internal_order_id`로 상세 화면에서 연결된다.
 - 화면의 Cancel·Paper 승인 요청은 `oms-api` Command로 받고 사용자 Identity, 사유, 멱등 키와 예상 Version을 검사한다.
 - Frontend는 `execution`·`accounting` Table, OMS 상태 머신과 Journal Posting을 직접 수정하지 않는다.
+- 현재 `apps/api/main.py`의 `/ui/snapshot`은 테스트 Paper Loop 기반 DEMO다. `/agent/ask`는 Hermes Tool 실행 가능성 때문에 Auth·Tool Allowlist 전까지 기본 비활성화한다.
+- Kanban Status Bridge는 읽기 전용으로 `agent.status.v1`을 발행하고, Projector가 Supabase Read Model을 갱신한다. Browser와 BFF는 Kanban SQLite를 직접 읽거나 수정하지 않는다.
 
 ---
 

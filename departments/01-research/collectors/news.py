@@ -17,7 +17,9 @@ def fetch_news(query, max_results=5):
         repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         env_path = os.path.join(repo_root, '.env')
         if os.path.exists(env_path):
-            with open(env_path) as f:
+            # .env 는 UTF-8이다. encoding을 생략하면 한국어 Windows에서
+            # locale 기본값(cp949)으로 열려 주석의 비ASCII 문자에서 깨진다.
+            with open(env_path, encoding='utf-8') as f:
                 for line in f:
                     if line.startswith('TAVILY_API_KEY='):
                         api_key = line.split('=', 1)[1].strip()
@@ -50,6 +52,11 @@ def fetch_news(query, max_results=5):
         return {"error": str(e)}
 
 if __name__ == '__main__':
+    # 국내 뉴스 제목이 그대로 출력되므로 stdout을 UTF-8로 고정한다.
+    # cp949 콘솔에서는 ensure_ascii=False 출력이 UnicodeEncodeError로 죽는다.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+
     query = sys.argv[1] if len(sys.argv) > 1 else "AAPL Apple stock"
     results = fetch_news(query)
     

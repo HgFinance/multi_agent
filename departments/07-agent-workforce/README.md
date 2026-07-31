@@ -46,6 +46,14 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
 미구현(후속): 위 검증, Eval Runner/Shadow Router 실체 연결(QA·audit 소유), CEO 예산·조직 승인과
 Scorecard 관찰의 실제 API 배선.
 
+## Profile Seed
+
+- `supabase/seed.sql`은 P0 직원 HR-00·HR-01·HR-04의 DRAFT Profile Version을 멱등 등록한다.
+- `prompt_artifact_path`의 Anchor는 직원 코드가 아니라 `hermes/config.yaml`의 실제 personality 이름인
+  `display_name`을 사용한다.
+- Supervisor `model` 설정과 개별 직원의 `agent_profile_versions.model_id`는 다른 계층이다. 어느 쪽도
+  QA Eval과 CEO 승인 없이 Production 활성화하지 않는다.
+
 ## 테스트
 
 ```bash

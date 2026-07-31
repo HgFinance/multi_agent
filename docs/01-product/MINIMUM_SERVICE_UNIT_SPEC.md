@@ -465,11 +465,12 @@ Investment Case는 다음 중 하나로 시작한다.
 
 1. Market Radar가 중요한 시장 Event를 탐지한다.
 2. 뉴스 수집기가 종목 관련 중요 문서를 탐지한다.
-3. 보유 Position의 Risk Event가 발생한다.
-4. 사용자가 Hermes에게 특정 종목 분석을 요청한다.
-5. Strategy Scanner가 Pair·Basket·Basis 또는 Volatility 관계의 이탈을 탐지한다.
+3. 승인된 X Watchlist의 Post가 중요 촉매 후보로 분류된다. 미검증 상태에서는 조사용 Research Case만 열고, 독립 근거로 교차 확인된 뒤에만 거래 판단 단계로 이동한다.
+4. 보유 Position의 Risk Event가 발생한다.
+5. 사용자가 Hermes에게 특정 종목 분석을 요청한다.
+6. Strategy Scanner가 Pair·Basket·Basis 또는 Volatility 관계의 이탈을 탐지한다.
 
-첫 Core Release의 자동 시작 조건은 `PRICE_VOLUME_SPIKE`, `RELATIVE_VALUE_DIVERGENCE`, `DISCLOSURE_EVENT`와 정기 `STRATEGY_REBALANCE` Fixture로 검증한다. 운영 활성화 여부는 해당 Strategy Capability에 따라 다르다.
+첫 Core Release의 자동 시작 조건은 `PRICE_VOLUME_SPIKE`, `RELATIVE_VALUE_DIVERGENCE`, `DISCLOSURE_EVENT`와 정기 `STRATEGY_REBALANCE` Fixture로 검증한다. `SOCIAL_INSIGHT_EVENT`는 P1이며 Social Post 단독으로 조사용 Research Case는 열 수 있지만 Order Intent를 생성하거나 Strategy를 승격하지 않는다. 운영 활성화 여부는 해당 Strategy Capability에 따라 다르다.
 
 ### 종료 조건
 

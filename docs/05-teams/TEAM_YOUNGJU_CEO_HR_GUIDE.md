@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.4
+> 문서 상태: Team Handoff v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -9,7 +9,7 @@
 > 공통 기준: [AGENT_EMPLOYEE_PROFILES.md](../04-organization/AGENT_EMPLOYEE_PROFILES.md), [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
-> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View
+> Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 
 ---
 
@@ -29,6 +29,7 @@ CEO Agent는 사용자 Mandate를 해석하고 업무를 각 본부에 배정하
 - Agent 채용 요청, Candidate Eval, Shadow 수습과 Lifecycle
 - Onboarding/Role Change/Offboarding 권한 요청과 Evidence
 - `governance-api`, `workforce-api`, 사용자 보고 API 제공
+- Live Office의 Business Ownership, Agent 상태 의미와 운영 View 우선순위 결정
 
 담당하지 않는 범위:
 
@@ -546,8 +547,10 @@ CEO Summary Event에 본부별 전체 Payload를 복사하지 않는다. 공식 
 
 ### 8.4 AI Office 제공 계약
 
+- 영주님은 Live Office·CEO·Workforce의 Business Owner다. 공통 Frontend Platform 기술 구현은 도현님이 담당하고 동규님이 Risk·QA 계약을 검토한다.
 - Live Office의 8개 조직, Agent Roster, Queue, SLA, Handoff, Approval과 Incident 집계 Read Model을 제공한다.
 - Agent 상세에는 Profile·Prompt·Skill·Tool·Model Version, 현재 `case_id`, Heartbeat, 비용, Eval과 Permission 만료를 제공한다.
+- Agent 업무 상태는 Hermes Kanban Task/Assignee와 Runtime Heartbeat를 `agent.status.v1`로 변환한 공식 Projection을 사용한다. Kanban은 업무 상태일 뿐 Risk 승인·주문·원장·QA 판정을 대체하지 않는다.
 - `DEMO`, `PAPER`, `LIVE` Mode는 Backend Session과 Fund 권한으로 결정하고 Browser Local State로 전환하지 않는다.
 - CEO 승인, Strategy Promotion과 Workforce Lifecycle Command는 `governance-api`·`workforce-api`로 받고 사유, 멱등 키, 예상 Version과 Audit 결과를 보존한다.
 - CEO와 인사팀 화면은 Risk·QA Block을 숨기거나 해제할 수 없다.
@@ -638,7 +641,7 @@ Supabase DB Backup에는 Storage Object 복구가 별도라는 전제로 Private
 
 ## 11. 화면과 운영 View
 
-영주님 담당 화면은 현재 `ai-office/` Pixel Office를 8개 조직 기반 Live Office로 바꾸고, 아래 업무용 View를 함께 제공한다.
+현재 `ai-office/` Pixel Office는 8개 조직·2개 층으로 바뀌었지만 업무 상태는 Scripted Simulation이다. 영주님은 이를 공식 Kanban·Domain Event 기반 Live Office로 전환하고 아래 업무용 View의 제품 우선순위와 의미를 소유한다.
 
 1. **CEO Overview:** NAV, PnL, Cash, Risk State, Strategy, Incident.
 2. **Decision Inbox:** 사용자 승인, 위원회 안건, Escalation과 만료.

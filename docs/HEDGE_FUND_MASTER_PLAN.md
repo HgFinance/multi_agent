@@ -800,7 +800,7 @@ priority =
 | 1. 리서치본부 | Microstructure Analyst | 호가, 체결, 스프레드와 유동성 분석 | 미시구조 이벤트 |
 | 1. 리서치본부 | Technical Analyst | 추세, 돌파, 거래량과 변동성 분석 | 가격 이벤트 |
 | 1. 리서치본부 | Fundamental Analyst | 재무, 밸류에이션과 실적 분석 | 저빈도/캐시 |
-| 1. 리서치본부 | News/Sentiment Analyst | 뉴스, 공시, 촉매, 내러티브와 심리 분석 | 문서 이벤트 |
+| 1. 리서치본부 | News/Sentiment Analyst | 뉴스, 공시, 승인된 X Watchlist, 촉매, 내러티브와 심리 분석 | 문서·소셜 이벤트 |
 | 1. 리서치본부 | Sector/Regime Analyst | 동종 종목, 섹터, 매크로와 시장 국면 분석 | 섹터/국면 이벤트 |
 | 2. 트레이딩본부 | Trading Supervisor | Research와 Strategy Signal을 거래 Case로 통합 | 주문 후보 |
 | 2. 트레이딩본부 | Bull Researcher | 상승 논거, 촉매와 기대수익 주장 | 심층 분석 |
@@ -831,6 +831,7 @@ priority =
 |---|---|
 | 거래량 및 가격 돌파 | 리서치본부의 Microstructure + Technical |
 | 뉴스 속보 | 리서치본부 News + 트레이딩본부 Bull/Bear + Evidence QA |
+| 승인 X 계정의 중요 Post | 리서치본부 News + Evidence QA, 교차 검증 후 필요 시 Bull/Bear |
 | 섹터 전체 급변 | 리서치본부 Sector/Regime + 리스크본부 Market Risk |
 | 보유 종목 급락 | 6개 본부 중요 Case + 결정론적 Risk Check |
 | 손실 한도 접근 | CEO/LLM 판단을 기다리지 않고 Risk Engine 즉시 실행 |
@@ -858,6 +859,7 @@ SymbolState
 - 투자 논리의 무효화 조건 발생
 - 목표가 또는 손절 수준 접근
 - 새로운 고중요도 뉴스
+- 승인 X Watchlist의 중요 Post가 공시·뉴스·시장 데이터로 교차 확인됨
 - 시장 국면 전환
 - 포트폴리오 위험 변화
 - 기존 결정 만료
@@ -873,7 +875,7 @@ RAG를 하나의 벡터 저장소로 취급하지 않고 다음 계층으로 분
 | 계층 | 데이터 | 조회 방식 |
 |---|---|---|
 | Fact Store | 가격, 특징, 재무, 포지션, 주문, PnL | SQL/시계열 조회 |
-| Document RAG | 공시, 뉴스, 실적 발표, 리서치, 매크로 문서 | Hybrid Search |
+| Document RAG | 공시, 뉴스, 실적 발표, 리서치, 매크로 문서, 승인된 공개 Social Evidence | Hybrid Search |
 | Decision Memory | 과거 논거, 판단, 주문, 결과, 회고 | 메타데이터 + 의미 검색 |
 | Policy Store | 투자 정책, 위험 한도, 운영 절차 | 버전 고정 조회 |
 
@@ -901,6 +903,7 @@ embedding_version
 - 분석 시각 이후에 관측된 문서는 조회할 수 없다.
 - 수정된 재무 및 경제 데이터는 당시 공개 버전을 보존한다.
 - 뉴스의 게시 시각과 시스템 최초 관측 시각을 함께 저장한다.
+- X Post는 Post ID·작성자 ID·수정/삭제 상태를 보존하고, 삭제된 본문은 RAG와 Cache에서도 제거한다.
 - 백테스트와 Replay는 동일한 시간 필터를 사용한다.
 - 데이터 공급자 장애로 나중에 수집한 문서를 과거 분석에 삽입하지 않는다.
 
@@ -910,7 +913,8 @@ embedding_version
 2. 키워드 검색과 Vector Search를 결합한다.
 3. 최신성, 출처 신뢰도 및 이벤트 관련성으로 재정렬한다.
 4. 중복 기사를 제거한다.
-5. 문서 ID와 인용 가능한 근거를 에이전트에 전달한다.
+5. Social Evidence는 의견·주장·인용을 구분하고 공시·뉴스·시장 데이터의 교차 검증 상태를 확인한다.
+6. 문서 ID와 인용 가능한 근거를 에이전트에 전달한다.
 
 ### 9.5 Decision Memory
 
@@ -1375,7 +1379,7 @@ multi_agent/
 
 ### 15.2 AI Office와 대시보드 화면
 
-현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 이를 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 **조직 관제·탐색 화면**으로 발전시킨다. 현재 12개 고정 방과 Scripted Simulation은 프로젝트 조직이나 실시간 업무 상태의 기준이 아니며, 8개 조직과 Backend Event를 사용하는 데이터 기반 구조로 교체한다.
+현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 원본 12개 부서는 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀 등 8개 조직·2개 층으로 전환됐고 Trading/Portfolio DEMO Snapshot도 연결됐다. 다만 Scripted Simulation과 테스트 Paper Loop가 아직 업무·Snapshot의 원천이므로 실시간 운영 화면으로 간주하지 않는다. 이를 8개 조직의 실제 Agent·Domain Event를 사용하는 **조직 관제·탐색 화면**으로 발전시킨다.
 
 첫 화면의 Live Office에서 Agent, 본부, Queue, Approval과 Incident를 보고, 다음 업무용 View로 이동한다.
 
@@ -1390,7 +1394,7 @@ multi_agent/
 - `Agent Workforce`: 본부별 Work Queue, SLA, Agent 상태, Skill Gap, 비용과 자기 개선 이력
 - `Derivatives`: Futures Curve, Roll Calendar, Option Chain, IV Surface, Greeks와 Multi-leg Leg Risk
 
-Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 캐릭터의 움직임은 공식 Agent Runtime Event의 Projection이고, Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
+Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 업무 상태는 Hermes Kanban의 Task·Assignee 상태와 Runtime Heartbeat를 읽기 전용 Bridge가 `agent.status.v1`로 변환하고, Projector가 만든 Supabase Read Model과 Event에서만 생성한다. Agent 캐릭터의 움직임은 이 공식 상태의 Projection이다. Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
 
 ### 15.2.1 실시간 Frontend 계약
 
@@ -1400,8 +1404,11 @@ Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들�
 4. Client는 Heartbeat, 지수형 재연결, Sequence Gap과 Staleness를 감지한다.
 5. 누락 Event는 추측하지 않고 Snapshot을 다시 읽어 복구한다.
 6. `DEMO`, `PAPER`, `LIVE`는 Backend Session으로 분리하고 모든 화면에 현재 Mode를 표시한다.
+7. Browser와 BFF는 Hermes Kanban SQLite를 직접 읽거나 Task를 수정하지 않는다.
 
 Frontend는 Supabase Service Role, Broker와 LS Credential을 갖지 않으며 Risk 계산, OMS 전이와 Ledger Posting을 수행하지 않는다. 승인, Pause와 Kill Switch는 FastAPI Command로만 요청하고 사용자 Identity, 사유, 영향 Preview, 멱등 키, 예상 Version과 Audit Event를 남긴다. 상세 UX, 상태 계약과 구현 순서는 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
+
+Live Office Business Owner는 영주님, 공통 Frontend Platform의 기술 DRI와 Kanban Status Bridge 구현 Owner는 도현님, Risk·QA Contract Reviewer는 동규님이다. 이 소유권과 상태 매핑 결정은 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
 
 ### 15.3 Alerting과 On-call
 
