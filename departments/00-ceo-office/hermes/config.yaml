@@ -45,6 +45,10 @@ implementation:
        구성 재요청 시 중복 삽입 방지. Repository는 인터페이스+In-Memory뿐, asyncpg 배선은 미착수.
        회계 절반(전략별 PnL·Drawdown 수치 계산)은
        departments/05-accounting-portfolio/reporting/daily_report.py가 별도로 완료"
+    - "F24 Notification — departments/00-ceo-office/src/notification/notification.py. 심각도->채널
+       결정론적 매핑, dedup_key(fund+event+scope) 기반 억제, CRITICAL은 절대 억제하지 않음, 심각도
+       불명(None/미지 값)은 CRITICAL로 승격(fail-safe). Repository는 인터페이스+In-Memory뿐,
+       asyncpg 배선은 미착수"
   in_progress: []
   not_started:
     - "asyncpg Repository 실 구현 — MandateVersionRepository는 인터페이스와 In-Memory 구현만 있다. 실제 governance.mandate_versions 배선은 미착수"
@@ -56,7 +60,8 @@ implementation:
        아직 Snapshot 조회 엔드포인트를 안 갖고 있어 daily_report.py의 SnapshotRef는 호출자가 직접
        채워야 한다. reporting-api(POST /reporting/v1/reports 등) 엔드포인트와 실제 렌더링(Reporting
        Worker, object_path 생성)도 미구현"
-    - "F24 Notification — governance.notifications 테이블만 있음"
+    - "F24 Notification 실 연동 — 실제 Domain Event(risk.breach.v1 등) 구독, 발송 Adapter(Email/Push/SMS),
+       governance-api 엔드포인트가 전부 미구현. 지금은 NotificationRequest를 호출자가 직접 만들어야 한다"
     - "POST /governance/v1/... FastAPI 엔드포인트 — 타입만 정의됐고 서비스가 없다"
 
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2, 2026-07-29)
