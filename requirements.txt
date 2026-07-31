@@ -42,6 +42,9 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp
 prometheus-client
 
+# --- Test (Risk/QA 자체 점검 pytest 전환분, departments/03-risk, 06-ai-qa-audit) ---
+pytest
+
 # NOTE: The Hermes agent runtime itself (NousResearch/hermes-agent) is a separate
 # CLI/orchestrator that these department .yaml files target — it is not a PyPI
 # package and is not listed here; install it per its own repo instructions.
