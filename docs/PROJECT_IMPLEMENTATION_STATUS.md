@@ -114,6 +114,8 @@ Production 사용이 가능하다는 뜻은 아니다.
 - Risk/QA Profile의 `tool_allowlist`와 `forbidden_tools`를 먼저 확정한다.
 - Kanban 상태 매핑과 Event Contract를 독립 검증하고 Frontend 상태 오표시 Test를 담당한다.
 - Risk Decision, QA Finding과 Trace를 Supabase/Event Bus에 실제 기록하는 Adapter가 필요하다.
+- Risk: VaR, Correlation Shock 등 P1 Risk Metric과 P1 티어 페르소나 `operational-counterparty-risk-agent` 연동은 아직 착수하지 않았다.
+- QA: P1 티어 페르소나(`model-risk-agent`, `internal-audit-agent`, `incident-postmortem-agent`)는 미구현이며, `audit.qa_decisions`에 `calculation_version`/`input_hash` 컬럼을 추가하는 Migration PR도 아직 진행하지 않았다.
 
 ## 4. 공통 기반 구현
 

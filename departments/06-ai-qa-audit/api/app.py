@@ -26,6 +26,7 @@ tool_permission_check.py/incident_timeline.py/agentic-rag를 감싸는 FastAPI �
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -54,6 +55,17 @@ from tool_permission_check import (  # noqa: E402
     record_and_check_tool_call,
 )
 from trace_recorder import TraceRecorder, TraceRecorderError  # noqa: E402
+
+# DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
+# write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
+# .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
+_DATABASE_URL = os.environ.get("DATABASE_URL")
+if _DATABASE_URL:
+    from repository import PostgresAuditRepository  # noqa: E402
+
+    _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
+else:
+    _audit_repository = None
 
 
 # --- Request 모델 ------------------------------------------------------------------
@@ -194,8 +206,8 @@ class ComplianceCheckRequest(BaseModel):
 app = FastAPI(title="QA Domain API", version="v1")
 evidence_engine = EvidenceQaEngine()
 ops_monitor = OpsHealthMonitor()
-recorder = TraceRecorder()
-timeline = IncidentTimeline()
+recorder = TraceRecorder(repository=_audit_repository)
+timeline = IncidentTimeline(repository=_audit_repository)
 evidence_store = EvidenceStore()  # rag-librarian-evidence-curator 실연동 전까지 스텁
 
 

@@ -24,7 +24,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from repository import PostgresAuditRepository
 
 
 class AgentRunStatus(StrEnum):
@@ -116,10 +120,13 @@ class TraceRecorder:
     """결정론적 Trace 기록소. svc_audit_collector가 이 모양대로 Supabase에 적재한다
     (지금은 인메모리 - DB 배선은 Sprint K0)."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: "PostgresAuditRepository | None" = None) -> None:
         self.runs: dict[UUID, AgentRunRecord] = {}
         self.tool_calls: dict[UUID, ToolCallRecord] = {}
         self._by_profile_input: dict[tuple[UUID, str], UUID] = {}
+        # repository가 있으면 audit.agent_runs/tool_calls에 write-through 한다(repository.py 참고).
+        # 인메모리는 그대로 불변식 검사의 근거로 남는다 - RedisTradingStateStore와 같은 구도.
+        self._repository = repository
 
     # -- Agent Run -------------------------------------------------------------
 
@@ -152,6 +159,8 @@ class TraceRecorder:
         )
         self.runs[run.agent_run_id] = run
         self._by_profile_input[key] = run.agent_run_id
+        if self._repository is not None:
+            self._repository.insert_run(run)
         return run
 
     def complete_run(
@@ -172,6 +181,7 @@ class TraceRecorder:
         run.token_usage = token_usage or {}
         run.cost = cost or {}
         run.trace_uri = trace_uri
+        self._sync_run_terminal(run)
         return run
 
     def fail_run(self, agent_run_id: UUID, error_code: str, *, ended_at: datetime | None = None) -> AgentRunRecord:
@@ -179,6 +189,7 @@ class TraceRecorder:
         run.status = AgentRunStatus.FAILED
         run.error_code = error_code
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
     def timeout_run(self, agent_run_id: UUID, *, ended_at: datetime | None = None) -> AgentRunRecord:
@@ -187,12 +198,14 @@ class TraceRecorder:
         run = self._require_run(agent_run_id)
         run.status = AgentRunStatus.TIMED_OUT
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
     def cancel_run(self, agent_run_id: UUID, *, ended_at: datetime | None = None) -> AgentRunRecord:
         run = self._require_run(agent_run_id)
         run.status = AgentRunStatus.CANCELLED
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
     # -- Tool Call ---------------------------------------------------------------
@@ -229,6 +242,7 @@ class TraceRecorder:
         )
         call.error_code = reason
         call.completed_at = _now()
+        self._sync_tool_call_terminal(call)
         return call
 
     def complete_tool_call(
@@ -240,6 +254,7 @@ class TraceRecorder:
         call.output_hash = output_hash
         call.completed_at = completed_at or _now()
         call.latency_ms = _latency_ms(call.occurred_at, call.completed_at)
+        self._sync_tool_call_terminal(call)
         return call
 
     def fail_tool_call(
@@ -251,9 +266,20 @@ class TraceRecorder:
         call.error_code = error_code
         call.completed_at = completed_at or _now()
         call.latency_ms = _latency_ms(call.occurred_at, call.completed_at)
+        self._sync_tool_call_terminal(call)
         return call
 
     # -- 내부 ------------------------------------------------------------------
+
+    def _sync_run_terminal(self, run: AgentRunRecord) -> None:
+        if self._repository is not None:
+            self._repository.update_run_terminal(run)
+
+    def _sync_tool_call_terminal(self, call: ToolCallRecord) -> None:
+        # audit.tool_calls는 append-only(DB 트리거) - REQUESTED/ALLOWED 중간 상태는 쓰지 않고
+        # 종결 상태(DENIED/COMPLETED/FAILED)에 도달했을 때 최종 스냅샷 1행만 insert한다.
+        if self._repository is not None:
+            self._repository.insert_tool_call_terminal(call)
 
     def _require_run(self, agent_run_id: UUID) -> AgentRunRecord:
         run = self.runs.get(agent_run_id)
