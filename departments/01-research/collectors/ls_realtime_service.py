@@ -185,6 +185,32 @@ def load_symbols(env: dict) -> tuple[str, ...]:
     return symbols
 
 
+async def _heartbeat(sinks, stop: asyncio.Event, *, interval_seconds: float,
+                     log=print) -> None:
+    """적재 증분을 주기적으로 로그에 찍는다. stop 이 서야 끝난다.
+
+    세션 통계는 세션이 끝나야 나오므로 장중에는 로그가 조용하다 - "돌고는 있는
+    건가" 를 로그만으로 알 수 있어야 운영이 된다. 증분 0 이 반복되면 그것대로
+    신호다(수신 정지 - 재접속 경로가 못 잡은 조용한 단절).
+    """
+    prev_ticks = prev_quotes = prev_msgs = 0
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            return  # stop
+        except asyncio.TimeoutError:
+            pass
+        ticks = sum(s.stats.written_ticks for s in sinks)
+        quotes = sum(s.stats.written_quotes for s in sinks)
+        msgs = sum(s.stats.messages for s in sinks)
+        log(
+            f"[{datetime.now(KST):%H:%M:%S}] 수신 +{msgs - prev_msgs:,} | "
+            f"적재 체결 +{ticks - prev_ticks:,} 호가 +{quotes - prev_quotes:,} | "
+            f"누적 {ticks:,}+{quotes:,}"
+        )
+        prev_ticks, prev_quotes, prev_msgs = ticks, quotes, msgs
+
+
 # ---------------------------------------------------------------------------
 # 세션 실행
 # ---------------------------------------------------------------------------
@@ -240,6 +266,8 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
     print(f"  구독 {len(subs)}건 ({len(iid_by_symbol)}종목) -> 소켓 {len(shards)}개 "
           f"(소켓당 최대 {SUBSCRIPTIONS_PER_SOCKET}) {mode} {ws_url}", flush=True)
 
+    heartbeat_seconds = max(float(env.get("LS_HEARTBEAT_SECONDS") or 60), 5.0)
+
     client = LsRestClient()
     while not stop.is_set():
         remaining = (window.ends_at - datetime.now(KST)).total_seconds()
@@ -263,10 +291,16 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                 asyncio.create_task(w.run(max_seconds=remaining)) for w in workers
             ]
             stop_task = asyncio.create_task(stop.wait())
+            # 적재가 로그에서 보이게 - 60초마다 증분을 찍는다 (재일님 지적 2026-07-31
+            # "실시간으로 적재되는 게 눈으로 안 보인다"). stop 에서만 끝나는 task 라
+            # 아래 wait 의 pending 취소 경로가 함께 정리한다.
+            hb_task = asyncio.create_task(
+                _heartbeat(sinks, stop, interval_seconds=heartbeat_seconds)
+            )
             # 소켓 하나가 죽으면(재접속 소진) 전체를 세우고 함께 재구축한다 -
             # 부분 생존을 허용하면 "절반만 수집되는" 상태가 조용히 지속된다.
             done, pending = await asyncio.wait(
-                {*run_tasks, stop_task}, return_when=asyncio.FIRST_COMPLETED
+                {*run_tasks, stop_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
             )
             for t in pending:
                 t.cancel()
@@ -277,6 +311,8 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             for t in run_tasks:
                 if t in done:
                     t.result()  # 재접속 소진 예외를 여기서 드러낸다
+            if hb_task in done and not hb_task.cancelled():
+                hb_task.result()  # 심박 버그가 조용한 재구축 루프로 위장되지 않게
             for i, s in enumerate(sinks):
                 print(f"  소켓{i}: {s.stats.summary()}", flush=True)
             if stop.is_set():
@@ -423,6 +459,35 @@ def _check_symbols_precedence(tmp_path: Path):
     print("  Watchlist 로드           OK")
 
 
+def _check_heartbeat():
+    """증분 계산과 stop 종료. 로그가 조용한 단절을 숨기지 않는지의 기반이다."""
+    from types import SimpleNamespace
+
+    async def scenario():
+        stop = asyncio.Event()
+        stats = SimpleNamespace(written_ticks=10, written_quotes=5, messages=20)
+        sinks = [SimpleNamespace(stats=stats)]
+        lines: list[str] = []
+
+        async def drive():
+            await asyncio.sleep(0.05)  # 첫 심박 후 통계 증가
+            stats.written_ticks, stats.written_quotes, stats.messages = 30, 15, 60
+            await asyncio.sleep(0.04)
+            stop.set()
+
+        await asyncio.gather(
+            _heartbeat(sinks, stop, interval_seconds=0.03, log=lines.append),
+            drive(),
+        )
+        return lines
+
+    lines = asyncio.run(scenario())
+    assert len(lines) >= 2, f"심박이 {len(lines)}줄뿐이다"
+    assert "+10" in lines[0] and "+5" in lines[0], lines[0]      # 첫 증분 = 누적
+    assert any("+20" in ln and "+10" in ln for ln in lines[1:]), lines  # 이후 증분만
+    print("  적재 심박                OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -435,7 +500,8 @@ if __name__ == "__main__":
         _check_subscriptions()
         with tempfile.TemporaryDirectory() as td:
             _check_symbols_precedence(Path(td))
-        print("상주 시세 서비스 3개 영역 통과. 상주 실행은 인자 없이")
+        _check_heartbeat()
+        print("상주 시세 서비스 4개 영역 통과. 상주 실행은 인자 없이")
         raise SystemExit(0)
 
     raise SystemExit(asyncio.run(main_async()))
