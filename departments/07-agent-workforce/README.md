@@ -56,11 +56,30 @@ Scorecard 관찰의 실제 API 배선.
 - Supervisor `model` 설정과 개별 직원의 `agent_profile_versions.model_id`는 다른 계층이다. 어느 쪽도
   QA Eval과 CEO 승인 없이 Production 활성화하지 않는다.
 
+## scorecard/
+
+- `scorecard/cost.py` — **F27 LLM Budget** 중 인사팀 담당분.
+  F27은 두 부서가 나눠 맡는다. **플랫폼/인프라**가 토큰 측정·과금·성능저하 차단(집행),
+  **인사팀**이 에이전트별 예산(`agent_profile_versions.token_budget`) 설정과 비용 귀속
+  (`workforce.cost_snapshots`), Scorecard, 조치 **권고**를 맡는다. 인사팀은 집행하지 않는다.
+  - `assess_budget()` — 예산 대비 사용률과 조치 권고
+  - `build_department_scorecard()` — `get_department_scorecard` 응답 조립
+    (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC §3.4)
+
+주의 두 가지:
+- **통제 부서(03-risk, 06-ai-qa-audit)는 예산을 초과해도 기능 축소를 권고하지 않는다.**
+  CEO Escalation 으로 보낸다 — 비용 절감이 Risk/QA 독립성을 없애면 안 된다(팀 가이드 10.3).
+- **Snapshot 이 없으면 0으로 채우지 않는다.** `UNKNOWN`으로 두고 측정 누락을 조사한다 —
+  0으로 채우면 "예산 여유 있음"으로 잘못 보인다.
+
+`quality.eval_score`는 QA/감사본부 소유(`audit.eval_runs`)라 항상 `None`으로 두고 audit-api가 채운다.
+
 ## 테스트
 
 ```bash
 python departments/07-agent-workforce/improvements/candidate.py  # 후보 계약·근거·롤백 검증
 python departments/07-agent-workforce/improvements/workflow.py   # 상태 머신·자기승인 차단·감사
+python departments/07-agent-workforce/scorecard/cost.py          # 예산·비용 Scorecard
 ```
 
 `__main__` assert 자체 점검 (F01 CEO Office 모듈과 동일 관례).
