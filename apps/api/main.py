@@ -4,13 +4,17 @@
 근거: docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md 5.2(연결 순서), 6(명령 경계)
       docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md 4절 `apps/api/`
 
+이 파일은 조립만 한다. 부서별 Agent 경로는 각 Router 파일이 소유한다
+(`accounting.py`, `trading.py`). 프로세스는 하나다 - 부서별로 프로세스를 쪼개는
+것은 Service Identity와 인증이 실제로 생긴 뒤에 한다.
+
 경계 두 개를 코드로 강제한다.
 
 1. **금융 상태는 Read-only다.** 이 서비스에는 주문 제출·분개 Posting·상태 변경 경로가 없다.
    계획 6절의 위험 Command(SET_TRADING_STATE 등)는 인증·승인·Audit가 붙기 전까지
    여기 열지 않는다. Hermes chat은 Tool을 실행할 수 있으므로 기본 비활성화한다.
-2. **Agent 응답은 수치가 아니다.** `/agent/ask`가 돌려주는 것은 Hermes CLI의 텍스트고,
-   공식 Position·PnL·NAV는 오직 `/ui/snapshot`에서만 나온다
+2. **Agent 응답은 수치가 아니다.** `/{부서}/agent/ask`가 돌려주는 것은 Hermes CLI의
+   텍스트고, 공식 Position·PnL·NAV는 오직 `/ui/snapshot`에서만 나온다
    (팀 가이드 원칙 5: 회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
 
 실행:
@@ -20,36 +24,23 @@
 """
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 
+import accounting  # noqa: E402
+import hermes_cli  # noqa: E402
+import trading  # noqa: E402
 from ui_read_model import build_ui_snapshot  # noqa: E402
 
-# Hermes CLI 이름 -> 저장소 Profile 경로. 이 브랜치는 도현 파트만 노출한다.
-# 다른 본부 Agent를 우리 BFF가 대신 호출하면 권한 경계가 무너진다(마스터플랜 5.6).
-DEPARTMENTS = {
-    "trading-department": "departments/02-trading/hermes/config.yaml",
-    "accounting-portfolio-department": "departments/05-accounting-portfolio/hermes/config.yaml",
-}
-
-# Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
-# 권한과 Tool Allowlist가 붙기 전에는 명시적인 로컬 개발 Opt-in 없이는 열지 않는다.
-ENABLE_AGENT_ASK = os.getenv("ENABLE_AGENT_ASK", "false").strip().lower() in {
-    "1", "true", "yes", "on",
-}
-
-app = FastAPI(title="AI Office BFF", version="0.1.0")
+app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     # ponytail: 개발용 로컬 Origin 고정. 배포 Origin이 정해지면 환경변수로 뺀다.
@@ -57,6 +48,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# 도현 파트 2개만 등록한다. 다른 본부 Agent를 우리 BFF가 대신 호출하면
+# 권한 경계가 무너진다(마스터플랜 5.6).
+app.include_router(accounting.router)
+app.include_router(trading.router)
 
 
 def _demo_state():
@@ -81,7 +77,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "mode": "DEMO",
-        "agent_ask_enabled": ENABLE_AGENT_ASK,
+        "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
+        "departments": [accounting.DEPARTMENT, trading.DEPARTMENT],
     }
 
 
@@ -95,53 +92,6 @@ def ui_snapshot() -> dict:
         snapshot=loop.snapshot(),
         mode="DEMO",
     )
-
-
-class AgentAsk(BaseModel):
-    department: str
-    query: str = Field(min_length=1, max_length=2000)
-
-
-@app.post("/agent/ask")
-def agent_ask(req: AgentAsk) -> dict:
-    """명시적으로 허용된 로컬 개발 환경에서만 Hermes 부서 Agent에 질의한다."""
-    if not ENABLE_AGENT_ASK:
-        raise HTTPException(
-            503,
-            "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",
-        )
-    if req.department not in DEPARTMENTS:
-        raise HTTPException(404, f"알 수 없는 부서: {req.department}")
-
-    timeout = _timeout_of(req.department)
-    try:
-        # shell=False. 사용자 문자열이 셸을 거치지 않게 인자 리스트로만 넘긴다.
-        proc = subprocess.run(
-            [req.department, "chat", "-q", req.query],
-            capture_output=True, text=True, timeout=timeout, cwd=ROOT,
-        )
-    except FileNotFoundError:
-        # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).
-        raise HTTPException(503, f"Hermes CLI 없음: {req.department}")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, f"{timeout}s 초과")
-
-    if proc.returncode != 0:
-        raise HTTPException(502, proc.stderr.strip()[:500] or "agent failed")
-
-    return {
-        "department": req.department,
-        "answer": proc.stdout.strip(),
-        # 화면이 이 값을 수치로 쓰지 못하게 계약에 박아둔다.
-        "authoritative": False,
-        "source_of_record": "/ui/snapshot",
-    }
-
-
-def _timeout_of(department: str) -> int:
-    """Profile의 agent.timeout_seconds를 그대로 쓴다. 부서마다 다르다."""
-    cfg = yaml.safe_load((ROOT / DEPARTMENTS[department]).read_text(encoding="utf-8"))
-    return int(cfg["agent"]["timeout_seconds"])
 
 
 if __name__ == "__main__":
@@ -162,16 +112,25 @@ if __name__ == "__main__":
     # 두 번 불러도 같은 Snapshot이다. Read-only가 상태를 바꾸면 안 된다
     assert c.get("/ui/snapshot").json()["portfolio"]["nav"] == snap["portfolio"]["nav"]
 
-    # 인증·Tool Allowlist가 없는 기본 환경에서는 모든 Agent 호출이 닫혀 있다.
-    assert c.post("/agent/ask", json={"department": "risk-management", "query": "x"}).status_code == 503
-    assert c.post("/agent/ask", json={"department": "ceo-agent", "query": "x"}).status_code == 503
+    # 인증·Tool Allowlist가 없는 기본 환경에서는 Agent 호출이 전부 닫혀 있다
+    assert c.post("/accounting/agent/ask", json={"query": "NAV?"}).status_code == 503
+    assert c.post("/trading/agent/ask", json={"query": "pending?"}).status_code == 503
     # 빈 질의는 스키마에서 걸린다
-    assert c.post("/agent/ask", json={"department": "trading-department", "query": ""}).status_code == 422
-    # 우리 부서도 명시적 Opt-in 전에는 503이다.
-    assert c.post(
-        "/agent/ask", json={"department": "accounting-portfolio-department", "query": "NAV?"}
-    ).status_code == 503
+    assert c.post("/accounting/agent/ask", json={"query": ""}).status_code == 422
+    # 부서를 Body로 지정할 방법이 없다. 다른 본부 경로는 존재하지 않는다
+    assert c.post("/agent/ask", json={"department": "risk-management", "query": "x"}).status_code == 404
+    assert c.post("/risk/agent/ask", json={"query": "x"}).status_code == 404
+    assert c.post("/ceo/agent/ask", json={"query": "x"}).status_code == 404
+    # 공개 경로 전체를 못 박는다. Command 경로(Posting, NAV 확정, 주문 제출)가
+    # 하나라도 늘면 여기서 깨진다 - 늘리려면 이 목록을 고쳐야 하고 Diff에 남는다
+    assert set(c.get("/openapi.json").json()["paths"]) == {
+        "/health", "/ui/snapshot", "/accounting/agent/ask", "/trading/agent/ask",
+    }, c.get("/openapi.json").json()["paths"].keys()
 
-    assert _timeout_of("accounting-portfolio-department") == 60
+    assert hermes_cli.timeout_of(accounting.CONFIG) == 60
 
-    print("ok - BFF 6개 영역 점검 통과")
+    # session_id는 stderr에서 뽑는다. 없으면 None이지 빈 문자열이 아니다
+    assert hermes_cli.session_id_of("\nsession_id: abc123\n") == "abc123"
+    assert hermes_cli.session_id_of("") is None
+
+    print("ok - BFF 7개 영역 점검 통과")
