@@ -1,12 +1,13 @@
 # Personal Hedge Fund Agent - Technology Stack Decisions
 
-> 문서 상태: Core Stack v1.4
+> 문서 상태: Core Stack v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: Core Paper Trading 구현  
 > 원칙: 사용자가 지정한 필수 도구를 유지하되 기능 중복과 Vendor Lock-in을 최소화한다.  
 > 관련 문서: [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > 전사 데이터·부서별 Library 구현: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
+> 조건부 고도화 기술과 도입 Trigger: [WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md](../01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md#8-기술-스택-고도화-연구)
 
 ## 1. 확정 스택 요약
 
@@ -514,3 +515,9 @@ LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 
 ## 17. 최종 결정
 
 > Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase는 Transaction·Vector·Auth·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
+
+Kafka/Redpanda, Flink, ClickHouse, Feast, Neo4j, Ray와 Kubernetes는 현재 Core 확정 스택이 아니다.
+부하, Replay, Feature 일관성, Graph Query, 분산 연구 또는 배포 격리 문제가 실측되고 기존 스택이
+정의된 SLO를 충족하지 못할 때만 [전사 고도화 연구 로드맵](../01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)의
+Trigger와 ADR을 통과해 도입한다. Qlib와 RD-Agent-Quant는 Strategy Factory의 격리 Spike
+후보이며 Trading, Risk, OMS와 Ledger Runtime의 직접 Dependency로 넣지 않는다.

@@ -2,7 +2,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
 
 ## 현재 상태
 
@@ -17,6 +17,7 @@
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
 - OpenDART 85개 API의 공시·재무·지분·주요사항 요청·응답 참조 문서
 - KRX Data Marketplace 31개 API의 지수·주식·증권상품·채권·파생상품·일반상품·ESG 요청·응답 참조 문서
+- SerpApi 전체 Search Engine 카탈로그와 뉴스·웹·트렌드·학술·특허·영상의 수집·Evidence 승격 가이드
 - 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot과 Read-only FastAPI BFF
 - Hermes Kanban을 Agent 상태 Source로 사용하는 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 - 공식 X API 기반 유명 인사 Social Insight Watchlist와 교차 검증 계획(P1, 미구현)
@@ -420,6 +421,7 @@ docs/
 |---|---|
 | [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | 제품의 전체 비전, 실제 서비스 전환과 장기 확장 경계를 확인할 때 |
 | [Project Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) | 팀원별 구현 결과, GitHub 통합 상태와 다음 작업을 확인할 때 |
+| [Whole-System Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) | 전 본부 고도화 Gate, 연구 근거, 기술 도입 시점과 보류 조건을 확인할 때 |
 | [Investment Case Specification](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) | 서비스 최소 단위의 상태, 증거, API와 완료 기준을 구현할 때 |
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
 | [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) | 기능 구현과 완료 조건을 확인할 때 |
@@ -432,13 +434,14 @@ docs/
 | [LS Open API 전체 참조](06-integrations/ls-openapi/README.md) | LS증권 REST·WebSocket API, TR 코드와 요청·응답 필드를 구현할 때 |
 | [OpenDART Open API 전체 참조](06-integrations/opendart/README.md) | 공시·기업·재무·지분·주요사항 85개 API와 수집·저장·RAG 계약을 구현할 때 |
 | [KRX Open API 전체 참조](06-integrations/krx-openapi/README.md) | 거래소 지수·주식·증권상품·채권·파생상품·일반상품·ESG 31개 API와 이용 제한을 구현할 때 |
+| [SerpApi Search Engine APIs 참조](06-integrations/serpapi/README.md) | 뉴스·웹·트렌드·학술·특허·영상 Discovery, Quota 운영과 Evidence 승격 경계를 구현할 때 |
 | [Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md) | 8개 Hermes Supervisor와 전문 Agent 직원의 역할·권한·Eval을 구현할 때 |
 | [재일님 팀 가이드](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) | 리서치·퀀트 수집, TimescaleDB와 전략 연구를 구현할 때 |
 | [도현님 팀 가이드](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) | Trading, OMS, Ledger, Position과 NAV를 구현할 때 |
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README, Master Plan, Implementation Status, AI Office Frontend, Accepted ADR, Repository Structure, Database 기준서와 ERD를 포함한 19개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을, `06-integrations/krx-openapi/`에는 31개 API를 분류한 8개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+README, Master Plan, Implementation Status, AI Office Frontend, Accepted ADR, Repository Structure, Database 기준서와 ERD를 포함한 19개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을, `06-integrations/krx-openapi/`에는 31개 API를 분류한 8개 개발용 참조 Markdown을, `06-integrations/serpapi/`에는 공식 전체 엔진 지도와 프로젝트 적용 계약을 나눈 7개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 

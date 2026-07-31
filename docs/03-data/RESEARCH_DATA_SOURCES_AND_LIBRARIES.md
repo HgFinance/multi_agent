@@ -34,6 +34,7 @@
 - 거래소 통계·지수·증권상품·파생상품 Reference는 [KRX Data Marketplace Open API 전체 참조](../06-integrations/krx-openapi/README.md)를 기준으로 검토한다. 공개 약관의 비상업 목적과 제3자 제공 제한 때문에 별도 상업 이용 계약이 확인되기 전에는 연구·내부 검증 Source로만 취급한다.
 - 한국 거시지표는 [한국은행 ECOS](https://ecos.bok.or.kr/api/)와 [KOSIS Open API](https://kosis.kr/openapi/index/index.jsp)를 사용한다.
 - 뉴스는 기사 검색 결과만 저장하는 것으로 끝내지 않는다. Story 중복 제거, 원출처, 게시·최초 관측 시각과 본문 저장 권한을 함께 관리한다.
+- [SerpApi Search Engine APIs](../06-integrations/serpapi/README.md)는 뉴스·웹·검색 관심도·학술·특허·영상의 Discovery 계층 후보로 사용한다. 검색 결과와 AI 검색 답변은 원출처 Evidence가 아니며 LS 가격·DART 공시·KRX 통계를 대체하지 않는다.
 - 무료 뉴스 API와 Website Scraping은 서비스 단계에서 그대로 사용할 수 있다고 가정하지 않는다. 본문 저장, RAG, 재배포와 모델 입력 권한을 계약별로 확인한다.
 - 컨센서스·추정치·정제 재무·산업 분류는 무료 Source의 공백이 크므로 P1 이후 별도 Vendor 계약 후보로 관리한다.
 - 외부 시장·공시·뉴스·거시 데이터는 중앙 Data Plane이 한 번만 수집하고, 각 본부 Agent는 승인된 Domain API로 참조한다.
@@ -259,6 +260,7 @@ Open DART는 공시검색, 기업개황, 원문파일, 고유번호와 XBRL 기�
 | 산업 통계 | 생산, 재고, 수출입, 지역·산업 지표 | KOSIS/공공데이터포털 | 일·월·분기 | 단위·계절조정·Revision 기록 |
 | Governance/ESG | 지배구조, 밸류업, ESG 공시 | DART/KRX | Event/연간 | 평가 점수와 원자료 분리 |
 | X 유명 인사 Watchlist | 정책 당국자, 기업 경영진·IR, 펀드매니저, 산업 전문가의 공개 Post | X API Filtered Stream | 준실시간 | 승인 계정만 수집하고 단독 거래 근거로 사용 금지 |
+| Search Discovery | 국내외 뉴스·공식 웹·논문·특허·영상의 원출처 후보 | SerpApi 승인 Engine | 5분~주간/Domain별 | 검색 결과는 `DISCOVERED`, 원출처 QA 뒤에만 인용 |
 
 [FRED API](https://fred.stlouisfed.org/docs/api/fred/overview.html)는 Series와 Release 단위 조회를 제공하고, ALFRED/Vintage Date를 통해 과거 시점의 값과 Revision을 다룰 수 있으므로 Global Macro Backtest에 적합하다.
 
@@ -271,7 +273,7 @@ Open DART는 공시검색, 기업개황, 원문파일, 고유번호와 XBRL 기�
 | Earnings Transcript | 경영진 어조, Guidance 변화 | 기업 IR 또는 계약형 Transcript Vendor | 본문 저장·Embedding 권한 |
 | 신용·채권 | Spread, 등급, 차환 Risk | 평가사·채권 Vendor | 재배포와 파생 Feature 권한 |
 | 대차·Borrow | 공매도 Capacity와 비용 | Broker/Prime/Vendor | Account별 사용권과 지연 정의 |
-| Search Trend | 소비자 관심과 Narrative 변화 | NAVER API HUB 등 | API 지속성, 표본 편향과 상업 이용 검토 |
+| Search Trend | 소비자 관심과 Narrative 변화 | SerpApi Google Trends, NAVER API HUB 등 | API 지속성, Query·Window 표본 편향과 상업 이용 검토 |
 | Supply Chain | 고객·공급자 관계, 수출입 Exposure | Vendor/공개 기업자료 | Entity 정확도와 시점 정보 |
 
 FnGuide DataGuide는 재무·주가·컨센서스 등 전문 데이터를 제공하지만, [공식 이용 안내](https://help-dataguide.fnguide.com/ko/articles/%EC%9D%B4%EC%9A%A9-%EB%B0%8F-%EC%9A%94%EA%B8%88-%EC%95%88%EB%82%B4-48b18a4b)에는 일반 DataGuide 데이터를 기계적으로 대량 추출하거나 DB 구축에 활용하는 행위를 제한한다고 명시되어 있다. Excel 구독을 자동화하지 말고 별도 API/Data Feed와 내부 DB·모델 사용 권한을 계약해야 한다.
@@ -353,6 +355,35 @@ Production에서는 뉴스 Vendor가 다음을 제공하는지 계약 전에 확
 - 전문 저장과 내부 검색 권한
 - Embedding/LLM 처리 허용 여부
 - 호출 한도, 지연 SLO와 Historical Backfill
+
+#### 5.4.1 SerpApi Search Intelligence
+
+**결정:** [SerpApi 전체 개발 참조](../06-integrations/serpapi/README.md)를 뉴스·웹·검색 관심도·학술·특허·영상의 Discovery Provider 평가 기준으로 사용한다. 초기 구현은 공통 Quota·오류 Adapter, Google News, Naver Search, Google Search와 Google Trends에 한정한다.
+
+SerpApi는 검색 결과를 구조화하지만 연결된 원출처 Content의 권위와 사용권을 대신 보증하는 Source가 아니다. 결과는 다음 흐름을 따른다.
+
+```text
+SerpApi Search Result
+  -> DISCOVERED
+  -> Canonical URL + Story Dedup
+  -> 원출처 또는 계약 News Document 수집
+  -> License·Published Time·Entity·Content QA
+  -> research.documents
+  -> CITABLE Evidence
+```
+
+적용 원칙:
+
+- 국내 실시간 가격·체결·호가는 계속 LS증권 Open API만 기준으로 사용한다.
+- Google Finance는 시세 원장, Risk Mark, PnL·NAV, Backtest와 주문 가격으로 사용하지 않는다.
+- Google AI Mode·AI Overview의 생성 답변은 Query와 Reference 후보 발견에만 쓰고 Evidence로 승격하지 않는다.
+- Google News와 Naver Search가 같은 기사를 반환해도 `document_id`를 중복 생성하지 않는다.
+- 검색 관심도는 Query, Topic ID, 지역, Category, Property, Window와 Template Version을 함께 저장한다.
+- Hermes·LangGraph Agent에는 SerpApi Key와 자유 형식 Proxy Tool을 주지 않고 승인된 `research-api` Tool만 제공한다.
+- Search Archive의 조회 가능 기간에 의존하지 않고, 보존이 허용된 Raw 응답은 수집 직후 Private Object Storage에 저장한다.
+- 검색 결과·Snippet, 원출처 전문, Embedding, LLM Context와 외부 재배포 권한을 각각 Source Registry에 기록한다.
+
+Evaluation 지표는 고유 원출처 발견률, Precision, 게시-관측 지연, Story 중복률, `CITABLE` 승격률과 유효 Evidence당 비용이다. 기존 BIGKinds·NAVER API HUB·공식 기관 Source 대비 증분 가치가 없으면 Production에 도입하지 않는다.
 
 ### 5.5 X Social Insight Watchlist
 
@@ -784,6 +815,7 @@ Version 숫자는 문서에 고정하지 않고 `uv.lock`으로 고정한다. �
 | 영역 | 라이브러리 | 도입 시점 | 주의사항 |
 |---|---|---|---|
 | Web Main Text | [trafilatura](https://trafilatura.readthedocs.io/en/stable/index.html) | 허용된 기업 IR/기관 Website | 수집 권한 확인, 원문 대체물 아님 |
+| Search API SDK | [`serpapi`](https://serpapi.com/integrations/python) | SerpApi Discovery 평가 | 공식 Package를 Adapter 뒤에 두고 Key·Quota·Schema를 자체 통제 |
 | RSS/Atom | `feedparser` | 기관·기업 Feed가 있는 경우 | Feed ID와 수정 Event 확인 |
 | Tabular DQ | `pandera` | DataFrame Contract가 늘어날 때 | Pydantic과 책임 중복 최소화 |
 | OCR | `PaddleOCR` 또는 검증된 OCR Adapter | Scanned PDF 비중이 높을 때 | 표·숫자 OCR Error Eval 필요 |
@@ -814,6 +846,7 @@ Version 숫자는 문서에 고정하지 않고 `uv.lock`으로 고정한다. �
 - Open DART는 `httpx + Pydantic` 공식 Adapter를 Source of Truth로 구현한다.
 - [OpenDartReader](https://github.com/FinanceData/OpenDartReader) 같은 Wrapper는 탐색과 Prototype에는 유용하지만 Production Contract를 Wrapper Object에 종속시키지 않는다.
 - KRX 비공식 Wrapper나 HTML Scraper는 Research Notebook에서만 사용할 수 있고 Production Source로 승격하려면 공식 API, License, Schema Fixture와 장애 대응을 갖춰야 한다.
+- SerpApi는 공식 `serpapi` SDK 또는 `httpx` 중 하나를 `SerpSearchProvider` Adapter 뒤에 둔다. Agent와 Business Logic을 SDK Response Object에 결합하지 않는다.
 - `pykrx`와 Website 내부 Endpoint 역공학을 핵심 Pipeline에 넣지 않는다.
 - LangGraph와 Hermes는 수집 Scheduler가 아니다. 수집은 결정론적 Worker가 하고 Agent는 승인된 Tool로 조회한다.
 
@@ -1257,6 +1290,10 @@ Collector가 이미 사용 중인 실제 Package와 Version은 Repository Lockfi
 - [KRX Open API 전체 개발 참조](../06-integrations/krx-openapi/README.md)
 - [KRX Data Marketplace Open API](https://openapi.krx.co.kr/contents/OPP/MAIN/main/index.cmd)
 - [KRX KIND](https://kind.krx.co.kr/)
+- [SerpApi Search Engine APIs 전체 개발 참조](../06-integrations/serpapi/README.md)
+- [SerpApi 공식 Search Engine APIs 카탈로그](https://serpapi.com/search-engine-apis)
+- [SerpApi 가격과 호출량](https://serpapi.com/pricing)
+- [SerpApi 약관](https://serpapi.com/legal)
 - [한국은행 ECOS Open API](https://ecos.bok.or.kr/api/)
 - [KOSIS Open API](https://kosis.kr/openapi/index/index.jsp)
 - [BIGKinds](https://www.kinds.or.kr/v2/intro/index.do)

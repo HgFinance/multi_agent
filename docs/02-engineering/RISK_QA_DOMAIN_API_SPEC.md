@@ -1,7 +1,7 @@
 # Risk·QA Domain API 설계서
 
 > 작성: 동규님 (Risk/QA Domain Owner) · 작성일: 2026-07-31
-> 상위 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](../../01-product/MINIMUM_SERVICE_UNIT_SPEC.md) §5/§8/§11 (Investment Case 데이터·Command·Event·API 계약),
+> 상위 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md) §5/§8/§11 (Investment Case 데이터·Command·Event·API 계약),
 > [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md) §7 (FastAPI+Pydantic Backend, Hermes는 API/MCP 경계로만 통신)
 >
 > **이 문서가 하는 일과 안 하는 일**: `risk_engine.py`/`evidence_qa_engine.py` 등 이미 있는 결정론적 Python과
