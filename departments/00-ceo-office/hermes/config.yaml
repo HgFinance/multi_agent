@@ -19,6 +19,37 @@ agent:
   personalities:
     executive-orchestrator: "You are the CEO Agent of a personal hedge fund investment agent. You translate the user's Mandate (capital, investment goals, allowed markets, loss limits, liquidity needs, prohibited conditions) into company-wide priorities, and route work, budget and SLAs across the six investment departments (Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI QA/Audit) plus the CEO-direct Agent Workforce (HR) Shared Service. You convene the Investment Committee, Strategy Planning Committee, Risk Committee and incident response meetings, then integrate department outputs into a single decision and explanation for the user. As Chief-of-Staff you summarize PM Pod/Book performance and risk, compare capital efficiency and Capacity, generate capital-reallocation candidates, draft Investment Committee agendas and memos, investigate drawdowns and regime shifts, flag overlap between new strategies and the existing portfolio, and track meeting decisions and action items to their due dates, auto-escalating anything overdue. You approve the Agent Workforce team's budget and org changes, but AI QA/Audit independently verifies every new Agent's Model/Prompt/Tool permissions — you never grant those yourself. You have NO authority to submit orders, approve risk, modify the official ledger, confirm NAV or close Audit Findings — the Risk, Accounting and AI QA departments hold that independent authority, and you never bypass their veto power."
 
+# CEO Office는 Agentic RAG 대상이 아니다. 문서 코퍼스에서 근거를 검색하는 역할이 아니라
+# 각 본부가 확정한 공식 Snapshot·Decision을 조회해 통합하는 역할이기 때문이다
+# (팀 가이드 3.1 "CEO는 외부 시장 데이터를 수집하지 않고 본부별 공식 API를 참조한다").
+# 문서 RAG가 필요한 곳은 리서치(F07)와 리스크의 compliance-policy-agent다.
+agentic_rag:
+  framework: null
+  status: "해당 없음 — 문서 검색이 아니라 공식 Read Model 조회로 근거를 얻는다"
+  target_personas: []
+
+# 구현 현황 (2026-07-31). 무엇이 되고 무엇이 안 됐는지 여기서 확인한다.
+# 코드 없는 항목을 코드로 만들지 않고 주석 백로그로 남긴다 (CLAUDE.md 부서 Profile 규약).
+implementation:
+  done:
+    - "F01 사용자 Mandate — departments/00-ceo-office/src/mandate/. governance.mandate_versions 위에 얹었고 스키마는 안 바꿨다"
+    - "policy.py — 구조화 정책 Pydantic 계약. DDL이 jsonb로만 둔 risk_bounds/universe_policy/approval_rules의 내부 형태를 정의하고, 값 범위 + 상호 모순 6종을 결정론적으로 검증(F01 완료조건: 잘못된 한도 조합 저장 불가). LLM 미사용"
+    - "service.py — Version 발급, content_hash 중복 방지(DDL unique와 이중 방어), 장중 변경 방향 판정(TIGHTEN/LOOSEN/NEUTRAL)"
+    - "통화 검증 (2026-07-31 결정 4-A) — mandate.currency를 accounting.funds.base_currency와 저장 시점에 대조. 불일치는 CurrencyMismatchError, Fund 통화 확인 불가는 FundNotFoundError로 저장 차단(개발원칙 9: 확인 불가 시 확대가 아니라 차단)"
+    - "lifecycle.py — Version 활성화 상태 전이(5.1). 완화·중립은 즉시, 확대(LOOSEN)와 최초 활성화는 사용자 승인 없으면 차단. 이전 Version effective_to 종료 + mandates.current_version 갱신 + mandate_decisions APPROVE 기록"
+    - "기준 자본 계약 확정 (2026-07-31, PR #26) — 한도 집행 기준은 회계 nav_runs.total_nav의 당일 장 시작 시점 값. base_capital은 Paper 시작 자본 선언값이자 첫날 회계 초기 현금 근거로만 쓰고 한도 분모로 쓰지 않는다"
+    - "governance-api 입출력 타입 정의 — docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2절"
+  in_progress: []
+  not_started:
+    - "asyncpg Repository 실 구현 — MandateVersionRepository는 인터페이스와 In-Memory 구현만 있다. 실제 governance.mandate_versions 배선은 미착수"
+    - "F01 완료조건 2번(Signal·Risk Decision이 mandate_version을 기록) — 트레이딩·리스크본부 코드 의존이라 CEO Office 단독으로 못 닫는다"
+    - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 지금은 방향 판정과 활성화 게이트만 있고 위원회 경유 경로가 없다"
+    - "Y1 나머지 — CEO Case 생성·Escalation·Daily Summary. governance.cases/escalations 테이블은 있고 로직이 없다"
+    - "Y2 위원회·승인 — committee_sessions/votes/decisions, approvals 테이블은 있고 Quorum·SoD 판정 로직이 없다. Y3(인사팀 Registry)를 먼저 해서 순서가 밀렸다"
+    - "F23 Daily Report — governance.report_runs는 있으나 각 본부 Snapshot API(portfolio/risk/strategy)가 아직 없어 반쪽만 가능. 회계본부와 공동 작업"
+    - "F24 Notification — governance.notifications 테이블만 있음"
+    - "POST /governance/v1/... FastAPI 엔드포인트 — 타입만 정의됐고 서비스가 없다"
+
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2, 2026-07-29)
 # executive-orchestrator는 CEO-00(CEO 에이전트)과 CEO-01(Chief of Staff)을 합친 페르소나 — 둘 다 P0라 격차 없음
 hiring_priority:
