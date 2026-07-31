@@ -30,6 +30,8 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -193,6 +195,19 @@ def _on_trading_state_store_error(request, exc: TradingStateStoreError):
     )
 
 
+@app.exception_handler(RequestValidationError)
+def _on_validation_error(request, exc: RequestValidationError):
+    # 스펙 1.4 에러 봉투를 요청 스키마 검증 실패에도 그대로 적용 — FastAPI 기본 {"detail": [...]}
+    # 형태를 그대로 내보내면 Hermes 클라이언트가 에러 봉투를 두 가지로 파싱해야 한다.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error_code": "RequestValidationError", "message": "요청 스키마 검증 실패",
+            "detail": {"errors": jsonable_encoder(exc.errors())}, "trace_id": None,
+        },
+    )
+
+
 @app.post("/investment-cases/{case_id}/risk-check")
 def risk_check(case_id: str, body: RiskCheckRequest):
     return engine.check_order(body.order_intent, body.context.to_context(), body.risk_request_id)
@@ -310,6 +325,7 @@ if __name__ == "__main__":
         json={"order_intent": order_intent_payload(), "context": context_payload(trading_state="NOT_A_STATE")},
     )
     assert r3.status_code == 422, r3.text
+    assert r3.json()["error_code"] == "RequestValidationError", r3.json()  # 스펙 1.4 봉투 확인
 
     # 4. risk_request_id를 지정하면 응답에 그대로 반영된다 (멱등키)
     fixed_id = str(uuid4())
