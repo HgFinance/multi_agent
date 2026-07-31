@@ -147,11 +147,40 @@ class LsRestClient:
         except urllib.error.URLError as e:
             raise LsApiError(f"{path} 연결 실패: {e.reason}") from None
 
+    def _token_cache_path(self) -> "Path":
+        """프로세스 밖 토큰 캐시 파일 경로. 앱키·환경별로 나눈다(PAPER/LIVE 혼동 방지)."""
+        import hashlib
+        import os
+        import tempfile
+        from pathlib import Path
+
+        key_id = hashlib.sha256(self._env.app_key.encode()).hexdigest()[:12]
+        base = os.environ.get("LS_TOKEN_CACHE_DIR") or tempfile.gettempdir()
+        return Path(base) / f"ls_token_{self._env.name}_{key_id}.json"
+
     def token(self) -> str:
-        """토큰을 발급/재사용한다. 만료 시각은 응답에 없어 TOKEN_TTL 로 관리한다."""
+        """토큰을 발급/재사용한다. 만료 시각은 응답에 없어 TOKEN_TTL 로 관리한다.
+
+        ▶ **프로세스 밖 파일 캐시를 함께 쓴다** (2026-07-31). 스케줄러가 수집기를
+          subprocess 로 돌리므로 메모리 캐시만으로는 10분마다 새 토큰을 발급하게
+          된다(하루 ~50회 인증 호출 - krx-tick-collector 는 하루 1회 갱신·재사용).
+          캐시 파일은 임시 디렉터리(컨테이너 경계 안)이고, 읽기·쓰기 실패는
+          조용히 발급 경로로 떨어진다 - 캐시는 최적화지 정합성 조건이 아니다.
+        """
         now = datetime.now(timezone.utc)
         if self._token and self._token_expires_at and now < self._token_expires_at:
             return self._token
+
+        cache = self._token_cache_path()
+        try:
+            d = json.loads(cache.read_text(encoding="utf-8"))
+            exp = datetime.fromisoformat(d["expires_at"])
+            if now + timedelta(seconds=60) < exp and d.get("token"):
+                self._token = d["token"]
+                self._token_expires_at = exp
+                return self._token
+        except (OSError, KeyError, ValueError):
+            pass
 
         body = urllib.parse.urlencode(
             {
@@ -172,6 +201,13 @@ class LsRestClient:
 
         self._token = tok
         self._token_expires_at = now + TOKEN_TTL
+        try:
+            cache.write_text(
+                json.dumps({"token": tok, "expires_at": self._token_expires_at.isoformat()}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # 캐시 실패는 기능 실패가 아니다
         return tok
 
     def call_tr(
