@@ -197,6 +197,30 @@ services:
     # 다음 주기가 이어받는다. 짧게 정리하고 내린다.
     stop_grace_period: 20s
 
+  # ── LS 실시간 뉴스 (NWS push - NAVER 와 병행 실측 중, 재일님 방침 2026-07-31) ──
+  # 진짜 push 라 폴링 주기·일 한도가 없고 종목코드가 패킷에 붙어 온다.
+  # 본문(t3102)은 약관 확인 전까지 저장하지 않는다 - 제목·메타만 적재.
+  ls-news:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-ls-news
+    restart: unless-stopped
+    command: ["python", "collectors/ls_news_collector.py", "--run"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
+      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+    mem_limit: 256m
+    cpus: 0.3
+    pids_limit: 64
+    stop_grace_period: 20s
+
   # ── research-api: Evidence 읽기 전용 조회면 (에이전트 배선의 시작점) ──
   # PIT(as_of) 기본, DB 세션 자체가 read-only. 뉴스/공시/재무 Evidence 를
   # LangGraph 직원 tool 이 여기서 읽는다 (DB 직접 접근 금지 - CLAUDE.md 원칙 1).

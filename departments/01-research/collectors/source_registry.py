@@ -299,6 +299,23 @@ SOURCES: tuple[SourceSpec, ...] = (
              " (CALENDAR Domain 자체는 krx_public_notice 선언 경로가 덮는다 - 2026-07-31)",
     ),
     SourceSpec(
+        source_id="ls_news",
+        market_scopes=(MarketScope.KR_MARKET,),
+        display_name="LS 실시간 뉴스 (NWS + t3102)",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P0,
+        required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
+        # 실측 2026-07-31: NWS(실시간 제목 push, 종목코드 동봉) + t3102(본문).
+        # 제목·메타 저장은 계약 API 데이터라 NAVER 와 같은 기준(SNIPPET) 적용.
+        # **본문 저장은 LS 약관의 저장·재배포 조항 확인 전까지 부여하지 않는다**
+        # - 본문은 판단 시점 이용(t3102 on-demand)만. 확인되면 FULLTEXT 승격.
+        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
+        raw_bucket="research-documents-private",
+        normalized_target="research.documents",
+        doc_ref="ls-openapi 07-misc(NWS)/03-stock(t3102), TEAM_JAEIL J3",
+        note="재일님 방침 2026-07-31: NAVER 와 하루 병행 실측 후 우세하면 주 소스 전환",
+    ),
+    SourceSpec(
         source_id="krx_public_notice",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="KRX 휴장일 공표 (선언 Calendar)",
