@@ -1,6 +1,6 @@
 # HgFinance AI Office
 
-`AI Office`는 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 개인형
+`AI Office`는 CEO Office, 6개 투자 본부와 인사팀을 한눈에 보는 개인형
 헤지펀드 운영 Frontend다. 현재는 **8개 조직·2개 층의 DEMO Prototype**이며 실제 Agent·시장·주문
 상태의 Source of Truth가 아니다.
 
@@ -11,7 +11,7 @@
 
 - Next.js, React, TypeScript 기반 Pixel Office.
 - CEO Office, 리서치, 트레이딩, 리스크, 퀀트/백테스트, 회계/포트폴리오, AI QA/감사와
-  Agent Workforce 등 8개 조직.
+  인사팀 등 8개 조직.
 - 1층·2층 전환, 조직별 직원과 Bull/Bear 토론 DEMO.
 - Trading/Portfolio Snapshot Panel과 `DEMO` Mode 표시.
 - `../apps/api/main.py`의 `GET /ui/snapshot` Read-only DEMO BFF.
@@ -37,7 +37,11 @@ DEMO BFF는 저장소 루트에서 별도로 실행한다.
 uvicorn apps.api.main:app --reload --port 8000
 ```
 
-`POST /agent/ask`는 Hermes가 Tool을 실행할 수 있으므로 기본 비활성화 상태다. 로컬 개발에서도
+부서 Agent 질의는 부서마다 경로가 다르다 — `POST /accounting/agent/ask`, `POST /trading/agent/ask`.
+Body는 `{"query": "..."}`뿐이고 부서 이름을 보내지 않는다. 화면이 부서를 지정할 수 없어야
+한 본부 패널에서 다른 본부 Agent를 부르는 경로 자체가 생기지 않는다(마스터플랜 5.6).
+
+이 경로들은 Hermes가 Tool을 실행할 수 있으므로 기본 비활성화 상태다. 로컬 개발에서도
 Profile Tool Allowlist와 질의 영향을 확인한 경우에만 `ENABLE_AGENT_ASK=true`로 명시적으로 연다.
 Production에서는 Supabase Auth, 사용자별 권한과 Audit가 연결되기 전까지 활성화하지 않는다.
 
