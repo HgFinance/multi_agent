@@ -74,12 +74,32 @@ Scorecard 관찰의 실제 API 배선.
 
 `quality.eval_score`는 QA/감사본부 소유(`audit.eval_runs`)라 항상 `None`으로 두고 audit-api가 채운다.
 
+## lifecycle/
+
+- `lifecycle/access.py` — **Y4 Access Lifecycle** (HR-04 Lifecycle Coordinator).
+  대응 테이블 `workforce.access_requests`·`access_assignments`
+  (`supabase/migrations/20260731000700_...`).
+  - `approve_request()` / `provision()` / `revoke()` / `find_expired()`
+
+세 테이블의 역할이 다르다 — 중복 저장하지 않는다.
+
+| 테이블 | 의미 |
+|---|---|
+| `agent_tool_permissions` | Profile Version이 **가질 수 있는** 도구 권한 선언 (설계) |
+| `access_requests` | 권한 요청과 승인 워크플로 (절차) |
+| `access_assignments` | Platform/IAM이 **실제로 부여·회수한** 사실 (증거) |
+
+**인사팀은 요청까지만 한다.** Identity·권한 생성은 Platform/IAM Service만 하고, 그 결과를
+`provisioning_ref`로 되받아 기록한다. 만료 없는 권한 요청은 만들 수 없고, 부여는 요청의
+`expires_at`을 넘길 수 없으며, 회수는 `revocation_evidence` 없이 완료되지 않는다.
+
 ## 테스트
 
 ```bash
 python departments/07-agent-workforce/improvements/candidate.py  # 후보 계약·근거·롤백 검증
 python departments/07-agent-workforce/improvements/workflow.py   # 상태 머신·자기승인 차단·감사
 python departments/07-agent-workforce/scorecard/cost.py          # 예산·비용 Scorecard
+python departments/07-agent-workforce/lifecycle/access.py        # 권한 요청·부여·회수 불변식
 ```
 
 `__main__` assert 자체 점검 (F01 CEO Office 모듈과 동일 관례).
