@@ -87,6 +87,10 @@ JOBS: tuple[Job, ...] = (
         daily_at=time(18, 10)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "400"),
         daily_at=time(18, 30)),
+    # 공시 원문 Archive - 당일 공시 원본 ZIP 을 Private Storage 로 (2시간 유예가
+    # 있어 저녁 실행이 당일분 대부분을 잡고, 미준비분은 다음 날 자연 재시도)
+    Job("document-archive", ("collectors/opendart_document_collector.py", "--collect", "--limit", "600"),
+        daily_at=time(20, 0)),
     # 개황이 빈 issuer 보강 (전량 보강은 완료 - 이후는 신규 필러 몫).
     # 300: 공시 백필 하루치가 신규 143 corp 를 만든 실측(2026-07-31) + 여유.
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
