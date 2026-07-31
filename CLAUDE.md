@@ -74,6 +74,11 @@ python apps/api/main.py                                          # Read-only DEM
 
 ## Claude Code 작업 시 주의
 
+- When running `/graphify` or analyzing code graphs, execute strictly in a single thread without spawning subagents.
+
+- **저비용 하위 에이전트 모델 기용**:
+단순 파일 검색, 코드 리서치 등을 위해 Subagent를 생성해야 하는 경우, 무조건 부모의 고비용 모델을 상속(`inherit`)하지 말고 의도적으로 `flash`나 `flash_lite` 등 저렴하고 빠른 모델을 지정하여 실행한다.
+
 `graphify-out/graph.json`(~1.3MB)과 `graph.html`(~1.1MB)은 `Read`로 직접 열지 않는다 — 컨텍스트를 한 번에 채워 조기 auto-compact를 유발한다. 저장소 구조나 연관관계 질문에는 `/graphify` 스킬의 query 흐름(`graphify query "<question>"` CLI, 또는 그 NetworkX 폴백)을 쓴다 — 둘 다 Bash/python으로 처리하고 작은 결과만 컨텍스트에 올린다. 사람이 읽는 요약이 필요하면 `graphify-out/GRAPH_REPORT.md`(~17KB)만 직접 읽는다. 그래프 파일 일부만 필요하면 `jq`/`grep`으로 필요한 조각만 추출한다.
 
 ## 아키텍처
