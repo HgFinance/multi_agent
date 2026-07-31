@@ -52,6 +52,19 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
                 self.assertRegex(sql.rstrip().lower(), r"commit;$")
 
+    def test_migration_versions_are_unique(self) -> None:
+        """버전 접두사(타임스탬프)가 겹치면 Supabase 가 적용을 꼬아 Preview 가
+        깨진다 - 2026-07-31 실측: 같은 날 두 사람이 각각 000700/000800 을 잡아
+        'access_requests already exists' 로 전 커밋이 실패했다. 파일 이름이
+        달라도 접두사가 같으면 같은 버전이다."""
+        versions = [path.name.split("_", 1)[0] for path, _ in self.files]
+        dup = {v for v in versions if versions.count(v) > 1}
+        self.assertFalse(
+            dup,
+            f"마이그레이션 버전 접두사 중복: {sorted(dup)} - 새 파일을 만들기 전에 "
+            f"`ls supabase/migrations | tail` 로 마지막 번호를 확인할 것",
+        )
+
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
