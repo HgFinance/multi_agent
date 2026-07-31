@@ -21,11 +21,29 @@ microstructure/technical/fundamental/sector-regime 4개 페르소나를 같은 �
     그 verdict를 절대 못 바꾸고, 서술(narrative)만 만든다.
   - REJECT면 compliance_check(비용이 큰 Agentic RAG 루프)를 건너뛰고 바로 종합한다 -
     이미 막힌 주문에 정책 검색을 더 태울 이유가 없다 (개발 원칙 9번).
-  - LLM 주소/모델은 환경변수다 - 특정 PC 주소를 하드코딩하지 않는다.
+  - Redis(REDIS_URL)·Compliance(OPENAI_API_KEY, agentic-rag 내부)는 환경변수다 - 특정 PC 주소를
+    하드코딩하지 않는다.
+  - 부서장(Hermes AIAgent)은 config.yaml의 model.default를 그대로 쓴다 - 부서별 env var로 바꾸지 않는다
+    (CLAUDE.md "model은 8개 파일 모두 동일, 바꾸려면 8개를 함께 바꾼다"). QA 패턴(departments/06-ai-qa-audit/
+    scripts.py)과 동일 - risk라서 Hermes를 뺄 이유는 없다.
+  - run_agent(Hermes Runtime) import는 모듈 최상단이 아니라 _hermes_chat 함수 안에서 한다(Lazy Import) -
+    이 패키지는 프로젝트 .venv가 아니라 별도 Hermes 설치 venv(예: ~/claude)에만 있으므로, 최상단에서
+    부르면 --run 없이 자체 점검만 하려는 경우에도 ModuleNotFoundError로 모듈 전체가 죽는다.
 
 실행:
-  python scripts.py               # 자체 점검 (Redis·OpenAI 없음)
-  python scripts.py --run         # 데모 주문으로 실제 실행 (REDIS_URL, OPENAI_API_KEY 필요)
+  python scripts.py               # 자체 점검 (Redis·Hermes 없음, run_agent 안 불러도 됨 - Lazy Import)
+
+  --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요) 은 .env(프로젝트 루트)를 셸에 먼저 로드해야 한다.
+  departments/03-risk 안에서 바로 실행하면 .env를 못 찾아 KeyError: 'REDIS_URL' 이 난다:
+    cd /Users/baiohelseu/Desktop/Project/multi_agent
+    set -a && source .env && set +a  # REDIS_URL, OPENAI_API_KEY 등을 셸 환경변수로 로드
+    source ~/claude/bin/activate      # run_agent(Hermes Runtime)가 이 venv에만 설치돼 있다 - 프로젝트 .venv엔 없음
+    cd departments/03-risk
+    python scripts.py --run           # 데모 주문으로 실제 실행
+
+  reports/risk_case_report_<risk_request_id>.md 로 결정론적 MD 리포트도 저장한다 - _render_report_md 는
+  순수 함수(run_risk_department 반환값을 그대로 옮김) 이고 LLM은 narrative/compliance answer 필드에만
+  관여한다 (QA 패턴과 동일).
 """
 from __future__ import annotations
 
@@ -33,6 +51,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -47,7 +66,6 @@ for _p in (_ENGINE_DIR, _API_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
 from langgraph.graph import END, StateGraph  # noqa: E402
 
 PIPELINE_VERSION = "risk-department-pipeline-v1"
-SUPERVISOR_MODEL = os.environ.get("RISK_SUPERVISOR_MODEL", "gpt-4o-mini")
 
 
 class RiskState(TypedDict, total=False):
@@ -87,6 +105,7 @@ def pre_trade_check(state: RiskState) -> dict:
         "verdict": d.verdict.value,
         "approved_quantity": str(d.approved_quantity) if d.approved_quantity is not None else None,
         "reason_codes": [r.value for r in result.reason_codes],
+        "calculation_version": result.calculation_version, "input_hash": result.input_hash,
         "check_results": [{"name": c.check_name, "passed": c.passed, "detail": c.detail}
                           for c in result.check_results],
     }}
@@ -103,13 +122,21 @@ def compliance_check(state: RiskState) -> dict:
     return {"compliance": run_compliance_check(query, as_of_date, persona="compliance-policy-agent")}
 
 
-# ── 노드 4: 종합 (risk-supervisor 페르소나 - config.yaml 원문) ─────────────
+# ── 노드 4: 종합 (risk-supervisor 페르소나 - Hermes AIAgent) ───────────────
 def _supervisor_persona() -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
     return re.search(r'risk-supervisor: "(.*?)"\n', cfg, re.S).group(1)
 
 
-def supervise(state: RiskState, *, llm=None) -> dict:
+def _hermes_chat(persona: str, task: str) -> str:
+    from run_agent import AIAgent  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+
+    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
+                     ephemeral_system_prompt=persona)
+    return agent.chat(task)
+
+
+def supervise(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
     bundle = {"order_intent": state["order_intent"], "trading_state": state["trading_state"],
               "assessment": a, "compliance": state.get("compliance")}
@@ -123,7 +150,7 @@ Schema (JSON only):
 Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
 
-    call = llm or _openai_chat
+    call = chat or _hermes_chat
     out = call(_supervisor_persona(), task)
     s, e = out.find("{"), out.rfind("}")
     note = json.loads(out[s:e + 1])
@@ -132,15 +159,6 @@ Evidence:
             raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
     # 바인딩 verdict 는 LLM 출력이 아니라 assessment 에서 그대로 가져온다
     return {"verdict": a["verdict"], "narrative": note["narrative"], "escalate": note["escalate"]}
-
-
-def _openai_chat(system: str, user: str) -> str:
-    from openai import OpenAI
-
-    res = OpenAI().chat.completions.create(
-        model=SUPERVISOR_MODEL, temperature=0.2,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-    return res.choices[0].message.content
 
 
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
@@ -164,10 +182,70 @@ def build_pipeline():
 def run_risk_department(order_intent: dict, context: dict, scope: str = "fund:default") -> dict:
     """본부 단독 실행 - QA/연구본부의 run_<dept>_department 와 같은 외부 인터페이스."""
     out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
-    return {"risk_request_id": out["assessment"]["risk_request_id"], "verdict": out["verdict"],
-            "approved_quantity": out["assessment"]["approved_quantity"],
-            "reason_codes": out["assessment"]["reason_codes"], "trading_state": out["trading_state"],
+    a = out["assessment"]
+    return {"risk_request_id": a["risk_request_id"], "verdict": out["verdict"],
+            "approved_quantity": a["approved_quantity"], "reason_codes": a["reason_codes"],
+            "check_results": a["check_results"], "calculation_version": a["calculation_version"],
+            "input_hash": a["input_hash"], "trading_state": out["trading_state"],
             "compliance": out.get("compliance"), "narrative": out["narrative"], "escalate": out["escalate"]}
+
+
+def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
+    """out(run_risk_department 반환값)을 그대로 옮겨 적는 순수 함수 - LLM이 리포트 구조나
+    내용을 창작하지 않는다(QA 패턴, departments/06-ai-qa-audit/scripts.py 동일)."""
+    checks = out.get("check_results", [])
+    compliance = out.get("compliance")
+
+    lines = [
+        "# 리스크본부 — Case 심사 보고서 (결정론적 생성, LLM 자유 서술 아님)",
+        "",
+        "| 항목 | 값 |",
+        "|---|---|",
+        f"| **risk_request_id** | `{out['risk_request_id']}` |",
+        f"| **판정 (verdict)** | **{out['verdict']}** |",
+        f"| **승인 수량** | {out['approved_quantity']} |",
+        f"| **판정 엔진** | departments/03-risk/engine/risk_engine.py (`{out['calculation_version']}`) |",
+        f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
+        f"| **trading_state** | {out['trading_state']} |",
+        f"| **주문** | {order_intent.get('side')} {order_intent.get('quantity')} x "
+        f"{order_intent.get('instrument_id')} (fund {order_intent.get('fund_id')}) |",
+        f"| **escalate** | {out['escalate']} |",
+        f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
+        "",
+        "---",
+        "",
+        "## Pre-trade 검사 결과",
+        "",
+        "| Check | 통과 | 상세 |",
+        "|---|---|---|",
+    ]
+    lines += [f"| {c['name']} | {c['passed']} | {c['detail']} |" for c in checks]
+    if not checks:
+        lines.append("| — | — | (check_results 없음) |")
+
+    lines += ["", "## Reason Codes", "",
+              ", ".join(f"`{r}`" for r in out["reason_codes"]) if out["reason_codes"] else "없음",
+              "", "## Compliance (compliance-policy-agent, Agentic RAG)", ""]
+    if compliance:
+        lines += ["| 필드 | 값 |", "|---|---|",
+                  f"| grounded | {compliance.get('grounded')} |",
+                  f"| attempts | {compliance.get('attempts')} |",
+                  f"| answer | {compliance.get('answer')} |", ""]
+        docs = compliance.get("relevant_documents") or []
+        if docs:
+            lines += ["| 참조 문서 | version | score |", "|---|---|---|"]
+            lines += [f"| {d['title']} (`{d['document_id']}`) | {d['version']} | {d['score']} |" for d in docs]
+    else:
+        lines.append("REJECT 조기 종료 - compliance_check 생략됨")
+
+    lines += [
+        "", "## 종합 서술 (risk-supervisor, Hermes)", "",
+        out["narrative"],
+        "", "---",
+        "> 이 문서는 risk_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
+        "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
+    ]
+    return "\n".join(lines)
 
 
 # ── 자체 점검 (Redis·OpenAI 없음) ──────────────────────────────────────────
@@ -179,29 +257,29 @@ def _check_graph_shape():
 
 def _check_reject_short_circuit():
     # REJECT 면 compliance_check(비싼 Agentic RAG 루프) 를 부르지 않고 바로 종합하는지 -
-    # supervise 는 REJECT 여도 여전히 불린다(감사용 서술은 필요) 라서 LLM 콜도 같이 스텁한다
-    global check_trading_state, pre_trade_check, compliance_check, _openai_chat
-    orig_ts, orig_pt, orig_cc, orig_llm = check_trading_state, pre_trade_check, compliance_check, _openai_chat
+    # supervise 는 REJECT 여도 여전히 불린다(감사용 서술은 필요) 라서 Hermes 콜도 같이 스텁한다
+    global check_trading_state, pre_trade_check, compliance_check, _hermes_chat
+    orig_ts, orig_pt, orig_cc, orig_chat = check_trading_state, pre_trade_check, compliance_check, _hermes_chat
     check_trading_state = lambda s: {"trading_state": "HALTED"}
     pre_trade_check = lambda s: {"assessment": {
         "risk_request_id": "r1", "verdict": "reject", "approved_quantity": None,
         "reason_codes": ["trading_state_blocked"], "check_results": []}}
     compliance_check = lambda s: (_ for _ in ()).throw(AssertionError("REJECT인데 compliance_check 가 불렸다"))
-    _openai_chat = lambda sys_, usr: '{"narrative": "차단됨", "escalate": true, "cited_checks": []}'
+    _hermes_chat = lambda persona, task: '{"narrative": "차단됨", "escalate": true, "cited_checks": []}'
     try:
         out = build_pipeline().invoke({"order_intent": {}, "context": {}})
         assert out["verdict"] == "reject"
         assert "compliance" not in out
     finally:
-        check_trading_state, pre_trade_check, compliance_check, _openai_chat = orig_ts, orig_pt, orig_cc, orig_llm
+        check_trading_state, pre_trade_check, compliance_check, _hermes_chat = orig_ts, orig_pt, orig_cc, orig_chat
     print("  REJECT 조기 종료          OK")
 
 
 def _check_supervisor_guard():
     a = {"verdict": "approve", "reason_codes": [], "check_results": []}
-    bad_llm = lambda s, u: '{"narrative": "n"}'  # escalate/cited_checks 누락
+    bad_chat = lambda persona, task: '{"narrative": "n"}'  # escalate/cited_checks 누락
     try:
-        supervise({"order_intent": {}, "trading_state": "ENABLED", "assessment": a}, llm=bad_llm)
+        supervise({"order_intent": {}, "trading_state": "ENABLED", "assessment": a}, chat=bad_chat)
         raise AssertionError("불완전 종합 결과가 통과했다")
     except ValueError:
         pass
@@ -213,7 +291,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     if "--run" in sys.argv:
-        from datetime import datetime, timedelta, timezone
+        from datetime import timedelta
         from uuid import uuid4
 
         now = datetime.now(timezone.utc)
@@ -241,12 +319,18 @@ if __name__ == "__main__":
             "trading_state": "ENABLED", "as_of": now.isoformat(),
         }
         print(f"{PIPELINE_VERSION} 실행 (데모 주문)")
-        print(json.dumps(run_risk_department(demo_intent, demo_context, scope=f"fund:{fund}"),
-                         ensure_ascii=False, indent=1))
+        out = run_risk_department(demo_intent, demo_context, scope=f"fund:{fund}")
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+
+        report_dir = _BASE / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"risk_case_report_{out['risk_request_id']}.md"
+        report_path.write_text(_render_report_md(demo_intent, demo_context, out), encoding="utf-8")
+        print(f"결정론적 MD 리포트 저장: {report_path}")
         raise SystemExit(0)
 
-    print(f"{PIPELINE_VERSION} 자체 점검 (Redis·OpenAI 없음)")
+    print(f"{PIPELINE_VERSION} 자체 점검 (Redis·Hermes 없음)")
     _check_graph_shape()
     _check_reject_short_circuit()
     _check_supervisor_guard()
-    print("본부 파이프라인 3개 영역 통과. 실행은 --run (REDIS_URL, OPENAI_API_KEY 필요)")
+    print("본부 파이프라인 3개 영역 통과. 실행은 --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요)")

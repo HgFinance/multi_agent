@@ -27,10 +27,17 @@ hallucination-critic/model-risk-agent/internal-audit-agent는 뺐다 - config.ya
     고정한 팀 공유 인프라 주소다.
   - 부서장(Hermes AIAgent)은 config.yaml의 model.default를 그대로 쓴다 - 부서별 env var로 바꾸지 않는다
     (CLAUDE.md "model은 8개 파일 모두 동일, 바꾸려면 8개를 함께 바꾼다").
+  - run_agent(Hermes Runtime) import는 모듈 최상단이 아니라 _hermes_chat 함수 안에서 한다(Lazy Import) -
+    이 패키지는 프로젝트 .venv가 아니라 별도 Hermes 설치 venv(예: ~/claude)에만 있으므로, 최상단에서
+    부르면 --run 없이 자체 점검만 하려는 경우에도 ModuleNotFoundError로 모듈 전체가 죽는다.
 
 실행:
-  python scripts.py               # 자체 점검 (Ollama·Hermes 없음)
-  python scripts.py --run         # 데모 Artifact로 실제 실행 (워커 Ollama, Hermes 필요)
+  source ~/claude/bin/activate    # run_agent(Hermes Runtime)가 이 venv에만 설치돼 있다 - 프로젝트 .venv엔 없음
+  python scripts.py               # 자체 점검 (Ollama·Hermes 없음, run_agent 안 불러도 됨 - Lazy Import)
+  python scripts.py --run         # 데모 Artifact로 실제 실행 (워커 Ollama, Hermes 필요) -
+                                   # reports/qa_audit_report_<qa_decision_id>.md 도 같이 저장한다.
+                                   # _render_report_md는 run_qa_department() 반환값을 그대로 옮기기만
+                                   # 하는 순수 함수다 - LLM이 리포트 형식·내용을 자유 창작하지 않는다.
 """
 from __future__ import annotations
 
@@ -44,7 +51,6 @@ from uuid import UUID
 
 from langgraph.graph import END, StateGraph
 from openai import OpenAI
-from run_agent import AIAgent
 
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE / "evidence"))
@@ -52,7 +58,9 @@ sys.path.insert(0, str(_BASE / "evidence"))
 PIPELINE_VERSION = "qa-department-pipeline-v1"
 
 # 워커(직원) LLM 백엔드 - 동규님 GPU에 올린 팀 공용 Ollama 서버. 환경변수로 옮기지 않는다.
-internal_llm = OpenAI(base_url="http://172.31.99.238:11434/v1", api_key="ollama")
+# 192.168.25.25
+# 172.31.99.238
+internal_llm = OpenAI(base_url="http://192.168.25.25:11434/v1", api_key="ollama")
 
 
 def _call_internal_llm(prompt: str) -> str:
@@ -94,11 +102,13 @@ def check_evidence(state: QAState) -> dict:
     return {"assessment": {
         "qa_decision_id": str(result.qa_decision_id), "decision": result.decision.value,
         "reason_codes": [r.value for r in result.reason_codes],
+        "calculation_version": result.calculation_version, "input_hash": result.input_hash,
         "claim_checks": [{"claim_index": c.claim_index, "claim": c.claim,
                           "result": c.result.value, "reason": c.reason}
                          for c in result.claim_checks],
-        "findings": [{"finding_type": f.finding_type, "severity": f.severity.value,
-                     "description": f.description} for f in result.findings],
+        "findings": [{"finding_id": str(f.finding_id), "finding_type": f.finding_type,
+                     "severity": f.severity.value, "description": f.description}
+                    for f in result.findings],
     }}
 
 
@@ -115,6 +125,8 @@ def draft_claim_narrative(state: QAState) -> dict:
 
 # ── 노드 3: 종합 (qa-audit-supervisor 페르소나 - Hermes AIAgent) ───────────
 def _hermes_chat(persona: str, task: str) -> str:
+    from run_agent import AIAgent  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+
     agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
                      ephemeral_system_prompt=persona)
     return agent.chat(task)
@@ -166,7 +178,8 @@ def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) 
     })
     a = out["assessment"]
     return {"qa_decision_id": a["qa_decision_id"], "verdict": out["verdict"],
-            "reason_codes": a["reason_codes"], "findings": a["findings"],
+            "reason_codes": a["reason_codes"], "claim_checks": a["claim_checks"], "findings": a["findings"],
+            "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
             "claim_narrative": out["claim_narrative"], "narrative": out["narrative"],
             "escalate": out["escalate"]}
 
@@ -180,7 +193,7 @@ def _check_graph_shape():
 
 def _check_fail_still_narrates():
     # FAIL 판정이어도 워커·부서장 둘 다 계속 불려 서술이 남는지, decision 값 자체는
-    # 그대로 유지되는지 - Ollama·Hermes 콜은 스텁으로 대체한다
+    # 그대로 유지되는지 - Ollama·Hermes 콜은 둘 다 스텁으로 대체한다
     global check_evidence, _call_internal_llm, _hermes_chat
     orig_ce, orig_llm, orig_chat = check_evidence, _call_internal_llm, _hermes_chat
     check_evidence = lambda s: {"assessment": {
@@ -212,6 +225,60 @@ def _check_supervisor_guard():
     print("  Supervisor 스키마 가드      OK")
 
 
+# ── MD 리포트 렌더 (결정론 - LLM 미개입, run_qa_department 반환값을 그대로 옮기기만 한다) ──
+def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
+    checks = out.get("claim_checks", [])
+    findings = out.get("findings", [])
+
+    lines = [
+        "# AI QA/감사본부 — 감사 보고서 (결정론적 생성, LLM 자유 서술 아님)",
+        "",
+        "| 항목 | 값 |",
+        "|---|---|",
+        f"| **qa_decision_id** | `{out['qa_decision_id']}` |",
+        f"| **판정 (verdict)** | **{out['verdict']}** |",
+        f"| **판정 엔진** | departments/06-ai-qa-audit/evidence/evidence_qa_engine.py (`{out['calculation_version']}`) |",
+        f"| **input_hash** | `{out['input_hash']}` (같은 Artifact·Context면 재현 가능) |",
+        f"| **decision_time (PIT)** | {decision_time} |",
+        f"| **escalate** | {out['escalate']} |",
+        f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
+        "",
+        "---",
+        "",
+        "## Claim별 검사 결과",
+        "",
+        "| # | Claim | 검사 결과 | 사유 |",
+        "|---|---|---|---|",
+    ]
+    lines += [f"| {c['claim_index']} | {c['claim']} | {c['result']} | {c['reason']} |" for c in checks]
+    if not checks:
+        lines.append("| — | (claim_checks 없음) | — | — |")
+
+    lines += ["", "## Reason Codes", "",
+              ", ".join(f"`{r}`" for r in out["reason_codes"]) if out["reason_codes"] else "없음",
+              "", "## Findings", ""]
+    if findings:
+        for f in findings:
+            lines += [f"### `{f['finding_id']}`", "",
+                      "| 필드 | 값 |", "|---|---|",
+                      f"| 유형 | `{f['finding_type']}` |",
+                      f"| 심각도 | {f['severity']} |",
+                      f"| 설명 | {f['description']} |", ""]
+    else:
+        lines.append("없음")
+
+    lines += [
+        "", "## Claim 서술 (evidence-qa-agent, 내부 Ollama - 판정 재해석 없이 결과만 풀어씀)", "",
+        out["claim_narrative"],
+        "", "## 종합 서술 (qa-audit-supervisor, Hermes)", "",
+        out["narrative"],
+        "", "---",
+        "> 이 문서는 evidence_qa_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
+        "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
+    ]
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -232,8 +299,14 @@ if __name__ == "__main__":
                                      "observed_at": now_iso, "excerpt": "종가 70000원",
                                      "numeric_value": "70000", "unit": "KRW"}}
         print(f"{PIPELINE_VERSION} 실행 (데모 Artifact)")
-        print(json.dumps(run_qa_department(demo_artifact, demo_evidence_store, now_iso),
-                         ensure_ascii=False, indent=1))
+        out = run_qa_department(demo_artifact, demo_evidence_store, now_iso)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+
+        report_dir = _BASE / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"qa_audit_report_{out['qa_decision_id']}.md"
+        report_path.write_text(_render_report_md(demo_artifact, now_iso, out), encoding="utf-8")
+        print(f"결정론적 MD 리포트 저장: {report_path}")
         raise SystemExit(0)
 
     print(f"{PIPELINE_VERSION} 자체 점검 (Ollama·Hermes 없음)")
