@@ -128,8 +128,18 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 }
 ```
 
-> `risk_bounds`의 비중·손실 값은 전부 **비율**이다. `base_capital`은 Mandate가 선언한 Paper 시작 자본이며,
-> 한도 집행 시점의 **live 분모(NAV/allocated capital)는 회계본부 API가 소유한다.** 두 값을 같은 것으로 쓰지 않는다(§7).
+> **기준 자본 계약** (2026-07-31 결정, §7 참고)
+>
+> `risk_bounds`의 비중·손실 값은 전부 **비율**이며, 그 기준 자본은 다음과 같이 정한다.
+>
+> - **한도 집행 기준**: 회계본부의 공식 자산 총액 `accounting.nav_runs.total_nav`. **당일 장 시작 시점 값으로
+>   고정**하고 장중에 갱신하지 않는다 — 같은 주문이면 판정도 같아야 한다.
+> - **`base_capital`의 역할**: Mandate가 선언한 **Paper 시작 자본**이다. 운용 첫날 회계 초기 현금의 근거로만
+>   쓰고, 이후 한도 집행의 기준으로 쓰지 않는다.
+> - `mandate.currency`는 저장 시점에 `accounting.funds.base_currency`와 일치하는지 governance가 검증한다.
+>
+> Risk Engine은 이 응답의 비율과 회계 API의 기준 자본을 **각각 조회해서** 판정한다. `base_capital`을 분모로
+> 쓰지 않는다.
 
 **`POST .../versions` Request**
 
@@ -478,6 +488,16 @@ risk-management / trading-department → GET /governance/v1/mandates/{fund_id}/c
 Risk Engine이 한도를 판정하려면 Mandate 비율이 필요하다. 이 호출은 **읽기 전용이며 판정을 대신하지 않는다** —
 승인/축소/거절은 Risk Engine이 결정한다.
 
+§2.1 기준 자본 계약에 따라 Risk Engine은 **두 곳을 각각 조회**한다. governance는 비율만 주고 기준 자본을 주지 않는다.
+
+```
+비율     ← GET /governance/v1/mandates/{fund_id}/current   (governance)
+기준 자본 ← 회계 API의 당일 장 시작 시점 nav_runs.total_nav  (accounting)
+```
+
+Mandate 저장 시 governance는 `accounting.funds.base_currency`를 조회해 통화 일치를 검증한다(§2.1).
+이 조회는 Mandate 생성·변경 시점에만 발생하며 주문 경로에 있지 않다.
+
 우리가 다른 부서에서 읽어오는 것(전부 읽기 전용, 공식 API 경유):
 
 | 대상 | 소비자 | 용도 |
@@ -593,11 +613,13 @@ Agent 상태(`OFFLINE|IDLE|QUEUED|RUNNING|WAITING_APPROVAL|BLOCKED|DEGRADED|ERRO
 | Scorecard `quality` 일부 | ⚠️ 저장소 미구현 — `quality_snapshots` 없음 |
 | Workforce Plan 저장 | ⚠️ 저장소 미구현 — `workforce_plans` 없음 |
 | 위원회 (§2.3) | ⚠️ 로직 미구현 (테이블은 있음, Y2) |
-| `base_capital` vs live NAV 분모 | 🔴 부서 간 미확정 — 회계(도현)·리스크(동규) 계약 필요 |
+| 한도 집행 기준 자본 = 당일 장 시작 시점 `nav_runs.total_nav` (§2.1) | ✅ 결정 2026-07-31 |
+| `base_capital` = Paper 시작 자본. 첫날 회계 초기 현금 근거로만 사용 | ✅ 결정 2026-07-31 |
+| `mandate.currency` ↔ `funds.base_currency` 검증은 governance가 저장 시점에 수행 | ✅ 결정 2026-07-31 — **F01 구현 필요** |
 | Transport | 🔴 미확정 — 타입은 영향받지 않음(§0) |
 
 ### 승인이 필요한 것
 
 1. 입출력 타입 전반 — 다른 본부가 이 모양으로 소비해도 되는지.
-2. `base_capital` 분모 계약 (도현·동규) — Mandate 선언 자본 vs 회계 live NAV.
+2. ~~`base_capital` 분모 계약~~ — 2026-07-31 결정(§2.1). 회계·리스크본부는 PR 리뷰에서 확인만 하면 된다.
 3. §8.1에 이름 없는 신규 엔드포인트 (§2.1 Version/Activate, §3.3 Improvement).
