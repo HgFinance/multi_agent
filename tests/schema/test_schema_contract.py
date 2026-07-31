@@ -41,7 +41,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260729000500_audit_api_security.sql",
                 "20260730000600_workforce_improvement_candidates.sql",
                 "20260731000700_workforce_access_lifecycle.sql",
+                "20260731000701_news_ingest_latency.sql",
                 "20260731000800_workforce_plan_quality_probation.sql",
+                "20260731000801_news_recency_weight.sql",
+                "20260731000900_public_dashboard_views.sql",
             ],
         )
         for path, sql in self.files:

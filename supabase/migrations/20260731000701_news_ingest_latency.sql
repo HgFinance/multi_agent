@@ -1,3 +1,4 @@
+begin;
 -- 뉴스 수집 지연 관측 View
 --
 -- 담당: 재일 (리서치/퀀트)
@@ -67,3 +68,5 @@ join reference.data_sources s using (source_id)
 where d.document_type = 'NEWS'
   and d.published_at is not null
 group by s.source_code, date_trunc('hour', d.observed_at);
+
+commit;

@@ -1,3 +1,4 @@
+begin;
 -- Supabase 대시보드용 public View (dash_*)
 --
 -- 담당: 재일 (리서치/퀀트)
@@ -89,3 +90,5 @@ as
 select * from research.news_ingest_latency_hourly
 order by observed_hour desc
 limit 168;
+
+commit;

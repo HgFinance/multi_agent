@@ -1,3 +1,4 @@
+begin;
 -- 최신 기사 가중치 View - 실시간 분석 입력용
 --
 -- 담당: 재일 (리서치/퀀트)
@@ -54,3 +55,5 @@ where d.document_type = 'NEWS'
   and d.published_at is not null
   and d.published_at <= now()   -- 미래로 찍힌 기사(Provider 시계 이상)는 빼고 센다
   and d.published_at > now() - interval '7 days';
+
+commit;
