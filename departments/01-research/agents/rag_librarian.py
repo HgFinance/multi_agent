@@ -58,10 +58,14 @@ EMBED_BATCH = 16
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t　]+")
+# style/script 는 태그만 지우면 내부 텍스트(CSS/JS)가 본문으로 남는다 -
+# 실측 2026-08-01: 발췌 머리가 ".xforms { font-family: 돋움체 }" 로 오염됐다
+_BLOCK_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.S | re.I)
+_CSS_LINE_RE = re.compile(r"^[.#@\w\-,:*\[\]]+\s*\{|^\s*[\w\-]+\s*:\s*[^;]+;\s*}?$")
 
 
 def extract_text_from_zip(data: bytes) -> str:
-    """DART 원문 ZIP -> 본문 텍스트. XML 태그 제거·엔티티 복원·공백 정리."""
+    """DART 원문 ZIP -> 본문 텍스트. style/script 블록·태그 제거·엔티티 복원."""
     out: list[str] = []
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for name in sorted(z.namelist()):
@@ -76,10 +80,12 @@ def extract_text_from_zip(data: bytes) -> str:
                     text = ""
             if not text:
                 continue
+            text = _BLOCK_RE.sub(" ", text)
             text = unescape(_TAG_RE.sub(" ", text))
             text = _WS_RE.sub(" ", text)
             lines = [ln.strip() for ln in text.splitlines()]
-            out.append("\n".join(ln for ln in lines if ln))
+            out.append("\n".join(ln for ln in lines
+                                 if ln and not _CSS_LINE_RE.match(ln)))
     return "\n".join(out).strip()
 
 
@@ -232,6 +238,41 @@ def index_documents(limit: int = 50) -> int:
         conn.close()
 
 
+def recent_excerpts_for_symbol(symbol: str, k: int = 3) -> list[dict]:
+    """종목의 최근 공시 머리 청크(k건) - Packet 의 공시 근거 발췌용.
+
+    시맨틱 검색이 아니라 결정론 조회다: 발행사가 확인된 문서의
+    chunk_index=0(문서 머리 - 제목·핵심 결정 사항)을 게재일 역순으로.
+    임베딩·LLM 무관이라 재현 가능하고, 다른 회사 공시가 섞일 수 없다.
+
+    연결 경로는 documents.issuer_id -> instruments.issuer_id 다 - 공시는
+    발행사 단위로 들어오고 document_instruments 는 뉴스 전용이다(실측
+    2026-08-01: 공시 3,380건 전부 issuer_id 보유, instrument 링크 0).
+    """
+    import psycopg2
+
+    from source_registry import load_project_env
+
+    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select d.title, c.published_at, c.content
+                from research.evidence_chunks c
+                join research.document_versions v using (document_version_id)
+                join research.documents d using (document_id)
+                join reference.instruments i on i.issuer_id = d.issuer_id
+                join reference.instrument_symbols sy
+                     on sy.instrument_id = i.instrument_id and sy.is_primary
+                where sy.symbol = %s and c.chunk_index = 0
+                order by c.published_at desc nulls last limit %s
+            """, (symbol, k))
+            return [{"title": t, "published_at": None if p is None else str(p)[:10],
+                     "excerpt": c[:400]} for t, p, c in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def search(query: str, k: int = 5) -> list[dict]:
     import psycopg2
 
@@ -280,11 +321,16 @@ def _check_chunker():
 def _check_zip_extraction():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("doc.xml", "<BODY><P>유상증자 &amp; 결정</P><TABLE>금액 100</TABLE></BODY>")
+        z.writestr("doc.xml",
+                   "<style>.xforms * { font-family: 돋움체;}</style>"
+                   "<script>var x=1;</script>"
+                   "<BODY><P>유상증자 &amp; 결정</P><TABLE>금액 100</TABLE></BODY>")
         z.writestr("skip.bin", b"\x00\x01")
     text = extract_text_from_zip(buf.getvalue())
     assert "유상증자 & 결정" in text and "금액 100" in text
     assert "<P>" not in text and "\x00" not in text
+    # 실측 오염 재발 방지 - CSS/JS 는 본문이 아니다
+    assert "font-family" not in text and "돋움체" not in text and "var x" not in text
     print("  ZIP/XML 본문 추출        OK")
 
 

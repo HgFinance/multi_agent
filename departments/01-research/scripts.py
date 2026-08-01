@@ -84,8 +84,18 @@ def assemble_evidence(state: ResearchState) -> dict:
     # 수집·등락률 계산은 전부 모듈이 한다 - 노드는 배선만 (계약: 기존 키 유지)
     from evidence.bundle import assemble_bundle
 
-    return {"evidence": assemble_bundle(state["symbol"], market_api=MARKET_API,
-                                        research_api=RESEARCH_API, get=_get)}
+    ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
+                         research_api=RESEARCH_API, get=_get)
+    # RES-08 사서의 공시 원문 발췌(결정론 - 종목 링크 확인 문서의 머리 청크만).
+    # 사서 조회 실패는 Packet 전체를 죽일 일이 아니다 - 미확인으로 명시한다.
+    try:
+        from rag_librarian import recent_excerpts_for_symbol
+
+        ev["disclosure_excerpts"] = recent_excerpts_for_symbol(state["symbol"])
+    except Exception as e:
+        ev["disclosure_excerpts"] = {"status": "UNAVAILABLE",
+                                     "reason": f"{type(e).__name__}: {e}"[:120]}
+    return {"evidence": ev}
 
 
 # ── 노드 3: Sentiment (검증된 LLM 직원) ────────────────────────────────────
