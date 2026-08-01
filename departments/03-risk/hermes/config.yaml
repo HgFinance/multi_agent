@@ -40,7 +40,8 @@ agent:
 
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
-# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
+# compliance-policy-agent부터 시작 — evidence-qa-agent(QA)까지 확장 완료. hallucination-critic(QA)은
+# evidence-qa-agent의 grounded 판정을 재사용할 다음 확장 대상(not_started, departments/06-ai-qa-audit/hermes/config.yaml 참고)
 agentic_rag:
   framework: langgraph
   status: "compliance-policy-agent baseline 구현됨 (skills/agentic-rag/)"

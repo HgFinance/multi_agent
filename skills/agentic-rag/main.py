@@ -32,6 +32,7 @@ from src.graph import run_compliance_check  # noqa: E402
 PERSONA_CORPUS = {
     "compliance-policy-agent": SKILL_DIR / "corpus" / "compliance",
     "evidence-qa-agent": SKILL_DIR / "corpus" / "evidence",
+    "hallucination-critic": SKILL_DIR / "corpus" / "evidence",  # evidence-qa-agent 코퍼스 재사용, 신규 문서 없음
 }
 
 

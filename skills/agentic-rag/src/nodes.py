@@ -17,6 +17,7 @@ import json
 import os
 from typing import TypedDict
 
+from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
 from .retriever import LocalVectorIndex, ScoredChunk
@@ -74,6 +75,33 @@ PERSONA_PROMPTS: dict[str, dict[str, object]] = {
         "query_label": "Claim under review",
         "docs_label": "Relevant evidence excerpts",
     },
+    "hallucination-critic": {
+        "grade_system": (
+            "You are an evidence relevance grader for a hedge fund's Hallucination Critic review. "
+            'Return JSON: {"relevant_indices": [int, ...]} — only indices of chunks that '
+            "could plausibly explain why the flagged claim lacks support or is contradicted. "
+            "Be strict: an on-topic but non-decisive chunk should still be included; "
+            "an off-topic chunk must not be."
+        ),
+        "generate_system": (
+            "You are the Hallucination Critic for a hedge fund's AI QA/Audit department. A claim was "
+            "already flagged UNSUPPORTED or CONTRADICTED by the deterministic Evidence QA engine — "
+            "that verdict is final and not yours to overturn. Your job is only to classify the failure "
+            "using ONLY the provided evidence excerpts and write the escalation rationale. "
+            'Return JSON: {"verdict": "HALLUCINATION"|"OVERCONFIDENT_CLAIM"|"CONTRADICTION"|"TOOL_MISUSE", '
+            '"cited_documents": [doc_id, ...], "rationale": str, '
+            '"confidence": float (0-1), "escalate": bool}. '
+            "Use CONTRADICTION if an excerpt states something inconsistent with the claim, HALLUCINATION "
+            "if the claim asserts a fact absent from every excerpt, OVERCONFIDENT_CLAIM if the claim "
+            "upgrades a forecast/opinion into a stated fact, and TOOL_MISUSE if the excerpts show the "
+            "originating agent queried the wrong scope or timeframe. Always set escalate=true — every "
+            "input to this node was already flagged for escalation upstream."
+        ),
+        "no_evidence_verdict": "HALLUCINATION",
+        "no_evidence_rationale": "No supporting or contradicting evidence document was found for the flagged claim; the original UNSUPPORTED/CONTRADICTED verdict stands as-is.",
+        "query_label": "Flagged claim under hallucination review",
+        "docs_label": "Relevant evidence excerpts",
+    },
 }
 
 
@@ -90,7 +118,9 @@ class ComplianceState(TypedDict, total=False):
 
 
 def _client() -> OpenAI:
-    return OpenAI()
+    # wrap_openai는 LANGSMITH_TRACING이 꺼져 있으면 아무 동작 없이 그대로 통과한다 -
+    # .env.example 3-1절(임시, risk/qa 부서 유휴 에이전트 점검용)이 켜졌을 때만 토큰/비용이 잡힌다.
+    return wrap_openai(OpenAI())
 
 
 def _chat_json(system: str, user: str) -> dict:
