@@ -1,6 +1,6 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.4
+> 문서 상태: Team Handoff v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
@@ -11,6 +11,8 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리서치·퀀트 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Market·Research·Strategy View
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `RQ-01`~`RQ-04`
+> 체크박스 해석: 11절의 완료 표시는 재일님 소유 산출물 기준이며 전사 E2E 완료를 뜻하지 않음
 
 ---
 

@@ -1,12 +1,14 @@
 # Department Backend Integration and Docker Plan
 
-> 상태: 전 본부 Backend 연결과 Container 운영의 구현 기준
+> 상태: 전 본부 Backend 연결과 Container 운영의 구현 기준 v1.1
 >
-> 기준일: 2026-07-31
+> 기준일: 2026-08-01
 >
 > 적용 범위: CEO Office, 6개 본부, Agent Workforce 인사팀, AI Office와 공통 Platform
 >
 > 본부별 Local Model 기준: [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
+>
+> 실제 실행 증거와 Owner별 다음 작업: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md)
 
 ## 1. 이 문서가 결정하는 것
 
@@ -27,24 +29,26 @@
 
 ### 2.1 이미 구현된 것
 
-| 영역 | 현재 구현 | Container 상태 |
+| 영역 | 현재 구현 | Container·실데이터 상태 |
 |---|---|---|
-| 리서치 수집 | LS 실시간, 뉴스, 공시·거시·Reference Batch Collector | `ls-realtime`, `news-watcher`, `batch-collectors` 실행 정의 존재 |
-| 리서치 조회 | `departments/01-research/api/main.py` FastAPI | `research-api` 실행 정의 존재 |
-| 시장 저장 | TimescaleDB Migration과 Repository | `timescaledb` 실행 정의 존재 |
+| 리서치 수집 | LS 실시간, LS/NAVER 뉴스, 공시·거시·Reference Batch Collector | `ls-realtime`, `ls-news`, `news-watcher`, `batch-collectors` 실제 실행 확인 |
+| 리서치 조회 | `research-api`, `market-api` FastAPI | 두 API 실제 실행·응답 확인 |
+| 시장 저장 | TimescaleDB Migration, 7개 Hypertable과 Repository | `timescaledb` Healthy, Tick·Quote·Bar 약 969만 행 확인 |
 | 트레이딩 | OrderIntent, Paper Broker, OMS, Multi-leg/Derivatives Domain Code | 전용 API·Container 미구현 |
-| 리스크 | Risk Engine, Trading State Store, FastAPI | Container 미구현 |
-| 회계/포트폴리오 | Ledger, Portfolio, Reconciliation, Reporting Domain Code | 전용 API·Container 미구현 |
-| AI QA/감사 | Evidence QA, Trace, Incident, Tool Permission, FastAPI | Container 미구현 |
+| 리스크 | Risk Engine, Trading State Store, FastAPI와 pytest | Test 통과, Container·Canonical Decision 기록 미구현 |
+| 회계/포트폴리오 | Ledger, Portfolio, Reconciliation, Reporting, Portfolio API | BFF Router만 존재, 전용 Worker·Container와 DB 행 없음 |
+| AI QA/감사 | Evidence QA, Trace, Incident, Tool Permission, FastAPI와 PostgreSQL Write-through | Test 통과, Container와 전사 Trace 연결 미구현 |
 | CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | API·Container 미구현 |
 | Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | API·Container 미구현 |
-| 퀀트/백테스트 | Hermes Profile과 계획 문서 | Worker·API·Container 미구현 |
-| AI Office BFF | `apps/api/main.py`, Trading/Accounting Agent Router | Docker 연결 미구현, Snapshot은 DEMO 의존 |
-| 로컬 보조 모델 | 8개 조직 폴더에 Ollama `Modelfile` 존재 | 공통 Ollama·Model Gateway 연결 미구현 |
+| 퀀트/백테스트 | Hypothesis, PIT Dataset, Backtest, Walk-Forward, Experiment Orchestrator | 실제 Quant DB 기록 존재, Worker·API·Container 미구현 |
+| AI Office BFF | `apps/api/main.py`, Trading/Accounting Router, 8개 조직 UI | Clean Build 성공, Render Test 1건 실패, Snapshot은 DEMO 의존 |
+| 로컬 보조 모델 | 8개 `Modelfile`, CEO·HR Smoke Script, Research/Quant 모델 실측 선택 | 공통 Ollama·Model Gateway·자동 Eval 미구현 |
 
 ### 2.2 현재 Compose의 의미
 
-루트 `docker-compose.yml`은 리서치 수집과 TimescaleDB를 실제로 실행하기 위한 초기 Compose다. 전사 Backend Topology를 표현한 최종 파일이 아니다.
+루트 `docker-compose.yml`은 리서치 수집, `market-api`, `research-api`와 TimescaleDB를 실제로 실행하는
+초기 Compose다. 2026-08-01 감사에서 7개 Service 실행을 확인했지만 전사 Backend Topology를 표현한
+최종 파일은 아니다. 같은 PC의 별도 `trading-*` Compose는 이 프로젝트 Runtime이 아니며 의존해서는 안 된다.
 
 현재 정상 동작하는 수집기를 한 번에 재작성하지 않는다. 다음 구조로 옮길 때도 Service 이름, Volume과 Migration 순서를 유지하면서 한 서비스씩 이동한다.
 
@@ -991,6 +995,22 @@ Lint/Type
 - Agent Tool Allowlist 또는 Audit Trace 누락
 
 ## 16. 단계별 구현 계획
+
+### 16.0 실행 상태 요약
+
+| Phase | 현재 상태 | 다음 종료 조건 |
+|---|---|---|
+| B0 Contract 고정 | 부분 | 공통 Event Envelope·Health·Error Contract를 코드와 Test로 등록 |
+| B1 Compose Modularization | 미착수 | 현재 7개 Research Service 회귀 Test 후 Fragment 분리 |
+| B2 Risk·QA Container | 코드·Test 완료, Container 미착수 | 두 API의 Compose Health와 DB/Event 영속화 |
+| B3 Trading·Accounting 연결 | Domain Prototype 완료 | Risk 승인→OMS→Fill→Journal의 Canonical DB E2E |
+| B4 Governance·Workforce 연결 | Domain·Migration 부분 완료 | Mandate/Case/Profile API와 승인 Runtime |
+| B5 Quant·Strategy Factory | Script·실 DB Experiment 완료 | Job Worker, Registry 승격과 Rollback Gate |
+| B6 Hermes Supervisor | Profile·Modelfile 부분 완료 | Model Gateway, Tool Allowlist와 Kanban Bridge |
+| B7 Production Hardening | 미착수 | CI, 관측, Backup, 장애 Drill과 10거래일 Paper Run |
+
+Phase 번호는 병렬 개발 순서가 아니라 통합 Gate다. B2~B5의 Domain Code가 먼저 만들어졌더라도
+B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운영 의존성을 가져서는 안 된다.
 
 ### Phase B0. 기준과 Contract 고정
 

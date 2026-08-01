@@ -1,6 +1,6 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.5
+> 문서 상태: Team Handoff v1.6
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -10,6 +10,8 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리스크·AI QA 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Risk·Control·AI QA·Audit View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)의 상태 계약 Review
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`
+> 체크박스 해석: 14절은 전 본부 Runtime·Canonical DB 연결까지 포함한 최종 DoD
 
 ---
 

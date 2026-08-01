@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.5
+> 문서 상태: Team Handoff v1.6
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -10,6 +10,8 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)의 `GOV-01`·`GOV-02`·`HR-01`~`HR-03`
+> 체크박스 해석: 14절은 실제 Governance·Workforce API, 승인과 Agent Runtime까지 포함한 최종 DoD
 
 ---
 

@@ -1,12 +1,43 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.5
+> 문서 상태: Implementation Backlog v1.6
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 확정 기술 스택: [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md)  
 > Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문, 성과 평가와 최소 조직 학습 Loop까지 구현한다.
+> 실제 실행 상태와 팀별 다음 작업: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md)
+
+## 0. 2026-08-01 실행 기준 상태
+
+이 표는 기능 파일의 존재가 아니라 Feature 전체 완료 조건을 기준으로 한다. `부분`은 유효한 구현과
+Test가 있으나 End-to-End Acceptance를 아직 통과하지 못했다는 뜻이다.
+
+| Feature | 상태 | 현재 증거 | 남은 핵심 Gate |
+|---|---|---|---|
+| F01 Mandate | 부분 | 정책·Version·Lifecycle 자체 점검 | PostgreSQL Repository, 승인 Interrupt, Case 연결 |
+| F02 Universe | 부분 | LS Master·Watchlist·구독 계획 | Versioned Universe와 지수 구성 이력 |
+| F03 Market WebSocket | 실행 확인 | `ls-realtime` 30시간 이상, Tick·Quote 실제 적재 | 부하·Gap·재시작 Acceptance |
+| F04 Event 정규화 | 부분 | Decimal·3시각·멱등 계약과 적재 | 공통 Event Registry와 Replay Test |
+| F05 Feature Engine | 부분 | Market API 레짐·미시구조 조회 | 상시 Feature Worker와 영속 Feature |
+| F06 Event Priority Queue | 문서 | 우선순위 규칙만 존재 | 탐지 Worker, Redis Queue와 Backpressure |
+| F07 PIT RAG | 부분 | Evidence API·검색·Bundle·RAG 사서 | Artifact Lineage와 전 본부 QA 연결 |
+| F08 Investment Workflow | 부분 | Research/Risk/QA LangGraph 자체 점검 | Durable Case, Checkpoint와 본부 Handoff |
+| F09 Strategy Registry | 부분 | Quant Schema·Hypothesis·Experiment 기록 | Capability·승격·Rollback API |
+| F10 Backtest | 부분 | PIT·Backtest·Walk-Forward와 실제 Experiment | Worker Container와 재현 CI |
+| F11 Signal/Target | 부분 | OrderIntent·철학별 Preset | Research Packet과 Strategy Registry 연결 |
+| F12 Risk Engine | Test 확인 | Risk/Redis 통합 포함 pytest 통과 | Container, Supabase Decision과 Event |
+| F13 Paper Broker | Test 확인 | 결정론적 Paper Broker 자체 점검 | 실제 OMS Worker와 비용·부분 체결 |
+| F14 OMS | Test 확인 | 상태 머신·멱등 Prototype | Event Store 복구와 Reconciliation |
+| F15 Portfolio/PnL | Test 확인 | Ledger·Position·Reconciliation Prototype | Canonical DB Journal·Snapshot과 공식 Read Model |
+| F16 Audit/Replay | 부분 | Trace·Incident·QA Module과 Archive Drill | 전 본부 `trace_id`와 Event Replay |
+| F17 Operator Control | 부분 | Redis Trading State와 Fail-closed Test | Project Redis, Kill Switch E2E와 UI Command |
+| F18 AI Office | 부분 | Clean Build 성공, Render Test 1/2 | 조직명 Test, 공식 Snapshot/WebSocket/Auth |
+| F19 Hermes 자기 개선 | 부분 | Candidate·Migration·Access Lifecycle | Eval·Shadow·승인·배포·Rollback Runner |
+
+현재 P0에서 먼저 닫아야 할 흐름은 F07→F11→F12→F13/F14→F15→F16이다. F03의 실행 기반은
+이미 있으므로 새 수집 Source를 늘리는 것보다 이 흐름의 Canonical DB와 Event 연결을 우선한다.
 
 ## 1. 우선순위
 

@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.5
+> 문서 상태: Team Handoff v1.6
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부, 공통 Frontend Platform 기술 DRI
@@ -10,6 +10,8 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View와 공통 Platform, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)의 `PLAT-01`·`PLAT-02`·`TRD-01`·`ACC-01`·`UI-01`
+> 체크박스 해석: 11절은 최종 E2E DoD이며 Prototype 파일이 있다는 이유로 체크하지 않음
 
 ---
 

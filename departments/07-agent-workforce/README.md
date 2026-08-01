@@ -1,7 +1,7 @@
 # Agent Workforce 인사팀 (HR)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Local Model은 [`Modelfile`](Modelfile)의 `qwen2.5` 기반 `hr-department`이며, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen2.5` 기반 `agent-hr`이고 Hermes Profile은 `hr-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 
@@ -41,10 +41,10 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
     `workforce.improvement_candidates`/`improvement_candidate_events` 컬럼과 1:1 매핑. `.env` 의
     `DATABASE_URL` 사용, 비밀번호/service_role Key 는 로그에 남기지 않는다.
 
-**실 DB 검증 미완**: `repository.py` 는 import·구조까지 확인했으나, 대상 테이블(migration 600)이
-아직 이 DB에 적용되지 않아 live round-trip 검증은 보류 상태다. `supabase db push`(또는 동등한
-방법)로 20260730000600 을 적용한 뒤 검증한다. asyncpg 는 `requirements.txt` 에 있으므로 팀원은
-각자 프로젝트 환경(Hermes Runtime venv 아님)에 `pip install -r requirements.txt` 로 설치한다.
+**실 DB 상태**: `workforce.improvement_candidates`, `access_requests`와 관련 Migration의 적용을
+2026-08-01 실제 DB에서 확인했다. 현재 두 Table은 0건이므로 Repository의 Live Create→Transition→Read
+Round-trip은 아직 검증되지 않았다. asyncpg는 `requirements.txt`에 있으며 Department API Container에서
+같은 Test를 수행해야 한다.
 
 미구현(후속): 위 검증, Eval Runner/Shadow Router 실체 연결(QA·audit 소유), CEO 예산·조직 승인과
 Scorecard 관찰의 실제 API 배선.
@@ -110,6 +110,6 @@ python departments/07-agent-workforce/lifecycle/access.py        # 권한 요청
 ## Handoff
 
 - `hermes/` — Git 기준 Hermes Profile 사본
-- Profile, Eval, Deployment, Lifecycle 모듈은 아직 미구현 — 코드가 생기면
-  `profiles/`, `evals/`, `deployments/`, `lifecycle/`에 배치
-  (8.1절 Hermes 자기 개선 Artifact 경계 참고)
+- Profile Seed와 Access Lifecycle은 구현됐다. 남은 것은 Workforce API, 실제 Tool Permission Assignment,
+  Eval·Shadow·Deployment·Rollback Runner이며 `profiles/`, `evals/`, `deployments/` 경계를 사용한다
+  (8.1절 Hermes 자기 개선 Artifact 경계 참고).

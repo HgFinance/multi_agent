@@ -1,7 +1,7 @@
 # AI QA/감사본부 (AI QA & Audit)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Local Model은 [`Modelfile`](Modelfile)의 `hermes3` 기반 `qa-department`이며, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-qa`이고 Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 
@@ -97,9 +97,11 @@ python3 skills/agentic-rag/main.py --persona evidence-qa-agent \
   `rag_technique_assignment:` 참고.
 - Eval, Model-Risk 모듈은 아직 미구현(P1 tier: model-risk-agent, internal-audit-agent,
   incident-postmortem-agent) — 코드가 생기면 `evals/`, `model-risk/`에 배치.
-- 미착수(기술적으로 지금 불가능한 것과 범위 밖인 것을 구분해서 기록): Agent/Tool Trace 실제 저장과
-  Tool Allowlist 실제 판정(`workforce.agent_profiles`가 비어 있어 FK/실데이터 없음, 인사팀 영역),
-  `audit.qa_decisions`에 calculation_version/input_hash 컬럼 자체를 추가하는 건 스키마 변경이라
-  별도 Migration PR 필요, Sprint K3 나머지·K4, LLM-as-a-Judge(의도적으로 P0 이후 백로그), 실시간
+- 미착수(기술적으로 지금 불가능한 것과 범위 밖인 것을 구분해서 기록): 전 본부 Agent/Tool Trace 실제 저장과
+  Tool Allowlist 실제 판정(Workforce의 Profile/Version Seed는 있으나 공식 Read API·실제 Permission 할당 없음),
+  Sprint K3 나머지·K4, LLM-as-a-Judge(의도적으로 P0 이후 백로그), 실시간
   Telemetry·부하 테스트(관찰·테스트할 실제 서비스가 없어 지금은 불가능). 자세한 진행 상태는
   `hermes/config.yaml`의 `implementation:` 블록 참고.
+- `audit.qa_decisions.calculation_version/input_hash`는
+  `20260731001000_qa_decisions_reproducibility.sql`로 실제 DB 적용까지 확인했다. 다음 단계는 API 판정을
+  해당 Row와 `qa.decision.v1`에 같은 Hash로 기록하는 것이다.
