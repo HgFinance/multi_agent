@@ -108,6 +108,11 @@ JOBS: tuple[Job, ...] = (
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
     Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
+    # Packet 사후 채점 - 선순환의 되먹임. 지평(5·20 거래일)이 지난 Packet 을
+    # 시세로 대조해 research.packet_outcomes 에 남긴다. 18:00: 당일 종가가
+    # 확정되고 밤 배치가 시작되기 전.
+    Job("packet-outcome", ("collectors/packet_outcome_scorer.py", "--score"),
+        daily_at=time(18, 0)),
     # 지정학 리스크 (GPR 일별 지수 + GDELT 테마 보도량·톤).
     # 07:20 - Steward(07:10) 뒤, 개장 전. 밤사이 미국·중동 사건이 반영된
     # 상태로 장을 연다. 일 단위 계열이고 진행 중인 날은 제외하므로 장중
@@ -229,9 +234,10 @@ def _check_job_table():
         assert Path(__file__).resolve().parent.parent.joinpath(j.argv[0]).exists(), \
             f"{j.name}: {j.argv[0]} 이 없다"
         # 실행 플래그가 없으면 수집기 규약상 자체점검만 돌게 된다.
-        # --collect(수집) / --audit(Steward 감사) / --export(Archive) 가 실행 동사다.
-        assert {"--collect", "--audit", "--export"} & set(j.argv), \
-            f"{j.name}: 실행 플래그(--collect/--audit/--export)가 없다 - 자체점검만 돈다"
+        # --collect(수집) / --audit(Steward 감사) / --export(Archive) /
+        # --score(Packet 사후 채점) 가 실행 동사다.
+        assert {"--collect", "--audit", "--export", "--score"} & set(j.argv), \
+            f"{j.name}: 실행 플래그가 없다 - 자체점검만 돈다"
     try:
         Job("bad", ("x.py", "--collect"))
         raise AssertionError("every/daily 둘 다 없는 Job 이 통과했다")

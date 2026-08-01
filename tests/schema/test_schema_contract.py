@@ -49,6 +49,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260731001100_dash_news_published_date.sql",
                 "20260801001200_evidence_chunk_embedding_1024.sql",
                 "20260801001300_research_pipeline_runs.sql",
+                "20260802001400_research_packet_outcomes.sql",
             ],
         )
         for path, sql in self.files:
@@ -77,7 +78,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "governance": 20,
             "quant": 12,
             "reference": 9,
-            "research": 15,
+            "research": 17,
             "risk": 16,
             "strategy": 9,
             "workforce": 24,

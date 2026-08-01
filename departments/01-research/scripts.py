@@ -366,9 +366,100 @@ def _node_models() -> dict:
     return models
 
 
+# ── 선순환 1단: 반증 가능한 주장 발행 (코드가 만든다) ─────────────────────
+# 재일님 지시 2026-08-01 "실제 투자 판단 -> 결과에 영향을 줄 때 선순환".
+# Packet 의 산문 무효화 조건("연계성 약화 가능성")은 사람도 판정이 갈려
+# 채점되지 않는다. 채점 가능한 주장은 코드가 결정론으로 발행한다 -
+# LLM 에게 자기 채점 기준을 쓰게 두면 맞히기 쉬운 조건 쪽으로 굽는다.
+CLAIM_HORIZONS = (5, 20)          # 거래일. 5일=단기 반응, 20일=한 달 검증
+DRAWDOWN_PCT = 10.0               # 기준가 대비 하락 발동선
+RALLY_PCT = 10.0
+
+
+def build_packet_claims(state: dict, packet: dict) -> list[dict]:
+    """Packet 시점 상태 -> 기계가 채점할 수 있는 주장 목록 (순수 함수).
+
+    기준가가 없으면 가격 주장을 만들지 않는다 - 기준 없는 채점은 무의미하고,
+    없는 기준을 추정해 넣으면 통계 전체가 오염된다.
+    """
+    claims: list[dict] = []
+    price = ((state.get("evidence") or {}).get("price_context") or {})
+    base = price.get("close")
+    try:
+        base = float(base) if base is not None else None
+    except (TypeError, ValueError):
+        base = None
+
+    if base and base > 0:
+        for h in CLAIM_HORIZONS:
+            claims.append({"kind": "PRICE_DRAWDOWN", "metric": "close", "op": "<=",
+                           "threshold": round(base * (1 - DRAWDOWN_PCT / 100), 4),
+                           "baseline": base, "horizon_days": h,
+                           "source_node": "price_context"})
+            claims.append({"kind": "PRICE_RALLY", "metric": "close", "op": ">=",
+                           "threshold": round(base * (1 + RALLY_PCT / 100), 4),
+                           "baseline": base, "horizon_days": h,
+                           "source_node": "price_context"})
+
+    regime = (state.get("regime") or {}).get("verdict")
+    if regime and regime != "INSUFFICIENT_DATA":
+        claims.append({"kind": "REGIME_FLIP", "metric": "regime_label", "op": "!=",
+                       "threshold_text": regime, "baseline_text": regime,
+                       "horizon_days": 20, "source_node": "regime"})
+
+    geo = (state.get("geopolitical") or {}).get("verdict")
+    if geo and geo not in ("INSUFFICIENT_DATA", "SHOCK"):
+        # 이미 SHOCK 이면 "SHOCK 으로 악화"는 발동 불가라 주장이 되지 않는다
+        claims.append({"kind": "GEO_ESCALATION", "metric": "geo_risk_label",
+                       "op": "==", "threshold_text": "SHOCK",
+                       "baseline_text": geo, "horizon_days": 20,
+                       "source_node": "geopolitical"})
+    return claims
+
+
+def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
+                          conn=None) -> int:
+    """research.packet_claims 적재. 기록 실패가 Packet 을 죽이지 않는다."""
+    if not claims:
+        return 0
+    try:
+        own = conn is None
+        if own:
+            import psycopg2
+
+            from source_registry import load_project_env
+
+            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                    connect_timeout=10)
+        with conn.cursor() as cur:
+            for c in claims:
+                cur.execute(
+                    """
+                    insert into research.packet_claims
+                      (trace_id, symbol, kind, metric, op, threshold,
+                       threshold_text, baseline, baseline_text, horizon_days,
+                       source_node)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (trace_id, kind, metric, horizon_days) do nothing
+                    """,
+                    (trace_id, symbol, c["kind"], c["metric"], c["op"],
+                     c.get("threshold"), c.get("threshold_text"),
+                     c.get("baseline"), c.get("baseline_text"),
+                     c["horizon_days"], c.get("source_node")))
+        conn.commit()
+        if own:
+            conn.close()
+        return len(claims)
+    except Exception as e:
+        print(f"⚠ packet_claims 기록 실패(Packet 은 정상): {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return 0
+
+
 def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                          status: str, packet: dict | None = None,
-                         halt_reason: str | None = None, conn=None) -> str | None:
+                         halt_reason: str | None = None, conn=None,
+                         analyst_verdicts: dict | None = None) -> str | None:
     """research.pipeline_runs 기록 - 기록 실패가 Packet 을 죽이면 안 된다.
 
     audit.agent_runs 는 workforce 프로필 FK(HR 권한)가 선행이라 우리 소유
@@ -399,15 +490,21 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                 insert into research.pipeline_runs
                   (trace_id, pipeline_version, symbol, input_hash, node_models,
                    packet_hash, evidence_quality, numeric_check_ok, status,
-                   halt_reason, started_at, ended_at)
-                values (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                   halt_reason, started_at, ended_at, metadata)
+                values (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s,
+                        %s::jsonb)
                 returning pipeline_run_id
                 """,
                 (trace_id, PIPELINE_VERSION, symbol, input_hash,
                  json.dumps(models), packet_hash,
                  (packet or {}).get("evidence_quality"),
                  nc.get("ok") if nc else None, status, halt_reason,
-                 started, ended))
+                 started, ended,
+                 # 판정 스냅샷 - 사후 채점(packet_outcome_scorer)이 "이 분석가가
+                 # 그때 뭐라고 했는지"를 여기서 읽는다. 없으면 되먹임 통계
+                 # (analyst_calibration)가 통째로 비어 선순환이 끊긴다.
+                 json.dumps({"analyst_verdicts": analyst_verdicts or {}},
+                            ensure_ascii=False)))
             run_id = str(cur.fetchone()[0])
         conn.commit()
         if own:
@@ -441,8 +538,6 @@ def run_research_department(symbol: str) -> dict:
                 "trace_id": trace_id}
     packet = out["packet"]
     packet["trace_id"] = trace_id
-    _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
-                         ended=ended, status="COMPLETED", packet=packet)
     packet["_analyst_verdicts"] = {          # 리포트용 메타 (Packet 본문과 분리)
         "sentiment": (out.get("sentiment") or {}).get("verdict"),
         "technical": (out.get("technical") or {}).get("verdict"),
@@ -451,6 +546,28 @@ def run_research_department(symbol: str) -> dict:
         "geopolitical": (out.get("geopolitical") or {}).get("verdict"),
         "microstructure": (out.get("microstructure") or {}).get("verdict"),
     }
+    _record_pipeline_run(
+        symbol=symbol, trace_id=trace_id, started=started, ended=ended,
+        status="COMPLETED", packet=packet,
+        analyst_verdicts={k: v for k, v in packet["_analyst_verdicts"].items() if v})
+    # 분석가 서술 - 리포트를 풍성하게. 검증(환각·수치·라벨)을 통과한 문장만 온다
+    packet["_analyst_notes"] = {
+        node: {"summary": ((out.get(key) or {}).get("note") or {}).get("summary")
+                          or (out.get(key) or {}).get("summary"),
+               "cautions": ((out.get(key) or {}).get("note") or {}).get("cautions")
+                           or (out.get(key) or {}).get("cautions") or []}
+        for node, key in (("technical", "technical"),
+                          ("fundamental", "fundamental"),
+                          ("regime", "regime"),
+                          ("geopolitical", "geopolitical"),
+                          ("microstructure", "microstructure"))
+    }
+    # 선순환 1단: 반증 가능한 주장을 발행해 남긴다. 채점은 지평이 지난 뒤
+    # collectors/packet_outcome_scorer.py 가 시세로 대조한다.
+    claims = build_packet_claims(out, packet)
+    packet["_claims"] = claims
+    packet["_claims_recorded"] = _record_packet_claims(
+        trace_id=trace_id, symbol=symbol, claims=claims)
     return packet
 
 
@@ -482,6 +599,42 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         lines += [f"## {title}", ""]
         lines += [f"- {x}" for x in (packet.get(key) or [])] or ["- (없음)"]
         lines += [""]
+
+    # 분석가 원문 소견 - 총괄이 압축하며 버린 맥락이 여기 남는다. 상충하는
+    # 소견을 지우지 않는 것이 본부 원칙이라, 요약본 옆에 원문을 같이 싣는다.
+    notes = {k: v for k, v in (packet.get("_analyst_notes") or {}).items()
+             if v.get("summary")}
+    if notes:
+        lines += ["## 분석가 소견 원문 (검증 통과분)", ""]
+        for node, n in notes.items():
+            verdict = verdicts.get(node)
+            lines += [f"### {node}" + (f" — `{verdict}`" if verdict else ""), "",
+                      str(n["summary"]), ""]
+            for c in n.get("cautions") or []:
+                lines += [f"> ⚠ {c}"]
+            if n.get("cautions"):
+                lines += [""]
+
+    # 선순환 - 나중에 기계가 채점할 주장. 산문 무효화 조건과 달리 판정이
+    # 갈리지 않는다(코드가 발행하고 코드가 채점한다).
+    claims = packet.get("_claims") or []
+    if claims:
+        lines += ["## 검증 예정 주장 (코드 발행 · 사후 자동 채점)", "",
+                  "| 종류 | 조건 | 지평 | 출처 |", "|---|---|---|---|"]
+        for c in claims:
+            tgt = c.get("threshold")
+            cond = (f"`{c['metric']} {c['op']} "
+                    f"{tgt if tgt is not None else c.get('threshold_text')}`")
+            if c.get("baseline") is not None:
+                cond += f" (기준 {c['baseline']:,})"
+            elif c.get("baseline_text"):
+                cond += f" (기준 {c['baseline_text']})"
+            lines += [f"| {c['kind']} | {cond} | {c['horizon_days']}거래일 | "
+                      f"{c.get('source_node') or '-'} |"]
+        lines += ["",
+                  f"기록 {packet.get('_claims_recorded', 0)}건 — 채점은 "
+                  f"`collectors/packet_outcome_scorer.py`, 누적 성과는 "
+                  f"`research.analyst_calibration`.", ""]
     return "\n".join(lines)
 
 
