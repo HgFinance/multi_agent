@@ -58,6 +58,7 @@ class ResearchState(TypedDict, total=False):
     technical: dict         # RES-04 기술적 소견 (결정론 readout + 검증된 서술)
     fundamental: dict       # RES-05 펀더멘털 소견 (결정론 readout + 검증된 서술)
     regime: dict            # RES-07 시장 레짐 (라벨은 코드, 서술만 LLM)
+    geopolitical: dict      # RES-09 지정학 국면 (라벨·driver 는 코드, 서술만 LLM)
     microstructure: dict    # RES-03 미시구조 (판정은 코드, 서술만 LLM)
     packet: dict            # 최종 Research Packet
     halted: str             # 중단 사유 (거래 불가 등)
@@ -145,6 +146,27 @@ def analyze_regime(state: ResearchState) -> dict:
                        "note": _norm_note(r.get("note"))}}
 
 
+def analyze_geopolitical(state: ResearchState) -> dict:
+    """지정학 국면 - 종목도 시장 단면도 아닌 **바깥 환경** (RES-09).
+
+    레짐(RES-07)이 국내 시장 내부 단면이라면 이쪽은 외생 충격이다. 둘 다
+    종목 무관이라 결과가 종목별로 달라지지 않는다 - 그래도 매 Packet 마다
+    부르는 이유는 as_of 시점 국면이 Packet 의 맥락이기 때문이다.
+    """
+    from geopolitical_analyst import analyze as geo_analyze
+
+    r = geo_analyze(research_api=RESEARCH_API)
+    return {"geopolitical": {"verdict": r.get("verdict"),
+                             "driver": r.get("driver"),
+                             "readout": r.get("readout"),
+                             "note": _norm_note(r.get("note")),
+                             "summary": r.get("summary"),
+                             "transmission": r.get("transmission"),
+                             "cautions": r.get("cautions"),
+                             "llm_status": r.get("llm_status"),
+                             "reason": r.get("reason")}}
+
+
 def analyze_microstructure(state: ResearchState) -> dict:
     from microstructure_analyst import analyze as micro_analyze
 
@@ -173,6 +195,7 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         "technical": state.get("technical") or {"status": "NOT_RUN"},
         "fundamental": state.get("fundamental") or {"status": "NOT_RUN"},
         "market_regime": state.get("regime") or {"status": "NOT_RUN"},
+        "geopolitical": state.get("geopolitical") or {"status": "NOT_RUN"},
         "microstructure": state.get("microstructure") or {"status": "NOT_RUN"},
     }
 
@@ -304,6 +327,7 @@ def build_pipeline():
     g.add_node("analyze_technical", analyze_technical)
     g.add_node("analyze_fundamental", analyze_fundamental)
     g.add_node("analyze_regime", analyze_regime)
+    g.add_node("analyze_geopolitical", analyze_geopolitical)
     g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
     g.set_entry_point("check_universe")
@@ -311,13 +335,15 @@ def build_pipeline():
     g.add_conditional_edges("check_universe",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
-    # 분석가 5인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
+    # 분석가 6인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
     # LLM 호출은 어차피 직렬화된다. 형태만 병렬로 꾸미지 않는다.
     g.add_edge("assemble_evidence", "analyze_sentiment")
     g.add_edge("analyze_sentiment", "analyze_technical")
     g.add_edge("analyze_technical", "analyze_fundamental")
     g.add_edge("analyze_fundamental", "analyze_regime")
-    g.add_edge("analyze_regime", "analyze_microstructure")
+    # 레짐(국내 단면) 다음에 지정학(외생 환경) - 안에서 밖으로 넓히는 순서
+    g.add_edge("analyze_regime", "analyze_geopolitical")
+    g.add_edge("analyze_geopolitical", "analyze_microstructure")
     g.add_edge("analyze_microstructure", "draft_packet")
     g.add_edge("draft_packet", END)
     return g.compile()
@@ -331,6 +357,7 @@ def _node_models() -> dict:
                       ("technical", "technical_analyst"),
                       ("fundamental", "fundamental_analyst"),
                       ("regime", "sector_regime_analyst"),
+                      ("geopolitical", "geopolitical_analyst"),
                       ("microstructure", "microstructure_analyst")):
         try:
             models[node] = getattr(__import__(mod), "MODEL", None)
@@ -421,6 +448,7 @@ def run_research_department(symbol: str) -> dict:
         "technical": (out.get("technical") or {}).get("verdict"),
         "fundamental": (out.get("fundamental") or {}).get("verdict"),
         "regime": (out.get("regime") or {}).get("verdict"),
+        "geopolitical": (out.get("geopolitical") or {}).get("verdict"),
         "microstructure": (out.get("microstructure") or {}).get("verdict"),
     }
     return packet

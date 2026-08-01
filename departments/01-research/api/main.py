@@ -263,6 +263,44 @@ def evidence_financials(
     )
 
 
+@app.get("/macro/observations")
+def macro_observations(
+    codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),
+    days: int = Query(120, gt=0, le=3650, description="period 소급 창(일)"),
+    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수)"),
+):
+    """거시·지정학 시계열 조회 (RES-09 지정학 분석가의 재료).
+
+    **PIT 핵심 두 가지**
+    1. `published_at <= as_of` - 그 시점에 실제로 공표된 값만 준다. GPR 은
+       4~5일 늦게 나오므로(수집기가 period+7일로 보수 기록) 사건 당일에
+       지수를 알았다고 착각하는 누수를 여기서 원천 차단한다.
+    2. 같은 period 에 여러 vintage 가 있으면 as_of 시점 **가장 최신 vintage**
+       하나만 준다(개정 이력은 append 되므로 골라야 한다).
+    """
+    ts = _as_of_or_now(as_of)
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list:
+        raise HTTPException(422, "codes 가 비었다")
+    if len(code_list) > 30:
+        raise HTTPException(422, f"codes 는 30개 이하 (요청 {len(code_list)}개)")
+    return _query(
+        """
+        select distinct on (s.external_series_code, o.period)
+               s.external_series_code as code, o.period, o.value,
+               o.published_at, o.vintage_date
+        from research.macro_observations o
+        join research.macro_series s on s.series_id = o.series_id
+        where s.external_series_code = any(%s)
+          and o.published_at <= %s
+          and o.period >= (%s::date - make_interval(days => %s))
+        order by s.external_series_code, o.period,
+                 o.vintage_date desc, o.revision desc
+        """,
+        (code_list, ts, ts, days),
+    )
+
+
 # ---------------------------------------------------------------------------
 # /evidence/search - 공시 원문 시맨틱 검색 (rag_librarian 이 적재한 청크)
 # ---------------------------------------------------------------------------
