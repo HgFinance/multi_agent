@@ -108,6 +108,12 @@ JOBS: tuple[Job, ...] = (
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
     Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
+    # Bluesky 미국 표적 계정 (기관 미디어 4곳 + 매크로 논객 2인, ~166건/일 실측).
+    # 60분 주기면 계정당 피드 50건 버퍼가 최고 볼륨(Reuters ~57건/일)도 20시간
+    # 이상 덮는다 - 놓칠 수 없는 구조. 창 06:00~23:50: 미 장중(KST 밤)은 다음날
+    # 아침 첫 폴링이 버퍼로 회수하므로 새벽 상주가 필요 없다.
+    Job("bluesky-watch", ("collectors/bluesky_watch_collector.py", "--collect"),
+        every_minutes=60, window=(time(6, 0), time(23, 50))),
 )
 
 

@@ -394,27 +394,25 @@ SOURCES: tuple[SourceSpec, ...] = (
     ),
     SourceSpec(
         source_id="bluesky",
-        market_scopes=(MarketScope.KR_MARKET, MarketScope.FOREIGN_MARKET),
-        display_name="Bluesky (AT Protocol) 소셜 신호",
+        # KR scope 를 빼는 이유(실측 2026-08-01): 파이어호스 90초 전수 표본에서
+        # 한국어 ~64,000건/일 중 금융 키워드 1건(오탐) - 한국 신호원이 아니다.
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        display_name="Bluesky (AT Protocol) 미국 금융 표적 수집",
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P1,
         required_env=(),
-        # ▶ 실측 판정 2026-08-01 (재일님 "무료로 ㄱㄱ" - X 무료 대안 실험):
-        #   기술 검증 통과 - Jetstream 파이어호스(무인증 공개 스트림) 연결·필터
-        #   관통 실측(42포스트/초, 검색 API 는 무인증 403 - 계정+앱 패스워드
-        #   필요). 그러나 **한국 금융 담론이 사실상 없다**: 90초 전수 표본에서
-        #   한국어 ~64,000건/일 규모 중 금융 키워드 1건(그마저 오탐).
-        disabled_reason=(
-            "합법·무료 경로는 확보(Jetstream 무인증)했으나 실측상 한국 금융 "
-            "담론 규모가 사실상 0 - 상주 수집 실익 없음. 재검토 조건: 한국 "
-            "금융 커뮤니티 성장 실측 또는 해외 종목 소셜 신호 필요 시 "
-            "(그 경우 영어 담론은 유의미할 수 있음 - 재프로브 후 결정)"
-        ),
-        allowed_uses=(UseScope.SEARCH_ONLY,),
+        # ▶ 활성 전환 2026-08-01 (재일님 "미국 주식·유명 인물 시도"):
+        #   getAuthorFeed 가 **무인증**으로 열려 표적 계정 수집이 성립한다.
+        #   실측 - Bloomberg ~46/일·Reuters ~57/일·WSJ ~27/일·CNBC ~36/일 +
+        #   매크로 논객(Politano 11.2만 팔로워 등). 수집기:
+        #   bluesky_watch_collector.py, 대상: config/bluesky_watchlist.txt.
+        #   검색(searchPosts)은 무인증 403 - 필요 시 무료 계정은 재일님 몫.
+        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
         normalized_target="research.documents",
-        doc_ref="Jetstream 프로브 실측 2026-08-01",
-        note="검색 API(searchPosts)는 무료 계정+앱 패스워드로 열 수 있다 - "
-             "표적 검색이 필요해지면 계정 생성은 재일님 몫",
+        doc_ref="실측 프로브 2026-08-01, bluesky_watch_collector.py",
+        note="스니펫 300자까지만 저장(보수적 시작). **삭제 Compliance 미구현** - "
+             "원 포스트 삭제 시 사본 제거 절차가 생기기 전까지 내부 Evidence "
+             "전용, 재배포 금지(REDISTRIBUTE 미허용이 그 게이트다)",
     ),
     SourceSpec(
         source_id="naver_apihub",
