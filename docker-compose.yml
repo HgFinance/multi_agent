@@ -192,6 +192,17 @@ services:
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
 
+    # ▶ 2026-08-02 실측 사고: Dockerfile 이 config 를 COPY 하지 않아 이 컨테이너
+    #   에는 config 디렉터리 자체가 없었다. 그래서 새로 넣은 Job 두 개가 조용히
+    #   죽고 있었다 - geopolitical 은 FileNotFoundError(geopolitical_themes.txt),
+    #   bluesky-watch 도 같은 이유. 스케줄러는 exit≠0 을 로그에 남기지만 **아무도
+    #   안 보면 없는 것과 같다**(그래서 실패 알림이 백로그로 남는다).
+    #   news-watcher·ls-realtime 은 이미 같은 마운트를 쓰고 있었다 - 이 컨테이너만
+    #   빠져 있었다. COPY 대신 마운트로 맞추는 이유: 워치리스트·테마 파일은 코드
+    #   배포 없이 고치라고 만든 것이라 이미지에 굽으면 그 목적이 사라진다.
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+
     mem_limit: 512m
     mem_reservation: 64m
     cpus: 0.5
