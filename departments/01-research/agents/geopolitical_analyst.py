@@ -92,7 +92,7 @@ GEO_RULES = {
 }
 
 _NON_METRIC = ("risk_label", "driver", "geo_rules", "latest_gpr_date",
-               "gpr_excluded_reason")
+               "gpr_excluded_reason", "label_reason")
 
 
 class GeoNote(BaseModel):
@@ -260,6 +260,32 @@ def compute_geo_readout(rows: list[dict], *, as_of: date) -> dict:
         label = "NEUTRAL"
     out["risk_label"] = label
     out["driver"] = driver if label != "INSUFFICIENT_DATA" else "UNKNOWN"
+
+    # 라벨의 **근거**도 코드가 만든다. 실측 2026-08-01: 라벨만 주면 EXAONE 이
+    # 근거를 지어내 GPR 에 귀속시켰다("183.64 백분위가 95 이상이라 SHOCK") -
+    # 실제로는 백분위 43 이고 SHOCK 은 북한 미사일 테마 배율 3.5 에서 나왔다.
+    # 모델과 싸우는 대신 베낄 문장을 준다.
+    reasons: list[str] = []
+    if label in ("SHOCK", "ELEVATED"):
+        trg = SHOCK_PCTL if label == "SHOCK" else ELEVATED_PCTL
+        rat = SHOCK_RATIO if label == "SHOCK" else ELEVATED_RATIO
+        if pctl is not None and pctl >= trg:
+            reasons.append(f"GPR 백분위 {pctl} >= {trg}")
+        if mx is not None and mx >= rat:
+            hot = ", ".join(out["hot_themes"]) or "테마"
+            reasons.append(f"테마 배율 {mx} >= {rat} ({hot})")
+    elif label == "CALM":
+        reasons.append(f"GPR 백분위 {pctl} <= {CALM_PCTL}" if pctl is not None
+                       else "GPR 판정 제외")
+        reasons.append(f"모든 테마 배율 < {CALM_RATIO}")
+    elif label == "NEUTRAL":
+        reasons.append(f"GPR 백분위 {pctl} 와 최대 테마 배율 {mx} 가 "
+                       f"어느 임계도 넘지 않음")
+    else:
+        reasons.append("GPR·GDELT 관측 부족")
+    if out["gpr_excluded_reason"]:
+        reasons.append("GPR 은 지연으로 판정에서 제외됨")
+    out["label_reason"] = "; ".join(reasons)
     return out
 
 
@@ -283,6 +309,11 @@ _SYSTEM = (
     "them character for character. Never change them.\n"
     "- summary is a single Korean string (NOT a list, NOT an object) using "
     "ONLY numbers present in the readout. Never invent a number.\n"
+    # 실측: 라벨 근거를 스스로 지어내 엉뚱한 지표에 귀속시켰다(백분위 43 인데
+    # "95 이상이라 SHOCK"). 근거는 코드가 계산해 주므로 그대로 쓰게 한다.
+    "- summary MUST state the label reason exactly as given. Never attribute "
+    "the label to a metric that the given reason does not name, and never "
+    "quote a threshold number that is not in the readout.\n"
     "- transmission, used_metrics, cautions are FLAT arrays of plain strings.\n"
     "- transmission holds at most 3 hypotheses for how this could reach the "
     "Korean market (oil import cost, USD/KRW, export demand, defense names). "
@@ -303,6 +334,8 @@ def narrate(readout: dict, llm: Optional[Callable] = None) -> GeoNote:
     allowed = [k for k in readout if k not in _NON_METRIC]
     prompt = (f"Deterministic risk label (copy verbatim): {readout['risk_label']}\n"
               f"Deterministic driver (copy verbatim): {readout['driver']}\n"
+              f"Why that label (code-computed - state THIS reason, do not "
+              f"invent your own): {readout.get('label_reason')}\n"
               f"Allowed metric keys: {json.dumps(allowed)}\n"
               f"Geopolitical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
@@ -532,12 +565,24 @@ def _check_labels_and_driver():
     assert r["risk_label"] == "CALM", r["risk_label"]
     assert r["driver"] == "BALANCED", r["driver"]
 
-    # 충격: 테마 배율 3배
-    shock = _rows("GPRD", [100.0] * 30, end=today - timedelta(days=1))
+    # 충격: 테마만 3배. GPR 은 최신값이 창 하위(백분위 3.3)라 발동하지 않는다
+    # - 평탄한 계열([100]*30)로 두면 최신값 백분위가 100 이 되어 GPR 조건까지
+    #   같이 켜진다(실측으로 확인). 근거 문구 검사는 한쪽만 켜야 의미가 있다.
+    shock = _rows("GPRD", [100.0] * 29 + [50.0], end=today - timedelta(days=1))
     shock += _rows("GDELT_X", [1.0] * 29 + [3.0], end=today - timedelta(days=1))
     r = compute_geo_readout(shock, as_of=today)
     assert r["risk_label"] == "SHOCK", r["risk_label"]
     assert r["max_theme_ratio"] == 3.0 and r["hot_themes"] == ["GDELT_X"]
+    # 근거는 실제 발동 조건만 말해야 한다 - GPR 백분위는 SHOCK 을 만들지 않았다
+    assert "테마 배율 3.0" in r["label_reason"], r["label_reason"]
+    assert "백분위" not in r["label_reason"], \
+        f"발동하지 않은 조건이 근거에 섞였다: {r['label_reason']}"
+    # 둘 다 켜지면 둘 다 적는다 - 근거는 사실의 전부여야 한다
+    both = _rows("GPRD", [100.0] * 30, end=today - timedelta(days=1))
+    both += _rows("GDELT_X", [1.0] * 29 + [3.0], end=today - timedelta(days=1))
+    rb = compute_geo_readout(both, as_of=today)
+    assert "백분위" in rb["label_reason"] and "테마 배율" in rb["label_reason"], \
+        rb["label_reason"]
 
     # 위협 주도 - "폭격한다니 만다니"가 실제 사건보다 큰 국면
     th = _rows("GPRD", [100.0] * 30, end=today - timedelta(days=1))

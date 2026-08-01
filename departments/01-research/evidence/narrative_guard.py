@@ -102,6 +102,44 @@ METRIC_LEXICON: dict[str, dict[str, list[str]]] = {
     # 아니라 키 이름의 p50/p90 리터럴(사례 3) - check_percentile_literal 담당
     "spread_bp_p50": {"allowed": ["스프레드", "bp"], "forbidden": []},
     "spread_bp_p90": {"allowed": ["스프레드", "bp"], "forbidden": []},
+    # RES-09 geopolitical readout: 지수 포인트 vs 백분위 (실측 2026-08-01 -
+    # EXAONE 이 gpr_latest 183.64 를 "183.64 백분위"라 쓰고 그 값이 SHOCK
+    # 기준(백분위>=95)에 든다고 서술했다. 실제 백분위는 43 이고 SHOCK 은
+    # 테마 배율에서 나왔다. 수치는 readout 에 실재하므로 숫자 대조가 못 잡는
+    # 전형적인 라벨 오서술이다).
+    "gpr_latest": {
+        "allowed": ["지수", "포인트", "GPR 지표", "GPR 지수"],
+        "forbidden": ["백분위", "퍼센타일", "상위 %"],
+    },
+    "gpr_5d_avg": {
+        "allowed": ["평균", "지수", "포인트"],
+        "forbidden": ["백분위", "퍼센타일"],
+    },
+    "gpr_window_median": {
+        "allowed": ["중앙값", "지수", "포인트"],
+        "forbidden": ["백분위", "퍼센타일"],
+    },
+    "gpr_threat_latest": {
+        "allowed": ["위협", "threat", "언사"],
+        "forbidden": ["백분위", "실제 사건", "실제사건"],
+    },
+    "gpr_act_latest": {
+        "allowed": ["실제", "사건", "act"],
+        "forbidden": ["백분위", "위협"],
+    },
+    "gpr_percentile": {
+        "allowed": ["백분위", "퍼센타일"],
+        "forbidden": ["포인트", "중앙값"],
+    },
+    # 배율(최근/중앙)과 점유율(%)은 단위가 다르다 - 서로 바꿔 부르면 오서술
+    "max_theme_ratio": {
+        "allowed": ["배", "배율"],
+        "forbidden": ["점유율", "백분위", "%p"],
+    },
+    "threat_act_ratio": {
+        "allowed": ["위협", "비", "배"],
+        "forbidden": ["백분위", "점유율"],
+    },
 }
 
 # 수치 매칭 풀에서 빼는 bookkeeping 키 - 기존 verify 의 숫자검증과 같은 관례
@@ -355,6 +393,30 @@ def _check_v2_observed_misses():
     print("  v2 확장(실측 미탐 재현)  OK")
 
 
+def _check_v3_geopolitical_misses():
+    """v3 사전 확장 - RES-09 실측 미탐: 지수 포인트를 '백분위'로 부른 서술.
+
+    2026-08-01 관통 실행에서 EXAONE 이 gpr_latest 183.64 를 "183.64 백분위"라
+    쓰고 그 값이 SHOCK 기준(백분위>=95)에 든다고 서술했다. 실제 백분위는 43,
+    SHOCK 은 테마 배율에서 나왔다. 수치가 readout 에 실재하므로 숫자 대조는
+    통과한다 - 라벨 결합 검사만이 잡을 수 있는 유형이다.
+    """
+    r = {"gpr_latest": 183.64, "gpr_percentile": 43.0, "max_theme_ratio": 3.5,
+         "gpr_lag_days": 7}
+    v = audit_narrative(
+        "최신 GPR 지표는 183.64 백분위로 SHOCK 범위에 속합니다.", r)
+    assert any(x["metric"] == "gpr_latest" and x["forbidden_hit"] == "백분위"
+               for x in v), v
+    # 위협/실제를 바꿔 부르는 것도 잡는다
+    r2 = {"gpr_threat_latest": 199.69, "gpr_act_latest": 225.32}
+    v2 = audit_narrative("실제 사건 지수는 199.69 입니다.", r2)
+    assert any(x["metric"] == "gpr_threat_latest" for x in v2), v2
+    # 정상 서술은 통과 - 각 수치를 제 이름으로 부른다
+    ok = audit_narrative("GPR 지수는 183.64 포인트이고 백분위는 43.0% 수준이다.", r)
+    assert not ok, ok
+    print("  v3 확장(지정학 지수/백분위)  OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -366,4 +428,6 @@ if __name__ == "__main__":
     _check_no_number_passes()
     _check_same_sentence_rule()
     _check_v2_observed_misses()
-    print("narrative-guard 7개 영역 통과. 배선: technical/sector_regime verify()")
+    _check_v3_geopolitical_misses()
+    print("narrative-guard 8개 영역 통과. "
+          "배선: technical/sector_regime/geopolitical verify()")
