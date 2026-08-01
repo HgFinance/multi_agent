@@ -35,11 +35,12 @@ microstructure/technical/fundamental/sector-regime 4개 페르소나를 같은 �
 
   --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요) 은 .env(프로젝트 루트)를 셸에 먼저 로드해야 한다.
   departments/03-risk 안에서 바로 실행하면 .env를 못 찾아 KeyError: 'REDIS_URL' 이 난다:
+    
     cd /Users/baiohelseu/Desktop/Project/multi_agent
-    set -a && source .env && set +a  # REDIS_URL, OPENAI_API_KEY 등을 셸 환경변수로 로드
-    source ~/claude/bin/activate      # run_agent(Hermes Runtime)가 이 venv에만 설치돼 있다 - 프로젝트 .venv엔 없음
+    set -a && source .env && set +a 
+    source ~/claude/bin/activate      
     cd departments/03-risk
-    python scripts.py --run           # 데모 주문으로 실제 실행
+    python scripts.py --run
 
   reports/risk_case_report_<risk_request_id>.md 로 결정론적 MD 리포트도 저장한다 - _render_report_md 는
   순수 함수(run_risk_department 반환값을 그대로 옮김) 이고 LLM은 narrative/compliance answer 필드에만
