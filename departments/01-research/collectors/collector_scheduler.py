@@ -79,6 +79,10 @@ JOBS: tuple[Job, ...] = (
     # 창 상한 17:00: 수능일 파생 마감 16:45 까지 덮는다. 호출 4회/실행이라 가볍다.
     Job("derivatives", ("collectors/derivatives_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 40), time(17, 0))),
+    # VKOSPI 종가 - 정규장 마감(15:45) 뒤. 휴장이면 수집기가 SKIP(exit 2) 한다
+    # (t1511 은 휴장에도 직전 종가를 주므로 그대로 넣으면 없는 관측이 생긴다).
+    Job("vkospi", ("collectors/volatility_index_collector.py", "--collect"),
+        daily_at=time(16, 5)),
     # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 20)),

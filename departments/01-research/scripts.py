@@ -203,13 +203,30 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
     # 모델이 출력 구조까지 dict 로 따라가 스키마(list[str])를 어긴다.
     # 수치 재대조(confirmed)는 아래에서 원본 analysts 로 한다 - 상위집합 허용.
     def _digest(a: dict) -> dict:
+        """분석가 결과 -> 총괄 프롬프트용 압축본. **상한이 있는 것이 핵심이다.**
+
+        실측 2026-08-02(분석가 6인 확장): 다이제스트가 커지자 qwen3 의 <think>
+        가 길어져 JSON 끝이 잘렸다("missing keys: ['invalidation']" - 마지막
+        키만 사라지는 전형적 절단). 분석가를 늘릴 때마다 총괄이 깨지면 확장이
+        불가능하므로, 분석가 수와 무관하게 프롬프트 크기가 상한을 갖게 한다.
+        버려지는 원문은 리포트의 '분석가 소견 원문'에 그대로 남는다.
+        """
         if not a or a.get("status") == "NOT_RUN":
             return {"status": "NOT_RUN"}
+        # 분석가마다 서술 위치가 다르다 - note.summary(기술·펀더멘털·레짐·
+        # 미시구조) 와 최상위 summary(지정학). 한쪽만 보면 RES-09 다이제스트가
+        # 통째로 null 이 되어 총괄이 맥락 없이 쓴다(2026-08-02 실측).
         note = a.get("note") or {}
+        summary = (note.get("summary") or a.get("summary") or "")[:DIGEST_SUMMARY_CHARS]
+        cautions = [str(c)[:DIGEST_CAUTION_CHARS]
+                    for c in (note.get("cautions") or a.get("cautions") or [])
+                    ][:DIGEST_MAX_CAUTIONS]
         nums = {k: v for k, v in (a.get("readout") or {}).items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        return {"verdict": a.get("verdict"), "summary": note.get("summary"),
-                "cautions": note.get("cautions"), "key_numbers": nums}
+        if len(nums) > DIGEST_MAX_NUMBERS:      # 앞에서부터 - readout 은 중요도순 정의다
+            nums = dict(list(nums.items())[:DIGEST_MAX_NUMBERS])
+        return {"verdict": a.get("verdict"), "summary": summary,
+                "cautions": cautions, "key_numbers": nums}
 
     analysts_digest = {k: _digest(v) for k, v in analysts.items()}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
@@ -253,10 +270,11 @@ Evidence:
                 "evidence_quality")
     packet = None
     last_err = None
+    repair = ""      # 실패 유형별 교정 지시 - 일반 문구만으로는 같은 실수를 반복한다
     for attempt in (1, 2, 3):   # 파싱·스키마 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
         extra = "" if attempt == 1 else (
             f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
-            f"JSON object with ALL required keys: {', '.join(REQUIRED)}.")
+            f"JSON object with ALL required keys: {', '.join(REQUIRED)}.{repair}")
         out = re.sub(r"<think>.*?</think>", "",
                      call(_supervisor_persona(), task + extra), flags=re.S)
         s, e = out.find("{"), out.rfind("}")
@@ -279,6 +297,13 @@ Evidence:
                             and all(isinstance(x, str) for x in candidate[k]))]
         if bad_type:
             last_err = f"keys must be list[str]: {bad_type}"
+            # 실측 2026-08-02(분석가 6인 확장 후 재발): 다이제스트가 커지자
+            # qwen 이 interpretation·invalidation 을 중첩 객체로 냈다. 일반
+            # 문구로는 안 고쳐진다 - 틀린 키를 지목하고 올바른 모양을 보인다.
+            repair = ("\n" + " ".join(
+                f'"{k}" must be a FLAT array of plain Korean sentences, e.g. '
+                f'"{k}": ["첫 번째 문장.", "두 번째 문장."] - never an object, '
+                f'never nested, never key-value pairs.' for k in bad_type))
             continue
         eq = str(candidate.get("evidence_quality", "")).lower().strip()
         if eq not in ("sufficient", "partial", "insufficient_evidence"):
@@ -302,6 +327,19 @@ Evidence:
                            ensure_ascii=False)
     packet["numeric_check"] = verify_narrative_numbers(
         narrative, {"price": price_ctx, "analysts": analysts})
+
+    # 결정론 가드 3: 사실 서술에 확정치 밖 수치가 있으면 evidence_quality 를
+    # **강등**한다. 실측 2026-08-02: 총괄이 매출 +18.3%·영업이익 +12.7% 를
+    # 지어내 facts 에 출처까지 달아 넣었는데(분석가 실제값은 46.76%/101.16%)
+    # 검사는 불일치를 표시만 하고 evidence_quality 는 sufficient 로 나갔다.
+    # 표시만 하는 가드는 하류(트레이딩)에서 읽히지 않는다 - 등급을 낮춰야
+    # 계약이 된다. 낮추기만 하고 올리지는 않는다(위험 방향 fail-closed).
+    if not packet["numeric_check"].get("ok"):
+        order = ("insufficient_evidence", "partial", "sufficient")
+        cur = packet["evidence_quality"]
+        if order.index(cur) > order.index("partial"):
+            packet["evidence_quality"] = "partial"
+            packet["numeric_check"]["downgraded_from"] = cur
     return {"packet": packet}
 
 
@@ -311,7 +349,11 @@ def _ollama_chat(system: str, user: str) -> str:
         headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
         data=json.dumps({"model": SUPERVISOR_MODEL, "temperature": 0.2,
                          "response_format": {"type": "json_object"},
-                         "max_tokens": 4096,   # 실측: 기본값에서 JSON 이 잘려 스키마 위반
+                         # 실측: 기본값에서 JSON 이 잘려 스키마 위반 -> 4096 ->
+                         # 분석가 6인 확장 후 <think> 가 길어져 또 잘림(마지막
+                         # 키 invalidation 소실)이라 8192. 입력 상한(_digest)과
+                         # 함께 쓴다 - 한쪽만으로는 확장할 때마다 다시 깨진다.
+                         "max_tokens": 8192,
                          "messages": [{"role": "system", "content": system},
                                       {"role": "user", "content": user}]}).encode())
     with urllib.request.urlopen(req, timeout=600) as r:
@@ -371,6 +413,12 @@ def _node_models() -> dict:
 # Packet 의 산문 무효화 조건("연계성 약화 가능성")은 사람도 판정이 갈려
 # 채점되지 않는다. 채점 가능한 주장은 코드가 결정론으로 발행한다 -
 # LLM 에게 자기 채점 기준을 쓰게 두면 맞히기 쉬운 조건 쪽으로 굽는다.
+# 총괄 프롬프트 상한 - 분석가를 늘려도 총괄이 깨지지 않게 하는 방어선
+DIGEST_SUMMARY_CHARS = 240
+DIGEST_CAUTION_CHARS = 140
+DIGEST_MAX_CAUTIONS = 2
+DIGEST_MAX_NUMBERS = 10
+
 CLAIM_HORIZONS = (5, 20)          # 거래일. 5일=단기 반응, 20일=한 달 검증
 DRAWDOWN_PCT = 10.0               # 기준가 대비 하락 발동선
 RALLY_PCT = 10.0
@@ -384,7 +432,10 @@ def build_packet_claims(state: dict, packet: dict) -> list[dict]:
     """
     claims: list[dict] = []
     price = ((state.get("evidence") or {}).get("price_context") or {})
-    base = price.get("close")
+    # 키 이름은 bundle.compute_price_context 계약이다("last_close"). 실측
+    # 2026-08-02: "close" 로 잘못 읽어 가격 주장이 통째로 발행되지 않았고,
+    # 그런데도 조용히 넘어갔다 - 그래서 아래 자체점검이 이 키를 못 박는다.
+    base = price.get("last_close")
     try:
         base = float(base) if base is not None else None
     except (TypeError, ValueError):
@@ -802,6 +853,81 @@ def _check_analyst_conflict_and_numeric_guard():
     print("  상충 보존·수치 창작 적발 OK")
 
 
+def _check_numeric_failure_downgrades_quality():
+    """창작 수치 적발이 **등급까지 낮추는지** - 표시만 하면 하류가 안 읽는다.
+
+    실측 2026-08-02: 총괄이 매출 +18.3%(실제 46.76%)를 facts 에 출처까지
+    달아 넣었는데 evidence_quality 는 sufficient 로 나갔다.
+    """
+    def liar(system, user):
+        return json.dumps({
+            "symbol": "X", "thesis": "매출이 전년 대비 18.3% 늘었다",
+            "facts": ["매출 성장률 18.3% (disclosure:5)"],
+            "interpretation": [], "catalysts": [], "invalidation": [],
+            "evidence_quality": "sufficient"})
+
+    out = draft_packet(
+        {"symbol": "X", "universe": {}, "sentiment": {"verdict": "SCORED"},
+         "fundamental": {"verdict": "NOTED", "readout": {"revenue_yoy_pct": 46.76}},
+         "evidence": {"price_context": {"status": "OK"}}}, llm=liar)
+    p = out["packet"]
+    assert not p["numeric_check"]["ok"]
+    assert p["evidence_quality"] == "partial", \
+        f"창작 수치가 있는데 등급이 {p['evidence_quality']} 로 남았다"
+    assert p["numeric_check"]["downgraded_from"] == "sufficient"
+
+    # 정직한 Packet 은 건드리지 않는다 - 강등은 낮추기만, 올리진 않는다
+    def honest(system, user):
+        return json.dumps({
+            "symbol": "X", "thesis": "매출이 46.76% 늘었다",
+            "facts": ["매출 성장률 46.76%"], "interpretation": [],
+            "catalysts": [], "invalidation": [], "evidence_quality": "sufficient"})
+
+    ok = draft_packet(
+        {"symbol": "X", "universe": {}, "sentiment": {"verdict": "SCORED"},
+         "fundamental": {"verdict": "NOTED", "readout": {"revenue_yoy_pct": 46.76}},
+         "evidence": {"price_context": {"status": "OK"}}}, llm=honest)["packet"]
+    assert ok["numeric_check"]["ok"] and ok["evidence_quality"] == "sufficient"
+    print("  수치 불일치 = 등급 강등  OK")
+
+
+def _check_claims_use_bundle_key():
+    """가격 주장이 실제로 발행되는지 - 키 이름이 어긋나면 조용히 0건이 된다.
+
+    실측 2026-08-02: price_context 의 종가 키는 'last_close' 인데 'close' 로
+    읽어 가격 주장이 통째로 빠졌고 아무도 몰랐다(리포트에 레짐 1건만).
+    """
+    from evidence.bundle import compute_price_context
+
+    ctx = compute_price_context([
+        {"bucket_time": f"2026-07-{d:02d}T00:00:00+09:00", "close": 1000.0 + d}
+        for d in range(1, 26)])
+    assert "last_close" in ctx, "bundle 계약(last_close)이 바뀌었다"
+
+    claims = build_packet_claims(
+        {"evidence": {"price_context": ctx},
+         "regime": {"verdict": "RISK_ON"},
+         "geopolitical": {"verdict": "ELEVATED"}}, {})
+    kinds = {c["kind"] for c in claims}
+    assert {"PRICE_DRAWDOWN", "PRICE_RALLY", "REGIME_FLIP",
+            "GEO_ESCALATION"} == kinds, kinds
+    price_claims = [c for c in claims if c["kind"].startswith("PRICE_")]
+    assert len(price_claims) == len(CLAIM_HORIZONS) * 2, price_claims
+    base = float(ctx["last_close"])
+    dd = next(c for c in price_claims if c["kind"] == "PRICE_DRAWDOWN")
+    assert abs(dd["threshold"] - base * 0.9) < 1e-6, dd
+
+    # 이미 SHOCK 이면 'SHOCK 으로 악화'는 발동 불가 - 주장이 되지 않는다
+    no_geo = build_packet_claims({"evidence": {"price_context": ctx},
+                                  "geopolitical": {"verdict": "SHOCK"}}, {})
+    assert not any(c["kind"] == "GEO_ESCALATION" for c in no_geo)
+    # 기준가가 없으면 가격 주장을 만들지 않는다
+    none_ctx = build_packet_claims(
+        {"evidence": {"price_context": {"status": "UNAVAILABLE"}}}, {})
+    assert not any(c["kind"].startswith("PRICE_") for c in none_ctx)
+    print("  주장 발행·기준가 계약    OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -826,6 +952,8 @@ if __name__ == "__main__":
     _check_price_context_injection()
     _check_evidence_module()
     _check_analyst_conflict_and_numeric_guard()
+    _check_numeric_failure_downgrades_quality()
+    _check_claims_use_bundle_key()
     _check_packet_report_renderer()
     _check_run_recorder()
-    print("본부 파이프라인 9개 영역 통과. 실행은 --run <종목>")
+    print("본부 파이프라인 11개 영역 통과. 실행은 --run <종목>")

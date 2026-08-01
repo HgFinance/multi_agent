@@ -77,6 +77,10 @@
 | Bluesky 미국 표적 수집기 (기관 미디어·매크로 논객) | `departments/01-research/collectors/bluesky_watch_collector.py`, `config/bluesky_watchlist.txt` | — (신규, 2026-08-01) |
 | 지정학 리스크 수집기 (GPR 지수 + GDELT 테마) | `departments/01-research/collectors/geopolitical_collector.py`, `config/geopolitical_themes.txt` | — (신규, 2026-08-01) |
 | 지정학 분석가 (RES-09, 위협/실제 분리·신선도 강제) | `departments/01-research/agents/geopolitical_analyst.py` | — (신규, 2026-08-01) |
+| Packet 사후 채점 (선순환 되먹임) | `departments/01-research/collectors/packet_outcome_scorer.py`, 마이그레이션 `001400` | — (신규, 2026-08-02) |
+| 방법론 레지스트리 (인용·도입상태 단일 출처) | `departments/01-research/evidence/methods.py` | — (신규, 2026-08-02) |
+| 펀더멘털 정량 점수 (Piotroski·Altman) | `departments/01-research/evidence/fundamental_scores.py` | — (신규, 2026-08-02) |
+| VKOSPI 수집기 (변동성 국면) | `departments/01-research/collectors/volatility_index_collector.py` | — (신규, 2026-08-02) |
 | PIT Dataset Builder (Manifest·Leakage Check) | `departments/04-quant-backtest/pipeline/pit_dataset.py` | — (신규, 2026-07-31) |
 | Backtest Runner v1 (비용·Ledger·재현 해시) | `departments/04-quant-backtest/pipeline/backtest_runner.py` | — (신규, 2026-07-31) |
 | Walk-Forward 검증 (QNT-04, Fragility 판정) | `departments/04-quant-backtest/pipeline/walk_forward.py` | — (신규, 2026-07-31) |
