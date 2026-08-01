@@ -340,6 +340,43 @@ def attach_bodies(articles: list[dict], *, reader=None,
     return articles, r.stats.summary()
 
 
+def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
+                      api_base: str = RESEARCH_API) -> Optional[dict]:
+    """스토리 군집(문서 id -> 스토리 크기). 실패는 None - 가중은 원래대로 간다."""
+    url = f"{api_base}/evidence/stories?symbol={symbol}&hours={hours}"
+    if as_of is not None:
+        url += f"&as_of={urllib.parse.quote(as_of.isoformat())}"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            data = json.loads(resp.read())
+        sizes: dict = {}
+        for s in data.get("stories") or []:
+            for mid in s.get("member_ids") or []:
+                sizes[str(mid)] = int(s["size"])
+        return sizes
+    except Exception:
+        return None
+
+
+def apply_story_weights(articles: list[dict], sizes: Optional[dict]) -> tuple[list[dict], str]:
+    """같은 사건(스토리) N건이면 각 1/N 가중 - 사건 단위 총가중 1 (2026-08-01).
+
+    같은 사건을 N개 매체가 받아쓰면 사건 하나가 N배로 점수를 끌던 중복
+    가중 문제의 해법. 군집 실패(None)면 원래 가중 그대로 + 사유를 남긴다
+    - 판단 불가를 조정으로 위장하지 않는다.
+    """
+    if sizes is None:
+        return articles, "스토리 군집 불가 - 기사 단위 가중 유지"
+    adjusted = 0
+    for a in articles:
+        size = sizes.get(str(a.get("document_id")), 1)
+        if size > 1:
+            a["weight"] = float(a.get("weight", 0.0)) / size
+            a["story_size"] = size
+            adjusted += 1
+    return articles, (f"스토리 가중 적용 {adjusted}건" if adjusted else "")
+
+
 def run(symbol: str, *, hours: float = 24.0, as_of: Optional[datetime] = None,
         llm=None, api_base: str = RESEARCH_API, reader=None,
         read_bodies: bool = True) -> SentimentReport:
@@ -348,6 +385,11 @@ def run(symbol: str, *, hours: float = 24.0, as_of: Optional[datetime] = None,
     if not articles:
         return SentimentReport(symbol, ts, "NO_EVIDENCE", None, 0, 0, (),
                                "창 안에 기사가 없다")
+    articles, story_note = apply_story_weights(
+        articles, fetch_story_sizes(symbol, hours=hours, as_of=as_of,
+                                    api_base=api_base))
+    if story_note:
+        print(f"  {story_note}", flush=True)
     read_note = ""
     if read_bodies:
         # as_of 재현(백테스트)에서는 열람하지 않는다 - 지금의 웹페이지는 그때의
@@ -411,6 +453,25 @@ def _check_hallucinated_citation():
         ArticleJudgement(document_id="x", sentiment=1, salience=1.0, reason="환각")]))
     assert r2.verdict == "INCONCLUSIVE" and r2.score is None
     print("  환각 인용 차단           OK")
+
+
+def _check_story_weighting():
+    """스토리 단위 가중 - 같은 사건 N건이면 사건 총가중이 1건과 같다."""
+    arts = [{"document_id": "a", "weight": 0.9},
+            {"document_id": "b", "weight": 0.9},
+            {"document_id": "c", "weight": 0.6}]
+    out, note = apply_story_weights(arts, {"a": 2, "b": 2})
+    assert out[0]["weight"] == 0.45 and out[1]["weight"] == 0.45  # 합 0.9 = 1건분
+    assert out[0]["story_size"] == 2
+    assert out[2]["weight"] == 0.6 and "story_size" not in out[2]
+    assert "2건" in note
+    # 군집 실패 -> 원래 가중 유지 + 사유 (조정으로 위장하지 않는다)
+    out2, note2 = apply_story_weights([{"document_id": "a", "weight": 0.9}], None)
+    assert out2[0]["weight"] == 0.9 and "유지" in note2
+    # 정상인데 조정 대상 없음 -> 빈 사유
+    _, note3 = apply_story_weights([{"document_id": "z", "weight": 0.5}], {})
+    assert note3 == ""
+    print("  스토리 단위 가중         OK")
 
 
 def _check_schema_retry():
@@ -491,6 +552,7 @@ if __name__ == "__main__":
     _check_aggregate()
     _check_hallucinated_citation()
     _check_schema_retry()
+    _check_story_weighting()
     _check_body_never_persists()
     try:
         _check_no_evidence()
