@@ -230,7 +230,7 @@ Evidence:
                 "evidence_quality")
     packet = None
     last_err = None
-    for attempt in (1, 2):      # 파싱·스키마 위반 1회 재시도 - 분석가들과 같은 규율
+    for attempt in (1, 2, 3):   # 파싱·스키마 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
         extra = "" if attempt == 1 else (
             f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
             f"JSON object with ALL required keys: {', '.join(REQUIRED)}.")
@@ -268,11 +268,15 @@ Evidence:
         # 결정론 가드: 두 번 다 스키마를 못 지키면 초안을 거부한다 - 통과 위장 금지
         raise ValueError(f"Packet 초안 거부 - {last_err}")
     # 결정론 가드 2: 서술 속 % 수치가 확정치(가격+분석가 readout) 밖이면 창작이다.
-    # Packet 전체를 직렬화해 검사한다 - 리스트만 훑으면 중첩 구조에 숨은 수치가
-    # 빠져나간다(실측: dict 값 안의 "5.2%" 가 검사를 우회했다)
+    # 대상은 **사실 서술**(thesis/facts/interpretation)만 - invalidation·catalysts
+    # 는 모델이 제안하는 미래 조건("성장률 10% 미달 시")이라 확정치에 없는 것이
+    # 정상이다(실측 2026-08-01: 제안 임계값 오탐). 중첩 우회 방지로 해당 키들을
+    # 통째로 직렬화한다.
     from evidence.bundle import verify_narrative_numbers
 
-    narrative = json.dumps(packet, ensure_ascii=False)
+    narrative = json.dumps({k: packet.get(k) for k in
+                            ("thesis", "facts", "interpretation")},
+                           ensure_ascii=False)
     packet["numeric_check"] = verify_narrative_numbers(
         narrative, {"price": price_ctx, "analysts": analysts})
     return {"packet": packet}

@@ -52,7 +52,11 @@ KST = timezone(timedelta(hours=9))
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get("TECH_ANALYST_MODEL", "agent-research")
+MODEL = os.environ.get(
+    "TECH_ANALYST_MODEL",
+    # 2026-08-01 역할 분담 실측: exaone3.5(한국어 특화)가 규율 완전 통과
+    # (환각 0·수치 플래그 0) + 6.0초로 14b 대비 ~40% 단축. 근거: 가이드 J4.
+    "exaone3.5:7.8b")
 LLM_TIMEOUT = float(os.environ.get("TECH_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
 
 BARS_LIMIT = 120          # sma60+cross(10일 lookback)에 70봉 필요 - 여유 포함

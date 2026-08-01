@@ -59,7 +59,10 @@ KST = timezone(timedelta(hours=9))
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-MODEL = os.environ.get("SECTOR_REGIME_MODEL", "agent-research")
+MODEL = os.environ.get(
+    "SECTOR_REGIME_MODEL",
+    # 2026-08-01 역할 분담 실측: 3.1초, 환각 0·라벨 복원 없음. 근거: 가이드 J4.
+    "exaone3.5:7.8b")
 LLM_TIMEOUT = float(os.environ.get("REGIME_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
 
 REGIME_DAYS = 40          # 20일 지표 + 휴장/결측 여유

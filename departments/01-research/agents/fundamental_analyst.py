@@ -62,7 +62,10 @@ KST = timezone(timedelta(hours=9))
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 # 팀 표준 로컬 모델(departments/01-research/Modelfile). news_sentiment_analyst 와 동일.
-MODEL = os.environ.get("FUNDAMENTAL_MODEL", "agent-research")
+MODEL = os.environ.get(
+    "FUNDAMENTAL_MODEL",
+    # 2026-08-01 역할 분담 실측: 2.3초, 환각 0·미확인 정직 처리. 근거: 가이드 J4.
+    "exaone3.5:7.8b")
 LLM_TIMEOUT = 120  # --run 실측 상한(초)
 
 # 핵심 계정 -> (매칭 후보 이름들). sj_div 접두사·공백 제거 후 비교한다.
