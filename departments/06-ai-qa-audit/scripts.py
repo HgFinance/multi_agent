@@ -15,12 +15,15 @@ grounded 서술만 하는 LLM이다** (research/risk 패턴을 QA 자신에게 �
                            서술만 한다, 새 판정 금지)
   supervise               qa-audit-supervisor 페르소나 (hermes/config.yaml 원문, Hermes AIAgent 호출 -
                            종합·Escalation만, 판정 자체는 못 바꾼다)
+  hallucination_review    hallucination-critic (skills/agentic-rag 기존 baseline 재사용, evidence-qa-agent
+                           코퍼스 그대로 씀) - UNSUPPORTED/CONTRADICTED로 이미 플래그된 claim만 대상,
+                           그 결과를 뒤집지 않고 유형 분류·인용 근거만 덧붙인다(2026-08-02 추가)
   notion_report           Reporter Node (결정론 - notion_reporter.upload_case, LLM 아님) - 최종 감사
                            결과를 Notion QA DB(NOTION_QA_DB)에 Projection으로 올린다. 실패해도
                            QAState의 바인딩 판정은 못 바꾼다(2026-08-02 추가, 03-risk와 동일 패턴)
 
-hallucination-critic/model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started
-항목대로 대응 결정론 서비스가 아직 없다 (research가 4개 페르소나를 같은 이유로 뺀 것과 동일).
+model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started 항목대로 대응 결정론
+서비스가 아직 없다 (research가 나머지 페르소나를 같은 이유로 뺀 것과 동일).
 
 원칙 (전 노드 공통, CLAUDE.md):
   - 바인딩 decision은 EvidenceQaEngine.check_artifact 결과에서만 온다. 워커 LLM도 qa-audit-supervisor도
@@ -53,17 +56,21 @@ from typing import TypedDict
 from uuid import UUID
 
 from langgraph.graph import END, StateGraph
+from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
 _BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_BASE / "evidence"))
+_AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
+for _p in (_BASE / "evidence", _AGENTIC_RAG_DIR):
+    sys.path.insert(0, str(_p))
 
 PIPELINE_VERSION = "qa-department-pipeline-v1"
 
 # 워커(직원) LLM 백엔드 - 동규님 GPU에 올린 팀 공용 Ollama 서버. 환경변수로 옮기지 않는다.
 # 192.168.25.25
 # 172.31.99.238
-internal_llm = OpenAI(base_url="http://192.168.25.25:11434/v1", api_key="ollama")
+# wrap_openai는 LANGSMITH_TRACING이 꺼져 있으면 그대로 통과한다 - 켜졌을 때만 토큰량 추적
+internal_llm = wrap_openai(OpenAI(base_url="http://192.168.25.25:11434/v1", api_key="ollama"))
 
 
 def _call_internal_llm(prompt: str) -> str:
@@ -88,6 +95,7 @@ class QAState(TypedDict, total=False):
     decision_time: str      # PIT 기준 시각 (ISO8601)
     assessment: dict        # evidence-qa-agent 결정론 결과 (QaAssessment)
     claim_narrative: str    # evidence-qa-agent LLM 결과 (grounded 서술)
+    hallucination_reviews: list  # hallucination-critic 결과 (UNSUPPORTED/CONTRADICTED claim만, 비었으면 전부 SUPPORTED/PARTIAL)
     verdict: str            # 최종 값 - 항상 assessment 에서만 옴
     narrative: str
     escalate: bool
@@ -116,6 +124,25 @@ def check_evidence(state: QAState) -> dict:
     }}
 
 
+# ── 노드 1.5: Hallucination Critic (skills/agentic-rag, evidence-qa-agent 코퍼스 재사용) ──
+def hallucination_review(state: QAState) -> dict:
+    from src.graph import run_compliance_check
+
+    a = state["assessment"]
+    flagged = [c for c in a["claim_checks"] if c["result"] in ("UNSUPPORTED", "CONTRADICTED")]
+    if not flagged:
+        # config.yaml 페르소나 프롬프트 원칙 - 이미 나온 근거를 우선하고, 불필요한 외부 호출은 피한다
+        return {"hallucination_reviews": []}
+
+    corpus_dir = _AGENTIC_RAG_DIR / "corpus" / "evidence"
+    as_of_date = state["decision_time"][:10]
+    return {"hallucination_reviews": [
+        {"claim_index": c["claim_index"],
+         **run_compliance_check(c["claim"], as_of_date, corpus_dir=corpus_dir, persona="hallucination-critic")}
+        for c in flagged
+    ]}
+
+
 # ── 노드 2: Claim 서술 (LLM 직원 - 내부 Ollama, grounded 서술만) ───────────
 def draft_claim_narrative(state: QAState) -> dict:
     a = state["assessment"]
@@ -140,7 +167,8 @@ def supervise(state: QAState, *, chat=None) -> dict:
     a = state["assessment"]
     bundle = {"decision": a["decision"], "reason_codes": a["reason_codes"],
               "claim_checks": a["claim_checks"], "findings": a["findings"],
-              "claim_narrative": state["claim_narrative"]}
+              "claim_narrative": state["claim_narrative"],
+              "hallucination_reviews": state.get("hallucination_reviews", [])}
     task = f"""Using ONLY the evidence below, write a case-level QA audit narrative in Korean for
 CEO/department review. The binding decision is "{a['decision']}" from the deterministic Evidence QA
 Engine - you cannot change it, only interpret and escalate it.
@@ -170,8 +198,9 @@ def _assemble_out(state: QAState) -> dict:
     return {"qa_decision_id": a["qa_decision_id"], "verdict": state["verdict"],
             "reason_codes": a["reason_codes"], "claim_checks": a["claim_checks"], "findings": a["findings"],
             "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
-            "claim_narrative": state["claim_narrative"], "narrative": state["narrative"],
-            "escalate": state["escalate"]}
+            "claim_narrative": state["claim_narrative"],
+            "hallucination_reviews": state.get("hallucination_reviews", []),
+            "narrative": state["narrative"], "escalate": state["escalate"]}
 
 
 # ── 노드 4: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────
@@ -188,11 +217,13 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
 def build_pipeline():
     g = StateGraph(QAState)
     g.add_node("check_evidence", check_evidence)
+    g.add_node("hallucination_review", hallucination_review)
     g.add_node("draft_claim_narrative", draft_claim_narrative)
     g.add_node("supervise", supervise)
     g.add_node("notion_report", notion_report)
     g.set_entry_point("check_evidence")
-    g.add_edge("check_evidence", "draft_claim_narrative")
+    g.add_edge("check_evidence", "hallucination_review")
+    g.add_edge("hallucination_review", "draft_claim_narrative")
     g.add_edge("draft_claim_narrative", "supervise")
     g.add_edge("supervise", "notion_report")
     g.add_edge("notion_report", END)
@@ -218,17 +249,19 @@ def _check_graph_shape():
 
 def _check_fail_still_narrates():
     # FAIL 판정이어도 워커·부서장 둘 다 계속 불려 서술이 남는지, decision 값 자체는
-    # 그대로 유지되는지 - Ollama·Hermes 콜은 둘 다 스텁으로 대체한다. notion_report 도 스텁한다 -
-    # 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때 자체 점검이 진짜 Notion에 네트워크
-    # 호출을 낸다(03-risk/scripts.py와 동일 이유).
-    global check_evidence, _call_internal_llm, _hermes_chat, notion_report
-    orig_ce, orig_llm, orig_chat, orig_nr = check_evidence, _call_internal_llm, _hermes_chat, notion_report
+    # 그대로 유지되는지 - Ollama·Hermes·Agentic RAG 콜은 전부 스텁으로 대체한다. notion_report 도
+    # 스텁한다 - 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때 자체 점검이 진짜 Notion에
+    # 네트워크 호출을 낸다(03-risk/scripts.py와 동일 이유).
+    global check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report
+    orig = (check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report)
     check_evidence = lambda s: {"assessment": {
         "qa_decision_id": "d1", "decision": "FAIL",
         "reason_codes": ["fact_without_evidence"],
         "claim_checks": [{"claim_index": 0, "claim": "x", "result": "UNSUPPORTED", "reason": "근거 없음"}],
         "findings": [{"finding_type": "unsupported_claim", "severity": "HIGH", "description": "d"}],
     }}
+    hallucination_review = lambda s: {"hallucination_reviews": [
+        {"claim_index": 0, "answer": {"verdict": "HALLUCINATION"}, "grounded": True}]}
     _call_internal_llm = lambda prompt: "요약: 근거 없는 주장 1건"
     _hermes_chat = lambda persona, task: '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
     notion_report = lambda s: {"notion_upload": {"ok": False, "reason": "self-check stub"}}
@@ -237,9 +270,40 @@ def _check_fail_still_narrates():
         assert out["assessment"]["decision"] == "FAIL"
         assert out["verdict"] == "FAIL"
         assert out["escalate"] is True
+        assert out["hallucination_reviews"][0]["answer"]["verdict"] == "HALLUCINATION"
     finally:
-        check_evidence, _call_internal_llm, _hermes_chat, notion_report = orig_ce, orig_llm, orig_chat, orig_nr
+        check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report = orig
     print("  FAIL 판정에도 서술 계속됨   OK")
+
+
+def _check_hallucination_review_conditional():
+    # SUPPORTED/PARTIAL 뿐이면 Agentic RAG 콜 자체를 안 하는지(비용 절감), UNSUPPORTED/CONTRADICTED가
+    # 있으면 그 claim만 골라 hallucination-critic 페르소나로 넘기는지 확인한다 - run_compliance_check을
+    # src.graph 모듈에서 직접 스텁해 네트워크 없이 점검한다(hallucination_review는 함수 안에서 Lazy Import).
+    import src.graph as agentic_graph
+
+    clean = {"assessment": {"claim_checks": [
+        {"claim_index": 0, "claim": "x", "result": "SUPPORTED", "reason": "ok"}]}}
+    flagged = {"assessment": {"claim_checks": [
+        {"claim_index": 0, "claim": "ok", "result": "SUPPORTED", "reason": "ok"},
+        {"claim_index": 1, "claim": "bad", "result": "UNSUPPORTED", "reason": "근거 없음"}]},
+        "decision_time": "2026-08-02T00:00:00+00:00"}
+    calls = []
+
+    def stub(query, as_of, corpus_dir=None, persona="compliance-policy-agent"):
+        calls.append((query, persona, corpus_dir.name if corpus_dir else None))
+        return {"answer": {"verdict": "HALLUCINATION"}, "grounded": True}
+
+    orig = agentic_graph.run_compliance_check
+    agentic_graph.run_compliance_check = stub
+    try:
+        assert hallucination_review(clean) == {"hallucination_reviews": []}
+        out = hallucination_review(flagged)
+        assert calls == [("bad", "hallucination-critic", "evidence")]
+        assert out["hallucination_reviews"][0]["claim_index"] == 1
+    finally:
+        agentic_graph.run_compliance_check = orig
+    print("  Hallucination Critic 조건부 호출  OK")
 
 
 def _check_supervisor_guard():
@@ -281,6 +345,19 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
     lines += [f"| {c['claim_index']} | {c['claim']} | {c['result']} | {c['reason']} |" for c in checks]
     if not checks:
         lines.append("| — | (claim_checks 없음) | — | — |")
+
+    lines += ["", "## Hallucination Critic (hallucination-critic, Agentic RAG)", ""]
+    reviews = out.get("hallucination_reviews") or []
+    if reviews:
+        for r in reviews:
+            answer = r.get("answer") or {}
+            lines += [f"### Claim #{r['claim_index']}", "",
+                      "| 필드 | 값 |", "|---|---|",
+                      f"| verdict | {answer.get('verdict')} |",
+                      f"| grounded | {r.get('grounded')} |",
+                      f"| rationale | {answer.get('rationale')} |", ""]
+    else:
+        lines.append("UNSUPPORTED/CONTRADICTED claim 없음 - 조건부 노드 미호출")
 
     lines += ["", "## Reason Codes", "",
               ", ".join(f"`{r}`" for r in out["reason_codes"]) if out["reason_codes"] else "없음",
@@ -364,9 +441,10 @@ if __name__ == "__main__":
         print(f"결정론적 MD 리포트 저장: {report_path}")
         raise SystemExit(0)
 
-    print(f"{PIPELINE_VERSION} 자체 점검 (Ollama·Hermes 없음)")
+    print(f"{PIPELINE_VERSION} 자체 점검 (Ollama·Hermes·Agentic RAG 없음)")
     _check_graph_shape()
     _check_fail_still_narrates()
+    _check_hallucination_review_conditional()
     _check_supervisor_guard()
     _check_notion_report_node()
-    print("본부 파이프라인 4개 영역 통과. 실행은 --run (내부 Ollama·Hermes 필요)")
+    print("본부 파이프라인 5개 영역 통과. 실행은 --run (내부 Ollama·Hermes·OPENAI_API_KEY 필요)")

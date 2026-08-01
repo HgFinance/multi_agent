@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
 EMBEDDING_MODEL = os.environ.get("AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -118,7 +119,7 @@ class LocalVectorIndex:
     def __init__(self, corpus_dir: Path, cache_path: Path | None = None):
         self.corpus_dir = corpus_dir
         self.cache_path = cache_path or corpus_dir / ".embedding_cache.json"
-        self._client = OpenAI()
+        self._client = wrap_openai(OpenAI())  # LANGSMITH_TRACING 켜졌을 때만 토큰/비용 추적, 꺼지면 그대로 통과
         self.chunks = load_corpus(corpus_dir)
         self._embeddings = self._load_or_build_embeddings()
 
