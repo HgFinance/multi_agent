@@ -393,6 +393,39 @@ SOURCES: tuple[SourceSpec, ...] = (
              "Registry·삭제 Compliance 요건은 가이드 DoD 뉴스 항목 참고",
     ),
     SourceSpec(
+        source_id="truth_social",
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        display_name="Truth Social (Trump Media) 정책 발화",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 조사 확정 2026-08-01 (재일님 "트럼프 미디어에 투자 글 있지 않나" 질의):
+        #   기술은 열려 있다 - Mastodon 포크라 /api/v1/accounts/lookup 과
+        #   .../statuses 가 무인증 200(검색만 401), max_id 페이지네이션 작동.
+        #   그러나 **두 축이 동시에 막는다**:
+        #   (1) ToS 명시 금지 - "you will not access the Service through
+        #       automated or non-human means, whether through a bot, script,
+        #       or otherwise" + "data mining, robots, or similar data gathering
+        #       and extraction tools" 금지. twikit·twscrape 를 거절한 것과
+        #       같은 사유이며, robots 없음(빈 robots.txt)이 허락은 아니다.
+        #   (2) 신호 밀도 미달 - realDonaldTrump 120건(5.6일, 21.4건/일) 표본에서
+        #       시장 키워드 3%(4건), 그중 실질 시장 발화는 1건. 27%는 본문 없는
+        #       미디어. 금융 기관은 사실상 부재(zerohedge 0포스트, djt 2포스트,
+        #       treasury 0포스트) - 투자 담론장이 아니다.
+        disabled_reason=(
+            "ToS 가 자동 접근·데이터 수집을 명시 금지(API 는 기술적으로 열려 "
+            "있으나 권리가 없다). 신호 밀도도 미달 - 실측 시장 관련 3%. "
+            "재검토 조건: 공식 데이터 라이선스 제공 또는 ToS 개정. 대안(권리 "
+            "청정): 정책 충격은 Federal Register API·백악관 Presidential "
+            "Actions RSS(미 공무저작물)가 권위 있게 덮고, 발언 보도는 이미 "
+            "수집 중인 Bluesky 기관 미디어가 수 분 내 덮는다"
+        ),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        normalized_target="research.documents",
+        doc_ref="ToS help.truthsocial.com/legal/terms-of-service, 실측 2026-08-01",
+        note="판단 시점 열람(비저장)까지가 한계 - 가이드 3.3 무권리 적재 금지",
+    ),
+    SourceSpec(
         source_id="bluesky",
         # KR scope 를 빼는 이유(실측 2026-08-01): 파이어호스 90초 전수 표본에서
         # 한국어 ~64,000건/일 중 금융 키워드 1건(오탐) - 한국 신호원이 아니다.
