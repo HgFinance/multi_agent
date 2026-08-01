@@ -367,6 +367,32 @@ SOURCES: tuple[SourceSpec, ...] = (
         note="검색/Snippet/전문/Embedding/Archive/재배포 권한을 각각 따로 확인할 것",
     ),
     SourceSpec(
+        source_id="x_twitter",
+        market_scopes=(MarketScope.KR_MARKET, MarketScope.FOREIGN_MARKET),
+        display_name="X (Twitter) 소셜 신호",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=("X_API_KEY",),
+        # ▶ 조사 확정 2026-08-01 (재일님 "무료 라이브러리 없나" 질의):
+        #   공식 무료 티어는 2026-02 부로 신규 개발자 읽기 종료(pay-per-use
+        #   $0.005/read 기본). 무료 라이브러리는 존재하나(twikit·twscrape -
+        #   계정 자격증명으로 내부 GraphQL 을 긁는 방식) **X ToS 위반 + 계정
+        #   정지 위험 + 파이프라인 취약**이라 도입하지 않는다 - robots
+        #   fail-closed·라이선스 게이트를 지켜온 이 Registry 의 원칙과 정면
+        #   충돌한다. BIGKinds 포기와 같은 결의 결정이다.
+        disabled_reason=(
+            "무료 합법 읽기 경로 없음(2026-02 무료 티어 종료). 비공식 라이브러리"
+            "(twikit/twscrape)는 ToS 위반이라 도입 불가. 재검토 조건: 유료 전환 "
+            "결정(참고: $0.005/read - 일 1,000읽기 ~ 월 $150) 또는 for-good "
+            "무료 승인. 합법 무료 대안 후보: Bluesky AT Protocol(공개 API)"
+        ),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        normalized_target="research.documents",
+        doc_ref="가이드 3.1 X Watchlist(P1), 조사 2026-08-01",
+        note="X Watchlist 는 이 Source 활성화 전까지 미착수 유지 - 승인 계정 "
+             "Registry·삭제 Compliance 요건은 가이드 DoD 뉴스 항목 참고",
+    ),
+    SourceSpec(
         source_id="naver_apihub",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="NAVER API HUB",
