@@ -35,6 +35,42 @@ agent:
     geopolitical-analyst: "You are the Geopolitical Risk Analyst (RES-09). Your mission is to judge the external, non-market environment - armed conflict, sanctions, tariff regimes, chokepoint and supply-chain disruption - and to state how, if at all, it could reach Korean equities. Working from deterministic indices (GPR daily, with its threat-versus-act split, and GDELT theme coverage ratios), you separate rhetoric-driven risk from realized-event risk, because the two transmit differently. Every claim states the observation date and the publication lag of the index behind it; a stale index is reported as stale, never as the current state. Transmission paths (oil import cost, USD/KRW, export demand, defense names) are hypotheses and must be worded as such. Official outputs: Geopolitical Brief, Threat-versus-Act Read, Transmission Hypothesis, Escalation Watch. You never direct orders from a geopolitical view, never assign target weights, and never treat a single headline or social post as an event - firm-wide exposure implications go to the Risk department. When indices are missing or stale beyond tolerance you end with insufficient_evidence rather than guess."
     rag-librarian-evidence-curator: "You are the RAG Librarian and Evidence Curator. You ensure every Research Claim links to verifiable Evidence that was actually retrievable at the time it was cited. You preserve original documents with Published/Observed/Valid timestamps, chunk them on structure, rerank keyword and vector results, and flag duplicate or stale versions. You hand other agents an Evidence ID, a short excerpt location, a reliability score and usage restrictions — never the full raw text. You never mix different embedding spaces in one index, and any deletion or correction of source documents goes through the Data Steward and QA approval path, not through you directly."
 
+  # ⚠ 2026-08-02 실측: **Hermes 는 이 키를 모른다.** 컨테이너 안에서
+  #   grep tool_allowlist /opt/hermes → 0건. hiring_priority·agentic_rag 도 같다
+  #   (personalities·skills·timeout_seconds·max_turns·reasoning_effort 는 인식).
+  #   즉 아래 목록은 **우리 저장소 스키마이자 계약 문서**이지 런타임 강제가
+  #   아니다. "Hermes 에 적어놨으니 막힌다"고 오해하면 그게 제일 위험하다.
+  #   실제 강제는 도구가 있는 곳 - research-api/market-api 쪽에 페르소나 식별과
+  #   scope 검사를 붙여야 성립한다(백로그: Tool Gateway).
+  #
+  # 2026-08-02 (재일): Hermes 연결 전 권한 경계를 명시한다. 동규님 리스크본부
+  # config.yaml 30-39행 패턴을 따랐다 - 표기는 AGENT_EMPLOYEE_PROFILES.md 2.2절
+  # <domain>.<resource>.<verb>. **여기 없는 도구는 호출할 수 없다**(허용목록 방식).
+  #
+  # 원칙: 리서치본부는 읽기만 한다. Agent 는 DB Credential 을 받지 않고
+  # research-api/market-api 읽기 전용 면만 쓴다(통합 계획 6.2). 주문·리스크
+  # 승인·원장은 우리 권한이 아니며 담당자가 같아도 이전되지 않는다(CLAUDE.md).
+  tool_allowlist:
+    research-supervisor: [case.read, case.delegate]        # 종합·위임만, 자체 조회 없음
+    universe-manager: [research.universe.read]
+    market-data-steward: [market.dq.read, market.snapshot.read]
+    microstructure-analyst: [market.microstructure.read, market.snapshot.read]
+    technical-analyst: [market.bars.read, market.snapshot.read]
+    fundamental-analyst: [research.evidence.financials.read, research.evidence.search]
+    news-sentiment-analyst: [research.evidence.news.read, research.evidence.stories.read]
+    sector-regime-analyst: [market.regime.read, market.breadth.read]
+    geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
+    rag-librarian-evidence-curator: [research.evidence.search, research.evidence.chunk.write]
+  # 부서 전체 공통 금지. 리서치는 어떤 경우에도 주문·리스크 판정·원장·전략 승격에
+  # 관여하지 않는다. Packet 은 재료일 뿐 결정이 아니다(Agent Decision != Order).
+  forbidden_tools:
+    - oms.submit
+    - ledger.write
+    - risk.decision.write
+    - strategy.promote
+    - research.documents.delete      # 문서 삭제·정정은 Data Steward·QA 승인 경로
+
+
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.3, 2026-07-29)
 hiring_priority:
   research-supervisor: {role_codes: ["RES-00"], tier: "P0"}
@@ -51,34 +87,6 @@ hiring_priority:
   # 보는 RES-07 과 달리 외생 환경을 본다. 실행 실체 agents/geopolitical_analyst.py,
   # 재료는 collectors/geopolitical_collector.py 가 적재한 GPR·GDELT 계열.
   geopolitical-analyst: {role_codes: ["RES-09"], tier: "P1"}
-
-# 2026-08-02 (재일): Hermes 연결 전 권한 경계를 명시한다. 동규님 리스크본부
-# config.yaml 30-39행 패턴을 따랐다 - 표기는 AGENT_EMPLOYEE_PROFILES.md 2.2절
-# <domain>.<resource>.<verb>. **여기 없는 도구는 호출할 수 없다**(허용목록 방식).
-#
-# 원칙: 리서치본부는 읽기만 한다. Agent 는 DB Credential 을 받지 않고
-# research-api/market-api 읽기 전용 면만 쓴다(통합 계획 6.2). 주문·리스크
-# 승인·원장은 우리 권한이 아니며 담당자가 같아도 이전되지 않는다(CLAUDE.md).
-tool_allowlist:
-  research-supervisor: [case.read, case.delegate]        # 종합·위임만, 자체 조회 없음
-  universe-manager: [research.universe.read]
-  market-data-steward: [market.dq.read, market.snapshot.read]
-  microstructure-analyst: [market.microstructure.read, market.snapshot.read]
-  technical-analyst: [market.bars.read, market.snapshot.read]
-  fundamental-analyst: [research.evidence.financials.read, research.evidence.search]
-  news-sentiment-analyst: [research.evidence.news.read, research.evidence.stories.read]
-  sector-regime-analyst: [market.regime.read, market.breadth.read]
-  geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
-  rag-librarian-evidence-curator: [research.evidence.search, research.evidence.chunk.write]
-
-# 부서 전체 공통 금지. 리서치는 어떤 경우에도 주문·리스크 판정·원장·전략 승격에
-# 관여하지 않는다. Packet 은 재료일 뿐 결정이 아니다(Agent Decision != Order).
-forbidden_tools:
-  - oms.submit
-  - ledger.write
-  - risk.decision.write
-  - strategy.promote
-  - research.documents.delete      # 문서 삭제·정정은 Data Steward·QA 승인 경로
 
 skills:
   - hermes-agent
