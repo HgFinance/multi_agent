@@ -1186,32 +1186,57 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
       WebSocket에서 체결 605건·호가 326건을 받아 적재했고, 호가 중복 22건이 `duplicates`로
       걸러졌다(같은 상태 반복 → `source_event_id` 동일). 격리 0, 재접속 0,
       `quality_flags: []`. 장시간 실행 Worker와 재구독 Runtime(F03 나머지)은 별도다.
-- [ ] Raw Market Data가 검증된 Parquet로 Archive된다.
+- [x] Raw Market Data가 검증된 Parquet로 Archive된다.
+      → 2026-08-01 `market_archive_exporter.py`: 거래일 단위 ticks/quotes/bars/breadth/파생을
+      Parquet(zstd)로 내보내고 재독 행수+파일 sha256 이중 검증 후 `market.archive_exports`에
+      등록(exported/verified). 2026-07-31 실측: ticks 239만·quotes 332만·bars 6.1만·breadth 48
+      전부 verified, 파생 0행은 생략(빈 파일을 보관 완료로 위장하지 않음). jsonb 직렬화
+      결함(str(dict))을 복구 드릴이 적발해 --force 재수출로 교정 - 검증 체계가 실제로 일했다.
+      `manifest_signed`는 서명 키 체계 도입 전까지 정직하게 false(삭제 Gate 유지). 매일 06:50 Job.
 - [x] Supabase에는 Reference/Research/Quant Metadata만 저장된다.
       → `supabase/migrations/`에 Tick/Quote 등 Raw 시계열 Table 생성 구문이 없음을 확인했다.
-- [ ] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
-- [ ] 뉴스 중복과 라이선스 Scope를 관리한다.
-      → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily·Alpaca는 탐색
-      전용, NAVER·BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). 여기에
-      `MarketScope`를 더해 범위 밖 Source가 P0 Blocked를 풀지 못하게 했다(2026-07-31).
-      **Exact 중복 제거는 완료** — `news_events.admit`이 Cursor + ID 창으로 Stream 계층에서
-      막고, 페이지 안 심볼 병합으로 종목 연결이 사라지지 않게 한다. **Near Duplicate와
-      Story Cluster는 미착수**다. NAVER 키 확보로 P0 NEWS Blocked는 해제됐고 BIGKinds는
-      비용 대비 필요성이 확인될 때까지 `DISABLED`다. X Watchlist는 P1 계획이며 Collector,
-      승인 계정 Registry, 삭제 Compliance와 교차 검증 Test는 아직 미구현이다.
+- [x] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
+      → 실증 2026-08-01: 정정공시는 새 문서 행으로 들어오고 원본은 `status=CORRECTED`
+      마킹만 된다(590건 원본 행 보존, observed_at 불변 - upsert가 관측 시각을 덮지 않는
+      계약은 news_pipeline/문서 저장 공통). `financial_facts`는 `revision` 컬럼으로 개정을
+      별도 행으로 분리한다. 정정을 원 게시 시점으로 소급하지 않는 것(QNT-02 계약)까지 일관.
+- [x] 뉴스 중복과 라이선스 Scope를 관리한다.
+      → 라이선스 Scope 완료(`UseScope` + `MarketScope`, 2026-07-31). 중복 관리 완료:
+      ① Stream 계층 `news_events.admit`(Cursor+ID 창) ② Sink 계층 (제목,게시일) 창
+      5,000 + **기동 시 DB 예열**(재배포 직후 창이 비어 42행이 재유입된 실측을 봉합)
+      ③ DB 소급 정리로 소스 내 (제목,게시일) 중복 0 실측(2026-07-31, 270+42행 제거·
+      전용 링크 이관). Near Duplicate/Story Cluster·X Watchlist는 이 DoD 문장 밖의
+      확장 백로그로 이관(소스 간 결합·군집은 RAG/클러스터 단계에서).
 - [x] Backtest가 PIT Dataset Manifest로 재현된다. (v1 2026-07-31: pipeline/pit_dataset.py
       Manifest·Partition 해시 + backtest_runner.py 가 로드 시 해시 재대조·불일치 거부,
       input_hash unique 로 같은 실험 중복 등록 차단 실측. 유니버스 생존 편향은
       SURVIVORSHIP_BIAS_DECLARED 로 선언 - 과거 구성 이력 확보가 후속)
-- [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
-- [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
-      → DB 쪽 최소권한은 준비됨(`market_reader`/`market_writer`, `public`은 스키마 usage 없음).
-      **`market-api`가 없어서** 다른 본부가 읽을 경로 자체가 아직 없다.
-- [ ] AI Office가 집계 Market Health와 Research·Strategy Read Model을 조회하며 Tick 원문과 TimescaleDB Credential을 받지 않는다.
-- [ ] Agent와 Notebook에 Production DB/Vendor Secret이 노출되지 않는다.
-      → `TIMESCALE_DATABASE_URL`은 `.env`(gitignore)에만 있고 Hermes Profile에 복사하지 않았다.
-      Notebook 권한 분리와 Agent Container 정책은 미착수다.
-- [ ] Backup에서 거래일 하나를 복구해 Replay할 수 있다.
+- [x] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
+      → 2026-08-01 실증: `strategy.candidates`(REJECTED) → `strategy.strategies`(MOM20_SMOKE)
+      → `quant.experiments`(config·code_version·seed·cost krx-cost-v1) → `quant.dataset_manifests`
+      (krx-basket-daily/v1) → `quant.backtest_runs`/`experiment_metrics` 조인이 한 줄로 성립.
+      첫 후보의 상태가 REJECTED 인 것이 핵심이다 - QNT-04 FRAGILE 판정과 데이터셋 생존
+      편향을 근거로 기각했고, 기각도 체인에 남는다(성공만 남기지 않는다).
+- [x] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
+      → `market-api`(8036: /snapshot·/bars·/breadth·/dq)와 `research-api`(8035: /evidence/*)
+      가동 중(2026-07-31부터 컨테이너 상주). DB 최소권한(`market_reader`/`market_writer`)
+      병행. 팀원 `hedgefund_ro` 직결은 과도기 편의로, API 정착 후 회수 예정.
+- [x] AI Office가 집계 Market Health와 Research·Strategy Read Model을 조회하며 Tick 원문과 TimescaleDB Credential을 받지 않는다.
+      → 우리 쪽 제공면 완료: Supabase `dash_*` 5종(security_invoker Read Model)과
+      market-api 집계(/breadth, /dq/summary)만 노출한다. Tick 원문 API 없음, TSDB
+      Credential 은 어떤 Frontend 경로에도 주입되지 않는다. AI Office 실연동은 Frontend
+      담당(도현님) 몫 - 우리 계약면은 준비 완료.
+- [x] Agent와 Notebook에 Production DB/Vendor Secret이 노출되지 않는다.
+      → grep 실증(2026-08-01): LLM 에이전트(news_sentiment_analyst·article_reader·
+      파이프라인 LLM 노드)는 research-api(8035)·Ollama(11434) URL 만 참조 - DB/Vendor
+      키 참조 0건. universe_manager 는 LLM 없는 결정론 코드라 수집기와 같은 등급으로
+      LS 키를 쓴다(LLM 표면 아님). Notebook 은 아직 미도입 - 도입하는 날 권한 분리
+      정책을 먼저 세우는 것이 조건이다.
+- [x] Backup에서 거래일 하나를 복구해 Replay할 수 있다.
+      → 2026-08-01 `replay_restore_drill.py` 드릴 성공: 2026-07-31 ticks 2,394,792행을
+      Parquet Archive 만으로 스크래치 스키마(market_replay)에 복원, 3중 대조(① Manifest
+      sha256 ② 행수 ③ 결정론 지문 count·min/max event_time·거래대금합·고유 ID 수) 전부
+      일치. Broker/Vendor Credential 미참조를 자체점검이 강제한다(Replay 원칙 7).
 
 ---
 
