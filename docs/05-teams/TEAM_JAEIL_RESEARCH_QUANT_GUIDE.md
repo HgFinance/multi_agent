@@ -78,7 +78,7 @@
 | Market Data Steward (심박·품질·지연 감사) | `departments/01-research/collectors/market_data_steward.py` | — (신규, 2026-07-31) |
 | Evidence Bundle 조립기 (결정론 가격 컨텍스트) | `departments/01-research/evidence/bundle.py` | — (신규, 2026-07-31) |
 | 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
-| LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3) |
+| LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3). **판정 2026-08-01**: 금요일 병행 실측으로 속보성 주 소스 확정 — p50 19초(NAVER 712초), 60초 내 관측 1,762건(vs 22건), 전용 링크 38%(vs 20%), 고유 427종목. 단 제목 교집합 8~12%뿐이라 **대체가 아니라 상호 보완** — NAVER는 웹 매체 폭(NAVER만 잡은 3,480건/8h) 담당으로 병행 유지 |
 | 공시 원문 Archive 수집기 | `departments/01-research/collectors/opendart_document_collector.py` | — (신규, Sprint J2) |
 | 직원 에이전트 (실구현) | `departments/01-research/agents/` (universe_manager, news_sentiment_analyst, article_reader) | — (신규, 2026-07-31) |
 | 본부 LangGraph 파이프라인 | `departments/01-research/scripts.py` | — (신규, 2026-07-31 - QA 부서 패턴) |

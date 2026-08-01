@@ -316,7 +316,11 @@ SOURCES: tuple[SourceSpec, ...] = (
         raw_bucket="research-documents-private",
         normalized_target="research.documents",
         doc_ref="ls-openapi 07-misc(NWS)/03-stock(t3102), TEAM_JAEIL J3",
-        note="재일님 방침 2026-07-31: NAVER 와 하루 병행 실측 후 우세하면 주 소스 전환",
+        note="판정 2026-08-01(금요일 병행 실측): 속보성 주 소스 = LS. p50 19초"
+             "(NAVER 712초), 60초 내 관측 1,762건(NAVER 22건), 종목 태그 정밀"
+             "(전용 38% vs 20%), 전 상장사 커버(고유 427종목). 단 제목 교집합이"
+             " 8~12%뿐이라 대체가 아니라 상호 보완 - NAVER 는 웹 매체 폭 담당으로"
+             " 병행 유지한다",
     ),
     SourceSpec(
         source_id="krx_public_notice",
