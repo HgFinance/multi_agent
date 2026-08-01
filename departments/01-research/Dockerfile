@@ -29,6 +29,9 @@ COPY collectors ./collectors
 COPY contracts ./contracts
 COPY repository ./repository
 COPY api ./api
+# evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
+# import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
+COPY evidence ./evidence
 
 ENV PYTHONUNBUFFERED=1
 

@@ -36,10 +36,12 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from evidence.story_cluster import build_stories  # noqa: E402
 from source_registry import load_project_env  # noqa: E402
 
 API_VERSION = "research-api-v1"
@@ -274,29 +276,46 @@ def _require_query(q: str) -> str:
     return q
 
 
-def _embed_query(text: str, *, base: Optional[str] = None) -> str:
-    """질의문 -> pgvector 리터럴. Ollama 불가는 503 으로 드러낸다.
+# 한 번에 임베딩할 텍스트 수. 실측(2026-08-01, 000660 48h 제목 996건): 300~500
+# 건을 한 요청으로 보내면 Ollama 내부 runner 가 간헐로 죽어 400("/tokenize
+# connection refused")이 난다 - 100건 서브배치는 996건 전체가 11.6초에 안정
+# 통과했다. rag_librarian 의 EMBED_BATCH 서브배치와 같은 패턴이다.
+EMBED_BATCH_SIZE = 100
 
-    빈 결과([])로 위장하지 않는다 - 호출자(에이전트)가 '관련 공시 없음'과
-    '검색 인프라 죽음'을 구분하지 못하면 잘못된 결론(근거 없음)을 낸다.
+
+def _embed_batch(texts: list[str], *, base: Optional[str] = None,
+                 timeout: int = 120) -> list[list[float]]:
+    """텍스트 배치 -> 벡터 목록 (내부는 서브배치). Ollama 불가는 503.
+
+    빈 결과([])로 위장하지 않는다 - 호출자(에이전트)가 '관련 근거 없음'과
+    '임베딩 인프라 죽음'을 구분하지 못하면 잘못된 결론(근거 없음)을 낸다.
     """
     base = (base or os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
-    req = urllib.request.Request(
-        base + "/api/embed", method="POST",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({"model": EMBED_MODEL, "input": [text]}).encode())
+    vecs: list[list[float]] = []
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            vec = json.loads(r.read())["embeddings"][0]
+        for i in range(0, len(texts), EMBED_BATCH_SIZE):
+            req = urllib.request.Request(
+                base + "/api/embed", method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"model": EMBED_MODEL,
+                                 "input": texts[i:i + EMBED_BATCH_SIZE]}).encode())
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                vecs.extend(json.loads(r.read())["embeddings"])
     except (urllib.error.URLError, OSError) as e:
         # HTTPError(모델 미설치 404 등)도 URLError 하위라 여기로 온다
-        raise HTTPException(503, f"질의 임베딩 실패 - Ollama({base}) 불가: "
+        raise HTTPException(503, f"임베딩 실패 - Ollama({base}) 불가: "
                                  f"{type(e).__name__} {str(e)[:120]}")
     except (KeyError, IndexError, ValueError) as e:
         raise HTTPException(503, f"Ollama({base}) 응답 형식 이상: {type(e).__name__} {e}")
-    if len(vec) != EMBED_DIMS:
-        raise HTTPException(503, f"임베딩 차원 {len(vec)} != {EMBED_DIMS} - "
-                                 f"인덱스와 다른 모델이다({EMBED_MODEL} 확인)")
+    if len(vecs) != len(texts) or any(len(v) != EMBED_DIMS for v in vecs):
+        raise HTTPException(503, f"임베딩 형상 이상 ({len(vecs)}개/{EMBED_DIMS}차원 "
+                                 f"기대) - 인덱스와 다른 모델이다({EMBED_MODEL} 확인)")
+    return vecs
+
+
+def _embed_query(text: str, *, base: Optional[str] = None) -> str:
+    """질의문 -> pgvector 리터럴 (_embed_batch 1건 + 리터럴 변환)."""
+    vec = _embed_batch([text], base=base, timeout=60)[0]
     return "[" + ",".join(f"{v:.7g}" for v in vec) + "]"
 
 
@@ -341,6 +360,71 @@ def evidence_search(
     for r in rows:
         r["cosine_sim"] = round(float(r["cosine_sim"]), 4)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# /evidence/stories - 뉴스 스토리 군집 (근접중복 -> 사건 단위)
+# ---------------------------------------------------------------------------
+
+# 군집 임계 운영 범위. 0.5 미만은 무관 기사까지 사슬로 묶이고(연결 성분 특성상
+# 저임계는 폭주한다), 0.99 초과는 사실상 완전 일치라 군집의 의미가 없다.
+STORY_THRESHOLD_MIN = 0.5
+STORY_THRESHOLD_MAX = 0.99
+# cluster_titles 의 O(n^2) 가드(1500)보다 낮게 - DB 에서부터 창을 자른다
+STORY_FETCH_LIMIT = 1000
+
+
+def _require_threshold(threshold: float) -> float:
+    """임계 범위 강제. Query 검증은 HTTP 경로에서만 돌므로 직접 호출
+    (자체점검·probe)에서도 같은 규칙이 서도록 함수로 분리해 다시 검증한다."""
+    if not (STORY_THRESHOLD_MIN <= threshold <= STORY_THRESHOLD_MAX):
+        raise HTTPException(422, f"threshold 는 {STORY_THRESHOLD_MIN}~"
+                                 f"{STORY_THRESHOLD_MAX} 여야 한다: {threshold}")
+    return threshold
+
+
+@app.get("/evidence/stories")
+def evidence_stories(
+    symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
+    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
+    threshold: float = Query(0.85, ge=STORY_THRESHOLD_MIN, le=STORY_THRESHOLD_MAX,
+                             description="코사인 유사도 임계 (0.5~0.99)"),
+):
+    """종목 뉴스를 스토리(같은 사건) 단위로 군집해 돌려준다.
+
+    /evidence/news 와 같은 소스·같은 PIT 규칙(observed_at <= as_of)의 기사를
+    제목 임베딩(bge-m3) -> 코사인 연결 성분으로 묶는다 - 감성·Packet 이 한
+    사건을 여러 기사로 중복 가중하는 문제의 해법(story_cluster.py docstring).
+    Ollama 불가는 503(빈 결과 위장 금지), 기사 0건은 note 로 자기 기술한다.
+    """
+    _require_threshold(threshold)   # DB·Ollama 도달 전에 끊는다
+    ts = _as_of_or_now(as_of)
+    rows = _query(
+        """
+        select d.document_id::text, s.source_code as source, d.title,
+               d.published_at, d.observed_at
+        from research.documents d
+        join reference.data_sources s using (source_id)
+        join research.document_instruments di using (document_id)
+        join reference.instrument_symbols isym
+          on isym.instrument_id = di.instrument_id and isym.is_primary
+        where d.document_type = 'NEWS' and d.status = 'ACTIVE'
+          and isym.symbol = %s
+          and d.observed_at <= %s
+          and d.published_at > %s - make_interval(secs => %s)
+        order by d.published_at desc
+        limit %s
+        """,
+        (symbol, ts, ts, hours * 3600.0, STORY_FETCH_LIMIT),
+    )
+    head = {"symbol": symbol, "as_of": ts.isoformat(), "hours": hours}
+    if not rows:
+        return {**head, "threshold": threshold, "total": 0,
+                "stories": [], "singletons": 0, "clustered_ratio": 0.0,
+                "note": "기사 없음"}
+    return {**head, **build_stories(rows, embed=_embed_batch,
+                                    threshold=threshold)}
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +501,57 @@ def _check_search_rules():
     print("  검색 질의·503 규칙       OK")
 
 
+def _check_stories_rules():
+    """스토리 군집 검증·읽기 전용 표면 - DB·Ollama 없이 확인한다."""
+    from fastapi import HTTPException as HE
+
+    # threshold 범위 밖은 422 - Endpoint 직접 호출이 DB·임베딩 도달 전에
+    # 끊긴다 (0.5 미만은 연결 성분 사슬 폭주, 0.99 초과는 무의미)
+    for bad in (0.3, 0.499, 0.991, 1.0):
+        try:
+            evidence_stories(symbol="000660", as_of=None, hours=24.0,
+                             threshold=bad)
+            raise AssertionError(f"threshold={bad} 가 통과했다")
+        except HE as e:
+            assert e.status_code == 422 and "threshold" in str(e.detail), \
+                f"422+사유가 아니다: {e.status_code} {e.detail}"
+    # 경계값(0.5, 0.99)은 통과 - 헬퍼 단독 검사라 DB·Ollama 유무와 무관하다
+    for edge in (0.5, 0.85, 0.99):
+        assert _require_threshold(edge) == edge
+
+    # naive as_of 는 다른 Evidence Endpoint 와 같은 422 규칙
+    try:
+        evidence_stories(symbol="000660", as_of=datetime(2026, 8, 1, 9, 0),
+                         hours=24.0, threshold=0.85)
+        raise AssertionError("naive as_of 가 통과했다")
+    except HE as e:
+        assert e.status_code == 422 and "timezone" in str(e.detail)
+
+    # 스토리 표면도 GET 전용으로 등록돼 있다 - 읽기 전용 원칙 유지
+    route = next(r for r in app.routes
+                 if getattr(r, "path", None) == "/evidence/stories")
+    assert getattr(route, "methods", set()) == {"GET"}, "스토리는 GET 전용이다"
+
+    # 배치 임베딩도 Ollama 불가 503 (빈 결과 위장 금지) - 닫힌 로컬 포트
+    try:
+        _embed_batch(["a", "b"], base="http://127.0.0.1:1")
+        raise AssertionError("도달 불가 Ollama 배치가 통과했다")
+    except HE as e:
+        assert e.status_code == 503 and "Ollama" in str(e.detail)
+
+    # 군집 계산부(순수 함수)는 story_cluster 자체 점검이 담당한다 - 여기서는
+    # 결선(가짜 임베딩 -> 스토리 요약 형상)만 재확인한다
+    fake = build_stories(
+        [{"title": "A 상한가", "source": "naver_apihub", "document_id": "d1",
+          "published_at": "2026-08-01T01:00:00+00:00"},
+         {"title": "A 가격제한폭", "source": "ls_news", "document_id": "d2",
+          "published_at": "2026-08-01T02:00:00+00:00"}],
+        embed=lambda ts_: [[1.0, 0.0], [1.0, 0.0]], threshold=0.85)
+    assert fake["stories"][0]["size"] == 2, fake
+    assert fake["stories"][0]["representative_title"] == "A 상한가", fake
+    print("  스토리 군집 규칙         OK")
+
+
 def _probe():
     """실 DB 관통 - 서버 없이 Endpoint 함수를 직접 부른다."""
     h = health()
@@ -448,6 +583,15 @@ def _probe():
     for h in hits:
         print(f"    sim={h['cosine_sim']:.4f} {str(h['title'])[:44]}")
     assert hits and hits[0]["cosine_sim"] > 0.4, "유상증자 검색 상위가 비었거나 무관하다"
+
+    # 스토리 군집 관통 - NAVER·LS 근접중복이 실제로 묶이는지 (48h 창)
+    st = evidence_stories(symbol="000660", as_of=None, hours=48.0, threshold=0.85)
+    print(f"  /evidence/stories?symbol=000660 (48h): 기사 {st['total']}건 -> "
+          f"스토리 {len(st['stories'])}개 / 단독 {st['singletons']}건 "
+          f"(clustered_ratio={st['clustered_ratio']})")
+    for s_ in st["stories"][:2]:
+        print(f"    size={s_['size']} sources={s_['sources']} "
+              f"{str(s_['representative_title'])[:44]}")
     return 0
 
 
@@ -464,4 +608,5 @@ if __name__ == "__main__":
     _check_as_of()
     _check_readonly_surface()
     _check_search_rules()
-    print("research-api 4개 영역 통과. 관통은 --probe, 서버는 compose research-api")
+    _check_stories_rules()
+    print("research-api 5개 영역 통과. 관통은 --probe, 서버는 compose research-api")
