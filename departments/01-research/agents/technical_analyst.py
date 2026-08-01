@@ -43,9 +43,15 @@ import re
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
+# 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+from narrative_guard import audit_narrative  # noqa: E402
 
 AGENT_VERSION = "research-technical-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -323,6 +329,19 @@ def verify(note: TechnicalNote, readout: dict) -> tuple[TechnicalNote, dict]:
             cautions.append("[강등] " + reason)
             stance = "NEUTRAL"
 
+    # 의미 오서술 가드 v1(evidence/narrative_guard): 수치는 readout 그대로인데
+    # 라벨을 바꿔 부르는 서술(실측: 레인지 위치 35.9 를 "이동평균 기준 상승")은
+    # 위 숫자 대조가 못 잡는다 - 라벨-수치 결합을 같은 문장 단위로 검사한다.
+    # v1 은 표시만 한다(stance 강등 없음) - 오탐 위험을 낮게 시작.
+    dropped["label_flags"] = audit_narrative(note.summary, readout)
+    for lf in dropped["label_flags"]:
+        if lf["check"] == "percentile_literal":
+            cautions.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
+        else:
+            cautions.append(
+                f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} 수치인데 "
+                f"같은 문장에 다른 지표 라벨 '{lf['forbidden_hit']}' - 오서술 의심")
+
     return (note.model_copy(update={"stance": stance, "used_metrics": kept,
                                     "cautions": cautions}),
             dropped)
@@ -494,6 +513,9 @@ def _check_verify_number_flag():
     v, dropped = verify(note, readout)
     assert dropped["flagged_numbers"] == ["99.9%"], dropped
     assert any("99.9%" in c for c in v.cautions), v.cautions
+    # narrative_guard v1: -15.7 은 price_vs_sma20 의 부호 반전 인용이고 문장에
+    # forbidden("레인지")이 없다 - 라벨 플래그 0 이어야 오탐이 없는 것이다
+    assert dropped["label_flags"] == [], dropped["label_flags"]
     print("  summary 수치 대조 플래그 OK")
 
 
@@ -573,6 +595,8 @@ def _check_analyze_pipeline():
     assert out["verdict"] == "NEUTRAL", out          # 모순 - 강등됐다
     assert out["dropped"]["hallucinated_metrics"] == ["rsi_14"]
     assert out["dropped"]["flagged_numbers"] == ["99.9%"]
+    # narrative_guard v1 배선 확인: 위반 0 이어도 카운트 키는 항상 노출된다
+    assert out["dropped"]["label_flags"] == []
     assert out["dropped"]["demoted"] and out["llm_status"] == "OK"
     assert out["readout"]["momentum_20d_pct"] == 40.0
 
@@ -622,10 +646,14 @@ def _print_result(out: dict) -> None:
             print(f"  caution: {c}")
         d = out["dropped"]
         demote = d["demoted"] or "없음"
+        labels = d.get("label_flags", [])
         print(f"  dropped: 환각 키 {len(d['hallucinated_metrics'])}"
               f"{d['hallucinated_metrics'] or ''} / "
               f"수치 플래그 {len(d['flagged_numbers'])}"
-              f"{d['flagged_numbers'] or ''} / 강등 {demote}")
+              f"{d['flagged_numbers'] or ''} / "
+              f"라벨 플래그 {len(labels)}"
+              f"{[f['value'] + '->' + f['metric'] for f in labels] or ''} / "
+              f"강등 {demote}")
 
 
 if __name__ == "__main__":

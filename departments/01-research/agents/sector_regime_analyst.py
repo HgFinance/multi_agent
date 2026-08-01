@@ -50,9 +50,15 @@ import re
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
+# 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+from narrative_guard import audit_narrative  # noqa: E402
 
 AGENT_VERSION = "research-sector-regime-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -384,6 +390,19 @@ def verify(note: RegimeNote, readout: dict) -> tuple[RegimeNote, dict]:
         cautions.append("[복원] " + reason)
         regime = code_label
 
+    # 의미 오서술 가드 v1(evidence/narrative_guard): 수치는 readout 그대로인데
+    # 라벨을 바꿔 부르는 서술(실측: 상회 5일 평균 22.11 을 "A/D 비율")은 위
+    # 숫자 대조가 못 잡는다 - 라벨-수치 결합을 같은 문장 단위로 검사한다.
+    # v1 은 표시만 한다(레짐 라벨·verdict 불변) - 오탐 위험을 낮게 시작.
+    dropped["label_flags"] = audit_narrative(note.summary, readout)
+    for lf in dropped["label_flags"]:
+        if lf["check"] == "percentile_literal":
+            cautions.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
+        else:
+            cautions.append(
+                f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} 수치인데 "
+                f"같은 문장에 다른 지표 라벨 '{lf['forbidden_hit']}' - 오서술 의심")
+
     return (note.model_copy(update={"regime": regime, "used_metrics": kept,
                                     "cautions": cautions}),
             dropped)
@@ -603,6 +622,14 @@ def _check_verify_number_flag():
     v, dropped = verify(note, readout)
     assert dropped["flagged_numbers"] == ["88.8%", "7.7배"], dropped
     assert sum("신뢰 금지" in c for c in v.cautions) == 2, v.cautions
+    # narrative_guard v1: 제 라벨이 붙은 인용(상회 60.0%, A/D 5.0배)은 allowed
+    # 근접 규칙으로 통과하고, 쉼표 run-on 절의 -28.0(상회 5일 평균의 부호
+    # 반전)만 'A/D' 가 더 가까워 오서술 의심 플래그를 받는다 - v1 은 표시만
+    # 하므로 여기서 개수·대상을 고정해 가드 회귀를 감지한다
+    assert [f["value"] for f in dropped["label_flags"]] == ["-28.0%"], \
+        dropped["label_flags"]
+    assert dropped["label_flags"][0]["metric"] == "above_sma20_pct_5d_avg"
+    assert sum(c.startswith("[라벨검증]") for c in v.cautions) == 1, v.cautions
     print("  summary 수치 대조 플래그 OK")
 
 
@@ -690,6 +717,8 @@ def _check_analyze_pipeline():
     assert out["dropped"]["label_restored"] is not None
     assert out["dropped"]["hallucinated_metrics"] == ["vix"]
     assert out["dropped"]["flagged_numbers"] == ["88.8%"]
+    # narrative_guard v1 배선 확인: 위반 0 이어도 카운트 키는 항상 노출된다
+    assert out["dropped"]["label_flags"] == []
     assert out["llm_status"] == "OK" and out["readout"]["ad_ratio"] == 5.0
     assert out["readout"]["breadth_by_market"]["KOSPI"]["advancers"] == 296
 
@@ -762,10 +791,14 @@ def _print_result(out: dict) -> None:
             print(f"  caution: {c}")
         d = out["dropped"]
         restored = d["label_restored"] or "없음"
+        labels = d.get("label_flags", [])
         print(f"  dropped: 환각 키 {len(d['hallucinated_metrics'])}"
               f"{d['hallucinated_metrics'] or ''} / "
               f"수치 플래그 {len(d['flagged_numbers'])}"
-              f"{d['flagged_numbers'] or ''} / 라벨 복원 {restored}")
+              f"{d['flagged_numbers'] or ''} / "
+              f"라벨 플래그 {len(labels)}"
+              f"{[f['value'] + '->' + f['metric'] for f in labels] or ''} / "
+              f"라벨 복원 {restored}")
 
 
 if __name__ == "__main__":
