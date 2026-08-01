@@ -41,7 +41,7 @@ sys.path.insert(0, str(_BASE / "agents"))
 
 from langgraph.graph import END, StateGraph  # noqa: E402
 
-PIPELINE_VERSION = "research-department-pipeline-v1"
+PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
 KST = timezone(timedelta(hours=9))
 
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -55,6 +55,8 @@ class ResearchState(TypedDict, total=False):
     universe: dict          # 결정론 판정 결과
     evidence: dict          # Evidence Bundle (API 수집분)
     sentiment: dict         # 검증된 sentiment 요약
+    technical: dict         # RES-04 기술적 소견 (결정론 readout + 검증된 서술)
+    fundamental: dict       # RES-05 펀더멘털 소견 (결정론 readout + 검증된 서술)
     packet: dict            # 최종 Research Packet
     halted: str             # 중단 사유 (거래 불가 등)
 
@@ -94,6 +96,33 @@ def analyze_sentiment(state: ResearchState) -> dict:
                           "dropped": r.articles_dropped}}
 
 
+# ── 노드 3b/3c: 기술적·펀더멘털 분석가 (검증된 LLM 직원 + 결정론 계산기) ──
+def _norm_note(note):
+    """분석가 note 가 pydantic 모델일 수 있다 - 프롬프트 직렬화 가능하게 통일."""
+    return note.model_dump() if hasattr(note, "model_dump") else note
+
+
+def analyze_technical(state: ResearchState) -> dict:
+    from technical_analyst import analyze as tech_analyze
+
+    r = tech_analyze(state["symbol"], market_api=MARKET_API)
+    return {"technical": {"verdict": r.get("verdict"),
+                          "readout": r.get("readout"),
+                          "note": _norm_note(r.get("note")),
+                          "llm_status": r.get("llm_status"),
+                          "reason": r.get("reason")}}
+
+
+def analyze_fundamental(state: ResearchState) -> dict:
+    from fundamental_analyst import analyze as fund_analyze
+
+    r = fund_analyze(state["symbol"])
+    return {"fundamental": {"verdict": r.get("verdict"),
+                            "readout": r.get("readout"),
+                            "note": _norm_note(r.get("note")),
+                            "verification": r.get("verification")}}
+
+
 # ── 노드 4: Packet 초안 (supervisor 페르소나 - config.yaml 원문) ───────────
 def _supervisor_persona() -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
@@ -108,6 +137,11 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         "status": "UNAVAILABLE", "reason": "evidence 에 price_context 가 없다"}
     bundle = {"symbol": state["symbol"], "universe": state["universe"],
               "sentiment": state["sentiment"], **evidence}
+    # 분석가 소견 - 각자의 결정론 readout 과 검증 통과한 서술만 온다
+    analysts = {
+        "technical": state.get("technical") or {"status": "NOT_RUN"},
+        "fundamental": state.get("fundamental") or {"status": "NOT_RUN"},
+    }
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
 {{"symbol": "...", "thesis": "1-2 sentences, facts first",
@@ -126,6 +160,16 @@ Rules for these figures - non-negotiable:
   Follow the sign exactly.
 - If status is UNAVAILABLE or a field is null, write "미확인" - never guess.
 
+CONFIRMED ANALYST FINDINGS (readouts computed by code; narratives already
+hallucination-checked - NOT yours to recompute):
+{json.dumps(analysts, ensure_ascii=False, indent=1)}
+Rules for analyst findings - non-negotiable:
+- Quote their verdicts and numbers verbatim; do not invent new figures.
+- If analysts DISAGREE (e.g., sentiment positive but technical BEARISH),
+  preserve BOTH views side by side in interpretation. Never delete dissent,
+  never average it away - state the conflict explicitly.
+- NOT_RUN / INSUFFICIENT_DATA / null means 미확인 - never fill the gap.
+
 Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
 
@@ -138,6 +182,15 @@ Evidence:
               "evidence_quality"):
         if k not in packet:
             raise ValueError(f"Packet 에 {k} 가 없다 - 초안 거부")
+    packet["evidence_quality"] = str(packet["evidence_quality"]).lower()  # 표기 정규화
+    # 결정론 가드 2: 서술 속 % 수치가 확정치(가격+분석가 readout) 밖이면 창작이다
+    from evidence.bundle import verify_narrative_numbers
+
+    narrative = " ".join([str(packet.get("thesis", "")),
+                          *map(str, packet.get("facts") or []),
+                          *map(str, packet.get("interpretation") or [])])
+    packet["numeric_check"] = verify_narrative_numbers(
+        narrative, {"price": price_ctx, "analysts": analysts})
     return {"packet": packet}
 
 
@@ -158,14 +211,20 @@ def build_pipeline():
     g.add_node("check_universe", check_universe)
     g.add_node("assemble_evidence", assemble_evidence)
     g.add_node("analyze_sentiment", analyze_sentiment)
+    g.add_node("analyze_technical", analyze_technical)
+    g.add_node("analyze_fundamental", analyze_fundamental)
     g.add_node("draft_packet", draft_packet)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
+    # 분석가 3인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
+    # LLM 호출은 어차피 직렬화된다. 형태만 병렬로 꾸미지 않는다.
     g.add_edge("assemble_evidence", "analyze_sentiment")
-    g.add_edge("analyze_sentiment", "draft_packet")
+    g.add_edge("analyze_sentiment", "analyze_technical")
+    g.add_edge("analyze_technical", "analyze_fundamental")
+    g.add_edge("analyze_fundamental", "draft_packet")
     g.add_edge("draft_packet", END)
     return g.compile()
 
@@ -248,6 +307,36 @@ def _check_evidence_module():
     eb._check_bundle_contract()
 
 
+def _check_analyst_conflict_and_numeric_guard():
+    """상충 보존 지시가 프롬프트에 실제로 들어가고, 서술 속 창작 수치가
+    결정론으로 적발되는지 - 다각 분석 통합의 두 가드."""
+    captured = {}
+
+    def fake_llm(system, user):
+        captured["user"] = user
+        return json.dumps({
+            "symbol": "X", "thesis": "감성 긍정 대 기술 BEARISH 상충",
+            "facts": ["20일 모멘텀 -21.44%"],
+            "interpretation": ["창작 수치 +55.5% 상승"],
+            "catalysts": [], "invalidation": [], "evidence_quality": "partial"})
+
+    out = draft_packet(
+        {"symbol": "X", "universe": {},
+         "sentiment": {"verdict": "SCORED", "score": 0.7},
+         "technical": {"verdict": "BEARISH",
+                       "readout": {"momentum_20d_pct": -21.4449}},
+         "fundamental": {"status": "NOT_RUN"},
+         "evidence": {"price_context": {"status": "OK", "change_1d_pct": 29.95}}},
+        llm=fake_llm)
+    u = captured["user"]
+    assert "CONFIRMED ANALYST FINDINGS" in u and "BEARISH" in u
+    assert "preserve BOTH" in u, "상충 보존 지시가 프롬프트에 없다"
+    nc = out["packet"]["numeric_check"]
+    assert nc["checked"] == 2 and not nc["ok"], nc
+    assert nc["unmatched"] == [55.5], "창작 수치(55.5%)가 적발되지 않았다"
+    print("  상충 보존·수치 창작 적발 OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -265,4 +354,5 @@ if __name__ == "__main__":
     _check_packet_guard()
     _check_price_context_injection()
     _check_evidence_module()
-    print("본부 파이프라인 6개 영역 통과. 실행은 --run <종목>")
+    _check_analyst_conflict_and_numeric_guard()
+    print("본부 파이프라인 7개 영역 통과. 실행은 --run <종목>")

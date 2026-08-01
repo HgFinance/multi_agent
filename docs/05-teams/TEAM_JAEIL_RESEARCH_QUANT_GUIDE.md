@@ -898,18 +898,35 @@ API(2019003)나 별도 Source가 필요하다.
 ANTHROPIC 키 없이 **로컬 Ollama(RTX 5080, qwen3:14b)** 로 에이전트 층을 열었다.
 비용 0, 전부 실측 검증:
 
+**모델 선정 결정 (2026-08-01, 에이전트 고도화 착수 시점):**
+- **리서치·퀀트 판단/서술 = `agent-research`/`agent-quant`(qwen3:14b 파생) 단일
+  상주.** 근거: ① 14b 는 인덱스 인용 규율이 실측 안정(10/10 SCORED 무효 0%),
+  8b 는 UUID 인용 전멸 전력 ② 분석가 여럿이 **모델을 공유하고 페르소나는 호출별
+  system 프롬프트로 주입** — 16GB VRAM 에서 모델 교체(재적재) 없이 병렬 호출을
+  받는 유일한 구성 ③ Packet 급 배치 판단에 9초/건 지연은 허용 범위.
+- qwen3:8b(5.2GB)는 지연이 문제 되는 짧은 정형 서술의 예비 후보로만 남긴다 —
+  전환하려면 인용 규율 실측을 다시 통과해야 한다(가정 승격 금지).
+- 30B급(MoE 포함)은 16GB VRAM 초과라 제외. 임베딩(RAG 사서용)은 별도 소형
+  임베딩 모델을 그때 선정한다 — 생성 모델과 상주 경합하지 않는 크기로.
+
 - **모델 기반**: 부서 Modelfile 2종(research/quant)을 실계약 프롬프트로 정교화해
   `agent-research`/`agent-quant` 생성. 8개 부서 모델 전부 로컬 재현(팀 서버는
   사설망이라 미도달 — Tailscale 후 전환 가능).
-- **직원 실구현 2 + 도구 1** (`agents/`): `universe_manager`(결정론 — t1404/t1405
+- **직원 실구현 4 + 도구 1** (`agents/`): `universe_manager`(결정론 — t1404/t1405
   6목록, 실전 347/3), `news_sentiment_analyst`(fetch→judge→verify→aggregate,
   **10종목 연속 SCORED·환각 인용 0%** — 소형 모델은 UUID 를 못 베끼므로 인덱스
-  인용+역매핑이 핵심), `article_reader`(판단 시점 열람·비저장 — 3.3 예외).
-- **본부 파이프라인** (`scripts.py`, QA 부서 패턴 적용): `run_research_department
+  인용+역매핑이 핵심), `article_reader`(판단 시점 열람·비저장 — 3.3 예외),
+  **`technical_analyst`(RES-04, 2026-08-01)** — 지표 8종 결정론 계산 + LLM 해석,
+  환각 키 제거·모순 강등(모멘텀 +40% 에 BEARISH 면 NEUTRAL 강등), 자체점검 10,
+  **`fundamental_analyst`(RES-05, 2026-08-01)** — YoY·이익률·부채비율 결정론
+  계산(전기 없으면 "미확인" — 추정 금지) + LLM 해석, 자체점검 10.
+- **본부 파이프라인 v2** (`scripts.py`, 2026-08-01 확장): `run_research_department
   (symbol)` → universe(결정론, 거래불가 조기종료) → Evidence 조립(API 2종만) →
-  sentiment → supervisor 페르소나 Packet 초안(JSON, 필수 키 코드 검증). 실측:
-  실데이터 Packet 에 인용·촉매·무효화 포함 생성. **research-hermes 컨테이너의
-  원형**이다.
+  **분석가 3인 순차(sentiment→technical→fundamental — GPU 하나에 모델 하나라
+  형태만 병렬로 꾸미지 않는다)** → supervisor 통합 Packet(상충 보존 지시 명문화 +
+  서술 % 수치 재대조 `numeric_check`). 실측 000660: 기술 BEARISH 와 펀더멘털
+  POSITIVE 의 갈등이 삭제되지 않고 병기됐고 수치 검사 5/5 통과. **research-hermes
+  컨테이너의 원형**이다.
 - **페르소나**: config.yaml 9종을 RES-00~08 직무기술서(미션·산출물·금지·
   Escalation)로 전면 강화. 퀀트 7종(QNT)은 후속.
 - 원칙 재확인: 에이전트는 DB Credential 없이 API 만(통합 계획 6.2와 일치),

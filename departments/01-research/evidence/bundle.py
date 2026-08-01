@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -152,6 +153,44 @@ def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
     }
 
 
+# ── 서술 수치 재대조 - 라벨 오서술·수치 창작 가드 (RES-00 Packet 검증용) ──
+
+_PCT_RE = re.compile(r"([+-]?\d{1,3}(?:\.\d{1,2})?)\s*%")
+
+
+def _collect_numbers(v, out: set) -> None:
+    if isinstance(v, bool):
+        return
+    if isinstance(v, (int, float)):
+        out.add(round(float(v), 2))
+    elif isinstance(v, dict):
+        for x in v.values():
+            _collect_numbers(x, out)
+    elif isinstance(v, (list, tuple)):
+        for x in v:
+            _collect_numbers(x, out)
+
+
+def verify_narrative_numbers(text: str, confirmed: dict,
+                             *, tolerance: float = 0.1) -> dict:
+    """서술 속 % 수치가 코드 계산 확정치 집합 안에 있는지 검사한다.
+
+    +29.95% 실측 사례의 후속 가드: 수치·부호 인용은 정확했지만 서술이 필드
+    의미를 바꿔 말하는 문제가 남았다 - 최소한 **확정치에 없는 % 수치를
+    창작하는 것**은 여기서 결정론으로 잡는다.
+
+    한계(정직하게): 한국어는 "2.33% 하락"처럼 부호를 단어로 옮기므로
+    절대값 일치를 허용한다. 부호 뒤집힘 자체는 이 검사가 아니라 각
+    분석가의 모순 강등(verify)이 맡는다.
+    """
+    allowed: set = set()
+    _collect_numbers(confirmed, allowed)
+    nums = [float(m.group(1)) for m in _PCT_RE.finditer(text or "")]
+    unmatched = [n for n in nums
+                 if not any(abs(abs(n) - abs(a)) <= tolerance for a in allowed)]
+    return {"checked": len(nums), "unmatched": unmatched, "ok": not unmatched}
+
+
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────
 def _fake_bars(closes_latest_first: list[float]) -> list[dict]:
     d0 = datetime(2026, 7, 30, 15, tzinfo=timezone.utc)
@@ -242,6 +281,24 @@ def _check_bundle_contract():
     print("  Bundle 계약 유지+확장    OK")
 
 
+def _check_narrative_numbers():
+    """서술 수치 재대조 - 창작 수치는 잡고, 확정치 인용·절대값 표기는 통과."""
+    confirmed = {"price_context": {"change_1d_pct": 29.95, "return_5d_pct": -2.33,
+                                   "range_position_20d_pct": 35.9}}
+    ok = verify_narrative_numbers("전일 대비 +29.95% 급등, 5일 기준 2.33% 하락", confirmed)
+    assert ok["ok"] and ok["checked"] == 2, ok
+    # 확정치에 없는 수치 창작 -> 적발
+    bad = verify_narrative_numbers("최근 +12.5% 상승 흐름", confirmed)
+    assert not bad["ok"] and bad["unmatched"] == [12.5], bad
+    # 허용 오차 - 반올림 표기(29.9%)는 통과, 크게 다르면(28%) 적발
+    assert verify_narrative_numbers("29.9% 상승", confirmed, tolerance=0.1)["ok"]
+    assert not verify_narrative_numbers("28% 상승", confirmed)["ok"]
+    # 수치 없는 서술·빈 문자열은 검사 0건으로 통과
+    assert verify_narrative_numbers("추세가 강하다", confirmed)["checked"] == 0
+    assert verify_narrative_numbers("", confirmed)["ok"]
+    print("  서술 수치 재대조 가드    OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -252,4 +309,5 @@ if __name__ == "__main__":
     _check_insufficient_bars()
     _check_api_unavailable()
     _check_bundle_contract()
-    print("Evidence Bundle 5개 영역 통과.")
+    _check_narrative_numbers()
+    print("Evidence Bundle 6개 영역 통과.")
