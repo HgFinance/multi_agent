@@ -112,6 +112,11 @@ JOBS: tuple[Job, ...] = (
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
     Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
+    # 역량 격차 감사 - "쓸 수 있는데 안 쓰는 것"을 스스로 찾는다. 매일 07:40
+    # (지정학 07:20 뒤). LS 호출 1회 + 질의 몇 개라 가볍다. 발견만 하고
+    # 채택은 사람이 한다 - 리포트가 reports/capability_audit_*.md 로 남는다.
+    Job("capability-audit", ("collectors/capability_audit.py", "--audit"),
+        daily_at=time(7, 40)),
     # Packet 사후 채점 - 선순환의 되먹임. 지평(5·20 거래일)이 지난 Packet 을
     # 시세로 대조해 research.packet_outcomes 에 남긴다. 18:00: 당일 종가가
     # 확정되고 밤 배치가 시작되기 전.
