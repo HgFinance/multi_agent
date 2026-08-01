@@ -43,7 +43,14 @@ STRATEGY_CATALOG: dict[str, dict] = {
         "impl": "pipeline/backtest_runner.py + walk_forward.py",
         "note": "20일 모멘텀 상위 N 균등, 월초 리밸런스",
     },
+    "mean_reversion": {
+        "strategy_code": "REV-5-SMOKE",
+        "impl": "pipeline/backtest_runner.py (STRATEGIES) + walk_forward 조각",
+        "note": "5일 낙폭 하위 N 균등, 5거래일 리밸런스 (2026-08-01 구현 - "
+                "QNT-01 첫 가설의 백로그를 이행)",
+    },
 }
+DATASET_NAME, DATASET_VERSION = "krx-basket-daily", "v1"
 
 
 @dataclass
@@ -153,7 +160,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         report.transitions.append("PROPOSED->TESTING")
 
         chain = run_chain or _default_chain
-        result = chain(hyp)        # {"experiment_id", "fragility": "FRAGILE|ROBUST"}
+        result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
         new_status = robustness_to_status(result["fragility"])
@@ -167,15 +174,62 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             conn.close()
 
 
-def _default_chain(hyp: dict) -> dict:
-    """실전 체인 - 카탈로그의 momentum 구현으로 백테스트+강건성을 돌린다.
+def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
+    """실전 체인: 백테스트(가설 바인딩) + walk-forward 강건성 -> 판정.
 
-    현재는 MOM-20 단일 구현이라, momentum 이 아닌 가설은 게이트가 이미
-    걸렀다. 새 전략이 카탈로그에 들어오면 여기서 분기한다.
+    edge type -> 전략 config 매핑은 카탈로그가 정하고, 강건성 지표는
+    walk_forward 의 조각(make_windows/run_window/fragility_summary)을
+    같은 config 로 재사용한다 - 검증 규칙을 두 벌 만들지 않는다.
     """
-    raise NotImplementedError(
-        "momentum 실전 체인은 기존 실험(walk_forward)과 가설 연결 리팩토링 후 - "
-        "게이트·전이 로직이 먼저 실측 검증되는 것이 이 파일의 v1 범위다")
+    import psycopg2
+
+    from backtest_runner import (DEFAULT_CONFIG, REV_CONFIG, load_dataset,
+                                 register_and_run)
+    from source_registry import load_project_env
+    from walk_forward import (WARMUP_TRADING_DAYS, fragility_summary,
+                              make_windows, run_window, slice_market)
+    from backtest_runner import Market
+
+    edge = ((hyp.get("expected_edge") or {}).get("type") or "").lower()
+    config = {"momentum": DEFAULT_CONFIG, "mean_reversion": REV_CONFIG}[edge]
+
+    bt = register_and_run(DATASET_NAME, DATASET_VERSION,
+                          config=config, hypothesis_id=hypothesis_id)
+    if bt.get("duplicate"):
+        # 같은 (가설, 데이터, 코드) 실험이 이미 있다 - 다시 돌리지 않고 기존
+        # 실험의 강건성 판정을 찾아 쓴다. 여기 없으면 판정 불가로 끊는다.
+        raise RuntimeError(f"중복 실험({bt.get('experiment_id')}) - 기존 판정을 "
+                           f"수동 확인할 것 (자동 재판정은 결과 조작 여지가 있다)")
+
+    # 강건성: 같은 config 로 창별 재실행 (walk_forward 조각 재사용)
+    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        _, _, _, rows = load_dataset(conn, DATASET_NAME, DATASET_VERSION)
+        market = Market.from_rows(rows)
+        windows = make_windows(market.dates, WARMUP_TRADING_DAYS)
+        wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
+              for w in windows]
+        summary, flags, verdict = fragility_summary(wm)
+        with conn.cursor() as cur:
+            for label, metrics in wm:
+                for k in ("total_return", "sharpe_rf0", "max_drawdown"):
+                    if isinstance(metrics.get(k), (int, float)):
+                        cur.execute("""
+                            insert into quant.experiment_metrics
+                              (experiment_id, split, metric, value,
+                               dimensions, cost_model_version)
+                            values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
+                            on conflict do nothing
+                        """, (bt["experiment_id"], k, metrics[k],
+                              json.dumps({"window": label, "chain": ORCH_VERSION}),
+                              "krx-cost-v1"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"experiment_id": bt["experiment_id"], "fragility": verdict,
+            "fragility_flags": flags, "windows": len(wm),
+            "backtest_metrics": bt.get("metrics")}
 
 
 def _print_report(r: OrchestratorReport) -> None:
@@ -231,12 +285,17 @@ def _check_feasibility_gate():
         {"expected_edge": {"type": "momentum"},
          "required_data_products": ["krx-basket-daily/v1"]}, ds)
     assert ok and not missing
-    # 미구현 전략 -> NOT_RUNNABLE (mean_reversion 실측 사례)
-    ok2, missing2, backlog2 = feasibility(
+    # mean_reversion 은 2026-08-01 REV-5 구현으로 RUNNABLE 이 됐다 (백로그 이행)
+    ok_rev, _, _ = feasibility(
         {"expected_edge": {"type": "mean_reversion"},
          "required_data_products": ["krx-basket-daily/v1"]}, ds)
-    assert not ok2 and "strategy_impl:mean_reversion" in missing2
-    assert any("mean_reversion" in b for b in backlog2)
+    assert ok_rev, "REV-5 구현 후에도 mean_reversion 이 막혀 있다"
+    # 미구현 전략 -> NOT_RUNNABLE (카탈로그에 없는 가상 전략으로 검증)
+    ok2, missing2, backlog2 = feasibility(
+        {"expected_edge": {"type": "pairs_trading"},
+         "required_data_products": ["krx-basket-daily/v1"]}, ds)
+    assert not ok2 and "strategy_impl:pairs_trading" in missing2
+    assert any("pairs_trading" in b for b in backlog2)
     # 없는 데이터셋 -> NOT_RUNNABLE
     ok3, missing3, _ = feasibility(
         {"expected_edge": {"type": "momentum"},
@@ -261,7 +320,7 @@ def _check_status_mapping():
 
 
 def _check_orchestrate_paths():
-    row = ("h-1", "미구현 엣지 가설", {"type": "mean_reversion", "horizon_days": 5},
+    row = ("h-1", "미구현 엣지 가설", {"type": "pairs_trading", "horizon_days": 5},
            ["krx-basket-daily/v1"], "PROPOSED")
     cur = _FakeCursor(row, ["krx-basket-daily/v1"])
     r = orchestrate("h-1", conn=_FakeConn(cur))
@@ -272,16 +331,16 @@ def _check_orchestrate_paths():
             ["krx-basket-daily/v1"], "PROPOSED")
     cur2 = _FakeCursor(row2, ["krx-basket-daily/v1"])
     r2 = orchestrate("h-2", conn=_FakeConn(cur2),
-                     run_chain=lambda h: {"experiment_id": "e-1",
-                                          "fragility": "FRAGILE"})
+                     run_chain=lambda h, hid: {"experiment_id": "e-1",
+                                               "fragility": "FRAGILE"})
     assert r2.verdict == "RUNNABLE"
     assert r2.transitions == ["PROPOSED->TESTING", "TESTING->REJECTED"]
     assert len(cur2.updates) == 2 and cur2.updates[1][0] == "REJECTED"
 
     cur3 = _FakeCursor(row2, ["krx-basket-daily/v1"])
     r3 = orchestrate("h-2", conn=_FakeConn(cur3),
-                     run_chain=lambda h: {"experiment_id": "e-2",
-                                          "fragility": "ROBUST"})
+                     run_chain=lambda h, hid: {"experiment_id": "e-2",
+                                               "fragility": "ROBUST"})
     assert r3.transitions[-1] == "TESTING->SUPPORTED"
 
     cur4 = _FakeCursor(None, [])

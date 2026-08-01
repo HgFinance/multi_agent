@@ -259,6 +259,16 @@ services:
 
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # /evidence/search 질의 임베딩(bge-m3)용. Ollama 는 호스트 프로세스라
+      # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
+      # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+
+    # Docker Desktop(Windows/Mac)은 host.docker.internal 을 자동 제공하지만
+    # 리눅스 엔진은 아니다 - host-gateway 매핑을 명시해 VPS 이전 시에도
+    # 같은 compose 파일이 그대로 동작하게 한다(파일 상단 이전 원칙).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     ports:
       - "127.0.0.1:8035:8035"   # 로컬 전용 - 외부 노출 금지

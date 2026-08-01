@@ -156,6 +156,10 @@ def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
 # ── 서술 수치 재대조 - 라벨 오서술·수치 창작 가드 (RES-00 Packet 검증용) ──
 
 _PCT_RE = re.compile(r"([+-]?\d{1,3}(?:\.\d{1,2})?)\s*%")
+# 셈 단위가 붙은 정수만 검사한다 - 가격("1,718,000원")·날짜("30일")까지 잡으면
+# 오탐이 검사를 무력화한다. 실측 근거: Packet 이 "advancers 297개" 처럼 확정치
+# (296)에 없는 종목 수를 창작했는데 % 가 아니라 통과했다 (2026-08-01).
+_COUNT_RE = re.compile(r"(\d{1,7})\s*(?:개|건|종목)")
 
 
 def _collect_numbers(v, out: set) -> None:
@@ -188,7 +192,12 @@ def verify_narrative_numbers(text: str, confirmed: dict,
     nums = [float(m.group(1)) for m in _PCT_RE.finditer(text or "")]
     unmatched = [n for n in nums
                  if not any(abs(abs(n) - abs(a)) <= tolerance for a in allowed)]
-    return {"checked": len(nums), "unmatched": unmatched, "ok": not unmatched}
+    # 셈 단위 정수는 정확 일치만 - 종목/기사/공시 개수는 반올림 여지가 없다
+    counts = [int(m.group(1)) for m in _COUNT_RE.finditer(text or "")]
+    unmatched_counts = [c for c in counts if float(c) not in allowed]
+    return {"checked": len(nums), "unmatched": unmatched,
+            "checked_counts": len(counts), "unmatched_counts": unmatched_counts,
+            "ok": not unmatched and not unmatched_counts}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────
@@ -296,6 +305,14 @@ def _check_narrative_numbers():
     # 수치 없는 서술·빈 문자열은 검사 0건으로 통과
     assert verify_narrative_numbers("추세가 강하다", confirmed)["checked"] == 0
     assert verify_narrative_numbers("", confirmed)["ok"]
+    # 셈 단위 정수 - "297개" 창작 실측 사례: 확정치(296) 밖이면 적발
+    conf2 = {"regime": {"latest_advancers": 296, "latest_decliners": 51}}
+    good = verify_narrative_numbers("상승 296개, 하락 51종목", conf2)
+    assert good["ok"] and good["checked_counts"] == 2
+    bad2 = verify_narrative_numbers("상승 297개, 하락 132종목", conf2)
+    assert not bad2["ok"] and bad2["unmatched_counts"] == [297, 132]
+    # 단위 없는 정수(가격·날짜)는 검사하지 않는다 - 오탐 방지
+    assert verify_narrative_numbers("종가 1718000원, 7월 30일", conf2)["checked_counts"] == 0
     print("  서술 수치 재대조 가드    OK")
 
 
