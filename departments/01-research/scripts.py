@@ -57,6 +57,8 @@ class ResearchState(TypedDict, total=False):
     sentiment: dict         # 검증된 sentiment 요약
     technical: dict         # RES-04 기술적 소견 (결정론 readout + 검증된 서술)
     fundamental: dict       # RES-05 펀더멘털 소견 (결정론 readout + 검증된 서술)
+    regime: dict            # RES-07 시장 레짐 (라벨은 코드, 서술만 LLM)
+    microstructure: dict    # RES-03 미시구조 (판정은 코드, 서술만 LLM)
     packet: dict            # 최종 Research Packet
     halted: str             # 중단 사유 (거래 불가 등)
 
@@ -123,6 +125,25 @@ def analyze_fundamental(state: ResearchState) -> dict:
                             "verification": r.get("verification")}}
 
 
+def analyze_regime(state: ResearchState) -> dict:
+    """시장 단면 레짐 - 종목이 아니라 시장 전체의 맥락 (RES-07)."""
+    from sector_regime_analyst import analyze as regime_analyze
+
+    r = regime_analyze(market_api=MARKET_API)
+    return {"regime": {"verdict": r.get("verdict"),
+                       "readout": r.get("readout"),
+                       "note": _norm_note(r.get("note"))}}
+
+
+def analyze_microstructure(state: ResearchState) -> dict:
+    from microstructure_analyst import analyze as micro_analyze
+
+    r = micro_analyze(state["symbol"], market_api=MARKET_API)
+    return {"microstructure": {"verdict": r.get("verdict"),
+                               "readout": r.get("readout"),
+                               "note": _norm_note(r.get("note"))}}
+
+
 # ── 노드 4: Packet 초안 (supervisor 페르소나 - config.yaml 원문) ───────────
 def _supervisor_persona() -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
@@ -141,15 +162,36 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
     analysts = {
         "technical": state.get("technical") or {"status": "NOT_RUN"},
         "fundamental": state.get("fundamental") or {"status": "NOT_RUN"},
+        "market_regime": state.get("regime") or {"status": "NOT_RUN"},
+        "microstructure": state.get("microstructure") or {"status": "NOT_RUN"},
     }
+
+    # 프롬프트에는 압축 다이제스트만 - 실측: 원자료(중첩 dict)를 통째로 주면
+    # 모델이 출력 구조까지 dict 로 따라가 스키마(list[str])를 어긴다.
+    # 수치 재대조(confirmed)는 아래에서 원본 analysts 로 한다 - 상위집합 허용.
+    def _digest(a: dict) -> dict:
+        if not a or a.get("status") == "NOT_RUN":
+            return {"status": "NOT_RUN"}
+        note = a.get("note") or {}
+        nums = {k: v for k, v in (a.get("readout") or {}).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        return {"verdict": a.get("verdict"), "summary": note.get("summary"),
+                "cautions": note.get("cautions"), "key_numbers": nums}
+
+    analysts_digest = {k: _digest(v) for k, v in analysts.items()}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
-{{"symbol": "...", "thesis": "1-2 sentences, facts first",
+{{"symbol": "...", "thesis": "1-2 sentences in Korean, facts first",
  "facts": ["cited facts only - reference ids like news:3"],
  "interpretation": ["clearly separated from facts"],
  "catalysts": ["upcoming checkpoints"],
  "invalidation": ["conditions that would kill the thesis"],
  "evidence_quality": "sufficient | partial | insufficient_evidence"}}
+STRUCTURE RULES - non-negotiable:
+- facts, interpretation, catalysts, invalidation MUST each be a FLAT JSON
+  array of plain strings. No nested objects, no key-value maps.
+- evidence_quality is exactly one of the three lowercase tokens above.
+- Write all narrative text in Korean.
 
 CONFIRMED PRICE FIGURES (deterministic, computed by code - NOT by you):
 {json.dumps(price_ctx, ensure_ascii=False, indent=1)}
@@ -162,7 +204,7 @@ Rules for these figures - non-negotiable:
 
 CONFIRMED ANALYST FINDINGS (readouts computed by code; narratives already
 hallucination-checked - NOT yours to recompute):
-{json.dumps(analysts, ensure_ascii=False, indent=1)}
+{json.dumps(analysts_digest, ensure_ascii=False, indent=1)}
 Rules for analyst findings - non-negotiable:
 - Quote their verdicts and numbers verbatim; do not invent new figures.
 - If analysts DISAGREE (e.g., sentiment positive but technical BEARISH),
@@ -174,21 +216,53 @@ Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
 
     call = llm or _ollama_chat
-    out = call(_supervisor_persona(), task)
-    s, e = out.find("{"), out.rfind("}")
-    packet = json.loads(out[s:e + 1])
-    # 결정론 가드: 스키마 필수 키와 사실/해석 분리 존재를 코드로 확인한다
-    for k in ("symbol", "thesis", "facts", "interpretation", "invalidation",
-              "evidence_quality"):
-        if k not in packet:
-            raise ValueError(f"Packet 에 {k} 가 없다 - 초안 거부")
-    packet["evidence_quality"] = str(packet["evidence_quality"]).lower()  # 표기 정규화
-    # 결정론 가드 2: 서술 속 % 수치가 확정치(가격+분석가 readout) 밖이면 창작이다
+    REQUIRED = ("symbol", "thesis", "facts", "interpretation", "invalidation",
+                "evidence_quality")
+    packet = None
+    last_err = None
+    for attempt in (1, 2):      # 파싱·스키마 위반 1회 재시도 - 분석가들과 같은 규율
+        extra = "" if attempt == 1 else (
+            f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
+            f"JSON object with ALL required keys: {', '.join(REQUIRED)}.")
+        out = re.sub(r"<think>.*?</think>", "",
+                     call(_supervisor_persona(), task + extra), flags=re.S)
+        s, e = out.find("{"), out.rfind("}")
+        if s < 0 or e < s:
+            last_err = "no JSON object in reply"
+            continue
+        try:
+            candidate = json.loads(out[s:e + 1])
+        except json.JSONDecodeError as err:
+            last_err = f"invalid JSON: {err}"
+            continue
+        missing = [k for k in REQUIRED if k not in candidate]
+        if missing:
+            last_err = f"missing keys: {missing}"
+            continue
+        # 타입 강제 - 실측: dict 로 오면 항목 안에 창작 사실이 숨고 수치 검사를
+        # 우회했다. 스키마 문장("list of strings")을 코드로 못 박는다.
+        bad_type = [k for k in ("facts", "interpretation", "invalidation")
+                    if not (isinstance(candidate.get(k), list)
+                            and all(isinstance(x, str) for x in candidate[k]))]
+        if bad_type:
+            last_err = f"keys must be list[str]: {bad_type}"
+            continue
+        eq = str(candidate.get("evidence_quality", "")).lower().strip()
+        if eq not in ("sufficient", "partial", "insufficient_evidence"):
+            last_err = f"evidence_quality must be one of the 3 tokens, got {eq[:40]!r}"
+            continue
+        candidate["evidence_quality"] = eq
+        packet = candidate
+        break
+    if packet is None:
+        # 결정론 가드: 두 번 다 스키마를 못 지키면 초안을 거부한다 - 통과 위장 금지
+        raise ValueError(f"Packet 초안 거부 - {last_err}")
+    # 결정론 가드 2: 서술 속 % 수치가 확정치(가격+분석가 readout) 밖이면 창작이다.
+    # Packet 전체를 직렬화해 검사한다 - 리스트만 훑으면 중첩 구조에 숨은 수치가
+    # 빠져나간다(실측: dict 값 안의 "5.2%" 가 검사를 우회했다)
     from evidence.bundle import verify_narrative_numbers
 
-    narrative = " ".join([str(packet.get("thesis", "")),
-                          *map(str, packet.get("facts") or []),
-                          *map(str, packet.get("interpretation") or [])])
+    narrative = json.dumps(packet, ensure_ascii=False)
     packet["numeric_check"] = verify_narrative_numbers(
         narrative, {"price": price_ctx, "analysts": analysts})
     return {"packet": packet}
@@ -199,6 +273,8 @@ def _ollama_chat(system: str, user: str) -> str:
         OLLAMA_BASE + "/v1/chat/completions", method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
         data=json.dumps({"model": SUPERVISOR_MODEL, "temperature": 0.2,
+                         "response_format": {"type": "json_object"},
+                         "max_tokens": 4096,   # 실측: 기본값에서 JSON 이 잘려 스키마 위반
                          "messages": [{"role": "system", "content": system},
                                       {"role": "user", "content": user}]}).encode())
     with urllib.request.urlopen(req, timeout=600) as r:
@@ -213,18 +289,22 @@ def build_pipeline():
     g.add_node("analyze_sentiment", analyze_sentiment)
     g.add_node("analyze_technical", analyze_technical)
     g.add_node("analyze_fundamental", analyze_fundamental)
+    g.add_node("analyze_regime", analyze_regime)
+    g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
-    # 분석가 3인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
+    # 분석가 5인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
     # LLM 호출은 어차피 직렬화된다. 형태만 병렬로 꾸미지 않는다.
     g.add_edge("assemble_evidence", "analyze_sentiment")
     g.add_edge("analyze_sentiment", "analyze_technical")
     g.add_edge("analyze_technical", "analyze_fundamental")
-    g.add_edge("analyze_fundamental", "draft_packet")
+    g.add_edge("analyze_fundamental", "analyze_regime")
+    g.add_edge("analyze_regime", "analyze_microstructure")
+    g.add_edge("analyze_microstructure", "draft_packet")
     g.add_edge("draft_packet", END)
     return g.compile()
 

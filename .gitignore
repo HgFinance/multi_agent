@@ -53,3 +53,4 @@ minute_backfill_resume.*
 
 # Raw Market Data Parquet Archive (TSDB 에서 재유도 가능, 등록은 market.archive_exports)
 market-archive/
+rag_index_batch.*
