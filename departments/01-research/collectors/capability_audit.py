@@ -158,6 +158,30 @@ def unscored_claim_gaps(rows: list[tuple[str, int]]) -> list[Gap]:
     return out
 
 
+def collector_health_gaps(rows: list[tuple]) -> list[Gap]:
+    """24시간 안에 실패한 수집 Job. **조용한 실패가 가장 큰 위험이다.**
+
+    2026-08-02: geopolitical·bluesky-watch 두 Job 이 컨테이너에서 계속 실패
+    하고 있었는데 로그에만 남아 아무도 몰랐다. 그 부류를 여기서 매일 들이민다.
+    rows: (job_name, runs, ok, skip, bad, last_ok_at, last_status, err_tail)
+    """
+    out: list[Gap] = []
+    for job, runs, ok, skip, bad, last_ok, last_status, err in rows or []:
+        if not bad:
+            continue
+        # SKIP 은 실패가 아니다(휴장 등) - 성공률에서 이미 분리돼 있다
+        detail = f"최근 24시간 {runs}회 중 실패 {bad}회 (성공 {ok} / SKIP {skip})"
+        if last_ok is None:
+            detail += " — **24시간 내 성공 기록이 아예 없다**"
+        out.append(Gap(
+            kind="COLLECTOR_FAILING",
+            title=f"수집 Job '{job}' 실패 중 (마지막 상태 {last_status})",
+            detail=detail + (f"\n      마지막 오류: {str(err)[:160]}" if err else ""),
+            evidence=f"research.collector_health 조회",
+            priority=1))
+    return out
+
+
 def render_report(gaps: list[Gap], *, now: str) -> str:
     lines = ["# 리서치본부 — 역량 격차 감사 (결정론 생성)", "",
              f"- 생성: {now}", f"- 발견: {len(gaps)}건", "",
@@ -227,6 +251,19 @@ def audit() -> int:
                 group by 1
             """)
             gaps += unscored_claim_gaps(cur.fetchall())
+
+            # 24시간 운영의 핵심 - 지금 뭐가 고장나 있는가
+            try:
+                cur.execute("""
+                    select job_name, runs_24h, ok_24h, skip_24h, bad_24h,
+                           last_ok_at, last_status, last_error_tail
+                    from research.collector_health order by bad_24h desc
+                """)
+                gaps += collector_health_gaps(cur.fetchall())
+            except Exception as e:  # noqa: BLE001 - 뷰 미적용 환경도 있다
+                conn.rollback()
+                print(f"  ⚠ collector_health 조회 실패(마이그레이션 001500 확인): "
+                      f"{type(e).__name__}", flush=True)
     finally:
         conn.close()
 
@@ -288,6 +325,24 @@ def _check_verdict_ratio():
     print("  판단불가 비율 탐지       OK")
 
 
+def _check_collector_health():
+    """실패는 올리고 SKIP 은 올리지 않는다 - 휴장마다 경보가 울리면 아무도 안 본다."""
+    rows = [
+        ("geopolitical", 3, 0, 0, 3, None, "FAILED", "FileNotFoundError: themes"),
+        ("vkospi", 2, 0, 2, 0, None, "SKIP", None),          # 휴장 - 정상
+        ("disclosure", 60, 59, 0, 1, "2026-08-02T09:00", "OK", "timeout"),
+    ]
+    gaps = collector_health_gaps(rows)
+    titles = " ".join(g.title for g in gaps)
+    assert "geopolitical" in titles and "disclosure" in titles, gaps
+    assert "vkospi" not in titles, "SKIP 만 있는 Job 을 실패로 올렸다"
+    geo = next(g for g in gaps if "geopolitical" in g.title)
+    assert "성공 기록이 아예 없다" in geo.detail, geo.detail
+    assert all(g.priority == 1 for g in gaps), "고장은 최우선이다"
+    assert not collector_health_gaps([]), "빈 입력에 격차를 만들면 안 된다"
+    print("  수집 Job 고장 탐지       OK")
+
+
 def _check_report_render():
     g = [Gap("INVENTORY_UNUSED", "t", "d", "e", 1)]
     md = render_report(g, now="2026-08-02T00:00:00+09:00")
@@ -308,5 +363,6 @@ if __name__ == "__main__":
     _check_finds_vkospi_case()
     _check_method_inputs()
     _check_verdict_ratio()
+    _check_collector_health()
     _check_report_render()
-    print("역량 격차 감사 4개 영역 통과. 감사는 --audit")
+    print("역량 격차 감사 5개 영역 통과. 감사는 --audit")

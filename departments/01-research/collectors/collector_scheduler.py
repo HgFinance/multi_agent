@@ -47,6 +47,7 @@ CHECK_EVERY_SECONDS = 30.0
 JOB_TIMEOUT_SECONDS = 30 * 60
 FAILURE_ALERT_THRESHOLD = 3
 EXIT_SKIP = 2  # 수집기 규약: "의도된 미수집" (market_breadth 실측)
+TIMEOUT_EXIT = -1  # 타임아웃은 종료 코드를 못 받는다 - DB 기록용 표식
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,56 @@ def run_job(job: Job, *, timeout: float = JOB_TIMEOUT_SECONDS) -> tuple[int, str
     return proc.returncode, tail
 
 
+def classify(exit_code: int) -> str:
+    """종료 코드 -> 상태. SKIP 은 실패가 아니다(휴장 등 의도된 미수집)."""
+    if exit_code == 0:
+        return "OK"
+    if exit_code == EXIT_SKIP:
+        return "SKIP"
+    if exit_code == TIMEOUT_EXIT:
+        return "TIMEOUT"
+    return "FAILED"
+
+
+def record_run(job_name: str, argv: tuple[str, ...], *, started, ended,
+               exit_code: int, tail: str, consecutive_failures: int,
+               conn=None) -> bool:
+    """research.collector_runs 기록.
+
+    **기록 실패가 수집을 죽이면 안 된다** - 조용한 실패를 막으려고 만든 장치가
+    새로운 실패 원인이 되면 본말전도다. 실패는 stderr 로만 알린다.
+    """
+    try:
+        own = conn is None
+        if own:
+            import psycopg2
+
+            from source_registry import load_project_env
+
+            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                    connect_timeout=10)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into research.collector_runs
+                  (job_name, argv, started_at, ended_at, duration_ms, exit_code,
+                   status, consecutive_failures, output_tail, scheduler_version)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (job_name, " ".join(argv), started, ended,
+                 int((ended - started).total_seconds() * 1000), exit_code,
+                 classify(exit_code), consecutive_failures,
+                 (tail or "")[:4000], SCHEDULER_VERSION))
+        conn.commit()
+        if own:
+            conn.close()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ collector_runs 기록 실패({job_name}): {type(e).__name__}: "
+              f"{str(e)[:120]}", file=sys.stderr, flush=True)
+        return False
+
+
 def main() -> int:
     stop = threading.Event()
 
@@ -208,9 +259,16 @@ def main() -> int:
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: ⚠ TIMEOUT "
                       f"({JOB_TIMEOUT_SECONDS / 60:.0f}분, 연속 {st.consecutive_failures})",
                       flush=True)
+                # 타임아웃도 기록한다 - 로그에만 남기면 재시작과 함께 사라진다
+                record_run(job.name, job.argv, started=st.last_started,
+                           ended=datetime.now(KST), exit_code=TIMEOUT_EXIT,
+                           tail=f"{JOB_TIMEOUT_SECONDS/60:.0f}분 초과",
+                           consecutive_failures=st.consecutive_failures)
                 continue
             st.runs += 1
             st.last_finished_date = datetime.now(KST).date()
+            # 상태 갱신 뒤 기록해야 consecutive_failures 가 맞다 - 아래 분기에서
+            # 0 으로 초기화되거나 증가한 값을 그대로 남긴다.
             if code == 0:
                 st.consecutive_failures = 0
                 last = tail.splitlines()[-1] if tail else ""
@@ -224,6 +282,9 @@ def main() -> int:
                 mark = " ⚠" if st.consecutive_failures >= FAILURE_ALERT_THRESHOLD else ""
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: 실패 exit={code} "
                       f"(연속 {st.consecutive_failures}){mark}\n{tail}", flush=True)
+            record_run(job.name, job.argv, started=st.last_started,
+                       ended=datetime.now(KST), exit_code=code, tail=tail,
+                       consecutive_failures=st.consecutive_failures)
         stop.wait(CHECK_EVERY_SECONDS)
 
     print("종료: " + ", ".join(
@@ -289,6 +350,30 @@ def _check_exit_codes():
     print("  종료 코드 규약           OK")
 
 
+def _check_status_classification():
+    """SKIP 을 실패로 세면 휴장마다 경보가 울려 아무도 안 보게 된다."""
+    assert classify(0) == "OK"
+    assert classify(EXIT_SKIP) == "SKIP"
+    assert classify(1) == "FAILED"
+    assert classify(TIMEOUT_EXIT) == "TIMEOUT"
+    assert classify(255) == "FAILED"
+    print("  실행 상태 분류           OK")
+
+
+def _check_record_failure_is_contained():
+    """기록 실패가 수집을 죽이면 안 된다 - 조용한 실패를 막는 장치가 새로운
+    실패 원인이 되면 본말전도다."""
+    class _Boom:
+        def cursor(self):
+            raise RuntimeError("DB down")
+
+    now = datetime.now(KST)
+    ok = record_run("t", ("x.py", "--collect"), started=now, ended=now,
+                    exit_code=0, tail="", consecutive_failures=0, conn=_Boom())
+    assert ok is False, "기록 실패를 성공으로 보고했다"
+    print("  기록 실패 격리           OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -298,7 +383,9 @@ if __name__ == "__main__":
         _check_job_table()
         _check_due_logic()
         _check_exit_codes()
-        print("스케줄러 3개 영역 통과. 상주 실행은 인자 없이")
+        _check_status_classification()
+        _check_record_failure_is_contained()
+        print("스케줄러 5개 영역 통과. 상주 실행은 인자 없이")
         raise SystemExit(0)
 
     if "--once" in sys.argv:
