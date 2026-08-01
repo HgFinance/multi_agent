@@ -547,6 +547,45 @@ SOURCES: tuple[SourceSpec, ...] = (
         note="ALFRED 의 vintage 가 PIT 재현에 필요하다",
     ),
     SourceSpec(
+        source_id="gpr",
+        # 지정학 리스크는 특정 시장 데이터가 아니라 배경 변수다 (FRED 와 같은 취급).
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
+        display_name="GPR 지정학 리스크 지수 (Caldara-Iacoviello)",
+        domains=(SourceDomain.MACRO,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 실측 2026-08-01 (재일님 "국제정치로 시장이 들썩인다" 요구):
+        #   일별 파일 무인증 다운로드 3.2MB, 15,183행 = 1985-01-01 ~ 현재.
+        #   GPRD(종합)·GPRD_ACT(실제 사건)·GPRD_THREAT(위협·언사) 3열 -
+        #   "폭격한다니 만다니"(THREAT)와 실제 타격(ACT)이 **분리돼 있다**.
+        #   40년 일별 히스토리라 백테스트 팩터로 바로 쓸 수 있다.
+        #   출처 표기 조건 공개 데이터(논문 인용 요건) - 재배포는 하지 않는다.
+        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
+        normalized_target="research.macro_observations",
+        doc_ref="matteoiacoviello.com/gpr.htm, 실측 2026-08-01",
+        note="게시 지연 실측 4~5일 - published_at 은 보수적으로 period+7일로 "
+             "둔다(미래 참조 방지). 실시간 경보용이 아니라 백테스트 팩터다",
+    ),
+    SourceSpec(
+        source_id="gdelt",
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
+        display_name="GDELT 전세계 보도량·톤 (지정학 실시간 축)",
+        domains=(SourceDomain.MACRO, SourceDomain.NEWS),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 실측 2026-08-01: DOC 2.0 API 무인증 관통(timelinevol/timelinetone).
+        #   테마별 보도 점유율 곡선이라 "충격 배율"(피크/중앙)로 이벤트를 잡는다.
+        #   실측 - North Korea missile 최근/중앙 3.7배, Iran strike 피크 2.1배.
+        #   라이선스: "unlimited and unrestricted use for any academic,
+        #   commercial, or governmental use of any kind without fee" +
+        #   출처 표기·링크 의무. 레이트리밋 5초/요청(429 실측) - 준수한다.
+        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
+        normalized_target="research.macro_observations",
+        doc_ref="gdeltproject.org (출처 표기 의무), 실측 2026-08-01",
+        note="저장 대상은 집계 지표(보도 점유율·톤)뿐 - 기사 본문은 각 매체 "
+             "권리라 담지 않는다. 인용 시 GDELT Project 표기",
+    ),
+    SourceSpec(
         source_id="kind",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="KRX KIND",

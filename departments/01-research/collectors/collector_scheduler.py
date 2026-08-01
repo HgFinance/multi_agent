@@ -108,6 +108,13 @@ JOBS: tuple[Job, ...] = (
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
     Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
+    # 지정학 리스크 (GPR 일별 지수 + GDELT 테마 보도량·톤).
+    # 07:20 - Steward(07:10) 뒤, 개장 전. 밤사이 미국·중동 사건이 반영된
+    # 상태로 장을 연다. 일 단위 계열이고 진행 중인 날은 제외하므로 장중
+    # 재폴링은 이득이 없다(15분 해상도가 필요하면 timelinevolraw - 백로그).
+    Job("geopolitical", ("collectors/geopolitical_collector.py", "--collect",
+                         "--days", "120"),
+        daily_at=time(7, 20)),
     # Bluesky 미국 표적 계정 (기관 미디어 4곳 + 매크로 논객 2인, ~166건/일 실측).
     # 60분 주기면 계정당 피드 50건 버퍼가 최고 볼륨(Reuters ~57건/일)도 20시간
     # 이상 덮는다 - 놓칠 수 없는 구조. 창 06:00~23:50: 미 장중(KST 밤)은 다음날

@@ -1,0 +1,15 @@
+# GDELT 지정학 테마 - geopolitical_collector.py 가 읽는다.
+# 형식: <시계열코드>|<GDELT 질의>   (# 뒤는 주석)
+# 코드는 macro_series.external_series_code 가 되므로 바꾸면 새 시계열이 된다.
+#
+# 선정 기준: **한국 시장으로 전달 경로가 있는 축만.** 유가(수입 100%),
+# 반도체 공급망, 방산, 원/달러, 코리아 디스카운트.
+# 실측 2026-08-01 (90일 창, 피크/중앙 배율):
+#   North Korea missile 5.7x / Iran strike 2.1x / Russia Ukraine 1.6x
+
+GDELT_NK_MISSILE|North Korea missile        # 코리아 디스카운트 직결
+GDELT_TAIWAN|Taiwan strait                  # 반도체 공급망·중국 리스크
+GDELT_IRAN|Iran strike                      # 호르무즈·유가
+GDELT_RUS_UKR|Russia Ukraine                # 에너지·곡물
+GDELT_MIDEAST_OIL|Middle East oil           # 유가 전달 경로
+GDELT_TARIFF|tariff trade war               # 관세 - 반도체·자동차·철강 수출
