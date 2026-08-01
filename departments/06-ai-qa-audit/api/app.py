@@ -39,10 +39,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-_EVIDENCE_DIR = Path(__file__).resolve().parent.parent / "evidence"
+_QA_DIR = Path(__file__).resolve().parent.parent
+_EVIDENCE_DIR = _QA_DIR / "evidence"
 _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
-for _p in (_EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
+for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
 from evidence_qa_engine import Artifact, EvidenceQaEngine, EvidenceStore, QaContext  # noqa: E402
@@ -55,17 +56,102 @@ from tool_permission_check import (  # noqa: E402
     record_and_check_tool_call,
 )
 from trace_recorder import TraceRecorder, TraceRecorderError  # noqa: E402
+from qa_events.redis_event_bus import (
+    DEFAULT_GROUP,
+    DEFAULT_STREAM,
+    QA_DECISION_EVENT,
+    RISK_DECISION_EVENT,
+    QaEventBusError,
+    RedisEventBus,
+)
 
 # DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
 # write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
 # .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 if _DATABASE_URL:
-    from repository import PostgresAuditRepository  # noqa: E402
+    from repository import QaDecisionPersistenceError, PostgresAuditRepository  # noqa: E402
 
     _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
 else:
+    from repository import QaDecisionPersistenceError, PostgresAuditRepository  # noqa: E402
+
     _audit_repository = None
+_event_bus: RedisEventBus | None = None
+
+
+def _qa_event_bus() -> RedisEventBus | None:
+    """Risk↔QA Redis Stream을 실제 호출 시점에만 연결한다."""
+
+    global _event_bus
+    redis_url = os.environ.get("RISK_QA_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _event_bus is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("RISK_QA_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+        except ValueError as exc:
+            raise QaEventBusError(
+                "RISK_QA_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+            ) from exc
+
+        _event_bus = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("RISK_QA_EVENT_STREAM", DEFAULT_STREAM),
+            group=os.environ.get("QA_EVENT_GROUP", DEFAULT_GROUP),
+            consumer=os.environ.get("QA_EVENT_CONSUMER", "qa-api"),
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+        )
+    return _event_bus
+
+
+def _persist_qa_decision(assessment) -> None:
+    """QA 결과를 DB에 기록하고 같은 trace의 Event를 발행한다."""
+
+    if _audit_repository is None:
+        return
+    _audit_repository.save_qa_assessment(assessment)
+    bus = _qa_event_bus()
+    if bus is None:
+        raise QaEventBusError("Canonical QA DB는 연결됐지만 QA Event Bus가 없습니다")
+    bus.publish(
+        event_id=assessment.qa_decision_id,
+        event_type=QA_DECISION_EVENT,
+        trace_id=assessment.trace_id,
+        payload={
+            "qa_decision_id": str(assessment.qa_decision_id),
+            "artifact_version_id": str(assessment.artifact_version_id),
+            "gate": assessment.gate,
+            "decision": assessment.decision.value,
+            "calculation_version": assessment.calculation_version,
+            "input_hash": assessment.input_hash,
+            "trace_id": str(assessment.trace_id),
+        },
+    )
+
+
+def _record_risk_event(event: dict) -> None:
+    """Risk Decision Event를 QA Audit 수신 이력으로 남긴다."""
+
+    if event.get("event_type") != RISK_DECISION_EVENT:
+        raise QaEventBusError(f"QA Consumer가 알 수 없는 Event를 받았습니다: {event.get('event_type')}")
+    if _audit_repository is None:
+        raise QaEventBusError("Risk Event를 기록할 DATABASE_URL이 없습니다")
+    try:
+        _audit_repository.record_domain_event(
+            event_id=UUID(event["event_id"]),
+            event_type=event["event_type"],
+            source_department="risk-management",
+            trace_id=UUID(event["trace_id"]),
+            payload=event["payload"],
+            occurred_at=datetime.fromisoformat(event["occurred_at"]),
+        )
+    except (KeyError, ValueError) as exc:
+        raise QaEventBusError(f"Risk Event Envelope이 유효하지 않습니다: {exc}") from exc
 
 
 # --- Request 모델 ------------------------------------------------------------------
@@ -79,6 +165,11 @@ class QaCheckRequest(BaseModel):
     qa_decision_id: UUID | None = None
     artifact: Artifact
     context: QaContextIn
+
+
+class EventConsumeRequest(BaseModel):
+    count: int = Field(default=10, ge=1, le=100)
+    min_idle_ms: int = Field(default=0, ge=0)
 
 
 class AgentHealthMetricsIn(BaseModel):
@@ -239,13 +330,59 @@ def _on_validation_error(request, exc: RequestValidationError):
     )
 
 
+@app.exception_handler(QaDecisionPersistenceError)
+def _on_qa_persistence_error(request, exc: QaDecisionPersistenceError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
+@app.exception_handler(QaEventBusError)
+def _on_qa_event_bus_error(request, exc: QaEventBusError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
 # 3.1 [제안] Case에 종속된 판정 -------------------------------------------------------
 
 
 @app.post("/investment-cases/{case_id}/qa-check")
 def qa_check(case_id: str, body: QaCheckRequest):
     ctx = QaContext(evidence_store=evidence_store, decision_time=body.context.decision_time)
-    return evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
+    assessment = evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
+    _persist_qa_decision(assessment)
+    return assessment
+
+
+@app.post("/qa/v1/events/consume")
+def consume_events(body: EventConsumeRequest):
+    """QA Worker가 Risk Decision Stream을 한 배치 소비한다."""
+
+    bus = _qa_event_bus()
+    if bus is None:
+        raise QaEventBusError("QA Event Bus 연결 설정이 없습니다")
+    return {
+        "consumed": bus.consume_once(
+            _record_risk_event,
+            count=body.count,
+            min_idle_ms=body.min_idle_ms,
+        )
+    }
+
+
+@app.get("/qa/v1/observability/rag")
+def rag_observability():
+    from src.resilience import latency_summary
+
+    return {
+        "nodes": {
+            node: latency_summary(node)
+            for node in ("retrieve", "grade", "generate", "hallucination_check")
+        }
+    }
 
 
 # 3.2 Ops Health ---------------------------------------------------------------------

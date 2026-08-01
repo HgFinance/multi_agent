@@ -37,7 +37,13 @@ from psycopg2.pool import ThreadedConnectionPool
 from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
 from trace_recorder import AgentRunRecord, ToolCallRecord
 
+from evidence_qa_engine import QaAssessment
+
 register_uuid()
+
+
+class QaDecisionPersistenceError(RuntimeError):
+    """Canonical QA Decision을 기록하지 못한 경우."""
 
 
 class PostgresAuditRepository:
@@ -53,11 +59,134 @@ class PostgresAuditRepository:
     def close(self) -> None:
         self._pool.closeall()
 
+    def record_domain_event(
+        self,
+        *,
+        event_id,
+        event_type: str,
+        source_department: str,
+        trace_id,
+        payload: dict,
+        occurred_at,
+    ) -> None:
+        """Redis Event 수신을 Canonical Audit Event로 멱등 기록한다."""
+
+        self._execute(
+            """
+            insert into audit.domain_events (
+                event_id, event_type, source_department, trace_id,
+                payload, occurred_at, status
+            ) values (%s, %s, %s, %s, %s, %s, 'PROCESSED')
+            on conflict (event_id) do nothing
+            """,
+            (
+                event_id,
+                event_type,
+                source_department,
+                trace_id,
+                Json(payload),
+                occurred_at,
+            ),
+        )
+
     def _execute(self, query: str, params: tuple) -> None:
         conn = self._pool.getconn()
         try:
-            with conn, conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(query, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def save_qa_assessment(self, assessment: QaAssessment) -> None:
+        """QA Decision과 Claim Check/Finding을 하나의 DB 트랜잭션으로 기록한다."""
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into audit.qa_decisions (
+                        qa_decision_id, artifact_version_id, gate, decision,
+                        conditions, reason_codes, decided_by, trace_id,
+                        decided_at, calculation_version, input_hash
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (artifact_version_id, gate) do nothing
+                    returning qa_decision_id
+                    """,
+                    (
+                        assessment.qa_decision_id,
+                        assessment.artifact_version_id,
+                        assessment.gate,
+                        assessment.decision.value,
+                        Json(
+                            {
+                                "calculation_version": assessment.calculation_version,
+                                "input_hash": assessment.input_hash,
+                            }
+                        ),
+                        [reason.value for reason in assessment.reason_codes],
+                        assessment.decided_by,
+                        assessment.trace_id,
+                        assessment.decided_at,
+                        assessment.calculation_version,
+                        assessment.input_hash,
+                    ),
+                )
+                inserted = cur.fetchone() is not None
+                if inserted:
+                    for check in assessment.claim_checks:
+                        cur.execute(
+                            """
+                            insert into audit.claim_checks (
+                                claim_check_id, artifact_version_id, claim_index,
+                                claim, evidence_chunk_ids, result, reason,
+                                checker_version, checked_at
+                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            on conflict (artifact_version_id, claim_index, checker_version)
+                            do nothing
+                            """,
+                            (
+                                check.claim_check_id,
+                                check.artifact_version_id,
+                                check.claim_index,
+                                check.claim,
+                                list(check.evidence_chunk_ids),
+                                check.result.value,
+                                check.reason,
+                                check.checker_version,
+                                check.checked_at,
+                            ),
+                        )
+                    for finding in assessment.findings:
+                        cur.execute(
+                            """
+                            insert into audit.findings (
+                                finding_id, fund_id, finding_type, severity,
+                                artifact_version_id, description, owner,
+                                trace_id, created_at
+                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            on conflict (finding_id) do nothing
+                            """,
+                            (
+                                finding.finding_id,
+                                finding.fund_id,
+                                finding.finding_type,
+                                finding.severity.value,
+                                finding.artifact_version_id,
+                                finding.description,
+                                finding.opened_by,
+                                finding.trace_id,
+                                finding.created_at,
+                            ),
+                        )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise QaDecisionPersistenceError(f"Canonical QA Decision 기록 실패: {exc}") from exc
         finally:
             self._pool.putconn(conn)
 

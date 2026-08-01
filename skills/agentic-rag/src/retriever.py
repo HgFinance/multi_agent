@@ -23,8 +23,19 @@ import numpy as np
 from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
+from .resilience import CircuitBreaker, RedisJsonCache, emit_metric
+
 EMBEDDING_MODEL = os.environ.get("AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small")
 CACHE_VERSION = "v1"
+_EMBED_BREAKER = CircuitBreaker(
+    "agentic-rag-embedding",
+    failure_threshold=int(os.environ.get("AGENTIC_RAG_EMBED_FAILURE_THRESHOLD", "3")),
+    recovery_timeout_seconds=float(os.environ.get("AGENTIC_RAG_EMBED_RECOVERY_SECONDS", "30")),
+)
+_EMBED_CACHE = RedisJsonCache(
+    "risk-qa:rag:embedding",
+    ttl_seconds=int(os.environ.get("AGENTIC_RAG_EMBED_CACHE_TTL_SECONDS", "604800")),
+)
 
 
 @dataclass
@@ -119,8 +130,14 @@ class LocalVectorIndex:
     def __init__(self, corpus_dir: Path, cache_path: Path | None = None):
         self.corpus_dir = corpus_dir
         self.cache_path = cache_path or corpus_dir / ".embedding_cache.json"
+        self._query_cache = _EMBED_CACHE
         self._client = wrap_openai(OpenAI())  # LANGSMITH_TRACING 켜졌을 때만 토큰/비용 추적, 꺼지면 그대로 통과
         self.chunks = load_corpus(corpus_dir)
+        self._graph_terms: dict[str, set[int]] = {}
+        for index, chunk in enumerate(self.chunks):
+            terms = set(re.findall(r"[a-z0-9_가-힣]{3,}", f"{chunk.title} {chunk.text}".casefold()))
+            for term in terms:
+                self._graph_terms.setdefault(term, set()).add(index)
         self._embeddings = self._load_or_build_embeddings()
 
     def _content_hash(self) -> str:
@@ -133,7 +150,9 @@ class LocalVectorIndex:
         return h.hexdigest()
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        resp = _EMBED_BREAKER.call(
+            lambda: self._client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+        )
         return [d.embedding for d in resp.data]
 
     def _load_or_build_embeddings(self) -> np.ndarray:
@@ -149,9 +168,37 @@ class LocalVectorIndex:
         return np.array(vectors, dtype=np.float32)
 
     def search(self, query: str, top_k: int = 4) -> list[ScoredChunk]:
-        query_vec = np.array(self._embed([query])[0], dtype=np.float32)
+        fingerprint = self._query_cache.fingerprint(EMBEDDING_MODEL, query.strip().casefold())
+        cached = self._query_cache.get(fingerprint)
+        if isinstance(cached, list):
+            query_vec = np.array(cached, dtype=np.float32)
+            emit_metric("rag_embedding_cache_hit", query_length=len(query))
+        else:
+            query_vec = np.array(self._embed([query])[0], dtype=np.float32)
+            self._query_cache.set(fingerprint, query_vec.tolist())
         sims = self._cosine_sim(self._embeddings, query_vec)
-        top_idx = np.argsort(-sims)[:top_k]
+        top_idx = list(np.argsort(-sims)[:top_k])
+        if os.environ.get("AGENTIC_RAG_RETRIEVAL_MODE", "vector").casefold() in {
+            "graph",
+            "lightrag",
+            "graphrag",
+            "pike-rag",
+        }:
+            query_terms = set(re.findall(r"[a-z0-9_가-힣]{3,}", query.casefold()))
+            related: set[int] = set(top_idx)
+            for term in query_terms:
+                related.update(self._graph_terms.get(term, set()))
+            top_idx = sorted(
+                related,
+                key=lambda index: float(sims[index])
+                + 0.05
+                * len(
+                    query_terms
+                    & set(re.findall(r"[a-z0-9_가-힣]{3,}", self.chunks[index].text.casefold()))
+                ),
+                reverse=True,
+            )[:top_k]
+            emit_metric("rag_graph_retrieval", candidates=len(related), returned=len(top_idx))
         return [ScoredChunk(chunk=self.chunks[i], score=float(sims[i])) for i in top_idx]
 
     @staticmethod
