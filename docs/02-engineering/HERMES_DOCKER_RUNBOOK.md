@@ -168,6 +168,50 @@ docker compose --profile dashboard up -d
 
 ---
 
+## 4-3. 로그인 (컨테이너별 1회)
+
+모델은 API Key 가 아니라 **Nous Portal 로그인**을 쓴다. 데이터 디렉터리를
+부서별로 갈랐으므로 **자격증명도 부서별로 따로**다.
+
+### 방법 A — 이미 로그인된 네이티브 설치본이 있으면 (가장 쉽다)
+
+```powershell
+# %LOCALAPPDATA%\hermes\auth.json 을 각 부서 디렉터리로 복사
+Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\auth.json"
+```
+
+브라우저·승인 없이 즉시 인식된다(2026-08-02 실측 - `hermes portal status` →
+`Auth: ✓ logged in`, 실제 chat 응답 확인).
+
+⚠ 이것은 **같은 계정 토큰을 복사**하는 것이라 '부서별 저장소 분리'는 되지만
+'부서별 신원 분리'는 아니다. 부서마다 다른 계정·요금제를 쓸 계획이면 방법 B로
+각각 로그인한다. 토큰 파일은 git 에 올라가지 않는다(디렉터리 자체가 저장소 밖).
+
+### 방법 B — 새로 로그인 (기기 코드 방식)
+
+```powershell
+docker exec -it hedgefund-research-hermes hermes portal login
+```
+
+URL 과 코드(`XXXX-XXXX`)가 출력된다. 브라우저에서 그 URL 을 열고 코드를 확인해
+승인하면 터미널이 폴링으로 감지해 끝난다. **승인 전까지 터미널을 닫지 않는다.**
+컨테이너는 브라우저를 못 열어 "Could not open browser automatically" 가 뜨는데
+정상이다.
+
+### 확인
+
+```bash
+docker exec hedgefund-research-hermes hermes portal status          # Auth: ✓ logged in
+docker exec hedgefund-research-hermes hermes -p research-department \
+  chat -q "한 문장으로: 당신의 역할과 만들면 안 되는 산출물은?"
+```
+
+실측 응답(2026-08-02): "…트레이딩 부서에 증거와 테제를 제공하는 역할이며,
+절대로 매수/매도 방향이나 포지션 크기 같은 실제 거래 결정을 산출해서는 안
+됩니다." — RES-00 경계가 그대로 나오면 Profile 이 물린 것이다.
+
+---
+
 ## 5. 모델·과금
 
 Profile 8개 모두 `provider: nous` / `poolside/laguna-s-2.1:free`다. 무료 티어이며
@@ -202,6 +246,10 @@ Bedrock Claude(TECH_STACK_DECISIONS.md의 목표 Gateway)로 옮기는 것은 �
 - Tool Gateway 부재 — `tool_allowlist`가 선언으로만 존재(위 1절)
 - 나머지 6개 본부 컨테이너 미생성 (담당자별, 4-2절 절차)
 - 부서 간 `serve` 엔드포인트 미개방 — 인증 설정이 선행(4-2절)
+- 부서별 **신원** 분리 미완 — 지금은 한 계정 토큰을 두 부서가 공유(4-3절 A)
+- 리서치 두 컨테이너 모두 `tirith security scanner enabled but not available`
+  경고 — 명령 스캔이 패턴 매칭으로 떨어진다. 에이전트에게 셸을 주지 않는
+  현재 구성에서는 영향이 없지만, 도구를 붙일 때 다시 본다.
 - 대시보드 인증 미설정 (각자 1회 필요)
 - 리서치 Profile ↔ `scripts.py` 파이프라인 호출 배선 미구현 —
   현재 Hermes는 부서 페르소나로 대화만 가능하고 우리 LangGraph 파이프라인을
