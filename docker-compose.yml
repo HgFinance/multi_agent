@@ -283,37 +283,64 @@ services:
   #       Version·Tool 권한·Memory 가 달라 **Department Backend Image 에 설치하지
   #       않는다.** 공식 Image 를 별도 Container 로 띄운다.
   #
-  # ▶ v1 은 런타임 1개가 부서 Profile 8개를 호스팅한다.
-  #   계획서의 목표는 부서별 Container(`research-hermes` 등) 분리지만, 그건
-  #   Credential·Memory Namespace 를 부서별로 쪼갠다는 뜻이라 데이터 디렉터리
-  #   분리가 선행돼야 한다. 지금 나누면 이름만 8개고 자격은 하나라 분리된
-  #   척이 된다 - v1 은 그 척을 하지 않고 하나로 두고 명시한다.
+  # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)
+  #   Credential·Memory Namespace 분리는 이름이 아니라 저장소 분리다.
+  #   컨테이너만 쪼개고 /opt/data 를 공유하면 한 부서의 세션·기억·자격이 옆
+  #   부서에서 그대로 보인다 - 분리된 척이 된다. 그래서 각 컨테이너는
+  #   `~/.hermes-<부서>` 를 따로 마운트하고, 그 안에는 자기 Profile 하나만 둔다.
+  #   HERMES_HOME=/opt/data 는 이미지 기본값이라 마운트만 갈면 분리가 끝난다.
+  #
+  # ▶ 여기 있는 것은 재일 소유 2개 부서뿐이다. 나머지 6개는 같은 형태로 각
+  #   담당자가 추가한다(도현: trading/accounting, 동규: risk/qa, 영주: ceo/hr).
+  #   담당자 표는 CLAUDE.md - 남의 본부 컨테이너를 대신 만들지 않는다.
   #
   # ▶ 데이터 경로 함정 (2026-08-02 실측)
   #   Windows 네이티브 설치본은 %LOCALAPPDATA%\hermes 를 쓰지만 컨테이너는
-  #   ${USERPROFILE}/.hermes 를 마운트한다 - **서로 다른 디렉터리다.**
-  #   둘을 섞으면 프로필이 한쪽에만 생겨 "분명 만들었는데 없다"가 된다.
-  #   도커를 기준으로 삼고, 동기화 스크립트는 HERMES_HOME 으로 맞춘다:
-  #     HERMES_HOME=~/.hermes ./scripts/sync_hermes_profiles.sh push
-  #   (~/.hermes 는 OneDrive 동기화 대상 밖이라 DB 손상 위험이 없다)
-  hermes:
+  #   ${USERPROFILE}/.hermes* 를 마운트한다 - **서로 다른 디렉터리다.**
+  #   섞으면 "분명 profile 을 만들었는데 목록에 없다"가 된다. 동기화는
+  #     HERMES_HOME=~/.hermes-research-department ./scripts/sync_hermes_profiles.sh push
+  #   처럼 부서 디렉터리를 명시해서 돌린다(스크립트가 부서별 경로를 자동 탐색).
+  #
+  # ▶ 부서 간 호출(계획서 3.3 "본부 간 호출은 HTTP")은 `hermes serve` 가
+  #   담당한다. 다만 2026-06 하드닝 이후 **비-loopback 바인딩은 인증 없이는
+  #   열리지 않는다**(--insecure 는 no-op 이 됐다). 컨테이너 간 통신은
+  #   0.0.0.0 바인딩이 필요하므로 인증 설정이 선행 조건이다 - 이는 제약이
+  #   아니라 권한 경계를 인증으로 강제하는 것이라 그대로 따른다.
+  #   절차는 docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4절.
+  research-hermes:
     image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-hermes
+    container_name: hedgefund-research-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes:/opt/data
+      - ${USERPROFILE}/.hermes-research-department:/opt/data
     environment:
       HERMES_UID: 10000
       HERMES_GID: 10000
-      # Profile 의 env: 블록이 참조하는 키만 넣는다 - 부서마다 배정이 다르므로
-      # (CLAUDE.md) 아무 키나 넣지 않는다. 없는 키는 빈 값으로 통과시킨다.
+      # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
+      # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    mem_limit: 2g
-    mem_reservation: 256m
-    cpus: 2.0
-    pids_limit: 512
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  quant-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-quant-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
     stop_grace_period: 20s
 
   # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
@@ -340,10 +367,13 @@ services:
     restart: unless-stopped
     profiles: ["dashboard"]
     depends_on:
-      - hermes
+      - research-hermes
     command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
+    # 대시보드는 **한 부서의 데이터만** 본다 - 부서 분리를 지켜야 하므로
+    # 여러 부서를 한 화면에 모으지 않는다. 다른 부서를 보려면 그 부서의
+    # 디렉터리를 마운트한 대시보드를 따로 띄운다(포트도 따로).
     volumes:
-      - ${USERPROFILE}/.hermes:/opt/data
+      - ${USERPROFILE}/.hermes-research-department:/opt/data
     environment:
       HERMES_UID: 10000
       HERMES_GID: 10000

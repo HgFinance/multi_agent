@@ -20,6 +20,15 @@ SRC_ROOT="$REPO_ROOT/departments"
 DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
 [[ -d "$DEST_ROOT" ]] || DEST_ROOT="$HOME/AppData/Local/hermes/profiles"
 
+# 2026-08-02 (재일): 부서별 Hermes Container 로 가면서 데이터 디렉터리도 부서별로
+# 갈렸다(docker-compose.yml 의 ~/.hermes-<부서>). Credential·Memory Namespace 분리가
+# 목적이므로 한 곳에 몰아넣으면 분리가 무의미해진다. 부서별 경로가 있으면 그쪽을
+# 쓰고, 없으면 기존 공용 경로로 떨어진다 - 아직 안 옮긴 부서도 그대로 동작한다.
+dest_for() {
+  local dept="$1" per_dept="${HERMES_HOME_PREFIX:-$HOME/.hermes}-$1/profiles/$1"
+  if [[ -d "$per_dept" ]]; then echo "$per_dept"; else echo "$DEST_ROOT/$dept"; fi
+}
+
 # dept -> departments/<n>/hermes 매핑. 순서는 CLAUDE.md 담당자 표와 무관하며
 # REPOSITORY_DEPARTMENT_STRUCTURE.md 2절 조직 번호를 따른다.
 DEPARTMENTS=(
@@ -60,14 +69,14 @@ case "$MODE" in
     echo "Syncing repo -> ~/.hermes/profiles (config.yaml, SOUL.md only)"
     for entry in "${DEPARTMENTS[@]}"; do
       dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$SRC_ROOT/$folder/hermes" "$DEST_ROOT/$dept"
+      sync_one "$dept" "$SRC_ROOT/$folder/hermes" "$(dest_for "$dept")"
     done
     ;;
   pull)
     echo "Syncing ~/.hermes/profiles -> repo (config.yaml, SOUL.md only)"
     for entry in "${DEPARTMENTS[@]}"; do
       dept="${entry%%:*}"; folder="${entry##*:}"
-      sync_one "$dept" "$DEST_ROOT/$dept" "$SRC_ROOT/$folder/hermes"
+      sync_one "$dept" "$(dest_for "$dept")" "$SRC_ROOT/$folder/hermes"
     done
     echo "Review with 'git diff' before committing."
     ;;
