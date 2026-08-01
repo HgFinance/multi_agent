@@ -304,27 +304,39 @@ def _embed_query(text: str, *, base: Optional[str] = None) -> str:
 def evidence_search(
     q: str = Query(..., min_length=1, description="자연어 질의 (공백만이면 422)"),
     k: int = Query(SEARCH_K_DEFAULT, ge=1, le=SEARCH_K_MAX, description="상위 k건"),
+    as_of: Optional[datetime] = Query(
+        None, description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)"),
 ):
     """공시 원문 청크 코사인 상위 k. 읽기 전용 GET - 세션도 read-only 다.
 
-    ⚠ PIT(as_of) 파라미터가 없다 - 전체 코퍼스 대상 리서치 탐색용이다.
-    백테스트 재현에 쓰려면 다른 Evidence Endpoint 처럼 observed_at 필터가
-    필요하다(후속). 정렬 연산(<=>)은 HNSW 인덱스를 태운다.
+    as_of 없으면 전체 코퍼스 탐색(리서치용), 있으면 observed_at <= as_of 로
+    가시성을 자른 PIT 검색(재현용) - 다른 Evidence Endpoint 와 같은 규칙이다.
+    ⚠ 청크 observed_at 은 **인덱싱 시각**이다: 원문 자체는 그 전부터 Storage
+    에 있었을 수 있으므로 이 필터는 보수적(늦은) 가시성이다 - 미래를 당겨오지
+    않는 쪽으로만 틀린다. 정렬 연산(<=>)은 HNSW 인덱스를 태운다.
     """
+    if as_of is not None and as_of.tzinfo is None:
+        raise HTTPException(422, "as_of 는 timezone 이 있어야 한다 (PIT 9시간 오차 방지)")
     qvec = _embed_query(_require_query(q))
+    pit_cond = "" if as_of is None else "and c.observed_at <= %s"
+    params: tuple = (qvec, SEARCH_EXCERPT_CHARS)
+    if as_of is not None:
+        params += (as_of,)
+    params += (qvec, k)
     rows = _query(
-        """
+        f"""
         select c.document_version_id::text,
                c.metadata->>'title' as title,
                c.published_at,
+               c.observed_at,
                1 - (c.embedding <=> %s::extensions.vector) as cosine_sim,
                left(c.content, %s) as content
         from research.evidence_chunks c
-        where c.embedding is not null
+        where c.embedding is not null {pit_cond}
         order by c.embedding <=> %s::extensions.vector
         limit %s
         """,
-        (qvec, SEARCH_EXCERPT_CHARS, qvec, k),
+        params,
     )
     for r in rows:
         r["cosine_sim"] = round(float(r["cosine_sim"]), 4)
@@ -385,6 +397,14 @@ def _check_search_rules():
     route = next(r for r in app.routes
                  if getattr(r, "path", None) == "/evidence/search")
     assert getattr(route, "methods", set()) == {"GET"}, "검색은 GET 전용이다"
+
+    # PIT: naive as_of 는 422 - 다른 Evidence Endpoint 와 같은 규칙 (임베딩
+    # 호출 전에 거부되므로 Ollama 없이 검증 가능)
+    try:
+        evidence_search(q="유상증자", k=1, as_of=datetime(2026, 8, 1, 9, 0))
+        raise AssertionError("naive as_of 가 통과했다")
+    except HE as e:
+        assert e.status_code == 422 and "timezone" in str(e.detail)
 
     # Ollama 불가 -> 503 (빈 결과 위장 금지). 닫힌 로컬 포트라 즉시 거부되고
     # 외부 네트워크·실행 중인 서비스가 필요 없다.

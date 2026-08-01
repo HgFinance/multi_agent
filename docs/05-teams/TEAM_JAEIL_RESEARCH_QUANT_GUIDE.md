@@ -1234,6 +1234,15 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
       Manifest·Partition 해시 + backtest_runner.py 가 로드 시 해시 재대조·불일치 거부,
       input_hash unique 로 같은 실험 중복 등록 차단 실측. 유니버스 생존 편향은
       SURVIVORSHIP_BIAS_DECLARED 로 선언 - 과거 구성 이력 확보가 후속)
+      → **소스 조사 완료 (2026-08-01)**: KRX 정보데이터시스템(data.krx.co.kr)이
+      ① 지수 > 구성종목 화면에서 **과거 일자 시점 조회**를 지원하고(웹 JSON
+      엔드포인트, 무키 - krx_public_notice 와 같은 공개 화면 계열) ② "주가지수
+      공지" 게시판에 정기변경(6월 옵션만기 익일, 편입·편출 목록) 공고가 남는다.
+      설계 초안: 분기 시점 조회로 2024-01~현재 구성 시계열을 백필해
+      quant.universe_versions 에 as-of 버전으로 적재 → Dataset v2 는 각 날짜의
+      실제 구성만 쓴다(정기변경일 사이는 공지 기반 보간). 공개 화면 이용 약관은
+      Registry 등재 시 krx_public_notice 전례로 검토. KRX Open API(키 보유,
+      NOT_AUTHORIZED)가 승인되면 그 경로가 정식이다.
 - [x] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
       → 2026-08-01 실증: `strategy.candidates`(REJECTED) → `strategy.strategies`(MOM20_SMOKE)
       → `quant.experiments`(config·code_version·seed·cost krx-cost-v1) → `quant.dataset_manifests`
