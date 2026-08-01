@@ -30,7 +30,7 @@ import os
 import re
 import sys
 import urllib.request
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -328,7 +328,46 @@ def run_research_department(symbol: str) -> dict:
     out = build_pipeline().invoke({"symbol": symbol})
     if out.get("halted"):
         return {"symbol": symbol, "verdict": "HALTED", "reason": out["halted"]}
-    return out["packet"]
+    packet = out["packet"]
+    packet["_analyst_verdicts"] = {          # 리포트용 메타 (Packet 본문과 분리)
+        "sentiment": (out.get("sentiment") or {}).get("verdict"),
+        "technical": (out.get("technical") or {}).get("verdict"),
+        "fundamental": (out.get("fundamental") or {}).get("verdict"),
+        "regime": (out.get("regime") or {}).get("verdict"),
+        "microstructure": (out.get("microstructure") or {}).get("verdict"),
+    }
+    return packet
+
+
+def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
+    """Packet 을 그대로 옮겨 적는 순수 함수 - 동규님 리스크본부 리포트 패턴
+    (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
+    LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
+    nc = packet.get("numeric_check") or {}
+    verdicts = packet.get("_analyst_verdicts") or {}
+    lines = [
+        "# 리서치본부 — Research Packet (결정론적 생성, LLM 자유 서술 아님)",
+        "",
+        "| 항목 | 값 |",
+        "|---|---|",
+        f"| **symbol** | `{packet.get('symbol')}` |",
+        f"| **evidence_quality** | **{packet.get('evidence_quality')}** |",
+        f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
+        f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |",
+        f"| **분석가 판정** | " + " · ".join(
+            f"{k}={v}" for k, v in verdicts.items() if v) + " |",
+        f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
+        "",
+        "## Thesis", "", str(packet.get("thesis", "")), "",
+    ]
+    for title, key in (("사실 (facts)", "facts"),
+                       ("해석 (interpretation)", "interpretation"),
+                       ("촉매 (catalysts)", "catalysts"),
+                       ("무효화 조건 (invalidation)", "invalidation")):
+        lines += [f"## {title}", ""]
+        lines += [f"- {x}" for x in (packet.get(key) or [])] or ["- (없음)"]
+        lines += [""]
+    return "\n".join(lines)
 
 
 # ── 자체 점검 (LLM·API 없음) ───────────────────────────────────────────────
@@ -401,6 +440,26 @@ def _check_evidence_module():
     eb._check_bundle_contract()
 
 
+def _check_packet_report_renderer():
+    """리포트 렌더러 순수성 - 같은 Packet 이면 같은 MD, 수치 불일치는 ⚠ 로 드러난다."""
+    pk = {"symbol": "000660", "evidence_quality": "sufficient",
+          "thesis": "테스트 논지", "facts": ["사실 1"], "interpretation": ["해석 1"],
+          "catalysts": [], "invalidation": ["조건 1"],
+          "numeric_check": {"ok": True, "checked": 3, "checked_counts": 1,
+                            "unmatched": [], "unmatched_counts": []},
+          "_analyst_verdicts": {"sentiment": "SCORED", "technical": "BEARISH"}}
+    a = _render_packet_md(pk, now="2026-08-01T00:00:00+00:00")
+    b = _render_packet_md(pk, now="2026-08-01T00:00:00+00:00")
+    assert a == b, "같은 입력이 다른 리포트를 냈다 - 순수성 위반"
+    assert "000660" in a and "테스트 논지" in a and "- 사실 1" in a
+    assert "통과" in a and "sentiment=SCORED" in a
+    assert "- (없음)" in a                      # catalysts 빈 목록 표기
+    bad = dict(pk, numeric_check={"ok": False, "checked": 2, "checked_counts": 0,
+                                  "unmatched": [55.5], "unmatched_counts": []})
+    assert "⚠ 불일치" in _render_packet_md(bad, now="2026-08-01T00:00:00+00:00")
+    print("  Packet 리포트 렌더러     OK")
+
+
 def _check_analyst_conflict_and_numeric_guard():
     """상충 보존 지시가 프롬프트에 실제로 들어가고, 서술 속 창작 수치가
     결정론으로 적발되는지 - 다각 분석 통합의 두 가드."""
@@ -440,6 +499,12 @@ if __name__ == "__main__":
         print(f"{PIPELINE_VERSION} 실행: {sym}")
         packet = run_research_department(sym)
         print(json.dumps(packet, ensure_ascii=False, indent=1))
+        # 결정론 MD 리포트 저장 (동규님 리스크본부 패턴 채택, 2026-08-01)
+        rep_dir = _BASE / "reports"
+        rep_dir.mkdir(exist_ok=True)
+        rp = rep_dir / f"research_packet_{sym}_{datetime.now(KST):%Y%m%d_%H%M%S}.md"
+        rp.write_text(_render_packet_md(packet), encoding="utf-8")
+        print(f"리포트 저장: {rp.relative_to(_BASE)}")
         raise SystemExit(0)
 
     print(f"{PIPELINE_VERSION} 자체 점검 (LLM·API 없음)")
@@ -449,4 +514,5 @@ if __name__ == "__main__":
     _check_price_context_injection()
     _check_evidence_module()
     _check_analyst_conflict_and_numeric_guard()
-    print("본부 파이프라인 7개 영역 통과. 실행은 --run <종목>")
+    _check_packet_report_renderer()
+    print("본부 파이프라인 8개 영역 통과. 실행은 --run <종목>")
