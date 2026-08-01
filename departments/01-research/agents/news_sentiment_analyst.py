@@ -164,7 +164,12 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
     prompt = (f"Stock: {symbol}\nArticles ({len(payload)}):\n"
               + json.dumps(payload, ensure_ascii=False, indent=1))
 
-    call = llm or (_ollama_call if LLM_BACKEND == "ollama" else _anthropic_call)
+    if llm is not None:
+        call = llm
+    elif LLM_BACKEND == "ollama":
+        call = _ollama_call_structured if GRAMMAR_DECODE else _ollama_call
+    else:
+        call = _anthropic_call
     last_err = None
     for attempt in range(2):
         text = call(_SYSTEM, prompt if attempt == 0 else
@@ -184,6 +189,50 @@ def judge_articles(symbol: str, articles: list[dict], *, llm=None) -> JudgementB
         except (ValidationError, ValueError) as e:
             last_err = str(e)[:200]
     raise RuntimeError(f"LLM 판정이 Schema 를 두 번 어겼다: {last_err}")
+
+
+# 스키마 강제 디코딩 옵트인 (2026-08-01). 감성 규율에서 4모델(EXAONE·gemma3·
+# kanana·8b)이 연속 탈락한 원인은 "모델이 스키마를 지켜주길 비는" 구조였다 -
+# Ollama /api/chat 의 format 에 JSON Schema 를 주면 **디코더가 구조를 강제**한다.
+# 판정 내용(환각 인용·점수)은 여전히 verify 가 본다 - 이 장치는 구조만 보증.
+# 검증된 qwen 경로와의 상호작용(think 모델)이 미검증이라 기본 OFF.
+GRAMMAR_DECODE = os.environ.get("NEWS_SENTIMENT_GRAMMAR", "0") == "1"
+
+_JUDGEMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "judgements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "sentiment": {"type": "integer", "minimum": -1, "maximum": 1},
+                    "salience": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reason": {"type": "string", "maxLength": 200},
+                },
+                "required": ["document_id", "sentiment", "salience", "reason"],
+            },
+        }
+    },
+    "required": ["judgements"],
+}
+
+
+def _ollama_call_structured(system: str, user: str) -> str:
+    """Ollama 네이티브 /api/chat + format=JSON Schema (구조 강제 디코딩)."""
+    req = urllib.request.Request(
+        OLLAMA_BASE + "/api/chat", method="POST",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps({
+            "model": MODEL, "stream": False,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "options": {"temperature": 0.1},
+            "format": _JUDGEMENT_SCHEMA,
+        }).encode())
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return json.loads(r.read())["message"]["content"]
 
 
 def _ollama_call(system: str, user: str) -> str:
