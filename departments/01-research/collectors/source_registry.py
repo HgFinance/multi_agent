@@ -393,6 +393,30 @@ SOURCES: tuple[SourceSpec, ...] = (
              "Registry·삭제 Compliance 요건은 가이드 DoD 뉴스 항목 참고",
     ),
     SourceSpec(
+        source_id="bluesky",
+        market_scopes=(MarketScope.KR_MARKET, MarketScope.FOREIGN_MARKET),
+        display_name="Bluesky (AT Protocol) 소셜 신호",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 실측 판정 2026-08-01 (재일님 "무료로 ㄱㄱ" - X 무료 대안 실험):
+        #   기술 검증 통과 - Jetstream 파이어호스(무인증 공개 스트림) 연결·필터
+        #   관통 실측(42포스트/초, 검색 API 는 무인증 403 - 계정+앱 패스워드
+        #   필요). 그러나 **한국 금융 담론이 사실상 없다**: 90초 전수 표본에서
+        #   한국어 ~64,000건/일 규모 중 금융 키워드 1건(그마저 오탐).
+        disabled_reason=(
+            "합법·무료 경로는 확보(Jetstream 무인증)했으나 실측상 한국 금융 "
+            "담론 규모가 사실상 0 - 상주 수집 실익 없음. 재검토 조건: 한국 "
+            "금융 커뮤니티 성장 실측 또는 해외 종목 소셜 신호 필요 시 "
+            "(그 경우 영어 담론은 유의미할 수 있음 - 재프로브 후 결정)"
+        ),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        normalized_target="research.documents",
+        doc_ref="Jetstream 프로브 실측 2026-08-01",
+        note="검색 API(searchPosts)는 무료 계정+앱 패스워드로 열 수 있다 - "
+             "표적 검색이 필요해지면 계정 생성은 재일님 몫",
+    ),
+    SourceSpec(
         source_id="naver_apihub",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="NAVER API HUB",
