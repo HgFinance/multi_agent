@@ -71,11 +71,12 @@ METRIC_LEXICON: dict[str, dict[str, list[str]]] = {
     # RES-07 regime readout: A/D 비율 vs SMA20 상회 비율 (사례 2의 혼동쌍)
     "ad_ratio": {
         "allowed": ["A/D", "등락 비", "상승/하락 비"],
-        "forbidden": ["상회"],
+        # v2(2026-08-01): 실측 미탐 - ad_ratio 5.80 을 "상승 종목 비율"이라 서술
+        "forbidden": ["상회", "상승 종목 비율"],
     },
     "ad_ratio_5d_avg": {
         "allowed": ["A/D", "등락 비", "상승/하락 비"],
-        "forbidden": ["상회"],
+        "forbidden": ["상회", "상승 종목 비율"],
     },
     "ad_ratio_20d_avg": {
         "allowed": ["A/D", "등락 비", "상승/하락 비"],
@@ -87,15 +88,15 @@ METRIC_LEXICON: dict[str, dict[str, list[str]]] = {
     },
     "above_sma20_pct": {
         "allowed": ["상회", "SMA20 위"],
-        "forbidden": ["A/D", "등락 비"],
+        "forbidden": ["A/D", "등락 비", "상승 종목 비율"],
     },
     "above_sma20_pct_5d_avg": {
         "allowed": ["상회", "SMA20 위"],
-        "forbidden": ["A/D", "등락 비"],
+        "forbidden": ["A/D", "등락 비", "상승 종목 비율"],
     },
     "above_sma20_pct_20d_avg": {
         "allowed": ["상회", "SMA20 위"],
-        "forbidden": ["A/D", "등락 비"],
+        "forbidden": ["A/D", "등락 비", "상승 종목 비율"],
     },
     # RES-06 microstructure readout: forbidden 없음 - bp 지표의 오서술은 어구가
     # 아니라 키 이름의 p50/p90 리터럴(사례 3) - check_percentile_literal 담당
@@ -340,6 +341,20 @@ def _check_same_sentence_rule():
     print("  같은 문장 판정·소수점 분리 규칙      OK")
 
 
+def _check_v2_observed_misses():
+    """v2 사전 확장 - 실측 미탐 2건(상회·A/D 를 '상승 종목 비율'로) 재현 적발."""
+    r = {"above_sma20_pct_5d_avg": 22.11, "ad_ratio": 5.8039}
+    v = audit_narrative("직전 5일 평균 상승 종목 비율은 22.11%입니다.", r)
+    assert any(x["metric"] == "above_sma20_pct_5d_avg" and
+               x["forbidden_hit"] == "상승 종목 비율" for x in v), v
+    v2 = audit_narrative("상승 종목 비율 5.80배를 기록했습니다.", r)
+    assert any(x["metric"] == "ad_ratio" for x in v2), v2
+    # 정당한 사용은 통과 - advancer_share 계열이 있으면 그 키에 매칭돼 구제
+    ok = audit_narrative("SMA20 상회 비율은 22.11%입니다.", r)
+    assert not ok, ok
+    print("  v2 확장(실측 미탐 재현)  OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -350,4 +365,5 @@ if __name__ == "__main__":
     _check_normal_narration_passes()
     _check_no_number_passes()
     _check_same_sentence_rule()
-    print("narrative-guard 6개 영역 통과. 배선: technical/sector_regime verify()")
+    _check_v2_observed_misses()
+    print("narrative-guard 7개 영역 통과. 배선: technical/sector_regime verify()")

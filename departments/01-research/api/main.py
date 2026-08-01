@@ -338,10 +338,14 @@ def evidence_search(
         raise HTTPException(422, "as_of 는 timezone 이 있어야 한다 (PIT 9시간 오차 방지)")
     qvec = _embed_query(_require_query(q))
     pit_cond = "" if as_of is None else "and c.observed_at <= %s"
+    # 같은 문서의 인접 청크가 상위를 도배하는 실측 한계 - 후보를 3배로 받아
+    # 문서당 최고 유사도 청크 1건만 남긴다(결정론 후처리 - DISTINCT ON 은
+    # HNSW 정렬과 충돌한다)
+    fetch_n = min(k * 3, 60)
     params: tuple = (qvec, SEARCH_EXCERPT_CHARS)
     if as_of is not None:
         params += (as_of,)
-    params += (qvec, k)
+    params += (qvec, fetch_n)
     rows = _query(
         f"""
         select c.document_version_id::text,
@@ -359,7 +363,22 @@ def evidence_search(
     )
     for r in rows:
         r["cosine_sim"] = round(float(r["cosine_sim"]), 4)
-    return rows
+    return _dedupe_by_doc(rows, k)
+
+
+def _dedupe_by_doc(rows: list[dict], k: int) -> list[dict]:
+    """문서당 최고 유사도 청크 1건 - 입력은 유사도 내림차순이 전제(순수 함수)."""
+    seen: set = set()
+    out = []
+    for r in rows:
+        doc = r.get("document_version_id")
+        if doc in seen:
+            continue
+        seen.add(doc)
+        out.append(r)
+        if len(out) >= k:
+            break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +517,13 @@ def _check_search_rules():
     except HE as e:
         assert e.status_code == 503 and "Ollama" in str(e.detail), \
             f"503+사유가 아니다: {e.status_code} {e.detail}"
+    # 문서당 중복 제거 - 유사도 내림차순 입력에서 문서별 최고 1건, k 에서 끊김
+    rows = [{"document_version_id": "d1", "cosine_sim": 0.9},
+            {"document_version_id": "d1", "cosine_sim": 0.8},
+            {"document_version_id": "d2", "cosine_sim": 0.7},
+            {"document_version_id": "d3", "cosine_sim": 0.6}]
+    dd = _dedupe_by_doc(rows, 2)
+    assert [r["document_version_id"] for r in dd] == ["d1", "d2"] and dd[0]["cosine_sim"] == 0.9
     print("  검색 질의·503 규칙       OK")
 
 

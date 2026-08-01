@@ -164,19 +164,43 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
 
     equity_test = result.equity[warmup_len - 1:]     # 기준점 = 초기자본
     traded = sum(abs(f.quantity * f.price) for f in result.fills)
-    return compute_metrics(equity_test, result.fills, capital, traded)
+    m = compute_metrics(equity_test, result.fills, capital, traded)
+    # 판정 제외 규칙(fragility_summary min_test_days)의 재료 - 창 크기를 싣는다
+    m["test_days"] = w.n_test_days
+    m["partial_window"] = w.partial
+    return m
 
 
 # ---------------------------------------------------------------------------
 # Fragility 판정 - 결정론 (LLM 없음)
 # ---------------------------------------------------------------------------
 
-def fragility_summary(window_metrics: list[tuple[str, dict]]) -> tuple[dict, list[str], str]:
-    """창별 지표 -> (요약 통계, 위반 플래그, 판정). 통계만 DB 에 남는다."""
+# 판정에 넣을 최소 시험 거래일. 실측(2026-08-01): 2026H2 부분창(20거래일,
+# -46.71%)이 5창 요약을 지배해 FRAGILE 판정을 사실상 혼자 결정했다 - 표본
+# 미달 창은 **기록은 남기되 판정에서 제외**한다. 값 40 = 정상 반기(~120
+# 거래일)의 1/3, 월초 리밸런스 2회 이상이 보장되는 최소 구간.
+MIN_JUDGE_TEST_DAYS = 40
+
+
+def fragility_summary(window_metrics: list[tuple[str, dict]],
+                      *, min_test_days: int = MIN_JUDGE_TEST_DAYS
+                      ) -> tuple[dict, list[str], str]:
+    """창별 지표 -> (요약 통계, 위반 플래그, 판정). 통계만 DB 에 남는다.
+
+    metrics 에 test_days 가 있으면 min_test_days 미달 창을 판정에서 뺀다
+    (없으면 구버전 호환으로 포함). 제외 수는 n_excluded_short 로 남는다 -
+    조용한 절단 금지.
+    """
     assert window_metrics, "창이 0개면 판정할 수 없다"
-    rets = [m["total_return"] for _, m in window_metrics]
-    sharpes = [m["sharpe_rf0"] for _, m in window_metrics]
-    mdds = [m["max_drawdown"] for _, m in window_metrics]
+    judgeable = [(l, m) for l, m in window_metrics
+                 if m.get("test_days") is None or m["test_days"] >= min_test_days]
+    excluded = [l for l, m in window_metrics
+                if not (m.get("test_days") is None or m["test_days"] >= min_test_days)]
+    assert judgeable, (f"판정 가능한 창이 없다 (전부 {min_test_days}일 미만) - "
+                       f"표본 없이 판정하지 않는다")
+    rets = [m["total_return"] for _, m in judgeable]
+    sharpes = [m["sharpe_rf0"] for _, m in judgeable]
+    mdds = [m["max_drawdown"] for _, m in judgeable]
     n = len(rets)
     pos_ratio = sum(1 for r in rets if r > 0) / n
     worst_mdd = min(mdds)
@@ -187,6 +211,7 @@ def fragility_summary(window_metrics: list[tuple[str, dict]]) -> tuple[dict, lis
         sharpe_std = 0.0
     stats = {
         "n_windows": n,
+        "n_excluded_short": len(excluded),   # 표본 미달로 판정 제외된 창 수
         "positive_window_ratio": round(pos_ratio, 4),
         "worst_window_return": round(min(rets), 6),
         "mean_window_return": round(sum(rets) / n, 6),
@@ -306,7 +331,7 @@ def register_and_validate(name: str, version: str) -> int:
         with conn.cursor() as cur:
             for label, m in per_window + [("SUMMARY", stats)]:
                 for k, v in m.items():
-                    if isinstance(v, (int, float)) and v is not None:
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v is not None:  # bool 은 int 서브클래스 - DB numeric 에 못 들어간다 (실측)
                         cur.execute(
                             """
                             insert into quant.experiment_metrics
@@ -474,6 +499,26 @@ def _check_fragility_rules():
     mu = (3.0 - 1.0 - 0.5) / 3
     exp_std = math.sqrt(sum((s - mu) ** 2 for s in (3.0, -1.0, -0.5)) / 2)
     assert abs(stats2["sharpe_std"] - round(exp_std, 4)) < 1e-9
+
+    # 표본 미달 창 제외 (2026H2 실측: 20거래일 부분창이 판정을 지배했다)
+    mixed = [("A", {"total_return": 0.05, "sharpe_rf0": 1.0,
+                    "max_drawdown": -0.05, "test_days": 120}),
+             ("B", {"total_return": 0.06, "sharpe_rf0": 1.1,
+                    "max_drawdown": -0.06, "test_days": 118}),
+             ("SHORT", {"total_return": -0.47, "sharpe_rf0": -7.8,
+                        "max_drawdown": -0.47, "test_days": 20})]
+    s3, f3, v3 = fragility_summary(mixed)
+    assert v3 == "ROBUST" and s3["n_windows"] == 2 and s3["n_excluded_short"] == 1
+    assert s3["worst_window_mdd"] == -0.06      # 부분창 수치가 판정에 안 들어감
+    try:
+        fragility_summary([("S", {"total_return": 0.0, "sharpe_rf0": 0.0,
+                                  "max_drawdown": 0.0, "test_days": 5})])
+        raise AssertionError("전부 표본 미달인데 판정이 나왔다")
+    except AssertionError as e:
+        if "판정이 나왔다" in str(e):
+            raise
+    # test_days 없는 구버전 입력은 전부 판정 대상 (호환)
+    assert fragility_summary(good)[0]["n_excluded_short"] == 0
     print("  Fragility 판정(결정론)  OK")
 
 
