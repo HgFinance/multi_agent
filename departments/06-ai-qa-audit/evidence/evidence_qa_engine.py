@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -332,8 +334,20 @@ class EvidenceQaEngine:
         reason_codes: list[CheckFailureReason] = []
         findings: list[FindingDraft] = []
 
-        for claim in artifact.claims:
-            result, reason, failure = self._check_claim(claim, artifact, ctx)
+        max_workers = min(
+            max(1, int(os.environ.get("QA_CLAIM_CHECK_WORKERS", "4"))),
+            len(artifact.claims),
+        )
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="qa-claim") as pool:
+            evaluated = list(
+                pool.map(
+                    lambda claim: (claim, self._check_claim(claim, artifact, ctx)),
+                    artifact.claims,
+                )
+            )
+
+        # executor.map preserves input order, so IDs and aggregate decisions remain reproducible.
+        for claim, (result, reason, failure) in evaluated:
             claim_checks.append(ClaimCheck(
                 claim_check_id=uuid4(),
                 artifact_version_id=artifact.artifact_version_id,

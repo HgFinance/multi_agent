@@ -23,6 +23,7 @@ Token 발급 주체가 아직 미정이라(스펙 6절) 여기서 검증하지 �
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -35,10 +36,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-_ENGINE_DIR = Path(__file__).resolve().parent.parent / "engine"
+_RISK_DIR = Path(__file__).resolve().parent.parent
+_ENGINE_DIR = _RISK_DIR / "engine"
 _CONTRACTS_DIR = Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
-for _p in (_ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
+for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
 from contracts import OrderIntent  # noqa: E402
@@ -60,6 +62,12 @@ from trading_state_store import RedisTradingStateStore, TradingStateStoreError  
 
 
 # --- Request 모델 (RiskContext 데이터클래스 트리를 JSON에서 그대로 재구성) ------------------
+from risk_events.redis_event_bus import (
+    RedisEventPublisher,
+    RiskEventBusError,
+    decision_event_id,
+)
+from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
 
 
 class MandateScopeIn(BaseModel):
@@ -166,6 +174,68 @@ class ComplianceCheckRequest(BaseModel):
 app = FastAPI(title="Risk Domain API", version="v1")
 engine = RiskEngine()
 _state_store: RedisTradingStateStore | None = None
+_decision_repository: RiskDecisionRepository | None = None
+_event_publisher: RedisEventPublisher | None = None
+
+
+def _risk_decision_repository() -> RiskDecisionRepository | None:
+    """DATABASE_URL이 주입된 Domain Runtime에서만 Canonical DB를 사용한다."""
+
+    global _decision_repository
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        return None
+    if _decision_repository is None:
+        _decision_repository = RiskDecisionRepository.connect(dsn)
+    return _decision_repository
+
+
+def _risk_event_publisher() -> RedisEventPublisher | None:
+    """Risk→QA Stream publisher를 지연 생성한다."""
+
+    global _event_publisher
+    redis_url = os.environ.get("RISK_QA_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _event_publisher is None:
+        import redis
+
+        _event_publisher = RedisEventPublisher(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("RISK_QA_EVENT_STREAM", "risk-qa-events"),
+        )
+    return _event_publisher
+
+
+def _persist_risk_decision(case_id: str, trace_id: UUID, assessment) -> None:
+    """DB 기록과 Event 발행을 모두 마쳐야 Risk API가 성공한다."""
+
+    repository = _risk_decision_repository()
+    if repository is None:
+        return
+    risk_decision_id = repository.save(assessment)
+    publisher = _risk_event_publisher()
+    if publisher is None:
+        raise RiskEventBusError("Canonical Risk DB는 연결됐지만 Risk→QA Event Bus가 없습니다")
+    publisher.publish(
+        event_id=decision_event_id(
+            risk_request_id=assessment.risk_request_id,
+            input_hash=assessment.input_hash,
+            calculation_version=assessment.calculation_version,
+        ),
+        trace_id=trace_id,
+        payload={
+            "case_id": case_id,
+            "risk_decision_id": str(risk_decision_id),
+            "risk_request_id": str(assessment.risk_request_id),
+            "order_intent_id": str(assessment.decision.order_intent_id),
+            "decision": assessment.decision.verdict.value,
+            "approved_quantity": assessment.decision.approved_quantity,
+            "input_hash": assessment.input_hash,
+            "calculation_version": assessment.calculation_version,
+            "trace_id": str(trace_id),
+        },
+    )
 
 
 def _redis_store() -> RedisTradingStateStore:
@@ -195,6 +265,22 @@ def _on_trading_state_store_error(request, exc: TradingStateStoreError):
     )
 
 
+@app.exception_handler(RiskDecisionPersistenceError)
+def _on_risk_persistence_error(request, exc: RiskDecisionPersistenceError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
+@app.exception_handler(RiskEventBusError)
+def _on_risk_event_bus_error(request, exc: RiskEventBusError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
 @app.exception_handler(RequestValidationError)
 def _on_validation_error(request, exc: RequestValidationError):
     # 스펙 1.4 에러 봉투를 요청 스키마 검증 실패에도 그대로 적용 — FastAPI 기본 {"detail": [...]}
@@ -210,7 +296,9 @@ def _on_validation_error(request, exc: RequestValidationError):
 
 @app.post("/investment-cases/{case_id}/risk-check")
 def risk_check(case_id: str, body: RiskCheckRequest):
-    return engine.check_order(body.order_intent, body.context.to_context(), body.risk_request_id)
+    assessment = engine.check_order(body.order_intent, body.context.to_context(), body.risk_request_id)
+    _persist_risk_decision(case_id, body.order_intent.trace_id, assessment)
+    return assessment
 
 
 @app.get("/risk/v1/trading-state/{scope}")
@@ -244,6 +332,18 @@ def compliance_check(body: ComplianceCheckRequest):
     from src.graph import run_compliance_check  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
 
     return run_compliance_check(body.query, body.as_of, persona="compliance-policy-agent")
+
+
+@app.get("/risk/v1/observability/rag")
+def rag_observability():
+    from src.resilience import latency_summary
+
+    return {
+        "nodes": {
+            node: latency_summary(node)
+            for node in ("retrieve", "grade", "generate", "hallucination_check")
+        }
+    }
 
 
 if __name__ == "__main__":
