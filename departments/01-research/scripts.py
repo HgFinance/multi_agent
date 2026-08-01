@@ -323,12 +323,99 @@ def build_pipeline():
     return g.compile()
 
 
+def _node_models() -> dict:
+    """노드별 실사용 모델 - 각 에이전트 모듈의 MODEL 상수에서 직접 읽는다
+    (env 기본값을 여기 복제하면 배정 변경 시 어긋난다)."""
+    models = {"supervisor": SUPERVISOR_MODEL}
+    for node, mod in (("sentiment", "news_sentiment_analyst"),
+                      ("technical", "technical_analyst"),
+                      ("fundamental", "fundamental_analyst"),
+                      ("regime", "sector_regime_analyst"),
+                      ("microstructure", "microstructure_analyst")):
+        try:
+            models[node] = getattr(__import__(mod), "MODEL", None)
+        except Exception:
+            models[node] = None
+    return models
+
+
+def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
+                         status: str, packet: dict | None = None,
+                         halt_reason: str | None = None, conn=None) -> str | None:
+    """research.pipeline_runs 기록 - 기록 실패가 Packet 을 죽이면 안 된다.
+
+    audit.agent_runs 는 workforce 프로필 FK(HR 권한)가 선행이라 우리 소유
+    스키마에 기록한다(마이그레이션 001300 주석). 좌표·지문만 남긴다.
+    """
+    import hashlib
+
+    models = _node_models()
+    input_hash = hashlib.sha256(
+        f"{symbol}|{PIPELINE_VERSION}|{json.dumps(models, sort_keys=True)}".encode()
+    ).hexdigest()
+    packet_hash = None if packet is None else hashlib.sha256(
+        json.dumps(packet, sort_keys=True, ensure_ascii=False,
+                   default=str).encode()).hexdigest()
+    nc = (packet or {}).get("numeric_check") or {}
+    try:
+        own = conn is None
+        if own:
+            import psycopg2
+
+            from source_registry import load_project_env
+
+            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                    connect_timeout=10)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into research.pipeline_runs
+                  (trace_id, pipeline_version, symbol, input_hash, node_models,
+                   packet_hash, evidence_quality, numeric_check_ok, status,
+                   halt_reason, started_at, ended_at)
+                values (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                returning pipeline_run_id
+                """,
+                (trace_id, PIPELINE_VERSION, symbol, input_hash,
+                 json.dumps(models), packet_hash,
+                 (packet or {}).get("evidence_quality"),
+                 nc.get("ok") if nc else None, status, halt_reason,
+                 started, ended))
+            run_id = str(cur.fetchone()[0])
+        conn.commit()
+        if own:
+            conn.close()
+        return run_id
+    except Exception as e:
+        print(f"⚠ pipeline_runs 기록 실패(Packet 은 정상): {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return None
+
+
 def run_research_department(symbol: str) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
-    out = build_pipeline().invoke({"symbol": symbol})
+    import uuid
+
+    trace_id = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+    try:
+        out = build_pipeline().invoke({"symbol": symbol})
+    except Exception as e:
+        _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
+                             ended=datetime.now(timezone.utc), status="FAILED",
+                             halt_reason=f"{type(e).__name__}: {e}"[:200])
+        raise
+    ended = datetime.now(timezone.utc)
     if out.get("halted"):
-        return {"symbol": symbol, "verdict": "HALTED", "reason": out["halted"]}
+        _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
+                             ended=ended, status="HALTED",
+                             halt_reason=str(out["halted"])[:200])
+        return {"symbol": symbol, "verdict": "HALTED", "reason": out["halted"],
+                "trace_id": trace_id}
     packet = out["packet"]
+    packet["trace_id"] = trace_id
+    _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
+                         ended=ended, status="COMPLETED", packet=packet)
     packet["_analyst_verdicts"] = {          # 리포트용 메타 (Packet 본문과 분리)
         "sentiment": (out.get("sentiment") or {}).get("verdict"),
         "technical": (out.get("technical") or {}).get("verdict"),
@@ -460,6 +547,50 @@ def _check_packet_report_renderer():
     print("  Packet 리포트 렌더러     OK")
 
 
+def _check_run_recorder():
+    """실행 기록 - 지문·상태가 정확히 남고, 기록 실패는 Packet 을 죽이지 않는다."""
+    captured = {}
+
+    class _Cur:
+        def execute(self, sql, params):
+            captured["params"] = params
+        def fetchone(self):
+            return ("11111111-1111-1111-1111-111111111111",)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+        def commit(self):
+            captured["committed"] = True
+
+    ts = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    pk = {"symbol": "X", "evidence_quality": "partial",
+          "numeric_check": {"ok": True}}
+    rid = _record_pipeline_run(symbol="X", trace_id="t-1", started=ts, ended=ts,
+                               status="COMPLETED", packet=pk, conn=_Conn())
+    assert rid and captured["committed"]
+    p = captured["params"]
+    assert p[8] == "COMPLETED" and p[6] == "partial" and p[7] is True
+    assert len(p[3]) == 64 and len(p[5]) == 64      # input/packet sha256
+    assert "supervisor" in json.loads(p[4])          # node_models 기록
+    # 같은 packet 이면 같은 지문 (재현성)
+    _record_pipeline_run(symbol="X", trace_id="t-2", started=ts, ended=ts,
+                         status="COMPLETED", packet=pk, conn=_Conn())
+    h1 = p[5]
+    assert captured["params"][5] == h1
+
+    class _Broken:
+        def cursor(self):
+            raise RuntimeError("DB down")
+    assert _record_pipeline_run(symbol="X", trace_id="t-3", started=ts, ended=ts,
+                                status="HALTED", conn=_Broken()) is None  # 예외 없음
+    print("  실행 기록(pipeline_runs) OK")
+
+
 def _check_analyst_conflict_and_numeric_guard():
     """상충 보존 지시가 프롬프트에 실제로 들어가고, 서술 속 창작 수치가
     결정론으로 적발되는지 - 다각 분석 통합의 두 가드."""
@@ -515,4 +646,5 @@ if __name__ == "__main__":
     _check_evidence_module()
     _check_analyst_conflict_and_numeric_guard()
     _check_packet_report_renderer()
-    print("본부 파이프라인 8개 영역 통과. 실행은 --run <종목>")
+    _check_run_recorder()
+    print("본부 파이프라인 9개 영역 통과. 실행은 --run <종목>")
