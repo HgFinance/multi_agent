@@ -61,6 +61,20 @@ DEFAULT_CONFIG = {
     "initial_capital": 100_000_000.0,
 }
 
+# 전략 카탈로그 - 시그널 순위 방향만 다르고 실행·비용·가드는 공유한다.
+# 여기 없는 strategy 문자열은 실행을 거부한다(비슷한 걸로 대충 돌리지 않는다).
+STRATEGIES = {
+    "MOM-20-SMOKE": {"rank": "TOP", "note": "N일 수익률 상위 N 균등 (모멘텀)"},
+    "REV-5-SMOKE": {"rank": "BOTTOM", "note": "N일 수익률 하위 N 균등 (평균회귀 롱)"},
+}
+REV_CONFIG = {
+    "strategy": "REV-5-SMOKE",
+    "lookback_days": 5,
+    "top_n": 20,
+    "rebalance": "EVERY_5_TRADING_DAYS",   # 가설 horizon 5일에 맞춘 주기
+    "initial_capital": 100_000_000.0,
+}
+
 
 def code_version() -> str:
     """이 파일 자신의 해시 - 코드가 바뀌면 실험이 달라진다는 사실을 강제한다."""
@@ -120,6 +134,28 @@ def month_first_trading_days(dates: list[date]) -> set[date]:
     return out
 
 
+def rebalance_days(dates: list[date], config: dict) -> set[date]:
+    """리밸런스 일자 집합 - 정책 문자열이 모르는 값이면 거부한다."""
+    policy = config.get("rebalance", "MONTH_FIRST_TRADING_DAY")
+    if policy == "MONTH_FIRST_TRADING_DAY":
+        return month_first_trading_days(dates)
+    if policy == "EVERY_5_TRADING_DAYS":
+        return set(dates[::5])
+    raise ValueError(f"알 수 없는 rebalance 정책: {policy!r}")
+
+
+def select_targets(market: "Market", i: int, config: dict) -> list[str]:
+    """시그널일 t-1 종가까지로 대상 선정 - 전략은 순위 방향만 다르다."""
+    strat = config["strategy"]
+    if strat not in STRATEGIES:
+        raise ValueError(f"카탈로그에 없는 전략: {strat!r} - 실행 거부")
+    signal = market.momentum(market.dates[i - 1], int(config["lookback_days"]))
+    if not signal:
+        return []
+    top = STRATEGIES[strat]["rank"] == "TOP"
+    return sorted(signal, key=signal.get, reverse=top)[:int(config["top_n"])]
+
+
 # ---------------------------------------------------------------------------
 # 시뮬레이션 - 시그널 t-1 마감 / 체결 t 시가
 # ---------------------------------------------------------------------------
@@ -163,15 +199,18 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
     fills: list[Fill] = []
     equity: list[tuple[date, float]] = []
     notes: list[str] = []
-    rebal_days = month_first_trading_days(market.dates)
+    rebal_days = rebalance_days(market.dates, config)
+    # 웜업 무거래 계약 (walk-forward 창 독립성) - 이 날짜 전에는 리밸런스 금지
+    ntb = config.get("no_trade_before")
+    if isinstance(ntb, str):
+        ntb = date.fromisoformat(ntb)
     traded_notional = 0.0
 
     for i, d in enumerate(market.dates):
         # ── 리밸런스: 시그널은 어제까지, 체결은 오늘 시가 ──
-        if d in rebal_days and i > 0:
-            signal = market.momentum(market.dates[i - 1], lookback)
-            if signal:
-                ranked = sorted(signal, key=signal.get, reverse=True)[:top_n]
+        if d in rebal_days and i > 0 and (ntb is None or d >= ntb):
+            ranked = select_targets(market, i, config)
+            if ranked:
                 tradable = [s for s in ranked if (d, s) in market.opens]
                 port_value = cash + sum(
                     q * last_close.get(s, 0.0) for s, q in shares.items())
@@ -319,7 +358,15 @@ def load_dataset(conn, name: str, version: str):
 # 등록 (hypothesis -> experiment -> run -> trades/metrics)
 # ---------------------------------------------------------------------------
 
-def register_and_run(name: str, version: str, *, seed: int = 0) -> int:
+def register_and_run(name: str, version: str, *, seed: int = 0,
+                     config: dict | None = None,
+                     hypothesis_id: str | None = None) -> dict:
+    """백테스트 등록·실행. hypothesis_id 를 주면 그 가설에 실험을 묶는다
+    (오케스트레이터 경로) - 없으면 SMOKE 가설을 만든다(단독 실행 경로).
+
+    반환: {"status": 0|중복0, "experiment_id", "backtest_run_id", "metrics",
+           "input_hash", "duplicate": bool}
+    """
     import psycopg2
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "01-research" / "collectors"))
@@ -327,7 +374,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0) -> int:
 
     env = load_project_env()
     conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
-    config = dict(DEFAULT_CONFIG)
+    config = dict(config or DEFAULT_CONFIG)
     code_ver = code_version()
     trace = str(uuid.uuid4())
     try:
@@ -335,22 +382,25 @@ def register_and_run(name: str, version: str, *, seed: int = 0) -> int:
         ihash = input_hash(dhash, config, code_ver, seed)
 
         with conn.cursor() as cur:
-            # SMOKE 가설 - 파이프라인 관통 검증용임을 제목에 박는다
-            cur.execute(
-                """
-                insert into quant.hypotheses
-                  (title, rationale, expected_edge, falsification_criteria,
-                   required_data_products, status, created_by, trace_id)
-                values (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, 'TESTING', %s, %s)
-                returning hypothesis_id
-                """,
-                ("[SMOKE] MOM-20 파이프라인 관통 검증",
-                 "전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
-                 "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다.",
-                 json.dumps({"type": "none", "note": "smoke"}),
-                 json.dumps({"note": "해시 재검증 실패 또는 비결정성 발견 시 기각"}),
-                 json.dumps([f"{name}/{version}"]), RUNNER_VERSION, trace))
-            hyp_id = str(cur.fetchone()[0])
+            if hypothesis_id is None:
+                # SMOKE 가설 - 파이프라인 관통 검증용임을 제목에 박는다
+                cur.execute(
+                    """
+                    insert into quant.hypotheses
+                      (title, rationale, expected_edge, falsification_criteria,
+                       required_data_products, status, created_by, trace_id)
+                    values (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, 'TESTING', %s, %s)
+                    returning hypothesis_id
+                    """,
+                    ("[SMOKE] MOM-20 파이프라인 관통 검증",
+                     "전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
+                     "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다.",
+                     json.dumps({"type": "none", "note": "smoke"}),
+                     json.dumps({"note": "해시 재검증 실패 또는 비결정성 발견 시 기각"}),
+                     json.dumps([f"{name}/{version}"]), RUNNER_VERSION, trace))
+                hyp_id = str(cur.fetchone()[0])
+            else:
+                hyp_id = hypothesis_id
 
             cur.execute(
                 """
@@ -371,7 +421,12 @@ def register_and_run(name: str, version: str, *, seed: int = 0) -> int:
                 conn.rollback()
                 print(f"같은 input_hash 의 실험이 이미 있다({ihash[:16]}…) - "
                       f"재실행은 같은 결과라 등록하지 않는다 (재현성 계약)", flush=True)
-                return 0
+                cur2 = conn.cursor()
+                cur2.execute("select experiment_id from quant.experiments "
+                             "where input_hash=%s", (ihash,))
+                prev = cur2.fetchone()
+                return {"status": 0, "duplicate": True, "input_hash": ihash,
+                        "experiment_id": str(prev[0]) if prev else None}
             exp_id = str(got[0])
         conn.commit()
 
@@ -463,7 +518,9 @@ def register_and_run(name: str, version: str, *, seed: int = 0) -> int:
                 print(f"  ⚠ {n}", flush=True)
         print(f"  input_hash {ihash[:16]}… (같은 입력 = 같은 해시 = 중복 등록 차단)",
               flush=True)
-        return 0
+        return {"status": 0, "duplicate": False, "experiment_id": exp_id,
+                "backtest_run_id": run_row_id, "metrics": m, "input_hash": ihash,
+                "dataset_id": dataset_id, "dataset_hash": dhash}
     finally:
         conn.close()
 
@@ -529,6 +586,39 @@ def _check_metrics_and_determinism():
     print("  결정성·Metric·input_hash OK")
 
 
+def _check_strategy_catalog():
+    """REV-5(평균회귀)가 하락 종목을 고르고, 모르는 전략·정책은 거부되는지."""
+    n = 40
+    m = _mk_market({"UP": [100 * 1.01 ** i for i in range(n)],
+                    "DOWN": [100 * 0.99 ** i for i in range(n)]})
+    i = len(m.dates) - 1
+    assert select_targets(m, i, dict(REV_CONFIG, top_n=1)) == ["DOWN"]
+    assert select_targets(m, i, dict(DEFAULT_CONFIG, top_n=1)) == ["UP"]
+    try:
+        select_targets(m, i, dict(DEFAULT_CONFIG, strategy="XXX"))
+        raise AssertionError("카탈로그 밖 전략이 실행됐다")
+    except ValueError:
+        pass
+    try:
+        rebalance_days(m.dates, {"rebalance": "EVERY_FULL_MOON"})
+        raise AssertionError("모르는 리밸런스 정책이 통과했다")
+    except ValueError:
+        pass
+    assert rebalance_days(m.dates[:8], {"rebalance": "EVERY_5_TRADING_DAYS"}) \
+        == {m.dates[0], m.dates[5]}
+    r1 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6))
+    r2 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6))
+    assert r1.metrics == r2.metrics, "REV-5 가 비결정적이다"
+    # no_trade_before(웜업 무거래 계약): 그 전 체결 0 - WF 실측 137건 재발 방지
+    cut = m.dates[20]
+    r3 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6,
+                              no_trade_before=cut.isoformat()))
+    assert r1.fills and r1.fills[0].trade_date < cut      # 기본은 cut 전에 체결 시작
+    assert r3.fills and all(f.trade_date >= cut for f in r3.fills), \
+        "no_trade_before 위반 - WF 웜업 체결 137건 실측의 재발 방지"
+    print("  전략 카탈로그(REV-5)     OK")
+
+
 def _check_cash_never_negative():
     prices = {s: [100.0 + (i % 7) for i in range(60)] for s in ("A", "B", "C")}
     m = _mk_market(prices)
@@ -546,14 +636,17 @@ if __name__ == "__main__":
         a = sys.argv
         def opt(n, d=None):
             return a[a.index(n) + 1] if n in a else d
-        raise SystemExit(register_and_run(
+        _r = register_and_run(
             opt("--dataset", "krx-basket-daily"),
             opt("--dataset-version", "v1"),
-            seed=int(opt("--seed", "0"))))
+            seed=int(opt("--seed", "0")),
+            config=REV_CONFIG if "--strategy-rev5" in a else None)
+        raise SystemExit(int(_r.get("status", 1)))
 
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
     _check_no_lookahead()
     _check_fifo_and_costs()
     _check_metrics_and_determinism()
     _check_cash_never_negative()
-    print("Backtest Runner 4개 영역 통과. 실행은 --run")
+    _check_strategy_catalog()
+    print("Backtest Runner 5개 영역 통과. 실행은 --run")

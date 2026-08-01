@@ -50,3 +50,7 @@ quant-data/
 
 # 백필 재개 런타임 로그 (수집기 산출물 아님)
 minute_backfill_resume.*
+
+# Raw Market Data Parquet Archive (TSDB 에서 재유도 가능, 등록은 market.archive_exports)
+market-archive/
+rag_index_batch.*

@@ -194,6 +194,82 @@ def dq_summary() -> dict:
     return {"today": rows[0]}
 
 
+@app.get("/regime/daily")
+def regime_daily(days: int = Query(20, gt=0, le=120)):
+    """시장 레짐 집계 (RES-07 의 결정론 재료) - 일봉 단면 지표.
+
+    등락 종목수·SMA20 상회 비율을 거래일별로 계산한다. SMA20 은 봉 20개가
+    다 있는 종목만 분모에 넣는다(부족 종목을 하회로 세지 않는다 - coverage
+    로 분모를 명시). 계산은 전부 이 SQL - LLM 은 이 결과를 서술만 한다.
+    """
+    return _query("""
+        with b as (
+          select instrument_id,
+                 (bucket_time at time zone 'Asia/Seoul')::date as d,
+                 close,
+                 avg(close) over w20 as sma20,
+                 count(*) over w20 as n20,
+                 lag(close) over (partition by instrument_id order by bucket_time) as prev_close
+          from market.market_bars
+          where interval_code = '1D' and source = 'ls_chart'
+          window w20 as (partition by instrument_id order by bucket_time
+                         rows between 19 preceding and current row)
+        )
+        select d as trade_date,
+               count(*) filter (where prev_close is not null and close > prev_close) as advancers,
+               count(*) filter (where prev_close is not null and close < prev_close) as decliners,
+               count(*) filter (where prev_close is not null and close = prev_close) as unchanged,
+               count(*) filter (where n20 = 20 and close > sma20) as above_sma20,
+               count(*) filter (where n20 = 20) as sma20_coverage,
+               count(*) as symbols
+        from b
+        group by d order by d desc limit %s
+    """, (days,))
+
+
+@app.get("/microstructure/{symbol}")
+def microstructure(symbol: str, trade_date: Optional[str] = Query(
+        None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="KST 거래일. 없으면 데이터가 있는 최근일")):
+    """미시구조 집계 (RES-03 의 결정론 재료) - 체결·호가 하루 요약.
+
+    체결: VWAP·매수/매도 체결량(side 부호)·건수. 호가: 스프레드 bp 중앙값/
+    p90·심도 불균형 평균. 데이터가 없는 날은 404 가 아니라 rows 0 으로
+    드러난다(없음과 조회 실패를 구분).
+    """
+    iid = _iid_or_404(symbol)
+    cond = "and (event_time at time zone 'Asia/Seoul')::date = %s::date" if trade_date else ""
+    params_t = (iid, trade_date) if trade_date else (iid,)
+    ticks = _query(f"""
+        select (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               count(*) as trades,
+               sum(quantity) as volume,
+               sum(price * quantity) / nullif(sum(quantity), 0) as vwap,
+               sum(quantity) filter (where side = 1) as buy_volume,
+               sum(quantity) filter (where side = -1) as sell_volume,
+               min(event_time) as first_trade, max(event_time) as last_trade
+        from market.market_ticks
+        where instrument_id = %s {cond}
+        group by 1 order by 1 desc limit 1
+    """, params_t)
+    quotes = _query(f"""
+        select (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               count(*) as quotes,
+               percentile_cont(0.5) within group
+                 (order by spread / nullif(mid_price, 0) * 10000) as spread_bp_p50,
+               percentile_cont(0.9) within group
+                 (order by spread / nullif(mid_price, 0) * 10000) as spread_bp_p90,
+               avg(depth_imbalance) as depth_imbalance_avg
+        from market.market_quotes
+        where instrument_id = %s {cond}
+          and mid_price is not null and spread is not null
+        group by 1 order by 1 desc limit 1
+    """, params_t)
+    return {"symbol": symbol, "ticks": ticks[0] if ticks else None,
+            "quotes": quotes[0] if quotes else None,
+            "note": None if ticks or quotes else "해당 일자 데이터 없음"}
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 - DB 없이
 # ---------------------------------------------------------------------------

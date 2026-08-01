@@ -15,6 +15,9 @@
    미래 정보를 볼 수 없다. 가중치도 View 의 now() 가 아니라 as_of 기준으로
    다시 계산한다 - View 를 그대로 노출하면 과거 재현에서 미래 감쇠가 샌다.
 3. **본문이 없다.** documents 에는 제목·URL뿐이다(가이드 3.3 라이선스).
+   예외는 공시 원문 발췌뿐이다 - opendart 는 UseScope.EMBEDDING 이 허용된
+   소스라 rag_librarian 이 적재한 evidence_chunks 를 /evidence/search 가
+   발췌(300자)로 내준다. 뉴스 스니펫은 여전히 안 나간다.
 
 실행:   uvicorn departments.01-research.api.main:app --port 8035   (경로 하이픈 탓에
         실제로는 compose 가 api/ 디렉터리에서 uvicorn main:app 으로 띄운다)
@@ -23,7 +26,11 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -41,6 +48,16 @@ KST = timezone(timedelta(hours=9))
 # 가중치 반감기(시간). news_recent_weighted View 와 같은 상수다 - 다르게 두면
 # 실시간(View)과 재현(API)이 다른 점수를 낸다.
 WEIGHT_HALF_LIFE_HOURS = 6.0
+
+# /evidence/search 상수. 모델·차원은 agents/rag_librarian.py 인덱서와 같아야
+# 한다 - 다른 모델로 질의를 임베딩하면 코사인 거리가 무의미해진다. import 로
+# 공유하고 싶지만 컨테이너 이미지에 agents/ 가 없어(Dockerfile COPY 목록) 상수를
+# 복제한다 - 인덱서 모델을 바꾸면 여기도 함께 바꾼다.
+EMBED_MODEL = "bge-m3"
+EMBED_DIMS = 1024
+SEARCH_K_DEFAULT = 5
+SEARCH_K_MAX = 20          # 청크 발췌 k건이면 충분하다 - 큰 k 는 DB 부하만 늘린다
+SEARCH_EXCERPT_CHARS = 300
 
 app = FastAPI(title="Research Evidence API", version="0.1.0")
 
@@ -245,6 +262,88 @@ def evidence_financials(
 
 
 # ---------------------------------------------------------------------------
+# /evidence/search - 공시 원문 시맨틱 검색 (rag_librarian 이 적재한 청크)
+# ---------------------------------------------------------------------------
+
+def _require_query(q: str) -> str:
+    """빈/공백 질의는 422 로 끊는다 - 빈 질의를 임베딩하면 무의미한 벡터로
+    '그럴듯한' 결과가 나와 오히려 위험하다."""
+    q = q.strip()
+    if not q:
+        raise HTTPException(422, "q 는 빈 문자열일 수 없다")
+    return q
+
+
+def _embed_query(text: str, *, base: Optional[str] = None) -> str:
+    """질의문 -> pgvector 리터럴. Ollama 불가는 503 으로 드러낸다.
+
+    빈 결과([])로 위장하지 않는다 - 호출자(에이전트)가 '관련 공시 없음'과
+    '검색 인프라 죽음'을 구분하지 못하면 잘못된 결론(근거 없음)을 낸다.
+    """
+    base = (base or os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
+    req = urllib.request.Request(
+        base + "/api/embed", method="POST",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps({"model": EMBED_MODEL, "input": [text]}).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            vec = json.loads(r.read())["embeddings"][0]
+    except (urllib.error.URLError, OSError) as e:
+        # HTTPError(모델 미설치 404 등)도 URLError 하위라 여기로 온다
+        raise HTTPException(503, f"질의 임베딩 실패 - Ollama({base}) 불가: "
+                                 f"{type(e).__name__} {str(e)[:120]}")
+    except (KeyError, IndexError, ValueError) as e:
+        raise HTTPException(503, f"Ollama({base}) 응답 형식 이상: {type(e).__name__} {e}")
+    if len(vec) != EMBED_DIMS:
+        raise HTTPException(503, f"임베딩 차원 {len(vec)} != {EMBED_DIMS} - "
+                                 f"인덱스와 다른 모델이다({EMBED_MODEL} 확인)")
+    return "[" + ",".join(f"{v:.7g}" for v in vec) + "]"
+
+
+@app.get("/evidence/search")
+def evidence_search(
+    q: str = Query(..., min_length=1, description="자연어 질의 (공백만이면 422)"),
+    k: int = Query(SEARCH_K_DEFAULT, ge=1, le=SEARCH_K_MAX, description="상위 k건"),
+    as_of: Optional[datetime] = Query(
+        None, description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)"),
+):
+    """공시 원문 청크 코사인 상위 k. 읽기 전용 GET - 세션도 read-only 다.
+
+    as_of 없으면 전체 코퍼스 탐색(리서치용), 있으면 observed_at <= as_of 로
+    가시성을 자른 PIT 검색(재현용) - 다른 Evidence Endpoint 와 같은 규칙이다.
+    ⚠ 청크 observed_at 은 **인덱싱 시각**이다: 원문 자체는 그 전부터 Storage
+    에 있었을 수 있으므로 이 필터는 보수적(늦은) 가시성이다 - 미래를 당겨오지
+    않는 쪽으로만 틀린다. 정렬 연산(<=>)은 HNSW 인덱스를 태운다.
+    """
+    if as_of is not None and as_of.tzinfo is None:
+        raise HTTPException(422, "as_of 는 timezone 이 있어야 한다 (PIT 9시간 오차 방지)")
+    qvec = _embed_query(_require_query(q))
+    pit_cond = "" if as_of is None else "and c.observed_at <= %s"
+    params: tuple = (qvec, SEARCH_EXCERPT_CHARS)
+    if as_of is not None:
+        params += (as_of,)
+    params += (qvec, k)
+    rows = _query(
+        f"""
+        select c.document_version_id::text,
+               c.metadata->>'title' as title,
+               c.published_at,
+               c.observed_at,
+               1 - (c.embedding <=> %s::extensions.vector) as cosine_sim,
+               left(c.content, %s) as content
+        from research.evidence_chunks c
+        where c.embedding is not null {pit_cond}
+        order by c.embedding <=> %s::extensions.vector
+        limit %s
+        """,
+        params,
+    )
+    for r in rows:
+        r["cosine_sim"] = round(float(r["cosine_sim"]), 4)
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # 자체 점검 - DB 없이
 # ---------------------------------------------------------------------------
 
@@ -281,6 +380,43 @@ def _check_readonly_surface():
     print("  읽기 전용 표면           OK")
 
 
+def _check_search_rules():
+    """검색 질의 검증·장애 노출 규칙 - Ollama·DB 없이 확인한다."""
+    from fastapi import HTTPException as HE
+
+    # 빈/공백 질의는 422 - 조용히 전체 코퍼스 유사도를 내주면 안 된다
+    for bad in ("", "   ", "\t\n"):
+        try:
+            _require_query(bad)
+            raise AssertionError(f"빈 질의 {bad!r} 가 통과했다")
+        except HE as e:
+            assert e.status_code == 422
+    assert _require_query(" 유상증자 결정 ") == "유상증자 결정"
+
+    # 검색 표면은 GET 전용이고 등록돼 있다 (읽기 전용 원칙에 편승)
+    route = next(r for r in app.routes
+                 if getattr(r, "path", None) == "/evidence/search")
+    assert getattr(route, "methods", set()) == {"GET"}, "검색은 GET 전용이다"
+
+    # PIT: naive as_of 는 422 - 다른 Evidence Endpoint 와 같은 규칙 (임베딩
+    # 호출 전에 거부되므로 Ollama 없이 검증 가능)
+    try:
+        evidence_search(q="유상증자", k=1, as_of=datetime(2026, 8, 1, 9, 0))
+        raise AssertionError("naive as_of 가 통과했다")
+    except HE as e:
+        assert e.status_code == 422 and "timezone" in str(e.detail)
+
+    # Ollama 불가 -> 503 (빈 결과 위장 금지). 닫힌 로컬 포트라 즉시 거부되고
+    # 외부 네트워크·실행 중인 서비스가 필요 없다.
+    try:
+        _embed_query("x", base="http://127.0.0.1:1")
+        raise AssertionError("도달 불가 Ollama 가 통과했다")
+    except HE as e:
+        assert e.status_code == 503 and "Ollama" in str(e.detail), \
+            f"503+사유가 아니다: {e.status_code} {e.detail}"
+    print("  검색 질의·503 규칙       OK")
+
+
 def _probe():
     """실 DB 관통 - 서버 없이 Endpoint 함수를 직접 부른다."""
     h = health()
@@ -305,6 +441,13 @@ def _probe():
     print(f"  /evidence/disclosures?symbol=005930 (7d): {len(dis)}건")
     fin = evidence_financials(symbol="005930", as_of=None, limit=5)
     print(f"  /evidence/financials?symbol=005930: {len(fin)}건")
+
+    # 시맨틱 검색 관통 - 호스트에서는 127.0.0.1:11434 의 Ollama 를 그대로 쓴다
+    hits = evidence_search(q="유상증자 결정", k=3)
+    print(f"  /evidence/search?q=유상증자 결정: {len(hits)}건")
+    for h in hits:
+        print(f"    sim={h['cosine_sim']:.4f} {str(h['title'])[:44]}")
+    assert hits and hits[0]["cosine_sim"] > 0.4, "유상증자 검색 상위가 비었거나 무관하다"
     return 0
 
 
@@ -320,4 +463,5 @@ if __name__ == "__main__":
     _check_weight()
     _check_as_of()
     _check_readonly_surface()
-    print("research-api 3개 영역 통과. 관통은 --probe, 서버는 compose research-api")
+    _check_search_rules()
+    print("research-api 4개 영역 통과. 관통은 --probe, 서버는 compose research-api")

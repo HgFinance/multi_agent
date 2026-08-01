@@ -148,7 +148,11 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     assert warmup_len == w.n_warmup_days, \
         f"{w.label}: 웜업 {warmup_len}일 != 기대 {w.n_warmup_days}일"
 
-    result = run_backtest(sub, config)
+    # 웜업 중 무거래를 **구조로** 강제한다. MOM-20 은 월초 리밸런스+룩백 20이
+    # 우연히 웜업 체결을 피했지만, REV-5(5일 리밸런스)에서 137건이 웜업에
+    # 체결되며 아래 단언이 실측 발화했다(2026-08-01) - 운이 아니라 계약으로.
+    result = run_backtest(sub, dict(config,
+                                    no_trade_before=w.test_start.isoformat()))
 
     early = [f for f in result.fills if f.trade_date < w.test_start]
     assert not early, f"{w.label}: 웜업 중 체결 {len(early)}건 - 창 독립성 위반"
