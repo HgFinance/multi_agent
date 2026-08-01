@@ -15,6 +15,9 @@ grounded 서술만 하는 LLM이다** (research/risk 패턴을 QA 자신에게 �
                            서술만 한다, 새 판정 금지)
   supervise               qa-audit-supervisor 페르소나 (hermes/config.yaml 원문, Hermes AIAgent 호출 -
                            종합·Escalation만, 판정 자체는 못 바꾼다)
+  notion_report           Reporter Node (결정론 - notion_reporter.upload_case, LLM 아님) - 최종 감사
+                           결과를 Notion QA DB(NOTION_QA_DB)에 Projection으로 올린다. 실패해도
+                           QAState의 바인딩 판정은 못 바꾼다(2026-08-02 추가, 03-risk와 동일 패턴)
 
 hallucination-critic/model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started
 항목대로 대응 결정론 서비스가 아직 없다 (research가 4개 페르소나를 같은 이유로 뺀 것과 동일).
@@ -88,6 +91,7 @@ class QAState(TypedDict, total=False):
     verdict: str            # 최종 값 - 항상 assessment 에서만 옴
     narrative: str
     escalate: bool
+    notion_upload: dict     # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
 
 
 # ── 노드 1: Evidence 검사 (결정론 직원 - EvidenceQaEngine) ─────────────────
@@ -158,16 +162,40 @@ Evidence:
     return {"verdict": a["decision"], "narrative": note["narrative"], "escalate": note["escalate"]}
 
 
+def _assemble_out(state: QAState) -> dict:
+    """QAState -> run_qa_department()/notion_report 공용 결과 dict. 필드 목록을 한 곳에서만
+    유지한다(03-risk/scripts.py와 동일 패턴) - 그래프 노드와 외부 인터페이스가 따로 베끼면
+    한쪽만 필드를 늘렸을 때 드리프트가 생긴다."""
+    a = state["assessment"]
+    return {"qa_decision_id": a["qa_decision_id"], "verdict": state["verdict"],
+            "reason_codes": a["reason_codes"], "claim_checks": a["claim_checks"], "findings": a["findings"],
+            "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
+            "claim_narrative": state["claim_narrative"], "narrative": state["narrative"],
+            "escalate": state["escalate"]}
+
+
+# ── 노드 4: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────
+def notion_report(state: QAState, *, uploader=None) -> dict:
+    from notion_reporter import upload_case
+
+    out = _assemble_out(state)
+    report_md = _render_report_md(state["artifact"], state["decision_time"], out)
+    upload = uploader or upload_case
+    return {"notion_upload": upload(state["artifact"], state["decision_time"], out, report_md=report_md)}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(QAState)
     g.add_node("check_evidence", check_evidence)
     g.add_node("draft_claim_narrative", draft_claim_narrative)
     g.add_node("supervise", supervise)
+    g.add_node("notion_report", notion_report)
     g.set_entry_point("check_evidence")
     g.add_edge("check_evidence", "draft_claim_narrative")
     g.add_edge("draft_claim_narrative", "supervise")
-    g.add_edge("supervise", END)
+    g.add_edge("supervise", "notion_report")
+    g.add_edge("notion_report", END)
     return g.compile()
 
 
@@ -176,12 +204,9 @@ def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) 
     out = build_pipeline().invoke({
         "artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
     })
-    a = out["assessment"]
-    return {"qa_decision_id": a["qa_decision_id"], "verdict": out["verdict"],
-            "reason_codes": a["reason_codes"], "claim_checks": a["claim_checks"], "findings": a["findings"],
-            "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
-            "claim_narrative": out["claim_narrative"], "narrative": out["narrative"],
-            "escalate": out["escalate"]}
+    result = _assemble_out(out)
+    result["notion_upload"] = out.get("notion_upload")
+    return result
 
 
 # ── 자체 점검 (Ollama·Hermes 없음) ──────────────────────────────────────────
@@ -193,9 +218,11 @@ def _check_graph_shape():
 
 def _check_fail_still_narrates():
     # FAIL 판정이어도 워커·부서장 둘 다 계속 불려 서술이 남는지, decision 값 자체는
-    # 그대로 유지되는지 - Ollama·Hermes 콜은 둘 다 스텁으로 대체한다
-    global check_evidence, _call_internal_llm, _hermes_chat
-    orig_ce, orig_llm, orig_chat = check_evidence, _call_internal_llm, _hermes_chat
+    # 그대로 유지되는지 - Ollama·Hermes 콜은 둘 다 스텁으로 대체한다. notion_report 도 스텁한다 -
+    # 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때 자체 점검이 진짜 Notion에 네트워크
+    # 호출을 낸다(03-risk/scripts.py와 동일 이유).
+    global check_evidence, _call_internal_llm, _hermes_chat, notion_report
+    orig_ce, orig_llm, orig_chat, orig_nr = check_evidence, _call_internal_llm, _hermes_chat, notion_report
     check_evidence = lambda s: {"assessment": {
         "qa_decision_id": "d1", "decision": "FAIL",
         "reason_codes": ["fact_without_evidence"],
@@ -204,13 +231,14 @@ def _check_fail_still_narrates():
     }}
     _call_internal_llm = lambda prompt: "요약: 근거 없는 주장 1건"
     _hermes_chat = lambda persona, task: '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
+    notion_report = lambda s: {"notion_upload": {"ok": False, "reason": "self-check stub"}}
     try:
         out = build_pipeline().invoke({"artifact": {}, "evidence_store": {}, "decision_time": "x"})
         assert out["assessment"]["decision"] == "FAIL"
         assert out["verdict"] == "FAIL"
         assert out["escalate"] is True
     finally:
-        check_evidence, _call_internal_llm, _hermes_chat = orig_ce, orig_llm, orig_chat
+        check_evidence, _call_internal_llm, _hermes_chat, notion_report = orig_ce, orig_llm, orig_chat, orig_nr
     print("  FAIL 판정에도 서술 계속됨   OK")
 
 
@@ -272,11 +300,38 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
         out["claim_narrative"],
         "", "## 종합 서술 (qa-audit-supervisor, Hermes)", "",
         out["narrative"],
+    ]
+
+    notion = out.get("notion_upload")
+    if notion is not None:
+        lines += ["", "## Notion 업로드 (Reporter Node)", ""]
+        lines.append(f"업로드 성공: {notion['url']}" if notion.get("ok")
+                     else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}")
+
+    lines += [
         "", "---",
         "> 이 문서는 evidence_qa_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
         "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
     ]
     return "\n".join(lines)
+
+
+def _check_notion_report_node():
+    captured = {}
+
+    def stub_uploader(artifact, decision_time, out, *, report_md=""):
+        captured["out"], captured["report_md"] = out, report_md
+        return {"ok": True, "url": "https://notion.so/fake"}
+
+    state = {"artifact": {"trace_id": "t1"}, "decision_time": "2026-08-01", "narrative": "n", "escalate": False,
+             "claim_narrative": "cn", "verdict": "PASS",
+             "assessment": {"qa_decision_id": "d1", "decision": "PASS", "reason_codes": [],
+                            "claim_checks": [], "findings": [], "calculation_version": "v", "input_hash": "h"}}
+    result = notion_report(state, uploader=stub_uploader)
+    assert result == {"notion_upload": {"ok": True, "url": "https://notion.so/fake"}}
+    assert captured["out"]["qa_decision_id"] == "d1"
+    assert "qa_decision_id" in captured["report_md"]  # _render_report_md 가 실제로 불렸는지
+    print("  Notion Reporter 노드        OK")
 
 
 if __name__ == "__main__":
@@ -293,12 +348,12 @@ if __name__ == "__main__":
             "producer": "research-supervisor", "fund_id": str(uuid4()), "trace_id": str(uuid4()),
             "claims": [{"claim_index": 0, "text": "AAPL 종가는 70000원", "kind": "fact",
                        "subject": "AAPL", "numeric_value": "70000", "unit": "KRW",
-                       "evidence_ids": [eid]}],
+                       "evidence_ids": [] if "--fail" in sys.argv else [eid]}],
         }
         demo_evidence_store = {eid: {"source": "market-api", "published_at": now_iso,
                                      "observed_at": now_iso, "excerpt": "종가 70000원",
                                      "numeric_value": "70000", "unit": "KRW"}}
-        print(f"{PIPELINE_VERSION} 실행 (데모 Artifact)")
+        print(f"{PIPELINE_VERSION} 실행 (데모 Artifact{' - FAIL 유도' if '--fail' in sys.argv else ''})")
         out = run_qa_department(demo_artifact, demo_evidence_store, now_iso)
         print(json.dumps(out, ensure_ascii=False, indent=1))
 
@@ -313,4 +368,5 @@ if __name__ == "__main__":
     _check_graph_shape()
     _check_fail_still_narrates()
     _check_supervisor_guard()
-    print("본부 파이프라인 3개 영역 통과. 실행은 --run (내부 Ollama·Hermes 필요)")
+    _check_notion_report_node()
+    print("본부 파이프라인 4개 영역 통과. 실행은 --run (내부 Ollama·Hermes 필요)")
