@@ -88,6 +88,27 @@ state.db 손상 위험이 없다 — compose 상단의 named volume 원칙과 �
 
 ---
 
+## 2-2. ⚠ 동기화의 두 함정 (2026-08-02 실측)
+
+**(1) `pull` 은 주석을 지운다.** Hermes 가 config.yaml 을 건드리면(예:
+`mcp add`) 파일 전체를 기계 포맷으로 다시 쓴다. 그 상태를 `pull` 하면 저장소
+사본의 한국어 주석·근거가 통째로 사라진다(실측: 226줄 재작성). **저장소 사본이
+사람이 쓴 원본**이고, 런타임이 추가한 블록은 손으로 추려 옮긴다.
+
+**(2) `push` 뒤 인증이 끊길 수 있다.** push 는 config.yaml 을 전부 덮으므로
+Hermes 가 붙여둔 런타임 부기가 사라진다. 실측에서 push 직후 `portal status` 가
+`not logged in` 으로 바뀌었고, 프로필 디렉터리에 별도 `auth.json` 이 생겨 상위
+토큰과 어긋나 있었다. 복구는 원본 토큰을 **두 곳 모두**에 다시 넣는다.
+
+```powershell
+Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\auth.json"
+Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\profiles\research-department\auth.json"
+```
+
+push 후에는 항상 `hermes portal status` 로 확인한다.
+
+---
+
 ## 3. 일상 운영
 
 ```bash

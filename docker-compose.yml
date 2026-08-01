@@ -294,6 +294,38 @@ services:
   #       Version·Tool 권한·Memory 가 달라 **Department Backend Image 에 설치하지
   #       않는다.** 공식 Image 를 별도 Container 로 띄운다.
   #
+  # ── research-mcp: 부서 도구 면 (Hermes ↔ LangGraph 파이프라인의 다리) ──
+  # 헤르메스는 부서 인터페이스·기억·위임 계층이고 분석 실체는 LangGraph 다
+  # (TECH_STACK_DECISIONS 2절). 둘을 잇는 것이 도구 호출인데 그게 비어 있어서
+  # 지금까지 헤르메스가 '대화만 되는 껍데기'로 보였다. 이 서비스가 그 다리다.
+  #
+  # 포트를 호스트에 게시하지 않는다 - 헤르메스 컨테이너가 같은 compose 네트워크
+  # 에서 서비스 이름으로 부른다(research-mcp:8037). 밖에서 부를 이유가 없다.
+  research-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-research-mcp
+    restart: unless-stopped
+    working_dir: /app/departments/01-research
+    command: ["python", "api/mcp_server.py", "--serve"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      # Packet MD 리포트를 호스트에서 바로 열어보기 위해 (읽기 전용 아님 - 쓴다)
+      - ./departments/01-research/reports:/app/departments/01-research/reports
+    # 파이프라인이 분석가 6인 x LLM 이라 오래 돈다 - 넉넉히 준다
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 256
+    stop_grace_period: 30s
+
   # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)
   #   Credential·Memory Namespace 분리는 이름이 아니라 저장소 분리다.
   #   컨테이너만 쪼개고 /opt/data 를 공유하면 한 부서의 세션·기억·자격이 옆

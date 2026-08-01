@@ -20,7 +20,10 @@ FROM python:3.12-slim
 
 # pyarrow 는 06:50 market-archive Job(Raw -> 검증된 Parquet) 전용이다 (DoD
 # "Raw Market Data가 검증된 Parquet로 Archive된다", 2026-08-01 추가)
-RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0
+# mcp: 리서치본부 도구 면(api/mcp_server.py)을 Hermes 에 붙이는 다리.
+# 버전 고정하지 않는 이유 - MCP SDK 가 빠르게 바뀌고 우리는 MCPServer/tool/
+# streamable-http 라는 안정된 최소 표면만 쓴다. 깨지면 자체점검이 먼저 잡는다.
+RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0 mcp
 
 # 저장소의 departments/01-research 경로 구조를 그대로 유지한다 - 수집기들이
 # Path(__file__) 상대로 contracts/repository 를 sys.path 에 넣기 때문이다.
