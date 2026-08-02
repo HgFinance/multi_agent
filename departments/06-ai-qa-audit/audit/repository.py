@@ -31,27 +31,48 @@
 """
 from __future__ import annotations
 
+from functools import lru_cache
+from typing import Any
+
 from evidence_qa_engine import QaAssessment
 from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
-from psycopg2.extras import Json, register_uuid
-from psycopg2.pool import ThreadedConnectionPool
 from trace_recorder import AgentRunRecord, ToolCallRecord
-
-register_uuid()
 
 
 class QaDecisionPersistenceError(RuntimeError):
     """Canonical QA Decision을 기록하지 못한 경우."""
 
 
+@lru_cache(maxsize=1)
+def _load_postgres_driver() -> tuple[Any, Any]:
+    """PostgreSQL 저장을 실제로 사용할 때만 psycopg2를 로드한다."""
+    try:
+        from psycopg2.extras import Json, register_uuid
+        from psycopg2.pool import ThreadedConnectionPool
+        register_uuid()
+    except ModuleNotFoundError as exc:
+        raise QaDecisionPersistenceError(
+            "PostgreSQL QA 감사 저장에는 psycopg2-binary가 필요합니다. "
+            "requirements.txt를 설치하거나 `uv pip install psycopg2-binary`를 실행하세요."
+        ) from exc
+    return Json, ThreadedConnectionPool
+
+
+def _json_param(value: Any) -> Any:
+    """psycopg2가 설치된 DB 저장 경로에서만 JSON 래퍼를 만든다."""
+    Json, _ = _load_postgres_driver()
+    return Json(value)
+
+
 class PostgresAuditRepository:
     """psycopg2 기반 audit 스키마 Repository. Pool을 주입받거나 connect()로 만든다."""
 
-    def __init__(self, pool: ThreadedConnectionPool) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
 
     @classmethod
     def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> PostgresAuditRepository:
+        _, ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
 
     def close(self) -> None:
@@ -82,7 +103,7 @@ class PostgresAuditRepository:
                 event_type,
                 source_department,
                 trace_id,
-                Json(payload),
+                _json_param(payload),
                 occurred_at,
             ),
         )
@@ -120,7 +141,7 @@ class PostgresAuditRepository:
                         assessment.artifact_version_id,
                         assessment.gate,
                         assessment.decision.value,
-                        Json(
+                        _json_param(
                             {
                                 "calculation_version": assessment.calculation_version,
                                 "input_hash": assessment.input_hash,
@@ -210,7 +231,7 @@ class PostgresAuditRepository:
                 output_artifact_version_id = %s, trace_uri = %s
             where agent_run_id = %s
             """,
-            (run.status.value, run.ended_at, run.error_code, Json(run.token_usage), Json(run.cost),
+            (run.status.value, run.ended_at, run.error_code, _json_param(run.token_usage), _json_param(run.cost),
              run.output_artifact_version_id, run.trace_uri, run.agent_run_id),
         )
 
@@ -224,9 +245,9 @@ class PostgresAuditRepository:
                status, policy_version, latency_ms, error_code, occurred_at, completed_at, metadata)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (call.tool_call_id, call.agent_run_id, call.trace_id, call.tool_name, Json(call.scope),
+            (call.tool_call_id, call.agent_run_id, call.trace_id, call.tool_name, _json_param(call.scope),
              call.input_hash, call.output_hash, call.status.value, call.policy_version, call.latency_ms,
-             call.error_code, call.occurred_at, call.completed_at, Json(call.metadata)),
+             call.error_code, call.occurred_at, call.completed_at, _json_param(call.metadata)),
         )
 
     # -- audit.incident_events (append-only) --------------------------------------
@@ -240,7 +261,7 @@ class PostgresAuditRepository:
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (event.incident_event_id, event.incident_id, event.source, event.entry_type.value,
-             event.summary, Json(event.evidence), event.occurred_at, event.recorded_at, event.recorded_by),
+             event.summary, _json_param(event.evidence), event.occurred_at, event.recorded_at, event.recorded_by),
         )
 
     # -- audit.corrective_actions --------------------------------------------------
@@ -254,7 +275,7 @@ class PostgresAuditRepository:
             values (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (action.corrective_action_id, action.incident_id, action.finding_id, action.owner,
-             Json(action.action_plan), action.due_at, action.status.value, action.created_at),
+             _json_param(action.action_plan), action.due_at, action.status.value, action.created_at),
         )
 
     def update_corrective_action(self, action: CorrectiveActionRecord) -> None:
@@ -264,7 +285,7 @@ class PostgresAuditRepository:
         set status = %s, verification = %s, verifier = %s, completed_at = %s
         where corrective_action_id = %s
             """,
-            (action.status.value, Json(action.verification) if action.verification is not None else None,
+            (action.status.value, _json_param(action.verification) if action.verification is not None else None,
              action.verifier, action.completed_at, action.corrective_action_id),
         )
 
@@ -291,7 +312,7 @@ class PostgresAuditRepository:
                 incident_id,
                 f"QA-AUTO-{incident_id}",
                 f"QA incident auto-created from {source}",
-                Json({"auto_created": True, "first_event_summary": summary}),
+                _json_param({"auto_created": True, "first_event_summary": summary}),
                 occurred_at,
                 occurred_at,
                 recorded_by,
@@ -325,7 +346,7 @@ class PostgresAuditRepository:
                         event.source,
                         event.entry_type.value,
                         event.summary,
-                        Json(event.evidence),
+                        _json_param(event.evidence),
                         event.occurred_at,
                         event.recorded_at,
                         event.recorded_by,
@@ -364,7 +385,7 @@ class PostgresAuditRepository:
                         action.incident_id,
                         action.finding_id,
                         action.owner,
-                        Json(action.action_plan),
+                        _json_param(action.action_plan),
                         action.due_at,
                         action.status.value,
                         action.created_at,

@@ -11,16 +11,29 @@ from dataclasses import asdict
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 from uuid import UUID
 
 from engine.risk_engine import RiskAssessment
-from psycopg2.extras import Json
-from psycopg2.pool import ThreadedConnectionPool
 
 
 class RiskDecisionPersistenceError(RuntimeError):
     """Canonical Risk Decision을 기록하지 못한 경우."""
+
+
+@lru_cache(maxsize=1)
+def _load_postgres_driver() -> tuple[Any, Any]:
+    """PostgreSQL 저장을 실제로 사용할 때만 psycopg2를 로드한다."""
+    try:
+        from psycopg2.extras import Json
+        from psycopg2.pool import ThreadedConnectionPool
+    except ModuleNotFoundError as exc:
+        raise RiskDecisionPersistenceError(
+            "PostgreSQL Risk 저장에는 psycopg2-binary가 필요합니다. "
+            "requirements.txt를 설치하거나 `uv pip install psycopg2-binary`를 실행하세요."
+        ) from exc
+    return Json, ThreadedConnectionPool
 
 
 def _json_safe(value: Any) -> Any:
@@ -49,17 +62,19 @@ class RiskDecisionRepository:
     FK 오류를 그대로 영속화 실패로 처리한다.
     """
 
-    def __init__(self, pool: ThreadedConnectionPool) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
 
     @classmethod
     def connect(cls, dsn: str) -> RiskDecisionRepository:
+        _, ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(1, 4, dsn))
 
     def close(self) -> None:
         self._pool.closeall()
 
     def save(self, assessment: RiskAssessment) -> UUID:
+        Json, _ = _load_postgres_driver()
         decision = assessment.decision
         conn = self._pool.getconn()
         try:
