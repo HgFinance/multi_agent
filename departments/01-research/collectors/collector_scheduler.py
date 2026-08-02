@@ -80,6 +80,12 @@ JOBS: tuple[Job, ...] = (
     # 창 상한 17:00: 수능일 파생 마감 16:45 까지 덮는다. 호출 4회/실행이라 가볍다.
     Job("derivatives", ("collectors/derivatives_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 40), time(17, 0))),
+    # 일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다. 16:30:
+    # VKOSPI(16:05) 뒤라 그날 시장 상태가 다 반영된 시점. 이 이력이 있어야
+    # Packet 의 REGIME_FLIP·GEO_ESCALATION 주장을 채점할 수 있다.
+    # **사후 소급이 불가능하므로 매일 도는 것 자체가 자산이다.**
+    Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
+        daily_at=time(16, 30)),
     # VKOSPI 종가 - 정규장 마감(15:45) 뒤. 휴장이면 수집기가 SKIP(exit 2) 한다
     # (t1511 은 휴장에도 직전 종가를 주므로 그대로 넣으면 없는 관측이 생긴다).
     Job("vkospi", ("collectors/volatility_index_collector.py", "--collect"),

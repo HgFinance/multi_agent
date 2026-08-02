@@ -78,6 +78,47 @@ def _rows(sql: str, params: tuple = ()) -> list[dict]:
 # 순수 로직 (자체 점검 대상)
 # ---------------------------------------------------------------------------
 
+def is_authorized(header: str | None, token: str | None) -> bool:
+    """Authorization 헤더 검증.
+
+    - 토큰이 설정돼 있지 않으면 **누구나 통과**한다(개발 편의). 대신 기동 시
+      경고를 찍어 '설정을 잊은 것'과 '일부러 연 것'이 구분되게 한다.
+    - 설정돼 있으면 정확히 일치해야 한다. 비교는 상수 시간으로 한다 -
+      토큰을 한 글자씩 맞춰보는 타이밍 공격을 막는다.
+    - 빈 문자열 토큰은 '설정 안 함'과 같게 취급한다. Hermes 가 미치환
+      `${MCP_RESEARCH_API_KEY}` 를 그대로 보내는 경우도 통과시키지 않는다.
+    """
+    import hmac
+
+    if not token:
+        return True
+    if not header:
+        return False
+    parts = header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return hmac.compare_digest(parts[1].strip(), token)
+
+
+def build_app(server, *, token: str | None):
+    """MCP Starlette 앱 + Bearer 검사 미들웨어."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    app = server.streamable_http_app()
+
+    class _Auth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if not is_authorized(request.headers.get("authorization"), token):
+                return JSONResponse(
+                    {"error": "unauthorized",
+                     "detail": "MCP_RESEARCH_API_KEY 가 필요하다"}, status_code=401)
+            return await call_next(request)
+
+    app.add_middleware(_Auth)
+    return app
+
+
 def normalize_symbol(symbol: str) -> str:
     """KRX 6자리 종목코드만 받는다. 지어내거나 추측하지 않는다."""
     s = str(symbol or "").strip()
@@ -308,6 +349,22 @@ def _check_health_summary():
     print("  건강 요약(SKIP 제외)     OK")
 
 
+def _check_bearer_auth():
+    """토큰 검증 - 미설정이면 열고, 설정되면 정확히 일치할 때만 통과."""
+    assert is_authorized(None, None) and is_authorized("Bearer x", None)
+    assert is_authorized("", "") , "빈 토큰은 미설정과 같게 취급한다"
+
+    T = "s3cr3t-value"
+    assert is_authorized(f"Bearer {T}", T)
+    assert is_authorized(f"bearer {T}", T), "스킴은 대소문자 무관이다"
+    for bad in (None, "", "Bearer", "Bearer wrong", T, f"Basic {T}",
+                "Bearer ${MCP_RESEARCH_API_KEY}"):
+        assert not is_authorized(bad, T), f"통과하면 안 된다: {bad!r}"
+    # 미치환 변수를 그대로 보내는 경우(Hermes 가 env 를 못 찾으면 이 모양이다)
+    assert not is_authorized("Bearer ${MCP_RESEARCH_API_KEY}", T)
+    print("  Bearer 인증 판정         OK")
+
+
 def _check_tool_surface():
     """권한 경계 - 주문·원장·리스크 도구가 노출되지 않았는가."""
     try:
@@ -330,18 +387,29 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     if "--serve" in sys.argv:
+        import uvicorn
+
+        token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
         srv = build_server(host="0.0.0.0", port=DEFAULT_PORT)
-        # 1.x 는 run() 이 host/port 를 안 받는다(생성 시 settings). 신판은 받는다.
         s = getattr(srv, "settings", None)
         if s is not None:
             s.host, s.port = "0.0.0.0", DEFAULT_PORT
-        print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp", flush=True)
-        srv.run(transport="streamable-http")
+        if token:
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp (Bearer 인증 켜짐)",
+                  flush=True)
+        else:
+            # 잊은 것과 일부러 연 것을 구분되게 남긴다 - 조용한 무인증 금지
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp "
+                  f"⚠ MCP_RESEARCH_API_KEY 미설정 - 인증 없이 연다. compose "
+                  f"네트워크 밖으로 노출하지 말 것", flush=True)
+        uvicorn.run(build_app(srv, token=token or None),
+                    host="0.0.0.0", port=DEFAULT_PORT, log_level="info")
         raise SystemExit(0)
 
     print(f"{MCP_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_symbol_guard()
+    _check_bearer_auth()
     _check_job_lifecycle()
     _check_health_summary()
     _check_tool_surface()
-    print("리서치 MCP 4개 영역 통과. 서버는 --serve")
+    print("리서치 MCP 5개 영역 통과. 서버는 --serve")

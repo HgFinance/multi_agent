@@ -19,10 +19,12 @@
     오염된다 - 다음 실행이 다시 시도한다(멱등: unique(trace_id, horizon)).
   - 가격 주장은 **터치 판정**이다(지평 안 어느 날이든 임계 도달이면 발동).
     종가 하나만 보면 "중간에 -15% 갔다가 돌아온" 사건을 놓친다.
-  - 라벨 주장(REGIME_FLIP·GEO_ESCALATION)은 v1 에서 채점하지 않는다 - 일별
-    레짐·지정학 **라벨 이력을 보관하지 않기 때문**이다. 없는 이력을 지금
-    다시 계산해 채우면 그건 사후 재구성이지 그때의 판정이 아니다. note 에
-    제외 사유와 건수를 남긴다(조용한 절단 금지). 백로그: 라벨 일별 적재.
+  - 라벨 주장(REGIME_FLIP·GEO_ESCALATION)은 **research.daily_labels 이력으로
+    채점한다**(2026-08-02 신설, 마이그레이션 001800). 그 전에는 이력이 없어
+    채점 자체를 못 했다 - 없는 이력을 지금 다시 계산해 채우는 사후 재구성은
+    그때의 판정이 아니므로 하지 않았고, 대신 오늘부터 매일 남긴다.
+    이력이 지평을 못 덮으면 '아무 일 없었다'로 세지 않고 보류한다 - 없는
+    날을 무발동으로 세면 거짓 음성이 된다.
 
 사용
   python collectors/packet_outcome_scorer.py            # 자체 점검
@@ -102,8 +104,38 @@ def forward_return(series: list[tuple[date, float]], baseline: float,
     return round((last / baseline - 1) * 100, 4), last, len(window)
 
 
+LABEL_KIND_MAP = {"REGIME_FLIP": "REGIME", "GEO_ESCALATION": "GEOPOLITICAL"}
+
+
+def evaluate_label_claim(claim: dict, history: list[tuple[date, str]],
+                         *, packet_date: date, horizon: int) -> dict:
+    """라벨 주장 채점. history: [(as_of, label_value)] - daily_labels 기록.
+
+    2026-08-02 이전에는 이력이 없어 채점 자체를 못 했다. 이제 남기므로 센다.
+    가격과 같은 **터치 판정**이다 - 지평 안 어느 날이든 조건이 성립하면 발동.
+    Packet 당일은 제외한다(그날 판정을 보고 쓴 주장이다).
+    이력이 지평을 못 덮으면 발동 여부를 단정하지 않는다(None) - 없는 날을
+    '아무 일 없었다'로 세면 거짓 음성이 된다.
+    """
+    op, want = claim["op"], claim.get("threshold_text")
+    window = [(d, v) for d, v in sorted(history) if d > packet_date][:horizon]
+    hit_on = None
+    for d, v in window:
+        if (op == "!=" and v != want) or (op == "==" and v == want):
+            hit_on = d
+            break
+    covered = len(window) >= horizon
+    return {"kind": claim["kind"], "metric": claim["metric"], "op": op,
+            "threshold_text": want, "horizon_days": horizon,
+            "triggered": None if (hit_on is None and not covered) else hit_on is not None,
+            "triggered_on": hit_on.isoformat() if hit_on else None,
+            "days_observed": len(window), "history_complete": covered}
+
+
 def score_packet(claims: list[dict], series: list[tuple[date, float]],
-                 horizon: int) -> dict:
+                 horizon: int,
+                 label_history: dict[str, list[tuple[date, str]]] | None = None,
+                 packet_date: date | None = None) -> dict:
     """한 (packet, horizon) 채점 결과. 시세 부족은 PENDING_DATA."""
     at_h = [c for c in claims if int(c["horizon_days"]) == horizon]
     price = [c for c in at_h if c["kind"] in PRICE_KINDS]
@@ -116,9 +148,26 @@ def score_packet(claims: list[dict], series: list[tuple[date, float]],
     triggered = [r for r in results if r["triggered"]]
 
     note_bits = []
-    if labels:
-        note_bits.append(f"라벨 주장 {len(labels)}건은 일별 라벨 이력 미보관으로 "
-                         f"채점 제외(백로그)")
+    # 라벨 주장 - 2026-08-02 부터 daily_labels 이력으로 채점한다
+    label_history = label_history or {}
+    unscored_labels = 0
+    for c in labels:
+        kind = LABEL_KIND_MAP.get(c["kind"])
+        hist = label_history.get(kind) or []
+        if not hist or packet_date is None:
+            unscored_labels += 1
+            continue
+        r = evaluate_label_claim(c, hist, packet_date=packet_date, horizon=horizon)
+        if r["triggered"] is None:      # 이력이 지평을 못 덮는다 - 단정하지 않는다
+            unscored_labels += 1
+            continue
+        results.append(r)
+        if r["triggered"]:
+            triggered.append(r)
+    if unscored_labels:
+        note_bits.append(f"라벨 주장 {unscored_labels}건은 이력이 지평을 덮지 "
+                         f"못해 채점 보류(이력은 2026-08-02 부터 쌓인다)")
+
     status = "EVALUATED" if used >= horizon and ret is not None else "PENDING_DATA"
     if status == "PENDING_DATA":
         note_bits.append(f"거래일 {used}/{horizon} - 시세 부족")
@@ -199,7 +248,17 @@ def score(*, market_api: str | None = None, get=_http_get, limit: int = 200) -> 
                 """, (trace_id,))
                 row = cur.fetchone()
 
-            res = score_packet(claims, series, int(horizon))
+            with conn.cursor() as cur:
+                cur.execute("""
+                    select label_kind, as_of, label_value
+                    from research.daily_labels
+                    where as_of >= %s order by as_of
+                """, (packet_date,))
+                hist: dict = {}
+                for kind, d, val in cur.fetchall():
+                    hist.setdefault(kind, []).append((d, val))
+            res = score_packet(claims, series, int(horizon),
+                               label_history=hist, packet_date=packet_date)
             # pipeline_runs.metadata 의 판정 스냅샷. 없으면 빈 dict 로 둔다 -
             # 없는 판정을 지어내면 되먹임 통계가 통째로 거짓이 된다.
             verdicts = ((row[0] or {}).get("analyst_verdicts") or {}) if row else {}
@@ -315,6 +374,39 @@ def _check_forward_return_and_labels():
     print("  수익률·라벨 제외 명시    OK")
 
 
+def _check_label_claim_scoring():
+    """라벨 주장이 이력으로 실제 채점되는지 - 선순환의 구멍을 메운 부분."""
+    p = date(2026, 8, 2)
+    hist = [(date(2026, 8, 3), "BREADTH_THRUST"),
+            (date(2026, 8, 4), "RISK_ON"),        # 여기서 전환
+            (date(2026, 8, 5), "RISK_ON")]
+    flip = {"kind": "REGIME_FLIP", "metric": "regime_label", "op": "!=",
+            "threshold_text": "BREADTH_THRUST", "horizon_days": 3}
+    r = evaluate_label_claim(flip, hist, packet_date=p, horizon=3)
+    assert r["triggered"] is True and r["triggered_on"] == "2026-08-04", r
+
+    # 전환이 없으면 무발동 - 단 이력이 지평을 덮을 때만 그렇게 단정한다
+    same = [(date(2026, 8, 3), "BREADTH_THRUST"), (date(2026, 8, 4), "BREADTH_THRUST"),
+            (date(2026, 8, 5), "BREADTH_THRUST")]
+    assert evaluate_label_claim(flip, same, packet_date=p, horizon=3)["triggered"] is False
+    # 이력이 모자라면 None - '아무 일 없었다'로 세면 거짓 음성이다
+    short = evaluate_label_claim(flip, same[:1], packet_date=p, horizon=3)
+    assert short["triggered"] is None and not short["history_complete"], short
+    # Packet 당일은 제외한다(그날 판정을 보고 쓴 주장이다)
+    withday = [(p, "RISK_ON")] + same
+    assert evaluate_label_claim(flip, withday, packet_date=p, horizon=3)["triggered"] is False
+
+    # score_packet 배선 - 이력이 있으면 채점되고 note 에 보류가 안 남는다
+    claims = [dict(flip)]
+    res = score_packet(claims, [], 3, label_history={"REGIME": hist}, packet_date=p)
+    assert res["claims_triggered"] == 1, res
+    assert "보류" not in (res["note"] or ""), res["note"]
+    # 이력이 아예 없으면 보류로 남는다(조용히 무발동으로 세지 않는다)
+    res2 = score_packet(claims, [], 3, label_history={}, packet_date=p)
+    assert res2["claims_triggered"] == 0 and "보류" in (res2["note"] or "")
+    print("  라벨 주장 채점           OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -327,4 +419,5 @@ if __name__ == "__main__":
     _check_touch_semantics()
     _check_pending_when_short()
     _check_forward_return_and_labels()
-    print("Packet 채점 4개 영역 통과. 채점은 --score")
+    _check_label_claim_scoring()
+    print("Packet 채점 5개 영역 통과. 채점은 --score")

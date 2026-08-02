@@ -191,6 +191,11 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      # label-snapshot Job 이 레짐·지정학 라벨을 계산하려면 부서 조회면이 필요하다.
+      # 2026-08-02 실측: 기본값이 127.0.0.1 이라 컨테이너 안에서 Connection
+      # refused 가 났다 - 같은 compose 네트워크의 서비스 이름으로 준다.
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
 
     # ▶ 2026-08-02 실측 사고: Dockerfile 이 config 를 COPY 하지 않아 이 컨테이너
     #   에는 config 디렉터리 자체가 없었다. 그래서 새로 넣은 Job 두 개가 조용히
@@ -310,6 +315,9 @@ services:
     command: ["python", "api/mcp_server.py", "--serve"]
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
+      # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
       # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
@@ -380,6 +388,8 @@ services:
       # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
       # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Profile 의 mcp_servers.research.headers 가 이 값을 Bearer 로 싣는다
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
