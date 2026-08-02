@@ -270,20 +270,32 @@ def compute_style_overlay(rows, *, benchmark: str = BENCHMARK_CODE,
     return overlay
 
 
+# 인용 대상이 아닌 bookkeeping 키 - 숫자 풀에서 뺀다.
+# 이것을 안 빼면 검증이 헐거워진다: days=21, lookback_used=20 이 풀에 있으면
+# LLM 이 "20%" 나 "21배" 를 지어내도 +-0.1 대조를 통과한다. 레짐 분석가가
+# days_used 를 이미 같은 이유로 빼고 있는데, overlay 중첩까지는 그 규약이
+# 안 미쳤다(2026-08-02 수정). 관측 개수는 '얼마나 있나'지 '얼마다'가 아니다.
+_NOT_QUOTABLE = ("days", "lookback_used")
+
+
 def overlay_numbers(overlay) -> list[float]:
-    """overlay 안의 모든 수치(중첩 포함) - 서술 검증의 숫자 풀에 넣는다.
-    여기서 빠뜨리면 **정상 인용이 환각으로 오판된다.**"""
+    """overlay 안의 인용 가능한 수치(중첩 포함) - 서술 검증의 숫자 풀에 넣는다.
+
+    빠뜨리면 정상 인용이 환각으로 오판되고, 반대로 다 넣으면 진짜 환각이
+    통과한다. 그래서 **수치는 넣되 카운트는 뺀다.**
+    """
     pool: list[float] = []
 
-    def walk(node):
+    def walk(node, key=None):
         if isinstance(node, dict):
-            for v in node.values():
-                walk(v)
+            for k, v in node.items():
+                walk(v, k)
         elif isinstance(node, list):
             for v in node:
-                walk(v)
+                walk(v, key)
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
-            pool.append(float(node))
+            if key not in _NOT_QUOTABLE:
+                pool.append(float(node))
 
     walk(overlay)
     return pool
@@ -439,9 +451,12 @@ def _check_number_pool():
     # 중첩 안의 수치가 전부 들어와야 정상 인용이 환각으로 오판되지 않는다
     assert 5.0 in pool and 100.0 in pool          # 상대강도·기준지수 수준
     assert all(isinstance(x, float) for x in pool)
-    # 두 계열의 ratio/change/days + benchmark_level + lookback_used = 8.
-    # None(백분위)은 안 담는다
-    assert len(pool) == 8, (len(pool), pool)
+    # 두 계열의 ratio/change + benchmark_level = 5.
+    # days(21)·lookback_used(20)·백분위(None)는 안 담는다 - 카운트를 넣으면
+    # LLM 이 "20%" 를 지어내도 통과한다.
+    assert len(pool) == 5, (len(pool), pool)
+    assert 21.0 not in pool, "days 가 풀에 섞였다 - 환각 검증이 헐거워진다"
+    assert 20.0 not in pool, "lookback_used 가 풀에 섞였다"
     assert o["ratios"]["BOND_FUT"]["ratio"] in pool, "중첩 2단이 누락되면 오판한다"
     print("  숫자 풀 중첩 수집        OK")
 

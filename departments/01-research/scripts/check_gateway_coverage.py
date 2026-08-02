@@ -31,9 +31,18 @@ CHECKER_VERSION = "research-gateway-coverage-v1"
 _BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BASE / "api"))
 
-# 게이트웨이가 관장하지 않는 대상 - research-api 가 아닌 곳으로 나가는 URL
-_NOT_GATEWAY = ("11434", "ollama", "supabase", "MARKET_API", "market_api",
-                "/regime/", "/breadth", "/bars", "/snapshot", "/dq/")
+# 게이트웨이가 관장하지 않는 대상 - 우리 API 가 아닌 곳으로 나가는 URL
+_NOT_GATEWAY = ("11434", "ollama", "supabase")
+
+# ▶ market-api 경로도 이제 대상이다 (2026-08-02)
+#   예전에는 market-api 에 게이트웨이가 없어서 이 경로들을 통째로 면제했다.
+#   이제 붙었으므로(관찰 모드) 검사 대상이다. 관찰 모드라 지금 위반이
+#   나와도 아무 것도 안 막히지만, **강제로 올리기 전에 무엇을 배선해야
+#   하는지가 바로 이 목록**이다.
+_PATH_RE = re.compile(
+    r"/(?:evidence|macro|universe)/[a-z_/]+"
+    r"|/(?:snapshot|bars|microstructure)(?=/|\"|'|\?|\{)"
+    r"|/regime/daily|/breadth|/dq/summary")
 
 
 def endpoint_of(url_expr: str) -> str | None:
@@ -43,7 +52,7 @@ def endpoint_of(url_expr: str) -> str | None:
     """
     if any(x in url_expr for x in _NOT_GATEWAY):
         return None
-    m = re.search(r"/(?:evidence|macro|universe)/[a-z_/]+", url_expr)
+    m = _PATH_RE.search(url_expr)
     return m.group(0).rstrip("/") if m else None
 
 
@@ -93,10 +102,13 @@ def call_sites(root: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
     notes: list[str] = []
     for py in sorted(root.rglob("*.py")):
         # 서버 자신과 이 검사기는 호출자가 아니다 - 검사기의 예시 문자열이
-        # '익명 호출 의심'으로 잡히면 판정이 영원히 시끄러워진다
+        # '익명 호출 의심'으로 잡히면 판정이 영원히 시끄러워진다.
+        # `py.parts[0] == "api"` 는 py 가 **절대경로**라 항상 거짓이었다
+        # (parts[0] 이 드라이브 문자다) - 상대경로로 판정해야 실제로 걸린다.
+        rel_parts = py.relative_to(root).parts
         if "__pycache__" in py.parts or py.name == "api_client.py" \
                 or py.resolve() == Path(__file__).resolve() \
-                or py.parts[0] == "api":
+                or rel_parts[0] == "api":
             continue
         text = py.read_text(encoding="utf-8")
         if "get_json" not in text:
