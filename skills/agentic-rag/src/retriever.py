@@ -26,6 +26,7 @@ from openai import OpenAI
 from .resilience import CircuitBreaker, RedisJsonCache, emit_metric
 
 EMBEDDING_MODEL = os.environ.get("AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_DIMENSIONS = int(os.environ.get("AGENTIC_RAG_EMBEDDING_DIMENSIONS", "1024"))
 CACHE_VERSION = "v1"
 _EMBED_BREAKER = CircuitBreaker(
     "agentic-rag-embedding",
@@ -144,6 +145,7 @@ class LocalVectorIndex:
         h = hashlib.sha256()
         h.update(CACHE_VERSION.encode())
         h.update(EMBEDDING_MODEL.encode())
+        h.update(str(EMBEDDING_DIMENSIONS).encode())
         for c in self.chunks:
             h.update(c.chunk_id.encode())
             h.update(c.text.encode())
@@ -151,7 +153,11 @@ class LocalVectorIndex:
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         resp = _EMBED_BREAKER.call(
-            lambda: self._client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+            lambda: self._client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=texts,
+                dimensions=EMBEDDING_DIMENSIONS,
+            )
         )
         return [d.embedding for d in resp.data]
 
