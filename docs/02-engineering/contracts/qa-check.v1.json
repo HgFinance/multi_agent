@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "qa-check.v1",
+  "title": "QA Evidence Gate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["qa_decision_id", "artifact", "context"],
+  "properties": {
+    "qa_decision_id": {"type": ["string", "null"]},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_version_id", "artifact_type", "producer", "fund_id", "trace_id", "claims"],
+      "properties": {
+        "artifact_version_id": {"type": "string", "format": "uuid"},
+        "artifact_type": {"type": "string", "minLength": 1},
+        "producer": {"type": "string", "minLength": 1},
+        "fund_id": {"type": "string", "format": "uuid"},
+        "trace_id": {"type": "string", "format": "uuid"},
+        "claims": {"type": "array", "minItems": 1},
+        "tool_results": {"type": "array"}
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_time"],
+      "properties": {
+        "decision_time": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "x-governance": {
+    "owner": "ai-qa-audit",
+    "approval_status": "PENDING",
+    "activation_flag": "QA_CHECK_CONTRACT_APPROVED",
+    "failure_behavior": "FAIL_ESCALATE",
+    "does_not_grant_order_or_ledger_authority": true
+  }
+}

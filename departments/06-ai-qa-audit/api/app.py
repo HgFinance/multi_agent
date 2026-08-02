@@ -373,11 +373,27 @@ def _on_qa_event_bus_error(request, exc: QaEventBusError):
     )
 
 
+def _qa_check_contract_is_approved() -> bool:
+    """Keep the proposed gate inactive until the owning service approves v1."""
+    runtime = os.environ.get("RISK_QA_RUNTIME", "test").strip().lower()
+    if runtime != "production":
+        return True
+    return os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
+
+
 # 3.1 [제안] Case에 종속된 판정 -------------------------------------------------------
 
 
 @app.post("/investment-cases/{case_id}/qa-check")
 def qa_check(case_id: str, body: QaCheckRequest):
+    if not _qa_check_contract_is_approved():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "QA_CHECK_CONTRACT_NOT_APPROVED",
+                "message": "상위 서비스 계약 승인 전에는 production qa-check를 활성화할 수 없습니다",
+            },
+        )
     ctx = QaContext(evidence_store=evidence_store, decision_time=body.context.decision_time)
     assessment = evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
     _persist_qa_decision(assessment)
