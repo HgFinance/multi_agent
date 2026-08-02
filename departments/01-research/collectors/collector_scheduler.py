@@ -96,6 +96,10 @@ JOBS: tuple[Job, ...] = (
     # (t1511 은 휴장에도 직전 종가를 주므로 그대로 넣으면 없는 관측이 생긴다).
     Job("vkospi", ("collectors/volatility_index_collector.py", "--collect"),
         daily_at=time(16, 5)),
+    # 스타일·안전자산 지수 6계열 - VKOSPI 와 같은 t1511 경로, 같은 휴장 규칙.
+    # 1분 뒤에 둬서 두 수집기가 같은 초에 LS 를 두드리지 않게 한다.
+    Job("style-index", ("collectors/style_index_collector.py", "--collect"),
+        daily_at=time(16, 6)),
     # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 20)),
