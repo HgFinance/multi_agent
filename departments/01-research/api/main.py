@@ -133,6 +133,18 @@ class HealthDomain(BaseModel):
     last_observed_kst: Optional[str]
 
 
+# ▶ Tool Gateway (2026-08-02): 허용목록을 선언에서 실제 강제로.
+#   Hermes 는 tool_allowlist 를 읽지도 않는다(컨테이너 실측) - 강제는 도구가
+#   있는 이 조회면에서만 성립한다. 기본은 관측 모드이고 위반은 응답 헤더로
+#   드러난다. TOOL_GATEWAY_ENFORCE=true 로 켜면 403 이 된다.
+try:
+    from tool_gateway import install as _install_gateway
+
+    _install_gateway(app)
+except Exception as _e:  # noqa: BLE001 - 게이트웨이 부재가 조회면을 죽이면 안 된다
+    print(f"⚠ Tool Gateway 미설치: {type(_e).__name__}: {_e}", file=sys.stderr)
+
+
 @app.get("/health")
 def health() -> dict:
     rows = _query(

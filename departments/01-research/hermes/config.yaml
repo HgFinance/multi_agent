@@ -56,8 +56,13 @@ agent:
     market-data-steward: [market.dq.read, market.snapshot.read]
     microstructure-analyst: [market.microstructure.read, market.snapshot.read]
     technical-analyst: [market.bars.read, market.snapshot.read]
-    fundamental-analyst: [research.evidence.financials.read, research.evidence.search]
-    news-sentiment-analyst: [research.evidence.news.read, research.evidence.stories.read]
+    # 공시 조회(2026-08-02 추가): Tool Gateway 자체점검이 "아무 페르소나도 못 쓰는
+    # 엔드포인트"로 /evidence/disclosures 를 잡아냈다. RES-05 는 재무의 근거로,
+    # RES-06 은 직무 자체가 "News, Filing and Sentiment" 라 공시를 읽는다.
+    fundamental-analyst: [research.evidence.financials.read, research.evidence.search,
+                          research.evidence.disclosures.read]
+    news-sentiment-analyst: [research.evidence.news.read, research.evidence.stories.read,
+                             research.evidence.disclosures.read]
     sector-regime-analyst: [market.regime.read, market.breadth.read]
     geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
     rag-librarian-evidence-curator: [research.evidence.search, research.evidence.chunk.write]

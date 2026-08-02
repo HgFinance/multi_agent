@@ -279,12 +279,22 @@ services:
       # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
       # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # Tool Gateway 강제 모드. 기본은 관측(위반을 헤더·로그로만 드러냄) -
+      # 기존 호출자(분석가 코드)가 아직 X-Agent-Persona 를 안 붙이므로 강제부터
+      # 켜면 파이프라인이 통째로 멈춘다. 호출자를 다 고친 뒤 true 로 올린다.
+      TOOL_GATEWAY_ENFORCE: ${TOOL_GATEWAY_ENFORCE:-false}
 
     # Docker Desktop(Windows/Mac)은 host.docker.internal 을 자동 제공하지만
     # 리눅스 엔진은 아니다 - host-gateway 매핑을 명시해 VPS 이전 시에도
     # 같은 compose 파일이 그대로 동작하게 한다(파일 상단 이전 원칙).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+    volumes:
+      # Tool Gateway 가 허용목록을 읽는다. **단일 출처는 config.yaml 이므로**
+      # API 쪽에 목록을 복제하지 않고 파일을 그대로 마운트한다 - 복제하면
+      # 둘이 어긋나고 어긋난 쪽이 조용히 이긴다. 읽기 전용.
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
 
     ports:
       - "127.0.0.1:8035:8035"   # 로컬 전용 - 외부 노출 금지
