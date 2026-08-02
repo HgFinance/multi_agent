@@ -57,6 +57,7 @@ counterparty_health 체크가 이미 실측(ctx.counterparty.health)을 CheckOut
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -72,6 +73,8 @@ _CONTRACTS_DIR = _BASE.parent / "02-trading" / "contracts"
 _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_ENGINE_DIR, _API_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
+
+from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
 
 from langgraph.graph import END, StateGraph  # noqa: E402
 
@@ -90,16 +93,43 @@ class RiskState(TypedDict, total=False):
     narrative: str
     escalate: bool
     notion_upload: Optional[dict]  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    fallbacks: list[dict]
+    observability: dict
+    report_markdown: str
+    evaluation: dict
+
+
+def _fallback(stage: str, exc: Exception) -> dict:
+    return {"stage": stage, "error": type(exc).__name__, "action": "ESCALATE"}
+
+
+def _fallback_narrative(stage: str, exc: Exception) -> str:
+    return (f"{stage} Agent를 사용할 수 없어 결정론적 결과만 유지했습니다 "
+            f"({type(exc).__name__}). 수동 검토와 후속 상태 확인이 필요합니다.")
+
+
+def _fallback_assessment(order_intent: dict, context: dict, exc: Exception) -> dict:
+    payload = json.dumps({"order_intent": order_intent, "context": context},
+                         ensure_ascii=False, sort_keys=True, default=str)
+    return {"risk_request_id": f"fallback-{hashlib.sha256(payload.encode()).hexdigest()[:16]}",
+            "verdict": "reject", "approved_quantity": None, "reason_codes": ["pipeline_fallback"],
+            "check_results": [], "calculation_version": "risk-pipeline-fallback-v1",
+            "input_hash": hashlib.sha256(payload.encode()).hexdigest(),
+            "trading_state": "HALTED"}
 
 
 # ── 노드 1: Trading State 실측 (결정론 직원) ────────────────────────────────
 def check_trading_state(state: RiskState) -> dict:
-    import redis as redis_lib
-    from trading_state_store import RedisTradingStateStore
+    try:
+        import redis as redis_lib
+        from trading_state_store import RedisTradingStateStore
 
-    store = RedisTradingStateStore(redis_lib.Redis.from_url(os.environ["REDIS_URL"]))
-    ts = store.get_state_fail_closed(state.get("scope", "fund:default"))
-    return {"trading_state": ts.value}
+        store = RedisTradingStateStore(redis_lib.Redis.from_url(os.environ["REDIS_URL"]))
+        ts = store.get_state_fail_closed(state.get("scope", "fund:default"))
+        return {"trading_state": ts.value}
+    except Exception as exc:
+        # Redis failure is a state-uncertainty condition, never an ENABLED fallback.
+        return {"trading_state": "HALTED", "fallbacks": [_fallback("trading_state", exc)]}
 
 
 # ── 노드 2: Pre-trade Gate (결정론 직원 - RiskEngine) ───────────────────────
@@ -148,25 +178,44 @@ Evidence:
 {json.dumps({"order_intent": state["order_intent"], "counterparty_health_check": cp,
              "reason_codes": a["reason_codes"], "verdict": a["verdict"]}, ensure_ascii=False, indent=1)}"""
 
-    call = chat or _hermes_chat
-    out = call(_persona("operational-counterparty-risk-agent"), task)
-    s, e = out.find("{"), out.rfind("}")
-    note = json.loads(out[s:e + 1])
-    for k in ("counterparty_narrative", "escalate"):
-        if k not in note:
-            raise ValueError(f"Counterparty 점검 결과에 {k} 가 없다 - 초안 거부")
-    return {"counterparty": note}
+    try:
+        call = chat or _hermes_chat
+        out = call(_persona("operational-counterparty-risk-agent"), task)
+        s, e = out.find("{"), out.rfind("}")
+        note = json.loads(out[s:e + 1])
+        for k in ("counterparty_narrative", "escalate"):
+            if k not in note:
+                raise ValueError(f"Counterparty 점검 결과에 {k} 가 없다 - 초안 거부")
+        return {"counterparty": note}
+    except Exception as exc:
+        if chat is not None:
+            raise
+        return {
+            "counterparty": {"counterparty_narrative": _fallback_narrative("Counterparty", exc),
+                              "escalate": True},
+            "fallbacks": [_fallback("counterparty", exc)],
+        }
 
 
 # ── 노드 4: Compliance (skills/agentic-rag 기존 baseline 재사용) ───────────
 def compliance_check(state: RiskState) -> dict:
-    from src.graph import run_compliance_check
+    try:
+        from src.graph import run_compliance_check
 
-    oi = state["order_intent"]
-    query = (f"Can we execute a {oi['side']} order for {oi['quantity']} units of "
-             f"instrument {oi['instrument_id']} under fund {oi['fund_id']} today?")
-    as_of_date = state["context"]["as_of"][:10]  # PIT 필터는 date-only(YYYY-MM-DD)를 요구한다
-    return {"compliance": run_compliance_check(query, as_of_date, persona="compliance-policy-agent")}
+        oi = state["order_intent"]
+        query = (f"Can we execute a {oi['side']} order for {oi['quantity']} units of "
+                 f"instrument {oi['instrument_id']} under fund {oi['fund_id']} today?")
+        as_of_date = state["context"]["as_of"][:10]  # PIT 필터는 date-only(YYYY-MM-DD)를 요구한다
+        return {"compliance": run_compliance_check(query, as_of_date, persona="compliance-policy-agent")}
+    except Exception as exc:
+        return {
+            "compliance": {"answer": {"verdict": "ambiguous", "cited_documents": [],
+                                        "rationale": _fallback_narrative("Compliance", exc),
+                                        "confidence": 0.0, "escalate": True},
+                            "grounded": False, "fallback": True, "attempts": 0,
+                            "fallback_reason": type(exc).__name__, "relevant_documents": []},
+            "fallbacks": [_fallback("compliance", exc)],
+        }
 
 
 # ── 노드 5: 종합 (risk-supervisor 페르소나 - Hermes AIAgent) ───────────────
@@ -199,15 +248,21 @@ Schema (JSON only):
 Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
 
-    call = chat or _hermes_chat
-    out = call(_persona("risk-supervisor"), task)
-    s, e = out.find("{"), out.rfind("}")
-    note = json.loads(out[s:e + 1])
-    for k in ("narrative", "escalate", "cited_checks"):
-        if k not in note:
-            raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
-    # 바인딩 verdict 는 LLM 출력이 아니라 assessment 에서 그대로 가져온다
-    return {"verdict": a["verdict"], "narrative": note["narrative"], "escalate": note["escalate"]}
+    try:
+        call = chat or _hermes_chat
+        out = call(_persona("risk-supervisor"), task)
+        s, e = out.find("{"), out.rfind("}")
+        note = json.loads(out[s:e + 1])
+        for k in ("narrative", "escalate", "cited_checks"):
+            if k not in note:
+                raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
+        # 바인딩 verdict 는 LLM 출력이 아니라 assessment 에서 그대로 가져온다
+        return {"verdict": a["verdict"], "narrative": note["narrative"], "escalate": note["escalate"]}
+    except Exception as exc:
+        if chat is not None:
+            raise
+        return {"verdict": a["verdict"], "narrative": _fallback_narrative("Risk Supervisor", exc),
+                "escalate": True, "fallbacks": [_fallback("supervisor", exc)]}
 
 
 def _assemble_out(state: RiskState) -> dict:
@@ -215,12 +270,28 @@ def _assemble_out(state: RiskState) -> dict:
     유지한다 - 그래프 노드(notion_report)와 외부 인터페이스(run_risk_department)가 따로 베끼면
     한쪽만 필드를 늘렸을 때 드리프트가 생긴다."""
     a = state["assessment"]
+    trace_id = (state.get("context") or {}).get("trace_id") or (state.get("order_intent") or {}).get("trace_id")
+    trace_id = trace_id or f"{PIPELINE_VERSION}:{a['risk_request_id']}"
+    executed_agents = []
+    if a.get("check_results"):
+        executed_agents += ["market-liquidity-risk-agent", "pre-trade-risk-analyst"]
+    if state.get("counterparty"):
+        executed_agents.append("operational-counterparty-risk-agent")
+    if state.get("compliance"):
+        executed_agents.append("compliance-policy-agent")
+    if state.get("narrative"):
+        executed_agents.append("risk-supervisor")
+    risk_agents = ["risk-supervisor", "market-liquidity-risk-agent", "derivatives-margin-risk-agent",
+                   "compliance-policy-agent", "pre-trade-risk-analyst", "operational-counterparty-risk-agent"]
     return {"risk_request_id": a["risk_request_id"], "verdict": state["verdict"],
             "approved_quantity": a["approved_quantity"], "reason_codes": a["reason_codes"],
             "check_results": a["check_results"], "calculation_version": a["calculation_version"],
             "input_hash": a["input_hash"], "trading_state": state["trading_state"],
             "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
-            "narrative": state["narrative"], "escalate": state["escalate"]}
+            "narrative": state["narrative"], "escalate": state["escalate"],
+            "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
+            "agent_execution": {"executed": executed_agents,
+                                 "not_executed": [agent for agent in risk_agents if agent not in executed_agents]}}
 
 
 # ── 노드 6: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────
@@ -229,8 +300,18 @@ def notion_report(state: RiskState, *, uploader=None) -> dict:
 
     out = _assemble_out(state)
     report_md = _render_report_md(state["order_intent"], state["context"], out)
+    evaluation = evaluation_metrics(out, report_md)
+    report_md = _render_report_md(state["order_intent"], state["context"],
+                                   {**out, "evaluation": evaluation})
+    evaluation = evaluation_metrics(out, report_md)
     upload = uploader or upload_case
-    return {"notion_upload": upload(state["order_intent"], state["context"], out, report_md=report_md)}
+    try:
+        notion_upload = upload(state["order_intent"], state["context"], out, report_md=report_md)
+    except Exception as exc:
+        notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
+        evaluation["fallback_count"] += 1
+    evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
+    return {"notion_upload": notion_upload, "report_markdown": report_md, "evaluation": evaluation}
 
 
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
@@ -271,9 +352,19 @@ def build_pipeline():
 
 def run_risk_department(order_intent: dict, context: dict, scope: str = "fund:default") -> dict:
     """본부 단독 실행 - QA/연구본부의 run_<dept>_department 와 같은 외부 인터페이스."""
-    out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
+    try:
+        out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
+    except Exception as exc:
+        out = {"order_intent": order_intent, "context": context, "scope": scope,
+               "assessment": _fallback_assessment(order_intent, context, exc),
+               "trading_state": "HALTED", "verdict": "reject",
+               "narrative": _fallback_narrative("Risk pipeline", exc), "escalate": True,
+               "fallbacks": [_fallback("pipeline", exc)]}
+        out.update(notion_report(out))
     result = _assemble_out(out)
     result["notion_upload"] = out.get("notion_upload")
+    result["report_markdown"] = out.get("report_markdown", "")
+    result["evaluation"] = out.get("evaluation", evaluation_metrics(result))
     return result
 
 
@@ -293,10 +384,10 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         f"| **승인 수량** | {out['approved_quantity']} |",
         f"| **판정 엔진** | departments/03-risk/engine/risk_engine.py (`{out['calculation_version']}`) |",
         f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
-        f"| **trading_state** | {out['trading_state']} |",
-        f"| **주문** | {order_intent.get('side')} {order_intent.get('quantity')} x "
-        f"{order_intent.get('instrument_id')} (fund {order_intent.get('fund_id')}) |",
-        f"| **escalate** | {out['escalate']} |",
+        f"| **trading_state** | {md_cell(out['trading_state'])} |",
+        f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
+        f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |",
+        f"| **escalate** | {md_cell(out['escalate'])} |",
         f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
         "",
         "---",
@@ -306,15 +397,15 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         "| Check | 통과 | 상세 |",
         "|---|---|---|",
     ]
-    lines += [f"| {c['name']} | {c['passed']} | {c['detail']} |" for c in checks]
+    lines += [f"| {md_cell(c.get('name'))} | {md_cell(c.get('passed'))} | {md_cell(c.get('detail'))} |" for c in checks]
     if not checks:
         lines.append("| — | — | (check_results 없음) |")
 
     lines += ["", "## Counterparty / Broker 점검 (operational-counterparty-risk-agent)", ""]
     counterparty = out.get("counterparty")
     if counterparty:
-        lines += [counterparty["counterparty_narrative"],
-                  f"(escalate: {counterparty['escalate']})"]
+        lines += [md_cell(counterparty.get("counterparty_narrative")),
+                  f"(escalate: {md_cell(counterparty.get('escalate'))})"]
     else:
         lines.append("counterparty_health 미플래그 - 조건부 노드 미호출")
 
@@ -323,20 +414,44 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
               "", "## Compliance (compliance-policy-agent, Agentic RAG)", ""]
     if compliance:
         lines += ["| 필드 | 값 |", "|---|---|",
-                  f"| grounded | {compliance.get('grounded')} |",
-                  f"| attempts | {compliance.get('attempts')} |",
-                  f"| answer | {compliance.get('answer')} |", ""]
+                  f"| grounded | {md_cell(compliance.get('grounded'))} |",
+                  f"| attempts | {md_cell(compliance.get('attempts'))} |",
+                  f"| answer | {json_cell(compliance.get('answer'))} |", ""]
         docs = compliance.get("relevant_documents") or []
         if docs:
             lines += ["| 참조 문서 | version | score |", "|---|---|---|"]
-            lines += [f"| {d['title']} (`{d['document_id']}`) | {d['version']} | {d['score']} |" for d in docs]
+            lines += [f"| {md_cell(d.get('title'))} (`{md_cell(d.get('document_id'))}`) | "
+                      f"{md_cell(d.get('version'))} | {md_cell(d.get('score'))} |" for d in docs]
     else:
         lines.append("REJECT 조기 종료 - compliance_check 생략됨")
 
     lines += [
         "", "## 종합 서술 (risk-supervisor, Hermes)", "",
-        out["narrative"],
+        md_cell(out["narrative"]),
     ]
+
+    evaluation = out.get("evaluation") or {}
+    if evaluation:
+        lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
+        lines += [f"| {md_cell(key)} | {json_cell(value)} |" for key, value in evaluation.items()]
+
+    observability = out.get("observability") or {}
+    if observability:
+        lines += ["", "## LangSmith / HR 관측성 전달", "", "| 필드 | 값 |", "|---|---|",
+                  f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
+                  f"| LangSmith | {json_cell(observability.get('langsmith'))} |"]
+
+    agent_execution = out.get("agent_execution") or {}
+    if agent_execution:
+        lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
+        lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
+        lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+
+    fallbacks = out.get("fallbacks") or []
+    if fallbacks:
+        lines += ["", "## Fallback / Escalation", "", "| 단계 | 오류 | 조치 |", "|---|---|---|"]
+        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | {md_cell(item.get('action'))} |"
+                  for item in fallbacks]
 
     notion = out.get("notion_upload")
     if notion is not None:
@@ -471,7 +586,8 @@ def _check_notion_report_node():
                             "reason_codes": [], "check_results": [], "calculation_version": "v",
                             "input_hash": "h"}}
     result = notion_report(state, uploader=stub_uploader)
-    assert result == {"notion_upload": {"ok": True, "url": "https://notion.so/fake"}}
+    assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
+    assert result["report_markdown"]
     assert captured["out"]["risk_request_id"] == "r1"
     assert "risk_request_id" in captured["report_md"]  # _render_report_md 가 실제로 불렸는지
     print("  Notion Reporter 노드        OK")

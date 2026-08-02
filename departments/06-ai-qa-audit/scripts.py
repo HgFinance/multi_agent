@@ -47,13 +47,14 @@ model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started 항
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langgraph.graph import END, StateGraph
 from langsmith.wrappers import wrap_openai
@@ -63,6 +64,8 @@ _BASE = Path(__file__).resolve().parent
 _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_BASE / "evidence", _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
+
+from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
 
 PIPELINE_VERSION = "qa-department-pipeline-v1"
 
@@ -100,6 +103,30 @@ class QAState(TypedDict, total=False):
     narrative: str
     escalate: bool
     notion_upload: dict     # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    fallbacks: list[dict]
+    observability: dict
+    report_markdown: str
+    evaluation: dict
+
+
+def _fallback(stage: str, exc: Exception) -> dict:
+    return {"stage": stage, "error": type(exc).__name__, "action": "ESCALATE"}
+
+
+def _fallback_narrative(stage: str, exc: Exception) -> str:
+    return (f"{stage} Agent를 사용할 수 없어 결정론적 QA 판정만 유지했습니다 "
+            f"({type(exc).__name__}). 원본 부서와 독립 검토자에게 수동 확인을 요청합니다.")
+
+
+def _fallback_assessment(state: QAState, exc: Exception) -> dict:
+    payload = json.dumps(state.get("artifact", {}), ensure_ascii=False, sort_keys=True, default=str)
+    input_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return {"assessment": {
+        "qa_decision_id": str(uuid4()), "decision": "FAIL", "reason_codes": ["pipeline_fallback"],
+        "calculation_version": "qa-pipeline-fallback-v1", "input_hash": input_hash,
+        "claim_checks": [], "findings": [{"finding_id": str(uuid4()), "finding_type": "pipeline_failure",
+                                             "severity": "CRITICAL", "description": _fallback_narrative("Evidence QA", exc)}],
+    }, "fallbacks": [_fallback("evidence_check", exc)]}
 
 
 # ── 노드 1: Evidence 검사 (결정론 직원 - EvidenceQaEngine) ─────────────────
@@ -331,8 +358,8 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
         f"| **판정 (verdict)** | **{out['verdict']}** |",
         f"| **판정 엔진** | departments/06-ai-qa-audit/evidence/evidence_qa_engine.py (`{out['calculation_version']}`) |",
         f"| **input_hash** | `{out['input_hash']}` (같은 Artifact·Context면 재현 가능) |",
-        f"| **decision_time (PIT)** | {decision_time} |",
-        f"| **escalate** | {out['escalate']} |",
+        f"| **decision_time (PIT)** | {md_cell(decision_time)} |",
+        f"| **escalate** | {md_cell(out['escalate'])} |",
         f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
         "",
         "---",
@@ -342,7 +369,8 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
         "| # | Claim | 검사 결과 | 사유 |",
         "|---|---|---|---|",
     ]
-    lines += [f"| {c['claim_index']} | {c['claim']} | {c['result']} | {c['reason']} |" for c in checks]
+    lines += [f"| {md_cell(c.get('claim_index'))} | {md_cell(c.get('claim'))} | "
+              f"{md_cell(c.get('result'))} | {md_cell(c.get('reason'))} |" for c in checks]
     if not checks:
         lines.append("| — | (claim_checks 없음) | — | — |")
 
@@ -353,9 +381,9 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
             answer = r.get("answer") or {}
             lines += [f"### Claim #{r['claim_index']}", "",
                       "| 필드 | 값 |", "|---|---|",
-                      f"| verdict | {answer.get('verdict')} |",
-                      f"| grounded | {r.get('grounded')} |",
-                      f"| rationale | {answer.get('rationale')} |", ""]
+                      f"| verdict | {md_cell(answer.get('verdict'))} |",
+                      f"| grounded | {md_cell(r.get('grounded'))} |",
+                      f"| rationale | {md_cell(answer.get('rationale'))} |", ""]
     else:
         lines.append("UNSUPPORTED/CONTRADICTED claim 없음 - 조건부 노드 미호출")
 
@@ -364,20 +392,43 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
               "", "## Findings", ""]
     if findings:
         for f in findings:
-            lines += [f"### `{f['finding_id']}`", "",
+            lines += [f"### `{md_cell(f.get('finding_id'))}`", "",
                       "| 필드 | 값 |", "|---|---|",
-                      f"| 유형 | `{f['finding_type']}` |",
-                      f"| 심각도 | {f['severity']} |",
-                      f"| 설명 | {f['description']} |", ""]
+                      f"| 유형 | `{md_cell(f.get('finding_type'))}` |",
+                      f"| 심각도 | {md_cell(f.get('severity'))} |",
+                      f"| 설명 | {md_cell(f.get('description'))} |", ""]
     else:
         lines.append("없음")
 
     lines += [
         "", "## Claim 서술 (evidence-qa-agent, 내부 Ollama - 판정 재해석 없이 결과만 풀어씀)", "",
-        out["claim_narrative"],
+        md_cell(out["claim_narrative"]),
         "", "## 종합 서술 (qa-audit-supervisor, Hermes)", "",
-        out["narrative"],
+        md_cell(out["narrative"]),
     ]
+
+    evaluation = out.get("evaluation") or {}
+    if evaluation:
+        lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
+        lines += [f"| {md_cell(key)} | {json_cell(value)} |" for key, value in evaluation.items()]
+
+    observability = out.get("observability") or {}
+    if observability:
+        lines += ["", "## LangSmith / HR 관측성 전달", "", "| 필드 | 값 |", "|---|---|",
+                  f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
+                  f"| LangSmith | {json_cell(observability.get('langsmith'))} |"]
+
+    agent_execution = out.get("agent_execution") or {}
+    if agent_execution:
+        lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
+        lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
+        lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+
+    fallbacks = out.get("fallbacks") or []
+    if fallbacks:
+        lines += ["", "## Fallback / Escalation", "", "| 단계 | 오류 | 조치 |", "|---|---|---|"]
+        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | "
+                  f"{md_cell(item.get('action'))} |" for item in fallbacks]
 
     notion = out.get("notion_upload")
     if notion is not None:
@@ -405,10 +456,128 @@ def _check_notion_report_node():
              "assessment": {"qa_decision_id": "d1", "decision": "PASS", "reason_codes": [],
                             "claim_checks": [], "findings": [], "calculation_version": "v", "input_hash": "h"}}
     result = notion_report(state, uploader=stub_uploader)
-    assert result == {"notion_upload": {"ok": True, "url": "https://notion.so/fake"}}
+    assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
+    assert result["report_markdown"]
     assert captured["out"]["qa_decision_id"] == "d1"
     assert "qa_decision_id" in captured["report_md"]  # _render_report_md 가 실제로 불렸는지
     print("  Notion Reporter 노드        OK")
+
+
+_RAW_CHECK_EVIDENCE = check_evidence
+_RAW_HALLUCINATION_REVIEW = hallucination_review
+_RAW_DRAFT_CLAIM_NARRATIVE = draft_claim_narrative
+_RAW_SUPERVISE = supervise
+
+
+def check_evidence(state: QAState) -> dict:
+    try:
+        return _RAW_CHECK_EVIDENCE(state)
+    except Exception as exc:
+        return _fallback_assessment(state, exc)
+
+
+def hallucination_review(state: QAState) -> dict:
+    try:
+        return _RAW_HALLUCINATION_REVIEW(state)
+    except Exception as exc:
+        flagged = [c for c in state.get("assessment", {}).get("claim_checks", [])
+                   if c.get("result") in ("UNSUPPORTED", "CONTRADICTED")]
+        return {"hallucination_reviews": [{"claim_index": c.get("claim_index"), "answer": {
+                    "verdict": "HALLUCINATION", "cited_documents": [],
+                    "rationale": _fallback_narrative("Hallucination Critic", exc),
+                    "confidence": 0.0, "escalate": True}, "grounded": False,
+                    "fallback": True, "fallback_reason": type(exc).__name__} for c in flagged],
+                "fallbacks": [_fallback("hallucination_review", exc)]}
+
+
+def draft_claim_narrative(state: QAState) -> dict:
+    try:
+        return _RAW_DRAFT_CLAIM_NARRATIVE(state)
+    except Exception as exc:
+        checks = state.get("assessment", {}).get("claim_checks", [])
+        summary = "; ".join(f"Claim {c.get('claim_index')}: {c.get('result')} — {c.get('reason')}"
+                            for c in checks) or "검사된 Claim 없음"
+        return {"claim_narrative": f"결정론적 Evidence QA 결과를 전달합니다. {summary}",
+                "fallbacks": [_fallback("claim_narrative", exc)]}
+
+
+def supervise(state: QAState, *, chat=None) -> dict:
+    try:
+        return _RAW_SUPERVISE(state, chat=chat)
+    except Exception as exc:
+        if chat is not None:
+            raise
+        decision = state.get("assessment", {}).get("decision", "FAIL")
+        return {"verdict": decision, "narrative": _fallback_narrative("QA Supervisor", exc),
+                "escalate": True, "fallbacks": [_fallback("supervisor", exc)]}
+
+
+_RAW_ASSEMBLE_OUT = _assemble_out
+
+
+def _assemble_out(state: QAState) -> dict:
+    out = _RAW_ASSEMBLE_OUT(state)
+    trace_id = (state.get("artifact") or {}).get("trace_id")
+    trace_id = trace_id or f"{PIPELINE_VERSION}:{out['qa_decision_id']}"
+    out["fallbacks"] = state.get("fallbacks", [])
+    out["observability"] = langsmith_handoff(str(trace_id))
+    executed_agents = []
+    if out.get("claim_checks") is not None:
+        executed_agents.append("evidence-qa-agent")
+    if out.get("hallucination_reviews"):
+        executed_agents.append("hallucination-critic")
+    if out.get("claim_narrative"):
+        executed_agents.append("evidence-qa-agent")
+    if out.get("narrative"):
+        executed_agents.append("qa-audit-supervisor")
+    qa_agents = ["qa-audit-supervisor", "evidence-qa-agent", "hallucination-critic", "model-risk-agent",
+                 "internal-audit-agent", "agent-ops-monitor", "tool-permission-security-reviewer",
+                 "incident-postmortem-agent"]
+    out["agent_execution"] = {"executed": list(dict.fromkeys(executed_agents)),
+                               "not_executed": [agent for agent in qa_agents if agent not in executed_agents]}
+    return out
+
+
+_RAW_NOTION_REPORT = notion_report
+
+
+def notion_report(state: QAState, *, uploader=None) -> dict:
+    out = _assemble_out(state)
+    report_md = _render_report_md(state["artifact"], state["decision_time"], out)
+    evaluation = evaluation_metrics(out, report_md)
+    report_md = _render_report_md(state["artifact"], state["decision_time"],
+                                   {**out, "evaluation": evaluation})
+    evaluation = evaluation_metrics(out, report_md)
+    from notion_reporter import upload_case
+    try:
+        upload = uploader or upload_case
+        notion_upload = upload(state["artifact"], state["decision_time"], out, report_md=report_md)
+    except Exception as exc:
+        notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
+        evaluation["fallback_count"] += 1
+    evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
+    return {"notion_upload": notion_upload, "report_markdown": report_md, "evaluation": evaluation}
+
+
+_RAW_RUN_QA_DEPARTMENT = run_qa_department
+
+
+def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) -> dict:
+    try:
+        out = build_pipeline().invoke({"artifact": artifact, "evidence_store": evidence_store,
+                                       "decision_time": decision_time})
+    except Exception as exc:
+        out = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
+               **_fallback_assessment({"artifact": artifact}, exc),
+               "claim_narrative": _fallback_narrative("QA pipeline", exc),
+               "hallucination_reviews": [], "verdict": "FAIL",
+               "narrative": _fallback_narrative("QA Supervisor", exc), "escalate": True}
+        out.update(notion_report(out))
+    result = _assemble_out(out)
+    result["notion_upload"] = out.get("notion_upload")
+    result["report_markdown"] = out.get("report_markdown", "")
+    result["evaluation"] = out.get("evaluation", evaluation_metrics(result))
+    return result
 
 
 if __name__ == "__main__":

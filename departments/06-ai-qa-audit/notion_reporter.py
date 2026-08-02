@@ -16,6 +16,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from reporting import notion_rich_text_chunks
+
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
 
@@ -49,7 +51,7 @@ def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
 
 
 def _rich_text(s) -> dict:
-    return {"rich_text": [{"text": {"content": (s or "")[:2000]}}]}
+    return {"rich_text": notion_rich_text_chunks(s)}
 
 
 def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str = "", env: dict | None = None) -> dict:
