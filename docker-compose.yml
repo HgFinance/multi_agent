@@ -166,7 +166,10 @@ services:
       context: departments/01-research
     container_name: hedgefund-batch-collectors
     restart: unless-stopped
-    command: ["python", "collectors/collector_scheduler.py"]
+    # --serve 가 필수다(2026-08-02). 인자가 없으면 자체 점검만 하고 끝난다 -
+    # "python <파일> = 자체 점검"이라는 저장소 관례를 이 파일만 어겨서,
+    # 전 모듈 점검 루프가 돌 때마다 상주 스케줄러가 조용히 떴다(4회).
+    command: ["python", "collectors/collector_scheduler.py", "--serve"]
 
     depends_on:
       timescaledb:

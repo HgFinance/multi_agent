@@ -48,9 +48,18 @@ import re
 import sys
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
+# sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+from llm_client import chat as llm_chat  # noqa: E402
+from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
+from number_guard import caution_lines, flag_unmatched  # noqa: E402
+from llm_client import narrate as llm_narrate  # noqa: E402
 
 PERSONA = "microstructure-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-microstructure-analyst-v1"
@@ -276,40 +285,17 @@ def narrate(readout: dict, symbol: str, llm: Optional[Callable] = None) -> Micro
               f"Microstructure readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    call = llm or _ollama_call
-    last_err = None
-    for attempt in range(2):
-        text = call(_SYSTEM, prompt if attempt == 0 else
-                    prompt + f"\n\nYour previous output failed validation: {last_err}. "
-                             f"Return ONLY valid JSON for the schema.")
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            return MicroNote.model_validate_json(text[start:end + 1])
-        except (ValidationError, ValueError) as e:
-            last_err = str(e)[:200]
-    raise RuntimeError(f"LLM 서술이 Schema 를 두 번 어겼다: {last_err}")
+    return llm_narrate(_SYSTEM, prompt, MicroNote, llm or _ollama_call)
 
 
 def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama (OpenAI 호환). technical_analyst._ollama_call 과 동일
-    패턴. qwen3 계열의 <think> 프리앰블은 호출부 파서가 첫 '{'~마지막 '}' 만
-    취하므로 그대로 견딘다."""
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 무시한다
-            "response_format": {"type": "json_object"},
-        }).encode(),
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
+
+    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
+    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
+    """
+    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
+                    timeout=LLM_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -337,18 +323,14 @@ def verify(note: MicroNote, readout: dict) -> tuple[MicroNote, dict]:
         else:
             dropped["hallucinated_metrics"].append(k)
 
+    # 숫자 대조 규칙은 evidence/number_guard 가 단일 출처다. 풀은 여기서
+    # 고른다 - 이 분석가는 비율·bp 지표만 인용 대상이고 체결량 같은 절대
+    # 수량은 뺀다(NUMERIC_POOL_KEYS).
     pool = [float(readout[k]) for k in NUMERIC_POOL_KEYS
             if isinstance(readout.get(k), (int, float))
             and not isinstance(readout.get(k), bool)]
-    for m in _NUM_RE.finditer(note.summary):
-        x = float(m.group(1))
-        if not any(abs(x - v) <= 0.1 or abs(x + v) <= 0.1 for v in pool):
-            dropped["flagged_numbers"].append(m.group(0))
-
-    cautions = list(note.cautions)
-    for f in dropped["flagged_numbers"]:
-        cautions.append(f"[숫자검증] summary 의 {f} 는 readout 수치와 불일치"
-                        f"(±0.1 밖) - 해당 문장 신뢰 금지")
+    dropped["flagged_numbers"] = flag_unmatched(note.summary, pool)
+    cautions = list(note.cautions) + caution_lines(dropped["flagged_numbers"])
 
     assessment = note.assessment
     code_assessment = readout.get("assessment")
@@ -358,6 +340,14 @@ def verify(note: MicroNote, readout: dict) -> tuple[MicroNote, dict]:
         dropped["assessment_restored"] = reason
         cautions.append("[복원] " + reason)
         assessment = code_assessment
+
+    # 의미 오서술 가드 - **이 분석가에는 없었다**(2026-08-02 배선). 사전의
+    # spread_bp_p50/p90 백분위 리터럴 규칙은 애초에 이 분석가의 실측 사고
+    # (사례 3: 키 이름 속 50/90 을 %로 서술)에서 나왔는데, 정작 여기에는
+    # 안 붙어 있었다. 숫자 대조는 수치가 readout 에 있으면 통과시키므로
+    # 라벨을 바꿔 부르는 오서술은 이 가드만 잡는다. v1 은 표시만 한다.
+    dropped["label_flags"] = audit_narrative(note.summary, readout)
+    cautions += label_caution_lines(dropped["label_flags"])
 
     return (note.model_copy(update={"assessment": assessment, "used_metrics": kept,
                                     "cautions": cautions}),

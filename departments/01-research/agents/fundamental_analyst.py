@@ -52,9 +52,17 @@ import sys
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
+# sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+from llm_client import chat as llm_chat  # noqa: E402
+from number_guard import flag_unmatched  # noqa: E402
+from llm_client import narrate as llm_narrate  # noqa: E402
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -325,38 +333,17 @@ def narrate(readout: dict, symbol: str, llm=None) -> FundamentalNote:
     prompt = (f"인용 가능한 필드 키: {list(readout['fields'])}\n"
               "readout:\n" + json.dumps(payload, ensure_ascii=False, indent=1))
 
-    call = llm or _ollama_call
-    last_err = None
-    for attempt in range(2):
-        text = call(_SYSTEM, prompt if attempt == 0 else
-                    prompt + f"\n\n직전 출력이 검증에 실패했다: {last_err}. "
-                             "스키마에 맞는 JSON 만 다시 내라.")
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            return FundamentalNote.model_validate_json(text[start:end + 1])
-        except (ValidationError, ValueError) as e:
-            last_err = str(e)[:200]
-    raise RuntimeError(f"LLM 서술이 Schema 를 두 번 어겼다: {last_err}")
+    return llm_narrate(_SYSTEM, prompt, FundamentalNote, llm or _ollama_call)
 
 
 def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama (OpenAI 호환). qwen3 계열의 <think> 프리앰블은 호출부가
-    첫 '{'~마지막 '}' 만 취하므로 그대로 견딘다."""
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }).encode(),
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
+
+    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
+    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
+    """
+    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
+                    timeout=LLM_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -370,14 +357,14 @@ def verify(note: FundamentalNote, readout: dict) -> dict:
     kept = [f for f in note.used_fields if f in fields]
     halluc = [f for f in note.used_fields if f not in fields]
 
-    # 4b. 서술 속 % 가 readout 의 어떤 % 값과도 ±0.1%p 안에서 안 맞으면 플래그
+    # 4b. 서술 속 수치가 readout 값과 안 맞으면 플래그.
+    # 규칙은 evidence/number_guard 가 단일 출처다. 예전에는 여기만 (a) % 만 보고
+    # (b) **부호 반전을 허용하지 않았다** - 코드가 -3.2 를 냈는데 서술이
+    # "3.2% 감소"라고 쓰는 정상 문장을 위반으로 잡았다(2026-08-02 통일).
     known = [info["value"] for k, info in fields.items()
              if k.endswith("_pct") and info.get("value") is not None]
-    pct_flags = []
-    for m in re.findall(r"(-?\d+(?:\.\d+)?)\s*%", note.summary):
-        p = float(m)
-        if not any(abs(p - kv) <= 0.1 for kv in known):
-            pct_flags.append(f"서술의 {p}% 가 readout 어느 값과도 ±0.1%p 안에 없다")
+    pct_flags = [f"서술의 {raw} 가 readout 어느 값과도 ±0.1 안에 없다"
+                 for raw in flag_unmatched(note.summary, known)]
 
     # 4c. YoY 부호와 stance 의 정면 모순 - 전 항목이 반대 부호면 MIXED 강등
     yoys = [info["value"] for k, info in fields.items()

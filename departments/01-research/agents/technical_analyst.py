@@ -51,7 +51,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 # 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from narrative_guard import audit_narrative  # noqa: E402
+from llm_client import chat as llm_chat  # noqa: E402
+from number_guard import caution_lines, flag_unmatched, numeric_pool  # noqa: E402
+from llm_client import narrate as llm_narrate  # noqa: E402
+from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
 
 PERSONA = "technical-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-technical-analyst-v1"
@@ -241,40 +244,17 @@ def narrate(readout: dict, symbol: str, llm: Optional[Callable] = None) -> Techn
               f"Technical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    call = llm or _ollama_call
-    last_err = None
-    for attempt in range(2):
-        text = call(_SYSTEM, prompt if attempt == 0 else
-                    prompt + f"\n\nYour previous output failed validation: {last_err}. "
-                             f"Return ONLY valid JSON for the schema.")
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            return TechnicalNote.model_validate_json(text[start:end + 1])
-        except (ValidationError, ValueError) as e:
-            last_err = str(e)[:200]
-    raise RuntimeError(f"LLM 서술이 Schema 를 두 번 어겼다: {last_err}")
+    return llm_narrate(_SYSTEM, prompt, TechnicalNote, llm or _ollama_call)
 
 
 def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama (OpenAI 호환). news_sentiment_analyst._ollama_call 과 동일
-    패턴. qwen3 계열의 <think> 프리앰블은 호출부 파서가 첫 '{'~마지막 '}' 만
-    취하므로 그대로 견딘다."""
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 무시한다
-            "response_format": {"type": "json_object"},
-        }).encode(),
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
+
+    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
+    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
+    """
+    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
+                    timeout=LLM_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -301,19 +281,12 @@ def verify(note: TechnicalNote, readout: dict) -> tuple[TechnicalNote, dict]:
         else:
             dropped["hallucinated_metrics"].append(k)
 
-    # summary 숫자 대조: readout 의 수치 풀(지표+참조값, bars_used 제외)과 비교
-    pool = [float(v) for k, v in readout.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-            and k != "bars_used"]
-    for m in _PCT_RE.finditer(note.summary):
-        x = float(m.group(1))
-        if not any(abs(x - v) <= 0.1 or abs(x + v) <= 0.1 for v in pool):
-            dropped["flagged_numbers"].append(m.group(0))
-
-    cautions = list(note.cautions)
-    for f in dropped["flagged_numbers"]:
-        cautions.append(f"[숫자검증] summary 의 {f} 는 readout 수치와 불일치"
-                        f"(±0.1 밖) - 해당 문장 신뢰 금지")
+    # summary 숫자 대조 - 규칙은 evidence/number_guard 가 단일 출처다.
+    # 예전에는 여기서 %만 봤다. 그래서 이 분석가가 "3.5배"를 지어내면
+    # 아무도 안 잡았다(복붙이 갈라진 자리 = 뚫린 자리).
+    pool = numeric_pool(readout, exclude=("bars_used",))
+    dropped["flagged_numbers"] = flag_unmatched(note.summary, pool)
+    cautions = list(note.cautions) + caution_lines(dropped["flagged_numbers"])
 
     stance = note.stance
     mom = readout.get("momentum_20d_pct")
@@ -335,13 +308,7 @@ def verify(note: TechnicalNote, readout: dict) -> tuple[TechnicalNote, dict]:
     # 위 숫자 대조가 못 잡는다 - 라벨-수치 결합을 같은 문장 단위로 검사한다.
     # v1 은 표시만 한다(stance 강등 없음) - 오탐 위험을 낮게 시작.
     dropped["label_flags"] = audit_narrative(note.summary, readout)
-    for lf in dropped["label_flags"]:
-        if lf["check"] == "percentile_literal":
-            cautions.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
-        else:
-            cautions.append(
-                f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} 수치인데 "
-                f"같은 문장에 다른 지표 라벨 '{lf['forbidden_hit']}' - 오서술 의심")
+    cautions += label_caution_lines(dropped["label_flags"])
 
     return (note.model_copy(update={"stance": stance, "used_metrics": kept,
                                     "cautions": cautions}),

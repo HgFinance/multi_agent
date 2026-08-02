@@ -41,6 +41,8 @@ sys.path.insert(0, str(_BASE / "agents"))
 
 from langgraph.graph import END, StateGraph  # noqa: E402
 
+from evidence.llm_client import chat as llm_chat  # noqa: E402
+
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
 KST = timezone(timedelta(hours=9))
 
@@ -407,21 +409,21 @@ Evidence:
     return {"packet": packet}
 
 
+SUPERVISOR_TEMPERATURE = 0.2   # 총괄은 분석가(0.1)보다 조금 느슨하게 종합한다
+SUPERVISOR_TIMEOUT = 600       # 14b + <think> - 분석가보다 훨씬 길다
+# 실측: 기본값에서 JSON 이 잘려 스키마 위반 -> 4096 -> 분석가 6인 확장 후
+# <think> 가 길어져 또 잘림(마지막 키 invalidation 소실)이라 8192.
+# 입력 상한(_digest)과 함께 쓴다 - 한쪽만으로는 확장할 때마다 다시 깨진다.
+SUPERVISOR_MAX_TOKENS = 8192
+
+
 def _ollama_chat(system: str, user: str) -> str:
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({"model": SUPERVISOR_MODEL, "temperature": 0.2,
-                         "response_format": {"type": "json_object"},
-                         # 실측: 기본값에서 JSON 이 잘려 스키마 위반 -> 4096 ->
-                         # 분석가 6인 확장 후 <think> 가 길어져 또 잘림(마지막
-                         # 키 invalidation 소실)이라 8192. 입력 상한(_digest)과
-                         # 함께 쓴다 - 한쪽만으로는 확장할 때마다 다시 깨진다.
-                         "max_tokens": 8192,
-                         "messages": [{"role": "system", "content": system},
-                                      {"role": "user", "content": user}]}).encode())
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read())["choices"][0]["message"]["content"]
+    """호출 모양은 evidence/llm_client 가 단일 출처다. 여기 남는 것은 총괄의
+    설정뿐 - 이 셋만 분석가와 다를 이유가 실제로 있다."""
+    return llm_chat(system, user, base=OLLAMA_BASE, model=SUPERVISOR_MODEL,
+                    timeout=SUPERVISOR_TIMEOUT,
+                    temperature=SUPERVISOR_TEMPERATURE,
+                    max_tokens=SUPERVISOR_MAX_TOKENS)
 
 
 # ── 그래프 조립 ────────────────────────────────────────────────────────────

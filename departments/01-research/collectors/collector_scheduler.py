@@ -26,9 +26,15 @@
   - 뉴스·실시간 시세: 전용 상주 컨테이너(news-watcher, ls-realtime)가 맡는다.
 
 실행
-  python collectors/collector_scheduler.py            # 상주 실행
-  python collectors/collector_scheduler.py --check    # 자체 점검 (실행 없음)
+  python collectors/collector_scheduler.py            # 자체 점검 (실행 없음)
+  python collectors/collector_scheduler.py --check    # 같음 (명시형)
+  python collectors/collector_scheduler.py --serve    # **상주 실행** (compose 가 쓴다)
   python collectors/collector_scheduler.py --once 이름  # 한 Job 즉시 1회 (수동 점검용)
+
+  인자 없는 실행이 상주가 아닌 이유: 이 저장소는 "python <파일> = 자체 점검"이
+  관례다. 이 파일만 예외라서, 전 모듈을 훑는 점검 루프가 돌 때마다 상주
+  스케줄러가 조용히 떴다(2026-08-02까지 4회). 관례를 어기는 쪽이 플래그를
+  달게 했다.
 """
 from __future__ import annotations
 
@@ -408,7 +414,7 @@ if __name__ == "__main__":
         _check_exit_codes()
         _check_status_classification()
         _check_record_failure_is_contained()
-        print("스케줄러 5개 영역 통과. 상주 실행은 인자 없이")
+        print("스케줄러 5개 영역 통과. 상주 실행은 --serve")
         raise SystemExit(0)
 
     if "--once" in sys.argv:
@@ -422,4 +428,22 @@ if __name__ == "__main__":
         print(f"exit={code}")
         raise SystemExit(0 if code in (0, EXIT_SKIP) else code)
 
-    raise SystemExit(main())
+    # ▶ 상주 기동은 **명시적으로만** (2026-08-02)
+    #   예전에는 인자가 없으면 곧장 상주 루프였다. 그런데 이 저장소의 관례는
+    #   "python <파일>" = 자체 점검이라, 전 모듈을 훑는 점검 루프가 이 파일을
+    #   만날 때마다 스케줄러가 조용히 떴다(네 번 겪었다 - 그때마다 사람이
+    #   알아채고 정리해야 했다). 관례를 지키는 쪽이 아니라 **어기는 쪽이
+    #   비용을 내야** 한다: 상주는 --serve 로만, 인자 없으면 점검이다.
+    if "--serve" in sys.argv:
+        raise SystemExit(main())
+
+    print(f"{SCHEDULER_VERSION}: 인자가 없으면 자체 점검만 한다 "
+          f"(상주 기동은 --serve, 단발 실행은 --once <job>)")
+    print(f"{SCHEDULER_VERSION} 자체 점검 (실행 없음)")
+    _check_job_table()
+    _check_due_logic()
+    _check_exit_codes()
+    _check_status_classification()
+    _check_record_failure_is_contained()
+    print("스케줄러 5개 영역 통과. 상주 실행은 --serve")
+    raise SystemExit(0)
