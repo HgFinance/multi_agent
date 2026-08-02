@@ -133,6 +133,38 @@ def test_08_owner_cannot_self_verify():
     )
 
 
+def test_write_through_failure_does_not_leave_memory_state():
+    class FailingRepository:
+        def insert_incident_event(self, _event):
+            raise RuntimeError("database unavailable")
+
+        def insert_corrective_action(self, _action):
+            raise RuntimeError("database unavailable")
+
+    timeline = IncidentTimeline(FailingRepository())
+
+    with pytest.raises(RuntimeError):
+        timeline.add_event(
+            incident_id,
+            "agent-ops-monitor",
+            IncidentEntryType.FACT,
+            "DB 저장 실패 테스트",
+            now,
+            "qa-test",
+            evidence={},
+        )
+    assert timeline.events == []
+
+    with pytest.raises(RuntimeError):
+        timeline.open_corrective_action(
+            "qa-test",
+            {"plan": "DB 저장 실패 테스트"},
+            now + timedelta(days=1),
+            incident_id=incident_id,
+        )
+    assert timeline.corrective_actions == {}
+
+
 def test_09_cancel_path_reaches_terminal_state_distinct_from_completed():
     timeline = IncidentTimeline()
     action3 = timeline.open_corrective_action("x", {}, now + timedelta(days=1), incident_id=incident_id)

@@ -136,6 +136,33 @@ def test_repository_is_atomic_and_requires_governed_stress_scenario() -> None:
     assert failing_connection.rollbacks == 1
 
 
+def test_repository_persists_kill_switch_requester_not_release_approver() -> None:
+    snapshot = _snapshot()
+    cursor = _Cursor()
+    connection = _Connection(cursor)
+
+    RiskP1Repository(connection).save_snapshot(
+        snapshot,
+        stress_scenario_ids={"equity_down": uuid4()},
+        trace_id=uuid4(),
+        kill_switch_transition={
+            "from_state": "ENABLED",
+            "to_state": "ENTRY_BLOCKED",
+            "trigger_type": "stress_breach",
+            "trigger_details": {"loss": 100.0},
+            "evidence": {"source": "test"},
+            "requested_by": "risk-supervisor",
+            "approved_release_by": "qa-audit-supervisor",
+        },
+    )
+
+    kill_switch_calls = [
+        params for query, params in cursor.calls if "risk.kill_switch_events" in query
+    ]
+    assert len(kill_switch_calls) == 1
+    assert kill_switch_calls[0][6] == "risk-supervisor"
+
+
 class _Quote:
     def __init__(self, symbol):
         self.symbol = symbol

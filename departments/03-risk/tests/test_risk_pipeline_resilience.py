@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
@@ -42,8 +44,79 @@ def test_pipeline_build_failure_returns_reject_report(monkeypatch):
     out = risk_scripts.run_risk_department({}, {})
     assert out["verdict"] == "reject"
     assert out["trading_state"] == "HALTED"
+    assert out["decision_status"] == "INCONCLUSIVE"
+    assert out["decision_origin"] == "FALLBACK"
+    assert out["safe_action"] == "HOLD"
+    assert out["failure"]["node"] == "pipeline"
+    assert out["failure"]["error_message"] == "graph"
     assert out["evaluation"]["fallback_count"] >= 1
     assert out["report_markdown"]
+    assert "비바인딩 fallback" in out["report_markdown"]
+
+
+def test_fallback_preserves_node_and_redacts_error_message():
+    def broken(_state):
+        raise RuntimeError("redis_url=redis://default:super-secret@example:6379")
+
+    guarded = risk_scripts._guard_node("pre_trade_check", broken)
+    with pytest.raises(risk_scripts.RiskPipelineNodeError) as caught:
+        guarded({})
+
+    details = risk_scripts._failure_details("pipeline", caught.value)
+    assert details["node"] == "pre_trade_check"
+    assert details["error"] == "RuntimeError"
+    assert "super-secret" not in details["error_message"]
+    assert "redis_url=[REDACTED]" in details["error_message"]
+    assert len(details["error_fingerprint"]) == 16
+
+
+def test_reject_supervisor_uses_deterministic_fast_path(monkeypatch):
+    def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("reject path must not call supervisor LLM")
+
+    monkeypatch.setattr(risk_scripts, "_hermes_chat", unexpected_llm)
+    out = risk_scripts.supervise(
+        {
+            "assessment": {
+                "verdict": "reject",
+                "reason_codes": ["position_cap"],
+                "check_results": [],
+            },
+            "order_intent": {},
+            "trading_state": "ENABLED",
+        }
+    )
+    assert out["verdict"] == "reject"
+    assert out["escalate"] is False
+    assert out["supervisor_llm_called"] is False
+    assert "position_cap" in out["narrative"]
+
+
+def test_reject_counterparty_uses_deterministic_fast_path(monkeypatch):
+    def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("reject path must not call counterparty LLM")
+
+    monkeypatch.setattr(risk_scripts, "_hermes_chat", unexpected_llm)
+    out = risk_scripts.counterparty_check(
+        {
+            "assessment": {
+                "verdict": "reject",
+                "reason_codes": ["counterparty_unhealthy"],
+                "check_results": [
+                    {
+                        "name": "counterparty_health",
+                        "passed": False,
+                        "detail": "broker DOWN",
+                    }
+                ],
+            },
+            "order_intent": {},
+            "trading_state": "ENABLED",
+        }
+    )
+    assert out["counterparty"]["escalate"] is True
+    assert out["counterparty_llm_called"] is False
+    assert "broker DOWN" in out["counterparty"]["counterparty_narrative"]
 
 
 def test_pipeline_fallback_emits_replayable_execution_evidence(monkeypatch, tmp_path):
