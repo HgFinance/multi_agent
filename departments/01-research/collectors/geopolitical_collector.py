@@ -184,38 +184,69 @@ def _http(url: str, *, label: str, tries: int = 3) -> bytes:
     raise GeopoliticalError(f"{label}: {last}")
 
 
-def fetch_gpr(*, start: date, observed_at: datetime) -> list[Observation]:
-    """GPR 일별 파일 -> 관측. pandas 는 여기서만 필요하다."""
-    import pandas as pd
+def parse_gpr_sheet(header: list, rows: list[list]) -> tuple[list[tuple[date, dict]], int]:
+    """GPR 시트(헤더 + 행) -> [(일자, {열: 값})], 파일 최신일.
 
-    raw = _http(GPR_URL, label="GPR 파일")
-    tmp = Path(__file__).resolve().parent / ".gpr_daily.xls"
-    tmp.write_bytes(raw)
-    try:
-        df = pd.read_excel(tmp, engine="xlrd" if raw[:2] == b"\xd0\xcf" else "openpyxl")
-    finally:
-        tmp.unlink(missing_ok=True)
-
-    missing = [c for c in ("DAY", *GPR_COLUMNS) if c not in df.columns]
+    순수 함수라 자체 점검이 파일 없이 검사한다. 필요한 열이 없으면 예외 -
+    발행처가 열 이름을 바꾸면 조용히 빈 결과가 되는 것이 가장 위험하다.
+    """
+    idx = {str(h).strip(): i for i, h in enumerate(header)}
+    missing = [c for c in ("DAY", *GPR_COLUMNS) if c not in idx]
     if missing:
         raise GeopoliticalError(f"GPR 파일 형식 변경 - 없는 열 {missing}")
 
-    file_max = int(df["DAY"].max())
-    obs: list[Observation] = []
-    for row in df.itertuples(index=False):
+    out: list[tuple[date, dict]] = []
+    file_max = 0
+    for r in rows:
         try:
-            day = int(row.DAY)
+            day = int(float(r[idx["DAY"]]))
             period = date(day // 10000, day // 100 % 100, day % 100)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             continue
+        file_max = max(file_max, day)
+        vals = {}
+        for code in GPR_COLUMNS:
+            raw = r[idx[code]] if idx[code] < len(r) else None
+            if raw is None or raw == "":
+                continue
+            try:
+                v = float(raw)
+            except (ValueError, TypeError):
+                continue
+            if v != v:                            # NaN
+                continue
+            vals[code] = v
+        if vals:
+            out.append((period, vals))
+    return out, file_max
+
+
+def fetch_gpr(*, start: date, observed_at: datetime) -> list[Observation]:
+    """GPR 일별 파일 -> 관측.
+
+    xlrd 로 직접 읽는다(pandas 아님). 실측 2026-08-02: 수집기 컨테이너에
+    pandas 가 없어 이 Job 이 매일 실패하고 있었다 - 열 4개를 읽자고 pandas 를
+    넣는 것보다 xlrd 하나가 가볍고 의존성이 적다(파일은 OLE2 .xls 고정).
+    """
+    import xlrd
+
+    raw = _http(GPR_URL, label="GPR 파일")
+    if raw[:2] != b"\xd0\xcf":
+        raise GeopoliticalError(
+            "GPR 파일이 .xls(OLE2) 가 아니다 - 발행처 형식 변경 확인 필요")
+    book = xlrd.open_workbook(file_contents=raw)
+    sheet = book.sheet_by_index(0)
+    header = sheet.row_values(0)
+    rows = [sheet.row_values(i) for i in range(1, sheet.nrows)]
+
+    parsed, file_max = parse_gpr_sheet(header, rows)
+    obs: list[Observation] = []
+    for period, vals in parsed:
         if period < start:
             continue
-        for code in GPR_COLUMNS:
-            v = getattr(row, code, None)
-            if v is None or v != v:              # NaN
-                continue
+        for code, v in vals.items():
             obs.append(make_observation(
-                code, period, Decimal(str(round(float(v), 6))),
+                code, period, Decimal(str(round(v, 6))),
                 lag_days=GPR_LAG_DAYS, observed_at=observed_at,
                 metadata={"source": "gpr", "file_max_day": file_max,
                           "lag_days": GPR_LAG_DAYS}))
@@ -330,6 +361,31 @@ def collect(*, days: int, themes_path: Path | None = None) -> int:
 # 자체 점검 - 네트워크·DB 없음
 # ---------------------------------------------------------------------------
 
+def _check_gpr_sheet_parsing():
+    """시트 파싱 - 결측·잡값을 0 으로 만들지 않고, 열 이름 변경은 즉시 실패."""
+    header = ["DAY", "N10D", "GPRD", "GPRD_ACT", "GPRD_THREAT"]
+    rows = [
+        [20260725.0, 5, 183.64, 225.32, 199.69],
+        [20260726.0, 5, 193.37, "", 265.66],       # ACT 결측 - 그 열만 빠진다
+        ["쓰레기", 5, 1, 2, 3],                     # 날짜 잡값 - 행 자체를 버린다
+        [20260727.0, 5, "NA", 248.57, 207.33],     # 비수치 - 그 열만 빠진다
+    ]
+    parsed, file_max = parse_gpr_sheet(header, rows)
+    got = {d.isoformat(): set(v) for d, v in parsed}
+    assert got["2026-07-25"] == {"GPRD", "GPRD_ACT", "GPRD_THREAT"}
+    assert got["2026-07-26"] == {"GPRD", "GPRD_THREAT"}, got["2026-07-26"]
+    assert got["2026-07-27"] == {"GPRD_ACT", "GPRD_THREAT"}, got["2026-07-27"]
+    assert len(parsed) == 3, "잡값 행이 살아남았다"
+    assert file_max == 20260727, file_max
+    # 발행처가 열 이름을 바꾸면 조용히 빈 결과가 아니라 예외여야 한다
+    try:
+        parse_gpr_sheet(["DAY", "GPRD"], [[20260725.0, 1.0]])
+        raise AssertionError("열이 없는데 통과했다")
+    except GeopoliticalError:
+        pass
+    print("  GPR 시트 파싱            OK")
+
+
 def _check_theme_parsing():
     text = ("# 주석\nGDELT_NK|North Korea missile   # 꼬리 주석\n"
             "\nGDELT_NK|중복 코드\n형식오류줄\nGDELT_IRAN|Iran strike\n")
@@ -411,9 +467,10 @@ if __name__ == "__main__":
         raise SystemExit(collect(days=d))
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (네트워크·DB 없음)")
+    _check_gpr_sheet_parsing()
     _check_theme_parsing()
     _check_partial_day_excluded()
     _check_publication_lag()
     _check_series_specs()
     _check_license_gate()
-    print("지정학 수집 5개 영역 통과. 수집은 --collect [--days N]")
+    print("지정학 수집 6개 영역 통과. 수집은 --collect [--days N]")
