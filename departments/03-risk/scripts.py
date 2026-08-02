@@ -67,6 +67,9 @@ from pathlib import Path
 from typing import TypedDict
 
 _BASE = Path(__file__).resolve().parent
+_REPO_ROOT = _BASE.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 _ENGINE_DIR = _BASE / "engine"
 _API_DIR = _BASE / "api"
 _CONTRACTS_DIR = _BASE.parent / "02-trading" / "contracts"
@@ -82,7 +85,13 @@ from reporting import (
     md_cell,
 )
 
+from apps.observability.risk_qa import get_runtime_telemetry, observe_pipeline
+
 PIPELINE_VERSION = "risk-department-pipeline-v1"
+RISK_TELEMETRY = get_runtime_telemetry("risk")
+from src.resilience import register_circuit_breaker_observer
+
+register_circuit_breaker_observer(RISK_TELEMETRY.record_circuit_breaker)
 
 
 class RiskState(TypedDict, total=False):
@@ -356,6 +365,7 @@ def build_pipeline():
     return g.compile()
 
 
+@observe_pipeline(RISK_TELEMETRY, "pipeline")
 def run_risk_department(order_intent: dict, context: dict, scope: str = "fund:default") -> dict:
     """본부 단독 실행 - QA/연구본부의 run_<dept>_department 와 같은 외부 인터페이스."""
     try:

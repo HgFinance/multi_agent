@@ -174,6 +174,14 @@ class ComplianceCheckRequest(BaseModel):
 
 
 app = FastAPI(title="Risk Domain API", version="v1")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from fastapi.responses import Response
+
+from apps.observability.risk_qa import get_runtime_telemetry
+
+RISK_TELEMETRY = get_runtime_telemetry("risk")
 engine = RiskEngine()
 _state_store: RedisTradingStateStore | None = None
 _decision_repository: RiskDecisionRepository | None = None
@@ -348,6 +356,19 @@ def rag_observability():
             for node in ("retrieve", "grade", "generate", "hallucination_check")
         }
     }
+
+
+@app.get("/risk/v1/observability/runtime")
+def runtime_observability():
+    return RISK_TELEMETRY.snapshot()
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    return Response(
+        content=RISK_TELEMETRY.prometheus_text(),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 if __name__ == "__main__":

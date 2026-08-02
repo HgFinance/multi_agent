@@ -314,6 +314,14 @@ class ComplianceCheckRequest(BaseModel):
 
 
 app = FastAPI(title="QA Domain API", version="v1")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from fastapi.responses import Response
+
+from apps.observability.risk_qa import get_runtime_telemetry
+
+QA_TELEMETRY = get_runtime_telemetry("qa")
 evidence_engine = EvidenceQaEngine()
 ops_monitor = OpsHealthMonitor()
 recorder = TraceRecorder(repository=_audit_repository)
@@ -557,6 +565,19 @@ def evidence_check(body: ComplianceCheckRequest):
     )
 
     return run_compliance_check(body.query, body.as_of, persona="evidence-qa-agent")
+
+
+@app.get("/qa/v1/observability/runtime")
+def runtime_observability():
+    return QA_TELEMETRY.snapshot()
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    return Response(
+        content=QA_TELEMETRY.prometheus_text(),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 if __name__ == "__main__":

@@ -260,10 +260,119 @@ class PostgresAuditRepository:
     def update_corrective_action(self, action: CorrectiveActionRecord) -> None:
         self._execute(
             """
-            update audit.corrective_actions
-            set status = %s, verification = %s, verifier = %s, completed_at = %s
-            where corrective_action_id = %s
+        update audit.corrective_actions
+        set status = %s, verification = %s, verifier = %s, completed_at = %s
+        where corrective_action_id = %s
             """,
             (action.status.value, Json(action.verification) if action.verification is not None else None,
              action.verifier, action.completed_at, action.corrective_action_id),
         )
+
+    def _ensure_incident_parent(
+        self,
+        cur,
+        *,
+        incident_id,
+        occurred_at,
+        source: str,
+        summary: str,
+        recorded_by: str,
+    ) -> None:
+        """Create the FK parent in the same transaction as its child row."""
+        cur.execute(
+            """
+            insert into audit.incidents
+            (incident_id, incident_code, severity, title, impact, status,
+             started_at, detected_at, commander, trace_id)
+            values (%s, %s, 'SEV3', %s, %s, 'OPEN', %s, %s, %s, %s)
+            on conflict (incident_id) do nothing
+            """,
+            (
+                incident_id,
+                f"QA-AUTO-{incident_id}",
+                f"QA incident auto-created from {source}",
+                Json({"auto_created": True, "first_event_summary": summary}),
+                occurred_at,
+                occurred_at,
+                recorded_by,
+                incident_id,
+            ),
+        )
+
+    def insert_incident_event(self, event: IncidentEventRecord) -> None:  # noqa: F811
+        """Insert Incident parent and event atomically."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                self._ensure_incident_parent(
+                    cur,
+                    incident_id=event.incident_id,
+                    occurred_at=event.occurred_at,
+                    source=event.source,
+                    summary=event.summary,
+                    recorded_by=event.recorded_by,
+                )
+                cur.execute(
+                    """
+                    insert into audit.incident_events
+                    (incident_event_id, incident_id, source, entry_type, summary,
+                     evidence, occurred_at, recorded_at, recorded_by)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        event.incident_event_id,
+                        event.incident_id,
+                        event.source,
+                        event.entry_type.value,
+                        event.summary,
+                        Json(event.evidence),
+                        event.occurred_at,
+                        event.recorded_at,
+                        event.recorded_by,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def insert_corrective_action(self, action: CorrectiveActionRecord) -> None:  # noqa: F811
+        """Insert an Incident parent and Corrective Action atomically."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                if action.incident_id is not None:
+                    self._ensure_incident_parent(
+                        cur,
+                        incident_id=action.incident_id,
+                        occurred_at=action.created_at,
+                        source="qa-corrective-action",
+                        summary="Corrective Action parent incident",
+                        recorded_by=action.owner,
+                    )
+                cur.execute(
+                    """
+                    insert into audit.corrective_actions
+                    (corrective_action_id, incident_id, finding_id, owner, action_plan,
+                     due_at, status, created_at)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        action.corrective_action_id,
+                        action.incident_id,
+                        action.finding_id,
+                        action.owner,
+                        Json(action.action_plan),
+                        action.due_at,
+                        action.status.value,
+                        action.created_at,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)

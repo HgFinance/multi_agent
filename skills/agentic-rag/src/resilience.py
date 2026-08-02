@@ -18,6 +18,21 @@ from typing import Any, Callable
 
 
 LOGGER = logging.getLogger("risk_qa.agentic_rag")
+_CIRCUIT_BREAKER_OBSERVERS: list[Callable[[str, str], None]] = []
+
+
+def register_circuit_breaker_observer(observer: Callable[[str, str], None]) -> None:
+    """Register a local metrics sink without making telemetry a hard dependency."""
+    if observer not in _CIRCUIT_BREAKER_OBSERVERS:
+        _CIRCUIT_BREAKER_OBSERVERS.append(observer)
+
+
+def _notify_circuit_breaker(name: str, state: str) -> None:
+    for observer in tuple(_CIRCUIT_BREAKER_OBSERVERS):
+        try:
+            observer(name, state)
+        except Exception:
+            LOGGER.debug("circuit breaker observer failed", exc_info=True)
 
 
 class CircuitOpenError(RuntimeError):
@@ -63,6 +78,7 @@ class CircuitBreaker:
             self._failures = 0
             self._opened_at = None
             self._half_open = False
+        _notify_circuit_breaker(self.name, self.state)
 
     def record_failure(self) -> None:
         with self._lock:
@@ -70,6 +86,7 @@ class CircuitBreaker:
             self._half_open = False
             if self._failures >= self.failure_threshold:
                 self._opened_at = time.monotonic()
+        _notify_circuit_breaker(self.name, self.state)
 
     def call(self, fn: Callable[[], Any]) -> Any:
         self.before_call()

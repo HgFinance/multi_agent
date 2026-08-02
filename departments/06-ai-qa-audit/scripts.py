@@ -61,6 +61,9 @@ from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
 _BASE = Path(__file__).resolve().parent
+_REPO_ROOT = _BASE.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_BASE / "evidence", _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
@@ -73,6 +76,12 @@ from reporting import (
 )
 
 PIPELINE_VERSION = "qa-department-pipeline-v1"
+from apps.observability.risk_qa import get_runtime_telemetry, observe_pipeline
+
+QA_TELEMETRY = get_runtime_telemetry("qa")
+from src.resilience import register_circuit_breaker_observer
+
+register_circuit_breaker_observer(QA_TELEMETRY.record_circuit_breaker)
 
 # 워커(직원) LLM 백엔드 - 동규님 GPU에 올린 팀 공용 Ollama 서버. 환경변수로 옮기지 않는다.
 # 192.168.25.25
@@ -270,6 +279,7 @@ def build_pipeline():
     return g.compile()
 
 
+@observe_pipeline(QA_TELEMETRY, "pipeline")
 def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) -> dict:
     """본부 단독 실행 - Risk/Research 의 run_<dept>_department 와 같은 외부 인터페이스."""
     out = build_pipeline().invoke({
