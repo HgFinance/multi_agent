@@ -16,7 +16,7 @@ def read_sql_files(directory: Path) -> list[tuple[Path, str]]:
 def created_tables(sql: str) -> set[tuple[str, str]]:
     return set(
         re.findall(
-            r"(?im)^create\s+table\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
+            r"(?im)^create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
             sql,
         )
     )
@@ -77,7 +77,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 20,
+            "audit": 21,
             "execution": 12,
             "governance": 20,
             "quant": 12,
