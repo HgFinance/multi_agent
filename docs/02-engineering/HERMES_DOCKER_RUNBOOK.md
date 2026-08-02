@@ -95,17 +95,16 @@ state.db 손상 위험이 없다 — compose 상단의 named volume 원칙과 �
 사본의 한국어 주석·근거가 통째로 사라진다(실측: 226줄 재작성). **저장소 사본이
 사람이 쓴 원본**이고, 런타임이 추가한 블록은 손으로 추려 옮긴다.
 
-**(2) `push` 뒤 인증이 끊길 수 있다.** push 는 config.yaml 을 전부 덮으므로
+**(2) push 후에는 인증을 확인한다.** push 는 config.yaml 을 전부 덮으므로
 Hermes 가 붙여둔 런타임 부기가 사라진다. 실측에서 push 직후 `portal status` 가
-`not logged in` 으로 바뀌었고, 프로필 디렉터리에 별도 `auth.json` 이 생겨 상위
-토큰과 어긋나 있었다. 복구는 원본 토큰을 **두 곳 모두**에 다시 넣는다.
+`not logged in` 으로 바뀐 적이 있다(당시엔 4-3 절의 토큰 복사 사고가 겹쳐
+있었다). 복구는 **해당 설치본에서 다시 로그인**한다 - 다른 곳의 auth.json 을
+가져오지 않는다(4-3 절 사고 원인).
 
-```powershell
-Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\auth.json"
-Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\profiles\research-department\auth.json"
+```bash
+docker exec hedgefund-research-hermes hermes portal status   # push 뒤 확인
+docker exec -it hedgefund-research-hermes hermes portal login  # 끊겼으면 재로그인
 ```
-
-push 후에는 항상 `hermes portal status` 로 확인한다.
 
 ---
 
@@ -194,21 +193,26 @@ docker compose --profile dashboard up -d
 모델은 API Key 가 아니라 **Nous Portal 로그인**을 쓴다. 데이터 디렉터리를
 부서별로 갈랐으므로 **자격증명도 부서별로 따로**다.
 
-### 방법 A — 이미 로그인된 네이티브 설치본이 있으면 (가장 쉽다)
+### 🚫 auth.json 을 설치본끼리 복사하지 않는다 (2026-08-02 사고)
 
-```powershell
-# %LOCALAPPDATA%\hermes\auth.json 을 각 부서 디렉터리로 복사
-Copy-Item "$env:LOCALAPPDATA\hermes\auth.json" "$env:USERPROFILE\.hermes-research-department\auth.json"
+한때 이 문서는 "네이티브 설치본의 `auth.json` 을 컨테이너로 복사하면 제일
+쉽다"고 적고 있었다. **그 방법이 계정 세션 전체를 죽였다.**
+
+리프레시 토큰은 **한 번 쓰면 새 것으로 교체된다(rotation).** 같은 토큰을 세
+곳(네이티브·리서치·퀀트)에 복사하면, 한 곳이 갱신해 토큰이 바뀐 뒤 다른 곳이
+**이미 쓴 옛 토큰을 다시 제출**한다. 서버는 이것을 토큰 탈취 신호로 보고
+세션 자체를 폐기한다. 토큰 파일에 그대로 기록돼 있었다.
+
+```
+code=invalid_grant  message=Refresh session has been revoked
+reason=runtime_access_refresh_failure  relogin_required=True
 ```
 
-브라우저·승인 없이 즉시 인식된다(2026-08-02 실측 - `hermes portal status` →
-`Auth: ✓ logged in`, 실제 chat 응답 확인).
+결과: 컨테이너뿐 아니라 **원래 로그인돼 있던 네이티브 설치본까지** 로그아웃됐다.
+**설치본 하나 = 로그인 하나.** 컨테이너를 새로 만들면 그 컨테이너에서 한 번
+로그인한다. 그것이 유일한 방법이며 아래가 그 절차다.
 
-⚠ 이것은 **같은 계정 토큰을 복사**하는 것이라 '부서별 저장소 분리'는 되지만
-'부서별 신원 분리'는 아니다. 부서마다 다른 계정·요금제를 쓸 계획이면 방법 B로
-각각 로그인한다. 토큰 파일은 git 에 올라가지 않는다(디렉터리 자체가 저장소 밖).
-
-### 방법 B — 새로 로그인 (기기 코드 방식)
+### 로그인 (기기 코드 방식) — 설치본마다 1회
 
 ```powershell
 docker exec -it hedgefund-research-hermes hermes portal login
@@ -217,7 +221,16 @@ docker exec -it hedgefund-research-hermes hermes portal login
 URL 과 코드(`XXXX-XXXX`)가 출력된다. 브라우저에서 그 URL 을 열고 코드를 확인해
 승인하면 터미널이 폴링으로 감지해 끝난다. **승인 전까지 터미널을 닫지 않는다.**
 컨테이너는 브라우저를 못 열어 "Could not open browser automatically" 가 뜨는데
-정상이다.
+정상이다. 코드에는 만료가 있어 방치하면
+`Timed out waiting for device authorization` 으로 끝난다(실측) - 바로 승인할 수
+있을 때 실행한다.
+
+### 갱신은 자동이다 — 주기적으로 할 일은 없다
+
+로그인 뒤에는 Hermes 가 백그라운드에서 액세스 토큰을 재발급한다. 다시 로그인이
+필요한 경우는 세 가지뿐이다: 비밀번호 변경, 포털에서 세션 강제 해지, 장기 미사용.
+**위 사고처럼 세션이 폐기된 경우도 여기 해당한다** - 그때는 각 설치본에서 다시
+한 번 로그인한다(복사하지 않는다).
 
 ### 확인
 
