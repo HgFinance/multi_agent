@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """리스크본부 LangGraph 파이프라인 - run_risk_department(order_intent, context) -> Case Decision.
 
 담당: 동규 (리스크/QA)
@@ -133,23 +132,100 @@ class RiskState(TypedDict, total=False):
     evaluation: dict
 
 
+class RiskPipelineNodeError(RuntimeError):
+    """Attach the LangGraph node to an exception without changing its cause."""
+
+    def __init__(self, node: str, cause: Exception) -> None:
+        self.failed_node = node
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+def _root_exception(exc: Exception) -> tuple[Exception, str | None]:
+    """Return the original exception and the node that raised it."""
+
+    node = getattr(exc, "failed_node", None)
+    cause = getattr(exc, "cause", None)
+    if isinstance(cause, Exception):
+        return cause, node
+    return exc, node
+
+
+def _sanitize_error_message(exc: Exception) -> str:
+    """Keep useful diagnostics while preventing credentials from entering logs."""
+
+    message = " ".join(str(exc).split()) or "no_exception_message"
+    patterns = (
+        r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|redis_url|database_url)\s*([=:])\s*[^\s,;]+",
+        r"(?i)\b(?:rediss?|postgres(?:ql)?|https?)://[^\s]+",
+        r"\b(?:sk|lsv2|ghp|xox[baprs])_[A-Za-z0-9._-]+\b",
+    )
+    for pattern in patterns:
+        replacement = r"\1=[REDACTED]" if pattern.startswith("(?i)(") else "[REDACTED]"
+        message = re.sub(pattern, replacement, message)
+    return message[:240]
+
+
+def _failure_details(stage: str, exc: Exception) -> dict[str, str]:
+    root, node = _root_exception(exc)
+    error_class = type(root).__name__
+    message = _sanitize_error_message(root)
+    fingerprint = hashlib.sha256(
+        f"{stage}:{node or stage}:{error_class}:{message}".encode()
+    ).hexdigest()[:16]
+    return {
+        "stage": stage,
+        "node": node or stage,
+        "error": error_class,
+        "error_message": message,
+        "error_fingerprint": fingerprint,
+    }
+
+
+def _guard_node(node: str, handler):
+    """Preserve the failing LangGraph node for the outer fail-closed boundary."""
+
+    def guarded(state: RiskState) -> dict:
+        try:
+            return handler(state)
+        except RiskPipelineNodeError:
+            raise
+        except Exception as exc:
+            raise RiskPipelineNodeError(node, exc) from exc
+
+    guarded.__name__ = f"{node}_guarded"
+    return guarded
+
+
 def _fallback(stage: str, exc: Exception) -> dict:
-    return {"stage": stage, "error": type(exc).__name__, "action": "ESCALATE"}
+    details = _failure_details(stage, exc)
+    return {
+        **details,
+        "action": "ESCALATE",
+        "safe_action": "HOLD",
+        "decision_origin": "FALLBACK",
+    }
 
 
 def _fallback_narrative(stage: str, exc: Exception) -> str:
-    return (f"{stage} Agent를 사용할 수 없어 결정론적 결과만 유지했습니다 "
-            f"({type(exc).__name__}). 수동 검토와 후속 상태 확인이 필요합니다.")
+    details = _failure_details(stage, exc)
+    return (f"{stage} Agent를 사용할 수 없어 결정론적 안전 기본값만 유지했습니다 "
+            f"(node={details['node']}, error={details['error']}, "
+            f"fingerprint={details['error_fingerprint']}). "
+            "이 결과는 비바인딩 fallback이며 HOLD/수동 검토가 필요합니다.")
 
 
 def _fallback_assessment(order_intent: dict, context: dict, exc: Exception) -> dict:
     payload = json.dumps({"order_intent": order_intent, "context": context},
                          ensure_ascii=False, sort_keys=True, default=str)
+    failure = _failure_details("pipeline", exc)
     return {"risk_request_id": f"fallback-{hashlib.sha256(payload.encode()).hexdigest()[:16]}",
             "verdict": "reject", "approved_quantity": None, "reason_codes": ["pipeline_fallback"],
             "check_results": [], "calculation_version": "risk-pipeline-fallback-v1",
             "input_hash": hashlib.sha256(payload.encode()).hexdigest(),
-            "trading_state": "HALTED"}
+            "trading_state": "HALTED", "decision_status": "INCONCLUSIVE",
+            "decision_origin": "FALLBACK", "binding": False, "safe_action": "HOLD",
+            "risk_checks_executed": False, "failure": failure}
 
 
 # ── 노드 1: Trading State 실측 (결정론 직원) ────────────────────────────────
@@ -158,10 +234,19 @@ def check_trading_state(state: RiskState) -> dict:
         import redis as redis_lib
         from trading_state_store import RedisTradingStateStore
 
-        store = RedisTradingStateStore(redis_lib.Redis.from_url(os.environ["REDIS_URL"]))
+        # Redis is a hot-path dependency. A bounded timeout fails closed quickly;
+        # it never converts a slow/unreachable cache into ENABLED.
+        timeout = float(os.environ.get("RISK_REDIS_TIMEOUT_SECONDS", "2"))
+        store = RedisTradingStateStore(
+            redis_lib.Redis.from_url(
+                os.environ["REDIS_URL"],
+                socket_connect_timeout=timeout,
+                socket_timeout=timeout,
+            )
+        )
         ts = store.get_state_fail_closed(state.get("scope", "fund:default"))
         return {"trading_state": ts.value}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary.
         # Redis failure is a state-uncertainty condition, never an ENABLED fallback.
         return {"trading_state": "HALTED", "fallbacks": [_fallback("trading_state", exc)]}
 
@@ -201,6 +286,15 @@ def _counterparty_flagged(assessment: dict) -> bool:
 def counterparty_check(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
     cp = next((c for c in a["check_results"] if c["name"] == "counterparty_health"), None)
+    if a.get("verdict") == "reject" and chat is None:
+        detail = (cp or {}).get("detail") or "counterparty health check failed"
+        return {
+            "counterparty": {
+                "counterparty_narrative": f"결정론적 Risk Engine이 counterparty_health를 확인했습니다: {detail}",
+                "escalate": True,
+            },
+            "counterparty_llm_called": False,
+        }
     task = f"""Using ONLY the evidence below, write a 1-2 sentence Korean note on Broker/Counterparty
 status for this case. Prioritize status confirmation and Reconciliation over new orders when the
 Broker state is not healthy - you cannot change the deterministic verdict "{a['verdict']}", only
@@ -220,14 +314,15 @@ Evidence:
         for k in ("counterparty_narrative", "escalate"):
             if k not in note:
                 raise ValueError(f"Counterparty 점검 결과에 {k} 가 없다 - 초안 거부")
-        return {"counterparty": note}
-    except Exception as exc:
+        return {"counterparty": note, "counterparty_llm_called": True}
+    except Exception as exc:  # counterparty fallback must escalate safely.
         if chat is not None:
             raise
         return {
-            "counterparty": {"counterparty_narrative": _fallback_narrative("Counterparty", exc),
-                              "escalate": True},
-            "fallbacks": [_fallback("counterparty", exc)],
+        "counterparty": {"counterparty_narrative": _fallback_narrative("Counterparty", exc),
+                          "escalate": True},
+        "counterparty_llm_called": True,
+        "fallbacks": [_fallback("counterparty", exc)],
         }
 
 
@@ -241,7 +336,7 @@ def compliance_check(state: RiskState) -> dict:
                  f"instrument {oi['instrument_id']} under fund {oi['fund_id']} today?")
         as_of_date = state["context"]["as_of"][:10]  # PIT 필터는 date-only(YYYY-MM-DD)를 요구한다
         return {"compliance": run_compliance_check(query, as_of_date, persona="compliance-policy-agent")}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - unavailable policy evidence is inconclusive.
         return {
             "compliance": {"answer": {"verdict": "ambiguous", "cited_documents": [],
                                         "rationale": _fallback_narrative("Compliance", exc),
@@ -268,8 +363,37 @@ def _hermes_chat(persona: str, task: str) -> str:
     return agent.chat(task)
 
 
+def _deterministic_supervisor_note(state: RiskState) -> dict:
+    """Render a reject/fallback note without paying for a second LLM call."""
+
+    assessment = state["assessment"]
+    reasons = ", ".join(str(code) for code in assessment.get("reason_codes", [])) or "deterministic_rule"
+    fallback = state.get("fallbacks") or []
+    if fallback:
+        narrative = (
+            "Risk pipeline이 완료되지 않아 결정론적 승인 판정을 만들 수 없습니다. "
+            f"실패 단계={fallback[0].get('node') or fallback[0].get('stage')}, "
+            f"오류={fallback[0].get('error')}; 비바인딩 fallback으로 HOLD/수동 검토가 필요합니다."
+        )
+    else:
+        narrative = (
+            f"결정론적 Risk Engine이 {reasons} 사유로 거래를 거절했습니다. "
+            "이 거절은 Risk Engine 판정이며 추가 주문 확대는 허용되지 않습니다."
+        )
+    return {
+        "verdict": assessment["verdict"],
+        "narrative": narrative,
+        "escalate": bool(fallback),
+        "supervisor_llm_called": False,
+    }
+
+
 def supervise(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
+    # REJECT에는 이미 결정론적 근거가 있으므로 설명용 Hermes 호출을 생략한다.
+    # 승인/resize 경로의 Compliance·Supervisor 경계는 그대로 유지한다.
+    if a.get("verdict") == "reject" and chat is None:
+        return _deterministic_supervisor_note(state)
     bundle = {"order_intent": state["order_intent"], "trading_state": state["trading_state"],
               "assessment": a, "compliance": state.get("compliance"),
               "counterparty": state.get("counterparty")}
@@ -293,12 +417,18 @@ Evidence:
             if k not in note:
                 raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
         # 바인딩 verdict 는 LLM 출력이 아니라 assessment 에서 그대로 가져온다
-        return {"verdict": a["verdict"], "narrative": note["narrative"], "escalate": note["escalate"]}
-    except Exception as exc:
+        return {
+            "verdict": a["verdict"],
+            "narrative": note["narrative"],
+            "escalate": note["escalate"],
+            "supervisor_llm_called": True,
+        }
+    except Exception as exc:  # supervisor failure must not alter the decision.
         if chat is not None:
             raise
         return {"verdict": a["verdict"], "narrative": _fallback_narrative("Risk Supervisor", exc),
-                "escalate": True, "fallbacks": [_fallback("supervisor", exc)]}
+                "escalate": True, "supervisor_llm_called": True,
+                "fallbacks": [_fallback("supervisor", exc)]}
 
 
 def _assemble_out(state: RiskState) -> dict:
@@ -311,18 +441,28 @@ def _assemble_out(state: RiskState) -> dict:
     executed_agents = []
     if a.get("check_results"):
         executed_agents += ["market-liquidity-risk-agent", "pre-trade-risk-analyst"]
-    if state.get("counterparty"):
+    if state.get("counterparty") and state.get("counterparty_llm_called", True):
         executed_agents.append("operational-counterparty-risk-agent")
     if state.get("compliance"):
         executed_agents.append("compliance-policy-agent")
-    if state.get("narrative"):
+    if state.get("narrative") and state.get("supervisor_llm_called", True):
         executed_agents.append("risk-supervisor")
     risk_agents = ["risk-supervisor", "market-liquidity-risk-agent", "derivatives-margin-risk-agent",
                    "compliance-policy-agent", "pre-trade-risk-analyst", "operational-counterparty-risk-agent"]
+    fallbacks = list(state.get("fallbacks", []))
+    fallback = fallbacks[0] if fallbacks else None
     return {"risk_request_id": a["risk_request_id"], "verdict": state["verdict"],
             "approved_quantity": a["approved_quantity"], "reason_codes": a["reason_codes"],
             "check_results": a["check_results"], "calculation_version": a["calculation_version"],
             "input_hash": a["input_hash"], "trading_state": state["trading_state"],
+            "decision_status": a.get("decision_status", "FINAL" if not fallbacks else "DEGRADED"),
+            "decision_origin": a.get(
+                "decision_origin",
+                "DEGRADED_RISK_ENGINE" if fallbacks else "DETERMINISTIC_RISK_ENGINE",
+            ),
+            "safe_action": a.get("safe_action", "HOLD" if fallbacks else None),
+            "risk_checks_executed": a.get("risk_checks_executed", bool(a.get("check_results"))),
+            "failure": a.get("failure", fallback),
             "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
             "narrative": state["narrative"], "escalate": state["escalate"],
             "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
@@ -377,11 +517,14 @@ def _record_execution_evidence(
                 run_id=run_id,
                 trace_id=trace_id,
                 employee_profile=employee,
-                output={
-                    "employee_profile": employee,
-                    "verdict": result.get("verdict"),
-                    "evidence_refs": ("compliance-policy-agent",) if compliance else (),
-                },
+            output={
+                "employee_profile": employee,
+                "verdict": result.get("verdict"),
+                "decision_status": result.get("decision_status"),
+                "decision_origin": result.get("decision_origin"),
+                "failure": result.get("failure"),
+                "evidence_refs": ("compliance-policy-agent",) if compliance else (),
+            },
                 inputs_hash=input_event.inputs_hash,
                 schema_id="risk.agent-output.v1",
                 schema_valid=schema_valid,
@@ -440,6 +583,9 @@ def _record_execution_evidence(
             "input_hash": input_event.inputs_hash,
             "pipeline_status": "DEGRADED" if degraded else "COMPLETED",
             "candidate_verdict": result.get("verdict"),
+            "decision_status": result.get("decision_status", "INCONCLUSIVE" if degraded else "FINAL"),
+            "decision_origin": result.get("decision_origin", "FALLBACK" if degraded else "DETERMINISTIC_RISK_ENGINE"),
+            "failure": result.get("failure"),
             "safe_action": safe_action,
             "binding": False,
             "hermes_profile": "risk-management",
@@ -458,7 +604,7 @@ def _record_execution_evidence(
             "journal_path": str(log_path) if log_path else None,
             "review": review,
         }
-    except Exception as exc:  # logging must never turn a safe decision into approval
+    except Exception as exc:  # noqa: BLE001 - logging must never turn a safe decision into approval.
         return {
             "run_id": run_id,
             "trace_id": trace_id,
@@ -484,7 +630,7 @@ def notion_report(state: RiskState, *, uploader=None) -> dict:
     upload = uploader or upload_case
     try:
         notion_upload = upload(state["order_intent"], state["context"], out, report_md=report_md)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] += 1
     evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
@@ -508,12 +654,15 @@ def _route_after_counterparty(state: RiskState) -> str:
 
 def build_pipeline():
     g = StateGraph(RiskState)
-    g.add_node("check_trading_state", check_trading_state)
-    g.add_node("pre_trade_check", pre_trade_check)
-    g.add_node("counterparty_check", counterparty_check)
-    g.add_node("compliance_check", compliance_check)
-    g.add_node("supervise", supervise)
-    g.add_node("notion_report", notion_report)
+    for node, handler in (
+        ("check_trading_state", check_trading_state),
+        ("pre_trade_check", pre_trade_check),
+        ("counterparty_check", counterparty_check),
+        ("compliance_check", compliance_check),
+        ("supervise", supervise),
+        ("notion_report", notion_report),
+    ):
+        g.add_node(node, _guard_node(node, handler))
     g.set_entry_point("check_trading_state")
     g.add_edge("check_trading_state", "pre_trade_check")
     g.add_conditional_edges("pre_trade_check", _route_after_pretrade,
@@ -544,7 +693,7 @@ def run_risk_department(
     asset = str(order_intent.get("instrument_id")) if order_intent.get("instrument_id") else None
     try:
         out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
         out = {"order_intent": order_intent, "context": context, "scope": scope,
                "assessment": _fallback_assessment(order_intent, context, exc),
                "trading_state": "HALTED", "verdict": "reject",
@@ -574,6 +723,11 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
     내용을 창작하지 않는다(QA 패턴, departments/06-ai-qa-audit/scripts.py 동일)."""
     checks = out.get("check_results", [])
     compliance = out.get("compliance")
+    decision_origin = out.get("decision_origin", "DETERMINISTIC_RISK_ENGINE")
+    engine_label = {
+        "DETERMINISTIC_RISK_ENGINE": "departments/03-risk/engine/risk_engine.py",
+        "DEGRADED_RISK_ENGINE": "departments/03-risk/engine/risk_engine.py (degraded dependency)",
+    }.get(decision_origin, "fallback boundary (Risk Engine not executed)")
 
     lines = [
         "# 리스크본부 — Case 심사 보고서 (결정론적 생성, LLM 자유 서술 아님)",
@@ -581,9 +735,13 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         "| 항목 | 값 |",
         "|---|---|",
         f"| **risk_request_id** | `{out['risk_request_id']}` |",
-        f"| **판정 (verdict)** | **{out['verdict']}** |",
+        f"| **판정 후보 (verdict)** | **{out['verdict']}** |",
+        f"| **판정 상태** | **{md_cell(out.get('decision_status', 'FINAL'))}** |",
+        f"| **판정 출처** | {md_cell(out.get('decision_origin', 'DETERMINISTIC_RISK_ENGINE'))} |",
+        f"| **안전 조치** | {md_cell(out.get('safe_action') or 'NOT_REQUIRED')} |",
+        f"| **Risk 검사 실행** | {md_cell(out.get('risk_checks_executed', bool(checks)))} |",
         f"| **승인 수량** | {out['approved_quantity']} |",
-        f"| **판정 엔진** | departments/03-risk/engine/risk_engine.py (`{out['calculation_version']}`) |",
+        f"| **판정 엔진** | {engine_label} (`{out['calculation_version']}`) |",
         f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
         f"| **trading_state** | {md_cell(out['trading_state'])} |",
         (f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
@@ -650,8 +808,19 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
-        lines += ["", "## Fallback / Escalation", "", "| 단계 | 오류 | 조치 |", "|---|---|---|"]
-        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | {md_cell(item.get('action'))} |"
+        fallback_note = (
+            "> `reject`는 Risk Engine이 실행되지 않은 비바인딩 fallback 후보입니다. "
+            "거래 조치는 HOLD이며 수동 검토가 필요합니다."
+            if decision_origin == "FALLBACK"
+            else "> 의존성 fallback이 기록되었습니다. Risk Engine은 fail-closed로 실행됐으며, "
+            "정상 승인 경로로 해석하지 말고 안전 조치를 우선합니다."
+        )
+        lines += ["", "## Fallback / Escalation", "",
+                  fallback_note, "",
+                  "| 단계 | 노드 | 오류 | 메시지 | 조치 |", "|---|---|---|---|---|"]
+        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('node'))} | "
+                   f"{md_cell(item.get('error'))} | {md_cell(item.get('error_message'))} | "
+                   f"{md_cell(item.get('action'))} |"
                   for item in fallbacks]
 
     notion = out.get("notion_upload")
