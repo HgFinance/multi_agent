@@ -253,17 +253,41 @@ def fetch_gpr(*, start: date, observed_at: datetime) -> list[Observation]:
     return obs
 
 
+def series_is_fresh(code: str, coverage: dict[str, date], *, today: date) -> bool:
+    """이 계열이 이미 최신인가(어제치까지 있으면 오늘 받을 게 없다).
+
+    GDELT 는 진행 중인 오늘을 저장하지 않으므로(gdelt_points), 어제까지 있으면
+    다시 물어봐야 얻을 것이 없다. 이 판정이 429 를 줄이는 핵심이다.
+    """
+    last = coverage.get(code)
+    return last is not None and last >= today - timedelta(days=1)
+
+
 def fetch_gdelt_theme(code: str, query: str, *, days: int, observed_at: datetime,
-                      today: date) -> tuple[list[Observation], list[str]]:
-    """모드(보도량·톤)별로 독립 수집한다.
+                      today: date,
+                      coverage: dict[str, date] | None = None
+                      ) -> tuple[list[Observation], list[str], list[str]]:
+    """모드(보도량·톤)별로 독립 수집한다. -> (관측, 실패, 건너뜀)
 
     한 모드가 429 로 빠져도 이미 받은 다른 모드를 버리지 않는다 - 첫 실행에서
     톤 실패가 보도량까지 통째로 날린 실측(2026-08-01)을 고친 것이다.
+
+    ▶ 증분 수집 (2026-08-02): 예전에는 매 실행마다 테마 6 x 모드 2 = 12회를
+      전량 재조회했다. GDELT 는 창 단위로 빡빡하게 재는지 16초 간격에도 429 가
+      나서 **톤 계열 절반이 매일 빠졌다**(지정학 입력이 반쪽). 이미 어제치까지
+      있는 계열은 물어봐도 얻을 게 없으므로 건너뛴다 - 호출 수가 줄면 남은
+      호출의 성공률이 올라간다. 빠진 계열은 다음 실행이 자연히 메운다.
     """
     obs: list[Observation] = []
     failures: list[str] = []
+    skipped: list[str] = []
+    coverage = coverage or {}
     span = min(max(days, 7), 365)   # DOC 2.0 timespan 상한이 1년대다
     for mode, suffix in (("timelinevol", ""), ("timelinetone", "_TONE")):
+        series_code = f"{code}{suffix}"
+        if series_is_fresh(series_code, coverage, today=today):
+            skipped.append(series_code)
+            continue
         url = (f"{GDELT_API}?query={urllib.parse.quote(query)}"
                f"&mode={mode}&timespan={span}d&format=json")
         try:
@@ -281,12 +305,36 @@ def fetch_gdelt_theme(code: str, query: str, *, days: int, observed_at: datetime
             continue
         for period, value in pts:
             obs.append(make_observation(
-                f"{code}{suffix}", period, value, lag_days=GDELT_LAG_DAYS,
+                series_code, period, value, lag_days=GDELT_LAG_DAYS,
                 observed_at=observed_at,
                 metadata={"source": "gdelt", "query": query, "mode": mode,
                           "attribution": "GDELT Project (gdeltproject.org)"}))
         time.sleep(GDELT_SLEEP_SECONDS)
-    return obs, failures
+    return obs, failures, skipped
+
+
+def gdelt_coverage(env: dict) -> dict[str, date]:
+    """계열별 최신 관측일. 조회 실패는 빈 dict - 그러면 전량 조회로 떨어질 뿐
+    이라 안전한 방향이다(수집을 멈추지 않는다)."""
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=15)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    select s.external_series_code, max(o.period)
+                    from research.macro_observations o
+                    join research.macro_series s on s.series_id = o.series_id
+                    where s.external_series_code like 'GDELT\\_%'
+                    group by 1""")
+                return {c: d for c, d in cur.fetchall() if d}
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 기존 커버리지 조회 실패({type(e).__name__}) - 전량 조회한다",
+              flush=True)
+        return {}
 
 
 def collect(*, days: int, themes_path: Path | None = None) -> int:
@@ -318,23 +366,34 @@ def collect(*, days: int, themes_path: Path | None = None) -> int:
         failures.append(str(e))
         print(f"  ⚠ {e}", flush=True)
 
+    # 이미 최신인 계열은 물어보지 않는다 - 호출을 줄여야 429 가 준다
+    coverage = gdelt_coverage(env)
     started = time.monotonic()
-    skipped: list[str] = []
+    over_budget: list[str] = []
+    fresh_skipped: list[str] = []
     for code, query in themes:
         if time.monotonic() - started > GDELT_BUDGET_SECONDS:
-            skipped.append(code)
+            over_budget.append(code)
             continue
-        got, fails = fetch_gdelt_theme(code, query, days=days, observed_at=now,
-                                       today=today)
+        got, fails, skipped = fetch_gdelt_theme(
+            code, query, days=days, observed_at=now, today=today,
+            coverage=coverage)
         obs.extend(got)
         failures.extend(fails)
+        fresh_skipped.extend(skipped)
+        if not got and not fails and skipped:
+            continue                     # 전부 최신 - 조용히 넘어간다
         mark = "" if not fails else f"  ⚠ 모드 {len(fails)}개 실패"
-        print(f"  GDELT {code:20s} {len(got)}건{mark}", flush=True)
+        note = f" (최신 {len(skipped)}개 생략)" if skipped else ""
+        print(f"  GDELT {code:20s} {len(got)}건{note}{mark}", flush=True)
         for f in fails:
             print(f"    {f}", flush=True)
-    if skipped:
+    if fresh_skipped:
+        print(f"  최신이라 생략한 계열 {len(fresh_skipped)}개 - 호출을 줄여 "
+              f"429 를 피한다", flush=True)
+    if over_budget:
         msg = (f"시간 예산({GDELT_BUDGET_SECONDS//60}분) 초과로 건너뜀: "
-               f"{', '.join(skipped)} - 다음 실행이 메운다")
+               f"{', '.join(over_budget)} - 다음 실행이 메운다")
         failures.append(msg)
         print(f"  ⚠ {msg}", flush=True)
 
@@ -384,6 +443,21 @@ def _check_gpr_sheet_parsing():
     except GeopoliticalError:
         pass
     print("  GPR 시트 파싱            OK")
+
+
+def _check_freshness_skip():
+    """이미 최신인 계열은 다시 묻지 않는다 - 429 를 줄이는 핵심 판정."""
+    today = date(2026, 8, 2)
+    cov = {"GDELT_NK": date(2026, 8, 1),        # 어제까지 있음 -> 생략
+           "GDELT_IRAN": date(2026, 7, 30),     # 이틀 전 -> 받아야 함
+           "GDELT_NK_TONE": date(2026, 8, 2)}   # 오늘(있을 수 없지만) -> 생략
+    assert series_is_fresh("GDELT_NK", cov, today=today)
+    assert series_is_fresh("GDELT_NK_TONE", cov, today=today)
+    assert not series_is_fresh("GDELT_IRAN", cov, today=today)
+    # 기록이 아예 없으면 받아야 한다 - 없는 것을 최신으로 착각하면 영원히 빈다
+    assert not series_is_fresh("GDELT_NEW", cov, today=today)
+    assert not series_is_fresh("GDELT_NK", {}, today=today)
+    print("  최신 계열 생략 판정      OK")
 
 
 def _check_theme_parsing():
@@ -468,9 +542,10 @@ if __name__ == "__main__":
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_gpr_sheet_parsing()
+    _check_freshness_skip()
     _check_theme_parsing()
     _check_partial_day_excluded()
     _check_publication_lag()
     _check_series_specs()
     _check_license_gate()
-    print("지정학 수집 6개 영역 통과. 수집은 --collect [--days N]")
+    print("지정학 수집 7개 영역 통과. 수집은 --collect [--days N]")

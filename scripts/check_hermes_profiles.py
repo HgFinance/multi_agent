@@ -36,6 +36,22 @@ ANTHROPIC = {"ceo-agent", "research-department", "qa-department",
 OPENAI = {"trading-department", "risk-management",
           "accounting-portfolio-department", "hr-department"}
 
+# 부서별 기대 모델. 2026-08-02 재일님 결정: "내 부서는 내가 원하는 모델 쓰면 된다".
+# 모델 선택은 **권한 경계가 아니라 소유자 재량**이다 - 리스크 거부권·주문 제출
+# 같은 통제 경계와 층이 다르므로 부서마다 달라도 된다. 다만 "달라도 된다"가
+# "아무거나 돼도 된다"는 아니므로, 소유자가 선언한 값과 다르면 이 검사가 잡는다
+# (전역 동일성 강제를 여기서 이 표로 바꿨다 - 우연한 표류는 여전히 걸린다).
+EXPECTED_MODELS = {
+    "research-department": "nous/poolside/laguna-s-2.1:free",     # 재일
+    "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
+    "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
+    "hr-department": "nous/poolside/laguna-s-2.1:free",          # 영주
+    "trading-department": "nous/poolside/laguna-s-2.1:free",     # 도현
+    "accounting-portfolio-department": "nous/poolside/laguna-s-2.1:free",
+    "risk-management": "nous/poolside/laguna-s-2.1:free",        # 동규
+    "qa-department": "nous/poolside/laguna-s-2.1:free",
+}
+
 DEPARTMENTS = {
     "ceo-agent": "00-ceo-office",
     "research-department": "01-research",
@@ -148,8 +164,11 @@ def audit() -> tuple[list[str], list[str], dict]:
         elif cfg.get("tool_allowlist") is not None:
             warns.append(f"{dept}: tool_allowlist 가 최상위에 있다 - 선행 사례"
                          f"(03-risk)는 agent: 아래다. 위치를 맞추면 리뷰가 쉽다")
-    if len(set(models.values())) > 1:
-        errors.append(f"모델이 부서마다 다르다 - 8개를 함께 바꾼다(CLAUDE.md): {models}")
+    for dept, got in sorted(models.items()):
+        want = EXPECTED_MODELS.get(dept)
+        if want and got != want:
+            errors.append(f"{dept}: 모델이 선언과 다르다 - 기대 {want}, 실제 {got}. "
+                          f"의도한 변경이면 EXPECTED_MODELS 를 함께 고친다")
     return errors, warns, models
 
 
