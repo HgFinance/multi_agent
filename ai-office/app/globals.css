@@ -618,3 +618,21 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
   .office-room { min-height: 205px; }
   .office-legend small { width: 100%; margin-left: 0; }
 }
+.risk-qa-panel { margin-top: 18px; }
+.risk-qa-note { margin: 0 0 14px; color: var(--ink-soft); font-size: 12px; line-height: 1.65; }
+.risk-qa-policy { display: grid; grid-template-columns: repeat(3, auto); gap: 8px 12px; align-items: center; margin-bottom: 16px; padding: 10px 12px; border: 1.5px dashed var(--pink-line); border-radius: 10px; background: #f7f1e8; color: var(--ink-soft); font-size: 11px; }
+.risk-qa-policy b { color: var(--ink); font-size: 11px; }
+.risk-qa-departments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.risk-qa-department { min-width: 0; padding: 13px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: #fdfaf6; }
+.risk-qa-department-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.risk-qa-department-heading h3 { margin: 0; font-size: 17px; }
+.risk-qa-contract { margin: 9px 0 12px; overflow-wrap: anywhere; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
+.risk-qa-staff { display: grid; gap: 7px; }
+.risk-qa-employee { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 8px; border: 1px solid var(--pink-line); border-radius: 8px; background: white; }
+.risk-qa-employee div { display: grid; min-width: 0; gap: 2px; }
+.risk-qa-employee b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-employee span { overflow: hidden; color: var(--ink-soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-employee code { align-self: start; color: var(--pink-deep); font-size: 10px; font-weight: 900; }
+.risk-qa-employee small { grid-column: 1 / -1; overflow: hidden; color: var(--ink-faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-source { margin-top: 14px; }
+@media (max-width: 760px) { .risk-qa-departments { grid-template-columns: 1fr; } .risk-qa-policy { grid-template-columns: 1fr 1fr; } }

@@ -7,6 +7,10 @@
 - `/qa/v1/model-risk/evaluate`와 `/qa/v1/internal-audit/evaluate`는 설명용 Agent와 분리된 안전한 P1 API다. `qa-check` 상위 계약은 여전히 명시적 승인 전까지 production `503`으로 차단된다.
 - 실제 정책 원문이 없어 `SAMPLE_PLACEHOLDER`는 적재하지 않는다. 실제 Corpus/pgvector, ACTIVE Profile과 운영 `agent_runs/tool_calls`, 상위 계약 승인·E2E가 남은 운영 조건이다.
 
+## Skill Harness
+
+`harness/manifest.py`가 QA Evidence/Model-Risk/Internal-Audit/Ops/Trace 스킬과 허용 Tool을 고정한다. `harness/core.py`는 trace·비밀값·권한을 preflight하고, RAG가 `grounded=false`이면 `ESCALATE`한다. 실패 fallback은 `ESCALATE + manual_review_required`다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-qa`이고 Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 

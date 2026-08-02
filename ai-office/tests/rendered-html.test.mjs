@@ -67,6 +67,10 @@ test("keeps organization configuration wired to the live office", async () => {
   assert.match(page, /new Company\(\)/);
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
+  assert.match(page, /<RiskQaPanel/);
+  assert.match(page, /RiskQaPanel/);
+  assert.match(await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"), /RSK-00/);
+  assert.match(await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"), /QAA-07/);
   assert.match(layout, /title:\s*COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);
