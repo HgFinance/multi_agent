@@ -12,8 +12,8 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -83,7 +83,7 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def jsonl_sink(path: str | Path) -> Callable[["LogEvent"], None]:
+def jsonl_sink(path: str | Path) -> Callable[[LogEvent], None]:
     """Return a secret-safe append-only JSONL sink for a runtime log."""
 
     target = Path(path)

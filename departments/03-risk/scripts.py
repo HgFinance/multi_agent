@@ -109,6 +109,7 @@ def _journal_module():
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Risk journal을 로드할 수 없습니다: {journal_path}")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         _JOURNAL_MODULE = module
     return _JOURNAL_MODULE
@@ -826,7 +827,16 @@ if __name__ == "__main__":
             "trading_state": "ENABLED", "as_of": now.isoformat(),
         }
         print(f"{PIPELINE_VERSION} 실행 (데모 주문{' - REJECT 유도' if '--reject' in sys.argv else ''})")
-        out = run_risk_department(demo_intent, demo_context, scope=f"fund:{fund}")
+        log_path = Path(os.environ.get(
+            "RISK_RUN_LOG_PATH",
+            _BASE / "reports" / "runs" / f"risk_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
+        ))
+        if "--log-path" in sys.argv:
+            log_index = sys.argv.index("--log-path") + 1
+            if log_index >= len(sys.argv):
+                raise SystemExit("--log-path requires a file path")
+            log_path = Path(sys.argv[log_index])
+        out = run_risk_department(demo_intent, demo_context, scope=f"fund:{fund}", log_path=log_path)
         print(json.dumps(out, ensure_ascii=False, indent=1))
 
         report_dir = _BASE / "reports"
