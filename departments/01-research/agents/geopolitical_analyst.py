@@ -330,12 +330,34 @@ _SYSTEM = (
 )
 
 
+# 지표별 단위. 실측 2026-08-01·08-02: 모델이 지수 포인트를 반복해서 "백분위"
+# 라고 부른다("193.37 백분위"). 가드가 잡아 리포트에 경고로 남지만, 경고가
+# 매번 붙는 서술은 쓸모가 떨어진다 - 단위를 프롬프트에 명시해 애초에 줄인다.
+# (가드는 그대로 둔다 - 프롬프트는 줄이는 장치이고 가드가 막는 장치다.)
+_UNITS = {
+    "gpr_latest": "지수 포인트 (백분위 아님)",
+    "gpr_5d_avg": "지수 포인트 5일 평균",
+    "gpr_window_median": "지수 포인트 창 중앙값",
+    "gpr_percentile": "백분위 % (0~100) — 백분위는 이 키 하나뿐",
+    "gpr_threat_latest": "위협 지수 포인트",
+    "gpr_act_latest": "실제 사건 지수 포인트",
+    "threat_act_ratio": "위협/실제 비 (배)",
+    "max_theme_ratio": "테마 최근/중앙 배율 (배)",
+    "gpr_lag_days": "게시 지연 일수",
+}
+
+
 def narrate(readout: dict, llm: Optional[Callable] = None) -> GeoNote:
     allowed = [k for k in readout if k not in _NON_METRIC]
+    # 값이 실제로 있는 지표의 단위만 싣는다. None 인 키까지 실으면 없는 지표를
+    # 있는 것처럼 보이게 해 모델이 그것을 인용하려 든다.
+    units = {k: v for k, v in _UNITS.items() if readout.get(k) is not None}
     prompt = (f"Deterministic risk label (copy verbatim): {readout['risk_label']}\n"
               f"Deterministic driver (copy verbatim): {readout['driver']}\n"
               f"Why that label (code-computed - state THIS reason, do not "
               f"invent your own): {readout.get('label_reason')}\n"
+              f"UNITS - call each number by its own unit, never another's:\n"
+              + json.dumps(units, ensure_ascii=False, indent=1) + "\n"
               f"Allowed metric keys: {json.dumps(allowed)}\n"
               f"Geopolitical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
@@ -640,6 +662,29 @@ def _check_verify_restores_and_flags():
     print("  검증(복원·숫자·권한)     OK")
 
 
+def _check_units_in_prompt():
+    """단위 표가 프롬프트에 실제로 들어가는지 - 안 들어가면 오서술이 계속된다."""
+    readout = compute_geo_readout(
+        _rows("GPRD", [100.0] * 30, end=date(2026, 7, 31)), as_of=date(2026, 8, 1))
+    seen = {}
+
+    def spy(system, user):
+        seen["user"] = user
+        return ('{"risk_label": "%s", "driver": "%s", "summary": "s", '
+                '"transmission": [], "used_metrics": [], "cautions": []}'
+                % (readout["risk_label"], readout["driver"]))
+
+    narrate(readout, llm=spy)
+    u = seen["user"]
+    assert "UNITS" in u, "단위 표가 프롬프트에 없다"
+    assert "백분위 아님" in u, "지수 포인트에 단위 경고가 붙지 않았다"
+    assert "백분위는 이 키 하나뿐" in u
+    # readout 에 없는 키의 단위는 넣지 않는다 - 없는 지표를 있는 것처럼 보이게 한다
+    assert "max_theme_ratio" not in u.split("Allowed metric keys")[0], \
+        "테마가 없는 readout 인데 테마 단위를 실었다"
+    print("  단위 표 주입             OK")
+
+
 def _check_narrate_roundtrip():
     readout = compute_geo_readout(
         _rows("GPRD", [100.0] * 30, end=date(2026, 7, 31))
@@ -725,7 +770,8 @@ if __name__ == "__main__":
     _check_labels_and_driver()
     _check_stale_gpr_excluded()
     _check_verify_restores_and_flags()
+    _check_units_in_prompt()
     _check_narrate_roundtrip()
     _check_analyze_api_down()
     _check_theme_codes_from_config()
-    print("지정학 분석가 7개 영역 통과. 실측은 --run")
+    print("지정학 분석가 8개 영역 통과. 실측은 --run")
