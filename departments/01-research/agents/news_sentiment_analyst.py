@@ -349,8 +349,12 @@ def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
     if as_of is not None:
         url += f"&as_of={urllib.parse.quote(as_of.isoformat())}"
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
-            data = json.loads(resp.read())
+        from api_client import get_json
+
+        # 페르소나를 밝힌다(Tool Gateway). 실패는 아래 except 가 None 으로
+        # 돌려 가중을 원래대로 두는데, **403 도 실패로 본다** - 권한이 없으면
+        # 스토리 가중을 못 쓰는 것이 맞고, 조용히 틀린 가중을 쓰면 안 된다.
+        data = get_json(url, persona="news-sentiment-analyst", timeout=60)
         sizes: dict = {}
         for s in data.get("stories") or []:
             for mid in s.get("member_ids") or []:

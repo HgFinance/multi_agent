@@ -65,8 +65,16 @@ class ResearchState(TypedDict, total=False):
 
 
 def _get(url: str):
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return json.loads(r.read())
+    """파이프라인 공용 조회 - Evidence 조립 경로가 쓴다.
+
+    페르소나는 큐레이터(RES-08)다. 뉴스·공시를 모아 분석가에게 넘기는
+    큐레이션이 그 직무이고, 총괄은 허용목록에서 "자체 조회 없음"으로
+    선언돼 있다(evidence/bundle.py 와 같은 판단).
+    """
+    sys.path.insert(0, str(_BASE / "evidence"))
+    from api_client import get_json
+
+    return get_json(url, persona="rag-librarian-evidence-curator", timeout=30)
 
 
 # ── 노드 1: Universe 판정 (결정론 직원) ────────────────────────────────────
