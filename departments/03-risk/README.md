@@ -1,5 +1,12 @@
 # 리스크본부 (Risk Management)
 
+## P1 현재 상태 (2026-08-02)
+
+- `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.
+- `p1/repository.py`가 `risk.snapshots`, `risk.exposure_components`, `risk.stress_results`, `risk.kill_switch_events`를 한 트랜잭션으로 적재한다. Fund/Book/Instrument/승인된 Stress Scenario FK가 없으면 생성·우회하지 않고 rollback한다.
+- LS증권 어댑터는 읽기 전용이다. 실제 키·계좌·운영 DB가 주입되기 전에는 실제 데이터를 수집하거나 운영 Snapshot을 만들지 않는다. `RISK_REQUIRE_P1_ANALYTICS=true`인 pre-trade API는 P1 Snapshot이 없거나 PASS가 아니면 차단한다.
+- 남은 운영 조건은 실제 API 자격증명, governed FK 원장, RLS/OMS E2E 및 운영 장애 검증이다. P1 계산 코드가 구현됐다는 뜻이지 실거래 승인을 뜻하지 않는다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-risk`이고 Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 

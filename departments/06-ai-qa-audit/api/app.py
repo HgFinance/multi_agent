@@ -57,6 +57,8 @@ from incident_timeline import (
     IncidentTimeline,
     IncidentTimelineError,
 )
+from internal_audit import InternalAuditEngine
+from model_risk import ModelRiskEngine, ModelRiskInput
 from ops_health_monitor import (
     AgentHealthMetrics,
     OpsHealthMonitor,
@@ -178,6 +180,23 @@ def _record_risk_event(event: dict) -> None:
 
 class QaContextIn(BaseModel):
     decision_time: datetime
+
+
+class ModelRiskCheckRequest(BaseModel):
+    model_id: UUID
+    model_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    dataset_version: str = Field(min_length=1)
+    evaluation_count: int = Field(ge=0)
+    accuracy: float = Field(ge=0, le=1)
+    calibration_error: float = Field(ge=0, le=1)
+    drift_score: float = Field(ge=0, le=1)
+    protected_failure_rate: float = Field(ge=0, le=1)
+
+
+class InternalAuditCheckRequest(BaseModel):
+    events: list[dict]
+    expected_department: str = Field(default="qa", min_length=1)
 
 
 class QaCheckRequest(BaseModel):
@@ -382,6 +401,28 @@ def _qa_check_contract_is_approved() -> bool:
 
 
 # 3.1 [제안] Case에 종속된 판정 -------------------------------------------------------
+
+
+@app.post("/qa/v1/model-risk/evaluate")
+def model_risk_evaluate(body: ModelRiskCheckRequest):
+    result = ModelRiskEngine().evaluate(ModelRiskInput(**body.model_dump()))
+    return {
+        "decision": result.decision.value,
+        "reason_codes": list(result.reason_codes),
+        "calculation_version": result.calculation_version,
+        "input_hash": result.input_hash,
+    }
+
+
+@app.post("/qa/v1/internal-audit/evaluate")
+def internal_audit_evaluate(body: InternalAuditCheckRequest):
+    result = InternalAuditEngine().evaluate(events=body.events, expected_department=body.expected_department)
+    return {
+        "decision": result.decision.value,
+        "findings": list(result.findings),
+        "calculation_version": result.calculation_version,
+        "input_hash": result.input_hash,
+    }
 
 
 @app.post("/investment-cases/{case_id}/qa-check")

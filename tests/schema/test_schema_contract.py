@@ -53,6 +53,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260802001500_research_collector_runs.sql",
                 "20260802001600_risk_qa_runtime_registration.sql",
                 "20260802001700_evidence_embedding_1024_match.sql",
+                "20260802001800_risk_qa_p1_rls.sql",
             ],
         )
         for path, sql in self.files:

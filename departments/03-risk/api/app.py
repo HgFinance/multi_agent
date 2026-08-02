@@ -44,6 +44,12 @@ for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
 from contracts import OrderIntent
+from p1.analytics import (
+    KillSwitchState,
+    P1GateDecision,
+    P1RiskSnapshot,
+    evaluate_p1_gate,
+)
 from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
@@ -153,10 +159,52 @@ class RiskContextIn(BaseModel):
         )
 
 
+class P1RiskSnapshotIn(BaseModel):
+    fund_id: UUID
+    book_id: UUID | None = None
+    strategy_version_id: UUID | None = None
+    as_of: datetime
+    gross_exposure: float
+    net_exposure: float
+    value_at_risk: float | None = None
+    expected_shortfall: float | None = None
+    stress_losses: dict[str, float] = {}
+    correlation_shock_loss: float | None = None
+    correlation_max: float | None = None
+    quality_status: str
+    input_hash: str = Field(min_length=1)
+    calculation_version: str = Field(min_length=1)
+    kill_switch_state: KillSwitchState
+    breaches: list[str] = []
+    exposure_components: list[dict] = []
+
+    def to_snapshot(self) -> P1RiskSnapshot:
+        return P1RiskSnapshot(
+            fund_id=self.fund_id,
+            book_id=self.book_id,
+            strategy_version_id=self.strategy_version_id,
+            as_of=self.as_of,
+            gross_exposure=self.gross_exposure,
+            net_exposure=self.net_exposure,
+            value_at_risk=self.value_at_risk,
+            expected_shortfall=self.expected_shortfall,
+            stress_losses=self.stress_losses,
+            correlation_shock_loss=self.correlation_shock_loss,
+            correlation_max=self.correlation_max,
+            quality_status=self.quality_status,
+            input_hash=self.input_hash,
+            calculation_version=self.calculation_version,
+            kill_switch_state=self.kill_switch_state,
+            breaches=tuple(self.breaches),
+            exposure_components=tuple(self.exposure_components),
+        )
+
+
 class RiskCheckRequest(BaseModel):
     risk_request_id: UUID | None = None
     order_intent: OrderIntent
     context: RiskContextIn
+    p1_snapshot: P1RiskSnapshotIn | None = None
 
 
 class TradingStateBody(BaseModel):
@@ -307,6 +355,11 @@ def _on_validation_error(request, exc: RequestValidationError):
 @app.post("/investment-cases/{case_id}/risk-check")
 def risk_check(case_id: str, body: RiskCheckRequest):
     assessment = engine.check_order(body.order_intent, body.context.to_context(), body.risk_request_id)
+    if os.environ.get("RISK_REQUIRE_P1_ANALYTICS", "false").strip().lower() == "true":
+        if body.p1_snapshot is None:
+            raise HTTPException(status_code=503, detail="P1 risk analytics snapshot is required")
+        if evaluate_p1_gate(body.p1_snapshot.to_snapshot()) is not P1GateDecision.PASS:
+            raise HTTPException(status_code=409, detail="P1 risk analytics gate rejected entry")
     _persist_risk_decision(case_id, body.order_intent.trace_id, assessment)
     return assessment
 

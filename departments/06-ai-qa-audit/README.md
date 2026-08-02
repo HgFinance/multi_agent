@@ -1,5 +1,12 @@
 # AI QA/감사본부 (AI QA & Audit)
 
+## P1 현재 상태 (2026-08-02)
+
+- `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.
+- `internal_audit.py`와 `/qa/v1/internal-audit/evaluate`는 Trace·권한·ACTIVE Profile·부서 경계·금지 Tool을 검사한다. QA가 Risk/OMS/원장 권한을 스스로 승인하지 않는다.
+- `/qa/v1/model-risk/evaluate`와 `/qa/v1/internal-audit/evaluate`는 설명용 Agent와 분리된 안전한 P1 API다. `qa-check` 상위 계약은 여전히 명시적 승인 전까지 production `503`으로 차단된다.
+- 실제 정책 원문이 없어 `SAMPLE_PLACEHOLDER`는 적재하지 않는다. 실제 Corpus/pgvector, ACTIVE Profile과 운영 `agent_runs/tool_calls`, 상위 계약 승인·E2E가 남은 운영 조건이다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-qa`이고 Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
