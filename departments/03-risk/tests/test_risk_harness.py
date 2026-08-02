@@ -9,6 +9,7 @@ for module_name in tuple(sys.modules):
         sys.modules.pop(module_name, None)
 
 from harness import DepartmentHarness, HarnessDecision
+from harness.journal import LogEventType
 from harness.manifest import RISK_SKILLS
 from harness.redis_check import check_redis_urls
 
@@ -68,3 +69,64 @@ def test_risk_harness_retries_twice_then_returns_success() -> None:
 
     assert calls == 3
     assert result.decision is HarnessDecision.READY
+
+
+def test_risk_harness_journal_replay_review_and_order_fill_separation() -> None:
+    harness = DepartmentHarness(RISK_SKILLS, hermes_profile="risk-management")
+    output = {
+        "verdict": "reject",
+        "trading_state": "HALTED",
+        "rationale": "stale snapshot",
+        "evidence_refs": ["risk-snapshot-1"],
+        "constraints_applied": ["position_cap"],
+    }
+
+    result = harness.execute(
+        "risk.pre_trade.check",
+        trace_id="trace-log",
+        run_id="run-log",
+        employee_profile="pre-trade-risk-analyst",
+        as_of="2026-08-02T00:00:00Z",
+        asset="SYMBOL_A",
+        model_version="risk-engine-1",
+        prompt_version="prompt-1",
+        parameter_version="params-1",
+        payload={"case_id": "case-1"},
+        handler=lambda _: output,
+    )
+
+    assert result.decision is HarnessDecision.READY
+    events = harness.journal.events_for_run("run-log")
+    assert [event.event_type for event in events] == [
+        LogEventType.INPUT_SNAPSHOT,
+        LogEventType.AGENT_OUTPUT,
+        LogEventType.VALIDATION,
+        LogEventType.DECISION,
+    ]
+    assert all(event.executor == "langgraph" for event in events)
+    assert events[1].rationale == "stale snapshot"
+    assert events[1].evidence_refs == ("risk-snapshot-1",)
+    replay = harness.journal.replay("run-log", lambda _: output)
+    assert replay.output_match and replay.decision_match and not replay.diffs
+    review = harness.journal.review("run-log")
+    assert review["replay_ready"] is True
+    assert review["fallback_rate"] == 0.0
+
+    order = harness.journal.order(
+        run_id="run-log",
+        trace_id="trace-log",
+        employee_profile="pre-trade-risk-analyst",
+        inputs_hash=events[0].inputs_hash,
+        order_id="order-1",
+        payload={"state": "CREATED"},
+    )
+    fill = harness.journal.fill(
+        run_id="run-log",
+        trace_id="trace-log",
+        employee_profile="pre-trade-risk-analyst",
+        inputs_hash=events[0].inputs_hash,
+        fill_id="fill-1",
+        payload={"filled_qty": "0"},
+    )
+    assert order.event_type is LogEventType.ORDER
+    assert fill.event_type is LogEventType.FILL

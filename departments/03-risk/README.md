@@ -11,6 +11,8 @@
 
 `harness/manifest.py`가 Risk 스킬과 허용 Tool을 고정하고, `harness/core.py`가 trace·비밀값·금지 Tool을 호출 전에 차단한다. 실패 fallback은 `REJECT + HALTED`다. Redis 연결 상태는 실제 비밀값을 출력하지 않는 `harness/redis_check.py`로 확인한다.
 
+`harness/journal.py`는 Hermes 부서 실행과 LangGraph 직원 실행을 `run_id`로 묶어 `InputSnapshot → AgentOutput → Validation → Decision`을 기록한다. Order와 Fill은 별도 이벤트이며 `inputs_hash`, 모델·프롬프트·파라미터 버전, retry/fallback, rationale/evidence를 보존한다. `RunJournal.replay()`와 `RunJournal.review()`는 단계 재실행과 폴백 사유 집계를 제공하고, 운영 적재 스키마는 `risk.run_log_events`다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-risk`이고 Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 

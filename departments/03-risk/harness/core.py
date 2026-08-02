@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .journal import RunJournal
+
 SECRET_FIELDS = frozenset({"api_key", "apikey", "authorization", "password", "secret", "token", "private_key"})
 
 
@@ -47,13 +49,21 @@ class SkillResult:
     trace_id: str
     reason: str = ""
     fallback_used: bool = False
+    retry_count: int = 0
 
 
 class DepartmentHarness:
-    def __init__(self, skills: Sequence[SkillSpec]) -> None:
+    def __init__(
+        self,
+        skills: Sequence[SkillSpec],
+        *,
+        journal: RunJournal | None = None,
+        hermes_profile: str = "risk-management",
+    ) -> None:
         self._skills = {skill.name: skill for skill in skills}
         if len(self._skills) != len(skills):
             raise ValueError("duplicate skill name")
+        self.journal = journal or RunJournal(hermes_profile=hermes_profile)
 
     @property
     def skills(self) -> Mapping[str, SkillSpec]:
@@ -88,38 +98,187 @@ class DepartmentHarness:
         payload: Mapping[str, Any],
         handler: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         tool_name: str | None = None,
+        run_id: str | None = None,
+        employee_profile: str = "unknown",
+        as_of: str | None = None,
+        asset: str | None = None,
+        model_version: str | None = None,
+        prompt_version: str | None = None,
+        parameter_version: str | None = None,
     ) -> SkillResult:
         preflight = self.preflight(skill_name, trace_id=trace_id, payload=payload, tool_name=tool_name)
         if preflight is None:
             return self._blocked(trace_id, "skill_not_registered")
         if preflight.decision is not HarnessDecision.READY:
+            self.journal.validation(
+                run_id=run_id or trace_id,
+                trace_id=trace_id,
+                employee_profile=employee_profile,
+                inputs_hash=preflight.input_hash,
+                schema_id=skill_name,
+                schema_valid=False,
+                domain_valid=False,
+                failed_rule=preflight.reason,
+                fallback_reason=preflight.reason,
+                as_of=as_of,
+                asset=asset,
+                model_version=model_version,
+                prompt_version=prompt_version,
+                parameter_version=parameter_version,
+            )
+            self.journal.decision(
+                run_id=run_id or trace_id,
+                trace_id=trace_id,
+                employee_profile=employee_profile,
+                inputs_hash=preflight.input_hash,
+                output=preflight.output,
+                schema_id=skill_name,
+                schema_valid=False,
+                domain_valid=False,
+                failed_rule=preflight.reason,
+                fallback_reason=preflight.reason,
+                as_of=as_of,
+                asset=asset,
+            )
             return preflight
         skill = self._skills[skill_name]
+        execution_run_id = run_id or trace_id
+        self.journal.input_snapshot(
+            run_id=execution_run_id,
+            trace_id=trace_id,
+            employee_profile=employee_profile,
+            payload=payload,
+            schema_id=skill_name,
+            as_of=as_of,
+            asset=asset,
+            model_version=model_version,
+            prompt_version=prompt_version,
+            parameter_version=parameter_version,
+        )
         for attempt in range(skill.max_attempts):
             try:
                 output = handler(payload)
                 if not isinstance(output, Mapping):
                     raise TypeError("skill output must be an object")
+                if _contains_secret_field(output):
+                    raise ValueError("secret_field_in_skill_output")
+                output_dict = dict(output)
+                self.journal.agent_output(
+                    run_id=execution_run_id,
+                    trace_id=trace_id,
+                    employee_profile=employee_profile,
+                    output=output_dict,
+                    inputs_hash=preflight.input_hash,
+                    schema_id=skill_name,
+                    schema_valid=True,
+                    retry_count=attempt,
+                    as_of=as_of,
+                    asset=asset,
+                    model_version=model_version,
+                    prompt_version=prompt_version,
+                    parameter_version=parameter_version,
+                )
                 if skill.requires_grounded and output.get("grounded") is not True:
-                    return SkillResult(
+                    result = SkillResult(
                         HarnessDecision.ESCALATE,
-                        dict(output),
+                        output_dict,
                         preflight.input_hash,
                         trace_id,
                         "grounded_result_required",
+                        True,
+                        attempt,
                     )
-                return SkillResult(HarnessDecision.READY, dict(output), preflight.input_hash, trace_id)
+                    self.journal.validation(
+                        run_id=execution_run_id,
+                        trace_id=trace_id,
+                        employee_profile=employee_profile,
+                        inputs_hash=preflight.input_hash,
+                        schema_id=skill_name,
+                        schema_valid=True,
+                        domain_valid=False,
+                        failed_rule="grounded_result_required",
+                        retry_count=attempt,
+                    )
+                    self.journal.decision(
+                        run_id=execution_run_id,
+                        trace_id=trace_id,
+                        employee_profile=employee_profile,
+                        inputs_hash=preflight.input_hash,
+                        output=output_dict,
+                        schema_id=skill_name,
+                        schema_valid=True,
+                        domain_valid=False,
+                        failed_rule="grounded_result_required",
+                        fallback_reason="grounded_result_required",
+                        retry_count=attempt,
+                    )
+                    return result
+                self.journal.validation(
+                    run_id=execution_run_id,
+                    trace_id=trace_id,
+                    employee_profile=employee_profile,
+                    inputs_hash=preflight.input_hash,
+                    schema_id=skill_name,
+                    schema_valid=True,
+                    domain_valid=True,
+                    retry_count=attempt,
+                )
+                result = SkillResult(
+                    HarnessDecision.READY,
+                    output_dict,
+                    preflight.input_hash,
+                    trace_id,
+                    retry_count=attempt,
+                )
+                self.journal.decision(
+                    run_id=execution_run_id,
+                    trace_id=trace_id,
+                    employee_profile=employee_profile,
+                    inputs_hash=preflight.input_hash,
+                    output=output_dict,
+                    schema_id=skill_name,
+                    schema_valid=True,
+                    domain_valid=True,
+                    retry_count=attempt,
+                )
+                return result
             except Exception as exc:  # noqa: BLE001 - skill boundary must fail closed for any handler error
+                self.journal.validation(
+                    run_id=execution_run_id,
+                    trace_id=trace_id,
+                    employee_profile=employee_profile,
+                    inputs_hash=preflight.input_hash,
+                    schema_id=skill_name,
+                    schema_valid=False,
+                    domain_valid=False,
+                    failed_rule=type(exc).__name__,
+                    retry_count=attempt,
+                )
                 if attempt + 1 < skill.max_attempts:
                     continue
-                return SkillResult(
+                result = SkillResult(
                     HarnessDecision.ESCALATE,
                     {"verdict": "reject", "trading_state": "HALTED", "reason_codes": ["harness_fallback"]},
                     preflight.input_hash,
                     trace_id,
                     f"{type(exc).__name__}: {skill_name}",
                     True,
+                    attempt,
                 )
+                self.journal.decision(
+                    run_id=execution_run_id,
+                    trace_id=trace_id,
+                    employee_profile=employee_profile,
+                    inputs_hash=preflight.input_hash,
+                    output=result.output,
+                    schema_id=skill_name,
+                    schema_valid=False,
+                    domain_valid=False,
+                    failed_rule=type(exc).__name__,
+                    fallback_reason="harness_fallback",
+                    retry_count=attempt,
+                )
+                return result
         raise AssertionError("unreachable")
 
     @staticmethod

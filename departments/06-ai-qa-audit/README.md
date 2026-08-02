@@ -11,6 +11,8 @@
 
 `harness/manifest.py`가 QA Evidence/Model-Risk/Internal-Audit/Ops/Trace 스킬과 허용 Tool을 고정한다. `harness/core.py`는 trace·비밀값·권한을 preflight하고, RAG가 `grounded=false`이면 `ESCALATE`한다. 실패 fallback은 `ESCALATE + manual_review_required`다.
 
+`harness/journal.py`는 Hermes QA 오케스트레이터와 LangGraph 직원 실행을 `run_id`로 묶어 `InputSnapshot → AgentOutput → Validation → Decision`을 기록한다. QA는 Order/Fill을 소유하지 않으며 공통 계약의 별도 이벤트 타입만 감사 스키마에서 허용한다. `RunJournal.replay()`와 `RunJournal.review()`로 입력 해시·버전·검증 실패·폴백 사유를 재현·집계하고, 운영 적재 스키마는 `audit.run_log_events`다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-qa`이고 Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 

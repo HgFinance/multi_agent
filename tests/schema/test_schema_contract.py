@@ -52,8 +52,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260802001400_research_packet_outcomes.sql",
                 "20260802001500_research_collector_runs.sql",
                 "20260802001600_risk_qa_runtime_registration.sql",
-                "20260802001700_evidence_embedding_1024_match.sql",
-                "20260802001800_risk_qa_p1_rls.sql",
+            "20260802001700_evidence_embedding_1024_match.sql",
+            "20260802001800_risk_qa_p1_rls.sql",
+            "20260802001900_risk_qa_run_log_replay.sql",
             ],
         )
         for path, sql in self.files:
@@ -77,13 +78,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 19,
+            "audit": 20,
             "execution": 12,
             "governance": 20,
             "quant": 12,
             "reference": 9,
             "research": 18,
-            "risk": 16,
+            "risk": 17,
             "strategy": 9,
             "workforce": 24,
         }
@@ -116,6 +117,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             ("accounting", "nav_runs"),
             ("audit", "traces"),
             ("audit", "agent_runs"),
+            ("audit", "run_log_events"),
+            ("risk", "run_log_events"),
             ("workforce", "agent_profile_versions"),
         }
         self.assertTrue(required.issubset(self.tables), required - self.tables)

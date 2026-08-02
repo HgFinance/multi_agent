@@ -109,6 +109,11 @@ rag_technique_assignment:
 deterministic_services:
   harness_manifest: departments/06-ai-qa-audit/harness/manifest.py
   harness_preflight: departments/06-ai-qa-audit/harness/core.py
+  harness_log_contract: departments/06-ai-qa-audit/harness/journal.py
+  harness_replay: "RunJournal.replay(run_id, executor)"
+  harness_review: "RunJournal.review(run_id)"
+  orchestrator: "Hermes department profile: qa-department"
+  employee_executor: "LangGraph employee node"
   harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=ESCALATE"
   harness_fallback: "ESCALATE + manual_review_required + trace_id + reason_code"
   evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py    # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL, input_hash 재현성

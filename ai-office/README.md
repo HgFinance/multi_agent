@@ -109,3 +109,8 @@ RSK-00~06(6명), QAA-00~07(8명)에 매핑되며, 화면은 읽기/검증 Projec
 `ESCALATE + manual_review_required`로 종료되며, 주문 제출·원장 기록·Risk Limit
 변경 권한은 연결 계약에 포함하지 않습니다. 실제 런타임 상태는 각 부서 API와 하네스
 로그에서 확인해야 합니다.
+
+로그 흐름은 `InputSnapshot → AgentOutput → Validation → Decision`이며, Risk에 한해
+`Order → Fill`을 별도 이벤트로 기록합니다. AI Office의 로그 흐름 카드는 계약만
+표시하며, 원문·리플레이·리뷰 결과는 각 부서의 `RunJournal`과 운영 DB 원장에서
+조회합니다.
