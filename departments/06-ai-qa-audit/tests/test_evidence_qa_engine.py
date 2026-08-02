@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 
-from evidence_qa_engine import (  # noqa: E402
+from evidence_qa_engine import (
     CHECKER_VERSION,
     Artifact,
     CheckFailureReason,
@@ -83,9 +83,9 @@ def decision_is(assessment: QaAssessment, expected: QaDecisionValue, why: str):
 
 
 def test_01_fact_with_matching_evidence_supported_pass():
-    ev1 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev1 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a1 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev1.evidence_id,)))
     r1 = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     result_is(r1, 0, ClaimCheckResult.SUPPORTED, "정상 Fact")
@@ -136,9 +136,9 @@ def test_06_evidence_published_after_decision_time_pit_violation_unsupported():
 
 
 def test_07_numeric_mismatch_unsupported():
-    ev7 = evidence(numeric_value=Decimal("50000"), unit="KRW")
+    ev7 = evidence(numeric_value=Decimal(50000), unit="KRW")
     a7 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev7.evidence_id,)))
     r7 = engine.check_artifact(a7, ctx_with(store_with(ev7)))
     result_is(r7, 0, ClaimCheckResult.UNSUPPORTED, "숫자 불일치")
@@ -146,8 +146,8 @@ def test_07_numeric_mismatch_unsupported():
 
 
 def test_08_contradicting_evidence_without_uncertainty_flag_contradicted_fail():
-    ev8a = evidence(source="A", numeric_value=Decimal("70000"), unit="KRW")
-    ev8b = evidence(source="B", numeric_value=Decimal("50000"), unit="KRW")
+    ev8a = evidence(source="A", numeric_value=Decimal(70000), unit="KRW")
+    ev8b = evidence(source="B", numeric_value=Decimal(50000), unit="KRW")
     a8 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 약 6만원대", kind=ClaimKind.FACT,
                              subject="AAPL", evidence_ids=(ev8a.evidence_id, ev8b.evidence_id)))
     r8 = engine.check_artifact(a8, ctx_with(store_with(ev8a, ev8b)))
@@ -157,8 +157,8 @@ def test_08_contradicting_evidence_without_uncertainty_flag_contradicted_fail():
 
 
 def test_09_same_contradiction_with_acknowledged_uncertainty_supported():
-    ev8a = evidence(source="A", numeric_value=Decimal("70000"), unit="KRW")
-    ev8b = evidence(source="B", numeric_value=Decimal("50000"), unit="KRW")
+    ev8a = evidence(source="A", numeric_value=Decimal(70000), unit="KRW")
+    ev8b = evidence(source="B", numeric_value=Decimal(50000), unit="KRW")
     a9 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 출처마다 다르게 보고됨", kind=ClaimKind.FACT,
                              subject="AAPL", evidence_ids=(ev8a.evidence_id, ev8b.evidence_id),
                              acknowledges_uncertainty=True))
@@ -167,11 +167,11 @@ def test_09_same_contradiction_with_acknowledged_uncertainty_supported():
 
 
 def test_10_tool_result_deviates_from_summary_contradicted():
-    ev10 = evidence(numeric_value=Decimal("100"), unit="주")
-    tool10 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("60")})
+    ev10 = evidence(numeric_value=Decimal(100), unit="주")
+    tool10 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal(60)})
     a10 = artifact_with(
         Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
+              numeric_value=Decimal(100), unit="주", evidence_ids=(ev10.evidence_id,),
               tool_source="portfolio-api"),
         tool_results=(tool10,),
     )
@@ -181,11 +181,11 @@ def test_10_tool_result_deviates_from_summary_contradicted():
 
 
 def test_11_tool_result_matches_summary_supported():
-    ev10 = evidence(numeric_value=Decimal("100"), unit="주")
-    tool11 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("100")})
+    ev10 = evidence(numeric_value=Decimal(100), unit="주")
+    tool11 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal(100)})
     a11 = artifact_with(
         Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
+              numeric_value=Decimal(100), unit="주", evidence_ids=(ev10.evidence_id,),
               tool_source="portfolio-api"),
         tool_results=(tool11,),
     )
@@ -194,9 +194,9 @@ def test_11_tool_result_matches_summary_supported():
 
 
 def test_12_one_invalid_one_valid_evidence_partial_warn():
-    ev12 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev12 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a12 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                              subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                              subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                               evidence_ids=(uuid4(), ev12.evidence_id)))
     r12 = engine.check_artifact(a12, ctx_with(store_with(ev12)))
     result_is(r12, 0, ClaimCheckResult.PARTIAL, "일부 근거 무효, 나머지로 성립")
@@ -205,10 +205,10 @@ def test_12_one_invalid_one_valid_evidence_partial_warn():
 
 
 def test_13_one_failing_claim_among_several_fails_whole_only_that_finding_opens():
-    ev13 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev13 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a13 = artifact_with(
         Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("70000"), unit="KRW", evidence_ids=(ev13.evidence_id,)),
+              numeric_value=Decimal(70000), unit="KRW", evidence_ids=(ev13.evidence_id,)),
         Claim(claim_index=1, text="MSFT는 반등 여력이 있다", kind=ClaimKind.INFERENCE),
         Claim(claim_index=2, text="삼성전자 실적이 개선됐다", kind=ClaimKind.FACT, subject="삼성전자"),
     )
@@ -234,9 +234,9 @@ def test_16_artifact_without_claims_rejected_at_construction():
 
 
 def test_17_reproducibility_same_decision_and_input_hash():
-    ev1 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev1 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a1 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev1.evidence_id,)))
     r17a = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     r17b = engine.check_artifact(a1, ctx_with(store_with(ev1)))
@@ -247,9 +247,9 @@ def test_17_reproducibility_same_decision_and_input_hash():
 
 
 def test_18_different_artifact_yields_different_input_hash():
-    ev1 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev1 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a1 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev1.evidence_id,)))
     r17a = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     a2 = artifact_with(Claim(claim_index=0, text="AAPL은 반등한다", kind=ClaimKind.FACT, subject="AAPL"))

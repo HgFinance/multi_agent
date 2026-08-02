@@ -43,8 +43,8 @@ _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skill
 for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
-from contracts import OrderIntent  # noqa: E402
-from risk_engine import (  # noqa: E402
+from contracts import OrderIntent
+from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
     LimitSet,
@@ -58,8 +58,6 @@ from risk_engine import (  # noqa: E402
     RiskEngineError,
     TradingState,
 )
-from trading_state_store import RedisTradingStateStore, TradingStateStoreError  # noqa: E402
-
 
 # --- Request 모델 (RiskContext 데이터클래스 트리를 JSON에서 그대로 재구성) ------------------
 from risk_events.redis_event_bus import (
@@ -68,6 +66,10 @@ from risk_events.redis_event_bus import (
     decision_event_id,
 )
 from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
+from trading_state_store import (
+    RedisTradingStateStore,
+    TradingStateStoreError,
+)
 
 
 class MandateScopeIn(BaseModel):
@@ -329,7 +331,9 @@ def delete_trading_state(scope: str):
 
 @app.post("/risk/v1/compliance/check")
 def compliance_check(body: ComplianceCheckRequest):
-    from src.graph import run_compliance_check  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    from src.graph import (
+        run_compliance_check,  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    )
 
     return run_compliance_check(body.query, body.as_of, persona="compliance-policy-agent")
 
@@ -350,9 +354,8 @@ if __name__ == "__main__":
     from datetime import timedelta, timezone
     from uuid import uuid4
 
+    from contracts import RiskVerdict
     from fastapi.testclient import TestClient
-
-    from contracts import MarketSnapshot, OrderType, RiskVerdict, Side, TimeInForce
 
     now = datetime.now(timezone.utc)
     fund, book, strategy, aapl = uuid4(), uuid4(), uuid4(), uuid4()

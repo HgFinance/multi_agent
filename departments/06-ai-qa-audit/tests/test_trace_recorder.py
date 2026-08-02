@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audit"))
 
-from trace_recorder import (  # noqa: E402
+from trace_recorder import (
     AgentRunStatus,
     ToolCallStatus,
     TraceRecorder,
@@ -116,6 +116,6 @@ def test_09_as_tool_result_output_values_excludes_denied_and_incomplete():
     recorder.deny_tool_call(call10b.tool_call_id, "denied")
     merged = as_tool_result_output_values(
         [call10a, call10b],
-        {call10a.tool_call_id: {"AAPL": Decimal("100")}, call10b.tool_call_id: {"MSFT": Decimal("999")}},
+        {call10a.tool_call_id: {"AAPL": Decimal(100)}, call10b.tool_call_id: {"MSFT": Decimal(999)}},
     )
-    assert merged == {"AAPL": Decimal("100")}, "DENIED Tool Call 값이 섞이면 안 됨"
+    assert merged == {"AAPL": Decimal(100)}, "DENIED Tool Call 값이 섞이면 안 됨"

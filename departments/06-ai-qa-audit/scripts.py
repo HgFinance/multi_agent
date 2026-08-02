@@ -65,7 +65,12 @@ _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_BASE / "evidence", _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
-from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
+from reporting import (
+    evaluation_metrics,
+    json_cell,
+    langsmith_handoff,
+    md_cell,
+)
 
 PIPELINE_VERSION = "qa-department-pipeline-v1"
 
@@ -86,7 +91,7 @@ def _call_internal_llm(prompt: str) -> str:
 
 def _persona(name: str) -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    m = re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.S)
+    m = re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.DOTALL)
     if not m:
         raise ValueError(f"{name} 페르소나를 config.yaml에서 찾을 수 없다")
     return m.group(1)
@@ -131,7 +136,13 @@ def _fallback_assessment(state: QAState, exc: Exception) -> dict:
 
 # ── 노드 1: Evidence 검사 (결정론 직원 - EvidenceQaEngine) ─────────────────
 def check_evidence(state: QAState) -> dict:
-    from evidence_qa_engine import Artifact, EvidenceChunk, EvidenceQaEngine, EvidenceStore, QaContext
+    from evidence_qa_engine import (
+        Artifact,
+        EvidenceChunk,
+        EvidenceQaEngine,
+        EvidenceStore,
+        QaContext,
+    )
 
     chunks = {UUID(eid): EvidenceChunk(evidence_id=UUID(eid), **fields)
               for eid, fields in state["evidence_store"].items()}
@@ -183,7 +194,9 @@ def draft_claim_narrative(state: QAState) -> dict:
 
 # ── 노드 3: 종합 (qa-audit-supervisor 페르소나 - Hermes AIAgent) ───────────
 def _hermes_chat(persona: str, task: str) -> str:
-    from run_agent import AIAgent  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+    from run_agent import (
+        AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+    )
 
     agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
                      ephemeral_system_prompt=persona)

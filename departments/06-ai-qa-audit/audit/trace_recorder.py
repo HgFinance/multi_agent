@@ -120,7 +120,7 @@ class TraceRecorder:
     """결정론적 Trace 기록소. svc_audit_collector가 이 모양대로 Supabase에 적재한다
     (지금은 인메모리 - DB 배선은 Sprint K0)."""
 
-    def __init__(self, repository: "PostgresAuditRepository | None" = None) -> None:
+    def __init__(self, repository: PostgresAuditRepository | None = None) -> None:
         self.runs: dict[UUID, AgentRunRecord] = {}
         self.tool_calls: dict[UUID, ToolCallRecord] = {}
         self._by_profile_input: dict[tuple[UUID, str], UUID] = {}
@@ -408,8 +408,8 @@ if __name__ == "__main__":
     recorder.deny_tool_call(call10b.tool_call_id, "denied")
     merged = as_tool_result_output_values(
         [call10a, call10b],
-        {call10a.tool_call_id: {"AAPL": Decimal("100")}, call10b.tool_call_id: {"MSFT": Decimal("999")}},
+        {call10a.tool_call_id: {"AAPL": Decimal(100)}, call10b.tool_call_id: {"MSFT": Decimal(999)}},
     )
-    assert merged == {"AAPL": Decimal("100")}, "DENIED Tool Call 값이 섞이면 안 됨"
+    assert merged == {"AAPL": Decimal(100)}, "DENIED Tool Call 값이 섞이면 안 됨"
 
     print("ok - Agent/Tool Trace Recorder 9개 시나리오 점검 통과")

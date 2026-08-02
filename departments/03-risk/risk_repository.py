@@ -7,7 +7,6 @@ Risk Engine은 순수 결정론 계산기로 유지한다. 이 모듈은 API 경
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -15,10 +14,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from engine.risk_engine import RiskAssessment
 from psycopg2.extras import Json
 from psycopg2.pool import ThreadedConnectionPool
-
-from engine.risk_engine import RiskAssessment
 
 
 class RiskDecisionPersistenceError(RuntimeError):
@@ -55,7 +53,7 @@ class RiskDecisionRepository:
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str) -> "RiskDecisionRepository":
+    def connect(cls, dsn: str) -> RiskDecisionRepository:
         return cls(ThreadedConnectionPool(1, 4, dsn))
 
     def close(self) -> None:

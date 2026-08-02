@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from risk_repository import (  # noqa: E402
+from risk_repository import (
     RiskDecisionPersistenceError,
     RiskDecisionRepository,
 )

@@ -15,6 +15,7 @@ from pathlib import Path
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
+    PERSONA_PROMPTS,
     ComplianceState,
     bump_attempt_node,
     generate_node,
@@ -64,7 +65,7 @@ def run_compliance_check(
         final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
     except Exception as exc:
         emit_metric("rag_graph_failure", persona=persona, error=type(exc).__name__)
-        fallback_verdict = "ambiguous" if persona == "compliance-policy-agent" else "UNSUPPORTED"
+        fallback_verdict = PERSONA_PROMPTS[persona]["no_evidence_verdict"]
         final_state = {
             "answer": {
                 "verdict": fallback_verdict,

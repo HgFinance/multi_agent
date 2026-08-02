@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audit"))
 
-from incident_timeline import (  # noqa: E402
+from incident_timeline import (
     CorrectiveActionStatus,
     IncidentEntryType,
     IncidentTimeline,

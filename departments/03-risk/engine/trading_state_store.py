@@ -32,7 +32,7 @@ from uuid import uuid4
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from risk_engine import TradingState  # noqa: E402
+from risk_engine import TradingState
 
 DEFAULT_KEY_PREFIX = "hgfinance:trading_state:"
 
@@ -185,11 +185,24 @@ if __name__ == "__main__":
         from datetime import timedelta
         from decimal import Decimal
 
-        from risk_engine import (
-            CounterpartyHealth, CounterpartyStatus, LimitSet, MandateScope, MarketStatus,
-            PortfolioState, RiskContext, RiskEngine, RiskVerdict,
+        from contracts import (
+            MarketSnapshot,
+            OrderIntent,
+            OrderType,
+            Side,
+            TimeInForce,
         )
-        from contracts import MarketSnapshot, OrderIntent, OrderType, Side, TimeInForce  # noqa: E402
+        from risk_engine import (
+            CounterpartyHealth,
+            CounterpartyStatus,
+            LimitSet,
+            MandateScope,
+            MarketStatus,
+            PortfolioState,
+            RiskContext,
+            RiskEngine,
+            RiskVerdict,
+        )
 
         store.set_state(test_scope, TradingState.ENTRY_BLOCKED, "통합 테스트", "selfcheck")
         now = _now()
@@ -197,24 +210,24 @@ if __name__ == "__main__":
         intent = OrderIntent(
             trade_case_id=uuid4(), fund_id=fund, book_id=book, strategy_id=strategy,
             instrument_id=aapl, side=Side.BUY, order_type=OrderType.LIMIT,
-            quantity=Decimal("10"), limit_price=Decimal("70000"), time_in_force=TimeInForce.DAY,
+            quantity=Decimal(10), limit_price=Decimal(70000), time_in_force=TimeInForce.DAY,
             valid_until=now + timedelta(hours=1),
             snapshot=MarketSnapshot(market_snapshot_id="s1", as_of=now,
-                                    bid=Decimal("69900"), ask=Decimal("70000")),
+                                    bid=Decimal(69900), ask=Decimal(70000)),
             idempotency_key="idem_redis_test", created_by="trader-pm-agent",
             trace_id="t1", created_at=now,
         )
         ctx = RiskContext(
             mandate=MandateScope(fund_id=fund, allowed_instrument_ids=None,
-                                 min_order_notional=Decimal("1000"), max_order_notional=Decimal("1000000000")),
+                                 min_order_notional=Decimal(1000), max_order_notional=Decimal(1000000000)),
             limits=LimitSet(soft_single_issuer_pct=Decimal("0.5"), hard_single_issuer_pct=Decimal("0.9"),
-                            max_daily_turnover_notional=Decimal("1000000000"), max_daily_order_count=1000,
-                            max_daily_loss=Decimal("1000000000"), max_drawdown_pct=Decimal("0.9")),
-            restricted_items=(), portfolio=PortfolioState(fund_id=fund, cash=Decimal("1000000000"),
-                                                           buying_power=Decimal("1000000000"),
-                                                           gross_exposure=Decimal("0"),
-                                                           peak_equity=Decimal("1000000000"),
-                                                           equity=Decimal("1000000000")),
+                            max_daily_turnover_notional=Decimal(1000000000), max_daily_order_count=1000,
+                            max_daily_loss=Decimal(1000000000), max_drawdown_pct=Decimal("0.9")),
+            restricted_items=(), portfolio=PortfolioState(fund_id=fund, cash=Decimal(1000000000),
+                                                           buying_power=Decimal(1000000000),
+                                                           gross_exposure=Decimal(0),
+                                                           peak_equity=Decimal(1000000000),
+                                                           equity=Decimal(1000000000)),
             market_status=MarketStatus(tradable=True),
             counterparty=CounterpartyStatus("paper", CounterpartyHealth.OK),
             trading_state=store.get_state_fail_closed(test_scope),  # <- Redis에서 실제로 읽음

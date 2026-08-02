@@ -46,16 +46,22 @@ _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skill
 for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
-from evidence_qa_engine import Artifact, EvidenceQaEngine, EvidenceStore, QaContext  # noqa: E402
-from incident_timeline import IncidentEntryType, IncidentTimeline, IncidentTimelineError  # noqa: E402
-from ops_health_monitor import AgentHealthMetrics, OpsHealthMonitor, OpsThresholds  # noqa: E402
-from tool_permission_check import (  # noqa: E402
-    AgentToolPolicy,
-    check_tool_permission,
-    count_unauthorized_calls,
-    record_and_check_tool_call,
+from evidence_qa_engine import (
+    Artifact,
+    EvidenceQaEngine,
+    EvidenceStore,
+    QaContext,
 )
-from trace_recorder import TraceRecorder, TraceRecorderError  # noqa: E402
+from incident_timeline import (
+    IncidentEntryType,
+    IncidentTimeline,
+    IncidentTimelineError,
+)
+from ops_health_monitor import (
+    AgentHealthMetrics,
+    OpsHealthMonitor,
+    OpsThresholds,
+)
 from qa_events.redis_event_bus import (
     DEFAULT_GROUP,
     DEFAULT_STREAM,
@@ -64,17 +70,30 @@ from qa_events.redis_event_bus import (
     QaEventBusError,
     RedisEventBus,
 )
+from tool_permission_check import (
+    AgentToolPolicy,
+    check_tool_permission,
+    count_unauthorized_calls,
+    record_and_check_tool_call,
+)
+from trace_recorder import TraceRecorder, TraceRecorderError
 
 # DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
 # write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
 # .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 if _DATABASE_URL:
-    from repository import QaDecisionPersistenceError, PostgresAuditRepository  # noqa: E402
+    from repository import (
+        PostgresAuditRepository,
+        QaDecisionPersistenceError,
+    )
 
     _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
 else:
-    from repository import QaDecisionPersistenceError, PostgresAuditRepository  # noqa: E402
+    from repository import (
+        PostgresAuditRepository,
+        QaDecisionPersistenceError,
+    )
 
     _audit_repository = None
 _event_bus: RedisEventBus | None = None
@@ -533,7 +552,9 @@ def cancel_action(corrective_action_id: UUID, body: CancelActionRequest):
 
 @app.post("/qa/v1/evidence/check")
 def evidence_check(body: ComplianceCheckRequest):
-    from src.graph import run_compliance_check  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    from src.graph import (
+        run_compliance_check,  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    )
 
     return run_compliance_check(body.query, body.as_of, persona="evidence-qa-agent")
 
@@ -542,9 +563,8 @@ if __name__ == "__main__":
     from datetime import timedelta, timezone
     from uuid import uuid4
 
-    from fastapi.testclient import TestClient
-
     from evidence_qa_engine import EvidenceChunk
+    from fastapi.testclient import TestClient
 
     now = datetime.now(timezone.utc)
     client = TestClient(app)
@@ -554,7 +574,7 @@ if __name__ == "__main__":
     evidence_store.chunks[ev_id] = EvidenceChunk(
         evidence_id=ev_id, source="research-api", published_at=now - timedelta(hours=1),
         observed_at=now - timedelta(hours=1), excerpt="근거 원문",
-        numeric_value=Decimal("70000"), unit="KRW",
+        numeric_value=Decimal(70000), unit="KRW",
     )
     fund, trace, artifact_id = uuid4(), uuid4(), uuid4()
 

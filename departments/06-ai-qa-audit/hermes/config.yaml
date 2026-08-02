@@ -52,14 +52,15 @@ agent:
 # 검색-평가-생성-환각검증-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline은 risk-management의 compliance-policy-agent부터 구현됨 (skills/agentic-rag/, 코드는 risk/qa 공용)
 # evidence-qa-agent는 corpus/evidence/ 추가 + main.py PERSONA_CORPUS 등록으로 확장 완료(2026-07-30, 샘플
-# placeholder 데이터로 grounded 검증). hallucination-critic은 evidence-qa-agent의 grounded 판정을
-# 그대로 재사용할 수 있어 별도 corpus 없이 다음 확장 대상으로 남긴다.
+# placeholder 데이터로 grounded 검증). hallucination-critic도 evidence-qa-agent의 corpus/evidence/를
+# 그대로 재사용해 확장 완료(2026-08-02, scripts.py의 조건부 노드 hallucination_review - UNSUPPORTED/
+# CONTRADICTED로 이미 플래그된 claim만 대상, 판정을 뒤집지 않고 유형 분류·인용 근거만 덧붙인다).
 agentic_rag:
   framework: langgraph
-  status: "evidence-qa-agent까지 확장됨 (skills/agentic-rag/, corpus/evidence/ SAMPLE_PLACEHOLDER). hallucination-critic은 미착수"
+  status: "hallucination-critic까지 확장됨 (skills/agentic-rag/, corpus/evidence/ SAMPLE_PLACEHOLDER)"
   target_personas:
     - evidence-qa-agent      # 구현됨 — Document RAG / Fact Store 근거를 검색해 주장-출처를 연결
-    - hallucination-critic   # 미착수 — 원 에이전트가 실제 검색한 근거와 출력 주장을 대조해 환각 판정
+    - hallucination-critic   # 구현됨 — evidence-qa-agent 코퍼스 재사용, UNSUPPORTED/CONTRADICTED claim만 대조해 환각 유형 분류
 
 # 2026-07-30 기법 배정 결정 (동규님, "내 부서에 한해서만" 범위) — 아직 미구현인 항목도 기록만 해둔다.
 # 판단 기준: 검색-근거-생성 루프면 Agentic RAG(+LightRAG 백엔드 후보), 관계/계보가 그래프 형태로 이미
@@ -85,8 +86,8 @@ rag_technique_assignment:
         trigger: "2단계까지 반영한 뒤에도 N항 관계 손실로 인한 오탐/누락이 실측으로 확인될 때 — 지금은 근거 없음, 셋 중 가장 검증 안 된 기법이라 최후순위"
   hallucination-critic:
     technique: agentic_rag
-    status: not_started
-    note: "evidence-qa-agent가 이미 만든 grounded 판정을 재사용 — 별도 corpus 불필요. corpus/evidence/가 안정화된 뒤 착수."
+    status: implemented
+    note: "skills/agentic-rag/ --persona hallucination-critic, corpus/evidence/ 재사용(신규 코퍼스 없음). departments/06-ai-qa-audit/scripts.py의 hallucination_review 노드 - evidence_qa_engine.py가 UNSUPPORTED/CONTRADICTED로 이미 플래그한 claim만 대상으로 호출, 판정 자체는 못 바꾸고 유형 분류(HALLUCINATION/OVERCONFIDENT_CLAIM/CONTRADICTION/TOOL_MISUSE)·인용 근거만 덧붙인다."
   model-risk-agent:
     technique: neo4j_knowledge_graph
     status: not_started

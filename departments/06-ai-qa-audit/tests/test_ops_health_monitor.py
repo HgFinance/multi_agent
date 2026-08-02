@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audit"))
 
-from ops_health_monitor import (  # noqa: E402
+from ops_health_monitor import (
     AgentHealthMetrics,
     BreachKind,
     IncidentSeverity,
@@ -27,13 +27,13 @@ window_start = now - timedelta(minutes=5)
 monitor = OpsHealthMonitor()
 thresholds = OpsThresholds(
     max_error_rate=Decimal("0.02"), critical_error_rate=Decimal("0.10"),
-    max_p95_latency_ms=Decimal("2000"), critical_p95_latency_ms=Decimal("5000"),
-    max_cost_usd_per_window=Decimal("10"),
+    max_p95_latency_ms=Decimal(2000), critical_p95_latency_ms=Decimal(5000),
+    max_cost_usd_per_window=Decimal(10),
 )
 
 
 def metrics(scope="research-department", requests=1000, errors=5,
-            p95=Decimal("800"), cost=Decimal("2.5")) -> AgentHealthMetrics:
+            p95=Decimal(800), cost=Decimal("2.5")) -> AgentHealthMetrics:
     return AgentHealthMetrics(
         scope=scope, window_start=window_start, window_end=now,
         request_count=requests, error_count=errors, p95_latency_ms=p95, cost_usd=cost,
@@ -61,26 +61,26 @@ def test_03_error_rate_critical_breach_critical_sev2():
 
 
 def test_04_latency_soft_breach_degraded():
-    a4 = monitor.evaluate(metrics(p95=Decimal("2500")), thresholds)
+    a4 = monitor.evaluate(metrics(p95=Decimal(2500)), thresholds)
     assert a4.status is OpsHealthStatus.DEGRADED
     assert BreachKind.LATENCY_SOFT in a4.breaches
 
 
 def test_05_latency_critical_breach_critical_sev2():
-    a5 = monitor.evaluate(metrics(p95=Decimal("6000")), thresholds)
+    a5 = monitor.evaluate(metrics(p95=Decimal(6000)), thresholds)
     assert a5.status is OpsHealthStatus.CRITICAL
     assert a5.incident.severity is IncidentSeverity.SEV2
     assert BreachKind.LATENCY_CRITICAL in a5.breaches
 
 
 def test_06_cost_over_budget_alone_degraded():
-    a6 = monitor.evaluate(metrics(cost=Decimal("15")), thresholds)
+    a6 = monitor.evaluate(metrics(cost=Decimal(15)), thresholds)
     assert a6.status is OpsHealthStatus.DEGRADED
     assert BreachKind.COST_OVER_BUDGET in a6.breaches
 
 
 def test_07_simultaneous_critical_breaches_escalate_to_sev1():
-    a7 = monitor.evaluate(metrics(requests=1000, errors=150, p95=Decimal("6000")), thresholds)
+    a7 = monitor.evaluate(metrics(requests=1000, errors=150, p95=Decimal(6000)), thresholds)
     assert a7.status is OpsHealthStatus.CRITICAL
     assert a7.incident.severity is IncidentSeverity.SEV1, "동시 Critical은 SEV1이어야 함"
 

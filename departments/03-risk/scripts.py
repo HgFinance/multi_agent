@@ -64,7 +64,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 _BASE = Path(__file__).resolve().parent
 _ENGINE_DIR = _BASE / "engine"
@@ -74,9 +74,13 @@ _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_ENGINE_DIR, _API_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
-from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
-
-from langgraph.graph import END, StateGraph  # noqa: E402
+from langgraph.graph import END, StateGraph
+from reporting import (
+    evaluation_metrics,
+    json_cell,
+    langsmith_handoff,
+    md_cell,
+)
 
 PIPELINE_VERSION = "risk-department-pipeline-v1"
 
@@ -87,12 +91,12 @@ class RiskState(TypedDict, total=False):
     scope: str               # trading_state_store 조회 scope (예: "fund:<uuid>")
     trading_state: str      # market-liquidity-risk-agent 결과
     assessment: dict        # pre-trade-risk-analyst 결과 (RiskAssessment)
-    counterparty: Optional[dict]  # operational-counterparty-risk-agent 결과 (플래그 안 되면 생략)
-    compliance: Optional[dict]  # compliance-policy-agent 결과 (REJECT면 생략)
+    counterparty: dict | None  # operational-counterparty-risk-agent 결과 (플래그 안 되면 생략)
+    compliance: dict | None  # compliance-policy-agent 결과 (REJECT면 생략)
     verdict: str             # 최종 case-level 값 - 항상 assessment 에서만 옴
     narrative: str
     escalate: bool
-    notion_upload: Optional[dict]  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    notion_upload: dict | None  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
     fallbacks: list[dict]
     observability: dict
     report_markdown: str
@@ -221,11 +225,13 @@ def compliance_check(state: RiskState) -> dict:
 # ── 노드 5: 종합 (risk-supervisor 페르소나 - Hermes AIAgent) ───────────────
 def _persona(name: str) -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    return re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.S).group(1)
+    return re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.DOTALL).group(1)
 
 
 def _hermes_chat(persona: str, task: str) -> str:
-    from run_agent import AIAgent  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+    from run_agent import (
+        AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
+    )
 
     agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
                      ephemeral_system_prompt=persona)
@@ -385,8 +391,8 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         f"| **판정 엔진** | departments/03-risk/engine/risk_engine.py (`{out['calculation_version']}`) |",
         f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
         f"| **trading_state** | {md_cell(out['trading_state'])} |",
-        f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
-        f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |",
+        (f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
+         f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |"),
         f"| **escalate** | {md_cell(out['escalate'])} |",
         f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
         "",
