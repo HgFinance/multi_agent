@@ -4,8 +4,13 @@ begin;
 -- 원문(raw)과 사람용 summary를 분리하고, 주문/체결은 별도 event_type으로
 -- 기록한다. RLS 정책을 추가하지 않아 authenticated client에는 기본 차단되며,
 -- domain service의 service-role/repository만 적재·Projection한다.
+--
+-- if not exists: 이 migration은 원래 20260802001900 버전 접두사로 research_daily_labels와
+-- 충돌해 main에 이미 두 테이블을 만들어놓고 버전만 미기록으로 남겼다(2026-08-02 Supabase
+-- Preview 502/"relation already exists" 실측). 접두사를 002100으로 옮기며 재실행해도
+-- 실패하지 않게 가드한다 - 스키마가 바뀌면 별도 ALTER migration으로 옮길 것.
 
-create table risk.run_log_events (
+create table if not exists risk.run_log_events (
   event_id uuid primary key default gen_random_uuid(),
   run_id text not null,
   trace_id text not null,
@@ -50,7 +55,7 @@ create index if not exists risk_run_log_events_fallback_idx
   where fallback_reason is not null;
 alter table risk.run_log_events enable row level security;
 
-create table audit.run_log_events (
+create table if not exists audit.run_log_events (
   event_id uuid primary key default gen_random_uuid(),
   run_id text not null,
   trace_id text not null,
