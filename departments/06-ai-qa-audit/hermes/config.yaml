@@ -5,8 +5,9 @@
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
