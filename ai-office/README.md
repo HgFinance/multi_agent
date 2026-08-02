@@ -99,3 +99,13 @@ python apps/api/main.py
 3. Kanban Status Bridge와 `agent.status.v1` Projector.
 4. Market, Research, Strategy, Risk, Trading, Portfolio, Audit와 Workforce Workbench.
 5. 위험 Command의 Preview, 사유, 멱등 키, Backend 재검증과 Audit.
+## Risk·QA 전용 연결
+
+대시보드의 `risk_qa.department_bridge`는 `departments/03-risk`와
+`departments/06-ai-qa-audit`만 allowlist로 연결합니다. 직원은 Hermes 프로필 코드
+RSK-00~06(6명), QAA-00~07(8명)에 매핑되며, 화면은 읽기/검증 Projection입니다.
+
+두 하네스의 재시도 상한은 2회(초기 실행 포함 총 3회)입니다. 마지막 실패는 Risk `REJECT + HALTED`, QA
+`ESCALATE + manual_review_required`로 종료되며, 주문 제출·원장 기록·Risk Limit
+변경 권한은 연결 계약에 포함하지 않습니다. 실제 런타임 상태는 각 부서 API와 하네스
+로그에서 확인해야 합니다.

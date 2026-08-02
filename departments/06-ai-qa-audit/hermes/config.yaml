@@ -107,6 +107,10 @@ rag_technique_assignment:
 # 결정론적 서비스. LLM은 관련성 판단과 서술 작성에만 쓴다 - Schema, Citation, PIT, Threshold
 # 판정은 이 두 모듈이 한다 (CLAUDE.md, 팀 가이드 7절 "LLM-as-a-Judge는 보조 신호다").
 deterministic_services:
+  harness_manifest: departments/06-ai-qa-audit/harness/manifest.py
+  harness_preflight: departments/06-ai-qa-audit/harness/core.py
+  harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=ESCALATE"
+  harness_fallback: "ESCALATE + manual_review_required + trace_id + reason_code"
   evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py    # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL, input_hash 재현성
   ops_health_monitor: departments/06-ai-qa-audit/audit/ops_health_monitor.py       # P0 Ops Threshold — HEALTHY/DEGRADED/CRITICAL, Incident 초안
   trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py              # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls

@@ -15,6 +15,7 @@ import { CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { COMPANY, STORAGE_LINK } from "../company.config";
 import OpsPanel from "./ops/OpsPanel";
+import RiskQaPanel from "./ops/RiskQaPanel";
 
 type View = "live" | "dashboard";
 
@@ -945,6 +946,7 @@ function DashboardView({
       </section>
 
       <OpsPanel />
+      <RiskQaPanel />
 
       <section className="win storage">
         <div className="win-bar">
