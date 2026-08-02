@@ -244,6 +244,7 @@ export default function Home() {
             filter={filter}
             setFilter={setFilter}
             snap={snap}
+            agents={engine.agents}
             onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
@@ -688,6 +689,7 @@ function DashboardView({
   filter,
   setFilter,
   snap,
+  agents,
   onStart,
   onApprove,
   onSelect,
@@ -699,6 +701,7 @@ function DashboardView({
   filter: "전체" | DeptStatus;
   setFilter: (value: "전체" | DeptStatus) => void;
   snap: Snapshot;
+  agents: readonly Agent[];
   onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
@@ -946,7 +949,7 @@ function DashboardView({
       </section>
 
       <OpsPanel />
-      <RiskQaPanel />
+      <RiskQaPanel agents={agents} snapshot={snap} />
 
       <section className="win storage">
         <div className="win-bar">
