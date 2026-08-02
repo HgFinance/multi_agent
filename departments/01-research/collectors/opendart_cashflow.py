@@ -12,10 +12,12 @@
   **단일회사 전체 재무제표**(2019020)에만 있고 회사당 1회 호출이다.
   싼 경로를 버리지 않고 비싼 경로를 필요한 만큼만 더한다.
 
-▶ 범위를 좁힌다
-  전 발행사(1,000+)를 매일 도는 것은 낭비다. **감시 바스켓**(news_watchlist,
-  코스피200+코스닥150)만 받는다 - 분석가가 실제로 Packet 을 만드는 대상이다.
-  범위를 넓히려면 --limit 을 올린다.
+▶ 범위 (2026-08-02 전종목 확대)
+  **full_universe.txt**(거래정지·관리종목 제외 2,596종목)를 쓴다. DART 는
+  회사당 1호출이고 corp_code 보유 발행사가 1,263 이라 일 한도의 6% 다 -
+  여기는 전종목을 감당한다(NAVER 뉴스·LS 실시간과 달리).
+  파일이 없으면 감시 바스켓으로 떨어진다(전종목 파일 생성 실패가 수집을
+  멈추지 않게).
 
 ▶ 지키는 것
   - account_code 는 기존과 같은 `{sj_div}:{account_nm}` 스킴이다. 2019020 은
@@ -44,7 +46,7 @@ ENDPOINT = "fnlttSinglAcntAll.json"          # 2019020 단일회사 전체 재�
 SOURCE_TAG = "opendart:2019020"
 CF_SJ_DIV = "CF"                              # 현금흐름표
 ANNUAL_REPORT = "11011"                       # 사업보고서 - 연차만 받는다
-DEFAULT_LIMIT = 400
+DEFAULT_LIMIT = 3000   # 전종목(2,596) 수용
 RATE_PER_SEC = 2.0
 
 # F-Score·Beneish 가 찾는 핵심 계정. 이름이 회사마다 조금씩 달라 부분일치로
@@ -138,8 +140,10 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
         print("OPEN_DART_API_KEY 가 없다", flush=True)
         return 1
 
-    wl = _BASE.parent / "config" / "news_watchlist.txt"
+    full = _BASE.parent / "config" / "full_universe.txt"
+    wl = full if full.exists() else _BASE.parent / "config" / "news_watchlist.txt"
     symbols = list(parse_watchlist_file(wl.read_text(encoding="utf-8")))[:limit]
+    print(f"  대상 {wl.name}: {len(symbols)}종목", flush=True)
 
     repo = SupabaseReferenceRepository()
     try:
