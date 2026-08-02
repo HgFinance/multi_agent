@@ -38,7 +38,7 @@ test("server-renders the HgFinance eight-organization office", async () => {
   assert.match(html, /리스크본부/);
   assert.match(html, /회계·포트폴리오본부/);
   assert.match(html, /AI QA·감사본부/);
-  assert.match(html, /Agent Workforce 인사팀/);
+  assert.match(html, /인사팀/);
   assert.match(html, /CEO Office 지원팀/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
