@@ -72,6 +72,7 @@ from llm_client import chat as llm_chat  # noqa: E402
 from number_guard import caution_lines, flag_unmatched  # noqa: E402
 from llm_client import narrate as llm_narrate  # noqa: E402
 from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
+from style_ratios import OVERLAY_CODES  # noqa: E402
 from style_ratios import compute_style_overlay, overlay_numbers  # noqa: E402
 
 PERSONA = "sector-regime-analyst"   # 부서 허용목록 키
@@ -90,10 +91,10 @@ LLM_TIMEOUT = float(os.environ.get("REGIME_LLM_TIMEOUT", "120"))  # 로컬 14b �
 REGIME_DAYS = 40          # 20일 지표 + 휴장/결측 여유
 BREADTH_MARKETS = ("KOSPI", "KOSDAQ")
 
-# 스타일 overlay 재료 - collectors/style_index_collector.py + volatility_index_collector.py
-# 가 macro_observations 에 넣는 계열. 백분위를 말하려면 이력이 필요해 창을 길게 잡는다.
-OVERLAY_CODES = ("KOSPI200", "BOND_FUT", "MIN_VOL", "DIV_50", "DIV_GROWTH",
-                 "EX_MEGA", "VKOSPI")
+# 스타일 overlay 재료 - **목록을 여기 복제하지 않는다.** config/style_indices.txt
+# 가 단일 출처이고 style_ratios 가 그것을 읽어 OVERLAY_CODES 를 만든다.
+# 예전에는 이 파일에 튜플을 따로 뒀는데, 설정에 지수를 추가하면 수집은 되고
+# 분석가는 안 읽는 상태가 조용히 생긴다(VKOSPI 가 실제로 그랬다).
 OVERLAY_DAYS = 400        # 1년 백분위 + 휴장 여유
 
 # 라벨 임계값 - regime_rules 에 문장으로도 같이 실어 출력만으로 재검산 가능하게
