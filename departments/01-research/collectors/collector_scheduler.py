@@ -80,6 +80,12 @@ JOBS: tuple[Job, ...] = (
     # 창 상한 17:00: 수능일 파생 마감 16:45 까지 덮는다. 호출 4회/실행이라 가볍다.
     Job("derivatives", ("collectors/derivatives_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 40), time(17, 0))),
+    # 거래제한 종목 스냅샷 - **자격을 수집기에 가둔다.** 판정하는 쪽
+    # (universe_manager)이 LS 를 직접 물면 파이프라인 컨테이너마다 LS 키가
+    # 필요해진다(통합계획 6.2 위반). 07:05: 공시 폴링(07:00) 직후, 개장 전.
+    Job("universe-restrictions",
+        ("collectors/universe_restriction_collector.py", "--collect"),
+        daily_at=time(7, 5)),
     # 일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다. 16:30:
     # VKOSPI(16:05) 뒤라 그날 시장 상태가 다 반영된 시점. 이 이력이 있어야
     # Packet 의 REGIME_FLIP·GEO_ESCALATION 주장을 채점할 수 있다.

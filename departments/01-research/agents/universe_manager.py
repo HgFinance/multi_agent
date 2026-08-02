@@ -101,20 +101,67 @@ def decide(basket: tuple[str, ...], restricted: dict[str, set[str]],
     )
 
 
-def run(client=None, basket: tuple[str, ...] = ()) -> UniverseDecision:
-    from ls_client import LsRestClient
+def restrictions_from_api(payload: dict) -> dict[str, set[str]]:
+    """research-api /universe/restrictions 응답 -> {사유: 종목집합}.
+
+    사유 목록은 **우리가 아는 것만** 받는다. 모르는 사유가 오면 무시하지 않고
+    드러낸다 - 목록 정의가 바뀌었는데 조용히 통과하면 정지 종목이 샌다.
+    """
+    known = {r for _tr, _j, r in RESTRICTION_SOURCES}
+    out: dict[str, set[str]] = {r: set() for r in known}
+    unknown: set[str] = set()
+    for row in payload.get("restrictions") or []:
+        reason = str(row.get("reason") or "").strip()
+        sym = str(row.get("symbol") or "").strip()
+        if not sym:
+            continue
+        if reason in known:
+            out[reason].add(sym)
+        else:
+            unknown.add(reason)
+    if unknown:
+        raise RuntimeError(
+            f"모르는 제한 사유 {sorted(unknown)} - RESTRICTION_SOURCES 와 "
+            f"수집기 정의가 어긋났다(판정을 멈춘다)")
+    return out
+
+
+def run(client=None, basket: tuple[str, ...] = (),
+        research_api: str | None = None, get=None) -> UniverseDecision:
+    """거래가능 판정.
+
+    ▶ 2026-08-02: LS REST 직접 호출을 **research-api 조회로 바꿨다.**
+      판정하는 쪽이 LS 자격을 들고 있으면 파이프라인을 돌리는 컨테이너마다
+      자격이 퍼진다(통합계획 6.2 위반). 이제 수집기
+      (universe_restriction_collector)만 자격을 갖고, 여기는 DB 를 읽는다.
+      client 인자는 자체 점검·수동 호출 호환으로 남기되, 주면 옛 경로를 쓴다.
+    """
+    import json as _json
+    import os
+    import urllib.request
 
     from news_watch_service import parse_watchlist_file
 
     if not basket:
         wl = Path(__file__).resolve().parent.parent / "config" / "news_watchlist.txt"
         basket = parse_watchlist_file(wl.read_text(encoding="utf-8"))
-    c = client or LsRestClient()
-    restricted = {
-        reason: fetch_restricted(c, tr, jong)
-        for tr, jong, reason in RESTRICTION_SOURCES
-    }
-    return decide(basket, restricted, as_of=datetime.now(timezone.utc))
+
+    if client is not None:      # 옛 경로 - LS 직접(자체 점검·긴급 수동용)
+        restricted = {reason: fetch_restricted(client, tr, jong)
+                      for tr, jong, reason in RESTRICTION_SOURCES}
+        return decide(basket, restricted, as_of=datetime.now(timezone.utc))
+
+    base = (research_api or os.environ.get("RESEARCH_API_URL",
+                                           "http://127.0.0.1:8035")).rstrip("/")
+
+    def _default_get(url):
+        with urllib.request.urlopen(url, timeout=25) as r:
+            return _json.loads(r.read())
+
+    # 조회 실패는 예외다 - 빈 목록으로 위장하면 정지 종목이 거래가능으로 샌다
+    payload = (get or _default_get)(f"{base}/universe/restrictions")
+    return decide(basket, restrictions_from_api(payload),
+                  as_of=datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +216,42 @@ def _check_pagination():
     print("  연속조회                 OK")
 
 
+
+def _check_api_restrictions():
+    """API 응답 -> 판정. 모르는 사유는 조용히 무시하지 않는다."""
+    payload = {"restrictions": [
+        {"symbol": "000660", "reason": "HALTED"},
+        {"symbol": "005930", "reason": "ADMINISTERED"},
+        {"symbol": "000660", "reason": "ADMINISTERED"},   # 중복 사유 - 둘 다 받는다
+        {"symbol": "", "reason": "HALTED"},                # 빈 종목 - 버린다
+    ]}
+    got = restrictions_from_api(payload)
+    assert got["HALTED"] == {"000660"} and got["ADMINISTERED"] == {"000660", "005930"}
+    assert got["LIQUIDATION"] == set(), "없는 사유도 키는 있어야 한다"
+
+    d = decide(("000660", "005930", "035720"), got, as_of=datetime.now(timezone.utc))
+    assert d.tradable == ("035720",), d.tradable
+    assert d.excluded["000660"] == "HALTED", "심각도 순서(정지가 관리보다 앞)"
+
+    # 모르는 사유가 오면 판정을 멈춘다 - 조용히 통과하면 정지 종목이 샌다
+    try:
+        restrictions_from_api({"restrictions": [{"symbol": "000660",
+                                                 "reason": "NEW_RULE"}]})
+        raise AssertionError("모르는 사유가 통과했다")
+    except RuntimeError:
+        pass
+
+    # run() 이 API 경로를 쓰는지 - 자격 없이 판정되는 것이 이 변경의 목적이다
+    called = {}
+    def fake_get(url):
+        called["url"] = url
+        return payload
+    d2 = run(basket=("000660", "035720"), research_api="http://x", get=fake_get)
+    assert "/universe/restrictions" in called["url"], called
+    assert d2.tradable == ("035720",)
+    print("  API 경유 판정            OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -184,4 +267,5 @@ if __name__ == "__main__":
     _check_decide()
     _check_fail_closed()
     _check_pagination()
+    _check_api_restrictions()
     print("직원 3개 영역 통과. 실제 판정은 --run")

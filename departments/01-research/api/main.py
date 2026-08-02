@@ -263,6 +263,36 @@ def evidence_financials(
     )
 
 
+@app.get("/universe/restrictions")
+def universe_restrictions(as_of: Optional[datetime] = Query(None)):
+    """거래제한 종목 스냅샷 (RES-01 universe_manager 의 재료).
+
+    **자격 없이 거래가능을 판정하기 위한 면이다.** 예전에는 판정하는 쪽이
+    LS REST 를 직접 물어 파이프라인 컨테이너마다 LS 키가 필요했다 -
+    수집기가 남긴 것을 여기서 읽어 그 의존을 끊는다(통합계획 6.2).
+
+    as_of 이하의 **가장 최근 스냅샷**을 준다. 스냅샷이 아예 없으면 빈 목록이
+    아니라 404 다 - '제한 종목이 없다'와 '아직 안 받았다'를 섞으면 정지 종목이
+    거래가능으로 새는 방향으로 틀린다(fail-closed).
+    """
+    ts = _as_of_or_now(as_of)
+    runs = _query(
+        "select as_of, list_sizes, total_rows, collected_at "
+        "from research.symbol_restriction_runs where as_of <= %s "
+        "order by as_of desc limit 1", (ts.date(),))
+    if not runs:
+        raise HTTPException(
+            404, f"{ts.date()} 이전 거래제한 스냅샷이 없다 - "
+                 f"universe_restriction_collector 실행 여부를 확인할 것")
+    snap = runs[0]
+    rows = _query(
+        "select symbol, reason, source_tr from research.symbol_restrictions "
+        "where as_of = %s order by symbol, reason", (snap["as_of"],))
+    return {"as_of": str(snap["as_of"]), "list_sizes": snap["list_sizes"],
+            "total_rows": snap["total_rows"],
+            "collected_at": snap["collected_at"], "restrictions": rows}
+
+
 @app.get("/macro/observations")
 def macro_observations(
     codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),

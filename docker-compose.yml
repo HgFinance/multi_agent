@@ -322,19 +322,12 @@ services:
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      # 파이프라인 첫 노드(universe_manager)가 거래가능 여부를 LS REST 로 판정한다
-      # - 2026-08-02 실측: 없으면 check_universe 에서 KEY_MISSING 으로 멈춘다.
-      # batch-collectors 와 같은 자격이며, **여기서 도는 것은 결정론 파이프라인**
-      # 이지 셸을 쥔 LLM 이 아니다(에이전트는 research-api/market-api 만 쓴다는
-      # 경계는 유지된다). 백로그: universe 판정을 market-api 뒤로 옮기면 이
-      # 컨테이너에서 LS 자격을 뺄 수 있다.
-      LS_ENV: ${LS_ENV:-PAPER}
-      LS_APP_KEY: ${LS_APP_KEY:-}
-      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
-      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
-      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
-      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
-      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
+      #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
+      #   LS 키가 필요했다. 이제 universe_restriction_collector(수집기)가 제한
+      #   목록을 DB 에 남기고 research-api /universe/restrictions 가 서빙하므로
+      #   **판정하는 쪽은 자격이 필요 없다**(통합계획 6.2).
+      #   자격이 퍼지는 것 자체가 위험이므로 옮기지 않고 없앴다.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
