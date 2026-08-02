@@ -31,8 +31,14 @@ if _ENV_PATH.exists() and not os.environ.get("REDIS_URL"):
     if _redis_url:
         os.environ["REDIS_URL"] = _redis_url
 
-from contracts import MarketSnapshot, OrderIntent, OrderType, Side, TimeInForce  # noqa: E402
-from risk_engine import (  # noqa: E402
+from contracts import (
+    MarketSnapshot,
+    OrderIntent,
+    OrderType,
+    Side,
+    TimeInForce,
+)
+from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
     LimitSet,
@@ -43,7 +49,7 @@ from risk_engine import (  # noqa: E402
     RiskEngine,
     RiskVerdict,
 )
-from trading_state_store import (  # noqa: E402
+from trading_state_store import (
     RedisTradingStateStore,
     TradingState,
     TradingStateStoreError,
@@ -139,24 +145,24 @@ def test_08_risk_engine_integration_reads_real_redis_state(store):
     intent = OrderIntent(
         trade_case_id=uuid4(), fund_id=fund, book_id=book, strategy_id=strategy,
         instrument_id=aapl, side=Side.BUY, order_type=OrderType.LIMIT,
-        quantity=Decimal("10"), limit_price=Decimal("70000"), time_in_force=TimeInForce.DAY,
+        quantity=Decimal(10), limit_price=Decimal(70000), time_in_force=TimeInForce.DAY,
         valid_until=now + timedelta(hours=1),
         snapshot=MarketSnapshot(market_snapshot_id="s1", as_of=now,
-                                bid=Decimal("69900"), ask=Decimal("70000")),
+                                bid=Decimal(69900), ask=Decimal(70000)),
         idempotency_key="idem_redis_test", created_by="trader-pm-agent",
         trace_id="t1", created_at=now,
     )
     ctx = RiskContext(
         mandate=MandateScope(fund_id=fund, allowed_instrument_ids=None,
-                             min_order_notional=Decimal("1000"), max_order_notional=Decimal("1000000000")),
+                             min_order_notional=Decimal(1000), max_order_notional=Decimal(1000000000)),
         limits=LimitSet(soft_single_issuer_pct=Decimal("0.5"), hard_single_issuer_pct=Decimal("0.9"),
-                        max_daily_turnover_notional=Decimal("1000000000"), max_daily_order_count=1000,
-                        max_daily_loss=Decimal("1000000000"), max_drawdown_pct=Decimal("0.9")),
-        restricted_items=(), portfolio=PortfolioState(fund_id=fund, cash=Decimal("1000000000"),
-                                                       buying_power=Decimal("1000000000"),
-                                                       gross_exposure=Decimal("0"),
-                                                       peak_equity=Decimal("1000000000"),
-                                                       equity=Decimal("1000000000")),
+                        max_daily_turnover_notional=Decimal(1000000000), max_daily_order_count=1000,
+                        max_daily_loss=Decimal(1000000000), max_drawdown_pct=Decimal("0.9")),
+        restricted_items=(), portfolio=PortfolioState(fund_id=fund, cash=Decimal(1000000000),
+                                                       buying_power=Decimal(1000000000),
+                                                       gross_exposure=Decimal(0),
+                                                       peak_equity=Decimal(1000000000),
+                                                       equity=Decimal(1000000000)),
         market_status=MarketStatus(tradable=True),
         counterparty=CounterpartyStatus("paper", CounterpartyHealth.OK),
         trading_state=s.get_state_fail_closed(scope),

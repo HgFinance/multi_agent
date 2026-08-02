@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 import importlib.util
+import sys
 from pathlib import Path
 
 QA_DIR = Path(__file__).resolve().parents[1]
@@ -13,7 +13,7 @@ _SPEC = importlib.util.spec_from_file_location("qa_pipeline_scripts", QA_DIR / "
 assert _SPEC and _SPEC.loader
 qa_scripts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(qa_scripts)
-from notion_reporter import _rich_text  # noqa: E402
+from notion_reporter import _rich_text
 
 
 def test_invalid_input_becomes_fail_closed_assessment():

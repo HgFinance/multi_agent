@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 
 sys.modules.pop("app", None)  # 06-ai-qa-audit도 모듈명 app이라 캐시 충돌 방지
-from app import app  # noqa: E402
-from risk_engine import RiskVerdict  # noqa: E402
+from app import app
+from risk_engine import RiskVerdict
 
 now = datetime.now(timezone.utc)
 fund, book, strategy, aapl = uuid4(), uuid4(), uuid4(), uuid4()

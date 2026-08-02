@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 
-from repository import QaDecisionPersistenceError, PostgresAuditRepository  # noqa: E402
+from repository import PostgresAuditRepository, QaDecisionPersistenceError
 
 
 class FakeCursor:

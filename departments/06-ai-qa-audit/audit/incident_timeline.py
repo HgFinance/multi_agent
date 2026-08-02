@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -84,7 +84,7 @@ class CorrectiveActionRecord:
 class IncidentTimeline:
     """결정론적 Timeline 기록소. Fact와 Inference를 같은 자리에 섞지 않는다."""
 
-    def __init__(self, repository: "PostgresAuditRepository | None" = None) -> None:
+    def __init__(self, repository: PostgresAuditRepository | None = None) -> None:
         self.events: list[IncidentEventRecord] = []
         self.corrective_actions: dict[UUID, CorrectiveActionRecord] = {}
         # repository가 있으면 audit.incident_events/corrective_actions에 write-through 한다.

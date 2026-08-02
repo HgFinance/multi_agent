@@ -31,13 +31,11 @@
 """
 from __future__ import annotations
 
+from evidence_qa_engine import QaAssessment
+from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
 from psycopg2.extras import Json, register_uuid
 from psycopg2.pool import ThreadedConnectionPool
-
-from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
 from trace_recorder import AgentRunRecord, ToolCallRecord
-
-from evidence_qa_engine import QaAssessment
 
 register_uuid()
 
@@ -53,7 +51,7 @@ class PostgresAuditRepository:
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> "PostgresAuditRepository":
+    def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> PostgresAuditRepository:
         return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
 
     def close(self) -> None:

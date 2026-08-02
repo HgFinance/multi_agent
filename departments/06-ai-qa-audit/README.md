@@ -92,8 +92,9 @@ python3 skills/agentic-rag/main.py --persona evidence-qa-agent \
 - `evidence-qa-agent`의 Agentic RAG는 `skills/agentic-rag/`(공용 skills 경계 유지, Risk가 Domain Owner,
   QA는 재사용)에 구현됨 — `corpus/evidence/`의 SAMPLE_PLACEHOLDER 근거 문서를 검색해 Claim의 출처를
   인용한다. 최종 PASS/WARN/FAIL 판정은 여전히 `evidence_qa_engine.py`가 하며, 이 RAG는 근거 인용
-  보조 도구일 뿐이다. `hallucination-critic`은 이 grounded 판정을 재사용할 예정이라 별도 corpus 없이
-  미착수 상태. 기법 배정 전체 결정(Neo4j/Hypergraph 포함)은 `hermes/config.yaml`의
+  보조 도구일 뿐이다. `hallucination-critic`도 같은 `corpus/evidence/`를 재사용해 확장 완료(2026-08-02) —
+  `scripts.py`의 조건부 노드 `hallucination_review`가 UNSUPPORTED/CONTRADICTED로 이미 플래그된 claim만
+  대상으로 호출하며, 판정을 뒤집지 않고 유형 분류·인용 근거만 덧붙인다. 기법 배정 전체 결정(Neo4j/Hypergraph 포함)은 `hermes/config.yaml`의
   `rag_technique_assignment:` 참고.
 - Eval, Model-Risk 모듈은 아직 미구현(P1 tier: model-risk-agent, internal-audit-agent,
   incident-postmortem-agent) — 코드가 생기면 `evals/`, `model-risk/`에 배치.

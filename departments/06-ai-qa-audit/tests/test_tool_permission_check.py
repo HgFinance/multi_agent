@@ -14,14 +14,14 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "audit"))
 
-from tool_permission_check import (  # noqa: E402
+from tool_permission_check import (
     AgentToolPolicy,
     ToolPermissionResult,
     check_tool_permission,
     count_unauthorized_calls,
     record_and_check_tool_call,
 )
-from trace_recorder import ToolCallStatus, TraceRecorder  # noqa: E402
+from trace_recorder import ToolCallStatus, TraceRecorder
 
 now = datetime.now(timezone.utc)
 trace, agent, profile = uuid4(), uuid4(), uuid4()

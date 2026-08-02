@@ -24,7 +24,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trace_recorder import TraceRecorder, ToolCallRecord, ToolCallStatus  # noqa: E402
+from trace_recorder import ToolCallRecord, ToolCallStatus, TraceRecorder
 
 
 class ToolPermissionResult(StrEnum):

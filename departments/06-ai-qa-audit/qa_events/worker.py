@@ -11,7 +11,7 @@ from pathlib import Path
 _QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_QA_DIR))
 
-from api.app import _qa_event_bus, _record_risk_event  # noqa: E402
+from api.app import _qa_event_bus, _record_risk_event
 
 
 def main() -> None:

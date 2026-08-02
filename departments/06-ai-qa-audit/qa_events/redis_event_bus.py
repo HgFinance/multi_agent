@@ -9,12 +9,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 from uuid import UUID
-
 
 RISK_DECISION_EVENT = "risk.decision.v1"
 QA_DECISION_EVENT = "qa.decision.v1"

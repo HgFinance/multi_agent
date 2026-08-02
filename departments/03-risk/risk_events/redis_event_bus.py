@@ -12,8 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
-from uuid import UUID, uuid5, NAMESPACE_URL
-
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 EVENT_TYPE = "risk.decision.v1"
 DEFAULT_STREAM = "risk-qa-events"

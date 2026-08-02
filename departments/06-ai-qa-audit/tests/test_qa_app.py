@@ -19,8 +19,8 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 
 sys.modules.pop("app", None)  # 03-risk도 모듈명 app이라 캐시 충돌 방지
-from app import app, evidence_store  # noqa: E402
-from evidence_qa_engine import EvidenceChunk  # noqa: E402
+from app import app, evidence_store
+from evidence_qa_engine import EvidenceChunk
 
 now = datetime.now(timezone.utc)
 client = TestClient(app)
@@ -31,7 +31,7 @@ def test_01_qa_check_pass_and_fail():
     evidence_store.chunks[ev_id] = EvidenceChunk(
         evidence_id=ev_id, source="research-api", published_at=now - timedelta(hours=1),
         observed_at=now - timedelta(hours=1), excerpt="근거 원문",
-        numeric_value=Decimal("70000"), unit="KRW",
+        numeric_value=Decimal(70000), unit="KRW",
     )
     fund, trace, artifact_id = uuid4(), uuid4(), uuid4()
 
