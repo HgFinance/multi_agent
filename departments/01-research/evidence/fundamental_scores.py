@@ -6,10 +6,10 @@
       등재는 evidence/methods.py (인용·부분구현 사유의 단일 출처).
 
 ▶ 이 파일이 지키는 것
-  1. **없는 것을 만들지 않는다.** DART 주요계정에는 현금흐름표가 없다.
-     그래서 F-Score 9신호 중 3개(CFO>0, 발생액, 매출총이익률)는 계산하지
-     않고 'unavailable' 로 보고한다. 9점 척도인 척하지 않는다 - 점수는
-     available 분모와 함께만 의미가 있다.
+  1. **없는 것을 만들지 않는다.** 2026-08-02 현금흐름표 수집(2019020)으로
+     CFO>0·발생액 2신호가 가능해져 8/9 가 됐다. 남은 1개(매출총이익률)는
+     DART 어느 API 에도 매출총이익이 표준 계정으로 없어 여전히 불가다.
+     9점 척도인 척하지 않는다 - 점수는 available 분모와 함께만 의미가 있다.
   2. **결측은 0점이 아니다.** 어떤 신호의 재료가 없으면 그 신호는 채점에서
      빠진다(분모 감소). 결측을 0점으로 처리하면 자료가 부실한 회사가
      자동으로 나쁜 회사가 된다 - 흔하고 치명적인 오류다.
@@ -36,6 +36,13 @@ A_REVENUE = "IS:매출액"
 A_OPERATING = "IS:영업이익"
 A_RETAINED = "BS:이익잉여금"
 A_CAPITAL_STOCK = "BS:자본금"
+
+# 영업활동현금흐름(CFO). DART 전체 재무제표는 계정명을 표준화하지 않아 회사마다
+# 다르게 쓴다(실측 2026-08-02: 16개사에서 10가지 변형). **총액만 골라야 한다** -
+# "영업활동에서 창출된 현금"은 이자·법인세 차감 전이고 "자산·부채의 변동"은
+# 운전자본 변동이라 둘 다 CFO 가 아니다. 이걸 섞으면 F-Score 가 조용히 틀린다.
+CFO_REQUIRE = ("영업활동",)
+CFO_EXCLUDE = ("창출", "변동", "자산", "부채", "차감", "법인세", "이자")
 
 # Altman(1968) 판정 구간. 우리는 X4 를 장부가로 대용하므로 구간을 그대로
 # 결론으로 쓰지 않고 라벨에 (참고) 를 붙인다 - methods.py partial_reason 참고
@@ -74,6 +81,39 @@ class FScore:
                 "f_label": self.label,
                 "f_signals": {s.key: s.passed for s in self.signals},
                 "f_unavailable": list(self.unavailable)}
+
+
+def is_cfo_account(account_name: str) -> bool:
+    """이 계정명이 영업활동현금흐름 **총액**인가.
+
+    포함어와 제외어를 함께 본다 - 포함만 보면 하위 항목(창출된 현금, 자산·부채
+    변동)이 딸려 들어와 CFO 를 잘못 잡는다.
+    """
+    nm = " ".join(str(account_name or "").split())
+    if not nm.startswith("CF:") and "CF:" in nm:
+        nm = nm.split("CF:", 1)[1]
+    nm = nm.replace("CF:", "")
+    if not all(k in nm for k in CFO_REQUIRE):
+        return False
+    if any(k in nm for k in CFO_EXCLUDE):
+        return False
+    return "현금흐름" in nm or "현금" in nm
+
+
+def find_cfo(facts: dict):
+    """{계정코드: 값} 에서 CFO 를 찾는다. 없으면 None(0 으로 채우지 않는다).
+
+    후보가 여럿이면 **절대값이 가장 큰 것**을 취한다 - 총액이 하위 항목보다
+    크다는 경험칙이고, 애초에 하위 항목은 위 제외어로 대부분 걸러진다.
+    """
+    cands = [(k, v) for k, v in facts.items()
+             if k.startswith("CF:") and is_cfo_account(k) and v is not None]
+    if not cands:
+        return None
+    try:
+        return max(cands, key=lambda kv: abs(float(kv[1])))[1]
+    except (TypeError, ValueError):
+        return None
 
 
 def _div(a, b):
@@ -139,12 +179,25 @@ def f_score(cur: dict, prior: dict | None) -> FScore:
         f"{turn_prev:.4f} -> {turn:.4f}" if (turn is not None and turn_prev is not None)
         else "재료 없음"))
 
+    # --- 현금흐름 신호 (2026-08-02 opendart_cashflow 수집으로 가능해짐) ---
+    cfo = find_cfo(cur)
+    sigs.append(Signal("CFO_POSITIVE", None if cfo is None else float(cfo) > 0,
+                       f"CFO={float(cfo):,.0f}" if cfo is not None else "CFO 없음"))
+    # 발생액 신호: CFO/자산 > ROA (현금이 이익을 뒷받침하는가)
+    cfo_ta = _div(cfo, cur.get(A_ASSETS))
+    sigs.append(Signal(
+        "ACCRUAL(CFO>ROA)",
+        None if (cfo_ta is None or roa is None) else cfo_ta > roa,
+        f"CFO/자산={cfo_ta:.4f} vs ROA={roa:.4f}"
+        if (cfo_ta is not None and roa is not None) else "재료 없음"))
+
     scored = [s for s in sigs if s.passed is not None]
     return FScore(
         score=sum(1 for s in scored if s.passed),
         available=len(scored),
         signals=tuple(sigs),
-        unavailable=("CFO_POSITIVE", "ACCRUAL(CFO>ROA)", "GROSS_MARGIN_UP"),
+        # 매출총이익은 DART 주요계정·전체재무제표 어디에도 표준 계정으로 없다
+        unavailable=("GROSS_MARGIN_UP",),
     )
 
 
@@ -193,16 +246,43 @@ def altman_z(cur: dict) -> ZScore:
 
 _GOOD = {A_NET_INCOME: 100, A_ASSETS: 1000, A_CUR_ASSETS: 400, A_CUR_LIAB: 200,
          A_NONCUR_LIAB: 100, A_REVENUE: 800, A_CAPITAL_STOCK: 50,
-         A_RETAINED: 300, A_OPERATING: 120, A_EQUITY: 700, A_LIABILITIES: 300}
+         A_RETAINED: 300, A_OPERATING: 120, A_EQUITY: 700, A_LIABILITIES: 300,
+         # CFO 150 > 순이익 100 -> CFO>0 과 발생액 둘 다 통과
+         "CF:영업활동현금흐름": 150}
 _PRIOR = {A_NET_INCOME: 50, A_ASSETS: 1000, A_CUR_ASSETS: 300, A_CUR_LIAB: 200,
           A_NONCUR_LIAB: 150, A_REVENUE: 700, A_CAPITAL_STOCK: 50}
 
 
+def _check_cfo_detection():
+    """CFO 총액만 고르고 하위 항목은 배제한다 - 섞이면 F-Score 가 조용히 틀린다.
+
+    실측 2026-08-02: 16개사에서 계정명 10가지 변형이 나왔다.
+    """
+    for nm in ("CF:영업활동현금흐름", "CF:영업활동으로 인한 현금흐름",
+               "CF:영업활동순현금흐름", "CF:영업활동으로 인한 순현금흐름",
+               "CF:영업활동 현금흐름", "CF:영업활동으로부터의 현금흐름"):
+        assert is_cfo_account(nm), nm
+    # 총액이 아닌 것들 - 이자·법인세 차감 전이거나 운전자본 변동이다
+    for nm in ("CF:영업활동에서 창출된 현금흐름", "CF:영업활동에서 창출된 현금",
+               "CF:영업활동으로 인한 자산·부채의 변동",
+               "CF:영업활동으로 인한 자산부채의 변동",
+               "CF:투자활동현금흐름", "CF:재무활동현금흐름", "IS:영업이익", ""):
+        assert not is_cfo_account(nm), nm
+
+    # 후보가 여럿이면 절대값이 큰 총액을 취한다
+    facts = {"CF:영업활동현금흐름": 1000, "CF:투자활동현금흐름": -5000,
+             "BS:자산총계": 9999}
+    assert find_cfo(facts) == 1000
+    assert find_cfo({"BS:자산총계": 100}) is None, "없으면 None(0 아님)"
+    assert find_cfo({"CF:영업활동현금흐름": None}) is None
+    print("  CFO 계정 판별            OK")
+
+
 def _check_f_all_pass():
     f = f_score(_GOOD, _PRIOR)
-    assert f.available == 6 and f.score == 6, (f.score, f.available)
+    assert f.available == 8 and f.score == 8, (f.score, f.available)
     assert f.label == "STRONG"
-    assert len(f.unavailable) == 3, "계산 불가 신호를 감췄다"
+    assert f.unavailable == ("GROSS_MARGIN_UP",), f.unavailable
     print("  F-Score 전신호 통과      OK")
 
 
@@ -220,13 +300,14 @@ def _check_missing_is_not_zero():
 def _check_f_direction():
     worse = dict(_GOOD, **{A_NET_INCOME: -10, A_NONCUR_LIAB: 300,
                            A_CUR_ASSETS: 100, A_REVENUE: 500,
-                           A_CAPITAL_STOCK: 80})
+                           A_CAPITAL_STOCK: 80, "CF:영업활동현금흐름": -20})
     f = f_score(worse, _PRIOR)
     got = {s.key: s.passed for s in f.signals}
     assert got["ROA_POSITIVE"] is False and got["ROA_IMPROVED"] is False
     assert got["LEVERAGE_DOWN"] is False and got["LIQUIDITY_UP"] is False
     assert got["NO_NEW_EQUITY(proxy)"] is False, "자본금 증가를 놓쳤다"
     assert got["ASSET_TURNOVER_UP"] is False
+    assert got["CFO_POSITIVE"] is False, "적자 현금흐름을 놓쳤다"
     assert f.score == 0 and f.label == "WEAK"
     print("  F-Score 악화 방향        OK")
 
@@ -256,8 +337,7 @@ def _check_registry_consistency():
         assert got[key].status == STATUS_ADOPTED, key
         assert "fundamental_scores.py" in (got[key].module or ""), key
     f = f_score(_GOOD, _PRIOR)
-    assert "9신호 중 6개" in got["piotroski_f_score"].partial_reason
-    assert f.available == 6, "레지스트리는 6개라는데 구현이 다르다"
+    assert f.available == 8, "레지스트리 문구와 구현 분모가 어긋난다"
     print("  레지스트리-구현 일치     OK")
 
 
@@ -265,9 +345,10 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(f"{SCORES_VERSION} 자체 점검 (네트워크·DB 없음)")
+    _check_cfo_detection()
     _check_f_all_pass()
     _check_missing_is_not_zero()
     _check_f_direction()
     _check_altman()
     _check_registry_consistency()
-    print("펀더멘털 점수 5개 영역 통과")
+    print("펀더멘털 점수 6개 영역 통과")

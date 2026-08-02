@@ -114,6 +114,10 @@ JOBS: tuple[Job, ...] = (
     # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
     Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1200"),
         daily_at=time(18, 10)),
+    # 현금흐름표 - F-Score 를 6/9 에서 9/9 로 올리는 재료. 회사당 1호출이라
+    # 감시 바스켓(400)만 받는다. 18:50: 재무(18:10) 뒤, CA(18:30) 사이 여유.
+    Job("cashflow", ("collectors/opendart_cashflow.py", "--collect", "--limit", "400"),
+        daily_at=time(18, 50)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "400"),
         daily_at=time(18, 30)),
     # 공시 원문 Archive - 당일 공시 원본 ZIP 을 Private Storage 로 (2시간 유예가
