@@ -314,10 +314,27 @@ services:
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # 파이프라인 첫 노드(universe_manager)가 거래가능 여부를 LS REST 로 판정한다
+      # - 2026-08-02 실측: 없으면 check_universe 에서 KEY_MISSING 으로 멈춘다.
+      # batch-collectors 와 같은 자격이며, **여기서 도는 것은 결정론 파이프라인**
+      # 이지 셸을 쥔 LLM 이 아니다(에이전트는 research-api/market-api 만 쓴다는
+      # 경계는 유지된다). 백로그: universe 판정을 market-api 뒤로 옮기면 이
+      # 컨테이너에서 LS 자격을 뺄 수 있다.
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
+      # 총괄 노드(draft_packet)가 research-supervisor 페르소나 원문을 여기서 읽는다
+      # - 2026-08-02 실측: 없으면 분석가 6인을 다 돌린 뒤 마지막에 실패한다.
+      # COPY 대신 마운트인 이유: 페르소나를 고칠 때마다 이미지를 다시 굽지 않는다.
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
       # Packet MD 리포트를 호스트에서 바로 열어보기 위해 (읽기 전용 아님 - 쓴다)
       - ./departments/01-research/reports:/app/departments/01-research/reports
     # 파이프라인이 분석가 6인 x LLM 이라 오래 돈다 - 넉넉히 준다

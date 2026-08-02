@@ -35,6 +35,16 @@ COPY api ./api
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
 COPY evidence ./evidence
+# agents/ 와 scripts.py: MCP 도구 run_research_packet 이 부서 파이프라인
+# (분석가 6인 -> Packet)을 subprocess 로 돌린다. 2026-08-02 실측 - 이 두 줄이
+# 없어 컨테이너에서 "No such file: scripts.py" 로 실패했다. LangGraph 는
+# 아래에서 별도 설치한다(무거워서 다른 서비스와 레이어를 나눈다).
+COPY agents ./agents
+COPY scripts.py ./scripts.py
+
+# 파이프라인 전용 의존성. 수집기·API 컨테이너는 안 쓰지만 같은 이미지를
+# 공유하므로 여기 둔다(계획서 3.1 "같은 본부는 하나의 Code Image").
+RUN pip install --no-cache-dir langgraph==0.6.7
 
 ENV PYTHONUNBUFFERED=1
 

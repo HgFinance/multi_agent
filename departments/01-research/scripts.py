@@ -176,6 +176,42 @@ def analyze_microstructure(state: ResearchState) -> dict:
                                "note": _norm_note(r.get("note"))}}
 
 
+def flatten_to_str_list(v) -> Optional[list[str]]:
+    """총괄이 낸 값을 문자열 목록으로 평탄화. 불가능하면 None(재시도).
+
+    실측 2026-08-02: 관통 4회가 모두 총괄 스키마 이탈로 죽었고 매번 모양이
+    달랐다. 거부만 하면 분석가 6인을 돌린 2~3분이 버려지므로, **모양은 코드가
+    바로잡고 내용 검증은 그대로 돌린다**(수치 재대조·라벨 가드는 평탄화된
+    문자열에 그대로 걸리므로 오히려 검사가 더 잘 보게 된다).
+
+    지어내지 않는 것이 원칙이라 값이 없으면 빈 목록이 아니라 None 을 낸다 -
+    빈 목록은 '내용이 없다'는 사실을 만들어내는 것이다.
+    """
+    def one(x) -> str:
+        if isinstance(x, str):
+            return x.strip()
+        if isinstance(x, dict):
+            # {"claim": "...", "source": "..."} -> "claim: ... | source: ..."
+            return " | ".join(f"{k}: {one(val)}" for k, val in x.items())
+        if isinstance(x, (list, tuple)):
+            return " ; ".join(one(i) for i in x)
+        return str(x)
+
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return [s] if s else None
+    if isinstance(v, dict):
+        out = [f"{k}: {one(val)}" for k, val in v.items()]
+    elif isinstance(v, (list, tuple)):
+        out = [one(x) for x in v]
+    else:
+        return None
+    out = [s for s in (x.strip() for x in out) if s]
+    return out or None
+
+
 # ── 노드 4: Packet 초안 (supervisor 페르소나 - config.yaml 원문) ───────────
 def _supervisor_persona() -> str:
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
@@ -290,24 +326,44 @@ Evidence:
         if missing:
             last_err = f"missing keys: {missing}"
             continue
-        # 타입 강제 - 실측: dict 로 오면 항목 안에 창작 사실이 숨고 수치 검사를
-        # 우회했다. 스키마 문장("list of strings")을 코드로 못 박는다.
-        bad_type = [k for k in ("facts", "interpretation", "invalidation")
-                    if not (isinstance(candidate.get(k), list)
-                            and all(isinstance(x, str) for x in candidate[k]))]
-        if bad_type:
-            last_err = f"keys must be list[str]: {bad_type}"
-            # 실측 2026-08-02(분석가 6인 확장 후 재발): 다이제스트가 커지자
-            # qwen 이 interpretation·invalidation 을 중첩 객체로 냈다. 일반
-            # 문구로는 안 고쳐진다 - 틀린 키를 지목하고 올바른 모양을 보인다.
-            repair = ("\n" + " ".join(
-                f'"{k}" must be a FLAT array of plain Korean sentences, e.g. '
-                f'"{k}": ["첫 번째 문장.", "두 번째 문장."] - never an object, '
-                f'never nested, never key-value pairs.' for k in bad_type))
+        # 타입 - **거부가 아니라 교정한다.** 실측 2026-08-02: 관통 실행 4회가
+        # 전부 여기서 죽었는데 매번 이탈 모양이 달랐다(facts 가 dict, 키 누락,
+        # 토큰 이탈). 그때마다 **분석가 6인을 돌린 2~3분이 통째로 버려진다.**
+        # 중첩을 거부한 원래 이유는 "항목 안에 창작 수치가 숨어 검사를 우회"
+        # 였는데, 평탄화하면 오히려 수치 검사가 전부 보게 되므로 교정이 더
+        # 안전하다. 무엇을 고쳤는지는 Packet 에 남겨 사람이 볼 수 있게 한다.
+        coerced: list[str] = []
+        bad_key = None
+        for k in ("facts", "interpretation", "invalidation"):
+            v = candidate.get(k)
+            if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                continue
+            flat = flatten_to_str_list(v)
+            if flat is None:
+                bad_key = k
+                break
+            candidate[k] = flat
+            coerced.append(k)
+        if bad_key is not None:
+            last_err = f"{bad_key} 를 문자열 목록으로 바꿀 수 없다"
+            repair = (f'\n"{bad_key}" must be a FLAT array of plain Korean '
+                      f'sentences, e.g. ["첫 문장.", "둘째 문장."] - never an '
+                      f'object, never nested.')
             continue
+        candidate["_schema_coerced"] = coerced
         eq = str(candidate.get("evidence_quality", "")).lower().strip()
         if eq not in ("sufficient", "partial", "insufficient_evidence"):
             last_err = f"evidence_quality must be one of the 3 tokens, got {eq[:40]!r}"
+            # 실측 2026-08-01·08-02: qwen3 이 'high'/'good' 같은 제 어휘를 3회
+            # 연속 낸다. 일반 문구로는 안 고쳐진다 - 무엇을 냈고 무엇으로
+            # 바꿔야 하는지 지목하고, 뜻이 가까운 토큰까지 알려준다.
+            near = ("sufficient" if eq in ("high", "good", "strong", "ok")
+                    else "insufficient_evidence" if eq in ("low", "poor", "none")
+                    else "partial")
+            repair = (f'\n"evidence_quality" must be EXACTLY one of these three '
+                      f'lowercase strings: "sufficient", "partial", '
+                      f'"insufficient_evidence". You wrote {eq[:20]!r}, which is '
+                      f'not allowed. If you meant that, write "{near}".')
             continue
         candidate["evidence_quality"] = eq
         packet = candidate
@@ -853,6 +909,38 @@ def _check_analyst_conflict_and_numeric_guard():
     print("  상충 보존·수치 창작 적발 OK")
 
 
+def _check_schema_coercion():
+    """모양 이탈은 교정하고 내용 검증은 그대로 - 분석가 6인 실행을 버리지 않는다."""
+    assert flatten_to_str_list(["a", "b"]) == ["a", "b"]
+    assert flatten_to_str_list("한 문장") == ["한 문장"]
+    # 실측 이탈 모양: dict 항목이 섞인 리스트
+    got = flatten_to_str_list([{"claim": "매출 46.76% 증가", "source": "disclosure:5"}])
+    assert got == ["claim: 매출 46.76% 증가 | source: disclosure:5"], got
+    # 통째로 dict
+    assert flatten_to_str_list({"a": "1", "b": "2"}) == ["a: 1", "b: 2"]
+    # 값이 없으면 빈 목록이 아니라 None - 없는 내용을 만들어내지 않는다
+    for empty in (None, "", "   ", [], {}, ["", "  "]):
+        assert flatten_to_str_list(empty) is None, empty
+
+    # 평탄화된 뒤에도 수치 검사가 창작을 잡는지 - 교정이 가드를 무디게 하면 안 된다
+    def liar(system, user):
+        return json.dumps({
+            "symbol": "X", "thesis": "성장 지속",
+            "facts": {"revenue": "전년 대비 18.3% 증가"},   # dict 이탈 + 창작 수치
+            "interpretation": [], "catalysts": [], "invalidation": [],
+            "evidence_quality": "sufficient"})
+
+    out = draft_packet(
+        {"symbol": "X", "universe": {}, "sentiment": {"verdict": "SCORED"},
+         "fundamental": {"verdict": "NOTED", "readout": {"revenue_yoy_pct": 46.76}},
+         "evidence": {"price_context": {"status": "OK"}}}, llm=liar)["packet"]
+    assert out["facts"] == ["revenue: 전년 대비 18.3% 증가"], out["facts"]
+    assert out["_schema_coerced"] == ["facts"], out.get("_schema_coerced")
+    assert not out["numeric_check"]["ok"], "평탄화 후 창작 수치를 놓쳤다"
+    assert out["evidence_quality"] == "partial", "강등이 안 걸렸다"
+    print("  스키마 교정·가드 유지    OK")
+
+
 def _check_numeric_failure_downgrades_quality():
     """창작 수치 적발이 **등급까지 낮추는지** - 표시만 하면 하류가 안 읽는다.
 
@@ -952,6 +1040,7 @@ if __name__ == "__main__":
     _check_price_context_injection()
     _check_evidence_module()
     _check_analyst_conflict_and_numeric_guard()
+    _check_schema_coercion()
     _check_numeric_failure_downgrades_quality()
     _check_claims_use_bundle_key()
     _check_packet_report_renderer()
