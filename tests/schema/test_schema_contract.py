@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SUPABASE_MIGRATIONS = ROOT / "supabase" / "migrations"
 TIMESCALE_MIGRATIONS = ROOT / "timescaledb" / "migrations"
@@ -31,9 +30,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         cls.tables = created_tables(cls.sql)
 
     def test_migration_sequence_is_complete(self) -> None:
-        self.assertEqual(
-            [path.name for path, _ in self.files],
-            [
+        expected = [
                 "20260729000100_foundation_reference.sql",
                 "20260729000200_governance_workforce.sql",
                 "20260729000300_research_quant_strategy.sql",
@@ -56,8 +53,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260802001800_risk_qa_p1_rls.sql",
                 "20260802001900_research_daily_labels.sql",
                 "20260802002000_research_symbol_restrictions.sql",
-            ],
-        )
+                "20260802002100_risk_qa_run_log_replay.sql",
+        ]
+        self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
@@ -85,7 +83,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "quant": 12,
             "reference": 9,
             "research": 21,
-            "risk": 16,
+            "risk": 17,
             "strategy": 9,
             "workforce": 24,
         }

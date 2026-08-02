@@ -46,6 +46,26 @@ def test_pipeline_build_failure_returns_reject_report(monkeypatch):
     assert out["report_markdown"]
 
 
+def test_pipeline_fallback_emits_replayable_execution_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(risk_scripts, "build_pipeline", lambda: (_ for _ in ()).throw(RuntimeError("graph")))
+    log_path = tmp_path / "risk-run.jsonl"
+
+    out = risk_scripts.run_risk_department(
+        {},
+        {},
+        run_id="risk-run-test",
+        log_path=log_path,
+    )
+
+    evidence = out["execution_evidence"]
+    assert evidence["run_id"] == "risk-run-test"
+    assert evidence["pipeline_status"] == "DEGRADED"
+    assert evidence["safe_action"] == "HOLD"
+    assert evidence["binding"] is False
+    assert evidence["replay_ready"] is True
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) >= 4
+
+
 def test_notion_report_keeps_full_markdown_as_chunks():
     markdown = "# Risk\n\n" + ("| claim | value |\n|---|---|\n" * 250)
     payload = _rich_text(markdown)

@@ -119,3 +119,15 @@ python3 skills/agentic-rag/main.py --persona evidence-qa-agent \
 - `audit.qa_decisions.calculation_version/input_hash`는
   `20260731001000_qa_decisions_reproducibility.sql`로 실제 DB 적용까지 확인했다. 다음 단계는 API 판정을
   해당 Row와 `qa.decision.v1`에 같은 Hash로 기록하는 것이다.
+
+## 안전한 단독 실행
+
+QA 실행 소스는 `ai-office/` 아래에 있지 않다. 저장소 루트에서 실행하고, `scripts.py --run` 결과의 `run_id`, `input_hash`, `execution_evidence`, JSONL 원장을 QA 감사 근거로 사용한다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+python departments/06-ai-qa-audit/scripts.py --run --fail --log-path /tmp/hg-qa-run.jsonl
+```
+
+`execution_evidence.pipeline_status`가 `DEGRADED`이거나 `safe_action`이 `ESCALATE`이면 PASS/승인으로 승격하지 않는다. 실제 정책 Corpus, `DATABASE_URL`, 상위 `qa-check` 계약 승인이 없는 상태는 운영 완료가 아니다.

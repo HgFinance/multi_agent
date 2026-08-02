@@ -50,6 +50,27 @@ def test_supervisor_failure_escalates_without_changing_qa_decision(monkeypatch):
     assert out["fallbacks"][0]["stage"] == "supervisor"
 
 
+def test_pipeline_fallback_emits_replayable_execution_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(qa_scripts, "build_pipeline", lambda: (_ for _ in ()).throw(RuntimeError("graph")))
+    log_path = tmp_path / "qa-run.jsonl"
+
+    out = qa_scripts.run_qa_department(
+        {},
+        {},
+        "2026-08-02T00:00:00+00:00",
+        run_id="qa-run-test",
+        log_path=log_path,
+    )
+
+    evidence = out["execution_evidence"]
+    assert evidence["run_id"] == "qa-run-test"
+    assert evidence["pipeline_status"] == "DEGRADED"
+    assert evidence["safe_action"] == "ESCALATE"
+    assert evidence["binding"] is False
+    assert evidence["replay_ready"] is True
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) >= 4
+
+
 def test_pipeline_build_failure_returns_fail_report(monkeypatch):
     monkeypatch.setattr(qa_scripts, "build_pipeline", lambda: (_ for _ in ()).throw(RuntimeError("graph")))
     out = qa_scripts.run_qa_department({}, {}, "invalid")

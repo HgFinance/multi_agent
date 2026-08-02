@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -98,6 +99,7 @@ def _journal_module():
         if spec is None or spec.loader is None:
             raise RuntimeError(f"QA journal을 로드할 수 없습니다: {journal_path}")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         _JOURNAL_MODULE = module
     return _JOURNAL_MODULE
@@ -718,8 +720,11 @@ def _assemble_out(state: QAState) -> dict:
     qa_agents = ["qa-audit-supervisor", "evidence-qa-agent", "hallucination-critic", "model-risk-agent",
                  "internal-audit-agent", "agent-ops-monitor", "tool-permission-security-reviewer",
                  "incident-postmortem-agent"]
-    out["agent_execution"] = {"executed": list(dict.fromkeys(executed_agents)),
-                               "not_executed": [agent for agent in qa_agents if agent not in executed_agents]}
+    out["agent_execution"] = {
+        "executed": list(dict.fromkeys(executed_agents)),
+        "not_executed": [agent for agent in qa_agents if agent not in executed_agents],
+    }
+    out["execution_evidence"] = state.get("execution_evidence")
     return out
 
 
@@ -747,7 +752,18 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
 _RAW_RUN_QA_DEPARTMENT = run_qa_department
 
 
-def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) -> dict:
+def run_qa_department(
+    artifact: dict,
+    evidence_store: dict,
+    decision_time: str,
+    *,
+    run_id: str | None = None,
+    log_path: str | Path | None = None,
+) -> dict:
+    execution_run_id = run_id or str(uuid4())
+    trace_id = str((artifact or {}).get("trace_id") or f"qa:{execution_run_id}")
+    payload = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time}
+    asset = str((artifact or {}).get("asset") or (artifact or {}).get("instrument_id") or "") or None
     try:
         out = build_pipeline().invoke({"artifact": artifact, "evidence_store": evidence_store,
                                        "decision_time": decision_time})
@@ -757,8 +773,19 @@ def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) 
                "claim_narrative": _fallback_narrative("QA pipeline", exc),
                "hallucination_reviews": [], "verdict": "FAIL",
                "narrative": _fallback_narrative("QA Supervisor", exc), "escalate": True}
-        out.update(notion_report(out))
     result = _assemble_out(out)
+    out["execution_evidence"] = _record_execution_evidence(
+        payload,
+        result,
+        run_id=execution_run_id,
+        trace_id=trace_id,
+        as_of=decision_time,
+        asset=asset,
+        log_path=log_path,
+    )
+    out.update(notion_report(out))
+    result = _assemble_out(out)
+    result["execution_evidence"] = out["execution_evidence"]
     result["notion_upload"] = out.get("notion_upload")
     result["report_markdown"] = out.get("report_markdown", "")
     result["evaluation"] = out.get("evaluation", evaluation_metrics(result))
@@ -785,7 +812,16 @@ if __name__ == "__main__":
                                      "observed_at": now_iso, "excerpt": "종가 70000원",
                                      "numeric_value": "70000", "unit": "KRW"}}
         print(f"{PIPELINE_VERSION} 실행 (데모 Artifact{' - FAIL 유도' if '--fail' in sys.argv else ''})")
-        out = run_qa_department(demo_artifact, demo_evidence_store, now_iso)
+        log_path = Path(os.environ.get(
+            "QA_RUN_LOG_PATH",
+            _BASE / "reports" / "runs" / f"qa_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
+        ))
+        if "--log-path" in sys.argv:
+            log_index = sys.argv.index("--log-path") + 1
+            if log_index >= len(sys.argv):
+                raise SystemExit("--log-path requires a file path")
+            log_path = Path(sys.argv[log_index])
+        out = run_qa_department(demo_artifact, demo_evidence_store, now_iso, log_path=log_path)
         print(json.dumps(out, ensure_ascii=False, indent=1))
 
         report_dir = _BASE / "reports"

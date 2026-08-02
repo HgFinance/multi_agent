@@ -77,3 +77,21 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
   fund_id FK로 막힘, 회계본부 영역), K2(Evidence QA — AI QA/감사본부 영역), K3(Kill Switch 이력 기록,
   Stress), K4(Release/Access Audit), P1 Risk Metric, P2 파생상품 Greeks. RLS는 담당자가 의도적으로 보류.
   자세한 진행 상태는 `hermes/config.yaml`의 `implementation:` 블록 참고.
+
+## 안전한 단독 실행
+
+Risk 실행 소스는 `ai-office/` 아래에 있지 않다. 현재 디렉터리가 `ai-office`여도 저장소 루트로 이동한 뒤 실행한다. `risk_engine.py`는 결정론적 엔진 자체 점검이고, Hermes/LangGraph 경계·폴백·JSONL 원장까지 확인하려면 `scripts.py --run`을 사용한다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+python departments/03-risk/scripts.py --run --reject --log-path /tmp/hg-risk-run.jsonl
+python departments/03-risk/engine/risk_engine.py
+python departments/03-risk/engine/trading_state_store.py  # REDIS_URL 필요
+python skills/agentic-rag/main.py \
+  --persona compliance-policy-agent \
+  --query "Can we open a new long position in AAPL today?" \
+  --as-of 2026-07-31
+```
+
+`--run` 결과의 `execution_evidence.pipeline_status`가 `DEGRADED`이면 승인으로 해석하지 않고 `HOLD/ESCALATE`로 처리한다. Redis·실제 정책 Corpus·DB가 없으면 해당 단계는 성공으로 위장하지 않는다.
