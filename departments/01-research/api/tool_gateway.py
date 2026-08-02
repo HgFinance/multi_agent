@@ -138,6 +138,13 @@ def install(app, *, config_path: Path | None = None) -> None:
                 # 설정 오류는 통과가 아니라 500 - 보호 구멍을 조용히 두지 않는다
                 return JSONResponse({"error": "gateway_misconfigured",
                                      "detail": str(e)}, status_code=500)
+            if not ok:
+                # **강제 모드에서도 남긴다.** 예전에는 조기 반환하며 로그를
+                # 건너뛰어 "403 인데 왜인지 모르는" 상태가 됐다(2026-08-02 실측).
+                # 막는 것과 왜 막았는지 알리는 것은 별개 의무다.
+                print(f"[tool-gateway] {code}: {why} (path={path}, "
+                      f"persona={persona!r}, mode={'enforce' if enforce else 'observe'})",
+                      file=sys.stderr, flush=True)
             if not ok and enforce:
                 return JSONResponse(
                     {"error": "forbidden", "code": code, "detail": why,
@@ -147,10 +154,8 @@ def install(app, *, config_path: Path | None = None) -> None:
                 "enforce" if enforce else "observe")
             if not ok:
                 # 무강제 모드에서도 위반은 응답에 드러난다 - 조용한 통과 금지.
-                # 헤더는 ASCII 코드만(latin-1 제약), 한국어 사유는 로그로.
+                # 헤더는 ASCII 코드만(latin-1 제약), 한국어 사유는 위에서 로그로.
                 resp.headers["X-Tool-Gateway-Violation"] = code
-                print(f"[tool-gateway] {code}: {why} (path={path})",
-                      file=sys.stderr, flush=True)
             return resp
 
     app.add_middleware(_Gateway)

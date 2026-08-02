@@ -116,8 +116,10 @@ def fetch_evidence(symbol: str, *, hours: float, as_of: Optional[datetime],
     url = f"{api_base}/evidence/news?symbol={symbol}&hours={hours}&limit=200"
     if as_of is not None:
         url += f"&as_of={urllib.parse.quote(as_of.isoformat())}"
-    with urllib.request.urlopen(url, timeout=20) as resp:
-        rows = json.loads(resp.read())
+    # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02)
+    from api_client import get_json
+
+    return get_json(url, persona="news-sentiment-analyst", timeout=20)
     # 가중치 상위만 판정에 넣는다 - 오래된 기사 수십 건이 토큰만 태우는 것을 막는다
     rows.sort(key=lambda r: r.get("weight", 0.0), reverse=True)
     return rows[:MAX_ARTICLES]

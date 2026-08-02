@@ -112,8 +112,10 @@ def fetch_financials(symbol: str, *, as_of: Optional[datetime] = None,
     url = f"{api_base}/evidence/financials?symbol={symbol}&limit=500"
     if as_of is not None:
         url += "&as_of=" + urllib.parse.quote(as_of.isoformat())
-    with urllib.request.urlopen(url, timeout=20) as resp:
-        return json.loads(resp.read())
+    # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02)
+    from api_client import get_json
+
+    return get_json(url, persona="fundamental-analyst", timeout=20)
 
 
 # ---------------------------------------------------------------------------

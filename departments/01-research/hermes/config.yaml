@@ -65,7 +65,12 @@ agent:
                              research.evidence.disclosures.read]
     sector-regime-analyst: [market.regime.read, market.breadth.read]
     geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
-    rag-librarian-evidence-curator: [research.evidence.search, research.evidence.chunk.write]
+    # Evidence Bundle 조립(evidence/bundle.py)이 이 페르소나로 돈다 -
+    # 뉴스·공시를 모아 분석가에게 넘기는 큐레이션이 RES-08 직무다.
+    rag-librarian-evidence-curator: [research.evidence.search,
+                                     research.evidence.chunk.write,
+                                     research.evidence.news.read,
+                                     research.evidence.disclosures.read]
   # 부서 전체 공통 금지. 리서치는 어떤 경우에도 주문·리스크 판정·원장·전략 승격에
   # 관여하지 않는다. Packet 은 재료일 뿐 결정이 아니다(Agent Decision != Order).
   forbidden_tools:

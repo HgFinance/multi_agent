@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
+PERSONA = "universe-manager"   # 부서 허용목록 키
 AGENT_VERSION = "research-universe-manager-v1"
 KST = timezone(timedelta(hours=9))
 PATH = "/stock/market-data"
@@ -155,8 +156,12 @@ def run(client=None, basket: tuple[str, ...] = (),
                                            "http://127.0.0.1:8035")).rstrip("/")
 
     def _default_get(url):
-        with urllib.request.urlopen(url, timeout=25) as r:
-            return _json.loads(r.read())
+        # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02). 강제 모드에서
+        # 헤더 없이 부르면 403 이고, 실제로 그렇게 걸렸다.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+        from api_client import get_json
+
+        return get_json(url, persona=PERSONA, timeout=25)
 
     # 조회 실패는 예외다 - 빈 목록으로 위장하면 정지 종목이 거래가능으로 샌다
     payload = (get or _default_get)(f"{base}/universe/restrictions")

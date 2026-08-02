@@ -41,9 +41,18 @@ RESEARCH_API_DEFAULT = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035
 PRICE_BARS_NEEDED = 21
 
 
+# Evidence 조립은 **큐레이션**이다 - 뉴스·공시를 모아 다른 분석가에게 넘긴다.
+# 그래서 RES-08(Evidence Curator)의 페르소나로 부른다. 총괄(RES-00)이 아니다:
+# 우리 허용목록이 총괄을 "종합·위임만, 자체 조회 없음"으로 선언했고, 그 선언을
+# 코드가 어기면 선언이 거짓이 된다.
+# 헤더가 없으면 Tool Gateway 가 익명으로 보고 강제 모드에서 403 이다.
+BUNDLE_PERSONA = "rag-librarian-evidence-curator"
+
+
 def _http_get(url: str, timeout: int = 30):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read())
+    from api_client import get_json
+
+    return get_json(url, persona=BUNDLE_PERSONA, timeout=timeout)
 
 
 def _pct(cur: float, base: Optional[float]) -> Optional[float]:

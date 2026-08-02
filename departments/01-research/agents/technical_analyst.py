@@ -53,6 +53,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 from narrative_guard import audit_narrative  # noqa: E402
 
+PERSONA = "technical-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-technical-analyst-v1"
 KST = timezone(timedelta(hours=9))
 
@@ -352,8 +353,11 @@ def verify(note: TechnicalNote, readout: dict) -> tuple[TechnicalNote, dict]:
 # ---------------------------------------------------------------------------
 
 def _http_get(url: str, timeout: int = 20):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read())
+    """조회면 호출 - **페르소나를 밝힌다**(Tool Gateway 이행, 2026-08-02).
+    헤더가 없으면 게이트웨이가 익명으로 보고 강제 모드에서 403 이다."""
+    from api_client import get_json
+
+    return get_json(url, persona=PERSONA, timeout=timeout)
 
 
 def analyze(symbol: str, *, market_api: Optional[str] = None,
