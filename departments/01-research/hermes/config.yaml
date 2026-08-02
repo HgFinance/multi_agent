@@ -100,9 +100,20 @@ hiring_priority:
 #   이 파일의 한국어 주석이 전부 사라진다(2026-08-02 실측 - 226줄 재작성).
 #   그래서 저장소 사본이 사람이 쓴 원본이고, 런타임 변경은 이렇게 추려 옮긴다.
 #
-#   MCP_RESEARCH_API_KEY 는 지금 비어 있다. 같은 compose 네트워크 안에서만
-#   도달 가능하고 호스트에 포트를 게시하지 않아 v1 은 인증 없이 둔다 -
-#   네트워크를 넓히거나 부서 밖에 열 때 반드시 채운다(백로그).
+# ⚠ 인증 (2026-08-02 실측): **Hermes 는 headers 안의 ${VAR} 를 치환하지 않는다.**
+#   프로세스 env 에도, 프로필 .env 에도 값을 넣어봤지만 미치환 문자열을 그대로
+#   보내 401 이 났다(서버가 그 문자열을 명시적으로 거부하도록 만들어놨다).
+#   그래서 **런타임 config 에는 실제 토큰이 들어간다** - 저장소 사본은 아래처럼
+#   플레이스홀더를 유지해 비밀이 git 에 올라가지 않게 한다.
+#
+#   ▶ 그래서 sync push 뒤에는 런타임에 토큰을 다시 넣어야 한다:
+#     KEY=$(grep '^MCP_RESEARCH_API_KEY=' .env | cut -d= -f2-)
+#     docker exec hedgefund-research-hermes python -c "import yaml; \
+#       p='/opt/data/profiles/research-department/config.yaml'; \
+#       d=yaml.safe_load(open(p,encoding='utf-8')); \
+#       d['mcp_servers']['research']['headers']['Authorization']='Bearer $KEY'; \
+#       yaml.safe_dump(d, open(p,'w',encoding='utf-8'), allow_unicode=True, sort_keys=False)"
+#     확인: hermes -p research-department mcp test research
 mcp_servers:
   research:
     url: http://research-mcp:8037/mcp
