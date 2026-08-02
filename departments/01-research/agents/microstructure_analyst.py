@@ -56,6 +56,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 # LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
 # sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+from liquidity import compute_liquidity  # noqa: E402
 from llm_client import chat as llm_chat  # noqa: E402
 from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
 from number_guard import caution_lines, flag_unmatched  # noqa: E402
@@ -68,6 +69,8 @@ MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 MODEL = os.environ.get("MICRO_ANALYST_MODEL", "agent-research")
 LLM_TIMEOUT = float(os.environ.get("MICRO_LLM_TIMEOUT", "120"))  # 로컬 14b 지연 감안
+# 유동성 지표(Amihud·Roll)의 관측 창 20일 + 차분·결측 여유
+LIQUIDITY_BARS = 30
 
 # 특이 플래그 기준 (결정론 - readout 에도 문자열로 기록한다)
 SPREAD_WIDE_BP = 20.0     # 스프레드 p50 이 이 이상이면 SPREAD_WIDE
@@ -385,19 +388,27 @@ def analyze(symbol: str, *, market_api: Optional[str] = None,
                 "reason": f"market-api /microstructure 호출 실패: "
                           f"{type(e).__name__}: {e}"}
 
-    # 선택적 최신 종가 1봉 (VWAP 대비 위치용) - 실패해도 분석은 계속한다
+    # 일봉 - 최신 종가(VWAP 대비 위치)와 유동성 지표(Amihud·Roll)에 함께 쓴다.
+    # 예전에는 1봉만 받았는데, 유동성은 창이 필요해 LIQUIDITY_BARS 로 넓혔다.
+    # 실패해도 분석은 계속한다 - 둘 다 비치명 보조다.
     last_close = None
     last_close_date = None
+    liquidity = None
     try:
-        bars = get(f"{base}/bars/{symbol}?interval=1D&limit=1&source=ls_chart")
+        bars = get(f"{base}/bars/{symbol}?interval=1D"
+                   f"&limit={LIQUIDITY_BARS}&source=ls_chart")
         if bars:
-            last_close = _f(bars[0].get("close"))
+            last_close = _f(bars[0].get("close"))     # API 는 최신순
             last_close_date = str(bars[0].get("bucket_time"))[:10]
-    except Exception:  # noqa: BLE001 - 비치명: 종가 위치만 미확인이 된다
+            liquidity = compute_liquidity(bars)
+    except Exception:  # noqa: BLE001 - 비치명: 종가 위치·유동성만 미확인이 된다
         pass
 
     readout = compute_micro_readout(payload, last_close=last_close)
     readout["last_close_date"] = last_close_date
+    # 체결·호가 단면이 '오늘 하루'라면 이 둘은 '최근 20일의 구조적 비용'이다.
+    # 못 받았으면 None(미확인) - 빈 dict 로 위장하지 않는다.
+    readout["liquidity"] = liquidity
 
     if readout["assessment"] == "INSUFFICIENT_DATA":
         return {**out, "verdict": "INSUFFICIENT_DATA", "readout": readout,
@@ -647,9 +658,15 @@ def _check_analyze_pipeline():
         if "/microstructure/000000" in url:
             return payload
         if "/bars/000000" in url:
-            assert "limit=1" in url and "source=ls_chart" in url, url
-            return [{"bucket_time": "2026-07-31T00:00:00+09:00",
-                     "close": "103.0"}]
+            assert f"limit={LIQUIDITY_BARS}" in url and "source=ls_chart" in url, url
+            # 최신순(desc). 최신 종가 103.0 은 그대로 두고, 유동성 계산용으로
+            # 나머지 날짜를 채운다 - 톱니라 Roll 모형이 성립한다.
+            rows = [{"bucket_time": "2026-07-31T00:00:00+09:00",
+                     "close": "103.0", "notional": 1e9}]
+            rows += [{"bucket_time": f"2026-07-{31 - i:02d}T00:00:00+09:00",
+                      "close": str(100.0 + (i % 2)), "notional": 1e9}
+                     for i in range(1, 25)]
+            return rows
         raise AssertionError(f"예상 밖 URL: {url}")
 
     def fake_llm(_s, _u):  # 환각 키 + 창작 수치 + 판정 불일치 전부 탑재
