@@ -13,6 +13,15 @@ export const RISK_QA_RETRY_POLICY = {
   qaFallback: "ESCALATE + manual_review_required",
 } as const;
 
+export const RISK_QA_LOG_EVENTS = [
+  "InputSnapshot",
+  "AgentOutput",
+  "Validation",
+  "Decision",
+  "Order",
+  "Fill",
+] as const;
+
 export type RiskQaDepartmentId = "ops" | "qa";
 
 export type RiskQaEmployee = {
@@ -29,6 +38,8 @@ export type RiskQaDepartment = {
   id: RiskQaDepartmentId;
   domain: "risk-management" | "qa-department";
   name: string;
+  orchestrator: "Hermes";
+  employeeExecutor: "LangGraph";
   sourceProfile: string;
   runtimeContract: string;
   employees: readonly RiskQaEmployee[];
@@ -57,6 +68,8 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     id: "ops",
     domain: "risk-management",
     name: "리스크본부",
+    orchestrator: "Hermes",
+    employeeExecutor: "LangGraph",
     sourceProfile: "departments/03-risk/hermes/config.yaml",
     runtimeContract: "/investment-cases/{case_id}/risk-check + /risk/v1/*",
     employees: [
@@ -120,6 +133,8 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     id: "qa",
     domain: "qa-department",
     name: "AI QA·감사본부",
+    orchestrator: "Hermes",
+    employeeExecutor: "LangGraph",
     sourceProfile: "departments/06-ai-qa-audit/hermes/config.yaml",
     runtimeContract: "/investment-cases/{case_id}/qa-check + /qa/v1/*",
     employees: [

@@ -1,6 +1,6 @@
 "use client";
 
-import { RISK_QA_CONNECTION, RISK_QA_RETRY_POLICY } from "./riskQaBridge";
+import { RISK_QA_CONNECTION, RISK_QA_LOG_EVENTS, RISK_QA_RETRY_POLICY } from "./riskQaBridge";
 
 function compactSkills(skills: readonly string[]): string {
   return skills.join(" · ");
@@ -35,6 +35,12 @@ export default function RiskQaPanel() {
           <span>QA 실패</span>
           <b>{RISK_QA_RETRY_POLICY.qaFallback}</b>
         </div>
+        <div className="risk-qa-log-flow" aria-label="로그 이벤트 흐름">
+          <span>LOG/REPLAY</span>
+          {RISK_QA_LOG_EVENTS.map((eventType) => (
+            <code key={eventType}>{eventType}</code>
+          ))}
+        </div>
         <div className="risk-qa-departments">
           {RISK_QA_CONNECTION.map((department) => (
             <article className="risk-qa-department" key={department.id}>
@@ -46,6 +52,8 @@ export default function RiskQaPanel() {
                 <span className="status-pill done">연결됨</span>
               </div>
               <p className="risk-qa-contract">
+                <b>{department.orchestrator} → {department.employeeExecutor}</b>
+                <br />
                 <code>{department.runtimeContract}</code>
               </p>
               <div className="risk-qa-staff" aria-label={`${department.name} 직원 목록`}>

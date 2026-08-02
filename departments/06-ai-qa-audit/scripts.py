@@ -48,6 +48,7 @@ model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started 항
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -82,6 +83,24 @@ QA_TELEMETRY = get_runtime_telemetry("qa")
 from src.resilience import register_circuit_breaker_observer
 
 register_circuit_breaker_observer(QA_TELEMETRY.record_circuit_breaker)
+
+
+_JOURNAL_MODULE = None
+
+
+def _journal_module():
+    """Load this department's journal without colliding with Risk's package."""
+
+    global _JOURNAL_MODULE
+    if _JOURNAL_MODULE is None:
+        journal_path = _BASE / "harness" / "journal.py"
+        spec = importlib.util.spec_from_file_location("qa_execution_journal", journal_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"QA journal을 로드할 수 없습니다: {journal_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _JOURNAL_MODULE = module
+    return _JOURNAL_MODULE
 
 # 워커(직원) LLM 백엔드 - 동규님 GPU에 올린 팀 공용 Ollama 서버. 환경변수로 옮기지 않는다.
 # 192.168.25.25
@@ -249,7 +268,150 @@ def _assemble_out(state: QAState) -> dict:
             "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
             "claim_narrative": state["claim_narrative"],
             "hallucination_reviews": state.get("hallucination_reviews", []),
-            "narrative": state["narrative"], "escalate": state["escalate"]}
+        "narrative": state["narrative"], "escalate": state["escalate"],
+        "execution_evidence": state.get("execution_evidence")}
+
+
+def _record_execution_evidence(
+    payload: dict,
+    result: dict,
+    *,
+    run_id: str,
+    trace_id: str,
+    as_of: str | None,
+    asset: str | None,
+    log_path: str | Path | None,
+) -> dict:
+    """Record the Hermes/LangGraph boundary without changing the QA verdict."""
+
+    try:
+        journal_module = _journal_module()
+        sink = journal_module.jsonl_sink(log_path) if log_path else None
+        journal = journal_module.RunJournal(
+            department="qa-department",
+            hermes_profile="qa-department",
+            sink=sink,
+        )
+        input_event = journal.input_snapshot(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="qa-audit-supervisor",
+            payload=payload,
+            schema_id="qa.department.input.v1",
+            as_of=as_of,
+            asset=asset,
+            model_version=PIPELINE_VERSION,
+            prompt_version="qa-hermes-profile-v1",
+            parameter_version="evidence-qa-engine-v1",
+        )
+        execution = result.get("agent_execution") or {}
+        executed = list(execution.get("executed") or [])
+        not_executed = list(execution.get("not_executed") or [])
+        fallbacks = list(result.get("fallbacks") or [])
+        degraded = bool(fallbacks or result.get("escalate"))
+        schema_valid = bool(result.get("qa_decision_id")) and not bool(fallbacks)
+        domain_valid = result.get("verdict") in {"PASS", "WARN", "FAIL"} and not degraded
+        agents_for_log = executed or ["qa-pipeline-fallback"]
+        for employee in agents_for_log:
+            journal.agent_output(
+                run_id=run_id,
+                trace_id=trace_id,
+                employee_profile=employee,
+                output={
+                    "employee_profile": employee,
+                    "decision": result.get("verdict"),
+                    "evidence_refs": tuple(
+                        str(check.get("claim_index"))
+                        for check in (result.get("claim_checks") or [])
+                        if check.get("claim_index") is not None
+                    ),
+                },
+                inputs_hash=input_event.inputs_hash,
+                schema_id="qa.agent-output.v1",
+                schema_valid=schema_valid,
+                domain_valid=domain_valid,
+                failed_rule=(result.get("reason_codes") or [None])[0],
+                fallback_reason=(fallbacks[0].get("stage") if fallbacks else None),
+                retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+                as_of=as_of,
+                asset=asset,
+                model_version=PIPELINE_VERSION,
+                prompt_version="qa-hermes-profile-v1",
+                parameter_version="evidence-qa-engine-v1",
+            )
+        failed_rule = (result.get("reason_codes") or [None])[0]
+        if fallbacks and not failed_rule:
+            failed_rule = fallbacks[0].get("stage") or "pipeline_fallback"
+        journal.validation(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="qa-audit-supervisor",
+            inputs_hash=input_event.inputs_hash,
+            schema_id="qa.department.output.v1",
+            schema_valid=schema_valid,
+            domain_valid=domain_valid,
+            failed_rule=failed_rule,
+            fallback_reason=(fallbacks[0].get("reason") if fallbacks else None),
+            retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+            raw={"executed": executed, "not_executed": not_executed},
+            as_of=as_of,
+            asset=asset,
+        )
+        safe_action = "ESCALATE" if degraded else result.get("verdict", "FAIL")
+        journal.decision(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="qa-audit-supervisor",
+            inputs_hash=input_event.inputs_hash,
+            output={
+                "decision": result.get("verdict"),
+                "safe_action": safe_action,
+                "binding": False,
+            },
+            schema_id="qa.department.decision.v1",
+            schema_valid=schema_valid,
+            domain_valid=domain_valid,
+            failed_rule=failed_rule,
+            fallback_reason=(fallbacks[0].get("reason") if fallbacks else None),
+            retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+            as_of=as_of,
+            asset=asset,
+        )
+        review = journal.review(run_id)
+        return {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "input_hash": input_event.inputs_hash,
+            "pipeline_status": "DEGRADED" if degraded else "COMPLETED",
+            "candidate_verdict": result.get("verdict"),
+            "safe_action": safe_action,
+            "binding": False,
+            "hermes_profile": "qa-department",
+            "employees_executed": executed,
+            "employees_not_executed": not_executed,
+            "retry_policy": {"max_retries": 2, "max_attempts": 3},
+            "external_dependencies": {
+                "policy_corpus": "PLACEHOLDER_OR_UNVERIFIED",
+                "canonical_db": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
+                "agent_runs_tool_calls": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
+            },
+            "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],
+            "replay_ready": review["replay_ready"],
+            "journal_event_count": len(journal.events_for_run(run_id)),
+            "journal_path": str(log_path) if log_path else None,
+            "review": review,
+        }
+    except Exception as exc:  # logging must never turn a safe decision into approval
+        return {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "pipeline_status": "DEGRADED",
+            "candidate_verdict": result.get("verdict", "FAIL"),
+            "safe_action": "ESCALATE",
+            "binding": False,
+            "journal_error": type(exc).__name__,
+            "journal_path": str(log_path) if log_path else None,
+        }
 
 
 # ── 노드 4: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────

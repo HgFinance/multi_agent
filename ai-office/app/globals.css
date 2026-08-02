@@ -622,6 +622,9 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .risk-qa-note { margin: 0 0 14px; color: var(--ink-soft); font-size: 12px; line-height: 1.65; }
 .risk-qa-policy { display: grid; grid-template-columns: repeat(3, auto); gap: 8px 12px; align-items: center; margin-bottom: 16px; padding: 10px 12px; border: 1.5px dashed var(--pink-line); border-radius: 10px; background: #f7f1e8; color: var(--ink-soft); font-size: 11px; }
 .risk-qa-policy b { color: var(--ink); font-size: 11px; }
+.risk-qa-log-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 16px; color: var(--ink-soft); font-size: 10px; }
+.risk-qa-log-flow span { color: var(--pink-deep); font-weight: 900; }
+.risk-qa-log-flow code { padding: 4px 6px; border: 1px solid var(--pink-line); border-radius: 6px; background: white; font-size: 9px; }
 .risk-qa-departments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .risk-qa-department { min-width: 0; padding: 13px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: #fdfaf6; }
 .risk-qa-department-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }

@@ -58,6 +58,7 @@ counterparty_health 체크가 이미 실측(ctx.counterparty.health)을 CheckOut
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -65,6 +66,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
+from uuid import uuid4
 
 _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
@@ -92,6 +94,24 @@ RISK_TELEMETRY = get_runtime_telemetry("risk")
 from src.resilience import register_circuit_breaker_observer
 
 register_circuit_breaker_observer(RISK_TELEMETRY.record_circuit_breaker)
+
+
+_JOURNAL_MODULE = None
+
+
+def _journal_module():
+    """Load this department's journal without colliding with QA's package."""
+
+    global _JOURNAL_MODULE
+    if _JOURNAL_MODULE is None:
+        journal_path = _BASE / "harness" / "journal.py"
+        spec = importlib.util.spec_from_file_location("risk_execution_journal", journal_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Risk journal을 로드할 수 없습니다: {journal_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _JOURNAL_MODULE = module
+    return _JOURNAL_MODULE
 
 
 class RiskState(TypedDict, total=False):
@@ -305,8 +325,149 @@ def _assemble_out(state: RiskState) -> dict:
             "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
             "narrative": state["narrative"], "escalate": state["escalate"],
             "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
-            "agent_execution": {"executed": executed_agents,
-                                 "not_executed": [agent for agent in risk_agents if agent not in executed_agents]}}
+        "agent_execution": {"executed": executed_agents,
+        "not_executed": [agent for agent in risk_agents if agent not in executed_agents]},
+        "execution_evidence": state.get("execution_evidence")}
+
+
+def _record_execution_evidence(
+    payload: dict,
+    result: dict,
+    *,
+    run_id: str,
+    trace_id: str,
+    as_of: str | None,
+    asset: str | None,
+    log_path: str | Path | None,
+) -> dict:
+    """Record the Hermes/LangGraph boundary without changing the Risk verdict."""
+
+    try:
+        journal_module = _journal_module()
+        sink = journal_module.jsonl_sink(log_path) if log_path else None
+        journal = journal_module.RunJournal(
+            department="risk-management",
+            hermes_profile="risk-management",
+            sink=sink,
+        )
+        input_event = journal.input_snapshot(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="risk-supervisor",
+            payload=payload,
+            schema_id="risk.department.input.v1",
+            as_of=as_of,
+            asset=asset,
+            model_version=PIPELINE_VERSION,
+            prompt_version="risk-hermes-profile-v1",
+            parameter_version="risk-engine-contract-v1",
+        )
+        execution = result.get("agent_execution") or {}
+        executed = list(execution.get("executed") or [])
+        not_executed = list(execution.get("not_executed") or [])
+        fallbacks = list(result.get("fallbacks") or [])
+        compliance = result.get("compliance") or {}
+        degraded = bool(fallbacks or result.get("escalate") or compliance.get("grounded") is False)
+        schema_valid = bool(result.get("assessment")) and not bool(fallbacks)
+        domain_valid = result.get("verdict") in {"approve", "resize", "reject"} and not degraded
+        agents_for_log = executed or ["risk-pipeline-fallback"]
+        for employee in agents_for_log:
+            journal.agent_output(
+                run_id=run_id,
+                trace_id=trace_id,
+                employee_profile=employee,
+                output={
+                    "employee_profile": employee,
+                    "verdict": result.get("verdict"),
+                    "evidence_refs": ("compliance-policy-agent",) if compliance else (),
+                },
+                inputs_hash=input_event.inputs_hash,
+                schema_id="risk.agent-output.v1",
+                schema_valid=schema_valid,
+                domain_valid=domain_valid,
+                failed_rule=(result.get("reason_codes") or [None])[0],
+                fallback_reason=(fallbacks[0].get("stage") if fallbacks else None),
+                retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+                as_of=as_of,
+                asset=asset,
+                model_version=PIPELINE_VERSION,
+                prompt_version="risk-hermes-profile-v1",
+                parameter_version="risk-engine-contract-v1",
+            )
+        failed_rule = (result.get("reason_codes") or [None])[0]
+        if fallbacks and not failed_rule:
+            failed_rule = fallbacks[0].get("stage") or "pipeline_fallback"
+        journal.validation(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="risk-supervisor",
+            inputs_hash=input_event.inputs_hash,
+            schema_id="risk.department.output.v1",
+            schema_valid=schema_valid,
+            domain_valid=domain_valid,
+            failed_rule=failed_rule,
+            fallback_reason=(fallbacks[0].get("reason") if fallbacks else None),
+            retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+            raw={"executed": executed, "not_executed": not_executed},
+            as_of=as_of,
+            asset=asset,
+        )
+        safe_action = "HOLD" if degraded else result.get("verdict", "HOLD")
+        journal.decision(
+            run_id=run_id,
+            trace_id=trace_id,
+            employee_profile="risk-supervisor",
+            inputs_hash=input_event.inputs_hash,
+            output={
+                "decision": result.get("verdict"),
+                "safe_action": safe_action,
+                "binding": False,
+            },
+            schema_id="risk.department.decision.v1",
+            schema_valid=schema_valid,
+            domain_valid=domain_valid,
+            failed_rule=failed_rule,
+            fallback_reason=(fallbacks[0].get("reason") if fallbacks else None),
+            retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+            as_of=as_of,
+            asset=asset,
+        )
+        review = journal.review(run_id)
+        return {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "input_hash": input_event.inputs_hash,
+            "pipeline_status": "DEGRADED" if degraded else "COMPLETED",
+            "candidate_verdict": result.get("verdict"),
+            "safe_action": safe_action,
+            "binding": False,
+            "hermes_profile": "risk-management",
+            "employees_executed": executed,
+            "employees_not_executed": not_executed,
+            "retry_policy": {"max_retries": 2, "max_attempts": 3},
+            "external_dependencies": {
+                "redis": "DEGRADED" if any(item.get("stage") == "trading_state" for item in fallbacks) else "NOT_OBSERVED",
+                "compliance_rag": "EXECUTED" if compliance else "NOT_EXECUTED",
+                "canonical_db": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
+                "portfolio_market_snapshot": "SUPPLIED_UNVERIFIED" if payload.get("context", {}).get("portfolio") else "MISSING",
+            },
+            "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],
+            "replay_ready": review["replay_ready"],
+            "journal_event_count": len(journal.events_for_run(run_id)),
+            "journal_path": str(log_path) if log_path else None,
+            "review": review,
+        }
+    except Exception as exc:  # logging must never turn a safe decision into approval
+        return {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "pipeline_status": "DEGRADED",
+            "candidate_verdict": result.get("verdict", "reject"),
+            "safe_action": "HOLD",
+            "binding": False,
+            "journal_error": type(exc).__name__,
+            "journal_path": str(log_path) if log_path else None,
+        }
 
 
 # ── 노드 6: Notion 업로드 (Reporter Node - 결정론, LLM 아님) ────────────────
@@ -366,8 +527,20 @@ def build_pipeline():
 
 
 @observe_pipeline(RISK_TELEMETRY, "pipeline")
-def run_risk_department(order_intent: dict, context: dict, scope: str = "fund:default") -> dict:
+def run_risk_department(
+    order_intent: dict,
+    context: dict,
+    scope: str = "fund:default",
+    *,
+    run_id: str | None = None,
+    log_path: str | Path | None = None,
+) -> dict:
     """본부 단독 실행 - QA/연구본부의 run_<dept>_department 와 같은 외부 인터페이스."""
+    execution_run_id = run_id or str(uuid4())
+    trace_id = str(context.get("trace_id") or order_intent.get("trace_id") or f"risk:{execution_run_id}")
+    payload = {"order_intent": order_intent, "context": context, "scope": scope}
+    as_of = str(context.get("as_of") or order_intent.get("snapshot", {}).get("as_of") or "") or None
+    asset = str(order_intent.get("instrument_id")) if order_intent.get("instrument_id") else None
     try:
         out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
     except Exception as exc:
@@ -376,8 +549,19 @@ def run_risk_department(order_intent: dict, context: dict, scope: str = "fund:de
                "trading_state": "HALTED", "verdict": "reject",
                "narrative": _fallback_narrative("Risk pipeline", exc), "escalate": True,
                "fallbacks": [_fallback("pipeline", exc)]}
-        out.update(notion_report(out))
     result = _assemble_out(out)
+    out["execution_evidence"] = _record_execution_evidence(
+        payload,
+        result,
+        run_id=execution_run_id,
+        trace_id=trace_id,
+        as_of=as_of,
+        asset=asset,
+        log_path=log_path,
+    )
+    out.update(notion_report(out))
+    result = _assemble_out(out)
+    result["execution_evidence"] = out["execution_evidence"]
     result["notion_upload"] = out.get("notion_upload")
     result["report_markdown"] = out.get("report_markdown", "")
     result["evaluation"] = out.get("evaluation", evaluation_metrics(result))

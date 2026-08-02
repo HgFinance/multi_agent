@@ -74,6 +74,11 @@ deterministic_services:
   harness_manifest: departments/03-risk/harness/manifest.py
   harness_preflight: departments/03-risk/harness/core.py
   harness_runtime_check: departments/03-risk/harness/redis_check.py
+  harness_log_contract: departments/03-risk/harness/journal.py
+  harness_replay: "RunJournal.replay(run_id, executor)"
+  harness_review: "RunJournal.review(run_id)"
+  orchestrator: "Hermes department profile: risk-management"
+  employee_executor: "LangGraph employee node"
   harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=REJECT+HALTED"
   harness_fallback: "REJECT + HALTED + trace_id + reason_code"
   risk_engine: departments/03-risk/engine/risk_engine.py                 # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT

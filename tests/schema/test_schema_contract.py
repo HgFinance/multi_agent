@@ -78,7 +78,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 19,
+            "audit": 20,
             "execution": 12,
             "governance": 20,
             "quant": 12,
@@ -117,6 +117,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             ("accounting", "nav_runs"),
             ("audit", "traces"),
             ("audit", "agent_runs"),
+            ("audit", "run_log_events"),
+            ("risk", "run_log_events"),
             ("workforce", "agent_profile_versions"),
         }
         self.assertTrue(required.issubset(self.tables), required - self.tables)

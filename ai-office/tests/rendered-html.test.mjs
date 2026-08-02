@@ -69,8 +69,12 @@ test("keeps organization configuration wired to the live office", async () => {
   assert.match(page, /<OpsPanel/);
   assert.match(page, /<RiskQaPanel/);
   assert.match(page, /RiskQaPanel/);
-  assert.match(await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"), /RSK-00/);
-  assert.match(await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"), /QAA-07/);
+  const riskQaBridge = await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8");
+  assert.match(riskQaBridge, /RSK-00/);
+  assert.match(riskQaBridge, /QAA-07/);
+  assert.match(riskQaBridge, /InputSnapshot/);
+  assert.match(riskQaBridge, /orchestrator: "Hermes"/);
+  assert.match(riskQaBridge, /employeeExecutor: "LangGraph"/);
   assert.match(layout, /title:\s*COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);

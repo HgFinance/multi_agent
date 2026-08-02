@@ -9,6 +9,7 @@ for module_name in tuple(sys.modules):
         sys.modules.pop(module_name, None)
 
 from harness import DepartmentHarness, HarnessDecision
+from harness.journal import LogEventType
 from harness.manifest import QA_SKILLS
 
 
@@ -60,3 +61,45 @@ def test_qa_harness_retries_twice_then_returns_success() -> None:
 
     assert calls == 3
     assert result.decision is HarnessDecision.READY
+
+
+def test_qa_harness_journal_replay_and_review() -> None:
+    harness = DepartmentHarness(QA_SKILLS, hermes_profile="qa-department")
+    output = {
+        "decision": "PASS",
+        "grounded": True,
+        "rationale": "claim is supported",
+        "evidence_refs": ["policy-1"],
+    }
+
+    result = harness.execute(
+        "qa.evidence.check",
+        trace_id="trace-qa-log",
+        run_id="run-qa-log",
+        employee_profile="evidence-qa-agent",
+        as_of="2026-08-02T00:00:00Z",
+        asset="SYMBOL_A",
+        model_version="qa-engine-1",
+        prompt_version="prompt-1",
+        parameter_version="params-1",
+        payload={"claim": "supported"},
+        handler=lambda _: output,
+    )
+
+    assert result.decision is HarnessDecision.READY
+    events = harness.journal.events_for_run("run-qa-log")
+    assert [event.event_type for event in events] == [
+        LogEventType.INPUT_SNAPSHOT,
+        LogEventType.AGENT_OUTPUT,
+        LogEventType.VALIDATION,
+        LogEventType.DECISION,
+    ]
+    assert all(event.hermes_profile == "qa-department" for event in events)
+    assert events[1].rationale == "claim is supported"
+    assert events[1].evidence_refs == ("policy-1",)
+    replay = harness.journal.replay("run-qa-log", lambda _: output)
+    assert replay.output_match and replay.decision_match and not replay.diffs
+    review = harness.journal.review("run-qa-log")
+    assert review["event_count"] == 4
+    assert review["replay_ready"] is True
+    assert review["fallback_rate"] == 0.0
