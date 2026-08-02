@@ -54,6 +54,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260802001600_risk_qa_runtime_registration.sql",
                 "20260802001700_evidence_embedding_1024_match.sql",
                 "20260802001800_risk_qa_p1_rls.sql",
+                "20260802001900_research_daily_labels.sql",
             ],
         )
         for path, sql in self.files:
@@ -82,7 +83,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "governance": 20,
             "quant": 12,
             "reference": 9,
-            "research": 18,
+            "research": 19,
             "risk": 16,
             "strategy": 9,
             "workforce": 24,
