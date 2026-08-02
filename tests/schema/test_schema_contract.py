@@ -51,6 +51,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260801001300_research_pipeline_runs.sql",
                 "20260802001400_research_packet_outcomes.sql",
                 "20260802001500_research_collector_runs.sql",
+                "20260802001600_risk_qa_runtime_registration.sql",
             ],
         )
         for path, sql in self.files:
