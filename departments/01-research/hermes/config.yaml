@@ -63,7 +63,12 @@ agent:
                           research.evidence.disclosures.read]
     news-sentiment-analyst: [research.evidence.news.read, research.evidence.stories.read,
                              research.evidence.disclosures.read]
-    sector-regime-analyst: [market.regime.read, market.breadth.read]
+    # research.macro.read 추가(2026-08-02): RES-07 이 스타일·안전자산 overlay
+    # (VKOSPI·국채선물·고배당 등 macro 계열)를 읽는다. 없으면 게이트웨이가 403 을
+    # 내고 분석가는 그것을 '보조 재료 미확인'으로 삼켜 **overlay 가 영원히 빈 채로
+    # 조용히 죽는다** - 그래서 자체 점검이 이 한 줄을 검사한다.
+    sector-regime-analyst: [market.regime.read, market.breadth.read,
+                            research.macro.read]
     geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
     # Evidence Bundle 조립(evidence/bundle.py)이 이 페르소나로 돈다 -
     # 뉴스·공시를 모아 분석가에게 넘기는 큐레이션이 RES-08 직무다.

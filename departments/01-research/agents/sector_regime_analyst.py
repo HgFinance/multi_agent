@@ -23,16 +23,25 @@
      변경은 무효이고 원 라벨로 되돌린 뒤 사유만 남긴다(라벨 권한은 코드).
   3. 환각 인용 키 제거·카운트, summary 의 %·배 수치 ±0.1 대조는 RES-04 와
      같은 규율이다. LLM 문장은 고치지 않고 cautions 에 검증 결과를 덧붙인다.
-  4. 데이터 접근은 market-api 뿐이다(통합 계획 6.2, DB Credential 없음):
-     GET /regime/daily (일별 등락·SMA20 상회 단면 - 주 재료),
-     GET /breadth (거래소 공식 등락 - 보조. 실패해도 분석은 계속하되 해당
-     필드는 None="미확인"으로 드러낸다).
+  4. 데이터 접근은 API 뿐이다(통합 계획 6.2, DB Credential 없음):
+     market-api  GET /regime/daily (일별 등락·SMA20 상회 단면 - 주 재료),
+                 GET /breadth (거래소 공식 등락 - 보조),
+     research-api GET /macro/observations (VKOSPI·스타일 지수 - 보조).
+     보조는 실패해도 분석을 계속하되 해당 필드를 None="미확인"으로 드러낸다.
   5. 판단 불가는 판단 불가로: 행이 모자란 지표는 None, 핵심 지표 전부 불가면
      INSUFFICIENT_DATA. LLM 불가면 결정론 readout+라벨만 내고 LLM_UNAVAILABLE
      명시 - RES-04 와 달리 verdict(라벨)는 유지한다. 라벨은 코드 것이므로
      LLM 이 죽어도 사라질 이유가 없다.
+  6. **스타일 overlay 는 라벨을 바꾸지 않는다** (2026-08-02 추가). 등락 단면이
+     "얼마나 올랐나", VKOSPI 가 "얼마나 무서운가"라면 overlay 는 "돈이 어디로
+     갔나"다 - 축이 셋 다 다르다. 다만 라벨 규칙(REGIME_RULES)에 새 축을
+     넣는 것은 별개 결정이다: 라벨은 daily_labels 로 이력이 쌓이고 packet
+     claims 채점의 기준이 되므로, 규칙을 바꾸면 과거와 현재의 라벨이 다른
+     뜻이 된다. calibration 표본으로 overlay 의 기여가 확인된 뒤에 바꾼다
+     (methods.py 의 '도입 != 검증' 규율과 같다).
 
-흐름: fetch(market-api) -> compute(결정론) -> narrate(LLM) -> verify(결정론)
+흐름: fetch(market-api + research-api) -> compute(결정론) -> narrate(LLM)
+      -> verify(결정론)
 
 이 출력은 **Agent Decision 이 아니다.** Regime Brief 의 입력 재료다
 (CLAUDE.md: Agent Decision != Signal != Order). 거시 전망 하나로 주문을
@@ -48,6 +57,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,12 +69,14 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 from narrative_guard import audit_narrative  # noqa: E402
+from style_ratios import compute_style_overlay, overlay_numbers  # noqa: E402
 
 PERSONA = "sector-regime-analyst"   # 부서 허용목록 키
-AGENT_VERSION = "research-sector-regime-analyst-v1"
+AGENT_VERSION = "research-sector-regime-analyst-v2"   # v2: 스타일 overlay 추가
 KST = timezone(timedelta(hours=9))
 
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
+RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 MODEL = os.environ.get(
     "SECTOR_REGIME_MODEL",
@@ -74,6 +86,12 @@ LLM_TIMEOUT = float(os.environ.get("REGIME_LLM_TIMEOUT", "120"))  # 로컬 14b �
 
 REGIME_DAYS = 40          # 20일 지표 + 휴장/결측 여유
 BREADTH_MARKETS = ("KOSPI", "KOSDAQ")
+
+# 스타일 overlay 재료 - collectors/style_index_collector.py + volatility_index_collector.py
+# 가 macro_observations 에 넣는 계열. 백분위를 말하려면 이력이 필요해 창을 길게 잡는다.
+OVERLAY_CODES = ("KOSPI200", "BOND_FUT", "MIN_VOL", "DIV_50", "DIV_GROWTH",
+                 "EX_MEGA", "VKOSPI")
+OVERLAY_DAYS = 400        # 1년 백분위 + 휴장 여유
 
 # 라벨 임계값 - regime_rules 에 문장으로도 같이 실어 출력만으로 재검산 가능하게
 THRUST_AD_MIN = 4.0       # 최신 A/D 이 이상
@@ -162,7 +180,8 @@ def _clean_rows(regime_rows: Optional[list[dict]]) -> list[dict]:
 
 
 def compute_regime_readout(regime_rows: list[dict],
-                           breadth_rows: Optional[list[dict]] = None) -> dict:
+                           breadth_rows: Optional[list[dict]] = None,
+                           macro_rows: Optional[list[dict]] = None) -> dict:
     """market-api /regime/daily 행 목록 -> 레짐 readout + 결정론 라벨.
 
     순수 함수 - 네트워크·시계 없이 입력만으로 계산한다(자체 점검 대상).
@@ -170,6 +189,8 @@ def compute_regime_readout(regime_rows: list[dict],
     각 지표는 행 충분성을 검사해 부족하면 None(=미확인)이고, 핵심 지표가
     전부 None 이면 regime_label 은 INSUFFICIENT_DATA 다.
     breadth_rows(거래소 공식 등락)는 보조 필드 - 없으면 None(미확인)이다.
+    macro_rows(VKOSPI·스타일 지수)도 보조 - 없으면 macro_overlay 는 None 이다.
+    **overlay 는 regime_label 계산에 들어가지 않는다** (설계 결정 6).
     """
     rows = _clean_rows(regime_rows)
     n = len(rows)
@@ -216,6 +237,8 @@ def compute_regime_readout(regime_rows: list[dict],
         "net_advances_5d_sum": net_5,
         "up_days_in_20d": up_20,
         "breadth_by_market": _breadth_by_market(breadth_rows),
+        # 못 받았으면 None(미확인) - 빈 dict 로 위장하면 "쏠림 없음"으로 읽힌다
+        "macro_overlay": compute_style_overlay(macro_rows) if macro_rows else None,
     }
 
     # 라벨 결정 - 비율이 무한대인 날(하락 0/상승 0)도 규칙이 성립하도록
@@ -278,11 +301,17 @@ Your ONLY job is to narrate it. Rules:
   as given in the readout. Cite ONLY metric keys that exist in it.
 - A null metric means insufficient rows ("미확인") - do not guess its value,
   and mention the limitation in cautions instead.
+- readout.macro_overlay (may be null = 미확인) shows WHERE money went, not how
+  much the market moved: ratios are style index / KOSPI200, so they are
+  RELATIVE strength. Its "tilt" was also decided by code (see tilt_rules) -
+  never override it, and never call a ratio an absolute return. If it is null,
+  say the style/safe-haven axis is 미확인 in cautions.
 - summary: 2~3 Korean sentences describing the market regime, quoting the
-  given values (% for *_pct keys, 배 for A/D ratio keys where natural).
+  given values (% for *_pct keys, 배 for A/D ratio keys where natural). If
+  macro_overlay exists, one sentence may add the style/volatility axis.
 - used_metrics: ONLY the readout keys your summary actually relied on.
 - cautions: short Korean phrases for risks/limits (null metrics, sma20
-  coverage, breadth 미확인 etc).
+  coverage, breadth 미확인, macro_overlay 미확인 etc).
 Output JSON only, exactly this shape, no other text:
 {"regime":"NEUTRAL","summary":"...","used_metrics":["ad_ratio"],
  "cautions":["..."]}"""
@@ -349,6 +378,9 @@ def _number_pool(readout: dict) -> list[float]:
     for m in (readout.get("breadth_by_market") or {}).values():
         pool.extend(float(v) for v in m.values()
                     if isinstance(v, (int, float)) and not isinstance(v, bool))
+    # overlay 는 2~3단 중첩이라 전용 walker 로 긁는다 - 여기서 빠뜨리면
+    # LLM 이 정확히 인용한 수치가 '환각'으로 플래그된다
+    pool.extend(overlay_numbers(readout.get("macro_overlay")))
     return pool
 
 
@@ -421,15 +453,19 @@ def _http_get(url: str, timeout: int = 20):
     return get_json(url, persona=PERSONA, timeout=timeout)
 
 
-def analyze(*, market_api: Optional[str] = None, llm: Optional[Callable] = None,
+def analyze(*, market_api: Optional[str] = None,
+            research_api: Optional[str] = None,
+            llm: Optional[Callable] = None,
             get: Callable = _http_get) -> dict:
-    """market-api 호출 -> 결정론 계산·라벨 -> LLM 서술 -> 결정론 검증.
+    """API 호출 -> 결정론 계산·라벨 -> LLM 서술 -> 결정론 검증.
 
     /regime/daily 불가/행 전무 -> verdict INSUFFICIENT_DATA (사유 명시).
     /breadth 불가 -> breadth_by_market None(미확인)으로 계속한다 - 보조 재료다.
+    /macro/observations 불가 -> macro_overlay None(미확인)으로 계속한다.
     LLM 불가 -> 결정론 readout+라벨은 그대로, llm_status=LLM_UNAVAILABLE.
     """
     base = (market_api or MARKET_API).rstrip("/")
+    rbase = (research_api or RESEARCH_API).rstrip("/")
     ts = datetime.now(timezone.utc)
     out = {"agent": AGENT_VERSION, "as_of": ts.isoformat(), "model": MODEL}
     try:
@@ -445,7 +481,17 @@ def analyze(*, market_api: Optional[str] = None, llm: Optional[Callable] = None,
         except Exception:  # noqa: BLE001 - 보조 재료 - 실패는 미확인으로 드러난다
             pass
 
-    readout = compute_regime_readout(regime_rows, breadth_rows or None)
+    # 스타일 overlay 는 research-api(매크로 관측) 쪽이다 - market-api 가 아니다
+    macro_rows: Optional[list[dict]] = None
+    try:
+        macro_rows = get(
+            f"{rbase}/macro/observations"
+            f"?codes={urllib.parse.quote(','.join(OVERLAY_CODES))}"
+            f"&days={OVERLAY_DAYS}") or None
+    except Exception:  # noqa: BLE001 - 보조 재료 - 실패는 미확인으로 드러난다
+        pass
+
+    readout = compute_regime_readout(regime_rows, breadth_rows or None, macro_rows)
     if readout["regime_label"] == "INSUFFICIENT_DATA":
         return {**out, "verdict": "INSUFFICIENT_DATA", "readout": readout,
                 "reason": f"레짐 지표 전부 계산 불가 (행 {readout['days_used']}개)"}
@@ -705,9 +751,14 @@ def _check_analyze_pipeline():
         if "/regime/daily" in url:
             assert f"days={REGIME_DAYS}" in url, url
             return regime
+        if "/macro/observations" in url:
+            assert "KOSPI200" in url and f"days={OVERLAY_DAYS}" in url, url
+            return _macro_rows()
         for m, rows in breadth.items():
             if f"market={m}" in url:
                 return rows
+        # 주의: analyze 가 보조 조회의 예외를 삼키므로 이 AssertionError 는
+        # 테스트를 실패시키지 못한다 - 그래서 위 분기를 명시적으로 둔다
         raise AssertionError(f"예상 밖 URL: {url}")
 
     def fake_llm(_s, _u):  # 라벨 변조 + 환각 키 + 창작 수치 전부 탑재
@@ -747,12 +798,101 @@ def _check_analyze_pipeline():
     def breadth_down(url):
         if "/breadth" in url:
             raise OSError("connection refused")
+        if "/macro/observations" in url:
+            return _macro_rows()
         return regime
 
     out4 = analyze(get=breadth_down, llm=dead_llm)
     assert out4["verdict"] == "BREADTH_THRUST"
     assert out4["readout"]["breadth_by_market"] is None
+    assert out4["readout"]["macro_overlay"]["tilt"] == "SAFE_HAVEN"
     print("  analyze 파이프라인       OK")
+
+
+def _check_gateway_scope():
+    """게이트웨이 권한이 없으면 403 이 나는데, 보조 조회라 분석가가 그것을
+    삼켜 **overlay 가 조용히 영원히 비어 있게 된다.** 배선 자체를 검사한다."""
+    import yaml
+
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "hermes" / "config.yaml")
+        .read_text(encoding="utf-8"))
+    allow = cfg["agent"]["tool_allowlist"]
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+    from tool_gateway import check_access, scope_for
+
+    scope = scope_for("/macro/observations")
+    assert scope in allow[PERSONA], (
+        f"{PERSONA} 에 {scope} 가 없다 - macro 조회가 403 으로 조용히 죽는다")
+    ok, _code, why = check_access(PERSONA, "/macro/observations", allow,
+                                  cfg["agent"]["forbidden_tools"])
+    assert ok, why
+    # 기존 권한이 지워지지 않았는가 - 추가하다 덮어쓰는 사고 방지.
+    # market-api 는 아직 게이트웨이 적용 전(백로그)이라 scope_for 로는 못
+    # 물어본다. 허용목록의 문자열로 직접 확인한다.
+    for scope_name in ("market.regime.read", "market.breadth.read"):
+        assert scope_name in allow[PERSONA], \
+            f"{scope_name} 가 사라졌다 - 주 재료 조회가 막힌다"
+    print("  게이트웨이 권한 배선     OK")
+
+
+def _macro_rows():
+    """research-api /macro/observations 합성 응답 - 국채선물만 21일간 +5%."""
+    from datetime import date as _date
+
+    end = _date(2026, 7, 31)
+    series = {"KOSPI200": [100.0] * 21,
+              "BOND_FUT": [100.0 + i * 0.25 for i in range(21)],
+              "DIV_50": [100.0] * 21,
+              "VKOSPI": [20.0] * 21}
+    rows = []
+    for code, vals in series.items():
+        for i, v in enumerate(vals):
+            rows.append({"code": code,
+                         "period": (end - timedelta(days=20 - i)).isoformat(),
+                         "value": v})
+    return rows
+
+
+def _check_macro_overlay_wiring():
+    """overlay 가 (1) 붙고 (2) 라벨을 안 건드리고 (3) 없으면 미확인이고
+    (4) 그 수치가 숫자 풀에 들어가는가."""
+    regime = _rows([(40, 80, 10, 30, 100)] * 20 + [(90, 60, 10, 45, 100)])
+    base = compute_regime_readout(regime)
+    with_overlay = compute_regime_readout(regime, None, _macro_rows())
+
+    # (1) 붙는다 - 코드가 정한 tilt 가 그대로 들어온다
+    ov = with_overlay["macro_overlay"]
+    assert ov["tilt"] == "SAFE_HAVEN" and ov["tilt_leader"] == "BOND_FUT", ov
+    assert ov["ratios"]["BOND_FUT"]["change_pct"] == 5.0
+    assert ov["lookback_used"] == 20, "공통 창이 목표에 못 미쳤다"
+    assert ov["volatility"]["level"] == 20.0, "VKOSPI 가 안 붙었다"
+    assert "VKOSPI" not in ov["ratios"], "변동성지수를 스타일 비율에 섞으면 안 된다"
+
+    # (2) 라벨은 안 바뀐다 (설계 결정 6) - overlay 유무로 regime_label 이 갈리면
+    #     daily_labels 이력의 뜻이 도중에 바뀐다
+    assert base["regime_label"] == with_overlay["regime_label"], \
+        "overlay 가 라벨을 흔들었다 - calibration 전에는 라벨 규칙 불변"
+    for k in CORE_METRICS:
+        assert base[k] == with_overlay[k], f"overlay 가 {k} 를 바꿨다"
+
+    # (3) 없으면 None(미확인) - 빈 dict 는 '쏠림 없음'으로 오독된다
+    assert base["macro_overlay"] is None
+    assert compute_regime_readout(regime, None, [])["macro_overlay"] is None
+
+    # (4) 숫자 풀 - 정확히 인용한 5.0% 가 환각으로 플래그되면 안 된다
+    note = RegimeNote(regime=with_overlay["regime_label"],
+                      summary="국채선물이 KOSPI200 대비 5.0% 앞섰다.",
+                      used_metrics=["macro_overlay"], cautions=[])
+    checked, dropped = verify(note, with_overlay)
+    assert dropped["flagged_numbers"] == [], dropped
+    assert checked.used_metrics == ["macro_overlay"], "overlay 인용이 잘렸다"
+    # 반대로 없는 수치는 여전히 잡혀야 한다
+    bad = RegimeNote(regime=with_overlay["regime_label"],
+                     summary="국채선물이 77.7% 앞섰다.", used_metrics=[],
+                     cautions=[])
+    assert verify(bad, with_overlay)[1]["flagged_numbers"] == ["77.7%"]
+    print("  스타일 overlay 배선      OK")
 
 
 def _check_api_down_fail_closed():
@@ -819,10 +959,12 @@ if __name__ == "__main__":
     _check_label_rules()
     _check_insufficient_rows()
     _check_breadth_aux()
+    _check_macro_overlay_wiring()
+    _check_gateway_scope()
     _check_verify_hallucination()
     _check_verify_number_flag()
     _check_label_restore()
     _check_narrate_roundtrip()
     _check_analyze_pipeline()
     _check_api_down_fail_closed()
-    print("sector-regime-analyst 10개 영역 통과. 실측은 --run")
+    print("sector-regime-analyst 12개 영역 통과. 실측은 --run")

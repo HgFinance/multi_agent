@@ -181,6 +181,49 @@ METHODS: tuple[Method, ...] = (
              "갈린다. 실측 2026-08-02: 84.35, 52주 18.03~97.99",
     ),
     Method(
+        key="flight_to_quality",
+        name="안전자산 도피 (국채 대비 주식 상대강도)",
+        analyst="RES-07",
+        citation="Baur, D.G., Lucey, B.M. (2009). Flights and Contagion - An "
+                 "Empirical Analysis of Stock-Bond Correlations. Journal of "
+                 "Financial Stability 5(4).",
+        status=STATUS_ADOPTED,
+        module="evidence/style_ratios.py",
+        inputs=("LS t1511 업종 606 국채선물지수", "LS t1511 업종 101 KOSPI200"),
+        note="같은 -1% 하락이어도 돈이 국채로 갔는지 아무 데도 안 갔는지는 다른 "
+             "국면이다. 수준이 아니라 국채선물/KOSPI200 비율의 20거래일 상대강도로 "
+             "본다. capability_audit 이 '접근 가능한데 미사용'으로 집어낸 계열",
+    ),
+    Method(
+        key="style_rotation_ratio",
+        name="스타일 로테이션 (배당·가치 대비 시장)",
+        analyst="RES-07",
+        citation="Fama, E.F., French, K.R. (1993). Common risk factors in the "
+                 "returns on stocks and bonds. Journal of Financial Economics "
+                 "33(1). (배당수익률을 가치 팩터의 시장 대용치로 사용)",
+        status=STATUS_ADOPTED,
+        module="evidence/style_ratios.py",
+        inputs=("LS t1511 업종 213/214 고배당·배당성장", "업종 122 초대형주제외",
+                "업종 101 KOSPI200"),
+        note="고배당지수가 올랐다는 사실만으로는 아무 말도 못 한다 - 시장이 같이 "
+             "올랐을 수 있다. 스타일은 KOSPI200 대비에서만 의미가 생기므로 비율로 "
+             "계산하고, 날짜가 짝이 맞는 관측만 나눈다(분자·분모가 다른 날이면 "
+             "그건 스타일이 아니라 하루치 등락이다)",
+    ),
+    Method(
+        key="low_volatility_preference",
+        name="저변동성 선호 (방어적 국면 관측)",
+        analyst="RES-07",
+        citation="Blitz, D.C., van Vliet, P. (2007). The Volatility Effect - "
+                 "Lower Risk Without Lower Return. Journal of Portfolio "
+                 "Management 34(1).",
+        status=STATUS_ADOPTED,
+        module="evidence/style_ratios.py",
+        inputs=("LS t1511 업종 526 KRX 최소변동성지수", "업종 101 KOSPI200"),
+        note="VKOSPI 가 '앞으로 무섭다'는 옵션시장의 예상이라면 최소변동성 상대강도는 "
+             "'이미 방어로 옮겼다'는 실제 자금 이동이다 - 예상과 행동은 다른 축이다",
+    ),
+    Method(
         key="fear_greed_composite",
         name="공포탐욕 복합지수 (한국 시장판)",
         analyst="RES-07",
