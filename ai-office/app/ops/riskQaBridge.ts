@@ -6,6 +6,8 @@
  * 변경할 수 없다. 실제 금융 상태는 Risk/QA API와 결정론적 엔진의 소유다.
  */
 
+import type { Agent, Snapshot } from "../game/sim";
+
 export const RISK_QA_RETRY_POLICY = {
   maxRetries: 2,
   maxAttempts: 3,
@@ -213,6 +215,47 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     ],
   },
 ] as const;
+
+export type RiskQaActivity = {
+  departmentStatus: Snapshot["deptStatus"][string];
+  statusLabel: "출근 대기" | "진행 중" | "업무 중" | "완료" | "승인 대기" | "연동 대기" | "대기";
+  taskLabel: string;
+  onDutyCount: number;
+  workingCount: number;
+  employees: readonly {
+    employee: RiskQaEmployee;
+    agent: Agent | null;
+  }[];
+};
+
+const ACTIVE_AGENT_STATUSES: readonly Agent["status"][] = ["업무 중", "회의 중"];
+
+/** AI Office simulation의 실제 Agent 상태를 Risk/QA 프로필 카드에 투영한다. */
+export function getRiskQaActivity(
+  department: RiskQaDepartment,
+  agents: readonly Agent[],
+  snapshot: Snapshot,
+): RiskQaActivity {
+  const teamAgents = agents.filter((agent) => agent.deptId === department.id);
+  const activeAgents = teamAgents.filter((agent) => ACTIVE_AGENT_STATUSES.includes(agent.status));
+  const departmentStatus = snapshot.running ? snapshot.deptStatus[department.id] ?? "대기" : "대기";
+  const statusLabel = snapshot.running ? departmentStatus : "출근 대기";
+  const taskLabel =
+    activeAgents.find((agent) => agent.taskLabel)?.taskLabel ??
+    (statusLabel === "완료" ? "오늘 업무 완료" : statusLabel === "출근 대기" ? "업무 시작을 기다리는 중" : "다음 작업을 기다리는 중");
+
+  return {
+    departmentStatus,
+    statusLabel,
+    taskLabel,
+    onDutyCount: teamAgents.filter((agent) => agent.status !== "출근 전").length,
+    workingCount: activeAgents.length,
+    employees: department.employees.map((employee) => ({
+      employee,
+      agent: teamAgents.find((agent) => agent.name === employee.name) ?? null,
+    })),
+  };
+}
 
 export function isRiskQaDepartment(id: string): id is RiskQaDepartmentId {
   return (RISK_QA_DEPARTMENT_IDS as readonly string[]).includes(id);
