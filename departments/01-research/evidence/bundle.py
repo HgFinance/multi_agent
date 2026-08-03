@@ -157,13 +157,93 @@ def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
         "daily_closes_recent": [(b["bucket_time"][:10], float(b["close"]))
                                 for b in bars],
         "last_trade": snap.get("last_trade"),
-        "news_headlines": [{"id": i + 1, "title": n["title"],
-                            "relation": n["relation_type"]}
+        # ▶ Evidence ID 를 살린다 (2026-08-03, RQF-1 완료기준)
+        #   예전에는 뉴스가 document_id 를 버리고 1,2,3 으로 다시 번호를 매겼고
+        #   공시는 제목만 남겼다. 그래서 **주장이 인용할 ID 자체가 없었고**,
+        #   "어떤 소스에 기댄 판단이 틀렸나" 를 영원히 물을 수 없었다.
+        #
+        #   ref 와 evidence_id 를 함께 싣는다:
+        #     ref('n1','d1')  - 짧아서 LLM 이 정확히 인용한다. UUID 를 받아쓰게
+        #                       하면 한 글자만 틀려도 인용이 깨진다.
+        #     evidence_id     - 진짜 document_id. 코드가 ref 를 이걸로 바꿔
+        #                       claim.evidence_ids 에 넣는다(resolve_refs).
+        #   판정은 코드가 한다 - LLM 은 ref 를 가리키기만 한다.
+        "news_headlines": [{"ref": f"n{i + 1}",
+                            "evidence_id": n.get("document_id"),
+                            "title": n["title"],
+                            "relation": n["relation_type"],
+                            # 저장 허가와 운영 근거 허가는 다른 질문이다
+                            "production_authorized": bool(
+                                n.get("production_authorized", False))}
                            for i, n in enumerate(news)],
-        "disclosures_7d": [d_["title"] for d_ in disc],
+        "disclosures_7d": [{"ref": f"d{i + 1}",
+                            "evidence_id": d_.get("document_id"),
+                            "title": d_["title"]}
+                           for i, d_ in enumerate(disc)],
         "price_context": fetch_price_context(symbol, market_api=m, get=get),
         "as_of": datetime.now(KST).isoformat(timespec="seconds"),
     }
+
+
+# ── 인용 해석 - ref -> 진짜 Evidence ID (RQF-1 완료기준) ──────────────────
+
+class CitationError(ValueError):
+    """존재하지 않는 근거를 인용했다. 조용히 버리지 않는다."""
+
+
+def evidence_index(bundle: dict) -> dict[str, dict]:
+    """Bundle 안의 인용 가능한 근거. ref -> {evidence_id, title, kind, ...}.
+
+    evidence_id 가 없는 항목은 **색인에 넣지 않는다** - 인용할 수 없는 것을
+    인용 가능한 것처럼 보여주면 하류가 빈 ID 를 근거로 삼는다.
+    """
+    idx: dict[str, dict] = {}
+    for kind, key in (("news", "news_headlines"), ("disclosure", "disclosures_7d")):
+        for item in bundle.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            ref, ev = item.get("ref"), item.get("evidence_id")
+            if not ref or not ev:
+                continue
+            idx[ref] = {"evidence_id": str(ev), "kind": kind,
+                        "title": item.get("title"),
+                        "production_authorized": bool(
+                            item.get("production_authorized", kind == "disclosure"))}
+    return idx
+
+
+def resolve_refs(refs, bundle: dict, *, strict: bool = True) -> tuple[str, ...]:
+    """LLM 이 가리킨 ref 를 진짜 evidence_id 로 바꾼다.
+
+    strict=True 면 없는 ref 는 **예외**다. 조용히 빼면 "근거 3건" 이라고 쓴
+    주장이 근거 1건으로 저장되고, 그 차이를 아무도 모른다. 근거를 못 찾았으면
+    그건 fact 주장이 아니라 inference 다 - 그 판정은 호출자가 한다.
+    """
+    idx = evidence_index(bundle)
+    out, missing = [], []
+    for r in refs or ():
+        hit = idx.get(str(r).strip())
+        if hit is None:
+            missing.append(str(r))
+            continue
+        if hit["evidence_id"] not in out:      # 같은 근거를 두 번 세지 않는다
+            out.append(hit["evidence_id"])
+    if missing and strict:
+        raise CitationError(
+            f"Bundle 에 없는 근거를 인용했다: {missing} - "
+            f"가능한 ref: {sorted(idx)[:12]}{'...' if len(idx) > 12 else ''}")
+    return tuple(out)
+
+
+def authorized_only(refs, bundle: dict) -> tuple[str, ...]:
+    """운영 근거로 써도 되는 것만 남긴다 (production_authorized).
+
+    저장 허가와 운영 허가는 다른 질문이다(마이그레이션 002500). 미승인 소스를
+    주문 판단의 근거로 흘려보내지 않는다 - fail-closed 라 기본은 제외다.
+    """
+    idx = evidence_index(bundle)
+    return tuple(idx[r]["evidence_id"] for r in (refs or ())
+                 if r in idx and idx[r]["production_authorized"])
 
 
 # ── 서술 수치 재대조 - 라벨 오서술·수치 창작 가드 (RES-00 Packet 검증용) ──
@@ -284,9 +364,12 @@ def _check_bundle_contract():
         if "/snapshot/" in url:
             return {"symbol": "000660", "last_trade": {"price": "1270.0"}}
         if "/evidence/news" in url:
-            return [{"title": "급등 뉴스", "relation_type": "direct"}]
+            return [{"document_id": "doc-news-1", "title": "급등 뉴스",
+                     "relation_type": "direct", "production_authorized": False},
+                    {"document_id": "doc-news-2", "title": "승인된 기사",
+                     "relation_type": "direct", "production_authorized": True}]
         if "/evidence/disclosures" in url:
-            return [{"title": "공시 1"}]
+            return [{"document_id": "doc-disc-1", "title": "공시 1"}]
         raise AssertionError(f"예상 밖 URL: {url}")
 
     b = assemble_bundle("000660", market_api="http://x", research_api="http://y",
@@ -296,11 +379,56 @@ def _check_bundle_contract():
               "disclosures_7d", "price_context", "as_of"):
         assert k in b, f"{k} 누락"
     assert len(b["daily_closes_recent"]) == 5
-    assert b["news_headlines"][0] == {"id": 1, "title": "급등 뉴스",
-                                      "relation": "direct"}
+    assert b["news_headlines"][0] == {
+        "ref": "n1", "evidence_id": "doc-news-1", "title": "급등 뉴스",
+        "relation": "direct", "production_authorized": False}, b["news_headlines"][0]
+    # 공시도 이제 인용할 ID 를 갖는다 (예전엔 제목 문자열뿐이었다)
+    assert b["disclosures_7d"][0] == {
+        "ref": "d1", "evidence_id": "doc-disc-1", "title": "공시 1"}
     assert b["price_context"]["change_1d_pct"] == 27.0
     assert b["price_context"]["direction_1d"] == "상승"
     print("  Bundle 계약 유지+확장    OK")
+
+
+def _check_citation_resolution():
+    """ref -> 진짜 evidence_id. 없는 인용을 조용히 버리지 않는가."""
+    bundle = {
+        "news_headlines": [
+            {"ref": "n1", "evidence_id": "doc-news-1", "title": "a",
+             "production_authorized": False},
+            {"ref": "n2", "evidence_id": "doc-news-2", "title": "b",
+             "production_authorized": True},
+            {"ref": "n3", "title": "id 없는 항목"},          # 색인에 안 들어간다
+        ],
+        "disclosures_7d": [{"ref": "d1", "evidence_id": "doc-disc-1", "title": "c"}],
+    }
+    idx = evidence_index(bundle)
+    assert set(idx) == {"n1", "n2", "d1"}, set(idx)
+    assert idx["d1"]["kind"] == "disclosure"
+
+    assert resolve_refs(("n1", "d1"), bundle) == ("doc-news-1", "doc-disc-1")
+    # 같은 근거를 두 번 세지 않는다
+    assert resolve_refs(("n1", "n1"), bundle) == ("doc-news-1",)
+    # 없는 ref 는 예외다 - 조용히 빼면 '근거 3건' 이 1건으로 저장된다
+    for bad in (("n9",), ("n1", "없음")):
+        try:
+            resolve_refs(bad, bundle)
+            raise AssertionError(f"없는 ref 가 통과했다: {bad}")
+        except CitationError as e:
+            assert "없는 근거를 인용했다" in str(e)
+    # evidence_id 가 없는 항목도 인용 대상이 아니다
+    try:
+        resolve_refs(("n3",), bundle)
+        raise AssertionError("id 없는 항목이 인용됐다")
+    except CitationError:
+        pass
+    # 관대 모드는 빼되, 그건 호출자가 명시해야 한다
+    assert resolve_refs(("n1", "n9"), bundle, strict=False) == ("doc-news-1",)
+
+    # 운영 근거 허가 필터 - 기본은 제외(fail-closed), 공시는 승인으로 본다
+    assert authorized_only(("n1", "n2", "d1"), bundle) == ("doc-news-2", "doc-disc-1")
+    assert authorized_only(("n1",), bundle) == ()
+    print("  인용 해석·미승인 차단    OK")
 
 
 def _check_narrative_numbers():
@@ -339,5 +467,6 @@ if __name__ == "__main__":
     _check_insufficient_bars()
     _check_api_unavailable()
     _check_bundle_contract()
+    _check_citation_resolution()
     _check_narrative_numbers()
-    print("Evidence Bundle 6개 영역 통과.")
+    print("Evidence Bundle 7개 영역 통과.")
