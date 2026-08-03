@@ -106,10 +106,17 @@ services:
       # 종목만 보려면 .env 의 NEWS_WATCH_SYMBOLS 가 파일보다 우선한다.
       NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-}
       NEWS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
-      # 350종목 × 57회/일 = 19,950 < 한도의 90%(22,500). 종목이 많아 간격이 길다 -
-      # 간격을 줄이려면 종목을 줄여야 한다(뉴스 지연은 NAVER 색인이 지배하므로
-      # 넓은 커버리지 쪽이 남는 장사라는 판단).
-      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1500}
+      # ▶ 2계층 (재일님 지시 2026-08-03 "2계층으로 가자")
+      #   Tier1 = 위 핵심 바스켓 350종목, 매 sweep. 속보는 여기서 잡는다.
+      #   Tier2 = 코스피+코스닥 개별주 전종목 2,595, 남는 한도로 순회.
+      #   전종목을 같은 빈도로 돌면 간격이 185분이 되어 속보성이 사라진다.
+      NEWS_TIER2_SYMBOLS_FILE: config/full_universe.txt
+      # 실측 2026-08-03 (한도 25,000, 상한 90% = 22,500):
+      #   1500초 -> Tier1 만으로 21,000회, Tier2 는 sweep 당 1종목 = 사실상 안 돈다
+      #   1800초 -> Tier1 16,800 + Tier2 sweep 당 118종목, 한 바퀴 10시간,
+      #             합계 22,193회/일 (여유 307)
+      # 5분을 양보하고 전종목을 하루 2.4회 훑는 쪽을 택했다.
+      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1800}
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -153,7 +160,13 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
-      LS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
+      # ▶ 전종목 구독 (2026-08-03, 재일님 지시)
+      #   ETF·ETN 은 instrument_type 이 달라 애초에 안 들어온다(STOCK 만).
+      #   거래정지·관리종목 등 제한 171 을 뺀 2,595종목 = 5,190구독 =
+      #   소켓 26개(소켓당 200). 실계좌 웹소켓 세션 한도는 미확인이라
+      #   전환 후 소켓 수와 유입을 반드시 확인한다 - 거절되면 즉시
+      #   news_watchlist.txt(350종목)로 되돌린다.
+      LS_WATCH_SYMBOLS_FILE: config/full_universe.txt
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro

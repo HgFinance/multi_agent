@@ -47,7 +47,12 @@ from contracts.market_events import (  # noqa: E402
 REPOSITORY_VERSION = "research-market-repository-v1"
 
 
+from reference_repository import guarded_execute_values  # noqa: E402
+
+
 @dataclass(frozen=True)
+
+
 class WriteResult:
     """적재 결과. 중복을 숨기지 않고 세어서 돌려준다.
 
@@ -232,7 +237,7 @@ class TimescaleMarketRepository(MarketDataRepository):
 
     def __init__(self, dsn: str) -> None:
         import psycopg2  # requirements.txt: psycopg2-binary
-        from psycopg2.extras import execute_values, register_uuid
+        from psycopg2.extras import execute_values  # noqa: F401, register_uuid
 
         # psycopg2 는 uuid.UUID 를 기본 어댑트하지 못한다. 등록하지 않으면
         # instrument_id / trace_id 삽입에서 "can't adapt type 'UUID'" 가 난다.
@@ -240,7 +245,7 @@ class TimescaleMarketRepository(MarketDataRepository):
         # 바꾸면 잘못된 형식이 DB까지 내려간다.
         register_uuid()
 
-        self._execute_values = execute_values
+        self._execute_values = guarded_execute_values
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
 
