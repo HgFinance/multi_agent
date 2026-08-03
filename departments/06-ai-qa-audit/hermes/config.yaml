@@ -37,8 +37,13 @@ agent:
       # qa.case.check(POST qa-check)는 3.1절 [제안] — MINIMUM_SERVICE_UNIT_SPEC.md §8/§11에 아직 미등록,
       # 팀 승인 전까지 그 상위 문서는 안 고친다. 엔진 코드·API는 이미 동작하고 self-check도 통과함.
     hallucination-critic: [case.read]  # 3.9절: qa-check 결과(UNSUPPORTED/CONTRADICTED) 재사용, 자체 호출 없음
-    model-risk-agent: []  # 3.9절: 미구현(Eval Harness 없음), 이번 범위 밖
-    internal-audit-agent: []  # 3.9절: 미구현, 이번 범위 밖
+    model-risk-agent: [case.read, qa.model_risk.evaluate]
+      # model_risk.py(ModelRiskEngine)·API(/qa/v1/model-risk/evaluate)·harness/manifest.py SkillSpec 전부 존재,
+      # 단위·계약 테스트(tests/test_p1_reviews.py, tests/test_p1_api.py) 통과함(2026-08-03 확인). scripts.py
+      # LangGraph 노드 배선만 아직 없음 — in_progress, "미구현" 아님.
+    internal-audit-agent: [case.read, qa.internal_audit.evaluate]
+      # internal_audit.py(InternalAuditEngine)·API(/qa/v1/internal-audit/evaluate)도 동일하게 이미 존재·테스트
+      # 통과, LangGraph 배선만 남음(2026-08-03 확인) — in_progress, "미구현" 아님.
     agent-ops-monitor: [case.read, qa.ops.evaluate]
     tool-permission-security-reviewer: [case.read, qa.tool_permission.check, qa.tool_permission.unauthorized_count.read]
     incident-postmortem-agent:
@@ -122,9 +127,11 @@ deterministic_services:
   trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py              # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls
   tool_permission_check: departments/06-ai-qa-audit/audit/tool_permission_check.py # Tool Allowlist 위반 탐지 — 결정론적 집합 소속 검사, LLM 없음
   incident_timeline: departments/06-ai-qa-audit/audit/incident_timeline.py        # Incident Fact/Inference Timeline, Corrective Action(QA 검증 후 Close)
+  model_risk: departments/06-ai-qa-audit/model_risk.py                           # P1 Model/Prompt/Dataset 재현성 Threshold Gate — PASS/WARN/FAIL/ESCALATE
+  internal_audit: departments/06-ai-qa-audit/internal_audit.py                   # P1 권한분리·금지 교차본부 행동(FORBIDDEN_CROSS_DOMAIN_ACTIONS) 탐지 — PASS/ESCALATE
 
 implementation:
-  status: "Sprint K2 P0 완료. P1 결정론적 Model-Risk·Internal-Audit 검사기/API·QA 운영 Trace RLS baseline 구현. 실제 정책 Corpus/pgvector 적재, qa-check 상위 계약 승인, ACTIVE Profile·운영 agent_runs/tool_calls·E2E 활성화는 외부 조건 대기"
+  status: "Sprint K2 P0 완료. P1 결정론적 Model-Risk·Internal-Audit 검사기/API·QA 운영 Trace RLS baseline 구현. scripts.py LangGraph 배선은 agent-ops-monitor·incident-postmortem-agent·tool-permission-security-reviewer까지 완료(2026-08-03, run_ops_incident_review/run_tool_permission_review); model-risk-agent·internal-audit-agent는 엔진/API/테스트만 있고 배선은 in_progress. 실제 정책 Corpus/pgvector 적재, qa-check 상위 계약 승인, ACTIVE Profile·운영 agent_runs/tool_calls·E2E 활성화는 외부 조건 대기"
   done:
     - "8단계 순서 검사 (Schema, Evidence 존재·권한, PIT, 숫자·단위 인용 일치, Fact/Inference 구분, 상충 근거, Tool 요약 변형, Unsupported Block)"
     - "Claim/Artifact/EvidenceChunk를 Pydantic으로 검증 — LLM 출력 신뢰 경계는 트레이딩본부 contracts.py와 같은 원칙 (CLAUDE.md 개발 원칙 2번)"
@@ -141,7 +148,10 @@ implementation:
     - "QA Domain API (2026-07-31) — departments/06-ai-qa-audit/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 3.2~3.6절 FastAPI로 래핑(ops/trace/tool-permission/incident/corrective-action/evidence-check). verify-and-close는 엔진 자체 검증 위에 API 레이어 인증주체 재검증 추가(3.5절 명시 요구). 새 판정 로직 없음, TestClient self-check 5개 영역 통과. 3.1절 qa-check는 코드로는 구현했지만 여전히 [제안] — MINIMUM_SERVICE_UNIT_SPEC.md 미등록. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
     - "TraceRecorder/IncidentTimeline Supabase 배선 (2026-07-31) — departments/06-ai-qa-audit/audit/repository.py(PostgresAuditRepository, psycopg2, RedisTradingStateStore와 같은 구도: 인메모리가 불변식 검사 근거, Postgres는 공식 이력). trace_recorder.py/incident_timeline.py에 repository 주입 파라미터 추가(기본 None — 기존 인메모리 전용 동작·자체 점검 전부 무영향). audit.tool_calls/incident_events는 DB 트리거로 append-only라 tool_call은 종결 상태 1행만 insert, ALLOWED 등 중간 상태는 안 씀. api/app.py는 DATABASE_URL이 있을 때만 실제 배선(.env 자동 로드 안 함). 실 DATABASE_URL로 5개 시나리오 검증: (1) FK 위반 재현 (2) 실존 HR agent로 agent_runs insert+update round-trip (3)(4) tool_calls/incident_events는 append-only라 manual transaction+rollback으로 매핑만 검증, 커밋 안 함 (5) corrective_actions insert+update round-trip — 테스트로 남긴 행은 전부 정리함"
     - "audit.qa_decisions에 calculation_version/input_hash 컬럼 추가 (2026-07-31) — supabase/migrations/20260731001000_qa_decisions_reproducibility.sql, risk.risk_decisions와 같은 재현성 컬럼 모양(not null, 없는 Default). 이 Table엔 아직 INSERT하는 코드가 없어(qa-check는 여전히 MINIMUM_SERVICE_UNIT_SPEC.md 미등록 [제안] 상태) 항상 비어 있었으므로 not null로 바로 추가해도 안전했음. EvidenceQaEngine에 repository 배선을 추가하는 건 이 PR 범위 밖(엔진은 의도적으로 순수 계산기 — TraceRecorder/IncidentTimeline과 달리 상태가 없음) — qa-check가 실제 Command로 승인된 뒤 API 레이어에서 배선하는 게 다음 단계."
-  in_progress: []
+    - "scripts.py LangGraph 배선 — agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer (2026-08-03) — run_qa_department()의 QAState(artifact/evidence_store)와 공유 신호가 없어 별도 소형 파이프라인 2개로 분리: run_ops_incident_review(agent-ops-monitor 결정론 OpsHealthMonitor.evaluate -> 실제 OpsAssessment.incident가 뜬 경우에만 incident-postmortem-agent가 FACT/INFERENCE를 IncidentTimeline에 기록), run_tool_permission_review(tool-permission-security-reviewer 결정론 check_tool_permission -> DENIED일 때만 LLM 위반 서술). 둘 다 fail-closed(엔진 예외 시 ops는 SEV2 Incident로, permission은 DENIED로 안전한 방향), self-check 2개 영역 추가로 네트워크 없이 조건부 라우팅 검증됨(본부 파이프라인 자체 점검 7개 영역 통과)."
+  in_progress:
+    - "model-risk-agent LangGraph 배선 — model_risk.py(ModelRiskEngine, PASS/WARN/FAIL/ESCALATE)와 API(/qa/v1/model-risk/evaluate), 단위·계약 테스트(tests/test_p1_reviews.py, tests/test_p1_api.py) 구현·통과 완료(2026-08-03 확인). scripts.py에 run_ops_incident_review/run_tool_permission_review와 같은 패턴의 별도 소형 파이프라인이 아직 없음 — Strategy Release 재현성 검증 신호(model_version/prompt_version/dataset_version/backtest 지표)가 QAState 밖에서 와야 하므로 quant-backtest 쪽 Challenger 산출물 스키마 확정 후 배선."
+    - "internal-audit-agent LangGraph 배선 — internal_audit.py(InternalAuditEngine, PASS/ESCALATE, FORBIDDEN_CROSS_DOMAIN_ACTIONS)와 API(/qa/v1/internal-audit/evaluate)도 동일하게 이미 존재·테스트 통과(2026-08-03 확인). 배선 대상 신호(6개 본부 횡단 agent_runs/tool_calls 이벤트 스트림)가 아직 부서 하나짜리 자체 점검으로 재현하기엔 근거가 얕아, 실제 운영 Trace가 쌓인 뒤 배선 우선순위 재검토."
   implementation_notes:
     - "audit.agent_runs/tool_calls 실제 운영 INSERT — QA/Risk 소속 Agent가 workforce.agent_profiles/agent_profile_versions에 아직 없어(HR 5명만 존재) not null FK를 못 채움(accounting.funds와 같은 종류의 막힘, 인사팀 영역이라 임의로 Seed 안 함). repository.py 매핑 자체는 실 DB로 검증 완료."
     - "audit.incident_events 실제 운영 INSERT — IncidentTimeline이 audit.incidents 부모 행을 만들지 않아, 그 행이 먼저 없으면 not null FK 위반. 지금 DB에 있는 audit.incidents 1건은 이전 수동 검증용이라 신규 Incident 발생 시 그 부모 행을 만드는 주체가 아직 없음(이 범위 밖 — Task 2는 TraceRecorder/IncidentTimeline 배선만 요청받음)"
@@ -150,7 +160,7 @@ implementation:
     - "LLM-as-a-Judge 보조 신호 (팀 가이드 7절) — 지금은 순수 규칙 판정만, Semantic 근거 검증은 의도적으로 P0 이후 백로그"
     - "rag-librarian-evidence-curator/Model Gateway Trace 실연동 — 지금은 EvidenceStore/AgentHealthMetrics/TraceRecorder가 전부 스텁이거나 인메모리"
     - "실시간 Telemetry 배선(OpenTelemetry/Prometheus), 부하 테스트(locust/testcontainers) — 관찰·테스트할 실제 실행 중인 서비스가 없어 지금은 불가능"
-    - "Model Risk(model-risk-agent), Internal Audit(internal-audit-agent), Incident Postmortem — P1 tier, 이번엔 범위 밖"
+    - "Model Risk(model-risk-agent), Internal Audit(internal-audit-agent) — P1 tier, 엔진/API/테스트는 있으나 LangGraph 배선은 in_progress(위 in_progress 항목 참고). Incident Postmortem(incident-postmortem-agent)은 2026-08-03에 run_ops_incident_review로 배선 완료돼 이 목록에서 제외함."
 
 # 백로그 (2026-07-29, Finyul MAS 아티클 비교에서 도출 — 아직 미구현, 기록만)
 # evidence-qa-agent: 완전성 검증 실패 시 지금은 Flag만 하는데, 자동 Block으로 격상하는 "3단 방어"

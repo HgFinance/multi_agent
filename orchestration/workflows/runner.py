@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,10 +172,13 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        repo_root = Path(__file__).resolve().parents[2]
+        if args.mode == "paper":
+            _load_repo_env(repo_root)
         handlers = None
         context: Mapping[str, object] | None = None
         if args.mode == "paper-e2e":
-            handlers = build_paper_e2e_handlers(Path(__file__).resolve().parents[2])
+            handlers = build_paper_e2e_handlers(repo_root)
             context = {
                 "case_request": {
                     "case_id": f"paper-e2e-{uuid4().hex[:12]}",
@@ -189,7 +191,7 @@ def main() -> int:
                 }
             }
         elif args.mode == "paper":
-            handlers = build_paper_handlers(Path(__file__).resolve().parents[2])
+            handlers = build_paper_handlers(repo_root)
             context = {
                 "case_request": {
                     "case_id": f"paper-{uuid4().hex[:12]}",
@@ -215,6 +217,15 @@ def main() -> int:
     payload = _jsonable(run)
     print(json.dumps(payload, ensure_ascii=False, indent=2) if args.as_json else f"{run.workflow}: {run.status}")
     return 0 if run.status in {"VALIDATED", "COMPLETED"} else 1
+
+
+def _load_repo_env(repo_root: Path) -> None:
+    """Load root secrets for paper adapters without printing or overriding env."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(repo_root / ".env", override=False)
 
 
 if __name__ == "__main__":
