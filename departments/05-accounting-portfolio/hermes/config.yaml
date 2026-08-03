@@ -14,8 +14,9 @@
 # ⚠ 선행 조건: 호스트에서 프록시 기동 + .env 의 CLAUDE_CODE_OAUTH_TOKEN.
 # 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
 model:
-  provider: anthropic
-  default: sonnet
+ provider: openai-codex
+ default: gpt-5.6-luna
+ base_url: https://chatgpt.com/backend-api/codex
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
@@ -133,4 +134,92 @@ known_builtin_toolsets:
         session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
         vision, web, x_search, yuanbao]
 known_plugin_toolsets:
-  cli: [spotify]
+ cli: [spotify]
+
+# Employee runtime v2: every listed employee is an independent LangGraph
+# Worker.  Official ledger/NAV state remains deterministic and permissioned.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+
+staff_registry:
+  head_count: 1
+  worker_count: 8
+  default_execution_count: 2
+  max_execution_count: 8
+  active_worker_count: 2
+  conditional_worker_count: 6
+  runtime_personality_source: workers
+  legacy_personas_are_aliases: true
+  runtime_personalities: [portfolio-control-worker, ledger-reconciliation-worker, nav-close-worker, treasury-liquidity-worker, pnl-attribution-worker, investor-reporting-worker, valuation-corporate-actions-worker, fee-accrual-tax-worker]
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+
+employee_runtime:
+  executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/05-accounting-portfolio/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:8b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:8b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: accounting.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: accounting-portfolio-department-head
+  failure_action: HOLD
+
+workers:
+  portfolio-control-worker:
+    role: Portfolio position and cash control analyst
+    status: active
+    trigger: always
+    tools: [accounting.position.read, accounting.cash.read]
+  ledger-reconciliation-worker:
+    role: Ledger, fund-accounting and reconciliation analyst
+    status: active
+    trigger: always
+    tools: [accounting.ledger.read, accounting.reconciliation.read]
+  nav-close-worker:
+    role: NAV close evidence analyst
+    status: conditional
+    trigger: when_nav_close_exists
+    tools: [accounting.nav.read, accounting.valuation.read]
+  treasury-liquidity-worker:
+    role: Treasury and liquidity analyst
+    status: conditional
+    trigger: when_treasury_input_exists
+    tools: [accounting.cash.read, accounting.treasury.read]
+  pnl-attribution-worker:
+    role: PnL attribution analyst
+    status: conditional
+    trigger: when_pnl_input_exists
+    tools: [accounting.pnl.read, accounting.position.read]
+  investor-reporting-worker:
+    role: Investor reporting context analyst
+    status: conditional
+    trigger: when_reporting_input_exists
+    tools: [accounting.reporting.read, accounting.nav.read]
+  valuation-corporate-actions-worker:
+    role: Valuation and corporate-actions analyst
+    status: conditional
+    trigger: when_valuation_input_exists
+    tools: [accounting.valuation.read, accounting.corporate_actions.read]
+  fee-accrual-tax-worker:
+    role: Fee accrual and tax context analyst
+    status: conditional
+    trigger: when_fee_tax_input_exists
+    tools: [accounting.fees.read, accounting.tax.read]

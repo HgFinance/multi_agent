@@ -13,6 +13,8 @@ Department Backend Image에 설치하지 않는다”), 여기서는 그 결정�
 
 ## 1. 지금 구성 (2026-08-03 실측 기준)
 
+현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. 직원은 부서별 독립 LangGraph Worker이며 현재 Ollama `qwen3:8b`를 사용한다. 아래에 남은 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이며 현재 실행 기준이 아니다. 실제 런타임 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
+
 계획서 3.1~3.2대로 **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개**다.
 
 ```

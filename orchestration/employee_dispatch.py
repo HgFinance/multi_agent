@@ -16,7 +16,6 @@ from typing import Any
 
 from departments.employee_worker_runtime import WorkerLLM
 
-
 EMPLOYEE_MODULE_BY_DEPARTMENT = {
     "ceo": "departments/00-ceo-office/employee_workers.py",
     "hr": "departments/07-agent-workforce/employee_workers.py",
@@ -102,8 +101,5 @@ def _load_module(repo_root: Path, department: str, relative_path: str) -> Any:
     try:
         spec.loader.exec_module(module)
         return module
-    except Exception as exc:  # noqa: BLE001 - normalize import boundary
+    except Exception as exc:
         raise EmployeeDispatchError(f"employee_registry_import_failed:{department}") from exc
-    finally:
-        sys.modules.pop(module_name, None)
-

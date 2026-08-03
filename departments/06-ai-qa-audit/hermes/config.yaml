@@ -28,6 +28,7 @@ agent:
   head_persona: qa-audit-supervisor
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
+  runtime_personalities: [evidence-qa-worker, hallucination-critic-worker, model-and-internal-audit-worker, ops-and-permission-worker, incident-postmortem-worker]
   max_turns: 100
   reasoning_effort: high
   timeout_seconds: 60  # 개별 명령어 타임아웃
