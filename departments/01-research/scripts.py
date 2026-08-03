@@ -133,6 +133,13 @@ def check_universe(state: ResearchState) -> dict:
 DQ_FAIL_HALTS = True          # FAIL 이면 분석을 안 한다. 나쁜 데이터로 낸 결론은
                               # 없는 결론보다 나쁘다 - 사람이 그걸 믿기 때문이다
 
+# ▶ **분석이 실제로 쓰는 스트림만 막는다.** 첫 실측에서 derivatives 스트림
+#   FAIL 때문에 주식 종목(006800) 분석이 통째로 멈췄다 - 우리 분석가 6인 중
+#   파생 데이터를 쓰는 사람은 없다. 무관한 장애로 막으면 게이트가 과하고,
+#   과한 게이트는 사람이 곧 꺼버린다(가드 오탐과 같은 실패 방식).
+#   관련 없는 스트림의 FAIL 은 기록하되 통과시킨다.
+EQUITY_STREAMS = ("ticks", "quotes", "bars", "breadth", "index")
+
 
 def check_data_quality(state: ResearchState) -> dict:
     """수집 품질을 확인하고 나쁘면 막는다. **행 0건은 PASS 가 아니다.**"""
@@ -149,7 +156,14 @@ def check_data_quality(state: ResearchState) -> dict:
         return {"data_quality": {"status": "UNKNOWN",
                                  "reason": "최근 24시간 품질 감사 기록 0건"}}
 
-    bad = [r for r in rows if str(r.get("quality_status")) == "FAIL"]
+    def _relevant(r) -> bool:
+        st = str(r.get("stream_type") or "").lower()
+        return any(k in st for k in EQUITY_STREAMS)
+
+    failed = [r for r in rows if str(r.get("quality_status")) == "FAIL"]
+    bad = [r for r in failed if _relevant(r)]          # 우리가 쓰는 스트림만
+    unrelated = sorted({str(r.get("stream_type")) for r in failed
+                        if not _relevant(r)})
     warn = [r for r in rows if str(r.get("quality_status")) == "WARN"]
     streams = sorted({str(r.get("stream_type")) for r in bad})
     dq = {
@@ -157,6 +171,8 @@ def check_data_quality(state: ResearchState) -> dict:
         "windows": len(rows),
         "failed_streams": streams,
         "warned_streams": sorted({str(r.get("stream_type")) for r in warn}),
+        # 무관한 스트림 장애도 **숨기지 않는다** - 막지 않을 뿐이다
+        "failed_unrelated_streams": unrelated,
         "reason": "; ".join(
             str((r.get("metrics") or {}).get("reasons") or "")[:80] for r in bad[:3]),
     }
@@ -2187,6 +2203,17 @@ def _check_data_quality_gate():
         out = check_data_quality({"symbol": "x"})
         assert out["data_quality"]["status"] == "FAIL", out
         assert out.get("halted"), "FAIL 인데 안 막았다"
+
+        # ▶ **무관한 스트림 장애로 막지 않는다.** 실측: derivatives FAIL 이
+        #   주식 종목 분석을 통째로 멈췄다 - 분석가 6인 중 파생을 쓰는
+        #   사람이 없다. 과한 게이트는 사람이 곧 꺼버린다.
+        globals()["_get"] = lambda url: [
+            {"stream_type": "derivatives", "quality_status": "FAIL",
+             "metrics": {"reasons": ["지연"]}}]
+        out = check_data_quality({"symbol": "x"})
+        assert not out.get("halted"), "무관한 스트림으로 막았다"
+        # 다만 **숨기지도 않는다**
+        assert out["data_quality"]["failed_unrelated_streams"] == ["derivatives"], out
 
         globals()["_get"] = lambda url: [
             {"stream_type": "ticks", "quality_status": "WARN", "metrics": {}}]

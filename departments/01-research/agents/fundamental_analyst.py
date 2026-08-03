@@ -65,7 +65,7 @@ from number_guard import flag_unmatched  # noqa: E402
 from llm_client import narrate as llm_narrate  # noqa: E402
 from fundamental_scores import f_score, altman_z  # noqa: E402
 from sector_baselines import (annotate as sector_annotate,  # noqa: E402
-                              cautions_for, detect_sector)
+                              cautions_for, resolve_sector)
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -337,7 +337,13 @@ def compute_fundamental_readout(facts: list[dict]) -> dict:
     #
     #   재료가 업종을 안 실으면 분석가도 총괄도 인사이트도 같은 오독을
     #   반복한다 - 그 위에서 무엇을 해도 안 고쳐진다.
-    sector, sector_why = detect_sector(r.get("account_code") for r in rows)
+    # 공식 업종코드(KSIC)를 우선한다. /evidence/financials 가 issuers 를 이미
+    # join 하고 있었는데 industry_code 를 안 실어서 몰랐다 - /bars 의 notional
+    # 과 같은 유형이다. 코드가 없으면 계정 구조로 추론한다.
+    ksic = next((r.get("industry_code") for r in rows if r.get("industry_code")),
+                None)
+    sector, sector_why = resolve_sector(
+        ksic, [r.get("account_code") for r in rows])
     fields = sector_annotate(fields, sector, sector_why)
     cautions += cautions_for(sector, sector_why)
 
@@ -582,6 +588,11 @@ def _check_sector_context_is_wired():
         "IS:당기순이익(손실)": 1.5e12})
     r = compute_fundamental_readout(fin)
     assert r["sector"] == "FINANCIAL", r.get("sector")
+    # 업종코드가 오면 그것이 우선한다(실측: 006800 = KSIC 66121)
+    with_code = [dict(x, industry_code="66121") for x in fin]
+    rk = compute_fundamental_readout(with_code)
+    assert rk["sector"] == "FINANCIAL", rk.get("sector")
+    assert "KSIC" in rk["fields"]["_sector"]["detected_by"], rk["fields"]["_sector"]
     f = r["fields"]
     # ▶ 값은 그대로 있고(사실이다), 적용 불가 표시가 붙는다
     assert f["부채비율_pct"]["value"] is not None, "값이 사라졌다"

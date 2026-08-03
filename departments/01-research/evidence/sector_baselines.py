@@ -83,6 +83,40 @@ def detect_sector(account_codes: Iterable[str]) -> tuple[str, str]:
     return SECTOR_UNKNOWN, f"판별 계정이 없다(계정 {len(codes)}종)"
 
 
+# KSIC(한국표준산업분류) 대분류 -> 금융업. DART 회사개황이 주는 industry_code 다.
+# 실측: 006800 미래에셋증권 66121, 055550 신한지주 64992,
+#       000660 SK하이닉스 2612, 005380 현대차 30121, 035420 NAVER 63120
+#   64 금융업(은행·지주)  65 보험·연금  66 금융·보험 관련 서비스(증권·자산운용)
+# **계정 판별보다 이쪽을 우선한다** - 공식 분류가 추론보다 정확하다.
+_KSIC_FINANCIAL = ("64", "65", "66")
+
+
+def sector_from_ksic(industry_code: Optional[str]) -> tuple[str, str]:
+    """KSIC 업종코드 -> (업종, 근거). 코드가 없으면 UNKNOWN."""
+    code = str(industry_code or "").strip()
+    if not code or not code[:2].isdigit():
+        return SECTOR_UNKNOWN, "업종코드 없음"
+    if code[:2] in _KSIC_FINANCIAL:
+        return SECTOR_FINANCIAL, f"KSIC {code} (금융·보험)"
+    return SECTOR_GENERAL, f"KSIC {code}"
+
+
+def resolve_sector(industry_code: Optional[str],
+                   account_codes: Iterable[str]) -> tuple[str, str]:
+    """업종 판별. **공식 코드 우선, 없으면 계정 구조로 추론.**
+
+    코드가 있는데 계정 추론과 어긋나면 코드를 따르되 **그 사실을 근거에
+    남긴다** - 조용히 한쪽을 버리면 어느 쪽이 틀렸는지 영영 모른다.
+    """
+    by_code, why_code = sector_from_ksic(industry_code)
+    by_acct, why_acct = detect_sector(account_codes)
+    if by_code == SECTOR_UNKNOWN:
+        return by_acct, why_acct + " (업종코드 없어 계정 추론)"
+    if by_acct != SECTOR_UNKNOWN and by_acct != by_code:
+        return by_code, f"{why_code} — 계정 추론({by_acct})과 불일치, 코드 우선"
+    return by_code, why_code
+
+
 # 업종별 지표 적용 가능 여부와 문맥.
 # **금융업의 '적정 부채비율' 을 숫자로 정하지 않는다** - 증권·은행·보험이
 # 각각 다르고 우리에게 그 기준을 세울 근거가 없다. 아무 숫자나 넣으면
@@ -178,6 +212,29 @@ _MANUFACTURER = ["BS:유동자산", "BS:유동부채", "BS:비유동부채", "BS
                  "BS:부채총계", "BS:자본총계", "IS:매출액", "IS:영업이익"]
 
 
+def _check_ksic_takes_priority():
+    """공식 업종코드가 계정 추론보다 우선하는가. 실측 코드로 확인한다."""
+    assert sector_from_ksic("66121")[0] == SECTOR_FINANCIAL   # 미래에셋증권
+    assert sector_from_ksic("64992")[0] == SECTOR_FINANCIAL   # 신한지주
+    assert sector_from_ksic("65110")[0] == SECTOR_FINANCIAL   # 보험
+    assert sector_from_ksic("2612")[0] == SECTOR_GENERAL      # SK하이닉스
+    assert sector_from_ksic("30121")[0] == SECTOR_GENERAL     # 현대차
+    assert sector_from_ksic("63120")[0] == SECTOR_GENERAL     # NAVER
+    # 코드가 없으면 UNKNOWN 이지 일반업이 아니다
+    for bad in (None, "", "  ", "X12"):
+        assert sector_from_ksic(bad)[0] == SECTOR_UNKNOWN, bad
+
+    # 코드 우선 - 계정이 얇아도 코드가 있으면 판별된다
+    s, why = resolve_sector("66121", ["BS:자산총계"])
+    assert s == SECTOR_FINANCIAL and "KSIC" in why, (s, why)
+    # 코드가 없으면 계정 추론으로 떨어지고 그 사실이 근거에 남는다
+    s2, why2 = resolve_sector(None, _SECURITIES)
+    assert s2 == SECTOR_FINANCIAL and "계정 추론" in why2, why2
+    # ▶ 불일치를 조용히 덮지 않는다 - 어느 쪽이 틀렸는지 보여야 고친다
+    s3, why3 = resolve_sector("2612", _SECURITIES)
+    assert s3 == SECTOR_GENERAL and "불일치" in why3, why3
+
+
 def _check_detects_securities_firm():
     """실측 계정으로 증권사를 잡는가. 못 잡으면 이 모듈은 무의미하다."""
     sector, why = detect_sector(_SECURITIES)
@@ -259,6 +316,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     print(f"{MODULE_VERSION} 자체 점검 (네트워크·DB 없음)")
+    _check_ksic_takes_priority();              print("  KSIC 코드 우선           OK")
     _check_detects_securities_firm();          print("  증권사 판별(실측 계정)   OK")
     _check_detects_manufacturer();             print("  일반업 판별             OK")
     _check_unknown_is_not_general();           print("  미판별 != 일반업        OK")
@@ -266,4 +324,4 @@ if __name__ == "__main__":
     _check_no_invented_threshold();            print("  기준선 날조 안 함        OK")
     _check_annotate_keeps_value();             print("  값 보존(문맥만 추가)     OK")
     _check_cautions();                         print("  업종 경고               OK")
-    print("업종 문맥 7개 영역 통과.")
+    print("업종 문맥 8개 영역 통과.")

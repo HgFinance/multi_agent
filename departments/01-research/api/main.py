@@ -306,7 +306,13 @@ def evidence_financials(
         """
         select distinct on (f.account_code, f.period_end, f.consolidation_scope)
                f.account_code, f.value, f.unit, f.currency, f.period_end,
-               f.consolidation_scope, f.published_at, f.observed_at, f.revision
+               f.consolidation_scope, f.published_at, f.observed_at, f.revision,
+               -- 업종(KSIC). issuers 를 이미 join 하는데 안 실어서 RES-05 가
+               -- 업종을 몰랐고, 증권사 부채비율을 제조업 기준으로 읽는 오독이
+               -- 났다(/bars 의 notional 과 같은 유형).
+               -- ▶ 주석에 퍼센트 기호를 쓰지 않는다 - psycopg2 가 SQL 전체에서
+               --   그것을 파라미터 자리로 읽어 IndexError 를 낸다(실측).
+               iss.industry_code
         from research.financial_facts f
         join reference.issuers iss on iss.issuer_id = f.issuer_id
         join reference.instruments i on i.issuer_id = iss.issuer_id
