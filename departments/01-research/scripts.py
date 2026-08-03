@@ -1166,6 +1166,16 @@ if __name__ == "__main__":
         rp = rep_dir / f"research_packet_{sym}_{datetime.now(KST):%Y%m%d_%H%M%S}.md"
         rp.write_text(_render_packet_md(packet), encoding="utf-8")
         print(f"리포트 저장: {rp.relative_to(_BASE)}")
+
+        # Notion 은 **구속력 없는 Projection** 이다 - 실패해도 Packet 은 그대로다
+        # (동규님 리스크 Reporter 와 같은 규약). 미설정이면 조용히 생략한다.
+        try:
+            from notion_reporter import upload_packet
+            nr = upload_packet(packet, symbol=sym,
+                               report_md=rp.read_text(encoding="utf-8"))
+            print("Notion:", nr.get("url") or nr.get("reason") or nr)
+        except Exception as e:  # noqa: BLE001
+            print(f"Notion 업로드 예외(무시): {type(e).__name__}: {e}")
         raise SystemExit(0)
 
     print(f"{PIPELINE_VERSION} 자체 점검 (LLM·API 없음)")
