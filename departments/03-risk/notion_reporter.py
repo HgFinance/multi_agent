@@ -19,7 +19,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from departments.notion_markdown import markdown_to_notion_blocks
 from reporting import notion_rich_text_chunks
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
@@ -88,7 +93,10 @@ def upload_case(order_intent: dict, context: dict, out: dict, *, report_md: str 
         props["compliance_verdict"] = {"select": {"name": compliance_verdict}}
 
     try:
-        status, body = _post("pages", {"parent": {"database_id": db_id}, "properties": props}, token)
+        payload = {"parent": {"database_id": db_id}, "properties": props}
+        if report_md:
+            payload["children"] = markdown_to_notion_blocks(report_md)
+        status, body = _post("pages", payload, token)
     except Exception as e:  # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
         return {"ok": False, "reason": f"업로드 예외: {e}"}
     if status == 200:
