@@ -70,7 +70,9 @@ def parse_daily(row: dict) -> Bar:
 def parse_minute(row: dict, *, ncnt: int = 1) -> Bar:
     # time 은 봉의 끝이다. bucket_time 은 관례상 시작으로 둔다 - 09:01:00 끝의
     # 1분봉 bucket 은 09:00:00. (bars_1m 연속집계의 time_bucket 과 같은 기준)
-    end = datetime.strptime(str(row["date"]) + f"{int(row['time']):06d}", "%Y%m%d%H%M%S")
+    end = datetime.strptime(  # noqa: DTZ007 - exchange-local timestamp receives KST below
+        str(row["date"]) + f"{int(row['time']):06d}", "%Y%m%d%H%M%S"
+    )
     start = end.replace(tzinfo=KST) - timedelta(minutes=ncnt)
     return _bar(start, "1M" if ncnt == 1 else f"{ncnt}M", row)
 

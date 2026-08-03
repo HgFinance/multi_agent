@@ -638,13 +638,13 @@ if __name__ == "__main__":
     snap = MarketSnapshot(market_snapshot_id="s1", as_of=now,
                           bid=Decimal(70000), ask=Decimal(70100))
     FUND = uuid4()
-    common = dict(
-        trade_case_id=uuid4(), fund_id=FUND, book_id=uuid4(),
-        strategy_id=uuid4(), instrument_id=uuid4(),
-        side=Side.BUY, order_type=OrderType.LIMIT, limit_price=Decimal(70000),
-        time_in_force=TimeInForce.DAY, valid_until=now + timedelta(hours=1),
-        snapshot=snap, created_by="trader-pm-agent", trace_id="t1", created_at=now,
-    )
+    common = {
+        "trade_case_id": uuid4(), "fund_id": FUND, "book_id": uuid4(),
+        "strategy_id": uuid4(), "instrument_id": uuid4(),
+        "side": Side.BUY, "order_type": OrderType.LIMIT, "limit_price": Decimal(70000),
+        "time_in_force": TimeInForce.DAY, "valid_until": now + timedelta(hours=1),
+        "snapshot": snap, "created_by": "trader-pm-agent", "trace_id": "t1", "created_at": now,
+    }
 
     def make_intent(key="idem_0001", qty="100", **over) -> OrderIntent:
         return OrderIntent(**{**common, **over}, quantity=Decimal(qty), idempotency_key=key)
@@ -808,12 +808,12 @@ if __name__ == "__main__":
 
     # Certification이 다 있어야 파생이 열린다
     def cap(**kw) -> CapabilityProfile:
-        base = dict(capability_profile_id=uuid4(), profile_code="p", version=1,
-                    status=ProfileStatus.ACTIVE,
-                    required_instruments=frozenset({"EQUITY", "FUTURE"}),
-                    execution_capabilities=frozenset({"limit"}),
-                    risk_capabilities=frozenset({"position_limit"}),
-                    accounting_capabilities=frozenset({"double_entry"}))
+        base = {"capability_profile_id": uuid4(), "profile_code": "p", "version": 1,
+                    "status": ProfileStatus.ACTIVE,
+                    "required_instruments": frozenset({"EQUITY", "FUTURE"}),
+                    "execution_capabilities": frozenset({"limit"}),
+                    "risk_capabilities": frozenset({"position_limit"}),
+                    "accounting_capabilities": frozenset({"double_entry"})}
         return CapabilityProfile(**{**base, **kw})
 
     half = OMS(capability=cap(certified_by=frozenset({"broker"})))

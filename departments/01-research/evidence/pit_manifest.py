@@ -242,12 +242,12 @@ def _check_declaration_invariants():
         seen.add(key)
     # dataclass __post_init__ 이 실제로 막는가
     for bad, why in (
-        (dict(service="x", path="/p", support=PitSupport.SUPPORTED,
-              time_param=None, note="n"), "SUPPORTED 인데 time_param 없음"),
-        (dict(service="x", path="/p", support=PitSupport.UNSUPPORTED,
-              time_param="as_of", note="n"), "UNSUPPORTED 인데 time_param 있음"),
-        (dict(service="x", path="/p", support=PitSupport.NOT_APPLICABLE,
-              time_param=None, note="  "), "note 없음"),
+        ({"service": "x", "path": "/p", "support": PitSupport.SUPPORTED,
+              "time_param": None, "note": "n"}, "SUPPORTED 인데 time_param 없음"),
+        ({"service": "x", "path": "/p", "support": PitSupport.UNSUPPORTED,
+              "time_param": "as_of", "note": "n"}, "UNSUPPORTED 인데 time_param 있음"),
+        ({"service": "x", "path": "/p", "support": PitSupport.NOT_APPLICABLE,
+              "time_param": None, "note": "  "}, "note 없음"),
     ):
         try:
             ToolCapability(**bad)

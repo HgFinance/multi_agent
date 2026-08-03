@@ -226,7 +226,7 @@ def index_documents(limit: int = 50) -> int:
                 if i % 10 == 0 or i == len(targets):
                     print(f"  [{i}/{len(targets)}] 적재 {done} / 본문없음 {skipped} / "
                           f"실패 {failed}", flush=True)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 conn.rollback()
                 failed += 1
                 print(f"  ⚠ {path}: {type(e).__name__} {str(e)[:80]}", flush=True)

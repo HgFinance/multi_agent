@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -213,7 +214,7 @@ def parse_gpr_sheet(header: list, rows: list[list]) -> tuple[list[tuple[date, di
                 v = float(raw)
             except (ValueError, TypeError):
                 continue
-            if v != v:                            # NaN
+            if math.isnan(v):                     # NaN
                 continue
             vals[code] = v
         if vals:

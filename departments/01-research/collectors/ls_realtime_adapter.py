@@ -395,7 +395,7 @@ def _check_time_resolution():
 
     # naive received_at
     try:
-        resolve_event_time("103000", datetime(2026, 7, 30, 10, 30))
+        resolve_event_time("103000", datetime(2026, 7, 30, 10, 30))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive received_at 이 통과했다")
     except TimeResolutionError:
         pass

@@ -92,7 +92,7 @@ class SearchHit:
     def content_hash(self) -> str:
         """url+제목으로 만든 안정 식별자. document_id 를 대신하지 않는다."""
         return "sha256:" + hashlib.sha256(
-            f"{self.url}|{self.title}".encode("utf-8")).hexdigest()[:32]
+            f"{self.url}|{self.title}".encode()).hexdigest()[:32]
 
     def evidence_ref(self) -> str:
         """인용 가능한 참조. **승격 전에는 web: 접두사로 구분된다.**"""
@@ -146,7 +146,7 @@ def search(req: SearchRequest, *, persona: str = SEARCH_PERSONA,
     now = datetime.now(timezone.utc)
     try:
         raw = (post or _post)(TAVILY_URL, body)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise WebSearchError(f"검색 호출 실패: {type(e).__name__}: {e}") from e
 
     hits = []
@@ -325,8 +325,8 @@ def _check_summary_shows_why_zero():
     hits = validate_hits([_hit("https://news.example.com/c")], as_of=_NOW)
     s = summarize(hits)
     assert s == {"hits": 1, "verified": 0, "rejected": 1, "verified_refs": [],
-                 "reject_reasons": ["1차 출처가 아니고 우리 수집본과도 겹치지 "
-                                    "않는다 - Evidence 후보로만 남긴다"],
+                 "reject_reasons": [("1차 출처가 아니고 우리 수집본과도 겹치지 "
+                                    "않는다 - Evidence 후보로만 남긴다")],
                  "engines": ["tavily"]}, s
     print("  0건의 사유 표시          OK")
 

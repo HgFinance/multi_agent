@@ -141,7 +141,7 @@ def _collect(limit: int) -> int:
             time.sleep(1.0 / RATE_PER_SEC)
             try:
                 data = fetch_original(api_key, rcept_no)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 stats.failed += 1
                 stats.note(type(e).__name__)
                 continue
@@ -154,7 +154,7 @@ def _collect(limit: int) -> int:
             path = object_path_for(rcept_no)
             try:
                 upload(env, path, data)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 stats.failed += 1
                 stats.note("UPLOAD_" + type(e).__name__)
                 continue

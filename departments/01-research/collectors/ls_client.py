@@ -463,7 +463,7 @@ def _check_env_and_rate_limit():
     try:
         LsEnvironment.from_env({"LS_ENV": "LIVE"})
         raise AssertionError("키 없이 통과했다")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         assert "ls_openapi_rest" in str(e) or "LS_APP_KEY" in str(e)
 
     rl = RateLimiter(per_sec=20.0)

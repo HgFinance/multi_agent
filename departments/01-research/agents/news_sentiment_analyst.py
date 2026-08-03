@@ -117,7 +117,7 @@ def fetch_evidence(symbol: str, *, hours: float, as_of: datetime | None,
     # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02)
     from api_client import get_json
 
-    return get_json(url, persona="news-sentiment-analyst", timeout=20)
+    rows = get_json(url, persona="news-sentiment-analyst", timeout=20)
     # 가중치 상위만 판정에 넣는다 - 오래된 기사 수십 건이 토큰만 태우는 것을 막는다
     rows.sort(key=lambda r: r.get("weight", 0.0), reverse=True)
     return rows[:MAX_ARTICLES]
@@ -358,7 +358,7 @@ def fetch_story_sizes(symbol: str, *, hours: float, as_of: datetime | None,
             for mid in s.get("member_ids") or []:
                 sizes[str(mid)] = int(s["size"])
         return sizes
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         return None
 
 
@@ -514,7 +514,7 @@ def _check_body_never_persists():
         def read(self, url):
             return "본문 텍스트 " * 50
 
-    arts, note = attach_bodies([art], reader=_FakeReader())
+    arts, _note = attach_bodies([art], reader=_FakeReader())
     assert arts[0].get("body"), "본문이 안 붙었다"
     batch = JudgementBatch(judgements=[
         ArticleJudgement(document_id="d1", sentiment=1, salience=0.9, reason="ok")])
@@ -562,6 +562,6 @@ if __name__ == "__main__":
         _check_no_evidence()
     except AssertionError as e:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         print("  API 장애 fail-closed     OK")  # URLError 등 - 조용히 0점 내지 않는다
     print("직원 에이전트 6개 영역 통과. 실행은 --run <종목코드>")

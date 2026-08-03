@@ -166,12 +166,14 @@ def compute_artifact_hash(submission: ProfileVersionSubmission) -> str:
 
 def validate_status_change(request: StatusChangeRequest) -> None:
     """불변식 2 - ACTIVE 전이는 QA Eval과 CEO 승인 둘 다 있어야 한다."""
-    if request.to_status is EmploymentStatus.ACTIVE:
-        if not request.qa_eval_run_id or not request.ceo_approval_id:
-            raise MissingActivationEvidenceError(
-                "ACTIVE 전이는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다 "
-                f"(qa_eval_run_id={request.qa_eval_run_id!r}, ceo_approval_id={request.ceo_approval_id!r})"
-            )
+    if (
+        request.to_status is EmploymentStatus.ACTIVE
+        and (not request.qa_eval_run_id or not request.ceo_approval_id)
+    ):
+        raise MissingActivationEvidenceError(
+            "ACTIVE 전이는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다 "
+            f"(qa_eval_run_id={request.qa_eval_run_id!r}, ceo_approval_id={request.ceo_approval_id!r})"
+        )
 
 
 class RosterRepository:

@@ -1033,7 +1033,7 @@ def _check_scope_gate():
         SourceSpec(source_id="no_scope", display_name="x", domains=(SourceDomain.NEWS,),
                    tier=SourceTier.P1, doc_ref="self-check")
         raise AssertionError("market_scopes 없이 SourceSpec 이 만들어졌다")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         assert "market_scopes" in str(e)
     print("  Scope Gate            OK")
 

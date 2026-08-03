@@ -743,9 +743,9 @@ def _check_option_row():
             "delt": "0.8894", "gama": "0.0011", "vega": "0.3850",
             "ceta": "-1.1914", "rhox": "0.02", "theoryprice": "183.15",
             "volume": 0, "atmgubun": "1"}
-    kw = dict(kind="CALL", expiry=date(2026, 8, 13), days_left=Decimal(14),
-              underlying=Decimal("1030.65"),
-              observed_kst=datetime(2026, 7, 31, 22, 0, tzinfo=KST))
+    kw = {"kind": "CALL", "expiry": date(2026, 8, 13), "days_left": Decimal(14),
+              "underlying": Decimal("1030.65"),
+              "observed_kst": datetime(2026, 7, 31, 22, 0, tzinfo=KST)}
     r = build_option_row(base, **kw)
     assert r is not None and abs(r.iv - 0.8084) < 1e-12
     assert r.raw_flags["iv_raw"] == "80.84"

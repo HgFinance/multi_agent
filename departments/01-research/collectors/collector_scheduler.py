@@ -206,7 +206,7 @@ def run_job(job: Job, *, timeout: float = JOB_TIMEOUT_SECONDS) -> tuple[int, str
     """subprocess 로 한 번 실행. (종료 코드, 출력 꼬리)."""
     proc = subprocess.run(
         [sys.executable, *job.argv],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout,
         cwd=str(Path(__file__).resolve().parent.parent),
     )

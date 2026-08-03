@@ -365,7 +365,7 @@ class PaperLoopTest(unittest.TestCase):
     def test_position_only_moves_on_fills(self):
         """Intent를 만들고 승인만 받고 체결이 없으면 포지션은 그대로다."""
         intent = self.build_intent(self.signal(), self.snapshot())
-        rec, order = self.route(intent)
+        _rec, order = self.route(intent)
         self.assertIs(order.state, BrokerOrderState.ACKNOWLEDGED)
         self.post_fills_to_ledger(order)
         snap = self.snapshot()

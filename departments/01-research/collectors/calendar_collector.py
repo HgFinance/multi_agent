@@ -147,7 +147,7 @@ def build_draft(
         raise CalendarUnavailable(f"폐장({session_close})이 개장({session_open})보다 이르다")
 
     # 종목별 관측 차이를 남긴다. 한 종목만 빠진 날은 그 종목의 거래정지 가능성이다.
-    per_symbol_missing = {
+    _per_symbol_missing = {
         sym: sorted(d.isoformat() for d in (union - days)) for sym, days in observed.items()
     }
 

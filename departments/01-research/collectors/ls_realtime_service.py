@@ -306,7 +306,7 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                 t.cancel()
                 try:
                     await t
-                except (asyncio.CancelledError, Exception):
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 - intentional fallback boundary
                     pass
             for t in run_tasks:
                 if t in done:
@@ -318,7 +318,7 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             if stop.is_set():
                 return
             # max_seconds 만료로 정상 반환 - 창도 끝났는지 위에서 재확인한다
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             print(f"  ⚠ 수집 오류: {type(e).__name__}: {e} - "
                   f"{SESSION_RETRY_BACKOFF:.0f}초 후 재시작", flush=True)
             try:
@@ -330,7 +330,7 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             for i, s in enumerate(sinks):
                 try:
                     s.close()  # 꼬리 Flush - 정상 경로에선 이미 비어 있다
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                     # _pending 은 property 다. 예전에 `s._pending()` 로 불러
                     # TypeError 가 났고, 그게 **finally 안에서** 터지는 바람에
                     # 나머지 소켓의 close() 와 repo 정리가 통째로 건너뛰어졌다.
@@ -339,12 +339,12 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                     try:
                         print(f"  ⚠ 소켓{i} 종료 Flush 실패 - {s._pending}건 유실: {e}",
                               flush=True)
-                    except Exception:  # noqa: BLE001 - 로깅 실패가 정리를 막지 않는다
+                    except Exception:  # noqa: BLE001, S110 - 로깅 실패가 정리를 막지 않는다
                         pass
             for r in repos:
                 try:
                     r.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
                     pass
 
 
@@ -371,7 +371,7 @@ async def main_async() -> int:
             _, _, _, session = _fetch_reference(symbols[:1])
         except LsRealtimeError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             print(f"⚠ 세션 판정용 Reference 조회 실패: {e} - "
                   f"{SESSION_RETRY_BACKOFF:.0f}초 후 재시도", flush=True)
             try:

@@ -81,7 +81,7 @@ def count_readout(readout) -> tuple[int, int]:
         if k in _NOT_MATERIAL or k.endswith("_rules"):
             continue
         if k in _CONTAINER_KEYS and isinstance(v, dict):
-            for ik, iv in v.items():
+            for iv in v.values():
                 keys += 1
                 # fields 는 {이름: {value:..}} 모양이라 value 를 들여다본다
                 inner = iv.get("value") if isinstance(iv, dict) and "value" in iv else iv
@@ -175,8 +175,8 @@ def measure_symbol(symbol: str) -> list[dict]:
 def render(rows: list[dict]) -> str:
     """사람이 읽는 표. 약한 지점이 눈에 띄게 정렬하지 않고 순서를 고정한다
     (실행 순서가 곧 파이프라인 순서라 그대로가 정보다)."""
-    out = [f"{'분석가':<16}{'판정':<16}{'초':>6}{'재료':>6}{'미확인':>7}"
-           f"{'인용':>6}{'밀도':>7}{'서술자':>7}{'환각':>6}{'수치':>6}{'라벨':>6}",
+    out = [(f"{'분석가':<16}{'판정':<16}{'초':>6}{'재료':>6}{'미확인':>7}"
+           f"{'인용':>6}{'밀도':>7}{'서술자':>7}{'환각':>6}{'수치':>6}{'라벨':>6}"),
            "-" * 90]
     for r in rows:
         if not r.get("ok"):
@@ -190,7 +190,7 @@ def render(rows: list[dict]) -> str:
     ok = [r for r in rows if r.get("ok")]
     if ok:
         out += ["-" * 90,
-                f"{'합계/평균':<16}{'':<16}{sum(r['latency_s'] for r in ok):>6.1f}"
+                (f"{'합계/평균':<16}{'':<16}{sum(r['latency_s'] for r in ok):>6.1f}"
                 f"{sum(r['readout_keys'] for r in ok):>6}"
                 f"{sum(r['readout_null'] for r in ok):>7}"
                 f"{sum(r['used_metrics'] for r in ok):>6}"
@@ -198,7 +198,7 @@ def render(rows: list[dict]) -> str:
                 f"{sum(r['summary_chars'] for r in ok):>7}"
                 f"{sum(r['hallucinated'] for r in ok):>6}"
                 f"{sum(r['flagged_numbers'] for r in ok):>6}"
-                f"{sum(r['label_flags'] for r in ok):>6}"]
+                f"{sum(r['label_flags'] for r in ok):>6}")]
     return "\n".join(out)
 
 

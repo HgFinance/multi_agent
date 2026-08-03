@@ -397,7 +397,8 @@ def _check_record_contract():
     # Timezone 없는 시각은 PIT 에서 위험하다
     try:
         NewsRecord(external_id="t:3", title="x", canonical_url=None,
-                   published_at=datetime(2026, 7, 30, 10, 0), observed_at=_dt(10, 1),
+                   published_at=datetime(2026, 7, 30, 10, 0),  # noqa: DTZ001 - intentionally invalid input
+                   observed_at=_dt(10, 1),
                    language="ko", provider="t")
         raise AssertionError("naive published_at 이 통과했다")
     except NewsStreamError as e:

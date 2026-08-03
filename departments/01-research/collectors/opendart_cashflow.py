@@ -224,7 +224,7 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
                 row["thstrm_dt"] = pe
                 try:
                     f = to_fact(row, observed_at=observed)
-                except Exception:  # noqa: BLE001 - 행 하나가 회사를 버리지 않는다
+                except Exception:  # noqa: BLE001, S112 - 행 하나가 회사를 버리지 않는다
                     continue
                 # 금액이 빈칸인 줄은 넣지 않는다 (2026-08-02 DQ Gate 적발).
                 # DART 는 그 해에 없었던 거래도 항목만 빈 금액으로 준다

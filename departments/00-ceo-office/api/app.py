@@ -515,9 +515,9 @@ if __name__ == "__main__":
     client = TestClient(app)
 
     def _policy(**over) -> dict:
-        risk = dict(base_capital="100000000", currency="KRW", max_instrument_weight="0.1",
-                    max_sector_weight="0.3", max_gross_exposure="1.0", max_concurrent_positions=10,
-                    max_daily_loss="0.03")
+        risk = {"base_capital": "100000000", "currency": "KRW", "max_instrument_weight": "0.1",
+                    "max_sector_weight": "0.3", "max_gross_exposure": "1.0", "max_concurrent_positions": 10,
+                    "max_daily_loss": "0.03"}
         risk.update(over.pop("risk", {}))
         return {
             "allowed_assets": over.pop("allowed_assets", ["A005930"]), "forbidden_assets": [],

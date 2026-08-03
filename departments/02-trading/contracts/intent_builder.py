@@ -196,11 +196,11 @@ if __name__ == "__main__":
     D = Decimal
 
     def signal(**over) -> StrategySignal:
-        kw = dict(
-            strategy_id=uuid4(), strategy_version="v1", fund_id=uuid4(), book_id=uuid4(),
-            instrument_id=uuid4(), philosophy="momentum", target_weight=D("0.02"),
-            stage="paper", as_of=now, valid_until=now + timedelta(hours=1), trace_id="t1",
-        )
+        kw = {
+            "strategy_id": uuid4(), "strategy_version": "v1", "fund_id": uuid4(), "book_id": uuid4(),
+            "instrument_id": uuid4(), "philosophy": "momentum", "target_weight": D("0.02"),
+            "stage": "paper", "as_of": now, "valid_until": now + timedelta(hours=1), "trace_id": "t1",
+        }
         kw.update(over)
         return StrategySignal(**kw)
 

@@ -31,7 +31,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypedDict
+from typing import ClassVar, TypedDict
 
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도 찾도록
@@ -62,7 +62,7 @@ try:
 
     for _k, _v in (_load_env() or {}).items():
         os.environ.setdefault(_k, _v)
-except Exception:  # noqa: BLE001 - .env 가 없어도 기본값으로 돈다
+except Exception:  # noqa: BLE001, S110 - .env 가 없어도 기본값으로 돈다
     pass
 
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -129,7 +129,7 @@ def assemble_evidence(state: ResearchState) -> dict:
         from rag_librarian import recent_excerpts_for_symbol
 
         ev["disclosure_excerpts"] = recent_excerpts_for_symbol(state["symbol"])
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         ev["disclosure_excerpts"] = {"status": "UNAVAILABLE",
                                      "reason": f"{type(e).__name__}: {e}"[:120]}
     return {"evidence": ev}
@@ -399,7 +399,7 @@ def _supervisor_persona() -> str:
       경유)에서도 쓰인다. 대신 이 호출이 4종 중 무엇을 요구하는지 여기서 좁힌다.
     """
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    persona = re.search(r'research-supervisor: "(.*?)"\n', cfg, re.S).group(1)
+    persona = re.search(r'research-supervisor: "(.*?)"\n', cfg, re.DOTALL).group(1)
     return persona + (
         "\n\nSCOPE OF THIS CALL: you are producing the Research Packet ONLY. "
         "Do NOT emit Research Assignment, Dossier Update or Data Quality Warning "
@@ -439,7 +439,7 @@ def korean_ratio(packet: dict) -> float:
     # 세면 한국어 문장도 비율이 깎이고, 무엇보다 숫자만 있는 서술이 영어로
     # 오판된다 - 가드가 오탐하면 재시도만 늘고 결국 무시된다.
     text = re.sub(r"\[[a-zA-Z]\d+\]", " ", text)
-    text = re.sub(r"^\s*[a-z_]+\s*:", " ", text, flags=re.M)
+    text = re.sub(r"^\s*[a-z_]+\s*:", " ", text, flags=re.MULTILINE)
     letters = _LETTER_RE.findall(text)
     if not letters:
         return 1.0
@@ -632,7 +632,7 @@ JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤�
                 for _k, _v in (candidate or {}).items():
                     if isinstance(_v, dict):
                         print(f"   └ {_k!r} 안쪽 키: {sorted(_v)[:10]}", flush=True)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
                 pass
             print(f"⚠ 총괄 스키마 이탈({attempt + 1}회) - 받은 최상위 키: "
                   f"{sorted(candidate)[:12]} / 원문 앞부분: {_last_raw[:220]}",
@@ -721,8 +721,7 @@ JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤�
     # 는 모델이 제안하는 미래 조건("성장률 10% 미달 시")이라 확정치에 없는 것이
     # 정상이다(실측 2026-08-01: 제안 임계값 오탐). 중첩 우회 방지로 해당 키들을
     # 통째로 직렬화한다.
-    from evidence.bundle import (verify_narrative_dates,
-                                 verify_narrative_numbers)
+    from evidence.bundle import verify_narrative_dates, verify_narrative_numbers
 
     narrative = json.dumps({k: packet.get(k) for k in
                             ("thesis", "facts", "interpretation")},
@@ -851,9 +850,13 @@ def challenge_packet(state: ResearchState) -> dict:
     다르다. 다만 **반박을 못 했다는 사실은 남긴다**.
     """
     from evidence.llm_client import extract_json
-    from skeptic import (CHALLENGE_SYSTEM, apply_challenge,
-                         build_challenge_prompt, detect_disagreements,
-                         verify_challenge)
+    from skeptic import (
+        CHALLENGE_SYSTEM,
+        apply_challenge,
+        build_challenge_prompt,
+        detect_disagreements,
+        verify_challenge,
+    )
 
     packet = state.get("packet") or {}
     analysts = {k: state.get(k) for k in
@@ -937,7 +940,7 @@ def _node_models() -> dict:
                       ("microstructure", "microstructure_analyst")):
         try:
             models[node] = getattr(__import__(mod), "MODEL", None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional fallback boundary
             models[node] = None
     return models
 
@@ -1069,7 +1072,7 @@ def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
         if own:
             conn.close()
         return len(claims)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         print(f"⚠ packet_claims 기록 실패(Packet 은 정상): {type(e).__name__}: {e}",
               file=sys.stderr)
         return 0
@@ -1138,7 +1141,7 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         if own:
             conn.close()
         return run_id
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         print(f"⚠ pipeline_runs 기록 실패(Packet 은 정상): {type(e).__name__}: {e}",
               file=sys.stderr)
         return None
@@ -1187,7 +1190,7 @@ def collect_occurrences(out: dict, *, run_id: str, symbol: str,
 
 
 def append_occurrences(events: list[dict], *,
-                       path: Optional[Path] = None) -> int:
+                path: Path | None = None) -> int:
     """사건을 누적한다. **실패해도 파이프라인을 죽이지 않는다** - 학습 기록이
     없다고 오늘 리포트를 못 내는 것은 우선순위가 뒤집힌 것이다."""
     if not events:
@@ -1293,20 +1296,20 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
         "|---|---|",
         f"| **symbol** | `{packet.get('symbol')}` |",
         f"| **evidence_quality** | **{packet.get('evidence_quality')}** |",
-        f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
-        f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |",
+        (f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
+        f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |"),
         # ▶ 인용 품질 - **통과가 검증인지 우연인지**를 드러낸다 (2026-08-03)
         #   지표 확장(10 -> 31)으로 확정치 풀이 넓어지면 창작 수치가 우연히 맞는
         #   일이 생긴다. "불일치 0" 만 보면 좋아 보이지만, 그중 몇이 여러 지표에
         #   동시에 걸린 모호한 인용인지가 진짜 품질이다.
-        f"| **인용 품질** | 확정치 풀 {nc.get('pool_size', 0)}개 · 인용 "
+        (f"| **인용 품질** | 확정치 풀 {nc.get('pool_size', 0)}개 · 인용 "
         f"{qq.get('quoted', 0)}건 중 {qq.get('matched', 0)}건 매칭"
-        f"{', 모호 ' + str(qq.get('ambiguous', 0)) + '건(' + str(round(qq.get('ambiguity_ratio', 0) * 100)) + '%)' if qq.get('ambiguous') else ''} |",
+        f"{', 모호 ' + str(qq.get('ambiguous', 0)) + '건(' + str(round(qq.get('ambiguity_ratio', 0) * 100)) + '%)' if qq.get('ambiguous') else ''} |"),
         # 시점 재대조를 리포트에 싣는다 - **표시 없는 가드는 없는 가드다**
         # (2026-08-03: 가드가 돌고도 리포트·DB 어디에도 안 남아 못 봤다)
-        f"| **시점 재대조** | {'통과' if dc.get('ok', True) else '⚠ Evidence 창 밖 연도 ' + str(dc.get('too_old_years', []) + dc.get('future_years', []))}"
-        f" (창 {dc.get('window', '-')}) |",
-        f"| **분석가 판정** | " + " · ".join(
+        (f"| **시점 재대조** | {'통과' if dc.get('ok', True) else '⚠ Evidence 창 밖 연도 ' + str(dc.get('too_old_years', []) + dc.get('future_years', []))}"
+        f" (창 {dc.get('window', '-')}) |"),
+        "| **분석가 판정** | " + " · ".join(
             f"{k}={v}" for k, v in verdicts.items() if v) + " |",
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
         "",
@@ -1327,8 +1330,8 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
         lines += ["## 격리된 문장 (창작 의심 — facts 에서 제외)", ""]
         lines += [f"- ~~{q.get('text', '')}~~ — {q.get('reason', '')}" for q in qz]
         if packet.get("_quarantine_emptied_facts"):
-            lines += ["", "> ⚠ 근거 있는 사실이 0건이라 evidence_quality 를 "
-                          "insufficient_evidence 로 적었다"]
+            lines += ["", ("> ⚠ 근거 있는 사실이 0건이라 evidence_quality 를 "
+                          "insufficient_evidence 로 적었다")]
         lines += [""]
 
     # ▶ 반박 (Skeptic). **내용이 핵심이다** - 갈등 건수만 세는 것은 대화가 아니다.
@@ -1338,9 +1341,9 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
     cv = packet.get("_challenge_verification") or {}
     lines += ["## 반박 (Skeptic — 분석가 간 대화)", ""]
     if dg:
-        lines += [f"- 코드가 찾은 갈등 **{dg.get('count', 0)}건** "
+        lines += [(f"- 코드가 찾은 갈등 **{dg.get('count', 0)}건** "
                   f"(정반대 {dg.get('opposite', 0)} / 신호↔맥락 "
-                  f"{dg.get('signal_vs_context', 0)})"]
+                  f"{dg.get('signal_vs_context', 0)})")]
         lines += [f"  - {x}" for x in (dg.get("lines") or [])]
     if dissent:
         lines += ["", "**대안 설명과 반대 근거**", ""]
@@ -1352,9 +1355,9 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
     elif cv.get("ok") is None and cv.get("reason"):
         lines += ["", f"> ⚠ {cv['reason']}"]
     if packet.get("_downgraded_by_challenge"):
-        lines += ["", f"> 치명적 반증으로 evidence_quality 강등: "
+        lines += ["", (f"> 치명적 반증으로 evidence_quality 강등: "
                       f"{packet['_downgraded_by_challenge']} → "
-                      f"{packet.get('evidence_quality')}"]
+                      f"{packet.get('evidence_quality')}")]
     lines += [""]
 
     # 분석가 원문 소견 - 총괄이 압축하며 버린 맥락이 여기 남는다. 상충하는
@@ -1403,17 +1406,17 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
             # 확률은 코드가 낸 사전 확률(evidence/forecast). 없으면 '-' -
             # 라벨 주장은 변동성 모형의 대상이 아니라 확률을 내지 않는다.
             pr = c.get("probability")
-            lines += [f"| {c['kind']} | {cond} | {c['horizon_days']}거래일 | "
+            lines += [(f"| {c['kind']} | {cond} | {c['horizon_days']}거래일 | "
                       f"{f'{pr:.0%}' if pr is not None else '-'} | "
-                      f"{c.get('source_node') or '-'} |"]
+                      f"{c.get('source_node') or '-'} |")]
         notes_f = [c for c in claims if c.get("falsification_note")]
         if notes_f:
             lines += ["", "**반증 조건** (발행 시점 고정 - 사후 해석 방지)", ""]
             lines += [f"- {c['falsification_note']}" for c in notes_f]
         lines += ["",
-                  f"기록 {packet.get('_claims_recorded', 0)}건 — 채점은 "
+                  (f"기록 {packet.get('_claims_recorded', 0)}건 — 채점은 "
                   f"`collectors/packet_outcome_scorer.py`, 누적 성과는 "
-                  f"`research.analyst_calibration`.", ""]
+                  f"`research.analyst_calibration`."), ""]
     return "\n".join(lines)
 
 
@@ -1429,8 +1432,9 @@ def _check_halt_short_circuit():
     import universe_manager as um
 
     class _D:
-        excluded = {"999999": "HALTED"}
-        def __init__(self): from datetime import datetime; self.as_of = datetime.now(timezone.utc)
+        excluded: ClassVar[dict[str, str]] = {"999999": "HALTED"}
+        def __init__(self):
+            self.as_of = datetime.now(timezone.utc)
     orig = um.run
     um.run = lambda basket=(): _D()
     try:

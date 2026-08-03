@@ -56,6 +56,7 @@ from contracts.market_events import (
 from ls_realtime_adapter import normalize
 from source_registry import SourceRegistry, load_project_env
 from subscription_plan import WEBSOCKET_PATH
+from typing_extensions import Self
 
 WORKER_VERSION = "research-ls-realtime-worker-v1"
 SOURCE_ID = "ls_openapi_ws"
@@ -173,9 +174,12 @@ class MarketSink:
 
     def tick(self) -> None:
         """이벤트가 안 와도 시간이 지나면 Flush 한다."""
-        if self._pending and self._started is not None:
-            if (self._now() - self._started) >= self._max_delay:
-                self.flush()
+        if (
+            self._pending
+            and self._started is not None
+            and (self._now() - self._started) >= self._max_delay
+        ):
+            self.flush()
 
     @property
     def _pending(self) -> int:
@@ -207,7 +211,7 @@ class MarketSink:
         finally:
             self._closed = True
 
-    def __enter__(self) -> MarketSink:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -326,7 +330,7 @@ class LsRealtimeWorker:
                 return self.stats
             except (LsRealtimeError, KeyboardInterrupt):
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 attempt += 1
                 self.stats.reconnects += 1
                 key = f"{type(e).__name__}: {str(e)[:70]}" if str(e) else type(e).__name__
@@ -428,7 +432,7 @@ class LsRealtimeWorker:
         if self._on_event is not None:
             try:
                 self._on_event(event)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 key = f"{type(e).__name__}: {str(e)[:60]}"
                 self.stats.observer_errors[key] = (
                     self.stats.observer_errors.get(key, 0) + 1

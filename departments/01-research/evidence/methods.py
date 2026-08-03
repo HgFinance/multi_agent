@@ -370,8 +370,8 @@ def _check_keys_unique():
 def _check_invariants_enforced():
     import dataclasses
 
-    base = dict(key="x", name="n", analyst="RES-05", citation="c",
-                status=STATUS_ADOPTED, module="m.py:f")
+    base = {"key": "x", "name": "n", "analyst": "RES-05", "citation": "c",
+                "status": STATUS_ADOPTED, "module": "m.py:f"}
     Method(**base)                                    # 정상
     for bad, why in (
         (dict(base, citation="  "), "인용 없는 등재"),

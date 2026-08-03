@@ -120,7 +120,7 @@ def roll_spread(closes, *, window: int = WINDOW,
 
 
 def corwin_schultz(highs, lows, *, window: int = WINDOW,
-                   min_days: int = 3) -> Optional[dict]:
+                   min_days: int = 3) -> dict | None:
     """Corwin-Schultz (2012) 고가-저가 기반 유효 스프레드 추정.
 
     ▶ 왜 Roll 만으로 부족한가
@@ -164,7 +164,7 @@ def corwin_schultz(highs, lows, *, window: int = WINDOW,
 
 
 def kyle_lambda(closes, volumes, *, window: int = WINDOW,
-                min_days: int = 5) -> Optional[dict]:
+                min_days: int = 5) -> dict | None:
     """Kyle 람다 대용 - 거래량 1단위당 가격 충격.
 
     원 모형은 **부호 있는** 주문흐름이 필요한데 우리는 일봉만 있으므로

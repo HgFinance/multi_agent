@@ -489,7 +489,7 @@ def analyze(*, market_api: str | None = None,
     for mkt in BREADTH_MARKETS:
         try:
             breadth_rows.extend(get(f"{base}/breadth?market={mkt}&limit=1"))
-        except Exception:  # noqa: BLE001 - 보조 재료 - 실패는 미확인으로 드러난다
+        except Exception:  # noqa: BLE001, S110 - 보조 재료 - 실패는 미확인으로 드러난다
             pass
 
     # 스타일 overlay 는 research-api(매크로 관측) 쪽이다 - market-api 가 아니다
@@ -499,7 +499,7 @@ def analyze(*, market_api: str | None = None,
             f"{rbase}/macro/observations"
             f"?codes={urllib.parse.quote(','.join(OVERLAY_CODES))}"
             f"&days={OVERLAY_DAYS}") or None
-    except Exception:  # noqa: BLE001 - 보조 재료 - 실패는 미확인으로 드러난다
+    except Exception:  # noqa: BLE001, S110 - 보조 재료 - 실패는 미확인으로 드러난다
         pass
 
     readout = compute_regime_readout(regime_rows, breadth_rows or None, macro_rows)
@@ -528,7 +528,7 @@ def analyze(*, market_api: str | None = None,
 
 def _rows(specs: list[tuple]) -> list[dict]:
     """specs: (advancers, decliners, unchanged, above_sma20, sma20_coverage)."""
-    base = datetime(2026, 1, 1)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     out = []
     for i, (adv, dec, unch, above, cov) in enumerate(specs):
         out.append({

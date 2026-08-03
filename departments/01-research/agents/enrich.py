@@ -106,7 +106,7 @@ def enrich(node: str, result: dict, *, symbol: str, run_mode: str = "LIVE",
             box.call(label, **kw)
         except BudgetExceeded:
             break          # 예산은 한계이지 오류가 아니다
-        except Exception:  # noqa: BLE001 - 권한·PIT 위반은 trace 에 남는다
+        except Exception:  # noqa: BLE001, S112 - 권한·PIT 위반은 trace 에 남는다
             continue
 
     out = dict(result)

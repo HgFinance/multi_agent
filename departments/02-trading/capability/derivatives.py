@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -239,7 +239,7 @@ def check_order_capability(
             )
 
     if contract is not None:
-        as_of = as_of or date.today()
+        as_of = as_of or datetime.now(timezone.utc).date()
         if contract.is_expired_at(as_of):
             reasons.append(f"만기({contract.expiry_date})가 지난 계약입니다")
         elif contract.days_to_expiry(as_of) == 0 and not allow_expiry_day:
@@ -378,14 +378,14 @@ if __name__ == "__main__":
         )
 
     def profile(**kw) -> CapabilityProfile:
-        base = dict(
-            capability_profile_id=uuid4(), profile_code="cash-long-only", version=1,
-            status=ProfileStatus.ACTIVE,
-            required_instruments=frozenset({"EQUITY"}),
-            execution_capabilities=frozenset({"market", "limit"}),
-            risk_capabilities=frozenset({"position_limit"}),
-            accounting_capabilities=frozenset({"double_entry"}),
-        )
+        base = {
+            "capability_profile_id": uuid4(), "profile_code": "cash-long-only", "version": 1,
+            "status": ProfileStatus.ACTIVE,
+            "required_instruments": frozenset({"EQUITY"}),
+            "execution_capabilities": frozenset({"market", "limit"}),
+            "risk_capabilities": frozenset({"position_limit"}),
+            "accounting_capabilities": frozenset({"double_entry"}),
+        }
         return CapabilityProfile(**{**base, **kw})
 
     # 1. 계약 검증 — 말이 안 되는 파생 계약은 만들어지지 않는다

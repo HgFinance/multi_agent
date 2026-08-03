@@ -121,7 +121,7 @@ def _query(sql: str, params: tuple):
     except Exception:
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
             pass
         raise
 
@@ -343,14 +343,14 @@ def _check_bar_params():
 
     try:
         bars.__wrapped__ if hasattr(bars, "__wrapped__") else None
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
         pass
     # naive to 거부 (PIT 9시간 오차 방지 - research-api 와 같은 규칙)
     global _sym2iid
     _sym2iid = {"005930": "00000000-0000-0000-0000-000000000000"}
     try:
         bars("005930", interval="1D", limit=10, source=None,
-             to=datetime(2026, 7, 31, 9, 0))
+            to=datetime(2026, 7, 31, 9, 0))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive to 가 통과했다")
     except HE:
         pass

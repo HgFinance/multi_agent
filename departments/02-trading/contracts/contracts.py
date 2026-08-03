@@ -462,30 +462,30 @@ if __name__ == "__main__":
     )
 
     def intent(**over) -> OrderIntent:
-        kw = dict(
-            trade_case_id=ids["case"],
-            fund_id=ids["fund"],
-            book_id=ids["book"],
-            strategy_id=ids["strategy"],
-            instrument_id=ids["instrument"],
-            side=Side.BUY,
-            order_type=OrderType.LIMIT,
-            quantity=Decimal(100),
-            limit_price=Decimal(70000),
-            valid_until=now + timedelta(hours=1),
-            snapshot=snap,
-            idempotency_key="idem_0001",
-            created_by="trader-pm-agent",
-            trace_id="trace_01",
-            created_at=now,
-        )
+        kw = {
+            "trade_case_id": ids["case"],
+            "fund_id": ids["fund"],
+            "book_id": ids["book"],
+            "strategy_id": ids["strategy"],
+            "instrument_id": ids["instrument"],
+            "side": Side.BUY,
+            "order_type": OrderType.LIMIT,
+            "quantity": Decimal(100),
+            "limit_price": Decimal(70000),
+            "valid_until": now + timedelta(hours=1),
+            "snapshot": snap,
+            "idempotency_key": "idem_0001",
+            "created_by": "trader-pm-agent",
+            "trace_id": "trace_01",
+            "created_at": now,
+        }
         kw.update(over)
         return OrderIntent(**kw)
 
     def rejects(fn, why: str):
         try:
             fn()
-        except (ValueError, Exception) as e:  # pydantic ValidationError 포함
+        except (ValueError, Exception) as e:  # pydantic ValidationError 포함  # noqa: BLE001 - intentional fallback boundary
             assert e is not None
             return
         raise AssertionError(f"통과하면 안 되는 입력: {why}")
