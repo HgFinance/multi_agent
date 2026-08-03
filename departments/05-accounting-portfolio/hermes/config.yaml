@@ -13,6 +13,8 @@
 #
 # ⚠ 선행 조건: 호스트에서 프록시 기동 + .env 의 CLAUDE_CODE_OAUTH_TOKEN.
 # 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
+# Current Head runtime (2026-08-03): openai-codex/gpt-5.6-luna.
+# The legacy Sonnet/Nous pricing notes above are historical fallback context only.
 model:
  provider: openai-codex
  default: gpt-5.6-luna

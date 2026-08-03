@@ -761,7 +761,7 @@ qa.finding.v1
 workforce.eval.v1
 ```
 
-DB Credential은 Collector, Domain Service와 Migration Job에만 발급한다. Hermes와 Specialist Agent에는 API Scope를 가진 짧은 수명의 Service Token만 제공하고, PostgreSQL/Supabase RLS와 API Authorization을 함께 적용한다.
+DB Credential은 Collector, Domain Service와 Migration Job에만 발급한다. Hermes Head와 독립 LangGraph Worker에는 API Scope를 가진 짧은 수명의 Service Token만 제공하고, PostgreSQL/Supabase RLS와 API Authorization을 함께 적용한다.
 
 ### 6.12 단계별 Library 도입 Matrix
 

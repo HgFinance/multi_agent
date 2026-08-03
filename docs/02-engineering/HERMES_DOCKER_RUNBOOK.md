@@ -60,6 +60,21 @@ Research Tool 강제는 확인됐지만 전사 권한 분리가 완료됐다고 
 
 ---
 
+### Current runtime authentication (2026-08-03)
+
+현재 Head는 `openai-codex/gpt-5.6-luna`이며 인증 확인은 Profile별 `hermes auth status openai-codex`를 사용한다. `hermes portal login`, Nous Portal, `poolside/laguna-s-2.1:free`는 아래 Historical Docker smoke 절차에만 해당한다. 저장소 Profile은 `./scripts/sync_hermes_profiles.sh push`로 `config.yaml`과 `SOUL.md`만 동기화하고, `auth.json`, `sessions`, `memories`, `logs`는 로컬 Runtime에 둔다.
+
+```bash
+source ~/claude/bin/activate
+./scripts/sync_hermes_profiles.sh push
+hermes --profile risk-management auth status openai-codex
+hermes --profile qa-department auth status openai-codex
+```
+
+### Historical Docker/Nous procedure
+
+아래 Docker Image·Portal OAuth·Laguna 명령은 분리 저장소를 검증하던 Historical snapshot이다. 현재 모델·인증 상태로 해석하거나 운영 완료의 증거로 사용하지 않는다.
+
 ## 2. 처음 붙일 때 (팀원 각자 1회)
 
 ```bash

@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECK_VERSION = "hermes-profile-contract-check-v1"
+CHECK_VERSION = "hermes-profile-contract-check-v2"
 
 # CLAUDE.md "env: 가 부서마다 다르다" - 아무 키나 넣지 않는다
 ANTHROPIC = {"ceo-agent", "research-department", "qa-department",
@@ -41,7 +41,8 @@ OPENAI = {"trading-department", "risk-management",
 # 같은 통제 경계와 층이 다르므로 부서마다 달라도 된다. 다만 "달라도 된다"가
 # "아무거나 돼도 된다"는 아니므로, 소유자가 선언한 값과 다르면 이 검사가 잡는다
 # (전역 동일성 강제를 여기서 이 표로 바꿨다 - 우연한 표류는 여전히 걸린다).
-EXPECTED_MODELS = {
+# Historical snapshot (2026-08-02): retained only to explain prior checker output.
+LEGACY_EXPECTED_MODELS = {
     "research-department": "nous/poolside/laguna-s-2.1:free",     # 재일
     "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
     "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
@@ -52,6 +53,19 @@ EXPECTED_MODELS = {
     "accounting-portfolio-department": "anthropic/sonnet",
     "risk-management": "nous/poolside/laguna-s-2.1:free",        # 동규
     "qa-department": "nous/poolside/laguna-s-2.1:free",
+}
+
+# Current runtime contract: every Hermes Head defaults to Codex/Luna.
+# The legacy table above is retained only as historical audit context.
+EXPECTED_MODELS = {
+    "ceo-agent": "openai-codex/gpt-5.6-luna",
+    "research-department": "openai-codex/gpt-5.6-luna",
+    "trading-department": "openai-codex/gpt-5.6-luna",
+    "risk-management": "openai-codex/gpt-5.6-luna",
+    "quant-backtest-department": "openai-codex/gpt-5.6-luna",
+    "accounting-portfolio-department": "openai-codex/gpt-5.6-luna",
+    "qa-department": "openai-codex/gpt-5.6-luna",
+    "hr-department": "openai-codex/gpt-5.6-luna",
 }
 
 DEPARTMENTS = {

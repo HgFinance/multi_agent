@@ -1,28 +1,36 @@
 # HgFinance AI Office
 
-`AI Office`는 CEO Office, 6개 투자 본부와 인사팀을 한눈에 보는 개인형
-헤지펀드 운영 Frontend다. 현재는 **8개 조직·2개 층의 DEMO Prototype**이며 실제 Agent·시장·주문
-상태의 Source of Truth가 아니다.
+`ai-office`는 HgFinance의 부서·직원 흐름을 보여주는 읽기 전용 DEMO Projection이다. 실제 Hermes 세션, LangGraph 실행, 시장 데이터, 주문, Risk Limit, 원장 상태의 Source of Truth가 아니다.
 
-전체 제품·권한·실시간 계약은
-[AI Office Frontend Plan](../docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
+## 현재 조직 기준
+
+실제 조직은 CEO와 7개 Hermes 부서다.
+
+| 조직 | Hermes Head | 독립 LangGraph Worker | Worker 모델 |
+|---|---|---:|---|
+| CEO | `ceo-agent` · `openai-codex/gpt-5.6-luna` | 1 | `qwen3:8b` |
+| HR | `hr-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:8b` |
+| Research | `research-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:8b` |
+| Trading | `trading-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:8b` |
+| Risk | `risk-management` · `openai-codex/gpt-5.6-luna` | 4 | `qwen3:8b` |
+| Quant/Backtest | `quant-backtest-department` · `openai-codex/gpt-5.6-luna` | 7 | `qwen3:8b` |
+| Accounting/Portfolio | `accounting-portfolio-department` · `openai-codex/gpt-5.6-luna` | 8 | `qwen3:8b` |
+| AI QA/Audit | `qa-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:8b` |
+
+부서 흐름은 `Hermes Head → Worker별 독립 LangGraph → Worker Context → Hermes 종합`이다. Worker Context는 non-binding이며, Risk Gate와 Evidence QA Gate는 결정론적 코드가 소유한다.
+
+화면 엔진의 고정 ID 호환성을 위해 `company.config.ts`에는 위 조직 외에 `secretary` 공간이 남아 있다. 이는 `CEO Office shared-support projection`일 뿐 별도의 Hermes 부서나 추가 인원으로 집계하지 않는다.
 
 ## 현재 구현
 
-- Next.js, React, TypeScript 기반 Pixel Office.
-- CEO Office, 리서치, 트레이딩, 리스크, 퀀트/백테스트, 회계/포트폴리오, AI QA/감사와
-  인사팀 등 8개 조직.
-- 1층·2층 전환, 조직별 직원과 Bull/Bear 토론 DEMO.
-- Trading/Portfolio Snapshot Panel과 `DEMO` Mode 표시.
-- Risk·QA Profile, Retry, Fail-closed와 Run Journal 계약을 보여주는 Read-only Panel.
-- `../apps/api/main.py`의 `GET /ui/snapshot` Read-only DEMO BFF.
-
-직원 이동과 업무 흐름은 아직 `app/game/sim.ts`의 Scripted Simulation이다. Trading/Portfolio
-Snapshot도 Supabase 운영 데이터가 아니라 테스트 Paper Loop로 만든 DEMO Projection이다.
+- CEO·7개 부서·CEO 지원 공간을 2층 Pixel Office로 표시한다.
+- `RiskQaPanel`은 Risk 4명, QA 5명의 Worker Registry와 Head 모델을 별도로 표시한다.
+- Head는 Hermes + Codex/Luna, Worker는 독립 LangGraph + Ollama `qwen3:8b`로 표시한다.
+- `Simulation working`은 `app/game/sim.ts`의 데모 상태일 뿐 외부 런타임 성공 증거가 아니다.
+- Risk/QA의 주문 제출·원장 기록·Risk Limit 변경 권한은 화면과 연결하지 않는다.
+- `DEMO`, `PAPER`, `LIVE` 상태를 혼동하지 않으며, 현재 화면은 DEMO Projection이다.
 
 ## 실행
-
-Node.js 22 이상을 사용한다.
 
 ```bash
 cd ai-office
@@ -32,88 +40,18 @@ npm run dev
 
 기본 주소는 `http://localhost:3000`이다.
 
-DEMO BFF는 저장소 루트에서 별도로 실행한다.
-
-```bash
-uvicorn apps.api.main:app --reload --port 8000
-```
-
-부서 Agent 질의는 부서마다 경로가 다르다 — `POST /accounting/agent/ask`, `POST /trading/agent/ask`.
-Body는 `{"query": "..."}`뿐이고 부서 이름을 보내지 않는다. 화면이 부서를 지정할 수 없어야
-한 본부 패널에서 다른 본부 Agent를 부르는 경로 자체가 생기지 않는다(마스터플랜 5.6).
-
-이 경로들은 Hermes가 Tool을 실행할 수 있으므로 기본 비활성화 상태다. 로컬 개발에서도
-Profile Tool Allowlist와 질의 영향을 확인한 경우에만 `ENABLE_AGENT_ASK=true`로 명시적으로 연다.
-Production에서는 Supabase Auth, 사용자별 권한과 Audit가 연결되기 전까지 활성화하지 않는다.
-
-## 목표 연결 구조
-
-```text
-Hermes Kanban + Runtime Heartbeat
-  -> Kanban Status Bridge
-  -> Redis Streams: agent.status.v1
-  -> Supabase Agent Status Read Model
-  -> FastAPI GET /ui/snapshot + WS /ws/operations
-  -> AI Office Projection
-
-LS Market Worker / Risk / OMS / Ledger / QA
-  -> Domain Event + Read Model
-  -> 같은 BFF와 WebSocket
-```
-
-Agent 업무 상태는 Hermes Kanban을 재사용한다. 상태 매핑과 소유권은
-[ADR-0001](../docs/02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
-Browser는 Kanban SQLite, Supabase 거래 Table, OMS나 Ledger를 직접 읽거나 수정하지 않는다.
-
-## 소유권
-
-| 영역 | Owner |
-|---|---|
-| Live Office 제품·업무 의미 | 영주님 |
-| 공통 Frontend Platform 기술 DRI | 도현님 |
-| Risk·QA 상태 계약 Review | 동규님 |
-| Market·Research·Strategy 계약 | 재일님 |
-| Trading·Portfolio·Close 계약 | 도현님 |
-
-각 본부는 자기 Read Model과 Event 의미를 소유한다. Frontend 구현자가 금융 상태의 의미를 새로
-계산하거나 추정하지 않는다.
-
 ## 검증
 
 ```bash
 cd ai-office
-npx tsc --noEmit
-npm run build
-node --test tests/rendered-html.test.mjs
-
-cd ..
-python apps/api/main.py
+npm test
 ```
 
-2026-08-03 clean Node 22 Container에서 Build와 Server Render Test `2/2`를 통과했다. `npm audit`은
-High 13, Moderate 4, Low 1건을 보고했으므로 직접·전이 의존성과 Upgrade 회귀를 배포 전 검토한다.
-현재 Cloudflare/Vinext 관련 기존 TypeScript 환경 오류와 실제 신규 오류를 구분해 기록한다.
-`DEMO`, `PAPER`, `LIVE` 데이터는 같은 화면에서 섞지 않는다.
+검증은 TypeScript build와 server-render assertion을 포함한다. 실제 외부 API·DB·Hermes 인증 검증은 별도의 부서 런북과 실행 로그로 확인한다.
 
-## 다음 작업
+## 관련 문서
 
-1. Supabase Auth와 공식 `/ui/snapshot` Read Model 연결.
-2. `/ws/operations`, Heartbeat, Sequence Gap과 Snapshot Recovery.
-3. Kanban Status Bridge와 `agent.status.v1` Projector.
-4. Market, Research, Strategy, Risk, Trading, Portfolio, Audit와 Workforce Workbench.
-5. 위험 Command의 Preview, 사유, 멱등 키, Backend 재검증과 Audit.
-## Risk·QA 전용 연결
-
-대시보드의 `risk_qa.department_bridge`는 `departments/03-risk`와
-`departments/06-ai-qa-audit`만 allowlist로 연결합니다. 직원은 Hermes 프로필 코드
-RSK-00~06(6명), QAA-00~07(8명)에 매핑되며, 화면은 읽기/검증 Projection입니다.
-
-두 하네스의 재시도 상한은 2회(초기 실행 포함 총 3회)입니다. 마지막 실패는 Risk `REJECT + HALTED`, QA
-`ESCALATE + manual_review_required`로 종료되며, 주문 제출·원장 기록·Risk Limit
-변경 권한은 연결 계약에 포함하지 않습니다. 실제 런타임 상태는 각 부서 API와 하네스
-로그에서 확인해야 합니다.
-
-로그 흐름은 `InputSnapshot → AgentOutput → Validation → Decision`이며, Risk에 한해
-`Order → Fill`을 별도 이벤트로 기록합니다. AI Office의 로그 흐름 카드는 계약만
-표시하며, 원문·리플레이·리뷰 결과는 각 부서의 `RunJournal`과 운영 DB 원장에서
-조회합니다.
+- 조직·Worker Registry: [`../docs/04-organization/AGENT_EMPLOYEE_PROFILES.md`](../docs/04-organization/AGENT_EMPLOYEE_PROFILES.md)
+- Worker 경계: [`../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md`](../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)
+- 전체 파이프라인: [`../docs/HEDGE_FUND_MASTER_PLAN.md`](../docs/HEDGE_FUND_MASTER_PLAN.md)
+- Hermes Profile 런북: [`../docs/02-engineering/HERMES_DOCKER_RUNBOOK.md`](../docs/02-engineering/HERMES_DOCKER_RUNBOOK.md)

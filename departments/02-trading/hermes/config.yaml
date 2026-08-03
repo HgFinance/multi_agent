@@ -24,6 +24,8 @@
 #   - 호스트에서 python scripts/claude_code_proxy.py --serve
 #   - .env 의 CLAUDE_CODE_OAUTH_TOKEN (claude setup-token 으로 발급)
 # 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
+# Current Head runtime (2026-08-03): openai-codex/gpt-5.6-luna.
+# The Nous/Claude pricing notes above and Laguna fallback note below are historical options only.
 model:
  provider: openai-codex
  default: gpt-5.6-luna

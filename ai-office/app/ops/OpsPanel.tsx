@@ -149,7 +149,7 @@ export default function OpsPanel() {
             {/* mode(DEMO/PAPER/LIVE)와 출처는 다른 축이다. DEMO Fixture와 DEMO
                 BFF 응답이 같은 배지로 보이면 어느 쪽을 보는지 알 수 없다. */}
             <span className={`status-pill ${source === "bff" ? "done" : "waiting"}`}>
-              {source === "bff" ? "실시간 조회" : "번들 Fixture"}
+{source === "bff" ? "BFF Read Model" : "번들 Fixture"}
             </span>
             <span className="status-pill">v{snap.snapshot_version}</span>
           </div>
