@@ -280,19 +280,35 @@ def evidence_financials(
     as_of: Optional[datetime] = Query(None),
     limit: int = Query(100, gt=0, le=500),
 ):
-    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2)."""
+    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2).
+
+    ▶ as_of 시점의 **최신 개정본 하나**만 준다 (2026-08-02)
+      정정 재무제표가 원본을 덮지 않고 새 revision 으로 쌓이게 바뀌면서
+      (reference_repository.assign_revisions) 같은 (계정, 기간)에 행이 여럿이
+      된다. 그대로 다 내보내면 소비자가 어느 것이 유효한지 스스로 골라야 하고,
+      고르는 규칙이 소비자마다 갈리면 그게 다음 사고다.
+
+      **그 시점에 알 수 있었던 것 중 가장 나중 개정본**을 고른다:
+        observed_at <= as_of 로 먼저 자르고(PIT), 남은 것 중 revision 최대.
+      정정 이전 시각으로 조회하면 정정본은 observed_at 필터에서 이미 빠지므로
+      원본이 나온다 - 이것이 PIT 재현이다.
+
+      revision 을 응답에 실어 소비자가 '이게 몇 번째 개정본인지' 알 수 있게 한다.
+    """
     ts = _as_of_or_now(as_of)
     return _query(
         """
-        select f.account_code, f.value, f.unit, f.currency, f.period_end,
-               f.consolidation_scope, f.published_at, f.observed_at
+        select distinct on (f.account_code, f.period_end, f.consolidation_scope)
+               f.account_code, f.value, f.unit, f.currency, f.period_end,
+               f.consolidation_scope, f.published_at, f.observed_at, f.revision
         from research.financial_facts f
         join reference.issuers iss on iss.issuer_id = f.issuer_id
         join reference.instruments i on i.issuer_id = iss.issuer_id
         join reference.instrument_symbols isym
           on isym.instrument_id = i.instrument_id and isym.is_primary
         where isym.symbol = %s and f.observed_at <= %s
-        order by f.period_end desc, f.account_code
+        order by f.account_code, f.period_end desc, f.consolidation_scope,
+                 f.revision desc, f.observed_at desc
         limit %s
         """,
         (symbol, ts, limit),
