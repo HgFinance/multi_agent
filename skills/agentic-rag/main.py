@@ -40,7 +40,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Agentic RAG baseline (retrieve->grade->generate->hallucination-check->retry)")
     parser.add_argument("--persona", default="compliance-policy-agent", choices=sorted(PERSONA_CORPUS))
     parser.add_argument("--query", required=True, help="The compliance question, proposed order, or claim under review to check")
-    parser.add_argument("--as-of", default=dt.date.today().isoformat(), help="Point-in-Time date, YYYY-MM-DD")
+    parser.add_argument(
+        "--as-of",
+        default=dt.datetime.now(dt.timezone.utc).date().isoformat(),
+        help="Point-in-Time date, YYYY-MM-DD",
+    )
     args = parser.parse_args()
 
     corpus_dir = PERSONA_CORPUS[args.persona]

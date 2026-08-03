@@ -279,8 +279,8 @@ if __name__ == "__main__":
         return led, positions[stock]
 
     def effective(**kw) -> CorporateAction:
-        base = dict(action_id=f"ca_{uuid4()}", instrument_id=stock,
-                    record_date=past, effective_at=past, status=ActionStatus.EFFECTIVE)
+        base = {"action_id": f"ca_{uuid4()}", "instrument_id": stock,
+                    "record_date": past, "effective_at": past, "status": ActionStatus.EFFECTIVE}
         return CorporateAction(**{**base, **kw})
 
     # 1. 계약 검증 — 말이 안 되는 Action은 만들어지지 않는다

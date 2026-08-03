@@ -323,41 +323,41 @@ _T = datetime(2026, 8, 3, 1, 30, tzinfo=timezone.utc)
 
 
 def _case(**kw) -> ResearchCaseV2:
-    base = dict(
-        case_id="research_case_1", instrument_ids=("inst_005930",),
-        trigger=Trigger(type="disclosure"), mandate_version="mandate_1",
-        as_known_at=_T, horizons=("1d", "20d"),
-        required_perspectives=("fundamental", "technical"),
-        budgets=Budgets(wall_clock_seconds=300, max_llm_calls=10, max_retrieval_rounds=2),
-        priority=80)
+    base = {
+        "case_id": "research_case_1", "instrument_ids": ("inst_005930",),
+        "trigger": Trigger(type="disclosure"), "mandate_version": "mandate_1",
+        "as_known_at": _T, "horizons": ("1d", "20d"),
+        "required_perspectives": ("fundamental", "technical"),
+        "budgets": Budgets(wall_clock_seconds=300, max_llm_calls=10, max_retrieval_rounds=2),
+        "priority": 80}
     base.update(kw)
     return ResearchCaseV2(**base)
 
 
 def _finding(**kw) -> AnalystFindingV1:
-    base = dict(
-        finding_id="finding_1", case_id="research_case_1", perspective="fundamental",
-        as_known_at=_T, horizon="20d",
-        claims=(Claim(claim_id="claim_1", statement="영업이익률이 개선됐다",
+    base = {
+        "finding_id": "finding_1", "case_id": "research_case_1", "perspective": "fundamental",
+        "as_known_at": _T, "horizon": "20d",
+        "claims": (Claim(claim_id="claim_1", statement="영업이익률이 개선됐다",
                       claim_type=ClaimType.FACT, evidence_ids=("dart_1",),
                       confidence=0.72),),
-        status=FindingStatus.COMPLETE,
-        model_version="agent-research@1", prompt_version="res-fundamental@1")
+        "status": FindingStatus.COMPLETE,
+        "model_version": "agent-research@1", "prompt_version": "res-fundamental@1"}
     base.update(kw)
     return AnalystFindingV1(**base)
 
 
 def _packet(**kw) -> ResearchPacketV2:
-    base = dict(
-        packet_id="rp_1", case_id="research_case_1", instrument_id="inst_005930",
-        trigger="disclosure", as_known_at=_T, horizons=("20d",),
-        macro_outlook=Outlook(direction="neutral", confidence=0.58),
-        micro_outlook=Outlook(direction="positive", confidence=0.66,
+    base = {
+        "packet_id": "rp_1", "case_id": "research_case_1", "instrument_id": "inst_005930",
+        "trigger": "disclosure", "as_known_at": _T, "horizons": ("20d",),
+        "macro_outlook": Outlook(direction="neutral", confidence=0.58),
+        "micro_outlook": Outlook(direction="positive", confidence=0.66,
                               claim_ids=("claim_1",)),
-        thesis="단기 촉매는 있으나 중기 환경은 중립이다",
-        calibration=Calibration(cohort="disclosure_20d"),
-        status="PUBLISHED", lineage=Lineage(graph_version="research-rqf-v1"),
-        findings=(_finding(),))
+        "thesis": "단기 촉매는 있으나 중기 환경은 중립이다",
+        "calibration": Calibration(cohort="disclosure_20d"),
+        "status": "PUBLISHED", "lineage": Lineage(graph_version="research-rqf-v1"),
+        "findings": (_finding(),)}
     base.update(kw)
     return ResearchPacketV2(**base)
 
@@ -365,7 +365,7 @@ def _packet(**kw) -> ResearchPacketV2:
 def _rejects(fn, needle: str, label: str):
     try:
         fn()
-    except Exception as e:  # pydantic ValidationError 포함
+    except Exception as e:  # pydantic ValidationError 포함  # noqa: BLE001 - intentional fallback boundary
         assert needle in str(e), f"{label}: 다른 이유로 거부됐다\n{e}"
         return
     raise AssertionError(f"{label}: 통과하면 안 되는데 통과했다")
@@ -374,7 +374,7 @@ def _rejects(fn, needle: str, label: str):
 def _check_case():
     c = _case()
     assert c.as_known_at.tzinfo is not None
-    _rejects(lambda: _case(as_known_at=datetime(2026, 8, 3, 1, 30)),
+    _rejects(lambda: _case(as_known_at=datetime(2026, 8, 3, 1, 30)),  # noqa: DTZ001 - intentionally invalid input
              "timezone", "naive as_known_at")
     _rejects(lambda: _case(required_perspectives=("fundamental",),
                            optional_perspectives=("fundamental",)),

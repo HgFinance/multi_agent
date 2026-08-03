@@ -401,7 +401,7 @@ def analyze(symbol: str, *, market_api: str | None = None,
             last_close = _f(bars[0].get("close"))     # API 는 최신순
             last_close_date = str(bars[0].get("bucket_time"))[:10]
             liquidity = compute_liquidity(bars)
-    except Exception:  # noqa: BLE001 - 비치명: 종가 위치·유동성만 미확인이 된다
+    except Exception:  # noqa: BLE001, S110 - 비치명: 종가 위치·유동성만 미확인이 된다
         pass
 
     readout = compute_micro_readout(payload, last_close=last_close)

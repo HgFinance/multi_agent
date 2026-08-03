@@ -299,7 +299,7 @@ if __name__ == "__main__":
                 )
             conn.commit()
             print("ok - candidate 정리 완료 (event 없었다면 삭제됨)")
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional fallback boundary
             conn.rollback()
             print(f"참고 - candidate_id={candidate_id}는 event가 참조 중이라 삭제하지 않고 남긴다")
     finally:

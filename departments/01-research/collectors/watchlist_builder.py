@@ -173,9 +173,9 @@ def render_file(kept: list[RankedSymbol], *, interval_seconds: float, built_at: 
     lines = [
         "# 뉴스 감시 Watchlist - watchlist_builder.py 가 생성한다. 손으로 고쳐도 된다.",
         f"# 생성: {built_at:%Y-%m-%d %H:%M} KST / 기준: LS t1444 시가총액 상위",
-        f"# {len(kept)}종목, 폴링 {interval_seconds:.0f}초 간격 기준 일 호출 "
+        (f"# {len(kept)}종목, 폴링 {interval_seconds:.0f}초 간격 기준 일 호출 "
         f"{int(86400 / interval_seconds) * len(kept):,}회 (한도 {DAILY_QUOTA:,}의 "
-        f"{QUOTA_SOFT_RATIO:.0%} 이내 검산 완료)",
+        f"{QUOTA_SOFT_RATIO:.0%} 이내 검산 완료)"),
     ]
     for r in kept:
         lines.append(f"{r.symbol}  # {r.venue} {r.name}")

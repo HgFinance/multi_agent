@@ -60,10 +60,10 @@ from pydantic import BaseModel, Field, field_validator
 # LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
 # sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from llm_client import chat as llm_chat  # noqa: E402
-from number_guard import flag_unmatched  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
-from fundamental_scores import f_score, altman_z  # noqa: E402
+from fundamental_scores import altman_z, f_score
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from number_guard import flag_unmatched
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -296,7 +296,7 @@ def compute_fundamental_readout(facts: list[dict]) -> dict:
     try:
         fs = f_score(cur_map, prior_map or None)
         zs = altman_z(cur_map)
-    except Exception as e:                        # 종합 점수 실패가 재무 readout 을
+    except Exception as e:                        # 종합 점수 실패가 재무 readout 을  # noqa: BLE001 - intentional fallback boundary
         cautions.append(f"종합 점수 산출 실패: {type(e).__name__}")  # 통째로 죽이지 않는다
     else:
         # ▶ **분모를 감추지 않는다.** 6신호 중 2개만 계산됐는데 "F-Score 2점" 만
@@ -766,6 +766,6 @@ if __name__ == "__main__":
         _check_api_fail_closed()
     except AssertionError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         print("  API 장애 fail-closed     OK")  # URLError 등 - 조용히 넘기지 않는다
     print("펀더멘털 분석가 10개 영역 통과. 실행은 --run <종목코드>")

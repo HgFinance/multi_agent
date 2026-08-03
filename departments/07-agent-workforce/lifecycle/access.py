@@ -300,12 +300,12 @@ if __name__ == "__main__":
     t_exp = t0 + timedelta(days=30)
 
     def req(**over) -> AccessRequest:
-        base = dict(
-            request_id="req-1", agent_id="a1",
-            resource_kind=ResourceKind.DATA, resource_ref="market-api:read",
-            environment=Environment.SHADOW, justification="Shadow 관찰에 필요",
-            requested_by="hr-04", expires_at=t_exp, requested_at=t0, trace_id="t1",
-        )
+        base = {
+            "request_id": "req-1", "agent_id": "a1",
+            "resource_kind": ResourceKind.DATA, "resource_ref": "market-api:read",
+            "environment": Environment.SHADOW, "justification": "Shadow 관찰에 필요",
+            "requested_by": "hr-04", "expires_at": t_exp, "requested_at": t0, "trace_id": "t1",
+        }
         base.update(over)
         return AccessRequest(**base)
 

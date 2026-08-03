@@ -325,9 +325,8 @@ def overlay_numbers(overlay) -> list[float]:
         elif isinstance(node, list):
             for v in node:
                 walk(v, key)
-        elif isinstance(node, (int, float)) and not isinstance(node, bool):
-            if key not in _NOT_QUOTABLE:
-                pool.append(float(node))
+        elif isinstance(node, (int, float)) and not isinstance(node, bool) and key not in _NOT_QUOTABLE:
+            pool.append(float(node))
 
     walk(overlay)
     return pool

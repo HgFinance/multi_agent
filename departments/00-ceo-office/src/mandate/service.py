@@ -411,27 +411,27 @@ class MandateVersionService:
 if __name__ == "__main__":
 
     def _policy(**over):
-        risk = dict(
-            base_capital="100000000",
-            currency="KRW",
-            max_instrument_weight="0.1",
-            max_sector_weight="0.3",
-            max_gross_exposure="1.0",
-            max_concurrent_positions=10,
-            max_daily_loss="0.03",
-        )
+        risk = {
+            "base_capital": "100000000",
+            "currency": "KRW",
+            "max_instrument_weight": "0.1",
+            "max_sector_weight": "0.3",
+            "max_gross_exposure": "1.0",
+            "max_concurrent_positions": 10,
+            "max_daily_loss": "0.03",
+        }
         risk.update(over.pop("risk", {}))
-        p = dict(
-            allowed_assets=over.pop("allowed_assets", ["A005930"]),
-            forbidden_assets=over.pop("forbidden_assets", []),
-            risk_bounds=risk,
-            universe_policy=dict(
-                allowed_markets=["KRX"], trading_start="09:00", trading_end="15:30"
-            ),
-            approval_rules=dict(
-                paper_order_mode=over.pop("mode", "USER_APPROVAL")
-            ),
-        )
+        p = {
+            "allowed_assets": over.pop("allowed_assets", ["A005930"]),
+            "forbidden_assets": over.pop("forbidden_assets", []),
+            "risk_bounds": risk,
+            "universe_policy": {
+                "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"
+            },
+            "approval_rules": {
+                "paper_order_mode": over.pop("mode", "USER_APPROVAL")
+            },
+        }
         return MandatePolicy(**p)
 
     now = datetime(2026, 7, 30, tzinfo=timezone.utc)

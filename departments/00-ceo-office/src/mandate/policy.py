@@ -169,31 +169,31 @@ if __name__ == "__main__":
     from pydantic import ValidationError
 
     def _valid_risk(**over) -> dict:
-        base = dict(
-            base_capital="100000000",
-            currency="KRW",
-            max_instrument_weight="0.1",
-            max_sector_weight="0.3",
-            max_gross_exposure="1.0",
-            max_concurrent_positions=10,
-            max_daily_loss="0.03",
-        )
+        base = {
+            "base_capital": "100000000",
+            "currency": "KRW",
+            "max_instrument_weight": "0.1",
+            "max_sector_weight": "0.3",
+            "max_gross_exposure": "1.0",
+            "max_concurrent_positions": 10,
+            "max_daily_loss": "0.03",
+        }
         base.update(over)
         return base
 
     def _valid_universe(**over) -> dict:
-        base = dict(allowed_markets=["KRX"], trading_start="09:00", trading_end="15:30")
+        base = {"allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"}
         base.update(over)
         return base
 
     def _valid_policy(**over) -> dict:
-        base = dict(
-            allowed_assets=["A005930"],
-            forbidden_assets=["A000660"],
-            risk_bounds=_valid_risk(),
-            universe_policy=_valid_universe(),
-            approval_rules=dict(paper_order_mode="USER_APPROVAL"),
-        )
+        base = {
+            "allowed_assets": ["A005930"],
+            "forbidden_assets": ["A000660"],
+            "risk_bounds": _valid_risk(),
+            "universe_policy": _valid_universe(),
+            "approval_rules": {"paper_order_mode": "USER_APPROVAL"},
+        }
         base.update(over)
         return base
 

@@ -52,7 +52,7 @@ def fetch_news(query, max_results=5):
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
             return result
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         return {"error": str(e)}
 
 if __name__ == '__main__':

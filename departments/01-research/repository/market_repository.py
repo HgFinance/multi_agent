@@ -47,6 +47,8 @@ from contracts.market_events import (
 REPOSITORY_VERSION = "research-market-repository-v1"
 
 
+import itertools
+
 from reference_repository import guarded_execute_values
 
 
@@ -205,7 +207,7 @@ class InMemoryMarketRepository(MarketDataRepository):
             key=lambda t: t.times.event_time,
         )
         gaps = []
-        for prev, cur in zip(rows, rows[1:]):
+        for prev, cur in itertools.pairwise(rows):
             if not _is_consecutive(prev.sequence_no, cur.sequence_no):
                 gaps.append((prev.sequence_no, cur.sequence_no))
         return tuple(gaps)
@@ -237,7 +239,7 @@ class TimescaleMarketRepository(MarketDataRepository):
 
     def __init__(self, dsn: str) -> None:
         import psycopg2  # requirements.txt: psycopg2-binary
-        from psycopg2.extras import execute_values  # noqa: F401, register_uuid
+        from psycopg2.extras import register_uuid
 
         # psycopg2 는 uuid.UUID 를 기본 어댑트하지 못한다. 등록하지 않으면
         # instrument_id / trace_id 삽입에서 "can't adapt type 'UUID'" 가 난다.
@@ -308,7 +310,7 @@ class TimescaleMarketRepository(MarketDataRepository):
         except Exception:
             try:
                 self._conn.rollback()
-            except Exception:  # noqa: BLE001 - 커넥션이 이미 죽었으면 rollback 도 실패한다
+            except Exception:  # noqa: BLE001, S110 - 커넥션이 이미 죽었으면 rollback 도 실패한다
                 pass
             raise
         return WriteResult(len(rows), inserted, len(rows) - inserted)
@@ -389,7 +391,7 @@ class TimescaleMarketRepository(MarketDataRepository):
         except Exception:
             try:
                 self._conn.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
                 pass
             raise
         return WriteResult(len(rows), inserted, len(rows) - inserted)
@@ -478,7 +480,7 @@ class TimescaleMarketRepository(MarketDataRepository):
             )
             seqs = [r[0] for r in cur.fetchall()]
         return tuple(
-            (a, b) for a, b in zip(seqs, seqs[1:]) if not _is_consecutive(a, b)
+            (a, b) for a, b in itertools.pairwise(seqs) if not _is_consecutive(a, b)
         )
 
     def close(self) -> None:

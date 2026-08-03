@@ -138,7 +138,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         if row is None:
             return OrchestratorReport(hypothesis_id="-", title="-",
                                       verdict="NO_HYPOTHESIS")
-        hid, title, edge, data_products, status = row
+        hid, title, edge, data_products, _status = row
         hyp = {"expected_edge": edge if isinstance(edge, dict) else json.loads(edge or "{}"),
                "required_data_products": (data_products if isinstance(data_products, list)
                                           else json.loads(data_products or "[]"))}
@@ -217,7 +217,7 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         windows = make_windows(market.dates, WARMUP_TRADING_DAYS)
         wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
               for w in windows]
-        summary, flags, verdict = fragility_summary(wm)
+        _summary, flags, verdict = fragility_summary(wm)
         with conn.cursor() as cur:
             for label, metrics in wm:
                 for k in ("total_return", "sharpe_rf0", "max_drawdown"):

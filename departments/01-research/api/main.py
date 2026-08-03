@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -90,7 +91,7 @@ def _query(sql: str, params: tuple):
     except Exception:
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
             pass
         raise
 
@@ -202,7 +203,7 @@ def health() -> dict:
 @app.get("/evidence/news", response_model=list[NewsEvidence])
 def evidence_news(
     symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
-    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    as_of: Annotated[datetime | None, Query(description="PIT 기준 시각(tz 필수). 없으면 지금")] = None,
     hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
     limit: int = Query(50, gt=0, le=200),
 ):
@@ -243,7 +244,7 @@ def evidence_news(
 @app.get("/evidence/disclosures")
 def evidence_disclosures(
     symbol: str | None = Query(None, min_length=6, max_length=6),
-    as_of: datetime | None = Query(None),
+    as_of: Annotated[datetime | None, Query()] = None,
     days: float = Query(7.0, gt=0, le=90),
     limit: int = Query(50, gt=0, le=200),
 ):
@@ -281,7 +282,7 @@ def evidence_disclosures(
 @app.get("/evidence/financials")
 def evidence_financials(
     symbol: str = Query(..., min_length=6, max_length=6),
-    as_of: datetime | None = Query(None),
+    as_of: Annotated[datetime | None, Query()] = None,
     limit: int = Query(100, gt=0, le=500),
 ):
     """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2).
@@ -320,7 +321,7 @@ def evidence_financials(
 
 
 @app.get("/universe/restrictions")
-def universe_restrictions(as_of: datetime | None = Query(None)):
+def universe_restrictions(as_of: Annotated[datetime | None, Query()] = None):
     """거래제한 종목 스냅샷 (RES-01 universe_manager 의 재료).
 
     **자격 없이 거래가능을 판정하기 위한 면이다.** 예전에는 판정하는 쪽이
@@ -365,7 +366,7 @@ def universe_restrictions(as_of: datetime | None = Query(None)):
 def macro_observations(
     codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),
     days: int = Query(120, gt=0, le=3650, description="period 소급 창(일)"),
-    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수)"),
+    as_of: Annotated[datetime | None, Query(description="PIT 기준 시각(tz 필수)")] = None,
 ):
     """거시·지정학 시계열 조회 (RES-09 지정학 분석가의 재료).
 
@@ -462,8 +463,9 @@ def _embed_query(text: str, *, base: str | None = None) -> str:
 def evidence_search(
     q: str = Query(..., min_length=1, description="자연어 질의 (공백만이면 422)"),
     k: int = Query(SEARCH_K_DEFAULT, ge=1, le=SEARCH_K_MAX, description="상위 k건"),
-    as_of: datetime | None = Query(
-        None, description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)"),
+    as_of: Annotated[
+        datetime | None, Query(description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)")
+    ] = None,
 ):
     """공시 원문 청크 코사인 상위 k. 읽기 전용 GET - 세션도 read-only 다.
 
@@ -544,7 +546,7 @@ def _require_threshold(threshold: float) -> float:
 @app.get("/evidence/stories")
 def evidence_stories(
     symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
-    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    as_of: Annotated[datetime | None, Query(description="PIT 기준 시각(tz 필수). 없으면 지금")] = None,
     hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
     threshold: float = Query(0.85, ge=STORY_THRESHOLD_MIN, le=STORY_THRESHOLD_MAX,
                              description="코사인 유사도 임계 (0.5~0.99)"),
@@ -606,7 +608,7 @@ def _check_as_of():
     kst = datetime(2026, 7, 31, 9, 0, tzinfo=KST)
     assert _as_of_or_now(kst).hour == 0, "KST 09:00 은 UTC 00:00 이다"
     try:
-        _as_of_or_now(datetime(2026, 7, 31, 9, 0))
+        _as_of_or_now(datetime(2026, 7, 31, 9, 0))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive as_of 가 통과했다 - PIT 9시간 오차 위험")
     except HE:
         pass
@@ -664,7 +666,7 @@ def _check_search_rules():
     # PIT: naive as_of 는 422 - 다른 Evidence Endpoint 와 같은 규칙 (임베딩
     # 호출 전에 거부되므로 Ollama 없이 검증 가능)
     try:
-        evidence_search(q="유상증자", k=1, as_of=datetime(2026, 8, 1, 9, 0))
+        evidence_search(q="유상증자", k=1, as_of=datetime(2026, 8, 1, 9, 0))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive as_of 가 통과했다")
     except HE as e:
         assert e.status_code == 422 and "timezone" in str(e.detail)
@@ -707,7 +709,7 @@ def _check_stories_rules():
 
     # naive as_of 는 다른 Evidence Endpoint 와 같은 422 규칙
     try:
-        evidence_stories(symbol="000660", as_of=datetime(2026, 8, 1, 9, 0),
+        evidence_stories(symbol="000660", as_of=datetime(2026, 8, 1, 9, 0),  # noqa: DTZ001 - intentionally invalid input
                          hours=24.0, threshold=0.85)
         raise AssertionError("naive as_of 가 통과했다")
     except HE as e:

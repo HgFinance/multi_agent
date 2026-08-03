@@ -719,7 +719,7 @@ def _collect(top: int = 40, symbols: tuple[str, ...] = ()) -> int:
             f"  종목 연결: 기사 {len(rel)}/{len(got)}건 (전용 {ded}, 복수종목 {multi})"
         )
 
-        new_src, upd_src, id_by_source = ref.sync_data_sources()
+        _new_src, _upd_src, id_by_source = ref.sync_data_sources()
         src = id_by_source.get(SOURCE_ID)
         if src is None:
             raise NaverNewsError(f"data_sources 에 {SOURCE_ID} 가 없다")

@@ -188,8 +188,8 @@ def _apply_costs(side: str, notional: float) -> float:
 
 
 def run_backtest(market: Market, config: dict) -> BacktestResult:
-    lookback = int(config["lookback_days"])
-    top_n = int(config["top_n"])
+    _lookback = int(config["lookback_days"])
+    _top_n = int(config["top_n"])
     capital = float(config["initial_capital"])
 
     cash = capital
@@ -393,8 +393,8 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                     returning hypothesis_id
                     """,
                     ("[SMOKE] MOM-20 파이프라인 관통 검증",
-                     "전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
-                     "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다.",
+                     ("전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
+                     "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다."),
                      json.dumps({"type": "none", "note": "smoke"}),
                      json.dumps({"note": "해시 재검증 실패 또는 비결정성 발견 시 기각"}),
                      json.dumps([f"{name}/{version}"]), RUNNER_VERSION, trace))

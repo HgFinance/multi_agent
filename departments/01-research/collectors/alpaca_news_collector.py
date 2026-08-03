@@ -511,7 +511,7 @@ def stream_news(
                     raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
                 except asyncio.TimeoutError:
                     return seen
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                     raise AlpacaNewsError(f"스트림이 끊겼다: {e}") from None
                 if not raw:
                     continue

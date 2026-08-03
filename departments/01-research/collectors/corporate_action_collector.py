@@ -38,6 +38,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import itertools
+
 from opendart_collector import KST, OpenDartClient, OpenDartError
 
 COLLECTOR_VERSION = "research-corporate-action-v1"
@@ -429,7 +431,7 @@ def _check_discovery_windows():
     """3개월 제한 대응 - 창이 공백·겹침 없이 전 구간을 덮는지."""
     ws = discovery_windows(date(2025, 1, 1), date(2026, 7, 31))
     assert ws[0][0] == date(2025, 1, 1) and ws[-1][1] == date(2026, 7, 31)
-    for (s1, e1), (s2, _e2) in zip(ws, ws[1:]):
+    for (s1, e1), (s2, _e2) in itertools.pairwise(ws):
         assert (s2 - e1).days == 1, f"공백/겹침: {e1} -> {s2}"
         assert (e1 - s1).days <= 89
     # 한 창이면 그대로

@@ -245,7 +245,7 @@ def validate_inputs(state: CloseState) -> dict:
         # naive 시각을 UTC 로 가정하면 KST 와 9시간 어긋나 회계일이 하루 밀린다.
         raise ValueError("as_of 는 timezone 이 있는 datetime 이어야 한다")
     if not isinstance(state.get("accounting_date"), date):
-        raise ValueError("accounting_date 가 없다")
+        raise TypeError("accounting_date 가 없다")
 
     # 분개 UUID 는 posting 마다 새로 나므로 해시에 넣지 않는다 - 넣으면 경제적으로 같은
     # 원장인데 해시가 매번 달라져 재현성 계약이 무의미해진다. 원천 이벤트 ID 와 시산표
@@ -362,7 +362,7 @@ Breaks:
         note = _parse_json_block(call(_persona("reconciliation-agent"), task),
                                  ("break_narrative", "owner_hint"), "Reconciliation")
         return {"break_narrative": note["break_narrative"]}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         # 서술 실패가 대사 결과를 지우지 않는다. Break 는 그대로 남는다.
         return {"break_narrative": None, "fallbacks": [_fallback("narrate_breaks", exc)]}
 
@@ -503,7 +503,7 @@ Evidence:
                                  ("narrative", "escalate", "cited_figures"), "Supervisor")
         return {"narrative": note["narrative"], "supervisor_llm_called": True,
                 "_llm_escalate": bool(note["escalate"])}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         # 서술 실패가 이미 확정된 수치를 지우지 않는다. 결정론 서술로 대체하고 fallback 만 남긴다.
         return {"narrative": _deterministic_close_note(state)["narrative"],
                 "supervisor_llm_called": True, "fallbacks": [_fallback("supervise", exc)]}
@@ -518,7 +518,7 @@ def notion_report(state: CloseState, *, uploader=None) -> dict:
     upload = uploader or upload_close
     try:
         result = upload(out, report_md=report_md)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         result = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
     return {"notion_upload": result, "report_markdown": report_md}
 
@@ -635,7 +635,7 @@ def run_accounting_close(
         # 그대로 꺼진 채고, 켜져 있을 때만 회계본부 Project 로 보낸다.
         with tracing_context(project_name=_ls_project()):
             state = build_pipeline(chat=chat, uploader=uploader).invoke(initial)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         state = {**initial, "nav_status": NAV_BLOCKED, "breaks": [], "recon": {},
                  "narrative": "", "fallbacks": [_fallback("pipeline", exc)]}
     out = _assemble_out(state)
@@ -734,8 +734,8 @@ def _render_report_md(out: dict) -> str:
             f"| **NAV (Preliminary)** | **{_md_cell(snap.get('nav'))}** |",
             f"| Gross / Net Exposure | {_md_cell(snap.get('gross_exposure'))} / {_md_cell(snap.get('net_exposure'))} |",
             "",
-            f"NAV 항등식 (NAV == 현금 + 증권평가액): "
-            f"**{'일치' if ident.get('ok') else '불일치'}** (차이 {_md_cell(ident.get('difference'))})",
+            (f"NAV 항등식 (NAV == 현금 + 증권평가액): "
+            f"**{'일치' if ident.get('ok') else '불일치'}** (차이 {_md_cell(ident.get('difference'))})"),
         ]
     else:
         lines.append(f"평가하지 않았다 — {_md_cell(ident.get('reason') or '사유 기록 없음')}. "
@@ -1012,7 +1012,7 @@ def _check_reproducibility():
 
 def _check_malformed_input():
     naive = run_accounting_close(ledger=_ledger_with_position(),
-                                 as_of=datetime(2026, 8, 3, 6, 0),   # tz 없음
+                                  as_of=datetime(2026, 8, 3, 6, 0),   # noqa: DTZ001 - intentionally invalid input
                                  accounting_date=_DATE, marks=_marks(),
                                  chat=_stub(), uploader=_no_upload)
     assert naive["nav_status"] == NAV_BLOCKED and naive["escalate"] is True

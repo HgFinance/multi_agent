@@ -114,7 +114,7 @@ def falsification_note(claim: dict) -> str:
     반증 조건을 미리 적어두지 않으면 사후에 해석이 늘어난다("그 정도면
     맞은 셈이다"). 조건을 발행 시점에 고정하는 것이 목적이다.
     """
-    kind = claim.get("kind", "")
+    _kind = claim.get("kind", "")
     h = claim.get("horizon_days")
     op, thr = claim.get("op"), claim.get("threshold")
     txt = claim.get("threshold_text")

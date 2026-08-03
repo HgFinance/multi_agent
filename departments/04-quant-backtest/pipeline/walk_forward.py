@@ -50,6 +50,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import itertools
+
 from backtest_runner import (
     COST_MODEL,
     DEFAULT_CONFIG,
@@ -286,11 +288,11 @@ def register_and_validate(name: str, version: str) -> int:
                 returning hypothesis_id
                 """,
                 ("[QNT-04] MOM-20 walk-forward 강건성 검증",
-                 "MOM-20 스모크의 강건성 판정 - 전략 승인 목적이 아니다. "
+                 ("MOM-20 스모크의 강건성 판정 - 전략 승인 목적이 아니다. "
                  "창별 성과의 부호 일관성·최악 창 MDD·창간 Sharpe 산포를 결정론 "
                  "규칙으로 요약해 QNT-03 스모크 결과가 특정 구간의 우연인지 "
                  "가려낸다. 판정으로 hypotheses.status 를 바꾸지 않는다(승인 "
-                 "권한은 CEO·Risk·QA 체인).",
+                 "권한은 CEO·Risk·QA 체인)."),
                  json.dumps({"type": "none", "note": "robustness check - edge 주장 없음"}),
                  json.dumps({"fragility_rules": FRAGILITY_RULES,
                              "note": "규칙 위반 플래그가 하나라도 있으면 FRAGILE"}),
@@ -408,7 +410,7 @@ def _check_windows_pure():
     assert [w.label for w in ws] == ["2024H2", "2025H1", "2025H2", "2026H1", "2026H2"], \
         [w.label for w in ws]
     assert ws == make_windows(days, WARMUP_TRADING_DAYS)      # 순수 함수 - 재호출 동일
-    for a, b in zip(ws, ws[1:]):
+    for a, b in itertools.pairwise(ws):
         assert a.test_end < b.test_start, f"시험창 겹침: {a.label}/{b.label}"
     for w in ws:
         assert w.warmup_start < w.test_start <= w.test_end
@@ -511,7 +513,7 @@ def _check_fragility_rules():
                     "max_drawdown": -0.06, "test_days": 118}),
              ("SHORT", {"total_return": -0.47, "sharpe_rf0": -7.8,
                         "max_drawdown": -0.47, "test_days": 20})]
-    s3, f3, v3 = fragility_summary(mixed)
+    s3, _f3, v3 = fragility_summary(mixed)
     assert v3 == "ROBUST" and s3["n_windows"] == 2 and s3["n_excluded_short"] == 1
     assert s3["worst_window_mdd"] == -0.06      # 부분창 수치가 판정에 안 들어감
     try:

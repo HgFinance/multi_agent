@@ -215,7 +215,7 @@ def upload_debate(out: dict, *, report_md: str = "", env: dict | None = None) ->
             intro = f"**결정론적 MD 리포트 저장:** `{_report_path(out.get('debate_id'))}`\n\n{report_md}"
             payload["children"] = markdown_to_notion_blocks(intro)
         status, body = _post("pages", payload, token)
-    except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+    except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다  # noqa: BLE001 - intentional fallback boundary
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}"}
     if status == 200:
         return {"ok": True, "url": body.get("url")}

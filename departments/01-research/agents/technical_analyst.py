@@ -51,6 +51,8 @@ from pydantic import BaseModel, Field, field_validator
 # 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+import itertools
+
 from llm_client import chat as llm_chat
 from llm_client import narrate as llm_narrate
 from narrative_guard import audit_narrative, label_caution_lines
@@ -145,7 +147,7 @@ def compute_technical_readout(bars: list[dict]) -> dict:
     if n >= 21:
         w = closes[-21:]
         if all(c != 0 for c in w[:-1]):
-            rets = [b / a - 1.0 for a, b in zip(w, w[1:])]
+            rets = [b / a - 1.0 for a, b in itertools.pairwise(w)]
             m = sum(rets) / len(rets)
             var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
             vol20 = _r4(math.sqrt(var) * math.sqrt(ANNUALIZE_DAYS) * 100.0)
@@ -393,7 +395,7 @@ def analyze(symbol: str, *, market_api: str | None = None,
 
 def _bars(closes: list[float], vols: list[float] | None = None,
           hl_pad: float = 0.0) -> list[dict]:
-    base = datetime(2026, 1, 1)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     out = []
     for i, c in enumerate(closes):
         out.append({

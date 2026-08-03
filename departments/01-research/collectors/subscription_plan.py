@@ -449,8 +449,8 @@ class SubscriptionPlan:
 
     def summary(self) -> str:
         lines = [
-            f"{PLAN_VERSION} - 구독 {self.count}건 "
-            f"(체결 {len(self.by_kind(DataKind.TICK))} / 호가 {len(self.by_kind(DataKind.QUOTE))})"
+            (f"{PLAN_VERSION} - 구독 {self.count}건 "
+            f"(체결 {len(self.by_kind(DataKind.TICK))} / 호가 {len(self.by_kind(DataKind.QUOTE))})")
         ]
         for path, n in self.by_socket().items():
             lines.append(f"  {path:34} {n}")

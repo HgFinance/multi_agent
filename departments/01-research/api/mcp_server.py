@@ -220,7 +220,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             try:
                 proc = subprocess.run(
                     [sys.executable, "scripts.py", "--run", sym],
-                    cwd=str(_BASE), capture_output=True, text=True,
+                    check=False, cwd=str(_BASE), capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=60 * 30)
                 out = (proc.stdout or "") + "\n" + (proc.stderr or "")[-800:]
                 finish_job(job_id, exit_code=proc.returncode, tail=out,

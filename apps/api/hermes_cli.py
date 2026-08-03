@@ -61,8 +61,8 @@ def ask(*, department: str, config: str, query: str) -> dict:
         # -Q: 배너·스피너·Tool Preview 없이 최종 답변만. 이게 없으면 ANSI 색코드와
         # 박스 문자가 그대로 화면까지 흘러간다.
         proc = subprocess.run(
-            ["hermes", "-p", department, "chat", "-Q", "-q", query],
-            capture_output=True, text=True, timeout=timeout, cwd=ROOT,
+        ["hermes", "-p", department, "chat", "-Q", "-q", query],
+        check=False, capture_output=True, text=True, timeout=timeout, cwd=ROOT,
         )
     except FileNotFoundError:
         # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).

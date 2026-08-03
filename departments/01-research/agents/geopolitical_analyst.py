@@ -151,8 +151,8 @@ def group_series(rows: list[dict]) -> dict[str, list[tuple[date, float]]]:
         if not code or d is None:
             continue
         out.setdefault(code, []).append((d, v))
-    for code in out:
-        out[code].sort(key=lambda t: t[0])
+    for values in out.values():
+        values.sort(key=lambda t: t[0])
     return out
 
 
@@ -651,9 +651,8 @@ def _check_units_in_prompt():
 
     def spy(system, user):
         seen["user"] = user
-        return ('{"risk_label": "%s", "driver": "%s", "summary": "s", '
-                '"transmission": [], "used_metrics": [], "cautions": []}'
-                % (readout["risk_label"], readout["driver"]))
+        return ('{{"risk_label": "{}", "driver": "{}", "summary": "s", '
+                '"transmission": [], "used_metrics": [], "cautions": []}}'.format(readout["risk_label"], readout["driver"]))
 
     narrate(readout, llm=spy)
     u = seen["user"]
@@ -714,9 +713,10 @@ def _check_analyze_api_down():
     assert r["verdict"] == "INSUFFICIENT_DATA"
     assert "호출 실패" in r["reason"], r["reason"]
 
-    rows = (_rows("GPRD", [100.0] * 30, end=date.today() - timedelta(days=1))
+    today = datetime.now(timezone.utc).date()
+    rows = (_rows("GPRD", [100.0] * 30, end=today - timedelta(days=1))
             + _rows("GDELT_X", [1.0] * 29 + [3.0],
-                    end=date.today() - timedelta(days=1)))
+            end=today - timedelta(days=1)))
 
     def ok_get(url, timeout=25):
         assert "/macro/observations" in url and "codes=" in url

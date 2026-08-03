@@ -441,33 +441,33 @@ def _dt(y, m, d) -> datetime:
 
 
 def _split(**kw) -> Split:
-    base = dict(name="fold1", train_start=_dt(2025, 1, 1), train_end=_dt(2025, 6, 1),
-                test_start=_dt(2025, 6, 11), test_end=_dt(2025, 9, 1), embargo_days=5)
+    base = {"name": "fold1", "train_start": _dt(2025, 1, 1), "train_end": _dt(2025, 6, 1),
+                "test_start": _dt(2025, 6, 11), "test_end": _dt(2025, 9, 1), "embargo_days": 5}
     base.update(kw)
     return Split(**base)
 
 
 def _spec(**kw) -> HypothesisSpecV2:
-    base = dict(
-        hypothesis_id="hyp_1", version=1, origin=HypothesisOrigin(),
-        strategy_family="event_driven",
-        economic_rationale="공시 충격 이후 유동성 회복 속도가 후속 수익률과 관련된다",
-        competing_explanation="단순 시장 반등 또는 업종 공통 충격일 수 있다",
-        universe_version="krx-liquid-v1", decision_frequency="5m",
-        holding_horizon="5d", features=("amihud_5d",), label={"kind": "fwd_ret_5d"},
-        baseline="sector_neutral_momentum", cost_model_version="krx-cost-v1",
-        trial_family_id="liquidity_recovery_v1", trial_budget=12,
-        preregistered_splits=(_split(),),
-        falsification_tests=("무작위 라벨에서 유의하면 폐기",))
+    base = {
+        "hypothesis_id": "hyp_1", "version": 1, "origin": HypothesisOrigin(),
+        "strategy_family": "event_driven",
+        "economic_rationale": "공시 충격 이후 유동성 회복 속도가 후속 수익률과 관련된다",
+        "competing_explanation": "단순 시장 반등 또는 업종 공통 충격일 수 있다",
+        "universe_version": "krx-liquid-v1", "decision_frequency": "5m",
+        "holding_horizon": "5d", "features": ("amihud_5d",), "label": {"kind": "fwd_ret_5d"},
+        "baseline": "sector_neutral_momentum", "cost_model_version": "krx-cost-v1",
+        "trial_family_id": "liquidity_recovery_v1", "trial_budget": 12,
+        "preregistered_splits": (_split(),),
+        "falsification_tests": ("무작위 라벨에서 유의하면 폐기",)}
     base.update(kw)
     return HypothesisSpecV2(**base)
 
 
 def _card(spec: HypothesisSpecV2, **kw) -> ExperimentCardV1:
-    base = dict(experiment_id="exp_1", dataset_manifest_id="ds_1",
-                dataset_hash="sha256:aa" * 8, code_hash="sha256:bb" * 8,
-                dependency_lock_hash="sha256:cc" * 8, seed=42, trial_number=1,
-                validation=Validation(), decision=Decision.REJECT)
+    base = {"experiment_id": "exp_1", "dataset_manifest_id": "ds_1",
+                "dataset_hash": "sha256:aa" * 8, "code_hash": "sha256:bb" * 8,
+                "dependency_lock_hash": "sha256:cc" * 8, "seed": 42, "trial_number": 1,
+                "validation": Validation(), "decision": Decision.REJECT}
     base.update(kw)
     return card_for(spec, **base)
 
@@ -475,7 +475,7 @@ def _card(spec: HypothesisSpecV2, **kw) -> ExperimentCardV1:
 def _rejects(fn, needle, label):
     try:
         fn()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - intentional fallback boundary
         assert needle in str(e), f"{label}: 다른 이유로 거부\n{e}"
         return
     raise AssertionError(f"{label}: 통과하면 안 되는데 통과했다")
@@ -552,9 +552,9 @@ def _check_card_binds_version():
 
 def _check_submit_is_earned():
     s = _spec().transition(HypothesisStatus.PREREGISTERED, now=_dt(2026, 8, 3))
-    full = dict(oos_metrics={"sharpe": 1.2}, regime_breakdown={"risk_on": {"sharpe": 1.4}},
-                validation=Validation(purged_walk_forward=ValidationResult.PASS,
-                                      bootstrap_ci_low=0.2, bootstrap_ci_high=1.9))
+    full = {"oos_metrics": {"sharpe": 1.2}, "regime_breakdown": {"risk_on": {"sharpe": 1.4}},
+                "validation": Validation(purged_walk_forward=ValidationResult.PASS,
+                                      bootstrap_ci_low=0.2, bootstrap_ci_high=1.9)}
     _card(s, decision=Decision.SUBMIT_TO_QA, **full)      # 통과
 
     _rejects(lambda: _card(s, decision=Decision.SUBMIT_TO_QA,
@@ -591,10 +591,10 @@ def _check_trial_pressure():
 
 
 def _check_guideline_gate():
-    base = dict(candidate_id="cal_1", scope="research.news_sentiment.5d",
-                failure_pattern="단일 출처 인수설을 확정 사실로 취급",
-                proposed_change="독립 출처 2개 미만이면 fact 가 아니라 inference",
-                expires_at=_dt(2026, 11, 1))
+    base = {"candidate_id": "cal_1", "scope": "research.news_sentiment.5d",
+                "failure_pattern": "단일 출처 인수설을 확정 사실로 취급",
+                "proposed_change": "독립 출처 2개 미만이면 fact 가 아니라 inference",
+                "expires_at": _dt(2026, 11, 1)}
     g = CalibrationGuidelineV1(**base)
     assert g.status is GuidelineStatus.CANDIDATE
     assert not g.is_effective(_dt(2026, 8, 3)), "CANDIDATE 가 적용되고 있다"

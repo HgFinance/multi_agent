@@ -888,7 +888,7 @@ class SupabaseReferenceRepository(ReferenceRepository):
                         continue
                     known.setdefault((corp, acct, pe, pt, scope), {})[rc] = int(rev)
 
-            revisions, fresh_revisions = assign_revisions(facts, known)
+            revisions, _fresh_revisions = assign_revisions(facts, known)
 
             rows = []
             unlinked = 0

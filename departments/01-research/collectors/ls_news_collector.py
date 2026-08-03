@@ -159,7 +159,7 @@ async def run_service(stop: asyncio.Event) -> int:
                                   f"{sink.stats.summary()}", flush=True)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 backoff = RECONNECT_BACKOFF[min(attempt, len(RECONNECT_BACKOFF) - 1)]
                 attempt += 1
                 print(f"⚠ 연결 오류: {type(e).__name__}: {str(e)[:80]} - "
@@ -171,7 +171,7 @@ async def run_service(stop: asyncio.Event) -> int:
     finally:
         try:
             sink.close()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             print(f"⚠ 종료 Flush 실패 - {sink.pending}건 유실: {e}", flush=True)
         ref.close()
     print(f"종료: 수신 {received:,} | {sink.stats.summary()}", flush=True)

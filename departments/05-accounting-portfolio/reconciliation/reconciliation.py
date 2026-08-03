@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -159,7 +159,7 @@ def reconcile_fills(
 ) -> ReconResult:
     """내부 체결과 브로커 명세서를 대사한다."""
     as_of = as_of or datetime.now(tz=internal[0].event_time.tzinfo) if internal else as_of
-    res = ReconResult("fill", rule_version, as_of or datetime.now())
+    res = ReconResult("fill", rule_version, as_of or datetime.now(tz=timezone.utc))
 
     remaining = list(external)
 
@@ -171,12 +171,12 @@ def reconcile_fills(
 
     for own in internal:
         # 1. Broker Fill ID
-        hit = take(lambda c: c.broker_fill_id and c.broker_fill_id == own.broker_fill_id)
+        hit = take(lambda c, own=own: c.broker_fill_id and c.broker_fill_id == own.broker_fill_id)
         method = MatchMethod.BROKER_ID
 
         # 2. Client Order ID + 수량·가격
         if hit is None:
-            hit = take(lambda c: (
+            hit = take(lambda c, own=own: (
                 c.client_order_id and c.client_order_id == own.client_order_id
                 and c.quantity == own.quantity and c.price == own.price
             ))
@@ -184,7 +184,7 @@ def reconcile_fills(
 
         # 3. 속성 매칭 (종목·방향·수량·가격 일치 + 시간창)
         if hit is None:
-            hit = take(lambda c: (
+            hit = take(lambda c, own=own: (
                 c.instrument_id == own.instrument_id and c.side == own.side
                 and c.quantity == own.quantity and c.price == own.price
                 and abs(c.event_time - own.event_time) <= time_window
@@ -194,7 +194,7 @@ def reconcile_fills(
         # 4. Fuzzy 후보 - 종목·방향만 같고 수량 또는 가격이 다르다.
         #    자동 확정하지 않는다. 후보로만 제시하고 Break를 만든다.
         if hit is None:
-            hit = take(lambda c: (
+            hit = take(lambda c, own=own: (
                 c.instrument_id == own.instrument_id and c.side == own.side
                 and abs(c.event_time - own.event_time) <= time_window
             ))
@@ -271,7 +271,7 @@ def reconcile_positions(
     수량 불일치는 항상 material이다. 마스터플랜 11.2가 브로커와 내부 포지션이
     어긋나면 Kill Switch 대상이라고 규정한다.
     """
-    res = ReconResult("position", rule_version, as_of or datetime.now())
+    res = ReconResult("position", rule_version, as_of or datetime.now(tz=timezone.utc))
 
     for instrument in sorted(set(internal) | set(external), key=str):
         own = internal.get(instrument, ZERO)
@@ -299,7 +299,7 @@ def reconcile_cash(
     rule_version: str = "cash-recon-v1",
 ) -> ReconResult:
     """현금 대사. 반올림 수준 차이는 Break로 올리지 않는다."""
-    res = ReconResult("cash", rule_version, as_of or datetime.now())
+    res = ReconResult("cash", rule_version, as_of or datetime.now(tz=timezone.utc))
     diff = internal - external
     res.items.append(ReconItem(
         MatchMethod.ATTRIBUTE if abs(diff) <= tolerance else MatchMethod.UNMATCHED,

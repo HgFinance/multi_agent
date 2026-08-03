@@ -482,7 +482,8 @@ def _check_times():
     # naive datetime 은 막는다
     try:
         ObservationTimes(
-            event_time=datetime(2026, 7, 30, 1, 0), received_at=_utc(), observed_at=_utc()
+            event_time=datetime(2026, 7, 30, 1, 0),  # noqa: DTZ001 - intentionally invalid input
+            received_at=_utc(), observed_at=_utc()
         )
         raise AssertionError("naive datetime 이 통과했다")
     except ValueError:

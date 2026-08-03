@@ -137,7 +137,7 @@ class RedisJsonCache:
             import redis
 
             return redis.Redis.from_url(url, socket_connect_timeout=2)
-        except Exception:
+        except Exception:  # noqa: BLE001 - intentional fallback boundary
             return None
 
     def key(self, fingerprint: str) -> str:
@@ -153,7 +153,7 @@ class RedisJsonCache:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
             return json.loads(raw)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
             LOGGER.warning("%s", json.dumps({"event": "cache_get_failed", "error": type(exc).__name__}))
             return None
 
@@ -166,7 +166,7 @@ class RedisJsonCache:
                 json.dumps(_json_safe(value), ensure_ascii=False),
                 ex=self.ttl_seconds,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
             LOGGER.warning("%s", json.dumps({"event": "cache_set_failed", "error": type(exc).__name__}))
 
     @staticmethod
@@ -187,7 +187,7 @@ def record_latency(node: str, latency_ms: float) -> None:
         client.rpush(key, str(float(latency_ms)))
         client.ltrim(key, -1000, -1)
         client.expire(key, _METRIC_CACHE.ttl_seconds)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         LOGGER.warning("%s", json.dumps({"event": "latency_record_failed", "error": type(exc).__name__}))
 
 
@@ -198,7 +198,7 @@ def latency_summary(node: str) -> dict[str, float | int]:
     try:
         values = client.lrange(_METRIC_CACHE.key(f"latency:{node}"), 0, -1)
         parsed = sorted(float(v.decode() if isinstance(v, bytes) else v) for v in values)
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         parsed = []
     if not parsed:
         return {"count": 0, "p50_ms": 0.0, "p99_ms": 0.0}

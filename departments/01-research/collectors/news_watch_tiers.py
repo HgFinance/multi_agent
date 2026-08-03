@@ -72,7 +72,7 @@ def plan_tiers(core: list[str], full: list[str], *,
 
     ceiling = int(quota * soft_ratio)
     sweeps_per_day = SECONDS_PER_DAY / core_interval_seconds
-    tier1_calls = int(round(len(core_set) * sweeps_per_day))
+    tier1_calls = round(len(core_set) * sweeps_per_day)
     remaining = ceiling - tier1_calls
 
     if remaining <= 0:
@@ -90,8 +90,8 @@ def plan_tiers(core: list[str], full: list[str], *,
 
     cycle_sweeps = (len(rest) + per_sweep - 1) // per_sweep if per_sweep else 0
     cycle_hours = cycle_sweeps * core_interval_seconds / 3600.0 if cycle_sweeps else 0.0
-    tier2_calls = int(round(len(rest) * (SECONDS_PER_DAY / (cycle_hours * 3600))
-                            )) if cycle_hours else 0
+    tier2_calls = round(len(rest) * (SECONDS_PER_DAY / (cycle_hours * 3600))
+                            ) if cycle_hours else 0
 
     return {
         "tier1": core_set,

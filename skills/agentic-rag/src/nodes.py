@@ -189,7 +189,7 @@ def _chat_json(system: str, user: str, *, task: str) -> dict:
 def _safe_chat_json(system: str, user: str, *, task: str) -> tuple[dict | None, str | None]:
     try:
         return _chat_json(system, user, task=task), None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         return None, f"{task}:{type(exc).__name__}"
 
 
@@ -225,9 +225,7 @@ def _point_in_time_ok(chunk: ScoredChunk, as_of: str) -> bool:
     eff_to = chunk.chunk.effective_to
     if eff_from and dt.date.fromisoformat(eff_from) > as_of_date:
         return False
-    if eff_to and dt.date.fromisoformat(eff_to) < as_of_date:
-        return False
-    return True
+    return not (eff_to and dt.date.fromisoformat(eff_to) < as_of_date)
 
 
 def make_retrieve_node(index: LocalVectorIndex):
@@ -235,7 +233,7 @@ def make_retrieve_node(index: LocalVectorIndex):
         query = state["query"]
         try:
             retrieved = index.search(query, top_k=RETRIEVE_TOP_K)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
             emit_metric("rag_retrieve_failure", error=type(exc).__name__)
             return {
                 **state,

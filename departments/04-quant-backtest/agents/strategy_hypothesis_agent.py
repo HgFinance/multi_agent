@@ -510,18 +510,18 @@ _REGIME_ROWS_DESC = [
 
 
 def _good_spec(**kw) -> HypothesisSpec:
-    base = dict(
-        title="하락 광폭 후 저SMA20 비율 반등 가설",
-        rationale="연속 하락으로 손절 매도가 몰린 뒤에는 유동성 공급자가 "
+    base = {
+        "title": "하락 광폭 후 저SMA20 비율 반등 가설",
+        "rationale": "연속 하락으로 손절 매도가 몰린 뒤에는 유동성 공급자가 "
                   "반대편에 서고, 광폭 지표가 바닥권이면 되돌림이 나온다.",
-        expected_edge={"type": "mean_reversion", "horizon_days": 5,
+        "expected_edge": {"type": "mean_reversion", "horizon_days": 5,
                        "universe": "KRX 일봉 바스켓"},
-        falsification_criteria=[
+        "falsification_criteria": [
             "SMA20 상회 비율 30% 미만 진입 후 5거래일 수익률 평균이 0 이하",
             "3년 백테스트에서 비용 차감 Sharpe 0.5 미만"],
-        required_data_products=["krx-basket-daily/v1"],
-        observation_refs=["latest_pct_above_sma20",
-                          "max_consecutive_down_breadth_days"])
+        "required_data_products": ["krx-basket-daily/v1"],
+        "observation_refs": ["latest_pct_above_sma20",
+                          "max_consecutive_down_breadth_days"]}
     base.update(kw)
     return HypothesisSpec.model_validate(base)
 
