@@ -41,7 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pit_dataset import DATA_ROOT, content_hash, load_partition  # noqa: E402
+from pit_dataset import DATA_ROOT, content_hash, load_partition
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
@@ -101,7 +101,7 @@ class Market:
     symbols: list[str]
 
     @classmethod
-    def from_rows(cls, rows: list[dict]) -> "Market":
+    def from_rows(cls, rows: list[dict]) -> Market:
         dates = sorted({r["trade_date"] for r in rows})
         opens, closes, symbols = {}, {}, set()
         for r in rows:
@@ -144,7 +144,7 @@ def rebalance_days(dates: list[date], config: dict) -> set[date]:
     raise ValueError(f"알 수 없는 rebalance 정책: {policy!r}")
 
 
-def select_targets(market: "Market", i: int, config: dict) -> list[str]:
+def select_targets(market: Market, i: int, config: dict) -> list[str]:
     """시그널일 t-1 종가까지로 대상 선정 - 전략은 순위 방향만 다르다."""
     strat = config["strategy"]
     if strat not in STRATEGIES:
@@ -188,8 +188,8 @@ def _apply_costs(side: str, notional: float) -> float:
 
 
 def run_backtest(market: Market, config: dict) -> BacktestResult:
-    lookback = int(config["lookback_days"])
-    top_n = int(config["top_n"])
+    _lookback = int(config["lookback_days"])
+    _top_n = int(config["top_n"])
     capital = float(config["initial_capital"])
 
     cash = capital
@@ -393,8 +393,8 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                     returning hypothesis_id
                     """,
                     ("[SMOKE] MOM-20 파이프라인 관통 검증",
-                     "전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
-                     "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다.",
+                     ("전략 가설이 아니라 Dataset->Experiment->Run->Ledger 체인의 "
+                     "재현성 검증이 목적이다. 결과 수치로 전략 판단을 하지 않는다."),
                      json.dumps({"type": "none", "note": "smoke"}),
                      json.dumps({"note": "해시 재검증 실패 또는 비결정성 발견 시 기각"}),
                      json.dumps([f"{name}/{version}"]), RUNNER_VERSION, trace))

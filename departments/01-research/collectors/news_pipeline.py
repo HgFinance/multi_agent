@@ -35,7 +35,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from news_events import NewsRecord, NewsStreamError, StreamStats  # noqa: E402
+from news_events import NewsRecord, NewsStreamError, StreamStats
+from typing_extensions import Self
 
 PIPELINE_VERSION = "research-news-pipeline-v1"
 
@@ -191,9 +192,12 @@ class NewsSink:
         add() 안에서만 시간을 보면 **마지막 기사 뒤에 아무것도 안 오는 동안**
         버퍼가 계속 남는다. Stream 이 한가할 때 이걸 불러준다.
         """
-        if self._buf and self._buf_started is not None:
-            if (self._now() - self._buf_started) >= self._max_delay:
-                self.flush()
+        if (
+            self._buf
+            and self._buf_started is not None
+            and (self._now() - self._buf_started) >= self._max_delay
+        ):
+            self.flush()
 
     def flush(self) -> None:
         """버퍼를 DB 로 밀어 넣는다. 실패하면 예외이며 버퍼를 비우지 않는다."""
@@ -279,7 +283,7 @@ class NewsSink:
         finally:
             self._closed = True
 
-    def __enter__(self) -> NewsSink:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -419,7 +423,7 @@ def derive_roman_aliases(name: str) -> set[str]:
     """
     out: set[str] = set()
     i = 0
-    prefix = name
+    _prefix = name
     # 가장 이른 위치의 연속 매핑 구간 하나를 찾아 변환한다(종목명에 구간이 둘
     # 이상인 경우는 실측에서 없다 - 나오면 그때 확장한다)
     while i < len(name):
@@ -504,16 +508,16 @@ def foreign_symbol_resolver(us_to_krx: dict, instrument_by_symbol: dict, pattern
 
     def resolve(record: NewsRecord):
         out = []
-        seen = set()
+        _seen = set()
         title_lc = record.title.lower()
         for sym in record.symbols:
             krx = us_to_krx.get(sym)
             if krx is None:
                 continue
             iid = instrument_by_symbol.get(krx)
-            if iid is None or iid in seen:
+            if iid is None or iid in _seen:
                 continue
-            seen.add(iid)
+            _seen.add(iid)
             pat = patterns.get(sym)
             if pat and _re.search(pat, title_lc):
                 out.append((iid, "DEDICATED", "0.95"))
@@ -694,7 +698,7 @@ def _check_rebind():
 
 def _check_batch_dedup():
     """같은 기사가 한 배치에 두 번 오면 upsert 가 같은 행을 두 번 건드려 실패한다."""
-    seen = {}
+    _seen = {}
 
     class _StrictRef(_FakeRef):
         def upsert_news_documents(self, records, **kw):

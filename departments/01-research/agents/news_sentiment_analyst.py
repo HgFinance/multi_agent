@@ -33,16 +33,14 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
-from pydantic import BaseModel, Field, ValidationError, field_validator  # noqa: E402
-
-from source_registry import load_project_env  # noqa: E402
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from source_registry import load_project_env
 
 AGENT_VERSION = "research-news-sentiment-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -91,7 +89,7 @@ class SentimentReport:
     symbol: str
     as_of: datetime
     verdict: str                  # SCORED | NO_EVIDENCE | INCONCLUSIVE
-    score: Optional[float]        # -1.0 ~ +1.0 (가중 평균)
+    score: float | None        # -1.0 ~ +1.0 (가중 평균)
     articles_used: int
     articles_dropped: int         # 환각 인용 등으로 버린 판정 수
     evidence: tuple[dict, ...]    # 인용 가능한 근거 (document_id 포함)
@@ -111,7 +109,7 @@ class SentimentReport:
 # 1. fetch - research-api 만 안다
 # ---------------------------------------------------------------------------
 
-def fetch_evidence(symbol: str, *, hours: float, as_of: Optional[datetime],
+def fetch_evidence(symbol: str, *, hours: float, as_of: datetime | None,
                    api_base: str = RESEARCH_API) -> list[dict]:
     url = f"{api_base}/evidence/news?symbol={symbol}&hours={hours}&limit=200"
     if as_of is not None:
@@ -119,7 +117,7 @@ def fetch_evidence(symbol: str, *, hours: float, as_of: Optional[datetime],
     # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02)
     from api_client import get_json
 
-    return get_json(url, persona="news-sentiment-analyst", timeout=20)
+    rows = get_json(url, persona="news-sentiment-analyst", timeout=20)
     # 가중치 상위만 판정에 넣는다 - 오래된 기사 수십 건이 토큰만 태우는 것을 막는다
     rows.sort(key=lambda r: r.get("weight", 0.0), reverse=True)
     return rows[:MAX_ARTICLES]
@@ -342,8 +340,8 @@ def attach_bodies(articles: list[dict], *, reader=None,
     return articles, r.stats.summary()
 
 
-def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
-                      api_base: str = RESEARCH_API) -> Optional[dict]:
+def fetch_story_sizes(symbol: str, *, hours: float, as_of: datetime | None,
+                      api_base: str = RESEARCH_API) -> dict | None:
     """스토리 군집(문서 id -> 스토리 크기). 실패는 None - 가중은 원래대로 간다."""
     url = f"{api_base}/evidence/stories?symbol={symbol}&hours={hours}"
     if as_of is not None:
@@ -360,11 +358,11 @@ def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
             for mid in s.get("member_ids") or []:
                 sizes[str(mid)] = int(s["size"])
         return sizes
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         return None
 
 
-def apply_story_weights(articles: list[dict], sizes: Optional[dict]) -> tuple[list[dict], str]:
+def apply_story_weights(articles: list[dict], sizes: dict | None) -> tuple[list[dict], str]:
     """같은 사건(스토리) N건이면 각 1/N 가중 - 사건 단위 총가중 1 (2026-08-01).
 
     같은 사건을 N개 매체가 받아쓰면 사건 하나가 N배로 점수를 끌던 중복
@@ -383,7 +381,7 @@ def apply_story_weights(articles: list[dict], sizes: Optional[dict]) -> tuple[li
     return articles, (f"스토리 가중 적용 {adjusted}건" if adjusted else "")
 
 
-def run(symbol: str, *, hours: float = 24.0, as_of: Optional[datetime] = None,
+def run(symbol: str, *, hours: float = 24.0, as_of: datetime | None = None,
         llm=None, api_base: str = RESEARCH_API, reader=None,
         read_bodies: bool = True) -> SentimentReport:
     ts = as_of or datetime.now(timezone.utc)
@@ -516,7 +514,7 @@ def _check_body_never_persists():
         def read(self, url):
             return "본문 텍스트 " * 50
 
-    arts, note = attach_bodies([art], reader=_FakeReader())
+    arts, _note = attach_bodies([art], reader=_FakeReader())
     assert arts[0].get("body"), "본문이 안 붙었다"
     batch = JudgementBatch(judgements=[
         ArticleJudgement(document_id="d1", sentiment=1, salience=0.9, reason="ok")])
@@ -564,6 +562,6 @@ if __name__ == "__main__":
         _check_no_evidence()
     except AssertionError as e:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         print("  API 장애 fail-closed     OK")  # URLError 등 - 조용히 0점 내지 않는다
     print("직원 에이전트 6개 영역 통과. 실행은 --run <종목코드>")

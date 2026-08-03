@@ -53,19 +53,19 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
 # sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from llm_client import chat as llm_chat  # noqa: E402
-from number_guard import flag_unmatched  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
-from fundamental_scores import f_score, altman_z  # noqa: E402
-from sector_baselines import (annotate as sector_annotate,  # noqa: E402
-                              cautions_for, resolve_sector)
+from fundamental_scores import altman_z, f_score
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from number_guard import flag_unmatched
+from sector_baselines import annotate as sector_annotate
+from sector_baselines import cautions_for, resolve_sector
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -118,7 +118,7 @@ class FundamentalNote(BaseModel):
 # 1. fetch - research-api 만 안다
 # ---------------------------------------------------------------------------
 
-def fetch_financials(symbol: str, *, as_of: Optional[datetime] = None,
+def fetch_financials(symbol: str, *, as_of: datetime | None = None,
                      api_base: str = RESEARCH_API) -> list[dict]:
     url = f"{api_base}/evidence/financials?symbol={symbol}&limit=500"
     if as_of is not None:
@@ -133,7 +133,7 @@ def fetch_financials(symbol: str, *, as_of: Optional[datetime] = None,
 # 2. compute - 순수 함수. 모든 숫자는 여기서만 나온다
 # ---------------------------------------------------------------------------
 
-def _pdate(v) -> Optional[date]:
+def _pdate(v) -> date | None:
     if v is None:
         return None
     if isinstance(v, datetime):
@@ -174,7 +174,7 @@ def _pick_row(rows: list[dict]) -> tuple[dict, list[str]]:
     return rows[0], cautions
 
 
-def _yoy_pct(cur: Optional[float], prior: Optional[float]) -> Optional[float]:
+def _yoy_pct(cur: float | None, prior: float | None) -> float | None:
     # 전기가 0 이면 증감률이 정의되지 않는다. 음수 전기는 절대값 분모(관행) -
     # 부호 해석은 cautions 가 아니라 값 자체가 아닌 서술 검증이 지킨다.
     if cur is None or prior is None or prior == 0:
@@ -298,7 +298,7 @@ def compute_fundamental_readout(facts: list[dict]) -> dict:
     try:
         fs = f_score(cur_map, prior_map or None)
         zs = altman_z(cur_map)
-    except Exception as e:                        # 종합 점수 실패가 재무 readout 을
+    except Exception as e:                        # 종합 점수 실패가 재무 readout 을  # noqa: BLE001 - intentional fallback boundary
         cautions.append(f"종합 점수 산출 실패: {type(e).__name__}")  # 통째로 죽이지 않는다
     else:
         # ▶ **분모를 감추지 않는다.** 6신호 중 2개만 계산됐는데 "F-Score 2점" 만
@@ -373,7 +373,7 @@ _SYSTEM = """너는 리서치본부 펀더멘털 분석가(RES-05)다.
 {"stance":"POSITIVE","summary":"...","used_fields":["매출액","영업이익률_pct"],"cautions":["..."]}"""
 
 
-def _fmt_krw(v: Optional[float]) -> Optional[str]:
+def _fmt_krw(v: float | None) -> str | None:
     """표시값을 결정론으로 만들어 준다 - 소형 모델의 단위 환산 실수를 막는다."""
     if v is None:
         return None
@@ -468,7 +468,7 @@ def verify(note: FundamentalNote, readout: dict) -> dict:
 # 파이프라인
 # ---------------------------------------------------------------------------
 
-def analyze(symbol: str, *, as_of: Optional[datetime] = None, llm=None,
+def analyze(symbol: str, *, as_of: datetime | None = None, llm=None,
             api_base: str = RESEARCH_API) -> dict:
     """API 조회 -> 계산 -> 서술 -> 검증. API 장애는 예외로 드러난다(fail-closed).
     LLM 장애만 결정론 readout 으로 강등한다 - 숫자는 이미 코드가 만들었다."""
@@ -840,6 +840,6 @@ if __name__ == "__main__":
         _check_api_fail_closed()
     except AssertionError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         print("  API 장애 fail-closed     OK")  # URLError 등 - 조용히 넘기지 않는다
     print("펀더멘털 분석가 10개 영역 통과. 실행은 --run <종목코드>")

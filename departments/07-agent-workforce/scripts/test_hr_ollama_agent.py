@@ -6,7 +6,7 @@
 출력이라 그건 이 스크립트의 역할이 아니다.
 
 사전 준비:
-  ollama pull qwen2.5
+ollama pull qwen3:1.7b
   ollama create agent-hr -f departments/07-agent-workforce/Modelfile
 
 실행: python departments/07-agent-workforce/scripts/test_hr_ollama_agent.py

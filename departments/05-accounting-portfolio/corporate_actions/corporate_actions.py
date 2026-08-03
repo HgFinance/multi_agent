@@ -35,7 +35,7 @@ from uuid import UUID, uuid4
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "ledger"))
 
-from ledger import (  # noqa: E402
+from ledger import (
     CASH,
     REALIZED_PNL,
     SECURITIES,
@@ -44,7 +44,6 @@ from ledger import (  # noqa: E402
     Journal,
     JournalLine,
     Ledger,
-    LedgerError,
     Position,
 )
 
@@ -265,56 +264,56 @@ if __name__ == "__main__":
     def fresh_ledger() -> tuple[Ledger, Position]:
         """자본금 10억 + 100주 @70,000 보유 상태."""
         led = Ledger(fund_id=fund, book_id=book)
-        led.post_capital(Decimal("1000000000"), past, f"cap_{uuid4()}")
+        led.post_capital(Decimal(1000000000), past, f"cap_{uuid4()}")
         led.post(Journal(
             journal_id=uuid4(), fund_id=fund, book_id=book,
             event_type="fill", source_event_id=f"buy_{uuid4()}",
             effective_at=past, accounting_date=past.date(),
             lines=[
-                JournalLine(SECURITIES, debit=Decimal("7000000"), instrument_id=stock,
-                            quantity=Decimal("100"), unit_price=Decimal("70000")),
-                JournalLine(CASH, credit=Decimal("7000000")),
+                JournalLine(SECURITIES, debit=Decimal(7000000), instrument_id=stock,
+                            quantity=Decimal(100), unit_price=Decimal(70000)),
+                JournalLine(CASH, credit=Decimal(7000000)),
             ],
         ))
         positions, _ = led.rebuild()
         return led, positions[stock]
 
     def effective(**kw) -> CorporateAction:
-        base = dict(action_id=f"ca_{uuid4()}", instrument_id=stock,
-                    record_date=past, effective_at=past, status=ActionStatus.EFFECTIVE)
+        base = {"action_id": f"ca_{uuid4()}", "instrument_id": stock,
+                    "record_date": past, "effective_at": past, "status": ActionStatus.EFFECTIVE}
         return CorporateAction(**{**base, **kw})
 
     # 1. 계약 검증 — 말이 안 되는 Action은 만들어지지 않는다
     raises(lambda: effective(action_type=ActionType.CASH_DIVIDEND,
                              amount_per_share=ZERO), "배당금 0")
-    raises(lambda: effective(action_type=ActionType.SPLIT, ratio=Decimal("1")),
+    raises(lambda: effective(action_type=ActionType.SPLIT, ratio=Decimal(1)),
            "비율 1 분할")
     raises(lambda: effective(action_type=ActionType.SYMBOL_CHANGE), "변경 후 종목 없음")
     raises(lambda: CorporateAction(action_id="x", action_type=ActionType.SPLIT,
                                    instrument_id=stock, record_date=now,
-                                   effective_at=past, ratio=Decimal("2")),
+                                   effective_at=past, ratio=Decimal(2)),
            "기준일이 발효일보다 늦음")
 
     # 2. 공시만으로는 분개하지 않는다 (팀 가이드 8.2)
     led, pos = fresh_ledger()
     for bad_status in (ActionStatus.ANNOUNCED, ActionStatus.CONFIRMED, ActionStatus.CANCELLED):
         raises(lambda s=bad_status: apply_corporate_action(
-            led, effective(action_type=ActionType.SPLIT, ratio=Decimal("2"), status=s), pos),
+            led, effective(action_type=ActionType.SPLIT, ratio=Decimal(2), status=s), pos),
             f"{bad_status} 상태로 Posting")
     assert len(led.journals) == 2, "거부됐는데 분개가 생겼다"
 
     # 3. 발효일이 미래면 거부한다
     future = now.replace(year=now.year + 1)
     raises(lambda: apply_corporate_action(led, effective(
-        action_type=ActionType.SPLIT, ratio=Decimal("2"),
+        action_type=ActionType.SPLIT, ratio=Decimal(2),
         record_date=past, effective_at=future), pos), "미래 발효일")
 
     # 4. 선택형은 승인 없이 못 넘어간다
     raises(lambda: apply_corporate_action(led, effective(
-        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal("500"),
+        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal(500),
         mandatory=False), pos), "승인 없는 선택형")
     approved = apply_corporate_action(led, effective(
-        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal("500"),
+        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal(500),
         mandatory=False, approval_id="apr_1"), pos)
     assert approved.event_type == "corporate_action_cash_dividend"
 
@@ -323,38 +322,38 @@ if __name__ == "__main__":
     _, cash_before = led.rebuild()
     div = apply_corporate_action(led, effective(
         action_type=ActionType.CASH_DIVIDEND,
-        amount_per_share=Decimal("500"), withholding_tax=Decimal("7700")), pos)
+        amount_per_share=Decimal(500), withholding_tax=Decimal(7700)), pos)
     positions, cash_after = led.rebuild()
-    gross = Decimal("100") * Decimal("500")          # 50,000
-    assert cash_after - cash_before == gross - Decimal("7700"), "세후 현금이 틀리다"
-    assert led.trial_balance()[TAX_EXPENSE] == Decimal("7700"), "원천징수세가 안 잡혔다"
+    gross = Decimal(100) * Decimal(500)          # 50,000
+    assert cash_after - cash_before == gross - Decimal(7700), "세후 현금이 틀리다"
+    assert led.trial_balance()[TAX_EXPENSE] == Decimal(7700), "원천징수세가 안 잡혔다"
     assert led.trial_balance()[REALIZED_PNL] == -gross, "배당총액이 수익으로 안 잡혔다"
-    assert positions[stock].quantity == Decimal("100"), "배당이 수량을 바꿨다"
+    assert positions[stock].quantity == Decimal(100), "배당이 수량을 바꿨다"
     assert sum(led.trial_balance().values()) == ZERO, "차대가 안 맞는다"
 
     # 6. 기준일 수량으로 계산한다 — 배당락 후 매매가 섞이면 안 된다
     led, pos = fresh_ledger()
     apply_corporate_action(led, effective(
-        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal("500")),
-        pos, record_date_quantity=Decimal("40"))
-    assert led.trial_balance()[REALIZED_PNL] == -Decimal("20000"), \
+        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal(500)),
+        pos, record_date_quantity=Decimal(40))
+    assert led.trial_balance()[REALIZED_PNL] == -Decimal(20000), \
         "현재 수량(100)으로 계산했다. 기준일 수량(40)이어야 한다"
 
     # 7. 원천징수세가 배당총액보다 클 수 없다
     led, pos = fresh_ledger()
     raises(lambda: apply_corporate_action(led, effective(
-        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal("1"),
-        withholding_tax=Decimal("999999")), pos), "세금 > 배당")
+        action_type=ActionType.CASH_DIVIDEND, amount_per_share=Decimal(1),
+        withholding_tax=Decimal(999999)), pos), "세금 > 배당")
 
     # 8. 액면분할 — 수량은 2배, 취득원가 총액과 NAV는 그대로
     led, pos = fresh_ledger()
     _, cash_before = led.rebuild()
     apply_corporate_action(led, effective(
-        action_type=ActionType.SPLIT, ratio=Decimal("2")), pos)
+        action_type=ActionType.SPLIT, ratio=Decimal(2)), pos)
     positions, cash_after = led.rebuild()
-    assert positions[stock].quantity == Decimal("200"), "분할 후 수량이 틀리다"
-    assert positions[stock].average_cost == Decimal("35000"), "평균단가가 안 반토막났다"
-    assert positions[stock].cost_basis == Decimal("7000000"), "취득원가 총액이 변했다"
+    assert positions[stock].quantity == Decimal(200), "분할 후 수량이 틀리다"
+    assert positions[stock].average_cost == Decimal(35000), "평균단가가 안 반토막났다"
+    assert positions[stock].cost_basis == Decimal(7000000), "취득원가 총액이 변했다"
     assert cash_after == cash_before, "분할이 현금을 움직였다"
     # 손익 계정 자체가 안 생겨야 정상이다. 0원 라인도 만들지 않는다
     assert led.trial_balance().get(REALIZED_PNL, ZERO) == ZERO, "분할로 손익이 생겼다"
@@ -365,8 +364,8 @@ if __name__ == "__main__":
     apply_corporate_action(led, effective(
         action_type=ActionType.SPLIT, ratio=Decimal("0.2")), pos)
     positions, _ = led.rebuild()
-    assert positions[stock].quantity == Decimal("20")
-    assert positions[stock].cost_basis == Decimal("7000000"), "역분할이 원가를 바꿨다"
+    assert positions[stock].quantity == Decimal(20)
+    assert positions[stock].cost_basis == Decimal(7000000), "역분할이 원가를 바꿨다"
 
     # 10. 종목코드 변경 — 구 종목은 사라지고 신 종목이 원가를 승계한다
     led, pos = fresh_ledger()
@@ -374,38 +373,38 @@ if __name__ == "__main__":
         action_type=ActionType.SYMBOL_CHANGE, new_instrument_id=new_stock), pos)
     positions, _ = led.rebuild()
     assert stock not in positions, "구 종목이 남아 있다"
-    assert positions[new_stock].quantity == Decimal("100")
-    assert positions[new_stock].average_cost == Decimal("70000"), "평균단가가 승계 안 됐다"
+    assert positions[new_stock].quantity == Decimal(100)
+    assert positions[new_stock].average_cost == Decimal(70000), "평균단가가 승계 안 됐다"
     assert led.trial_balance().get(REALIZED_PNL, ZERO) == ZERO, "종목 변경으로 손익이 생겼다"
 
     # 11. 멱등 — 같은 action_id가 두 번 와도 한 번만 반영된다
     led, pos = fresh_ledger()
-    act = effective(action_type=ActionType.SPLIT, ratio=Decimal("2"))
+    act = effective(action_type=ActionType.SPLIT, ratio=Decimal(2))
     first = apply_corporate_action(led, act, pos)
     before = len(led.journals)
     again = apply_corporate_action(led, act, pos)
     assert again.journal_id == first.journal_id, "같은 Action이 새 분개를 만들었다"
     assert len(led.journals) == before, "중복 분개가 생겼다"
     positions, _ = led.rebuild()
-    assert positions[stock].quantity == Decimal("200"), "두 번 반영돼 400주가 됐다"
+    assert positions[stock].quantity == Decimal(200), "두 번 반영돼 400주가 됐다"
 
     # 12. 포지션이 없거나 종목이 다르면 거부한다
     led, pos = fresh_ledger()
     raises(lambda: apply_corporate_action(led, effective(
-        action_type=ActionType.SPLIT, ratio=Decimal("2")), Position(stock)),
+        action_type=ActionType.SPLIT, ratio=Decimal(2)), Position(stock)),
         "보유 0인 포지션")
     raises(lambda: apply_corporate_action(led, effective(
-        action_type=ActionType.SPLIT, ratio=Decimal("2"),
+        action_type=ActionType.SPLIT, ratio=Decimal(2),
         instrument_id=new_stock), pos), "종목 불일치")
 
     # 13. 정정은 Reversal로만 — 원본 분개는 남는다
     led, pos = fresh_ledger()
     j = apply_corporate_action(led, effective(
-        action_type=ActionType.SPLIT, ratio=Decimal("2")), pos)
+        action_type=ActionType.SPLIT, ratio=Decimal(2)), pos)
     led.reverse(j.journal_id, "발효 취소 통보")
     positions, _ = led.rebuild()
     assert j.status == "reversed", "원본을 지웠다"
-    assert positions[stock].quantity == Decimal("100"), "반대분개 후 수량이 안 돌아왔다"
+    assert positions[stock].quantity == Decimal(100), "반대분개 후 수량이 안 돌아왔다"
     assert sum(led.trial_balance().values()) == ZERO
 
     print("ok - Corporate Action 13개 영역 점검 통과")

@@ -41,7 +41,8 @@ MODULE_VERSION = "research-news-tiers-v1"
 # 한도는 naver_news_collector 가 유일한 출처다. 여기 숫자를 따로 두었더니
 # 실제 25,000 인데 22,500 으로 계획해 Tier2 를 매일 5,700회씩 놀렸다
 # (실측 2026-08-03). 상수를 두 곳에 두면 언젠가 반드시 갈라진다.
-from naver_news_collector import DAILY_QUOTA  # noqa: E402
+from naver_news_collector import DAILY_QUOTA
+
 QUOTA_SOFT_RATIO = 0.9        # 한도의 90% 를 상한으로 - 밤에 조용히 죽는 것보다 낫다
 SECONDS_PER_DAY = 86_400
 
@@ -71,7 +72,7 @@ def plan_tiers(core: list[str], full: list[str], *,
 
     ceiling = int(quota * soft_ratio)
     sweeps_per_day = SECONDS_PER_DAY / core_interval_seconds
-    tier1_calls = int(round(len(core_set) * sweeps_per_day))
+    tier1_calls = round(len(core_set) * sweeps_per_day)
     remaining = ceiling - tier1_calls
 
     if remaining <= 0:
@@ -89,8 +90,8 @@ def plan_tiers(core: list[str], full: list[str], *,
 
     cycle_sweeps = (len(rest) + per_sweep - 1) // per_sweep if per_sweep else 0
     cycle_hours = cycle_sweeps * core_interval_seconds / 3600.0 if cycle_sweeps else 0.0
-    tier2_calls = int(round(len(rest) * (SECONDS_PER_DAY / (cycle_hours * 3600))
-                            )) if cycle_hours else 0
+    tier2_calls = round(len(rest) * (SECONDS_PER_DAY / (cycle_hours * 3600))
+                            ) if cycle_hours else 0
 
     return {
         "tier1": core_set,

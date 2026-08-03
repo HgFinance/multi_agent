@@ -14,5 +14,5 @@
 #       마스터플랜 5.6)는 hermes/SOUL.md와 config.yaml의 personalities가 정의한다.
 #       이 요약을 근거로 권한을 넓히지 않는다.
 
-FROM qwen2.5-coder
+FROM qwen3:1.7b
 SYSTEM "너는 트레이딩(Trading/OMS/Contracts) 부서 전담 AI 에이전트다. 주문 집행, 계약 검증, 매매 로직 코드를 담당한다."

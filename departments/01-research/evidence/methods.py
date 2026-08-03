@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 REGISTRY_VERSION = "research-method-registry-v1"
 
@@ -370,8 +370,8 @@ def _check_keys_unique():
 def _check_invariants_enforced():
     import dataclasses
 
-    base = dict(key="x", name="n", analyst="RES-05", citation="c",
-                status=STATUS_ADOPTED, module="m.py:f")
+    base = {"key": "x", "name": "n", "analyst": "RES-05", "citation": "c",
+                "status": STATUS_ADOPTED, "module": "m.py:f"}
     Method(**base)                                    # 정상
     for bad, why in (
         (dict(base, citation="  "), "인용 없는 등재"),
@@ -431,7 +431,7 @@ def _check_adopted_module_exists():
         if func:
             src = p.read_text(encoding="utf-8")
             if not _re.search(rf"^\s*(?:def|class)\s+{_re.escape(func)}\b",
-                              src, _re.M):
+                              src, _re.MULTILINE):
                 missing_func.append(f"{m.key} -> {path}:{func}")
 
     assert not missing_file, (

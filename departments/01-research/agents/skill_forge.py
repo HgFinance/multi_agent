@@ -38,12 +38,11 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
 # ── 부서 경계 ────────────────────────────────────────────────────────────────
 # 재일님이 소유한 두 본부만. 다른 본부 스킬을 만드는 것은 권한 침범이다.
@@ -166,13 +165,13 @@ _DRAFT_PROMPT = """당신은 리서치본부의 절차를 문서로 굳히는 �
 """
 
 
-def draft_body(cand: SkillCandidate, llm: Callable[[str], str]) -> Optional[str]:
+def draft_body(cand: SkillCandidate, llm: Callable[[str], str]) -> str | None:
     """후보 -> SKILL.md 본문. LLM 은 **이미 정해진 후보의 문서만** 쓴다."""
     samples = "\n".join(f"- {s}" for s in cand.samples) or "- (상세 없음)"
     try:
         body = llm(_DRAFT_PROMPT.format(
             count=cand.count, kind=cand.kind, samples=samples))
-    except Exception:
+    except Exception:  # noqa: BLE001 - intentional fallback boundary
         return None
     if not body or len(body.strip()) < 80:
         return None                        # 빈 껍데기 스킬을 만들지 않는다
@@ -186,7 +185,7 @@ def _frontmatter(cand: SkillCandidate, description: str) -> str:
 
 def forge(candidates: list[SkillCandidate], llm: Callable[[str], str], *,
           skills_dir: Path,
-          now: Optional[datetime] = None) -> list[dict]:
+          now: datetime | None = None) -> list[dict]:
     """후보 -> 실제 스킬 파일. 경계 위반은 **저장하지 않고 사유를 남긴다.**"""
     ts = (now or datetime.now(timezone.utc)).isoformat()
     results = []

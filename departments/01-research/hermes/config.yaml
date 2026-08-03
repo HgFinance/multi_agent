@@ -5,13 +5,18 @@
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #1, 8
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: research-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [research-data-worker, microstructure-worker, technical-signal-worker, fundamental-valuation-worker, news-macro-worker, evidence-rag-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60
@@ -162,3 +167,80 @@ skills:
 usage:
   run: "research-department chat -q 'Build a Research Packet for AAPL'"
   collaborate: "research-department chat -q 'Validate the signal, then deliver a Research Packet to trading-department'"
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+staff_registry:
+  head_count: 1
+  worker_count: 6
+  default_execution_count: 2
+  max_execution_count: 6
+  active_worker_count: 2
+  conditional_worker_count: 4
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+employee_runtime:
+  executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/01-research/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:1.7b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:1.7b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: research.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/01-research/scripts.py
+  failure_action: HOLD_ESCALATE
+workers:
+  research-data-worker:
+    role: Universe and market-data stewardship analyst
+    status: active
+    trigger: always
+    tools: [research.universe.read, research.market_snapshot.read]
+    output: advisory_context
+  microstructure-worker:
+    role: Microstructure and liquidity evidence analyst
+    status: conditional
+    trigger: market_snapshot
+    tools: [research.microstructure.read]
+    output: advisory_context
+  technical-signal-worker:
+    role: Multi-timeframe technical signal analyst
+    status: conditional
+    trigger: market_features
+    tools: [research.technical_features.read]
+    output: advisory_context
+  fundamental-valuation-worker:
+    role: Point-in-time fundamental and valuation analyst
+    status: conditional
+    trigger: fundamentals
+    tools: [research.fundamentals.read]
+    output: advisory_context
+  news-macro-worker:
+    role: News, sentiment, macro and geopolitical evidence analyst
+    status: active
+    trigger: always
+    tools: [research.news.read, research.macro.read]
+    output: advisory_context
+  evidence-rag-worker:
+    role: Evidence retrieval and citation curator
+    status: conditional
+    trigger: evidence_request
+    tools: [research.evidence.search]
+    output: advisory_context

@@ -54,9 +54,9 @@ from typing import TYPE_CHECKING
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from departments.notion_markdown import markdown_to_notion_blocks  # noqa: E402
+from reporting import notion_rich_text_chunks
 
-from reporting import notion_rich_text_chunks  # noqa: E402
+from departments.notion_markdown import markdown_to_notion_blocks
 
 _IMPROVEMENTS_DIR = Path(__file__).resolve().parent / "improvements"
 if str(_IMPROVEMENTS_DIR) not in sys.path:
@@ -113,7 +113,7 @@ def _report_path(candidate_id: str) -> Path:
 
 
 def upload_candidate(
-    candidate: "ImprovementCandidate", events: list["CandidateEvent"],
+    candidate: ImprovementCandidate, events: list[CandidateEvent],
     *, report_md: str = "", env: dict | None = None,
 ) -> dict:
     """candidate(+전이 Event 이력)를 Notion HR DB에 1건 업로드한다. 절대 예외를 던지지 않는다.

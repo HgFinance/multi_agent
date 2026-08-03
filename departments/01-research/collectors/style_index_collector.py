@@ -41,9 +41,8 @@ from pathlib import Path
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))
 
-from macro_collector import FREQ_DAILY, Observation, SeriesSpec  # noqa: E402
-from volatility_index_collector import (  # noqa: E402  (t1511 파싱은 한 곳에만)
-    VolatilityIndexError,
+from macro_collector import FREQ_DAILY, Observation, SeriesSpec
+from volatility_index_collector import (
     parse_block,
     position_in_52w,
 )
@@ -143,10 +142,9 @@ def build_observation(parsed: dict, *, series_code: str, upcode: str,
 
 def collect() -> int:
     sys.path.insert(0, str(_BASE.parent / "repository"))
-    from market_breadth_collector import fetch_index_breadth
     from ls_client import LsRestClient
+    from market_breadth_collector import fetch_index_breadth
     from reference_repository import SupabaseReferenceRepository
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()

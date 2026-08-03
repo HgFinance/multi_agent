@@ -51,7 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
-from news_events import (  # noqa: E402
+from news_events import (
     DEDUP_WINDOW,
     NewsRecord,
     NewsStreamError,
@@ -61,7 +61,7 @@ from news_events import (  # noqa: E402
     build_external_id,
     clean_title,
 )
-from source_registry import SourceRegistry, UseScope, load_project_env  # noqa: E402
+from source_registry import SourceRegistry, UseScope, load_project_env
 
 COLLECTOR_VERSION = "research-naver-news-v1"
 SOURCE_ID = "naver_apihub"
@@ -296,7 +296,10 @@ def relation_for(record: NewsRecord, item: WatchItem,
                  all_names=()) -> tuple[str, str]:
     """(relation_type, confidence). 제목에 종목명(별칭 포함)이 **독립 등장**하면 전용."""
     from news_pipeline import (
-        BODY_MATCH_CONFIDENCE, expand_aliases, names_for, title_has_standalone,
+        BODY_MATCH_CONFIDENCE,
+        expand_aliases,
+        names_for,
+        title_has_standalone,
     )
 
     own = set(names_for(item.name))
@@ -716,7 +719,7 @@ def _collect(top: int = 40, symbols: tuple[str, ...] = ()) -> int:
             f"  종목 연결: 기사 {len(rel)}/{len(got)}건 (전용 {ded}, 복수종목 {multi})"
         )
 
-        new_src, upd_src, id_by_source = ref.sync_data_sources()
+        _new_src, _upd_src, id_by_source = ref.sync_data_sources()
         src = id_by_source.get(SOURCE_ID)
         if src is None:
             raise NaverNewsError(f"data_sources 에 {SOURCE_ID} 가 없다")

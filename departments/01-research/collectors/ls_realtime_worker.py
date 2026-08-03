@@ -40,7 +40,6 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,14 +48,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 #   때문이다. `market_events` 로 받으면 **같은 파일이 두 모듈로 로드되어 클래스가
 #   갈리고 isinstance 가 전부 False 가 된다.** 정규화 결과를 타입으로 분기하는
 #   이 파일에서는 조용히 모든 이벤트가 버려지는 형태로 터진다.
-from contracts.market_events import (  # noqa: E402
+from contracts.market_events import (
     MarketQuote,
     MarketTick,
     QuarantinedEvent,
 )
-from ls_realtime_adapter import normalize  # noqa: E402
-from source_registry import SourceRegistry, load_project_env  # noqa: E402
-from subscription_plan import WEBSOCKET_PATH  # noqa: E402
+from ls_realtime_adapter import normalize
+from source_registry import SourceRegistry, load_project_env
+from subscription_plan import WEBSOCKET_PATH
+from typing_extensions import Self
 
 WORKER_VERSION = "research-ls-realtime-worker-v1"
 SOURCE_ID = "ls_openapi_ws"
@@ -174,9 +174,12 @@ class MarketSink:
 
     def tick(self) -> None:
         """이벤트가 안 와도 시간이 지나면 Flush 한다."""
-        if self._pending and self._started is not None:
-            if (self._now() - self._started) >= self._max_delay:
-                self.flush()
+        if (
+            self._pending
+            and self._started is not None
+            and (self._now() - self._started) >= self._max_delay
+        ):
+            self.flush()
 
     @property
     def _pending(self) -> int:
@@ -208,7 +211,7 @@ class MarketSink:
         finally:
             self._closed = True
 
-    def __enter__(self) -> MarketSink:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -311,7 +314,6 @@ class LsRealtimeWorker:
     async def run(self, *, max_seconds: float | None = None, max_messages: int | None = None):
         import asyncio
 
-        import websockets
 
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -328,7 +330,7 @@ class LsRealtimeWorker:
                 return self.stats
             except (LsRealtimeError, KeyboardInterrupt):
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 attempt += 1
                 self.stats.reconnects += 1
                 key = f"{type(e).__name__}: {str(e)[:70]}" if str(e) else type(e).__name__
@@ -430,7 +432,7 @@ class LsRealtimeWorker:
         if self._on_event is not None:
             try:
                 self._on_event(event)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 key = f"{type(e).__name__}: {str(e)[:60]}"
                 self.stats.observer_errors[key] = (
                     self.stats.observer_errors.get(key, 0) + 1
@@ -506,7 +508,7 @@ def _check_sink_batching():
     from ls_realtime_adapter import normalize as _n
 
     def res(sym):
-        from uuid import uuid5, NAMESPACE_URL
+        from uuid import NAMESPACE_URL, uuid5
 
         return uuid5(NAMESPACE_URL, f"ls://KOSPI/{sym}")
 

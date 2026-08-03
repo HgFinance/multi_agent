@@ -1,10 +1,10 @@
 # Ollama Department Modelfile Guide
 
-Risk·QA의 확정 직원 런타임은 Hermes 부서장과 분리된 LangGraph Worker Graph + Ollama `qwen3:8b`다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 `model`은 부서장 Hermes 모델만 의미한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+현재 8개 부서의 확정 직원 런타임은 Hermes 부서장과 분리된 **직원별 독립 LangGraph Worker Graph + Ollama `qwen3:1.7b`**다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 `model`은 부서장 Hermes 모델만 의미한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)와 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)를 따른다.
 
-현재 직원 모델은 `qwen3:8b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다. 자동 교체는 금지한다. `agent-risk`와 `agent-qa`는 이 직접 호출 경로를 가리지 않는 수동 호환 Alias다.
+현재 직원 모델은 검증 전까지 `qwen3:1.7b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark → HR 제안 → QA 독립 검증 → CEO 승인 후에만 Worker별로 변경한다. 자동 교체와 무제한 재시도는 금지한다. 기존 `Modelfile` alias는 호환·개발용이며, 실행 기준은 각 부서의 `employee_workers.py` Registry다.
 
-> 상태: 8개 조직 Modelfile v2 등록, 일부 Smoke Script 존재, Runtime 통합 미완료
+> 현재 구현 범위: CEO 1, HR 5, Research 6, Trading 6, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5 Worker. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
 >
 > 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)
 >
@@ -30,14 +30,14 @@ Risk·QA의 확정 직원 런타임은 Hermes 부서장과 분리된 LangGraph W
 
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
-| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `agent-ceo` | Prompt 고도화, 수동 Smoke Script |
-| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:14b` | `agent-research` | 실측 후 Base Model 변경 |
-| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen2.5-coder` | `agent-trading` | 파일 등록 완료 |
-| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:8b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:14b` | `agent-quant` | 실측 후 Base Model 변경 |
-| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen2.5` | `agent-accounting` | 파일 등록 완료 |
-| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:8b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen2.5` | `agent-hr` | Prompt 고도화, 수동 Smoke Script |
+| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `qwen3:1.7b` | `agent-ceo` | 현재 CEO Worker 고정값; Hermes Head와 분리 |
+| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:1.7b` | `agent-research` | 현재 Worker 고정값 |
+| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:1.7b` | `agent-trading` | 현재 Worker 고정값 |
+| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:1.7b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
+| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:1.7b` | `agent-quant` | 현재 Worker 고정값 |
+| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen3:1.7b` | `agent-accounting` | 현재 Worker 고정값 |
+| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:1.7b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
+| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen3:1.7b` | `agent-hr` | 현재 Worker 고정값 |
 
 ### 2.1 현재 SYSTEM 역할 요약
 
@@ -68,7 +68,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
-| Hermes Supervisor Model | Risk·QA 부서장은 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:8b` |
+| Hermes Supervisor Model | 8개 부서 Head 모두 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:1.7b` |
 
 따라서 현재 완료 상태는 **Risk/QA Worker Graph 코드·Profile 계약의 Git 등록과 일부 Hermes Runtime 실행**이다. 로컬 Ollama 모델 다운로드·Health, 호환 Alias Build, 공통 Gateway와 Production 배포는 별도 운영 증거가 필요한 경계다.
 
@@ -76,10 +76,9 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 
 | Base Model | 배치 조직 | 의도 | 허용 업무 |
 |---|---|---|---|
-| `hermes3` | CEO, Risk, AI QA | 지시 준수와 검토 중심 업무 | 보고 초안, Risk 설명, Finding 분류 |
-| `qwen3:14b` | Research, Quant | 실측 Eval에서 채택한 분석·구조화 업무 | Research Packet 서술, 가설·실험 설명 |
-| `qwen2.5` | Accounting, Workforce | 일반 문서·요약 업무 | Break 설명, 인력 계획 초안 |
-| `qwen2.5-coder` | Trading | 코드와 구조화된 기술 작업 | 계약·코드 검토, 주문 로직 초안 |
+| `hermes3` | Historical alias only | 이전 로컬 검토 실험 | 현재 Worker에 자동 배정하지 않음 |
+| `qwen3:1.7b` | 전 부서 Worker | 현재 고정 기본값 | 역할별 Context, 근거 요약, 조건부 검토 |
+| 향후 light/standard/heavy 후보 | Worker별 benchmark 대상 | 현재 자동 배정하지 않음 | HR 제안·QA 검증·CEO 승인 후 변경 |
 
 Base Model 선택은 초기 가설이다. 모델 이름만으로 업무 적합성을 확정하지 않는다. 본부별 Eval 결과, 지연, 메모리와 비용을 비교해 유지하거나 변경한다.
 
@@ -128,10 +127,7 @@ Ollama 공식 절차는 Base Model을 준비한 뒤 `ollama create <alias> -f <M
 ### 6.1 Base Model 준비
 
 ```powershell
-ollama pull hermes3
-ollama pull qwen2.5
-ollama pull qwen2.5-coder
-ollama pull qwen3:14b
+ollama pull qwen3:1.7b
 ```
 
 ### 6.2 본부별 Alias 생성
@@ -262,7 +258,7 @@ Prompt와 응답 전문은 무조건 Log에 남기지 않는다. Data Classifica
 
 ## 9. Version과 재현성
 
-현재 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder`는 명시적 Size·Quantization Tag가 없다. Prototype에는 사용할 수 있지만 Production Build 재현성은 부족하다.
+과거 Prototype의 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder` 기록은 현재 Worker 기본값이 아니다. 현재 Worker Modelfile은 `FROM qwen3:1.7b`이며, 변경 시에는 Worker Model Matrix 승인 절차로 digest와 재현성을 고정한다.
 
 Production 승격 전 다음을 고정한다.
 

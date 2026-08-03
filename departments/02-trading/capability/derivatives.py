@@ -37,8 +37,8 @@ Greeks는 여기서 계산하지 않는다. Capability로 선언만 하고 실�
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -48,8 +48,8 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "contracts"))
 sys.path.insert(0, str(_HERE.parent / "multileg"))
 
-from contracts import Side  # noqa: E402
-from intent_group import (  # noqa: E402
+from contracts import Side
+from intent_group import (
     AtomicityPolicy,
     FailurePolicy,
     IntentGroup,
@@ -57,7 +57,7 @@ from intent_group import (  # noqa: E402
     PositionEffect,
 )
 
-ZERO = Decimal("0")
+ZERO = Decimal(0)
 
 
 class ContractKind(StrEnum):
@@ -239,7 +239,7 @@ def check_order_capability(
             )
 
     if contract is not None:
-        as_of = as_of or date.today()
+        as_of = as_of or datetime.now(timezone.utc).date()
         if contract.is_expired_at(as_of):
             reasons.append(f"만기({contract.expiry_date})가 지난 계약입니다")
         elif contract.days_to_expiry(as_of) == 0 and not allow_expiry_day:
@@ -372,45 +372,45 @@ if __name__ == "__main__":
         return DerivativeContract(
             instrument_id=uuid4(), contract_kind=kind,
             expiry_date=expiry or (today + timedelta(days=30)),
-            contract_multiplier=Decimal("250000"),
-            settlement_type=settle, strike_price=Decimal("350"),
+            contract_multiplier=Decimal(250000),
+            settlement_type=settle, strike_price=Decimal(350),
             exercise_style=style, underlying_instrument_id=k200,
         )
 
     def profile(**kw) -> CapabilityProfile:
-        base = dict(
-            capability_profile_id=uuid4(), profile_code="cash-long-only", version=1,
-            status=ProfileStatus.ACTIVE,
-            required_instruments=frozenset({"EQUITY"}),
-            execution_capabilities=frozenset({"market", "limit"}),
-            risk_capabilities=frozenset({"position_limit"}),
-            accounting_capabilities=frozenset({"double_entry"}),
-        )
+        base = {
+            "capability_profile_id": uuid4(), "profile_code": "cash-long-only", "version": 1,
+            "status": ProfileStatus.ACTIVE,
+            "required_instruments": frozenset({"EQUITY"}),
+            "execution_capabilities": frozenset({"market", "limit"}),
+            "risk_capabilities": frozenset({"position_limit"}),
+            "accounting_capabilities": frozenset({"double_entry"}),
+        }
         return CapabilityProfile(**{**base, **kw})
 
     # 1. 계약 검증 — 말이 안 되는 파생 계약은 만들어지지 않는다
     raises(lambda: future(mult="0"), "승수 0")
     raises(lambda: DerivativeContract(
         instrument_id=uuid4(), contract_kind=ContractKind.CALL,
-        expiry_date=today, contract_multiplier=Decimal("1"),
+        expiry_date=today, contract_multiplier=Decimal(1),
         settlement_type=SettlementType.CASH), "행사가 없는 콜")
     raises(lambda: DerivativeContract(
         instrument_id=uuid4(), contract_kind=ContractKind.PUT,
-        expiry_date=today, contract_multiplier=Decimal("1"),
+        expiry_date=today, contract_multiplier=Decimal(1),
         settlement_type=SettlementType.CASH,
-        strike_price=Decimal("100")), "행사 방식 없는 풋")
+        strike_price=Decimal(100)), "행사 방식 없는 풋")
     raises(lambda: future().__class__(
         instrument_id=uuid4(), contract_kind=ContractKind.FUTURE,
-        expiry_date=today, contract_multiplier=Decimal("1"),
+        expiry_date=today, contract_multiplier=Decimal(1),
         settlement_type=SettlementType.CASH, margin_currency="won"), "통화 코드 오류")
 
     # 2. 명목금액은 승수를 곱한다 — 이걸 빼먹으면 한도가 조용히 느슨해진다
     f = future()
-    assert f.notional(Decimal("1"), Decimal("350")) == Decimal("87500000"), \
+    assert f.notional(Decimal(1), Decimal(350)) == Decimal(87500000), \
         "승수가 빠졌다. 8,750만원짜리를 350원으로 계산했다"
-    assert f.notional(Decimal("2"), Decimal("350")) == Decimal("175000000")
-    raises(lambda: f.notional(Decimal("0"), Decimal("350")), "수량 0")
-    raises(lambda: f.notional(Decimal("1"), Decimal("0")), "가격 0")
+    assert f.notional(Decimal(2), Decimal(350)) == Decimal(175000000)
+    raises(lambda: f.notional(Decimal(0), Decimal(350)), "수량 0")
+    raises(lambda: f.notional(Decimal(1), Decimal(0)), "가격 0")
 
     # 3. 현물 주문은 통과한다 (초기 시장 KOSPI/KOSDAQ 현물)
     v = check_order_capability(profile(), "EQUITY")
@@ -477,7 +477,7 @@ if __name__ == "__main__":
     # 10. Roll은 2-Leg ALL_OR_NONE 그룹이다 (청산과 진입이 나뉘면 안 된다)
     nxt = future(inst=k200_next, expiry=today + timedelta(days=120))
     g = build_roll_group(trade_case_id=case, fund_id=fund, expiring=f,
-                         next_contract=nxt, quantity=Decimal("2"),
+                         next_contract=nxt, quantity=Decimal(2),
                          side=Side.BUY, idempotency_key="roll_1")
     assert g.atomicity_policy is AtomicityPolicy.ALL_OR_NONE
     assert g.failure_policy is FailurePolicy.CANCEL_ALL
@@ -486,54 +486,54 @@ if __name__ == "__main__":
     assert close_leg.side is Side.SELL and close_leg.position_effect is PositionEffect.CLOSE
     assert open_leg.side is Side.BUY and open_leg.position_effect is PositionEffect.OPEN
     assert close_leg.instrument_id == k200 and open_leg.instrument_id == k200_next
-    assert open_leg.contract_multiplier == Decimal("250000"), "Leg에 승수가 안 실렸다"
+    assert open_leg.contract_multiplier == Decimal(250000), "Leg에 승수가 안 실렸다"
 
     # 11. Roll 계약 검증
     raises(lambda: build_roll_group(trade_case_id=case, fund_id=fund, expiring=f,
-                                    next_contract=f, quantity=Decimal("1"),
+                                    next_contract=f, quantity=Decimal(1),
                                     side=Side.BUY, idempotency_key="r"), "같은 계약")
     raises(lambda: build_roll_group(trade_case_id=case, fund_id=fund, expiring=nxt,
-                                    next_contract=f, quantity=Decimal("1"),
+                                    next_contract=f, quantity=Decimal(1),
                                     side=Side.BUY, idempotency_key="r"), "차기 만기가 더 이름")
     raises(lambda: build_roll_group(trade_case_id=case, fund_id=fund, expiring=f,
-                                    next_contract=option(), quantity=Decimal("1"),
+                                    next_contract=option(), quantity=Decimal(1),
                                     side=Side.BUY, idempotency_key="r"), "계약 종류 다름")
 
     # 12. Exercise/Assignment — 능동 행사는 승인이 필요하다
     call = option()
-    raises(lambda: ExerciseEvent(contract=call, quantity=Decimal("1"),
+    raises(lambda: ExerciseEvent(contract=call, quantity=Decimal(1),
                                  is_assignment=False, as_of=call.expiry_date),
            "승인 없는 능동 행사")
-    ok = ExerciseEvent(contract=call, quantity=Decimal("1"), is_assignment=False,
+    ok = ExerciseEvent(contract=call, quantity=Decimal(1), is_assignment=False,
                        as_of=call.expiry_date, approval_id="apr_1")
-    assert ok.underlying_quantity == Decimal("250000"), "승수가 안 곱해졌다"
+    assert ok.underlying_quantity == Decimal(250000), "승수가 안 곱해졌다"
     assert ok.cash_amount == ZERO, "현금정산인데 인수도 금액이 나왔다"
 
     # 배정은 우리가 고른 게 아니라 승인이 필요 없다
-    assigned = ExerciseEvent(contract=call, quantity=Decimal("1"), is_assignment=True,
+    assigned = ExerciseEvent(contract=call, quantity=Decimal(1), is_assignment=True,
                              as_of=call.expiry_date)
-    assert assigned.underlying_quantity == Decimal("250000")
+    assert assigned.underlying_quantity == Decimal(250000)
 
     # 13. 유럽형은 만기일에만, 미국형은 만기 전에도
-    raises(lambda: ExerciseEvent(contract=call, quantity=Decimal("1"),
+    raises(lambda: ExerciseEvent(contract=call, quantity=Decimal(1),
                                  is_assignment=True, as_of=today), "유럽형 조기 행사")
     american = option(style=ExerciseStyle.AMERICAN)
-    early = ExerciseEvent(contract=american, quantity=Decimal("1"),
+    early = ExerciseEvent(contract=american, quantity=Decimal(1),
                           is_assignment=True, as_of=today)
-    assert early.underlying_quantity == Decimal("250000")
+    assert early.underlying_quantity == Decimal(250000)
 
     # 만기 지난 계약은 행사할 수 없다
     dead = option(style=ExerciseStyle.AMERICAN, expiry=today - timedelta(days=1))
-    raises(lambda: ExerciseEvent(contract=dead, quantity=Decimal("1"),
+    raises(lambda: ExerciseEvent(contract=dead, quantity=Decimal(1),
                                  is_assignment=True, as_of=today), "만기 지난 행사")
     # 선물은 행사 대상이 아니다
-    raises(lambda: ExerciseEvent(contract=f, quantity=Decimal("1"),
+    raises(lambda: ExerciseEvent(contract=f, quantity=Decimal(1),
                                  is_assignment=True, as_of=today), "선물 행사")
 
     # 14. 실물 인수도는 행사가 x 기초수량이 오간다
     physical = option(settle=SettlementType.PHYSICAL, style=ExerciseStyle.AMERICAN)
-    ev = ExerciseEvent(contract=physical, quantity=Decimal("1"),
+    ev = ExerciseEvent(contract=physical, quantity=Decimal(1),
                        is_assignment=True, as_of=today)
-    assert ev.cash_amount == Decimal("350") * Decimal("250000"), ev.cash_amount
+    assert ev.cash_amount == Decimal(350) * Decimal(250000), ev.cash_amount
 
     print("ok - Derivatives Capability 14개 영역 점검 통과")

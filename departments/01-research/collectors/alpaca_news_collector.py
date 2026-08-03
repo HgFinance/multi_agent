@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from source_registry import SourceRegistry, UseScope, load_project_env  # noqa: E402
+from source_registry import SourceRegistry, UseScope, load_project_env
 
 COLLECTOR_VERSION = "research-alpaca-news-v1"
 SOURCE_ID = "alpaca_news"
@@ -511,7 +511,7 @@ def stream_news(
                     raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
                 except asyncio.TimeoutError:
                     return seen
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                     raise AlpacaNewsError(f"스트림이 끊겼다: {e}") from None
                 if not raw:
                     continue

@@ -85,8 +85,8 @@ _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-from langsmith import tracing_context  # noqa: E402
+from langgraph.graph import END, StateGraph
+from langsmith import tracing_context
 
 PIPELINE_VERSION = "trading-debate-pipeline-v1"
 
@@ -341,7 +341,7 @@ def _parse_json_block(out: str, required: tuple[str, ...], who: str) -> dict:
         if k not in note:
             raise ValueError(f"{who} 결과에 {k} 가 없다 - 초안 거부")
     if not isinstance(note.get("claim_refs"), list):
-        raise ValueError(f"{who} 의 claim_refs 가 배열이 아니다 - 초안 거부")
+        raise TypeError(f"{who} 의 claim_refs 가 배열이 아니다 - 초안 거부")
     return note
 
 
@@ -394,7 +394,7 @@ def _researcher(state: DebateState, *, key: str, persona: str, build_task,
             note = _parse_json_block(call(persona_text, task + repair), required, who)
             note["attempts"] = attempt
             return {key: note}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
             last = exc
             # 일반 문구만으로는 같은 실수를 반복한다 - 무엇이 거부됐는지 알려준다(리서치본부 실측).
             repair = (f"\n\nYour previous reply was rejected ({_sanitize(exc)}). "
@@ -486,7 +486,7 @@ def notion_report(state: DebateState, *, uploader=None) -> dict:
     upload = uploader or upload_debate
     try:
         result = upload(out, report_md=report_md)
-    except Exception as exc:   # reporter 는 원래 예외를 안 던지지만, 던져도 여기서 멈춘다
+    except Exception as exc:   # reporter 는 원래 예외를 안 던지지만, 던져도 여기서 멈춘다  # noqa: BLE001 - intentional fallback boundary
         result = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
     return {"notion_upload": result, "report_markdown": report_md}
 
@@ -553,7 +553,7 @@ def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None) -> 
         with tracing_context(project_name=_ls_project()):
             state = build_pipeline(chat=chat, uploader=uploader).invoke(
                 {"research_packet": research_packet, "fallbacks": []})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         state = {"research_packet": research_packet, "claims": {}, "debate_opened": False,
                  "bull": None, "bear": None, "grounded": False, "escalate": True,
                  "fallbacks": [_fallback("pipeline", exc)]}

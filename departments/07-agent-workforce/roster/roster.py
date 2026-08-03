@@ -166,12 +166,14 @@ def compute_artifact_hash(submission: ProfileVersionSubmission) -> str:
 
 def validate_status_change(request: StatusChangeRequest) -> None:
     """불변식 2 - ACTIVE 전이는 QA Eval과 CEO 승인 둘 다 있어야 한다."""
-    if request.to_status is EmploymentStatus.ACTIVE:
-        if not request.qa_eval_run_id or not request.ceo_approval_id:
-            raise MissingActivationEvidenceError(
-                "ACTIVE 전이는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다 "
-                f"(qa_eval_run_id={request.qa_eval_run_id!r}, ceo_approval_id={request.ceo_approval_id!r})"
-            )
+    if (
+        request.to_status is EmploymentStatus.ACTIVE
+        and (not request.qa_eval_run_id or not request.ceo_approval_id)
+    ):
+        raise MissingActivationEvidenceError(
+            "ACTIVE 전이는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다 "
+            f"(qa_eval_run_id={request.qa_eval_run_id!r}, ceo_approval_id={request.ceo_approval_id!r})"
+        )
 
 
 class RosterRepository:
@@ -287,7 +289,7 @@ if __name__ == "__main__":
     repo = InMemoryRosterRepository()
     repo.seed_agent(AgentSummary(
         agent_id="a1", employee_code="HR-00", display_name="agent-workforce-supervisor",
-        department_code="AGENT-WORKFORCE", role_code="HR-00",
+        department_code="hr-department", role_code="HR-00",
         employment_status=EmploymentStatus.CANDIDATE, current_version=0,
         current_profile_version=None, owner_user_id=None,
     ))

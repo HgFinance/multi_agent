@@ -3,6 +3,9 @@
 # LLM 환각·근거 검증, 전략/모델 재현성, 권한분리·Audit Finding 추적, Agent/Feed 운영 모니터링을 담당하는 6개 본부 전체 대상 독립 감사 부서
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #6, 5.6, 8, 9.1
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
+# 현재 역할 경계(2026-08-03): QA는 Evidence QA, Hallucination, Model/Internal Audit,
+# Ops/Permission, Incident 검증을 소유한다. Policy RAG와 Risk 개인 DB는 Risk 범위다.
+# PIKE-RAG/Light-RAG는 전사 적용 완료가 아니라 corpus·평가셋 준비 후 검토할 후보 기술이다.
 
 model:
   provider: openai-codex
@@ -25,6 +28,10 @@ env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: qa-audit-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [evidence-qa-worker, hallucination-critic-worker, model-and-internal-audit-worker, ops-and-permission-worker, incident-postmortem-worker]
   max_turns: 100
   reasoning_effort: high
   timeout_seconds: 60  # 개별 명령어 타임아웃
@@ -211,6 +218,7 @@ staff_registry:
   conditional_worker_count: 4
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
+  runtime_personalities: [evidence-qa-worker, hallucination-critic-worker, model-and-internal-audit-worker, ops-and-permission-worker, incident-postmortem-worker]
   legacy_personas:
     source: agent.personalities
     runtime: compatibility_only
@@ -222,12 +230,13 @@ employee_runtime:
   worker_graph_module: departments/06-ai-qa-audit/qa_employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
-  model_default: qwen3:8b
+  model_default: qwen3:1.7b
   base_url_env: OLLAMA_BASE_URL
   model_selection:
-    active_model: qwen3:8b
+    active_model: qwen3:1.7b
     candidate_source: ollama list
-    selection_policy: fixed_until_model_eval_approved
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
     change_control: benchmark_then_hr_and_qa_approval
   output_contract: qa.worker-context.v1
   max_retries: 2
@@ -237,32 +246,38 @@ employee_runtime:
 
 workers:
   evidence-qa-worker:
+    role: Evidence and citation QA analyst
     status: active
+    trigger: always
     replaces: [evidence-qa-agent]
     tools: [qa.evidence.check]
     output: advisory_context
   hallucination-critic-worker:
+    role: Hallucination and contradiction critic
     status: conditional
     replaces: [hallucination-critic]
-    trigger: unsupported_or_contradicted_claim_exists
+    trigger: when_unsupported_claim_exists
     tools: [qa.evidence.rag]
     output: advisory_context
   model-and-internal-audit-worker:
+    role: Model risk and internal audit analyst
     status: conditional
     replaces: [model-risk-agent, internal-audit-agent]
-    trigger: model_or_audit_input_exists
+    trigger: when_audit_input_exists
     tools: [qa.model_risk.evaluate, qa.internal_audit.evaluate]
     output: advisory_context
   ops-and-permission-worker:
+    role: Agent operations and tool permission analyst
     status: conditional
     replaces: [agent-ops-monitor, tool-permission-security-reviewer]
-    trigger: ops_or_permission_input_exists
+    trigger: when_ops_input_exists
     tools: [qa.ops.evaluate, qa.tool_permission.check]
     output: advisory_context
   incident-postmortem-worker:
+    role: Incident timeline and postmortem analyst
     status: conditional
     replaces: [incident-postmortem-agent]
-    trigger: incident_exists
+    trigger: when_incident_exists
     tools: [qa.incident.record]
     output: advisory_context
 

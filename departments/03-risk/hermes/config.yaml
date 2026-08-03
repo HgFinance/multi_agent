@@ -4,6 +4,9 @@
 # 실제 승인·축소·거부의 바인딩 집행과 한도 관리는 결정론적 Risk Engine이 담당 (5.3, 5.9절) — 에이전트는 원장을 직접 변경하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #3, 5.6, 8, 9.1, 11
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
+# 현재 역할 경계(2026-08-03): Policy RAG는 Risk의 compliance-policy-worker가 소유한다.
+# Research의 evidence-rag-worker와 QA의 Evidence/Hallucination Audit은 각각 연구 근거와 독립 감사 범위다.
+# PIKE-RAG/Light-RAG는 전사 적용 완료가 아닌 향후 평가·도입 후보이며, 현재 baseline은 skills/agentic-rag다.
 
 model:
   provider: openai-codex
@@ -26,6 +29,10 @@ env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: risk-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [market-liquidity-worker, pre-trade-risk-worker, compliance-policy-worker, derivatives-counterparty-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60  # 개별 명령어 타임아웃
@@ -162,6 +169,7 @@ staff_registry:
   conditional_worker_count: 2
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
+  runtime_personalities: [market-liquidity-worker, pre-trade-risk-worker, compliance-policy-worker, derivatives-counterparty-worker]
   legacy_personas:
     source: agent.personalities
     runtime: compatibility_only
@@ -173,12 +181,13 @@ employee_runtime:
   worker_graph_module: departments/03-risk/risk_employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
-  model_default: qwen3:8b
+  model_default: qwen3:1.7b
   base_url_env: OLLAMA_BASE_URL
   model_selection:
-    active_model: qwen3:8b
+    active_model: qwen3:1.7b
     candidate_source: ollama list
-    selection_policy: fixed_until_model_eval_approved
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
     change_control: benchmark_then_hr_and_qa_approval
   output_contract: risk.worker-context.v1
   max_retries: 2
@@ -188,25 +197,31 @@ employee_runtime:
 
 workers:
   market-liquidity-worker:
+    role: Market and liquidity risk analyst
     status: active
+    trigger: always
     replaces: [market-liquidity-risk-agent]
     tools: [risk.trading_state.read, risk.p1.snapshot]
     output: advisory_context
   pre-trade-risk-worker:
+    role: Pre-trade deterministic gate analyst
     status: active
+    trigger: always
     replaces: [pre-trade-risk-analyst]
     tools: [risk.case.check]
     output: advisory_context
   compliance-policy-worker:
+    role: Point-in-time policy evidence analyst
     status: conditional
     replaces: [compliance-policy-agent]
-    trigger: compliance_evidence_exists
+    trigger: when_compliance_evidence_exists
     tools: [risk.compliance.check]
     output: advisory_context
   derivatives-counterparty-worker:
+    role: Derivatives and counterparty exposure analyst
     status: conditional
     replaces: [derivatives-margin-risk-agent, operational-counterparty-risk-agent]
-    trigger: counterparty_or_derivatives_signal_exists
+    trigger: when_counterparty_or_derivatives_signal_exists
     tools: [risk.trading_state.record.read]
     output: advisory_context
 

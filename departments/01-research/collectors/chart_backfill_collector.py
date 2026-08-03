@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from source_registry import load_project_env  # noqa: E402
+from source_registry import load_project_env
 
 COLLECTOR_VERSION = "research-chart-backfill-v1"
 KST = timezone(timedelta(hours=9))
@@ -69,7 +70,9 @@ def parse_daily(row: dict) -> Bar:
 def parse_minute(row: dict, *, ncnt: int = 1) -> Bar:
     # time 은 봉의 끝이다. bucket_time 은 관례상 시작으로 둔다 - 09:01:00 끝의
     # 1분봉 bucket 은 09:00:00. (bars_1m 연속집계의 time_bucket 과 같은 기준)
-    end = datetime.strptime(str(row["date"]) + f"{int(row['time']):06d}", "%Y%m%d%H%M%S")
+    end = datetime.strptime(  # noqa: DTZ007 - exchange-local timestamp receives KST below
+        str(row["date"]) + f"{int(row['time']):06d}", "%Y%m%d%H%M%S"
+    )
     start = end.replace(tzinfo=KST) - timedelta(minutes=ncnt)
     return _bar(start, "1M" if ncnt == 1 else f"{ncnt}M", row)
 
@@ -163,7 +166,6 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str) -> tuple[int,
 
 def _symbols_and_ids(symbols: tuple[str, ...]):
     import psycopg2
-
     from news_watch_service import parse_watchlist_file
 
     if not symbols:
@@ -186,7 +188,6 @@ def _symbols_and_ids(symbols: tuple[str, ...]):
 
 def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int | None) -> int:
     import psycopg2
-
     from ls_client import LsRestClient
 
     pairs = _symbols_and_ids(symbols)

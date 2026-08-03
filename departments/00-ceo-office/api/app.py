@@ -51,23 +51,80 @@ _BASE = Path(__file__).resolve().parent.parent
 _MANDATE_DIR = _BASE / "src" / "mandate"
 _REPORTING_DIR = _BASE / "src" / "reporting"
 _NOTIFICATION_DIR = _BASE / "src" / "notification"
-for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR):
+_APPROVAL_DIR = _BASE / "src" / "approval"
+_CASE_DIR = _BASE / "src" / "case"
+_ESCALATION_DIR = _BASE / "src" / "escalation"
+for _p in (
+    _MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR, _ESCALATION_DIR
+):
     sys.path.insert(0, str(_p))
 
-from daily_report import (  # noqa: E402
+from approval import (
+    AlreadyDecidedError,
+    ApprovalDecision,
+    ApprovalExpiredError,
+    ApprovalRecord,
+    InMemoryApprovalRepository,
+    ObjectType,
+    OwnerApprovalNotSupportedError,
+    RequiredRole,
+    UnauthorizedDeciderError,
+)
+from approval import (
+    decide as decide_approval,
+)
+from approval import (
+    request_approval as build_approval_request,
+)
+from approval import (
+    revoke as revoke_approval,
+)
+from case_root import (
+    CaseEvent,
+    CaseRecord,
+    CaseStatus,
+    IllegalCaseTransition,
+    InMemoryCaseRepository,
+    build_display_id,
+)
+from case_root import (
+    open_case as open_case_root,
+)
+from case_root import (
+    transition as transition_case,
+)
+from daily_report import (
     DailyReportAssembler,
     DailyReportSections,
     InMemoryReportRunRepository,
     SnapshotRef,
 )
-from lifecycle import ActivationResult, MandateActivationService, UserApproval  # noqa: E402
-from notification import (  # noqa: E402
+from escalation import (
+    EscalationRecord,
+    EscalationStatus,
+    IllegalEscalationTransition,
+    InMemoryEscalationRepository,
+    MissingResolutionError,
+    Severity,
+)
+from escalation import (
+    open_escalation as open_escalation_record,
+)
+from escalation import (
+    transition as transition_escalation,
+)
+from lifecycle import (
+    ActivationResult,
+    MandateActivationService,
+    UserApproval,
+)
+from notification import (
     InMemoryNotificationRepository,
     NotificationRequest,
     NotificationService,
 )
-from policy import MandatePolicy  # noqa: E402
-from service import (  # noqa: E402
+from policy import MandatePolicy
+from service import (
     ChangeDirection,
     CurrencyMismatchError,
     FundNotFoundError,
@@ -76,7 +133,10 @@ from service import (  # noqa: E402
 )
 
 try:
-    from postgres_repository import MandatePersistenceError, PostgresMandateVersionRepository
+    from postgres_repository import (
+        MandatePersistenceError,
+        PostgresMandateVersionRepository,
+    )
 except ImportError:  # psycopg2 미설치 환경에서도 앱 자체는 뜬다
     PostgresMandateVersionRepository = None  # type: ignore[assignment,misc]
 
@@ -93,16 +153,34 @@ try:
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
 
+try:
+    from postgres_approval_repository import PostgresApprovalRepository
+except ImportError:
+    PostgresApprovalRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_case_repository import PostgresCaseRepository
+except ImportError:
+    PostgresCaseRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_escalation_repository import PostgresEscalationRepository
+except ImportError:
+    PostgresEscalationRepository = None  # type: ignore[assignment,misc]
+
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
 
-from redis_event_bus import (  # noqa: E402
+from redis_event_bus import (
     DEFAULT_GROUP as _GOVERNANCE_EVENT_GROUP,
+)
+from redis_event_bus import (
     DEFAULT_STREAM as _GOVERNANCE_EVENT_STREAM,
+)
+from redis_event_bus import (
     GovernanceEventBusError,
     RedisEventBus,
 )
-
 
 # --- Request/Response 모델 ---------------------------------------------------
 
@@ -143,6 +221,125 @@ class NotificationRequestIn(BaseModel):
     payload: dict = {}
     severity: str | None = None
     now: datetime
+
+
+# GOV-02 1단계 승인 모델. 위 ApprovalIn(Mandate 활성화 시 '사용자 승인' 증적)과 다른 개념이라
+# 이름을 구분한다 - 저건 lifecycle.py의 UserApproval이고 이건 governance.approvals 행이다.
+
+
+class ApprovalRequestIn(BaseModel):
+    """POST /governance/v1/approvals (스펙 2.2 request_approval Request 그대로)."""
+
+    object_type: ObjectType
+    object_id: str
+    required_role: RequiredRole
+    fund_id: str
+    reason: str | None = None
+    expires_at: datetime | None = None
+    conditions: dict = {}
+    idempotency_key: str | None = Field(
+        default=None,
+        description="스펙 2.2 필드. 실제 중복 방지는 DDL의 "
+                    "unique(object_type, object_id, required_role)가 하므로 여기서 별도로 "
+                    "저장하지 않는다 - governance.approvals에 이 컬럼이 없다.",
+    )
+
+
+class ApprovalDecisionIn(BaseModel):
+    """POST /governance/v1/approvals/{approval_id}/decide.
+
+    스펙에 이름이 없는 제안 엔드포인트다(2.2는 request_approval만 확정). 요청 생성과 결정
+    기록을 분리해야 하는 이유는 권한이 다르기 때문이다 - approval.py 불변식 2 참고.
+
+    actor_department는 호출자가 자기 부서를 밝히는 값이고, 이 API는 그것이 required_role과
+    맞는지만 결정론적으로 검사한다. 실제 신원 증명(mTLS/JWT 등)은 Platform 계층 몫이며
+    아직 없다 - 그 전까지 이 검사는 '실수 방지'이고 '침입 방지'가 아니다(투명하게 남긴다).
+    """
+
+    decision: ApprovalDecision
+    actor_department: str = Field(min_length=1)
+    at: datetime
+    actor_agent_id: str | None = Field(
+        default=None,
+        description="결정한 Agent. workforce.agent_profiles FK이므로 Roster에 등록된 "
+                    "agent_id여야 한다(미등록 uuid는 DB가 거절).",
+    )
+    actor_user_id: str | None = Field(
+        default=None,
+        description="사람이 찍은 승인일 때만 채운다. governance.user_profiles FK.",
+    )
+    conditions: dict | None = None
+    reason: str | None = None
+
+
+class ApprovalRevokeIn(BaseModel):
+    actor_department: str = Field(min_length=1)
+    at: datetime
+    reason: str = Field(min_length=1)
+    actor_agent_id: str | None = None
+    actor_user_id: str | None = None
+
+
+class CreateCaseIn(BaseModel):
+    """POST /governance/v1/cases (스펙 2.2 create_case Request 그대로).
+
+    display_id는 요청에 없다 - NOT NULL unique인데 스펙이 정의하지 않아 서버가
+    `PREFIX-YYYYMMDD-NNNN` 꼴로 만든다(case_root.build_display_id, MSU_SPEC 8절의
+    "IC-20260731-0001" 형태를 따랐다).
+    """
+
+    case_type: str = Field(min_length=1)
+    priority: int = Field(ge=0, le=100)
+    owner_department: str = Field(min_length=1)
+    fund_id: str
+    trace_id: str
+    created_by: str = Field(min_length=1)
+    due_at: datetime | None = None
+    reason: str | None = None
+    payload: dict = {}
+    idempotency_key: str | None = Field(
+        default=None,
+        description="case_events.idempotency_key(unique)로 저장된다. 없으면 서버가 생성한다.",
+    )
+
+
+class CreateEscalationIn(BaseModel):
+    """POST /governance/v1/escalations (스펙 2.2 제안 엔드포인트).
+
+    case_id는 NOT NULL FK다 - 에스컬레이션은 항상 어떤 Case에 붙는다.
+    """
+
+    case_id: str
+    reason: str = Field(min_length=1)
+    severity: Severity
+    target: str = Field(min_length=1)
+    due_at: datetime | None = None
+
+
+class EscalationTransitionIn(BaseModel):
+    """POST /governance/v1/escalations/{escalation_id}/transitions.
+
+    RESOLVED로 닫을 때는 resolution이 필수다 - 사유 없이 닫힌 에스컬레이션은 추적이 끊긴다.
+    """
+
+    to_status: EscalationStatus
+    at: datetime
+    resolution: str | None = None
+
+
+class CaseTransitionIn(BaseModel):
+    """POST /governance/v1/cases/{case_id}/transitions.
+
+    스펙에 이름이 없는 제안 엔드포인트다. Case를 만들 수만 있고 진행시킬 수 없으면
+    MSU_SPEC 3절이 금지한 "무기한 대기하는 Case"가 되므로 함께 넣는다.
+    """
+
+    to_status: CaseStatus
+    actor: str = Field(min_length=1)
+    at: datetime
+    reason: str | None = None
+    payload: dict = {}
+    idempotency_key: str | None = None
 
 
 class SnapshotRefIn(BaseModel):
@@ -189,6 +386,24 @@ if os.environ.get("DATABASE_URL") and PostgresNotificationRepository is not None
 else:
     notification_repo = InMemoryNotificationRepository()
 notification_service = NotificationService(notification_repo)
+
+# GOV-02 1단계 - 승인. Mandate/Report/Notification과 같은 패턴(In-Memory 기본,
+# DATABASE_URL 있으면 Postgres)이다. 여기선 In-Memory 대체가 의미 있다 - 승인 상태 전이와
+# 권한 분리 규칙 자체는 저장소와 무관한 순수 함수라서 DB 없이도 계약을 검증할 수 있다.
+if os.environ.get("DATABASE_URL") and PostgresApprovalRepository is not None:
+    approval_repo = PostgresApprovalRepository.connect(os.environ["DATABASE_URL"])
+else:
+    approval_repo = InMemoryApprovalRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresCaseRepository is not None:
+    case_repo = PostgresCaseRepository.connect(os.environ["DATABASE_URL"])
+else:
+    case_repo = InMemoryCaseRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresEscalationRepository is not None:
+    escalation_repo = PostgresEscalationRepository.connect(os.environ["DATABASE_URL"])
+else:
+    escalation_repo = InMemoryEscalationRepository()
 
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
@@ -329,6 +544,59 @@ def _on_governance_event_bus_error(request, exc: GovernanceEventBusError):
 def _on_currency_mismatch(request, exc: CurrencyMismatchError):
     return JSONResponse(status_code=400, content={
         "error_code": "MANDATE_CURRENCY_MISMATCH", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# GOV-02 승인 도메인 예외 -> HTTP. 어느 쪽도 200으로 새지 않는다(approval.py 불변식 1).
+#   권한 없음 403 / 만료·중복결정 409 / OWNER 미지원 501
+@app.exception_handler(UnauthorizedDeciderError)
+def _on_unauthorized_decider(request, exc: UnauthorizedDeciderError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnauthorizedDeciderError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(ApprovalExpiredError)
+def _on_approval_expired(request, exc: ApprovalExpiredError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "ApprovalExpiredError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(AlreadyDecidedError)
+def _on_already_decided(request, exc: AlreadyDecidedError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "AlreadyDecidedError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(OwnerApprovalNotSupportedError)
+def _on_owner_approval_unsupported(request, exc: OwnerApprovalNotSupportedError):
+    return JSONResponse(status_code=501, content={
+        "error_code": "OwnerApprovalNotSupportedError", "message": str(exc), "detail": {},
+        "trace_id": None,
+    })
+
+
+@app.exception_handler(IllegalCaseTransition)
+def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
+    return JSONResponse(status_code=409, content={
+        "error_code": "IllegalCaseTransition", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(IllegalEscalationTransition)
+def _on_illegal_escalation_transition(request, exc: IllegalEscalationTransition):
+    return JSONResponse(status_code=409, content={
+        "error_code": "IllegalEscalationTransition", "message": str(exc), "detail": {},
+        "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingResolutionError)
+def _on_missing_resolution(request, exc: MissingResolutionError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "MissingResolutionError", "message": str(exc), "detail": {}, "trace_id": None,
     })
 
 
@@ -484,6 +752,267 @@ def get_report(content_hash: str, fund_id: str):
     }
 
 
+# --- 2.2 Case Root (GOV-02) -------------------------------------------------------
+#
+# `create_case`는 스펙 2.2 확정 엔드포인트다. 조회·timeline·전이는 스펙에 이름이 없는 제안이다.
+# 투자 Case는 여기서 만들지 않는다 - 스펙 2.2가 "투자 Case는 MSU_SPEC 11절
+# POST /investment-cases를 쓰고 여기를 복제하지 않는다"고 명시했고, 그 19단계 상태 머신은
+# 리서치·트레이딩·회계본부가 담당한다.
+#
+# `POST /cases/{case_id}/decisions`(스펙 2.2 record_decision)는 넣지 않았다 - 범용
+# governance.decisions 테이블이 없고(mandate_decisions/committee_decisions만 있다) 스펙에
+# Request 본문도 정의돼 있지 않아 계약을 지어내야 한다. 별도 작업으로 남긴다.
+
+
+def _case_dict(c: CaseRecord) -> dict:
+    return {
+        "case_id": c.case_id, "fund_id": c.fund_id, "display_id": c.display_id,
+        "case_type": c.case_type, "priority": c.priority, "status": c.status.value,
+        "owner_department": c.owner_department, "trace_id": c.trace_id,
+        "created_by": c.created_by, "schema_version": c.schema_version,
+        "due_at": c.due_at.isoformat() if c.due_at else None,
+        "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
+    }
+
+
+def _case_event_dict(e: CaseEvent) -> dict:
+    return {
+        "sequence": e.sequence, "event_type": e.event_type,
+        "from_status": e.from_status.value if e.from_status else None,
+        "to_status": e.to_status.value, "producer": e.producer, "actor": e.actor,
+        "reason": e.reason, "payload": e.payload or {},
+        "occurred_at": e.occurred_at.isoformat(), "schema_version": e.schema_version,
+    }
+
+
+def _load_case(case_id: str) -> CaseRecord:
+    case = case_repo.get(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"case {case_id} 없음")
+    return case
+
+
+@app.post("/governance/v1/cases")
+def create_case(body: CreateCaseIn):
+    """Case를 OPEN으로 만든다. cases 행과 case_events 첫 줄이 한 트랜잭션으로 들어간다."""
+    now = datetime.now(timezone.utc)
+    display_id = build_display_id(
+        body.case_type, created_at=now,
+        sequence=case_repo.next_display_sequence(body.case_type, now),
+    )
+    case, event = open_case_root(
+        case_id=str(uuid.uuid4()), fund_id=body.fund_id, display_id=display_id,
+        case_type=body.case_type, priority=body.priority,
+        owner_department=body.owner_department, trace_id=body.trace_id,
+        created_by=body.created_by, created_at=now,
+        idempotency_key=body.idempotency_key or str(uuid.uuid4()),
+        due_at=body.due_at, reason=body.reason, payload=body.payload,
+    )
+    case_repo.save_new(case, event)
+    _publish_governance_event(
+        event_type="governance.case.created.v1", trace_id=body.trace_id,
+        payload={"case_id": case.case_id, "display_id": case.display_id,
+                 "case_type": case.case_type, "owner_department": case.owner_department,
+                 "status": case.status.value},
+    )
+    return _case_dict(case)
+
+
+@app.get("/governance/v1/cases/{case_id}")
+def get_case(case_id: str):
+    return _case_dict(_load_case(case_id))
+
+
+@app.get("/governance/v1/cases/{case_id}/timeline")
+def get_case_timeline(case_id: str):
+    """변경 이력의 기준은 case_events다 (MSU_SPEC 12절). cases는 현재 상태 Projection."""
+    _load_case(case_id)  # 없는 case_id면 404
+    return {"events": [_case_event_dict(e) for e in case_repo.timeline(case_id)]}
+
+
+@app.post("/governance/v1/cases/{case_id}/transitions")
+def transition_case_endpoint(case_id: str, body: CaseTransitionIn):
+    """상태를 바꾸고 case_events에 한 줄 남긴다. Terminal 이후 전이는 409."""
+    case = _load_case(case_id)
+    updated, event = transition_case(
+        case, to_status=body.to_status, actor=body.actor, at=body.at,
+        next_sequence=case_repo.next_sequence(case_id),
+        idempotency_key=body.idempotency_key or str(uuid.uuid4()),
+        reason=body.reason, payload=body.payload,
+    )
+    case_repo.apply_transition(updated, event)
+    return _case_dict(updated)
+
+
+# --- 2.2 Escalation (GOV-02) ------------------------------------------------------
+#
+# 상태 값을 새로 정할 필요가 없었다 - DDL에 severity/status 허용 값이 이미 있다.
+# 스펙 5.1절이 "risk-api — Trading State/Breach | CEO | Incident·Escalation"이라 했으므로
+# 리스크본부의 breach가 CEO로 올라오는 수신 경로이기도 하다. 생성 시 스펙 5.3절의
+# governance.escalation.v1을 발행해 담당 본부와 QA가 Owner·기한을 추적할 수 있게 한다.
+
+
+def _escalation_dict(e: EscalationRecord) -> dict:
+    return {
+        "escalation_id": e.escalation_id, "case_id": e.case_id, "reason": e.reason,
+        "severity": e.severity.value, "target": e.target, "status": e.status.value,
+        "resolution": e.resolution,
+        "due_at": e.due_at.isoformat() if e.due_at else None,
+        "created_at": e.created_at.isoformat(),
+        "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+    }
+
+
+def _load_escalation(escalation_id: str) -> EscalationRecord:
+    escalation = escalation_repo.get(escalation_id)
+    if escalation is None:
+        raise HTTPException(status_code=404, detail=f"escalation {escalation_id} 없음")
+    return escalation
+
+
+@app.post("/governance/v1/escalations")
+def create_escalation(body: CreateEscalationIn):
+    """에스컬레이션을 OPEN으로 만든다. 존재하지 않는 case_id면 DB FK가 거절한다."""
+    case = case_repo.get(body.case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"case {body.case_id} 없음")
+
+    escalation = open_escalation_record(
+        escalation_id=str(uuid.uuid4()), case_id=body.case_id, reason=body.reason,
+        severity=body.severity, target=body.target,
+        created_at=datetime.now(timezone.utc), due_at=body.due_at,
+    )
+    escalation_repo.save(escalation)
+    _publish_governance_event(
+        event_type="governance.escalation.v1", trace_id=case.trace_id,
+        payload={"escalation_id": escalation.escalation_id, "case_id": escalation.case_id,
+                 "severity": escalation.severity.value, "target": escalation.target,
+                 "status": escalation.status.value,
+                 "due_at": escalation.due_at.isoformat() if escalation.due_at else None},
+    )
+    return _escalation_dict(escalation)
+
+
+@app.get("/governance/v1/escalations/{escalation_id}")
+def get_escalation(escalation_id: str):
+    return _escalation_dict(_load_escalation(escalation_id))
+
+
+@app.get("/governance/v1/escalations")
+def list_escalations(case_id: str | None = None, target: str | None = None):
+    """case_id를 주면 그 Case의 전체, 안 주면 미해결 건만 (담당 본부·QA의 추적 경로)."""
+    if case_id is not None:
+        rows = escalation_repo.list_by_case(case_id)
+    else:
+        rows = escalation_repo.list_open(target=target)
+    return {"escalations": [_escalation_dict(e) for e in rows]}
+
+
+@app.post("/governance/v1/escalations/{escalation_id}/transitions")
+def transition_escalation_endpoint(escalation_id: str, body: EscalationTransitionIn):
+    """상태를 전이한다. RESOLVED에 resolution이 없으면 409, Terminal 이후 전이도 409."""
+    updated = transition_escalation(
+        _load_escalation(escalation_id), to_status=body.to_status, at=body.at,
+        resolution=body.resolution,
+    )
+    escalation_repo.save(updated)
+    return _escalation_dict(updated)
+
+
+# --- 2.2 Approval (GOV-02 1단계) --------------------------------------------------
+#
+# `request_approval`은 스펙 2.2 확정 엔드포인트다. decide/revoke/조회는 스펙에 이름이 없는
+# 제안이지만, 요청만 만들고 결정할 수 없으면 승인이 영원히 PENDING으로 남으므로 함께 넣는다.
+#
+# 판정 로직은 여기 없다 - approval.py의 순수 함수(assert_can_decide/decide/revoke)가 전부
+# 하고, 이 계층은 HTTP <-> 도메인 변환과 저장만 담당한다.
+
+
+def _approval_dict(a: ApprovalRecord) -> dict:
+    return {
+        "approval_id": a.approval_id, "fund_id": a.fund_id,
+        "object_type": a.object_type.value, "object_id": a.object_id,
+        "required_role": a.required_role.value, "decision": a.decision.value,
+        "reason": a.reason, "conditions": a.conditions or {},
+        "created_at": a.created_at.isoformat(),
+        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "actor_user_id": a.actor_user_id, "actor_agent_id": a.actor_agent_id,
+    }
+
+
+def _load_approval(approval_id: str) -> ApprovalRecord:
+    approval = approval_repo.get(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id} 없음")
+    return approval
+
+
+@app.post("/governance/v1/approvals")
+def request_approval(body: ApprovalRequestIn):
+    """승인 요청을 만든다. 요청 생성 자체에는 부서 제한이 없다 (결정만 제한된다).
+
+    같은 (object_type, object_id, required_role) 조합이 이미 있으면 새로 만들지 않고 기존
+    건을 그대로 돌려준다 - DDL unique 제약이 정한 계약이며, 거절된 건이 있으면 그 거절이
+    조회된다(approval.py 불변식 4). 재요청으로 거절을 지우지 않는다.
+    """
+    existing = approval_repo.find(body.object_type, body.object_id, body.required_role)
+    if existing is not None:
+        return _approval_dict(existing)
+
+    approval = build_approval_request(
+        approval_id=str(uuid.uuid4()), fund_id=body.fund_id, object_type=body.object_type,
+        object_id=body.object_id, required_role=body.required_role,
+        created_at=datetime.now(timezone.utc), reason=body.reason,
+        expires_at=body.expires_at, conditions=body.conditions,
+    )
+    approval_repo.save(approval)
+    return _approval_dict(approval)
+
+
+@app.get("/governance/v1/approvals/{approval_id}")
+def get_approval(approval_id: str):
+    return _approval_dict(_load_approval(approval_id))
+
+
+@app.get("/governance/v1/approvals")
+def list_approvals(object_type: ObjectType, object_id: str):
+    """대상 하나에 걸린 승인 전부. HR-02가 ceo_approval_id를 찾을 때 쓰는 경로다."""
+    return {"approvals": [
+        _approval_dict(a) for a in approval_repo.list_by_object(object_type, object_id)
+    ]}
+
+
+@app.post("/governance/v1/approvals/{approval_id}/decide")
+def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
+    """승인/거절을 기록한다. required_role과 actor_department가 안 맞으면 403.
+
+    CEO Office가 호스팅하는 API지만 required_role=RISK/QA인 승인은 CEO Office가 결정할 수
+    없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
+    자동 승격되지 않는다.
+    """
+    updated = decide_approval(
+        _load_approval(approval_id), decision=body.decision,
+        actor_department=body.actor_department, at=body.at,
+        actor_agent_id=body.actor_agent_id, actor_user_id=body.actor_user_id,
+        conditions=body.conditions, reason=body.reason,
+    )
+    approval_repo.save(updated)
+    return _approval_dict(updated)
+
+
+@app.post("/governance/v1/approvals/{approval_id}/revoke")
+def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
+    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    updated = revoke_approval(
+        _load_approval(approval_id), actor_department=body.actor_department, at=body.at,
+        reason=body.reason, actor_agent_id=body.actor_agent_id,
+        actor_user_id=body.actor_user_id,
+    )
+    approval_repo.save(updated)
+    return _approval_dict(updated)
+
+
 # --- F24 Notification (governance-api §8.1에 이름 없는 제안 엔드포인트) -------------
 
 
@@ -505,9 +1034,9 @@ if __name__ == "__main__":
     client = TestClient(app)
 
     def _policy(**over) -> dict:
-        risk = dict(base_capital="100000000", currency="KRW", max_instrument_weight="0.1",
-                    max_sector_weight="0.3", max_gross_exposure="1.0", max_concurrent_positions=10,
-                    max_daily_loss="0.03")
+        risk = {"base_capital": "100000000", "currency": "KRW", "max_instrument_weight": "0.1",
+                    "max_sector_weight": "0.3", "max_gross_exposure": "1.0", "max_concurrent_positions": 10,
+                    "max_daily_loss": "0.03"}
         risk.update(over.pop("risk", {}))
         return {
             "allowed_assets": over.pop("allowed_assets", ["A005930"]), "forbidden_assets": [],
@@ -575,4 +1104,189 @@ if __name__ == "__main__":
     assert all(x["status"] == "PENDING" for x in n1.json()["notifications"])
     assert all(x["status"] == "PENDING" for x in n2.json()["notifications"]), "CRITICAL이 억제됐다"
 
-    print("ok - CEO Office Domain API 7개 시나리오 점검 통과")
+    # 8. 승인 요청(GOV-02) - PENDING 생성, 같은 대상·역할 재요청은 같은 건을 돌려준다.
+    a1 = client.post("/governance/v1/approvals", json={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+        "required_role": "CEO", "fund_id": "f1", "reason": "HR-02 활성화",
+    })
+    assert a1.status_code == 200 and a1.json()["decision"] == "PENDING", a1.text
+    approval_id = a1.json()["approval_id"]
+    a1b = client.post("/governance/v1/approvals", json={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+        "required_role": "CEO", "fund_id": "f1",
+    })
+    assert a1b.json()["approval_id"] == approval_id, "재요청이 새 승인을 만들었다"
+
+    # 9. 권한 분리 - RISK 승인은 CEO Office가 결정할 수 없다(403).
+    a2 = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-1",
+        "required_role": "RISK", "fund_id": "f1",
+    })
+    risk_id = a2.json()["approval_id"]
+    d_bad = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
+    })
+    assert d_bad.status_code == 403, d_bad.text
+    assert client.get(f"/governance/v1/approvals/{risk_id}").json()["decision"] == "PENDING"
+
+    # 10. 리스크본부 본인은 결정 가능. DB 표기(risk-management)도 받는다.
+    d_ok = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "REJECTED", "actor_department": "risk-management", "at": now,
+        "reason": "한도 초과",
+    })
+    assert d_ok.status_code == 200 and d_ok.json()["decision"] == "REJECTED", d_ok.text
+
+    # 11. 이미 결정된 승인 재결정 409, 거절된 건 재요청해도 거절이 그대로 조회된다.
+    d_again = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "risk-management", "at": now,
+    })
+    assert d_again.status_code == 409, d_again.text
+    a2b = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-1",
+        "required_role": "RISK", "fund_id": "f1",
+    })
+    assert a2b.json()["decision"] == "REJECTED", "재요청이 거절을 지웠다"
+
+    # 12. OWNER는 fail-closed(501) - 소유 부서 검증 경로가 없다.
+    a3 = client.post("/governance/v1/approvals", json={
+        "object_type": "CAPITAL_ALLOCATION", "object_id": "ca-1",
+        "required_role": "OWNER", "fund_id": "f1",
+    })
+    d_owner = client.post(f"/governance/v1/approvals/{a3.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
+    })
+    assert d_owner.status_code == 501, d_owner.text
+
+    # 13. 만료된 승인은 결정 불가(409) - 자동 승인으로 떨어지지 않는다.
+    # created_at은 서버의 실제 now라 expires_at은 그보다 뒤여야 요청이 만들어진다(그게 아니면
+    # 400). 그래서 기한을 넉넉히 미래로 두고, 그 기한을 넘긴 시점에 결정을 시도한다.
+    a4 = client.post("/governance/v1/approvals", json={
+        "object_type": "IMPROVEMENT_CANDIDATE", "object_id": "ic-1",
+        "required_role": "CEO", "fund_id": "f1",
+        "expires_at": "2026-12-31T00:00:00+00:00",
+    })
+    assert a4.status_code == 200, a4.text
+    d_exp = client.post(f"/governance/v1/approvals/{a4.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "actor_department": "ceo-agent",
+        "at": "2027-01-01T00:00:00+00:00",
+    })
+    assert d_exp.status_code == 409, d_exp.text
+    # 만료 시도 후에도 PENDING이어야 한다 - 실패가 상태를 바꾸지 않는다.
+    assert client.get(
+        f"/governance/v1/approvals/{a4.json()['approval_id']}"
+    ).json()["decision"] == "PENDING"
+
+    # 14. CEO 승인 결정 -> 철회. 사람 승인이 아니므로 actor_user_id는 None 유지.
+    d_ceo = client.post(f"/governance/v1/approvals/{approval_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
+    })
+    assert d_ceo.status_code == 200 and d_ceo.json()["decision"] == "APPROVED", d_ceo.text
+    assert d_ceo.json()["actor_user_id"] is None
+    rv = client.post(f"/governance/v1/approvals/{approval_id}/revoke", json={
+        "actor_department": "ceo-agent", "at": now, "reason": "Mandate 변경",
+    })
+    assert rv.status_code == 200 and rv.json()["decision"] == "REVOKED", rv.text
+
+    # 15. 대상별 승인 목록 조회 - HR-02가 ceo_approval_id를 찾는 경로.
+    lst = client.get("/governance/v1/approvals", params={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+    })
+    assert lst.status_code == 200 and len(lst.json()["approvals"]) == 1, lst.text
+
+    # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
+    c1 = client.post("/governance/v1/cases", json={
+        "case_type": "HIRING", "priority": 2, "owner_department": "hr-department",
+        "fund_id": "f1", "trace_id": "trace-case-1", "created_by": "ceo-agent",
+        "reason": "리스크본부 Queue 적체",
+    })
+    assert c1.status_code == 200 and c1.json()["status"] == "OPEN", c1.text
+    case_id = c1.json()["case_id"]
+    assert c1.json()["display_id"].startswith("HR-"), c1.json()["display_id"]
+    tl1 = client.get(f"/governance/v1/cases/{case_id}/timeline")
+    assert tl1.status_code == 200 and len(tl1.json()["events"]) == 1, tl1.text
+    assert tl1.json()["events"][0]["to_status"] == "OPEN"
+    assert tl1.json()["events"][0]["from_status"] is None
+
+    # 17. 전이 - OPEN -> ACKNOWLEDGED, timeline이 함께 쌓인다.
+    t1 = client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "ACKNOWLEDGED", "actor": "hr-department", "at": now,
+    })
+    assert t1.status_code == 200 and t1.json()["status"] == "ACKNOWLEDGED", t1.text
+    tl2 = client.get(f"/governance/v1/cases/{case_id}/timeline")
+    assert [e["sequence"] for e in tl2.json()["events"]] == [1, 2]
+
+    # 18. OPEN -> RESOLVED 직행 차단(409), Terminal 이후 전이 차단(409).
+    c2 = client.post("/governance/v1/cases", json={
+        "case_type": "INCIDENT", "priority": 90, "owner_department": "risk-management",
+        "fund_id": "f1", "trace_id": "trace-case-2", "created_by": "ceo-agent",
+    })
+    skip = client.post(f"/governance/v1/cases/{c2.json()['case_id']}/transitions", json={
+        "to_status": "RESOLVED", "actor": "x", "at": now,
+    })
+    assert skip.status_code == 409, skip.text
+    assert client.get(f"/governance/v1/cases/{c2.json()['case_id']}").json()["status"] == "OPEN"
+
+    client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "RESOLVED", "actor": "hr-department", "at": now,
+    })
+    dead = client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "CANCELLED", "actor": "x", "at": now,
+    })
+    assert dead.status_code == 409, dead.text
+
+    # 19. display_id는 같은 타입·날짜에서 연번이 증가하고 타입이 다르면 접두어가 다르다.
+    c3 = client.post("/governance/v1/cases", json={
+        "case_type": "HIRING", "priority": 1, "owner_department": "hr-department",
+        "fund_id": "f1", "trace_id": "trace-case-3", "created_by": "ceo-agent",
+    })
+    assert c3.json()["display_id"] != c1.json()["display_id"]
+    assert c3.json()["display_id"].startswith("HR-")
+    assert c2.json()["display_id"].startswith("IN-"), c2.json()["display_id"]
+
+    # 20. 없는 Case는 404.
+    assert client.get("/governance/v1/cases/00000000-0000-4000-8000-000000000000").status_code == 404
+
+    # 21. 에스컬레이션 생성 - Case에 붙는다. 없는 Case면 404.
+    e1 = client.post("/governance/v1/escalations", json={
+        "case_id": c2.json()["case_id"], "reason": "Risk 한도 초과 24시간 미해결",
+        "severity": "CRITICAL", "target": "risk-management",
+    })
+    assert e1.status_code == 200 and e1.json()["status"] == "OPEN", e1.text
+    escalation_id = e1.json()["escalation_id"]
+    assert client.post("/governance/v1/escalations", json={
+        "case_id": "00000000-0000-4000-8000-000000000000", "reason": "x",
+        "severity": "LOW", "target": "x",
+    }).status_code == 404
+
+    # 22. resolution 없이 RESOLVED 불가(409), ACKNOWLEDGED 건너뛰기도 불가(409).
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now,
+    }).status_code == 409
+    ack_e = client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "ACKNOWLEDGED", "at": now,
+    })
+    assert ack_e.status_code == 200 and ack_e.json()["status"] == "ACKNOWLEDGED", ack_e.text
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now, "resolution": "   ",
+    }).status_code == 409
+
+    # 23. 미해결 목록 -> 해소 후 목록에서 빠진다. severity는 유지된다.
+    open_list = client.get("/governance/v1/escalations", params={"target": "risk-management"})
+    assert escalation_id in {e["escalation_id"] for e in open_list.json()["escalations"]}
+    done = client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now, "resolution": "한도 재적용으로 해소",
+    })
+    assert done.status_code == 200 and done.json()["severity"] == "CRITICAL"
+    assert done.json()["resolved_at"] is not None
+    after_list = client.get("/governance/v1/escalations", params={"target": "risk-management"})
+    assert escalation_id not in {e["escalation_id"] for e in after_list.json()["escalations"]}
+
+    # 24. Terminal 이후 전이 차단, Case별 조회에는 여전히 보인다.
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "CANCELLED", "at": now,
+    }).status_code == 409
+    by_case = client.get("/governance/v1/escalations", params={"case_id": c2.json()["case_id"]})
+    assert len(by_case.json()["escalations"]) == 1, by_case.text
+
+    print("ok - CEO Office Domain API 24개 시나리오 점검 통과 "
+          "(승인 8개 + Case Root 5개 + 에스컬레이션 4개 포함)")

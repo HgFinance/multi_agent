@@ -1,5 +1,7 @@
 # Hermes 도커 운영 Runbook
 
+> 현재 기준(2026-08-03): 모든 부서장은 Hermes + Codex 기본/Claude Code 대체이고, 직원은 부서별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 아래의 Laguna·기존 단일 Ollama 호출 예시는 과거 Smoke 기록이다.
+
 담당: 재일 (리서치·퀀트) — 2026-08-02 작성, 2026-08-03 상태 갱신
 근거: 재일님 지시 "팀원들이랑 도커로 관리하기로 했는데 어떻게 해야 할지"
 
@@ -12,6 +14,8 @@ Department Backend Image에 설치하지 않는다”), 여기서는 그 결정�
 ---
 
 ## 1. 지금 구성 (2026-08-03 실측 기준)
+
+현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. 직원은 부서별 독립 LangGraph Worker이며 현재 Ollama `qwen3:1.7b`를 사용한다. 아래에 남은 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이며 현재 실행 기준이 아니다. 실제 런타임 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
 
 계획서 3.1~3.2대로 **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개**다.
 
@@ -36,7 +40,7 @@ compose 프로젝트 hedgefund
 그대로 보인다 — 이름만 다른 **분리된 척**이다. 그래서 마운트를 부서별로 가른다.
 이미지 기본값이 `HERMES_HOME=/opt/data`라 **마운트만 갈면 분리가 끝난다.**
 
-실측 검증 (2026-08-02):
+Historical snapshot (2026-08-02 Docker smoke; 현재 모델 기준 아님):
 
 ```
 $ docker exec hedgefund-research-hermes hermes profile list
@@ -55,6 +59,21 @@ Quant, Accounting과 HR의 `tool_allowlist`가 미선언 경고로 남는다. �
 Research Tool 강제는 확인됐지만 전사 권한 분리가 완료됐다고 말하지 않는다.
 
 ---
+
+### Current runtime authentication (2026-08-03)
+
+현재 Head는 `openai-codex/gpt-5.6-luna`이며 인증 확인은 Profile별 `hermes auth status openai-codex`를 사용한다. `hermes portal login`, Nous Portal, `poolside/laguna-s-2.1:free`는 아래 Historical Docker smoke 절차에만 해당한다. 저장소 Profile은 `./scripts/sync_hermes_profiles.sh push`로 `config.yaml`과 `SOUL.md`만 동기화하고, `auth.json`, `sessions`, `memories`, `logs`는 로컬 Runtime에 둔다.
+
+```bash
+source ~/claude/bin/activate
+./scripts/sync_hermes_profiles.sh push
+hermes --profile risk-management auth status openai-codex
+hermes --profile qa-department auth status openai-codex
+```
+
+### Historical Docker/Nous procedure
+
+아래 Docker Image·Portal OAuth·Laguna 명령은 분리 저장소를 검증하던 Historical snapshot이다. 현재 모델·인증 상태로 해석하거나 운영 완료의 증거로 사용하지 않는다.
 
 ## 2. 처음 붙일 때 (팀원 각자 1회)
 
@@ -249,9 +268,7 @@ docker exec hedgefund-research-hermes hermes -p research-department \
 
 ## 5. 모델·과금
 
-현재 Git 기준 CEO, Research, Trading, Quant, Accounting과 HR 6개 Profile은 기존 baseline을 유지하고, Risk·QA는 별도 Head/Employee 런타임 계약을 사용한다.
-기존 6개 Profile은 `provider: nous` / `poolside/laguna-s-2.1:free`다. Risk와 QA 부서장은
-`provider: openai-codex` / `gpt-5.6-luna`를 사용하고 `anthropic-claude-code`를 승인된 대체 provider로 둔다. 직원은 Hermes의 `model`과 분리된 LangGraph Worker + Ollama `qwen3:8b`다.
+현재 저장소 기준 8개 Profile의 Head는 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 provider로 사용할 수 있다. 직원은 Hermes Head 모델과 분리된 부서별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 이전 6개 Nous/Laguna와 Risk·QA만 Codex였던 구성은 Historical snapshot으로만 보존한다.
 `scripts/check_hermes_profiles.py`는 부서별 Head 모델과 Employee 모델을 각각 검증해야 하며, 전체 Profile을 하나의 모델로 비교하지 않는다.
 모델 교체는 benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다.
 

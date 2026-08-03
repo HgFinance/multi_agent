@@ -39,9 +39,10 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 _HERE = Path(__file__).resolve().parent
 for _p in (_HERE, _HERE.parent / "evidence", _HERE.parent / "contracts"):
@@ -87,7 +88,7 @@ class ToolResult:
             raise ValueError(f"{self.tool}: 실패인데 사유가 없다 - 침묵하는 실패는 금지")
         for k, v in self.numbers.items():
             if not isinstance(v, (int, float)) or isinstance(v, bool):
-                raise ValueError(f"{self.tool}: numbers[{k!r}] 가 수치가 아니다({v!r})")
+                raise TypeError(f"{self.tool}: numbers[{k!r}] 가 수치가 아니다({v!r})")
 
 
 @dataclass(frozen=True)
@@ -237,8 +238,8 @@ PERSONA_TOOLS: dict[str, tuple[tuple[str, str, str, str, tuple[str, ...]], ...]]
     "fundamental-analyst": (
         ("research.evidence.disclosures.read", "disclosure_detail",
          "특정 공시의 제목·유형·시각과 중요도 분류(MATERIAL/NOTABLE/ROUTINE)",
-         "재무 수치의 배경(공급계약·증자·자기주식)이 필요할 때. "
-         "재무제표만으로 설명 안 되는 변화가 보이면 부른다", ("symbol", "days")),
+         ("재무 수치의 배경(공급계약·증자·자기주식)이 필요할 때. "
+         "재무제표만으로 설명 안 되는 변화가 보이면 부른다"), ("symbol", "days")),
         ("research.evidence.financials.read", "financial_history",
          "과거 보고기간의 재무 항목 시계열(정정본은 최신 revision)",
          "전년 대비 한 시점 비교로 부족할 때. 추세인지 일회성인지 가르려면 부른다",
@@ -247,8 +248,8 @@ PERSONA_TOOLS: dict[str, tuple[tuple[str, str, str, str, tuple[str, ...]], ...]]
     "news-sentiment-analyst": (
         ("research.evidence.stories.read", "story_cluster",
          "같은 사건을 다룬 기사 묶음과 독립 출처 수",
-         "한 건의 보도인지 여러 출처가 확인한 사건인지 가를 때. "
-         "**단일 출처를 사실로 올리지 않기 위해** 부른다", ("symbol", "hours")),
+         ("한 건의 보도인지 여러 출처가 확인한 사건인지 가를 때. "
+         "**단일 출처를 사실로 올리지 않기 위해** 부른다"), ("symbol", "hours")),
         ("research.evidence.news.read", "news_window",
          "더 넓은 시간창의 기사 목록(document_id 포함)",
          "24시간 창에 재료가 부족할 때. 창을 넓힌 사실을 반드시 서술에 남긴다",
@@ -278,8 +279,8 @@ PERSONA_TOOLS: dict[str, tuple[tuple[str, str, str, str, tuple[str, ...]], ...]]
     "microstructure-analyst": (
         ("market.microstructure.read", "micro_history",
          "과거 일자의 미시구조 집계",
-         "오늘 스프레드·불균형이 평소 대비 이례적인지 볼 때. "
-         "**비교 없는 STRESSED 판정은 근거가 약하다**", ("symbol", "date")),
+         ("오늘 스프레드·불균형이 평소 대비 이례적인지 볼 때. "
+         "**비교 없는 STRESSED 판정은 근거가 약하다**"), ("symbol", "date")),
     ),
 }
 

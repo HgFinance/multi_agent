@@ -42,18 +42,19 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
-from typing import Callable, Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from llm_client import chat as llm_chat  # noqa: E402
-from number_guard import caution_lines, flag_unmatched  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
-from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from narrative_guard import audit_narrative, label_caution_lines
+from number_guard import caution_lines, flag_unmatched
 
 PERSONA = "geopolitical-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-geopolitical-analyst-v1"
@@ -124,11 +125,11 @@ class GeoNote(BaseModel):
 # 1. compute - 결정론 계산 (순수 함수, LLM·네트워크 무관)
 # ---------------------------------------------------------------------------
 
-def _r2(v: Optional[float]) -> Optional[float]:
+def _r2(v: float | None) -> float | None:
     return None if v is None else round(float(v), 2)
 
 
-def _to_date(v) -> Optional[date]:
+def _to_date(v) -> date | None:
     if isinstance(v, date):
         return v
     try:
@@ -150,12 +151,12 @@ def group_series(rows: list[dict]) -> dict[str, list[tuple[date, float]]]:
         if not code or d is None:
             continue
         out.setdefault(code, []).append((d, v))
-    for code in out:
-        out[code].sort(key=lambda t: t[0])
+    for values in out.values():
+        values.sort(key=lambda t: t[0])
     return out
 
 
-def percentile_of(value: float, pool: list[float]) -> Optional[float]:
+def percentile_of(value: float, pool: list[float]) -> float | None:
     """pool 안에서 value 의 백분위(이하 비율 %). pool 이 얇으면 None."""
     if len(pool) < MIN_POINTS:
         return None
@@ -163,7 +164,7 @@ def percentile_of(value: float, pool: list[float]) -> Optional[float]:
     return round(100.0 * n_le / len(pool), 1)
 
 
-def shock_ratio(pool: list[float], latest: float) -> Optional[float]:
+def shock_ratio(pool: list[float], latest: float) -> float | None:
     """최근값 / 중앙값. 중앙값이 0 이면 배율이 정의되지 않는다(None)."""
     if len(pool) < MIN_POINTS:
         return None
@@ -354,7 +355,7 @@ _UNITS = {
 }
 
 
-def narrate(readout: dict, llm: Optional[Callable] = None) -> GeoNote:
+def narrate(readout: dict, llm: Callable | None = None) -> GeoNote:
     allowed = [k for k in readout if k not in _NON_METRIC]
     # 값이 실제로 있는 지표의 단위만 싣는다. None 인 키까지 실으면 없는 지표를
     # 있는 것처럼 보이게 해 모델이 그것을 인용하려 든다.
@@ -469,7 +470,7 @@ def _http_get(url: str, timeout: int = 25):
     return get_json(url, persona=PERSONA, timeout=timeout)
 
 
-def _theme_codes(path: Optional[Path] = None) -> list[str]:
+def _theme_codes(path: Path | None = None) -> list[str]:
     """수집기와 같은 워치리스트를 읽어 계열 코드를 만든다 - 목록이 두 곳에서
     갈라지지 않게 한 곳(config/geopolitical_themes.txt)만 본다."""
     p = path or (Path(__file__).resolve().parent.parent / "config"
@@ -490,7 +491,7 @@ def _theme_codes(path: Optional[Path] = None) -> list[str]:
     return codes
 
 
-def analyze(*, research_api: Optional[str] = None, llm: Optional[Callable] = None,
+def analyze(*, research_api: str | None = None, llm: Callable | None = None,
             get: Callable = _http_get) -> dict:
     base = (research_api or RESEARCH_API).rstrip("/")
     now = datetime.now(timezone.utc)
@@ -650,9 +651,8 @@ def _check_units_in_prompt():
 
     def spy(system, user):
         seen["user"] = user
-        return ('{"risk_label": "%s", "driver": "%s", "summary": "s", '
-                '"transmission": [], "used_metrics": [], "cautions": []}'
-                % (readout["risk_label"], readout["driver"]))
+        return ('{{"risk_label": "{}", "driver": "{}", "summary": "s", '
+                '"transmission": [], "used_metrics": [], "cautions": []}}'.format(readout["risk_label"], readout["driver"]))
 
     narrate(readout, llm=spy)
     u = seen["user"]
@@ -713,9 +713,10 @@ def _check_analyze_api_down():
     assert r["verdict"] == "INSUFFICIENT_DATA"
     assert "호출 실패" in r["reason"], r["reason"]
 
-    rows = (_rows("GPRD", [100.0] * 30, end=date.today() - timedelta(days=1))
+    today = datetime.now(timezone.utc).date()
+    rows = (_rows("GPRD", [100.0] * 30, end=today - timedelta(days=1))
             + _rows("GDELT_X", [1.0] * 29 + [3.0],
-                    end=date.today() - timedelta(days=1)))
+            end=today - timedelta(days=1)))
 
     def ok_get(url, timeout=25):
         assert "/macro/observations" in url and "codes=" in url

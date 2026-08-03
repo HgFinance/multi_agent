@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from source_registry import load_project_env  # noqa: E402
+from source_registry import load_project_env
 
 COLLECTOR_VERSION = "research-opendart-document-v1"
 BUCKET = "research-documents-private"
@@ -141,7 +141,7 @@ def _collect(limit: int) -> int:
             time.sleep(1.0 / RATE_PER_SEC)
             try:
                 data = fetch_original(api_key, rcept_no)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 stats.failed += 1
                 stats.note(type(e).__name__)
                 continue
@@ -154,7 +154,7 @@ def _collect(limit: int) -> int:
             path = object_path_for(rcept_no)
             try:
                 upload(env, path, data)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 stats.failed += 1
                 stats.note("UPLOAD_" + type(e).__name__)
                 continue

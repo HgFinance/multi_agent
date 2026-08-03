@@ -10,18 +10,30 @@ runtime_layers:
     runtime: hermes
     model_choices: [openai-codex, anthropic-claude-code]
     active_profile_models:
+      ceo-agent: openai-codex/gpt-5.6-luna
+      hr-department: openai-codex/gpt-5.6-luna
+      research-department: openai-codex/gpt-5.6-luna
+      trading-department: openai-codex/gpt-5.6-luna
       risk-management: openai-codex/gpt-5.6-luna
+      quant-backtest-department: openai-codex/gpt-5.6-luna
+      accounting-portfolio-department: openai-codex/gpt-5.6-luna
       qa-department: openai-codex/gpt-5.6-luna
     alternative_provider: anthropic-claude-code
     responsibility: department_synthesis_and_escalation
   department_employee:
     runtime: langgraph
     provider: ollama
-    model: qwen3:8b
+    model: qwen3:1.7b
     model_selection: fixed_until_model_eval_approved
     discovery_command: ollama list
     worker_counts:
+      ceo-agent: 1
+      hr-department: 5
+      research-department: 6
+      trading-department: 6
       risk-management: 4
+      quant-backtest-department: 7
+      accounting-portfolio-department: 8
       qa-department: 5
     output: non_binding_worker_context
     retry: {max_retries: 2, max_attempts: 3}
@@ -31,8 +43,8 @@ runtime_layers:
   failure_action: fail_closed_hold_reject_escalate_rollback
 
 model:
-  provider: nous
-  name: "poolside/laguna-s-2.1:free"
+  provider: openai-codex
+  name: "gpt-5.6-luna"
   note: "Hermes Profile의 모델 설정은 각 departments/<n>/hermes/config.yaml을 따른다."
 
 workflow:

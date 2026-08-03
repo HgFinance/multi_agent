@@ -57,7 +57,7 @@ def scan_bounded_regex(py: Path) -> list[dict]:
 _CREATE_COL = re.compile(
     r"^\s{2,}([a-z_][a-z0-9_]*)\s+(?:text|int|integer|bigint|numeric|"
     r"boolean|timestamptz|date|jsonb|uuid|double|real|smallint)",
-    re.I | re.M)
+    re.IGNORECASE | re.MULTILINE)
 
 
 def scan_unselected_columns(root: Path) -> list[dict]:
@@ -71,7 +71,7 @@ def scan_unselected_columns(root: Path) -> list[dict]:
             txt = f.read_text(encoding="utf-8", errors="replace")
             for tbl_m in re.finditer(
                     r"create table (?:if not exists )?([a-z_]+\.[a-z_]+)\s*\((.*?)\n\)",
-                    txt, re.I | re.S):
+                    txt, re.IGNORECASE | re.DOTALL):
                 table, body = tbl_m.group(1), tbl_m.group(2)
                 for c in _CREATE_COL.finditer(body):
                     name = c.group(1).lower()
@@ -83,11 +83,11 @@ def scan_unselected_columns(root: Path) -> list[dict]:
     selected: set[str] = set()
     for py in _py_files(root):
         txt = py.read_text(encoding="utf-8", errors="replace")
-        for sel in re.finditer(r"select\s+(.*?)\s+from\s", txt, re.I | re.S):
+        for sel in re.finditer(r"select\s+(.*?)\s+from\s", txt, re.IGNORECASE | re.DOTALL):
             body = sel.group(1)
             if len(body) > 2000:
                 continue
-            selected |= {w.lower() for w in re.findall(r"[a-z_][a-z0-9_]*", body, re.I)}
+            selected |= {w.lower() for w in re.findall(r"[a-z_][a-z0-9_]*", body, re.IGNORECASE)}
 
     out = []
     for table, names in sorted(cols.items()):
@@ -197,7 +197,7 @@ def scan_key_mismatch(root: Path) -> list[dict]:
     produced: dict[str, set[str]] = {}   # 모듈 -> 최상위로 내는 키
     for py in _py_files(root):
         txt = py.read_text(encoding="utf-8", errors="replace")
-        for m in re.finditer(r"return \{[^}]{0,400}?\}", txt, re.S):
+        for m in re.finditer(r"return \{[^}]{0,400}?\}", txt, re.DOTALL):
             keys = set(re.findall(r'"([a-z_][a-z0-9_]*)":', m.group(0)))
             if keys:
                 produced.setdefault(py.stem, set()).update(keys)

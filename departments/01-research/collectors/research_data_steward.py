@@ -136,7 +136,6 @@ def summarize(results: list[dict]) -> tuple[str, str]:
 
 def audit() -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     now = datetime.now(timezone.utc)

@@ -7,6 +7,7 @@ from .paper_e2e import (
     build_paper_e2e_handlers,
 )
 from .paper_pipeline import PaperPipelineAdapter, build_paper_handlers
+from .test_pipeline import build_test_handlers
 
 __all__ = [
     "CeoAdapterError",
@@ -16,4 +17,5 @@ __all__ = [
     "PaperPipelineAdapter",
     "build_paper_e2e_handlers",
     "build_paper_handlers",
+    "build_test_handlers",
 ]

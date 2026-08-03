@@ -69,7 +69,8 @@ _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from departments.notion_markdown import markdown_to_notion_blocks  # noqa: E402
+from departments.notion_markdown import markdown_to_notion_blocks
+
 # 앞에 오는 파일이 이긴다. root .env 가 정본(2026-08-03 확정) - 모듈 상단 참고.
 _ENV_FILES = (_REPO_ROOT / ".env", _REPO_ROOT / "ai-office" / ".dev.vars")
 _NOTION_VERSION = "2022-06-28"
@@ -214,7 +215,7 @@ def upload_debate(out: dict, *, report_md: str = "", env: dict | None = None) ->
             intro = f"**결정론적 MD 리포트 저장:** `{_report_path(out.get('debate_id'))}`\n\n{report_md}"
             payload["children"] = markdown_to_notion_blocks(intro)
         status, body = _post("pages", payload, token)
-    except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+    except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다  # noqa: BLE001 - intentional fallback boundary
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}"}
     if status == 200:
         return {"ok": True, "url": body.get("url")}

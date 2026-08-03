@@ -5,13 +5,18 @@
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #4, 8
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: quant-backtest-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [strategy-hypothesis-worker, dataset-feature-worker, backtest-optimization-worker, strategy-release-worker, ml-quant-worker, execution-cost-worker, regime-robustness-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60
@@ -42,3 +47,86 @@ skills:
 usage:
   run: "quant-backtest-department chat -q 'Propose an alpha hypothesis and experiment spec for volume breakouts'"
   collaborate: "quant-backtest-department chat -q 'Backtest the new strategy and compare it against the current Champion'"
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+staff_registry:
+  head_count: 1
+  worker_count: 7
+  default_execution_count: 2
+  max_execution_count: 7
+  active_worker_count: 2
+  conditional_worker_count: 5
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+employee_runtime:
+  executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/04-quant-backtest/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:1.7b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:1.7b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: quant.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/04-quant-backtest/pipeline
+  failure_action: HOLD_ESCALATE
+workers:
+  strategy-hypothesis-worker:
+    role: Falsifiable strategy hypothesis analyst
+    status: active
+    trigger: always
+    tools: [quant.hypothesis.read]
+    output: advisory_context
+  dataset-feature-worker:
+    role: Point-in-time dataset and feature quality analyst
+    status: active
+    trigger: always
+    tools: [quant.dataset.read]
+    output: advisory_context
+  backtest-optimization-worker:
+    role: Cost-aware backtest and capacity optimization analyst
+    status: conditional
+    trigger: backtest_request
+    tools: [quant.backtest.run, quant.capacity.check]
+    output: advisory_context
+  strategy-release-worker:
+    role: Champion/challenger strategy release reviewer
+    status: conditional
+    trigger: release_candidate
+    tools: [quant.release.read]
+    output: advisory_context
+  ml-quant-worker:
+    role: ML quant research and leakage review analyst
+    status: conditional
+    trigger: ml_research
+    tools: [quant.ml_evaluation.read]
+    output: advisory_context
+  execution-cost-worker:
+    role: Execution-cost and turnover sensitivity analyst
+    status: conditional
+    trigger: cost_sensitivity
+    tools: [quant.cost_sensitivity.read]
+    output: advisory_context
+  regime-robustness-worker:
+    role: Regime robustness and stress-sensitivity analyst
+    status: conditional
+    trigger: regime_analysis
+    tools: [quant.regime_robustness.read]
+    output: advisory_context

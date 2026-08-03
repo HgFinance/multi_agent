@@ -36,6 +36,7 @@
 """
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -45,7 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from ls_client import LsApiError, LsRestClient  # noqa: E402
+from ls_client import LsApiError, LsRestClient
 
 COLLECTOR_VERSION = "research-market-breadth-v1"
 
@@ -147,7 +148,7 @@ def _as_int(raw: object) -> int | None:
         return raw if INT32_MIN <= raw <= INT32_MAX else None
     if isinstance(raw, float):
         # math.isfinite 대신 자기 비교로 NaN 을, 범위로 inf 를 거른다
-        if raw != raw or raw in (float("inf"), float("-inf")):
+        if math.isnan(raw) or raw in (float("inf"), float("-inf")):
             return None
         v = int(raw)
         return v if INT32_MIN <= v <= INT32_MAX else None
@@ -180,7 +181,7 @@ def _as_decimal(raw: object) -> Decimal | None:
     """
     if raw is None or isinstance(raw, bool):
         return None
-    if isinstance(raw, float) and (raw != raw or raw in (float("inf"), float("-inf"))):
+    if isinstance(raw, float) and (math.isnan(raw) or raw in (float("inf"), float("-inf"))):
         return None
     s = str(raw).strip().replace(",", "")
     if not s:
@@ -409,9 +410,14 @@ def parse_breadth(
         flags.append("SIGN_CODE_UNKNOWN")
 
     # 부호 교차검증 - sign 과 등락률의 방향이 어긋나면 둘 중 하나를 잘못 읽은 것이다.
-    if signed_change is not None and change_pct is not None:
-        if (signed_change > 0) != (change_pct > 0) and change_pct != 0 and signed_change != 0:
-            flags.append("SIGN_DIRECTION_MISMATCH")
+    if (
+        signed_change is not None
+        and change_pct is not None
+        and (signed_change > 0) != (change_pct > 0)
+        and change_pct != 0
+        and signed_change != 0
+    ):
+        flags.append("SIGN_DIRECTION_MISMATCH")
 
     # 상장 보통주 수와 대조. 지수 구성이 상장 전체와 같지는 않아 넓게 잡는다.
     coverage = None

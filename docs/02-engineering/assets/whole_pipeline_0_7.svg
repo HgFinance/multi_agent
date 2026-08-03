@@ -28,7 +28,7 @@
 
   <rect width="1600" height="1000" fill="#ffffff"/>
   <text x="50" y="48" class="title">HgFinance AI Office — 0–7 Department Pipeline</text>
-  <text x="50" y="76" class="subtitle">Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:8b</text>
+  <text x="50" y="76" class="subtitle">Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:1.7b</text>
 
   <rect x="1100" y="25" width="450" height="68" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
   <line x1="1120" y1="48" x2="1170" y2="48" class="main-line"/>

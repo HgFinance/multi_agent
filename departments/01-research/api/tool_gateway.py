@@ -215,7 +215,7 @@ def _check_scope_mapping():
 
 
 def _check_access_rules():
-    ok, code, _ = check_access("geopolitical-analyst", "/macro/observations",
+    ok, _code, _ = check_access("geopolitical-analyst", "/macro/observations",
                                _ALLOW, _FORBID)
     assert ok
     # 남의 권한은 못 쓴다
@@ -226,7 +226,7 @@ def _check_access_rules():
     ok3, code3, why3 = check_access(None, "/macro/observations", _ALLOW, _FORBID)
     assert not ok3 and code3 == NO_PERSONA and "익명" in why3
     # 모르는 페르소나 거부
-    ok4, code4, why4 = check_access("someone-else", "/macro/observations", _ALLOW, _FORBID)
+    ok4, code4, _why4 = check_access("someone-else", "/macro/observations", _ALLOW, _FORBID)
     assert not ok4 and code4 == UNKNOWN_PERSONA
     print("  접근 판정                OK")
 

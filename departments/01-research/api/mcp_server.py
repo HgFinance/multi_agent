@@ -31,7 +31,6 @@
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -57,7 +56,6 @@ MAX_JOBS_KEPT = 50
 
 def _db():
     import psycopg2
-
     from source_registry import load_project_env
 
     return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=15)
@@ -186,7 +184,7 @@ def _server_class():
         from mcp.server.mcpserver import MCPServer  # 신판
         return MCPServer, "mcpserver"
     except ImportError:
-        from mcp.server.fastmcp import FastMCP      # 1.x
+        from mcp.server.fastmcp import FastMCP  # 1.x
         return FastMCP, "fastmcp"
 
 
@@ -222,7 +220,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             try:
                 proc = subprocess.run(
                     [sys.executable, "scripts.py", "--run", sym],
-                    cwd=str(_BASE), capture_output=True, text=True,
+                    check=False, cwd=str(_BASE), capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=60 * 30)
                 out = (proc.stdout or "") + "\n" + (proc.stderr or "")[-800:]
                 finish_job(job_id, exit_code=proc.returncode, tail=out,

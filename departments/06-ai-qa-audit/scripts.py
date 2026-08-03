@@ -122,7 +122,7 @@ def _journal_module():
     return _JOURNAL_MODULE
 
 def _ollama_base_url() -> str:
-    raw = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+    raw = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/v1").rstrip("/")
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
@@ -137,7 +137,7 @@ internal_llm = wrap_openai(OpenAI(
 
 def _call_internal_llm(prompt: str) -> str:
     res = internal_llm.chat.completions.create(
-        model=os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b"),
+        model=os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b",
         messages=[{"role": "user", "content": prompt}],
     )
     return res.choices[0].message.content

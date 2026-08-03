@@ -111,7 +111,6 @@ def fetch_author_feed(handle: str) -> list[dict]:
 
 def collect(watchlist_path: Path | None = None) -> int:
     import psycopg2
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()
@@ -148,7 +147,7 @@ def collect(watchlist_path: Path | None = None) -> int:
         for h in handles:
             try:
                 items = fetch_author_feed(h)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 failed += 1
                 print(f"  ⚠ {h}: {type(e).__name__} {str(e)[:60]}", flush=True)
                 continue

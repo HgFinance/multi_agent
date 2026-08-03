@@ -27,31 +27,32 @@ F04 완료 조건 - "Adapter 가 바뀌어도 하위 Feature Schema 는 유지�
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from contracts.market_events import (  # noqa: E402
+from contracts.market_events import (
+    QUOTE_DEPTH_MAX,
+    InstrumentRef,
     Market,
     MarketQuote,
     MarketTick,
     ObservationTimes,
     QualityFlag,
-    QuarantineReason,
     QuarantinedEvent,
+    QuarantineReason,
     SessionType,
     Side,
     build_source_event_id,
-    InstrumentRef,
-    QUOTE_DEPTH_MAX,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from subscription_plan import DataKind, Venue  # noqa: E402
+from subscription_plan import DataKind, Venue
 
 ADAPTER_VERSION = "research-ls-realtime-adapter-v1"
 
@@ -394,7 +395,7 @@ def _check_time_resolution():
 
     # naive received_at
     try:
-        resolve_event_time("103000", datetime(2026, 7, 30, 10, 30))
+        resolve_event_time("103000", datetime(2026, 7, 30, 10, 30))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive received_at 이 통과했다")
     except TimeResolutionError:
         pass
@@ -413,9 +414,9 @@ def _check_tick_normalize():
     assert isinstance(r, MarketTick), r
     assert r.instrument.instrument_id == IID
     assert r.instrument.market is Market.KRX, "시계열 market 은 거래소 단위(KRX)다"
-    assert r.price == Decimal("70000") and r.quantity == Decimal("10")
+    assert r.price == Decimal(70000) and r.quantity == Decimal(10)
     assert r.side is Side.BUY
-    assert r.cumulative_volume == Decimal("1234567")
+    assert r.cumulative_volume == Decimal(1234567)
     assert r.tr_code == "S3_"
     row = r.to_row()
     assert row["side"] == 1 and row["market"] == "KRX"
@@ -431,11 +432,11 @@ def _check_tick_normalize():
 def _check_quote_normalize():
     r = normalize("H1_", H1, received_at=_recv(), resolve_instrument=_resolver)
     assert isinstance(r, MarketQuote), r
-    assert r.bid_prices == (Decimal("69900"), Decimal("69800"))
-    assert r.ask_sizes == (Decimal("150"), Decimal("50"))
-    assert r.total_bid_size == Decimal("300") and r.total_ask_size == Decimal("200")
-    assert r.best_bid == Decimal("69900") and r.best_ask == Decimal("70000")
-    assert r.spread == Decimal("100")
+    assert r.bid_prices == (Decimal(69900), Decimal(69800))
+    assert r.ask_sizes == (Decimal(150), Decimal(50))
+    assert r.total_bid_size == Decimal(300) and r.total_ask_size == Decimal(200)
+    assert r.best_bid == Decimal(69900) and r.best_ask == Decimal(70000)
+    assert r.spread == Decimal(100)
     assert abs(r.depth_imbalance - 0.2) < 1e-12
     row = r.to_row()
     assert len(row["bid_prices"]) == 2

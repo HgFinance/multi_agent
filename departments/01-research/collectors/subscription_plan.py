@@ -38,7 +38,7 @@ TR 은 (시장, 자산군, 데이터종류) 조합마다 다르다. 종목이 �
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
@@ -449,8 +449,8 @@ class SubscriptionPlan:
 
     def summary(self) -> str:
         lines = [
-            f"{PLAN_VERSION} - 구독 {self.count}건 "
-            f"(체결 {len(self.by_kind(DataKind.TICK))} / 호가 {len(self.by_kind(DataKind.QUOTE))})"
+            (f"{PLAN_VERSION} - 구독 {self.count}건 "
+            f"(체결 {len(self.by_kind(DataKind.TICK))} / 호가 {len(self.by_kind(DataKind.QUOTE))})")
         ]
         for path, n in self.by_socket().items():
             lines.append(f"  {path:34} {n}")

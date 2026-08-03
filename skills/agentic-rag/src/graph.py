@@ -24,8 +24,8 @@ from .nodes import (
     make_retrieve_node,
     should_retry,
 )
-from .retriever import LocalVectorIndex
 from .resilience import emit_metric
+from .retriever import LocalVectorIndex
 
 
 def build_compliance_graph(corpus_dir: Path):
@@ -63,7 +63,7 @@ def run_compliance_check(
     try:
         app = build_compliance_graph(corpus_dir)
         final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         emit_metric("rag_graph_failure", persona=persona, error=type(exc).__name__)
         fallback_verdict = PERSONA_PROMPTS[persona]["no_evidence_verdict"]
         final_state = {

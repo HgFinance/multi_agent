@@ -125,7 +125,7 @@ def test_04_tool_permission_allowed_denied_and_unauthorized_count():
 
 
 def test_05_incident_timeline_and_corrective_action_full_flow():
-    incident_id, finding_id = uuid4(), uuid4()
+    incident_id, _finding_id = uuid4(), uuid4()
     client.post(f"/qa/v1/incidents/{incident_id}/events", json={
         "source": "agent-ops-monitor", "entry_type": "FACT", "summary": "에러율 15% 관측",
         "occurred_at": now.isoformat(), "recorded_by": "svc_audit_collector",

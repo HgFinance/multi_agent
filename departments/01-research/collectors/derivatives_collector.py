@@ -64,7 +64,7 @@ EXIT_SKIP = 2                      # collector_scheduler 규약: 의도된 미�
 SCHEMA_VERSION = 1
 PROVIDER = "ls"
 MARKET = "KRX"
-K200_MULTIPLIER = Decimal("250000")   # 정규 KOSPI200 선물·옵션 승수 (2017 개정 후)
+K200_MULTIPLIER = Decimal(250000)   # 정규 KOSPI200 선물·옵션 승수 (2017 개정 후)
 SESSION_PAD = timedelta(minutes=15)   # 파생 = 주식 세션 ±15분
 EXPIRY_TOLERANCE_DAYS = 2
 # 상장일을 마스터가 주지 않아 조회 좌표 용도의 고정 valid_from 을 쓴다.
@@ -575,7 +575,6 @@ def load_universe(client, today: date):
 
 def collect() -> int:
     import psycopg2
-
     from ls_client import LsEnvironment, LsRestClient
     from source_registry import SourceRegistry, load_project_env
 
@@ -670,7 +669,6 @@ def sync_contracts() -> int:
     """계약 등록만 (세션 무관). 시세는 한 행도 적재하지 않는다 - 계약 목록은
     사실이라 폐장 조회로도 왜곡이 없다. 배포 전 검증과 월물 선등록에 쓴다."""
     import psycopg2
-
     from ls_client import LsEnvironment, LsRestClient
     from source_registry import SourceRegistry, load_project_env
 
@@ -734,8 +732,8 @@ def _check_expiry_rules():
     assert front_month([(2026, 8), (2026, 9)], date(2026, 8, 13)) == (2026, 8)  # 만기 당일까지 근월
     assert front_month([(2026, 8), (2026, 9)], date(2026, 8, 14)) == (2026, 9)
     # 실측: 2026-07-31 에 jandatecnt=14 (포함 기준) - 만기 8/13 과 1일 차, 허용
-    assert validate_front_expiry(date(2026, 8, 13), Decimal("14"), date(2026, 7, 31))
-    assert not validate_front_expiry(date(2026, 8, 13), Decimal("30"), date(2026, 7, 31))
+    assert validate_front_expiry(date(2026, 8, 13), Decimal(14), date(2026, 7, 31))
+    assert not validate_front_expiry(date(2026, 8, 13), Decimal(30), date(2026, 7, 31))
     print("  만기 규칙(둘째 목요일)   OK")
 
 
@@ -745,9 +743,9 @@ def _check_option_row():
             "delt": "0.8894", "gama": "0.0011", "vega": "0.3850",
             "ceta": "-1.1914", "rhox": "0.02", "theoryprice": "183.15",
             "volume": 0, "atmgubun": "1"}
-    kw = dict(kind="CALL", expiry=date(2026, 8, 13), days_left=Decimal("14"),
-              underlying=Decimal("1030.65"),
-              observed_kst=datetime(2026, 7, 31, 22, 0, tzinfo=KST))
+    kw = {"kind": "CALL", "expiry": date(2026, 8, 13), "days_left": Decimal(14),
+              "underlying": Decimal("1030.65"),
+              "observed_kst": datetime(2026, 7, 31, 22, 0, tzinfo=KST)}
     r = build_option_row(base, **kw)
     assert r is not None and abs(r.iv - 0.8084) < 1e-12
     assert r.raw_flags["iv_raw"] == "80.84"

@@ -482,7 +482,8 @@ def _check_times():
     # naive datetime 은 막는다
     try:
         ObservationTimes(
-            event_time=datetime(2026, 7, 30, 1, 0), received_at=_utc(), observed_at=_utc()
+            event_time=datetime(2026, 7, 30, 1, 0),  # noqa: DTZ001 - intentionally invalid input
+            received_at=_utc(), observed_at=_utc()
         )
         raise AssertionError("naive datetime 이 통과했다")
     except ValueError:
@@ -537,8 +538,8 @@ def _tick(**kw) -> MarketTick:
         "instrument": _instrument(),
         "tr_code": "S3_",
         "session_type": SessionType.REGULAR,
-        "price": Decimal("70000"),
-        "quantity": Decimal("10"),
+        "price": Decimal(70000),
+        "quantity": Decimal(10),
         "side": Side.BUY,
         "source_event_id": build_source_event_id(
             provider="LS", provider_symbol="005930", event_time=_utc(), payload_identity="seq-1"
@@ -553,7 +554,7 @@ def _check_tick():
     row = t.to_row()
     assert row["side"] == 1 and isinstance(row["side"], int)
     assert row["market"] == "KRX"
-    assert row["price"] == Decimal("70000")
+    assert row["price"] == Decimal(70000)
     assert row["raw_flags"] == {"quality_flags": []}
     assert row["schema_version"] == SCHEMA_VERSION
 
@@ -568,7 +569,7 @@ def _check_tick():
 
     # 음수 가격은 막는다 (마이그레이션 check price >= 0)
     try:
-        _tick(price=Decimal("-1"))
+        _tick(price=Decimal(-1))
         raise AssertionError("음수 가격이 통과했다")
     except ValueError:
         pass
@@ -598,10 +599,10 @@ def _quote(**kw) -> MarketQuote:
         "times": _times(),
         "instrument": _instrument(),
         "tr_code": "H1_",
-        "bid_prices": (Decimal("69900"), Decimal("69800")),
-        "bid_sizes": (Decimal("100"), Decimal("200")),
-        "ask_prices": (Decimal("70000"), Decimal("70100")),
-        "ask_sizes": (Decimal("150"), Decimal("50")),
+        "bid_prices": (Decimal(69900), Decimal(69800)),
+        "bid_sizes": (Decimal(100), Decimal(200)),
+        "ask_prices": (Decimal(70000), Decimal(70100)),
+        "ask_sizes": (Decimal(150), Decimal(50)),
         "source_event_id": build_source_event_id(
             provider="LS", provider_symbol="005930", event_time=_utc(), payload_identity="h-1"
         ),
@@ -612,10 +613,10 @@ def _quote(**kw) -> MarketQuote:
 
 def _check_quote():
     q = _quote()
-    assert q.best_bid == Decimal("69900")
-    assert q.best_ask == Decimal("70000")
-    assert q.spread == Decimal("100")
-    assert q.mid_price == Decimal("69950")
+    assert q.best_bid == Decimal(69900)
+    assert q.best_ask == Decimal(70000)
+    assert q.spread == Decimal(100)
+    assert q.mid_price == Decimal(69950)
     assert q.is_crossed is False
     # (300 - 200) / 500
     assert abs(q.depth_imbalance - 0.2) < 1e-12
@@ -633,7 +634,7 @@ def _check_quote():
 
     # 길이 불일치는 막는다
     try:
-        _quote(bid_sizes=(Decimal("100"),))
+        _quote(bid_sizes=(Decimal(100),))
         raise AssertionError("bid 길이 불일치가 통과했다")
     except ValueError:
         pass
@@ -642,7 +643,7 @@ def _check_quote():
     try:
         _quote(
             bid_prices=tuple(Decimal(70000 - i) for i in range(11)),
-            bid_sizes=tuple(Decimal("1") for _ in range(11)),
+            bid_sizes=tuple(Decimal(1) for _ in range(11)),
         )
         raise AssertionError("11단계가 통과했다")
     except ValueError:
@@ -650,26 +651,26 @@ def _check_quote():
 
     # 정렬이 깨지면 막는다
     try:
-        _quote(bid_prices=(Decimal("69800"), Decimal("69900")))
+        _quote(bid_prices=(Decimal(69800), Decimal(69900)))
         raise AssertionError("bid 오름차순이 통과했다")
     except ValueError:
         pass
 
     # 0 단계는 정렬 검사에서 제외한다(공급자가 빈 단계를 0 으로 채운다)
     padded = _quote(
-        bid_prices=(Decimal("69900"), Decimal("0")), bid_sizes=(Decimal("100"), Decimal("0"))
+        bid_prices=(Decimal(69900), Decimal(0)), bid_sizes=(Decimal(100), Decimal(0))
     )
-    assert padded.best_bid == Decimal("69900")
+    assert padded.best_bid == Decimal(69900)
     print("  MarketQuote           OK")
 
 
 def _check_crossed_quote():
     """동시호가 교차는 버리지 않고 Flag + best null 로 처리한다."""
     q = _quote(
-        bid_prices=(Decimal("70100"),),
-        bid_sizes=(Decimal("100"),),
-        ask_prices=(Decimal("70000"),),
-        ask_sizes=(Decimal("100"),),
+        bid_prices=(Decimal(70100),),
+        bid_sizes=(Decimal(100),),
+        ask_prices=(Decimal(70000),),
+        ask_sizes=(Decimal(100),),
         session_type=SessionType.CLOSING_AUCTION,
     )
     assert q.is_crossed is True
@@ -679,7 +680,7 @@ def _check_crossed_quote():
     assert row["spread"] is None and row["mid_price"] is None
     assert "CROSSED_QUOTE" in row["raw_flags"]["quality_flags"]
     # 원본 배열은 그대로 남는다
-    assert row["bid_prices"] == [Decimal("70100")]
+    assert row["bid_prices"] == [Decimal(70100)]
     print("  교차 호가 처리        OK")
 
 

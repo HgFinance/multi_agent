@@ -92,7 +92,7 @@ class PostgresRosterRepository(RosterRepository):
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str) -> "PostgresRosterRepository":
+    def connect(cls, dsn: str) -> PostgresRosterRepository:
         ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(1, 4, dsn))
 

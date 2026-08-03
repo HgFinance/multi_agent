@@ -1,6 +1,6 @@
 # AI QA/감사본부 (AI QA & Audit)
 
-부서장 `qa-audit-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [QA Worker Graph](qa_employee_workers.py)의 Ollama `qwen3:8b` LangGraph Worker다. 결정론적 Evidence QA Engine이 바인딩 판정을 소유한다.
+부서장 `qa-audit-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [QA Worker Graph](qa_employee_workers.py)의 Ollama `qwen3:1.7b` LangGraph Worker다. 결정론적 Evidence QA Engine이 바인딩 판정을 소유한다.
 
 ## P1 현재 상태 (2026-08-03)
 
@@ -29,7 +29,7 @@
 - 기본 입력에서 항상 실행되는 Worker는 1개(`evidence-qa-worker`)다.
 - 조건부 Worker는 4개(`hallucination-critic-worker`, `model-and-internal-audit-worker`, `ops-and-permission-worker`, `incident-postmortem-worker`)이며, 근거·모델·운영·Incident 신호가 있을 때 호출된다.
 - 한 케이스의 최대 실행 수는 5개다. `agent.personalities`의 기존 8개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
-직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:8b`이며, `agent-qa`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:1.7b`이며, `agent-qa`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 

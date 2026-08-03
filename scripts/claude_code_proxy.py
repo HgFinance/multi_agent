@@ -198,7 +198,7 @@ def call_cli(prompt: str, alias: str, *, cli: str) -> tuple[str, dict]:
     """
     proc = subprocess.run(
         [cli, "-p", "--model", alias, "--output-format", "json"],
-        input=prompt, capture_output=True, text=True, encoding="utf-8",
+        check=False, input=prompt, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=CLI_TIMEOUT,
     )
     if proc.returncode != 0:

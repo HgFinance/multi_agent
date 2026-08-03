@@ -47,14 +47,14 @@ import sys
 import threading
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from naver_news_collector import (  # noqa: E402
+from naver_news_collector import (
     DAILY_QUOTA,
     DEDUP_WINDOW,
     SOURCE_ID,
@@ -63,14 +63,14 @@ from naver_news_collector import (  # noqa: E402
     load_watchlist,
     make_watch_stream,
 )
-from news_events import StreamCursor  # noqa: E402
-from news_watch_tiers import plan_tiers, sweep_symbols  # noqa: E402
-from news_pipeline import (  # noqa: E402
+from news_events import StreamCursor
+from news_pipeline import (
     NewsSink,
     krx_symbol_resolver,
     seed_title_window_from_db,
 )
-from source_registry import load_project_env  # noqa: E402
+from news_watch_tiers import plan_tiers, sweep_symbols
+from source_registry import load_project_env
 
 SERVICE_VERSION = "research-news-watch-service-v1"
 KST = timezone(timedelta(hours=9))
@@ -371,7 +371,7 @@ def main() -> int:
                     interval_seconds=cfg.interval_seconds, stop=stop,
                     quota_state=quota_state,
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 # NAVER 오류든 DB 오류든 같은 경로다. DB 재접속이 NAVER 오류에는
                 # 불필요하지만 무해하고, 경로가 하나면 놓치는 조합이 없다.
                 print(
@@ -387,7 +387,7 @@ def main() -> int:
                 backoff = min(backoff * 2, 300.0)
                 try:
                     ref.close()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
                     pass
                 ref = SupabaseReferenceRepository()
                 sink.rebind(ref)  # 버퍼·통계 유지 - flush 실패분이 재시도된다
@@ -396,12 +396,12 @@ def main() -> int:
     finally:
         try:
             sink.close()  # 꼬리를 밀어 넣는다
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             # 종료 Flush 까지 실패하면 몇 건을 잃는지 숨기지 않는다
             print(f"⚠ 종료 Flush 실패 - 버퍼 {sink.pending}건 유실: {e}", flush=True)
         try:
             ref.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
             pass
 
     print(f"종료: {sink.stats.summary()}", flush=True)
@@ -503,10 +503,10 @@ def _check_tier2_config():
 
     fd, core_path = tempfile.mkstemp(suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(("005930", "000660")))
+        f.write("005930\n000660")
     fd, full_path = tempfile.mkstemp(suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(("005930", "000660", "035720")))
+        f.write("005930\n000660\n035720")
     try:
         # 지정 안 하면 꺼진 상태 - 기존 동작과 같다
         cfg = parse_config({"NEWS_WATCH_SYMBOLS_FILE": core_path})
@@ -559,7 +559,7 @@ def _check_loop_sweeps():
     stop = threading.Event()
     stream = _FakeStream([["r1", "r2"], [], ["r3"]], stop)
     sink = _FakeSink()
-    tracker = DailyQuotaTracker(_FakeClient(), today=lambda: datetime(2026, 7, 31).date())
+    tracker = DailyQuotaTracker(_FakeClient(), today=lambda: date(2026, 7, 31))
     sweeps, emitted = run_loop(
         stream, sink, interval_seconds=0.01, stop=stop,
         quota_state=tracker, log=lambda *_: None,
@@ -573,7 +573,7 @@ def _check_loop_sweeps():
 def _check_quota_guard():
     """한도 도달 시 정지, 재진입에도 기준 유지, 날짜 변경 시 리셋."""
     client = _FakeClient()
-    seq = {"d": datetime(2026, 7, 31).date()}
+    seq = {"d": date(2026, 7, 31)}
     tracker = DailyQuotaTracker(client, today=lambda: seq["d"])
     client.calls = 22_500  # tracker 생성 *후* 사용된 호출 - 25,000 의 90%
 
@@ -606,7 +606,7 @@ def _check_quota_guard():
     assert warned2
 
     # 날이 바뀌면 오늘 사용량은 0 부터다
-    seq["d"] = datetime(2026, 8, 1).date()
+    seq["d"] = date(2026, 8, 1)
     stop3 = threading.Event()
     stream3 = _FakeStream([["z"]], stop3)
     run_loop(stream3, _FakeSink(), interval_seconds=0.01, stop=stop3,

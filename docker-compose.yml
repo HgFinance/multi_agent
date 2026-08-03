@@ -39,6 +39,8 @@ name: hedgefund
 #   서비스(redis 등)와 하나의 병합된 모델을 공유하므로 depends_on 등 상호 참조가 그대로 된다.
 include:
   - departments/00-ceo-office/compose.yaml
+  - departments/02-trading/compose.yaml
+  - departments/05-accounting-portfolio/compose.yaml
   - departments/07-agent-workforce/compose.yaml
 
 services:
@@ -582,6 +584,10 @@ services:
   # departments/00-ceo-office/compose.yaml, departments/07-agent-workforce/compose.yaml
   # (governance-api, notification-worker, ceo-hermes, workforce-api, improvement-worker,
   # workforce-hermes). 이 파일 상단 `include:` 참고.
+
+  # 트레이딩·회계/포트폴리오본부(도현 소유) 서비스도 각자 Compose Fragment로 옮겼다 -
+  # departments/02-trading/compose.yaml, departments/05-accounting-portfolio/compose.yaml
+  # (trading-hermes, accounting-hermes). 이 파일 상단 `include:` 참고.
 
   # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
   #

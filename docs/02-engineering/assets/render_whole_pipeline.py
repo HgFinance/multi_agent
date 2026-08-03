@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-
 
 WIDTH, HEIGHT = 1600, 1000
 ROOT = Path(__file__).parent
@@ -49,7 +49,7 @@ def arrow(draw: ImageDraw.ImageDraw, points: list[tuple[int, int]], dashed: bool
     if not dashed:
         draw.line(points, fill=SLATE, width=width, joint="curve")
     else:
-        for start, end in zip(points, points[1:]):
+        for start, end in pairwise(points):
             x1, y1 = start
             x2, y2 = end
             distance = max(abs(x2 - x1), abs(y2 - y1))
@@ -112,7 +112,7 @@ def main() -> None:
     draw = ImageDraw.Draw(image)
 
     label(draw, 50, 24, "HgFinance AI Office — 0–7 Department Pipeline", 30, NAVY, True)
-    label(draw, 50, 62, "Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:8b", 16, MUTED)
+    label(draw, 50, 62, "Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:1.7b", 16, MUTED)
 
     draw.rounded_rectangle((1100, 20, 1550, 88), radius=12, fill="#f8fafc", outline="#cbd5e1")
     arrow(draw, [(1120, 44), (1170, 44)])
@@ -124,8 +124,8 @@ def main() -> None:
     centered(draw, (682, 105, 918, 143), "START / case_request", 14, SLATE, True)
     arrow(draw, [(800, 143), (800, 160)])
 
-    dept_box(draw, 40, 160, "1", "Research", "Employees: LangGraph Workers", "role-based registry / evidence context", "Output: research_packet")
-    dept_box(draw, 390, 160, "2", "Trading", "Employees: LangGraph Workers", "OrderIntent + OMS/Fill adapter", "Output: order_intent")
+    dept_box(draw, 40, 160, "1", "Research", "Employees: 6 Workers", "2 always + 4 conditional", "Output: research_packet")
+    dept_box(draw, 390, 160, "2", "Trading", "Employees: 6 Workers", "2 always + 4 conditional", "Output: order_intent")
     dept_box(draw, 740, 160, "3", "Risk Management", "Employees: 4 Workers", "2 always + 2 conditional", "", gate="DETERMINISTIC RISK GATE")
     dept_box(draw, 1090, 160, "6", "AI QA / Audit", "Employees: 5 Workers", "1 always + 4 conditional", "", gate="DETERMINISTIC EVIDENCE QA GATE")
 
@@ -136,10 +136,10 @@ def main() -> None:
     arrow(draw, [(1040, 260), (1090, 260)])
     label(draw, 1065, 238, "risk_decision", 12, "#1d4ed8", True, "mm")
 
-    lower_box(draw, 40, 505, "4", "Quant / Backtest", "Employees: LangGraph Workers", "strategy research / replay context", "strategy_research_cycle", fill=BLUE, border=BLUE_BORDER)
-    lower_box(draw, 390, 505, "7", "HR / Agent Workforce", "Worker lifecycle registry", "hire / evaluate / pause / retire", "shared governance service", fill=GRAY, border=GRAY_BORDER, dashed=True)
-    lower_box(draw, 740, 505, "5", "Accounting / Portfolio", "Employees: LangGraph Workers", "ledger / reconciliation context", "Output: accounting_snapshot")
-    lower_box(draw, 1090, 505, "0", "CEO Office", "Employees: LangGraph Workers", "final case-summary context", "Final summary; no order authority", fill=AMBER, border=AMBER_BORDER)
+    lower_box(draw, 40, 505, "4", "Quant / Backtest", "Employees: 7 Workers", "2 always + 5 conditional", "strategy_research_cycle", fill=BLUE, border=BLUE_BORDER)
+    lower_box(draw, 390, 505, "7", "HR / Agent Workforce", "Employees: 5 Workers", "hire / evaluate / pause / retire", "shared governance service", fill=GRAY, border=GRAY_BORDER, dashed=True)
+    lower_box(draw, 740, 505, "5", "Accounting / Portfolio", "Employees: 8 Workers", "2 always + 6 conditional", "Output: accounting_snapshot")
+    lower_box(draw, 1090, 505, "0", "CEO Office", "Employees: 1 Worker", "briefing context only", "Final summary; no order authority", fill=AMBER, border=AMBER_BORDER)
 
     arrow(draw, [(1240, 365), (1240, 420), (900, 420), (900, 505)])
     label(draw, 1080, 404, "qa_assessment", 12, "#1d4ed8", True, "mm")

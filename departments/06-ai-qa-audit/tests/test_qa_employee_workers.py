@@ -23,7 +23,7 @@ def test_evidence_worker_is_langgraph_qwen_and_conditional_roles_sleep():
     assert report["runtime"] == {
         "executor": "LangGraph",
         "provider": "ollama",
-        "model": "qwen3:8b",
+        "model": "qwen3:1.7b",
         "max_retries": 2,
         "max_attempts": 3,
     }

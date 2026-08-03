@@ -63,7 +63,7 @@ class _TextExtractor(html.parser.HTMLParser):
     """<p>·<article> 중심의 단순 본문 추출. 언론사마다 구조가 달라 완벽할 수 없고,
     완벽할 필요도 없다 - LLM 판단 재료로 충분한 평문이면 된다."""
 
-    _SKIP = {"script", "style", "nav", "header", "footer", "aside", "form", "button"}
+    _SKIP = frozenset({"script", "style", "nav", "header", "footer", "aside", "form", "button"})
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -97,7 +97,7 @@ def extract_text(html_doc: str, *, max_chars: int = MAX_BODY_CHARS) -> str:
     p = _TextExtractor()
     try:
         p.feed(html_doc)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
         pass  # 깨진 HTML 은 그때까지 모은 문단으로 간다
     return "\n".join(p.paragraphs)[:max_chars]
 
@@ -148,7 +148,7 @@ class ArticleReader:
 
         try:
             doc = self._fetch(url)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             self.stats.failed += 1
             key = type(e).__name__
             self.stats.fail_reasons[key] = self.stats.fail_reasons.get(key, 0) + 1
@@ -180,7 +180,7 @@ class ArticleReader:
             rp.set_url(base + "/robots.txt")
             try:
                 rp.read()
-            except Exception:
+            except Exception:  # noqa: BLE001 - intentional fallback boundary
                 # robots 를 읽을 수 없으면 **읽지 않는 쪽**을 택한다 (fail-closed)
                 rp.disallow_all = True
             self._robots_cache[base] = rp

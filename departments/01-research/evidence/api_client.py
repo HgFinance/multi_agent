@@ -53,7 +53,7 @@ def get_json(url: str, *, persona: str, timeout: int = 25, opener=None):
             body = ""
             try:
                 body = e.read().decode("utf-8", "replace")[:200]
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
                 pass
             raise ApiForbidden(
                 f"{persona} 가 {url} 을 호출할 권한이 없다(게이트웨이 403). {body}")

@@ -35,8 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from news_events import NewsRecord, clean_title  # noqa: E402
-from source_registry import SourceRegistry, load_project_env  # noqa: E402
+from news_events import NewsRecord, clean_title
+from source_registry import SourceRegistry, load_project_env
 
 COLLECTOR_VERSION = "research-ls-news-v1"
 SOURCE_ID = "ls_news"
@@ -81,7 +81,6 @@ def parse_packet(body: dict, *, observed_at: datetime) -> NewsRecord | None:
 
 async def run_service(stop: asyncio.Event) -> int:
     import websockets
-
     from ls_client import LsRestClient
     from ls_realtime_worker import build_subscribe_message, classify_message
     from news_pipeline import NewsSink, krx_symbol_resolver, seed_title_window_from_db
@@ -160,7 +159,7 @@ async def run_service(stop: asyncio.Event) -> int:
                                   f"{sink.stats.summary()}", flush=True)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - intentional fallback boundary
                 backoff = RECONNECT_BACKOFF[min(attempt, len(RECONNECT_BACKOFF) - 1)]
                 attempt += 1
                 print(f"⚠ 연결 오류: {type(e).__name__}: {str(e)[:80]} - "
@@ -172,7 +171,7 @@ async def run_service(stop: asyncio.Event) -> int:
     finally:
         try:
             sink.close()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             print(f"⚠ 종료 Flush 실패 - {sink.pending}건 유실: {e}", flush=True)
         ref.close()
     print(f"종료: 수신 {received:,} | {sink.stats.summary()}", flush=True)

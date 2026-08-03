@@ -21,7 +21,7 @@ from pathlib import Path
 _API_DIR = Path(__file__).resolve().parents[1] / "api"
 sys.path.insert(0, str(_API_DIR))
 
-from app import _governance_event_bus, _handle_governance_event  # noqa: E402
+from app import _governance_event_bus, _handle_governance_event
 
 
 def main() -> None:

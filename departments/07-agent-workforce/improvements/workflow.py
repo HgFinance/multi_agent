@@ -203,17 +203,17 @@ if __name__ == "__main__":
     from candidate import ImprovementCandidate
 
     def _candidate(**over) -> ImprovementCandidate:
-        base = dict(
-            candidate_id="ic-1",
-            author="qa-department-hermes",
-            target_type="PROFILE",
-            target_ref="agent-citation-checker",
-            target_current_version=3,
-            evidence_ids=["finding-101"],
-            expected_effect="인용 누락 오탐 감소",
-            risk_class="MEDIUM",
-            rollback_target_version=3,
-        )
+        base = {
+            "candidate_id": "ic-1",
+            "author": "qa-department-hermes",
+            "target_type": "PROFILE",
+            "target_ref": "agent-citation-checker",
+            "target_current_version": 3,
+            "evidence_ids": ["finding-101"],
+            "expected_effect": "인용 누락 오탐 감소",
+            "risk_class": "MEDIUM",
+            "rollback_target_version": 3,
+        }
         base.update(over)
         return ImprovementCandidate(**base)
 

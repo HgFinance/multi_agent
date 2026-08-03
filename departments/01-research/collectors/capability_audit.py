@@ -26,9 +26,8 @@
 """
 from __future__ import annotations
 
-import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -177,7 +176,7 @@ def collector_health_gaps(rows: list[tuple]) -> list[Gap]:
             kind="COLLECTOR_FAILING",
             title=f"수집 Job '{job}' 실패 중 (마지막 상태 {last_status})",
             detail=detail + (f"\n      마지막 오류: {str(err)[:160]}" if err else ""),
-            evidence=f"research.collector_health 조회",
+            evidence="research.collector_health 조회",
             priority=1))
     return out
 
@@ -205,7 +204,6 @@ def render_report(gaps: list[Gap], *, now: str) -> str:
 
 def audit() -> int:
     import psycopg2
-
     from methods import METHODS
     from source_registry import load_project_env
 

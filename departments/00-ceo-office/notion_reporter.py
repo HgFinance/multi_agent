@@ -18,10 +18,15 @@ Notion은 Projection일 뿐이다 - 이 모듈이 실패해도(미설정, 네트
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from reporting import notion_rich_text_chunks
 
@@ -78,13 +83,17 @@ def upload_report(out: dict, *, report_md: str = "", env: dict | None = None) ->
         "content_hash": _rich_text(out.get("content_hash")),
         "escalate": {"checkbox": bool(out.get("escalate", False))},
         "서술": _rich_text(out.get("narrative")),
-        "원본 리포트": _rich_text(report_md),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
     }
 
     try:
-        status, body = _post("pages", {"parent": {"database_id": db_id}, "properties": props}, token)
-    except Exception as e:  # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+        from departments.notion_markdown import markdown_to_notion_blocks
+
+        payload = {"parent": {"database_id": db_id}, "properties": props}
+        if report_md:
+            payload["children"] = markdown_to_notion_blocks(report_md)
+        status, body = _post("pages", payload, token)
+    except Exception as e:  # noqa: BLE001 - Notion은 비바인딩 Projection이라 오류를 흡수한다.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
     if status == 200:
         return {"ok": True, "url": body.get("url")}
@@ -119,10 +128,16 @@ def _check_payload_shape():
                "status": "QUEUED", "missing_required": [], "source_snapshot_ids": ["s1", "s2"],
                "template_version": "v1", "content_hash": "h1", "escalate": False,
                "narrative": "n"}
-        result = upload_report(out, env={"NOTION_TOKEN": "tok", "NOTION_CEO_DB": "db1"})
+        result = upload_report(
+            out,
+            report_md="# CEO Summary\n\n- worker context",
+            env={"NOTION_TOKEN": "tok", "NOTION_CEO_DB": "db1"},
+        )
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         assert captured["body"]["parent"]["database_id"] == "db1"
         assert captured["body"]["properties"]["판정"]["select"]["name"] == "QUEUED"
+        assert "원본 리포트" not in captured["body"]["properties"]
+        assert captured["body"]["children"]
     finally:
         globals()["_post"] = orig
     print("  업로드 Payload 구성        OK")

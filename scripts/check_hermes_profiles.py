@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECK_VERSION = "hermes-profile-contract-check-v1"
+CHECK_VERSION = "hermes-profile-contract-check-v2"
 
 # CLAUDE.md "env: 가 부서마다 다르다" - 아무 키나 넣지 않는다
 ANTHROPIC = {"ceo-agent", "research-department", "qa-department",
@@ -41,16 +41,37 @@ OPENAI = {"trading-department", "risk-management",
 # 같은 통제 경계와 층이 다르므로 부서마다 달라도 된다. 다만 "달라도 된다"가
 # "아무거나 돼도 된다"는 아니므로, 소유자가 선언한 값과 다르면 이 검사가 잡는다
 # (전역 동일성 강제를 여기서 이 표로 바꿨다 - 우연한 표류는 여전히 걸린다).
-EXPECTED_MODELS = {
+# Historical snapshot (2026-08-02): retained only to explain prior checker output.
+LEGACY_EXPECTED_MODELS = {
     "research-department": "nous/poolside/laguna-s-2.1:free",     # 재일
     "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
     "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
     "hr-department": "nous/poolside/laguna-s-2.1:free",          # 영주
-    "trading-department": "nous/poolside/laguna-s-2.1:free",     # 도현
-    "accounting-portfolio-department": "nous/poolside/laguna-s-2.1:free",
+    # 도현: 2026-08-03 팀 합의대로 Sonnet. 단 api.anthropic.com 직접이 아니라
+    # scripts/claude_code_proxy.py 를 거쳐 구독 플랜 한도로 부른다(각 config.yaml 주석).
+    "trading-department": "anthropic/sonnet",                    # 도현
+    "accounting-portfolio-department": "anthropic/sonnet",
     "risk-management": "nous/poolside/laguna-s-2.1:free",        # 동규
     "qa-department": "nous/poolside/laguna-s-2.1:free",
 }
+
+# Current runtime contract: every Hermes Head defaults to Codex/Luna.
+# The legacy table above is retained only as historical audit context.
+EXPECTED_MODELS = {
+    "ceo-agent": "openai-codex/gpt-5.6-luna",
+    "research-department": "openai-codex/gpt-5.6-luna",
+    "trading-department": "openai-codex/gpt-5.6-luna",
+    "risk-management": "openai-codex/gpt-5.6-luna",
+    "quant-backtest-department": "openai-codex/gpt-5.6-luna",
+    "accounting-portfolio-department": "openai-codex/gpt-5.6-luna",
+    "qa-department": "openai-codex/gpt-5.6-luna",
+    "hr-department": "openai-codex/gpt-5.6-luna",
+}
+
+# Worker model is a separate contract from the Hermes Head model above.
+# This is intentionally a temporary low-memory test default; do not change
+# EXPECTED_MODELS when switching employee Workers.
+EXPECTED_WORKER_MODEL = "qwen3:1.7b"
 
 DEPARTMENTS = {
     "ceo-agent": "00-ceo-office",
@@ -143,6 +164,25 @@ def check_boundary(dept: str, cfg: dict) -> list[str]:
     return errs
 
 
+def check_worker_model(dept: str, cfg: dict) -> list[str]:
+    """Verify the employee Worker model without changing the Head contract."""
+    runtime = cfg.get("employee_runtime") or {}
+    model_default = runtime.get("model_default")
+    active_model = (runtime.get("model_selection") or {}).get("active_model")
+    errors: list[str] = []
+    if model_default != EXPECTED_WORKER_MODEL:
+        errors.append(
+            f"{dept}: employee_runtime.model_default expected "
+            f"{EXPECTED_WORKER_MODEL}, got {model_default}"
+        )
+    if active_model != EXPECTED_WORKER_MODEL:
+        errors.append(
+            f"{dept}: employee_runtime.model_selection.active_model expected "
+            f"{EXPECTED_WORKER_MODEL}, got {active_model}"
+        )
+    return errors
+
+
 def audit() -> tuple[list[str], list[str], dict]:
     errors: list[str] = []
     warns: list[str] = []
@@ -157,6 +197,7 @@ def audit() -> tuple[list[str], list[str], dict]:
         errors += check_env_assignment(dept, cfg)
         errors += check_persona_consistency(dept, cfg)
         errors += check_boundary(dept, cfg)
+        errors += check_worker_model(dept, cfg)
         m = cfg.get("model") or {}
         models[dept] = f"{m.get('provider')}/{m.get('default')}"
         if get_allowlist(cfg) is None:

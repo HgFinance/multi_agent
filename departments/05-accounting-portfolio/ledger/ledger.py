@@ -28,7 +28,7 @@ from uuid import UUID, uuid4
 # 본부 간 의존 방향이 이 파일에 그대로 남는다.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
 
-from contracts import Side  # noqa: E402
+from contracts import Side
 
 # ---------------------------------------------------------------------------
 # 계정과목 (최소 세트)
@@ -55,7 +55,7 @@ ACCOUNT_TYPES = {
     FEE_EXPENSE: "expense", TAX_EXPENSE: "expense",
 }
 
-ZERO = Decimal("0")
+ZERO = Decimal(0)
 
 
 class LedgerError(Exception):
@@ -297,44 +297,44 @@ if __name__ == "__main__":
 
     # 1. 불균형 분개는 만들어지지 않는다
     raises(lambda: Journal(uuid4(), fund, book, "t", "s1", now, now.date(),
-                           [JournalLine(CASH, debit=Decimal("100"))]), "차변만 있는 분개")
-    raises(lambda: JournalLine(CASH, debit=Decimal("1"), credit=Decimal("1")), "차대 동시")
+                           [JournalLine(CASH, debit=Decimal(100))]), "차변만 있는 분개")
+    raises(lambda: JournalLine(CASH, debit=Decimal(1), credit=Decimal(1)), "차대 동시")
     raises(lambda: Journal(uuid4(), fund, book, "t", "s2", now, now.date(), []), "빈 분개")
 
     # 2. 초기 자본 10억 (db/004_seed.sql과 같은 값)
-    led.post_capital(Decimal("1000000000"), now, "seed_capital")
+    led.post_capital(Decimal(1000000000), now, "seed_capital")
     _, cash = led.rebuild()
-    assert cash == Decimal("1000000000")
+    assert cash == Decimal(1000000000)
 
     # 3. 매수 100주 @70,000 (수수료 1,050)
-    buy = FakeFill(Decimal("100"), Decimal("70000"), Decimal("1050"), ZERO, now, "bf_1")
+    buy = FakeFill(Decimal(100), Decimal(70000), Decimal(1050), ZERO, now, "bf_1")
     positions = {}
     led.post_fill(buy, Side.BUY, stock, Position(stock))
     positions, cash = led.rebuild()
-    assert positions[stock].quantity == Decimal("100")
-    assert positions[stock].average_cost == Decimal("70000")
-    assert cash == Decimal("1000000000") - Decimal("7000000") - Decimal("1050")
+    assert positions[stock].quantity == Decimal(100)
+    assert positions[stock].average_cost == Decimal(70000)
+    assert cash == Decimal(1000000000) - Decimal(7000000) - Decimal(1050)
 
     # 4. 멱등성 - 같은 체결 재처리 (DoD 3번)
     led.post_fill(buy, Side.BUY, stock, Position(stock))
     positions, cash2 = led.rebuild()
-    assert positions[stock].quantity == Decimal("100"), "중복 분개로 포지션이 두 배가 됨"
+    assert positions[stock].quantity == Decimal(100), "중복 분개로 포지션이 두 배가 됨"
     assert cash2 == cash
 
     # 5. 매도 40주 @75,000 -> 실현이익 (75000-70000)*40 = 200,000
-    sell = FakeFill(Decimal("40"), Decimal("75000"), Decimal("450"), Decimal("4500"), now, "sf_1")
+    sell = FakeFill(Decimal(40), Decimal(75000), Decimal(450), Decimal(4500), now, "sf_1")
     led.post_fill(sell, Side.SELL, stock, positions[stock])
     positions, cash3 = led.rebuild()
-    assert positions[stock].quantity == Decimal("60")
-    assert positions[stock].average_cost == Decimal("70000"), "매도가 평균단가를 바꿨다"
+    assert positions[stock].quantity == Decimal(60)
+    assert positions[stock].average_cost == Decimal(70000), "매도가 평균단가를 바꿨다"
     tb = led.trial_balance()
-    assert tb[REALIZED_PNL] == Decimal("-200000"), f"실현이익 오류: {tb[REALIZED_PNL]}"
-    assert tb[FEE_EXPENSE] == Decimal("1500") and tb[TAX_EXPENSE] == Decimal("4500")
-    assert cash3 == cash + Decimal("3000000") - Decimal("450") - Decimal("4500")
+    assert tb[REALIZED_PNL] == Decimal(-200000), f"실현이익 오류: {tb[REALIZED_PNL]}"
+    assert tb[FEE_EXPENSE] == Decimal(1500) and tb[TAX_EXPENSE] == Decimal(4500)
+    assert cash3 == cash + Decimal(3000000) - Decimal(450) - Decimal(4500)
 
     # 6. 보유보다 많은 매도 차단
     raises(lambda: led.post_fill(
-        FakeFill(Decimal("999"), Decimal("75000"), ZERO, ZERO, now, "sf_bad"),
+        FakeFill(Decimal(999), Decimal(75000), ZERO, ZERO, now, "sf_bad"),
         Side.SELL, stock, positions[stock]), "보유 초과 매도")
 
     # 7. 시산표 합계는 항상 0 (이중분개 불변식)
@@ -342,13 +342,13 @@ if __name__ == "__main__":
 
     # 8. 손실 매도도 균형이 맞는가
     led2 = Ledger(fund_id=fund, book_id=book)
-    led2.post_capital(Decimal("10000000"), now, "seed2")
-    led2.post_fill(FakeFill(Decimal("10"), Decimal("70000"), ZERO, ZERO, now, "b2"),
+    led2.post_capital(Decimal(10000000), now, "seed2")
+    led2.post_fill(FakeFill(Decimal(10), Decimal(70000), ZERO, ZERO, now, "b2"),
                    Side.BUY, stock, Position(stock))
     p2, _ = led2.rebuild()
-    led2.post_fill(FakeFill(Decimal("10"), Decimal("60000"), ZERO, ZERO, now, "s2"),
+    led2.post_fill(FakeFill(Decimal(10), Decimal(60000), ZERO, ZERO, now, "s2"),
                    Side.SELL, stock, p2[stock])
-    assert led2.trial_balance()[REALIZED_PNL] == Decimal("100000"), "실현손실 부호 오류"
+    assert led2.trial_balance()[REALIZED_PNL] == Decimal(100000), "실현손실 부호 오류"
     assert sum(led2.trial_balance().values()) == ZERO
     p2, _ = led2.rebuild()
     assert stock not in p2, "전량 매도 후에도 포지션이 남았다"
@@ -364,6 +364,6 @@ if __name__ == "__main__":
 
     # 10. 수수료·세금이 실현손익에 섞이지 않았는가
     tb = led.trial_balance()
-    assert tb[REALIZED_PNL] == Decimal("-200000"), "손익에 비용이 섞였다"
+    assert tb[REALIZED_PNL] == Decimal(-200000), "손익에 비용이 섞였다"
 
     print("ok - 원장 불변식 10개 점검 통과")

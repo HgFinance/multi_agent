@@ -27,17 +27,18 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 _HERE = Path(__file__).resolve().parent
 for _p in (_HERE, _HERE.parent / "evidence"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from analyst_toolbox import ToolResult  # noqa: E402
+from analyst_toolbox import ToolResult
 
 RUNNERS_VERSION = "research-tool-runners-v1"
 
@@ -58,7 +59,7 @@ def _num(v) -> float | None:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f == f else None      # NaN 제외
+    return f if not math.isnan(f) else None      # NaN 제외
 
 
 def _guard(service: str, path: str, run_mode: str, url: str | None = None) -> None:

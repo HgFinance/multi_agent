@@ -41,10 +41,10 @@
 
 ### 부서와 직원의 실행 계층
 
-- 부서는 Hermes Profile로 실행하고, 부서 안의 개별 직원·페르소나는 LangGraph Node로 구현한다.
+- 부서는 Hermes Profile로 실행하고, 부서 안의 각 직원은 독립 LangGraph Worker Graph로 구현한다. Worker는 Ollama `qwen3:1.7b`를 사용하고, 부서장은 Hermes가 Codex를 기본으로 호출하며 승인된 Claude Code를 대체 런타임으로 사용할 수 있다.
 - Hermes는 부서 단위 오케스트레이션, Queue, Memory Namespace, Tool Allowlist를 담당한다.
-- 현재 Profile의 `agent.personalities`는 대부분 prompt-only다. 실제 구현 여부를 추측하지 말고 코드와 `config.yaml`을 확인한다.
-- 먼저 Hermes 엔지니어링, 부서 간 계약, 권한 경계를 완성한 뒤 개별 직원을 구현한다.
+- 현재 Profile의 `agent.personalities`는 호환 Alias·메타데이터일 수 있다. 실제 직원 실행 여부는 각 부서의 Worker Registry, Worker 구현과 `config.yaml`을 함께 확인한다.
+- Worker 수·역할·trigger·tool 권한의 Source of Truth는 [WORKER_ROLE_BOUNDARIES.md](docs/02-engineering/WORKER_ROLE_BOUNDARIES.md)와 각 Profile의 `workers`/`runtime_personalities`다. 미구현 기능은 가짜 코드로 채우지 않고 구현 상태를 기록한다.
 
 ### 8개 부서와 흐름
 
@@ -73,7 +73,7 @@
 - 각 부서는 `departments/<n>/hermes/config.yaml`과 `SOUL.md` 한 쌍으로 관리한다.
 - 저장소 Profile과 실제 Runtime Profile은 별개다. Runtime은 `~/.hermes/profiles/<department>/`이며 `auth.json`, `.env`, `memories/`, `sessions/`, `state.db*` 등을 포함할 수 있으므로 Git에 넣지 않는다.
 - Profile을 수정하면 `./scripts/sync_hermes_profiles.sh push`, 로컬 Runtime에서 역으로 반영하면 `./scripts/sync_hermes_profiles.sh pull`을 사용한다.
-- `config.yaml`의 `env`는 부서별로 다르므로 임의로 API Key 종류를 통일하지 않는다. `model`은 현재 8개 Profile 모두 `provider: nous` / `poolside/laguna-s-2.1:free` baseline이다.
+- `config.yaml`의 `env`는 부서별로 다르므로 임의로 API Key 종류를 통일하지 않는다. 현재 저장소 기준 8개 Profile의 Head는 `provider: openai-codex` / `gpt-5.6-luna`이며, 승인된 Claude Code 대체 런타임을 허용한다. 직원은 Head 모델과 분리된 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 과거 Nous/Laguna 값은 문서에 남길 때 `Historical snapshot`으로 표시한다.
 - 미구현 기능은 가짜 코드로 채우지 말고 주석 백로그와 구현 상태 필드로 남긴다.
 - 부서 Profile의 페르소나 프롬프트는 영어 2인칭(`You are the ...`)을 사용하고, 파일 상단 설명·주석은 한국어로 작성한다.
 

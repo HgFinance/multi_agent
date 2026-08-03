@@ -24,13 +24,11 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
-
-from source_registry import load_project_env  # noqa: E402
+from fastapi import FastAPI, HTTPException, Query
+from source_registry import load_project_env
 
 API_VERSION = "research-market-api-v1"
 KST = timezone(timedelta(hours=9))
@@ -56,7 +54,7 @@ try:
 
     _install_gateway(app, env_var=_MARKET_ENV)
     GATEWAY_STATUS = "enforce" if _gateway_enforcing(_MARKET_ENV) else "observe"
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
     print(f"⚠ {_msg}", file=sys.stderr)
     if os.environ.get("TOOL_GATEWAY_ENFORCE_MARKET", "").lower() in ("1", "true", "yes"):
@@ -123,7 +121,7 @@ def _query(sql: str, params: tuple):
     except Exception:
         try:
             conn.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
             pass
         raise
 
@@ -189,8 +187,8 @@ def bars(
     symbol: str,
     interval: str = Query("1D", pattern="^(1D|1M|5M|15M|1H)$"),
     limit: int = Query(120, gt=0, le=2000),
-    source: Optional[str] = Query(None, description="ls_chart | derived 등. 없으면 전체"),
-    to: Optional[datetime] = None,
+    source: str | None = Query(None, description="ls_chart | derived 등. 없으면 전체"),
+    to: datetime | None = None,
 ):
     """봉 조회 - 백필(ls_chart)과 자체 파생이 한 테이블에서 나온다(source 로 구분)."""
     iid = _iid_or_404(symbol)
@@ -315,7 +313,7 @@ def regime_daily(days: int = Query(20, gt=0, le=120),
 
 
 @app.get("/microstructure/{symbol}")
-def microstructure(symbol: str, trade_date: Optional[str] = Query(
+def microstructure(symbol: str, trade_date: str | None = Query(
         None, pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="KST 거래일. 없으면 데이터가 있는 최근일")):
     """미시구조 집계 (RES-03 의 결정론 재료) - 체결·호가 하루 요약.
@@ -400,14 +398,14 @@ def _check_bar_params():
 
     try:
         bars.__wrapped__ if hasattr(bars, "__wrapped__") else None
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
         pass
     # naive to 거부 (PIT 9시간 오차 방지 - research-api 와 같은 규칙)
     global _sym2iid
     _sym2iid = {"005930": "00000000-0000-0000-0000-000000000000"}
     try:
         bars("005930", interval="1D", limit=10, source=None,
-             to=datetime(2026, 7, 31, 9, 0))
+            to=datetime(2026, 7, 31, 9, 0))  # noqa: DTZ001 - intentionally invalid input
         raise AssertionError("naive to 가 통과했다")
     except HE:
         pass
