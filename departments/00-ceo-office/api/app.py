@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -82,6 +82,16 @@ try:
     from postgres_notification_repository import PostgresNotificationRepository
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+_GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
+sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
+
+from redis_event_bus import (  # noqa: E402
+    DEFAULT_GROUP as _GOVERNANCE_EVENT_GROUP,
+    DEFAULT_STREAM as _GOVERNANCE_EVENT_STREAM,
+    GovernanceEventBusError,
+    RedisEventBus,
+)
 
 
 # --- Request/Response 모델 ---------------------------------------------------
@@ -169,6 +179,99 @@ if os.environ.get("DATABASE_URL") and PostgresNotificationRepository is not None
 else:
     notification_repo = InMemoryNotificationRepository()
 notification_service = NotificationService(notification_repo)
+
+
+# --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
+#
+# notification-worker는 아직 실제 Producer가 없다 - risk.breach.v1/qa.finding.v1/
+# incident.opened.v1/governance.escalation.v1/report.ready.v1 어느 것도 현재 다른 본부가
+# 발행하지 않는다(2026-08-03 확인. 유일하게 실제 발행되는 건 risk-api의 risk.decision.v1인데,
+# 그건 §6.1이 정한 CEO Notification의 입력이 아니다 - 임의로 갖다 붙이지 않는다). 그래도
+# 배관(Redis Streams + Consumer Group + dedup + ACK)은 risk/qa와 같은 방식으로 실제로
+# 구현하고 검증한다 - Producer가 생기면 바로 동작한다.
+_EVENT_DEFAULT_SEVERITY: dict[str, str] = {
+    "risk.breach.v1": "HIGH",
+    "qa.finding.v1": "MEDIUM",
+    "incident.opened.v1": "CRITICAL",
+    "governance.escalation.v1": "HIGH",
+    "report.ready.v1": "LOW",
+}
+
+# TODO(영주): 실제 수신자 Routing Table이 아직 없다(부서·역할별 실제 수신자 설계 전) -
+# 임시로 고정값을 쓴다. 실제 Routing Table이 생기면 event_type/payload 기준으로 교체한다.
+_PLACEHOLDER_RECIPIENT = "role:ceo-ops"
+
+_governance_event_bus_instance: RedisEventBus | None = None
+
+
+def _governance_event_bus() -> RedisEventBus | None:
+    """hf:governance Redis Stream을 실제 호출 시점에만 연결한다."""
+
+    global _governance_event_bus_instance
+    redis_url = os.environ.get("GOVERNANCE_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _governance_event_bus_instance is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("GOVERNANCE_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+        except ValueError as exc:
+            raise GovernanceEventBusError(
+                "GOVERNANCE_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+            ) from exc
+
+        _governance_event_bus_instance = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("GOVERNANCE_EVENT_STREAM", _GOVERNANCE_EVENT_STREAM),
+            group=os.environ.get("GOVERNANCE_EVENT_GROUP", _GOVERNANCE_EVENT_GROUP),
+            consumer=os.environ.get("GOVERNANCE_EVENT_CONSUMER", "governance-api"),
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+        )
+    return _governance_event_bus_instance
+
+
+def _handle_governance_event(event: dict) -> None:
+    """Domain Event 하나를 NotificationService.notify() 호출로 변환한다.
+
+    여기엔 판정 로직이 없다 - 심각도 기본값 매핑과 필수 필드 추출만 하고, 실제 채널·억제
+    판정은 notification.py의 NotificationService가 그대로 한다 (CLAUDE.md 원칙: 규칙 판정은
+    결정론적 코드가 하고, 이 함수는 그 앞단 배선일 뿐).
+    """
+
+    event_type = event.get("event_type")
+    if event_type not in _EVENT_DEFAULT_SEVERITY:
+        raise GovernanceEventBusError(
+            f"governance Notification Consumer가 모르는 Event입니다: {event_type}"
+        )
+    payload = event.get("payload") or {}
+    fund_id = payload.get("fund_id")
+    scope_key = payload.get("scope_key")
+    if not fund_id or not scope_key:
+        raise GovernanceEventBusError(
+            f"{event_type} payload에 fund_id/scope_key가 없습니다 (event_id={event.get('event_id')})"
+        )
+
+    request = NotificationRequest(
+        fund_id=fund_id,
+        event_type=event_type,
+        scope_key=scope_key,
+        recipient=payload.get("recipient", _PLACEHOLDER_RECIPIENT),
+        payload=payload,
+        severity=payload.get("severity", _EVENT_DEFAULT_SEVERITY[event_type]),
+    )
+    occurred_at = event.get("occurred_at")
+    now = datetime.fromisoformat(occurred_at) if occurred_at else datetime.now(timezone.utc)
+    notification_service.notify(request, now=now)
+
+
+@app.exception_handler(GovernanceEventBusError)
+def _on_governance_event_bus_error(request, exc: GovernanceEventBusError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "GOVERNANCE_EVENT_BUS_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
 
 
 @app.exception_handler(CurrencyMismatchError)
