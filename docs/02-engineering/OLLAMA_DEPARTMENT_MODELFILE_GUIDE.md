@@ -30,7 +30,7 @@
 
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
-| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `agent-ceo` | Prompt 고도화, 수동 Smoke Script |
+| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `qwen3:8b` | `agent-ceo` | 현재 CEO Worker 고정값; `hermes3`는 Historical alias |
 | 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:8b` | `agent-research` | 현재 Worker 고정값 |
 | 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:8b` | `agent-trading` | 현재 Worker 고정값 |
 | 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:8b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
@@ -68,7 +68,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
-| Hermes Supervisor Model | Risk·QA 부서장은 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:8b` |
+| Hermes Supervisor Model | 8개 부서 Head 모두 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:8b` |
 
 따라서 현재 완료 상태는 **Risk/QA Worker Graph 코드·Profile 계약의 Git 등록과 일부 Hermes Runtime 실행**이다. 로컬 Ollama 모델 다운로드·Health, 호환 Alias Build, 공통 Gateway와 Production 배포는 별도 운영 증거가 필요한 경계다.
 
@@ -76,7 +76,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 
 | Base Model | 배치 조직 | 의도 | 허용 업무 |
 |---|---|---|---|
-| `hermes3` | CEO, Risk, AI QA | 지시 준수와 검토 중심 업무 | 보고 초안, Risk 설명, Finding 분류 |
+| `hermes3` | Historical alias only | 이전 로컬 검토 실험 | 현재 Worker에 자동 배정하지 않음 |
 | `qwen3:8b` | 전 부서 Worker | 현재 고정 기본값 | 역할별 Context, 근거 요약, 조건부 검토 |
 | 향후 light/standard/heavy 후보 | Worker별 benchmark 대상 | 현재 자동 배정하지 않음 | HR 제안·QA 검증·CEO 승인 후 변경 |
 
@@ -259,7 +259,7 @@ Prompt와 응답 전문은 무조건 Log에 남기지 않는다. Data Classifica
 
 ## 9. Version과 재현성
 
-현재 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder`는 명시적 Size·Quantization Tag가 없다. Prototype에는 사용할 수 있지만 Production Build 재현성은 부족하다.
+과거 Prototype의 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder` 기록은 현재 Worker 기본값이 아니다. 현재 Worker Modelfile은 `FROM qwen3:8b`이며, 변경 시에는 Worker Model Matrix 승인 절차로 digest와 재현성을 고정한다.
 
 Production 승격 전 다음을 고정한다.
 

@@ -170,7 +170,7 @@ python apps/api/main.py                                          # Read-only DEM
 
 Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. 현재 `vinext`·Cloudflare Worker 구성은 Prototype Hosting Baseline일 뿐 Backend와 전체 Cloud Provider 결정이 아니다. Frontend는 금융 상태의 Projection이며 Supabase Service Role, Broker·LS Credential, Risk 계산, OMS 상태 전이와 Ledger Posting을 소유하지 않는다.
 
-현재 Hermes 8개 Profile의 `provider: nous`는 로컬 Profile baseline이다. Core 목표 Model Gateway의 주 통합 모델은 `TECH_STACK_DECISIONS.md`가 정한 Amazon Bedrock Claude이고 Ollama는 로컬·저비용 보조 모델이다. 애플리케이션 Hosting Cloud는 아직 미정이므로 Bedrock 사용과 전체 Cloud Provider 선정을 같은 결정으로 취급하지 않는다.
+현재 저장소 실행 기준은 Hermes 8개 Profile의 Head가 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 런타임으로 사용하는 것이다. 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Amazon Bedrock은 `TECH_STACK_DECISIONS.md`에 남아 있는 목표 Model Gateway 후보이며 현재 로컬 Profile의 실행 모델로 오인하지 않는다. 과거 Nous/Laguna baseline은 역사 기록으로만 보존하고, 애플리케이션 Hosting Cloud 결정과 모델 선택을 같은 결정으로 취급하지 않는다.
 
 ## 담당자
 

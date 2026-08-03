@@ -1,5 +1,7 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
+> **Current runtime override (2026-08-03)**: 현재 실행 계층은 8개 Hermes Head + 42개 직원별 독립 LangGraph Worker Graph다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, Worker는 Ollama `qwen3:8b`다. Risk 4개와 QA 5개를 포함한 전체 Registry·역할 경계는 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선한다. 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
+
 > 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, 모든 부서 직원은 직원별 독립 LangGraph Worker Graph와 Ollama LLM을 사용한다. 현재 Worker 모델은 `qwen3:8b`이며 Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
 
 > Risk는 4개 Worker, AI QA/감사는 5개 Worker로 운영하며 나머지 부서도 동일한 독립 Worker 계층으로 운영한다. 직원 모델 교체는 [Worker 모델 배치 기준](02-engineering/WORKER_MODEL_MATRIX.md)에 따라 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
@@ -304,6 +306,8 @@ Risk Engine과 OMS는 에이전트 런타임과 분리한다.
 Hermes는 연구 작업을 예약하고 여러 연구 에이전트를 병렬 실행하며, Strategy Registry의 상태 변화와 승인 절차를 조정한다. 실제 전략 실행기는 Registry에서 승인된 불변 Artifact만 읽는다.
 
 ### 5.5 실제 헤지펀드 Operating Model
+
+> **Current runtime clarification**: 아래 Operating Model의 `Specialist Agent` 또는 `LangGraph Node` 표현은 역할 개념을 뜻한다. 실제 구현 단위는 직원별 독립 LangGraph Worker Graph이며, 현재 수·모델·trigger·tool은 Worker Registry 문서를 우선한다.
 
 본부별 Agent/Service 경계, 권한과 직원 역할은 [AGENT_EMPLOYEE_PROFILES.md](04-organization/AGENT_EMPLOYEE_PROFILES.md)와 팀별 실행 가이드를 따른다.
 

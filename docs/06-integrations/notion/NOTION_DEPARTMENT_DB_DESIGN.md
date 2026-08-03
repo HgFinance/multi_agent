@@ -30,7 +30,28 @@ Reporter 결과 필드는 `adapter_present`, `credentials_configured`, `upload_s
 
 ---
 
+## Current integration matrix (2026-08-03)
+
+이 표가 아래의 초기 설계·이전 연결 계획보다 우선한다. `adapter_present`는 저장소 Reporter 존재, `credentials_configured`는 로컬/배포 Credential과 DB ID 설정, `upload_succeeded`는 실제 Notion API 응답 성공을 뜻한다. 세 상태를 하나로 합쳐 “연결 완료”라고 기록하지 않는다.
+
+| 부서 | Reporter adapter | 현재 상태 | 렌더링 | 판정 Source of Truth |
+|---|---|---|---|---|
+| CEO | `departments/00-ceo-office/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | CEO report artifact / DB |
+| Research | `departments/01-research/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | Research packet / DB |
+| Trading | `departments/02-trading/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | OrderIntent / OMS event |
+| Risk | `departments/03-risk/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | deterministic Risk Engine / Risk DB |
+| Quant | 없음 | 미연결 | 해당 없음 | Backtest artifact / experiment DB |
+| Accounting | `departments/05-accounting-portfolio/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | Ledger / reconciliation / NAV |
+| QA | `departments/06-ai-qa-audit/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | deterministic Evidence QA / audit DB |
+| HR | `departments/07-agent-workforce/notion_reporter.py` | adapter 있음 | Markdown → `children` blocks | Workforce registry / audit DB |
+
+Markdown 원문을 Notion `rich_text` 속성에 넣지 않는다. 원문 리포트 속성은 필수가 아니며, Notion은 사람이 보는 Projection이다. 실제 업로드는 각 실행 결과의 `upload_succeeded`와 page ID로만 확정한다.
+
+---
+
 ## 1. 원칙
+
+현재 판정 원칙: Reporter adapter의 존재, 자격증명·DB ID 설정, Notion API 업로드 성공은 서로 다른 상태다. 실제 자동 채움 부서는 상단 matrix를 기준으로 하며, 아래에 남은 초기 `scripts.py` 연결 계획은 Historical snapshot으로 해석한다.
 
 1. **Notion은 Projection이지 Source of Truth가 아니다.** 결정론적 판정의 원본은
    `departments/<n>/reports/*.md`(각 부서 `_render_report_md`가 생성)와 예정된 Supabase
@@ -50,6 +71,8 @@ Reporter 결과 필드는 `adapter_present`, `credentials_configured`, `upload_s
    (ai-office CLAUDE.md의 "연결 안 된 걸 연결됐다고 표시하지 않는다"와 같은 원칙).
 
 ---
+
+> 위 4번의 “01/03/06만 자동 채움” 설명은 초기 설계 문장의 Historical snapshot이다. 현재 자동 채움 여부는 상단 matrix와 실제 Reporter 실행 결과를 사용한다.
 
 ## 2. 전체 구조
 
@@ -89,7 +112,7 @@ HgFinance AI Office (워크스페이스 최상위 페이지)
 
 ---
 
-## 4. 부서별 DB — 지금 코드로 채울 수 있는 3개
+## 4. 부서별 DB — 현재 Reporter adapter가 있는 7개와 미연결 Quant
 
 ### 4.1 `03 · 리스크본부 DB` (`departments/03-risk/scripts.py`)
 
@@ -130,7 +153,9 @@ HgFinance AI Office (워크스페이스 최상위 페이지)
 
 ---
 
-## 5. 부서별 DB — 설계만 (아직 자동 채움 파이프라인 없음)
+## 5. Historical snapshot — 초기 DB 설계와 미연결 계획
+
+이 절은 2026-08-03 이전의 초기 Notion 연결 계획이다. 현재 연결 여부·자동 채움 여부는 이 문서 상단의 Reporter matrix와 실행 결과 `adapter_present`·`credentials_configured`·`upload_succeeded`로 판정한다. 아래의 “01/03/06만 자동 채움”과 “나머지 5개 미연결” 표현은 현재 상태가 아니다.
 
 이 5개는 지금 `departments/<n>/scripts.py`가 없다(CLAUDE.md "다른 본부는 대부분 Profile과
 설계 문서 단계"). DB Description에 아래 문구를 그대로 넣어 미연동 상태를 감춘 것처럼 보이지
@@ -186,7 +211,7 @@ NOTION_HR_DB=                    # 신규 07 (스키마만)
 
 ---
 
-## 8. 다음 단계 (이 문서 밖 — 별도 작업)
+## 8. Historical snapshot — 초기 다음 단계 (이 문서 밖 — 별도 작업)
 
 1. Notion에서 위 8개 DB를 실제로 생성하고 Integration에 연결(사람 또는 Notion AI가 수행).
 2. `ai-office/worker/report.ts`의 `sendNotion`을 부서별로 일반화(`sendNotionForDepartment(dept, payload, env)`) —

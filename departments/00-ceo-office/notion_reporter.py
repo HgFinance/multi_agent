@@ -18,10 +18,15 @@ Notion은 Projection일 뿐이다 - 이 모듈이 실패해도(미설정, 네트
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from reporting import notion_rich_text_chunks
 

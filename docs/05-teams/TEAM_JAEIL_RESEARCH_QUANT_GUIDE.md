@@ -958,9 +958,9 @@ API(2019003)나 별도 Source가 필요하다.
 조건이었다. `allowed_uses`와 `prohibited_uses`를 함께 넣어 DB만 보는 사람도 라이선스
 경계를 알 수 있게 했다.
 
-### Sprint J4 (신설 2026-07-31): 본부 에이전트 — 무료 로컬 모델 체계
+### Sprint J4 (신설 2026-07-31): 본부 에이전트 — 무료 로컬 모델 체계 (Historical benchmark)
 
-과거 성능 비교에서는 로컬 Ollama `qwen3:14b`를 사용했다. 이는 2026-08-03 확정된 현재 Worker 기본값이 아니며, 현재 런타임은 독립 LangGraph Worker + `qwen3:8b`로 통일한다.
+과거 성능 비교에서는 로컬 Ollama `qwen3:14b`를 사용했다. 아래의 모델 선정·후보·예비 등재 표는 당시 실험 결과인 Historical snapshot이며 현재 배정이 아니다. 2026-08-03 확정된 현재 Worker 기본값은 독립 LangGraph Worker + `qwen3:8b`로 통일한다.
 비용 0, 전부 실측 검증:
 
 **모델 선정 결정 (2026-08-01, 에이전트 고도화 착수 시점):**

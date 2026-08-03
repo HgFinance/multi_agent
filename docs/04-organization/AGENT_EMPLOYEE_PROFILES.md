@@ -1,5 +1,7 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
+> **Current runtime override (2026-08-03)**: 실제 실행 기준은 8개 Hermes Head와 42개 독립 LangGraph Worker다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, Worker는 Ollama `qwen3:8b`다. 아래의 `54개 논리적 역할`, `Specialist Agent`, `LangGraph Node` 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`를 따른다.
+
 > 2026-08-03 전사 실행 계층 확정: 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant/Backtest 7·Accounting/Portfolio 8·QA 5다. 기존 RSK/QAA Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
 
 부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
@@ -63,7 +65,7 @@ Hermes Supervisor는 Case를 처리한 뒤 다음 업무에 재사용할 가치�
 
 Hermes Memory는 공식 Position, PnL, 주문, Risk Limit과 Policy의 대체 저장소가 아니다. 이러한 값은 ID만 기억하고 담당 API에서 다시 조회한다. 다른 본부와 공유할 교훈은 Raw Memory 복사가 아니라 QA가 검증한 `ImprovementCandidate` 또는 Versioned Skill로 전달한다. 상세 재귀 루프와 적용 순서는 [마스터 플랜 5.10](../HEDGE_FUND_MASTER_PLAN.md#510-hermes-memory-기반-조직-재귀적-자기-개선)을 따른다.
 
-### 1.2 직원 Runtime 유형
+### 1.2 직원 Runtime 유형 (legacy taxonomy; current registry는 상단 override와 Worker Role Boundaries를 우선)
 
 | 유형 | 구현 | 담당 업무 | 상주 여부 |
 |---|---|---|---|
