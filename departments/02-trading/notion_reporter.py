@@ -19,12 +19,34 @@
 않는다는 규칙(CLAUDE.md)을 토론 산출물에도 같게 적용한다. Bull/Bear 의 실제 서술은 본문
 "원본 리포트"에 원문 그대로 들어간다.
 
-자격증명 위치가 두 곳으로 갈라져 있다 (2026-08-03 확인):
-  - 규약: .env.example 24행이 "Notion / Discord 연동 값은 ai-office/.dev.vars.example 이
-    Source"라고 명시한다. 실제 그 파일에는 NOTION_TOKEN 과 NOTION_BRIEFING_DB 만 있다.
-  - 실제: NOTION_TRADING_DB 를 포함한 부서별 DB ID 8개는 root .env 에 들어와 있다.
-  둘 다 읽고 .dev.vars 를 우선한다. 한쪽으로 합치는 건 별도 정리 대상이다.
-  ponytail: 자격증명 Source 가 하나로 정해지면 _load_env 의 두 번째 경로를 지운다.
+자격증명 Source (2026-08-03 도현님 확정):
+  **root .env 가 정본이다.** NOTION_TOKEN 과 부서별 DB ID 8개(NOTION_TRADING_DB 포함)를
+  거기서 읽는다. ai-office/.dev.vars 는 Cloudflare Worker 가 쓰던 기존 경로라 아직 읽되
+  root .env 가 이긴다 - 같은 키가 양쪽에 있으면 .env 값이 쓰인다.
+
+  ⚠ .env.example 24행은 아직 "Notion / Discord 연동 값은 ai-office/.dev.vars.example 이
+  Source"라고 적혀 있다. 이 결정과 어긋나므로 .env.example 과 .dev.vars.example 의 문구
+  정리가 남았다 - 문서는 이 모듈 소관이 아니라 별도 커밋으로 정리한다.
+
+  ponytail: .dev.vars 쪽 Notion 키가 정리되면 _ENV_FILES 에서 그 경로를 지우고 _load_env 를
+  root .env 단일 경로로 줄인다. 지금 두 경로를 유지하는 유일한 이유는 ai-office Worker 가
+  아직 .dev.vars 의 NOTION_TOKEN/NOTION_BRIEFING_DB 를 쓰고 있어서다.
+
+Notion DB 속성이 아직 없다 - 설계 문서 5절이 `02 · 트레이딩본부` DB 를 "스키마만"으로 뒀다.
+**속성 생성 후 절차 (이 순서를 지킨다):**
+  1. Notion Trading DB 에 아래 REQUIRED_PROPERTIES 의 속성을 만든다. 이름·타입이 정확히
+     같아야 한다 - Notion 은 속성 이름으로 매칭하고 없으면 400 을 준다.
+  2. "판정" Select 옵션 3개(GROUNDED / ESCALATE / BLOCKED)와 "Packet 신선도" Select 옵션
+     4개(FRESH / STALE / FUTURE / UNKNOWN)를 미리 만든다. Notion 은 없는 옵션을 자동
+     생성하지 않는다.
+  3. Integration 을 해당 DB 에 연결한다(Notion 페이지 우상단 ... > Connections).
+     토큰만 있고 연결이 없으면 404 가 난다 - 미설정과 구분이 안 되니 이 단계를 빼먹지 않는다.
+  4. `python departments/02-trading/scripts.py --run` 으로 1건 올리고 반환의
+     notion_upload.ok 가 True, url 이 실제 페이지인지 확인한다.
+  5. 실패하면 status/error 를 그대로 읽는다 - 400 은 속성 불일치, 404 는 연결 누락,
+     401 은 토큰이다. ok:False 를 성공으로 넘기지 않는다.
+  6. 통과하면 이 문단을 "속성 생성 완료(날짜)"로 갱신하고 REQUIRED_PROPERTIES 를
+     실제 DB 와 다시 대조한다. 속성을 추가·개명할 때마다 이 목록을 같이 고친다.
 
 Notion 은 Projection 일 뿐이다 - 이 모듈이 실패해도(미설정, 네트워크 오류, 속성 누락 등)
 토론의 grounded/escalate 는 절대 바뀌지 않는다. 모든 실패를 흡수하고 {"ok": False, ...} 로만
@@ -43,14 +65,38 @@ from typing import Any
 
 _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
-_ENV_FILES = (_REPO_ROOT / "ai-office" / ".dev.vars", _REPO_ROOT / ".env")
+# 앞에 오는 파일이 이긴다. root .env 가 정본(2026-08-03 확정) - 모듈 상단 참고.
+_ENV_FILES = (_REPO_ROOT / ".env", _REPO_ROOT / "ai-office" / ".dev.vars")
 _NOTION_VERSION = "2022-06-28"
 # Notion rich_text 한 블록 상한은 2000자다. 여유를 두고 자른다.
 _CHUNK = 1900
 
+# Notion Trading DB 에 있어야 하는 속성. upload_debate 의 props 와 1:1 이며 이름·타입이
+# 다르면 Notion 이 400 을 준다. 속성을 늘리거나 개명하면 여기도 같이 고친다.
+REQUIRED_PROPERTIES: dict[str, str] = {
+    "제목": "Title",
+    "trade_case_id": "Rich text",
+    "판정": "Select (GROUNDED / ESCALATE / BLOCKED)",
+    "escalate": "Checkbox",
+    "서술": "Rich text",
+    "calculation_version": "Rich text",
+    "input_hash": "Rich text",
+    "원본 리포트": "Rich text",
+    "생성 시각": "Date",
+    "종목": "Rich text",
+    "Packet 신선도": "Select (FRESH / STALE / FUTURE / UNKNOWN)",
+    "쟁점 Claim": "Rich text",
+    "미검토 Claim": "Rich text",
+    "날조 인용": "Rich text",
+    "독립성 위반": "Number",
+    "model": "Rich text",
+    "prompt": "Rich text",
+    "trace_id": "Rich text",
+}
+
 
 def _load_env() -> dict:
-    """.dev.vars(규약상 Source) 를 먼저 읽고, 없는 키만 root .env 에서 채운다."""
+    """root .env(정본) 를 먼저 읽고, 없는 키만 ai-office/.dev.vars 에서 채운다."""
     env: dict[str, str] = {}
     for path in _ENV_FILES:
         if not path.exists():
@@ -217,6 +263,28 @@ def _check_payload_shape():
     print("  업로드 Payload 구성        OK")
 
 
+def _check_required_properties_match_payload():
+    # REQUIRED_PROPERTIES 는 DB 를 만들 사람이 보는 목록이다. 실제 전송 payload 와 어긋나면
+    # 목록만 낡고 업로드는 400 으로 죽는다 - 두 개를 여기서 묶어 둔다.
+    captured = {}
+
+    def _fake(path, body, token):
+        captured["props"] = body["properties"]
+        return 200, {"url": "u"}
+
+    orig, globals()["_post"] = _post, _fake
+    try:
+        upload_debate(_OUT, env={"NOTION_TOKEN": "t", "NOTION_TRADING_DB": "d"})
+    finally:
+        globals()["_post"] = orig
+    sent, listed = set(captured["props"]), set(REQUIRED_PROPERTIES)
+    assert sent == listed, f"목록에만 있음={listed - sent}, payload 에만 있음={sent - listed}"
+    # Select 속성은 옵션을 미리 만들어야 하므로 목록이 값까지 적어야 한다
+    for name in ("판정", "Packet 신선도"):
+        assert REQUIRED_PROPERTIES[name].startswith("Select ("), REQUIRED_PROPERTIES[name]
+    print("  속성 목록 ↔ payload 일치   OK")
+
+
 def _check_outcome_and_summary():
     assert pipeline_outcome(_OUT) == "GROUNDED"
     assert pipeline_outcome({**_OUT, "grounded": False}) == "ESCALATE"
@@ -256,7 +324,8 @@ if __name__ == "__main__":
     print("trading notion_reporter 자체 점검 (네트워크 없음)")
     _check_missing_config_skips_without_network()
     _check_payload_shape()
+    _check_required_properties_match_payload()
     _check_outcome_and_summary()
     _check_long_report_chunked()
     _check_upload_never_raises()
-    print("notion_reporter 5개 영역 통과")
+    print("notion_reporter 6개 영역 통과")
