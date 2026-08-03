@@ -232,8 +232,38 @@ def analyze_microstructure(state: ResearchState) -> dict:
     return {"microstructure": _analyst_state(r)}
 
 
-PACKET_REQUIRED_KEYS = ("symbol", "thesis", "facts", "interpretation",
+PACKET_REQUIRED_KEYS = ("thesis", "facts", "interpretation",
                         "invalidation", "evidence_quality")
+
+
+# 총괄이 자주 내는 근접 키 이름 -> 계약 키. **뜻이 명백한 것만** 넣는다 -
+# 추측으로 매핑하면 다른 내용을 엉뚱한 필드에 넣게 된다.
+# 실측 2026-08-03: invalidation_conditions, key_facts, thesis_statement 로 냈다가
+# "missing keys" 로 거부돼 분석가 6인을 돌린 2~3분이 통째로 버려졌다.
+_KEY_ALIASES = {
+    "invalidation_conditions": "invalidation",
+    "invalidations": "invalidation",
+    "key_facts": "facts",
+    "facts_observed": "facts",
+    "thesis_statement": "thesis",
+    "interpretations": "interpretation",
+    "catalyst": "catalysts",
+    "upcoming_catalysts": "catalysts",
+    "evidence_quality_assessment": "evidence_quality",
+    "data_quality": "evidence_quality",
+    "thesis_summary": "thesis",
+}
+
+
+def normalize_packet_keys(obj):
+    """근접 키 이름을 계약 키로 바꾼다. **이미 계약 키가 있으면 건드리지 않는다.**"""
+    if not isinstance(obj, dict):
+        return obj
+    out = dict(obj)
+    for alias, real in _KEY_ALIASES.items():
+        if alias in out and real not in out:
+            out[real] = out.pop(alias)
+    return out
 
 
 def unwrap_packet(obj):
@@ -250,6 +280,7 @@ def unwrap_packet(obj):
     """
     if not isinstance(obj, dict):
         return obj
+    obj = normalize_packet_keys(obj)
     if all(k in obj for k in PACKET_REQUIRED_KEYS):
         return obj
 
@@ -261,11 +292,12 @@ def unwrap_packet(obj):
     #   **이름으로 Packet 을 먼저 찾는다** - 추측이 아니라 프롬프트가 그렇게
     #   부르라고 시킨 이름이다.
     for key in ("research_packet", "Research Packet", "researchPacket", "packet"):
-        v = obj.get(key)
+        v = normalize_packet_keys(obj.get(key))
         if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
             return v
 
-    for v in obj.values():
+    for raw in obj.values():
+        v = normalize_packet_keys(raw)
         if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
             return v
     return obj
@@ -309,8 +341,65 @@ def flatten_to_str_list(v) -> Optional[list[str]]:
 
 # ── 노드 4: Packet 초안 (supervisor 페르소나 - config.yaml 원문) ───────────
 def _supervisor_persona() -> str:
+    """RES-00 페르소나 + **이 호출의 범위**를 명시한다.
+
+    ▶ 왜 덧붙이는가 (실측 2026-08-03)
+      페르소나가 "Official outputs: Research Assignment, Research Packet,
+      Dossier Update, Data Quality Warning" 이라고 4종을 나열한다. Claude 는 그
+      지시를 성실히 따라 **매번 4종을 한 객체로** 낸다. 그런데 그 안의
+      research_packet 은 {facts, interpretations} 처럼 반쪽이라 언래퍼로도 못
+      살린다 - 모델이 산출물 하나에 쏟을 토큰을 넷으로 나눠 쓰기 때문이다.
+      실측 4회 연속 거부.
+
+      **페르소나를 고치지 않는다.** 그건 부서의 직무 정의이고 다른 호출(헤르메스
+      경유)에서도 쓰인다. 대신 이 호출이 4종 중 무엇을 요구하는지 여기서 좁힌다.
+    """
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    return re.search(r'research-supervisor: "(.*?)"\n', cfg, re.S).group(1)
+    persona = re.search(r'research-supervisor: "(.*?)"\n', cfg, re.S).group(1)
+    return persona + (
+        "\n\nSCOPE OF THIS CALL: you are producing the Research Packet ONLY. "
+        "Do NOT emit Research Assignment, Dossier Update or Data Quality Warning "
+        "in this reply, and do NOT nest the packet under a wrapper key. "
+        "Return ONE flat JSON object whose top-level keys are exactly the schema "
+        "keys requested below. Spend your whole answer on that single object.")
+
+
+# 서술이 한국어인지 판정하는 하한. 숫자·티커·[n1] 같은 ref 가 섞이므로 100% 를
+# 요구할 수 없고, 너무 낮으면 영어 문장에 한글 단어 하나 섞인 것을 통과시킨다.
+# 실측: 정상 한국어 서술은 0.35~0.55, 영어 서술은 0.00~0.03 이라 0.15 면 갈린다.
+MIN_KOREAN_RATIO = 0.15
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+_LETTER_RE = re.compile(r"[가-힣A-Za-z]")
+
+# 언어를 판정할 **서술** 필드. evidence_quality 같은 토큰 필드는 제외한다 -
+# 그건 영어여야 맞다.
+NARRATIVE_KEYS = ("thesis", "facts", "interpretation", "catalysts", "invalidation")
+
+
+def korean_ratio(packet: dict) -> float:
+    """서술 필드의 한글 비율. 글자가 없으면 1.0(판정 보류 - 막지 않는다).
+
+    숫자·기호는 세지 않는다. 한글 대 (한글+로마자) 다 - 그래야 "Global sales
+    decreased 5.1%" 같은 문장이 0 에 가깝게 나온다.
+    """
+    buf = []
+    for k in NARRATIVE_KEYS:
+        v = (packet or {}).get(k)
+        if isinstance(v, str):
+            buf.append(v)
+        elif isinstance(v, (list, tuple)):
+            buf += [str(x) for x in v]
+    text = " ".join(buf)
+    # 인용 ref([n1], [d2])와 필드 접두사(sales_data:)는 언어가 아니다.
+    # 세면 한국어 문장도 비율이 깎이고, 무엇보다 숫자만 있는 서술이 영어로
+    # 오판된다 - 가드가 오탐하면 재시도만 늘고 결국 무시된다.
+    text = re.sub(r"\[[a-zA-Z]\d+\]", " ", text)
+    text = re.sub(r"^\s*[a-z_]+\s*:", " ", text, flags=re.M)
+    letters = _LETTER_RE.findall(text)
+    if not letters:
+        return 1.0
+    return len(_HANGUL_RE.findall(text)) / len(letters)
 
 
 def _citable(bundle: dict) -> list[dict]:
@@ -395,7 +484,7 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
     analysts_digest = {k: _digest(v) for k, v in analysts.items()}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
-{{"symbol": "...", "thesis": "1-2 sentences in Korean, facts first",
+{{"thesis": "1-2 sentences in Korean, facts first",
  "facts": ["one fact per string. EVERY fact must end with its evidence ref in
             brackets, e.g. [n1] for a news item or [d2] for a disclosure. If you
             cannot point at a ref, it is not a fact - move it to interpretation."],
@@ -403,6 +492,12 @@ Schema (JSON only):
  "catalysts": ["upcoming checkpoints"],
  "invalidation": ["conditions that would kill the thesis"],
  "evidence_quality": "sufficient | partial | insufficient_evidence"}}
+LANGUAGE - non-negotiable, checked by code:
+- thesis, facts, interpretation, catalysts, invalidation MUST be written in
+  KOREAN (한국어). A reply in English is rejected automatically and costs a
+  retry. Field NAMES stay English; every VALUE is Korean. Numbers, tickers and
+  refs like [n1] stay as-is.
+
 STRUCTURE RULES - non-negotiable:
 - facts, interpretation, catalysts, invalidation MUST each be a FLAT JSON
   array of plain strings. No nested objects, no key-value maps.
@@ -441,15 +536,24 @@ Rules for citation - non-negotiable:
   evidence above. If the evidence does not mention it, you do not know it.
 
 Evidence:
-{json.dumps(bundle, ensure_ascii=False, indent=1)}"""
+{json.dumps(bundle, ensure_ascii=False, indent=1)}
+
+마지막 지시 (가장 중요, 코드가 검사한다):
+thesis · facts · interpretation · catalysts · invalidation 의 **값을 전부
+한국어 문장으로** 쓴다. 영어로 쓰면 코드가 거부하고 재시도를 소모한다.
+키 이름은 영어 그대로 두고, 숫자·종목코드·[n1] 같은 근거 표시도 그대로 둔다.
+JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤에 붙이지 않는다."""
 
     call = llm or _ollama_chat
-    REQUIRED = ("symbol", "thesis", "facts", "interpretation", "invalidation",
+    # symbol 은 뺀다 - 코드가 덮어쓰기로 정했으므로(종목 정체성은 LLM 에게 묻지
+    # 않는다) 필수로 요구하면 실패 표면만 넓어진다. 실측 2026-08-03: 4/6 키를
+    # 맞춘 응답이 symbol 하나 때문에 버려졌다.
+    REQUIRED = ("thesis", "facts", "interpretation", "invalidation",
                 "evidence_quality")
     packet = None
     last_err = None
     repair = ""      # 실패 유형별 교정 지시 - 일반 문구만으로는 같은 실수를 반복한다
-    for attempt in (1, 2, 3):   # 파싱·스키마 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
+    for attempt in (1, 2, 3, 4, 5):   # 파싱·스키마·언어 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
         extra = "" if attempt == 1 else (
             f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
             f"JSON object with ALL required keys: {', '.join(REQUIRED)}.{repair}")
@@ -473,6 +577,15 @@ Evidence:
             # 문구로 죽었는데 둘 다 원인을 못 봤다). 분석가 6인을 2~3분 돌린
             # 뒤에 죽는 자리라 재현 비용이 비싸다 - 그때 본 것을 그때 남긴다.
             _last_raw = out[s:e + 1][:600]
+            # 래핑된 경우 **안쪽 키도** 찍는다 - 바깥 키만 보면 왜 못 벗겼는지
+            # 알 수 없다(실측 2026-08-03: 'Research Packet' 을 이름으로 찾는데도
+            # 계속 거부돼 안쪽을 못 봤다).
+            try:
+                for _k, _v in (candidate or {}).items():
+                    if isinstance(_v, dict):
+                        print(f"   └ {_k!r} 안쪽 키: {sorted(_v)[:10]}", flush=True)
+            except Exception:  # noqa: BLE001
+                pass
             print(f"⚠ 총괄 스키마 이탈({attempt + 1}회) - 받은 최상위 키: "
                   f"{sorted(candidate)[:12]} / 원문 앞부분: {_last_raw[:220]}",
                   file=sys.stderr, flush=True)
@@ -521,6 +634,22 @@ Evidence:
                       f'not allowed. If you meant that, write "{near}".')
             continue
         candidate["evidence_quality"] = eq
+
+        # ▶ 한국어 검사 (2026-08-03)
+        #   프롬프트가 "Write all narrative text in Korean" 이라고 세 군데서
+        #   지시하는데 총괄이 영어로 쓴다. **지시만 하고 검사하지 않으면 지켜지지
+        #   않는다** - 스키마·수치는 검사하면서 언어만 신뢰한 것이 구멍이었다.
+        #   재시도 루프가 이미 있으므로 같은 자리에 넣는다.
+        ratio = korean_ratio(candidate)
+        if ratio < MIN_KOREAN_RATIO:
+            last_err = f"narrative is not Korean (한글 비율 {ratio:.0%})"
+            repair = (
+                '\nCRITICAL: thesis, facts, interpretation, catalysts and '
+                'invalidation MUST be written in KOREAN (한국어). Your previous '
+                'reply was in English and was rejected. Keep field NAMES in '
+                'English but write every VALUE in Korean. Numbers, tickers and '
+                'evidence refs like [n1] stay as-is.')
+            continue
 
         # ▶ 종목 정체성은 LLM 에게 묻지 않는다 (2026-08-03 사고)
         #   005380(현대차)을 요청했는데 총괄이 symbol 을 "KOSPI" 로 쓰고 지수
@@ -1205,7 +1334,8 @@ def _check_price_context_injection():
 
     def fake_llm(system, user):
         captured["user"] = user
-        return json.dumps({"symbol": "X", "thesis": "t", "facts": [],
+        return json.dumps({"symbol": "X", "thesis": "시험용 논지",
+                           "facts": [],
                            "interpretation": [], "catalysts": [],
                            "invalidation": [], "evidence_quality": "partial"})
 
@@ -1356,13 +1486,23 @@ def _check_schema_coercion():
     assert out["evidence_quality"] == "partial", "강등이 안 걸렸다"
     # 한 겹 싸서 온 Packet 은 벗긴다 - 실측 2회가 '키 전부 누락'으로 죽었다
     inner = {k: "x" for k in PACKET_REQUIRED_KEYS}
-    assert unwrap_packet({"packet": inner}) is inner
+    # 근접 키 정규화가 새 dict 를 만드므로 **값**으로 비교한다(is 가 아니라)
+    assert unwrap_packet({"packet": inner}) == inner
     assert unwrap_packet({"result": {"data": inner}}) != inner, \
         "두 겹까지 파고들지 않는다 - 추측으로 구조를 바꾸지 않는다"
-    assert unwrap_packet(inner) is inner, "이미 평평하면 그대로 둔다"
+    assert unwrap_packet(inner) == inner, "이미 평평하면 그대로 둔다"
     # 일부 키만 있는 dict 는 건드리지 않는다(다른 문제이므로 사유가 보여야 한다)
     partial = {"wrap": {"symbol": "x", "thesis": "y"}}
-    assert unwrap_packet(partial) is partial
+    assert unwrap_packet(partial) == partial
+
+    # ▶ 근접 키 이름 정규화 (실측 2026-08-03: 이것 때문에 2회 연속 거부됐다)
+    alias = {"symbol": "X", "thesis": "논지", "key_facts": ["f"],
+             "interpretation": [], "invalidation_conditions": ["조건"],
+             "evidence_quality": "partial"}
+    fixed = unwrap_packet(alias)
+    assert fixed["facts"] == ["f"] and fixed["invalidation"] == ["조건"], fixed
+    # 계약 키가 이미 있으면 별칭이 덮지 않는다
+    assert unwrap_packet(dict(alias, facts=["원본"]))["facts"] == ["원본"]
     assert unwrap_packet(["not", "a", "dict"]) == ["not", "a", "dict"]
     print("  스키마 교정·가드 유지    OK")
 
@@ -1442,6 +1582,31 @@ def _check_claims_use_bundle_key():
     print("  주장 발행·기준가 계약    OK")
 
 
+def _check_korean_guard():
+    """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
+    # 실제 사고 문장(005380, 2026-08-03)
+    eng = {"thesis": "Hyundai's global sales performance and strategic investment "
+                     "in Yeongnam region may signal broader market positioning.",
+           "facts": ["sales_data: Global sales decreased 5.1% year-over-year"]}
+    assert korean_ratio(eng) < MIN_KOREAN_RATIO, korean_ratio(eng)
+
+    kor = {"thesis": "7월 글로벌 판매가 전년 대비 5.1% 감소했다.",
+           "facts": ["현대차 7월 글로벌 판매 31만8천대 [n1]", "부채비율 188.95% [d1]"]}
+    assert korean_ratio(kor) >= MIN_KOREAN_RATIO, korean_ratio(kor)
+
+    # 숫자·ref 만 있으면 판정을 보류한다 - 막지 않는다(모르는 것을 단정하지 않는다)
+    assert korean_ratio({"thesis": "5.1%", "facts": ["188.95", "[n1]"]}) == 1.0
+    assert korean_ratio({}) == 1.0
+
+    # 토큰 필드(evidence_quality)는 언어 판정 대상이 아니다 - 영어여야 맞다
+    assert "evidence_quality" not in NARRATIVE_KEYS
+    # 영어 문장에 한글 단어 하나 섞은 것을 통과시키지 않는다
+    mixed = {"thesis": "Hyundai global sales decreased significantly in July 현대차",
+             "facts": ["Global sales down year over year across all regions"]}
+    assert korean_ratio(mixed) < MIN_KOREAN_RATIO, korean_ratio(mixed)
+    print("  총괄 한국어 가드         OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -1471,6 +1636,7 @@ if __name__ == "__main__":
 
     print(f"{PIPELINE_VERSION} 자체 점검 (LLM·API 없음)")
     _check_graph_shape()
+    _check_korean_guard()
     _check_halt_short_circuit()
     _check_packet_guard()
     _check_price_context_injection()
@@ -1481,4 +1647,4 @@ if __name__ == "__main__":
     _check_claims_use_bundle_key()
     _check_packet_report_renderer()
     _check_run_recorder()
-    print("본부 파이프라인 11개 영역 통과. 실행은 --run <종목>")
+    print("본부 파이프라인 12개 영역 통과. 실행은 --run <종목>")
