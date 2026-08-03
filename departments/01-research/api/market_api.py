@@ -213,6 +213,32 @@ def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500)):
     """, (market, limit))
 
 
+@app.get("/dq/windows")
+def dq_windows(hours: int = Query(24, gt=0, le=168),
+               limit: int = Query(50, gt=0, le=500)):
+    """RES-02 Market Data Steward 의 감사 결과 (스트림별 품질 판정).
+
+    ▶ **감사는 돌고 있었는데 아무도 못 읽었다.** collectors/market_data_steward.py
+      가 market.data_quality_windows 에 판정을 쓰는데 이를 노출하는 엔드포인트가
+      없었다 - Agent 는 DB Credential 을 안 받으므로(통합 계획 6.2) API 가
+      없으면 존재하지 않는 것과 같다. RES-02 는 P0 페르소나인데 리서치
+      파이프라인 어디에도 배선돼 있지 않았고, 그래서 데이터 품질 게이트가
+      Packet 생성 경로 앞에 서 있지 않았다.
+
+    quality_status 는 PASS / WARN / FAIL. **행이 0건인 것은 PASS 가 아니다** -
+    감사가 안 돌았다는 뜻이므로 호출부가 미확인으로 다뤄야 한다.
+    """
+    return _query("""
+        select window_start, window_end, provider, stream_type,
+               observed_count, duplicate_count, p95_latency_ms, max_latency_ms,
+               quality_status, rule_version, metrics
+        from market.data_quality_windows
+        where window_end > now() - make_interval(hours => %s)
+        order by window_end desc, stream_type
+        limit %s
+    """, (hours, limit))
+
+
 @app.get("/dq/summary")
 def dq_summary() -> dict:
     """수집 건강 요약 - 오늘 심볼 커버리지와 최근 유입."""

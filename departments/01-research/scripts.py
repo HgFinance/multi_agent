@@ -81,6 +81,7 @@ RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 class ResearchState(TypedDict, total=False):
     symbol: str
     universe: dict          # 결정론 판정 결과
+    data_quality: dict      # RES-02 수집 품질 게이트 (PASS/WARN/FAIL/UNKNOWN)
     evidence: dict          # Evidence Bundle (API 수집분)
     sentiment: dict         # 검증된 sentiment 요약
     technical: dict         # RES-04 기술적 소견 (결정론 readout + 검증된 서술)
@@ -114,6 +115,49 @@ def check_universe(state: ResearchState) -> dict:
         return {"universe": {"tradable": False, "reason": d.excluded[state["symbol"]]},
                 "halted": f"거래 불가({d.excluded[state['symbol']]}) - 분석 중단"}
     return {"universe": {"tradable": True, "as_of": d.as_of.isoformat()}}
+
+
+# ── 노드 1.5: 데이터 품질 게이트 (RES-02 Market Data Steward) ──────────────
+# ▶ **P0 페르소나인데 파이프라인 어디에도 없었다.** 감사 구현
+#   (collectors/market_data_steward.py)은 있고 market.data_quality_windows 에
+#   판정을 쓰는데, 그걸 노출하는 엔드포인트가 없어 아무도 못 읽었다 - Agent 는
+#   DB Credential 을 안 받으므로 API 가 없으면 존재하지 않는 것과 같다.
+#   그 결과 **데이터 품질 게이트가 Packet 생성 앞에 서 있지 않았다.**
+DQ_FAIL_HALTS = True          # FAIL 이면 분석을 안 한다. 나쁜 데이터로 낸 결론은
+                              # 없는 결론보다 나쁘다 - 사람이 그걸 믿기 때문이다
+
+
+def check_data_quality(state: ResearchState) -> dict:
+    """수집 품질을 확인하고 나쁘면 막는다. **행 0건은 PASS 가 아니다.**"""
+    try:
+        rows = _get(f"{MARKET_API}/dq/windows?hours=24")
+    except Exception as e:
+        # 조회 실패를 통과로 위장하지 않는다. 다만 품질 API 장애가 리서치를
+        # 통째로 세우는 것도 과하므로, 미확인으로 남기고 진행한다.
+        return {"data_quality": {"status": "UNKNOWN",
+                                 "reason": f"품질 조회 실패: {type(e).__name__}"}}
+    rows = rows if isinstance(rows, list) else []
+    if not rows:
+        # 감사가 안 돌았다는 뜻이다. 정상 0 과 구분한다.
+        return {"data_quality": {"status": "UNKNOWN",
+                                 "reason": "최근 24시간 품질 감사 기록 0건"}}
+
+    bad = [r for r in rows if str(r.get("quality_status")) == "FAIL"]
+    warn = [r for r in rows if str(r.get("quality_status")) == "WARN"]
+    streams = sorted({str(r.get("stream_type")) for r in bad})
+    dq = {
+        "status": "FAIL" if bad else ("WARN" if warn else "PASS"),
+        "windows": len(rows),
+        "failed_streams": streams,
+        "warned_streams": sorted({str(r.get("stream_type")) for r in warn}),
+        "reason": "; ".join(
+            str((r.get("metrics") or {}).get("reasons") or "")[:80] for r in bad[:3]),
+    }
+    if bad and DQ_FAIL_HALTS:
+        return {"data_quality": dq,
+                "halted": f"데이터 품질 FAIL - 스트림 {', '.join(streams)} "
+                          f"(RES-02 감사). 나쁜 데이터로 낸 판단은 내지 않는다"}
+    return {"data_quality": dq}
 
 
 # ── 노드 2: Evidence Bundle 조립 (결정론 - evidence/bundle.py) ─────────────
@@ -896,6 +940,7 @@ def challenge_packet(state: ResearchState) -> dict:
 def build_pipeline():
     g = StateGraph(ResearchState)
     g.add_node("check_universe", check_universe)
+    g.add_node("check_data_quality", check_data_quality)
     g.add_node("assemble_evidence", assemble_evidence)
     g.add_node("analyze_sentiment", analyze_sentiment)
     g.add_node("analyze_technical", analyze_technical)
@@ -908,6 +953,11 @@ def build_pipeline():
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
+                            lambda s: "END" if s.get("halted") else "go",
+                            {"END": END, "go": "check_data_quality"})
+    # RES-02 품질 게이트가 Evidence 조립 **앞**에 선다. 뒤에 두면 이미 나쁜
+    # 데이터로 계산을 다 한 뒤에 막는 셈이라 게이트가 아니라 사후 라벨이다.
+    g.add_conditional_edges("check_data_quality",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
     # 분석가 6인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
@@ -1822,6 +1872,50 @@ def _check_method_performance_readback():
     assert none["available"] is False, none
 
 
+def _check_data_quality_gate():
+    """품질 게이트가 **Evidence 조립 앞**에 서고, 행 0을 PASS 로 안 보는가.
+
+    RES-02 는 P0 페르소나인데 감사 결과를 노출하는 엔드포인트가 없어
+    파이프라인 어디에도 배선돼 있지 않았다. 게이트를 뒤에 두면 이미 나쁜
+    데이터로 계산을 다 한 뒤에 막는 셈이라 게이트가 아니라 사후 라벨이다.
+    """
+    # 조회를 가짜로 바꿔 네 경우를 본다
+    orig = globals()["_get"]
+    try:
+        globals()["_get"] = lambda url: [
+            {"stream_type": "ticks", "quality_status": "FAIL",
+             "metrics": {"reasons": ["중복 12%"]}}]
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "FAIL", out
+        assert out.get("halted"), "FAIL 인데 안 막았다"
+
+        globals()["_get"] = lambda url: [
+            {"stream_type": "ticks", "quality_status": "WARN", "metrics": {}}]
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "WARN" and not out.get("halted"), out
+
+        # ▶ 행 0 은 PASS 가 아니다 - 감사가 안 돌았다는 뜻이다
+        globals()["_get"] = lambda url: []
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "UNKNOWN", out
+        assert "0건" in out["data_quality"]["reason"], out
+
+        # 조회 실패도 통과가 아니다
+        def boom(url):
+            raise OSError("거부")
+        globals()["_get"] = boom
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "UNKNOWN", out
+    finally:
+        globals()["_get"] = orig
+
+    # 그래프에서 게이트가 assemble_evidence 앞에 있는가
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    i_gate = src.index('g.add_node("check_data_quality"')
+    i_asm = src.index('"go": "assemble_evidence"')
+    assert i_gate < i_asm, "게이트가 Evidence 조립 뒤에 있다"
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -1879,6 +1973,7 @@ if __name__ == "__main__":
     _check_korean_guard()
     _check_occurrence_collection()
     _check_method_performance_readback()
+    _check_data_quality_gate()
     _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()
