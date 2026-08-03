@@ -225,7 +225,14 @@ def price_history(symbol: str, limit: int = 120, *, run_mode: str = "LIVE",
     q = f"&to={to}" if to else ""
     bars = _get(f"{MARKET_API}/bars/{symbol}?interval=1D&limit={limit}"
                 f"&source=ls_chart{q}", "technical-analyst", get) or []
-    closes = [v for v in (_num(b.get("close")) for b in bars) if v is not None]
+    # ▶ 순서를 가정하지 않는다 (2026-08-03, 리포트가 잡아낸 결함)
+    #   /bars 는 **최신순**으로 온다. closes[-1] 을 최신으로 쓰면 120봉 조회에서
+    #   가장 오래된 종가(491,500원)를 "최신종가"로 냈고, 같은 Packet 안에
+    #   확정치 388,000원과 나란히 실려 총괄이 그 불일치를 지적했다.
+    #   compute_price_context 는 이미 bucket_time 으로 정렬한다 - 러너만 안 했다.
+    rows = sorted((b for b in bars if b.get("close") is not None),
+                  key=lambda b: str(b.get("bucket_time", "")))   # 과거 -> 최신
+    closes = [v for v in (_num(b.get("close")) for b in rows) if v is not None]
     if len(closes) < 2:
         return ToolResult(tool="price_history", ok=False,
                           reason=f"{symbol} 일봉 {len(closes)}개 - 추세 계산 불가")
@@ -345,10 +352,19 @@ def _check_empty_is_failure_not_zero():
 
 def _check_derived_numbers_are_comparisons():
     """단일 값이 아니라 **비교**를 낸다 - 그게 판단을 바꾼다."""
-    bars = [{"close": 100.0}, {"close": 110.0}, {"close": 90.0}, {"close": 105.0}]
-    r = price_history("005380", get=lambda u: bars)
+    # ▶ /bars 는 **최신순**으로 온다. 순서를 가정하면 가장 오래된 종가를
+    #   '최신종가' 로 낸다(2026-08-03 실측: 491,500 vs 확정치 388,000).
+    newest_first = [{"bucket_time": "2026-07-30", "close": 105.0},
+                    {"bucket_time": "2026-07-29", "close": 90.0},
+                    {"bucket_time": "2026-07-28", "close": 110.0},
+                    {"bucket_time": "2026-07-27", "close": 100.0}]
+    r = price_history("005380", get=lambda u: newest_first)
+    assert r.numbers["최신종가"] == 105.0, r.numbers
     assert r.numbers["구간수익률_pct"] == 5.0, r.numbers
     assert r.numbers["구간내위치_pct"] == 75.0, r.numbers
+    # 오래된순으로 와도 같은 답이어야 한다
+    r2 = price_history("005380", get=lambda u: list(reversed(newest_first)))
+    assert r2.numbers == r.numbers, (r.numbers, r2.numbers)
 
     br = breadth_history(get=lambda u: [{"ad_ratio": 1.0}, {"ad_ratio": 2.0},
                                         {"ad_ratio": 4.0}])
