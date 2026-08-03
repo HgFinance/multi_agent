@@ -38,8 +38,8 @@
 | 리스크 | P1 Risk, FastAPI, PostgreSQL Repository, Redis Event와 Harness | Test 통과, Container·Canonical Decision 기록 미구현 |
 | 회계/포트폴리오 | Ledger, Portfolio, Reconciliation, Reporting, Portfolio API | BFF Router만 존재, 전용 Worker·Container와 DB 행 없음 |
 | AI QA/감사 | P1 QA, Repository, Redis Consumer, Harness, Replay와 Metrics | QA/Incident 일부 Row 존재, Container와 전사 Trace 미구현 |
-| CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | API·Container 미구현 |
-| Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | API·Container 미구현 |
+| CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | `governance-api` Container 실행 확인(2026-08-03) - Mandate/Report/Notification 전부 Postgres Repository로 실 DB 검증, `reporting-worker`/`notification-worker`는 Event Consumer 코드가 아직 없어 미착수 |
+| Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | `workforce-api` Container 실행 확인(2026-08-03) - Access/Improvements/Scorecard 전부 Postgres Repository로 실 DB 검증, `lifecycle-worker`/`improvement-worker`는 Event Consumer 코드가 아직 없어 미착수 |
 | 퀀트/백테스트 | Hypothesis, PIT Dataset, Backtest, Walk-Forward, Experiment Orchestrator | Hermes 실행, DB Experiment 6개, Worker·API 미구현 |
 | AI Office BFF | DEMO BFF, 8개 조직 UI와 Risk·QA 계약 Panel | Clean Build·Render 2/2, 공식 Runtime Snapshot 미구현 |
 | 로컬 보조 모델 | 8개 `Modelfile`, CEO·HR Smoke Script, Research/Quant 모델 실측 선택 | 공통 Ollama·Model Gateway·자동 Eval 미구현 |
@@ -227,6 +227,8 @@ flowchart LR
 | `migration-runner` | Supabase·Timescale Migration 검증·적용 | `tools` | One-shot |
 
 Supabase Cloud를 사용하는 환경에서는 별도 PostgreSQL Container를 항상 띄우지 않는다. Schema Integration Test가 필요할 때만 Supabase CLI 또는 Testcontainers Profile을 사용한다.
+
+`redis`를 부서별로 쪼갤지는 [ADR-0002](adr/0002-per-department-redis-instances.md)(Proposed, 2026-08-03)에서 검토 중이다. ADR이 Accepted 되기 전까지는 위 표의 결정(부서 소유가 아닌 단일 공통 Container)이 그대로 유효하다.
 
 Ollama Container를 본부마다 하나씩 만들지 않는다. 공통 `ollama` Runtime 하나에 8개 Modelfile을 서로 다른 Model Alias로 등록하고 `model-gateway`가 본부·업무·비용 정책에 따라 호출한다. `Modelfile`의 `SYSTEM`은 로컬 보조 역할 요약이며, 권위 있는 Agent Profile과 권한은 각 `hermes/config.yaml`, `hermes/SOUL.md`와 Workforce Registry가 결정한다. 실제 Alias, Build, Eval과 Version 기준은 [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
@@ -1005,7 +1007,7 @@ Lint/Type
 | B1 Compose Modularization | 부분 | 현재 10개 Service 회귀 Test와 프로젝트 Redis 추가 |
 | B2 Risk·QA Container | API·Repository·Event·Test 구현, Container 미착수 | 두 API의 Compose Health와 DB/Event 영속화 |
 | B3 Trading·Accounting 연결 | Domain Prototype 완료 | Risk 승인→OMS→Fill→Journal의 Canonical DB E2E |
-| B4 Governance·Workforce 연결 | Domain·Migration 부분 완료 | Mandate/Case/Profile API와 승인 Runtime |
+| B4 Governance·Workforce 연결 | `governance-api`/`workforce-api` Container 실행 확인(2026-08-03), Mandate/Case/Profile API 승인 Runtime은 미착수 | Mandate/Case/Profile API와 승인 Runtime |
 | B5 Quant·Strategy Factory | Hermes·Script·실 DB Experiment 6개 | Job Worker, Registry 승격과 Rollback Gate |
 | B6 Hermes Supervisor | Research·Quant 실행, 8개 Profile 존재 | 모델 위반 2건·Allowlist 경고 5건 해소, Kanban Bridge |
 | B7 Production Hardening | 미착수 | CI, 관측, Backup, 장애 Drill과 10거래일 Paper Run |
@@ -1083,7 +1085,15 @@ B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운�
 
 **담당:** 영주님
 
-- `governance-api`, `reporting-worker`, `workforce-api` Container
+- `governance-api`, `workforce-api` Container — 완료(2026-08-03). `departments/00-ceo-office/Dockerfile`,
+  `departments/07-agent-workforce/Dockerfile`로 Image Build, `docker-compose.yml`에 등록,
+  `docker compose up`으로 기동 후 `/openapi.json`과 실제 Domain Endpoint(Notification 발행,
+  Budget Assessment)까지 실행 확인. Redis는 아직 안 쓴다(Mandate/Report/Notification,
+  Access/Improvements/Scorecard 전부 Postgres Repository로만 동작).
+- `reporting-worker`, `notification-worker`, `lifecycle-worker`, `improvement-worker` — 미착수.
+  daily_report.py/notification.py/access.py/workflow.py가 전부 순수 함수·상태 머신일 뿐
+  Event Consumer 루프가 없다(risk-api Dockerfile의 risk-projection-worker와 같은 이유) -
+  코드 없는 역할을 컨테이너부터 만들지 않는다.
 - Mandate Snapshot과 Risk Read 계약 연결
 - Strategy/Profile Approval Gate 연결
 - Kanban Status Bridge와 Workforce Roster Projection 연결
