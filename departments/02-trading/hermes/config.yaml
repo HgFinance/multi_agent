@@ -25,8 +25,9 @@
 #   - .env 의 CLAUDE_CODE_OAUTH_TOKEN (claude setup-token 으로 발급)
 # 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
 model:
-  provider: anthropic
-  default: sonnet
+ provider: openai-codex
+ default: gpt-5.6-luna
+ base_url: https://chatgpt.com/backend-api/codex
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
@@ -177,4 +178,83 @@ known_builtin_toolsets:
         session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
         vision, web, x_search, yuanbao]
 known_plugin_toolsets:
-  cli: [spotify]
+ cli: [spotify]
+
+# Employee runtime v2: every listed employee is an independent LangGraph
+# Worker.  Hermes remains the department-head runtime and has no order submit
+# authority.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+
+staff_registry:
+  head_count: 1
+  worker_count: 6
+  default_execution_count: 2
+  max_execution_count: 6
+  active_worker_count: 2
+  conditional_worker_count: 4
+  runtime_personality_source: workers
+  legacy_personas_are_aliases: true
+  runtime_personalities: [market-thesis-worker, trade-proposal-worker, order-constraint-worker, execution-planning-worker, venue-cost-worker, derivatives-structure-worker]
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+
+employee_runtime:
+  executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/02-trading/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:8b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:8b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: trading.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: trading-department-head
+  failure_action: HOLD
+
+workers:
+  market-thesis-worker:
+    role: Market thesis and signal-context analyst
+    status: active
+    trigger: always
+    tools: [trading.market_snapshot.read, trading.strategy_bundle.read]
+  trade-proposal-worker:
+    role: Non-binding trade proposal analyst
+    status: active
+    trigger: always
+    tools: [trading.research_packet.read, trading.portfolio.read]
+  order-constraint-worker:
+    role: Order constraint and pre-gate analyst
+    status: active
+    trigger: when_order_intent_exists
+    tools: [trading.order_intent.read, trading.mandate.read]
+  execution-planning-worker:
+    role: Paper execution-plan analyst
+    status: active
+    trigger: when_order_intent_exists
+    tools: [trading.order_intent.read, trading.execution_plan.read]
+  venue-cost-worker:
+    role: Venue, liquidity and transaction-cost analyst
+    status: active
+    trigger: when_market_snapshot_exists
+    tools: [trading.market_snapshot.read, trading.tca.read]
+  derivatives-structure-worker:
+    role: Derivatives structure and payoff analyst
+    status: conditional
+    trigger: when_derivatives_input_exists
+    tools: [trading.derivatives.read, trading.margin.read]

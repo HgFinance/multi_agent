@@ -6,9 +6,19 @@ from collections.abc import Mapping
 from typing import Any
 
 try:
-    from departments.employee_worker_runtime import WorkerLLM, WorkerSpec, run_worker_registry, tools_for_specs
+    from departments.employee_worker_runtime import (
+        WorkerLLM,
+        WorkerSpec,
+        run_worker_registry,
+        tools_for_specs,
+    )
 except ModuleNotFoundError:
-    from employee_worker_runtime import WorkerLLM, WorkerSpec, run_worker_registry, tools_for_specs
+    from employee_worker_runtime import (
+        WorkerLLM,
+        WorkerSpec,
+        run_worker_registry,
+        tools_for_specs,
+    )
 
 WORKER_SPECS = (
     WorkerSpec("portfolio-control-worker", "Portfolio control and position-state analyst", ("accounting.portfolio_snapshot.read",), "always", ("portfolio_snapshot", "positions", "cash")),

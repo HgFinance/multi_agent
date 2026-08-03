@@ -23,11 +23,28 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from ..employee_dispatch import run_department_workers
 from .ceo import CeoAdapterError, LunaCeoAdapter
 
 PaperHandler = Callable[[str, str, MutableMapping[str, object]], str]
 DepartmentRunner = Callable[..., Mapping[str, object]]
 _PAPER_NAMESPACE = UUID("d8ce7fb7-4b08-4e4f-8524-8a516a6f0b8d")
+
+AUXILIARY_WORKER_DEPARTMENT = {
+    "quant-backtest": "quant-backtest",
+    "qa-release-review": "qa",
+    "ceo-promotion-review": "ceo",
+    "hr-profile": "hr",
+    "hr-candidate-eval": "hr",
+    "qa-permission-review": "qa",
+    "ceo-org-approval": "ceo",
+    "hr-lifecycle": "hr",
+    "hr-improvement-signal": "hr",
+    "hr-profile-revision": "hr",
+    "qa-revision-review": "qa",
+    "ceo-revision-approval": "ceo",
+    "hr-shadow-rollback": "hr",
+}
 
 
 class PaperPipelineAdapter:
@@ -50,7 +67,7 @@ class PaperPipelineAdapter:
         self._log_dir = Path(tempfile.mkdtemp(prefix="hgfinance-paper-"))
 
     def handlers(self) -> dict[str, PaperHandler]:
-        return {
+        handlers: dict[str, PaperHandler] = {
             "research": self.research,
             "trading": self.trading,
             "risk": self.risk,
@@ -59,11 +76,86 @@ class PaperPipelineAdapter:
             "accounting": self.accounting,
             "ceo": self.ceo,
         }
+        for step_id, department in AUXILIARY_WORKER_DEPARTMENT.items():
+            handlers[step_id] = self._auxiliary_handler(department)
+        return handlers
+
+    def _auxiliary_handler(self, department: str) -> PaperHandler:
+        def handler(
+            input_contract: str,
+            output_contract: str,
+            context: MutableMapping[str, object],
+        ) -> str:
+            return self.auxiliary(department, input_contract, output_contract, context)
+
+        return handler
+
+    def auxiliary(
+        self,
+        department: str,
+        input_contract: str,
+        output_contract: str,
+        context: MutableMapping[str, object],
+    ) -> str:
+        """Run Quant/HR governance-cycle Workers with no production side effect."""
+
+        payload = {
+            "case_request": context.get("case_request", {}),
+            "input_contract": input_contract,
+            "workflow_context": dict(context),
+        }
+        employee_context = self._run_employee_workers(department, payload, context)
+        artifact = {
+            "status": "PAPER_CONTEXT_ONLY",
+            "producer": f"{department}-department",
+            "input_contract": input_contract,
+            "output_contract": output_contract,
+            "binding": False,
+            "production_promotion": False,
+            "permission_grant": False,
+            "employee_context": employee_context,
+        }
+        report = {
+            "department": department,
+            "status": "COMPLETED" if employee_context.get("status") == "COMPLETED" else "DEGRADED",
+            "binding": False,
+            "paper_only": True,
+            "employee_context": employee_context,
+        }
+        _store(context, output_contract, artifact, report)
+        return _detail(department, report, output_contract)
+
+    def _run_employee_workers(
+        self,
+        department: str,
+        payload: Mapping[str, object],
+        context: MutableMapping[str, object],
+    ) -> dict[str, object]:
+        """Run non-binding Worker context and make it visible to the head."""
+
+        try:
+            result = run_department_workers(self.repo_root, department, payload)
+        except Exception as exc:  # noqa: BLE001 - Worker boundary is fail-closed
+            result = {
+                "department": department,
+                "status": "DEGRADED",
+                "binding": False,
+                "error": type(exc).__name__,
+                "error_message": str(exc)[:240],
+                "executed": [],
+                "failed": ["employee_dispatch"],
+                "not_executed": [],
+            }
+        context.setdefault("employee_context", {})[department] = result
+        return result
 
     def research(
         self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
     ) -> str:
         case = _case(context)
+        employee_context = self._run_employee_workers(
+            "research", {"case_request": case, "symbol": case["symbol"]}, context
+        )
         report: dict[str, object]
         try:
             runner = self._research_runner or _default_research_runner(self.repo_root)
@@ -83,6 +175,7 @@ class PaperPipelineAdapter:
             "producer": "research-department",
             "summary": _summary_text(raw),
             "evidence_available": bool(raw),
+            "employee_context": employee_context,
         }
         _store(context, "research_packet", packet, report)
         return _detail("research", report, "research_packet")
@@ -91,6 +184,11 @@ class PaperPipelineAdapter:
         self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
     ) -> str:
         case = _case(context)
+        self._run_employee_workers(
+            "trading",
+            {"case_request": case, "research_packet": _artifact(context, "research_packet")},
+            context,
+        )
         now = datetime.now(timezone.utc)
         instrument_id = uuid5(_PAPER_NAMESPACE, f"instrument:{case['symbol']}")
         fund_id = uuid5(_PAPER_NAMESPACE, "fund:paper")
@@ -152,6 +250,7 @@ class PaperPipelineAdapter:
                         log_path=self._log_dir / "risk.jsonl",
                     )
                 )
+            raw.setdefault("employee_context", raw.get("employee_workers", {}))
             report = _department_summary("risk", raw)
         except Exception as exc:  # noqa: BLE001 - reject on adapter failure
             raw = _risk_failure(exc)
@@ -178,6 +277,7 @@ class PaperPipelineAdapter:
                         log_path=self._log_dir / "qa.jsonl",
                     )
                 )
+            raw.setdefault("employee_context", raw.get("employee_workers", {}))
             report = _department_summary("qa", raw)
         except Exception as exc:  # noqa: BLE001 - escalate on QA failure
             raw = _qa_failure(exc)
@@ -220,6 +320,9 @@ class PaperPipelineAdapter:
         self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
     ) -> str:
         execution = _artifact(context, "execution_result")
+        employee_context = self._run_employee_workers(
+            "accounting-portfolio", {"execution_result": execution}, context
+        )
         snapshot = {
             "status": "PAPER_NOT_POSTED",
             "position_delta": "0",
@@ -228,6 +331,7 @@ class PaperPipelineAdapter:
             "reconciled": False,
             "source_execution_status": execution.get("status"),
             "binding": False,
+            "employee_context": employee_context,
         }
         report = {
             "status": "PAPER_NOT_POSTED",
@@ -245,6 +349,21 @@ class PaperPipelineAdapter:
         reports = context.get("department_reports", {})
         if not isinstance(reports, Mapping):
             reports = {}
+        reports = dict(reports)
+        employee_context = self._run_employee_workers(
+            "ceo",
+            {
+                "case_request": case,
+                "department_reports": reports,
+                "artifacts": dict(context.get("artifacts", {})),
+            },
+            context,
+        )
+        reports["ceo-worker-context"] = {
+            "status": employee_context.get("status"),
+            "employee_context": employee_context,
+            "binding": False,
+        }
         try:
             decision = self._ceo_adapter.decide(
                 case_request=case,
@@ -260,6 +379,7 @@ class PaperPipelineAdapter:
                 "runtime": {"profile": "ceo-agent", "call_status": "failed"},
             }
             context.setdefault("domain_failures", []).append(f"ceo:{exc}")
+        decision["employee_context"] = employee_context
         report = {
             "status": "COMPLETED" if decision.get("runtime", {}).get("call_status") == "succeeded" else "DEGRADED",
             "binding": False,
@@ -292,7 +412,37 @@ def _store(
     report: Mapping[str, object],
 ) -> None:
     context.setdefault("artifacts", {})[contract] = dict(artifact)  # type: ignore[index]
-    context.setdefault("department_reports", {})[report_name(report, contract)] = dict(report)  # type: ignore[index]
+    report_for_head = dict(report)
+    employee_contexts = context.get("employee_context", {})
+    stage = report_name(report, contract)
+    employee_stage = {"accounting": "accounting-portfolio"}.get(stage, stage)
+    worker_context = artifact.get("employee_context") if isinstance(artifact, Mapping) else None
+    if not isinstance(worker_context, Mapping) and isinstance(employee_contexts, Mapping):
+        worker_context = employee_contexts.get(employee_stage)
+    if isinstance(worker_context, Mapping):
+        report_for_head["employee_context"] = _bounded_worker_context(worker_context)
+    context.setdefault("department_reports", {})[stage] = report_for_head  # type: ignore[index]
+
+
+def _bounded_worker_context(value: Mapping[str, object]) -> dict[str, object]:
+    """Keep Worker evidence useful to the head without unbounded prompt growth."""
+
+    bounded: dict[str, object] = {}
+    for key in ("department", "status", "runtime", "executed", "failed", "not_executed", "input_hash", "binding"):
+        if key in value:
+            bounded[key] = value[key]
+    workers = value.get("workers")
+    if isinstance(workers, list):
+        bounded["workers"] = [
+            {
+                key: item[key]
+                for key in ("worker_id", "role", "status", "attempts", "error", "output_contract")
+                if key in item
+            }
+            for item in workers
+            if isinstance(item, Mapping)
+        ]
+    return bounded
 
 
 def report_name(report: Mapping[str, object], contract: str) -> str:
