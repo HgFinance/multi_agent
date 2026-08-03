@@ -5,6 +5,15 @@
 # 참고: docs/HEDGE_FUND_MASTER_PLAN.md 5.5 #2, 8, 19.8
 #       docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md (v1.2) 1.1, 4.2, 4.3
 
+# 2026-08-03 팀 합의는 Sonnet(anthropic/claude-sonnet-5)이지만 **Nous 계정에
+# 크레딧이 없어 유료 모델이 전부 404다**(실측: "requires available credits").
+# 크레딧이 들어오면 default 를 anthropic/claude-sonnet-5 로 되돌린다 - provider 는
+# 그대로 nous 여도 된다(그 모델이 Nous 목록 안에 있어 새 API 키가 필요 없다).
+#
+# 그때까지 저장소 8개 통일 기준값(= check_hermes_profiles.py 의 기대값)을 그대로
+# 쓴다. stepfun/step-3.7-flash:free 도 검토했지만 **-Q 인데도 사고 과정을 stdout
+# 으로 흘려** apps/api/hermes_cli.py 가 그걸 그대로 answer 로 반환한다(실측). 화면에
+# 모델 혼잣말이 뜨므로 -Q 를 쓴 목적이 사라진다.
 model:
   provider: nous
   default: poolside/laguna-s-2.1:free
