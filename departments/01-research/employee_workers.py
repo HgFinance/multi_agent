@@ -25,7 +25,7 @@ WORKER_SPECS = (
     WorkerSpec("microstructure-worker", "Microstructure and liquidity evidence analyst", ("research.microstructure.read",), "market_snapshot", ("market_snapshot", "order_book")),
     WorkerSpec("technical-signal-worker", "Multi-timeframe technical signal analyst", ("research.technical_features.read",), "market_features", ("technical_features", "price_history")),
     WorkerSpec("fundamental-valuation-worker", "Point-in-time fundamental and valuation analyst", ("research.fundamentals.read",), "fundamentals", ("fundamentals", "filings")),
-    WorkerSpec("news-macro-worker", "News, sentiment, macro and geopolitical evidence analyst", ("research.news.read", "research.macro.read"), "news_or_macro", ("news", "macro", "geopolitical")),
+    WorkerSpec("news-macro-worker", "News, sentiment, macro and geopolitical evidence analyst", ("research.news.read", "research.macro.read"), "always", ("news", "macro", "geopolitical")),
     WorkerSpec("evidence-rag-worker", "Evidence retrieval and citation curator", ("research.evidence.search",), "evidence_request", ("evidence", "documents")),
 )
 

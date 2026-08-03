@@ -245,6 +245,7 @@ workers:
   evidence-qa-worker:
     role: Evidence and citation QA analyst
     status: active
+    trigger: always
     replaces: [evidence-qa-agent]
     tools: [qa.evidence.check]
     output: advisory_context
@@ -266,14 +267,14 @@ workers:
     role: Agent operations and tool permission analyst
     status: conditional
     replaces: [agent-ops-monitor, tool-permission-security-reviewer]
-    trigger: when_ops_or_permission_input_exists
+    trigger: when_ops_input_exists
     tools: [qa.ops.evaluate, qa.tool_permission.check]
     output: advisory_context
   incident-postmortem-worker:
     role: Incident timeline and postmortem analyst
     status: conditional
     replaces: [incident-postmortem-agent]
-    trigger: incident_exists
+    trigger: when_incident_exists
     tools: [qa.incident.record]
     output: advisory_context
 
