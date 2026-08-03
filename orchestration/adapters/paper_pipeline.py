@@ -24,6 +24,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from .ceo import CeoAdapterError, LunaCeoAdapter
+from ..employee_dispatch import run_department_workers
 
 PaperHandler = Callable[[str, str, MutableMapping[str, object]], str]
 DepartmentRunner = Callable[..., Mapping[str, object]]
@@ -60,10 +61,37 @@ class PaperPipelineAdapter:
             "ceo": self.ceo,
         }
 
+    def _run_employee_workers(
+        self,
+        department: str,
+        payload: Mapping[str, object],
+        context: MutableMapping[str, object],
+    ) -> dict[str, object]:
+        """Run non-binding Worker context and make it visible to the head."""
+
+        try:
+            result = run_department_workers(self.repo_root, department, payload)
+        except Exception as exc:  # noqa: BLE001 - Worker boundary is fail-closed
+            result = {
+                "department": department,
+                "status": "DEGRADED",
+                "binding": False,
+                "error": type(exc).__name__,
+                "error_message": str(exc)[:240],
+                "executed": [],
+                "failed": ["employee_dispatch"],
+                "not_executed": [],
+            }
+        context.setdefault("employee_context", {})[department] = result
+        return result
+
     def research(
         self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
     ) -> str:
         case = _case(context)
+        employee_context = self._run_employee_workers(
+            "research", {"case_request": case, "symbol": case["symbol"]}, context
+        )
         report: dict[str, object]
         try:
             runner = self._research_runner or _default_research_runner(self.repo_root)
@@ -83,6 +111,7 @@ class PaperPipelineAdapter:
             "producer": "research-department",
             "summary": _summary_text(raw),
             "evidence_available": bool(raw),
+            "employee_context": employee_context,
         }
         _store(context, "research_packet", packet, report)
         return _detail("research", report, "research_packet")
