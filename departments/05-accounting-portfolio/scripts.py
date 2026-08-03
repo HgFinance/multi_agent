@@ -62,6 +62,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -80,6 +81,7 @@ for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_ac
         sys.path.insert(0, _p)
 
 from langgraph.graph import END, StateGraph  # noqa: E402
+from langsmith import tracing_context  # noqa: E402
 
 from daily_report import DailyReport, ReportError, build_daily_report  # noqa: E402
 from ledger import Ledger  # noqa: E402
@@ -203,6 +205,31 @@ def _model_version() -> str:
 def _prompt_version(persona_name: str) -> str:
     """페르소나 본문 해시 - 프롬프트를 한 글자만 고쳐도 값이 바뀐다."""
     return f"{persona_name}@{hashlib.sha256(_persona(persona_name).encode()).hexdigest()[:12]}"
+
+
+# ── LangSmith 관측성 ──────────────────────────────────────────────────────
+# 기본은 꺼져 있다 (LANGSMITH_TRACING=false). 켜면 이 그래프의 노드·LLM 호출이
+# 외부(LangSmith)로 나간다 - 회계 Trace 에는 NAV·Position·현금이 그대로 담기므로
+# 금융 데이터 외부 전송 정책 검토 전까지 로컬 개발에서만 켠다.
+def _ls_project() -> str:
+    """부서별 Project 로 격리한다. 한 Project 에 8개 부서를 섞으면 회계 Trace 를
+    다른 본부가 그대로 열람하게 된다 - 부서 경계가 관측성에서만 무너진다."""
+    return f"{os.environ.get('LANGSMITH_PROJECT') or 'hedgefund'}-05-accounting"
+
+
+def _langsmith_handoff(trace_id: str) -> dict[str, Any]:
+    """리포트·소비자에게 넘기는 것은 Trace 원문이 아니라 이 좌표뿐이다."""
+    flag = os.environ.get("LANGCHAIN_TRACING_V2", os.environ.get("LANGSMITH_TRACING", ""))
+    enabled = flag.casefold() in {"1", "true", "yes", "on"}
+    return {
+        "trace_id": str(trace_id),
+        "langsmith": {
+            "enabled": enabled,
+            "project": _ls_project() if enabled else None,
+            "run_id": os.environ.get("LANGSMITH_RUN_ID"),
+            "handoff_status": "configured" if enabled else "not_configured",
+        },
+    }
 
 
 def _max_staleness() -> timedelta:
@@ -573,6 +600,7 @@ def _assemble_out(state: CloseState) -> dict:
         "narrative": state.get("narrative", ""),
         "escalate": bool(blocked or state.get("fallbacks")),
         "fallbacks": state.get("fallbacks", []),
+        "observability": _langsmith_handoff(state.get("trace_id") or ""),
         "agent_versions": {
             "model": _model_version(),
             "supervisor_prompt": _prompt_version("portfolio-control-supervisor"),
@@ -605,7 +633,10 @@ def run_accounting_close(
                      "stored_projection": stored_projection, "strategy_of": strategy_of,
                      "trace_id": trace_id, "fallbacks": []}
     try:
-        state = build_pipeline(chat=chat, uploader=uploader).invoke(initial)
+        # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
+        # 그대로 꺼진 채고, 켜져 있을 때만 회계본부 Project 로 보낸다.
+        with tracing_context(project_name=_ls_project()):
+            state = build_pipeline(chat=chat, uploader=uploader).invoke(initial)
     except Exception as exc:
         state = {**initial, "nav_status": NAV_BLOCKED, "breaks": [], "recon": {},
                  "narrative": "", "fallbacks": [_fallback("pipeline", exc)]}
@@ -657,6 +688,7 @@ def _render_report_md(out: dict) -> str:
         f"| pipeline_version | `{_md_cell(out.get('pipeline_version'))}` |",
         f"| input_hash | `{_md_cell(out.get('input_hash'))}` |",
         f"| trace_id | `{_md_cell(out.get('trace_id'))}` |",
+        f"| LangSmith | {_md_cell(json.dumps((out.get('observability') or {}).get('langsmith'), ensure_ascii=False, sort_keys=True))} |",
         "",
         "> **이 NAV 는 Preliminary 다.** Official NAV 는 독립 승인이 필요하며 이 파이프라인은",
         "> 그 권한을 갖지 않는다. 원장 수정·NAV 확정 권한은 CEO 에게도 없다.",
@@ -1053,6 +1085,37 @@ def _run_live() -> dict:
         opening_snapshot=opening)
 
 
+def _check_langsmith_observability():
+    """기본은 꺼짐이고, Project 는 회계본부로 격리된다.
+    실제 그래프를 켠 채로 돌리지 않는다 - 이 점검은 네트워크를 타면 안 된다."""
+    saved = {k: os.environ.get(k) for k in
+             ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_PROJECT")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        off = _langsmith_handoff("t1")["langsmith"]
+        assert off["enabled"] is False and off["handoff_status"] == "not_configured", off
+        assert off["project"] is None, off
+
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ["LANGSMITH_PROJECT"] = "First"
+        on = _langsmith_handoff("t1")["langsmith"]
+        assert on == {"enabled": True, "project": "First-05-accounting",
+                      "run_id": None, "handoff_status": "configured"}, on
+        # 다른 부서 Project 를 그대로 쓰지 않는다 (부서 경계).
+        assert _ls_project().endswith("-05-accounting"), _ls_project()
+        os.environ.pop("LANGSMITH_PROJECT")
+        assert _ls_project() == "hedgefund-05-accounting", _ls_project()
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    md = _render_report_md({"observability": _langsmith_handoff("t1"), "recon": {}})
+    assert "| LangSmith |" in md, md[:400]
+    print("  LangSmith 관측성           OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("value", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1095,4 +1158,5 @@ if __name__ == "__main__":
     _check_report_renders()
     _check_notion_report_node()
     _check_secret_redaction()
-    print("회계본부 마감 파이프라인 17개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    _check_langsmith_observability()
+    print("회계본부 마감 파이프라인 18개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
