@@ -1213,6 +1213,7 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
     nc = packet.get("numeric_check") or {}
     dc = packet.get("date_check") or {}
+    qq = (nc.get("quote_quality") or {})
     verdicts = packet.get("_analyst_verdicts") or {}
     lines = [
         "# 리서치본부 — Research Packet (결정론적 생성, LLM 자유 서술 아님)",
@@ -1223,6 +1224,13 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         f"| **evidence_quality** | **{packet.get('evidence_quality')}** |",
         f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
         f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |",
+        # ▶ 인용 품질 - **통과가 검증인지 우연인지**를 드러낸다 (2026-08-03)
+        #   지표 확장(10 -> 31)으로 확정치 풀이 넓어지면 창작 수치가 우연히 맞는
+        #   일이 생긴다. "불일치 0" 만 보면 좋아 보이지만, 그중 몇이 여러 지표에
+        #   동시에 걸린 모호한 인용인지가 진짜 품질이다.
+        f"| **인용 품질** | 확정치 풀 {nc.get('pool_size', 0)}개 · 인용 "
+        f"{qq.get('quoted', 0)}건 중 {qq.get('matched', 0)}건 매칭"
+        f"{', 모호 ' + str(qq.get('ambiguous', 0)) + '건(' + str(round(qq.get('ambiguity_ratio', 0) * 100)) + '%)' if qq.get('ambiguous') else ''} |",
         # 시점 재대조를 리포트에 싣는다 - **표시 없는 가드는 없는 가드다**
         # (2026-08-03: 가드가 돌고도 리포트·DB 어디에도 안 남아 못 봤다)
         f"| **시점 재대조** | {'통과' if dc.get('ok', True) else '⚠ Evidence 창 밖 연도 ' + str(dc.get('too_old_years', []) + dc.get('future_years', []))}"

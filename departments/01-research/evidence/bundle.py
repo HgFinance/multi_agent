@@ -308,6 +308,26 @@ _PCT_RE = re.compile(r"([+-]?\d{1,3}(?:\.\d{1,2})?)\s*%")
 _COUNT_RE = re.compile(r"(\d{1,7})\s*(?:개|건|종목)")
 
 
+
+def _collect_keyed(v, out: dict, path: str = "") -> None:
+    """수치를 **경로와 함께** 모은다 - 어느 값에 맞았는지 말하려면 이름이 필요하다.
+
+    _collect_numbers 는 집합이라 이름을 잃는다. 지표가 늘어 풀이 넓어진 뒤로는
+    "통과했다" 만으로 부족하다 - 무엇에 통과했는지가 있어야 우연을 가른다.
+    """
+    if isinstance(v, bool):
+        return
+    if isinstance(v, (int, float)):
+        if path:
+            out[path] = float(v)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            _collect_keyed(x, out, f"{path}.{k}" if path else str(k))
+    elif isinstance(v, (list, tuple)):
+        for i, x in enumerate(v):
+            _collect_keyed(x, out, f"{path}[{i}]")
+
+
 def _collect_numbers(v, out: set) -> None:
     if isinstance(v, bool):
         return
@@ -334,26 +354,46 @@ def verify_narrative_numbers(text: str, confirmed: dict,
     분석가의 모순 강등(verify)이 맡는다.
     """
     allowed: set = set()
+    keyed: dict = {}
     _collect_numbers(confirmed, allowed)
+    _collect_keyed(confirmed, keyed)
     # ▶ 근거 **제목 문자열 안의 수치**도 확정치다 (2026-08-03)
     #   _collect_numbers 는 수치형만 본다. 그런데 우리가 프롬프트에 넣은 뉴스
     #   제목("7월 판매 5.1% 감소")은 문자열이라 풀에 안 들어갔고, 총괄이 그것을
     #   정확히 인용했는데 창작으로 몰렸다. **우리가 준 것을 인용했는데 창작이라
     #   하면 가드가 거짓말을 하고, 그러면 사람이 가드를 무시한다.**
-    for t in (confirmed or {}).get("evidence_titles") or []:
+    for i, t in enumerate((confirmed or {}).get("evidence_titles") or []):
         for m in _PCT_RE.finditer(str(t)):
             allowed.add(float(m.group(1)))
+            keyed[f"evidence_title[{i}]#{m.group(1)}"] = float(m.group(1))
         for m in _COUNT_RE.finditer(str(t)):
             allowed.add(float(m.group(1)))
+            keyed[f"evidence_title[{i}]#{m.group(1)}"] = float(m.group(1))
     nums = [float(m.group(1)) for m in _PCT_RE.finditer(text or "")]
     unmatched = [n for n in nums
                  if not any(abs(abs(n) - abs(a)) <= tolerance for a in allowed)]
+    # ▶ 인용 귀속 - "통과가 검증인지 우연인지" 를 가른다 (2026-08-03)
+    #   지표 확장으로 풀이 넓어지면 창작 수치가 우연히 맞는 일이 생긴다.
+    #   어느 키에 맞았는지를 세어 모호 비율을 드러낸다. **판정은 바꾸지 않는다** -
+    #   통과 여부는 위 unmatched 가 그대로 정한다.
+    # 호출부가 evidence/ 를 sys.path 에 넣었는지에 의존하지 않는다 -
+    # scripts.py 는 `from evidence.bundle import ...` 로 부르고 agents/ 는
+    # evidence/ 를 직접 넣는다. 두 경로 모두에서 되게 한다.
+    try:
+        from number_guard import quote_quality, trace_quoted
+    except ModuleNotFoundError:  # pragma: no cover - 패키지 경로로 들어온 경우
+        from evidence.number_guard import quote_quality, trace_quoted
+
+    quality = quote_quality(trace_quoted(text or "", keyed, tolerance=tolerance))
     # 셈 단위 정수는 정확 일치만 - 종목/기사/공시 개수는 반올림 여지가 없다
     counts = [int(m.group(1)) for m in _COUNT_RE.finditer(text or "")]
     unmatched_counts = [c for c in counts if float(c) not in allowed]
     return {"checked": len(nums), "unmatched": unmatched,
             "checked_counts": len(counts), "unmatched_counts": unmatched_counts,
-            "ok": not unmatched and not unmatched_counts}
+            "ok": not unmatched and not unmatched_counts,
+            # 통과가 검증인지 우연인지 - 모호 비율이 높으면 풀이 헐거워진 것이다
+            "quote_quality": quality,
+            "pool_size": len(keyed)}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────
