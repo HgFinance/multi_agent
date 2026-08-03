@@ -40,7 +40,7 @@ compose 프로젝트 hedgefund
 그대로 보인다 — 이름만 다른 **분리된 척**이다. 그래서 마운트를 부서별로 가른다.
 이미지 기본값이 `HERMES_HOME=/opt/data`라 **마운트만 갈면 분리가 끝난다.**
 
-실측 검증 (2026-08-02):
+Historical snapshot (2026-08-02 Docker smoke; 현재 모델 기준 아님):
 
 ```
 $ docker exec hedgefund-research-hermes hermes profile list
@@ -253,9 +253,7 @@ docker exec hedgefund-research-hermes hermes -p research-department \
 
 ## 5. 모델·과금
 
-현재 Git 기준 CEO, Research, Trading, Quant, Accounting과 HR 6개 Profile은 기존 baseline을 유지하고, Risk·QA는 별도 Head/Employee 런타임 계약을 사용한다.
-기존 6개 Profile은 `provider: nous` / `poolside/laguna-s-2.1:free`다. Risk와 QA 부서장은
-`provider: openai-codex` / `gpt-5.6-luna`를 사용하고 `anthropic-claude-code`를 승인된 대체 provider로 둔다. 직원은 Hermes의 `model`과 분리된 LangGraph Worker + Ollama `qwen3:8b`다.
+현재 저장소 기준 8개 Profile의 Head는 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 provider로 사용할 수 있다. 직원은 Hermes Head 모델과 분리된 부서별 독립 LangGraph Worker + Ollama `qwen3:8b`다. 이전 6개 Nous/Laguna와 Risk·QA만 Codex였던 구성은 Historical snapshot으로만 보존한다.
 `scripts/check_hermes_profiles.py`는 부서별 Head 모델과 Employee 모델을 각각 검증해야 하며, 전체 Profile을 하나의 모델로 비교하지 않는다.
 모델 교체는 benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다.
 

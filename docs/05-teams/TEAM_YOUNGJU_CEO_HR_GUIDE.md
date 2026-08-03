@@ -39,7 +39,7 @@
 ### Blocker
 
 - `GOV-02`(Investment Case·Approval·Escalation API): `governance.cases` 제네릭 Case Root의 상태 머신이 미정의라 착수 보류. `HR-03`(Eval·Shadow·Promotion·Rollback Orchestrator)도 설계 문서만 있고 코드가 없다.
-- `HR-04`: DRAFT Profile 13개 중 HR 자기 직원 5명(HR-00~04)은 QA 독립 검증 없이 인사팀이 스스로 ACTIVE 승격할 수 없다(권한 분리, 이제 `HR-02`의 `POST .../status`가 이 규칙을 코드로 강제). 나머지 8개(Risk 4, QA 4)는 해당 부서 Owner 확인 선행.
+- `HR-04`: 현재 Worker Registry 기준 HR 직원 5명(HR-00~04)은 QA 독립 검증 없이 인사팀이 스스로 ACTIVE 승격할 수 없다(권한 분리, `HR-02`의 `POST .../status`가 이 규칙을 코드로 강제). Risk 4명과 QA 5명의 Profile 상태는 각 부서 Owner 확인과 DB snapshot으로 별도 검증한다.
 - `lifecycle-worker`는 Platform/IAM Adapter의 이벤트 계약이 없어 인사팀 단독으로 재개할 수 없다.
 - `HR-03`의 `improvement-worker`는 QA의 `workforce.eval.v1` 실제 발행이 있어야 잠정 Payload Contract를 확정할 수 있다.
 - Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다(공식 Roster는 `HR-02`로 해소됨).
