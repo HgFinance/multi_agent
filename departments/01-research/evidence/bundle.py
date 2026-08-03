@@ -187,9 +187,16 @@ def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
 
 # ── 시점 창작 가드 - 숫자 가드가 못 잡는 날짜 (2026-08-03 사고) ────────────
 
-# YYYY-MM-DD / YYYY년 M월 / YYYY.MM.DD 를 잡는다. 연도 없는 "11월 3일" 은
-# 잡지 않는다 - 어느 해인지 모르는 것을 창작이라 단정할 수 없다.
-_DATE_RE = re.compile(r"(19|20)(\d{2})\s*[-./년]")
+# 연도를 잡는다. **연도 뒤 구분자를 요구하지 않는다** - 처음 만들 때
+# `(19|20)(\d{2})\s*[-./년]` 로 썼더니 이 가드를 만든 계기인 사고 문장
+# `"(August 3, 2023)"` 을 못 잡았다(2023 뒤가 괄호라서). 가드가 자기 사고를
+# 못 잡으면 없는 것과 같다.
+#
+# 대신 **앞뒤로 숫자·쉼표·소수점이 붙은 것은 연도가 아니다**(1,995,000원의 995).
+# 그리고 원/주/건 같은 단위가 바로 붙으면 금액·수량이지 연도가 아니다 -
+# 오탐이 잦으면 사람이 가드를 무시하게 되고, 그러면 진짜를 놓친다.
+_DATE_RE = re.compile(
+    r"(?<![\d,.])(19|20)(\d{2})(?![\d])(?!\s*(?:원|주|건|개|명|회|대|bp|%))")
 
 # Evidence 가 담는 시점보다 얼마나 과거까지를 정상으로 볼 것인가.
 # 재무는 직전 회계연도를 인용하고 GPR 은 지연이 있어 넉넉히 잡는다 - 좁게 잡으면
@@ -489,15 +496,24 @@ def _check_date_guard():
     f = verify_narrative_dates("2027년 실적이 개선됐다", as_known_at=now)
     assert f["ok"] is False and f["future_years"] == [2027], f
 
+    # ▶ 이 가드를 만든 계기인 실제 사고 문장 - 연도 뒤가 괄호다
+    for incident in ("Samsung shares dropped 7% (August 3, 2023)",
+                     "Q3 2023 sales of 1.16 million vehicles",
+                     "timestamp: 2023-10-15T14:30:00Z"):
+        r2 = verify_narrative_dates(incident, as_known_at=now)
+        assert r2["ok"] is False, f"사고 문장을 못 잡았다: {incident}"
+
     # 정상 인용은 통과한다 - 직전 회계연도를 쓰는 것은 펀더멘털의 정상 동작
-    for good in ("2025-12-31 기준 매출액", "2026년 8월 공시", "2026.07.27 GPR 지수"):
+    for good in ("2025-12-31 기준 매출액", "2026년 8월 공시", "2026.07.27 GPR 지수",
+                 "2026년 7월 판매 318,454대"):
         assert verify_narrative_dates(good, as_known_at=now)["ok"], good
 
     # **모르는 것을 단정하지 않는다** - 연도 없는 표현은 판정 대상이 아니다
     assert verify_narrative_dates("11월 3일 급등", as_known_at=now)["ok"]
     # 가격·수량은 연도가 아니다 (오탐하면 가드가 무시된다)
-    assert verify_narrative_dates("종가 1,718,000원 거래량 2,400주",
-                                  as_known_at=now)["ok"]
+    for money in ("종가 1,718,000원 거래량 2,400주", "매출액 1,995,000원",
+                  "목표가 2,000원", "발행주식 1,999,000주", "직원 2,024명"):
+        assert verify_narrative_dates(money, as_known_at=now)["ok"], money
     print("  시점 창작 가드           OK")
 
 

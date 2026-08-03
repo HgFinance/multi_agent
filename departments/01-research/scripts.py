@@ -313,6 +313,23 @@ def _supervisor_persona() -> str:
     return re.search(r'research-supervisor: "(.*?)"\n', cfg, re.S).group(1)
 
 
+def _citable(bundle: dict) -> list[dict]:
+    """총괄이 인용할 수 있는 근거 목록. **여기 없는 ref 는 창작이다.**
+
+    Bundle 이 ref + evidence_id 를 싣게 된 뒤(evidence/bundle.py 2026-08-03)
+    비로소 가능해진 계약이다. 예전 프롬프트는 "reference ids like news:3" 이라고
+    **존재하지 않는 형식**을 지시했고, 그러니 LLM 이 형식을 지어냈다.
+    """
+    out = []
+    for key in ("news_headlines", "disclosures_7d"):
+        for item in (bundle or {}).get(key) or []:
+            if isinstance(item, dict) and item.get("ref"):
+                out.append({"ref": item["ref"],
+                            "title": str(item.get("title", ""))[:80],
+                            "kind": "news" if key.startswith("news") else "disclosure"})
+    return out
+
+
 def draft_packet(state: ResearchState, *, llm=None) -> dict:
     symbol = state["symbol"]
     # 시점 가드의 기준. state 에 없으면 지금이다 - Evidence 를 방금 모았으므로
@@ -358,18 +375,30 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         cautions = [str(c)[:DIGEST_CAUTION_CHARS]
                     for c in (note.get("cautions") or a.get("cautions") or [])
                     ][:DIGEST_MAX_CAUTIONS]
-        nums = {k: v for k, v in (a.get("readout") or {}).items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        if len(nums) > DIGEST_MAX_NUMBERS:      # 앞에서부터 - readout 은 중요도순 정의다
-            nums = dict(list(nums.items())[:DIGEST_MAX_NUMBERS])
+        # ▶ 최상위만 세면 재료의 절반을 놓친다 (2026-08-03)
+        #   readout 은 평평하지 않다 - fields/ratios/liquidity/macro_overlay 같은
+        #   컨테이너 한 겹 안에 실제 수치가 있다. 최상위 dict 만 훑으면 펀더멘털의
+        #   재무 12개, 레짐의 스타일 비율이 통째로 빠지고, 총괄은 그만큼 얇은
+        #   재료로 쓰다가 사전지식으로 채운다(005380 창작 사고의 배경).
+        #   highlights 가 이미 푼 문제이므로 같은 함수를 쓴다 - 중요도 정렬
+        #   (임계 위반 우선, |값| 큰 순)까지 따라온다.
+        h = pick_highlights(a.get("readout"), top_n=DIGEST_MAX_NUMBERS,
+                            flags=(a.get("readout") or {}).get("flags") or [])
+        nums = {i["key"]: i["value"] for i in h["items"]}
         return {"verdict": a.get("verdict"), "summary": summary,
-                "cautions": cautions, "key_numbers": nums}
+                "cautions": cautions, "key_numbers": nums,
+                # 몇 개 중 몇 개를 보여주는지 숨기지 않는다 - 총괄이 "이게 전부"
+                # 라고 오해하면 없는 것을 채우려 든다
+                "numbers_shown_of_total": [len(nums), h["total_metrics"]],
+                "unknown_metrics": h["unknown"]}
 
     analysts_digest = {k: _digest(v) for k, v in analysts.items()}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
 {{"symbol": "...", "thesis": "1-2 sentences in Korean, facts first",
- "facts": ["cited facts only - reference ids like news:3"],
+ "facts": ["one fact per string. EVERY fact must end with its evidence ref in
+            brackets, e.g. [n1] for a news item or [d2] for a disclosure. If you
+            cannot point at a ref, it is not a fact - move it to interpretation."],
  "interpretation": ["clearly separated from facts"],
  "catalysts": ["upcoming checkpoints"],
  "invalidation": ["conditions that would kill the thesis"],
@@ -398,6 +427,18 @@ Rules for analyst findings - non-negotiable:
   preserve BOTH views side by side in interpretation. Never delete dissent,
   never average it away - state the conflict explicitly.
 - NOT_RUN / INSUFFICIENT_DATA / null means 미확인 - never fill the gap.
+- key_numbers is a SELECTION, not everything - numbers_shown_of_total tells you
+  how many were withheld. Do not invent the missing ones.
+
+CITABLE EVIDENCE (these refs, and only these, may appear in facts):
+{json.dumps(_citable(bundle), ensure_ascii=False, indent=1)}
+Rules for citation - non-negotiable:
+- A statement in "facts" MUST carry a ref from the list above, like "... [n1]".
+- You may NOT cite a ref that is not in the list. Inventing an id is worse than
+  omitting the claim.
+- Anything you cannot attach a ref to belongs in "interpretation", not "facts".
+- Never write a company name, price, date or source that is absent from the
+  evidence above. If the evidence does not mention it, you do not know it.
 
 Evidence:
 {json.dumps(bundle, ensure_ascii=False, indent=1)}"""
@@ -537,7 +578,57 @@ Evidence:
         if order.index(cur) > order.index("partial"):
             packet["evidence_quality"] = "partial"
             packet["date_check"]["downgraded_from"] = cur
+
+    # ▶ 결정론 가드 5: 창작 문장을 **격리한다** (2026-08-03)
+    #   지금까지는 등급만 낮추고 창작 문장은 facts 에 그대로 남았다. 트레이딩본부가
+    #   읽는 것은 facts 이지 evidence_quality 가 아니다 - 등급을 낮춰도 "삼성전자
+    #   7% 하락(2023-10-15, Bloomberg)" 이 사실 목록에 그대로 있으면 하류는 그것을
+    #   사실로 받는다. **표시로 끝내지 않고 빼낸다.**
+    packet = quarantine_fabrications(packet, as_known_at=as_known)
     return {"packet": packet}
+
+
+def quarantine_fabrications(packet: dict, *, as_known_at) -> dict:
+    """facts 에서 창작이 확인된 문장을 빼내 _quarantined 로 옮긴다.
+
+    ▶ 문장 단위로 판정한다. Packet 전체를 강등하는 것과 다르다 - 한 문장이
+      창작이라고 나머지 정상 사실까지 버릴 이유가 없다.
+
+    ▶ 판정 기준은 **시점**뿐이다. 숫자 불일치는 문장 단위로 귀속시키기 어렵다
+      (한 문장에 여러 수치가 있고 일부만 어긋날 수 있다) - 그건 전체 강등으로
+      남긴다. 시점은 그 문장 안에 있으므로 귀속이 확실하다.
+      **확실하지 않은 것은 빼지 않는다** - 정상 사실을 지우는 것이 더 나쁘다.
+
+    ▶ facts 가 비면 insufficient_evidence 다. 강등이 아니라 사실 진술이다 -
+      근거 있는 사실이 하나도 없는 Packet 은 근거가 불충분한 것이 맞다.
+    """
+    from evidence.bundle import verify_narrative_dates
+
+    p = dict(packet or {})
+    facts = list(p.get("facts") or [])
+    if not facts:
+        return p
+
+    kept, quarantined = [], []
+    for f in facts:
+        s = str(f)
+        r = verify_narrative_dates(s, as_known_at=as_known_at)
+        if r.get("ok"):
+            kept.append(f)
+        else:
+            bad = (r.get("too_old_years") or []) + (r.get("future_years") or [])
+            quarantined.append({"text": s, "reason": f"Evidence 창 밖 연도 {bad}"})
+
+    if not quarantined:
+        return p
+    p["facts"] = kept
+    p["_quarantined"] = list(p.get("_quarantined") or []) + quarantined
+    print(f"⚠ 창작 의심 사실 {len(quarantined)}건을 facts 에서 격리했다", flush=True)
+    if not kept:
+        # 근거 있는 사실이 0건이면 등급을 사실대로 적는다
+        p["evidence_quality"] = "insufficient_evidence"
+        p["_quarantine_emptied_facts"] = True
+    return p
 
 
 SUPERVISOR_TEMPERATURE = 0.2   # 총괄은 분석가(0.1)보다 조금 느슨하게 종합한다
@@ -971,6 +1062,17 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
                        ("무효화 조건 (invalidation)", "invalidation")):
         lines += [f"## {title}", ""]
         lines += [f"- {x}" for x in (packet.get(key) or [])] or ["- (없음)"]
+        lines += [""]
+
+    # ▶ 격리된 창작 의심 문장. **지우지 않고 드러낸다** - 무엇이 왜 빠졌는지
+    #   보여야 사람이 판단할 수 있고, 조용히 사라지면 가드를 신뢰할 수 없다.
+    qz = packet.get("_quarantined") or []
+    if qz:
+        lines += ["## 격리된 문장 (창작 의심 — facts 에서 제외)", ""]
+        lines += [f"- ~~{q.get('text', '')}~~ — {q.get('reason', '')}" for q in qz]
+        if packet.get("_quarantine_emptied_facts"):
+            lines += ["", "> ⚠ 근거 있는 사실이 0건이라 evidence_quality 를 "
+                          "insufficient_evidence 로 적었다"]
         lines += [""]
 
     # ▶ 반박 (Skeptic). **내용이 핵심이다** - 갈등 건수만 세는 것은 대화가 아니다.
