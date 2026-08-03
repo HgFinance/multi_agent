@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Sprint K3 경계 위 P0 조각: Incident Timeline과 Corrective Action.
 
 소유: 동규 (AI QA/감사본부)
@@ -16,10 +15,14 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from repository import PostgresAuditRepository
 
 
 class IncidentEntryType(StrEnum):
@@ -80,9 +83,13 @@ class CorrectiveActionRecord:
 class IncidentTimeline:
     """결정론적 Timeline 기록소. Fact와 Inference를 같은 자리에 섞지 않는다."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: PostgresAuditRepository | None = None) -> None:
         self.events: list[IncidentEventRecord] = []
         self.corrective_actions: dict[UUID, CorrectiveActionRecord] = {}
+        # repository가 있으면 audit.incident_events/corrective_actions에 write-through 한다.
+        # incident_id가 가리키는 audit.incidents 부모 행은 이 클래스가 만들지 않으므로,
+        # 그 행이 아직 없으면 add_event의 insert는 FK 위반으로 실패한다(repository.py 참고).
+        self._repository = repository
 
     def add_event(
         self,
@@ -100,6 +107,8 @@ class IncidentTimeline:
             entry_type=entry_type, summary=summary, evidence=evidence or {},
             occurred_at=occurred_at, recorded_at=_now(), recorded_by=recorded_by,
         )
+        if self._repository is not None:
+            self._repository.insert_incident_event(event)
         self.events.append(event)
         return event
 
@@ -126,17 +135,21 @@ class IncidentTimeline:
             corrective_action_id=uuid4(), owner=owner, action_plan=action_plan, due_at=due_at,
             created_at=_now(), incident_id=incident_id, finding_id=finding_id,
         )
+        if self._repository is not None:
+            self._repository.insert_corrective_action(action)
         self.corrective_actions[action.corrective_action_id] = action
         return action
 
     def start_action(self, corrective_action_id: UUID) -> CorrectiveActionRecord:
         action = self._require_action(corrective_action_id)
         action.status = CorrectiveActionStatus.IN_PROGRESS
+        self._sync_action(action)
         return action
 
     def submit_for_verification(self, corrective_action_id: UUID) -> CorrectiveActionRecord:
         action = self._require_action(corrective_action_id)
         action.status = CorrectiveActionStatus.VERIFYING
+        self._sync_action(action)
         return action
 
     def verify_and_close(
@@ -155,6 +168,7 @@ class IncidentTimeline:
         action.verifier = verifier
         action.verification = verification
         action.completed_at = _now()
+        self._sync_action(action)
         return action
 
     def cancel_action(self, corrective_action_id: UUID, reason: str) -> CorrectiveActionRecord:
@@ -162,7 +176,12 @@ class IncidentTimeline:
         action.status = CorrectiveActionStatus.CANCELLED
         action.verification = {"cancelled_reason": reason}
         action.completed_at = _now()
+        self._sync_action(action)
         return action
+
+    def _sync_action(self, action: CorrectiveActionRecord) -> None:
+        if self._repository is not None:
+            self._repository.update_corrective_action(action)
 
     def _require_action(self, corrective_action_id: UUID) -> CorrectiveActionRecord:
         action = self.corrective_actions.get(corrective_action_id)

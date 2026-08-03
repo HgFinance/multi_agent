@@ -1,8 +1,8 @@
 # Ollama Department Modelfile Guide
 
-> 상태: 8개 조직 Modelfile 등록 완료, Runtime 통합 미완료
+> 상태: 8개 조직 Modelfile v2 등록, 일부 Smoke Script 존재, Runtime 통합 미완료
 >
-> 기준 Commit: `9d14f12` (`chore(departments): 8개 부서 폴더에 Ollama Modelfile 추가`)
+> 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)
 >
 > 적용 범위: 로컬·저비용 보조 모델, Model Gateway와 Docker `local-llm` Profile
 
@@ -21,31 +21,35 @@
 
 ## 2. GitHub 확인 결과
 
-원격 `main`의 Commit `9d14f12`에서 다음 8개 파일이 추가됐다. 사용자 제공 목록과 Repository의 `FROM`, `SYSTEM` 문구가 모두 일치한다.
+원격 `main`의 Commit `9d14f12`에서 8개 파일이 추가된 뒤 각 팀이 Alias와 Prompt를 고도화했다.
+아래 표는 최초 제안이 아니라 2026-08-01 Repository의 실제 `FROM`과 Build 주석을 기준으로 한다.
 
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
-| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `ceo-agent` | 파일 등록 완료 |
-| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen2.5` | `research-department` | 파일 등록 완료 |
-| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen2.5-coder` | `trading-department` | 파일 등록 완료 |
-| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `hermes3` | `risk-management` | 파일 등록 완료 |
-| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen2.5-coder` | `quant-backtest-department` | 파일 등록 완료 |
-| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen2.5` | `accounting-portfolio-department` | 파일 등록 완료 |
-| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `hermes3` | `qa-department` | 파일 등록 완료 |
-| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen2.5` | `hr-department` | 파일 등록 완료 |
+| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `agent-ceo` | Prompt 고도화, 수동 Smoke Script |
+| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:14b` | `agent-research` | 실측 후 Base Model 변경 |
+| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen2.5-coder` | `agent-trading` | 파일 등록 완료 |
+| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `hermes3` | `agent-risk` | 파일 등록 완료 |
+| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:14b` | `agent-quant` | 실측 후 Base Model 변경 |
+| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen2.5` | `agent-accounting` | 파일 등록 완료 |
+| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `hermes3` | `agent-qa` | QA Pipeline 호출명과 일치 |
+| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen2.5` | `agent-hr` | Prompt 고도화, 수동 Smoke Script |
 
-### 2.1 등록된 SYSTEM 역할
+### 2.1 현재 SYSTEM 역할 요약
 
-| 조직 | Repository에 등록된 SYSTEM |
+Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도화할 때 다시 어긋난다. 정확한 문구는
+각 파일을 기준으로 하고, 여기에는 변하지 않아야 할 책임만 요약한다.
+
+| 조직 | 책임 요약 |
 |---|---|
-| CEO Office | 너는 CEO 오피스 전담 AI 에이전트다. 전체 프로젝트 리스크 관리, 최종 의사결정 보조 및 종합 보고서 생성을 담당한다. |
-| 리서치본부 | 너는 리서치 부서 전담 AI 에이전트다. 시장 동향 분석, 금융/기술 논문 및 리포트 요약을 담당한다. |
-| 트레이딩본부 | 너는 트레이딩(Trading/OMS/Contracts) 부서 전담 AI 에이전트다. 주문 집행, 계약 검증, 매매 로직 코드를 담당한다. |
-| 리스크본부 | 너는 Risk 부서 전담 AI 에이전트다. 포트폴리오 리스크 측정, 손실 한도 검증, 이상 징후 감지를 엄격하게 분석한다. |
-| 퀀트/백테스트본부 | 너는 퀀트 백테스트 부서 전담 AI 에이전트다. 데이터 처리, 백테스팅 알고리즘 작성, 수치 분석을 담당한다. |
-| 회계/포트폴리오본부 | 너는 회계/포트폴리오 부서 전담 AI 에이전트다. 자산 배분 현황, 회계 장부 검증, 포트폴리오 리밸런싱을 담당한다. |
-| AI QA/감사본부 | 너는 AI QA/Audit 부서 전담 AI 에이전트다. 다른 에이전트들의 응답 검증, 코드 감사, 시스템 무결성 체크를 담당한다. |
-| Agent Workforce 인사팀 | 너는 인사/워크포스 부서 전담 AI 에이전트다. 에이전트 역할 분담 및 워크플로우 조율을 담당한다. |
+| CEO Office | Mandate 해석, 본부 조정, 상충·미보고 명시와 사용자 보고 |
+| 리서치본부 | PIT Evidence 기반 Research Packet, 수치 창작 금지와 근거 부족 표시 |
+| 트레이딩본부 | 구조화 OrderIntent와 실행 검토, Risk 우회·직접 주문 금지 |
+| 리스크본부 | 결정론적 Risk 결과 설명, 한도 완화·Override 금지 |
+| 퀀트/백테스트본부 | 가설·PIT Dataset·Backtest 검토, 미래 정보와 과적합 방지 |
+| 회계/포트폴리오본부 | 원장·Snapshot 설명, 공식 수치 창작·직접 수정 금지 |
+| AI QA/감사본부 | 근거·권한·Trace 독립 검증, 자기 Finding 단독 종료 금지 |
+| Agent Workforce 인사팀 | Agent 역할·비용·Lifecycle 조정, 자기 Candidate 승인 금지 |
 
 확인 시점의 구현 상태:
 
@@ -53,22 +57,26 @@
 |---|---|
 | 8개 `Modelfile` | 완료 |
 | `.env.example`의 `OLLAMA_BASE_URL`, Chat·Embedding Model 변수 | 완료 |
-| Ollama Local Runtime 설치 | 현재 작업 환경에서는 확인 불가, CLI 미설치 |
+| Ollama Local Runtime 설치 | 감사 Host에는 CLI 없음, 팀 공용 Remote Endpoint는 코드에 존재하나 자동 Health 증거 없음 |
 | Docker Compose `ollama` Service | 미구현 |
 | `ollama-model-init` One-shot Service | 미구현 |
 | Model Gateway `OllamaChatAdapter` | 문서 계약만 존재, 구현 미확인 |
-| 8개 Alias Build와 Digest 기록 | 미실행 |
+| CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
+| 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
+| Hermes Supervisor Model | 6개는 `nous/poolside/laguna-s-2.1:free`, Risk·QA는 `openai-codex/gpt-5.6-luna`; Checker 기대값 불일치 2건 |
 
-따라서 현재 완료 상태는 **모델 청사진의 Git 등록**이다. 모델 다운로드, Alias Build, Gateway 연결과 Production 배포가 완료된 상태가 아니다.
+따라서 현재 완료 상태는 **모델 청사진의 Git 등록과 일부 Hermes Runtime 실행**이다. Risk·QA 변경은
+`MODEL-03` 승인 전이며 모델 다운로드, Alias Build, 공통 Gateway와 Production 배포가 완료된 상태가 아니다.
 
 ## 3. 모델 선택 의도
 
 | Base Model | 배치 조직 | 의도 | 허용 업무 |
 |---|---|---|---|
 | `hermes3` | CEO, Risk, AI QA | 지시 준수와 검토 중심 업무 | 보고 초안, Risk 설명, Finding 분류 |
-| `qwen2.5` | Research, Accounting, Workforce | 일반 문서·분석·요약 업무 | 문서 요약, Break 설명, 인력 계획 초안 |
-| `qwen2.5-coder` | Trading, Quant | 코드와 구조화된 기술 작업 | 계약·코드 검토, 실험 코드 초안 |
+| `qwen3:14b` | Research, Quant | 실측 Eval에서 채택한 분석·구조화 업무 | Research Packet 서술, 가설·실험 설명 |
+| `qwen2.5` | Accounting, Workforce | 일반 문서·요약 업무 | Break 설명, 인력 계획 초안 |
+| `qwen2.5-coder` | Trading | 코드와 구조화된 기술 작업 | 계약·코드 검토, 주문 로직 초안 |
 
 Base Model 선택은 초기 가설이다. 모델 이름만으로 업무 적합성을 확정하지 않는다. 본부별 Eval 결과, 지연, 메모리와 비용을 비교해 유지하거나 변경한다.
 
@@ -120,6 +128,7 @@ Ollama 공식 절차는 Base Model을 준비한 뒤 `ollama create <alias> -f <M
 ollama pull hermes3
 ollama pull qwen2.5
 ollama pull qwen2.5-coder
+ollama pull qwen3:14b
 ```
 
 ### 6.2 본부별 Alias 생성
@@ -127,21 +136,21 @@ ollama pull qwen2.5-coder
 Repository Root에서 실행한다.
 
 ```powershell
-ollama create ceo-agent -f departments/00-ceo-office/Modelfile
-ollama create research-department -f departments/01-research/Modelfile
-ollama create trading-department -f departments/02-trading/Modelfile
-ollama create risk-management -f departments/03-risk/Modelfile
-ollama create quant-backtest-department -f departments/04-quant-backtest/Modelfile
-ollama create accounting-portfolio-department -f departments/05-accounting-portfolio/Modelfile
-ollama create qa-department -f departments/06-ai-qa-audit/Modelfile
-ollama create hr-department -f departments/07-agent-workforce/Modelfile
+ollama create agent-ceo -f departments/00-ceo-office/Modelfile
+ollama create agent-research -f departments/01-research/Modelfile
+ollama create agent-trading -f departments/02-trading/Modelfile
+ollama create agent-risk -f departments/03-risk/Modelfile
+ollama create agent-quant -f departments/04-quant-backtest/Modelfile
+ollama create agent-accounting -f departments/05-accounting-portfolio/Modelfile
+ollama create agent-qa -f departments/06-ai-qa-audit/Modelfile
+ollama create agent-hr -f departments/07-agent-workforce/Modelfile
 ```
 
 ### 6.3 수동 Smoke Test
 
 ```powershell
-ollama run research-department
-ollama run risk-management
+ollama run agent-research
+ollama run agent-risk
 ollama ls
 ollama ps
 ```
@@ -326,6 +335,20 @@ Local Model은 Eval에서 실패하면 자동으로 Bedrock에 Fallback하는 �
 
 ## 12. 구현 단계
 
+### 12.0 현재 Phase 상태
+
+| Phase | 상태 | 근거와 다음 Gate |
+|---|---|---|
+| O0 환경 확인 | 부분 | Docker는 확인, 감사 Host Ollama CLI·GPU Budget 미확인 |
+| O1 반복 Build | 부분 | 8개 Modelfile은 있으나 Manifest·Build Script·Digest 없음 |
+| O2 Model Gateway | 미착수 | Department Routing, Timeout, Fallback과 Trace 필요 |
+| O3 Eval | 부분 | CEO·HR 수동 Smoke만 존재, 자동 Golden/Adversarial Eval 없음 |
+| O4 Docker 통합 | 미착수 | `ollama`, Init, Gateway Compose Service 없음 |
+| O5 승인·운영 | 미착수 | Workforce Model Version·QA Eval·Shadow 기록 없음 |
+
+현재 가장 먼저 할 일은 모델을 더 고르는 것이 아니라 Alias Manifest와 Provider Routing ADR을 확정하는
+것이다. 특히 QA Pipeline의 개인 IP 직접 호출은 O2에서 제거하고 Model Gateway만 사용하도록 바꾼다.
+
 ### Phase O0. 환경 확인
 
 - Ollama Version과 Docker Runtime 확인
@@ -413,6 +436,6 @@ Local Model은 Eval에서 실패하면 자동으로 Bedrock에 Fallback하는 �
 
 ## 17. 최종 결정
 
-도현님이 추가한 8개 `Modelfile`을 본부별 Local Model Blueprint로 채택한다.
+도현님이 추가하고 각 본부가 고도화한 8개 `Modelfile`을 본부별 Local Model Blueprint로 채택한다.
 
 다만 `Modelfile`은 Agent 권한, Hermes Profile, 파인튜닝 결과 또는 Production 승인 자체가 아니다. 공통 Ollama Runtime에서 8개 Alias를 Build하고 Model Gateway로만 호출하며, 본부별 Eval과 Workforce·QA·CEO Gate를 통과한 업무에 한해 Local Model을 사용한다.

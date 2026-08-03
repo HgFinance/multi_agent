@@ -15,6 +15,9 @@
    미래 정보를 볼 수 없다. 가중치도 View 의 now() 가 아니라 as_of 기준으로
    다시 계산한다 - View 를 그대로 노출하면 과거 재현에서 미래 감쇠가 샌다.
 3. **본문이 없다.** documents 에는 제목·URL뿐이다(가이드 3.3 라이선스).
+   예외는 공시 원문 발췌뿐이다 - opendart 는 UseScope.EMBEDDING 이 허용된
+   소스라 rag_librarian 이 적재한 evidence_chunks 를 /evidence/search 가
+   발췌(300자)로 내준다. 뉴스 스니펫은 여전히 안 나간다.
 
 실행:   uvicorn departments.01-research.api.main:app --port 8035   (경로 하이픈 탓에
         실제로는 compose 가 api/ 디렉터리에서 uvicorn main:app 으로 띄운다)
@@ -23,16 +26,22 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from evidence.story_cluster import build_stories  # noqa: E402
 from source_registry import load_project_env  # noqa: E402
 
 API_VERSION = "research-api-v1"
@@ -41,6 +50,16 @@ KST = timezone(timedelta(hours=9))
 # 가중치 반감기(시간). news_recent_weighted View 와 같은 상수다 - 다르게 두면
 # 실시간(View)과 재현(API)이 다른 점수를 낸다.
 WEIGHT_HALF_LIFE_HOURS = 6.0
+
+# /evidence/search 상수. 모델·차원은 agents/rag_librarian.py 인덱서와 같아야
+# 한다 - 다른 모델로 질의를 임베딩하면 코사인 거리가 무의미해진다. import 로
+# 공유하고 싶지만 컨테이너 이미지에 agents/ 가 없어(Dockerfile COPY 목록) 상수를
+# 복제한다 - 인덱서 모델을 바꾸면 여기도 함께 바꾼다.
+EMBED_MODEL = "bge-m3"
+EMBED_DIMS = 1024
+SEARCH_K_DEFAULT = 5
+SEARCH_K_MAX = 20          # 청크 발췌 k건이면 충분하다 - 큰 k 는 DB 부하만 늘린다
+SEARCH_EXCERPT_CHARS = 300
 
 app = FastAPI(title="Research Evidence API", version="0.1.0")
 
@@ -114,6 +133,36 @@ class HealthDomain(BaseModel):
     last_observed_kst: Optional[str]
 
 
+# ▶ Tool Gateway (2026-08-02): 허용목록을 선언에서 실제 강제로.
+#   Hermes 는 tool_allowlist 를 읽지도 않는다(컨테이너 실측) - 강제는 도구가
+#   있는 이 조회면에서만 성립한다. TOOL_GATEWAY_ENFORCE=true 면 403 이 된다.
+#
+# ▶ 강제 모드에서는 설치 실패를 삼키지 않는다 (2026-08-02 수정)
+#   예전에는 어떤 예외든 경고 한 줄로 넘기고 기동했다. 관측 모드에서는 그래도
+#   됐다 - 게이트웨이 유무가 통과 여부를 안 바꾸니까. 그런데 강제로 올린 뒤에는
+#   그게 **fail-open** 이 된다: config.yaml 오타 하나, 마운트 한 줄 누락에
+#   전 경로가 무인증으로 열리고 로그 한 줄 말고는 아무 데도 안 드러난다.
+#   config.yaml 은 :ro 로 라이브 마운트된 '사람이 고치는 파일'이라 현실적인
+#   방아쇠다. 그래서 강제 모드면 기동을 막고, 관측 모드에서만 경고로 넘긴다.
+#   어느 쪽이든 상태를 전역에 남겨 /health 가 드러낸다 - '조용히 꺼짐'을 없앤다.
+GATEWAY_STATUS = "NOT_INSTALLED"
+try:
+    from tool_gateway import enforcing as _gateway_enforcing
+    from tool_gateway import install as _install_gateway
+
+    _install_gateway(app)
+    GATEWAY_STATUS = "enforce" if _gateway_enforcing() else "observe"
+except Exception as _e:  # noqa: BLE001
+    _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
+    print(f"⚠ {_msg}", file=sys.stderr)
+    # enforcing() 자체를 못 부를 수도 있으므로 환경변수를 직접 본다
+    if os.environ.get("TOOL_GATEWAY_ENFORCE", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError(
+            f"{_msg} - 강제 모드인데 게이트웨이가 없으면 전 경로가 무인증으로 "
+            f"열린다. 기동을 막는다(fail-closed). config.yaml 마운트와 문법을 "
+            f"확인할 것.") from _e
+
+
 @app.get("/health")
 def health() -> dict:
     rows = _query(
@@ -136,6 +185,12 @@ def health() -> dict:
     return {
         "version": API_VERSION,
         "read_only": True,
+        # 게이트웨이 상태를 드러낸다 - /health 는 OPEN_PATHS 라 X-Tool-Gateway
+        # 헤더가 안 붙는다(정상일 때와 부재일 때가 원리적으로 같아 보였다).
+        # 강제 모드에서는 애초에 기동이 막히므로 여기서 NOT_INSTALLED 가 보이면
+        # 관측 모드로 떠 있다는 뜻이고, 그 자체가 degraded 다.
+        "tool_gateway": GATEWAY_STATUS,
+        "status": "degraded" if GATEWAY_STATUS == "NOT_INSTALLED" else "ok",
         "domains": [HealthDomain(domain=r["domain"], rows=r["rows"],
                                  last_observed_kst=r["last"]).model_dump()
                     for r in rows],
@@ -225,23 +280,302 @@ def evidence_financials(
     as_of: Optional[datetime] = Query(None),
     limit: int = Query(100, gt=0, le=500),
 ):
-    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2)."""
+    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2).
+
+    ▶ as_of 시점의 **최신 개정본 하나**만 준다 (2026-08-02)
+      정정 재무제표가 원본을 덮지 않고 새 revision 으로 쌓이게 바뀌면서
+      (reference_repository.assign_revisions) 같은 (계정, 기간)에 행이 여럿이
+      된다. 그대로 다 내보내면 소비자가 어느 것이 유효한지 스스로 골라야 하고,
+      고르는 규칙이 소비자마다 갈리면 그게 다음 사고다.
+
+      **그 시점에 알 수 있었던 것 중 가장 나중 개정본**을 고른다:
+        observed_at <= as_of 로 먼저 자르고(PIT), 남은 것 중 revision 최대.
+      정정 이전 시각으로 조회하면 정정본은 observed_at 필터에서 이미 빠지므로
+      원본이 나온다 - 이것이 PIT 재현이다.
+
+      revision 을 응답에 실어 소비자가 '이게 몇 번째 개정본인지' 알 수 있게 한다.
+    """
     ts = _as_of_or_now(as_of)
     return _query(
         """
-        select f.account_code, f.value, f.unit, f.currency, f.period_end,
-               f.consolidation_scope, f.published_at, f.observed_at
+        select distinct on (f.account_code, f.period_end, f.consolidation_scope)
+               f.account_code, f.value, f.unit, f.currency, f.period_end,
+               f.consolidation_scope, f.published_at, f.observed_at, f.revision
         from research.financial_facts f
         join reference.issuers iss on iss.issuer_id = f.issuer_id
         join reference.instruments i on i.issuer_id = iss.issuer_id
         join reference.instrument_symbols isym
           on isym.instrument_id = i.instrument_id and isym.is_primary
         where isym.symbol = %s and f.observed_at <= %s
-        order by f.period_end desc, f.account_code
+        order by f.account_code, f.period_end desc, f.consolidation_scope,
+                 f.revision desc, f.observed_at desc
         limit %s
         """,
         (symbol, ts, limit),
     )
+
+
+@app.get("/universe/restrictions")
+def universe_restrictions(as_of: Optional[datetime] = Query(None)):
+    """거래제한 종목 스냅샷 (RES-01 universe_manager 의 재료).
+
+    **자격 없이 거래가능을 판정하기 위한 면이다.** 예전에는 판정하는 쪽이
+    LS REST 를 직접 물어 파이프라인 컨테이너마다 LS 키가 필요했다 -
+    수집기가 남긴 것을 여기서 읽어 그 의존을 끊는다(통합계획 6.2).
+
+    as_of 이하의 **가장 최근 스냅샷**을 준다. 스냅샷이 아예 없으면 빈 목록이
+    아니라 404 다 - '제한 종목이 없다'와 '아직 안 받았다'를 섞으면 정지 종목이
+    거래가능으로 새는 방향으로 틀린다(fail-closed).
+
+    ▶ 날짜는 KST 로 자른다 (2026-08-02 수정)
+      symbol_restriction_runs.as_of 는 수집기가 **KST 거래일**로 쓴다. 여기서
+      ts.date()(UTC)로 비교하면 KST 00~09시에는 UTC 날짜가 하루 뒤라 그날
+      스냅샷을 못 보고 항상 어제 것이 나갔다. 쓰는 쪽과 읽는 쪽의 시간대가
+      다르면 조용히 하루가 밀린다.
+
+    ▶ 며칠 묵었는지 함께 낸다
+      수집기가 며칠 멈춰도 '가장 최근'은 늘 무언가를 돌려주므로, 소비자가
+      낡음을 알 방법이 없었다. stale_days 를 실어 판정하는 쪽이 막을 수 있게 한다.
+    """
+    ts = _as_of_or_now(as_of)
+    asof_kst = ts.astimezone(KST).date()   # 수집기 쓰기 규약과 같은 시간대
+    runs = _query(
+        "select as_of, list_sizes, total_rows, collected_at "
+        "from research.symbol_restriction_runs where as_of <= %s "
+        "order by as_of desc limit 1", (asof_kst,))
+    if not runs:
+        raise HTTPException(
+            404, f"{asof_kst} 이전 거래제한 스냅샷이 없다 - "
+                 f"universe_restriction_collector 실행 여부를 확인할 것")
+    snap = runs[0]
+    rows = _query(
+        "select symbol, reason, source_tr from research.symbol_restrictions "
+        "where as_of = %s order by symbol, reason", (snap["as_of"],))
+    return {"as_of": str(snap["as_of"]), "list_sizes": snap["list_sizes"],
+            "total_rows": snap["total_rows"],
+            "stale_days": (asof_kst - snap["as_of"]).days,
+            "collected_at": snap["collected_at"], "restrictions": rows}
+
+
+@app.get("/macro/observations")
+def macro_observations(
+    codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),
+    days: int = Query(120, gt=0, le=3650, description="period 소급 창(일)"),
+    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수)"),
+):
+    """거시·지정학 시계열 조회 (RES-09 지정학 분석가의 재료).
+
+    **PIT 핵심 두 가지**
+    1. `published_at <= as_of` - 그 시점에 실제로 공표된 값만 준다. GPR 은
+       4~5일 늦게 나오므로(수집기가 period+7일로 보수 기록) 사건 당일에
+       지수를 알았다고 착각하는 누수를 여기서 원천 차단한다.
+    2. 같은 period 에 여러 vintage 가 있으면 as_of 시점 **가장 최신 vintage**
+       하나만 준다(개정 이력은 append 되므로 골라야 한다).
+    """
+    ts = _as_of_or_now(as_of)
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list:
+        raise HTTPException(422, "codes 가 비었다")
+    if len(code_list) > 30:
+        raise HTTPException(422, f"codes 는 30개 이하 (요청 {len(code_list)}개)")
+    return _query(
+        """
+        select distinct on (s.external_series_code, o.period)
+               s.external_series_code as code, o.period, o.value,
+               o.published_at, o.vintage_date
+        from research.macro_observations o
+        join research.macro_series s on s.series_id = o.series_id
+        where s.external_series_code = any(%s)
+          and o.published_at <= %s
+          and o.period >= (%s::date - make_interval(days => %s))
+        order by s.external_series_code, o.period,
+                 o.vintage_date desc, o.revision desc
+        """,
+        (code_list, ts, ts, days),
+    )
+
+
+# ---------------------------------------------------------------------------
+# /evidence/search - 공시 원문 시맨틱 검색 (rag_librarian 이 적재한 청크)
+# ---------------------------------------------------------------------------
+
+def _require_query(q: str) -> str:
+    """빈/공백 질의는 422 로 끊는다 - 빈 질의를 임베딩하면 무의미한 벡터로
+    '그럴듯한' 결과가 나와 오히려 위험하다."""
+    q = q.strip()
+    if not q:
+        raise HTTPException(422, "q 는 빈 문자열일 수 없다")
+    return q
+
+
+# 한 번에 임베딩할 텍스트 수. 실측(2026-08-01, 000660 48h 제목 996건): 300~500
+# 건을 한 요청으로 보내면 Ollama 내부 runner 가 간헐로 죽어 400("/tokenize
+# connection refused")이 난다 - 100건 서브배치는 996건 전체가 11.6초에 안정
+# 통과했다. rag_librarian 의 EMBED_BATCH 서브배치와 같은 패턴이다.
+EMBED_BATCH_SIZE = 100
+
+
+def _embed_batch(texts: list[str], *, base: Optional[str] = None,
+                 timeout: int = 120) -> list[list[float]]:
+    """텍스트 배치 -> 벡터 목록 (내부는 서브배치). Ollama 불가는 503.
+
+    빈 결과([])로 위장하지 않는다 - 호출자(에이전트)가 '관련 근거 없음'과
+    '임베딩 인프라 죽음'을 구분하지 못하면 잘못된 결론(근거 없음)을 낸다.
+    """
+    base = (base or os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
+    vecs: list[list[float]] = []
+    try:
+        for i in range(0, len(texts), EMBED_BATCH_SIZE):
+            req = urllib.request.Request(
+                base + "/api/embed", method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"model": EMBED_MODEL,
+                                 "input": texts[i:i + EMBED_BATCH_SIZE]}).encode())
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                vecs.extend(json.loads(r.read())["embeddings"])
+    except (urllib.error.URLError, OSError) as e:
+        # HTTPError(모델 미설치 404 등)도 URLError 하위라 여기로 온다
+        raise HTTPException(503, f"임베딩 실패 - Ollama({base}) 불가: "
+                                 f"{type(e).__name__} {str(e)[:120]}")
+    except (KeyError, IndexError, ValueError) as e:
+        raise HTTPException(503, f"Ollama({base}) 응답 형식 이상: {type(e).__name__} {e}")
+    if len(vecs) != len(texts) or any(len(v) != EMBED_DIMS for v in vecs):
+        raise HTTPException(503, f"임베딩 형상 이상 ({len(vecs)}개/{EMBED_DIMS}차원 "
+                                 f"기대) - 인덱스와 다른 모델이다({EMBED_MODEL} 확인)")
+    return vecs
+
+
+def _embed_query(text: str, *, base: Optional[str] = None) -> str:
+    """질의문 -> pgvector 리터럴 (_embed_batch 1건 + 리터럴 변환)."""
+    vec = _embed_batch([text], base=base, timeout=60)[0]
+    return "[" + ",".join(f"{v:.7g}" for v in vec) + "]"
+
+
+@app.get("/evidence/search")
+def evidence_search(
+    q: str = Query(..., min_length=1, description="자연어 질의 (공백만이면 422)"),
+    k: int = Query(SEARCH_K_DEFAULT, ge=1, le=SEARCH_K_MAX, description="상위 k건"),
+    as_of: Optional[datetime] = Query(
+        None, description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)"),
+):
+    """공시 원문 청크 코사인 상위 k. 읽기 전용 GET - 세션도 read-only 다.
+
+    as_of 없으면 전체 코퍼스 탐색(리서치용), 있으면 observed_at <= as_of 로
+    가시성을 자른 PIT 검색(재현용) - 다른 Evidence Endpoint 와 같은 규칙이다.
+    ⚠ 청크 observed_at 은 **인덱싱 시각**이다: 원문 자체는 그 전부터 Storage
+    에 있었을 수 있으므로 이 필터는 보수적(늦은) 가시성이다 - 미래를 당겨오지
+    않는 쪽으로만 틀린다. 정렬 연산(<=>)은 HNSW 인덱스를 태운다.
+    """
+    if as_of is not None and as_of.tzinfo is None:
+        raise HTTPException(422, "as_of 는 timezone 이 있어야 한다 (PIT 9시간 오차 방지)")
+    qvec = _embed_query(_require_query(q))
+    pit_cond = "" if as_of is None else "and c.observed_at <= %s"
+    # 같은 문서의 인접 청크가 상위를 도배하는 실측 한계 - 후보를 3배로 받아
+    # 문서당 최고 유사도 청크 1건만 남긴다(결정론 후처리 - DISTINCT ON 은
+    # HNSW 정렬과 충돌한다)
+    fetch_n = min(k * 3, 60)
+    params: tuple = (qvec, SEARCH_EXCERPT_CHARS)
+    if as_of is not None:
+        params += (as_of,)
+    params += (qvec, fetch_n)
+    rows = _query(
+        f"""
+        select c.document_version_id::text,
+               c.metadata->>'title' as title,
+               c.published_at,
+               c.observed_at,
+               1 - (c.embedding <=> %s::extensions.vector) as cosine_sim,
+               left(c.content, %s) as content
+        from research.evidence_chunks c
+        where c.embedding is not null {pit_cond}
+        order by c.embedding <=> %s::extensions.vector
+        limit %s
+        """,
+        params,
+    )
+    for r in rows:
+        r["cosine_sim"] = round(float(r["cosine_sim"]), 4)
+    return _dedupe_by_doc(rows, k)
+
+
+def _dedupe_by_doc(rows: list[dict], k: int) -> list[dict]:
+    """문서당 최고 유사도 청크 1건 - 입력은 유사도 내림차순이 전제(순수 함수)."""
+    seen: set = set()
+    out = []
+    for r in rows:
+        doc = r.get("document_version_id")
+        if doc in seen:
+            continue
+        seen.add(doc)
+        out.append(r)
+        if len(out) >= k:
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# /evidence/stories - 뉴스 스토리 군집 (근접중복 -> 사건 단위)
+# ---------------------------------------------------------------------------
+
+# 군집 임계 운영 범위. 0.5 미만은 무관 기사까지 사슬로 묶이고(연결 성분 특성상
+# 저임계는 폭주한다), 0.99 초과는 사실상 완전 일치라 군집의 의미가 없다.
+STORY_THRESHOLD_MIN = 0.5
+STORY_THRESHOLD_MAX = 0.99
+# cluster_titles 의 O(n^2) 가드(1500)보다 낮게 - DB 에서부터 창을 자른다
+STORY_FETCH_LIMIT = 1000
+
+
+def _require_threshold(threshold: float) -> float:
+    """임계 범위 강제. Query 검증은 HTTP 경로에서만 돌므로 직접 호출
+    (자체점검·probe)에서도 같은 규칙이 서도록 함수로 분리해 다시 검증한다."""
+    if not (STORY_THRESHOLD_MIN <= threshold <= STORY_THRESHOLD_MAX):
+        raise HTTPException(422, f"threshold 는 {STORY_THRESHOLD_MIN}~"
+                                 f"{STORY_THRESHOLD_MAX} 여야 한다: {threshold}")
+    return threshold
+
+
+@app.get("/evidence/stories")
+def evidence_stories(
+    symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
+    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
+    threshold: float = Query(0.85, ge=STORY_THRESHOLD_MIN, le=STORY_THRESHOLD_MAX,
+                             description="코사인 유사도 임계 (0.5~0.99)"),
+):
+    """종목 뉴스를 스토리(같은 사건) 단위로 군집해 돌려준다.
+
+    /evidence/news 와 같은 소스·같은 PIT 규칙(observed_at <= as_of)의 기사를
+    제목 임베딩(bge-m3) -> 코사인 연결 성분으로 묶는다 - 감성·Packet 이 한
+    사건을 여러 기사로 중복 가중하는 문제의 해법(story_cluster.py docstring).
+    Ollama 불가는 503(빈 결과 위장 금지), 기사 0건은 note 로 자기 기술한다.
+    """
+    _require_threshold(threshold)   # DB·Ollama 도달 전에 끊는다
+    ts = _as_of_or_now(as_of)
+    rows = _query(
+        """
+        select d.document_id::text, s.source_code as source, d.title,
+               d.published_at, d.observed_at
+        from research.documents d
+        join reference.data_sources s using (source_id)
+        join research.document_instruments di using (document_id)
+        join reference.instrument_symbols isym
+          on isym.instrument_id = di.instrument_id and isym.is_primary
+        where d.document_type = 'NEWS' and d.status = 'ACTIVE'
+          and isym.symbol = %s
+          and d.observed_at <= %s
+          and d.published_at > %s - make_interval(secs => %s)
+        order by d.published_at desc
+        limit %s
+        """,
+        (symbol, ts, ts, hours * 3600.0, STORY_FETCH_LIMIT),
+    )
+    head = {"symbol": symbol, "as_of": ts.isoformat(), "hours": hours}
+    if not rows:
+        return {**head, "threshold": threshold, "total": 0,
+                "stories": [], "singletons": 0, "clustered_ratio": 0.0,
+                "note": "기사 없음"}
+    return {**head, **build_stories(rows, embed=_embed_batch,
+                                    threshold=threshold)}
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +615,122 @@ def _check_readonly_surface():
     print("  읽기 전용 표면           OK")
 
 
+def _check_gateway_installed():
+    """게이트웨이가 실제로 붙었는가.
+
+    2026-08-02 실측 결함: install() 실패를 삼키고 기동해 강제 모드인데 전 경로가
+    무인증으로 열릴 수 있었다. 자체 점검 5종 어디에도 게이트웨이 항목이 없어
+    **초록으로 보고되면서 보호가 없는** 상태가 가능했다. 그래서 여기에 둔다.
+    """
+    assert GATEWAY_STATUS in ("enforce", "observe"), \
+        f"Tool Gateway 가 안 붙었다(GATEWAY_STATUS={GATEWAY_STATUS}) - " \
+        f"config.yaml 마운트·문법 확인"
+    # 미들웨어가 실제 스택에 있는가 (전역 변수만 맞고 미들웨어가 빠지는 것 방지)
+    names = [getattr(m.cls, "__name__", "") for m in app.user_middleware]
+    assert any("Gateway" in n for n in names), \
+        f"GATEWAY_STATUS 는 {GATEWAY_STATUS} 인데 미들웨어 스택에 없다: {names}"
+    # 강제 모드인데 설치 실패면 기동 자체가 막혀야 한다 - 그 분기가 살아 있는가
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert "TOOL_GATEWAY_ENFORCE" in src and "raise RuntimeError" in src, \
+        "강제 모드 fail-closed 분기가 사라졌다 - 다시 fail-open 이 된다"
+    print(f"  게이트웨이 설치({GATEWAY_STATUS})  OK")
+
+
+def _check_search_rules():
+    """검색 질의 검증·장애 노출 규칙 - Ollama·DB 없이 확인한다."""
+    from fastapi import HTTPException as HE
+
+    # 빈/공백 질의는 422 - 조용히 전체 코퍼스 유사도를 내주면 안 된다
+    for bad in ("", "   ", "\t\n"):
+        try:
+            _require_query(bad)
+            raise AssertionError(f"빈 질의 {bad!r} 가 통과했다")
+        except HE as e:
+            assert e.status_code == 422
+    assert _require_query(" 유상증자 결정 ") == "유상증자 결정"
+
+    # 검색 표면은 GET 전용이고 등록돼 있다 (읽기 전용 원칙에 편승)
+    route = next(r for r in app.routes
+                 if getattr(r, "path", None) == "/evidence/search")
+    assert getattr(route, "methods", set()) == {"GET"}, "검색은 GET 전용이다"
+
+    # PIT: naive as_of 는 422 - 다른 Evidence Endpoint 와 같은 규칙 (임베딩
+    # 호출 전에 거부되므로 Ollama 없이 검증 가능)
+    try:
+        evidence_search(q="유상증자", k=1, as_of=datetime(2026, 8, 1, 9, 0))
+        raise AssertionError("naive as_of 가 통과했다")
+    except HE as e:
+        assert e.status_code == 422 and "timezone" in str(e.detail)
+
+    # Ollama 불가 -> 503 (빈 결과 위장 금지). 닫힌 로컬 포트라 즉시 거부되고
+    # 외부 네트워크·실행 중인 서비스가 필요 없다.
+    try:
+        _embed_query("x", base="http://127.0.0.1:1")
+        raise AssertionError("도달 불가 Ollama 가 통과했다")
+    except HE as e:
+        assert e.status_code == 503 and "Ollama" in str(e.detail), \
+            f"503+사유가 아니다: {e.status_code} {e.detail}"
+    # 문서당 중복 제거 - 유사도 내림차순 입력에서 문서별 최고 1건, k 에서 끊김
+    rows = [{"document_version_id": "d1", "cosine_sim": 0.9},
+            {"document_version_id": "d1", "cosine_sim": 0.8},
+            {"document_version_id": "d2", "cosine_sim": 0.7},
+            {"document_version_id": "d3", "cosine_sim": 0.6}]
+    dd = _dedupe_by_doc(rows, 2)
+    assert [r["document_version_id"] for r in dd] == ["d1", "d2"] and dd[0]["cosine_sim"] == 0.9
+    print("  검색 질의·503 규칙       OK")
+
+
+def _check_stories_rules():
+    """스토리 군집 검증·읽기 전용 표면 - DB·Ollama 없이 확인한다."""
+    from fastapi import HTTPException as HE
+
+    # threshold 범위 밖은 422 - Endpoint 직접 호출이 DB·임베딩 도달 전에
+    # 끊긴다 (0.5 미만은 연결 성분 사슬 폭주, 0.99 초과는 무의미)
+    for bad in (0.3, 0.499, 0.991, 1.0):
+        try:
+            evidence_stories(symbol="000660", as_of=None, hours=24.0,
+                             threshold=bad)
+            raise AssertionError(f"threshold={bad} 가 통과했다")
+        except HE as e:
+            assert e.status_code == 422 and "threshold" in str(e.detail), \
+                f"422+사유가 아니다: {e.status_code} {e.detail}"
+    # 경계값(0.5, 0.99)은 통과 - 헬퍼 단독 검사라 DB·Ollama 유무와 무관하다
+    for edge in (0.5, 0.85, 0.99):
+        assert _require_threshold(edge) == edge
+
+    # naive as_of 는 다른 Evidence Endpoint 와 같은 422 규칙
+    try:
+        evidence_stories(symbol="000660", as_of=datetime(2026, 8, 1, 9, 0),
+                         hours=24.0, threshold=0.85)
+        raise AssertionError("naive as_of 가 통과했다")
+    except HE as e:
+        assert e.status_code == 422 and "timezone" in str(e.detail)
+
+    # 스토리 표면도 GET 전용으로 등록돼 있다 - 읽기 전용 원칙 유지
+    route = next(r for r in app.routes
+                 if getattr(r, "path", None) == "/evidence/stories")
+    assert getattr(route, "methods", set()) == {"GET"}, "스토리는 GET 전용이다"
+
+    # 배치 임베딩도 Ollama 불가 503 (빈 결과 위장 금지) - 닫힌 로컬 포트
+    try:
+        _embed_batch(["a", "b"], base="http://127.0.0.1:1")
+        raise AssertionError("도달 불가 Ollama 배치가 통과했다")
+    except HE as e:
+        assert e.status_code == 503 and "Ollama" in str(e.detail)
+
+    # 군집 계산부(순수 함수)는 story_cluster 자체 점검이 담당한다 - 여기서는
+    # 결선(가짜 임베딩 -> 스토리 요약 형상)만 재확인한다
+    fake = build_stories(
+        [{"title": "A 상한가", "source": "naver_apihub", "document_id": "d1",
+          "published_at": "2026-08-01T01:00:00+00:00"},
+         {"title": "A 가격제한폭", "source": "ls_news", "document_id": "d2",
+          "published_at": "2026-08-01T02:00:00+00:00"}],
+        embed=lambda ts_: [[1.0, 0.0], [1.0, 0.0]], threshold=0.85)
+    assert fake["stories"][0]["size"] == 2, fake
+    assert fake["stories"][0]["representative_title"] == "A 상한가", fake
+    print("  스토리 군집 규칙         OK")
+
+
 def _probe():
     """실 DB 관통 - 서버 없이 Endpoint 함수를 직접 부른다."""
     h = health()
@@ -305,6 +755,22 @@ def _probe():
     print(f"  /evidence/disclosures?symbol=005930 (7d): {len(dis)}건")
     fin = evidence_financials(symbol="005930", as_of=None, limit=5)
     print(f"  /evidence/financials?symbol=005930: {len(fin)}건")
+
+    # 시맨틱 검색 관통 - 호스트에서는 127.0.0.1:11434 의 Ollama 를 그대로 쓴다
+    hits = evidence_search(q="유상증자 결정", k=3)
+    print(f"  /evidence/search?q=유상증자 결정: {len(hits)}건")
+    for h in hits:
+        print(f"    sim={h['cosine_sim']:.4f} {str(h['title'])[:44]}")
+    assert hits and hits[0]["cosine_sim"] > 0.4, "유상증자 검색 상위가 비었거나 무관하다"
+
+    # 스토리 군집 관통 - NAVER·LS 근접중복이 실제로 묶이는지 (48h 창)
+    st = evidence_stories(symbol="000660", as_of=None, hours=48.0, threshold=0.85)
+    print(f"  /evidence/stories?symbol=000660 (48h): 기사 {st['total']}건 -> "
+          f"스토리 {len(st['stories'])}개 / 단독 {st['singletons']}건 "
+          f"(clustered_ratio={st['clustered_ratio']})")
+    for s_ in st["stories"][:2]:
+        print(f"    size={s_['size']} sources={s_['sources']} "
+              f"{str(s_['representative_title'])[:44]}")
     return 0
 
 
@@ -320,4 +786,7 @@ if __name__ == "__main__":
     _check_weight()
     _check_as_of()
     _check_readonly_surface()
-    print("research-api 3개 영역 통과. 관통은 --probe, 서버는 compose research-api")
+    _check_gateway_installed()
+    _check_search_rules()
+    _check_stories_rules()
+    print("research-api 6개 영역 통과. 관통은 --probe, 서버는 compose research-api")

@@ -15,6 +15,7 @@ from pathlib import Path
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
+    PERSONA_PROMPTS,
     ComplianceState,
     bump_attempt_node,
     generate_node,
@@ -24,6 +25,7 @@ from .nodes import (
     should_retry,
 )
 from .retriever import LocalVectorIndex
+from .resilience import emit_metric
 
 
 def build_compliance_graph(corpus_dir: Path):
@@ -58,12 +60,32 @@ def run_compliance_check(
     persona: str = "compliance-policy-agent",
 ) -> dict:
     corpus_dir = corpus_dir or (Path(__file__).resolve().parent.parent / "corpus" / "compliance")
-    app = build_compliance_graph(corpus_dir)
-    final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
+    try:
+        app = build_compliance_graph(corpus_dir)
+        final_state = app.invoke({"query": query, "as_of": as_of, "attempt": 1, "persona": persona})
+    except Exception as exc:
+        emit_metric("rag_graph_failure", persona=persona, error=type(exc).__name__)
+        fallback_verdict = PERSONA_PROMPTS[persona]["no_evidence_verdict"]
+        final_state = {
+            "answer": {
+                "verdict": fallback_verdict,
+                "cited_documents": [],
+                "rationale": "RAG dependency unavailable; escalation required.",
+                "confidence": 0.0,
+                "escalate": True,
+            },
+            "grounded": False,
+            "attempt": 1,
+            "relevant": [],
+            "fallback": True,
+            "fallback_reason": type(exc).__name__,
+        }
     return {
         "answer": final_state.get("answer"),
         "grounded": final_state.get("grounded"),
         "attempts": final_state.get("attempt"),
+        "fallback": final_state.get("fallback", False),
+        "fallback_reason": final_state.get("fallback_reason"),
         "relevant_documents": [
             {
                 "document_id": c.chunk.document_id,

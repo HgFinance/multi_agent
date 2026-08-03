@@ -21,7 +21,8 @@
   구분할 수 있어야 한다. ECOS 값으로 과거 시점 Backtest 를 하면 개정 후 수치를
   쓰게 되므로, 이 한계를 모른 채 쓰면 미래 정보가 새어든다.
 
-▶ KOSIS 는 넣지 않았다. 실측(2026-07-30)에서 `err=11 유효하지않은 인증KEY입니다` 가 온다.
+▶ KOSIS 는 2026-07-31 키 갱신·실측 통과로 도입됐다(fetch_kosis). 한때 err=11 로
+  제외했던 기록은 Registry NOT_AUTHORIZED_OBSERVED 주석에 남아 있다.
   Source Registry 의 NOT_AUTHORIZED_OBSERVED 에 기록했다.
 
 자체 점검(호출 없음): python departments/01-research/collectors/macro_collector.py
@@ -119,6 +120,11 @@ SERIES: tuple[SeriesSpec, ...] = (
                unit="percent", country_code="US"),
     SeriesSpec("fred", "CPIAUCSL", "US CPI All Urban Consumers", FREQ_MONTHLY,
                unit="index", country_code="US", seasonal_adjustment="SA"),
+    # KOSIS (2026-07-31 키 유효 확인 - 가이드 3.1 물가 도메인)
+    SeriesSpec("kosis", "101:DT_1J22042:0", "소비자물가 총지수 전년동월비", FREQ_MONTHLY,
+               unit="%", country_code="KR", item_name="전년동월비(%)"),
+    SeriesSpec("kosis", "101:DT_1J22042:4", "근원물가(식료품·에너지 제외) 전년동월비",
+               FREQ_MONTHLY, unit="%", country_code="KR", item_name="전년동월비(%)"),
 )
 
 
@@ -185,6 +191,58 @@ def parse_period(raw: str, frequency: str) -> date:
     if frequency == FREQ_DAILY and re.fullmatch(r"\d{8}", text):
         return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
     raise ValueError(f"기간 형식을 해석할 수 없다: {raw!r} (frequency={frequency})")
+
+
+def fetch_kosis(spec: SeriesSpec, api_key: str, *, start: date, end: date,
+                observed_at: datetime, limiter: _Limiter) -> list[Observation]:
+    """KOSIS 관측 (2026-07-31 키 유효 확인 후 도입 - err11 시절의 제외 사유 해소).
+
+    external_series_code = "orgId:tblId:C1" (예: "101:DT_1J22042:0" = 소비자물가
+    총지수), item_name = ITM_NM 필터("전년동월비(%)" 등). 실측 규격:
+    itmId/objL1 은 ALL 로 받고 우리가 거른다 - 개별 코드 지정(T10 등)은 err 21.
+    vintage 는 응답에 없다 - LST_CHN_DE(최종수정일)를 기록만 하고 vintage 는
+    관측일로 둔다(제공자 vintage 아님을 metadata 에 명시).
+    """
+    org, tbl, c1 = spec.external_series_code.split(":")
+    limiter.wait()
+    q = urllib.parse.urlencode({
+        "method": "getList", "apiKey": api_key, "itmId": "ALL", "objL1": "ALL",
+        "format": "json", "jsonVD": "Y", "prdSe": "M",
+        "startPrdDe": start.strftime("%Y%m"), "endPrdDe": end.strftime("%Y%m"),
+        "orgId": org, "tblId": tbl,
+    })
+    d = _get_json(f"https://kosis.kr/openapi/Param/statisticsParameterData.do?{q}",
+                  label=f"KOSIS {tbl}")
+    if isinstance(d, dict):
+        raise MacroError(f"KOSIS {tbl}: {d.get('errMsg', d)}")
+
+    out = []
+    for r in d:
+        if r.get("C1") != c1 or r.get("ITM_NM") != spec.item_name:
+            continue
+        prd = str(r.get("PRD_DE") or "")
+        if len(prd) != 6:
+            raise MacroError(f"KOSIS {tbl}: PRD_DE 형식 이상 {prd!r}")
+        period = parse_period(prd, spec.frequency)  # KOSIS PRD_DE = YYYYMM (ECOS 와 동일)
+        out.append(Observation(
+            external_series_code=spec.external_series_code,
+            period=period,
+            value=parse_value(r.get("DT")),
+            # 발표 시각을 API 가 주지 않는다 - 관측일 기준이며 정밀도를 남긴다
+            published_at=observed_at,
+            observed_at=observed_at,
+            vintage_date=observed_at.date(),
+            metadata={
+                "source": "kosis",
+                "vintage_source": "OBSERVED_NOT_PROVIDER",
+                "published_at_precision": "UNKNOWN",
+                "lst_chn_de": str(r.get("LST_CHN_DE") or ""),
+                "item": spec.item_name, "c1_nm": str(r.get("C1_NM") or ""),
+            },
+        ))
+    if not out:
+        raise MacroError(f"KOSIS {tbl}: (C1={c1}, {spec.item_name}) 관측 0건 - 필터 확인")
+    return out
 
 
 def fetch_fred(spec: SeriesSpec, api_key: str, *, start: date, end: date,
@@ -316,6 +374,10 @@ def collect_macro(*, start: date, end: date, specs=SERIES,
             elif spec.source_code == "ecos":
                 rows = fetch_ecos(spec, env["ECOS_API_KEY"].strip(), start=start, end=end,
                                   observed_at=obs, limiter=limiters["ecos"])
+            elif spec.source_code == "kosis":
+                rows = fetch_kosis(spec, env["KOSIS_API_KEY"].strip(), start=start, end=end,
+                                   observed_at=obs,
+                                   limiter=limiters.setdefault("kosis", _Limiter(2.0)))
             else:
                 failures.append(f"{spec.source_code}: 수집기가 없다")
                 continue

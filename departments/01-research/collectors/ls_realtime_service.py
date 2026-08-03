@@ -331,8 +331,16 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                 try:
                     s.close()  # 꼬리 Flush - 정상 경로에선 이미 비어 있다
                 except Exception as e:
-                    print(f"  ⚠ 소켓{i} 종료 Flush 실패 - {s._pending()}건 유실: {e}",
-                          flush=True)
+                    # _pending 은 property 다. 예전에 `s._pending()` 로 불러
+                    # TypeError 가 났고, 그게 **finally 안에서** 터지는 바람에
+                    # 나머지 소켓의 close() 와 repo 정리가 통째로 건너뛰어졌다.
+                    # DB 가 잠깐 끊긴 복구 가능한 상황에서 상주 서비스가
+                    # 재구축 백오프 대신 무관한 예외로 죽었다(2026-08-02 수정).
+                    try:
+                        print(f"  ⚠ 소켓{i} 종료 Flush 실패 - {s._pending}건 유실: {e}",
+                              flush=True)
+                    except Exception:  # noqa: BLE001 - 로깅 실패가 정리를 막지 않는다
+                        pass
             for r in repos:
                 try:
                     r.close()

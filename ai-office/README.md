@@ -14,6 +14,7 @@
   인사팀 등 8개 조직.
 - 1층·2층 전환, 조직별 직원과 Bull/Bear 토론 DEMO.
 - Trading/Portfolio Snapshot Panel과 `DEMO` Mode 표시.
+- Risk·QA Profile, Retry, Fail-closed와 Run Journal 계약을 보여주는 Read-only Panel.
 - `../apps/api/main.py`의 `GET /ui/snapshot` Read-only DEMO BFF.
 
 직원 이동과 업무 흐름은 아직 `app/game/sim.ts`의 Scripted Simulation이다. Trading/Portfolio
@@ -89,6 +90,8 @@ cd ..
 python apps/api/main.py
 ```
 
+2026-08-03 clean Node 22 Container에서 Build와 Server Render Test `2/2`를 통과했다. `npm audit`은
+High 13, Moderate 4, Low 1건을 보고했으므로 직접·전이 의존성과 Upgrade 회귀를 배포 전 검토한다.
 현재 Cloudflare/Vinext 관련 기존 TypeScript 환경 오류와 실제 신규 오류를 구분해 기록한다.
 `DEMO`, `PAPER`, `LIVE` 데이터는 같은 화면에서 섞지 않는다.
 
@@ -99,3 +102,18 @@ python apps/api/main.py
 3. Kanban Status Bridge와 `agent.status.v1` Projector.
 4. Market, Research, Strategy, Risk, Trading, Portfolio, Audit와 Workforce Workbench.
 5. 위험 Command의 Preview, 사유, 멱등 키, Backend 재검증과 Audit.
+## Risk·QA 전용 연결
+
+대시보드의 `risk_qa.department_bridge`는 `departments/03-risk`와
+`departments/06-ai-qa-audit`만 allowlist로 연결합니다. 직원은 Hermes 프로필 코드
+RSK-00~06(6명), QAA-00~07(8명)에 매핑되며, 화면은 읽기/검증 Projection입니다.
+
+두 하네스의 재시도 상한은 2회(초기 실행 포함 총 3회)입니다. 마지막 실패는 Risk `REJECT + HALTED`, QA
+`ESCALATE + manual_review_required`로 종료되며, 주문 제출·원장 기록·Risk Limit
+변경 권한은 연결 계약에 포함하지 않습니다. 실제 런타임 상태는 각 부서 API와 하네스
+로그에서 확인해야 합니다.
+
+로그 흐름은 `InputSnapshot → AgentOutput → Validation → Decision`이며, Risk에 한해
+`Order → Fill`을 별도 이벤트로 기록합니다. AI Office의 로그 흐름 카드는 계약만
+표시하며, 원문·리플레이·리뷰 결과는 각 부서의 `RunJournal`과 운영 DB 원장에서
+조회합니다.

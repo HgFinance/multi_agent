@@ -30,13 +30,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 CHECKER_VERSION = "qa-evidence-p0-v1"
 GATE_NAME = "research_trading_artifact"
@@ -332,8 +341,20 @@ class EvidenceQaEngine:
         reason_codes: list[CheckFailureReason] = []
         findings: list[FindingDraft] = []
 
-        for claim in artifact.claims:
-            result, reason, failure = self._check_claim(claim, artifact, ctx)
+        max_workers = min(
+            max(1, int(os.environ.get("QA_CLAIM_CHECK_WORKERS", "4"))),
+            len(artifact.claims),
+        )
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="qa-claim") as pool:
+            evaluated = list(
+                pool.map(
+                    lambda claim: (claim, self._check_claim(claim, artifact, ctx)),
+                    artifact.claims,
+                )
+            )
+
+        # executor.map preserves input order, so IDs and aggregate decisions remain reproducible.
+        for claim, (result, reason, failure) in evaluated:
             claim_checks.append(ClaimCheck(
                 claim_check_id=uuid4(),
                 artifact_version_id=artifact.artifact_version_id,
@@ -527,9 +548,9 @@ if __name__ == "__main__":
         assert assessment.decision is expected, f"{why}: {assessment.decision} (기대: {expected})"
 
     # 1. Fact + 일치하는 근거 1건 -> SUPPORTED, 전체 PASS
-    ev1 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev1 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a1 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev1.evidence_id,)))
     r1 = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     result_is(r1, 0, ClaimCheckResult.SUPPORTED, "정상 Fact")
@@ -574,17 +595,17 @@ if __name__ == "__main__":
     assert CheckFailureReason.EVIDENCE_NOT_YET_VALID in r6.reason_codes
 
     # 7. 숫자 불일치 -> UNSUPPORTED
-    ev7 = evidence(numeric_value=Decimal("50000"), unit="KRW")
+    ev7 = evidence(numeric_value=Decimal(50000), unit="KRW")
     a7 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                             subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                              evidence_ids=(ev7.evidence_id,)))
     r7 = engine.check_artifact(a7, ctx_with(store_with(ev7)))
     result_is(r7, 0, ClaimCheckResult.UNSUPPORTED, "숫자 불일치")
     assert CheckFailureReason.NUMERIC_CITATION_MISMATCH in r7.reason_codes
 
     # 8. 상충하는 두 근거, 불확실성 표시 없음 -> CONTRADICTED, Finding
-    ev8a = evidence(source="A", numeric_value=Decimal("70000"), unit="KRW")
-    ev8b = evidence(source="B", numeric_value=Decimal("50000"), unit="KRW")
+    ev8a = evidence(source="A", numeric_value=Decimal(70000), unit="KRW")
+    ev8b = evidence(source="B", numeric_value=Decimal(50000), unit="KRW")
     a8 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 약 6만원대", kind=ClaimKind.FACT,
                              subject="AAPL", evidence_ids=(ev8a.evidence_id, ev8b.evidence_id)))
     r8 = engine.check_artifact(a8, ctx_with(store_with(ev8a, ev8b)))
@@ -600,11 +621,11 @@ if __name__ == "__main__":
     result_is(r9, 0, ClaimCheckResult.SUPPORTED, "상충이어도 불확실성 표시하면 통과")
 
     # 10. Tool 실제 결과와 Agent 요약이 다름 -> CONTRADICTED
-    ev10 = evidence(numeric_value=Decimal("100"), unit="주")
-    tool10 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("60")})
+    ev10 = evidence(numeric_value=Decimal(100), unit="주")
+    tool10 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal(60)})
     a10 = artifact_with(
         Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
+              numeric_value=Decimal(100), unit="주", evidence_ids=(ev10.evidence_id,),
               tool_source="portfolio-api"),
         tool_results=(tool10,),
     )
@@ -613,10 +634,10 @@ if __name__ == "__main__":
     assert CheckFailureReason.TOOL_SUMMARY_DEVIATION in r10.reason_codes
 
     # 11. Tool 실제 결과와 요약이 일치 -> SUPPORTED
-    tool11 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("100")})
+    tool11 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal(100)})
     a11 = artifact_with(
         Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
+              numeric_value=Decimal(100), unit="주", evidence_ids=(ev10.evidence_id,),
               tool_source="portfolio-api"),
         tool_results=(tool11,),
     )
@@ -624,9 +645,9 @@ if __name__ == "__main__":
     result_is(r11, 0, ClaimCheckResult.SUPPORTED, "Tool 결과와 요약 일치")
 
     # 12. 근거 2건 중 1건은 존재하지 않고 1건은 유효+일치 -> PARTIAL (완전 실패 아님)
-    ev12 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev12 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a12 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                              subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
+                              subject="AAPL", numeric_value=Decimal(70000), unit="KRW",
                               evidence_ids=(uuid4(), ev12.evidence_id)))
     r12 = engine.check_artifact(a12, ctx_with(store_with(ev12)))
     result_is(r12, 0, ClaimCheckResult.PARTIAL, "일부 근거 무효, 나머지로 성립")
@@ -634,10 +655,10 @@ if __name__ == "__main__":
     decision_is(r12, QaDecisionValue.WARN, "PARTIAL Claim 포함 - WARN이지 FAIL 아님")
 
     # 13. 여러 Claim 중 1개만 실패해도 전체 FAIL, Finding은 실패한 것만 생성
-    ev13 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev13 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a13 = artifact_with(
         Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("70000"), unit="KRW", evidence_ids=(ev13.evidence_id,)),
+              numeric_value=Decimal(70000), unit="KRW", evidence_ids=(ev13.evidence_id,)),
         Claim(claim_index=1, text="MSFT는 반등 여력이 있다", kind=ClaimKind.INFERENCE),
         Claim(claim_index=2, text="삼성전자 실적이 개선됐다", kind=ClaimKind.FACT, subject="삼성전자"),  # 근거 없음
     )

@@ -166,7 +166,10 @@ services:
       context: departments/01-research
     container_name: hedgefund-batch-collectors
     restart: unless-stopped
-    command: ["python", "collectors/collector_scheduler.py"]
+    # --serve 가 필수다(2026-08-02). 인자가 없으면 자체 점검만 하고 끝난다 -
+    # "python <파일> = 자체 점검"이라는 저장소 관례를 이 파일만 어겨서,
+    # 전 모듈 점검 루프가 돌 때마다 상주 스케줄러가 조용히 떴다(4회).
+    command: ["python", "collectors/collector_scheduler.py", "--serve"]
 
     depends_on:
       timescaledb:
@@ -179,6 +182,10 @@ services:
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
       KOSIS_API_KEY: ${KOSIS_API_KEY:-}
+      # 20:00 document-archive 가 공시 원문 ZIP 을 Storage 에 올린다 - 이 두 개가
+      # 빠지면 upload() 가 KeyError 로 전건 실패한다 (2026-07-31 실측 597건)
+      SUPABASE_URL: ${SUPABASE_URL:?.env 에 SUPABASE_URL 이 필요하다}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?.env 에 SUPABASE_SERVICE_ROLE_KEY 가 필요하다}
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
       LS_ENV: ${LS_ENV:-PAPER}
       LS_APP_KEY: ${LS_APP_KEY:-}
@@ -187,6 +194,22 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      # label-snapshot Job 이 레짐·지정학 라벨을 계산하려면 부서 조회면이 필요하다.
+      # 2026-08-02 실측: 기본값이 127.0.0.1 이라 컨테이너 안에서 Connection
+      # refused 가 났다 - 같은 compose 네트워크의 서비스 이름으로 준다.
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+
+    # ▶ 2026-08-02 실측 사고: Dockerfile 이 config 를 COPY 하지 않아 이 컨테이너
+    #   에는 config 디렉터리 자체가 없었다. 그래서 새로 넣은 Job 두 개가 조용히
+    #   죽고 있었다 - geopolitical 은 FileNotFoundError(geopolitical_themes.txt),
+    #   bluesky-watch 도 같은 이유. 스케줄러는 exit≠0 을 로그에 남기지만 **아무도
+    #   안 보면 없는 것과 같다**(그래서 실패 알림이 백로그로 남는다).
+    #   news-watcher·ls-realtime 은 이미 같은 마운트를 쓰고 있었다 - 이 컨테이너만
+    #   빠져 있었다. COPY 대신 마운트로 맞추는 이유: 워치리스트·테마 파일은 코드
+    #   배포 없이 고치라고 만든 것이라 이미지에 굽으면 그 목적이 사라진다.
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
 
     mem_limit: 512m
     mem_reservation: 64m
@@ -255,6 +278,26 @@ services:
 
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # /evidence/search 질의 임베딩(bge-m3)용. Ollama 는 호스트 프로세스라
+      # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
+      # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # Tool Gateway 강제 모드. 기본은 관측(위반을 헤더·로그로만 드러냄) -
+      # 기존 호출자(분석가 코드)가 아직 X-Agent-Persona 를 안 붙이므로 강제부터
+      # 켜면 파이프라인이 통째로 멈춘다. 호출자를 다 고친 뒤 true 로 올린다.
+      TOOL_GATEWAY_ENFORCE: ${TOOL_GATEWAY_ENFORCE:-false}
+
+    # Docker Desktop(Windows/Mac)은 host.docker.internal 을 자동 제공하지만
+    # 리눅스 엔진은 아니다 - host-gateway 매핑을 명시해 VPS 이전 시에도
+    # 같은 compose 파일이 그대로 동작하게 한다(파일 상단 이전 원칙).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # Tool Gateway 가 허용목록을 읽는다. **단일 출처는 config.yaml 이므로**
+      # API 쪽에 목록을 복제하지 않고 파일을 그대로 마운트한다 - 복제하면
+      # 둘이 어긋나고 어긋난 쪽이 조용히 이긴다. 읽기 전용.
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
 
     ports:
       - "127.0.0.1:8035:8035"   # 로컬 전용 - 외부 노출 금지
@@ -262,6 +305,276 @@ services:
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
+
+  # ── Hermes Agent Runtime (부서 Supervisor 계층) ────────────────────────────
+  # 재일님 지시 2026-08-02 "팀원들이랑 도커로 관리하기로 했다".
+  # 근거: DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 3.1 - Hermes 는 Python
+  #       Version·Tool 권한·Memory 가 달라 **Department Backend Image 에 설치하지
+  #       않는다.** 공식 Image 를 별도 Container 로 띄운다.
+  #
+  # ── research-mcp: 부서 도구 면 (Hermes ↔ LangGraph 파이프라인의 다리) ──
+  # 헤르메스는 부서 인터페이스·기억·위임 계층이고 분석 실체는 LangGraph 다
+  # (TECH_STACK_DECISIONS 2절). 둘을 잇는 것이 도구 호출인데 그게 비어 있어서
+  # 지금까지 헤르메스가 '대화만 되는 껍데기'로 보였다. 이 서비스가 그 다리다.
+  #
+  # 포트를 호스트에 게시하지 않는다 - 헤르메스 컨테이너가 같은 compose 네트워크
+  # 에서 서비스 이름으로 부른다(research-mcp:8037). 밖에서 부를 이유가 없다.
+  research-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-research-mcp
+    restart: unless-stopped
+    working_dir: /app/departments/01-research
+    command: ["python", "api/mcp_server.py", "--serve"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
+      # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
+      #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
+      #   LS 키가 필요했다. 이제 universe_restriction_collector(수집기)가 제한
+      #   목록을 DB 에 남기고 research-api /universe/restrictions 가 서빙하므로
+      #   **판정하는 쪽은 자격이 필요 없다**(통합계획 6.2).
+      #   자격이 퍼지는 것 자체가 위험이므로 옮기지 않고 없앴다.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      # 총괄 노드(draft_packet)가 research-supervisor 페르소나 원문을 여기서 읽는다
+      # - 2026-08-02 실측: 없으면 분석가 6인을 다 돌린 뒤 마지막에 실패한다.
+      # COPY 대신 마운트인 이유: 페르소나를 고칠 때마다 이미지를 다시 굽지 않는다.
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
+      # Packet MD 리포트를 호스트에서 바로 열어보기 위해 (읽기 전용 아님 - 쓴다)
+      - ./departments/01-research/reports:/app/departments/01-research/reports
+    # 파이프라인이 분석가 6인 x LLM 이라 오래 돈다 - 넉넉히 준다
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 256
+    stop_grace_period: 30s
+
+  # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)
+  #   Credential·Memory Namespace 분리는 이름이 아니라 저장소 분리다.
+  #   컨테이너만 쪼개고 /opt/data 를 공유하면 한 부서의 세션·기억·자격이 옆
+  #   부서에서 그대로 보인다 - 분리된 척이 된다. 그래서 각 컨테이너는
+  #   `~/.hermes-<부서>` 를 따로 마운트하고, 그 안에는 자기 Profile 하나만 둔다.
+  #   HERMES_HOME=/opt/data 는 이미지 기본값이라 마운트만 갈면 분리가 끝난다.
+  #
+  # ▶ 여기 있는 것은 재일 소유 2개 부서뿐이다. 나머지 6개는 같은 형태로 각
+  #   담당자가 추가한다(도현: trading/accounting, 동규: risk/qa, 영주: ceo/hr).
+  #   담당자 표는 CLAUDE.md - 남의 본부 컨테이너를 대신 만들지 않는다.
+  #
+  # ▶ 데이터 경로 함정 (2026-08-02 실측)
+  #   Windows 네이티브 설치본은 %LOCALAPPDATA%\hermes 를 쓰지만 컨테이너는
+  #   ${USERPROFILE}/.hermes* 를 마운트한다 - **서로 다른 디렉터리다.**
+  #   섞으면 "분명 profile 을 만들었는데 목록에 없다"가 된다. 동기화는
+  #     HERMES_HOME=~/.hermes-research-department ./scripts/sync_hermes_profiles.sh push
+  #   처럼 부서 디렉터리를 명시해서 돌린다(스크립트가 부서별 경로를 자동 탐색).
+  #
+  # ▶ 부서 간 호출(계획서 3.3 "본부 간 호출은 HTTP")은 `hermes serve` 가
+  #   담당한다. 다만 2026-06 하드닝 이후 **비-loopback 바인딩은 인증 없이는
+  #   열리지 않는다**(--insecure 는 no-op 이 됐다). 컨테이너 간 통신은
+  #   0.0.0.0 바인딩이 필요하므로 인증 설정이 선행 조건이다 - 이는 제약이
+  #   아니라 권한 경계를 인증으로 강제하는 것이라 그대로 따른다.
+  #   절차는 docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4절.
+  research-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-research-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-research-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
+      # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Profile 의 mcp_servers.research.headers 가 이 값을 Bearer 로 싣는다
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  quant-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-quant-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  # ── 리스크·AI QA/감사본부 (동규 소유) ───────────────────────────────────────
+  # 근거: DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.4·6.7절
+  # departments/03-risk/Dockerfile, departments/06-ai-qa-audit/Dockerfile 참고.
+  #
+  # ▶ redis: Risk↔QA Event Stream(risk_events/qa_events)이 쓰는 공통 Core 인프라다.
+  #   특정 부서 소유가 아니다(계획서 5절 "공통 Platform Container") - 다른 부서도
+  #   Redis Streams가 필요해지면 이 서비스를 재사용하면 된다. P0 로컬용 최소 구성이라
+  #   영속화(AOF)는 아직 안 켰다 - 재시작 시 Stream 유실 감수.
+  redis:
+    image: redis:7-alpine
+    container_name: hedgefund-redis
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # risk-api: Pre-trade Risk Check, Trading State, Compliance(agentic-rag) 조회면.
+  # Build Context가 저장소 루트인 이유는 departments/03-risk/Dockerfile 상단 주석 참고.
+  risk-api:
+    build:
+      context: .
+      dockerfile: departments/03-risk/Dockerfile
+    container_name: hedgefund-risk-api
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8041:8000"   # 로컬 전용 - 외부 노출 금지 (research-api와 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # audit-api: Evidence QA, Trace, Tool Permission, Finding, Incident 조회면.
+  audit-api:
+    build:
+      context: .
+      dockerfile: departments/06-ai-qa-audit/Dockerfile
+    container_name: hedgefund-audit-api
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # qa-worker: Risk Decision Stream을 QA Audit 수신 이력으로 적재한다(qa_events/worker.py).
+  # audit-api와 같은 Image, command만 다르다(계획서 3.1). REDIS_URL 없으면 즉시 종료하는
+  # 프로세스라 여기서는 `:?`로 필수 처리한다(다른 서비스는 REDIS_URL이 선택值).
+  qa-worker:
+    build:
+      context: .
+      dockerfile: departments/06-ai-qa-audit/Dockerfile
+    container_name: hedgefund-qa-worker
+    restart: unless-stopped
+    command: ["python", "qa_events/worker.py"]
+    working_dir: /app/departments/06-ai-qa-audit
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}
+      QA_EVENT_POLL_INTERVAL_SECONDS: ${QA_EVENT_POLL_INTERVAL_SECONDS:-1}
+    mem_limit: 256m
+    cpus: 0.3
+    pids_limit: 64
+    stop_grace_period: 20s
+
+  # risk-hermes / qa-hermes: research-hermes/quant-hermes와 같은 패턴 - Hermes는 Backend
+  # Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는 CLAUDE.md
+  # 배정표대로 risk는 OPENAI_API_KEY, qa는 ANTHROPIC_API_KEY만 준다(아무 키나 넣지 않는다).
+  risk-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-risk-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-risk-management:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  qa-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-qa-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-qa-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
+  #
+  # ▶ **기본 기동에서 제외했다**(profiles: [dashboard]). 실측 2026-08-02:
+  #   대시보드는 0.0.0.0 바인딩 시 인증 없이는 기동을 거부하고 재시작 루프에
+  #   빠진다(--insecure 로도 안 된다). Docker 는 컨테이너 안 127.0.0.1 을
+  #   호스트로 게시할 수 없으므로 0.0.0.0 바인딩이 강제되고, 따라서 **인증
+  #   설정이 선행 조건**이다. 비밀번호는 각자 정하는 값이라 저장소에 넣지 않는다.
+  #
+  #   쓰려면 둘 중 하나를 먼저 하고 `docker compose --profile dashboard up -d`:
+  #     1) Basic Auth - 해시를 만들어 ~/.hermes/config.yaml 의
+  #        dashboard.basic_auth.{username,password_hash} 에 넣는다.
+  #        docker exec hedgefund-hermes python -c \
+  #          "from plugins.dashboard_auth.basic import hash_password; \
+  #           print(hash_password('<사용할 비밀번호>'))"
+  #     2) Nous Portal OAuth - docker exec -it hedgefund-hermes hermes dashboard register
+  #
+  #   게시는 127.0.0.1 로 묶고 팀원 접근은 Tailscale 사설망으로만 한다
+  #   (공유기 포트포워딩 금지 - 저장소 전역 규칙).
+  hermes-dashboard:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-hermes-dashboard
+    restart: unless-stopped
+    profiles: ["dashboard"]
+    depends_on:
+      - research-hermes
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
+    # 대시보드는 **한 부서의 데이터만** 본다 - 부서 분리를 지켜야 하므로
+    # 여러 부서를 한 화면에 모으지 않는다. 다른 부서를 보려면 그 부서의
+    # 디렉터리를 마운트한 대시보드를 따로 띄운다(포트도 따로).
+    volumes:
+      - ${USERPROFILE}/.hermes-research-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
 
 volumes:
   tsdb_data:

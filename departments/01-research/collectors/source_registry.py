@@ -91,6 +91,7 @@ class SourceDomain(StrEnum):
     REALTIME_PRICE = "REALTIME_PRICE"
     REALTIME_QUOTE = "REALTIME_QUOTE"
     MARKET_STATE = "MARKET_STATE"
+    DERIVATIVE = "DERIVATIVE"
     INSTRUMENT_MASTER = "INSTRUMENT_MASTER"
     CALENDAR = "CALENDAR"
     DISCLOSURE = "DISCLOSURE"
@@ -241,14 +242,16 @@ SOURCES: tuple[SourceSpec, ...] = (
         source_id="ls_openapi_rest",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="LS증권 Open API REST",
-        domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE),
+        domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE,
+                 SourceDomain.DERIVATIVE),
         tier=SourceTier.P0,
         required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
         allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
         raw_bucket="research-raw-private",
         normalized_target="reference.instruments",
-        doc_ref="docs/06-integrations/ls-openapi/01-oauth, 03-stock",
-        note="모의투자 REST Domain 은 수집 문서 기준 전부 '-'(미제공)이다",
+        doc_ref="docs/06-integrations/ls-openapi/01-oauth, 03-stock, 04-derivatives",
+        note="모의투자 REST Domain 은 수집 문서 기준 전부 '-'(미제공)이다. "
+             "파생 시세(t2301/t2111 등)는 실전 키에 기본 개방 - 2026-07-31 실측",
     ),
     SourceSpec(
         source_id="opendart",
@@ -313,7 +316,11 @@ SOURCES: tuple[SourceSpec, ...] = (
         raw_bucket="research-documents-private",
         normalized_target="research.documents",
         doc_ref="ls-openapi 07-misc(NWS)/03-stock(t3102), TEAM_JAEIL J3",
-        note="재일님 방침 2026-07-31: NAVER 와 하루 병행 실측 후 우세하면 주 소스 전환",
+        note="판정 2026-08-01(금요일 병행 실측): 속보성 주 소스 = LS. p50 19초"
+             "(NAVER 712초), 60초 내 관측 1,762건(NAVER 22건), 종목 태그 정밀"
+             "(전용 38% vs 20%), 전 상장사 커버(고유 427종목). 단 제목 교집합이"
+             " 8~12%뿐이라 대체가 아니라 상호 보완 - NAVER 는 웹 매체 폭 담당으로"
+             " 병행 유지한다",
     ),
     SourceSpec(
         source_id="krx_public_notice",
@@ -358,6 +365,87 @@ SOURCES: tuple[SourceSpec, ...] = (
         normalized_target="research.documents",
         doc_ref="TEAM_JAEIL 3.1, .env 7절",
         note="검색/Snippet/전문/Embedding/Archive/재배포 권한을 각각 따로 확인할 것",
+    ),
+    SourceSpec(
+        source_id="x_twitter",
+        market_scopes=(MarketScope.KR_MARKET, MarketScope.FOREIGN_MARKET),
+        display_name="X (Twitter) 소셜 신호",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=("X_API_KEY",),
+        # ▶ 조사 확정 2026-08-01 (재일님 "무료 라이브러리 없나" 질의):
+        #   공식 무료 티어는 2026-02 부로 신규 개발자 읽기 종료(pay-per-use
+        #   $0.005/read 기본). 무료 라이브러리는 존재하나(twikit·twscrape -
+        #   계정 자격증명으로 내부 GraphQL 을 긁는 방식) **X ToS 위반 + 계정
+        #   정지 위험 + 파이프라인 취약**이라 도입하지 않는다 - robots
+        #   fail-closed·라이선스 게이트를 지켜온 이 Registry 의 원칙과 정면
+        #   충돌한다. BIGKinds 포기와 같은 결의 결정이다.
+        disabled_reason=(
+            "무료 합법 읽기 경로 없음(2026-02 무료 티어 종료). 비공식 라이브러리"
+            "(twikit/twscrape)는 ToS 위반이라 도입 불가. 재검토 조건: 유료 전환 "
+            "결정(참고: $0.005/read - 일 1,000읽기 ~ 월 $150) 또는 for-good "
+            "무료 승인. 합법 무료 대안 후보: Bluesky AT Protocol(공개 API)"
+        ),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        normalized_target="research.documents",
+        doc_ref="가이드 3.1 X Watchlist(P1), 조사 2026-08-01",
+        note="X Watchlist 는 이 Source 활성화 전까지 미착수 유지 - 승인 계정 "
+             "Registry·삭제 Compliance 요건은 가이드 DoD 뉴스 항목 참고",
+    ),
+    SourceSpec(
+        source_id="truth_social",
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        display_name="Truth Social (Trump Media) 정책 발화",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 조사 확정 2026-08-01 (재일님 "트럼프 미디어에 투자 글 있지 않나" 질의):
+        #   기술은 열려 있다 - Mastodon 포크라 /api/v1/accounts/lookup 과
+        #   .../statuses 가 무인증 200(검색만 401), max_id 페이지네이션 작동.
+        #   그러나 **두 축이 동시에 막는다**:
+        #   (1) ToS 명시 금지 - "you will not access the Service through
+        #       automated or non-human means, whether through a bot, script,
+        #       or otherwise" + "data mining, robots, or similar data gathering
+        #       and extraction tools" 금지. twikit·twscrape 를 거절한 것과
+        #       같은 사유이며, robots 없음(빈 robots.txt)이 허락은 아니다.
+        #   (2) 신호 밀도 미달 - realDonaldTrump 120건(5.6일, 21.4건/일) 표본에서
+        #       시장 키워드 3%(4건), 그중 실질 시장 발화는 1건. 27%는 본문 없는
+        #       미디어. 금융 기관은 사실상 부재(zerohedge 0포스트, djt 2포스트,
+        #       treasury 0포스트) - 투자 담론장이 아니다.
+        disabled_reason=(
+            "ToS 가 자동 접근·데이터 수집을 명시 금지(API 는 기술적으로 열려 "
+            "있으나 권리가 없다). 신호 밀도도 미달 - 실측 시장 관련 3%. "
+            "재검토 조건: 공식 데이터 라이선스 제공 또는 ToS 개정. 대안(권리 "
+            "청정): 정책 충격은 Federal Register API·백악관 Presidential "
+            "Actions RSS(미 공무저작물)가 권위 있게 덮고, 발언 보도는 이미 "
+            "수집 중인 Bluesky 기관 미디어가 수 분 내 덮는다"
+        ),
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        normalized_target="research.documents",
+        doc_ref="ToS help.truthsocial.com/legal/terms-of-service, 실측 2026-08-01",
+        note="판단 시점 열람(비저장)까지가 한계 - 가이드 3.3 무권리 적재 금지",
+    ),
+    SourceSpec(
+        source_id="bluesky",
+        # KR scope 를 빼는 이유(실측 2026-08-01): 파이어호스 90초 전수 표본에서
+        # 한국어 ~64,000건/일 중 금융 키워드 1건(오탐) - 한국 신호원이 아니다.
+        market_scopes=(MarketScope.FOREIGN_MARKET,),
+        display_name="Bluesky (AT Protocol) 미국 금융 표적 수집",
+        domains=(SourceDomain.NEWS,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 활성 전환 2026-08-01 (재일님 "미국 주식·유명 인물 시도"):
+        #   getAuthorFeed 가 **무인증**으로 열려 표적 계정 수집이 성립한다.
+        #   실측 - Bloomberg ~46/일·Reuters ~57/일·WSJ ~27/일·CNBC ~36/일 +
+        #   매크로 논객(Politano 11.2만 팔로워 등). 수집기:
+        #   bluesky_watch_collector.py, 대상: config/bluesky_watchlist.txt.
+        #   검색(searchPosts)은 무인증 403 - 필요 시 무료 계정은 재일님 몫.
+        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
+        normalized_target="research.documents",
+        doc_ref="실측 프로브 2026-08-01, bluesky_watch_collector.py",
+        note="스니펫 300자까지만 저장(보수적 시작). **삭제 Compliance 미구현** - "
+             "원 포스트 삭제 시 사본 제거 절차가 생기기 전까지 내부 Evidence "
+             "전용, 재배포 금지(REDISTRIBUTE 미허용이 그 게이트다)",
     ),
     SourceSpec(
         source_id="naver_apihub",
@@ -459,6 +547,45 @@ SOURCES: tuple[SourceSpec, ...] = (
         note="ALFRED 의 vintage 가 PIT 재현에 필요하다",
     ),
     SourceSpec(
+        source_id="gpr",
+        # 지정학 리스크는 특정 시장 데이터가 아니라 배경 변수다 (FRED 와 같은 취급).
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
+        display_name="GPR 지정학 리스크 지수 (Caldara-Iacoviello)",
+        domains=(SourceDomain.MACRO,),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 실측 2026-08-01 (재일님 "국제정치로 시장이 들썩인다" 요구):
+        #   일별 파일 무인증 다운로드 3.2MB, 15,183행 = 1985-01-01 ~ 현재.
+        #   GPRD(종합)·GPRD_ACT(실제 사건)·GPRD_THREAT(위협·언사) 3열 -
+        #   "폭격한다니 만다니"(THREAT)와 실제 타격(ACT)이 **분리돼 있다**.
+        #   40년 일별 히스토리라 백테스트 팩터로 바로 쓸 수 있다.
+        #   출처 표기 조건 공개 데이터(논문 인용 요건) - 재배포는 하지 않는다.
+        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
+        normalized_target="research.macro_observations",
+        doc_ref="matteoiacoviello.com/gpr.htm, 실측 2026-08-01",
+        note="게시 지연 실측 4~5일 - published_at 은 보수적으로 period+7일로 "
+             "둔다(미래 참조 방지). 실시간 경보용이 아니라 백테스트 팩터다",
+    ),
+    SourceSpec(
+        source_id="gdelt",
+        market_scopes=(MarketScope.MACRO_BACKGROUND,),
+        display_name="GDELT 전세계 보도량·톤 (지정학 실시간 축)",
+        domains=(SourceDomain.MACRO, SourceDomain.NEWS),
+        tier=SourceTier.P1,
+        required_env=(),
+        # ▶ 실측 2026-08-01: DOC 2.0 API 무인증 관통(timelinevol/timelinetone).
+        #   테마별 보도 점유율 곡선이라 "충격 배율"(피크/중앙)로 이벤트를 잡는다.
+        #   실측 - North Korea missile 최근/중앙 3.7배, Iran strike 피크 2.1배.
+        #   라이선스: "unlimited and unrestricted use for any academic,
+        #   commercial, or governmental use of any kind without fee" +
+        #   출처 표기·링크 의무. 레이트리밋 5초/요청(429 실측) - 준수한다.
+        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
+        normalized_target="research.macro_observations",
+        doc_ref="gdeltproject.org (출처 표기 의무), 실측 2026-08-01",
+        note="저장 대상은 집계 지표(보도 점유율·톤)뿐 - 기사 본문은 각 매체 "
+             "권리라 담지 않는다. 인용 시 GDELT Project 표기",
+    ),
+    SourceSpec(
         source_id="kind",
         market_scopes=(MarketScope.KR_MARKET,),
         display_name="KRX KIND",
@@ -501,11 +628,8 @@ SOURCES: tuple[SourceSpec, ...] = (
 # 키는 있지만 실제 호출이 거부된 Source. 관측 사실이라 근거와 날짜를 함께 남긴다.
 # 승인이 떨어지면 여기서 항목을 지우는 것으로 해제된다 - 코드 수정이 아니라 사실 갱신이다.
 NOT_AUTHORIZED_OBSERVED: dict[str, str] = {
-    "kosis": (
-        "2026-07-30 실측: statisticsList.do 호출 시 {'err': '11', 'errMsg': "
-        "'유효하지않은 인증KEY입니다.'}. 키가 .env 에 있으나 KOSIS 가 거부한다 - "
-        "발급처(kosis.kr/openapi)에서 키 유효성과 활용 신청 상태를 확인할 것"
-    ),
+    # kosis: 2026-07-31 재일님 키 갱신 후 실측 통과(소비자물가 DT_1J22042 수신)로
+    #        해제. err 11 이 다시 관측되면 여기 기록을 되살린다.
     "krx_openapi": (
         "2026-07-30 실측: 헤더 AUTH_KEY 로 https://data-dbg.krx.co.kr/svc/apis/sto/"
         "stk_bydd_trd 호출 시 401 'Unauthorized API Call'. 키는 인식되나(잘못된 헤더는 "
@@ -833,10 +957,19 @@ def _check_blocked_domains():
     assert r.status("krx_public_notice") is SourceStatus.AVAILABLE
     # 키가 없어서 지금 막힌 Domain
     assert SourceDomain.MACRO in blocked
-    assert SourceDomain.NEWS in blocked, "BIGKinds/NAVER 둘 다 없으면 NEWS 는 Blocked 다"
+    # NEWS 는 2026-07-31 부로 ls_news(LS 키) 가 P0 로 덮는다 - NAVER/BIGKinds 가
+    # 없어도 LS 키가 살아 있으면 Blocked 가 아니다. (이 자리에 있던 이전 단언은
+    # ls_news 등재 전의 세계를 박제한 것이라 갱신했다)
+    assert SourceDomain.NEWS not in blocked, "ls_news 가 살아 있는데 NEWS 가 막혔다"
     # LS 로 덮이는 Domain 은 막히지 않는다
     assert SourceDomain.REALTIME_PRICE not in blocked
     assert SourceDomain.REALTIME_QUOTE not in blocked
+    assert SourceDomain.DERIVATIVE not in blocked, "파생은 ls_openapi_rest 가 덮는다"
+    # LS 키마저 사라지면 LS 단독 Domain 은 전부 막힌다 - NEWS 도 그때는 Blocked
+    no_ls = SourceRegistry(env={**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": ""})
+    b2 = no_ls.blocked_p0_domains()
+    assert SourceDomain.NEWS in b2, "뉴스 경로가 하나도 없는데 NEWS 가 안 막혔다"
+    assert SourceDomain.DERIVATIVE in b2 and SourceDomain.REALTIME_PRICE in b2
     # DART 로 덮이는 Domain
     assert SourceDomain.DISCLOSURE not in blocked
     assert SourceDomain.FINANCIAL not in blocked
@@ -865,7 +998,10 @@ def _check_scope_gate():
     Source 를 P0 NEWS 로 등록하면 한국 종목 뉴스가 0건인데 NEWS Blocked 가 풀린다.
     그러면 '데이터 장애 시 신규 진입 자동 차단' 이 조용히 무너진다.
     """
-    env_with_news = {**_FAKE_ENV, "FOREIGN_NEWS_API_KEY": "k"}
+    # LS 키를 비운다 - ls_news(2026-07-31 등재)가 NEWS 를 덮으면 "다른 경로가
+    # 없는데 해외 Source 가 풀어버리는가"라는 이 검사의 전제가 성립하지 않는다
+    env_with_news = {**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": "",
+                     "FOREIGN_NEWS_API_KEY": "k"}
 
     foreign = SourceSpec(
         source_id="foreign_news_probe",

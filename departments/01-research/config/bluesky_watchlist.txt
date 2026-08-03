@@ -1,0 +1,13 @@
+# Bluesky 표적 계정 (미국·글로벌 금융) - bluesky_watch_collector.py 가 읽는다.
+# 한 줄 한 핸들, # 뒤는 주석. 계정 추가·삭제는 이 파일만 고치면 된다.
+# 선정 근거: 2026-08-01 실측 (getProfile 팔로워·getAuthorFeed 하루 포스팅)
+
+# 기관 미디어 (하루 합계 ~166건 실측)
+bloomberg.com          # 48.7만 팔로워, ~46건/일
+reuters.com            # ~57건/일
+wsj.com                # 24.5만 팔로워, ~27건/일
+cnbc.com               # ~36건/일
+
+# 매크로·시장 논객 (저빈도지만 신호 밀도 높음)
+josephpolitano.bsky.social   # Apricitas Economics, 11.2만 팔로워
+nathantankus.bsky.social     # Notes on the Crises, 3.5만 팔로워

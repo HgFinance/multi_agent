@@ -5,8 +5,9 @@
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
@@ -52,14 +53,15 @@ agent:
 # 검색-평가-생성-환각검증-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline은 risk-management의 compliance-policy-agent부터 구현됨 (skills/agentic-rag/, 코드는 risk/qa 공용)
 # evidence-qa-agent는 corpus/evidence/ 추가 + main.py PERSONA_CORPUS 등록으로 확장 완료(2026-07-30, 샘플
-# placeholder 데이터로 grounded 검증). hallucination-critic은 evidence-qa-agent의 grounded 판정을
-# 그대로 재사용할 수 있어 별도 corpus 없이 다음 확장 대상으로 남긴다.
+# placeholder 데이터로 grounded 검증). hallucination-critic도 evidence-qa-agent의 corpus/evidence/를
+# 그대로 재사용해 확장 완료(2026-08-02, scripts.py의 조건부 노드 hallucination_review - UNSUPPORTED/
+# CONTRADICTED로 이미 플래그된 claim만 대상, 판정을 뒤집지 않고 유형 분류·인용 근거만 덧붙인다).
 agentic_rag:
   framework: langgraph
-  status: "evidence-qa-agent까지 확장됨 (skills/agentic-rag/, corpus/evidence/ SAMPLE_PLACEHOLDER). hallucination-critic은 미착수"
+  status: "hallucination-critic까지 확장됨 (skills/agentic-rag/, corpus/evidence/ SAMPLE_PLACEHOLDER)"
   target_personas:
     - evidence-qa-agent      # 구현됨 — Document RAG / Fact Store 근거를 검색해 주장-출처를 연결
-    - hallucination-critic   # 미착수 — 원 에이전트가 실제 검색한 근거와 출력 주장을 대조해 환각 판정
+    - hallucination-critic   # 구현됨 — evidence-qa-agent 코퍼스 재사용, UNSUPPORTED/CONTRADICTED claim만 대조해 환각 유형 분류
 
 # 2026-07-30 기법 배정 결정 (동규님, "내 부서에 한해서만" 범위) — 아직 미구현인 항목도 기록만 해둔다.
 # 판단 기준: 검색-근거-생성 루프면 Agentic RAG(+LightRAG 백엔드 후보), 관계/계보가 그래프 형태로 이미
@@ -85,8 +87,8 @@ rag_technique_assignment:
         trigger: "2단계까지 반영한 뒤에도 N항 관계 손실로 인한 오탐/누락이 실측으로 확인될 때 — 지금은 근거 없음, 셋 중 가장 검증 안 된 기법이라 최후순위"
   hallucination-critic:
     technique: agentic_rag
-    status: not_started
-    note: "evidence-qa-agent가 이미 만든 grounded 판정을 재사용 — 별도 corpus 불필요. corpus/evidence/가 안정화된 뒤 착수."
+    status: implemented
+    note: "skills/agentic-rag/ --persona hallucination-critic, corpus/evidence/ 재사용(신규 코퍼스 없음). departments/06-ai-qa-audit/scripts.py의 hallucination_review 노드 - evidence_qa_engine.py가 UNSUPPORTED/CONTRADICTED로 이미 플래그한 claim만 대상으로 호출, 판정 자체는 못 바꾸고 유형 분류(HALLUCINATION/OVERCONFIDENT_CLAIM/CONTRADICTION/TOOL_MISUSE)·인용 근거만 덧붙인다."
   model-risk-agent:
     technique: neo4j_knowledge_graph
     status: not_started
@@ -106,6 +108,15 @@ rag_technique_assignment:
 # 결정론적 서비스. LLM은 관련성 판단과 서술 작성에만 쓴다 - Schema, Citation, PIT, Threshold
 # 판정은 이 두 모듈이 한다 (CLAUDE.md, 팀 가이드 7절 "LLM-as-a-Judge는 보조 신호다").
 deterministic_services:
+  harness_manifest: departments/06-ai-qa-audit/harness/manifest.py
+  harness_preflight: departments/06-ai-qa-audit/harness/core.py
+  harness_log_contract: departments/06-ai-qa-audit/harness/journal.py
+  harness_replay: "RunJournal.replay(run_id, executor)"
+  harness_review: "RunJournal.review(run_id)"
+  orchestrator: "Hermes department profile: qa-department"
+  employee_executor: "LangGraph employee node"
+  harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=ESCALATE"
+  harness_fallback: "ESCALATE + manual_review_required + trace_id + reason_code"
   evidence_qa_engine: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py    # P0 Evidence QA Gate — 8단계 검사, PASS/WARN/FAIL, input_hash 재현성
   ops_health_monitor: departments/06-ai-qa-audit/audit/ops_health_monitor.py       # P0 Ops Threshold — HEALTHY/DEGRADED/CRITICAL, Incident 초안
   trace_recorder: departments/06-ai-qa-audit/audit/trace_recorder.py              # P0 Agent/Tool Trace 기록 — audit.agent_runs/tool_calls
@@ -113,7 +124,7 @@ deterministic_services:
   incident_timeline: departments/06-ai-qa-audit/audit/incident_timeline.py        # Incident Fact/Inference Timeline, Corrective Action(QA 검증 후 Close)
 
 implementation:
-  status: "Sprint K2 P0 전체(Evidence QA + Trace 수집 + Tool 권한 탐지) + agent-ops-monitor P0 + Incident Timeline 구현됨. Evidence QA/Ops Incident 경로는 실제 Supabase에 배선 완료. Agent/Tool Trace 실저장·K3 나머지·K4는 미착수"
+  status: "Sprint K2 P0 완료. P1 결정론적 Model-Risk·Internal-Audit 검사기/API·QA 운영 Trace RLS baseline 구현. 실제 정책 Corpus/pgvector 적재, qa-check 상위 계약 승인, ACTIVE Profile·운영 agent_runs/tool_calls·E2E 활성화는 외부 조건 대기"
   done:
     - "8단계 순서 검사 (Schema, Evidence 존재·권한, PIT, 숫자·단위 인용 일치, Fact/Inference 구분, 상충 근거, Tool 요약 변형, Unsupported Block)"
     - "Claim/Artifact/EvidenceChunk를 Pydantic으로 검증 — LLM 출력 신뢰 경계는 트레이딩본부 contracts.py와 같은 원칙 (CLAUDE.md 개발 원칙 2번)"
@@ -128,10 +139,12 @@ implementation:
     - "bandit/pip-audit 스캔 — 실제 보안 이슈 0건 확인 (assert 사용 경고, PASS 오탐만 있음)"
     - "Supabase 실제 배선 (2026-07-30) — Evidence QA Engine·Ops Health Monitor 실행 결과를 audit.artifact_versions/claim_checks/qa_decisions/findings/incidents에 직접 INSERT해 검증함. fund_id는 accounting.funds가 아직 비어 있어 전부 NULL로 기록(가짜 Fund를 참조하는 척 안 함). .env의 DATABASE_URL 자체가 깨져 있던 것(스킴 누락 + 비밀번호 내 '@' 미인코딩, IPv6 전용 Direct Connection 대신 IPv4 Session Pooler로 전환)도 같이 고침"
     - "QA Domain API (2026-07-31) — departments/06-ai-qa-audit/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 3.2~3.6절 FastAPI로 래핑(ops/trace/tool-permission/incident/corrective-action/evidence-check). verify-and-close는 엔진 자체 검증 위에 API 레이어 인증주체 재검증 추가(3.5절 명시 요구). 새 판정 로직 없음, TestClient self-check 5개 영역 통과. 3.1절 qa-check는 코드로는 구현했지만 여전히 [제안] — MINIMUM_SERVICE_UNIT_SPEC.md 미등록. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
+    - "TraceRecorder/IncidentTimeline Supabase 배선 (2026-07-31) — departments/06-ai-qa-audit/audit/repository.py(PostgresAuditRepository, psycopg2, RedisTradingStateStore와 같은 구도: 인메모리가 불변식 검사 근거, Postgres는 공식 이력). trace_recorder.py/incident_timeline.py에 repository 주입 파라미터 추가(기본 None — 기존 인메모리 전용 동작·자체 점검 전부 무영향). audit.tool_calls/incident_events는 DB 트리거로 append-only라 tool_call은 종결 상태 1행만 insert, ALLOWED 등 중간 상태는 안 씀. api/app.py는 DATABASE_URL이 있을 때만 실제 배선(.env 자동 로드 안 함). 실 DATABASE_URL로 5개 시나리오 검증: (1) FK 위반 재현 (2) 실존 HR agent로 agent_runs insert+update round-trip (3)(4) tool_calls/incident_events는 append-only라 manual transaction+rollback으로 매핑만 검증, 커밋 안 함 (5) corrective_actions insert+update round-trip — 테스트로 남긴 행은 전부 정리함"
+    - "audit.qa_decisions에 calculation_version/input_hash 컬럼 추가 (2026-07-31) — supabase/migrations/20260731001000_qa_decisions_reproducibility.sql, risk.risk_decisions와 같은 재현성 컬럼 모양(not null, 없는 Default). 이 Table엔 아직 INSERT하는 코드가 없어(qa-check는 여전히 MINIMUM_SERVICE_UNIT_SPEC.md 미등록 [제안] 상태) 항상 비어 있었으므로 not null로 바로 추가해도 안전했음. EvidenceQaEngine에 repository 배선을 추가하는 건 이 PR 범위 밖(엔진은 의도적으로 순수 계산기 — TraceRecorder/IncidentTimeline과 달리 상태가 없음) — qa-check가 실제 Command로 승인된 뒤 API 레이어에서 배선하는 게 다음 단계."
   in_progress: []
-  not_started:
-    - "Agent/Tool Trace 실제 저장(audit.agent_runs/tool_calls), audit.qa_decisions에 calculation_version/input_hash 실제 컬럼 추가 — 후자는 스키마 변경(DDL)이라 별도 Migration PR 필요"
-    - "workforce.agent_profiles/agent_profile_versions가 아직 비어 있어 실제 Tool Allowlist·Agent Run 기록의 FK를 못 채움 (accounting.funds와 같은 종류의 막힘, 인사팀 영역이라 임의로 Seed 안 함) — tool_permission_check.py/trace_recorder.py 자체는 스텁 Policy로 완결·검증됨"
+  implementation_notes:
+    - "audit.agent_runs/tool_calls 실제 운영 INSERT — QA/Risk 소속 Agent가 workforce.agent_profiles/agent_profile_versions에 아직 없어(HR 5명만 존재) not null FK를 못 채움(accounting.funds와 같은 종류의 막힘, 인사팀 영역이라 임의로 Seed 안 함). repository.py 매핑 자체는 실 DB로 검증 완료."
+    - "audit.incident_events 실제 운영 INSERT — IncidentTimeline이 audit.incidents 부모 행을 만들지 않아, 그 행이 먼저 없으면 not null FK 위반. 지금 DB에 있는 audit.incidents 1건은 이전 수동 검증용이라 신규 Incident 발생 시 그 부모 행을 만드는 주체가 아직 없음(이 범위 밖 — Task 2는 TraceRecorder/IncidentTimeline 배선만 요청받음)"
     - "Sprint K3 나머지: Stress Scenario, Kill Switch 연동, Feed/Broker/Model 장애 Correlation"
     - "Sprint K4: Strategy/Agent Candidate Eval, Dataset/Model/Prompt Lineage, Release Review"
     - "LLM-as-a-Judge 보조 신호 (팀 가이드 7절) — 지금은 순수 규칙 판정만, Semantic 근거 검증은 의도적으로 P0 이후 백로그"
@@ -164,3 +177,14 @@ skills:
 usage:
   run: "qa-department chat -q 'Validate this trading signal'"
   collaborate: "qa-department chat -q 'Validate the signal and its cited evidence, then delegate risk assessment to risk-management'"
+
+validation_record:
+  recorded_at: "2026-08-03"
+  scope: "Risk·QA Redis 통합 수용 테스트"
+  acceptance_command: >-
+    cd /Users/baiohelseu/Desktop/Project/multi_agent && source ~/claude/bin/activate &&
+    python -m pytest departments/03-risk/tests/test_trading_state_store.py
+    departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
+  accepted_result: "11 passed, skipped 0; 실행 환경은 /Users/baiohelseu/claude/bin/python"
+  p1_status: "결정론적 Evidence QA·Model Risk·Internal Audit·Trace/Incident baseline 완료; 실제 Corpus/pgvector·ACTIVE Profile FK·qa-check 계약·운영 E2E는 외부 조건 대기"
+  p2_status: "별도 P2 기능을 임의 활성화하지 않음; 실제 운영 Corpus·Trace·상위 계약 승인 후 재평가"

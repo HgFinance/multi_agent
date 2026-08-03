@@ -241,6 +241,23 @@ def discover_targets(
     return out
 
 
+def discovery_windows(start: date, end: date, *, days: int = 90) -> list[tuple[date, date]]:
+    """corp_code 없는 list.json 은 검색기간 3개월 제한 - 90일 창으로 자른다.
+
+    실측 2026-07-31: 19개월 창을 그대로 넘겨 status=100 으로 수집 전체가
+    죽어 있었다(CA 4건 정체의 원인). 창 사이 공백·겹침이 없어야 한다.
+    """
+    if start > end:
+        raise ValueError("start 가 end 보다 늦다")
+    out: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        w_end = min(cursor + timedelta(days=days - 1), end)
+        out.append((cursor, w_end))
+        cursor = w_end + timedelta(days=1)
+    return out
+
+
 def collect_actions(
     client: OpenDartClient,
     corp_codes: list[str],
@@ -407,6 +424,25 @@ def _check_endpoint_failure_reported():
     print("  엔드포인트 실패 보고        OK")
 
 
+def _check_discovery_windows():
+    """3개월 제한 대응 - 창이 공백·겹침 없이 전 구간을 덮는지."""
+    ws = discovery_windows(date(2025, 1, 1), date(2026, 7, 31))
+    assert ws[0][0] == date(2025, 1, 1) and ws[-1][1] == date(2026, 7, 31)
+    for (s1, e1), (s2, _e2) in zip(ws, ws[1:]):
+        assert (s2 - e1).days == 1, f"공백/겹침: {e1} -> {s2}"
+        assert (e1 - s1).days <= 89
+    # 한 창이면 그대로
+    assert discovery_windows(date(2026, 7, 1), date(2026, 7, 31)) == [
+        (date(2026, 7, 1), date(2026, 7, 31))]
+    # 역순은 거부
+    try:
+        discovery_windows(date(2026, 2, 1), date(2026, 1, 1))
+        raise AssertionError("역순 기간이 통과했다")
+    except ValueError:
+        pass
+    print("  90일 창 분할 (3개월 제한)   OK")
+
+
 def _check_target_discovery():
     """공시 제목으로 호출 대상을 좁힌다. 모르는 제목은 추측하지 않는다."""
     assert endpoint_for_report("주요사항보고서(자기주식취득결정)") == "tsstkAqDecsn"
@@ -473,13 +509,19 @@ def _collect_and_report(start: date, end: date, limit: int) -> int:
             codes = [r[0] for r in cur.fetchall()]
         print(f"  대상 발행사 {len(codes)}개 (issuer 연결 + 단일 종목)")
 
-        # 주요사항보고(pblntf_ty=B)만 먼저 훑어 호출 대상을 좁힌다
+        # 주요사항보고를 먼저 훑어 호출 대상을 좁힌다. corp_code 없는 list.json
+        # 은 검색기간이 3개월 제한이라(collect_disclosures docstring + 실측
+        # 2026-07-31 status=100 "3개월만 가능") 기간을 90일 창으로 잘라 잇는다.
+        # 이 제한을 무시한 것이 CA 가 4건에서 멈춰 있던 원인이었다.
         from opendart_collector import collect_disclosures
         client = OpenDartClient()
-        disc = collect_disclosures(client, start=start, end=end, max_pages=10)
-        targets = discover_targets(list(disc.records))
+        disc_records: list = []
+        for w_start, w_end in discovery_windows(start, end):
+            disc = collect_disclosures(client, start=w_start, end=w_end, max_pages=10)
+            disc_records.extend(disc.records)
+        targets = discover_targets(disc_records)
         n_calls = sum(len(v & set(codes)) for v in targets.values())
-        print(f"  공시 {len(disc.records)}건에서 대상 축약: "
+        print(f"  공시 {len(disc_records)}건에서 대상 축약: "
               f"{ {k: len(v & set(codes)) for k, v in targets.items() if v & set(codes)} } "
               f"= {n_calls}회 호출 (전수는 {len(ACTION_SPECS) * len(codes)}회)")
 
@@ -525,5 +567,6 @@ if __name__ == "__main__":
     _check_external_id_uniqueness()
     _check_fail_closed_and_dedup()
     _check_endpoint_failure_reported()
+    _check_discovery_windows()
     _check_target_discovery()
-    print("Corporate Action 7개 영역 통과. 실제 수집은 --collect")
+    print("Corporate Action 8개 영역 통과. 실제 수집은 --collect")

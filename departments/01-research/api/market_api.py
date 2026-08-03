@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,33 @@ API_VERSION = "research-market-api-v1"
 KST = timezone(timedelta(hours=9))
 
 app = FastAPI(title="Market Read API", version="0.1.0")
+
+# ▶ Tool Gateway (2026-08-02 추가)
+#   config.yaml 은 market.snapshot.read / market.bars.read / market.breadth.read /
+#   market.dq.read / market.regime.read / market.microstructure.read 를 페르소나별로
+#   선언해 놓았는데, **market-api 에는 게이트웨이가 아예 없어 어디서도 강제되지
+#   않았다.** 익명 호출이 200 으로 나갔다(실측). 선언만 있고 강제가 없으면
+#   "Hermes 에 적어놨으니 막힌다"는 오해가 그대로 남는다.
+#
+#   다만 research-api 와 달리 **기본은 관찰 모드**다. 이 API 는 퀀트본부와
+#   팀원이 8036 으로 직접 조회하는 면이라, 강제부터 켜면 남의 작업이 멈춘다.
+#   위반은 로그와 X-Tool-Gateway-Violation 헤더로 드러나므로, 그 기록을 보고
+#   호출자를 다 배선한 뒤 TOOL_GATEWAY_ENFORCE_MARKET=true 로 올린다.
+GATEWAY_STATUS = "NOT_INSTALLED"
+try:
+    from tool_gateway import ENFORCE_ENV_MARKET as _MARKET_ENV
+    from tool_gateway import enforcing as _gateway_enforcing
+    from tool_gateway import install as _install_gateway
+
+    _install_gateway(app, env_var=_MARKET_ENV)
+    GATEWAY_STATUS = "enforce" if _gateway_enforcing(_MARKET_ENV) else "observe"
+except Exception as _e:  # noqa: BLE001
+    _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
+    print(f"⚠ {_msg}", file=sys.stderr)
+    if os.environ.get("TOOL_GATEWAY_ENFORCE_MARKET", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError(
+            f"{_msg} - 강제 모드인데 게이트웨이가 없으면 전 경로가 무인증으로 "
+            f"열린다. 기동을 막는다(fail-closed).") from _e
 
 _ts = None          # TimescaleDB 연결 (read-only)
 _sym2iid: dict = {}  # symbol -> instrument_id (기동 시 1회)
@@ -194,6 +222,82 @@ def dq_summary() -> dict:
     return {"today": rows[0]}
 
 
+@app.get("/regime/daily")
+def regime_daily(days: int = Query(20, gt=0, le=120)):
+    """시장 레짐 집계 (RES-07 의 결정론 재료) - 일봉 단면 지표.
+
+    등락 종목수·SMA20 상회 비율을 거래일별로 계산한다. SMA20 은 봉 20개가
+    다 있는 종목만 분모에 넣는다(부족 종목을 하회로 세지 않는다 - coverage
+    로 분모를 명시). 계산은 전부 이 SQL - LLM 은 이 결과를 서술만 한다.
+    """
+    return _query("""
+        with b as (
+          select instrument_id,
+                 (bucket_time at time zone 'Asia/Seoul')::date as d,
+                 close,
+                 avg(close) over w20 as sma20,
+                 count(*) over w20 as n20,
+                 lag(close) over (partition by instrument_id order by bucket_time) as prev_close
+          from market.market_bars
+          where interval_code = '1D' and source = 'ls_chart'
+          window w20 as (partition by instrument_id order by bucket_time
+                         rows between 19 preceding and current row)
+        )
+        select d as trade_date,
+               count(*) filter (where prev_close is not null and close > prev_close) as advancers,
+               count(*) filter (where prev_close is not null and close < prev_close) as decliners,
+               count(*) filter (where prev_close is not null and close = prev_close) as unchanged,
+               count(*) filter (where n20 = 20 and close > sma20) as above_sma20,
+               count(*) filter (where n20 = 20) as sma20_coverage,
+               count(*) as symbols
+        from b
+        group by d order by d desc limit %s
+    """, (days,))
+
+
+@app.get("/microstructure/{symbol}")
+def microstructure(symbol: str, trade_date: Optional[str] = Query(
+        None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="KST 거래일. 없으면 데이터가 있는 최근일")):
+    """미시구조 집계 (RES-03 의 결정론 재료) - 체결·호가 하루 요약.
+
+    체결: VWAP·매수/매도 체결량(side 부호)·건수. 호가: 스프레드 bp 중앙값/
+    p90·심도 불균형 평균. 데이터가 없는 날은 404 가 아니라 rows 0 으로
+    드러난다(없음과 조회 실패를 구분).
+    """
+    iid = _iid_or_404(symbol)
+    cond = "and (event_time at time zone 'Asia/Seoul')::date = %s::date" if trade_date else ""
+    params_t = (iid, trade_date) if trade_date else (iid,)
+    ticks = _query(f"""
+        select (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               count(*) as trades,
+               sum(quantity) as volume,
+               sum(price * quantity) / nullif(sum(quantity), 0) as vwap,
+               sum(quantity) filter (where side = 1) as buy_volume,
+               sum(quantity) filter (where side = -1) as sell_volume,
+               min(event_time) as first_trade, max(event_time) as last_trade
+        from market.market_ticks
+        where instrument_id = %s {cond}
+        group by 1 order by 1 desc limit 1
+    """, params_t)
+    quotes = _query(f"""
+        select (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               count(*) as quotes,
+               percentile_cont(0.5) within group
+                 (order by spread / nullif(mid_price, 0) * 10000) as spread_bp_p50,
+               percentile_cont(0.9) within group
+                 (order by spread / nullif(mid_price, 0) * 10000) as spread_bp_p90,
+               avg(depth_imbalance) as depth_imbalance_avg
+        from market.market_quotes
+        where instrument_id = %s {cond}
+          and mid_price is not null and spread is not null
+        group by 1 order by 1 desc limit 1
+    """, params_t)
+    return {"symbol": symbol, "ticks": ticks[0] if ticks else None,
+            "quotes": quotes[0] if quotes else None,
+            "note": None if ticks or quotes else "해당 일자 데이터 없음"}
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 - DB 없이
 # ---------------------------------------------------------------------------
@@ -204,6 +308,32 @@ def _check_readonly_surface():
         assert not (methods - {"GET", "HEAD", "OPTIONS"}), \
             f"읽기 전용 API 에 쓰기 메서드: {route.path}"
     print("  읽기 전용 표면           OK")
+
+
+def _check_gateway_covers_all_routes():
+    """모든 엔드포인트가 scope 매핑을 갖는가.
+
+    게이트웨이가 붙은 뒤로는 매핑 없는 경로가 **500(gateway_misconfigured)**
+    이 된다 - 새 엔드포인트를 추가하면서 ENDPOINT_SCOPES 를 안 고치면 그
+    경로가 통째로 죽는다. 배포 전에 여기서 잡는다.
+    """
+    assert GATEWAY_STATUS in ("enforce", "observe"), \
+        f"market-api 에 게이트웨이가 안 붙었다({GATEWAY_STATUS})"
+    from tool_gateway import GatewayConfigError, is_open_path, scope_for
+
+    missing = []
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if not path or is_open_path(path):
+            continue
+        # /bars/{symbol} 처럼 경로 파라미터가 있으면 접두사로 판정된다
+        probe = path.split("{", 1)[0].rstrip("/") or path
+        try:
+            scope_for(probe)
+        except GatewayConfigError:
+            missing.append(path)
+    assert not missing, f"scope 매핑이 없는 엔드포인트(500 이 된다): {missing}"
+    print(f"  게이트웨이 매핑({GATEWAY_STATUS})  OK")
 
 
 def _check_bar_params():
@@ -254,5 +384,6 @@ if __name__ == "__main__":
 
     print(f"{API_VERSION} 자체 점검 (DB 없이)")
     _check_readonly_surface()
+    _check_gateway_covers_all_routes()
     _check_bar_params()
-    print("market-api 2개 영역 통과. 관통은 --probe")
+    print("market-api 3개 영역 통과. 관통은 --probe")

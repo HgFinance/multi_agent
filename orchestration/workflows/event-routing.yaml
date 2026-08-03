@@ -1,0 +1,62 @@
+name: event-routing
+version: event-routing-v1
+kind: dynamic-routing
+description: 이벤트 유형별 필요한 전문가만 선택 호출하는 동적 라우팅
+boundary_rules:
+  - 이벤트 라우팅은 고정 순서 Workflow가 아니며 등록된 전문가만 호출한다.
+  - Risk Engine·Kill Switch·시장 정지 같은 결정론적 이벤트는 LLM 라우팅 대상이 아니다.
+  - 알 수 없는 이벤트와 stale market data는 ENTRY_BLOCKED로 처리한다.
+steps:
+  - id: event-detect
+    sequence: 1
+    department: event-router
+    owner: platform
+    task: 이벤트 타입과 결정론적 처리 여부 판정
+    input_contract: event_envelope
+    output_contract: routed_event
+    timeout_seconds: 5
+    retry: {max_attempts: 1}
+    failure_action: ENTRY_BLOCKED
+    forbidden_actions: [order_submission, risk_approval]
+  - id: event-dispatch
+    sequence: 2
+    department: event-router
+    owner: platform
+    task: 허용된 전문가 Pool에 이벤트 전달
+    input_contract: routed_event
+    output_contract: event_dispatch_result
+    timeout_seconds: 15
+    retry: {max_attempts: 1}
+    failure_action: ENTRY_BLOCKED
+    forbidden_actions: [order_submission, risk_approval]
+rules:
+  price_breakout:
+    call: [research-department.microstructure-analyst, research-department.technical-analyst]
+  return_spike:
+    call: [research-department.technical-analyst]
+  relative_volume_spike:
+    call: [research-department.microstructure-analyst, research-department.technical-analyst]
+  volatility_regime_change:
+    call: [research-department.sector-regime-analyst, risk-management.market-liquidity-risk-agent]
+  spread_widening:
+    call: [research-department.microstructure-analyst, risk-management.market-liquidity-risk-agent]
+  orderbook_imbalance:
+    call: [research-department.microstructure-analyst]
+  sector_decoupling:
+    call: [research-department.sector-regime-analyst, risk-management.market-liquidity-risk-agent]
+  correlation_breakdown:
+    call: [research-department.sector-regime-analyst, risk-management.market-liquidity-risk-agent]
+  news_catalyst:
+    call: [research-department.news-sentiment-analyst, trading-department.bull-researcher, trading-department.bear-researcher, qa-department.evidence-qa-agent]
+  portfolio_risk_breach:
+    call: [research-department, trading-department, risk-management, quant-backtest-department, accounting-portfolio-department, qa-department]
+    deterministic_check: true
+  loss_limit_approach:
+    call: []
+    deterministic_check: true
+    action: ENTRY_BLOCKED
+  stale_market_data:
+    call: []
+    deterministic_check: true
+    action: ENTRY_BLOCKED
+

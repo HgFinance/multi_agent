@@ -38,7 +38,7 @@ test("server-renders the HgFinance eight-organization office", async () => {
   assert.match(html, /리스크본부/);
   assert.match(html, /회계·포트폴리오본부/);
   assert.match(html, /AI QA·감사본부/);
-  assert.match(html, /Agent Workforce 인사팀/);
+  assert.match(html, /인사팀/);
   assert.match(html, /CEO Office 지원팀/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
 });
@@ -67,6 +67,14 @@ test("keeps organization configuration wired to the live office", async () => {
   assert.match(page, /new Company\(\)/);
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
+  assert.match(page, /<RiskQaPanel/);
+  assert.match(page, /RiskQaPanel/);
+  const riskQaBridge = await readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8");
+  assert.match(riskQaBridge, /RSK-00/);
+  assert.match(riskQaBridge, /QAA-07/);
+  assert.match(riskQaBridge, /InputSnapshot/);
+  assert.match(riskQaBridge, /orchestrator: "Hermes"/);
+  assert.match(riskQaBridge, /employeeExecutor: "LangGraph"/);
   assert.match(layout, /title:\s*COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);

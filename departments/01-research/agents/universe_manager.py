@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
+PERSONA = "universe-manager"   # 부서 허용목록 키
 AGENT_VERSION = "research-universe-manager-v1"
 KST = timezone(timedelta(hours=9))
 PATH = "/stock/market-data"
@@ -101,20 +102,116 @@ def decide(basket: tuple[str, ...], restricted: dict[str, set[str]],
     )
 
 
-def run(client=None, basket: tuple[str, ...] = ()) -> UniverseDecision:
-    from ls_client import LsRestClient
+# 스냅샷이 이보다 오래되면 판정하지 않는다. 0 = 그날 것만 허용하면 아침
+# 수집 전(장 시작 08:45 이전)에 전부 막히므로 하루를 준다 - 그 사이 새로
+# 정지된 종목은 최대 하루 늦게 반영되지만, 여러 날 묵은 목록으로 '지금
+# 거래가능'을 말하는 것보다 낫다.
+MAX_RESTRICTION_STALE_DAYS = 1
+
+
+def check_snapshot_freshness(payload: dict, *, today=None) -> int:
+    """스냅샷이 며칠 묵었는지 확인하고, 한계를 넘으면 판정을 멈춘다.
+
+    2026-08-02 실측 결함: 판정하는 쪽이 스냅샷의 as_of 를 버리고 now() 를
+    썼다. 그래서 universe_restriction_collector 가 며칠 멈춰도 '가장 최근'
+    목록이 늘 무언가를 돌려주며 **낡은 목록이 오늘의 판정으로 나갔다.**
+    그 사이 정지된 종목은 거래가능으로 새는 방향으로 틀린다(fail-closed 위반).
+
+    total_rows 가 0 인 것도 거부한다 - 거래제한 종목이 하나도 없는 날은
+    현실적으로 없고, 수집 실패가 빈 스냅샷으로 남았을 가능성이 훨씬 크다.
+    """
+    raw = payload.get("as_of")
+    if not raw:
+        raise RuntimeError(
+            "거래제한 응답에 as_of 가 없다 - 언제 것인지 모르는 목록으로는 "
+            "판정하지 않는다(fail-closed)")
+    try:
+        snap_date = date.fromisoformat(str(raw)[:10])
+    except ValueError as e:
+        raise RuntimeError(f"거래제한 as_of 를 못 읽는다: {raw!r}") from e
+
+    total = payload.get("total_rows")
+    if total is not None and int(total) <= 0:
+        raise RuntimeError(
+            f"{snap_date} 거래제한 스냅샷이 0행이다 - 제한 종목이 정말 없는 "
+            f"것과 수집 실패를 구분할 수 없으므로 판정을 멈춘다")
+
+    today = today or datetime.now(KST).date()
+    stale = (today - snap_date).days
+    if stale > MAX_RESTRICTION_STALE_DAYS:
+        raise RuntimeError(
+            f"거래제한 스냅샷이 {stale}일 묵었다({snap_date} 기준, 오늘 {today}) - "
+            f"그 사이 정지된 종목이 거래가능으로 샐 수 있어 판정을 멈춘다. "
+            f"universe_restriction_collector 를 먼저 돌릴 것")
+    return stale
+
+
+def restrictions_from_api(payload: dict) -> dict[str, set[str]]:
+    """research-api /universe/restrictions 응답 -> {사유: 종목집합}.
+
+    사유 목록은 **우리가 아는 것만** 받는다. 모르는 사유가 오면 무시하지 않고
+    드러낸다 - 목록 정의가 바뀌었는데 조용히 통과하면 정지 종목이 샌다.
+    """
+    check_snapshot_freshness(payload)
+    known = {r for _tr, _j, r in RESTRICTION_SOURCES}
+    out: dict[str, set[str]] = {r: set() for r in known}
+    unknown: set[str] = set()
+    for row in payload.get("restrictions") or []:
+        reason = str(row.get("reason") or "").strip()
+        sym = str(row.get("symbol") or "").strip()
+        if not sym:
+            continue
+        if reason in known:
+            out[reason].add(sym)
+        else:
+            unknown.add(reason)
+    if unknown:
+        raise RuntimeError(
+            f"모르는 제한 사유 {sorted(unknown)} - RESTRICTION_SOURCES 와 "
+            f"수집기 정의가 어긋났다(판정을 멈춘다)")
+    return out
+
+
+def run(client=None, basket: tuple[str, ...] = (),
+        research_api: str | None = None, get=None) -> UniverseDecision:
+    """거래가능 판정.
+
+    ▶ 2026-08-02: LS REST 직접 호출을 **research-api 조회로 바꿨다.**
+      판정하는 쪽이 LS 자격을 들고 있으면 파이프라인을 돌리는 컨테이너마다
+      자격이 퍼진다(통합계획 6.2 위반). 이제 수집기
+      (universe_restriction_collector)만 자격을 갖고, 여기는 DB 를 읽는다.
+      client 인자는 자체 점검·수동 호출 호환으로 남기되, 주면 옛 경로를 쓴다.
+    """
+    import json as _json
+    import os
+    import urllib.request
 
     from news_watch_service import parse_watchlist_file
 
     if not basket:
         wl = Path(__file__).resolve().parent.parent / "config" / "news_watchlist.txt"
         basket = parse_watchlist_file(wl.read_text(encoding="utf-8"))
-    c = client or LsRestClient()
-    restricted = {
-        reason: fetch_restricted(c, tr, jong)
-        for tr, jong, reason in RESTRICTION_SOURCES
-    }
-    return decide(basket, restricted, as_of=datetime.now(timezone.utc))
+
+    if client is not None:      # 옛 경로 - LS 직접(자체 점검·긴급 수동용)
+        restricted = {reason: fetch_restricted(client, tr, jong)
+                      for tr, jong, reason in RESTRICTION_SOURCES}
+        return decide(basket, restricted, as_of=datetime.now(timezone.utc))
+
+    base = (research_api or os.environ.get("RESEARCH_API_URL",
+                                           "http://127.0.0.1:8035")).rstrip("/")
+
+    def _default_get(url):
+        # 페르소나를 밝힌다(Tool Gateway 이행, 2026-08-02). 강제 모드에서
+        # 헤더 없이 부르면 403 이고, 실제로 그렇게 걸렸다.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
+        from api_client import get_json
+
+        return get_json(url, persona=PERSONA, timeout=25)
+
+    # 조회 실패는 예외다 - 빈 목록으로 위장하면 정지 종목이 거래가능으로 샌다
+    payload = (get or _default_get)(f"{base}/universe/restrictions")
+    return decide(basket, restrictions_from_api(payload),
+                  as_of=datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +266,66 @@ def _check_pagination():
     print("  연속조회                 OK")
 
 
+
+def _check_snapshot_freshness():
+    """낡은 스냅샷으로는 '지금 거래가능'을 말하지 않는다."""
+    today = date(2026, 8, 3)
+    ok = {"as_of": "2026-08-03", "total_rows": 250, "restrictions": []}
+    assert check_snapshot_freshness(ok, today=today) == 0
+    # 하루까지는 허용 - 아침 수집 전에 전부 막히면 그것도 못 쓴다
+    assert check_snapshot_freshness(dict(ok, as_of="2026-08-02"), today=today) == 1
+
+    for bad, why in (
+        ({"total_rows": 1, "restrictions": []}, "as_of 없음"),
+        (dict(ok, as_of="2026-07-30"), "4일 묵음"),
+        (dict(ok, total_rows=0), "0행 스냅샷"),
+        (dict(ok, as_of="망가진날짜"), "파싱 불가"),
+    ):
+        try:
+            check_snapshot_freshness(bad, today=today)
+            raise AssertionError(f"{why} 인데 판정이 진행됐다")
+        except RuntimeError:
+            pass
+    print("  스냅샷 신선도            OK")
+
+
+def _check_api_restrictions():
+    """API 응답 -> 판정. 모르는 사유는 조용히 무시하지 않는다."""
+    today = datetime.now(KST).date().isoformat()
+    payload = {"as_of": today, "total_rows": 4, "restrictions": [
+        {"symbol": "000660", "reason": "HALTED"},
+        {"symbol": "005930", "reason": "ADMINISTERED"},
+        {"symbol": "000660", "reason": "ADMINISTERED"},   # 중복 사유 - 둘 다 받는다
+        {"symbol": "", "reason": "HALTED"},                # 빈 종목 - 버린다
+    ]}
+    got = restrictions_from_api(payload)
+    assert got["HALTED"] == {"000660"} and got["ADMINISTERED"] == {"000660", "005930"}
+    assert got["LIQUIDATION"] == set(), "없는 사유도 키는 있어야 한다"
+
+    d = decide(("000660", "005930", "035720"), got, as_of=datetime.now(timezone.utc))
+    assert d.tradable == ("035720",), d.tradable
+    assert d.excluded["000660"] == "HALTED", "심각도 순서(정지가 관리보다 앞)"
+
+    # 모르는 사유가 오면 판정을 멈춘다 - 조용히 통과하면 정지 종목이 샌다
+    try:
+        restrictions_from_api({"as_of": today, "total_rows": 1,
+                               "restrictions": [{"symbol": "000660",
+                                                 "reason": "NEW_RULE"}]})
+        raise AssertionError("모르는 사유가 통과했다")
+    except RuntimeError:
+        pass
+
+    # run() 이 API 경로를 쓰는지 - 자격 없이 판정되는 것이 이 변경의 목적이다
+    called = {}
+    def fake_get(url):
+        called["url"] = url
+        return payload
+    d2 = run(basket=("000660", "035720"), research_api="http://x", get=fake_get)
+    assert "/universe/restrictions" in called["url"], called
+    assert d2.tradable == ("035720",)
+    print("  API 경유 판정            OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -184,4 +341,6 @@ if __name__ == "__main__":
     _check_decide()
     _check_fail_closed()
     _check_pagination()
-    print("직원 3개 영역 통과. 실제 판정은 --run")
+    _check_snapshot_freshness()
+    _check_api_restrictions()
+    print("직원 5개 영역 통과. 실제 판정은 --run")

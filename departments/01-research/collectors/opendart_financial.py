@@ -20,11 +20,13 @@
      이것이 IFRS 표준코드가 아님을 명시한다. 표준코드가 필요해지면 2019020 이나
      XBRL 택사노미(2020001)로 보강한다.
 
-  2. **당기만 적재한다.** 응답은 당기·전기·전전기 3개 기간을 한 번에 준다. 전기 값을
-     같이 적재하면 같은 period_end 를 두 보고서가 서로 다른 시점에 보고하는 상황이
-     생기고(2025 사업보고서의 전기 = 2024, 2024 사업보고서의 당기 = 2024), 지금
-     unique key 로는 어느 것이 나중 개정본인지 구분되지 않는다. revision 규칙을
-     정하기 전에는 당기만 넣고 전기·전전기는 metadata 에 참고로 남긴다.
+  2. **당기 + 전기(연차 한정)를 적재한다.** (2026-08-01 개정 - 원래는 당기만이었다)
+     응답은 당기·전기·전전기 3개 기간을 한 번에 준다. 원래 미룬 이유(같은
+     period_end 를 두 보고서가 보고할 때 개정본 구분 불가)는 upsert 가 자연키
+     DO UPDATE 로 **최신 관측 수렴**임이 확인되며 해소됐다 - 정정 재무제표의
+     전기 재작성값이 오히려 최신 상태다. 분기 보고서의 frmtrm 은 BS(전기말)와
+     IS(누적/동기)의 의미가 갈려 **연차(11011)만** 방출한다(prior_fact_from_row).
+     이로써 펀더멘털 분석가의 YoY 가 활성화된다. 전전기는 여전히 metadata 참고.
 
 ▶ PIT 한계
   published_at 을 rcept_no 앞 8자리(접수일)로 만든다. 공시와 같은 DAY 정밀도 문제이며
@@ -209,6 +211,46 @@ def to_fact(row: dict, *, observed_at: datetime) -> FinancialFact:
     )
 
 
+def prior_fact_from_row(row: dict, current: "FinancialFact") -> "FinancialFact | None":
+    """전기(frmtrm) 값을 별도 행으로 방출한다 - YoY 활성화 (2026-08-01, 결정 2 개정).
+
+    ▶ 왜 이제 안전한가 (원래 결정 2 가 미룬 이유의 해소)
+      - 키 충돌 우려: upsert 가 (계정, 기간, scope, revision) 자연키에 DO UPDATE
+        라 같은 기간을 두 보고서가 보고해도 **최신 관측으로 수렴**한다. 정정
+        재무제표의 전기 재작성값이 오히려 최신 상태이므로 이 방향이 맞다.
+      - 범위 한정: **연차보고서(11011)만** 방출한다 - 분기 보고서의 frmtrm 은
+        재무상태표(전기말)와 손익(누적/동기)의 의미가 갈려 오적재 위험이 있다.
+    published_at 은 이 보고서의 게시일 그대로다 - 전기 수치도 이 보고서로
+    관측된 것이므로 PIT 가 정확하다. 금액·일자 결측/파싱 불가면 None(방출 안 함).
+    """
+    if str(current.metadata.get("reprt_code", "")) != "11011":
+        return None
+    amt = parse_amount(row.get("frmtrm_amount"))
+    dt_raw = str(row.get("frmtrm_dt") or "").strip()
+    if amt is None or not dt_raw:
+        return None
+    try:
+        pend = parse_period_end(dt_raw)
+    except (ValueError, AttributeError):
+        return None
+    return FinancialFact(
+        corp_code=current.corp_code, account_code=current.account_code,
+        account_name=current.account_name, period_end=pend,
+        period_type=current.period_type,
+        consolidation_scope=current.consolidation_scope,
+        value=amt, unit=current.unit, currency=current.currency,
+        published_at=current.published_at, observed_at=current.observed_at,
+        rcept_no=current.rcept_no,
+        metadata={
+            "source": current.metadata.get("source"),
+            "account_code_scheme": current.metadata.get("account_code_scheme"),
+            "published_at_precision": current.metadata.get("published_at_precision"),
+            "reprt_code": current.metadata.get("reprt_code"),
+            "origin": f"frmtrm of {current.rcept_no}",   # 전기 참고값 출처 표식
+            "frmtrm_dt": dt_raw,
+        })
+
+
 def collect_financials(
     client: OpenDartClient,
     corp_codes: list[str],
@@ -246,9 +288,14 @@ def collect_financials(
         fetched += len(rows)
         for row in rows:
             try:
-                facts.append(to_fact(row, observed_at=obs))
+                cur_fact = to_fact(row, observed_at=obs)
+                facts.append(cur_fact)
             except ValueError:
                 skipped += 1
+                continue
+            prior = prior_fact_from_row(row, cur_fact)
+            if prior is not None:
+                facts.append(prior)
 
     # DART 응답에 유니크 키 중복이 있다(실측: `IS:당기순이익(손실)` 이 값까지 같은 채로
     # 두 번 온다). ON CONFLICT DO UPDATE 는 같은 명령에서 같은 행을 두 번 건드릴 수 없어
@@ -363,6 +410,25 @@ def _check_fact_mapping():
     print("  재무 -> financial_facts     OK")
 
 
+def _check_prior_period_emission():
+    """전기(frmtrm) 방출 - 연차 한정·PIT 유지·결측 미방출 (결정 2 개정 검증)."""
+    cur = to_fact(_ROW, observed_at=_OBS)
+    p = prior_fact_from_row(_ROW, cur)
+    assert p is not None and p.period_end == date(2024, 12, 31)
+    assert p.value == Decimal("227062266000000")
+    assert p.published_at == cur.published_at, "전기도 이 보고서로 관측 - PIT 게시일 유지"
+    assert p.account_code == cur.account_code and p.consolidation_scope == cur.consolidation_scope
+    assert p.metadata["origin"].startswith("frmtrm of ")
+    # 연차(11011)가 아니면 방출하지 않는다 - 분기 frmtrm 은 의미가 갈린다
+    q = to_fact({**_ROW, "reprt_code": "11013"}, observed_at=_OBS)
+    assert prior_fact_from_row({**_ROW, "reprt_code": "11013"}, q) is None
+    # 금액·일자 결측이면 방출하지 않는다 (지어내지 않는다)
+    assert prior_fact_from_row({**_ROW, "frmtrm_amount": ""}, cur) is None
+    assert prior_fact_from_row({**_ROW, "frmtrm_dt": ""}, cur) is None
+    assert prior_fact_from_row({**_ROW, "frmtrm_dt": "이상한 형식"}, cur) is None
+    print("  전기 방출 (YoY 활성화)   OK")
+
+
 def _check_fail_closed():
     for bad, why in (
         ({**_ROW, "corp_code": ""}, "corp_code 없음"),
@@ -414,7 +480,8 @@ def _check_batching_and_error_counting():
     r = collect_financials(c, codes, bsns_year="2025", reprt_code="11011")
     assert c.batches == [50, 50, 20], c.batches
     # 2번째 배치가 실패했으므로 50건이 skipped 로 잡혀야 한다
-    assert len(r.facts) == 70 and r.skipped == 50, (len(r.facts), r.skipped)
+    # 70건의 당기 + 70건의 전기(frmtrm 방출, 2026-08-01 결정 2 개정) = 140
+    assert len(r.facts) == 140 and r.skipped == 50, (len(r.facts), r.skipped)
     print("  배치/실패 집계              OK")
 
 
@@ -430,13 +497,14 @@ def _check_duplicate_handling():
 
     same = collect_financials(_Dup("247,684,612,000,000"), ["00126380"],
                              bsns_year="2025", reprt_code="11011")
-    assert len(same.facts) == 1, "중복이 걸러지지 않았다"
-    assert same.duplicates_same_value == 1 and same.duplicates_conflicting == ()
+    # 당기 1 + 전기 1 (frmtrm 방출, 결정 2 개정). 당기·전기 각각 중복 1회 흡수
+    assert len(same.facts) == 2, "중복이 걸러지지 않았다"
+    assert same.duplicates_same_value == 2 and same.duplicates_conflicting == ()
 
     diff = collect_financials(_Dup("999,999"), ["00126380"],
                               bsns_year="2025", reprt_code="11011")
-    assert len(diff.facts) == 1
-    assert diff.duplicates_same_value == 0
+    assert len(diff.facts) == 2          # 당기 1(상충 보고) + 전기 1(값 동일 흡수)
+    assert diff.duplicates_same_value == 1
     assert len(diff.duplicates_conflicting) == 1, "값 상충이 보고되지 않았다"
     assert "!=" in diff.duplicates_conflicting[0]
     assert "중복(값 상충)" in diff.summary()
@@ -501,4 +569,5 @@ if __name__ == "__main__":
     _check_fail_closed()
     _check_batching_and_error_counting()
     _check_duplicate_handling()
-    print("재무 6개 영역 통과. 실제 수집은 --collect")
+    _check_prior_period_emission()
+    print("재무 7개 영역 통과. 실제 수집은 --collect")

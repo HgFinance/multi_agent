@@ -26,9 +26,15 @@
   - 뉴스·실시간 시세: 전용 상주 컨테이너(news-watcher, ls-realtime)가 맡는다.
 
 실행
-  python collectors/collector_scheduler.py            # 상주 실행
-  python collectors/collector_scheduler.py --check    # 자체 점검 (실행 없음)
+  python collectors/collector_scheduler.py            # 자체 점검 (실행 없음)
+  python collectors/collector_scheduler.py --check    # 같음 (명시형)
+  python collectors/collector_scheduler.py --serve    # **상주 실행** (compose 가 쓴다)
   python collectors/collector_scheduler.py --once 이름  # 한 Job 즉시 1회 (수동 점검용)
+
+  인자 없는 실행이 상주가 아닌 이유: 이 저장소는 "python <파일> = 자체 점검"이
+  관례다. 이 파일만 예외라서, 전 모듈을 훑는 점검 루프가 돌 때마다 상주
+  스케줄러가 조용히 떴다(2026-08-02까지 4회). 관례를 어기는 쪽이 플래그를
+  달게 했다.
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ CHECK_EVERY_SECONDS = 30.0
 JOB_TIMEOUT_SECONDS = 30 * 60
 FAILURE_ALERT_THRESHOLD = 3
 EXIT_SKIP = 2  # 수집기 규약: "의도된 미수집" (market_breadth 실측)
+TIMEOUT_EXIT = -1  # 타임아웃은 종료 코드를 못 받는다 - DB 기록용 표식
 
 
 @dataclass(frozen=True)
@@ -75,16 +82,60 @@ JOBS: tuple[Job, ...] = (
     # 시장 Breadth - 세션 판정은 수집기 자신이 한다 (휴장이면 exit 2 = SKIP)
     Job("breadth", ("collectors/market_breadth_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 30), time(16, 10))),
+    # KOSPI200 파생 스냅샷 - 파생 세션(주식 ±15분)은 수집기가 판정, 밖이면 SKIP.
+    # 창 상한 17:00: 수능일 파생 마감 16:45 까지 덮는다. 호출 4회/실행이라 가볍다.
+    Job("derivatives", ("collectors/derivatives_collector.py", "--collect"),
+        every_minutes=10, window=(time(8, 40), time(17, 0))),
+    # 거래제한 종목 스냅샷 - **자격을 수집기에 가둔다.** 판정하는 쪽
+    # (universe_manager)이 LS 를 직접 물면 파이프라인 컨테이너마다 LS 키가
+    # 필요해진다(통합계획 6.2 위반). 07:05: 공시 폴링(07:00) 직후, 개장 전.
+    Job("universe-restrictions",
+        ("collectors/universe_restriction_collector.py", "--collect"),
+        daily_at=time(7, 5)),
+    # 일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다. 16:30:
+    # VKOSPI(16:05) 뒤라 그날 시장 상태가 다 반영된 시점. 이 이력이 있어야
+    # Packet 의 REGIME_FLIP·GEO_ESCALATION 주장을 채점할 수 있다.
+    # **사후 소급이 불가능하므로 매일 도는 것 자체가 자산이다.**
+    Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
+        daily_at=time(16, 30)),
+    # VKOSPI 종가 - 정규장 마감(15:45) 뒤. 휴장이면 수집기가 SKIP(exit 2) 한다
+    # (t1511 은 휴장에도 직전 종가를 주므로 그대로 넣으면 없는 관측이 생긴다).
+    Job("vkospi", ("collectors/volatility_index_collector.py", "--collect"),
+        daily_at=time(16, 5)),
+    # 스타일·안전자산 지수 6계열 - VKOSPI 와 같은 t1511 경로, 같은 휴장 규칙.
+    # 1분 뒤에 둬서 두 수집기가 같은 초에 LS 를 두드리지 않게 한다.
+    Job("style-index", ("collectors/style_index_collector.py", "--collect"),
+        daily_at=time(16, 6)),
     # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 20)),
     Job("macro", ("collectors/macro_collector.py", "--collect"),
         daily_at=time(7, 30)),
+    # 시세 평면 심박·품질 감사 - 개장 전, 밤 배치가 다 끝난 뒤 (FAIL 이면 exit 1
+    # 로 스케줄러 로그에 남는다 - 개장 전에 눈에 띄는 것이 목적)
+    Job("data-steward", ("collectors/market_data_steward.py", "--audit"),
+        daily_at=time(7, 10)),
+    # 리서치 평면 DQ - 시세 Steward(07:10)와 같은 목적, 다른 평면.
+    # 07:15: 개장 전이고 밤 배치(문서·재무·거시)가 다 끝난 뒤다.
+    # FAIL 이면 exit 1 로 스케줄러 로그에 남는다.
+    Job("research-data-steward", ("collectors/research_data_steward.py", "--audit"),
+        daily_at=time(7, 15)),
+    # Raw -> 검증된 Parquet Archive (전일분 - 기본값이 데이터 있는 최근 거래일).
+    # 06:50: 분봉 백필 등 밤 작업이 끝난 뒤, Steward(07:10)가 결과를 보기 전.
+    Job("market-archive", ("collectors/market_archive_exporter.py", "--export"),
+        daily_at=time(6, 50)),
     # --limit 명시: CLI 기본값(재무 20, CA 40)은 프로브용이라 스케줄이 그대로 쓰면
     # 발행사 1,049곳 중 꼬리만 돌게 된다 (2026-07-31 점검에서 발견).
     # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
     Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1200"),
         daily_at=time(18, 10)),
+    # 전종목 바스켓 재생성 - 제한 스냅샷(07:05) 뒤라 그날의 정지·관리 종목이
+    # 반영된다. 파일은 config 에 쓰므로 이 Job 은 호스트 권한이 필요하다 -
+    # 컨테이너 config 는 읽기 전용이라 실패한다(알려진 제약, 백로그).
+    # 현금흐름표 - F-Score 를 6/9 에서 9/9 로 올리는 재료. 회사당 1호출이라
+    # 감시 바스켓(400)만 받는다. 18:50: 재무(18:10) 뒤, CA(18:30) 사이 여유.
+    Job("cashflow", ("collectors/opendart_cashflow.py", "--collect", "--limit", "3000"),
+        daily_at=time(18, 50)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "400"),
         daily_at=time(18, 30)),
     # 공시 원문 Archive - 당일 공시 원본 ZIP 을 Private Storage 로 (2시간 유예가
@@ -96,6 +147,29 @@ JOBS: tuple[Job, ...] = (
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
     Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
         daily_at=time(19, 0)),
+    # 역량 격차 감사 - "쓸 수 있는데 안 쓰는 것"을 스스로 찾는다. 매일 07:40
+    # (지정학 07:20 뒤). LS 호출 1회 + 질의 몇 개라 가볍다. 발견만 하고
+    # 채택은 사람이 한다 - 리포트가 reports/capability_audit_*.md 로 남는다.
+    Job("capability-audit", ("collectors/capability_audit.py", "--audit"),
+        daily_at=time(7, 40)),
+    # Packet 사후 채점 - 선순환의 되먹임. 지평(5·20 거래일)이 지난 Packet 을
+    # 시세로 대조해 research.packet_outcomes 에 남긴다. 18:00: 당일 종가가
+    # 확정되고 밤 배치가 시작되기 전.
+    Job("packet-outcome", ("collectors/packet_outcome_scorer.py", "--score"),
+        daily_at=time(18, 0)),
+    # 지정학 리스크 (GPR 일별 지수 + GDELT 테마 보도량·톤).
+    # 07:20 - Steward(07:10) 뒤, 개장 전. 밤사이 미국·중동 사건이 반영된
+    # 상태로 장을 연다. 일 단위 계열이고 진행 중인 날은 제외하므로 장중
+    # 재폴링은 이득이 없다(15분 해상도가 필요하면 timelinevolraw - 백로그).
+    Job("geopolitical", ("collectors/geopolitical_collector.py", "--collect",
+                         "--days", "120"),
+        daily_at=time(7, 20)),
+    # Bluesky 미국 표적 계정 (기관 미디어 4곳 + 매크로 논객 2인, ~166건/일 실측).
+    # 60분 주기면 계정당 피드 50건 버퍼가 최고 볼륨(Reuters ~57건/일)도 20시간
+    # 이상 덮는다 - 놓칠 수 없는 구조. 창 06:00~23:50: 미 장중(KST 밤)은 다음날
+    # 아침 첫 폴링이 버퍼로 회수하므로 새벽 상주가 필요 없다.
+    Job("bluesky-watch", ("collectors/bluesky_watch_collector.py", "--collect"),
+        every_minutes=60, window=(time(6, 0), time(23, 50))),
 )
 
 
@@ -136,6 +210,56 @@ def run_job(job: Job, *, timeout: float = JOB_TIMEOUT_SECONDS) -> tuple[int, str
     return proc.returncode, tail
 
 
+def classify(exit_code: int) -> str:
+    """종료 코드 -> 상태. SKIP 은 실패가 아니다(휴장 등 의도된 미수집)."""
+    if exit_code == 0:
+        return "OK"
+    if exit_code == EXIT_SKIP:
+        return "SKIP"
+    if exit_code == TIMEOUT_EXIT:
+        return "TIMEOUT"
+    return "FAILED"
+
+
+def record_run(job_name: str, argv: tuple[str, ...], *, started, ended,
+               exit_code: int, tail: str, consecutive_failures: int,
+               conn=None) -> bool:
+    """research.collector_runs 기록.
+
+    **기록 실패가 수집을 죽이면 안 된다** - 조용한 실패를 막으려고 만든 장치가
+    새로운 실패 원인이 되면 본말전도다. 실패는 stderr 로만 알린다.
+    """
+    try:
+        own = conn is None
+        if own:
+            import psycopg2
+
+            from source_registry import load_project_env
+
+            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                    connect_timeout=10)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into research.collector_runs
+                  (job_name, argv, started_at, ended_at, duration_ms, exit_code,
+                   status, consecutive_failures, output_tail, scheduler_version)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (job_name, " ".join(argv), started, ended,
+                 int((ended - started).total_seconds() * 1000), exit_code,
+                 classify(exit_code), consecutive_failures,
+                 (tail or "")[:4000], SCHEDULER_VERSION))
+        conn.commit()
+        if own:
+            conn.close()
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ collector_runs 기록 실패({job_name}): {type(e).__name__}: "
+              f"{str(e)[:120]}", file=sys.stderr, flush=True)
+        return False
+
+
 def main() -> int:
     stop = threading.Event()
 
@@ -169,9 +293,16 @@ def main() -> int:
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: ⚠ TIMEOUT "
                       f"({JOB_TIMEOUT_SECONDS / 60:.0f}분, 연속 {st.consecutive_failures})",
                       flush=True)
+                # 타임아웃도 기록한다 - 로그에만 남기면 재시작과 함께 사라진다
+                record_run(job.name, job.argv, started=st.last_started,
+                           ended=datetime.now(KST), exit_code=TIMEOUT_EXIT,
+                           tail=f"{JOB_TIMEOUT_SECONDS/60:.0f}분 초과",
+                           consecutive_failures=st.consecutive_failures)
                 continue
             st.runs += 1
             st.last_finished_date = datetime.now(KST).date()
+            # 상태 갱신 뒤 기록해야 consecutive_failures 가 맞다 - 아래 분기에서
+            # 0 으로 초기화되거나 증가한 값을 그대로 남긴다.
             if code == 0:
                 st.consecutive_failures = 0
                 last = tail.splitlines()[-1] if tail else ""
@@ -185,6 +316,9 @@ def main() -> int:
                 mark = " ⚠" if st.consecutive_failures >= FAILURE_ALERT_THRESHOLD else ""
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: 실패 exit={code} "
                       f"(연속 {st.consecutive_failures}){mark}\n{tail}", flush=True)
+            record_run(job.name, job.argv, started=st.last_started,
+                       ended=datetime.now(KST), exit_code=code, tail=tail,
+                       consecutive_failures=st.consecutive_failures)
         stop.wait(CHECK_EVERY_SECONDS)
 
     print("종료: " + ", ".join(
@@ -203,7 +337,11 @@ def _check_job_table():
     for j in JOBS:
         assert Path(__file__).resolve().parent.parent.joinpath(j.argv[0]).exists(), \
             f"{j.name}: {j.argv[0]} 이 없다"
-        assert "--collect" in j.argv, f"{j.name}: --collect 가 없다 - 자체점검만 돌게 된다"
+        # 실행 플래그가 없으면 수집기 규약상 자체점검만 돌게 된다.
+        # --collect(수집) / --audit(Steward 감사) / --export(Archive) /
+        # --score(Packet 사후 채점) 가 실행 동사다.
+        assert {"--collect", "--audit", "--export", "--score"} & set(j.argv), \
+            f"{j.name}: 실행 플래그가 없다 - 자체점검만 돈다"
     try:
         Job("bad", ("x.py", "--collect"))
         raise AssertionError("every/daily 둘 다 없는 Job 이 통과했다")
@@ -246,6 +384,30 @@ def _check_exit_codes():
     print("  종료 코드 규약           OK")
 
 
+def _check_status_classification():
+    """SKIP 을 실패로 세면 휴장마다 경보가 울려 아무도 안 보게 된다."""
+    assert classify(0) == "OK"
+    assert classify(EXIT_SKIP) == "SKIP"
+    assert classify(1) == "FAILED"
+    assert classify(TIMEOUT_EXIT) == "TIMEOUT"
+    assert classify(255) == "FAILED"
+    print("  실행 상태 분류           OK")
+
+
+def _check_record_failure_is_contained():
+    """기록 실패가 수집을 죽이면 안 된다 - 조용한 실패를 막는 장치가 새로운
+    실패 원인이 되면 본말전도다."""
+    class _Boom:
+        def cursor(self):
+            raise RuntimeError("DB down")
+
+    now = datetime.now(KST)
+    ok = record_run("t", ("x.py", "--collect"), started=now, ended=now,
+                    exit_code=0, tail="", consecutive_failures=0, conn=_Boom())
+    assert ok is False, "기록 실패를 성공으로 보고했다"
+    print("  기록 실패 격리           OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -255,7 +417,9 @@ if __name__ == "__main__":
         _check_job_table()
         _check_due_logic()
         _check_exit_codes()
-        print("스케줄러 3개 영역 통과. 상주 실행은 인자 없이")
+        _check_status_classification()
+        _check_record_failure_is_contained()
+        print("스케줄러 5개 영역 통과. 상주 실행은 --serve")
         raise SystemExit(0)
 
     if "--once" in sys.argv:
@@ -269,4 +433,22 @@ if __name__ == "__main__":
         print(f"exit={code}")
         raise SystemExit(0 if code in (0, EXIT_SKIP) else code)
 
-    raise SystemExit(main())
+    # ▶ 상주 기동은 **명시적으로만** (2026-08-02)
+    #   예전에는 인자가 없으면 곧장 상주 루프였다. 그런데 이 저장소의 관례는
+    #   "python <파일>" = 자체 점검이라, 전 모듈을 훑는 점검 루프가 이 파일을
+    #   만날 때마다 스케줄러가 조용히 떴다(네 번 겪었다 - 그때마다 사람이
+    #   알아채고 정리해야 했다). 관례를 지키는 쪽이 아니라 **어기는 쪽이
+    #   비용을 내야** 한다: 상주는 --serve 로만, 인자 없으면 점검이다.
+    if "--serve" in sys.argv:
+        raise SystemExit(main())
+
+    print(f"{SCHEDULER_VERSION}: 인자가 없으면 자체 점검만 한다 "
+          f"(상주 기동은 --serve, 단발 실행은 --once <job>)")
+    print(f"{SCHEDULER_VERSION} 자체 점검 (실행 없음)")
+    _check_job_table()
+    _check_due_logic()
+    _check_exit_codes()
+    _check_status_classification()
+    _check_record_failure_is_contained()
+    print("스케줄러 5개 영역 통과. 상주 실행은 --serve")
+    raise SystemExit(0)

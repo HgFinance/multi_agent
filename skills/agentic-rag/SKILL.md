@@ -13,7 +13,7 @@ metadata:
 
 ## Overview
 
-This skill runs a small LangGraph pipeline — retrieve → grade → generate → hallucination-check, with a bounded retry loop — over a local document corpus, and returns a structured JSON verdict. It exists so that `compliance-policy-agent` and `evidence-qa-agent` (and later `hallucination-critic`) never answer from the model's own memory of "what the Mandate probably says" or "what the source probably said" — every claim must trace back to a retrieved, Point-in-Time-valid document chunk.
+This skill runs a small LangGraph pipeline — retrieve → grade → generate → hallucination-check, with a bounded retry loop — over a local document corpus, and returns a structured JSON verdict. It exists so that `compliance-policy-agent`, `evidence-qa-agent`, and `hallucination-critic` never answer from the model's own memory of "what the Mandate probably says" or "what the source probably said" — every claim must trace back to a retrieved, Point-in-Time-valid document chunk.
 
 Baseline scope only (see HEDGE_FUND_MASTER_PLAN.md 5.10 and 13.1's "don't over-build early" principle): no query rewriting, reranking, fusion, or semantic cache yet. Those are backlog items once this loop is proven in real use.
 
@@ -22,6 +22,7 @@ Baseline scope only (see HEDGE_FUND_MASTER_PLAN.md 5.10 and 13.1's "don't over-b
 Use this skill whenever a persona needs to answer a question that must be grounded in a specific, versioned document rather than general knowledge or model memory — currently:
 - `compliance-policy-agent` checking a proposed order against the Mandate, Restricted List, or Policy Store (`--persona compliance-policy-agent`, `corpus/compliance/`).
 - `evidence-qa-agent` checking a claim from a Research/Trading Artifact against the Evidence Store (`--persona evidence-qa-agent`, `corpus/evidence/`). This is a citation-grounding aid only — the final PASS/WARN/FAIL gate decision still comes from `departments/06-ai-qa-audit/evidence/evidence_qa_engine.py`, which this skill does not call and does not replace.
+- `hallucination-critic` classifying why a claim was already flagged `UNSUPPORTED`/`CONTRADICTED` (`--persona hallucination-critic`, reuses `corpus/evidence/`). Only runs on claims `evidence_qa_engine.py` already flagged — it does not re-judge `SUPPORTED`/`PARTIAL` claims, and does not overturn the engine's verdict, only classifies the failure and cites supporting excerpts.
 
 ## Prerequisites
 
@@ -94,6 +95,6 @@ Retrieval math and citation-grounding checks are plain Python (`src/nodes.py`, `
 
 ## Extending to other personas
 
-`evidence-qa-agent` is wired in (`corpus/evidence/`, registered in `PERSONA_CORPUS` in `main.py`). System prompts and verdict vocabulary per persona live in `PERSONA_PROMPTS` in `src/nodes.py` — the graph, retriever and node functions are persona-agnostic; only that table and `main.py`'s corpus mapping change per persona.
+`evidence-qa-agent` and `hallucination-critic` are both wired in (`corpus/evidence/`, registered in `PERSONA_CORPUS` in `main.py`). System prompts and verdict vocabulary per persona live in `PERSONA_PROMPTS` in `src/nodes.py` — the graph, retriever and node functions are persona-agnostic; only that table and `main.py`'s corpus mapping change per persona.
 
-To wire in `hallucination-critic` next: add a `PERSONA_PROMPTS` entry in `src/nodes.py` (grade/generate system prompts, a `no_evidence_verdict`, and query/docs labels), then either point it at `corpus/evidence/` (reusing `evidence-qa-agent`'s corpus, since a Hallucination Critic checks the same underlying evidence) or a new corpus directory, and register it in `main.py`'s `PERSONA_CORPUS`.
+To wire in a new persona: add a `PERSONA_PROMPTS` entry in `src/nodes.py` (grade/generate system prompts, a `no_evidence_verdict`, and query/docs labels), then either point it at an existing corpus directory (if it checks the same underlying evidence as an already-wired persona) or a new corpus directory, and register it in `main.py`'s `PERSONA_CORPUS`. If the fallback path in `src/graph.py`'s `run_compliance_check` ever needs a persona-specific default outside `PERSONA_PROMPTS[persona]["no_evidence_verdict"]`, update it there rather than hardcoding a persona name in a ternary.

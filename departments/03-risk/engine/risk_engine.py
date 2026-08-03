@@ -41,7 +41,7 @@ from uuid import UUID, uuid4
 # 본부 간 의존 방향이 이 파일에 그대로 남는다.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
 
-from contracts import (  # noqa: E402
+from contracts import (
     OrderIntent,
     RiskDecision,
     RiskVerdict,
@@ -375,7 +375,7 @@ class RiskEngine:
             )
         if notional > ctx.mandate.max_order_notional:
             capped_qty = (ctx.mandate.max_order_notional / ref_price).quantize(
-                Decimal("1"), rounding=ROUND_DOWN
+                Decimal(1), rounding=ROUND_DOWN
             )
             allowed_qty = min(allowed_qty, capped_qty)
             reasons.append(RejectReason.NOTIONAL_ABOVE_MAXIMUM)
@@ -394,7 +394,7 @@ class RiskEngine:
         # 6. Cash/Buying Power와 Pending Order 포함 Position (매도 초과분 포함).
         if intent.side is Side.BUY:
             affordable_qty = (ctx.portfolio.buying_power / ref_price).quantize(
-                Decimal("1"), rounding=ROUND_DOWN
+                Decimal(1), rounding=ROUND_DOWN
             )
             if affordable_qty <= 0:
                 return reject(
@@ -453,7 +453,7 @@ class RiskEngine:
                 ctx.limits.soft_single_issuer_pct * ctx.portfolio.gross_exposure
                 - current_issuer_exposure,
             )
-            capped_qty = (max_allowed_notional / ref_price).quantize(Decimal("1"), rounding=ROUND_DOWN)
+            capped_qty = (max_allowed_notional / ref_price).quantize(Decimal(1), rounding=ROUND_DOWN)
             allowed_qty = min(allowed_qty, capped_qty)
             reasons.append(RejectReason.CONCENTRATION_LIMIT_SOFT)
             checks.append(CheckOutcome(
@@ -482,7 +482,7 @@ class RiskEngine:
             )
         order_notional = allowed_qty * ref_price
         if order_notional > remaining_turnover:
-            capped_qty = (remaining_turnover / ref_price).quantize(Decimal("1"), rounding=ROUND_DOWN)
+            capped_qty = (remaining_turnover / ref_price).quantize(Decimal(1), rounding=ROUND_DOWN)
             allowed_qty = min(allowed_qty, capped_qty)
             reasons.append(RejectReason.TURNOVER_LIMIT)
             checks.append(CheckOutcome(
@@ -567,10 +567,10 @@ class RiskEngine:
 
 
 if __name__ == "__main__":
-    from contracts import MarketSnapshot, OrderType, TimeInForce  # noqa: E402
+    from contracts import MarketSnapshot, OrderType, TimeInForce
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "oms"))
-    from oms import OMS  # noqa: E402
+    from oms import OMS
 
     now = datetime.now(timezone.utc)
     fund, book, strategy = uuid4(), uuid4(), uuid4()
@@ -596,18 +596,18 @@ if __name__ == "__main__":
         defaults = dict(
             mandate=MandateScope(
                 fund_id=fund, allowed_instrument_ids=None,
-                min_order_notional=Decimal("100000"), max_order_notional=Decimal("50000000"),
+                min_order_notional=Decimal(100000), max_order_notional=Decimal(50000000),
             ),
             limits=LimitSet(
                 soft_single_issuer_pct=Decimal("0.20"), hard_single_issuer_pct=Decimal("0.30"),
-                max_daily_turnover_notional=Decimal("100000000"), max_daily_order_count=50,
-                max_daily_loss=Decimal("10000000"), max_drawdown_pct=Decimal("0.20"),
+                max_daily_turnover_notional=Decimal(100000000), max_daily_order_count=50,
+                max_daily_loss=Decimal(10000000), max_drawdown_pct=Decimal("0.20"),
             ),
             restricted_items=(),
             portfolio=PortfolioState(
-                fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-                gross_exposure=Decimal("100000000"), peak_equity=Decimal("1000000000"),
-                equity=Decimal("1000000000"),
+                fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+                gross_exposure=Decimal(100000000), peak_equity=Decimal(1000000000),
+                equity=Decimal(1000000000),
             ),
             market_status=MarketStatus(tradable=True),
             counterparty=CounterpartyStatus(broker_adapter="paper", health=CounterpartyHealth.OK),
@@ -636,7 +636,7 @@ if __name__ == "__main__":
 
     # 1. 정상 주문 -> APPROVE, 전체 10개 검사 전부 기록됨
     r = approved(lambda: engine.check_order(make_intent(), base_context()), "평범한 매수")
-    assert r.decision.approved_quantity == Decimal("100")
+    assert r.decision.approved_quantity == Decimal(100)
     assert len(r.check_results) == 10, "10단계 검사가 다 기록돼야 함"
     assert all(c.passed for c in r.check_results)
     assert r.approved_legs and r.approved_legs[0]["order_intent_id"] == str(r.decision.order_intent_id)
@@ -655,16 +655,16 @@ if __name__ == "__main__":
     #    최대치를 낮게 잡아 강제로 걸리게 한다)
     tight_mandate_ctx = base_context(mandate=MandateScope(
         fund_id=fund, allowed_instrument_ids=None,
-        min_order_notional=Decimal("100000"), max_order_notional=Decimal("3500000"),
+        min_order_notional=Decimal(100000), max_order_notional=Decimal(3500000),
     ))
     r = resized(lambda: engine.check_order(make_intent(), tight_mandate_ctx), "최대 Notional 초과")
-    assert r.decision.approved_quantity == Decimal("50"), "3,500,000 / 70,000 = 50주여야 함"
+    assert r.decision.approved_quantity == Decimal(50), "3,500,000 / 70,000 = 50주여야 함"
     assert RejectReason.NOTIONAL_ABOVE_MAXIMUM in r.reason_codes
 
     # 4. Notional 최소 미달 -> REJECT
     below_min_ctx = base_context(mandate=MandateScope(
         fund_id=fund, allowed_instrument_ids=None,
-        min_order_notional=Decimal("50000000"), max_order_notional=Decimal("100000000"),
+        min_order_notional=Decimal(50000000), max_order_notional=Decimal(100000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(), below_min_ctx), "최소 Notional 미달")
     assert RejectReason.NOTIONAL_BELOW_MINIMUM in r.reason_codes
@@ -680,9 +680,9 @@ if __name__ == "__main__":
     no_new_pos_ctx = base_context(
         restricted_items=(RestrictedItem(aapl, RestrictionType.NO_NEW_POSITION, now - timedelta(days=1)),),
         portfolio=PortfolioState(
-            fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-            gross_exposure=Decimal("100000000"), positions={aapl: Decimal("100")},
-            peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+            fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+            gross_exposure=Decimal(100000000), positions={aapl: Decimal(100)},
+            peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
         ),
     )
     rejected(lambda: engine.check_order(make_intent(), no_new_pos_ctx), "NO_NEW_POSITION - 매수는 막힘")
@@ -694,7 +694,7 @@ if __name__ == "__main__":
     # 7. Mandate 유니버스 밖 종목 -> REJECT
     narrow_mandate_ctx = base_context(mandate=MandateScope(
         fund_id=fund, allowed_instrument_ids=frozenset({msft}),
-        min_order_notional=Decimal("100000"), max_order_notional=Decimal("100000000"),
+        min_order_notional=Decimal(100000), max_order_notional=Decimal(100000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(instrument=aapl), narrow_mandate_ctx), "유니버스 밖 종목")
     assert RejectReason.OUTSIDE_MANDATE in r.reason_codes
@@ -711,25 +711,25 @@ if __name__ == "__main__":
 
     # 10. 매수 여력 부족 -> RESIZE
     low_buying_power_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("3500000"), buying_power=Decimal("3500000"),
-        gross_exposure=Decimal("100000000"), peak_equity=Decimal("1000000000"),
-        equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(3500000), buying_power=Decimal(3500000),
+        gross_exposure=Decimal(100000000), peak_equity=Decimal(1000000000),
+        equity=Decimal(1000000000),
     ))
     r = resized(lambda: engine.check_order(make_intent(), low_buying_power_ctx), "매수 여력 부족")
-    assert r.decision.approved_quantity == Decimal("50")
+    assert r.decision.approved_quantity == Decimal(50)
     assert RejectReason.INSUFFICIENT_BUYING_POWER in r.reason_codes
 
     # 11. 초과 매도(공매도) -> RESIZE to 보유 수량 (아직 공매도 미인증)
     oversell_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("100000000"), positions={aapl: Decimal("30")},
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(100000000), positions={aapl: Decimal(30)},
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ))
     r = resized(
         lambda: engine.check_order(make_intent(side=Side.SELL, qty="100"), oversell_ctx),
         "보유량 초과 매도",
     )
-    assert r.decision.approved_quantity == Decimal("30")
+    assert r.decision.approved_quantity == Decimal(30)
     assert RejectReason.OVERSELL in r.reason_codes
     rejected(
         lambda: engine.check_order(make_intent(side=Side.SELL, qty="10", instrument=msft), oversell_ctx),
@@ -738,42 +738,42 @@ if __name__ == "__main__":
 
     # 12. 집중도 Hard Limit 초과 -> REJECT
     conc_hard_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("10000000"), issuer_of={aapl: "AAPL"},
-        issuer_exposure={"AAPL": Decimal("2900000")},
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(10000000), issuer_of={aapl: "AAPL"},
+        issuer_exposure={"AAPL": Decimal(2900000)},
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(qty="100"), conc_hard_ctx), "집중도 Hard Limit 초과")
     assert RejectReason.CONCENTRATION_LIMIT_HARD in r.reason_codes
 
     # 13. 집중도 Soft Limit만 초과 -> RESIZE
     conc_soft_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("10000000"), issuer_of={aapl: "AAPL"},
-        issuer_exposure={"AAPL": Decimal("1900000")},
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(10000000), issuer_of={aapl: "AAPL"},
+        issuer_exposure={"AAPL": Decimal(1900000)},
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ))
     r = resized(lambda: engine.check_order(make_intent(qty="10"), conc_soft_ctx), "집중도 Soft Limit 초과")
     assert RejectReason.CONCENTRATION_LIMIT_SOFT in r.reason_codes
 
     # 14. 일일 회전율 한도 초과 -> RESIZE
     turnover_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("100000000"), notional_traded_today=Decimal("96500000"),
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(100000000), notional_traded_today=Decimal(96500000),
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ), limits=LimitSet(
         soft_single_issuer_pct=Decimal("0.20"), hard_single_issuer_pct=Decimal("0.30"),
-        max_daily_turnover_notional=Decimal("100000000"), max_daily_order_count=50,
-        max_daily_loss=Decimal("10000000"), max_drawdown_pct=Decimal("0.20"),
+        max_daily_turnover_notional=Decimal(100000000), max_daily_order_count=50,
+        max_daily_loss=Decimal(10000000), max_drawdown_pct=Decimal("0.20"),
     ))
     r = resized(lambda: engine.check_order(make_intent(), turnover_ctx), "회전율 한도 초과")
     assert RejectReason.TURNOVER_LIMIT in r.reason_codes
 
     # 15. 일일 주문 건수 한도 초과 -> REJECT
     order_count_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("100000000"), orders_today=50,
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(100000000), orders_today=50,
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(), order_count_ctx), "일일 주문 건수 한도")
     assert RejectReason.ORDER_COUNT_LIMIT in r.reason_codes
@@ -782,9 +782,9 @@ if __name__ == "__main__":
     halted_ctx = base_context(
         trading_state=TradingState.HALTED,
         portfolio=PortfolioState(
-            fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-            gross_exposure=Decimal("100000000"), positions={aapl: Decimal("100")},
-            peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+            fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+            gross_exposure=Decimal(100000000), positions={aapl: Decimal(100)},
+            peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
         ),
     )
     rejected(lambda: engine.check_order(make_intent(), halted_ctx), "HALTED - 신규 매수")
@@ -794,9 +794,9 @@ if __name__ == "__main__":
     entry_blocked_ctx = base_context(
         trading_state=TradingState.ENTRY_BLOCKED,
         portfolio=PortfolioState(
-            fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-            gross_exposure=Decimal("100000000"), positions={aapl: Decimal("100")},
-            peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+            fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+            gross_exposure=Decimal(100000000), positions={aapl: Decimal(100)},
+            peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
         ),
     )
     rejected(lambda: engine.check_order(make_intent(), entry_blocked_ctx), "ENTRY_BLOCKED - 신규 매수 차단")
@@ -807,10 +807,10 @@ if __name__ == "__main__":
 
     # 18. 일일 손실 한도 초과 -> REJECT (신규 진입), 청산은 통과
     loss_limit_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("100000000"), positions={aapl: Decimal("100")},
-        realized_pnl_today=Decimal("-11000000"),
-        peak_equity=Decimal("1000000000"), equity=Decimal("1000000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(100000000), positions={aapl: Decimal(100)},
+        realized_pnl_today=Decimal(-11000000),
+        peak_equity=Decimal(1000000000), equity=Decimal(1000000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(), loss_limit_ctx), "일일 손실 한도 초과")
     assert RejectReason.LOSS_LIMIT_BREACHED in r.reason_codes
@@ -821,9 +821,9 @@ if __name__ == "__main__":
 
     # 19. Drawdown 한도 초과 -> REJECT
     drawdown_ctx = base_context(portfolio=PortfolioState(
-        fund_id=fund, cash=Decimal("100000000"), buying_power=Decimal("100000000"),
-        gross_exposure=Decimal("100000000"),
-        peak_equity=Decimal("1000000000"), equity=Decimal("750000000"),
+        fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
+        gross_exposure=Decimal(100000000),
+        peak_equity=Decimal(1000000000), equity=Decimal(750000000),
     ))
     r = rejected(lambda: engine.check_order(make_intent(), drawdown_ctx), "Drawdown 한도 초과")
     assert RejectReason.DRAWDOWN_LIMIT_BREACHED in r.reason_codes
@@ -841,7 +841,7 @@ if __name__ == "__main__":
         market_status=MarketStatus(tradable=False, reason="거래정지"),
         mandate=MandateScope(
             fund_id=fund, allowed_instrument_ids=None,
-            min_order_notional=Decimal("100000"), max_order_notional=Decimal("1000"),
+            min_order_notional=Decimal(100000), max_order_notional=Decimal(1000),
         ),
     )
     r = rejected(lambda: engine.check_order(make_intent(), combo_ctx), "Hard 조건 우선 차단")
@@ -858,7 +858,7 @@ if __name__ == "__main__":
     oms.apply_risk_decision(rec, assessment.decision)
     order = oms.create_broker_order(rec, intent)
     oms.submit(order, rec)
-    from contracts import BrokerOrderState  # noqa: E402
+    from contracts import BrokerOrderState
     assert order.state is BrokerOrderState.SUBMITTED, "RiskEngine 판정이 OMS Risk Gate를 통과해야 한다"
 
     print("ok - P0 Pre-trade Risk Gate 22개 시나리오 점검 통과")

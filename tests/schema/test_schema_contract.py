@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SUPABASE_MIGRATIONS = ROOT / "supabase" / "migrations"
 TIMESCALE_MIGRATIONS = ROOT / "timescaledb" / "migrations"
@@ -17,7 +16,7 @@ def read_sql_files(directory: Path) -> list[tuple[Path, str]]:
 def created_tables(sql: str) -> set[tuple[str, str]]:
     return set(
         re.findall(
-            r"(?im)^create\s+table\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
+            r"(?im)^create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
             sql,
         )
     )
@@ -31,9 +30,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         cls.tables = created_tables(cls.sql)
 
     def test_migration_sequence_is_complete(self) -> None:
-        self.assertEqual(
-            [path.name for path, _ in self.files],
-            [
+        expected = [
                 "20260729000100_foundation_reference.sql",
                 "20260729000200_governance_workforce.sql",
                 "20260729000300_research_quant_strategy.sql",
@@ -45,8 +42,20 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260731000800_workforce_plan_quality_probation.sql",
                 "20260731000801_news_recency_weight.sql",
                 "20260731000900_public_dashboard_views.sql",
-            ],
-        )
+                "20260731001000_qa_decisions_reproducibility.sql",
+                "20260731001100_dash_news_published_date.sql",
+                "20260801001200_evidence_chunk_embedding_1024.sql",
+                "20260801001300_research_pipeline_runs.sql",
+                "20260802001400_research_packet_outcomes.sql",
+                "20260802001500_research_collector_runs.sql",
+                "20260802001600_risk_qa_runtime_registration.sql",
+                "20260802001700_evidence_embedding_1024_match.sql",
+                "20260802001800_risk_qa_p1_rls.sql",
+                "20260802001900_research_daily_labels.sql",
+                "20260802002000_research_symbol_restrictions.sql",
+                "20260802002100_risk_qa_run_log_replay.sql",
+        ]
+        self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
@@ -68,13 +77,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 19,
+            "audit": 21,
             "execution": 12,
             "governance": 20,
             "quant": 12,
             "reference": 9,
-            "research": 14,
-            "risk": 16,
+            "research": 21,
+            "risk": 17,
             "strategy": 9,
             "workforce": 24,
         }
@@ -107,6 +116,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             ("accounting", "nav_runs"),
             ("audit", "traces"),
             ("audit", "agent_runs"),
+            ("audit", "run_log_events"),
+            ("risk", "run_log_events"),
             ("workforce", "agent_profile_versions"),
         }
         self.assertTrue(required.issubset(self.tables), required - self.tables)

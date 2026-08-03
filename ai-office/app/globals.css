@@ -618,3 +618,102 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
   .office-room { min-height: 205px; }
   .office-legend small { width: 100%; margin-left: 0; }
 }
+.risk-qa-panel { margin-top: 18px; }
+.risk-qa-note { margin: 0 0 14px; color: var(--ink-soft); font-size: 12px; line-height: 1.65; }
+.risk-qa-policy { display: grid; grid-template-columns: repeat(3, auto); gap: 8px 12px; align-items: center; margin-bottom: 16px; padding: 10px 12px; border: 1.5px dashed var(--pink-line); border-radius: 10px; background: #f7f1e8; color: var(--ink-soft); font-size: 11px; }
+.risk-qa-policy b { color: var(--ink); font-size: 11px; }
+.risk-qa-log-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 16px; color: var(--ink-soft); font-size: 10px; }
+.risk-qa-log-flow span { color: var(--pink-deep); font-weight: 900; }
+.risk-qa-log-flow code { padding: 4px 6px; border: 1px solid var(--pink-line); border-radius: 6px; background: white; font-size: 9px; }
+.risk-qa-departments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.risk-qa-department { min-width: 0; padding: 13px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: #fdfaf6; }
+.risk-qa-department-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.risk-qa-department-heading h3 { margin: 0; font-size: 17px; }
+.risk-qa-contract { margin: 9px 0 12px; overflow-wrap: anywhere; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
+.risk-qa-staff { display: grid; gap: 7px; }
+.risk-qa-employee { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; padding: 8px; border: 1px solid var(--pink-line); border-radius: 8px; background: white; }
+.risk-qa-employee div { display: grid; min-width: 0; gap: 2px; }
+.risk-qa-employee b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-employee span { overflow: hidden; color: var(--ink-soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-employee code { align-self: start; color: var(--pink-deep); font-size: 10px; font-weight: 900; }
+.risk-qa-employee small { grid-column: 1 / -1; overflow: hidden; color: var(--ink-faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.risk-qa-source { margin-top: 14px; }
+@media (max-width: 760px) { .risk-qa-departments { grid-template-columns: 1fr; } .risk-qa-policy { grid-template-columns: 1fr 1fr; } }
+
+.risk-qa-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.risk-qa-metrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--pink-line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.risk-qa-metrics span,
+.risk-qa-live-summary span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.risk-qa-metrics b {
+  font-family: "Archivo", sans-serif;
+  font-size: 18px;
+}
+
+.risk-qa-live-summary {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff5c9;
+}
+
+.risk-qa-live-summary strong {
+  font-size: 12px;
+}
+
+.risk-qa-agent-status {
+  align-self: start;
+  justify-self: end;
+  padding: 3px 6px;
+  border: 1px solid var(--pink-line);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.risk-qa-agent-status.working {
+  background: var(--yellow);
+}
+
+.risk-qa-agent-status.done {
+  background: var(--mint);
+}
+
+.risk-qa-agent-status.blocked {
+  background: var(--lav);
+}
+
+.risk-qa-agent-status.waiting {
+  background: #f2eee8;
+}
+
+.risk-qa-agent-task {
+  color: var(--ink-soft) !important;
+}
+
+@media (max-width: 760px) {
+  .risk-qa-metrics {
+    grid-template-columns: 1fr;
+  }
+}

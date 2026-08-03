@@ -31,33 +31,181 @@
 """
 from __future__ import annotations
 
-from psycopg2.extras import Json, register_uuid
-from psycopg2.pool import ThreadedConnectionPool
+from functools import lru_cache
+from typing import Any
 
+from evidence_qa_engine import QaAssessment
 from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
 from trace_recorder import AgentRunRecord, ToolCallRecord
 
-register_uuid()
+
+class QaDecisionPersistenceError(RuntimeError):
+    """Canonical QA Decision을 기록하지 못한 경우."""
+
+
+@lru_cache(maxsize=1)
+def _load_postgres_driver() -> tuple[Any, Any]:
+    """PostgreSQL 저장을 실제로 사용할 때만 psycopg2를 로드한다."""
+    try:
+        from psycopg2.extras import Json, register_uuid
+        from psycopg2.pool import ThreadedConnectionPool
+        register_uuid()
+    except ModuleNotFoundError as exc:
+        raise QaDecisionPersistenceError(
+            "PostgreSQL QA 감사 저장에는 psycopg2-binary가 필요합니다. "
+            "requirements.txt를 설치하거나 `uv pip install psycopg2-binary`를 실행하세요."
+        ) from exc
+    return Json, ThreadedConnectionPool
+
+
+def _json_param(value: Any) -> Any:
+    """psycopg2가 설치된 DB 저장 경로에서만 JSON 래퍼를 만든다."""
+    Json, _ = _load_postgres_driver()
+    return Json(value)
 
 
 class PostgresAuditRepository:
     """psycopg2 기반 audit 스키마 Repository. Pool을 주입받거나 connect()로 만든다."""
 
-    def __init__(self, pool: ThreadedConnectionPool) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> "PostgresAuditRepository":
+    def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> PostgresAuditRepository:
+        _, ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
 
     def close(self) -> None:
         self._pool.closeall()
 
+    def record_domain_event(
+        self,
+        *,
+        event_id,
+        event_type: str,
+        source_department: str,
+        trace_id,
+        payload: dict,
+        occurred_at,
+    ) -> None:
+        """Redis Event 수신을 Canonical Audit Event로 멱등 기록한다."""
+
+        self._execute(
+            """
+            insert into audit.domain_events (
+                event_id, event_type, source_department, trace_id,
+                payload, occurred_at, status
+            ) values (%s, %s, %s, %s, %s, %s, 'PROCESSED')
+            on conflict (event_id) do nothing
+            """,
+            (
+                event_id,
+                event_type,
+                source_department,
+                trace_id,
+                _json_param(payload),
+                occurred_at,
+            ),
+        )
+
     def _execute(self, query: str, params: tuple) -> None:
         conn = self._pool.getconn()
         try:
-            with conn, conn.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute(query, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def save_qa_assessment(self, assessment: QaAssessment) -> None:
+        """QA Decision과 Claim Check/Finding을 하나의 DB 트랜잭션으로 기록한다."""
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into audit.qa_decisions (
+                        qa_decision_id, artifact_version_id, gate, decision,
+                        conditions, reason_codes, decided_by, trace_id,
+                        decided_at, calculation_version, input_hash
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (artifact_version_id, gate) do nothing
+                    returning qa_decision_id
+                    """,
+                    (
+                        assessment.qa_decision_id,
+                        assessment.artifact_version_id,
+                        assessment.gate,
+                        assessment.decision.value,
+                        _json_param(
+                            {
+                                "calculation_version": assessment.calculation_version,
+                                "input_hash": assessment.input_hash,
+                            }
+                        ),
+                        [reason.value for reason in assessment.reason_codes],
+                        assessment.decided_by,
+                        assessment.trace_id,
+                        assessment.decided_at,
+                        assessment.calculation_version,
+                        assessment.input_hash,
+                    ),
+                )
+                inserted = cur.fetchone() is not None
+                if inserted:
+                    for check in assessment.claim_checks:
+                        cur.execute(
+                            """
+                            insert into audit.claim_checks (
+                                claim_check_id, artifact_version_id, claim_index,
+                                claim, evidence_chunk_ids, result, reason,
+                                checker_version, checked_at
+                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            on conflict (artifact_version_id, claim_index, checker_version)
+                            do nothing
+                            """,
+                            (
+                                check.claim_check_id,
+                                check.artifact_version_id,
+                                check.claim_index,
+                                check.claim,
+                                list(check.evidence_chunk_ids),
+                                check.result.value,
+                                check.reason,
+                                check.checker_version,
+                                check.checked_at,
+                            ),
+                        )
+                    for finding in assessment.findings:
+                        cur.execute(
+                            """
+                            insert into audit.findings (
+                                finding_id, fund_id, finding_type, severity,
+                                artifact_version_id, description, owner,
+                                trace_id, created_at
+                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            on conflict (finding_id) do nothing
+                            """,
+                            (
+                                finding.finding_id,
+                                finding.fund_id,
+                                finding.finding_type,
+                                finding.severity.value,
+                                finding.artifact_version_id,
+                                finding.description,
+                                finding.opened_by,
+                                finding.trace_id,
+                                finding.created_at,
+                            ),
+                        )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise QaDecisionPersistenceError(f"Canonical QA Decision 기록 실패: {exc}") from exc
         finally:
             self._pool.putconn(conn)
 
@@ -83,7 +231,7 @@ class PostgresAuditRepository:
                 output_artifact_version_id = %s, trace_uri = %s
             where agent_run_id = %s
             """,
-            (run.status.value, run.ended_at, run.error_code, Json(run.token_usage), Json(run.cost),
+            (run.status.value, run.ended_at, run.error_code, _json_param(run.token_usage), _json_param(run.cost),
              run.output_artifact_version_id, run.trace_uri, run.agent_run_id),
         )
 
@@ -97,9 +245,9 @@ class PostgresAuditRepository:
                status, policy_version, latency_ms, error_code, occurred_at, completed_at, metadata)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (call.tool_call_id, call.agent_run_id, call.trace_id, call.tool_name, Json(call.scope),
+            (call.tool_call_id, call.agent_run_id, call.trace_id, call.tool_name, _json_param(call.scope),
              call.input_hash, call.output_hash, call.status.value, call.policy_version, call.latency_ms,
-             call.error_code, call.occurred_at, call.completed_at, Json(call.metadata)),
+             call.error_code, call.occurred_at, call.completed_at, _json_param(call.metadata)),
         )
 
     # -- audit.incident_events (append-only) --------------------------------------
@@ -113,7 +261,7 @@ class PostgresAuditRepository:
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (event.incident_event_id, event.incident_id, event.source, event.entry_type.value,
-             event.summary, Json(event.evidence), event.occurred_at, event.recorded_at, event.recorded_by),
+             event.summary, _json_param(event.evidence), event.occurred_at, event.recorded_at, event.recorded_by),
         )
 
     # -- audit.corrective_actions --------------------------------------------------
@@ -127,16 +275,125 @@ class PostgresAuditRepository:
             values (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (action.corrective_action_id, action.incident_id, action.finding_id, action.owner,
-             Json(action.action_plan), action.due_at, action.status.value, action.created_at),
+             _json_param(action.action_plan), action.due_at, action.status.value, action.created_at),
         )
 
     def update_corrective_action(self, action: CorrectiveActionRecord) -> None:
         self._execute(
             """
-            update audit.corrective_actions
-            set status = %s, verification = %s, verifier = %s, completed_at = %s
-            where corrective_action_id = %s
+        update audit.corrective_actions
+        set status = %s, verification = %s, verifier = %s, completed_at = %s
+        where corrective_action_id = %s
             """,
-            (action.status.value, Json(action.verification) if action.verification is not None else None,
+            (action.status.value, _json_param(action.verification) if action.verification is not None else None,
              action.verifier, action.completed_at, action.corrective_action_id),
         )
+
+    def _ensure_incident_parent(
+        self,
+        cur,
+        *,
+        incident_id,
+        occurred_at,
+        source: str,
+        summary: str,
+        recorded_by: str,
+    ) -> None:
+        """Create the FK parent in the same transaction as its child row."""
+        cur.execute(
+            """
+            insert into audit.incidents
+            (incident_id, incident_code, severity, title, impact, status,
+             started_at, detected_at, commander, trace_id)
+            values (%s, %s, 'SEV3', %s, %s, 'OPEN', %s, %s, %s, %s)
+            on conflict (incident_id) do nothing
+            """,
+            (
+                incident_id,
+                f"QA-AUTO-{incident_id}",
+                f"QA incident auto-created from {source}",
+                _json_param({"auto_created": True, "first_event_summary": summary}),
+                occurred_at,
+                occurred_at,
+                recorded_by,
+                incident_id,
+            ),
+        )
+
+    def insert_incident_event(self, event: IncidentEventRecord) -> None:  # noqa: F811
+        """Insert Incident parent and event atomically."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                self._ensure_incident_parent(
+                    cur,
+                    incident_id=event.incident_id,
+                    occurred_at=event.occurred_at,
+                    source=event.source,
+                    summary=event.summary,
+                    recorded_by=event.recorded_by,
+                )
+                cur.execute(
+                    """
+                    insert into audit.incident_events
+                    (incident_event_id, incident_id, source, entry_type, summary,
+                     evidence, occurred_at, recorded_at, recorded_by)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        event.incident_event_id,
+                        event.incident_id,
+                        event.source,
+                        event.entry_type.value,
+                        event.summary,
+                        _json_param(event.evidence),
+                        event.occurred_at,
+                        event.recorded_at,
+                        event.recorded_by,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def insert_corrective_action(self, action: CorrectiveActionRecord) -> None:  # noqa: F811
+        """Insert an Incident parent and Corrective Action atomically."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                if action.incident_id is not None:
+                    self._ensure_incident_parent(
+                        cur,
+                        incident_id=action.incident_id,
+                        occurred_at=action.created_at,
+                        source="qa-corrective-action",
+                        summary="Corrective Action parent incident",
+                        recorded_by=action.owner,
+                    )
+                cur.execute(
+                    """
+                    insert into audit.corrective_actions
+                    (corrective_action_id, incident_id, finding_id, owner, action_plan,
+                     due_at, status, created_at)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        action.corrective_action_id,
+                        action.incident_id,
+                        action.finding_id,
+                        action.owner,
+                        _json_param(action.action_plan),
+                        action.due_at,
+                        action.status.value,
+                        action.created_at,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)

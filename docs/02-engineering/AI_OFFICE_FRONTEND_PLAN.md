@@ -1,6 +1,6 @@
 # AI Office Frontend and Operator Control Plan
 
-> 문서 상태: Confirmed Frontend Plan v1.1
+> 문서 상태: Confirmed Frontend Plan v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 현재 구현: [`ai-office/`](../../ai-office/)
 > 관련 기준: [Core Plan](../01-product/HEDGE_FUND_CORE_PLAN.md) · [Feature Backlog](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Technology Stack](TECH_STACK_DECISIONS.md) · [Repository Structure](REPOSITORY_DEPARTMENT_STRUCTURE.md) · [ADR-0001](adr/0001-hermes-kanban-agent-status-bridge.md)
@@ -14,7 +14,7 @@
 
 ## 2. 현재 구현과 목표의 차이
 
-현재 `ai-office`는 Next.js, React, TypeScript 기반 시각·상호작용 Prototype이다. 원본의 12개 부서를 CEO Office, 6개 투자 본부와 Agent Workforce 등 8개 조직·2개 층으로 바꿨고, Trading/Portfolio DEMO Snapshot Panel과 `apps/api/main.py`의 Read-only BFF도 추가했다. 다만 직원 이동과 업무 흐름은 여전히 Frontend 메모리의 Scripted Simulation이며, Snapshot도 실제 운영 DB가 아니라 테스트용 Paper Loop에서 생성한다.
+현재 `ai-office`는 Next.js, React, TypeScript 기반 시각·상호작용 Prototype이다. 원본의 12개 부서를 CEO Office, 6개 투자 본부와 Agent Workforce 등 8개 조직·2개 층으로 바꿨고, Trading/Portfolio DEMO Snapshot Panel, Risk·QA 계약 Panel과 `apps/api/main.py`의 Read-only BFF도 추가했다. 2026-08-03 clean Node 22 환경에서 Build와 Render Test `2/2`를 통과했다. 다만 직원 이동과 업무 흐름은 여전히 Frontend 메모리의 Scripted Simulation이며, Snapshot과 Risk·QA Panel도 실제 운영 API가 아니라 DEMO·정적 계약 Projection이다.
 
 | 구분 | 현재 `ai-office` | 목표 상태 |
 |---|---|---|
@@ -24,11 +24,12 @@
 | 업무 흐름 | 출근부터 콘텐츠 제작까지 정해진 Demo Scenario | Research Case, Strategy Promotion, Risk Review, Order, Close, Self-Improvement Workflow |
 | 실시간성 | `requestAnimationFrame` 기반 로컬 상태 | REST Snapshot + FastAPI WebSocket Event |
 | 승인 | 화면 안의 Demo 승인 | 인증, 권한, 사유, 멱등 키와 Audit를 갖춘 Backend Command |
+| Risk·QA | Profile·Retry·Fallback 계약 Panel | Risk·QA API·Run Journal·Incident Read Model의 실시간 Projection |
 | 보고 | Notion·Discord Demo 연동 | 공식 Report Artifact와 승인된 알림 Adapter |
 | 저장 | 브라우저 메모리 + 정적/DEMO Read Model | Supabase·TimescaleDB·OMS·Ledger·Risk Engine이 Source of Truth |
 | 배포 | `vinext`와 Cloudflare Worker 기반 Prototype | Frontend Hosting과 금융 Backend를 분리한 Provider-neutral 구조 |
 
-조직 화면 전환은 시작됐지만 실시간 연결은 아직 아니다. 다음 작업은 Scripted 업무 엔진과 DEMO Snapshot을 **Hermes Kanban 업무 상태, Supabase Read Model과 Backend Event Adapter**로 교체하는 것이다.
+조직 화면과 Risk·QA 계약 표시는 시작됐지만 실시간 연결은 아직 아니다. 다음 작업은 Scripted 업무 엔진과 DEMO Snapshot을 **Hermes Kanban 업무 상태, Supabase Read Model과 Backend Event Adapter**로 교체하는 것이다. `npm audit`이 보고한 High 13, Moderate 4, Low 1건은 배포 전 직접·전이 의존성, 도달 가능성과 Upgrade 회귀를 검토한다.
 
 ## 3. 사용자 경험
 

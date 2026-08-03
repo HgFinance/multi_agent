@@ -26,6 +26,7 @@ tool_permission_check.py/incident_timeline.py/agentic-rag를 감싸는 FastAPI �
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -38,22 +39,140 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-_EVIDENCE_DIR = Path(__file__).resolve().parent.parent / "evidence"
+_QA_DIR = Path(__file__).resolve().parent.parent
+_EVIDENCE_DIR = _QA_DIR / "evidence"
 _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
-for _p in (_EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
+for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
-from evidence_qa_engine import Artifact, EvidenceQaEngine, EvidenceStore, QaContext  # noqa: E402
-from incident_timeline import IncidentEntryType, IncidentTimeline, IncidentTimelineError  # noqa: E402
-from ops_health_monitor import AgentHealthMetrics, OpsHealthMonitor, OpsThresholds  # noqa: E402
-from tool_permission_check import (  # noqa: E402
+from evidence_qa_engine import (
+    Artifact,
+    EvidenceQaEngine,
+    EvidenceStore,
+    QaContext,
+)
+from incident_timeline import (
+    IncidentEntryType,
+    IncidentTimeline,
+    IncidentTimelineError,
+)
+from internal_audit import InternalAuditEngine
+from model_risk import ModelRiskEngine, ModelRiskInput
+from ops_health_monitor import (
+    AgentHealthMetrics,
+    OpsHealthMonitor,
+    OpsThresholds,
+)
+from qa_events.redis_event_bus import (
+    DEFAULT_GROUP,
+    DEFAULT_STREAM,
+    QA_DECISION_EVENT,
+    RISK_DECISION_EVENT,
+    QaEventBusError,
+    RedisEventBus,
+)
+from tool_permission_check import (
     AgentToolPolicy,
     check_tool_permission,
     count_unauthorized_calls,
     record_and_check_tool_call,
 )
-from trace_recorder import TraceRecorder, TraceRecorderError  # noqa: E402
+from trace_recorder import TraceRecorder, TraceRecorderError
+
+# DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
+# write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
+# .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
+_DATABASE_URL = os.environ.get("DATABASE_URL")
+if _DATABASE_URL:
+    from repository import (
+        PostgresAuditRepository,
+        QaDecisionPersistenceError,
+    )
+
+    _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
+else:
+    from repository import (
+        PostgresAuditRepository,
+        QaDecisionPersistenceError,
+    )
+
+    _audit_repository = None
+_event_bus: RedisEventBus | None = None
+
+
+def _qa_event_bus() -> RedisEventBus | None:
+    """Risk↔QA Redis Stream을 실제 호출 시점에만 연결한다."""
+
+    global _event_bus
+    redis_url = os.environ.get("RISK_QA_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _event_bus is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("RISK_QA_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+        except ValueError as exc:
+            raise QaEventBusError(
+                "RISK_QA_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+            ) from exc
+
+        _event_bus = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("RISK_QA_EVENT_STREAM", DEFAULT_STREAM),
+            group=os.environ.get("QA_EVENT_GROUP", DEFAULT_GROUP),
+            consumer=os.environ.get("QA_EVENT_CONSUMER", "qa-api"),
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+        )
+    return _event_bus
+
+
+def _persist_qa_decision(assessment) -> None:
+    """QA 결과를 DB에 기록하고 같은 trace의 Event를 발행한다."""
+
+    if _audit_repository is None:
+        return
+    _audit_repository.save_qa_assessment(assessment)
+    bus = _qa_event_bus()
+    if bus is None:
+        raise QaEventBusError("Canonical QA DB는 연결됐지만 QA Event Bus가 없습니다")
+    bus.publish(
+        event_id=assessment.qa_decision_id,
+        event_type=QA_DECISION_EVENT,
+        trace_id=assessment.trace_id,
+        payload={
+            "qa_decision_id": str(assessment.qa_decision_id),
+            "artifact_version_id": str(assessment.artifact_version_id),
+            "gate": assessment.gate,
+            "decision": assessment.decision.value,
+            "calculation_version": assessment.calculation_version,
+            "input_hash": assessment.input_hash,
+            "trace_id": str(assessment.trace_id),
+        },
+    )
+
+
+def _record_risk_event(event: dict) -> None:
+    """Risk Decision Event를 QA Audit 수신 이력으로 남긴다."""
+
+    if event.get("event_type") != RISK_DECISION_EVENT:
+        raise QaEventBusError(f"QA Consumer가 알 수 없는 Event를 받았습니다: {event.get('event_type')}")
+    if _audit_repository is None:
+        raise QaEventBusError("Risk Event를 기록할 DATABASE_URL이 없습니다")
+    try:
+        _audit_repository.record_domain_event(
+            event_id=UUID(event["event_id"]),
+            event_type=event["event_type"],
+            source_department="risk-management",
+            trace_id=UUID(event["trace_id"]),
+            payload=event["payload"],
+            occurred_at=datetime.fromisoformat(event["occurred_at"]),
+        )
+    except (KeyError, ValueError) as exc:
+        raise QaEventBusError(f"Risk Event Envelope이 유효하지 않습니다: {exc}") from exc
 
 
 # --- Request 모델 ------------------------------------------------------------------
@@ -63,10 +182,32 @@ class QaContextIn(BaseModel):
     decision_time: datetime
 
 
+class ModelRiskCheckRequest(BaseModel):
+    model_id: UUID
+    model_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    dataset_version: str = Field(min_length=1)
+    evaluation_count: int = Field(ge=0)
+    accuracy: float = Field(ge=0, le=1)
+    calibration_error: float = Field(ge=0, le=1)
+    drift_score: float = Field(ge=0, le=1)
+    protected_failure_rate: float = Field(ge=0, le=1)
+
+
+class InternalAuditCheckRequest(BaseModel):
+    events: list[dict]
+    expected_department: str = Field(default="qa", min_length=1)
+
+
 class QaCheckRequest(BaseModel):
     qa_decision_id: UUID | None = None
     artifact: Artifact
     context: QaContextIn
+
+
+class EventConsumeRequest(BaseModel):
+    count: int = Field(default=10, ge=1, le=100)
+    min_idle_ms: int = Field(default=0, ge=0)
 
 
 class AgentHealthMetricsIn(BaseModel):
@@ -192,10 +333,18 @@ class ComplianceCheckRequest(BaseModel):
 
 
 app = FastAPI(title="QA Domain API", version="v1")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from fastapi.responses import Response
+
+from apps.observability.risk_qa import get_runtime_telemetry
+
+QA_TELEMETRY = get_runtime_telemetry("qa")
 evidence_engine = EvidenceQaEngine()
 ops_monitor = OpsHealthMonitor()
-recorder = TraceRecorder()
-timeline = IncidentTimeline()
+recorder = TraceRecorder(repository=_audit_repository)
+timeline = IncidentTimeline(repository=_audit_repository)
 evidence_store = EvidenceStore()  # rag-librarian-evidence-curator 실연동 전까지 스텁
 
 
@@ -227,13 +376,97 @@ def _on_validation_error(request, exc: RequestValidationError):
     )
 
 
+@app.exception_handler(QaDecisionPersistenceError)
+def _on_qa_persistence_error(request, exc: QaDecisionPersistenceError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
+@app.exception_handler(QaEventBusError)
+def _on_qa_event_bus_error(request, exc: QaEventBusError):
+    return JSONResponse(
+        status_code=503,
+        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+    )
+
+
+def _qa_check_contract_is_approved() -> bool:
+    """Keep the proposed gate inactive until the owning service approves v1."""
+    runtime = os.environ.get("RISK_QA_RUNTIME", "test").strip().lower()
+    if runtime != "production":
+        return True
+    return os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
+
+
 # 3.1 [제안] Case에 종속된 판정 -------------------------------------------------------
+
+
+@app.post("/qa/v1/model-risk/evaluate")
+def model_risk_evaluate(body: ModelRiskCheckRequest):
+    result = ModelRiskEngine().evaluate(ModelRiskInput(**body.model_dump()))
+    return {
+        "decision": result.decision.value,
+        "reason_codes": list(result.reason_codes),
+        "calculation_version": result.calculation_version,
+        "input_hash": result.input_hash,
+    }
+
+
+@app.post("/qa/v1/internal-audit/evaluate")
+def internal_audit_evaluate(body: InternalAuditCheckRequest):
+    result = InternalAuditEngine().evaluate(events=body.events, expected_department=body.expected_department)
+    return {
+        "decision": result.decision.value,
+        "findings": list(result.findings),
+        "calculation_version": result.calculation_version,
+        "input_hash": result.input_hash,
+    }
 
 
 @app.post("/investment-cases/{case_id}/qa-check")
 def qa_check(case_id: str, body: QaCheckRequest):
+    if not _qa_check_contract_is_approved():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "QA_CHECK_CONTRACT_NOT_APPROVED",
+                "message": "상위 서비스 계약 승인 전에는 production qa-check를 활성화할 수 없습니다",
+            },
+        )
     ctx = QaContext(evidence_store=evidence_store, decision_time=body.context.decision_time)
-    return evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
+    assessment = evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
+    _persist_qa_decision(assessment)
+    return assessment
+
+
+@app.post("/qa/v1/events/consume")
+def consume_events(body: EventConsumeRequest):
+    """QA Worker가 Risk Decision Stream을 한 배치 소비한다."""
+
+    bus = _qa_event_bus()
+    if bus is None:
+        raise QaEventBusError("QA Event Bus 연결 설정이 없습니다")
+    return {
+        "consumed": bus.consume_once(
+            _record_risk_event,
+            count=body.count,
+            min_idle_ms=body.min_idle_ms,
+        )
+    }
+
+
+@app.get("/qa/v1/observability/rag")
+def rag_observability():
+    from src.resilience import latency_summary
+
+    return {
+        "nodes": {
+            node: latency_summary(node)
+            for node in ("retrieve", "grade", "generate", "hallucination_check")
+        }
+    }
 
 
 # 3.2 Ops Health ---------------------------------------------------------------------
@@ -384,18 +617,32 @@ def cancel_action(corrective_action_id: UUID, body: CancelActionRequest):
 
 @app.post("/qa/v1/evidence/check")
 def evidence_check(body: ComplianceCheckRequest):
-    from src.graph import run_compliance_check  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    from src.graph import (
+        run_compliance_check,  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
+    )
 
     return run_compliance_check(body.query, body.as_of, persona="evidence-qa-agent")
+
+
+@app.get("/qa/v1/observability/runtime")
+def runtime_observability():
+    return QA_TELEMETRY.snapshot()
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    return Response(
+        content=QA_TELEMETRY.prometheus_text(),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 if __name__ == "__main__":
     from datetime import timedelta, timezone
     from uuid import uuid4
 
-    from fastapi.testclient import TestClient
-
     from evidence_qa_engine import EvidenceChunk
+    from fastapi.testclient import TestClient
 
     now = datetime.now(timezone.utc)
     client = TestClient(app)
@@ -405,7 +652,7 @@ if __name__ == "__main__":
     evidence_store.chunks[ev_id] = EvidenceChunk(
         evidence_id=ev_id, source="research-api", published_at=now - timedelta(hours=1),
         observed_at=now - timedelta(hours=1), excerpt="근거 원문",
-        numeric_value=Decimal("70000"), unit="KRW",
+        numeric_value=Decimal(70000), unit="KRW",
     )
     fund, trace, artifact_id = uuid4(), uuid4(), uuid4()
 

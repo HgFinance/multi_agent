@@ -6,8 +6,9 @@
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
@@ -40,7 +41,8 @@ agent:
 
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
-# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
+# compliance-policy-agent부터 시작 — evidence-qa-agent(QA), hallucination-critic(QA)까지 확장 완료
+# (2026-08-02, departments/06-ai-qa-audit/hermes/config.yaml 참고)
 agentic_rag:
   framework: langgraph
   status: "compliance-policy-agent baseline 구현됨 (skills/agentic-rag/)"
@@ -70,11 +72,23 @@ rag_technique_assignment:
 # 끝난다 (팀 가이드 2절). risk-supervisor/pre-trade-risk-analyst는 이 엔진의 판정을 해석·
 # Escalation만 하고, Limit을 계산하거나 판정을 바꾸지 않는다.
 deterministic_services:
+  harness_manifest: departments/03-risk/harness/manifest.py
+  harness_preflight: departments/03-risk/harness/core.py
+  harness_runtime_check: departments/03-risk/harness/redis_check.py
+  harness_log_contract: departments/03-risk/harness/journal.py
+  harness_replay: "RunJournal.replay(run_id, executor)"
+  harness_review: "RunJournal.review(run_id)"
+  orchestrator: "Hermes department profile: risk-management"
+  employee_executor: "LangGraph employee node"
+  harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=REJECT+HALTED"
+  harness_fallback: "REJECT candidate + INCONCLUSIVE + HOLD + HALTED + trace_id + node + sanitized_error"
+  redis_timeout_env: "RISK_REDIS_TIMEOUT_SECONDS=2; timeout => HALTED (fail-closed)"
+  reject_fast_path: "deterministic counterparty/supervisor narrative; no non-binding LLM call"
   risk_engine: departments/03-risk/engine/risk_engine.py                 # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
   trading_state_store: departments/03-risk/engine/trading_state_store.py # Redis 최신 Trading State — 장애 시 HALTED로 fail-closed
 
 implementation:
-  status: "Sprint K1 P0 Pre-trade Risk Gate + Redis Trading State 구현됨 (팀 가이드 4.1, 12절, DoD 4번 Redis 절반). Supabase 쪽(risk 스키마 실기록)·K2-K4는 미착수"
+  status: "Sprint K1 P0 완료. P1 결정론적 Exposure Snapshot·Instrument Mapping·Stress/VaR/Correlation 계산·P1 Entry Gate·Risk DB Repository/RLS baseline 구현. 실제 Portfolio/Market 자격증명, governed Fund/Book/Instrument/Stress Scenario, 운영 DB/RLS/E2E 활성화는 외부 조건 대기"
   done:
     - "10단계 순서 검사 (Data Freshness, Market 거래가능, Mandate, Restricted List, Notional, Buying Power/Oversell, Concentration Soft/Hard, Turnover/주문건수, Trading State/Loss/Drawdown, Counterparty Health)"
     - "Soft Limit은 RESIZE, Hard Limit은 REJECT — 실패는 항상 축소·차단 방향"
@@ -84,7 +98,7 @@ implementation:
     - "Redis 최신 Trading State (2026-07-30) — 실제 Redis Cloud에 연결해 scope별 현재 상태 Get/Set. Key 없음(=제한한 적 없음)은 ENABLED, Redis 장애는 예외 또는 HALTED로 fail-closed — ENABLED로 잘못 추정하지 않음. RiskEngine.check_order와 End-to-End 통합 검증(Redis의 ENTRY_BLOCKED가 실제 주문을 막음)"
     - "Risk Domain API (2026-07-31) — departments/03-risk/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 2절 그대로 FastAPI로 래핑(risk-check/trading-state/compliance-check). 새 판정 로직 없음, TestClient self-check 4개 시나리오 통과. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
   in_progress: []
-  not_started:
+  implementation_notes:
     - "Sprint K0: Supabase risk 스키마 실기록(risk.risk_decisions/breaches/trading_states) — accounting.funds가 비어 있어 risk.policies부터 fund_id FK로 막힘(회계본부 영역, QA의 audit 스키마와 달리 risk 테이블 대부분이 fund_id NOT NULL). RLS는 의도적으로 보류(담당자 결정)"
     - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역, departments/06-ai-qa-audit 참고"
     - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow(risk.kill_switch_events 이력 기록) — Redis 현재 상태는 됐지만 Supabase 이력은 위 Fund 의존으로 막힘"
@@ -97,6 +111,15 @@ implementation:
 # 2. risk-supervisor: 명시적 Stop Rule — 본부 간 신호 충돌이 크면 기본값 reject/hold
 # 3. evidence-qa-agent(QA쪽): 완전성 검증 실패 시 Flag가 아니라 자동 Block으로 격상 (3단 방어)
 # compliance-policy-agent 베이스라인이 안정화된 뒤 순서대로 반영 예정
+
+# 백로그 (2026-08-03, DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.4절 대비 — 아직 미구현, 기록만)
+# 4. risk-projection-worker (Consumer 루프 포함) — market.snapshot.v1/portfolio.snapshot.v1/
+#    governance.mandate.changed.v1을 구독해 Risk Snapshot을 투영하는 Worker. 저장소 전체에서
+#    이 세 이벤트를 Redis Stream에 XADD하는 Publisher가 아직 없다(Trading/Accounting/CEO 쪽
+#    미구현 — 본부 경계 밖이라 리스크본부가 대신 만들 수 없다). risk_events/redis_event_bus.py는
+#    Risk→QA 결정 이벤트 Publisher만 있고 이 방향의 Consumer는 없다. P1RiskSnapshot(p1/analytics.py)은
+#    지금도 존재하지만 Pre-trade 요청 경로에서 evaluate_p1_gate로 동기 계산되며, 이 백로그가 말하는
+#    비동기 투영과는 다른 메커니즘이다. 업스트림 Publisher가 생긴 뒤 순서대로 반영
 
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.4, 2026-07-29)
 # market-liquidity-risk-agent는 RSK-02(Market/Exposure Risk, P0)와 RSK-03(Liquidity/Concentration/Stress, P1)을 합친 페르소나
@@ -115,3 +138,14 @@ skills:
 usage:
   run: "risk-management chat -q 'Assess risk of AAPL long position'"
   collaborate: "risk-management chat -q 'Evaluate portfolio risk with 25% volatility, then check compliance against the current Mandate'"
+
+validation_record:
+  recorded_at: "2026-08-03"
+  scope: "Risk·QA Redis 통합 수용 테스트"
+  acceptance_command: >-
+    cd /Users/baiohelseu/Desktop/Project/multi_agent && source ~/claude/bin/activate &&
+    python -m pytest departments/03-risk/tests/test_trading_state_store.py
+    departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
+  accepted_result: "11 passed, skipped 0; 실행 환경은 /Users/baiohelseu/claude/bin/python"
+  p1_status: "결정론적 계산·Entry Gate·Repository/RLS baseline 완료; 실제 Portfolio/Market·운영 DB/RLS/E2E는 외부 조건 대기"
+  p2_status: "VaR·Stress·Black-Scholes Greeks 로컬 계산기/테스트 완료; 파생상품 Snapshot·Margin·Volatility Surface·Golden Fixture·Gate 연결 미완료"

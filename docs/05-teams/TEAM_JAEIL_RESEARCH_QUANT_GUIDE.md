@@ -1,6 +1,6 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.4
+> 문서 상태: Team Handoff v1.7
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
@@ -11,6 +11,58 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리서치·퀀트 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Market·Research·Strategy View
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `CI-06`·`RQ-01`~`RQ-05`·`MODEL-04`
+> 체크박스 해석: 11절의 완료 표시는 재일님 소유 산출물 기준이며 전사 E2E 완료를 뜻하지 않음
+
+---
+
+## 0. Daily Scrum (필수)
+
+> 기준: 2026-08-03 10:20 KST
+> 갱신 규칙: 재일님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
+
+### Yesterday
+
+- 전 종목 2,596개 Universe와 거래정지·관리종목 제외, DART 현금흐름, F-Score 보강을 반영했다.
+- Research MCP와 Tool Gateway 강제 모드·Bearer 인증을 연결하고 `research-mcp`, `research-hermes`,
+  `quant-hermes`를 Docker에서 실행했다.
+- GPR·GDELT·Bluesky, Story Cluster, 일별 Label, Packet Outcome과 Source 실행 기록층을 추가했다.
+- 파생 Snapshot이 실제 TimescaleDB에 3,910건 적재돼 `RQ-04` 첫 적재 Gate를 통과했다.
+- 증거: Research API 7개 Domain 응답, Timescale 7개 Hypertable, Research Self-check 11개,
+  Quant Self-check 26개 통과.
+
+### Today
+
+- `CI-06`: `20260802002200_research_as_known_at.sql`을 Schema Contract 기대 순서에 추가해 실패 1건을 닫는다.
+- `RQ-01`: Research Packet의 `artifact_id`, `case_id`, `trace_id`, `as_known_at`과 Event Payload를
+  도현·동규님 Review가 가능한 Contract Fixture로 고정한다.
+- 금일 이미 반영한 정정 재무 PIT 보존, `as_known_at`, Research Data Steward와 Amihud·Roll 지표를
+  실제 Packet 한 건에서 재검증한다.
+- `collector_runs`의 `FAILED 11`을 Source별로 분류하고 허용 실패와 재처리 대상 목록을 남긴다.
+- `RQ-05`: 0건인 `microstructure_features` 영속 Worker의 최소 입력·출력과 Replay Hash를 확정한다.
+- 로컬 미커밋 Claude Code Host Proxy와 Compose Base URL 변경은 호스트 자격 파일 비공유 원칙,
+  동시성·Timeout·429·비용과 Fallback을 검증한 뒤 `MODEL-04` 별도 PR로 제출한다.
+
+### Blocker
+
+- Schema Contract 목록 누락으로 전체 명시 Test가 `179 passed / 1 failed`다. Owner는 재일님이다.
+- `RQ-01`의 공식 Event Envelope은 도현님 `PLAT-01`, Project Redis는 `PLAT-02`가 선행한다.
+- NAVER 마지막 관측이 08-02 04:20, Alpaca가 07-31 01:49라 Staleness가 정책상 허용인지 확인이 필요하다.
+- 미래 거래일 Calendar와 지수 구성 이력의 승인 Source가 확정되지 않았다.
+- Quant API·Worker와 Strategy 승격은 공통 Runtime과 QA/Risk Gate 없이는 운영 완료로 승격하지 않는다.
+
+### 2주 개인 실행 계획
+
+| 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
+|---|---|---|---|---|---|
+| 1 | 08-03 | `CI-06` | Migration 기대 목록과 Schema Test | 없음 | 실패 0, 도현님 CI 인계 |
+| 2 | 08-04~05 | `RQ-01` | `ResearchPacket v1` Schema·Fixture·Artifact ID | 도현 `PLAT-01` Review | 동규 QA, 도현 Trading이 같은 Fixture 소비 |
+| 3 | 08-05~07 | `RQ-02` | Feature Event·Priority Producer | `PLAT-01`, `PLAT-02` | 중복 Event 0, 재시작 Replay |
+| 4 | 08-06~10 | `RQ-05` | Microstructure 영속 Worker | Timescale Migration Review | 행 수 > 0, 계산·Replay Hash 일치 |
+| 5 | 08-10~14 | `RQ-03` | Quant API·Job Worker | 프로젝트 Redis, QA Gate | Experiment 재시작 복구와 Candidate Handoff |
+| 실험 | 별도 PR | `MODEL-04` | Claude Host Proxy Test·Runbook | 동규 보안 Review | 승인 전 기본 비활성, 실패 시 Nous/Ollama Fallback |
+
+WIP 제한은 주 작업 1개와 타 팀 Review 1개다. `RQ-01`이 끝나기 전 새 외부 Source 확장은 시작하지 않는다.
 
 ---
 
@@ -69,6 +121,32 @@
 | 감시 Watchlist 생성기 | `departments/01-research/collectors/watchlist_builder.py`, `config/` | — (신규, Sprint J3) |
 | 수집기 Container Image | `departments/01-research/Dockerfile` | — (신규, 2026-07-31) |
 | research-api (Evidence 조회면) | `departments/01-research/api/main.py` | — (신규, Sprint J2) |
+| market-api (시세 조회면) | `departments/01-research/api/market_api.py` | — (신규, F03) |
+| 차트 백필 수집기 | `departments/01-research/collectors/chart_backfill_collector.py` | — (신규, 2026-07-31) |
+| 파생 스냅샷 수집기 (K200 선물·옵션 체인) | `departments/01-research/collectors/derivatives_collector.py` | — (신규, 2026-07-31) |
+| Bluesky 미국 표적 수집기 (기관 미디어·매크로 논객) | `departments/01-research/collectors/bluesky_watch_collector.py`, `config/bluesky_watchlist.txt` | — (신규, 2026-08-01) |
+| 지정학 리스크 수집기 (GPR 지수 + GDELT 테마) | `departments/01-research/collectors/geopolitical_collector.py`, `config/geopolitical_themes.txt` | — (신규, 2026-08-01) |
+| 지정학 분석가 (RES-09, 위협/실제 분리·신선도 강제) | `departments/01-research/agents/geopolitical_analyst.py` | — (신규, 2026-08-01) |
+| Packet 사후 채점 (선순환 되먹임) | `departments/01-research/collectors/packet_outcome_scorer.py`, 마이그레이션 `001400` | — (신규, 2026-08-02) |
+| 방법론 레지스트리 (인용·도입상태 단일 출처) | `departments/01-research/evidence/methods.py` | — (신규, 2026-08-02) |
+| 펀더멘털 정량 점수 (Piotroski·Altman) | `departments/01-research/evidence/fundamental_scores.py` | — (신규, 2026-08-02) |
+| VKOSPI 수집기 (변동성 국면) | `departments/01-research/collectors/volatility_index_collector.py` | — (신규, 2026-08-02) |
+| PIT Dataset Builder (Manifest·Leakage Check) | `departments/04-quant-backtest/pipeline/pit_dataset.py` | — (신규, 2026-07-31) |
+| Backtest Runner v1 (비용·Ledger·재현 해시) | `departments/04-quant-backtest/pipeline/backtest_runner.py` | — (신규, 2026-07-31) |
+| Walk-Forward 검증 (QNT-04, Fragility 판정) | `departments/04-quant-backtest/pipeline/walk_forward.py` | — (신규, 2026-07-31) |
+| Market Data Steward (심박·품질·지연 감사) | `departments/01-research/collectors/market_data_steward.py` | — (신규, 2026-07-31) |
+| Evidence Bundle 조립기 (결정론 가격 컨텍스트) | `departments/01-research/evidence/bundle.py` | — (신규, 2026-07-31) |
+| 기술적 분석가 (RES-04) | `departments/01-research/agents/technical_analyst.py` | — (신규, 2026-08-01) |
+| 펀더멘털 분석가 (RES-05) | `departments/01-research/agents/fundamental_analyst.py` | — (신규, 2026-08-01) |
+| 섹터·레짐 분석가 (RES-07) | `departments/01-research/agents/sector_regime_analyst.py` | — (신규, 2026-08-01) |
+| 미시구조 분석가 (RES-03) | `departments/01-research/agents/microstructure_analyst.py` | — (신규, 2026-08-01) |
+| RAG 사서 (RES-08, 결정론 인덱싱·검색) | `departments/01-research/agents/rag_librarian.py` | — (신규, 2026-08-01) |
+| 전략 가설 연구자 (QNT-01) | `departments/04-quant-backtest/agents/strategy_hypothesis_agent.py` | — (신규, 2026-08-01) |
+| 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
+| LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3). **판정 2026-08-01**: 금요일 병행 실측으로 속보성 주 소스 확정 — p50 19초(NAVER 712초), 60초 내 관측 1,762건(vs 22건), 전용 링크 38%(vs 20%), 고유 427종목. 단 제목 교집합 8~12%뿐이라 **대체가 아니라 상호 보완** — NAVER는 웹 매체 폭(NAVER만 잡은 3,480건/8h) 담당으로 병행 유지 |
+| 공시 원문 Archive 수집기 | `departments/01-research/collectors/opendart_document_collector.py` | — (신규, Sprint J2) |
+| 직원 에이전트 (실구현) | `departments/01-research/agents/` (universe_manager, news_sentiment_analyst, article_reader) | — (신규, 2026-07-31) |
+| 본부 LangGraph 파이프라인 | `departments/01-research/scripts.py` | — (신규, 2026-07-31 - QA 부서 패턴) |
 | LS API 계약 | `docs/06-integrations/ls-openapi/` | — (문서 위치 유지, 리서치본부가 내용 Owner) |
 | 시장 시계열 Migration | `timescaledb/migrations/` | — (도구 표준 경로 유지, 리서치본부가 Schema Owner) |
 | 퀀트 Hermes | `departments/04-quant-backtest/hermes/` | `orchestration/hermes/quant-backtest-department/` |
@@ -783,7 +861,12 @@ Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메�
 - **완료** 장시간 실행 Runtime — 세션 인지 상주(위). 장중 재접속·중복·Gap 식별은
   worker의 재접속 경로(MAX_RECONNECTS + disconnect_reasons)와 멱등 적재가 맡는다.
 - **미착수** 특정 종목·시간 구간을 Parquet로 재현한다.
-- **미착수** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다.
+- **완료** 트레이딩·리스크는 DB 없이 Snapshot API를 조회한다 — `market-api`
+  (2026-07-31, `api/market_api.py`, :8036). Snapshot/Bars(백필+파생 통합)/
+  Breadth/DQ 요약, TSDB read-only 세션, GET 전용 표면. 통합 계획 6.2의 목표
+  이름과 일치. 차트 백필(t8410/t8412 → `market_bars` source='ls_chart')로
+  일봉 2024년~ 216,885행 + 분봉 4개월이 뒤를 받친다 — 백테스트는 이 API 또는
+  `market_bars` 하나만 본다.
 
 ### Sprint J2: DART와 Research Metadata
 
@@ -798,7 +881,14 @@ Limit을 공유하므로 병렬이면 서로를 429로 민다), **상태는 메�
   계약(`CompanyProfile`)에 필드 자체가 없다** — 개인정보를 수집하지 않으며, 자체 점검이
   metadata로 새는 경로까지 검사한다. 재적용은 `IS DISTINCT FROM` 가드로 실변경 0을
   확인했다(멱등).
-- **부분** 공시 원본 Archive, Version, 정정 관계.
+- **완료(원본 확보)** 공시 원본 Archive — `opendart_document_collector.py`
+  (2026-07-31). 2019003 원본 ZIP → Supabase Private Storage
+  (`research-documents-private`, 왕복 검증) → `document_versions`(sha256
+  지문·경로·크기, license_scope=PRIVATE_ARCHIVE). 실측 함정: 갓 나온 공시는
+  원문 미생성(XML status 014) → 2시간 유예 + 다음 실행 자연 재시도. 백필
+  355건+ 후 매일 20:00 Job(한도 600)이 잇는다. 남은 후속: 원문 파서
+  (`parser_name` 채우기), 정정↔원본 `document_relations`, RAG 재료화.
+- **부분(구버전 항목)** Version, 정정 관계.
   `research.documents` 869건 적재(ACTIVE 793 / CORRECTED 76). 정정은 `report_nm` 앞
   표기(`[기재정정]`, `[첨부정정]` 등)로 탐지하고 **원본을 덮어쓰지 않는다** — `rcept_no`가
   달라 별개 문서로 들어간다. 멱등 키는 `unique nulls not distinct (source_id, external_id)`이며
@@ -867,6 +957,91 @@ API(2019003)나 별도 Source가 필요하다.
 실제 동기화 코드가 없었고, `research.documents.source_id`가 NOT NULL FK라 이것이 선행
 조건이었다. `allowed_uses`와 `prohibited_uses`를 함께 넣어 DB만 보는 사람도 라이선스
 경계를 알 수 있게 했다.
+
+### Sprint J4 (신설 2026-07-31): 본부 에이전트 — 무료 로컬 모델 체계
+
+ANTHROPIC 키 없이 **로컬 Ollama(RTX 5080, qwen3:14b)** 로 에이전트 층을 열었다.
+비용 0, 전부 실측 검증:
+
+**모델 선정 결정 (2026-08-01, 에이전트 고도화 착수 시점):**
+- **리서치·퀀트 판단/서술 = `agent-research`/`agent-quant`(qwen3:14b 파생) 단일
+  상주.** 근거: ① 14b 는 인덱스 인용 규율이 실측 안정(10/10 SCORED 무효 0%),
+  8b 는 UUID 인용 전멸 전력 ② 분석가 여럿이 **모델을 공유하고 페르소나는 호출별
+  system 프롬프트로 주입** — 16GB VRAM 에서 모델 교체(재적재) 없이 병렬 호출을
+  받는 유일한 구성 ③ Packet 급 배치 판단에 9초/건 지연은 허용 범위.
+- qwen3:8b(5.2GB)는 지연이 문제 되는 짧은 정형 서술의 예비 후보로만 남긴다 —
+  전환하려면 인용 규율 실측을 다시 통과해야 한다(가정 승격 금지).
+- 30B급(MoE 포함)은 16GB VRAM 초과라 제외. 임베딩(RAG 사서용)은 bge-m3
+  (1024차원, 1.2GB)로 확정(2026-08-01) — 생성 모델과 상주 경합 없음.
+
+**역할 분담 갱신 (2026-08-01, 재일님 지시 "다른 모델도 뒤져서 배정" — 전 후보
+실측 검증 후 확정):**
+| 역할 | 모델 | 실측 근거 |
+|---|---|---|
+| 기술·레짐·펀더멘털 (정형 한국어 서술) | **exaone3.5:7.8b** (LG, 한국어 특화, 4.8GB) | 환각 0·수치 플래그 0·라벨 복원 없음, 2.3~6.0초 (14b 대비 ~40%↓) |
+| 미시구조 | qwen3:14b 유지 | EXAONE 이 p50/p90 라벨을 수치로 서술 → 가드가 플래그하나 상시 노이즈 |
+| 감성 (다중 기사 인덱스 인용) | qwen3:14b 유지 | **EXAONE 스키마 2회 위반(26 오류) → fail-closed INCONCLUSIVE** — 최난관 규율은 14b 만 통과 |
+| 총괄 Packet·QNT-01 가설 | qwen3:14b 유지 | 통합·경제 서술은 검증된 14b |
+| **탈락: gpt-oss:20b** | (삭제) | 웜 상태 한 문장 16.5초, 한국어 응답 미달, reasoning/content 분리로 파서 비호환, VRAM 12.7GB 점유 |
+- 원칙 재확인: **배정은 실측 검증 통과가 조건이다** — 감성에서 EXAONE 이 떨어진
+  것이 이 원칙의 근거 사례다(스키마 위반이 점수 조작 없이 INCONCLUSIVE 로 끊김).
+
+**2차 라운드 (2026-08-01 저녁, HF 포함 확장 탐색 — 배정 변경 없음):**
+| 후보 | 결과 | 사유 |
+|---|---|---|
+| gemma3:12b (8.1GB) | **예비 등재** (배정 없음) | 미시구조 규율 전부 통과(환각 0, p50/p90 함정 회피)한 유일 도전자 — 단 지연·품질이 qwen 과 대등해 상주 VRAM 조합(14b+EXAONE+bge=15.3GB)을 깰 실익 없음. **qwen3:14b 장애 시 1순위 백업** |
+| deepseek-r1:14b (9.0GB) | **예비 등재** (배정 없음) | 가설 규율 통과·한국어 유창(23.6초) — qwen 대비 우위 불명확 + think 토큰 비용. 추론 역할 확장 시 재평가 |
+| kanana-1.5-8b (카카오, HF) | 탈락·삭제 | 감성 스키마 2회 위반(33 오류) + 점수 대신 "즉시 매수" 권고성 출력(규율 위반의 전형). HF 직풀은 마지막 블롭 타임아웃 반복 - 커뮤니티 미러로 우회했음 |
+| solar-pro (Upstage 22B) | 탈락·삭제 | 규율 이전 단계 — 현 Ollama llama.cpp 가 'solar' 아키텍처 미지원(모델 로드 불가 500) |
+- 감성(다중 기사 인덱스 인용)은 **4모델 연속 전멸**(EXAONE·gemma3·kanana + 8b 전력)
+  — qwen3:14b 가 유일 통과. 이 역할의 교체 실험은 스키마 강제 디코딩(grammar)
+  도입 후에나 재개할 것.
+
+**3차 라운드 (2026-08-01 밤, 스키마 강제 디코딩 도입 + Midm):**
+- **스키마 강제 디코딩 구현** (`NEWS_SENTIMENT_GRAMMAR=1` 옵트인, /api/chat
+  format=JSON Schema): 구조 위반은 원천 봉쇄된다 — 실측으로 배운 것:
+  * EXAONE+grammar: 구조는 통과하나 **전 기사 중립 수렴**(3종목 60건 전부
+    0.000) — 구조와 판별력은 별개 축이다.
+  * qwen+grammar: 판별력 유지 + think 억제로 **38% 단축**(37.7→23.4초)이나
+    **환각 인용 25%**(005930 무효 10/40) — think 가 인용 정확도를 지탱한다.
+  * **결론: 감성 기본 경로는 qwen(think 포함) 유지.** grammar 는 후보 시험
+    인프라로 보존 — 속도가 규율을 이기지 못한다.
+- **Midm 2.0 Base 11.5B (KT, HF GGUF)**: 펀더멘털 규율 통과 + 한국어 서술
+  최상급, 단 9.9초로 EXAONE(2.3초)의 4배 → **예비 등재**(지연 무관 배치
+  서술 역할이 생기면 1순위). 감성 grammar 경로와는 비호환(HTTP 400,
+  템플릿 충돌).
+- 미시험 잔여 후보(다음 기회): EXAONE 4.0(32B 는 VRAM 초과 - 중형 변형 출시 시).
+
+**4차 라운드 (2026-08-01 밤, A.X 4.0 Light 실측):**
+- **A.X 4.0 Light(SKT 7B, HF GGUF, 4.6GB)**: 정형 3역할(기술·펀더멘털·레짐)
+  전부 규율 통과(환각 0·복원 없음) + 웜 지연이 EXAONE 보다 빠른 관찰
+  (펀더멘털 2.0초 vs 6.2초 - 단 1회 비교라 VRAM 스왑 노이즈 가능).
+  감성은 실패(예상 - 5모델째). **정형 서술 예비 1순위 등재** - 다음 주
+  실사용에서 EXAONE 와 지연·품질을 자연 비교 후 교체 여부 결정
+  (성급 교체 금지 - 1회 측정으로 배정을 뒤집지 않는다).
+
+- **모델 기반**: 부서 Modelfile 2종(research/quant)을 실계약 프롬프트로 정교화해
+  `agent-research`/`agent-quant` 생성. 8개 부서 모델 전부 로컬 재현(팀 서버는
+  사설망이라 미도달 — Tailscale 후 전환 가능).
+- **직원 실구현 4 + 도구 1** (`agents/`): `universe_manager`(결정론 — t1404/t1405
+  6목록, 실전 347/3), `news_sentiment_analyst`(fetch→judge→verify→aggregate,
+  **10종목 연속 SCORED·환각 인용 0%** — 소형 모델은 UUID 를 못 베끼므로 인덱스
+  인용+역매핑이 핵심), `article_reader`(판단 시점 열람·비저장 — 3.3 예외),
+  **`technical_analyst`(RES-04, 2026-08-01)** — 지표 8종 결정론 계산 + LLM 해석,
+  환각 키 제거·모순 강등(모멘텀 +40% 에 BEARISH 면 NEUTRAL 강등), 자체점검 10,
+  **`fundamental_analyst`(RES-05, 2026-08-01)** — YoY·이익률·부채비율 결정론
+  계산(전기 없으면 "미확인" — 추정 금지) + LLM 해석, 자체점검 10.
+- **본부 파이프라인 v2** (`scripts.py`, 2026-08-01 확장): `run_research_department
+  (symbol)` → universe(결정론, 거래불가 조기종료) → Evidence 조립(API 2종만) →
+  **분석가 3인 순차(sentiment→technical→fundamental — GPU 하나에 모델 하나라
+  형태만 병렬로 꾸미지 않는다)** → supervisor 통합 Packet(상충 보존 지시 명문화 +
+  서술 % 수치 재대조 `numeric_check`). 실측 000660: 기술 BEARISH 와 펀더멘털
+  POSITIVE 의 갈등이 삭제되지 않고 병기됐고 수치 검사 5/5 통과. **research-hermes
+  컨테이너의 원형**이다.
+- **페르소나**: config.yaml 9종을 RES-00~08 직무기술서(미션·산출물·금지·
+  Escalation)로 전면 강화. 퀀트 7종(QNT)은 후속.
+- 원칙 재확인: 에이전트는 DB Credential 없이 API 만(통합 계획 6.2와 일치),
+  LLM 은 판단·서술만, 부족하면 insufficient_evidence.
 
 ### Sprint J3: News/RAG
 
@@ -1139,29 +1314,66 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
       WebSocket에서 체결 605건·호가 326건을 받아 적재했고, 호가 중복 22건이 `duplicates`로
       걸러졌다(같은 상태 반복 → `source_event_id` 동일). 격리 0, 재접속 0,
       `quality_flags: []`. 장시간 실행 Worker와 재구독 Runtime(F03 나머지)은 별도다.
-- [ ] Raw Market Data가 검증된 Parquet로 Archive된다.
+- [x] Raw Market Data가 검증된 Parquet로 Archive된다.
+      → 2026-08-01 `market_archive_exporter.py`: 거래일 단위 ticks/quotes/bars/breadth/파생을
+      Parquet(zstd)로 내보내고 재독 행수+파일 sha256 이중 검증 후 `market.archive_exports`에
+      등록(exported/verified). 2026-07-31 실측: ticks 239만·quotes 332만·bars 6.1만·breadth 48
+      전부 verified, 파생 0행은 생략(빈 파일을 보관 완료로 위장하지 않음). jsonb 직렬화
+      결함(str(dict))을 복구 드릴이 적발해 --force 재수출로 교정 - 검증 체계가 실제로 일했다.
+      `manifest_signed`는 서명 키 체계 도입 전까지 정직하게 false(삭제 Gate 유지). 매일 06:50 Job.
 - [x] Supabase에는 Reference/Research/Quant Metadata만 저장된다.
       → `supabase/migrations/`에 Tick/Quote 등 Raw 시계열 Table 생성 구문이 없음을 확인했다.
-- [ ] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
-- [ ] 뉴스 중복과 라이선스 Scope를 관리한다.
-      → 라이선스 Scope는 완료(`UseScope`로 Source별 허용 용도 강제. Tavily·Alpaca는 탐색
-      전용, NAVER·BIGKinds는 Snippet까지, Open DART는 전문·Embedding 허용). 여기에
-      `MarketScope`를 더해 범위 밖 Source가 P0 Blocked를 풀지 못하게 했다(2026-07-31).
-      **Exact 중복 제거는 완료** — `news_events.admit`이 Cursor + ID 창으로 Stream 계층에서
-      막고, 페이지 안 심볼 병합으로 종목 연결이 사라지지 않게 한다. **Near Duplicate와
-      Story Cluster는 미착수**다. NAVER 키 확보로 P0 NEWS Blocked는 해제됐고 BIGKinds는
-      비용 대비 필요성이 확인될 때까지 `DISABLED`다. X Watchlist는 P1 계획이며 Collector,
-      승인 계정 Registry, 삭제 Compliance와 교차 검증 Test는 아직 미구현이다.
-- [ ] Backtest가 PIT Dataset Manifest로 재현된다.
-- [ ] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
-- [ ] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
-      → DB 쪽 최소권한은 준비됨(`market_reader`/`market_writer`, `public`은 스키마 usage 없음).
-      **`market-api`가 없어서** 다른 본부가 읽을 경로 자체가 아직 없다.
-- [ ] AI Office가 집계 Market Health와 Research·Strategy Read Model을 조회하며 Tick 원문과 TimescaleDB Credential을 받지 않는다.
-- [ ] Agent와 Notebook에 Production DB/Vendor Secret이 노출되지 않는다.
-      → `TIMESCALE_DATABASE_URL`은 `.env`(gitignore)에만 있고 Hermes Profile에 복사하지 않았다.
-      Notebook 권한 분리와 Agent Container 정책은 미착수다.
-- [ ] Backup에서 거래일 하나를 복구해 Replay할 수 있다.
+- [x] DART 정정공시와 재무 Revision을 덮어쓰지 않는다.
+      → 실증 2026-08-01: 정정공시는 새 문서 행으로 들어오고 원본은 `status=CORRECTED`
+      마킹만 된다(590건 원본 행 보존, observed_at 불변 - upsert가 관측 시각을 덮지 않는
+      계약은 news_pipeline/문서 저장 공통). `financial_facts`는 `revision` 컬럼으로 개정을
+      별도 행으로 분리한다. 정정을 원 게시 시점으로 소급하지 않는 것(QNT-02 계약)까지 일관.
+- [x] 뉴스 중복과 라이선스 Scope를 관리한다.
+      → 라이선스 Scope 완료(`UseScope` + `MarketScope`, 2026-07-31). 중복 관리 완료:
+      ① Stream 계층 `news_events.admit`(Cursor+ID 창) ② Sink 계층 (제목,게시일) 창
+      5,000 + **기동 시 DB 예열**(재배포 직후 창이 비어 42행이 재유입된 실측을 봉합)
+      ③ DB 소급 정리로 소스 내 (제목,게시일) 중복 0 실측(2026-07-31, 270+42행 제거·
+      전용 링크 이관). Near Duplicate/Story Cluster·X Watchlist는 이 DoD 문장 밖의
+      확장 백로그로 이관(소스 간 결합·군집은 RAG/클러스터 단계에서).
+- [x] Backtest가 PIT Dataset Manifest로 재현된다. (v1 2026-07-31: pipeline/pit_dataset.py
+      Manifest·Partition 해시 + backtest_runner.py 가 로드 시 해시 재대조·불일치 거부,
+      input_hash unique 로 같은 실험 중복 등록 차단 실측. 유니버스 생존 편향은
+      SURVIVORSHIP_BIAS_DECLARED 로 선언 - 과거 구성 이력 확보가 후속)
+      → **소스 조사 완료 (2026-08-01)**: KRX 정보데이터시스템(data.krx.co.kr)이
+      ① 지수 > 구성종목 화면에서 **과거 일자 시점 조회**를 지원하고(웹 JSON
+      엔드포인트, 무키 - krx_public_notice 와 같은 공개 화면 계열) ② "주가지수
+      공지" 게시판에 정기변경(6월 옵션만기 익일, 편입·편출 목록) 공고가 남는다.
+      설계 초안: 분기 시점 조회로 2024-01~현재 구성 시계열을 백필해
+      quant.universe_versions 에 as-of 버전으로 적재 → Dataset v2 는 각 날짜의
+      실제 구성만 쓴다(정기변경일 사이는 공지 기반 보간). 공개 화면 이용 약관은
+      Registry 등재 시 krx_public_notice 전례로 검토. KRX Open API(키 보유,
+      NOT_AUTHORIZED)가 승인되면 그 경로가 정식이다.
+- [x] Strategy Candidate가 Dataset·Code·Metric·Cost Model과 연결된다.
+      → 2026-08-01 실증: `strategy.candidates`(REJECTED) → `strategy.strategies`(MOM20_SMOKE)
+      → `quant.experiments`(config·code_version·seed·cost krx-cost-v1) → `quant.dataset_manifests`
+      (krx-basket-daily/v1) → `quant.backtest_runs`/`experiment_metrics` 조인이 한 줄로 성립.
+      첫 후보의 상태가 REJECTED 인 것이 핵심이다 - QNT-04 FRAGILE 판정과 데이터셋 생존
+      편향을 근거로 기각했고, 기각도 체인에 남는다(성공만 남기지 않는다).
+- [x] 다른 본부는 TimescaleDB가 아니라 Domain API로 데이터를 읽는다.
+      → `market-api`(8036: /snapshot·/bars·/breadth·/dq)와 `research-api`(8035: /evidence/*)
+      가동 중(2026-07-31부터 컨테이너 상주). DB 최소권한(`market_reader`/`market_writer`)
+      병행. 팀원 `hedgefund_ro` 직결은 과도기 편의로, API 정착 후 회수 예정.
+- [x] AI Office가 집계 Market Health와 Research·Strategy Read Model을 조회하며 Tick 원문과 TimescaleDB Credential을 받지 않는다.
+      → 우리 쪽 제공면 완료: Supabase `dash_*` 5종(security_invoker Read Model)과
+      market-api 집계(/breadth, /dq/summary)만 노출한다. Tick 원문 API 없음, TSDB
+      Credential 은 어떤 Frontend 경로에도 주입되지 않는다. AI Office 실연동은 Frontend
+      담당(도현님) 몫 - 우리 계약면은 준비 완료.
+- [x] Agent와 Notebook에 Production DB/Vendor Secret이 노출되지 않는다.
+      → grep 실증(2026-08-01): LLM 에이전트(news_sentiment_analyst·article_reader·
+      파이프라인 LLM 노드)는 research-api(8035)·Ollama(11434) URL 만 참조 - DB/Vendor
+      키 참조 0건. universe_manager 는 LLM 없는 결정론 코드라 수집기와 같은 등급으로
+      LS 키를 쓴다(LLM 표면 아님). Notebook 은 아직 미도입 - 도입하는 날 권한 분리
+      정책을 먼저 세우는 것이 조건이다.
+- [x] Backup에서 거래일 하나를 복구해 Replay할 수 있다.
+      → 2026-08-01 `replay_restore_drill.py` 드릴 성공: 2026-07-31 ticks 2,394,792행을
+      Parquet Archive 만으로 스크래치 스키마(market_replay)에 복원, 3중 대조(① Manifest
+      sha256 ② 행수 ③ 결정론 지문 count·min/max event_time·거래대금합·고유 ID 수) 전부
+      일치. Broker/Vendor Credential 미참조를 자체점검이 강제한다(Replay 원칙 7).
 
 ---
 

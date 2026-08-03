@@ -1,7 +1,26 @@
 # 리스크본부 (Risk Management)
 
+## P1 현재 상태 (2026-08-03)
+
+- `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.
+- `p1/repository.py`가 `risk.snapshots`, `risk.exposure_components`, `risk.stress_results`, `risk.kill_switch_events`를 한 트랜잭션으로 적재한다. Fund/Book/Instrument/승인된 Stress Scenario FK가 없으면 생성·우회하지 않고 rollback한다.
+- LS증권 어댑터는 읽기 전용이다. 실제 키·계좌·운영 DB가 주입되기 전에는 실제 데이터를 수집하거나 운영 Snapshot을 만들지 않는다. `RISK_REQUIRE_P1_ANALYTICS=true`인 pre-trade API는 P1 Snapshot이 없거나 PASS가 아니면 차단한다.
+- 남은 운영 조건은 실제 API 자격증명, governed FK 원장, RLS/OMS E2E 및 운영 장애 검증이다. P1 계산 코드가 구현됐다는 뜻이지 실거래 승인을 뜻하지 않는다.
+- 2026-08-03 감사에서 Self-check 7개와 명시 pytest는 통과했지만 Compose Service와 실제
+  `risk.risk_decisions`, `risk.trading_states`, `risk.run_log_events` Row는 0건이었다.
+- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 Risk 보고서 11개가 있다.
+  Notion 실패는 Risk 판정을 바꾸지 않으며 운영 전 Report Hash·Artifact Storage·Page 멱등 계약이 필요하다.
+
+현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
+
+## Skill Harness
+
+`harness/manifest.py`가 Risk 스킬과 허용 Tool을 고정하고, `harness/core.py`가 trace·비밀값·금지 Tool을 호출 전에 차단한다. 실패 fallback은 `REJECT + HALTED`다. Redis 연결 상태는 실제 비밀값을 출력하지 않는 `harness/redis_check.py`로 확인한다.
+
+`harness/journal.py`는 Hermes 부서 실행과 LangGraph 직원 실행을 `run_id`로 묶어 `InputSnapshot → AgentOutput → Validation → Decision`을 기록한다. Order와 Fill은 별도 이벤트이며 `inputs_hash`, 모델·프롬프트·파라미터 버전, retry/fallback, rationale/evidence를 보존한다. `RunJournal.replay()`와 `RunJournal.review()`는 단계 재실행과 폴백 사유 집계를 제공하고, 운영 적재 스키마는 `risk.run_log_events`다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Local Model은 [`Modelfile`](Modelfile)의 `hermes3` 기반 `risk-management`이며, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-risk`이고 Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 
@@ -64,3 +83,41 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent \
   fund_id FK로 막힘, 회계본부 영역), K2(Evidence QA — AI QA/감사본부 영역), K3(Kill Switch 이력 기록,
   Stress), K4(Release/Access Audit), P1 Risk Metric, P2 파생상품 Greeks. RLS는 담당자가 의도적으로 보류.
   자세한 진행 상태는 `hermes/config.yaml`의 `implementation:` 블록 참고.
+
+## 안전한 단독 실행
+
+Risk 실행 소스는 `ai-office/` 아래에 있지 않다. 현재 디렉터리가 `ai-office`여도 저장소 루트로 이동한 뒤 실행한다. `risk_engine.py`는 결정론적 엔진 자체 점검이고, Hermes/LangGraph 경계·폴백·JSONL 원장까지 확인하려면 `scripts.py --run`을 사용한다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+python departments/03-risk/scripts.py --run --reject --log-path /tmp/hg-risk-run.jsonl
+python departments/03-risk/engine/risk_engine.py
+python departments/03-risk/engine/trading_state_store.py  # REDIS_URL 필요
+python skills/agentic-rag/main.py \
+  --persona compliance-policy-agent \
+  --query "Can we open a new long position in AAPL today?" \
+  --as-of 2026-07-31
+```
+
+`--run` 결과의 `execution_evidence.pipeline_status`가 `DEGRADED`이면 승인으로 해석하지 않고 `HOLD/ESCALATE`로 처리한다. Redis·실제 정책 Corpus·DB가 없으면 해당 단계는 성공으로 위장하지 않는다.
+
+## P1/P2 검증 기록 (2026-08-03)
+
+Risk·QA Redis 경계 검증은 두 부서 공통 테스트가 아니라 이 부서의 `TradingState`·P1 Risk Gate 연동 수용 기준으로 기록한다. 반드시 저장소 루트에서 `~/claude` 환경으로 실행한다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+which python
+python -m pytest \
+  departments/03-risk/tests/test_trading_state_store.py \
+  departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py \
+  -q -rs
+```
+
+`which python`이 `/Users/baiohelseu/claude/bin/python`이고 결과가 `11 passed`이며 `skipped`가 없어야 실제 Redis PING·상태 저장·QA 이벤트/캐시 통합이 확인된 것으로 본다. `skipped`는 연결 성공이 아니며, 운영 승인 근거로 사용하지 않는다.
+
+- P1: Instrument Mapping, PIT/staleness, Exposure, VaR/Stress/Correlation, Entry Gate와 DB Repository/RLS baseline은 구현·단위 검증 완료. 실제 Portfolio/Market API, governed FK 데이터, 운영 DB/RLS/E2E는 외부 조건 대기다.
+- P2: `analytics/risk_metrics.py`의 결정론적 historical VaR·Stress·Black-Scholes Greeks 계산기와 단위 테스트는 준비됐다. 파생상품 Snapshot/마진/변동성 표면·Golden Fixture·QuantLib 검증·Risk Gate/API 연결 전에는 P2 운영 완료로 보지 않는다.
+- Kill Switch 이력 저장은 `requested_by`와 `approved_release_by`를 분리해 기록하고, FK/RLS 실패 시 전체 트랜잭션을 rollback한다.

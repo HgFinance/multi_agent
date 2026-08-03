@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,6 +60,7 @@ class SinkStats:
     issuers_linked: int = 0
     revisions: int = 0
     flushes: int = 0
+    title_dups: int = 0           # 제목 창이 걸러낸 재전송·재게재
     unresolved_symbols: set = field(default_factory=set)
 
     def summary(self) -> str:
@@ -71,6 +72,8 @@ class SinkStats:
             base += f" issuer {self.issuers_linked}"
         if self.revisions:
             base += f" 정정 {self.revisions}"
+        if self.title_dups:
+            base += f" 제목중복 {self.title_dups}"
         if self.unresolved_symbols:
             n = len(self.unresolved_symbols)
             sample = ", ".join(sorted(self.unresolved_symbols)[:6])
@@ -100,6 +103,7 @@ class NewsSink:
         max_delay_seconds: float = DEFAULT_MAX_DELAY_SECONDS,
         clock=None,
         on_flush=None,
+        title_dedup_window: int = 0,
     ) -> None:
         if max_batch < 1:
             raise ValueError("max_batch 는 1 이상이어야 한다")
@@ -121,15 +125,54 @@ class NewsSink:
         self._buf_started: float | None = None
         self._closed = False
         self.stats = SinkStats()
+        # 제목 기반 중복 창 (재일님 지적 2026-07-31: LS 재전송·NAVER 재게재가
+        # 다른 external_id 로 들어와 소스 내 중복 270행이 쌓였다 - DB 소급 제거
+        # 후 재발을 여기서 막는다). 키 = (제목, 게시 날짜). 0 이면 비활성.
+        from collections import deque
+        self._title_window = title_dedup_window
+        self._seen_titles: deque = deque(maxlen=max(title_dedup_window, 1))
+        self._seen_title_set: set = set()
 
     # -- callable: on_record 로 그대로 넘길 수 있다 ---------------------------
 
     def __call__(self, record: NewsRecord) -> None:
         self.add(record)
 
+    def seed_titles(self, keys) -> int:
+        """재기동 예열: DB 에 이미 있는 (제목, 게시일) 로 창을 채운다.
+
+        실측 2026-07-31: 컨테이너 재배포(12:09 UTC) 직후 창이 비어 재방출분
+        42행이 그 시간대에 전부 재적재됐다. 기동 시 최근 기사로 예열하면
+        재기동이 중복 창의 구멍이 되지 않는다. 오래된 것부터 넣어야 deque 가
+        최신 키를 밀어내지 않는다.
+        """
+        if not self._title_window:
+            return 0
+        seeded = 0
+        for key in keys:
+            key = (key[0], key[1])
+            if key in self._seen_title_set:
+                continue
+            if len(self._seen_titles) == self._seen_titles.maxlen:
+                self._seen_title_set.discard(self._seen_titles[0])
+            self._seen_titles.append(key)
+            self._seen_title_set.add(key)
+            seeded += 1
+        return seeded
+
     def add(self, record: NewsRecord) -> None:
         if self._closed:
             raise NewsSinkError("닫힌 Sink 에 기사를 넣으려 했다")
+
+        if self._title_window:
+            key = (record.title, record.published_at.date())
+            if key in self._seen_title_set:
+                self.stats.title_dups += 1
+                return
+            if len(self._seen_titles) == self._seen_titles.maxlen:
+                self._seen_title_set.discard(self._seen_titles[0])
+            self._seen_titles.append(key)
+            self._seen_title_set.add(key)
 
         now = self._now()
         self._buf.append(record)
@@ -255,6 +298,30 @@ class NewsSink:
 # ---------------------------------------------------------------------------
 # Stream <-> Sink 연결
 # ---------------------------------------------------------------------------
+
+def seed_title_window_from_db(sink: NewsSink, conn, source_id) -> int:
+    """상주 서비스 기동 시 제목 창을 DB 최근 기사로 예열한다.
+
+    게시일은 Asia/Seoul 기준으로 뽑는다 - add() 의 키가
+    record.published_at.date() 이고 두 한국 소스(NAVER·LS) 레코드가 KST
+    tz 를 달고 오기 때문에, UTC date 로 뽑으면 자정 전후 기사가 어긋난다.
+    """
+    if not sink._title_window:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select title, (published_at at time zone 'Asia/Seoul')::date
+            from research.documents
+            where source_id = %s and document_type = 'NEWS'
+            order by observed_at desc
+            limit %s
+            """,
+            (source_id, sink._title_window),
+        )
+        rows = cur.fetchall()
+    return sink.seed_titles(reversed(rows))
+
 
 def run_pipeline(
     stream,
@@ -644,6 +711,55 @@ def _check_batch_dedup():
     print("  배치 내 중복 제거        OK")
 
 
+def _check_title_dedup_window():
+    """같은 (제목, 게시일) 재전송을 적재 전에 거르는지 - DB 중복 270행 재발 방지."""
+    ref = _FakeRef()
+    sink = NewsSink(ref, source_id="s", max_batch=1, clock=lambda: 0.0,
+                    title_dedup_window=100)
+    sink.add(_rec(1, title="아이텍, 자기 전환사채 만기전 취득 결정"))
+    # 같은 제목·같은 날, external_id 만 다른 재전송(LS 실측 x14 사례)
+    dup = NewsRecord(external_id="t:999", title="아이텍, 자기 전환사채 만기전 취득 결정",
+                     canonical_url=None,
+                     published_at=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+                     observed_at=datetime(2026, 7, 31, 1, 2, tzinfo=timezone.utc),
+                     language="ko", provider="t")
+    sink.add(dup)
+    assert len(ref.docs) == 1, "재전송이 적재됐다"
+    assert sink.stats.title_dups == 1 and "제목중복 1" in sink.stats.summary()
+    # 창 0 이면 기존 동작 그대로
+    s2 = NewsSink(_FakeRef(), source_id="s", max_batch=1, clock=lambda: 0.0)
+    s2.add(_rec(1)); s2.add(dup)
+    assert s2.stats.title_dups == 0
+    print("  제목 중복 창             OK")
+
+
+def _check_title_window_seed():
+    """재기동 예열 - 창이 비어 있는 첫 몇 분이 중복 구멍이 되지 않는지."""
+    from datetime import date
+
+    ref = _FakeRef()
+    sink = NewsSink(ref, source_id="s", max_batch=1, clock=lambda: 0.0,
+                    title_dedup_window=3)
+    n = sink.seed_titles([("기사A", date(2026, 7, 31)), ("기사B", date(2026, 7, 31))])
+    assert n == 2
+    # 예열된 키의 재방출은 적재 전에 걸린다 (재배포 직후 42행 재유입 사례)
+    dup = NewsRecord(external_id="t:1", title="기사A", canonical_url=None,
+                     published_at=datetime(2026, 7, 31, 1, 0,
+                                           tzinfo=timezone(timedelta(hours=9))),
+                     observed_at=datetime(2026, 7, 31, 1, 2, tzinfo=timezone.utc),
+                     language="ko", provider="t")
+    sink.add(dup)
+    assert len(ref.docs) == 0 and sink.stats.title_dups == 1, "예열이 안 먹었다"
+    # 창 크기 초과 예열은 오래된 키부터 밀려난다 + 중복 키는 다시 세지 않는다
+    n2 = sink.seed_titles([("기사B", date(2026, 7, 31)), ("기사C", date(2026, 7, 31)),
+                           ("기사D", date(2026, 7, 31))])
+    assert n2 == 2 and len(sink._seen_title_set) == 3
+    # 창 0(비활성)이면 예열도 no-op
+    assert NewsSink(_FakeRef(), source_id="s", max_batch=1,
+                    clock=lambda: 0.0).seed_titles([("x", date(2026, 1, 1))]) == 0
+    print("  제목 창 예열             OK")
+
+
 def _check_title_standalone():
     names = {"두산", "두산에너빌리티", "LG", "LG전자"}
     # 긴 이름의 부분 문자열은 독립 등장이 아니다
@@ -772,9 +888,11 @@ if __name__ == "__main__":
     _check_failure_not_swallowed()
     _check_rebind()
     _check_batch_dedup()
+    _check_title_dedup_window()
+    _check_title_window_seed()
     _check_title_standalone()
     _check_aliases()
     _check_link_resolvers()
     _check_pipeline_with_stream()
     _check_config_guards()
-    print("Sink 12개 영역 통과")
+    print("Sink 14개 영역 통과")

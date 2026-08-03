@@ -17,13 +17,25 @@ import json
 import os
 from typing import TypedDict
 
+from langsmith.wrappers import wrap_openai
 from openai import OpenAI
 
+from .resilience import CircuitBreaker, RedisJsonCache, emit_metric
 from .retriever import LocalVectorIndex, ScoredChunk
 
 CHAT_MODEL = os.environ.get("AGENTIC_RAG_CHAT_MODEL", "gpt-4o-mini")
 MAX_ATTEMPTS = 3
 RETRIEVE_TOP_K = 4
+MAX_CONTEXT_CHARS = int(os.environ.get("AGENTIC_RAG_MAX_CONTEXT_CHARS", "6000"))
+_CHAT_BREAKER = CircuitBreaker(
+    "agentic-rag-llm",
+    failure_threshold=int(os.environ.get("AGENTIC_RAG_LLM_FAILURE_THRESHOLD", "3")),
+    recovery_timeout_seconds=float(os.environ.get("AGENTIC_RAG_LLM_RECOVERY_SECONDS", "30")),
+)
+_PROMPT_CACHE = RedisJsonCache(
+    "risk-qa:rag:prompt",
+    ttl_seconds=int(os.environ.get("AGENTIC_RAG_PROMPT_CACHE_TTL_SECONDS", "604800")),
+)
 
 PERSONA_PROMPTS: dict[str, dict[str, object]] = {
     "compliance-policy-agent": {
@@ -74,6 +86,33 @@ PERSONA_PROMPTS: dict[str, dict[str, object]] = {
         "query_label": "Claim under review",
         "docs_label": "Relevant evidence excerpts",
     },
+    "hallucination-critic": {
+        "grade_system": (
+            "You are an evidence relevance grader for a hedge fund's Hallucination Critic review. "
+            'Return JSON: {"relevant_indices": [int, ...]} — only indices of chunks that '
+            "could plausibly explain why the flagged claim lacks support or is contradicted. "
+            "Be strict: an on-topic but non-decisive chunk should still be included; "
+            "an off-topic chunk must not be."
+        ),
+        "generate_system": (
+            "You are the Hallucination Critic for a hedge fund's AI QA/Audit department. A claim was "
+            "already flagged UNSUPPORTED or CONTRADICTED by the deterministic Evidence QA engine — "
+            "that verdict is final and not yours to overturn. Your job is only to classify the failure "
+            "using ONLY the provided evidence excerpts and write the escalation rationale. "
+            'Return JSON: {"verdict": "HALLUCINATION"|"OVERCONFIDENT_CLAIM"|"CONTRADICTION"|"TOOL_MISUSE", '
+            '"cited_documents": [doc_id, ...], "rationale": str, '
+            '"confidence": float (0-1), "escalate": bool}. '
+            "Use CONTRADICTION if an excerpt states something inconsistent with the claim, HALLUCINATION "
+            "if the claim asserts a fact absent from every excerpt, OVERCONFIDENT_CLAIM if the claim "
+            "upgrades a forecast/opinion into a stated fact, and TOOL_MISUSE if the excerpts show the "
+            "originating agent queried the wrong scope or timeframe. Always set escalate=true — every "
+            "input to this node was already flagged for escalation upstream."
+        ),
+        "no_evidence_verdict": "HALLUCINATION",
+        "no_evidence_rationale": "No supporting or contradicting evidence document was found for the flagged claim; the original UNSUPPORTED/CONTRADICTED verdict stands as-is.",
+        "query_label": "Flagged claim under hallucination review",
+        "docs_label": "Relevant evidence excerpts",
+    },
 }
 
 
@@ -87,23 +126,92 @@ class ComplianceState(TypedDict, total=False):
     answer: dict
     grounded: bool
     done: bool
+    fallback: bool
+    fallback_reason: str
+    telemetry: list[dict[str, object]]
 
 
 def _client() -> OpenAI:
-    return OpenAI()
+    # wrap_openai는 LANGSMITH_TRACING이 꺼져 있으면 아무 동작 없이 그대로 통과한다 -
+    # .env.example 3-1절(임시, risk/qa 부서 유휴 에이전트 점검용)이 켜졌을 때만 토큰/비용이 잡힌다.
+    return wrap_openai(OpenAI())
 
 
-def _chat_json(system: str, user: str) -> dict:
-    resp = _client().chat.completions.create(
-        model=CHAT_MODEL,
-        response_format={"type": "json_object"},
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+def _model_for(task: str) -> str:
+    return os.environ.get(f"AGENTIC_RAG_{task.upper()}_MODEL", CHAT_MODEL)
+
+
+def _chat_json(system: str, user: str, *, task: str) -> dict:
+    model = _model_for(task)
+    fingerprint = _PROMPT_CACHE.fingerprint(model, system, user)
+    cached = _PROMPT_CACHE.get(fingerprint)
+    if isinstance(cached, dict):
+        emit_metric("rag_prompt_cache_hit", task=task, model=model)
+        return cached
+
+    started = dt.datetime.now(dt.timezone.utc)
+    try:
+        resp = _CHAT_BREAKER.call(
+            lambda: _client().chat.completions.create(
+                model=model,
+                response_format={"type": "json_object"},
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+        )
+        result = json.loads(resp.choices[0].message.content)
+    except Exception as exc:
+        emit_metric(
+            "rag_llm_failure",
+            task=task,
+            model=model,
+            error=type(exc).__name__,
+            circuit_state=_CHAT_BREAKER.state,
+        )
+        raise
+
+    usage = getattr(resp, "usage", None)
+    emit_metric(
+        "rag_llm_call",
+        task=task,
+        model=model,
+        latency_ms=round((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000, 2),
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
     )
-    return json.loads(resp.choices[0].message.content)
+    _PROMPT_CACHE.set(fingerprint, result)
+    return result
+
+
+def _safe_chat_json(system: str, user: str, *, task: str) -> tuple[dict | None, str | None]:
+    try:
+        return _chat_json(system, user, task=task), None
+    except Exception as exc:
+        return None, f"{task}:{type(exc).__name__}"
+
+
+def _trim_context(chunks: list[ScoredChunk], *, prefix: str = "") -> str:
+    """Keep prompt size bounded without changing deterministic PIT/citation rules."""
+
+    remaining = max(0, MAX_CONTEXT_CHARS - len(prefix))
+    blocks: list[str] = []
+    for chunk in chunks:
+        block = (
+            f"doc_id={chunk.chunk.document_id} title={chunk.chunk.title!r} "
+            f"version={chunk.chunk.version}\n{chunk.chunk.text}"
+        )
+        if len(block) > remaining:
+            block = block[:remaining]
+        if not block:
+            break
+        blocks.append(block)
+        remaining -= len(block) + 2
+        if remaining <= 0:
+            break
+    return "\n\n".join(blocks)
 
 
 def _prompts(persona: str) -> dict[str, object]:
@@ -125,9 +233,20 @@ def _point_in_time_ok(chunk: ScoredChunk, as_of: str) -> bool:
 def make_retrieve_node(index: LocalVectorIndex):
     def retrieve_node(state: ComplianceState) -> ComplianceState:
         query = state["query"]
-        retrieved = index.search(query, top_k=RETRIEVE_TOP_K)
+        try:
+            retrieved = index.search(query, top_k=RETRIEVE_TOP_K)
+        except Exception as exc:
+            emit_metric("rag_retrieve_failure", error=type(exc).__name__)
+            return {
+                **state,
+                "retrieved": [],
+                "relevant": [],
+                "fallback": True,
+                "fallback_reason": f"retrieve:{type(exc).__name__}",
+            }
         # Point-in-Time filter runs here, deterministically, before anything reaches the LLM.
         pit_valid = [c for c in retrieved if _point_in_time_ok(c, state["as_of"])]
+        emit_metric("rag_node_latency", node="retrieve", retrieved=len(pit_valid))
         return {**state, "retrieved": pit_valid}
 
     return retrieve_node
@@ -144,10 +263,19 @@ def grade_node(state: ComplianceState) -> ComplianceState:
         f"[{i}] ({c.chunk.document_type} — {c.chunk.title}, v{c.chunk.version})\n{c.chunk.text}"
         for i, c in enumerate(retrieved)
     )
-    result = _chat_json(
+    docs_block = docs_block[:MAX_CONTEXT_CHARS]
+    result, error = _safe_chat_json(
         system=prompts["grade_system"],
         user=f"{prompts['query_label']}:\n{state['query']}\n\nCandidate chunks:\n{docs_block}",
+        task="grade",
     )
+    if result is None:
+        return {
+            **state,
+            "relevant": [],
+            "fallback": True,
+            "fallback_reason": error or "grade:unknown",
+        }
     keep = set(result.get("relevant_indices", []))
     relevant = [c for i, c in enumerate(retrieved) if i in keep]
     return {**state, "relevant": relevant}
@@ -171,14 +299,33 @@ def generate_node(state: ComplianceState) -> ComplianceState:
         f"doc_id={c.chunk.document_id} title={c.chunk.title!r} version={c.chunk.version}\n{c.chunk.text}"
         for c in relevant
     )
-    result = _chat_json(
+    docs_block = docs_block[:MAX_CONTEXT_CHARS]
+    result, error = _safe_chat_json(
         system=prompts["generate_system"],
         user=f"{prompts['query_label']}:\n{state['query']}\n\n{prompts['docs_label']}:\n{docs_block}",
+        task="generate",
     )
+    if result is None:
+        fallback_answer = {
+            "verdict": prompts["no_evidence_verdict"],
+            "cited_documents": [],
+            "rationale": "External model unavailable; deterministic escalation required.",
+            "confidence": 0.0,
+            "escalate": True,
+        }
+        return {
+            **state,
+            "answer": fallback_answer,
+            "grounded": False,
+            "fallback": True,
+            "fallback_reason": error or "generate:unknown",
+        }
     return {**state, "answer": result}
 
 
 def hallucination_check_node(state: ComplianceState) -> ComplianceState:
+    if state.get("fallback"):
+        return {**state, "grounded": False, "done": True}
     """Deterministic grounding check: every cited doc_id must be among the relevant chunks."""
     prompts = _prompts(state["persona"])
     answer = state.get("answer", {})
@@ -192,6 +339,8 @@ def hallucination_check_node(state: ComplianceState) -> ComplianceState:
 
 
 def should_retry(state: ComplianceState) -> str:
+    if state.get("fallback"):
+        return "done"
     if state.get("grounded"):
         return "done"
     if state.get("attempt", 1) >= MAX_ATTEMPTS:

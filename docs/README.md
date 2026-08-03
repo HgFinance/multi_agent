@@ -2,27 +2,29 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [Risk/QA Rollout](02-engineering/RISK_QA_TEST_AND_PRODUCTION_ROLLOUT.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
 
 ## 현재 상태
 
-이 저장소는 **본부별 Prototype을 통합하는 초기 구현 단계**다. 완전한 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 존재한다. 세부 현황과 남은 작업은 [Project Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md)를 기준으로 확인한다.
+이 저장소는 **실행 중인 리서치 Data Plane·Hermes와 Risk/QA 구현을 전사 Runtime으로 통합하는 단계**다. 완전한 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 존재한다. 팀원별 2주 계획과 Daily Scrum, 실제 실행 증거, 애로사항, 선행 의존성과 다음 작업은 [실행 현황과 통합 계획 v2.2](PROJECT_IMPLEMENTATION_STATUS.md)을 단일 기준으로 확인한다.
 
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
 - Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
+- Docker에서 실행 중인 LS 전 종목 WebSocket·뉴스·Batch Collector, API, Research MCP, Research·Quant Hermes와 TimescaleDB 등 기본 10개 Service
 - LS 종목 Master·구독 계획·실시간 Payload 정규화, DART·거시·Calendar·Corporate Action·뉴스 수집 Adapter
 - Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
 - 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype
-- Evidence QA, Trace, Tool Permission, Ops Health, Incident와 `compliance-policy-agent` Agentic RAG Baseline
+- Risk P1, Risk·QA Repository·Redis Event·Harness·Replay, QA Model Risk·Internal Audit와 Agentic RAG 회복성
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
 - OpenDART 85개 API의 공시·재무·지분·주요사항 요청·응답 참조 문서
 - KRX Data Marketplace 31개 API의 지수·주식·증권상품·채권·파생상품·일반상품·ESG 요청·응답 참조 문서
 - SerpApi 전체 Search Engine 카탈로그와 뉴스·웹·트렌드·학술·특허·영상의 수집·Evidence 승격 가이드
-- 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot과 Read-only FastAPI BFF
+- PIT Dataset, Backtest, Walk-Forward와 Experiment Orchestrator 및 실제 Quant Experiment 기록
+- 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot, Risk·QA 계약 Panel과 Read-only BFF
 - Hermes Kanban을 Agent 상태 Source로 사용하는 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 - 공식 X API 기반 유명 인사 Social Insight Watchlist와 교차 검증 계획(P1, 미구현)
 
-이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`의 조직 화면은 8개 단위로 바뀌었지만 직원 업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반 DEMO다. 상시 LS WebSocket Worker, Redis Event Bus, 공식 Read Model API, Kanban Status Bridge, Strategy Factory, Auth와 10거래일 Paper Dry Run은 아직 남아 있다. `/agent/ask`는 인증·Tool Allowlist 전까지 기본 비활성화한다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
+이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`의 조직 화면은 8개 단위로 바뀌었지만 직원 업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반 DEMO다. LS WebSocket Worker와 조회 API는 실행 중이지만 프로젝트 전용 Redis Event Bus, Trading·Risk·Accounting·QA Container, 공식 Read Model, Kanban Status Bridge, Auth와 10거래일 Paper Dry Run은 아직 남아 있다. Canonical Execution/Risk/Accounting DB에도 실제 Case 행이 없다. `/agent/ask`는 인증·Tool Allowlist 전까지 기본 비활성화한다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
 
 첫 번째 목표는 실제 자금 운용이 아니다. 단일 사용자와 단일 주식시장을 대상으로 다음 폐쇄 루프를 완성하는 것이다.
 
@@ -420,7 +422,7 @@ docs/
 | 문서 | 언제 읽는가 |
 |---|---|
 | [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | 제품의 전체 비전, 실제 서비스 전환과 장기 확장 경계를 확인할 때 |
-| [Project Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) | 팀원별 구현 결과, GitHub 통합 상태와 다음 작업을 확인할 때 |
+| [Execution Status v2](PROJECT_IMPLEMENTATION_STATUS.md) | 실행 증거, 팀원별 진척도, 애로사항, 의존성과 다음 작업을 확인할 때 |
 | [Whole-System Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) | 전 본부 고도화 Gate, 연구 근거, 기술 도입 시점과 보류 조건을 확인할 때 |
 | [Investment Case Specification](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) | 서비스 최소 단위의 상태, 증거, API와 완료 기준을 구현할 때 |
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
