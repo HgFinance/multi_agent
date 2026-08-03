@@ -127,3 +127,25 @@ hiring_priority:
 usage:
   run: "trading-department chat -q 'Turn this Research Packet into an OrderIntent for 005930'"
   collaborate: "trading-department chat -q 'Run Bull/Bear debate, then submit the OrderIntent to risk-management'"
+
+# ── 도구 허용목록 (2026-08-03) ────────────────────────────────────────────────
+# ⚠ 이 키는 tool_allowlist 와 다르다. **Hermes 가 실제로 읽고 강제한다**
+#   (`hermes tools list` 결과가 이 목록과 일치한다). 01-research/hermes/config.yaml
+#   38-44행이 경고하듯 tool_allowlist 는 우리 저장소 계약 문서일 뿐 런타임 강제가
+#   아니지만, platform_toolsets 는 런타임 자체의 허용목록이다.
+#
+# 기본값 문제: Portal 로그인이 free tool pool 을 켜면서 web·browser·terminal·
+# file·code_execution·computer_use 가 전부 enabled 로 들어왔다(2026-08-03 실측).
+# HERMES_DOCKER_RUNBOOK.md 7절은 "에이전트에게 셸을 주지 않는 현재 구성"이라고
+# 적고 있었지만 실제 런타임은 그 반대였다.
+#
+# 남기는 기준: Hermes 는 부서 인터페이스·기억·위임 계층이고 분석 실체는
+# LangGraph 다(TECH_STACK_DECISIONS 2절, 같은 runbook 6절). 오케스트레이션에
+# 필요한 것만 남기고 실행 능력은 전부 뺀다.
+#   - 뺀 것: web·browser(시세·뉴스 원본 수집은 리서치본부 영역 - CLAUDE.local.md
+#     "만들지 않는 것"), terminal·file·code_execution·computer_use(셸이 있으면
+#     Agent 가 우리 OMS·원장 코드를 직접 실행할 수 있다 - 원칙 1 위반 경로),
+#     vision·image_gen·bfl·tts(거래·회계 업무와 무관)
+#   - 도메인 데이터는 나중에 MCP Server 로 붙인다. builtin toolset 과 별개다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]

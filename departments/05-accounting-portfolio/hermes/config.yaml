@@ -105,3 +105,16 @@ hiring_priority:
 usage:
   run: "accounting-portfolio-department chat -q 'Reconcile today''s fills and compute preliminary NAV'"
   collaborate: "accounting-portfolio-department chat -q 'Reconcile positions, then report PnL attribution to ceo-agent'"
+
+# ── 도구 허용목록 (2026-08-03) ────────────────────────────────────────────────
+# 근거와 기준은 departments/02-trading/hermes/config.yaml 같은 절 주석과 동일하다.
+# 요약: platform_toolsets 는 tool_allowlist 와 달리 **Hermes 가 실제로 강제하는**
+# 허용목록이다. Portal 로그인이 free tool pool 로 켜둔 셸·파일·코드실행·컴퓨터
+# 제어·웹검색을 전부 뺀다.
+#
+# 회계본부에 특히 중요한 이유: 이 부서의 산출물은 원장과 NAV다. Agent 에게 셸과
+# 파일 쓰기가 있으면 ledger.py 의 Posted Journal 을 직접 건드릴 경로가 열린다 -
+# "Posted Journal 은 수정하지 않는다, Reversal 을 추가한다"(CLAUDE.local.md 원칙 6)가
+# 프롬프트 문장으로만 남고 실행 경로로는 뚫려 있는 상태가 된다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
