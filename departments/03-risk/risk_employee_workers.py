@@ -70,11 +70,11 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
 
 
 def _model_name() -> str:
-    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:1.7b")
+    return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
 
 
 def _base_url() -> str:
-    raw = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+    raw = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/v1").rstrip("/")
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from orchestration.adapters import build_paper_e2e_handlers, build_paper_handlers
+from orchestration.adapters.test_pipeline import build_test_handlers
 
 from .contracts import StepRun, WorkflowRun, WorkflowSpec
 from .manifest import load_workflow
@@ -38,8 +39,8 @@ def execute_workflow(
     integration visible instead of fabricating a PASS result.
     """
 
-    if mode not in {"dry-run", "live", "paper-e2e", "paper"}:
-        raise ValueError("mode는 dry-run, paper-e2e, paper 또는 live여야 합니다")
+    if mode not in {"dry-run", "test", "live", "production", "paper-e2e", "paper"}:
+        raise ValueError("mode는 dry-run, test, paper-e2e, paper, production 또는 live여야 합니다")
     spec.validate()
     handlers = handlers or {}
     context = dict(context or {})
@@ -73,7 +74,11 @@ def execute_workflow(
                     output_contract=step.output_contract,
                     failure_action=step.failure_action,
                     attempts=0,
-                    detail="no explicit department adapter registered",
+                    detail=(
+                        "production adapter not registered"
+                        if mode == "production"
+                        else "no explicit department adapter registered"
+                    ),
                 )
             )
             return WorkflowRun(
@@ -161,9 +166,13 @@ def main() -> int:
     parser.add_argument("--workflow", default="investment-case")
     parser.add_argument(
         "--mode",
- choices=("dry-run", "paper-e2e", "paper", "live"),
+        choices=("dry-run", "test", "paper-e2e", "paper", "production", "live"),
         default="dry-run",
- help="dry-run은 계획만, paper-e2e는 smoke만, paper는 읽기 전용 handoff, live는 승인 adapter만 실행합니다.",
+        help=(
+            "dry-run은 계획만, test는 외부 의존성 없는 전체 계약 검증, "
+            "paper-e2e는 Hermes smoke만, paper는 실제 Worker/Hermes 읽기 전용 handoff, "
+            "production/live는 명시적 승인 adapter만 실행합니다."
+        ),
     )
     parser.add_argument("--symbol", default="AAPL")
     parser.add_argument("--quantity", type=int, default=100)
@@ -173,10 +182,23 @@ def main() -> int:
 
     try:
         repo_root = Path(__file__).resolve().parents[2]
-        if args.mode == "paper":
+        if args.mode == "test":
+            handlers = build_test_handlers(repo_root)
+            context = {
+                "case_request": {
+                    "case_id": f"test-{uuid4().hex[:12]}",
+                    "symbol": args.symbol,
+                    "side": "BUY",
+                    "quantity": args.quantity,
+                    "order_type": "LIMIT",
+                    "limit_price": args.limit_price,
+                    "stage": "test",
+                }
+            }
+        elif args.mode == "paper":
             _load_repo_env(repo_root)
-        handlers = None
-        context: Mapping[str, object] | None = None
+            handlers = None
+            context: Mapping[str, object] | None = None
         if args.mode == "paper-e2e":
             handlers = build_paper_e2e_handlers(repo_root)
             context = {
@@ -201,6 +223,18 @@ def main() -> int:
                     "order_type": "LIMIT",
                     "limit_price": args.limit_price,
                     "stage": "paper",
+                }
+            }
+        elif args.mode == "production":
+            context = {
+                "case_request": {
+                    "case_id": f"production-{uuid4().hex[:12]}",
+                    "symbol": args.symbol,
+                    "side": "BUY",
+                    "quantity": args.quantity,
+                    "order_type": "LIMIT",
+                    "limit_price": args.limit_price,
+                    "stage": "production",
                 }
             }
         run = execute_workflow(

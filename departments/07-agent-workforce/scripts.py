@@ -106,9 +106,19 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
     )
 
-    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
+ agent = AIAgent(model=_configured_head_model(), quiet_mode=True,
                      ephemeral_system_prompt=persona)
     return agent.chat(task)
+
+
+def _configured_head_model() -> str:
+    """Read the current Hermes Head model instead of a legacy alias."""
+
+    config = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
+    match = re.search(r"^\s+default:\s*([^\s#]+)", config, re.MULTILINE)
+    if not match:
+        raise ValueError("Hermes Head model is missing from config.yaml")
+    return match.group(1)
 
 
 def narrate(state: HRState, *, chat=None) -> dict:
