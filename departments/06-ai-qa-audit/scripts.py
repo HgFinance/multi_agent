@@ -79,6 +79,10 @@ _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+from qa_employee_workers import run_employee_workers as run_qa_employee_workers
+
 _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
 for _p in (_BASE / "evidence", _BASE / "audit", _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
@@ -117,16 +121,17 @@ def _journal_module():
         _JOURNAL_MODULE = module
     return _JOURNAL_MODULE
 
-# 워커(직원) LLM 백엔드 - 동규님 GPU에 올린 팀 공용 Ollama 서버. 환경변수로 옮기지 않는다.
-# 192.168.25.25
-# 172.31.99.238
-# wrap_openai는 LANGSMITH_TRACING이 꺼져 있으면 그대로 통과한다 - 켜졌을 때만 토큰량 추적
-internal_llm = wrap_openai(OpenAI(base_url="http://192.168.25.25:11434/v1", api_key="ollama"))
+# 직원 LLM은 부서장 Hermes와 분리된 로컬/팀 Ollama 런타임이다.
+# 주소와 모델은 환경변수로 주입해 개발·CI·운영 환경을 섞지 않는다.
+internal_llm = wrap_openai(OpenAI(
+    base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"),
+    api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+))
 
 
 def _call_internal_llm(prompt: str) -> str:
     res = internal_llm.chat.completions.create(
-        model="agent-qa",
+        model=os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b"),
         messages=[{"role": "user", "content": prompt}],
     )
     return res.choices[0].message.content
@@ -239,6 +244,7 @@ class QAState(TypedDict, total=False):
     escalate: bool
     notion_upload: dict     # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
     fallbacks: list[dict]
+    employee_workers: dict
     observability: dict
     report_markdown: str
     evaluation: dict
@@ -314,12 +320,47 @@ def hallucination_review(state: QAState) -> dict:
 # ── 노드 2: Claim 서술 (LLM 직원 - 내부 Ollama, grounded 서술만) ───────────
 def draft_claim_narrative(state: QAState) -> dict:
     a = state["assessment"]
-    prompt = f"""{_persona('evidence-qa-agent')}
-
-아래는 결정론적 Evidence QA Engine이 이미 계산한 Claim별 검사 결과다(전체 판정: {a['decision']}).
-새 판정을 내리거나 근거를 임의로 재해석하지 말고, 각 결과를 그대로 풀어 쓴 한국어 요약만 작성하라:
-{json.dumps(a['claim_checks'], ensure_ascii=False, indent=1)}"""
-    return {"claim_narrative": _call_internal_llm(prompt)}
+    report = run_qa_employee_workers(
+        {
+            "assessment": a,
+            "hallucination_reviews": state.get("hallucination_reviews", []),
+            "model_risk": state.get("model_risk"),
+            "internal_audit": state.get("internal_audit"),
+            "ops_assessment": state.get("ops_assessment"),
+            "permission_check": state.get("permission_check"),
+            "incident": state.get("incident"),
+            "incident_events": state.get("incident_events", []),
+        },
+        llm=lambda system, prompt: _call_internal_llm(f"{system}\n{prompt}"),
+    )
+    evidence_worker = next(
+        (item for item in report.get("workers", []) if item.get("worker_id") == "evidence-qa-worker"),
+        {},
+    )
+    output = evidence_worker.get("output") or {}
+    fallbacks = []
+    if report.get("failed"):
+        fallbacks = [{
+            "stage": "claim_narrative",
+            "node": "evidence-qa-worker",
+            "error": ";".join(str(item.get("error")) for item in report.get("workers", [])
+                               if item.get("status") != "COMPLETED"),
+            "action": "ESCALATE",
+            "safe_action": "ESCALATE",
+            "decision_origin": "FALLBACK",
+        }]
+    deterministic_summary = "; ".join(
+        f"Claim {item.get('claim_index')}: {item.get('result')} ({item.get('reason', '')})"
+        for item in a.get("claim_checks", [])
+    )
+    return {
+        "claim_narrative": (output.get("summary") if not report.get("failed") else "") or (
+            "직원 LLM 서술을 생성하지 못했습니다. 결정론적 결과를 그대로 전달합니다: "
+            + deterministic_summary
+        ),
+        "employee_workers": report,
+        "fallbacks": fallbacks,
+    }
 
 
 # ── 노드 3: 종합 (qa-audit-supervisor 페르소나 - Hermes AIAgent) ───────────
@@ -733,6 +774,16 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
         lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
         lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
         lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        worker_execution = out.get("employee_workers") or {}
+        if worker_execution:
+            lines += ["", "### LangGraph Employee Workers", "", "| Worker | 상태 | 도구 |", "|---|---|---|"]
+            lines += [
+                f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
+                f"{md_cell(', '.join(item.get('tools') or []))} |"
+                for item in worker_execution.get("workers", [])
+            ]
+            lines += [f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
+                      f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`"]
         runtime = out.get("hermes_runtime") or {}
         if runtime:
             lines += [
@@ -854,20 +905,27 @@ def _assemble_out(state: QAState) -> dict:
     trace_id = trace_id or f"{PIPELINE_VERSION}:{out['qa_decision_id']}"
     out["fallbacks"] = state.get("fallbacks", [])
     out["observability"] = langsmith_handoff(str(trace_id))
-    executed_agents = []
+    worker_execution = state.get("employee_workers") or {}
+    executed_agents = list(worker_execution.get("executed") or [])
+    failed_worker_agents = list(worker_execution.get("failed") or [])
     if out.get("claim_checks") is not None:
-        executed_agents.append("evidence-qa-agent")
+        if "evidence-qa-worker" not in executed_agents:
+            executed_agents.append("evidence-qa-worker")
     if out.get("hallucination_reviews"):
-        executed_agents.append("hallucination-critic")
+        if "hallucination-critic-worker" not in executed_agents:
+            executed_agents.append("hallucination-critic-worker")
     if out.get("claim_narrative"):
-        executed_agents.append("evidence-qa-agent")
+        if "evidence-qa-worker" not in executed_agents:
+            executed_agents.append("evidence-qa-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if out.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("qa-audit-supervisor")
-    qa_agents = ["qa-audit-supervisor", "evidence-qa-agent", "hallucination-critic", "model-risk-agent",
-                 "internal-audit-agent", "agent-ops-monitor", "tool-permission-security-reviewer",
-                 "incident-postmortem-agent"]
-    failed_agents = ["qa-audit-supervisor"] if supervisor_status == "failed" else []
+    qa_agents = ["qa-audit-supervisor", "evidence-qa-worker", "hallucination-critic-worker",
+                 "model-and-internal-audit-worker", "ops-and-permission-worker",
+                 "incident-postmortem-worker"]
+    failed_agents = list(failed_worker_agents)
+    if supervisor_status == "failed":
+        failed_agents.append("qa-audit-supervisor")
     attempted_agents = list(dict.fromkeys(executed_agents + failed_agents))
     out["supervisor_call_status"] = supervisor_status
     out["hermes_runtime"] = state.get("hermes_runtime")
@@ -878,6 +936,7 @@ def _assemble_out(state: QAState) -> dict:
         "not_executed": [agent for agent in qa_agents if agent not in attempted_agents],
     }
     out["execution_evidence"] = state.get("execution_evidence")
+    out["employee_workers"] = worker_execution
     return out
 
 
