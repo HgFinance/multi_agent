@@ -1,4 +1,4 @@
-# CEO Office Backend Image — governance-api(FastAPI)를 담는다.
+# CEO Office Backend Image — governance-api(FastAPI)와 notification-worker(Redis Consumer)를 담는다.
 #
 # 담당: 영주 (CEO Office)
 # 근거: docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md
@@ -7,28 +7,32 @@
 #
 # ▶ Build Context가 저장소 루트가 아니라 **departments/00-ceo-office** 다 (risk/audit
 #   Dockerfile과 다른 점, research Dockerfile과 같은 이유). api/app.py는 src/mandate,
-#   src/reporting, src/notification만 import하고 다른 본부 코드를 참조하지 않는다
-#   (2026-08-03 확인 - contracts/apps/observability 등 교차 참조 없음).
+#   src/reporting, src/notification만 import하고 다른 본부 코드를 참조하지 않는다.
 #
-# ▶ 하나의 Image, command만 바꿔 여러 프로세스를 돌리는 원칙(research/risk와 동일)은
-#   유지하되 지금은 governance-api 하나뿐이다. reporting-worker/notification-worker
-#   (계획서 6.1)는 넣지 않았다 - daily_report.py/notification.py는 순수 함수·서비스
-#   클래스일 뿐 Event Consumer 루프가 아직 없다(risk-api Dockerfile의 risk-projection-worker
-#   주석과 같은 이유). 코드 없는 역할을 컨테이너부터 만들지 않는다.
+# ▶ 하나의 Image, command만 바꿔 governance-api와 notification-worker를 둘 다 돌린다
+#   (research/risk와 동일 원칙). reporting-worker/lifecycle-worker류는 아직 안 만들었다 -
+#   daily_report.py는 여러 이벤트에 걸친 상태 누적(부분 Snapshot 조합)이 필요해 순수 함수
+#   호출만으로는 안 되고, 그 누적 로직 자체가 아직 없다(코드 없는 역할을 컨테이너부터 만들지
+#   않는다).
 #
-# ▶ Redis 미사용 - governance-api는 Mandate/Report/Notification을 Postgres(psycopg2)로만
-#   다루고 Event Stream을 아직 발행·소비하지 않는다. REDIS_URL을 주입하지 않는다.
+# ▶ notification-worker는 Redis Stream(hf:governance)을 소비한다 - risk-api/audit-api와
+#   같은 공용 `redis` 서비스에 연결한다(ADR-0002 Proposed 상태, 아직 부서별로 안 쪼갠다).
+#   governance-api(HTTP)는 Redis에 의존하지 않는다 - Mandate/Report/Notification 전부
+#   Postgres(psycopg2)로만 응답한다.
 
 FROM python:3.12-slim
 
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12
+
+    psycopg2-binary==2.9.12 redis==7.0.1
+
 
 WORKDIR /app/departments/00-ceo-office
 COPY api ./api
 COPY src ./src
+COPY governance_events ./governance_events
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
