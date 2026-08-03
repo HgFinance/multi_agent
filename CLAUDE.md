@@ -18,9 +18,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 트레이딩·회계본부는 Sprint D0~D2 Prototype(계약·Paper OMS·원장·대사)이 있고, Risk의 `compliance-policy-agent`에는 Agentic RAG baseline이 있다. 다른 본부는 대부분 Profile과 설계 문서 단계다. DB에는 Supabase·TimescaleDB 통합 Migration과 Schema Contract Test가 별도로 존재한다.
 
-트레이딩·회계 코드는 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전이라
-재작업 예정이다. 각 부서 `config.yaml`의 `implementation:` 블록이 무엇이 되고 무엇이 안 됐는지
-표시한다.
+트레이딩 OMS는 팀 가이드 v1.2의 상태 머신 2단 분리가 **반영 완료됐다**(2026-08-03 확인).
+`IntentState`/`BrokerOrderState`가 별도 전이표를 갖고, `can_transition()`이 두 머신의 상태를
+섞으면 `False`를 내며, Python 전이표가 `supabase/migrations/20260729000400_execution_risk_accounting.sql`의
+`execution.order_state_transitions`와 대조 검증된다. 각 부서 `config.yaml`의 `implementation:`
+블록이 무엇이 되고 무엇이 안 됐는지 표시한다.
 
 구 경로 `orchestration/hermes/<department>/`, 루트 `trading/`, `execution/`, `accounting/`, 루트 `fetch_news.py`는
 이동 후 삭제됐다 — 위 새 경로가 유일한 실행 경로다. 임시 CLI 호환 Wrapper는 예정보다 일찍(2026-07-30) 제거됐다.

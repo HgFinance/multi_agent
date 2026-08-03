@@ -5,9 +5,17 @@
 # 참고: docs/HEDGE_FUND_MASTER_PLAN.md 5.5 #5, 8, 12.3, 12.4
 #       docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md (v1.2) 4.4, 4.5, 8.2
 
+# 2026-08-03 팀 합의대로 Sonnet 을 쓴다. 경로 선택 근거와 선행 조건은
+# departments/02-trading/hermes/config.yaml 같은 절 주석에 전부 적었다.
+# 요약: 호스트 프록시(scripts/claude_code_proxy.py)를 거쳐 claude -p 로 부르면
+# **구독 플랜 한도**가 적용된다. api.anthropic.com 직접 호출은 서드파티로 잡혀
+# extra usage 에서 차감되고, Nous 경로는 계정 크레딧이 없어 404 다.
+#
+# ⚠ 선행 조건: 호스트에서 프록시 기동 + .env 의 CLAUDE_CODE_OAUTH_TOKEN.
+# 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: anthropic
+  default: sonnet
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
@@ -96,3 +104,29 @@ hiring_priority:
 usage:
   run: "accounting-portfolio-department chat -q 'Reconcile today''s fills and compute preliminary NAV'"
   collaborate: "accounting-portfolio-department chat -q 'Reconcile positions, then report PnL attribution to ceo-agent'"
+
+# ── 도구 허용목록 (2026-08-03) ────────────────────────────────────────────────
+# 근거와 기준은 departments/02-trading/hermes/config.yaml 같은 절 주석과 동일하다.
+# 요약: platform_toolsets 는 tool_allowlist 와 달리 **Hermes 가 실제로 강제하는**
+# 허용목록이다. Portal 로그인이 free tool pool 로 켜둔 셸·파일·코드실행·컴퓨터
+# 제어·웹검색을 전부 뺀다.
+#
+# 회계본부에 특히 중요한 이유: 이 부서의 산출물은 원장과 NAV다. Agent 에게 셸과
+# 파일 쓰기가 있으면 ledger.py 의 Posted Journal 을 직접 건드릴 경로가 열린다 -
+# "Posted Journal 은 수정하지 않는다, Reversal 을 추가한다"(CLAUDE.local.md 원칙 6)가
+# 프롬프트 문장으로만 남고 실행 경로로는 뚫려 있는 상태가 된다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+
+# ⚠ 아래 목록이 없으면 위 허용목록이 조용히 새어나간다 - 이유는
+#   departments/02-trading/hermes/config.yaml 같은 절 주석 참고.
+#   요약: Hermes 는 known_builtin_toolsets 에 없는 toolset 을 새 것으로 보고 자동
+#   활성화하고, sync push 는 이 파일을 통째로 덮는다. 둘이 겹치면 push 할 때마다
+#   허용목록에 없는 도구가 되살아난다.
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+  cli: [spotify]
