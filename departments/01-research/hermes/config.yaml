@@ -225,7 +225,7 @@ workers:
   news-macro-worker:
     role: News, sentiment, macro and geopolitical evidence analyst
     status: active
-    trigger: news_or_macro
+    trigger: always
     tools: [research.news.read, research.macro.read]
     output: advisory_context
   evidence-rag-worker:

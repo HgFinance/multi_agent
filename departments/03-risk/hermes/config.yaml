@@ -196,12 +196,14 @@ workers:
   market-liquidity-worker:
     role: Market and liquidity risk analyst
     status: active
+    trigger: always
     replaces: [market-liquidity-risk-agent]
     tools: [risk.trading_state.read, risk.p1.snapshot]
     output: advisory_context
   pre-trade-risk-worker:
     role: Pre-trade deterministic gate analyst
     status: active
+    trigger: always
     replaces: [pre-trade-risk-analyst]
     tools: [risk.case.check]
     output: advisory_context
