@@ -187,7 +187,17 @@ def macro_series(code: str, days: int = 90, *, run_mode: str = "LIVE",
     # RES-09 의 유일한 도구가 매번 실패하고 있었다)
     f"{RESEARCH_API}/macro/observations?codes={code}&days={days}",
                 persona, get) or []
-    vals = [v for v in (_num(r.get("value")) for r in rows) if v is not None]
+    # ▶ 같은 period 에 **개정본이 여러 행** 온다(vintage_date desc, revision desc).
+    #   period 별로 첫 행(최신 vintage)만 남기지 않으면 개정 횟수가 많은 달이
+    #   평균을 끌고, latest 가 최신 period 의 **옛 개정치**가 될 수 있다.
+    by_period: dict[str, float] = {}
+    for r in rows:
+        v = _num(r.get("value"))
+        if v is None:
+            continue
+        key = str(r.get("period") or r.get("observed_at") or len(by_period))
+        by_period.setdefault(key, v)          # 첫 행 = 최신 vintage
+    vals = [by_period[k] for k in sorted(by_period)]
     if not vals:
         return ToolResult(tool="macro_series", ok=False,
                           reason=f"{code} 최근 {days}일 관측치 0건")
@@ -256,7 +266,14 @@ def breadth_history(days: int = 60, *, run_mode: str = "LIVE",
     _guard("market-api", "/breadth", run_mode)
     rows = _get(f"{MARKET_API}/breadth?days={days}", "sector-regime-analyst", get)
     rows = rows if isinstance(rows, list) else [rows] if rows else []
-    ratios = [v for v in (_num((r or {}).get("ad_ratio")) for r in rows) if v is not None]
+    # ▶ **정렬을 가정하지 않는다.** /breadth 는 `order by event_time desc` 라
+    #   최신이 rows[0] 이다. 예전엔 ratios[-1] 을 최신으로 읽어 60일 조회에서
+    #   **가장 오래된 폭 비율**을 "현재" 로 냈다 - /bars 와 같은 사고다.
+    keyed = sorted(
+        ((str((r or {}).get("event_time") or ""), _num((r or {}).get("ad_ratio")))
+         for r in rows),
+        key=lambda kv: kv[0])
+    ratios = [v for _, v in keyed if v is not None]
     if not ratios:
         return ToolResult(tool="breadth_history", ok=False,
                           reason=f"최근 {days}일 breadth 관측 0건")

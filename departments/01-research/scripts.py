@@ -1146,6 +1146,65 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         return None
 
 
+# ── 학습 계층 1단: 실행 중 사건을 남긴다 ─────────────────────────────────────
+# 우리 파이프라인은 인터페이스·추론·실행·메모리는 있는데 **학습이 없었다** -
+# 같은 결함을 겪어도 다음 실행이 그걸 모른다. 사건을 남겨야 반복이 보이고,
+# 반복이 보여야 부서가 절차로 굳힐 수 있다(agents/skill_forge.py).
+#
+# 무엇을 남길지는 **코드가 정한다.** "오늘 뭐가 아쉬웠어?" 를 LLM 에게 물으면
+# 매번 다른 답이 나와 셀 수 없다 - 셀 수 없으면 반복도 없다.
+_OCCURRENCE_LOG = Path(__file__).resolve().parent / "var" / "occurrences.jsonl"
+
+
+def collect_occurrences(out: dict, *, run_id: str, symbol: str,
+                        at: str) -> list[dict]:
+    """실행 상태 -> 사건 목록. 순수 함수."""
+    ev: list[dict] = []
+
+    def _add(kind: str, detail: str) -> None:
+        ev.append({"kind": kind, "detail": detail[:180],
+                   "run_id": run_id, "symbol": symbol, "at": at})
+
+    for node in ("sentiment", "technical", "fundamental", "regime",
+                 "geopolitical", "microstructure"):
+        st = out.get(node) or {}
+        if not st:
+            _add("분석가 미실행", f"{node} 노드가 상태를 내지 않았다")
+            continue
+        # 서술이 비면 리포트에서 그 분석가가 통째로 사라진다
+        if not (((st.get("note") or {}).get("summary")) or st.get("summary")):
+            _add("분석가 서술 폐기", f"{node} 가 서술 없이 끝났다")
+        ro = st.get("readout") or {}
+        for name in (ro.get("unavailable") or [])[:6]:
+            # ▶ 미확인 지표는 **지표별로** 센다. "무언가 없었다" 로 뭉치면
+            #   어느 배관이 막혔는지 영원히 안 보인다
+            _add(f"지표 미확인:{name}", f"{node} 의 {name} 를 계산하지 못했다")
+    for t in (out.get("tool_results") or []):
+        if isinstance(t, dict) and t.get("ok") is False:
+            _add(f"도구 실패:{t.get('tool')}", str(t.get("reason") or "")[:120])
+    q = (out.get("packet") or {}).get("_quote_quality") or {}
+    for m in (q.get("mismatched") or [])[:6]:
+        _add("수치 불일치", f"확정치 풀에 없는 수치 {m}")
+    return ev
+
+
+def append_occurrences(events: list[dict], *,
+                       path: Optional[Path] = None) -> int:
+    """사건을 누적한다. **실패해도 파이프라인을 죽이지 않는다** - 학습 기록이
+    없다고 오늘 리포트를 못 내는 것은 우선순위가 뒤집힌 것이다."""
+    if not events:
+        return 0
+    tgt = path or _OCCURRENCE_LOG
+    try:
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        with tgt.open("a", encoding="utf-8") as f:
+            for e in events:
+                f.write(json.dumps(e, ensure_ascii=False) + chr(10))
+        return len(events)
+    except OSError:
+        return 0
+
+
 def run_research_department(symbol: str) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
     import uuid
@@ -1214,6 +1273,10 @@ def run_research_department(symbol: str) -> dict:
     packet["_claims_recorded"] = _record_packet_claims(
         trace_id=trace_id, symbol=symbol, claims=claims,
         as_known_at=as_known_at)
+    # 선순환 2단: 이번 실행에서 무엇이 막혔는지 남긴다. 같은 것이 서로 다른
+    # 실행에서 3번 반복되면 skill_forge 가 절차로 굳힌다.
+    packet["_occurrences_logged"] = append_occurrences(collect_occurrences(
+        out, run_id=trace_id, symbol=symbol, at=started.isoformat()))
     return packet
 
 
@@ -1648,6 +1711,41 @@ def _check_claims_use_bundle_key():
     print("  주장 발행·기준가 계약    OK")
 
 
+def _check_occurrence_collection():
+    """사건 수집이 **지표 단위로** 세는지. 뭉치면 어느 배관인지 안 보인다."""
+    out = {
+        "technical": {"note": {"summary": "정상"},
+                      "readout": {"unavailable": ["amihud", "kyle_lambda"]}},
+        "regime": {"readout": {}},          # 서술 없음
+        "tool_results": [{"tool": "breadth_history", "ok": False, "reason": "0건"}],
+        "packet": {"_quote_quality": {"mismatched": [4444.4]}},
+    }
+    ev = collect_occurrences(out, run_id="r1", symbol="005380", at="2026-08-03")
+    kinds = {e["kind"] for e in ev}
+    assert "지표 미확인:amihud" in kinds and "지표 미확인:kyle_lambda" in kinds, kinds
+    assert "분석가 서술 폐기" in kinds, kinds
+    assert "도구 실패:breadth_history" in kinds, kinds
+    assert "수치 불일치" in kinds, kinds
+    assert sum(1 for e in ev if e["kind"] == "분석가 미실행") == 4, ev
+    assert all(e["run_id"] == "r1" for e in ev)
+
+
+def _check_occurrence_log_failure_is_not_fatal():
+    """기록 실패가 리포트를 죽이면 우선순위가 뒤집힌 것이다."""
+    # ▶ **파일을 부모로 삼는다.** 전에는 "/nonexistent-root-xyz/..." 를 썼는데
+    #   Windows 에서 그건 현재 드라이브 루트로 해석돼 mkdir 이 성공했다 -
+    #   실패를 검사하는 테스트가 플랫폼에 따라 통과 조건이 달랐다.
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".notadir", delete=False) as f:
+        blocker = Path(f.name)
+    try:
+        bad = blocker / "var" / "occ.jsonl"     # 파일 아래에는 디렉터리를 못 만든다
+        assert append_occurrences([{"kind": "k"}], path=bad) == 0
+        assert append_occurrences([], path=bad) == 0
+    finally:
+        blocker.unlink(missing_ok=True)
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -1703,6 +1801,8 @@ if __name__ == "__main__":
     print(f"{PIPELINE_VERSION} 자체 점검 (LLM·API 없음)")
     _check_graph_shape()
     _check_korean_guard()
+    _check_occurrence_collection()
+    _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()
     _check_price_context_injection()

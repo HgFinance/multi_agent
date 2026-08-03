@@ -168,10 +168,22 @@ def scan_order_assumptions(py: Path) -> list[dict]:
             continue
         if "sorted(" in seg or ".sort(" in seg or "order by" in seg.lower():
             continue
-        if re.search(r"\[-1\]|\[0\]", seg) and re.search(
-                r"(최신|latest|last_|recent)", seg):
+        # ▶ 자체점검은 픽스처를 손으로 만든다 - 정렬 가정이 성립할 수 없다
+        if fn.name.startswith(("_check_", "test_", "_selftest")):
+            continue
+        hit = None
+        for off, ln in enumerate(src[fn.lineno - 1:
+                                     getattr(fn, "end_lineno", fn.lineno)]):
+            if re.search(r"\[-1\]|\[0\]", ln):
+                hit = (fn.lineno + off, ln.strip())
+                break
+        if hit and re.search(r"(최신|latest|last_|recent)", seg):
             out.append({
-                "kind": "order_assumption", "line": fn.lineno, "func": fn.name,
+                # ▶ **함수 def 가 아니라 문제가 있는 줄**을 가리킨다. 스킬 본문이
+                #   "경로:행과 재현을 적어야 다음 사람이 확인할 수 있다" 고 해놓고
+                #   def 줄만 주면 확인하는 사람이 함수 전체를 다시 읽어야 한다.
+                "kind": "order_assumption", "line": hit[0], "func": fn.name,
+                "evidence": hit[1][:100],
                 "why": "정렬 없이 인덱스를 '최신' 으로 쓴다. 실측: /bars 가 "
                        "최신순으로 오는데 closes[-1] 을 최신으로 써서 120봉 "
                        "조회에서 가장 오래된 종가를 냈다",
