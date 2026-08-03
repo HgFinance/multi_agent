@@ -84,7 +84,7 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(riskQaBridge, /incident-postmortem-worker/);
   assert.doesNotMatch(riskQaBridge, /RSK-00|QAA-07/);
   assert.match(riskQaBridge, /headModel: "gpt-5\.6-luna"/);
-  assert.match(riskQaBridge, /workerModel: "qwen3:8b"/);
+  assert.match(riskQaBridge, /workerModel: "qwen3:1\.7b"/);
   assert.match(riskQaBridge, /orchestrator: "Hermes"/);
   assert.match(riskQaBridge, /employeeExecutor: "LangGraph"/);
   assert.match(riskQaBridge, /InputSnapshot/);

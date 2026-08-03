@@ -4,7 +4,7 @@
 
 > **문서 해석 규칙(2026-08-03)**: 최신 런타임 사실은 상단 Registry와 각 부서 `config.yaml`·Worker 구현을 기준으로 한다. 날짜가 붙은 Commit·DB·Container 수치는 당시의 Historical snapshot이다. `IMPLEMENTED`는 코드·계약 존재, `TEST_VERIFIED`는 재실행 테스트 통과, `RUNTIME_VERIFIED`는 실제 API·DB 입출력 확인, `BLOCKED`는 안전한 중단 상태를 뜻한다. 과거 모델·Profile row·외부 연동 성공을 현재 운영 완료로 승격하지 않는다.
 
-> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
+> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
@@ -229,7 +229,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 
 - Risk·QA는 Compose Service가 아니며 Canonical Risk Decision과 Run Log가 0건이다.
 - 운영 Credential에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 비어 있다.
-- Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:8b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
+- Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:1.7b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
 - QA/Risk Script의 직원 Ollama 주소·모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수로 주입된다. 실제 Ollama Health와 응답 증거는 운영 전 별도 확인한다.
 - Risk·QA의 기존 14개 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 실제 실행 직원 수는 Risk 4개·QA 5개 Worker Registry다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.
 - 생성 보고서의 Git 보존 여부, Canonical Artifact Storage, Report Hash와 Notion Idempotency 정책이 미확정이다.

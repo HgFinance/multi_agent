@@ -1,8 +1,8 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> **Current runtime override (2026-08-03)**: 실제 실행 기준은 8개 Hermes Head와 42개 독립 LangGraph Worker다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, Worker는 Ollama `qwen3:8b`다. 아래의 `54개 논리적 역할`, `Specialist Agent`, `LangGraph Node` 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`를 따른다.
+> **Current runtime override (2026-08-03)**: 실제 실행 기준은 8개 Hermes Head와 42개 독립 LangGraph Worker다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, Worker는 Ollama `qwen3:1.7b`다. 아래의 `54개 논리적 역할`, `Specialist Agent`, `LangGraph Node` 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`를 따른다.
 
-> 2026-08-03 전사 실행 계층 확정: 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant/Backtest 7·Accounting/Portfolio 8·QA 5다. 기존 RSK/QAA Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
+> 2026-08-03 전사 실행 계층 확정: 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant/Backtest 7·Accounting/Portfolio 8·QA 5다. 기존 RSK/QAA Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
 
 부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
@@ -28,7 +28,7 @@
 2. `departments/03-risk/risk_employee_workers.py` 및 `departments/06-ai-qa-audit/qa_employee_workers.py`의 `WORKER_SPECS`
 3. 전사 현재 Registry인 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)
 
-따라서 이 문서의 `RSK-*`, `QAA-*`, `RES-*`, `TRD-*`, `QNT-*`, `ACC-*` 및 `Specialist Agent` 이름은 현재 Worker ID가 아니다. 현재 runtime은 부서장 Hermes + 독립 LangGraph Worker + Ollama `qwen3:8b`이며, 이 Historical taxonomy를 실행 설정으로 역해석하지 않는다.
+따라서 이 문서의 `RSK-*`, `QAA-*`, `RES-*`, `TRD-*`, `QNT-*`, `ACC-*` 및 `Specialist Agent` 이름은 현재 Worker ID가 아니다. 현재 runtime은 부서장 Hermes + 독립 LangGraph Worker + Ollama `qwen3:1.7b`이며, 이 Historical taxonomy를 실행 설정으로 역해석하지 않는다.
 
 ## 1. 이 문서가 정의하는 것
 

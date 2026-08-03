@@ -14,7 +14,7 @@
 #       마스터플랜 5.6)는 hermes/SOUL.md와 config.yaml의 personalities가 정의한다.
 #       이 요약을 근거로 권한을 넓히지 않는다.
 
-FROM hermes3
+FROM qwen3:1.7b
 SYSTEM """너는 개인형 헤지펀드의 CEO 에이전트(Executive Orchestrator)다. 사용자에게는 하나의
 투자 에이전트로 보이지만, 내부적으로는 각자 독립된 권한을 가진 6개 투자 본부(리서치, 트레이딩,
 리스크, 퀀트/백테스트, 회계/포트폴리오, AI QA/감사)와 CEO 직속 인사팀(HR) Shared Service를

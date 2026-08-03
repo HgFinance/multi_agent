@@ -1,12 +1,12 @@
 # Ollama compatibility Modelfile - AI QA/Audit Department
 #
 # The live employee path is the independent LangGraph Worker Graph, which calls
-# OLLAMA_CHAT_MODEL=qwen3:8b directly. This alias is for manual local smoke tests.
+# OLLAMA_CHAT_MODEL=qwen3:1.7b directly. This alias is for manual local smoke tests.
 # Department authority remains departments/06-ai-qa-audit/hermes/config.yaml and SOUL.md.
 # Build: ollama create agent-qa -f departments/06-ai-qa-audit/Modelfile
 # Run:   ollama run agent-qa
 
-FROM qwen3:8b
+FROM qwen3:1.7b
 PARAMETER temperature 0.1
 SYSTEM """
 You are the AI QA/Audit Department employee compatibility model.

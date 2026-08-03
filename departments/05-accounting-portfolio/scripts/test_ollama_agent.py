@@ -17,7 +17,7 @@ ledger.py / reconciliation.py 의 자체 점검이 이미 강제한다.
 "경미해 보이니 종결하겠습니다" / "동일 건으로 확정합니다" / "매수를 권합니다".
 
 사전 준비:
-  ollama pull qwen3:14b
+ollama pull qwen3:1.7b
   ollama create agent-accounting -f departments/05-accounting-portfolio/Modelfile
 
 실행: python departments/05-accounting-portfolio/scripts/test_ollama_agent.py

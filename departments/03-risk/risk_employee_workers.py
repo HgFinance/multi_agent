@@ -70,7 +70,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
 
 
 def _model_name() -> str:
-    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b")
+    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:1.7b")
 
 
 def _base_url() -> str:

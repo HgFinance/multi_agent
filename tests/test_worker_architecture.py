@@ -122,7 +122,8 @@ def test_profile_worker_registry_counts_and_models() -> None:
         assert len(workers) == expected_counts[directory]
         assert registry["worker_count"] == expected_counts[directory]
         assert config["employee_runtime"]["topology"] == "independent_graph_per_worker"
-        assert config["employee_runtime"]["model_default"] == "qwen3:8b"
+        assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
+        assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
         assert config["employee_runtime"]["max_retries"] == 2
         assert config["employee_runtime"]["max_attempts"] == 3
         assert config["model"]["provider"] == "openai-codex"
@@ -140,7 +141,7 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         assert result["not_executed"] == []
         assert result["runtime"]["executor"] == "LangGraph"
         assert result["runtime"]["provider"] == "ollama"
-        assert result["runtime"]["model"] == "qwen3:8b"
+        assert result["runtime"]["model"] == "qwen3:1.7b"
 
 
 def test_profile_worker_metadata_matches_runtime_specs() -> None:
@@ -186,7 +187,7 @@ def test_paper_pipeline_passes_worker_context_to_department_head(monkeypatch: An
             "department": department,
             "status": "COMPLETED",
             "binding": False,
-            "runtime": {"executor": "LangGraph", "provider": "ollama", "model": "qwen3:8b"},
+        "runtime": {"executor": "LangGraph", "provider": "ollama", "model": "qwen3:1.7b"},
             "executed": [f"{department}-worker"],
             "failed": [],
             "not_executed": [],

@@ -48,7 +48,7 @@ TradingAgents는 **한 종목·한 시점의 투자 판단을 만드는 연구�
 - “전 종목 실시간 헤지펀드 플랫폼” → **전 종목 실시간 운용을 목표로 하는 초기 구현 플랫폼**
 - “TradingAgents에는 Risk Engine/OMS/Ledger가 없다” → **TradingAgents 공개 baseline의 핵심은 연구 판단 흐름이며, 우리처럼 독립적인 결정론적 Risk·OMS·Ledger Control Plane을 제품 경계로 두지는 않는다**
 - “2~10초 판단 지연” → **목표 SLO**. 실측 전에는 성능 차별점으로 주장하지 않는다.
-- “Bedrock Production + Ollama” → 현재 저장소 기준은 8개 Hermes Head의 `openai-codex/gpt-5.6-luna` 기본 실행과 승인된 Claude Code 대체 런타임, 직원별 독립 LangGraph Worker의 Ollama `qwen3:8b`다. Bedrock은 목표 Model Gateway 후보이며 실제 운영 연결 완료로 표기하지 않는다. 이전 Nous/Laguna 혼합 상태는 `Historical snapshot`으로만 보존한다.
+- “Bedrock Production + Ollama” → 현재 저장소 기준은 8개 Hermes Head의 `openai-codex/gpt-5.6-luna` 기본 실행과 승인된 Claude Code 대체 런타임, 직원별 독립 LangGraph Worker의 Ollama `qwen3:1.7b`다. Bedrock은 목표 Model Gateway 후보이며 실제 운영 연결 완료로 표기하지 않는다. 이전 Nous/Laguna 혼합 상태는 `Historical snapshot`으로만 보존한다.
 - “전 종목 실시간 파이프라인 구현” → LS 실시간 수집과 적재 검증 및 설계는 있으나, 전 종목 Feature·Priority Queue·Agent Router·Paper 체결까지 연결됐다고 쓰지 않는다.
 
 ## 차별성을 증명할 최소 Acceptance Scenario

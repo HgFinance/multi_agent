@@ -137,7 +137,7 @@ internal_llm = wrap_openai(OpenAI(
 
 def _call_internal_llm(prompt: str) -> str:
     res = internal_llm.chat.completions.create(
-        model=os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b"),
+        model=os.getenv("OLLAMA_CHAT_MODEL", "qwen3:1.7b"),
         messages=[{"role": "user", "content": prompt}],
     )
     return res.choices[0].message.content

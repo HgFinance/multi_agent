@@ -46,7 +46,7 @@ export type RiskQaDepartment = {
   headProfile: string;
   headProvider: "openai-codex";
   headModel: "gpt-5.6-luna";
-  workerModel: "qwen3:8b";
+  workerModel: "qwen3:1.7b";
   sourceProfile: string;
   runtimeContract: string;
   employees: readonly RiskQaEmployee[];
@@ -79,7 +79,7 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     headProfile: "risk-management",
     headProvider: "openai-codex",
     headModel: "gpt-5.6-luna",
-    workerModel: "qwen3:8b",
+    workerModel: "qwen3:1.7b",
     sourceProfile: "departments/03-risk/hermes/config.yaml",
     runtimeContract: "/investment-cases/{case_id}/risk-check · /risk/v1/*",
     employees: [
@@ -130,7 +130,7 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     headProfile: "qa-department",
     headProvider: "openai-codex",
     headModel: "gpt-5.6-luna",
-    workerModel: "qwen3:8b",
+    workerModel: "qwen3:1.7b",
     sourceProfile: "departments/06-ai-qa-audit/hermes/config.yaml",
     runtimeContract: "/investment-cases/{case_id}/qa-check · /qa/v1/*",
     employees: [

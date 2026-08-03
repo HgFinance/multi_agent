@@ -46,7 +46,8 @@ class WorkerSpec:
 
 
 def model_name() -> str:
-    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:8b")
+    """Return the temporary low-memory Worker model; Hermes Head is separate."""
+    return os.getenv("OLLAMA_CHAT_MODEL", "qwen3:1.7b")
 
 
 def _ollama_base_url() -> str:

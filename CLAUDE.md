@@ -114,7 +114,7 @@ python apps/api/main.py                                          # Read-only DEM
 - Hermes Profile(8개 `config.yaml` = 8개 Supervisor)이 부서 단위 오케스트레이션·Queue·Memory Namespace·Tool Allowlist를 맡는다.
 - 부서 소속 직원은 직원별 독립 LangGraph Worker Graph로 구현하고 사건별로 필요한 Worker만 동적으로 호출한다. Worker는 허용된 읽기 도구 결과를 `worker-context.v1`로 만들어 Hermes 부서장에게 전달하며 주문·Risk/QA 판정·원장·권한 변경은 수행하지 않는다.
 - **현재 Worker Registry**: CEO 1, HR 5, Research 6, Trading 6, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5. 실제 런타임 수는 `workers`와 `runtime_personalities`를 기준으로 하며 `agent.personalities`의 기존 ID는 호환·감사 Alias로만 유지한다.
-- **현재 실행 기준**: 모든 Worker는 독립 LangGraph + Ollama `qwen3:8b`를 사용한다. Worker별 경량·표준·중량 모델 배치는 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)의 benchmark·HR 제안·QA 검증·CEO 승인 절차를 거친 뒤에만 변경한다.
+- **현재 실행 기준**: 모든 Worker는 독립 LangGraph + Ollama `qwen3:1.7b`를 사용한다. Worker별 경량·표준·중량 모델 배치는 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)의 benchmark·HR 제안·QA 검증·CEO 승인 절차를 거친 뒤에만 변경한다.
 
 ### 절대 깨면 안 되는 권한 분리
 
@@ -136,7 +136,7 @@ python apps/api/main.py                                          # Read-only DEM
 - 페르소나 프롬프트는 영어 2인칭(`You are the ...`), 파일 상단 주석·설명은 한국어.
 - 상단 주석에 담당자와 `HEDGE_FUND_MASTER_PLAN.md` 절 번호를 남긴다.
 - **`env:`가 부서마다 다르다.** `ANTHROPIC_API_KEY` — ceo, research, qa, quant-backtest / `OPENAI_API_KEY` — trading, risk, accounting, hr. 아무 키나 넣지 않는다. `skills/agentic-rag`가 OpenAI를 쓰는 것도 risk-management가 OpenAI에 배정돼 있기 때문이다.
-- 모든 Hermes 부서장 Profile은 기본 `provider: openai-codex` / `gpt-5.6-luna`이며 Claude Code는 승인된 대체 런타임이다. 모든 직원은 Hermes `model`과 분리된 독립 LangGraph + Ollama `qwen3:8b`를 사용한다. 직원 모델 변경은 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따른다. 기존 `agent.personalities` 목록은 런타임 직원 수가 아니라 호환·감사 카탈로그다.
+- 모든 Hermes 부서장 Profile은 기본 `provider: openai-codex` / `gpt-5.6-luna`이며 Claude Code는 승인된 대체 런타임이다. 모든 직원은 Hermes `model`과 분리된 독립 LangGraph + Ollama `qwen3:1.7b`를 사용한다. 직원 모델 변경은 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)를 따른다. 기존 `agent.personalities` 목록은 런타임 직원 수가 아니라 호환·감사 카탈로그다.
 - `agent.timeout_seconds`는 부서 단독 명령의 기본 한도다. `multi-agent-workflow.yaml`의 Step Timeout은 Case별 Orchestrator 한도이므로 더 길 수 있으며 Workflow 실행에서는 Step 값이 우선한다.
 - 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](departments/03-risk/hermes/config.yaml), [qa-department/config.yaml](departments/06-ai-qa-audit/hermes/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
 
@@ -170,7 +170,7 @@ python apps/api/main.py                                          # Read-only DEM
 
 Frontend Framework는 `ai-office` 기반 Next.js·React·TypeScript로 확정됐다. 현재 `vinext`·Cloudflare Worker 구성은 Prototype Hosting Baseline일 뿐 Backend와 전체 Cloud Provider 결정이 아니다. Frontend는 금융 상태의 Projection이며 Supabase Service Role, Broker·LS Credential, Risk 계산, OMS 상태 전이와 Ledger Posting을 소유하지 않는다.
 
-현재 저장소 실행 기준은 Hermes 8개 Profile의 Head가 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 런타임으로 사용하는 것이다. 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Amazon Bedrock은 `TECH_STACK_DECISIONS.md`에 남아 있는 목표 Model Gateway 후보이며 현재 로컬 Profile의 실행 모델로 오인하지 않는다. 과거 Nous/Laguna baseline은 역사 기록으로만 보존하고, 애플리케이션 Hosting Cloud 결정과 모델 선택을 같은 결정으로 취급하지 않는다.
+현재 저장소 실행 기준은 Hermes 8개 Profile의 Head가 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 런타임으로 사용하는 것이다. 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Amazon Bedrock은 `TECH_STACK_DECISIONS.md`에 남아 있는 목표 Model Gateway 후보이며 현재 로컬 Profile의 실행 모델로 오인하지 않는다. 과거 Nous/Laguna baseline은 역사 기록으로만 보존하고, 애플리케이션 Hosting Cloud 결정과 모델 선택을 같은 결정으로 취급하지 않는다.
 
 ## 담당자
 
