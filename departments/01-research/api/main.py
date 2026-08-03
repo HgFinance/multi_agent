@@ -363,6 +363,32 @@ def universe_restrictions(as_of: Optional[datetime] = Query(None)):
             "collected_at": snap["collected_at"], "restrictions": rows}
 
 
+@app.get("/methods/performance")
+def methods_performance(
+    min_scored: int = Query(1, ge=0, le=10_000,
+                            description="이 표본 수 이상만. 0 이면 전부"),
+    limit: int = Query(200, gt=0, le=1000),
+):
+    """방법 단위 사후 성과 (학습 계층 2단 - 선순환의 되읽기 경로).
+
+    research.method_calibration 뷰를 그대로 낸다. **등급 판정은 여기서 하지
+    않는다** - evidence/method_performance.py 가 결정론으로 매긴다. API 는
+    숫자만 주고 판정은 한 곳에서만 하게 해야 기준이 갈라지지 않는다.
+
+    ▶ 표본 수(scored)를 **반드시 함께** 준다. 발동률만 보면 n=2 짜리 100% 가
+      n=200 짜리 62% 보다 좋아 보인다. 소표본 과적합은 되먹임이 아니라
+      잡음 증폭이다(마이그레이션 20260802001400 주석과 같은 규율).
+    """
+    return _query("""
+        select method_key, kind, horizon_days, claims, scored,
+               trigger_rate, brier_score, with_probability
+        from research.method_calibration
+        where scored >= %s
+        order by scored desc, method_key, horizon_days
+        limit %s
+    """, (min_scored, limit))
+
+
 @app.get("/macro/observations")
 def macro_observations(
     codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),

@@ -32,7 +32,7 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Callable, Optional, TypedDict
 
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도 찾도록
@@ -1205,6 +1205,34 @@ def append_occurrences(events: list[dict], *,
         return 0
 
 
+def fetch_method_performance(used_keys: list[str], *,
+                             get: Optional[Callable] = None) -> dict:
+    """방법별 사후 성과를 되읽어 이번 근거의 성적을 붙인다 (학습 계층 2단).
+
+    ▶ 이 한 칸이 비어 자가 발전이 안 됐다. 주장 발행(packet_claims.method_key),
+      사후 채점(packet_outcome_scorer), 집계(research.method_calibration)까지
+      다 있었는데 **그 숫자를 다음 실행이 읽지 않았다** - 적중률 30% 짜리와
+      70% 짜리를 리포트가 똑같은 어조로 인용했다.
+
+    실패는 비치명이다. 성적을 못 읽었다고 오늘 리포트를 못 내면 안 된다 -
+    다만 **못 읽었다는 사실을 남긴다.** 조용히 빈 값을 주면 "성적이 없는 것"과
+    "성적이 나쁜 것"이 구분되지 않는다.
+    """
+    from evidence.method_performance import grade_all, performance_note
+
+    if not used_keys:
+        return {"available": False, "reason": "이번 실행이 쓴 method_key 가 없다"}
+    try:
+        rows = (get or _get)(f"{RESEARCH_API}/methods/performance?min_scored=1")
+    except Exception as e:
+        return {"available": False,
+                "reason": f"성과 조회 실패: {type(e).__name__}"}
+    rows = rows if isinstance(rows, list) else []
+    note = performance_note(grade_all(rows), used_keys=used_keys)
+    note["available"] = True
+    return note
+
+
 def run_research_department(symbol: str) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
     import uuid
@@ -1277,6 +1305,10 @@ def run_research_department(symbol: str) -> dict:
     # 실행에서 3번 반복되면 skill_forge 가 절차로 굳힌다.
     packet["_occurrences_logged"] = append_occurrences(collect_occurrences(
         out, run_id=trace_id, symbol=symbol, at=started.isoformat()))
+    # 선순환 3단: 이번에 쓴 방법들의 **과거 성적**을 붙인다. 리포트가 스스로
+    # "이 신호는 최근 성적이 나쁘다" 고 말하면 그것만으로 판단의 질이 오른다.
+    packet["_method_performance"] = fetch_method_performance(
+        sorted({c["method_key"] for c in claims if c.get("method_key")}))
     return packet
 
 
@@ -1284,6 +1316,7 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
     """Packet 을 그대로 옮겨 적는 순수 함수 - 동규님 리스크본부 리포트 패턴
     (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
+    _mp = packet.get("_method_performance") or {}
     nc = packet.get("numeric_check") or {}
     dc = packet.get("date_check") or {}
     qq = (nc.get("quote_quality") or {})
@@ -1310,6 +1343,16 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         f" (창 {dc.get('window', '-')}) |",
         f"| **분석가 판정** | " + " · ".join(
             f"{k}={v}" for k, v in verdicts.items() if v) + " |",
+        # ▶ **이번 근거의 과거 성적** (학습 계층 2단). 적중률 30% 짜리와 70%
+        #   짜리를 같은 어조로 인용하던 것을 드러낸다. 성적이 '없는' 것과
+        #   '나쁜' 것을 구분해 적는다 - 새 지표가 표본 없다는 이유로 나쁜
+        #   기법처럼 읽히면 아무도 새 지표를 안 넣는다.
+        (f"| **근거 성적** | "
+         + (("우수 " + ", ".join(_mp["strong_methods"]) + " · ") if _mp.get("strong_methods") else "")
+         + (("⚠ 저조 " + ", ".join(_mp["weak_methods"]) + " · ") if _mp.get("weak_methods") else "")
+         + (f"미채점 {len(_mp['unscored_methods'])}종" if _mp.get("unscored_methods") else "")
+         + " |") if _mp.get("available") else
+        f"| **근거 성적** | 미확인 ({_mp.get('reason', '조회 안 함')}) |",
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
         "",
         "## Thesis", "", str(packet.get("thesis", "")), "",
@@ -1746,6 +1789,39 @@ def _check_occurrence_log_failure_is_not_fatal():
         blocker.unlink(missing_ok=True)
 
 
+def _check_method_performance_readback():
+    """성과 되읽기가 **없는 것과 나쁜 것을 구분**하는가 (학습 계층 2단).
+
+    조용히 빈 값을 주면 성적이 없는 기법과 나쁜 기법이 같아 보인다. 조회
+    실패도 마찬가지 - 못 읽었으면 못 읽었다고 남아야 사람이 판단한다.
+    """
+    rows = [{"method_key": "momentum_20d", "horizon_days": 20, "scored": 40,
+             "trigger_rate": 0.20, "brier_score": None},
+            {"method_key": "adx_trend", "horizon_days": 20, "scored": 60,
+             "trigger_rate": 0.75, "brier_score": None},
+            {"method_key": "신규", "horizon_days": 20, "scored": 2,
+             "trigger_rate": 1.0, "brier_score": None}]
+    r = fetch_method_performance(["momentum_20d", "adx_trend", "신규", "미채점"],
+                                 get=lambda url: rows)
+    assert r["available"] is True, r
+    assert r["weak_methods"] == ["momentum_20d"], r
+    assert r["strong_methods"] == ["adx_trend"], r
+    # 표본 2건짜리는 INSUFFICIENT 라 약체가 아니다 - 새 지표를 죽이면 안 된다
+    assert "신규" not in r["weak_methods"], r
+    # 아예 집계에 없는 것은 이름을 남긴다
+    assert "미채점" in r["unscored_methods"], r
+    assert "momentum_20d" in (r["caution"] or ""), r
+
+    # 조회 실패는 비치명이되 **사유가 남는다**
+    def boom(url):
+        raise OSError("연결 거부")
+    bad = fetch_method_performance(["x"], get=boom)
+    assert bad["available"] is False and "실패" in bad["reason"], bad
+    # 쓴 기법이 없으면 그것도 사유로 남는다
+    none = fetch_method_performance([], get=lambda url: rows)
+    assert none["available"] is False, none
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -1802,6 +1878,7 @@ if __name__ == "__main__":
     _check_graph_shape()
     _check_korean_guard()
     _check_occurrence_collection()
+    _check_method_performance_readback()
     _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()
