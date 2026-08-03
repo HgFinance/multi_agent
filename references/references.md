@@ -71,9 +71,11 @@ LLM 기반 멀티 에이전트 주식 트레이딩 프레임워크. 실제 트�
 - **프로젝트 관련성**: AI QA/감사본부의 감사 기준 설계와 리스크본부의 Stress Test 접근에 직접 참고 — 특히 "정확도 높다고 안전한 게 아니다"라는 논지가 Risk Supervisor의 approve/resize/reject 근거 설계에 유용
 
 ### Nexus: An LLM Agent Framework for Multi-Source Time Series Forecasting
+- **저자**: Sarkar Snigdha Sarathi Das, Palash Goyal, Mihir Parmar, Nanyun Peng, Vishy Tirumalashetty, Chun-Liang Li, Rui Zhang, Jinsung Yoon, Tomas Pfister
 - **arXiv**: [2605.14389](https://arxiv.org/abs/2605.14389) · 로컬 파일: `2605.14389v1.pdf`
 - 여러 수치·텍스트 Source를 시간순 맥락으로 구조화하고, Macro/Micro 해상도의 전망을 독립 생성한 뒤 합성과 Calibration Loop로 보정하는 Agent Framework
-- **프로젝트 관련성**: Research의 Context Timeline, Macro/Micro Outlook, Synthesis와 Outcome Calibration의 직접 근거. 한국어 설명은 `NEXUS_FRAMEWORK_EXPLAINED.md`, 번역은 `NEXUS_PAPER_KO_TRANSLATION.md`
+- **한국어 자료**: [전체 번역본](./NEXUS_PAPER_KO_TRANSLATION.md) · [프레임워크 해설 및 프로젝트 적용안](./NEXUS_FRAMEWORK_EXPLAINED.md)
+- **프로젝트 관련성**: Research의 Context Timeline, Macro/Micro Outlook, Synthesis와 Outcome Calibration의 직접 근거
 
 ### MimirRAG: A Multi-Agent Retrieval-Augmented Generation Framework for Financial Question Answering
 - **arXiv**: [2605.25030](https://arxiv.org/abs/2605.25030)
