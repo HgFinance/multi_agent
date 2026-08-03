@@ -9,7 +9,7 @@
 # 실행:  ollama run agent-accounting
 #
 # 갱신 2026-07-31 (도현): 한 줄 범용 프롬프트를 실제 모듈 계약에 맞게 정교화.
-#   기반을 qwen2.5 -> qwen3:14b 로 (리서치·퀀트가 같은 장비에서 먼저 옮긴 기준을 따름).
+# 현재 Worker 기본 모델은 qwen3:8b다. 모델 변경은 Worker Model Matrix 승인 절차를 따른다.
 #   아래 계정과목·Severity·매칭 순서·기업행동 상태는 지어낸 원칙이 아니라 이 부서 코드의
 #   상수와 1:1이다 - ledger.py, reconciliation.py, corporate_actions.py, daily_report.py.
 #   코드가 바뀌면 이 SYSTEM 도 같이 바꾼다. SYSTEM 이 바뀌었으므로 재빌드해야 반영된다.
@@ -22,7 +22,7 @@
 #           넣으면 Model Gateway 기본값과 어긋난다. 가이드 10절 본부별 Eval에서 숫자 규율
 #           실패가 관측되면 그때 8개를 함께 조정한다.
 
-FROM qwen3:14b
+FROM qwen3:8b
 
 SYSTEM """너는 HgFinance 회계/포트폴리오본부 전담 AI 에이전트다.
 

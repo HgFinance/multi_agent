@@ -1,41 +1,50 @@
 # Worker 모델 배치 기준
 
-이 문서는 8개 부서의 독립 LangGraph Worker에 적용할 모델 선택 기준이다.
+검토일: 2026-08-03 (KST)
 
-현재 운영 기본값은 모든 Worker에 `qwen3:8b`다. `light`·`standard`·`heavy`는 현재 모델을 바꾸라는 설정이 아니라, 향후 `ollama list` 결과와 Worker별 평가를 바탕으로 교체할 때 사용하는 승인된 분류다.
-
-## 선택 원칙
-
-| Tier | 적합한 업무 | 변경 후보 입력 | 현재 fallback |
-|---|---|---|---|
-| `light` | 라우팅, 검색, 포맷 검증, 단순 상태 분류 | `OLLAMA_LIGHT_MODEL` | `qwen3:8b` |
-| `standard` | 도메인 분석, 근거 요약, 조건부 검토 | `OLLAMA_CHAT_MODEL` | `qwen3:8b` |
-| `heavy` | 충돌 조정, 다중 근거 합성, 복합 시나리오 검토 | `OLLAMA_HEAVY_MODEL` | `qwen3:8b` |
-
-모델 변경은 `ollama list` 확인 → Worker Golden/Adversarial 평가 → 지연·비용·검증 실패율 비교 → HR 변경 제안 → QA 독립 검증 → CEO 승인 순서다. 자동 교체와 실패 시 상위 모델 무제한 재시도는 허용하지 않는다.
-
-## Worker Registry
-
-| 부서 | Worker 수 | `light` | `standard` | `heavy` |
-|---|---:|---|---|---|
-| CEO Office | 1 | — | `executive-briefing-worker` | — |
-| Agent Workforce | 5 | `workforce-planning-worker`, `lifecycle-coordination-worker` | `profile-architecture-worker`, `workforce-governance-worker` | `selection-performance-worker` |
-| Research | 6 | `research-data-worker`, `evidence-rag-worker` | `microstructure-worker`, `technical-signal-worker`, `news-macro-worker` | `fundamental-valuation-worker` |
-| Trading | 6 | `order-constraint-worker`, `venue-cost-worker` | `market-thesis-worker`, `execution-planning-worker`, `derivatives-structure-worker` | `trade-proposal-worker` |
-| Risk | 4 | `market-liquidity-worker` | `pre-trade-risk-worker`, `derivatives-counterparty-worker` | `compliance-policy-worker` |
-| Quant / Backtest | 7 | `dataset-feature-worker`, `execution-cost-worker` | `strategy-hypothesis-worker`, `backtest-optimization-worker`, `regime-robustness-worker` | `strategy-release-worker`, `ml-quant-worker` |
-| Accounting / Portfolio | 8 | `ledger-reconciliation-worker`, `fee-accrual-tax-worker` | `portfolio-control-worker`, `treasury-liquidity-worker`, `pnl-attribution-worker`, `valuation-corporate-actions-worker` | `nav-close-worker`, `investor-reporting-worker` |
-| AI QA / Audit | 5 | `ops-and-permission-worker`, `incident-postmortem-worker` | `evidence-qa-worker`, `hallucination-critic-worker` | `model-and-internal-audit-worker` |
+이 문서는 8개 Hermes Profile 안에서 실행되는 42개 LangGraph Worker의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 Ollama `qwen3:8b`로 고정한다.
 
 ## 실행 계층
 
-```text
-Hermes Department Head (Codex or Claude Code)
-  └─ independent LangGraph Worker Graph × Registry count
-       ├─ allow-listed deterministic/read-only tools
-       ├─ Ollama LLM (temporary active model: qwen3:8b)
-       ├─ schema validation + max 3 attempts
-       └─ non-binding worker-context.v1 → Hermes context
-```
+| 계층 | 런타임 | 모델 | 책임 |
+|---|---|---|---|
+| 부서장 | Hermes Agent | `openai-codex/gpt-5.6-luna` 기본, 승인된 Claude Code 대체 | Worker Context 종합, 누락·충돌 설명, 에스컬레이션 |
+| 직원 | 독립 LangGraph Graph | Ollama `qwen3:8b` | allow-listed tool 호출, 역할별 Evidence와 비바인딩 Context 생성 |
+| 통제 엔진 | 결정론적 Python | 해당 없음 | Risk/QA 판정, PIT·스키마·권한·상태 전이 |
 
-Risk Gate, Evidence QA Gate, OMS, Ledger, IAM, HR 승인과 CEO 권한은 Worker가 소유하지 않는다. Worker가 실패하면 해당 부서의 계약된 HOLD/REJECT/ESCALATE 방향으로만 전달한다.
+## 현재 고정값
+
+모든 부서의 `employee_runtime.model_default`, `active_model`, `OLLAMA_CHAT_MODEL` fallback은 `qwen3:8b`다. `qwen2.5`, `qwen2.5-coder`, `qwen3:14b`는 과거 Modelfile 또는 실험 문서의 값이며 현재 Worker 기본값으로 해석하지 않는다.
+
+`light`·`standard`·`heavy`는 미래 교체를 위한 분류일 뿐 현재 서로 다른 모델을 배치한다는 뜻이 아니다.
+
+| Tier | 후보 업무 | 현재 모델 |
+|---|---|---|
+| light | 라우팅, 검색, 단순 상태·포맷 검증 | `qwen3:8b` |
+| standard | 도메인 분석, 근거 요약, 조건부 검토 | `qwen3:8b` |
+| heavy | 충돌 조정, 다중 근거 합성, 복합 시나리오 검토 | `qwen3:8b` |
+
+## 부서별 배치
+
+| 부서 | Worker 수 | 항상 / 조건부 |
+|---|---:|---:|
+| CEO | 1 | 1 / 0 |
+| HR | 5 | 2 / 3 |
+| Research | 6 | 2 / 4 |
+| Trading | 6 | 2 / 4 |
+| Risk | 4 | 2 / 2 |
+| Quant / Backtest | 7 | 2 / 5 |
+| Accounting / Portfolio | 8 | 2 / 6 |
+| QA | 5 | 1 / 4 |
+
+세부 Worker ID·역할·통합 판정은 [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md)에 둔다. 실제 실행 메타데이터는 `config.yaml`과 `WORKER_SPECS`에서 읽으며, `agent.personalities`는 호환 Alias다.
+
+## 모델 변경 승인 절차
+
+1. `ollama list`로 설치된 후보 모델과 digest를 고정한다.
+2. Worker별 Golden/Adversarial 평가에서 정확성·환각·지연·비용을 비교한다.
+3. HR이 변경 제안과 Rollback 모델을 등록한다.
+4. QA가 독립 회귀·권한·결정론 검증을 수행한다.
+5. CEO가 승인한 뒤 Profile, `OLLAMA_*_MODEL`, 테스트 Fixture를 함께 변경한다.
+
+자동 교체와 부서 간 임의 모델 공유는 허용하지 않는다.

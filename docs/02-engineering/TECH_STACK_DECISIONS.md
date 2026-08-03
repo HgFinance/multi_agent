@@ -443,7 +443,7 @@ Render 검증 실패 시 Cloud Provider 선정 전에는 단일 VM과 Docker Com
 - Trivy: Container/Image 취약점
 - pip-audit/Bandit: Python 의존성과 정적 보안 검사
 
-LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 전송 정책과 비용을 검토하기 전 필수 도구로 지정하지 않는다. 초기에는 OpenTelemetry와 자체 Agent Run Record를 기준으로 한다.
+LangSmith는 선택적 LangGraph 개발 추적 어댑터다. 기본 tracing은 비활성(`LANGSMITH_TRACING=false` 또는 `LANGCHAIN_TRACING_V2=false`)이며, 금융 데이터 마스킹·외부 전송 정책·비용·자격증명·네트워크를 확인한 실제 run만 연결 성공으로 기록한다. 현재 Source of Truth는 OpenTelemetry와 자체 Agent Run Record이고, 코드나 API Key가 있다는 사실만으로 LangSmith 연결 완료로 표시하지 않는다.
 
 ## 12. Secret과 설정
 

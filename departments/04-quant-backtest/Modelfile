@@ -9,14 +9,13 @@
 # 실행:  ollama run agent-quant
 #
 # 갱신 2026-07-31 (재일): 실제 데이터 계약(market_bars, PIT)에 맞게 정교화.
-#   기반 qwen2.5-coder -> qwen3:14b (코드+분석 겸용, RTX 5080 16GB 실측 권장.
-#   코드 생성 비중이 커지면 qwen2.5-coder:14b 병행을 재검토).
+# 현재 Worker 기본 모델은 qwen3:8b다. 모델 변경은 Worker Model Matrix 승인 절차를 따른다.
 #
 # 주의: 아래 SYSTEM은 부서 역할 요약이다. 실제 권한 경계(제안/승인/실행 분리,
 #       마스터플랜 5.6)는 hermes/SOUL.md와 config.yaml의 personalities가 정의한다.
 #       이 요약을 근거로 권한을 넓히지 않는다.
 
-FROM qwen3:14b
+FROM qwen3:8b
 
 SYSTEM """너는 HgFinance 퀀트/백테스트본부 전담 AI 에이전트다.
 

@@ -31,13 +31,13 @@
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
 | CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `agent-ceo` | Prompt 고도화, 수동 Smoke Script |
-| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:14b` | `agent-research` | 실측 후 Base Model 변경 |
-| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen2.5-coder` | `agent-trading` | 파일 등록 완료 |
+| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:8b` | `agent-research` | 현재 Worker 고정값 |
+| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:8b` | `agent-trading` | 현재 Worker 고정값 |
 | 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:8b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:14b` | `agent-quant` | 실측 후 Base Model 변경 |
-| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen2.5` | `agent-accounting` | 파일 등록 완료 |
+| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:8b` | `agent-quant` | 현재 Worker 고정값 |
+| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen3:8b` | `agent-accounting` | 현재 Worker 고정값 |
 | AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:8b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen2.5` | `agent-hr` | Prompt 고도화, 수동 Smoke Script |
+| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen3:8b` | `agent-hr` | 현재 Worker 고정값 |
 
 ### 2.1 현재 SYSTEM 역할 요약
 
@@ -77,9 +77,8 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | Base Model | 배치 조직 | 의도 | 허용 업무 |
 |---|---|---|---|
 | `hermes3` | CEO, Risk, AI QA | 지시 준수와 검토 중심 업무 | 보고 초안, Risk 설명, Finding 분류 |
-| `qwen3:14b` | Research, Quant | 실측 Eval에서 채택한 분석·구조화 업무 | Research Packet 서술, 가설·실험 설명 |
-| `qwen2.5` | Accounting, Workforce | 일반 문서·요약 업무 | Break 설명, 인력 계획 초안 |
-| `qwen2.5-coder` | Trading | 코드와 구조화된 기술 작업 | 계약·코드 검토, 주문 로직 초안 |
+| `qwen3:8b` | 전 부서 Worker | 현재 고정 기본값 | 역할별 Context, 근거 요약, 조건부 검토 |
+| 향후 light/standard/heavy 후보 | Worker별 benchmark 대상 | 현재 자동 배정하지 않음 | HR 제안·QA 검증·CEO 승인 후 변경 |
 
 Base Model 선택은 초기 가설이다. 모델 이름만으로 업무 적합성을 확정하지 않는다. 본부별 Eval 결과, 지연, 메모리와 비용을 비교해 유지하거나 변경한다.
 
@@ -129,9 +128,7 @@ Ollama 공식 절차는 Base Model을 준비한 뒤 `ollama create <alias> -f <M
 
 ```powershell
 ollama pull hermes3
-ollama pull qwen2.5
-ollama pull qwen2.5-coder
-ollama pull qwen3:14b
+ollama pull qwen3:8b
 ```
 
 ### 6.2 본부별 Alias 생성

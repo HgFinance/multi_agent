@@ -4,6 +4,9 @@
 # 실제 승인·축소·거부의 바인딩 집행과 한도 관리는 결정론적 Risk Engine이 담당 (5.3, 5.9절) — 에이전트는 원장을 직접 변경하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #3, 5.6, 8, 9.1, 11
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
+# 현재 역할 경계(2026-08-03): Policy RAG는 Risk의 compliance-policy-worker가 소유한다.
+# Research의 evidence-rag-worker와 QA의 Evidence/Hallucination Audit은 각각 연구 근거와 독립 감사 범위다.
+# PIKE-RAG/Light-RAG는 전사 적용 완료가 아닌 향후 평가·도입 후보이며, 현재 baseline은 skills/agentic-rag다.
 
 model:
   provider: openai-codex

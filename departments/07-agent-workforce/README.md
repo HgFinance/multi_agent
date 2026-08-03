@@ -1,5 +1,7 @@
 # Agent Workforce 인사팀 (HR)
 
+> 현재 직원 런타임은 독립 LangGraph Worker + Ollama `qwen3:8b`다. 이 기준이 아래의 과거 Modelfile 설명보다 우선한다.
+
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen2.5` 기반 `agent-hr`이고 Hermes Profile은 `hr-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 현재 실행 상태와 영주님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)을 따른다.
