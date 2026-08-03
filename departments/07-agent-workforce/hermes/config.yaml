@@ -27,6 +27,21 @@ agent:
     selection-performance-agent: "You are the Selection/Performance Agent. You run Golden and Adversarial Evals on candidates, manage their Shadow probation period, and coordinate ongoing training and performance improvement for existing Agents. You periodically review each department's Queue/SLA/Cost/Quality Scorecard and Eval score trend to identify active Agent Profiles that need revision, and route them to the Profile Architect — you never apply a revision yourself, and a revised profile passes the same Eval bar as a new hire, never a relaxed one."
     lifecycle-coordinator: "You are the Lifecycle Coordinator. You manage Joiner/Mover/Leaver events — Identity, Queue assignment, Memory namespace and permission requests — but you never create the actual Identity or grant permissions yourself; only the Platform/IAM Service does that."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다
+  # (Risk/QA config.yaml과 동일 컨벤션). 새로 지어낸 권한이 아니라 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+  # 3.6절(인사팀 부서 내 통신)을 그대로 옮긴 것 — departments/07-agent-workforce/api/app.py가
+  # 실제로 감싸는 엔드포인트만 대상.
+  tool_allowlist:
+    agent-workforce-supervisor: [workforce.roster.read, workforce.scorecard.read, workforce.hiring_request.propose]  # HR-00, 제안만 - 승인은 CEO
+    workforce-planning-agent: [workforce.scorecard.read, workforce.skill_gap.read]  # HR-01, 읽기 전용
+    profile-architect: [workforce.profile_version.submit, workforce.improvement.propose]  # HR-02, 개정안 제안
+    selection-performance-agent: [workforce.improvement.propose, workforce.improvement_event.read, audit.eval_run.read]  # HR-03, 후보 author. Eval 원본은 audit.eval_runs 조회(3.6절 §5.1)
+    lifecycle-coordinator: [workforce.agent_status.change, workforce.access_request.create]  # HR-04, 요청만 - 실제 Provisioning은 Platform/IAM
+  # 부서 전체 공통 금지 — SOUL.md Hard Boundaries 그대로: Model/Prompt/Tool 권한 부여는 QA 몫,
+  # 예산·조직 승인은 CEO 몫, Identity 생성·권한 부여는 Platform/IAM 몫. oms.submit/ledger.write는
+  # Risk/QA config.yaml과 같은 이유(트레이딩·회계본부 전속 권한)로 금지한다.
+  forbidden_tools: [oms.submit, ledger.write, workforce.permission.grant, workforce.budget.approve, iam.identity.create]
+
 # 인사팀은 Agentic RAG 대상이 아니다. 문서 코퍼스에서 근거를 찾는 게 아니라 Queue·Eval·비용 같은
 # 구조화된 운영 데이터를 집계하는 역할이라서다. 평가 방식(SLA 기준 등)에 대한 연구 결과는
 # RAG 검색 대상이 아니라 결정론적 코드의 기준값으로 들어간다 (CLAUDE.md: 규칙 판정은 Python이 한다).
@@ -98,6 +113,10 @@ implementation:
        리포트 전문을 이어 붙인다. 공용 렌더러는 진짜 Bold/Code 서식(annotations)과
        Heading/Table/Quote/Divider/할일목록까지 지원해 이전 자체 구현보다 낫다. 페이지
        조회로 블록 9개 실제 반영까지 확인"
+    - "tool_allowlist/forbidden_tools 선언(2026-08-03, P1 대응) — GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+       3.6절(인사팀 부서 내 통신)을 Risk/QA config.yaml과 동일한 <domain>.<resource>.<verb>
+       표기로 그대로 옮겼다. 새로 지어낸 권한 아님 - 5개 페르소나(HR-00~04)가 실제로 부르는
+       엔드포인트만 대상"
   in_progress: []
   not_started:
     - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다. Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"
