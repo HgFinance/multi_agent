@@ -15,7 +15,7 @@ services:
     container_name: hedgefund-governance-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
     ports:
       - "127.0.0.1:8043:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api/audit-api와 같은 정책)
     mem_limit: 256m
@@ -36,7 +36,7 @@ services:
     depends_on:
       - redis
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS: ${GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS:-1}
     mem_limit: 256m
