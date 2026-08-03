@@ -53,7 +53,10 @@ _REPORTING_DIR = _BASE / "src" / "reporting"
 _NOTIFICATION_DIR = _BASE / "src" / "notification"
 _APPROVAL_DIR = _BASE / "src" / "approval"
 _CASE_DIR = _BASE / "src" / "case"
-for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR):
+_ESCALATION_DIR = _BASE / "src" / "escalation"
+for _p in (
+    _MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR, _ESCALATION_DIR
+):
     sys.path.insert(0, str(_p))
 
 from approval import (
@@ -95,6 +98,20 @@ from daily_report import (
     DailyReportSections,
     InMemoryReportRunRepository,
     SnapshotRef,
+)
+from escalation import (
+    EscalationRecord,
+    EscalationStatus,
+    IllegalEscalationTransition,
+    InMemoryEscalationRepository,
+    MissingResolutionError,
+    Severity,
+)
+from escalation import (
+    open_escalation as open_escalation_record,
+)
+from escalation import (
+    transition as transition_escalation,
 )
 from lifecycle import (
     ActivationResult,
@@ -145,6 +162,11 @@ try:
     from postgres_case_repository import PostgresCaseRepository
 except ImportError:
     PostgresCaseRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_escalation_repository import PostgresEscalationRepository
+except ImportError:
+    PostgresEscalationRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -281,6 +303,30 @@ class CreateCaseIn(BaseModel):
     )
 
 
+class CreateEscalationIn(BaseModel):
+    """POST /governance/v1/escalations (스펙 2.2 제안 엔드포인트).
+
+    case_id는 NOT NULL FK다 - 에스컬레이션은 항상 어떤 Case에 붙는다.
+    """
+
+    case_id: str
+    reason: str = Field(min_length=1)
+    severity: Severity
+    target: str = Field(min_length=1)
+    due_at: datetime | None = None
+
+
+class EscalationTransitionIn(BaseModel):
+    """POST /governance/v1/escalations/{escalation_id}/transitions.
+
+    RESOLVED로 닫을 때는 resolution이 필수다 - 사유 없이 닫힌 에스컬레이션은 추적이 끊긴다.
+    """
+
+    to_status: EscalationStatus
+    at: datetime
+    resolution: str | None = None
+
+
 class CaseTransitionIn(BaseModel):
     """POST /governance/v1/cases/{case_id}/transitions.
 
@@ -353,6 +399,11 @@ if os.environ.get("DATABASE_URL") and PostgresCaseRepository is not None:
     case_repo = PostgresCaseRepository.connect(os.environ["DATABASE_URL"])
 else:
     case_repo = InMemoryCaseRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresEscalationRepository is not None:
+    escalation_repo = PostgresEscalationRepository.connect(os.environ["DATABASE_URL"])
+else:
+    escalation_repo = InMemoryEscalationRepository()
 
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
@@ -531,6 +582,21 @@ def _on_owner_approval_unsupported(request, exc: OwnerApprovalNotSupportedError)
 def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
     return JSONResponse(status_code=409, content={
         "error_code": "IllegalCaseTransition", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(IllegalEscalationTransition)
+def _on_illegal_escalation_transition(request, exc: IllegalEscalationTransition):
+    return JSONResponse(status_code=409, content={
+        "error_code": "IllegalEscalationTransition", "message": str(exc), "detail": {},
+        "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingResolutionError)
+def _on_missing_resolution(request, exc: MissingResolutionError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "MissingResolutionError", "message": str(exc), "detail": {}, "trace_id": None,
     })
 
 
@@ -776,6 +842,81 @@ def transition_case_endpoint(case_id: str, body: CaseTransitionIn):
     )
     case_repo.apply_transition(updated, event)
     return _case_dict(updated)
+
+
+# --- 2.2 Escalation (GOV-02) ------------------------------------------------------
+#
+# 상태 값을 새로 정할 필요가 없었다 - DDL에 severity/status 허용 값이 이미 있다.
+# 스펙 5.1절이 "risk-api — Trading State/Breach | CEO | Incident·Escalation"이라 했으므로
+# 리스크본부의 breach가 CEO로 올라오는 수신 경로이기도 하다. 생성 시 스펙 5.3절의
+# governance.escalation.v1을 발행해 담당 본부와 QA가 Owner·기한을 추적할 수 있게 한다.
+
+
+def _escalation_dict(e: EscalationRecord) -> dict:
+    return {
+        "escalation_id": e.escalation_id, "case_id": e.case_id, "reason": e.reason,
+        "severity": e.severity.value, "target": e.target, "status": e.status.value,
+        "resolution": e.resolution,
+        "due_at": e.due_at.isoformat() if e.due_at else None,
+        "created_at": e.created_at.isoformat(),
+        "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+    }
+
+
+def _load_escalation(escalation_id: str) -> EscalationRecord:
+    escalation = escalation_repo.get(escalation_id)
+    if escalation is None:
+        raise HTTPException(status_code=404, detail=f"escalation {escalation_id} 없음")
+    return escalation
+
+
+@app.post("/governance/v1/escalations")
+def create_escalation(body: CreateEscalationIn):
+    """에스컬레이션을 OPEN으로 만든다. 존재하지 않는 case_id면 DB FK가 거절한다."""
+    case = case_repo.get(body.case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"case {body.case_id} 없음")
+
+    escalation = open_escalation_record(
+        escalation_id=str(uuid.uuid4()), case_id=body.case_id, reason=body.reason,
+        severity=body.severity, target=body.target,
+        created_at=datetime.now(timezone.utc), due_at=body.due_at,
+    )
+    escalation_repo.save(escalation)
+    _publish_governance_event(
+        event_type="governance.escalation.v1", trace_id=case.trace_id,
+        payload={"escalation_id": escalation.escalation_id, "case_id": escalation.case_id,
+                 "severity": escalation.severity.value, "target": escalation.target,
+                 "status": escalation.status.value,
+                 "due_at": escalation.due_at.isoformat() if escalation.due_at else None},
+    )
+    return _escalation_dict(escalation)
+
+
+@app.get("/governance/v1/escalations/{escalation_id}")
+def get_escalation(escalation_id: str):
+    return _escalation_dict(_load_escalation(escalation_id))
+
+
+@app.get("/governance/v1/escalations")
+def list_escalations(case_id: str | None = None, target: str | None = None):
+    """case_id를 주면 그 Case의 전체, 안 주면 미해결 건만 (담당 본부·QA의 추적 경로)."""
+    if case_id is not None:
+        rows = escalation_repo.list_by_case(case_id)
+    else:
+        rows = escalation_repo.list_open(target=target)
+    return {"escalations": [_escalation_dict(e) for e in rows]}
+
+
+@app.post("/governance/v1/escalations/{escalation_id}/transitions")
+def transition_escalation_endpoint(escalation_id: str, body: EscalationTransitionIn):
+    """상태를 전이한다. RESOLVED에 resolution이 없으면 409, Terminal 이후 전이도 409."""
+    updated = transition_escalation(
+        _load_escalation(escalation_id), to_status=body.to_status, at=body.at,
+        resolution=body.resolution,
+    )
+    escalation_repo.save(updated)
+    return _escalation_dict(updated)
 
 
 # --- 2.2 Approval (GOV-02 1단계) --------------------------------------------------
@@ -1105,5 +1246,47 @@ if __name__ == "__main__":
     # 20. 없는 Case는 404.
     assert client.get("/governance/v1/cases/00000000-0000-4000-8000-000000000000").status_code == 404
 
-    print("ok - CEO Office Domain API 20개 시나리오 점검 통과 "
-          "(승인 8개 + Case Root 5개 포함)")
+    # 21. 에스컬레이션 생성 - Case에 붙는다. 없는 Case면 404.
+    e1 = client.post("/governance/v1/escalations", json={
+        "case_id": c2.json()["case_id"], "reason": "Risk 한도 초과 24시간 미해결",
+        "severity": "CRITICAL", "target": "risk-management",
+    })
+    assert e1.status_code == 200 and e1.json()["status"] == "OPEN", e1.text
+    escalation_id = e1.json()["escalation_id"]
+    assert client.post("/governance/v1/escalations", json={
+        "case_id": "00000000-0000-4000-8000-000000000000", "reason": "x",
+        "severity": "LOW", "target": "x",
+    }).status_code == 404
+
+    # 22. resolution 없이 RESOLVED 불가(409), ACKNOWLEDGED 건너뛰기도 불가(409).
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now,
+    }).status_code == 409
+    ack_e = client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "ACKNOWLEDGED", "at": now,
+    })
+    assert ack_e.status_code == 200 and ack_e.json()["status"] == "ACKNOWLEDGED", ack_e.text
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now, "resolution": "   ",
+    }).status_code == 409
+
+    # 23. 미해결 목록 -> 해소 후 목록에서 빠진다. severity는 유지된다.
+    open_list = client.get("/governance/v1/escalations", params={"target": "risk-management"})
+    assert escalation_id in {e["escalation_id"] for e in open_list.json()["escalations"]}
+    done = client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "RESOLVED", "at": now, "resolution": "한도 재적용으로 해소",
+    })
+    assert done.status_code == 200 and done.json()["severity"] == "CRITICAL"
+    assert done.json()["resolved_at"] is not None
+    after_list = client.get("/governance/v1/escalations", params={"target": "risk-management"})
+    assert escalation_id not in {e["escalation_id"] for e in after_list.json()["escalations"]}
+
+    # 24. Terminal 이후 전이 차단, Case별 조회에는 여전히 보인다.
+    assert client.post(f"/governance/v1/escalations/{escalation_id}/transitions", json={
+        "to_status": "CANCELLED", "at": now,
+    }).status_code == 409
+    by_case = client.get("/governance/v1/escalations", params={"case_id": c2.json()["case_id"]})
+    assert len(by_case.json()["escalations"]) == 1, by_case.text
+
+    print("ok - CEO Office Domain API 24개 시나리오 점검 통과 "
+          "(승인 8개 + Case Root 5개 + 에스컬레이션 4개 포함)")
