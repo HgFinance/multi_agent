@@ -60,6 +60,14 @@ def _rich_text(s) -> dict:
     return {"rich_text": notion_rich_text_chunks(s)}
 
 
+def _report_path(qa_decision_id: object) -> Path:
+    return (
+        Path(__file__).resolve().parent
+        / "reports"
+        / f"qa_audit_report_{qa_decision_id}.md"
+    )
+
+
 def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str = "", env: dict | None = None) -> dict:
     """out(run_qa_department 반환 형태)을 Notion QA DB에 1건 업로드한다. 절대 예외를 던지지 않는다."""
     env = env if env is not None else _load_dev_vars()
@@ -78,14 +86,17 @@ def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str
         "claim_checks": _rich_text(json.dumps(out.get("claim_checks", []), ensure_ascii=False)),
         "findings": _rich_text(json.dumps(out.get("findings", []), ensure_ascii=False)),
         "claim_narrative": _rich_text(out.get("claim_narrative")),
-        "원본 리포트": _rich_text(report_md),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
     }
 
     try:
         payload = {"parent": {"database_id": db_id}, "properties": props}
         if report_md:
-            payload["children"] = markdown_to_notion_blocks(report_md)
+            report_path = _report_path(out["qa_decision_id"])
+            report_intro = (
+                f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
+            )
+            payload["children"] = markdown_to_notion_blocks(report_intro)
         status, body = _post("pages", payload, token)
     except Exception as e:  # noqa: BLE001 - Notion is a non-binding projection.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
