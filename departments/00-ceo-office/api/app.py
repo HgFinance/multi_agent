@@ -52,7 +52,8 @@ _MANDATE_DIR = _BASE / "src" / "mandate"
 _REPORTING_DIR = _BASE / "src" / "reporting"
 _NOTIFICATION_DIR = _BASE / "src" / "notification"
 _APPROVAL_DIR = _BASE / "src" / "approval"
-for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR):
+_CASE_DIR = _BASE / "src" / "case"
+for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR):
     sys.path.insert(0, str(_p))
 
 from approval import (
@@ -74,6 +75,20 @@ from approval import (
 )
 from approval import (
     revoke as revoke_approval,
+)
+from case_root import (
+    CaseEvent,
+    CaseRecord,
+    CaseStatus,
+    IllegalCaseTransition,
+    InMemoryCaseRepository,
+    build_display_id,
+)
+from case_root import (
+    open_case as open_case_root,
+)
+from case_root import (
+    transition as transition_case,
 )
 from daily_report import (
     DailyReportAssembler,
@@ -125,6 +140,11 @@ try:
     from postgres_approval_repository import PostgresApprovalRepository
 except ImportError:
     PostgresApprovalRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_case_repository import PostgresCaseRepository
+except ImportError:
+    PostgresCaseRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -238,6 +258,44 @@ class ApprovalRevokeIn(BaseModel):
     actor_user_id: str | None = None
 
 
+class CreateCaseIn(BaseModel):
+    """POST /governance/v1/cases (스펙 2.2 create_case Request 그대로).
+
+    display_id는 요청에 없다 - NOT NULL unique인데 스펙이 정의하지 않아 서버가
+    `PREFIX-YYYYMMDD-NNNN` 꼴로 만든다(case_root.build_display_id, MSU_SPEC 8절의
+    "IC-20260731-0001" 형태를 따랐다).
+    """
+
+    case_type: str = Field(min_length=1)
+    priority: int = Field(ge=0, le=100)
+    owner_department: str = Field(min_length=1)
+    fund_id: str
+    trace_id: str
+    created_by: str = Field(min_length=1)
+    due_at: datetime | None = None
+    reason: str | None = None
+    payload: dict = {}
+    idempotency_key: str | None = Field(
+        default=None,
+        description="case_events.idempotency_key(unique)로 저장된다. 없으면 서버가 생성한다.",
+    )
+
+
+class CaseTransitionIn(BaseModel):
+    """POST /governance/v1/cases/{case_id}/transitions.
+
+    스펙에 이름이 없는 제안 엔드포인트다. Case를 만들 수만 있고 진행시킬 수 없으면
+    MSU_SPEC 3절이 금지한 "무기한 대기하는 Case"가 되므로 함께 넣는다.
+    """
+
+    to_status: CaseStatus
+    actor: str = Field(min_length=1)
+    at: datetime
+    reason: str | None = None
+    payload: dict = {}
+    idempotency_key: str | None = None
+
+
 class SnapshotRefIn(BaseModel):
     snapshot_id: str
     as_of: datetime
@@ -290,6 +348,11 @@ if os.environ.get("DATABASE_URL") and PostgresApprovalRepository is not None:
     approval_repo = PostgresApprovalRepository.connect(os.environ["DATABASE_URL"])
 else:
     approval_repo = InMemoryApprovalRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresCaseRepository is not None:
+    case_repo = PostgresCaseRepository.connect(os.environ["DATABASE_URL"])
+else:
+    case_repo = InMemoryCaseRepository()
 
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
@@ -464,6 +527,13 @@ def _on_owner_approval_unsupported(request, exc: OwnerApprovalNotSupportedError)
     })
 
 
+@app.exception_handler(IllegalCaseTransition)
+def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
+    return JSONResponse(status_code=409, content={
+        "error_code": "IllegalCaseTransition", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(FundNotFoundError)
 def _on_fund_not_found(request, exc: FundNotFoundError):
     return JSONResponse(status_code=404, content={
@@ -614,6 +684,98 @@ def get_report(content_hash: str, fund_id: str):
         "status": row.status, "source_snapshot_ids": list(row.source_snapshot_ids),
         "template_version": row.template_version, "content_hash": row.content_hash,
     }
+
+
+# --- 2.2 Case Root (GOV-02) -------------------------------------------------------
+#
+# `create_case`는 스펙 2.2 확정 엔드포인트다. 조회·timeline·전이는 스펙에 이름이 없는 제안이다.
+# 투자 Case는 여기서 만들지 않는다 - 스펙 2.2가 "투자 Case는 MSU_SPEC 11절
+# POST /investment-cases를 쓰고 여기를 복제하지 않는다"고 명시했고, 그 19단계 상태 머신은
+# 리서치·트레이딩·회계본부가 담당한다.
+#
+# `POST /cases/{case_id}/decisions`(스펙 2.2 record_decision)는 넣지 않았다 - 범용
+# governance.decisions 테이블이 없고(mandate_decisions/committee_decisions만 있다) 스펙에
+# Request 본문도 정의돼 있지 않아 계약을 지어내야 한다. 별도 작업으로 남긴다.
+
+
+def _case_dict(c: CaseRecord) -> dict:
+    return {
+        "case_id": c.case_id, "fund_id": c.fund_id, "display_id": c.display_id,
+        "case_type": c.case_type, "priority": c.priority, "status": c.status.value,
+        "owner_department": c.owner_department, "trace_id": c.trace_id,
+        "created_by": c.created_by, "schema_version": c.schema_version,
+        "due_at": c.due_at.isoformat() if c.due_at else None,
+        "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
+    }
+
+
+def _case_event_dict(e: CaseEvent) -> dict:
+    return {
+        "sequence": e.sequence, "event_type": e.event_type,
+        "from_status": e.from_status.value if e.from_status else None,
+        "to_status": e.to_status.value, "producer": e.producer, "actor": e.actor,
+        "reason": e.reason, "payload": e.payload or {},
+        "occurred_at": e.occurred_at.isoformat(), "schema_version": e.schema_version,
+    }
+
+
+def _load_case(case_id: str) -> CaseRecord:
+    case = case_repo.get(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"case {case_id} 없음")
+    return case
+
+
+@app.post("/governance/v1/cases")
+def create_case(body: CreateCaseIn):
+    """Case를 OPEN으로 만든다. cases 행과 case_events 첫 줄이 한 트랜잭션으로 들어간다."""
+    now = datetime.now(timezone.utc)
+    display_id = build_display_id(
+        body.case_type, created_at=now,
+        sequence=case_repo.next_display_sequence(body.case_type, now),
+    )
+    case, event = open_case_root(
+        case_id=str(uuid.uuid4()), fund_id=body.fund_id, display_id=display_id,
+        case_type=body.case_type, priority=body.priority,
+        owner_department=body.owner_department, trace_id=body.trace_id,
+        created_by=body.created_by, created_at=now,
+        idempotency_key=body.idempotency_key or str(uuid.uuid4()),
+        due_at=body.due_at, reason=body.reason, payload=body.payload,
+    )
+    case_repo.save_new(case, event)
+    _publish_governance_event(
+        event_type="governance.case.created.v1", trace_id=body.trace_id,
+        payload={"case_id": case.case_id, "display_id": case.display_id,
+                 "case_type": case.case_type, "owner_department": case.owner_department,
+                 "status": case.status.value},
+    )
+    return _case_dict(case)
+
+
+@app.get("/governance/v1/cases/{case_id}")
+def get_case(case_id: str):
+    return _case_dict(_load_case(case_id))
+
+
+@app.get("/governance/v1/cases/{case_id}/timeline")
+def get_case_timeline(case_id: str):
+    """변경 이력의 기준은 case_events다 (MSU_SPEC 12절). cases는 현재 상태 Projection."""
+    _load_case(case_id)  # 없는 case_id면 404
+    return {"events": [_case_event_dict(e) for e in case_repo.timeline(case_id)]}
+
+
+@app.post("/governance/v1/cases/{case_id}/transitions")
+def transition_case_endpoint(case_id: str, body: CaseTransitionIn):
+    """상태를 바꾸고 case_events에 한 줄 남긴다. Terminal 이후 전이는 409."""
+    case = _load_case(case_id)
+    updated, event = transition_case(
+        case, to_status=body.to_status, actor=body.actor, at=body.at,
+        next_sequence=case_repo.next_sequence(case_id),
+        idempotency_key=body.idempotency_key or str(uuid.uuid4()),
+        reason=body.reason, payload=body.payload,
+    )
+    case_repo.apply_transition(updated, event)
+    return _case_dict(updated)
 
 
 # --- 2.2 Approval (GOV-02 1단계) --------------------------------------------------
@@ -890,4 +1052,58 @@ if __name__ == "__main__":
     })
     assert lst.status_code == 200 and len(lst.json()["approvals"]) == 1, lst.text
 
-    print("ok - CEO Office Domain API 15개 시나리오 점검 통과 (승인 8개 포함)")
+    # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
+    c1 = client.post("/governance/v1/cases", json={
+        "case_type": "HIRING", "priority": 2, "owner_department": "AGENT-WORKFORCE",
+        "fund_id": "f1", "trace_id": "trace-case-1", "created_by": "ceo-agent",
+        "reason": "리스크본부 Queue 적체",
+    })
+    assert c1.status_code == 200 and c1.json()["status"] == "OPEN", c1.text
+    case_id = c1.json()["case_id"]
+    assert c1.json()["display_id"].startswith("HR-"), c1.json()["display_id"]
+    tl1 = client.get(f"/governance/v1/cases/{case_id}/timeline")
+    assert tl1.status_code == 200 and len(tl1.json()["events"]) == 1, tl1.text
+    assert tl1.json()["events"][0]["to_status"] == "OPEN"
+    assert tl1.json()["events"][0]["from_status"] is None
+
+    # 17. 전이 - OPEN -> ACKNOWLEDGED, timeline이 함께 쌓인다.
+    t1 = client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "ACKNOWLEDGED", "actor": "hr-department", "at": now,
+    })
+    assert t1.status_code == 200 and t1.json()["status"] == "ACKNOWLEDGED", t1.text
+    tl2 = client.get(f"/governance/v1/cases/{case_id}/timeline")
+    assert [e["sequence"] for e in tl2.json()["events"]] == [1, 2]
+
+    # 18. OPEN -> RESOLVED 직행 차단(409), Terminal 이후 전이 차단(409).
+    c2 = client.post("/governance/v1/cases", json={
+        "case_type": "INCIDENT", "priority": 90, "owner_department": "RISK",
+        "fund_id": "f1", "trace_id": "trace-case-2", "created_by": "ceo-agent",
+    })
+    skip = client.post(f"/governance/v1/cases/{c2.json()['case_id']}/transitions", json={
+        "to_status": "RESOLVED", "actor": "x", "at": now,
+    })
+    assert skip.status_code == 409, skip.text
+    assert client.get(f"/governance/v1/cases/{c2.json()['case_id']}").json()["status"] == "OPEN"
+
+    client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "RESOLVED", "actor": "hr-department", "at": now,
+    })
+    dead = client.post(f"/governance/v1/cases/{case_id}/transitions", json={
+        "to_status": "CANCELLED", "actor": "x", "at": now,
+    })
+    assert dead.status_code == 409, dead.text
+
+    # 19. display_id는 같은 타입·날짜에서 연번이 증가하고 타입이 다르면 접두어가 다르다.
+    c3 = client.post("/governance/v1/cases", json={
+        "case_type": "HIRING", "priority": 1, "owner_department": "AGENT-WORKFORCE",
+        "fund_id": "f1", "trace_id": "trace-case-3", "created_by": "ceo-agent",
+    })
+    assert c3.json()["display_id"] != c1.json()["display_id"]
+    assert c3.json()["display_id"].startswith("HR-")
+    assert c2.json()["display_id"].startswith("IN-"), c2.json()["display_id"]
+
+    # 20. 없는 Case는 404.
+    assert client.get("/governance/v1/cases/00000000-0000-4000-8000-000000000000").status_code == 404
+
+    print("ok - CEO Office Domain API 20개 시나리오 점검 통과 "
+          "(승인 8개 + Case Root 5개 포함)")
