@@ -150,9 +150,10 @@ def _sanitize(exc: Exception) -> str:
 
 
 def _fallback(stage: str, exc: Exception, *, attempts: int = 1) -> dict:
-    # safe_action 은 multi-agent-workflow.yaml step 2 의 on_failure 와 같은 값이어야 한다
-    # ("HOLD — Order Intent 생성 실패 시 리스크본부로 넘기지 않는다"). 여기서 다른 말을 쓰면
-    # Orchestrator 가 선언한 안전 기본값과 코드가 어긋난다.
+    # safe_action 은 orchestration/workflows/investment-case.yaml 의 trading step(sequence 2)
+    # failure_action 과 같은 값이어야 한다(HOLD). 여기서 다른 말을 쓰면 Orchestrator 가 선언한
+    # 안전 기본값과 코드가 어긋난다. 루트 multi-agent-workflow.yaml 은 호환 진입점일 뿐이고
+    # 정본은 orchestration/workflows/ 다(2026-08-03 main 에서 분할됨).
     return {"stage": stage, "error": type(exc).__name__, "error_message": _sanitize(exc),
             "attempts": attempts, "safe_action": "HOLD", "decision_origin": "FALLBACK"}
 
@@ -180,7 +181,8 @@ def _max_age_minutes() -> int:
 
 
 def _max_attempts() -> int:
-    """multi-agent-workflow.yaml step 2 의 retry.max_attempts 와 같은 값(3). F08 완료 조건
+    """orchestration/workflows/investment-case.yaml trading step 의 retry.max_attempts 와 같은 값(3).
+    F08 완료 조건
     "Schema 실패는 재시도 후 PASS 처리한다" - 한 번 실패했다고 바로 포기하지 않는다."""
     return 3
 
@@ -751,13 +753,13 @@ def _check_insufficient_evidence_gate():
     out = _run({**_PACKET, "evidence_quality": "insufficient_evidence"}, chat=never)
     assert called == [], "근거 부족인데 LLM 을 불렀다"
     assert out["debate_opened"] is False and out["escalate"] is True
-    # safe_action 은 multi-agent-workflow.yaml step 2 on_failure 와 같은 값이어야 한다
+    # safe_action 은 investment-case.yaml trading step 의 failure_action 과 같은 값이어야 한다
     assert out["fallbacks"][0]["safe_action"] == "HOLD", out["fallbacks"][0]
     print("  근거부족 차단 게이트       OK")
 
 
 def _check_retry_and_versions():
-    # multi-agent-workflow.yaml step 2 retry.max_attempts: 3 / F08 "Schema 실패는 재시도 후 PASS".
+    # investment-case.yaml trading step retry.max_attempts: 3 / F08 "Schema 실패는 재시도 후 PASS".
     calls: list = []
 
     def flaky(persona, task):
