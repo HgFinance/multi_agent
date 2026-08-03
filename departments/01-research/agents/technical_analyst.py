@@ -41,20 +41,20 @@ import math
 import os
 import re
 import sys
-import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from llm_client import chat as llm_chat  # noqa: E402
-from number_guard import caution_lines, flag_unmatched, numeric_pool  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
-from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from narrative_guard import audit_narrative, label_caution_lines
+from number_guard import caution_lines, flag_unmatched, numeric_pool
 
 PERSONA = "technical-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-technical-analyst-v1"
@@ -107,11 +107,11 @@ class TechnicalNote(BaseModel):
 # 1. compute - 결정론 지표 계산 (순수 함수, LLM 무관)
 # ---------------------------------------------------------------------------
 
-def _r4(v: Optional[float]) -> Optional[float]:
+def _r4(v: float | None) -> float | None:
     return None if v is None else round(float(v), 4)
 
 
-def _pct(cur: Optional[float], base: Optional[float]) -> Optional[float]:
+def _pct(cur: float | None, base: float | None) -> float | None:
     # 기준가 0/결측은 데이터 오류다 - 수치로 위장하지 않고 None 으로 남긴다
     if cur is None or base is None or base == 0:
         return None
@@ -234,7 +234,7 @@ Output JSON only, exactly this shape, no other text:
  "cautions":["..."]}"""
 
 
-def narrate(readout: dict, symbol: str, llm: Optional[Callable] = None) -> TechnicalNote:
+def narrate(readout: dict, symbol: str, llm: Callable | None = None) -> TechnicalNote:
     """readout 을 LLM 에 주고 TechnicalNote 를 받는다. Schema 불합격이면 한 번
     고쳐 부르고, 또 실패하면 예외다 - 서술을 지어내지 않는다(호출부가
     LLM_UNAVAILABLE 처리). llm 주입은 자체 점검용."""
@@ -327,8 +327,8 @@ def _http_get(url: str, timeout: int = 20):
     return get_json(url, persona=PERSONA, timeout=timeout)
 
 
-def analyze(symbol: str, *, market_api: Optional[str] = None,
-            llm: Optional[Callable] = None, get: Callable = _http_get) -> dict:
+def analyze(symbol: str, *, market_api: str | None = None,
+            llm: Callable | None = None, get: Callable = _http_get) -> dict:
     """market-api 호출 -> 결정론 계산 -> LLM 서술 -> 결정론 검증.
 
     market-api 불가/봉 전무 -> verdict INSUFFICIENT_DATA (사유 명시).
@@ -368,7 +368,7 @@ def analyze(symbol: str, *, market_api: Optional[str] = None,
 # 자체 점검 - 네트워크 없음 (합성 봉 + 가짜 LLM 주입)
 # ---------------------------------------------------------------------------
 
-def _bars(closes: list[float], vols: Optional[list[float]] = None,
+def _bars(closes: list[float], vols: list[float] | None = None,
           hl_pad: float = 0.0) -> list[dict]:
     base = datetime(2026, 1, 1)
     out = []

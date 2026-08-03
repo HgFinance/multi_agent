@@ -38,7 +38,6 @@ import gzip
 import hashlib
 import json
 import sys
-import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -388,8 +387,8 @@ def build(name: str, version: str, start: date, end: date) -> int:
 
 def _mk_row(iid="i1", d=date(2026, 7, 30), o="100", c="101", obs=None):
     return {"instrument_id": iid, "trade_date": d,
-            "open": Decimal(o), "high": Decimal("102"), "low": Decimal("99"),
-            "close": Decimal(c), "volume": Decimal("1000"),
+            "open": Decimal(o), "high": Decimal(102), "low": Decimal(99),
+            "close": Decimal(c), "volume": Decimal(1000),
             "observed_at": obs or datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc)}
 
 
@@ -476,7 +475,7 @@ if __name__ == "__main__":
         # 점검용 export 는 임시 폴더에 쓰되 상대경로 계산이 성립해야 한다
         _tmp_root = Path(td)
         _orig = DATA_ROOT
-        DATA_ROOT = _tmp_root / "quant-data"          # noqa: F811
+        DATA_ROOT = _tmp_root / "quant-data"
         try:
             _check_partition_roundtrip(DATA_ROOT)
         finally:

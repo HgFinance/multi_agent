@@ -23,11 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
+import hermes_cli
 import psycopg2
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
-
-import hermes_cli
 
 DEPARTMENT = "accounting-portfolio-department"   # Hermes Profile 이름
 CONFIG = "departments/05-accounting-portfolio/hermes/config.yaml"  # 저장소 사본

@@ -38,7 +38,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from opendart_collector import OpenDartClient, OpenDartError, STATUS_NO_DATA  # noqa: E402
+from opendart_collector import (
+    STATUS_NO_DATA,
+    OpenDartClient,
+    OpenDartError,
+)
 
 COLLECTOR_VERSION = "research-opendart-company-v1"
 

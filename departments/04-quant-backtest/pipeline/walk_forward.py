@@ -50,8 +50,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from backtest_runner import (  # noqa: E402
-    COST_MODEL, DEFAULT_CONFIG, Market, compute_metrics, load_dataset,
+from backtest_runner import (
+    COST_MODEL,
+    DEFAULT_CONFIG,
+    Market,
+    compute_metrics,
+    load_dataset,
     run_backtest,
 )
 

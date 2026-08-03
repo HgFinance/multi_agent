@@ -39,14 +39,14 @@ import asyncio
 import signal
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from ls_realtime_worker import (  # noqa: E402
+from ls_realtime_worker import (
     KST,
     SOURCE_ID,
     LsRealtimeError,
@@ -54,9 +54,9 @@ from ls_realtime_worker import (  # noqa: E402
     MarketSink,
     make_trading_day_check,
 )
-from news_watch_service import parse_watchlist_file  # noqa: E402
-from source_registry import SourceRegistry, load_project_env  # noqa: E402
-from subscription_plan import (  # noqa: E402
+from news_watch_service import parse_watchlist_file
+from source_registry import SourceRegistry, load_project_env
+from subscription_plan import (
     SUBSCRIPTIONS_PER_SOCKET,
     TR_MATRIX,
     WEBSOCKET_PATH,
@@ -409,7 +409,7 @@ async def main_async() -> int:
 # ---------------------------------------------------------------------------
 
 def _check_window():
-    kst = lambda *a: datetime(*a, tzinfo=KST)  # noqa: E731
+    kst = lambda *a: datetime(*a, tzinfo=KST)
     # Calendar 가 오늘을 안다 - 그대로 따른다
     w = resolve_window(date(2026, 7, 31), (True, kst(2026, 7, 31, 9), kst(2026, 7, 31, 15, 30)),
                        pre_open_minutes=35, post_close_minutes=10)

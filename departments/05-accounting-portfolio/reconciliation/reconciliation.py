@@ -35,11 +35,11 @@ from uuid import UUID, uuid4
 # 본부 간 의존 방향이 이 파일에 그대로 남는다.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
 
-from contracts import Side  # noqa: E402
+from contracts import Side
 
-ZERO = Decimal("0")
+ZERO = Decimal(0)
 DEFAULT_TIME_WINDOW = timedelta(minutes=5)
-CASH_TOLERANCE = Decimal("1")  # 원 단위 반올림 차이는 Break로 올리지 않는다
+CASH_TOLERANCE = Decimal(1)  # 원 단위 반올림 차이는 Break로 올리지 않는다
 
 
 class MatchMethod(StrEnum):
@@ -388,18 +388,18 @@ if __name__ == "__main__":
     assert r.result == "partial" and len(r.breaks) == 1
 
     # 10. 포지션 대사 - 불일치는 항상 material (마스터플랜 11.2)
-    r = reconcile_positions({stock: Decimal("100")}, {stock: Decimal("100")})
+    r = reconcile_positions({stock: Decimal(100)}, {stock: Decimal(100)})
     assert r.result == "matched"
-    r = reconcile_positions({stock: Decimal("100")}, {stock: Decimal("90")})
+    r = reconcile_positions({stock: Decimal(100)}, {stock: Decimal(90)})
     assert r.breaks[0].severity is Severity.MATERIAL and r.breaks[0].kind == "position_mismatch"
     # 한쪽에만 있는 종목도 잡힌다
-    r = reconcile_positions({stock: Decimal("100")}, {other: Decimal("10")})
+    r = reconcile_positions({stock: Decimal(100)}, {other: Decimal(10)})
     assert len(r.breaks) == 2
 
     # 11. 현금 대사 - 반올림은 통과, 큰 차이는 material
-    assert reconcile_cash(Decimal("1000000"), Decimal("1000000.5")).result == "matched"
-    assert reconcile_cash(Decimal("1000000"), Decimal("999900")).breaks[0].severity is Severity.HIGH
-    big = reconcile_cash(Decimal("1000000"), Decimal("0"))
+    assert reconcile_cash(Decimal(1000000), Decimal("1000000.5")).result == "matched"
+    assert reconcile_cash(Decimal(1000000), Decimal(999900)).breaks[0].severity is Severity.HIGH
+    big = reconcile_cash(Decimal(1000000), Decimal(0))
     assert big.breaks[0].severity is Severity.MATERIAL and big.material_breaks
 
     # 12. 매칭된 브로커 체결은 재사용되지 않는다 (같은 건에 두 번 매칭 금지)

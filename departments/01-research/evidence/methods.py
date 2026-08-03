@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 REGISTRY_VERSION = "research-method-registry-v1"
 
@@ -405,7 +405,7 @@ def _check_adopted_module_exists():
         if func:
             src = p.read_text(encoding="utf-8")
             if not _re.search(rf"^\s*(?:def|class)\s+{_re.escape(func)}\b",
-                              src, _re.M):
+                              src, _re.MULTILINE):
                 missing_func.append(f"{m.key} -> {path}:{func}")
 
     assert not missing_file, (

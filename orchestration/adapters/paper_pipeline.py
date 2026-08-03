@@ -137,12 +137,15 @@ class PaperPipelineAdapter:
         """Run non-binding Worker context and make it visible to the head."""
 
         try:
-        result = run_department_workers(
-            self.repo_root,
-            department,
-            payload,
-            llm=self._worker_llm,
-        )
+            if self._worker_llm is None:
+                result = run_department_workers(self.repo_root, department, payload)
+            else:
+                result = run_department_workers(
+                    self.repo_root,
+                    department,
+                    payload,
+                    llm=self._worker_llm,
+                )
         except Exception as exc:  # noqa: BLE001 - Worker boundary is fail-closed
             result = {
                 "department": department,
@@ -470,8 +473,8 @@ def _detail(stage: str, report: Mapping[str, object], contract: str) -> str:
 
 def _case(context: Mapping[str, object]) -> MutableMapping[str, object]:
     value = context.get("case_request")
-    if not isinstance(value, MutableMapping) or value.get("stage") != "paper":
-        raise ValueError("paper case_request is required")
+    if not isinstance(value, MutableMapping) or value.get("stage") not in {"paper", "test"}:
+        raise ValueError("paper/test case_request is required")
     return value
 
 

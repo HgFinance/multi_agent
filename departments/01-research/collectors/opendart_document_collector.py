@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from source_registry import load_project_env  # noqa: E402
+from source_registry import load_project_env
 
 COLLECTOR_VERSION = "research-opendart-document-v1"
 BUCKET = "research-documents-private"

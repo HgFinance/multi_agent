@@ -39,11 +39,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from source_registry import SourceRegistry, UseScope, load_project_env  # noqa: E402
+from source_registry import SourceRegistry, UseScope, load_project_env
 
 COLLECTOR_VERSION = "research-opendart-collector-v1"
 

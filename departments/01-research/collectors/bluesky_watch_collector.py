@@ -111,7 +111,6 @@ def fetch_author_feed(handle: str) -> list[dict]:
 
 def collect(watchlist_path: Path | None = None) -> int:
     import psycopg2
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()

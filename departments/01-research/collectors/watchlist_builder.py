@@ -36,8 +36,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from naver_news_collector import DAILY_QUOTA  # noqa: E402
-from news_watch_service import (  # noqa: E402
+from naver_news_collector import DAILY_QUOTA
+from news_watch_service import (
     QUOTA_SOFT_RATIO,
     ensure_quota_headroom,
     parse_watchlist_file,
@@ -244,7 +244,7 @@ def _build(kospi: int, kosdaq: int, interval: float, output: Path) -> int:
     )
     print(f"  {output} 에 {len(final)}종목 "
           f"(KOSPI {len(by_venue['KOSPI'][:kospi])} / KOSDAQ {len(by_venue['KOSDAQ'][:kosdaq])})")
-    print(f"  적용: docker compose restart news-watcher")
+    print("  적용: docker compose restart news-watcher")
     return 0
 
 

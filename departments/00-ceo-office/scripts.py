@@ -51,15 +51,19 @@ if str(_REPO_ROOT) not in sys.path:
 _REPORTING_DIR = _BASE / "src" / "reporting"
 sys.path.insert(0, str(_REPORTING_DIR))
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-
-from daily_report import (  # noqa: E402
+from daily_report import (
     DailyReportAssembler,
     DailyReportSections,
     InMemoryReportRunRepository,
     SnapshotRef,
 )
-from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
+from langgraph.graph import END, StateGraph
+from reporting import (
+    evaluation_metrics,
+    json_cell,
+    langsmith_handoff,
+    md_cell,
+)
 
 PIPELINE_VERSION = "ceo-office-pipeline-v1"
 ALL_SECTION_FIELDS = ("portfolio", "risk", "research", "execution", "strategy", "qa")
@@ -132,7 +136,7 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
     )
 
- agent = AIAgent(model=_configured_head_model(), quiet_mode=True,
+    agent = AIAgent(model=_configured_head_model(), quiet_mode=True,
                      ephemeral_system_prompt=persona)
     return agent.chat(task)
 
@@ -407,7 +411,9 @@ if __name__ == "__main__":
     if "--run" in sys.argv:
         print(f"{PIPELINE_VERSION} 실행 (데모 Section)")
         out = run_ceo_department(
-            fund_id="demo-fund", as_of=date.today().isoformat(), template_version="v1",
+        fund_id="demo-fund",
+        as_of=datetime.now(timezone.utc).date().isoformat(),
+        template_version="v1",
             sections_input=_demo_sections(full="--full" in sys.argv),
             trace_id=hashlib.sha256(b"ceo-demo").hexdigest()[:16],
         )

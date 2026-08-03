@@ -45,7 +45,7 @@ sys.path.insert(0, str(_DEPT / "contracts"))
 sys.path.insert(0, str(_DEPT / "multileg"))
 sys.path.insert(0, str(_DEPT / "capability"))
 
-from contracts import (  # noqa: E402
+from contracts import (
     BROKER_TERMINAL_STATES,
     BrokerOrderState,
     IntentState,
@@ -54,19 +54,19 @@ from contracts import (  # noqa: E402
     Side,
     can_transition,
 )
-from derivatives import (  # noqa: E402
+from derivatives import (
     CERTIFICATION_REQUIRED,
     CapabilityProfile,
     DerivativeContract,
     check_order_capability,
 )
-from intent_group import (  # noqa: E402
+from intent_group import (
     GroupStatus,
     IntentGroup,
     LegOutcome,
     RecoveryPlan,
 )
-from intent_group import evaluate_group as _evaluate_group  # noqa: E402
+from intent_group import evaluate_group as _evaluate_group
 
 
 class OMSError(Exception):
@@ -636,12 +636,12 @@ if __name__ == "__main__":
 
     now = datetime.now(timezone.utc)
     snap = MarketSnapshot(market_snapshot_id="s1", as_of=now,
-                          bid=Decimal("70000"), ask=Decimal("70100"))
+                          bid=Decimal(70000), ask=Decimal(70100))
     FUND = uuid4()
     common = dict(
         trade_case_id=uuid4(), fund_id=FUND, book_id=uuid4(),
         strategy_id=uuid4(), instrument_id=uuid4(),
-        side=Side.BUY, order_type=OrderType.LIMIT, limit_price=Decimal("70000"),
+        side=Side.BUY, order_type=OrderType.LIMIT, limit_price=Decimal(70000),
         time_in_force=TimeInForce.DAY, valid_until=now + timedelta(hours=1),
         snapshot=snap, created_by="trader-pm-agent", trace_id="t1", created_at=now,
     )
@@ -700,17 +700,17 @@ if __name__ == "__main__":
     oms.on_broker_event(o, "ack", "brk_ack_1", now, {"broker_order_id": "B-1"})
     assert o.broker_order_id == "B-1"
     oms.on_broker_event(o, "fill", "brk_f1", now, {"quantity": "40", "price": "70000", "fee": "10"})
-    assert o.state is BrokerOrderState.PARTIALLY_FILLED and o.filled_quantity == Decimal("40")
-    assert o.leaves_quantity == Decimal("60")
+    assert o.state is BrokerOrderState.PARTIALLY_FILLED and o.filled_quantity == Decimal(40)
+    assert o.leaves_quantity == Decimal(60)
     oms.on_broker_event(o, "fill", "brk_f2", now, {"quantity": "60", "price": "70050", "fee": "15"})
-    assert o.state is BrokerOrderState.FILLED and o.filled_quantity == Decimal("100")
-    assert o.average_fill_price == Decimal("70030")
+    assert o.state is BrokerOrderState.FILLED and o.filled_quantity == Decimal(100)
+    assert o.average_fill_price == Decimal(70030)
     # Intent 상태는 브로커 체결에 끌려가지 않는다. 두 머신은 분리돼 있다.
     assert rec.state is IntentState.READY_TO_SUBMIT, "Broker 상태가 Intent로 새어나갔다"
 
     # 4. 멱등성 - 같은 브로커 체결 이벤트 재수신 (DoD 3번)
     oms.on_broker_event(o, "fill", "brk_f2", now, {"quantity": "60", "price": "70050"})
-    assert o.filled_quantity == Decimal("100"), "중복 체결이 잡혔다"
+    assert o.filled_quantity == Decimal(100), "중복 체결이 잡혔다"
     assert len(o.fills) == 2
 
     # 5. 멱등성 - 같은 idempotency_key 재등록, 같은 Intent로 주문 재생성
@@ -746,7 +746,7 @@ if __name__ == "__main__":
     oms5.apply_risk_decision(rec5, approval(i5, qty="40", verdict=RiskVerdict.RESIZE))
     assert rec5.state is IntentState.READY_TO_SUBMIT
     o5 = oms5.create_broker_order(rec5, i5)
-    assert o5.requested_quantity == Decimal("40"), "축소 승인이 반영 안 됨"
+    assert o5.requested_quantity == Decimal(40), "축소 승인이 반영 안 됨"
     oms5.submit(o5, rec5)
     assert o5.state is BrokerOrderState.SUBMITTED
 
@@ -783,7 +783,7 @@ if __name__ == "__main__":
     assert o7.state is BrokerOrderState.PARTIALLY_FILLED
     oms7.request_cancel(o7, "재요청")
     oms7.on_broker_event(o7, "cancel", "b7_cxl", now, {"leaves": "70"})
-    assert o7.state is BrokerOrderState.CANCELLED and o7.filled_quantity == Decimal("30")
+    assert o7.state is BrokerOrderState.CANCELLED and o7.filled_quantity == Decimal(30)
 
     # 11. 이벤트에서 상태 재구축 (DoD 4번) - 두 스트림 모두
     for oms_i, rec_i, ord_i in ((oms, rec, o), (oms3, rec3, o3), (oms7, rec7, o7)):
@@ -791,7 +791,7 @@ if __name__ == "__main__":
         assert oms_i.rebuild_state("broker_order", ord_i.order_id) == str(ord_i.state)
 
     # 12. F31 Capability 게이트 — Profile이 없으면 파생·공매도가 접수에서 막힌다
-    from derivatives import (  # noqa: E402
+    from derivatives import (
         DERIVATIVE_CERTIFIERS,
         ContractKind,
         ProfileStatus,
@@ -827,7 +827,7 @@ if __name__ == "__main__":
     # 만기 지난 계약은 Certification이 있어도 막힌다
     expired = DerivativeContract(
         instrument_id=uuid4(), contract_kind=ContractKind.FUTURE,
-        expiry_date=date(2020, 1, 1), contract_multiplier=Decimal("250000"),
+        expiry_date=date(2020, 1, 1), contract_multiplier=Decimal(250000),
         settlement_type=SettlementType.CASH)
     raises(lambda: full.register_intent(make_intent("idem_cap_exp"),
                                         asset_class="FUTURE", contract=expired,
@@ -838,7 +838,7 @@ if __name__ == "__main__":
         "차단됐는데 Intent가 저장됐다"
 
     # 13. F30 Multi-leg 배선 — 실제 Broker Order 상태에서 판정이 나온다
-    from intent_group import (  # noqa: E402
+    from intent_group import (
         AtomicityPolicy,
         FailurePolicy,
         Leg,
@@ -856,9 +856,9 @@ if __name__ == "__main__":
         failure_policy=FailurePolicy.CANCEL_ALL,
         idempotency_key="grp_wired",
         legs=(Leg(leg_index=0, instrument_id=inst_a, side=Side.BUY,
-                  quantity=Decimal("100"), position_effect=PositionEffect.OPEN),
+                  quantity=Decimal(100), position_effect=PositionEffect.OPEN),
               Leg(leg_index=1, instrument_id=inst_b, side=Side.SELL,
-                  quantity=Decimal("100"), position_effect=PositionEffect.OPEN)),
+                  quantity=Decimal(100), position_effect=PositionEffect.OPEN)),
     )
     oms8.register_group(grp)
     # 멱등 — 같은 키로 다시 부르면 같은 그룹이다
@@ -868,7 +868,7 @@ if __name__ == "__main__":
     oms8.link_leg(grp, 0, o8a)
     oms8.link_leg(grp, 1, o8b)
     # 계약 위반은 MultiLegError 그대로 올라온다 - OMSError로 감싸 사유를 흐리지 않는다
-    from intent_group import MultiLegError  # noqa: E402
+    from intent_group import MultiLegError
     raises(lambda: oms8.link_leg(grp, 9, o8a), "없는 leg_index 연결", MultiLegError)
 
     # 아직 아무 체결도 없다 -> 판정을 서두르지 않는다

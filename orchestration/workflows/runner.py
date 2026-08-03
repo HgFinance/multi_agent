@@ -182,6 +182,8 @@ def main() -> int:
 
     try:
         repo_root = Path(__file__).resolve().parents[2]
+        handlers = None
+        context: Mapping[str, object] | None = None
         if args.mode == "test":
             handlers = build_test_handlers(repo_root)
             context = {

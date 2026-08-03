@@ -31,7 +31,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-from portfolio import PortfolioSnapshot  # noqa: E402
+from portfolio import PortfolioSnapshot
 
 SCHEMA_VERSION = 1
 
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     # 백엔드가 바뀌어도 안 깨지므로 거짓말이 오래 남는다.
     ROOT = _HERE.parents[2]
     sys.path.insert(0, str(ROOT / "tests" / "e2e"))
-    from test_paper_loop import PaperLoopTest  # noqa: E402
+    from test_paper_loop import PaperLoopTest
 
     loop = PaperLoopTest("test_full_loop_signal_to_nav")
     loop.setUp()

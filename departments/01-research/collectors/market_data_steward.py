@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -174,7 +174,6 @@ def _columns(cur, table: str) -> set:
 
 def audit(write: bool = True) -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     env = load_project_env()

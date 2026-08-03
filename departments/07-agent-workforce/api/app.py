@@ -55,7 +55,7 @@ _ROSTER_DIR = _BASE / "roster"
 for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR):
     sys.path.insert(0, str(_p))
 
-from access import (  # noqa: E402
+from access import (
     AccessAssignment,
     AccessRequest,
     Environment,
@@ -64,29 +64,22 @@ from access import (  # noqa: E402
     MissingProvisioningError,
     MissingRevocationEvidenceError,
     ResourceKind,
-    SelfApprovalError as AccessSelfApprovalError,
     approve_request,
     provision,
     revoke,
 )
-from candidate import ImprovementCandidate  # noqa: E402
-from cost import (  # noqa: E402
+from access import (
+    SelfApprovalError as AccessSelfApprovalError,
+)
+from candidate import ImprovementCandidate
+from cost import (
     CapacitySnapshot,
     CostSnapshot,
     TokenBudget,
     assess_budget,
     build_department_scorecard,
 )
-from workflow import (  # noqa: E402
-    Approval,
-    CandidateStatus,
-    ImprovementWorkflow,
-    InMemoryImprovementRepository,
-    IllegalTransition as CandidateIllegalTransition,
-    MissingEvidenceError,
-    SelfApprovalError as CandidateSelfApprovalError,
-)
-from roster import (  # noqa: E402
+from roster import (
     AgentNotFoundError,
     AgentSummary,
     EmploymentStatus,
@@ -95,6 +88,19 @@ from roster import (  # noqa: E402
     ProfileVersionSubmission,
     StatusChangeRequest,
     validate_status_change,
+)
+from workflow import (
+    Approval,
+    CandidateStatus,
+    ImprovementWorkflow,
+    InMemoryImprovementRepository,
+    MissingEvidenceError,
+)
+from workflow import (
+    IllegalTransition as CandidateIllegalTransition,
+)
+from workflow import (
+    SelfApprovalError as CandidateSelfApprovalError,
 )
 
 try:
@@ -120,11 +126,15 @@ except ImportError:
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
 
-from redis_event_bus import (  # noqa: E402
+from redis_event_bus import (
     DEFAULT_GROUP as _WORKFORCE_EVENT_GROUP,
+)
+from redis_event_bus import (
     DEFAULT_STREAM as _WORKFORCE_EVENT_STREAM,
-    WorkforceEventBusError,
+)
+from redis_event_bus import (
     RedisEventBus,
+    WorkforceEventBusError,
 )
 
 # --- Request 모델 --------------------------------------------------------------

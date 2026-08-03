@@ -11,9 +11,8 @@ Prompt가 아니라 "경로가 없음"으로 지켜져야 한다.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
-
 import hermes_cli
+from fastapi import APIRouter
 
 DEPARTMENT = "trading-department"   # Hermes Profile 이름
 CONFIG = "departments/02-trading/hermes/config.yaml"  # 저장소 사본

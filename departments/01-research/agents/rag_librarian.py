@@ -60,7 +60,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t　]+")
 # style/script 는 태그만 지우면 내부 텍스트(CSS/JS)가 본문으로 남는다 -
 # 실측 2026-08-01: 발췌 머리가 ".xforms { font-family: 돋움체 }" 로 오염됐다
-_BLOCK_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.S | re.I)
+_BLOCK_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 _CSS_LINE_RE = re.compile(r"^[.#@\w\-,:*\[\]]+\s*\{|^\s*[\w\-]+\s*:\s*[^;]+;\s*}?$")
 
 
@@ -151,7 +151,6 @@ def embed_texts(texts: list[str], *, base: str | None = None) -> list[list[float
 
 def index_documents(limit: int = 50) -> int:
     import psycopg2
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()
@@ -250,7 +249,6 @@ def recent_excerpts_for_symbol(symbol: str, k: int = 3) -> list[dict]:
     2026-08-01: 공시 3,380건 전부 issuer_id 보유, instrument 링크 0).
     """
     import psycopg2
-
     from source_registry import load_project_env
 
     conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
@@ -275,7 +273,6 @@ def recent_excerpts_for_symbol(symbol: str, k: int = 3) -> list[dict]:
 
 def search(query: str, k: int = 5) -> list[dict]:
     import psycopg2
-
     from source_registry import load_project_env
 
     env = load_project_env()

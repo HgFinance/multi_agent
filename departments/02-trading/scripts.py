@@ -85,8 +85,8 @@ _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-from langsmith import tracing_context  # noqa: E402
+from langgraph.graph import END, StateGraph
+from langsmith import tracing_context
 
 PIPELINE_VERSION = "trading-debate-pipeline-v1"
 

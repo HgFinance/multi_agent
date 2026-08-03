@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -182,9 +182,7 @@ def run(client=None, basket: tuple[str, ...] = (),
       (universe_restriction_collector)만 자격을 갖고, 여기는 DB 를 읽는다.
       client 인자는 자체 점검·수동 호출 호환으로 남기되, 주면 옛 경로를 쓴다.
     """
-    import json as _json
     import os
-    import urllib.request
 
     from news_watch_service import parse_watchlist_file
 

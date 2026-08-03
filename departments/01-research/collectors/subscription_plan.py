@@ -38,7 +38,7 @@ TR 은 (시장, 자산군, 데이터종류) 조합마다 다르다. 종목이 �
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 

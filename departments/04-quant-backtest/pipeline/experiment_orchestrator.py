@@ -182,13 +182,21 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     같은 config 로 재사용한다 - 검증 규칙을 두 벌 만들지 않는다.
     """
     import psycopg2
-
-    from backtest_runner import (DEFAULT_CONFIG, REV_CONFIG, load_dataset,
-                                 register_and_run)
+    from backtest_runner import (
+        DEFAULT_CONFIG,
+        REV_CONFIG,
+        Market,
+        load_dataset,
+        register_and_run,
+    )
     from source_registry import load_project_env
-    from walk_forward import (WARMUP_TRADING_DAYS, fragility_summary,
-                              make_windows, run_window, slice_market)
-    from backtest_runner import Market
+    from walk_forward import (
+        WARMUP_TRADING_DAYS,
+        fragility_summary,
+        make_windows,
+        run_window,
+        slice_market,
+    )
 
     edge = ((hyp.get("expected_edge") or {}).get("type") or "").lower()
     config = {"momentum": DEFAULT_CONFIG, "mean_reversion": REV_CONFIG}[edge]

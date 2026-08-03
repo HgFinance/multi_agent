@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from naver_news_collector import (  # noqa: E402
+from naver_news_collector import (
     DAILY_QUOTA,
     DEDUP_WINDOW,
     SOURCE_ID,
@@ -63,14 +63,14 @@ from naver_news_collector import (  # noqa: E402
     load_watchlist,
     make_watch_stream,
 )
-from news_events import StreamCursor  # noqa: E402
-from news_watch_tiers import plan_tiers, sweep_symbols  # noqa: E402
-from news_pipeline import (  # noqa: E402
+from news_events import StreamCursor
+from news_pipeline import (
     NewsSink,
     krx_symbol_resolver,
     seed_title_window_from_db,
 )
-from source_registry import load_project_env  # noqa: E402
+from news_watch_tiers import plan_tiers, sweep_symbols
+from source_registry import load_project_env
 
 SERVICE_VERSION = "research-news-watch-service-v1"
 KST = timezone(timedelta(hours=9))

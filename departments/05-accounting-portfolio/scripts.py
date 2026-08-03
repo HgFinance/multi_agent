@@ -80,20 +80,18 @@ for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_ac
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-from langsmith import tracing_context  # noqa: E402
-
-from daily_report import DailyReport, ReportError, build_daily_report  # noqa: E402
-from ledger import Ledger  # noqa: E402
-from portfolio import (  # noqa: E402
+from daily_report import DailyReport, ReportError, build_daily_report
+from langgraph.graph import END, StateGraph
+from langsmith import tracing_context
+from ledger import Ledger
+from portfolio import (
     MarkPrice,
     PortfolioSnapshot,
     ValuationError,
     value_portfolio,
 )
-from reconciliation import (  # noqa: E402
+from reconciliation import (
     Break,
-    FillRecord,
     ReconResult,
     reconcile_cash,
     reconcile_fills,
@@ -386,7 +384,7 @@ def verify_projection(state: CloseState) -> dict:
                      {k: v.quantity for k, v in second_pos.items()})
 
     tb = ledger.trial_balance()
-    balanced = sum(tb.values()) == Decimal("0")
+    balanced = sum(tb.values()) == Decimal(0)
 
     drift: list[dict] = []
     stored = state.get("stored_projection")
@@ -681,7 +679,7 @@ def _render_report_md(out: dict) -> str:
         f"| **close_id** | `{_md_cell(out.get('close_id'))}` |",
         f"| **회계일** | {_md_cell(out.get('accounting_date'))} |",
         f"| **NAV 상태** | **{_md_cell(out.get('nav_status'))}** |",
-        f"| **공식 여부** | **비공식 (is_official=false)** |",
+        "| **공식 여부** | **비공식 (is_official=false)** |",
         f"| **escalate** | {'**예**' if out.get('escalate') else '아니오'} |",
         f"| Material Break | {_md_cell(out.get('material_break_count', 0))}건 |",
         f"| fund / book | `{_md_cell(out.get('fund_id'))}` / `{_md_cell(out.get('book_id'))}` |",
@@ -764,10 +762,10 @@ def _render_report_md(out: dict) -> str:
 
 
 # ── 자체 점검 (Hermes 없음, Notion 없음, 네트워크 없음) ────────────────────
-from dataclasses import dataclass, field  # noqa: E402
+from dataclasses import dataclass, field
 
-from contracts import Side  # noqa: E402
-from ledger import Position  # noqa: E402
+from contracts import Side
+from ledger import Position
 
 _NOW = datetime(2026, 8, 3, 6, 0, tzinfo=timezone.utc)
 _DATE = date(2026, 8, 3)
@@ -789,9 +787,9 @@ class _Fill:
 def _ledger_with_position() -> Ledger:
     """자본 1억 + 100주 매수. 엔진의 실제 API 로만 세운다 - 분개를 손으로 만들지 않는다."""
     led = Ledger(fund_id=_FUND, book_id=_BOOK)
-    led.post_capital(Decimal("100000000"), _NOW, "cap_1")
-    led.post_fill(_Fill(Decimal("100"), Decimal("70000"), Decimal("1050"),
-                        Decimal("0"), _NOW, "bf_1"),
+    led.post_capital(Decimal(100000000), _NOW, "cap_1")
+    led.post_fill(_Fill(Decimal(100), Decimal(70000), Decimal(1050),
+                        Decimal(0), _NOW, "bf_1"),
                   Side.BUY, _AAA, Position(_AAA))
     return led
 
@@ -925,7 +923,7 @@ def _check_material_break_blocks_valuation():
         return json.dumps({"break_narrative": "수량 불일치", "owner_hint": ["운영"],
                            "narrative": "차단", "escalate": True, "cited_figures": []})
 
-    out = _run(external={"positions": {_AAA: Decimal("50")}}, chat=watch)
+    out = _run(external={"positions": {_AAA: Decimal(50)}}, chat=watch)
     assert out["material_break_count"] >= 1, out["breaks"]
     assert out["nav_status"] == NAV_BLOCKED and out["escalate"] is True
     assert out["snapshot"] is None, "Material Break 인데 평가했다"
@@ -936,8 +934,8 @@ def _check_material_break_blocks_valuation():
 
 def _check_clean_recon_passes():
     # 대사가 맞으면 평가까지 간다 - 게이트가 항상 막기만 하는 게 아니다.
-    out = _run(external={"positions": {_AAA: Decimal("100")},
-                         "cash": Decimal("92998950")}, chat=_stub())
+    out = _run(external={"positions": {_AAA: Decimal(100)},
+                         "cash": Decimal(92998950)}, chat=_stub())
     assert out["material_break_count"] == 0, out["breaks"]
     assert out["snapshot"] is not None and out["nav_status"] == NAV_PRELIMINARY
     assert out["recon"]["position"]["result"] == "matched"
@@ -946,11 +944,11 @@ def _check_clean_recon_passes():
 
 def _check_projection_drift_blocks():
     # 저장 projection 과 분개 재구축이 어긋나면 분개가 사실이고 차이는 Break 다.
-    out = _run(stored_projection={"positions": {_AAA: Decimal("999")}}, chat=_stub())
+    out = _run(stored_projection={"positions": {_AAA: Decimal(999)}}, chat=_stub())
     assert out["projection_check"]["drift"], "불일치를 못 잡았다"
     assert out["nav_status"] == NAV_BLOCKED and out["escalate"] is True
-    clean = _run(stored_projection={"positions": {_AAA: Decimal("100")},
-                                    "cash": Decimal("92998950")}, chat=_stub())
+    clean = _run(stored_projection={"positions": {_AAA: Decimal(100)},
+                                    "cash": Decimal(92998950)}, chat=_stub())
     assert clean["projection_check"]["drift"] == [], clean["projection_check"]
     assert clean["nav_status"] == NAV_PRELIMINARY
     print("  projection 대조 (백로그 1)  OK")
@@ -963,7 +961,7 @@ def _check_daily_report_produced():
     null 인데 fallback 도 없어서 아무도 안 죽었다(2026-08-03 실측).
     """
     opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
-    opening_ledger.post_capital(Decimal("100000000"), _NOW - timedelta(hours=1), "cap_1")
+    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
     opening = value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
 
     out = _run(marks=_marks("77000"), opening_snapshot=opening, chat=_stub())
@@ -1076,12 +1074,12 @@ def _run_live() -> dict:
     D3(Valuation/PnL/NAV) 착수 조건이며 지금은 market-api bulk 종가 조회면 대기 중이다.
     """
     opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
-    opening_ledger.post_capital(Decimal("100000000"), _NOW - timedelta(hours=1), "cap_1")
+    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
     opening = value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
     return run_accounting_close(
         ledger=_ledger_with_position(), as_of=_NOW, accounting_date=_DATE,
         marks=_marks("77000"),
-        external={"positions": {_AAA: Decimal("100")}, "cash": Decimal("92998950")},
+        external={"positions": {_AAA: Decimal(100)}, "cash": Decimal(92998950)},
         opening_snapshot=opening)
 
 

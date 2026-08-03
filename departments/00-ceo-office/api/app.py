@@ -54,20 +54,24 @@ _NOTIFICATION_DIR = _BASE / "src" / "notification"
 for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR):
     sys.path.insert(0, str(_p))
 
-from daily_report import (  # noqa: E402
+from daily_report import (
     DailyReportAssembler,
     DailyReportSections,
     InMemoryReportRunRepository,
     SnapshotRef,
 )
-from lifecycle import ActivationResult, MandateActivationService, UserApproval  # noqa: E402
-from notification import (  # noqa: E402
+from lifecycle import (
+    ActivationResult,
+    MandateActivationService,
+    UserApproval,
+)
+from notification import (
     InMemoryNotificationRepository,
     NotificationRequest,
     NotificationService,
 )
-from policy import MandatePolicy  # noqa: E402
-from service import (  # noqa: E402
+from policy import MandatePolicy
+from service import (
     ChangeDirection,
     CurrencyMismatchError,
     FundNotFoundError,
@@ -76,7 +80,10 @@ from service import (  # noqa: E402
 )
 
 try:
-    from postgres_repository import MandatePersistenceError, PostgresMandateVersionRepository
+    from postgres_repository import (
+        MandatePersistenceError,
+        PostgresMandateVersionRepository,
+    )
 except ImportError:  # psycopg2 미설치 환경에서도 앱 자체는 뜬다
     PostgresMandateVersionRepository = None  # type: ignore[assignment,misc]
 
@@ -96,13 +103,16 @@ except ImportError:
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
 
-from redis_event_bus import (  # noqa: E402
+from redis_event_bus import (
     DEFAULT_GROUP as _GOVERNANCE_EVENT_GROUP,
+)
+from redis_event_bus import (
     DEFAULT_STREAM as _GOVERNANCE_EVENT_STREAM,
+)
+from redis_event_bus import (
     GovernanceEventBusError,
     RedisEventBus,
 )
-
 
 # --- Request/Response 모델 ---------------------------------------------------
 

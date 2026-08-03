@@ -23,13 +23,11 @@ price_context 규칙 (지어내지 않는다 - 레포 핵심 원칙):
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
-import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
 
 BUNDLE_VERSION = "evidence-bundle-v1"
 KST = timezone(timedelta(hours=9))
@@ -55,7 +53,7 @@ def _http_get(url: str, timeout: int = 30):
     return get_json(url, persona=BUNDLE_PERSONA, timeout=timeout)
 
 
-def _pct(cur: float, base: Optional[float]) -> Optional[float]:
+def _pct(cur: float, base: float | None) -> float | None:
     # 기준가 0/결측은 데이터 오류다 - 수치로 위장하지 않고 None 으로 남긴다
     if base is None or base == 0:
         return None
@@ -125,7 +123,7 @@ def compute_price_context(bars: list[dict]) -> dict:
     return ctx
 
 
-def fetch_price_context(symbol: str, *, market_api: Optional[str] = None,
+def fetch_price_context(symbol: str, *, market_api: str | None = None,
                         get: Callable = _http_get) -> dict:
     base = (market_api or MARKET_API_DEFAULT).rstrip("/")
     try:
@@ -139,8 +137,8 @@ def fetch_price_context(symbol: str, *, market_api: Optional[str] = None,
 
 
 # ── Bundle 조립 (scripts.py assemble_evidence 이관) ────────────────────────
-def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
-                    research_api: Optional[str] = None,
+def assemble_bundle(symbol: str, *, market_api: str | None = None,
+                    research_api: str | None = None,
                     get: Callable = _http_get) -> dict:
     """기존 evidence 계약 유지 + price_context/as_of 확장.
 

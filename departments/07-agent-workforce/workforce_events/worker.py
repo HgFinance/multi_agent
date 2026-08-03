@@ -22,7 +22,7 @@ from pathlib import Path
 _API_DIR = Path(__file__).resolve().parents[1] / "api"
 sys.path.insert(0, str(_API_DIR))
 
-from app import _handle_workforce_event, _workforce_event_bus  # noqa: E402
+from app import _handle_workforce_event, _workforce_event_bus
 
 
 def main() -> None:

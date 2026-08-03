@@ -5,9 +5,10 @@ Tavily API를 통해 금융 관련 뉴스 및 공시자료를 가져오는 스�
 (구 경로 fetch_news.py 와 임시 호환 Wrapper는 2026-07-30에 삭제됐다)
 """
 import json
-import sys
 import os
+import sys
 import urllib.request
+
 
 def fetch_news(query, max_results=5):
     """Tavily API를 통해 뉴스 검색"""

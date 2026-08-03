@@ -38,12 +38,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from source_registry import SourceRegistry, load_project_env  # noqa: E402
+from source_registry import SourceRegistry, load_project_env
 
 COLLECTOR_VERSION = "research-macro-collector-v1"
 
@@ -185,7 +186,7 @@ def parse_period(raw: str, frequency: str) -> date:
         return date(int(text), 1, 1)
     if frequency == FREQ_MONTHLY and re.fullmatch(r"\d{6}", text):
         return date(int(text[:4]), int(text[4:6]), 1)
-    if frequency == FREQ_QUARTERLY and re.fullmatch(r"\d{4}Q?[1-4]", text, re.I):
+    if frequency == FREQ_QUARTERLY and re.fullmatch(r"\d{4}Q?[1-4]", text, re.IGNORECASE):
         q = int(text[-1])
         return date(int(text[:4]), (q - 1) * 3 + 1, 1)
     if frequency == FREQ_DAILY and re.fullmatch(r"\d{8}", text):

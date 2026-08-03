@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from source_registry import load_project_env  # noqa: E402
+from source_registry import load_project_env
 
 COLLECTOR_VERSION = "research-chart-backfill-v1"
 KST = timezone(timedelta(hours=9))
@@ -163,7 +164,6 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str) -> tuple[int,
 
 def _symbols_and_ids(symbols: tuple[str, ...]):
     import psycopg2
-
     from news_watch_service import parse_watchlist_file
 
     if not symbols:
@@ -186,7 +186,6 @@ def _symbols_and_ids(symbols: tuple[str, ...]):
 
 def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int | None) -> int:
     import psycopg2
-
     from ls_client import LsRestClient
 
     pairs = _symbols_and_ids(symbols)

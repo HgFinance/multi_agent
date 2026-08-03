@@ -42,9 +42,9 @@ from pathlib import Path
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "collectors"))
-from ls_client import StockMasterRow  # noqa: E402
-from source_registry import UseScope, load_project_env  # noqa: E402
-from subscription_plan import AssetClass, UniverseMember, Venue  # noqa: E402
+from ls_client import StockMasterRow
+from source_registry import UseScope, load_project_env
+from subscription_plan import AssetClass, UniverseMember, Venue
 
 REPOSITORY_VERSION = "research-reference-repository-v1"
 
@@ -57,7 +57,7 @@ NEWS_LINK_VERSION = "news-symbol-map-v1"
 CURRENCY_KRW = "KRW"
 
 
-_INSERT_COLUMNS_RE = re.compile(r"insert\s+into\s+[\w.]+\s*\(([^)]*)\)", re.I)
+_INSERT_COLUMNS_RE = re.compile(r"insert\s+into\s+[\w.]+\s*\(([^)]*)\)", re.IGNORECASE)
 
 
 def insert_arity(sql: str) -> int | None:
@@ -276,7 +276,7 @@ class SupabaseReferenceRepository(ReferenceRepository):
 
     def __init__(self, dsn: str | None = None) -> None:
         import psycopg2
-        from psycopg2.extras import execute_values, register_uuid
+        from psycopg2.extras import register_uuid
 
         register_uuid()
         self._execute_values = guarded_execute_values
@@ -1381,7 +1381,7 @@ def _check_mapping():
     assert r.asset_class == "EQUITY" and r.instrument_type == "STOCK"
     assert r.currency == "KRW" and r.status == "ACTIVE"
     assert r.price_scale == 0 and r.quantity_scale == 0
-    assert r.lot_size == Decimal("1")
+    assert r.lot_size == Decimal(1)
     assert r.isin == "KR7005930003" and r.provider_symbol == "005930"
     assert r.metadata["source"] == "ls:t8436" and r.metadata["shcode"] == "005930"
 
@@ -1390,7 +1390,7 @@ def _check_mapping():
     assert master_row_to_record(_row("123456", "KR7123456789", Venue.KOSDAQ, spac=True), as_of=now).metadata["is_spac"] is True
 
     # 주문 단위가 10 인 종목
-    assert master_row_to_record(_row("000010", "KR7000010000", Venue.KOSPI, unit="10"), as_of=now).lot_size == Decimal("10")
+    assert master_row_to_record(_row("000010", "KR7000010000", Venue.KOSPI, unit="10"), as_of=now).lot_size == Decimal(10)
 
     # tick_size 는 넣지 않는다 - 추정값이 주문 검증을 깨뜨린다
     assert not hasattr(r, "tick_size")
@@ -1398,11 +1398,11 @@ def _check_mapping():
 
 
 def _check_numeric_parsing():
-    assert _to_decimal("1") == Decimal("1")
-    assert _to_decimal("") == Decimal("1")
-    assert _to_decimal("10") == Decimal("10")
+    assert _to_decimal("1") == Decimal(1)
+    assert _to_decimal("") == Decimal(1)
+    assert _to_decimal("10") == Decimal(10)
     # 0 이나 음수는 lot_size CHECK(> 0) 을 위반하므로 기본값으로 올린다
-    assert _to_decimal("0") == Decimal("1")
+    assert _to_decimal("0") == Decimal(1)
     try:
         _to_decimal("abc")
         raise AssertionError("숫자 아닌 값이 통과했다")

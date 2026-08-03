@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from news_events import NewsRecord, NewsStreamError, StreamStats  # noqa: E402
+from news_events import NewsRecord, NewsStreamError, StreamStats
 
 PIPELINE_VERSION = "research-news-pipeline-v1"
 

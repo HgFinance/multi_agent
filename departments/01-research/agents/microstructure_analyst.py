@@ -46,21 +46,21 @@ import json
 import os
 import re
 import sys
-import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # LLM 호출·서술 재시도의 단일 출처 - agents/ 를 스크립트로 실행하면 본부 루트가
 # sys.path 에 없어 evidence/ 를 직접 넣는다(다른 분석가와 같은 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from liquidity import compute_liquidity  # noqa: E402
-from llm_client import chat as llm_chat  # noqa: E402
-from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
-from number_guard import caution_lines, flag_unmatched  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
+from liquidity import compute_liquidity
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from narrative_guard import audit_narrative, label_caution_lines
+from number_guard import caution_lines, flag_unmatched
 
 PERSONA = "microstructure-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-microstructure-analyst-v1"
@@ -117,11 +117,11 @@ class MicroNote(BaseModel):
 # 1. compute - 결정론 지표 계산 (순수 함수, LLM·네트워크·시계 무관)
 # ---------------------------------------------------------------------------
 
-def _r4(v: Optional[float]) -> Optional[float]:
+def _r4(v: float | None) -> float | None:
     return None if v is None else round(float(v), 4)
 
 
-def _f(v) -> Optional[float]:
+def _f(v) -> float | None:
     """market-api 는 Decimal 을 문자열로 줄 수 있다 - None 안전 float 코어션."""
     if v is None:
         return None
@@ -131,12 +131,12 @@ def _f(v) -> Optional[float]:
         return None
 
 
-def _i(v) -> Optional[int]:
+def _i(v) -> int | None:
     f = _f(v)
     return None if f is None else int(f)
 
 
-def compute_micro_readout(payload: dict, last_close: Optional[float] = None) -> dict:
+def compute_micro_readout(payload: dict, last_close: float | None = None) -> dict:
     """market-api /microstructure 응답(payload) -> 미시구조 readout.
 
     순수 함수 - 입력만으로 계산한다(자체 점검 대상).
@@ -277,7 +277,7 @@ Output JSON only, exactly this shape, no other text:
  "cautions":["..."]}"""
 
 
-def narrate(readout: dict, symbol: str, llm: Optional[Callable] = None) -> MicroNote:
+def narrate(readout: dict, symbol: str, llm: Callable | None = None) -> MicroNote:
     """readout 을 LLM 에 주고 MicroNote 를 받는다. Schema 불합격이면 한 번
     고쳐 부르고, 또 실패하면 예외다 - 서술을 지어내지 않는다(호출부가
     LLM_UNAVAILABLE 처리하되 판정은 코드 것을 유지). llm 주입은 자체 점검용."""
@@ -369,8 +369,8 @@ def _http_get(url: str, timeout: int = 20):
     return get_json(url, persona=PERSONA, timeout=timeout)
 
 
-def analyze(symbol: str, *, market_api: Optional[str] = None,
-            llm: Optional[Callable] = None, get: Callable = _http_get) -> dict:
+def analyze(symbol: str, *, market_api: str | None = None,
+            llm: Callable | None = None, get: Callable = _http_get) -> dict:
     """market-api 호출 -> 결정론 계산 -> LLM 서술 -> 결정론 검증.
 
     /microstructure 불가·둘 다 null -> verdict INSUFFICIENT_DATA (사유 명시).

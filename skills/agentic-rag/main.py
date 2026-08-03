@@ -23,11 +23,11 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SKILL_DIR))
 
-from dotenv import load_dotenv  # noqa: E402
+from dotenv import load_dotenv
 
 load_dotenv(SKILL_DIR.parent.parent / ".env")
 
-from src.graph import run_compliance_check  # noqa: E402
+from src.graph import run_compliance_check
 
 PERSONA_CORPUS = {
     "compliance-policy-agent": SKILL_DIR / "corpus" / "compliance",

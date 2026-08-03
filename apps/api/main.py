@@ -36,10 +36,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 
-import accounting  # noqa: E402
-import hermes_cli  # noqa: E402
-import trading  # noqa: E402
-from ui_read_model import build_ui_snapshot  # noqa: E402
+import accounting
+import hermes_cli
+import trading
+from ui_read_model import build_ui_snapshot
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(

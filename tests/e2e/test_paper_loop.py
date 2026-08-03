@@ -44,7 +44,7 @@ for _p in (
 ):
     sys.path.insert(0, str(_p))
 
-from contracts import (  # noqa: E402
+from contracts import (
     BrokerOrderState,
     IntentState,
     MarketSnapshot,
@@ -52,12 +52,12 @@ from contracts import (  # noqa: E402
     Side,
     StrategySignal,
 )
-from intent_builder import build_order_intent, load_presets  # noqa: E402
-from ledger import Ledger, Position  # noqa: E402
-from oms import OMS, OMSError  # noqa: E402
-from paper_broker import PaperBroker, Quote  # noqa: E402
-from portfolio import MarkPrice, value_portfolio  # noqa: E402
-from risk_engine import (  # noqa: E402
+from intent_builder import build_order_intent, load_presets
+from ledger import Ledger, Position
+from oms import OMS, OMSError
+from paper_broker import PaperBroker, Quote
+from portfolio import MarkPrice, value_portfolio
+from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
     LimitSet,
@@ -69,8 +69,8 @@ from risk_engine import (  # noqa: E402
     TradingState,
 )
 
-CAPITAL = D("1000000000")   # 10억
-PRICE = D("70000")
+CAPITAL = D(1000000000)   # 10억
+PRICE = D(70000)
 
 
 class PaperLoopTest(unittest.TestCase):
@@ -104,7 +104,7 @@ class PaperLoopTest(unittest.TestCase):
 
     def market(self):
         return MarketSnapshot(market_snapshot_id="e2e_snap", as_of=self.now,
-                              bid=PRICE - D("100"), ask=PRICE + D("100"))
+                              bid=PRICE - D(100), ask=PRICE + D(100))
 
     def build_intent(self, signal, snap):
         return build_order_intent(
@@ -124,7 +124,7 @@ class PaperLoopTest(unittest.TestCase):
         return RiskContext(
             mandate=mandate or MandateScope(
                 fund_id=self.fund, allowed_instrument_ids=None,
-                min_order_notional=D("1"), max_order_notional=D("1000000000"),
+                min_order_notional=D(1), max_order_notional=D(1000000000),
             ),
             # 집중도 한도를 100%로 열어둔다. RiskEngine의 집중도 분모가
             # gross_exposure라서 보유가 없는 첫 주문은 정의상 항상 100%가 되고,
@@ -132,9 +132,9 @@ class PaperLoopTest(unittest.TestCase):
             # 이 파일의 목적은 배선 검증이므로 그 검사만 열고 나머지는 살려둔다.
             # 분모를 NAV로 볼지 gross로 볼지는 미해결 - PR 참조.
             limits=limits or LimitSet(
-                soft_single_issuer_pct=D("1"), hard_single_issuer_pct=D("1"),
-                max_daily_turnover_notional=D("1000000000"), max_daily_order_count=100,
-                max_daily_loss=D("100000000"), max_drawdown_pct=D("0.20"),
+                soft_single_issuer_pct=D(1), hard_single_issuer_pct=D(1),
+                max_daily_turnover_notional=D(1000000000), max_daily_order_count=100,
+                max_daily_loss=D(100000000), max_drawdown_pct=D("0.20"),
             ),
             restricted_items=(),
             portfolio=PortfolioState(
@@ -173,7 +173,7 @@ class PaperLoopTest(unittest.TestCase):
 
     def fill_completely(self, order, quote_size="3000"):
         """호가 잔량 한도 때문에 여러 번 나눠 체결된다."""
-        quote = Quote(PRICE - D("100"), PRICE, D(quote_size), D(quote_size))
+        quote = Quote(PRICE - D(100), PRICE, D(quote_size), D(quote_size))
         fills = 0
         while (ev := self.broker.try_fill(order, quote, self.now)) is not None:
             self.oms.on_broker_event(order, "fill", ev.broker_event_id, self.now, ev.payload)
@@ -194,7 +194,7 @@ class PaperLoopTest(unittest.TestCase):
     def test_full_loop_signal_to_nav(self):
         opening = self.snapshot()
         self.assertEqual(opening.nav, CAPITAL)
-        self.assertEqual(opening.quantity_of(self.instrument), D("0"))
+        self.assertEqual(opening.quantity_of(self.instrument), D(0))
 
         # 1. NAV와 보유수량이 Intent 수량을 정한다
         intent = self.build_intent(self.signal(), opening)
@@ -222,9 +222,9 @@ class PaperLoopTest(unittest.TestCase):
         self.assertEqual(closing.fees, fees)
 
         # 5. 체결가로 평가하면 평가손익은 0이고 NAV는 수수료만큼만 줄어든다
-        self.assertEqual(closing.unrealized_pnl, D("0"))
+        self.assertEqual(closing.unrealized_pnl, D(0))
         self.assertEqual(closing.nav, CAPITAL - fees)
-        self.assertEqual(closing.realized_pnl, D("0"))
+        self.assertEqual(closing.realized_pnl, D(0))
 
         # 6. NAV 항등식
         self.assertEqual(
@@ -233,7 +233,7 @@ class PaperLoopTest(unittest.TestCase):
         )
 
         # 7. 원장 차대균형
-        self.assertEqual(sum(self.ledger.trial_balance().values()), D("0"))
+        self.assertEqual(sum(self.ledger.trial_balance().values()), D(0))
 
     def test_loop_converges_on_second_pass(self):
         """같은 시그널을 다시 돌리면 목표에 도달해 주문이 생기지 않는다.
@@ -256,11 +256,11 @@ class PaperLoopTest(unittest.TestCase):
         self.post_fills_to_ledger(order)
 
         at_cost = self.snapshot(price=PRICE)
-        higher = self.snapshot(price=PRICE + D("7000"))
+        higher = self.snapshot(price=PRICE + D(7000))
         self.assertEqual(higher.cash, at_cost.cash)
         self.assertGreater(higher.nav, at_cost.nav)
-        self.assertEqual(higher.unrealized_pnl, intent.quantity * D("7000"))
-        self.assertEqual(higher.realized_pnl, D("0"), "팔지 않았는데 실현손익이 생겼다")
+        self.assertEqual(higher.unrealized_pnl, intent.quantity * D(7000))
+        self.assertEqual(higher.realized_pnl, D(0), "팔지 않았는데 실현손익이 생겼다")
 
     def test_sell_realizes_pnl_through_ledger(self):
         """가격이 오른 뒤 비중을 줄이면 실현손익이 원장에 남는다."""
@@ -276,20 +276,20 @@ class PaperLoopTest(unittest.TestCase):
         self.assertIs(sell_intent.side, Side.SELL)
 
         _, sell_order = self.route(sell_intent)
-        quote = Quote(PRICE + D("7000"), PRICE + D("7100"), D("3000"), D("3000"))
+        quote = Quote(PRICE + D(7000), PRICE + D(7100), D(3000), D(3000))
         while (ev := self.broker.try_fill(sell_order, quote, self.now)) is not None:
             self.oms.on_broker_event(sell_order, "fill", ev.broker_event_id, self.now, ev.payload)
         self.assertIs(sell_order.state, BrokerOrderState.FILLED)
         self.post_fills_to_ledger(sell_order)
 
-        after = self.snapshot(price=PRICE + D("7000"))
-        self.assertGreater(after.realized_pnl, D("0"), "이익 실현이 원장에 안 잡혔다")
-        self.assertGreater(after.taxes, D("0"), "매도 거래세가 없다")
+        after = self.snapshot(price=PRICE + D(7000))
+        self.assertGreater(after.realized_pnl, D(0), "이익 실현이 원장에 안 잡혔다")
+        self.assertGreater(after.taxes, D(0), "매도 거래세가 없다")
         self.assertEqual(
             after.quantity_of(self.instrument),
             intent.quantity - sell_intent.quantity,
         )
-        self.assertEqual(sum(self.ledger.trial_balance().values()), D("0"))
+        self.assertEqual(sum(self.ledger.trial_balance().values()), D(0))
 
     # -- 경계 -----------------------------------------------------------------
 
@@ -305,8 +305,8 @@ class PaperLoopTest(unittest.TestCase):
         """
         realistic = LimitSet(
             soft_single_issuer_pct=D("0.05"), hard_single_issuer_pct=D("0.10"),
-            max_daily_turnover_notional=D("1000000000"), max_daily_order_count=100,
-            max_daily_loss=D("100000000"), max_drawdown_pct=D("0.20"),
+            max_daily_turnover_notional=D(1000000000), max_daily_order_count=100,
+            max_daily_loss=D(100000000), max_drawdown_pct=D("0.20"),
         )
         intent = self.build_intent(self.signal(), self.snapshot())
 
@@ -335,7 +335,7 @@ class PaperLoopTest(unittest.TestCase):
         intent = self.build_intent(self.signal(), self.snapshot())
         _, order = self.route(intent)
         ev = self.broker.try_fill(
-            order, Quote(PRICE - D("100"), PRICE, D("3000"), D("3000")), self.now
+            order, Quote(PRICE - D(100), PRICE, D(3000), D(3000)), self.now
         )
         self.oms.on_broker_event(order, "fill", ev.broker_event_id, self.now, ev.payload)
         self.oms.on_broker_event(order, "fill", ev.broker_event_id, self.now, ev.payload)
@@ -369,7 +369,7 @@ class PaperLoopTest(unittest.TestCase):
         self.assertIs(order.state, BrokerOrderState.ACKNOWLEDGED)
         self.post_fills_to_ledger(order)
         snap = self.snapshot()
-        self.assertEqual(snap.quantity_of(self.instrument), D("0"))
+        self.assertEqual(snap.quantity_of(self.instrument), D(0))
         self.assertEqual(snap.nav, CAPITAL)
 
 

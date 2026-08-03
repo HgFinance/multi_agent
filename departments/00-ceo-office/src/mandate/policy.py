@@ -65,7 +65,7 @@ class RiskBounds(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _check_weight_containment(self) -> "RiskBounds":
+    def _check_weight_containment(self) -> RiskBounds:
         # 상호 모순 1: 단일 종목 상한이 섹터 상한보다 크다.
         if self.max_instrument_weight > self.max_sector_weight:
             raise ValueError(
@@ -97,7 +97,7 @@ class UniversePolicy(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _check_session(self) -> "UniversePolicy":
+    def _check_session(self) -> UniversePolicy:
         # 상호 모순 3: 거래 종료가 시작보다 빠르거나 같다.
         if self.trading_end <= self.trading_start:
             raise ValueError(
@@ -146,7 +146,7 @@ class MandatePolicy(BaseModel):
     approval_rules: ApprovalRules
 
     @model_validator(mode="after")
-    def _check_asset_lists(self) -> "MandatePolicy":
+    def _check_asset_lists(self) -> MandatePolicy:
         allowed = set(self.allowed_assets)
         forbidden = set(self.forbidden_assets)
         # 상호 모순 5: 같은 자산이 허용이자 금지.

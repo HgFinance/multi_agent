@@ -106,7 +106,7 @@ class ImprovementCandidate(BaseModel):
     status: CandidateStatus = CandidateStatus.PROPOSED
 
     @model_validator(mode="after")
-    def _check(self) -> "ImprovementCandidate":
+    def _check(self) -> ImprovementCandidate:
         # 롤백 대상은 현재 Version 이하의 실재 Version 이어야 한다.
         if self.rollback_target_version > self.target_current_version:
             raise ValueError(

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from orchestration.adapters import build_paper_e2e_handlers
+from orchestration.adapters import build_paper_e2e_handlers, build_test_handlers
 from orchestration.workflows.contracts import SAFE_FAILURE_ACTIONS
 from orchestration.workflows.manifest import load_workflow, load_workflows
 from orchestration.workflows.routing import route_event
@@ -83,6 +83,56 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(run.safe_action, "HOLD")
         self.assertEqual(run.steps[-1].step_id, "research")
         self.assertEqual(run.steps[-1].status, "BLOCKED")
+
+
+    def test_test_mode_runs_full_pipeline_without_external_dependencies(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        run = execute_workflow(
+            load_workflow("investment-case"),
+            mode="test",
+            handlers=build_test_handlers(root),
+            context={
+                "case_request": {
+                    "case_id": "test-contract-001",
+                    "symbol": "AAPL",
+                    "side": "BUY",
+                    "quantity": 100,
+                    "order_type": "LIMIT",
+                    "limit_price": "200.00",
+                    "stage": "test",
+                }
+            },
+            run_id="test-contract-run",
+        )
+
+        self.assertEqual(run.status, "COMPLETED")
+        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps))
+        self.assertFalse(run.metadata["external_writes"])
+        self.assertFalse(run.metadata["orders_submitted"])
+        self.assertFalse(run.metadata["ledger_posted"])
+        self.assertEqual(run.metadata["ceo_decision"]["binding"], False)
+
+    def test_production_mode_blocks_without_explicit_approved_adapters(self) -> None:
+        run = execute_workflow(
+            load_workflow("investment-case"),
+            mode="production",
+            context={
+                "case_request": {
+                    "case_id": "production-contract-001",
+                    "symbol": "AAPL",
+                    "side": "BUY",
+                    "quantity": 100,
+                    "order_type": "LIMIT",
+                    "limit_price": "200.00",
+                    "stage": "production",
+                }
+            },
+            run_id="production-contract-run",
+        )
+        self.assertEqual(run.status, "BLOCKED")
+        self.assertEqual(run.safe_action, "HOLD")
+        self.assertEqual(run.steps[0].status, "BLOCKED")
+        self.assertEqual(run.steps[0].detail, "production adapter not registered")
 
 
 class EventRoutingContractTest(unittest.TestCase):

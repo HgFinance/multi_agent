@@ -69,7 +69,8 @@ _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from departments.notion_markdown import markdown_to_notion_blocks  # noqa: E402
+from departments.notion_markdown import markdown_to_notion_blocks
+
 # 앞에 오는 파일이 이긴다. root .env 가 정본(2026-08-03 확정) - 모듈 상단 참고.
 _ENV_FILES = (_REPO_ROOT / ".env", _REPO_ROOT / "ai-office" / ".dev.vars")
 _NOTION_VERSION = "2022-06-28"
