@@ -33,16 +33,16 @@
 - `CI-01`: CEO·HR Smoke Test 파일명 충돌 해소(`test_ollama_agent.py` → `test_ceo_ollama_agent.py`/`test_hr_ollama_agent.py`).
 - CEO/HR Hermes Profile에 `tool_allowlist`/`forbidden_tools` 선언(GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4·3.6절을 Risk/QA와 동일 표기로 반영).
 - 이 Daily Scrum과 `PROJECT_IMPLEMENTATION_STATUS.md`의 GOV/HR 표를 실제 실행 증거로 최신화.
-- `GOV-02`: Investment Case·Approval·Escalation API 착수 준비(현재 `DOCUMENTED`뿐, 코드 없음).
-- `HR-02`: Profile·Tool Permission 공식 Read API(`GET /workforce/v1/roster` 등) 착수 준비(현재 `BLOCKED`).
+- ~~`HR-02`: Profile·Tool Permission 공식 Read API 착수~~ 완료 — `roster/{roster,postgres_roster_repository}.py` + `api/app.py` 4개 엔드포인트(GET roster, GET agent, POST profile-versions, POST status). ACTIVE 전환은 `qa_eval_run_id`·`ceo_approval_id` 둘 다 없으면 409로 거절.
+- `GOV-02`(Investment Case·Approval·Escalation API)는 착수하지 않는다 — `governance.cases`의 상태 값·전이 규칙이 어느 문서에도 정의돼 있지 않아(투자안 하위타입 `investment_cases`만 정의됨), 계약을 지어내지 않고 보류.
 
 ### Blocker
 
-- `GOV-02`(Investment Case·Approval·Escalation API), `HR-02`(Profile·Tool Permission Read API), `HR-03`(Eval·Shadow·Promotion·Rollback Orchestrator)는 전부 설계 문서만 있고 코드가 없다.
-- `HR-04`: DRAFT Profile 13개 중 HR 자기 직원 5명(HR-00~04)은 QA 독립 검증 없이 인사팀이 스스로 ACTIVE 승격할 수 없다(권한 분리). 나머지 8개(Risk 4, QA 4)는 해당 부서 Owner 확인 선행.
+- `GOV-02`(Investment Case·Approval·Escalation API): `governance.cases` 제네릭 Case Root의 상태 머신이 미정의라 착수 보류. `HR-03`(Eval·Shadow·Promotion·Rollback Orchestrator)도 설계 문서만 있고 코드가 없다.
+- `HR-04`: DRAFT Profile 13개 중 HR 자기 직원 5명(HR-00~04)은 QA 독립 검증 없이 인사팀이 스스로 ACTIVE 승격할 수 없다(권한 분리, 이제 `HR-02`의 `POST .../status`가 이 규칙을 코드로 강제). 나머지 8개(Risk 4, QA 4)는 해당 부서 Owner 확인 선행.
 - `lifecycle-worker`는 Platform/IAM Adapter의 이벤트 계약이 없어 인사팀 단독으로 재개할 수 없다.
 - `HR-03`의 `improvement-worker`는 QA의 `workforce.eval.v1` 실제 발행이 있어야 잠정 Payload Contract를 확정할 수 있다.
-- 공식 Roster, Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다.
+- Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다(공식 Roster는 `HR-02`로 해소됨).
 
 ### 2주 개인 실행 계획
 
@@ -51,9 +51,9 @@
 | 1 | 08-03 | `CI-01`, Tool Allowlist, 문서 최신화 | 파일명 분리, config.yaml 선언, Scrum/현황판 갱신 | 없음 | 이번 갱신이 증거 |
 | 2 | ~~08-06~10~~ 완료 | ~~`GOV-01`~~ | ~~Mandate API·PostgreSQL Repository~~ | — | PR #71 |
 | 3 | ~~08-11~13~~ 완료 | ~~`HR-01`~~ | ~~Candidate·Access Runtime~~ | — | PR #72 |
-| 4 | 08-04~08 | `GOV-02` | Investment Case·Approval·Escalation API | `GOV-01`(완료) | Block 우회 불가, 사람 승인 Resume |
-| 5 | 08-05~07 | `HR-02` | Profile·Tool Permission Read Contract | 도현 `PLAT-01` | QA·Gateway 동일 Version 조회 |
-| 6 | 08-08~09 | `HR-04` | DRAFT 13개 Profile Review | QA 독립 검증 선행(HR 자기 5명) | 승인·거절 사유와 Version 상태 기록 |
+| 4 | 대기 (보류) | `GOV-02` | Investment Case·Approval·Escalation API | `governance.cases` 상태 머신 정의 필요(미착수 지시) | Block 우회 불가, 사람 승인 Resume |
+| 5 | ~~08-03~~ 완료 | ~~`HR-02`~~ | ~~Profile·Tool Permission Read+Write API~~ | — | 이번 갱신이 증거 (roster/*.py + app.py 4개 엔드포인트, 실 DB 검증) |
+| 6 | 08-04~05 | `HR-04` | DRAFT 13개 Profile Review | QA 독립 검증 선행(HR 자기 5명) | 승인·거절 사유와 Version 상태 기록 |
 | 7 | 대기 | `HR-03`, `UI-02` | 개선 후보와 Kanban Read Model 연결 | QA `workforce.eval.v1` 발행, 도현 UI Bridge | Shadow·Rollback Fixture와 Approval Inbox |
 
 CEO와 HR은 실행 결과를 승인·조정하지만 Risk 판정, 주문 제출, 원장과 QA Finding을 직접 변경하지 않는다.

@@ -8,7 +8,7 @@
 #
 # ▶ Build Context가 저장소 루트가 아니라 **departments/07-agent-workforce** 다 (risk/audit
 #   Dockerfile과 다른 점, research/CEO Dockerfile과 같은 이유). api/app.py는 lifecycle/
-#   improvements/scorecard만 import하고 다른 본부 코드를 참조하지 않는다(2026-08-03 확인).
+#   improvements/scorecard/roster만 import하고 다른 본부 코드를 참조하지 않는다(2026-08-03 확인).
 #
 # ▶ 하나의 Image, command만 바꿔 workforce-api와 improvement-worker를 둘 다 돌린다
 #   (research/risk와 동일 원칙). lifecycle-worker(계획서 6.8)는 아직 안 만들었다 -
@@ -33,6 +33,7 @@ COPY api ./api
 COPY lifecycle ./lifecycle
 COPY improvements ./improvements
 COPY scorecard ./scorecard
+COPY roster ./roster
 COPY workforce_events ./workforce_events
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

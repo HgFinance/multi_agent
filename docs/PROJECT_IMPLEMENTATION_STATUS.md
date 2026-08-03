@@ -255,7 +255,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - Profile Version 19개 중 13개가 DRAFT이며 승격·철회 Workflow가 없다.
 - CEO와 HR Hermes Profile은 Tool Allowlist를 선언하지 않아 Profile Checker 경고가 난다.
 - CEO·HR의 같은 Smoke Test 파일명이 전체 pytest 수집을 막는다.
-- 공식 Roster, Approval Inbox, Queue, SLA와 Kanban Read Model이 없다.
+- 공식 Roster는 HR-02로 해소됐다(아래 표 참고). Approval Inbox, Queue, SLA와 Kanban Read Model은 여전히 없다.
 
 **다음 작업**
 
@@ -264,7 +264,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `GOV-01` | `IMPLEMENTED` | Governance API와 Mandate PostgreSQL Repository | Version 활성화·재승인 Test |
 | `GOV-02` | `DOCUMENTED` | Investment Case·Approval·Escalation API | Risk/QA Block 우회 불가 |
 | `HR-01` | `IMPLEMENTED` | Workforce API와 Candidate/Access Runtime | 후보 생성부터 독립 승인 DB Replay |
-| `HR-02` | `BLOCKED` | Profile·Tool Permission 공식 Read API | QA와 Gateway가 같은 Version 조회 |
+| `HR-02` | `IMPLEMENTED` | Profile·Tool Permission 공식 Read+Write API(roster/*.py, app.py 4개 엔드포인트) | QA와 Gateway가 같은 Version 조회, ACTIVE 전환 시 QA Eval·CEO 승인 둘 다 없으면 409 |
 | `HR-03` | `DOCUMENTED` | Eval·Shadow·Promotion·Rollback Orchestrator | 승인형 자기 개선 폐쇄 루프 |
 | `HR-04` | `BLOCKED` | 13개 DRAFT Profile Review와 Allowlist 보완 | 승인·거절 사유와 Version 상태 기록 |
 
@@ -348,7 +348,7 @@ Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Che
 ### Wave 3. Hermes와 AI Office 실시간 연결
 
 1. `MODEL-01`: 개발·Paper·Production Provider와 Gateway ADR을 확정한다.
-2. `HR-02`: Profile·Tool Permission 공식 Read API를 제공한다.
+2. ~~`HR-02`: Profile·Tool Permission 공식 Read API를 제공한다.~~ (2026-08-03 구현 완료, 위 4.4절 표 참고)
 3. `UI-01`: 공식 Snapshot과 Domain Event WebSocket을 연결한다.
 4. `UI-02`: Hermes Kanban을 `agent.status.v1`로 변환하는 Read-only Bridge를 구현한다.
 5. `UI-03`: Frontend 의존성 취약점을 검토하고 Upgrade 회귀 Test를 통과한다.
