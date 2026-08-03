@@ -17,7 +17,7 @@
 
   | V2 가 요구 | V1 에 있나 | 어댑터의 처리 |
   |---|---|---|
-  | claim.evidence_ids | **없다** | fact 로 올리지 않고 `inference` 로 낸다 |
+  | claim.evidence_ids | 인용했을 때만 | 인용한 것만 `fact`, 나머지는 `inference` |
   | claim.confidence | 없다(verdict 라벨만) | 라벨→확률 매핑을 **하지 않는다.** 0.5 고정 + uncalibrated |
   | as_known_at | 있다(실행 시각) | 그대로. 뜻이 '컷오프'가 아니라 '실행 시각'임을 note 에 남긴다 |
   | perspective 별 horizon | 없다 | Case 의 대표 지평을 쓴다 |
@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 
 from research_v2 import (  # noqa: E402
     AnalystFindingV1,
@@ -111,6 +112,51 @@ def _finding_status(node_state: dict | None) -> FindingStatus:
     return FindingStatus.COMPLETE if has_narrative else FindingStatus.PARTIAL
 
 
+def cited_fact_claims(
+    node: str,
+    node_state: dict | None,
+    bundle: dict | None,
+    *,
+    case_id: str,
+) -> tuple[Claim, ...]:
+    """분석가가 **실제로 인용한 근거**가 있으면 fact 주장을 만든다.
+
+    ▶ 이것이 RQF-1 완료기준 "모든 Fact Claim 이 존재하는 Evidence ID 를 가진다"를
+      우회가 아니라 실제로 여는 경로다. 예전에는 Bundle 이 document_id 를 버려서
+      인용할 ID 자체가 없었고(evidence/bundle.py 2026-08-03 수정), 그래서 이
+      어댑터는 모든 주장을 inference 로 낼 수밖에 없었다.
+
+      이제 분석가가 note.cited_refs 로 ref('n1','d2')를 가리키면 코드가 그것을
+      진짜 evidence_id 로 바꾼다. **없는 ref 는 예외**이므로(resolve_refs strict)
+      환각 인용이 fact 로 올라가지 않는다.
+
+    ▶ 인용이 없으면 fact 를 만들지 않는다. 빈 튜플이 정상 상태다(fail-closed).
+    """
+    st = node_state or {}
+    refs = ((st.get("note") or {}).get("cited_refs")
+            or st.get("cited_refs") or ())
+    if not refs or not bundle:
+        return ()
+
+    from bundle import resolve_refs  # 지연 import - 계약 모듈이 evidence 에 의존하지 않게
+
+    evidence_ids = resolve_refs(refs, bundle)   # 없는 ref 면 CitationError
+    if not evidence_ids:
+        return ()
+    summary = ((st.get("note") or {}).get("summary") or st.get("summary") or "")
+    if not summary.strip():
+        # 근거는 있는데 무엇을 주장하는지 문장이 없다 - 사실 주장을 만들 수 없다
+        return ()
+    return (Claim(
+        claim_id=f"claim_{case_id}_{node}_cited",
+        statement=summary.strip()[:500],
+        claim_type=ClaimType.FACT,
+        evidence_ids=evidence_ids,
+        direction=_direction_of(st.get("verdict")),
+        confidence=NEUTRAL_CONFIDENCE,
+    ),)
+
+
 def finding_from_node(
     node: str,
     node_state: dict | None,
@@ -121,10 +167,12 @@ def finding_from_node(
     model_version: str,
     prompt_version: str,
     tool_versions: tuple[str, ...] = (),
+    bundle: dict | None = None,
 ) -> AnalystFindingV1:
     """분석가 한 명의 V1 출력 -> AnalystFindingV1.
 
     verdict 는 **inference** 로 낸다. 판정은 문서에 적힌 사실이 아니다.
+    인용한 근거가 있으면 그 부분만 별도로 fact 주장이 된다(cited_fact_claims).
     """
     perspective = NODE_TO_PERSPECTIVE.get(node)
     if perspective is None:
@@ -149,6 +197,7 @@ def finding_from_node(
                 confidence=NEUTRAL_CONFIDENCE,
                 numeric_refs=tuple(sorted((st.get("readout") or {}).keys()))[:20],
             ))
+        claims.extend(cited_fact_claims(node, node_state, bundle, case_id=case_id))
 
     # BLOCKED 는 claims 가 있으면 안 된다(V2 불변식). 여기서 그럴 일은 없지만
     # 위 분기가 바뀌었을 때 조용히 어기지 않도록 계약이 잡게 둔다.
@@ -209,6 +258,7 @@ def packet_from_v1(
     packet: dict,
     state: dict | None = None,
     *,
+    bundle: dict | None = None,
     horizon: str = "20d",
     graph_version: str = "research-v1-legacy",
     model_version: str = "unknown",
@@ -248,7 +298,7 @@ def packet_from_v1(
         findings.append(finding_from_node(
             node, node_state, case_id=case.case_id, as_known_at=ak,
             horizon=horizon, model_version=model_version,
-            prompt_version=prompt_version))
+            prompt_version=prompt_version, bundle=bundle))
 
     claim_ids = tuple(c.claim_id for f in findings for c in f.claims)
 
@@ -421,6 +471,49 @@ def _check_v2_contract_passes():
     print("  V2 계약 통과·왕복        OK")
 
 
+def _check_cited_facts_open_the_axis():
+    """인용이 있으면 fact 가 된다 - RQF-1 완료기준을 우회가 아니라 실제로 연다."""
+    bundle = {
+        "news_headlines": [{"ref": "n1", "evidence_id": "doc-news-1",
+                            "title": "공급계약", "production_authorized": True}],
+        "disclosures_7d": [{"ref": "d1", "evidence_id": "doc-disc-1",
+                            "title": "단일판매공급계약"}],
+    }
+    state = {"fundamental": {
+        "verdict": "BULLISH",
+        "note": {"summary": "공급계약 공시로 매출 가시성이 개선됐다",
+                 "cited_refs": ["d1", "n1"]}}}
+    _, v2 = packet_from_v1(_v1_packet(), state, bundle=bundle)
+    fund = next(f for f in v2.findings if f.perspective == "fundamental")
+    facts = fund.fact_claims()
+    assert len(facts) == 1, [c.claim_id for c in fund.claims]
+    assert facts[0].evidence_ids == ("doc-disc-1", "doc-news-1"), facts[0].evidence_ids
+    # 판정 주장은 여전히 inference 다 - 둘이 섞이지 않는다
+    assert any(c.claim_type is ClaimType.INFERENCE for c in fund.claims)
+    # PUBLISHED 도 통과한다(V2 가 fact 의 근거 존재를 검사한다)
+    assert v2.status == "PUBLISHED", v2.status
+
+    # 인용이 없으면 fact 를 만들지 않는다 (fail-closed)
+    no_cite = {"fundamental": {"verdict": "BULLISH", "note": {"summary": "좋다"}}}
+    _, v2b = packet_from_v1(_v1_packet(), no_cite, bundle=bundle)
+    assert sum(len(f.fact_claims()) for f in v2b.findings) == 0
+
+    # 환각 인용은 예외다 - 없는 ref 가 fact 로 올라가지 않는다
+    from bundle import CitationError
+    ghost = {"fundamental": {"verdict": "BULLISH",
+                             "note": {"summary": "s", "cited_refs": ["d9"]}}}
+    try:
+        packet_from_v1(_v1_packet(), ghost, bundle=bundle)
+        raise AssertionError("없는 근거를 인용했는데 통과했다")
+    except CitationError as e:
+        assert "없는 근거를 인용했다" in str(e)
+
+    # Bundle 이 없으면(옛 호출부) 예전처럼 inference 만 - 하위 호환
+    _, v2c = packet_from_v1(_v1_packet(), state)
+    assert sum(len(f.fact_claims()) for f in v2c.findings) == 0
+    print("  인용 -> fact 축 개방     OK")
+
+
 def _check_node_map_covers_v1():
     """V1 의 분석가 노드를 빠뜨리지 않았는가 - scripts.py 와 대조한다."""
     src = (Path(__file__).resolve().parent.parent / "scripts.py").read_text(
@@ -447,5 +540,6 @@ if __name__ == "__main__":
     _check_inconclusive_and_blocked()
     _check_refuses_to_guess()
     _check_v2_contract_passes()
+    _check_cited_facts_open_the_axis()
     _check_node_map_covers_v1()
-    print("V1->V2 어댑터 8개 영역 통과.")
+    print("V1->V2 어댑터 9개 영역 통과.")
