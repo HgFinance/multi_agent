@@ -42,7 +42,7 @@ OPENAI = {"trading-department", "risk-management",
 # "아무거나 돼도 된다"는 아니므로, 소유자가 선언한 값과 다르면 이 검사가 잡는다
 # (전역 동일성 강제를 여기서 이 표로 바꿨다 - 우연한 표류는 여전히 걸린다).
 # Historical snapshot (2026-08-02): retained only to explain prior checker output.
-EXPECTED_MODELS = {
+LEGACY_EXPECTED_MODELS = {
     "research-department": "nous/poolside/laguna-s-2.1:free",     # 재일
     "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
     "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
