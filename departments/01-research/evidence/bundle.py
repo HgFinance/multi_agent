@@ -183,6 +183,59 @@ def assemble_bundle(symbol: str, *, market_api: str | None = None,
     }
 
 
+# ── 시점 창작 가드 - 숫자 가드가 못 잡는 날짜 (2026-08-03 사고) ────────────
+
+# 연도를 잡는다. **연도 뒤 구분자를 요구하지 않는다** - 처음 만들 때
+# `(19|20)(\d{2})\s*[-./년]` 로 썼더니 이 가드를 만든 계기인 사고 문장
+# `"(August 3, 2023)"` 을 못 잡았다(2023 뒤가 괄호라서). 가드가 자기 사고를
+# 못 잡으면 없는 것과 같다.
+#
+# 대신 **앞뒤로 숫자·쉼표·소수점이 붙은 것은 연도가 아니다**(1,995,000원의 995).
+# 그리고 원/주/건 같은 단위가 바로 붙으면 금액·수량이지 연도가 아니다 -
+# 오탐이 잦으면 사람이 가드를 무시하게 되고, 그러면 진짜를 놓친다.
+_DATE_RE = re.compile(
+    r"(?<![\d,.])(19|20)(\d{2})(?![\d])(?!\s*(?:원|주|건|개|명|회|대|bp|%))")
+
+# Evidence 가 담는 시점보다 얼마나 과거까지를 정상으로 볼 것인가.
+# 재무는 직전 회계연도를 인용하고 GPR 은 지연이 있어 넉넉히 잡는다 - 좁게 잡으면
+# 정상 인용을 창작으로 오탐하고, 그러면 가드가 무시된다.
+MAX_NARRATIVE_AGE_DAYS = 800
+
+
+def verify_narrative_dates(text: str, *, as_known_at: datetime,
+                           max_age_days: int = MAX_NARRATIVE_AGE_DAYS) -> dict:
+    """서술 속 연도가 Evidence 가 담을 수 있는 시점 범위 안인가.
+
+    ▶ 왜 필요한가 (실측 2026-08-03)
+      총괄이 005380 Packet 의 facts 4건을 **2023-11-02/03** 날짜로 쓰고 출처까지
+      달았다. 우리가 준 적 없는 기사다. 그런데 verify_narrative_numbers 를
+      통과했다 - % 수치가 아니라 날짜라서 검사 대상이 아니었다.
+
+    ▶ 판정
+      미래(as_known_at 이후) 연도  -> 창작. 아직 오지 않은 일을 사실로 쓸 수 없다
+      max_age_days 보다 과거       -> 창작 의심. Evidence 창 밖이다
+      **모르는 것을 단정하지 않는다** - 연도 없는 날짜 표현은 판정하지 않는다.
+    """
+    now = as_known_at.astimezone(timezone.utc)
+    oldest = now - timedelta(days=max_age_days)
+    bad_future, bad_old = [], []
+    for m in _DATE_RE.finditer(text or ""):
+        year = int(m.group(1) + m.group(2))
+        if year > now.year:
+            bad_future.append(year)
+        elif year < oldest.year:
+            bad_old.append(year)
+    ok = not bad_future and not bad_old
+    return {
+        "ok": ok,
+        "future_years": sorted(set(bad_future)),
+        "too_old_years": sorted(set(bad_old)),
+        "window": f"{oldest.year}~{now.year}",
+        "rule": (f"서술의 연도는 as_known_at({now.date()}) 이하이고 "
+                 f"{max_age_days}일 이내여야 한다. 연도 없는 표현은 판정하지 않는다."),
+    }
+
+
 # ── 인용 해석 - ref -> 진짜 Evidence ID (RQF-1 완료기준) ──────────────────
 
 class CitationError(ValueError):
@@ -246,11 +299,36 @@ def authorized_only(refs, bundle: dict) -> tuple[str, ...]:
 
 # ── 서술 수치 재대조 - 라벨 오서술·수치 창작 가드 (RES-00 Packet 검증용) ──
 
-_PCT_RE = re.compile(r"([+-]?\d{1,3}(?:\.\d{1,2})?)\s*%")
+# ▶ 자릿수 상한을 두지 않는다 (2026-08-03 실측 - 불일치의 진짜 원인)
+#   `\d{1,3}(?:\.\d{1,2})?` 였다. 그래서 "-29.8837%" 를 **"837"** 로,
+#   "74.353%" 를 "353" 으로 읽었다 - **꼬리만 잘라 읽고** 그 값이 확정치에
+#   없으니 창작이라고 표시했다. 실측 불일치 [837.0, 353.0, 908.0] 이 전부 이것이다.
+#   가드가 정상 인용을 위반으로 몰면 사람이 가드를 무시한다.
+_PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
 # 셈 단위가 붙은 정수만 검사한다 - 가격("1,718,000원")·날짜("30일")까지 잡으면
 # 오탐이 검사를 무력화한다. 실측 근거: Packet 이 "advancers 297개" 처럼 확정치
 # (296)에 없는 종목 수를 창작했는데 % 가 아니라 통과했다 (2026-08-01).
 _COUNT_RE = re.compile(r"(\d{1,7})\s*(?:개|건|종목)")
+
+
+
+def _collect_keyed(v, out: dict, path: str = "") -> None:
+    """수치를 **경로와 함께** 모은다 - 어느 값에 맞았는지 말하려면 이름이 필요하다.
+
+    _collect_numbers 는 집합이라 이름을 잃는다. 지표가 늘어 풀이 넓어진 뒤로는
+    "통과했다" 만으로 부족하다 - 무엇에 통과했는지가 있어야 우연을 가른다.
+    """
+    if isinstance(v, bool):
+        return
+    if isinstance(v, (int, float)):
+        if path:
+            out[path] = float(v)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            _collect_keyed(x, out, f"{path}.{k}" if path else str(k))
+    elif isinstance(v, (list, tuple)):
+        for i, x in enumerate(v):
+            _collect_keyed(x, out, f"{path}[{i}]")
 
 
 def _collect_numbers(v, out: set) -> None:
@@ -279,16 +357,46 @@ def verify_narrative_numbers(text: str, confirmed: dict,
     분석가의 모순 강등(verify)이 맡는다.
     """
     allowed: set = set()
+    keyed: dict = {}
     _collect_numbers(confirmed, allowed)
+    _collect_keyed(confirmed, keyed)
+    # ▶ 근거 **제목 문자열 안의 수치**도 확정치다 (2026-08-03)
+    #   _collect_numbers 는 수치형만 본다. 그런데 우리가 프롬프트에 넣은 뉴스
+    #   제목("7월 판매 5.1% 감소")은 문자열이라 풀에 안 들어갔고, 총괄이 그것을
+    #   정확히 인용했는데 창작으로 몰렸다. **우리가 준 것을 인용했는데 창작이라
+    #   하면 가드가 거짓말을 하고, 그러면 사람이 가드를 무시한다.**
+    for i, t in enumerate((confirmed or {}).get("evidence_titles") or []):
+        for m in _PCT_RE.finditer(str(t)):
+            allowed.add(float(m.group(1)))
+            keyed[f"evidence_title[{i}]#{m.group(1)}"] = float(m.group(1))
+        for m in _COUNT_RE.finditer(str(t)):
+            allowed.add(float(m.group(1)))
+            keyed[f"evidence_title[{i}]#{m.group(1)}"] = float(m.group(1))
     nums = [float(m.group(1)) for m in _PCT_RE.finditer(text or "")]
     unmatched = [n for n in nums
                  if not any(abs(abs(n) - abs(a)) <= tolerance for a in allowed)]
+    # ▶ 인용 귀속 - "통과가 검증인지 우연인지" 를 가른다 (2026-08-03)
+    #   지표 확장으로 풀이 넓어지면 창작 수치가 우연히 맞는 일이 생긴다.
+    #   어느 키에 맞았는지를 세어 모호 비율을 드러낸다. **판정은 바꾸지 않는다** -
+    #   통과 여부는 위 unmatched 가 그대로 정한다.
+    # 호출부가 evidence/ 를 sys.path 에 넣었는지에 의존하지 않는다 -
+    # scripts.py 는 `from evidence.bundle import ...` 로 부르고 agents/ 는
+    # evidence/ 를 직접 넣는다. 두 경로 모두에서 되게 한다.
+    try:
+        from number_guard import quote_quality, trace_quoted
+    except ModuleNotFoundError:  # pragma: no cover - 패키지 경로로 들어온 경우
+        from evidence.number_guard import quote_quality, trace_quoted
+
+    quality = quote_quality(trace_quoted(text or "", keyed, tolerance=tolerance))
     # 셈 단위 정수는 정확 일치만 - 종목/기사/공시 개수는 반올림 여지가 없다
     counts = [int(m.group(1)) for m in _COUNT_RE.finditer(text or "")]
     unmatched_counts = [c for c in counts if float(c) not in allowed]
     return {"checked": len(nums), "unmatched": unmatched,
             "checked_counts": len(counts), "unmatched_counts": unmatched_counts,
-            "ok": not unmatched and not unmatched_counts}
+            "ok": not unmatched and not unmatched_counts,
+            # 통과가 검증인지 우연인지 - 모호 비율이 높으면 풀이 헐거워진 것이다
+            "quote_quality": quality,
+            "pool_size": len(keyed)}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────
@@ -429,6 +537,39 @@ def _check_citation_resolution():
     print("  인용 해석·미승인 차단    OK")
 
 
+def _check_date_guard():
+    """시점 창작 - 숫자 가드가 못 잡던 것 (2026-08-03 사고 재현)."""
+    now = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    # 실제 사고 문장 그대로
+    bad = ("KOSPI closed at 2,485.30 on 2023-11-03, following a drop on 2023-11-02.")
+    r = verify_narrative_dates(bad, as_known_at=now)
+    assert r["ok"] is False and r["too_old_years"] == [2023], r
+
+    # 미래 연도도 창작이다
+    f = verify_narrative_dates("2027년 실적이 개선됐다", as_known_at=now)
+    assert f["ok"] is False and f["future_years"] == [2027], f
+
+    # ▶ 이 가드를 만든 계기인 실제 사고 문장 - 연도 뒤가 괄호다
+    for incident in ("Samsung shares dropped 7% (August 3, 2023)",
+                     "Q3 2023 sales of 1.16 million vehicles",
+                     "timestamp: 2023-10-15T14:30:00Z"):
+        r2 = verify_narrative_dates(incident, as_known_at=now)
+        assert r2["ok"] is False, f"사고 문장을 못 잡았다: {incident}"
+
+    # 정상 인용은 통과한다 - 직전 회계연도를 쓰는 것은 펀더멘털의 정상 동작
+    for good in ("2025-12-31 기준 매출액", "2026년 8월 공시", "2026.07.27 GPR 지수",
+                 "2026년 7월 판매 318,454대"):
+        assert verify_narrative_dates(good, as_known_at=now)["ok"], good
+
+    # **모르는 것을 단정하지 않는다** - 연도 없는 표현은 판정 대상이 아니다
+    assert verify_narrative_dates("11월 3일 급등", as_known_at=now)["ok"]
+    # 가격·수량은 연도가 아니다 (오탐하면 가드가 무시된다)
+    for money in ("종가 1,718,000원 거래량 2,400주", "매출액 1,995,000원",
+                  "목표가 2,000원", "발행주식 1,999,000주", "직원 2,024명"):
+        assert verify_narrative_dates(money, as_known_at=now)["ok"], money
+    print("  시점 창작 가드           OK")
+
+
 def _check_narrative_numbers():
     """서술 수치 재대조 - 창작 수치는 잡고, 확정치 인용·절대값 표기는 통과."""
     confirmed = {"price_context": {"change_1d_pct": 29.95, "return_5d_pct": -2.33,
@@ -466,5 +607,6 @@ if __name__ == "__main__":
     _check_api_unavailable()
     _check_bundle_contract()
     _check_citation_resolution()
+    _check_date_guard()
     _check_narrative_numbers()
-    print("Evidence Bundle 7개 영역 통과.")
+    print("Evidence Bundle 8개 영역 통과.")

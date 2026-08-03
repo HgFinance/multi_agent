@@ -54,3 +54,6 @@ minute_backfill_resume.*
 # Raw Market Data Parquet Archive (TSDB 에서 재유도 가능, 등록은 market.archive_exports)
 market-archive/
 rag_index_batch.*
+
+# 학습 계층 실행 기록 - 머신별 상태다
+departments/01-research/var/

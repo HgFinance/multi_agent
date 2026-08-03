@@ -50,6 +50,21 @@ from langgraph.graph import END, StateGraph
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
 KST = timezone(timedelta(hours=9))
 
+# ▶ .env 를 프로세스 환경으로 올린다 (2026-08-03)
+#   실측: .env 에 RESEARCH_SUPERVISOR_BASE/MODEL 을 넣어도 **무시됐다.**
+#   이 모듈은 os.environ 만 봤고, .env 는 수집기(source_registry.load_project_env)
+#   에서만 읽혔다. 그래서 총괄이 Claude 로 도는 줄 알았는데 실제로는 로컬
+#   qwen3:14b 였고, 창작·영어 서술·스키마 이탈이 전부 그 모델에서 났다.
+#   **설정이 있는데 조용히 안 먹는 것이 가장 나쁘다** - 무엇이 도는지 착각하게 된다.
+#   이미 프로세스에 있는 값은 덮지 않는다(컨테이너 주입이 우선).
+try:
+    from source_registry import load_project_env as _load_env
+
+    for _k, _v in (_load_env() or {}).items():
+        os.environ.setdefault(_k, _v)
+except Exception:  # noqa: BLE001 - .env 가 없어도 기본값으로 돈다
+    pass
+
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 # ▶ 총괄은 별도 엔드포인트를 쓸 수 있다 (2026-08-03)
 #   실측: pipeline_runs 19회 중 10회가 총괄 스키마 이탈로 실패했다
@@ -124,7 +139,13 @@ def assemble_evidence(state: ResearchState) -> dict:
 def analyze_sentiment(state: ResearchState) -> dict:
     from news_sentiment_analyst import run as senti_run
 
-    r = senti_run(state["symbol"], hours=24.0, read_bodies=False)
+    # ▶ 본문을 읽는다 (2026-08-03, 재일님 지시 "본문 링크 타고 분석")
+    #   article_reader 가 robots.txt 를 지키고 열람 예산·실패를 세며, **본문을
+    #   저장하지 않는다**(라이선스). 판정에만 쓰고 파생 점수만 남는다.
+    #   as_of 재현(백테스트)에서는 열람 자체를 건너뛴다 - 지금의 웹페이지는
+    #   그때의 지면이 아니므로 PIT 가 깨진다(news_sentiment_analyst 가 판정).
+    #   창을 48시간으로 넓혔다 - 24시간은 주말·연휴에 재료가 얇아진다.
+    r = senti_run(state["symbol"], hours=48.0, read_bodies=True)
     # ▶ 인용을 버리지 않는다 (2026-08-03, RQF-1)
     #   RES-06 은 이미 document_id 단위로 인용하고 환각 인용을 버린다
     #   (verify_and_aggregate). 그런데 파이프라인이 verdict·score 만 들고 와서
@@ -132,10 +153,20 @@ def analyze_sentiment(state: ResearchState) -> dict:
     #   원문·본문은 싣지 않는다(라이선스). document_id 와 제목까지다.
     cited = tuple(dict.fromkeys(
         str(e["document_id"]) for e in (r.evidence or ()) if e.get("document_id")))
-    return {"sentiment": {"verdict": r.verdict, "score": r.score,
-                          "articles": r.articles_used,
-                          "dropped": r.articles_dropped,
-                          "cited_evidence_ids": cited,
+    base = {"verdict": r.verdict, "score": r.score,
+            "articles": r.articles_used, "dropped": r.articles_dropped,
+            "cited_evidence_ids": cited,
+            "readout": {"articles_used": float(r.articles_used),
+                        "articles_dropped": float(r.articles_dropped),
+                        **({"score": float(r.score)} if r.score is not None else {})}}
+    try:
+        from enrich import enrich as _enrich
+
+        base = _enrich("sentiment", base, symbol=state["symbol"])
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ sentiment 도구 보강 실패(분석은 유지): "
+              f"{type(e).__name__}: {e}"[:150], flush=True)
+    return {"sentiment": {**base,
                           "evidence": tuple(
                               {k: e.get(k) for k in
                                ("document_id", "title", "sentiment", "salience")}
@@ -148,24 +179,72 @@ def _norm_note(note):
     return note.model_dump() if hasattr(note, "model_dump") else note
 
 
+def _analyst_state(r: dict, *, node: str = "", symbol: str = "") -> dict:
+    """분석가 반환 -> state 조각. **반환 모양이 두 갈래인 것을 여기서 흡수한다.**
+
+    ▶ 왜 필요한가 (실측 2026-08-03, 이 세션에서 발견)
+      RES-04 기술·RES-07 레짐·RES-03 미시구조는 `summary`/`used_metrics`/
+      `cautions`/`dropped` 를 **최상위 평평한 키**로 낸다(technical_analyst.py:361).
+      RES-05 펀더멘털만 `note` 객체를 낸다.
+      그런데 파이프라인 노드는 전부 `r.get("note")` 만 읽었다. 그래서 세 분석가의
+      **검증을 통과한 서술이 매 실행 100% 폐기**됐고, 리포트에는
+      `_서술 없음 (LLM 미응답)_` 이 찍혔다 - LLM 은 정상 응답했는데도.
+      **거짓 라벨이 3개월치 리포트를 얕아 보이게 만든 진짜 원인이다.**
+
+      서술이 없으면 총괄 프롬프트(_digest)도 그것을 못 보므로, thesis 가 분석가
+      근거 위에 서지 못하고 모델의 사전지식으로 흘렀다 - 005380 창작 사고의
+      배경이기도 하다.
+
+    두 모양을 다 받아 하나로 낸다. 없는 것을 지어내지는 않는다.
+    """
+    note = _norm_note(r.get("note")) or {}
+    if not isinstance(note, dict):
+        note = {}
+
+    def pick(key):
+        # note 안이 우선, 없으면 최상위 평평한 키
+        v = note.get(key)
+        return v if v not in (None, "", [], {}) else r.get(key)
+
+    # ▶ 도구 보강 (2026-08-03). 계획이 있는 노드만 - 없으면 그대로 통과한다.
+    #   실패해도 원래 결과를 건드리지 않는다(enrich 가 보장).
+    if node and symbol:
+        try:
+            from enrich import enrich as _enrich
+
+            r = _enrich(node, r, symbol=symbol)
+        except Exception as e:  # noqa: BLE001 - 보강 실패가 분석을 죽이지 않는다
+            print(f"⚠ {node} 도구 보강 실패(분석은 유지): "
+                  f"{type(e).__name__}: {e}"[:150], flush=True)
+
+    return {
+        "verdict": r.get("verdict"),
+        "readout": r.get("readout"),
+        "cited_evidence_ids": tuple(r.get("cited_evidence_ids") or ()),
+        "tool_trace": r.get("tool_trace"),
+        "note": note or None,
+        "summary": pick("summary"),
+        "used_metrics": pick("used_metrics") or [],
+        "cautions": pick("cautions") or [],
+        "dropped": pick("dropped") or [],
+        # llm_status 는 서술 유무를 라벨링하는 근거다 - 없으면 추측하지 않는다
+        "llm_status": r.get("llm_status"),
+        "reason": r.get("reason"),
+    }
+
+
 def analyze_technical(state: ResearchState) -> dict:
     from technical_analyst import analyze as tech_analyze
 
     r = tech_analyze(state["symbol"], market_api=MARKET_API)
-    return {"technical": {"verdict": r.get("verdict"),
-                          "readout": r.get("readout"),
-                          "note": _norm_note(r.get("note")),
-                          "llm_status": r.get("llm_status"),
-                          "reason": r.get("reason")}}
+    return {"technical": _analyst_state(r, node="technical", symbol=state["symbol"])}
 
 
 def analyze_fundamental(state: ResearchState) -> dict:
     from fundamental_analyst import analyze as fund_analyze
 
     r = fund_analyze(state["symbol"])
-    return {"fundamental": {"verdict": r.get("verdict"),
-                            "readout": r.get("readout"),
-                            "note": _norm_note(r.get("note")),
+    return {"fundamental": {**_analyst_state(r, node="fundamental", symbol=state["symbol"]),
                             "verification": r.get("verification")}}
 
 
@@ -174,9 +253,7 @@ def analyze_regime(state: ResearchState) -> dict:
     from sector_regime_analyst import analyze as regime_analyze
 
     r = regime_analyze(market_api=MARKET_API)
-    return {"regime": {"verdict": r.get("verdict"),
-                       "readout": r.get("readout"),
-                       "note": _norm_note(r.get("note"))}}
+    return {"regime": _analyst_state(r, node="regime", symbol=state["symbol"])}
 
 
 def analyze_geopolitical(state: ResearchState) -> dict:
@@ -189,28 +266,48 @@ def analyze_geopolitical(state: ResearchState) -> dict:
     from geopolitical_analyst import analyze as geo_analyze
 
     r = geo_analyze(research_api=RESEARCH_API)
-    return {"geopolitical": {"verdict": r.get("verdict"),
-                             "driver": r.get("driver"),
-                             "readout": r.get("readout"),
-                             "note": _norm_note(r.get("note")),
-                             "summary": r.get("summary"),
-                             "transmission": r.get("transmission"),
-                             "cautions": r.get("cautions"),
-                             "llm_status": r.get("llm_status"),
-                             "reason": r.get("reason")}}
+    return {"geopolitical": _analyst_state(r, node="geopolitical", symbol=state["symbol"])}
 
 
 def analyze_microstructure(state: ResearchState) -> dict:
     from microstructure_analyst import analyze as micro_analyze
 
     r = micro_analyze(state["symbol"], market_api=MARKET_API)
-    return {"microstructure": {"verdict": r.get("verdict"),
-                               "readout": r.get("readout"),
-                               "note": _norm_note(r.get("note"))}}
+    return {"microstructure": _analyst_state(r, node="microstructure", symbol=state["symbol"])}
 
 
-PACKET_REQUIRED_KEYS = ("symbol", "thesis", "facts", "interpretation",
+PACKET_REQUIRED_KEYS = ("thesis", "facts", "interpretation",
                         "invalidation", "evidence_quality")
+
+
+# 총괄이 자주 내는 근접 키 이름 -> 계약 키. **뜻이 명백한 것만** 넣는다 -
+# 추측으로 매핑하면 다른 내용을 엉뚱한 필드에 넣게 된다.
+# 실측 2026-08-03: invalidation_conditions, key_facts, thesis_statement 로 냈다가
+# "missing keys" 로 거부돼 분석가 6인을 돌린 2~3분이 통째로 버려졌다.
+_KEY_ALIASES = {
+    "invalidation_conditions": "invalidation",
+    "invalidations": "invalidation",
+    "key_facts": "facts",
+    "facts_observed": "facts",
+    "thesis_statement": "thesis",
+    "interpretations": "interpretation",
+    "catalyst": "catalysts",
+    "upcoming_catalysts": "catalysts",
+    "evidence_quality_assessment": "evidence_quality",
+    "data_quality": "evidence_quality",
+    "thesis_summary": "thesis",
+}
+
+
+def normalize_packet_keys(obj):
+    """근접 키 이름을 계약 키로 바꾼다. **이미 계약 키가 있으면 건드리지 않는다.**"""
+    if not isinstance(obj, dict):
+        return obj
+    out = dict(obj)
+    for alias, real in _KEY_ALIASES.items():
+        if alias in out and real not in out:
+            out[real] = out.pop(alias)
+    return out
 
 
 def unwrap_packet(obj):
@@ -227,9 +324,24 @@ def unwrap_packet(obj):
     """
     if not isinstance(obj, dict):
         return obj
+    obj = normalize_packet_keys(obj)
     if all(k in obj for k in PACKET_REQUIRED_KEYS):
         return obj
-    for v in obj.values():
+
+    # ▶ 페르소나가 공식 산출물을 **전부** 낸 경우 (실측 2026-08-03, 005380)
+    #   RES-00 프롬프트가 "Official outputs: Research Assignment, Research Packet,
+    #   Dossier Update, Data Quality Warning" 이라고 4종을 나열한다. Claude 가
+    #   그 지시를 성실히 따라 4종을 한 객체로 냈고, 아래 일반 탐색은 그중 어느
+    #   것을 골라야 할지 몰라 실패했다(2회 연속 거부).
+    #   **이름으로 Packet 을 먼저 찾는다** - 추측이 아니라 프롬프트가 그렇게
+    #   부르라고 시킨 이름이다.
+    for key in ("research_packet", "Research Packet", "researchPacket", "packet"):
+        v = normalize_packet_keys(obj.get(key))
+        if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
+            return v
+
+    for raw in obj.values():
+        v = normalize_packet_keys(raw)
         if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
             return v
     return obj
@@ -273,11 +385,91 @@ def flatten_to_str_list(v) -> list[str] | None:
 
 # ── 노드 4: Packet 초안 (supervisor 페르소나 - config.yaml 원문) ───────────
 def _supervisor_persona() -> str:
+    """RES-00 페르소나 + **이 호출의 범위**를 명시한다.
+
+    ▶ 왜 덧붙이는가 (실측 2026-08-03)
+      페르소나가 "Official outputs: Research Assignment, Research Packet,
+      Dossier Update, Data Quality Warning" 이라고 4종을 나열한다. Claude 는 그
+      지시를 성실히 따라 **매번 4종을 한 객체로** 낸다. 그런데 그 안의
+      research_packet 은 {facts, interpretations} 처럼 반쪽이라 언래퍼로도 못
+      살린다 - 모델이 산출물 하나에 쏟을 토큰을 넷으로 나눠 쓰기 때문이다.
+      실측 4회 연속 거부.
+
+      **페르소나를 고치지 않는다.** 그건 부서의 직무 정의이고 다른 호출(헤르메스
+      경유)에서도 쓰인다. 대신 이 호출이 4종 중 무엇을 요구하는지 여기서 좁힌다.
+    """
     cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    return re.search(r'research-supervisor: "(.*?)"\n', cfg, re.DOTALL).group(1)
+    persona = re.search(r'research-supervisor: "(.*?)"\n', cfg, re.S).group(1)
+    return persona + (
+        "\n\nSCOPE OF THIS CALL: you are producing the Research Packet ONLY. "
+        "Do NOT emit Research Assignment, Dossier Update or Data Quality Warning "
+        "in this reply, and do NOT nest the packet under a wrapper key. "
+        "Return ONE flat JSON object whose top-level keys are exactly the schema "
+        "keys requested below. Spend your whole answer on that single object.")
+
+
+# 서술이 한국어인지 판정하는 하한. 숫자·티커·[n1] 같은 ref 가 섞이므로 100% 를
+# 요구할 수 없고, 너무 낮으면 영어 문장에 한글 단어 하나 섞인 것을 통과시킨다.
+# 실측: 정상 한국어 서술은 0.35~0.55, 영어 서술은 0.00~0.03 이라 0.15 면 갈린다.
+MIN_KOREAN_RATIO = 0.15
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+_LETTER_RE = re.compile(r"[가-힣A-Za-z]")
+
+# 언어를 판정할 **서술** 필드. evidence_quality 같은 토큰 필드는 제외한다 -
+# 그건 영어여야 맞다.
+NARRATIVE_KEYS = ("thesis", "facts", "interpretation", "catalysts", "invalidation")
+
+
+def korean_ratio(packet: dict) -> float:
+    """서술 필드의 한글 비율. 글자가 없으면 1.0(판정 보류 - 막지 않는다).
+
+    숫자·기호는 세지 않는다. 한글 대 (한글+로마자) 다 - 그래야 "Global sales
+    decreased 5.1%" 같은 문장이 0 에 가깝게 나온다.
+    """
+    buf = []
+    for k in NARRATIVE_KEYS:
+        v = (packet or {}).get(k)
+        if isinstance(v, str):
+            buf.append(v)
+        elif isinstance(v, (list, tuple)):
+            buf += [str(x) for x in v]
+    text = " ".join(buf)
+    # 인용 ref([n1], [d2])와 필드 접두사(sales_data:)는 언어가 아니다.
+    # 세면 한국어 문장도 비율이 깎이고, 무엇보다 숫자만 있는 서술이 영어로
+    # 오판된다 - 가드가 오탐하면 재시도만 늘고 결국 무시된다.
+    text = re.sub(r"\[[a-zA-Z]\d+\]", " ", text)
+    text = re.sub(r"^\s*[a-z_]+\s*:", " ", text, flags=re.M)
+    letters = _LETTER_RE.findall(text)
+    if not letters:
+        return 1.0
+    return len(_HANGUL_RE.findall(text)) / len(letters)
+
+
+def _citable(bundle: dict) -> list[dict]:
+    """총괄이 인용할 수 있는 근거 목록. **여기 없는 ref 는 창작이다.**
+
+    Bundle 이 ref + evidence_id 를 싣게 된 뒤(evidence/bundle.py 2026-08-03)
+    비로소 가능해진 계약이다. 예전 프롬프트는 "reference ids like news:3" 이라고
+    **존재하지 않는 형식**을 지시했고, 그러니 LLM 이 형식을 지어냈다.
+    """
+    out = []
+    for key in ("news_headlines", "disclosures_7d"):
+        for item in (bundle or {}).get(key) or []:
+            if isinstance(item, dict) and item.get("ref"):
+                out.append({"ref": item["ref"],
+                            "title": str(item.get("title", ""))[:80],
+                            "kind": "news" if key.startswith("news") else "disclosure"})
+    return out
 
 
 def draft_packet(state: ResearchState, *, llm=None) -> dict:
+    symbol = state["symbol"]
+    # 시점 가드의 기준. state 에 없으면 지금이다 - Evidence 를 방금 모았으므로
+    # '지금' 이 곧 컷오프다(as_known_at = started 와 같은 뜻).
+    as_known = state.get("as_known_at") or datetime.now(timezone.utc)
+    if isinstance(as_known, str):
+        as_known = datetime.fromisoformat(as_known)
     evidence = dict(state["evidence"])
     # 가격 수치는 코드가 계산한 확정값 - qwen 이 +27% 급등을 하락으로 서술한
     # 실측 사고 재발 방지로, LLM 이 재계산하지 못하게 별도 블록으로 분리 주입
@@ -292,6 +484,10 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         "market_regime": state.get("regime") or {"status": "NOT_RUN"},
         "geopolitical": state.get("geopolitical") or {"status": "NOT_RUN"},
         "microstructure": state.get("microstructure") or {"status": "NOT_RUN"},
+        # ▶ 감성이 확정치 풀에서 빠져 있었다 (2026-08-03 실측)
+        #   6인 중 5인만 넣어서 RES-06 의 articles_used·score 를 인용하면
+        #   창작으로 몰렸다 - 실측 불일치 [200, 127] 이 정확히 이것이다.
+        "sentiment": state.get("sentiment") or {"status": "NOT_RUN"},
     }
 
     # 프롬프트에는 압축 다이제스트만 - 실측: 원자료(중첩 dict)를 통째로 주면
@@ -316,22 +512,40 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         cautions = [str(c)[:DIGEST_CAUTION_CHARS]
                     for c in (note.get("cautions") or a.get("cautions") or [])
                     ][:DIGEST_MAX_CAUTIONS]
-        nums = {k: v for k, v in (a.get("readout") or {}).items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        if len(nums) > DIGEST_MAX_NUMBERS:      # 앞에서부터 - readout 은 중요도순 정의다
-            nums = dict(list(nums.items())[:DIGEST_MAX_NUMBERS])
+        # ▶ 최상위만 세면 재료의 절반을 놓친다 (2026-08-03)
+        #   readout 은 평평하지 않다 - fields/ratios/liquidity/macro_overlay 같은
+        #   컨테이너 한 겹 안에 실제 수치가 있다. 최상위 dict 만 훑으면 펀더멘털의
+        #   재무 12개, 레짐의 스타일 비율이 통째로 빠지고, 총괄은 그만큼 얇은
+        #   재료로 쓰다가 사전지식으로 채운다(005380 창작 사고의 배경).
+        #   highlights 가 이미 푼 문제이므로 같은 함수를 쓴다 - 중요도 정렬
+        #   (임계 위반 우선, |값| 큰 순)까지 따라온다.
+        h = pick_highlights(a.get("readout"), top_n=DIGEST_MAX_NUMBERS,
+                            flags=(a.get("readout") or {}).get("flags") or [])
+        nums = {i["key"]: i["value"] for i in h["items"]}
         return {"verdict": a.get("verdict"), "summary": summary,
-                "cautions": cautions, "key_numbers": nums}
+                "cautions": cautions, "key_numbers": nums,
+                # 몇 개 중 몇 개를 보여주는지 숨기지 않는다 - 총괄이 "이게 전부"
+                # 라고 오해하면 없는 것을 채우려 든다
+                "numbers_shown_of_total": [len(nums), h["total_metrics"]],
+                "unknown_metrics": h["unknown"]}
 
     analysts_digest = {k: _digest(v) for k, v in analysts.items()}
     task = f"""Using ONLY the evidence below, draft a compact Research Packet in Korean.
 Schema (JSON only):
-{{"symbol": "...", "thesis": "1-2 sentences in Korean, facts first",
- "facts": ["cited facts only - reference ids like news:3"],
+{{"thesis": "1-2 sentences in Korean, facts first",
+ "facts": ["one fact per string. EVERY fact must end with its evidence ref in
+            brackets, e.g. [n1] for a news item or [d2] for a disclosure. If you
+            cannot point at a ref, it is not a fact - move it to interpretation."],
  "interpretation": ["clearly separated from facts"],
  "catalysts": ["upcoming checkpoints"],
  "invalidation": ["conditions that would kill the thesis"],
  "evidence_quality": "sufficient | partial | insufficient_evidence"}}
+LANGUAGE - non-negotiable, checked by code:
+- thesis, facts, interpretation, catalysts, invalidation MUST be written in
+  KOREAN (한국어). A reply in English is rejected automatically and costs a
+  retry. Field NAMES stay English; every VALUE is Korean. Numbers, tickers and
+  refs like [n1] stay as-is.
+
 STRUCTURE RULES - non-negotiable:
 - facts, interpretation, catalysts, invalidation MUST each be a FLAT JSON
   array of plain strings. No nested objects, no key-value maps.
@@ -356,17 +570,38 @@ Rules for analyst findings - non-negotiable:
   preserve BOTH views side by side in interpretation. Never delete dissent,
   never average it away - state the conflict explicitly.
 - NOT_RUN / INSUFFICIENT_DATA / null means 미확인 - never fill the gap.
+- key_numbers is a SELECTION, not everything - numbers_shown_of_total tells you
+  how many were withheld. Do not invent the missing ones.
+
+CITABLE EVIDENCE (these refs, and only these, may appear in facts):
+{json.dumps(_citable(bundle), ensure_ascii=False, indent=1)}
+Rules for citation - non-negotiable:
+- A statement in "facts" MUST carry a ref from the list above, like "... [n1]".
+- You may NOT cite a ref that is not in the list. Inventing an id is worse than
+  omitting the claim.
+- Anything you cannot attach a ref to belongs in "interpretation", not "facts".
+- Never write a company name, price, date or source that is absent from the
+  evidence above. If the evidence does not mention it, you do not know it.
 
 Evidence:
-{json.dumps(bundle, ensure_ascii=False, indent=1)}"""
+{json.dumps(bundle, ensure_ascii=False, indent=1)}
+
+마지막 지시 (가장 중요, 코드가 검사한다):
+thesis · facts · interpretation · catalysts · invalidation 의 **값을 전부
+한국어 문장으로** 쓴다. 영어로 쓰면 코드가 거부하고 재시도를 소모한다.
+키 이름은 영어 그대로 두고, 숫자·종목코드·[n1] 같은 근거 표시도 그대로 둔다.
+JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤에 붙이지 않는다."""
 
     call = llm or _ollama_chat
-    REQUIRED = ("symbol", "thesis", "facts", "interpretation", "invalidation",
+    # symbol 은 뺀다 - 코드가 덮어쓰기로 정했으므로(종목 정체성은 LLM 에게 묻지
+    # 않는다) 필수로 요구하면 실패 표면만 넓어진다. 실측 2026-08-03: 4/6 키를
+    # 맞춘 응답이 symbol 하나 때문에 버려졌다.
+    REQUIRED = ("thesis", "facts", "interpretation", "invalidation",
                 "evidence_quality")
     packet = None
     last_err = None
     repair = ""      # 실패 유형별 교정 지시 - 일반 문구만으로는 같은 실수를 반복한다
-    for attempt in (1, 2, 3):   # 파싱·스키마 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
+    for attempt in (1, 2, 3, 4, 5):   # 파싱·스키마·언어 위반 재시도 - 실측: 토큰 이탈(high)이 2회 연속도 나온다
         extra = "" if attempt == 1 else (
             f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
             f"JSON object with ALL required keys: {', '.join(REQUIRED)}.{repair}")
@@ -390,6 +625,15 @@ Evidence:
             # 문구로 죽었는데 둘 다 원인을 못 봤다). 분석가 6인을 2~3분 돌린
             # 뒤에 죽는 자리라 재현 비용이 비싸다 - 그때 본 것을 그때 남긴다.
             _last_raw = out[s:e + 1][:600]
+            # 래핑된 경우 **안쪽 키도** 찍는다 - 바깥 키만 보면 왜 못 벗겼는지
+            # 알 수 없다(실측 2026-08-03: 'Research Packet' 을 이름으로 찾는데도
+            # 계속 거부돼 안쪽을 못 봤다).
+            try:
+                for _k, _v in (candidate or {}).items():
+                    if isinstance(_v, dict):
+                        print(f"   └ {_k!r} 안쪽 키: {sorted(_v)[:10]}", flush=True)
+            except Exception:  # noqa: BLE001
+                pass
             print(f"⚠ 총괄 스키마 이탈({attempt + 1}회) - 받은 최상위 키: "
                   f"{sorted(candidate)[:12]} / 원문 앞부분: {_last_raw[:220]}",
                   file=sys.stderr, flush=True)
@@ -438,6 +682,35 @@ Evidence:
                       f'not allowed. If you meant that, write "{near}".')
             continue
         candidate["evidence_quality"] = eq
+
+        # ▶ 한국어 검사 (2026-08-03)
+        #   프롬프트가 "Write all narrative text in Korean" 이라고 세 군데서
+        #   지시하는데 총괄이 영어로 쓴다. **지시만 하고 검사하지 않으면 지켜지지
+        #   않는다** - 스키마·수치는 검사하면서 언어만 신뢰한 것이 구멍이었다.
+        #   재시도 루프가 이미 있으므로 같은 자리에 넣는다.
+        ratio = korean_ratio(candidate)
+        if ratio < MIN_KOREAN_RATIO:
+            last_err = f"narrative is not Korean (한글 비율 {ratio:.0%})"
+            repair = (
+                '\nCRITICAL: thesis, facts, interpretation, catalysts and '
+                'invalidation MUST be written in KOREAN (한국어). Your previous '
+                'reply was in English and was rejected. Keep field NAMES in '
+                'English but write every VALUE in Korean. Numbers, tickers and '
+                'evidence refs like [n1] stay as-is.')
+            continue
+
+        # ▶ 종목 정체성은 LLM 에게 묻지 않는다 (2026-08-03 사고)
+        #   005380(현대차)을 요청했는데 총괄이 symbol 을 "KOSPI" 로 쓰고 지수
+        #   서사를 만들었다. symbol 은 **우리가 인자로 넘긴 값**이다 - 코드가
+        #   아는 사실을 LLM 출력으로 받는 것 자체가 설계 오류였다.
+        #   다르게 썼다는 사실은 지우지 않고 남긴다(무엇이 어긋났는지 봐야 한다).
+        said = str(candidate.get("symbol", "")).strip()
+        if said != symbol:
+            candidate["_symbol_said"] = said
+            print(f"⚠ 총괄이 종목을 다르게 썼다: {said!r} -> {symbol} 로 정정",
+                  flush=True)
+        candidate["symbol"] = symbol
+
         packet = candidate
         break
     if packet is None:
@@ -448,13 +721,24 @@ Evidence:
     # 는 모델이 제안하는 미래 조건("성장률 10% 미달 시")이라 확정치에 없는 것이
     # 정상이다(실측 2026-08-01: 제안 임계값 오탐). 중첩 우회 방지로 해당 키들을
     # 통째로 직렬화한다.
-    from evidence.bundle import verify_narrative_numbers
+    from evidence.bundle import (verify_narrative_dates,
+                                 verify_narrative_numbers)
 
     narrative = json.dumps({k: packet.get(k) for k in
                             ("thesis", "facts", "interpretation")},
                            ensure_ascii=False)
     packet["numeric_check"] = verify_narrative_numbers(
-        narrative, {"price": price_ctx, "analysts": analysts})
+        narrative,
+        # ▶ 우리가 준 근거의 수치도 확정치다 (2026-08-03)
+        #   Opus 전환 후 불일치가 23건 중 9건으로 늘었는데, 확인해 보니 대부분이
+        #   **우리가 프롬프트에 넣은 뉴스 제목의 숫자**였다("7월 판매 5.1% 감소
+        #   [n6]"). 우리가 준 것을 인용했는데 창작으로 몰면 가드가 거짓말을 하고,
+        #   그러면 사람이 가드를 무시한다. 근거 제목을 풀에 넣는다 -
+        #   **정당하게 준 것이 화이트리스트에 들어간다**는 도구 계층과 같은 원칙이다.
+        {"price": price_ctx, "analysts": analysts,
+         "evidence_titles": [i.get("title") for k in
+                             ("news_headlines", "disclosures_7d")
+                             for i in (bundle.get(k) or []) if isinstance(i, dict)]})
 
     # 결정론 가드 3: 사실 서술에 확정치 밖 수치가 있으면 evidence_quality 를
     # **강등**한다. 실측 2026-08-02: 총괄이 매출 +18.3%·영업이익 +12.7% 를
@@ -468,7 +752,70 @@ Evidence:
         if order.index(cur) > order.index("partial"):
             packet["evidence_quality"] = "partial"
             packet["numeric_check"]["downgraded_from"] = cur
+
+    # ▶ 결정론 가드 4: 시점 창작 (2026-08-03 사고)
+    #   005380 실행에서 총괄이 facts 4건을 **2023-11-02/03** 날짜로 썼다.
+    #   출처("연합뉴스", "코리아타임스")까지 달았는데 우리는 그런 기사를 준 적이
+    #   없다. 완전한 창작인데 **숫자 가드를 통과했다** - % 수치가 아니라 날짜라서다.
+    #   Evidence 가 담고 있는 시점 밖의 날짜를 사실 서술에 쓰면 창작으로 본다.
+    packet["date_check"] = verify_narrative_dates(narrative, as_known_at=as_known)
+    if not packet["date_check"].get("ok"):
+        order = ("insufficient_evidence", "partial", "sufficient")
+        cur = packet["evidence_quality"]
+        if order.index(cur) > order.index("partial"):
+            packet["evidence_quality"] = "partial"
+            packet["date_check"]["downgraded_from"] = cur
+
+    # ▶ 결정론 가드 5: 창작 문장을 **격리한다** (2026-08-03)
+    #   지금까지는 등급만 낮추고 창작 문장은 facts 에 그대로 남았다. 트레이딩본부가
+    #   읽는 것은 facts 이지 evidence_quality 가 아니다 - 등급을 낮춰도 "삼성전자
+    #   7% 하락(2023-10-15, Bloomberg)" 이 사실 목록에 그대로 있으면 하류는 그것을
+    #   사실로 받는다. **표시로 끝내지 않고 빼낸다.**
+    packet = quarantine_fabrications(packet, as_known_at=as_known)
     return {"packet": packet}
+
+
+def quarantine_fabrications(packet: dict, *, as_known_at) -> dict:
+    """facts 에서 창작이 확인된 문장을 빼내 _quarantined 로 옮긴다.
+
+    ▶ 문장 단위로 판정한다. Packet 전체를 강등하는 것과 다르다 - 한 문장이
+      창작이라고 나머지 정상 사실까지 버릴 이유가 없다.
+
+    ▶ 판정 기준은 **시점**뿐이다. 숫자 불일치는 문장 단위로 귀속시키기 어렵다
+      (한 문장에 여러 수치가 있고 일부만 어긋날 수 있다) - 그건 전체 강등으로
+      남긴다. 시점은 그 문장 안에 있으므로 귀속이 확실하다.
+      **확실하지 않은 것은 빼지 않는다** - 정상 사실을 지우는 것이 더 나쁘다.
+
+    ▶ facts 가 비면 insufficient_evidence 다. 강등이 아니라 사실 진술이다 -
+      근거 있는 사실이 하나도 없는 Packet 은 근거가 불충분한 것이 맞다.
+    """
+    from evidence.bundle import verify_narrative_dates
+
+    p = dict(packet or {})
+    facts = list(p.get("facts") or [])
+    if not facts:
+        return p
+
+    kept, quarantined = [], []
+    for f in facts:
+        s = str(f)
+        r = verify_narrative_dates(s, as_known_at=as_known_at)
+        if r.get("ok"):
+            kept.append(f)
+        else:
+            bad = (r.get("too_old_years") or []) + (r.get("future_years") or [])
+            quarantined.append({"text": s, "reason": f"Evidence 창 밖 연도 {bad}"})
+
+    if not quarantined:
+        return p
+    p["facts"] = kept
+    p["_quarantined"] = list(p.get("_quarantined") or []) + quarantined
+    print(f"⚠ 창작 의심 사실 {len(quarantined)}건을 facts 에서 격리했다", flush=True)
+    if not kept:
+        # 근거 있는 사실이 0건이면 등급을 사실대로 적는다
+        p["evidence_quality"] = "insufficient_evidence"
+        p["_quarantine_emptied_facts"] = True
+    return p
 
 
 SUPERVISOR_TEMPERATURE = 0.2   # 총괄은 분석가(0.1)보다 조금 느슨하게 종합한다
@@ -488,6 +835,63 @@ def _ollama_chat(system: str, user: str) -> str:
                     max_tokens=SUPERVISOR_MAX_TOKENS)
 
 
+
+# ── 노드 6: Skeptic (분석가 대화) ──────────────────────────────────────────
+def challenge_packet(state: ResearchState) -> dict:
+    """총괄 초안을 **반박한다**. framework 6.1 9단계(Challenge).
+
+    지금까지 분석가 6인은 병렬로 각자 답하고 총괄이 fan-in 할 뿐이었다 -
+    서로의 판정을 보지 않고 모순이 있어도 총괄이 매끄럽게 뭉갰다.
+    여기가 유일하게 **대화가 일어나는 자리**다.
+
+    갈등은 코드가 찾고(detect_disagreements), LLM 은 찾아진 갈등에 대해서만
+    대안 설명을 쓴다. LLM 에게 "누가 어긋나나"를 물으면 없는 갈등을 지어낸다.
+
+    실패해도 Packet 을 죽이지 않는다 - 반박이 없는 것과 Packet 이 없는 것은
+    다르다. 다만 **반박을 못 했다는 사실은 남긴다**.
+    """
+    from evidence.llm_client import extract_json
+    from skeptic import (CHALLENGE_SYSTEM, apply_challenge,
+                         build_challenge_prompt, detect_disagreements,
+                         verify_challenge)
+
+    packet = state.get("packet") or {}
+    analysts = {k: state.get(k) for k in
+                ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment")}
+    analysts = {k: v for k, v in analysts.items() if isinstance(v, dict)}
+    disagreements = detect_disagreements(analysts)
+
+    confirmed = {"price": (state.get("evidence") or {}).get("price_context"),
+                 "analysts": {k: v.get("readout") for k, v in analysts.items()}}
+
+    challenge = verification = None
+    try:
+        raw = _ollama_chat(CHALLENGE_SYSTEM, build_challenge_prompt(
+            thesis=str(packet.get("thesis", "")), analysts=analysts,
+            disagreements=disagreements, confirmed=confirmed))
+        challenge = json.loads(extract_json(raw))
+        # dict 로 온 반박도 문장으로 펴서 검증한다 - str(dict) 를 검사하면
+        # 따옴표·중괄호에 가려 수치 검출이 헐거워진다(실측 2026-08-03).
+        from skeptic import _as_sentence
+
+        verification = verify_challenge(
+            " ".join(_as_sentence(x) for x in (
+                (challenge.get("alternative_explanations") or [])
+                + [challenge.get("weakest_claim", ""),
+                   challenge.get("what_would_overturn_it", "")])),
+            confirmed)
+    except Exception as e:  # noqa: BLE001
+        # 반박 실패는 Packet 실패가 아니다. 그러나 침묵하지 않는다.
+        verification = {"ok": None,
+                        "reason": f"반박 미실행: {type(e).__name__}: {e}"[:200]}
+        print(f"⚠ Skeptic 실패(Packet 은 유지): {type(e).__name__}: {e}", flush=True)
+
+    return {"packet": apply_challenge(packet, disagreements=disagreements,
+                                      challenge=challenge,
+                                      verification=verification)}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(ResearchState)
@@ -500,6 +904,7 @@ def build_pipeline():
     g.add_node("analyze_geopolitical", analyze_geopolitical)
     g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
+    g.add_node("challenge_packet", challenge_packet)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
@@ -515,7 +920,8 @@ def build_pipeline():
     g.add_edge("analyze_regime", "analyze_geopolitical")
     g.add_edge("analyze_geopolitical", "analyze_microstructure")
     g.add_edge("analyze_microstructure", "draft_packet")
-    g.add_edge("draft_packet", END)
+    g.add_edge("draft_packet", "challenge_packet")
+    g.add_edge("challenge_packet", END)
     return g.compile()
 
 
@@ -688,6 +1094,7 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         json.dumps(packet, sort_keys=True, ensure_ascii=False,
                    default=str).encode()).hexdigest()
     nc = (packet or {}).get("numeric_check") or {}
+    dc = (packet or {}).get("date_check") or {}
     try:
         own = conn is None
         if own:
@@ -721,7 +1128,10 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                  # 판정 스냅샷 - 사후 채점(packet_outcome_scorer)이 "이 분석가가
                  # 그때 뭐라고 했는지"를 여기서 읽는다. 없으면 되먹임 통계
                  # (analyst_calibration)가 통째로 비어 선순환이 끊긴다.
-                 json.dumps({"analyst_verdicts": analyst_verdicts or {}},
+                 # date_check 를 함께 남긴다 - 리포트에만 찍고 DB 에 없으면
+                 # "그때 시점 가드가 뭐라고 했나" 를 사후에 물을 수 없다.
+                 json.dumps({"analyst_verdicts": analyst_verdicts or {},
+                             "date_check": dc},
                             ensure_ascii=False)))
             run_id = str(cur.fetchone()[0])
         conn.commit()
@@ -732,6 +1142,65 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         print(f"⚠ pipeline_runs 기록 실패(Packet 은 정상): {type(e).__name__}: {e}",
               file=sys.stderr)
         return None
+
+
+# ── 학습 계층 1단: 실행 중 사건을 남긴다 ─────────────────────────────────────
+# 우리 파이프라인은 인터페이스·추론·실행·메모리는 있는데 **학습이 없었다** -
+# 같은 결함을 겪어도 다음 실행이 그걸 모른다. 사건을 남겨야 반복이 보이고,
+# 반복이 보여야 부서가 절차로 굳힐 수 있다(agents/skill_forge.py).
+#
+# 무엇을 남길지는 **코드가 정한다.** "오늘 뭐가 아쉬웠어?" 를 LLM 에게 물으면
+# 매번 다른 답이 나와 셀 수 없다 - 셀 수 없으면 반복도 없다.
+_OCCURRENCE_LOG = Path(__file__).resolve().parent / "var" / "occurrences.jsonl"
+
+
+def collect_occurrences(out: dict, *, run_id: str, symbol: str,
+                        at: str) -> list[dict]:
+    """실행 상태 -> 사건 목록. 순수 함수."""
+    ev: list[dict] = []
+
+    def _add(kind: str, detail: str) -> None:
+        ev.append({"kind": kind, "detail": detail[:180],
+                   "run_id": run_id, "symbol": symbol, "at": at})
+
+    for node in ("sentiment", "technical", "fundamental", "regime",
+                 "geopolitical", "microstructure"):
+        st = out.get(node) or {}
+        if not st:
+            _add("분석가 미실행", f"{node} 노드가 상태를 내지 않았다")
+            continue
+        # 서술이 비면 리포트에서 그 분석가가 통째로 사라진다
+        if not (((st.get("note") or {}).get("summary")) or st.get("summary")):
+            _add("분석가 서술 폐기", f"{node} 가 서술 없이 끝났다")
+        ro = st.get("readout") or {}
+        for name in (ro.get("unavailable") or [])[:6]:
+            # ▶ 미확인 지표는 **지표별로** 센다. "무언가 없었다" 로 뭉치면
+            #   어느 배관이 막혔는지 영원히 안 보인다
+            _add(f"지표 미확인:{name}", f"{node} 의 {name} 를 계산하지 못했다")
+    for t in (out.get("tool_results") or []):
+        if isinstance(t, dict) and t.get("ok") is False:
+            _add(f"도구 실패:{t.get('tool')}", str(t.get("reason") or "")[:120])
+    q = (out.get("packet") or {}).get("_quote_quality") or {}
+    for m in (q.get("mismatched") or [])[:6]:
+        _add("수치 불일치", f"확정치 풀에 없는 수치 {m}")
+    return ev
+
+
+def append_occurrences(events: list[dict], *,
+                       path: Optional[Path] = None) -> int:
+    """사건을 누적한다. **실패해도 파이프라인을 죽이지 않는다** - 학습 기록이
+    없다고 오늘 리포트를 못 내는 것은 우선순위가 뒤집힌 것이다."""
+    if not events:
+        return 0
+    tgt = path or _OCCURRENCE_LOG
+    try:
+        tgt.parent.mkdir(parents=True, exist_ok=True)
+        with tgt.open("a", encoding="utf-8") as f:
+            for e in events:
+                f.write(json.dumps(e, ensure_ascii=False) + chr(10))
+        return len(events)
+    except OSError:
+        return 0
 
 
 def run_research_department(symbol: str) -> dict:
@@ -802,6 +1271,10 @@ def run_research_department(symbol: str) -> dict:
     packet["_claims_recorded"] = _record_packet_claims(
         trace_id=trace_id, symbol=symbol, claims=claims,
         as_known_at=as_known_at)
+    # 선순환 2단: 이번 실행에서 무엇이 막혔는지 남긴다. 같은 것이 서로 다른
+    # 실행에서 3번 반복되면 skill_forge 가 절차로 굳힌다.
+    packet["_occurrences_logged"] = append_occurrences(collect_occurrences(
+        out, run_id=trace_id, symbol=symbol, at=started.isoformat()))
     return packet
 
 
@@ -810,6 +1283,8 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
     (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
     nc = packet.get("numeric_check") or {}
+    dc = packet.get("date_check") or {}
+    qq = (nc.get("quote_quality") or {})
     verdicts = packet.get("_analyst_verdicts") or {}
     lines = [
         "# 리서치본부 — Research Packet (결정론적 생성, LLM 자유 서술 아님)",
@@ -820,7 +1295,18 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
         f"| **evidence_quality** | **{packet.get('evidence_quality')}** |",
         f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
         f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |",
-        "| **분석가 판정** | " + " · ".join(
+        # ▶ 인용 품질 - **통과가 검증인지 우연인지**를 드러낸다 (2026-08-03)
+        #   지표 확장(10 -> 31)으로 확정치 풀이 넓어지면 창작 수치가 우연히 맞는
+        #   일이 생긴다. "불일치 0" 만 보면 좋아 보이지만, 그중 몇이 여러 지표에
+        #   동시에 걸린 모호한 인용인지가 진짜 품질이다.
+        f"| **인용 품질** | 확정치 풀 {nc.get('pool_size', 0)}개 · 인용 "
+        f"{qq.get('quoted', 0)}건 중 {qq.get('matched', 0)}건 매칭"
+        f"{', 모호 ' + str(qq.get('ambiguous', 0)) + '건(' + str(round(qq.get('ambiguity_ratio', 0) * 100)) + '%)' if qq.get('ambiguous') else ''} |",
+        # 시점 재대조를 리포트에 싣는다 - **표시 없는 가드는 없는 가드다**
+        # (2026-08-03: 가드가 돌고도 리포트·DB 어디에도 안 남아 못 봤다)
+        f"| **시점 재대조** | {'통과' if dc.get('ok', True) else '⚠ Evidence 창 밖 연도 ' + str(dc.get('too_old_years', []) + dc.get('future_years', []))}"
+        f" (창 {dc.get('window', '-')}) |",
+        f"| **분석가 판정** | " + " · ".join(
             f"{k}={v}" for k, v in verdicts.items() if v) + " |",
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
         "",
@@ -833,6 +1319,43 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
         lines += [f"## {title}", ""]
         lines += [f"- {x}" for x in (packet.get(key) or [])] or ["- (없음)"]
         lines += [""]
+
+    # ▶ 격리된 창작 의심 문장. **지우지 않고 드러낸다** - 무엇이 왜 빠졌는지
+    #   보여야 사람이 판단할 수 있고, 조용히 사라지면 가드를 신뢰할 수 없다.
+    qz = packet.get("_quarantined") or []
+    if qz:
+        lines += ["## 격리된 문장 (창작 의심 — facts 에서 제외)", ""]
+        lines += [f"- ~~{q.get('text', '')}~~ — {q.get('reason', '')}" for q in qz]
+        if packet.get("_quarantine_emptied_facts"):
+            lines += ["", "> ⚠ 근거 있는 사실이 0건이라 evidence_quality 를 "
+                          "insufficient_evidence 로 적었다"]
+        lines += [""]
+
+    # ▶ 반박 (Skeptic). **내용이 핵심이다** - 갈등 건수만 세는 것은 대화가 아니다.
+    #   총괄이 동의하든 안 하든 지우지 못한다(마스터플랜: 반대 의견을 삭제하지 않는다).
+    dg = packet.get("disagreements") or {}
+    dissent = packet.get("dissent") or []
+    cv = packet.get("_challenge_verification") or {}
+    lines += ["## 반박 (Skeptic — 분석가 간 대화)", ""]
+    if dg:
+        lines += [f"- 코드가 찾은 갈등 **{dg.get('count', 0)}건** "
+                  f"(정반대 {dg.get('opposite', 0)} / 신호↔맥락 "
+                  f"{dg.get('signal_vs_context', 0)})"]
+        lines += [f"  - {x}" for x in (dg.get("lines") or [])]
+    if dissent:
+        lines += ["", "**대안 설명과 반대 근거**", ""]
+        lines += [f"- {x}" for x in dissent]
+    else:
+        lines += ["", "- (반박 없음)"]
+    if cv.get("ok") is False:
+        lines += ["", f"> ⚠ 반박 서술에 확정치 밖 수치: {cv.get('unmatched')}"]
+    elif cv.get("ok") is None and cv.get("reason"):
+        lines += ["", f"> ⚠ {cv['reason']}"]
+    if packet.get("_downgraded_by_challenge"):
+        lines += ["", f"> 치명적 반증으로 evidence_quality 강등: "
+                      f"{packet['_downgraded_by_challenge']} → "
+                      f"{packet.get('evidence_quality')}"]
+    lines += [""]
 
     # 분석가 원문 소견 - 총괄이 압축하며 버린 맥락이 여기 남는다. 상충하는
     # 소견을 지우지 않는 것이 본부 원칙이라, 요약본 옆에 원문을 같이 싣는다.
@@ -938,7 +1461,8 @@ def _check_price_context_injection():
 
     def fake_llm(system, user):
         captured["user"] = user
-        return json.dumps({"symbol": "X", "thesis": "t", "facts": [],
+        return json.dumps({"symbol": "X", "thesis": "시험용 논지",
+                           "facts": [],
                            "interpretation": [], "catalysts": [],
                            "invalidation": [], "evidence_quality": "partial"})
 
@@ -1089,13 +1613,23 @@ def _check_schema_coercion():
     assert out["evidence_quality"] == "partial", "강등이 안 걸렸다"
     # 한 겹 싸서 온 Packet 은 벗긴다 - 실측 2회가 '키 전부 누락'으로 죽었다
     inner = {k: "x" for k in PACKET_REQUIRED_KEYS}
-    assert unwrap_packet({"packet": inner}) is inner
+    # 근접 키 정규화가 새 dict 를 만드므로 **값**으로 비교한다(is 가 아니라)
+    assert unwrap_packet({"packet": inner}) == inner
     assert unwrap_packet({"result": {"data": inner}}) != inner, \
         "두 겹까지 파고들지 않는다 - 추측으로 구조를 바꾸지 않는다"
-    assert unwrap_packet(inner) is inner, "이미 평평하면 그대로 둔다"
+    assert unwrap_packet(inner) == inner, "이미 평평하면 그대로 둔다"
     # 일부 키만 있는 dict 는 건드리지 않는다(다른 문제이므로 사유가 보여야 한다)
     partial = {"wrap": {"symbol": "x", "thesis": "y"}}
-    assert unwrap_packet(partial) is partial
+    assert unwrap_packet(partial) == partial
+
+    # ▶ 근접 키 이름 정규화 (실측 2026-08-03: 이것 때문에 2회 연속 거부됐다)
+    alias = {"symbol": "X", "thesis": "논지", "key_facts": ["f"],
+             "interpretation": [], "invalidation_conditions": ["조건"],
+             "evidence_quality": "partial"}
+    fixed = unwrap_packet(alias)
+    assert fixed["facts"] == ["f"] and fixed["invalidation"] == ["조건"], fixed
+    # 계약 키가 이미 있으면 별칭이 덮지 않는다
+    assert unwrap_packet(dict(alias, facts=["원본"]))["facts"] == ["원본"]
     assert unwrap_packet(["not", "a", "dict"]) == ["not", "a", "dict"]
     print("  스키마 교정·가드 유지    OK")
 
@@ -1175,6 +1709,66 @@ def _check_claims_use_bundle_key():
     print("  주장 발행·기준가 계약    OK")
 
 
+def _check_occurrence_collection():
+    """사건 수집이 **지표 단위로** 세는지. 뭉치면 어느 배관인지 안 보인다."""
+    out = {
+        "technical": {"note": {"summary": "정상"},
+                      "readout": {"unavailable": ["amihud", "kyle_lambda"]}},
+        "regime": {"readout": {}},          # 서술 없음
+        "tool_results": [{"tool": "breadth_history", "ok": False, "reason": "0건"}],
+        "packet": {"_quote_quality": {"mismatched": [4444.4]}},
+    }
+    ev = collect_occurrences(out, run_id="r1", symbol="005380", at="2026-08-03")
+    kinds = {e["kind"] for e in ev}
+    assert "지표 미확인:amihud" in kinds and "지표 미확인:kyle_lambda" in kinds, kinds
+    assert "분석가 서술 폐기" in kinds, kinds
+    assert "도구 실패:breadth_history" in kinds, kinds
+    assert "수치 불일치" in kinds, kinds
+    assert sum(1 for e in ev if e["kind"] == "분석가 미실행") == 4, ev
+    assert all(e["run_id"] == "r1" for e in ev)
+
+
+def _check_occurrence_log_failure_is_not_fatal():
+    """기록 실패가 리포트를 죽이면 우선순위가 뒤집힌 것이다."""
+    # ▶ **파일을 부모로 삼는다.** 전에는 "/nonexistent-root-xyz/..." 를 썼는데
+    #   Windows 에서 그건 현재 드라이브 루트로 해석돼 mkdir 이 성공했다 -
+    #   실패를 검사하는 테스트가 플랫폼에 따라 통과 조건이 달랐다.
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".notadir", delete=False) as f:
+        blocker = Path(f.name)
+    try:
+        bad = blocker / "var" / "occ.jsonl"     # 파일 아래에는 디렉터리를 못 만든다
+        assert append_occurrences([{"kind": "k"}], path=bad) == 0
+        assert append_occurrences([], path=bad) == 0
+    finally:
+        blocker.unlink(missing_ok=True)
+
+
+def _check_korean_guard():
+    """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
+    # 실제 사고 문장(005380, 2026-08-03)
+    eng = {"thesis": "Hyundai's global sales performance and strategic investment "
+                     "in Yeongnam region may signal broader market positioning.",
+           "facts": ["sales_data: Global sales decreased 5.1% year-over-year"]}
+    assert korean_ratio(eng) < MIN_KOREAN_RATIO, korean_ratio(eng)
+
+    kor = {"thesis": "7월 글로벌 판매가 전년 대비 5.1% 감소했다.",
+           "facts": ["현대차 7월 글로벌 판매 31만8천대 [n1]", "부채비율 188.95% [d1]"]}
+    assert korean_ratio(kor) >= MIN_KOREAN_RATIO, korean_ratio(kor)
+
+    # 숫자·ref 만 있으면 판정을 보류한다 - 막지 않는다(모르는 것을 단정하지 않는다)
+    assert korean_ratio({"thesis": "5.1%", "facts": ["188.95", "[n1]"]}) == 1.0
+    assert korean_ratio({}) == 1.0
+
+    # 토큰 필드(evidence_quality)는 언어 판정 대상이 아니다 - 영어여야 맞다
+    assert "evidence_quality" not in NARRATIVE_KEYS
+    # 영어 문장에 한글 단어 하나 섞은 것을 통과시키지 않는다
+    mixed = {"thesis": "Hyundai global sales decreased significantly in July 현대차",
+             "facts": ["Global sales down year over year across all regions"]}
+    assert korean_ratio(mixed) < MIN_KOREAN_RATIO, korean_ratio(mixed)
+    print("  총괄 한국어 가드         OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -1204,6 +1798,9 @@ if __name__ == "__main__":
 
     print(f"{PIPELINE_VERSION} 자체 점검 (LLM·API 없음)")
     _check_graph_shape()
+    _check_korean_guard()
+    _check_occurrence_collection()
+    _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()
     _check_price_context_injection()
@@ -1214,4 +1811,4 @@ if __name__ == "__main__":
     _check_claims_use_bundle_key()
     _check_packet_report_renderer()
     _check_run_recorder()
-    print("본부 파이프라인 11개 영역 통과. 실행은 --run <종목>")
+    print("본부 파이프라인 12개 영역 통과. 실행은 --run <종목>")

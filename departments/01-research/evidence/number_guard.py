@@ -50,6 +50,89 @@ def quoted_numbers(text: str) -> list[tuple[float, str]]:
     return [(float(m.group(1)), m.group(0)) for m in _NUM_RE.finditer(text or "")]
 
 
+# 지표가 아닌 bookkeeping - 인용 풀에 넣지 않는다. 카운트가 풀에 있으면
+# LLM 이 그 숫자를 단위와 함께 지어내도 통과한다(numeric_pool 주석과 같은 이유).
+_NOT_QUOTABLE = frozenset({
+    "bars_used", "days_used", "n", "count", "limit", "window_days",
+    "articles", "articles_used", "articles_dropped", "gpr_points",
+    "lookback_used", "window_requested",
+})
+
+
+def keyed_pool(readout: dict, *, exclude: tuple[str, ...] = (),
+               prefix: str = "") -> dict[str, float]:
+    """readout -> {키: 수치}. numeric_pool 과 달리 **키를 잃지 않는다.**
+
+    컨테이너 한 겹(fields/ratios 등)은 펼친다 - 지표 확장 후 재무·스타일 수치가
+    거기 들어가는데, 최상위만 보면 풀의 절반을 놓친다.
+    """
+    out: dict[str, float] = {}
+    for k, v in (readout or {}).items():
+        if k in exclude or k in _NOT_QUOTABLE:
+            continue
+        key = f"{prefix}{k}"
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            out[key] = float(v)
+        elif isinstance(v, dict):
+            for ik, iv in v.items():
+                if ik in exclude or ik in _NOT_QUOTABLE:
+                    continue
+                val = iv.get("value") if isinstance(iv, dict) and "value" in iv else iv
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    out[f"{key}.{ik}" if k not in ("fields",) else f"{prefix}{ik}"] = \
+                        float(val)
+    return out
+
+
+def trace_quoted(text: str, pool: dict[str, float], *,
+                 tolerance: float = TOLERANCE,
+                 allow_sign_flip: bool = True) -> list[dict]:
+    """인용 수치마다 **어느 키에 맞았는지**를 남긴다.
+
+    ▶ 왜 필요한가 (2026-08-03, 지표 확장이 드러낸 문제)
+      지표를 10개에서 31개로 늘리자 확정치 풀이 넓어졌고, 그만큼 **우연히 맞는
+      수치**가 생겼다. 실제로 자체점검 픽스처의 '창작 수치 99.9%' 가 단조 상승
+      구간의 rsi=adx=100.0 에 허용오차로 걸려 통과했다.
+
+      flag_unmatched 는 통과/불통과만 낸다. 그래서 **"통과가 검증인지 우연인지"
+      를 구분할 수 없다.** 어느 키에 몇 개나 맞았는지를 남기면 그것이 보인다:
+        matched_keys 가 1개  -> 그 지표를 인용한 것이다(검증)
+        matched_keys 가 여럿 -> 어느 것을 뜻하는지 모른다(모호)
+      모호 비율(ambiguity)이 높아지면 가드가 헐거워졌다는 뜻이다.
+
+    **판정하지 않는다.** 통과 여부는 flag_unmatched 가 그대로 맡는다 - 여기서
+    또 판정하면 두 곳이 갈라진다. 이 함수는 근거를 드러내기만 한다.
+    """
+    out: list[dict] = []
+    for x, raw in quoted_numbers(text):
+        hits = [k for k, v in (pool or {}).items()
+                if abs(x - v) <= tolerance
+                or (allow_sign_flip and abs(x + v) <= tolerance)]
+        out.append({"raw": raw, "value": x, "matched_keys": sorted(hits),
+                    "matched": bool(hits), "ambiguous": len(hits) > 1})
+    return out
+
+
+def quote_quality(traces: list[dict]) -> dict:
+    """인용 품질 요약. **모호 비율을 숨기지 않는다.**"""
+    n = len(traces or [])
+    if not n:
+        return {"quoted": 0, "matched": 0, "ambiguous": 0,
+                "ambiguity_ratio": 0.0, "unmatched": []}
+    matched = sum(1 for t in traces if t["matched"])
+    amb = sum(1 for t in traces if t["ambiguous"])
+    return {
+        "quoted": n,
+        "matched": matched,
+        "ambiguous": amb,
+        # 맞은 것 중 몇이 모호한가 - 이 값이 높으면 "통과" 가 우연일 수 있다
+        "ambiguity_ratio": round(amb / matched, 3) if matched else 0.0,
+        "unmatched": [t["raw"] for t in traces if not t["matched"]],
+    }
+
+
 def flag_unmatched(text: str, pool, *, tolerance: float = TOLERANCE,
                    allow_sign_flip: bool = True) -> list[str]:
     """pool 의 어떤 값과도 안 맞는 인용 수치의 원문 조각 목록.
@@ -142,6 +225,42 @@ def _check_caution_wording():
     print("  cautions 문구 단일화     OK")
 
 
+def _check_trace_reveals_ambiguity():
+    """**이 모듈의 새 존재 이유** - 통과가 검증인지 우연인지 가른다.
+
+    지표 확장(10 -> 31)으로 풀이 넓어지자 창작 수치가 우연히 맞는 일이 생겼다.
+    실제 사례: 단조 상승 구간에서 rsi=adx=100.0 이라 '99.9%' 가 통과했다.
+    """
+    pool = keyed_pool({"rsi_14": 100.0, "adx_adx": 100.0,
+                       "momentum_20d_pct": 40.0, "bars_used": 120})
+    # bookkeeping 은 풀에 안 들어간다
+    assert "bars_used" not in pool, pool
+    tr = trace_quoted("모멘텀 40.0% 상승, 승률 99.9%, 창작 4444.4%", pool)
+    by = {t["raw"]: t for t in tr}
+    # 한 키에만 맞음 = 그 지표를 인용한 것이다(검증)
+    assert by["40.0%"]["matched_keys"] == ["momentum_20d_pct"]
+    assert by["40.0%"]["ambiguous"] is False
+    # 두 키에 맞음 = 어느 것을 뜻하는지 모른다(모호) - 이것이 드러나야 한다
+    assert by["99.9%"]["matched"] is True and by["99.9%"]["ambiguous"] is True
+    assert by["99.9%"]["matched_keys"] == ["adx_adx", "rsi_14"]
+    # 아무데도 안 맞음 = 창작
+    assert by["4444.4%"]["matched"] is False
+
+    q = quote_quality(tr)
+    assert q == {"quoted": 3, "matched": 2, "ambiguous": 1,
+                 "ambiguity_ratio": 0.5, "unmatched": ["4444.4%"]}, q
+
+    # **기존 계약을 깨지 않는다** - flag_unmatched 와 결과가 같아야 한다
+    vals = list(pool.values())
+    assert flag_unmatched("모멘텀 40.0% 상승, 승률 99.9%, 창작 4444.4%", vals) ==         [t["raw"] for t in tr if not t["matched"]]
+
+    # keyed_pool 은 컨테이너 한 겹을 펼친다 - 최상위만 보면 절반을 놓친다
+    deep = keyed_pool({"fields": {"매출액": {"value": 186.3}},
+                       "ratios": {"BOND_FUT": 1.05}})
+    assert deep == {"매출액": 186.3, "ratios.BOND_FUT": 1.05}, deep
+    print("  인용 귀속·모호 탐지      OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -151,5 +270,6 @@ if __name__ == "__main__":
     _check_tolerance_and_sign()
     _check_empty_pool_flags_everything()
     _check_pool_excludes_counts()
+    _check_trace_reveals_ambiguity()
     _check_caution_wording()
-    print("숫자 가드 5개 영역 통과.")
+    print("숫자 가드 6개 영역 통과.")

@@ -249,6 +249,34 @@ def compute_regime_readout(regime_rows: list[dict],
         "macro_overlay": compute_style_overlay(macro_rows) if macro_rows else None,
     }
 
+    # ▶ 시장 심리·국면 (2026-08-03)
+    #   재일님 지적: "현재 시장의 국면변화·최근 시황을 서술하는게 아쉽다",
+    #   "시장의 심리를 반영한 분석 - 시황 + 시장 심리 지수".
+    #   A/D 하루치 값만으로는 "국면이 바뀌었다" 를 말할 수 없다 - 백분위와
+    #   지속 일수가 있어야 한다. **없는 심리 지표는 이름을 남긴다**(지어내지 않는다).
+    try:
+        from market_psych import compute_psych_pack, detect_transition
+
+        # 원본 행에는 ad_ratio 가 없다 - 위에서 코드가 계산한 시계열(ratios)을 쓴다.
+        # 원본 키를 가정하면 조용히 빈 목록이 되고 심리 지표가 통째로 사라진다
+        # (실측 2026-08-03: 그래서 처음엔 전부 미확인으로 나왔다).
+        ad_series = [x for x in ratios if x is not None]
+        above_series = [
+            (a / c * 100.0) for a, c in zip(
+                [r.get("above_sma20") for r in rows],
+                [r.get("sma20_coverage") or r.get("symbols") for r in rows])
+            if a is not None and c]
+        psych = compute_psych_pack(ad_ratios=ad_series, above_ma_pcts=above_series)
+        unavailable = psych.pop("psych_unavailable", [])
+        readout.update(psych)
+        if unavailable:
+            readout["psych_unavailable"] = unavailable
+        # 국면 전환 - 지속을 요구한다. 하루 넘었다고 바뀐 게 아니다.
+        if len(ad_series) >= 5:
+            readout["regime_transition"] = detect_transition(ad_series, 2.0)
+    except Exception as e:  # noqa: BLE001 - 심리 지표 실패가 레짐 판정을 죽이지 않는다
+        readout["psych_unavailable"] = [f"계산 실패: {type(e).__name__}"]
+
     # 라벨 결정 - 비율이 무한대인 날(하락 0/상승 0)도 규칙이 성립하도록
     # 나눗셈 대신 원 카운트 부등식(a>=4d, d>=4a)으로 판정한다
     if all(readout[k] is None for k in CORE_METRICS):
