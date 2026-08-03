@@ -359,11 +359,6 @@ class PaperPipelineAdapter:
             },
             context,
         )
-        reports["ceo-worker-context"] = {
-            "status": employee_context.get("status"),
-            "employee_context": employee_context,
-            "binding": False,
-        }
         try:
             decision = self._ceo_adapter.decide(
                 case_request=case,
