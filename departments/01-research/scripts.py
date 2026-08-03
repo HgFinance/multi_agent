@@ -586,8 +586,22 @@ def build_packet_claims(state: dict, packet: dict) -> list[dict]:
     #   발동 여부만 세면 과신하는 분석가와 소심한 분석가가 구분되지 않는다.
     #   **코드가 낸다** - LLM 이 자기 확률을 쓰면 맞히기 쉬운 쪽으로 굽는다
     #   (origin='code' 와 같은 이유).
+    # 주장 -> 방법 귀속. 분석가 readout 의 method_keys 가 출처다.
+    # **안 쓴 기법을 썼다고 기록하지 않는다** - 귀속이 거짓이면 그걸로 계산한
+    # validated 도 거짓이 된다. 여러 방법이 기여했으면 첫 것을 대표로 쓰고,
+    # 전체는 나중에 다대다로 넓힌다(지금은 열이 하나다).
+    by_node = {}
+    for node in ("regime", "geopolitical", "microstructure", "fundamental",
+                 "technical"):
+        keys = ((state.get(node) or {}).get("readout") or {}).get("method_keys")
+        if keys:
+            by_node[node] = list(keys)
+
     closes = price.get("closes") or []
     for c in claims:
+        node_methods = by_node.get(c.get("source_node") or "")
+        if node_methods:
+            c["method_key"] = node_methods[0]
         prob, method = probability_for_claim(c, closes)
         if prob is not None:
             c["probability"] = prob

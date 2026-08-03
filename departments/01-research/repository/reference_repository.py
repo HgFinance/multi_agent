@@ -589,15 +589,38 @@ class SupabaseReferenceRepository(ReferenceRepository):
         exts = [r.external_id for r in records]
         with self._conn.cursor() as cur:
             cur.execute(
-                "select external_id, title from research.documents "
+                "select external_id, title, document_id from research.documents "
                 "where source_id = %s and external_id = any(%s)",
                 (source_id, exts),
             )
-            stored_title = dict(cur.fetchall())
-        self.last_revisions = tuple(
-            r.external_id for r in records
-            if r.external_id in stored_title and stored_title[r.external_id] != r.title
-        )
+            stored = {e: (t, d) for e, t, d in cur.fetchall()}
+        stored_title = {e: t for e, (t, _d) in stored.items()}
+        changed = [r for r in records
+                   if r.external_id in stored_title
+                   and stored_title[r.external_id] != r.title]
+        self.last_revisions = tuple(r.external_id for r in changed)
+
+        # ▶ 탐지한 정정을 **영속한다** (2026-08-03)
+        #   예전에는 위 튜플(메모리)에만 담고 프로세스가 끝나면 사라졌다.
+        #   저장본은 PIT 규율상 최초 관측 문장을 유지하므로 정정 사실은 그
+        #   튜플이 유일한 흔적이었는데 그것마저 휘발됐다. 그러면 로드맵 6.2 의
+        #   중단 조건("수정 이력 없는 문서는 거래 근거로 쓰지 않는다")을 판정할
+        #   데이터가 없다. 원본은 그대로 두고 변경 사실만 append 한다.
+        #   기록 실패가 수집을 죽이지 않는다 - 이력은 보조 기록이다.
+        if changed:
+            try:
+                rows = [(stored[r.external_id][1], "title",
+                         stored_title[r.external_id], r.title, "news_pipeline")
+                        for r in changed]
+                with self._conn.cursor() as cur:
+                    self._execute_values(cur, """
+                        insert into research.document_revisions
+                          (document_id, field, old_value, new_value, detected_by)
+                        values %s on conflict do nothing
+                    """, rows, page_size=200)
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠ document_revisions 기록 실패(수집은 계속): "
+                      f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
         before = self._count("research.documents")
         with self._conn.cursor() as cur:
