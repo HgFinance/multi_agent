@@ -9,14 +9,19 @@ scorecard/cost.py를 감싸는 FastAPI 래퍼.
 여기엔 새 판정 로직이 없다. access.py의 승인/부여/회수 상태 전이, workflow.py의
 자기승인 차단·QA 근거 게이트, cost.py의 Scorecard 집계가 이미 하는 일을 얇게 감싈 뿐이다.
 
-저장소는 전부 In-Memory다(asyncpg/psycopg2 실 배선은 config.yaml not_started) - 이
-프로세스가 재시작되면 상태가 사라진다. 프로덕션 배선 전 데모/통합 테스트용이다.
+저장소는 기본 In-Memory다. DATABASE_URL이 설정돼 있으면 Access(lifecycle/
+postgres_access_repository.py)·Improvements(improvements/repository.py)가 Postgres
+구현으로 전환한다. Scorecard/Budget은 원래 저장소 자체가 없었어서(In-Memory 대체가
+없다) - DATABASE_URL이 없으면 아래 GET 엔드포인트가 501로 막고, 기존 POST 데모
+엔드포인트(호출자가 Snapshot을 직접 실어 보냄)만 동작한다.
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다):
-  - GET /workforce/v1/departments/{code}/scorecard(스펙 3.4)는 GET인데, 여기서는
-    POST로 뒀다 - workforce.cost_snapshots/capacity_snapshots를 조회할 저장소가 아직
-    없어서(Y4 나머지), 캐시된 Snapshot을 서버가 찾는 게 아니라 호출자가 Snapshot 자체를
-    요청 본문에 실어 보낸다.
+  - POST /workforce/v1/departments/{code}/scorecard, POST /workforce/v1/budget-assessments는
+    스펙 3.4가 GET인데 POST로 뒀다 - Snapshot 저장소가 없던 시절 데모용으로, 호출자가
+    Snapshot 자체를 요청 본문에 실어 보낸다. 지금은 GET /workforce/v1/departments/{code}/
+    scorecard, GET /workforce/v1/agents/{agent_id}/budget-assessment가 스펙이 원래
+    의도한 형태(postgres_scorecard_repository.py가 실제 Snapshot을 조회) - POST는
+    호환을 위해 남겨뒀다.
   - GET /workforce/v1/roster, GET /workforce/v1/skill-gap(스펙 3.1/3.4)은 없다 -
     workforce.agent_profiles를 조회하는 Repository가 아직 없다(HR-01 선행 작업).
 
@@ -25,6 +30,7 @@ scorecard/cost.py를 감싸는 FastAPI 래퍼.
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -48,6 +54,7 @@ from access import (  # noqa: E402
     AccessRequest,
     Environment,
     IllegalTransition,
+    InMemoryAccessRepository,
     MissingProvisioningError,
     MissingRevocationEvidenceError,
     ResourceKind,
@@ -68,10 +75,26 @@ from workflow import (  # noqa: E402
     Approval,
     CandidateStatus,
     ImprovementWorkflow,
+    InMemoryImprovementRepository,
     IllegalTransition as CandidateIllegalTransition,
     MissingEvidenceError,
     SelfApprovalError as CandidateSelfApprovalError,
 )
+
+try:
+    from postgres_access_repository import PostgresAccessRepository
+except ImportError:
+    PostgresAccessRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from repository import PostgresImprovementRepository
+except ImportError:
+    PostgresImprovementRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_scorecard_repository import PostgresScorecardRepository
+except ImportError:
+    PostgresScorecardRepository = None  # type: ignore[assignment,misc]
 
 # --- Request 모델 --------------------------------------------------------------
 
@@ -208,10 +231,24 @@ def _access_assignment_dict(a: AccessAssignment) -> dict:
 
 app = FastAPI(title="Workforce Domain API", version="v1")
 
-_access_requests: dict[str, AccessRequest] = {}
-_access_assignments: dict[str, AccessAssignment] = {}
-_candidates: dict[str, ImprovementCandidate] = {}
-_workflow = ImprovementWorkflow()
+if os.environ.get("DATABASE_URL") and PostgresAccessRepository is not None:
+    _access_repo = PostgresAccessRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _access_repo = InMemoryAccessRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresImprovementRepository is not None:
+    _improvement_repo = PostgresImprovementRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _improvement_repo = InMemoryImprovementRepository()
+_workflow = ImprovementWorkflow(_improvement_repo)
+
+# Scorecard/Budget용 Snapshot 조회 Repository - In-Memory 대체가 없다(원래 저장소가
+# 아예 없었다, config.yaml not_started). DATABASE_URL 없으면 None - 아래 GET 엔드포인트가
+# 501로 막고, 기존 POST 데모 엔드포인트(호출자가 Snapshot을 직접 보냄)는 그대로 동작한다.
+if os.environ.get("DATABASE_URL") and PostgresScorecardRepository is not None:
+    _scorecard_repo = PostgresScorecardRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _scorecard_repo = None
 
 
 @app.exception_handler(ValueError)
@@ -249,23 +286,23 @@ def request_access(body: AccessRequestIn):
         tool_id=body.tool_id, profile_version_id=body.profile_version_id, scope=body.scope,
         trace_id=body.trace_id,
     )
-    _access_requests[request_id] = req
+    _access_repo.save_request(req)
     return _access_request_dict(req)
 
 
 @app.post("/workforce/v1/access-requests/{request_id}/approve")
 def approve_access_request(request_id: str, body: ApproveRequestIn):
-    req = _access_requests.get(request_id)
+    req = _access_repo.get_request(request_id)
     if req is None:
         raise HTTPException(status_code=404, detail=f"access_request {request_id} 없음")
     updated = approve_request(req, approver=body.approver, approval_id=body.approval_id, at=body.at)
-    _access_requests[request_id] = updated
+    _access_repo.save_request(updated)
     return _access_request_dict(updated)
 
 
 @app.post("/workforce/v1/access-requests/{request_id}/provision")
 def provision_access(request_id: str, body: ProvisionRequestIn):
-    req = _access_requests.get(request_id)
+    req = _access_repo.get_request(request_id)
     if req is None:
         raise HTTPException(status_code=404, detail=f"access_request {request_id} 없음")
     assignment_id = str(uuid4())
@@ -274,25 +311,25 @@ def provision_access(request_id: str, body: ProvisionRequestIn):
         provisioned_by=body.provisioned_by, effective_from=body.effective_from,
         tool_permission_id=body.tool_permission_id,
     )
-    _access_requests[request_id] = updated_req
-    _access_assignments[assignment_id] = assignment
+    _access_repo.save_request(updated_req)
+    _access_repo.save_assignment(assignment)
     return _access_assignment_dict(assignment)
 
 
 @app.post("/workforce/v1/access-assignments/{assignment_id}/revoke")
 def revoke_access(assignment_id: str, body: RevokeRequestIn):
-    assignment = _access_assignments.get(assignment_id)
+    assignment = _access_repo.get_assignment(assignment_id)
     if assignment is None:
         raise HTTPException(status_code=404, detail=f"access_assignment {assignment_id} 없음")
     updated = revoke(assignment, at=body.at, evidence=body.evidence)
-    _access_assignments[assignment_id] = updated
+    _access_repo.save_assignment(updated)
     return _access_assignment_dict(updated)
 
 
 @app.get("/workforce/v1/agents/{agent_id}/access")
 def get_agent_access(agent_id: str):
     return {"assignments": [
-        _access_assignment_dict(a) for a in _access_assignments.values() if a.agent_id == agent_id
+        _access_assignment_dict(a) for a in _access_repo.list_assignments_by_agent(agent_id)
     ]}
 
 
@@ -302,13 +339,13 @@ def get_agent_access(agent_id: str):
 @app.post("/workforce/v1/improvements")
 def create_improvement(body: dict[str, Any]):
     candidate = ImprovementCandidate(**body)
-    _candidates[candidate.candidate_id] = candidate
+    _improvement_repo.save_candidate(candidate)
     return candidate.model_dump(mode="json")
 
 
 @app.get("/workforce/v1/improvements/{candidate_id}")
 def get_improvement(candidate_id: str):
-    candidate = _candidates.get(candidate_id)
+    candidate = _improvement_repo.get_candidate(candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
     return candidate.model_dump(mode="json")
@@ -316,7 +353,7 @@ def get_improvement(candidate_id: str):
 
 @app.post("/workforce/v1/improvements/{candidate_id}/transitions")
 def transition_improvement(candidate_id: str, body: TransitionRequestIn):
-    candidate = _candidates.get(candidate_id)
+    candidate = _improvement_repo.get_candidate(candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
     approval = None
@@ -326,7 +363,7 @@ def transition_improvement(candidate_id: str, body: TransitionRequestIn):
     updated = _workflow.transition(
         candidate, body.to_status, actor=body.actor, reason=body.reason, at=body.at, approval=approval,
     )
-    _candidates[candidate_id] = updated
+    _improvement_repo.save_candidate(updated)
     return updated.model_dump(mode="json")
 
 
@@ -363,12 +400,69 @@ def create_budget_assessment(body: BudgetAssessmentRequest):
         agent_id=body.agent_id, employee_code=body.employee_code, department_code=body.department_code,
         budget=budget, snapshots=[_cost_snapshot(c) for c in body.cost_snapshots],
     )
+    return _budget_assessment_dict(assessment)
+
+
+def _budget_assessment_dict(assessment) -> dict:
     return {
         "agent_id": assessment.agent_id, "status": assessment.status.value,
         "recommended_action": assessment.recommended_action.value, "tokens_used": assessment.tokens_used,
         "usage_ratio": str(assessment.usage_ratio) if assessment.usage_ratio is not None else None,
         "is_control_role": assessment.is_control_role, "note": assessment.note,
     }
+
+
+# --- 3.4 스펙 형태 GET 엔드포인트 (Postgres Scorecard Repository 배선) -------------------
+#
+# 위 POST 데모 엔드포인트는 호출자가 Snapshot을 직접 실어 보낸다(저장소 없던 시절 설계).
+# 아래는 스펙 3.4가 원래 의도한 GET 형태 - workforce.cost_snapshots/capacity_snapshots를
+# 실제로 조회한다. DATABASE_URL이 없으면(_scorecard_repo가 None) 501로 막는다 - 조회할
+# 저장소가 없는데 빈 결과를 성공처럼 돌려주지 않는다.
+
+
+@app.get("/workforce/v1/departments/{department_code}/scorecard")
+def get_department_scorecard_real(department_code: str, window_start: datetime, window_end: datetime):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - 실 Snapshot 조회 불가. POST .../scorecard로 직접 보내라",
+        )
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
+    department_id = _scorecard_repo.get_department_id(department_code)
+    if department_id is None:
+        raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+    capacity = _scorecard_repo.get_capacity_snapshot(
+        department_id=department_id, window_start=window_start, window_end=window_end,
+    )
+    cost_snapshots = _scorecard_repo.list_cost_snapshots_by_department(
+        department_id, window_start=window_start, window_end=window_end,
+    )
+    return build_department_scorecard(
+        department_code=department_code, window_start=window_start, window_end=window_end,
+        capacity=capacity, cost_snapshots=cost_snapshots,
+    )
+
+
+@app.get("/workforce/v1/agents/{agent_id}/budget-assessment")
+def get_budget_assessment_real(
+    agent_id: str, employee_code: str, department_code: str,
+    per_case_tokens: int, daily_tokens: int, window_start: datetime, window_end: datetime,
+):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - 실 Snapshot 조회 불가. POST .../budget-assessments로 직접 보내라",
+        )
+    budget = TokenBudget(per_case_tokens=per_case_tokens, daily_tokens=daily_tokens)
+    snapshots = _scorecard_repo.list_cost_snapshots_by_agent(
+        agent_id, window_start=window_start, window_end=window_end,
+    )
+    assessment = assess_budget(
+        agent_id=agent_id, employee_code=employee_code, department_code=department_code,
+        budget=budget, snapshots=snapshots,
+    )
+    return _budget_assessment_dict(assessment)
 
 
 if __name__ == "__main__":

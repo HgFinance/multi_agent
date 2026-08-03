@@ -50,10 +50,28 @@ implementation:
        됐던 격차 해소, 실 DB 적용 완료. 채우는 로직은 아직 없음(아래 not_started 참고)"
     - "Workforce Domain API — departments/07-agent-workforce/api/app.py. lifecycle/access.py
        (권한 요청·승인·부여·회수), improvements/{candidate,workflow}.py(F19 후보·전이·자기승인
-       차단), scorecard/cost.py(Scorecard·예산 판정)를 FastAPI로 감쌌다. Repository는 In-Memory뿐
-       (재시작 시 소실). FastAPI TestClient로 4개 영역(access/improvements/scorecard/budget)
-       실행 검증 완료 — 자기승인 403, Snapshot 없음은 0이 아니라 None, 예산 초과 시
-       PROPOSE_MODEL_DOWNGRADE 권고까지 확인"
+       차단), scorecard/cost.py(Scorecard·예산 판정)를 FastAPI로 감쌌다. Repository는 In-Memory
+       기본, DATABASE_URL 있으면 Access/Improvements가 Postgres 구현으로 전환(아래 psycopg2
+       구현 항목 참고). FastAPI TestClient(In-Memory 모드)로 4개 영역(access/improvements/
+       scorecard/budget) 실행 검증 완료 — 자기승인 403, Snapshot 없음은 0이 아니라 None, 예산
+       초과 시 PROPOSE_MODEL_DOWNGRADE 권고까지 확인"
+    - "AccessRepository/ImprovementRepository/Scorecard 조회의 psycopg2 실 구현(2026-08-03) —
+       lifecycle/postgres_access_repository.py, improvements/repository.py(이전 asyncpg 버전은
+       아무 곳에서도 import되지 않아 API와 어긋나 있었다 - psycopg2로 다시 짬),
+       scorecard/postgres_scorecard_repository.py. 호출부가 동기라 psycopg2로 통일(Mandate/
+       Audit과 동일 근거). Access는 Y3 Registry의 실제 HR-04 agent_id로 요청->승인 대기(REQUESTED,
+       approval_id 없음)->Assignment(DATA)->회수까지 실 DB 왕복 검증(approval_id가 채워진
+       승인은 governance.approvals 부모 행이 없어 건너뜀 - Mandate owner_user_id와 같은 이유).
+       workflow.py의 ImprovementWorkflow는 이제 ImprovementRepository를 주입받는다(기본
+       In-Memory, 생성자 시그니처만 바뀌고 기존 자체 점검은 그대로 통과) - candidate insert/
+       status 갱신/event append까지 실 DB 검증했지만 improvement_candidate_events가
+       append-only 트리거라 자체 점검이 남긴 candidate 1건은 정리하지 못하고 selfcheck 흔적으로
+       남는다(문서화함). Scorecard는 원래 저장소 자체가 없어서(cost.py가 순수 함수라 Snapshot을
+       인자로만 받음) 새로 만들었다 - GET /workforce/v1/departments/{code}/scorecard, GET
+       /workforce/v1/agents/{agent_id}/budget-assessment 두 엔드포인트를 추가해 스펙 3.4의 GET
+       형태를 실제로 채우고, 기존 POST 데모 엔드포인트(호출자가 Snapshot 직접 전송)는 호환을
+       위해 남겼다. 셋 다 In-Memory 자체 점검(app.py TestClient, 4개 영역)과 Postgres 자체
+       점검(각 파일 __main__, 실 DB) 양쪽 통과 확인"
     - "LangGraph 파이프라인 + Notion Reporter — departments/07-agent-workforce/scripts.py
        (submit_candidate→narrate→notion_report), notion_reporter.py. F19 ImprovementCandidate를
        실제 Notion HR DB(NOTION_HR_DB)에 올린다. 2026-08-03 실측: 처음엔 F27 Scorecard를

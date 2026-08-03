@@ -243,6 +243,53 @@ def find_expired(
 
 
 # ---------------------------------------------------------------------------
+# Repository 인터페이스 + In-Memory 구현 (api/app.py가 dict 대신 이걸 쓴다)
+# ---------------------------------------------------------------------------
+
+
+class AccessRepository:
+    """조회·저장 인터페이스. 실제 구현은 workforce.access_requests/access_assignments에 반영한다."""
+
+    def get_request(self, request_id: str) -> AccessRequest | None:
+        raise NotImplementedError
+
+    def save_request(self, request: AccessRequest) -> None:
+        """새 요청이면 insert, 이미 있으면(같은 request_id) 전체 행을 갱신한다."""
+        raise NotImplementedError
+
+    def get_assignment(self, assignment_id: str) -> AccessAssignment | None:
+        raise NotImplementedError
+
+    def save_assignment(self, assignment: AccessAssignment) -> None:
+        """새 부여면 insert, 이미 있으면(같은 assignment_id) 전체 행을 갱신한다."""
+        raise NotImplementedError
+
+    def list_assignments_by_agent(self, agent_id: str) -> list[AccessAssignment]:
+        raise NotImplementedError
+
+
+class InMemoryAccessRepository(AccessRepository):
+    def __init__(self) -> None:
+        self._requests: dict[str, AccessRequest] = {}
+        self._assignments: dict[str, AccessAssignment] = {}
+
+    def get_request(self, request_id: str) -> AccessRequest | None:
+        return self._requests.get(request_id)
+
+    def save_request(self, request: AccessRequest) -> None:
+        self._requests[request.request_id] = request
+
+    def get_assignment(self, assignment_id: str) -> AccessAssignment | None:
+        return self._assignments.get(assignment_id)
+
+    def save_assignment(self, assignment: AccessAssignment) -> None:
+        self._assignments[assignment.assignment_id] = assignment
+
+    def list_assignments_by_agent(self, agent_id: str) -> list[AccessAssignment]:
+        return [a for a in self._assignments.values() if a.agent_id == agent_id]
+
+
+# ---------------------------------------------------------------------------
 # 자체 점검
 # ---------------------------------------------------------------------------
 
