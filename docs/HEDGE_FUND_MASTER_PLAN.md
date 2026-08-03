@@ -1,6 +1,6 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v3.1
+> 문서 상태: Production Plan v3.2
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
@@ -15,8 +15,13 @@
 > 운영 Frontend 기준: [AI Office Frontend and Operator Control Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 전사 데이터·부서별 Library: [헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 구현 가이드: [재일](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
-> 실행 현황·본부 간 의존성·다음 통합 순서: [실행 현황과 통합 계획 v2.0](PROJECT_IMPLEMENTATION_STATUS.md)
+> 실행 현황·본부 간 의존성·Daily Scrum·다음 통합 순서: [실행 현황과 통합 계획 v2.1](PROJECT_IMPLEMENTATION_STATUS.md)
 > 
+
+2026-08-03 기준 Research MCP와 Research·Quant Hermes까지 Docker에서 실행되며 Risk·QA는 API,
+Repository, Redis Event와 Harness가 구현됐다. 다만 Risk·QA·Trading·Accounting·Governance Runtime과
+전사 Paper Case는 아직 연결되지 않았다. 장기 단계 설명보다 현재 실행 증거와 당일 작업은 위 v2.1 문서를 우선한다.
+
 ## 1. 프로젝트 개요
 
 본 프로젝트는 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)를 에이전트 운영 계층으로 사용하고, [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)의 전문 분석가, Bull/Bear 토론, Trader, Risk, Portfolio Manager 구조를 투자 의사결정 패턴으로 참고한다.

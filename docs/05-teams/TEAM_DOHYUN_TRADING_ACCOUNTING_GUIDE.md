@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.6
+> 문서 상태: Team Handoff v1.7
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부, 공통 Frontend Platform 기술 DRI
@@ -10,8 +10,39 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 트레이딩·회계 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Trading·OMS·Portfolio·Close View와 공통 Platform, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)의 `PLAT-01`·`PLAT-02`·`TRD-01`·`ACC-01`·`UI-01`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)의 `CI-01`·`PLAT-01`·`PLAT-02`·`TRD-01`·`ACC-01`·`UI-01`·`UI-03`
 > 체크박스 해석: 11절은 최종 E2E DoD이며 Prototype 파일이 있다는 이유로 체크하지 않음
+
+---
+
+## 0. Daily Scrum (필수)
+
+> 기준: 2026-08-03 09:40 KST
+> 갱신 규칙: 도현님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
+
+### Yesterday
+
+- 이전 감사 이후 도현님 명의 신규 Commit은 확인되지 않았다. 미확인 작업을 완료로 추정하지 않는다.
+- 기존 OrderIntent·Paper Broker·OMS와 Ledger·Position·Reconciliation Prototype은 유지된다.
+- 동규님이 AI Office에 Risk·QA 계약 Panel을 추가했고 clean Node 22 환경에서 Build와 Render Test
+  `2/2`가 통과했다. 공통 Frontend Platform DRI로서 인수 Review가 필요하다.
+
+### Today
+
+- `CI-01`: CEO·HR의 동일한 `test_ollama_agent.py` 수집 충돌을 고치거나 pytest Test Path를 분리한다.
+- `PLAT-01`: Event Envelope, API Error, Idempotency Key, Health와 Version Registry Fixture를 만든다.
+- `PLAT-02`: 별도 Trading Bot Redis에 의존하지 않는 프로젝트 전용 Redis Service와 Network를 설계한다.
+- `UI-01`: 새 Risk·QA Panel을 `DEMO` 계약 Projection으로 명시하고 실제 API 연결 전까지 Runtime처럼
+  표시되지 않는지 Review한다.
+- `UI-03`: `npm audit`의 High 13, Moderate 4, Low 1건을 직접·전이 의존성으로 분류하고 Upgrade 회귀 계획을 남긴다.
+
+### Blocker
+
+- Trading·Accounting 전용 API/Worker가 없고 Order·Fill·Journal·Position·Snapshot DB Row가 모두 0건이다.
+- `TRD-01`은 재일님 `RQ-01` Research Packet과 동규님 `RSK-01` Risk Endpoint가 선행한다.
+- `PLAT-02` 완료 전 Risk·QA Redis Test는 별도 프로젝트 Redis를 빌려 쓰므로 제품 Runtime 증거가 아니다.
+- 공식 `/ui/snapshot`, `/ws/operations`, Sequence Gap 복구와 Kanban Bridge가 없다.
+- Frontend 의존성 Upgrade는 Vinext·Cloudflare Build 회귀 위험이 있어 `npm audit fix --force`를 바로 실행하지 않는다.
 
 ---
 

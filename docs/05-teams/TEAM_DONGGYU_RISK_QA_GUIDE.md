@@ -1,6 +1,6 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.6
+> 문서 상태: Team Handoff v1.7
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -10,8 +10,41 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리스크·AI QA 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Risk·Control·AI QA·Audit View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)의 상태 계약 Review
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`·`MODEL-03`·`OPS-01`
 > 체크박스 해석: 14절은 전 본부 Runtime·Canonical DB 연결까지 포함한 최종 DoD
+
+---
+
+## 0. Daily Scrum (필수)
+
+> 기준: 2026-08-03 09:40 KST
+> 갱신 규칙: 동규님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
+
+### Yesterday
+
+- Risk P1 Exposure·Stress·VaR·Correlation·Kill Switch와 PIT/Staleness Gate, LS Read-only Adapter를 구현했다.
+- Risk·QA PostgreSQL Repository, Redis Event Bus, Bounded Retry, Fail-closed Harness와 Replay Journal을 추가했다.
+- QA Model Risk, Internal Audit, Production Evidence Ingestion, Agentic RAG 회복성과 Incident 부모 Transaction을 구현했다.
+- Risk·QA API·Metrics·Observability, AI Office 전용 계약 Panel과 관련 Supabase Migration을 반영했다.
+- 증거: Risk Self-check 7개, QA Self-check 5개 통과. QA Decision 2, Incident Event 2,
+  Corrective Action 1건이 DB에 존재한다.
+
+### Today
+
+- `RSK-01`: 기존 Risk API·Repository·`risk.decision.v1` Publisher를 Compose Service로 올릴 준비를 한다.
+- `QA-01`: QA API·Consumer·Trace Repository의 Health, Environment와 DB/Event 설정 표를 완성한다.
+- `MODEL-03`: Risk·QA Hermes의 `gpt-5.6-luna` 변경이 의도된 것인지 확정하고
+  `scripts/check_hermes_profiles.py` 기대 계약과 일치시킨다.
+- `QA-03`: `scripts.py`의 `192.168.25.25:11434`를 환경변수 기반 Model Gateway로 교체할 계획과 Test를 작성한다.
+- `OPS-01`: `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`, Governed Fund·Policy·Profile 승인 입력의 담당자를 지정한다.
+
+### Blocker
+
+- Risk·QA Compose Service가 없고 `risk_decisions`, `trading_states`, Risk·QA `run_log_events`가 0건이다.
+- Hermes Profile Contract Check가 Risk·QA 모델 불일치 2건으로 실패한다.
+- 운영 Credential Preflight에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 누락됐다.
+- Workforce Profile 19개 중 13개가 DRAFT이며 Risk·QA Profile의 ACTIVE 승격은 영주님 승인 경로가 필요하다.
+- `QA-02`의 공식 Tool Allowlist는 영주님 `HR-02`, 실제 Research Evidence는 재일님 `RQ-01`이 선행한다.
 
 ---
 

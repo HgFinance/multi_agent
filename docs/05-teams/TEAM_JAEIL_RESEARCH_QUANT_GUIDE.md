@@ -1,6 +1,6 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.5
+> 문서 상태: Team Handoff v1.6
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
@@ -11,8 +11,45 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리서치·퀀트 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Market·Research·Strategy View
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `RQ-01`~`RQ-04`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `CI-06`·`RQ-01`~`RQ-05`
 > 체크박스 해석: 11절의 완료 표시는 재일님 소유 산출물 기준이며 전사 E2E 완료를 뜻하지 않음
+
+---
+
+## 0. Daily Scrum (필수)
+
+> 기준: 2026-08-03 09:40 KST
+> 갱신 규칙: 재일님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
+
+### Yesterday
+
+- 전 종목 2,596개 Universe와 거래정지·관리종목 제외, DART 현금흐름, F-Score 보강을 반영했다.
+- Research MCP와 Tool Gateway 강제 모드·Bearer 인증을 연결하고 `research-mcp`, `research-hermes`,
+  `quant-hermes`를 Docker에서 실행했다.
+- GPR·GDELT·Bluesky, Story Cluster, 일별 Label, Packet Outcome과 Source 실행 기록층을 추가했다.
+- 파생 Snapshot이 실제 TimescaleDB에 3,910건 적재돼 `RQ-04` 첫 적재 Gate를 통과했다.
+- 증거: Research API 7개 Domain 응답, Timescale 7개 Hypertable, Research Self-check 11개,
+  Quant Self-check 26개 통과.
+
+### Today
+
+- `CI-06`: `20260802002200_research_as_known_at.sql`을 Schema Contract 기대 순서에 추가해 실패 1건을 닫는다.
+- `RQ-01`: Research Packet의 `artifact_id`, `case_id`, `trace_id`, `as_known_at`과 Event Payload를
+  도현·동규님 Review가 가능한 Contract Fixture로 고정한다.
+- 금일 이미 반영한 정정 재무 PIT 보존, `as_known_at`, Research Data Steward와 Amihud·Roll 지표를
+  실제 Packet 한 건에서 재검증한다.
+- `collector_runs`의 `FAILED 11`을 Source별로 분류하고 허용 실패와 재처리 대상 목록을 남긴다.
+- `RQ-05`: 0건인 `microstructure_features` 영속 Worker의 최소 입력·출력과 Replay Hash를 확정한다.
+- 로컬 미커밋 `CLAUDE_CODE_OAUTH_TOKEN` Compose 변경은 호스트 자격 파일 비공유 원칙, Secret 주입과
+  팀원 재현 절차를 Review한 뒤 별도 Commit으로 제출한다.
+
+### Blocker
+
+- Schema Contract 목록 누락으로 전체 명시 Test가 `179 passed / 1 failed`다. Owner는 재일님이다.
+- `RQ-01`의 공식 Event Envelope은 도현님 `PLAT-01`, Project Redis는 `PLAT-02`가 선행한다.
+- NAVER 마지막 관측이 08-02 04:20, Alpaca가 07-31 01:49라 Staleness가 정책상 허용인지 확인이 필요하다.
+- 미래 거래일 Calendar와 지수 구성 이력의 승인 Source가 확정되지 않았다.
+- Quant API·Worker와 Strategy 승격은 공통 Runtime과 QA/Risk Gate 없이는 운영 완료로 승격하지 않는다.
 
 ---
 

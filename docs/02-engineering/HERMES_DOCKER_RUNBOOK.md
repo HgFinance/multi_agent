@@ -1,6 +1,6 @@
 # Hermes 도커 운영 Runbook
 
-담당: 재일 (리서치·퀀트) — 2026-08-02 작성
+담당: 재일 (리서치·퀀트) — 2026-08-02 작성, 2026-08-03 상태 갱신
 근거: 재일님 지시 "팀원들이랑 도커로 관리하기로 했는데 어떻게 해야 할지"
 
 이 문서는 **운영 절차서**다. 아키텍처 결정은
@@ -11,7 +11,7 @@ Department Backend Image에 설치하지 않는다”), 여기서는 그 결정�
 
 ---
 
-## 1. 지금 구성 (2026-08-02 실측 기준)
+## 1. 지금 구성 (2026-08-03 실측 기준)
 
 계획서 3.1~3.2대로 **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개**다.
 
@@ -47,11 +47,12 @@ $ docker exec hedgefund-quant-hermes    hermes profile list
 
 각 컨테이너가 **자기 부서 Profile만** 본다.
 
-### 아직 선언 단계인 것
+### 권한 강제의 현재 경계
 
-Profile의 `tool_allowlist` / `forbidden_tools`는 선언이다. 이것을 실행 시점에
-강제하는 Tool Gateway가 아직 없으므로, 강제 지점이 생기기 전에 "권한 분리 완료"
-라고 말하지 않는다. 컨테이너·저장소 분리는 됐고, 도구 호출 강제는 남았다.
+Research MCP에는 Bearer 인증과 허용 경로를 강제하는 Tool Gateway가 생겼다. 그러나 이 강제는
+Research 도구 면에만 적용되며 전 본부 공통 Gateway가 아니다. Profile 검사에서 CEO, Trading,
+Quant, Accounting과 HR의 `tool_allowlist`가 미선언 경고로 남는다. 따라서 컨테이너·저장소 분리와
+Research Tool 강제는 확인됐지만 전사 권한 분리가 완료됐다고 말하지 않는다.
 
 ---
 
@@ -248,16 +249,20 @@ docker exec hedgefund-research-hermes hermes -p research-department \
 
 ## 5. 모델·과금
 
-Profile 8개 모두 `provider: nous` / `poolside/laguna-s-2.1:free`다. 무료 티어이며
-API Key가 아니라 Nous Portal 로그인 방식이라 `.env`에 키가 없어도 된다.
-컨테이너는 `~/.hermes/auth.json`을 쓰므로 **로그인은 컨테이너에서 1회** 한다.
+현재 Git 기준 CEO, Research, Trading, Quant, Accounting과 HR 6개 Profile은
+`provider: nous` / `poolside/laguna-s-2.1:free`다. Risk와 QA는
+`provider: openai-codex` / `gpt-5.6-luna`로 변경돼 있다. 이 변경은
+`scripts/check_hermes_profiles.py`의 기대 모델과 일치하지 않아 2026-08-03 검사에서 위반 2건으로
+판정됐다. 의도한 변경인지 `MODEL-03`에서 확정하기 전에는 운영 Baseline으로 승격하지 않는다.
+
+Nous Profile은 Portal 로그인, Provider별 API·구독 자격은 해당 Runtime의 승인된 환경변수를 사용한다.
+호스트의 갱신형 자격 파일을 여러 컨테이너가 공유하거나 복사하지 않는다.
 
 ```bash
 docker exec -it hedgefund-hermes hermes status     # 인증·모델 확인
 ```
 
-Bedrock Claude(TECH_STACK_DECISIONS.md의 목표 Gateway)로 옮기는 것은 별개
-결정이며 이 Runbook의 범위가 아니다.
+Bedrock Claude(TECH_STACK_DECISIONS.md의 목표 Gateway)로 옮기는 것은 `MODEL-01`의 별도 결정이다.
 
 ---
 

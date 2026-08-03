@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.6
+> 문서 상태: Team Handoff v1.7
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -10,8 +10,38 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.0](../PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)의 `GOV-01`·`GOV-02`·`HR-01`~`HR-03`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)의 `GOV-01`·`GOV-02`·`HR-01`~`HR-04`
 > 체크박스 해석: 14절은 실제 Governance·Workforce API, 승인과 Agent Runtime까지 포함한 최종 DoD
+
+---
+
+## 0. Daily Scrum (필수)
+
+> 기준: 2026-08-03 09:40 KST
+> 갱신 규칙: 영주님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
+
+### Yesterday
+
+- 이전 감사 이후 영주님 명의 신규 Commit은 확인되지 않았다. 미확인 작업을 완료로 추정하지 않는다.
+- 기존 Mandate, Improvement Candidate, Access Lifecycle, Cost Scorecard와 승인 상태 머신은 유지된다.
+- 동규님 Migration으로 Risk·QA Profile이 추가돼 Workforce Agent Profile과 Version이 각각 19개가 됐다.
+  Version 상태는 `ACTIVE 6`, `DRAFT 13`이다.
+
+### Today
+
+- `HR-04`: 신규 DRAFT Profile 13개의 Owner, Model, Tool Allowlist, Data Scope와 승인 조건을 Review한다.
+- `HR-02`: QA와 Model Gateway가 같은 Profile Version을 조회할 Read API의 최소 응답 계약을 확정한다.
+- `GOV-01`: Mandate In-memory Repository를 PostgreSQL로 옮길 API·Migration 연결 순서를 정한다.
+- CEO·HR Hermes Profile에 Tool Allowlist를 선언하고 Profile Checker 경고를 해소할 작업자를 지정한다.
+- 도현님과 `CI-01`을 공동 처리해 CEO·HR Smoke Test 파일명을 고유하게 만들고 자동 판정 조건을 추가한다.
+
+### Blocker
+
+- Governance·Workforce API가 없고 Mandate·Investment Case·Approval·Improvement Candidate DB Row가 0건이다.
+- DRAFT Profile의 ACTIVE 승격은 QA 독립 검증과 모델 계약 확정 전에는 진행할 수 없다.
+- Risk·QA 운영은 Governed Fund·Policy와 `QA_POLICY_SOURCE_ID`가 없어 Production Gate를 통과하지 못한다.
+- CEO·HR Tool Allowlist 미선언과 동일 Smoke Test 파일명이 각각 Profile 경고와 전체 pytest 실패를 만든다.
+- 공식 Roster, Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다.
 
 ---
 

@@ -64,9 +64,10 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
-| Hermes Supervisor Model | 8개 `config.yaml` 모두 `nous/poolside/laguna-s-2.1:free`; Ollama Alias와 별도 계층 |
+| Hermes Supervisor Model | 6개는 `nous/poolside/laguna-s-2.1:free`, Risk·QA는 `openai-codex/gpt-5.6-luna`; Checker 기대값 불일치 2건 |
 
-따라서 현재 완료 상태는 **모델 청사진의 Git 등록**이다. 모델 다운로드, Alias Build, Gateway 연결과 Production 배포가 완료된 상태가 아니다.
+따라서 현재 완료 상태는 **모델 청사진의 Git 등록과 일부 Hermes Runtime 실행**이다. Risk·QA 변경은
+`MODEL-03` 승인 전이며 모델 다운로드, Alias Build, 공통 Gateway와 Production 배포가 완료된 상태가 아니다.
 
 ## 3. 모델 선택 의도
 

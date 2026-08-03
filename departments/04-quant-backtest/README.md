@@ -4,7 +4,7 @@
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen3:14b` 기반 `agent-quant`이고 Hermes Profile은
 `quant-backtest-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
-실제 실행 상태와 다음 Handoff는 [실행 현황과 통합 계획 v2.0](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
+실제 실행 상태와 재일님 Daily Scrum은 [실행 현황과 통합 계획 v2.1](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 
 ## Mission
 
@@ -37,8 +37,8 @@ CEO 승인이 필요하다. Backtest 수익률이 좋아도 미래 데이터, �
 | `pipeline/experiment_orchestrator.py` | 데이터·전략 가능성 Gate와 상태 전이 | 자체 점검 3개 통과, 실제 Experiment 4개 |
 | `hermes/` | 본부장 Profile, 직원 Persona와 Strategy Research Workflow | Runtime 통합 전 |
 
-2026-08-01 실제 Supabase에서 Universe 1개, Dataset Manifest 1개, Partition 31개, Hypothesis 3개,
-완료 Experiment 4개, Backtest Run 3개, Trade 10,544개와 Metric 108개를 확인했다. 이는 Script가
+2026-08-03 실제 Supabase에서 Dataset Manifest 1개, Hypothesis 5개(`TESTING 4`, `REJECTED 1`),
+Experiment 6개(`COMPLETED 5`, `RUNNING 1`)와 Backtest Run 3개를 확인했다. 이는 Script가
 DB와 한 번 이상 연결됐다는 증거지만, 상시 Worker·API·CI와 Strategy 승격이 완료됐다는 뜻은 아니다.
 
 ## 실행법

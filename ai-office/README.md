@@ -14,6 +14,7 @@
   인사팀 등 8개 조직.
 - 1층·2층 전환, 조직별 직원과 Bull/Bear 토론 DEMO.
 - Trading/Portfolio Snapshot Panel과 `DEMO` Mode 표시.
+- Risk·QA Profile, Retry, Fail-closed와 Run Journal 계약을 보여주는 Read-only Panel.
 - `../apps/api/main.py`의 `GET /ui/snapshot` Read-only DEMO BFF.
 
 직원 이동과 업무 흐름은 아직 `app/game/sim.ts`의 Scripted Simulation이다. Trading/Portfolio
@@ -89,6 +90,8 @@ cd ..
 python apps/api/main.py
 ```
 
+2026-08-03 clean Node 22 Container에서 Build와 Server Render Test `2/2`를 통과했다. `npm audit`은
+High 13, Moderate 4, Low 1건을 보고했으므로 직접·전이 의존성과 Upgrade 회귀를 배포 전 검토한다.
 현재 Cloudflare/Vinext 관련 기존 TypeScript 환경 오류와 실제 신규 오류를 구분해 기록한다.
 `DEMO`, `PAPER`, `LIVE` 데이터는 같은 화면에서 섞지 않는다.
 
