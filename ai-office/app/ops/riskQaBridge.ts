@@ -1,9 +1,10 @@
 /**
  * Risk·QA 전용 AI Office 연결 계약.
  *
- * 이 파일은 화면 Projection과 Hermes Profile 사이의 allowlist다. 다른 부서는
- * 이 계약에 포함하지 않으며, 여기에 적힌 직원도 주문·원장·Risk Limit을 직접
- * 변경할 수 없다. 실제 금융 상태는 Risk/QA API와 결정론적 엔진의 소유다.
+ * 이 파일은 화면 Projection과 두 부서의 Hermes Profile/Worker Registry를
+ * 연결하는 allowlist다. employees에는 Hermes Head를 포함하지 않고 실제
+ * LangGraph Worker만 둔다. Head 정보는 별도 필드로 표시해 인원 수 혼동을 막는다.
+ * 실제 금융 상태·주문·원장·Risk Limit은 각 Domain API와 결정론적 엔진이 소유한다.
  */
 
 import type { Agent, Snapshot } from "../game/sim";
@@ -31,7 +32,7 @@ export type RiskQaEmployee = {
   persona: string;
   name: string;
   role: string;
-  rank: "lead" | "member";
+  rank: "worker";
   skills: readonly string[];
   forbiddenTools: readonly string[];
 };
@@ -42,6 +43,10 @@ export type RiskQaDepartment = {
   name: string;
   orchestrator: "Hermes";
   employeeExecutor: "LangGraph";
+  headProfile: string;
+  headProvider: "openai-codex";
+  headModel: "gpt-5.6-luna";
+  workerModel: "qwen3:8b";
   sourceProfile: string;
   runtimeContract: string;
   employees: readonly RiskQaEmployee[];
@@ -62,71 +67,56 @@ const QA_FORBIDDEN_TOOLS = [
   "risk.trading_state.clear",
 ] as const;
 
-/** 연결 허용 범위. 반드시 두 부서만 유지한다. */
-export const RISK_QA_DEPARTMENT_IDS = ["ops", "qa"] as const satisfies readonly RiskQaDepartmentId[];
+export const RISK_QA_DEPARTMENT_IDS: readonly RiskQaDepartmentId[] = ["ops", "qa"];
 
 export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
   {
     id: "ops",
     domain: "risk-management",
-    name: "리스크본부",
+    name: "Risk관리본부",
     orchestrator: "Hermes",
     employeeExecutor: "LangGraph",
+    headProfile: "risk-management",
+    headProvider: "openai-codex",
+    headModel: "gpt-5.6-luna",
+    workerModel: "qwen3:8b",
     sourceProfile: "departments/03-risk/hermes/config.yaml",
-    runtimeContract: "/investment-cases/{case_id}/risk-check + /risk/v1/*",
+    runtimeContract: "/investment-cases/{case_id}/risk-check · /risk/v1/*",
     employees: [
       {
-        profileId: "RSK-00",
-        persona: "risk-supervisor",
-        name: "이예주",
-        role: "리스크본부 팀장",
-        rank: "lead",
-        skills: ["risk.pre_trade.check", "risk.qa.handoff"],
-        forbiddenTools: RISK_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "RSK-01",
-        persona: "pre-trade-risk-analyst",
-        name: "노은우",
-        role: "Pre-Trade 리스크",
-        rank: "member",
-        skills: ["risk.pre_trade.check"],
-        forbiddenTools: RISK_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "RSK-02",
-        persona: "market-liquidity-risk-agent",
+        profileId: "market-liquidity-worker",
+        persona: "market-liquidity-worker",
         name: "문가온",
-        role: "시장·유동성 리스크",
-        rank: "member",
-        skills: ["risk.p1.snapshot", "risk.trading_state.read"],
+        role: "Market·Liquidity Risk",
+        rank: "worker",
+        skills: ["risk.trading_state.read", "risk.p1.snapshot"],
         forbiddenTools: RISK_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "RSK-04",
-        persona: "compliance-policy-agent",
+        profileId: "pre-trade-risk-worker",
+        persona: "pre-trade-risk-worker",
+        name: "노은우",
+        role: "Pre-trade Risk",
+        rank: "worker",
+        skills: ["risk.case.check"],
+        forbiddenTools: RISK_FORBIDDEN_TOOLS,
+      },
+      {
+        profileId: "compliance-policy-worker",
+        persona: "compliance-policy-worker",
         name: "류하진",
-        role: "Compliance Policy",
-        rank: "member",
+        role: "Point-in-time Compliance Policy",
+        rank: "worker",
         skills: ["risk.compliance.check"],
         forbiddenTools: RISK_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "RSK-05",
-        persona: "derivatives-margin-risk-agent",
+        profileId: "derivatives-counterparty-worker",
+        persona: "derivatives-counterparty-worker",
         name: "안유하",
-        role: "파생·마진 리스크",
-        rank: "member",
-        skills: ["risk.p1.snapshot"],
-        forbiddenTools: RISK_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "RSK-06",
-        persona: "operational-counterparty-risk-agent",
-        name: "마도연",
-        role: "운영·거래상대방 리스크",
-        rank: "member",
-        skills: ["risk.trading_state.read"],
+        role: "Derivatives·Counterparty Exposure",
+        rank: "worker",
+        skills: ["risk.trading_state.record.read"],
         forbiddenTools: RISK_FORBIDDEN_TOOLS,
       },
     ],
@@ -137,79 +127,56 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     name: "AI QA·감사본부",
     orchestrator: "Hermes",
     employeeExecutor: "LangGraph",
+    headProfile: "qa-department",
+    headProvider: "openai-codex",
+    headModel: "gpt-5.6-luna",
+    workerModel: "qwen3:8b",
     sourceProfile: "departments/06-ai-qa-audit/hermes/config.yaml",
-    runtimeContract: "/investment-cases/{case_id}/qa-check + /qa/v1/*",
+    runtimeContract: "/investment-cases/{case_id}/qa-check · /qa/v1/*",
     employees: [
       {
-        profileId: "QAA-00",
-        persona: "qa-audit-supervisor",
-        name: "김동규",
-        role: "QA·감사본부 팀장",
-        rank: "lead",
-        skills: ["qa.evidence.check", "qa.internal_audit.evaluate"],
-        forbiddenTools: QA_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "QAA-01",
-        persona: "evidence-qa-agent",
+        profileId: "evidence-qa-worker",
+        persona: "evidence-qa-worker",
         name: "강태오",
-        role: "근거(Evidence) 검증",
-        rank: "member",
-        skills: ["qa.evidence.check", "qa.evidence.rag"],
+        role: "Evidence·Citation QA",
+        rank: "worker",
+        skills: ["qa.evidence.check"],
         forbiddenTools: QA_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "QAA-02",
-        persona: "hallucination-critic",
+        profileId: "hallucination-critic-worker",
+        persona: "hallucination-critic-worker",
         name: "문세라",
-        role: "환각(Hallucination) 검증",
-        rank: "member",
+        role: "Hallucination·Contradiction Review",
+        rank: "worker",
         skills: ["qa.evidence.rag"],
         forbiddenTools: QA_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "QAA-03",
-        persona: "tool-permission-security-reviewer",
-        name: "한지오",
-        role: "권한·보안 검토",
-        rank: "member",
-        skills: ["qa.tool_permission.check", "qa.trace.record"],
-        forbiddenTools: QA_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "QAA-04",
-        persona: "model-risk-agent",
+        profileId: "model-and-internal-audit-worker",
+        persona: "model-and-internal-audit-worker",
         name: "정하은",
-        role: "Model Risk",
-        rank: "member",
-        skills: ["qa.model_risk.evaluate"],
+        role: "Model Risk·Internal Audit",
+        rank: "worker",
+        skills: ["qa.model_risk.evaluate", "qa.internal_audit.evaluate"],
         forbiddenTools: QA_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "QAA-05",
-        persona: "agent-ops-monitor",
-        name: "서유나",
-        role: "Agent 운영 모니터링",
-        rank: "member",
-        skills: ["qa.ops.evaluate", "qa.trace.record"],
-        forbiddenTools: QA_FORBIDDEN_TOOLS,
-      },
-      {
-        profileId: "QAA-06",
-        persona: "internal-audit-agent",
+        profileId: "ops-and-permission-worker",
+        persona: "ops-and-permission-worker",
         name: "배준서",
-        role: "내부 감사",
-        rank: "member",
-        skills: ["qa.internal_audit.evaluate"],
+        role: "Agent Ops·Tool Permission",
+        rank: "worker",
+        skills: ["qa.ops.evaluate", "qa.tool_permission.check"],
         forbiddenTools: QA_FORBIDDEN_TOOLS,
       },
       {
-        profileId: "QAA-07",
-        persona: "incident-postmortem-agent",
-        name: "조은채",
-        role: "인시던트 사후분석",
-        rank: "member",
-        skills: ["qa.incident.record", "qa.trace.record"],
+        profileId: "incident-postmortem-worker",
+        persona: "incident-postmortem-worker",
+        name: "이수빈",
+        role: "Incident·Postmortem",
+        rank: "worker",
+        skills: ["qa.incident.record"],
         forbiddenTools: QA_FORBIDDEN_TOOLS,
       },
     ],
@@ -222,15 +189,12 @@ export type RiskQaActivity = {
   taskLabel: string;
   onDutyCount: number;
   workingCount: number;
-  employees: readonly {
-    employee: RiskQaEmployee;
-    agent: Agent | null;
-  }[];
+  employees: readonly { employee: RiskQaEmployee; agent: Agent | null }[];
 };
 
 const ACTIVE_AGENT_STATUSES: readonly Agent["status"][] = ["업무 중", "회의 중"];
 
-/** AI Office simulation의 실제 Agent 상태를 Risk/QA 프로필 카드에 투영한다. */
+/** AI Office simulation의 Agent 상태를 Risk/QA Worker 카드에 투영한다. */
 export function getRiskQaActivity(
   department: RiskQaDepartment,
   agents: readonly Agent[],
@@ -242,7 +206,11 @@ export function getRiskQaActivity(
   const statusLabel = snapshot.running ? departmentStatus : "출근 대기";
   const taskLabel =
     activeAgents.find((agent) => agent.taskLabel)?.taskLabel ??
-    (statusLabel === "완료" ? "오늘 업무 완료" : statusLabel === "출근 대기" ? "업무 시작을 기다리는 중" : "다음 작업을 기다리는 중");
+    (statusLabel === "완료"
+      ? "오늘 업무 완료"
+      : statusLabel === "출근 대기"
+        ? "업무 시작을 기다리는 중"
+        : "다음 작업을 기다리는 중");
 
   return {
     departmentStatus,
@@ -258,5 +226,5 @@ export function getRiskQaActivity(
 }
 
 export function isRiskQaDepartment(id: string): id is RiskQaDepartmentId {
-  return (RISK_QA_DEPARTMENT_IDS as readonly string[]).includes(id);
+  return RISK_QA_DEPARTMENT_IDS.includes(id as RiskQaDepartmentId);
 }

@@ -20,6 +20,16 @@
 
 ---
 
+## Runtime source of truth
+
+이 문서의 아래 역할 카탈로그는 과거 채용안·권한 검토·평가 문맥을 보존한 Historical taxonomy다. 현재 실행 인원, Worker ID, trigger, tool, 모델, 활성/조건부 상태를 판정할 때는 아래 순서만 사용한다.
+
+1. `departments/<n>/hermes/config.yaml`의 `staff_registry`와 `runtime_personalities`
+2. `departments/03-risk/risk_employee_workers.py` 및 `departments/06-ai-qa-audit/qa_employee_workers.py`의 `WORKER_SPECS`
+3. 전사 현재 Registry인 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)
+
+따라서 이 문서의 `RSK-*`, `QAA-*`, `RES-*`, `TRD-*`, `QNT-*`, `ACC-*` 및 `Specialist Agent` 이름은 현재 Worker ID가 아니다. 현재 runtime은 부서장 Hermes + 독립 LangGraph Worker + Ollama `qwen3:8b`이며, 이 Historical taxonomy를 실행 설정으로 역해석하지 않는다.
+
 ## 1. 이 문서가 정의하는 것
 
 이 프로젝트의 디지털 직원은 단순한 프롬프트 이름이 아니다. 각 직원은 다음 항목이 분리된 **실행 가능한 Job Profile**이다.

@@ -155,7 +155,7 @@ class ModelGateway:
 - `BedrockEmbeddingAdapter`: Production Embedding 후보
 - `OllamaEmbeddingAdapter`: 로컬 Embedding
 
-LangGraph Node에서는 직접 `boto3`나 Ollama URL을 호출하지 않고 Gateway를 주입한다.
+독립 LangGraph Worker Graph에서는 직접 `boto3`나 Ollama URL을 호출하지 않고 Gateway와 allow-listed tool을 주입한다.
 
 ### 3.2 Bedrock Claude
 

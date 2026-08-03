@@ -18,6 +18,8 @@ import OpsPanel from "./ops/OpsPanel";
 import RiskQaPanel from "./ops/RiskQaPanel";
 
 type View = "live" | "dashboard";
+const CANONICAL_DEPARTMENT_COUNT = 7;
+const CANONICAL_WORKER_COUNT = 42;
 
 const statusClass: Record<DeptStatus, string> = {
   "완료": "done",
@@ -161,7 +163,7 @@ export default function Home() {
     engine.start();
     setBriefing(false);
     setView("live");
-    showToast(`07:00 — AI 직원 ${STAFF.length}명이 출근합니다 ✨`);
+ showToast(`07:00 — Worker ${CANONICAL_WORKER_COUNT}명이 시뮬레이션에 참여합니다 ✨`);
   };
 
   const approve = () => {
@@ -309,7 +311,7 @@ function LiveView({
     <>
       <header className="live-hero">
         <div>
-          <p className="eyebrow">LIVE OFFICE · {STAFF.length} AI STAFF · REAL-TIME</p>
+ <p className="eyebrow">DEMO OFFICE · {CANONICAL_WORKER_COUNT} WORKERS · SIMULATION</p>
           <h1>
             {COMPANY.titlePrefix} <em className="highlight">{COMPANY.titleAccent}</em>
           </h1>
@@ -753,7 +755,7 @@ function DashboardView({
             <h1>
               오늘 회사가 어떻게 움직이는지 <em className="highlight">한눈에</em> 보여드려요
             </h1>
-            <p>AI는 비서, 결정은 대표님. {teams.length}개 팀 {STAFF.length}명의 조사부터 제작·저장·브리핑까지 한 흐름으로 관리해요.</p>
+ <p>Worker는 context를 만들고, 결정은 권한을 가진 결정론적 Gate와 대표님이 맡아요. {CANONICAL_DEPARTMENT_COUNT}개 부서 {CANONICAL_WORKER_COUNT}명의 흐름을 Projection으로 보여줘요.</p>
           </div>
           <div className="hero-actions">
             <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
@@ -766,9 +768,9 @@ function DashboardView({
 
       <section className="summary-grid" aria-label="오늘 업무 요약">
         <article className="metric yellow">
-          <span>AI 직원</span>
-          <strong>{STAFF.length}</strong>
-          <small>STAFF</small>
+<span>LangGraph Worker</span>
+<strong>{CANONICAL_WORKER_COUNT}</strong>
+<small>WORKERS</small>
         </article>
         <article className="metric mint">
           <span>완료</span>
@@ -852,8 +854,8 @@ function DashboardView({
             <div className="win-body">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">LIVE OFFICE</p>
-                  <h2>{teams.length}개 부서 · 팀장 {teams.length}명 근무 현황</h2>
+<p className="eyebrow">DEMO ORGANIZATION</p>
+<h2>{CANONICAL_DEPARTMENT_COUNT}개 부서 · {CANONICAL_WORKER_COUNT} Worker 현황</h2>
                 </div>
                 <div className="filter-tabs" role="group" aria-label="팀 상태 필터">
                   {(["전체", "진행 중", "완료", "승인 대기", "연동 대기"] as const).map((item) => (
@@ -992,8 +994,8 @@ function DashboardView({
       </section>
 
       <p className="dash-note">
-        대표 {CEO.name}({CEO.callsign}) · AI 직원 {teams.length}개 부서 {STAFF.length}명 · 이 화면은 라이브 오피스와 같은 상태를
-        공유해요.
+        대표 {CEO.name}({CEO.callsign}) · {CANONICAL_DEPARTMENT_COUNT}개 Hermes 부서 · {CANONICAL_WORKER_COUNT}개 독립 LangGraph Worker · 화면은
+        DEMO Projection입니다.
       </p>
     </>
   );
