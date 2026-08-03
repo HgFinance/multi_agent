@@ -139,6 +139,44 @@ usage:
   run: "risk-management chat -q 'Assess risk of AAPL long position'"
   collaborate: "risk-management chat -q 'Evaluate portfolio risk with 25% volatility, then check compliance against the current Mandate'"
 
+# 직원 실행 계층 v2. Hermes의 model은 부서장 전용이며 직원은 독립 LangGraph
+# Worker Graph에서 Ollama Qwen을 사용한다.
+employee_runtime:
+  executor: langgraph
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:8b
+  base_url_env: OLLAMA_BASE_URL
+  output_contract: risk.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/03-risk/engine/risk_engine.py
+  failure_action: HOLD_ESCALATE
+
+workers:
+  market-liquidity-worker:
+    status: active
+    replaces: [market-liquidity-risk-agent]
+    tools: [risk.trading_state.read, risk.p1.snapshot]
+    output: advisory_context
+  pre-trade-risk-worker:
+    status: active
+    replaces: [pre-trade-risk-analyst]
+    tools: [risk.case.check]
+    output: advisory_context
+  compliance-policy-worker:
+    status: conditional
+    replaces: [compliance-policy-agent]
+    trigger: compliance_evidence_exists
+    tools: [risk.compliance.check]
+    output: advisory_context
+  derivatives-counterparty-worker:
+    status: conditional
+    replaces: [derivatives-margin-risk-agent, operational-counterparty-risk-agent]
+    trigger: counterparty_or_derivatives_signal_exists
+    tools: [risk.trading_state.record.read]
+    output: advisory_context
+
 validation_record:
   recorded_at: "2026-08-03"
   scope: "Risk·QA Redis 통합 수용 테스트"

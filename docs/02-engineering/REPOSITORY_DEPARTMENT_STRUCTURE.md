@@ -1,5 +1,7 @@
 # Department-Oriented Repository Structure
 
+직원 실행 계층과 부서 간 핸드오프는 [DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 문서 상태: Confirmed Target Structure v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 적용 범위: CEO Office, CEO 직속 Agent Workforce 인사팀, 6개 투자 본부와 공통 Platform

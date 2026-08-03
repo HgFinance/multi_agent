@@ -1,5 +1,7 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
+Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 문서 상태: Team Handoff v1.8
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  

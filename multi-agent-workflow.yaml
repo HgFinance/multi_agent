@@ -4,6 +4,23 @@ version: multi-agent-workflow-v2
 description: "HgFinance 5개 분리 Workflow와 동적 Event Routing registry"
 canonical_workflow_index: orchestration/workflows/index.yaml
 
+# 실행 계층 계약: 실제 Head 모델은 각 departments/<n>/hermes/config.yaml에서 선택한다.
+runtime_layers:
+  department_head:
+    runtime: hermes
+    model_choices: [openai-codex, anthropic-claude-code]
+    responsibility: department_synthesis_and_escalation
+  department_employee:
+    runtime: langgraph
+    provider: ollama
+    model: qwen3:8b
+    output: non_binding_worker_context
+    retry: {max_retries: 2, max_attempts: 3}
+  binding_gates:
+    risk: departments/03-risk/engine/risk_engine.py
+    qa: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py
+  failure_action: fail_closed_hold_reject_escalate_rollback
+
 model:
   provider: nous
   name: "poolside/laguna-s-2.1:free"
