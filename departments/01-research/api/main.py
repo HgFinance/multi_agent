@@ -386,7 +386,10 @@ def macro_observations(
         """
         select distinct on (s.external_series_code, o.period)
                s.external_series_code as code, o.period, o.value,
-               o.published_at, o.vintage_date
+               o.published_at, o.vintage_date,
+               -- metadata 추가(2026-08-03): 수집기가 이미 52주 위치·백분위를
+               -- 넣고 있는데 SELECT 에 없어서 심리 축이 통째로 안 보였다.
+               o.metadata
         from research.macro_observations o
         join research.macro_series s on s.series_id = o.series_id
         where s.external_series_code = any(%s)
