@@ -95,6 +95,8 @@ class ResearchState(TypedDict, total=False):
     insight_claims: list    # 해석의 채점 행
     insight_note: str
     revisions: int          # 반박 -> 재해석 횟수 (상한 MAX_REVISIONS)
+    gap_fills: int          # 근거 부족 -> 재수집 횟수 (상한 MAX_GAP_FILLS)
+    evidence_gaps: dict     # 분석가별 미확인 항목
     halted: str             # 중단 사유 (거래 불가 등)
 
 
@@ -941,6 +943,64 @@ def challenge_packet(state: ResearchState) -> dict:
                                       verification=verification)}
 
 
+# ── Evidence Gap Loop ──────────────────────────────────────────────────────
+# ▶ 분석가가 INSUFFICIENT_DATA 를 내면 지금은 **그냥 다음으로 갔다.** 근거가
+#   부족하다고 스스로 말했는데 아무도 메우려 하지 않는다 - 도구를 쥐여준
+#   의미가 여기서 사라졌다. framework 의 Evidence Gap Loop 가 이 자리다.
+#
+#   되돌아가는 곳은 assemble_evidence 다. 분석가 개별 재실행이 아니라 근거를
+#   더 모아 **전원이 다시 보게** 한다 - 한 분석가만 다시 돌리면 다른 분석가는
+#   옛 근거로 판단한 채 남아 Packet 안에서 시점이 갈라진다.
+MAX_GAP_FILLS = 1        # 한 번만. 못 메우면 부족한 채로 내되 그 사실을 남긴다
+
+
+def gap_report(state: ResearchState) -> dict:
+    """어느 분석가가 무엇이 없다고 했는가. 순수 함수."""
+    gaps: dict[str, list[str]] = {}
+    for node in ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment"):
+        st = state.get(node)
+        if not isinstance(st, dict):
+            continue
+        ro = st.get("readout") or {}
+        missing = [str(x) for x in (ro.get("unavailable") or [])][:8]
+        if str(st.get("verdict") or ro.get("verdict")) == "INSUFFICIENT_DATA":
+            missing = missing or ["(사유 미기재)"]
+        if missing:
+            gaps[node] = missing
+    return gaps
+
+
+def needs_gap_fill(state: ResearchState) -> str:
+    """근거를 더 모을 가치가 있는가. **판정은 결정론이다.**
+
+    빈 구멍이 있다고 무조건 되돌아가지 않는다 - 어떤 지표는 그 종목에
+    원래 없다(비상장 파생, 미상장 기간). 무한히 다시 모아도 안 채워진다.
+    **분석가가 INSUFFICIENT_DATA 로 판정 자체를 못 낸 경우**만 되돌아간다.
+    """
+    if int(state.get("gap_fills") or 0) >= MAX_GAP_FILLS:
+        return "done"
+    for node in ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment"):
+        st = state.get(node)
+        if not isinstance(st, dict):
+            continue
+        if str(st.get("verdict") or (st.get("readout") or {}).get("verdict"))                 == "INSUFFICIENT_DATA":
+            return "fill"
+    return "done"
+
+
+def bump_gap_fill(state: ResearchState) -> dict:
+    """재수집 횟수를 올리고 무엇이 비었는지 남긴다.
+
+    **메우려 했다는 사실과 무엇이 비었는지가 남아야** 다음에 수집기를 고친다.
+    조용히 다시 돌면 같은 구멍이 영원히 반복된다.
+    """
+    gaps = gap_report(state)
+    return {"gap_fills": int(state.get("gap_fills") or 0) + 1,
+            "evidence_gaps": gaps}
+
+
 # ── 노드 10.5: 해석 (인사이트) ─────────────────────────────────────────────
 # ▶ **인사이트가 나올 자리가 없었다.** 분석가는 compute -> narrate -> verify 로
 #   돌고 라벨은 코드가 정한다. LLM 은 그 라벨을 문장으로 옮길 뿐이라 여섯 축을
@@ -1089,6 +1149,7 @@ def build_pipeline():
     g.add_node("challenge_packet", challenge_packet)
     g.add_node("interpret", interpret)
     g.add_node("bump_revision", bump_revision)
+    g.add_node("bump_gap_fill", bump_gap_fill)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
@@ -1108,7 +1169,11 @@ def build_pipeline():
     # 레짐(국내 단면) 다음에 지정학(외생 환경) - 안에서 밖으로 넓히는 순서
     g.add_edge("analyze_regime", "analyze_geopolitical")
     g.add_edge("analyze_geopolitical", "analyze_microstructure")
-    g.add_edge("analyze_microstructure", "draft_packet")
+    # Evidence Gap Loop - 분석가가 판정을 못 냈으면 근거를 더 모아 전원이
+    # 다시 본다. 한 분석가만 다시 돌리면 Packet 안에서 시점이 갈라진다.
+    g.add_conditional_edges("analyze_microstructure", needs_gap_fill,
+                            {"fill": "bump_gap_fill", "done": "draft_packet"})
+    g.add_edge("bump_gap_fill", "assemble_evidence")
     g.add_edge("draft_packet", "interpret")
     # 해석 -> 반박 -> (필요하면) 재해석. **이 순환이 LangGraph 를 쓰는 이유다.**
     # 지금까지 그래프는 선형 간선뿐이라 함수를 순서대로 부르는 것과 다를 게
@@ -1492,6 +1557,15 @@ def run_research_department(symbol: str) -> dict:
     # 선순환 1단: 반증 가능한 주장을 발행해 남긴다. 채점은 지평이 지난 뒤
     # collectors/packet_outcome_scorer.py 가 시세로 대조한다.
     claims = build_packet_claims(out, packet)
+    # ▶ **해석도 채점 대상이다.** 반증 조건과 지평이 있으므로 같은 경로로
+    #   발행한다 - 자가 발전의 대상이 지표에서 판단으로 넓어지는 지점이다.
+    #   생성만 하고 발행을 안 하면 인사이트는 영원히 성적이 안 매겨진다.
+    insight_claims = out.get("insight_claims") or []
+    claims = claims + insight_claims
+    packet["_insights"] = out.get("insights") or []
+    packet["_insight_rejected"] = out.get("insight_rejected") or []
+    packet["_insight_note"] = out.get("insight_note")
+    packet["_revisions"] = int(out.get("revisions") or 0)
     packet["_claims"] = claims
     packet["_claims_recorded"] = _record_packet_claims(
         trace_id=trace_id, symbol=symbol, claims=claims,
@@ -1551,6 +1625,35 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
         "",
         "## Thesis", "", str(packet.get("thesis", "")), "",
+    ]
+    # ── 해석 (인사이트) ─────────────────────────────────────────────────────
+    # 수치 나열과 분리해 싣는다. 검증 방식이 다르므로 읽는 사람도 다르게
+    # 읽어야 한다 - Fact 는 확정치 대조를 통과한 것이고, 해석은 **반증 가능한
+    # 가설**이다. 섞어 놓으면 가설이 사실처럼 읽힌다.
+    _ins = packet.get("_insights") or []
+    if _ins:
+        lines += ["## 인사이트 (교차 해석)", "",
+                  f"_{len(_ins)}건. 각 해석은 서로 다른 분석가 2인 이상의 "
+                  f"근거를 가로지르며 **반증 조건**을 함께 낸다 - 틀릴 수 있어야 "
+                  f"분석이다._", ""]
+        for k, ins in enumerate(_ins, 1):
+            lines += [
+                f"**{k}. [{ins.get('kind')}]** {ins.get('claim')}",
+                f"- 근거: {', '.join(ins.get('source_nodes') or [])} "
+                f"({len(ins.get('supporting_fact_ids') or [])}개 Fact)",
+                f"- **반증 조건**: {ins.get('falsifier')}",
+                f"- 지평 {ins.get('horizon_days')}일 · 신뢰도 {ins.get('confidence')}",
+                "",
+            ]
+    _rej = packet.get("_insight_rejected") or []
+    if _rej:
+        # ▶ 거부를 숨기지 않는다. 왜 인사이트가 적은지 보여야 프롬프트를 고친다
+        lines += [f"_거부된 해석 {len(_rej)}건: "
+                  + "; ".join(str(r.get("reason", ""))[:70] for r in _rej[:3])
+                  + "_", ""]
+    if packet.get("_revisions"):
+        lines += [f"_반박을 받아 해석을 {packet['_revisions']}회 재작성했다._", ""]
+    lines += [
     ]
     for title, key in (("사실 (facts)", "facts"),
                        ("해석 (interpretation)", "interpretation"),
@@ -2117,6 +2220,81 @@ def _check_interpret_refuses_thin_input():
     assert r2["insights"] == [], r2
 
 
+def _check_insight_render_and_publish():
+    """인사이트가 **리포트에 실리고 채점 행으로 발행되는가.**
+
+    생성만 하고 발행을 안 하면 영원히 성적이 안 매겨진다 - 자가 발전의
+    대상이 지표에 머문다. 렌더링도 마찬가지로, 안 보이면 없는 것과 같다.
+    """
+    sys.path.insert(0, str(_BASE / "contracts"))
+    from insight import Insight, to_claims
+
+    ins = {"kind": "DIVERGENCE",
+           "claim": "추세는 섰는데 폭이 안 따라와 저변이 좁다",
+           "source_nodes": ["technical", "regime"],
+           "supporting_fact_ids": ["f1", "f2"],
+           "falsifier": "5거래일 내 상승비율이 55% 를 넘으면 틀렸다",
+           "horizon_days": 5, "confidence": "MEDIUM"}
+    md = _render_packet_md(
+        {"symbol": "005380", "thesis": "t", "facts": [], "_insights": [ins],
+         "_insight_rejected": [{"reason": "없는 Fact 참조"}], "_revisions": 1},
+        now="2026-08-04T00:00:00Z")
+    assert "## 인사이트 (교차 해석)" in md, "인사이트 절이 없다"
+    # ▶ 절 이름이 기존 interpretation 절과 겹치면 읽는 사람이 헷갈린다
+    assert md.count("## 해석 (교차") == 0, "절 이름이 interpretation 과 겹친다"
+    assert "반증 조건" in md, "반증 조건이 안 보인다 - 이게 인사이트의 핵심이다"
+    assert "거부된 해석" in md, "거부를 숨기면 왜 적은지 모른다"
+    assert "재작성" in md, "재해석 횟수가 안 보인다"
+
+    # 발행 행이 반증 조건을 싣는가 (채점의 기준이다)
+    claims = to_claims([Insight(**ins)], symbol="005380")
+    assert claims[0]["falsification_note"], "반증 조건이 채점 행에 없다"
+    assert claims[0]["kind"] == "INSIGHT_DIVERGENCE"
+
+
+def _check_gap_loop_terminates_and_is_selective():
+    """근거 재수집 순환이 **끝나고, 아무 때나 돌지 않는가.**
+
+    빈 구멍이 있다고 무조건 되돌아가면 안 된다 - 어떤 지표는 그 종목에
+    원래 없어서 몇 번을 다시 모아도 안 채워진다. 그러면 순환이 낭비가 되고,
+    낭비하는 순환은 곧 꺼진다.
+    """
+    # 판정을 못 낸 분석가가 있으면 되돌아간다
+    st = {"technical": {"verdict": "INSUFFICIENT_DATA"}}
+    assert needs_gap_fill(st) == "fill", st
+
+    # ▶ 미확인 항목이 있어도 **판정은 냈으면** 되돌아가지 않는다
+    st2 = {"technical": {"verdict": "POSITIVE",
+                         "readout": {"unavailable": ["amihud", "vpin"]}}}
+    assert needs_gap_fill(st2) == "done", st2
+
+    # 상한에 닿으면 무조건 끝난다 - 못 메우면 부족한 채로 내되 사실을 남긴다
+    st3 = dict(st, gap_fills=MAX_GAP_FILLS)
+    assert needs_gap_fill(st3) == "done", st3
+
+    # 유한성 - 실제로 돌려본다
+    state = dict(st, gap_fills=0)
+    steps = 0
+    while needs_gap_fill(state) == "fill":
+        state.update(bump_gap_fill(state))
+        steps += 1
+        assert steps <= MAX_GAP_FILLS + 1, "재수집 순환이 안 멈춘다"
+    assert steps == MAX_GAP_FILLS, steps
+
+    # 무엇이 비었는지 남는가 - 안 남기면 같은 구멍이 영원히 반복된다
+    g = bump_gap_fill({"technical": {"verdict": "INSUFFICIENT_DATA",
+                                     "readout": {"unavailable": ["amihud"]}},
+                       "regime": {"verdict": "OK",
+                                  "readout": {"unavailable": ["vkospi_52w"]}}})
+    assert g["evidence_gaps"]["technical"] == ["amihud"], g
+    assert g["evidence_gaps"]["regime"] == ["vkospi_52w"], g
+
+    # 그래프에 순환 간선이 있는가
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    assert 'g.add_edge("bump_gap_fill", "assemble_evidence")' in src
+    assert '"fill": "bump_gap_fill"' in src
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -2177,6 +2355,8 @@ if __name__ == "__main__":
     _check_data_quality_gate()
     _check_revision_cycle_terminates()
     _check_interpret_refuses_thin_input()
+    _check_insight_render_and_publish()
+    _check_gap_loop_terminates_and_is_selective()
     _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()

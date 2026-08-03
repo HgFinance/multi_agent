@@ -169,7 +169,12 @@ def to_claims(insights: list[Insight], *, symbol: str) -> list[dict]:
     for i, ins in enumerate(insights):
         out.append({
             "kind": "INSIGHT_" + ins.kind,
-            "metric": "insight",
+            # ▶ **metric 에 순번을 넣는다.** packet_claims 의 충돌 키가
+            #   (trace_id, kind, metric, horizon_days) 라서 metric 을 그냥
+            #   "insight" 로 두면 같은 종류·같은 지평 해석 둘 중 하나가
+            #   `do nothing` 으로 조용히 사라진다 - 발행한 줄 알았는데 채점
+            #   대상이 아닌 상태가 되고, 그건 통계를 오염시킨다.
+            "metric": f"insight_{i}",
             "op": "==",
             "threshold_text": ins.claim[:200],
             "horizon_days": ins.horizon_days,
@@ -274,6 +279,21 @@ def _check_claims_do_not_invent_probability():
     assert c["horizon_days"] == 5
 
 
+def _check_same_kind_insights_do_not_collide():
+    """같은 종류·같은 지평 해석 둘이 **서로 덮어쓰지 않는가.**
+
+    packet_claims 의 충돌 키는 (trace_id, kind, metric, horizon_days) 이고
+    `do nothing` 이다. metric 이 같으면 두 번째가 조용히 사라진다 - 발행한
+    줄 알았는데 채점 대상이 아닌 상태가 된다.
+    """
+    two = [Insight(**_base(claim="첫 번째 해석이다 폭이 좁다")),
+           Insight(**_base(claim="두 번째 해석이다 거래대금이 준다"))]
+    claims = to_claims(two, symbol="005380")
+    keys = {(c["kind"], c["metric"], c["horizon_days"]) for c in claims}
+    assert len(keys) == 2, f"충돌 키가 겹친다: {keys}"
+    assert claims[0]["threshold_text"] != claims[1]["threshold_text"]
+
+
 def _check_extra_field_forbidden():
     try:
         Insight(**_base(뭔가="추가"))
@@ -294,5 +314,6 @@ if __name__ == "__main__":
     _check_reference_integrity();             print("  참조 무결성+사유        OK")
     _check_contract_violation_keeps_reason(); print("  거부 사유 보존          OK")
     _check_claims_do_not_invent_probability();print("  확률 날조 안 함         OK")
+    _check_same_kind_insights_do_not_collide(); print("  동종 해석 비충돌        OK")
     _check_extra_field_forbidden();           print("  미지 필드 거부          OK")
-    print("Insight 계약 8개 영역 통과.")
+    print("Insight 계약 9개 영역 통과.")
