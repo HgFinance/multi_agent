@@ -1,5 +1,7 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
+> 실행 계층 확정(2026-08-03): 부서장은 Hermes + Codex/Claude Code, 직원은 독립 LangGraph Worker + Ollama `qwen3:8b`다. Risk는 4개 Worker, QA는 5개 Worker로 통합했으며, 중복된 기존 RSK/QAA 역할명은 Profile·감사 이력 호환 Alias로만 유지한다. 상세 매핑은 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 기준으로 한다.
+
 Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
 > 문서 상태: Team Handoff v1.8
@@ -35,9 +37,8 @@ Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](..
 
 - `RSK-01`: 기존 Risk API·Repository·`risk.decision.v1` Publisher를 Compose Service로 올릴 준비를 한다.
 - `QA-01`: QA API·Consumer·Trace Repository의 Health, Environment와 DB/Event 설정 표를 완성한다.
-- `MODEL-03`: Risk·QA Hermes의 `gpt-5.6-luna` 변경이 의도된 것인지 확정하고
-  `scripts/check_hermes_profiles.py` 기대 계약과 일치시킨다.
-- `QA-03`: `scripts.py`의 `192.168.25.25:11434`를 환경변수 기반 Model Gateway로 교체할 계획과 Test를 작성한다.
+- `MODEL-03`: Risk·QA `head_runtime`의 Hermes `gpt-5.6-luna`와 직원 `employee_runtime`의 Ollama `qwen3:8b`를 각각 검증한다. 전체 Profile을 하나의 모델로 비교하지 않는다.
+- `QA-03`: `scripts.py`의 직원 Ollama 호출은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수 기반으로 전환됐다. 실제 Ollama Health와 모델 응답 증거만 운영 전 검증한다.
 - `OPS-01`: `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`, Governed Fund·Policy·Profile 승인 입력의 담당자를 지정한다.
 - Risk·QA 결정론적 Markdown 보고서와 Notion Block Projection을 Merge했고 최신 회귀 Test 18개가 통과했다.
 - `RPT-01`: Report Hash, Canonical Artifact Storage와 Notion Page 멱등 키를 다음 계약으로 확정한다.

@@ -9,11 +9,20 @@ runtime_layers:
   department_head:
     runtime: hermes
     model_choices: [openai-codex, anthropic-claude-code]
+    active_profile_models:
+      risk-management: openai-codex/gpt-5.6-luna
+      qa-department: openai-codex/gpt-5.6-luna
+    alternative_provider: anthropic-claude-code
     responsibility: department_synthesis_and_escalation
   department_employee:
     runtime: langgraph
     provider: ollama
     model: qwen3:8b
+    model_selection: fixed_until_model_eval_approved
+    discovery_command: ollama list
+    worker_counts:
+      risk-management: 4
+      qa-department: 5
     output: non_binding_worker_context
     retry: {max_retries: 2, max_attempts: 3}
   binding_gates:

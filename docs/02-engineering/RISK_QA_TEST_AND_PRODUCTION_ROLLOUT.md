@@ -10,8 +10,7 @@
 
 ### Workforce Agent Profile
 
-`20260802001600_risk_qa_runtime_registration.sql`은 Risk 6개(`RSK-*`)와 QA
-8개(`QAA-*`)의 `workforce.agent_profiles` 및 version row를 등록한다.
+`20260802001600_risk_qa_runtime_registration.sql`은 감사·FK 호환을 위해 Risk 6개(`RSK-*`)와 QA 8개(`QAA-*`)의 `workforce.agent_profiles` 및 version row를 등록한다. 실제 실행 Registry는 Risk 4개 Worker와 QA 5개 Worker이며, 중복된 Profile ID는 호환 Alias다.
 
 - profile: `PROBATION`
 - profile version: `DRAFT`

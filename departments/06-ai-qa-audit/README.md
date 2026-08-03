@@ -22,7 +22,14 @@
 `harness/journal.py`는 Hermes QA 오케스트레이터와 LangGraph 직원 실행을 `run_id`로 묶어 `InputSnapshot → AgentOutput → Validation → Decision`을 기록한다. QA는 Order/Fill을 소유하지 않으며 공통 계약의 별도 이벤트 타입만 감사 스키마에서 허용한다. `RunJournal.replay()`와 `RunJournal.review()`로 입력 해시·버전·검증 실패·폴백 사유를 재현·집계하고, 운영 적재 스키마는 `audit.run_log_events`다.
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-qa`이고 Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+
+## Worker Registry 수와 실제 실행 수
+
+- Registry에 등록된 실제 Worker는 5개다.
+- 기본 입력에서 항상 실행되는 Worker는 1개(`evidence-qa-worker`)다.
+- 조건부 Worker는 4개(`hallucination-critic-worker`, `model-and-internal-audit-worker`, `ops-and-permission-worker`, `incident-postmortem-worker`)이며, 근거·모델·운영·Incident 신호가 있을 때 호출된다.
+- 한 케이스의 최대 실행 수는 5개다. `agent.personalities`의 기존 8개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
+직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:8b`이며, `agent-qa`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 
