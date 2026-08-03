@@ -22,7 +22,14 @@
 `harness/journal.py`는 Hermes 부서 실행과 LangGraph 직원 실행을 `run_id`로 묶어 `InputSnapshot → AgentOutput → Validation → Decision`을 기록한다. Order와 Fill은 별도 이벤트이며 `inputs_hash`, 모델·프롬프트·파라미터 버전, retry/fallback, rationale/evidence를 보존한다. `RunJournal.replay()`와 `RunJournal.review()`는 단계 재실행과 폴백 사유 집계를 제공하고, 운영 적재 스키마는 `risk.run_log_events`다.
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-Local Ollama Alias는 [`Modelfile`](Modelfile)의 `hermes3` 기반 `agent-risk`이고 Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+
+## Worker Registry 수와 실제 실행 수
+
+- Registry에 등록된 실제 Worker는 4개다.
+- 기본 입력에서 항상 실행되는 Worker는 2개(`market-liquidity-worker`, `pre-trade-risk-worker`)다.
+- 조건부 Worker는 2개(`compliance-policy-worker`, `derivatives-counterparty-worker`)이며, 사건 신호가 있을 때 호출된다.
+- 한 케이스의 최대 실행 수는 4개다. `agent.personalities`의 기존 6개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
+직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:8b`이며, `agent-risk`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission
 

@@ -9,6 +9,18 @@ model:
   default: gpt-5.6-luna
   base_url: https://chatgpt.com/backend-api/codex
 
+# 부서장은 Hermes가 담당하며 Codex를 기본으로 사용하고 Claude Code를 승인된 대체 경로로 둔다.
+# 부서장 서술은 Worker Context를 종합·에스컬레이션할 뿐 결정론적 QA Engine을 대체하지 않는다.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
 
@@ -178,7 +190,7 @@ hiring_priority:
   qa-audit-supervisor: {role_codes: ["QAA-00"], tier: "P0"}
   tool-permission-security-reviewer: {role_codes: ["QAA-03"], tier: "P1"}
   incident-postmortem-agent: {role_codes: ["QAA-07"], tier: "P1"}
-  # 2026-07-29: QAA-00/QAA-03/QAA-07 채용 완료 — QA본부는 8/8 전원 존재
+ # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 5개 Worker다.
 
 skills:
   - hermes-agent
@@ -192,17 +204,31 @@ usage:
 # Worker Graph에서 Ollama Qwen을 사용한다.
 staff_registry:
   head_count: 1
+  worker_count: 5
+  default_execution_count: 1
+  max_execution_count: 5
   active_worker_count: 1
   conditional_worker_count: 4
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
 
 employee_runtime:
   executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/06-ai-qa-audit/qa_employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
   model_default: qwen3:8b
   base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:8b
+    candidate_source: ollama list
+    selection_policy: fixed_until_model_eval_approved
+    change_control: benchmark_then_hr_and_qa_approval
   output_contract: qa.worker-context.v1
   max_retries: 2
   max_attempts: 3

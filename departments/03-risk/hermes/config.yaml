@@ -10,6 +10,18 @@ model:
   default: gpt-5.6-luna
   base_url: https://chatgpt.com/backend-api/codex
 
+# 부서장은 Hermes가 담당하며 Codex를 기본으로 사용하고 Claude Code를 승인된 대체 경로로 둔다.
+# 부서장 서술은 Worker Context를 종합·에스컬레이션할 뿐 결정론적 Risk Engine을 대체하지 않는다.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
@@ -130,7 +142,7 @@ hiring_priority:
   compliance-policy-agent: {role_codes: ["RSK-04"], tier: "P0"}
   pre-trade-risk-analyst: {role_codes: ["RSK-01"], tier: "P0"}
   operational-counterparty-risk-agent: {role_codes: ["RSK-06"], tier: "P1"}
-  # 2026-07-29: RSK-01/RSK-06 채용 완료 — 리스크본부는 6/7 (RSK-05는 P2, 이미 존재)
+ # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 4개 Worker다.
 
 skills:
   - hermes-agent
@@ -143,17 +155,31 @@ usage:
 # Worker Graph에서 Ollama Qwen을 사용한다.
 staff_registry:
   head_count: 1
+  worker_count: 4
+  default_execution_count: 2
+  max_execution_count: 4
   active_worker_count: 2
   conditional_worker_count: 2
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
 
 employee_runtime:
   executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/03-risk/risk_employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
   model_default: qwen3:8b
   base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:8b
+    candidate_source: ollama list
+    selection_policy: fixed_until_model_eval_approved
+    change_control: benchmark_then_hr_and_qa_approval
   output_contract: risk.worker-context.v1
   max_retries: 2
   max_attempts: 3

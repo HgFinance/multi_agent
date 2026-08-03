@@ -1,5 +1,7 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
+> 현재 Risk/QA 런타임 기준(2026-08-03): 부서장은 Hermes + Codex/Claude Code, 직원은 독립 LangGraph Worker + Ollama `qwen3:8b`다. Risk 4개 Worker와 QA 5개 Worker의 Profile·Worker Graph 배선은 적용됐으며, 기존 6/8개 역할명은 감사·Profile 호환 Alias다. 실제 Ollama/Hermes 인증·외부 DB·Redis 운영 연결 여부는 실행 증거로 별도 판정한다.
+
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
 > 감사 기준: GitHub `main`의 `a1107c4`, 실행 중인 Docker, 실제 DB와 재실행한 Test
@@ -121,7 +123,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 
 | 검증 | 결과 | 주의사항 |
 |---|---|---|
-| 전체 Repository pytest | Collection 실패 | CEO·HR의 동일 파일명 `test_ollama_agent.py` 충돌 |
+| 전체 Repository pytest | CEO·HR 원인 해소(2026-08-03) | CEO·HR `test_ollama_agent.py`를 `test_ceo_ollama_agent.py`/`test_hr_ollama_agent.py`로 분리. Accounting 쪽 동일 파일명 충돌 여부는 도현님 확인 필요 |
 | Core·Risk·QA 명시 테스트 | `179 passed`, `1 failed`, 16 subtests 통과 | 신규 Migration을 Schema 기대 목록에 누락 |
 | Research Pipeline | 11개 영역 통과 | LLM·API 없는 결정론적 자체 점검 |
 | Risk Pipeline | 7개 영역 통과 | Redis·Hermes 없는 자체 점검 |
@@ -167,11 +169,15 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | ID | 상태 | 작업 | 완료 증거 |
 |---|---|---|---|
 | `CI-06` | `BLOCKED` | 신규 Migration을 Schema Contract 기대 순서에 반영 | 전체 Schema Test 통과 |
-| `RQ-01` | `IMPLEMENTED` | `ResearchPacket v1` Artifact와 Event Contract 확정 | API·Event·DB에서 같은 Packet ID 조회 |
-| `RQ-02` | `IMPLEMENTED` | Feature/Event Engine과 Priority Queue 연결 | 급변 Fixture가 Stream에 한 번만 생성 |
-| `RQ-03` | `IMPLEMENTED` | Quant API·Worker Container와 Job Contract | Dataset→Experiment→Candidate 재시작 복구 |
+| `RQ-01` | `PARTIAL` | `ResearchPacket v1` Schema와 MCP 생성 경로를 Canonical Artifact·Event로 연결 | API·Event·DB에서 같은 Packet ID 조회 |
+| `RQ-02` | `DOCUMENTED` | Feature/Event Engine과 Priority Queue 연결 | 급변 Fixture가 Stream에 한 번만 생성 |
+| `RQ-03` | `DOCUMENTED` | Quant API·Worker Container와 Job Contract | Dataset→Experiment→Candidate 재시작 복구 |
 | `RQ-04` | `RUNTIME_VERIFIED` | 파생 첫 적재와 DQ | 3,910행과 DQ 증거 확인, 다음은 연속성 검증 |
 | `RQ-05` | `DOCUMENTED` | Microstructure Feature 영속 Worker | `microstructure_features > 0`, Replay Hash 일치 |
+| `RQF-01` | `DOCUMENTED` | Research V2 계약, PIT Cutoff와 Claim/Evidence Graph | Fact Claim 100% Citation, Replay 미래 조회 0건 |
+| `RQF-02` | `DOCUMENTED` | Research Branch/Fan-in, Hermes Case Adapter와 부분 복구 | 분석가 실패 Fixture가 Checkpoint에서 PARTIAL 복구 |
+| `RQF-03` | `DOCUMENTED` | Evidence-linked 가설 사전 등록과 독립 Quant Validation | Packet→Claim→Hypothesis→Experiment 역추적, 생성자 자기 승인 0건 |
+| `RQF-WEB-01` | `DOCUMENTED` | RES-08 전담 SearXNG/Playwright Web Search MCP와 Evidence 승격 | 타 Persona Search 403, Replay 호출 0건, 검증 전 Fact 승격 0건 |
 | `MODEL-04` | `IMPLEMENTED` | Claude Code Host Proxy 보안·비용·지연 검증 | Commit·Self-check·Probe·429/Timeout·Fallback 증거 |
 
 ### 4.2 도현님: 트레이딩본부, 회계/포트폴리오본부와 공통 Platform
@@ -219,10 +225,9 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 
 - Risk·QA는 Compose Service가 아니며 Canonical Risk Decision과 Run Log가 0건이다.
 - 운영 Credential에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 비어 있다.
-- Risk·QA Hermes 모델은 `openai-codex/gpt-5.6-luna`로 바뀌었지만 Profile Checker 기대값은
-  `nous/poolside/laguna-s-2.1:free`라 계약 검사가 실패한다.
-- QA Script에 `192.168.25.25:11434`가 여전히 하드코딩돼 있다.
-- Risk·QA Profile 14개는 DRAFT/PROBATION 성격이며 Governed Fund·Policy·ACTIVE 승인 경로가 필요하다.
+- Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:8b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
+- QA/Risk Script의 직원 Ollama 주소·모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수로 주입된다. 실제 Ollama Health와 응답 증거는 운영 전 별도 확인한다.
+- Risk·QA의 기존 14개 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 실제 실행 직원 수는 Risk 4개·QA 5개 Worker Registry다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.
 - 생성 보고서의 Git 보존 여부, Canonical Artifact Storage, Report Hash와 Notion Idempotency 정책이 미확정이다.
 
 **다음 작업**
@@ -233,7 +238,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `QA-01` | `IMPLEMENTED` | QA API Container와 Trace/Decision 영속화 | Claim→Evidence→Decision→Finding Replay |
 | `QA-02` | `IMPLEMENTED` | Workforce Tool Allowlist와 실제 Evidence API 연결 | 미허용 Tool 차단과 Trace |
 | `QA-03` | `BLOCKED` | 개인 GPU 주소 제거와 Model Gateway 전환 | 개인 IP 0건, Gateway Trace |
-| `MODEL-03` | `BLOCKED` | Risk·QA Hermes 모델 선언과 Checker 일치 | 8개 Profile Contract Check 통과 |
+| `MODEL-03` | `BLOCKED` | Risk·QA Hermes Head 모델 선언과 Worker Registry 일치 | Head/Worker 계층 Contract Check 통과 |
 | `OPS-01` | `BLOCKED` | Risk·QA 운영 Credential과 Governed FK 준비 | Preflight 필수 항목 전부 `true` |
 | `RPT-01` | `IMPLEMENTED` | 결정론적 Report Artifact·Notion Projection 운영 계약 | DB Artifact Hash·Notion Page ID·재실행 멱등성 |
 
@@ -251,7 +256,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - Profile Version 19개 중 13개가 DRAFT이며 승격·철회 Workflow가 없다.
 - CEO와 HR Hermes Profile은 Tool Allowlist를 선언하지 않아 Profile Checker 경고가 난다.
 - CEO·HR의 같은 Smoke Test 파일명이 전체 pytest 수집을 막는다.
-- 공식 Roster, Approval Inbox, Queue, SLA와 Kanban Read Model이 없다.
+- 공식 Roster는 HR-02로 해소됐다(아래 표 참고). Approval Inbox, Queue, SLA와 Kanban Read Model은 여전히 없다.
 
 **다음 작업**
 
@@ -260,7 +265,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `GOV-01` | `IMPLEMENTED` | Governance API와 Mandate PostgreSQL Repository | Version 활성화·재승인 Test |
 | `GOV-02` | `DOCUMENTED` | Investment Case·Approval·Escalation API | Risk/QA Block 우회 불가 |
 | `HR-01` | `IMPLEMENTED` | Workforce API와 Candidate/Access Runtime | 후보 생성부터 독립 승인 DB Replay |
-| `HR-02` | `BLOCKED` | Profile·Tool Permission 공식 Read API | QA와 Gateway가 같은 Version 조회 |
+| `HR-02` | `IMPLEMENTED` | Profile·Tool Permission 공식 Read+Write API(roster/*.py, app.py 4개 엔드포인트) | QA와 Gateway가 같은 Version 조회, ACTIVE 전환 시 QA Eval·CEO 승인 둘 다 없으면 409 |
 | `HR-03` | `DOCUMENTED` | Eval·Shadow·Promotion·Rollback Orchestrator | 승인형 자기 개선 폐쇄 루프 |
 | `HR-04` | `BLOCKED` | 13개 DRAFT Profile Review와 Allowlist 보완 | 승인·거절 사유와 Version 상태 기록 |
 
@@ -276,7 +281,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | P0 | QA 개인 GPU IP 하드코딩 | 재현성·보안·Failover 문제 | 동규, `QA-03` |
 | P0 | Risk·QA 필수 Credential 2개 누락 | Production Ingestion 불가 | 동규·영주, `OPS-01` |
 | P1 | AI Office npm High 취약점 13건 | Frontend 배포 위험 | 도현, `UI-03` |
-| P1 | 5개 Hermes Profile Tool Allowlist 미선언 | 권한 경계 경고 | 해당 Owner, `HR-04` |
+| P1 | Hermes Profile Tool Allowlist 미선언 — CEO·HR 2개는 해소(2026-08-03, GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4·3.6절 반영), 나머지 Owner 확인 필요 | 권한 경계 경고 | 해당 Owner, `HR-04` |
 | P1 | Microstructure Feature 0건 | 전략·Risk Replay 제한 | 재일, `RQ-05` |
 | P1 | Kanban Bridge가 ADR만 있고 미구현 | Agent 상태는 Scripted | 도현·영주, `UI-02` |
 | P1 | Claude Host Proxy가 미커밋·미검증 | 구독 한도·보안·가용성 위험 | 재일·동규, `MODEL-04` |
@@ -344,7 +349,7 @@ Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Che
 ### Wave 3. Hermes와 AI Office 실시간 연결
 
 1. `MODEL-01`: 개발·Paper·Production Provider와 Gateway ADR을 확정한다.
-2. `HR-02`: Profile·Tool Permission 공식 Read API를 제공한다.
+2. ~~`HR-02`: Profile·Tool Permission 공식 Read API를 제공한다.~~ (2026-08-03 구현 완료, 위 4.4절 표 참고)
 3. `UI-01`: 공식 Snapshot과 Domain Event WebSocket을 연결한다.
 4. `UI-02`: Hermes Kanban을 `agent.status.v1`로 변환하는 Read-only Bridge를 구현한다.
 5. `UI-03`: Frontend 의존성 취약점을 검토하고 Upgrade 회귀 Test를 통과한다.

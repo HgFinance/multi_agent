@@ -2,6 +2,8 @@
 
 Risk·QA의 확정 직원 런타임은 Hermes 부서장과 분리된 LangGraph Worker Graph + Ollama `qwen3:8b`다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 `model`은 부서장 Hermes 모델만 의미한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
+현재 직원 모델은 `qwen3:8b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다. 자동 교체는 금지한다. `agent-risk`와 `agent-qa`는 이 직접 호출 경로를 가리지 않는 수동 호환 Alias다.
+
 > 상태: 8개 조직 Modelfile v2 등록, 일부 Smoke Script 존재, Runtime 통합 미완료
 >
 > 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)
@@ -31,10 +33,10 @@ Risk·QA의 확정 직원 런타임은 Hermes 부서장과 분리된 LangGraph W
 | CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `hermes3` | `agent-ceo` | Prompt 고도화, 수동 Smoke Script |
 | 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:14b` | `agent-research` | 실측 후 Base Model 변경 |
 | 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen2.5-coder` | `agent-trading` | 파일 등록 완료 |
-| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `hermes3` | `agent-risk` | 파일 등록 완료 |
+| 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:8b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
 | 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:14b` | `agent-quant` | 실측 후 Base Model 변경 |
 | 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen2.5` | `agent-accounting` | 파일 등록 완료 |
-| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `hermes3` | `agent-qa` | QA Pipeline 호출명과 일치 |
+| AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:8b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
 | Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen2.5` | `agent-hr` | Prompt 고도화, 수동 Smoke Script |
 
 ### 2.1 현재 SYSTEM 역할 요약
@@ -66,10 +68,9 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
-| Hermes Supervisor Model | 6개는 `nous/poolside/laguna-s-2.1:free`, Risk·QA는 `openai-codex/gpt-5.6-luna`; Checker 기대값 불일치 2건 |
+| Hermes Supervisor Model | Risk·QA 부서장은 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:8b` |
 
-따라서 현재 완료 상태는 **모델 청사진의 Git 등록과 일부 Hermes Runtime 실행**이다. Risk·QA 변경은
-`MODEL-03` 승인 전이며 모델 다운로드, Alias Build, 공통 Gateway와 Production 배포가 완료된 상태가 아니다.
+따라서 현재 완료 상태는 **Risk/QA Worker Graph 코드·Profile 계약의 Git 등록과 일부 Hermes Runtime 실행**이다. 로컬 Ollama 모델 다운로드·Health, 호환 Alias Build, 공통 Gateway와 Production 배포는 별도 운영 증거가 필요한 경계다.
 
 ## 3. 모델 선택 의도
 
