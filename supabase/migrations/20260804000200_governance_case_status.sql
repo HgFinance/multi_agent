@@ -45,7 +45,21 @@ begin;
 -- 같은 변경이 데이터 마이그레이션이 되므로 지금이 비용이 가장 낮은 시점이다.
 --
 -- 리뷰에서 다른 어휘가 낫다고 판단되면 이 제약만 교체하면 된다 - 애플리케이션 쪽
--- 상태 머신(departments/00-ceo-office/src/case/case.py)도 같은 값을 쓰므로 함께 수정한다.
+-- 상태 머신(departments/00-ceo-office/src/case/case_root.py)도 같은 값을 쓰므로 함께 수정한다.
+--
+-- ## 재적용 안전성 (drop if exists 를 앞에 두는 이유)
+--
+-- PostgreSQL 에 `add constraint if not exists` 가 없어서 이 문장은 두 번 실행되면
+-- 42710(already exists)으로 실패한다. 개발 중 이 DDL 을 공유 DB 에 직접 적용해 검증했더니
+-- 마이그레이션 러너가 나중에 같은 문장을 실행하다 실제로 실패했다(2026-08-04).
+-- 그래서 같은 이름의 제약을 먼저 떨어뜨린 뒤 다시 만든다.
+--   - `begin;` 안에 있어 원자적이다 - 제약이 없는 순간이 외부에 보이지 않는다.
+--   - 이름만 확인하는 `if not exists` 방식이 아니라 drop+add 를 쓰는 이유는, 이미 다른
+--     정의로 만들어져 있어도 최종 정의가 이 파일과 일치하도록 보장하기 위해서다.
+--   - 재검증 Scan 비용은 무시할 수 있다(cases 는 사실상 비어 있다).
+alter table governance.cases
+  drop constraint if exists cases_status_check;
+
 alter table governance.cases
   add constraint cases_status_check
   check (status in ('OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'CANCELLED'));
