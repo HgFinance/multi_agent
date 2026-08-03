@@ -139,7 +139,13 @@ def assemble_evidence(state: ResearchState) -> dict:
 def analyze_sentiment(state: ResearchState) -> dict:
     from news_sentiment_analyst import run as senti_run
 
-    r = senti_run(state["symbol"], hours=24.0, read_bodies=False)
+    # ▶ 본문을 읽는다 (2026-08-03, 재일님 지시 "본문 링크 타고 분석")
+    #   article_reader 가 robots.txt 를 지키고 열람 예산·실패를 세며, **본문을
+    #   저장하지 않는다**(라이선스). 판정에만 쓰고 파생 점수만 남는다.
+    #   as_of 재현(백테스트)에서는 열람 자체를 건너뛴다 - 지금의 웹페이지는
+    #   그때의 지면이 아니므로 PIT 가 깨진다(news_sentiment_analyst 가 판정).
+    #   창을 48시간으로 넓혔다 - 24시간은 주말·연휴에 재료가 얇아진다.
+    r = senti_run(state["symbol"], hours=48.0, read_bodies=True)
     # ▶ 인용을 버리지 않는다 (2026-08-03, RQF-1)
     #   RES-06 은 이미 document_id 단위로 인용하고 환각 인용을 버린다
     #   (verify_and_aggregate). 그런데 파이프라인이 verdict·score 만 들고 와서
