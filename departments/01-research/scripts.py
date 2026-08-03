@@ -1053,10 +1053,31 @@ def interpret(state: ResearchState) -> dict:
     from insight import to_claims, validate_insights
 
     packet = state.get("packet") or {}
-    facts = _fact_index(packet)
     nodes = {k for k in ("technical", "fundamental", "regime", "geopolitical",
                          "microstructure", "sentiment")
              if isinstance(state.get(k), dict)}
+    # ▶ **가로지를 재료는 분석가 readout 이다.** 처음엔 Packet 의 facts 만
+    #   줬는데, 그건 공시·뉴스 기반(d1, n1)이라 **분석가 귀속이 없다** -
+    #   그래서 source_nodes 를 채울 수가 없었고 좋은 해석이 전부 거부됐다.
+    #   교차 해석은 "어느 분석가가 무엇을 봤나" 가 있어야 성립한다.
+    facts = _fact_index(packet)
+    for node in sorted(nodes):
+        ro = (state.get(node) or {}).get("readout") or {}
+        hi = pick_highlights(ro, flags=(ro.get("flags") or []))
+        for it in (hi.get("items") or [])[:6]:
+            k = str(it.get("key") or "")
+            if not k:
+                continue
+            unit = str(it.get("unit") or "")
+            facts[f"{node}.{k}"] = {
+                "claim": f"{k} = {it.get('value')}{unit}", "source_node": node}
+        for fl in (hi.get("flags") or [])[:3]:
+            facts[f"{node}.flag.{fl}"] = {"claim": f"플래그: {fl}",
+                                          "source_node": node}
+        note = ((state.get(node) or {}).get("note") or {}).get("summary")             or (state.get(node) or {}).get("summary")
+        if note:
+            facts[f"{node}.소견"] = {"claim": str(note)[:200],
+                                    "source_node": node}
     revision = int(state.get("revisions") or 0)
     if not facts or len(nodes) < 2:
         # 가로지를 것이 없으면 해석도 없다. 억지로 만들면 재진술이 된다.
@@ -1071,7 +1092,7 @@ def interpret(state: ResearchState) -> dict:
                  for fid, f in facts.items()}
     brief = {fid: {"claim": str(f.get("claim") or f.get("text") or "")[:180],
                    "분석가": fact_node.get(fid) or "(미상)"}
-             for fid, f in list(facts.items())[:24]}
+             for fid, f in list(facts.items())[:48]}
     # 재해석이면 반박 내용을 같이 준다 - 그것이 이 순환의 이유다
     chal = (packet.get("challenge") or {}) if revision else {}
     user = json.dumps({
