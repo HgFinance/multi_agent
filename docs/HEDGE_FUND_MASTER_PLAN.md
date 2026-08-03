@@ -1,8 +1,8 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, 부서 직원은 역할별 독립 LangGraph Worker Graph와 Ollama `qwen3:8b`를 사용한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
+> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, 모든 부서 직원은 직원별 독립 LangGraph Worker Graph와 Ollama LLM을 사용한다. 현재 Worker 모델은 `qwen3:8b`이며 Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
 
-> Risk는 4개 Worker, AI QA/감사는 5개 Worker로 통합 운영한다. 직원 모델 교체는 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
+> Risk는 4개 Worker, AI QA/감사는 5개 Worker로 운영하며 나머지 부서도 동일한 독립 Worker 계층으로 운영한다. 직원 모델 교체는 [Worker 모델 배치 기준](02-engineering/WORKER_MODEL_MATRIX.md)에 따라 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
 
 > 문서 상태: Production Plan v3.3
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  

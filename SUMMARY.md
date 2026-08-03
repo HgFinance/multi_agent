@@ -1,14 +1,13 @@
-# Risk·QA 요약
+# HgFinance Worker Runtime Summary
 
-검토일: 2026-08-02 (KST)
+검토일: 2026-08-03 (KST)
 
-- Risk P1: API 입력·Instrument 매핑·PIT Exposure·Stress/VaR/Correlation·Kill Switch DB·RLS·진입 차단 게이트 구현.
-- QA P1: 정책 ingestion 보호, Model-Risk/Internal-Audit 결정론적 검사 및 API 구현. `qa-check` production 미승인 호출은 `503` 차단.
-- Harness: 두 부서에 Skill Registry·trace/비밀값/권한 preflight·bounded retry·fail-closed fallback·Redis health check를 추가.
-- AI Office: Risk·QA만 Profile/계약 allowlist 연결, RSK-00~06(6명)·QAA-00~07(8명) 직원/Skill 매핑. 초기 1회+재시도 2회이며 주문·원장 권한은 없음(실시간 API는 별도 실행 필요).
-- 로그/Replay/Review: Hermes 실행과 LangGraph 직원 실행을 run_id로 묶어 InputSnapshot·AgentOutput·Validation·Decision을 기록하고 Risk만 Order/Fill을 분리. inputs_hash·버전·retry/fallback·원문/요약을 보존하며 Risk/QA 전용 DB migration을 추가. 기본 Journal은 안전한 인메모리/JSONL 계약이며 운영 DB sink wiring은 별도 배선 조건이다.
-- 실제 정책 원문과 `SAMPLE_PLACEHOLDER`는 구분하며, placeholder는 운영 적재하지 않음.
-- 운영 완료 조건: 실제 API/DB 자격증명, governed FK, ACTIVE Profile, 정책 Corpus/pgvector, 상위 계약 승인, E2E.
-- API 키는 수집·저장하지 않음. 추가 Agent 증원은 현재 불필요.
-
-검증: Risk·QA 테스트 통과, Schema contract 12개 통과. 외부 Redis 통합은 DNS 미가용으로 skip.
+- 전 부서 구조를 `Hermes 부서장 → 직원별 독립 LangGraph Worker → 부서장 context 종합`으로 통일했다.
+- 직원 수: CEO 1, HR 5, Research 6, Trading 6, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5.
+- 모든 Worker의 현재 모델은 Ollama `qwen3:8b`; Worker별 경량·표준·중량 모델 변경은 benchmark → HR 제안 → QA 검증 → CEO 승인 후에만 허용한다.
+- Risk Gate와 Evidence QA Gate는 결정론적 바인딩 엔진으로 유지한다. Worker와 Hermes는 주문·한도·원장·QA 판정을 직접 수행하지 않는다.
+- 공통 출력은 `worker-context.v1`이며, 입력 해시·실행 Worker·실패·재시도·폴백을 기록하고 실패 시 안전 방향으로 격리한다.
+- 전체 계약은 `case_request → research_packet → order_intent → risk_decision → qa_assessment → execution_result → accounting_snapshot → ceo_case_summary`다.
+- 전체 아키텍처: [DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md](docs/02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)
+- 모델 매트릭스: [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)
+- 실거래·운영 DB·실제 정책 Corpus·외부 API는 별도 승인과 운영 증거가 필요하며, paper 모드는 외부 쓰기를 하지 않는다.

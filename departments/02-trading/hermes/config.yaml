@@ -32,6 +32,10 @@ env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: trading-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [market-thesis-worker, trade-proposal-worker, order-constraint-worker, execution-planning-worker, venue-cost-worker, derivatives-structure-worker]
   max_turns: 100
   reasoning_effort: high
   timeout_seconds: 60

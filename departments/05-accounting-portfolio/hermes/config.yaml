@@ -21,6 +21,10 @@ env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: portfolio-control-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [portfolio-control-worker, ledger-reconciliation-worker, nav-close-worker, treasury-liquidity-worker, pnl-attribution-worker, investor-reporting-worker, valuation-corporate-actions-worker, fee-accrual-tax-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60

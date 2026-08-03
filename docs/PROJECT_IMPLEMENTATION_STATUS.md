@@ -1,6 +1,6 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
-> 현재 Risk/QA 런타임 기준(2026-08-03): 부서장은 Hermes + Codex/Claude Code, 직원은 독립 LangGraph Worker + Ollama `qwen3:8b`다. Risk 4개 Worker와 QA 5개 Worker의 Profile·Worker Graph 배선은 적용됐으며, 기존 6/8개 역할명은 감사·Profile 호환 Alias다. 실제 Ollama/Hermes 인증·외부 DB·Redis 운영 연결 여부는 실행 증거로 별도 판정한다.
+> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:8b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
