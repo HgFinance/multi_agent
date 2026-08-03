@@ -39,6 +39,11 @@ MODULE_VERSION = "research-highlights-v1"
 
 DEFAULT_TOP_N = 8
 
+# 재료가 이 수 이하이면 상한을 적용하지 않고 **전부 싣는다**. 실측(2026-08-03)에서
+# 고정 8 이 미시구조 13개 중 5개를 조용히 버렸다 - 계산해 놓고 버리는 낭비다.
+# 사람이 한 줄로 읽을 수 있는 한계를 넘지 않는 선에서 잡았다.
+ADAPTIVE_KEEP_ALL_UPTO = 14
+
 # 지표가 아닌 bookkeeping - 뽑지 않는다(규칙표·사유·개수)
 NOT_MATERIAL = frozenset({
     "regime_rules", "tilt_rules", "flag_criteria", "assessment_rule",
@@ -88,7 +93,7 @@ def flatten_metrics(readout, *, containers=("fields", "ratios", "volatility",
     return out
 
 
-def pick_highlights(readout, *, top_n: int = DEFAULT_TOP_N,
+def pick_highlights(readout, *, top_n: int | None = None,
                     flags=()) -> dict:
     """readout -> Packet 에 실을 핵심 수치.
 
@@ -113,17 +118,34 @@ def pick_highlights(readout, *, top_n: int = DEFAULT_TOP_N,
 
     # 0 에서 먼 순 -> 같으면 이름순 (결정론)
     ordered = sorted(metrics.items(), key=lambda kv: (-abs(kv[1]), kv[0]))
-    items = [{"key": k, "value": round(v, 4), "unit": unit_for(k)}
-             for k, v in ordered[:top_n]]
     known = len(metrics)
+
+    # ▶ 상한을 적응시킨다 (2026-08-03 실측)
+    #   고정 8 이면 재료가 13개인 미시구조에서 5개가 조용히 버려졌다. 계산해 놓고
+    #   버리는 것은 계측이 지목한 바로 그 낭비다. 재료가 적으면 전부 싣는다 -
+    #   상한은 '너무 길어져 사람이 못 읽는 것' 을 막으려는 것이지 재료를 줄이려는
+    #   것이 아니다.
+    #
+    #   **호출자가 top_n 을 명시하면 그 값을 존중한다.** 적응은 기본값(None)일
+    #   때만이다 - 안 그러면 호출자가 건 상한을 코드가 조용히 무시하게 된다.
+    if top_n is not None:
+        effective_n = top_n
+    else:
+        effective_n = known if known <= ADAPTIVE_KEEP_ALL_UPTO else DEFAULT_TOP_N
+    items = [{"key": k, "value": round(v, 4), "unit": unit_for(k)}
+             for k, v in ordered[:effective_n]]
+    dropped = [k for k, _ in ordered[effective_n:]]
     return {
         "items": items,
         "flags": list(flags or []),
         "total_metrics": known,
         "unknown": unknown,
         "coverage": round(len(items) / known, 3) if known else 0.0,
-        "rule": (f"임계 위반 우선, 그다음 |값| 큰 순 상위 {top_n} "
-                 f"(같으면 키 이름순). 미확인은 뽑지 않고 개수로 보고한다."),
+        # **버린 것을 숨기지 않는다.** coverage 만 보면 무엇이 빠졌는지 알 수 없다.
+        "dropped": dropped,
+        "rule": (f"임계 위반 우선, 그다음 |값| 큰 순 상위 {effective_n} "
+                 f"(같으면 키 이름순). 재료 {ADAPTIVE_KEEP_ALL_UPTO}개 이하면 "
+                 f"전부 싣는다. 미확인은 뽑지 않고 개수로 보고한다."),
     }
 
 
@@ -182,6 +204,26 @@ def _check_unit_and_coverage():
     print("  단위·커버리지 보고       OK")
 
 
+def _check_adaptive_cap():
+    """재료가 적으면 전부 싣는다 - 계산해 놓고 버리지 않는다."""
+    small = {f"m{i}": float(i + 1) for i in range(13)}      # 13개
+    h = pick_highlights(small)                              # top_n 미지정 = 적응
+    assert len(h["items"]) == 13, len(h["items"])
+    assert h["coverage"] == 1.0 and h["dropped"] == []
+
+    big = {f"m{i}": float(i + 1) for i in range(30)}        # 30개
+    hb = pick_highlights(big)
+    assert len(hb["items"]) == DEFAULT_TOP_N, len(hb["items"])
+    # 버린 것을 숨기지 않는다
+    assert len(hb["dropped"]) == 30 - DEFAULT_TOP_N, len(hb["dropped"])
+    assert set(hb["dropped"]) & set(big), "버린 키 이름이 실제 재료여야 한다"
+
+    # 호출자가 명시하면 그 값을 존중한다 - 조용히 무시하지 않는다
+    hx = pick_highlights(small, top_n=2)
+    assert len(hx["items"]) == 2 and len(hx["dropped"]) == 11
+    print("  적응 상한·버린 것 보고   OK")
+
+
 def _check_empty_is_honest():
     h = pick_highlights({}, top_n=5)
     assert h["items"] == [] and h["coverage"] == 0.0
@@ -206,6 +248,7 @@ if __name__ == "__main__":
     _check_flatten()
     _check_pick_order()
     _check_unit_and_coverage()
+    _check_adaptive_cap()
     _check_empty_is_honest()
     _check_flags_first()
     print("Highlights 5개 영역 통과.")

@@ -133,14 +133,24 @@ def cited_fact_claims(
     ▶ 인용이 없으면 fact 를 만들지 않는다. 빈 튜플이 정상 상태다(fail-closed).
     """
     st = node_state or {}
+
+    # ▶ 경로 1: 분석가가 **이미 진짜 document_id 로** 인용한 경우.
+    #   RES-06 이 그렇다 - 자기 verify 에서 환각 인용을 이미 버렸으므로
+    #   Bundle 대조를 다시 하지 않는다. 두 번 검증하면 RES-06 이 본 기사와
+    #   Bundle 이 담은 기사가 달라(창·개수가 다르다) 멀쩡한 인용이 탈락한다.
+    direct = tuple(dict.fromkeys(
+        str(x) for x in (st.get("cited_evidence_ids") or ()) if str(x).strip()))
+
+    # ▶ 경로 2: ref('n1','d1')로 가리킨 경우 - Bundle 로 해석한다.
     refs = ((st.get("note") or {}).get("cited_refs")
             or st.get("cited_refs") or ())
-    if not refs or not bundle:
-        return ()
+    resolved: tuple[str, ...] = ()
+    if refs and bundle:
+        from bundle import resolve_refs  # 지연 import - 계약이 evidence 에 의존하지 않게
 
-    from bundle import resolve_refs  # 지연 import - 계약 모듈이 evidence 에 의존하지 않게
+        resolved = resolve_refs(refs, bundle)   # 없는 ref 면 CitationError
 
-    evidence_ids = resolve_refs(refs, bundle)   # 없는 ref 면 CitationError
+    evidence_ids = tuple(dict.fromkeys(direct + resolved))
     if not evidence_ids:
         return ()
     summary = ((st.get("note") or {}).get("summary") or st.get("summary") or "")
@@ -511,6 +521,20 @@ def _check_cited_facts_open_the_axis():
     # Bundle 이 없으면(옛 호출부) 예전처럼 inference 만 - 하위 호환
     _, v2c = packet_from_v1(_v1_packet(), state)
     assert sum(len(f.fact_claims()) for f in v2c.findings) == 0
+
+    # ▶ RES-06 경로: 이미 진짜 document_id 로 인용한다. Bundle 없이도 fact 다.
+    #   자기 verify 에서 환각을 이미 버렸으므로 Bundle 대조를 다시 하지 않는다 -
+    #   두 번 검증하면 RES-06 이 본 기사와 Bundle 이 담은 기사의 창이 달라
+    #   멀쩡한 인용이 탈락한다.
+    senti = {"sentiment": {
+        "verdict": "SCORED",
+        "cited_evidence_ids": ("doc-real-1", "doc-real-2", "doc-real-1"),
+        "note": {"summary": "공급계약 보도가 다수 관측됐다"}}}
+    _, v2d = packet_from_v1(_v1_packet(), senti)          # bundle 없음
+    ns = next(f for f in v2d.findings if f.perspective == "news_sentiment")
+    facts = ns.fact_claims()
+    assert len(facts) == 1, [c.claim_id for c in ns.claims]
+    assert facts[0].evidence_ids == ("doc-real-1", "doc-real-2"), facts[0].evidence_ids
     print("  인용 -> fact 축 개방     OK")
 
 

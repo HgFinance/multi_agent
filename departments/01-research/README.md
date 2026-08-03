@@ -6,6 +6,8 @@ Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen3:14b` 기반 `agent-rese
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 순서는
 [Research-Quant Evidence-to-Strategy Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
+리서치 산출물의 V3 계약, 소비 본부별 View, 품질 Gate와 단계별 구현 기준은
+[Research Output Advancement Strategy](../../docs/02-engineering/RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md)를 따른다.
 
 ## Mission
 

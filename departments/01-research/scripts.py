@@ -125,9 +125,21 @@ def analyze_sentiment(state: ResearchState) -> dict:
     from news_sentiment_analyst import run as senti_run
 
     r = senti_run(state["symbol"], hours=24.0, read_bodies=False)
+    # ▶ 인용을 버리지 않는다 (2026-08-03, RQF-1)
+    #   RES-06 은 이미 document_id 단위로 인용하고 환각 인용을 버린다
+    #   (verify_and_aggregate). 그런데 파이프라인이 verdict·score 만 들고 와서
+    #   **그 인용이 여기서 끊겼다** - Packet 의 주장이 근거를 못 갖는 원인이었다.
+    #   원문·본문은 싣지 않는다(라이선스). document_id 와 제목까지다.
+    cited = tuple(dict.fromkeys(
+        str(e["document_id"]) for e in (r.evidence or ()) if e.get("document_id")))
     return {"sentiment": {"verdict": r.verdict, "score": r.score,
                           "articles": r.articles_used,
-                          "dropped": r.articles_dropped}}
+                          "dropped": r.articles_dropped,
+                          "cited_evidence_ids": cited,
+                          "evidence": tuple(
+                              {k: e.get(k) for k in
+                               ("document_id", "title", "sentiment", "salience")}
+                              for e in (r.evidence or ()))}}
 
 
 # ── 노드 3b/3c: 기술적·펀더멘털 분석가 (검증된 LLM 직원 + 결정론 계산기) ──

@@ -4,6 +4,7 @@
 > 범위: 리서치본부, 퀀트/백테스트본부, 두 본부의 Hermes Supervisor와 LangGraph Workflow
 > 상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 구현 담당: [TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md)
+> 리서치 산출물 상세: [RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md](RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md)
 
 ## 1. 한 문장 정의
 
