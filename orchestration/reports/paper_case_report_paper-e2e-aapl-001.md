@@ -1,6 +1,6 @@
 # Paper Investment Case Report
 
-> 이 문서는 주문·브로커·원장·DB를 변경하지 않는 `paper-e2e` 연결 검증 결과다.
+> 이 문서는 주문·브로커·원장·DB를 변경하지 않는 `paper-e2e` 또는 `paper` 결과다.
 > 시장 데이터 기반 투자 자문이나 실거래 승인으로 사용할 수 없다.
 
 ## 1. CEO 요약
@@ -10,16 +10,19 @@
 | Case ID | `paper-e2e-aapl-001` |
 | Pipeline | `PAPER_CONNECTED` |
 | Workflow run | `wf-20260803T031139Z-c09271a7` |
+| Execution mode | `paper-e2e` |
 | Workflow status | `COMPLETED` |
 | Binding decision | **`HOLD / ESCALATE`** |
 | Binding | `False` |
-| Generated at | `2026-08-03T03:19:12.321524+00:00` |
+| Generated at | `2026-08-03T03:48:57.959381+00:00` |
 
 ### CEO 최종 페이퍼 판정
 
 **HOLD / ESCALATE**
 
 7개 Hermes Profile smoke와 handoff 계약은 통과했다. 그러나 이 실행은 실제 직원 작업·시장 Snapshot·결정론적 Risk/QA 결과·OMS/Fill·원장 반영을 수행하지 않았으므로 실거래 승격 근거가 없다.
+
+CEO adapter: `not_available`
 
 CEO는 모든 부서 결과를 종합해 이 Case의 페이퍼 판정을 내릴 수 있지만,
 Risk 한도 승인·주문 제출·원장 수정·NAV 확정 권한을 갖지 않는다. 실거래 전환은
@@ -63,9 +66,9 @@ Prediction action: `HOLD` — 실제 Snapshot과 근거가 없으므로 진입 �
 | accounting | accounting-portfolio-department | PAPER_SMOKE_PASS | `execution_result` → `accounting_snapshot` | No | BREAK | hermes_smoke=PASS profile=accounting-portfolio-department input=execution_result output=accounting_snapshot paper_no_side_effects=true |
 | ceo | ceo-agent | PAPER_SMOKE_PASS | `accounting_snapshot` → `ceo_case_summary` | No | ESCALATE | hermes_smoke=PASS profile=ceo-agent input=accounting_snapshot output=ceo_case_summary paper_no_side_effects=true |
 
-각 단계의 `PAPER_SMOKE_PASS`는 프로필 호출과 계약 경계가 통과했다는 뜻이다.
-직원 LangGraph 분석, 실제 시장 예측, Risk 계산, QA evidence 판정, OMS/Fill,
-Accounting posting이 실행됐다는 뜻은 아니다.
+`PAPER_SMOKE_PASS`는 프로필 호출과 계약 경계만 통과했다는 뜻이다.
+`PAPER_DOMAIN_PASS`는 Research/Risk/QA 부서 진입점과 CEO 종합 adapter가
+실행됐다는 뜻이다. 어느 경우에도 Broker 제출, 체결 확정, Ledger posting을 의미하지 않는다.
 
 ## 5. Production adapter 승인 기준
 

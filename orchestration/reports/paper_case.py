@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -120,6 +120,7 @@ class PaperStageReport:
 class PaperCaseReport:
     case: PaperCaseInput
     run_id: str
+    mode: str
     workflow_status: str
     final_decision: str
     decision_reason: str
@@ -127,17 +128,26 @@ class PaperCaseReport:
     forecast: Mapping[str, Decimal]
     generated_at: str
     runtime_error: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def report_status(self) -> str:
-        complete_smoke = bool(self.stages) and all(
-            stage.status == "PAPER_SMOKE_PASS" for stage in self.stages
+        complete = bool(self.stages) and all(
+            stage.status in {"PAPER_SMOKE_PASS", "PAPER_DOMAIN_PASS"}
+            for stage in self.stages
         )
-        return (
-            "PAPER_CONNECTED"
-            if self.workflow_status == "COMPLETED" and complete_smoke
-            else "INCONCLUSIVE"
-        )
+        if self.workflow_status != "COMPLETED" or not complete:
+            return "INCONCLUSIVE"
+        return "PAPER_EXECUTED" if self.mode == "paper" else "PAPER_CONNECTED"
+
+    def _ceo_metadata(self) -> str:
+        decision = self.metadata.get("ceo_decision")
+        if not isinstance(decision, Mapping):
+            return "not_available"
+        runtime = decision.get("runtime")
+        if isinstance(runtime, Mapping):
+            return f"{runtime.get('profile', 'ceo-agent')} / {runtime.get('model', 'unknown')} / {runtime.get('call_status', 'unknown')}"
+        return str(decision.get("binding_decision", "not_available"))
 
     def to_markdown(self) -> str:
         forecast_rows = "\n".join(
@@ -161,7 +171,7 @@ class PaperCaseReport:
         runtime_error = self.runtime_error or "없음"
         return f"""# Paper Investment Case Report
 
-> 이 문서는 주문·브로커·원장·DB를 변경하지 않는 `paper-e2e` 연결 검증 결과다.
+> 이 문서는 주문·브로커·원장·DB를 변경하지 않는 `paper-e2e` 또는 `paper` 결과다.
 > 시장 데이터 기반 투자 자문이나 실거래 승인으로 사용할 수 없다.
 
 ## 1. CEO 요약
@@ -171,6 +181,7 @@ class PaperCaseReport:
 | Case ID | `{self.case.case_id}` |
 | Pipeline | `{self.report_status}` |
 | Workflow run | `{self.run_id}` |
+| Execution mode | `{self.mode}` |
 | Workflow status | `{self.workflow_status}` |
 | Binding decision | **`{self.final_decision}`** |
 | Binding | `False` |
@@ -181,6 +192,8 @@ class PaperCaseReport:
 **{self.final_decision}**
 
 {self.decision_reason}
+
+CEO adapter: `{self._ceo_metadata()}`
 
 CEO는 모든 부서 결과를 종합해 이 Case의 페이퍼 판정을 내릴 수 있지만,
 Risk 한도 승인·주문 제출·원장 수정·NAV 확정 권한을 갖지 않는다. 실거래 전환은
@@ -216,9 +229,9 @@ Prediction action: `HOLD` — 실제 Snapshot과 근거가 없으므로 진입 �
 |---|---|---|---|---|---|---|
 {stage_rows}
 
-각 단계의 `PAPER_SMOKE_PASS`는 프로필 호출과 계약 경계가 통과했다는 뜻이다.
-직원 LangGraph 분석, 실제 시장 예측, Risk 계산, QA evidence 판정, OMS/Fill,
-Accounting posting이 실행됐다는 뜻은 아니다.
+`PAPER_SMOKE_PASS`는 프로필 호출과 계약 경계만 통과했다는 뜻이다.
+`PAPER_DOMAIN_PASS`는 Research/Risk/QA 부서 진입점과 CEO 종합 adapter가
+실행됐다는 뜻이다. 어느 경우에도 Broker 제출, 체결 확정, Ledger posting을 의미하지 않는다.
 
 ## 5. Production adapter 승인 기준
 
@@ -261,9 +274,13 @@ def build_paper_case_report(
     case.validate()
     steps_by_id: dict[str, StepRun] = {}
     workflow_status = "NOT_EXECUTED"
+    workflow_mode = "paper-e2e"
+    workflow_metadata: Mapping[str, object] = {}
     if workflow_run is not None:
         run_id = workflow_run.run_id
+        workflow_mode = workflow_run.mode
         workflow_status = workflow_run.status
+        workflow_metadata = workflow_run.metadata
         steps_by_id = {step.step_id: step for step in workflow_run.steps}
 
     stages: list[PaperStageReport] = []
@@ -275,7 +292,13 @@ def build_paper_case_report(
             evidence = "이전 단계 미완료로 안전하게 건너뜀" if previous_blocked else "실행 증거 없음"
             previous_blocked = True
         elif step.status == "DISPATCHED":
-            status = "PAPER_SMOKE_PASS"
+            status = (
+                "PAPER_DOMAIN_DEGRADED"
+                if workflow_mode == "paper" and "status=DEGRADED" in (step.detail or "")
+                else "PAPER_DOMAIN_PASS"
+                if workflow_mode == "paper"
+                else "PAPER_SMOKE_PASS"
+            )
             evidence = step.detail or "Hermes smoke 통과"
         elif step.status in {"FAILED", "BLOCKED"}:
             status = "BLOCKED_SAFE"
@@ -296,15 +319,23 @@ def build_paper_case_report(
             )
         )
 
-    all_smoke_passed = bool(stages) and all(
-        stage.status == "PAPER_SMOKE_PASS" for stage in stages
+    all_paper_steps_passed = bool(stages) and all(
+        stage.status in {"PAPER_SMOKE_PASS", "PAPER_DOMAIN_PASS"}
+        for stage in stages
     )
-    if all_smoke_passed and workflow_status == "COMPLETED":
-        reason = (
-            "7개 Hermes Profile smoke와 handoff 계약은 통과했다. 그러나 이 실행은 "
-            "실제 직원 작업·시장 Snapshot·결정론적 Risk/QA 결과·OMS/Fill·원장 반영을 "
-            "수행하지 않았으므로 실거래 승격 근거가 없다."
-        )
+    if all_paper_steps_passed and workflow_status == "COMPLETED":
+        if workflow_mode == "paper":
+            reason = (
+                "Research/Risk/QA 실행 결과와 CEO Luna 종합까지 연결됐다. 그러나 "
+                "Paper adapter는 주문 제출·체결·원장 반영을 하지 않고, 결과도 바인딩 "
+                "승인이 아니므로 실거래 승격 근거가 없다."
+            )
+        else:
+            reason = (
+                "7개 Hermes Profile smoke와 handoff 계약은 통과했다. 그러나 이 실행은 "
+                "실제 직원 작업·시장 Snapshot·결정론적 Risk/QA 결과·OMS/Fill·원장 반영을 "
+                "수행하지 않았으므로 실거래 승격 근거가 없다."
+            )
     else:
         reason = (
             "전체 부서 결과가 완료되지 않았거나 실행 증거가 부족하다. 누락된 근거를 "
@@ -314,6 +345,7 @@ def build_paper_case_report(
     return PaperCaseReport(
         case=case,
         run_id=run_id,
+        mode=workflow_mode,
         workflow_status=workflow_status,
         final_decision="HOLD / ESCALATE",
         decision_reason=reason,
@@ -321,6 +353,7 @@ def build_paper_case_report(
         forecast=forecast or DEFAULT_ILLUSTRATIVE_FORECAST,
         generated_at=(generated_at or datetime.now(timezone.utc)).isoformat(),
         runtime_error=runtime_error,
+        metadata=workflow_metadata,
     )
 
 
@@ -345,6 +378,7 @@ def _run_from_json(raw: Mapping[str, Any]) -> WorkflowRun:
         status=str(raw.get("status", "UNKNOWN")),
         safe_action=raw.get("safe_action"),
         steps=steps,
+        metadata=raw.get("metadata", {}),
     )
 
 

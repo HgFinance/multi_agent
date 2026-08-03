@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from orchestration.adapters import build_paper_e2e_handlers
+from orchestration.adapters import build_paper_e2e_handlers, build_paper_handlers
 
 from .contracts import StepRun, WorkflowRun, WorkflowSpec
 from .manifest import load_workflow
@@ -38,11 +38,11 @@ def execute_workflow(
     integration visible instead of fabricating a PASS result.
     """
 
-    if mode not in {"dry-run", "live", "paper-e2e"}:
-        raise ValueError("mode는 dry-run, paper-e2e 또는 live여야 합니다")
+    if mode not in {"dry-run", "live", "paper-e2e", "paper"}:
+        raise ValueError("mode는 dry-run, paper-e2e, paper 또는 live여야 합니다")
     spec.validate()
     handlers = handlers or {}
-    context = context or {}
+    context = dict(context or {})
     run_id = run_id or f"wf-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     step_runs: list[StepRun] = []
 
@@ -81,8 +81,9 @@ def execute_workflow(
                 workflow=spec.name,
                 mode=mode,
                 status="BLOCKED",
-                safe_action=step.failure_action,
-                steps=tuple(step_runs),
+ safe_action=step.failure_action,
+ steps=tuple(step_runs),
+ metadata=dict(context.get("workflow_metadata", {})),
             )
 
         detail = ""
@@ -114,8 +115,9 @@ def execute_workflow(
                 workflow=spec.name,
                 mode=mode,
                 status="FAILED",
-                safe_action=step.failure_action,
-                steps=tuple(step_runs),
+ safe_action=step.failure_action,
+ steps=tuple(step_runs),
+ metadata=dict(context.get("workflow_metadata", {})),
             )
 
         step_runs.append(
@@ -136,8 +138,9 @@ def execute_workflow(
         workflow=spec.name,
         mode=mode,
         status="VALIDATED" if mode == "dry-run" else "COMPLETED",
-        safe_action=None,
-        steps=tuple(step_runs),
+ safe_action=None,
+ steps=tuple(step_runs),
+ metadata=dict(context.get("workflow_metadata", {})),
     )
 
 
@@ -148,7 +151,8 @@ def _jsonable(run: WorkflowRun) -> dict[str, object]:
         "mode": run.mode,
         "status": run.status,
         "safe_action": run.safe_action,
-        "steps": [step.__dict__ for step in run.steps],
+ "steps": [step.__dict__ for step in run.steps],
+ "metadata": dict(run.metadata),
     }
 
 
@@ -157,9 +161,9 @@ def main() -> int:
     parser.add_argument("--workflow", default="investment-case")
     parser.add_argument(
         "--mode",
-        choices=("dry-run", "paper-e2e", "live"),
+ choices=("dry-run", "paper-e2e", "paper", "live"),
         default="dry-run",
-        help="dry-run은 계획만, paper-e2e는 Hermes smoke만, live는 명시적 adapter만 실행합니다.",
+ help="dry-run은 계획만, paper-e2e는 smoke만, paper는 읽기 전용 handoff, live는 승인 adapter만 실행합니다.",
     )
     parser.add_argument("--symbol", default="AAPL")
     parser.add_argument("--quantity", type=int, default=100)
@@ -175,6 +179,19 @@ def main() -> int:
             context = {
                 "case_request": {
                     "case_id": f"paper-e2e-{uuid4().hex[:12]}",
+                    "symbol": args.symbol,
+                    "side": "BUY",
+                    "quantity": args.quantity,
+                    "order_type": "LIMIT",
+                    "limit_price": args.limit_price,
+                    "stage": "paper",
+                }
+            }
+        elif args.mode == "paper":
+            handlers = build_paper_handlers(Path(__file__).resolve().parents[2])
+            context = {
+                "case_request": {
+                    "case_id": f"paper-{uuid4().hex[:12]}",
                     "symbol": args.symbol,
                     "side": "BUY",
                     "quantity": args.quantity,

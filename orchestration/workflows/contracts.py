@@ -130,4 +130,4 @@ class WorkflowRun:
     status: str
     safe_action: str | None
     steps: tuple[StepRun, ...]
-
+    metadata: Mapping[str, Any] = field(default_factory=dict)
