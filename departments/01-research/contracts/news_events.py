@@ -158,7 +158,7 @@ class StreamCursor:
     _seen_set: set = field(default_factory=set)
 
     @classmethod
-    def sized(cls, window: int) -> "StreamCursor":
+    def sized(cls, window: int) -> StreamCursor:
         """dedup 창 크기를 지정한 Cursor.
 
         기본 창(DEDUP_WINDOW=2,000)은 단일 질의용 가정이다. Watch sweep 는
@@ -278,8 +278,7 @@ def admit(
     cursor.remember(record)
     stats.emitted += 1
     lag = record.ingest_lag
-    if lag > stats.max_lag:
-        stats.max_lag = lag
+    stats.max_lag = max(stats.max_lag, lag)
     return True
 
 

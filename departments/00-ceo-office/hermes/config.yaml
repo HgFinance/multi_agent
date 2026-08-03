@@ -148,10 +148,10 @@ employee_runtime:
   worker_graph_module: departments/00-ceo-office/employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
-  model_default: qwen3:8b
+  model_default: qwen3:1.7b
   base_url_env: OLLAMA_BASE_URL
   model_selection:
-    active_model: qwen3:8b
+    active_model: qwen3:1.7b
     candidate_source: ollama list
     selection_policy: fixed_until_worker_benchmark_approved
     matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md

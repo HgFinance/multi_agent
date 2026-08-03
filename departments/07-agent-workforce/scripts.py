@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -50,11 +50,15 @@ if str(_REPO_ROOT) not in sys.path:
 _IMPROVEMENTS_DIR = _BASE / "improvements"
 sys.path.insert(0, str(_IMPROVEMENTS_DIR))
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-
-from candidate import ImprovementCandidate  # noqa: E402
-from reporting import evaluation_metrics, json_cell, langsmith_handoff, md_cell  # noqa: E402
-from workflow import Approval, CandidateStatus, ImprovementWorkflow  # noqa: E402
+from candidate import ImprovementCandidate
+from langgraph.graph import END, StateGraph
+from reporting import (
+    evaluation_metrics,
+    json_cell,
+    langsmith_handoff,
+    md_cell,
+)
+from workflow import Approval, CandidateStatus, ImprovementWorkflow
 
 PIPELINE_VERSION = "agent-workforce-pipeline-v2"
 
@@ -106,9 +110,19 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
     )
 
-    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
+    agent = AIAgent(model=_configured_head_model(), quiet_mode=True,
                      ephemeral_system_prompt=persona)
     return agent.chat(task)
+
+
+def _configured_head_model() -> str:
+    """Read the current Hermes Head model instead of a legacy alias."""
+
+    config = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
+    match = re.search(r"^\s+default:\s*([^\s#]+)", config, re.MULTILINE)
+    if not match:
+        raise ValueError("Hermes Head model is missing from config.yaml")
+    return match.group(1)
 
 
 def narrate(state: HRState, *, chat=None) -> dict:
@@ -215,7 +229,7 @@ def _render_report_md(out: dict) -> str:
         f"| **QA 독립검증** | {md_cell(out.get('qa_verified'))} |",
         f"| **CEO 승인** | {md_cell(out.get('ceo_approved'))} |",
         f"| **escalate** | {md_cell(out.get('escalate'))} |",
-        f"| **생성** | {PIPELINE_VERSION}, {datetime.now().isoformat()} |",
+        f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
         "",
         "---",
         "",
@@ -251,12 +265,17 @@ def _check_graph_shape():
 
 
 def _demo_candidate_input(**over) -> dict:
-    base = dict(
-        candidate_id="ic-demo-1", author="qa-department-hermes", target_type="PROFILE",
-        target_ref="agent-citation-checker", target_current_version=3,
-        evidence_ids=["finding-101"], expected_effect="인용 누락 오탐 감소",
-        risk_class="MEDIUM", rollback_target_version=3,
-    )
+    base = {
+        "candidate_id": "ic-demo-1",
+        "author": "qa-department-hermes",
+        "target_type": "PROFILE",
+        "target_ref": "agent-citation-checker",
+        "target_current_version": 3,
+        "evidence_ids": ["finding-101"],
+        "expected_effect": "인용 누락 오탐 감소",
+        "risk_class": "MEDIUM",
+        "rollback_target_version": 3,
+    }
     base.update(over)
     return base
 
@@ -346,7 +365,9 @@ if __name__ == "__main__":
     if "--run" in sys.argv:
         print(f"{PIPELINE_VERSION} 실행 (데모 후보 제출)")
         out = run_hr_department(
-            candidate_input=_demo_candidate_input(candidate_id=f"ic-run-{datetime.now():%Y%m%d%H%M%S}"),
+        candidate_input=_demo_candidate_input(
+            candidate_id=f"ic-run-{datetime.now(timezone.utc):%Y%m%d%H%M%S}"
+        ),
             transition=None, trace_id=f"{PIPELINE_VERSION}-run",
         )
         print(json.dumps(out, ensure_ascii=False, indent=1, default=str))

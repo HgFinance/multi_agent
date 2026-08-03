@@ -11,7 +11,7 @@ assert는 없다 — 비결정적 출력이라 그건 이 스크립트의 역할
   3. 상충 조정 — 본부 간 의견이 갈릴 때 하나를 임의로 고르지 않고 상충을 명시하는지
 
 사전 준비:
-  ollama pull hermes3
+ollama pull qwen3:1.7b
   ollama create agent-ceo -f departments/00-ceo-office/Modelfile
 
 실행: python departments/00-ceo-office/scripts/test_ceo_ollama_agent.py

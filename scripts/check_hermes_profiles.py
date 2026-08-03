@@ -68,6 +68,11 @@ EXPECTED_MODELS = {
     "hr-department": "openai-codex/gpt-5.6-luna",
 }
 
+# Worker model is a separate contract from the Hermes Head model above.
+# This is intentionally a temporary low-memory test default; do not change
+# EXPECTED_MODELS when switching employee Workers.
+EXPECTED_WORKER_MODEL = "qwen3:1.7b"
+
 DEPARTMENTS = {
     "ceo-agent": "00-ceo-office",
     "research-department": "01-research",
@@ -159,6 +164,25 @@ def check_boundary(dept: str, cfg: dict) -> list[str]:
     return errs
 
 
+def check_worker_model(dept: str, cfg: dict) -> list[str]:
+    """Verify the employee Worker model without changing the Head contract."""
+    runtime = cfg.get("employee_runtime") or {}
+    model_default = runtime.get("model_default")
+    active_model = (runtime.get("model_selection") or {}).get("active_model")
+    errors: list[str] = []
+    if model_default != EXPECTED_WORKER_MODEL:
+        errors.append(
+            f"{dept}: employee_runtime.model_default expected "
+            f"{EXPECTED_WORKER_MODEL}, got {model_default}"
+        )
+    if active_model != EXPECTED_WORKER_MODEL:
+        errors.append(
+            f"{dept}: employee_runtime.model_selection.active_model expected "
+            f"{EXPECTED_WORKER_MODEL}, got {active_model}"
+        )
+    return errors
+
+
 def audit() -> tuple[list[str], list[str], dict]:
     errors: list[str] = []
     warns: list[str] = []
@@ -173,6 +197,7 @@ def audit() -> tuple[list[str], list[str], dict]:
         errors += check_env_assignment(dept, cfg)
         errors += check_persona_consistency(dept, cfg)
         errors += check_boundary(dept, cfg)
+        errors += check_worker_model(dept, cfg)
         m = cfg.get("model") or {}
         models[dept] = f"{m.get('provider')}/{m.get('default')}"
         if get_allowlist(cfg) is None:

@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from macro_collector import FREQ_DAILY, Observation, SeriesSpec  # noqa: E402
+from macro_collector import FREQ_DAILY, Observation, SeriesSpec
 
 COLLECTOR_VERSION = "research-volatility-index-v1"
 KST = timezone(timedelta(hours=9))
@@ -134,10 +134,9 @@ def build_observation(parsed: dict, *, trade_date: date,
 
 def collect() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "repository"))
-    from market_breadth_collector import fetch_index_breadth
     from ls_client import LsRestClient
+    from market_breadth_collector import fetch_index_breadth
     from reference_repository import SupabaseReferenceRepository
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()
@@ -205,8 +204,8 @@ def _check_position():
     # 실측값: (84.35-18.03)/(97.99-18.03) = 82.9%
     assert position_in_52w(Decimal("84.35"), Decimal("18.03"),
                            Decimal("97.99")) == 82.9
-    assert position_in_52w(Decimal("50"), None, Decimal("90")) is None
-    assert position_in_52w(Decimal("50"), Decimal("90"), Decimal("90")) is None, \
+    assert position_in_52w(Decimal(50), None, Decimal(90)) is None
+    assert position_in_52w(Decimal(50), Decimal(90), Decimal(90)) is None, \
         "폭 0 인 범위에서 위치를 만들면 안 된다"
     print("  52주 위치 계산           OK")
 

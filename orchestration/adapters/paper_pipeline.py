@@ -28,6 +28,7 @@ from .ceo import CeoAdapterError, LunaCeoAdapter
 
 PaperHandler = Callable[[str, str, MutableMapping[str, object]], str]
 DepartmentRunner = Callable[..., Mapping[str, object]]
+WorkerLLM = Callable[[str, str], str]
 _PAPER_NAMESPACE = UUID("d8ce7fb7-4b08-4e4f-8524-8a516a6f0b8d")
 
 AUXILIARY_WORKER_DEPARTMENT = {
@@ -58,12 +59,14 @@ class PaperPipelineAdapter:
         risk_runner: DepartmentRunner | None = None,
         qa_runner: DepartmentRunner | None = None,
         ceo_adapter: LunaCeoAdapter | None = None,
+        worker_llm: WorkerLLM | None = None,
     ) -> None:
         self.repo_root = repo_root
         self._research_runner = research_runner
         self._risk_runner = risk_runner
         self._qa_runner = qa_runner
         self._ceo_adapter = ceo_adapter or LunaCeoAdapter(repo_root)
+        self._worker_llm = worker_llm
         self._log_dir = Path(tempfile.mkdtemp(prefix="hgfinance-paper-"))
 
     def handlers(self) -> dict[str, PaperHandler]:
@@ -134,7 +137,15 @@ class PaperPipelineAdapter:
         """Run non-binding Worker context and make it visible to the head."""
 
         try:
-            result = run_department_workers(self.repo_root, department, payload)
+            if self._worker_llm is None:
+                result = run_department_workers(self.repo_root, department, payload)
+            else:
+                result = run_department_workers(
+                    self.repo_root,
+                    department,
+                    payload,
+                    llm=self._worker_llm,
+                )
         except Exception as exc:  # noqa: BLE001 - Worker boundary is fail-closed
             result = {
                 "department": department,
@@ -462,8 +473,8 @@ def _detail(stage: str, report: Mapping[str, object], contract: str) -> str:
 
 def _case(context: Mapping[str, object]) -> MutableMapping[str, object]:
     value = context.get("case_request")
-    if not isinstance(value, MutableMapping) or value.get("stage") != "paper":
-        raise ValueError("paper case_request is required")
+    if not isinstance(value, MutableMapping) or value.get("stage") not in {"paper", "test"}:
+        raise ValueError("paper/test case_request is required")
     return value
 
 
@@ -705,7 +716,8 @@ def _load_script(repo_root: Path, name: str, relative_path: str) -> Any:
 
 
 def _default_research_runner(repo_root: Path) -> DepartmentRunner:
-    return _load_script(repo_root, "paper_research_scripts", "departments/01-research/scripts.py").run_research_department
+    module = _load_script(repo_root, "paper_research_scripts", "departments/01-research/scripts.py")
+    return _bind_department_runner(module, "run_research_department")
 
 
 def _default_risk_runner(repo_root: Path) -> DepartmentRunner:
@@ -765,6 +777,8 @@ def _activate_department_runtime(module: Any):
 def _department_import_paths(repo_root: Path, department_root: Path) -> list[str]:
     candidates = (
         department_root,
+        department_root / "agents",
+        department_root / "collectors",
         department_root / "engine",
         department_root / "api",
         department_root / "evidence",

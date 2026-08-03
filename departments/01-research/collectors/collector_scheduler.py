@@ -38,11 +38,11 @@
 """
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 import threading
-import signal
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -239,7 +239,6 @@ def record_run(job_name: str, argv: tuple[str, ...], *, started, ended,
         own = conn is None
         if own:
             import psycopg2
-
             from source_registry import load_project_env
 
             conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
@@ -362,7 +361,7 @@ def _check_job_table():
 
 
 def _check_due_logic():
-    kst = lambda h, m=0: datetime(2026, 7, 31, h, m, tzinfo=KST)  # noqa: E731
+    kst = lambda h, m=0: datetime(2026, 7, 31, h, m, tzinfo=KST)
     periodic = Job("p", ("x.py", "--collect"), every_minutes=10,
                    window=(time(9, 0), time(15, 0)))
     st = JobState()

@@ -112,7 +112,7 @@ def main() -> None:
     draw = ImageDraw.Draw(image)
 
     label(draw, 50, 24, "HgFinance AI Office — 0–7 Department Pipeline", 30, NAVY, True)
-    label(draw, 50, 62, "Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:8b", 16, MUTED)
+    label(draw, 50, 62, "Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:1.7b", 16, MUTED)
 
     draw.rounded_rectangle((1100, 20, 1550, 88), radius=12, fill="#f8fafc", outline="#cbd5e1")
     arrow(draw, [(1120, 44), (1170, 44)])

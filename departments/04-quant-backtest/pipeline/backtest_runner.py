@@ -41,7 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pit_dataset import DATA_ROOT, content_hash, load_partition  # noqa: E402
+from pit_dataset import DATA_ROOT, content_hash, load_partition
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
@@ -101,7 +101,7 @@ class Market:
     symbols: list[str]
 
     @classmethod
-    def from_rows(cls, rows: list[dict]) -> "Market":
+    def from_rows(cls, rows: list[dict]) -> Market:
         dates = sorted({r["trade_date"] for r in rows})
         opens, closes, symbols = {}, {}, set()
         for r in rows:
@@ -144,7 +144,7 @@ def rebalance_days(dates: list[date], config: dict) -> set[date]:
     raise ValueError(f"알 수 없는 rebalance 정책: {policy!r}")
 
 
-def select_targets(market: "Market", i: int, config: dict) -> list[str]:
+def select_targets(market: Market, i: int, config: dict) -> list[str]:
     """시그널일 t-1 종가까지로 대상 선정 - 전략은 순위 방향만 다르다."""
     strat = config["strategy"]
     if strat not in STRATEGIES:

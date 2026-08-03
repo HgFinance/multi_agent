@@ -43,7 +43,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 
-from research_v2 import (  # noqa: E402
+from research_v2 import (
     AnalystFindingV1,
     Budgets,
     Calibration,
@@ -146,7 +146,9 @@ def cited_fact_claims(
             or st.get("cited_refs") or ())
     resolved: tuple[str, ...] = ()
     if refs and bundle:
-        from bundle import resolve_refs  # 지연 import - 계약이 evidence 에 의존하지 않게
+        from bundle import (
+            resolve_refs,  # 지연 import - 계약이 evidence 에 의존하지 않게
+        )
 
         resolved = resolve_refs(refs, bundle)   # 없는 ref 면 CitationError
 

@@ -150,7 +150,7 @@ def assess_budget(
         )
 
     tokens_used = sum(s.total_tokens for s in snapshots)
-    cost = sum((s.total_cost for s in snapshots), Decimal("0"))
+    cost = sum((s.total_cost for s in snapshots), Decimal(0))
     ratio = Decimal(tokens_used) / Decimal(budget.daily_tokens)
 
     if ratio > 1:
@@ -212,9 +212,9 @@ def build_department_scorecard(
     cost_block: dict = {
         "input_tokens": sum(s.input_tokens for s in cost_snapshots),
         "output_tokens": sum(s.output_tokens for s in cost_snapshots),
-        "model_cost": _num(sum((s.model_cost for s in cost_snapshots), Decimal("0"))),
-        "tool_cost": _num(sum((s.tool_cost for s in cost_snapshots), Decimal("0"))),
-        "infra_cost": _num(sum((s.infra_cost for s in cost_snapshots), Decimal("0"))),
+        "model_cost": _num(sum((s.model_cost for s in cost_snapshots), Decimal(0))),
+        "tool_cost": _num(sum((s.tool_cost for s in cost_snapshots), Decimal(0))),
+        "infra_cost": _num(sum((s.infra_cost for s in cost_snapshots), Decimal(0))),
         "case_count": sum(s.case_count for s in cost_snapshots),
         "currency": cost_snapshots[0].currency if cost_snapshots else None,
     }
@@ -264,7 +264,7 @@ if __name__ == "__main__":
             agent_id=agent, profile_version_id="pv1",
             window_start=t0, window_end=t1,
             input_tokens=inp, output_tokens=out,
-            model_cost=Decimal(cost), tool_cost=Decimal("0"), infra_cost=Decimal("0"),
+            model_cost=Decimal(cost), tool_cost=Decimal(0), infra_cost=Decimal(0),
             case_count=cases, currency=currency,
         )
 

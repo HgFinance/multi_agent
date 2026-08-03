@@ -30,8 +30,8 @@ import math
 import os
 import sys
 import urllib.request
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence
 
 STORY_CLUSTER_VERSION = "story-cluster-v1"
 
@@ -79,7 +79,7 @@ def cluster_titles(items: Sequence, embeddings: Sequence[Sequence[float]],
 
     # 사전 정규화 - 쌍마다 내적만 남긴다. 영벡터는 무엇과도 안 묶인다(norm 0
     # 유사도를 지어내지 않는다).
-    unit: list[Optional[list[float]]] = []
+    unit: list[list[float] | None] = []
     for vec in embeddings:
         norm = math.sqrt(_dot(vec, vec))
         unit.append([x / norm for x in vec] if norm > 0.0 else None)
@@ -134,7 +134,7 @@ def _published_key(article: dict) -> tuple:
 
 
 def _embed_titles_ollama(titles: list[str], *,
-                         base: Optional[str] = None) -> list[list[float]]:
+                         base: str | None = None) -> list[list[float]]:
     """기본 임베딩 - Ollama /api/embed 배치 (rag_librarian.embed_texts 와 동형)."""
     base = (base or os.environ.get("OLLAMA_BASE_URL",
                                    "http://127.0.0.1:11434")).rstrip("/")
@@ -146,7 +146,7 @@ def _embed_titles_ollama(titles: list[str], *,
         return json.loads(r.read())["embeddings"]
 
 
-def build_stories(articles: list[dict], *, embed: Optional[Callable] = None,
+def build_stories(articles: list[dict], *, embed: Callable | None = None,
                   threshold: float = 0.85) -> dict:
     """기사 목록 -> 스토리 군집 요약 (제목 임베딩 -> cluster_titles).
 

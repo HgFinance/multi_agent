@@ -12,10 +12,10 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
-
+from typing import Any
 
 LOGGER = logging.getLogger("risk_qa.agentic_rag")
 _CIRCUIT_BREAKER_OBSERVERS: list[Callable[[str, str], None]] = []

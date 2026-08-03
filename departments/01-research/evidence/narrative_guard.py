@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Optional
 
 GUARD_VERSION = "narrative-guard-v1"
 
@@ -173,11 +172,11 @@ def _metric_values(readout: dict) -> dict[str, float]:
 
 
 def _nearest_phrase(sent: str, span: tuple[int, int],
-                    phrases: list[str]) -> tuple[float, Optional[str]]:
+                    phrases: list[str]) -> tuple[float, str | None]:
     """수치 span 과 가장 가까운 어구 출현의 (간격, 어구). 없으면 (inf, None).
     casefold 로 SMA/sma 표기 차이를 흡수한다."""
     low = sent.casefold()
-    best: tuple[float, Optional[str]] = (float("inf"), None)
+    best: tuple[float, str | None] = (float("inf"), None)
     for p in phrases:
         pl = p.casefold()
         start = 0

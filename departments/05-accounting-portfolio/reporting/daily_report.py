@@ -40,7 +40,7 @@ sys.path.insert(0, str(_HERE.parent / "ledger"))
 sys.path.insert(0, str(_HERE.parent / "portfolio"))
 sys.path.insert(0, str(_HERE.parent / "reconciliation"))
 
-from ledger import (  # noqa: E402
+from ledger import (
     CAPITAL,
     FEE_EXPENSE,
     REALIZED_PNL,
@@ -49,8 +49,8 @@ from ledger import (  # noqa: E402
     Journal,
     Ledger,
 )
-from portfolio import PortfolioSnapshot  # noqa: E402
-from reconciliation import Break, Severity  # noqa: E402
+from portfolio import PortfolioSnapshot
+from reconciliation import Break, Severity
 
 # 전략을 알 수 없는 분개가 모이는 곳. 이름을 비워두거나 버리지 않는다 -
 # 귀속 안 된 손익이 얼마인지가 Attribution 품질 지표다.
@@ -279,8 +279,7 @@ def _max_drawdown(navs: Sequence[Decimal]) -> tuple[Decimal, Decimal]:
     max_dd = ZERO
 
     for nav in navs:
-        if nav > peak:
-            peak = nav
+        peak = max(peak, nav)
         drop = peak - nav
         if drop > max_dd:
             max_dd, peak_at_max = drop, peak
@@ -358,8 +357,8 @@ if __name__ == "__main__":
     from datetime import datetime, timedelta, timezone
     from uuid import uuid4
 
-    from ledger import Position  # noqa: E402
-    from portfolio import MarkPrice, value_portfolio  # noqa: E402
+    from ledger import Position
+    from portfolio import MarkPrice, value_portfolio
 
     day = date(2026, 7, 31)
     t0 = datetime(2026, 7, 31, 0, 30, tzinfo=timezone.utc)   # 09:30 KST
@@ -387,11 +386,11 @@ if __name__ == "__main__":
             self.event_time, self.broker_fill_id = when, fid
             self.fill_id = uuid4()
 
-    from ledger import Side  # noqa: E402
+    from ledger import Side
 
     # ---- 시나리오: 자본 10억 -> 100주 매수 -> 40주 익절 -----------------------
     led = Ledger(fund_id=fund, book_id=book)
-    led.post_capital(Decimal("1000000000"), t0, "cap_1")
+    led.post_capital(Decimal(1000000000), t0, "cap_1")
     open_snap = snap(led, "70000", t0)
 
     led.post_fill(FakeFill("100", "70000", "1050", "0", t0, "bf_1"),
@@ -420,14 +419,14 @@ if __name__ == "__main__":
     assert rep.nav_change == rep.net_pnl + rep.capital_flow
 
     # 3. 실현손익은 원장에서 온 값이다 (40주 x (75000-70000) = 200,000)
-    assert rep.realized_pnl == Decimal("200000"), rep.realized_pnl
+    assert rep.realized_pnl == Decimal(200000), rep.realized_pnl
     # 미실현: 남은 60주 x (75000-70000) = 300,000
-    assert rep.unrealized_pnl == Decimal("300000"), rep.unrealized_pnl
-    assert rep.pnl_total == Decimal("500000")
+    assert rep.unrealized_pnl == Decimal(300000), rep.unrealized_pnl
+    assert rep.pnl_total == Decimal(500000)
 
     # 4. 비용은 손익에 섞이지 않고 따로 잡힌다
-    assert rep.fees == Decimal("1500") and rep.taxes == Decimal("4500")
-    assert rep.net_pnl == Decimal("500000") - Decimal("6000")
+    assert rep.fees == Decimal(1500) and rep.taxes == Decimal(4500)
+    assert rep.net_pnl == Decimal(500000) - Decimal(6000)
 
     # 5. Drawdown — 고점 72,000 시점에서 66,000 시점까지 떨어진 폭
     assert rep.nav_peak == max(s.nav for s in series)
@@ -443,21 +442,21 @@ if __name__ == "__main__":
 
     # 7. 자본 유출입을 수익으로 읽지 않는다
     led2 = Ledger(fund_id=fund, book_id=book)
-    led2.post_capital(Decimal("1000000000"), t0, "cap_a")
+    led2.post_capital(Decimal(1000000000), t0, "cap_a")
     s_open = snap(led2, "70000", t0)
-    led2.post_capital(Decimal("500000000"), t0 + timedelta(hours=1), "cap_b")
+    led2.post_capital(Decimal(500000000), t0 + timedelta(hours=1), "cap_b")
     s_close = snap(led2, "70000", t0 + timedelta(hours=2))
     r2 = build_daily_report(snapshots=[s_open, s_close], ledger=led2, accounting_date=day)
-    assert r2.nav_change == Decimal("500000000"), "NAV가 안 늘었다"
-    assert r2.capital_flow == Decimal("500000000"), "자본 유입을 못 잡았다"
+    assert r2.nav_change == Decimal(500000000), "NAV가 안 늘었다"
+    assert r2.capital_flow == Decimal(500000000), "자본 유입을 못 잡았다"
     assert r2.net_pnl == ZERO, "증자를 손익으로 읽었다"
     assert r2.unexplained_pnl == ZERO
     assert r2.return_pct == ZERO, "증자로 수익률이 생겼다"
 
     # 8. 전략 매핑이 없으면 전부 UNATTRIBUTED — 버리지 않는다
     assert [s.strategy_id for s in rep.by_strategy] == [UNATTRIBUTED]
-    assert rep.by_strategy[0].realized_pnl == Decimal("200000")
-    assert rep.by_strategy[0].cost_total == Decimal("6000")
+    assert rep.by_strategy[0].realized_pnl == Decimal(200000)
+    assert rep.by_strategy[0].cost_total == Decimal(6000)
 
     # 9. 매핑을 주면 전략별로 갈린다
     tagged = build_daily_report(
@@ -467,8 +466,8 @@ if __name__ == "__main__":
     ids = [s.strategy_id for s in tagged.by_strategy]
     assert ids == ["momentum", "seed"], ids
     momentum = tagged.by_strategy[0]
-    assert momentum.realized_pnl == Decimal("200000")
-    assert momentum.net_pnl == Decimal("200000") - Decimal("6000")
+    assert momentum.realized_pnl == Decimal(200000)
+    assert momentum.net_pnl == Decimal(200000) - Decimal(6000)
     # 전략별 합이 전체와 같아야 한다 — 어느 전략에도 안 붙은 손익이 사라지면 안 된다
     assert sum(s.realized_pnl for s in tagged.by_strategy) == rep.realized_pnl
     assert sum(s.fees + s.taxes for s in tagged.by_strategy) == rep.cost_total
@@ -482,8 +481,8 @@ if __name__ == "__main__":
 
     # 11. 오류 신호 — Break와 Reversal이 보고서에 드러난다
     assert rep.has_errors is False, "정상인데 오류로 표시됐다"
-    from reconciliation import reconcile_cash  # noqa: E402
-    bad = reconcile_cash(Decimal("1000000"), Decimal("1"))
+    from reconciliation import reconcile_cash
+    bad = reconcile_cash(Decimal(1000000), Decimal(1))
     with_breaks = build_daily_report(snapshots=series, ledger=led,
                                      accounting_date=day, breaks=bad.breaks)
     assert with_breaks.material_break_count == 1, with_breaks.breaks_by_severity
@@ -497,7 +496,7 @@ if __name__ == "__main__":
 
     # 12. 다른 Fund/Book 스냅샷은 섞이지 않는다
     other = Ledger(fund_id=uuid4(), book_id=book)
-    other.post_capital(Decimal("1000"), t0, "cap_x")
+    other.post_capital(Decimal(1000), t0, "cap_x")
     raises(lambda: build_daily_report(snapshots=[snap(other, "70000", t0),
                                                 snap(other, "70000", t0 + timedelta(hours=1))],
                                       ledger=led, accounting_date=day), "Fund 불일치")

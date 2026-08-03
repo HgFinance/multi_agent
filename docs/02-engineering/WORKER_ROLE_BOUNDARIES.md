@@ -11,7 +11,7 @@
 Hermes Department Head (Codex 기본 / 승인된 Claude Code 대체)
   └─ 독립 LangGraph Worker Graph × Worker Registry
        ├─ allow-listed read/calculation tools
-       ├─ Ollama qwen3:8b (현재 모든 Worker 고정값)
+       ├─ Ollama qwen3:1.7b (임시 테스트용 현재 모든 Worker 고정값)
        ├─ schema validation + 최대 2회 재시도(총 3회 시도)
        └─ non-binding worker-context.v1 → Hermes context
 ```
@@ -61,7 +61,7 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 
 ## 모델과 연동 상태
 
-- **현재 고정**: 모든 Worker는 Ollama `qwen3:8b`; `qwen2.5`, `qwen2.5-coder`, `qwen3:14b`는 과거 Modelfile/실험 표기이며 현재 Worker 기본값이 아니다.
+- **현재 고정**: 모든 Worker는 임시 테스트용 Ollama `qwen3:1.7b`; `qwen3:8b`, `qwen2.5`, `qwen2.5-coder`, `qwen3:14b`는 과거 기준·Modelfile/실험 표기이며 현재 Worker 기본값이 아니다.
 - **향후 모델 변경**: `ollama list` 확인 → Worker별 Golden/Adversarial benchmark → HR 제안 → QA 검증 → CEO 승인 후 Profile과 `OLLAMA_*_MODEL`을 함께 변경한다.
 - **Notion**: 부서별 Reporter와 Markdown-to-Notion block 변환기는 어댑터다. 실제 업로드는 `NOTION_TOKEN`과 부서별 DB ID가 설정되고 API 호출이 성공한 경우에만 `upload_succeeded=true`로 본다. Notion은 Projection이며 원본 판정을 소유하지 않는다.
 - **LangSmith**: 일부 부서의 handoff 필드는 존재하지만 기본 tracing은 꺼져 있다. 환경변수·자격증명·DNS·네트워크가 모두 확인되고 민감 필드 마스킹을 통과한 실제 run만 trace 성공으로 본다. 코드나 API Key의 존재만으로 연결 완료로 표시하지 않는다.

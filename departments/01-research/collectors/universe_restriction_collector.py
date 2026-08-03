@@ -57,7 +57,6 @@ def source_tr_of(reason: str, sources) -> str:
 
 def collect() -> int:
     import psycopg2
-
     from ls_client import LsRestClient
     from source_registry import load_project_env
     from universe_manager import RESTRICTION_SOURCES, fetch_restricted

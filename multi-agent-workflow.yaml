@@ -23,7 +23,7 @@ runtime_layers:
   department_employee:
     runtime: langgraph
     provider: ollama
-    model: qwen3:8b
+    model: qwen3:1.7b
     model_selection: fixed_until_model_eval_approved
     discovery_command: ollama list
     worker_counts:

@@ -117,7 +117,7 @@ class Base(BaseModel):
 # 브로커가 정하는 값이 아니라 거래소 규칙이라 계약 계층에 둔다.
 # Intent를 만들 때(F11)와 Paper 체결(F13) 양쪽이 같은 표를 봐야 한다.
 
-LOT_SIZE = Decimal("1")  # 국내 주식은 1주 단위
+LOT_SIZE = Decimal(1)  # 국내 주식은 1주 단위
 
 
 def tick_size(price: Decimal) -> Decimal:
@@ -128,18 +128,18 @@ def tick_size(price: Decimal) -> Decimal:
     """
     p = int(price)
     if p < 2_000:
-        return Decimal("1")
+        return Decimal(1)
     if p < 5_000:
-        return Decimal("5")
+        return Decimal(5)
     if p < 20_000:
-        return Decimal("10")
+        return Decimal(10)
     if p < 50_000:
-        return Decimal("50")
+        return Decimal(50)
     if p < 200_000:
-        return Decimal("100")
+        return Decimal(100)
     if p < 500_000:
-        return Decimal("500")
-    return Decimal("1000")
+        return Decimal(500)
+    return Decimal(1000)
 
 
 def is_valid_tick(price: Decimal) -> bool:
@@ -457,8 +457,8 @@ if __name__ == "__main__":
     snap = MarketSnapshot(
         market_snapshot_id="snap_01",
         as_of=now,
-        bid=Decimal("70000"),
-        ask=Decimal("70100"),
+        bid=Decimal(70000),
+        ask=Decimal(70100),
     )
 
     def intent(**over) -> OrderIntent:
@@ -470,8 +470,8 @@ if __name__ == "__main__":
             instrument_id=ids["instrument"],
             side=Side.BUY,
             order_type=OrderType.LIMIT,
-            quantity=Decimal("100"),
-            limit_price=Decimal("70000"),
+            quantity=Decimal(100),
+            limit_price=Decimal(70000),
             valid_until=now + timedelta(hours=1),
             snapshot=snap,
             idempotency_key="idem_0001",
@@ -496,8 +496,8 @@ if __name__ == "__main__":
     assert ok.evidence_hash() == intent(trace_id="다른trace").evidence_hash(), "trace는 지문에 영향 없어야"
 
     # 2. 신뢰 경계 검증 - LLM이 만들 법한 잘못된 값들
-    rejects(lambda: intent(quantity=Decimal("0")), "수량 0")
-    rejects(lambda: intent(quantity=Decimal("-5")), "음수 수량")
+    rejects(lambda: intent(quantity=Decimal(0)), "수량 0")
+    rejects(lambda: intent(quantity=Decimal(-5)), "음수 수량")
     rejects(lambda: intent(limit_price=None), "LIMIT인데 가격 없음")
     rejects(lambda: intent(order_type=OrderType.MARKET), "MARKET인데 가격 있음")
     rejects(lambda: intent(valid_until=now - timedelta(minutes=1)), "이미 만료")
@@ -505,19 +505,19 @@ if __name__ == "__main__":
     rejects(lambda: OrderIntent(**{**ok.model_dump(), "hallucinated": 1}), "모르는 필드")
 
     # 3. 데이터 품질 게이트 - stale 시세로는 주문 후보를 못 만든다
-    stale = MarketSnapshot(market_snapshot_id="s2", as_of=now, bid=Decimal("1"),
-                           ask=Decimal("2"), quality=SnapshotQuality.STALE)
+    stale = MarketSnapshot(market_snapshot_id="s2", as_of=now, bid=Decimal(1),
+                           ask=Decimal(2), quality=SnapshotQuality.STALE)
     rejects(lambda: intent(snapshot=stale), "stale 시세")
     rejects(
         lambda: MarketSnapshot(market_snapshot_id="s3", as_of=now,
-                               bid=Decimal("100"), ask=Decimal("90")),
+                               bid=Decimal(100), ask=Decimal(90)),
         "역전 호가",
     )
 
     # 4. Risk Decision
     approve = RiskDecision(
         order_intent_id=ok.order_intent_id, verdict=RiskVerdict.APPROVE,
-        approved_quantity=Decimal("100"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(100), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert approve.authorizes(ok, now)
@@ -525,24 +525,24 @@ if __name__ == "__main__":
 
     resized = RiskDecision(
         order_intent_id=ok.order_intent_id, verdict=RiskVerdict.RESIZE,
-        approved_quantity=Decimal("40"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(40), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert not resized.authorizes(ok, now), "축소 승인인데 원래 수량이 통과됨"
     assert resized.authorizes(
-        intent(order_intent_id=ok.order_intent_id, quantity=Decimal("40")), now
+        intent(order_intent_id=ok.order_intent_id, quantity=Decimal(40)), now
     ), "축소된 수량으로 다시 낸 주문이 거부됨"
 
     other = RiskDecision(
         order_intent_id=uuid4(), verdict=RiskVerdict.APPROVE,
-        approved_quantity=Decimal("100"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(100), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert not other.authorizes(ok, now), "다른 주문의 승인이 재사용됨"
 
     rejects(
         lambda: RiskDecision(order_intent_id=ok.order_intent_id, verdict=RiskVerdict.REJECT,
-                             approved_quantity=Decimal("100"),
+                             approved_quantity=Decimal(100),
                              expires_at=now + timedelta(minutes=5), decided_by="r", reason="x"),
         "reject인데 승인 수량 존재",
     )

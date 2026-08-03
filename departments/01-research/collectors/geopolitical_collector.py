@@ -46,7 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from macro_collector import FREQ_DAILY, Observation, SeriesSpec  # noqa: E402
+from macro_collector import FREQ_DAILY, Observation, SeriesSpec
 
 COLLECTOR_VERSION = "research-geopolitical-v1"
 UA = {"User-Agent": "hedgefund-research-collector/0.1 (contact: traderjaeil@gmail.com)"}
@@ -340,7 +340,6 @@ def gdelt_coverage(env: dict) -> dict[str, date]:
 def collect(*, days: int, themes_path: Path | None = None) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "repository"))
     from reference_repository import SupabaseReferenceRepository
-
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()

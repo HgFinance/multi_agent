@@ -33,16 +33,14 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 
-from pydantic import BaseModel, Field, ValidationError, field_validator  # noqa: E402
-
-from source_registry import load_project_env  # noqa: E402
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from source_registry import load_project_env
 
 AGENT_VERSION = "research-news-sentiment-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -91,7 +89,7 @@ class SentimentReport:
     symbol: str
     as_of: datetime
     verdict: str                  # SCORED | NO_EVIDENCE | INCONCLUSIVE
-    score: Optional[float]        # -1.0 ~ +1.0 (가중 평균)
+    score: float | None        # -1.0 ~ +1.0 (가중 평균)
     articles_used: int
     articles_dropped: int         # 환각 인용 등으로 버린 판정 수
     evidence: tuple[dict, ...]    # 인용 가능한 근거 (document_id 포함)
@@ -111,7 +109,7 @@ class SentimentReport:
 # 1. fetch - research-api 만 안다
 # ---------------------------------------------------------------------------
 
-def fetch_evidence(symbol: str, *, hours: float, as_of: Optional[datetime],
+def fetch_evidence(symbol: str, *, hours: float, as_of: datetime | None,
                    api_base: str = RESEARCH_API) -> list[dict]:
     url = f"{api_base}/evidence/news?symbol={symbol}&hours={hours}&limit=200"
     if as_of is not None:
@@ -342,8 +340,8 @@ def attach_bodies(articles: list[dict], *, reader=None,
     return articles, r.stats.summary()
 
 
-def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
-                      api_base: str = RESEARCH_API) -> Optional[dict]:
+def fetch_story_sizes(symbol: str, *, hours: float, as_of: datetime | None,
+                      api_base: str = RESEARCH_API) -> dict | None:
     """스토리 군집(문서 id -> 스토리 크기). 실패는 None - 가중은 원래대로 간다."""
     url = f"{api_base}/evidence/stories?symbol={symbol}&hours={hours}"
     if as_of is not None:
@@ -364,7 +362,7 @@ def fetch_story_sizes(symbol: str, *, hours: float, as_of: Optional[datetime],
         return None
 
 
-def apply_story_weights(articles: list[dict], sizes: Optional[dict]) -> tuple[list[dict], str]:
+def apply_story_weights(articles: list[dict], sizes: dict | None) -> tuple[list[dict], str]:
     """같은 사건(스토리) N건이면 각 1/N 가중 - 사건 단위 총가중 1 (2026-08-01).
 
     같은 사건을 N개 매체가 받아쓰면 사건 하나가 N배로 점수를 끌던 중복
@@ -383,7 +381,7 @@ def apply_story_weights(articles: list[dict], sizes: Optional[dict]) -> tuple[li
     return articles, (f"스토리 가중 적용 {adjusted}건" if adjusted else "")
 
 
-def run(symbol: str, *, hours: float = 24.0, as_of: Optional[datetime] = None,
+def run(symbol: str, *, hours: float = 24.0, as_of: datetime | None = None,
         llm=None, api_base: str = RESEARCH_API, reader=None,
         read_bodies: bool = True) -> SentimentReport:
     ts = as_of or datetime.now(timezone.utc)

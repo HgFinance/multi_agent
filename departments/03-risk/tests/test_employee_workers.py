@@ -21,7 +21,7 @@ def test_active_workers_are_independent_and_use_allowlisted_tools():
         llm=_llm,
     )
     assert report["runtime"]["executor"] == "LangGraph"
-    assert report["runtime"]["model"] == "qwen3:8b"
+    assert report["runtime"]["model"] == "qwen3:1.7b"
     assert report["failed"] == []
     assert report["executed"] == ["market-liquidity-worker", "pre-trade-risk-worker"]
     assert "compliance-policy-worker" in report["not_executed"]

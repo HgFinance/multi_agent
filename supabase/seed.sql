@@ -32,9 +32,12 @@ values
   ('ollama', 'local-quick', 'proposed',
    '{"tier":"quick","use":["classify","summarize","draft"],"note":"정확 Model ID는 ADR/Config"}'::jsonb,
    '{"class":"low"}'::jsonb, array['DEVELOPMENT','SHADOW','PRODUCTION']),
-  ('nous', 'poolside-laguna-s', '2.1-free',
-   '{"tier":"baseline","use":["dev"]}'::jsonb,
-   '{"class":"free"}'::jsonb, array['DEVELOPMENT'])
+  ('openai-codex', 'gpt-5.6-luna', 'profile-head',
+   '{"tier":"head","use":["orchestration","supervision"]}'::jsonb,
+   '{"class":"approved-profile"}'::jsonb, array['DEVELOPMENT','PAPER','PRODUCTION']),
+  ('ollama', 'qwen3:1.7b', 'worker-test',
+   '{"tier":"worker","use":["context","classification","summary"]}'::jsonb,
+   '{"class":"local-low-memory"}'::jsonb, array['DEVELOPMENT','PAPER'])
 on conflict (provider, model_name, model_version) do nothing;
 
 -- 3) 역할 템플릿 (HR-00~04) — AGENT_EMPLOYEE_PROFILES.md §5 기준

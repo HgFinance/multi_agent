@@ -32,22 +32,22 @@ from uuid import UUID, uuid4
 # 같은 본부 안의 계약이라 상대 import 로 붙인다. 본부 경계를 넘는 import 는 하지 않는다
 # (REPOSITORY_DEPARTMENT_STRUCTURE 8절 의존성 방향).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from contracts.market_events import (  # noqa: E402
+from contracts.market_events import (
+    InstrumentRef,
     Market,
     MarketQuote,
     MarketTick,
+    ObservationTimes,
     QualityFlag,
     SessionType,
     Side,
     build_source_event_id,
-    InstrumentRef,
-    ObservationTimes,
 )
 
 REPOSITORY_VERSION = "research-market-repository-v1"
 
 
-from reference_repository import guarded_execute_values  # noqa: E402
+from reference_repository import guarded_execute_values
 
 
 @dataclass(frozen=True)
@@ -546,7 +546,7 @@ def make_tick(fx: Fixture, seq: int, *, price: str = "70000") -> MarketTick:
         tr_code="S3_",
         session_type=SessionType.REGULAR,
         price=Decimal(price),
-        quantity=Decimal("10"),
+        quantity=Decimal(10),
         side=Side.BUY,
         sequence_no=str(seq),
         source_event_id=build_source_event_id(
@@ -566,12 +566,12 @@ def make_quote(fx: Fixture, seq: int) -> MarketQuote:
         instrument=_ref(fx),
         tr_code="H1_",
         session_type=SessionType.REGULAR,
-        bid_prices=(Decimal("69900"), Decimal("69800")),
-        bid_sizes=(Decimal("100"), Decimal("200")),
-        ask_prices=(Decimal("70000"), Decimal("70100")),
-        ask_sizes=(Decimal("150"), Decimal("50")),
-        total_bid_size=Decimal("300"),
-        total_ask_size=Decimal("200"),
+        bid_prices=(Decimal(69900), Decimal(69800)),
+        bid_sizes=(Decimal(100), Decimal(200)),
+        ask_prices=(Decimal(70000), Decimal(70100)),
+        ask_sizes=(Decimal(150), Decimal(50)),
+        total_bid_size=Decimal(300),
+        total_ask_size=Decimal(200),
         sequence_no=str(seq),
         source_event_id=build_source_event_id(
             provider="LS",
@@ -612,9 +612,9 @@ def _check_contract(repo: MarketDataRepository, label: str, fx: Fixture) -> None
     snap = repo.get_snapshot(iid, now=datetime(2026, 7, 30, 2, 0, 1, tzinfo=timezone.utc))
     assert snap is not None
     assert snap.market is Market.KRX
-    assert snap.last_price == Decimal("70000")
-    assert snap.best_bid == Decimal("69900") and snap.best_ask == Decimal("70000")
-    assert snap.spread == Decimal("100")
+    assert snap.last_price == Decimal(70000)
+    assert snap.best_bid == Decimal(69900) and snap.best_ask == Decimal(70000)
+    assert snap.spread == Decimal(100)
     assert snap.freshness > timedelta(0), f"{label}: freshness 가 음수/0 이다"
 
     # 없는 종목은 None 이다. 빈 Snapshot 을 만들어 주지 않는다
@@ -653,7 +653,7 @@ def _check_sequence_gap_detection():
 def _run_integration() -> int:
     """살아 있는 컨테이너에 실제로 적재한다. TIMESCALE_DATABASE_URL 이 필요하다."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "collectors"))
-    from source_registry import load_project_env  # noqa: E402
+    from source_registry import load_project_env
 
     dsn = load_project_env().get("TIMESCALE_DATABASE_URL", "").strip()
     if not dsn:

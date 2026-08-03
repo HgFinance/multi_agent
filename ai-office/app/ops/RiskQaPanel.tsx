@@ -61,7 +61,7 @@ export default function RiskQaPanel({
         </div>
 
         <p className="risk-qa-note">
-          Hermes Head가 부서 단위로 조율하고, 각 Worker는 독립 LangGraph + Ollama qwen3:8b로
+          Hermes Head가 부서 단위로 조율하고, 각 Worker는 독립 LangGraph + Ollama qwen3:1.7b로
           non-binding context를 제공합니다. 이 패널의 작업 중 표시는 AI Office 시뮬레이션 Projection이며,
           외부 런타임·주문·원장·Risk Limit 변경의 증거가 아닙니다.
         </p>

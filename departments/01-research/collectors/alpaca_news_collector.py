@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from source_registry import SourceRegistry, UseScope, load_project_env  # noqa: E402
+from source_registry import SourceRegistry, UseScope, load_project_env
 
 COLLECTOR_VERSION = "research-alpaca-news-v1"
 SOURCE_ID = "alpaca_news"

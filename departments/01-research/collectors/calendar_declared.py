@@ -40,7 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
-from calendar_collector import (  # noqa: E402
+from calendar_collector import (
     KST,
     MARKET_KRX,
     SESSION_REGULAR,

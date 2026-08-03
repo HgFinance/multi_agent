@@ -213,7 +213,6 @@ def score_packet(claims: list[dict], series: list[tuple[date, float]],
 
 def score(*, market_api: str | None = None, get=_http_get, limit: int = 200) -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     base = (market_api or MARKET_API_DEFAULT).rstrip("/")

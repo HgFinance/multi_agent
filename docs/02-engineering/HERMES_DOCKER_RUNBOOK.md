@@ -1,6 +1,6 @@
 # Hermes 도커 운영 Runbook
 
-> 현재 기준(2026-08-03): 모든 부서장은 Hermes + Codex 기본/Claude Code 대체이고, 직원은 부서별 독립 LangGraph Worker + Ollama `qwen3:8b`다. 아래의 Laguna·기존 단일 Ollama 호출 예시는 과거 Smoke 기록이다.
+> 현재 기준(2026-08-03): 모든 부서장은 Hermes + Codex 기본/Claude Code 대체이고, 직원은 부서별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 아래의 Laguna·기존 단일 Ollama 호출 예시는 과거 Smoke 기록이다.
 
 담당: 재일 (리서치·퀀트) — 2026-08-02 작성, 2026-08-03 상태 갱신
 근거: 재일님 지시 "팀원들이랑 도커로 관리하기로 했는데 어떻게 해야 할지"
@@ -15,7 +15,7 @@ Department Backend Image에 설치하지 않는다”), 여기서는 그 결정�
 
 ## 1. 지금 구성 (2026-08-03 실측 기준)
 
-현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. 직원은 부서별 독립 LangGraph Worker이며 현재 Ollama `qwen3:8b`를 사용한다. 아래에 남은 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이며 현재 실행 기준이 아니다. 실제 런타임 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
+현재 Git 기준은 8개 Hermes 부서장 Profile 모두 `openai-codex/gpt-5.6-luna`를 기본으로 사용하고 Claude Code를 승인된 대체 런타임으로 둔다. 직원은 부서별 독립 LangGraph Worker이며 현재 Ollama `qwen3:1.7b`를 사용한다. 아래에 남은 `poolside/laguna-s-2.1:free` 표기는 이전 Docker smoke 기록이며 현재 실행 기준이 아니다. 실제 런타임 반영은 `./scripts/sync_hermes_profiles.sh push` 후 Profile별 credential 상태로 확인한다.
 
 계획서 3.1~3.2대로 **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개**다.
 
@@ -268,7 +268,7 @@ docker exec hedgefund-research-hermes hermes -p research-department \
 
 ## 5. 모델·과금
 
-현재 저장소 기준 8개 Profile의 Head는 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 provider로 사용할 수 있다. 직원은 Hermes Head 모델과 분리된 부서별 독립 LangGraph Worker + Ollama `qwen3:8b`다. 이전 6개 Nous/Laguna와 Risk·QA만 Codex였던 구성은 Historical snapshot으로만 보존한다.
+현재 저장소 기준 8개 Profile의 Head는 `provider: openai-codex` / `gpt-5.6-luna`이고, 승인된 Claude Code를 대체 provider로 사용할 수 있다. 직원은 Hermes Head 모델과 분리된 부서별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 이전 6개 Nous/Laguna와 Risk·QA만 Codex였던 구성은 Historical snapshot으로만 보존한다.
 `scripts/check_hermes_profiles.py`는 부서별 Head 모델과 Employee 모델을 각각 검증해야 하며, 전체 Profile을 하나의 모델로 비교하지 않는다.
 모델 교체는 benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다.
 

@@ -33,7 +33,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from market_archive_exporter import ARCHIVE_ROOT, file_sha256, kst_day_bounds  # noqa: E402
+from market_archive_exporter import (
+    ARCHIVE_ROOT,
+    file_sha256,
+    kst_day_bounds,
+)
 
 DRILL_VERSION = "research-replay-drill-v1"
 KST = timezone(timedelta(hours=9))
@@ -92,7 +96,6 @@ def restore(tcur, parquet_path: Path) -> int:
 
 def run_drill(day: date, keep: bool) -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     env = load_project_env()

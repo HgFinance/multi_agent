@@ -39,9 +39,9 @@ from uuid import UUID, uuid4
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "contracts"))
 
-from contracts import Side  # noqa: E402
+from contracts import Side
 
-ZERO = Decimal("0")
+ZERO = Decimal(0)
 
 
 class AtomicityPolicy(StrEnum):
@@ -115,7 +115,7 @@ class Leg:
     position_effect: PositionEffect
     order_intent_id: UUID = field(default_factory=uuid4)
     # 파생 Leg면 승수가 1이 아니다. 명목금액 계산이 달라진다(F31).
-    contract_multiplier: Decimal = Decimal("1")
+    contract_multiplier: Decimal = Decimal(1)
 
     def __post_init__(self) -> None:
         if self.leg_index < 0:
@@ -402,8 +402,8 @@ if __name__ == "__main__":
     raises(lambda: leg(-1, a), "음수 leg_index")
     raises(lambda: leg(0, a, qty="0"), "수량 0")
     raises(lambda: leg(0, a, mult="0"), "승수 0")
-    raises(lambda: LegOutcome(leg_index=0, filled_quantity=Decimal("101"),
-                              requested_quantity=Decimal("100"), is_terminal=True),
+    raises(lambda: LegOutcome(leg_index=0, filled_quantity=Decimal(101),
+                              requested_quantity=Decimal(100), is_terminal=True),
            "주문보다 많은 체결")
 
     # 2. 전 Leg 완전 체결 -> COMPLETED

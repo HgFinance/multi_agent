@@ -63,7 +63,6 @@ def render(symbols: list[str], *, as_of: str, excluded: dict) -> str:
 
 def build() -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)

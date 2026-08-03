@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 SCORES_VERSION = "research-fundamental-scores-v1"
 

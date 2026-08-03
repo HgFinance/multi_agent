@@ -45,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-from ls_client import LsApiError, LsRestClient  # noqa: E402
+from ls_client import LsApiError, LsRestClient
 
 COLLECTOR_VERSION = "research-market-breadth-v1"
 

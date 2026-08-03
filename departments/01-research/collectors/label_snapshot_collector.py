@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _BASE = Path(__file__).resolve().parent.parent
@@ -71,8 +71,12 @@ def numeric_readout(readout: dict | None, *, limit: int = 14) -> dict:
 
 def snapshot_regime(market_api: str | None = None) -> dict | None:
     """레짐 라벨. 분석가의 LLM 서술 단계는 부르지 않는다."""
-    from sector_regime_analyst import (MARKET_API, REGIME_DAYS, _http_get,
-                                       compute_regime_readout)
+    from sector_regime_analyst import (
+        MARKET_API,
+        REGIME_DAYS,
+        _http_get,
+        compute_regime_readout,
+    )
 
     base = (market_api or MARKET_API).rstrip("/")
     rows = _http_get(f"{base}/regime/daily?days={REGIME_DAYS}")
@@ -89,9 +93,14 @@ def snapshot_geopolitical(research_api: str | None = None) -> dict | None:
     """지정학 라벨 + driver(위협 주도 / 실제 사건 주도)."""
     import urllib.parse
 
-    from geopolitical_analyst import (GPR_CODES, RESEARCH_API, WINDOW_DAYS,
-                                      _http_get, _theme_codes,
-                                      compute_geo_readout)
+    from geopolitical_analyst import (
+        GPR_CODES,
+        RESEARCH_API,
+        WINDOW_DAYS,
+        _http_get,
+        _theme_codes,
+        compute_geo_readout,
+    )
 
     base = (research_api or RESEARCH_API).rstrip("/")
     codes = list(GPR_CODES) + _theme_codes()
@@ -109,7 +118,6 @@ def snapshot_geopolitical(research_api: str | None = None) -> dict | None:
 
 def collect() -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     as_of = datetime.now(KST).date()

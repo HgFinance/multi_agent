@@ -5,14 +5,14 @@
 이 문서는 전체 투자 파이프라인의 공통 실행 계층과 Worker 수·역할·모델 경계를 정의한다. 전체 직원 수의 Source of Truth는 각 부서 `config.yaml`의 `staff_registry`, `workers`, `runtime_personalities`와 해당 부서 `employee_workers.py`다.
 
 - 부서장: Hermes Agent가 연결한 상위 LLM(Codex 또는 Claude Code)
-- 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama `qwen3:8b` (전체 부서 현재 고정)
+- 직원: 역할별 독립 LangGraph Worker Graph + 임시 테스트용 로컬 Ollama `qwen3:1.7b` (전체 부서 현재 고정)
 - 결정론적 엔진: Risk Gate, Evidence QA Gate, PIT·인용·권한·상태 전이의 유일한 바인딩 소유자
 
 ![0–7번 부서 전체 파이프라인 아키텍처](assets/whole_pipeline_0_7.png)
 
 원본 편집 가능한 다이어그램은 [`whole_pipeline_0_7.svg`](assets/whole_pipeline_0_7.svg)이며, PNG는 [`render_whole_pipeline.py`](assets/render_whole_pipeline.py)로 재생성한다.
 
-Worker별 경량·표준·중량 모델 선택 규칙은 [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md)에 고정한다. 현재 운영 후보는 모든 Worker에서 `qwen3:8b`이며, benchmark·HR 제안·QA 검증·CEO 승인 전에는 자동 변경하지 않는다.
+Worker별 경량·표준·중량 모델 선택 규칙은 [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md)에 고정한다. 현재 임시 테스트 후보는 모든 Worker에서 `qwen3:1.7b`이며, 정식 모델 교체는 benchmark·HR 제안·QA 검증·CEO 승인 전에는 자동 변경하지 않는다.
 
 ## 전체 파이프라인
 
@@ -33,7 +33,7 @@ case_request
 | 계층 | 런타임 | 책임 | 금지 |
 |---|---|---|---|
 | Department Head | Hermes + Codex/Claude Code | 하위 context 종합, 누락·충돌·에스컬레이션 서술 | 주문 제출, Risk 판정 변경, 원장 수정 |
-| Employee Worker | LangGraph + Ollama `qwen3:8b` | 허용된 도구 호출, 근거 요약, 역할별 context 생성 | 바인딩 승인, 임의 API/도구 호출 |
+| Employee Worker | LangGraph + Ollama `qwen3:1.7b` | 허용된 도구 호출, 근거 요약, 역할별 context 생성 | 바인딩 승인, 임의 API/도구 호출 |
 | Deterministic Gate | Python engine/service | Risk/QA 판정, PIT·스키마·권한·상태 검증 | LLM 자유 서술에 의한 판정 변경 |
 | HR Registry | Workforce/HR | Worker 활성화·비활성화·교체·성과 검토 | 자기 후보 최종 승인, 권한 우회 |
 

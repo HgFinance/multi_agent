@@ -41,12 +41,13 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timezone
+from datetime import time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from opendart_collector import KST, OpenDartClient, OpenDartError  # noqa: E402
+from opendart_collector import KST, OpenDartClient, OpenDartError
 
 COLLECTOR_VERSION = "research-opendart-financial-v1"
 
@@ -211,7 +212,7 @@ def to_fact(row: dict, *, observed_at: datetime) -> FinancialFact:
     )
 
 
-def prior_fact_from_row(row: dict, current: "FinancialFact") -> "FinancialFact | None":
+def prior_fact_from_row(row: dict, current: FinancialFact) -> FinancialFact | None:
     """전기(frmtrm) 값을 별도 행으로 방출한다 - YoY 활성화 (2026-08-01, 결정 2 개정).
 
     ▶ 왜 이제 안전한가 (원래 결정 2 가 미룬 이유의 해소)
@@ -345,9 +346,9 @@ _OBS = datetime(2026, 7, 30, 5, 0, tzinfo=timezone.utc)
 
 
 def _check_amount_parsing():
-    assert parse_amount("247,684,612,000,000") == Decimal("247684612000000")
-    assert parse_amount("-1,234") == Decimal("-1234")
-    assert parse_amount("0") == Decimal("0")
+    assert parse_amount("247,684,612,000,000") == Decimal(247684612000000)
+    assert parse_amount("-1,234") == Decimal(-1234)
+    assert parse_amount("0") == Decimal(0)
     # 해당 계정 없음과 값 0 을 구분한다
     assert parse_amount("") is None
     assert parse_amount("-") is None
@@ -389,7 +390,7 @@ def _check_fact_mapping():
     assert f.period_end == date(2025, 12, 31)
     assert f.period_type == "ANNUAL"
     assert f.consolidation_scope == "CONSOLIDATED"
-    assert f.value == Decimal("247684612000000")
+    assert f.value == Decimal(247684612000000)
     assert f.unit == UNIT_ABSOLUTE and f.currency == "KRW"
     assert f.published_at.astimezone(KST).date() == date(2026, 3, 10)
     assert f.observed_at == _OBS
@@ -415,7 +416,7 @@ def _check_prior_period_emission():
     cur = to_fact(_ROW, observed_at=_OBS)
     p = prior_fact_from_row(_ROW, cur)
     assert p is not None and p.period_end == date(2024, 12, 31)
-    assert p.value == Decimal("227062266000000")
+    assert p.value == Decimal(227062266000000)
     assert p.published_at == cur.published_at, "전기도 이 보고서로 관측 - PIT 게시일 유지"
     assert p.account_code == cur.account_code and p.consolidation_scope == cur.consolidation_scope
     assert p.metadata["origin"].startswith("frmtrm of ")

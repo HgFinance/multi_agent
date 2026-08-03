@@ -29,23 +29,23 @@ import json
 import os
 import re
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도 찾도록
 sys.path.insert(0, str(_BASE / "collectors"))
 sys.path.insert(0, str(_BASE / "agents"))
 
-from langgraph.graph import END, StateGraph  # noqa: E402
-
-from evidence.forecast import falsification_note  # noqa: E402
-from evidence.highlights import pick_highlights  # noqa: E402
-from evidence.highlights import render_line as render_highlights  # noqa: E402
-from evidence.forecast import probability_for_claim  # noqa: E402
-from evidence.llm_client import chat as llm_chat  # noqa: E402
+from evidence.forecast import (
+    falsification_note,
+    probability_for_claim,
+)
+from evidence.highlights import pick_highlights
+from evidence.highlights import render_line as render_highlights
+from evidence.llm_client import chat as llm_chat
+from langgraph.graph import END, StateGraph
 
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
 KST = timezone(timedelta(hours=9))
@@ -347,7 +347,7 @@ def unwrap_packet(obj):
     return obj
 
 
-def flatten_to_str_list(v) -> Optional[list[str]]:
+def flatten_to_str_list(v) -> list[str] | None:
     """총괄이 낸 값을 문자열 목록으로 평탄화. 불가능하면 None(재시도).
 
     실측 2026-08-02: 관통 4회가 모두 총괄 스키마 이탈로 죽었고 매번 모양이
@@ -606,7 +606,7 @@ JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤�
             f"\n\nYour previous reply was rejected ({last_err}). Return ONLY the "
             f"JSON object with ALL required keys: {', '.join(REQUIRED)}.{repair}")
         out = re.sub(r"<think>.*?</think>", "",
-                     call(_supervisor_persona(), task + extra), flags=re.S)
+                     call(_supervisor_persona(), task + extra), flags=re.DOTALL)
         s, e = out.find("{"), out.rfind("}")
         if s < 0 or e < s:
             last_err = "no JSON object in reply"
@@ -1042,7 +1042,6 @@ def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
         own = conn is None
         if own:
             import psycopg2
-
             from source_registry import load_project_env
 
             conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
@@ -1100,7 +1099,6 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         own = conn is None
         if own:
             import psycopg2
-
             from source_registry import load_project_env
 
             conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
@@ -1280,7 +1278,7 @@ def run_research_department(symbol: str) -> dict:
     return packet
 
 
-def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
+def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
     """Packet 을 그대로 옮겨 적는 순수 함수 - 동규님 리스크본부 리포트 패턴
     (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""

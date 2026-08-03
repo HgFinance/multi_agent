@@ -8,14 +8,14 @@
 
 | 조직 | Hermes Head | 독립 LangGraph Worker | Worker 모델 |
 |---|---|---:|---|
-| CEO | `ceo-agent` · `openai-codex/gpt-5.6-luna` | 1 | `qwen3:8b` |
-| HR | `hr-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:8b` |
-| Research | `research-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:8b` |
-| Trading | `trading-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:8b` |
-| Risk | `risk-management` · `openai-codex/gpt-5.6-luna` | 4 | `qwen3:8b` |
-| Quant/Backtest | `quant-backtest-department` · `openai-codex/gpt-5.6-luna` | 7 | `qwen3:8b` |
-| Accounting/Portfolio | `accounting-portfolio-department` · `openai-codex/gpt-5.6-luna` | 8 | `qwen3:8b` |
-| AI QA/Audit | `qa-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:8b` |
+| CEO | `ceo-agent` · `openai-codex/gpt-5.6-luna` | 1 | `qwen3:1.7b` |
+| HR | `hr-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:1.7b` |
+| Research | `research-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:1.7b` |
+| Trading | `trading-department` · `openai-codex/gpt-5.6-luna` | 6 | `qwen3:1.7b` |
+| Risk | `risk-management` · `openai-codex/gpt-5.6-luna` | 4 | `qwen3:1.7b` |
+| Quant/Backtest | `quant-backtest-department` · `openai-codex/gpt-5.6-luna` | 7 | `qwen3:1.7b` |
+| Accounting/Portfolio | `accounting-portfolio-department` · `openai-codex/gpt-5.6-luna` | 8 | `qwen3:1.7b` |
+| AI QA/Audit | `qa-department` · `openai-codex/gpt-5.6-luna` | 5 | `qwen3:1.7b` |
 
 부서 흐름은 `Hermes Head → Worker별 독립 LangGraph → Worker Context → Hermes 종합`이다. Worker Context는 non-binding이며, Risk Gate와 Evidence QA Gate는 결정론적 코드가 소유한다.
 
@@ -25,7 +25,7 @@
 
 - CEO·7개 부서·CEO 지원 공간을 2층 Pixel Office로 표시한다.
 - `RiskQaPanel`은 Risk 4명, QA 5명의 Worker Registry와 Head 모델을 별도로 표시한다.
-- Head는 Hermes + Codex/Luna, Worker는 독립 LangGraph + Ollama `qwen3:8b`로 표시한다.
+- Head는 Hermes + Codex/Luna, Worker는 독립 LangGraph + Ollama `qwen3:1.7b`로 표시한다.
 - `Simulation working`은 `app/game/sim.ts`의 데모 상태일 뿐 외부 런타임 성공 증거가 아니다.
 - Risk/QA의 주문 제출·원장 기록·Risk Limit 변경 권한은 화면과 연결하지 않는다.
 - `DEMO`, `PAPER`, `LIVE` 상태를 혼동하지 않으며, 현재 화면은 DEMO Projection이다.

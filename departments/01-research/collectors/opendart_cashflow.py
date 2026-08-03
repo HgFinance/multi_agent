@@ -125,10 +125,10 @@ def cashflow_rows(payload: dict) -> list[dict]:
 
 
 def collect(limit: int = DEFAULT_LIMIT) -> int:
-    import urllib.parse
-    import urllib.request
     import json as _json
     import time
+    import urllib.parse
+    import urllib.request
 
     sys.path.insert(0, str(_BASE.parent / "repository"))
     from news_watch_service import parse_watchlist_file

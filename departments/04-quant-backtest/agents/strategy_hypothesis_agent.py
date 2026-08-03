@@ -47,9 +47,9 @@ import re
 import sys
 import urllib.request
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -107,7 +107,7 @@ class HypothesisSpec(BaseModel):
 # 1. build_observation_context - 결정론. LLM 에게 주는 유일한 시장 관찰 입력
 # ---------------------------------------------------------------------------
 
-def _r2(v: Optional[float]) -> Optional[float]:
+def _r2(v: float | None) -> float | None:
     return None if v is None else round(float(v), 2)
 
 
@@ -128,8 +128,8 @@ def summarize_regime(rows: list[dict]) -> dict:
     if not rs:
         raise RuntimeError("/regime/daily 가 빈 목록을 줬다 - 관찰할 단면이 없다")
 
-    adv_shares: list[Optional[float]] = []
-    above_pcts: list[Optional[float]] = []
+    adv_shares: list[float | None] = []
+    above_pcts: list[float | None] = []
     up_days = down_days = streak = max_streak = 0
     for r in rs:
         a = int(r.get("advancers") or 0)
@@ -176,7 +176,7 @@ def summarize_regime(rows: list[dict]) -> dict:
     }
 
 
-def build_observation_context(*, market_api: Optional[str] = None,
+def build_observation_context(*, market_api: str | None = None,
                               days: int = REGIME_DAYS,
                               get: Callable = _http_get) -> dict:
     """market-api /regime/daily?days=N -> summarize_regime. 실패는 예외로
@@ -226,10 +226,10 @@ Output JSON only, exactly this shape, no other text:
  "required_data_products":["krx-basket-daily/v1"],
  "observation_refs":["latest_pct_above_sma20"]}"""
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-def generate(context: dict, llm: Optional[Callable] = None) -> HypothesisSpec:
+def generate(context: dict, llm: Callable | None = None) -> HypothesisSpec:
     """관찰 컨텍스트를 LLM 에 주고 HypothesisSpec 을 받는다. Schema 불합격이면
     한 번 고쳐 부르고, 또 실패하면 예외다 - 가설을 코드가 지어내지 않는다.
     llm 주입은 자체 점검용."""
@@ -283,7 +283,7 @@ def _ollama_call(system: str, user: str) -> str:
 # ---------------------------------------------------------------------------
 
 def verify(spec: HypothesisSpec, context: dict
-           ) -> tuple[Optional[HypothesisSpec], dict]:
+           ) -> tuple[HypothesisSpec | None, dict]:
     """(1) title/rationale 빈 값 -> 거부,
     (2) observation_refs 중 context 에 없는 키 제거(환각 인용 - 카운트),
     (3) required_data_products 중 실존 목록 밖 항목 제거+카운트, 전부
@@ -411,8 +411,8 @@ def register(spec: HypothesisSpec, conn=None) -> tuple[str, bool]:
 # 5. run - 관찰 -> 생성 -> 검증 -> (옵션) 등록
 # ---------------------------------------------------------------------------
 
-def run(register_db: bool = False, *, llm: Optional[Callable] = None,
-        get: Optional[Callable] = None, conn=None) -> dict:
+def run(register_db: bool = False, *, llm: Callable | None = None,
+        get: Callable | None = None, conn=None) -> dict:
     """기본은 등록하지 않는다 - register_db=True(--register) 일 때만 insert.
     각 단계 실패는 상태로 드러낸다(fail-closed): NO_OBSERVATION /
     LLM_UNAVAILABLE / REJECTED / REGISTER_FAILED."""

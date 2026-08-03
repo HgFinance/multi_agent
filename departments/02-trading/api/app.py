@@ -54,7 +54,7 @@ _DEPT = Path(__file__).resolve().parent.parent
 for _sub in ("contracts", "oms", "broker", "multileg", "capability"):
     sys.path.insert(0, str(_DEPT / _sub))
 
-from contracts import (  # noqa: E402
+from contracts import (
     MarketSnapshot,
     OrderIntent,
     OrderType,
@@ -63,8 +63,8 @@ from contracts import (  # noqa: E402
     TimeInForce,
     tick_size,
 )
-from oms import OMS, OMSError, BrokerOrder, OrderIntentRecord  # noqa: E402
-from paper_broker import PaperBroker, Quote  # noqa: E402
+from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord
+from paper_broker import PaperBroker, Quote
 
 API_VERSION = "v1"
 

@@ -33,16 +33,14 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
-
-from evidence.story_cluster import build_stories  # noqa: E402
-from source_registry import load_project_env  # noqa: E402
+from evidence.story_cluster import build_stories
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+from source_registry import load_project_env
 
 API_VERSION = "research-api-v1"
 KST = timezone(timedelta(hours=9))
@@ -97,7 +95,7 @@ def _query(sql: str, params: tuple):
         raise
 
 
-def _as_of_or_now(as_of: Optional[datetime]) -> datetime:
+def _as_of_or_now(as_of: datetime | None) -> datetime:
     if as_of is None:
         return datetime.now(timezone.utc)
     if as_of.tzinfo is None:
@@ -119,11 +117,11 @@ class NewsEvidence(BaseModel):
     document_id: str
     source: str
     title: str
-    url: Optional[str]
+    url: str | None
     published_at: datetime
     observed_at: datetime = Field(description="이 시각 이후에만 '알 수 있었던' 기사다")
-    relation_type: Optional[str]
-    confidence: Optional[float]
+    relation_type: str | None
+    confidence: float | None
     production_authorized: bool = Field(
         default=False,
         description="주문·전략 판단의 **근거로 써도 되는가**. 저장 허가"
@@ -134,7 +132,7 @@ class NewsEvidence(BaseModel):
 class HealthDomain(BaseModel):
     domain: str
     rows: int
-    last_observed_kst: Optional[str]
+    last_observed_kst: str | None
 
 
 # ▶ Tool Gateway (2026-08-02): 허용목록을 선언에서 실제 강제로.
@@ -156,7 +154,7 @@ try:
 
     _install_gateway(app)
     GATEWAY_STATUS = "enforce" if _gateway_enforcing() else "observe"
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
     print(f"⚠ {_msg}", file=sys.stderr)
     # enforcing() 자체를 못 부를 수도 있으므로 환경변수를 직접 본다
@@ -204,7 +202,7 @@ def health() -> dict:
 @app.get("/evidence/news", response_model=list[NewsEvidence])
 def evidence_news(
     symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
-    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
     hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
     limit: int = Query(50, gt=0, le=200),
 ):
@@ -244,8 +242,8 @@ def evidence_news(
 
 @app.get("/evidence/disclosures")
 def evidence_disclosures(
-    symbol: Optional[str] = Query(None, min_length=6, max_length=6),
-    as_of: Optional[datetime] = Query(None),
+    symbol: str | None = Query(None, min_length=6, max_length=6),
+    as_of: datetime | None = Query(None),
     days: float = Query(7.0, gt=0, le=90),
     limit: int = Query(50, gt=0, le=200),
 ):
@@ -283,7 +281,7 @@ def evidence_disclosures(
 @app.get("/evidence/financials")
 def evidence_financials(
     symbol: str = Query(..., min_length=6, max_length=6),
-    as_of: Optional[datetime] = Query(None),
+    as_of: datetime | None = Query(None),
     limit: int = Query(100, gt=0, le=500),
 ):
     """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2).
@@ -322,7 +320,7 @@ def evidence_financials(
 
 
 @app.get("/universe/restrictions")
-def universe_restrictions(as_of: Optional[datetime] = Query(None)):
+def universe_restrictions(as_of: datetime | None = Query(None)):
     """거래제한 종목 스냅샷 (RES-01 universe_manager 의 재료).
 
     **자격 없이 거래가능을 판정하기 위한 면이다.** 예전에는 판정하는 쪽이
@@ -367,7 +365,7 @@ def universe_restrictions(as_of: Optional[datetime] = Query(None)):
 def macro_observations(
     codes: str = Query(..., description="쉼표 구분 external_series_code (최대 30개)"),
     days: int = Query(120, gt=0, le=3650, description="period 소급 창(일)"),
-    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수)"),
+    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수)"),
 ):
     """거시·지정학 시계열 조회 (RES-09 지정학 분석가의 재료).
 
@@ -424,7 +422,7 @@ def _require_query(q: str) -> str:
 EMBED_BATCH_SIZE = 100
 
 
-def _embed_batch(texts: list[str], *, base: Optional[str] = None,
+def _embed_batch(texts: list[str], *, base: str | None = None,
                  timeout: int = 120) -> list[list[float]]:
     """텍스트 배치 -> 벡터 목록 (내부는 서브배치). Ollama 불가는 503.
 
@@ -454,7 +452,7 @@ def _embed_batch(texts: list[str], *, base: Optional[str] = None,
     return vecs
 
 
-def _embed_query(text: str, *, base: Optional[str] = None) -> str:
+def _embed_query(text: str, *, base: str | None = None) -> str:
     """질의문 -> pgvector 리터럴 (_embed_batch 1건 + 리터럴 변환)."""
     vec = _embed_batch([text], base=base, timeout=60)[0]
     return "[" + ",".join(f"{v:.7g}" for v in vec) + "]"
@@ -464,7 +462,7 @@ def _embed_query(text: str, *, base: Optional[str] = None) -> str:
 def evidence_search(
     q: str = Query(..., min_length=1, description="자연어 질의 (공백만이면 422)"),
     k: int = Query(SEARCH_K_DEFAULT, ge=1, le=SEARCH_K_MAX, description="상위 k건"),
-    as_of: Optional[datetime] = Query(
+    as_of: datetime | None = Query(
         None, description="PIT 상한 - 이 시각까지 **관측된** 청크만 (tz 필수)"),
 ):
     """공시 원문 청크 코사인 상위 k. 읽기 전용 GET - 세션도 read-only 다.
@@ -546,7 +544,7 @@ def _require_threshold(threshold: float) -> float:
 @app.get("/evidence/stories")
 def evidence_stories(
     symbol: str = Query(..., min_length=6, max_length=6, description="KRX 종목코드"),
-    as_of: Optional[datetime] = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
+    as_of: datetime | None = Query(None, description="PIT 기준 시각(tz 필수). 없으면 지금"),
     hours: float = Query(24.0, gt=0, le=24 * 7, description="published_at 소급 창"),
     threshold: float = Query(0.85, ge=STORY_THRESHOLD_MIN, le=STORY_THRESHOLD_MAX,
                              description="코사인 유사도 임계 (0.5~0.99)"),

@@ -33,7 +33,8 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -150,7 +151,6 @@ def already_verified(tconn, table: str, lo: datetime, hi: datetime) -> bool:
 
 def run_export(day: date | None, *, force: bool = False) -> int:
     import psycopg2
-
     from source_registry import load_project_env
 
     env = load_project_env()

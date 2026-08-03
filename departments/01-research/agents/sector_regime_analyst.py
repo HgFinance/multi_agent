@@ -59,21 +59,25 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from llm_client import chat as llm_chat  # noqa: E402
-from number_guard import caution_lines, flag_unmatched  # noqa: E402
-from llm_client import narrate as llm_narrate  # noqa: E402
-from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
-from style_ratios import OVERLAY_CODES  # noqa: E402
-from style_ratios import compute_style_overlay, overlay_numbers  # noqa: E402
+from llm_client import chat as llm_chat
+from llm_client import narrate as llm_narrate
+from narrative_guard import audit_narrative, label_caution_lines
+from number_guard import caution_lines, flag_unmatched
+from style_ratios import (
+    OVERLAY_CODES,
+    compute_style_overlay,
+    overlay_numbers,
+)
 
 PERSONA = "sector-regime-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-sector-regime-analyst-v2"   # v2: 스타일 overlay 추가
@@ -152,11 +156,11 @@ class RegimeNote(BaseModel):
 # 1. compute - 결정론 레짐 계산 (순수 함수, LLM 무관)
 # ---------------------------------------------------------------------------
 
-def _r4(v: Optional[float]) -> Optional[float]:
+def _r4(v: float | None) -> float | None:
     return None if v is None else round(float(v), 4)
 
 
-def _avg(vals: list[Optional[float]]) -> Optional[float]:
+def _avg(vals: list[float | None]) -> float | None:
     # 창 안에 계산 불가한 날이 하나라도 끼면 평균도 미확인이다 - 부분 평균으로
     # 위장하지 않는다
     if not vals or any(v is None for v in vals):
@@ -164,13 +168,13 @@ def _avg(vals: list[Optional[float]]) -> Optional[float]:
     return _r4(sum(vals) / len(vals))
 
 
-def _ad_ratio(adv: int, dec: int) -> Optional[float]:
+def _ad_ratio(adv: int, dec: int) -> float | None:
     # 하락 0 은 비율로 표현 불가(무한대) - 수치는 None, 라벨 규칙은 원 카운트로
     # 별도 판정한다
     return None if dec == 0 else _r4(adv / dec)
 
 
-def _clean_rows(regime_rows: Optional[list[dict]]) -> list[dict]:
+def _clean_rows(regime_rows: list[dict] | None) -> list[dict]:
     """날짜 오름차순 정렬 + 같은 거래일 중복은 나중 것(재수집 우선)으로 정리.
     등락 카운트가 없는 행은 지표를 오염시키므로 버린다."""
     dedup: dict[str, dict] = {}
@@ -184,8 +188,8 @@ def _clean_rows(regime_rows: Optional[list[dict]]) -> list[dict]:
 
 
 def compute_regime_readout(regime_rows: list[dict],
-                           breadth_rows: Optional[list[dict]] = None,
-                           macro_rows: Optional[list[dict]] = None) -> dict:
+                           breadth_rows: list[dict] | None = None,
+                           macro_rows: list[dict] | None = None) -> dict:
     """market-api /regime/daily 행 목록 -> 레짐 readout + 결정론 라벨.
 
     순수 함수 - 네트워크·시계 없이 입력만으로 계산한다(자체 점검 대상).
@@ -203,7 +207,7 @@ def compute_regime_readout(regime_rows: list[dict],
     decs = [int(r["decliners"]) for r in rows]
     ratios = [_ad_ratio(a, d) for a, d in zip(advs, decs)]
 
-    def above_pct(r: dict) -> Optional[float]:
+    def above_pct(r: dict) -> float | None:
         cov = int(r.get("sma20_coverage") or 0)
         # 분모(20봉 완비 종목)가 0 이면 비율이 존재하지 않는다 - 미확인
         return None if cov == 0 else _r4(int(r.get("above_sma20") or 0) / cov * 100.0)
@@ -306,7 +310,7 @@ def compute_regime_readout(regime_rows: list[dict],
     return readout
 
 
-def _breadth_by_market(breadth_rows: Optional[list[dict]]) -> Optional[dict]:
+def _breadth_by_market(breadth_rows: list[dict] | None) -> dict | None:
     """시장별 최신 공식 등락(보조 필드). 못 받았으면 None = 미확인."""
     if not breadth_rows:
         return None
@@ -359,7 +363,7 @@ Output JSON only, exactly this shape, no other text:
  "cautions":["..."]}"""
 
 
-def narrate(readout: dict, llm: Optional[Callable] = None) -> RegimeNote:
+def narrate(readout: dict, llm: Callable | None = None) -> RegimeNote:
     """readout 을 LLM 에 주고 RegimeNote 를 받는다. Schema 불합격이면 한 번
     고쳐 부르고, 또 실패하면 예외다 - 서술을 지어내지 않는다(호출부가
     LLM_UNAVAILABLE 처리). llm 주입은 자체 점검용."""
@@ -460,9 +464,9 @@ def _http_get(url: str, timeout: int = 20):
     return get_json(url, persona=PERSONA, timeout=timeout)
 
 
-def analyze(*, market_api: Optional[str] = None,
-            research_api: Optional[str] = None,
-            llm: Optional[Callable] = None,
+def analyze(*, market_api: str | None = None,
+            research_api: str | None = None,
+            llm: Callable | None = None,
             get: Callable = _http_get) -> dict:
     """API 호출 -> 결정론 계산·라벨 -> LLM 서술 -> 결정론 검증.
 
@@ -489,7 +493,7 @@ def analyze(*, market_api: Optional[str] = None,
             pass
 
     # 스타일 overlay 는 research-api(매크로 관측) 쪽이다 - market-api 가 아니다
-    macro_rows: Optional[list[dict]] = None
+    macro_rows: list[dict] | None = None
     try:
         macro_rows = get(
             f"{rbase}/macro/observations"

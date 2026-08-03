@@ -35,8 +35,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from source_registry import SourceRegistry, UseScope, load_project_env  # noqa: E402
-from subscription_plan import AssetClass, UniverseMember, Venue  # noqa: E402
+from source_registry import SourceRegistry, load_project_env
+from subscription_plan import AssetClass, UniverseMember, Venue
 
 CLIENT_VERSION = "research-ls-client-v1"
 
@@ -147,7 +147,7 @@ class LsRestClient:
         except urllib.error.URLError as e:
             raise LsApiError(f"{path} 연결 실패: {e.reason}") from None
 
-    def _token_cache_path(self) -> "Path":
+    def _token_cache_path(self) -> Path:
         """프로세스 밖 토큰 캐시 파일 경로. 앱키·환경별로 나눈다(PAPER/LIVE 혼동 방지)."""
         import hashlib
         import os
@@ -424,7 +424,7 @@ def _check_parsing():
 
 def _check_universe_mapping():
     rows = [r for r in (StockMasterRow.from_out_block(x) for x in _SAMPLE["t8436OutBlock"]) if r]
-    from uuid import uuid5, NAMESPACE_URL
+    from uuid import NAMESPACE_URL, uuid5
 
     def iid(venue, code):
         return uuid5(NAMESPACE_URL, f"ls://{venue.value}/{code}")
@@ -481,7 +481,7 @@ def _check_env_and_rate_limit():
 
 def _fetch_and_report() -> int:
     """실제 LS API 를 호출해 전 종목 마스터를 받는다."""
-    from uuid import uuid5, NAMESPACE_URL
+    from uuid import NAMESPACE_URL, uuid5
 
     client = LsRestClient()
     print(f"  환경: LS_ENV={client.environment} (REST Domain 은 실전 하나뿐)")

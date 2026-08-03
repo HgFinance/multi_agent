@@ -32,12 +32,13 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from opendart_collector import KST, OpenDartClient, OpenDartError  # noqa: E402
+from opendart_collector import KST, OpenDartClient, OpenDartError
 
 COLLECTOR_VERSION = "research-corporate-action-v1"
 
@@ -339,7 +340,7 @@ def _check_date_number_parsing():
         assert parse_yyyymmdd(bad) is None, bad
     assert parse_yyyymmdd("20260231") is None, "존재하지 않는 날짜"
 
-    assert parse_number("70,000,000,000") == Decimal("70000000000")
+    assert parse_number("70,000,000,000") == Decimal(70000000000)
     assert parse_number("-") is None and parse_number("") is None
     assert parse_number("해당없음") is None
     print("  날짜·숫자 파싱              OK")
@@ -351,7 +352,7 @@ def _check_verified_mapping():
     assert a.external_id == "20260415000111:tsstkAqDecsn"
     assert a.announced_at.astimezone(KST).date() == date(2026, 4, 15)
     assert a.effective_at.astimezone(KST).date() == date(2026, 4, 16)
-    assert a.cash_amount == Decimal("70000000000") and a.currency == "KRW"
+    assert a.cash_amount == Decimal(70000000000) and a.currency == "KRW"
     assert a.status == "ANNOUNCED"
     # ex_date 와 ratio 는 이 API 가 주지 않는다. 추측하지 않는다
     assert a.ex_date is None and a.ratio is None

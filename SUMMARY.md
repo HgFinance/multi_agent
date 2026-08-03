@@ -18,7 +18,7 @@
 | QA | 5 | 1 | 4 |
 
 - 부서장: Hermes Agent + `openai-codex/gpt-5.6-luna` 기본. 승인된 Claude Code 경로를 대체 provider로 둔다.
-- 직원: 독립 LangGraph Graph + Ollama `qwen3:8b` (현재 전 부서 고정값).
+- 직원: 독립 LangGraph Graph + Ollama `qwen3:1.7b` (현재 전 부서 고정값).
 - 공통 출력: 비바인딩 `worker-context.v1`; 입력 해시, Worker, 시도 횟수, 실패·폴백을 남긴다.
 - Risk Gate와 Evidence QA Gate는 결정론적 엔진이 소유한다. LLM은 주문·한도·원장·QA 판정을 직접 수행하지 않는다.
 - 파이프라인 계약: `case_request → research_packet → order_intent → risk_decision → qa_assessment → execution_result → accounting_snapshot → ceo_case_summary`.

@@ -32,7 +32,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from contracts import (  # noqa: E402
+from contracts import (
     LOT_SIZE,
     MarketSnapshot,
     OrderIntent,
@@ -85,7 +85,7 @@ def round_to_tick(price: Decimal, side: Side) -> Decimal:
     """
     unit = tick_size(price)
     rounding = ROUND_DOWN if side is Side.BUY else ROUND_UP
-    return (price / unit).quantize(Decimal("1"), rounding=rounding) * unit
+    return (price / unit).quantize(Decimal(1), rounding=rounding) * unit
 
 
 def _idempotency_key(signal: StrategySignal, delta: Decimal) -> str:
@@ -157,7 +157,7 @@ def build_order_intent(
         raise IntentBuildError(f"지원하지 않는 order_type입니다: {preset.order_type}")
     signed_offset = preset.limit_offset_bps if side is Side.BUY else -preset.limit_offset_bps
     raw_price = reference * (Decimal(1) + signed_offset / Decimal(10000))
-    limit_price = round_to_tick(raw_price.quantize(Decimal("1"), rounding=ROUND_HALF_UP), side)
+    limit_price = round_to_tick(raw_price.quantize(Decimal(1), rounding=ROUND_HALF_UP), side)
     if limit_price <= 0:
         raise IntentBuildError("지정가가 0 이하로 계산됐습니다")
 

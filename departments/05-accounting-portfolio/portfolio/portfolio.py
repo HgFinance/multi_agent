@@ -33,16 +33,15 @@ from uuid import UUID
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "ledger"))
 
-from ledger import (  # noqa: E402
-    CASH,
+from ledger import (
+    FEE_EXPENSE,
     PAYABLE,
     REALIZED_PNL,
     RECEIVABLE,
+    TAX_EXPENSE,
     ZERO,
-    FEE_EXPENSE,
     Ledger,
     Position,
-    TAX_EXPENSE,
 )
 
 # 시세가 이보다 낡으면 평가에 쓰지 않는다.
@@ -219,7 +218,7 @@ if __name__ == "__main__":
     from uuid import uuid4
 
     sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
-    from contracts import Side  # noqa: E402
+    from contracts import Side
 
     D = Decimal
     now = datetime.now(timezone.utc)

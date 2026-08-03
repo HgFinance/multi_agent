@@ -24,8 +24,8 @@ from .nodes import (
     make_retrieve_node,
     should_retry,
 )
-from .retriever import LocalVectorIndex
 from .resilience import emit_metric
+from .retriever import LocalVectorIndex
 
 
 def build_compliance_graph(corpus_dir: Path):
