@@ -63,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 from llm_client import chat as llm_chat  # noqa: E402
 from number_guard import flag_unmatched  # noqa: E402
 from llm_client import narrate as llm_narrate  # noqa: E402
+from fundamental_scores import f_score, altman_z  # noqa: E402
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -274,6 +275,58 @@ def compute_fundamental_readout(facts: list[dict]) -> dict:
                              "published_at": fields["부채총계"].get("published_at"),
                              "inputs": ["부채총계", "자본총계"]}
 
+    # ── 종합 점수: F-Score / Altman Z ────────────────────────────────────────
+    # ▶ evidence/fundamental_scores.py 는 진작 구현돼 있었고 methods.py 레지스트리에
+    #   등재까지 돼 있었는데 **호출처가 0개**였다. 선언은 있고 실재는 없는 상태 -
+    #   레지스트리를 믿고 "우리는 F-Score 를 본다" 고 말할 수 있어서 가장 나쁘다.
+    #   개별 비율 두 개(영업이익률·부채비율)로는 재무 건전성을 말하기 어렵고,
+    #   RES-05 가 인용할 확정치가 얇았던 것도 여기서 왔다.
+    def _by_code(period) -> dict:
+        m: dict = {}
+        for r in rows:
+            if _pdate(r.get("period_end")) != period:
+                continue
+            code, v = r.get("account_code"), r.get("value")
+            if code is None or v is None:
+                continue
+            m.setdefault(str(code), float(v))     # 중복은 _pick_row 규율과 같이 첫 행
+        return m
+
+    cur_map, prior_map = _by_code(latest), _by_code(prior_pe)
+    try:
+        fs = f_score(cur_map, prior_map or None)
+        zs = altman_z(cur_map)
+    except Exception as e:                        # 종합 점수 실패가 재무 readout 을
+        cautions.append(f"종합 점수 산출 실패: {type(e).__name__}")  # 통째로 죽이지 않는다
+    else:
+        # ▶ **분모를 감추지 않는다.** 6신호 중 2개만 계산됐는데 "F-Score 2점" 만
+        #   쓰면 나쁜 회사처럼 읽힌다. 계산 가능 수를 항상 함께 싣는다.
+        fields["f_score"] = {
+            "value": fs.score, "available": fs.available, "label": fs.label,
+            "period_end": str(latest),
+            "signals": {sg.key: sg.passed for sg in fs.signals},
+            "unavailable": list(fs.unavailable),
+        }
+        z = zs.as_dict()
+        fields["altman_z"] = {
+            "value": z["altman_z"], "label": z["altman_label"],
+            "period_end": str(latest),
+            # x4(시가총액/부채)는 재무제표만으로는 못 구해 장부가 대용을 쓴다.
+            # 대용인 사실을 지우면 원본 Z 로 읽힌다.
+            "x4_is_proxy": z["altman_x4_is_proxy"],
+            "components": z["altman_components"],
+        }
+        # ▶ 구성요소를 **fields 최상위로도 올린다.** keyed_pool 은 컨테이너 한 겹만
+        #   펼치므로 altman_z.components 안의 값은 확정치 풀에 안 들어간다.
+        #   그대로 두면 LLM 이 "운전자본/자산 0.02" 라고 정확히 인용해도 창작으로
+        #   몰린다 - 가드가 정상 인용을 위반으로 만들면 사람이 가드를 무시한다.
+        for ck, cv in (z["altman_components"] or {}).items():
+            if cv is not None:
+                fields[f"altman_{ck}"] = {"value": cv, "period_end": str(latest),
+                                          "inputs": ["altman_z"]}
+        if not prior_map:
+            cautions.append(f"전기({prior_pe}) 재무가 없어 F-Score 변화 신호 4개 제외")
+
     return {"verdict": "OK", "scope": scope, "period_end": str(latest),
             "fields": fields, "cautions": cautions}
 
@@ -444,6 +497,47 @@ def _two_period_facts() -> list[dict]:
         _fact("IS:당기순이익(손실)", 10.0, pri, published_at=old),
         _fact("BS:자본총계", 200.0, cur), _fact("BS:부채총계", 100.0, cur),
     ]
+
+
+def _check_scores_wired_and_citable():
+    """F-Score/Altman 이 **readout 에 실리고 확정치 풀에 들어가는가.**
+
+    이 두 함수는 진작 구현돼 methods.py 레지스트리에 등재까지 됐는데 호출처가
+    0개였다 - 선언과 실재가 어긋난 상태다. 배선만 하고 풀에 안 넣으면 LLM 이
+    정확히 인용해도 창작으로 몰리므로 둘을 같이 검사한다.
+    """
+    from number_guard import keyed_pool
+
+    def _rows(pe, ni, at, cl, ca, ncl, rev, op):
+        d = {"IS:당기순이익(손실)": ni, "BS:자산총계": at, "BS:유동부채": cl,
+             "BS:유동자산": ca, "BS:비유동부채": ncl, "IS:매출액": rev,
+             "IS:영업이익": op, "BS:부채총계": ncl + cl,
+             "BS:자본총계": at - (ncl + cl), "BS:이익잉여금": at * 0.3,
+             "BS:자본금": at * 0.05}
+        return [{"account_code": k, "account_name": k.split(":")[1],
+                 "value": float(v), "period_end": pe,
+                 "published_at": pe + "T00:00:00+09:00",
+                 "consolidation_scope": "CONSOLIDATED"} for k, v in d.items()]
+
+    r = compute_fundamental_readout(
+        _rows("2025-12-31", 120, 1000, 200, 400, 300, 900, 150)
+        + _rows("2024-12-31", 80, 950, 210, 360, 320, 850, 110))
+    f = r["fields"]
+    assert f["f_score"]["value"] == 5 and f["f_score"]["available"] == 6, f["f_score"]
+    # 분모를 감춘 라벨은 만들지 않는다 - 6신호 중 2개만 계산됐는데 "2점" 만 쓰면
+    # 나쁜 회사처럼 읽힌다
+    assert f["f_score"]["available"] >= 1 and f["f_score"]["label"] != "", f["f_score"]
+    assert f["altman_z"]["value"] is not None and f["altman_z"]["x4_is_proxy"] is True
+
+    pool = keyed_pool(r)
+    assert "f_score" in pool and "altman_z" in pool, sorted(pool)
+    comps = [k for k in pool if k.lower().startswith("altman_x")]
+    assert comps, f"Altman 구성요소가 풀 밖이다 - 정확한 인용이 창작으로 몰린다: {sorted(pool)}"
+
+    # 전기가 없으면 변화 신호는 빠지고 그 사실이 cautions 에 남아야 한다
+    solo = compute_fundamental_readout(_rows("2025-12-31", 120, 1000, 200, 400, 300, 900, 150))
+    assert solo["fields"]["f_score"]["available"] < 6, solo["fields"]["f_score"]
+    assert any("전기" in c for c in solo["cautions"]), solo["cautions"]
 
 
 def _check_readout_math():
@@ -659,6 +753,7 @@ if __name__ == "__main__":
 
     print(f"{AGENT_VERSION} 자체 점검 (LLM·API 없음)")
     _check_readout_math()
+    _check_scores_wired_and_citable()
     _check_corrected_filing_and_scope()
     _check_no_prior_period()
     _check_division_guards()
