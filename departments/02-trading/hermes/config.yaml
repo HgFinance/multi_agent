@@ -5,10 +5,28 @@
 # 참고: docs/HEDGE_FUND_MASTER_PLAN.md 5.5 #2, 8, 19.8
 #       docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md (v1.2) 1.1, 4.2, 4.3
 
+# 2026-08-03 팀 합의대로 Sonnet 을 쓴다. 경로가 셋인데 **셋 다 과금처가 다르다.**
+#   1) provider: nous + anthropic/claude-sonnet-5
+#      -> Nous 크레딧 필요. 계정 잔액이 없어 전부 404(실측 "requires available credits")
+#   2) provider: anthropic + ANTHROPIC_API_KEY(sk-ant-)
+#      -> 구독과 별개인 종량 과금. 키는 .env 에 있지만 이걸 쓰면 플랜이 아니다
+#   3) provider: anthropic + ANTHROPIC_BASE_URL -> 호스트 프록시 -> claude -p   ← 이것
+#      -> Claude Code CLI 가 부르는 것이라 **구독 플랜 한도**가 적용된다
+# api.anthropic.com 직접 호출이 서드파티로 잡혀 extra usage 에서 차감되는 문제를
+# 재일님이 2026-08-03 에 실측하고 scripts/claude_code_proxy.py 로 우회했다.
+# 배선은 compose.yaml 의 ANTHROPIC_BASE_URL 주석 참고.
+#
+# `sonnet` 은 프록시 MODEL_ALIASES 가 정확히 아는 이름이다. 모르는 이름을 주면
+# 조용히 DEFAULT_ALIAS(sonnet)로 떨어지므로, 오타가 있어도 안 드러난다 -
+# 그래서 별칭표에 있는 값을 그대로 쓴다.
+#
+# ⚠ 선행 조건 두 개. 없으면 이 부서 Agent 질의가 5xx 다.
+#   - 호스트에서 python scripts/claude_code_proxy.py --serve
+#   - .env 의 CLAUDE_CODE_OAUTH_TOKEN (claude setup-token 으로 발급)
+# 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
 model:
-  provider: openai-codex
-  default: gpt-5.6-luna
-  base_url: https://chatgpt.com/backend-api/codex
+  provider: anthropic
+  default: sonnet
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
@@ -123,50 +141,40 @@ hiring_priority:
 usage:
   run: "trading-department chat -q 'Turn this Research Packet into an OrderIntent for 005930'"
   collaborate: "trading-department chat -q 'Run Bull/Bear debate, then submit the OrderIntent to risk-management'"
-head_runtime:
-  runtime: hermes
-  role: department_head
-  provider_choices: [openai-codex, anthropic-claude-code]
-  active_provider: openai-codex
-  active_model: gpt-5.6-luna
-  model_source: model
-  responsibility: synthesize_worker_context_and_escalate
-  binding_decision: false
-staff_registry:
-  head_count: 1
-  worker_count: 6
-  default_execution_count: 2
-  max_execution_count: 6
-  active_worker_count: 2
-  conditional_worker_count: 4
-  runtime_persona_source: workers
-  legacy_personas_are_aliases: true
-  legacy_personas:
-    source: agent.personalities
-    runtime: compatibility_only
-    excluded_from_worker_count: true
-employee_runtime:
-  executor: langgraph
-  topology: independent_graph_per_worker
-  worker_graph_module: departments/02-trading/employee_workers.py
-  provider: ollama
-  model_env: OLLAMA_CHAT_MODEL
-  model_default: qwen3:8b
-  base_url_env: OLLAMA_BASE_URL
-  model_selection:
-    active_model: qwen3:8b
-    candidate_source: ollama list
-    selection_policy: fixed_until_worker_benchmark_approved
-    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
-  output_contract: trading.worker-context.v1
-  max_retries: 2
-  max_attempts: 3
-  binding_decision_owner: departments/02-trading/oms/oms.py
-  failure_action: HOLD
-workers:
-  market-thesis-worker: {status: active, tools: [trading.research_packet.read], output: advisory_context}
-  trade-proposal-worker: {status: active, tools: [trading.portfolio_state.read], output: advisory_context}
-  order-constraint-worker: {status: conditional, trigger: risk_decision, tools: [trading.risk_decision.read], output: advisory_context}
-  execution-planning-worker: {status: conditional, trigger: approved_risk, tools: [trading.execution_constraints.read], output: advisory_context}
-  venue-cost-worker: {status: conditional, trigger: execution_request, tools: [trading.venue_cost.read], output: advisory_context}
-  derivatives-structure-worker: {status: conditional, trigger: derivatives_signal, tools: [trading.derivatives.read], output: advisory_context}
+
+# ── 도구 허용목록 (2026-08-03) ────────────────────────────────────────────────
+# ⚠ 이 키는 tool_allowlist 와 다르다. **Hermes 가 실제로 읽고 강제한다**
+#   (`hermes tools list` 결과가 이 목록과 일치한다). 01-research/hermes/config.yaml
+#   38-44행이 경고하듯 tool_allowlist 는 우리 저장소 계약 문서일 뿐 런타임 강제가
+#   아니지만, platform_toolsets 는 런타임 자체의 허용목록이다.
+#
+# 기본값 문제: Portal 로그인이 free tool pool 을 켜면서 web·browser·terminal·
+# file·code_execution·computer_use 가 전부 enabled 로 들어왔다(2026-08-03 실측).
+# HERMES_DOCKER_RUNBOOK.md 7절은 "에이전트에게 셸을 주지 않는 현재 구성"이라고
+# 적고 있었지만 실제 런타임은 그 반대였다.
+#
+# 남기는 기준: Hermes 는 부서 인터페이스·기억·위임 계층이고 분석 실체는
+# LangGraph 다(TECH_STACK_DECISIONS 2절, 같은 runbook 6절). 오케스트레이션에
+# 필요한 것만 남기고 실행 능력은 전부 뺀다.
+#   - 뺀 것: web·browser(시세·뉴스 원본 수집은 리서치본부 영역 - CLAUDE.local.md
+#     "만들지 않는 것"), terminal·file·code_execution·computer_use(셸이 있으면
+#     Agent 가 우리 OMS·원장 코드를 직접 실행할 수 있다 - 원칙 1 위반 경로),
+#     vision·image_gen·bfl·tts(거래·회계 업무와 무관)
+#   - 도메인 데이터는 나중에 MCP Server 로 붙인다. builtin toolset 과 별개다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+
+# ⚠ 아래 목록이 없으면 위 허용목록이 조용히 새어나간다. Hermes 는
+#   known_builtin_toolsets 에 **없는** toolset 을 "새로 생긴 것"으로 보고 자동
+#   활성화한다. sync push 가 이 파일을 통째로 덮으므로, 이 키를 빼두면 push 할
+#   때마다 platform_toolsets 에 없는 도구가 다시 켜진다(2026-08-03 실측: bfl 이
+#   그렇게 살아남았다 - 목록에 없는데 enabled 였다).
+#   Hermes 가 새 toolset 을 추가하면 여기서도 빠져 자동 활성화되므로, `hermes
+#   tools list` 결과가 platform_toolsets 와 다르면 이 목록을 갱신한다.
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+  cli: [spotify]

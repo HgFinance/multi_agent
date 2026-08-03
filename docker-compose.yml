@@ -32,6 +32,17 @@
 
 name: hedgefund
 
+# ▶ Compose Fragment 분리(계획서 10절, 2026-08-03) - "본부가 자기 Compose Fragment를
+#   소유하도록 한다"는 목표 구조의 첫 단계다. 지금은 영주 소유 2개 부서(CEO Office, Agent
+#   Workforce)만 옮겼다 - 남의 본부 서비스를 대신 옮기지 않는다(CLAUDE.md 원칙). 나머지
+#   6개 부서는 각 담당자가 같은 방식으로 옮기면 된다. `include`된 파일도 이 파일의
+#   서비스(redis 등)와 하나의 병합된 모델을 공유하므로 depends_on 등 상호 참조가 그대로 된다.
+include:
+  - departments/00-ceo-office/compose.yaml
+  - departments/02-trading/compose.yaml
+  - departments/05-accounting-portfolio/compose.yaml
+  - departments/07-agent-workforce/compose.yaml
+
 services:
   timescaledb:
     image: timescale/timescaledb-ha:pg17
@@ -97,10 +108,17 @@ services:
       # 종목만 보려면 .env 의 NEWS_WATCH_SYMBOLS 가 파일보다 우선한다.
       NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-}
       NEWS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
-      # 350종목 × 57회/일 = 19,950 < 한도의 90%(22,500). 종목이 많아 간격이 길다 -
-      # 간격을 줄이려면 종목을 줄여야 한다(뉴스 지연은 NAVER 색인이 지배하므로
-      # 넓은 커버리지 쪽이 남는 장사라는 판단).
-      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1500}
+      # ▶ 2계층 (재일님 지시 2026-08-03 "2계층으로 가자")
+      #   Tier1 = 위 핵심 바스켓 350종목, 매 sweep. 속보는 여기서 잡는다.
+      #   Tier2 = 코스피+코스닥 개별주 전종목 2,595, 남는 한도로 순회.
+      #   전종목을 같은 빈도로 돌면 간격이 185분이 되어 속보성이 사라진다.
+      NEWS_TIER2_SYMBOLS_FILE: config/full_universe.txt
+      # 실측 2026-08-03 (한도 25,000, 상한 90% = 22,500):
+      #   1500초 -> Tier1 만으로 21,000회, Tier2 는 sweep 당 1종목 = 사실상 안 돈다
+      #   1800초 -> Tier1 16,800 + Tier2 sweep 당 118종목, 한 바퀴 10시간,
+      #             합계 22,193회/일 (여유 307)
+      # 5분을 양보하고 전종목을 하루 2.4회 훑는 쪽을 택했다.
+      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1800}
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -144,7 +162,13 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
-      LS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
+      # ▶ 전종목 구독 (2026-08-03, 재일님 지시)
+      #   ETF·ETN 은 instrument_type 이 달라 애초에 안 들어온다(STOCK 만).
+      #   거래정지·관리종목 등 제한 171 을 뺀 2,595종목 = 5,190구독 =
+      #   소켓 26개(소켓당 200). 실계좌 웹소켓 세션 한도는 미확인이라
+      #   전환 후 소켓 수와 유입을 반드시 확인한다 - 거절되면 즉시
+      #   news_watchlist.txt(350종목)로 되돌린다.
+      LS_WATCH_SYMBOLS_FILE: config/full_universe.txt
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -394,6 +418,24 @@ services:
       # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
       # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # ▶ Claude 구독 자격 (2026-08-03)
+      #   `claude setup-token` 이 발급하는 **장기 토큰**이다. anthropic provider 의
+      #   자격 해석 순서가 ANTHROPIC_API_KEY -> ANTHROPIC_TOKEN ->
+      #   CLAUDE_CODE_OAUTH_TOKEN 이라, API 키가 비어 있으면 이것이 쓰인다.
+      #
+      #   **~/.claude/.credentials.json 을 마운트하지 않는 이유**: 그 파일의
+      #   accessToken 은 1시간마다 만료되고 갱신 때 refreshToken 이 rotation 된다.
+      #   컨테이너가 갱신하는 순간 호스트의 대화형 세션이 무효가 된다
+      #   (2026-08-02 auth.json 복사로 실제 겪음 - invalid_grant, 네이티브
+      #   설치본까지 로그아웃). setup-token 은 그 세션과 **별도 자격**이라
+      #   서로를 무효화하지 않는다.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # ▶ Claude Code CLI 프록시 (2026-08-03)
+      #   api.anthropic.com 직접 호출은 '서드파티'라 플랜 한도가 아니라
+      #   extra usage 에서 차감된다(실측 HTTP 400). CLI 로 부르면 Claude
+      #   Code 자신이라 플랜 한도가 적용되므로, 호스트의 프록시를 거친다.
+      #   프록시 기동: python scripts/claude_code_proxy.py --serve
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
       # Profile 의 mcp_servers.research.headers 가 이 값을 Bearer 로 싣는다
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
@@ -413,6 +455,9 @@ services:
       HERMES_UID: 10000
       HERMES_GID: 10000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Claude Code CLI 프록시 - 리서치와 같은 근거(2026-08-03).
+      # api.anthropic.com 직접 호출은 서드파티라 플랜 한도가 안 쓰인다.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -535,78 +580,14 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
-  # ── CEO Office·Agent Workforce 인사팀 (영주 소유) ───────────────────────────
-  # 근거: DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.1·6.8절
-  # departments/00-ceo-office/Dockerfile, departments/07-agent-workforce/Dockerfile 참고.
-  #
-  # ▶ redis 미의존 - 위 risk-api/audit-api와 달리 governance-api/workforce-api는 아직
-  #   Redis Event Stream을 쓰지 않는다(Mandate/Report/Notification, Access/Improvements/
-  #   Scorecard 전부 Postgres psycopg2로만 다룬다 - depends_on: redis 넣지 않는다).
-  governance-api:
-    build:
-      context: departments/00-ceo-office
-    container_name: hedgefund-governance-api
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-}
-    ports:
-      - "127.0.0.1:8043:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api/audit-api와 같은 정책)
-    mem_limit: 256m
-    cpus: 0.5
-    pids_limit: 64
+  # CEO Office·Agent Workforce 인사팀(영주 소유) 서비스는 각자 Compose Fragment로 옮겼다 -
+  # departments/00-ceo-office/compose.yaml, departments/07-agent-workforce/compose.yaml
+  # (governance-api, notification-worker, ceo-hermes, workforce-api, improvement-worker,
+  # workforce-hermes). 이 파일 상단 `include:` 참고.
 
-  workforce-api:
-    build:
-      context: departments/07-agent-workforce
-    container_name: hedgefund-workforce-api
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-}
-    ports:
-      - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
-    mem_limit: 256m
-    cpus: 0.5
-    pids_limit: 64
-
-  # ceo-hermes / workforce-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는
-  # Backend Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는
-  # CLAUDE.md 배정표대로 ceo는 ANTHROPIC_API_KEY, hr은 OPENAI_API_KEY만 준다.
-  # 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의 매핑("ceo-agent",
-  # "hr-department")과 일치해야 한다 - 다른 부서(예: research-department)와 달리
-  # CEO/HR은 CLI 명령 이름과 프로필 이름이 같다.
-  ceo-hermes:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-ceo-hermes
-    restart: unless-stopped
-    command: ["gateway", "run"]
-    volumes:
-      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data
-    environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    mem_limit: 1g
-    mem_reservation: 192m
-    cpus: 1.0
-    pids_limit: 256
-    stop_grace_period: 20s
-
-  workforce-hermes:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-workforce-hermes
-    restart: unless-stopped
-    command: ["gateway", "run"]
-    volumes:
-      - ${USERPROFILE}/.hermes-hr-department:/opt/data
-    environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    mem_limit: 1g
-    mem_reservation: 192m
-    cpus: 1.0
-    pids_limit: 256
-    stop_grace_period: 20s
+  # 트레이딩·회계/포트폴리오본부(도현 소유) 서비스도 각자 Compose Fragment로 옮겼다 -
+  # departments/02-trading/compose.yaml, departments/05-accounting-portfolio/compose.yaml
+  # (trading-hermes, accounting-hermes). 이 파일 상단 `include:` 참고.
 
   # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
   #

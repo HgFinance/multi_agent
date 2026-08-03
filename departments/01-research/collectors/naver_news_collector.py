@@ -372,6 +372,7 @@ def make_watch_stream(
     display: int = 30,
     interval_seconds: float = 60.0,
     cursor: StreamCursor | None = None,
+    sweep_items=None,
     sleep=None,
     clock=None,
     now=None,
@@ -380,6 +381,10 @@ def make_watch_stream(
 
     호출부는 이게 폴링인지 WebSocket 인지 모른다 - news_events.NewsStream 계약이다.
     sleep/clock/now 는 테스트 주입용이다(실제로 자거나 벽시계를 보지 않게).
+
+    sweep_items(sweep_index) -> list[WatchItem] 을 주면 **sweep 마다 대상이 바뀐다**
+    (2계층 순회). 안 주면 매번 items 전체다 - 기존 동작 그대로다.
+    items 는 그때도 필요하다: dedup 창 크기와 빈 감시 판정의 기준이다.
     """
     if not items:
         raise NaverNewsError("Watchlist 가 비었다 - 빈 감시를 정상으로 보지 않는다")
@@ -394,10 +399,22 @@ def make_watch_stream(
         #   한 기사가 여러 종목 질의에 걸리면(예: '삼성전자·SK하이닉스 동반 상승')
         #   Cursor 가 두 번째를 중복으로 걸러 종목 하나를 잃는다. 그래서 페이지 안에서
         #   먼저 **심볼을 합쳐** 두고 한 건으로 내보낸다.
+        # ▶ sweep 순회 (2계층). index 를 **부르기 전에** 올린다 - 실패한 slice 에서
+        #   멈추면 그 slice 가 영구히 순회를 막는다. 한 번 걸러도 다음 바퀴에 다시
+        #   오고, LS 실시간 푸시가 같은 종목을 이미 덮는다.
+        active = items
+        if sweep_items is not None:
+            idx = fetch_page.sweep_index
+            fetch_page.sweep_index = idx + 1
+            active = list(sweep_items(idx))
+            if not active:
+                raise NaverNewsError(
+                    f"sweep {idx} 대상이 비었다 - 빈 sweep 을 정상으로 보지 않는다")
+
         by_ext: dict[str, tuple[NewsRecord, set]] = {}
         order: list[str] = []
         raw = 0
-        for it in items:
+        for it in active:
             # 종목 하나가 실패해도 나머지를 조용히 건너뛰지 않는다. 예외를 올린다.
             for rec in client.fetch(it.query, display=display):
                 raw += 1
@@ -414,6 +431,7 @@ def make_watch_stream(
 
     fetch_page.raw_items = 0
     fetch_page.merged = 0
+    fetch_page.sweep_index = 0
 
     if cursor is None:
         # dedup 창은 한 sweep(종목수 × display)보다 커야 한다. 기본 창(2,000)으로
@@ -559,7 +577,7 @@ def _check_stream_contract():
 
         def fetch(self, query, display=30):
             self.n += 1
-            return [parse_item(_SAMPLE, observed_at=datetime.now(timezone.utc))]
+            return [parse_item(_SAMPLE, observed_at=_ob())]
 
     items = [WatchItem(None, "005930", "삼성전자"), WatchItem(None, "000660", "SK하이닉스")]
 
@@ -572,8 +590,11 @@ def _check_stream_contract():
     def sleep(s):
         ticks["t"] += s
 
+    # ▶ now 를 고정한다 - 벽시계를 쓰면 _SAMPLE 의 고정 pubDate 가 MAX_BACKFILL_AGE
+    #   (3일)를 넘기는 날 자체점검이 갑자기 TOO_OLD 로 깨진다(실제로 2026-08-03 에
+    #   깨졌다). 결정론적 점검은 오늘이 며칠인지에 의존하면 안 된다.
     s = make_watch_stream(_FakeClient(), items, interval_seconds=10.0,
-                          sleep=sleep, clock=clock)
+                          sleep=sleep, clock=clock, now=_ob)
     assert isinstance(s, NewsStream)
     assert s.transport is Transport.POLLING and s.source_id == SOURCE_ID
 
@@ -589,6 +610,29 @@ def _check_stream_contract():
     # 원본 건수와 병합 건수를 숨기지 않는다
     fp = s._fetch_page
     assert fp.raw_items == 2 and fp.merged == 1, (fp.raw_items, fp.merged)
+
+    # ▶ sweep_items 를 주면 sweep 마다 대상이 바뀐다(2계층 순회)
+    seen_idx = []
+
+    def _by_sweep(i):
+        seen_idx.append(i)
+        return [items[i % len(items)]]
+
+    s2 = make_watch_stream(_FakeClient(), items, interval_seconds=10.0,
+                           sleep=sleep, clock=clock, now=_ob,
+                           sweep_items=_by_sweep)
+    s2.run(on_record=lambda r: None, max_seconds=5.0)
+    assert seen_idx == [0], seen_idx
+    assert s2._fetch_page.raw_items == 1, "sweep 대상이 1종목인데 전체를 불렀다"
+    # 빈 sweep 은 조용히 넘어가지 않는다
+    s3 = make_watch_stream(_FakeClient(), items, interval_seconds=10.0,
+                           sleep=sleep, clock=clock, now=_ob,
+                           sweep_items=lambda i: [])
+    try:
+        s3.run(on_record=lambda r: None, max_seconds=5.0)
+        raise AssertionError("빈 sweep 이 통과했다")
+    except NaverNewsError:
+        pass
 
     # 빈 Watchlist 를 정상으로 보지 않는다
     try:

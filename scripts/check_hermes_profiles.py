@@ -46,8 +46,10 @@ EXPECTED_MODELS = {
     "quant-backtest-department": "nous/poolside/laguna-s-2.1:free",  # 재일
     "ceo-agent": "nous/poolside/laguna-s-2.1:free",              # 영주
     "hr-department": "nous/poolside/laguna-s-2.1:free",          # 영주
-    "trading-department": "nous/poolside/laguna-s-2.1:free",     # 도현
-    "accounting-portfolio-department": "nous/poolside/laguna-s-2.1:free",
+    # 도현: 2026-08-03 팀 합의대로 Sonnet. 단 api.anthropic.com 직접이 아니라
+    # scripts/claude_code_proxy.py 를 거쳐 구독 플랜 한도로 부른다(각 config.yaml 주석).
+    "trading-department": "anthropic/sonnet",                    # 도현
+    "accounting-portfolio-department": "anthropic/sonnet",
     "risk-management": "nous/poolside/laguna-s-2.1:free",        # 동규
     "qa-department": "nous/poolside/laguna-s-2.1:free",
 }

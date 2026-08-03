@@ -32,6 +32,21 @@ agent:
     selection-performance-agent: "You are the Selection/Performance Agent. You run Golden and Adversarial Evals on candidates, manage their Shadow probation period, and coordinate ongoing training and performance improvement for existing Agents. You periodically review each department's Queue/SLA/Cost/Quality Scorecard and Eval score trend to identify active Agent Profiles that need revision, and route them to the Profile Architect — you never apply a revision yourself, and a revised profile passes the same Eval bar as a new hire, never a relaxed one."
     lifecycle-coordinator: "You are the Lifecycle Coordinator. You manage Joiner/Mover/Leaver events — Identity, Queue assignment, Memory namespace and permission requests — but you never create the actual Identity or grant permissions yourself; only the Platform/IAM Service does that."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다
+  # (Risk/QA config.yaml과 동일 컨벤션). 새로 지어낸 권한이 아니라 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+  # 3.6절(인사팀 부서 내 통신)을 그대로 옮긴 것 — departments/07-agent-workforce/api/app.py가
+  # 실제로 감싸는 엔드포인트만 대상.
+  tool_allowlist:
+    agent-workforce-supervisor: [workforce.roster.read, workforce.scorecard.read, workforce.hiring_request.propose]  # HR-00, 제안만 - 승인은 CEO
+    workforce-planning-agent: [workforce.scorecard.read, workforce.skill_gap.read]  # HR-01, 읽기 전용
+    profile-architect: [workforce.profile_version.submit, workforce.improvement.propose]  # HR-02, 개정안 제안
+    selection-performance-agent: [workforce.improvement.propose, workforce.improvement_event.read, audit.eval_run.read]  # HR-03, 후보 author. Eval 원본은 audit.eval_runs 조회(3.6절 §5.1)
+    lifecycle-coordinator: [workforce.agent_status.change, workforce.access_request.create]  # HR-04, 요청만 - 실제 Provisioning은 Platform/IAM
+  # 부서 전체 공통 금지 — SOUL.md Hard Boundaries 그대로: Model/Prompt/Tool 권한 부여는 QA 몫,
+  # 예산·조직 승인은 CEO 몫, Identity 생성·권한 부여는 Platform/IAM 몫. oms.submit/ledger.write는
+  # Risk/QA config.yaml과 같은 이유(트레이딩·회계본부 전속 권한)로 금지한다.
+  forbidden_tools: [oms.submit, ledger.write, workforce.permission.grant, workforce.budget.approve, iam.identity.create]
+
 # 인사팀은 Agentic RAG 대상이 아니다. 문서 코퍼스에서 근거를 찾는 게 아니라 Queue·Eval·비용 같은
 # 구조화된 운영 데이터를 집계하는 역할이라서다. 평가 방식(SLA 기준 등)에 대한 연구 결과는
 # RAG 검색 대상이 아니라 결정론적 코드의 기준값으로 들어간다 (CLAUDE.md: 규칙 판정은 Python이 한다).
@@ -77,6 +92,14 @@ implementation:
        형태를 실제로 채우고, 기존 POST 데모 엔드포인트(호출자가 Snapshot 직접 전송)는 호환을
        위해 남겼다. 셋 다 In-Memory 자체 점검(app.py TestClient, 4개 영역)과 Postgres 자체
        점검(각 파일 __main__, 실 DB) 양쪽 통과 확인"
+    - "improvement-worker(F19 Event Consumer, 2026-08-03) — workforce_events/{redis_event_bus,
+       worker}.py. hf:workforce Redis Stream을 소비해 workforce.eval.v1(QA Eval 결과)을
+       개선 후보의 EVALUATING -> SHADOW(PASS)/REJECTED(FAIL) 전이로 바꾼다. QA/감사본부가
+       이 이벤트를 아직 발행하지 않아 Payload Contract(candidate_id, result)는 잠정안이다.
+       CEO의 governance_events(notification-worker)와 같은 패턴 - 실 Redis로 전이 성공,
+       다른 Consumer Group용 Event(workforce.access_request.v1 등) 스킵, 알 수 없는 Event는
+       예외로 재시도 유지, 재시작 후 Pending 복구까지 검증. docker-compose.yml에
+       improvement-worker Service로 등록, 실제 기동까지 확인"
     - "LangGraph 파이프라인 + Notion Reporter — departments/07-agent-workforce/scripts.py
        (submit_candidate→narrate→notion_report), notion_reporter.py. F19 ImprovementCandidate를
        실제 Notion HR DB(NOTION_HR_DB)에 올린다. 2026-08-03 실측: 처음엔 F27 Scorecard를
@@ -95,16 +118,36 @@ implementation:
        리포트 전문을 이어 붙인다. 공용 렌더러는 진짜 Bold/Code 서식(annotations)과
        Heading/Table/Quote/Divider/할일목록까지 지원해 이전 자체 구현보다 낫다. 페이지
        조회로 블록 9개 실제 반영까지 확인"
+    - "tool_allowlist/forbidden_tools 선언(2026-08-03, P1 대응) — GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+       3.6절(인사팀 부서 내 통신)을 Risk/QA config.yaml과 동일한 <domain>.<resource>.<verb>
+       표기로 그대로 옮겼다. 새로 지어낸 권한 아님 - 5개 페르소나(HR-00~04)가 실제로 부르는
+       엔드포인트만 대상"
+    - "HR-02 Roster/Profile 공식 Read+Write API(2026-08-03) — roster/{roster,
+       postgres_roster_repository}.py + api/app.py 4개 엔드포인트(GET /workforce/v1/roster,
+       GET /workforce/v1/agents/{agent_id}, POST .../profile-versions, POST .../status).
+       QA와 Model Gateway가 같은 Profile Version을 조회할 수 있게 하는 게 목적(그 전엔 이
+       조회 경로 자체가 없었다). submit_profile은 항상 새 Version만 insert하고(update 경로
+       없음), change_status는 to_status=ACTIVE에 qa_eval_run_id·ceo_approval_id가 둘 다
+       없으면 애플리케이션 계층에서 거절한다(스펙 3.1 명시 규칙, 인사팀이 자기 후보를
+       스스로 ACTIVE로 못 올리는 권한 분리를 여기서 강제). Scorecard와 동일하게 In-Memory
+       대체 없이 DATABASE_URL 없으면 501로 막는다(실제로 등록된 Agent를 보는 게 목적이라
+       빈 In-Memory는 의미가 없다). roster.py 자체 점검(9개 시나리오) + Postgres 자체 점검
+       (실 DB, HR-04로 제출→조회→상태전이 왕복, 자체 점검 흔적은 원복) + app.py TestClient
+       (In-Memory 모드 501 확인, ACTIVE 증거 없음 409 확인) 3중 검증 완료. idempotency_key는
+       스펙 필드로 받지만 저장할 테이블이 없어(governance.case_events만 그 컬럼을 가지며
+       이건 GOV-02 영역) 아직 실제 중복 방지에는 안 쓴다 - 투명하게 문서화."
   in_progress: []
   not_started:
-    - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다. Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"
+    - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다(이 거절 규칙 자체는 HR-02의 POST /workforce/v1/agents/{agent_id}/status가 이제 강제한다 - qa_eval_run_id/ceo_approval_id 없이 ACTIVE 요청하면 409). Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"
     - "타 부서 Agent 등록 — workforce.agent_profiles에 인사팀 5명만 있다. QA본부 8개 페르소나 등 다른 본부 직원이 미등록이라, 동규님 쪽 audit.agent_runs/tool_calls가 FK를 못 채우고 막혀 있다(동규님 config not_started에 같은 내용 기록됨). 등록은 인사팀 소관이므로 우리가 풀어야 하는 블로커다"
     - "workforce.skills / workforce.tools 카탈로그가 0건 — agent_skill_assignments·agent_tool_permissions를 채울 수 없다. Skill/Tool 정의는 각 본부 소유라 임의로 Seed하지 않는다"
     - "F27 플랫폼 절반 — 토큰 측정·과금·성능저하 차단은 플랫폼/인프라 몫인데 담당자가 미지정이다. cost_snapshots가 비어 있어 지금 모든 평가가 UNKNOWN으로 나온다(코드 문제가 아니라 텔레메트리 부재이며, 0으로 채우지 않고 UNKNOWN으로 구분한다)"
     - "quality_snapshots/workforce_plans/probation_periods/performance_actions 채우는 로직 없음 —
        테이블은 생겼지만(위 done 참고) HR-01의 Capacity Report·Staffing Scenario, HR-03의 품질
        집계, 수습·성과조치 워크플로를 실제로 그 테이블에 쓰는 코드가 없다"
-    - "asyncpg 실 배선 — improvements/repository.py는 작성·import 확인까지고, 도메인 로직과 DB를 잇는 호출 경로가 아직 없다. scorecard/lifecycle은 Repository 자체가 없다(api/app.py는 In-Memory)"
+    - "lifecycle-worker(승인 Event -> Platform/IAM Provisioning 요청) 미착수 — Platform/IAM
+       Adapter의 이벤트 계약 자체가 없다. 인사팀이 대신 정하지 않는다(CLAUDE.md 권한 경계) -
+       Platform 담당자의 선행 작업이 필요하다"
     - "Eval Runner / Shadow Router 실체 — F19 흐름의 EVALUATING·SHADOW 단계를 실제로 실행하는 구현이 없다. Eval은 QA·audit 소유"
     - "5명 personality가 아직 prompt-only — LangGraph 노드로 구현된 직원은 아직 없다(CLAUDE.md: 현재 LangGraph 구현체는 compliance-policy-agent 하나뿐)"
 

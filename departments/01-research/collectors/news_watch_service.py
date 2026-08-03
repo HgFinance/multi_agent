@@ -45,6 +45,7 @@ from __future__ import annotations
 import signal
 import sys
 import threading
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,12 +56,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
 
 from naver_news_collector import (  # noqa: E402
     DAILY_QUOTA,
+    DEDUP_WINDOW,
     SOURCE_ID,
     NaverNewsClient,
     NaverNewsError,
     load_watchlist,
     make_watch_stream,
 )
+from news_events import StreamCursor  # noqa: E402
+from news_watch_tiers import plan_tiers, sweep_symbols  # noqa: E402
 from news_pipeline import (  # noqa: E402
     NewsSink,
     krx_symbol_resolver,
@@ -89,6 +93,7 @@ class WatchConfig:
     interval_seconds: float
     max_batch: int
     max_delay_seconds: float
+    tier2_symbols: tuple[str, ...] = ()
 
     @property
     def watch_count(self) -> int:
@@ -135,8 +140,24 @@ def parse_config(env: dict) -> WatchConfig:
         symbols = parse_watchlist_file(path.read_text(encoding="utf-8"))
         if not symbols:
             raise NaverNewsError(f"NEWS_WATCH_SYMBOLS_FILE 이 비어 있다: {path}")
+    # ▶ 2계층 (2026-08-03). 이 파일이 지정될 때만 켜진다 - 없으면 기존 동작이다.
+    tier2 = ()
+    tier2_file = (env.get("NEWS_TIER2_SYMBOLS_FILE") or "").strip()
+    if tier2_file:
+        tpath = Path(tier2_file)
+        if not tpath.exists():
+            raise NaverNewsError(f"NEWS_TIER2_SYMBOLS_FILE 이 없다: {tpath}")
+        tier2 = parse_watchlist_file(tpath.read_text(encoding="utf-8"))
+        if not tier2:
+            raise NaverNewsError(f"NEWS_TIER2_SYMBOLS_FILE 이 비어 있다: {tpath}")
+        if not symbols:
+            raise NaverNewsError(
+                "2계층은 Tier1(핵심 바스켓) 없이 성립하지 않는다 - "
+                "NEWS_WATCH_SYMBOLS_FILE 을 함께 지정해야 한다")
+
     return WatchConfig(
         symbols=symbols,
+        tier2_symbols=tier2,
         top=_num("NEWS_WATCH_TOP", 20, int, 1),
         display=_num("NEWS_WATCH_DISPLAY", 20, int, 1),
         # 간격 5초 미만은 거부한다 - RateLimiter 가 있어도 sweep 자체가 겹친다
@@ -257,7 +278,43 @@ def main() -> int:
     if source_id is None:
         raise NaverNewsError(f"data_sources 에 {SOURCE_ID} 가 없다")
 
-    items = load_watchlist(ref, top=cfg.top, symbols=cfg.symbols)
+    # ▶ 2계층 (2026-08-03) - NEWS_TIER2_SYMBOLS_FILE 이 있을 때만 켜진다.
+    #   없으면 기존 동작 그대로다(설정 안 하면 아무것도 안 바뀐다).
+    #   전종목 2,595를 같은 빈도로 돌면 한도의 6.6배라 간격이 185분이 된다 -
+    #   속보성이 사라진다. 핵심은 짧게 유지하고 나머지는 순회로 훑는다.
+    tier_plan = None
+    if cfg.tier2_symbols:
+        # plan_tiers 가 한도를 넘으면 **예외를 낸다** - 조용히 줄이지 않는다
+        tier_plan = plan_tiers(list(cfg.symbols), list(cfg.tier2_symbols),
+                               core_interval_seconds=cfg.interval_seconds)
+        print(f"{SERVICE_VERSION}: 2계층 - {tier_plan['note']}", flush=True)
+        print(f"  예상 {tier_plan['projected_daily_calls']:,}회/일 "
+              f"(상한 {tier_plan['quota_ceiling']:,}, 여유 {tier_plan['headroom']:,})",
+              flush=True)
+
+    items = load_watchlist(ref, top=cfg.top, symbols=cfg.symbols)   # Tier1
+    sweep_fn = None
+    if tier_plan is not None:
+        rest = load_watchlist(ref, symbols=tuple(tier_plan["tier2"]))
+        # ▶ 계획을 **해석된 종목**으로 다시 세운다. reference 에 없는 종목은
+        #   load_watchlist 가 조용히 떨어뜨리므로, 처음 계획의 순회 주기는 실제와
+        #   다르다. 보고하는 숫자가 실제와 달라지는 것을 허용하지 않는다.
+        tier_plan = plan_tiers([it.symbol for it in items],
+                               [it.symbol for it in items] + [it.symbol for it in rest],
+                               core_interval_seconds=cfg.interval_seconds)
+        by_sym = {it.symbol: it for it in list(items) + list(rest)}
+
+        def sweep_fn(i, _p=tier_plan, _m=by_sym):
+            return [_m[s] for s in sweep_symbols(_p, i) if s in _m]
+
+        sweep_size = len(tier_plan["tier1"]) + tier_plan["tier2_per_sweep"]
+        print(f"  해석됨 Tier1 {len(tier_plan['tier1'])} / Tier2 "
+              f"{len(tier_plan['tier2'])} / sweep {sweep_size}종목 / "
+              f"Tier2 한바퀴 {tier_plan['tier2_cycle_hours']}시간", flush=True)
+        # 링크 해석과 dedup 창은 **전체** 를 기준으로 만든다 - Tier2 종목이 걸린
+        # 기사를 종목에 못 붙이면 순회가 무의미하다.
+        items = list(items) + list(rest)
+        projected = tier_plan["projected_daily_calls"]
     print(
         f"{SERVICE_VERSION}: {len(items)}종목 / {cfg.interval_seconds:.0f}초 간격 / "
         f"예상 {projected:,}회/일 (한도 {DAILY_QUOTA:,})",
@@ -273,6 +330,14 @@ def main() -> int:
     stream = make_watch_stream(
         client, items, display=cfg.display,
         interval_seconds=cfg.interval_seconds,
+        sweep_items=sweep_fn,
+        # 2계층에서는 창을 **한 sweep** 기준으로 잡는다. items 전체(2,595)로 잡으면
+        # 창이 15만 건이 되고, 정작 Tier2 는 한 바퀴 뒤에 와서 어차피 창 밖이다.
+        cursor=(StreamCursor.sized(
+            max(DEDUP_WINDOW,
+                (len(tier_plan["tier1"]) + tier_plan["tier2_per_sweep"])
+                * cfg.display * 2))
+            if tier_plan is not None else None),
     )
     # '더 긴 이름' 오탐 검사는 감시 목록이 아니라 전 상장사 이름으로 한다 -
     # 제목의 '두산로보틱스' 가 감시 밖이어도 '두산' DEDICATED 를 막아야 한다.
@@ -313,6 +378,10 @@ def main() -> int:
                     f"⚠ 수집 루프 오류: {type(e).__name__}: {e} - "
                     f"{backoff:.0f}초 후 재접속", flush=True,
                 )
+                # ▶ 스택을 함께 남긴다 (2026-08-03). 메시지만 찍었더니 DB
+                #   SyntaxError 가 **어느 문장에서** 났는지 알 수 없어 재현에
+                #   시간을 썼다. 재시도 루프는 원인을 삼키기 가장 쉬운 자리다.
+                traceback.print_exc()
                 if stop.wait(backoff):
                     break
                 backoff = min(backoff * 2, 300.0)
@@ -427,6 +496,52 @@ def _check_config():
     print("  설정 파싱                OK")
 
 
+def _check_tier2_config():
+    """2계층 설정 - 켜지는 조건과 거부 조건."""
+    import os
+    import tempfile
+
+    fd, core_path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(("005930", "000660")))
+    fd, full_path = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(("005930", "000660", "035720")))
+    try:
+        # 지정 안 하면 꺼진 상태 - 기존 동작과 같다
+        cfg = parse_config({"NEWS_WATCH_SYMBOLS_FILE": core_path})
+        assert cfg.tier2_symbols == (), "설정하지 않았는데 2계층이 켜졌다"
+
+        cfg = parse_config({"NEWS_WATCH_SYMBOLS_FILE": core_path,
+                            "NEWS_TIER2_SYMBOLS_FILE": full_path})
+        assert cfg.tier2_symbols == ("005930", "000660", "035720"), cfg.tier2_symbols
+
+        # Tier1 없이 Tier2 만 지정하면 거부 - '전종목을 다 본다'는 착시가 된다
+        try:
+            parse_config({"NEWS_TIER2_SYMBOLS_FILE": full_path})
+            raise AssertionError("Tier1 없는 2계층이 통과했다")
+        except NaverNewsError:
+            pass
+
+        # 계획이 실제 sweep 대상을 만들어내는가 (Tier1 은 매번, Tier2 는 순회)
+        plan = plan_tiers(list(cfg.symbols), list(cfg.tier2_symbols),
+                          core_interval_seconds=cfg.interval_seconds)
+        first = sweep_symbols(plan, 0)
+        assert set(cfg.symbols) <= set(first), first
+        assert "035720" in first, "Tier2 가 첫 sweep 에 안 들어왔다"
+    finally:
+        os.unlink(core_path)
+        os.unlink(full_path)
+    # 없는 파일은 조용히 넘어가지 않는다
+    try:
+        parse_config({"NEWS_WATCH_SYMBOLS_FILE": core_path,
+                      "NEWS_TIER2_SYMBOLS_FILE": full_path})
+        raise AssertionError("없는 Tier2 파일이 통과했다")
+    except NaverNewsError:
+        pass
+    print("  2계층 설정               OK")
+
+
 def _check_quota_math():
     # 20종목 120초 = 14,400회/일 < 22,500 - 통과
     assert ensure_quota_headroom(20, 120.0) == 14_400
@@ -510,7 +625,8 @@ if __name__ == "__main__":
         _check_quota_math()
         _check_loop_sweeps()
         _check_quota_guard()
-        print("상주 서비스 4개 영역 통과. 상주 실행은 인자 없이")
+        _check_tier2_config()
+        print("상주 서비스 5개 영역 통과. 상주 실행은 인자 없이")
         raise SystemExit(0)
 
     raise SystemExit(main())

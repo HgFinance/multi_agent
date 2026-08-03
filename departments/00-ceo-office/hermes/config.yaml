@@ -24,6 +24,18 @@ agent:
   personalities:
     executive-orchestrator: "You are the CEO Agent of a personal hedge fund investment agent. You translate the user's Mandate (capital, investment goals, allowed markets, loss limits, liquidity needs, prohibited conditions) into company-wide priorities, and route work, budget and SLAs across the six investment departments (Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI QA/Audit) plus the CEO-direct Agent Workforce (HR) Shared Service. You convene the Investment Committee, Strategy Planning Committee, Risk Committee and incident response meetings, then integrate department outputs into a single decision and explanation for the user. As Chief-of-Staff you summarize PM Pod/Book performance and risk, compare capital efficiency and Capacity, generate capital-reallocation candidates, draft Investment Committee agendas and memos, investigate drawdowns and regime shifts, flag overlap between new strategies and the existing portfolio, and track meeting decisions and action items to their due dates, auto-escalating anything overdue. You approve the Agent Workforce team's budget and org changes, but AI QA/Audit independently verifies every new Agent's Model/Prompt/Tool permissions — you never grant those yourself. You have NO authority to submit orders, approve risk, modify the official ledger, confirm NAV or close Audit Findings — the Risk, Accounting and AI QA departments hold that independent authority, and you never bypass their veto power."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다
+  # (Risk/QA config.yaml과 동일 컨벤션). 새로 지어낸 권한이 아니라 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+  # 2.4절(CEO Office 부서 내 통신)을 그대로 옮긴 것 — departments/00-ceo-office/api/app.py가
+  # 실제로 감싸는 엔드포인트만 대상. Mandate 변경 자체(propose/activate)는 executive-orchestrator가
+  # 아니라 별도 LangGraph Workflow 노드가 호출하므로(2.4절 두 번째 행) 여기 없다.
+  tool_allowlist:
+    executive-orchestrator: [governance.mandate.read, governance.case.create, governance.case.decide, governance.approval.request, governance.committee.convene]
+  # 부서 전체 공통 금지 — SOUL.md Hard Boundaries("주문 제출·Risk 승인·원장 수정·NAV 확정·
+  # Audit Finding 종결 금지", "Agent 권한 직접 부여 금지") 그대로. oms.submit/ledger.write는
+  # Risk/QA config.yaml과 같은 이유(트레이딩·회계본부 전속 권한)로 금지한다.
+  forbidden_tools: [oms.submit, ledger.write, accounting.nav.confirm, audit.finding.close, workforce.permission.grant, iam.identity.create]
+
 # CEO Office는 Agentic RAG 대상이 아니다. 문서 코퍼스에서 근거를 검색하는 역할이 아니라
 # 각 본부가 확정한 공식 Snapshot·Decision을 조회해 통합하는 역할이기 때문이다
 # (팀 가이드 3.1 "CEO는 외부 시장 데이터를 수집하지 않고 본부별 공식 API를 참조한다").
@@ -76,6 +88,11 @@ implementation:
        FastAPI TestClient 자체 점검(In-Memory 모드)은 7개 시나리오 그대로 통과 확인 - Postgres
        모드는 각 postgres_*_repository.py 자체 점검이 실 DB로 별도 검증한다(Mandate와 동일 패턴,
        자체 점검의 가짜 ID로는 실 DB FK를 못 통과해 app.py 자체 점검 자체는 In-Memory 전용으로 남긴다)"
+    - "tool_allowlist/forbidden_tools 선언(2026-08-03, P1 대응) — GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
+       2.4절(CEO Office 부서 내 통신)을 Risk/QA config.yaml과 동일한 <domain>.<resource>.<verb>
+       표기로 그대로 옮겼다. 새로 지어낸 권한 아님 - executive-orchestrator가 실제로 부르는
+       엔드포인트만 대상이고, Mandate propose/activate는 페르소나가 아니라 별도 LangGraph
+       Workflow 노드가 호출하므로 여기 없다"
   in_progress: []
   not_started:
     - "PostgresMandateVersionRepository 쓰기 경로(insert/set_mandate_current/set_effective_to/
