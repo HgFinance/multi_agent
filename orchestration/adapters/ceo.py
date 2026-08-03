@@ -72,6 +72,12 @@ confidence (number 0 to 1), rationale (short string), escalate (boolean).
 Input bundle:
 {json.dumps(bundle, ensure_ascii=False, sort_keys=True, default=str)}"""
         try:
+            environment = os.environ.copy()
+            # The parent process may have an active Risk/QA profile without
+            # exporting the Hermes home.  Pin the CLI to the shared runtime
+            # root so ``--profile ceo-agent`` cannot write/read the wrong
+            # profile.  Credentials remain profile-local and are never copied.
+            environment.setdefault("HERMES_HOME", str(Path.home() / ".hermes"))
             process = subprocess.run(
                 [self.executable, "--profile", self.profile, "-z", prompt],
                 cwd=self.repo_root,
@@ -79,7 +85,7 @@ Input bundle:
                 text=True,
                 timeout=self.timeout,
                 check=False,
-                env=os.environ.copy(),
+                env=environment,
             )
         except FileNotFoundError as exc:
             raise CeoAdapterError("ceo_executable_not_found") from exc

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
