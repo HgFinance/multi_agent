@@ -10,9 +10,9 @@ reporting/daily_report.py, notification/notification.py를 감싸는 FastAPI 래
 여기엔 새 판정 로직이 없다. MandateVersionService/MandateActivationService/
 DailyReportAssembler/NotificationService가 이미 하는 일을 얇게 감싼다.
 
-Repository는 기본 In-Memory다 (asyncpg/psycopg2 실 배선은 config.yaml not_started).
-DATABASE_URL이 설정돼 있으면 Mandate Repository만 PostgresMandateVersionRepository로
-전환한다 - postgres_repository.py가 실제로 검증된 조회 경로를 그대로 쓴다.
+Repository는 기본 In-Memory다. DATABASE_URL이 설정돼 있으면 Mandate/Report/Notification
+셋 다 Postgres 구현으로 전환한다 - postgres_repository.py, postgres_report_repository.py,
+postgres_notification_repository.py가 각각 실제로 검증된 조회·왕복 경로를 그대로 쓴다.
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
   - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
@@ -72,6 +72,16 @@ except ImportError:  # psycopg2 미설치 환경에서도 앱 자체는 뜬다
 
     class MandatePersistenceError(RuntimeError):  # type: ignore[no-redef]
         pass
+
+try:
+    from postgres_report_repository import PostgresReportRunRepository
+except ImportError:
+    PostgresReportRunRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_notification_repository import PostgresNotificationRepository
+except ImportError:
+    PostgresNotificationRepository = None  # type: ignore[assignment,misc]
 
 
 # --- Request/Response 모델 ---------------------------------------------------
@@ -147,9 +157,17 @@ else:
 
 mandate_service = MandateVersionService(_mandate_repo)
 activation_service = MandateActivationService(_mandate_repo)
-report_repo = InMemoryReportRunRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresReportRunRepository is not None:
+    report_repo = PostgresReportRunRepository.connect(os.environ["DATABASE_URL"])
+else:
+    report_repo = InMemoryReportRunRepository()
 report_assembler = DailyReportAssembler(report_repo)
-notification_repo = InMemoryNotificationRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresNotificationRepository is not None:
+    notification_repo = PostgresNotificationRepository.connect(os.environ["DATABASE_URL"])
+else:
+    notification_repo = InMemoryNotificationRepository()
 notification_service = NotificationService(notification_repo)
 
 
