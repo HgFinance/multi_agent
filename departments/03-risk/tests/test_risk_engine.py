@@ -69,27 +69,27 @@ def make_intent(instrument=aapl, qty="100", price="70000", side=Side.BUY,
 
 
 def base_context(**overrides) -> RiskContext:
-    defaults = dict(
-        mandate=MandateScope(
+    defaults = {
+        "mandate": MandateScope(
             fund_id=fund, allowed_instrument_ids=None,
             min_order_notional=Decimal(100000), max_order_notional=Decimal(50000000),
         ),
-        limits=LimitSet(
+        "limits": LimitSet(
             soft_single_issuer_pct=Decimal("0.20"), hard_single_issuer_pct=Decimal("0.30"),
             max_daily_turnover_notional=Decimal(100000000), max_daily_order_count=50,
             max_daily_loss=Decimal(10000000), max_drawdown_pct=Decimal("0.20"),
         ),
-        restricted_items=(),
-        portfolio=PortfolioState(
+        "restricted_items": (),
+        "portfolio": PortfolioState(
             fund_id=fund, cash=Decimal(100000000), buying_power=Decimal(100000000),
             gross_exposure=Decimal(100000000), peak_equity=Decimal(1000000000),
             equity=Decimal(1000000000),
         ),
-        market_status=MarketStatus(tradable=True),
-        counterparty=CounterpartyStatus(broker_adapter="paper", health=CounterpartyHealth.OK),
-        trading_state=TradingState.ENABLED,
-        as_of=now,
-    )
+        "market_status": MarketStatus(tradable=True),
+        "counterparty": CounterpartyStatus(broker_adapter="paper", health=CounterpartyHealth.OK),
+        "trading_state": TradingState.ENABLED,
+        "as_of": now,
+    }
     defaults.update(overrides)
     return RiskContext(**defaults)
 
