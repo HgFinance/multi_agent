@@ -62,7 +62,13 @@ implementation:
        Candidate 기반으로 다시 짰다. 로컬 Hermes(nous)와 실제 Notion에 연결해 전 구간 실행
        검증 완료 — 진짜 Notion 페이지 생성, reports/hr_candidate_*.md 로컬 저장까지 확인.
        QA독립검증/CEO승인 체크박스는 workflow.py 전이 결과에서만 오고 LLM은 서술만 한다.
-       IAM 생성은 F19 범위 밖이라 항상 False(lifecycle/access.py 소관, 지어내지 않음)"
+       IAM 생성은 F19 범위 밖이라 항상 False(lifecycle/access.py 소관, 지어내지 않음).
+       2차 수정(같은 날): 리포트 전문을 '원본 리포트' 속성에 통째로 넣던 걸 고쳤다 -
+       Notion 설계서 3절이 이미 그 속성은 로컬 파일 경로만 담으라고 정해뒀었다. 이제
+       속성엔 경로만, 리포트 전문은 실제 Notion 페이지 본문(children 블록 - heading/
+       table/quote/bulleted_list_item/paragraph)으로 올라간다. 완전한 Markdown
+       렌더러는 아니다(인라인 **bold**/`code`는 지운다, 구조만 옮김). 페이지 조회로
+       블록 8개(heading_1/table/divider 등) 실제 반영까지 확인"
   in_progress: []
   not_started:
     - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다. Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"

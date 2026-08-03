@@ -153,6 +153,12 @@ def _assemble_out(state: HRState) -> dict:
     }
 
 
+def _report_path(candidate_id: str) -> str:
+    """__main__ 이 실제로 쓰는 경로와 반드시 같아야 한다 - Notion 속성이 가리키는 파일이
+    실제로 그 자리에 있어야 링크가 의미 있다."""
+    return f"departments/07-agent-workforce/reports/hr_candidate_{candidate_id}.md"
+
+
 def notion_report(state: HRState, *, uploader=None) -> dict:
     from notion_reporter import upload_candidate
 
@@ -161,7 +167,8 @@ def notion_report(state: HRState, *, uploader=None) -> dict:
     evaluation = evaluation_metrics(out, report_md)
     upload = uploader or upload_candidate
     try:
-        notion_upload = upload(state["candidate"], state["events"], report_md=report_md)
+        notion_upload = upload(state["candidate"], state["events"], report_md=report_md,
+                               report_path=_report_path(state["candidate"].candidate_id))
     except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] = evaluation.get("fallback_count", 0) + 1
@@ -297,8 +304,8 @@ def _check_narrate_schema_guard():
 def _check_notion_report_node():
     captured = {}
 
-    def stub_uploader(candidate, events, *, report_md=""):
-        captured["candidate"], captured["report_md"] = candidate, report_md
+    def stub_uploader(candidate, events, *, report_md="", report_path=""):
+        captured["candidate"], captured["report_md"], captured["report_path"] = candidate, report_md, report_path
         return {"ok": True, "url": "https://notion.so/fake"}
 
     c = ImprovementCandidate(**_demo_candidate_input(candidate_id="ic-5"))
@@ -307,6 +314,7 @@ def _check_notion_report_node():
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["candidate"].candidate_id == "ic-5"
+    assert captured["report_path"] == "departments/07-agent-workforce/reports/hr_candidate_ic-5.md"
     print("  Notion Reporter 노드          OK")
 
 
@@ -314,7 +322,7 @@ def _check_full_pipeline_invoke():
     called = []
     fake_chat = lambda persona, task: called.append("narrate") or json.dumps(
         {"narrative": "citation-checker Profile 개선을 제안합니다.", "escalate": False})
-    fake_uploader = lambda candidate, events, *, report_md="": called.append("notion") or {
+    fake_uploader = lambda candidate, events, *, report_md="", report_path="": called.append("notion") or {
         "ok": False, "reason": "self-check stub"}
 
     global narrate, notion_report
@@ -344,9 +352,8 @@ if __name__ == "__main__":
             transition=None, trace_id=f"{PIPELINE_VERSION}-run",
         )
         print(json.dumps(out, ensure_ascii=False, indent=1, default=str))
-        report_dir = _BASE / "reports"
-        report_dir.mkdir(exist_ok=True)
-        rp = report_dir / f"hr_candidate_{out['candidate_id']}.md"
+        rp = _REPO_ROOT / _report_path(out["candidate_id"])
+        rp.parent.mkdir(exist_ok=True)
         rp.write_text(_render_report_md(out), encoding="utf-8")
         print(f"결정론적 MD 리포트 저장: {rp}")
         raise SystemExit(0)
