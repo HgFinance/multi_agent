@@ -403,6 +403,24 @@ services:
       # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
       # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # ▶ Claude 구독 자격 (2026-08-03)
+      #   `claude setup-token` 이 발급하는 **장기 토큰**이다. anthropic provider 의
+      #   자격 해석 순서가 ANTHROPIC_API_KEY -> ANTHROPIC_TOKEN ->
+      #   CLAUDE_CODE_OAUTH_TOKEN 이라, API 키가 비어 있으면 이것이 쓰인다.
+      #
+      #   **~/.claude/.credentials.json 을 마운트하지 않는 이유**: 그 파일의
+      #   accessToken 은 1시간마다 만료되고 갱신 때 refreshToken 이 rotation 된다.
+      #   컨테이너가 갱신하는 순간 호스트의 대화형 세션이 무효가 된다
+      #   (2026-08-02 auth.json 복사로 실제 겪음 - invalid_grant, 네이티브
+      #   설치본까지 로그아웃). setup-token 은 그 세션과 **별도 자격**이라
+      #   서로를 무효화하지 않는다.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # ▶ Claude Code CLI 프록시 (2026-08-03)
+      #   api.anthropic.com 직접 호출은 '서드파티'라 플랜 한도가 아니라
+      #   extra usage 에서 차감된다(실측 HTTP 400). CLI 로 부르면 Claude
+      #   Code 자신이라 플랜 한도가 적용되므로, 호스트의 프록시를 거친다.
+      #   프록시 기동: python scripts/claude_code_proxy.py --serve
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
       # Profile 의 mcp_servers.research.headers 가 이 값을 Bearer 로 싣는다
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
@@ -422,6 +440,9 @@ services:
       HERMES_UID: 10000
       HERMES_GID: 10000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Claude Code CLI 프록시 - 리서치와 같은 근거(2026-08-03).
+      # api.anthropic.com 직접 호출은 서드파티라 플랜 한도가 안 쓰인다.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
