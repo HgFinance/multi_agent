@@ -1,3 +1,5 @@
+begin;
+
 -- workforce.departments.department_code 표기 통일 — Hermes Profile 이름
 --
 -- 소유: 영주 (CEO Office / Agent Workforce 인사팀)
@@ -30,9 +32,6 @@
 --
 -- 폴더 이름(`03-risk`, `07-agent-workforce`)은 세 번째 체계이며 경로 전용이다 - 데이터
 -- 식별자로 쓰지 않는다.
-
-begin;
-
 update workforce.departments
    set department_code = 'hr-department', updated_at = now()
  where department_code = 'AGENT-WORKFORCE';

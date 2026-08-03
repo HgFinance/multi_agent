@@ -1,3 +1,5 @@
+begin;
+
 -- GOV-02 Case Root — governance.cases.status 허용 값 명시
 --
 -- 소유: 영주 (CEO Office). 근거: docs/01-product/MINIMUM_SERVICE_UNIT_SPEC.md 12절
@@ -44,9 +46,6 @@
 --
 -- 리뷰에서 다른 어휘가 낫다고 판단되면 이 제약만 교체하면 된다 - 애플리케이션 쪽
 -- 상태 머신(departments/00-ceo-office/src/case/case.py)도 같은 값을 쓰므로 함께 수정한다.
-
-begin;
-
 alter table governance.cases
   add constraint cases_status_check
   check (status in ('OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'CANCELLED'));
