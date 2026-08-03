@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -95,6 +95,16 @@ try:
     from postgres_scorecard_repository import PostgresScorecardRepository
 except ImportError:
     PostgresScorecardRepository = None  # type: ignore[assignment,misc]
+
+_WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
+sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
+
+from redis_event_bus import (  # noqa: E402
+    DEFAULT_GROUP as _WORKFORCE_EVENT_GROUP,
+    DEFAULT_STREAM as _WORKFORCE_EVENT_STREAM,
+    WorkforceEventBusError,
+    RedisEventBus,
+)
 
 # --- Request 모델 --------------------------------------------------------------
 
@@ -242,6 +252,92 @@ else:
     _improvement_repo = InMemoryImprovementRepository()
 _workflow = ImprovementWorkflow(_improvement_repo)
 
+
+# --- F19 improvement-worker Event Consumer (workforce_events/worker.py가 이 함수들을 쓴다) ---
+#
+# workforce.eval.v1(QA Eval 결과)을 아직 QA/감사본부가 발행하지 않는다(2026-08-03 확인) -
+# 그래도 배관(Redis Streams + Consumer Group + dedupe + ACK)은 governance_events와 같은
+# 방식으로 실제로 구현하고 검증한다. Payload Contract(candidate_id, result=PASS|FAIL)는
+# QA의 실제 Eval Runner가 정해지기 전까지의 잠정안이다 - 최종 확정본과 다를 수 있다.
+_KNOWN_NON_EVAL_EVENTS: frozenset[str] = frozenset({
+    "workforce.hiring_request.v1",
+    "workforce.profile_candidate.v1",
+    "workforce.lifecycle_changed.v1",
+    "workforce.access_request.v1",
+})
+
+_workforce_event_bus_instance: RedisEventBus | None = None
+
+
+def _workforce_event_bus() -> RedisEventBus | None:
+    """hf:workforce Redis Stream을 실제 호출 시점에만 연결한다."""
+
+    global _workforce_event_bus_instance
+    redis_url = os.environ.get("WORKFORCE_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _workforce_event_bus_instance is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("WORKFORCE_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+        except ValueError as exc:
+            raise WorkforceEventBusError(
+                "WORKFORCE_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+            ) from exc
+
+        _workforce_event_bus_instance = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("WORKFORCE_EVENT_STREAM", _WORKFORCE_EVENT_STREAM),
+            group=os.environ.get("WORKFORCE_EVENT_GROUP", _WORKFORCE_EVENT_GROUP),
+            consumer=os.environ.get("WORKFORCE_EVENT_CONSUMER", "workforce-api"),
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+        )
+    return _workforce_event_bus_instance
+
+
+def _handle_workforce_event(event: dict) -> None:
+    """workforce.eval.v1을 EVALUATING -> SHADOW/REJECTED 전이로 변환한다.
+
+    여기엔 판정 로직이 없다 - Eval 결과를 다음 상태로 매핑만 하고, 자기승인 차단·전이
+    허용 여부 같은 실제 규칙은 workflow.py의 ImprovementWorkflow가 그대로 한다(candidate가
+    EVALUATING이 아니면 IllegalTransition을 내고, 그 예외는 여기서 삼키지 않는다 - 처리
+    중 예외면 ACK하지 않고 재시도 대상으로 남는다).
+    """
+
+    event_type = event.get("event_type")
+    if event_type in _KNOWN_NON_EVAL_EVENTS:
+        return  # 다른 Consumer Group을 위한 Event - 조용히 넘긴다(ACK, 전이 없음).
+    if event_type != "workforce.eval.v1":
+        raise WorkforceEventBusError(
+            f"improvement-worker가 모르는 Event입니다: {event_type}"
+        )
+
+    payload = event.get("payload") or {}
+    candidate_id = payload.get("candidate_id")
+    result = payload.get("result")
+    if not candidate_id or result not in ("PASS", "FAIL"):
+        raise WorkforceEventBusError(
+            f"workforce.eval.v1 payload에 candidate_id/result(PASS|FAIL)가 없습니다 "
+            f"(event_id={event.get('event_id')})"
+        )
+
+    candidate = _improvement_repo.get_candidate(candidate_id)
+    if candidate is None:
+        raise WorkforceEventBusError(f"candidate_id={candidate_id}를 찾을 수 없습니다")
+
+    to_status = CandidateStatus.SHADOW if result == "PASS" else CandidateStatus.REJECTED
+    occurred_at = event.get("occurred_at")
+    at = datetime.fromisoformat(occurred_at) if occurred_at else datetime.now(timezone.utc)
+    updated = _workflow.transition(
+        candidate, to_status, actor="qa-eval-consumer",
+        reason=payload.get("reason", f"QA Eval 결과: {result}"), at=at,
+    )
+    _improvement_repo.save_candidate(updated)
+
+
 # Scorecard/Budget용 Snapshot 조회 Repository - In-Memory 대체가 없다(원래 저장소가
 # 아예 없었다, config.yaml not_started). DATABASE_URL 없으면 None - 아래 GET 엔드포인트가
 # 501로 막고, 기존 POST 데모 엔드포인트(호출자가 Snapshot을 직접 보냄)는 그대로 동작한다.
@@ -271,6 +367,13 @@ for _exc_type in (
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
         })
+
+
+@app.exception_handler(WorkforceEventBusError)
+def _on_workforce_event_bus_error(request, exc: WorkforceEventBusError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "WORKFORCE_EVENT_BUS_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
 
 
 # --- 3.5 Access ------------------------------------------------------------------

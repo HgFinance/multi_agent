@@ -1,5 +1,7 @@
 # AI QA/감사본부 (AI QA & Audit)
 
+부서장 `qa-audit-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [QA Worker Graph](qa_employee_workers.py)의 Ollama `qwen3:8b` LangGraph Worker다. 결정론적 Evidence QA Engine이 바인딩 판정을 소유한다.
+
 ## P1 현재 상태 (2026-08-03)
 
 - `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.

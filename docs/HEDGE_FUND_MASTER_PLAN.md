@@ -1,5 +1,7 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
+> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, 부서 직원은 역할별 독립 LangGraph Worker Graph와 Ollama `qwen3:8b`를 사용한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
+
 > 문서 상태: Production Plan v3.3
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  

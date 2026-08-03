@@ -1,5 +1,7 @@
 # Personal Hedge Fund Agent
 
+전체 부서 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
 [Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [Risk/QA Rollout](02-engineering/RISK_QA_TEST_AND_PRODUCTION_ROLLOUT.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)

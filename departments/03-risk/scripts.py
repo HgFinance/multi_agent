@@ -74,6 +74,10 @@ _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+from risk_employee_workers import run_employee_workers as run_risk_employee_workers
+
 _ENGINE_DIR = _BASE / "engine"
 _API_DIR = _BASE / "api"
 _CONTRACTS_DIR = _BASE.parent / "02-trading" / "contracts"
@@ -136,6 +140,7 @@ class RiskState(TypedDict, total=False):
     observability: dict
     report_markdown: str
     evaluation: dict
+    employee_workers: dict
 
 
 class RiskPipelineNodeError(RuntimeError):
@@ -289,7 +294,7 @@ def _counterparty_flagged(assessment: dict) -> bool:
     return "counterparty_unhealthy" in assessment.get("reason_codes", [])
 
 
-def counterparty_check(state: RiskState, *, chat=None) -> dict:
+def _legacy_counterparty_check(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
     cp = next((c for c in a["check_results"] if c["name"] == "counterparty_health"), None)
     if a.get("verdict") == "reject" and chat is None:
@@ -330,6 +335,25 @@ Evidence:
         "counterparty_llm_called": True,
         "fallbacks": [_fallback("counterparty", exc)],
         }
+
+
+# Counterparty employee logic lives in the LangGraph worker.  Keep this gate
+# deterministic so an old Hermes persona cannot be called as a duplicate employee.
+def counterparty_check(state: RiskState, *, chat=None) -> dict:
+    assessment = state["assessment"]
+    check = next(
+        (item for item in assessment.get("check_results", [])
+         if item.get("name") == "counterparty_health"),
+        None,
+    )
+    detail = (check or {}).get("detail") or "counterparty health check recorded by RiskEngine"
+    return {
+        "counterparty": {
+            "counterparty_narrative": f"RiskEngine counterparty_health 결과: {detail}",
+            "escalate": not bool((check or {}).get("passed", True)),
+        },
+        "counterparty_llm_called": False,
+    }
 
 
 # ── 노드 4: Compliance (skills/agentic-rag 기존 baseline 재사용) ───────────
@@ -495,13 +519,14 @@ def _deterministic_supervisor_note(state: RiskState) -> dict:
 
 def supervise(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
-    # REJECT에는 이미 결정론적 근거가 있으므로 설명용 Hermes 호출을 생략한다.
-    # 승인/resize 경로의 Compliance·Supervisor 경계는 그대로 유지한다.
-    if a.get("verdict") == "reject" and chat is None:
+    # REJECT도 직원 context를 Hermes 부서장에게 전달한다. Hermes는
+    # 결정론적 verdict를 바꾸지 않고 설명·에스컬레이션만 만든다.
+    if a.get("verdict") == "reject" and chat is None and not state.get("employee_workers"):
         return _deterministic_supervisor_note(state)
     bundle = {"order_intent": state["order_intent"], "trading_state": state["trading_state"],
               "assessment": a, "compliance": state.get("compliance"),
-              "counterparty": state.get("counterparty")}
+              "counterparty": state.get("counterparty"),
+              "employee_workers": state.get("employee_workers", {})}
     task = f"""Using ONLY the evidence below, write a case-level risk narrative in Korean for
 CEO/Audit review. The binding verdict is "{a['verdict']}" from the deterministic Risk Engine -
 you cannot change it, only cite and explain it. If "counterparty" evidence is present, weave its
@@ -554,19 +579,24 @@ def _assemble_out(state: RiskState) -> dict:
     a = state["assessment"]
     trace_id = (state.get("context") or {}).get("trace_id") or (state.get("order_intent") or {}).get("trace_id")
     trace_id = trace_id or f"{PIPELINE_VERSION}:{a['risk_request_id']}"
-    executed_agents = []
-    if a.get("check_results"):
-        executed_agents += ["market-liquidity-risk-agent", "pre-trade-risk-analyst"]
-    if state.get("counterparty") and state.get("counterparty_llm_called", True):
-        executed_agents.append("operational-counterparty-risk-agent")
-    if state.get("compliance"):
-        executed_agents.append("compliance-policy-agent")
+    worker_execution = state.get("employee_workers") or {}
+    executed_agents = list(worker_execution.get("executed") or [])
+    failed_worker_agents = list(worker_execution.get("failed") or [])
+    if a.get("check_results") and not worker_execution:
+        executed_agents += ["market-liquidity-worker", "pre-trade-risk-worker"]
+    if (state.get("counterparty") and state.get("counterparty_llm_called", True)
+            and not worker_execution):
+        executed_agents.append("derivatives-counterparty-worker")
+    if state.get("compliance") and not worker_execution:
+        executed_agents.append("compliance-policy-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if state.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("risk-supervisor")
-    risk_agents = ["risk-supervisor", "market-liquidity-risk-agent", "derivatives-margin-risk-agent",
-                   "compliance-policy-agent", "pre-trade-risk-analyst", "operational-counterparty-risk-agent"]
-    failed_agents = ["risk-supervisor"] if supervisor_status == "failed" else []
+    risk_agents = ["risk-supervisor", "market-liquidity-worker", "pre-trade-risk-worker",
+                   "compliance-policy-worker", "derivatives-counterparty-worker"]
+    failed_agents = list(failed_worker_agents)
+    if supervisor_status == "failed":
+        failed_agents.append("risk-supervisor")
     attempted_agents = list(dict.fromkeys(executed_agents + failed_agents))
     fallbacks = list(state.get("fallbacks", []))
     fallback = fallbacks[0] if fallbacks else None
@@ -583,6 +613,7 @@ def _assemble_out(state: RiskState) -> dict:
             "risk_checks_executed": a.get("risk_checks_executed", bool(a.get("check_results"))),
             "failure": a.get("failure", fallback),
             "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
+            "employee_workers": worker_execution,
             "narrative": state["narrative"], "escalate": state["escalate"],
             "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
         "supervisor_call_status": supervisor_status,
@@ -766,6 +797,39 @@ def notion_report(state: RiskState, *, uploader=None) -> dict:
     return {"notion_upload": notion_upload, "report_markdown": report_md, "evaluation": evaluation}
 
 
+# ── 직원 Worker Graph ──────────────────────────────────────────────────────
+def employee_workers(state: RiskState) -> dict:
+    """Run independent Ollama/LangGraph employees before Hermes synthesis.
+
+    The returned context is advisory only.  RiskEngine's assessment remains
+    the sole binding verdict.  A worker failure is recorded as HOLD/ESCALATE
+    evidence and can never become an approval.
+    """
+
+    payload = {
+        "order_intent": state.get("order_intent", {}),
+        "context": state.get("context", {}),
+        "trading_state": state.get("trading_state"),
+        "assessment": state.get("assessment", {}),
+        "counterparty": state.get("counterparty"),
+        "compliance": state.get("compliance"),
+        "derivatives": (state.get("context") or {}).get("derivatives", {}),
+    }
+    report = run_risk_employee_workers(payload)
+    fallbacks = list(state.get("fallbacks", []))
+    for worker_id in report.get("failed", []):
+        fallbacks.append({
+            "stage": f"employee:{worker_id}",
+            "node": "employee_workers",
+            "error": next((item.get("error") for item in report.get("workers", [])
+                           if item.get("worker_id") == worker_id), "worker_failed"),
+            "action": "ESCALATE",
+            "safe_action": "HOLD",
+            "decision_origin": "FALLBACK",
+        })
+    return {"employee_workers": report, "fallbacks": fallbacks}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def _route_after_pretrade(state: RiskState) -> str:
     # counterparty_health 가 실측으로 플래그됐으면(DOWN/DEGRADED) verdict 와 무관하게 먼저 태운다 -
@@ -773,12 +837,12 @@ def _route_after_pretrade(state: RiskState) -> str:
     if _counterparty_flagged(state["assessment"]):
         return "counterparty"
     # 그 외 REJECT 면 정책 검색(Agentic RAG)을 태우지 않고 바로 종합한다 - 이미 막힌 주문이다
-    return "supervise" if state["assessment"]["verdict"] == "reject" else "compliance"
+    return "employee_workers" if state["assessment"]["verdict"] == "reject" else "compliance"
 
 
 def _route_after_counterparty(state: RiskState) -> str:
     # counterparty_check 를 거친 뒤에도 REJECT short-circuit 규칙은 그대로 적용한다
-    return "supervise" if state["assessment"]["verdict"] == "reject" else "compliance"
+    return "employee_workers" if state["assessment"]["verdict"] == "reject" else "compliance"
 
 
 def build_pipeline():
@@ -788,6 +852,7 @@ def build_pipeline():
         ("pre_trade_check", pre_trade_check),
         ("counterparty_check", counterparty_check),
         ("compliance_check", compliance_check),
+        ("employee_workers", employee_workers),
         ("supervise", supervise),
         ("notion_report", notion_report),
     ):
@@ -796,10 +861,13 @@ def build_pipeline():
     g.add_edge("check_trading_state", "pre_trade_check")
     g.add_conditional_edges("pre_trade_check", _route_after_pretrade,
                             {"counterparty": "counterparty_check",
+                             "employee_workers": "employee_workers",
                              "supervise": "supervise", "compliance": "compliance_check"})
     g.add_conditional_edges("counterparty_check", _route_after_counterparty,
-                            {"supervise": "supervise", "compliance": "compliance_check"})
-    g.add_edge("compliance_check", "supervise")
+                            {"employee_workers": "employee_workers",
+                             "supervise": "supervise", "compliance": "compliance_check"})
+    g.add_edge("compliance_check", "employee_workers")
+    g.add_edge("employee_workers", "supervise")
     g.add_edge("supervise", "notion_report")
     g.add_edge("notion_report", END)
     return g.compile()
@@ -935,6 +1003,16 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
         lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
         lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        worker_execution = out.get("employee_workers") or {}
+        if worker_execution:
+            lines += ["", "### LangGraph Employee Workers", "", "| Worker | 상태 | 도구 |", "|---|---|---|"]
+            lines += [
+                f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
+                f"{md_cell(', '.join(item.get('tools') or []))} |"
+                for item in worker_execution.get("workers", [])
+            ]
+            lines += [f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
+                      f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`"]
         runtime = out.get("hermes_runtime") or {}
         if runtime:
             lines += [

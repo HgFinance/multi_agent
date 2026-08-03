@@ -1,5 +1,7 @@
 # 리스크본부 (Risk Management)
 
+부서장 `risk-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [Risk Worker Graph](risk_employee_workers.py)의 Ollama `qwen3:8b` LangGraph Worker다. 결정론적 Risk Engine이 바인딩 판정을 소유한다.
+
 ## P1 현재 상태 (2026-08-03)
 
 - `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.

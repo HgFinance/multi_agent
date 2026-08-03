@@ -188,6 +188,58 @@ usage:
   run: "qa-department chat -q 'Validate this trading signal'"
   collaborate: "qa-department chat -q 'Validate the signal and its cited evidence, then delegate risk assessment to risk-management'"
 
+# 직원 실행 계층 v2. Hermes의 model은 부서장 전용이며 직원은 독립 LangGraph
+# Worker Graph에서 Ollama Qwen을 사용한다.
+staff_registry:
+  head_count: 1
+  active_worker_count: 1
+  conditional_worker_count: 4
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+
+employee_runtime:
+  executor: langgraph
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:8b
+  base_url_env: OLLAMA_BASE_URL
+  output_contract: qa.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py
+  failure_action: ESCALATE
+
+workers:
+  evidence-qa-worker:
+    status: active
+    replaces: [evidence-qa-agent]
+    tools: [qa.evidence.check]
+    output: advisory_context
+  hallucination-critic-worker:
+    status: conditional
+    replaces: [hallucination-critic]
+    trigger: unsupported_or_contradicted_claim_exists
+    tools: [qa.evidence.rag]
+    output: advisory_context
+  model-and-internal-audit-worker:
+    status: conditional
+    replaces: [model-risk-agent, internal-audit-agent]
+    trigger: model_or_audit_input_exists
+    tools: [qa.model_risk.evaluate, qa.internal_audit.evaluate]
+    output: advisory_context
+  ops-and-permission-worker:
+    status: conditional
+    replaces: [agent-ops-monitor, tool-permission-security-reviewer]
+    trigger: ops_or_permission_input_exists
+    tools: [qa.ops.evaluate, qa.tool_permission.check]
+    output: advisory_context
+  incident-postmortem-worker:
+    status: conditional
+    replaces: [incident-postmortem-agent]
+    trigger: incident_exists
+    tools: [qa.incident.record]
+    output: advisory_context
+
 validation_record:
   recorded_at: "2026-08-03"
   scope: "Risk·QA Redis 통합 수용 테스트"

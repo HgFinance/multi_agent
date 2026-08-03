@@ -1,5 +1,7 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
+부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 문서 상태: Agent Organization v1.4
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 대상 조직: CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부  
