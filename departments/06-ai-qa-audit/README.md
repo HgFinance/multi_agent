@@ -8,8 +8,10 @@
 - 실제 정책 원문이 없어 `SAMPLE_PLACEHOLDER`는 적재하지 않는다. 실제 Corpus/pgvector, ACTIVE Profile과 운영 `agent_runs/tool_calls`, 상위 계약 승인·E2E가 남은 운영 조건이다.
 - 2026-08-03 감사에서 Self-check 5개가 통과했고 QA Decision 2, Incident Event 2, Corrective Action
   1건을 확인했다. Compose Service와 `agent_runs`, `tool_calls`, `audit.run_log_events`는 아직 0건이다.
+- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 QA 보고서 9개가 있다.
+  Projection 실패는 QA Verdict를 바꾸지 않으며 최신 Reporter·Pipeline 회귀 Test 18개가 통과했다.
 
-현재 실행 상태와 동규님 Daily Scrum은 [실행 현황과 통합 계획 v2.1](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
+현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
 
 ## Skill Harness
 

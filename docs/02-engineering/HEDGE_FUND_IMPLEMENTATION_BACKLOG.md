@@ -1,13 +1,13 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.7
+> 문서 상태: Implementation Backlog v1.8
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 확정 기술 스택: [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md)  
 > Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문, 성과 평가와 최소 조직 학습 Loop까지 구현한다.
-> 실제 실행 상태와 팀별 Daily Scrum: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md)
+> 실제 실행 상태·2주 통합 보드와 팀별 Daily Scrum: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md)
 
 ## 0. 2026-08-03 실행 기준 상태
 
@@ -38,6 +38,10 @@ Test가 있으나 End-to-End Acceptance를 아직 통과하지 못했다는 뜻�
 
 현재 P0에서 먼저 닫아야 할 흐름은 F07→F11→F12→F13/F14→F15→F16이다. F03의 실행 기반은
 이미 있으므로 새 수집 Source를 늘리는 것보다 이 흐름의 Canonical DB와 Event 연결을 우선한다.
+
+2026-08-03~08-14 실행 순서는 `M0 CI·계약 복구 → M1 공통 Contract → M2 프로젝트 Redis와
+Risk·QA Runtime → M3 첫 Paper Case → M4 AI Office·Report Projection`이다. Feature Owner는 새 기능을
+시작하기 전에 [v2.2 통합 보드](../PROJECT_IMPLEMENTATION_STATUS.md#8-2주-통합-실행-보드)의 선행 Gate를 확인한다.
 
 ## 1. 우선순위
 

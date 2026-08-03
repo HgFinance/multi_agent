@@ -1,6 +1,6 @@
 # 동규님 담당 가이드: 리스크본부 + AI QA/감사본부
 
-> 문서 상태: Team Handoff v1.7
+> 문서 상태: Team Handoff v1.8
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -10,14 +10,14 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리스크·AI QA 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Risk·Control·AI QA·Audit View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)의 상태 계약 Review
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`·`MODEL-03`·`OPS-01`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`·`MODEL-03`·`OPS-01`·`RPT-01`
 > 체크박스 해석: 14절은 전 본부 Runtime·Canonical DB 연결까지 포함한 최종 DoD
 
 ---
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 09:40 KST
+> 기준: 2026-08-03 10:20 KST
 > 갱신 규칙: 동규님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
@@ -37,6 +37,8 @@
   `scripts/check_hermes_profiles.py` 기대 계약과 일치시킨다.
 - `QA-03`: `scripts.py`의 `192.168.25.25:11434`를 환경변수 기반 Model Gateway로 교체할 계획과 Test를 작성한다.
 - `OPS-01`: `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`, Governed Fund·Policy·Profile 승인 입력의 담당자를 지정한다.
+- Risk·QA 결정론적 Markdown 보고서와 Notion Block Projection을 Merge했고 최신 회귀 Test 18개가 통과했다.
+- `RPT-01`: Report Hash, Canonical Artifact Storage와 Notion Page 멱등 키를 다음 계약으로 확정한다.
 
 ### Blocker
 
@@ -45,6 +47,20 @@
 - 운영 Credential Preflight에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 누락됐다.
 - Workforce Profile 19개 중 13개가 DRAFT이며 Risk·QA Profile의 ACTIVE 승격은 영주님 승인 경로가 필요하다.
 - `QA-02`의 공식 Tool Allowlist는 영주님 `HR-02`, 실제 Research Evidence는 재일님 `RQ-01`이 선행한다.
+- 현재 생성 보고서는 Git에 포함돼 있다. 운영 보고서 보존 위치와 개인정보·원문 제한이 확정되지 않았다.
+
+### 2주 개인 실행 계획
+
+| 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
+|---|---|---|---|---|---|
+| 1 | 08-03~04 | `MODEL-03` | Risk·QA 모델 Manifest·Checker | 영주 Provider 결정 | Profile 위반 0 |
+| 2 | 08-04~05 | `RPT-01` | Report Artifact·Hash·Notion Idempotency 계약 | 영주 보존 정책 Review | 재실행 중복 Page 0, 판정 불변 |
+| 3 | 08-06~07 | `RSK-01` | Risk API Container·DB·Event | 도현 `PLAT-02` | 응답·DB·Event Hash 일치 |
+| 4 | 08-06~07 | `QA-01` | QA API Container·Consumer·Trace | 도현 `PLAT-02` | Case Replay와 Fail-closed |
+| 5 | 08-10~11 | `OPS-01` | Credential Preflight·Governed FK | 영주 Fund·Policy·Profile | 필수 항목 전부 `true` |
+| 6 | 08-11~14 | `QA-02`, `QA-03` | 실제 Evidence·Allowlist·Model Gateway | 재일 `RQ-01`, 영주 `HR-02` | 개인 IP 0, 미허용 Tool 차단 Trace |
+
+Risk와 QA는 같은 담당자여도 승인 권한을 합치지 않는다. Risk 결과 수정과 QA Finding 자기 종결은 계속 금지한다.
 
 ---
 

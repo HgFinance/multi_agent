@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.7
+> 문서 상태: Team Handoff v1.8
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -10,14 +10,14 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 CEO·Agent Workforce 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Live Office·CEO Command Center·Agent Workforce View, [ADR-0001](../02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)의 `GOV-01`·`GOV-02`·`HR-01`~`HR-04`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md#44-영주님-ceo-office와-agent-workforce-인사팀)의 `GOV-01`·`GOV-02`·`HR-01`~`HR-04`
 > 체크박스 해석: 14절은 실제 Governance·Workforce API, 승인과 Agent Runtime까지 포함한 최종 DoD
 
 ---
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 09:40 KST
+> 기준: 2026-08-03 10:20 KST
 > 갱신 규칙: 영주님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
@@ -42,6 +42,19 @@
 - Risk·QA 운영은 Governed Fund·Policy와 `QA_POLICY_SOURCE_ID`가 없어 Production Gate를 통과하지 못한다.
 - CEO·HR Tool Allowlist 미선언과 동일 Smoke Test 파일명이 각각 Profile 경고와 전체 pytest 실패를 만든다.
 - 공식 Roster, Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다.
+
+### 2주 개인 실행 계획
+
+| 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
+|---|---|---|---|---|---|
+| 1 | 08-03~04 | `HR-04` | DRAFT 13개 Profile Review·Allowlist | 동규 Model·Tool 목록 | 승인·거절 사유와 Version 상태 기록 |
+| 2 | 08-04~05 | `HR-02` | Profile·Tool Permission Read Contract | 도현 `PLAT-01` | QA·Gateway 동일 Version 조회 |
+| 3 | 08-06~10 | `GOV-01` | Mandate API·PostgreSQL Repository | 공통 Health·Error 계약 | 활성 Version·재승인 Test |
+| 4 | 08-10~12 | `GOV-02` | Investment Case·Approval·Escalation | `GOV-01`, Risk·QA 계약 | Block 우회 불가, 사람 승인 Resume |
+| 5 | 08-11~13 | `HR-01` | Candidate·Access Runtime | 프로젝트 Redis | DB Event와 독립 승인 Replay |
+| 6 | 08-13~14 | `HR-03`, `UI-02` | 개선 후보와 Kanban Read Model 연결 계획 | QA Eval, 도현 UI Bridge | Shadow·Rollback Fixture와 Approval Inbox |
+
+CEO와 HR은 실행 결과를 승인·조정하지만 Risk 판정, 주문 제출, 원장과 QA Finding을 직접 변경하지 않는다.
 
 ---
 

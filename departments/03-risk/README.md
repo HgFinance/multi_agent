@@ -8,8 +8,10 @@
 - 남은 운영 조건은 실제 API 자격증명, governed FK 원장, RLS/OMS E2E 및 운영 장애 검증이다. P1 계산 코드가 구현됐다는 뜻이지 실거래 승인을 뜻하지 않는다.
 - 2026-08-03 감사에서 Self-check 7개와 명시 pytest는 통과했지만 Compose Service와 실제
   `risk.risk_decisions`, `risk.trading_states`, `risk.run_log_events` Row는 0건이었다.
+- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 Risk 보고서 11개가 있다.
+  Notion 실패는 Risk 판정을 바꾸지 않으며 운영 전 Report Hash·Artifact Storage·Page 멱등 계약이 필요하다.
 
-현재 실행 상태와 동규님 Daily Scrum은 [실행 현황과 통합 계획 v2.1](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
+현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
 
 ## Skill Harness
 

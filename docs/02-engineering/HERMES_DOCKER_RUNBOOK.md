@@ -264,6 +264,10 @@ docker exec -it hedgefund-hermes hermes status     # 인증·모델 확인
 
 Bedrock Claude(TECH_STACK_DECISIONS.md의 목표 Gateway)로 옮기는 것은 `MODEL-01`의 별도 결정이다.
 
+2026-08-03 로컬에는 Claude Code CLI를 Host Proxy로 감싸 Research Hermes가 호출하는 실험 코드가
+생겼지만 아직 미커밋·미승인이다. 구독 한도 공유, 동시성, Timeout, 429, Host 장애, Prompt·응답 Log와
+Provider 약관을 `MODEL-04`에서 검증하기 전 기본 Runtime이나 팀 공용 Gateway로 사용하지 않는다.
+
 ---
 
 ## 6. Hermes가 하는 일과 하지 않는 일

@@ -1,8 +1,8 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
-> 문서 상태: Confirmed Execution and Coordination Plan v2.1
-> 감사 기준일: 2026-08-03 09:40 KST
-> 감사 기준: 이전 문서 Commit `0d6d356` 이후 Git 이력, 통합 Commit `8130d80`, 실행 중인 Docker, 실제 DB와 재실행한 Test
+> 문서 상태: Confirmed Execution and Coordination Plan v2.2
+> 감사 기준일: 2026-08-03 10:20 KST
+> 감사 기준: GitHub `main`의 `a1107c4`, 실행 중인 Docker, 실제 DB와 재실행한 Test
 > 목적: 팀원별 진척도, 애로사항, 선행 의존성과 다음 실행 순서를 한곳에서 관리한다.
 > 완료 조건 기준: [Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 
@@ -49,12 +49,14 @@ Feature Backlog의 End-to-End 완료 조건으로만 판정한다.
 
 - 감사 시작 시 로컬 `main`에는 리서치 8개 Commit, `origin/main`에는 Risk·QA 4개 Commit이 따로 있었다.
 - 두 이력을 일반 Merge Commit `8130d80`으로 통합해 어느 팀의 기록도 재작성하지 않았다.
-- 이전 감사 `0d6d356` 이후 Commit 기록은 재일님 계정 48개, 동규님 계정 35개다. Merge Commit도 포함한다.
-- 같은 기간 183개 파일이 바뀌었고 리서치·Hermes·Risk·QA·AI Office·Supabase Migration이 중심이다.
+- 이전 감사 `0d6d356` 이후 Commit 기록은 Email Identity를 합쳐 재일님 49개, 동규님 39개다. Merge Commit도 포함한다.
+- 같은 기간 208개 파일이 바뀌었고 리서치·Hermes·Risk·QA·AI Office·Supabase Migration과 Report가 중심이다.
 - 도현님과 영주님 명의의 신규 Commit은 이번 구간에서 확인되지 않았다. 진행 완료로 추정하지 않는다.
 - 추적하지 않는 `ai-office/ai-office-dev.log`는 개인 Runtime Log이므로 감사와 Commit 범위에서 제외한다.
-- 감사 중 `docker-compose.yml`에 Research Hermes용 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수 변경이
-  로컬 미커밋 상태로 추가됐다. 본 문서 Commit에는 포함하지 않으며 별도 Review·Commit 대상으로 남긴다.
+- v2.1 반영 직후 동규님 Risk·QA PR #56·#57이 추가돼 `a1107c4`까지 Fast-forward했다. 결정론적
+  Markdown 보고서, Notion Block Projection과 회귀 Test가 포함됐다.
+- 감사 중 `docker-compose.yml`의 Claude 인증·Base URL 변경과 `scripts/claude_code_proxy.py`가
+  로컬 미커밋 WIP로 추가됐다. 이번 문서 Commit에는 포함하지 않고 `MODEL-04` Review 대상으로 남긴다.
 
 ### 3.2 실제 실행 중인 서비스
 
@@ -130,6 +132,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | AI Office dependency audit | 18건 | High 13, Moderate 4, Low 1. Upgrade 영향 검토 필요 |
 | Hermes Profile Contract | 실패 2건, 경고 5건 | Risk·QA 모델 선언 불일치, 5개 Profile Tool Allowlist 미선언 |
 | Risk·QA Credential Preflight | 필수 2개 누락 | `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY` |
+| Risk·QA Report/Notion 회귀 | `18 passed` | Reporter 실패가 Risk·QA 판정을 바꾸지 않는지 검증 |
 
 전체 Python Test의 유일한 Assertion 실패는 `20260802002200_research_as_known_at.sql`을
 `tests/schema/test_schema_contract.py`의 기대 순서에 추가하지 않은 것이다. Risk·QA Redis Integration은
@@ -147,6 +150,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - `as_known_at`과 정정 재무 PIT 보존, Research Data Steward, Amihud·Roll 유동성 지표를 구현했다.
 - 파생 Snapshot 3,910건이 적재돼 `RQ-04`의 첫 적재 조건을 충족했다.
 - Research 11개와 Quant 26개 Self-check가 통과했고 Quant 실제 Experiment도 6개로 늘었다.
+- Claude Code CLI를 Anthropic Messages 형태로 감싸는 Host Proxy와 Compose 연결이 로컬 WIP로 생겼다.
 
 **애로사항과 남은 경계**
 
@@ -156,6 +160,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - 영속 `microstructure_features`는 0건이고 Event Priority Queue·Project Redis Producer가 없다.
 - NAVER의 마지막 관측은 08-02 04:20, Alpaca는 07-31 01:49라 Staleness 정책 확인이 필요하다.
 - Quant API·Worker와 Strategy Registry Promotion Runtime은 아직 없다.
+- Claude Proxy는 구독 한도 공유, Host 단일 장애점, 동시 실행 제한과 Provider 약관을 검증하지 않았다.
 
 **다음 작업**
 
@@ -167,6 +172,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `RQ-03` | `IMPLEMENTED` | Quant API·Worker Container와 Job Contract | Dataset→Experiment→Candidate 재시작 복구 |
 | `RQ-04` | `RUNTIME_VERIFIED` | 파생 첫 적재와 DQ | 3,910행과 DQ 증거 확인, 다음은 연속성 검증 |
 | `RQ-05` | `DOCUMENTED` | Microstructure Feature 영속 Worker | `microstructure_features > 0`, Replay Hash 일치 |
+| `MODEL-04` | `IMPLEMENTED` | Claude Code Host Proxy 보안·비용·지연 검증 | Commit·Self-check·Probe·429/Timeout·Fallback 증거 |
 
 ### 4.2 도현님: 트레이딩본부, 회계/포트폴리오본부와 공통 Platform
 
@@ -206,6 +212,8 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - Risk·QA API Surface, Metrics, Observability와 AI Office Risk·QA 계약 Panel을 추가했다.
 - 관련 DB Migration과 Test가 반영됐고 QA Decision 2건, Incident Event 2건, Corrective Action 1건이 존재한다.
 - Risk 7개, QA 5개 Self-check와 명시 pytest 대부분이 통과한다.
+- 결정론적 Risk 보고서 11개와 QA 보고서 9개, 공통 Markdown→Notion Block Renderer를 추가했다.
+- 최신 Reporter·Pipeline 회귀 Test 18개가 통과했다. Notion은 판정 Source가 아니라 Projection으로 유지된다.
 
 **애로사항과 남은 경계**
 
@@ -215,6 +223,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
   `nous/poolside/laguna-s-2.1:free`라 계약 검사가 실패한다.
 - QA Script에 `192.168.25.25:11434`가 여전히 하드코딩돼 있다.
 - Risk·QA Profile 14개는 DRAFT/PROBATION 성격이며 Governed Fund·Policy·ACTIVE 승인 경로가 필요하다.
+- 생성 보고서의 Git 보존 여부, Canonical Artifact Storage, Report Hash와 Notion Idempotency 정책이 미확정이다.
 
 **다음 작업**
 
@@ -226,6 +235,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `QA-03` | `BLOCKED` | 개인 GPU 주소 제거와 Model Gateway 전환 | 개인 IP 0건, Gateway Trace |
 | `MODEL-03` | `BLOCKED` | Risk·QA Hermes 모델 선언과 Checker 일치 | 8개 Profile Contract Check 통과 |
 | `OPS-01` | `BLOCKED` | Risk·QA 운영 Credential과 Governed FK 준비 | Preflight 필수 항목 전부 `true` |
+| `RPT-01` | `IMPLEMENTED` | 결정론적 Report Artifact·Notion Projection 운영 계약 | DB Artifact Hash·Notion Page ID·재실행 멱등성 |
 
 ### 4.4 영주님: CEO Office와 Agent Workforce 인사팀
 
@@ -269,6 +279,8 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | P1 | 5개 Hermes Profile Tool Allowlist 미선언 | 권한 경계 경고 | 해당 Owner, `HR-04` |
 | P1 | Microstructure Feature 0건 | 전략·Risk Replay 제한 | 재일, `RQ-05` |
 | P1 | Kanban Bridge가 ADR만 있고 미구현 | Agent 상태는 Scripted | 도현·영주, `UI-02` |
+| P1 | Claude Host Proxy가 미커밋·미검증 | 구독 한도·보안·가용성 위험 | 재일·동규, `MODEL-04` |
+| P1 | Risk·QA 생성 보고서 보존 경계 미확정 | Git 팽창·중복 Notion Page 위험 | 동규·영주, `RPT-01` |
 
 `MODEL-01`과 `MODEL-03`에서 개발·Paper·Production Provider, Bedrock 전환 기준, 공용 GPU Gateway,
 Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Checker를 무시하는 방식으로 완료 처리하지 않는다.
@@ -291,7 +303,7 @@ Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Che
 후속 본부는 선행 산출물의 필드가 확정되기 전 임의 JSON을 만들지 않는다. Stub에는 제거 Task ID와
 실제 생산자 Contract를 기다리는 조건을 함께 기록한다.
 
-## 7. 실행 계획 v2.1
+## 7. 실행 계획 v2.2
 
 ### Wave 0. CI와 계약 기준 복구
 
@@ -348,7 +360,47 @@ Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Che
 
 **Exit Gate:** Strategy Candidate 한 건의 데이터, 코드, 비용, Eval, 승인, 배포와 Rollback을 재현한다.
 
-## 8. Daily Scrum과 진행 공유 규칙
+## 8. 2주 통합 실행 보드
+
+기간은 2026-08-03부터 2026-08-14까지다. 각 팀은 동시에 주 작업 1개와 Review 1개만 진행한다.
+선행 Contract가 없으면 임의 JSON을 만들지 않고 `BLOCKED`로 전환한다.
+
+| 마일스톤 | 기간 | 주 작업 | Owner | Exit Gate |
+|---|---|---|---|---|
+| M0 기준 복구 | 08-03 | `CI-01`, `CI-06`, `MODEL-03` | 도현·재일·동규 | 전체 pytest 수집, Schema 실패 0, Profile 위반 0 |
+| M1 계약 고정 | 08-04~05 | `PLAT-01`, `RQ-01`, Risk·QA Event Review, `HR-02` 응답 계약 | 도현 주도, 전 팀 Review | Fixture와 Contract Test, Owner 승인 |
+| M2 Runtime Backbone | 08-06~07 | `PLAT-02`, `RSK-01`, `QA-01`, Health·Metrics | 도현·동규 | 프로젝트 Redis와 Risk·QA Compose 기동 |
+| M3 첫 Paper Case | 08-10~12 | `GOV-01`, `TRD-01`, `ACC-01`, `RPT-01` | 영주·도현·동규·재일 | Mandate→Packet→Risk→Fill→Journal→QA 1건 |
+| M4 운영 Projection | 08-13~14 | `UI-01`, `UI-02`, `UI-03`, Replay·보고서 | 도현·영주·동규 | 공식 Snapshot 복구, Trace·Report 탐색 |
+
+### 8.1 Merge와 Handoff 순서
+
+1. 생산자가 Contract Fixture와 Version을 먼저 Merge한다.
+2. 소비자는 같은 PR 또는 후속 PR에서 Contract Test를 추가한다.
+3. Runtime Service는 Health와 실패 정책을 통과한 뒤 Compose에 들어간다.
+4. DB Row와 Event Hash가 일치한 뒤에만 AI Office와 Notion Projection을 연결한다.
+5. Projection 실패는 Risk, QA, OMS와 Ledger의 결정 결과를 바꾸지 않는다.
+
+### 8.2 Blocker 처리 시간
+
+| 경과 시간 | 조치 |
+|---|---|
+| 발견 즉시 | 담당자 Scrum `Blocker`에 필요한 입력과 Owner 기록 |
+| 4시간 | 생산자·소비자 공동 Issue와 최소 Fixture 등록 |
+| 1영업일 | CEO/PM 스크럼에서 범위 축소·순서 변경 결정 |
+| 2영업일 | 임시 Stub 허용 여부 ADR, 제거 Task와 만료일 필수 |
+
+### 8.3 통합 완료 증거 묶음
+
+각 마일스톤은 아래 다섯 가지가 모두 있어야 완료다.
+
+- Merge Commit과 Reviewer.
+- 재현 명령과 Test 결과.
+- API Health 또는 Worker Heartbeat.
+- 생성된 DB Row·Event·Artifact ID와 Hash.
+- 다음 본부가 실제로 소비한 Handoff 증거.
+
+## 9. Daily Scrum과 진행 공유 규칙
 
 네 팀원 가이드의 `Daily Scrum`은 선택 항목이 아니다. 매일 아침 아래 세 항목을 실제 상태로 갱신한다.
 
@@ -372,7 +424,7 @@ Owner / Reviewer:
 다음 Handoff:
 ```
 
-## 9. 다음 스크럼에서 확정할 것
+## 10. 다음 스크럼에서 확정할 것
 
 1. `CI-01`, `CI-06`, `MODEL-03`의 당일 Owner와 Merge 순서
 2. `PLAT-01` Event Envelope과 `PLAT-02` 프로젝트 Redis의 공동 작업자
@@ -380,8 +432,10 @@ Owner / Reviewer:
 4. Risk·QA 운영 Credential과 Governed Fund·Policy 준비 책임자
 5. Wave 2 첫 Fixture 종목, Strategy Family와 Mandate 값
 6. AI Office High 의존성 Upgrade 범위와 Kanban Bridge 시작일
+7. `MODEL-04` Host Proxy를 실험용으로 허용할지와 비용·동시성 한도
+8. `RPT-01` 생성 Markdown의 Git, Object Storage와 Notion 보존 경계
 
-## 10. 현재 결론
+## 11. 현재 결론
 
 Research는 실제 수집·MCP·Hermes·PIT·DQ까지 가장 앞서 있고 Risk·QA도 Prototype을 넘어 API, Event,
 Repository와 Harness를 갖췄다. 그러나 Risk·QA는 아직 서비스로 실행되지 않고 Trading·Accounting·Governance는

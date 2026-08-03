@@ -1,6 +1,6 @@
 # 재일님 담당 가이드: 리서치본부 + 퀀트/백테스트본부
 
-> 문서 상태: Team Handoff v1.6
+> 문서 상태: Team Handoff v1.7
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 재일님  
 > 담당 조직: 리서치본부, 퀀트/백테스트본부  
@@ -11,14 +11,14 @@
 > 공통 계약: [README.md](../README.md), [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
 > 저장소 소유권: [REPOSITORY_DEPARTMENT_STRUCTURE.md](../02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)의 리서치·퀀트 경계
 > Frontend 계약: [AI_OFFICE_FRONTEND_PLAN.md](../02-engineering/AI_OFFICE_FRONTEND_PLAN.md)의 Market·Research·Strategy View
-> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `CI-06`·`RQ-01`~`RQ-05`
+> 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)의 `CI-06`·`RQ-01`~`RQ-05`·`MODEL-04`
 > 체크박스 해석: 11절의 완료 표시는 재일님 소유 산출물 기준이며 전사 E2E 완료를 뜻하지 않음
 
 ---
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 09:40 KST
+> 기준: 2026-08-03 10:20 KST
 > 갱신 규칙: 재일님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
@@ -40,8 +40,8 @@
   실제 Packet 한 건에서 재검증한다.
 - `collector_runs`의 `FAILED 11`을 Source별로 분류하고 허용 실패와 재처리 대상 목록을 남긴다.
 - `RQ-05`: 0건인 `microstructure_features` 영속 Worker의 최소 입력·출력과 Replay Hash를 확정한다.
-- 로컬 미커밋 `CLAUDE_CODE_OAUTH_TOKEN` Compose 변경은 호스트 자격 파일 비공유 원칙, Secret 주입과
-  팀원 재현 절차를 Review한 뒤 별도 Commit으로 제출한다.
+- 로컬 미커밋 Claude Code Host Proxy와 Compose Base URL 변경은 호스트 자격 파일 비공유 원칙,
+  동시성·Timeout·429·비용과 Fallback을 검증한 뒤 `MODEL-04` 별도 PR로 제출한다.
 
 ### Blocker
 
@@ -50,6 +50,19 @@
 - NAVER 마지막 관측이 08-02 04:20, Alpaca가 07-31 01:49라 Staleness가 정책상 허용인지 확인이 필요하다.
 - 미래 거래일 Calendar와 지수 구성 이력의 승인 Source가 확정되지 않았다.
 - Quant API·Worker와 Strategy 승격은 공통 Runtime과 QA/Risk Gate 없이는 운영 완료로 승격하지 않는다.
+
+### 2주 개인 실행 계획
+
+| 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
+|---|---|---|---|---|---|
+| 1 | 08-03 | `CI-06` | Migration 기대 목록과 Schema Test | 없음 | 실패 0, 도현님 CI 인계 |
+| 2 | 08-04~05 | `RQ-01` | `ResearchPacket v1` Schema·Fixture·Artifact ID | 도현 `PLAT-01` Review | 동규 QA, 도현 Trading이 같은 Fixture 소비 |
+| 3 | 08-05~07 | `RQ-02` | Feature Event·Priority Producer | `PLAT-01`, `PLAT-02` | 중복 Event 0, 재시작 Replay |
+| 4 | 08-06~10 | `RQ-05` | Microstructure 영속 Worker | Timescale Migration Review | 행 수 > 0, 계산·Replay Hash 일치 |
+| 5 | 08-10~14 | `RQ-03` | Quant API·Job Worker | 프로젝트 Redis, QA Gate | Experiment 재시작 복구와 Candidate Handoff |
+| 실험 | 별도 PR | `MODEL-04` | Claude Host Proxy Test·Runbook | 동규 보안 Review | 승인 전 기본 비활성, 실패 시 Nous/Ollama Fallback |
+
+WIP 제한은 주 작업 1개와 타 팀 Review 1개다. `RQ-01`이 끝나기 전 새 외부 Source 확장은 시작하지 않는다.
 
 ---
 

@@ -1,6 +1,6 @@
 # Department Backend Integration and Docker Plan
 
-> 상태: 전 본부 Backend 연결과 Container 운영의 구현 기준 v1.2
+> 상태: 전 본부 Backend 연결과 Container 운영의 구현 기준 v1.3
 >
 > 기준일: 2026-08-03
 >
@@ -8,7 +8,7 @@
 >
 > 본부별 Local Model 기준: [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 >
-> 실제 실행 증거와 Owner별 Daily Scrum: [실행 현황과 통합 계획 v2.1](../PROJECT_IMPLEMENTATION_STATUS.md)
+> 실제 실행 증거·2주 통합 보드와 Owner별 Daily Scrum: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md)
 
 ## 1. 이 문서가 결정하는 것
 
@@ -1012,6 +1012,10 @@ Lint/Type
 
 Phase 번호는 병렬 개발 순서가 아니라 통합 Gate다. B2~B5의 Domain Code가 먼저 만들어졌더라도
 B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운영 의존성을 가져서는 안 된다.
+
+단기 실행 일정은 B0을 08-03~05, B1·B2를 08-06~07, B3·B4를 08-10~12, 공식 Projection과
+운영 검증을 08-13~14에 수행한다. 일정은 완료 선언이 아니라 Exit Gate를 검사하는 시점이며,
+선행 Gate 실패 시 후속 Container를 억지로 기동하지 않는다.
 
 ### Phase B0. 기준과 Contract 고정
 
