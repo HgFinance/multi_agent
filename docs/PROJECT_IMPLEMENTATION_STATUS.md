@@ -167,11 +167,15 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | ID | 상태 | 작업 | 완료 증거 |
 |---|---|---|---|
 | `CI-06` | `BLOCKED` | 신규 Migration을 Schema Contract 기대 순서에 반영 | 전체 Schema Test 통과 |
-| `RQ-01` | `IMPLEMENTED` | `ResearchPacket v1` Artifact와 Event Contract 확정 | API·Event·DB에서 같은 Packet ID 조회 |
-| `RQ-02` | `IMPLEMENTED` | Feature/Event Engine과 Priority Queue 연결 | 급변 Fixture가 Stream에 한 번만 생성 |
-| `RQ-03` | `IMPLEMENTED` | Quant API·Worker Container와 Job Contract | Dataset→Experiment→Candidate 재시작 복구 |
+| `RQ-01` | `PARTIAL` | `ResearchPacket v1` Schema와 MCP 생성 경로를 Canonical Artifact·Event로 연결 | API·Event·DB에서 같은 Packet ID 조회 |
+| `RQ-02` | `DOCUMENTED` | Feature/Event Engine과 Priority Queue 연결 | 급변 Fixture가 Stream에 한 번만 생성 |
+| `RQ-03` | `DOCUMENTED` | Quant API·Worker Container와 Job Contract | Dataset→Experiment→Candidate 재시작 복구 |
 | `RQ-04` | `RUNTIME_VERIFIED` | 파생 첫 적재와 DQ | 3,910행과 DQ 증거 확인, 다음은 연속성 검증 |
 | `RQ-05` | `DOCUMENTED` | Microstructure Feature 영속 Worker | `microstructure_features > 0`, Replay Hash 일치 |
+| `RQF-01` | `DOCUMENTED` | Research V2 계약, PIT Cutoff와 Claim/Evidence Graph | Fact Claim 100% Citation, Replay 미래 조회 0건 |
+| `RQF-02` | `DOCUMENTED` | Research Branch/Fan-in, Hermes Case Adapter와 부분 복구 | 분석가 실패 Fixture가 Checkpoint에서 PARTIAL 복구 |
+| `RQF-03` | `DOCUMENTED` | Evidence-linked 가설 사전 등록과 독립 Quant Validation | Packet→Claim→Hypothesis→Experiment 역추적, 생성자 자기 승인 0건 |
+| `RQF-WEB-01` | `DOCUMENTED` | RES-08 전담 SearXNG/Playwright Web Search MCP와 Evidence 승격 | 타 Persona Search 403, Replay 호출 0건, 검증 전 Fact 승격 0건 |
 | `MODEL-04` | `IMPLEMENTED` | Claude Code Host Proxy 보안·비용·지연 검증 | Commit·Self-check·Probe·429/Timeout·Fallback 증거 |
 
 ### 4.2 도현님: 트레이딩본부, 회계/포트폴리오본부와 공통 Platform

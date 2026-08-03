@@ -199,6 +199,7 @@ Skill은 성격이나 추상적 역량이 아니라 Hermes/LangGraph에서 호�
 | `RES-05 Sentiment and Narrative` | 출처별 심리와 내러티브 변화 평가 | Aggregator + Agent |
 | `RES-06 Sector and Regime` | 섹터 상대강도, Macro와 시장 국면 해석 | Feature Store + Agent |
 | `RES-07 Thesis Construction` | Thesis, Counter-thesis, Catalyst, Invalidation 작성 | Deep Model |
+| `RES-08 Web Evidence Research` | 내부 RAG의 Evidence Gap을 웹에서 탐색하고 원출처·시점·사용권을 검증 | SearXNG MCP + 제한적 Playwright MCP + Evidence Service |
 | `TRD-01 Bull/Bear Debate` | 동일 Evidence에서 찬반 논거를 독립 생성 | LangGraph Parallel Nodes |
 | `TRD-02 Signal Synthesis` | Research와 Strategy Signal을 하나의 Intent로 통합 | PM Workflow |
 | `TRD-03 Portfolio Proposal` | 목표 비중, 위험 예산과 무효화 조건 제안 | Optimizer Service + Agent |
@@ -393,7 +394,7 @@ Agent Workforce 인사팀은 6개 본부의 채용 요청을 중앙 관리한다
 
 | 요청 조직 | 채용 필요 신호 | 먼저 검토할 대안 | 신규 채용 후보 |
 |---|---|---|---|
-| 리서치본부 | Event Queue SLA 위반, Coverage 공백, 낮은 Citation, 반복 Entity 오류 | Dedup Worker, Retrieval 개선, 기존 Analyst 동시성 | RES-03/05/07 또는 시장·섹터별 Specialist |
+| 리서치본부 | Event Queue SLA 위반, Coverage 공백, 낮은 Citation, 반복 Entity 오류, Web Evidence 요청 적체 | Dedup Worker, Retrieval 개선, RES-08 Skill·동시성과 MCP Cache 확대 | RES-03/05/07, 조건부 RES-10 또는 시장·섹터별 Specialist |
 | 트레이딩본부 | PM Case 대기, Bull/Bear 독립성 저하, Execution Slippage 증가 | Workflow 병렬화, Optimizer/TCA 개선 | TRD-01/02 독립 Instance, TRD-06, 상품별 Trader |
 | 리스크본부 | Pre-trade P99 지연, Stress Coverage 공백, Breach 조사 적체 | Risk Engine 최적화, Rule 추가, Cache 개선 | RSK-03/05/06 또는 독립 Policy Analyst |
 | 퀀트/백테스트본부 | Experiment Queue 적체, Dataset/Backtest 재현 실패, 검증 병목 | Compute 확대, Dataset Cache, Test 자동화 | QNT-02/03/04/05/06/07 전문 역할 |
@@ -494,16 +495,40 @@ Agent Workforce 인사팀은 6개 본부의 채용 요청을 중앙 관리한다
 - **KPI:** Regime 변경 탐지 지연, 상대수익 설명력, 보유 종목 영향 누락률, Macro Timestamp 오류 0.
 - **금지·Escalation:** 거시 전망 하나로 주문을 지시하지 않는다. 전사 Exposure 영향은 리스크본부로 전달한다.
 
-### RES-08 RAG Librarian and Evidence Curator
+### RES-08 RAG Librarian, Evidence Curator and Web Researcher
 
 - **채용 등급·Runtime:** P0, Retrieval Specialist + Index Worker.
-- **미션:** 모든 Research Claim이 당시 조회 가능했던 검증 가능한 Evidence로 연결되게 한다.
-- **필수 Skill:** `DAT-02`, `DAT-04~07`, Chunking, Metadata, Embedding Version, Retention과 License Policy.
-- **입력·Tool:** Ingested Document, Fact Store, Chunk/Embedding Index, Citation Request와 Retraction Event.
-- **업무 수행:** 문서 원본을 보존하고 Published/Observed/Valid Time을 기록한 후 구조 기반으로 Chunk한다. Keyword와 Vector 결과를 Rerank하고 중복·오래된 Version을 표시한다. Agent에게 텍스트 전체가 아니라 Evidence ID, 짧은 근거 위치, 신뢰도와 사용 제한을 전달한다.
-- **공식 산출물:** `Evidence Bundle`, `Index Version`, `Document Lineage`, `Retraction Impact List`.
-- **KPI:** Retrieval Precision/Recall, Citation Resolution 100%, Index Freshness, License 위반 0, Retraction 전파 시간.
-- **금지·Escalation:** 서로 다른 Embedding Space를 한 Index에 혼합하지 않는다. 원문 삭제·정정은 Data Steward와 QA 승인 경로를 따른다.
+- **미션:** 모든 Research Claim이 당시 조회 가능했던 검증 가능한 Evidence로 연결되게 하고, 내부 RAG에 없는 근거만 통제된 웹검색으로 보완한다.
+- **필수 Skill:** `DAT-02`, `DAT-04~07`, `RES-08`, Chunking, Metadata, Embedding Version, 검색어 분해, 원출처 추적, Retention과 License Policy.
+- **입력·Tool:** Ingested Document, Fact Store, Chunk/Embedding Index, `WebSearchRequest`, Citation Request와 Retraction Event. 실제 외부 접근은 `research.web.search`, `research.web.open`, `research.web.verify`에 한정한다.
+- **업무 수행:** 먼저 내부 Evidence를 검색하고 Coverage가 부족할 때만 SearXNG 기반 Web Search MCP를 호출한다. 검색 결과에서 공식·최초 출처와 허용된 도메인을 우선하고, URL·게시시각·관측시각·사용권을 확인한 상위 소수 문서만 `article_reader` 또는 격리된 Playwright MCP로 연다. 검색 결과는 `SEARCH_HIT`으로 기록하며 Citation·Time·Numeric 검증을 통과하기 전에는 `VERIFIED_EVIDENCE`로 승격하지 않는다. 문서 원본을 보존할 권리가 있을 때만 구조 기반 Chunk를 생성하고, 그 외에는 허용된 Metadata·짧은 인용 위치·파생 요약만 남긴다.
+- **공식 산출물:** `Web Search Run`, `Search Hit Set`, `Evidence Bundle`, `Index Version`, `Document Lineage`, `Retraction Impact List`.
+- **KPI:** Retrieval Precision/Recall, 원출처 발견률, Search-to-Verified 전환율, Citation Resolution 100%, 검색 Cache Hit, License 위반 0, Retraction 전파 시간.
+- **금지·Escalation:** 전 종목을 주기적으로 검색하거나 검색 결과 Snippet을 곧바로 사실로 사용하지 않는다. 로그인 Browser, Broker Credential, 내부망 접근, 임의 다운로드와 무제한 Crawl을 금지한다. 서로 다른 Embedding Space를 한 Index에 혼합하지 않으며 원문 삭제·정정은 Data Steward와 QA 승인 경로를 따른다.
+
+다른 리서치 직원의 웹 권한은 다음처럼 제한한다.
+
+| 직원 | 직접 Web Search/Open | 허용되는 요청 |
+|---|---|---|
+| RES-00 Research Supervisor | 금지 | Case 우선순위 지정과 RES-08 위임·상태 조회 |
+| RES-05 Fundamental Analyst | 금지 | 기업 IR·공시·실적 원출처를 찾는 `WebSearchRequest` |
+| RES-06 News/Sentiment Analyst | 금지 | 속보의 최초 출처, 독립 출처와 루머 교차 검증 요청 |
+| RES-07 Sector/Macro Analyst | 금지 | 정책·통계·산업 보고서의 공식 원문 검색 요청 |
+| RES-09 Geopolitical Analyst | 금지 | 정부·국제기구·제재·분쟁 발표의 원출처 검색 요청 |
+| RES-01/02/03/04 | 금지 | 웹이 아니라 Universe·시세·Feature·DQ API 사용 |
+
+### RES-10 Web Intelligence Researcher / 조건부 신설
+
+- **채용 상태:** 초기에는 신설하지 않는다. RES-08에 `RES-08 Web Evidence Research` Skill과 MCP 권한을 추가해 먼저 운영한다.
+- **신설 Trigger:** Web Search Queue가 본부 SLO를 반복 위반하거나, 검색 업무 때문에 RES-08의 Citation·Index 업무가 지연되거나, 국제 정책·산업·법률 원출처 탐색이 독립 전문 역할을 요구하는 상황이 최소 2개 평가 주기에서 확인될 때 Hiring Requisition을 낸다.
+- **미션:** 외부 웹에서 후보 Source와 원출처를 발견하고 구조화된 `Search Hit Set`을 만드는 일만 담당한다.
+- **필수 Skill:** `DAT-02`, `DAT-04`, `DAT-06`, `RES-08`, 다국어 Query Planning, Source Reliability와 Prompt Injection 방어.
+- **입력·Tool:** `WebSearchRequest`, SearXNG Search MCP와 격리된 Read-only Playwright MCP. 내부 Evidence 승격 Write 권한은 갖지 않는다.
+- **업무 수행:** Query를 최대 검색 예산 안에서 분해하고 공식 Source를 우선 탐색한다. 검색 URL, Rank, Snippet, 게시·관측시각과 Source Tier를 기록해 RES-08에 넘긴다.
+- **공식 산출물:** `Web Search Plan`, `Search Hit Set`, `Source Conflict Note`.
+- **KPI:** 원출처 발견률, Search SLA, 중복 Query 비율, 검색 비용, 악성·무관 URL 차단률.
+- **권한 분리:** RES-10은 발견자이고 RES-08은 Evidence Curator다. RES-10이 찾은 결과를 스스로 `VERIFIED_EVIDENCE`로 승격할 수 없다.
+- **금지·Escalation:** 주문·Risk·Strategy Tool, 로그인 세션, 내부망, 파일 실행과 Persistent Browser Profile을 금지한다. CAPTCHA·약관·robots 제한을 우회하지 않고 실패 사유를 기록한다.
 
 ---
 

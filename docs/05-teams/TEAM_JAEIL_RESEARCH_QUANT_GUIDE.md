@@ -140,7 +140,7 @@ WIP 제한은 주 작업 1개와 타 팀 Review 1개다. `RQ-01`이 끝나기 �
 | 펀더멘털 분석가 (RES-05) | `departments/01-research/agents/fundamental_analyst.py` | — (신규, 2026-08-01) |
 | 섹터·레짐 분석가 (RES-07) | `departments/01-research/agents/sector_regime_analyst.py` | — (신규, 2026-08-01) |
 | 미시구조 분석가 (RES-03) | `departments/01-research/agents/microstructure_analyst.py` | — (신규, 2026-08-01) |
-| RAG 사서 (RES-08, 결정론 인덱싱·검색) | `departments/01-research/agents/rag_librarian.py` | — (신규, 2026-08-01) |
+| RAG 사서/Web Evidence Curator (RES-08, 결정론 인덱싱·검색 + 통제된 Web MCP) | `departments/01-research/agents/rag_librarian.py` | Web MCP 확장은 계획, 기존 RAG 사서 구현은 2026-08-01 |
 | 전략 가설 연구자 (QNT-01) | `departments/04-quant-backtest/agents/strategy_hypothesis_agent.py` | — (신규, 2026-08-01) |
 | 배치 스케줄러 | `departments/01-research/collectors/collector_scheduler.py` | — (신규, 2026-07-31) |
 | LS 실시간 뉴스 수집기 | `departments/01-research/collectors/ls_news_collector.py` | — (신규, Sprint J3). **판정 2026-08-01**: 금요일 병행 실측으로 속보성 주 소스 확정 — p50 19초(NAVER 712초), 60초 내 관측 1,762건(vs 22건), 전용 링크 38%(vs 20%), 고유 427종목. 단 제목 교집합 8~12%뿐이라 **대체가 아니라 상호 보완** — NAVER는 웹 매체 폭(NAVER만 잡은 3,480건/8h) 담당으로 병행 유지 |
@@ -1377,7 +1377,156 @@ WebSocket(`wss://stream.data.alpaca.markets/v1beta1/news`)이 있는 유일한 �
 
 ---
 
-## 12. 공식 참고 자료
+## 12. Research-Quant Agentic Framework 도입 계획
+
+상세 설계와 논문 채택 근거는
+[Research-Quant Evidence-to-Strategy Framework](../02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+기준으로 한다. 이 절은 재일님 영역에서 실제로 구현할 순서와 인수인계를 요약한다.
+
+### 12.1 현재와 목표의 차이
+
+| 영역 | 현재 실행 사실 | 목표 |
+|---|---|---|
+| Research 직원 흐름 | 여섯 분석가를 LangGraph에서 순차 실행 | 독립 Branch/Fan-in으로 표현, 단일 GPU에서는 동시성만 1 |
+| Research 총괄 | Hermes Persona를 읽은 LLM이 Packet 합성 | 실제 Research Hermes가 Case·Queue·Retry·Escalation을 관리 |
+| Evidence | 공통 Bundle과 분석가별 Readout | 역할별 Query Plan, Context Timeline과 Claim/Evidence Graph |
+| Point-in-Time | 실행 시각을 `as_known_at`으로 기록, 일부 Tool은 최신 조회 | 모든 Tool이 Cutoff를 강제하고 미지원 Tool은 Replay에서 차단 |
+| 전망 | 분석 차원을 한 Packet에서 통합 | Macro/중기와 Micro/단기 전망을 독립 생성 후 합성 |
+| Research-Quant Handoff | Observation과 제한된 Regime Context | Packet·Claim·Evidence ID가 Hypothesis까지 연결 |
+| Quant 흐름 | 가설·Dataset·Backtest·WF·Orchestrator Script | Curator·Planner·Runner·Validator·Reporter 상태 Graph와 Worker |
+| 과적합 검증 | 기본 Walk-Forward와 Fragility | Trial Ledger, Purge/Embargo, CPCV, DSR와 PBO |
+| 자기 개선 | Claim Outcome과 Hermes 계획 존재 | 역할·Horizon별 Calibration 후보를 Held-out Eval 후 Skill 승격 |
+| 웹검색 | Tavily 탐색 Script와 제한적 ArticleReader가 분리 존재 | RES-08이 SearXNG/Playwright MCP를 통제하고 분석가는 검색 요청만 제출 |
+
+Graph를 Branch로 바꾼다는 말은 지금 GPU에서 동시에 여섯 모델을 실행한다는 뜻이 아니다.
+업무 의존성을 정확히 표현하고 `max_concurrency=1`로 시작한다. 그래야 한 직원 실패를 격리하고,
+성공한 Branch를 Checkpoint에서 재사용하며, GPU가 늘었을 때 Graph를 다시 설계하지 않아도 된다.
+
+### 12.2 구현 Backlog
+
+| ID | 우선순위 | 구현 | 주요 경로 | 완료 증거 |
+|---|---|---|---|---|
+| `RQF-01` | P0 | V2 계약과 V1 Adapter | `departments/01-research/contracts/`, `departments/04-quant-backtest/contracts/` | V1 Fixture 변환과 Schema Test |
+| `RQF-02` | P0 | 전 Research Tool의 `as_known_at` Capability Manifest | Research API·Agent Tool Adapter | 과거 Replay에서 최신 조회 0건 |
+| `RQF-03` | P0 | Retrieval Plan, Timeline과 Claim Graph | `01-research/evidence/` | 모든 Fact Claim에 유효한 Evidence ID |
+| `RQF-04` | P0 | Research Fan-out/Fan-in과 Checkpoint | `01-research/scripts.py` 또는 새 `workflows/` | Branch 1개 실패 후 PARTIAL 복구 |
+| `RQF-05` | P0 | Macro/Micro Outlook과 Skeptic | Research Workflow | 상충 Horizon을 보존한 Packet Fixture |
+| `RQF-06` | P0 | 실제 Research Hermes Case Adapter | `01-research/hermes/`, MCP/Tool Gateway | Hermes Case ID와 Pipeline Run ID 연결 |
+| `RQF-07` | P0 | Packet-to-Hypothesis Lineage | Research/Quant 계약과 Supabase Migration | Hypothesis에서 Claim/Evidence 역조회 |
+| `RQF-08` | P0 | Quant API·Redis Worker·Checkpoint | `04-quant-backtest/api/`, `worker/` | 중복 Job 0건, 재시작 복구 |
+| `RQF-09` | P0 | Preregistered Experiment Spec | Quant Planner와 Registry | 결과 확인 후 같은 Version 수정 차단 |
+| `RQF-10` | P1 | 독립 Robustness Validator | `04-quant-backtest/validation/` | 누수 Fixture와 생성자 자기 승인 차단 |
+| `RQF-11` | P1 | Trial Ledger, DSR, PBO와 CPCV | Quant Validation/DB | 탐색 횟수와 보정 결과가 Experiment Card에 기록 |
+| `RQF-12` | P1 | Outcome Calibration과 Skill Candidate | Research Outcome, Hermes, QA Handoff | Held-out 개선 후에만 Skill ACTIVE |
+| `RQF-13` | P2 | Forecast/Ensemble Spike | Quant Adapter Sandbox | 단순 Baseline 반복 우위 없으면 폐기 |
+| `RQF-WEB-01` | P0 | Self-hosted SearXNG와 `research-web-mcp` | Compose, `01-research/web_mcp/` | 실제 Query, Cache, Timeout과 감사 Trace |
+| `RQF-WEB-02` | P0 | RES-08 `web-evidence-research` Skill과 MCP 권한 | RES-08 Profile, Tool Gateway | 다른 Persona의 직접 Search/Open 403 |
+| `RQF-WEB-03` | P0 | `WebSearchRequest`와 Search Hit/Evidence 승격 계약 | Research Contract, LangGraph | SEARCH_HIT이 Validator 전 Fact로 사용되지 않음 |
+| `RQF-WEB-04` | P1 | Read-only Playwright MCP | 격리 Browser Container | JS 페이지 열람, Secret·내부망·다운로드 차단 |
+
+`RQF-01`~`RQF-09`가 Research-Quant 연결의 P0다. `RQF-10` 이후는 기본 Loop가 안정된 뒤
+도입한다. 최신 논문 모델을 먼저 붙이기보다 계약과 누수 방지부터 완료한다.
+
+### 12.2.1 Web Search MCP 직원 배정
+
+초기에는 `RES-10`을 채용하지 않는다. 검색·인용·시점·라이선스 책임이 이미 RES-08에 있으므로
+기존 직원을 다음처럼 확장한다.
+
+| 직원 | 부여 Tool/Skill | 역할 |
+|---|---|---|
+| RES-08 RAG Librarian/Web Evidence Curator | `web-evidence-research`, `research.web.search/open/verify` | 내부 RAG 실패 시 실제 검색·제한 열람·Evidence 후보 제출 |
+| RES-00 Research Supervisor | `case.delegate`, Web Search 상태 조회 | 검색 Case의 우선순위·예산·SLA 관리, 직접 검색 금지 |
+| RES-05 Fundamental | `research.web.request` | IR·공시·실적 최초 원문 요청 |
+| RES-06 News/Sentiment | `research.web.request` | 속보 원출처·루머·독립 출처 교차 검증 요청 |
+| RES-07 Sector/Macro | `research.web.request` | 정책·통계·산업 보고서 원문 요청 |
+| RES-09 Geopolitical | `research.web.request` | 정부·국제기구·제재·분쟁 발표 원문 요청 |
+| RES-01/02/03/04 | 없음 | Universe·DQ·시세·Feature API 사용 |
+
+구현 흐름:
+
+```text
+Analyst Unanswered Question
+  -> WebSearchRequest
+  -> RES-08 내부 RAG 재검색
+  -> SearXNG MCP
+  -> Source/Time/License Filter
+  -> 필요할 때만 ArticleReader 또는 Playwright MCP
+  -> SEARCH_HIT
+  -> Citation/Time/Numeric Validator
+  -> VERIFIED_EVIDENCE
+```
+
+`RES-10 Web Intelligence Researcher`는 Web Search Queue가 반복적으로 SLO를 위반하거나, 검색 때문에
+RES-08의 Citation·Index 업무가 지연되거나, 전문 외국어·정책 Source Coverage가 별도 역할을 요구할
+때만 Hiring Requisition을 낸다. 신설 후에는 RES-10이 URL 발견, RES-08이 Evidence 승격을 맡는다.
+
+SearXNG는 검색, Playwright MCP는 SearXNG가 찾은 반응형 상위 URL 열람에만 사용한다. Browser에는
+로그인 Profile, Broker·DB Secret, 내부망, 다운로드와 파일 실행 권한을 주지 않는다. Tavily/SerpApi
+Quota는 SearXNG 장애 또는 Material Case Coverage 보완에만 사용한다.
+
+### 12.3 계약별 구현 책임
+
+| 계약 | 생성 | 검증 | 소비 |
+|---|---|---|---|
+| `ResearchCaseV2` | Research Hermes | Research API Schema | Research LangGraph |
+| `AnalystFindingV1` | 직원 Agent | Evidence/Numeric Validator | Claim Graph와 Synthesis |
+| `ResearchPacketV2` | Research Workflow | Research Hermes + QA | Trading, Quant |
+| `HypothesisSpecV2` | Quant Planner | Preregistration Policy | Experiment Designer |
+| `ExperimentCardV1` | Quant Reporter | 독립 Validator + QA | Strategy Registry, Risk, CEO |
+| `CalibrationGuidelineV1` | Outcome/Calibration Worker | Held-out Eval + QA | Versioned Hermes Skill |
+
+### 12.4 Research 구현 순서
+
+1. 기존 `ResearchState`를 한 번에 교체하지 말고 V2 Case/Packet Adapter부터 추가한다.
+2. 각 분석가 출력에 `claim_type`, `evidence_ids`, `horizon`, `confidence`와 Version을 추가한다.
+3. `assemble_evidence` 앞에 역할별 Retrieval Plan을 만들고, 결과를 Source·Entity·시각별로 정리한다.
+4. 기존 순차 Edge를 독립 `Send` Branch로 바꾸고 결과 Reducer를 추가한다.
+5. 실제 실행은 Redis/GPU Queue에서 `max_concurrency=1`로 제한한다.
+6. Citation, Numeric, Time Cutoff, Coverage와 Contradiction Validator를 Fan-in 앞에 둔다.
+7. Macro와 Micro Outlook이 서로의 결과를 보지 않게 만든 뒤 Synthesis에서 처음 결합한다.
+8. Skeptic이 치명적 근거 누락을 찾으면 최대 2회만 재검색하고, 그 뒤에는 부족 상태로 종료한다.
+9. 마지막에 Hermes Case Adapter를 연결해 Queue, Retry, Timeout과 Escalation을 운영한다.
+
+### 12.5 Quant 구현 순서
+
+1. `strategy_hypothesis_agent.py`가 `ResearchPacketV2`와 Claim ID를 입력으로 받게 확장한다.
+2. 가설을 `PREREGISTERED`로 고정하기 전까지 Draft를 허용하고, 이후 변경은 새 Version으로 만든다.
+3. 기존 `pit_dataset.py`, `backtest_runner.py`, `walk_forward.py`를 버리지 않고 결정론적 Worker Tool로 감싼다.
+4. Curator, Planner, Runner, Validator와 Reporter를 LangGraph Subgraph로 연결한다.
+5. Runner는 네트워크, LLM, 운영 DB Write와 Broker Credential이 없는 격리 Container에서 실행한다.
+6. Trial Family와 Trial Budget을 DB에 저장해 Parameter 탐색 수를 숨길 수 없게 한다.
+7. 기존 Walk-Forward에 Purge/Embargo를 먼저 넣고 CPCV, DSR와 PBO는 독립 Validation 모듈로 추가한다.
+8. Quant Hermes는 결과를 다시 계산하지 않고 상태, 실패 원인과 Candidate 제출만 관리한다.
+
+### 12.6 팀 간 Handoff
+
+| 상대 | 재일님이 제공 | 상대가 제공 |
+|---|---|---|
+| 도현님 Trading/Accounting | `ResearchPacketV2`, 승인 Strategy Bundle의 Read Model | Packet 소비 오류, Fill·PnL와 실현 Slippage Outcome |
+| 동규님 Risk/QA | Claim/Evidence, Dataset·Experiment Lineage, Calibration Candidate | Citation/Leakage/Model Risk Finding과 Release Decision |
+| 영주님 CEO/Workforce | Case 상태, Queue·GPU·SLA, Skill Gap과 Candidate | 우선순위, 예산, Profile 변경과 승인 상태 |
+| 공통 Platform DRI | Event Schema, Redis Consumer 요구사항, Checkpoint Key | 공통 Event Bus, Auth, Observability와 배포 Runtime |
+
+### 12.7 완료 Definition of Done
+
+- [ ] `as_known_at`이 모든 Research 조회의 실제 Cutoff로 동작한다.
+- [ ] Fact, Inference와 Forecast가 Schema에서 분리된다.
+- [ ] 모든 Fact Claim은 존재하는 Evidence ID와 Citation을 가진다.
+- [ ] 분석가 한 명의 Timeout이 전체 Case의 무조건 실패로 이어지지 않는다.
+- [ ] 재시작 시 성공한 Branch와 완료 Experiment를 중복 실행하지 않는다.
+- [ ] Macro와 Micro 전망의 상충이 평균 처리되지 않고 Packet에 남는다.
+- [ ] Hypothesis에서 원 Research Packet, Claim과 Evidence까지 역추적된다.
+- [ ] 가설 사전 등록 이후의 변경은 새 Version으로 기록된다.
+- [ ] Trial 수, Dataset, Code, Seed, Cost와 검증 결과가 `ExperimentCardV1`에 연결된다.
+- [ ] 생성 Agent가 자신의 검증 또는 Strategy 승격 상태를 직접 쓸 수 없다.
+- [ ] 실패한 Experiment도 실패 사유와 함께 보존된다.
+- [ ] Hermes Skill 개선은 Held-out Eval과 QA 승인 후에만 활성화된다.
+- [ ] RES-08 외 Persona의 `research.web.search/open` 직접 호출이 차단된다.
+- [ ] `SEARCH_HIT`은 Citation·Time·Numeric 검증 전 Fact Claim으로 사용되지 않는다.
+- [ ] Historical Replay와 Backtest에서 실시간 Web MCP 호출이 0건이다.
+- [ ] Browser Container가 로그인 Profile, 내부망, Secret, 다운로드와 파일 실행에 접근하지 못한다.
+
+## 13. 공식 참고 자료
 
 - [LS증권 Open API](https://openapi.ls-sec.co.kr/)
 - [Open DART 개발가이드](https://opendart.fss.or.kr/guide/main.do)
