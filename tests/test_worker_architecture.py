@@ -255,3 +255,26 @@ def test_paper_pipeline_passes_worker_context_to_department_head(monkeypatch: An
             run_id=f"{workflow_name}-paper-test",
         )
         assert auxiliary_run.status == "COMPLETED"
+
+
+def test_final_worker_shape_has_no_duplicate_roles() -> None:
+    """Keep the approved head/worker topology explicit and reviewable."""
+    expected = {
+        "ceo": (1, 1, 0),
+        "hr": (5, 2, 3),
+        "research": (6, 2, 4),
+        "trading": (6, 2, 4),
+        "risk": (4, 2, 2),
+        "quant-backtest": (7, 2, 5),
+        "accounting-portfolio": (8, 2, 6),
+        "qa": (5, 1, 4),
+    }
+    for department, directory in DEPARTMENTS:
+        config = yaml.safe_load(
+            (ROOT / "departments" / directory / "hermes" / "config.yaml").read_text()
+        )
+        workers = config["workers"]
+        active = sum(item["trigger"] == "always" for item in workers.values())
+        conditional = len(workers) - active
+        assert (len(workers), active, conditional) == expected[department]
+        assert len({item["role"] for item in workers.values()}) == len(workers)

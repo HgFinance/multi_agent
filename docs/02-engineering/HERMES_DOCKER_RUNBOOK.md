@@ -1,5 +1,7 @@
 # Hermes 도커 운영 Runbook
 
+> 현재 기준(2026-08-03): 모든 부서장은 Hermes + Codex 기본/Claude Code 대체이고, 직원은 부서별 독립 LangGraph Worker + Ollama `qwen3:8b`다. 아래의 Laguna·기존 단일 Ollama 호출 예시는 과거 Smoke 기록이다.
+
 담당: 재일 (리서치·퀀트) — 2026-08-02 작성, 2026-08-03 상태 갱신
 근거: 재일님 지시 "팀원들이랑 도커로 관리하기로 했는데 어떻게 해야 할지"
 

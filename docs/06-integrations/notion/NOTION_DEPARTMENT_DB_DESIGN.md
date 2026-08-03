@@ -1,5 +1,19 @@
 # Notion 부서별 데이터베이스 설계
 
+> **현재 기준(2026-08-03)**: 이 문서의 아래 초기 설계 문장 중 “01/03/06만 자동 채움”과 “원본 리포트 Rich Text 보관”은 폐기된 과거 기준이다. 현재 Reporter는 구조화 속성을 저장하고, Markdown 리포트는 Notion `children` block으로 렌더링한다. 실제 업로드 성공 여부는 자격증명·DB ID·API 응답으로만 판정한다.
+
+## 0. 현재 연동 상태
+
+| 영역 | 현재 상태 | 성공 판정 |
+|---|---|---|
+| 부서 Reporter | CEO, Research, Trading, Risk, Accounting, QA, HR 어댑터 구현 | 함수 존재만으로 연결 완료로 표시하지 않음 |
+| Quant / Backtest | Notion Reporter 미구현 | 백테스트 결과 발행 계약과 DB 스키마 확정 후 구현 |
+| Markdown 표시 | `departments/notion_markdown.py`가 제목·표·목록을 block으로 변환 | `children` payload와 HTTP 200 응답 확인 |
+| 원본 리포트 속성 | 필수 아님; 전문을 rich-text 속성에 넣지 않음 | `report_artifact_ref` 또는 페이지 본문으로 추적 |
+| Source of Truth | 로컬 report artifact와 운영 DB | Notion은 사람이 보는 Projection |
+
+Reporter 결과 필드는 `adapter_present`, `credentials_configured`, `upload_succeeded`, `url`처럼 분리해 기록한다. `upload_succeeded=false`는 부서 판정 실패가 아니며, Notion 장애가 Risk/QA/Accounting의 바인딩 결정을 바꾸지 않는다.
+
 담당: 동규 (리스크/QA) 제안, 8개 본부 전체에 적용
 근거: [ai-office/worker/report.ts](../../../ai-office/worker/report.ts)의 기존 "김비서 일일 브리핑" 단일 DB 연동,
       [CLAUDE.md](../../../CLAUDE.md) 부서 토폴로지·권한 분리 원칙,
