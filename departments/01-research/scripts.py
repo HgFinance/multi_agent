@@ -1023,6 +1023,8 @@ _INTERPRET_SYSTEM = """너는 리서치본부 총괄(RES-00)이다.
   "없다", "알 수 없음" 같은 회피는 거부된다. 틀릴 수 없는 문장은 분석이 아니다.
 - 판정 지평(일)을 정한다. 언제 맞았는지 볼 수 있어야 한다.
 - 새 수치를 만들지 않는다. 주어진 Fact 를 가리키기만 한다.
+- **[주의] 로 시작하는 Fact 를 반드시 존중한다.** 어떤 지표가 이 업종에
+  적용되지 않는다고 적혀 있으면 그 지표를 근거로 삼지 않는다.
 - source_nodes 에는 **분석가 이름**을 넣는다(주어진 analysts 목록에서 고른다).
   claim 문장 안에 적지 말고 반드시 이 필드에 넣어라.
 
@@ -1078,6 +1080,15 @@ def interpret(state: ResearchState) -> dict:
         if note:
             facts[f"{node}.소견"] = {"claim": str(note)[:200],
                                     "source_node": node}
+        # ▶ **주의사항도 재료다.** 실측(006800): RES-05 가 "부채비율은 금융업에
+        #   적용되지 않는다" 를 cautions 에 실었고 Skeptic 은 그것을 읽어 약한
+        #   주장을 지목했는데, 해석 노드는 수치만 받아 같은 오독을 반복했다 -
+        #   경고가 닿지 않는 층은 경고가 없는 것과 같다.
+        for ci, c in enumerate((ro.get("cautions")
+                                or (state.get(node) or {}).get("cautions")
+                                or [])[:4]):
+            facts[f"{node}.주의{ci + 1}"] = {"claim": f"[주의] {str(c)[:200]}",
+                                            "source_node": node}
     revision = int(state.get("revisions") or 0)
     if not facts or len(nodes) < 2:
         # 가로지를 것이 없으면 해석도 없다. 억지로 만들면 재진술이 된다.
