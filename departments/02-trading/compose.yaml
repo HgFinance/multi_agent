@@ -9,11 +9,33 @@
 # 하나의 병합된 모델을 공유하므로 redis 같은 공통 Platform Container를 서비스 이름으로
 # 참조할 수 있다(계획서 5절 - 공통 인프라는 루트가 소유한다).
 #
-# ▶ 지금은 Hermes 하나뿐이다. 계획서 6.3의 trading-api / oms-worker / broker-adapter는
-#   넣지 않았다 - departments/02-trading에 api/app.py가 아직 없고, 조회면은 apps/api BFF
-#   한 프로세스가 트레이딩·회계 Router를 함께 서빙한다. 코드 없는 역할을 컨테이너부터
-#   만들지 않는다(departments/03-risk/Dockerfile 상단 주석과 같은 원칙).
+# ▶ 계획서 6.3의 oms-worker / broker-adapter는 아직 없다 - 코드가 없다.
+#   코드 없는 역할을 컨테이너부터 만들지 않는다(departments/03-risk/Dockerfile 상단 주석과
+#   같은 원칙). trading-api는 2026-08-03에 api/app.py가 생기면서 추가했다.
 services:
+  # trading-api: OrderIntent 심사, Broker Order 상태 머신, Paper 체결의 조회·명령면.
+  # 계약은 docs/02-engineering/TRADING_DOMAIN_API_SPEC.md.
+  #
+  # ▶ DATABASE_URL을 주지 않는다. 빠뜨린 게 아니라 **아직 안 쓰기 때문**이다 -
+  #   OrderStore가 프로세스 메모리라 재시작하면 주문이 사라진다(설계서 4절).
+  #   execution.* 테이블은 Supabase에 이미 있고 행이 0이며, psycopg OrderStore는
+  #   팀장 확인 대기 항목이다. 그때 여기에 DATABASE_URL을 추가한다.
+  #   자격증명을 "언젠가 쓸 것"이라고 미리 주입하지 않는다 - 안 쓰는 자격이 퍼지는
+  #   것 자체가 위험이다(01-research의 research-mcp에서 LS 자격을 뺀 것과 같은 이유).
+  #
+  # ▶ 상태가 프로세스 메모리라 **복제하면 안 된다.** 지금 replica를 늘리면 주문이
+  #   컨테이너별로 갈라진다. DB store가 들어오기 전까지 단일 인스턴스로 둔다.
+  trading-api:
+    build:
+      context: .
+    container_name: hedgefund-trading-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
   # ▶ 볼륨 디렉터리 이름은 Profile 이름과 정확히 같아야 한다 - scripts/sync_hermes_profiles.sh가
   #   `~/.hermes-<profile>` 규칙으로 경로를 찾는다. 부서 폴더명(02-trading)이 아니다.
   #
