@@ -1,0 +1,43 @@
+name: strategy-research
+version: strategy-research-v1
+kind: strategy-research
+description: 실시간 투자 Case와 분리된 Quant Backtest·승격 검토 흐름
+boundary_rules:
+  - Point-in-Time Dataset과 재현 가능한 Strategy Candidate만 다음 단계로 전달한다.
+  - Quant는 Production 승격을 수행하지 않는다.
+  - QA 독립 검증과 CEO 승인 전에는 Trading으로 Strategy Bundle을 전달하지 않는다.
+steps:
+  - id: quant-backtest
+    sequence: 1
+    department: quant-backtest-department
+    owner: quant
+    task: PIT Dataset·Backtest·Walk-forward로 Strategy Candidate 생성
+    input_contract: strategy_hypothesis
+    output_contract: strategy_candidate
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: NO_SUBMIT
+    forbidden_actions: [production_promotion, order_submission]
+  - id: qa-release-review
+    sequence: 2
+    department: qa-department
+    owner: qa
+    task: Strategy Candidate의 재현성·근거·Model Risk 독립 검증
+    input_contract: strategy_candidate
+    output_contract: strategy_qa_assessment
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: REJECT_PROMOTION
+    forbidden_actions: [production_promotion, order_submission]
+  - id: ceo-promotion-review
+    sequence: 3
+    department: ceo-agent
+    owner: ceo
+    task: QA와 Risk 검토 결과를 바탕으로 Shadow/Paper 승격 여부만 결정
+    input_contract: strategy_qa_assessment
+    output_contract: promotion_decision
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: REJECT_PROMOTION
+    forbidden_actions: [order_submission, risk_approval]
+
