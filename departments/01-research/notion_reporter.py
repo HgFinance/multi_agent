@@ -38,6 +38,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 _DEV_VARS = _REPO_ROOT / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
+# Notion API 한 요청당 children 상한. 넘기면 400 이다.
+_NOTION_MAX_CHILDREN = 100
 REPORTER_VERSION = "research-notion-reporter-v1"
 
 # 분석가 노드 -> **실제 Notion 속성명** (2026-08-03 DB 조회로 확인).
@@ -99,14 +101,15 @@ def describe_source(env: dict | None = None) -> str:
     return " / ".join(where)
 
 
-def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
+def _post(path: str, body: dict, token: str, *,
+          method: str = "POST") -> tuple[int, dict]:
     req = urllib.request.Request(
         f"https://api.notion.com/v1/{path}",
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {token}",
                  "Notion-Version": _NOTION_VERSION,
                  "Content-Type": "application/json"},
-        method="POST")
+        method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, json.loads(r.read())
@@ -175,12 +178,38 @@ def upload_packet(packet: dict, *, symbol: str, report_md: str = "",
         if report_md:
             from departments.notion_markdown import markdown_to_notion_blocks
 
-            payload["children"] = markdown_to_notion_blocks(report_md)
+            blocks = markdown_to_notion_blocks(report_md)
+            # ▶ Notion 은 한 요청에 children 100개까지다(실측 2026-08-03: 102개로
+            #   400). **잘라내지 않는다** - 리포트가 조용히 반쪽이 되면 사람이
+            #   그것을 전부로 오해한다. 첫 100개로 페이지를 만들고 나머지는
+            #   append 로 이어 붙인다.
+            payload["children"] = blocks[:_NOTION_MAX_CHILDREN]
+            rest = blocks[_NOTION_MAX_CHILDREN:]
         status, body = _post("pages", payload, token)
     except Exception as e:  # noqa: BLE001 - Notion 은 구속력 없는 Projection 이다
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}: {e}"[:200]}
     if status == 200:
-        return {"ok": True, "url": body.get("url")}
+        page_id = body.get("id")
+        appended, append_error = 0, None
+        while rest and page_id:
+            chunk, rest = rest[:_NOTION_MAX_CHILDREN], rest[_NOTION_MAX_CHILDREN:]
+            try:
+                st2, b2 = _post(f"blocks/{page_id}/children", {"children": chunk},
+                                token, method="PATCH")
+            except Exception as e:  # noqa: BLE001
+                append_error = f"{type(e).__name__}: {e}"[:120]
+                break
+            if st2 != 200:
+                append_error = str(b2.get("message", b2))[:120]
+                break
+            appended += len(chunk)
+        out = {"ok": True, "url": body.get("url")}
+        if appended:
+            out["appended_blocks"] = appended
+        if append_error:
+            # 본문 일부가 빠졌다는 사실을 숨기지 않는다
+            out["append_error"] = append_error
+        return out
     return {"ok": False, "status": status, "error": body.get("message", body)}
 
 

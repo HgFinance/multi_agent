@@ -50,6 +50,21 @@ from evidence.llm_client import chat as llm_chat  # noqa: E402
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
 KST = timezone(timedelta(hours=9))
 
+# ▶ .env 를 프로세스 환경으로 올린다 (2026-08-03)
+#   실측: .env 에 RESEARCH_SUPERVISOR_BASE/MODEL 을 넣어도 **무시됐다.**
+#   이 모듈은 os.environ 만 봤고, .env 는 수집기(source_registry.load_project_env)
+#   에서만 읽혔다. 그래서 총괄이 Claude 로 도는 줄 알았는데 실제로는 로컬
+#   qwen3:14b 였고, 창작·영어 서술·스키마 이탈이 전부 그 모델에서 났다.
+#   **설정이 있는데 조용히 안 먹는 것이 가장 나쁘다** - 무엇이 도는지 착각하게 된다.
+#   이미 프로세스에 있는 값은 덮지 않는다(컨테이너 주입이 우선).
+try:
+    from source_registry import load_project_env as _load_env
+
+    for _k, _v in (_load_env() or {}).items():
+        os.environ.setdefault(_k, _v)
+except Exception:  # noqa: BLE001 - .env 가 없어도 기본값으로 돈다
+    pass
+
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 # ▶ 총괄은 별도 엔드포인트를 쓸 수 있다 (2026-08-03)
 #   실측: pipeline_runs 19회 중 10회가 총괄 스키마 이탈로 실패했다
@@ -132,10 +147,20 @@ def analyze_sentiment(state: ResearchState) -> dict:
     #   원문·본문은 싣지 않는다(라이선스). document_id 와 제목까지다.
     cited = tuple(dict.fromkeys(
         str(e["document_id"]) for e in (r.evidence or ()) if e.get("document_id")))
-    return {"sentiment": {"verdict": r.verdict, "score": r.score,
-                          "articles": r.articles_used,
-                          "dropped": r.articles_dropped,
-                          "cited_evidence_ids": cited,
+    base = {"verdict": r.verdict, "score": r.score,
+            "articles": r.articles_used, "dropped": r.articles_dropped,
+            "cited_evidence_ids": cited,
+            "readout": {"articles_used": float(r.articles_used),
+                        "articles_dropped": float(r.articles_dropped),
+                        **({"score": float(r.score)} if r.score is not None else {})}}
+    try:
+        from enrich import enrich as _enrich
+
+        base = _enrich("sentiment", base, symbol=state["symbol"])
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ sentiment 도구 보강 실패(분석은 유지): "
+              f"{type(e).__name__}: {e}"[:150], flush=True)
+    return {"sentiment": {**base,
                           "evidence": tuple(
                               {k: e.get(k) for k in
                                ("document_id", "title", "sentiment", "salience")}
@@ -148,7 +173,7 @@ def _norm_note(note):
     return note.model_dump() if hasattr(note, "model_dump") else note
 
 
-def _analyst_state(r: dict) -> dict:
+def _analyst_state(r: dict, *, node: str = "", symbol: str = "") -> dict:
     """분석가 반환 -> state 조각. **반환 모양이 두 갈래인 것을 여기서 흡수한다.**
 
     ▶ 왜 필요한가 (실측 2026-08-03, 이 세션에서 발견)
@@ -175,9 +200,22 @@ def _analyst_state(r: dict) -> dict:
         v = note.get(key)
         return v if v not in (None, "", [], {}) else r.get(key)
 
+    # ▶ 도구 보강 (2026-08-03). 계획이 있는 노드만 - 없으면 그대로 통과한다.
+    #   실패해도 원래 결과를 건드리지 않는다(enrich 가 보장).
+    if node and symbol:
+        try:
+            from enrich import enrich as _enrich
+
+            r = _enrich(node, r, symbol=symbol)
+        except Exception as e:  # noqa: BLE001 - 보강 실패가 분석을 죽이지 않는다
+            print(f"⚠ {node} 도구 보강 실패(분석은 유지): "
+                  f"{type(e).__name__}: {e}"[:150], flush=True)
+
     return {
         "verdict": r.get("verdict"),
         "readout": r.get("readout"),
+        "cited_evidence_ids": tuple(r.get("cited_evidence_ids") or ()),
+        "tool_trace": r.get("tool_trace"),
         "note": note or None,
         "summary": pick("summary"),
         "used_metrics": pick("used_metrics") or [],
@@ -193,14 +231,14 @@ def analyze_technical(state: ResearchState) -> dict:
     from technical_analyst import analyze as tech_analyze
 
     r = tech_analyze(state["symbol"], market_api=MARKET_API)
-    return {"technical": _analyst_state(r)}
+    return {"technical": _analyst_state(r, node="technical", symbol=state["symbol"])}
 
 
 def analyze_fundamental(state: ResearchState) -> dict:
     from fundamental_analyst import analyze as fund_analyze
 
     r = fund_analyze(state["symbol"])
-    return {"fundamental": {**_analyst_state(r),
+    return {"fundamental": {**_analyst_state(r, node="fundamental", symbol=state["symbol"]),
                             "verification": r.get("verification")}}
 
 
@@ -209,7 +247,7 @@ def analyze_regime(state: ResearchState) -> dict:
     from sector_regime_analyst import analyze as regime_analyze
 
     r = regime_analyze(market_api=MARKET_API)
-    return {"regime": _analyst_state(r)}
+    return {"regime": _analyst_state(r, node="regime", symbol=state["symbol"])}
 
 
 def analyze_geopolitical(state: ResearchState) -> dict:
@@ -222,14 +260,14 @@ def analyze_geopolitical(state: ResearchState) -> dict:
     from geopolitical_analyst import analyze as geo_analyze
 
     r = geo_analyze(research_api=RESEARCH_API)
-    return {"geopolitical": _analyst_state(r)}
+    return {"geopolitical": _analyst_state(r, node="geopolitical", symbol=state["symbol"])}
 
 
 def analyze_microstructure(state: ResearchState) -> dict:
     from microstructure_analyst import analyze as micro_analyze
 
     r = micro_analyze(state["symbol"], market_api=MARKET_API)
-    return {"microstructure": _analyst_state(r)}
+    return {"microstructure": _analyst_state(r, node="microstructure", symbol=state["symbol"])}
 
 
 PACKET_REQUIRED_KEYS = ("thesis", "facts", "interpretation",
