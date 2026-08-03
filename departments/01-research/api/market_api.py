@@ -204,13 +204,21 @@ def bars(
 
 
 @app.get("/breadth")
-def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500)):
+def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500),
+            as_of: Optional[str] = Query(
+                None, description="이 시각까지만 본다(PIT, tz 포함 ISO8601). "
+                                  "없으면 최신")):
+    """시장 폭. **as_of 를 받는다** - 이력은 event_time 으로 원래 다 있었고
+    컷오프만 없어서 Replay 금지였다. 금지는 도구를 없애지만 파라미터는 도구를
+    살린다 - 에이전트가 값을 하는지 증명하려면 과거로 돌려볼 수 있어야 한다."""
     return _query("""
         select event_time, market, advancers, decliners, unchanged,
                up_volume, down_volume, total_value
-        from market.market_breadth where market = %s
+        from market.market_breadth
+        where market = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit %s
-    """, (market, limit))
+    """, (market, as_of, as_of, limit))
 
 
 @app.get("/dq/windows")
@@ -253,7 +261,10 @@ def dq_summary() -> dict:
 
 
 @app.get("/regime/daily")
-def regime_daily(days: int = Query(20, gt=0, le=120)):
+def regime_daily(days: int = Query(20, gt=0, le=120),
+                 as_of: Optional[str] = Query(
+                     None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+                     description="이 거래일까지만 본다(PIT). 없으면 최신")):
     """시장 레짐 집계 (RES-07 의 결정론 재료) - 일봉 단면 지표.
 
     등락 종목수·SMA20 상회 비율을 거래일별로 계산한다. SMA20 은 봉 20개가
@@ -270,6 +281,11 @@ def regime_daily(days: int = Query(20, gt=0, le=120)):
                  lag(close) over (partition by instrument_id order by bucket_time) as prev_close
           from market.market_bars
           where interval_code = '1D' and source = 'ls_chart'
+            -- ▶ PIT 컷오프. 없으면 최신까지(LIVE 에서는 '지금'이 곧 컷오프라
+            --   아무것도 막지 않는다). **이력은 원래 다 있었다** - 컷오프를
+            --   안 받아서 Replay 금지 목록에 올라 있었을 뿐이다.
+            and (%s::date is null
+                 or (bucket_time at time zone 'Asia/Seoul')::date <= %s::date)
           window w20 as (partition by instrument_id order by bucket_time
                          rows between 19 preceding and current row)
         )
@@ -282,7 +298,7 @@ def regime_daily(days: int = Query(20, gt=0, le=120)):
                count(*) as symbols
         from b
         group by d order by d desc limit %s
-    """, (days,))
+    """, (as_of, as_of, days))
 
 
 @app.get("/microstructure/{symbol}")

@@ -118,12 +118,28 @@ MANIFEST: tuple[ToolCapability, ...] = (
                    "Replay 배선 시 반드시 넘겨야 한다"),
     ToolCapability("market-api", "/snapshot/{symbol}", PitSupport.UNSUPPORTED, None,
                    "최신 스냅샷 1행. 시간 인자가 없다"),
-    ToolCapability("market-api", "/breadth", PitSupport.UNSUPPORTED, None,
-                   "최신 Breadth. 과거 날짜를 지정할 방법이 없다"),
+    # 2026-08-04: 금지 -> 파라미터. market_breadth 는 event_time 으로 이력이
+    # 원래 다 있었고 컷오프만 없었다. 금지는 도구를 없애지만 파라미터는 도구를
+    # 살린다 - **에이전트가 값을 하는지 증명하려면 과거로 돌려볼 수 있어야 한다.**
+    ToolCapability("market-api", "/breadth", PitSupport.SUPPORTED, "as_of",
+                   "as_of 시각까지의 Breadth. 없으면 최신"),
+    # 2026-08-04 신설. **Replay 에서 금지다** - 오늘의 방법 성적은 Replay 시점
+    # 이후에 일어난 결과까지 포함한다. 6월 판단에 "이 기법이 잘 맞는다" 를
+    # 쓰면 그건 그때 몰랐던 것을 아는 셈이고, 정확히 look-ahead 다.
+    # 학습 되먹임과 백테스트는 이 지점에서 반드시 갈라져야 한다.
+    ToolCapability("research-api", "/methods/performance", PitSupport.UNSUPPORTED,
+                   None, "누적 성적은 Replay 시점 이후 결과를 포함한다"),
+    # 2026-08-04 신설. /dq/summary 와 같은 이유 - 그때 몰랐던 품질 결함을
+    # 아는 셈이 된다.
+    ToolCapability("market-api", "/dq/windows", PitSupport.UNSUPPORTED, None,
+                   "현재 품질 감사. Replay 근거로 쓰면 그때 몰랐던 결함을 아는 셈"),
     ToolCapability("market-api", "/dq/summary", PitSupport.UNSUPPORTED, None,
                    "현재 데이터 품질. Replay 판단 근거로 쓰면 그때 몰랐던 결함을 아는 셈"),
-    ToolCapability("market-api", "/regime/daily", PitSupport.UNSUPPORTED, None,
-                   "최신 레짐. RES-07 이 쓴다 - Replay 에서 가장 위험한 경로"),
+    # 2026-08-04: 같은 이유로 해제. 일봉 bucket_time 으로 계산하므로 이력이
+    # 있다. RES-07 이 Replay 에서 가장 위험한 경로였는데, 이제 그 경로가
+    # **막힌 것이 아니라 시점이 지정된다.**
+    ToolCapability("market-api", "/regime/daily", PitSupport.SUPPORTED, "as_of",
+                   "as_of 거래일까지의 레짐. 없으면 최신"),
     ToolCapability("market-api", "/microstructure/{symbol}", PitSupport.UNSUPPORTED, None,
                    "최신 미시구조 집계. RES-03 이 쓴다"),
 )

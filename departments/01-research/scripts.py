@@ -90,6 +90,11 @@ class ResearchState(TypedDict, total=False):
     geopolitical: dict      # RES-09 지정학 국면 (라벨·driver 는 코드, 서술만 LLM)
     microstructure: dict    # RES-03 미시구조 (판정은 코드, 서술만 LLM)
     packet: dict            # 최종 Research Packet
+    insights: list          # 교차 해석 (반증 조건 필수)
+    insight_rejected: list  # 거부된 해석 + 사유
+    insight_claims: list    # 해석의 채점 행
+    insight_note: str
+    revisions: int          # 반박 -> 재해석 횟수 (상한 MAX_REVISIONS)
     halted: str             # 중단 사유 (거래 불가 등)
 
 
@@ -936,6 +941,138 @@ def challenge_packet(state: ResearchState) -> dict:
                                       verification=verification)}
 
 
+# ── 노드 10.5: 해석 (인사이트) ─────────────────────────────────────────────
+# ▶ **인사이트가 나올 자리가 없었다.** 분석가는 compute -> narrate -> verify 로
+#   돌고 라벨은 코드가 정한다. LLM 은 그 라벨을 문장으로 옮길 뿐이라 여섯 축을
+#   가로질러 "그래서 무슨 뜻인가" 를 말하는 자리가 통째로 비어 있었다.
+#
+#   마스터 플랜이 결정론에 묶은 것은 **규칙 판정**(PIT·인용검증·한도)이다.
+#   "이 세 신호가 같이 나타난다는 게 무슨 뜻인가" 는 규칙 판정이 아니다 -
+#   둘을 같은 것으로 묶어 해석까지 결정론에 넘긴 것이 지금까지의 한계였다.
+MAX_REVISIONS = 1        # 반박 -> 재해석은 한 번만. 무한 순환은 비용만 태운다
+MAX_INSIGHTS = 5
+
+_INTERPRET_SYSTEM = """너는 리서치본부 총괄(RES-00)이다.
+분석가 여섯의 판정을 **가로질러** 해석한다. 숫자를 다시 쓰는 것이 아니라
+서로 다른 축이 함께 무엇을 가리키는지 말한다.
+
+반드시 지켜라:
+- 각 해석은 **서로 다른 분석가 2인 이상**의 Fact 를 참조한다.
+  하나만 가리키면 그건 해석이 아니라 그 Fact 의 재진술이다.
+- 각 해석에 **반증 조건**을 쓴다: 무엇이 관측되면 이 해석이 틀리는가.
+  "없다", "알 수 없음" 같은 회피는 거부된다. 틀릴 수 없는 문장은 분석이 아니다.
+- 판정 지평(일)을 정한다. 언제 맞았는지 볼 수 있어야 한다.
+- 새 수치를 만들지 않는다. 주어진 Fact 를 가리키기만 한다.
+
+kind 는 다음 중 하나: CROSS_SIGNAL, CAUSAL_HYPOTHESIS, REGIME_READ,
+RISK_ASYMMETRY, DIVERGENCE
+
+JSON 만 낸다: {"insights": [{"kind": "...", "claim": "...",
+"supporting_fact_ids": ["..."], "source_nodes": ["..."], "falsifier": "...",
+"horizon_days": 5, "confidence": "MEDIUM"}]}"""
+
+
+def _fact_index(packet: dict) -> dict:
+    """Packet facts -> {id: fact}. id 가 없으면 순번으로 만든다."""
+    out = {}
+    for i, f in enumerate(packet.get("facts") or []):
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or f.get("fact_id") or f"f{i + 1}")
+        out[fid] = f
+    return out
+
+
+def interpret(state: ResearchState) -> dict:
+    """여섯 축을 가로질러 해석을 만든다. **수치 대조가 아니라 반증 가능성으로
+    검증한다** - 수치 대조를 걸면 다시 숫자 나열로 수렴한다."""
+    sys.path.insert(0, str(_BASE / "contracts"))
+    from evidence.llm_client import extract_json
+    from insight import to_claims, validate_insights
+
+    packet = state.get("packet") or {}
+    facts = _fact_index(packet)
+    nodes = {k for k in ("technical", "fundamental", "regime", "geopolitical",
+                         "microstructure", "sentiment")
+             if isinstance(state.get(k), dict)}
+    revision = int(state.get("revisions") or 0)
+    if not facts or len(nodes) < 2:
+        # 가로지를 것이 없으면 해석도 없다. 억지로 만들면 재진술이 된다.
+        return {"insights": [], "insight_rejected": [],
+                "insight_note": f"Fact {len(facts)}건 / 분석가 {len(nodes)}인 - "
+                                f"교차 해석 불가"}
+
+    brief = {fid: {"claim": str(f.get("claim") or f.get("text") or "")[:180],
+                   "node": f.get("source_node") or f.get("node")}
+             for fid, f in list(facts.items())[:24]}
+    # 재해석이면 반박 내용을 같이 준다 - 그것이 이 순환의 이유다
+    chal = (packet.get("challenge") or {}) if revision else {}
+    user = json.dumps({
+        "facts": brief,
+        "analysts": sorted(nodes),
+        "thesis": str(packet.get("thesis", ""))[:600],
+        "skeptic_반박": {k: chal.get(k) for k in
+                        ("alternative_explanations", "weakest_claim",
+                         "what_would_overturn_it")} if chal else None,
+        "지시": ("반박을 반영해 해석을 다시 하라" if revision
+                else f"최대 {MAX_INSIGHTS}개"),
+    }, ensure_ascii=False)
+
+    try:
+        raw = _ollama_chat(_INTERPRET_SYSTEM, user)
+        parsed = json.loads(extract_json(raw))
+    except Exception as e:  # noqa: BLE001
+        # 해석 실패가 Packet 실패는 아니다. 다만 침묵하지 않는다.
+        return {"insights": [], "insight_rejected": [],
+                "insight_note": f"해석 미실행: {type(e).__name__}"}
+
+    ok, rejected = validate_insights(
+        (parsed.get("insights") or [])[:MAX_INSIGHTS],
+        fact_ids=set(facts), known_nodes=nodes)
+    return {
+        "insights": [i.model_dump() for i in ok],
+        # ▶ 거부를 조용히 버리지 않는다 - 왜 인사이트가 안 나오는지 보여야
+        #   다음에 프롬프트를 고칠 수 있다
+        "insight_rejected": rejected,
+        "insight_claims": to_claims(ok, symbol=str(state.get("symbol") or "")),
+        "insight_note": f"채택 {len(ok)} / 거부 {len(rejected)}"
+                        + (f" (재해석 {revision}회)" if revision else ""),
+    }
+
+
+def needs_revision(state: ResearchState) -> str:
+    """반박이 실질적인데 해석이 그것을 안 다뤘으면 되돌아간다.
+
+    ▶ **LangGraph 가 처음으로 값을 하는 자리다.** 지금까지 그래프는 선형
+      간선뿐이라 함수를 순서대로 부르는 것과 다를 게 없었다. 되돌아가는 경로가
+      있어야 심의(deliberation)가 되고, 심의가 있어야 판단이 깊어진다.
+
+    판정은 결정론이다. "다시 할까?" 를 LLM 에게 물으면 매번 다르게 답하고
+    재현이 깨진다.
+    """
+    if int(state.get("revisions") or 0) >= MAX_REVISIONS:
+        return "done"
+    packet = state.get("packet") or {}
+    conflicts = (packet.get("disagreements") or
+                 (packet.get("challenge") or {}).get("disagreements") or [])
+    if not conflicts:
+        return "done"
+    # 반박이 지목한 분석가를 해석이 실제로 가로질렀는가
+    flagged = set()
+    for c in conflicts:
+        if isinstance(c, dict):
+            flagged |= {str(x) for x in (c.get("nodes") or []) if x}
+    covered = set()
+    for ins in (state.get("insights") or []):
+        covered |= {str(n) for n in (ins.get("source_nodes") or [])}
+    return "revise" if (flagged and not (flagged & covered)) else "done"
+
+
+def bump_revision(state: ResearchState) -> dict:
+    """재해석 횟수를 올린다. **상한이 없으면 순환이 멈추지 않는다.**"""
+    return {"revisions": int(state.get("revisions") or 0) + 1}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(ResearchState)
@@ -950,6 +1087,8 @@ def build_pipeline():
     g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
     g.add_node("challenge_packet", challenge_packet)
+    g.add_node("interpret", interpret)
+    g.add_node("bump_revision", bump_revision)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
@@ -970,8 +1109,14 @@ def build_pipeline():
     g.add_edge("analyze_regime", "analyze_geopolitical")
     g.add_edge("analyze_geopolitical", "analyze_microstructure")
     g.add_edge("analyze_microstructure", "draft_packet")
-    g.add_edge("draft_packet", "challenge_packet")
-    g.add_edge("challenge_packet", END)
+    g.add_edge("draft_packet", "interpret")
+    # 해석 -> 반박 -> (필요하면) 재해석. **이 순환이 LangGraph 를 쓰는 이유다.**
+    # 지금까지 그래프는 선형 간선뿐이라 함수를 순서대로 부르는 것과 다를 게
+    # 없었다. 되돌아가는 경로가 있어야 심의가 되고, 심의가 있어야 판단이 깊어진다.
+    g.add_edge("interpret", "challenge_packet")
+    g.add_conditional_edges("challenge_packet", needs_revision,
+                            {"revise": "bump_revision", "done": END})
+    g.add_edge("bump_revision", "interpret")
     return g.compile()
 
 
@@ -1916,6 +2061,62 @@ def _check_data_quality_gate():
     assert i_gate < i_asm, "게이트가 Evidence 조립 뒤에 있다"
 
 
+def _check_revision_cycle_terminates():
+    """**순환이 반드시 끝나는가.** 무한 반복은 최악의 실패다 - 비용을 태우고
+    사람이 개입할 때까지 안 멈춘다.
+
+    그리고 되돌아가는 조건이 결정론인지 본다. "다시 할까?" 를 LLM 에게 물으면
+    매번 다르게 답하고 재현이 깨진다.
+    """
+    conflict = {"packet": {"disagreements": [{"nodes": ["technical", "regime"]}]}}
+
+    # 갈등이 있고 해석이 그 축을 안 다뤘으면 되돌아간다
+    st = dict(conflict, insights=[{"source_nodes": ["fundamental", "sentiment"]}])
+    assert needs_revision(st) == "revise", st
+
+    # 해석이 그 축을 다뤘으면 안 돌아간다 - 이미 답했는데 또 시키면 낭비다
+    st2 = dict(conflict, insights=[{"source_nodes": ["technical", "regime"]}])
+    assert needs_revision(st2) == "done", st2
+
+    # 갈등이 없으면 안 돌아간다
+    assert needs_revision({"packet": {"disagreements": []}}) == "done"
+
+    # ▶ 상한에 닿으면 **무조건** 끝난다. 갈등이 남아 있어도 끝낸다 -
+    #   해결 못 한 갈등은 Packet 에 남아 사람이 본다
+    st3 = dict(conflict, insights=[], revisions=MAX_REVISIONS)
+    assert needs_revision(st3) == "done", st3
+    assert bump_revision({"revisions": 0})["revisions"] == 1
+
+    # 실제로 유한한가 - 상한까지 돌리고 멈추는지 시뮬레이션
+    state = dict(conflict, insights=[{"source_nodes": ["x", "y"]}], revisions=0)
+    steps = 0
+    while needs_revision(state) == "revise":
+        state["revisions"] = bump_revision(state)["revisions"]
+        steps += 1
+        assert steps <= MAX_REVISIONS + 1, "순환이 안 멈춘다"
+    assert steps == MAX_REVISIONS, steps
+
+    # 그래프에 순환 간선이 실제로 있는가 (선형으로 되돌아가면 의미가 없다)
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    assert 'g.add_edge("bump_revision", "interpret")' in src, "순환 간선이 없다"
+    assert '"revise": "bump_revision"' in src, "조건부 되돌림이 없다"
+
+
+def _check_interpret_refuses_thin_input():
+    """가로지를 것이 없으면 해석을 만들지 않는다.
+
+    Fact 가 없거나 분석가가 1인이면 '교차 해석' 이 성립하지 않는다. 억지로
+    만들면 그 Fact 의 재진술이 되고, 재진술을 인사이트라 부르면 리포트가
+    길어지기만 한다.
+    """
+    r = interpret({"packet": {"facts": []}, "technical": {}, "regime": {}})
+    assert r["insights"] == [] and "불가" in r["insight_note"], r
+    # 분석가 1인
+    r2 = interpret({"packet": {"facts": [{"id": "f1", "claim": "x"}]},
+                    "technical": {}})
+    assert r2["insights"] == [], r2
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -1974,6 +2175,8 @@ if __name__ == "__main__":
     _check_occurrence_collection()
     _check_method_performance_readback()
     _check_data_quality_gate()
+    _check_revision_cycle_terminates()
+    _check_interpret_refuses_thin_input()
     _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()
