@@ -11,17 +11,18 @@
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-import sys
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from departments.notion_markdown import markdown_to_notion_blocks
 from reporting import notion_rich_text_chunks
+
+from departments.notion_markdown import markdown_to_notion_blocks
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -86,7 +87,7 @@ def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str
         if report_md:
             payload["children"] = markdown_to_notion_blocks(report_md)
         status, body = _post("pages", payload, token)
-    except Exception as e:  # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+    except Exception as e:  # noqa: BLE001 - Notion is a non-binding projection.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
     if status == 200:
         return {"ok": True, "url": body.get("url")}

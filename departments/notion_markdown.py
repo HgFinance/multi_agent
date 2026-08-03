@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _FENCE_RE = re.compile(r"^\s*```\s*([A-Za-z0-9_+-]*)\s*$")
 _HEADING_RE = re.compile(r"^\s*(#{1,3})\s+(.+?)\s*$")
 _UNORDERED_RE = re.compile(r"^\s*[-*]\s+(.*)$")
@@ -88,10 +87,8 @@ def _table_cells(line: str) -> list[str] | None:
     stripped = line.strip()
     if "|" not in stripped:
         return None
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
+    stripped = stripped.removeprefix("|")
+    stripped = stripped.removesuffix("|")
     cells = re.split(r"(?<!\\)\|", stripped)
     return [cell.replace("\\|", "|").strip() for cell in cells]
 
