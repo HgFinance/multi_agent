@@ -37,3 +37,22 @@ hermes --profile ceo-agent auth status openai-codex
 If Research, Risk, QA, or CEO dependencies fail, the adapter records a
 degraded result and preserves `HOLD / ESCALATE`. It does not convert a
 fallback into approval.
+
+## Risk/QA runtime evidence
+
+Risk and QA are loaded through isolated department adapters. This is required
+because both departments have local top-level modules such as `reporting.py`,
+while Risk also lazily imports its local `api/app.py`. The adapter temporarily
+binds the correct department import paths and Hermes profile for each call, then
+restores the process state.
+
+The CEO handoff keeps the following non-secret evidence for both departments:
+
+- LangGraph entered or not, pipeline status, trace/input hash, and replay journal metadata.
+- Executed, failed, and conditionally skipped employee personas.
+- Source/runtime Hermes profile and model, config-match status, skill count, memory count, and supervisor call status.
+- Deterministic verdict, reason codes, fallback node/error, and safe action.
+
+`DEGRADED`, `FAILED`, and `HALTED` evidence always wins over a superficial
+handler completion status. A failed Risk/QA node remains `HOLD`, `REJECT`, or
+`ESCALATE`; it is never promoted to approval by the paper adapter.

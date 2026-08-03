@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from orchestration.adapters.ceo import _parse_decision
-from orchestration.adapters.paper_pipeline import PaperPipelineAdapter
+from orchestration.adapters.paper_pipeline import (
+    PaperPipelineAdapter,
+    _default_qa_runner,
+    _default_risk_runner,
+    _department_summary,
+)
 from orchestration.workflows.manifest import load_workflow
 from orchestration.workflows.runner import execute_workflow
 
@@ -99,6 +104,37 @@ class PaperPipelineAdapterTest(unittest.TestCase):
                 '{"recommendation":"ALL_IN","confidence":1,'
                 '"rationale":"unsafe","escalate":false}'
             )
+
+
+    def test_risk_and_qa_runners_keep_local_modules_isolated(self) -> None:
+        risk = _default_risk_runner(Path.cwd())
+        qa = _default_qa_runner(Path.cwd())
+
+        risk_file = risk.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
+        qa_file = qa.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
+        self.assertIn("departments/03-risk/reporting.py", risk_file)
+        self.assertIn("departments/06-ai-qa-audit/reporting.py", qa_file)
+        self.assertIsNot(
+            risk.__paper_module__.__dict__["md_cell"],
+            qa.__paper_module__.__dict__["md_cell"],
+        )
+
+    def test_degraded_execution_evidence_cannot_be_promoted(self) -> None:
+        report = _department_summary(
+            "risk",
+            {
+                "status": "COMPLETED",
+                "verdict": "reject",
+                "execution_evidence": {
+                    "pipeline_status": "DEGRADED",
+                    "safe_action": "HOLD",
+                    "trace_id": "trace-test",
+                },
+            },
+        )
+        self.assertEqual(report["status"], "DEGRADED")
+        self.assertEqual(report["safe_action"], "HOLD")
+        self.assertTrue(report["langgraph"]["used"])
 
 
 if __name__ == "__main__":

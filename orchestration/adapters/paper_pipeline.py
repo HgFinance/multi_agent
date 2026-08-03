@@ -11,12 +11,14 @@ CEO receives a safe HOLD/ESCALATE case summary.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, MutableMapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
@@ -338,17 +340,53 @@ def _department_summary(department: str, raw: Mapping[str, object]) -> dict[str,
     status = str(raw.get("pipeline_status", raw.get("status", "COMPLETED"))).upper()
     if status not in {"COMPLETED", "DEGRADED", "FAILED", "HALTED"}:
         status = "COMPLETED"
+    agent_execution = raw.get("agent_execution")
+    hermes_runtime = raw.get("hermes_runtime")
+    execution_evidence = raw.get("execution_evidence")
+    if not isinstance(agent_execution, Mapping):
+        agent_execution = {
+            "executed": list(raw.get("employees_executed", []))
+            if isinstance(raw.get("employees_executed"), list)
+            else [],
+            "failed": list(raw.get("employees_failed", []))
+            if isinstance(raw.get("employees_failed"), list)
+            else [],
+            "not_executed": list(raw.get("employees_not_executed", []))
+            if isinstance(raw.get("employees_not_executed"), list)
+            else [],
+        }
+    if not isinstance(hermes_runtime, Mapping):
+        hermes_runtime = {}
+    if not isinstance(execution_evidence, Mapping):
+        execution_evidence = {}
+    evidence_status = str(execution_evidence.get("pipeline_status", "")).upper()
+    if evidence_status in {"DEGRADED", "FAILED", "HALTED"}:
+        status = evidence_status
+    safe_action = raw.get("safe_action") or execution_evidence.get("safe_action")
+    trace_id = raw.get("trace_id") or execution_evidence.get("trace_id")
     return {
         "department": department,
         "status": status,
         "verdict": raw.get("verdict", raw.get("candidate_verdict")),
-        "safe_action": raw.get("safe_action"),
+        "safe_action": safe_action,
         "binding": False,
-        "employees": raw.get("employees_executed", raw.get("agent_execution", {})),
+        "employees": dict(agent_execution),
+        "agent_execution": dict(agent_execution),
+        "execution_evidence": dict(execution_evidence),
+        "langgraph": {
+            "used": bool(raw.get("pipeline_version") or execution_evidence),
+            "pipeline_version": raw.get("pipeline_version"),
+            "trace_id": trace_id,
+        },
+        "decision_origin": raw.get("decision_origin"),
+        "decision_status": raw.get("decision_status"),
+        "input_hash": raw.get("input_hash"),
+        "reason_codes": raw.get("reason_codes", []),
         "fallbacks": raw.get("fallbacks", []),
-        "model": (raw.get("hermes_runtime") or {}).get("model")
-        if isinstance(raw.get("hermes_runtime"), Mapping)
-        else None,
+        "hermes_runtime": dict(hermes_runtime),
+        "model": hermes_runtime.get("model"),
+        "error": raw.get("error"),
+        "error_message": raw.get("error_message"),
     }
 
 
@@ -482,9 +520,42 @@ def _load_script(repo_root: Path, name: str, relative_path: str) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {relative_path}")
+    department_root = path.parent
+    import_paths = _department_import_paths(repo_root, department_root)
+
+    # Risk and QA both intentionally use small, local top-level modules named
+    # ``reporting`` (and Risk lazily imports ``app``).  Loading both scripts
+    # with one global sys.path otherwise makes the second department import the
+    # first department's module.  Evict only department-local modules while
+    # loading and keep the module references on the runner for call-time
+    # isolation.  Shared packages under apps/src are never evicted.
+    saved_modules = _evict_department_modules(repo_root)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    previous_path = sys.path[:]
+    sys.path[:0] = import_paths
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        loaded_local_modules = {
+            module_name: loaded
+            for module_name, loaded in list(sys.modules.items())
+            if _is_department_module(repo_root, loaded)
+            and module_name != name
+        }
+        sys.path[:] = previous_path
+        for module_name in list(sys.modules):
+            if module_name == name:
+                continue
+            loaded = sys.modules[module_name]
+            if _is_department_module(repo_root, loaded):
+                sys.modules.pop(module_name, None)
+        sys.modules.update(saved_modules)
+
+    module.__paper_repo_root__ = repo_root
+    module.__paper_import_paths__ = import_paths
+    module.__paper_local_modules__ = loaded_local_modules
+    module.__paper_hermes_profile__ = _hermes_profile_for_path(relative_path)
     return module
 
 
@@ -493,11 +564,97 @@ def _default_research_runner(repo_root: Path) -> DepartmentRunner:
 
 
 def _default_risk_runner(repo_root: Path) -> DepartmentRunner:
-    return _load_script(repo_root, "paper_risk_scripts", "departments/03-risk/scripts.py").run_risk_department
+    module = _load_script(repo_root, "paper_risk_scripts", "departments/03-risk/scripts.py")
+    return _bind_department_runner(module, "run_risk_department")
 
 
 def _default_qa_runner(repo_root: Path) -> DepartmentRunner:
-    return _load_script(repo_root, "paper_qa_scripts", "departments/06-ai-qa-audit/scripts.py").run_qa_department
+    module = _load_script(repo_root, "paper_qa_scripts", "departments/06-ai-qa-audit/scripts.py")
+    return _bind_department_runner(module, "run_qa_department")
+
+
+def _bind_department_runner(module: Any, function_name: str) -> DepartmentRunner:
+    function = getattr(module, function_name)
+
+    @wraps(function)
+    def isolated_runner(*args: object, **kwargs: object) -> Mapping[str, object]:
+        with _activate_department_runtime(module):
+            result = function(*args, **kwargs)
+        enriched = dict(result)
+        enriched.setdefault("pipeline_version", module.__dict__.get("PIPELINE_VERSION"))
+        enriched.setdefault("langgraph_used", True)
+        return enriched
+
+    isolated_runner.__paper_module__ = module
+    return isolated_runner
+
+
+@contextmanager
+def _activate_department_runtime(module: Any):
+    repo_root = Path(module.__paper_repo_root__)
+    saved_modules = _evict_department_modules(repo_root)
+    for module_name, local_module in module.__paper_local_modules__.items():
+        sys.modules[module_name] = local_module
+    previous_path = sys.path[:]
+    sys.path[:0] = list(module.__paper_import_paths__)
+    previous_hermes_home = os.environ.get("HERMES_HOME")
+    hermes_profile = module.__paper_hermes_profile__
+    os.environ["HERMES_HOME"] = str(Path.home() / ".hermes" / "profiles" / hermes_profile)
+    try:
+        yield
+    finally:
+        if previous_hermes_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = previous_hermes_home
+        sys.path[:] = previous_path
+        for module_name in list(sys.modules):
+            if module_name == module.__name__:
+                continue
+            loaded = sys.modules[module_name]
+            if _is_department_module(repo_root, loaded):
+                sys.modules.pop(module_name, None)
+        sys.modules.update(saved_modules)
+
+
+def _department_import_paths(repo_root: Path, department_root: Path) -> list[str]:
+    candidates = (
+        department_root,
+        department_root / "engine",
+        department_root / "api",
+        department_root / "evidence",
+        department_root.parent / "02-trading" / "contracts",
+        repo_root / "skills" / "agentic-rag",
+    )
+    return [str(path) for path in candidates if path.is_dir()]
+
+
+def _hermes_profile_for_path(relative_path: str) -> str:
+    if "03-risk" in relative_path:
+        return "risk-management"
+    if "06-ai-qa-audit" in relative_path:
+        return "qa-department"
+    return "default"
+
+
+def _evict_department_modules(repo_root: Path) -> dict[str, Any]:
+    saved: dict[str, Any] = {}
+    for module_name, loaded in list(sys.modules.items()):
+        if _is_department_module(repo_root, loaded):
+            saved[module_name] = loaded
+            sys.modules.pop(module_name, None)
+    return saved
+
+
+def _is_department_module(repo_root: Path, loaded: object) -> bool:
+    file_name = getattr(loaded, "__file__", None)
+    if not file_name:
+        return False
+    try:
+        file_path = Path(file_name).resolve()
+        return file_path.is_relative_to((repo_root / "departments").resolve())
+    except (OSError, ValueError):
+        return False
 
 
 @contextmanager
@@ -531,4 +688,7 @@ def _disable_research_persistence(runner: DepartmentRunner):
 
 
 def _module_from_runner(runner: DepartmentRunner) -> Any:
+    module = getattr(runner, "__paper_module__", None)
+    if module is not None:
+        return module
     return __import__(runner.__module__)

@@ -149,6 +149,59 @@ class PaperCaseReport:
             return f"{runtime.get('profile', 'ceo-agent')} / {runtime.get('model', 'unknown')} / {runtime.get('call_status', 'unknown')}"
         return str(decision.get("binding_decision", "not_available"))
 
+    def _risk_qa_execution(self) -> str:
+        reports = self.metadata.get("paper_domain_reports")
+        if not isinstance(reports, Mapping):
+            return "실행 증거가 CEO handoff에 전달되지 않았습니다."
+
+        rows: list[str] = []
+        for department, label in (("risk", "Risk"), ("qa", "QA")):
+            report = reports.get(department)
+            if not isinstance(report, Mapping):
+                rows.append(f"| {label} | NOT_REPORTED | — | — | — |")
+                continue
+            agents = report.get("agent_execution", report.get("employees", {}))
+            executed = []
+            failed = []
+            not_executed = []
+            if isinstance(agents, Mapping):
+                executed = [str(item) for item in agents.get("executed", [])]
+                failed = [str(item) for item in agents.get("failed", [])]
+                not_executed = [str(item) for item in agents.get("not_executed", [])]
+            langgraph = report.get("langgraph")
+            langgraph_used = (
+                str(langgraph.get("used", False))
+                if isinstance(langgraph, Mapping)
+                else "False"
+            )
+            hermes = report.get("hermes_runtime")
+            hermes_status = "not_observed"
+            hermes_model = "—"
+            if isinstance(hermes, Mapping):
+                hermes_status = str(hermes.get("call_status", "not_observed"))
+                hermes_model = str(hermes.get("model") or "—")
+            detail = report.get("error_message") or report.get("fallbacks") or "—"
+            rows.append(
+                "| {label} | {status} | LangGraph={langgraph}; "
+                "executed={executed}; failed={failed}; not_executed={not_executed} | "
+                "{model} / {hermes_status} | {detail} |".format(
+                    label=label,
+                    status=report.get("status", "UNKNOWN"),
+                    langgraph=langgraph_used,
+                    executed=", ".join(executed) or "—",
+                    failed=", ".join(failed) or "—",
+                    not_executed=", ".join(not_executed) or "—",
+                    model=hermes_model,
+                    hermes_status=hermes_status,
+                    detail=str(detail).replace("|", "\\|"),
+                )
+            )
+        return (
+            "| 부서 | 상태 | 직원/LangGraph 실행 | Hermes 모델/호출 | 폴백·오류 |\n"
+            "|---|---|---|---|---|\n"
+            + "\n".join(rows)
+        )
+
     def to_markdown(self) -> str:
         forecast_rows = "\n".join(
             f"| T+5 {label} | {value:.2%} |"
@@ -232,6 +285,10 @@ Prediction action: `HOLD` — 실제 Snapshot과 근거가 없으므로 진입 �
 `PAPER_SMOKE_PASS`는 프로필 호출과 계약 경계만 통과했다는 뜻이다.
 `PAPER_DOMAIN_PASS`는 Research/Risk/QA 부서 진입점과 CEO 종합 adapter가
 실행됐다는 뜻이다. 어느 경우에도 Broker 제출, 체결 확정, Ledger posting을 의미하지 않는다.
+
+## 4. Risk / QA 실행 증거
+
+{self._risk_qa_execution()}
 
 ## 5. Production adapter 승인 기준
 
