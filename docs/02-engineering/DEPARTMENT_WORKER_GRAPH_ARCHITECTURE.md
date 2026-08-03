@@ -8,6 +8,10 @@
 - 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama `qwen3:8b` (Risk/QA 현재 고정)
 - 결정론적 엔진: Risk Gate, Evidence QA Gate, PIT·인용·권한·상태 전이의 유일한 바인딩 소유자
 
+![0–7번 부서 전체 파이프라인 아키텍처](assets/whole_pipeline_0_7.png)
+
+원본 편집 가능한 다이어그램은 [`whole_pipeline_0_7.svg`](assets/whole_pipeline_0_7.svg)이며, PNG는 [`render_whole_pipeline.py`](assets/render_whole_pipeline.py)로 재생성한다.
+
 ## 전체 파이프라인
 
 ```text
