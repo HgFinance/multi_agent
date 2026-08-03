@@ -1,0 +1,65 @@
+name: agent-evolution
+version: agent-evolution-v1
+kind: shared-service
+description: 기존 Agent Profile 개선·검증·승인·Rollback 흐름
+boundary_rules:
+  - 프롬프트 한 줄 변경도 Profile Version과 Rollback Target을 가진다.
+  - Champion을 보유한 HR이 자기 개정안을 단독 승인하지 않는다.
+  - 실패한 개정은 Production에 반영하지 않고 이전 Champion을 유지한다.
+steps:
+  - id: hr-improvement-signal
+    sequence: 1
+    department: hr-department
+    owner: hr
+    task: 운영 Queue·SLA·비용·품질 신호에서 개선 후보 생성
+    input_contract: agent_ops_signal
+    output_contract: improvement_candidate
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: NO_CHANGE
+    forbidden_actions: [production_deploy]
+  - id: hr-profile-revision
+    sequence: 2
+    department: hr-department
+    owner: hr
+    task: Mission·Skill·Tool Allowlist·금지 권한 변경안을 Profile Version으로 설계
+    input_contract: improvement_candidate
+    output_contract: profile_revision
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: NO_CHANGE
+    forbidden_actions: [self_approval, production_deploy]
+  - id: qa-revision-review
+    sequence: 3
+    department: qa-department
+    owner: qa
+    task: Champion 대비 Golden/Adversarial Eval과 권한 경계 검증
+    input_contract: profile_revision
+    output_contract: revision_qa_assessment
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: REJECT_REVISION
+    forbidden_actions: [production_deploy]
+  - id: ceo-revision-approval
+    sequence: 4
+    department: ceo-agent
+    owner: ceo
+    task: 검증된 개정안의 변경 승인 여부 결정
+    input_contract: revision_qa_assessment
+    output_contract: revision_approval
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: NO_APPROVAL
+    forbidden_actions: [production_deploy]
+  - id: hr-shadow-rollback
+    sequence: 5
+    department: hr-department
+    owner: hr
+    task: Shadow 검증 후 승인된 Version을 배포하거나 이전 Champion으로 Rollback
+    input_contract: revision_approval
+    output_contract: profile_lifecycle_result
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: ROLLBACK
+    forbidden_actions: [unlogged_deploy]
+
