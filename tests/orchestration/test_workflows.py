@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from orchestration.adapters import build_paper_e2e_handlers
 from orchestration.workflows.contracts import SAFE_FAILURE_ACTIONS
 from orchestration.workflows.manifest import load_workflow, load_workflows
 from orchestration.workflows.routing import route_event
@@ -106,6 +107,39 @@ class EventRoutingContractTest(unittest.TestCase):
         unknown = route_event("not-registered")
         self.assertEqual(unknown.calls, ())
         self.assertEqual(unknown.action, "ENTRY_BLOCKED")
+
+
+class PaperE2EAdapterTest(unittest.TestCase):
+    def test_every_realtime_boundary_has_a_smoke_handler(self) -> None:
+        class FakeSmokeAdapter:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str]] = []
+
+            def invoke(self, step_id, input_contract, output_contract, context):
+                self.calls.append((step_id, input_contract, output_contract))
+                self.assert_paper(context)
+                return f"fake_smoke={step_id}"
+
+            @staticmethod
+            def assert_paper(context) -> None:
+                self_case = context["case_request"]
+                if self_case.get("stage") != "paper":
+                    raise AssertionError("paper stage required")
+
+        fake = FakeSmokeAdapter()
+        handlers = build_paper_e2e_handlers(Path.cwd(), smoke_adapter=fake)
+        spec = load_workflow("investment-case")
+        run = execute_workflow(
+            spec,
+            mode="live",
+            handlers=handlers,
+            context={"case_request": {"symbol": "AAPL", "stage": "paper"}},
+            run_id="paper-e2e-test",
+        )
+        self.assertEqual(run.status, "COMPLETED")
+        self.assertEqual(len(fake.calls), 7)
+        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps))
+
 
 
 if __name__ == "__main__":

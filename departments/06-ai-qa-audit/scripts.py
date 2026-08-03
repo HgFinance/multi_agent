@@ -25,6 +25,18 @@ grounded 서술만 하는 LLM이다** (research/risk 패턴을 QA 자신에게 �
 model-risk-agent/internal-audit-agent는 뺐다 - config.yaml의 not_started 항목대로 대응 결정론
 서비스가 아직 없다 (research가 나머지 페르소나를 같은 이유로 뺀 것과 동일).
 
+agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer는 실제 결정론
+백엔드(audit/ops_health_monitor.py, audit/incident_timeline.py, audit/tool_permission_check.py)가
+있지만 run_qa_department()의 QAState(artifact/evidence_store)와 공유 신호가 없어(개별 Artifact
+검토가 아니라 부서 전체 Ops/Trace를 본다) 같은 그래프에 조건부로 억지로 끼워 넣지 않는다 -
+"트리거할 실제 신호가 없는 노드를 조건부로 연결하면 날조한 기준이 된다" 원칙. 대신 각자의 실제
+신호로만 조건부 라우팅하는 별도 소형 파이프라인 2개를 둔다:
+  run_ops_incident_review     agent-ops-monitor(결정론 OpsHealthMonitor.evaluate) -> Incident가
+                               실제로 뜬 경우에만(fabricated 아님, OpsAssessment.incident 그 자체)
+                               incident-postmortem-agent가 FACT/INFERENCE를 Timeline에 남긴다.
+  run_tool_permission_review  tool-permission-security-reviewer(결정론 check_tool_permission) ->
+                               DENIED일 때만 위반 서술을 LLM이 덧붙인다.
+
 원칙 (전 노드 공통, CLAUDE.md):
   - 바인딩 decision은 EvidenceQaEngine.check_artifact 결과에서만 온다. 워커 LLM도 qa-audit-supervisor도
     그 결과를 절대 못 바꾸고 서술(narrative)만 만든다 - config.yaml의 evidence-qa-agent 페르소나 자체가
@@ -68,7 +80,7 @@ _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 _AGENTIC_RAG_DIR = _BASE.parent.parent / "skills" / "agentic-rag"
-for _p in (_BASE / "evidence", _AGENTIC_RAG_DIR):
+for _p in (_BASE / "evidence", _BASE / "audit", _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
 from reporting import (
@@ -933,6 +945,267 @@ def run_qa_department(
     return result
 
 
+# ── Ops Health -> Incident Postmortem (agent-ops-monitor, incident-postmortem-agent) ──
+# QAState의 artifact/evidence_store와 무관한 별도 소형 파이프라인 - 근거는 위 모듈 docstring.
+class OpsIncidentState(TypedDict, total=False):
+    metrics: dict            # AgentHealthMetrics 필드 (scope/window/*_count/p95_latency_ms/cost_usd)
+    thresholds: dict         # OpsThresholds 필드
+    trace_id: str | None
+    ops_assessment: dict     # agent-ops-monitor 결정론 결과 (OpsAssessment)
+    incident_events: list    # IncidentTimeline에 실제로 남긴 FACT/INFERENCE 행
+    postmortem_narrative: str
+    fallbacks: list[dict]
+
+
+def _event_dict(event) -> dict:
+    return {"incident_event_id": str(event.incident_event_id), "source": event.source,
+            "entry_type": event.entry_type.value, "summary": event.summary, "evidence": event.evidence}
+
+
+def _fallback_ops_assessment(state: OpsIncidentState, exc: Exception) -> dict:
+    # 모니터 자체가 죽으면 "정상"으로 침묵하지 않는다 - 판정 불가를 SEV2 Incident로 격상한다
+    # (원칙 9: 위험한 기능은 실패 시 확대가 아니라 차단 방향으로 - risk_engine.py와 동일 정신).
+    now = datetime.now(timezone.utc)
+    return {"ops_assessment": {
+        "scope": (state.get("metrics") or {}).get("scope", "unknown"), "status": "critical",
+        "breaches": ["monitor_pipeline_failure"],
+        "incident": {
+            "incident_id": str(uuid4()),
+            "incident_code": f"OPS-MONITOR-FAILURE-{now.strftime('%Y%m%dT%H%M%S')}",
+            "severity": "SEV2", "title": f"agent-ops-monitor 파이프라인 실패 ({type(exc).__name__})",
+            "impact": {"error": type(exc).__name__}, "started_at": now.isoformat(), "detected_at": now.isoformat(),
+        },
+    }, "fallbacks": [_fallback("evaluate_ops_health", exc)]}
+
+
+def evaluate_ops_health(state: OpsIncidentState) -> dict:
+    from decimal import Decimal
+
+    from ops_health_monitor import AgentHealthMetrics, OpsHealthMonitor, OpsThresholds
+
+    m, t = state["metrics"], state["thresholds"]
+    metrics = AgentHealthMetrics(
+        scope=m["scope"], window_start=datetime.fromisoformat(m["window_start"]),
+        window_end=datetime.fromisoformat(m["window_end"]), request_count=int(m["request_count"]),
+        error_count=int(m["error_count"]), p95_latency_ms=Decimal(str(m["p95_latency_ms"])),
+        cost_usd=Decimal(str(m["cost_usd"])),
+    )
+    thresholds = OpsThresholds(
+        max_error_rate=Decimal(str(t["max_error_rate"])), critical_error_rate=Decimal(str(t["critical_error_rate"])),
+        max_p95_latency_ms=Decimal(str(t["max_p95_latency_ms"])),
+        critical_p95_latency_ms=Decimal(str(t["critical_p95_latency_ms"])),
+        max_cost_usd_per_window=Decimal(str(t["max_cost_usd_per_window"])),
+    )
+    trace_id = state.get("trace_id")
+    assessment = OpsHealthMonitor().evaluate(metrics, thresholds, UUID(trace_id) if trace_id else None)
+    incident = assessment.incident
+    return {"ops_assessment": {
+        "scope": assessment.scope, "status": assessment.status.value,
+        "breaches": [b.value for b in assessment.breaches],
+        "incident": None if incident is None else {
+            "incident_id": str(incident.incident_id), "incident_code": incident.incident_code,
+            "severity": incident.severity.value, "title": incident.title, "impact": incident.impact,
+            "started_at": incident.started_at.isoformat(), "detected_at": incident.detected_at.isoformat(),
+        },
+    }}
+
+
+def _ops_incident_detected(state: OpsIncidentState) -> bool:
+    # 실제 신호(OpsAssessment.incident)로만 라우팅한다 - 날조한 조건이 아니다.
+    return (state.get("ops_assessment") or {}).get("incident") is not None
+
+
+def record_incident_fact(state: OpsIncidentState) -> dict:
+    from incident_timeline import IncidentEntryType, IncidentTimeline
+
+    incident = state["ops_assessment"]["incident"]
+    event = IncidentTimeline().add_event(
+        UUID(incident["incident_id"]), "agent-ops-monitor", IncidentEntryType.FACT,
+        incident["title"], datetime.fromisoformat(incident["detected_at"]), "agent-ops-monitor",
+        evidence=incident["impact"],
+    )
+    return {"incident_events": [_event_dict(event)]}
+
+
+def draft_incident_postmortem(state: OpsIncidentState) -> dict:
+    from incident_timeline import IncidentEntryType, IncidentTimeline
+
+    incident = state["ops_assessment"]["incident"]
+    prompt = f"""{_persona('incident-postmortem-agent')}
+
+아래는 agent-ops-monitor가 결정론적으로 감지한 Incident FACT다. 이미 확인된 사실 밖의 내용을
+지어내지 말고, 원인 추정(INFERENCE)이라는 것을 분명히 밝히며 한국어로 1-2문장만 작성하라:
+{json.dumps(incident, ensure_ascii=False, indent=1)}"""
+    narrative = _call_internal_llm(prompt)
+    event = IncidentTimeline().add_event(
+        UUID(incident["incident_id"]), "incident-postmortem-agent", IncidentEntryType.INFERENCE,
+        narrative, datetime.fromisoformat(incident["detected_at"]), "incident-postmortem-agent",
+    )
+    return {"postmortem_narrative": narrative, "incident_events": state.get("incident_events", []) + [_event_dict(event)]}
+
+
+def build_ops_incident_pipeline():
+    g = StateGraph(OpsIncidentState)
+    g.add_node("evaluate_ops_health", evaluate_ops_health)
+    g.add_node("record_incident_fact", record_incident_fact)
+    g.add_node("draft_incident_postmortem", draft_incident_postmortem)
+    g.set_entry_point("evaluate_ops_health")
+    g.add_conditional_edges("evaluate_ops_health", _ops_incident_detected,
+                             {True: "record_incident_fact", False: END})
+    g.add_edge("record_incident_fact", "draft_incident_postmortem")
+    g.add_edge("draft_incident_postmortem", END)
+    return g.compile()
+
+
+def run_ops_incident_review(metrics: dict, thresholds: dict, trace_id: str | None = None) -> dict:
+    out = build_ops_incident_pipeline().invoke({"metrics": metrics, "thresholds": thresholds, "trace_id": trace_id})
+    return {"ops_assessment": out["ops_assessment"], "incident_events": out.get("incident_events", []),
+            "postmortem_narrative": out.get("postmortem_narrative"), "fallbacks": out.get("fallbacks", [])}
+
+
+_RAW_EVALUATE_OPS_HEALTH = evaluate_ops_health
+_RAW_RECORD_INCIDENT_FACT = record_incident_fact
+_RAW_DRAFT_INCIDENT_POSTMORTEM = draft_incident_postmortem
+
+
+def evaluate_ops_health(state: OpsIncidentState) -> dict:
+    try:
+        return _RAW_EVALUATE_OPS_HEALTH(state)
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
+        return _fallback_ops_assessment(state, exc)
+
+
+def record_incident_fact(state: OpsIncidentState) -> dict:
+    try:
+        return _RAW_RECORD_INCIDENT_FACT(state)
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
+        return {"incident_events": [], "fallbacks": [_fallback("record_incident_fact", exc)]}
+
+
+def draft_incident_postmortem(state: OpsIncidentState) -> dict:
+    try:
+        return _RAW_DRAFT_INCIDENT_POSTMORTEM(state)
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
+        return {"postmortem_narrative": _fallback_narrative("Incident Postmortem", exc),
+                "incident_events": state.get("incident_events", []),
+                "fallbacks": [_fallback("draft_incident_postmortem", exc)]}
+
+
+def _check_ops_incident_conditional():
+    # 정상 Metrics -> Incident 없음, Timeline/LLM 둘 다 안 불림. Breach Metrics -> 실제
+    # OpsAssessment.incident를 그대로 물려받아 FACT/INFERENCE가 남는지 확인한다.
+    global _call_internal_llm
+    orig = _call_internal_llm
+    _call_internal_llm = lambda prompt: "지연 원인은 market-api 응답 지연으로 추정됨(확정 아님)"
+    now = datetime.now(timezone.utc)
+    healthy_metrics = {"scope": "research-department", "window_start": now.isoformat(), "window_end": now.isoformat(),
+                        "request_count": 1000, "error_count": 5, "p95_latency_ms": "800", "cost_usd": "2.5"}
+    breach_metrics = {**healthy_metrics, "error_count": 150}
+    thresholds = {"max_error_rate": "0.02", "critical_error_rate": "0.10", "max_p95_latency_ms": "2000",
+                  "critical_p95_latency_ms": "5000", "max_cost_usd_per_window": "10"}
+    try:
+        healthy = run_ops_incident_review(healthy_metrics, thresholds)
+        assert healthy["ops_assessment"]["status"] == "healthy"
+        assert healthy["ops_assessment"]["incident"] is None
+        assert healthy["incident_events"] == []
+
+        breached = run_ops_incident_review(breach_metrics, thresholds)
+        assert breached["ops_assessment"]["incident"] is not None
+        assert [e["entry_type"] for e in breached["incident_events"]] == ["FACT", "INFERENCE"]
+        assert breached["postmortem_narrative"]
+    finally:
+        _call_internal_llm = orig
+    print("  Ops Health -> Incident 조건부 연결  OK")
+
+
+# ── Tool Permission Security Review (tool-permission-security-reviewer) ─────
+class ToolPermissionState(TypedDict, total=False):
+    policy: dict           # AgentToolPolicy 필드 (agent_id/profile_version_id/allowed_tools)
+    tool_name: str
+    permission_check: dict  # {"result": "ALLOWED"|"DENIED", "reason": str}
+    violation_narrative: str
+    fallbacks: list[dict]
+
+
+def check_tool_permission_node(state: ToolPermissionState) -> dict:
+    from tool_permission_check import AgentToolPolicy, check_tool_permission
+
+    p = state["policy"]
+    policy = AgentToolPolicy(agent_id=UUID(p["agent_id"]), profile_version_id=UUID(p["profile_version_id"]),
+                              allowed_tools=frozenset(p["allowed_tools"]))
+    result = check_tool_permission(policy, state["tool_name"])
+    return {"permission_check": {"result": result.result.value, "reason": result.reason}}
+
+
+def _permission_denied(state: ToolPermissionState) -> bool:
+    return (state.get("permission_check") or {}).get("result") == "DENIED"
+
+
+def narrate_permission_violation(state: ToolPermissionState) -> dict:
+    prompt = f"""{_persona('tool-permission-security-reviewer')}
+
+아래는 결정론적 Tool Allowlist 판정 결과다(DENIED). 새 판정을 내리지 말고, 위반 사실과 왜
+Escalation이 필요한지만 한국어 1-2문장으로 서술하라:
+{json.dumps({"tool_name": state["tool_name"], **state["permission_check"]}, ensure_ascii=False, indent=1)}"""
+    return {"violation_narrative": _call_internal_llm(prompt)}
+
+
+def build_tool_permission_pipeline():
+    g = StateGraph(ToolPermissionState)
+    g.add_node("check_tool_permission_node", check_tool_permission_node)
+    g.add_node("narrate_permission_violation", narrate_permission_violation)
+    g.set_entry_point("check_tool_permission_node")
+    g.add_conditional_edges("check_tool_permission_node", _permission_denied,
+                             {True: "narrate_permission_violation", False: END})
+    g.add_edge("narrate_permission_violation", END)
+    return g.compile()
+
+
+def run_tool_permission_review(policy: dict, tool_name: str) -> dict:
+    out = build_tool_permission_pipeline().invoke({"policy": policy, "tool_name": tool_name})
+    return {"permission_check": out["permission_check"], "violation_narrative": out.get("violation_narrative"),
+            "fallbacks": out.get("fallbacks", [])}
+
+
+_RAW_CHECK_TOOL_PERMISSION_NODE = check_tool_permission_node
+_RAW_NARRATE_PERMISSION_VIOLATION = narrate_permission_violation
+
+
+def check_tool_permission_node(state: ToolPermissionState) -> dict:
+    try:
+        return _RAW_CHECK_TOOL_PERMISSION_NODE(state)
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary (애매하면 거부, tool_permission_check.py와 동일 원칙)
+        return {"permission_check": {"result": "DENIED",
+                                      "reason": f"판정 파이프라인 실패로 안전하게 거부 ({type(exc).__name__})"},
+                "fallbacks": [_fallback("check_tool_permission", exc)]}
+
+
+def narrate_permission_violation(state: ToolPermissionState) -> dict:
+    try:
+        return _RAW_NARRATE_PERMISSION_VIOLATION(state)
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
+        return {"violation_narrative": _fallback_narrative("Tool Permission Security Reviewer", exc),
+                "fallbacks": [_fallback("narrate_permission_violation", exc)]}
+
+
+def _check_tool_permission_conditional():
+    global _call_internal_llm
+    orig = _call_internal_llm
+    _call_internal_llm = lambda prompt: "Allowlist 밖 Tool 호출 - 즉시 Escalation 필요"
+    policy = {"agent_id": str(uuid4()), "profile_version_id": str(uuid4()), "allowed_tools": ["market-api"]}
+    try:
+        allowed = run_tool_permission_review(policy, "market-api")
+        assert allowed["permission_check"]["result"] == "ALLOWED"
+        assert allowed["violation_narrative"] is None
+
+        denied = run_tool_permission_review(policy, "oms.submit")
+        assert denied["permission_check"]["result"] == "DENIED"
+        assert denied["violation_narrative"]
+    finally:
+        _call_internal_llm = orig
+    print("  Tool Permission 조건부 연결        OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -978,4 +1251,6 @@ if __name__ == "__main__":
     _check_hallucination_review_conditional()
     _check_supervisor_guard()
     _check_notion_report_node()
-    print("본부 파이프라인 5개 영역 통과. 실행은 --run (내부 Ollama·Hermes·OPENAI_API_KEY 필요)")
+    _check_ops_incident_conditional()
+    _check_tool_permission_conditional()
+    print("본부 파이프라인 7개 영역 통과. 실행은 --run (내부 Ollama·Hermes·OPENAI_API_KEY 필요)")

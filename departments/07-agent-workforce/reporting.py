@@ -2,7 +2,8 @@
 
 담당: 영주 (Agent Workforce 인사팀)
 근거: departments/03-risk/reporting.py, departments/06-ai-qa-audit/reporting.py와 같은
-      부서 로컬 패턴 - Risk/QA 원안 그대로, verdict/check_results 자리만 Scorecard 계약으로 바꿨다.
+      부서 로컬 패턴 - Risk/QA 원안 그대로, verdict/check_results 자리만 F19 Candidate
+      계약(scripts.py v2, 2026-08-03)으로 바꿨다.
 
 이 헬퍼는 이 부서에만 쓴다(공유하지 않는다).
 """
@@ -43,14 +44,13 @@ def langsmith_handoff(trace_id: str) -> dict[str, Any]:
 
 
 def evaluation_metrics(out: dict[str, Any], report_markdown: str = "") -> dict[str, Any]:
-    """Scorecard 계약 기준 지표 - cost/capacity 존재 여부와 budget 상태를 센다."""
+    """F19 Candidate 계약 기준 지표 - QA/CEO 게이트 통과 여부와 업로드 결과를 센다."""
 
     notion = out.get("notion_upload") or {}
-    cost = out.get("cost")
     return {
-        "has_capacity_snapshot": out.get("capacity") is not None,
-        "has_cost_snapshot": cost is not None,
-        "case_count": (cost or {}).get("case_count"),
+        "status": out.get("status"),
+        "qa_verified": out.get("qa_verified"),
+        "ceo_approved": out.get("ceo_approved"),
         "notion_upload_ok": notion.get("ok") if notion else None,
         "report_markdown_chars": len(report_markdown),
         "langsmith_enabled": bool((out.get("observability") or {}).get("langsmith", {}).get("enabled")),

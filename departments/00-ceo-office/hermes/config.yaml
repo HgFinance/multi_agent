@@ -6,8 +6,9 @@
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5, 8, 19.5(CEO Chief-of-Staff 자동화)
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
@@ -42,13 +43,13 @@ implementation:
     - "F23 Daily Report (CEO 절반) — departments/00-ceo-office/src/reporting/daily_report.py. 본부별
        공식 Snapshot ID를 governance.report_runs 행으로 조립. 필수 Section(portfolio/risk) 누락 시
        FAILED, 선택 Section(research/execution/strategy/qa) 없음은 정상 진행. content_hash로 동일
-       구성 재요청 시 중복 삽입 방지. Repository는 인터페이스+In-Memory뿐, asyncpg 배선은 미착수.
-       회계 절반(전략별 PnL·Drawdown 수치 계산)은
+       구성 재요청 시 중복 삽입 방지. Repository는 인터페이스+In-Memory와 Postgres 구현 둘 다 있다
+       (아래 psycopg2 구현 항목 참고). 회계 절반(전략별 PnL·Drawdown 수치 계산)은
        departments/05-accounting-portfolio/reporting/daily_report.py가 별도로 완료"
     - "F24 Notification — departments/00-ceo-office/src/notification/notification.py. 심각도->채널
        결정론적 매핑, dedup_key(fund+event+scope) 기반 억제, CRITICAL은 절대 억제하지 않음, 심각도
-       불명(None/미지 값)은 CRITICAL로 승격(fail-safe). Repository는 인터페이스+In-Memory뿐,
-       asyncpg 배선은 미착수"
+       불명(None/미지 값)은 CRITICAL로 승격(fail-safe). Repository는 인터페이스+In-Memory와
+       Postgres 구현 둘 다 있다(아래 psycopg2 구현 항목 참고)"
     - "MandateVersionRepository의 psycopg2 구현 —
        departments/00-ceo-office/src/mandate/postgres_repository.py. asyncpg가 아니라 psycopg2다
        (audit/repository.py 컨벤션과 동일 이유: 호출자 scripts.py가 동기). 조회 4개 메서드
@@ -56,12 +57,21 @@ implementation:
        Supabase DB에 연결해 존재하지 않는 mandate_id로 검증 통과(governance.mandates 부모 행 없이도
        안전). tests/schema/supabase_governance_test_fixture.sql(TEST ONLY)로 accounting.funds
        테스트 Fund도 실제로 삽입 확인함"
+    - "ReportRunRepository/NotificationRepository의 psycopg2 구현(2026-08-03) —
+       reporting/postgres_report_repository.py, notification/postgres_notification_repository.py.
+       같은 psycopg2 conventions(Pool, Json, register_uuid). governance.report_runs.fund_id는
+       accounting.funds not null FK라 실제 Fund 행(accounting.funds에 실제 1건 존재)으로
+       insert->find_by_content_hash 왕복 검증하고 검증 행은 정리(delete)함 - source_snapshot_ids가
+       DB에서는 uuid[]라 실제 UUID 문자열이어야 한다(도메인의 자유 문자열 snapshot_id와 다름,
+       register_uuid()로 배열 typecaster까지 등록해야 Python list로 돌아온다). governance.
+       notifications.fund_id는 nullable이라 fund_id=None으로 Fund 없이도 왕복 검증 완료"
     - "CEO Office Domain API — departments/00-ceo-office/api/app.py. mandate/service.py+lifecycle.py
        (Mandate 제안·활성화·조회), reporting/daily_report.py(Report 조립·조회),
        notification/notification.py(알림 발행)를 FastAPI로 감쌌다. Repository는 In-Memory 기본,
-       DATABASE_URL 있으면 Mandate만 PostgresMandateVersionRepository로 전환. FastAPI
-       TestClient로 7개 시나리오 실행 검증 완료(fund_base_currency 미설정 시 404, 최초 활성화
-       승인 게이트, Report FAILED/QUEUED, CRITICAL 알림 비억제)"
+       DATABASE_URL 있으면 Mandate/Report/Notification 셋 다 Postgres 구현으로 전환(2026-08-03).
+       FastAPI TestClient 자체 점검(In-Memory 모드)은 7개 시나리오 그대로 통과 확인 - Postgres
+       모드는 각 postgres_*_repository.py 자체 점검이 실 DB로 별도 검증한다(Mandate와 동일 패턴,
+       자체 점검의 가짜 ID로는 실 DB FK를 못 통과해 app.py 자체 점검 자체는 In-Memory 전용으로 남긴다)"
   in_progress: []
   not_started:
     - "PostgresMandateVersionRepository 쓰기 경로(insert/set_mandate_current/set_effective_to/

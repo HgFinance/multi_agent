@@ -10,9 +10,17 @@ reporting/daily_report.py, notification/notification.py를 감싸는 FastAPI 래
 여기엔 새 판정 로직이 없다. MandateVersionService/MandateActivationService/
 DailyReportAssembler/NotificationService가 이미 하는 일을 얇게 감싼다.
 
-Repository는 기본 In-Memory다 (asyncpg/psycopg2 실 배선은 config.yaml not_started).
-DATABASE_URL이 설정돼 있으면 Mandate Repository만 PostgresMandateVersionRepository로
-전환한다 - postgres_repository.py가 실제로 검증된 조회 경로를 그대로 쓴다.
+Repository는 기본 In-Memory다. DATABASE_URL이 설정돼 있으면 Mandate/Report/Notification
+셋 다 Postgres 구현으로 전환한다 - postgres_repository.py, postgres_report_repository.py,
+postgres_notification_repository.py가 각각 실제로 검증된 조회·왕복 경로를 그대로 쓴다.
+
+REDIS_URL(또는 GOVERNANCE_EVENT_REDIS_URL)이 설정돼 있으면 hf:governance Stream에도
+발행한다(2026-08-03) - Mandate 제안/활성화는 governance.mandate.changed.v1, Report는
+성공(QUEUED, 신규)일 때만 report.ready.v1. Redis가 없거나 발행이 실패해도 요청 자체는
+실패시키지 않는다(_publish_governance_event 문서 참고 - Postgres가 이미 Canonical Source
+of Truth라 Event는 부가 채널). governance_events/worker.py(notification-worker)가 이
+Stream을 소비해 report.ready.v1/risk.breach.v1 등을 알림으로 바꾸는데, governance.
+mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_NON_NOTIFICATION_EVENTS).
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
   - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
@@ -28,9 +36,11 @@ DATABASE_URL이 설정돼 있으면 Mandate Repository만 PostgresMandateVersion
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from datetime import date, datetime
+import uuid
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -72,6 +82,26 @@ except ImportError:  # psycopg2 미설치 환경에서도 앱 자체는 뜬다
 
     class MandatePersistenceError(RuntimeError):  # type: ignore[no-redef]
         pass
+
+try:
+    from postgres_report_repository import PostgresReportRunRepository
+except ImportError:
+    PostgresReportRunRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_notification_repository import PostgresNotificationRepository
+except ImportError:
+    PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+_GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
+sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
+
+from redis_event_bus import (  # noqa: E402
+    DEFAULT_GROUP as _GOVERNANCE_EVENT_GROUP,
+    DEFAULT_STREAM as _GOVERNANCE_EVENT_STREAM,
+    GovernanceEventBusError,
+    RedisEventBus,
+)
 
 
 # --- Request/Response 모델 ---------------------------------------------------
@@ -147,10 +177,152 @@ else:
 
 mandate_service = MandateVersionService(_mandate_repo)
 activation_service = MandateActivationService(_mandate_repo)
-report_repo = InMemoryReportRunRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresReportRunRepository is not None:
+    report_repo = PostgresReportRunRepository.connect(os.environ["DATABASE_URL"])
+else:
+    report_repo = InMemoryReportRunRepository()
 report_assembler = DailyReportAssembler(report_repo)
-notification_repo = InMemoryNotificationRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresNotificationRepository is not None:
+    notification_repo = PostgresNotificationRepository.connect(os.environ["DATABASE_URL"])
+else:
+    notification_repo = InMemoryNotificationRepository()
 notification_service = NotificationService(notification_repo)
+
+
+# --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
+#
+# notification-worker는 아직 실제 Producer가 없다 - risk.breach.v1/qa.finding.v1/
+# incident.opened.v1/governance.escalation.v1/report.ready.v1 어느 것도 현재 다른 본부가
+# 발행하지 않는다(2026-08-03 확인. 유일하게 실제 발행되는 건 risk-api의 risk.decision.v1인데,
+# 그건 §6.1이 정한 CEO Notification의 입력이 아니다 - 임의로 갖다 붙이지 않는다). 그래도
+# 배관(Redis Streams + Consumer Group + dedup + ACK)은 risk/qa와 같은 방식으로 실제로
+# 구현하고 검증한다 - Producer가 생기면 바로 동작한다.
+_EVENT_DEFAULT_SEVERITY: dict[str, str] = {
+    "risk.breach.v1": "HIGH",
+    "qa.finding.v1": "MEDIUM",
+    "incident.opened.v1": "CRITICAL",
+    "governance.escalation.v1": "HIGH",
+    "report.ready.v1": "LOW",
+}
+
+# TODO(영주): 실제 수신자 Routing Table이 아직 없다(부서·역할별 실제 수신자 설계 전) -
+# 임시로 고정값을 쓴다. 실제 Routing Table이 생기면 event_type/payload 기준으로 교체한다.
+_PLACEHOLDER_RECIPIENT = "role:ceo-ops"
+
+# hf:governance는 CEO Office가 발행하는 Mandate/Report Event를 다른 본부(Risk 등)도 같이
+# 구독하는 공용 Stream이다(§8.3 - Consumer Group마다 같은 Stream의 전체 메시지를 받는다).
+# 즉 이 notification-worker의 Consumer Group에도 "알림 대상이 아닌" Event가 그대로
+# 들어온다 - _handle_governance_event가 이걸 "모르는 Event"로 착각해 예외를 내고 무한
+# 재시도에 빠지면 안 되므로, 알려진 비-알림 Event는 조용히 넘긴다(ACK만, notify 없음).
+_KNOWN_NON_NOTIFICATION_EVENTS: frozenset[str] = frozenset({
+    "governance.mandate.changed.v1",
+    "governance.case.created.v1",
+    "governance.decision.v1",
+    "governance.capital_allocation.v1",
+})
+
+_governance_event_bus_instance: RedisEventBus | None = None
+
+
+def _governance_event_bus() -> RedisEventBus | None:
+    """hf:governance Redis Stream을 실제 호출 시점에만 연결한다."""
+
+    global _governance_event_bus_instance
+    redis_url = os.environ.get("GOVERNANCE_EVENT_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    if _governance_event_bus_instance is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("GOVERNANCE_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+        except ValueError as exc:
+            raise GovernanceEventBusError(
+                "GOVERNANCE_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+            ) from exc
+
+        _governance_event_bus_instance = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("GOVERNANCE_EVENT_STREAM", _GOVERNANCE_EVENT_STREAM),
+            group=os.environ.get("GOVERNANCE_EVENT_GROUP", _GOVERNANCE_EVENT_GROUP),
+            consumer=os.environ.get("GOVERNANCE_EVENT_CONSUMER", "governance-api"),
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+        )
+    return _governance_event_bus_instance
+
+
+def _handle_governance_event(event: dict) -> None:
+    """Domain Event 하나를 NotificationService.notify() 호출로 변환한다.
+
+    여기엔 판정 로직이 없다 - 심각도 기본값 매핑과 필수 필드 추출만 하고, 실제 채널·억제
+    판정은 notification.py의 NotificationService가 그대로 한다 (CLAUDE.md 원칙: 규칙 판정은
+    결정론적 코드가 하고, 이 함수는 그 앞단 배선일 뿐).
+    """
+
+    event_type = event.get("event_type")
+    if event_type in _KNOWN_NON_NOTIFICATION_EVENTS:
+        return  # 다른 Consumer Group을 위한 Event - 조용히 넘긴다(ACK, notify 없음).
+    if event_type not in _EVENT_DEFAULT_SEVERITY:
+        raise GovernanceEventBusError(
+            f"governance Notification Consumer가 모르는 Event입니다: {event_type}"
+        )
+    payload = event.get("payload") or {}
+    fund_id = payload.get("fund_id")
+    scope_key = payload.get("scope_key")
+    if not fund_id or not scope_key:
+        raise GovernanceEventBusError(
+            f"{event_type} payload에 fund_id/scope_key가 없습니다 (event_id={event.get('event_id')})"
+        )
+
+    request = NotificationRequest(
+        fund_id=fund_id,
+        event_type=event_type,
+        scope_key=scope_key,
+        recipient=payload.get("recipient", _PLACEHOLDER_RECIPIENT),
+        payload=payload,
+        severity=payload.get("severity", _EVENT_DEFAULT_SEVERITY[event_type]),
+    )
+    occurred_at = event.get("occurred_at")
+    now = datetime.fromisoformat(occurred_at) if occurred_at else datetime.now(timezone.utc)
+    notification_service.notify(request, now=now)
+
+
+_logger = logging.getLogger("governance-api")
+
+
+def _publish_governance_event(*, event_type: str, trace_id: str, payload: dict) -> None:
+    """Mandate/Report Domain Event를 hf:governance Stream에 발행한다 (Best-effort).
+
+    Risk의 RedisEventPublisher(risk_events/redis_event_bus.py)는 발행 실패를 호출자에게
+    전달해 API가 성공 응답을 못 내게 한다 - QA로 가는 감사 이력을 잃으면 안 되기 때문이다.
+    여기는 의도적으로 다르게 간다: Mandate/Report의 Canonical Source of Truth는 이미
+    Postgres에 안전하게 커밋된 뒤이고(Repository.insert가 먼저 성공), 이 발행은 그 사실을
+    다른 본부에 알리는 부가 채널일 뿐이다. Redis가 없거나 장애여도 governance-api 자체의
+    핵심 기능(Mandate 저장·활성화, Report 조립)을 막지 않는다 - master plan §13 "Redis 장애:
+    Outbox 적재 유지, 비동기 전파 중단"과 같은 방향(전파만 지연되고 원장은 안전).
+    실제 outbox_events 테이블은 아직 없어 여기서 직접 발행한다 - Postgres commit과 Redis
+    publish가 하나의 Transaction은 아니므로, 이 둘 사이에 죽으면 Event가 유실될 수 있다는
+    한계는 있다(진짜 Outbox 패턴으로 옮기기 전까지의 임시 배선).
+    """
+
+    bus = _governance_event_bus()
+    if bus is None:
+        return
+    try:
+        bus.publish(event_id=uuid.uuid4(), event_type=event_type, trace_id=trace_id, payload=payload)
+    except GovernanceEventBusError:
+        _logger.exception("governance Domain Event 발행 실패 (event_type=%s)", event_type)
+
+
+@app.exception_handler(GovernanceEventBusError)
+def _on_governance_event_bus_error(request, exc: GovernanceEventBusError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "GOVERNANCE_EVENT_BUS_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
 
 
 @app.exception_handler(CurrencyMismatchError)
@@ -195,6 +367,25 @@ def propose_version(mandate_id: str, body: ProposeVersionRequest):
         previous_policy=body.previous_policy, effective_to=body.effective_to,
         execution_rules=body.execution_rules, created_by=body.created_by,
     )
+    # MandateVersionRow/VersionResult에 trace_id가 없다(Mandate 도메인이 아직 그 개념을
+    # 안 갖고 있다) - 이 Event 하나만의 trace_id를 새로 만든다(Mandate 자체의 trace가 아님).
+    _publish_governance_event(
+        event_type="governance.mandate.changed.v1",
+        trace_id=str(uuid.uuid4()),
+        payload={
+            # mandate_id를 fund_id 자리에 쓴다 - 이 Event는 _KNOWN_NON_NOTIFICATION_EVENTS라
+            # notification-worker가 fund_id를 실제로 읽지 않는다(§6.1 다른 Consumer 몫).
+            # 진짜 accounting.funds.fund_id 매핑이 필요해지면(예: 알림 대상으로 승격) 그때 바꾼다.
+            "fund_id": mandate_id,
+            "scope_key": f"mandate:{mandate_id}",
+            "action": "PROPOSED",
+            "mandate_id": mandate_id,
+            "version": result.row.version,
+            "direction": result.direction.value,
+            "requires_user_reapproval": result.requires_user_reapproval,
+            "content_hash": result.row.content_hash,
+        },
+    )
     return {
         "mandate_id": mandate_id, "version": result.row.version,
         "direction": result.direction.value, "requires_user_reapproval": result.requires_user_reapproval,
@@ -213,6 +404,20 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
     )
     if not result.activated:
         return {"activated": False, "direction": result.direction.value, "blocked_reason": result.blocked_reason}
+
+    _publish_governance_event(
+        event_type="governance.mandate.changed.v1",
+        trace_id=result.decision.trace_id if result.decision else str(uuid.uuid4()),
+        payload={
+            "fund_id": mandate_id,  # _handle_governance_event에서 fund_id를 안 쓰는 Event (위 주석 참고)
+            "scope_key": f"mandate:{mandate_id}",
+            "action": "ACTIVATED",
+            "mandate_id": mandate_id,
+            "version": version,
+            "direction": result.direction.value,
+            "decided_by": result.decision.approved_by if result.decision else None,
+        },
+    )
     return {
         "activated": True, "direction": result.direction.value,
         "decision": {"decision": result.decision.decision, "approved_by": result.decision.approved_by,
@@ -243,6 +448,22 @@ def request_report(body: AssembleReportRequest):
         fund_id=body.fund_id, as_of=body.as_of, template_version=body.template_version,
         sections=sections, trace_id=body.trace_id,
     )
+    # created(새 Report)이고 status가 QUEUED(필수 Section 다 있어 실제로 "준비됨")일 때만
+    # 발행한다 - FAILED는 "준비"가 아니고, 동일 content_hash 재요청(created=False)은 이미
+    # 한 번 발행했으므로 다시 발행하면 다른 본부·notification-worker가 중복 처리한다.
+    if assembly.created and assembly.row.status == "QUEUED":
+        _publish_governance_event(
+            event_type="report.ready.v1",
+            trace_id=assembly.row.trace_id,
+            payload={
+                "fund_id": assembly.row.fund_id,
+                "scope_key": f"report:{assembly.row.content_hash}",
+                "report_type": assembly.row.report_type,
+                "as_of": assembly.row.as_of.isoformat(),
+                "content_hash": assembly.row.content_hash,
+                "template_version": assembly.row.template_version,
+            },
+        )
     return {
         "fund_id": assembly.row.fund_id, "type": assembly.row.report_type, "as_of": assembly.row.as_of.isoformat(),
         "status": assembly.row.status, "source_snapshot_ids": list(assembly.row.source_snapshot_ids),

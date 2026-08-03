@@ -50,10 +50,46 @@ implementation:
        됐던 격차 해소, 실 DB 적용 완료. 채우는 로직은 아직 없음(아래 not_started 참고)"
     - "Workforce Domain API — departments/07-agent-workforce/api/app.py. lifecycle/access.py
        (권한 요청·승인·부여·회수), improvements/{candidate,workflow}.py(F19 후보·전이·자기승인
-       차단), scorecard/cost.py(Scorecard·예산 판정)를 FastAPI로 감쌌다. Repository는 In-Memory뿐
-       (재시작 시 소실). FastAPI TestClient로 4개 영역(access/improvements/scorecard/budget)
-       실행 검증 완료 — 자기승인 403, Snapshot 없음은 0이 아니라 None, 예산 초과 시
-       PROPOSE_MODEL_DOWNGRADE 권고까지 확인"
+       차단), scorecard/cost.py(Scorecard·예산 판정)를 FastAPI로 감쌌다. Repository는 In-Memory
+       기본, DATABASE_URL 있으면 Access/Improvements가 Postgres 구현으로 전환(아래 psycopg2
+       구현 항목 참고). FastAPI TestClient(In-Memory 모드)로 4개 영역(access/improvements/
+       scorecard/budget) 실행 검증 완료 — 자기승인 403, Snapshot 없음은 0이 아니라 None, 예산
+       초과 시 PROPOSE_MODEL_DOWNGRADE 권고까지 확인"
+    - "AccessRepository/ImprovementRepository/Scorecard 조회의 psycopg2 실 구현(2026-08-03) —
+       lifecycle/postgres_access_repository.py, improvements/repository.py(이전 asyncpg 버전은
+       아무 곳에서도 import되지 않아 API와 어긋나 있었다 - psycopg2로 다시 짬),
+       scorecard/postgres_scorecard_repository.py. 호출부가 동기라 psycopg2로 통일(Mandate/
+       Audit과 동일 근거). Access는 Y3 Registry의 실제 HR-04 agent_id로 요청->승인 대기(REQUESTED,
+       approval_id 없음)->Assignment(DATA)->회수까지 실 DB 왕복 검증(approval_id가 채워진
+       승인은 governance.approvals 부모 행이 없어 건너뜀 - Mandate owner_user_id와 같은 이유).
+       workflow.py의 ImprovementWorkflow는 이제 ImprovementRepository를 주입받는다(기본
+       In-Memory, 생성자 시그니처만 바뀌고 기존 자체 점검은 그대로 통과) - candidate insert/
+       status 갱신/event append까지 실 DB 검증했지만 improvement_candidate_events가
+       append-only 트리거라 자체 점검이 남긴 candidate 1건은 정리하지 못하고 selfcheck 흔적으로
+       남는다(문서화함). Scorecard는 원래 저장소 자체가 없어서(cost.py가 순수 함수라 Snapshot을
+       인자로만 받음) 새로 만들었다 - GET /workforce/v1/departments/{code}/scorecard, GET
+       /workforce/v1/agents/{agent_id}/budget-assessment 두 엔드포인트를 추가해 스펙 3.4의 GET
+       형태를 실제로 채우고, 기존 POST 데모 엔드포인트(호출자가 Snapshot 직접 전송)는 호환을
+       위해 남겼다. 셋 다 In-Memory 자체 점검(app.py TestClient, 4개 영역)과 Postgres 자체
+       점검(각 파일 __main__, 실 DB) 양쪽 통과 확인"
+    - "LangGraph 파이프라인 + Notion Reporter — departments/07-agent-workforce/scripts.py
+       (submit_candidate→narrate→notion_report), notion_reporter.py. F19 ImprovementCandidate를
+       실제 Notion HR DB(NOTION_HR_DB)에 올린다. 2026-08-03 실측: 처음엔 F27 Scorecard를
+       올리려 했는데 실제 DB에 붙여보니 Notion 설계서 5절 '채용 후보' 스키마(후보 role_code +
+       CEO 승인/IAM 생성/QA 독립검증 체크박스 3개)로 이미 만들어져 있어 400으로 거부됐다 -
+       Candidate 기반으로 다시 짰다. 로컬 Hermes(nous)와 실제 Notion에 연결해 전 구간 실행
+       검증 완료 — 진짜 Notion 페이지 생성, reports/hr_candidate_*.md 로컬 저장까지 확인.
+       QA독립검증/CEO승인 체크박스는 workflow.py 전이 결과에서만 오고 LLM은 서술만 한다.
+       IAM 생성은 F19 범위 밖이라 항상 False(lifecycle/access.py 소관, 지어내지 않음).
+       2차 수정(같은 날): 리포트 전문을 '원본 리포트' 속성에 통째로 넣던 걸 고쳤다 -
+       Notion 설계서 3절이 이미 페이지 본문에 전문을 복사하지 말라고 정해뒀었다.
+       3차 수정(같은 날, main 병합 후): 그 사이 Risk/QA/Trading이 공용
+       departments/notion_markdown.py(markdown_to_notion_blocks)로 먼저 수렴해 있어서
+       직접 짠 변환기를 버리고 그걸 쓰도록 맞췄다 - risk/notion_reporter.py와 동일하게
+       '원본 리포트' 속성 자체를 안 보내고, 로컬 리포트 경로를 페이지 본문 첫 줄에 적은 뒤
+       리포트 전문을 이어 붙인다. 공용 렌더러는 진짜 Bold/Code 서식(annotations)과
+       Heading/Table/Quote/Divider/할일목록까지 지원해 이전 자체 구현보다 낫다. 페이지
+       조회로 블록 9개 실제 반영까지 확인"
   in_progress: []
   not_started:
     - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다. Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"

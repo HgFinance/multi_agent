@@ -48,6 +48,7 @@ usage:
   boundary_validation:
     all: "python -m orchestration.workflows.runner --workflow investment-case --mode dry-run --json"
     strategy: "python -m orchestration.workflows.runner --workflow strategy-research --mode dry-run --json"
+    paper_e2e: "python -m orchestration.workflows.runner --workflow investment-case --mode paper-e2e --symbol AAPL --quantity 100 --limit-price 200.00 --json"
 
 files:
   workflow_index: orchestration/workflows/index.yaml
