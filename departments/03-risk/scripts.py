@@ -62,10 +62,13 @@ import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
+
+import yaml
 
 _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
@@ -124,6 +127,9 @@ class RiskState(TypedDict, total=False):
     compliance: dict | None  # compliance-policy-agent 결과 (REJECT면 생략)
     verdict: str             # 최종 case-level 값 - 항상 assessment 에서만 옴
     narrative: str
+    supervisor_llm_called: bool
+    supervisor_call_status: str
+    hermes_runtime: dict
     escalate: bool
     notion_upload: dict | None  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
     fallbacks: list[dict]
@@ -348,9 +354,96 @@ def compliance_check(state: RiskState) -> dict:
 
 
 # ── 노드 5: 종합 (risk-supervisor 페르소나 - Hermes AIAgent) ───────────────
+_HERMES_PROFILE = "risk-management"
+
+
+def _hermes_config() -> dict:
+    config_path = _BASE / "hermes" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise TypeError(f"Hermes config is not a mapping: {config_path}")
+    return config
+
+
+def _hermes_model_config() -> dict[str, str | None]:
+    raw_model = _hermes_config().get("model")
+    if isinstance(raw_model, str):
+        model = raw_model.strip()
+        provider = base_url = api_mode = None
+    elif isinstance(raw_model, dict):
+        model = str(raw_model.get("default") or raw_model.get("model") or "").strip()
+        provider = str(raw_model.get("provider") or "").strip() or None
+        base_url = str(raw_model.get("base_url") or "").strip() or None
+        api_mode = str(raw_model.get("api_mode") or "").strip() or None
+    else:
+        model = ""
+        provider = base_url = api_mode = None
+    if not model:
+        raise ValueError("Hermes config model.default is required")
+    return {"model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode}
+
+
+def _profile_dir() -> Path:
+    from hermes_cli.profiles import get_profile_dir
+
+    return Path(get_profile_dir(_HERMES_PROFILE))
+
+
+def _hermes_runtime_metadata() -> dict:
+    """Expose profile wiring without reading secrets or memory contents."""
+    model = _hermes_model_config()
+    metadata = {
+        "profile": _HERMES_PROFILE,
+        "provider": model["provider"],
+        "model": model["model"],
+        "base_url": model["base_url"],
+        "config_source": str(_BASE / "hermes" / "config.yaml"),
+    }
+    try:
+        profile_dir = _profile_dir()
+        skills_dir = profile_dir / "skills"
+        memories_dir = profile_dir / "memories"
+        runtime_config = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
+        runtime_model = runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
+        runtime_provider = runtime_model.get("provider") if isinstance(runtime_model, dict) else None
+        runtime_default = runtime_model.get("default") if isinstance(runtime_model, dict) else runtime_model
+        metadata.update(
+            {
+                "runtime_profile_dir": str(profile_dir),
+                "runtime_config_provider": runtime_provider,
+                "runtime_config_model": runtime_default,
+                "runtime_config_matches_source": runtime_provider == model["provider"] and runtime_default == model["model"],
+                "soul_md_present": (profile_dir / "SOUL.md").is_file(),
+                "skills_dir_present": skills_dir.is_dir(),
+                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md")) if skills_dir.is_dir() else 0,
+                "memories_dir_present": memories_dir.is_dir(),
+                "memory_file_count": sum(1 for path in memories_dir.iterdir() if path.is_file()) if memories_dir.is_dir() else 0,
+                "auth_present": (profile_dir / "auth.json").is_file(),
+                "env_present": (profile_dir / ".env").is_file(),
+            }
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        metadata["profile_error"] = type(exc).__name__
+    return metadata
+
+
+@contextmanager
+def _hermes_profile_scope():
+    """Make AIAgent load this department's runtime profile, not the global default."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(_profile_dir()))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _persona(name: str) -> str:
-    cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    return re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.DOTALL).group(1)
+    personalities = _hermes_config().get("agent", {}).get("personalities", {})
+    if not isinstance(personalities, dict) or not isinstance(personalities.get(name), str):
+        raise TypeError(f"{name} persona is missing from hermes/config.yaml")
+    return personalities[name]
 
 
 def _hermes_chat(persona: str, task: str) -> str:
@@ -358,9 +451,19 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
     )
 
-    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
-                     ephemeral_system_prompt=persona)
-    return agent.chat(task)
+    model = _hermes_model_config()
+    with _hermes_profile_scope():
+        agent = AIAgent(
+            provider=model["provider"],
+            model=model["model"],
+            base_url=model["base_url"],
+            api_mode=model["api_mode"],
+            quiet_mode=True,
+            load_soul_identity=True,
+            skip_memory=False,
+            ephemeral_system_prompt=persona,
+        )
+        return agent.chat(task)
 
 
 def _deterministic_supervisor_note(state: RiskState) -> dict:
@@ -385,6 +488,8 @@ def _deterministic_supervisor_note(state: RiskState) -> dict:
         "narrative": narrative,
         "escalate": bool(fallback),
         "supervisor_llm_called": False,
+        "supervisor_call_status": "not_called",
+        "hermes_runtime": {**_hermes_runtime_metadata(), "call_status": "not_called"},
     }
 
 
@@ -422,13 +527,24 @@ Evidence:
             "narrative": note["narrative"],
             "escalate": note["escalate"],
             "supervisor_llm_called": True,
+            "supervisor_call_status": "injected" if chat is not None else "succeeded",
+            "hermes_runtime": {
+                **_hermes_runtime_metadata(),
+                "call_status": "injected" if chat is not None else "succeeded",
+            },
         }
     except Exception as exc:  # supervisor failure must not alter the decision.
         if chat is not None:
             raise
-        return {"verdict": a["verdict"], "narrative": _fallback_narrative("Risk Supervisor", exc),
-                "escalate": True, "supervisor_llm_called": True,
-                "fallbacks": [_fallback("supervisor", exc)]}
+        return {
+            "verdict": a["verdict"],
+            "narrative": _fallback_narrative("Risk Supervisor", exc),
+            "escalate": True,
+            "supervisor_llm_called": True,
+            "supervisor_call_status": "failed",
+            "hermes_runtime": {**_hermes_runtime_metadata(), "call_status": "failed", "error_type": type(exc).__name__},
+            "fallbacks": [_fallback("supervisor", exc)],
+        }
 
 
 def _assemble_out(state: RiskState) -> dict:
@@ -445,10 +561,13 @@ def _assemble_out(state: RiskState) -> dict:
         executed_agents.append("operational-counterparty-risk-agent")
     if state.get("compliance"):
         executed_agents.append("compliance-policy-agent")
-    if state.get("narrative") and state.get("supervisor_llm_called", True):
+    supervisor_status = state.get("supervisor_call_status", "not_called")
+    if state.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("risk-supervisor")
     risk_agents = ["risk-supervisor", "market-liquidity-risk-agent", "derivatives-margin-risk-agent",
                    "compliance-policy-agent", "pre-trade-risk-analyst", "operational-counterparty-risk-agent"]
+    failed_agents = ["risk-supervisor"] if supervisor_status == "failed" else []
+    attempted_agents = list(dict.fromkeys(executed_agents + failed_agents))
     fallbacks = list(state.get("fallbacks", []))
     fallback = fallbacks[0] if fallbacks else None
     return {"risk_request_id": a["risk_request_id"], "verdict": state["verdict"],
@@ -466,8 +585,14 @@ def _assemble_out(state: RiskState) -> dict:
             "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
             "narrative": state["narrative"], "escalate": state["escalate"],
             "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
-        "agent_execution": {"executed": executed_agents,
-        "not_executed": [agent for agent in risk_agents if agent not in executed_agents]},
+        "supervisor_call_status": supervisor_status,
+        "hermes_runtime": state.get("hermes_runtime"),
+        "agent_execution": {
+            "executed": executed_agents,
+            "failed": failed_agents,
+            "attempted": attempted_agents,
+            "not_executed": [agent for agent in risk_agents if agent not in attempted_agents],
+        },
         "execution_evidence": state.get("execution_evidence")}
 
 
@@ -505,21 +630,24 @@ def _record_execution_evidence(
         )
         execution = result.get("agent_execution") or {}
         executed = list(execution.get("executed") or [])
+        failed = list(execution.get("failed") or [])
         not_executed = list(execution.get("not_executed") or [])
         fallbacks = list(result.get("fallbacks") or [])
         compliance = result.get("compliance") or {}
         degraded = bool(fallbacks or result.get("escalate") or compliance.get("grounded") is False)
         schema_valid = bool(result.get("assessment")) and not bool(fallbacks)
         domain_valid = result.get("verdict") in {"approve", "resize", "reject"} and not degraded
-        agents_for_log = executed or ["risk-pipeline-fallback"]
+        agents_for_log = list(dict.fromkeys(executed + failed)) or ["risk-pipeline-fallback"]
         for employee in agents_for_log:
             journal.agent_output(
                 run_id=run_id,
                 trace_id=trace_id,
                 employee_profile=employee,
-            output={
-                "employee_profile": employee,
-                "verdict": result.get("verdict"),
+                output={
+                    "employee_profile": employee,
+                    "supervisor_call_status": result.get("supervisor_call_status") if employee == "risk-supervisor" else None,
+                    "hermes_runtime": result.get("hermes_runtime") if employee == "risk-supervisor" else None,
+                    "verdict": result.get("verdict"),
                 "decision_status": result.get("decision_status"),
                 "decision_origin": result.get("decision_origin"),
                 "failure": result.get("failure"),
@@ -589,8 +717,9 @@ def _record_execution_evidence(
             "safe_action": safe_action,
             "binding": False,
             "hermes_profile": "risk-management",
-            "employees_executed": executed,
-            "employees_not_executed": not_executed,
+        "employees_executed": executed,
+        "employees_failed": failed,
+        "employees_not_executed": not_executed,
             "retry_policy": {"max_retries": 2, "max_attempts": 3},
             "external_dependencies": {
                 "redis": "DEGRADED" if any(item.get("stage") == "trading_state" for item in fallbacks) else "NOT_OBSERVED",
@@ -804,7 +933,20 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
     if agent_execution:
         lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
         lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
+        lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
         lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        runtime = out.get("hermes_runtime") or {}
+        if runtime:
+            lines += [
+                "",
+                "### Hermes Runtime",
+                "",
+                f"- profile: `{md_cell(runtime.get('profile'))}`",
+                f"- provider/model: `{md_cell(runtime.get('provider'))}` / `{md_cell(runtime.get('model'))}`",
+                f"- runtime config matches source: `{md_cell(runtime.get('runtime_config_matches_source'))}`",
+                f"- supervisor call: `{md_cell(out.get('supervisor_call_status'))}`",
+                f"- skills: `{md_cell(runtime.get('skill_file_count'))}`; memory files: `{md_cell(runtime.get('memory_file_count'))}`",
+            ]
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
