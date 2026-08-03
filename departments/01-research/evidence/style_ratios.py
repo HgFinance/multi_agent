@@ -24,19 +24,48 @@ from __future__ import annotations
 
 import sys
 from datetime import date
+from pathlib import Path
 
 MODULE_VERSION = "research-style-ratios-v1"
 
 BENCHMARK_CODE = "KOSPI200"
 VOL_CODE = "VKOSPI"
+
+# ▶ 계열 목록의 단일 출처는 config/style_indices.txt 다 (2026-08-02)
+#   예전에는 같은 코드 목록이 네 파일에 흩어져 있었다(설정 파일 / 수집기 /
+#   레짐 분석가의 OVERLAY_CODES / 여기 STYLE_LABELS). 지수를 하나 추가하면
+#   네 곳을 다 고쳐야 하고, 하나라도 빠뜨리면 **수집은 되는데 아무도 안 읽는**
+#   계열이 조용히 생긴다(VKOSPI 가 실제로 그 상태였다).
+#   이름은 설정에서 읽고, '어느 축인가'만 여기서 정한다 - 축은 설정이 아니라
+#   분석 의미론이라 코드에 있는 게 맞다. 둘이 어긋나면 자체 점검이 잡는다.
+_CONFIG = Path(__file__).resolve().parent.parent / "config" / "style_indices.txt"
+
+
+def load_style_config(path: Path | None = None) -> dict[str, str]:
+    """설정 파일 -> {계열코드: 설명}. 파일이 없으면 빈 dict(계산은 계속된다).
+
+    수집기(style_index_collector)는 같은 파일을 **엄격하게** 파싱한다 -
+    쓰기 경로라 형식 오류를 거부해야 하기 때문이다. 여기는 읽기 경로라
+    관대하게 읽고, 둘이 같은 코드 집합을 보는지는 자체 점검이 검사한다.
+    """
+    p = path or _CONFIG
+    try:
+        body = p.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [x.strip() for x in line.split("|", 2)]
+        if len(parts) == 3 and parts[1]:
+            out[parts[1]] = parts[2]
+    return out
+
+
 # 비율 계열의 표시 이름 - 라벨 사유를 사람이 읽을 수 있게 한다
-STYLE_LABELS = {
-    "BOND_FUT": "국채선물(안전자산)",
-    "MIN_VOL": "최소변동성(방어)",
-    "DIV_50": "고배당50(배당·가치)",
-    "DIV_GROWTH": "배당성장50",
-    "EX_MEGA": "초대형주제외(중소형)",
-}
+STYLE_LABELS = load_style_config()
 # 어느 계열이 앞서면 어떤 국면인가 - 코드가 라벨을 정하므로 표로 고정한다
 TILT_BY_CODE = {
     "BOND_FUT": "SAFE_HAVEN",
@@ -45,6 +74,9 @@ TILT_BY_CODE = {
     "DIV_GROWTH": "DIVIDEND_VALUE",
     "EX_MEGA": "SMALL_MID",
 }
+# 레짐 분석가가 조회할 계열 - 설정 + 변동성지수. 분석가가 자기 목록을 따로
+# 들면 설정에 추가한 계열을 영영 안 읽는다.
+OVERLAY_CODES = tuple(sorted(STYLE_LABELS)) + (VOL_CODE,)
 
 LOOKBACK = 20              # 상대강도 목표 창(거래일)
 MIN_LOOKBACK = 5           # 이보다 짧으면 상대강도라 부르지 않는다
@@ -270,20 +302,32 @@ def compute_style_overlay(rows, *, benchmark: str = BENCHMARK_CODE,
     return overlay
 
 
+# 인용 대상이 아닌 bookkeeping 키 - 숫자 풀에서 뺀다.
+# 이것을 안 빼면 검증이 헐거워진다: days=21, lookback_used=20 이 풀에 있으면
+# LLM 이 "20%" 나 "21배" 를 지어내도 +-0.1 대조를 통과한다. 레짐 분석가가
+# days_used 를 이미 같은 이유로 빼고 있는데, overlay 중첩까지는 그 규약이
+# 안 미쳤다(2026-08-02 수정). 관측 개수는 '얼마나 있나'지 '얼마다'가 아니다.
+_NOT_QUOTABLE = ("days", "lookback_used")
+
+
 def overlay_numbers(overlay) -> list[float]:
-    """overlay 안의 모든 수치(중첩 포함) - 서술 검증의 숫자 풀에 넣는다.
-    여기서 빠뜨리면 **정상 인용이 환각으로 오판된다.**"""
+    """overlay 안의 인용 가능한 수치(중첩 포함) - 서술 검증의 숫자 풀에 넣는다.
+
+    빠뜨리면 정상 인용이 환각으로 오판되고, 반대로 다 넣으면 진짜 환각이
+    통과한다. 그래서 **수치는 넣되 카운트는 뺀다.**
+    """
     pool: list[float] = []
 
-    def walk(node):
+    def walk(node, key=None):
         if isinstance(node, dict):
-            for v in node.values():
-                walk(v)
+            for k, v in node.items():
+                walk(v, k)
         elif isinstance(node, list):
             for v in node:
-                walk(v)
+                walk(v, key)
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
-            pool.append(float(node))
+            if key not in _NOT_QUOTABLE:
+                pool.append(float(node))
 
     walk(overlay)
     return pool
@@ -299,6 +343,41 @@ def _rows(code: str, values: list[float], *, end=date(2026, 8, 3), step=1):
     return [{"code": code,
              "period": (end - timedelta(days=(n - 1 - i) * step)).isoformat(),
              "value": v} for i, v in enumerate(values)]
+
+
+def _check_single_source():
+    """설정·축표·분석가 조회목록이 한 출처에서 나오는가.
+
+    이 셋이 갈리면 **수집은 되는데 아무도 안 읽는 계열**이 조용히 생긴다.
+    VKOSPI 가 실제로 그 상태였다(수집기만 있고 분석가가 안 봤다).
+    """
+    cfg = load_style_config()
+    assert cfg, f"{_CONFIG.name} 을 못 읽었다 - 계열 목록의 단일 출처가 비었다"
+    assert BENCHMARK_CODE in cfg, "설정에 분모(KOSPI200)가 없다"
+
+    # 분모·변동성 말고는 전부 축이 있어야 한다. 없으면 tilt 가 OTHER_STYLE 로
+    # 뭉뚱그려져 "무슨 쏠림인지" 를 말할 수 없다.
+    axisless = sorted(set(cfg) - set(TILT_BY_CODE) - {BENCHMARK_CODE, VOL_CODE})
+    assert not axisless, (
+        f"설정에 있는데 TILT_BY_CODE 에 축이 없는 계열: {axisless} - "
+        f"지수를 추가했으면 어느 국면인지도 정해야 한다")
+
+    # 축표에만 있고 설정에 없는 것 = 수집되지 않는 유령 축
+    ghost = sorted(set(TILT_BY_CODE) - set(cfg))
+    assert not ghost, f"축은 있는데 수집 설정에 없는 계열: {ghost}"
+
+    # 분석가 조회 목록이 설정 + 변동성을 정확히 덮는가
+    assert set(OVERLAY_CODES) == set(cfg) | {VOL_CODE}, \
+        f"OVERLAY_CODES 가 설정과 어긋난다: {sorted(set(OVERLAY_CODES))}"
+
+    # 수집기의 엄격 파서와 같은 코드 집합을 보는가 (관대/엄격 두 파서의 합치)
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
+    from style_index_collector import parse_config as strict_parse
+
+    strict = {c for _up, c, _d in strict_parse(_CONFIG.read_text(encoding="utf-8"))}
+    assert strict == set(cfg), \
+        f"엄격 파서와 관대 파서의 결과가 다르다: {strict ^ set(cfg)}"
+    print("  계열 목록 단일 출처      OK")
 
 
 def _check_grouping():
@@ -439,9 +518,12 @@ def _check_number_pool():
     # 중첩 안의 수치가 전부 들어와야 정상 인용이 환각으로 오판되지 않는다
     assert 5.0 in pool and 100.0 in pool          # 상대강도·기준지수 수준
     assert all(isinstance(x, float) for x in pool)
-    # 두 계열의 ratio/change/days + benchmark_level + lookback_used = 8.
-    # None(백분위)은 안 담는다
-    assert len(pool) == 8, (len(pool), pool)
+    # 두 계열의 ratio/change + benchmark_level = 5.
+    # days(21)·lookback_used(20)·백분위(None)는 안 담는다 - 카운트를 넣으면
+    # LLM 이 "20%" 를 지어내도 통과한다.
+    assert len(pool) == 5, (len(pool), pool)
+    assert 21.0 not in pool, "days 가 풀에 섞였다 - 환각 검증이 헐거워진다"
+    assert 20.0 not in pool, "lookback_used 가 풀에 섞였다"
     assert o["ratios"]["BOND_FUT"]["ratio"] in pool, "중첩 2단이 누락되면 오판한다"
     print("  숫자 풀 중첩 수집        OK")
 
@@ -451,6 +533,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     print(f"{MODULE_VERSION} 자체 점검 (네트워크·DB 없음)")
+    _check_single_source()
     _check_grouping()
     _check_ratio_date_alignment()
     _check_percentile_and_change()
@@ -458,4 +541,4 @@ if __name__ == "__main__":
     _check_adaptive_window()
     _check_volatility_block()
     _check_number_pool()
-    print("스타일 비율 7개 영역 통과.")
+    print("스타일 비율 8개 영역 통과.")

@@ -54,7 +54,11 @@ agent:
     research-supervisor: [case.read, case.delegate]        # 종합·위임만, 자체 조회 없음
     universe-manager: [research.universe.read]
     market-data-steward: [market.dq.read, market.snapshot.read]
-    microstructure-analyst: [market.microstructure.read, market.snapshot.read]
+    # market.bars.read 추가(2026-08-02): RES-03 은 /microstructure 외에 /bars
+    # 최신 1봉 종가를 읽어 VWAP 대비 위치를 낸다(비치명 보조). 선언에 없으면
+    # market-api 를 강제로 올리는 순간 403 이다 - check_gateway_coverage 적발.
+    microstructure-analyst: [market.microstructure.read, market.snapshot.read,
+                             market.bars.read]
     technical-analyst: [market.bars.read, market.snapshot.read]
     # 공시 조회(2026-08-02 추가): Tool Gateway 자체점검이 "아무 페르소나도 못 쓰는
     # 엔드포인트"로 /evidence/disclosures 를 잡아냈다. RES-05 는 재무의 근거로,
@@ -72,10 +76,16 @@ agent:
     geopolitical-analyst: [research.macro.read]            # /macro/observations (PIT)
     # Evidence Bundle 조립(evidence/bundle.py)이 이 페르소나로 돈다 -
     # 뉴스·공시를 모아 분석가에게 넘기는 큐레이션이 RES-08 직무다.
+    # market.snapshot/bars.read 추가(2026-08-02): Evidence Bundle 은 뉴스·공시만
+    # 모으는 게 아니라 price_context(1D 봉 종가 시계열)를 함께 싣는다 -
+    # "이 뉴스가 나왔을 때 주가가 어디였나"가 없으면 근거가 반쪽이다.
+    # 쓰기 권한은 여전히 chunk.write 하나뿐이다(시세는 읽기만).
     rag-librarian-evidence-curator: [research.evidence.search,
                                      research.evidence.chunk.write,
                                      research.evidence.news.read,
-                                     research.evidence.disclosures.read]
+                                     research.evidence.disclosures.read,
+                                     market.snapshot.read,
+                                     market.bars.read]
   # 부서 전체 공통 금지. 리서치는 어떤 경우에도 주문·리스크 판정·원장·전략 승격에
   # 관여하지 않는다. Packet 은 재료일 뿐 결정이 아니다(Agent Decision != Order).
   forbidden_tools:

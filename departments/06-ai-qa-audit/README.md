@@ -1,11 +1,17 @@
 # AI QA/감사본부 (AI QA & Audit)
 
-## P1 현재 상태 (2026-08-02)
+## P1 현재 상태 (2026-08-03)
 
 - `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.
 - `internal_audit.py`와 `/qa/v1/internal-audit/evaluate`는 Trace·권한·ACTIVE Profile·부서 경계·금지 Tool을 검사한다. QA가 Risk/OMS/원장 권한을 스스로 승인하지 않는다.
 - `/qa/v1/model-risk/evaluate`와 `/qa/v1/internal-audit/evaluate`는 설명용 Agent와 분리된 안전한 P1 API다. `qa-check` 상위 계약은 여전히 명시적 승인 전까지 production `503`으로 차단된다.
 - 실제 정책 원문이 없어 `SAMPLE_PLACEHOLDER`는 적재하지 않는다. 실제 Corpus/pgvector, ACTIVE Profile과 운영 `agent_runs/tool_calls`, 상위 계약 승인·E2E가 남은 운영 조건이다.
+- 2026-08-03 감사에서 Self-check 5개가 통과했고 QA Decision 2, Incident Event 2, Corrective Action
+  1건을 확인했다. Compose Service와 `agent_runs`, `tool_calls`, `audit.run_log_events`는 아직 0건이다.
+- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 QA 보고서 9개가 있다.
+  Projection 실패는 QA Verdict를 바꾸지 않으며 최신 Reporter·Pipeline 회귀 Test 18개가 통과했다.
+
+현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
 
 ## Skill Harness
 

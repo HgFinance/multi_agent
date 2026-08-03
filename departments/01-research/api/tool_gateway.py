@@ -50,9 +50,23 @@ ENDPOINT_SCOPES: dict[str, str] = {
     "/evidence/stories": "research.evidence.stories.read",
     "/macro/observations": "research.macro.read",
     "/universe/restrictions": "research.universe.read",
+    # market-api 면 (2026-08-02 추가). 여기 없으면 scope_for 가 예외를 내므로
+    # market-api 에 게이트웨이를 붙이는 순간 전 경로가 500 이 된다 - 붙이기
+    # 전에 매핑이 먼저 있어야 한다. config.yaml 이 이미 market.* 를 선언해
+    # 놓고도 **어디서도 강제되지 않던** 구멍을 메운다.
+    "/snapshot": "market.snapshot.read",
+    "/bars": "market.bars.read",
+    "/breadth": "market.breadth.read",
+    "/dq/summary": "market.dq.read",
+    "/regime/daily": "market.regime.read",
+    "/microstructure": "market.microstructure.read",
 }
-# 인증 없이 열어두는 경로 - 상태 확인은 권한 판단의 대상이 아니다
-OPEN_PATHS = ("/health", "/docs", "/openapi.json", "/redoc")
+# 인증 없이 열어두는 경로 - 상태 확인은 권한 판단의 대상이 아니다.
+# /docs/oauth2-redirect 는 FastAPI 가 자동으로 다는 라우트다. 빼먹으면
+# scope_for 가 예외를 내 **강제 모드에서 500** 이 된다(2026-08-02 자체 점검이
+# 적발). 문서 표면은 통째로 열어두는 게 맞다.
+OPEN_PATHS = ("/health", "/docs", "/docs/oauth2-redirect",
+              "/openapi.json", "/redoc")
 
 
 class GatewayConfigError(RuntimeError):
@@ -109,22 +123,33 @@ def is_open_path(path: str) -> bool:
     return base in OPEN_PATHS or base == ""
 
 
-def enforcing() -> bool:
+ENFORCE_ENV = "TOOL_GATEWAY_ENFORCE"                  # research-api
+ENFORCE_ENV_MARKET = "TOOL_GATEWAY_ENFORCE_MARKET"    # market-api (별도 스위치)
+
+
+def enforcing(env_var: str = ENFORCE_ENV) -> bool:
     """강제 모드. 기본은 기록만 - 기존 호출자가 헤더를 아직 안 붙인다.
 
     끄고 켜는 스위치를 둔 이유: 강제부터 켜면 파이프라인이 통째로 멈춘다.
     다만 **기본이 무강제라는 사실이 응답 헤더로 드러나야** 한다(아래 미들웨어).
+
+    ▶ 서비스마다 스위치가 따로다 (2026-08-02)
+      research-api 는 호출자가 전부 우리 부서 코드라 강제로 올렸다. market-api
+      는 다르다 - 퀀트본부와 **팀원이 8036 을 직접 조회**한다. 같은 스위치를
+      쓰면 research 를 강제로 올리는 순간 팀원 조회가 403 이 된다. 그래서
+      market-api 는 자기 변수로 따로 켠다(기본 관찰).
     """
-    return os.environ.get("TOOL_GATEWAY_ENFORCE", "").lower() in ("1", "true", "yes")
+    return os.environ.get(env_var, "").lower() in ("1", "true", "yes")
 
 
-def install(app, *, config_path: Path | None = None) -> None:
+def install(app, *, config_path: Path | None = None,
+            env_var: str = ENFORCE_ENV) -> None:
     """FastAPI 앱에 게이트웨이를 붙인다."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
     allow, forbid = load_allowlist(config_path)
-    enforce = enforcing()
+    enforce = enforcing(env_var)
 
     class _Gateway(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):

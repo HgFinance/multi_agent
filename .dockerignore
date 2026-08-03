@@ -1,0 +1,18 @@
+# 저장소 루트 .dockerignore
+#
+# 담당: 동규 (리스크/QA) — risk-api/audit-api가 부서 경계를 넘어 import하기 때문에
+# (departments/02-trading/contracts, skills/agentic-rag, apps/observability) 두 Dockerfile은
+# build context를 저장소 루트(.)로 쓴다. 이 파일이 없으면 ai-office/node_modules(~760MB)까지
+# 매 빌드마다 Docker Daemon에 업로드된다.
+#
+# COPY는 각 Dockerfile이 필요한 경로만 명시하므로, 여기서는 "업로드 자체를 줄이는 것"만 한다.
+
+.git
+ai-office/node_modules
+ai-office/.next
+graphify-out
+**/__pycache__
+**/*.pyc
+.venv
+venv
+node_modules

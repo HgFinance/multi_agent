@@ -50,7 +50,10 @@ from typing import Callable, Literal, Optional
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from narrative_guard import audit_narrative  # noqa: E402
+from llm_client import chat as llm_chat  # noqa: E402
+from number_guard import caution_lines, flag_unmatched  # noqa: E402
+from llm_client import narrate as llm_narrate  # noqa: E402
+from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
 
 PERSONA = "geopolitical-analyst"   # 부서 허용목록 키
 AGENT_VERSION = "research-geopolitical-analyst-v1"
@@ -362,35 +365,17 @@ def narrate(readout: dict, llm: Optional[Callable] = None) -> GeoNote:
               f"Allowed metric keys: {json.dumps(allowed)}\n"
               f"Geopolitical readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
-    call = llm or _ollama_call
-    last_err = None
-    for attempt in range(2):
-        text = call(_SYSTEM, prompt if attempt == 0 else
-                    prompt + f"\n\nYour previous output failed validation: {last_err}. "
-                             f"Return ONLY valid JSON for the schema.")
-        try:
-            start, end = text.find("{"), text.rfind("}")
-            return GeoNote.model_validate_json(text[start:end + 1])
-        except (ValidationError, ValueError) as e:
-            last_err = str(e)[:200]
-    raise RuntimeError(f"LLM 서술이 Schema 를 두 번 어겼다: {last_err}")
+    return llm_narrate(_SYSTEM, prompt, GeoNote, llm or _ollama_call)
 
 
 def _ollama_call(system: str, user: str) -> str:
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }).encode(),
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
+
+    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
+    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
+    """
+    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
+                    timeout=LLM_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -428,17 +413,11 @@ def verify(note: GeoNote, readout: dict) -> tuple[GeoNote, dict]:
         else:
             dropped["hallucinated_metrics"].append(k)
 
-    pool = _number_pool(readout)
-    for rx in (_PCT_RE, _RATIO_RE):
-        for m in rx.finditer(note.summary):
-            x = float(m.group(1))
-            if not any(abs(x - v) <= 0.1 or abs(x + v) <= 0.1 for v in pool):
-                dropped["flagged_numbers"].append(m.group(0))
-
-    cautions = list(note.cautions)
-    for f in dropped["flagged_numbers"]:
-        cautions.append(f"[숫자검증] summary 의 {f} 는 readout 수치와 불일치"
-                        f"(±0.1 밖) - 해당 문장 신뢰 금지")
+    # 숫자 대조 규칙은 evidence/number_guard 가 단일 출처다 - 분석가마다
+    # 다른 정규식을 두면 그 차이가 곧 검증 구멍이 된다(2026-08-02).
+    dropped["flagged_numbers"] = flag_unmatched(note.summary,
+                                               _number_pool(readout))
+    cautions = list(note.cautions) + caution_lines(dropped["flagged_numbers"])
 
     label = note.risk_label
     code_label = readout.get("risk_label")
@@ -468,13 +447,7 @@ def verify(note: GeoNote, readout: dict) -> tuple[GeoNote, dict]:
             f"주문을 지시하지 않는다(RES-09 금지). 해당 문장은 근거로만 취급")
 
     dropped["label_flags"] = audit_narrative(note.summary, readout)
-    for lf in dropped["label_flags"]:
-        if lf["check"] == "percentile_literal":
-            cautions.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
-        else:
-            cautions.append(
-                f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} 수치인데 "
-                f"같은 문장에 다른 지표 라벨 '{lf['forbidden_hit']}' - 오서술 의심")
+    cautions += label_caution_lines(dropped["label_flags"])
 
     return (note.model_copy(update={"risk_label": label, "driver": driver,
                                     "used_metrics": kept, "cautions": cautions}),

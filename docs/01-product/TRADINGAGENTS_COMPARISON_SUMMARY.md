@@ -48,7 +48,7 @@ TradingAgents는 **한 종목·한 시점의 투자 판단을 만드는 연구�
 - “전 종목 실시간 헤지펀드 플랫폼” → **전 종목 실시간 운용을 목표로 하는 초기 구현 플랫폼**
 - “TradingAgents에는 Risk Engine/OMS/Ledger가 없다” → **TradingAgents 공개 baseline의 핵심은 연구 판단 흐름이며, 우리처럼 독립적인 결정론적 Risk·OMS·Ledger Control Plane을 제품 경계로 두지는 않는다**
 - “2~10초 판단 지연” → **목표 SLO**. 실측 전에는 성능 차별점으로 주장하지 않는다.
-- “Bedrock Production + Ollama” → 현재 Profile baseline은 `Nous / poolside/laguna-s-2.1:free`이므로, 실제 운영 Provider가 확정되기 전에는 목표 스택으로 표기한다.
+- “Bedrock Production + Ollama” → 2026-08-03 Git에는 Nous Profile 6개와 미승인 OpenAI-Codex Risk·QA Profile 2개가 섞여 있다. Profile Contract Check도 실패하므로 실제 운영 Provider가 확정되기 전에는 목표 스택으로만 표기한다.
 - “전 종목 실시간 파이프라인 구현” → LS 실시간 수집과 적재 검증 및 설계는 있으나, 전 종목 Feature·Priority Queue·Agent Router·Paper 체결까지 연결됐다고 쓰지 않는다.
 
 ## 차별성을 증명할 최소 Acceptance Scenario

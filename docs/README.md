@@ -2,25 +2,25 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [Risk/QA Rollout](02-engineering/RISK_QA_TEST_AND_PRODUCTION_ROLLOUT.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
 
 ## 현재 상태
 
-이 저장소는 **실행 중인 리서치 Data Plane과 본부별 Prototype을 통합하는 단계**다. 완전한 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 존재한다. 팀원별 진척도, 실제 실행 증거, 애로사항, 선행 의존성과 다음 작업은 [실행 현황과 통합 계획 v2.0](PROJECT_IMPLEMENTATION_STATUS.md)을 단일 기준으로 확인한다.
+이 저장소는 **실행 중인 리서치 Data Plane·Hermes와 Risk/QA 구현을 전사 Runtime으로 통합하는 단계**다. 완전한 End-to-End 서비스는 아직 없지만 다음 실행 가능한 기반은 존재한다. 팀원별 2주 계획과 Daily Scrum, 실제 실행 증거, 애로사항, 선행 의존성과 다음 작업은 [실행 현황과 통합 계획 v2.2](PROJECT_IMPLEMENTATION_STATUS.md)을 단일 기준으로 확인한다.
 
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
 - Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
-- Docker에서 실행 중인 LS 전 종목 WebSocket·뉴스·Batch Collector, `market-api`, `research-api`와 TimescaleDB
+- Docker에서 실행 중인 LS 전 종목 WebSocket·뉴스·Batch Collector, API, Research MCP, Research·Quant Hermes와 TimescaleDB 등 기본 10개 Service
 - LS 종목 Master·구독 계획·실시간 Payload 정규화, DART·거시·Calendar·Corporate Action·뉴스 수집 Adapter
 - Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
 - 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype
-- Evidence QA, Trace, Tool Permission, Ops Health, Incident와 `compliance-policy-agent` Agentic RAG Baseline
+- Risk P1, Risk·QA Repository·Redis Event·Harness·Replay, QA Model Risk·Internal Audit와 Agentic RAG 회복성
 - LS증권 Open API의 REST·WebSocket 개발 참조 문서
 - OpenDART 85개 API의 공시·재무·지분·주요사항 요청·응답 참조 문서
 - KRX Data Marketplace 31개 API의 지수·주식·증권상품·채권·파생상품·일반상품·ESG 요청·응답 참조 문서
 - SerpApi 전체 Search Engine 카탈로그와 뉴스·웹·트렌드·학술·특허·영상의 수집·Evidence 승격 가이드
 - PIT Dataset, Backtest, Walk-Forward와 Experiment Orchestrator 및 실제 Quant Experiment 기록
-- 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot과 Read-only FastAPI BFF
+- 8개 조직·2개 층의 `ai-office`, Trading/Portfolio DEMO Snapshot, Risk·QA 계약 Panel과 Read-only BFF
 - Hermes Kanban을 Agent 상태 Source로 사용하는 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 - 공식 X API 기반 유명 인사 Social Insight Watchlist와 교차 검증 계획(P1, 미구현)
 

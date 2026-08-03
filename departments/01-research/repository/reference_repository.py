@@ -151,6 +151,55 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
     )
 
 
+def fact_key(fact) -> tuple:
+    """financial_facts 의 멱등 키 중 revision 을 뺀 부분.
+
+    revision 은 이 키 안에서 rcept_no 순서로 매겨진다 - 그래서 키에서 뺀다.
+    """
+    return (fact.corp_code, fact.account_code, str(fact.period_end),
+            fact.period_type, fact.consolidation_scope)
+
+
+def assign_revisions(facts: list, known: dict) -> tuple[list, int]:
+    """각 fact 에 revision 을 매긴다. (revision 목록, 새 개정 수).
+
+    known: {fact_key: {rcept_no: revision}} - DB 에 이미 있는 것.
+    규칙 (순수 함수라 자체 점검이 전부 검사한다):
+      - 같은 rcept_no 가 이미 있으면 **그 revision 을 그대로 쓴다**(재수집 멱등).
+      - 새 rcept_no 면 그 키의 max(revision)+1 (없으면 1).
+      - 한 배치 안에 같은 키의 rcept_no 가 여럿이면 **rcept_no 오름차순**으로
+        번호를 준다 - 접수번호 앞 8자리가 접수일이라 나중 접수가 큰 수다.
+      - rcept_no 가 없으면 revision 1 - 개정 순서를 매길 근거가 없으므로
+        원본 자리에 둔다(그 자리에 이미 다른 문서가 있으면 덮지 않는다).
+
+    **원본을 지우지 않는 것이 이 함수의 목적이다.** 정정본은 새 행이 된다.
+    """
+    # 키별로 (rcept_no -> revision) 을 알려진 것에서 시작해 채워 나간다
+    table: dict = {k: dict(v) for k, v in (known or {}).items()}
+    fresh = 0
+
+    # 배치 안에서도 접수번호 순서로 처리해야 번호가 시간 순서와 맞는다
+    order = sorted(range(len(facts)),
+                   key=lambda i: (fact_key(facts[i]),
+                                  str(getattr(facts[i], "rcept_no", "") or "")))
+    revisions = [1] * len(facts)
+    for i in order:
+        f = facts[i]
+        k = fact_key(f)
+        rc = str(getattr(f, "rcept_no", "") or "").strip()
+        seen = table.setdefault(k, {})
+        if not rc:
+            revisions[i] = 1
+            continue
+        if rc in seen:
+            revisions[i] = seen[rc]
+            continue
+        revisions[i] = (max(seen.values()) + 1) if seen else 1
+        seen[rc] = revisions[i]
+        fresh += 1
+    return revisions, fresh
+
+
 class ReferenceRepository(ABC):
     """Instrument Master 경계. 영구 instrument_id 는 이 뒤에서만 발급된다."""
 
@@ -708,9 +757,24 @@ class SupabaseReferenceRepository(ReferenceRepository):
         """research.financial_facts 에 적재한다. (신규, 갱신, issuer 미연결).
 
         멱등 키는 unique (issuer_id, source_id, account_code, period_end, period_type,
-        consolidation_scope, revision) 이다. revision 은 1 로 고정한다 - 정정 재무제표는
-        rcept_no 가 다르지만 어느 것이 나중 개정본인지 판정하는 규칙을 아직 정하지
-        않았다. 규칙 없이 revision 을 올리면 PIT 조회가 어긋난다.
+        consolidation_scope, revision) 이다.
+
+        ▶ 정정 재무제표는 **원본을 덮지 않고 새 revision 으로 쌓는다** (2026-08-02)
+          예전에는 revision 을 1 로 고정하고 conflict 시 value·observed_at 까지
+          덮어썼다. 그래서 DART 정정본이 들어오면 **최초 보고치와 그 관측
+          시각이 사라졌다.** 그러면 정정 이전 시점의 Backtest·Packet 재현이
+          미래 수치를 보게 된다 - DATA_GOVERNANCE_GUIDE 9절이 직접 금지하는
+          상황이고, 우리가 가진 유일하게 강한 PIT 축(observed_at <= as_of)이
+          재무에서만 뚫려 있었다.
+
+          개정 순서는 **rcept_no 오름차순**이다(앞 8자리가 접수일이라 나중
+          접수가 큰 수 - opendart_financial.published_at_from_rcept 와 같은
+          근거). 같은 rcept_no 를 다시 수집하면 같은 revision 이라 멱등이고,
+          새 rcept_no 는 max+1 로 append 된다.
+
+          conflict 시에도 **value·observed_at·published_at 을 덮지 않는다** -
+          같은 revision 이면 같은 문서에서 온 같은 값이므로 덮을 이유가 없고,
+          덮을 이유가 있는 상황이라면 그건 새 revision 이어야 한다.
 
         issuer 가 없는 행은 적재하지 않는다 - issuer_id 가 NOT NULL FK 다.
         """
@@ -733,20 +797,44 @@ class SupabaseReferenceRepository(ReferenceRepository):
                 )
                 doc_by_rcept = {e: d for e, d in cur.fetchall()}
 
+            # 이미 있는 (키, rcept_no) -> revision 을 읽어 개정 순서를 잇는다.
+            # metadata.rcept_no 로 대조한다 - 전용 컬럼이 없어서다(백로그).
+            known: dict = {}
+            if codes:
+                cur.execute("""
+                    select iss.corp_code, ff.account_code, ff.period_end::text,
+                           ff.period_type, ff.consolidation_scope,
+                           ff.metadata->>'rcept_no', ff.revision
+                    from research.financial_facts ff
+                    join reference.issuers iss using (issuer_id)
+                    where ff.source_id = %s and iss.corp_code = any(%s)
+                """, (source_id, codes))
+                for corp, acct, pe, pt, scope, rc, rev in cur.fetchall():
+                    if not rc:
+                        continue
+                    known.setdefault((corp, acct, pe, pt, scope), {})[rc] = int(rev)
+
+            revisions, fresh_revisions = assign_revisions(facts, known)
+
             rows = []
             unlinked = 0
-            for f in facts:
+            for f, rev in zip(facts, revisions):
                 iid = issuer_by_corp.get(f.corp_code)
                 if iid is None:
                     unlinked += 1
                     continue
+                meta = dict(f.metadata or {})
+                # rcept_no 를 metadata 에 남긴다 - 다음 수집이 개정 순서를 이으려면
+                # '이 행이 어느 접수번호에서 왔는지'가 있어야 한다
+                if f.rcept_no:
+                    meta.setdefault("rcept_no", f.rcept_no)
                 rows.append(
                     (
                         iid, source_id, f.account_code, f.account_name,
                         None, f.period_end, f.period_type, f.consolidation_scope,
-                        f.value, f.unit, f.currency, f.published_at, f.observed_at, 1,
+                        f.value, f.unit, f.currency, f.published_at, f.observed_at, rev,
                         doc_by_rcept.get(f.rcept_no),
-                        json.dumps(f.metadata, ensure_ascii=False),
+                        json.dumps(meta, ensure_ascii=False),
                     )
                 )
             if not rows:
@@ -763,13 +851,16 @@ class SupabaseReferenceRepository(ReferenceRepository):
                 values %s
                 on conflict (issuer_id, source_id, account_code, period_end,
                              period_type, consolidation_scope, revision) do update set
-                  value = excluded.value,
-                  account_name = excluded.account_name,
-                  published_at = excluded.published_at,
-                  observed_at = excluded.observed_at,
+                  -- **value·observed_at·published_at 을 덮지 않는다.**
+                  -- 같은 revision 이면 같은 접수번호에서 온 같은 값이라 덮을
+                  -- 이유가 없고, 값이 달라졌다면 그건 정정이므로 새 revision 으로
+                  -- 가야 한다(assign_revisions). 관측 시각을 덮으면 그 순간
+                  -- observed_at <= as_of 재현이 미래를 보게 된다.
+                  account_name = coalesce(research.financial_facts.account_name,
+                                          excluded.account_name),
                   source_document_id = coalesce(excluded.source_document_id,
                                                research.financial_facts.source_document_id),
-                  metadata = excluded.metadata
+                  metadata = research.financial_facts.metadata || excluded.metadata
                 """,
                 rows,
                 page_size=500,
@@ -1246,6 +1337,79 @@ def _check_numeric_parsing():
     print("  수량 단위 파싱              OK")
 
 
+class _F:
+    """assign_revisions 점검용 최소 fact - 실제 FinancialFact 의 키 필드만."""
+
+    def __init__(self, corp, acct, pe, rcept, pt="ANNUAL", scope="CONSOLIDATED"):
+        self.corp_code, self.account_code, self.period_end = corp, acct, pe
+        self.period_type, self.consolidation_scope = pt, scope
+        self.rcept_no = rcept
+
+
+def _check_revision_assignment():
+    """정정본이 원본을 덮지 않고 새 revision 으로 쌓이는가.
+
+    2026-08-02 이전에는 revision 이 1 로 고정이고 conflict 시 value·observed_at
+    까지 덮어써서, DART 정정 재무제표가 들어오면 최초 보고치와 관측 시각이
+    사라졌다 - 정정 이전 시점의 재현이 미래 수치를 보게 되는 PIT 위반이다.
+    """
+    # 최초 보고 - 아무것도 모르는 상태에서 revision 1
+    a = _F("00126380", "IS:매출액", "2025.12.31", "20260315000001")
+    rev, fresh = assign_revisions([a], {})
+    assert rev == [1] and fresh == 1, (rev, fresh)
+
+    # 같은 접수번호 재수집 = 같은 revision (멱등 - 새 행이 생기면 안 된다)
+    known = {fact_key(a): {"20260315000001": 1}}
+    rev2, fresh2 = assign_revisions([a], known)
+    assert rev2 == [1] and fresh2 == 0, (rev2, fresh2)
+
+    # **정정본(다른 rcept_no)은 revision 2** - 원본은 그대로 남는다
+    b = _F("00126380", "IS:매출액", "2025.12.31", "20260520000009")
+    rev3, fresh3 = assign_revisions([b], known)
+    assert rev3 == [2] and fresh3 == 1, (rev3, fresh3)
+
+    # 한 배치에 원본·정정본이 같이 와도 접수번호 오름차순으로 번호가 붙는다
+    rev4, _ = assign_revisions([b, a], {})     # 일부러 역순 입력
+    assert rev4 == [2, 1], f"접수번호 순서가 revision 순서여야 한다: {rev4}"
+
+    # 키가 다르면 서로의 revision 에 영향을 주지 않는다
+    other = _F("00126380", "IS:영업이익", "2025.12.31", "20260520000009")
+    rev5, _ = assign_revisions([other], known)
+    assert rev5 == [1], "다른 계정인데 남의 개정 순서를 물려받았다"
+    # 기간이 달라도 마찬가지
+    prev_year = _F("00126380", "IS:매출액", "2024.12.31", "20260520000009")
+    assert assign_revisions([prev_year], known)[0] == [1]
+
+    # rcept_no 가 없으면 1 - 개정 순서를 매길 근거가 없다(지어내지 않는다)
+    norc = _F("00126380", "IS:매출액", "2025.12.31", "")
+    assert assign_revisions([norc], known)[0] == [1]
+
+    # 3차 정정까지 - 접수번호가 커질수록 revision 이 는다
+    k2 = {fact_key(a): {"20260315000001": 1, "20260520000009": 2}}
+    c = _F("00126380", "IS:매출액", "2025.12.31", "20260801000003")
+    assert assign_revisions([c], k2)[0] == [3]
+    print("  정정 revision 배정       OK")
+
+
+def _check_upsert_preserves_original():
+    """SQL 이 원본의 value·observed_at 을 덮지 않는가 - 문자열로 강제한다.
+
+    이 규칙이 무너지면 조용히 PIT 가 뚫리므로, 실제 DB 없이도 계약을 지킨다.
+    """
+    import inspect
+
+    src = inspect.getsource(SupabaseReferenceRepository.upsert_financial_facts)
+    body = src[src.index("on conflict (issuer_id"):]
+    for forbidden in ("value = excluded.value",
+                      "observed_at = excluded.observed_at",
+                      "published_at = excluded.published_at"):
+        assert forbidden not in body, \
+            f"정정본이 원본을 덮는다: '{forbidden}' - 새 revision 으로 가야 한다"
+    assert "assign_revisions(facts, known)" in src, \
+        "revision 이 다시 고정값이 됐다 - 정정본이 원본 자리를 차지한다"
+    print("  원본 보존 SQL 계약       OK")
+
+
 def _check_ingest_result_invariant():
     r = IngestResult(
         attempted=10, instruments_inserted=7, instruments_updated=1,
@@ -1298,5 +1462,7 @@ if __name__ == "__main__":
     print(f"{REPOSITORY_VERSION} 자체 점검 (DB 없이)")
     _check_mapping()
     _check_numeric_parsing()
+    _check_revision_assignment()
+    _check_upsert_preserves_original()
     _check_ingest_result_invariant()
-    print("Reference Repository 3개 영역 통과. 실제 적재는 --ingest")
+    print("Reference Repository 5개 영역 통과. 실제 적재는 --ingest")
