@@ -718,7 +718,17 @@ JSON 객체 하나만 반환한다 - 설명 문장이나 코드펜스를 앞뒤�
                             ("thesis", "facts", "interpretation")},
                            ensure_ascii=False)
     packet["numeric_check"] = verify_narrative_numbers(
-        narrative, {"price": price_ctx, "analysts": analysts})
+        narrative,
+        # ▶ 우리가 준 근거의 수치도 확정치다 (2026-08-03)
+        #   Opus 전환 후 불일치가 23건 중 9건으로 늘었는데, 확인해 보니 대부분이
+        #   **우리가 프롬프트에 넣은 뉴스 제목의 숫자**였다("7월 판매 5.1% 감소
+        #   [n6]"). 우리가 준 것을 인용했는데 창작으로 몰면 가드가 거짓말을 하고,
+        #   그러면 사람이 가드를 무시한다. 근거 제목을 풀에 넣는다 -
+        #   **정당하게 준 것이 화이트리스트에 들어간다**는 도구 계층과 같은 원칙이다.
+        {"price": price_ctx, "analysts": analysts,
+         "evidence_titles": [i.get("title") for k in
+                             ("news_headlines", "disclosures_7d")
+                             for i in (bundle.get(k) or []) if isinstance(i, dict)]})
 
     # 결정론 가드 3: 사실 서술에 확정치 밖 수치가 있으면 evidence_quality 를
     # **강등**한다. 실측 2026-08-02: 총괄이 매출 +18.3%·영업이익 +12.7% 를

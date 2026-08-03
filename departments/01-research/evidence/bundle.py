@@ -335,6 +335,16 @@ def verify_narrative_numbers(text: str, confirmed: dict,
     """
     allowed: set = set()
     _collect_numbers(confirmed, allowed)
+    # ▶ 근거 **제목 문자열 안의 수치**도 확정치다 (2026-08-03)
+    #   _collect_numbers 는 수치형만 본다. 그런데 우리가 프롬프트에 넣은 뉴스
+    #   제목("7월 판매 5.1% 감소")은 문자열이라 풀에 안 들어갔고, 총괄이 그것을
+    #   정확히 인용했는데 창작으로 몰렸다. **우리가 준 것을 인용했는데 창작이라
+    #   하면 가드가 거짓말을 하고, 그러면 사람이 가드를 무시한다.**
+    for t in (confirmed or {}).get("evidence_titles") or []:
+        for m in _PCT_RE.finditer(str(t)):
+            allowed.add(float(m.group(1)))
+        for m in _COUNT_RE.finditer(str(t)):
+            allowed.add(float(m.group(1)))
     nums = [float(m.group(1)) for m in _PCT_RE.finditer(text or "")]
     unmatched = [n for n in nums
                  if not any(abs(abs(n) - abs(a)) <= tolerance for a in allowed)]
