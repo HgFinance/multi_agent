@@ -15,15 +15,18 @@ approval.py의 도메인 규칙(권한 분리, 만료 거절, 자동 승인 금�
   2. `actor_user_id`는 governance.user_profiles FK다. 사람 승인이 아니면 None으로 넣는다 -
      플레이스홀더 회원으로 채우면 감사 기록이 거짓이 된다(approval.py decide() 주석 참고).
 
-2026-08-03 실측으로 확인한 두 제약(설계 문서에는 없다):
+2026-08-03 실측으로 확인한 제약(설계 문서에는 없다):
   - `actor_agent_id`는 uuid이며 **workforce.agent_profiles FK**다. 같은 마이그레이션 파일
     359행의 `alter table ... add constraint approvals_actor_agent_fk`로 뒤늦게 붙어 있어
-    create table 블록만 읽으면 놓친다. 즉 승인을 **결정한 Agent는 Roster에 등록돼 있어야 한다.**
-  - 그런데 workforce.agent_profiles에는 HR 5명·QA 8명·Risk 6명만 있고 **CEO Office 부서와
-    CEO Agent가 없다.** 그래서 실제 CEO 승인을 감사 추적이 남는 형태로 기록하려면 CEO Agent
-    등록이 선행돼야 한다(GOV-02 2단계에서 처리, 인사팀 소관).
-    아래 자체 점검은 그 등록 전에도 SQL 왕복을 검증할 수 있게 이미 등록된 Agent 하나를
-    빌려 쓴다 - 권한 규칙 자체는 순수 함수인 approval.py 자체 점검이 검증한다.
+    create table 블록만 읽으면 놓친다. 즉 이 칸을 채우려면 Agent가 Roster에 등재돼 있어야 한다.
+  - workforce.agent_profiles에는 HR 5명·QA 8명·Risk 6명만 있고 CEO Agent는 없다. 그리고
+    Agent Roster 등재는 전체 Prototype 이후로 미루기로 했다(2026-08-04 팀 결정) - 그때까지
+    hermes/config.yaml이 Agent 정의의 기준이다.
+  - 따라서 이 칸은 **대부분의 결정에서 NULL로 남는다**(nullable이라 DB는 허용한다). 결정
+    주체 부서는 approval.py decide()가 conditions._decider에 기록한다 - approvals에 부서
+    컬럼이 아예 없어서 그마저 없으면 감사 추적이 통째로 사라진다.
+    아래 자체 점검은 두 경로를 다 검증한다: 등재된 Agent를 빌려 FK가 실제로 작동하는 경우와,
+    actor_agent_id 없이 부서만 남기는 경우(지금의 기본 경로).
 
 자체 점검: python departments/00-ceo-office/src/approval/postgres_approval_repository.py
   - DATABASE_URL(또는 GOVERNANCE_WORKFORCE_DATABASE_URL) 없으면 import만 확인한다.
@@ -259,10 +262,11 @@ if __name__ == "__main__":
         assert reloaded.decision is ApprovalDecision.APPROVED
         assert reloaded.actor_agent_id == decider_agent_id
         assert reloaded.actor_user_id is None
-        assert reloaded.conditions == {"note": "selfcheck"}
+        assert reloaded.conditions["note"] == "selfcheck"
+        assert reloaded.conditions["_decider"] == {"department": "CEO-OFFICE"}
         assert reloaded.decided_at is not None
         print(f"ok - 결정 기록 (실 DB) 통과 - actor_user_id는 None 유지, "
-              f"actor_agent_id는 등록된 {decider_code} 차용")
+              f"actor_agent_id는 등재된 {decider_code} 차용, _decider 부서 기록 확인")
 
         # 3b) 미등록 Agent uuid로는 결정을 기록할 수 없다 - approvals_actor_agent_fk 확인.
         try:
@@ -272,7 +276,15 @@ if __name__ == "__main__":
             raise
         except Exception:
             pass
-        print("ok - 미등록 Agent 차단(approvals_actor_agent_fk) 확인")
+        print("ok - 미등재 Agent 차단(approvals_actor_agent_fk) 확인")
+
+        # 3c) Roster 미등재가 기본인 지금의 실제 경로 - actor_agent_id 없이 부서만 남긴다.
+        #     이게 CEO 승인의 기본 경로이므로 실 DB에서 반드시 동작해야 한다.
+        repo.save(replace(reloaded, actor_agent_id=None))
+        no_agent = repo.get(approval_id)
+        assert no_agent.actor_agent_id is None and no_agent.actor_user_id is None
+        assert no_agent.conditions["_decider"] == {"department": "CEO-OFFICE"}
+        print("ok - Agent 미등재 경로(actor_agent_id=NULL + _decider 부서) 실 DB 저장 확인")
 
         # 4) DB의 unique 제약이 실제로 막는지 - 같은 대상·역할에 다른 approval_id (불변식 1).
         try:

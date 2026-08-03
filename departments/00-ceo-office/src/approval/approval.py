@@ -188,6 +188,14 @@ def decide(
     actor_user_id는 '사람이 찍은 승인'일 때만 채운다. governance.user_profiles가 비어 있는
     동안에는 None으로 두고, 절대 플레이스홀더 회원으로 조용히 채우지 않는다 - 그러면 감사
     기록에 '사람이 승인했다'고 남는데 실제로는 아무도 승인하지 않은 상태가 된다.
+
+    결정 주체 부서는 conditions["_decider"]에 함께 기록한다. governance.approvals에는
+    부서 컬럼이 아예 없어서(actor_user_id/actor_agent_id 둘뿐) 그냥 두면 "어느 부서가
+    결정했는지"가 어디에도 남지 않는다. 게다가 actor_agent_id는 workforce.agent_profiles
+    FK인데 Agent Roster 등재를 Prototype 이후로 미뤘으므로(2026-08-04 팀 결정) 대부분의
+    결정에서 그 칸이 비게 된다 - 그 상태로 부서까지 잃으면 감사 추적이 통째로 사라진다.
+    **제거 조건**: approvals에 부서 컬럼이 생기거나 Roster 등재가 끝나 actor_agent_id로
+    결정 주체를 특정할 수 있게 되면 이 _decider 기록을 그쪽으로 옮긴다.
     """
     if decision not in _DECIDABLE:
         raise ValueError(
@@ -207,10 +215,13 @@ def decide(
             f"(approval_id={approval.approval_id})"
         )
 
+    merged_conditions = dict(conditions if conditions is not None else (approval.conditions or {}))
+    merged_conditions["_decider"] = {"department": normalize_department(actor_department)}
+
     return replace(
         approval, decision=decision, decided_at=at,
         actor_agent_id=actor_agent_id, actor_user_id=actor_user_id,
-        conditions=conditions if conditions is not None else approval.conditions,
+        conditions=merged_conditions,
         reason=reason if reason is not None else approval.reason,
     )
 
@@ -232,9 +243,12 @@ def revoke(
         raise AlreadyDecidedError(
             f"APPROVED만 철회할 수 있다 (현재: {approval.decision.value})"
         )
+    revoke_conditions = dict(approval.conditions or {})
+    revoke_conditions["_decider"] = {"department": normalize_department(actor_department)}
     return replace(
         approval, decision=ApprovalDecision.REVOKED, decided_at=at, reason=reason,
         actor_agent_id=actor_agent_id, actor_user_id=actor_user_id,
+        conditions=revoke_conditions,
     )
 
 
@@ -333,6 +347,16 @@ if __name__ == "__main__":
     assert approved.decision is ApprovalDecision.APPROVED
     assert approved.actor_agent_id == ceo_agent_id
     assert approved.actor_user_id is None  # 사람 승인 아님 - 조용히 채우지 않는다
+    # 결정 부서는 approvals에 컬럼이 없어 conditions._decider에 남는다.
+    assert approved.conditions["_decider"] == {"department": "CEO-OFFICE"}
+
+    # 2b) Agent Roster 미등재 상태(actor_agent_id=None)에서도 결정 부서는 남아야 한다.
+    no_agent = decide(
+        _pending(RequiredRole.CEO), decision=ApprovalDecision.APPROVED,
+        actor_department="ceo_office".replace("_", "-"), at=t0,
+    )
+    assert no_agent.actor_agent_id is None and no_agent.actor_user_id is None
+    assert no_agent.conditions["_decider"] == {"department": "CEO-OFFICE"}
 
     # 3) 핵심 권한 분리 - CEO Office가 RISK 승인을 결정하려 하면 거절 (불변식 2).
     risk_req = _pending(RequiredRole.RISK)
@@ -439,4 +463,4 @@ if __name__ == "__main__":
     repo.save(_pending(RequiredRole.RISK))
     assert len(repo.list_by_object(ObjectType.AGENT_PROFILE_VERSION, "pv-1")) == 2
 
-    print("ok - GOV-02 승인 도메인 계약 13개 시나리오 통과")
+    print("ok - GOV-02 승인 도메인 계약 14개 시나리오 통과")
