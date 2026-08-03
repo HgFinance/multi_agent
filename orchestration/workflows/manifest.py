@@ -9,7 +9,6 @@ import yaml
 
 from .contracts import StepSpec, WorkflowContractError, WorkflowSpec
 
-
 WORKFLOW_DIR = Path(__file__).resolve().parent
 INDEX_PATH = WORKFLOW_DIR / "index.yaml"
 

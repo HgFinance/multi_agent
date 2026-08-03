@@ -1,23 +1,16 @@
 # Cross-department workflow registry.
-#
-# Detailed, versioned contracts live under orchestration/workflows/.  This
-# file remains the compatibility entrypoint for existing Hermes documentation
-# and commands; it must not contain department business logic.
+# Detailed contracts live under orchestration/workflows/.
 version: multi-agent-workflow-v2
-description: >-
-  HgFinance의 5개 분리 흐름과 동적 이벤트 라우팅을 등록한다. 실시간 투자
-  Case와 전략 연구·HR 흐름을 섞지 않는다.
+description: "HgFinance 5개 분리 Workflow와 동적 Event Routing registry"
 canonical_workflow_index: orchestration/workflows/index.yaml
 
 model:
   provider: nous
-  name: poolside/laguna-s-2.1:free
-  note: Hermes Profile의 모델 설정은 각 departments/<n>/hermes/config.yaml을 따른다.
+  name: "poolside/laguna-s-2.1:free"
+  note: "Hermes Profile의 모델 설정은 각 departments/<n>/hermes/config.yaml을 따른다."
 
-# 기존 키 이름을 유지한 manifest 포인터다. 실제 순서·계약·안전 게이트는
-# 각 manifest에서 관리한다.
 workflow:
-  name: AI 트레이딩 신호 검증 및 집행 프로세스
+  name: "AI 트레이딩 신호 검증 및 집행 프로세스"
   manifest: orchestration/workflows/investment-case.yaml
   order: [research, trading, risk, qa, oms-fill-gate, accounting, ceo]
   timeout_seconds: 450
@@ -44,17 +37,17 @@ event_routing:
 
 usage:
   single_department:
-    research: research-department chat -q 'Build a Research Packet for [종목]'
-    trading: trading-department chat -q 'Propose a trade for [종목]'
-    risk: risk-management chat -q 'Assess risk: [포지션 정보]'
-    qa: qa-department chat -q 'Validate: [AI 신호 내용]'
-    quant: quant-backtest-department chat -q 'Backtest [전략 가설]'
-    accounting: accounting-portfolio-department chat -q 'Reconcile fills and compute PnL'
-    ceo: ceo-agent chat -q 'Summarize current portfolio decisions and open risks'
-    hr: hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'
+    research: "research-department chat -q 'Build a Research Packet for [종목]'"
+    trading: "trading-department chat -q 'Propose a trade for [종목]'"
+    risk: "risk-management chat -q 'Assess risk: [포지션 정보]'"
+    qa: "qa-department chat -q 'Validate: [AI 신호 내용]'"
+    quant: "quant-backtest-department chat -q 'Backtest [전략 가설]'"
+    accounting: "accounting-portfolio-department chat -q 'Reconcile fills and compute PnL'"
+    ceo: "ceo-agent chat -q 'Summarize current portfolio decisions and open risks'"
+    hr: "hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'"
   boundary_validation:
-    all: python -m orchestration.workflows.runner --workflow investment-case --mode dry-run --json
-    strategy: python -m orchestration.workflows.runner --workflow strategy-research --mode dry-run --json
+    all: "python -m orchestration.workflows.runner --workflow investment-case --mode dry-run --json"
+    strategy: "python -m orchestration.workflows.runner --workflow strategy-research --mode dry-run --json"
 
 files:
   workflow_index: orchestration/workflows/index.yaml
@@ -67,4 +60,3 @@ files:
   accounting_portfolio_department: departments/05-accounting-portfolio/hermes/config.yaml
   qa_department: departments/06-ai-qa-audit/hermes/config.yaml
   news_script: departments/01-research/collectors/news.py
-
