@@ -5,7 +5,7 @@
 이 문서는 전체 투자 파이프라인의 공통 실행 계층을 정의한다.
 
 - 부서장: Hermes Agent가 연결한 상위 LLM(Codex 또는 Claude Code)
-- 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama Qwen3-8B
+- 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama `qwen3:8b` (Risk/QA 현재 고정)
 - 결정론적 엔진: Risk Gate, Evidence QA Gate, PIT·인용·권한·상태 전이의 유일한 바인딩 소유자
 
 ## 전체 파이프라인
@@ -20,7 +20,7 @@ case_request
   → CEO Hermes → ceo_case_summary
 ```
 
-각 부서의 직원 결과는 `worker-context.v1` 형태의 비바인딩 context로 부서장에게 전달된다. 부서장은 결과를 종합하고 서술하지만, 주문·원장·한도·감사 종결을 직접 실행하지 않는다.
+각 부서의 직원 결과는 `worker-context.v1` 형태의 비바인딩 context로 부서장에게 전달된다. 부서장은 결과를 종합하고 서술하지만, 주문·원장·한도·감사 종결을 직접 실행하지 않는다. 직원 모델을 바꿀 때는 `ollama list`로 설치 모델을 확인하고 benchmark와 HR·QA 승인을 거쳐 `OLLAMA_CHAT_MODEL` 및 Profile을 함께 변경한다. 자동 모델 교체는 허용하지 않는다.
 
 ## 호출 경계
 
@@ -61,6 +61,17 @@ case_request
 `EvidenceQaEngine.check_artifact`가 PASS/WARN/FAIL의 유일한 바인딩 소유자다. QA Worker 또는 Hermes는 Claim 결과, Finding 상태, Corrective Action 상태를 변경할 수 없다.
 
 ## 직원 생명주기와 HR 운영
+
+## Worker count와 execution count
+
+`workers`와 각 부서의 `WORKER_SPECS`가 실행 직원 수의 단일 기준이다. 기존 `agent.personalities` 역할명은 Hermes·DB·감사 호환용 Alias이며 런타임 Worker 수에 포함하지 않는다.
+
+| 부서 | Registry 전체 | 기본 실행 | 조건부 실행 | 케이스 최대 |
+|---|---:|---:|---:|---:|
+| Risk | 4 | 2 | 2 | 4 |
+| QA | 5 | 1 | 4 | 5 |
+
+기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다.
 
 Profile에 정의된 직원은 자동으로 실행되는 직원이 아니다. `workers.<id>.status`와 trigger를 기준으로 Registry가 호출 대상을 정한다.
 

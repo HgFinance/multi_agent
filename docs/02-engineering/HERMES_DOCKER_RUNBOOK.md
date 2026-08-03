@@ -249,11 +249,11 @@ docker exec hedgefund-research-hermes hermes -p research-department \
 
 ## 5. 모델·과금
 
-현재 Git 기준 CEO, Research, Trading, Quant, Accounting과 HR 6개 Profile은
-`provider: nous` / `poolside/laguna-s-2.1:free`다. Risk와 QA는
-`provider: openai-codex` / `gpt-5.6-luna`로 변경돼 있다. 이 변경은
-`scripts/check_hermes_profiles.py`의 기대 모델과 일치하지 않아 2026-08-03 검사에서 위반 2건으로
-판정됐다. 의도한 변경인지 `MODEL-03`에서 확정하기 전에는 운영 Baseline으로 승격하지 않는다.
+현재 Git 기준 CEO, Research, Trading, Quant, Accounting과 HR 6개 Profile은 기존 baseline을 유지하고, Risk·QA는 별도 Head/Employee 런타임 계약을 사용한다.
+기존 6개 Profile은 `provider: nous` / `poolside/laguna-s-2.1:free`다. Risk와 QA 부서장은
+`provider: openai-codex` / `gpt-5.6-luna`를 사용하고 `anthropic-claude-code`를 승인된 대체 provider로 둔다. 직원은 Hermes의 `model`과 분리된 LangGraph Worker + Ollama `qwen3:8b`다.
+`scripts/check_hermes_profiles.py`는 부서별 Head 모델과 Employee 모델을 각각 검증해야 하며, 전체 Profile을 하나의 모델로 비교하지 않는다.
+모델 교체는 benchmark와 HR·QA 승인 후 Profile 및 `OLLAMA_CHAT_MODEL`을 함께 변경한다.
 
 Nous Profile은 Portal 로그인, Provider별 API·구독 자격은 해당 Runtime의 승인된 환경변수를 사용한다.
 호스트의 갱신형 자격 파일을 여러 컨테이너가 공유하거나 복사하지 않는다.

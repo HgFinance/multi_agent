@@ -1,5 +1,7 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
+> 2026-08-03 Risk/QA 실행 계층 확정: 부서장은 Hermes + Codex/Claude Code, 직원은 독립 LangGraph Worker + Ollama `qwen3:8b`다. Risk는 4개 Worker(`market-liquidity`, `pre-trade-risk`, `compliance-policy`, `derivatives-counterparty`), QA는 5개 Worker(`evidence-qa`, `hallucination-critic`, `model-and-internal-audit`, `ops-and-permission`, `incident-postmortem`)로 통합했다. 아래 RSK/QAA Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Worker Registry를 따른다.
+
 부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
 > 문서 상태: Agent Organization v1.4

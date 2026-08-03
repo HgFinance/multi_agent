@@ -1,5 +1,7 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
+> 현재 Risk/QA 런타임 기준(2026-08-03): 부서장은 Hermes + Codex/Claude Code, 직원은 독립 LangGraph Worker + Ollama `qwen3:8b`다. Risk 4개 Worker와 QA 5개 Worker의 Profile·Worker Graph 배선은 적용됐으며, 기존 6/8개 역할명은 감사·Profile 호환 Alias다. 실제 Ollama/Hermes 인증·외부 DB·Redis 운영 연결 여부는 실행 증거로 별도 판정한다.
+
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
 > 감사 기준: GitHub `main`의 `a1107c4`, 실행 중인 Docker, 실제 DB와 재실행한 Test
@@ -223,10 +225,9 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 
 - Risk·QA는 Compose Service가 아니며 Canonical Risk Decision과 Run Log가 0건이다.
 - 운영 Credential에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 비어 있다.
-- Risk·QA Hermes 모델은 `openai-codex/gpt-5.6-luna`로 바뀌었지만 Profile Checker 기대값은
-  `nous/poolside/laguna-s-2.1:free`라 계약 검사가 실패한다.
-- QA Script에 `192.168.25.25:11434`가 여전히 하드코딩돼 있다.
-- Risk·QA Profile 14개는 DRAFT/PROBATION 성격이며 Governed Fund·Policy·ACTIVE 승인 경로가 필요하다.
+- Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:8b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
+- QA/Risk Script의 직원 Ollama 주소·모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수로 주입된다. 실제 Ollama Health와 응답 증거는 운영 전 별도 확인한다.
+- Risk·QA의 기존 14개 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 실제 실행 직원 수는 Risk 4개·QA 5개 Worker Registry다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.
 - 생성 보고서의 Git 보존 여부, Canonical Artifact Storage, Report Hash와 Notion Idempotency 정책이 미확정이다.
 
 **다음 작업**
@@ -237,7 +238,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `QA-01` | `IMPLEMENTED` | QA API Container와 Trace/Decision 영속화 | Claim→Evidence→Decision→Finding Replay |
 | `QA-02` | `IMPLEMENTED` | Workforce Tool Allowlist와 실제 Evidence API 연결 | 미허용 Tool 차단과 Trace |
 | `QA-03` | `BLOCKED` | 개인 GPU 주소 제거와 Model Gateway 전환 | 개인 IP 0건, Gateway Trace |
-| `MODEL-03` | `BLOCKED` | Risk·QA Hermes 모델 선언과 Checker 일치 | 8개 Profile Contract Check 통과 |
+| `MODEL-03` | `BLOCKED` | Risk·QA Hermes Head 모델 선언과 Worker Registry 일치 | Head/Worker 계층 Contract Check 통과 |
 | `OPS-01` | `BLOCKED` | Risk·QA 운영 Credential과 Governed FK 준비 | Preflight 필수 항목 전부 `true` |
 | `RPT-01` | `IMPLEMENTED` | 결정론적 Report Artifact·Notion Projection 운영 계약 | DB Artifact Hash·Notion Page ID·재실행 멱등성 |
 

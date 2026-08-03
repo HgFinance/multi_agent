@@ -134,7 +134,7 @@ python apps/api/main.py                                          # Read-only DEM
 - 페르소나 프롬프트는 영어 2인칭(`You are the ...`), 파일 상단 주석·설명은 한국어.
 - 상단 주석에 담당자와 `HEDGE_FUND_MASTER_PLAN.md` 절 번호를 남긴다.
 - **`env:`가 부서마다 다르다.** `ANTHROPIC_API_KEY` — ceo, research, qa, quant-backtest / `OPENAI_API_KEY` — trading, risk, accounting, hr. 아무 키나 넣지 않는다. `skills/agentic-rag`가 OpenAI를 쓰는 것도 risk-management가 OpenAI에 배정돼 있기 때문이다.
-- `model`은 8개 파일 모두 `provider: nous` / `poolside/laguna-s-2.1:free`로 동일. 바꾸려면 8개를 함께 바꾼다.
+- 기본 Profile 모델은 대부분 `provider: nous` / `poolside/laguna-s-2.1:free`지만, Risk·QA 부서장은 `provider: openai-codex` / `gpt-5.6-luna`를 사용한다. Risk·QA 직원은 Hermes `model`과 분리된 LangGraph + Ollama `qwen3:8b`이며, 관련 설정은 각 Profile의 `head_runtime`과 `employee_runtime`을 따른다.
 - `agent.timeout_seconds`는 부서 단독 명령의 기본 한도다. `multi-agent-workflow.yaml`의 Step Timeout은 Case별 Orchestrator 한도이므로 더 길 수 있으며 Workflow 실행에서는 Step 값이 우선한다.
 - 미구현 항목은 코드가 아니라 **주석 백로그**로 남긴다 ([risk-management/config.yaml](departments/03-risk/hermes/config.yaml), [qa-department/config.yaml](departments/06-ai-qa-audit/hermes/config.yaml) 참고). `agentic_rag.status` 필드가 실제 구현 여부를 기록하므로 그 값을 신뢰한다.
 
