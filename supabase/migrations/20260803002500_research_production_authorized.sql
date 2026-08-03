@@ -1,3 +1,5 @@
+begin;
+
 -- research: Evidence 에 '운영 근거로 써도 되는가' 를 붙인다
 --
 -- 소유: 재일 (리서치본부)
@@ -59,3 +61,5 @@ join reference.data_sources s using (source_id);
 comment on view research.documents_effective_auth is
   '문서의 **유효** 운영 권한(문서 재정의 > 소스 기본 > false). 조회면이 이 뷰를 '
   '통해서만 권한을 읽는다 - 계산이 흩어지면 한쪽이 빠져도 아무도 모른다.';
+
+commit;

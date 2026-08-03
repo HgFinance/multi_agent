@@ -1,3 +1,5 @@
+begin;
+
 -- research: 문서 정정 이력 - 탐지한 것을 버리지 않는다
 --
 -- 소유: 재일 (리서치본부)
@@ -65,3 +67,5 @@ group by d.document_id, d.source_id, d.external_id, d.title, d.published_at,
 comment on view research.documents_with_revisions is
   '정정 이력이 있는 문서만. 6.2 중단 조건("수정 이력 없는 문서는 거래 근거에 '
   '쓰지 않는다")을 판정하려면 이 면이 필요하다.';
+
+commit;

@@ -1,3 +1,5 @@
+begin;
+
 -- research: 주장에 확률과 인용을 붙인다 (선순환의 빠진 두 고리)
 --
 -- 소유: 재일 (리서치본부)
@@ -116,3 +118,5 @@ group by 1, 2, 3;
 comment on view research.method_calibration is
   '방법론 단위 성과. Brier 는 확률이 있는 주장만으로 계산한다 - 확률 없는 '
   '것을 0 으로 채우면 완벽 예측으로 위장된다.';
+
+commit;

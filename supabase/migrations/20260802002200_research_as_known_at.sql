@@ -1,3 +1,5 @@
+begin;
+
 -- research: as_known_at - "그 판단을 내릴 때 무엇까지 알 수 있었는가"
 --
 -- 소유: 재일 (리서치본부)
@@ -41,3 +43,5 @@ comment on column research.packet_claims.as_known_at is
 -- 채점 결과와 나란히 볼 수 있게 - "언제까지 알고 한 판단이 어떻게 됐나"
 create index if not exists packet_claims_as_known_idx
   on research.packet_claims (as_known_at desc nulls last);
+
+commit;
