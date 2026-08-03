@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Sprint K3 경계 위 P0 조각: Incident Timeline과 Corrective Action.
 
 소유: 동규 (AI QA/감사본부)
@@ -108,9 +107,9 @@ class IncidentTimeline:
             entry_type=entry_type, summary=summary, evidence=evidence or {},
             occurred_at=occurred_at, recorded_at=_now(), recorded_by=recorded_by,
         )
-        self.events.append(event)
         if self._repository is not None:
             self._repository.insert_incident_event(event)
+        self.events.append(event)
         return event
 
     def timeline_for(self, incident_id: UUID) -> list[IncidentEventRecord]:
@@ -136,9 +135,9 @@ class IncidentTimeline:
             corrective_action_id=uuid4(), owner=owner, action_plan=action_plan, due_at=due_at,
             created_at=_now(), incident_id=incident_id, finding_id=finding_id,
         )
-        self.corrective_actions[action.corrective_action_id] = action
         if self._repository is not None:
             self._repository.insert_corrective_action(action)
+        self.corrective_actions[action.corrective_action_id] = action
         return action
 
     def start_action(self, corrective_action_id: UUID) -> CorrectiveActionRecord:

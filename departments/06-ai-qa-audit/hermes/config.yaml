@@ -5,8 +5,9 @@
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
@@ -176,3 +177,14 @@ skills:
 usage:
   run: "qa-department chat -q 'Validate this trading signal'"
   collaborate: "qa-department chat -q 'Validate the signal and its cited evidence, then delegate risk assessment to risk-management'"
+
+validation_record:
+  recorded_at: "2026-08-03"
+  scope: "Risk·QA Redis 통합 수용 테스트"
+  acceptance_command: >-
+    cd /Users/baiohelseu/Desktop/Project/multi_agent && source ~/claude/bin/activate &&
+    python -m pytest departments/03-risk/tests/test_trading_state_store.py
+    departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
+  accepted_result: "11 passed, skipped 0; 실행 환경은 /Users/baiohelseu/claude/bin/python"
+  p1_status: "결정론적 Evidence QA·Model Risk·Internal Audit·Trace/Incident baseline 완료; 실제 Corpus/pgvector·ACTIVE Profile FK·qa-check 계약·운영 E2E는 외부 조건 대기"
+  p2_status: "별도 P2 기능을 임의 활성화하지 않음; 실제 운영 Corpus·Trace·상위 계약 승인 후 재평가"

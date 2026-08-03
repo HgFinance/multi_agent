@@ -12,6 +12,7 @@ from uuid import uuid4
 QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 sys.path.insert(0, str(QA_DIR / "audit"))
+sys.path.insert(0, str(QA_DIR / "evidence"))
 
 from audit.repository import PostgresAuditRepository
 

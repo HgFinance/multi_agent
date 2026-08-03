@@ -95,3 +95,23 @@ python skills/agentic-rag/main.py \
 ```
 
 `--run` 결과의 `execution_evidence.pipeline_status`가 `DEGRADED`이면 승인으로 해석하지 않고 `HOLD/ESCALATE`로 처리한다. Redis·실제 정책 Corpus·DB가 없으면 해당 단계는 성공으로 위장하지 않는다.
+
+## P1/P2 검증 기록 (2026-08-03)
+
+Risk·QA Redis 경계 검증은 두 부서 공통 테스트가 아니라 이 부서의 `TradingState`·P1 Risk Gate 연동 수용 기준으로 기록한다. 반드시 저장소 루트에서 `~/claude` 환경으로 실행한다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+which python
+python -m pytest \
+  departments/03-risk/tests/test_trading_state_store.py \
+  departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py \
+  -q -rs
+```
+
+`which python`이 `/Users/baiohelseu/claude/bin/python`이고 결과가 `11 passed`이며 `skipped`가 없어야 실제 Redis PING·상태 저장·QA 이벤트/캐시 통합이 확인된 것으로 본다. `skipped`는 연결 성공이 아니며, 운영 승인 근거로 사용하지 않는다.
+
+- P1: Instrument Mapping, PIT/staleness, Exposure, VaR/Stress/Correlation, Entry Gate와 DB Repository/RLS baseline은 구현·단위 검증 완료. 실제 Portfolio/Market API, governed FK 데이터, 운영 DB/RLS/E2E는 외부 조건 대기다.
+- P2: `analytics/risk_metrics.py`의 결정론적 historical VaR·Stress·Black-Scholes Greeks 계산기와 단위 테스트는 준비됐다. 파생상품 Snapshot/마진/변동성 표면·Golden Fixture·QuantLib 검증·Risk Gate/API 연결 전에는 P2 운영 완료로 보지 않는다.
+- Kill Switch 이력 저장은 `requested_by`와 `approved_release_by`를 분리해 기록하고, FK/RLS 실패 시 전체 트랜잭션을 rollback한다.

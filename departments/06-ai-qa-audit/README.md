@@ -131,3 +131,23 @@ python departments/06-ai-qa-audit/scripts.py --run --fail --log-path /tmp/hg-qa-
 ```
 
 `execution_evidence.pipeline_status`가 `DEGRADED`이거나 `safe_action`이 `ESCALATE`이면 PASS/승인으로 승격하지 않는다. 실제 정책 Corpus, `DATABASE_URL`, 상위 `qa-check` 계약 승인이 없는 상태는 운영 완료가 아니다.
+
+## P1/P2 검증 기록 (2026-08-03)
+
+QA의 Redis 통합 검증은 Risk의 Trading State와 함께 실행하는 이 부서의 이벤트·RAG 캐시 수용 기준이다. 다른 부서 테스트에는 적용하지 않는다.
+
+```bash
+cd /Users/baiohelseu/Desktop/Project/multi_agent
+source ~/claude/bin/activate
+which python
+python -m pytest \
+  departments/03-risk/tests/test_trading_state_store.py \
+  departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py \
+  -q -rs
+```
+
+`which python`이 `/Users/baiohelseu/claude/bin/python`이고 결과가 `11 passed`이며 `skipped`가 없어야 실제 Redis PING, 중복 이벤트 제거, 재시작 후 pending 이벤트 회수, RAG 캐시 TTL을 통합 검증한 것으로 본다.
+
+- P1: Evidence QA, Model-Risk, Internal-Audit, Trace/Tool Permission, Incident Timeline의 결정론적 코드·API·폴백·RLS baseline은 구현·단위 검증 완료. `model-risk-agent`와 `internal-audit-agent`의 LangGraph 직원 활성화, 실제 정책 Corpus/pgvector, ACTIVE Profile FK와 운영 `agent_runs/tool_calls`, 상위 `qa-check` 계약 승인은 별도 운영 조건이다.
+- Incident 부모 자동 생성은 `audit.incident_events` 또는 Incident 연결 Corrective Action INSERT와 같은 DB 트랜잭션에서 보장한다. DB 저장 실패 시 메모리 Timeline/Action도 남지 않도록 write-through 순서를 유지한다.
+- P2: 현재 QA에는 별도 P2 기능을 임의로 활성화하지 않는다. 실제 운영 Corpus·Trace·계약 승인 이후에만 Model-Risk/내부감사 평가 범위와 그래프 인덱스 도입을 재평가한다.
