@@ -1,5 +1,7 @@
 # Ollama Department Modelfile Guide
 
+Risk·QA의 확정 직원 런타임은 Hermes 부서장과 분리된 LangGraph Worker Graph + Ollama `qwen3:8b`다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 `model`은 부서장 Hermes 모델만 의미한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 상태: 8개 조직 Modelfile v2 등록, 일부 Smoke Script 존재, Runtime 통합 미완료
 >
 > 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)

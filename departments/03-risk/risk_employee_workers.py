@@ -8,6 +8,7 @@ bounded, non-binding context.  It cannot approve an order or change a gate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -73,7 +74,8 @@ def _model_name() -> str:
 
 
 def _base_url() -> str:
-    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+    raw = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+    return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
 def default_worker_llm(system: str, prompt: str) -> str:
@@ -225,6 +227,7 @@ def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) 
     }
     reports: list[dict[str, Any]] = []
     not_executed: list[str] = []
+    input_hash = hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
     for spec in WORKER_SPECS:
         if not _should_run(spec, payload):
             not_executed.append(spec.worker_id)
@@ -241,6 +244,7 @@ def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) 
             "output": state.get("output", {}),
             "error": state.get("error"),
             "output_contract": spec.output_contract,
+            "input_hash": input_hash,
         })
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
     return {
@@ -251,4 +255,5 @@ def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) 
         "failed": failed,
         "not_executed": not_executed,
         "degraded": bool(failed),
+        "input_hash": input_hash,
     }

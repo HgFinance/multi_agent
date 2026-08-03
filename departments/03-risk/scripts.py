@@ -294,7 +294,7 @@ def _counterparty_flagged(assessment: dict) -> bool:
     return "counterparty_unhealthy" in assessment.get("reason_codes", [])
 
 
-def counterparty_check(state: RiskState, *, chat=None) -> dict:
+def _legacy_counterparty_check(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
     cp = next((c for c in a["check_results"] if c["name"] == "counterparty_health"), None)
     if a.get("verdict") == "reject" and chat is None:
@@ -335,6 +335,25 @@ Evidence:
         "counterparty_llm_called": True,
         "fallbacks": [_fallback("counterparty", exc)],
         }
+
+
+# Counterparty employee logic lives in the LangGraph worker.  Keep this gate
+# deterministic so an old Hermes persona cannot be called as a duplicate employee.
+def counterparty_check(state: RiskState, *, chat=None) -> dict:
+    assessment = state["assessment"]
+    check = next(
+        (item for item in assessment.get("check_results", [])
+         if item.get("name") == "counterparty_health"),
+        None,
+    )
+    detail = (check or {}).get("detail") or "counterparty health check recorded by RiskEngine"
+    return {
+        "counterparty": {
+            "counterparty_narrative": f"RiskEngine counterparty_health 결과: {detail}",
+            "escalate": not bool((check or {}).get("passed", True)),
+        },
+        "counterparty_llm_called": False,
+    }
 
 
 # ── 노드 4: Compliance (skills/agentic-rag 기존 baseline 재사용) ───────────
@@ -500,13 +519,14 @@ def _deterministic_supervisor_note(state: RiskState) -> dict:
 
 def supervise(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
-    # REJECT에는 이미 결정론적 근거가 있으므로 설명용 Hermes 호출을 생략한다.
-    # 승인/resize 경로의 Compliance·Supervisor 경계는 그대로 유지한다.
-    if a.get("verdict") == "reject" and chat is None:
+    # REJECT도 직원 context를 Hermes 부서장에게 전달한다. Hermes는
+    # 결정론적 verdict를 바꾸지 않고 설명·에스컬레이션만 만든다.
+    if a.get("verdict") == "reject" and chat is None and not state.get("employee_workers"):
         return _deterministic_supervisor_note(state)
     bundle = {"order_intent": state["order_intent"], "trading_state": state["trading_state"],
               "assessment": a, "compliance": state.get("compliance"),
-              "counterparty": state.get("counterparty")}
+              "counterparty": state.get("counterparty"),
+              "employee_workers": state.get("employee_workers", {})}
     task = f"""Using ONLY the evidence below, write a case-level risk narrative in Korean for
 CEO/Audit review. The binding verdict is "{a['verdict']}" from the deterministic Risk Engine -
 you cannot change it, only cite and explain it. If "counterparty" evidence is present, weave its
@@ -562,14 +582,13 @@ def _assemble_out(state: RiskState) -> dict:
     worker_execution = state.get("employee_workers") or {}
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
-    if a.get("check_results") and not executed_agents:
+    if a.get("check_results") and not worker_execution:
         executed_agents += ["market-liquidity-worker", "pre-trade-risk-worker"]
-    if state.get("counterparty") and state.get("counterparty_llm_called", True):
-        if "derivatives-counterparty-worker" not in executed_agents:
-            executed_agents.append("derivatives-counterparty-worker")
-    if state.get("compliance"):
-        if "compliance-policy-worker" not in executed_agents:
-            executed_agents.append("compliance-policy-worker")
+    if (state.get("counterparty") and state.get("counterparty_llm_called", True)
+            and not worker_execution):
+        executed_agents.append("derivatives-counterparty-worker")
+    if state.get("compliance") and not worker_execution:
+        executed_agents.append("compliance-policy-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if state.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("risk-supervisor")
@@ -842,9 +861,11 @@ def build_pipeline():
     g.add_edge("check_trading_state", "pre_trade_check")
     g.add_conditional_edges("pre_trade_check", _route_after_pretrade,
                             {"counterparty": "counterparty_check",
+                             "employee_workers": "employee_workers",
                              "supervise": "supervise", "compliance": "compliance_check"})
     g.add_conditional_edges("counterparty_check", _route_after_counterparty,
-                            {"supervise": "supervise", "compliance": "compliance_check"})
+                            {"employee_workers": "employee_workers",
+                             "supervise": "supervise", "compliance": "compliance_check"})
     g.add_edge("compliance_check", "employee_workers")
     g.add_edge("employee_workers", "supervise")
     g.add_edge("supervise", "notion_report")
