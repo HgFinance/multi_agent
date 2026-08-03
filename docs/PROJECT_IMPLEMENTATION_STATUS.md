@@ -121,7 +121,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 
 | 검증 | 결과 | 주의사항 |
 |---|---|---|
-| 전체 Repository pytest | Collection 실패 | CEO·HR의 동일 파일명 `test_ollama_agent.py` 충돌 |
+| 전체 Repository pytest | CEO·HR 원인 해소(2026-08-03) | CEO·HR `test_ollama_agent.py`를 `test_ceo_ollama_agent.py`/`test_hr_ollama_agent.py`로 분리. Accounting 쪽 동일 파일명 충돌 여부는 도현님 확인 필요 |
 | Core·Risk·QA 명시 테스트 | `179 passed`, `1 failed`, 16 subtests 통과 | 신규 Migration을 Schema 기대 목록에 누락 |
 | Research Pipeline | 11개 영역 통과 | LLM·API 없는 결정론적 자체 점검 |
 | Risk Pipeline | 7개 영역 통과 | Redis·Hermes 없는 자체 점검 |
@@ -280,7 +280,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | P0 | QA 개인 GPU IP 하드코딩 | 재현성·보안·Failover 문제 | 동규, `QA-03` |
 | P0 | Risk·QA 필수 Credential 2개 누락 | Production Ingestion 불가 | 동규·영주, `OPS-01` |
 | P1 | AI Office npm High 취약점 13건 | Frontend 배포 위험 | 도현, `UI-03` |
-| P1 | 5개 Hermes Profile Tool Allowlist 미선언 | 권한 경계 경고 | 해당 Owner, `HR-04` |
+| P1 | Hermes Profile Tool Allowlist 미선언 — CEO·HR 2개는 해소(2026-08-03, GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4·3.6절 반영), 나머지 Owner 확인 필요 | 권한 경계 경고 | 해당 Owner, `HR-04` |
 | P1 | Microstructure Feature 0건 | 전략·Risk Replay 제한 | 재일, `RQ-05` |
 | P1 | Kanban Bridge가 ADR만 있고 미구현 | Agent 상태는 Scripted | 도현·영주, `UI-02` |
 | P1 | Claude Host Proxy가 미커밋·미검증 | 구독 한도·보안·가용성 위험 | 재일·동규, `MODEL-04` |
