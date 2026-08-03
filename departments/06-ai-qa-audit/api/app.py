@@ -491,7 +491,8 @@ def start_run(body: StartRunRequest):
 
 
 @app.post("/qa/v1/runs/{agent_run_id}/complete")
-def complete_run(agent_run_id: UUID, body: CompleteRunRequest = CompleteRunRequest()):
+def complete_run(agent_run_id: UUID, body: CompleteRunRequest | None = None):
+    body = body or CompleteRunRequest()
     return recorder.complete_run(
         agent_run_id, output_artifact_version_id=body.output_artifact_version_id,
         token_usage=body.token_usage, cost=body.cost, trace_uri=body.trace_uri,
