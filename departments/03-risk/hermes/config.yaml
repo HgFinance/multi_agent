@@ -141,6 +141,13 @@ usage:
 
 # 직원 실행 계층 v2. Hermes의 model은 부서장 전용이며 직원은 독립 LangGraph
 # Worker Graph에서 Ollama Qwen을 사용한다.
+staff_registry:
+  head_count: 1
+  active_worker_count: 2
+  conditional_worker_count: 2
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+
 employee_runtime:
   executor: langgraph
   provider: ollama

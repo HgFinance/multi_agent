@@ -121,11 +121,17 @@ def _journal_module():
         _JOURNAL_MODULE = module
     return _JOURNAL_MODULE
 
+def _ollama_base_url() -> str:
+    raw = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+    return raw if raw.endswith("/v1") else f"{raw}/v1"
+
+
 # 직원 LLM은 부서장 Hermes와 분리된 로컬/팀 Ollama 런타임이다.
 # 주소와 모델은 환경변수로 주입해 개발·CI·운영 환경을 섞지 않는다.
 internal_llm = wrap_openai(OpenAI(
-    base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"),
+    base_url=_ollama_base_url(),
     api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+    timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
 ))
 
 
@@ -389,7 +395,8 @@ def supervise(state: QAState, *, chat=None) -> dict:
     bundle = {"decision": a["decision"], "reason_codes": a["reason_codes"],
               "claim_checks": a["claim_checks"], "findings": a["findings"],
               "claim_narrative": state["claim_narrative"],
-              "hallucination_reviews": state.get("hallucination_reviews", [])}
+              "hallucination_reviews": state.get("hallucination_reviews", []),
+              "employee_workers": state.get("employee_workers", {})}
     task = f"""Using ONLY the evidence below, write a case-level QA audit narrative in Korean for
 CEO/department review. The binding decision is "{a['decision']}" from the deterministic Evidence QA
 Engine - you cannot change it, only interpret and escalate it.
@@ -908,15 +915,12 @@ def _assemble_out(state: QAState) -> dict:
     worker_execution = state.get("employee_workers") or {}
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
-    if out.get("claim_checks") is not None:
-        if "evidence-qa-worker" not in executed_agents:
-            executed_agents.append("evidence-qa-worker")
-    if out.get("hallucination_reviews"):
-        if "hallucination-critic-worker" not in executed_agents:
-            executed_agents.append("hallucination-critic-worker")
-    if out.get("claim_narrative"):
-        if "evidence-qa-worker" not in executed_agents:
-            executed_agents.append("evidence-qa-worker")
+    if out.get("claim_checks") is not None and not worker_execution:
+        executed_agents.append("evidence-qa-worker")
+    if out.get("hallucination_reviews") and not worker_execution:
+        executed_agents.append("hallucination-critic-worker")
+    if out.get("claim_narrative") and not worker_execution:
+        executed_agents.append("evidence-qa-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if out.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("qa-audit-supervisor")
