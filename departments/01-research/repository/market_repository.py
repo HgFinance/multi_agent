@@ -286,15 +286,26 @@ class TimescaleMarketRepository(MarketDataRepository):
             f"on conflict (event_time, source_event_id) do nothing "
             f"returning 1"
         )
-        with self._conn.cursor() as cur:
-            # fetch=True 가 필수다. execute_values 는 page_size 단위로 INSERT 를 여러
-            # 문장으로 쪼개는데, 그냥 cur.fetchall() 을 하면 **마지막 문장의 RETURNING
-            # 만** 잡힌다. 500건 이하 배치에서는 맞아 보이다가 그 이상에서 조용히
-            # 어긋난다(실측: 4293건 넣고 293건으로 셌다). 그러면 없는 중복이
-            # 보고되어 DQ 경보가 잘못 뜬다.
-            returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
-            inserted = len(returned)
-        self._conn.commit()
+        # 실패하면 **반드시 rollback 한다.** 안 그러면 커넥션이 aborted
+        # transaction 에 갇혀 이후 모든 문장이 InFailedSqlTransaction 으로 죽는다 -
+        # 한 번의 일시적 실패가 그 소켓의 남은 세션 전체를 못 쓰게 만들었다
+        # (2026-08-02 수정). 예외는 그대로 올린다 - 삼키면 유실이 조용해진다.
+        try:
+            with self._conn.cursor() as cur:
+                # fetch=True 가 필수다. execute_values 는 page_size 단위로 INSERT 를 여러
+                # 문장으로 쪼개는데, 그냥 cur.fetchall() 을 하면 **마지막 문장의 RETURNING
+                # 만** 잡힌다. 500건 이하 배치에서는 맞아 보이다가 그 이상에서 조용히
+                # 어긋난다(실측: 4293건 넣고 293건으로 셌다). 그러면 없는 중복이
+                # 보고되어 DQ 경보가 잘못 뜬다.
+                returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
+                inserted = len(returned)
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:  # noqa: BLE001 - 커넥션이 이미 죽었으면 rollback 도 실패한다
+                pass
+            raise
         return WriteResult(len(rows), inserted, len(rows) - inserted)
 
     def write_ticks(self, ticks: list[MarketTick]) -> WriteResult:
@@ -362,11 +373,20 @@ class TimescaleMarketRepository(MarketDataRepository):
             f"on conflict (event_time, market, source) do nothing "
             f"returning 1"
         )
-        with self._conn.cursor() as cur:
-            # _insert 와 같은 이유로 fetch=True 다.
-            returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
-            inserted = len(returned)
-        self._conn.commit()
+        # _insert 와 같은 이유로 실패 시 rollback 한다 - 안 하면 커넥션이
+        # aborted transaction 에 갇혀 이후 전부 연쇄 실패한다.
+        try:
+            with self._conn.cursor() as cur:
+                # _insert 와 같은 이유로 fetch=True 다.
+                returned = self._execute_values(cur, sql, values, page_size=500, fetch=True)
+                inserted = len(returned)
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         return WriteResult(len(rows), inserted, len(rows) - inserted)
 
     def count_market_breadth(self, market: str | None = None) -> int:

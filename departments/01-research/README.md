@@ -3,7 +3,7 @@
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen3:14b` 기반 `agent-research`이고 Hermes Profile은 `research-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
-실제 실행 상태와 다음 Handoff는 [실행 현황과 통합 계획 v2.0](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
+실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 
 ## Mission
 
@@ -43,12 +43,14 @@ Analyst를 소집해 종목별 근거, 촉매, 무효화 조건을 갖춘 Resear
 | `collectors/ls_realtime_service.py` | 전 종목 LS WebSocket, 4 Socket 구독과 Timescale 적재 Runtime | Docker 실행 확인 |
 | `collectors/collector_scheduler.py` | 공시·거시·Reference·Archive Batch Schedule | Docker 실행 확인 |
 | `api/market_api.py`, `api/main.py` | Snapshot·Bar·Breadth·DQ·Regime·Microstructure와 Evidence 조회 | Docker 실행 확인 |
-| `agents/`, `evidence/`, `scripts.py` | 분석가 5인, RAG 사서, Evidence Bundle과 Research Packet Pipeline v2 | 자체 점검 8개 통과 |
-| `collectors/derivatives_collector.py` | KOSPI200 선물·옵션·Greeks Snapshot 수집 | 코드 완료, 실제 적재 0건 |
+| `api/mcp_server.py`, `api/tool_gateway.py` | Hermes Tool 호출면, 허용 경로 강제와 Bearer 인증 | `research-mcp` Docker 실행 확인 |
+| `agents/`, `evidence/`, `scripts.py` | 분석가 6인, RAG 사서, Evidence Bundle과 Research Packet Pipeline v2 | 자체 점검 11개 통과 |
+| `collectors/derivatives_collector.py` | KOSPI200 선물·옵션·Greeks Snapshot 수집 | 실제 적재 3,910건 확인 |
+| `collectors/research_data_steward.py` | Research Source 전체의 실행·신선도·DQ Gate | `collector_runs` 367건, 실패 11건 분류 필요 |
 | `collectors/market_archive_exporter.py`, `replay_restore_drill.py` | 검증된 Parquet Archive와 복구 Drill | 자체 점검·팀 가이드 증거 존재 |
 
 남은 핵심: Redis Stream Producer, 상시 Feature/Priority Engine, Research Packet의 Canonical Artifact·Event,
-파생상품 실제 적재, 영속 Microstructure Feature, X Watchlist Collector와 Social Evidence 교차 검증.
+파생 연속성 검증, 영속 Microstructure Feature, X Watchlist Collector와 Social Evidence 교차 검증.
 진행 상황은 팀 가이드 9절에 항목별로 적어둔다.
 
 ## 실행법
@@ -84,7 +86,7 @@ python departments/01-research/contracts/news_events.py          # Polling/WebSo
 python departments/01-research/collectors/market_breadth_collector.py # Breadth·DQ
 python departments/01-research/repository/market_repository.py   # Repository 계약 (DB 없이)
 python departments/01-research/repository/market_repository.py --integration  # 실제 TimescaleDB
-python departments/01-research/scripts.py                        # Research Pipeline 8개 영역
+python departments/01-research/scripts.py                        # Research Pipeline 11개 영역
 ```
 
 `--integration`은 `.env`의 `TIMESCALE_DATABASE_URL`과 살아 있는 컨테이너가 필요하다.

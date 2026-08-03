@@ -112,6 +112,15 @@ implementation:
 # 3. evidence-qa-agent(QA쪽): 완전성 검증 실패 시 Flag가 아니라 자동 Block으로 격상 (3단 방어)
 # compliance-policy-agent 베이스라인이 안정화된 뒤 순서대로 반영 예정
 
+# 백로그 (2026-08-03, DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.4절 대비 — 아직 미구현, 기록만)
+# 4. risk-projection-worker (Consumer 루프 포함) — market.snapshot.v1/portfolio.snapshot.v1/
+#    governance.mandate.changed.v1을 구독해 Risk Snapshot을 투영하는 Worker. 저장소 전체에서
+#    이 세 이벤트를 Redis Stream에 XADD하는 Publisher가 아직 없다(Trading/Accounting/CEO 쪽
+#    미구현 — 본부 경계 밖이라 리스크본부가 대신 만들 수 없다). risk_events/redis_event_bus.py는
+#    Risk→QA 결정 이벤트 Publisher만 있고 이 방향의 Consumer는 없다. P1RiskSnapshot(p1/analytics.py)은
+#    지금도 존재하지만 Pre-trade 요청 경로에서 evaluate_p1_gate로 동기 계산되며, 이 백로그가 말하는
+#    비동기 투영과는 다른 메커니즘이다. 업스트림 Publisher가 생긴 뒤 순서대로 반영
+
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.4, 2026-07-29)
 # market-liquidity-risk-agent는 RSK-02(Market/Exposure Risk, P0)와 RSK-03(Liquidity/Concentration/Stress, P1)을 합친 페르소나
 hiring_priority:

@@ -166,7 +166,10 @@ services:
       context: departments/01-research
     container_name: hedgefund-batch-collectors
     restart: unless-stopped
-    command: ["python", "collectors/collector_scheduler.py"]
+    # --serve 가 필수다(2026-08-02). 인자가 없으면 자체 점검만 하고 끝난다 -
+    # "python <파일> = 자체 점검"이라는 저장소 관례를 이 파일만 어겨서,
+    # 전 모듈 점검 루프가 돌 때마다 상주 스케줄러가 조용히 떴다(4회).
+    command: ["python", "collectors/collector_scheduler.py", "--serve"]
 
     depends_on:
       timescaledb:
@@ -406,6 +409,122 @@ services:
     command: ["gateway", "run"]
     volumes:
       - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  # ── 리스크·AI QA/감사본부 (동규 소유) ───────────────────────────────────────
+  # 근거: DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.4·6.7절
+  # departments/03-risk/Dockerfile, departments/06-ai-qa-audit/Dockerfile 참고.
+  #
+  # ▶ redis: Risk↔QA Event Stream(risk_events/qa_events)이 쓰는 공통 Core 인프라다.
+  #   특정 부서 소유가 아니다(계획서 5절 "공통 Platform Container") - 다른 부서도
+  #   Redis Streams가 필요해지면 이 서비스를 재사용하면 된다. P0 로컬용 최소 구성이라
+  #   영속화(AOF)는 아직 안 켰다 - 재시작 시 Stream 유실 감수.
+  redis:
+    image: redis:7-alpine
+    container_name: hedgefund-redis
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # risk-api: Pre-trade Risk Check, Trading State, Compliance(agentic-rag) 조회면.
+  # Build Context가 저장소 루트인 이유는 departments/03-risk/Dockerfile 상단 주석 참고.
+  risk-api:
+    build:
+      context: .
+      dockerfile: departments/03-risk/Dockerfile
+    container_name: hedgefund-risk-api
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8041:8000"   # 로컬 전용 - 외부 노출 금지 (research-api와 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # audit-api: Evidence QA, Trace, Tool Permission, Finding, Incident 조회면.
+  audit-api:
+    build:
+      context: .
+      dockerfile: departments/06-ai-qa-audit/Dockerfile
+    container_name: hedgefund-audit-api
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # qa-worker: Risk Decision Stream을 QA Audit 수신 이력으로 적재한다(qa_events/worker.py).
+  # audit-api와 같은 Image, command만 다르다(계획서 3.1). REDIS_URL 없으면 즉시 종료하는
+  # 프로세스라 여기서는 `:?`로 필수 처리한다(다른 서비스는 REDIS_URL이 선택值).
+  qa-worker:
+    build:
+      context: .
+      dockerfile: departments/06-ai-qa-audit/Dockerfile
+    container_name: hedgefund-qa-worker
+    restart: unless-stopped
+    command: ["python", "qa_events/worker.py"]
+    working_dir: /app/departments/06-ai-qa-audit
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}
+      QA_EVENT_POLL_INTERVAL_SECONDS: ${QA_EVENT_POLL_INTERVAL_SECONDS:-1}
+    mem_limit: 256m
+    cpus: 0.3
+    pids_limit: 64
+    stop_grace_period: 20s
+
+  # risk-hermes / qa-hermes: research-hermes/quant-hermes와 같은 패턴 - Hermes는 Backend
+  # Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는 CLAUDE.md
+  # 배정표대로 risk는 OPENAI_API_KEY, qa는 ANTHROPIC_API_KEY만 준다(아무 키나 넣지 않는다).
+  risk-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-risk-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-risk-management:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  qa-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-qa-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-qa-department:/opt/data
     environment:
       HERMES_UID: 10000
       HERMES_GID: 10000

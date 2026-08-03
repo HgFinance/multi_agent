@@ -68,7 +68,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 # 의미 오서술 가드(라벨-수치 결합 검사) - agents/ 를 스크립트로 실행하면
 # 본부 루트가 sys.path 에 없어 evidence/ 를 직접 넣는다(collectors 와 동일 관례)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
-from narrative_guard import audit_narrative  # noqa: E402
+from llm_client import chat as llm_chat  # noqa: E402
+from number_guard import caution_lines, flag_unmatched  # noqa: E402
+from llm_client import narrate as llm_narrate  # noqa: E402
+from narrative_guard import audit_narrative, label_caution_lines  # noqa: E402
+from style_ratios import OVERLAY_CODES  # noqa: E402
 from style_ratios import compute_style_overlay, overlay_numbers  # noqa: E402
 
 PERSONA = "sector-regime-analyst"   # 부서 허용목록 키
@@ -87,10 +91,10 @@ LLM_TIMEOUT = float(os.environ.get("REGIME_LLM_TIMEOUT", "120"))  # 로컬 14b �
 REGIME_DAYS = 40          # 20일 지표 + 휴장/결측 여유
 BREADTH_MARKETS = ("KOSPI", "KOSDAQ")
 
-# 스타일 overlay 재료 - collectors/style_index_collector.py + volatility_index_collector.py
-# 가 macro_observations 에 넣는 계열. 백분위를 말하려면 이력이 필요해 창을 길게 잡는다.
-OVERLAY_CODES = ("KOSPI200", "BOND_FUT", "MIN_VOL", "DIV_50", "DIV_GROWTH",
-                 "EX_MEGA", "VKOSPI")
+# 스타일 overlay 재료 - **목록을 여기 복제하지 않는다.** config/style_indices.txt
+# 가 단일 출처이고 style_ratios 가 그것을 읽어 OVERLAY_CODES 를 만든다.
+# 예전에는 이 파일에 튜플을 따로 뒀는데, 설정에 지수를 추가하면 수집은 되고
+# 분석가는 안 읽는 상태가 조용히 생긴다(VKOSPI 가 실제로 그랬다).
 OVERLAY_DAYS = 400        # 1년 백분위 + 휴장 여유
 
 # 라벨 임계값 - regime_rules 에 문장으로도 같이 실어 출력만으로 재검산 가능하게
@@ -327,40 +331,17 @@ def narrate(readout: dict, llm: Optional[Callable] = None) -> RegimeNote:
               f"Regime readout (code-computed, do not alter):\n"
               + json.dumps(readout, ensure_ascii=False, indent=1))
 
-    call = llm or _ollama_call
-    last_err = None
-    for attempt in range(2):
-        text = call(_SYSTEM, prompt if attempt == 0 else
-                    prompt + f"\n\nYour previous output failed validation: {last_err}. "
-                             f"Return ONLY valid JSON for the schema.")
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            return RegimeNote.model_validate_json(text[start:end + 1])
-        except (ValidationError, ValueError) as e:
-            last_err = str(e)[:200]
-    raise RuntimeError(f"LLM 서술이 Schema 를 두 번 어겼다: {last_err}")
+    return llm_narrate(_SYSTEM, prompt, RegimeNote, llm or _ollama_call)
 
 
 def _ollama_call(system: str, user: str) -> str:
-    """로컬/팀 Ollama (OpenAI 호환). technical_analyst._ollama_call 과 동일 패턴.
-    qwen3 계열의 <think> 프리앰블은 호출부 파서가 첫 '{'~마지막 '}' 만
-    취하므로 그대로 견딘다."""
-    req = urllib.request.Request(
-        OLLAMA_BASE + "/v1/chat/completions", method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
-        data=json.dumps({
-            "model": MODEL,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.1,
-            # 소형 모델의 JSON 규율 - 지원 안 하는 서버는 무시한다
-            "response_format": {"type": "json_object"},
-        }).encode(),
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    """로컬/팀 Ollama. 호출 모양은 evidence/llm_client 가 단일 출처다.
+
+    여기 남는 것은 **이 분석가의 설정**뿐이다(모델·타임아웃). 예전에는 요청
+    조립까지 7곳에 복붙돼 timeout 이 20/30/LLM_TIMEOUT 으로 갈라져 있었다.
+    """
+    return llm_chat(system, user, base=OLLAMA_BASE, model=MODEL,
+                    timeout=LLM_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -402,17 +383,11 @@ def verify(note: RegimeNote, readout: dict) -> tuple[RegimeNote, dict]:
         else:
             dropped["hallucinated_metrics"].append(k)
 
-    pool = _number_pool(readout)
-    for rx in (_PCT_RE, _RATIO_RE):
-        for m in rx.finditer(note.summary):
-            x = float(m.group(1))
-            if not any(abs(x - v) <= 0.1 or abs(x + v) <= 0.1 for v in pool):
-                dropped["flagged_numbers"].append(m.group(0))
-
-    cautions = list(note.cautions)
-    for f in dropped["flagged_numbers"]:
-        cautions.append(f"[숫자검증] summary 의 {f} 는 readout 수치와 불일치"
-                        f"(±0.1 밖) - 해당 문장 신뢰 금지")
+    # 숫자 대조 규칙은 evidence/number_guard 가 단일 출처다 - 분석가마다
+    # 다른 정규식을 두면 그 차이가 곧 검증 구멍이 된다(2026-08-02).
+    dropped["flagged_numbers"] = flag_unmatched(note.summary,
+                                               _number_pool(readout))
+    cautions = list(note.cautions) + caution_lines(dropped["flagged_numbers"])
 
     regime = note.regime
     code_label = readout.get("regime_label")
@@ -428,13 +403,7 @@ def verify(note: RegimeNote, readout: dict) -> tuple[RegimeNote, dict]:
     # 숫자 대조가 못 잡는다 - 라벨-수치 결합을 같은 문장 단위로 검사한다.
     # v1 은 표시만 한다(레짐 라벨·verdict 불변) - 오탐 위험을 낮게 시작.
     dropped["label_flags"] = audit_narrative(note.summary, readout)
-    for lf in dropped["label_flags"]:
-        if lf["check"] == "percentile_literal":
-            cautions.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
-        else:
-            cautions.append(
-                f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} 수치인데 "
-                f"같은 문장에 다른 지표 라벨 '{lf['forbidden_hit']}' - 오서술 의심")
+    cautions += label_caution_lines(dropped["label_flags"])
 
     return (note.model_copy(update={"regime": regime, "used_metrics": kept,
                                     "cautions": cautions}),

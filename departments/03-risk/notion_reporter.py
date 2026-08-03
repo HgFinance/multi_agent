@@ -15,12 +15,18 @@ RiskState의 바인딩 판정은 절대 바뀌지 않는다. 모든 실패를 �
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 from reporting import notion_rich_text_chunks
+
+from departments.notion_markdown import markdown_to_notion_blocks
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -58,6 +64,14 @@ def _rich_text(s) -> dict:
     return {"rich_text": notion_rich_text_chunks(s)}
 
 
+def _report_path(risk_request_id: object) -> Path:
+    return (
+        Path(__file__).resolve().parent
+        / "reports"
+        / f"risk_case_report_{risk_request_id}.md"
+    )
+
+
 def upload_case(order_intent: dict, context: dict, out: dict, *, report_md: str = "", env: dict | None = None) -> dict:
     """out(run_risk_department 반환 형태)을 Notion Risk DB에 1건 업로드한다. 절대 예외를 던지지 않는다."""
     env = env if env is not None else _load_dev_vars()
@@ -81,15 +95,21 @@ def upload_case(order_intent: dict, context: dict, out: dict, *, report_md: str 
         "check_results": _rich_text(json.dumps(out.get("check_results", []), ensure_ascii=False)),
         "counterparty_narrative": _rich_text(cp.get("counterparty_narrative")),
         "서술": _rich_text(out.get("narrative")),
-        "원본 리포트": _rich_text(report_md),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
     }
     if compliance_verdict:
         props["compliance_verdict"] = {"select": {"name": compliance_verdict}}
 
     try:
-        status, body = _post("pages", {"parent": {"database_id": db_id}, "properties": props}, token)
-    except Exception as e:  # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+        payload = {"parent": {"database_id": db_id}, "properties": props}
+        if report_md:
+            report_path = _report_path(out["risk_request_id"])
+            report_intro = (
+                f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
+            )
+            payload["children"] = markdown_to_notion_blocks(report_intro)
+        status, body = _post("pages", payload, token)
+    except Exception as e:  # noqa: BLE001 - Notion is a non-binding projection.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
     if status == 200:
         return {"ok": True, "url": body.get("url")}
