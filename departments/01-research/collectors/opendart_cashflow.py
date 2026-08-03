@@ -165,6 +165,7 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
         year = datetime.now(timezone.utc).year - 1     # 직전 사업연도
         observed = datetime.now(timezone.utc)
         facts, ok, empty, failed, cfo_seen = [], 0, 0, 0, 0
+        blank = 0   # 금액이 빈칸이라 넣지 않은 줄 - 조용히 버리지 않고 센다
         total_n = total_u = total_unlinked = total_dropped = 0
         _, _, src = repo.sync_data_sources()
 
@@ -225,6 +226,15 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
                     f = to_fact(row, observed_at=observed)
                 except Exception:  # noqa: BLE001 - 행 하나가 회사를 버리지 않는다
                     continue
+                # 금액이 빈칸인 줄은 넣지 않는다 (2026-08-02 DQ Gate 적발).
+                # DART 는 그 해에 없었던 거래도 항목만 빈 금액으로 준다
+                # ("무형자산의 처분" 등). NULL 행으로 쌓으면 1,500건 넘게
+                # 늘어나 결측률만 올리고, F-Score 는 매번 걸러내야 한다.
+                # **그 줄이 없다는 것 자체가 "그 해엔 그 거래가 없었다"** 다 -
+                # 0 원과 미보고를 구분하는 정보는 NULL 이 아니라 부재에 있다.
+                if f.value is None:
+                    blank += 1
+                    continue
                 f.metadata["source"] = SOURCE_TAG
                 f.metadata["account_id"] = str(row.get("account_id", "")).strip()
                 facts.append(f)
@@ -246,7 +256,8 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
         print(f"{COLLECTOR_VERSION}: 회사 {ok} / 현금흐름 "
               f"{total_n + total_u}건 (영업활동 {cfo_seen}) -> 신규 {total_n} / "
               f"갱신 {total_u} / issuer 미연결 {total_unlinked} "
-              f"(빈 응답 {empty}, 실패 {failed}, 동명중복 제외 {total_dropped})",
+              f"(빈 응답 {empty}, 실패 {failed}, 동명중복 제외 {total_dropped}, "
+              f"금액 빈칸 제외 {blank})",
               flush=True)
         return 1 if failed > ok else 0
     finally:

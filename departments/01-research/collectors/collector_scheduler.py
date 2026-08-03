@@ -115,6 +115,11 @@ JOBS: tuple[Job, ...] = (
     # 로 스케줄러 로그에 남는다 - 개장 전에 눈에 띄는 것이 목적)
     Job("data-steward", ("collectors/market_data_steward.py", "--audit"),
         daily_at=time(7, 10)),
+    # 리서치 평면 DQ - 시세 Steward(07:10)와 같은 목적, 다른 평면.
+    # 07:15: 개장 전이고 밤 배치(문서·재무·거시)가 다 끝난 뒤다.
+    # FAIL 이면 exit 1 로 스케줄러 로그에 남는다.
+    Job("research-data-steward", ("collectors/research_data_steward.py", "--audit"),
+        daily_at=time(7, 15)),
     # Raw -> 검증된 Parquet Archive (전일분 - 기본값이 데이터 있는 최근 거래일).
     # 06:50: 분봉 백필 등 밤 작업이 끝난 뒤, Steward(07:10)가 결과를 보기 전.
     Job("market-archive", ("collectors/market_archive_exporter.py", "--export"),
