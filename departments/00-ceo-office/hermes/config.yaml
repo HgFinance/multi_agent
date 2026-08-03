@@ -163,6 +163,8 @@ employee_runtime:
 
 workers:
   executive-briefing-worker:
+    role: Executive briefing and cross-department handoff analyst
     status: active
+    trigger: always
     tools: [ceo.department_reports.read]
     output: advisory_context

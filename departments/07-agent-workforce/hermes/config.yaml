@@ -207,8 +207,33 @@ employee_runtime:
   binding_decision_owner: departments/07-agent-workforce/lifecycle
   failure_action: ESCALATE
 workers:
-  workforce-planning-worker: {status: active, tools: [workforce.queue.read, workforce.sla.read], output: advisory_context}
-  profile-architecture-worker: {status: active, tools: [workforce.profile.read], output: advisory_context}
-  selection-performance-worker: {status: conditional, trigger: performance_signal, tools: [workforce.evaluation.read], output: advisory_context}
-  lifecycle-coordination-worker: {status: conditional, trigger: lifecycle_event, tools: [workforce.lifecycle.read], output: advisory_context}
-  workforce-governance-worker: {status: conditional, trigger: governance_request, tools: [workforce.governance.read], output: advisory_context}
+  workforce-planning-worker:
+    role: Queue, SLA, cost and staffing-gap analyst
+    status: active
+    trigger: always
+    tools: [workforce.queue.read, workforce.sla.read]
+    output: advisory_context
+  profile-architecture-worker:
+    role: Agent profile and role-boundary architect
+    status: active
+    trigger: always
+    tools: [workforce.profile.read]
+    output: advisory_context
+  selection-performance-worker:
+    role: Candidate selection and performance-evaluation analyst
+    status: conditional
+    trigger: performance_signal
+    tools: [workforce.evaluation.read]
+    output: advisory_context
+  lifecycle-coordination-worker:
+    role: Joiner, mover and leaver lifecycle coordinator
+    status: conditional
+    trigger: lifecycle_event
+    tools: [workforce.lifecycle.read]
+    output: advisory_context
+  workforce-governance-worker:
+    role: Workforce approval routing and segregation-of-duties analyst
+    status: conditional
+    trigger: governance_request
+    tools: [workforce.governance.read]
+    output: advisory_context

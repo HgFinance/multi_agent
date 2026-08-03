@@ -198,9 +198,39 @@ employee_runtime:
   binding_decision_owner: departments/01-research/scripts.py
   failure_action: HOLD_ESCALATE
 workers:
-  research-data-worker: {status: active, tools: [research.universe.read, research.market_snapshot.read], output: advisory_context}
-  microstructure-worker: {status: conditional, trigger: market_snapshot, tools: [research.microstructure.read], output: advisory_context}
-  technical-signal-worker: {status: conditional, trigger: market_features, tools: [research.technical_features.read], output: advisory_context}
-  fundamental-valuation-worker: {status: conditional, trigger: fundamentals, tools: [research.fundamentals.read], output: advisory_context}
-  news-macro-worker: {status: active, tools: [research.news.read, research.macro.read], output: advisory_context}
-  evidence-rag-worker: {status: conditional, trigger: evidence_request, tools: [research.evidence.search], output: advisory_context}
+  research-data-worker:
+    role: Universe and market-data stewardship analyst
+    status: active
+    trigger: always
+    tools: [research.universe.read, research.market_snapshot.read]
+    output: advisory_context
+  microstructure-worker:
+    role: Microstructure and liquidity evidence analyst
+    status: conditional
+    trigger: market_snapshot
+    tools: [research.microstructure.read]
+    output: advisory_context
+  technical-signal-worker:
+    role: Multi-timeframe technical signal analyst
+    status: conditional
+    trigger: market_features
+    tools: [research.technical_features.read]
+    output: advisory_context
+  fundamental-valuation-worker:
+    role: Point-in-time fundamental and valuation analyst
+    status: conditional
+    trigger: fundamentals
+    tools: [research.fundamentals.read]
+    output: advisory_context
+  news-macro-worker:
+    role: News, sentiment, macro and geopolitical evidence analyst
+    status: active
+    trigger: news_or_macro
+    tools: [research.news.read, research.macro.read]
+    output: advisory_context
+  evidence-rag-worker:
+    role: Evidence retrieval and citation curator
+    status: conditional
+    trigger: evidence_request
+    tools: [research.evidence.search]
+    output: advisory_context

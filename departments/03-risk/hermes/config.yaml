@@ -194,25 +194,29 @@ employee_runtime:
 
 workers:
   market-liquidity-worker:
+    role: Market and liquidity risk analyst
     status: active
     replaces: [market-liquidity-risk-agent]
     tools: [risk.trading_state.read, risk.p1.snapshot]
     output: advisory_context
   pre-trade-risk-worker:
+    role: Pre-trade deterministic gate analyst
     status: active
     replaces: [pre-trade-risk-analyst]
     tools: [risk.case.check]
     output: advisory_context
   compliance-policy-worker:
+    role: Point-in-time policy evidence analyst
     status: conditional
     replaces: [compliance-policy-agent]
-    trigger: compliance_evidence_exists
+    trigger: when_compliance_evidence_exists
     tools: [risk.compliance.check]
     output: advisory_context
   derivatives-counterparty-worker:
+    role: Derivatives and counterparty exposure analyst
     status: conditional
     replaces: [derivatives-margin-risk-agent, operational-counterparty-risk-agent]
-    trigger: counterparty_or_derivatives_signal_exists
+    trigger: when_counterparty_or_derivatives_signal_exists
     tools: [risk.trading_state.record.read]
     output: advisory_context
 
