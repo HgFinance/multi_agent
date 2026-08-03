@@ -182,7 +182,11 @@ def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     return bool(payload.get("incident"))
 
 
-def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) -> dict[str, Any]:
+def run_employee_workers(
+    payload: dict[str, Any],
+    llm: WorkerLLM | None = None,
+    trace_bridge: Any | None = None,
+) -> dict[str, Any]:
     tools: dict[str, WorkerTool] = {
         "evidence-qa-worker": _evidence_tool,
         "hallucination-critic-worker": _hallucination_tool,
@@ -191,8 +195,16 @@ def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) 
         "incident-postmortem-worker": _incident_tool,
     }
     reports: list[dict[str, Any]] = []
+    trace_errors: list[str] = []
     not_executed: list[str] = []
     input_hash = hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
+    if trace_bridge is None and os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() == "true":
+        try:
+            from audit.worker_trace_bridge import build_default_trace_bridge
+
+            trace_bridge = build_default_trace_bridge()
+        except Exception as exc:  # noqa: BLE001 - optional audit boundary
+            trace_errors.append(type(exc).__name__)
     for spec in WORKER_SPECS:
         if not _should_run(spec, payload):
             not_executed.append(spec.worker_id)
@@ -205,7 +217,21 @@ def run_employee_workers(payload: dict[str, Any], llm: WorkerLLM | None = None) 
                         "attempts": state.get("attempts", 0), "output": state.get("output", {}),
                         "error": state.get("error"), "output_contract": spec.output_contract,
                         "input_hash": input_hash})
+        if trace_bridge is not None:
+            try:
+                trace_bridge.record(
+                    worker_id=spec.worker_id,
+                    trace_id=str(payload.get("trace_id", "")),
+                    input_hash=input_hash,
+                    tools=spec.tools,
+                    payload=payload,
+                    output=state.get("output", {}),
+                )
+            except Exception as exc:  # noqa: BLE001 - audit must escalate
+                trace_errors.append(f"{spec.worker_id}:{type(exc).__name__}")
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
+    if trace_errors:
+        failed.extend(f"trace:{error}" for error in trace_errors)
     return {"runtime": {"executor": "LangGraph", "provider": "ollama", "model": _model_name(),
                          "max_retries": 2, "max_attempts": 3},
             "workers": reports,

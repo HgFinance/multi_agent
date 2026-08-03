@@ -50,6 +50,8 @@ from p1.analytics import (
     P1RiskSnapshot,
     evaluate_p1_gate,
 )
+from p1_runtime_api import router as p1_runtime_router
+from p2_derivatives_api import router as p2_derivatives_router
 from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
@@ -222,6 +224,8 @@ class ComplianceCheckRequest(BaseModel):
 
 
 app = FastAPI(title="Risk Domain API", version="v1")
+app.include_router(p1_runtime_router)
+app.include_router(p2_derivatives_router)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))

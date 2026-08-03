@@ -26,6 +26,10 @@ tool_permission_check.py/incident_timeline.py/agentic-rag를 감싸는 FastAPI �
 """
 from __future__ import annotations
 
+# Current contract status: qa-check is approved as Evidence QA Gate v1. The
+# production flag and fail-closed corpus/worker-profile checks below are the
+# authoritative runtime boundary; older proposal wording in this module docstring
+# is retained only as historical context.
 import os
 import sys
 from datetime import datetime
@@ -45,7 +49,7 @@ _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
 for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
-
+from corpus_registry import inspect_policy_corpus
 from evidence_qa_engine import (
     Artifact,
     EvidenceQaEngine,
@@ -400,7 +404,7 @@ def _qa_check_contract_is_approved() -> bool:
     return os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
 
 
-# 3.1 [제안] Case에 종속된 판정 -------------------------------------------------------
+# 3.1 승인된 QA Evidence Gate v1 — Case에 종속된 판정 -------------------------------
 
 
 @app.post("/qa/v1/model-risk/evaluate")
@@ -636,6 +640,22 @@ def prometheus_metrics():
         content=QA_TELEMETRY.prometheus_text(),
         media_type="text/plain; version=0.0.4",
     )
+
+
+@app.get("/qa/v1/evidence/corpus/status")
+def evidence_corpus_status():
+    """Expose readiness only; document contents never leave the QA service."""
+
+    corpus_dir = (_QA_DIR.parents[1] / "skills" / "agentic-rag" / "corpus" / "evidence").resolve()
+    status = inspect_policy_corpus(corpus_dir)
+    return {
+        "directory": status.directory,
+        "document_count": status.document_count,
+        "placeholder_count": status.placeholder_count,
+        "corpus_hash": status.corpus_hash,
+        "ready": status.ready,
+        "reason": status.reason,
+    }
 
 
 if __name__ == "__main__":

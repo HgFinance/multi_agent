@@ -1,5 +1,7 @@
 # Investment Case - Minimum Service Unit Specification
 
+> 2026-08-04 승인 보강: `POST /investment-cases/{case_id}/qa-check`는 QA Evidence Gate v1의 확정 계약이다. production은 `QA_CHECK_CONTRACT_APPROVED=true`로 명시 활성화하고, 결정론적 EvidenceQaEngine이 binding verdict를 만든다. 정책 Corpus가 placeholder이거나 운영 Trace Profile FK가 없으면 자동 PASS가 아니라 ESCALATE/HOLD로 종료한다.
+
 > 문서 상태: Confirmed Core Domain and Service Specification v1.3
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 결정: 우리 서비스의 최소 가치 단위는 `Investment Case`다.  

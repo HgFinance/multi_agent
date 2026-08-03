@@ -59,7 +59,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260803002300_research_claim_forecast.sql",
                 "20260803002400_research_document_revisions.sql",
                 "20260803002500_research_production_authorized.sql",
-                "20260804000100_align_current_runtime_models.sql",
+            "20260804000100_align_current_runtime_models.sql",
+            "20260804000200_risk_qa_runtime_activation.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -92,7 +93,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
             "research": 23,
-            "risk": 17,
+            "risk": 19,
             "strategy": 9,
             "workforce": 24,
         }

@@ -10,6 +10,8 @@ sys.path.insert(0, str(QA_DIR))
 
 from qa_employee_workers import run_employee_workers
 
+import scripts as qa_scripts
+
 
 def _llm(_system: str, _prompt: str) -> str:
     return '{"summary":"evidence checked","confidence":0.8,"evidence_refs":["tool"],"escalate":false}'
@@ -46,3 +48,37 @@ def test_all_conditional_qa_workers_require_real_signals():
     )
     assert report["failed"] == []
     assert len(report["executed"]) == 5
+
+
+def test_model_and_internal_audit_graph_stage_runs_with_governed_inputs():
+    model_risk_input = {
+        "model_id": "00000000-0000-0000-0000-000000000001",
+        "model_version": "model-v1",
+        "prompt_version": "prompt-v1",
+        "dataset_version": "dataset-v1",
+        "evaluation_count": 500,
+        "accuracy": 0.9,
+        "calibration_error": 0.02,
+        "drift_score": 0.04,
+        "protected_failure_rate": 0.01,
+    }
+    audit_events = [{
+        "action": "qa.evidence.check",
+        "department": "qa",
+        "trace_id": "trace-qa-1",
+        "profile_status": "ACTIVE",
+        "authorized": True,
+    }]
+
+    output = qa_scripts.model_and_internal_audit({
+        "model_risk_input": model_risk_input,
+        "internal_audit_events": audit_events,
+    })
+
+    assert output["model_risk"]["decision"] == "PASS"
+    assert output["internal_audit"]["decision"] == "PASS"
+    assert output["audit_escalate"] is False
+
+    report = run_employee_workers(output, llm=_llm)
+    assert "model-and-internal-audit-worker" in report["executed"]
+    assert "model-and-internal-audit-worker" not in report["not_executed"]

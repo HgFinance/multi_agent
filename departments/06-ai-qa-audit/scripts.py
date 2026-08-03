@@ -59,6 +59,10 @@ agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer는
 """
 from __future__ import annotations
 
+# Current runtime: Evidence QA is always evaluated first; Model Risk and Internal
+# Audit are deterministic conditional stages with independent LangGraph worker
+# narration. Their non-PASS result only escalates and never changes Evidence QA
+# into an approval or grants operational authority.
 import hashlib
 import importlib.util
 import json
@@ -236,6 +240,12 @@ def _persona(name: str) -> str:
 
 
 class QAState(TypedDict, total=False):
+    model_risk_input: dict
+    internal_audit_events: list
+    model_risk: dict
+    internal_audit: dict
+    internal_audit_department: str
+    audit_escalate: bool
     artifact: dict          # Artifact JSON (Claim 포함) - 검토 대상
     evidence_store: dict    # {evidence_id: EvidenceChunk 필드} - QA는 근거를 직접 수집하지 않는다
     decision_time: str      # PIT 기준 시각 (ISO8601)
@@ -304,6 +314,85 @@ def check_evidence(state: QAState) -> dict:
     }}
 
 
+# ── 노드 1.25: Model Risk / Internal Audit (결정론적 엔진 + 직원 Worker) ────────
+def model_and_internal_audit(state: QAState) -> dict:
+    """Run optional P1 reviews when their governed input signals are present.
+
+    The engines remain deterministic.  The LangGraph employee Worker receives
+    only their serialised results later in ``draft_claim_narrative``; it cannot
+    change the binding Evidence QA decision.
+    """
+    output: dict[str, object] = {}
+
+    model_input = state.get("model_risk_input")
+    if model_input is not None:
+        try:
+            from model_risk import ModelRiskEngine, ModelRiskInput
+
+            evidence = ModelRiskInput(
+                model_id=UUID(str(model_input["model_id"])),
+                model_version=str(model_input["model_version"]),
+                prompt_version=str(model_input["prompt_version"]),
+                dataset_version=str(model_input["dataset_version"]),
+                evaluation_count=int(model_input["evaluation_count"]),
+                accuracy=float(model_input["accuracy"]),
+                calibration_error=float(model_input["calibration_error"]),
+                drift_score=float(model_input["drift_score"]),
+                protected_failure_rate=float(model_input["protected_failure_rate"]),
+            )
+            assessment = ModelRiskEngine().evaluate(evidence)
+            output["model_risk"] = {
+                "decision": assessment.decision.value,
+                "reason_codes": list(assessment.reason_codes),
+                "calculation_version": assessment.calculation_version,
+                "input_hash": assessment.input_hash,
+            }
+        except Exception as exc:  # noqa: BLE001 - invalid audit input escalates
+            output["model_risk"] = {
+                "decision": "ESCALATE",
+                "reason_codes": ["model_risk_input_invalid"],
+                "calculation_version": "qa-model-risk-v1",
+                "input_hash": hashlib.sha256(
+                    json.dumps(model_input, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest(),
+                "error": type(exc).__name__,
+            }
+
+    audit_events = state.get("internal_audit_events")
+    if audit_events is not None:
+        try:
+            from internal_audit import InternalAuditEngine
+
+            assessment = InternalAuditEngine().evaluate(
+                events=audit_events,
+                expected_department=str(state.get("internal_audit_department") or "qa"),
+            )
+            output["internal_audit"] = {
+                "decision": assessment.decision.value,
+                "findings": list(assessment.findings),
+                "calculation_version": assessment.calculation_version,
+                "input_hash": assessment.input_hash,
+            }
+        except Exception as exc:  # noqa: BLE001 - invalid audit input escalates
+            output["internal_audit"] = {
+                "decision": "ESCALATE",
+                "findings": ["internal_audit_input_invalid"],
+                "calculation_version": "qa-internal-audit-v1",
+                "input_hash": hashlib.sha256(
+                    json.dumps(audit_events, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest(),
+                "error": type(exc).__name__,
+            }
+
+    decisions = [
+        str(result.get("decision"))
+        for result in (output.get("model_risk"), output.get("internal_audit"))
+        if isinstance(result, dict)
+    ]
+    output["audit_escalate"] = any(decision != "PASS" for decision in decisions)
+    return output
+
+
 # ── 노드 1.5: Hallucination Critic (skills/agentic-rag, evidence-qa-agent 코퍼스 재사용) ──
 def hallucination_review(state: QAState) -> dict:
     from src.graph import run_compliance_check
@@ -328,6 +417,7 @@ def draft_claim_narrative(state: QAState) -> dict:
     a = state["assessment"]
     report = run_qa_employee_workers(
         {
+            "trace_id": (state.get("artifact") or {}).get("trace_id"),
             "assessment": a,
             "hallucination_reviews": state.get("hallucination_reviews", []),
             "model_risk": state.get("model_risk"),
@@ -396,6 +486,9 @@ def supervise(state: QAState, *, chat=None) -> dict:
               "claim_checks": a["claim_checks"], "findings": a["findings"],
               "claim_narrative": state["claim_narrative"],
               "hallucination_reviews": state.get("hallucination_reviews", []),
+              "model_risk": state.get("model_risk"),
+              "internal_audit": state.get("internal_audit"),
+              "audit_escalate": state.get("audit_escalate", False),
               "employee_workers": state.get("employee_workers", {})}
     task = f"""Using ONLY the evidence below, write a case-level QA audit narrative in Korean for
 CEO/department review. The binding decision is "{a['decision']}" from the deterministic Evidence QA
@@ -419,7 +512,7 @@ Evidence:
     return {
         "verdict": a["decision"],
         "narrative": note["narrative"],
-        "escalate": note["escalate"],
+        "escalate": bool(note["escalate"] or state.get("audit_escalate", False)),
         "supervisor_llm_called": True,
         "supervisor_call_status": call_status,
         "hermes_runtime": {**_hermes_runtime_metadata(), "call_status": call_status},
@@ -436,6 +529,9 @@ def _assemble_out(state: QAState) -> dict:
             "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
             "claim_narrative": state["claim_narrative"],
             "hallucination_reviews": state.get("hallucination_reviews", []),
+            "model_risk": state.get("model_risk"),
+            "internal_audit": state.get("internal_audit"),
+            "audit_escalate": state.get("audit_escalate", False),
         "narrative": state["narrative"], "escalate": state["escalate"],
         "execution_evidence": state.get("execution_evidence")}
 
@@ -600,12 +696,14 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
 def build_pipeline():
     g = StateGraph(QAState)
     g.add_node("check_evidence", check_evidence)
+    g.add_node("model_and_internal_audit", model_and_internal_audit)
     g.add_node("hallucination_review", hallucination_review)
     g.add_node("draft_claim_narrative", draft_claim_narrative)
     g.add_node("supervise", supervise)
     g.add_node("notion_report", notion_report)
     g.set_entry_point("check_evidence")
-    g.add_edge("check_evidence", "hallucination_review")
+    g.add_edge("check_evidence", "model_and_internal_audit")
+    g.add_edge("model_and_internal_audit", "hallucination_review")
     g.add_edge("hallucination_review", "draft_claim_narrative")
     g.add_edge("draft_claim_narrative", "supervise")
     g.add_edge("supervise", "notion_report")
@@ -975,14 +1073,23 @@ def run_qa_department(
     *,
     run_id: str | None = None,
     log_path: str | Path | None = None,
+    model_risk_input: dict | None = None,
+    internal_audit_events: list[dict] | None = None,
+    internal_audit_department: str = "qa",
 ) -> dict:
     execution_run_id = run_id or str(uuid4())
     trace_id = str((artifact or {}).get("trace_id") or f"qa:{execution_run_id}")
     payload = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time}
     asset = str((artifact or {}).get("asset") or (artifact or {}).get("instrument_id") or "") or None
     try:
-        out = build_pipeline().invoke({"artifact": artifact, "evidence_store": evidence_store,
-                                       "decision_time": decision_time})
+        out = build_pipeline().invoke({
+            "artifact": artifact,
+            "evidence_store": evidence_store,
+            "decision_time": decision_time,
+            "model_risk_input": model_risk_input,
+            "internal_audit_events": internal_audit_events,
+            "internal_audit_department": internal_audit_department,
+        })
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         out = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
                **_fallback_assessment({"artifact": artifact}, exc),
