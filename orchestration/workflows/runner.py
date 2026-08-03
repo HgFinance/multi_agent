@@ -17,7 +17,6 @@ from uuid import uuid4
 from .contracts import StepRun, WorkflowRun, WorkflowSpec
 from .manifest import load_workflow
 
-
 StepHandler = Callable[[str, str, Mapping[str, object]], str | None]
 
 
