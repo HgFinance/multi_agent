@@ -590,6 +590,29 @@ services:
     cpus: 0.5
     pids_limit: 64
 
+  # improvement-worker: workforce-api와 같은 Image, command만 다르다(qa-worker와 같은 패턴).
+  # hf:workforce Stream을 소비해 workforce.eval.v1(QA Eval 결과)을 개선 후보의
+  # EVALUATING -> SHADOW/REJECTED 전이로 바꾼다(workforce_events/worker.py). QA가 이
+  # 이벤트를 아직 발행하지 않아(2026-08-03) Payload Contract는 잠정안이다 - 다른
+  # Consumer Group용 Event(workforce.access_request.v1 등)는 조용히 넘긴다.
+  improvement-worker:
+    build:
+      context: departments/07-agent-workforce
+    container_name: hedgefund-improvement-worker
+    restart: unless-stopped
+    command: ["python", "workforce_events/worker.py"]
+    working_dir: /app/departments/07-agent-workforce
+    depends_on:
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WORKFORCE_EVENT_POLL_INTERVAL_SECONDS: ${WORKFORCE_EVENT_POLL_INTERVAL_SECONDS:-1}
+    mem_limit: 256m
+    cpus: 0.3
+    pids_limit: 64
+    stop_grace_period: 20s
+
   # ceo-hermes / workforce-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는
   # Backend Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는
   # CLAUDE.md 배정표대로 ceo는 ANTHROPIC_API_KEY, hr은 OPENAI_API_KEY만 준다.

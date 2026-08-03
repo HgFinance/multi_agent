@@ -39,7 +39,7 @@
 | 회계/포트폴리오 | Ledger, Portfolio, Reconciliation, Reporting, Portfolio API | BFF Router만 존재, 전용 Worker·Container와 DB 행 없음 |
 | AI QA/감사 | P1 QA, Repository, Redis Consumer, Harness, Replay와 Metrics | QA/Incident 일부 Row 존재, Container와 전사 Trace 미구현 |
 | CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | `governance-api`+`notification-worker` Container 실행 확인(2026-08-03) - Mandate/Report/Notification 전부 Postgres Repository로 실 DB 검증, `hf:governance` Redis Stream Producer(Mandate/Report)·Consumer(Notification) 실 검증 완료. `reporting-worker`는 상태 누적 로직이 없어 미착수 |
-| Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | `workforce-api` Container 실행 확인(2026-08-03) - Access/Improvements/Scorecard 전부 Postgres Repository로 실 DB 검증, `lifecycle-worker`/`improvement-worker`는 Event Consumer 코드가 아직 없어 미착수 |
+| Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | `workforce-api`+`improvement-worker` Container 실행 확인(2026-08-03) - Access/Improvements/Scorecard 전부 Postgres Repository로 실 DB 검증, `hf:workforce` Redis Stream Consumer(workforce.eval.v1 -> EVALUATING/SHADOW/REJECTED 전이) 실 검증 완료(QA가 아직 실제로 발행하지 않아 Payload Contract는 잠정안). `lifecycle-worker`는 Platform/IAM Adapter 이벤트 계약이 없어 미착수 |
 | 퀀트/백테스트 | Hypothesis, PIT Dataset, Backtest, Walk-Forward, Experiment Orchestrator | Hermes 실행, DB Experiment 6개, Worker·API 미구현 |
 | AI Office BFF | DEMO BFF, 8개 조직 UI와 Risk·QA 계약 Panel | Clean Build·Render 2/2, 공식 Runtime Snapshot 미구현 |
 | 로컬 보조 모델 | 8개 `Modelfile`, CEO·HR Smoke Script, Research/Quant 모델 실측 선택 | 공통 Ollama·Model Gateway·자동 Eval 미구현 |
@@ -1097,7 +1097,14 @@ B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운�
   실제 Producer가 아직 없는 나머지 입력(research.packet.v1 등, §6.1 참고)은 발행하는 본부가
   생기면 그대로 동작한다 - 실 Redis로 발행→소비→알림 생성, dedupe, 재시작 후 Pending 복구,
   "다른 Consumer Group용 Event는 조용히 ACK" 전부 검증함.
-- `reporting-worker`(CEO), `lifecycle-worker`/`improvement-worker`(Workforce) — 미착수.
+- `improvement-worker`(Workforce) — 완료(2026-08-03). `workforce_events/{redis_event_bus,worker}.py`가
+  `hf:workforce` Stream을 소비해 `workforce.eval.v1`을 개선 후보의 EVALUATING -> SHADOW(PASS)/
+  REJECTED(FAIL) 전이로 바꾼다. QA/감사본부가 이 이벤트를 아직 실제로 발행하지 않아
+  Payload Contract(`candidate_id`, `result`)는 잠정안이다 - QA의 Eval Runner가 확정되면
+  달라질 수 있다. `notification-worker`와 같은 방식으로 실 Redis 검증(전이 성공, 다른
+  Consumer Group용 Event 스킵, 알 수 없는 Event는 예외로 재시도 유지, 재시작 후 Pending
+  복구) 완료.
+- `reporting-worker`(CEO), `lifecycle-worker`(Workforce) — 미착수.
   - `reporting-worker`: daily_report.py의 assemble()은 완성된 Section 묶음을 한 번에 받는
     순수 함수라, 여러 시점에 걸쳐 들어오는 Snapshot Event를 fund_id·as_of별로 누적했다가
     필요 Section이 다 모이면 assemble()을 호출하는 상태 저장 로직이 없다 - 이게 생겨야
@@ -1106,8 +1113,6 @@ B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운�
     Platform/IAM Adapter 호출을 전제하는데 그 Adapter 자체가 없다. 인사팀이 직접 Provisioning을
     수행하지 않는다는 권한 경계(CLAUDE.md) 때문에 인사팀 쪽에서 이 Adapter를 대신 만들 수도 없다 -
     Platform 담당자의 선행 작업이 막혀 있다.
-  - `improvement-worker`: 입력인 `workforce.eval.v1`을 QA/감사본부가 아직 발행하지 않는다 -
-    QA 쪽 Eval Runner/Event 발행이 선행돼야 한다.
 - Mandate Snapshot과 Risk Read 계약 연결
 - Strategy/Profile Approval Gate 연결
 - Kanban Status Bridge와 Workforce Roster Projection 연결
