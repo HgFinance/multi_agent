@@ -6,9 +6,9 @@
 형식 근거: QA본부(departments/06-ai-qa-audit/scripts.py)와 리스크본부
       (departments/03-risk/scripts.py)의 파이프라인 형식 — 결정론 노드 + 서술만 하는 LLM,
       _guard_node fail-closed 경계, 순수 함수 MD 리포트, input_hash 재현성, 자체 점검.
-      **형식만 가져왔고 내용은 우리 본부 것이다** — 저쪽의 LangSmith 핸드오프와 evaluation
-      요약은 우리에게 필요 없어서 넣지 않았다(전자는 .env 가 "금융 데이터 외부 전송 정책·비용
-      검토 전까지 필수 도구가 아니다"로 못박은 것, 후자는 이미 있는 필드를 다시 세는 것).
+      **형식만 가져왔고 내용은 우리 본부 것이다** — 저쪽의 evaluation 요약은 이미 있는 필드를
+      다시 세는 것이라 넣지 않았다. LangSmith 핸드오프는 2026-08-03 에 넣되 저쪽과 달리
+      부서 Project 로 격리했다(_ls_project). 기본은 여전히 꺼짐이다.
 내용 근거: docs/04-organization/AGENT_EMPLOYEE_PROFILES.md TRD-01/TRD-02, 200행
       "동일 Evidence에서 찬반 논거를 독립 생성 | LangGraph Parallel Nodes".
 
@@ -73,6 +73,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -85,6 +86,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from langgraph.graph import END, StateGraph  # noqa: E402
+from langsmith import tracing_context  # noqa: E402
 
 PIPELINE_VERSION = "trading-debate-pipeline-v1"
 
@@ -185,6 +187,31 @@ def _max_attempts() -> int:
     F08 완료 조건
     "Schema 실패는 재시도 후 PASS 처리한다" - 한 번 실패했다고 바로 포기하지 않는다."""
     return 3
+
+
+# ── LangSmith 관측성 ──────────────────────────────────────────────────────
+# 기본은 꺼져 있다 (LANGSMITH_TRACING=false). 켜면 이 그래프의 노드·LLM 호출이
+# 외부(LangSmith)로 나간다 - 토론 Trace 에는 미공개 Research Packet 과 종목·논거가
+# 그대로 담기므로 금융 데이터 외부 전송 정책 검토 전까지 로컬 개발에서만 켠다.
+def _ls_project() -> str:
+    """부서별 Project 로 격리한다. 한 Project 에 8개 부서를 섞으면 트레이딩 Trace 를
+    다른 본부가 그대로 열람하게 된다 - 부서 경계가 관측성에서만 무너진다."""
+    return f"{os.environ.get('LANGSMITH_PROJECT') or 'hedgefund'}-02-trading"
+
+
+def _langsmith_handoff(trace_id: str) -> dict[str, Any]:
+    """리포트·소비자에게 넘기는 것은 Trace 원문이 아니라 이 좌표뿐이다."""
+    flag = os.environ.get("LANGCHAIN_TRACING_V2", os.environ.get("LANGSMITH_TRACING", ""))
+    enabled = flag.casefold() in {"1", "true", "yes", "on"}
+    return {
+        "trace_id": str(trace_id),
+        "langsmith": {
+            "enabled": enabled,
+            "project": _ls_project() if enabled else None,
+            "run_id": os.environ.get("LANGSMITH_RUN_ID"),
+            "handoff_status": "configured" if enabled else "not_configured",
+        },
+    }
 
 
 def _model_version() -> str:
@@ -506,6 +533,8 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
             "grounded": state.get("grounded", False),
             "escalate": state.get("escalate", True),
             "fallbacks": state.get("fallbacks", []),
+            "observability": _langsmith_handoff(
+                state.get("trace_id") or f"{PIPELINE_VERSION}:{ihash[:16]}"),
             # F08 완료 조건 "Model, Prompt, 입력 Snapshot과 결과를 기록한다".
             # 입력 Snapshot 은 input_hash, 결과는 이 dict 자체가 기록이다.
             "agent_versions": {"model": _model_version(),
@@ -519,8 +548,11 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
 def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None) -> dict:
     """본부 단독 실행 - 리스크/QA/리서치의 run_<dept>_department 와 같은 외부 인터페이스."""
     try:
-        state = build_pipeline(chat=chat, uploader=uploader).invoke(
-            {"research_packet": research_packet, "fallbacks": []})
+        # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
+        # 그대로 꺼진 채고, 켜져 있을 때만 트레이딩본부 Project 로 보낸다.
+        with tracing_context(project_name=_ls_project()):
+            state = build_pipeline(chat=chat, uploader=uploader).invoke(
+                {"research_packet": research_packet, "fallbacks": []})
     except Exception as exc:
         state = {"research_packet": research_packet, "claims": {}, "debate_opened": False,
                  "bull": None, "bear": None, "grounded": False, "escalate": True,
@@ -584,6 +616,7 @@ def _render_report_md(out: dict) -> str:
         f"| model | `{_md_cell(versions.get('model'))}` |",
         f"| prompt (Bull) | `{_md_cell(versions.get('bull_prompt'))}` |",
         f"| prompt (Bear) | `{_md_cell(versions.get('bear_prompt'))}` |",
+        f"| LangSmith | {_md_cell(json.dumps((out.get('observability') or {}).get('langsmith'), ensure_ascii=False, sort_keys=True))} |",
         "",
         "> 이 문서는 **판정이 아니다.** 매수/매도 방향, 수량, 주문 유형을 담지 않는다.",
         "> OrderIntent 는 trader-pm-agent(TRD-03), 승인은 리스크본부 Risk Engine 이 만든다.",
@@ -972,6 +1005,38 @@ def _check_notion_report_node():
     print("  Notion Reporter 노드       OK")
 
 
+def _check_langsmith_observability():
+    """기본은 꺼짐이고, Project 는 트레이딩본부로 격리된다.
+    실제 그래프를 켠 채로 돌리지 않는다 - 이 점검은 네트워크를 타면 안 된다."""
+    saved = {k: os.environ.get(k) for k in
+             ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_PROJECT")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        off = _langsmith_handoff("t1")["langsmith"]
+        assert off["enabled"] is False and off["handoff_status"] == "not_configured", off
+        assert off["project"] is None, off
+
+        os.environ["LANGSMITH_TRACING"] = "true"
+        os.environ["LANGSMITH_PROJECT"] = "First"
+        on = _langsmith_handoff("t1")["langsmith"]
+        assert on == {"enabled": True, "project": "First-02-trading",
+                      "run_id": None, "handoff_status": "configured"}, on
+        # 회계본부 Project 를 그대로 쓰지 않는다 (부서 경계).
+        assert _ls_project().endswith("-02-trading"), _ls_project()
+        os.environ.pop("LANGSMITH_PROJECT")
+        assert _ls_project() == "hedgefund-02-trading", _ls_project()
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    out = _run(_PACKET, chat=_stub())
+    assert out["observability"]["trace_id"] == out["trace_id"], out["observability"]
+    assert "| LangSmith |" in out["report_markdown"]
+    print("  LangSmith 관측성           OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("bull_researcher", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1013,4 +1078,5 @@ if __name__ == "__main__":
     _check_agent_has_no_tools()
     _check_notion_report_node()
     _check_secret_redaction()
-    print("트레이딩본부 토론 파이프라인 16개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    _check_langsmith_observability()
+    print("트레이딩본부 토론 파이프라인 17개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
