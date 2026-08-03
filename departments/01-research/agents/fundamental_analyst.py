@@ -64,6 +64,8 @@ from fundamental_scores import altman_z, f_score
 from llm_client import chat as llm_chat
 from llm_client import narrate as llm_narrate
 from number_guard import flag_unmatched
+from sector_baselines import annotate as sector_annotate
+from sector_baselines import cautions_for, resolve_sector
 
 AGENT_VERSION = "research-fundamental-analyst-v1"
 KST = timezone(timedelta(hours=9))
@@ -327,8 +329,26 @@ def compute_fundamental_readout(facts: list[dict]) -> dict:
         if not prior_map:
             cautions.append(f"전기({prior_pe}) 재무가 없어 F-Score 변화 신호 4개 제외")
 
+    # ── 업종 문맥 ────────────────────────────────────────────────────────────
+    # ▶ 실측(006800 미래에셋증권 2026-08-04): 부채비율 1015.01% 를 인사이트가
+    #   "외부 충격에 대한 완충이 거의 없다" 로 읽었다. **증권사는 고객예탁금·
+    #   차입이 구조적으로 부채에 잡혀 레버리지가 원래 높다** - 제조업 기준을
+    #   그대로 들이댄 오독이다. 숫자도 계산도 맞았고 틀린 것은 문맥이었다.
+    #
+    #   재료가 업종을 안 실으면 분석가도 총괄도 인사이트도 같은 오독을
+    #   반복한다 - 그 위에서 무엇을 해도 안 고쳐진다.
+    # 공식 업종코드(KSIC)를 우선한다. /evidence/financials 가 issuers 를 이미
+    # join 하고 있었는데 industry_code 를 안 실어서 몰랐다 - /bars 의 notional
+    # 과 같은 유형이다. 코드가 없으면 계정 구조로 추론한다.
+    ksic = next((r.get("industry_code") for r in rows if r.get("industry_code")),
+                None)
+    sector, sector_why = resolve_sector(
+        ksic, [r.get("account_code") for r in rows])
+    fields = sector_annotate(fields, sector, sector_why)
+    cautions += cautions_for(sector, sector_why)
+
     return {"verdict": "OK", "scope": scope, "period_end": str(latest),
-            "fields": fields, "cautions": cautions}
+            "sector": sector, "fields": fields, "cautions": cautions}
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +398,12 @@ def narrate(readout: dict, symbol: str, llm=None) -> FundamentalNote:
     payload = {"symbol": symbol, "scope": readout["scope"],
                "period_end": readout["period_end"], "fields": {}}
     for k, info in readout["fields"].items():
-        f = {"value": info["value"], "period_end": info["period_end"],
+        # ▶ 밑줄 접두는 **수치가 아니라 메타**다(_sector 등). value 를 기대하고
+        #   읽으면 KeyError 로 서술이 통째로 죽는다 - 필드 표에 메타를 섞을
+        #   때마다 여기가 깨지므로 규약으로 못박는다.
+        if k.startswith("_") or not isinstance(info, dict) or "value" not in info:
+            continue
+        f = {"value": info["value"], "period_end": info.get("period_end"),
              "published_at": info.get("published_at")}
         if not k.endswith("_pct"):
             f["표시값"] = _fmt_krw(info["value"])
@@ -538,6 +563,54 @@ def _check_scores_wired_and_citable():
     solo = compute_fundamental_readout(_rows("2025-12-31", 120, 1000, 200, 400, 300, 900, 150))
     assert solo["fields"]["f_score"]["available"] < 6, solo["fields"]["f_score"]
     assert any("전기" in c for c in solo["cautions"]), solo["cautions"]
+
+
+def _check_sector_context_is_wired():
+    """업종 문맥이 **readout 에 실제로 실리는가.**
+
+    모듈만 만들고 안 부르면 F-Score 때와 같은 상태가 된다 - 구현은 있는데
+    호출처가 0개. 실측 오독(증권사 부채비율 1015% 를 위험으로 읽음)이
+    고쳐졌는지는 여기서만 확인된다.
+    """
+    def _rows(pe, codes):
+        return [{"account_code": k, "account_name": k.split(":")[1],
+                 "value": float(v), "period_end": pe,
+                 "published_at": pe + "T00:00:00+09:00",
+                 "consolidation_scope": "CONSOLIDATED"}
+                for k, v in codes.items()]
+
+    # 증권사 - 006800 실측 계정 구조(예수부채, 유동 구분 없음)
+    fin = _rows("2025-12-31", {
+        "BS:예수부채": 50e12, "BS:당기손익-공정가치측정금융자산": 40e12,
+        "BS:자산총계": 150e12, "BS:부채총계": 136e12, "BS:자본총계": 13e12,
+        "BS:이익잉여금": 8e12, "BS:자본금": 1e12,
+        "IS:매출액": 29e12, "IS:영업이익": 1.9e12,
+        "IS:당기순이익(손실)": 1.5e12})
+    r = compute_fundamental_readout(fin)
+    assert r["sector"] == "FINANCIAL", r.get("sector")
+    # 업종코드가 오면 그것이 우선한다(실측: 006800 = KSIC 66121)
+    with_code = [dict(x, industry_code="66121") for x in fin]
+    rk = compute_fundamental_readout(with_code)
+    assert rk["sector"] == "FINANCIAL", rk.get("sector")
+    assert "KSIC" in rk["fields"]["_sector"]["detected_by"], rk["fields"]["_sector"]
+    f = r["fields"]
+    # ▶ 값은 그대로 있고(사실이다), 적용 불가 표시가 붙는다
+    assert f["부채비율_pct"]["value"] is not None, "값이 사라졌다"
+    assert f["부채비율_pct"]["sector_applicable"] is False, f["부채비율_pct"]
+    assert f["altman_z"]["sector_applicable"] is False, f["altman_z"]
+    assert any("금융업" in c for c in r["cautions"]), r["cautions"]
+
+    # 일반업 - 유동 구분이 있으면 기준이 적용된다
+    gen = _rows("2025-12-31", {
+        "BS:유동자산": 400.0, "BS:유동부채": 200.0, "BS:비유동부채": 300.0,
+        "BS:자산총계": 1000.0, "BS:부채총계": 500.0, "BS:자본총계": 500.0,
+        "BS:이익잉여금": 300.0, "BS:자본금": 50.0,
+        "IS:매출액": 900.0, "IS:영업이익": 150.0,
+        "IS:당기순이익(손실)": 120.0})
+    r2 = compute_fundamental_readout(gen)
+    assert r2["sector"] == "GENERAL", r2.get("sector")
+    assert r2["fields"]["부채비율_pct"]["sector_applicable"] is True
+    assert not any("금융업" in c for c in r2["cautions"]), r2["cautions"]
 
 
 def _check_readout_math():
@@ -754,6 +827,7 @@ if __name__ == "__main__":
     print(f"{AGENT_VERSION} 자체 점검 (LLM·API 없음)")
     _check_readout_math()
     _check_scores_wired_and_citable()
+    _check_sector_context_is_wired()
     _check_corrected_filing_and_scope()
     _check_no_prior_period()
     _check_division_guards()

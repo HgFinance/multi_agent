@@ -43,6 +43,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -53,6 +54,27 @@ WEB_SEARCH_VERSION = "research-web-search-v1"
 SEARCH_PERSONA = "rag-librarian-evidence-curator"
 
 TAVILY_URL = "https://api.tavily.com/search"
+
+# ── 검색 백엔드 ──────────────────────────────────────────────────────────────
+# ▶ 직무기술서(AGENT_EMPLOYEE_PROFILES.md 500-509행)가 RES-08 에게 정한 것은
+#   **SearXNG 기반 Web Search MCP** 다. Tavily 직접 호출은 그 자리를 임시로
+#   메운 것이었다. SearXNG 는 우리가 띄우는 메타검색이라 (a) 외부 API 키가
+#   필요 없고 (b) 질의가 제3자 로그에 남지 않으며 (c) 엔진 구성이 우리 통제다.
+#
+#   **공개 인스턴스를 쓰지 않는다.** 남의 인스턴스에 자동 질의를 넣는 것은
+#   그쪽 ToS 위반이고, 우리가 스크레이퍼를 금지한 이유와 같은 문제다.
+#   SEARXNG_URL 은 우리가 운영하는 주소여야 한다.
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
+SEARXNG_TIMEOUT = 20
+
+
+def active_backend() -> str:
+    """어느 백엔드가 실제로 쓰이는가. **선언이 아니라 실재를 돌려준다.**"""
+    if SEARXNG_URL:
+        return "searxng"
+    if os.environ.get("TAVILY_API_KEY"):
+        return "tavily"
+    return "none"
 # 한 번에 가져올 상한. 늘리면 비용이 늘고 Validator 부담도 는다.
 MAX_RESULTS = 8
 
@@ -136,21 +158,37 @@ def search(req: SearchRequest, *, persona: str = SEARCH_PERSONA,
             "과거 재현에서 실시간 웹검색을 부를 수 없다 - 지금의 웹은 그때의 "
             "지면이 아니다(RESEARCH_DATA_SOURCES 606행)")
 
+    now = datetime.now(timezone.utc)
+    n = min(req.max_results, MAX_RESULTS)
+
+    # 직무기술서가 정한 SearXNG 를 먼저 쓴다. 없으면 Tavily 로 떨어지되
+    # **어느 엔진이 냈는지 hit 에 남긴다** - 근거의 출처가 섞이면 안 된다.
+    if SEARXNG_URL:
+        raw = _call(lambda: (post or _get_json)(
+            f"{SEARXNG_URL}/search?q={urllib.parse.quote(req.question)}"
+            f"&format=json&safesearch=1"))
+        return _hits_from_searxng(raw, n, now)
+
     key = api_key if api_key is not None else os.environ.get("TAVILY_API_KEY", "")
     if not key:
-        raise WebSearchError("TAVILY_API_KEY 미설정 - 검색을 건너뛴다")
+        raise WebSearchError(
+            "검색 백엔드가 없다 - SEARXNG_URL 또는 TAVILY_API_KEY 를 설정한다")
+    raw = _call(lambda: (post or _post)(TAVILY_URL, {
+        "api_key": key, "query": req.question,
+        "max_results": n, "search_depth": "basic"}))
+    return _hits_from_tavily(raw, n, now)
 
-    body = {"api_key": key, "query": req.question,
-            "max_results": min(req.max_results, MAX_RESULTS),
-            "search_depth": "basic"}
-    now = datetime.now(timezone.utc)
+
+def _call(fn):
     try:
-        raw = (post or _post)(TAVILY_URL, body)
-    except Exception as e:
+        return fn()
+    except Exception as e:  # noqa: BLE001
         raise WebSearchError(f"검색 호출 실패: {type(e).__name__}: {e}") from e
 
+
+def _hits_from_tavily(raw, n: int, now) -> list[SearchHit]:
     hits = []
-    for r in (raw or {}).get("results") or []:
+    for r in ((raw or {}).get("results") or [])[:n]:
         if not r.get("url"):
             continue
         hits.append(SearchHit(
@@ -163,6 +201,35 @@ def search(req: SearchRequest, *, persona: str = SEARCH_PERSONA,
             score=float(r["score"]) if r.get("score") is not None else None,
         ))
     return hits
+
+
+def _hits_from_searxng(raw, n: int, now) -> list[SearchHit]:
+    """SearXNG JSON -> SearchHit.
+
+    SearXNG 는 score 대신 순위를 준다. **순위를 점수로 위장하지 않는다** -
+    0.9 같은 값을 만들어 넣으면 Tavily 점수와 비교 가능한 것처럼 읽힌다.
+    """
+    hits = []
+    for r in ((raw or {}).get("results") or [])[:n]:
+        if not r.get("url"):
+            continue
+        hits.append(SearchHit(
+            url=str(r["url"]),
+            title=str(r.get("title") or "")[:200],
+            snippet=str(r.get("content") or "")[:500],
+            # 어느 엔진이 냈는지 남긴다. searxng 는 메타검색이라 그 안에서
+            # 어떤 엔진이 물어왔는지도 함께 적는다.
+            engine="searxng:" + str(r.get("engine") or "?")[:24],
+            retrieved_at=now,
+            score=None,
+        ))
+    return hits
+
+
+def _get_json(url: str, timeout: int = SEARXNG_TIMEOUT) -> dict:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
 
 
 def _post(url: str, body: dict, timeout: int = 25) -> dict:
@@ -342,6 +409,60 @@ def _check_snippet_not_full_body():
     print("  스니펫 상한(본문 금지)   OK")
 
 
+def _check_searxng_backend():
+    """SearXNG 가 실제로 쓰이고, **엔진 출처가 남는가.**
+
+    직무기술서가 정한 백엔드는 SearXNG 다. 붙였는데 hit 에 엔진이 안 남으면
+    Tavily 결과와 섞여 어느 엔진이 낸 근거인지 못 가린다.
+    """
+    global SEARXNG_URL
+    orig = SEARXNG_URL
+    try:
+        globals()["SEARXNG_URL"] = "http://127.0.0.1:8888"
+        assert active_backend() == "searxng", active_backend()
+        fake = {"results": [
+            {"url": "https://a.com/1", "title": "t1", "content": "c1",
+             "engine": "google"},
+            {"url": "", "title": "버림", "content": "x"},
+            {"url": "https://a.com/2", "title": "t2", "content": "c2",
+             "engine": "bing"}]}
+        req = SearchRequest(question="q", reason="내부 근거 없음",
+                            requester=SEARCH_PERSONA)
+        hits = search(req, post=lambda url: fake)
+        assert len(hits) == 2, hits              # url 없는 행은 버린다
+        assert hits[0].engine == "searxng:google", hits[0]
+        assert hits[1].engine == "searxng:bing", hits[1]
+        # ▶ 순위를 점수로 위장하지 않는다 - Tavily 점수와 비교 가능한 것처럼
+        #   읽히면 안 된다
+        assert all(h.score is None for h in hits), hits
+        # 스니펫 상한은 백엔드가 바뀌어도 지켜진다(라이선스)
+        big = {"results": [{"url": "https://a.com/3", "title": "t",
+                            "content": "가" * 5000, "engine": "e"}]}
+        assert len(search(req, post=lambda url: big)[0].snippet) <= 500
+    finally:
+        globals()["SEARXNG_URL"] = orig
+
+
+def _check_backend_absent_is_explicit():
+    """백엔드가 없으면 **조용히 0건이 아니라 사유가 있는 실패**여야 한다."""
+    global SEARXNG_URL
+    orig, key = SEARXNG_URL, os.environ.pop("TAVILY_API_KEY", None)
+    try:
+        globals()["SEARXNG_URL"] = ""
+        assert active_backend() == "none"
+        req = SearchRequest(question="q", reason="r", requester=SEARCH_PERSONA)
+        try:
+            search(req, api_key="")
+        except WebSearchError as e:
+            assert "SEARXNG_URL" in str(e), str(e)
+        else:
+            raise AssertionError("백엔드 없이 검색이 성공했다")
+    finally:
+        globals()["SEARXNG_URL"] = orig
+        if key is not None:
+            os.environ["TAVILY_API_KEY"] = key
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -355,4 +476,6 @@ if __name__ == "__main__":
     _check_future_and_empty_rejected()
     _check_summary_shows_why_zero()
     _check_snippet_not_full_body()
-    print("웹검색 8개 영역 통과.")
+    _check_searxng_backend();          print("  SearXNG 백엔드·출처      OK")
+    _check_backend_absent_is_explicit();print("  백엔드 부재 = 명시 실패  OK")
+    print("웹검색 10개 영역 통과.")
