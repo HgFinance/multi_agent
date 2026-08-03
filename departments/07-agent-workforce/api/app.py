@@ -11,9 +11,10 @@ scorecard/cost.py를 감싸는 FastAPI 래퍼.
 
 저장소는 기본 In-Memory다. DATABASE_URL이 설정돼 있으면 Access(lifecycle/
 postgres_access_repository.py)·Improvements(improvements/repository.py)가 Postgres
-구현으로 전환한다. Scorecard/Budget은 원래 저장소 자체가 없었어서(In-Memory 대체가
-없다) - DATABASE_URL이 없으면 아래 GET 엔드포인트가 501로 막고, 기존 POST 데모
-엔드포인트(호출자가 Snapshot을 직접 실어 보냄)만 동작한다.
+구현으로 전환한다. Scorecard/Budget/Roster는 원래 저장소 자체가 없었어서(In-Memory
+대체가 의미 없다 - 실제로 등록된 Agent를 보는 게 목적이라) - DATABASE_URL이 없으면
+관련 GET/POST 엔드포인트가 501로 막고, Scorecard의 기존 POST 데모 엔드포인트(호출자가
+Snapshot을 직접 실어 보냄)만 그대로 동작한다.
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다):
   - POST /workforce/v1/departments/{code}/scorecard, POST /workforce/v1/budget-assessments는
@@ -22,8 +23,12 @@ postgres_access_repository.py)·Improvements(improvements/repository.py)가 Post
     scorecard, GET /workforce/v1/agents/{agent_id}/budget-assessment가 스펙이 원래
     의도한 형태(postgres_scorecard_repository.py가 실제 Snapshot을 조회) - POST는
     호환을 위해 남겨뒀다.
-  - GET /workforce/v1/roster, GET /workforce/v1/skill-gap(스펙 3.1/3.4)은 없다 -
-    workforce.agent_profiles를 조회하는 Repository가 아직 없다(HR-01 선행 작업).
+  - GET /workforce/v1/skill-gap(스펙 3.4)은 아직 없다 - Roster(3.1)만 이번(HR-02)에
+    구현했다.
+  - POST /workforce/v1/agents/{agent_id}/status의 idempotency_key는 스펙 필드를
+    그대로 받지만 실제 중복 실행 방지에는 쓰지 않는다(workforce 스키마에 이 값을 저장할
+    테이블이 없다 - governance.case_events만 idempotency_key 컬럼을 갖는데 그건 GOV-02
+    영역이라 여기서 빌려 쓰지 않는다).
 
 실행: uvicorn app:app --app-dir departments/07-agent-workforce/api
 자체 점검: python departments/07-agent-workforce/api/app.py
@@ -46,7 +51,8 @@ _BASE = Path(__file__).resolve().parent.parent
 _LIFECYCLE_DIR = _BASE / "lifecycle"
 _IMPROVEMENTS_DIR = _BASE / "improvements"
 _SCORECARD_DIR = _BASE / "scorecard"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR):
+_ROSTER_DIR = _BASE / "roster"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (  # noqa: E402
@@ -80,6 +86,16 @@ from workflow import (  # noqa: E402
     MissingEvidenceError,
     SelfApprovalError as CandidateSelfApprovalError,
 )
+from roster import (  # noqa: E402
+    AgentNotFoundError,
+    AgentSummary,
+    EmploymentStatus,
+    MissingActivationEvidenceError,
+    ProfileVersionRow,
+    ProfileVersionSubmission,
+    StatusChangeRequest,
+    validate_status_change,
+)
 
 try:
     from postgres_access_repository import PostgresAccessRepository
@@ -95,6 +111,11 @@ try:
     from postgres_scorecard_repository import PostgresScorecardRepository
 except ImportError:
     PostgresScorecardRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_roster_repository import PostgresRosterRepository
+except ImportError:
+    PostgresRosterRepository = None  # type: ignore[assignment,misc]
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
@@ -187,6 +208,42 @@ class ScorecardRequest(BaseModel):
     rework_rate: str | None = None
 
 
+class ProfileVersionSubmissionIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/profile-versions Request.
+
+    agent_profile_versions 컬럼과 1:1 (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1).
+    """
+
+    model_id: str
+    prompt_artifact_path: str
+    skill_manifest: dict
+    tool_allowlist: dict
+    data_scopes: dict
+    memory_namespace: str
+    token_budget: dict
+    sla: dict
+    eval_requirements: dict
+    forbidden_actions: list
+    effective_from: datetime
+    effective_to: datetime | None = None
+
+
+class StatusChangeRequestIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/status Request (스펙 3.1 change_status).
+
+    idempotency_key는 스펙 필드 그대로 받지만, 이를 저장·조회할 별도 테이블이
+    workforce 스키마에 없어(governance.case_events만 idempotency_key 컬럼을 가진다 -
+    GOV-02 영역) 아직 실제 중복 실행 방지에는 쓰지 않는다 - 투명하게 남겨둔다.
+    """
+
+    to_status: EmploymentStatus
+    profile_version_id: str
+    reason: str
+    idempotency_key: str
+    qa_eval_run_id: str | None = None
+    ceo_approval_id: str | None = None
+
+
 class BudgetAssessmentRequest(BaseModel):
     agent_id: str
     employee_code: str
@@ -224,6 +281,32 @@ def _access_request_dict(r: AccessRequest) -> dict:
         "request_id": r.request_id, "agent_id": r.agent_id, "resource_kind": r.resource_kind.value,
         "resource_ref": r.resource_ref, "environment": r.environment.value, "status": r.status.value,
         "expires_at": r.expires_at.isoformat(), "approval_id": r.approval_id,
+    }
+
+
+def _agent_summary_dict(a: AgentSummary) -> dict:
+    current_profile_version = None
+    if a.current_profile_version is not None:
+        pv = a.current_profile_version
+        current_profile_version = {
+            "profile_version_id": pv.profile_version_id, "version": pv.version,
+            "model": {"provider": pv.model.provider, "model_name": pv.model.model_name,
+                      "model_version": pv.model.model_version},
+            "memory_namespace": pv.memory_namespace, "status": pv.status.value,
+        }
+    return {
+        "agent_id": a.agent_id, "employee_code": a.employee_code, "display_name": a.display_name,
+        "department_code": a.department_code, "role_code": a.role_code,
+        "employment_status": a.employment_status.value, "current_version": a.current_version,
+        "current_profile_version": current_profile_version,
+        "owner_user_id": a.owner_user_id, "backup_owner_user_id": a.backup_owner_user_id,
+    }
+
+
+def _profile_version_row_dict(row: ProfileVersionRow) -> dict:
+    return {
+        "profile_version_id": row.profile_version_id, "agent_id": row.agent_id,
+        "version": row.version, "artifact_hash": row.artifact_hash, "status": row.status.value,
     }
 
 
@@ -346,6 +429,14 @@ if os.environ.get("DATABASE_URL") and PostgresScorecardRepository is not None:
 else:
     _scorecard_repo = None
 
+# Roster/Profile - workforce.agent_profiles는 seed 데이터 이전 In-Memory 대체가 의미
+# 없다(QA/Model Gateway가 보려는 건 실제로 등록된 Agent다) - Scorecard와 같은 이유로
+# DATABASE_URL 없으면 None -> 아래 엔드포인트가 501로 막는다.
+if os.environ.get("DATABASE_URL") and PostgresRosterRepository is not None:
+    _roster_repo = PostgresRosterRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _roster_repo = None
+
 
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
@@ -357,16 +448,25 @@ def _on_value_error(request, exc: ValueError):
 for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
+    MissingActivationEvidenceError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
         AccessSelfApprovalError: 403, MissingProvisioningError: 409,
         MissingRevocationEvidenceError: 409, IllegalTransition: 409,
         CandidateSelfApprovalError: 403, MissingEvidenceError: 409, CandidateIllegalTransition: 409,
+        MissingActivationEvidenceError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
         })
+
+
+@app.exception_handler(AgentNotFoundError)
+def _on_agent_not_found(request, exc: AgentNotFoundError):
+    return JSONResponse(status_code=404, content={
+        "error_code": "AgentNotFoundError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
 
 
 @app.exception_handler(WorkforceEventBusError)
@@ -434,6 +534,66 @@ def get_agent_access(agent_id: str):
     return {"assignments": [
         _access_assignment_dict(a) for a in _access_repo.list_assignments_by_agent(agent_id)
     ]}
+
+
+# --- 3.1 Roster / Profile (HR-02) ------------------------------------------------
+#
+# QA·Model Gateway가 같은 Profile Version을 조회할 공식 Read API(+ 발급/전이 Write).
+# 판정 로직은 없다 - roster.py의 순수 함수(compute_artifact_hash, validate_status_change)와
+# postgres_roster_repository.py의 SQL 왕복이 전부다.
+
+
+def _require_roster_repo() -> None:
+    if _roster_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - workforce.agent_profiles 조회 불가",
+        )
+
+
+@app.get("/workforce/v1/roster")
+def get_roster():
+    _require_roster_repo()
+    return {"agents": [_agent_summary_dict(a) for a in _roster_repo.list_roster()]}
+
+
+@app.get("/workforce/v1/agents/{agent_id}")
+def get_agent(agent_id: str):
+    _require_roster_repo()
+    agent = _roster_repo.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"agent_id={agent_id} 없음")
+    return _agent_summary_dict(agent)
+
+
+@app.post("/workforce/v1/agents/{agent_id}/profile-versions")
+def submit_profile_version(agent_id: str, body: ProfileVersionSubmissionIn):
+    """항상 새 Version을 insert한다 - 기존 Version을 수정하는 엔드포인트는 없다."""
+    _require_roster_repo()
+    submission = ProfileVersionSubmission(
+        model_id=body.model_id, prompt_artifact_path=body.prompt_artifact_path,
+        skill_manifest=body.skill_manifest, tool_allowlist=body.tool_allowlist,
+        data_scopes=body.data_scopes, memory_namespace=body.memory_namespace,
+        token_budget=body.token_budget, sla=body.sla, eval_requirements=body.eval_requirements,
+        forbidden_actions=body.forbidden_actions, effective_from=body.effective_from,
+        effective_to=body.effective_to,
+    )
+    row = _roster_repo.submit_profile(agent_id, submission)
+    return _profile_version_row_dict(row)
+
+
+@app.post("/workforce/v1/agents/{agent_id}/status")
+def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
+    """to_status=ACTIVE는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다."""
+    request = StatusChangeRequest(
+        to_status=body.to_status, profile_version_id=body.profile_version_id, reason=body.reason,
+        idempotency_key=body.idempotency_key, qa_eval_run_id=body.qa_eval_run_id,
+        ceo_approval_id=body.ceo_approval_id,
+    )
+    validate_status_change(request)
+    _require_roster_repo()
+    _roster_repo.change_status(agent_id, to_status=body.to_status, at=datetime.now(timezone.utc))
+    return _agent_summary_dict(_roster_repo.get_agent(agent_id))
 
 
 # --- 3.3 Improvement Candidate (F19) ----------------------------------------------
@@ -668,4 +828,22 @@ if __name__ == "__main__":
     assert r14.status_code == 200 and r14.json()["status"] == "EXCEEDED", r14.text
     assert r14.json()["recommended_action"] == "PROPOSE_MODEL_DOWNGRADE"
 
-    print("ok - Workforce Domain API 4개 영역(access/improvements/scorecard/budget) 점검 통과")
+    # 5. Roster (HR-02) - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야 한다.
+    # 실제 DB 왕복 검증은 roster/postgres_roster_repository.py 자체 점검이 담당한다.
+    r15 = client.get("/workforce/v1/roster")
+    assert r15.status_code == 501, r15.text
+    r16 = client.get("/workforce/v1/agents/a1")
+    assert r16.status_code == 501, r16.text
+    r17 = client.post("/workforce/v1/agents/a1/profile-versions", json={
+        "model_id": "m1", "prompt_artifact_path": "x", "skill_manifest": {}, "tool_allowlist": {},
+        "data_scopes": {}, "memory_namespace": "x", "token_budget": {}, "sla": {},
+        "eval_requirements": {}, "forbidden_actions": [], "effective_from": t0,
+    })
+    assert r17.status_code == 501, r17.text
+    r18 = client.post("/workforce/v1/agents/a1/status", json={
+        "to_status": "ACTIVE", "profile_version_id": "pv1", "reason": "x",
+        "idempotency_key": "idem-1",
+    })
+    assert r18.status_code == 409, r18.text  # validate_status_change가 501 확인보다 먼저 막는다
+
+    print("ok - Workforce Domain API 5개 영역(access/improvements/scorecard/budget/roster) 점검 통과")
