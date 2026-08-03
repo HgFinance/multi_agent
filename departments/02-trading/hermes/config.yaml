@@ -149,3 +149,18 @@ usage:
 #   - 도메인 데이터는 나중에 MCP Server 로 붙인다. builtin toolset 과 별개다.
 platform_toolsets:
   cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+
+# ⚠ 아래 목록이 없으면 위 허용목록이 조용히 새어나간다. Hermes 는
+#   known_builtin_toolsets 에 **없는** toolset 을 "새로 생긴 것"으로 보고 자동
+#   활성화한다. sync push 가 이 파일을 통째로 덮으므로, 이 키를 빼두면 push 할
+#   때마다 platform_toolsets 에 없는 도구가 다시 켜진다(2026-08-03 실측: bfl 이
+#   그렇게 살아남았다 - 목록에 없는데 enabled 였다).
+#   Hermes 가 새 toolset 을 추가하면 여기서도 빠져 자동 활성화되므로, `hermes
+#   tools list` 결과가 platform_toolsets 와 다르면 이 목록을 갱신한다.
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+  cli: [spotify]
