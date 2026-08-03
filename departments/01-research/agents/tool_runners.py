@@ -61,11 +61,17 @@ def _num(v) -> float | None:
     return f if f == f else None      # NaN 제외
 
 
-def _guard(service: str, path: str, run_mode: str) -> None:
-    """PIT Manifest 판정을 러너가 우회하지 않는다."""
+def _guard(service: str, path: str, run_mode: str, url: str | None = None) -> None:
+    """PIT Manifest 판정을 러너가 우회하지 않는다.
+
+    ▶ **url 을 같이 넘긴다.** 엔드포인트가 as_of 를 받는다고 해서 이 호출이
+      그것을 실었다는 보장이 없다. 안 실으면 REPLAY 에서 현재 값이 조용히
+      과거 판단의 근거가 된다 - 막혀 있던 것보다 나쁘다(막혀 있으면 사람이
+      알지만 조용히 틀리면 아무도 모른다).
+    """
     from pit_manifest import ensure_callable
 
-    ensure_callable(service, path, run_mode=run_mode)
+    ensure_callable(service, path, run_mode=run_mode, url=url)
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +267,13 @@ def price_history(symbol: str, limit: int = 120, *, run_mode: str = "LIVE",
 
 
 def breadth_history(days: int = 60, *, run_mode: str = "LIVE",
+                    as_of: str | None = None,
                     get: Callable | None = None) -> ToolResult:
     """시장 폭 과거치. **비교 기준 없는 단일 값은 판정이 아니다.**"""
-    _guard("market-api", "/breadth", run_mode)
-    rows = _get(f"{MARKET_API}/breadth?days={days}", "sector-regime-analyst", get)
+    # URL 을 **먼저** 만들어 가드에 넘긴다 - 가드가 파라미터 실사용까지 본다
+    url = f"{MARKET_API}/breadth?days={days}" + (f"&as_of={as_of}" if as_of else "")
+    _guard("market-api", "/breadth", run_mode, url)
+    rows = _get(url, "sector-regime-analyst", get)
     rows = rows if isinstance(rows, list) else [rows] if rows else []
     # ▶ **정렬을 가정하지 않는다.** /breadth 는 `order by event_time desc` 라
     #   최신이 rows[0] 이다. 예전엔 ratios[-1] 을 최신으로 읽어 60일 조회에서
@@ -288,11 +297,12 @@ def breadth_history(days: int = 60, *, run_mode: str = "LIVE",
 def micro_history(symbol: str, date: str = "", *, run_mode: str = "LIVE",
                   get: Callable | None = None) -> ToolResult:
     """과거 세션 미시구조. 오늘이 얼마나 이례적인지 말하기 위해 쓴다."""
-    _guard("market-api", "/microstructure/{symbol}", run_mode)
     # ?date= 는 무시된다 - API 는 trade_date= 를 받는다.
     # 그래서 "과거 세션 비교" 가 매번 오늘 자신과의 비교였다.
     q = f"?trade_date={date}" if date else ""
-    r = _get(f"{MARKET_API}/microstructure/{symbol}{q}", "microstructure-analyst", get)
+    url = f"{MARKET_API}/microstructure/{symbol}{q}"
+    _guard("market-api", "/microstructure/{symbol}", run_mode, url)
+    r = _get(url, "microstructure-analyst", get)
     if not r:
         return ToolResult(tool="micro_history", ok=False,
                           reason=f"{symbol} {date or '최근'} 미시구조 없음")
@@ -398,13 +408,25 @@ def _check_replay_is_blocked():
     """PIT Manifest 를 러너가 우회하지 않는가."""
     from pit_manifest import PitViolation
 
-    # Manifest 가 UNSUPPORTED 로 선언한 것은 Replay 에서 호출 자체가 막힌다
+    # ▶ 2026-08-04: 이 둘은 UNSUPPORTED 였다가 as_of/trade_date 를 받게 되면서
+    #   SUPPORTED 가 됐다. **그래도 컷오프 없이 부르면 여전히 막힌다** -
+    #   지원한다는 것과 쓴다는 것은 다르고, 안 쓰면 REPLAY 에서 현재 값이
+    #   조용히 과거 판단의 근거가 된다(막혀 있던 것보다 나쁘다).
     for fn, args in ((breadth_history, ()), (micro_history, ("005380",))):
         try:
             fn(*args, run_mode="REPLAY", get=lambda u: [])
-            raise AssertionError(f"{fn.__name__} 이 REPLAY 에서 통과했다")
+            raise AssertionError(f"{fn.__name__} 이 컷오프 없이 REPLAY 를 통과했다")
         except PitViolation as e:
-            assert "look-ahead" in str(e)
+            assert "컷오프를 안 넘겼다" in str(e), str(e)
+
+    # 컷오프를 넘기면 통과한다 - 금지가 파라미터가 됐다는 것의 실제 의미다
+    ok = breadth_history(run_mode="REPLAY", as_of="2026-06-01T00:00:00+09:00",
+                         get=lambda u: [{"event_time": "2026-05-30",
+                                         "ad_ratio": 1.1}])
+    assert ok.ok is True, ok
+    ok2 = micro_history("005380", date="2026-06-01", run_mode="REPLAY",
+                        get=lambda u: {"trade_date": "2026-06-01"})
+    assert ok2 is not None
 
     # ▶ /bars 는 SUPPORTED 라 Manifest 는 통과시킨다. 그러나 **러너가 to 를 안
     #   넘기면 최신 봉이 온다** - 지원한다는 것과 쓴다는 것은 다르다.

@@ -150,20 +150,33 @@ def health() -> dict:
 
 
 @app.get("/snapshot/{symbol}")
-def snapshot(symbol: str) -> dict:
-    """마지막 체결 + 마지막 호가. 세션 밖에서는 마감 스냅샷이 나온다."""
+def snapshot(symbol: str,
+             as_of: Optional[str] = Query(
+                 None, description="이 시각까지의 마지막 체결·호가(PIT, "
+                                   "tz 포함 ISO8601). 없으면 최신")) -> dict:
+    """마지막 체결 + 마지막 호가. 세션 밖에서는 마감 스냅샷이 나온다.
+
+    ▶ **as_of 를 받는다.** market_ticks·market_quotes 는 event_time 으로 이력이
+      원래 다 있었고 컷오프만 없어서 Replay 금지였다. 금지는 도구를 없애지만
+      파라미터는 도구를 살린다 - 에이전트가 값을 하는지 증명하려면 과거로
+      돌려볼 수 있어야 한다.
+    """
     iid = _iid_or_404(symbol)
     tick = _query("""
         select event_time, price, quantity, cumulative_volume
-        from market.market_ticks where instrument_id = %s
+        from market.market_ticks
+        where instrument_id = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid,))
+    """, (iid, as_of, as_of))
     quote = _query("""
         select event_time, best_bid, best_ask, mid_price,
                total_bid_size, total_ask_size
-        from market.market_quotes where instrument_id = %s
+        from market.market_quotes
+        where instrument_id = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid,))
+    """, (iid, as_of, as_of))
     if not tick and not quote:
         raise HTTPException(404, f"{symbol} 의 시세가 아직 없다")
     return {"symbol": symbol,
