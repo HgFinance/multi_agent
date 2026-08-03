@@ -646,6 +646,51 @@ OBSERVED
 
 설계의 기반이 되는 Hermes 공식 기능은 [Persistent Memory](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md), [Skills System](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md)과 [Tools Reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/tools-reference.md)를 따른다. 회사 차원의 Gate, Version, RLS, Audit와 승인 분리는 본 프로젝트가 그 위에 추가하는 금융 통제다.
 
+### 5.11 Research-Quant Evidence-to-Strategy Framework
+
+리서치본부와 퀀트/백테스트본부는 `직원 Agent가 자료를 가공하고 본부장 LLM이 긴 문장을
+요약하는 구조`에 머물지 않는다. 두 본부는 하나의 과학적 폐쇄 루프로 연결한다.
+
+```text
+Point-in-Time Evidence
+  -> 역할별 Retrieval과 Claim/Evidence Graph
+  -> Macro/Micro 독립 전망
+  -> 반론과 근거 누락 검증
+  -> ResearchPacketV2
+  -> 사전 등록 HypothesisSpecV2
+  -> 불변 Dataset과 결정론적 Experiment
+  -> 독립 Robustness Validation
+  -> ExperimentCard와 Strategy Candidate
+  -> Outcome Calibration
+  -> 검증된 Skill/Workflow Version
+```
+
+역할 경계는 다음처럼 확정한다.
+
+- **Hermes Supervisor**: 본부 Mandate, Case, Queue, Budget, SLA, 재시도, Escalation과 검증된
+  Memory/Skill을 관리한다. 수치 계산, Backtest Metric, Risk 승인과 자기 후보의 최종 승격은 하지 않는다.
+- **LangGraph**: 한 Research/Experiment Case의 상태 전이, 역할별 Branch/Fan-in, Checkpoint,
+  제한된 재검색과 부분 실패 복구를 담당한다.
+- **직원 Agent**: 역할별 Tool로 근거가 연결된 구조화 산출물을 만든다. 자유로운 Agent 간 대화보다
+  `AnalystFindingV1`, `ResearchPacketV2`, `HypothesisSpecV2` 계약으로 협업한다.
+- **결정론적 Service**: Point-in-Time 조회, 숫자 계산, Dataset, Backtest, 통계 검증, Hash와 Registry를 맡는다.
+
+현재 Research Pipeline의 마지막 Packet 합성은 Hermes Profile의 Supervisor Persona를 읽은 LLM
+호출이며, 실제 Hermes Queue·Memory·Retry Runtime이 합성을 지휘하는 상태는 아니다. Quant도
+Dataset·Backtest·Walk-Forward Script와 Hermes Profile이 존재하지만 하나의 상태 Graph/Worker로
+통합되지 않았다. 문서에서는 이 현재 상태와 목표 상태를 혼동하지 않는다.
+
+Research에는 Nexus의 Contextualization과 Macro/Micro 이중 전망, MimirRAG/FinSAgent의 금융
+문서·Corpus-aware Retrieval, STORM의 관점 발견을 적용한다. Quant에는 TimeSeriesScientist의
+Curator/Planner/Forecaster/Reporter 역할 분리, 사전 등록, Trial Ledger, Purged Walk-Forward,
+CPCV, Deflated Sharpe Ratio와 PBO를 단계적으로 도입한다. 실패 결과는 역할·Horizon·Regime별로
+채점하고, Held-out Eval과 QA 승인을 통과한 개선 후보만 Hermes Skill이나 Workflow Version으로
+승격한다.
+
+상세 문제 분석, 계약, 상태 머신, 기술 스택과 `RQF-0`~`RQF-5` 구현 순서는
+[Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+단일 구현 기준으로 사용한다.
+
 ## 6. 실시간 처리 파이프라인
 
 ### 6.1 데이터 수신
@@ -814,6 +859,7 @@ priority =
 | 1. 리서치본부 | Fundamental Analyst | 재무, 밸류에이션과 실적 분석 | 저빈도/캐시 |
 | 1. 리서치본부 | News/Sentiment Analyst | 뉴스, 공시, 승인된 X Watchlist, 촉매, 내러티브와 심리 분석 | 문서·소셜 이벤트 |
 | 1. 리서치본부 | Sector/Regime Analyst | 동종 종목, 섹터, 매크로와 시장 국면 분석 | 섹터/국면 이벤트 |
+| 1. 리서치본부 | RAG Librarian/Web Evidence Curator | 내부 RAG, 통제된 웹검색, 원출처·인용·시점·사용권 검증 | Evidence Gap |
 | 2. 트레이딩본부 | Trading Supervisor | Research와 Strategy Signal을 거래 Case로 통합 | 주문 후보 |
 | 2. 트레이딩본부 | Bull Researcher | 상승 논거, 촉매와 기대수익 주장 | 심층 분석 |
 | 2. 트레이딩본부 | Bear Researcher | 반증, 하락 위험과 논리 취약점 제시 | 심층 분석 |
@@ -836,6 +882,19 @@ priority =
 | 6. AI QA/감사본부 | Model Risk Agent | 모델·프롬프트·Dataset·Release 재현성 독립 검증 | 연구/배포 |
 | 6. AI QA/감사본부 | Internal Audit Agent | 권한 분리, Override, 원장 변경과 Finding 추적 | 상시/정기 |
 | 6. AI QA/감사본부 | Agent Ops Monitor | Agent, Feed, Queue, Model Server의 오류·지연·비용 감시 | 항상 |
+
+웹검색 MCP는 초기에는 별도 상시 직원 신설 없이 기존 `RES-08 RAG Librarian/Evidence Curator`에
+`web-evidence-research` Skill로 배정한다. RES-08만 SearXNG Search MCP와 제한된 Read-only
+Playwright MCP를 사용하며 Fundamental, News/Sentiment, Sector/Macro와 Geopolitical Analyst는
+`WebSearchRequest`만 제출한다. Research Supervisor는 검색을 직접 수행하지 않고 Case 우선순위와
+위임을 관리한다. Technical, Microstructure, Universe와 Data Steward는 기존 Market/Data API만 사용한다.
+
+웹검색 Queue의 반복 SLO 위반, RES-08의 Citation·Index 업무 지연, 전문 언어·정책 Source Coverage
+공백 또는 발견·검증 분리 필요성이 두 평가 주기 이상 확인될 때만 조건부 `RES-10 Web Intelligence
+Researcher` 채용을 검토한다. 신설 시 RES-10은 후보 URL 발견만, RES-08은
+`VERIFIED_EVIDENCE` 승격만 맡아 자기 검색 결과의 자기 승인을 금지한다. 상세 권한과 Trigger는
+[Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md)와
+[Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
 
 ### 8.1 동적 라우팅
 
@@ -1677,6 +1736,11 @@ flowchart LR
     M --> D
 ```
 
+이 폐쇄 루프의 앞단은 `ResearchPacketV2`의 Claim과 Evidence를 가설의 출처로 보존하고, 뒷단은
+실험 결과를 Research Query, Calibration과 검증된 Hermes Skill 후보로 되돌린다. Research와 Quant의
+세부 Graph는 [Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+따른다.
+
 ### 18.4 전략 가설 계약
 
 전략 연구는 자유로운 노트가 아니라 검증 가능한 계약으로 시작한다.
@@ -1707,6 +1771,9 @@ owner: alpha_research_agent
 ```
 
 가설에는 경제적 근거, 대상 Universe, 판단 빈도, 보유 기간, 필요한 데이터, 비용 가정 및 폐기 조건이 반드시 포함되어야 한다.
+가설은 추가로 `research_packet_ids`, `claim_ids`, `competing_explanation`, `baseline`,
+`trial_family_id`, `trial_budget`과 `preregistered_splits`를 가진다. Backtest 결과를 본 뒤 Feature,
+Label, Split, 비용 또는 폐기 기준을 바꾸면 같은 가설을 덮어쓰지 않고 새 Version을 만든다.
 
 ### 18.5 Dataset Factory
 
@@ -1761,6 +1828,10 @@ Credit, Convertible, Private Market, Real Estate, Digital Asset와 OTC 전략은
 - Survivorship Bias 방지
 - Purged Walk-Forward Validation
 - Label 구간이 겹치는 샘플의 Embargo
+- Trial Family별 전체 실험 수와 선택 과정을 남기는 Trial Ledger
+- 연구 단계의 경로 안정성을 확인하는 CPCV
+- 다중 실험 선택 편향과 비정규 수익률을 보정하는 Deflated Sharpe Ratio
+- 선택된 최적 후보의 과적합 가능성을 측정하는 PBO
 - 최종 Holdout은 승격 심사 전까지 비공개
 - 종목, 기간, 섹터 및 시장 국면별 결과 분해
 - Bootstrap Confidence Interval

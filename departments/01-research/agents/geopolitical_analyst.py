@@ -180,7 +180,10 @@ def compute_geo_readout(rows: list[dict], *, as_of: date) -> dict:
     남긴다 - 낡은 값을 현재 국면으로 쓰는 것이 가장 위험하다.
     """
     series = group_series(rows)
-    out: dict = {"window_days": WINDOW_DAYS, "geo_rules": GEO_RULES}
+    # method_keys: 이 판독에 실제로 쓰인 등재 방법. 성과를 방법 단위로
+    # 귀속하려면 주장에 method_key 를 실어야 하고, 그 출처가 여기다.
+    out: dict = {"window_days": WINDOW_DAYS, "geo_rules": GEO_RULES,
+                 "method_keys": ("gpr_threat_act_split",)}
 
     # --- GPR ---
     gprd = series.get("GPRD") or []

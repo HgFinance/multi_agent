@@ -588,7 +588,7 @@ CEO가 생성하는 `MandateDecision`과 `CapitalAllocationDecision`은 설명�
 | RES-05 Fundamental | DART XBRL, 공시, Corporate Action, 기업개황 | Consensus, 신용, Transcript | Fundamental Memo |
 | RES-06 News/Sentiment | News Story, 공시, Entity, Source 신뢰도 | Search Trend, Social Aggregate | Catalyst/Story Cluster |
 | RES-07 Sector/Macro | Index, Sector/Peer, 금리·환율·원자재, ECOS/KOSIS | Global Macro, Supply Chain | Regime Brief |
-| RES-08 RAG Librarian | 원문, Metadata, License, Chunk, Embedding, Retraction | Knowledge Graph | Evidence Bundle |
+| RES-08 RAG Librarian/Web Evidence Curator | 원문, Metadata, License, Chunk, Embedding, Retraction, `WebSearchRequest`와 Search Hit | Knowledge Graph, 공식 웹 원출처 | Evidence Bundle, Web Search Run |
 
 핵심 Library 묶음:
 
@@ -597,9 +597,13 @@ CEO가 생성하는 `MandateDecision`과 `CapitalAllocationDecision`은 설명�
 - 문서: `pymupdf`, `pypdf`, `trafilatura`, `PaddleOCR` 후보.
 - 한국어·중복: `kiwipiepy`, `rapidfuzz`, `datasketch`.
 - RAG: `sentence-transformers` 또는 Model Gateway, `pgvector`.
+- Web Evidence: Self-hosted `SearXNG` + 프로젝트 전용 MCP, 제한적 `Playwright MCP`; Tavily/SerpApi는 장애·Coverage 보조 Quota.
 - 저장·조회: `SQLAlchemy`, `asyncpg`, `duckdb`, TimescaleDB SQL.
 
 본부장 RES-00은 각 저장소를 직접 Query하지 않고 Specialist의 구조화된 Artifact를 받아 `Research Packet`을 통합한다.
+외부 웹검색은 RES-08만 직접 수행하고 RES-05/06/07/09는 `WebSearchRequest`로 요청한다. 검색 결과는
+`SEARCH_HIT`으로 저장하며 Citation·Time·Numeric 검증을 통과하기 전에는 공식 Evidence나 Fact가 아니다.
+실시간 Web Search는 Historical Replay와 Backtest에서 호출하지 않는다.
 
 ### 6.6 트레이딩본부
 

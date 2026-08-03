@@ -265,6 +265,16 @@ def compute_regime_readout(regime_rows: list[dict],
 
     readout["regime_label"] = label
     readout["regime_rules"] = REGIME_RULES
+    # 이 판독에 실제로 기여한 등재 방법. overlay 가 없으면(미확인) 그 방법들은
+    # 안 실린다 - 안 쓴 기법을 썼다고 기록하면 귀속이 통째로 거짓이 된다.
+    used = []
+    ov = readout.get("macro_overlay") or {}
+    if ov.get("volatility"):
+        used.append("vkospi_fear_gauge")
+    if ov.get("ratios"):
+        used += ["flight_to_quality", "style_rotation_ratio",
+                 "low_volatility_preference"]
+    readout["method_keys"] = tuple(used)
     return readout
 
 

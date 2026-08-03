@@ -25,9 +25,7 @@ FROM python:3.12-slim
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-
     psycopg2-binary==2.9.12 redis==7.0.1
-
 
 WORKDIR /app/departments/00-ceo-office
 COPY api ./api

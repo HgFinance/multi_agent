@@ -124,6 +124,10 @@ class NewsEvidence(BaseModel):
     observed_at: datetime = Field(description="이 시각 이후에만 '알 수 있었던' 기사다")
     relation_type: Optional[str]
     confidence: Optional[float]
+    production_authorized: bool = Field(
+        default=False,
+        description="주문·전략 판단의 **근거로 써도 되는가**. 저장 허가"
+                    "(UseScope)와 다른 질문이다. 기본 False - 승인된 소스만 True.")
     weight: float = Field(description=f"2^(-age/{WEIGHT_HALF_LIFE_HOURS}h), as_of 기준")
 
 
@@ -209,6 +213,8 @@ def evidence_news(
     rows = _query(
         """
         select d.document_id::text, s.source_code as source, d.title, d.canonical_url as url,
+               coalesce(d.production_authorized, s.production_authorized, false)
+                 as production_authorized,
                d.published_at, d.observed_at, di.relation_type, di.confidence
         from research.documents d
         join reference.data_sources s using (source_id)

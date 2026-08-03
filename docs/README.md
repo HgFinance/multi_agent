@@ -4,7 +4,7 @@
 
 > 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
 
-[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [Risk/QA Rollout](02-engineering/RISK_QA_TEST_AND_PRODUCTION_ROLLOUT.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
+[Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Research-Quant Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md) · [Research Output Strategy](02-engineering/RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [Risk/QA Rollout](02-engineering/RISK_QA_TEST_AND_PRODUCTION_ROLLOUT.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
 
 ## 현재 상태
 
@@ -426,6 +426,7 @@ docs/
 | [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | 제품의 전체 비전, 실제 서비스 전환과 장기 확장 경계를 확인할 때 |
 | [Execution Status v2](PROJECT_IMPLEMENTATION_STATUS.md) | 실행 증거, 팀원별 진척도, 애로사항, 의존성과 다음 작업을 확인할 때 |
 | [Whole-System Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) | 전 본부 고도화 Gate, 연구 근거, 기술 도입 시점과 보류 조건을 확인할 때 |
+| [Research-Quant Agentic Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md) | 리서치 근거가 전략 가설·실험·검증·Hermes 자기 개선으로 이어지는 구조와 계약을 구현할 때 |
 | [Investment Case Specification](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) | 서비스 최소 단위의 상태, 증거, API와 완료 기준을 구현할 때 |
 | [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) | 제품 범위와 16주 실행 계획이 필요할 때 |
 | [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) | 기능 구현과 완료 조건을 확인할 때 |

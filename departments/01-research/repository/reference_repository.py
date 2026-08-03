@@ -32,6 +32,7 @@ instrument_symbols 가 (provider, market, symbol) -> instrument_id 매핑을 시
 from __future__ import annotations
 
 import json
+import re
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -56,7 +57,53 @@ NEWS_LINK_VERSION = "news-symbol-map-v1"
 CURRENCY_KRW = "KRW"
 
 
+_INSERT_COLUMNS_RE = re.compile(r"insert\s+into\s+[\w.]+\s*\(([^)]*)\)", re.I)
+
+
+def insert_arity(sql: str) -> int | None:
+    """INSERT 문의 열 개수. 열 목록을 못 찾으면 None(검사 안 함)."""
+    m = _INSERT_COLUMNS_RE.search(sql)
+    if not m:
+        return None
+    cols = [c.strip() for c in m.group(1).split(",") if c.strip()]
+    return len(cols) or None
+
+
+def guarded_execute_values(cur, sql, rows, **kw):
+    """열 개수와 행 길이를 대조한 뒤 psycopg2 execute_values 를 부른다.
+
+    ▶ 왜 있는가 (2026-08-03)
+      upsert_news_documents 안에서 정정 이력 코드가 `rows` 를 재대입해 문서
+      INSERT 에 5칼럼짜리 이력 행이 들어갔다. Postgres 는
+      "INSERT has more target columns than expressions" 라는 **문장 오류** 로만
+      알려주는데, 이 메시지는 어느 호출부인지·무엇이 잘못됐는지 말하지 않아
+      원인 추적에 시간을 썼다. 여기서 막으면 어느 문장에서 몇 개가 와야 하는데
+      몇 개가 왔는지가 즉시 나온다.
+
+      **잘라 맞추지 않는다.** 모양이 다르면 그건 잘못된 데이터이고, 조용히
+      통과시키면 엉뚱한 열에 값이 들어간다.
+    """
+    n = insert_arity(sql)
+    if n is not None:
+        for i, r in enumerate(rows):
+            try:
+                got = len(r)
+            except TypeError:  # 길이가 없는 것을 행으로 넘겼다
+                raise ValueError(f"{i}번째 행이 시퀀스가 아니다: {type(r).__name__}") from None
+            if got != n:
+                head = sql.strip().splitlines()[0].strip()
+                raise ValueError(
+                    f"INSERT 열 {n}개인데 {i}번째 행은 {got}개다 - {head!r} "
+                    f"(다른 용도의 행이 섞였는지 확인한다)")
+    # psycopg2 는 여기서 늦게 부른다 - 이 모듈은 DB 없이도 import 되어야
+    # 자체 점검(순수 함수)이 psycopg2 설치 없이 돈다.
+    from psycopg2.extras import execute_values
+
+    return execute_values(cur, sql, rows, **kw)
+
+
 @dataclass(frozen=True)
+
 class InstrumentRecord:
     """reference.instruments 한 행. Column 이름과 1:1로 맞춘다."""
 
@@ -232,7 +279,7 @@ class SupabaseReferenceRepository(ReferenceRepository):
         from psycopg2.extras import execute_values, register_uuid
 
         register_uuid()
-        self._execute_values = execute_values
+        self._execute_values = guarded_execute_values
         # upsert_news_documents 가 채운다. 공급자가 정정한 기사의 external_id 다 -
         # 저장은 최초 관측본을 유지하므로(PIT) 정정 사실은 여기로만 드러난다.
         self.last_revisions: tuple[str, ...] = ()
@@ -589,15 +636,42 @@ class SupabaseReferenceRepository(ReferenceRepository):
         exts = [r.external_id for r in records]
         with self._conn.cursor() as cur:
             cur.execute(
-                "select external_id, title from research.documents "
+                "select external_id, title, document_id from research.documents "
                 "where source_id = %s and external_id = any(%s)",
                 (source_id, exts),
             )
-            stored_title = dict(cur.fetchall())
-        self.last_revisions = tuple(
-            r.external_id for r in records
-            if r.external_id in stored_title and stored_title[r.external_id] != r.title
-        )
+            stored = {e: (t, d) for e, t, d in cur.fetchall()}
+        stored_title = {e: t for e, (t, _d) in stored.items()}
+        changed = [r for r in records
+                   if r.external_id in stored_title
+                   and stored_title[r.external_id] != r.title]
+        self.last_revisions = tuple(r.external_id for r in changed)
+
+        # ▶ 탐지한 정정을 **영속한다** (2026-08-03)
+        #   예전에는 위 튜플(메모리)에만 담고 프로세스가 끝나면 사라졌다.
+        #   저장본은 PIT 규율상 최초 관측 문장을 유지하므로 정정 사실은 그
+        #   튜플이 유일한 흔적이었는데 그것마저 휘발됐다. 그러면 로드맵 6.2 의
+        #   중단 조건("수정 이력 없는 문서는 거래 근거로 쓰지 않는다")을 판정할
+        #   데이터가 없다. 원본은 그대로 두고 변경 사실만 append 한다.
+        #   기록 실패가 수집을 죽이지 않는다 - 이력은 보조 기록이다.
+        if changed:
+            try:
+                # 변수명을 rows 로 쓰면 **아래 문서 INSERT 의 rows 를 덮어쓴다.**
+                # 실제로 그랬고(2026-08-03), 정정이 하나라도 잡히는 순간 문서
+                # INSERT 에 5칼럼짜리 이력 행이 들어가 수집 루프 전체가
+                # "INSERT has more target columns than expressions" 로 죽었다.
+                revision_rows = [(stored[r.external_id][1], "title",
+                                  stored_title[r.external_id], r.title, "news_pipeline")
+                                 for r in changed]
+                with self._conn.cursor() as cur:
+                    self._execute_values(cur, """
+                        insert into research.document_revisions
+                          (document_id, field, old_value, new_value, detected_by)
+                        values %s on conflict do nothing
+                    """, revision_rows, page_size=200)
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠ document_revisions 기록 실패(수집은 계속): "
+                      f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
         before = self._count("research.documents")
         with self._conn.cursor() as cur:
@@ -1454,6 +1528,36 @@ def _ingest() -> int:
         repo.close()
 
 
+def _check_insert_arity_guard():
+    """열 수 != 행 길이면 막는다. 이번에 실제로 난 버그를 그대로 재현한다."""
+    doc_sql = """
+        insert into research.documents
+          (source_id, external_id, document_type, canonical_url, title, language,
+           issuer_id, published_at, observed_at, status)
+        values %s
+        on conflict (source_id, external_id) do update set
+          status = excluded.status
+    """
+    assert insert_arity(doc_sql) == 10, insert_arity(doc_sql)
+    # 정정 이력 행(5칼럼)이 문서 INSERT 로 흘러든 그 상황
+    rev_row = ("doc-id", "title", "옛 제목", "새 제목", "news_pipeline")
+    try:
+        guarded_execute_values(None, doc_sql, [rev_row])
+        raise AssertionError("5칼럼 행이 10칼럼 INSERT 를 통과했다")
+    except ValueError as e:
+        assert "10개인데" in str(e) and "5개" in str(e), str(e)
+
+    # 열 목록이 없는 문장은 검사하지 않는다(insert ... select 등) - 오탐을 만들지 않는다
+    assert insert_arity("insert into t select * from u") is None
+    # 길이 없는 것을 행으로 넘기면 잡는다
+    try:
+        guarded_execute_values(None, doc_sql, [123])
+        raise AssertionError("시퀀스가 아닌 행이 통과했다")
+    except ValueError as e:
+        assert "시퀀스가 아니다" in str(e), str(e)
+    print("  INSERT 열/행 관문       OK")
+
+
 if __name__ == "__main__":
     if "--ingest" in sys.argv:
         print(f"{REPOSITORY_VERSION} 실제 적재")
@@ -1465,4 +1569,5 @@ if __name__ == "__main__":
     _check_revision_assignment()
     _check_upsert_preserves_original()
     _check_ingest_result_invariant()
-    print("Reference Repository 5개 영역 통과. 실제 적재는 --ingest")
+    _check_insert_arity_guard()
+    print("Reference Repository 6개 영역 통과. 실제 적재는 --ingest")

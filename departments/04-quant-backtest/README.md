@@ -5,6 +5,8 @@ Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen3:14b` 기반 `agent-quan
 `quant-backtest-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
+Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Graph와 계약은
+[Research-Quant Evidence-to-Strategy Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
 
 ## Mission
 
@@ -41,6 +43,34 @@ CEO 승인이 필요하다. Backtest 수익률이 좋아도 미래 데이터, �
 Experiment 6개(`COMPLETED 5`, `RUNNING 1`)와 Backtest Run 3개를 확인했다. 이는 Script가
 DB와 한 번 이상 연결됐다는 증거지만, 상시 Worker·API·CI와 Strategy 승격이 완료됐다는 뜻은 아니다.
 
+## 목표 Graph
+
+현재 Quant는 통합 LangGraph가 아니라 가설, Dataset, Backtest, Walk-Forward와 Orchestrator
+스크립트의 조합이다. 가설 Agent의 주 근거도 `market-api /regime/daily` 단면이므로 Research
+Packet의 Claim/Evidence와 직접 연결되는 계약은 남아 있다. 기존 결정론적 Script는 폐기하지
+않고 다음 Graph의 Tool/Worker로 사용한다.
+
+```text
+Quant Hermes Intake
+  -> Data Curator와 PIT Dataset Certification
+  -> Evidence-linked Hypothesis Planner
+  -> Hypothesis Preregistration
+  -> Deterministic Experiment Runner
+  -> Independent Robustness Validator
+  -> Model/Strategy Arbitrator
+  -> ExperimentCardV1
+  -> QA · Risk · CEO Gate
+```
+
+핵심 규칙:
+
+- Agent는 가설과 Experiment Spec을 만들지만 Metric과 Backtest 결과는 코드가 계산한다.
+- 결과를 본 뒤 가설을 수정하지 않는다. 변경은 새 Version과 Trial로 기록한다.
+- `trial_family_id`와 Trial Ledger로 전체 탐색 횟수를 숨길 수 없게 한다.
+- Purged Walk-Forward와 Embargo를 P0로, CPCV·Deflated Sharpe Ratio·PBO를 P1으로 추가한다.
+- 생성자와 독립 Validator는 Service Identity, Queue와 Write 권한을 분리한다.
+- Quant Hermes는 Job·Retry·Escalation과 Candidate 제출만 맡고 Production을 직접 승격하지 않는다.
+
 ## 실행법
 
 Repository Root에서 실행한다.
@@ -62,6 +92,9 @@ python departments/04-quant-backtest/pipeline/experiment_orchestrator.py
 
 - Quant API와 Job Worker를 Docker Compose에 추가한다.
 - Job Request·완료 Event, 재시도, 중복 실행과 재시작 복구 계약을 만든다.
+- `ResearchPacketV2 -> HypothesisSpecV2 -> ExperimentCardV1` Lineage를 연결한다.
+- Preregistration, Trial Ledger와 독립 Robustness Validator를 추가한다.
+- Purge/Embargo를 먼저 구현하고 CPCV·DSR·PBO를 단계적으로 추가한다.
 - Strategy Registry에 Capability, QA, Risk, CEO 승인과 Shadow/Paper 상태를 연결한다.
 - Dataset·Code·Dependency·Seed·Cost Model을 CI에서 같은 결과로 재현한다.
 - 현재 `TESTING` Hypothesis 2개의 종료 조건을 명시하고 고아 Experiment를 방지한다.

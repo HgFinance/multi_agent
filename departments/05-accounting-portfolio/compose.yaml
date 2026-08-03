@@ -1,0 +1,44 @@
+# Accounting/Portfolio Department Compose Fragment (도현 소유).
+#
+# 근거: docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 10절(Docker Compose
+#       구조 - "본부가 자기 Compose Fragment를 소유하도록 한다"), 6.6절(회계/포트폴리오본부
+#       Container 목록), 3.1절(Hermes는 Backend Image에 설치하지 않고 공식 Image를 별도
+#       Container로 띄운다), docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4-2절
+#
+# 루트 docker-compose.yml이 `include:`로 이 파일을 끌어온다. 구조 설명은
+# departments/02-trading/compose.yaml 상단 주석과 같다.
+#
+# ▶ 지금은 Hermes 하나뿐이다. 계획서 6.6의 accounting-api / ledger-worker /
+#   portfolio-projector는 넣지 않았다 - departments/05-accounting-portfolio에 api/app.py가
+#   아직 없고, 조회면은 apps/api BFF가 겸한다. 코드 없는 역할을 컨테이너부터 만들지 않는다.
+services:
+  # 주의 사항은 departments/02-trading/compose.yaml과 동일하다 - 볼륨 이름 = Profile 이름,
+  # 부서별 데이터 디렉터리 분리, CLAUDE.md 배정표대로 OPENAI_API_KEY만 주입.
+  accounting-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-accounting-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-accounting-portfolio-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Claude 구독 한도로 Sonnet 사용 (2026-08-03). 근거와 주의는
+      # departments/02-trading/compose.yaml 같은 절 주석과 동일하다 -
+      # 호스트 프록시(scripts/claude_code_proxy.py --serve)가 선행 조건이고,
+      # ANTHROPIC_API_KEY는 일부러 주지 않는다(종량 과금으로 새지 않게).
+      # 자리표시자인 이유는 02-trading/compose.yaml 주석 참고 - Hermes는 자격이
+      # 비면 호출을 안 하는데 프록시는 그 값을 읽지 않는다. 진짜 구독 토큰을
+      # 컨테이너에 넣지 않으면서, BASE_URL이 빠지면 막히는 쪽으로 동작한다.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-proxy-placeholder-not-a-credential}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
