@@ -60,6 +60,12 @@ ENDPOINT_SCOPES: dict[str, str] = {
     "/dq/summary": "market.dq.read",
     "/regime/daily": "market.regime.read",
     "/microstructure": "market.microstructure.read",
+    # 2026-08-04 추가. **엔드포인트만 만들고 여기를 안 고치면 강제 모드에서
+    # 500 이다** - 게이트웨이가 fail-closed 라 모르는 경로를 통과시키지
+    # 않는다(실측: /methods/performance 가 gateway_misconfigured 로 막혔다).
+    # 새 라우트를 낼 때마다 이 표가 같이 커져야 한다.
+    "/dq/windows": "market.dq.read",
+    "/methods/performance": "research.methods.read",
 }
 # 인증 없이 열어두는 경로 - 상태 확인은 권한 판단의 대상이 아니다.
 # /docs/oauth2-redirect 는 FastAPI 가 자동으로 다는 라우트다. 빼먹으면

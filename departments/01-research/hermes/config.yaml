@@ -90,7 +90,12 @@ agent:
                                      research.evidence.news.read,
                                      research.evidence.disclosures.read,
                                      market.snapshot.read,
-                                     market.bars.read]
+                                     market.bars.read,
+                                     # 2026-08-04: 학습 계층 2단. 이번에 쓴
+                                     # 방법들의 과거 성적을 되읽어 리포트가
+                                     # 스스로 "이 근거는 최근 성적이 나쁘다"
+                                     # 고 말하게 한다. 읽기 전용이다.
+                                     research.methods.read]
   # 부서 전체 공통 금지. 리서치는 어떤 경우에도 주문·리스크 판정·원장·전략 승격에
   # 관여하지 않는다. Packet 은 재료일 뿐 결정이 아니다(Agent Decision != Order).
   forbidden_tools:

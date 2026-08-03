@@ -1023,6 +1023,8 @@ _INTERPRET_SYSTEM = """너는 리서치본부 총괄(RES-00)이다.
   "없다", "알 수 없음" 같은 회피는 거부된다. 틀릴 수 없는 문장은 분석이 아니다.
 - 판정 지평(일)을 정한다. 언제 맞았는지 볼 수 있어야 한다.
 - 새 수치를 만들지 않는다. 주어진 Fact 를 가리키기만 한다.
+- source_nodes 에는 **분석가 이름**을 넣는다(주어진 analysts 목록에서 고른다).
+  claim 문장 안에 적지 말고 반드시 이 필드에 넣어라.
 
 kind 는 다음 중 하나: CROSS_SIGNAL, CAUSAL_HYPOTHESIS, REGIME_READ,
 RISK_ASYMMETRY, DIVERGENCE
@@ -1062,8 +1064,13 @@ def interpret(state: ResearchState) -> dict:
                 "insight_note": f"Fact {len(facts)}건 / 분석가 {len(nodes)}인 - "
                                 f"교차 해석 불가"}
 
+    # ▶ Fact -> 분석가 대응은 **코드가 안다.** 이것을 LLM 에게 물었더니 이름을
+    #   claim 안에 적고 필드는 비워 냈고, 그래서 실측에서 좋은 해석 4건이
+    #   전부 거부됐다(source_nodes=[]). 코드가 아는 것을 LLM 에게 묻지 않는다.
+    fact_node = {fid: str(f.get("source_node") or f.get("node") or "")
+                 for fid, f in facts.items()}
     brief = {fid: {"claim": str(f.get("claim") or f.get("text") or "")[:180],
-                   "node": f.get("source_node") or f.get("node")}
+                   "분석가": fact_node.get(fid) or "(미상)"}
              for fid, f in list(facts.items())[:24]}
     # 재해석이면 반박 내용을 같이 준다 - 그것이 이 순환의 이유다
     chal = (packet.get("challenge") or {}) if revision else {}
@@ -1086,9 +1093,21 @@ def interpret(state: ResearchState) -> dict:
         return {"insights": [], "insight_rejected": [],
                 "insight_note": f"해석 미실행: {type(e).__name__}"}
 
-    ok, rejected = validate_insights(
-        (parsed.get("insights") or [])[:MAX_INSIGHTS],
-        fact_ids=set(facts), known_nodes=nodes)
+    raw_items = (parsed.get("insights") or [])[:MAX_INSIGHTS]
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        # 참조한 Fact 로부터 분석가를 채운다. LLM 이 채웠으면 그것도 합치되
+        # **없는 분석가는 넣지 않는다** - 참조 무결성은 계약이 다시 본다.
+        derived = {fact_node.get(str(f)) for f in
+                   (item.get("supporting_fact_ids") or [])}
+        given = {str(n) for n in (item.get("source_nodes") or [])}
+        merged = sorted((derived | given) & nodes)
+        if merged:
+            item["source_nodes"] = merged
+
+    ok, rejected = validate_insights(raw_items, fact_ids=set(facts),
+                                     known_nodes=nodes)
     return {
         "insights": [i.model_dump() for i in ok],
         # ▶ 거부를 조용히 버리지 않는다 - 왜 인사이트가 안 나오는지 보여야
