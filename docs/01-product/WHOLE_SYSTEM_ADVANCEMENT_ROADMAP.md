@@ -283,13 +283,19 @@ P0:
 - Schema, 범위, 신선도, 결측과 이상치 Data Quality Gate
 - 뉴스·공시 수정과 삭제 이력, 원문 Hash와 수집 Version
 - Claim, Citation, Forecast, Resolution Rule과 Outcome Schema
+- 역할별 Corpus-aware Retrieval Plan과 Context Timeline
+- 독립 분석 Branch, Claim/Evidence Graph와 Citation·Numeric·Time Validator
+- Macro/중기와 Micro/단기 Outlook의 독립 생성, 합성 및 Skeptic Challenge
+- RES-08 전담 SearXNG Web Search MCP, `WebSearchRequest`와 Search Hit 검증 계약
 
 P1:
 
 - 사건 중심 Temporal Market Memory Graph
 - Source와 Analyst의 Calibration 및 사후 정확도
 - Query 난이도에 따른 no-RAG, single-hop, multi-hop 동적 라우팅
+- 금융 문서 구조·표·Metadata를 보존하는 MimirRAG식 Parser와 FinSAgent식 Retrieval Spike
 - X 유명인 Insight를 단독 근거가 아닌 교차 검증 대상 Evidence로 사용
+- Web Search Queue·Citation 업무가 반복 병목일 때만 RES-10 Web Intelligence Researcher 조건부 신설
 
 핵심 지표:
 
@@ -315,12 +321,14 @@ P0:
 - PIT Join, Delisting, Corporate Action, Survivorship와 Look-ahead 검사
 - 수수료, 세금, Slippage, Borrow, Turnover와 Capacity 모델
 - Walk-Forward, Purge/Embargo, Regime/Stress와 Parameter Stability
-- Deflated Sharpe Ratio와 Trial Accounting
+- ResearchPacket Claim ID가 연결된 가설 사전 등록과 대안 설명
+- Deflated Sharpe Ratio, PBO, CPCV와 Trial Accounting
 
 P1:
 
 - 독립 `Adversarial Strategy Court`
 - Qlib/RD-Agent-Quant 격리 Spike
+- TimeSeriesScientist 역할 분리와 TimeCopilot Model Adapter Spike
 - Strategy Family별 Adapter와 공통 Promotion Evidence
 - Champion/Challenger와 자동 Shadow 배포
 
@@ -340,6 +348,10 @@ P2:
 중단 조건:
 
 - Trial 수, 비용 모델, PIT 증거 또는 독립 검증이 없으면 Strategy Bundle을 만들 수 없다.
+
+Research와 Quant의 현재/목표 구조, Hermes·LangGraph 책임, V2 계약과 구현 순서는
+[Research-Quant Evidence-to-Strategy Framework](../02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+기준으로 한다.
 
 ### 6.4 트레이딩본부
 
@@ -615,6 +627,9 @@ Gate 0에서 실제 Import Scan, Docker Build와 Test를 기준으로 `pyproject
 |---|---|---|
 | Qlib | 한국 시장 PIT Dataset과 비용 모델을 Adapter로 연결할 수 있는가 | 기존 Backtest와 동일 사건 결과 재현 |
 | RD-Agent-Quant | 가설·Factor·Model 반복 연구가 우리 Promotion Gate를 준수하는가 | 격리 Runner, Trial 계보, 비용 상한과 실패 재현 |
+| MimirRAG/FinSAgent 패턴 | DART 표·절·Metadata와 로컬 Corpus 구조를 보존할 때 Citation/Numeric 정확도가 개선되는가 | 고정 Finance QA Fixture에서 기존 Hybrid RAG보다 개선 |
+| TimeCopilot | 통계·ML·TSFM을 같은 PIT Dataset과 비용 조건으로 비교할 수 있는가 | 기존 Runner 계약 유지, 단순 Baseline 대비 반복 OOS 개선 |
+| SearXNG + Playwright MCP | API Quota를 보완하면서 Search/Open 권한과 Evidence 승격을 분리할 수 있는가 | RES-08 전담, Replay 호출 0건, Browser Secret·내부망 차단 |
 | Feast | Offline/Online Feature 정의가 실제로 어긋나는가 | 공유 Feature와 Online Model 증가로 mismatch가 반복 |
 | Dagster | 수집·Dataset·Experiment 의존성을 Asset으로 관리할 가치가 있는가 | Scheduler/수동 Handoff가 반복 장애 원인 |
 | Ray | Backtest와 Hyperparameter Trial의 단일 Host 시간이 병목인가 | 병렬화로 비용 대비 완료시간 SLO 개선 |
@@ -823,11 +838,23 @@ subject to mandate, risk, liquidity, operational, legal and cost constraints
 - [Correctness is not Faithfulness](https://arxiv.org/abs/2412.18004)
 - [FinanceBench](https://arxiv.org/abs/2311.11944)
 - [RAGChecker](https://arxiv.org/abs/2408.08067)
+- [Nexus](https://arxiv.org/abs/2605.14389)
+- [MimirRAG](https://arxiv.org/abs/2605.25030)
+- [FinSAgent](https://arxiv.org/abs/2607.18102)
+- [STORM](https://arxiv.org/abs/2402.14207)
+- [Agentic Time Series Forecasting](https://arxiv.org/abs/2602.01776)
+- [TimeSeriesScientist](https://arxiv.org/abs/2510.01538)
+- [AlphaCast](https://arxiv.org/abs/2511.08947)
+- [Synapse](https://arxiv.org/abs/2511.05460)
+- [FinCon](https://arxiv.org/abs/2407.06567)
 
 ### 전략 연구와 시뮬레이션
 
 - [Microsoft Qlib](https://github.com/microsoft/qlib)
 - [The Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)
+- [A Comparison of Backtest Overfitting Prevention Methods](https://www.sciencedirect.com/science/article/pii/S0950705124011110)
+- [MLAgentBench](https://arxiv.org/abs/2310.03302)
+- [TimeCopilot](https://github.com/TimeCopilot/timecopilot)
 - [Doubly Robust Off-policy Value Evaluation](https://proceedings.mlr.press/v48/jiang16.html)
 - [Agent Lightning](https://arxiv.org/abs/2508.03680)
 - [ABIDES](https://arxiv.org/abs/1904.12066)

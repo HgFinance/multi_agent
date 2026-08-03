@@ -70,6 +70,66 @@ LLM 기반 멀티 에이전트 주식 트레이딩 프레임워크. 실제 트�
 - 금융 LLM 에이전트를 정확도 중심 벤치마크가 아니라 리스크 프로파일(환각, Stale Data, Adversarial Prompt 취약성) 중심으로 감사해야 한다고 주장. Model/Workflow/System 3계층 프레임워크로 6개 LLM 에이전트를 3개 금융 태스크에서 감사, "Safety Budget"을 성공 기준으로 제안
 - **프로젝트 관련성**: AI QA/감사본부의 감사 기준 설계와 리스크본부의 Stress Test 접근에 직접 참고 — 특히 "정확도 높다고 안전한 게 아니다"라는 논지가 Risk Supervisor의 approve/resize/reject 근거 설계에 유용
 
+### Nexus: An LLM Agent Framework for Multi-Source Time Series Forecasting
+- **arXiv**: [2605.14389](https://arxiv.org/abs/2605.14389) · 로컬 파일: `2605.14389v1.pdf`
+- 여러 수치·텍스트 Source를 시간순 맥락으로 구조화하고, Macro/Micro 해상도의 전망을 독립 생성한 뒤 합성과 Calibration Loop로 보정하는 Agent Framework
+- **프로젝트 관련성**: Research의 Context Timeline, Macro/Micro Outlook, Synthesis와 Outcome Calibration의 직접 근거. 한국어 설명은 `NEXUS_FRAMEWORK_EXPLAINED.md`, 번역은 `NEXUS_PAPER_KO_TRANSLATION.md`
+
+### MimirRAG: A Multi-Agent Retrieval-Augmented Generation Framework for Financial Question Answering
+- **arXiv**: [2605.25030](https://arxiv.org/abs/2605.25030)
+- 금융 문서의 구조와 표를 보존하는 Parsing, Metadata 추출, Agent Query Planning, Hybrid Retrieval과 숫자 검증을 결합
+- **프로젝트 관련성**: DART 공시·재무 RAG에서 절·표·정정·보고기간 Metadata를 보존하고 Citation/Numeric Validator를 두는 설계 근거
+
+### FinSAgent: Building Financial Agents by Equipping Their Proprietary Knowledge Bases
+- **arXiv**: [2607.18102](https://arxiv.org/abs/2607.18102)
+- 로컬 Corpus 구조와 일반 모델의 사전지식이 어긋나는 문제를 다루며, 역할별 Agent, Corpus-aware Query Decomposition, 다중 검색 경로와 Evidence-validity Rerank를 제안
+- **프로젝트 관련성**: 최신 Preprint이므로 P1 Spike로만 채택. 모든 직원에게 같은 Evidence Bundle을 주지 않고 역할별 Retrieval Plan을 만드는 근거
+
+### STORM: Synthesis of Topic Outlines through Retrieval and Multi-perspective Question Asking
+- **arXiv**: [2402.14207](https://arxiv.org/abs/2402.14207)
+- 다양한 관점을 먼저 발견하고 Source-grounded 질문을 구성한 뒤 개요를 만드는 연구 시스템
+- **프로젝트 관련성**: Research 시작 전 Perspective/Question Planner에 제한 채택. 투자 판단이나 최종 Packet 합성은 맡기지 않음
+
+### TimeSeriesScientist: A General-Purpose AI Agent for Time Series Analysis
+- **arXiv**: [2510.01538](https://arxiv.org/abs/2510.01538) · [공식 구현](https://github.com/Y-Research-SBU/TimeSeriesScientist)
+- Curator, Planner, Forecaster와 Reporter를 분리해 데이터 진단, 모델 후보 축소, 검증·선택·Ensemble과 보고를 수행
+- **프로젝트 관련성**: Quant를 Data Curator, Hypothesis Planner, Deterministic Runner, Independent Validator와 Reporter로 분리하는 구조의 핵심 근거
+
+### AlphaCast: A Multi-Agent Framework for Financial Time Series Forecasting
+- **arXiv**: [2511.08947](https://arxiv.org/abs/2511.08947)
+- Feature, 도메인 지식, 시간 창별 Context와 유사 Case를 준비한 뒤 생성 추론과 Reflection을 수행
+- **프로젝트 관련성**: 과거 유사 Regime·실패 Case를 다음 가설에 연결하되, 검증 전 자동 Prompt 수정은 금지하는 Case Memory 설계 참고
+
+### Synapse: A Multi-Agent Framework for Adaptive Time Series Forecasting
+- **arXiv**: [2511.05460](https://arxiv.org/abs/2511.05460)
+- 여러 시계열 Foundation Model Specialist의 가중치를 Context와 Rolling 성능에 따라 조정하는 Forecasting Framework
+- **프로젝트 관련성**: Regime/Horizon별 Model Arbitration과 Ensemble Challenger의 P2 근거. 단순 Baseline을 반복해서 이긴 뒤에만 채택
+
+### Position: Beyond Model-Centric Prediction — Agentic Time Series Forecasting
+- **arXiv**: [2602.01776](https://arxiv.org/abs/2602.01776)
+- 예측을 단일 모델 호출이 아니라 Perception, Planning, Action, Reflection과 Memory를 포함한 Workflow로 재정의
+- **프로젝트 관련성**: Research-Quant를 모델 선택 문제가 아닌 데이터·가설·검증·학습의 상태 Workflow로 설계하는 상위 원칙
+
+### FinCon: A Synthesized LLM Multi-Agent System with Conceptual Verbal Reinforcement for Enhanced Financial Decision Making
+- **arXiv**: [2407.06567](https://arxiv.org/abs/2407.06567)
+- Manager-Analyst 계층과 위험 기반 회고를 결합하고, 교훈을 관련 역할에 선택적으로 전파
+- **프로젝트 관련성**: Hermes 본부장과 전문 직원의 계층, 부서별 Memory Namespace, 실패 교훈을 관련 역할에만 전달하는 개선 후보 설계 참고
+
+### MLAgentBench: Evaluating Language Agents on Machine Learning Experimentation
+- **arXiv**: [2310.03302](https://arxiv.org/abs/2310.03302)
+- ML Experiment를 수행하는 자율 Agent의 장기 계획, 실험 반복과 신뢰성 한계를 평가
+- **프로젝트 관련성**: Quant Agent가 무제한으로 코드를 고치고 좋은 결과를 선택하지 못하게 하고, Agent는 Spec·설명, Runner와 Gate는 결정론적 Service로 분리하는 근거
+
+### The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality
+- **SSRN**: [2460551](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)
+- 여러 전략을 시험한 뒤 가장 높은 Sharpe를 고르는 Selection Bias와 수익률의 비정규성을 보정
+- **프로젝트 관련성**: Quant Trial Family Ledger와 Promotion Gate의 P1 통계 검증 항목
+
+### A Comparison of Backtest Overfitting Prevention Methods in a Synthetic Environment
+- **Journal**: [Knowledge-Based Systems, 2024](https://www.sciencedirect.com/science/article/pii/S0950705124011110)
+- Holdout, Walk-Forward, CSCV/CPCV 계열 방법의 Backtest Overfitting 방지 성능을 비교
+- **프로젝트 관련성**: Walk-Forward 하나를 만능 Gate로 보지 않고 CPCV와 PBO를 연구 단계의 보조 검증으로 추가하는 근거
+
 ## PDF Files
 
 | 파일 | 논문 |
@@ -82,3 +142,4 @@ LLM 기반 멀티 에이전트 주식 트레이딩 프레임워크. 실제 트�
 | `2510.06265.pdf` | LLM Hallucination Comprehensive Survey |
 | `2405.14767.pdf` | FinRobot |
 | `2502.15865.pdf` | Auditing LLM Agents in Finance (Risk-First) |
+| `2605.14389v1.pdf` | Nexus Multi-Source Time Series Forecasting Framework |

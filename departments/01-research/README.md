@@ -4,6 +4,8 @@
 Local Ollama Alias는 [`Modelfile`](Modelfile)의 `qwen3:14b` 기반 `agent-research`이고 Hermes Profile은 `research-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
+Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 순서는
+[Research-Quant Evidence-to-Strategy Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
 
 ## Mission
 
@@ -50,8 +52,70 @@ Analyst를 소집해 종목별 근거, 촉매, 무효화 조건을 갖춘 Resear
 | `collectors/market_archive_exporter.py`, `replay_restore_drill.py` | 검증된 Parquet Archive와 복구 Drill | 자체 점검·팀 가이드 증거 존재 |
 
 남은 핵심: Redis Stream Producer, 상시 Feature/Priority Engine, Research Packet의 Canonical Artifact·Event,
-파생 연속성 검증, 영속 Microstructure Feature, X Watchlist Collector와 Social Evidence 교차 검증.
+파생 연속성 검증, 영속 Microstructure Feature, X Watchlist Collector, `research-web-mcp`와 Social/Web Evidence 교차 검증.
 진행 상황은 팀 가이드 9절에 항목별로 적어둔다.
+
+## 현재 Graph와 목표 Graph
+
+현재 `scripts.py`는 여섯 분석가를 순차 실행하고, 마지막에 Hermes Profile의 Supervisor Persona를
+읽은 일반 LLM 호출이 Packet을 합성한다. 즉 Profile과 Tool Gateway는 존재하지만 실제 Hermes
+Runtime이 Case Queue, Checkpoint, Retry와 합성을 지휘하는 단계는 아직 아니다. `as_known_at`도
+실행 시각으로 기록되지만 모든 Tool의 실제 Query Cutoff로 강제되지는 않는다.
+
+목표 흐름은 다음과 같다.
+
+```text
+Research Hermes Case
+  -> Point-in-Time Cutoff Lock
+  -> 역할별 Retrieval Plan과 Context Timeline
+  -> 여섯 분석가 독립 Branch
+  -> Claim/Evidence·Citation·Numeric·Time Validator
+  -> Macro/Micro 독립 Outlook
+  -> Synthesis와 Skeptic
+  -> ResearchPacketV2 발행
+```
+
+Branch는 현재 단일 GPU에서 `max_concurrency=1`로 실행한다. 병렬 표시는 하드웨어 동시 실행을
+꾸미기 위한 것이 아니라, 역할 간 독립성과 부분 실패·Checkpoint 복구 경계를 정확히 나타내기
+위한 것이다.
+
+도입 우선순위:
+
+1. `ResearchCaseV2`, `AnalystFindingV1`, `ResearchPacketV2`와 V1 Adapter
+2. 전 Tool의 `as_known_at` Capability와 Fail-closed Replay
+3. 역할별 Retrieval, Context Timeline과 Claim/Evidence Graph
+4. LangGraph Fan-out/Fan-in, Branch Timeout과 Checkpoint
+5. Macro/Micro Outlook, Skeptic과 제한된 Evidence Gap 재검색
+6. 실제 Research Hermes Case/Queue/Retry Adapter
+
+## Web Search MCP 배정
+
+P0에서는 새 상시 Agent를 만들지 않는다. 기존 `RES-08 RAG Librarian/Evidence Curator`를
+`RAG Librarian, Evidence Curator and Web Researcher`로 확장하고 `web-evidence-research` Skill과
+`research.web.search/open/verify` 권한을 전담시킨다.
+
+```text
+Fundamental · News · Sector/Macro · Geopolitical Analyst
+  -> WebSearchRequest
+  -> RES-08 내부 RAG 재검색
+  -> Self-hosted SearXNG 기반 research-web-mcp
+  -> 상위 URL만 ArticleReader/Read-only Playwright MCP
+  -> SEARCH_HIT
+  -> Citation·Time·Numeric 검증
+  -> VERIFIED_EVIDENCE
+```
+
+- Research Supervisor는 검색 Case의 우선순위·예산·SLA를 관리하지만 직접 검색하지 않는다.
+- Fundamental, News/Sentiment, Sector/Macro와 Geopolitical은 `research.web.request`만 사용한다.
+- Universe, Data Steward, Technical과 Microstructure는 Web MCP 없이 Market/Data API만 사용한다.
+- 실시간 Web MCP는 Live Research Case에서만 허용하고 Historical Replay·Backtest에서는 차단한다.
+- 검색 결과 Snippet은 Evidence가 아니며 Validator 통과 전 Fact Claim에 사용할 수 없다.
+- Playwright MCP는 JavaScript·버튼·탭이 필요한 검증된 상위 URL에만 사용하고 로그인 Profile,
+  Broker·DB Secret, 내부망, 다운로드와 파일 실행을 차단한다.
+
+Web Search Queue의 반복 SLO 위반, RES-08의 Citation·Index 업무 지연 또는 전문 외국어·정책
+Coverage 공백이 두 평가 주기 이상 확인될 때만 조건부 `RES-10 Web Intelligence Researcher`를
+채용한다. 신설 시 RES-10은 URL 발견만, RES-08은 `VERIFIED_EVIDENCE` 승격만 담당한다.
 
 ## 실행법
 

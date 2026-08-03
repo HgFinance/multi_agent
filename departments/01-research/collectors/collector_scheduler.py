@@ -124,10 +124,16 @@ JOBS: tuple[Job, ...] = (
     # 06:50: 분봉 백필 등 밤 작업이 끝난 뒤, Steward(07:10)가 결과를 보기 전.
     Job("market-archive", ("collectors/market_archive_exporter.py", "--export"),
         daily_at=time(6, 50)),
+    # ▶ 상한을 모수보다 크게 (2026-08-03 실측)
+    #   corp_code 보유 발행사가 **1,315** 인데 재무 1200·CA 400 이었다.
+    #   특히 CA 는 400 이라 매일 900개사가 통째로 빠졌다 - 상한이 모수보다
+    #   작으면 꼬리가 영원히 안 돌고, 그 사실이 어디에도 안 드러난다.
+    #   DART 일 한도 20,000 대비 현금흐름 2,595 + 재무 배치 + CA 1,500 이면
+    #   25% 수준이라 여유가 있다.
     # --limit 명시: CLI 기본값(재무 20, CA 40)은 프로브용이라 스케줄이 그대로 쓰면
     # 발행사 1,049곳 중 꼬리만 돌게 된다 (2026-07-31 점검에서 발견).
     # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
-    Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1200"),
+    Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1500"),
         daily_at=time(18, 10)),
     # 전종목 바스켓 재생성 - 제한 스냅샷(07:05) 뒤라 그날의 정지·관리 종목이
     # 반영된다. 파일은 config 에 쓰므로 이 Job 은 호스트 권한이 필요하다 -
@@ -136,7 +142,7 @@ JOBS: tuple[Job, ...] = (
     # 감시 바스켓(400)만 받는다. 18:50: 재무(18:10) 뒤, CA(18:30) 사이 여유.
     Job("cashflow", ("collectors/opendart_cashflow.py", "--collect", "--limit", "3000"),
         daily_at=time(18, 50)),
-    Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "400"),
+    Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "1500"),
         daily_at=time(18, 30)),
     # 공시 원문 Archive - 당일 공시 원본 ZIP 을 Private Storage 로 (2시간 유예가
     # 있어 저녁 실행이 당일분 대부분을 잡고, 미준비분은 다음 날 자연 재시도)

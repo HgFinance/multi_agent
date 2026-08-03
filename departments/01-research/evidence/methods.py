@@ -224,6 +224,23 @@ METHODS: tuple[Method, ...] = (
              "'이미 방어로 옮겼다'는 실제 자금 이동이다 - 예상과 행동은 다른 축이다",
     ),
     Method(
+        key="barrier_touch_probability",
+        name="배리어 터치 확률 (주장의 사전 확률)",
+        analyst="RES-07",
+        citation="Harrison, J.M. (1985). Brownian Motion and Stochastic Flow "
+                 "Systems. Wiley. (반사원리 기반 first-passage 확률)",
+        status=STATUS_ADOPTED,
+        module="evidence/forecast.py:touch_probability",
+        inputs=("일별 종가 20+", "주장의 baseline·threshold·horizon"),
+        partial_reason="드리프트 0·로그정규·실현변동성=미래변동성 세 가정이 전부 "
+                       "근사다. 그래서 이 확률은 '정답'이 아니라 **비교 가능한 "
+                       "기준선**이다 - 분석가가 이 기준선보다 잘 맞히는지가 "
+                       "calibration 이 답할 질문이다. 라벨 주장(REGIME_FLIP 등)은 "
+                       "이 모형의 대상이 아니라 확률을 내지 않는다.",
+        note="확률이 없으면 Brier Score·Calibration Error 를 원리적으로 못 센다 - "
+             "발동 여부만 세면 과신하는 분석가와 소심한 분석가가 구분되지 않는다",
+    ),
+    Method(
         key="fear_greed_composite",
         name="공포탐욕 복합지수 (한국 시장판)",
         analyst="RES-07",

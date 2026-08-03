@@ -54,6 +54,11 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260802001900_research_daily_labels.sql",
                 "20260802002000_research_symbol_restrictions.sql",
                 "20260802002100_risk_qa_run_log_replay.sql",
+                # 리서치 (재일, 2026-08-02~03)
+                "20260802002200_research_as_known_at.sql",
+                "20260803002300_research_claim_forecast.sql",
+                "20260803002400_research_document_revisions.sql",
+                "20260803002500_research_production_authorized.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -82,7 +87,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "governance": 20,
             "quant": 12,
             "reference": 9,
-            "research": 21,
+            # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
+            # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
+            # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
+            "research": 23,
             "risk": 17,
             "strategy": 9,
             "workforce": 24,
