@@ -557,6 +557,63 @@ def _ollama_chat(system: str, user: str) -> str:
                     max_tokens=SUPERVISOR_MAX_TOKENS)
 
 
+
+# ── 노드 6: Skeptic (분석가 대화) ──────────────────────────────────────────
+def challenge_packet(state: ResearchState) -> dict:
+    """총괄 초안을 **반박한다**. framework 6.1 9단계(Challenge).
+
+    지금까지 분석가 6인은 병렬로 각자 답하고 총괄이 fan-in 할 뿐이었다 -
+    서로의 판정을 보지 않고 모순이 있어도 총괄이 매끄럽게 뭉갰다.
+    여기가 유일하게 **대화가 일어나는 자리**다.
+
+    갈등은 코드가 찾고(detect_disagreements), LLM 은 찾아진 갈등에 대해서만
+    대안 설명을 쓴다. LLM 에게 "누가 어긋나나"를 물으면 없는 갈등을 지어낸다.
+
+    실패해도 Packet 을 죽이지 않는다 - 반박이 없는 것과 Packet 이 없는 것은
+    다르다. 다만 **반박을 못 했다는 사실은 남긴다**.
+    """
+    from evidence.llm_client import extract_json
+    from skeptic import (CHALLENGE_SYSTEM, apply_challenge,
+                         build_challenge_prompt, detect_disagreements,
+                         verify_challenge)
+
+    packet = state.get("packet") or {}
+    analysts = {k: state.get(k) for k in
+                ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment")}
+    analysts = {k: v for k, v in analysts.items() if isinstance(v, dict)}
+    disagreements = detect_disagreements(analysts)
+
+    confirmed = {"price": (state.get("evidence") or {}).get("price_context"),
+                 "analysts": {k: v.get("readout") for k, v in analysts.items()}}
+
+    challenge = verification = None
+    try:
+        raw = _ollama_chat(CHALLENGE_SYSTEM, build_challenge_prompt(
+            thesis=str(packet.get("thesis", "")), analysts=analysts,
+            disagreements=disagreements, confirmed=confirmed))
+        challenge = json.loads(extract_json(raw))
+        # dict 로 온 반박도 문장으로 펴서 검증한다 - str(dict) 를 검사하면
+        # 따옴표·중괄호에 가려 수치 검출이 헐거워진다(실측 2026-08-03).
+        from skeptic import _as_sentence
+
+        verification = verify_challenge(
+            " ".join(_as_sentence(x) for x in (
+                (challenge.get("alternative_explanations") or [])
+                + [challenge.get("weakest_claim", ""),
+                   challenge.get("what_would_overturn_it", "")])),
+            confirmed)
+    except Exception as e:  # noqa: BLE001
+        # 반박 실패는 Packet 실패가 아니다. 그러나 침묵하지 않는다.
+        verification = {"ok": None,
+                        "reason": f"반박 미실행: {type(e).__name__}: {e}"[:200]}
+        print(f"⚠ Skeptic 실패(Packet 은 유지): {type(e).__name__}: {e}", flush=True)
+
+    return {"packet": apply_challenge(packet, disagreements=disagreements,
+                                      challenge=challenge,
+                                      verification=verification)}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(ResearchState)
@@ -569,6 +626,7 @@ def build_pipeline():
     g.add_node("analyze_geopolitical", analyze_geopolitical)
     g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
+    g.add_node("challenge_packet", challenge_packet)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
@@ -584,7 +642,8 @@ def build_pipeline():
     g.add_edge("analyze_regime", "analyze_geopolitical")
     g.add_edge("analyze_geopolitical", "analyze_microstructure")
     g.add_edge("analyze_microstructure", "draft_packet")
-    g.add_edge("draft_packet", END)
+    g.add_edge("draft_packet", "challenge_packet")
+    g.add_edge("challenge_packet", END)
     return g.compile()
 
 
@@ -913,6 +972,32 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         lines += [f"## {title}", ""]
         lines += [f"- {x}" for x in (packet.get(key) or [])] or ["- (없음)"]
         lines += [""]
+
+    # ▶ 반박 (Skeptic). **내용이 핵심이다** - 갈등 건수만 세는 것은 대화가 아니다.
+    #   총괄이 동의하든 안 하든 지우지 못한다(마스터플랜: 반대 의견을 삭제하지 않는다).
+    dg = packet.get("disagreements") or {}
+    dissent = packet.get("dissent") or []
+    cv = packet.get("_challenge_verification") or {}
+    lines += ["## 반박 (Skeptic — 분석가 간 대화)", ""]
+    if dg:
+        lines += [f"- 코드가 찾은 갈등 **{dg.get('count', 0)}건** "
+                  f"(정반대 {dg.get('opposite', 0)} / 신호↔맥락 "
+                  f"{dg.get('signal_vs_context', 0)})"]
+        lines += [f"  - {x}" for x in (dg.get("lines") or [])]
+    if dissent:
+        lines += ["", "**대안 설명과 반대 근거**", ""]
+        lines += [f"- {x}" for x in dissent]
+    else:
+        lines += ["", "- (반박 없음)"]
+    if cv.get("ok") is False:
+        lines += ["", f"> ⚠ 반박 서술에 확정치 밖 수치: {cv.get('unmatched')}"]
+    elif cv.get("ok") is None and cv.get("reason"):
+        lines += ["", f"> ⚠ {cv['reason']}"]
+    if packet.get("_downgraded_by_challenge"):
+        lines += ["", f"> 치명적 반증으로 evidence_quality 강등: "
+                      f"{packet['_downgraded_by_challenge']} → "
+                      f"{packet.get('evidence_quality')}"]
+    lines += [""]
 
     # 분석가 원문 소견 - 총괄이 압축하며 버린 맥락이 여기 남는다. 상충하는
     # 소견을 지우지 않는 것이 본부 원칙이라, 요약본 옆에 원문을 같이 싣는다.
