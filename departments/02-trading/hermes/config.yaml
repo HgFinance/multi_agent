@@ -229,32 +229,32 @@ employee_runtime:
 
 workers:
   market-thesis-worker:
-    role: Market thesis and signal-context analyst
+    role: Bull and bear market-thesis debate analyst
     status: active
     trigger: always
-    tools: [trading.market_snapshot.read, trading.strategy_bundle.read]
+    tools: [trading.research_packet.read]
   trade-proposal-worker:
-    role: Non-binding trade proposal analyst
+    role: Trade proposal and OrderIntent analyst
     status: active
     trigger: always
-    tools: [trading.research_packet.read, trading.portfolio.read]
+    tools: [trading.portfolio_state.read]
   order-constraint-worker:
-    role: Order constraint and pre-gate analyst
-    status: active
-    trigger: when_order_intent_exists
-    tools: [trading.order_intent.read, trading.mandate.read]
-  execution-planning-worker:
-    role: Paper execution-plan analyst
-    status: active
-    trigger: when_order_intent_exists
-    tools: [trading.order_intent.read, trading.execution_plan.read]
-  venue-cost-worker:
-    role: Venue, liquidity and transaction-cost analyst
-    status: active
-    trigger: when_market_snapshot_exists
-    tools: [trading.market_snapshot.read, trading.tca.read]
-  derivatives-structure-worker:
-    role: Derivatives structure and payoff analyst
+    role: Risk and compliance constraint mapping analyst
     status: conditional
-    trigger: when_derivatives_input_exists
-    tools: [trading.derivatives.read, trading.margin.read]
+    trigger: risk_decision
+    tools: [trading.risk_decision.read]
+  execution-planning-worker:
+    role: Risk-approved execution planning analyst
+    status: conditional
+    trigger: approved_risk
+    tools: [trading.execution_constraints.read]
+  venue-cost-worker:
+    role: Broker venue, slippage and transaction-cost analyst
+    status: conditional
+    trigger: execution_request
+    tools: [trading.venue_cost.read]
+  derivatives-structure-worker:
+    role: Derivatives structure and margin planning analyst
+    status: conditional
+    trigger: derivatives_signal
+    tools: [trading.derivatives.read]

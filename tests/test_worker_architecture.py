@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from orchestration.employee_dispatch import run_department_workers
+from orchestration.employee_dispatch import load_worker_specs, run_department_workers
 from orchestration.workflows.manifest import load_workflow
 from orchestration.workflows.runner import execute_workflow
 
@@ -141,6 +141,28 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         assert result["runtime"]["executor"] == "LangGraph"
         assert result["runtime"]["provider"] == "ollama"
         assert result["runtime"]["model"] == "qwen3:8b"
+
+
+def test_profile_worker_metadata_matches_runtime_specs() -> None:
+    """Prevent config registry drift from the executable WorkerSpec registry."""
+
+    for department, directory in DEPARTMENTS:
+        config = yaml.safe_load(
+            (ROOT / "departments" / directory / "hermes" / "config.yaml").read_text()
+        )
+        runtime_specs = {
+            spec.worker_id: spec for spec in load_worker_specs(ROOT, department)
+        }
+        configured_workers = config["workers"]
+        assert set(configured_workers) == set(runtime_specs)
+
+        for worker_id, spec in runtime_specs.items():
+            entry = configured_workers[worker_id]
+            assert entry["role"] == spec.role
+            assert entry["trigger"] == spec.trigger
+            assert tuple(entry["tools"]) == spec.tools
+            expected_status = "active" if spec.trigger == "always" else "conditional"
+            assert entry["status"] == expected_status
 
 
 def test_worker_failure_is_degraded_and_non_binding() -> None:

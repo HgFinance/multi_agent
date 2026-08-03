@@ -243,29 +243,34 @@ employee_runtime:
 
 workers:
   evidence-qa-worker:
+    role: Evidence and citation QA analyst
     status: active
     replaces: [evidence-qa-agent]
     tools: [qa.evidence.check]
     output: advisory_context
   hallucination-critic-worker:
+    role: Hallucination and contradiction critic
     status: conditional
     replaces: [hallucination-critic]
-    trigger: unsupported_or_contradicted_claim_exists
+    trigger: when_unsupported_claim_exists
     tools: [qa.evidence.rag]
     output: advisory_context
   model-and-internal-audit-worker:
+    role: Model risk and internal audit analyst
     status: conditional
     replaces: [model-risk-agent, internal-audit-agent]
-    trigger: model_or_audit_input_exists
+    trigger: when_audit_input_exists
     tools: [qa.model_risk.evaluate, qa.internal_audit.evaluate]
     output: advisory_context
   ops-and-permission-worker:
+    role: Agent operations and tool permission analyst
     status: conditional
     replaces: [agent-ops-monitor, tool-permission-security-reviewer]
-    trigger: ops_or_permission_input_exists
+    trigger: when_ops_or_permission_input_exists
     tools: [qa.ops.evaluate, qa.tool_permission.check]
     output: advisory_context
   incident-postmortem-worker:
+    role: Incident timeline and postmortem analyst
     status: conditional
     replaces: [incident-postmortem-agent]
     trigger: incident_exists

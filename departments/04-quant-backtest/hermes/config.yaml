@@ -88,10 +88,45 @@ employee_runtime:
   binding_decision_owner: departments/04-quant-backtest/pipeline
   failure_action: HOLD_ESCALATE
 workers:
-  strategy-hypothesis-worker: {status: active, tools: [quant.hypothesis.read], output: advisory_context}
-  dataset-feature-worker: {status: active, tools: [quant.dataset.read], output: advisory_context}
-  backtest-optimization-worker: {status: conditional, trigger: backtest_request, tools: [quant.backtest.run, quant.capacity.check], output: advisory_context}
-  strategy-release-worker: {status: conditional, trigger: release_candidate, tools: [quant.release.read], output: advisory_context}
-  ml-quant-worker: {status: conditional, trigger: ml_research, tools: [quant.ml_evaluation.read], output: advisory_context}
-  execution-cost-worker: {status: conditional, trigger: cost_sensitivity, tools: [quant.cost_sensitivity.read], output: advisory_context}
-  regime-robustness-worker: {status: conditional, trigger: regime_analysis, tools: [quant.regime_robustness.read], output: advisory_context}
+  strategy-hypothesis-worker:
+    role: Falsifiable strategy hypothesis analyst
+    status: active
+    trigger: always
+    tools: [quant.hypothesis.read]
+    output: advisory_context
+  dataset-feature-worker:
+    role: Point-in-time dataset and feature quality analyst
+    status: active
+    trigger: always
+    tools: [quant.dataset.read]
+    output: advisory_context
+  backtest-optimization-worker:
+    role: Cost-aware backtest and capacity optimization analyst
+    status: conditional
+    trigger: backtest_request
+    tools: [quant.backtest.run, quant.capacity.check]
+    output: advisory_context
+  strategy-release-worker:
+    role: Champion/challenger strategy release reviewer
+    status: conditional
+    trigger: release_candidate
+    tools: [quant.release.read]
+    output: advisory_context
+  ml-quant-worker:
+    role: ML quant research and leakage review analyst
+    status: conditional
+    trigger: ml_research
+    tools: [quant.ml_evaluation.read]
+    output: advisory_context
+  execution-cost-worker:
+    role: Execution-cost and turnover sensitivity analyst
+    status: conditional
+    trigger: cost_sensitivity
+    tools: [quant.cost_sensitivity.read]
+    output: advisory_context
+  regime-robustness-worker:
+    role: Regime robustness and stress-sensitivity analyst
+    status: conditional
+    trigger: regime_analysis
+    tools: [quant.regime_robustness.read]
+    output: advisory_context

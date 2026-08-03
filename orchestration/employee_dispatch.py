@@ -32,6 +32,21 @@ class EmployeeDispatchError(RuntimeError):
     """Raised when a department Worker registry cannot be loaded."""
 
 
+def load_worker_specs(repo_root: Path, department: str) -> tuple[Any, ...]:
+    """Return the runtime WorkerSpec registry for metadata contract checks."""
+
+    relative_path = EMPLOYEE_MODULE_BY_DEPARTMENT.get(department)
+    if relative_path is None:
+        raise EmployeeDispatchError(f"department_worker_registry_missing:{department}")
+    module = _load_module(repo_root, department, relative_path)
+    specs = getattr(module, "WORKER_SPECS", None)
+    if not isinstance(specs, tuple) or not specs:
+        raise EmployeeDispatchError(f"worker_specs_missing:{department}")
+    if any(not getattr(spec, "worker_id", None) for spec in specs):
+        raise EmployeeDispatchError(f"worker_spec_invalid:{department}")
+    return specs
+
+
 def run_department_workers(
     repo_root: Path,
     department: str,

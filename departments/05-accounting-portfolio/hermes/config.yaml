@@ -184,42 +184,42 @@ employee_runtime:
 
 workers:
   portfolio-control-worker:
-    role: Portfolio position and cash control analyst
+    role: Portfolio control and position-state analyst
     status: active
     trigger: always
-    tools: [accounting.position.read, accounting.cash.read]
+    tools: [accounting.portfolio_snapshot.read]
   ledger-reconciliation-worker:
-    role: Ledger, fund-accounting and reconciliation analyst
+    role: Ledger, fund-accounting and broker-reconciliation analyst
     status: active
     trigger: always
     tools: [accounting.ledger.read, accounting.reconciliation.read]
   nav-close-worker:
-    role: NAV close evidence analyst
+    role: NAV close and official-figure readiness analyst
     status: conditional
-    trigger: when_nav_close_exists
-    tools: [accounting.nav.read, accounting.valuation.read]
+    trigger: nav_close
+    tools: [accounting.nav_close.read]
   treasury-liquidity-worker:
-    role: Treasury and liquidity analyst
+    role: Treasury, collateral and liquidity analyst
     status: conditional
-    trigger: when_treasury_input_exists
-    tools: [accounting.cash.read, accounting.treasury.read]
+    trigger: treasury_signal
+    tools: [accounting.treasury.read]
   pnl-attribution-worker:
-    role: PnL attribution analyst
+    role: PnL and performance attribution analyst
     status: conditional
-    trigger: when_pnl_input_exists
-    tools: [accounting.pnl.read, accounting.position.read]
+    trigger: pnl_request
+    tools: [accounting.pnl.read]
   investor-reporting-worker:
-    role: Investor reporting context analyst
+    role: Investor reporting and disclosure consistency analyst
     status: conditional
-    trigger: when_reporting_input_exists
-    tools: [accounting.reporting.read, accounting.nav.read]
+    trigger: investor_report
+    tools: [accounting.reporting.read]
   valuation-corporate-actions-worker:
     role: Valuation and corporate-actions analyst
     status: conditional
-    trigger: when_valuation_input_exists
+    trigger: corporate_action
     tools: [accounting.valuation.read, accounting.corporate_actions.read]
   fee-accrual-tax-worker:
-    role: Fee accrual and tax context analyst
+    role: Fee, expense and tax-accrual consistency analyst
     status: conditional
-    trigger: when_fee_tax_input_exists
-    tools: [accounting.fees.read, accounting.tax.read]
+    trigger: fee_accrual
+    tools: [accounting.fees_tax.read]
