@@ -38,7 +38,7 @@
 | 리스크 | P1 Risk, FastAPI, PostgreSQL Repository, Redis Event와 Harness | Test 통과, Container·Canonical Decision 기록 미구현 |
 | 회계/포트폴리오 | Ledger, Portfolio, Reconciliation, Reporting, Portfolio API | BFF Router만 존재, 전용 Worker·Container와 DB 행 없음 |
 | AI QA/감사 | P1 QA, Repository, Redis Consumer, Harness, Replay와 Metrics | QA/Incident 일부 Row 존재, Container와 전사 Trace 미구현 |
-| CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | `governance-api` Container 실행 확인(2026-08-03) - Mandate/Report/Notification 전부 Postgres Repository로 실 DB 검증, `reporting-worker`/`notification-worker`는 Event Consumer 코드가 아직 없어 미착수 |
+| CEO Office | Mandate, Daily Report Assembly, Notification Domain Code | `governance-api`+`notification-worker` Container 실행 확인(2026-08-03) - Mandate/Report/Notification 전부 Postgres Repository로 실 DB 검증, `hf:governance` Redis Stream Producer(Mandate/Report)·Consumer(Notification) 실 검증 완료. `reporting-worker`는 상태 누적 로직이 없어 미착수 |
 | Agent Workforce | Improvement, Lifecycle, Scorecard Domain Code | `workforce-api` Container 실행 확인(2026-08-03) - Access/Improvements/Scorecard 전부 Postgres Repository로 실 DB 검증, `lifecycle-worker`/`improvement-worker`는 Event Consumer 코드가 아직 없어 미착수 |
 | 퀀트/백테스트 | Hypothesis, PIT Dataset, Backtest, Walk-Forward, Experiment Orchestrator | Hermes 실행, DB Experiment 6개, Worker·API 미구현 |
 | AI Office BFF | DEMO BFF, 8개 조직 UI와 Risk·QA 계약 Panel | Clean Build·Render 2/2, 공식 Runtime Snapshot 미구현 |
@@ -1088,12 +1088,26 @@ B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운�
 - `governance-api`, `workforce-api` Container — 완료(2026-08-03). `departments/00-ceo-office/Dockerfile`,
   `departments/07-agent-workforce/Dockerfile`로 Image Build, `docker-compose.yml`에 등록,
   `docker compose up`으로 기동 후 `/openapi.json`과 실제 Domain Endpoint(Notification 발행,
-  Budget Assessment)까지 실행 확인. Redis는 아직 안 쓴다(Mandate/Report/Notification,
-  Access/Improvements/Scorecard 전부 Postgres Repository로만 동작).
-- `reporting-worker`, `notification-worker`, `lifecycle-worker`, `improvement-worker` — 미착수.
-  daily_report.py/notification.py/access.py/workflow.py가 전부 순수 함수·상태 머신일 뿐
-  Event Consumer 루프가 없다(risk-api Dockerfile의 risk-projection-worker와 같은 이유) -
-  코드 없는 역할을 컨테이너부터 만들지 않는다.
+  Budget Assessment)까지 실행 확인.
+- `notification-worker`(CEO) — 완료(2026-08-03). `governance_events/{redis_event_bus,worker}.py`가
+  `hf:governance` Stream을 소비해 risk.breach.v1/qa.finding.v1/incident.opened.v1/
+  governance.escalation.v1/report.ready.v1을 `NotificationService.notify()`로 변환한다.
+  Mandate 제안/활성화·Report 성공 조립도 각각 `governance.mandate.changed.v1`/`report.ready.v1`을
+  같은 Stream에 발행한다(Producer, Best-effort - Redis 장애가 Mandate/Report 자체를 막지 않는다).
+  실제 Producer가 아직 없는 나머지 입력(research.packet.v1 등, §6.1 참고)은 발행하는 본부가
+  생기면 그대로 동작한다 - 실 Redis로 발행→소비→알림 생성, dedupe, 재시작 후 Pending 복구,
+  "다른 Consumer Group용 Event는 조용히 ACK" 전부 검증함.
+- `reporting-worker`(CEO), `lifecycle-worker`/`improvement-worker`(Workforce) — 미착수.
+  - `reporting-worker`: daily_report.py의 assemble()은 완성된 Section 묶음을 한 번에 받는
+    순수 함수라, 여러 시점에 걸쳐 들어오는 Snapshot Event를 fund_id·as_of별로 누적했다가
+    필요 Section이 다 모이면 assemble()을 호출하는 상태 저장 로직이 없다 - 이게 생겨야
+    Consumer가 의미 있다.
+  - `lifecycle-worker`: §6.8 책임("승인 Event를 받아 Runtime/IAM Provisioning 요청")이 실제
+    Platform/IAM Adapter 호출을 전제하는데 그 Adapter 자체가 없다. 인사팀이 직접 Provisioning을
+    수행하지 않는다는 권한 경계(CLAUDE.md) 때문에 인사팀 쪽에서 이 Adapter를 대신 만들 수도 없다 -
+    Platform 담당자의 선행 작업이 막혀 있다.
+  - `improvement-worker`: 입력인 `workforce.eval.v1`을 QA/감사본부가 아직 발행하지 않는다 -
+    QA 쪽 Eval Runner/Event 발행이 선행돼야 한다.
 - Mandate Snapshot과 Risk Read 계약 연결
 - Strategy/Profile Approval Gate 연결
 - Kanban Status Bridge와 Workforce Roster Projection 연결
