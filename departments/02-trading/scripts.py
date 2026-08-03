@@ -279,8 +279,16 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 import 는 항상 되어야 한다
     )
 
-    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
-                    ephemeral_system_prompt=persona)
+    # enabled_toolsets=[] 는 도구를 0개로 만든다(기본값 None 이면 33개, 실측 2026-08-03).
+    # **이게 없으면 분석가가 파일을 쓴다.** 첫 --run 에서 bull-researcher 가 답변을 그냥
+    # 반환하지 않고 departments/04-research/bull_report_005930.json 을 만들었다 - 존재하지도
+    # 않는 남의 본부 경로다(실제로는 01-research / 04-quant-backtest). 두 가지가 동시에 깨진다:
+    #   1. 부서 경계 - 트레이딩 직원이 다른 본부 디렉터리에 쓴다 (CLAUDE.md 권한 분리)
+    #   2. 산출물 경로 - 결과는 이 파이프라인의 반환값과 Notion 이지, 에이전트가 임의로
+    #      정한 파일이 아니다. 감사 추적 밖에서 파일이 생긴다.
+    # 이 두 페르소나는 JSON 을 반환하기만 하면 되므로 도구가 하나도 필요 없다.
+    agent = AIAgent(model=_model_version(), quiet_mode=True,
+                    ephemeral_system_prompt=persona, enabled_toolsets=[])
     return agent.chat(task)
 
 
@@ -525,13 +533,27 @@ def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None) -> 
 
 # ── 결정론적 MD 리포트 (순수 함수 - LLM 이 형식·내용을 창작하지 않는다) ────
 def _md_cell(value: Any) -> str:
+    """표 셀 한 칸. 줄바꿈은 공백으로 접는다 - <br> 로 바꾸면 Notion 블록에서 문자 그대로 보인다
+    (departments/notion_markdown.py 는 HTML 을 해석하지 않는다)."""
     if value is None:
         return "—"
-    return str(value).replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
+    return " ".join(str(value).replace("|", "\\|").split())
 
 
-def _md_list(values) -> str:
-    return "<br>".join(f"- {_md_cell(v)}" for v in (values or [])) or "—"
+def _md_lines(title: str, value) -> list[str]:
+    """제목 + 본문을 진짜 마크다운 줄로 낸다.
+
+    <br> 로 이어붙이지 않는다 - departments/notion_markdown.py 가 이 MD 를 Notion 블록으로
+    렌더링하는데, <br> 는 HTML 이라 블록 안에서 문자 그대로 보인다(2026-08-03 실측).
+    목록은 목록 줄로, 문단은 문단으로 내야 Notion 에서도 목록·문단으로 읽힌다.
+    """
+    lines = [f"### {title}", ""]
+    if isinstance(value, (list, tuple)):
+        lines += [f"- {_md_cell(v)}" for v in value] or ["—"]
+    else:
+        lines.append(_md_cell(value) if value is not None else "—")
+    lines.append("")
+    return lines
 
 
 def _md_refs(values) -> str:
@@ -558,8 +580,8 @@ def _render_report_md(out: dict) -> str:
         f"| input_hash | `{_md_cell(out.get('input_hash'))}` |",
         f"| trace_id | `{_md_cell(out.get('trace_id'))}` |",
         f"| model | `{_md_cell(versions.get('model'))}` |",
-        f"| prompt (Bull / Bear) | `{_md_cell(versions.get('bull_prompt'))}`<br>"
-        f"`{_md_cell(versions.get('bear_prompt'))}` |",
+        f"| prompt (Bull) | `{_md_cell(versions.get('bull_prompt'))}` |",
+        f"| prompt (Bear) | `{_md_cell(versions.get('bear_prompt'))}` |",
         "",
         "> 이 문서는 **판정이 아니다.** 매수/매도 방향, 수량, 주문 유형을 담지 않는다.",
         "> OrderIntent 는 trader-pm-agent(TRD-03), 승인은 리스크본부 Risk Engine 이 만든다.",
@@ -572,20 +594,24 @@ def _render_report_md(out: dict) -> str:
     lines += [f"| `{cid}` | {_md_cell(text)} |" for cid, text in (out.get("claims") or {}).items()]
 
     lines += ["", "## Bull Researcher (TRD-01)", ""]
-    lines += ([f"- **Bull Case:** {_md_cell(bull.get('bull_case'))}",
-               f"- **Upside Scenario:** {_md_cell(bull.get('upside_scenario'))}",
-               f"- **Catalyst Timeline:** {_md_list(bull.get('catalyst_timeline'))}",
-               f"- **Bull Invalidation:** {_md_list(bull.get('bull_invalidation'))}",
-               f"- **인용 Claim:** {_md_refs(bull.get('claim_refs'))}"]
-              if bull else ["초안 없음 — 아래 Fallback 참고."])
+    if bull:
+        lines += _md_lines("Bull Case", bull.get("bull_case"))
+        lines += _md_lines("Upside Scenario", bull.get("upside_scenario"))
+        lines += _md_lines("Catalyst Timeline", bull.get("catalyst_timeline"))
+        lines += _md_lines("Bull Invalidation", bull.get("bull_invalidation"))
+        lines += [f"**인용 Claim:** {_md_refs(bull.get('claim_refs'))}"]
+    else:
+        lines.append("초안 없음 — 아래 Fallback 참고.")
 
     lines += ["", "## Bear Researcher (TRD-02)", ""]
-    lines += ([f"- **Bear Case:** {_md_cell(bear.get('bear_case'))}",
-               f"- **Failure Mode:** {_md_list(bear.get('failure_mode'))}",
-               f"- **Downside Scenario:** {_md_cell(bear.get('downside_scenario'))}",
-               f"- **Missing Evidence:** {_md_list(bear.get('missing_evidence'))}",
-               f"- **인용 Claim:** {_md_refs(bear.get('claim_refs'))}"]
-              if bear else ["초안 없음 — 아래 Fallback 참고."])
+    if bear:
+        lines += _md_lines("Bear Case", bear.get("bear_case"))
+        lines += _md_lines("Failure Mode", bear.get("failure_mode"))
+        lines += _md_lines("Downside Scenario", bear.get("downside_scenario"))
+        lines += _md_lines("Missing Evidence", bear.get("missing_evidence"))
+        lines += [f"**인용 Claim:** {_md_refs(bear.get('claim_refs'))}"]
+    else:
+        lines.append("초안 없음 — 아래 Fallback 참고.")
 
     citations, independence = out.get("citations") or {}, out.get("independence") or {}
     contested = out.get("contested") or {}
@@ -858,7 +884,60 @@ def _check_report_is_deterministic():
     for must in (out["debate_id"], out["input_hash"], "fact:0", "판정이 아니다",
                  _BULL_OK["bull_case"], _BEAR_OK["bear_case"]):
         assert must in md, f"리포트에 {must!r} 가 없다"
-    print("  결정론 MD 리포트           OK")
+
+    # departments/notion_markdown.py 가 이 MD 를 Notion 블록으로 바꾼다. 생성과 렌더링이
+    # 어긋나면(예: <br> 를 쓰면) Notion 에서 문자 그대로 보인다 - 여기서 잡는다.
+    from departments.notion_markdown import markdown_to_notion_blocks
+
+    assert "<br>" not in md, "MD 에 <br> 가 있다 - Notion 블록에서 문자로 보인다"
+    blocks = markdown_to_notion_blocks(md)
+    kinds = {b["type"] for b in blocks}
+    for need in ("heading_1", "heading_2", "heading_3", "table", "bulleted_list_item", "quote"):
+        assert need in kinds, f"렌더링 결과에 {need} 가 없다: {sorted(kinds)}"
+
+    def _plain(b):
+        d = b.get(b["type"], {})
+        return "".join(x.get("text", {}).get("content", "") for x in (d.get("rich_text") or []))
+
+    rendered = " ".join(_plain(b) for b in blocks)
+    assert "<br>" not in rendered and "**" not in rendered, "마크업이 본문 텍스트로 샜다"
+    assert _BEAR_OK["failure_mode"][0] in rendered, "Bear 목록이 렌더링에서 유실됐다"
+    print("  결정론 MD 리포트 + 렌더링  OK")
+
+
+def _check_agent_has_no_tools():
+    """분석가에게 도구가 붙지 않는지. Hermes 없이도 돌도록 가짜 run_agent 를 끼운다.
+
+    실측 사고(2026-08-03): 도구를 안 막았더니 bull-researcher 가 답변을 반환하는 대신
+    departments/04-research/bull_report_005930.json 을 만들었다 - 없는 본부 경로다.
+    """
+    import types
+
+    captured: dict = {}
+
+    class FakeAgent:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def chat(self, task):
+            return "{}"
+
+    fake = types.ModuleType("run_agent")
+    fake.AIAgent = FakeAgent
+    saved = sys.modules.get("run_agent")
+    sys.modules["run_agent"] = fake
+    try:
+        _hermes_chat("persona", "task")
+    finally:
+        sys.modules.pop("run_agent", None)
+        if saved is not None:
+            sys.modules["run_agent"] = saved
+
+    assert captured.get("enabled_toolsets") == [], \
+        f"분석가에게 도구가 열려 있다: enabled_toolsets={captured.get('enabled_toolsets')!r}"
+    assert captured.get("ephemeral_system_prompt") == "persona"
+    assert captured.get("model") == _model_version(), "config.yaml 의 model 을 안 쓴다"
+    print("  분석가 도구 0개 (경계)     OK")
 
 
 def _check_notion_report_node():
@@ -929,6 +1008,7 @@ if __name__ == "__main__":
     _check_contested_math()
     _check_reproducibility_and_keys()
     _check_report_is_deterministic()
+    _check_agent_has_no_tools()
     _check_notion_report_node()
     _check_secret_redaction()
-    print("트레이딩본부 토론 파이프라인 15개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    print("트레이딩본부 토론 파이프라인 16개 영역 통과. 실행은 --run (Hermes + Notion 필요)")

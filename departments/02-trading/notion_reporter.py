@@ -57,6 +57,7 @@ Notion 은 Projection 일 뿐이다 - 이 모듈이 실패해도(미설정, 네�
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -65,6 +66,10 @@ from typing import Any
 
 _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from departments.notion_markdown import markdown_to_notion_blocks  # noqa: E402
 # 앞에 오는 파일이 이긴다. root .env 가 정본(2026-08-03 확정) - 모듈 상단 참고.
 _ENV_FILES = (_REPO_ROOT / ".env", _REPO_ROOT / "ai-office" / ".dev.vars")
 _NOTION_VERSION = "2022-06-28"
@@ -81,7 +86,6 @@ REQUIRED_PROPERTIES: dict[str, str] = {
     "서술": "Rich text",
     "calculation_version": "Rich text",
     "input_hash": "Rich text",
-    "원본 리포트": "Rich text",
     "생성 시각": "Date",
     "종목": "Rich text",
     "Packet 신선도": "Select (FRESH / STALE / FUTURE / UNKNOWN)",
@@ -140,6 +144,11 @@ def _refs(values) -> str:
     return ", ".join(values or []) or "없음"
 
 
+def _report_path(debate_id) -> Path:
+    """scripts.py --run 이 저장하는 MD 경로와 같은 규칙. Notion 본문 첫 줄에 원본 위치를 남긴다."""
+    return _BASE / "reports" / f"trading_debate_{debate_id}.md"
+
+
 def pipeline_outcome(out: dict) -> str:
     """Notion "판정" Select 값. 투자 판정이 아니라 파이프라인 결과다(모듈 상단 주의 참고)."""
     if not out.get("debate_opened"):
@@ -183,7 +192,6 @@ def upload_debate(out: dict, *, report_md: str = "", env: dict | None = None) ->
         "서술": _rich_text(deterministic_summary(out)),
         "calculation_version": _rich_text(out.get("pipeline_version")),
         "input_hash": _rich_text(out.get("input_hash")),
-        "원본 리포트": _rich_text(report_md),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
         # 트레이딩본부 고유 - 감사가 토론 품질을 한 화면에서 보게 하는 값들
         "종목": _rich_text(out.get("symbol")),
@@ -198,7 +206,14 @@ def upload_debate(out: dict, *, report_md: str = "", env: dict | None = None) ->
     }
 
     try:
-        status, body = _post("pages", {"parent": {"database_id": db_id}, "properties": props}, token)
+        payload = {"parent": {"database_id": db_id}, "properties": props}
+        if report_md:
+            # 리포트를 rich_text 속성에 밀어넣지 않고 페이지 본문 블록으로 렌더링한다
+            # (2026-08-03 main 의 risk/qa 패턴, departments/notion_markdown.py 공용 모듈).
+            # 표·제목·목록이 Notion 에서 그대로 읽힌다.
+            intro = f"**결정론적 MD 리포트 저장:** `{_report_path(out.get('debate_id'))}`\n\n{report_md}"
+            payload["children"] = markdown_to_notion_blocks(intro)
+        status, body = _post("pages", payload, token)
     except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}"}
     if status == 200:
@@ -253,7 +268,10 @@ def _check_payload_shape():
         assert props["판정"]["select"]["name"] == "GROUNDED"
         assert props["독립성 위반"]["number"] == 0
         assert props["Packet 신선도"]["select"]["name"] == "FRESH"
-        assert props["원본 리포트"]["rich_text"][0]["text"]["content"] == "# 리포트"
+        # 리포트는 속성이 아니라 페이지 본문 블록으로 간다
+        assert "원본 리포트" not in props
+        blocks = captured["body"]["children"]
+        assert blocks and any(b.get("type", "").startswith("heading") for b in blocks), blocks
         # 방향·수량·주문유형이 어떤 속성으로도 새 나가지 않는다 (권한 분리)
         blob = json.dumps(props, ensure_ascii=False)
         for forbidden in ("BUY", "SELL", "quantity", "order_type", "limit_price"):
