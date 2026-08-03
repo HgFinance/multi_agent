@@ -148,24 +148,59 @@ def _norm_note(note):
     return note.model_dump() if hasattr(note, "model_dump") else note
 
 
+def _analyst_state(r: dict) -> dict:
+    """분석가 반환 -> state 조각. **반환 모양이 두 갈래인 것을 여기서 흡수한다.**
+
+    ▶ 왜 필요한가 (실측 2026-08-03, 이 세션에서 발견)
+      RES-04 기술·RES-07 레짐·RES-03 미시구조는 `summary`/`used_metrics`/
+      `cautions`/`dropped` 를 **최상위 평평한 키**로 낸다(technical_analyst.py:361).
+      RES-05 펀더멘털만 `note` 객체를 낸다.
+      그런데 파이프라인 노드는 전부 `r.get("note")` 만 읽었다. 그래서 세 분석가의
+      **검증을 통과한 서술이 매 실행 100% 폐기**됐고, 리포트에는
+      `_서술 없음 (LLM 미응답)_` 이 찍혔다 - LLM 은 정상 응답했는데도.
+      **거짓 라벨이 3개월치 리포트를 얕아 보이게 만든 진짜 원인이다.**
+
+      서술이 없으면 총괄 프롬프트(_digest)도 그것을 못 보므로, thesis 가 분석가
+      근거 위에 서지 못하고 모델의 사전지식으로 흘렀다 - 005380 창작 사고의
+      배경이기도 하다.
+
+    두 모양을 다 받아 하나로 낸다. 없는 것을 지어내지는 않는다.
+    """
+    note = _norm_note(r.get("note")) or {}
+    if not isinstance(note, dict):
+        note = {}
+
+    def pick(key):
+        # note 안이 우선, 없으면 최상위 평평한 키
+        v = note.get(key)
+        return v if v not in (None, "", [], {}) else r.get(key)
+
+    return {
+        "verdict": r.get("verdict"),
+        "readout": r.get("readout"),
+        "note": note or None,
+        "summary": pick("summary"),
+        "used_metrics": pick("used_metrics") or [],
+        "cautions": pick("cautions") or [],
+        "dropped": pick("dropped") or [],
+        # llm_status 는 서술 유무를 라벨링하는 근거다 - 없으면 추측하지 않는다
+        "llm_status": r.get("llm_status"),
+        "reason": r.get("reason"),
+    }
+
+
 def analyze_technical(state: ResearchState) -> dict:
     from technical_analyst import analyze as tech_analyze
 
     r = tech_analyze(state["symbol"], market_api=MARKET_API)
-    return {"technical": {"verdict": r.get("verdict"),
-                          "readout": r.get("readout"),
-                          "note": _norm_note(r.get("note")),
-                          "llm_status": r.get("llm_status"),
-                          "reason": r.get("reason")}}
+    return {"technical": _analyst_state(r)}
 
 
 def analyze_fundamental(state: ResearchState) -> dict:
     from fundamental_analyst import analyze as fund_analyze
 
     r = fund_analyze(state["symbol"])
-    return {"fundamental": {"verdict": r.get("verdict"),
-                            "readout": r.get("readout"),
-                            "note": _norm_note(r.get("note")),
+    return {"fundamental": {**_analyst_state(r),
                             "verification": r.get("verification")}}
 
 
@@ -174,9 +209,7 @@ def analyze_regime(state: ResearchState) -> dict:
     from sector_regime_analyst import analyze as regime_analyze
 
     r = regime_analyze(market_api=MARKET_API)
-    return {"regime": {"verdict": r.get("verdict"),
-                       "readout": r.get("readout"),
-                       "note": _norm_note(r.get("note"))}}
+    return {"regime": _analyst_state(r)}
 
 
 def analyze_geopolitical(state: ResearchState) -> dict:
@@ -189,24 +222,14 @@ def analyze_geopolitical(state: ResearchState) -> dict:
     from geopolitical_analyst import analyze as geo_analyze
 
     r = geo_analyze(research_api=RESEARCH_API)
-    return {"geopolitical": {"verdict": r.get("verdict"),
-                             "driver": r.get("driver"),
-                             "readout": r.get("readout"),
-                             "note": _norm_note(r.get("note")),
-                             "summary": r.get("summary"),
-                             "transmission": r.get("transmission"),
-                             "cautions": r.get("cautions"),
-                             "llm_status": r.get("llm_status"),
-                             "reason": r.get("reason")}}
+    return {"geopolitical": _analyst_state(r)}
 
 
 def analyze_microstructure(state: ResearchState) -> dict:
     from microstructure_analyst import analyze as micro_analyze
 
     r = micro_analyze(state["symbol"], market_api=MARKET_API)
-    return {"microstructure": {"verdict": r.get("verdict"),
-                               "readout": r.get("readout"),
-                               "note": _norm_note(r.get("note"))}}
+    return {"microstructure": _analyst_state(r)}
 
 
 PACKET_REQUIRED_KEYS = ("symbol", "thesis", "facts", "interpretation",
@@ -229,6 +252,19 @@ def unwrap_packet(obj):
         return obj
     if all(k in obj for k in PACKET_REQUIRED_KEYS):
         return obj
+
+    # ▶ 페르소나가 공식 산출물을 **전부** 낸 경우 (실측 2026-08-03, 005380)
+    #   RES-00 프롬프트가 "Official outputs: Research Assignment, Research Packet,
+    #   Dossier Update, Data Quality Warning" 이라고 4종을 나열한다. Claude 가
+    #   그 지시를 성실히 따라 4종을 한 객체로 냈고, 아래 일반 탐색은 그중 어느
+    #   것을 골라야 할지 몰라 실패했다(2회 연속 거부).
+    #   **이름으로 Packet 을 먼저 찾는다** - 추측이 아니라 프롬프트가 그렇게
+    #   부르라고 시킨 이름이다.
+    for key in ("research_packet", "Research Packet", "researchPacket", "packet"):
+        v = obj.get(key)
+        if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
+            return v
+
     for v in obj.values():
         if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
             return v
@@ -278,6 +314,12 @@ def _supervisor_persona() -> str:
 
 
 def draft_packet(state: ResearchState, *, llm=None) -> dict:
+    symbol = state["symbol"]
+    # 시점 가드의 기준. state 에 없으면 지금이다 - Evidence 를 방금 모았으므로
+    # '지금' 이 곧 컷오프다(as_known_at = started 와 같은 뜻).
+    as_known = state.get("as_known_at") or datetime.now(timezone.utc)
+    if isinstance(as_known, str):
+        as_known = datetime.fromisoformat(as_known)
     evidence = dict(state["evidence"])
     # 가격 수치는 코드가 계산한 확정값 - qwen 이 +27% 급등을 하락으로 서술한
     # 실측 사고 재발 방지로, LLM 이 재계산하지 못하게 별도 블록으로 분리 주입
@@ -438,6 +480,19 @@ Evidence:
                       f'not allowed. If you meant that, write "{near}".')
             continue
         candidate["evidence_quality"] = eq
+
+        # ▶ 종목 정체성은 LLM 에게 묻지 않는다 (2026-08-03 사고)
+        #   005380(현대차)을 요청했는데 총괄이 symbol 을 "KOSPI" 로 쓰고 지수
+        #   서사를 만들었다. symbol 은 **우리가 인자로 넘긴 값**이다 - 코드가
+        #   아는 사실을 LLM 출력으로 받는 것 자체가 설계 오류였다.
+        #   다르게 썼다는 사실은 지우지 않고 남긴다(무엇이 어긋났는지 봐야 한다).
+        said = str(candidate.get("symbol", "")).strip()
+        if said != symbol:
+            candidate["_symbol_said"] = said
+            print(f"⚠ 총괄이 종목을 다르게 썼다: {said!r} -> {symbol} 로 정정",
+                  flush=True)
+        candidate["symbol"] = symbol
+
         packet = candidate
         break
     if packet is None:
@@ -448,7 +503,8 @@ Evidence:
     # 는 모델이 제안하는 미래 조건("성장률 10% 미달 시")이라 확정치에 없는 것이
     # 정상이다(실측 2026-08-01: 제안 임계값 오탐). 중첩 우회 방지로 해당 키들을
     # 통째로 직렬화한다.
-    from evidence.bundle import verify_narrative_numbers
+    from evidence.bundle import (verify_narrative_dates,
+                                 verify_narrative_numbers)
 
     narrative = json.dumps({k: packet.get(k) for k in
                             ("thesis", "facts", "interpretation")},
@@ -468,6 +524,19 @@ Evidence:
         if order.index(cur) > order.index("partial"):
             packet["evidence_quality"] = "partial"
             packet["numeric_check"]["downgraded_from"] = cur
+
+    # ▶ 결정론 가드 4: 시점 창작 (2026-08-03 사고)
+    #   005380 실행에서 총괄이 facts 4건을 **2023-11-02/03** 날짜로 썼다.
+    #   출처("연합뉴스", "코리아타임스")까지 달았는데 우리는 그런 기사를 준 적이
+    #   없다. 완전한 창작인데 **숫자 가드를 통과했다** - % 수치가 아니라 날짜라서다.
+    #   Evidence 가 담고 있는 시점 밖의 날짜를 사실 서술에 쓰면 창작으로 본다.
+    packet["date_check"] = verify_narrative_dates(narrative, as_known_at=as_known)
+    if not packet["date_check"].get("ok"):
+        order = ("insufficient_evidence", "partial", "sufficient")
+        cur = packet["evidence_quality"]
+        if order.index(cur) > order.index("partial"):
+            packet["evidence_quality"] = "partial"
+            packet["date_check"]["downgraded_from"] = cur
     return {"packet": packet}
 
 
@@ -689,6 +758,7 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
         json.dumps(packet, sort_keys=True, ensure_ascii=False,
                    default=str).encode()).hexdigest()
     nc = (packet or {}).get("numeric_check") or {}
+    dc = (packet or {}).get("date_check") or {}
     try:
         own = conn is None
         if own:
@@ -723,7 +793,10 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                  # 판정 스냅샷 - 사후 채점(packet_outcome_scorer)이 "이 분석가가
                  # 그때 뭐라고 했는지"를 여기서 읽는다. 없으면 되먹임 통계
                  # (analyst_calibration)가 통째로 비어 선순환이 끊긴다.
-                 json.dumps({"analyst_verdicts": analyst_verdicts or {}},
+                 # date_check 를 함께 남긴다 - 리포트에만 찍고 DB 에 없으면
+                 # "그때 시점 가드가 뭐라고 했나" 를 사후에 물을 수 없다.
+                 json.dumps({"analyst_verdicts": analyst_verdicts or {},
+                             "date_check": dc},
                             ensure_ascii=False)))
             run_id = str(cur.fetchone()[0])
         conn.commit()
@@ -812,6 +885,7 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
     (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
     nc = packet.get("numeric_check") or {}
+    dc = packet.get("date_check") or {}
     verdicts = packet.get("_analyst_verdicts") or {}
     lines = [
         "# 리서치본부 — Research Packet (결정론적 생성, LLM 자유 서술 아님)",
@@ -822,6 +896,10 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
         f"| **evidence_quality** | **{packet.get('evidence_quality')}** |",
         f"| **수치 재대조** | {'통과' if nc.get('ok') else '⚠ 불일치 ' + str(nc.get('unmatched', []) + nc.get('unmatched_counts', []))} "
         f"(% {nc.get('checked', 0)}건 / 셈단위 {nc.get('checked_counts', 0)}건) |",
+        # 시점 재대조를 리포트에 싣는다 - **표시 없는 가드는 없는 가드다**
+        # (2026-08-03: 가드가 돌고도 리포트·DB 어디에도 안 남아 못 봤다)
+        f"| **시점 재대조** | {'통과' if dc.get('ok', True) else '⚠ Evidence 창 밖 연도 ' + str(dc.get('too_old_years', []) + dc.get('future_years', []))}"
+        f" (창 {dc.get('window', '-')}) |",
         f"| **분석가 판정** | " + " · ".join(
             f"{k}={v}" for k, v in verdicts.items() if v) + " |",
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",

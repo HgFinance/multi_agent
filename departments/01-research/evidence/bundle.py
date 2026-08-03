@@ -185,6 +185,52 @@ def assemble_bundle(symbol: str, *, market_api: Optional[str] = None,
     }
 
 
+# ── 시점 창작 가드 - 숫자 가드가 못 잡는 날짜 (2026-08-03 사고) ────────────
+
+# YYYY-MM-DD / YYYY년 M월 / YYYY.MM.DD 를 잡는다. 연도 없는 "11월 3일" 은
+# 잡지 않는다 - 어느 해인지 모르는 것을 창작이라 단정할 수 없다.
+_DATE_RE = re.compile(r"(19|20)(\d{2})\s*[-./년]")
+
+# Evidence 가 담는 시점보다 얼마나 과거까지를 정상으로 볼 것인가.
+# 재무는 직전 회계연도를 인용하고 GPR 은 지연이 있어 넉넉히 잡는다 - 좁게 잡으면
+# 정상 인용을 창작으로 오탐하고, 그러면 가드가 무시된다.
+MAX_NARRATIVE_AGE_DAYS = 800
+
+
+def verify_narrative_dates(text: str, *, as_known_at: datetime,
+                           max_age_days: int = MAX_NARRATIVE_AGE_DAYS) -> dict:
+    """서술 속 연도가 Evidence 가 담을 수 있는 시점 범위 안인가.
+
+    ▶ 왜 필요한가 (실측 2026-08-03)
+      총괄이 005380 Packet 의 facts 4건을 **2023-11-02/03** 날짜로 쓰고 출처까지
+      달았다. 우리가 준 적 없는 기사다. 그런데 verify_narrative_numbers 를
+      통과했다 - % 수치가 아니라 날짜라서 검사 대상이 아니었다.
+
+    ▶ 판정
+      미래(as_known_at 이후) 연도  -> 창작. 아직 오지 않은 일을 사실로 쓸 수 없다
+      max_age_days 보다 과거       -> 창작 의심. Evidence 창 밖이다
+      **모르는 것을 단정하지 않는다** - 연도 없는 날짜 표현은 판정하지 않는다.
+    """
+    now = as_known_at.astimezone(timezone.utc)
+    oldest = now - timedelta(days=max_age_days)
+    bad_future, bad_old = [], []
+    for m in _DATE_RE.finditer(text or ""):
+        year = int(m.group(1) + m.group(2))
+        if year > now.year:
+            bad_future.append(year)
+        elif year < oldest.year:
+            bad_old.append(year)
+    ok = not bad_future and not bad_old
+    return {
+        "ok": ok,
+        "future_years": sorted(set(bad_future)),
+        "too_old_years": sorted(set(bad_old)),
+        "window": f"{oldest.year}~{now.year}",
+        "rule": (f"서술의 연도는 as_known_at({now.date()}) 이하이고 "
+                 f"{max_age_days}일 이내여야 한다. 연도 없는 표현은 판정하지 않는다."),
+    }
+
+
 # ── 인용 해석 - ref -> 진짜 Evidence ID (RQF-1 완료기준) ──────────────────
 
 class CitationError(ValueError):
@@ -431,6 +477,30 @@ def _check_citation_resolution():
     print("  인용 해석·미승인 차단    OK")
 
 
+def _check_date_guard():
+    """시점 창작 - 숫자 가드가 못 잡던 것 (2026-08-03 사고 재현)."""
+    now = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    # 실제 사고 문장 그대로
+    bad = ("KOSPI closed at 2,485.30 on 2023-11-03, following a drop on 2023-11-02.")
+    r = verify_narrative_dates(bad, as_known_at=now)
+    assert r["ok"] is False and r["too_old_years"] == [2023], r
+
+    # 미래 연도도 창작이다
+    f = verify_narrative_dates("2027년 실적이 개선됐다", as_known_at=now)
+    assert f["ok"] is False and f["future_years"] == [2027], f
+
+    # 정상 인용은 통과한다 - 직전 회계연도를 쓰는 것은 펀더멘털의 정상 동작
+    for good in ("2025-12-31 기준 매출액", "2026년 8월 공시", "2026.07.27 GPR 지수"):
+        assert verify_narrative_dates(good, as_known_at=now)["ok"], good
+
+    # **모르는 것을 단정하지 않는다** - 연도 없는 표현은 판정 대상이 아니다
+    assert verify_narrative_dates("11월 3일 급등", as_known_at=now)["ok"]
+    # 가격·수량은 연도가 아니다 (오탐하면 가드가 무시된다)
+    assert verify_narrative_dates("종가 1,718,000원 거래량 2,400주",
+                                  as_known_at=now)["ok"]
+    print("  시점 창작 가드           OK")
+
+
 def _check_narrative_numbers():
     """서술 수치 재대조 - 창작 수치는 잡고, 확정치 인용·절대값 표기는 통과."""
     confirmed = {"price_context": {"change_1d_pct": 29.95, "return_5d_pct": -2.33,
@@ -468,5 +538,6 @@ if __name__ == "__main__":
     _check_api_unavailable()
     _check_bundle_contract()
     _check_citation_resolution()
+    _check_date_guard()
     _check_narrative_numbers()
-    print("Evidence Bundle 7개 영역 통과.")
+    print("Evidence Bundle 8개 영역 통과.")
