@@ -146,6 +146,32 @@ METHODS: tuple[Method, ...] = (
                        "0 이나 임의값으로 채우지 않고 None(판정 불가)을 낸다.",
     ),
     Method(
+        key="corwin_schultz_spread",
+        name="Corwin-Schultz 고저가 유효 스프레드",
+        analyst="RES-03",
+        citation="Corwin, S. & Schultz, P. (2012). A Simple Way to Estimate "
+                 "Bid-Ask Spreads from Daily High and Low Prices. "
+                 "Journal of Finance 67(2).",
+        status=STATUS_ADOPTED,
+        module="evidence/liquidity.py:corwin_schultz",
+        inputs=("일중 고가", "일중 저가"),
+        partial_reason="Roll 이 추세장에서 통째로 미확인이 되는 것을 보완한다 - "
+                       "가정이 다른 두 추정치를 함께 본다. 음수 추정은 0 으로 "
+                       "절사하지 않는다(절사하면 잡음이 한쪽으로만 쌓인다).",
+    ),
+    Method(
+        key="kyle_lambda_proxy",
+        name="Kyle 람다 대용 (거래량당 가격충격)",
+        analyst="RES-03",
+        citation="Kyle, A. (1985). Continuous Auctions and Insider Trading. "
+                 "Econometrica 53(6).",
+        status=STATUS_ADOPTED,
+        module="evidence/liquidity.py:kyle_lambda",
+        inputs=("연속 종가", "거래량"),
+        partial_reason="원 모형은 부호 있는 주문흐름이 필요한데 일봉만 있어 "
+                       "수익률 크기를 대용으로 쓴다 - proxy 임을 지우지 않는다.",
+    ),
+    Method(
         key="vpin_toxicity",
         name="VPIN (주문흐름 독성)",
         analyst="RES-03",

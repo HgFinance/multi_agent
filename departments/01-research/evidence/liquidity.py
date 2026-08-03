@@ -118,6 +118,90 @@ def roll_spread(closes, *, window: int = WINDOW,
     return out
 
 
+
+def corwin_schultz(highs, lows, *, window: int = WINDOW,
+                   min_days: int = 3) -> Optional[dict]:
+    """Corwin-Schultz (2012) 고가-저가 기반 유효 스프레드 추정.
+
+    ▶ 왜 Roll 만으로 부족한가
+      Roll 은 종가 자기공분산이 **음수일 때만** 정의된다 - 추세장에서 양수가
+      나오면 통째로 미확인이다. 실측에서 RES-03 이 스프레드를 못 말하는 날이
+      잦았던 이유다. Corwin-Schultz 는 일중 고가·저가만 쓰므로 추세와 무관하게
+      나온다. 서로 다른 가정의 두 추정치가 있으면 한쪽이 죽어도 판정이 산다.
+
+    beta  = 이틀치 (ln(H/L))^2 합
+    gamma = 이틀 통합 고가/저가의 (ln(H/L))^2
+    alpha = (sqrt(2*beta) - sqrt(beta)) / (3 - 2*sqrt(2)) - sqrt(gamma/(3-2*sqrt(2)))
+    S     = 2*(exp(alpha)-1) / (1+exp(alpha))
+
+    **음수 추정은 0 으로 절사하지 않고 그대로 센다.** 절사하면 추정 잡음이
+    한쪽으로만 쌓여 스프레드가 실제보다 넓어 보인다 - 원논문도 음수 관측을
+    기간 평균에 그대로 넣는 쪽을 권한다.
+    """
+    pairs = [(h, l) for h, l in zip(highs or [], lows or [])
+             if h is not None and l is not None and h > 0 and l > 0 and h >= l]
+    if len(pairs) < min_days + 1:
+        return None
+    pairs = pairs[-(window + 1):]
+    k = 3.0 - 2.0 * math.sqrt(2.0)
+    vals = []
+    for i in range(1, len(pairs)):
+        (h1, l1), (h2, l2) = pairs[i - 1], pairs[i]
+        beta = math.log(h1 / l1) ** 2 + math.log(h2 / l2) ** 2
+        gamma = math.log(max(h1, h2) / min(l1, l2)) ** 2
+        try:
+            alpha = ((math.sqrt(2.0 * beta) - math.sqrt(beta)) / k
+                     - math.sqrt(gamma / k))
+            s = 2.0 * (math.exp(alpha) - 1.0) / (1.0 + math.exp(alpha))
+        except (ValueError, OverflowError):
+            continue
+        vals.append(s)
+    if not vals:
+        return None
+    return {"spread_pct": round(sum(vals) / len(vals) * 100.0, 4),
+            "days_used": len(vals),
+            "negative_days": sum(1 for v in vals if v < 0)}
+
+
+def kyle_lambda(closes, volumes, *, window: int = WINDOW,
+                min_days: int = 5) -> Optional[dict]:
+    """Kyle 람다 대용 - 거래량 1단위당 가격 충격.
+
+    원 모형은 **부호 있는** 주문흐름이 필요한데 우리는 일봉만 있으므로
+    수익률 부호를 매수·매도 압력의 대용으로 쓴다(Amihud 와 같은 계열의 타협).
+    proxy 임을 지우지 않는다 - 원 람다로 읽히면 안 된다.
+
+    회귀 대신 |r| / sqrt(V) 의 중앙값을 쓴다. 소표본 회귀는 하루의 이상치가
+    기울기를 통째로 끌고, 우리는 60봉 안팎만 본다.
+    """
+    pairs = [(c, v) for c, v in zip(closes or [], volumes or [])
+             if c is not None and v is not None and c > 0 and v > 0]
+    if len(pairs) < min_days + 1:
+        return None
+    pairs = pairs[-(window + 1):]
+    impacts = []
+    for i in range(1, len(pairs)):
+        c0, _ = pairs[i - 1]
+        c1, v1 = pairs[i]
+        r = abs(c1 / c0 - 1.0)
+        impacts.append(r / math.sqrt(v1))
+    if not impacts:
+        return None
+    impacts.sort()
+    m = len(impacts)
+    med = (impacts[m // 2] if m % 2 else (impacts[m // 2 - 1] + impacts[m // 2]) / 2)
+    return {"lambda_proxy": round(med * 1e6, 4), "days_used": m,
+            "scale": "x1e6, |수익률|/sqrt(거래량)", "is_proxy": True}
+
+
+def _num(v):
+    """숫자로 못 읽으면 None. **0 으로 대체하지 않는다.**"""
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_liquidity(bars, *, window: int = WINDOW) -> dict:
     """market-api /bars 행 목록 -> 두 지표. 정렬·중복은 여기서 정리한다.
 
@@ -134,6 +218,10 @@ def compute_liquidity(bars, *, window: int = WINDOW) -> dict:
     closes = [float(b["close"]) for b in rows]
     notionals = [b.get("notional") for b in rows]
     has_notional = any(v is not None for v in notionals)
+    # 없는 필드는 None 으로 남긴다 - 0 으로 채우면 "못 구했다" 가 사라진다
+    highs = [_num(b.get("high")) for b in rows]
+    lows = [_num(b.get("low")) for b in rows]
+    volumes = [_num(b.get("volume")) for b in rows]
 
     return {
         "bars_used": len(rows),
@@ -141,7 +229,12 @@ def compute_liquidity(bars, *, window: int = WINDOW) -> dict:
         "amihud": (amihud_illiquidity(closes, notionals, window=window)
                    if has_notional else None),
         "roll": roll_spread(closes, window=window),
-        "method_keys": ("amihud_illiquidity", "roll_effective_spread"),
+        # ▶ Roll 은 종가 자기공분산이 음수일 때만 정의된다 - 추세장에서 통째로
+        #   미확인이 된다. 가정이 다른 두 번째 추정치를 함께 둔다.
+        "corwin_schultz": corwin_schultz(highs, lows, window=window),
+        "kyle_lambda": kyle_lambda(closes, volumes, window=window),
+        "method_keys": ("amihud_illiquidity", "roll_effective_spread",
+                        "corwin_schultz_spread", "kyle_lambda_proxy"),
     }
 
 
@@ -217,21 +310,63 @@ def _check_compute_from_bars():
     print("  bars -> 지표 조립        OK")
 
 
+def _check_second_estimator_survives_roll_failure():
+    """**Roll 이 죽는 날 스프레드 판정이 살아남는가.**
+
+    Roll 은 종가 자기공분산이 음수일 때만 정의된다 - 추세·진동장에서 양수가
+    나오면 통째로 미확인이고, 그런 날 RES-03 은 스프레드를 아예 못 말했다.
+    가정이 다른 두 번째 추정치를 둔 이유가 이것이므로, 그 상황을 픽스처로
+    고정한다. Roll 이 살아 있는 픽스처만 쓰면 이 검사는 아무것도 안 지킨다.
+    """
+    bars = []
+    for i in range(40):
+        c = 100.0 + 5 * math.sin(i / 4.0)
+        bars.append({"bucket_time": f"2026-06-{i + 1:02d}", "close": c,
+                     "high": c * 1.012, "low": c * 0.988,
+                     "volume": 1e5 + i * 500, "notional": c * 1e5})
+    bars.reverse()                                  # API 는 최신순으로 준다
+    r = compute_liquidity(bars)
+    assert r["roll"]["model_holds"] is False, "픽스처가 Roll 을 죽이지 못했다"
+    assert r["roll"]["spread"] is None
+    cs = r["corwin_schultz"]
+    assert cs and cs["spread_pct"] > 0, cs
+    assert cs["days_used"] >= 20, cs
+    # 음수 추정을 절사하지 않았다는 사실이 드러나야 한다 - 절사하면 잡음이
+    # 한쪽으로만 쌓여 스프레드가 실제보다 넓어 보인다
+    assert "negative_days" in cs, cs
+    kl = r["kyle_lambda"]
+    assert kl and kl["lambda_proxy"] > 0 and kl["is_proxy"] is True, kl
+
+
+def _check_missing_fields_are_none_not_zero():
+    """고가·저가·거래량이 없으면 **미확인**이다. 0 으로 채우지 않는다."""
+    bars = [{"bucket_time": f"2026-06-{i + 1:02d}", "close": 100.0 + i}
+            for i in range(30)]
+    r = compute_liquidity(bars)
+    assert r["corwin_schultz"] is None, r["corwin_schultz"]
+    assert r["kyle_lambda"] is None, r["kyle_lambda"]
+    assert r["amihud"] is None, "notional 없이 Amihud 가 나왔다"
+
+
 def _check_registry_contract():
     """레지스트리가 이 파일을 가리키고, 그 함수가 실재하는가."""
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
     from methods import METHODS
 
     m = {x.key: x for x in METHODS}
-    for key, func in (("amihud_illiquidity", amihud_illiquidity),
-                      ("roll_effective_spread", roll_spread)):
+    # ▶ **compute_liquidity 가 실제로 내는 method_keys 를 순회한다.** 예전엔
+    #   키 2개를 하드코딩해서 지표를 새로 붙여도 검사가 그냥 통과했다 -
+    #   호출하는데 레지스트리엔 없는 상태(F-Score 결함의 거울상)를 못 잡았다.
+    #   목록을 코드에서 가져오면 드리프트가 불가능하다.
+    declared = compute_liquidity([])["method_keys"]
+    assert set(declared) >= {"amihud_illiquidity", "roll_effective_spread"}, declared
+    for key in declared:
         assert key in m, f"{key} 가 레지스트리에 없다"
         assert m[key].status == "ADOPTED", key
         path, _, name = (m[key].module or "").partition(":")
         assert path == "evidence/liquidity.py", (key, path)
         assert name and name in globals(), \
             f"{key}: 레지스트리가 가리키는 함수 {name!r} 가 이 파일에 없다"
-        assert callable(func)
     print("  레지스트리 계약 일치     OK")
 
 
@@ -243,5 +378,9 @@ if __name__ == "__main__":
     _check_amihud_math()
     _check_roll_model_limit()
     _check_compute_from_bars()
+    _check_second_estimator_survives_roll_failure()
+    print("  Roll 실패시 2차 추정      OK")
+    _check_missing_fields_are_none_not_zero()
+    print("  결측=미확인(0 아님)      OK")
     _check_registry_contract()
-    print("유동성 지표 4개 영역 통과.")
+    print("유동성 지표 6개 영역 통과.")
