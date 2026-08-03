@@ -167,8 +167,7 @@ def notion_report(state: HRState, *, uploader=None) -> dict:
     evaluation = evaluation_metrics(out, report_md)
     upload = uploader or upload_candidate
     try:
-        notion_upload = upload(state["candidate"], state["events"], report_md=report_md,
-                               report_path=_report_path(state["candidate"].candidate_id))
+        notion_upload = upload(state["candidate"], state["events"], report_md=report_md)
     except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] = evaluation.get("fallback_count", 0) + 1
@@ -304,8 +303,8 @@ def _check_narrate_schema_guard():
 def _check_notion_report_node():
     captured = {}
 
-    def stub_uploader(candidate, events, *, report_md="", report_path=""):
-        captured["candidate"], captured["report_md"], captured["report_path"] = candidate, report_md, report_path
+    def stub_uploader(candidate, events, *, report_md=""):
+        captured["candidate"], captured["report_md"] = candidate, report_md
         return {"ok": True, "url": "https://notion.so/fake"}
 
     c = ImprovementCandidate(**_demo_candidate_input(candidate_id="ic-5"))
@@ -314,7 +313,6 @@ def _check_notion_report_node():
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["candidate"].candidate_id == "ic-5"
-    assert captured["report_path"] == "departments/07-agent-workforce/reports/hr_candidate_ic-5.md"
     print("  Notion Reporter 노드          OK")
 
 
@@ -322,7 +320,7 @@ def _check_full_pipeline_invoke():
     called = []
     fake_chat = lambda persona, task: called.append("narrate") or json.dumps(
         {"narrative": "citation-checker Profile 개선을 제안합니다.", "escalate": False})
-    fake_uploader = lambda candidate, events, *, report_md="", report_path="": called.append("notion") or {
+    fake_uploader = lambda candidate, events, *, report_md="": called.append("notion") or {
         "ok": False, "reason": "self-check stub"}
 
     global narrate, notion_report

@@ -29,12 +29,12 @@ improvements/candidate.py의 ImprovementCandidate를 이 스키마에 맞춰 올
     없다(그건 워크포스 채용 우선순위 개념이고, F19는 기존 Agent 개선 후보라 다른 개념).
 
 2026-08-03 2차 수정: 리포트 전문을 "원본 리포트" 속성(rich_text)에 통째로 넣고 있었다.
-Notion 설계서 3절이 이미 "원본 리포트 | URL 또는 Rich Text | departments/<n>/reports/
-<파일명>.md 경로. Notion 페이지 본문에 전체 리포트를 복사하지 않는다"라고 정해뒀는데
-그걸 어긴 것이었다 - 이제 그 속성에는 로컬 파일 경로만 넣고, 리포트 전문은 실제 Notion
-페이지 본문(children 블록)에 올린다. 표는 Notion table 블록으로, 나머지는 heading/quote/
-bulleted_list_item/paragraph로 대략 옮긴다(완전한 Markdown 렌더러는 아니다 - **, ` 같은
-인라인 마크업은 지운다. 표·목록·제목 구조만 유지한다).
+Notion 설계서 3절이 이미 "Notion 페이지 본문에 전체 리포트를 복사하지 않는다"라고
+정해뒀는데 그걸 어긴 것이었다. 처음엔 이 파일 안에 직접 Markdown->블록 변환기를 만들어
+"원본 리포트" 속성에 경로만 넣는 방식으로 고쳤는데, 그 사이 Risk/QA/Trading이 공용
+departments/notion_markdown.py(markdown_to_notion_blocks)로 먼저 수렴해 있었다 - 그
+패턴을 그대로 따른다: "원본 리포트" 속성 자체를 보내지 않고, 로컬 리포트 경로를 페이지
+본문 첫 줄에 적은 뒤 나머지 리포트 전문을 이어 붙인다(risk/notion_reporter.py와 동일).
 
 자격증명은 root .env가 아니라 ai-office/.dev.vars에서 읽는다(Risk/QA와 동일 근거).
 
@@ -51,7 +51,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from reporting import notion_rich_text_chunks
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from departments.notion_markdown import markdown_to_notion_blocks  # noqa: E402
+
+from reporting import notion_rich_text_chunks  # noqa: E402
 
 _IMPROVEMENTS_DIR = Path(__file__).resolve().parent / "improvements"
 if str(_IMPROVEMENTS_DIR) not in sys.path:
@@ -103,85 +108,18 @@ def _rich_text(s) -> dict:
     return {"rich_text": notion_rich_text_chunks(s)}
 
 
-def _clean_inline(text: str) -> str:
-    """인라인 마크업(**bold**, `code`)을 지운다 - 완전한 렌더링이 아니라 문자 그대로
-    남는 것보다 낫다는 절충이다."""
-    return text.replace("**", "").replace("`", "")
-
-
-def _rich_block(block_type: str, text: str) -> dict:
-    return {"object": "block", "type": block_type,
-            block_type: {"rich_text": notion_rich_text_chunks(_clean_inline(text))}}
-
-
-def _table_block(table_lines: list[str]) -> dict:
-    """`| a | b |` 연속 줄을 Notion table 블록으로 변환한다. 구분선(|---|---|)은 건너뛴다."""
-    rows = []
-    for line in table_lines:
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if all(set(c) <= set("-: ") for c in cells):
-            continue  # 헤더 구분선
-        rows.append(cells)
-    if not rows:
-        return _rich_block("paragraph", " ".join(table_lines))
-    width = max(len(r) for r in rows)
-    table_rows = [
-        {"object": "block", "type": "table_row",
-         "table_row": {"cells": [notion_rich_text_chunks(_clean_inline(c)) for c in (r + [""] * (width - len(r)))]}}
-        for r in rows
-    ][:100]  # Notion 한 테이블당 자식 100개 제한
-    return {"object": "block", "type": "table",
-            "table": {"table_width": width, "has_column_header": True, "has_row_header": False,
-                      "children": table_rows}}
-
-
-def _markdown_to_blocks(markdown: str) -> list[dict]:
-    """리포트 Markdown을 Notion 페이지 본문 블록으로 옮긴다.
-
-    완전한 Markdown 렌더러가 아니다 - 표(table)/제목(heading)/구분선(divider)/
-    인용(quote)/목록(bulleted_list_item)만 구조로 인식하고 나머지는 문단(paragraph)이다.
-    """
-    blocks: list[dict] = []
-    lines = markdown.split("\n")
-    i = 0
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if not stripped:
-            i += 1
-            continue
-        if stripped.startswith("### "):
-            blocks.append(_rich_block("heading_3", stripped[4:]))
-        elif stripped.startswith("## "):
-            blocks.append(_rich_block("heading_2", stripped[3:]))
-        elif stripped.startswith("# "):
-            blocks.append(_rich_block("heading_1", stripped[2:]))
-        elif stripped == "---":
-            blocks.append({"object": "block", "type": "divider", "divider": {}})
-        elif stripped.startswith("> "):
-            blocks.append(_rich_block("quote", stripped[2:]))
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            blocks.append(_rich_block("bulleted_list_item", stripped[2:]))
-        elif stripped.startswith("|") and stripped.endswith("|"):
-            table_lines = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                table_lines.append(lines[i])
-                i += 1
-            blocks.append(_table_block(table_lines))
-            continue  # i 는 위 while 에서 이미 진행됨
-        else:
-            blocks.append(_rich_block("paragraph", stripped))
-        i += 1
-    return blocks[:100]  # Notion 페이지 생성 요청 한 번에 children 100개 제한
+def _report_path(candidate_id: str) -> Path:
+    return Path(__file__).resolve().parent / "reports" / f"hr_candidate_{candidate_id}.md"
 
 
 def upload_candidate(
     candidate: "ImprovementCandidate", events: list["CandidateEvent"],
-    *, report_md: str = "", report_path: str = "", env: dict | None = None,
+    *, report_md: str = "", env: dict | None = None,
 ) -> dict:
     """candidate(+전이 Event 이력)를 Notion HR DB에 1건 업로드한다. 절대 예외를 던지지 않는다.
 
-    report_md는 페이지 본문(children 블록)으로, report_path(로컬 리포트 파일 경로)는
-    "원본 리포트" 속성으로 들어간다 - 전문을 속성에 복제하지 않는다(설계서 3절).
+    report_md는 페이지 본문(children 블록)으로만 올라간다 - "원본 리포트" 같은 속성에
+    전문을 복제하지 않는다(설계서 3절, risk/notion_reporter.py와 동일 패턴).
     """
     env = env if env is not None else _load_dev_vars()
     token, db_id = env.get("NOTION_TOKEN"), env.get("NOTION_HR_DB")
@@ -197,16 +135,17 @@ def upload_candidate(
         "CEO 승인": {"checkbox": ceo_approved},
         "IAM 생성": {"checkbox": False},  # F19는 Identity를 만들지 않는다 - lifecycle/access.py 소관
         "서술": _rich_text(candidate.expected_effect),
-        "원본 리포트": _rich_text(report_path),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
     }
-    body = {"parent": {"database_id": db_id}, "properties": props}
-    if report_md:
-        body["children"] = _markdown_to_blocks(report_md)
 
     try:
-        status, resp = _post("pages", body, token)
-    except Exception as e:  # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다
+        payload = {"parent": {"database_id": db_id}, "properties": props}
+        if report_md:
+            report_path = _report_path(candidate.candidate_id)
+            report_intro = f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
+            payload["children"] = markdown_to_notion_blocks(report_intro)
+        status, resp = _post("pages", payload, token)
+    except Exception as e:  # noqa: BLE001 - Notion은 바인딩 판정을 못 바꾸는 Projection이다.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
     if status == 200:
         return {"ok": True, "url": resp.get("url")}
@@ -258,9 +197,8 @@ def _check_payload_shape():
         events = [CandidateEvent(candidate_id="ic-1", sequence=1, from_status=CandidateStatus.PENDING_APPROVAL,
                                   to_status=CandidateStatus.APPROVED, actor="ceo-office-hermes", reason="ok",
                                   occurred_at=now, qa_eval_run_id="eval-1")]
-        report_path = "departments/07-agent-workforce/reports/hr_candidate_ic-1.md"
         report_md = "# 제목\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- 항목 1\n"
-        result = upload_candidate(c, events, report_md=report_md, report_path=report_path,
+        result = upload_candidate(c, events, report_md=report_md,
                                   env={"NOTION_TOKEN": "tok", "NOTION_HR_DB": "db1"})
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         props = captured["body"]["properties"]
@@ -270,36 +208,18 @@ def _check_payload_shape():
         assert props["CEO 승인"]["checkbox"] is True
         assert props["IAM 생성"]["checkbox"] is False
         assert "담당자" not in props and "hiring_priority_tier" not in props
-        # 리포트 전문이 아니라 경로만 속성에 들어간다 (설계서 3절).
-        assert props["원본 리포트"]["rich_text"][0]["text"]["content"] == report_path
-        assert "# 제목" not in json.dumps(props), "리포트 전문이 속성에 복제됐다"
-        # 리포트 전문은 페이지 본문(children)으로 간다.
+        assert "원본 리포트" not in props, "전문을 속성에 복제하지 않는다 - 아예 안 보낸다"
+        # 리포트 전문은 페이지 본문(children)으로 간다. 경로는 본문 첫 줄에 적힌다.
         children = captured["body"]["children"]
         assert any(b["type"] == "heading_1" for b in children)
         assert any(b["type"] == "table" for b in children)
         assert any(b["type"] == "bulleted_list_item" for b in children)
+        first_paragraph = next(b for b in children if b["type"] == "paragraph")
+        first_text = "".join(t["text"]["content"] for t in first_paragraph["paragraph"]["rich_text"])
+        assert "hr_candidate_ic-1.md" in first_text
     finally:
         globals()["_post"] = orig
     print("  업로드 Payload 구성        OK")
-
-
-def _check_markdown_to_blocks():
-    md = (
-        "# 제목\n\n## 소제목\n\n일반 문단입니다.\n\n"
-        "| 항목 | 값 |\n|---|---|\n| a | 1 |\n| b | 2 |\n\n"
-        "- 목록 1\n- 목록 2\n\n> 인용문\n\n---\n"
-    )
-    blocks = _markdown_to_blocks(md)
-    types = [b["type"] for b in blocks]
-    assert types == [
-        "heading_1", "heading_2", "paragraph", "table",
-        "bulleted_list_item", "bulleted_list_item", "quote", "divider",
-    ], types
-    table = next(b for b in blocks if b["type"] == "table")
-    assert table["table"]["table_width"] == 2
-    # 구분선(|---|---|)은 데이터 행으로 안 들어간다 - 표는 헤더 1행 + 데이터 2행 = 3행.
-    assert len(table["table"]["children"]) == 3
-    print("  Markdown -> Notion 블록 변환   OK")
 
 
 def _check_qa_and_ceo_flags_reflect_evidence():
@@ -335,5 +255,4 @@ if __name__ == "__main__":
     _check_missing_config_skips_without_network()
     _check_payload_shape()
     _check_qa_and_ceo_flags_reflect_evidence()
-    _check_markdown_to_blocks()
-    print("notion_reporter 4개 영역 통과")
+    print("notion_reporter 3개 영역 통과")
