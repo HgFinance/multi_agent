@@ -535,6 +535,79 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
+  # ── CEO Office·Agent Workforce 인사팀 (영주 소유) ───────────────────────────
+  # 근거: DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.1·6.8절
+  # departments/00-ceo-office/Dockerfile, departments/07-agent-workforce/Dockerfile 참고.
+  #
+  # ▶ redis 미의존 - 위 risk-api/audit-api와 달리 governance-api/workforce-api는 아직
+  #   Redis Event Stream을 쓰지 않는다(Mandate/Report/Notification, Access/Improvements/
+  #   Scorecard 전부 Postgres psycopg2로만 다룬다 - depends_on: redis 넣지 않는다).
+  governance-api:
+    build:
+      context: departments/00-ceo-office
+    container_name: hedgefund-governance-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:8043:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api/audit-api와 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  workforce-api:
+    build:
+      context: departments/07-agent-workforce
+    container_name: hedgefund-workforce-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # ceo-hermes / workforce-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는
+  # Backend Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는
+  # CLAUDE.md 배정표대로 ceo는 ANTHROPIC_API_KEY, hr은 OPENAI_API_KEY만 준다.
+  # 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의 매핑("ceo-agent",
+  # "hr-department")과 일치해야 한다 - 다른 부서(예: research-department)와 달리
+  # CEO/HR은 CLI 명령 이름과 프로필 이름이 같다.
+  ceo-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-ceo-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
+  workforce-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-workforce-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-hr-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
   # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
   #
   # ▶ **기본 기동에서 제외했다**(profiles: [dashboard]). 실측 2026-08-02:

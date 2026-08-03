@@ -85,19 +85,58 @@ class Approval:
     reason: str
 
 
-class ImprovementWorkflow:
-    """개선 후보 상태 머신. Event Ledger 는 in-memory (후속 마이그레이션에서 DB로)."""
+class ImprovementRepository:
+    """Event Ledger 조회·저장 인터페이스. 실제 구현은 workforce.improvement_candidate_events에
+    반영한다(append-only - DB 트리거로도 강제된다). candidate 저장은 워크플로 밖에서
+    api/app.py가 직접 호출한다(여기 인터페이스는 sequence/event만 다룬다)."""
 
+    def next_sequence(self, candidate_id: str) -> int:
+        raise NotImplementedError
+
+    def append_event(self, event: CandidateEvent) -> None:
+        raise NotImplementedError
+
+    def events_for(self, candidate_id: str) -> list[CandidateEvent]:
+        raise NotImplementedError
+
+
+class InMemoryImprovementRepository(ImprovementRepository):
     def __init__(self) -> None:
         self._events: list[CandidateEvent] = []
+        # candidate 저장은 ImprovementRepository 인터페이스 밖(PostgresImprovementRepository와
+        # 대칭을 맞추려고 여기 추가) - api/app.py가 candidate CRUD에 쓴다.
+        self._candidates: dict[str, ImprovementCandidate] = {}
 
-    # --- 조회 ---
+    def next_sequence(self, candidate_id: str) -> int:
+        return len(self.events_for(candidate_id)) + 1
+
+    def append_event(self, event: CandidateEvent) -> None:
+        self._events.append(event)
 
     def events_for(self, candidate_id: str) -> list[CandidateEvent]:
         return [e for e in self._events if e.candidate_id == candidate_id]
 
+    def get_candidate(self, candidate_id: str) -> ImprovementCandidate | None:
+        return self._candidates.get(candidate_id)
+
+    def save_candidate(self, candidate: ImprovementCandidate) -> None:
+        self._candidates[candidate.candidate_id] = candidate
+
+
+class ImprovementWorkflow:
+    """개선 후보 상태 머신. Event Ledger 저장소는 주입받는다(기본 in-memory,
+    api/app.py가 DATABASE_URL이 있으면 Postgres 구현을 주입한다)."""
+
+    def __init__(self, repo: ImprovementRepository | None = None) -> None:
+        self._repo = repo if repo is not None else InMemoryImprovementRepository()
+
+    # --- 조회 ---
+
+    def events_for(self, candidate_id: str) -> list[CandidateEvent]:
+        return self._repo.events_for(candidate_id)
+
     def _next_sequence(self, candidate_id: str) -> int:
-        return len(self.events_for(candidate_id)) + 1
+        return self._repo.next_sequence(candidate_id)
 
     # --- 전이 ---
 
@@ -149,7 +188,7 @@ class ImprovementWorkflow:
             occurred_at=at,
             qa_eval_run_id=qa_eval_run_id,
         )
-        self._events.append(event)
+        self._repo.append_event(event)
 
         return candidate.model_copy(update={"status": to_status})
 
