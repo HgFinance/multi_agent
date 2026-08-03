@@ -192,7 +192,11 @@ def bars(
         params.append(to)
     params.append(limit)
     return _query(f"""
-        select bucket_time, open, high, low, close, volume, source, is_final
+        -- notional 추가(2026-08-03): 적재는 되는데 SELECT 에 없어서
+        -- evidence/liquidity.py 의 Amihud 비유동성이 **영구 None** 이었다.
+        -- 레지스트리에는 ADOPTED 로 등재돼 있는데 값이 안 나오던 상태.
+        select bucket_time, open, high, low, close, volume, notional,
+               source, is_final
         from market.market_bars
         where instrument_id = %s and interval_code = %s{cond}
         order by bucket_time desc limit %s

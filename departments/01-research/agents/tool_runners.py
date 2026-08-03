@@ -183,7 +183,9 @@ def macro_series(code: str, days: int = 90, *, run_mode: str = "LIVE",
                  get: Callable | None = None) -> ToolResult:
     """거시·스타일 지수 관측치(PIT). 두 번째 계열이 동의하는지 확인용."""
     _guard("research-api", "/macro/observations", run_mode)
-    rows = _get(f"{RESEARCH_API}/macro/observations?code={code}&days={days}",
+    rows = _get(# ?code= 는 422 다 - API 는 codes= 를 받는다(실측 2026-08-03:
+    # RES-09 의 유일한 도구가 매번 실패하고 있었다)
+    f"{RESEARCH_API}/macro/observations?codes={code}&days={days}",
                 persona, get) or []
     vals = [v for v in (_num(r.get("value")) for r in rows) if v is not None]
     if not vals:
@@ -270,7 +272,9 @@ def micro_history(symbol: str, date: str = "", *, run_mode: str = "LIVE",
                   get: Callable | None = None) -> ToolResult:
     """과거 세션 미시구조. 오늘이 얼마나 이례적인지 말하기 위해 쓴다."""
     _guard("market-api", "/microstructure/{symbol}", run_mode)
-    q = f"?date={date}" if date else ""
+    # ?date= 는 무시된다 - API 는 trade_date= 를 받는다.
+    # 그래서 "과거 세션 비교" 가 매번 오늘 자신과의 비교였다.
+    q = f"?trade_date={date}" if date else ""
     r = _get(f"{MARKET_API}/microstructure/{symbol}{q}", "microstructure-analyst", get)
     if not r:
         return ToolResult(tool="micro_history", ok=False,

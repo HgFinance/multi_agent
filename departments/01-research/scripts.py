@@ -484,6 +484,10 @@ def draft_packet(state: ResearchState, *, llm=None) -> dict:
         "market_regime": state.get("regime") or {"status": "NOT_RUN"},
         "geopolitical": state.get("geopolitical") or {"status": "NOT_RUN"},
         "microstructure": state.get("microstructure") or {"status": "NOT_RUN"},
+        # ▶ 감성이 확정치 풀에서 빠져 있었다 (2026-08-03 실측)
+        #   6인 중 5인만 넣어서 RES-06 의 articles_used·score 를 인용하면
+        #   창작으로 몰렸다 - 실측 불일치 [200, 127] 이 정확히 이것이다.
+        "sentiment": state.get("sentiment") or {"status": "NOT_RUN"},
     }
 
     # 프롬프트에는 압축 다이제스트만 - 실측: 원자료(중첩 dict)를 통째로 주면
