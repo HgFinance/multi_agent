@@ -186,6 +186,32 @@ def analyze_microstructure(state: ResearchState) -> dict:
                                "note": _norm_note(r.get("note"))}}
 
 
+PACKET_REQUIRED_KEYS = ("symbol", "thesis", "facts", "interpretation",
+                        "invalidation", "evidence_quality")
+
+
+def unwrap_packet(obj):
+    """총괄이 Packet 을 한 겹 감싸 냈으면 벗긴다.
+
+    실측 2026-08-02·08-03: 두 실행이 `missing keys: [전부]` 로 죽었다. 키가
+    하나도 없다는 것은 형태가 조금 어긋난 게 아니라 **다른 층을 봤다**는
+    뜻이고, 소형·중형 모델의 가장 흔한 이탈이 {"packet": {...}} 처럼 한 겹
+    싸는 것이다. 거부하면 분석가 6인을 돌린 2~3분이 통째로 버려지므로,
+    확실히 벗길 수 있을 때만 벗긴다 - **추측으로 구조를 바꾸지 않는다.**
+
+    벗기는 조건: 값이 dict 이고 그 안에 필수 키가 **전부** 있을 때만.
+    (일부만 있으면 그건 다른 문제이므로 건드리지 않는다.)
+    """
+    if not isinstance(obj, dict):
+        return obj
+    if all(k in obj for k in PACKET_REQUIRED_KEYS):
+        return obj
+    for v in obj.values():
+        if isinstance(v, dict) and all(k in v for k in PACKET_REQUIRED_KEYS):
+            return v
+    return obj
+
+
 def flatten_to_str_list(v) -> Optional[list[str]]:
     """총괄이 낸 값을 문자열 목록으로 평탄화. 불가능하면 None(재시도).
 
@@ -332,9 +358,22 @@ Evidence:
         except json.JSONDecodeError as err:
             last_err = f"invalid JSON: {err}"
             continue
+        candidate = unwrap_packet(candidate)
         missing = [k for k in REQUIRED if k not in candidate]
         if missing:
             last_err = f"missing keys: {missing}"
+            # **원문을 남긴다.** 예전에는 사유만 남아 다음 실패 때 무엇이
+            # 왔는지 알 방법이 없었다(실측: 08-02 01:22 과 08-03 00:10 이 같은
+            # 문구로 죽었는데 둘 다 원인을 못 봤다). 분석가 6인을 2~3분 돌린
+            # 뒤에 죽는 자리라 재현 비용이 비싸다 - 그때 본 것을 그때 남긴다.
+            _last_raw = out[s:e + 1][:600]
+            print(f"⚠ 총괄 스키마 이탈({attempt + 1}회) - 받은 최상위 키: "
+                  f"{sorted(candidate)[:12]} / 원문 앞부분: {_last_raw[:220]}",
+                  file=sys.stderr, flush=True)
+            repair = ('\nReturn a SINGLE flat JSON object whose TOP-LEVEL keys are '
+                      'exactly: symbol, thesis, facts, interpretation, invalidation, '
+                      'evidence_quality. Do NOT wrap it in another object such as '
+                      '{"packet": {...}} or {"result": {...}}.')
             continue
         # 타입 - **거부가 아니라 교정한다.** 실측 2026-08-02: 관통 실행 4회가
         # 전부 여기서 죽었는데 매번 이탈 모양이 달랐다(facts 가 dict, 키 누락,
@@ -535,8 +574,12 @@ def build_packet_claims(state: dict, packet: dict) -> list[dict]:
 
 
 def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
-                          conn=None) -> int:
-    """research.packet_claims 적재. 기록 실패가 Packet 을 죽이지 않는다."""
+                          conn=None, as_known_at=None) -> int:
+    """research.packet_claims 적재. 기록 실패가 Packet 을 죽이지 않는다.
+
+    as_known_at 은 이 주장을 발행할 때의 증거 컷오프다 - 사후 채점이
+    hindsight 로 오염되지 않았는지 확인하는 기준이라 주장과 함께 남긴다.
+    """
     if not claims:
         return 0
     try:
@@ -555,14 +598,14 @@ def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
                     insert into research.packet_claims
                       (trace_id, symbol, kind, metric, op, threshold,
                        threshold_text, baseline, baseline_text, horizon_days,
-                       source_node)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       source_node, as_known_at)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     on conflict (trace_id, kind, metric, horizon_days) do nothing
                     """,
                     (trace_id, symbol, c["kind"], c["metric"], c["op"],
                      c.get("threshold"), c.get("threshold_text"),
                      c.get("baseline"), c.get("baseline_text"),
-                     c["horizon_days"], c.get("source_node")))
+                     c["horizon_days"], c.get("source_node"), as_known_at))
         conn.commit()
         if own:
             conn.close()
@@ -607,9 +650,9 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                 insert into research.pipeline_runs
                   (trace_id, pipeline_version, symbol, input_hash, node_models,
                    packet_hash, evidence_quality, numeric_check_ok, status,
-                   halt_reason, started_at, ended_at, metadata)
+                   halt_reason, started_at, ended_at, as_known_at, metadata)
                 values (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s,
-                        %s::jsonb)
+                        %s, %s::jsonb)
                 returning pipeline_run_id
                 """,
                 (trace_id, PIPELINE_VERSION, symbol, input_hash,
@@ -617,6 +660,12 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                  (packet or {}).get("evidence_quality"),
                  nc.get("ok") if nc else None, status, halt_reason,
                  started, ended,
+                 # as_known_at = 증거 컷오프. 이 실행이 "무엇까지 알 수 있었나"
+                 # 의 경계다. 지금은 진입 시각(started)이 그 경계다 - 분석가
+                 # 일부가 아직 as_of 를 안 받아 최신을 보기 때문이다.
+                 # **기록이 먼저다**: 기록이 없으면 무엇이 파라미터화됐는지조차
+                 # 확인할 수 없고, 사후 채점이 hindsight 로 오염됐는지도 모른다.
+                 started,
                  # 판정 스냅샷 - 사후 채점(packet_outcome_scorer)이 "이 분석가가
                  # 그때 뭐라고 했는지"를 여기서 읽는다. 없으면 되먹임 통계
                  # (analyst_calibration)가 통째로 비어 선순환이 끊긴다.
@@ -655,6 +704,12 @@ def run_research_department(symbol: str) -> dict:
                 "trace_id": trace_id}
     packet = out["packet"]
     packet["trace_id"] = trace_id
+    # 증거 컷오프. 진입 시각을 그대로 쓴다 - 분석가 일부가 아직 as_of 를 안 받아
+    # 최신을 보므로 '이 시각 이후 관측은 안 썼다'가 아니라 '이 시각에 실행했다'가
+    # 지금의 정확한 뜻이다. 그래도 기록해야 나중에 무엇이 파라미터화됐는지
+    # 확인할 수 있고, 사후 채점이 hindsight 인지 아닌지도 이 값으로 따진다.
+    as_known_at = started
+    packet["as_known_at"] = as_known_at.isoformat()
     packet["_analyst_verdicts"] = {          # 리포트용 메타 (Packet 본문과 분리)
         "sentiment": (out.get("sentiment") or {}).get("verdict"),
         "technical": (out.get("technical") or {}).get("verdict"),
@@ -684,7 +739,8 @@ def run_research_department(symbol: str) -> dict:
     claims = build_packet_claims(out, packet)
     packet["_claims"] = claims
     packet["_claims_recorded"] = _record_packet_claims(
-        trace_id=trace_id, symbol=symbol, claims=claims)
+        trace_id=trace_id, symbol=symbol, claims=claims,
+        as_known_at=as_known_at)
     return packet
 
 
@@ -948,6 +1004,16 @@ def _check_schema_coercion():
     assert out["_schema_coerced"] == ["facts"], out.get("_schema_coerced")
     assert not out["numeric_check"]["ok"], "평탄화 후 창작 수치를 놓쳤다"
     assert out["evidence_quality"] == "partial", "강등이 안 걸렸다"
+    # 한 겹 싸서 온 Packet 은 벗긴다 - 실측 2회가 '키 전부 누락'으로 죽었다
+    inner = {k: "x" for k in PACKET_REQUIRED_KEYS}
+    assert unwrap_packet({"packet": inner}) is inner
+    assert unwrap_packet({"result": {"data": inner}}) != inner, \
+        "두 겹까지 파고들지 않는다 - 추측으로 구조를 바꾸지 않는다"
+    assert unwrap_packet(inner) is inner, "이미 평평하면 그대로 둔다"
+    # 일부 키만 있는 dict 는 건드리지 않는다(다른 문제이므로 사유가 보여야 한다)
+    partial = {"wrap": {"symbol": "x", "thesis": "y"}}
+    assert unwrap_packet(partial) is partial
+    assert unwrap_packet(["not", "a", "dict"]) == ["not", "a", "dict"]
     print("  스키마 교정·가드 유지    OK")
 
 
