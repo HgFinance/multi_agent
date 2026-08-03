@@ -135,14 +135,32 @@ class HealthDomain(BaseModel):
 
 # ▶ Tool Gateway (2026-08-02): 허용목록을 선언에서 실제 강제로.
 #   Hermes 는 tool_allowlist 를 읽지도 않는다(컨테이너 실측) - 강제는 도구가
-#   있는 이 조회면에서만 성립한다. 기본은 관측 모드이고 위반은 응답 헤더로
-#   드러난다. TOOL_GATEWAY_ENFORCE=true 로 켜면 403 이 된다.
+#   있는 이 조회면에서만 성립한다. TOOL_GATEWAY_ENFORCE=true 면 403 이 된다.
+#
+# ▶ 강제 모드에서는 설치 실패를 삼키지 않는다 (2026-08-02 수정)
+#   예전에는 어떤 예외든 경고 한 줄로 넘기고 기동했다. 관측 모드에서는 그래도
+#   됐다 - 게이트웨이 유무가 통과 여부를 안 바꾸니까. 그런데 강제로 올린 뒤에는
+#   그게 **fail-open** 이 된다: config.yaml 오타 하나, 마운트 한 줄 누락에
+#   전 경로가 무인증으로 열리고 로그 한 줄 말고는 아무 데도 안 드러난다.
+#   config.yaml 은 :ro 로 라이브 마운트된 '사람이 고치는 파일'이라 현실적인
+#   방아쇠다. 그래서 강제 모드면 기동을 막고, 관측 모드에서만 경고로 넘긴다.
+#   어느 쪽이든 상태를 전역에 남겨 /health 가 드러낸다 - '조용히 꺼짐'을 없앤다.
+GATEWAY_STATUS = "NOT_INSTALLED"
 try:
+    from tool_gateway import enforcing as _gateway_enforcing
     from tool_gateway import install as _install_gateway
 
     _install_gateway(app)
-except Exception as _e:  # noqa: BLE001 - 게이트웨이 부재가 조회면을 죽이면 안 된다
-    print(f"⚠ Tool Gateway 미설치: {type(_e).__name__}: {_e}", file=sys.stderr)
+    GATEWAY_STATUS = "enforce" if _gateway_enforcing() else "observe"
+except Exception as _e:  # noqa: BLE001
+    _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
+    print(f"⚠ {_msg}", file=sys.stderr)
+    # enforcing() 자체를 못 부를 수도 있으므로 환경변수를 직접 본다
+    if os.environ.get("TOOL_GATEWAY_ENFORCE", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError(
+            f"{_msg} - 강제 모드인데 게이트웨이가 없으면 전 경로가 무인증으로 "
+            f"열린다. 기동을 막는다(fail-closed). config.yaml 마운트와 문법을 "
+            f"확인할 것.") from _e
 
 
 @app.get("/health")
@@ -167,6 +185,12 @@ def health() -> dict:
     return {
         "version": API_VERSION,
         "read_only": True,
+        # 게이트웨이 상태를 드러낸다 - /health 는 OPEN_PATHS 라 X-Tool-Gateway
+        # 헤더가 안 붙는다(정상일 때와 부재일 때가 원리적으로 같아 보였다).
+        # 강제 모드에서는 애초에 기동이 막히므로 여기서 NOT_INSTALLED 가 보이면
+        # 관측 모드로 떠 있다는 뜻이고, 그 자체가 degraded 다.
+        "tool_gateway": GATEWAY_STATUS,
+        "status": "degraded" if GATEWAY_STATUS == "NOT_INSTALLED" else "ok",
         "domains": [HealthDomain(domain=r["domain"], rows=r["rows"],
                                  last_observed_kst=r["last"]).model_dump()
                     for r in rows],
@@ -256,19 +280,35 @@ def evidence_financials(
     as_of: Optional[datetime] = Query(None),
     limit: int = Query(100, gt=0, le=500),
 ):
-    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2)."""
+    """재무 Evidence. account_code 는 dart_major_account_nm scheme 이다(가이드 J2).
+
+    ▶ as_of 시점의 **최신 개정본 하나**만 준다 (2026-08-02)
+      정정 재무제표가 원본을 덮지 않고 새 revision 으로 쌓이게 바뀌면서
+      (reference_repository.assign_revisions) 같은 (계정, 기간)에 행이 여럿이
+      된다. 그대로 다 내보내면 소비자가 어느 것이 유효한지 스스로 골라야 하고,
+      고르는 규칙이 소비자마다 갈리면 그게 다음 사고다.
+
+      **그 시점에 알 수 있었던 것 중 가장 나중 개정본**을 고른다:
+        observed_at <= as_of 로 먼저 자르고(PIT), 남은 것 중 revision 최대.
+      정정 이전 시각으로 조회하면 정정본은 observed_at 필터에서 이미 빠지므로
+      원본이 나온다 - 이것이 PIT 재현이다.
+
+      revision 을 응답에 실어 소비자가 '이게 몇 번째 개정본인지' 알 수 있게 한다.
+    """
     ts = _as_of_or_now(as_of)
     return _query(
         """
-        select f.account_code, f.value, f.unit, f.currency, f.period_end,
-               f.consolidation_scope, f.published_at, f.observed_at
+        select distinct on (f.account_code, f.period_end, f.consolidation_scope)
+               f.account_code, f.value, f.unit, f.currency, f.period_end,
+               f.consolidation_scope, f.published_at, f.observed_at, f.revision
         from research.financial_facts f
         join reference.issuers iss on iss.issuer_id = f.issuer_id
         join reference.instruments i on i.issuer_id = iss.issuer_id
         join reference.instrument_symbols isym
           on isym.instrument_id = i.instrument_id and isym.is_primary
         where isym.symbol = %s and f.observed_at <= %s
-        order by f.period_end desc, f.account_code
+        order by f.account_code, f.period_end desc, f.consolidation_scope,
+                 f.revision desc, f.observed_at desc
         limit %s
         """,
         (symbol, ts, limit),
@@ -286,15 +326,26 @@ def universe_restrictions(as_of: Optional[datetime] = Query(None)):
     as_of 이하의 **가장 최근 스냅샷**을 준다. 스냅샷이 아예 없으면 빈 목록이
     아니라 404 다 - '제한 종목이 없다'와 '아직 안 받았다'를 섞으면 정지 종목이
     거래가능으로 새는 방향으로 틀린다(fail-closed).
+
+    ▶ 날짜는 KST 로 자른다 (2026-08-02 수정)
+      symbol_restriction_runs.as_of 는 수집기가 **KST 거래일**로 쓴다. 여기서
+      ts.date()(UTC)로 비교하면 KST 00~09시에는 UTC 날짜가 하루 뒤라 그날
+      스냅샷을 못 보고 항상 어제 것이 나갔다. 쓰는 쪽과 읽는 쪽의 시간대가
+      다르면 조용히 하루가 밀린다.
+
+    ▶ 며칠 묵었는지 함께 낸다
+      수집기가 며칠 멈춰도 '가장 최근'은 늘 무언가를 돌려주므로, 소비자가
+      낡음을 알 방법이 없었다. stale_days 를 실어 판정하는 쪽이 막을 수 있게 한다.
     """
     ts = _as_of_or_now(as_of)
+    asof_kst = ts.astimezone(KST).date()   # 수집기 쓰기 규약과 같은 시간대
     runs = _query(
         "select as_of, list_sizes, total_rows, collected_at "
         "from research.symbol_restriction_runs where as_of <= %s "
-        "order by as_of desc limit 1", (ts.date(),))
+        "order by as_of desc limit 1", (asof_kst,))
     if not runs:
         raise HTTPException(
-            404, f"{ts.date()} 이전 거래제한 스냅샷이 없다 - "
+            404, f"{asof_kst} 이전 거래제한 스냅샷이 없다 - "
                  f"universe_restriction_collector 실행 여부를 확인할 것")
     snap = runs[0]
     rows = _query(
@@ -302,6 +353,7 @@ def universe_restrictions(as_of: Optional[datetime] = Query(None)):
         "where as_of = %s order by symbol, reason", (snap["as_of"],))
     return {"as_of": str(snap["as_of"]), "list_sizes": snap["list_sizes"],
             "total_rows": snap["total_rows"],
+            "stale_days": (asof_kst - snap["as_of"]).days,
             "collected_at": snap["collected_at"], "restrictions": rows}
 
 
@@ -563,6 +615,27 @@ def _check_readonly_surface():
     print("  읽기 전용 표면           OK")
 
 
+def _check_gateway_installed():
+    """게이트웨이가 실제로 붙었는가.
+
+    2026-08-02 실측 결함: install() 실패를 삼키고 기동해 강제 모드인데 전 경로가
+    무인증으로 열릴 수 있었다. 자체 점검 5종 어디에도 게이트웨이 항목이 없어
+    **초록으로 보고되면서 보호가 없는** 상태가 가능했다. 그래서 여기에 둔다.
+    """
+    assert GATEWAY_STATUS in ("enforce", "observe"), \
+        f"Tool Gateway 가 안 붙었다(GATEWAY_STATUS={GATEWAY_STATUS}) - " \
+        f"config.yaml 마운트·문법 확인"
+    # 미들웨어가 실제 스택에 있는가 (전역 변수만 맞고 미들웨어가 빠지는 것 방지)
+    names = [getattr(m.cls, "__name__", "") for m in app.user_middleware]
+    assert any("Gateway" in n for n in names), \
+        f"GATEWAY_STATUS 는 {GATEWAY_STATUS} 인데 미들웨어 스택에 없다: {names}"
+    # 강제 모드인데 설치 실패면 기동 자체가 막혀야 한다 - 그 분기가 살아 있는가
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert "TOOL_GATEWAY_ENFORCE" in src and "raise RuntimeError" in src, \
+        "강제 모드 fail-closed 분기가 사라졌다 - 다시 fail-open 이 된다"
+    print(f"  게이트웨이 설치({GATEWAY_STATUS})  OK")
+
+
 def _check_search_rules():
     """검색 질의 검증·장애 노출 규칙 - Ollama·DB 없이 확인한다."""
     from fastapi import HTTPException as HE
@@ -713,6 +786,7 @@ if __name__ == "__main__":
     _check_weight()
     _check_as_of()
     _check_readonly_surface()
+    _check_gateway_installed()
     _check_search_rules()
     _check_stories_rules()
-    print("research-api 5개 영역 통과. 관통은 --probe, 서버는 compose research-api")
+    print("research-api 6개 영역 통과. 관통은 --probe, 서버는 compose research-api")

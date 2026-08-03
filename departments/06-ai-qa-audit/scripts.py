@@ -51,13 +51,14 @@ import hashlib
 import importlib.util
 import json
 import os
-import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 from uuid import UUID, uuid4
 
+import yaml
 from langgraph.graph import END, StateGraph
 from langsmith.wrappers import wrap_openai
 from openai import OpenAI
@@ -119,12 +120,96 @@ def _call_internal_llm(prompt: str) -> str:
     return res.choices[0].message.content
 
 
+_HERMES_PROFILE = "qa-department"
+
+
+def _hermes_config() -> dict:
+    config_path = _BASE / "hermes" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise TypeError(f"Hermes config is not a mapping: {config_path}")
+    return config
+
+
+def _hermes_model_config() -> dict[str, str | None]:
+    raw_model = _hermes_config().get("model")
+    if isinstance(raw_model, str):
+        model = raw_model.strip()
+        provider = base_url = api_mode = None
+    elif isinstance(raw_model, dict):
+        model = str(raw_model.get("default") or raw_model.get("model") or "").strip()
+        provider = str(raw_model.get("provider") or "").strip() or None
+        base_url = str(raw_model.get("base_url") or "").strip() or None
+        api_mode = str(raw_model.get("api_mode") or "").strip() or None
+    else:
+        model = ""
+        provider = base_url = api_mode = None
+    if not model:
+        raise ValueError("Hermes config model.default is required")
+    return {"model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode}
+
+
+def _profile_dir() -> Path:
+    from hermes_cli.profiles import get_profile_dir
+
+    return Path(get_profile_dir(_HERMES_PROFILE))
+
+
+def _hermes_runtime_metadata() -> dict:
+    """Expose profile wiring without reading secrets or memory contents."""
+    model = _hermes_model_config()
+    metadata = {
+        "profile": _HERMES_PROFILE,
+        "provider": model["provider"],
+        "model": model["model"],
+        "base_url": model["base_url"],
+        "config_source": str(_BASE / "hermes" / "config.yaml"),
+    }
+    try:
+        profile_dir = _profile_dir()
+        skills_dir = profile_dir / "skills"
+        memories_dir = profile_dir / "memories"
+        runtime_config = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
+        runtime_model = runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
+        runtime_provider = runtime_model.get("provider") if isinstance(runtime_model, dict) else None
+        runtime_default = runtime_model.get("default") if isinstance(runtime_model, dict) else runtime_model
+        metadata.update(
+            {
+                "runtime_profile_dir": str(profile_dir),
+                "runtime_config_provider": runtime_provider,
+                "runtime_config_model": runtime_default,
+                "runtime_config_matches_source": runtime_provider == model["provider"] and runtime_default == model["model"],
+                "soul_md_present": (profile_dir / "SOUL.md").is_file(),
+                "skills_dir_present": skills_dir.is_dir(),
+                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md")) if skills_dir.is_dir() else 0,
+                "memories_dir_present": memories_dir.is_dir(),
+                "memory_file_count": sum(1 for path in memories_dir.iterdir() if path.is_file()) if memories_dir.is_dir() else 0,
+                "auth_present": (profile_dir / "auth.json").is_file(),
+                "env_present": (profile_dir / ".env").is_file(),
+            }
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        metadata["profile_error"] = type(exc).__name__
+    return metadata
+
+
+@contextmanager
+def _hermes_profile_scope():
+    """Make AIAgent load this department's runtime profile, not the global default."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(_profile_dir()))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _persona(name: str) -> str:
-    cfg = (_BASE / "hermes" / "config.yaml").read_text(encoding="utf-8")
-    m = re.search(rf'{re.escape(name)}: "(.*?)"\n', cfg, re.DOTALL)
-    if not m:
-        raise ValueError(f"{name} 페르소나를 config.yaml에서 찾을 수 없다")
-    return m.group(1)
+    personalities = _hermes_config().get("agent", {}).get("personalities", {})
+    if not isinstance(personalities, dict) or not isinstance(personalities.get(name), str):
+        raise TypeError(f"{name} persona is missing from hermes/config.yaml")
+    return personalities[name]
 
 
 class QAState(TypedDict, total=False):
@@ -136,6 +221,9 @@ class QAState(TypedDict, total=False):
     hallucination_reviews: list  # hallucination-critic 결과 (UNSUPPORTED/CONTRADICTED claim만, 비었으면 전부 SUPPORTED/PARTIAL)
     verdict: str            # 최종 값 - 항상 assessment 에서만 옴
     narrative: str
+    supervisor_llm_called: bool
+    supervisor_call_status: str
+    hermes_runtime: dict
     escalate: bool
     notion_upload: dict     # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
     fallbacks: list[dict]
@@ -228,9 +316,19 @@ def _hermes_chat(persona: str, task: str) -> str:
         AIAgent,  # Lazy Import - Hermes 없는 환경에서도 모듈 자체는 항상 import 가능해야 한다
     )
 
-    agent = AIAgent(model="poolside/laguna-s-2.1:free", quiet_mode=True,
-                     ephemeral_system_prompt=persona)
-    return agent.chat(task)
+    model = _hermes_model_config()
+    with _hermes_profile_scope():
+        agent = AIAgent(
+            provider=model["provider"],
+            model=model["model"],
+            base_url=model["base_url"],
+            api_mode=model["api_mode"],
+            quiet_mode=True,
+            load_soul_identity=True,
+            skip_memory=False,
+            ephemeral_system_prompt=persona,
+        )
+        return agent.chat(task)
 
 
 def supervise(state: QAState, *, chat=None) -> dict:
@@ -257,7 +355,15 @@ Evidence:
         if k not in note:
             raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
     # 바인딩 decision 은 LLM 출력이 아니라 assessment 에서 그대로 가져온다
-    return {"verdict": a["decision"], "narrative": note["narrative"], "escalate": note["escalate"]}
+    call_status = "injected" if chat is not None else "succeeded"
+    return {
+        "verdict": a["decision"],
+        "narrative": note["narrative"],
+        "escalate": note["escalate"],
+        "supervisor_llm_called": True,
+        "supervisor_call_status": call_status,
+        "hermes_runtime": {**_hermes_runtime_metadata(), "call_status": call_status},
+    }
 
 
 def _assemble_out(state: QAState) -> dict:
@@ -308,12 +414,13 @@ def _record_execution_evidence(
         )
         execution = result.get("agent_execution") or {}
         executed = list(execution.get("executed") or [])
+        failed = list(execution.get("failed") or [])
         not_executed = list(execution.get("not_executed") or [])
         fallbacks = list(result.get("fallbacks") or [])
         degraded = bool(fallbacks or result.get("escalate"))
         schema_valid = bool(result.get("qa_decision_id")) and not bool(fallbacks)
         domain_valid = result.get("verdict") in {"PASS", "WARN", "FAIL"} and not degraded
-        agents_for_log = executed or ["qa-pipeline-fallback"]
+        agents_for_log = list(dict.fromkeys(executed + failed)) or ["qa-pipeline-fallback"]
         for employee in agents_for_log:
             journal.agent_output(
                 run_id=run_id,
@@ -321,6 +428,8 @@ def _record_execution_evidence(
                 employee_profile=employee,
                 output={
                     "employee_profile": employee,
+                    "supervisor_call_status": result.get("supervisor_call_status") if employee == "qa-audit-supervisor" else None,
+                    "hermes_runtime": result.get("hermes_runtime") if employee == "qa-audit-supervisor" else None,
                     "decision": result.get("verdict"),
                     "evidence_refs": tuple(
                         str(check.get("claim_index"))
@@ -389,8 +498,9 @@ def _record_execution_evidence(
             "safe_action": safe_action,
             "binding": False,
             "hermes_profile": "qa-department",
-            "employees_executed": executed,
-            "employees_not_executed": not_executed,
+        "employees_executed": executed,
+        "employees_failed": failed,
+        "employees_not_executed": not_executed,
             "retry_policy": {"max_retries": 2, "max_attempts": 3},
             "external_dependencies": {
                 "policy_corpus": "PLACEHOLDER_OR_UNVERIFIED",
@@ -403,7 +513,7 @@ def _record_execution_evidence(
             "journal_path": str(log_path) if log_path else None,
             "review": review,
         }
-    except Exception as exc:  # logging must never turn a safe decision into approval
+    except Exception as exc:  # logging must never turn a safe decision into approval  # noqa: BLE001
         return {
             "run_id": run_id,
             "trace_id": trace_id,
@@ -609,7 +719,20 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
     if agent_execution:
         lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
         lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
+        lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
         lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        runtime = out.get("hermes_runtime") or {}
+        if runtime:
+            lines += [
+                "",
+                "### Hermes Runtime",
+                "",
+                f"- profile: `{md_cell(runtime.get('profile'))}`",
+                f"- provider/model: `{md_cell(runtime.get('provider'))}` / `{md_cell(runtime.get('model'))}`",
+                f"- runtime config matches source: `{md_cell(runtime.get('runtime_config_matches_source'))}`",
+                f"- supervisor call: `{md_cell(out.get('supervisor_call_status'))}`",
+                f"- skills: `{md_cell(runtime.get('skill_file_count'))}`; memory files: `{md_cell(runtime.get('memory_file_count'))}`",
+            ]
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
@@ -659,14 +782,14 @@ _RAW_SUPERVISE = supervise
 def check_evidence(state: QAState) -> dict:
     try:
         return _RAW_CHECK_EVIDENCE(state)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         return _fallback_assessment(state, exc)
 
 
 def hallucination_review(state: QAState) -> dict:
     try:
         return _RAW_HALLUCINATION_REVIEW(state)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         flagged = [c for c in state.get("assessment", {}).get("claim_checks", [])
                    if c.get("result") in ("UNSUPPORTED", "CONTRADICTED")]
         return {"hallucination_reviews": [{"claim_index": c.get("claim_index"), "answer": {
@@ -680,7 +803,7 @@ def hallucination_review(state: QAState) -> dict:
 def draft_claim_narrative(state: QAState) -> dict:
     try:
         return _RAW_DRAFT_CLAIM_NARRATIVE(state)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         checks = state.get("assessment", {}).get("claim_checks", [])
         summary = "; ".join(f"Claim {c.get('claim_index')}: {c.get('result')} — {c.get('reason')}"
                             for c in checks) or "검사된 Claim 없음"
@@ -695,8 +818,19 @@ def supervise(state: QAState, *, chat=None) -> dict:
         if chat is not None:
             raise
         decision = state.get("assessment", {}).get("decision", "FAIL")
-        return {"verdict": decision, "narrative": _fallback_narrative("QA Supervisor", exc),
-                "escalate": True, "fallbacks": [_fallback("supervisor", exc)]}
+        return {
+            "verdict": decision,
+            "narrative": _fallback_narrative("QA Supervisor", exc),
+            "escalate": True,
+            "supervisor_llm_called": True,
+            "supervisor_call_status": "failed",
+            "hermes_runtime": {
+                **_hermes_runtime_metadata(),
+                "call_status": "failed",
+                "error_type": type(exc).__name__,
+            },
+            "fallbacks": [_fallback("supervisor", exc)],
+        }
 
 
 _RAW_ASSEMBLE_OUT = _assemble_out
@@ -715,14 +849,21 @@ def _assemble_out(state: QAState) -> dict:
         executed_agents.append("hallucination-critic")
     if out.get("claim_narrative"):
         executed_agents.append("evidence-qa-agent")
-    if out.get("narrative"):
+    supervisor_status = state.get("supervisor_call_status", "not_called")
+    if out.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("qa-audit-supervisor")
     qa_agents = ["qa-audit-supervisor", "evidence-qa-agent", "hallucination-critic", "model-risk-agent",
                  "internal-audit-agent", "agent-ops-monitor", "tool-permission-security-reviewer",
                  "incident-postmortem-agent"]
+    failed_agents = ["qa-audit-supervisor"] if supervisor_status == "failed" else []
+    attempted_agents = list(dict.fromkeys(executed_agents + failed_agents))
+    out["supervisor_call_status"] = supervisor_status
+    out["hermes_runtime"] = state.get("hermes_runtime")
     out["agent_execution"] = {
         "executed": list(dict.fromkeys(executed_agents)),
-        "not_executed": [agent for agent in qa_agents if agent not in executed_agents],
+        "failed": failed_agents,
+        "attempted": attempted_agents,
+        "not_executed": [agent for agent in qa_agents if agent not in attempted_agents],
     }
     out["execution_evidence"] = state.get("execution_evidence")
     return out
@@ -742,7 +883,7 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
     try:
         upload = uploader or upload_case
         notion_upload = upload(state["artifact"], state["decision_time"], out, report_md=report_md)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] += 1
     evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
@@ -767,7 +908,7 @@ def run_qa_department(
     try:
         out = build_pipeline().invoke({"artifact": artifact, "evidence_store": evidence_store,
                                        "decision_time": decision_time})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         out = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
                **_fallback_assessment({"artifact": artifact}, exc),
                "claim_narrative": _fallback_narrative("QA pipeline", exc),

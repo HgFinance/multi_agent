@@ -1,0 +1,91 @@
+name: investment-case
+version: investment-case-v2
+kind: realtime-investment
+description: >-
+  실시간 투자 Case의 부서 경계만 연결한다. Research와 Trading은 제안물을 만들고,
+  Risk와 QA가 독립 게이트를 수행한 뒤 결정론적 OMS/Fill을 거쳐 Accounting과 CEO에 전달한다.
+boundary_rules:
+  - LLM 출력은 ResearchPacket, OrderIntent, RiskDecision, QaAssessment 계약으로만 이동한다.
+  - Risk 승인 전에는 OMS/브로커로 주문을 제출하지 않는다.
+  - Risk 승인과 Accounting 사이에는 결정론적 OMS/Fill 경계를 둔다.
+  - 실패·타임아웃·상태 불명은 다음 단계의 성공으로 전달하지 않고 선언된 안전 행동으로 종료한다.
+  - CEO는 주문·Risk 승인·원장 수정을 수행하지 않고 결과를 통합해서 설명한다.
+steps:
+  - id: research
+    sequence: 1
+    department: research-department
+    owner: research
+    task: Research Packet 생성
+    input_contract: case_request
+    output_contract: research_packet
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: HOLD
+    forbidden_actions: [order, risk_approval]
+  - id: trading
+    sequence: 2
+    department: trading-department
+    owner: trading
+    task: Research Packet을 Order Intent로 구조화
+    input_contract: research_packet
+    output_contract: order_intent
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: HOLD
+    forbidden_actions: [order_submission, risk_approval]
+  - id: risk
+    sequence: 3
+    department: risk-management
+    owner: risk
+    task: Order Intent의 결정론적 Risk Gate와 Risk Decision 연결
+    input_contract: order_intent
+    output_contract: risk_decision
+    timeout_seconds: 60
+    retry: {max_attempts: 2}
+    failure_action: REJECT
+    forbidden_actions: [order_submission, ledger_write]
+  - id: qa
+    sequence: 4
+    department: qa-department
+    owner: qa
+    task: 근거·재현성·Decision Trace 독립 검증
+    input_contract: risk_decision
+    output_contract: qa_assessment
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: ESCALATE
+    forbidden_actions: [risk_approval, order_submission, ledger_write]
+  - id: oms-fill-gate
+    sequence: 5
+    department: trading-department
+    owner: trading
+    task: Risk/QA 결과를 결정론적 OMS·Paper/Broker Fill 경계로 전달
+    input_contract: qa_assessment
+    output_contract: execution_result
+    timeout_seconds: 60
+    retry: {max_attempts: 1}
+    failure_action: HOLD
+    forbidden_actions: [risk_override, unapproved_order]
+  - id: accounting
+    sequence: 6
+    department: accounting-portfolio-department
+    owner: accounting
+    task: 승인·체결된 결과만 Position·Cash·Ledger·Reconciliation에 반영
+    input_contract: execution_result
+    output_contract: accounting_snapshot
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: BREAK
+    forbidden_actions: [signal_generation, risk_override]
+  - id: ceo
+    sequence: 7
+    department: ceo-agent
+    owner: ceo
+    task: 각 결과를 통합해 사용자 설명과 미완료 상태를 보고
+    input_contract: accounting_snapshot
+    output_contract: ceo_case_summary
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: ESCALATE
+    forbidden_actions: [order_submission, risk_approval, ledger_write]
+

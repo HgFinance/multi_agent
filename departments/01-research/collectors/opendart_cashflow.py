@@ -48,6 +48,9 @@ CF_SJ_DIV = "CF"                              # 현금흐름표
 ANNUAL_REPORT = "11011"                       # 사업보고서 - 연차만 받는다
 DEFAULT_LIMIT = 3000   # 전종목(2,596) 수용
 RATE_PER_SEC = 2.0
+# 이 개수마다 중간 적재한다. 200개 = 약 100초 - 타임아웃(30분)에 걸려도
+# 잃는 것은 마지막 100초어치뿐이고 나머지는 DB 에 남는다.
+FLUSH_EVERY = 200
 
 # F-Score·Beneish 가 찾는 핵심 계정. 이름이 회사마다 조금씩 달라 부분일치로
 # 본다 - 정확 일치만 쓰면 "영업활동으로 인한 현금흐름" 같은 변형을 놓친다.
@@ -162,6 +165,31 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
         year = datetime.now(timezone.utc).year - 1     # 직전 사업연도
         observed = datetime.now(timezone.utc)
         facts, ok, empty, failed, cfo_seen = [], 0, 0, 0, 0
+        blank = 0   # 금액이 빈칸이라 넣지 않은 줄 - 조용히 버리지 않고 센다
+        total_n = total_u = total_unlinked = total_dropped = 0
+        _, _, src = repo.sync_data_sources()
+
+        def flush() -> None:
+            """모은 사실을 적재하고 버퍼를 비운다.
+
+            ▶ 왜 중간에 적재하는가 (2026-08-02)
+              전종목(2,596)이면 2회/초 제한 때문에 최소 21분이고 HTTP 지연을
+              더하면 스케줄러 타임아웃 30분에 닿는다. 적재가 루프 **뒤에**
+              한 번뿐이면 타임아웃 순간 그날 수집분이 **통째로 사라진다** -
+              매일 30분을 쓰고 아무것도 안 남는 최악의 실패다.
+              멱등 upsert 라 중간 적재가 재실행을 깨지 않는다.
+            """
+            nonlocal facts, total_n, total_u, total_unlinked, total_dropped
+            if not facts:
+                return
+            batch, dropped = dedupe_facts(facts)
+            n, u, unlinked = repo.upsert_financial_facts(
+                batch, source_id=src["opendart"])
+            total_n += n
+            total_u += u
+            total_unlinked += unlinked
+            total_dropped += dropped
+            facts = []
 
         for sym in symbols:
             entry = corp_of.get(sym)
@@ -198,25 +226,39 @@ def collect(limit: int = DEFAULT_LIMIT) -> int:
                     f = to_fact(row, observed_at=observed)
                 except Exception:  # noqa: BLE001 - 행 하나가 회사를 버리지 않는다
                     continue
+                # 금액이 빈칸인 줄은 넣지 않는다 (2026-08-02 DQ Gate 적발).
+                # DART 는 그 해에 없었던 거래도 항목만 빈 금액으로 준다
+                # ("무형자산의 처분" 등). NULL 행으로 쌓으면 1,500건 넘게
+                # 늘어나 결측률만 올리고, F-Score 는 매번 걸러내야 한다.
+                # **그 줄이 없다는 것 자체가 "그 해엔 그 거래가 없었다"** 다 -
+                # 0 원과 미보고를 구분하는 정보는 NULL 이 아니라 부재에 있다.
+                if f.value is None:
+                    blank += 1
+                    continue
                 f.metadata["source"] = SOURCE_TAG
                 f.metadata["account_id"] = str(row.get("account_id", "")).strip()
                 facts.append(f)
                 if looks_like_cfo(row.get("account_nm", "")):
                     cfo_seen += 1
             ok += 1
+            if ok % FLUSH_EVERY == 0:
+                flush()
+                print(f"  … {ok}개사 진행 (누적 신규 {total_n} / 갱신 {total_u})",
+                      flush=True)
             time.sleep(1 / RATE_PER_SEC)
 
-        if not facts:
+        flush()   # 꼬리 배치
+        if total_n + total_u == 0:
             print(f"{COLLECTOR_VERSION}: 적재할 현금흐름 0건 "
                   f"(조회 {ok} / 빈 응답 {empty} / 실패 {failed})", flush=True)
             return 1
 
-        facts, dropped = dedupe_facts(facts)
-        _, _, src = repo.sync_data_sources()
-        n, u, unlinked = repo.upsert_financial_facts(facts, source_id=src["opendart"])
-        print(f"{COLLECTOR_VERSION}: 회사 {ok} / 현금흐름 {len(facts)}건 "
-              f"(영업활동 {cfo_seen}) -> 신규 {n} / 갱신 {u} / issuer 미연결 {unlinked} "
-              f"(빈 응답 {empty}, 실패 {failed}, 동명중복 제외 {dropped})", flush=True)
+        print(f"{COLLECTOR_VERSION}: 회사 {ok} / 현금흐름 "
+              f"{total_n + total_u}건 (영업활동 {cfo_seen}) -> 신규 {total_n} / "
+              f"갱신 {total_u} / issuer 미연결 {total_unlinked} "
+              f"(빈 응답 {empty}, 실패 {failed}, 동명중복 제외 {total_dropped}, "
+              f"금액 빈칸 제외 {blank})",
+              flush=True)
         return 1 if failed > ok else 0
     finally:
         repo.close()

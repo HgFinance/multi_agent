@@ -360,6 +360,44 @@ def _check_partial_documented():
     print("  부분·차단 사유 명시      OK")
 
 
+def _check_adopted_module_exists():
+    """ADOPTED 가 가리키는 파일과 함수가 **실제로 있는가**.
+
+    2026-08-02 계획 대조에서 적발: amihud_illiquidity·roll_effective_spread 가
+    ADOPTED 로 등재돼 있었는데 module 이 가리키는 evidence/liquidity.py 가
+    저장소에 없었다. __post_init__ 은 module 문자열이 비었는지만 봤기 때문에
+    **레지스트리가 실제 역량보다 부풀어 있었다** - 이 레지스트리가 막으려던
+    바로 그 상태다("도입했다"와 "됐다고 적었다"의 혼동).
+
+    파일 존재와 함수 심볼까지 본다. import 는 하지 않는다 - 무거운 의존
+    (pydantic·psycopg2)을 끌어오면 레지스트리 점검이 환경에 묶인다.
+    """
+    import re as _re
+    from pathlib import Path as _P
+
+    base = _P(__file__).resolve().parent.parent      # departments/01-research
+    missing_file, missing_func = [], []
+    for m in METHODS:
+        if m.status != STATUS_ADOPTED:
+            continue
+        path, _, func = (m.module or "").partition(":")
+        p = base / path
+        if not p.exists():
+            missing_file.append(f"{m.key} -> {path}")
+            continue
+        if func:
+            src = p.read_text(encoding="utf-8")
+            if not _re.search(rf"^\s*(?:def|class)\s+{_re.escape(func)}\b",
+                              src, _re.M):
+                missing_func.append(f"{m.key} -> {path}:{func}")
+
+    assert not missing_file, (
+        f"ADOPTED 인데 구현 파일이 없다: {missing_file} - 파일을 만들거나 "
+        f"CANDIDATE 로 내려라(둘 중 하나이지 이대로 둘 수는 없다)")
+    assert not missing_func, f"ADOPTED 인데 함수가 없다: {missing_func}"
+    print(f"  ADOPTED 구현 실재        OK ({sum(1 for m in METHODS if m.status == STATUS_ADOPTED)}종)")
+
+
 def _check_no_unearned_validation():
     """도입 != 검증. calibration 표본 전에는 validated 가 켜지면 안 된다."""
     assert not any(m.validated for m in METHODS), \
@@ -374,8 +412,9 @@ if __name__ == "__main__":
     _check_keys_unique()
     _check_invariants_enforced()
     _check_partial_documented()
+    _check_adopted_module_exists()
     _check_no_unearned_validation()
-    print(f"방법론 레지스트리 4개 영역 통과. {summary_line()}\n")
+    print(f"방법론 레지스트리 5개 영역 통과. {summary_line()}\n")
 
     for analyst, ms in by_analyst().items():
         if not ms:

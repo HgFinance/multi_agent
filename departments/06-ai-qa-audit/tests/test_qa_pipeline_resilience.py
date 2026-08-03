@@ -48,6 +48,29 @@ def test_supervisor_failure_escalates_without_changing_qa_decision(monkeypatch):
     assert out["verdict"] == "FAIL"
     assert out["escalate"] is True
     assert out["fallbacks"][0]["stage"] == "supervisor"
+    assert out["supervisor_call_status"] == "failed"
+    assembled = qa_scripts._assemble_out({
+        "assessment": {
+            "qa_decision_id": "q1",
+            "decision": "FAIL",
+            "reason_codes": [],
+            "claim_checks": [],
+            "findings": [],
+            "calculation_version": "v1",
+            "input_hash": "h1",
+        },
+        "claim_narrative": "deterministic summary",
+        "hallucination_reviews": [],
+        **out,
+    })
+    assert assembled["agent_execution"]["failed"] == ["qa-audit-supervisor"]
+    assert "qa-audit-supervisor" not in assembled["agent_execution"]["executed"]
+
+
+def test_hermes_model_is_loaded_from_qa_profile_config():
+    model = qa_scripts._hermes_model_config()
+    assert model["provider"] == "openai-codex"
+    assert model["model"] == "gpt-5.6-luna"
 
 
 def test_pipeline_fallback_emits_replayable_execution_evidence(monkeypatch, tmp_path):

@@ -417,10 +417,43 @@ def _check_v3_geopolitical_misses():
     print("  v3 확장(지정학 지수/백분위)  OK")
 
 
+def label_caution_lines(flags: list[dict]) -> list[str]:
+    """라벨검증 플래그 -> cautions 문장.
+
+    이 문장 조립이 분석가 3곳에 복붙돼 있었다(2026-08-02 정리). 문구가 갈리면
+    같은 위반이 분석가마다 다르게 읽히고, 로그를 모아 세는 것도 안 된다.
+    """
+    out: list[str] = []
+    for lf in flags:
+        if lf.get("check") == "percentile_literal":
+            out.append(f"[라벨검증] summary 의 {lf['value']} - {lf['reason']}")
+        else:
+            out.append(f"[라벨검증] summary 의 {lf['value']} 는 {lf['metric']} "
+                       f"수치인데 같은 문장에 다른 지표 라벨 "
+                       f"'{lf['forbidden_hit']}' - 오서술 의심")
+    return out
+
+
+def _check_caution_lines():
+    """문구 조립도 한 곳에서만 - 갈라지면 같은 위반이 다르게 읽힌다."""
+    r = {"range_position_20d_pct": 35.9}
+    flags = audit_narrative("이동평균 대비 35.9% 위에 있다.", r)
+    lines = label_caution_lines(flags)
+    assert len(lines) == len(flags) >= 1
+    assert "[라벨검증]" in lines[0] and "오서술 의심" in lines[0], lines
+    # 백분위 리터럴은 다른 문구를 쓴다
+    pl = label_caution_lines([{"check": "percentile_literal", "value": "99%",
+                               "reason": "백분위가 아닌 값을 백분위로 불렀다"}])
+    assert "백분위" in pl[0] and "오서술 의심" not in pl[0], pl
+    assert label_caution_lines([]) == []
+    print("  cautions 문구 단일화     OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(f"{GUARD_VERSION} 자체 점검 (결정론, 네트워크·LLM 없음)")
+    _check_caution_lines()
     _check_case1_range_as_sma()
     _check_case2_above_as_ad()
     _check_case3_percentile_literal()
@@ -429,5 +462,5 @@ if __name__ == "__main__":
     _check_same_sentence_rule()
     _check_v2_observed_misses()
     _check_v3_geopolitical_misses()
-    print("narrative-guard 8개 영역 통과. "
-          "배선: technical/sector_regime/geopolitical verify()")
+    print("narrative-guard 9개 영역 통과. "
+          "배선: technical/microstructure/sector_regime/geopolitical verify()")

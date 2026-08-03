@@ -108,7 +108,8 @@ LABEL_KIND_MAP = {"REGIME_FLIP": "REGIME", "GEO_ESCALATION": "GEOPOLITICAL"}
 
 
 def evaluate_label_claim(claim: dict, history: list[tuple[date, str]],
-                         *, packet_date: date, horizon: int) -> dict:
+                         *, packet_date: date, horizon: int,
+                         trading_days: set[date] | None = None) -> dict:
     """라벨 주장 채점. history: [(as_of, label_value)] - daily_labels 기록.
 
     2026-08-02 이전에는 이력이 없어 채점 자체를 못 했다. 이제 남기므로 센다.
@@ -116,9 +117,23 @@ def evaluate_label_claim(claim: dict, history: list[tuple[date, str]],
     Packet 당일은 제외한다(그날 판정을 보고 쓴 주장이다).
     이력이 지평을 못 덮으면 발동 여부를 단정하지 않는다(None) - 없는 날을
     '아무 일 없었다'로 세면 거짓 음성이 된다.
+
+    ▶ 창은 거래일로 센다 (2026-08-02 수정)
+      daily_labels 는 매일 기록되므로 주말·휴장일이 섞인다. 그대로 [:horizon]
+      을 하면 '5일'이 **달력 5일 = 거래일 3일**이 되어, 같은 지평의 가격
+      주장(거래일 5일)보다 창이 짧아진다. 같은 horizon 이라고 적어놓고 두
+      주장이 다른 기간을 보면 채점 결과를 나란히 놓을 수 없다.
+      trading_days 를 주면 그 날짜만 남긴다(가격 시계열의 날짜 = 거래일).
+      **비어 있으면 거르지 않는다** - 시세를 못 받은 경우인데, 라벨은 가격과
+      독립된 축이라 그 이유로 채점을 포기하면 안 된다. 창 기준이 달력일임은
+      calendar_basis 로 드러낸다(조용히 다른 기준을 쓰지 않는다).
     """
     op, want = claim["op"], claim.get("threshold_text")
-    window = [(d, v) for d, v in sorted(history) if d > packet_date][:horizon]
+    days = [(d, v) for d, v in sorted(history) if d > packet_date]
+    by_trading = bool(trading_days)
+    if by_trading:
+        days = [(d, v) for d, v in days if d in trading_days]
+    window = days[:horizon]
     hit_on = None
     for d, v in window:
         if (op == "!=" and v != want) or (op == "==" and v == want):
@@ -129,7 +144,8 @@ def evaluate_label_claim(claim: dict, history: list[tuple[date, str]],
             "threshold_text": want, "horizon_days": horizon,
             "triggered": None if (hit_on is None and not covered) else hit_on is not None,
             "triggered_on": hit_on.isoformat() if hit_on else None,
-            "days_observed": len(window), "history_complete": covered}
+            "days_observed": len(window), "history_complete": covered,
+            "calendar_basis": "trading_days" if by_trading else "calendar_days"}
 
 
 def score_packet(claims: list[dict], series: list[tuple[date, float]],
@@ -146,6 +162,8 @@ def score_packet(claims: list[dict], series: list[tuple[date, float]],
     ret, close_h, used = forward_return(series, baseline or 0.0, horizon)
     results = [evaluate_price_claim(c, series) for c in price]
     triggered = [r for r in results if r["triggered"]]
+    # 가격 시계열의 날짜가 곧 거래일이다 - 라벨 창을 여기에 맞춘다
+    trading_days = {d for d, _c in series}
 
     note_bits = []
     # 라벨 주장 - 2026-08-02 부터 daily_labels 이력으로 채점한다
@@ -157,7 +175,8 @@ def score_packet(claims: list[dict], series: list[tuple[date, float]],
         if not hist or packet_date is None:
             unscored_labels += 1
             continue
-        r = evaluate_label_claim(c, hist, packet_date=packet_date, horizon=horizon)
+        r = evaluate_label_claim(c, hist, packet_date=packet_date,
+                                 horizon=horizon, trading_days=trading_days)
         if r["triggered"] is None:      # 이력이 지평을 못 덮는다 - 단정하지 않는다
             unscored_labels += 1
             continue
@@ -168,9 +187,18 @@ def score_packet(claims: list[dict], series: list[tuple[date, float]],
         note_bits.append(f"라벨 주장 {unscored_labels}건은 이력이 지평을 덮지 "
                          f"못해 채점 보류(이력은 2026-08-02 부터 쌓인다)")
 
-    status = "EVALUATED" if used >= horizon and ret is not None else "PENDING_DATA"
+    # ▶ '수익률 미확인'과 '채점 미완료'는 다른 것이다 (2026-08-02 수정)
+    #   예전에는 ret is None 이면 PENDING_DATA 였다. 그런데 ret 은 기준가가
+    #   없어도 None 이 된다(가격 주장이 하나도 없는 Packet - 라벨 주장만 있는
+    #   경우). 그러면 지평이 다 지나고 라벨 채점이 끝나도 **영원히 PENDING**
+    #   이고, analyst_calibration 에서 통째로 사라진다 - 채점했는데 안 센다.
+    #   채점 완료의 기준은 '지평만큼 관측이 쌓였는가' 하나다. 수익률은
+    #   계산되면 싣고 아니면 None 으로 둔다.
+    status = "EVALUATED" if used >= horizon else "PENDING_DATA"
     if status == "PENDING_DATA":
         note_bits.append(f"거래일 {used}/{horizon} - 시세 부족")
+    elif ret is None:
+        note_bits.append("가격 기준가가 없어 수익률은 미확인(라벨 주장만 채점)")
 
     return {"horizon_days": horizon, "status": status,
             "baseline_close": baseline, "horizon_close": close_h,
@@ -396,11 +424,33 @@ def _check_label_claim_scoring():
     withday = [(p, "RISK_ON")] + same
     assert evaluate_label_claim(flip, withday, packet_date=p, horizon=3)["triggered"] is False
 
+    # 창은 거래일로 센다 - 주말이 끼면 달력일 창은 통째로 짧아진다.
+    # 8/3(월)~8/7(금) 중 8/8·8/9 는 주말이라 daily_labels 에는 있어도 창에서 빠진다.
+    weekend_hist = [(date(2026, 8, 7), "BREADTH_THRUST"),   # 금
+                    (date(2026, 8, 8), "BREADTH_THRUST"),   # 토 - 거래일 아님
+                    (date(2026, 8, 9), "BREADTH_THRUST"),   # 일 - 거래일 아님
+                    (date(2026, 8, 10), "RISK_ON")]         # 월 - 여기서 전환
+    tdays = {date(2026, 8, 7), date(2026, 8, 10), date(2026, 8, 11)}
+    cal = evaluate_label_claim(flip, weekend_hist, packet_date=date(2026, 8, 6),
+                               horizon=3)
+    trd = evaluate_label_claim(flip, weekend_hist, packet_date=date(2026, 8, 6),
+                               horizon=3, trading_days=tdays)
+    assert cal["triggered"] is False and cal["calendar_basis"] == "calendar_days", cal
+    assert trd["triggered"] is True and trd["triggered_on"] == "2026-08-10", trd
+    assert trd["calendar_basis"] == "trading_days"
+
     # score_packet 배선 - 이력이 있으면 채점되고 note 에 보류가 안 남는다
     claims = [dict(flip)]
     res = score_packet(claims, [], 3, label_history={"REGIME": hist}, packet_date=p)
     assert res["claims_triggered"] == 1, res
     assert "보류" not in (res["note"] or ""), res["note"]
+    # 가격 기준가가 없어도 지평이 지났으면 채점 완료다 - 영원히 PENDING 이면
+    # analyst_calibration 에서 통째로 사라진다
+    done = score_packet(claims, [(date(2026, 8, 3), 100.0), (date(2026, 8, 4), 101.0),
+                                 (date(2026, 8, 5), 102.0)], 3,
+                        label_history={"REGIME": hist}, packet_date=p)
+    assert done["status"] == "EVALUATED", done
+    assert done["forward_return_pct"] is None and "미확인" in (done["note"] or ""), done
     # 이력이 아예 없으면 보류로 남는다(조용히 무발동으로 세지 않는다)
     res2 = score_packet(claims, [], 3, label_history={}, packet_date=p)
     assert res2["claims_triggered"] == 0 and "보류" in (res2["note"] or "")

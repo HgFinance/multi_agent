@@ -1,11 +1,17 @@
 # 리스크본부 (Risk Management)
 
-## P1 현재 상태 (2026-08-02)
+## P1 현재 상태 (2026-08-03)
 
 - `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.
 - `p1/repository.py`가 `risk.snapshots`, `risk.exposure_components`, `risk.stress_results`, `risk.kill_switch_events`를 한 트랜잭션으로 적재한다. Fund/Book/Instrument/승인된 Stress Scenario FK가 없으면 생성·우회하지 않고 rollback한다.
 - LS증권 어댑터는 읽기 전용이다. 실제 키·계좌·운영 DB가 주입되기 전에는 실제 데이터를 수집하거나 운영 Snapshot을 만들지 않는다. `RISK_REQUIRE_P1_ANALYTICS=true`인 pre-trade API는 P1 Snapshot이 없거나 PASS가 아니면 차단한다.
 - 남은 운영 조건은 실제 API 자격증명, governed FK 원장, RLS/OMS E2E 및 운영 장애 검증이다. P1 계산 코드가 구현됐다는 뜻이지 실거래 승인을 뜻하지 않는다.
+- 2026-08-03 감사에서 Self-check 7개와 명시 pytest는 통과했지만 Compose Service와 실제
+  `risk.risk_decisions`, `risk.trading_states`, `risk.run_log_events` Row는 0건이었다.
+- 결정론적 Markdown 보고서와 Notion Block Projection을 추가했고 현재 Risk 보고서 11개가 있다.
+  Notion 실패는 Risk 판정을 바꾸지 않으며 운영 전 Report Hash·Artifact Storage·Page 멱등 계약이 필요하다.
+
+현재 실행 상태와 동규님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)을 따른다.
 
 ## Skill Harness
 

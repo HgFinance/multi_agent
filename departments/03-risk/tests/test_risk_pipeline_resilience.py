@@ -37,6 +37,30 @@ def test_supervisor_failure_preserves_binding_verdict(monkeypatch):
     assert out["verdict"] == "approve"
     assert out["escalate"] is True
     assert out["fallbacks"][0]["stage"] == "supervisor"
+    assert out["supervisor_call_status"] == "failed"
+    assembled = risk_scripts._assemble_out({
+        "assessment": {
+            "verdict": "approve",
+            "risk_request_id": "r1",
+            "approved_quantity": None,
+            "reason_codes": [],
+            "check_results": [],
+            "calculation_version": "v1",
+            "input_hash": "h1",
+        },
+        "order_intent": {},
+        "context": {},
+        "trading_state": "ENABLED",
+        **out,
+    })
+    assert assembled["agent_execution"]["failed"] == ["risk-supervisor"]
+    assert "risk-supervisor" not in assembled["agent_execution"]["executed"]
+
+
+def test_hermes_model_is_loaded_from_risk_profile_config():
+    model = risk_scripts._hermes_model_config()
+    assert model["provider"] == "openai-codex"
+    assert model["model"] == "gpt-5.6-luna"
 
 
 def test_pipeline_build_failure_returns_reject_report(monkeypatch):

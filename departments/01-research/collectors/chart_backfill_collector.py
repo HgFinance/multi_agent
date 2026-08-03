@@ -133,20 +133,28 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str) -> tuple[int,
          None, True, SOURCE, source_version, "PASS", SCHEMA_VERSION)
         for b in bars
     ]
+    # ▶ count(*) 대신 RETURNING (2026-08-02 수정)
+    #   예전에는 삽입 전후로 `select count(*) from market.market_bars
+    #   where source=%s` 를 종목마다 두 번 했다. market_bars 는 400만 행
+    #   하이퍼테이블이라 이 한 번이 전체 스캔이고, 종목 수만큼 반복하면
+    #   백필 시간이 종목 수에 대해 2차식으로 늘어난다. 게다가 다른 세션이
+    #   동시에 넣으면 그 증가분까지 '내가 넣은 것'으로 세어 수치가 틀린다.
+    #   RETURNING 은 **이 문장이 실제로 삽입한 행**만 돌려준다.
+    #
+    #   fetch=True 가 필수다 - execute_values 는 page_size 단위로 문장을
+    #   쪼개므로 그냥 fetchall() 하면 마지막 문장 것만 잡힌다
+    #   (market_repository._insert 에 같은 함정의 실측 기록이 있다).
     with conn.cursor() as cur:
-        cur.execute("select count(*) from market.market_bars where source=%s", (SOURCE,))
-        before = cur.fetchone()[0]
-        execute_values(cur, """
+        returned = execute_values(cur, """
             insert into market.market_bars
               (bucket_time, observed_at, instrument_id, market, interval_code,
                open, high, low, close, volume, trade_count, notional,
                vwap, is_final, source, source_version, quality_status, schema_version)
-            values %s on conflict do nothing
-        """, rows, page_size=1000)
-        cur.execute("select count(*) from market.market_bars where source=%s", (SOURCE,))
-        after = cur.fetchone()[0]
+            values %s on conflict do nothing returning 1
+        """, rows, page_size=1000, fetch=True)
+        inserted = len(returned)
     conn.commit()
-    return after - before, len(rows) - (after - before)
+    return inserted, len(rows) - inserted
 
 
 # ---------------------------------------------------------------------------
