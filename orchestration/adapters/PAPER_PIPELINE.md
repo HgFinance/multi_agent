@@ -13,9 +13,9 @@ Accounting projection -> accounting_snapshot (never posted)
 CEO Luna -> ceo_case_summary (always non-binding)
 ```
 
-부서 실행 계층은 모든 부서에서 동일하다. Hermes Agent가 Codex 또는 Claude Code에 연결된 부서장이며, 부서 직원은 역할별 독립 LangGraph Worker Graph와 Ollama `qwen3:8b`를 사용한다. Worker는 허용된 도구 결과를 context로 만들 뿐이며, Risk/QA 결정론 엔진의 바인딩 판정이나 CEO의 최종 비바인딩 종합을 대체하지 않는다.
+부서 실행 계층은 모든 부서에서 동일하다. Hermes Agent가 Codex 또는 Claude Code에 연결된 부서장이며, 부서 직원은 역할별 독립 LangGraph Worker Graph와 Ollama `qwen3:8b`를 사용한다. Worker는 허용된 도구 결과를 `worker-context.v1`로 만들어 부서장에게 전달할 뿐이며, Risk/QA 결정론 엔진의 바인딩 판정이나 CEO의 최종 비바인딩 종합을 대체하지 않는다.
 
-Risk·QA에서 적용된 Worker 계약과 HR의 active/conditional/paused/retired 운영 기준은 [DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md](../../docs/02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)에 고정한다.
+전 부서 Worker 계약과 HR의 active/conditional/paused/retired 운영 기준은 [DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md](../../docs/02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)에, 모델 선택 기준은 [WORKER_MODEL_MATRIX.md](../../docs/02-engineering/WORKER_MODEL_MATRIX.md)에 고정한다.
 
 Use it from the repository root:
 

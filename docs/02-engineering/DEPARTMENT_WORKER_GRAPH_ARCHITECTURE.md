@@ -1,16 +1,18 @@
 # 부서 실행 계층 v2: Hermes 부서장과 LangGraph 직원
 
-상태: 확정 설계 · Risk/QA 1차 적용
+상태: 확정 설계 · 8개 부서 Worker Registry 적용
 
-이 문서는 전체 투자 파이프라인의 공통 실행 계층을 정의한다.
+이 문서는 전체 투자 파이프라인의 공통 실행 계층과 Worker 수·역할·모델 경계를 정의한다. 전체 직원 수의 Source of Truth는 각 부서 `config.yaml`의 `staff_registry`, `workers`, `runtime_personalities`와 해당 부서 `employee_workers.py`다.
 
 - 부서장: Hermes Agent가 연결한 상위 LLM(Codex 또는 Claude Code)
-- 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama `qwen3:8b` (Risk/QA 현재 고정)
+- 직원: 역할별 독립 LangGraph Worker Graph + 로컬 Ollama `qwen3:8b` (전체 부서 현재 고정)
 - 결정론적 엔진: Risk Gate, Evidence QA Gate, PIT·인용·권한·상태 전이의 유일한 바인딩 소유자
 
 ![0–7번 부서 전체 파이프라인 아키텍처](assets/whole_pipeline_0_7.png)
 
 원본 편집 가능한 다이어그램은 [`whole_pipeline_0_7.svg`](assets/whole_pipeline_0_7.svg)이며, PNG는 [`render_whole_pipeline.py`](assets/render_whole_pipeline.py)로 재생성한다.
+
+Worker별 경량·표준·중량 모델 선택 규칙은 [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md)에 고정한다. 현재 운영 후보는 모든 Worker에서 `qwen3:8b`이며, benchmark·HR 제안·QA 검증·CEO 승인 전에는 자동 변경하지 않는다.
 
 ## 전체 파이프라인
 
@@ -72,7 +74,13 @@ case_request
 
 | 부서 | Registry 전체 | 기본 실행 | 조건부 실행 | 케이스 최대 |
 |---|---:|---:|---:|---:|
+| CEO | 1 | 1 | 0 | 1 |
+| HR | 5 | 2 | 3 | 5 |
+| Research | 6 | 2 | 4 | 6 |
+| Trading | 6 | 2 | 4 | 6 |
 | Risk | 4 | 2 | 2 | 4 |
+| Quant / Backtest | 7 | 2 | 5 | 7 |
+| Accounting / Portfolio | 8 | 2 | 6 | 8 |
 | QA | 5 | 1 | 4 | 5 |
 
 기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다.

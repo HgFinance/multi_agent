@@ -10,13 +10,18 @@
 # 레이어인 workforce.agent_profile_versions.model_id 에 배정된다(예: HR-00=Bedrock Deep,
 # HR-01/04=Ollama Quick). 이 값 변경은 8개 Profile 공통 + ADR 대상이다(CLAUDE.md 참고).
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: agent-workforce-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  runtime_personalities: [workforce-planning-worker, profile-architecture-worker, selection-performance-worker, lifecycle-coordination-worker, workforce-governance-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60
@@ -118,3 +123,49 @@ skills:
 usage:
   run: "hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'"
   collaborate: "hr-department chat -q 'Design a Job Profile for a new risk-management analyst, then route it to qa-department for permission verification and ceo-agent for budget approval'"
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+staff_registry:
+  head_count: 1
+  worker_count: 5
+  default_execution_count: 2
+  max_execution_count: 5
+  active_worker_count: 2
+  conditional_worker_count: 3
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+employee_runtime:
+  executor: langgraph
+  topology: independent_graph_per_worker
+  worker_graph_module: departments/07-agent-workforce/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:8b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:8b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: workforce.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/07-agent-workforce/lifecycle
+  failure_action: ESCALATE
+workers:
+  workforce-planning-worker: {status: active, tools: [workforce.queue.read, workforce.sla.read], output: advisory_context}
+  profile-architecture-worker: {status: active, tools: [workforce.profile.read], output: advisory_context}
+  selection-performance-worker: {status: conditional, trigger: performance_signal, tools: [workforce.evaluation.read], output: advisory_context}
+  lifecycle-coordination-worker: {status: conditional, trigger: lifecycle_event, tools: [workforce.lifecycle.read], output: advisory_context}
+  workforce-governance-worker: {status: conditional, trigger: governance_request, tools: [workforce.governance.read], output: advisory_context}
