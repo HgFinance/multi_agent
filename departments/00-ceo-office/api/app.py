@@ -51,9 +51,30 @@ _BASE = Path(__file__).resolve().parent.parent
 _MANDATE_DIR = _BASE / "src" / "mandate"
 _REPORTING_DIR = _BASE / "src" / "reporting"
 _NOTIFICATION_DIR = _BASE / "src" / "notification"
-for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR):
+_APPROVAL_DIR = _BASE / "src" / "approval"
+for _p in (_MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR):
     sys.path.insert(0, str(_p))
 
+from approval import (
+    AlreadyDecidedError,
+    ApprovalDecision,
+    ApprovalExpiredError,
+    ApprovalRecord,
+    InMemoryApprovalRepository,
+    ObjectType,
+    OwnerApprovalNotSupportedError,
+    RequiredRole,
+    UnauthorizedDeciderError,
+)
+from approval import (
+    decide as decide_approval,
+)
+from approval import (
+    request_approval as build_approval_request,
+)
+from approval import (
+    revoke as revoke_approval,
+)
 from daily_report import (
     DailyReportAssembler,
     DailyReportSections,
@@ -99,6 +120,11 @@ try:
     from postgres_notification_repository import PostgresNotificationRepository
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_approval_repository import PostgresApprovalRepository
+except ImportError:
+    PostgresApprovalRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -155,6 +181,63 @@ class NotificationRequestIn(BaseModel):
     now: datetime
 
 
+# GOV-02 1단계 승인 모델. 위 ApprovalIn(Mandate 활성화 시 '사용자 승인' 증적)과 다른 개념이라
+# 이름을 구분한다 - 저건 lifecycle.py의 UserApproval이고 이건 governance.approvals 행이다.
+
+
+class ApprovalRequestIn(BaseModel):
+    """POST /governance/v1/approvals (스펙 2.2 request_approval Request 그대로)."""
+
+    object_type: ObjectType
+    object_id: str
+    required_role: RequiredRole
+    fund_id: str
+    reason: str | None = None
+    expires_at: datetime | None = None
+    conditions: dict = {}
+    idempotency_key: str | None = Field(
+        default=None,
+        description="스펙 2.2 필드. 실제 중복 방지는 DDL의 "
+                    "unique(object_type, object_id, required_role)가 하므로 여기서 별도로 "
+                    "저장하지 않는다 - governance.approvals에 이 컬럼이 없다.",
+    )
+
+
+class ApprovalDecisionIn(BaseModel):
+    """POST /governance/v1/approvals/{approval_id}/decide.
+
+    스펙에 이름이 없는 제안 엔드포인트다(2.2는 request_approval만 확정). 요청 생성과 결정
+    기록을 분리해야 하는 이유는 권한이 다르기 때문이다 - approval.py 불변식 2 참고.
+
+    actor_department는 호출자가 자기 부서를 밝히는 값이고, 이 API는 그것이 required_role과
+    맞는지만 결정론적으로 검사한다. 실제 신원 증명(mTLS/JWT 등)은 Platform 계층 몫이며
+    아직 없다 - 그 전까지 이 검사는 '실수 방지'이고 '침입 방지'가 아니다(투명하게 남긴다).
+    """
+
+    decision: ApprovalDecision
+    actor_department: str = Field(min_length=1)
+    at: datetime
+    actor_agent_id: str | None = Field(
+        default=None,
+        description="결정한 Agent. workforce.agent_profiles FK이므로 Roster에 등록된 "
+                    "agent_id여야 한다(미등록 uuid는 DB가 거절).",
+    )
+    actor_user_id: str | None = Field(
+        default=None,
+        description="사람이 찍은 승인일 때만 채운다. governance.user_profiles FK.",
+    )
+    conditions: dict | None = None
+    reason: str | None = None
+
+
+class ApprovalRevokeIn(BaseModel):
+    actor_department: str = Field(min_length=1)
+    at: datetime
+    reason: str = Field(min_length=1)
+    actor_agent_id: str | None = None
+    actor_user_id: str | None = None
+
+
 class SnapshotRefIn(BaseModel):
     snapshot_id: str
     as_of: datetime
@@ -199,6 +282,14 @@ if os.environ.get("DATABASE_URL") and PostgresNotificationRepository is not None
 else:
     notification_repo = InMemoryNotificationRepository()
 notification_service = NotificationService(notification_repo)
+
+# GOV-02 1단계 - 승인. Mandate/Report/Notification과 같은 패턴(In-Memory 기본,
+# DATABASE_URL 있으면 Postgres)이다. 여기선 In-Memory 대체가 의미 있다 - 승인 상태 전이와
+# 권한 분리 규칙 자체는 저장소와 무관한 순수 함수라서 DB 없이도 계약을 검증할 수 있다.
+if os.environ.get("DATABASE_URL") and PostgresApprovalRepository is not None:
+    approval_repo = PostgresApprovalRepository.connect(os.environ["DATABASE_URL"])
+else:
+    approval_repo = InMemoryApprovalRepository()
 
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
@@ -339,6 +430,37 @@ def _on_governance_event_bus_error(request, exc: GovernanceEventBusError):
 def _on_currency_mismatch(request, exc: CurrencyMismatchError):
     return JSONResponse(status_code=400, content={
         "error_code": "MANDATE_CURRENCY_MISMATCH", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# GOV-02 승인 도메인 예외 -> HTTP. 어느 쪽도 200으로 새지 않는다(approval.py 불변식 1).
+#   권한 없음 403 / 만료·중복결정 409 / OWNER 미지원 501
+@app.exception_handler(UnauthorizedDeciderError)
+def _on_unauthorized_decider(request, exc: UnauthorizedDeciderError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnauthorizedDeciderError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(ApprovalExpiredError)
+def _on_approval_expired(request, exc: ApprovalExpiredError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "ApprovalExpiredError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(AlreadyDecidedError)
+def _on_already_decided(request, exc: AlreadyDecidedError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "AlreadyDecidedError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(OwnerApprovalNotSupportedError)
+def _on_owner_approval_unsupported(request, exc: OwnerApprovalNotSupportedError):
+    return JSONResponse(status_code=501, content={
+        "error_code": "OwnerApprovalNotSupportedError", "message": str(exc), "detail": {},
+        "trace_id": None,
     })
 
 
@@ -494,6 +616,100 @@ def get_report(content_hash: str, fund_id: str):
     }
 
 
+# --- 2.2 Approval (GOV-02 1단계) --------------------------------------------------
+#
+# `request_approval`은 스펙 2.2 확정 엔드포인트다. decide/revoke/조회는 스펙에 이름이 없는
+# 제안이지만, 요청만 만들고 결정할 수 없으면 승인이 영원히 PENDING으로 남으므로 함께 넣는다.
+#
+# 판정 로직은 여기 없다 - approval.py의 순수 함수(assert_can_decide/decide/revoke)가 전부
+# 하고, 이 계층은 HTTP <-> 도메인 변환과 저장만 담당한다.
+
+
+def _approval_dict(a: ApprovalRecord) -> dict:
+    return {
+        "approval_id": a.approval_id, "fund_id": a.fund_id,
+        "object_type": a.object_type.value, "object_id": a.object_id,
+        "required_role": a.required_role.value, "decision": a.decision.value,
+        "reason": a.reason, "conditions": a.conditions or {},
+        "created_at": a.created_at.isoformat(),
+        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "actor_user_id": a.actor_user_id, "actor_agent_id": a.actor_agent_id,
+    }
+
+
+def _load_approval(approval_id: str) -> ApprovalRecord:
+    approval = approval_repo.get(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id} 없음")
+    return approval
+
+
+@app.post("/governance/v1/approvals")
+def request_approval(body: ApprovalRequestIn):
+    """승인 요청을 만든다. 요청 생성 자체에는 부서 제한이 없다 (결정만 제한된다).
+
+    같은 (object_type, object_id, required_role) 조합이 이미 있으면 새로 만들지 않고 기존
+    건을 그대로 돌려준다 - DDL unique 제약이 정한 계약이며, 거절된 건이 있으면 그 거절이
+    조회된다(approval.py 불변식 4). 재요청으로 거절을 지우지 않는다.
+    """
+    existing = approval_repo.find(body.object_type, body.object_id, body.required_role)
+    if existing is not None:
+        return _approval_dict(existing)
+
+    approval = build_approval_request(
+        approval_id=str(uuid.uuid4()), fund_id=body.fund_id, object_type=body.object_type,
+        object_id=body.object_id, required_role=body.required_role,
+        created_at=datetime.now(timezone.utc), reason=body.reason,
+        expires_at=body.expires_at, conditions=body.conditions,
+    )
+    approval_repo.save(approval)
+    return _approval_dict(approval)
+
+
+@app.get("/governance/v1/approvals/{approval_id}")
+def get_approval(approval_id: str):
+    return _approval_dict(_load_approval(approval_id))
+
+
+@app.get("/governance/v1/approvals")
+def list_approvals(object_type: ObjectType, object_id: str):
+    """대상 하나에 걸린 승인 전부. HR-02가 ceo_approval_id를 찾을 때 쓰는 경로다."""
+    return {"approvals": [
+        _approval_dict(a) for a in approval_repo.list_by_object(object_type, object_id)
+    ]}
+
+
+@app.post("/governance/v1/approvals/{approval_id}/decide")
+def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
+    """승인/거절을 기록한다. required_role과 actor_department가 안 맞으면 403.
+
+    CEO Office가 호스팅하는 API지만 required_role=RISK/QA인 승인은 CEO Office가 결정할 수
+    없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
+    자동 승격되지 않는다.
+    """
+    updated = decide_approval(
+        _load_approval(approval_id), decision=body.decision,
+        actor_department=body.actor_department, at=body.at,
+        actor_agent_id=body.actor_agent_id, actor_user_id=body.actor_user_id,
+        conditions=body.conditions, reason=body.reason,
+    )
+    approval_repo.save(updated)
+    return _approval_dict(updated)
+
+
+@app.post("/governance/v1/approvals/{approval_id}/revoke")
+def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
+    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    updated = revoke_approval(
+        _load_approval(approval_id), actor_department=body.actor_department, at=body.at,
+        reason=body.reason, actor_agent_id=body.actor_agent_id,
+        actor_user_id=body.actor_user_id,
+    )
+    approval_repo.save(updated)
+    return _approval_dict(updated)
+
+
 # --- F24 Notification (governance-api §8.1에 이름 없는 제안 엔드포인트) -------------
 
 
@@ -585,4 +801,93 @@ if __name__ == "__main__":
     assert all(x["status"] == "PENDING" for x in n1.json()["notifications"])
     assert all(x["status"] == "PENDING" for x in n2.json()["notifications"]), "CRITICAL이 억제됐다"
 
-    print("ok - CEO Office Domain API 7개 시나리오 점검 통과")
+    # 8. 승인 요청(GOV-02) - PENDING 생성, 같은 대상·역할 재요청은 같은 건을 돌려준다.
+    a1 = client.post("/governance/v1/approvals", json={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+        "required_role": "CEO", "fund_id": "f1", "reason": "HR-02 활성화",
+    })
+    assert a1.status_code == 200 and a1.json()["decision"] == "PENDING", a1.text
+    approval_id = a1.json()["approval_id"]
+    a1b = client.post("/governance/v1/approvals", json={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+        "required_role": "CEO", "fund_id": "f1",
+    })
+    assert a1b.json()["approval_id"] == approval_id, "재요청이 새 승인을 만들었다"
+
+    # 9. 권한 분리 - RISK 승인은 CEO Office가 결정할 수 없다(403).
+    a2 = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-1",
+        "required_role": "RISK", "fund_id": "f1",
+    })
+    risk_id = a2.json()["approval_id"]
+    d_bad = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+    })
+    assert d_bad.status_code == 403, d_bad.text
+    assert client.get(f"/governance/v1/approvals/{risk_id}").json()["decision"] == "PENDING"
+
+    # 10. 리스크본부 본인은 결정 가능. DB 표기(risk-management)도 받는다.
+    d_ok = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "REJECTED", "actor_department": "risk-management", "at": now,
+        "reason": "한도 초과",
+    })
+    assert d_ok.status_code == 200 and d_ok.json()["decision"] == "REJECTED", d_ok.text
+
+    # 11. 이미 결정된 승인 재결정 409, 거절된 건 재요청해도 거절이 그대로 조회된다.
+    d_again = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "RISK", "at": now,
+    })
+    assert d_again.status_code == 409, d_again.text
+    a2b = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-1",
+        "required_role": "RISK", "fund_id": "f1",
+    })
+    assert a2b.json()["decision"] == "REJECTED", "재요청이 거절을 지웠다"
+
+    # 12. OWNER는 fail-closed(501) - 소유 부서 검증 경로가 없다.
+    a3 = client.post("/governance/v1/approvals", json={
+        "object_type": "CAPITAL_ALLOCATION", "object_id": "ca-1",
+        "required_role": "OWNER", "fund_id": "f1",
+    })
+    d_owner = client.post(f"/governance/v1/approvals/{a3.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+    })
+    assert d_owner.status_code == 501, d_owner.text
+
+    # 13. 만료된 승인은 결정 불가(409) - 자동 승인으로 떨어지지 않는다.
+    # created_at은 서버의 실제 now라 expires_at은 그보다 뒤여야 요청이 만들어진다(그게 아니면
+    # 400). 그래서 기한을 넉넉히 미래로 두고, 그 기한을 넘긴 시점에 결정을 시도한다.
+    a4 = client.post("/governance/v1/approvals", json={
+        "object_type": "IMPROVEMENT_CANDIDATE", "object_id": "ic-1",
+        "required_role": "CEO", "fund_id": "f1",
+        "expires_at": "2026-12-31T00:00:00+00:00",
+    })
+    assert a4.status_code == 200, a4.text
+    d_exp = client.post(f"/governance/v1/approvals/{a4.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "actor_department": "CEO-OFFICE",
+        "at": "2027-01-01T00:00:00+00:00",
+    })
+    assert d_exp.status_code == 409, d_exp.text
+    # 만료 시도 후에도 PENDING이어야 한다 - 실패가 상태를 바꾸지 않는다.
+    assert client.get(
+        f"/governance/v1/approvals/{a4.json()['approval_id']}"
+    ).json()["decision"] == "PENDING"
+
+    # 14. CEO 승인 결정 -> 철회. 사람 승인이 아니므로 actor_user_id는 None 유지.
+    d_ceo = client.post(f"/governance/v1/approvals/{approval_id}/decide", json={
+        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+    })
+    assert d_ceo.status_code == 200 and d_ceo.json()["decision"] == "APPROVED", d_ceo.text
+    assert d_ceo.json()["actor_user_id"] is None
+    rv = client.post(f"/governance/v1/approvals/{approval_id}/revoke", json={
+        "actor_department": "CEO-OFFICE", "at": now, "reason": "Mandate 변경",
+    })
+    assert rv.status_code == 200 and rv.json()["decision"] == "REVOKED", rv.text
+
+    # 15. 대상별 승인 목록 조회 - HR-02가 ceo_approval_id를 찾는 경로.
+    lst = client.get("/governance/v1/approvals", params={
+        "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
+    })
+    assert lst.status_code == 200 and len(lst.json()["approvals"]) == 1, lst.text
+
+    print("ok - CEO Office Domain API 15개 시나리오 점검 통과 (승인 8개 포함)")
