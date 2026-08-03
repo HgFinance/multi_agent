@@ -18,8 +18,17 @@ python -m orchestration.workflows.runner \
   --json > /tmp/investment-case-paper.json
 
 python -m orchestration.reports.paper_case \
-  --run-json /tmp/investment-case-paper.json \
-  --output orchestration/reports/paper_case_report_aapl-001.md
+ --run-json /tmp/investment-case-paper.json \
+ --output orchestration/reports/paper_case_report_aapl-001.md
+
+# 직원·Risk·QA 실행과 CEO Luna 종합까지 연결하는 읽기 전용 paper mode
+python -m orchestration.workflows.runner \
+ --workflow investment-case \
+ --mode paper \
+ --symbol AAPL \
+ --quantity 100 \
+ --limit-price 200.00 \
+ --json > /tmp/investment-case-paper-domain.json
 ```
 
 The report always marks its forecast as `SIMULATION_ONLY` and its CEO result
