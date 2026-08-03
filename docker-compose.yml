@@ -39,6 +39,8 @@ name: hedgefund
 #   서비스(redis 등)와 하나의 병합된 모델을 공유하므로 depends_on 등 상호 참조가 그대로 된다.
 include:
   - departments/00-ceo-office/compose.yaml
+  - departments/02-trading/compose.yaml
+  - departments/05-accounting-portfolio/compose.yaml
   - departments/07-agent-workforce/compose.yaml
 
 services:
@@ -549,56 +551,9 @@ services:
   # (governance-api, notification-worker, ceo-hermes, workforce-api, improvement-worker,
   # workforce-hermes). 이 파일 상단 `include:` 참고.
 
-  # ── 트레이딩·회계/포트폴리오본부 (도현 소유) ────────────────────────────────
-  # 근거: HERMES_DOCKER_RUNBOOK.md 4-2절(다른 본부를 추가하는 법),
-  #       DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 3.1(Hermes는 별도 Image),
-  #       6.3·6.6절(트레이딩·회계본부 Container 목록)
-  #
-  # ▶ 지금은 Hermes 2개뿐이다. 계획서 6.3·6.6의 trading-api / accounting-api /
-  #   oms-worker / ledger-worker 는 넣지 않았다 - departments/02-trading 과
-  #   05-accounting-portfolio 에 api/app.py 가 아직 없다(2026-08-03 확인).
-  #   조회면은 현재 apps/api BFF 한 프로세스가 두 부서 Router 를 함께 서빙한다.
-  #   **코드 없는 역할을 컨테이너부터 만들지 않는다**(03-risk Dockerfile 과 같은 원칙).
-  #
-  # ▶ 볼륨 디렉터리 이름은 Profile 이름과 정확히 같아야 한다 - scripts/
-  #   sync_hermes_profiles.sh 의 매핑(trading-department / accounting-portfolio-
-  #   department)이 그 규칙으로 경로를 찾는다. 부서 폴더명(02-trading)이 아니다.
-  #
-  # ▶ env 는 CLAUDE.md 배정표대로 둘 다 OPENAI_API_KEY 만 준다(각 config.yaml 의
-  #   env: 블록이 참조하는 키). 아무 키나 넣지 않는다.
-  trading-hermes:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-trading-hermes
-    restart: unless-stopped
-    command: ["gateway", "run"]
-    volumes:
-      - ${USERPROFILE}/.hermes-trading-department:/opt/data
-    environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    mem_limit: 1g
-    mem_reservation: 192m
-    cpus: 1.0
-    pids_limit: 256
-    stop_grace_period: 20s
-
-  accounting-hermes:
-    image: nousresearch/hermes-agent:latest
-    container_name: hedgefund-accounting-hermes
-    restart: unless-stopped
-    command: ["gateway", "run"]
-    volumes:
-      - ${USERPROFILE}/.hermes-accounting-portfolio-department:/opt/data
-    environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    mem_limit: 1g
-    mem_reservation: 192m
-    cpus: 1.0
-    pids_limit: 256
-    stop_grace_period: 20s
+  # 트레이딩·회계/포트폴리오본부(도현 소유) 서비스도 각자 Compose Fragment로 옮겼다 -
+  # departments/02-trading/compose.yaml, departments/05-accounting-portfolio/compose.yaml
+  # (trading-hermes, accounting-hermes). 이 파일 상단 `include:` 참고.
 
   # 부서가 실제로 어떻게 도는지 보는 창. 127.0.0.1 전용 - 외부 노출 금지.
   #

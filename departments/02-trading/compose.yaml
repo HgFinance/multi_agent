@@ -1,0 +1,41 @@
+# Trading Department Compose Fragment (도현 소유).
+#
+# 근거: docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 10절(Docker Compose
+#       구조 - "본부가 자기 Compose Fragment를 소유하도록 한다"), 6.3절(트레이딩본부 Container 목록),
+#       3.1절(Hermes는 Backend Image에 설치하지 않고 공식 Image를 별도 Container로 띄운다),
+#       docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4-2절(다른 본부를 추가하는 법)
+#
+# 루트 docker-compose.yml이 `include:`로 이 파일을 끌어온다. include된 파일도 루트 파일과
+# 하나의 병합된 모델을 공유하므로 redis 같은 공통 Platform Container를 서비스 이름으로
+# 참조할 수 있다(계획서 5절 - 공통 인프라는 루트가 소유한다).
+#
+# ▶ 지금은 Hermes 하나뿐이다. 계획서 6.3의 trading-api / oms-worker / broker-adapter는
+#   넣지 않았다 - departments/02-trading에 api/app.py가 아직 없고, 조회면은 apps/api BFF
+#   한 프로세스가 트레이딩·회계 Router를 함께 서빙한다. 코드 없는 역할을 컨테이너부터
+#   만들지 않는다(departments/03-risk/Dockerfile 상단 주석과 같은 원칙).
+services:
+  # ▶ 볼륨 디렉터리 이름은 Profile 이름과 정확히 같아야 한다 - scripts/sync_hermes_profiles.sh가
+  #   `~/.hermes-<profile>` 규칙으로 경로를 찾는다. 부서 폴더명(02-trading)이 아니다.
+  #
+  # ▶ 부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개(계획서 3.1~3.2). 컨테이너만 쪼개고
+  #   /opt/data를 공유하면 한 부서의 세션·기억·자격이 옆 부서에서 그대로 보인다 - 분리된
+  #   척이 된다. HERMES_HOME=/opt/data가 이미지 기본값이라 마운트만 갈면 분리가 끝난다.
+  #
+  # ▶ env는 CLAUDE.md 배정표대로 OPENAI_API_KEY만 준다(hermes/config.yaml의 env: 블록이
+  #   참조하는 키). 아무 키나 넣지 않는다.
+  trading-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-trading-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - ${USERPROFILE}/.hermes-trading-department:/opt/data
+    environment:
+      HERMES_UID: 10000
+      HERMES_GID: 10000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
