@@ -286,7 +286,7 @@ if __name__ == "__main__":
         return open_case(
             case_id=case_id, fund_id=fund,
             display_id=build_display_id(case_type, created_at=t0, sequence=seq),
-            case_type=case_type, priority=2, owner_department="AGENT-WORKFORCE",
+            case_type=case_type, priority=2, owner_department="hr-department",
             trace_id=f"trace-{case_id}", created_by="ceo-agent", created_at=t0,
             idempotency_key=key or f"open-{case_id}",
         )

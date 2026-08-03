@@ -17,7 +17,7 @@ begin;
 -- 1) 부서
 insert into workforce.departments (department_code, name, mission)
 values (
-  'AGENT-WORKFORCE',
+  'hr-department',
   'Agent Workforce 인사팀',
   'CEO 직속 Shared Service. 6개 본부의 업무량·품질·비용·Skill Gap을 근거로 Agent 채용·평가·교육·이동·비활성화를 관리한다. 투자 본부가 아니다.'
 )
@@ -70,7 +70,7 @@ from (values
    '["iam_admin_direct","assign_self_as_approver"]',
    '{"metrics":["zero_unauthorized_activation","provisioning_lead_time","revocation_sla","zero_orphan_case","zero_dormant_identity"]}')
 ) as v(role_code, mission, required_skills, forbidden_actions, kpi)
-cross join (select department_id from workforce.departments where department_code = 'AGENT-WORKFORCE') d
+cross join (select department_id from workforce.departments where department_code = 'hr-department') d
 on conflict (role_code) do nothing;
 
 -- 4) Agent Roster (P0 3명 + P1 2명) — CANDIDATE 상태
@@ -85,7 +85,7 @@ from (values
   ('HR-02', 'HR-02', 'profile-architect'),
   ('HR-03', 'HR-03', 'selection-performance-agent')
 ) as v(employee_code, role_code, display_name)
-join workforce.departments d on d.department_code = 'AGENT-WORKFORCE'
+join workforce.departments d on d.department_code = 'hr-department'
 join workforce.role_templates r on r.role_code = v.role_code
 on conflict (employee_code) do nothing;
 

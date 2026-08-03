@@ -314,7 +314,7 @@ if __name__ == "__main__":
         case, ev = open_case(
             case_id=case_id, fund_id=fund_id,
             display_id=build_display_id("HIRING", created_at=t0, sequence=seq),
-            case_type="HIRING", priority=2, owner_department="AGENT-WORKFORCE",
+            case_type="HIRING", priority=2, owner_department="hr-department",
             trace_id=str(uuid.uuid4()), created_by="selfcheck", created_at=t0,
             idempotency_key=f"selfcheck-open-{case_id}", reason="자체 점검",
         )

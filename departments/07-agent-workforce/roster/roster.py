@@ -289,7 +289,7 @@ if __name__ == "__main__":
     repo = InMemoryRosterRepository()
     repo.seed_agent(AgentSummary(
         agent_id="a1", employee_code="HR-00", display_name="agent-workforce-supervisor",
-        department_code="AGENT-WORKFORCE", role_code="HR-00",
+        department_code="hr-department", role_code="HR-00",
         employment_status=EmploymentStatus.CANDIDATE, current_version=0,
         current_profile_version=None, owner_user_id=None,
     ))

@@ -228,7 +228,7 @@ if __name__ == "__main__":
         profile_version_id = str(version_row[0])
 
         # 1) department_code 조회.
-        dept_id = repo.get_department_id("AGENT-WORKFORCE")
+        dept_id = repo.get_department_id("hr-department")
         assert dept_id == department_id
         print("ok - get_department_id (실 DB) 통과")
 

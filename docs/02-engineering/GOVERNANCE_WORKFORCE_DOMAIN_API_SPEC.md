@@ -192,12 +192,24 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 {
   "case_type": "MANDATE_CHANGE|COMMITTEE|INCIDENT|HIRING|IMPROVEMENT",
   "priority": 2,
-  "owner_department": "AGENT-WORKFORCE",
+  "owner_department": "hr-department",
   "fund_id": "uuid",
   "due_at": "2026-08-01T00:00:00Z",
   "trace_id": "uuid"
 }
 ```
+
+> **부서 식별자 표기(2026-08-04 확정)** — 부서를 가리키는 모든 필드(`owner_department`,
+> `department`, `department_code`, `target`, `actor_department`)는 **Hermes Profile 이름**을
+> 쓴다: `ceo-agent`, `research-department`, `trading-department`, `risk-management`,
+> `quant-backtest-department`, `accounting-portfolio-department`, `qa-department`,
+> `hr-department`.
+>
+> 이 문서는 이전에 대문자 표기(`AGENT-WORKFORCE`, `RISK`, `QA`)를 예시로 썼는데, 실제 코드
+> 40개 파일(프론트엔드 `riskQaBridge.ts`, `apps/api/main.py`, 리스크·QA harness와 tests,
+> 등록 마이그레이션)은 전부 Profile 이름을 쓰고 있었다. 대문자 표기를 쓰는 코드는 없었으므로
+> 다수 쪽으로 문서를 맞췄다. 폴더 이름(`03-risk`, `06-ai-qa-audit`)은 세 번째 체계이며
+> 경로 전용이다 — 데이터 식별자로 쓰지 않는다.
 
 **`request_approval`**
 
@@ -226,7 +238,7 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 
 ```json
 {
-  "department": "RISK|QA|TRADING|RESEARCH|QUANT|ACCOUNTING",
+  "department": "risk-management|qa-department|trading-department|research-department|quant-backtest-department|accounting-portfolio-department",
   "decision": "APPROVE|CONDITIONAL|REJECT",
   "conditions": {},
   "artifact_ids": ["uuid"]
@@ -268,7 +280,7 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
   "agents": [{
     "agent_id": "uuid", "employee_code": "HR-00",
     "display_name": "agent-workforce-supervisor",
-    "department_code": "AGENT-WORKFORCE", "role_code": "HR-00",
+    "department_code": "hr-department", "role_code": "HR-00",
     "employment_status": "CANDIDATE|PROBATION|ACTIVE|SUSPENDED|RETIRED",
     "current_version": 1,
     "current_profile_version": {

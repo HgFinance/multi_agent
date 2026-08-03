@@ -253,7 +253,7 @@ if __name__ == "__main__":
 
         # 3) CEO Office가 결정 -> APPROVED 영속화. actor_user_id는 None 유지(불변식 2).
         approved = decide(
-            loaded, decision=ApprovalDecision.APPROVED, actor_department="CEO-OFFICE",
+            loaded, decision=ApprovalDecision.APPROVED, actor_department="ceo-agent",
             at=t0 + timedelta(hours=2), actor_agent_id=decider_agent_id,
             conditions={"note": "selfcheck"},
         )
@@ -263,7 +263,7 @@ if __name__ == "__main__":
         assert reloaded.actor_agent_id == decider_agent_id
         assert reloaded.actor_user_id is None
         assert reloaded.conditions["note"] == "selfcheck"
-        assert reloaded.conditions["_decider"] == {"department": "CEO-OFFICE"}
+        assert reloaded.conditions["_decider"] == {"department": "CEO-AGENT"}
         assert reloaded.decided_at is not None
         print(f"ok - 결정 기록 (실 DB) 통과 - actor_user_id는 None 유지, "
               f"actor_agent_id는 등재된 {decider_code} 차용, _decider 부서 기록 확인")
@@ -283,7 +283,7 @@ if __name__ == "__main__":
         repo.save(replace(reloaded, actor_agent_id=None))
         no_agent = repo.get(approval_id)
         assert no_agent.actor_agent_id is None and no_agent.actor_user_id is None
-        assert no_agent.conditions["_decider"] == {"department": "CEO-OFFICE"}
+        assert no_agent.conditions["_decider"] == {"department": "CEO-AGENT"}
         print("ok - Agent 미등재 경로(actor_agent_id=NULL + _decider 부서) 실 DB 저장 확인")
 
         # 4) DB의 unique 제약이 실제로 막는지 - 같은 대상·역할에 다른 approval_id (불변식 1).

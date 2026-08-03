@@ -1124,7 +1124,7 @@ if __name__ == "__main__":
     })
     risk_id = a2.json()["approval_id"]
     d_bad = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
-        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
     })
     assert d_bad.status_code == 403, d_bad.text
     assert client.get(f"/governance/v1/approvals/{risk_id}").json()["decision"] == "PENDING"
@@ -1138,7 +1138,7 @@ if __name__ == "__main__":
 
     # 11. 이미 결정된 승인 재결정 409, 거절된 건 재요청해도 거절이 그대로 조회된다.
     d_again = client.post(f"/governance/v1/approvals/{risk_id}/decide", json={
-        "decision": "APPROVED", "actor_department": "RISK", "at": now,
+        "decision": "APPROVED", "actor_department": "risk-management", "at": now,
     })
     assert d_again.status_code == 409, d_again.text
     a2b = client.post("/governance/v1/approvals", json={
@@ -1153,7 +1153,7 @@ if __name__ == "__main__":
         "required_role": "OWNER", "fund_id": "f1",
     })
     d_owner = client.post(f"/governance/v1/approvals/{a3.json()['approval_id']}/decide", json={
-        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
     })
     assert d_owner.status_code == 501, d_owner.text
 
@@ -1167,7 +1167,7 @@ if __name__ == "__main__":
     })
     assert a4.status_code == 200, a4.text
     d_exp = client.post(f"/governance/v1/approvals/{a4.json()['approval_id']}/decide", json={
-        "decision": "APPROVED", "actor_department": "CEO-OFFICE",
+        "decision": "APPROVED", "actor_department": "ceo-agent",
         "at": "2027-01-01T00:00:00+00:00",
     })
     assert d_exp.status_code == 409, d_exp.text
@@ -1178,12 +1178,12 @@ if __name__ == "__main__":
 
     # 14. CEO 승인 결정 -> 철회. 사람 승인이 아니므로 actor_user_id는 None 유지.
     d_ceo = client.post(f"/governance/v1/approvals/{approval_id}/decide", json={
-        "decision": "APPROVED", "actor_department": "CEO-OFFICE", "at": now,
+        "decision": "APPROVED", "actor_department": "ceo-agent", "at": now,
     })
     assert d_ceo.status_code == 200 and d_ceo.json()["decision"] == "APPROVED", d_ceo.text
     assert d_ceo.json()["actor_user_id"] is None
     rv = client.post(f"/governance/v1/approvals/{approval_id}/revoke", json={
-        "actor_department": "CEO-OFFICE", "at": now, "reason": "Mandate 변경",
+        "actor_department": "ceo-agent", "at": now, "reason": "Mandate 변경",
     })
     assert rv.status_code == 200 and rv.json()["decision"] == "REVOKED", rv.text
 
@@ -1195,7 +1195,7 @@ if __name__ == "__main__":
 
     # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
     c1 = client.post("/governance/v1/cases", json={
-        "case_type": "HIRING", "priority": 2, "owner_department": "AGENT-WORKFORCE",
+        "case_type": "HIRING", "priority": 2, "owner_department": "hr-department",
         "fund_id": "f1", "trace_id": "trace-case-1", "created_by": "ceo-agent",
         "reason": "리스크본부 Queue 적체",
     })
@@ -1217,7 +1217,7 @@ if __name__ == "__main__":
 
     # 18. OPEN -> RESOLVED 직행 차단(409), Terminal 이후 전이 차단(409).
     c2 = client.post("/governance/v1/cases", json={
-        "case_type": "INCIDENT", "priority": 90, "owner_department": "RISK",
+        "case_type": "INCIDENT", "priority": 90, "owner_department": "risk-management",
         "fund_id": "f1", "trace_id": "trace-case-2", "created_by": "ceo-agent",
     })
     skip = client.post(f"/governance/v1/cases/{c2.json()['case_id']}/transitions", json={
@@ -1236,7 +1236,7 @@ if __name__ == "__main__":
 
     # 19. display_id는 같은 타입·날짜에서 연번이 증가하고 타입이 다르면 접두어가 다르다.
     c3 = client.post("/governance/v1/cases", json={
-        "case_type": "HIRING", "priority": 1, "owner_department": "AGENT-WORKFORCE",
+        "case_type": "HIRING", "priority": 1, "owner_department": "hr-department",
         "fund_id": "f1", "trace_id": "trace-case-3", "created_by": "ceo-agent",
     })
     assert c3.json()["display_id"] != c1.json()["display_id"]

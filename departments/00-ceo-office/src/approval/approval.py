@@ -24,16 +24,11 @@
      승인은 영구히 한 건이며, 거절된 뒤 재요청하면 그 거절된 건이 그대로 조회된다. 이건 스키마가
      정한 계약이므로 애플리케이션에서 우회하지 않는다.
 
-부서 코드 표기(2026-08-03 실측) — 저장소에 두 종류의 불일치가 동시에 있다.
-  a) 표기: governance 스펙은 대문자 하이픈(`owner_department: "AGENT-WORKFORCE"`)인데
-     workforce.departments에는 `risk-management`, `qa-department` 같은 소문자 폴더명 표기도 있다.
-  b) 이름: 스펙 2.3은 짧은 이름(`RISK`/`QA`)을, DB는 긴 이름(`risk-management`/`qa-department`)을
-     쓴다. 같은 부서를 가리키는 서로 다른 이름 두 벌이다.
-(a)는 normalize_department()로 흡수한다. (b)는 진짜 데이터 불일치이며 팀 차원의 통일이 필요하다 -
-아래 _ROLE_DECIDERS가 두 이름을 함께 받는 건 그 통일이 끝나기 전까지의 **임시 호환**이다.
-**제거 조건**: workforce.departments의 department_code가 한 가지 표기로 통일되고 governance
-스펙 2.3의 부서 어휘와 일치하면, 각 역할의 허용 집합을 정규 이름 하나로 줄인다.
-다른 본부가 이미 쓰는 코드를 인사팀/CEO가 임의로 개명하지 않는다(그쪽 FK 의존 코드가 깨진다).
+부서 식별자는 **Hermes Profile 이름**을 쓴다 (`ceo-agent`, `risk-management`, `qa-department` 등).
+2026-08-04에 확정됐다 — 그 전에는 API 스펙이 대문자 표기(`RISK`/`QA`/`AGENT-WORKFORCE`)를
+예시로 썼지만 실제 코드 40개 파일이 전부 Profile 이름을 쓰고 있었고 대문자 표기를 쓰는 코드는
+없었으므로, 다수 쪽으로 스펙 문서를 맞췄다(GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절 주석).
+normalize_department()는 대소문자·`_` 차이만 흡수하는 방어 코드로 남긴다.
 
 자체 점검: python departments/00-ceo-office/src/approval/approval.py
 """
@@ -82,13 +77,13 @@ class AlreadyDecidedError(Exception):
     """PENDING이 아닌 승인에 다시 결정을 시도했다."""
 
 
-# required_role별로 결정을 내릴 수 있는 부서. 여기에 없는 조합은 전부 거절이다.
-# 각 역할의 두 이름은 스펙 어휘(짧은 이름)와 실제 DB 코드(긴 이름)다 - 위 "부서 코드 표기"의
-# 불일치 (b)에 대한 임시 호환이며 제거 조건도 거기 적어뒀다.
+# required_role별로 결정을 내릴 수 있는 부서(Hermes Profile 이름). 여기에 없는 조합은 전부
+# 거절이다. required_role은 governance.approvals.required_role의 DDL 값이라 그대로 두고,
+# 부서 식별자만 Profile 이름을 쓴다 - 둘은 다른 축이다(역할 vs 조직).
 _ROLE_DECIDERS: dict[RequiredRole, frozenset[str]] = {
-    RequiredRole.CEO: frozenset({"CEO-OFFICE"}),  # 통일 대상 아님 - 이번에 새로 만드는 코드
-    RequiredRole.RISK: frozenset({"RISK", "RISK-MANAGEMENT"}),
-    RequiredRole.QA: frozenset({"QA", "QA-DEPARTMENT"}),
+    RequiredRole.CEO: frozenset({"CEO-AGENT"}),
+    RequiredRole.RISK: frozenset({"RISK-MANAGEMENT"}),
+    RequiredRole.QA: frozenset({"QA-DEPARTMENT"}),
     # OWNER는 의도적으로 비어 있다 - 아래 decide()가 먼저 fail-closed로 막는다.
     RequiredRole.OWNER: frozenset(),
 }
@@ -341,43 +336,51 @@ if __name__ == "__main__":
 
     # 2) CEO Office가 CEO 승인을 결정 -> APPROVED.
     approved = decide(
-        ceo_req, decision=ApprovalDecision.APPROVED, actor_department="CEO-OFFICE",
+        ceo_req, decision=ApprovalDecision.APPROVED, actor_department="ceo-agent",
         at=t0 + timedelta(hours=1), actor_agent_id=ceo_agent_id,
     )
     assert approved.decision is ApprovalDecision.APPROVED
     assert approved.actor_agent_id == ceo_agent_id
     assert approved.actor_user_id is None  # 사람 승인 아님 - 조용히 채우지 않는다
     # 결정 부서는 approvals에 컬럼이 없어 conditions._decider에 남는다.
-    assert approved.conditions["_decider"] == {"department": "CEO-OFFICE"}
+    assert approved.conditions["_decider"] == {"department": "CEO-AGENT"}
 
     # 2b) Agent Roster 미등재 상태(actor_agent_id=None)에서도 결정 부서는 남아야 한다.
     no_agent = decide(
         _pending(RequiredRole.CEO), decision=ApprovalDecision.APPROVED,
-        actor_department="ceo_office".replace("_", "-"), at=t0,
+        actor_department="ceo_agent", at=t0,  # `_` 표기도 정규화가 흡수한다
     )
     assert no_agent.actor_agent_id is None and no_agent.actor_user_id is None
-    assert no_agent.conditions["_decider"] == {"department": "CEO-OFFICE"}
+    assert no_agent.conditions["_decider"] == {"department": "CEO-AGENT"}
 
-    # 3) 핵심 권한 분리 - CEO Office가 RISK 승인을 결정하려 하면 거절 (불변식 2).
+    # 3) 핵심 권한 분리 - CEO가 RISK 승인을 결정하려 하면 거절 (불변식 2).
     risk_req = _pending(RequiredRole.RISK)
     try:
         decide(risk_req, decision=ApprovalDecision.APPROVED,
-               actor_department="CEO-OFFICE", at=t0)
-        raise AssertionError("CEO Office가 RISK 승인을 결정함")
+               actor_department="ceo-agent", at=t0)
+        raise AssertionError("ceo-agent가 RISK 승인을 결정함")
     except UnauthorizedDeciderError:
         pass
 
-    # 4) 리스크본부 본인은 결정할 수 있다. 실제 DB 코드 표기(risk-management)도 받는다.
-    for dept in ("RISK", "risk-management"):
+    # 4) 리스크본부 본인은 결정할 수 있다. 대소문자·`_` 차이는 정규화가 흡수한다.
+    for dept in ("risk-management", "RISK-MANAGEMENT", "risk_management"):
         ok = decide(_pending(RequiredRole.RISK), decision=ApprovalDecision.REJECTED,
                     actor_department=dept, at=t0, reason="한도 초과")
         assert ok.decision is ApprovalDecision.REJECTED
 
+    # 4b) 폐기된 대문자 축약 표기(`RISK`)는 이제 받지 않는다 - Profile 이름만 인정한다.
+    try:
+        decide(_pending(RequiredRole.RISK), decision=ApprovalDecision.APPROVED,
+               actor_department="RISK", at=t0)
+        raise AssertionError("폐기된 'RISK' 표기가 통과함")
+    except UnauthorizedDeciderError:
+        pass
+
     # 5) QA도 같은 방식 - CEO는 QA 승인도 못 찍는다.
     try:
         decide(_pending(RequiredRole.QA), decision=ApprovalDecision.APPROVED,
-               actor_department="CEO-OFFICE", at=t0)
-        raise AssertionError("CEO Office가 QA 승인을 결정함")
+               actor_department="ceo-agent", at=t0)
+        raise AssertionError("ceo-agent가 QA 승인을 결정함")
     except UnauthorizedDeciderError:
         pass
     assert decide(_pending(RequiredRole.QA), decision=ApprovalDecision.APPROVED,
@@ -386,7 +389,7 @@ if __name__ == "__main__":
     # 6) OWNER는 fail-closed (불변식 3).
     try:
         decide(_pending(RequiredRole.OWNER), decision=ApprovalDecision.APPROVED,
-               actor_department="CEO-OFFICE", at=t0)
+               actor_department="ceo-agent", at=t0)
         raise AssertionError("OWNER 승인이 검증 없이 통과함")
     except OwnerApprovalNotSupportedError:
         pass
@@ -395,7 +398,7 @@ if __name__ == "__main__":
     expiring = _pending(RequiredRole.CEO, expires=t0 + timedelta(hours=1))
     try:
         decide(expiring, decision=ApprovalDecision.APPROVED,
-               actor_department="CEO-OFFICE", at=t_late)
+               actor_department="ceo-agent", at=t_late)
         raise AssertionError("만료된 승인이 결정됨")
     except ApprovalExpiredError:
         pass
@@ -403,7 +406,7 @@ if __name__ == "__main__":
     # 8) 이미 결정된 승인 재결정 불가.
     try:
         decide(approved, decision=ApprovalDecision.REJECTED,
-               actor_department="CEO-OFFICE", at=t_late)
+               actor_department="ceo-agent", at=t_late)
         raise AssertionError("이미 결정된 승인이 다시 결정됨")
     except AlreadyDecidedError:
         pass
@@ -412,21 +415,21 @@ if __name__ == "__main__":
     for bad in (ApprovalDecision.PENDING, ApprovalDecision.EXPIRED, ApprovalDecision.REVOKED):
         try:
             decide(_pending(RequiredRole.CEO), decision=bad,
-                   actor_department="CEO-OFFICE", at=t0)
+                   actor_department="ceo-agent", at=t0)
             raise AssertionError(f"decide()가 {bad.value}를 받아들임")
         except ValueError:
             pass
 
     # 10) 철회 - APPROVED만 가능하고 사유가 필요하다.
-    revoked = revoke(approved, actor_department="CEO-OFFICE", at=t_late, reason="Mandate 변경")
+    revoked = revoke(approved, actor_department="ceo-agent", at=t_late, reason="Mandate 변경")
     assert revoked.decision is ApprovalDecision.REVOKED
     try:
-        revoke(revoked, actor_department="CEO-OFFICE", at=t_late, reason="다시")
+        revoke(revoked, actor_department="ceo-agent", at=t_late, reason="다시")
         raise AssertionError("REVOKED를 다시 철회함")
     except AlreadyDecidedError:
         pass
     try:
-        revoke(approved, actor_department="CEO-OFFICE", at=t_late, reason="   ")
+        revoke(approved, actor_department="ceo-agent", at=t_late, reason="   ")
         raise AssertionError("사유 없이 철회됨")
     except ValueError:
         pass
@@ -463,4 +466,4 @@ if __name__ == "__main__":
     repo.save(_pending(RequiredRole.RISK))
     assert len(repo.list_by_object(ObjectType.AGENT_PROFILE_VERSION, "pv-1")) == 2
 
-    print("ok - GOV-02 승인 도메인 계약 14개 시나리오 통과")
+    print("ok - GOV-02 승인 도메인 계약 15개 시나리오 통과")
