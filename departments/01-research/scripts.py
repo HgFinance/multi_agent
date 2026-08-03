@@ -41,6 +41,8 @@ sys.path.insert(0, str(_BASE / "agents"))
 
 from langgraph.graph import END, StateGraph  # noqa: E402
 
+from evidence.forecast import falsification_note  # noqa: E402
+from evidence.forecast import probability_for_claim  # noqa: E402
 from evidence.llm_client import chat as llm_chat  # noqa: E402
 
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
@@ -570,6 +572,19 @@ def build_packet_claims(state: dict, packet: dict) -> list[dict]:
                        "op": "==", "threshold_text": "SHOCK",
                        "baseline_text": geo, "horizon_days": 20,
                        "source_node": "geopolitical"})
+    # ▶ 사전 확률·반증 조건을 붙인다 (2026-08-03, P0)
+    #   확률이 없으면 Brier Score·Calibration Error 를 원리적으로 못 센다 -
+    #   발동 여부만 세면 과신하는 분석가와 소심한 분석가가 구분되지 않는다.
+    #   **코드가 낸다** - LLM 이 자기 확률을 쓰면 맞히기 쉬운 쪽으로 굽는다
+    #   (origin='code' 와 같은 이유).
+    closes = price.get("closes") or []
+    for c in claims:
+        prob, method = probability_for_claim(c, closes)
+        if prob is not None:
+            c["probability"] = prob
+            c["probability_method"] = method
+            c["method_key"] = method
+        c["falsification_note"] = falsification_note(c)
     return claims
 
 
@@ -598,14 +613,18 @@ def _record_packet_claims(*, trace_id: str, symbol: str, claims: list[dict],
                     insert into research.packet_claims
                       (trace_id, symbol, kind, metric, op, threshold,
                        threshold_text, baseline, baseline_text, horizon_days,
-                       source_node, as_known_at)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       source_node, as_known_at, probability,
+                       probability_method, method_key, falsification_note)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
                     on conflict (trace_id, kind, metric, horizon_days) do nothing
                     """,
                     (trace_id, symbol, c["kind"], c["metric"], c["op"],
                      c.get("threshold"), c.get("threshold_text"),
                      c.get("baseline"), c.get("baseline_text"),
-                     c["horizon_days"], c.get("source_node"), as_known_at))
+                     c["horizon_days"], c.get("source_node"), as_known_at,
+                     c.get("probability"), c.get("probability_method"),
+                     c.get("method_key"), c.get("falsification_note")))
         conn.commit()
         if own:
             conn.close()

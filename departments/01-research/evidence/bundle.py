@@ -116,6 +116,10 @@ def compute_price_context(bars: list[dict]) -> dict:
         "low_20d": low_20,
         "range_position_20d_pct": pos_20,
     }
+    # 종가 시계열(과거->최신). 주장의 사전 확률(evidence/forecast.py)이 여기서
+    # 실현변동성을 낸다 - 요약 통계만으로는 변동성을 복원할 수 없다.
+    # rows 는 최신순이므로 뒤집어 시간순으로 준다(계산 쪽 관례와 맞춘다).
+    ctx["closes"] = list(reversed(closes))
     if missing:
         ctx["note"] = "봉 부족으로 미확인: " + ", ".join(missing)
     return ctx
