@@ -42,6 +42,8 @@ sys.path.insert(0, str(_BASE / "agents"))
 from langgraph.graph import END, StateGraph  # noqa: E402
 
 from evidence.forecast import falsification_note  # noqa: E402
+from evidence.highlights import pick_highlights  # noqa: E402
+from evidence.highlights import render_line as render_highlights  # noqa: E402
 from evidence.forecast import probability_for_claim  # noqa: E402
 from evidence.llm_client import chat as llm_chat  # noqa: E402
 
@@ -49,7 +51,14 @@ PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통�
 KST = timezone(timedelta(hours=9))
 
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+# ▶ 총괄은 별도 엔드포인트를 쓸 수 있다 (2026-08-03)
+#   실측: pipeline_runs 19회 중 10회가 총괄 스키마 이탈로 실패했다
+#   (evidence_quality 에 문장을 넣거나, 키를 통째로 빠뜨리거나, 한 겹 싸거나).
+#   qwen3:14b 가 6인 분석가 readout 을 종합하는 이 자리에서 반복적으로 무너진다.
+#   RESEARCH_SUPERVISOR_BASE 를 Claude Code 프록시로 돌리면 그 자리만 올릴 수
+#   있다 - 분석가 6인은 그대로 로컬 무료다(비용·한도 소모가 예측 가능하다).
 SUPERVISOR_MODEL = os.environ.get("RESEARCH_SUPERVISOR_MODEL", "qwen3:14b")
+SUPERVISOR_BASE = os.environ.get("RESEARCH_SUPERVISOR_BASE", OLLAMA_BASE).rstrip("/")
 MARKET_API = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036")
 RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 
@@ -461,7 +470,7 @@ SUPERVISOR_MAX_TOKENS = 8192
 def _ollama_chat(system: str, user: str) -> str:
     """호출 모양은 evidence/llm_client 가 단일 출처다. 여기 남는 것은 총괄의
     설정뿐 - 이 셋만 분석가와 다를 이유가 실제로 있다."""
-    return llm_chat(system, user, base=OLLAMA_BASE, model=SUPERVISOR_MODEL,
+    return llm_chat(system, user, base=SUPERVISOR_BASE, model=SUPERVISOR_MODEL,
                     timeout=SUPERVISOR_TIMEOUT,
                     temperature=SUPERVISOR_TEMPERATURE,
                     max_tokens=SUPERVISOR_MAX_TOKENS)
@@ -742,11 +751,20 @@ def run_research_department(symbol: str) -> dict:
         status="COMPLETED", packet=packet,
         analyst_verdicts={k: v for k, v in packet["_analyst_verdicts"].items() if v})
     # 분석가 서술 - 리포트를 풍성하게. 검증(환각·수치·라벨)을 통과한 문장만 온다
+    # ▶ 핵심 수치는 **코드가** 싣는다 (2026-08-03 실측 개선)
+    #   계측 결과: 미시구조 재료 25개 중 LLM 이 3개만 인용(12%), 지정학 18개 중
+    #   3개(18%). 서술이 "2~3문장 600자"로 묶여 있어 애초에 다 못 쓴다 -
+    #   모델을 탓할 문제가 아니다. 그런데 Packet 에는 summary 만 실리므로
+    #   나머지 22개는 계산해놓고 버려졌다. 무엇이 중요한 재료인지도 판정의
+    #   일부이므로 코드가 골라 그대로 싣는다(판정은 코드, 서술만 LLM).
     packet["_analyst_notes"] = {
         node: {"summary": ((out.get(key) or {}).get("note") or {}).get("summary")
                           or (out.get(key) or {}).get("summary"),
                "cautions": ((out.get(key) or {}).get("note") or {}).get("cautions")
-                           or (out.get(key) or {}).get("cautions") or []}
+                           or (out.get(key) or {}).get("cautions") or [],
+               "highlights": pick_highlights(
+                   (out.get(key) or {}).get("readout"),
+                   flags=((out.get(key) or {}).get("readout") or {}).get("flags") or [])}
         for node, key in (("technical", "technical"),
                           ("fundamental", "fundamental"),
                           ("regime", "regime"),
@@ -794,14 +812,27 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
 
     # 분석가 원문 소견 - 총괄이 압축하며 버린 맥락이 여기 남는다. 상충하는
     # 소견을 지우지 않는 것이 본부 원칙이라, 요약본 옆에 원문을 같이 싣는다.
+    # 서술이 없어도(LLM 실패·침묵) **핵심 수치가 있으면 싣는다.** 예전에는
+    # summary 가 없으면 그 분석가를 통째로 뺐는데, 그러면 결정론 계산 결과까지
+    # 같이 사라진다 - LLM 이 죽었다고 코드가 만든 재료를 버릴 이유가 없다
+    # (실측 2026-08-03: 5인 중 3인이 이 필터에 걸려 리포트에서 사라졌다).
     notes = {k: v for k, v in (packet.get("_analyst_notes") or {}).items()
-             if v.get("summary")}
+             if v.get("summary") or (v.get("highlights") or {}).get("items")}
     if notes:
         lines += ["## 분석가 소견 원문 (검증 통과분)", ""]
         for node, n in notes.items():
             verdict = verdicts.get(node)
-            lines += [f"### {node}" + (f" — `{verdict}`" if verdict else ""), "",
-                      str(n["summary"]), ""]
+            lines += [f"### {node}" + (f" — `{verdict}`" if verdict else ""), ""]
+            lines += ([str(n["summary"]), ""] if n.get("summary")
+                      else ["_서술 없음 (LLM 미응답) - 아래 수치는 코드 계산이다_", ""])
+            # 코드가 고른 핵심 수치 - LLM 이 문장에 못 담은 재료가 여기로 온다.
+            # 실측(2026-08-03): 서술만 실을 때 미시구조는 계산한 25개 중 3개만
+            # Packet 에 도달했다. 나머지가 버려지는 것을 막는다.
+            h = n.get("highlights") or {}
+            if h.get("items") or h.get("flags"):
+                if h.get("flags"):
+                    lines += [f"- **임계 위반**: {', '.join(h['flags'])}"]
+                lines += [f"- **핵심 수치**: {render_highlights(h)}", ""]
             for c in n.get("cautions") or []:
                 lines += [f"> ⚠ {c}"]
             if n.get("cautions"):
@@ -812,7 +843,8 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
     claims = packet.get("_claims") or []
     if claims:
         lines += ["## 검증 예정 주장 (코드 발행 · 사후 자동 채점)", "",
-                  "| 종류 | 조건 | 지평 | 출처 |", "|---|---|---|---|"]
+                  "| 종류 | 조건 | 지평 | 사전확률 | 출처 |",
+                  "|---|---|---|---|---|"]
         for c in claims:
             tgt = c.get("threshold")
             cond = (f"`{c['metric']} {c['op']} "
@@ -821,8 +853,16 @@ def _render_packet_md(packet: dict, *, now: Optional[str] = None) -> str:
                 cond += f" (기준 {c['baseline']:,})"
             elif c.get("baseline_text"):
                 cond += f" (기준 {c['baseline_text']})"
+            # 확률은 코드가 낸 사전 확률(evidence/forecast). 없으면 '-' -
+            # 라벨 주장은 변동성 모형의 대상이 아니라 확률을 내지 않는다.
+            pr = c.get("probability")
             lines += [f"| {c['kind']} | {cond} | {c['horizon_days']}거래일 | "
+                      f"{f'{pr:.0%}' if pr is not None else '-'} | "
                       f"{c.get('source_node') or '-'} |"]
+        notes_f = [c for c in claims if c.get("falsification_note")]
+        if notes_f:
+            lines += ["", "**반증 조건** (발행 시점 고정 - 사후 해석 방지)", ""]
+            lines += [f"- {c['falsification_note']}" for c in notes_f]
         lines += ["",
                   f"기록 {packet.get('_claims_recorded', 0)}건 — 채점은 "
                   f"`collectors/packet_outcome_scorer.py`, 누적 성과는 "

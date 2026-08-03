@@ -55,14 +55,43 @@ MEASURE_VERSION = "research-agent-measure-v1"
 MARKET_WIDE = ("regime", "geopolitical")
 
 
+# 재료가 **중첩 컨테이너 안에** 있는 분석가가 있다. RES-05 는 readout 최상위가
+# {verdict, scope, period_end, fields, cautions} 5개뿐이고 실제 재료는 fields
+# 안에 있는데, LLM 은 그 안쪽 이름(used_fields)을 인용한다. 최상위만 세면
+# 분모가 5, 분자가 10 이 되어 **인용밀도가 2.0** 으로 나온다(2026-08-03 실측
+# 결함). 컨테이너를 펼쳐야 같은 단위로 비교된다.
+_CONTAINER_KEYS = ("fields", "ratios", "themes", "breadth_by_market",
+                   "macro_overlay", "volatility", "liquidity")
+# 지표가 아닌 bookkeeping - 인용 대상이 아니므로 분모에서 뺀다
+_NOT_MATERIAL = ("regime_rules", "tilt_rules", "flag_criteria", "assessment_rule",
+                 "depth_imbalance_convention", "cautions", "method_keys",
+                 "label_reason", "driver")
+
+
 def count_readout(readout) -> tuple[int, int]:
-    """(재료 수, 그중 미확인 수). 중첩 dict 는 1개로 센다 - 최상위 키가
-    '분석가가 만든 재료' 의 단위다."""
+    """(재료 수, 그중 미확인 수).
+
+    컨테이너 키(fields·ratios 등)는 **펼쳐서** 안쪽을 센다 - LLM 이 인용하는
+    단위가 그쪽이기 때문이다. 규칙표·사유 문자열은 재료가 아니라 뺀다.
+    """
     if not isinstance(readout, dict):
         return 0, 0
-    keys = [k for k in readout if not k.endswith("_rules")]
-    nulls = sum(1 for k in keys if readout.get(k) is None)
-    return len(keys), nulls
+    keys, nulls = 0, 0
+    for k, v in readout.items():
+        if k in _NOT_MATERIAL or k.endswith("_rules"):
+            continue
+        if k in _CONTAINER_KEYS and isinstance(v, dict):
+            for ik, iv in v.items():
+                keys += 1
+                # fields 는 {이름: {value:..}} 모양이라 value 를 들여다본다
+                inner = iv.get("value") if isinstance(iv, dict) and "value" in iv else iv
+                if inner is None:
+                    nulls += 1
+            continue
+        keys += 1
+        if v is None:
+            nulls += 1
+    return keys, nulls
 
 
 def measure_one(name: str, fn, **kwargs) -> dict:
