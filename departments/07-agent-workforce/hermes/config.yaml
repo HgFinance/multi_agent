@@ -54,6 +54,15 @@ implementation:
        (재시작 시 소실). FastAPI TestClient로 4개 영역(access/improvements/scorecard/budget)
        실행 검증 완료 — 자기승인 403, Snapshot 없음은 0이 아니라 None, 예산 초과 시
        PROPOSE_MODEL_DOWNGRADE 권고까지 확인"
+    - "LangGraph 파이프라인 + Notion Reporter — departments/07-agent-workforce/scripts.py
+       (submit_candidate→narrate→notion_report), notion_reporter.py. F19 ImprovementCandidate를
+       실제 Notion HR DB(NOTION_HR_DB)에 올린다. 2026-08-03 실측: 처음엔 F27 Scorecard를
+       올리려 했는데 실제 DB에 붙여보니 Notion 설계서 5절 '채용 후보' 스키마(후보 role_code +
+       CEO 승인/IAM 생성/QA 독립검증 체크박스 3개)로 이미 만들어져 있어 400으로 거부됐다 -
+       Candidate 기반으로 다시 짰다. 로컬 Hermes(nous)와 실제 Notion에 연결해 전 구간 실행
+       검증 완료 — 진짜 Notion 페이지 생성, reports/hr_candidate_*.md 로컬 저장까지 확인.
+       QA독립검증/CEO승인 체크박스는 workflow.py 전이 결과에서만 오고 LLM은 서술만 한다.
+       IAM 생성은 F19 범위 밖이라 항상 False(lifecycle/access.py 소관, 지어내지 않음)"
   in_progress: []
   not_started:
     - "직원 5명 활성화 — 전원 CANDIDATE/DRAFT다. ACTIVE 전환은 QA Eval(audit.eval_runs)과 CEO 승인이 있어야 하며 인사팀이 단독으로 못 올린다. Golden/Adversarial Eval Set은 QA/감사본부 소유라 우리가 못 만든다"
