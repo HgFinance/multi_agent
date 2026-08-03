@@ -190,7 +190,7 @@ def compute_technical_readout(bars: list[dict]) -> dict:
                 cross = "DEAD"
                 break
 
-    return {
+    out = {
         "last_close": _r4(last),
         "last_close_date": str(rows[-1]["bucket_time"])[:10] if rows else None,
         "bars_used": n,
@@ -205,6 +205,29 @@ def compute_technical_readout(bars: list[dict]) -> dict:
         "range_position_20d_pct": rng,
         "cross_sma20_sma60_recent_10d": cross,
     }
+
+    # ▶ 추세·변동성·모멘텀 지표 확장 (2026-08-03)
+    #   재일님 지적: "이동평균선 MA 정도만 기용하고 있는 느낌". MA 계열만으로는
+    #   "추세가 있는가"(ADX)와 "변동성이 확장 중인가"(밴드폭·vol_regime)를 말할 수
+    #   없다. **지표가 늘면 number_guard 의 확정치 풀도 늘어** 서술이 함께 넓어진다.
+    #   못 구한 지표는 키에서 빠지고 unavailable 에 이름만 남는다(0 으로 안 채운다).
+    from indicators import compute_trend_pack
+
+    highs = [float(b["high"]) for b in rows if b.get("high") is not None]
+    lows = [float(b["low"]) for b in rows if b.get("low") is not None]
+    vols = [float(b["volume"]) for b in rows if b.get("volume") is not None]
+    pack = compute_trend_pack(
+        closes,
+        highs if len(highs) == n else None,
+        lows if len(lows) == n else None,
+        vols if len(vols) == n else None)
+    pack.pop("bars_used", None)          # 이미 위에 있다
+    unavailable = pack.pop("unavailable", [])
+    out.update(pack)
+    if unavailable:
+        # 무엇을 못 구했는지 숨기지 않는다 - 봉이 모자란 사실이 판정의 일부다
+        out["indicators_unavailable"] = unavailable
+    return out
 
 
 def _all_core_none(readout: dict) -> bool:
@@ -461,13 +484,14 @@ def _check_cross_detection():
 def _check_verify_hallucination():
     readout = compute_technical_readout(_bars([float(x) for x in range(1, 71)]))
     note = TechnicalNote(stance="BULLISH", summary="20일 모멘텀 40.0% 상승 추세다.",
-                         used_metrics=["momentum_20d_pct", "rsi_14",
+                         used_metrics=["momentum_20d_pct", "없는지표_xyz",
                                        "last_close_date", "momentum_20d_pct"],
                          cautions=[])
     v, dropped = verify(note, readout)
-    # 없는 키(rsi_14)·비수치 키(last_close_date)는 버리고, 중복은 1개로
+    # 없는 키·비수치 키(last_close_date)는 버리고, 중복은 1개로
+    # (rsi_14 는 2026-08-03 지표 확장으로 **실재하게 됐다** - 픽스처를 바꿨다)
     assert v.used_metrics == ["momentum_20d_pct"], v.used_metrics
-    assert dropped["hallucinated_metrics"] == ["rsi_14", "last_close_date"]
+    assert dropped["hallucinated_metrics"] == ["없는지표_xyz", "last_close_date"]
     assert dropped["demoted"] is None and v.stance == "BULLISH"
     print("  환각 키 제거·카운트      OK")
 
@@ -478,12 +502,21 @@ def _check_verify_number_flag():
     note = TechnicalNote(
         stance="BULLISH",
         # 40.0% 는 readout 그대로(통과), -15.7% 는 부호 반전 서술(±0.1 허용),
-        # 99.9% 는 어느 수치에도 없다(플래그)
-        summary="모멘텀 40.0% 에 sma20 대비 -15.7% 괴리, 승률은 99.9% 다.",
+        # 4444.4% 는 어느 수치에도 없다(플래그)
+        #
+        # ▶ 왜 99.9 가 아니라 4444.4 인가 (2026-08-03 지표 확장)
+        #   지표가 늘면 확정치 풀이 넓어지고, 넓어진 만큼 **우연히 맞는 수치**가
+        #   생긴다. 이 픽스처는 단조 상승이라 rsi_14 와 adx 가 100.0 이고
+        #   99.9 가 허용오차(±0.1) 안에 들어와 버렸다.
+        #   **이것은 픽스처 문제이자 실제 한계다** - 풀이 넓어질수록 창작 탐지가
+        #   느슨해진다. 지표 확장의 대가이며, 근본 해결은 수치를 어느 키에
+        #   매칭했는지 추적(trace_quoted)해 "통과가 검증인지 우연인지" 가르는 것이다.
+        #   그건 별도 과제로 남긴다 - 여기서는 한계를 기록만 한다.
+        summary="모멘텀 40.0% 에 sma20 대비 -15.7% 괴리, 승률은 4444.4% 다.",
         used_metrics=["momentum_20d_pct"], cautions=[])
     v, dropped = verify(note, readout)
-    assert dropped["flagged_numbers"] == ["99.9%"], dropped
-    assert any("99.9%" in c for c in v.cautions), v.cautions
+    assert dropped["flagged_numbers"] == ["4444.4%"], dropped
+    assert any("4444.4%" in c for c in v.cautions), v.cautions
     # narrative_guard v1: -15.7 은 price_vs_sma20 의 부호 반전 인용이고 문장에
     # forbidden("레인지")이 없다 - 라벨 플래그 0 이어야 오탐이 없는 것이다
     assert dropped["label_flags"] == [], dropped["label_flags"]
@@ -558,14 +591,15 @@ def _check_analyze_pipeline():
 
     def fake_llm(_s, _u):  # 환각 키 + 창작 수치 + 모순 stance 전부 탑재
         return json.dumps({"stance": "BEARISH",
-                           "summary": "하락 반전 확률 99.9% 로 본다.",
-                           "used_metrics": ["momentum_20d_pct", "rsi_14"],
+                           "summary": "하락 반전 확률 4444.4% 로 본다.",
+                           "used_metrics": ["momentum_20d_pct", "없는지표_xyz"],
                            "cautions": []}, ensure_ascii=False)
 
     out = analyze("000000", llm=fake_llm, get=fake_get)
     assert out["verdict"] == "NEUTRAL", out          # 모순 - 강등됐다
-    assert out["dropped"]["hallucinated_metrics"] == ["rsi_14"]
-    assert out["dropped"]["flagged_numbers"] == ["99.9%"]
+    # rsi_14 는 2026-08-03 지표 확장으로 실재한다 - 환각 픽스처를 바꿨다
+    assert out["dropped"]["hallucinated_metrics"] == ["없는지표_xyz"]
+    assert out["dropped"]["flagged_numbers"] == ["4444.4%"]
     # narrative_guard v1 배선 확인: 위반 0 이어도 카운트 키는 항상 노출된다
     assert out["dropped"]["label_flags"] == []
     assert out["dropped"]["demoted"] and out["llm_status"] == "OK"
