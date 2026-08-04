@@ -462,6 +462,26 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
     metrics = compute_metrics(equity, fills, capital, traded_notional)
     # ▶ 벤치마크 대비를 **항상** 붙인다. 절대수익만 보면 시장이 오른 것을
     #   전략의 실력으로 착각한다.
+    # ── 과적합 통계 (계약 quant_v2 가 요구하는 필드) ────────────────────────
+    # ▶ 계산과 판정을 **같이** 붙인다. 계약에 필드만 있고 채우는 코드가
+    #   없던 상태가 오늘만 세 번째였다(F-Score, industry_code, trial_pressure).
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from overfit_stats import bootstrap_ci, deflated_sharpe
+
+        eq = [v for _, v in equity]
+        rets = [eq[i] / eq[i - 1] - 1.0
+                for i in range(1, len(eq)) if eq[i - 1]]
+        # trials 는 오케스트레이터가 세는 시도 횟수. 없으면 1(보수적으로
+        # 낙관하지 않되, 없는 압력을 지어내지도 않는다).
+        trials = int(config.get("trials") or 1)
+        for src in (deflated_sharpe(rets, trials=trials), bootstrap_ci(rets)):
+            for k, v in src.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    metrics[k] = v          # metrics 는 numeric 전용이다
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"과적합 통계 실패: {type(e).__name__}")
+
     bench_note = "benchmark=equal_weight_buy_and_hold (동일 PIT·동일 비용)"
     try:
         ex = excess_metrics(equity, buy_and_hold_equity(market, config))

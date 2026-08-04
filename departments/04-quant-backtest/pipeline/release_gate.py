@@ -50,6 +50,15 @@ CRITERIA = {
     "max_turnover": 200.0,
     # 창별 재검증을 통과해야 한다. FRAGILE 은 애초에 여기 오지 않는다.
     "required_fragility": "ROBUST",
+    # ▶ Deflated Sharpe. "이 성적이 우연이 아닐 확률" 이다.
+    #   0.95 는 관행적 유의수준 - 20번 중 1번은 우연이어도 통과한다는 뜻이라
+    #   느슨한 편이지만, 표본이 짧은 우리 단계에서 더 조이면 아무것도 못 낸다.
+    "min_deflated_sharpe": 0.95,
+    # ▶ 부트스트랩 구간이 0을 걸치면 알파라고 말할 수 없다.
+    "require_ci_excludes_zero": True,
+    # ▶ 백테스트 1등이 OOS 에서 중앙값 아래로 떨어지는 비율. 절반을 넘으면
+    #   "백테스트 1등" 이 미래를 예측하지 못한다는 뜻이다.
+    "max_pbo": 0.5,
 }
 
 
@@ -129,6 +138,26 @@ def evaluate(metrics: dict, *, fragility: str,
            f"회전율 {to}x > 허용 {CRITERIA['max_turnover']}x - "
            f"비용 가정 오차가 결과를 좌우한다")
 
+    # ── 과적합 통계 (계약 quant_v2 가 요구하는 필드들) ──────────────────────
+    dsr = _num(metrics.get("deflated_sharpe"))
+    _check("deflated_sharpe", dsr,
+           dsr is not None and dsr >= CRITERIA["min_deflated_sharpe"],
+           f"DSR {dsr} < 기준 {CRITERIA['min_deflated_sharpe']} - "
+           f"시도 횟수를 감안하면 이 성적은 우연과 구분되지 않는다")
+
+    lo = _num(metrics.get("bootstrap_ci_low"))
+    if CRITERIA["require_ci_excludes_zero"]:
+        _check("bootstrap_ci", lo,
+               lo is not None and lo > 0.0,
+               f"Sharpe 신뢰구간 하한 {lo} <= 0 - 구간이 0을 걸치면 "
+               f"알파가 있다고 말할 수 없다")
+
+    pbo_v = _num(metrics.get("pbo"))
+    _check("pbo", pbo_v,
+           pbo_v is not None and pbo_v <= CRITERIA["max_pbo"],
+           f"PBO {pbo_v} > 허용 {CRITERIA['max_pbo']} - 백테스트 1등이 "
+           f"OOS 에서 중앙값 아래로 떨어진다")
+
     frag = (fragility or "").strip().upper()
     _check("fragility", frag or None, frag == CRITERIA["required_fragility"],
            f"강건성 {frag or '미확인'} != {CRITERIA['required_fragility']}")
@@ -167,7 +196,38 @@ def _print(d: ReleaseDecision) -> None:
 # ── 자체 점검 ────────────────────────────────────────────────────────────────
 
 _GOOD = {"excess_return_pct": 156.37, "information_ratio": 1.2495,
-         "max_drawdown_pct": -30.0, "turnover": 114.87}
+         "max_drawdown_pct": -30.0, "turnover": 114.87,
+         "deflated_sharpe": 0.985, "bootstrap_ci_low": 0.42,
+         "bootstrap_ci_high": 1.91, "pbo": 0.2}
+
+
+def _check_overfit_stats_block():
+    """**과적합 통계가 실제로 막는가.** 계약에 필드만 있고 안 보면 무의미하다.
+
+    contracts/quant_v2 는 deflated_sharpe·bootstrap_ci 를 필드로 갖고 있었는데
+    채우는 코드도, 보는 코드도 없었다. 계산과 판정을 같이 붙여야 값을 한다.
+    """
+    # DSR 이 낮으면 나머지가 좋아도 막힌다 - 많이 돌려 얻은 성적이다
+    d = evaluate(dict(_GOOD, deflated_sharpe=0.60), fragility="ROBUST")
+    assert d.decision == "HOLD" and "deflated_sharpe" in d.failed, d
+    assert any("우연과 구분" in r for r in d.reasons), d.reasons
+
+    # 신뢰구간이 0을 걸치면 알파라고 말할 수 없다
+    d2 = evaluate(dict(_GOOD, bootstrap_ci_low=-0.1), fragility="ROBUST")
+    assert d2.decision == "HOLD" and "bootstrap_ci" in d2.failed, d2
+
+    # PBO 가 높으면 백테스트 1등이 미래를 예측하지 못한다
+    d3 = evaluate(dict(_GOOD, pbo=0.8), fragility="ROBUST")
+    assert d3.decision == "HOLD" and "pbo" in d3.failed, d3
+
+    # ▶ 셋 다 **미확인이면 통과가 아니다** - 검증을 안 돌린 것과 통과한 것은
+    #   다르다. 계약이 NOT_RUN 을 별도 값으로 두는 이유와 같다.
+    d4 = evaluate({k: v for k, v in _GOOD.items()
+                   if k not in ("deflated_sharpe", "bootstrap_ci_low", "pbo")},
+                  fragility="ROBUST")
+    assert d4.decision == "HOLD", d4
+    for k in ("deflated_sharpe", "bootstrap_ci", "pbo"):
+        assert k in d4.failed, (k, d4.failed)
 
 
 def _check_all_pass_submits():
@@ -266,10 +326,11 @@ if __name__ == "__main__":
 
     print(f"{GATE_VERSION} 자체 점검 (DB 없음)")
     _check_all_pass_submits();       print("  전부 통과 -> 제출        OK")
+    _check_overfit_stats_block();    print("  과적합 통계 차단        OK")
     _check_one_failure_blocks();     print("  하나 미달 -> 차단        OK")
     _check_missing_is_not_pass();    print("  미확인 != 통과          OK")
     _check_fragile_never_submits();  print("  FRAGILE 차단            OK")
     _check_trial_pressure_blocks();  print("  다중검정 차단           OK")
     _check_negative_excess_blocks(); print("  음수 초과 차단          OK")
     _check_gate_cannot_promote();    print("  승격 경로 부재          OK")
-    print("릴리스 관문 7개 영역 통과.")
+    print("릴리스 관문 8개 영역 통과.")
