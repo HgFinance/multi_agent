@@ -580,6 +580,29 @@ if __name__ == "__main__":
         is ApprovalDecision.EXPIRED
     assert wf._version_repo.get_mandate_current("m1") == (3, "ACTIVE")
     print("ok - UC-5(user approval expiry preserves prior version)")
+
+    # UC-4: a counterproposal starts a new version and repeats every review gate.
+    counter_at = user_request_at + timedelta(hours=3)
+    r16 = wf.submit(mandate_id="m1", fund_id="f1", policy=_policy("0.35"),
+                    objective_text="counterproposal", objective={}, effective_from=counter_at,
+                    created_by="u", trace_id="t7", now=counter_at,
+                    previous_policy=_policy("0.3"))
+    assert r16.stage is ChangeStage.AWAITING_REVIEW and r16.version == 8, r16
+    v8_id = wf._version_repo.get_mandate_version_id("m1", 8)
+    for role, dept in ((RequiredRole.RISK, "risk-management"), (RequiredRole.QA, "qa-department")):
+        approval = approvals.find(ObjectType.MANDATE_VERSION, v8_id, role)
+        assert approval is not None and approval.decision is ApprovalDecision.PENDING
+        approvals.save(decide_approval(approval, decision=ApprovalDecision.APPROVED,
+                                       actor_department=dept, at=counter_at))
+    r17 = wf.advance(r16.case_id, at=counter_at)
+    assert r17.stage is ChangeStage.AWAITING_USER_APPROVAL, r17
+    user_a8 = approvals.find(ObjectType.MANDATE_VERSION, v8_id, RequiredRole.USER)
+    approvals.save(decide_approval(user_a8, decision=ApprovalDecision.APPROVED,
+                                   actor_user_id="user-1", at=counter_at))
+    r18 = wf.advance(r16.case_id, at=counter_at)
+    assert r18.stage is ChangeStage.ACTIVATED
+    assert wf._version_repo.get_mandate_current("m1") == (8, "ACTIVE")
+    print("ok - UC-4(counterproposal restarts the complete approval pipeline)")
     print("ok - UC-5(만료 지연 평가 - 승인 방향으로 안 떨어짐) 통과")
 
     # 7) 종료된 Case 재advance 차단.
