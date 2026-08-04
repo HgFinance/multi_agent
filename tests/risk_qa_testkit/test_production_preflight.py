@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from departments.risk_qa_testkit.production_preflight import _database_dsn, run_preflight
+from departments.risk_qa_testkit.production_preflight import (
+    _database_dsn,
+    run_preflight,
+)
 
 
 def test_canonical_database_dsn_prefers_supabase_specific_environment() -> None:
