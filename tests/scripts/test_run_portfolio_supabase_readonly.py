@@ -37,3 +37,6 @@ def test_load_profile_explains_literal_newline_inside_value() -> None:
 def test_load_profile_requires_exactly_one_input() -> None:
     with pytest.raises(SystemExit, match="exactly one"):
         cli._load_profile(None, None)
+
+    with pytest.raises(SystemExit, match="exactly one"):
+        cli._load_profile("", Path("profile.json"))
