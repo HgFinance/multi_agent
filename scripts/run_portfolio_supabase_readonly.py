@@ -13,15 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# This read-only verification CLI must not send LangGraph traces externally.
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
-os.environ["LANGSMITH_TRACING"] = "false"
-
-from orchestration.workflows.portfolio_recommendation import (  # noqa: E402
-    run_portfolio_recommendation_pipeline_async,
-)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run portfolio recommendation with Supabase read-only PIT inputs"
@@ -43,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _load_profile(profile_json: str | None, profile_file: Path | None) -> dict:
-    if bool(profile_json) == bool(profile_file):
+    if (profile_json is not None) == (profile_file is not None):
         raise SystemExit("provide exactly one of --profile-json or --profile-file")
     raw = profile_json
     if profile_file is not None:
@@ -66,12 +57,22 @@ def _load_profile(profile_json: str | None, profile_file: Path | None) -> dict:
 
 
 async def main_async(argv: list[str] | None = None) -> int:
+    # Keep tracing disabled and load local configuration only for an actual CLI run.
+    # Importing this module in a test or another process must not mutate its environment
+    # or initialize the workflow runtime.
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+
     try:
         from dotenv import load_dotenv
 
         load_dotenv(ROOT / ".env")
     except ModuleNotFoundError:
         pass
+
+    from orchestration.workflows.portfolio_recommendation import (
+        run_portfolio_recommendation_pipeline_async,
+    )
     args = _parser().parse_args(argv)
     profile = _load_profile(args.profile_json, args.profile_file)
     if args.as_of:
