@@ -12,7 +12,7 @@
 > §4의 저장소 항목은 **미결이며 팀장 확인 대기**다. §6의 MCP 도구 면은 **아직 구현 없음(설계만)**이다.
 > 마지막 §7에 무엇이 확정이고 무엇이 제안/미구현인지 표로 정리했다.
 >
-> 구현: [`departments/02-trading/api/app.py`](../../departments/02-trading/api/app.py) (자체 점검 14개 영역 통과)
+> 구현: [`departments/02-trading/api/app.py`](../../departments/02-trading/api/app.py) (자체 점검 15개 영역 통과)
 
 ---
 
@@ -73,10 +73,12 @@ Frontend·Browser는 이 API를 직접 부르지 않는다 — `AI_OFFICE_FRONTE
 |---|---|---|
 | `TRADING_OMS_REJECTED` | 400 | OMS 불변식 위반(Risk 미승인 제출, 만료, 수량 초과, UNKNOWN 차단 등). **500이 아니다** — 호출자가 고칠 수 있는 요청이다 |
 | `TRADING_INTENT_MISMATCH` | 400 | 경로와 본문의 `order_intent_id` 불일치 |
+| `TRADING_CASE_MISMATCH` | 400 | 경로의 `case_id`와 Intent의 `trade_case_id` 불일치(§2.3) |
 | `TRADING_INTENT_NOT_FOUND` / `TRADING_ORDER_NOT_FOUND` | 404 | 없는 자원 |
 | `TRADING_INTENT_BODY_LOST` | 409 | 프로세스 재시작으로 Intent 원본이 사라짐(§4 저장소 미결의 직접 증상) |
 | `TRADING_INVALID_INTENT` / `TRADING_INVALID_RISK_DECISION` | 422 | Pydantic 계약 위반 |
 | `TRADING_INVALID_REQUEST` | 422 | 요청 본문 형식 오류 |
+| `TRADING_HTTP_ERROR` | 그대로 | 위 어디에도 안 걸린 HTTP 에러(404 Route Not Found 등)를 같은 봉투로 평탄화한 것 |
 
 ## 2. Trading Domain API
 
@@ -147,6 +149,11 @@ POST /investment-cases/{case_id}/cancel
 
 **시세는 여기서 조회하지 않는다.** 호출자가 준 값으로만 체결한다 — 시세 수집은 리서치본부
 `market-api` 소관이고 우리는 별도 Collector를 만들지 않는다.
+
+**경로의 `case_id`와 Intent의 `trade_case_id`가 같아야 한다**(`TRADING_CASE_MISMATCH`, 400).
+안 막으면 Case B 경로로 낸 주문이 Case A의 승인 위에 올라타고, 정작 Case B의 `/cancel`은
+그 주문을 못 본다 — 낸 쪽이 취소할 수 없는 주문이 생긴다. `/cancel`은 이미 `trade_case_id`로
+거르고 있었고 `paper-orders`만 안 걸렀다. 자체 점검 11번이 이걸 검증한다.
 
 ### 2.4 시장 규칙
 

@@ -234,6 +234,37 @@ def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500),
     """, (market, as_of, as_of, limit))
 
 
+@app.get("/dq/bar_freshness")
+def dq_bar_freshness(interval: str = Query("1D")):
+    """최신 봉이 **언제 것인가.** 거래일 수 세기는 여기서 하지 않는다.
+
+    ▶ DB 경계 (실측 2026-08-04)
+      거래일 달력(reference.market_sessions)은 Supabase 에, market_bars 는
+      TimescaleDB 에 있다 - **한 쿼리로 못 센다.** 처음엔 join 을 썼다가
+      UndefinedTable 로 죽었다. 각자 자기 DB 만 보고, 거래일 환산은
+      research-api 의 /calendar/sessions_since 가 한다.
+
+    ▶ 왜 필요한가
+      리포트가 34,550원을 "최신 종가" 로 인용했는데 그건 7/31 종가였고 8/3
+      장이 통째로 빠져 있었다(350종목 전부). 일봉 수집기가 스케줄에 없어서다.
+      틱 품질(/dq/windows)은 봤지만 **봉 신선도를 보는 곳이 없었다.**
+    """
+    rows = _query("""
+        select max((bucket_time at time zone 'Asia/Seoul')::date) as last_bar_date,
+               count(distinct instrument_id) as symbols
+        from market.market_bars
+        where interval_code = %s and source = 'ls_chart'
+    """, (interval,))
+    r = (rows or [{}])[0]
+    # 행 0 을 신선함으로 위장하지 않는다 - 봉이 없는 것과 최신인 것은 다르다
+    if not r or r.get("last_bar_date") is None:
+        return {"ok": False, "interval": interval, "last_bar_date": None,
+                "reason": f"{interval} 봉이 0건"}
+    return {"ok": True, "interval": interval,
+            "last_bar_date": str(r["last_bar_date"]),
+            "symbols": int(r.get("symbols") or 0)}
+
+
 @app.get("/dq/windows")
 def dq_windows(hours: int = Query(24, gt=0, le=168),
                limit: int = Query(50, gt=0, le=500)):

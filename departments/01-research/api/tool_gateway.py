@@ -65,6 +65,8 @@ ENDPOINT_SCOPES: dict[str, str] = {
     # 않는다(실측: /methods/performance 가 gateway_misconfigured 로 막혔다).
     # 새 라우트를 낼 때마다 이 표가 같이 커져야 한다.
     "/dq/windows": "market.dq.read",
+    "/dq/bar_freshness": "market.dq.read",
+    "/calendar/sessions_since": "research.universe.read",
     "/methods/performance": "research.methods.read",
 }
 # 인증 없이 열어두는 경로 - 상태 확인은 권한 판단의 대상이 아니다.

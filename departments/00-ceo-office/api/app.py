@@ -54,8 +54,10 @@ _NOTIFICATION_DIR = _BASE / "src" / "notification"
 _APPROVAL_DIR = _BASE / "src" / "approval"
 _CASE_DIR = _BASE / "src" / "case"
 _ESCALATION_DIR = _BASE / "src" / "escalation"
+_COMMITTEE_DIR = _BASE / "src" / "committee"
 for _p in (
-    _MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR, _ESCALATION_DIR
+    _MANDATE_DIR, _REPORTING_DIR, _NOTIFICATION_DIR, _APPROVAL_DIR, _CASE_DIR,
+    _ESCALATION_DIR, _COMMITTEE_DIR,
 ):
     sys.path.insert(0, str(_p))
 
@@ -92,6 +94,32 @@ from case_root import (
 )
 from case_root import (
     transition as transition_case,
+)
+from committee import (
+    CommitteeDecision,
+    CommitteeDecisionRecord,
+    CommitteeSession,
+    DuplicateVoteError,
+    IllegalSessionTransition,
+    InMemoryCommitteeRepository,
+    InvalidQuorumPolicyError,
+    QuorumPolicy,
+    SelfReviewError,
+    SessionStatus,
+    Vote,
+    VoteDecision,
+)
+from committee import (
+    cancel_session as cancel_committee_session,
+)
+from committee import (
+    cast_vote as cast_committee_vote,
+)
+from committee import (
+    close_session as close_committee_session,
+)
+from committee import (
+    open_session as open_committee_session,
 )
 from daily_report import (
     DailyReportAssembler,
@@ -167,6 +195,11 @@ try:
     from postgres_escalation_repository import PostgresEscalationRepository
 except ImportError:
     PostgresEscalationRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_committee_repository import PostgresCommitteeRepository
+except ImportError:
+    PostgresCommitteeRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -327,6 +360,48 @@ class EscalationTransitionIn(BaseModel):
     resolution: str | None = None
 
 
+class QuorumPolicyIn(BaseModel):
+    """committee_sessions.quorum_policy(jsonb)의 요청 형태 - committee.py QuorumPolicy 참고.
+
+    committee_type별로 구성이 다르다(투자위원회 vs 전략기획위원회 - MASTER_PLAN 5.2/18.2,
+    QA는 투자위원회 구성원이 아니다) - 그래서 세션을 여는 쪽이 매번 지정한다.
+    """
+
+    required_departments: list[str] = Field(min_length=1)
+    veto_departments: list[str] = []
+    approval_threshold: int = Field(default=1, ge=1)
+
+
+class OpenCommitteeSessionIn(BaseModel):
+    """POST /governance/v1/committee/sessions (스펙 2.3 open_session)."""
+
+    fund_id: str
+    committee_type: str = Field(min_length=1)
+    quorum_policy: QuorumPolicyIn
+    trace_id: str
+    case_id: str | None = None
+
+
+class CloseCommitteeSessionIn(BaseModel):
+    scope: dict = {}
+    valid_until: datetime | None = None
+
+
+class CancelCommitteeSessionIn(BaseModel):
+    reason: str | None = None
+
+
+class SubmitVoteIn(BaseModel):
+    """POST /governance/v1/committee/sessions/{session_id}/votes (스펙 2.3 submit_vote 그대로)."""
+
+    department: str = Field(min_length=1)
+    decision: VoteDecision
+    conditions: dict = {}
+    artifact_ids: list[str] = []
+    rationale: str | None = None
+    voter_agent_id: str | None = None
+
+
 class CaseTransitionIn(BaseModel):
     """POST /governance/v1/cases/{case_id}/transitions.
 
@@ -404,6 +479,11 @@ if os.environ.get("DATABASE_URL") and PostgresEscalationRepository is not None:
     escalation_repo = PostgresEscalationRepository.connect(os.environ["DATABASE_URL"])
 else:
     escalation_repo = InMemoryEscalationRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
+    committee_repo = PostgresCommitteeRepository.connect(os.environ["DATABASE_URL"])
+else:
+    committee_repo = InMemoryCommitteeRepository()
 
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
@@ -597,6 +677,36 @@ def _on_illegal_escalation_transition(request, exc: IllegalEscalationTransition)
 def _on_missing_resolution(request, exc: MissingResolutionError):
     return JSONResponse(status_code=409, content={
         "error_code": "MissingResolutionError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# 위원회(Y2) 예외 -> HTTP.
+#   quorum_policy 형태 오류 400 / OPEN 아닌 세션 조작 409 / 중복 투표 409 / SoD 위반 403
+@app.exception_handler(InvalidQuorumPolicyError)
+def _on_invalid_quorum_policy(request, exc: InvalidQuorumPolicyError):
+    return JSONResponse(status_code=400, content={
+        "error_code": "InvalidQuorumPolicyError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(IllegalSessionTransition)
+def _on_illegal_session_transition(request, exc: IllegalSessionTransition):
+    return JSONResponse(status_code=409, content={
+        "error_code": "IllegalSessionTransition", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(DuplicateVoteError)
+def _on_duplicate_vote(request, exc: DuplicateVoteError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "DuplicateVoteError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(SelfReviewError)
+def _on_self_review(request, exc: SelfReviewError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "SelfReviewError", "message": str(exc), "detail": {}, "trace_id": None,
     })
 
 
@@ -917,6 +1027,133 @@ def transition_escalation_endpoint(escalation_id: str, body: EscalationTransitio
     )
     escalation_repo.save(updated)
     return _escalation_dict(updated)
+
+
+# --- 2.3 위원회 (Y2 - Vote/Quorum/SoD) --------------------------------------------
+#
+# `open/close_session`, `submit_vote`는 스펙 2.3 확정 엔드포인트다. cancel/get은
+# 스펙에 이름이 없는 제안이지만 DDL의 CANCELLED 상태·조회 없이는 쓸 수 없어 함께 넣는다.
+#
+# 판정 로직은 여기 없다 - committee.py의 순수 함수(evaluate_quorum/cast_vote)가 전부
+# 하고, 이 계층은 HTTP <-> 도메인 변환과 저장만 담당한다("API는 투표를 기록만 하고
+# 정족수를 임의로 계산해 승인 처리하지 않는다", 스펙 2.3).
+
+
+def _committee_session_dict(s: CommitteeSession) -> dict:
+    return {
+        "session_id": s.session_id, "fund_id": s.fund_id, "case_id": s.case_id,
+        "committee_type": s.committee_type, "status": s.status.value,
+        "quorum_policy": s.quorum_policy.to_jsonb(), "trace_id": s.trace_id,
+        "opened_at": s.opened_at.isoformat(),
+        "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+    }
+
+
+def _vote_dict(v: Vote) -> dict:
+    return {
+        "vote_id": v.vote_id, "session_id": v.session_id, "department": v.department,
+        "voter_agent_id": v.voter_agent_id, "decision": v.decision.value,
+        "conditions": v.conditions or {}, "artifact_ids": list(v.artifact_ids),
+        "rationale": v.rationale, "voted_at": v.voted_at.isoformat(),
+    }
+
+
+def _committee_decision_dict(d: CommitteeDecisionRecord) -> dict:
+    return {
+        "committee_decision_id": d.committee_decision_id, "session_id": d.session_id,
+        "decision": d.decision.value, "scope": d.scope or {}, "conditions": d.conditions or {},
+        "valid_until": d.valid_until.isoformat() if d.valid_until else None,
+        "dissent": list(d.dissent), "approvals": list(d.approvals),
+        "decided_at": d.decided_at.isoformat(),
+    }
+
+
+def _load_committee_session(session_id: str) -> CommitteeSession:
+    session = committee_repo.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"committee session {session_id} 없음")
+    return session
+
+
+@app.post("/governance/v1/committee/sessions")
+def open_committee_session_endpoint(body: OpenCommitteeSessionIn):
+    """위원회 세션을 OPEN으로 연다. quorum_policy 형태가 잘못되면 400."""
+    policy = QuorumPolicy(
+        required_departments=tuple(body.quorum_policy.required_departments),
+        veto_departments=tuple(body.quorum_policy.veto_departments),
+        approval_threshold=body.quorum_policy.approval_threshold,
+    )
+    session = open_committee_session(
+        session_id=str(uuid.uuid4()), fund_id=body.fund_id, committee_type=body.committee_type,
+        quorum_policy=policy, opened_at=datetime.now(timezone.utc), trace_id=body.trace_id,
+        case_id=body.case_id,
+    )
+    committee_repo.save_session(session)
+    return _committee_session_dict(session)
+
+
+@app.get("/governance/v1/committee/sessions/{session_id}")
+def get_committee_session(session_id: str):
+    session = _load_committee_session(session_id)
+    return {
+        **_committee_session_dict(session),
+        "votes": [_vote_dict(v) for v in committee_repo.list_votes(session_id)],
+    }
+
+
+@app.post("/governance/v1/committee/sessions/{session_id}/votes")
+def submit_vote(session_id: str, body: SubmitVoteIn):
+    """투표 한 표를 기록한다. OPEN 세션에만 가능하고, 부서당 1표, SoD를 지킨다.
+
+    case_owner_department는 세션에 case_id가 있을 때만 조회한다 - 없으면 SoD 검사
+    자체가 성립하지 않는다(위원회가 특정 Case를 심의하는 게 아니라는 뜻). Case Root의
+    실제 저장소(case_repo)에서 직접 조회한다 - committee_repo와 case_repo는 별개
+    저장소(In-Memory 모드에서는 서로 다른 인스턴스)라 committee_repo만 봐서는
+    Case가 실제로 아는 owner_department를 알 수 없다.
+    """
+    session = _load_committee_session(session_id)
+    case_owner_department = None
+    if session.case_id is not None:
+        case = case_repo.get(session.case_id)
+        case_owner_department = case.owner_department if case is not None else None
+    vote = cast_committee_vote(
+        session, committee_repo.list_votes(session_id), vote_id=str(uuid.uuid4()),
+        department=body.department, decision=body.decision, voted_at=datetime.now(timezone.utc),
+        case_owner_department=case_owner_department, voter_agent_id=body.voter_agent_id,
+        conditions=body.conditions, artifact_ids=tuple(body.artifact_ids), rationale=body.rationale,
+    )
+    committee_repo.save_vote(vote)
+    return _vote_dict(vote)
+
+
+@app.post("/governance/v1/committee/sessions/{session_id}/close")
+def close_committee_session_endpoint(session_id: str, body: CloseCommitteeSessionIn):
+    """세션을 닫고 Quorum·Veto 판정 결과를 committee_decisions로 확정한다.
+
+    정족수 미달이면 DEFER로 결정되지만 세션 status는 여전히 DECIDED다(committee.py
+    close_session 문서 참고 - "결론을 못 냈다"도 하나의 결정이다).
+    """
+    session = _load_committee_session(session_id)
+    votes = committee_repo.list_votes(session_id)
+    updated, decision = close_committee_session(
+        session, votes, committee_decision_id=str(uuid.uuid4()),
+        at=datetime.now(timezone.utc), scope=body.scope, valid_until=body.valid_until,
+    )
+    committee_repo.save_session(updated)
+    committee_repo.save_decision(decision)
+    return {
+        "session": _committee_session_dict(updated),
+        "decision": _committee_decision_dict(decision),
+    }
+
+
+@app.post("/governance/v1/committee/sessions/{session_id}/cancel")
+def cancel_committee_session_endpoint(session_id: str, body: CancelCommitteeSessionIn):
+    """SCHEDULED/OPEN 세션을 취소한다. 이미 DECIDED/CANCELLED면 409."""
+    session = _load_committee_session(session_id)
+    updated = cancel_committee_session(session, at=datetime.now(timezone.utc))
+    committee_repo.save_session(updated)
+    return _committee_session_dict(updated)
 
 
 # --- 2.2 Approval (GOV-02 1단계) --------------------------------------------------
@@ -1288,5 +1525,83 @@ if __name__ == "__main__":
     by_case = client.get("/governance/v1/escalations", params={"case_id": c2.json()["case_id"]})
     assert len(by_case.json()["escalations"]) == 1, by_case.text
 
-    print("ok - CEO Office Domain API 24개 시나리오 점검 통과 "
-          "(승인 8개 + Case Root 5개 + 에스컬레이션 4개 포함)")
+    # 25. 위원회 세션 생성 - quorum_policy 형태 오류(threshold 범위 초과)는 400.
+    bad_policy = client.post("/governance/v1/committee/sessions", json={
+        "fund_id": "f1", "committee_type": "INVESTMENT", "trace_id": "t-committee",
+        "quorum_policy": {"required_departments": ["a", "b"], "approval_threshold": 5},
+    })
+    assert bad_policy.status_code == 400, bad_policy.text
+
+    # hr-department를 required_departments에 넣지 않는다 - c1의 owner_department가
+    # hr-department라(16번 참고) SoD로 영원히 투표를 못 해 정족수가 절대 안 찬다
+    # (required이면서 SoD로 막힌 부서가 있으면 설계상 DEFER에서 못 벗어난다 - 의도된
+    # 동작이지만 이 시나리오의 목적은 그게 아니므로 required에서 뺀다).
+    s1 = client.post("/governance/v1/committee/sessions", json={
+        "fund_id": "f1", "committee_type": "STRATEGY_PLANNING", "trace_id": "t-committee",
+        "case_id": c1.json()["case_id"],
+        "quorum_policy": {
+            "required_departments": ["risk-management", "qa-department"],
+            "veto_departments": ["risk-management"], "approval_threshold": 2,
+        },
+    })
+    assert s1.status_code == 200 and s1.json()["status"] == "OPEN", s1.text
+    session_id = s1.json()["session_id"]
+
+    # 26. SoD - c1의 owner_department는 hr-department다. required_departments에
+    # 없어도 SoD 차단은 부서 소속과만 관련이 있어 그대로 걸린다.
+    self_vote = client.post(f"/governance/v1/committee/sessions/{session_id}/votes", json={
+        "department": "hr-department", "decision": "APPROVE",
+    })
+    assert self_vote.status_code == 403, self_vote.text
+
+    # 27. 정상 투표 - 부서당 1표, 중복은 409.
+    v1 = client.post(f"/governance/v1/committee/sessions/{session_id}/votes", json={
+        "department": "risk-management", "decision": "APPROVE",
+    })
+    assert v1.status_code == 200 and v1.json()["decision"] == "APPROVE", v1.text
+    dup = client.post(f"/governance/v1/committee/sessions/{session_id}/votes", json={
+        "department": "risk-management", "decision": "REJECT",
+    })
+    assert dup.status_code == 409, dup.text
+
+    # 28. 정족수 미달 상태로 종료 -> DEFER, 그래도 세션 status는 DECIDED.
+    early_close = client.post("/governance/v1/committee/sessions", json={
+        "fund_id": "f1", "committee_type": "STRATEGY_PLANNING", "trace_id": "t-early",
+        "quorum_policy": {"required_departments": ["hr-department", "risk-management"],
+                          "approval_threshold": 2},
+    })
+    early_id = early_close.json()["session_id"]
+    client.post(f"/governance/v1/committee/sessions/{early_id}/votes", json={
+        "department": "risk-management", "decision": "APPROVE",
+    })
+    closed_early = client.post(f"/governance/v1/committee/sessions/{early_id}/close", json={})
+    assert closed_early.json()["decision"]["decision"] == "DEFER", closed_early.text
+    assert closed_early.json()["session"]["status"] == "DECIDED"
+
+    # 29. 정족수 채우기 -> 종료 -> APPROVE, DECIDED 세션 재종결/재투표는 409.
+    client.post(f"/governance/v1/committee/sessions/{session_id}/votes", json={
+        "department": "qa-department", "decision": "APPROVE",
+    })
+    done = client.post(f"/governance/v1/committee/sessions/{session_id}/close", json={})
+    assert done.status_code == 200 and done.json()["decision"]["decision"] == "APPROVE", done.text
+    assert client.post(f"/governance/v1/committee/sessions/{session_id}/close", json={}).status_code == 409
+    assert client.post(f"/governance/v1/committee/sessions/{session_id}/votes", json={
+        "department": "hr-department", "decision": "APPROVE",
+    }).status_code == 409
+
+    # 30. 취소 - SCHEDULED/OPEN만 가능. GET으로 투표 내역까지 함께 조회된다.
+    to_cancel = client.post("/governance/v1/committee/sessions", json={
+        "fund_id": "f1", "committee_type": "INVESTMENT", "trace_id": "t-cancel",
+        "quorum_policy": {"required_departments": ["ceo-agent"], "approval_threshold": 1},
+    })
+    cancel_id = to_cancel.json()["session_id"]
+    cancelled = client.post(f"/governance/v1/committee/sessions/{cancel_id}/cancel", json={})
+    assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
+    assert client.post(f"/governance/v1/committee/sessions/{cancel_id}/cancel", json={}).status_code == 409
+
+    detail = client.get(f"/governance/v1/committee/sessions/{session_id}")
+    assert detail.status_code == 200 and len(detail.json()["votes"]) == 2, detail.text
+    assert client.get("/governance/v1/committee/sessions/00000000-0000-4000-8000-000000000000").status_code == 404
+
+    print("ok - CEO Office Domain API 30개 시나리오 점검 통과 "
+          "(승인 8개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 포함)")

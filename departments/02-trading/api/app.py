@@ -55,6 +55,7 @@ for _sub in ("contracts", "oms", "broker", "multileg", "capability"):
     sys.path.insert(0, str(_DEPT / _sub))
 
 from contracts import (
+    LOT_SIZE,
     MarketSnapshot,
     OrderIntent,
     OrderType,
@@ -122,15 +123,25 @@ def _on_validation_error(request, exc: RequestValidationError):
 
 
 def _intent_record(order_intent_id: UUID) -> OrderIntentRecord:
-    rec = _oms.store.intents.get(order_intent_id)
+    rec = _oms.store.get_intent(order_intent_id)
     if rec is None:
         raise HTTPException(404, _envelope("TRADING_INTENT_NOT_FOUND",
                                            f"그런 order_intent_id 가 없습니다: {order_intent_id}"))
     return rec
 
 
+def _intent_body(order_intent_id: UUID) -> OrderIntent:
+    """OrderIntent 원본. OMS 기록(`_intent_record`)과 달리 이건 프로세스 메모리에만 있다."""
+    intent = _intents.get(order_intent_id)
+    if intent is None:
+        raise HTTPException(409, _envelope("TRADING_INTENT_BODY_LOST",
+                                           "이 프로세스에 Intent 원본이 없습니다(재시작됨). "
+                                           "order-intents 로 다시 등록하세요"))
+    return intent
+
+
 def _order(order_id: UUID) -> BrokerOrder:
-    order = _oms.store.orders.get(order_id)
+    order = _oms.store.get_order(order_id)
     if order is None:
         raise HTTPException(404, _envelope("TRADING_ORDER_NOT_FOUND",
                                            f"그런 order_id 가 없습니다: {order_id}"))
@@ -272,7 +283,13 @@ class QuoteIn(BaseModel):
     ask_size: Decimal
 
 
-class PaperOrderIn(BaseModel):
+class BrokerOrderIn(BaseModel):
+    """Broker Order 생성. 이 경로는 체결하지 않으므로 호가를 받지 않는다."""
+
+    order_intent_id: UUID
+
+
+class PaperOrderIn(BrokerOrderIn):
     """Case 에서 Paper 주문을 만든다. Risk 판정이 이미 있어야 한다.
 
     `quote` 를 주면 체결까지 시도하고, 없으면 ack 까지만 하고 미체결로 남긴다.
@@ -280,7 +297,6 @@ class PaperOrderIn(BaseModel):
     값으로만 체결한다(CLAUDE.local.md "만들지 않는 것": 별도 Collector 금지).
     """
 
-    order_intent_id: UUID
     quote: QuoteIn | None = None
 
 
@@ -336,19 +352,14 @@ def apply_risk_decision(order_intent_id: UUID, body: RiskDecisionIn) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders", status_code=201)
-def create_broker_order(body: PaperOrderIn) -> dict:
+def create_broker_order(body: BrokerOrderIn) -> dict:
     """READY_TO_SUBMIT Intent 로 Broker Order 를 만든다. 아직 전송 전(CREATED)이다.
 
     두 상태 머신의 유일한 접점이자 Risk Gate 다. 상태 전이가 아니라 새 객체 생성인
     것이 v1.2 의 핵심이다 - Intent 와 Broker Order 는 서로 전이하지 않는다.
     """
-    rec = _intent_record(body.order_intent_id)
-    intent = _intents.get(body.order_intent_id)
-    if intent is None:
-        raise HTTPException(409, _envelope("TRADING_INTENT_BODY_LOST",
-                                           "이 프로세스에 Intent 원본이 없습니다(재시작됨). "
-                                           "order-intents 로 다시 등록하세요"))
-    return _order_view(_oms.create_broker_order(rec, intent))
+    return _order_view(_oms.create_broker_order(_intent_record(body.order_intent_id),
+                                                _intent_body(body.order_intent_id)))
 
 
 @app.get(f"/trading/{API_VERSION}/orders/{{order_id}}")
@@ -426,7 +437,7 @@ def get_tick_size(price: Decimal) -> dict:
 
     이 값이 틀리면 지정가가 거래소에서 거부된다 - 실거래 전 최신 규정 대조 필요.
     """
-    return {"price": str(price), "tick_size": str(tick_size(price)), "lot_size": "1"}
+    return {"price": str(price), "tick_size": str(tick_size(price)), "lot_size": str(LOT_SIZE)}
 
 
 # ── Case 종속 경로 (MINIMUM_SERVICE_UNIT_SPEC 11절이 이미 이름 지음) ──────────
@@ -439,12 +450,16 @@ def create_paper_order(case_id: UUID, body: PaperOrderIn) -> dict:
     Broker Order 생성 -> submit -> Paper Broker accept(ack) 까지가 한 호출이다.
     체결은 호가가 있어야 하므로 quote_bid/ask 를 준 경우에만 시도하고, 그 결과도
     브로커 이벤트로 들어간다 - 우리가 체결을 지어내는 경로는 없다.
+
+    경로의 case_id 와 Intent 의 trade_case_id 가 같아야 한다. 다르면 그 주문은 남의
+    Case 승인 위에 올라타고, 접수한 Case 의 `/cancel` 은 자기가 낸 주문을 못 본다.
     """
     rec = _intent_record(body.order_intent_id)
-    intent = _intents.get(body.order_intent_id)
-    if intent is None:
-        raise HTTPException(409, _envelope("TRADING_INTENT_BODY_LOST",
-                                           "이 프로세스에 Intent 원본이 없습니다(재시작됨)"))
+    intent = _intent_body(body.order_intent_id)
+    if intent.trade_case_id != case_id:
+        raise HTTPException(400, _envelope(
+            "TRADING_CASE_MISMATCH",
+            f"이 Intent 는 다른 Case 의 것입니다: {intent.trade_case_id}"))
 
     order = _oms.create_broker_order(rec, intent)
     _oms.submit(order, rec)
@@ -471,7 +486,7 @@ def cancel_case_orders(case_id: UUID, body: CancelIn) -> dict:
     되면 store 에 case_id 인덱스를 추가한다(DB store 로 가면 자연히 해결된다).
     """
     targets = [
-        o for o in _oms.store.orders.values()
+        o for o in _oms.store.list_orders()
         if not o.is_terminal
         and (i := _intents.get(o.order_intent_id)) is not None
         and i.trade_case_id == case_id
@@ -489,8 +504,8 @@ def health() -> dict:
         "api_version": API_VERSION,
         "adapter": _oms.adapter,
         # 이 두 값이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
-        "intents": len(_oms.store.intents),
-        "orders": len(_oms.store.orders),
+        "intents": len(_oms.store.list_intents()),
+        "orders": len(_oms.store.list_orders()),
         "store": "in-memory (execution.* 미연결)",
     }
 
@@ -586,9 +601,6 @@ if __name__ == "__main__":
     cancelled = c.post(f"/trading/v1/orders/{order_id}/cancel", json={"reason": "self check"})
     assert cancelled.json()["state"] == "CANCEL_PENDING" and not cancelled.json()["is_terminal"]
 
-    # 10. UNKNOWN 은 종료가 아니고, 확정 안 된 이벤트로 탈출할 수 없다
-    o4 = c.post("/trading/v1/order-intents", json=intent_body("idem_api_0004")).json()["order_intent_id"]
-    c.post(f"/trading/v1/order-intents/{o4}/risk-review")
     # 10. Case 경로 - Paper 주문과 체결. 호가를 안 주면 체결도 없다
     o5 = c.post("/trading/v1/order-intents", json=intent_body("idem_api_0005")).json()["order_intent_id"]
     c.post(f"/trading/v1/order-intents/{o5}/risk-review")
@@ -612,19 +624,27 @@ if __name__ == "__main__":
     assert noquote.json()["order"]["state"] == "ACKNOWLEDGED", noquote.text
     assert noquote.json()["fill"] is None, "호가 없이 체결이 만들어졌다"
 
-    # 11. 존재하지 않는 자원은 404 봉투
+    # 11. 남의 Case 경로로는 접수되지 않는다. 통과시키면 그 주문은 접수한 Case 의
+    #     /cancel 에 안 잡히고(취소 불가), 남의 Case 승인 위에 올라탄다
+    o8 = c.post("/trading/v1/order-intents", json=intent_body("idem_api_0008")).json()["order_intent_id"]
+    c.post(f"/trading/v1/order-intents/{o8}/risk-review")
+    c.post(f"/trading/v1/order-intents/{o8}/risk-decision", json=risk_body(o8))
+    cross = c.post(f"/investment-cases/{uuid4()}/paper-orders", json={"order_intent_id": o8})
+    assert cross.status_code == 400 and cross.json()["error_code"] == "TRADING_CASE_MISMATCH", cross.text
+
+    # 12. 존재하지 않는 자원은 404 봉투
     missing = c.get(f"/trading/v1/orders/{uuid4()}")
     assert missing.status_code == 404 and \
         missing.json()["error_code"] == "TRADING_ORDER_NOT_FOUND", missing.text
 
-    # 12. KRX 호가 단위 - 가격대별로 다르다
+    # 13. KRX 호가 단위 - 가격대별로 다르다
     assert c.get("/trading/v1/market-rules/tick-size", params={"price": "1500"}).json()["tick_size"] == "1"
     assert c.get("/trading/v1/market-rules/tick-size", params={"price": "70000"}).json()["tick_size"] != "1"
 
-    # 13. health 가 in-memory 사실을 숨기지 않는다
+    # 14. health 가 in-memory 사실을 숨기지 않는다
     assert c.get("/health").json()["store"].startswith("in-memory")
 
-    # 14. UNKNOWN — 맨 뒤에 둔다. 같은 Fund 의 신규 주문을 막으므로(불변식 8)
+    # 15. UNKNOWN — 맨 뒤에 둔다. 같은 Fund 의 신규 주문을 막으므로(불변식 8)
     #     이걸 앞에 두면 뒤따르는 모든 검사가 이 차단에 걸린다. 실제로 처음
     #     작성했을 때 그렇게 걸렸고, 그게 불변식이 살아있다는 증거였다.
     o4 = c.post("/trading/v1/order-intents", json=intent_body("idem_api_0004")).json()["order_intent_id"]
@@ -651,4 +671,4 @@ if __name__ == "__main__":
         blocked_new.json()["error_code"] == "TRADING_OMS_REJECTED", \
         "UNKNOWN 미해소 상태에서 신규 주문이 통과했다"
 
-    print("ok - Trading Domain API 14개 영역 점검 통과 (Risk 우회 차단·멱등·Event Store 포함)")
+    print("ok - Trading Domain API 15개 영역 점검 통과 (Risk 우회 차단·Case 교차 차단·멱등·Event Store 포함)")

@@ -154,6 +154,7 @@ function staff(
   role: string,
   index: number,
   callsign?: string,
+  thoughts?: string[],
 ): StaffEntry {
   return {
     dept,
@@ -162,7 +163,7 @@ function staff(
     role,
     callsign,
     colors: COLORS[index % COLORS.length],
-    thoughts: workerThoughts[index % workerThoughts.length],
+    thoughts: thoughts ?? workerThoughts[index % workerThoughts.length],
   };
 }
 
@@ -188,7 +189,23 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("strategy1", "member", "오세훈", "execution-cost-worker", 7),
   staff("strategy1", "member", "장도현", "regime-robustness-worker", 0),
 
-  staff("strategy2", "lead", "김도현", "Hermes Head · Trading", 2, "김트레이딩"),
+  staff("strategy2", "lead", "윤도현", "Hermes Head · Trading", 2, "윤트레", [
+    "Bull/Bear 토론 없이 바로 주문 제안 안 나가요.",
+    "여러 종목이면 trade_case_id 하나로 묶어요.",
+  ]),
+  // 이현서·장정훈은 config.yaml agent.personalities의 TRD-01/TRD-02 페르소나다.
+  // runtime worker가 아니라 worker_count(6)에 포함되지 않는다.
+  // app/game/sim.ts의 debate()가 이 두 role 문자열로 둘을 찾으므로 문구를 바꾸지 않는다.
+  staff("strategy2", "member", "이현서", "Bull 리서처", 3, undefined, [
+    "정훈이가 또 딴지 걸겠지. 근거부터 챙기자.",
+    "리서치본부가 준 근거만 씁니다. 그래야 싸울 때 안 밀려요.",
+    "오늘은 커피 얻어먹는다.",
+  ]),
+  staff("strategy2", "member", "장정훈", "Bear 리서처", 4, undefined, [
+    "현서 논리 약점부터 찾습니다. 미워서가 아니라 그게 제 일이라서요.",
+    "무효화 조건 없는 상승 논리는 그냥 기대예요.",
+    "이번엔 현서가 맞았으면 좋겠는데.",
+  ]),
   staff("strategy2", "member", "한지우", "market-thesis-worker", 3),
   staff("strategy2", "member", "윤서준", "trade-proposal-worker", 4),
   staff("strategy2", "member", "임채린", "order-constraint-worker", 5),

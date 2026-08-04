@@ -4,7 +4,7 @@
 
 Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
-> 문서 상태: Team Handoff v1.8
+> 문서 상태: Team Handoff v1.9
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 동규님  
 > 담당 조직: 리스크본부, AI QA/감사본부  
@@ -21,35 +21,33 @@ Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](..
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 10:20 KST
+> 기준: 2026-08-04 09:45 KST
+> GitHub 기준: `origin/main` `54dd3eb`
 > 갱신 규칙: 동규님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
 
-- Risk P1 Exposure·Stress·VaR·Correlation·Kill Switch와 PIT/Staleness Gate, LS Read-only Adapter를 구현했다.
-- Risk·QA PostgreSQL Repository, Redis Event Bus, Bounded Retry, Fail-closed Harness와 Replay Journal을 추가했다.
-- QA Model Risk, Internal Audit, Production Evidence Ingestion, Agentic RAG 회복성과 Incident 부모 Transaction을 구현했다.
-- Risk·QA API·Metrics·Observability, AI Office 전용 계약 Panel과 관련 Supabase Migration을 반영했다.
-- 증거: Risk Self-check 7개, QA Self-check 5개 통과. QA Decision 2, Incident Event 2,
-  Corrective Action 1건이 DB에 존재한다.
+- Risk P1 Runtime, Instrument Repository와 Projection Worker를 추가해 기존 계산기를 API·Event 경계로 확장했다.
+- 선물·옵션용 Derivatives Gate와 P2 API를 추가해 Greeks·Margin·만기·유동성 조건을 주문 전 판정할 기반을 만들었다.
+- QA Worker Trace Bridge, Evidence Corpus Registry와 pgvector Retriever를 추가해 직원 실행 Trace와 RAG Evidence를 감사 경로에 연결했다.
+- Risk·QA Runtime 활성화 Supabase Migration과 신규 회귀 Test를 추가하고 Hermes Head·Employee Runtime 설정을 갱신했다.
+- 위 변경은 PR #108, `45a3c85`로 `main`에 병합됐으며 Risk·QA 원격 작업 브랜치는 `main`보다 앞선 Commit이 없다.
 
 ### Today
 
-- `RSK-01`: 기존 Risk API·Repository·`risk.decision.v1` Publisher를 Compose Service로 올릴 준비를 한다.
-- `QA-01`: QA API·Consumer·Trace Repository의 Health, Environment와 DB/Event 설정 표를 완성한다.
-- `MODEL-03`: Risk·QA `head_runtime`의 Hermes `gpt-5.6-luna`와 직원 `employee_runtime`의 Ollama `qwen3:1.7b`를 각각 검증한다. 전체 Profile을 하나의 모델로 비교하지 않는다.
-- `QA-03`: `scripts.py`의 직원 Ollama 호출은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수 기반으로 전환됐다. 실제 Ollama Health와 모델 응답 증거만 운영 전 검증한다.
-- `OPS-01`: `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`, Governed Fund·Policy·Profile 승인 입력의 담당자를 지정한다.
-- Risk·QA 결정론적 Markdown 보고서와 Notion Block Projection을 Merge했고 최신 회귀 Test 18개가 통과했다.
-- `RPT-01`: Report Hash, Canonical Artifact Storage와 Notion Page 멱등 키를 다음 계약으로 확정한다.
+- [ ] 신규 Risk P1·Derivatives·Projection Test와 QA Corpus·Worker Trace Test를 깨끗한 Docker 환경에서 재실행하고 Commit 기준 결과를 남긴다.
+- [ ] `RSK-01`: Risk API와 QA API의 Compose Fragment, Health Check와 환경변수 표를 만들되 공통 Redis 주소는 도현님 `PLAT-02` 계약을 사용한다.
+- [ ] 도현님의 OrderIntent Fixture 한 건을 Risk API로 판정해 API 응답, `risk_decisions` Row와 `risk.decision.v1` Event Hash가 일치하는지 검증한다.
+- [ ] 같은 `case_id`·`trace_id`로 QA가 Research Evidence, OrderIntent와 Risk Decision을 조회해 `qa.decision.v1`과 Finding을 만드는 Replay Test를 추가한다.
+- [ ] `MODEL-03`: Hermes Head와 Ollama 직원 모델을 별도 규칙으로 검사해 Profile Contract 위반을 0건으로 만든다.
+- [ ] `OPS-01`: 필요한 Credential 이름, 소유자와 주입 위치만 문서화하고 실제 Key 값은 Git·보고서·Agent Trace에 남기지 않는다.
 
 ### Blocker
 
-- Risk·QA Compose Service가 없고 `risk_decisions`, `trading_states`, Risk·QA `run_log_events`가 0건이다.
-- Hermes Profile Contract Check가 Risk·QA 모델 불일치 2건으로 실패한다.
-- 운영 Credential Preflight에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 누락됐다.
-- Workforce Profile 19개 중 13개가 DRAFT이며 Risk·QA Profile의 ACTIVE 승격은 영주님 승인 경로가 필요하다.
-- `QA-02`의 공식 Tool Allowlist는 영주님 `HR-02`, 실제 Research Evidence는 재일님 `RQ-01`이 선행한다.
+- Risk·QA API 코드는 확장됐지만 Compose Fragment와 프로젝트 Redis 연결이 없어 제품 Runtime으로 기동되지 않았다.
+- PR #108의 신규 테스트가 추가됐지만 최신 `main` 기준 Docker 또는 CI 재실행 결과는 아직 확인되지 않았다.
+- 운영 Credential `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`와 Governed Fund·Policy·ACTIVE Profile 입력이 준비되지 않았다.
+- `QA-02`의 실제 Research Evidence는 재일님 `RQ-01`, 주문 입력은 도현님 Contract Fixture, Profile 승격은 영주님 독립 승인이 선행한다.
 - 현재 생성 보고서는 Git에 포함돼 있다. 운영 보고서 보존 위치와 개인정보·원문 제한이 확정되지 않았다.
 
 ### 2주 개인 실행 계획

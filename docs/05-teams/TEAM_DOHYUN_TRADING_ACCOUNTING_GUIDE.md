@@ -1,6 +1,6 @@
 # 도현님 담당 가이드: 트레이딩본부 + 회계/포트폴리오본부
 
-> 문서 상태: Team Handoff v1.8
+> 문서 상태: Team Handoff v1.9
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 도현님  
 > 담당 조직: 트레이딩본부, 회계/포트폴리오본부, 공통 Frontend Platform 기술 DRI
@@ -17,38 +17,49 @@
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 10:20 KST
+> 기준: 2026-08-04 09:45 KST
+> GitHub 기준: `origin/main` `54dd3eb`
 > 갱신 규칙: 도현님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
 
-- 이전 감사 이후 도현님 명의 신규 Commit은 확인되지 않았다. 미확인 작업을 완료로 추정하지 않는다.
-- 기존 OrderIntent·Paper Broker·OMS와 Ledger·Position·Reconciliation Prototype은 유지된다.
-- 동규님이 AI Office에 Risk·QA 계약 Panel을 추가했고 clean Node 22 환경에서 Build와 Render Test
-  `2/2`가 통과했다. 공통 Frontend Platform DRI로서 인수 Review가 필요하다.
+- Trading Domain API FastAPI 래퍼와 `trading-api` Container를 추가하고 트레이딩·회계 서비스를 부서별 Compose Fragment로 분리했다.
+- OMS 상태 머신을 계획·집행 2단계로 정리하고 Bull/Bear 독립 토론 LangGraph, NAV Close LangGraph와 Notion Projection을 연결했다.
+- 트레이딩·회계 Hermes Container, LangSmith Project 격리와 Tool Allowlist를 적용하고 부서장 모델을 구독형 Sonnet 경로로 전환했다.
+- Trading API가 URL의 `case_id`와 다른 Case의 Intent를 받아들이던 소유권 결함을 차단하고 PR #110으로 병합했다.
+- 관련 Commit은 `8aed60b`까지 모두 `main`에 병합됐으며 트레이딩·회계 원격 작업 브랜치는 `main`보다 앞선 Commit이 없다.
+- 다만 코드와 Container 정의가 존재한다는 사실만 확인됐고 Canonical Order·Fill·Journal·Position Row 생성은 아직 증명되지 않았다.
 
 ### Today
 
-- `CI-01`: CEO·HR의 동일한 `test_ollama_agent.py` 수집 충돌을 고치거나 pytest Test Path를 분리한다.
-- `PLAT-01`: Event Envelope, API Error, Idempotency Key, Health와 Version Registry Fixture를 만든다.
-- `PLAT-02`: 별도 Trading Bot Redis에 의존하지 않는 프로젝트 전용 Redis Service와 Network를 설계한다.
-- `UI-01`: 새 Risk·QA Panel을 `DEMO` 계약 Projection으로 명시하고 실제 API 연결 전까지 Runtime처럼
-  표시되지 않는지 Review한다.
-- `UI-03`: `npm audit`의 High 13, Moderate 4, Low 1건을 직접·전이 의존성으로 분류하고 Upgrade 회귀 계획을 남긴다.
+- [ ] `PLAT-01`: `case_id`, `trace_id`, `event_id`, `event_type`, `schema_version`, `occurred_at`,
+  `producer`, `idempotency_key`를 포함한 공통 Event Envelope과 Error·Health Fixture를 코드로 고정한다.
+- [ ] 재일님의 `ResearchPacketV2` Fixture를 받아 Trading API가 같은 ID를 유지한 `OrderIntent`를 생성하는 Contract Test를 만든다.
+- [ ] 동규님의 Risk API 입력·출력과 연결해 `APPROVE/RESIZE/REJECT` 중 승인된 Intent만 Paper OMS로 넘어가는 테스트를 만든다.
+- [ ] 트레이딩·회계 Compose Fragment를 깨끗한 환경에서 기동하고 Health, DB 연결, Hermes Tool 제한 결과를 실행 로그로 남긴다.
+- [x] Paper Fill 한 건이 Journal Entry, Position과 Portfolio Snapshot을 만드는 `ACC-01` 최소 Fixture를 구현한다.
+  (2026-08-04. `departments/05-accounting-portfolio/ledger/repository.py` psycopg 원장 저장소 +
+  `ledger/fill_consumer.py`. 실 Supabase에 Fund `ACC01-PAPER` / Book `MAIN` 고정 Fixture로
+  `journals`(POSTED·3라인)·`journal_lines`·`positions`·`cash_balances`·`portfolio_snapshots` 생성,
+  재실행 멱등 확인. **체결 원천은 아직 `execution.fills`가 아니라 API 주입이다** — 그 조인
+  경로(`pending_fills()`)는 구현했고 TRD-01이 행을 넣으면 그대로 붙는다.)
+- [ ] AI Office에서 Scripted Demo와 실제 Runtime Projection을 명확히 구분하고, 공식 API 연결 전 화면에 `LIVE`를 표시하지 않는지 검토한다.
 
 ### Blocker
 
-- Trading·Accounting 전용 API/Worker가 없고 Order·Fill·Journal·Position·Snapshot DB Row가 모두 0건이다.
-- `TRD-01`은 재일님 `RQ-01` Research Packet과 동규님 `RSK-01` Risk Endpoint가 선행한다.
-- `PLAT-02` 완료 전 Risk·QA Redis Test는 별도 프로젝트 Redis를 빌려 쓰므로 제품 Runtime 증거가 아니다.
-- 공식 `/ui/snapshot`, `/ws/operations`, Sequence Gap 복구와 Kanban Bridge가 없다.
+- Canonical Journal·Position·Cash·Snapshot 행은 2026-08-04에 생겼다(`ACC01-PAPER` Fixture).
+  남은 공백은 **Order·Fill 쪽**이다 — `execution.orders`/`fills`가 여전히 0행이고 OMS 상태는
+  프로세스 메모리다. 회계는 그 표를 읽을 준비만 돼 있다(`fill_consumer.pending_fills()`).
+- `TRD-01` E2E는 재일님 `RQ-01` Fixture와 동규님 Risk Runtime, 영주님 Case·Approval ID가 선행한다.
+- `PLAT-02` 프로젝트 전용 Redis·Outbox가 없어 부서 간 Event Replay를 제품 Runtime으로 검증할 수 없다.
+- 공식 `/ui/snapshot`, `/ws/operations`, Sequence Gap 복구와 Hermes Kanban Bridge가 없다.
 - Frontend 의존성 Upgrade는 Vinext·Cloudflare Build 회귀 위험이 있어 `npm audit fix --force`를 바로 실행하지 않는다.
 
 ### 2주 개인 실행 계획
 
 | 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
 |---|---|---|---|---|---|
-| 1 | 08-03 | `CI-01` | 전체 pytest 수집 기준과 Clean Runner 명령 | 영주 Smoke 파일 Review | 전체 수집 성공, 전 팀 공유 |
+| 1 | 완료 | `CI-01` | 중복 Smoke Test 파일명 분리 | 영주 Smoke 파일 Review | `4334c49`, 전체 Suite 재검증 대기 |
 | 2 | 08-04~05 | `PLAT-01` | Event·Error·Health·Idempotency Contract | 전 본부 Fixture | 생산자·소비자 Contract Test 통과 |
 | 3 | 08-06~07 | `PLAT-02` | 프로젝트 Redis·Core Network·Compose | `PLAT-01` | Risk·QA Service가 별도 Redis 없이 기동 |
 | 4 | 08-10~11 | `TRD-01` | Trading API·OMS Worker·Repository | `RQ-01`, `RSK-01` | 승인 Intent만 Order·Fill 생성 |

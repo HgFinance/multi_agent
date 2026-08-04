@@ -368,6 +368,29 @@ def universe_restrictions(as_of: Annotated[datetime | None, Query()] = None):
             "collected_at": snap["collected_at"], "restrictions": rows}
 
 
+@app.get("/calendar/sessions_since")
+def calendar_sessions_since(
+    since: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    market: str = Query("KRX")):
+    """since 다음날부터 어제까지의 **거래일 수**. 주말·공휴일은 안 센다.
+
+    달력 없이 날짜만 빼면 월요일마다 "3일 지연" 이 뜨고, 그런 경고는 사람이
+    곧 무시한다 - 오탐이 잦은 가드는 있는 것보다 나쁘다.
+    """
+    rows = _query("""
+        select count(*) as sessions,
+               (now() at time zone 'Asia/Seoul')::date as today_kst
+        from reference.market_sessions
+        where market = %s and is_trading_day
+          and trade_date > %s::date
+          and trade_date < (now() at time zone 'Asia/Seoul')::date
+    """, (market, since))
+    r = (rows or [{}])[0]
+    return {"since": since, "market": market,
+            "sessions": int(r.get("sessions") or 0),
+            "today_kst": str(r.get("today_kst"))}
+
+
 @app.get("/methods/performance")
 def methods_performance(
     min_scored: int = Query(1, ge=0, le=10_000,
