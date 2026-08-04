@@ -4,7 +4,7 @@
 
 ## Canonical flows
 
-- `portfolio-recommendation.yaml`: `user profile → suitability → research → trading → risk → QA → accounting → CEO` (async TEST fan-out/fan-in)
+- `portfolio-recommendation.yaml`: `user profile → suitability → research → trading → risk → QA → accounting → CEO` (async TEST/Supabase-read-only fan-out/fan-in)
 
 - `investment-case.yaml`: `research → trading → risk → QA → OMS/Fill → accounting → CEO`
 - `strategy-research.yaml`: `quant-backtest → QA → CEO`
