@@ -603,6 +603,37 @@ if __name__ == "__main__":
     assert r18.stage is ChangeStage.ACTIVATED
     assert wf._version_repo.get_mandate_current("m1") == (8, "ACTIVE")
     print("ok - UC-4(counterproposal restarts the complete approval pipeline)")
+
+    # UC-7: recreate the orchestrator between each decision; only repository state resumes.
+    restart_at = counter_at + timedelta(hours=1)
+    r19 = wf.submit(mandate_id="m1", fund_id="f1", policy=_policy("0.47"),
+                    objective_text="restart recovery", objective={}, effective_from=restart_at,
+                    created_by="u", trace_id="t8", now=restart_at,
+                    previous_policy=_policy("0.35"))
+    v9_id = wf._version_repo.get_mandate_version_id("m1", 9)
+    for role, dept in ((RequiredRole.RISK, "risk-management"), (RequiredRole.QA, "qa-department")):
+        approval = approvals.find(ObjectType.MANDATE_VERSION, v9_id, role)
+        approvals.save(decide_approval(approval, decision=ApprovalDecision.APPROVED,
+                                       actor_department=dept, at=restart_at))
+    wf_after_restart = MandateChangeWorkflow(
+        version_repo=wf._version_repo, version_service=MandateVersionService(wf._version_repo),
+        activation_service=MandateActivationService(wf._version_repo),
+        approval_repo=approvals, case_repo=cases,
+    )
+    r20 = wf_after_restart.advance(r19.case_id, at=restart_at)
+    assert r20.stage is ChangeStage.AWAITING_USER_APPROVAL, r20
+    user_a9 = approvals.find(ObjectType.MANDATE_VERSION, v9_id, RequiredRole.USER)
+    approvals.save(decide_approval(user_a9, decision=ApprovalDecision.APPROVED,
+                                   actor_user_id="user-1", at=restart_at))
+    wf_after_second_restart = MandateChangeWorkflow(
+        version_repo=wf._version_repo, version_service=MandateVersionService(wf._version_repo),
+        activation_service=MandateActivationService(wf._version_repo),
+        approval_repo=approvals, case_repo=cases,
+    )
+    r21 = wf_after_second_restart.advance(r19.case_id, at=restart_at)
+    assert r21.stage is ChangeStage.ACTIVATED
+    assert wf._version_repo.get_mandate_current("m1") == (9, "ACTIVE")
+    print("ok - UC-7(recreated workflow resumes from persisted approvals and case)")
     print("ok - UC-5(만료 지연 평가 - 승인 방향으로 안 떨어짐) 통과")
 
     # 7) 종료된 Case 재advance 차단.
