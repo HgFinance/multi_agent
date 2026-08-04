@@ -67,12 +67,12 @@ implementation:
     - "플레이스홀더 회원 seed — auth.users/user_profiles 1건(RFC 2606 .invalid, 로그인 불가). Mandate owner_user_id NOT NULL 차단 해제. 자동 기본값으로는 쓰지 않는다"
     - "부서 코드 통일 — Hermes Profile 이름(ceo-agent/hr-department 등)으로 정본 확정. 스펙 2.2·2.3 갱신 + AGENT-WORKFORCE 행 rename 마이그레이션"
     - "Mandate 쓰기 경로 왕복 검증 — TEST-CEO-MANDATE Fund + 플레이스홀더 회원으로 governance.mandates 부모 행을 만들어 MandateVersionService.propose_version()/MandateActivationService.activate()를 그대로 실행. insert/set_mandate_current/set_effective_to/record_decision 4개 전부 실 DB에서 확인(v1 최초 활성화 + v2 TIGHTEN 자동 활성화), 2회 연속 실행으로 정리 로직 멱등성도 확인"
+    - "Y2 위원회 Vote·Quorum·SoD — src/committee/. 엔드포인트 6개(open/get/vote/close/cancel + close가 결정 확정). status/decision 값은 DDL에 이미 있어 새로 안 만듦, quorum_policy(jsonb) 형태만 제안(리뷰 대상) - required_departments/veto_departments/approval_threshold. committee_type별 구성(투자위원회 vs 전략기획위원회, MASTER_PLAN 5.2/18.2)은 강제하지 않고 세션을 여는 쪽이 매번 지정. Veto 부서 REJECT는 문턱 충족과 무관하게 REJECT, 정족수 미달은 DEFER(승인 방향 자동 fallback 없음), SoD로 Case owner_department는 그 Case 위원회에서 투표 불가. Docker 컨테이너에서 실 DB로 세션 열기→투표→종료 전 구간 확인"
   in_progress: []
   not_started:
     - "F01 완료조건 2번(Signal·Risk Decision이 mandate_version 기록) — 트레이딩·리스크본부 코드 의존이라 CEO Office 단독으로 못 닫는다"
     - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 방향 판정·활성화 게이트만 있고 위원회 경유 경로 없음"
-    - "Y1 나머지 — Daily Summary. Case 생성·Escalation은 GOV-02로 해소됨"
-    - "Y2 위원회 — committee_sessions/votes/decisions의 Quorum·SoD 판정 로직 없음. approvals는 GOV-02로 해소됨"
+    - "Y1 나머지 — Daily Summary. Case 생성·Escalation·위원회는 GOV-02/Y2로 해소됨"
     - "record_decision (스펙 2.2) — 범용 governance.decisions 테이블이 없고 스펙에 Request 본문도 없어 계약을 지어내야 한다. 별도 결정 필요"
     - "F23 Daily Report 실 연동 — 본부별 Snapshot 조회 엔드포인트 부재로 SnapshotRef는 호출자가 직접 채워야 함. Reporting Worker 렌더링도 미구현"
     - "F24 Notification 발송 Adapter — Email/Push/SMS 미구현. 지금은 API 호출자가 NotificationRequest를 직접 만든다"
