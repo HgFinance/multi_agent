@@ -634,6 +634,22 @@ if __name__ == "__main__":
     assert r21.stage is ChangeStage.ACTIVATED
     assert wf._version_repo.get_mandate_current("m1") == (9, "ACTIVE")
     print("ok - UC-7(recreated workflow resumes from persisted approvals and case)")
+
+    # UC-6 also applies when QA, rather than Risk, rejects the proposal.
+    qa_reject_at = restart_at + timedelta(hours=1)
+    r22 = wf.submit(mandate_id="m1", fund_id="f1", policy=_policy("0.49"),
+                    objective_text="qa rejection", objective={}, effective_from=qa_reject_at,
+                    created_by="u", trace_id="t9", now=qa_reject_at,
+                    previous_policy=_policy("0.47"))
+    v10_id = wf._version_repo.get_mandate_version_id("m1", 10)
+    qa_a10 = approvals.find(ObjectType.MANDATE_VERSION, v10_id, RequiredRole.QA)
+    approvals.save(decide_approval(qa_a10, decision=ApprovalDecision.REJECTED,
+                                   actor_department="qa-department", at=qa_reject_at))
+    r23 = wf.advance(r22.case_id, at=qa_reject_at)
+    assert r23.stage is ChangeStage.REVIEW_REJECTED, r23
+    assert approvals.find(ObjectType.MANDATE_VERSION, v10_id, RequiredRole.USER) is None
+    assert wf._version_repo.get_mandate_current("m1") == (9, "ACTIVE")
+    print("ok - UC-6(QA rejection never reaches user approval)")
     print("ok - UC-5(만료 지연 평가 - 승인 방향으로 안 떨어짐) 통과")
 
     # 7) 종료된 Case 재advance 차단.
