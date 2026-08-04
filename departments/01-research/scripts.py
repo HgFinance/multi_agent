@@ -140,6 +140,10 @@ DQ_FAIL_HALTS = True          # FAIL 이면 분석을 안 한다. 나쁜 데이�
 #   관련 없는 스트림의 FAIL 은 기록하되 통과시킨다.
 EQUITY_STREAMS = ("ticks", "quotes", "bars", "breadth", "index")
 
+# 일봉이 며칠 비면 분석을 멈추는가. 1 은 수집 지연일 수 있으나 2 이상이면
+# 배선이 끊긴 것이다 - 그 위에서 낸 판단은 쓸 수 없다.
+BAR_STALE_HALT_SESSIONS = 2
+
 
 def check_data_quality(state: ResearchState) -> dict:
     """수집 품질을 확인하고 나쁘면 막는다. **행 0건은 PASS 가 아니다.**"""
@@ -176,6 +180,41 @@ def check_data_quality(state: ResearchState) -> dict:
         "reason": "; ".join(
             str((r.get("metrics") or {}).get("reasons") or "")[:80] for r in bad[:3]),
     }
+    # ▶ **봉 신선도.** 틱 품질만 보면 이게 안 보인다 - 실측(2026-08-04)에서
+    #   일봉이 7/31 에 멈춰 있었는데 리포트는 그 종가를 "최신" 으로 인용했고
+    #   품질 게이트는 통과시켰다. 분석 전체가 나흘 낡은 가격 위에 서 있었다.
+    # ▶ **두 DB 를 건너 센다.** 봉은 TimescaleDB, 거래일 달력은 Supabase 다.
+    #   한 쿼리로 join 하려다 UndefinedTable 로 죽었다 - 각자 자기 DB 만 보고
+    #   여기서 합친다.
+    fr: dict = {"ok": None, "reason": "봉 신선도 미확인"}
+    try:
+        bars = _get(f"{MARKET_API}/dq/bar_freshness?interval=1D")
+        if isinstance(bars, dict) and bars.get("last_bar_date"):
+            last = str(bars["last_bar_date"])[:10]
+            cal = _get(f"{RESEARCH_API}/calendar/sessions_since?since={last}")
+            fr = {"last_bar_date": last, "symbols": bars.get("symbols")}
+            if isinstance(cal, dict) and cal.get("sessions") is not None:
+                fr["missing_sessions"] = int(cal["sessions"])
+                fr["ok"] = fr["missing_sessions"] == 0
+            else:
+                # 달력을 못 읽으면 **날짜 차이로 대신 세지 않는다** - 주말을
+                # 지연으로 세면 월요일마다 오탐이 나고 사람이 가드를 무시한다
+                fr["reason"] = "거래일 달력을 읽지 못해 지연 일수를 셀 수 없다"
+        elif isinstance(bars, dict):
+            fr = dict(bars, missing_sessions=None)
+    except Exception as e:
+        fr = {"ok": None, "reason": f"봉 신선도 조회 실패: {type(e).__name__}"}
+    dq["bar_freshness"] = fr
+    missing = fr.get("missing_sessions")
+    if isinstance(missing, int) and missing >= BAR_STALE_HALT_SESSIONS:
+        # 하루 빠진 것과 나흘 빠진 것은 다르다. 하루는 수집 지연일 수 있으나
+        # 여러 날이면 배선이 끊긴 것이고, 그 위에서 낸 판단은 쓸 수 없다.
+        return {"data_quality": dict(dq, status="FAIL"),
+                "halted": f"일봉이 {fr.get('last_bar_date')} 이후 "
+                          f"거래일 {missing}일치 비었다 - 낡은 가격으로 판단하지 않는다"}
+    if isinstance(missing, int) and missing > 0:
+        dq["status"] = "WARN" if dq["status"] == "PASS" else dq["status"]
+
     if bad and DQ_FAIL_HALTS:
         return {"data_quality": dq,
                 "halted": f"데이터 품질 FAIL - 스트림 {', '.join(streams)} "
@@ -2199,9 +2238,19 @@ def _check_data_quality_gate():
     # 조회를 가짜로 바꿔 네 경우를 본다
     orig = globals()["_get"]
     try:
-        globals()["_get"] = lambda url: [
+        def _fake(windows, fresh_missing=0):
+            def g(url):
+                if "bar_freshness" in url:
+                    return {"ok": True, "last_bar_date": "2026-07-31",
+                            "symbols": 350}
+                if "sessions_since" in url:
+                    return {"since": "2026-07-31", "sessions": fresh_missing}
+                return windows
+            return g
+
+        globals()["_get"] = _fake([
             {"stream_type": "ticks", "quality_status": "FAIL",
-             "metrics": {"reasons": ["중복 12%"]}}]
+             "metrics": {"reasons": ["중복 12%"]}}])
         out = check_data_quality({"symbol": "x"})
         assert out["data_quality"]["status"] == "FAIL", out
         assert out.get("halted"), "FAIL 인데 안 막았다"
@@ -2209,24 +2258,38 @@ def _check_data_quality_gate():
         # ▶ **무관한 스트림 장애로 막지 않는다.** 실측: derivatives FAIL 이
         #   주식 종목 분석을 통째로 멈췄다 - 분석가 6인 중 파생을 쓰는
         #   사람이 없다. 과한 게이트는 사람이 곧 꺼버린다.
-        globals()["_get"] = lambda url: [
+        globals()["_get"] = _fake([
             {"stream_type": "derivatives", "quality_status": "FAIL",
-             "metrics": {"reasons": ["지연"]}}]
+             "metrics": {"reasons": ["지연"]}}])
         out = check_data_quality({"symbol": "x"})
         assert not out.get("halted"), "무관한 스트림으로 막았다"
         # 다만 **숨기지도 않는다**
         assert out["data_quality"]["failed_unrelated_streams"] == ["derivatives"], out
 
-        globals()["_get"] = lambda url: [
-            {"stream_type": "ticks", "quality_status": "WARN", "metrics": {}}]
+        globals()["_get"] = _fake([
+            {"stream_type": "ticks", "quality_status": "WARN", "metrics": {}}])
         out = check_data_quality({"symbol": "x"})
         assert out["data_quality"]["status"] == "WARN" and not out.get("halted"), out
 
         # ▶ 행 0 은 PASS 가 아니다 - 감사가 안 돌았다는 뜻이다
-        globals()["_get"] = lambda url: []
+        globals()["_get"] = _fake([])
         out = check_data_quality({"symbol": "x"})
         assert out["data_quality"]["status"] == "UNKNOWN", out
         assert "0건" in out["data_quality"]["reason"], out
+
+        # ▶ **봉이 낡으면 막는다.** 틱 품질이 멀쩡해도 일봉이 며칠 비면
+        #   분석 전체가 낡은 가격 위에 선다(실측 2026-08-04).
+        globals()["_get"] = _fake(
+            [{"stream_type": "ticks", "quality_status": "PASS", "metrics": {}}],
+            fresh_missing=2)
+        out = check_data_quality({"symbol": "x"})
+        assert out.get("halted") and "일봉" in out["halted"], out
+        # 하루는 수집 지연일 수 있다 - 막지 않되 WARN 으로 남긴다
+        globals()["_get"] = _fake(
+            [{"stream_type": "ticks", "quality_status": "PASS", "metrics": {}}],
+            fresh_missing=1)
+        out = check_data_quality({"symbol": "x"})
+        assert not out.get("halted") and out["data_quality"]["status"] == "WARN", out
 
         # 조회 실패도 통과가 아니다
         def boom(url):

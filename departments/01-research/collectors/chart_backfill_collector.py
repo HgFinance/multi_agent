@@ -284,9 +284,20 @@ if __name__ == "__main__":
     syms = tuple(s.strip() for s in opt("--symbols", "").split(",") if s.strip())
 
     if "--daily" in a:
-        print(f"{COLLECTOR_VERSION} 일봉 백필")
+        # ▶ --recent-days: 스케줄러용 상대 창. 매일 도는 증분 수집은 시작일을
+        #   고정할 수 없고, 그렇다고 2024-01-01 부터 다시 받으면 매일 몇 년치를
+        #   재요청한다. PK 가 멱등이라 겹쳐 받아도 안전하므로 짧은 창을 돌린다
+        #   (연휴·장애로 며칠 빠져도 다음 실행이 메운다).
+        recent = opt("--recent-days", "")
+        if recent:
+            start = (datetime.now(KST)
+                     - timedelta(days=int(recent))).strftime("%Y%m%d")
+            print(f"{COLLECTOR_VERSION} 일봉 증분 (최근 {recent}일)")
+        else:
+            start = opt("--from", "20240101")
+            print(f"{COLLECTOR_VERSION} 일봉 백필")
         raise SystemExit(_collect(
-            True, syms, opt("--from", "20240101"),
+            True, syms, start,
             opt("--to", datetime.now(KST).strftime("%Y%m%d")), 1,
             int(opt("--top", "0")) or None))
     if "--minute" in a:

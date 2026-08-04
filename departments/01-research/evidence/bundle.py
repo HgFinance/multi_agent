@@ -27,7 +27,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as _dtime, timedelta, timezone
 
 BUNDLE_VERSION = "evidence-bundle-v1"
 KST = timezone(timedelta(hours=9))
@@ -123,8 +123,34 @@ def compute_price_context(bars: list[dict]) -> dict:
     return ctx
 
 
+# 정규장 (KST). 이 창 안에서는 그날 일봉이 아직 확정되지 않는다.
+MARKET_OPEN = _dtime(9, 0)
+MARKET_CLOSE = _dtime(15, 30)
+
+
+def is_market_hours(now=None) -> bool:
+    """지금이 정규장 중인가. 주말은 제외한다(공휴일은 달력이 따로 본다)."""
+    n = now or datetime.now(KST)
+    return n.weekday() < 5 and MARKET_OPEN <= n.time() <= MARKET_CLOSE
+
+
 def fetch_price_context(symbol: str, *, market_api: str | None = None,
-                        get: Callable = _http_get) -> dict:
+                        get: Callable = _http_get, now=None) -> dict:
+    """일봉 기반 가격 문맥. **장중에는 현재가로 당일 종가를 대신한다.**
+
+    ▶ 재일님 결정 2026-08-04
+      "장중에는 현재가를 종가로 대체하고 장 끝나면 백필 수집기가 집계한
+       종가를 사용한다"
+
+      일봉은 마감 후에야 확정되고 수집기는 15:50 에 돈다. 그 전까지 최신 봉은
+      **어제 것**이라, 장중에 돌린 분석은 하루 낡은 가격 위에 서게 된다.
+
+    ▶ 대체한 사실을 지우지 않는다
+      현재가는 **확정 종가가 아니다.** close_is_intraday 와 as_of 를 함께 실어
+      읽는 쪽이 구분하게 한다 - 조용히 바꿔치면 리포트를 보는 사람이 34,550 이
+      확정치인지 장중 시세인지 알 수 없고, 사후 채점도 오염된다.
+      PIT 위반은 아니다 - 장중 현재가는 그 시점의 사실이다.
+    """
     base = (market_api or MARKET_API_DEFAULT).rstrip("/")
     try:
         bars = get(f"{base}/bars/{symbol}?interval=1D"
@@ -133,11 +159,47 @@ def fetch_price_context(symbol: str, *, market_api: str | None = None,
         # 미가동을 통과로 위장하지 않는다 - 사유를 명시하고 UNAVAILABLE 로 끝낸다
         return {"status": "UNAVAILABLE",
                 "reason": f"market-api /bars 호출 실패: {type(e).__name__}: {e}"}
-    return compute_price_context(bars)
+    ctx = compute_price_context(bars)
+    ctx["close_is_intraday"] = False
+    if not is_market_hours(now) or ctx.get("status") == "UNAVAILABLE":
+        return ctx
+
+    try:
+        snap = get(f"{base}/snapshot/{symbol}")
+        trade = (snap or {}).get("last_trade") or {}
+        px = float(trade["price"])
+    except Exception:  # noqa: BLE001
+        # 현재가를 못 구하면 **확정 종가를 그대로 쓴다.** 실패를 숨기지 않고
+        # 사유를 남긴다 - 없는 값을 만들어 넣는 것보다 낡은 사실이 낫다.
+        ctx["intraday_note"] = "장중이지만 현재가를 구하지 못해 직전 종가를 쓴다"
+        return ctx
+
+    prev = ctx.get("last_close")
+    ctx.update({
+        "last_close": px,
+        "close_is_intraday": True,
+        "intraday_as_of": str(trade.get("event_time") or ""),
+        "settled_close": prev,                 # 무엇을 대체했는지 남긴다
+        "settled_close_date": ctx.get("last_close_date"),
+        "intraday_note": "정규장 중이라 현재가로 당일 종가를 대신한다 - "
+                         "확정 종가가 아니다",
+    })
+    if prev:
+        # 장중 등락률의 기준은 **직전 확정 종가**다. prev_close 도 한 칸 밀어
+        # 맞춘다 - 안 밀면 등락률은 100 기준인데 prev_close 는 99 로 남아
+        # 리포트 안에서 두 수가 서로 안 맞는다.
+        ctx["prev_close"] = prev
+        ctx["change_1d_pct"] = round((px / prev - 1.0) * 100.0, 2)
+        ctx["direction_1d"] = ("상승" if px > prev else
+                               "하락" if px < prev else "보합")
+    if ctx.get("closes"):
+        ctx["closes"] = list(ctx["closes"]) + [px]
+    return ctx
 
 
 # ── Bundle 조립 (scripts.py assemble_evidence 이관) ────────────────────────
-def assemble_bundle(symbol: str, *, market_api: str | None = None,
+def assemble_bundle(symbol: str, *, now=None,
+                    market_api: str | None = None,
                     research_api: str | None = None,
                     get: Callable = _http_get) -> dict:
     """기존 evidence 계약 유지 + price_context/as_of 확장.
@@ -178,7 +240,8 @@ def assemble_bundle(symbol: str, *, market_api: str | None = None,
                             "evidence_id": d_.get("document_id"),
                             "title": d_["title"]}
                            for i, d_ in enumerate(disc)],
-        "price_context": fetch_price_context(symbol, market_api=m, get=get),
+        "price_context": fetch_price_context(symbol, market_api=m, get=get,
+                                            now=now),
         "as_of": datetime.now(KST).isoformat(timespec="seconds"),
     }
 
@@ -459,6 +522,57 @@ def _check_api_unavailable():
     print("  API 불가 UNAVAILABLE     OK")
 
 
+def _check_intraday_close_substitution():
+    """장중에는 현재가로 종가를 대신하되 **대체한 사실을 남기는가.**
+
+    재일님 결정 2026-08-04. 조용히 바꿔치면 리포트를 보는 사람이 그 값이
+    확정치인지 장중 시세인지 알 수 없고, 사후 채점도 오염된다.
+    """
+    bars = [{"bucket_time": f"2026-07-{31 - i:02d}T15:00:00+00:00",
+             "close": 100.0 - i} for i in range(30)]
+
+    def g(url):
+        if "/snapshot/" in url:
+            return {"last_trade": {"price": 110.0,
+                                   "event_time": "2026-08-04T11:00:00+09:00"}}
+        return bars
+
+    # 장 밖 - 확정 종가 그대로
+    off = fetch_price_context("000660", market_api="http://x", get=g,
+                              now=datetime(2026, 8, 4, 18, 0, tzinfo=KST))
+    assert off["close_is_intraday"] is False, off
+    assert off["last_close"] == 100.0, off
+
+    # 장중 - 현재가로 대체하되 원본을 남긴다
+    on = fetch_price_context("000660", market_api="http://x", get=g,
+                             now=datetime(2026, 8, 4, 11, 0, tzinfo=KST))
+    assert on["close_is_intraday"] is True, on
+    assert on["last_close"] == 110.0, on
+    assert on["settled_close"] == 100.0, "무엇을 대체했는지 안 남았다"
+    assert on["intraday_as_of"], "언제 시세인지 안 남았다"
+    assert "확정 종가가 아니다" in on["intraday_note"], on
+    # 장중 등락률의 기준은 직전 **확정** 종가(100.0)이지 그 앞 봉(99.0)이 아니다
+    assert on["change_1d_pct"] == 10.0, on
+    assert on["prev_close"] == 100.0, on
+
+    # 주말은 장중이 아니다 (2026-08-02 는 일요일)
+    wk = fetch_price_context("000660", market_api="http://x", get=g,
+                             now=datetime(2026, 8, 2, 11, 0, tzinfo=KST))
+    assert wk["close_is_intraday"] is False, wk
+
+    # ▶ 현재가를 못 구하면 **확정 종가를 쓰되 사유를 남긴다** - 없는 값을
+    #   만들어 넣는 것보다 낡은 사실이 낫다
+    def boom(url):
+        if "/snapshot/" in url:
+            raise OSError("거부")
+        return bars
+
+    fb = fetch_price_context("000660", market_api="http://x", get=boom,
+                             now=datetime(2026, 8, 4, 11, 0, tzinfo=KST))
+    assert fb["close_is_intraday"] is False and fb["last_close"] == 100.0, fb
+    assert "구하지 못해" in fb["intraday_note"], fb
+
+
 def _check_bundle_contract():
     d0 = _fake_bars([1270.0, 1000.0] + [1000.0] * 19)
 
@@ -478,7 +592,12 @@ def _check_bundle_contract():
             return [{"document_id": "doc-disc-1", "title": "공시 1"}]
         raise AssertionError(f"예상 밖 URL: {url}")
 
-    b = assemble_bundle("000660", market_api="http://x", research_api="http://y",
+    # ▶ **벽시계에 기대지 않는다.** 장중이면 현재가 대체가 걸려 종가가
+    #   달라지고, 그러면 이 검사가 시각에 따라 통과·실패한다(이 세션에서
+    #   이미 한 번 겪은 실패 방식이다). 장 밖 시각을 못박는다.
+    _after_close = datetime(2026, 8, 4, 18, 0, tzinfo=KST)
+    b = assemble_bundle("000660", now=_after_close,
+                        market_api="http://x", research_api="http://y",
                         get=fake_get)
     # 기존 소비자(draft_packet)가 쓰던 키가 전부 살아 있어야 한다
     for k in ("daily_closes_recent", "last_trade", "news_headlines",
@@ -605,6 +724,8 @@ if __name__ == "__main__":
     _check_drop()
     _check_insufficient_bars()
     _check_api_unavailable()
+    _check_intraday_close_substitution()
+    print("  장중 현재가 대체         OK")
     _check_bundle_contract()
     _check_citation_resolution()
     _check_date_guard()
