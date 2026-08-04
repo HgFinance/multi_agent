@@ -1381,6 +1381,13 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     if "--run" in sys.argv:
+        if os.environ.get("RISK_QA_PRODUCTION_ENABLED", "false").lower() != "true":
+            print(
+                "AI-QA production pipeline is OFF. "
+                "Run scripts/run_risk_qa_test_pipeline.py --mode test, "
+                "or explicitly enable the reviewed production gate."
+            )
+            raise SystemExit(2)
         from uuid import uuid4
 
         now_iso = datetime.now(timezone.utc).isoformat()
