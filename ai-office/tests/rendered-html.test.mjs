@@ -46,7 +46,7 @@ test("server-renders the HgFinance organization projection", async () => {
 });
 
 test("keeps the current organization and Risk/QA bridge wired", async () => {
-  const [config, page, layout, staff, world, packageJson, riskQaBridge] = await Promise.all([
+  const [config, page, layout, staff, world, packageJson, riskQaBridge, sim] = await Promise.all([
     readFile(new URL("../company.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -54,6 +54,7 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
     readFile(new URL("../app/game/world.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/game/sim.ts", import.meta.url), "utf8"),
   ]);
 
   const departmentBlock = config.match(/export const DEPARTMENTS = \[(?<departments>[\s\S]*?)\] as const/);
@@ -69,6 +70,11 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.equal((config.match(/staff\("ops", "member"/g) ?? []).length, 4);
   assert.equal((config.match(/staff\("qa", "member"/g) ?? []).length, 5);
   assert.match(config, /executive-briefing-worker/);
+  // sim.ts의 debate()가 role 문자열로 두 사람을 찾는다. 이름이 바뀌면 토론이 조용히 사라진다.
+  for (const role of ["Bull 리서처", "Bear 리서처"]) {
+    assert.ok(config.includes(`"${role}"`), `${role} 누락 — debate()가 no-op이 된다`);
+    assert.ok(sim.includes(`=== "${role}"`), `sim.ts가 찾는 role 문자열과 불일치`);
+  }
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
   assert.match(page, /<RiskQaPanel/);
