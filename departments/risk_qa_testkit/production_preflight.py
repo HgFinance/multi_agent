@@ -55,15 +55,13 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "QA_TRACE_PERSIST",
     "QA_INGEST_MODE",
     "RISK_REQUIRE_P1_ANALYTICS",
+    "RISK_CONTEXT_SOURCE",
+    "RISK_BROKER_ADAPTER",
 )
 
 
 def _present(environ: Mapping[str, str], name: str) -> bool:
     return bool(environ.get(name, "").strip())
-
-
-def _true(environ: Mapping[str, str], name: str) -> bool:
-    return environ.get(name, "").strip().lower() == "true"
 
 
 def _check(name: str, status: str, *, reason: str | None = None, **details: Any) -> dict[str, Any]:
@@ -129,12 +127,12 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
             )
         )
 
-    redis_configured = _present(environ, "RISK_QA_EVENT_REDIS_URL") or _present(environ, "REDIS_URL")
+    redis_configured = _present(environ, "REDIS_URL")
     checks.append(
         _check(
             "REDIS_URL",
             "PASS" if redis_configured else "FAIL",
-            reason=None if redis_configured else "REDIS_URL_MISSING",
+            reason=None if redis_configured else "REDIS_URL_REQUIRED_FOR_TRADING_STATE",
             configured=redis_configured,
         )
     )
@@ -146,10 +144,21 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
         "QA_TRACE_PERSIST": "true",
         "QA_INGEST_MODE": "production",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
+        "RISK_CONTEXT_SOURCE": "database",
     }
     for name in REQUIRED_FLAGS:
         actual = environ.get(name, "").strip().lower()
-        expected_value = expected[name]
+        expected_value = expected.get(name)
+        if expected_value is None:
+            checks.append(
+                _check(
+                    name,
+                    "PASS" if _present(environ, name) else "FAIL",
+                    reason=None if _present(environ, name) else f"{name}_MISSING",
+                    configured=_present(environ, name),
+                )
+            )
+            continue
         checks.append(
             _check(
                 name,
@@ -226,6 +235,11 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
                     (SELECT count(*) FROM risk.policies
                      WHERE status = 'ACTIVE' AND effective_from <= %s
                        AND (effective_to IS NULL OR effective_to > %s)),
+                    (SELECT count(*) FROM governance.mandates m
+                     JOIN governance.mandate_versions mv ON mv.mandate_id = m.mandate_id
+                     WHERE m.status = 'ACTIVE' AND mv.version = m.current_version
+                       AND mv.effective_from <= %s
+                       AND (mv.effective_to IS NULL OR mv.effective_to > %s)),
                     (SELECT count(*) FROM strategy.versions v
                      JOIN strategy.strategies s ON s.strategy_id = v.strategy_id
                      WHERE v.effective_from <= %s
@@ -240,10 +254,18 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
                      WHERE ap.employment_status = 'ACTIVE'
                        AND apv.status IN ('APPROVED', 'ACTIVE'))
                 """,
-                (as_of, as_of, as_of, as_of, as_of),
+                (as_of, as_of, as_of, as_of, as_of, as_of, as_of),
             )
-            counts = cur.fetchone()
+        counts = cur.fetchone()
         conn.rollback()
+        data_counts = {
+            "active_funds": int(counts[0]),
+            "active_policies_as_of": int(counts[1]),
+            "active_mandates_as_of": int(counts[2]),
+            "deployable_portfolio_versions_as_of": int(counts[3]),
+            "usable_market_snapshots_as_of": int(counts[4]),
+            "active_worker_profiles": int(counts[5]),
+        }
         if missing:
             return _check(
                 "postgres",
@@ -262,18 +284,33 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
                 rls_failures=rls_failures,
                 rls=rls,
             )
+        data_requirements = {
+            "active_funds": 1,
+            "active_policies_as_of": 1,
+            "active_mandates_as_of": 1,
+            "deployable_portfolio_versions_as_of": 1,
+            "usable_market_snapshots_as_of": 1,
+            "active_worker_profiles": 5,
+        }
+        data_failures = [
+            name for name, minimum in data_requirements.items() if data_counts[name] < minimum
+        ]
+        if data_failures:
+            return _check(
+                "postgres",
+                "FAIL",
+                reason="PIT_DATA_NOT_READY",
+                read_only=read_only,
+                data_failures=data_failures,
+                data_counts=data_counts,
+                rls=rls,
+            )
         return _check(
             "postgres",
             "PASS",
             read_only=read_only,
             rls=rls,
-            data_counts={
-                "active_funds": int(counts[0]),
-                "active_policies_as_of": int(counts[1]),
-                "deployable_portfolio_versions_as_of": int(counts[2]),
-                "usable_market_snapshots_as_of": int(counts[3]),
-                "active_worker_profiles": int(counts[4]),
-            },
+            data_counts=data_counts,
         )
     except Exception as exc:  # noqa: BLE001 - preflight returns sanitized class only
         if conn is not None:
@@ -285,7 +322,7 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
 
 
 def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
-    redis_url = (environ.get("RISK_QA_EVENT_REDIS_URL") or environ.get("REDIS_URL") or "").strip()
+    redis_url = environ.get("REDIS_URL", "").strip()
     if not redis_url:
         return _check("redis", "FAIL", reason="REDIS_URL_MISSING")
     try:

@@ -23,6 +23,8 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path:
         "QA_TRACE_PERSIST": "true",
         "QA_INGEST_MODE": "production",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
+        "RISK_CONTEXT_SOURCE": "database",
+        "RISK_BROKER_ADAPTER": "paper",
     }
 
     report = run_preflight(environment, as_of="2026-08-04T00:00:00+00:00")

@@ -1,4 +1,4 @@
--- Supabase 운영 DB Seed (db reset 시 마이그레이션 이후 실행)
+-- Supabase local/Preview reset seed (Production에서는 실행하지 않는다)
 -- 소유 구획: 각 본부가 자기 도메인 seed 를 섹션으로 추가한다.
 -- 근거: docs/database/README.md 7절(적용), TEAM_YOUNGJU_CEO_HR_GUIDE.md 12(Y3)
 -- 멱등: 모든 insert 는 ON CONFLICT DO NOTHING (재적용 안전).

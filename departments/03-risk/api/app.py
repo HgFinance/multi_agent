@@ -92,6 +92,7 @@ from trading_state_store import (
     RedisTradingStateStore,
     TradingStateStoreError,
 )
+from risk_context_repository import PostgresRiskContextRepository, RiskContextLoadError
 
 
 class MandateScopeIn(BaseModel):
@@ -219,7 +220,7 @@ class P1RiskSnapshotIn(BaseModel):
 class RiskCheckRequest(BaseModel):
     risk_request_id: UUID | None = None
     order_intent: OrderIntent
-    context: RiskContextIn
+    context: RiskContextIn | None = None
     p1_snapshot: P1RiskSnapshotIn | None = None
 
 
@@ -377,7 +378,42 @@ def _on_validation_error(request, exc: RequestValidationError):
 
 @app.post("/investment-cases/{case_id}/risk-check")
 def risk_check(case_id: str, body: RiskCheckRequest):
-    assessment = engine.check_order(body.order_intent, body.context.to_context(), body.risk_request_id)
+    use_database_context = (
+        os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production"
+        or os.environ.get("RISK_CONTEXT_SOURCE", "request").strip().lower() == "database"
+    )
+    if use_database_context:
+        dsn = os.environ.get("DATABASE_URL", "").strip()
+        broker_adapter = os.environ.get("RISK_BROKER_ADAPTER", "").strip()
+        if not dsn or not broker_adapter:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "RISK_CANONICAL_CONTEXT_NOT_CONFIGURED",
+                    "reason": "DATABASE_URL and RISK_BROKER_ADAPTER are required",
+                },
+            )
+        try:
+            trading_state = _redis_store().get_state_fail_closed(f"fund:{body.order_intent.fund_id}")
+            context = PostgresRiskContextRepository.connect(dsn).load(
+                fund_id=body.order_intent.fund_id,
+                book_id=body.order_intent.book_id,
+                instrument_id=body.order_intent.instrument_id,
+                broker_adapter=broker_adapter,
+                as_of=body.order_intent.snapshot.as_of,
+                trading_state=trading_state,
+            )
+        except RiskContextLoadError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"error_code": "RISK_CANONICAL_CONTEXT_UNAVAILABLE"},
+            ) from exc
+    elif body.context is not None:
+        context = body.context.to_context()
+    else:
+        raise HTTPException(status_code=503, detail={"error_code": "RISK_CONTEXT_REQUIRED"})
+
+    assessment = engine.check_order(body.order_intent, context, body.risk_request_id)
     if os.environ.get("RISK_REQUIRE_P1_ANALYTICS", "false").strip().lower() == "true":
         if body.p1_snapshot is None:
             raise HTTPException(status_code=503, detail="P1 risk analytics snapshot is required")
