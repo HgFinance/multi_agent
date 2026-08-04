@@ -36,6 +36,9 @@ alter table execution.order_events
   drop constraint if exists order_events_broker_adapter_broker_event_id_key;
 
 alter table execution.order_events
+  drop constraint if exists order_events_broker_event_unique;
+
+alter table execution.order_events
   add constraint order_events_broker_event_unique
   unique (broker_adapter, broker_event_id);
 

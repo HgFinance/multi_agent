@@ -88,6 +88,17 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             f"`ls supabase/migrations | tail` 로 마지막 번호를 확인할 것",
         )
 
+    def test_order_event_constraint_migration_is_idempotent(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260804001100_order_events_broker_id_unique.sql"
+        ).lower()
+        self.assertIn(
+            "drop constraint if exists order_events_broker_event_unique",
+            migration,
+        )
+
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
