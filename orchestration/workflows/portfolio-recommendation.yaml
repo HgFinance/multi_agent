@@ -5,6 +5,9 @@ description: >-
   사용자 투자 성향과 경험으로 적합 포트폴리오 후보를 계산하고,
   Research·Trading·Risk·QA·Accounting·CEO의 비바인딩 Context를
   async LangGraph fan-out/fan-in으로 연결한다.
+input_sources: [TEST, SUPABASE_READ_ONLY]
+production_enabled: false
+external_writes: false
 boundary_rules:
   - User profile and portfolio suitability are advisory inputs, not OrderIntent or Order.
   - Risk and QA results remain independent non-binding gates for this TEST flow.

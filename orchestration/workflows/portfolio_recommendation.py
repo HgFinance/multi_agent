@@ -1,9 +1,9 @@
-"""Async TEST pipeline for user suitability and all investment departments.
+"""Async TEST/Supabase-read-only pipeline for user suitability and all investment departments.
 
 The graph connects Research -> Trading -> Risk -> QA -> Accounting -> CEO.
 Each department stage uses LangGraph ``Send`` fan-out to independent Worker
 graphs and a reducer-backed fan-in node. No order, ledger, credential, or
-production side effect is permitted in this adapter.
+No order, ledger, credential, or production side effect is permitted.
 """
 
 from __future__ import annotations
@@ -131,6 +131,7 @@ class PortfolioPipelineState(TypedDict, total=False):
     as_of: str
     user_profile: dict[str, Any]
     portfolio_candidates: list[dict[str, Any]]
+    data_context: dict[str, Any]
     suitability: dict[str, Any]
     suitability_context: dict[str, Any]
     risk_gate: dict[str, Any]
@@ -157,6 +158,20 @@ def _load_suitability() -> Any:
     return module
 
 
+def _load_supabase_adapter() -> Any:
+    name = "portfolio_supabase_readonly"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Supabase read-only adapter unavailable: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _profile_context(profile: Mapping[str, Any]) -> dict[str, Any]:
     # User identity is not forwarded to employee Workers.
     return {key: value for key, value in profile.items() if key != "user_id"}
@@ -164,6 +179,12 @@ def _profile_context(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     suitability = state.get("suitability", {})
+    data_context = state.get("data_context", {})
+    research_context = data_context.get("research", {})
+    market_context = data_context.get("market", {})
+    accounting_context = data_context.get("accounting", {})
+    live_source = data_context.get("source") == "SUPABASE"
+    default_status = "LIVE" if live_source else "TEST"
     context: dict[str, Any] = {
         "trace_id": state.get("trace_id", ""),
         "case_id": state.get("case_id", ""),
@@ -178,25 +199,46 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "user_profile": _profile_context(state.get("user_profile", {})),
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
-        # Shared Worker trigger fields. They are TEST read models, not live data.
-        "universe": {"status": "TEST"},
-        "market_snapshot": {"status": "TEST", "as_of": state.get("as_of", "")},
-        "market_features": {"status": "TEST"},
-        "price_history": {"status": "TEST"},
-        "fundamentals": {"status": "TEST"},
-        "filings": {"status": "TEST"},
-        "news": {"status": "TEST"},
-        "macro": {"status": "TEST"},
-        "geopolitical": {"status": "TEST"},
-        "order_book": {"status": "TEST"},
-        "evidence": {"status": "TEST", "refs": ["research:portfolio-catalog:v1"]},
+        "data_source": data_context.get("source", "TEST"),
+        "data_quality": data_context.get("quality_status", "TEST"),
+        "read_only": True,
+        "external_writes": False,
+        # Worker tools receive read models only. They never receive credentials
+        # or a write-capable database handle.
+        "universe": {"status": default_status},
+        "market_snapshot": {
+            **market_context,
+            "status": market_context.get("status", default_status),
+            "as_of": state.get("as_of", ""),
+        },
+        "market_features": {"status": default_status},
+        "price_history": {"status": default_status},
+        "fundamentals": {"status": default_status},
+        "filings": {"status": default_status},
+        "news": {"status": default_status},
+        "macro": {"status": default_status},
+        "geopolitical": {"status": default_status},
+        "order_book": {"status": default_status},
+        "evidence": {
+            "status": research_context.get("status", default_status),
+            "refs": research_context.get(
+                "evidence_refs", ["research:portfolio-catalog:v1"]
+            ),
+            "documents": research_context.get("documents", []),
+        },
         "evidence_request": {"query": "portfolio suitability evidence"},
-        "documents": {"status": "TEST"},
+        "documents": {
+            "status": research_context.get("status", default_status),
+            "items": research_context.get("documents", []),
+        },
         "research_packet": {
             "status": "COMPLETED",
             "input_hash": state.get("suitability_context", {}).get("input_hash"),
         },
-        "portfolio_snapshot": {"status": "TEST", "positions": [], "cash": "0"},
+        "portfolio_snapshot": {
+            **accounting_context,
+            "status": accounting_context.get("status", "TEST"),
+        },
         "strategy_bundle": {"status": "ADVISORY_ONLY", "production_promotion": False},
         "risk_decision": state.get("risk_gate", {"status": "PENDING", "binding": False}),
         "approved_risk": {"status": "ADVISORY_ONLY", "binding": False},
@@ -320,6 +362,7 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
 def _initial_state(
     profile: Mapping[str, Any],
     candidates: Sequence[Mapping[str, Any]],
+    data_context: Mapping[str, Any] | None = None,
 ) -> PortfolioPipelineState:
     now = str(profile.get("as_of", ""))
     seed_hash = _hash({"profile": profile, "candidates": candidates})
@@ -330,6 +373,18 @@ def _initial_state(
         "as_of": now,
         "user_profile": dict(profile),
         "portfolio_candidates": [dict(item) for item in candidates],
+        "data_context": dict(
+            data_context
+            or {
+                "source": "TEST",
+                "quality_status": "TEST",
+                "read_only": True,
+                "external_writes": False,
+                "research": {"status": "TEST"},
+                "market": {"status": "TEST"},
+                "accounting": {"status": "TEST"},
+            }
+        ),
         "worker_reports": [],
         "department_reports": {},
         "manual_review_required": True,
@@ -343,10 +398,32 @@ def build_portfolio_recommendation_graph() -> Any:
 
     def validate_profile(state: PortfolioPipelineState) -> dict[str, Any]:
         suitability = _load_suitability()
-        result = suitability.recommend_portfolios(
-            state["user_profile"],
-            state["portfolio_candidates"],
-        )
+        if state["portfolio_candidates"]:
+            result = suitability.recommend_portfolios(
+                state["user_profile"],
+                state["portfolio_candidates"],
+            )
+        else:
+            normalized_profile = suitability.InvestorProfile.model_validate(
+                state["user_profile"]
+            )
+            effective_risk_band = {
+                1: suitability.PortfolioRiskBand.LOW,
+                2: suitability.PortfolioRiskBand.MEDIUM,
+                3: suitability.PortfolioRiskBand.HIGH,
+            }[normalized_profile.effective_risk_score]
+            result = suitability.SuitabilityResult(
+                status=suitability.SuitabilityStatus.NO_MATCH,
+                calculation_version=suitability.CALCULATION_VERSION,
+                input_hash=_hash(
+                    {"profile": state["user_profile"], "candidates": []}
+                ),
+                profile_user_id=normalized_profile.user_id,
+                effective_risk_band=effective_risk_band,
+                recommendations=[],
+                exclusions=[],
+                manual_review_required=True,
+            )
         context = {
             "status": result.status.value,
             "calculation_version": result.calculation_version,
@@ -363,30 +440,53 @@ def build_portfolio_recommendation_graph() -> Any:
 
     def risk_precheck(state: PortfolioPipelineState) -> dict[str, Any]:
         matched = state.get("suitability", {}).get("status") == "MATCHED"
+        data_context = state.get("data_context", {})
+        data_quality = data_context.get("quality_status", "TEST")
+        live_data_blocked = (
+            data_context.get("source") not in {None, "TEST"}
+            and data_quality != "PASS"
+        )
+        approved = matched and not live_data_blocked
         return {
             "risk_gate": {
                 "status": "COMPLETED",
-                "verdict": "approve" if matched else "reject",
-                "safe_action": "NO_ACTION" if matched else "HOLD",
-                "reason": "SUITABILITY_MATCHED" if matched else "NO_SUITABLE_PORTFOLIO",
+                "verdict": "approve" if approved else "reject",
+                "safe_action": "NO_ACTION" if approved else "HOLD",
+                "reason": (
+                    "SUITABILITY_MATCHED"
+                    if approved
+                    else "LIVE_DATA_QUALITY_BLOCKED"
+                    if matched and live_data_blocked
+                    else "NO_SUITABLE_PORTFOLIO"
+                ),
+                "data_quality": data_quality,
                 "binding": False,
             }
         }
 
     def qa_precheck(state: PortfolioPipelineState) -> dict[str, Any]:
         recommendations = state.get("suitability", {}).get("recommendations", [])
-        evidence_ok = bool(recommendations) and all(item.get("evidence_refs") for item in recommendations)
+        evidence_ok = bool(recommendations) and all(
+            item.get("evidence_refs") for item in recommendations
+        )
         # The TEST fixture deliberately carries one unsupported claim so the
         # hallucination worker is exercised without turning WARN into PASS.
-        unsupported_claim_fixture = True
-        decision = "PASS" if evidence_ok and not unsupported_claim_fixture else "WARN"
+        unsupported_claim_fixture = state.get("data_context", {}).get("source") != "SUPABASE"
+        live_data_quality = state.get("data_context", {}).get("quality_status", "TEST")
+        decision = (
+            "PASS"
+            if evidence_ok and not unsupported_claim_fixture and live_data_quality == "PASS"
+            else "WARN"
+        )
         return {
             "qa_gate": {
                 "status": "COMPLETED",
                 "decision": decision,
                 "reason": (
                     "EVIDENCE_PRESENT_BUT_TEST_UNSUPPORTED_CLAIM"
-                    if evidence_ok
+                    if unsupported_claim_fixture and evidence_ok
+                    else "LIVE_DATA_QUALITY_WARNING"
+                    if live_data_quality != "PASS"
                     else "NO_MATCH_OR_EVIDENCE_GAP"
                 ),
                 "binding": False,
@@ -461,10 +561,17 @@ def build_portfolio_recommendation_graph() -> Any:
 
     def finalize(state: PortfolioPipelineState) -> dict[str, Any]:
         reports = state.get("department_reports", {})
-        degraded = [stage for stage, report in reports.items() if report.get("status") != "COMPLETED"]
+        degraded = [
+            stage for stage, report in reports.items() if report.get("status") != "COMPLETED"
+        ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
-        pipeline_status = "DEGRADED" if degraded else "COMPLETED"
-        safe_action = "NO_ACTION" if matched and not degraded else "HOLD"
+        data_context = state.get("data_context", {})
+        live_data_blocked = (
+            data_context.get("source") not in {None, "TEST"}
+            and data_context.get("quality_status") != "PASS"
+        )
+        pipeline_status = "DEGRADED" if degraded or live_data_blocked else "COMPLETED"
+        safe_action = "NO_ACTION" if matched and not degraded and not live_data_blocked else "HOLD"
         result = {
             "workflow": "portfolio-recommendation-full",
             "pipeline_version": PIPELINE_VERSION,
@@ -476,6 +583,7 @@ def build_portfolio_recommendation_graph() -> Any:
             "trace_id": state.get("trace_id"),
             "case_id": state.get("case_id"),
             "suitability": state.get("suitability", {}),
+            "data_context": data_context,
             "risk_gate": state.get("risk_gate", {}),
             "qa_gate": state.get("qa_gate", {}),
             "department_reports": reports,
@@ -535,12 +643,30 @@ def build_portfolio_recommendation_graph() -> Any:
 
 async def run_portfolio_recommendation_pipeline_async(
     profile: Mapping[str, Any],
-    candidates: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    data_adapter: Any | None = None,
 ) -> dict[str, Any]:
-    """Run the complete async graph; production remains explicitly disabled."""
+    """Run complete async graph with TEST or Supabase read-only inputs.
+
+    Passing candidates explicitly keeps deterministic TEST callers stable. If
+    omitted, the adapter loads canonical PIT data from Supabase and an adapter
+    failure remains a degraded, HOLD result.
+    """
+
+    data_context: Mapping[str, Any] | None = None
+    if candidates is None:
+        adapter_module = _load_supabase_adapter()
+        adapter = data_adapter or adapter_module.SupabaseReadOnlyAdapter()
+        snapshot = await adapter.load_snapshot(
+            as_of=profile.get("as_of", ""),
+            fund_id=profile.get("fund_id"),
+        )
+        candidates = snapshot.candidates
+        data_context = snapshot.as_pipeline_context()
 
     app = build_portfolio_recommendation_graph()
-    state = await app.ainvoke(_initial_state(profile, candidates))
+    state = await app.ainvoke(_initial_state(profile, candidates, data_context))
     return dict(state.get("result", state))
 
 
