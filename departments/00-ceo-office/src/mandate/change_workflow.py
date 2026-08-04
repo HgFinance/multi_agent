@@ -660,7 +660,7 @@ if __name__ == "__main__":
         pass
     print("ok - 종료된 Case 재advance 차단 확인")
 
-    print("ok - HITL Mandate 변경 워크플로 7개 시나리오(UC-1,2,3,5,6 포함) 통과")
+    print("ok - HITL Mandate 변경 워크플로 11개 시나리오(UC-1~7, Risk/QA 거절 포함) 통과")
 
     # -----------------------------------------------------------------------
     # 실 DB 통합 검증 - PostgresMandateVersionRepository/PostgresApprovalRepository/
