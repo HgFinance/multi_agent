@@ -24,10 +24,12 @@ Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](..
 - [x] Risk/QA Worker Skill Scope는 명시적 allow-list가 없으면 `SCOPE_DENIED`/`ESCALATE`로 종료한다. 회귀 테스트가 있다.
 - [x] QA `qa-check`는 `RISK_QA_RUNTIME=test`를 명시한 테스트에서만 허용되며, Runtime 미설정은 거부한다.
 - [x] Risk Trading State 변경/삭제와 QA Corrective Action 종결은 서명된 Service Token의 department/scope/subject/expiry를 검증한다.
-- [ ] Redis Event Bus, Docker/Compose, DB 영속화와 Risk↔QA Replay는 실제 인프라에서 검증되지 않았다. 이 상태는 `RUNTIME_VERIFIED`가 아니다.
+- [x] Risk↔QA Redis Event Bus는 외부 Redis 통합 테스트 `11 passed`로 검증했다(2026-08-05). Redis 항목은 `RUNTIME_VERIFIED`다.
+- [x] 루트 Compose에 `redis`, `risk-api`, `audit-api`, `qa-worker`, `risk-hermes`, `qa-hermes`가 포함되며 `docker compose config --quiet`와 서비스 목록을 검증했다.
+- [ ] Docker 컨테이너 기동/Health, DB 영속화와 전체 Risk↔QA Replay E2E는 아직 실행 검증되지 않았다.
 - [ ] `MODEL-03`, `OPS-01`, 운영 Issuer/JWKS·mTLS·IAM 매핑은 미완료다.
 
-따라서 위의 `[x]`는 `IMPLEMENTED + 단위검증` 의미이며 운영 승인이나 배포 가능을 뜻하지 않는다.
+따라서 앞의 세 `[x]`는 `IMPLEMENTED + TEST_VERIFIED`, Redis `[x]`는 Event Bus의 `RUNTIME_VERIFIED`, Compose `[x]`는 정적 구성 검증이다. Docker 기동·Health·DB·Replay까지 완료된 것은 아니며 전체 운영 승인이나 배포 가능을 뜻하지 않는다.
 
 ---
 

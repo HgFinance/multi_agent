@@ -86,6 +86,7 @@ class PortfolioRuntime:
             "active_handoff": None,
             "messages": [],
             "result": None,
+            "approval": {"status": "PENDING", "binding": False, "approved_at": None, "comment": None},
             "error": None,
         }
 
@@ -200,6 +201,7 @@ class PortfolioRuntime:
                 job["active_workers"] = []
                 job["active_handoff"] = None
                 job["result"] = result
+                job["result"]["user_approval"] = dict(job["approval"])
                 job["status"] = str(result.get("pipeline_status", "DEGRADED"))
                 job["phase"] = "포트폴리오 추천 결과 준비 완료" if job["status"] == "COMPLETED" else "안전 보류 — 추가 검토 필요"
                 job["updated_at"] = _now()
@@ -216,6 +218,41 @@ class PortfolioRuntime:
                 job["error"] = f"{type(exc).__name__}: {_one_line(exc)}"
                 job["updated_at"] = _now()
                 self._message(job, "LangGraph 실행이 실패해 추천 결과를 확정하지 않았습니다.", kind="run_error")
+
+    def decide(self, run_id: str, decision: str, comment: str | None = None) -> dict[str, Any] | None:
+        """Record user approval of an advisory result, never an order approval."""
+
+        with self._lock:
+            job = self._job_for(run_id)
+            if job is None:
+                return None
+            result = job.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("portfolio_recommendation_result_not_ready")
+            if decision == "APPROVE":
+                suitability = result.get("suitability", {})
+                if result.get("pipeline_status") != "COMPLETED" or suitability.get("status") != "MATCHED":
+                    raise RuntimeError("portfolio_recommendation_approval_blocked")
+            if decision not in {"APPROVE", "REJECT"}:
+                raise RuntimeError("portfolio_recommendation_approval_invalid")
+            approval = {
+                "status": decision,
+                "binding": False,
+                "approved_at": _now(),
+                "comment": _one_line(comment, 240) if comment else None,
+            }
+            job["approval"] = approval
+            result["user_approval"] = dict(approval)
+            job["phase"] = "사용자 승인 완료 · 주문 단계는 별도" if decision == "APPROVE" else "사용자 추천 거절 · 재분석 가능"
+            job["updated_at"] = _now()
+            self._message(
+                job,
+                "사용자가 추천 포트폴리오를 승인했습니다. 이 승인으로 주문은 제출되지 않습니다."
+                if decision == "APPROVE"
+                else "사용자가 추천 포트폴리오를 거절했습니다.",
+                kind="user_approval",
+            )
+            return json.loads(json.dumps(job, default=str))
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

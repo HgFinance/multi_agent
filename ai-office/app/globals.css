@@ -764,4 +764,7 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .portfolio-recommendation code { color: var(--ink-faint); font-size: 10px; }
 .portfolio-recommendation .score { color: var(--pink-deep); font-size: 12px; font-weight: 900; }
 .portfolio-recommendation p, .portfolio-recommendation small { grid-column: 1 / -1; margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.5; }
+.approval-actions { display: grid; gap: 8px; padding-top: 4px; }
+.risk-warning { color: #a33b5e !important; font-weight: 800; }
+.approval-actions > div { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 760px) { .portfolio-form { grid-template-columns: 1fr; } .portfolio-form .btn { width: 100%; } .result-heading { align-items: flex-start; flex-direction: column; } .portfolio-recommendation { grid-template-columns: 1fr; } }

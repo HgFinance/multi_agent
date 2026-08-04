@@ -42,7 +42,7 @@ npm run dev
 
 ## BFF 연결
 
-AI Office는 브라우저에서 부서 API나 DB를 직접 호출하지 않고 `operator-bff`의 `GET /ui/snapshot`만 읽는다. 두 프로세스를 각각 실행한다.
+AI Office는 브라우저에서 부서 API나 DB를 직접 호출하지 않고 `operator-bff`의 Read Model을 읽는다. 화면의 직원 이동·착석·대화는 실제 `portfolio-recommendation-full` LangGraph runtime projection이 있을 때만 발생한다. 사용자 적합성 입력은 BFF의 `POST /ui/portfolio-recommendations`로 전달된다. 두 프로세스를 각각 실행한다.
 
 ```bash
 # 저장소 루트, 외부 DB 없이 DEMO Read Model로 실행
@@ -53,7 +53,7 @@ cd ai-office
 npm run dev
 ```
 
-프론트는 `NEXT_PUBLIC_BFF_URL`이 없으면 `http://localhost:8000`을 사용하고, 연결 후 Snapshot을 5초마다 갱신한다. BFF가 꺼져 있으면 오래된 Fixture를 표시하지 않고 `OFFLINE` 상태를 보여준다.
+프론트는 `NEXT_PUBLIC_BFF_URL`이 없으면 `http://localhost:8000`을 사용하고, 연결 후 Snapshot을 5초마다 갱신한다. BFF가 꺼져 있거나 실제 LangGraph run이 없으면 오래된 Fixture나 가짜 업무를 표시하지 않고 `OFFLINE`/대기 상태를 보여준다. 투자금액별 목표 금액과 사용자 추천 승인 단계까지 표시하지만, 추천 승인은 주문 제출·Risk 승인·원장 변경을 수행하지 않는다.
 
 ## 검증
 

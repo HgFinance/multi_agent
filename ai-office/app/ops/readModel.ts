@@ -196,6 +196,12 @@ export type OperationsRuntime = {
   active_handoff: OperationsRuntimeHandoff | null;
   messages: OperationsRuntimeMessage[];
   result: Record<string, unknown> | null;
+  approval: {
+    status: "PENDING" | "APPROVE" | "REJECT" | string;
+    binding: boolean;
+    approved_at: string | null;
+    comment: string | null;
+  } | null;
   error: string | null;
 };
 

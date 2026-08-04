@@ -8,7 +8,8 @@
     "max_drawdown_pct": "0.08",
     "max_exit_days": 7,
     "target_allocations": {
-      "GLOBAL_EQUITY": "0.30",
+      "KOREA_EQUITY": "0.10",
+      "GLOBAL_EQUITY": "0.20",
       "SHORT_TERM_BOND": "0.70"
     },
     "evidence_refs": ["research:portfolio-catalog:v1"],
@@ -16,32 +17,36 @@
   },
   {
     "portfolio_id": "balanced-core",
-    "name": "기본 균형형",
+    "name": "국내·글로벌 균형형",
     "risk_band": "MEDIUM",
     "minimum_experience": "BEGINNER",
     "minimum_horizon_years": 3,
     "max_drawdown_pct": "0.15",
     "max_exit_days": 14,
     "target_allocations": {
-      "GLOBAL_EQUITY": "0.60",
-      "SHORT_TERM_BOND": "0.40"
+      "KOREA_EQUITY": "0.20",
+      "GLOBAL_EQUITY": "0.50",
+      "SHORT_TERM_BOND": "0.30"
     },
     "evidence_refs": ["research:portfolio-catalog:v1"],
     "as_of": "2026-01-01T00:00:00+00:00"
   },
   {
-    "portfolio_id": "long-horizon-growth",
-    "name": "장기 성장형",
+    "portfolio_id": "long-horizon-opportunity",
+    "name": "장기 성장·기회형",
     "risk_band": "HIGH",
     "minimum_experience": "EXPERIENCED",
     "minimum_horizon_years": 7,
     "max_drawdown_pct": "0.35",
     "max_exit_days": 30,
     "target_allocations": {
-      "GLOBAL_EQUITY": "0.80",
-      "SHORT_TERM_BOND": "0.20"
+      "KOREA_EQUITY": "0.25",
+      "GLOBAL_EQUITY": "0.50",
+      "LEVERAGED_ETF": "0.10",
+      "SHORT_EXPOSURE": "0.05",
+      "DERIVATIVES_HEDGE": "0.10"
     },
-    "evidence_refs": ["research:portfolio-catalog:v1"],
+    "evidence_refs": ["research:portfolio-catalog:v1", "risk:derivatives-satellite:v1"],
     "as_of": "2026-01-01T00:00:00+00:00"
   }
 ]

@@ -232,7 +232,7 @@ validation_record:
     cd /Users/baiohelseu/Desktop/Project/multi_agent && source ~/claude/bin/activate &&
     python -m pytest departments/03-risk/tests/test_trading_state_store.py
     departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
-  accepted_result: "Historical snapshot only: 11 passed, skipped 0 (2026-08-03). Current runtime recheck is not RUNTIME_VERIFIED; Redis integration tests may skip when the configured host/DNS is unavailable."
+  accepted_result: "Historical snapshot only: 11 passed, skipped 0 (2026-08-03). External Redis recheck on 2026-08-05: 11 passed, skipped 0. Docker/DB Replay remains pending and is not RUNTIME_VERIFIED."
   p1_status: "결정론적 계산·Entry Gate·Repository/RLS baseline 완료; 실제 Portfolio/Market·운영 DB/RLS/E2E는 외부 조건 대기"
 p2_status: "VaR·Stress·Black-Scholes Greeks 로컬 계산기/테스트 완료; 파생상품 Snapshot·Margin·Volatility Surface·Golden Fixture·Gate 연결 완료. 외부 Vol Surface/Margin 입력과 승인된 시나리오 ID가 없으면 Gate는 fail-closed"
 

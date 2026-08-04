@@ -167,6 +167,7 @@ def build_operations_snapshot() -> dict[str, Any]:
             "active_handoff": run.get("active_handoff") if run else None,
             "messages": live_messages,
             "result": run.get("result") if run else None,
+            "approval": run.get("approval") if run else None,
             "error": run.get("error") if run else None,
         },
         "warnings": [

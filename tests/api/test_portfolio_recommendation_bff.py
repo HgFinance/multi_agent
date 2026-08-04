@@ -27,6 +27,8 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 "investment_horizon_years": 3,
                 "max_drawdown_pct": "0.10",
                 "liquidity_need": "MEDIUM",
+                "investment_amount": "1000000",
+                "currency": "KRW",
             },
         )
         self.assertEqual(response.status_code, 202, response.text)
@@ -49,8 +51,18 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(result["suitability"]["status"], "MATCHED")
         self.assertEqual(result["suitability"]["recommendations"][0]["portfolio_id"], "starter-safety")
         self.assertTrue(result["suitability"]["recommendations"][0]["target_allocations"])
+        self.assertEqual(result["suitability"]["currency"], "KRW")
+        self.assertEqual(result["suitability"]["recommendations"][0]["target_amounts"]["KOREA_EQUITY"], "100000.00")
         self.assertTrue(any(message["kind"] == "worker_summary" for message in runtime["messages"]))
         self.assertTrue(any(message["kind"] == "department_handoff" for message in runtime["messages"]))
+
+        approval = client.post(
+            f"/ui/portfolio-recommendations/{run_id}/approval",
+            json={"decision": "APPROVE"},
+        )
+        self.assertEqual(approval.status_code, 200, approval.text)
+        self.assertEqual(approval.json()["approval"]["status"], "APPROVE")
+        self.assertFalse(approval.json()["approval"]["binding"])
 
 
 if __name__ == "__main__":

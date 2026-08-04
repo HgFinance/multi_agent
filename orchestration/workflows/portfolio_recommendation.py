@@ -483,6 +483,8 @@ def build_portfolio_recommendation_graph(
                 ),
                 profile_user_id=normalized_profile.user_id,
                 effective_risk_band=effective_risk_band,
+                investment_amount=normalized_profile.investment_amount,
+                currency=normalized_profile.currency,
                 recommendations=[],
                 exclusions=[],
                 manual_review_required=True,

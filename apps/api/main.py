@@ -25,8 +25,10 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
@@ -72,6 +74,8 @@ class PortfolioRecommendationRequest(BaseModel):
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: str = Field(pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$")
     liquidity_need: str
+    investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     as_of: str | None = None
     fund_id: str | None = None
 
@@ -94,6 +98,27 @@ async def start_portfolio_recommendation(request: PortfolioRecommendationRequest
 @app.get("/ui/portfolio-recommendations/{run_id}")
 def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
     run = RUNTIME.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    return run
+
+
+class PortfolioRecommendationApprovalRequest(BaseModel):
+    decision: Literal["APPROVE", "REJECT"]
+    comment: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/ui/portfolio-recommendations/{run_id}/approval")
+def decide_portfolio_recommendation(
+    run_id: str,
+    request: PortfolioRecommendationApprovalRequest,
+) -> dict[str, object]:
+    """Approve or reject the advisory recommendation, never an order."""
+
+    try:
+        run = RUNTIME.decide(run_id, request.decision, request.comment)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if run is None:
         raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
     return run

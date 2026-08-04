@@ -356,9 +356,13 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 사용자 적합성 입력은 `POST /ui/portfolio-recommendations`로 전달한다. BFF는 기존
 `portfolio-recommendation-full` LangGraph를 비동기로 실행하고 `run_id`를 반환한다.
 
-- 입력은 `mindset`, `experience`, `investment_horizon_years`, `max_drawdown_pct`, `liquidity_need`를 포함한다.
+- 입력은 `mindset`, `experience`, `investment_horizon_years`, `max_drawdown_pct`, `liquidity_need`,
+  `investment_amount`, `currency`를 포함한다. 목표 금액은 서버가 결정론적으로 계산한다.
 - 결과 조회는 `GET /ui/portfolio-recommendations/{run_id}` 또는 `GET /ui/snapshot`의
   `operations.runtime` projection을 사용한다.
+- 추천 결과가 `MATCHED`이고 pipeline이 `COMPLETED`인 경우 `POST
+  /ui/portfolio-recommendations/{run_id}/approval`에서 사용자가 `APPROVE` 또는
+  `REJECT`할 수 있다. 이는 추천 자문 승인 기록이며 주문 승인과 다르다.
 - 결과는 `portfolio suitability` 자문이며 `binding: false`, `production_enabled: false`,
   `manual_review_required: true`를 유지한다. 주문 제출·Risk 승인·Ledger Posting은 이 경로에서 수행하지 않는다.
 - 실제 LangGraph run이 없을 때 `operations.runtime.status`는 `OFFLINE`이고, 브라우저는
