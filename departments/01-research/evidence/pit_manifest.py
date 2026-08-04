@@ -134,6 +134,29 @@ MANIFEST: tuple[ToolCapability, ...] = (
     # 아는 셈이 된다.
     # 2026-08-04 신설. **Replay 금지** - 봉 신선도는 "지금 기준" 판정이다.
     #   과거 재현에 오늘의 수집 지연을 쓰면 그때 몰랐던 것을 아는 셈이다.
+    # ── 2026-08-04 신설 3종 (Packet Handoff / Calibration / Identity) ───────
+    # ▶ **Replay 금지.** 오늘의 Calibration 상태는 Replay 시점 이후의 성과로
+    #   갱신된 것이다. 과거 판단에 "이 방법은 잘 맞는다" 를 쓰면 그때 몰랐던
+    #   것을 아는 셈이고, /methods/performance 와 같은 종류의 look-ahead 다.
+    ToolCapability("research-api", "/calibration/guidelines",
+                   PitSupport.UNSUPPORTED, None,
+                   "Calibration 레지스트리는 사후 성과로 갱신된다"),
+    # ▶ **Replay 금지.** 최신 Packet 은 정의상 '지금' 의 산출물이다.
+    #   과거 재현에서 최신 Packet 을 읽으면 그 시점 이후 판단이 섞인다.
+    #   (as_of 로 특정 시점 Packet 을 조회하는 경로가 생기면 그때 SUPPORTED)
+    ToolCapability("research-api", "/packets/latest/{symbol}",
+                   PitSupport.UNSUPPORTED, None,
+                   "latest 는 정의상 지금 것이다 - 시점 지정 경로가 없다"),
+    # ▶ 종목 신원(Security Master). SUPPORTED 로 두려 했으나 계약이 막았다 -
+    #   "SUPPORTED 인데 time_param 이 없다". 맞는 지적이다. 이 엔드포인트는
+    #   시점 인자가 없어 **지금의 신원**을 준다. 상장폐지·사명변경이 있으면
+    #   과거 재현에서 오늘의 이름을 보게 된다.
+    #   신원 확인 자체는 identity_guard 가 요구하는 관문이라 Replay 에서도
+    #   필요하지만, 그건 as_of 를 받는 경로를 만들어 풀 문제이지 분류를
+    #   느슨하게 해서 풀 문제가 아니다.
+    ToolCapability("research-api", "/instruments/{symbol}",
+                   PitSupport.UNSUPPORTED, None,
+                   "지금의 종목 신원. 시점 인자가 없어 사명변경·폐지를 소급 못 한다"),
     ToolCapability("market-api", "/dq/bar_freshness", PitSupport.UNSUPPORTED,
                    None, "최신 봉 기준 신선도. 지금 시점 판정이다"),
     # 거래일 달력은 **선언된 사실**이라 소급해도 안전하다 - since 로 과거
