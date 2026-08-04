@@ -1,6 +1,6 @@
 # 영주님 담당 가이드: CEO Agent + Agent Workforce 인사팀
 
-> 문서 상태: Team Handoff v1.8
+> 문서 상태: Team Handoff v1.9
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 담당자: 영주님  
 > 담당 조직: CEO Office, CEO 직속 Agent Workforce 인사팀  
@@ -17,43 +17,45 @@
 
 ## 0. Daily Scrum (필수)
 
-> 기준: 2026-08-03 (하단 갱신)
+> 기준: 2026-08-04 09:45 KST
+> GitHub 기준: `origin/main` `54dd3eb`
 > 갱신 규칙: 영주님이 매일 아침 아래 세 항목을 실제 실행 증거로 갱신한다. 항목 삭제와 공란은 허용하지 않으며 이전 기록은 Git 이력으로 보존한다.
 
 ### Yesterday
 
-- **`GOV-01`, `HR-01` 완료** — Mandate/Report/Notification(governance-api), Access/Improvements/Scorecard(workforce-api)를 전부 실제 PostgreSQL Repository로 배선하고 실 DB 왕복 검증 완료(PR #71, #72).
-- **CEO/HR 최초 Docker Container 기동** — `governance-api`, `workforce-api` 빌드·기동·실제 엔드포인트 호출 확인. 이후 `docker-compose.yml`을 부서별 `compose.yaml` Fragment로 분리(계획서 10절, PR #81)하고, Supabase Session Mode Pooler 한도(15) 초과 문제를 Transaction Mode(6543) 전환으로 해결(PR #81, CEO/HR 전용 로컬 env var라 다른 부서 영향 없음).
-- **Redis Event Consumer/Producer 신규** — `notification-worker`(CEO, PR #78)가 `hf:governance` Stream을 소비해 risk.breach.v1 등을 알림으로 변환하고, Mandate 제안/활성화·Report 성공 조립이 각각 `governance.mandate.changed.v1`/`report.ready.v1`을 같은 Stream에 발행. `improvement-worker`(HR, PR #79)가 `hf:workforce`의 `workforce.eval.v1`(QA Eval 결과, 아직 QA가 미발행 - Payload Contract는 잠정안)을 소비해 EVALUATING → SHADOW/REJECTED 전이. 둘 다 실 Redis(팀 공유 Redis Cloud)로 Consumer Group 등록·dedupe·재시작 복구까지 검증 완료.
-- `lifecycle-worker`는 보류 결정(Platform/IAM Adapter 이벤트 계약 부재 - 인사팀이 대신 정의하지 않음).
-- ADR-0002(Proposed) — 부서별 Redis 분리 여부 검토, 아직 미승인. 공용 Redis 1개 유지.
+- `GOV-01`, `HR-01`, `HR-02`의 PostgreSQL Repository, API, 부서별 Compose와 Redis Worker를 구현하고 Tool Allowlist·CI 파일명 충돌을 정리했다.
+- `GOV-02`를 4단계로 구현해 Approval API, Case Root 상태 머신과 Escalation API를 추가했으며 Risk·QA 차단을 CEO가 임의 우회하지 못하는 경계를 코드화했다.
+- `governance.cases.status` Migration을 재적용 가능하게 보강하고 신규 Migration을 Schema Contract 목록에 등록했다.
+- CEO·HR Hermes Profile의 부서 코드를 통일하고 구현 현황 문서의 읽기 어려운 상태 블록을 정리했다.
+- 위 변경은 `d2005de`까지 `main`에 병합됐으며 CEO·HR 원격 작업 브랜치는 `main`보다 앞선 Commit이 없다.
 
 ### Today
 
-- `CI-01`: CEO·HR Smoke Test 파일명 충돌 해소(`test_ollama_agent.py` → `test_ceo_ollama_agent.py`/`test_hr_ollama_agent.py`).
-- CEO/HR Hermes Profile에 `tool_allowlist`/`forbidden_tools` 선언(GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4·3.6절을 Risk/QA와 동일 표기로 반영).
-- 이 Daily Scrum과 `PROJECT_IMPLEMENTATION_STATUS.md`의 GOV/HR 표를 실제 실행 증거로 최신화.
-- ~~`HR-02`: Profile·Tool Permission 공식 Read API 착수~~ 완료 — `roster/{roster,postgres_roster_repository}.py` + `api/app.py` 4개 엔드포인트(GET roster, GET agent, POST profile-versions, POST status). ACTIVE 전환은 `qa_eval_run_id`·`ceo_approval_id` 둘 다 없으면 409로 거절.
-- `GOV-02`(Investment Case·Approval·Escalation API)는 착수하지 않는다 — `governance.cases`의 상태 값·전이 규칙이 어느 문서에도 정의돼 있지 않아(투자안 하위타입 `investment_cases`만 정의됨), 계약을 지어내지 않고 보류.
+- [ ] `GOV-02`: Case 생성→Approval 요청→승인·거절→Escalation 전이를 실제 PostgreSQL에서 왕복 검증하고 허용되지 않은 상태 전이가 거절되는지 기록한다.
+- [ ] 오늘 통합용 Canonical Case 한 건을 만들고 `mandate_version_id`, `fund_id`, `case_id`, 담당 본부와 승인 상태를 재일·도현·동규님에게 인계한다.
+- [ ] `HR-04`: 현재 Profile 상태를 DB에서 다시 조회한 뒤 DRAFT Profile별 Owner, Tool Allowlist, QA Eval과 CEO 승인 누락 사유를 표로 정리한다.
+- [ ] 동규님과 `workforce.eval.v1` Payload Fixture를 검토해 `HR-03` improvement-worker의 잠정 계약을 확정하거나 차단 사유를 명시한다.
+- [ ] 네 본부의 오늘 산출물 링크와 Blocker Owner를 CEO Daily Report 한 건으로 조립하되, 코드·DB·Test 증거가 없는 항목은 완료로 표시하지 않는다.
+- [ ] 도현님과 공통 Redis·Kanban Bridge의 DRI, Review Owner와 오늘 결정할 최소 범위를 확정한다.
 
 ### Blocker
 
-- `GOV-02`(Investment Case·Approval·Escalation API): `governance.cases` 제네릭 Case Root의 상태 머신이 미정의라 착수 보류. `HR-03`(Eval·Shadow·Promotion·Rollback Orchestrator)도 설계 문서만 있고 코드가 없다.
-- `HR-04`: 현재 Worker Registry 기준 HR 직원 5명(HR-00~04)은 QA 독립 검증 없이 인사팀이 스스로 ACTIVE 승격할 수 없다(권한 분리, `HR-02`의 `POST .../status`가 이 규칙을 코드로 강제). Risk 4명과 QA 5명의 Profile 상태는 각 부서 Owner 확인과 DB snapshot으로 별도 검증한다.
-- `lifecycle-worker`는 Platform/IAM Adapter의 이벤트 계약이 없어 인사팀 단독으로 재개할 수 없다.
-- `HR-03`의 `improvement-worker`는 QA의 `workforce.eval.v1` 실제 발행이 있어야 잠정 Payload Contract를 확정할 수 있다.
-- Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다(공식 Roster는 `HR-02`로 해소됨).
+- `GOV-02` 코드는 구현됐지만 실제 DB 왕복, 동시 승인과 Risk·QA 차단 우회 방지 E2E 증거가 아직 없다.
+- `HR-03`의 improvement-worker는 QA의 `workforce.eval.v1` 실제 발행과 독립 승인 Fixture가 필요하다.
+- 인사팀은 자기 소속 Profile을 스스로 ACTIVE 승격할 수 없으며 Risk·QA Profile도 각 부서 Owner와 QA 독립 검증이 필요하다.
+- `lifecycle-worker`는 Platform/IAM Adapter Event 계약이 없어 인사팀 단독으로 재개할 수 없다.
+- Approval Inbox, Queue·SLA와 Hermes Kanban Read Model은 도현님 `PLAT-02`·`UI-02`가 선행한다.
 
 ### 2주 개인 실행 계획
 
 | 순서 | 기간 | Task | 산출물 | 선행 조건 | 완료·인계 기준 |
 |---|---|---|---|---|---|
-| 1 | 08-03 | `CI-01`, Tool Allowlist, 문서 최신화 | 파일명 분리, config.yaml 선언, Scrum/현황판 갱신 | 없음 | 이번 갱신이 증거 |
+| 1 | 완료 | `CI-01`, Tool Allowlist | 파일명 분리와 `config.yaml` 선언 | 없음 | `4334c49`, 전체 Suite 재검증 대기 |
 | 2 | ~~08-06~10~~ 완료 | ~~`GOV-01`~~ | ~~Mandate API·PostgreSQL Repository~~ | — | PR #71 |
 | 3 | ~~08-11~13~~ 완료 | ~~`HR-01`~~ | ~~Candidate·Access Runtime~~ | — | PR #72 |
-| 4 | 대기 (보류) | `GOV-02` | Investment Case·Approval·Escalation API | `governance.cases` 상태 머신 정의 필요(미착수 지시) | Block 우회 불가, 사람 승인 Resume |
+| 4 | 08-04 Runtime 검증 | `GOV-02` | Investment Case·Approval·Escalation E2E | API·상태 머신 구현 완료 | DB 왕복, Block 우회 불가, 사람 승인 Resume |
 | 5 | ~~08-03~~ 완료 | ~~`HR-02`~~ | ~~Profile·Tool Permission Read+Write API~~ | — | 이번 갱신이 증거 (roster/*.py + app.py 4개 엔드포인트, 실 DB 검증) |
-| 6 | 08-04~05 | `HR-04` | DRAFT 13개 Profile Review | QA 독립 검증 선행(HR 자기 5명) | 승인·거절 사유와 Version 상태 기록 |
+| 6 | 08-04~05 | `HR-04` | DRAFT Profile 현황 재조회와 Review | QA 독립 검증 선행 | 승인·거절 사유와 Version 상태 기록 |
 | 7 | 대기 | `HR-03`, `UI-02` | 개선 후보와 Kanban Read Model 연결 | QA `workforce.eval.v1` 발행, 도현 UI Bridge | Shadow·Rollback Fixture와 Approval Inbox |
 
 CEO와 HR은 실행 결과를 승인·조정하지만 Risk 판정, 주문 제출, 원장과 QA Finding을 직접 변경하지 않는다.
