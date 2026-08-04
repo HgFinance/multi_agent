@@ -32,8 +32,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from datetime import time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -125,15 +124,50 @@ def fetch_bars(client, symbol: str, *, daily: bool, sdate: str, edate: str,
     return out
 
 
-def write_bars(conn, iid, bars: list[Bar], *, source_version: str) -> tuple[int, int]:
-    """market_bars 멱등 적재. (신규, 중복). 봉은 확정 사실 - do nothing 이 맞다."""
+MARKET_CLOSE_KST = dtime(15, 30)
+
+
+def is_bar_final(bucket_time, *, now=None) -> bool:
+    """이 봉이 **확정됐는가.** 장중 조회에서 오늘 봉은 아직 아니다.
+
+    ▶ 왜 필요한가 (실측 2026-08-04)
+      LS 는 장중에도 그날 일봉을 준다 - 시작가·현재까지의 고저·현재가로 채운
+      **미완성 봉**이다. 그런데 예전 코드는 is_final 을 모든 행에 True 로
+      하드코딩했다. 필드는 있는데 상수 거짓말이 들어간 셈이라, 읽는 쪽에서
+      "오늘 봉이 있다 = 확정됐다" 로 읽힐 수밖에 없었다.
+
+      이건 계산 못 한 것을 0 으로 채우는 것과 같은 종류의 사고다 - 없는
+      확실성을 만들어낸다.
+
+    판정은 결정론이다: KST 기준 오늘 이전이면 확정, 오늘이면 마감(15:30)
+    이후에만 확정. 미래 날짜는 확정이 아니다.
+    """
+    n = now or datetime.now(KST)
+    d = bucket_time.astimezone(KST).date()
+    if d < n.date():
+        return True
+    if d > n.date():
+        return False              # 미래 봉 - 있을 수 없지만 확정으로 치지 않는다
+    return n.time() >= MARKET_CLOSE_KST
+
+
+def write_bars(conn, iid, bars: list[Bar], *, source_version: str,
+               now=None) -> tuple[int, int]:
+    """market_bars 멱등 적재. (신규, 중복).
+
+    ▶ **do nothing 은 확정 봉에만 맞다.** 장중에 넣은 미확정 봉은 마감 뒤에
+      확정치로 갱신돼야 하므로, 미확정으로 들어간 행은 나중 실행이 덮어쓴다.
+      안 그러면 장중 현재가가 그날의 영구 종가로 굳는다.
+    """
     from psycopg2.extras import execute_values
 
-    now = datetime.now(timezone.utc)
+    ts = datetime.now(timezone.utc)
+    kst_now = now or datetime.now(KST)
     rows = [
-        (b.bucket_time, now, iid, "KRX", b.interval_code,
+        (b.bucket_time, ts, iid, "KRX", b.interval_code,
          b.open, b.high, b.low, b.close, b.volume, 0, b.value,
-         None, True, SOURCE, source_version, "PASS", SCHEMA_VERSION)
+         None, is_bar_final(b.bucket_time, now=kst_now),
+         SOURCE, source_version, "PASS", SCHEMA_VERSION)
         for b in bars
     ]
     # ▶ count(*) 대신 RETURNING (2026-08-02 수정)
@@ -153,7 +187,19 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str) -> tuple[int,
               (bucket_time, observed_at, instrument_id, market, interval_code,
                open, high, low, close, volume, trade_count, notional,
                vwap, is_final, source, source_version, quality_status, schema_version)
-            values %s on conflict do nothing returning 1
+            values %s
+            on conflict (bucket_time, instrument_id, market, interval_code, source)
+            -- ▶ **미확정 봉만 덮어쓴다.** 장중에 넣은 봉은 미완성이라 마감 뒤
+            --   확정치로 갱신돼야 한다 - do nothing 으로 두면 장중 현재가가
+            --   그날의 영구 종가로 굳는다. 확정된 행은 건드리지 않는다(봉은
+            --   확정 사실이고, 확정 뒤 바뀌면 그건 정정이지 재수집이 아니다).
+            do update set
+              open = excluded.open, high = excluded.high, low = excluded.low,
+              close = excluded.close, volume = excluded.volume,
+              notional = excluded.notional, is_final = excluded.is_final,
+              observed_at = excluded.observed_at
+            where market.market_bars.is_final = false
+            returning 1
         """, rows, page_size=1000, fetch=True)
         inserted = len(returned)
     conn.commit()
@@ -222,6 +268,38 @@ def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int |
 # ---------------------------------------------------------------------------
 # 자체 점검 - 호출·DB 없이
 # ---------------------------------------------------------------------------
+
+def _check_is_final_is_computed():
+    """오늘 봉이 **장중에는 미확정**인가. 상수 True 였던 것을 고정한다.
+
+    LS 는 장중에도 그날 일봉을 준다 - 시작가·현재까지 고저·현재가로 채운
+    미완성 봉이다. 예전엔 is_final 을 모든 행에 True 로 하드코딩해서
+    "오늘 봉이 있다 = 확정됐다" 로 읽힐 수밖에 없었다. 없는 확실성을
+    만들어내는 것은 계산 못 한 값을 0 으로 채우는 것과 같은 사고다.
+    """
+    def bt(y, m, d):
+        return datetime(y, m, d, 0, 0, tzinfo=KST)
+
+    trading_day = datetime(2026, 8, 4, 11, 0, tzinfo=KST)     # 장중
+    after_close = datetime(2026, 8, 4, 16, 0, tzinfo=KST)     # 마감 뒤
+
+    # 어제 이전 봉은 언제 봐도 확정
+    assert is_bar_final(bt(2026, 8, 3), now=trading_day) is True
+    assert is_bar_final(bt(2026, 7, 31), now=after_close) is True
+    # 오늘 봉은 마감 전 미확정, 마감 후 확정
+    assert is_bar_final(bt(2026, 8, 4), now=trading_day) is False
+    assert is_bar_final(bt(2026, 8, 4), now=after_close) is True
+    # 마감 정각은 확정으로 본다(15:30 에 장이 닫힌다)
+    assert is_bar_final(bt(2026, 8, 4),
+                        now=datetime(2026, 8, 4, 15, 30, tzinfo=KST)) is True
+    # 미래 봉은 확정이 아니다 - 있을 수 없지만 통과시키지 않는다
+    assert is_bar_final(bt(2026, 8, 5), now=after_close) is False
+
+    # UTC 로 들어와도 KST 로 환산해 판정한다 (bucket_time 은 tz-aware 다)
+    utc_today = datetime(2026, 8, 3, 15, 0, tzinfo=timezone.utc)   # = 8/4 KST
+    assert is_bar_final(utc_today, now=trading_day) is False
+    assert is_bar_final(utc_today, now=after_close) is True
+
 
 def _check_parse():
     d = parse_daily({"date": "20260730", "open": 100, "high": 110, "low": 90,
@@ -309,6 +387,8 @@ if __name__ == "__main__":
             int(opt("--ncnt", "1")), int(opt("--top", "0")) or None))
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (호출 없음)")
+    _check_is_final_is_computed()
+    print("  is_final 결정론 판정     OK")
     _check_parse()
     _check_fetch_pagination()
-    print("차트 백필 2개 영역 통과. 실행은 --daily / --minute")
+    print("차트 백필 3개 영역 통과. 실행은 --daily / --minute")
