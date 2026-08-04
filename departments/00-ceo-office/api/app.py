@@ -280,6 +280,10 @@ class SubmitChangeRequestIn(BaseModel):
     previous_policy: MandatePolicy | None = None
     priority: int = Field(default=50, ge=0, le=100)
     review_expires_at: datetime | None = None
+    user_approval_ttl_seconds: int = Field(
+        default=24 * 60 * 60, ge=1,
+        description="Risk/QA 통과 뒤 사용자 승인 요청이 유효한 시간(초). 기본 24시간.",
+    )
     version_created_by: str | None = None
     fund_base_currency: str | None = Field(
         default=None,
@@ -937,6 +941,7 @@ def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
         effective_from=body.effective_from, created_by=body.created_by,
         trace_id=body.trace_id, now=body.now, previous_policy=body.previous_policy,
         priority=body.priority, review_expires_at=body.review_expires_at,
+        user_approval_ttl_seconds=body.user_approval_ttl_seconds,
         version_created_by=body.version_created_by,
     )
     _publish_governance_event(
@@ -1833,6 +1838,8 @@ if __name__ == "__main__":
     user_pending_m3 = client.get("/governance/v1/approvals", params={
         "object_type": "MANDATE_VERSION", "object_id": version_id_m3,
     }).json()["approvals"]
+    assert next(a for a in user_pending_m3 if a["required_role"] == "USER")["expires_at"] \
+        == "2026-08-03T00:00:00+00:00"
     user_approval_id_m3 = next(a["approval_id"] for a in user_pending_m3 if a["required_role"] == "USER")
     du = client.post(f"/governance/v1/approvals/{user_approval_id_m3}/decide", json={
         "decision": "APPROVED", "actor_user_id": "u1", "at": now,

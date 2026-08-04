@@ -74,7 +74,7 @@ from __future__ import annotations
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -184,6 +184,7 @@ class MandateChangeWorkflow:
         previous_policy: MandatePolicy | None = None,
         priority: int = 50,
         review_expires_at: datetime | None = None,
+        user_approval_ttl_seconds: int = 24 * 60 * 60,
         version_created_by: str | None = None,
     ) -> ChangeRequestResult:
         """`created_by`(Case 감사 표지, 자유 텍스트)와 `version_created_by`
@@ -192,6 +193,9 @@ class MandateChangeWorkflow:
         cases.created_by는 `text not null`, mandate_versions.created_by는
         `uuid references governance.user_profiles(user_id)`다). 호출자가 실제 사용자
         uuid를 모르면 version_created_by를 생략한다 - nullable이라 None이 안전하다."""
+        if user_approval_ttl_seconds < 1:
+            raise ValueError("user_approval_ttl_seconds는 1 이상이어야 한다")
+
         version_result = self._version_service.propose_version(
             mandate_id=mandate_id, policy=policy, objective_text=objective_text,
             objective=objective, effective_from=effective_from,
@@ -236,6 +240,9 @@ class MandateChangeWorkflow:
                 "mandate_id": mandate_id, "version": version_result.row.version,
                 "mandate_version_id": version_id, "direction": version_result.direction.value,
                 "is_initial": is_initial,
+                # Risk/QA 완료 시점부터 사용자에게 주는 승인 기한이다. absolute timestamp를
+                # submit 시점에 고정하면 검토가 길어질수록 사용자 승인 시간이 사라진다.
+                "user_approval_ttl_seconds": user_approval_ttl_seconds,
             },
         )
         self._case_repo.save_new(case, open_event)
@@ -285,6 +292,7 @@ class MandateChangeWorkflow:
         version = opened_payload["version"]
         version_id = opened_payload["mandate_version_id"]
         direction = ChangeDirection(opened_payload["direction"])
+        user_approval_ttl_seconds = opened_payload.get("user_approval_ttl_seconds", 24 * 60 * 60)
 
         user_approval = self._find_current(ObjectType.MANDATE_VERSION, version_id, RequiredRole.USER, at)
         if user_approval is not None:
@@ -323,6 +331,7 @@ class MandateChangeWorkflow:
                 object_type=ObjectType.MANDATE_VERSION, object_id=version_id,
                 required_role=RequiredRole.USER, created_at=at,
                 reason="Mandate 변경 사용자 승인 - Risk/QA 검토 통과",
+                expires_at=at + timedelta(seconds=user_approval_ttl_seconds),
             )
             self._approval_repo.save(user_request)
             return ChangeRequestResult(
@@ -548,6 +557,29 @@ if __name__ == "__main__":
     assert approvals.find(ObjectType.MANDATE_VERSION, v6_id, RequiredRole.RISK).decision \
         is ApprovalDecision.EXPIRED, "지연 평가로 EXPIRED가 저장되지 않음"
     _clock[0] = t_late
+
+    # UC-5: USER approval expires relative to Risk/QA completion, not submit time.
+    user_request_at = _tick()
+    r13 = wf.submit(mandate_id="m1", fund_id="f1", policy=_policy("0.46"),
+                    objective_text="user approval expiry", objective={},
+                    effective_from=user_request_at, created_by="u", trace_id="t6",
+                    now=user_request_at, previous_policy=_policy("0.3"),
+                    user_approval_ttl_seconds=60 * 60)
+    v7_id = wf._version_repo.get_mandate_version_id("m1", 7)
+    for role, dept in ((RequiredRole.RISK, "risk-management"), (RequiredRole.QA, "qa-department")):
+        approval = approvals.find(ObjectType.MANDATE_VERSION, v7_id, role)
+        approvals.save(decide_approval(approval, decision=ApprovalDecision.APPROVED,
+                                       actor_department=dept, at=user_request_at))
+    r14 = wf.advance(r13.case_id, at=user_request_at)
+    assert r14.stage is ChangeStage.AWAITING_USER_APPROVAL, r14
+    user_a7 = approvals.find(ObjectType.MANDATE_VERSION, v7_id, RequiredRole.USER)
+    assert user_a7.expires_at == user_request_at + timedelta(hours=1), user_a7
+    r15 = wf.advance(r13.case_id, at=user_request_at + timedelta(hours=2))
+    assert r15.stage is ChangeStage.USER_REJECTED, r15
+    assert approvals.find(ObjectType.MANDATE_VERSION, v7_id, RequiredRole.USER).decision \
+        is ApprovalDecision.EXPIRED
+    assert wf._version_repo.get_mandate_current("m1") == (3, "ACTIVE")
+    print("ok - UC-5(user approval expiry preserves prior version)")
     print("ok - UC-5(만료 지연 평가 - 승인 방향으로 안 떨어짐) 통과")
 
     # 7) 종료된 Case 재advance 차단.
