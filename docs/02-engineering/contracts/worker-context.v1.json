@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hgfinance.local/contracts/worker-context.v1.json",
+  "title": "HgFinance Worker Context v1",
+  "description": "같은 부서의 Head와 독립 Worker Graph 사이에서 전달하는 비바인딩 실행 Context.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "context_id",
+    "schema_version",
+    "department",
+    "trace_id",
+    "producer_worker",
+    "consumer_worker",
+    "status",
+    "advisory",
+    "reason_codes",
+    "input_refs",
+    "output_refs",
+    "profile_version",
+    "created_at"
+  ],
+  "properties": {
+    "context_id": {"type": "string", "format": "uuid"},
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "worker-context.v1",
+        "research.worker-context.v1",
+        "quant.worker-context.v1",
+        "trading.worker-context.v1",
+        "risk.worker-context.v1",
+        "qa.worker-context.v1",
+        "governance.worker-context.v1",
+        "workforce.worker-context.v1",
+        "accounting.worker-context.v1"
+      ]
+    },
+    "department": {
+      "type": "string",
+      "enum": [
+        "ceo-agent",
+        "research-department",
+        "trading-department",
+        "risk-management",
+        "quant-backtest-department",
+        "accounting-portfolio-department",
+        "qa-department",
+        "hr-department"
+      ]
+    },
+    "trace_id": {"type": "string", "format": "uuid"},
+    "case_id": {"type": ["string", "null"], "format": "uuid"},
+    "producer_worker": {"type": "string", "minLength": 1},
+    "consumer_worker": {"type": "string", "minLength": 1},
+    "status": {
+      "type": "string",
+      "enum": ["COMPLETED", "DEGRADED", "ESCALATE", "REJECTED", "HOLD"]
+    },
+    "advisory": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["summary"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "suggested_verdict": {"type": "string"}
+      }
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "input_refs": {"$ref": "#/$defs/artifact_refs"},
+    "output_refs": {"$ref": "#/$defs/artifact_refs"},
+    "profile_version": {"type": "string", "minLength": 1},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "output_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "timeout_ms": {"type": "integer", "minimum": 1},
+    "calculation_version": {"type": "string", "minLength": 1},
+    "replay_manifest_ref": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "content_hash"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "format": "uuid"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact_ref"},
+      "uniqueItems": true
+    }
+  }
+}

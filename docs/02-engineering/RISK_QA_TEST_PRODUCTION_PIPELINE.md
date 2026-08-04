@@ -1,51 +1,60 @@
 # Risk·QA TEST / PRODUCTION Pipeline Runbook
 
 검토일: 2026-08-04  
-상태: TEST pipeline implemented, PRODUCTION intentionally OFF
+상태: TEST E2E 구현, PRODUCTION 의도적 OFF
 
 ## 1. 실행 프로파일
 
-| 프로파일 | 데이터 | LLM | 외부 연결 | 현재 상태 |
-|---|---|---|---|---|
-| `test` | synthetic ResearchPacket fixture | 결정론적 Qwen-shaped stub | 없음 | 실행 가능 |
-| `production` | 실제 Research/API/DB 데이터 | 실제 Worker·Ollama | 승인된 Adapter 필요 | OFF |
+| 프로파일 | 입력 | Head | 직원 | 외부 연결 | 상태 |
+|---|---|---|---|---|---|
+| `test` | synthetic `ResearchPacket v1` | 결정론적 Hermes-shaped stub | 결정론적 Qwen-shaped `LangGraph` Worker | 없음 | 실행 가능 |
+| `production` | 승인된 Research/API/DB 입력 | 실제 Hermes Profile | 승인된 Ollama Worker | DB·Redis·외부 API 필요 | OFF/HOLD |
 
-`test`는 운영 성공을 의미하지 않는다. 파이프라인 배선, 계약, Worker topology,
-fallback, trace/replay를 검증하는 용도다. `production`은 실제 Adapter acceptance가
-완료되기 전까지 `OFF/HOLD`로만 반환한다.
+TEST는 운영 성공이 아니다. 계약, Graph topology, handoff, trace/replay, fallback을 검증하며 실제 주문·Risk 승인·QA PASS·원장 변경을 수행하지 않는다.
 
-## 2. TEST 전체 흐름
+## 2. TEST E2E 흐름
 
 ```text
 ResearchPacket fixture
-  → packet contract + input_hash + PIT check
+  → packet contract / input_hash / PIT guard
   → Risk deterministic gate skeleton (binding=false)
-  → Risk 4 Worker Graphs
+  → risk-supervisor (Hermes-shaped Head Graph)
+      → market-liquidity-worker (nested LangGraph)
+      → pre-trade-risk-worker (peer context)
+      → compliance-policy-worker (peer context)
+      → derivatives-counterparty-worker (peer context)
+  → risk-supervisor synthesis (non-binding)
+  → Risk Head → QA Head department handoff
   → QA deterministic gate skeleton (binding=false)
-  → AI-QA 5 Worker Graphs
-  → trace/replay manifest inspection
-  → test gate
+  → qa-audit-supervisor (Hermes-shaped Head Graph)
+      → evidence-qa-worker (nested LangGraph)
+      → hallucination-critic-worker (peer context)
+      → model-and-internal-audit-worker (peer context)
+      → ops-and-permission-worker (peer context)
+      → incident-postmortem-worker (peer context)
+  → qa-audit-supervisor synthesis (non-binding)
+  → test gate / trace-replay inspection
 ```
 
-모든 조건부 signal을 fixture에 포함하므로 Risk 4명과 QA 5명이 모두 한 번씩
-실행된다. Worker는 `Guard → allow-listed Tool → Qwen-shaped summary → schema`
-순서를 지키며, 실패하면 `DEGRADED/ESCALATE`와 `HOLD` 방향으로 종료한다.
+각 직원은 별도 `StateGraph`로 compile된다. 상위 Department Graph의 직원 노드는 해당 Worker Graph를 invoke한다. 직원 간 handoff에는 요약, confidence, evidence refs, status, input hash와 trace manifest만 전달하며 원문 Prompt·Secret·binding decision은 전달하지 않는다.
 
-## 3. 재일님 Research handoff 반영
+Head와 직원의 권한은 다음과 같이 고정한다.
 
-TEST fixture는 다음 계약을 고정한다.
+- Head는 위임·취합·해석·에스컬레이션만 한다.
+- Worker는 allow-listed Tool을 읽고 non-binding `worker-context.v1` 또는 `qa.worker-context.v1`만 만든다.
+- Risk Engine이 binding `APPROVE|RESIZE|REJECT`를 소유한다.
+- QA Evidence Engine이 binding `PASS|WARN|FAIL`를 소유한다.
+- Head/Worker 모두 주문 제출, 원장 기록, Risk gate 우회, QA 판정 승격, Incident 종결을 할 수 없다.
 
-- `packet_id`, `artifact_id`, `case_id`, `trace_id`
-- `as_known_at`, `input_hash`, `source_refs`
-- claim별 `evidence_refs`, `observed_at`
-- Risk·QA 입력이 같은 `trace_id`와 Research Packet `input_hash`를 공유
+## 3. 실행 코드
 
-`as_known_at` 이후의 Evidence는 fixture에서도 허용하지 않는다. 실제 Research API가
-연결될 때도 이 필드와 `ResearchPacket v1` 계약을 먼저 검증한 뒤 Risk·QA로 넘긴다.
+- TEST runner: [`scripts/run_risk_qa_test_pipeline.py`](../../scripts/run_risk_qa_test_pipeline.py)
+- Pipeline contract: [`departments/risk_qa_testkit/pipeline.py`](../../departments/risk_qa_testkit/pipeline.py)
+- Department parent graph: [`departments/risk_qa_testkit/department_graph.py`](../../departments/risk_qa_testkit/department_graph.py)
+- Risk employee Graph: [`departments/03-risk/risk_employee_workers.py`](../../departments/03-risk/risk_employee_workers.py)
+- QA employee Graph: [`departments/06-ai-qa-audit/qa_employee_workers.py`](../../departments/06-ai-qa-audit/qa_employee_workers.py)
 
-## 4. 실행 명령
-
-저장소 루트에서 실행한다.
+실행:
 
 ```bash
 python scripts/run_risk_qa_test_pipeline.py --mode test
@@ -53,27 +62,88 @@ python scripts/run_risk_qa_test_pipeline.py --mode production
 python -m pytest tests/e2e/test_risk_qa_pipeline_profiles.py -q -p no:warnings
 ```
 
-기대 결과:
+## 4. 기대 결과
 
-- TEST: `pipeline_status=COMPLETED`, `safe_action=NO_ACTION`, Risk 4명·QA 5명 실행. QA fixture는 의도적인 unsupported claim을 포함하므로 QA skeleton decision은 `WARN`이며 운영 PASS가 아니다.
-- PRODUCTION: `pipeline_status=OFF`, `safe_action=HOLD`, Worker 미실행
+TEST에서 다음을 확인한다.
 
-## 5. Production 전환 조건
+- `pipeline_status=COMPLETED`
+- `manual_review_required=true`는 fixture의 QA `WARN`을 의미하며, 파이프라인 실행 완료와 QA PASS를 혼동하지 않게 한다.
+- Risk `risk-supervisor`가 4개 Worker를 위임하고 4개 Worker Graph가 실행됨
+- QA `qa-audit-supervisor`가 5개 Worker를 위임하고 5개 Worker Graph가 실행됨
+- Risk/QA 각각의 `handoffs`에 Head delegation 1개와 peer context handoff가 기록됨
+- Risk Head → QA Head department handoff가 같은 `trace_id`와 `input_hash`로 기록됨
+- 모든 Worker에 `skill_results`, `trace.events`, `trace_id`, `input_hash`가 존재함
+- Risk/QA Head 결과 모두 `binding=false`
+- QA fixture의 unsupported claim 때문에 deterministic QA gate는 `WARN`, QA Head는 `ESCALATE` advisory
+- `safe_action=NO_ACTION`은 외부 side effect가 없다는 뜻이며 QA `WARN`을 PASS로 의미 변경하지 않음
 
-다음 조건을 충족하기 전에는 Production flag를 만들거나 실제 Credential을 TEST에
-주입하지 않는다.
+PRODUCTION mode는 다음 값을 반환하고 Worker를 실행하지 않는다.
 
-1. Research API의 실제 `ResearchPacket v1` 조회와 PIT/ACL 검증
-2. Risk·QA 내부 API/Redis/Supabase Adapter의 timeout·idempotency·schema 검증
-3. 실제 정책 Corpus 교체 및 citation/contradiction golden set 통과
-4. `qa-check`, deterministic Risk Engine, Trace/DB persistence의 E2E acceptance
-5. Redis/Supabase/Timescale 통합 테스트에서 `skip` 없는 runtime 증거
-6. 운영 Credential preflight, Profile/Worker model contract, RLS 권한 검토
+```json
+{
+  "pipeline_status": "OFF",
+  "safe_action": "HOLD",
+  "reason": "PRODUCTION_DISABLED_UNTIL_REAL_ADAPTER_ACCEPTANCE"
+}
+```
 
-Production 전환은 이 문서의 조건을 만족하는 별도 변경으로 진행한다. 현재 TEST
-pipeline은 실제 주문·Risk 승인·QA PASS·원장 변경을 수행하지 않는다.
+## 5. Fail-closed 규칙
 
-기존 `departments/03-risk/scripts.py --run`와
-`departments/06-ai-qa-audit/scripts.py --run`도 현재 기본적으로 같은 Production
-guard에 걸린다. `RISK_QA_PRODUCTION_ENABLED=true`가 없으면 실제 데이터나
-Credential을 읽지 않고 종료한다.
+- Head JSON schema 실패: `DEGRADED`, `ESCALATE`, Risk는 `HOLD`
+- Worker Tool scope 실패·timeout·schema 실패: Worker `DEGRADED`, Head `ESCALATE`
+- Trace/replay manifest 누락: 성공으로 승격하지 않음
+- Risk gate 입력 오류: `HOLD`
+- QA evidence 부족·모순·PIT 실패: `WARN|FAIL|ESCALATE`, PASS로 보정하지 않음
+- 조건부 signal이 없으면 해당 Worker는 `not_executed`에 기록하며 성공한 것처럼 실행 수에 포함하지 않음
+
+## 6. Production 전환 조건
+
+다음 조건을 모두 별도 acceptance로 통과하기 전까지 Production flag와 credential을 만들지 않는다.
+
+1. 실제 ResearchPacket v1 조회와 PIT/ACL 검증
+2. 실제 Hermes Head adapter와 Ollama Worker timeout/retry/cost 검증
+3. Risk deterministic gate와 QA Evidence Gate golden/replay 검증
+4. 실제 정책 corpus 교체 및 citation/contradiction golden set 통과
+5. Supabase migration/RLS, Redis Stream, Event idempotency/recovery 통합 검증
+6. ACTIVE `LANGGRAPH` Profile FK와 `audit.agent_runs/tool_calls` persistence 검증
+7. Production `RISK_QA_RUNTIME=production`, `QA_CHECK_CONTRACT_APPROVED=true` 및 별도 운영 승인
+
+기존 본부 self-check의 `--run`은 `RISK_QA_PRODUCTION_ENABLED=true`가 없으면 실제 데이터를 사용하지 않고 종료한다.
+
+## 7. Worker runtime smoke
+
+TEST Graph는 Worker runtime을 명시적으로 구분한다.
+
+```bash
+python scripts/run_risk_qa_test_pipeline.py --mode test --worker-runtime deterministic
+python scripts/run_risk_qa_test_pipeline.py --mode test --worker-runtime ollama
+```
+
+`ollama` 모드는 실제 로컬 `qwen3:1.7b` Worker를 호출하지만 Head는 TEST용 deterministic stub이며,
+Production·주문·Risk binding decision·QA PASS·DB write를 활성화하지 않는다.
+
+## 8. Canonical ResearchPacketV2
+
+Risk/QA E2E의 authoritative input은 `ResearchPacketV2`다. `RiskQaPacket` envelope은 `artifact_id`,
+`trace_id`, `input_hash`와 결정론적 Risk/QA read model만 추가하며 canonical Packet을 대체하지 않는다.
+PIT와 canonical packet hash가 검증되지 않으면 파이프라인은 시작하지 않는다.
+
+## 9. External integration probe
+
+```bash
+python scripts/run_risk_qa_integration_smoke.py
+```
+
+외부 연결은 별도 smoke로 실행한다. Production은 계속 OFF이며 Supabase Event는 transaction rollback,
+Redis는 임시 Stream 삭제를 사용한다. 지원 환경변수는 `RESEARCH_API_URL`,
+`RISK_QA_RESEARCH_PACKET_URL`, `RISK_QA_EVENT_REDIS_URL` 또는 `REDIS_URL`, `DATABASE_URL`이다.
+미설정은 `SKIPPED`, 연결 실패는 `FAILED`로 남긴다.
+
+## 10. Jaeil Research/Quant acceptance
+
+```bash
+python scripts/run_jaeil_p0_p2_checks.py
+```
+
+P0 contract self-check를 먼저 실행하고, P1/P2는 runtime evidence가 없으면 `DOCUMENTED_ONLY` 또는
+`NOT_RUN`으로 남긴다. 이 가이드에는 P3 priority 항목이 없으며 `RQF-3`은 별도의 phase다.

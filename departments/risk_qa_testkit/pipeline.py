@@ -23,6 +23,17 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from departments.risk_qa_testkit.department_graph import (
+    DepartmentGraphSpec,
+    run_department_graph,
+)
+from departments.risk_qa_testkit.research_packet import (
+    ResearchPacketV2,
+    RiskQaPacket,
+    make_canonical_test_packet,
+    packet_from_api_payload,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,6 +41,11 @@ ROOT = Path(__file__).resolve().parents[2]
 class PipelineMode(str, Enum):
     TEST = "test"
     PRODUCTION = "production"
+
+
+class WorkerRuntime(str, Enum):
+    DETERMINISTIC = "deterministic"
+    OLLAMA = "ollama"
 
 
 class ProductionDisabled(RuntimeError):
@@ -43,7 +59,7 @@ def _hash_payload(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-class ResearchPacket(BaseModel):
+class _LegacyResearchPacket(BaseModel):
     """Minimal cross-team handoff contract from Research to Risk and QA."""
 
     model_config = ConfigDict(extra="forbid")
@@ -81,6 +97,10 @@ class ResearchPacket(BaseModel):
             if observed > self.as_known_at:
                 raise ValueError("future claim is not allowed by ResearchPacket PIT")
         return self
+
+
+# Compatibility name for callers; the authoritative payload is now V2.
+ResearchPacket = RiskQaPacket
 
 
 def _load_worker_module(path: Path, module_name: str) -> Any:
@@ -123,7 +143,39 @@ def _skeleton_llm(system: str, prompt: str) -> str:
     )
 
 
-def make_test_packet(*, as_known_at: datetime | None = None) -> ResearchPacket:
+def _test_department_head_llm(system: str, prompt: str) -> str:
+    """Hermes-shaped deterministic Head adapter used only by TEST E2E."""
+
+    context = json.loads(prompt)
+    is_risk = "risk-supervisor" in system
+    gate = context.get("deterministic_gate", {})
+    workers = context.get("worker_reports", [])
+    worker_failed = any(
+        report.get("status") != "COMPLETED" or report.get("escalate")
+        for report in workers
+    )
+    if is_risk:
+        escalate = worker_failed or gate.get("status") != "COMPLETED"
+        return json.dumps(
+            {
+                "summary": "TEST Hermes head synthesized Risk employee context.",
+                "recommendation": "REVIEW_RISK_PROPOSAL",
+                "safe_action": "HOLD" if escalate else "NO_ACTION",
+                "escalate": escalate,
+            }
+        )
+    escalate = worker_failed or gate.get("decision") != "PASS"
+    return json.dumps(
+        {
+            "summary": "TEST Hermes head synthesized independent QA employee context.",
+            "recommendation": "ESCALATE_QA_REVIEW" if escalate else "PROPOSE_QA_PASS",
+            "safe_action": "ESCALATE" if escalate else "NO_ACTION",
+            "escalate": escalate,
+        }
+    )
+
+
+def _legacy_make_test_packet(*, as_known_at: datetime | None = None) -> ResearchPacket:
     """Build a complete handoff fixture and activate every conditional Worker."""
 
     known_at = as_known_at or datetime(2026, 8, 4, tzinfo=timezone.utc)
@@ -228,6 +280,12 @@ def make_test_packet(*, as_known_at: datetime | None = None) -> ResearchPacket:
     )
 
 
+def make_test_packet(*, as_known_at: datetime | None = None) -> RiskQaPacket:
+    """Return the canonical ResearchPacketV2-backed Risk/QA fixture."""
+
+    return make_canonical_test_packet(as_known_at=as_known_at)
+
+
 def _worker_summary(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "DEGRADED" if report.get("degraded") else "COMPLETED",
@@ -290,6 +348,9 @@ def run_risk_qa_pipeline(
     mode: PipelineMode | str = PipelineMode.TEST,
     *,
     packet: ResearchPacket | None = None,
+    worker_llm: Any | None = None,
+    head_llm: Any | None = None,
+    worker_runtime: WorkerRuntime | str = WorkerRuntime.DETERMINISTIC,
 ) -> dict[str, Any]:
     """Run TEST end-to-end or return an explicit production OFF result."""
 
@@ -305,49 +366,123 @@ def run_risk_qa_pipeline(
         }
 
     packet = packet or make_test_packet()
+    runtime = WorkerRuntime(worker_runtime)
     risk_gate = _risk_deterministic_gate_skeleton(packet)
     qa_gate = _qa_deterministic_gate_skeleton(packet)
     risk_module, qa_module = _worker_modules()
-    risk_report = risk_module.run_employee_workers(
-        packet.risk_input,
-        llm=_skeleton_llm,
+    risk_payload = {
+        **packet.risk_input,
+        "packet_id": packet.packet_id,
+        "artifact_id": packet.artifact_id,
+        "deterministic_gate": risk_gate,
+    }
+    risk_spec = DepartmentGraphSpec(
+        department="risk-management",
+        profile="risk-management",
+        head_id="risk-supervisor",
+        output_contract="risk.department-head-context.v1",
+        worker_module=risk_module,
+        worker_tools={
+            "market-liquidity-worker": risk_module._market_tool,
+            "pre-trade-risk-worker": risk_module._pre_trade_tool,
+            "compliance-policy-worker": risk_module._compliance_tool,
+            "derivatives-counterparty-worker": risk_module._counterparty_tool,
+        },
     )
-    qa_report = qa_module.run_employee_workers(
-        packet.qa_input,
-        llm=_skeleton_llm,
+    if worker_llm is None and runtime is WorkerRuntime.DETERMINISTIC:
+        worker_llm = _skeleton_llm
+    head_llm = head_llm or _test_department_head_llm
+    risk_report = run_department_graph(
+        risk_spec,
+        risk_payload,
+        worker_llm=worker_llm,
+        head_llm=head_llm,
+        worker_runtime=runtime.value,
     )
+
+    department_handoff = {
+        "from": risk_report["head"]["head_id"],
+        "to": "qa-audit-supervisor",
+        "type": "DEPARTMENT_HANDOFF",
+        "purpose": "independent QA review of Risk employee context",
+        "trace_id": packet.trace_id,
+        "input_hash": packet.input_hash,
+        "artifact_id": packet.artifact_id,
+        "binding": False,
+    }
+    qa_payload = {
+        **packet.qa_input,
+        "packet_id": packet.packet_id,
+        "artifact_id": packet.artifact_id,
+        "deterministic_gate": qa_gate,
+        "risk_department_report": {
+            "head": risk_report["head"],
+            "workers": [
+                {
+                    "worker_id": worker["worker_id"],
+                    "status": worker["status"],
+                    "output": worker.get("output", {}),
+                }
+                for worker in risk_report["workers"]
+            ],
+        },
+    }
+    qa_spec = DepartmentGraphSpec(
+        department="qa-department",
+        profile="qa-department",
+        head_id="qa-audit-supervisor",
+        output_contract="qa.department-head-context.v1",
+        worker_module=qa_module,
+        worker_tools={
+            "evidence-qa-worker": qa_module._evidence_tool,
+            "hallucination-critic-worker": qa_module._hallucination_tool,
+            "model-and-internal-audit-worker": qa_module._audit_tool,
+            "ops-and-permission-worker": qa_module._ops_tool,
+            "incident-postmortem-worker": qa_module._incident_tool,
+        },
+    )
+    qa_report = run_department_graph(
+        qa_spec,
+        qa_payload,
+        worker_llm=worker_llm,
+        head_llm=head_llm,
+        worker_runtime=runtime.value,
+    )
+    qa_report["received_department_handoff"] = department_handoff
     risk_ok = (
         risk_report.get("degraded") is False
+        and risk_report.get("head", {}).get("binding") is False
         and len(risk_report.get("workers", [])) == 4
         and not risk_report.get("not_executed")
+        and len(risk_report.get("handoffs", [])) == 4
     )
     qa_ok = (
         qa_report.get("degraded") is False
+        and qa_report.get("head", {}).get("binding") is False
         and len(qa_report.get("workers", [])) == 5
         and not qa_report.get("not_executed")
+        and len(qa_report.get("handoffs", [])) == 5
+        and qa_report.get("received_department_handoff", {}).get("from") == "risk-supervisor"
     )
-    packet_ok = packet.input_hash == _hash_payload(
-        {
-            "packet_id": packet.packet_id,
-            "artifact_id": packet.artifact_id,
-            "case_id": packet.case_id,
-            "trace_id": packet.trace_id,
-            "as_known_at": packet.as_known_at.isoformat(),
-            "source_refs": packet.source_refs,
-            "claims": packet.claims,
-        }
-    )
+    # RiskQaPacket validates this against the canonical ResearchPacketV2 hash.
+    packet_ok = isinstance(packet.research_packet, ResearchPacketV2)
     completed = packet_ok and risk_ok and qa_ok
     skeleton_ok = (
         risk_gate["status"] == "COMPLETED"
         and qa_gate["status"] == "COMPLETED"
     )
     completed = completed and skeleton_ok
+    manual_review_required = bool(
+        qa_gate.get("decision") != "PASS"
+        or qa_report.get("head", {}).get("escalate")
+    )
     return {
         "mode": selected.value,
         "production_enabled": False,
+        "worker_runtime": runtime.value,
         "pipeline_status": "COMPLETED" if completed else "DEGRADED",
         "safe_action": "NO_ACTION" if completed else "HOLD",
+        "manual_review_required": manual_review_required,
         "packet": {
             "packet_id": packet.packet_id,
             "artifact_id": packet.artifact_id,
@@ -363,9 +498,10 @@ def run_risk_qa_pipeline(
         "stages": [
             {"stage": "research_packet_fixture", "status": "COMPLETED" if packet_ok else "DEGRADED"},
             {"stage": "risk_deterministic_gate_skeleton", "status": risk_gate["status"], "binding": False},
-            {"stage": "risk_worker_graphs", "status": "COMPLETED" if risk_ok else "DEGRADED", "summary": _worker_summary(risk_report)},
-            {"stage": "qa_deterministic_gate_skeleton", "status": qa_gate["status"], "binding": False},
-            {"stage": "qa_worker_graphs", "status": "COMPLETED" if qa_ok else "DEGRADED", "summary": _worker_summary(qa_report)},
+        {"stage": "risk_department_head_employee_graph", "status": "COMPLETED" if risk_ok else "DEGRADED", "summary": _worker_summary(risk_report), "head_id": "risk-supervisor", "handoff_count": len(risk_report.get("handoffs", []))},
+        {"stage": "risk_to_qa_department_handoff", "status": "COMPLETED", "binding": False},
+        {"stage": "qa_deterministic_gate_skeleton", "status": qa_gate["status"], "binding": False},
+        {"stage": "qa_department_head_employee_graph", "status": "COMPLETED" if qa_ok else "DEGRADED", "summary": _worker_summary(qa_report), "head_id": "qa-audit-supervisor", "handoff_count": len(qa_report.get("handoffs", []))},
             {"stage": "risk_qa_test_gate", "status": "COMPLETED" if completed else "DEGRADED"},
         ],
         "risk": risk_report,
