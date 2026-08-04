@@ -74,6 +74,7 @@ from daily_report import ReportError, build_daily_report
 from fill_consumer import project
 from ledger import Journal, Ledger, LedgerError, Position, decimal_str
 from portfolio import MarkPrice, PortfolioSnapshot, ValuationError, value_portfolio
+from recon_repository import ReconRun, open_breaks, save_reconciliation
 from repository import LedgerConflictError, LedgerPersistenceError, LedgerRepository
 from reconciliation import (
     FillRecord,
@@ -264,18 +265,29 @@ def _snapshot_view(s: PortfolioSnapshot) -> dict:
         "positions": [
             {"instrument_id": str(p.instrument_id), "quantity": _d(p.quantity),
              "average_cost": _d(p.average_cost), "mark_price": _d(p.mark_price),
-             "mark_as_of": p.mark_as_of.isoformat(), "cost_basis": _d(p.cost_basis),
-             "market_value": _d(p.market_value), "unrealized_pnl": _d(p.unrealized_pnl)}
+             "mark_as_of": p.mark_as_of.isoformat(), "mark_is_final": p.mark_is_final,
+             "cost_basis": _d(p.cost_basis), "market_value": _d(p.market_value),
+             "unrealized_pnl": _d(p.unrealized_pnl)}
             for p in s.positions
         ],
+        # WARN 이면 미확정 봉으로 평가된 NAV 다. 숨기지 않고 수치와 함께 낸다.
+        "quality_status": s.quality_status,
         # NAV 를 냈다고 확정한 것이 아니다. 공식 확정은 승인 절차다.
         "is_official": False,
         **_provenance(),
     }
 
 
-def _recon_view(r: ReconResult) -> dict:
+def _recon_view(r: ReconResult, run: ReconRun | None = None) -> dict:
+    """대사 결과. `run` 이 있으면 canonical 표에 남은 대사다.
+
+    `breaks[].break_id` 는 저장했다면 DB 의 id 다(`recon_repository._relabel`).
+    응답의 id 와 DB 의 id 가 갈라지면 화면에서 본 Break 를 찾을 수 없다.
+    """
     return {
+        "reconciliation_id": str(run.reconciliation_id) if run else None,
+        "statement_id": str(run.statement_id) if run else None,
+        "persisted": run is not None,
         "recon_type": r.recon_type,
         "rule_version": r.rule_version,
         "as_of": r.as_of.isoformat(),
@@ -337,12 +349,19 @@ class ReverseIn(BaseModel):
 
 
 class MarkIn(BaseModel):
-    """market-api 가 준 평가 기준가. **우리가 만들지 않는다.**"""
+    """market-api 가 준 평가 기준가. **우리가 만들지 않는다.**
+
+    `is_final` 은 market-api 응답의 `is_final`(= `market.market_bars.is_final`)을
+    그대로 넘기는 자리다. 안 주면 **미확정으로 본다** - 진행 중인 봉을 종가로 써서
+    NAV 가 조용히 틀리는 것을 막는 기본값이다(`portfolio.MarkPrice` 주석).
+    NAV 를 막지는 않고 스냅샷의 `quality_status` 를 WARN 으로 만든다.
+    """
 
     instrument_id: UUID
     price: Decimal
     as_of: datetime
     source: str = "market-api"
+    is_final: bool = False
 
 
 class ValuationIn(BaseModel):
@@ -390,11 +409,27 @@ class FillRecordIn(BaseModel):
         return FillRecord(**self.model_dump())
 
 
+class StatementSourceIn(BaseModel):
+    """외부 명세서가 어디서 왔는지. 대사를 canonical 표에 남길 때 필요하다.
+
+    **원문은 받지 않는다.** `object_path` 는 Storage 포인터이며 우리는 해시만 남긴다
+    (규약: Event Payload 에 전체 Statement 를 넣지 않는다).
+    """
+
+    provider: str = Field(default="paper-broker", min_length=1)
+    account_ref: str = Field(default="", max_length=200)
+    object_path: str | None = None
+
+
 class FillReconIn(BaseModel):
     internal: list[FillRecordIn]
     external: list[FillRecordIn]
     as_of: datetime | None = None
     time_window_seconds: int | None = Field(default=None, gt=0)
+    # 이 경로만 Ledger 종속이 아니라서(양쪽 체결을 다 받는다) Fund 를 모른다.
+    # 주면 canonical 표에 남기고, 안 주면 계산만 해서 돌려준다.
+    ledger_id: UUID | None = None
+    statement: StatementSourceIn = Field(default_factory=StatementSourceIn)
 
 
 class PositionReconIn(BaseModel):
@@ -405,12 +440,14 @@ class PositionReconIn(BaseModel):
 
     external: dict[UUID, Decimal]
     as_of: datetime | None = None
+    statement: StatementSourceIn = Field(default_factory=StatementSourceIn)
 
 
 class CashReconIn(BaseModel):
     external: Decimal
     as_of: datetime | None = None
     tolerance: Decimal | None = Field(default=None, ge=0)
+    statement: StatementSourceIn = Field(default_factory=StatementSourceIn)
 
 
 class DailyReportIn(BaseModel):
@@ -579,7 +616,8 @@ def create_valuation(ledger_id: UUID, body: ValuationIn) -> dict:
     **시세를 여기서 조회하지 않는다.** market-api 소관이라 호출자가 준 값만 쓴다.
     """
     led = _ledger(ledger_id)
-    marks = {m.instrument_id: MarkPrice(m.instrument_id, m.price, m.as_of, m.source)
+    marks = {m.instrument_id: MarkPrice(m.instrument_id, m.price, m.as_of, m.source,
+                                        m.is_final)
              for m in body.marks}
     staleness = (timedelta(seconds=body.max_staleness_seconds)
                  if body.max_staleness_seconds else None)
@@ -599,6 +637,22 @@ def list_valuations(ledger_id: UUID) -> dict:
 
 
 # ── 대사 ──────────────────────────────────────────────────────────────────────
+# **Break 는 응답에만 있으면 안 된다.** 프로세스가 죽으면 사라지는 불일치는 없었던
+# 것과 같다. DB 모드에서는 external_statements -> reconciliations ->
+# reconciliation_items -> breaks 4단 사슬에 남기고, 리스크·QA 가 그 표를 읽는다.
+# 이벤트 전송로(Redis)는 PLAT-02 대기다.
+
+
+def _persist_recon(led: Ledger, result: ReconResult, source: StatementSourceIn,
+                   external_payload) -> ReconRun | None:
+    if _repo is None:
+        return None
+    return save_reconciliation(
+        _repo, led.fund_id, result,
+        provider=source.provider,
+        account_ref=source.account_ref or str(led.book_id),
+        external_payload=external_payload,
+        object_path=source.object_path)
 
 
 @app.post(f"/accounting/{API_VERSION}/reconciliations/fills")
@@ -607,30 +661,68 @@ def recon_fills(body: FillReconIn) -> dict:
 
     양쪽을 다 받는 유일한 대사다 - 내부 체결을 FillRecord 로 보관하지 않기 때문이다.
     Position/Cash 대사는 내부를 원장에서 재계산한다.
+
+    `ledger_id` 를 주면 canonical 표에 남긴다. Fund 를 모르면 남길 수 없어서
+    (`reconciliations.fund_id` 가 not null) 계산 결과만 돌려준다.
     """
     kwargs = {}
     if body.time_window_seconds:
         kwargs["time_window"] = timedelta(seconds=body.time_window_seconds)
-    return _recon_view(reconcile_fills(
+    result = reconcile_fills(
         [r.to_record() for r in body.internal],
         [r.to_record() for r in body.external],
-        as_of=body.as_of, **kwargs))
+        as_of=body.as_of, **kwargs)
+    run = None
+    if body.ledger_id is not None:
+        run = _persist_recon(_ledger(body.ledger_id), result, body.statement,
+                             [r.model_dump(mode="json") for r in body.external])
+    return _recon_view(result, run)
 
 
 @app.post(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/reconciliations/positions")
 def recon_positions(ledger_id: UUID, body: PositionReconIn) -> dict:
     """원장 projection 과 브로커 잔고를 대사한다. 수량 불일치는 항상 material 이다."""
-    pos, _ = _ledger(ledger_id).rebuild()
+    led = _ledger(ledger_id)
+    pos, _ = led.rebuild()
     internal = {i: p.quantity for i, p in pos.items()}
-    return _recon_view(reconcile_positions(internal, body.external, as_of=body.as_of))
+    result = reconcile_positions(internal, body.external, as_of=body.as_of)
+    return _recon_view(result, _persist_recon(
+        led, result, body.statement,
+        {str(k): _d(v) for k, v in sorted(body.external.items(), key=lambda kv: str(kv[0]))}))
 
 
 @app.post(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/reconciliations/cash")
 def recon_cash(ledger_id: UUID, body: CashReconIn) -> dict:
     """현금 대사. 반올림 수준 차이는 Break 로 올리지 않는다."""
-    _, cash = _ledger(ledger_id).rebuild()
+    led = _ledger(ledger_id)
+    _, cash = led.rebuild()
     kwargs = {"tolerance": body.tolerance} if body.tolerance is not None else {}
-    return _recon_view(reconcile_cash(cash, body.external, as_of=body.as_of, **kwargs))
+    result = reconcile_cash(cash, body.external, as_of=body.as_of, **kwargs)
+    return _recon_view(result, _persist_recon(
+        led, result, body.statement, {"cash": _d(body.external)}))
+
+
+@app.get(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/breaks")
+def list_open_breaks(ledger_id: UUID) -> dict:
+    """미종결 Break. **리스크·QA 가 읽는 자리다.**
+
+    이벤트 전송로가 붙기 전까지 여기가 전달 경로이며, 붙은 뒤에도 재동기화용으로
+    남는다. `escalates: true` 가 팀 가이드 4.5 5번의 "리스크본부와 QA 로 전달"
+    대상이다. **종결 경로는 없다** - 이 API 에 Break 를 닫는 메서드가 없는 것이 의도다.
+    """
+    led = _ledger(ledger_id)
+    if _repo is None:
+        raise HTTPException(503, _envelope(
+            "ACCOUNTING_STORE_UNAVAILABLE",
+            "인메모리 모드에는 저장된 Break 가 없습니다. DATABASE_URL 이 필요합니다"))
+    breaks = open_breaks(_repo, led.fund_id)
+    return {
+        "ledger_id": str(ledger_id),
+        "breaks": breaks,
+        "escalating_count": sum(1 for b in breaks if b["escalates"]),
+        "closable_here": False,
+        **_provenance(),
+    }
 
 
 # ── 일일 보고 ─────────────────────────────────────────────────────────────────

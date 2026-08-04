@@ -279,6 +279,11 @@ API는 서비스 호출자용이고, 불변식이 HTTP 계층이 아니라 도�
 | `accounting-api` Container | **구현 완료.** `127.0.0.1:8046`. Build Context가 저장소 루트다(§8) |
 | 저장소(in-memory → `accounting.*`) | **구현 완료** (2026-08-04, §4). `DATABASE_URL`로 갈린다 |
 | ACC-01 (체결 1건 → 분개·Position·스냅샷) | **구현 완료.** `ledger/fill_consumer.py`. 단 체결 원천이 `execution.fills`가 아니라 API 주입이다(TRD-01 대기) |
+| 대사·Break 영속 (`reconciliations`→`breaks`) | **구현 완료** (2026-08-04). `reconciliation/recon_repository.py`. `GET .../breaks`가 미종결 목록을 준다. **이벤트 전송로(Redis)는 PLAT-02 대기** — 리스크·QA는 지금 이 표를 읽는다 |
+| `api.*` 회계 읽기 뷰 | **구현 완료** (`20260804000500`). `portfolio_snapshot_latest` / `position_holdings` / `ledger_balances` / `open_breaks`. 트레이딩 뷰는 `execution.*`가 0행이라 만들지 않았다 |
+| `/ui/snapshot` 원천 | **회계 구간만 교체 완료.** `?book_id=`를 주면 portfolio·ledger가 Supabase에서 온다. trading은 Scripted Loop이며 `sources`가 구간별 출처를 밝힌다 |
+| Mark 확정 여부(`is_final`) | **구현 완료.** 기본값 False(미확정). 미확정 봉으로 평가하면 스냅샷 `quality_status`가 WARN이 된다. NAV를 막지는 않는다 |
+| symbol ↔ instrument_id | **구현 완료.** `repository.instrument_by_symbol()`은 Point-in-Time(`valid_from`/`valid_to`), `api.position_holdings`는 현재 대표 코드 |
 | MCP 도구 면 | **설계만, 구현 없음** (§6) |
 | 인증(Service Token) | **미정** — 발급 주체 미결. 지금은 `127.0.0.1` 바인딩으로 대체 |
 | `/metrics`·Observability | **미구현** (§5) |

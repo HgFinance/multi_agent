@@ -41,7 +41,7 @@ sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
 
 from contracts import Side
 from ledger import Journal, Position, decimal_str
-from portfolio import MarkPrice, PortfolioSnapshot, value_portfolio
+from portfolio import MarkPrice, PortfolioSnapshot, value_portfolio  # noqa: F401  (자체 점검이 value_portfolio를 직접 쓴다)
 from repository import LedgerRepository, PostgresLedger
 
 
@@ -70,7 +70,7 @@ def pending_fills(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[
     Fund/Book은 `execution.order_intents`에서 온다 - 체결 자체는 Book을 모르고,
     어느 장부의 거래인지는 Intent가 정한다.
     """
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute(
             """
             select f.fill_id, f.instrument_id, f.side, f.quantity, f.price,
@@ -152,12 +152,12 @@ if __name__ == "__main__":
         "ACC01-PAPER", "MAIN",
         fund_name="Paper Fund (ACC-01 Fixture)", book_name="Paper Main Book")
 
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute("select instrument_id from reference.instruments order by instrument_id limit 1")
         instrument_id = cur.fetchone()[0]
 
     def row_counts() -> tuple[int, int, int]:
-        with repo._cursor() as cur:
+        with repo.cursor() as cur:
             cur.execute("select count(*) from accounting.journals where fund_id=%s and book_id=%s",
                         (fund_id, book_id))
             journals = cur.fetchone()[0]
@@ -172,7 +172,9 @@ if __name__ == "__main__":
         fill_id=uuid5(NAMESPACE_OID, "ACC01-FILL-0001"), instrument_id=instrument_id,
         side=Side.BUY, quantity=D("10"), price=D("50000"), fee=D("75"), tax=D("0"),
         event_time=FIXED, broker_fill_id="ACC01-FILL-0001")
-    marks = {instrument_id: MarkPrice(instrument_id, D("52000"), FIXED)}
+    # 확정 종가 Fixture다. is_final을 명시하지 않으면 미확정으로 잡혀 quality_status가
+    # WARN이 된다 - 그 기본값이 의도된 것임은 아래 6번이 검사한다.
+    marks = {instrument_id: MarkPrice(instrument_id, D("52000"), FIXED, is_final=True)}
 
     # 0. 정식 경로(execution.fills)는 아직 비어 있다. 그 사실을 숨기지 않는다
     pending = pending_fills(repo, fund_id, book_id)
@@ -192,7 +194,7 @@ if __name__ == "__main__":
     snapshot = project(repo, ledger, marks, FIXED)
 
     # 3. ACC-01 DoD - 세 표에 행이 남았는가
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute("select status, count(*) from accounting.journal_lines l "
                     "join accounting.journals j on j.journal_id = l.journal_id "
                     "where j.source_event_id = %s group by status", ("ACC01-FILL-0001",))
@@ -235,6 +237,27 @@ if __name__ == "__main__":
     except Exception as exc:
         assert "평가 불가" in str(exc), exc
     assert row_counts()[2] == before[2], "실패한 평가가 스냅샷을 남겼다"
+
+    # 7. is_final을 말하지 않은 Mark는 미확정으로 잡힌다 (2026-08-03 `3978ee1` 재발 방지).
+    #    NAV는 나오되 PASS가 아니다 - 진행 중인 봉으로 만든 NAV가 확정 종가 NAV와
+    #    같은 얼굴을 하면 안 된다. 이건 저장하지 않고 계산만 확인한다.
+    unstated = value_portfolio(
+        repo.load(fund_id, book_id),
+        {instrument_id: MarkPrice(instrument_id, D("52000"), FIXED)}, FIXED)
+    assert unstated.nav == snapshot.nav, "확정 여부가 NAV 값을 바꿨다"
+    assert unstated.quality_status == "WARN", unstated.quality_status
+    assert snapshot.quality_status == "PASS", snapshot.quality_status
+
+    # 8. symbol -> instrument_id 다리. market-api는 symbol을 주고 우리는 UUID를 쓴다
+    with repo.cursor() as cur:
+        cur.execute("select symbol from reference.instrument_symbols "
+                    "where instrument_id=%s and valid_to is null limit 1", (instrument_id,))
+        row = cur.fetchone()
+    if row is not None:
+        assert repo.instrument_by_symbol(row[0], as_of=FIXED) == instrument_id, \
+            f"symbol {row[0]} 이 다른 instrument로 풀렸다"
+    assert repo.instrument_by_symbol("없는코드", as_of=FIXED) is None, \
+        "모르는 symbol에 instrument를 붙였다"
 
     print(f"ok - ACC-01 통과: 체결 1건 -> 분개 {line_count}줄 · "
           f"Position {decimal_str(quantity)}주 · NAV {decimal_str(snapshot.nav)} "

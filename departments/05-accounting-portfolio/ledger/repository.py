@@ -136,7 +136,8 @@ class LedgerRepository:
         self._pool.closeall()
 
     @contextmanager
-    def _cursor(self) -> Iterator[Any]:
+    def cursor(self) -> Iterator[Any]:
+        """트랜잭션 하나. 같은 부서의 다른 저장 모듈(대사)도 이 Pool을 함께 쓴다."""
         psycopg2, _, _ = _load_driver()
         conn = self._pool.getconn()
         try:
@@ -158,7 +159,7 @@ class LedgerRepository:
         원장을 쓰려면 이 셋이 먼저 있어야 한다(전부 FK). 요청 경로에서는 부르지
         않는다 - Fund를 만드는 건 자본 구조 결정이지 주문 처리 중에 일어날 일이 아니다.
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 """
                 insert into accounting.funds (fund_code, name, base_currency, inception_date, status)
@@ -194,14 +195,14 @@ class LedgerRepository:
 
     def fund_of_book(self, book_id: UUID) -> UUID | None:
         """book_id 하나로 Fund가 정해진다. 그래서 ledger_id == book_id로 쓴다."""
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("select fund_id from accounting.books where book_id = %s", (book_id,))
             row = cur.fetchone()
         return row[0] if row else None
 
     def counts(self) -> tuple[int, int]:
         """(장부 수, 분개 수). /health가 "몇 건이 실제로 저장돼 있는지"를 말하게 한다."""
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("select (select count(*) from accounting.books), "
                         "(select count(*) from accounting.journals)")
             return cur.fetchone()
@@ -210,7 +211,7 @@ class LedgerRepository:
         cached = self._accounts.get(fund_id)
         if cached:
             return cached
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "select account_code, account_id from accounting.ledger_accounts where fund_id = %s",
                 (fund_id,),
@@ -223,11 +224,37 @@ class LedgerRepository:
         self._accounts[fund_id] = accounts
         return accounts
 
+    def instrument_by_symbol(self, symbol: str, *, as_of: datetime | None = None,
+                             market: str = "KRX") -> UUID | None:
+        """symbol -> instrument_id. **market-api는 symbol을 쓰고 우리 도메인은 UUID를 쓴다.**
+
+        `reference.instrument_symbols`가 그 다리이며 **Point-in-Time 표다**
+        (`valid_from`/`valid_to`). KRX는 상장폐지된 종목코드를 나중에 다른 회사에
+        재배정하므로 "지금 이 코드의 주인"으로 과거 체결을 해석하면 남의 종목에
+        분개가 붙는다. 그래서 as_of를 받아 그 시점의 매핑을 쓴다.
+
+        모르면 None이다. 짐작해서 아무 instrument에 붙이지 않는다.
+        """
+        as_of = as_of or datetime.now(timezone.utc)
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select instrument_id from reference.instrument_symbols
+                 where symbol = %s and market = %s
+                   and valid_from <= %s and (valid_to is null or valid_to > %s)
+                 order by is_primary desc, valid_from desc
+                 limit 1
+                """,
+                (symbol, market, as_of, as_of),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
+
     def base_currency(self, fund_id: UUID) -> str:
         cached = self._currency.get(fund_id)
         if cached:
             return cached
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("select base_currency from accounting.funds where fund_id = %s", (fund_id,))
             row = cur.fetchone()
         if row is None:
@@ -252,7 +279,7 @@ class LedgerRepository:
         _, Json, _ = _load_driver()
         metadata = {"reason": journal.reason} if journal.reason else {}
 
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 """
                 insert into accounting.journals (
@@ -310,7 +337,7 @@ class LedgerRepository:
         DB 트리거가 status 외의 컬럼이 함께 바뀌면 거부하므로, 여기서 다른 컬럼을
         섞어 쓰려 해도 저장되지 않는다.
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "update accounting.journals set status = 'REVERSED' "
                 "where journal_id = %s and status = 'POSTED'",
@@ -324,7 +351,7 @@ class LedgerRepository:
                   느려지면 Position/Cash projection 테이블을 기점으로 삼고 그 이후
                   분개만 읽는 방식으로 바꾼다 - projection은 이미 저장하고 있다.
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 """
                 select journal_id, event_type, source_event_id, effective_at,
@@ -387,7 +414,7 @@ class LedgerRepository:
         currency = self.base_currency(ledger.fund_id)
         last_journal = ledger.journals[-1].journal_id if ledger.journals else None
 
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             for instrument_id, pos in positions.items():
                 cur.execute(
                     """
@@ -436,8 +463,11 @@ class LedgerRepository:
         """확정된 스냅샷을 남긴다. 같은 내용이면 다시 만들지 않는다.
 
         `is_official`은 여기에도 없다. NAV 확정은 별도 승인 절차이고 이 행은 그 전
-        단계의 계산 결과다(quality_status='PASS'는 "모든 종목에 신선한 Mark가 있었다"는
-        뜻이지 "확정됐다"가 아니다).
+        단계의 계산 결과다.
+
+        `quality_status`를 우리가 정하지 않고 스냅샷에게 묻는다 - 하나라도 미확정
+        봉(`MarkPrice.is_final=False`)으로 평가됐으면 WARN이다. 여기에 PASS를 박아
+        두면 미확정 가격으로 만든 NAV가 확정 종가 NAV와 구분되지 않는다.
         """
         _, Json, _ = _load_driver()
         currency = self.base_currency(snapshot.fund_id)
@@ -445,8 +475,9 @@ class LedgerRepository:
         positions = [
             {"instrument_id": str(p.instrument_id), "quantity": _num(p.quantity),
              "average_cost": _num(p.average_cost), "mark_price": _num(p.mark_price),
-             "mark_as_of": p.mark_as_of.isoformat(), "cost_basis": _num(p.cost_basis),
-             "market_value": _num(p.market_value), "unrealized_pnl": _num(p.unrealized_pnl)}
+             "mark_as_of": p.mark_as_of.isoformat(), "mark_is_final": p.mark_is_final,
+             "cost_basis": _num(p.cost_basis), "market_value": _num(p.market_value),
+             "unrealized_pnl": _num(p.unrealized_pnl)}
             for p in snapshot.positions
         ]
         content_hash = _canonical_hash({
@@ -454,21 +485,23 @@ class LedgerRepository:
             "receivable": _num(snapshot.receivable), "payable": _num(snapshot.payable),
             "realized_pnl": _num(snapshot.realized_pnl),
             "fees": _num(snapshot.fees), "taxes": _num(snapshot.taxes),
+            "quality_status": snapshot.quality_status,
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
         })
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 """
                 insert into accounting.portfolio_snapshots (
                     fund_id, book_id, as_of, cash, positions, gross_exposure,
                     net_exposure, nav, currency, quality_status, content_hash, schema_version
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PASS', %s, %s)
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (fund_id, book_id, as_of, content_hash) do nothing
                 returning portfolio_snapshot_id
                 """,
                 (snapshot.fund_id, snapshot.book_id, snapshot.as_of, Json(cash),
                  Json(positions), snapshot.gross_exposure, snapshot.net_exposure,
-                 snapshot.nav, currency, content_hash, SNAPSHOT_SCHEMA_VERSION),
+                 snapshot.nav, currency, snapshot.quality_status, content_hash,
+                 SNAPSHOT_SCHEMA_VERSION),
             )
             row = cur.fetchone()
             if row is not None:
@@ -488,7 +521,7 @@ class LedgerRepository:
         jsonb에는 NAV 같은 파생값도 들어 있지만 읽지 않는다 - 되살린 뒤 다시 계산해서
         저장된 값과 갈라지면 계산이 틀린 것이고, jsonb를 믿으면 그걸 못 본다.
         """
-        with self._cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 """
                 select as_of, cash, positions from accounting.portfolio_snapshots
@@ -514,6 +547,9 @@ class LedgerRepository:
                         average_cost=Decimal(p["average_cost"]),
                         mark_price=Decimal(p["mark_price"]),
                         mark_as_of=datetime.fromisoformat(p["mark_as_of"]),
+                        # 옛 스냅샷에는 이 키가 없다. 없으면 미확정으로 읽는다 -
+                        # 모르는 것을 확정으로 승격시키지 않는다.
+                        mark_is_final=bool(p.get("mark_is_final", False)),
                     )
                     for p in positions
                 ),
@@ -595,12 +631,12 @@ if __name__ == "__main__":
         "ACC01-PAPER", "REPO-SELFCHECK",
         fund_name="Paper Fund (ACC-01 Fixture)", book_name="Repository Self-check Book")
 
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute("select instrument_id from reference.instruments order by instrument_id limit 1")
         instrument_id = cur.fetchone()[0]
 
     def journal_count() -> int:
-        with repo._cursor() as cur:
+        with repo.cursor() as cur:
             cur.execute("select count(*) from accounting.journals where fund_id=%s and book_id=%s",
                         (fund_id, book_id))
             return cur.fetchone()[0]
@@ -635,7 +671,7 @@ if __name__ == "__main__":
     led.post_fill(Fill("100", "70000", "1050", "0", "repo-selfcheck-buy"),
                   Side.BUY, instrument_id, Position(instrument_id))
     repo.save_projection(led)
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute("select quantity, average_cost from accounting.positions "
                     "where fund_id=%s and book_id=%s and instrument_id=%s",
                     (fund_id, book_id, instrument_id))
@@ -666,7 +702,7 @@ if __name__ == "__main__":
     target = next(j for j in led.journals if j.source_event_id == "repo-selfcheck-reversal-target")
     if not any(j.reversal_of == target.journal_id for j in led.journals):
         led.reverse(target.journal_id, "자체 점검 정정")
-    with repo._cursor() as cur:
+    with repo.cursor() as cur:
         cur.execute("select status from accounting.journals where journal_id=%s", (target.journal_id,))
         assert cur.fetchone()[0] == "REVERSED"
         cur.execute("select count(*) from accounting.journals where reversal_of_journal_id=%s",
@@ -679,7 +715,7 @@ if __name__ == "__main__":
 
     # 8. POSTED 분개는 DB가 수정을 거부한다
     try:
-        with repo._cursor() as cur:
+        with repo.cursor() as cur:
             cur.execute("update accounting.journals set event_type='변조' where journal_id=%s",
                         (target.journal_id,))
         raise AssertionError("POSTED 분개가 수정됐다")
@@ -691,7 +727,9 @@ if __name__ == "__main__":
     assert sum(led.trial_balance().values()) == ZERO, "복원한 원장의 차대가 안 맞는다"
 
     # 10. 스냅샷 저장 -> 복원. 같은 내용이면 행이 늘지 않는다
-    snap = value_portfolio(led, {instrument_id: MarkPrice(instrument_id, D("75000"), FIXED)}, FIXED)
+    snap = value_portfolio(
+        led, {instrument_id: MarkPrice(instrument_id, D("75000"), FIXED, is_final=True)}, FIXED)
+    assert snap.quality_status == "PASS", snap.quality_status
     snapshot_id = repo.save_snapshot(snap)
     assert repo.save_snapshot(snap) == snapshot_id, "같은 내용의 스냅샷이 두 건 생겼다"
     restored = repo.load_snapshots(fund_id, book_id)

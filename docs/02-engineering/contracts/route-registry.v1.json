@@ -96,8 +96,8 @@
       "owner": "accounting-portfolio-department",
       "module_name": "app",
       "working_directory": "departments/05-accounting-portfolio/api",
-      "openapi_status": "planned",
-      "route_status_default": "PLANNED"
+      "openapi_status": "ready",
+      "route_status_default": "IMPLEMENTED_PAPER"
     },
     {
       "app_id": "msu-case-api",
@@ -258,6 +258,28 @@
         {"method": "GET", "path": "/reporting/v1/reports/{content_hash}"}
       ]
     },
+    "accounting-api": {
+      "status": "IMPLEMENTED_PAPER",
+      "operations": [
+        {"method": "GET", "path": "/health"},
+        {"method": "POST", "path": "/accounting/v1/ledgers"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/capital"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/fills"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/journals"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/positions"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
+        {"method": "POST", "path": "/accounting/v1/reconciliations/fills"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/breaks"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"}
+      ]
+    },
     "operator-bff": {
       "status": "IMPLEMENTED_TEST",
       "operations": [
@@ -318,23 +340,6 @@
       {"method": "GET", "path": "/workforce/v1/hiring-requests/{request_id}"},
       {"method": "POST", "path": "/workforce/v1/hiring-requests/{request_id}/candidates"},
       {"method": "GET", "path": "/workforce/v1/skill-gap"}
-    ]},
-    {"app_id": "accounting-api", "status": "PLANNED", "source": "ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md §2", "operations": [
-      {"method": "POST", "path": "/accounting/v1/ledgers"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/capital"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/fills"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/journals"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/positions"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-      {"method": "POST", "path": "/accounting/v1/reconciliations/fills"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"}
     ]}
   ]
 }
