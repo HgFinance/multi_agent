@@ -837,12 +837,16 @@ def _route_after_pretrade(state: RiskState) -> str:
     if _counterparty_flagged(state["assessment"]):
         return "counterparty"
     # 그 외 REJECT 면 정책 검색(Agentic RAG)을 태우지 않고 바로 종합한다 - 이미 막힌 주문이다
-    return "employee_workers" if state["assessment"]["verdict"] == "reject" else "compliance"
+    return "supervise" if state["assessment"]["verdict"] == "reject" else "compliance"
 
 
 def _route_after_counterparty(state: RiskState) -> str:
     # counterparty_check 를 거친 뒤에도 REJECT short-circuit 규칙은 그대로 적용한다
-    return "employee_workers" if state["assessment"]["verdict"] == "reject" else "compliance"
+    if state["assessment"]["verdict"] != "reject":
+        return "compliance"
+    # A failed counterparty health signal requires the supervisor to review the
+    # operational failure; it must not be treated as an ordinary trade reject.
+    return "supervise" if _counterparty_flagged(state["assessment"]) else "employee_workers"
 
 
 def build_pipeline():
@@ -1129,7 +1133,7 @@ def _check_counterparty_schema_guard():
          "reason_codes": ["counterparty_unhealthy"]}
     bad_chat = lambda persona, task: '{"counterparty_narrative": "n"}'  # escalate 누락
     try:
-        counterparty_check({"order_intent": {}, "assessment": a}, chat=bad_chat)
+        _legacy_counterparty_check({"order_intent": {}, "assessment": a}, chat=bad_chat)
         raise AssertionError("불완전 Counterparty 결과가 통과했다")
     except ValueError:
         pass
@@ -1188,6 +1192,13 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     if "--run" in sys.argv:
+        if os.environ.get("RISK_QA_PRODUCTION_ENABLED", "false").lower() != "true":
+            print(
+                "Risk production pipeline is OFF. "
+                "Run scripts/run_risk_qa_test_pipeline.py --mode test, "
+                "or explicitly enable the reviewed production gate."
+            )
+            raise SystemExit(2)
         from datetime import timedelta
         from uuid import uuid4
 

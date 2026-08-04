@@ -86,12 +86,12 @@ set capabilities = excluded.capabilities,
 do $$
 declare
   seed record;
-  department_id uuid;
-  role_id uuid;
-  agent_id uuid;
-  worker_model_id uuid;
+  v_department_id uuid;
+  v_role_id uuid;
+  v_agent_id uuid;
+  v_worker_model_id uuid;
 begin
-  select model_id into strict worker_model_id
+  select model_id into strict v_worker_model_id
   from workforce.models
   where provider = 'ollama'
     and model_name = 'qwen3:1.7b'
@@ -140,7 +140,7 @@ begin
       tools, scopes, trigger
     )
   loop
-    select d.department_id into strict department_id
+    select d.department_id into strict v_department_id
     from workforce.departments d
     where d.department_code = seed.department_code;
 
@@ -149,7 +149,7 @@ begin
       forbidden_actions, kpi, status
     )
     values (
-      seed.employee_code, department_id, seed.mission, seed.skills,
+      seed.employee_code, v_department_id, seed.mission, seed.skills,
       '["oms.submit", "ledger.write", "risk.override", "qa.verdict.override"]'::jsonb,
       jsonb_build_object('trigger', seed.trigger, 'output_contract', 'worker-context.v1'),
       'ACTIVE'
@@ -161,14 +161,14 @@ begin
         forbidden_actions = excluded.forbidden_actions,
         kpi = excluded.kpi,
         status = 'ACTIVE'
-    returning role_id into role_id;
+    returning role_id into v_role_id;
 
     insert into workforce.agent_profiles (
       employee_code, department_id, role_id, display_name, runtime,
       employment_status, current_version
     )
     values (
-      seed.employee_code, department_id, role_id, seed.display_name,
+      seed.employee_code, v_department_id, v_role_id, seed.display_name,
       'LANGGRAPH', 'ACTIVE', 1
     )
     on conflict (employee_code) do update
@@ -179,7 +179,7 @@ begin
         employment_status = 'ACTIVE',
         current_version = 1,
         updated_at = now()
-    returning agent_id into agent_id;
+    returning agent_id into v_agent_id;
 
     insert into workforce.agent_profile_versions (
       agent_id, version, model_id, prompt_artifact_path, skill_manifest,
@@ -187,7 +187,7 @@ begin
       eval_requirements, forbidden_actions, artifact_hash, effective_from, status
     )
     values (
-      agent_id, 1, worker_model_id,
+      v_agent_id, 1, v_worker_model_id,
       'departments/' || case when seed.department_code = 'risk-management' then '03-risk' else '06-ai-qa-audit' end
         || '/hermes/config.yaml#worker.' || seed.employee_code,
       jsonb_build_object('skills', seed.skills, 'trigger', seed.trigger),

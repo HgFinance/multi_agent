@@ -63,6 +63,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # CEO Office / 인사팀 (영주, 2026-08-04)
                 "20260804000200_governance_case_status.sql",
                 "20260804000300_unify_department_code.sql",
+                "20260804000400_risk_qa_runtime_activation.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:

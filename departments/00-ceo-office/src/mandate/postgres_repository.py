@@ -22,9 +22,14 @@ config.yaml의 not_started 항목은 이 구현을 "asyncpg"로 적어뒀지만,
   - DATABASE_URL 있으면 실제 DB에 연결해 조회 경로(latest_version/content_hash_exists/
     get_mandate_current/get_fund_base_currency)를 존재하지 않는 UUID로 검증한다 - 이건
     governance.mandates 부모 행이 없어도 안전하게 통과한다.
-  - insert()/record_decision() 등 쓰기 경로의 완전한 왕복 검증은 governance.mandates가
-    요구하는 owner_user_id(auth.users FK)가 필요하다. 이 저장소에는 auth.users 행이
-    0건이라(Supabase Auth로 생성돼야 함), 자체 점검에서 계정을 만들어 우회하지 않는다.
+  - insert()/set_mandate_current()/set_effective_to()/record_decision() 쓰기 경로는
+    governance.mandates 부모 행이 필요하고, 그 행은 owner_user_id(auth.users FK)를
+    요구한다. auth.users는 Supabase Auth로만 만들 수 있어(계정 생성으로 우회 금지)
+    2026-08-03까지 왕복 검증을 못 했다. 2026-08-04 GOV-02 2단계에서 플레이스홀더
+    회원(supabase/seed.sql, RFC 2606 .invalid 주소, 로그인 불가)을 seed한 뒤로는
+    tests/schema/supabase_governance_test_fixture.sql의 TEST-CEO-MANDATE Fund와
+    엮어 실제 MandateVersionService.propose_version()/MandateActivationService.
+    activate()를 그대로 태워 4개 쓰기 메서드 전부 검증한다(아래 자체 점검 참고).
 """
 from __future__ import annotations
 
@@ -294,11 +299,14 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
 
 if __name__ == "__main__":
     import os
+    import sys
     import uuid
+    from datetime import timedelta, timezone
+    from pathlib import Path
 
     print("ok - import 확인 (psycopg2 lazy load)")
 
-    dsn = os.environ.get("DATABASE_URL")
+    dsn = os.environ.get("GOVERNANCE_WORKFORCE_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL 미설정 - 조회 경로 실 DB 검증은 건너뛴다")
         raise SystemExit(0)
@@ -314,11 +322,166 @@ if __name__ == "__main__":
         assert repo.get_fund_base_currency(missing) is None
         print("ok - 조회 경로 4개 (존재하지 않는 mandate_id, 실 DB) 통과")
 
-        # 2) 쓰기 경로(insert/set_mandate_current/record_decision)는 governance.mandates
-        #    부모 행이 필요하고, 그건 owner_user_id(auth.users FK)를 요구한다. 이 환경의
-        #    auth.users는 0건이라(Supabase Auth로만 만들 수 있음) 계정을 만들어 우회하지
-        #    않는다 - 여기서 검증을 멈춘다.
-        print("SKIP - 쓰기 경로 왕복 검증: governance.mandates 부모 행이 없다 "
-              "(auth.users 0건 -> owner_user_id FK 불가, 계정 생성으로 우회하지 않음)")
+        # 2) 쓰기 경로(insert/set_mandate_current/set_effective_to/record_decision) -
+        #    tests/schema/supabase_governance_test_fixture.sql의 TEST-CEO-MANDATE Fund와
+        #    supabase/seed.sql의 플레이스홀더 회원이 둘 다 있어야 governance.mandates
+        #    부모 행을 만들 수 있다(둘 다 이 Repository의 책임 밖 - docstring 참고).
+        conn = repo._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select fund_id from accounting.funds where fund_code = %s",
+                           ("TEST-CEO-MANDATE",))
+                fund_row = cur.fetchone()
+                cur.execute("select user_id from governance.user_profiles limit 1")
+                user_row = cur.fetchone()
+        finally:
+            repo._pool.putconn(conn)
+
+        if fund_row is None or user_row is None:
+            print("SKIP - 쓰기 경로 왕복 검증: TEST-CEO-MANDATE Fund 또는 플레이스홀더 "
+                  "회원이 없다 (psql -f tests/schema/supabase_governance_test_fixture.sql "
+                  "과 supabase/seed.sql 선행 필요)")
+            raise SystemExit(0)
+        fund_id, owner_user_id = str(fund_row[0]), str(user_row[0])
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lifecycle import MandateActivationService, UserApproval
+        from policy import (
+            ApprovalRules,
+            MandatePolicy,
+            PaperOrderMode,
+            RiskBounds,
+            UniversePolicy,
+        )
+        from service import MandateVersionService
+
+        def _policy(base_capital: str, max_instrument_weight: str) -> MandatePolicy:
+            return MandatePolicy(
+                allowed_assets=["A005930"], forbidden_assets=[],
+                risk_bounds=RiskBounds(
+                    base_capital=base_capital, currency="KRW",
+                    max_instrument_weight=max_instrument_weight, max_sector_weight="0.3",
+                    max_gross_exposure="1.0", max_concurrent_positions=10, max_daily_loss="0.03",
+                ),
+                universe_policy=UniversePolicy(
+                    allowed_markets=["KRX"], trading_start="09:00", trading_end="15:30",
+                ),
+                approval_rules=ApprovalRules(paper_order_mode=PaperOrderMode.USER_APPROVAL),
+            )
+
+        version_service = MandateVersionService(repo)
+        activation_service = MandateActivationService(repo)
+        t0 = datetime(2026, 8, 4, tzinfo=timezone.utc)
+        mandate_name = "GOV write-path selfcheck (postgres_repository.py)"
+
+        conn = repo._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # 이전 실행이 중간에 죽었을 경우를 대비해 같은 이름의 행을 먼저 정리한다
+                # (mandates에 unique(fund_id, name) - 이 이름은 이 자체 점검 전용이다).
+                cur.execute(
+                    "select mandate_id from governance.mandates where fund_id = %s and name = %s",
+                    (fund_id, mandate_name),
+                )
+                stale = cur.fetchone()
+                if stale is not None:
+                    stale_id = stale[0]
+                    cur.execute(
+                        "delete from governance.mandate_decisions where mandate_version_id in "
+                        "(select mandate_version_id from governance.mandate_versions where mandate_id = %s)",
+                        (stale_id,),
+                    )
+                    cur.execute("delete from governance.mandate_versions where mandate_id = %s", (stale_id,))
+                    cur.execute("delete from governance.mandates where mandate_id = %s", (stale_id,))
+                cur.execute(
+                    "insert into governance.mandates (fund_id, owner_user_id, name) "
+                    "values (%s, %s, %s) returning mandate_id",
+                    (fund_id, owner_user_id, mandate_name),
+                )
+                mandate_id = str(cur.fetchone()[0])
+            conn.commit()
+        finally:
+            repo._pool.putconn(conn)
+
+        try:
+            # 3) v1 제안(insert) -> 최초 활성화(set_mandate_current + record_decision,
+            #    이전 Version이 없어 set_effective_to는 안 탄다).
+            r1 = version_service.propose_version(
+                mandate_id=mandate_id, policy=_policy("100000000", "0.1"),
+                objective_text="자체 점검", objective={"style": "growth"}, effective_from=t0,
+                created_by=owner_user_id,
+            )
+            assert r1.row.version == 1
+            a1 = activation_service.activate(
+                mandate_id=mandate_id, version=1, direction=r1.direction, at=t0,
+                approval=UserApproval(approved_by=owner_user_id, trace_id=str(uuid.uuid4()),
+                                       reason="최초 활성화"),
+            )
+            assert a1.activated is True
+            assert repo.get_mandate_current(mandate_id) == (1, "ACTIVE")
+            print("ok - v1 제안+최초 활성화 (실 DB) 통과 - insert/set_mandate_current/"
+                  "record_decision 확인")
+
+            # 4) v2 제안(TIGHTEN: 한도를 더 좁힘) -> 승인 없이 즉시 활성화
+            #    (set_effective_to로 v1 종료 + set_mandate_current + record_decision).
+            # t1 > t0로 둔다 - mandate_versions DDL이 effective_to > effective_from을
+            # 강제해서(check 제약), v1 종료 시각이 v1의 effective_from과 같으면 거부된다.
+            t1 = t0 + timedelta(hours=1)
+            r2 = version_service.propose_version(
+                mandate_id=mandate_id, policy=_policy("100000000", "0.05"),
+                previous_policy=_policy("100000000", "0.1"),
+                objective_text="자체 점검 v2", objective={"style": "growth"},
+                effective_from=t1, created_by=owner_user_id,
+            )
+            assert r2.row.version == 2 and r2.direction.value == "TIGHTEN"
+            a2 = activation_service.activate(
+                mandate_id=mandate_id, version=2, direction=r2.direction, at=t1,
+            )
+            assert a2.activated is True and a2.decision.approved_by is None  # 자동 적용
+            assert repo.get_mandate_current(mandate_id) == (2, "ACTIVE")
+            print("ok - v2 제안+자동 활성화(TIGHTEN) (실 DB) 통과 - set_effective_to 확인")
+
+            # 5) DB에서 직접 확인 - v1이 실제로 종료됐는지, Decision이 2건 쌓였는지.
+            conn = repo._pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "select version, effective_to is not null from governance.mandate_versions "
+                        "where mandate_id = %s order by version",
+                        (mandate_id,),
+                    )
+                    versions = cur.fetchall()
+                    cur.execute(
+                        "select count(*) from governance.mandate_decisions d "
+                        "join governance.mandate_versions v on v.mandate_version_id = d.mandate_version_id "
+                        "where v.mandate_id = %s",
+                        (mandate_id,),
+                    )
+                    decision_count = cur.fetchone()[0]
+            finally:
+                repo._pool.putconn(conn)
+            assert versions == [(1, True), (2, False)], versions
+            assert decision_count == 2
+            print("ok - DB 직접 조회 통과 - v1.effective_to 종료됨, Decision 2건 확인")
+
+            # 6) content_hash 중복 방지 - 같은 policy로 재제안하면 거부돼야 한다(DDL unique).
+            assert repo.content_hash_exists(mandate_id, r1.row.content_hash) is True
+        finally:
+            # 정리 - mandate_decisions/mandate_versions/mandates에는 append-only 트리거가
+            # 없다(case_events/improvement_candidate_events와 다른 점, 2026-08-04 실측).
+            conn = repo._pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "delete from governance.mandate_decisions where mandate_version_id in "
+                        "(select mandate_version_id from governance.mandate_versions where mandate_id = %s)",
+                        (mandate_id,),
+                    )
+                    cur.execute("delete from governance.mandate_versions where mandate_id = %s", (mandate_id,))
+                    cur.execute("delete from governance.mandates where mandate_id = %s", (mandate_id,))
+                conn.commit()
+            finally:
+                repo._pool.putconn(conn)
+            print("ok - 자체 점검 행 정리 완료 (mandates/mandate_versions/mandate_decisions)")
     finally:
         repo.close()
