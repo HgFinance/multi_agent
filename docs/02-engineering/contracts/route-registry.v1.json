@@ -96,8 +96,8 @@
       "owner": "accounting-portfolio-department",
       "module_name": "app",
       "working_directory": "departments/05-accounting-portfolio/api",
-      "openapi_status": "planned",
-      "route_status_default": "PLANNED"
+      "openapi_status": "ready",
+      "route_status_default": "IMPLEMENTED_PAPER"
     },
     {
       "app_id": "msu-case-api",
@@ -120,7 +120,8 @@
         {"method": "GET", "path": "/evidence/stories"},
         {"method": "GET", "path": "/macro/observations"},
         {"method": "GET", "path": "/methods/performance"},
-        {"method": "GET", "path": "/universe/restrictions"}
+        {"method": "GET", "path": "/universe/restrictions"},
+        {"method": "GET", "path": "/calendar/sessions_since"}
       ]
     },
     "market-read-api": {
@@ -132,6 +133,7 @@
         {"method": "GET", "path": "/breadth"},
         {"method": "GET", "path": "/dq/windows"},
         {"method": "GET", "path": "/dq/summary"},
+        {"method": "GET", "path": "/dq/bar_freshness"},
         {"method": "GET", "path": "/regime/daily"},
         {"method": "GET", "path": "/microstructure/{symbol}"}
       ]
@@ -247,8 +249,35 @@
         {"method": "GET", "path": "/governance/v1/escalations/{escalation_id}"},
         {"method": "POST", "path": "/governance/v1/escalations/{escalation_id}/transitions"},
         {"method": "POST", "path": "/governance/v1/notifications"},
+        {"method": "POST", "path": "/governance/v1/committee/sessions"},
+        {"method": "GET", "path": "/governance/v1/committee/sessions/{session_id}"},
+        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/votes"},
+        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/close"},
+        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/cancel"},
         {"method": "POST", "path": "/reporting/v1/reports"},
         {"method": "GET", "path": "/reporting/v1/reports/{content_hash}"}
+      ]
+    },
+    "accounting-api": {
+      "status": "IMPLEMENTED_PAPER",
+      "operations": [
+        {"method": "GET", "path": "/health"},
+        {"method": "POST", "path": "/accounting/v1/ledgers"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/capital"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/fills"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/journals"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/positions"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
+        {"method": "POST", "path": "/accounting/v1/reconciliations/fills"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"},
+        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/breaks"},
+        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"}
       ]
     },
     "operator-bff": {
@@ -284,12 +313,6 @@
       {"method": "GET", "path": "/research/v1/packets/{packet_id}"},
       {"method": "GET", "path": "/research/v1/cases/{case_id}/packets"}
     ]},
-    {"app_id": "research-evidence-api", "status": "PLANNED", "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §4", "operations": [
-      {"method": "GET", "path": "/calendar/sessions_since"}
-    ]},
-    {"app_id": "market-read-api", "status": "PLANNED", "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §4", "operations": [
-      {"method": "GET", "path": "/dq/bar_freshness"}
-    ]},
     {"app_id": "quant-api", "status": "PLANNED", "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §7", "operations": [
       {"method": "GET", "path": "/health/live"},
       {"method": "GET", "path": "/health/ready"},
@@ -310,9 +333,6 @@
     ]},
     {"app_id": "governance-api", "status": "PLANNED", "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §2.2-§2.3", "operations": [
       {"method": "POST", "path": "/governance/v1/cases/{case_id}/decisions"},
-      {"method": "POST", "path": "/governance/v1/committee/sessions"},
-      {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/close"},
-      {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/votes"},
       {"method": "GET", "path": "/reporting/v1/reports/{report_id}"}
     ]},
     {"app_id": "workforce-api", "status": "PLANNED", "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §3.2-§3.4", "operations": [
@@ -320,23 +340,6 @@
       {"method": "GET", "path": "/workforce/v1/hiring-requests/{request_id}"},
       {"method": "POST", "path": "/workforce/v1/hiring-requests/{request_id}/candidates"},
       {"method": "GET", "path": "/workforce/v1/skill-gap"}
-    ]},
-    {"app_id": "accounting-api", "status": "PLANNED", "source": "ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md §2", "operations": [
-      {"method": "POST", "path": "/accounting/v1/ledgers"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/capital"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/fills"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/journals"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/positions"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-      {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-      {"method": "POST", "path": "/accounting/v1/reconciliations/fills"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"},
-      {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"}
     ]}
   ]
 }

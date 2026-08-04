@@ -24,6 +24,11 @@ class WorkflowContractTest(unittest.TestCase):
             registry["workflow"]["order"],
             ["research", "trading", "risk", "qa", "oms-fill-gate", "accounting", "ceo"],
         )
+        self.assertEqual(
+            registry["portfolio_recommendation_cycle"]["manifest"],
+            "orchestration/workflows/portfolio-recommendation.yaml",
+        )
+        self.assertFalse(registry["portfolio_recommendation_cycle"]["external_writes"])
 
     def test_all_declared_workflows_load_and_validate(self) -> None:
         workflows = load_workflows()
@@ -35,6 +40,7 @@ class WorkflowContractTest(unittest.TestCase):
                 "workforce-management",
                 "agent-evolution",
                 "event-routing",
+                "portfolio-recommendation-full",
             },
         )
         for spec in workflows.values():

@@ -60,12 +60,22 @@ class MarkPrice:
 
     우리가 만들지 않는다. instrument_id와 as_of가 없으면 어느 시점 가격인지
     알 수 없어 Point-in-Time 재현이 깨진다.
+
+    **`is_final`의 기본값이 False인 것은 의도다.** market-api의 봉은 진행 중일 수
+    있고(`market.market_bars.is_final`), 미확정 봉을 종가로 쓰면 NAV가 조용히
+    틀린다. 2026-08-03에 리서치본부가 `is_final`을 모든 봉에 True로 박아두던
+    결함을 고쳤다(`3978ee1` "없는 확실성을 만들어내던 것"). 여기서 True를
+    기본값으로 두면 우리가 그 결함을 다시 만드는 셈이다 - 말 안 하면 미확정이다.
+
+    확정 여부는 NAV를 막지 않는다. 장중 평가는 원래 미확정 가격으로 한다.
+    대신 스냅샷의 `quality_status`가 PASS 대신 WARN이 되어 드러난다.
     """
 
     instrument_id: UUID
     price: Decimal
     as_of: datetime
     source: str = "market-api"
+    is_final: bool = False
 
     def __post_init__(self) -> None:
         if self.price <= 0:
@@ -82,6 +92,8 @@ class PositionValuation:
     average_cost: Decimal
     mark_price: Decimal
     mark_as_of: datetime
+    # 이 값이 스냅샷 전체의 quality_status를 정한다. MarkPrice.is_final 주석 참고.
+    mark_is_final: bool = False
 
     @property
     def cost_basis(self) -> Decimal:
@@ -126,6 +138,16 @@ class PortfolioSnapshot:
     def nav(self) -> Decimal:
         """순자산가치. 이 값이 F11의 주문 사이징 기준이 된다."""
         return self.cash + self.securities_value + self.receivable - self.payable
+
+    @property
+    def quality_status(self) -> str:
+        """`accounting.portfolio_snapshots.quality_status`에 그대로 들어간다.
+
+        보유 종목 중 하나라도 미확정 봉으로 평가됐으면 WARN이다. NAV를 막지는
+        않지만 "이 NAV는 확정 종가 기준이 아니다"를 수치와 함께 남긴다 - 공식
+        NAV Close는 PASS만 받아야 한다(그 승인 경로는 아직 없다).
+        """
+        return "PASS" if all(p.mark_is_final for p in self.positions) else "WARN"
 
     @property
     def gross_exposure(self) -> Decimal:
@@ -187,6 +209,7 @@ def value_portfolio(
                 average_cost=pos.average_cost,
                 mark_price=mark.price,
                 mark_as_of=mark.as_of,
+                mark_is_final=mark.is_final,
             )
         )
 

@@ -37,12 +37,19 @@
 - [ ] 재일님의 `ResearchPacketV2` Fixture를 받아 Trading API가 같은 ID를 유지한 `OrderIntent`를 생성하는 Contract Test를 만든다.
 - [ ] 동규님의 Risk API 입력·출력과 연결해 `APPROVE/RESIZE/REJECT` 중 승인된 Intent만 Paper OMS로 넘어가는 테스트를 만든다.
 - [ ] 트레이딩·회계 Compose Fragment를 깨끗한 환경에서 기동하고 Health, DB 연결, Hermes Tool 제한 결과를 실행 로그로 남긴다.
-- [ ] Paper Fill 한 건이 Journal Entry, Position과 Portfolio Snapshot을 만드는 `ACC-01` 최소 Fixture를 구현한다.
+- [x] Paper Fill 한 건이 Journal Entry, Position과 Portfolio Snapshot을 만드는 `ACC-01` 최소 Fixture를 구현한다.
+  (2026-08-04. `departments/05-accounting-portfolio/ledger/repository.py` psycopg 원장 저장소 +
+  `ledger/fill_consumer.py`. 실 Supabase에 Fund `ACC01-PAPER` / Book `MAIN` 고정 Fixture로
+  `journals`(POSTED·3라인)·`journal_lines`·`positions`·`cash_balances`·`portfolio_snapshots` 생성,
+  재실행 멱등 확인. **체결 원천은 아직 `execution.fills`가 아니라 API 주입이다** — 그 조인
+  경로(`pending_fills()`)는 구현했고 TRD-01이 행을 넣으면 그대로 붙는다.)
 - [ ] AI Office에서 Scripted Demo와 실제 Runtime Projection을 명확히 구분하고, 공식 API 연결 전 화면에 `LIVE`를 표시하지 않는지 검토한다.
 
 ### Blocker
 
-- Trading API와 Compose 정의는 생겼지만 Accounting API/Fill Consumer와 Canonical Order·Fill·Journal·Position·Snapshot DB 증거가 없다.
+- Canonical Journal·Position·Cash·Snapshot 행은 2026-08-04에 생겼다(`ACC01-PAPER` Fixture).
+  남은 공백은 **Order·Fill 쪽**이다 — `execution.orders`/`fills`가 여전히 0행이고 OMS 상태는
+  프로세스 메모리다. 회계는 그 표를 읽을 준비만 돼 있다(`fill_consumer.pending_fills()`).
 - `TRD-01` E2E는 재일님 `RQ-01` Fixture와 동규님 Risk Runtime, 영주님 Case·Approval ID가 선행한다.
 - `PLAT-02` 프로젝트 전용 Redis·Outbox가 없어 부서 간 Event Replay를 제품 Runtime으로 검증할 수 없다.
 - 공식 `/ui/snapshot`, `/ws/operations`, Sequence Gap 복구와 Hermes Kanban Bridge가 없다.

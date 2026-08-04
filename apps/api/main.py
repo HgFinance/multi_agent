@@ -27,16 +27,19 @@ from __future__ import annotations
 import sys
 from functools import lru_cache
 from pathlib import Path
+from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
+sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "ledger"))
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 
 import accounting
+import db_read_model
 import hermes_cli
 import trading
 from ui_read_model import build_ui_snapshot
@@ -91,19 +94,51 @@ def health() -> dict:
     }
 
 
+@lru_cache(maxsize=1)
+def _repo():
+    """회계 원장 저장소. DATABASE_URL이 없으면 None이고 Snapshot은 전부 DEMO다."""
+    from repository import LedgerRepository
+
+    return LedgerRepository.from_env()
+
+
 @app.get("/ui/snapshot")
-def ui_snapshot() -> dict:
-    """계획 5.2의 `GET /ui/snapshot`. 화면 State는 이 한 장에서 재구축된다."""
+def ui_snapshot(book_id: UUID | None = None) -> dict:
+    """계획 5.2의 `GET /ui/snapshot`. 화면 State는 이 한 장에서 재구축된다.
+
+    `book_id`를 주고 DB가 붙어 있으면 **회계 구간(portfolio·ledger)이 Canonical
+    표에서** 온다(`api.portfolio_snapshot_latest` 등). 트레이딩 구간은 아직
+    Scripted Loop다 - `execution.orders`가 0행이고 OMS 상태가 프로세스 메모리라
+    뷰를 만들어도 빈 화면을 실데이터인 척 보여줄 뿐이다(TRD-01 대기).
+
+    그래서 **구간별 출처를 `sources`에 밝힌다.** 최상위 `mode`는 트레이딩까지
+    실데이터가 되기 전에는 DEMO로 둔다 - 절반만 진짜인 화면을 PAPER라고 부르면
+    나머지 절반도 진짜라고 읽힌다.
+    """
     loop = _demo_state()
+    overrides = None
+    repo = _repo()
+    if book_id is not None and repo is not None:
+        sections = db_read_model.build_accounting_sections(repo, book_id)
+        if sections is None:
+            # 평가된 적 없는 장부다. 0원 NAV를 지어내지 않고 그 사실을 알린다.
+            raise HTTPException(404, f"book {book_id}의 확정 Snapshot이 없습니다")
+        overrides = {**sections,
+                     "book_id": str(book_id),
+                     "sources": {"portfolio": "supabase", "ledger": "supabase"}}
+
     return build_ui_snapshot(
         oms=loop.oms,
         ledger=loop.ledger,
         snapshot=loop.snapshot(),
         mode="DEMO",
+        overrides=overrides,
     )
 
 
 if __name__ == "__main__":
+    from uuid import uuid4
+
     from fastapi.testclient import TestClient
 
     c = TestClient(app)
@@ -117,6 +152,16 @@ if __name__ == "__main__":
     assert snap["ledger"]["balanced"] is True, "차대가 맞지 않는 원장이 화면으로 나갔다"
     assert isinstance(snap["portfolio"]["nav"], str), "금액이 JSON number로 나갔다"
     assert snap["trading"]["orders"][0]["state"] == "FILLED"
+    # book_id 없이 부르면 전 구간이 Scripted Loop다. 출처를 숨기지 않는다
+    assert set(snap["sources"].values()) == {"scripted-loop"}, snap["sources"]
+
+    # 없는 book_id는 404다. 0원 NAV를 지어내지 않는다.
+    # (DB가 없으면 book_id가 무시되므로 그때는 200이고, 그 경우도 출처는 전부 DEMO다)
+    missing_book = c.get("/ui/snapshot", params={"book_id": str(uuid4())})
+    if _repo() is not None:
+        assert missing_book.status_code == 404, missing_book.text
+    else:
+        assert set(missing_book.json()["sources"].values()) == {"scripted-loop"}
 
     # 두 번 불러도 같은 Snapshot이다. Read-only가 상태를 바꾸면 안 된다
     assert c.get("/ui/snapshot").json()["portfolio"]["nav"] == snap["portfolio"]["nav"]

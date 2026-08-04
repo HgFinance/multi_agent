@@ -209,7 +209,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `PLAT-01` | `DOCUMENTED` | Event Envelope, Error, Idempotency와 Health Contract 코드화 | 전 본부 Contract Test 통과 |
 | `PLAT-02` | `DOCUMENTED` | 프로젝트 전용 Redis와 Compose Core | 별도 `trading-*` 없이 Core 기동 |
 | `TRD-01` | `IMPLEMENTED` | Trading API·OMS Worker와 Supabase 연결 | Risk 승인 없는 Submit 0건, 재시작 복구 |
-| `ACC-01` | `IMPLEMENTED` | Fill Consumer·Ledger·Snapshot Projector | Fill 1건이 Journal·Position·Snapshot 생성 |
+| `ACC-01` | `RUNTIME_VERIFIED` | Fill Consumer·Ledger·Snapshot Projector | 2026-08-04 실 Supabase 왕복. `ledger/fill_consumer.py` 자체 점검이 체결 1건 → `accounting.journals`(POSTED, 3라인) · `positions` · `cash_balances` · `portfolio_snapshots` 생성과 재실행 멱등을 확인. **남은 것: 체결 원천이 `execution.fills`가 아니라 API 주입**(TRD-01 대기) |
 | `UI-01` | `IMPLEMENTED` | 공식 Snapshot/WebSocket Client | `DEMO/PAPER` 분리와 Gap 복구 E2E |
 | `UI-03` | `BLOCKED` | AI Office 취약점 Upgrade 계획과 회귀 Test | High 취약점 처리·수용 기록 |
 

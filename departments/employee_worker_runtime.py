@@ -9,6 +9,7 @@ permission grants.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -235,6 +236,91 @@ def run_worker_registry(
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
     return {
         "runtime": {"executor": "LangGraph", "topology": "independent_graph_per_worker", "provider": "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
+        "workers": reports,
+        "executed": [item["worker_id"] for item in reports if item["status"] == "COMPLETED"],
+        "failed": failed,
+        "not_executed": not_executed,
+        "degraded": bool(failed),
+        "input_hash": input_hash,
+        "binding": False,
+    }
+
+
+async def run_worker_registry_async(
+    specs: tuple[WorkerSpec, ...],
+    payload: Mapping[str, Any],
+    *,
+    tools: Mapping[str, WorkerTool],
+    llm: WorkerLLM | None = None,
+) -> dict[str, Any]:
+    """Run Worker graphs with LangGraph async fan-out/fan-in.
+
+    The synchronous registry remains for legacy self-checks. New
+    cross-department orchestration uses this boundary so every compiled Worker
+    graph is invoked with ``await app.ainvoke(...)``.
+    """
+
+    input_hash = hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
+    not_executed = [spec.worker_id for spec in specs if not should_run(spec, payload)]
+    eligible = [spec for spec in specs if should_run(spec, payload)]
+
+    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+        tool = tools.get(spec.worker_id)
+        if tool is None:
+            return {
+                "worker_id": spec.worker_id,
+                "status": "DEGRADED",
+                "error": "tool_not_registered",
+                "tools": list(spec.tools),
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+            }
+        try:
+            app = build_independent_worker_graph(spec, tool, llm)
+            state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
+            return {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": state.get("status", "DEGRADED"),
+                "attempts": state.get("attempts", 0),
+                "output": state.get("output", {}),
+                "error": state.get("error"),
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+            }
+        except Exception as exc:  # noqa: BLE001 - worker boundary fails closed.
+            return {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": "DEGRADED",
+                "attempts": 0,
+                "output": {
+                    "worker_id": spec.worker_id,
+                    "summary": "Worker graph failed; human review is required.",
+                    "confidence": 0.0,
+                    "evidence_refs": [],
+                    "escalate": True,
+                    "schema_valid": False,
+                },
+                "error": type(exc).__name__,
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+            }
+
+    # asyncio.gather preserves input order, making fan-in reproducible.
+    reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
+    failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
+    return {
+        "runtime": {
+            "executor": "LangGraph",
+            "topology": "async_fan_out_fan_in_independent_graphs",
+            "provider": "ollama",
+            "model": model_name(),
+            "max_retries": 2,
+            "max_attempts": 3,
+        },
         "workers": reports,
         "executed": [item["worker_id"] for item in reports if item["status"] == "COMPLETED"],
         "failed": failed,

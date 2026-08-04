@@ -4,6 +4,8 @@
 
 ## Canonical flows
 
+- `portfolio-recommendation.yaml`: `user profile → suitability → research → trading → risk → QA → accounting → CEO` (async TEST fan-out/fan-in)
+
 - `investment-case.yaml`: `research → trading → risk → QA → OMS/Fill → accounting → CEO`
 - `strategy-research.yaml`: `quant-backtest → QA → CEO`
 - `workforce-management.yaml`: `HR 설계 → HR 평가 → QA 권한 검증 → CEO 승인 → HR lifecycle`

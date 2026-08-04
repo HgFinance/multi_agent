@@ -194,27 +194,53 @@ Supabase의 `accounting.journals`도 마찬가지라 **DB 델타가 필요한 �
 **어느 방향으로도 권한이 이전되지 않는다.** 담당자가 같아도(도현: 트레이딩↔회계) 합치지 않는다 —
 트레이딩 API가 원장을 쓰지 않고, 이 API가 주문을 내지 않는 것이 그 경계다.
 
-## 4. 저장소 — ⚠ 미결, 트레이딩 OMS와 같은 결정
+## 4. 저장소 — Supabase `accounting.*` (2026-08-04 구현)
 
-**현재 상태는 프로세스 메모리다.** `_ledgers` dict가 이 프로세스의 전체 원장이라 API를
-재시작하면 분개가 사라지고, BFF도 트레이딩본부도 이 상태를 볼 수 없다.
+`DATABASE_URL`이 있으면 Supabase가 원장이고, 없으면 프로세스 메모리다.
+구현은 [`ledger/repository.py`](../../departments/05-accounting-portfolio/ledger/repository.py)이며
+`app.py`는 `_ledger()` 한 곳에서만 두 모드를 가른다 — 엔드포인트 계약은 바뀌지 않았다.
 
-Supabase `accounting` 스키마에 테이블 18개가 이미 있다(`journals`, `journal_lines`,
-`portfolio_snapshots`, `valuations`, `nav_runs`, `breaks` 등). `portfolio_snapshots`는
-사실상 우리 스냅샷 모양 그대로다(`cash`, `positions` jsonb, `gross/net_exposure`, `nav`,
-`quality_status`, `content_hash`, `schema_version`).
+| | DB 모드 | 인메모리 모드 |
+|---|---|---|
+| 조건 | `DATABASE_URL` 있음 | 없음 |
+| 원장 | `accounting.journals` / `journal_lines` | `_ledgers` dict |
+| Projection | `accounting.positions` / `cash_balances` | 없음(요청마다 재계산) |
+| 스냅샷 | `accounting.portfolio_snapshots` | `_snapshots` dict |
+| `ledger_id` | **`book_id`와 같다** | 같음(규약 일치) |
+| `/health`의 `store` | `supabase accounting.*` | `in-memory (accounting.* 미연결)` |
 
-**트레이딩 OMS 저장소와 같은 결정이며 따로 정하지 않는다**([TRADING_DOMAIN_API_SPEC.md](TRADING_DOMAIN_API_SPEC.md) §4).
-오히려 회계 쪽이 더 급하다 — 원장이 휘발되면 대사할 내부 원천 자체가 없어진다.
+**`ledger_id == book_id`인 이유:** Book 하나는 Fund 하나에 속하므로 book_id만으로 장부가
+정해진다. 별도 매핑표를 두면 그 표가 프로세스 메모리에 남아 재시작 후 같은 id로 같은
+장부를 못 연다 — 저장소를 옮긴 의미가 없어진다.
 
-바꿀 곳은 `app.py`의 `_ledgers`/`_snapshots` **두 dict**다 — 엔드포인트 계약은 안 바뀐다.
-그때까지 응답의 `authoritative: false`와 `source_of_record`가 이 사실을 계약으로 표시한다.
+**Posting은 DRAFT → 라인 → POSTED 3단계다.** DB 트리거가 POSTED 전환 시점에 차대 균형을
+검사하므로(`journals_validate_posting`) 처음부터 POSTED로 넣으면 라인을 붙일 수도 없고
+(`journal_lines_protect_posted`) 균형 검사도 안 걸린다. 즉 **불변식 1·2·3이 우리 코드와
+DB 양쪽에 있다** — 애플리케이션을 우회해 psql로 불균형 분개를 넣어도 거부된다.
+
+**`unique (event_type, source_event_id)`는 Fund/Book 전역이다.** 다른 장부가 이미 쓴
+`source_event_id`로 분개하면 409(`ACCOUNTING_SOURCE_EVENT_CONFLICT`)다. 조용히 "이미
+반영됨"으로 넘기면 그 장부에는 분개가 없는데 있다고 착각하게 된다.
+
+**DB 실패는 503이다.** 메모리로 말없이 후퇴하지 않는다 — 기록되지 않은 분개를 기록된 것처럼
+응답하면 그 뒤의 모든 잔고가 틀어진다.
+
+`authoritative`는 두 모드 모두 여전히 `false`다. 저장 위치가 바뀌었을 뿐 NAV 확정·Close
+승인 절차는 아직 없다. `source_of_record`가 실제 저장 위치를 말한다.
+
+**Fund/Book/계정과목은 API가 만들지 않는다.** `repository.bootstrap()`이 하며, 요청 경로에는
+없다 — Fund를 여는 것은 자본 구조 결정이지 주문 처리 중에 일어날 일이 아니다. 없는 book_id로
+원장을 열면 404(`ACCOUNTING_BOOK_NOT_FOUND`)다.
+
+트레이딩 OMS 저장소(`execution.orders`)는 **아직 프로세스 메모리다**
+([TRADING_DOMAIN_API_SPEC.md](TRADING_DOMAIN_API_SPEC.md) §4). 회계를 먼저 옮긴 이유는
+원장이 휘발되면 대사할 내부 원천 자체가 없어지기 때문이다.
 
 ## 5. 관측
 
 `risk-api`가 `/metrics`(Prometheus)를 갖고 있다. 회계도 같은 자리를 잡아야 하지만 **아직 없다.**
-지금은 `GET /health`가 `ledgers`/`journals` 개수와 `store: "in-memory (accounting.* 미연결)"`를
-그대로 노출한다 — 재시작마다 0으로 돌아간다는 사실을 숨기지 않는 것이 목적이다.
+지금은 `GET /health`가 `ledgers`/`journals` 개수와 `store`를 그대로 노출한다 — DB 모드면
+실제 저장된 행 수를, 인메모리면 재시작마다 0으로 돌아가는 값을 숨기지 않는 것이 목적이다.
 
 회계에서 관측이 붙으면 우선 볼 값은 정해져 있다: **시산표 합계(항상 0)**, **미설명 손익(항상 0)**,
 **Material Break 수**. 셋 다 이미 API가 내주고 있으므로 수집만 붙이면 된다.
@@ -250,10 +276,45 @@ API는 서비스 호출자용이고, 불변식이 HTTP 계층이 아니라 도�
 | Corporate Action (F25) | **구현 완료.** 배당수익 계정(4200) 신설은 DB 델타 대기 — 지금은 배당이 실현손익(4000)에 섞인다 |
 | Daily Report (F23) | **구현 완료.** 전략별 분해는 호출자 매핑 의존(원장에 전략 차원 없음 — DB 델타) |
 | Case 종속 경로 | **없음.** `evaluate`는 D4 TCA + QA 판정이 필요해 우리 것이 아니다(§1.1) |
-| 저장소(in-memory → `accounting.*`) | **미결 — 트레이딩 OMS와 같은 결정**(§4) |
+| `accounting-api` Container | **구현 완료.** `127.0.0.1:8046`. Build Context가 저장소 루트다(§8) |
+| 저장소(in-memory → `accounting.*`) | **구현 완료** (2026-08-04, §4). `DATABASE_URL`로 갈린다 |
+| ACC-01 (체결 1건 → 분개·Position·스냅샷) | **구현 완료.** `ledger/fill_consumer.py`. 단 체결 원천이 `execution.fills`가 아니라 API 주입이다(TRD-01 대기) |
+| 대사·Break 영속 (`reconciliations`→`breaks`) | **구현 완료** (2026-08-04). `reconciliation/recon_repository.py`. `GET .../breaks`가 미종결 목록을 준다. **이벤트 전송로(Redis)는 PLAT-02 대기** — 리스크·QA는 지금 이 표를 읽는다 |
+| `api.*` 회계 읽기 뷰 | **구현 완료** (`20260804000500`). `portfolio_snapshot_latest` / `position_holdings` / `ledger_balances` / `open_breaks`. 트레이딩 뷰는 `execution.*`가 0행이라 만들지 않았다 |
+| `/ui/snapshot` 원천 | **회계 구간만 교체 완료.** `?book_id=`를 주면 portfolio·ledger가 Supabase에서 온다. trading은 Scripted Loop이며 `sources`가 구간별 출처를 밝힌다 |
+| Mark 확정 여부(`is_final`) | **구현 완료.** 기본값 False(미확정). 미확정 봉으로 평가하면 스냅샷 `quality_status`가 WARN이 된다. NAV를 막지는 않는다 |
+| symbol ↔ instrument_id | **구현 완료.** `repository.instrument_by_symbol()`은 Point-in-Time(`valid_from`/`valid_to`), `api.position_holdings`는 현재 대표 코드 |
 | MCP 도구 면 | **설계만, 구현 없음** (§6) |
 | 인증(Service Token) | **미정** — 발급 주체 미결. 지금은 `127.0.0.1` 바인딩으로 대체 |
 | `/metrics`·Observability | **미구현** (§5) |
 | BFF `/accounting/v1/portfolio-snapshot`과의 접두사 중복 | **정리 대상** (§1.1). 그 경로는 Domain 읽기인데 BFF에 있다 |
 | Long/Short 분리, Borrow/Financing 비용 | **범위 밖** — 팀 가이드 v1.2 1.1, 미구현 |
 | 관리보수·성과보수·High-Water Mark | **범위 밖** — Mandate 미확정 |
+
+## 8. Container
+
+```bash
+docker compose up -d accounting-api      # 127.0.0.1:8046 (로컬 전용)
+```
+
+**Build Context가 저장소 루트다** — `departments/05-accounting-portfolio`가 아니다.
+트레이딩(`trading-api`)은 자기 폴더 안에서 닫히지만 회계는 `ledger.py`와
+`reconciliation.py`가 **모듈 최상위에서** 부서 경계를 넘기 때문이다:
+
+```python
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
+from contracts import Side
+```
+
+이 계산이 `departments/<본부>/<모듈>/x.py` 배치를 전제하므로 이미지 안에서도 같은 상대
+경로를 유지해야 한다(`03-risk`와 같은 사정). compose는
+`context: ../..` + `dockerfile: departments/05-accounting-portfolio/Dockerfile`이다.
+
+**`DATABASE_URL`이 필요하다.** 없으면 컨테이너가 인메모리 모드로 뜨고, 그 원장은 컨테이너를
+지우면 사라진다. compose에 추가할 것(§4 구현 이후 남은 배선).
+
+**아직 복제하면 안 된다.** DB 모드에서는 원장이 갈라지지 않지만, 같은 장부에 동시에 분개하면
+경합 창(로드 → 계산 → INSERT)이 생긴다. DB의 `unique (event_type, source_event_id)`가
+이중 분개는 막지만 평균원가 계산이 오래된 상태를 볼 수 있다. 단일 인스턴스로 둔다.
+
+계획서 6.6의 `ledger-worker`/`portfolio-projector`는 넣지 않았다 — 코드가 없다.
