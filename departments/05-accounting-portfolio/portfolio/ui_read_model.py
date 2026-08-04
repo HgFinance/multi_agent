@@ -141,16 +141,22 @@ def build_ui_snapshot(
     mode: str = "DEMO",
     snapshot_version: int = 1,
     server_time: datetime | None = None,
+    overrides: dict | None = None,
 ) -> dict:
     """AI Office가 읽는 Trading·Portfolio Snapshot 한 장.
 
     mode는 DEMO | PAPER | LIVE다. Scripted Loop 산출물이면 DEMO이고,
     실제 Paper Backend에 붙으면 PAPER가 된다 - 그 판단은 호출자가 한다.
+
+    `overrides`로 구간을 통째로 갈아끼울 수 있다. 회계 구간은 Canonical 표에서
+    오고 트레이딩 구간은 아직 Scripted Loop인 과도기 때문이다. **구간마다 출처가
+    다르면 `sources`에 밝힌다** - DEMO와 PAPER가 한 화면에서 말없이 섞이는 것이
+    계획 4절이 금지하는 것이고, mode 하나로는 그 구분을 담을 수 없다.
     """
     if mode not in ("DEMO", "PAPER", "LIVE"):
         raise ValueError(f"알 수 없는 mode: {mode}")
 
-    return {
+    doc = {
         "schema_version": SCHEMA_VERSION,
         "mode": mode,
         "snapshot_version": snapshot_version,
@@ -160,7 +166,17 @@ def build_ui_snapshot(
         "portfolio": _portfolio(snapshot),
         "trading": _trading(oms),
         "ledger": _ledger(ledger),
+        "sources": {"portfolio": "scripted-loop", "trading": "scripted-loop",
+                    "ledger": "scripted-loop"},
     }
+    if overrides:
+        # 먼저 합치고 나중에 덮는다. 순서를 바꾸면 update가 sources를 통째로
+        # 갈아치워서 갈아끼우지 않은 구간(trading)의 출처가 사라진다 -
+        # 출처 없는 구간이 생기면 이 필드를 만든 이유가 없어진다.
+        merged = {**doc["sources"], **overrides.get("sources", {})}
+        doc.update(overrides)
+        doc["sources"] = merged
+    return doc
 
 
 if __name__ == "__main__":
@@ -212,7 +228,17 @@ if __name__ == "__main__":
     pos = doc["portfolio"]["positions"][0]
     assert Decimal(pos["weight"]) == Decimal(pos["market_value"]) / final.nav
 
-    # 6. 알 수 없는 mode는 거부한다
+    # 6. 구간을 갈아끼워도 모든 구간에 출처가 남는다.
+    #    갈아끼우지 않은 구간의 출처가 사라지면 화면이 그 절반을 뭘로 믿을지 모른다
+    swapped = build_ui_snapshot(
+        oms=loop.oms, ledger=loop.ledger, snapshot=final,
+        overrides={"portfolio": {"nav": "1"}, "sources": {"portfolio": "supabase"}})
+    assert set(swapped["sources"]) == {"portfolio", "trading", "ledger"}, swapped["sources"]
+    assert swapped["sources"]["portfolio"] == "supabase"
+    assert swapped["sources"]["trading"] == "scripted-loop", "안 바꾼 구간의 출처가 사라졌다"
+    assert swapped["portfolio"]["nav"] == "1", "override가 반영되지 않았다"
+
+    # 7. 알 수 없는 mode는 거부한다
     try:
         build_ui_snapshot(oms=loop.oms, ledger=loop.ledger, snapshot=final, mode="REAL")
         raise AssertionError("알 수 없는 mode가 통과했다")
@@ -225,4 +251,4 @@ if __name__ == "__main__":
         out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"wrote {out.relative_to(ROOT)}")
 
-    print("ok - UI Read Model 6개 영역 점검 통과")
+    print("ok - UI Read Model 7개 영역 점검 통과 (구간별 출처 유지 포함)")

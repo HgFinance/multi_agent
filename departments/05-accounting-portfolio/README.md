@@ -40,6 +40,9 @@ python departments/05-accounting-portfolio/api/app.py
 python apps/api/main.py
 
 uvicorn app:app --app-dir departments/05-accounting-portfolio/api   # Domain API 실행
+
+docker compose up -d accounting-api        # 컨테이너로 (127.0.0.1:8046, 로컬 전용)
+curl http://127.0.0.1:8046/health
 ```
 
 ## 테스트

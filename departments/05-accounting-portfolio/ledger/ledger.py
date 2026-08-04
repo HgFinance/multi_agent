@@ -58,6 +58,17 @@ ACCOUNT_TYPES = {
 ZERO = Decimal(0)
 
 
+def decimal_str(value: Decimal) -> str:
+    """수 하나에 문자열 하나. 금액을 밖으로 내보내는 모든 곳이 이걸 쓴다.
+
+    DB numeric(30,10)에서 읽은 `20.0000000000`과 방금 계산한 `20`은 같은 수인데
+    str()이 다르다. 그대로 두면 (1) 같은 스냅샷이 다른 content_hash를 갖고
+    (2) 저장소 모드에 따라 API 응답 문자열이 달라진다. 둘 다 실제로 겪은 버그다.
+    """
+    normalized = value.normalize()
+    return f"{normalized:f}"  # normalize()가 만드는 지수 표기(1E+2)를 펴준다
+
+
 class LedgerError(Exception):
     """원장 불변식 위반. 절대 조용히 넘어가지 않는다."""
 
@@ -92,6 +103,9 @@ class Journal:
     reversal_of: UUID | None = None
     created_by_service: str = "svc_ledger"
     trace_id: str = ""
+    # 정정 사유. trace_id에 섞어 넣던 것을 분리했다 - accounting.journals.trace_id는
+    # uuid 컬럼이라 사람이 쓴 사유가 거기 들어가면 저장 자체가 안 된다.
+    reason: str = ""
 
     def __post_init__(self) -> None:
         if not self.lines:
@@ -160,11 +174,12 @@ class Ledger:
             source_event_id=f"{original.source_event_id}:rev",
             effective_at=datetime.now(timezone.utc),
             accounting_date=original.accounting_date,
-            lines=flipped, reversal_of=journal_id, trace_id=reason,
+            lines=flipped, reversal_of=journal_id, reason=reason,
         )
         original.status = "reversed"
-        self.journals.append(rev)
-        self._posted_sources.add((rev.event_type, rev.source_event_id))
+        # post()를 거친다. 저장소를 붙인 하위 클래스(PostgresLedger)가 post()만
+        # 가로채도 반대 분개가 함께 저장되게 하기 위해서다.
+        self.post(rev)
         return rev
 
     # -- 분개 규칙 -----------------------------------------------------------
@@ -225,8 +240,12 @@ class Ledger:
             add(TAX_EXPENSE, debit=fill.tax)
             add(SECURITIES, credit=cost, instrument_id=instrument_id,
                 quantity=-fill.quantity, unit_price=position.average_cost)
+            # 실현손익에도 instrument_id를 단다. 이게 없으면 accounting.positions의
+            # realized_pnl을 종목별로 채울 방법이 없어 0으로 남고, System of Record에
+            # 틀린 0이 들어간다.
             add(REALIZED_PNL, credit=realized if realized > 0 else ZERO,
-                debit=-realized if realized < 0 else ZERO)
+                debit=-realized if realized < 0 else ZERO,
+                instrument_id=instrument_id)
 
         return self.post(self._journal("fill", source, when, lines))
 
