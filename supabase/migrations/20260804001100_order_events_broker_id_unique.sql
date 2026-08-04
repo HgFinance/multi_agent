@@ -1,4 +1,5 @@
 begin;
+-- Migration sequence is after the already-applied 20260804001000 revision.
 
 -- `execution.order_events`의 브로커 이벤트 중복 방지 제약을 고친다.
 --

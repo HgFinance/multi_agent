@@ -1,4 +1,5 @@
 begin;
+-- Migration sequence is after the already-applied 20260804001000 revision.
 
 -- Production Risk/QA read paths: PIT lookups only. No data or state mutation.
 create index if not exists risk_policies_active_pit_idx
