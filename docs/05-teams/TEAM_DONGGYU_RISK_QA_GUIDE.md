@@ -26,10 +26,11 @@ Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](..
 - [x] Risk Trading State 변경/삭제와 QA Corrective Action 종결은 서명된 Service Token의 department/scope/subject/expiry를 검증한다.
 - [x] Risk↔QA Redis Event Bus는 외부 Redis 통합 테스트 `11 passed`로 검증했다(2026-08-05). Redis 항목은 `RUNTIME_VERIFIED`다.
 - [x] 루트 Compose에 `redis`, `risk-api`, `audit-api`, `qa-worker`, `risk-hermes`, `qa-hermes`가 포함되며 `docker compose config --quiet`와 서비스 목록을 검증했다.
-- [ ] Docker 컨테이너 기동/Health, DB 영속화와 전체 Risk↔QA Replay E2E는 아직 실행 검증되지 않았다.
+- [x] `redis`, `risk-api`, `audit-api`, `qa-worker`, `research-api` 컨테이너가 `running`이며 Risk/QA observability endpoint가 응답했다. 추가한 Compose formal healthcheck도 `risk-api`, `audit-api`, `qa-worker` 모두 `healthy`로 확인했다(2026-08-05).
+- [ ] DB 영속화와 전체 Risk↔QA Replay E2E는 아직 완료되지 않았다. rollback형 DB/Event smoke는 통과했지만 실제 Research Packet URL/Case Replay는 미구성이다.
 - [ ] `MODEL-03`, `OPS-01`, 운영 Issuer/JWKS·mTLS·IAM 매핑은 미완료다.
 
-따라서 앞의 세 `[x]`는 `IMPLEMENTED + TEST_VERIFIED`, Redis `[x]`는 Event Bus의 `RUNTIME_VERIFIED`, Compose `[x]`는 정적 구성 검증이다. Docker 기동·Health·DB·Replay까지 완료된 것은 아니며 전체 운영 승인이나 배포 가능을 뜻하지 않는다.
+따라서 앞의 세 `[x]`는 `IMPLEMENTED + TEST_VERIFIED`, Redis `[x]`는 Event Bus의 `RUNTIME_VERIFIED`, Compose/Health `[x]`는 컨테이너 기동·Health 확인이다. 실제 Research Packet Replay와 전역 인증·운영 승인이 남아 있으므로 전체 배포 가능을 뜻하지 않는다.
 
 ---
 

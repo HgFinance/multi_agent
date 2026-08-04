@@ -16,6 +16,17 @@ export type BffFeed = {
 const POLL_INTERVAL_MS = 5_000;
 const BffContext = createContext<BffFeed | null>(null);
 
+function explainBffError(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (message === "Not Found" || message.includes("404")) {
+    return "BFF 경로를 찾지 못했습니다. 저장소 루트에서 FastAPI BFF를 8000 포트로 실행하세요.";
+  }
+  if (message.includes("Failed to fetch") || message.includes("NetworkError")) {
+    return "BFF 연결 대기 중입니다. 저장소 루트에서 FastAPI BFF를 8000 포트로 실행하세요.";
+  }
+  return message;
+}
+
 export async function fetchBffSnapshot(): Promise<TradingSnapshot> {
   const response = await fetch(`${BFF}/ui/snapshot`, {
     cache: "no-store",
@@ -49,7 +60,7 @@ export function BffProvider({ children }: { children: React.ReactNode }) {
       setError("");
       setConnection("connected");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(explainBffError(cause));
       setConnection(snapshotRef.current ? "stale" : "offline");
     }
   }, []);

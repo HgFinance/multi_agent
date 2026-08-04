@@ -2,13 +2,22 @@
 
 import { BFF } from "./readModel";
 
+function explainPortfolioApiError(body: unknown, status: number): string {
+  const detail = typeof body === "object" && body !== null && "detail" in body
+    ? String((body as { detail?: unknown }).detail)
+    : `HTTP ${status}`;
+  if (detail === "Not Found" || status === 404) {
+    return "포트폴리오 BFF를 찾지 못했습니다. FastAPI BFF를 8000 포트로 실행하세요.";
+  }
+  return detail;
+}
+
 export type PortfolioInterviewInput = {
   user_id: string;
   mindset: "SAFETY_FIRST" | "BALANCED" | "RISK_SEEKING";
   experience: "BEGINNER" | "INTERMEDIATE" | "EXPERIENCED";
   investment_horizon_years: number;
   max_drawdown_pct: string;
-  liquidity_need: "HIGH" | "MEDIUM" | "LOW";
   investment_amount: string;
   currency: "KRW" | "USD" | "EUR";
 };
@@ -22,10 +31,7 @@ export async function startPortfolioRecommendation(input: PortfolioInterviewInpu
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = typeof body === "object" && body !== null && "detail" in body
-      ? String((body as { detail?: unknown }).detail)
-      : `HTTP ${response.status}`;
-    throw new Error(detail);
+    throw new Error(explainPortfolioApiError(body, response.status));
   }
   return body as { run_id: string; status: string };
 }
@@ -42,10 +48,7 @@ export async function decidePortfolioRecommendation(
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = typeof body === "object" && body !== null && "detail" in body
-      ? String((body as { detail?: unknown }).detail)
-      : `HTTP ${response.status}`;
-    throw new Error(detail);
+    throw new Error(explainPortfolioApiError(body, response.status));
   }
   return body as { status: string; binding: boolean };
 }

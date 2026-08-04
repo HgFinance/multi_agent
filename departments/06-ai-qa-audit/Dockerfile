@@ -28,6 +28,7 @@ WORKDIR /app
 COPY departments/06-ai-qa-audit ./departments/06-ai-qa-audit
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability
+COPY apps/security ./apps/security
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

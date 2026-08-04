@@ -49,7 +49,6 @@ export default function PortfolioInterviewPanel() {
     experience: "BEGINNER",
     investment_horizon_years: 3,
     max_drawdown_pct: "0.10",
-    liquidity_need: "MEDIUM",
     investment_amount: "1000000",
     currency: "KRW",
   });
@@ -105,11 +104,11 @@ export default function PortfolioInterviewPanel() {
             <h2 id="portfolio-interview-title">사용자에게 맞는 포트폴리오 받기</h2>
           </div>
           <span className={`status-pill ${running ? "working" : runtime?.result ? "done" : "waiting"}`}>
-            {running ? "LANGGRAPH RUNNING" : runtime?.result ? runtime.status : connection.toUpperCase()}
+          {busy ? "요청 중" : running ? "LANGGRAPH RUNNING" : runtime?.result ? runtime.status : connection.toUpperCase()}
           </span>
         </div>
-        <p className="dash-note">처음 주식을 접해도 괜찮습니다. 입력한 투자 성향·경험·기간·손실 감내도·현금화 필요를 기준으로 백엔드 suitability 엔진이 후보를 선별합니다.</p>
-        <form className="portfolio-form" onSubmit={submit}>
+        <p className="dash-note">처음 주식을 접해도 괜찮습니다. 입력한 투자 성향·경험·기간·손실 감내도를 기준으로 백엔드 suitability 엔진이 후보를 선별합니다.</p>
+        <form id="portfolio-interview-form" className="portfolio-form" onSubmit={submit}>
           <label>사용자 식별자<input value={input.user_id} onChange={(event) => setInput({ ...input, user_id: event.target.value })} required /></label>
           <label>투자 성향<select value={input.mindset} onChange={(event) => setInput({ ...input, mindset: event.target.value as PortfolioInterviewInput["mindset"] })}><option value="SAFETY_FIRST">안전 우선</option><option value="BALANCED">균형형</option><option value="RISK_SEEKING">성장·위험 감수</option></select></label>
           <label>투자 경험<select value={input.experience} onChange={(event) => setInput({ ...input, experience: event.target.value as PortfolioInterviewInput["experience"] })}><option value="BEGINNER">처음 접함</option><option value="INTERMEDIATE">어느 정도 경험</option><option value="EXPERIENCED">경험 많음</option></select></label>
@@ -117,8 +116,6 @@ export default function PortfolioInterviewPanel() {
           <label>투자 가능 금액<input inputMode="decimal" min="1" value={input.investment_amount} onChange={(event) => setInput({ ...input, investment_amount: event.target.value })} required /></label>
           <label>통화<select value={input.currency} onChange={(event) => setInput({ ...input, currency: event.target.value as PortfolioInterviewInput["currency"] })}><option value="KRW">KRW · 원화</option><option value="USD">USD · 달러</option><option value="EUR">EUR · 유로</option></select></label>
           <label>감내 가능한 최대 손실률<input type="number" min="1" max="100" step="1" value={Number(input.max_drawdown_pct) * 100} onChange={(event) => setInput({ ...input, max_drawdown_pct: (Number(event.target.value) / 100).toFixed(4) })} required /><small>예: 10 = 최대 -10%</small></label>
-          <label>현금화 필요<select value={input.liquidity_need} onChange={(event) => setInput({ ...input, liquidity_need: event.target.value as PortfolioInterviewInput["liquidity_need"] })}><option value="HIGH">7일 안에 필요</option><option value="MEDIUM">30일 안에 필요</option><option value="LOW">당장 필요 없음</option></select></label>
-          <button className="btn btn-primary" type="submit" disabled={busy || running}>{busy ? "요청 중…" : running ? "직원들이 분석 중…" : "LangGraph 분석 시작"}</button>
         </form>
         {(submitError || error) && <p className="form-error">⚠️ {submitError || error}</p>}
         {runtime?.phase && <p className="runtime-phase"><b>현재 단계</b> {runtime.phase}</p>}

@@ -18,12 +18,13 @@
    (팀 가이드 원칙 5: 회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
 
 실행:
-    uv run --python .venv/Scripts/python.exe uvicorn apps.api.main:app --reload --port 8000
+    DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8000
 자체 점검:
     python apps/api/main.py
 """
 from __future__ import annotations
 
+import os
 import sys
 from decimal import Decimal
 from functools import lru_cache
@@ -54,7 +55,16 @@ app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     # ponytail: 개발용 로컬 Origin 고정. 배포 Origin이 정해지면 환경변수로 뺀다.
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:3002",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -65,6 +75,48 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 
 
+def _integration_status() -> dict[str, dict[str, object]]:
+    """Return configuration presence only; never expose integration secrets."""
+
+    def configured(*names: str) -> bool:
+        return all(os.getenv(name, "").strip() for name in names)
+
+    return {
+        "notion": {
+            "configured": configured("NOTION_TOKEN", "NOTION_BRIEFING_DB"),
+            "label": "Notion 저장",
+            "need": "NOTION_TOKEN / NOTION_BRIEFING_DB 미설정",
+        },
+        "discord": {
+            "configured": configured("DISCORD_WEBHOOK_URL"),
+            "label": "Discord 전송",
+            "need": "DISCORD_WEBHOOK_URL 미설정",
+        },
+        "instagram": {
+            "configured": False,
+            "label": "Instagram",
+            "need": "OAuth 연동 대기",
+        },
+        "gmail": {
+            "configured": False,
+            "label": "Gmail",
+            "need": "OAuth 연동 대기",
+        },
+        "finance": {
+            "configured": False,
+            "label": "재무 파일",
+            "need": "자료 업로드 대기",
+        },
+    }
+
+
+@app.get("/ui/integrations")
+def ui_integrations() -> dict[str, dict[str, object]]:
+    """Read-only integration readiness projection for the operator UI."""
+
+    return _integration_status()
+
+
 class PortfolioRecommendationRequest(BaseModel):
     """User suitability inputs; this route never accepts orders or credentials."""
 
@@ -73,7 +125,7 @@ class PortfolioRecommendationRequest(BaseModel):
     experience: str
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: str = Field(pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$")
-    liquidity_need: str
+    liquidity_need: str = "MEDIUM"
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     as_of: str | None = None

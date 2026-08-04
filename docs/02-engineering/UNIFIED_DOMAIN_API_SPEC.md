@@ -356,8 +356,9 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 사용자 적합성 입력은 `POST /ui/portfolio-recommendations`로 전달한다. BFF는 기존
 `portfolio-recommendation-full` LangGraph를 비동기로 실행하고 `run_id`를 반환한다.
 
-- 입력은 `mindset`, `experience`, `investment_horizon_years`, `max_drawdown_pct`, `liquidity_need`,
+- 입력은 `mindset`, `experience`, `investment_horizon_years`, `max_drawdown_pct`,
   `investment_amount`, `currency`를 포함한다. 목표 금액은 서버가 결정론적으로 계산한다.
+  `liquidity_need`는 선택적 내부 적합성 조건이며 생략하면 `MEDIUM`으로 정규화한다.
 - 결과 조회는 `GET /ui/portfolio-recommendations/{run_id}` 또는 `GET /ui/snapshot`의
   `operations.runtime` projection을 사용한다.
 - 추천 결과가 `MATCHED`이고 pipeline이 `COMPLETED`인 경우 `POST
@@ -369,6 +370,13 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
   직원 이동·착석 작업·대화를 시작하지 않는다.
 - 부서 간 handoff는 `operations.runtime.active_handoff`로 노출하며 producer/consumer
   부서장만 참여한다. Worker의 완료 요약은 줄바꿈을 제거한 단일 문장으로 `messages`에 기록한다.
+
+### 10.3 BFF 연동 상태
+
+`GET /ui/integrations`는 Notion·Discord·향후 외부 연동의 설정 준비 상태만 반환한다.
+토큰·Webhook URL·파일 경로 등 비밀값은 응답에 포함하지 않는다. 브라우저는 이 Projection을
+사용해 연결됨·미설정·OAuth 대기 상태를 표시하며, 외부 발행은 별도 Worker의 명시적 사용자
+동작으로 제한한다.
 
 ## 11. 연계 문서
 

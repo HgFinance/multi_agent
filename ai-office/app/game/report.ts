@@ -3,6 +3,7 @@ import type { Snapshot } from "./sim";
 import { BLOCK_NEED, DEPT_BRIEF } from "./staff";
 import { roomOf } from "./world";
 import { COMPANY } from "../../company.config";
+import { BFF } from "../ops/readModel";
 
 export type DayReport = {
   title: string;
@@ -79,7 +80,7 @@ export async function publish(report: DayReport): Promise<PublishResult> {
 }
 
 export async function fetchIntegrations(): Promise<IntegrationStatus> {
-  const response = await fetch("/api/integrations");
+  const response = await fetch(`${BFF}/ui/integrations`, { cache: "no-store" });
   if (!response.ok) throw new Error("연동 상태 조회 실패");
   return (await response.json()) as IntegrationStatus;
 }

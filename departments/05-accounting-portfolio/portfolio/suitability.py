@@ -93,7 +93,7 @@ class InvestorProfile(BaseModel):
     experience: ExperienceLevel
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: Decimal = Field(gt=0, le=Decimal("1"))
-    liquidity_need: LiquidityNeed
+    liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
     investment_amount: Decimal = Field(default=Decimal("1000000"), gt=0)
     currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
     as_of: datetime

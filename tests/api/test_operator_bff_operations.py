@@ -47,6 +47,15 @@ class OperatorBffOperationsTest(unittest.TestCase):
         self.assertEqual(body["trading"]["orders"][0]["state"], "FILLED")
         self.assertEqual(body["sources"]["portfolio"], "scripted-loop")
 
+    def test_integration_projection_exposes_readiness_without_secrets(self) -> None:
+        response = self.client.get("/ui/integrations")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(set(body), {"notion", "discord", "instagram", "gmail", "finance"})
+        self.assertFalse(body["notion"]["configured"])
+        self.assertNotIn("TOKEN", body["notion"].get("value", ""))
+        self.assertNotIn("WEBHOOK", body["discord"].get("value", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

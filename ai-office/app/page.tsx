@@ -169,14 +169,15 @@ export default function Home() {
         () => document.getElementById("ceo-console")?.scrollIntoView({ behavior: "smooth", block: "center" }),
         60,
       );
-    },
-    [engine],
+  },
+  [engine],
   );
 
   const start = () => {
     setView("live");
-    document.getElementById("portfolio-interview")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    showToast("사용자 적합성 입력을 제출하면 실제 LangGraph가 실행됩니다.");
+    const form = document.getElementById("portfolio-interview-form") as HTMLFormElement | null;
+    form?.scrollIntoView({ behavior: "smooth", block: "center" });
+    form?.requestSubmit();
   };
 
   const approve = () => {
@@ -204,7 +205,7 @@ export default function Home() {
   const filteredTeams = filter === "전체" ? teams : teams.filter((team) => team.status === filter);
   const selected = selectedId ? engine.agentById.get(selectedId) ?? null : null;
   const todo = snap.approvalPending ? 1 : 0;
-  const onDuty = engine.agents.filter((a) => a.status !== "출근 전").length;
+  const onDuty = engine.agents.filter((a) => a.status === "업무 중").length;
 
   return (
     <main className="page-shell">
@@ -261,7 +262,6 @@ export default function Home() {
             setFilter={setFilter}
             snap={snap}
             agents={engine.agents}
-            onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
             integrations={integrations}
@@ -343,7 +343,7 @@ function LiveView({
 
       <section className="live-bar">
         <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-{snap.running ? "실제 Worker가 분석 중…" : snap.dayComplete ? "새 프로필로 다시 분석" : "사용자 입력으로 분석 시작"}
+          {snap.running ? "실제 Worker가 분석 중…" : "사용자 입력으로 분석 시작"}
         </button>
         <button className="btn btn-ghost" onClick={() => engine.togglePause()}>
           {snap.paused ? "▶ 재생" : "⏸ 일시정지"}
@@ -708,7 +708,6 @@ function DashboardView({
   setFilter,
   snap,
   agents,
-  onStart,
   onApprove,
   onSelect,
   integrations,
@@ -719,7 +718,6 @@ function DashboardView({
   setFilter: (value: "전체" | DeptStatus) => void;
   snap: Snapshot;
   agents: readonly Agent[];
-  onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
   integrations: IntegrationStatus | null;
@@ -773,9 +771,6 @@ function DashboardView({
  <p>Worker는 context를 만들고, 결정은 권한을 가진 결정론적 Gate와 대표님이 맡아요. {CANONICAL_DEPARTMENT_COUNT}개 부서 {CANONICAL_WORKER_COUNT}명의 흐름을 Projection으로 보여줘요.</p>
           </div>
           <div className="hero-actions">
-            <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-{snap.running ? "실제 Worker가 분석 중…" : "사용자 입력으로 분석 시작"}
-            </button>
             <span className="trust-copy">실제 전송·게시·결제는 대표 승인 후 진행해요</span>
           </div>
         </div>

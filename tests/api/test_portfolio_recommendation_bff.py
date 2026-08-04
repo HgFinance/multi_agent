@@ -26,7 +26,6 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 "experience": "BEGINNER",
                 "investment_horizon_years": 3,
                 "max_drawdown_pct": "0.10",
-                "liquidity_need": "MEDIUM",
                 "investment_amount": "1000000",
                 "currency": "KRW",
             },
