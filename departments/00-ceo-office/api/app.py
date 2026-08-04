@@ -43,9 +43,15 @@ import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# 저장소 루트의 .env를 읽는다(find_dotenv()가 이 파일 위치부터 상위로 탐색 - 실행
+# 위치(cwd)나 uvicorn --app-dir 여부와 무관). 이미 설정된 프로세스 환경변수는 덮어쓰지
+# 않는다(override=False 기본값) - 배포 환경 값이 항상 우선한다.
+load_dotenv()
 
 _BASE = Path(__file__).resolve().parent.parent
 _MANDATE_DIR = _BASE / "src" / "mandate"
@@ -67,6 +73,7 @@ from approval import (
     ApprovalExpiredError,
     ApprovalRecord,
     InMemoryApprovalRepository,
+    MissingActorUserError,
     ObjectType,
     OwnerApprovalNotSupportedError,
     RequiredRole,
@@ -140,6 +147,13 @@ from escalation import (
 )
 from escalation import (
     transition as transition_escalation,
+)
+from change_workflow import (
+    CaseAlreadyResolvedError,
+    ChangeRequestResult,
+    MandateChangeWorkflow,
+    NotAMandateChangeCaseError,
+    ReviewApprovalMissingError,
 )
 from lifecycle import (
     ActivationResult,
@@ -246,6 +260,43 @@ class ActivateRequest(BaseModel):
     approval: ApprovalIn | None = None
 
 
+class SubmitChangeRequestIn(BaseModel):
+    """POST /governance/v1/mandates/{mandate_id}/change-requests
+    (HITL §5.1, change_workflow.MandateChangeWorkflow.submit()).
+
+    `created_by`(Case 감사 표지, 자유 텍스트)와 `version_created_by`
+    (mandate_versions.created_by, governance.user_profiles를 가리키는 uuid, nullable)는
+    컬럼 타입이 달라 분리한다 - change_workflow.submit() 문서 참고.
+    """
+
+    fund_id: str
+    policy: MandatePolicy
+    objective_text: str = Field(min_length=1)
+    objective: dict
+    effective_from: datetime
+    created_by: str = Field(min_length=1)
+    trace_id: str
+    now: datetime
+    previous_policy: MandatePolicy | None = None
+    priority: int = Field(default=50, ge=0, le=100)
+    review_expires_at: datetime | None = None
+    version_created_by: str | None = None
+    fund_base_currency: str | None = Field(
+        default=None,
+        description="ProposeVersionRequest.fund_base_currency와 동일한 In-Memory 데모용 seed. "
+                    "Postgres Repository를 쓸 때는 무시한다.",
+    )
+
+
+class AdvanceCaseIn(BaseModel):
+    """POST /governance/v1/cases/{case_id}/advance
+    (change_workflow.MandateChangeWorkflow.advance()). 재개(resume)가 아니라 매번 새로
+    판단하는 짧은 호출이다 - Risk/QA/사용자 승인이 결정될 때마다 다시 부른다.
+    """
+
+    at: datetime
+
+
 class NotificationRequestIn(BaseModel):
     fund_id: str
     event_type: str
@@ -287,10 +338,15 @@ class ApprovalDecisionIn(BaseModel):
     actor_department는 호출자가 자기 부서를 밝히는 값이고, 이 API는 그것이 required_role과
     맞는지만 결정론적으로 검사한다. 실제 신원 증명(mTLS/JWT 등)은 Platform 계층 몫이며
     아직 없다 - 그 전까지 이 검사는 '실수 방지'이고 '침입 방지'가 아니다(투명하게 남긴다).
+
+    required_role=USER(HITL 사용자 승인, 2026-08-04)는 부서가 아니라 사람이 결정하는
+    역할이라 actor_department가 필요 없다 - 대신 actor_user_id가 필수다. 그래서 이 필드는
+    선택이고, 어느 쪽이 필요한지는 approval.py의 assert_can_decide()가 required_role을
+    보고 판단한다(400/403으로 거절).
     """
 
     decision: ApprovalDecision
-    actor_department: str = Field(min_length=1)
+    actor_department: str | None = None
     at: datetime
     actor_agent_id: str | None = Field(
         default=None,
@@ -306,7 +362,7 @@ class ApprovalDecisionIn(BaseModel):
 
 
 class ApprovalRevokeIn(BaseModel):
-    actor_department: str = Field(min_length=1)
+    actor_department: str | None = None
     at: datetime
     reason: str = Field(min_length=1)
     actor_agent_id: str | None = None
@@ -485,6 +541,14 @@ if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
 else:
     committee_repo = InMemoryCommitteeRepository()
 
+# HITL Mandate 변경 워크플로 (change_workflow.py) - 위 5개 Repository/Service를 그대로
+# 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 DB다"라는 그 모듈의
+# 설계상, 이 오케스트레이터가 스스로 상태를 들고 있지 않기 때문이다.
+mandate_change_workflow = MandateChangeWorkflow(
+    version_repo=_mandate_repo, version_service=mandate_service,
+    activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
+)
+
 
 # --- F24 Notification Event Consumer (governance_events/worker.py가 이 함수들을 쓴다) --------
 #
@@ -658,6 +722,13 @@ def _on_owner_approval_unsupported(request, exc: OwnerApprovalNotSupportedError)
     })
 
 
+@app.exception_handler(MissingActorUserError)
+def _on_missing_actor_user(request, exc: MissingActorUserError):
+    return JSONResponse(status_code=400, content={
+        "error_code": "MissingActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(IllegalCaseTransition)
 def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
     return JSONResponse(status_code=409, content={
@@ -728,6 +799,30 @@ def _on_value_error(request, exc: ValueError):
 def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     return JSONResponse(status_code=409, content={
         "error_code": "MANDATE_PERSISTENCE_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# HITL Mandate 변경 워크플로(change_workflow.py) 예외 -> HTTP.
+#   종료된 Case 재advance 409 / MANDATE_CHANGE 아닌·없는 case_id 404 /
+#   submit()이 만들었어야 할 RISK·QA 승인 행 누락(데이터 정합성 문제) 500
+@app.exception_handler(CaseAlreadyResolvedError)
+def _on_case_already_resolved(request, exc: CaseAlreadyResolvedError):
+    return JSONResponse(status_code=409, content={
+        "error_code": "CaseAlreadyResolvedError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(NotAMandateChangeCaseError)
+def _on_not_a_mandate_change_case(request, exc: NotAMandateChangeCaseError):
+    return JSONResponse(status_code=404, content={
+        "error_code": "NotAMandateChangeCaseError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(ReviewApprovalMissingError)
+def _on_review_approval_missing(request, exc: ReviewApprovalMissingError):
+    return JSONResponse(status_code=500, content={
+        "error_code": "ReviewApprovalMissingError", "message": str(exc), "detail": {}, "trace_id": None,
     })
 
 
@@ -807,6 +902,73 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
 def get_mandate_current(mandate_id: str):
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     return {"mandate_id": mandate_id, "current_version": version, "status": status}
+
+
+# --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
+#
+# TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.1절 7단계(제출 -> Draft Version -> Risk/QA 검토 ->
+# 사용자 승인 -> 활성화)를 오케스트레이션한다. propose_version/activate_version(위 2.1)을
+# 대체하지 않는다 - 저 둘은 여전히 "Version 하나만 딱 만들고/활성화하고 끝내고 싶을 때" 쓰는
+# 저수준 경로이고, 여긴 그 사이의 Risk/QA/사용자 승인 배선까지 묶어서 처리하는 상위 경로다.
+
+
+def _change_request_dict(r: ChangeRequestResult) -> dict:
+    return {
+        "stage": r.stage.value, "mandate_id": r.mandate_id, "version": r.version,
+        "direction": r.direction.value, "case_id": r.case_id, "detail": r.detail,
+    }
+
+
+@app.post("/governance/v1/mandates/{mandate_id}/change-requests")
+def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
+    """5.1 1단계 — Draft Version 생성 + (필요 시) Risk/QA 동시 승인 요청.
+
+    TIGHTEN/NEUTRAL은 Case 없이 즉시 적용되고 stage=FAST_APPLIED로 끝난다. LOOSEN·최초
+    활성화는 Case를 열고 stage=AWAITING_REVIEW로 돌아온다 - 이후 진행은 담당자가
+    /approvals/{id}/decide로 결정할 때마다 POST .../cases/{case_id}/advance를 다시
+    불러야 한다(재개가 아니라 매번 새로 판단하는 짧은 호출).
+    """
+    if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
+
+    result = mandate_change_workflow.submit(
+        mandate_id=mandate_id, fund_id=body.fund_id, policy=body.policy,
+        objective_text=body.objective_text, objective=body.objective,
+        effective_from=body.effective_from, created_by=body.created_by,
+        trace_id=body.trace_id, now=body.now, previous_policy=body.previous_policy,
+        priority=body.priority, review_expires_at=body.review_expires_at,
+        version_created_by=body.version_created_by,
+    )
+    _publish_governance_event(
+        event_type="governance.mandate.changed.v1", trace_id=body.trace_id,
+        payload={
+            "fund_id": mandate_id, "scope_key": f"mandate:{mandate_id}",
+            "action": result.stage.value, "mandate_id": mandate_id, "version": result.version,
+            "direction": result.direction.value, "case_id": result.case_id,
+        },
+    )
+    return _change_request_dict(result)
+
+
+@app.post("/governance/v1/cases/{case_id}/advance")
+def advance_change_request(case_id: str, body: AdvanceCaseIn):
+    """5.1 2단계 — 대기 중인 승인(Risk/QA/사용자) 상태를 다시 읽어 다음 단계로 넘긴다.
+
+    상태 변화가 없으면(승인이 아직 PENDING이면) 조회만 하고 아무것도 쓰지 않는다.
+    RESOLVED/CANCELLED Case에 다시 부르면 409(CaseAlreadyResolvedError).
+    """
+    case = case_repo.get(case_id)
+    result = mandate_change_workflow.advance(case_id, at=body.at)
+    _publish_governance_event(
+        event_type="governance.mandate.changed.v1",
+        trace_id=case.trace_id if case is not None else str(uuid.uuid4()),
+        payload={
+            "fund_id": result.mandate_id, "scope_key": f"mandate:{result.mandate_id}",
+            "action": result.stage.value, "mandate_id": result.mandate_id,
+            "version": result.version, "direction": result.direction.value, "case_id": case_id,
+        },
+    )
+    return _change_request_dict(result)
 
 
 # --- 4. reporting-api -------------------------------------------------------------
@@ -1268,6 +1430,34 @@ def create_notification(body: NotificationRequestIn):
 if __name__ == "__main__":
     from fastapi.testclient import TestClient
 
+    # 이 자체 점검은 "m1"/"m2"/"m3" 같은 합성 mandate_id로 In-Memory 계약을 검증한다 -
+    # DATABASE_URL이 .env에 있어도(위 load_dotenv()) 실 DB로 새면 uuid 타입 에러로 즉시
+    # 깨진다(합성 ID가 유효한 uuid가 아니라서다). 실 DB 왕복 검증은 change_workflow.py/
+    # postgres_repository.py의 별도 실 DB 구간이 실제 uuid로 담당하므로, 여기서는 자체
+    # 점검 목적에 맞게 In-Memory Repository로 강제 전환한다.
+    if not isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        _mandate_repo = InMemoryMandateVersionRepository()
+        mandate_service = MandateVersionService(_mandate_repo)
+        activation_service = MandateActivationService(_mandate_repo)
+    if not isinstance(report_repo, InMemoryReportRunRepository):
+        report_repo = InMemoryReportRunRepository()
+        report_assembler = DailyReportAssembler(report_repo)
+    if not isinstance(notification_repo, InMemoryNotificationRepository):
+        notification_repo = InMemoryNotificationRepository()
+        notification_service = NotificationService(notification_repo)
+    if not isinstance(approval_repo, InMemoryApprovalRepository):
+        approval_repo = InMemoryApprovalRepository()
+    if not isinstance(case_repo, InMemoryCaseRepository):
+        case_repo = InMemoryCaseRepository()
+    if not isinstance(escalation_repo, InMemoryEscalationRepository):
+        escalation_repo = InMemoryEscalationRepository()
+    if not isinstance(committee_repo, InMemoryCommitteeRepository):
+        committee_repo = InMemoryCommitteeRepository()
+    mandate_change_workflow = MandateChangeWorkflow(
+        version_repo=_mandate_repo, version_service=mandate_service,
+        activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
+    )
+
     client = TestClient(app)
 
     def _policy(**over) -> dict:
@@ -1429,6 +1619,23 @@ if __name__ == "__main__":
         "object_type": "AGENT_PROFILE_VERSION", "object_id": "pv-1",
     })
     assert lst.status_code == 200 and len(lst.json()["approvals"]) == 1, lst.text
+
+    # 15b. required_role=USER(HITL 사용자 승인) - actor_department 없이 actor_user_id만으로
+    # 결정된다. 없으면 400.
+    a5 = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-user-1",
+        "required_role": "USER", "fund_id": "f1",
+    })
+    assert a5.status_code == 200, a5.text
+    d_no_user = client.post(f"/governance/v1/approvals/{a5.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now,
+    })
+    assert d_no_user.status_code == 400, d_no_user.text
+    d_user = client.post(f"/governance/v1/approvals/{a5.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "00000000-0000-4000-8000-00000000cec0",
+    })
+    assert d_user.status_code == 200 and d_user.json()["decision"] == "APPROVED", d_user.text
+    assert d_user.json()["actor_user_id"] == "00000000-0000-4000-8000-00000000cec0"
 
     # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
     c1 = client.post("/governance/v1/cases", json={
@@ -1603,5 +1810,59 @@ if __name__ == "__main__":
     assert detail.status_code == 200 and len(detail.json()["votes"]) == 2, detail.text
     assert client.get("/governance/v1/committee/sessions/00000000-0000-4000-8000-000000000000").status_code == 404
 
-    print("ok - CEO Office Domain API 30개 시나리오 점검 통과 "
-          "(승인 8개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 포함)")
+    # 31. HITL 변경 요청 — 최초 활성화(UC-1: Risk+QA 동시 승인 -> 사용자 승인 -> 활성화) API 경로.
+    r31 = client.post("/governance/v1/mandates/m3/change-requests", json={
+        "fund_id": "f1", "policy": _policy(), "objective_text": "최초 활성화",
+        "objective": {}, "effective_from": now, "created_by": "selfcheck-api",
+        "trace_id": "trace-m3", "now": now, "fund_base_currency": "KRW",
+    })
+    assert r31.status_code == 200 and r31.json()["stage"] == "AWAITING_REVIEW", r31.text
+    case_id_m3 = r31.json()["case_id"]
+    version_id_m3 = _mandate_repo.get_mandate_version_id("m3", 1)
+    for role, dept in (("RISK", "risk-management"), ("QA", "qa-department")):
+        pending = client.get("/governance/v1/approvals", params={
+            "object_type": "MANDATE_VERSION", "object_id": version_id_m3,
+        }).json()["approvals"]
+        target = next(a for a in pending if a["required_role"] == role)
+        d = client.post(f"/governance/v1/approvals/{target['approval_id']}/decide", json={
+            "decision": "APPROVED", "actor_department": dept, "at": now,
+        })
+        assert d.status_code == 200, d.text
+    r32 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
+    assert r32.status_code == 200 and r32.json()["stage"] == "AWAITING_USER_APPROVAL", r32.text
+    user_pending_m3 = client.get("/governance/v1/approvals", params={
+        "object_type": "MANDATE_VERSION", "object_id": version_id_m3,
+    }).json()["approvals"]
+    user_approval_id_m3 = next(a["approval_id"] for a in user_pending_m3 if a["required_role"] == "USER")
+    du = client.post(f"/governance/v1/approvals/{user_approval_id_m3}/decide", json={
+        "decision": "APPROVED", "actor_user_id": "u1", "at": now,
+    })
+    assert du.status_code == 200, du.text
+    r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
+    assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
+    assert client.get("/governance/v1/mandates/m3/current").json() == {
+        "mandate_id": "m3", "current_version": 1, "status": "ACTIVE",
+    }
+
+    # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
+    # v1의 effective_to가 v1의 effective_from(now)보다 뒤여야 한다(DDL check) - 같은 시각을
+    # 재사용하면 안 된다(change_workflow.py 자체 점검에서 겪은 것과 같은 함정).
+    now_v2 = "2026-08-02T01:00:00+00:00"
+    r34 = client.post("/governance/v1/mandates/m3/change-requests", json={
+        "fund_id": "f1", "policy": _policy(risk={"max_gross_exposure": "0.5"}),
+        "objective_text": "한도 축소", "objective": {}, "effective_from": now_v2,
+        "created_by": "selfcheck-api", "trace_id": "trace-m3-v2", "now": now_v2,
+        "previous_policy": _policy(),
+    })
+    assert r34.status_code == 200, r34.text
+    assert r34.json()["stage"] == "FAST_APPLIED" and r34.json()["case_id"] is None, r34.text
+    assert client.get("/governance/v1/mandates/m3/current").json()["current_version"] == 2
+
+    # 33. 종료된 Case(위 31에서 RESOLVED) 재advance -> 409 CaseAlreadyResolvedError.
+    r35 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
+    assert r35.status_code == 409 and r35.json()["error_code"] == "CaseAlreadyResolvedError", r35.text
+
+    print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
+
+    print("ok - CEO Office Domain API 34개 시나리오 점검 통과 "
+          "(승인 9개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 + HITL 변경요청 3개 포함)")

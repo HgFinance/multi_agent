@@ -162,6 +162,21 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get_mandate_version_id(self, mandate_id: str, version: int) -> str | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select mandate_version_id from governance.mandate_versions "
+                    "where mandate_id = %s and version = %s",
+                    (mandate_id, version),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return str(row[0]) if row else None
+        finally:
+            self._pool.putconn(conn)
+
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 
     def insert(self, row: MandateVersionRow) -> None:
@@ -306,6 +321,10 @@ if __name__ == "__main__":
 
     print("ok - import 확인 (psycopg2 lazy load)")
 
+    from dotenv import load_dotenv
+
+    load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
+
     dsn = os.environ.get("GOVERNANCE_WORKFORCE_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL 미설정 - 조회 경로 실 DB 검증은 건너뛴다")
@@ -440,6 +459,14 @@ if __name__ == "__main__":
             assert a2.activated is True and a2.decision.approved_by is None  # 자동 적용
             assert repo.get_mandate_current(mandate_id) == (2, "ACTIVE")
             print("ok - v2 제안+자동 활성화(TIGHTEN) (실 DB) 통과 - set_effective_to 확인")
+
+            # 4b) get_mandate_version_id - HITL(2026-08-04)이 governance.approvals.object_id
+            # 로 쓸 실제 uuid PK. 존재하는 (mandate_id, version)은 uuid, 없는 조합은 None.
+            v1_id = repo.get_mandate_version_id(mandate_id, 1)
+            v2_id = repo.get_mandate_version_id(mandate_id, 2)
+            assert v1_id is not None and v2_id is not None and v1_id != v2_id
+            assert repo.get_mandate_version_id(mandate_id, 99) is None
+            print(f"ok - get_mandate_version_id (실 DB) 통과 (v1={v1_id[:8]}..., v2={v2_id[:8]}...)")
 
             # 5) DB에서 직접 확인 - v1이 실제로 종료됐는지, Decision이 2건 쌓였는지.
             conn = repo._pool.getconn()

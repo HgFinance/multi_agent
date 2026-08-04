@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import os
 
+from dotenv import load_dotenv
 from openai import OpenAI
+
+load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
 
 BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://172.31.99.238:11434/v1")
 MODEL = os.environ.get("OLLAMA_MODEL", "agent-ceo")

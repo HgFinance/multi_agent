@@ -14,6 +14,10 @@ import json
 import os
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
+
 
 def md_cell(value: Any) -> str:
     """Render one value safely inside a Markdown table cell."""

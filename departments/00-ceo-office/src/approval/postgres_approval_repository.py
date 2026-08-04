@@ -200,6 +200,10 @@ if __name__ == "__main__":
 
     print("ok - import 확인 (psycopg2 lazy load)")
 
+    from dotenv import load_dotenv
+
+    load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
+
     dsn = os.environ.get("GOVERNANCE_WORKFORCE_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL 미설정 - 왕복 검증은 건너뛴다")

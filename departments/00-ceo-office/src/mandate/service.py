@@ -248,6 +248,17 @@ class MandateVersionRepository:
         """
         raise NotImplementedError
 
+    def get_mandate_version_id(self, mandate_id: str, version: int) -> str | None:
+        """(mandate_id, version) -> mandate_versions.mandate_version_id (자연키 -> PK).
+
+        HITL(2026-08-04): governance.approvals.object_id는 uuid 한 개 칸이라 Mandate
+        Version을 가리키려면 이 PK가 필요하다 - record_decision()이 내부적으로 이미
+        하던 조회(자연키 -> mandate_version_id)를 change_workflow.py가 쓸 수 있게
+        공개 메서드로 뺀 것뿐이다. 존재하지 않으면 None(예외 아님 - 호출자가 404로
+        번역할 수 있게 판단을 미룬다).
+        """
+        raise NotImplementedError
+
 
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
@@ -312,6 +323,15 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
 
     def decisions_for(self, mandate_id: str) -> list[MandateDecisionRow]:
         return [d for d in self._decisions if d.mandate_id == mandate_id]
+
+    def get_mandate_version_id(self, mandate_id: str, version: int) -> str | None:
+        """In-Memory에는 실제 uuid PK가 없다 - MandateVersionRow가 그 칸을 안 갖고
+        있어서다(자연키(mandate_id, version)로만 관리). 존재 여부만 자연키로 확인하고,
+        있으면 결정적 합성 ID(진짜 uuid 아님, 조회 키로만 씀)를 돌려준다 - Postgres
+        구현과 형태만 맞추면 되는 테스트·개발 용도라 실제 uuid 포맷을 흉내 내지 않는다."""
+        if self.get(mandate_id, version) is None:
+            return None
+        return f"inmemory:{mandate_id}:{version}"
 
 
 @dataclass(frozen=True)

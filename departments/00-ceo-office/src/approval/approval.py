@@ -23,6 +23,12 @@
   4. **`unique(object_type, object_id, required_role)`가 DDL 제약이다.** 같은 대상·같은 역할의
      승인은 영구히 한 건이며, 거절된 뒤 재요청하면 그 거절된 건이 그대로 조회된다. 이건 스키마가
      정한 계약이므로 애플리케이션에서 우회하지 않는다.
+  5. **`required_role="USER"`는 OWNER와 다른 종류의 미검증이다.** OWNER는 "소유 부서"를
+     검증할 방법이 없어 완전히 막지만(fail-closed 501), USER는 애초에 부서가 아니라 사람이
+     결정하는 역할이라 부서 매칭 자체가 성립하지 않는다 — 그래서 부서 대신 actor_user_id가
+     명시됐는지만 요구한다(HITL Mandate 변경의 "사용자 승인" 단계, 2026-08-04). 그 사람이
+     실제 Fund 승인 권한자인지는 아직 검증 못한다(governance.fund_memberships 0건) - 이
+     한계를 감춘 채 통과시키지 않고 결정 기록에 그대로 남긴다.
 
 부서 식별자는 **Hermes Profile 이름**을 쓴다 (`ceo-agent`, `risk-management`, `qa-department` 등).
 2026-08-04에 확정됐다 — 그 전에는 API 스펙이 대문자 표기(`RISK`/`QA`/`AGENT-WORKFORCE`)를
@@ -59,6 +65,7 @@ class RequiredRole(str, Enum):
     RISK = "RISK"
     QA = "QA"
     OWNER = "OWNER"
+    USER = "USER"
 
 
 class UnauthorizedDeciderError(Exception):
@@ -67,6 +74,19 @@ class UnauthorizedDeciderError(Exception):
 
 class OwnerApprovalNotSupportedError(Exception):
     """required_role=OWNER의 소유 부서 검증 경로가 아직 없다 (불변식 3)."""
+
+
+class MissingActorUserError(Exception):
+    """required_role=USER 결정에 actor_user_id가 없다 (불변식 5).
+
+    USER는 OWNER와 다르다 - OWNER는 "이 대상을 소유한 부서"를 검증할 방법이 없어
+    fail-closed(501)로 완전히 막지만, USER는 애초에 부서 개념이 아니라 사람이 결정하는
+    역할이라 부서 매칭 자체가 성립하지 않는다. 그래서 부서 대신 "누가"(actor_user_id)가
+    명시됐는지만 요구한다 - 그 사람이 정말 이 Fund의 승인 권한자인지(governance.
+    fund_memberships)는 아직 검증하지 않는다(2026-08-04 실측: fund_memberships 0건).
+    검증 없는 신원 확인은 fail-open이 아니라 "누구인지는 반드시 밝혀야 결정할 수 있다"는
+    최소 방어선이다 - 조용히 비워두고 통과시키지 않는다.
+    """
 
 
 class ApprovalExpiredError(Exception):
@@ -152,12 +172,29 @@ def request_approval(
     )
 
 
-def assert_can_decide(required_role: RequiredRole, actor_department: str) -> None:
-    """불변식 2·3 — 이 부서가 이 역할의 결정을 내릴 수 있는지 검증한다."""
+def assert_can_decide(
+    required_role: RequiredRole, actor_department: str | None, *, actor_user_id: str | None = None
+) -> None:
+    """불변식 2·3·5 — 이 역할의 결정을 지금 내릴 수 있는지 검증한다.
+
+    USER는 부서 검증이 아니라 신원 명시(actor_user_id) 요구로 대체한다 - 사람이 결정하는
+    역할이라 department 매칭이 애초에 성립하지 않는다(불변식 5).
+    """
     if required_role is RequiredRole.OWNER:
         raise OwnerApprovalNotSupportedError(
             "required_role=OWNER의 결정은 아직 지원하지 않는다 - object_type/object_id의 "
             "소유 부서를 governance.approvals만으로 검증할 수 없어 fail-closed로 막는다"
+        )
+    if required_role is RequiredRole.USER:
+        if not actor_user_id:
+            raise MissingActorUserError(
+                "required_role=USER 결정에는 actor_user_id가 필요하다 - 부서가 아니라 "
+                "사람이 결정하는 역할이라 누가 결정했는지 명시해야 한다"
+            )
+        return
+    if not actor_department:
+        raise UnauthorizedDeciderError(
+            f"required_role={required_role.value} 결정에는 actor_department가 필요하다"
         )
     allowed = _ROLE_DECIDERS[required_role]
     if normalize_department(actor_department) not in allowed:
@@ -167,12 +204,21 @@ def assert_can_decide(required_role: RequiredRole, actor_department: str) -> Non
         )
 
 
+def _decider_conditions(
+    required_role: RequiredRole, actor_department: str | None, actor_user_id: str | None
+) -> dict:
+    """conditions["_decider"]에 남길 결정 주체 표기 - USER는 부서가 아니라 사람이다."""
+    if required_role is RequiredRole.USER:
+        return {"user_id": actor_user_id}
+    return {"department": normalize_department(actor_department)}
+
+
 def decide(
     approval: ApprovalRecord,
     *,
     decision: ApprovalDecision,
-    actor_department: str,
     at: datetime,
+    actor_department: str | None = None,
     actor_agent_id: str | None = None,
     actor_user_id: str | None = None,
     conditions: dict | None = None,
@@ -198,7 +244,7 @@ def decide(
             f"(요청: {decision.value}). EXPIRED는 시간이, REVOKED는 revoke()가 만든다"
         )
 
-    assert_can_decide(approval.required_role, actor_department)
+    assert_can_decide(approval.required_role, actor_department, actor_user_id=actor_user_id)
 
     if approval.decision is not ApprovalDecision.PENDING:
         raise AlreadyDecidedError(
@@ -211,7 +257,7 @@ def decide(
         )
 
     merged_conditions = dict(conditions if conditions is not None else (approval.conditions or {}))
-    merged_conditions["_decider"] = {"department": normalize_department(actor_department)}
+    merged_conditions["_decider"] = _decider_conditions(approval.required_role, actor_department, actor_user_id)
 
     return replace(
         approval, decision=decision, decided_at=at,
@@ -224,22 +270,22 @@ def decide(
 def revoke(
     approval: ApprovalRecord,
     *,
-    actor_department: str,
     at: datetime,
     reason: str,
+    actor_department: str | None = None,
     actor_agent_id: str | None = None,
     actor_user_id: str | None = None,
 ) -> ApprovalRecord:
     """이미 내준 승인을 철회한다. APPROVED만 REVOKED로 갈 수 있다."""
     if not reason.strip():
         raise ValueError("철회에는 사유가 필요하다")
-    assert_can_decide(approval.required_role, actor_department)
+    assert_can_decide(approval.required_role, actor_department, actor_user_id=actor_user_id)
     if approval.decision is not ApprovalDecision.APPROVED:
         raise AlreadyDecidedError(
             f"APPROVED만 철회할 수 있다 (현재: {approval.decision.value})"
         )
     revoke_conditions = dict(approval.conditions or {})
-    revoke_conditions["_decider"] = {"department": normalize_department(actor_department)}
+    revoke_conditions["_decider"] = _decider_conditions(approval.required_role, actor_department, actor_user_id)
     return replace(
         approval, decision=ApprovalDecision.REVOKED, decided_at=at, reason=reason,
         actor_agent_id=actor_agent_id, actor_user_id=actor_user_id,
@@ -394,6 +440,21 @@ if __name__ == "__main__":
     except OwnerApprovalNotSupportedError:
         pass
 
+    # 6b) USER - 부서가 아니라 사람이 결정한다 (불변식 5). actor_user_id 없으면 거절.
+    user_pending = _pending(RequiredRole.USER)
+    try:
+        decide(user_pending, decision=ApprovalDecision.APPROVED, at=t0)
+        raise AssertionError("actor_user_id 없이 USER 결정이 통과함")
+    except MissingActorUserError:
+        pass
+    # actor_department 없이도(부서 무관) actor_user_id만 있으면 결정된다.
+    some_user_id = "3f9d2c41-0000-4000-8000-0000000000aa"
+    user_approved = decide(user_pending, decision=ApprovalDecision.APPROVED, at=t0,
+                           actor_user_id=some_user_id, reason="사용자 승인")
+    assert user_approved.decision is ApprovalDecision.APPROVED
+    assert user_approved.actor_user_id == some_user_id
+    assert user_approved.conditions["_decider"] == {"user_id": some_user_id}
+
     # 7) 만료된 승인은 결정 불가 - 자동 승인으로 떨어지지 않는다 (불변식 1).
     expiring = _pending(RequiredRole.CEO, expires=t0 + timedelta(hours=1))
     try:
@@ -466,4 +527,4 @@ if __name__ == "__main__":
     repo.save(_pending(RequiredRole.RISK))
     assert len(repo.list_by_object(ObjectType.AGENT_PROFILE_VERSION, "pv-1")) == 2
 
-    print("ok - GOV-02 승인 도메인 계약 15개 시나리오 통과")
+    print("ok - GOV-02 승인 도메인 계약 16개 시나리오 통과")

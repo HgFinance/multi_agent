@@ -18,6 +18,10 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
+
 _API_DIR = Path(__file__).resolve().parents[1] / "api"
 sys.path.insert(0, str(_API_DIR))
 
