@@ -2,6 +2,12 @@
 
 부서장 `risk-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [Risk Worker Graph](risk_employee_workers.py)의 Ollama `qwen3:1.7b` LangGraph Worker다. 결정론적 Risk Engine이 바인딩 판정을 소유한다.
 
+## 현재 승인 상태 (2026-08-04)
+
+- P1 외부 Portfolio/Market Snapshot, PIT Instrument Mapping, Redis Stream Projection Worker, P1 Gate와 Repository 경계가 구현·테스트됐다.
+- P2 파생상품 Snapshot, Margin, Volatility Surface, Greeks·Stress Gate와 선택적 DB 적재가 구현·테스트됐다.
+- 실제 운영 활성화는 API 자격증명, governed Fund/Book/Instrument/Stress Scenario ID, Redis, DATABASE_URL, migration 적용이 모두 필요하다. 입력이 없거나 검증되지 않으면 항상 HOLD/REJECT로 종료한다.
+
 ## P1 현재 상태 (2026-08-03)
 
 - `p1/analytics.py`가 canonical instrument UUID 매핑, PIT/staleness 검사, Exposure Snapshot, Stress/VaR/Correlation 지표와 `ENABLED` 외 진입 차단을 하나의 결정론적 경계로 묶는다.

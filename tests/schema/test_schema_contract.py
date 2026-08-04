@@ -95,7 +95,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
             "research": 23,
-            "risk": 17,
+            "risk": 19,
             "strategy": 9,
             "workforce": 24,
         }

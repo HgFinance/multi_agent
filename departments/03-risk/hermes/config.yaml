@@ -234,4 +234,14 @@ validation_record:
     departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
   accepted_result: "11 passed, skipped 0; 실행 환경은 /Users/baiohelseu/claude/bin/python"
   p1_status: "결정론적 계산·Entry Gate·Repository/RLS baseline 완료; 실제 Portfolio/Market·운영 DB/RLS/E2E는 외부 조건 대기"
-  p2_status: "VaR·Stress·Black-Scholes Greeks 로컬 계산기/테스트 완료; 파생상품 Snapshot·Margin·Volatility Surface·Golden Fixture·Gate 연결 미완료"
+p2_status: "VaR·Stress·Black-Scholes Greeks 로컬 계산기/테스트 완료; 파생상품 Snapshot·Margin·Volatility Surface·Golden Fixture·Gate 연결 완료. 외부 Vol Surface/Margin 입력과 승인된 시나리오 ID가 없으면 Gate는 fail-closed"
+
+runtime_activation:
+  as_of: "2026-08-04"
+  p1_external_snapshot_api: "implemented_fail_closed"
+  instrument_mapping: "canonical reference.instrument_symbols required outside PAPER"
+  projection_worker: "implemented; Redis Streams -> risk.input_snapshots; DATABASE_URL and Redis publishers required"
+  p2_derivatives_api: "implemented; explicit margin_rates and vol_surface required"
+  persistence: "RISK_P1_PERSIST=true plus DATABASE_URL and RISK_STRESS_SCENARIO_IDS_JSON"
+  production_readiness: "external credentials, governed portfolio snapshot and migration apply remain deployment prerequisites"
+  current_status: "code_and_tests_ready_external_activation_pending"

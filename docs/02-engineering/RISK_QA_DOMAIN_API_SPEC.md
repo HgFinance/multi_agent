@@ -1,5 +1,15 @@
 # Risk·QA Domain API 설계서
 
+## 0.1 현재 승인된 구현 기준 (2026-08-04)
+
+이 문서의 현재 기준은 다음과 같다. 아래 본문에 남아 있는 `[제안]`, `미구현`, `배선 전` 표현은 승인 전 설계 스냅샷이며 현재 구현 상태를 덮어쓰지 않는다.
+
+- Risk: P1 외부 Snapshot API, PIT Instrument 매핑, Redis Stream Projection Worker, P2 파생상품 Margin·Volatility Surface·Greeks·Stress Gate가 코드와 테스트로 구현됐다. 운영 활성화에는 실제 API 자격증명, governed ID, DATABASE_URL, Redis publisher, migration 적용이 필요하다.
+- QA: Evidence QA·Model Risk·Internal Audit 결정론 엔진/API와 5개 LangGraph Worker가 연결됐다. Model/Internal Audit Worker는 입력 신호가 있을 때만 실행되며, 결과가 PASS가 아니면 QA는 자동 에스컬레이션한다.
+- QA `qa-check`: Evidence QA Gate v1로 승인됐다. `QA_CHECK_CONTRACT_APPROVED=true` 없이는 production 경로를 열지 않는다.
+- QA Corpus: `SAMPLE_PLACEHOLDER`는 운영 근거가 아니다. 실제 정책 문서를 PIT 메타데이터와 1024차원 임베딩으로 적재하고 `api.match_evidence_chunks`를 통해 조회해야 한다.
+- 운영 Trace: `QA_TRACE_PERSIST=true`와 ACTIVE `LANGGRAPH` Worker Profile FK가 모두 있을 때만 `audit.agent_runs/tool_calls`에 적재한다. 미충족 시 PASS로 승격하지 않고 안전하게 에스컬레이션한다.
+
 > 작성: 동규님 (Risk/QA Domain Owner) · 작성일: 2026-07-31
 > 상위 계약: [MINIMUM_SERVICE_UNIT_SPEC.md](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md) §5/§8/§11 (Investment Case 데이터·Command·Event·API 계약),
 > [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md) §7 (FastAPI+Pydantic Backend, Hermes는 API/MCP 경계로만 통신)
@@ -515,3 +525,20 @@ ADR-0001 §5를 그대로 따른다 — Frontend는 그 판단을 보여줄 뿐 
 config.yaml에 채워 이 API들에 대한 Profile별 호출 권한을 명시 → (4) §2.3/§3.6 Agentic RAG 래퍼(이미 구현된
 그래프를 감싸기만 하면 됨, 가장 저비용) → (5) Supabase 연동 → (6) PIKE-RAG/Hyper-Extraction은 트리거 조건
 충족 여부를 분기마다 재확인 → (7) Frontend 연결은 담당자 배정 후.
+# 2026-08-04 승인된 운영 보강
+
+`POST /investment-cases/{case_id}/qa-check`와 `POST /qa/v1/evidence/check`는
+QA Evidence Gate v1 계약으로 승인한다. 판정은 `EvidenceQaEngine`이 결정론적으로
+생성하며, Hermes/LangGraph는 근거가 포함된 비바인딩 Context와 서술만 제공한다.
+
+- production 활성화는 `QA_CHECK_CONTRACT_APPROVED=true`를 명시해야 한다.
+- `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며, Corpus 상태가 `ready`가
+  아니면 RAG는 `ESCALATE`로 종료한다.
+- 실제 정책 문서는 `evidence/production_ingestion.py`로 PIT 메타데이터와 1024차원
+  pgvector를 함께 적재한다. `api.match_evidence_chunks`가 조회 경계다.
+- QA Worker는 ACTIVE `LANGGRAPH` Profile FK가 있을 때만 `audit.agent_runs`와
+  `audit.tool_calls`에 적재한다. `QA_TRACE_PERSIST=true`가 없으면 인메모리/JSONL
+  감사만 사용한다.
+
+기존 본문에 남은 `[제안]` 표현은 이 승인일 이전의 설계 스냅샷이며, 위 계약과
+충돌할 경우 본 승인 섹션과 현재 API/config가 우선한다.

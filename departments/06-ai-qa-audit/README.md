@@ -2,6 +2,12 @@
 
 부서장 `qa-audit-supervisor`는 Hermes(Codex/Claude Code)이고 직원은 [QA Worker Graph](qa_employee_workers.py)의 Ollama `qwen3:1.7b` LangGraph Worker다. 결정론적 Evidence QA Engine이 바인딩 판정을 소유한다.
 
+## 현재 승인 상태 (2026-08-04)
+
+- Evidence QA `qa-check`는 Evidence QA Gate v1로 승인됐고, production은 `QA_CHECK_CONTRACT_APPROVED=true`일 때만 활성화된다.
+- Model Risk/Internal Audit는 governed 입력 신호가 있을 때만 결정론 엔진과 `model-and-internal-audit-worker`가 실행되며, PASS가 아니면 에스컬레이션한다.
+- 5개 Worker의 ACTIVE Profile·운영 Trace는 migration 적용과 `QA_TRACE_PERSIST=true`가 필요하다. `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며 실제 문서·임베딩·pgvector 적재 전에는 ESCALATE한다.
+
 ## P1 현재 상태 (2026-08-03)
 
 - `model_risk.py`는 모델·프롬프트·데이터셋 계보와 평가량/Calibration/Drift 지표를 결정론적으로 검사하고, 근거가 없으면 `ESCALATE`한다.
