@@ -76,6 +76,7 @@
 | 트레이딩본부 | Decimal, Pydantic, Redis, Polars, NumPy, exchange-calendars | SciPy, CVXPY | Agent는 Order Intent까지만 생성 |
 | 리스크본부 | Decimal, Pydantic, NumPy, Polars, Hypothesis | SciPy, Statsmodels, CVXPY, QuantLib | Risk 수치와 Limit은 결정론적 Service |
 | 퀀트/백테스트본부 | Polars, NumPy, PyArrow, DuckDB, vectorbt, pytest | scikit-learn, Optuna, MLflow, Pandera | PIT Dataset과 Experiment Manifest 필수 |
+| 투자철학 모델 Factory | Pydantic, Dataset Manifest, Frozen Eval | Transformers, PEFT, TRL, Accelerate, vLLM, MLflow | P2 조건부. Prompt/RAG Baseline 실패와 QA 승인 후 Adapter Training |
 | 회계/포트폴리오본부 | Decimal, Pydantic, SQLAlchemy, Polars, PyArrow, Jinja2 | DuckDB, openpyxl | Ledger·Position·NAV는 Transaction Service 전용 |
 | AI QA/감사본부 | pytest, Hypothesis, structlog, 보안 Scanner | OpenTelemetry, Prometheus, Ragas, MLflow, Sentry | LLM Judge 단독 승인 금지 |
 

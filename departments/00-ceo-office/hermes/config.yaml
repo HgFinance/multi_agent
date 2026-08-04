@@ -45,71 +45,39 @@ agentic_rag:
   status: "해당 없음 — 문서 검색이 아니라 공식 Read Model 조회로 근거를 얻는다"
   target_personas: []
 
-# 구현 현황 (2026-07-31). 무엇이 되고 무엇이 안 됐는지 여기서 확인한다.
-# 코드 없는 항목을 코드로 만들지 않고 주석 백로그로 남긴다 (CLAUDE.md 부서 Profile 규약).
+# 구현 현황 (코드 없는 항목은 주석 백로그로 유지)
 implementation:
   done:
-    - "F01 사용자 Mandate — departments/00-ceo-office/src/mandate/. governance.mandate_versions 위에 얹었고 스키마는 안 바꿨다"
-    - "policy.py — 구조화 정책 Pydantic 계약. DDL이 jsonb로만 둔 risk_bounds/universe_policy/approval_rules의 내부 형태를 정의하고, 값 범위 + 상호 모순 6종을 결정론적으로 검증(F01 완료조건: 잘못된 한도 조합 저장 불가). LLM 미사용"
-    - "service.py — Version 발급, content_hash 중복 방지(DDL unique와 이중 방어), 장중 변경 방향 판정(TIGHTEN/LOOSEN/NEUTRAL)"
-    - "통화 검증 (2026-07-31 결정 4-A) — mandate.currency를 accounting.funds.base_currency와 저장 시점에 대조. 불일치는 CurrencyMismatchError, Fund 통화 확인 불가는 FundNotFoundError로 저장 차단(개발원칙 9: 확인 불가 시 확대가 아니라 차단)"
-    - "lifecycle.py — Version 활성화 상태 전이(5.1). 완화·중립은 즉시, 확대(LOOSEN)와 최초 활성화는 사용자 승인 없으면 차단. 이전 Version effective_to 종료 + mandates.current_version 갱신 + mandate_decisions APPROVE 기록"
-    - "기준 자본 계약 확정 (2026-07-31, PR #26) — 한도 집행 기준은 회계 nav_runs.total_nav의 당일 장 시작 시점 값. base_capital은 Paper 시작 자본 선언값이자 첫날 회계 초기 현금 근거로만 쓰고 한도 분모로 쓰지 않는다"
-    - "governance-api 입출력 타입 정의 — docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2절"
-    - "F23 Daily Report (CEO 절반) — departments/00-ceo-office/src/reporting/daily_report.py. 본부별
-       공식 Snapshot ID를 governance.report_runs 행으로 조립. 필수 Section(portfolio/risk) 누락 시
-       FAILED, 선택 Section(research/execution/strategy/qa) 없음은 정상 진행. content_hash로 동일
-       구성 재요청 시 중복 삽입 방지. Repository는 인터페이스+In-Memory와 Postgres 구현 둘 다 있다
-       (아래 psycopg2 구현 항목 참고). 회계 절반(전략별 PnL·Drawdown 수치 계산)은
-       departments/05-accounting-portfolio/reporting/daily_report.py가 별도로 완료"
-    - "F24 Notification — departments/00-ceo-office/src/notification/notification.py. 심각도->채널
-       결정론적 매핑, dedup_key(fund+event+scope) 기반 억제, CRITICAL은 절대 억제하지 않음, 심각도
-       불명(None/미지 값)은 CRITICAL로 승격(fail-safe). Repository는 인터페이스+In-Memory와
-       Postgres 구현 둘 다 있다(아래 psycopg2 구현 항목 참고)"
-    - "MandateVersionRepository의 psycopg2 구현 —
-       departments/00-ceo-office/src/mandate/postgres_repository.py. asyncpg가 아니라 psycopg2다
-       (audit/repository.py 컨벤션과 동일 이유: 호출자 scripts.py가 동기). 조회 4개 메서드
-       (latest_version/content_hash_exists/get_mandate_current/get_fund_base_currency)는 실제
-       Supabase DB에 연결해 존재하지 않는 mandate_id로 검증 통과(governance.mandates 부모 행 없이도
-       안전). tests/schema/supabase_governance_test_fixture.sql(TEST ONLY)로 accounting.funds
-       테스트 Fund도 실제로 삽입 확인함"
-    - "ReportRunRepository/NotificationRepository의 psycopg2 구현(2026-08-03) —
-       reporting/postgres_report_repository.py, notification/postgres_notification_repository.py.
-       같은 psycopg2 conventions(Pool, Json, register_uuid). governance.report_runs.fund_id는
-       accounting.funds not null FK라 실제 Fund 행(accounting.funds에 실제 1건 존재)으로
-       insert->find_by_content_hash 왕복 검증하고 검증 행은 정리(delete)함 - source_snapshot_ids가
-       DB에서는 uuid[]라 실제 UUID 문자열이어야 한다(도메인의 자유 문자열 snapshot_id와 다름,
-       register_uuid()로 배열 typecaster까지 등록해야 Python list로 돌아온다). governance.
-       notifications.fund_id는 nullable이라 fund_id=None으로 Fund 없이도 왕복 검증 완료"
-    - "CEO Office Domain API — departments/00-ceo-office/api/app.py. mandate/service.py+lifecycle.py
-       (Mandate 제안·활성화·조회), reporting/daily_report.py(Report 조립·조회),
-       notification/notification.py(알림 발행)를 FastAPI로 감쌌다. Repository는 In-Memory 기본,
-       DATABASE_URL 있으면 Mandate/Report/Notification 셋 다 Postgres 구현으로 전환(2026-08-03).
-       FastAPI TestClient 자체 점검(In-Memory 모드)은 7개 시나리오 그대로 통과 확인 - Postgres
-       모드는 각 postgres_*_repository.py 자체 점검이 실 DB로 별도 검증한다(Mandate와 동일 패턴,
-       자체 점검의 가짜 ID로는 실 DB FK를 못 통과해 app.py 자체 점검 자체는 In-Memory 전용으로 남긴다)"
-    - "tool_allowlist/forbidden_tools 선언(2026-08-03, P1 대응) — GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
-       2.4절(CEO Office 부서 내 통신)을 Risk/QA config.yaml과 동일한 <domain>.<resource>.<verb>
-       표기로 그대로 옮겼다. 새로 지어낸 권한 아님 - executive-orchestrator가 실제로 부르는
-       엔드포인트만 대상이고, Mandate propose/activate는 페르소나가 아니라 별도 LangGraph
-       Workflow 노드가 호출하므로 여기 없다"
+    - "F01 사용자 Mandate — src/mandate/. governance.mandate_versions 위에 얹었고 스키마 변경 없음"
+    - "policy.py — 구조화 정책 Pydantic 계약. DDL이 jsonb로만 둔 risk_bounds/universe_policy/approval_rules 내부 형태 정의 + 값 범위·상호 모순 6종 결정론 검증 (LLM 미사용)"
+    - "service.py — Version 발급, content_hash 중복 방지(DDL unique 이중 방어), 장중 변경 방향 판정(TIGHTEN/LOOSEN/NEUTRAL)"
+    - "통화 검증 — mandate.currency를 accounting.funds.base_currency와 저장 시점 대조. 불일치/확인불가 시 저장 차단(개발원칙 9)"
+    - "lifecycle.py — Version 활성화 게이트(5.1). 확대(LOOSEN)·최초 활성화는 사용자 승인 없으면 차단, 이전 Version 종료 + current_version 갱신 + mandate_decisions 기록"
+    - "기준 자본 계약 확정 (PR #26) — 한도 집행 기준은 nav_runs.total_nav 장 시작 값. base_capital은 한도 분모로 쓰지 않는다"
+    - "governance-api 입출력 타입 정의 — GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2절"
+    - "F23 Daily Report (CEO 절반) — src/reporting/daily_report.py. 필수 Section 누락 시 FAILED, content_hash로 재요청 중복 방지. 회계 절반은 05-accounting-portfolio가 별도 완료"
+    - "F24 Notification — src/notification/notification.py. 심각도→채널 결정론 매핑, dedup_key 억제, CRITICAL 억제 금지, 심각도 불명은 CRITICAL 승격(fail-safe)"
+    - "Persistence Repository (psycopg2) — mandate/postgres_repository.py, reporting/postgres_report_repository.py, notification/postgres_notification_repository.py. 실 Supabase DB 왕복 검증 완료(검증 행 정리)"
+    - "CEO Office Domain API — api/app.py. FastAPI 기반 엔드포인트 구현 (In-Memory / Postgres 이중 지원)"
+    - "Tool Allowlist / Forbidden Tools 선언 — API Spec 2.4절 기준 페르소나별 최소 권한 통제 정의"
+    - "notification-worker (F24 Event Consumer) — governance_events/. hf:governance Redis Stream 소비 + Mandate/Report Producer 발행. 실 Redis로 dedupe·재시작 복구 검증"
+    - "GOV-02 승인 API — src/approval/. 엔드포인트 5개(request/get/list/decide/revoke). 권한 분리 강제(CEO는 RISK/QA 승인 결정 불가 403), 만료·중복 결정 409, OWNER는 fail-closed 501, 자동 승인 경로 없음"
+    - "GOV-02 Case Root — src/case/ + cases.status 제약 마이그레이션. OPEN→ACKNOWLEDGED→RESOLVED/CANCELLED(escalations 어휘 재사용). status 갱신과 case_events append를 한 트랜잭션으로 처리"
+    - "GOV-02 에스컬레이션 — src/escalation/. 엔드포인트 4개 + governance.escalation.v1 발행. RESOLVED에 resolution 필수, severity 무기록 하향 차단"
+    - "플레이스홀더 회원 seed — auth.users/user_profiles 1건(RFC 2606 .invalid, 로그인 불가). Mandate owner_user_id NOT NULL 차단 해제. 자동 기본값으로는 쓰지 않는다"
+    - "부서 코드 통일 — Hermes Profile 이름(ceo-agent/hr-department 등)으로 정본 확정. 스펙 2.2·2.3 갱신 + AGENT-WORKFORCE 행 rename 마이그레이션"
   in_progress: []
   not_started:
-    - "PostgresMandateVersionRepository 쓰기 경로(insert/set_mandate_current/set_effective_to/
-       record_decision) 왕복 검증 — governance.mandates 행을 만들려면 owner_user_id(auth.users FK)가
-       필요한데 이 환경 auth.users가 0건이다. Supabase Auth로만 계정을 만들 수 있어(Claude 계정
-       생성 금지 원칙) 테스트 사용자를 대신 만들지 않았다. 실 사용자 user_id가 생기면 마저 검증한다"
-    - "F01 완료조건 2번(Signal·Risk Decision이 mandate_version을 기록) — 트레이딩·리스크본부 코드 의존이라 CEO Office 단독으로 못 닫는다"
-    - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 지금은 방향 판정과 활성화 게이트만 있고 위원회 경유 경로가 없다"
-    - "Y1 나머지 — CEO Case 생성·Escalation·Daily Summary. governance.cases/escalations 테이블은 있고 로직이 없다"
-    - "Y2 위원회·승인 — committee_sessions/votes/decisions, approvals 테이블은 있고 Quorum·SoD 판정 로직이 없다. Y3(인사팀 Registry)를 먼저 해서 순서가 밀렸다"
-    - "F23 Daily Report 실 연동 — portfolio-api/risk-api/research-api/strategy-registry-api/audit-api가
-       아직 Snapshot 조회 엔드포인트를 안 갖고 있어 daily_report.py의 SnapshotRef는 호출자가 직접
-       채워야 한다. 실제 렌더링(Reporting Worker, object_path 생성)도 미구현"
-    - "F24 Notification 실 연동 — 실제 Domain Event(risk.breach.v1 등) 구독, 발송 Adapter(Email/Push/SMS)
-       미구현. 지금은 API 호출자가 NotificationRequest를 직접 만들어야 한다"
-    - "GET /governance/v1/mandates/{fund_id}/current(스펙 2.1) — fund_id -> mandate_id 역참조 쿼리가
-       없어(accounting-api 미구현) 지금은 mandate_id로만 조회 가능. api/app.py 상단 주석에 명시"
+    - "Mandate 쓰기 경로 왕복 검증 — 플레이스홀더 회원으로 owner_user_id FK는 통과 확인(롤백 검증)했으나 insert/set_mandate_current/set_effective_to/record_decision 전 구간 검증은 미실행"
+    - "F01 완료조건 2번(Signal·Risk Decision이 mandate_version 기록) — 트레이딩·리스크본부 코드 의존이라 CEO Office 단독으로 못 닫는다"
+    - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 방향 판정·활성화 게이트만 있고 위원회 경유 경로 없음"
+    - "Y1 나머지 — Daily Summary. Case 생성·Escalation은 GOV-02로 해소됨"
+    - "Y2 위원회 — committee_sessions/votes/decisions의 Quorum·SoD 판정 로직 없음. approvals는 GOV-02로 해소됨"
+    - "record_decision (스펙 2.2) — 범용 governance.decisions 테이블이 없고 스펙에 Request 본문도 없어 계약을 지어내야 한다. 별도 결정 필요"
+    - "F23 Daily Report 실 연동 — 본부별 Snapshot 조회 엔드포인트 부재로 SnapshotRef는 호출자가 직접 채워야 함. Reporting Worker 렌더링도 미구현"
+    - "F24 Notification 발송 Adapter — Email/Push/SMS 미구현. 지금은 API 호출자가 NotificationRequest를 직접 만든다"
+    - "GET /governance/v1/mandates/{fund_id}/current — fund_id→mandate_id 역참조 쿼리 부재(accounting-api 미구현)로 mandate_id 조회만 가능"
+    - "CEO Agent Roster 등재 — 전체 Prototype까지 미룸(2026-08-04 팀 결정, config.yaml이 기준). 그래서 approvals.actor_agent_id는 NULL로 남고 결정 부서를 conditions._decider에 기록한다"
 
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2, 2026-07-29)
 # executive-orchestrator는 CEO-00(CEO 에이전트)과 CEO-01(Chief of Staff)을 합친 페르소나 — 둘 다 P0라 격차 없음

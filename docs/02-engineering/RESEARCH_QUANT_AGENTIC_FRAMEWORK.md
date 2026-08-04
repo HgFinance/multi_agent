@@ -487,6 +487,38 @@ INTAKE
 SUPPORTED -> QA_REVIEW -> RISK_REVIEW -> SHADOW_CANDIDATE
 ```
 
+### 7.7 Investment Doctrine Model Factory
+
+투자자 Persona는 이름과 문체를 흉내 내는 의사결정자가 아니라, 검증 가능한 투자 원칙을 적용하는
+`Strategy Reviewer` 또는 `Research Lens`로 사용한다. 조건부 직원 `QNT-08 Investment Doctrine &
+Model Engineer`가 Source에서 원칙을 추출해 `InvestmentDoctrineV1`과 학습 Dataset을 만들고,
+Prompt/RAG Baseline이 고정 Eval을 반복 실패할 때만 Fine-tuning Candidate를 제출한다.
+
+```text
+Verified Source Corpus
+  -> InvestmentDoctrineV1
+  -> Prompt/RAG Baseline
+  -> Fine-tuning Need Gate
+  -> PIT Dataset + Frozen Test
+  -> Isolated SFT/LoRA Worker
+  -> DoctrineModelCandidateV1
+  -> Independent QNT-04 + AI QA Evaluation
+  -> Shadow Doctrine Reviewer
+  -> DoctrineReviewV1
+  -> QNT-01 Hypothesis Seed
+```
+
+- QNT-08은 Training Plan을 만들지만 GPU Worker를 임의 실행하거나 자기 Candidate를 승인하지 않는다.
+- 실제 학습, Metric과 Artifact Hash는 격리된 결정론적 Worker가 생성한다.
+- `DoctrineReviewV1`은 주문 방향·수량·목표 비중이 아니라 평가 기준별 Claim과 Evidence, 반론,
+  미확인 질문과 가설 후보만 반환한다.
+- 여러 Doctrine은 서로의 답을 보지 않고 독립 Review를 제출하며, 충돌을 다수결로 지우지 않는다.
+- Persona 이름의 유명세가 아니라 Frozen Eval, Citation, Calibration과 Shadow 결과로 유지·중단한다.
+- Source Retraction은 Dataset, Adapter, Review, Hypothesis와 Strategy Candidate까지 전파한다.
+
+상세 계약, Fine-tuning 기술 경로, 평가와 도입 Trigger는
+[Investment Doctrine Model Factory](INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
+
 ## 8. 두 본부를 잇는 Calibration과 자기 개선
 
 ### 8.1 결과를 다시 학습시키는 방법

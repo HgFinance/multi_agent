@@ -148,20 +148,33 @@ def health() -> dict:
 
 
 @app.get("/snapshot/{symbol}")
-def snapshot(symbol: str) -> dict:
-    """마지막 체결 + 마지막 호가. 세션 밖에서는 마감 스냅샷이 나온다."""
+def snapshot(symbol: str,
+             as_of: Optional[str] = Query(
+                 None, description="이 시각까지의 마지막 체결·호가(PIT, "
+                                   "tz 포함 ISO8601). 없으면 최신")) -> dict:
+    """마지막 체결 + 마지막 호가. 세션 밖에서는 마감 스냅샷이 나온다.
+
+    ▶ **as_of 를 받는다.** market_ticks·market_quotes 는 event_time 으로 이력이
+      원래 다 있었고 컷오프만 없어서 Replay 금지였다. 금지는 도구를 없애지만
+      파라미터는 도구를 살린다 - 에이전트가 값을 하는지 증명하려면 과거로
+      돌려볼 수 있어야 한다.
+    """
     iid = _iid_or_404(symbol)
     tick = _query("""
         select event_time, price, quantity, cumulative_volume
-        from market.market_ticks where instrument_id = %s
+        from market.market_ticks
+        where instrument_id = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid,))
+    """, (iid, as_of, as_of))
     quote = _query("""
         select event_time, best_bid, best_ask, mid_price,
                total_bid_size, total_ask_size
-        from market.market_quotes where instrument_id = %s
+        from market.market_quotes
+        where instrument_id = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid,))
+    """, (iid, as_of, as_of))
     if not tick and not quote:
         raise HTTPException(404, f"{symbol} 의 시세가 아직 없다")
     return {"symbol": symbol,
@@ -202,13 +215,47 @@ def bars(
 
 
 @app.get("/breadth")
-def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500)):
+def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500),
+            as_of: Optional[str] = Query(
+                None, description="이 시각까지만 본다(PIT, tz 포함 ISO8601). "
+                                  "없으면 최신")):
+    """시장 폭. **as_of 를 받는다** - 이력은 event_time 으로 원래 다 있었고
+    컷오프만 없어서 Replay 금지였다. 금지는 도구를 없애지만 파라미터는 도구를
+    살린다 - 에이전트가 값을 하는지 증명하려면 과거로 돌려볼 수 있어야 한다."""
     return _query("""
         select event_time, market, advancers, decliners, unchanged,
                up_volume, down_volume, total_value
-        from market.market_breadth where market = %s
+        from market.market_breadth
+        where market = %s
+          and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit %s
-    """, (market, limit))
+    """, (market, as_of, as_of, limit))
+
+
+@app.get("/dq/windows")
+def dq_windows(hours: int = Query(24, gt=0, le=168),
+               limit: int = Query(50, gt=0, le=500)):
+    """RES-02 Market Data Steward 의 감사 결과 (스트림별 품질 판정).
+
+    ▶ **감사는 돌고 있었는데 아무도 못 읽었다.** collectors/market_data_steward.py
+      가 market.data_quality_windows 에 판정을 쓰는데 이를 노출하는 엔드포인트가
+      없었다 - Agent 는 DB Credential 을 안 받으므로(통합 계획 6.2) API 가
+      없으면 존재하지 않는 것과 같다. RES-02 는 P0 페르소나인데 리서치
+      파이프라인 어디에도 배선돼 있지 않았고, 그래서 데이터 품질 게이트가
+      Packet 생성 경로 앞에 서 있지 않았다.
+
+    quality_status 는 PASS / WARN / FAIL. **행이 0건인 것은 PASS 가 아니다** -
+    감사가 안 돌았다는 뜻이므로 호출부가 미확인으로 다뤄야 한다.
+    """
+    return _query("""
+        select window_start, window_end, provider, stream_type,
+               observed_count, duplicate_count, p95_latency_ms, max_latency_ms,
+               quality_status, rule_version, metrics
+        from market.data_quality_windows
+        where window_end > now() - make_interval(hours => %s)
+        order by window_end desc, stream_type
+        limit %s
+    """, (hours, limit))
 
 
 @app.get("/dq/summary")
@@ -225,7 +272,10 @@ def dq_summary() -> dict:
 
 
 @app.get("/regime/daily")
-def regime_daily(days: int = Query(20, gt=0, le=120)):
+def regime_daily(days: int = Query(20, gt=0, le=120),
+                 as_of: Optional[str] = Query(
+                     None, pattern=r"^\d{4}-\d{2}-\d{2}$",
+                     description="이 거래일까지만 본다(PIT). 없으면 최신")):
     """시장 레짐 집계 (RES-07 의 결정론 재료) - 일봉 단면 지표.
 
     등락 종목수·SMA20 상회 비율을 거래일별로 계산한다. SMA20 은 봉 20개가
@@ -242,6 +292,11 @@ def regime_daily(days: int = Query(20, gt=0, le=120)):
                  lag(close) over (partition by instrument_id order by bucket_time) as prev_close
           from market.market_bars
           where interval_code = '1D' and source = 'ls_chart'
+            -- ▶ PIT 컷오프. 없으면 최신까지(LIVE 에서는 '지금'이 곧 컷오프라
+            --   아무것도 막지 않는다). **이력은 원래 다 있었다** - 컷오프를
+            --   안 받아서 Replay 금지 목록에 올라 있었을 뿐이다.
+            and (%s::date is null
+                 or (bucket_time at time zone 'Asia/Seoul')::date <= %s::date)
           window w20 as (partition by instrument_id order by bucket_time
                          rows between 19 preceding and current row)
         )
@@ -254,7 +309,7 @@ def regime_daily(days: int = Query(20, gt=0, le=120)):
                count(*) as symbols
         from b
         group by d order by d desc limit %s
-    """, (days,))
+    """, (as_of, as_of, days))
 
 
 @app.get("/microstructure/{symbol}")

@@ -31,7 +31,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import ClassVar, TypedDict
+from typing import Callable, ClassVar, Optional, TypedDict
 
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도 찾도록
@@ -81,6 +81,7 @@ RESEARCH_API = os.environ.get("RESEARCH_API_URL", "http://127.0.0.1:8035")
 class ResearchState(TypedDict, total=False):
     symbol: str
     universe: dict          # 결정론 판정 결과
+    data_quality: dict      # RES-02 수집 품질 게이트 (PASS/WARN/FAIL/UNKNOWN)
     evidence: dict          # Evidence Bundle (API 수집분)
     sentiment: dict         # 검증된 sentiment 요약
     technical: dict         # RES-04 기술적 소견 (결정론 readout + 검증된 서술)
@@ -89,6 +90,13 @@ class ResearchState(TypedDict, total=False):
     geopolitical: dict      # RES-09 지정학 국면 (라벨·driver 는 코드, 서술만 LLM)
     microstructure: dict    # RES-03 미시구조 (판정은 코드, 서술만 LLM)
     packet: dict            # 최종 Research Packet
+    insights: list          # 교차 해석 (반증 조건 필수)
+    insight_rejected: list  # 거부된 해석 + 사유
+    insight_claims: list    # 해석의 채점 행
+    insight_note: str
+    revisions: int          # 반박 -> 재해석 횟수 (상한 MAX_REVISIONS)
+    gap_fills: int          # 근거 부족 -> 재수집 횟수 (상한 MAX_GAP_FILLS)
+    evidence_gaps: dict     # 분석가별 미확인 항목
     halted: str             # 중단 사유 (거래 불가 등)
 
 
@@ -114,6 +122,65 @@ def check_universe(state: ResearchState) -> dict:
         return {"universe": {"tradable": False, "reason": d.excluded[state["symbol"]]},
                 "halted": f"거래 불가({d.excluded[state['symbol']]}) - 분석 중단"}
     return {"universe": {"tradable": True, "as_of": d.as_of.isoformat()}}
+
+
+# ── 노드 1.5: 데이터 품질 게이트 (RES-02 Market Data Steward) ──────────────
+# ▶ **P0 페르소나인데 파이프라인 어디에도 없었다.** 감사 구현
+#   (collectors/market_data_steward.py)은 있고 market.data_quality_windows 에
+#   판정을 쓰는데, 그걸 노출하는 엔드포인트가 없어 아무도 못 읽었다 - Agent 는
+#   DB Credential 을 안 받으므로 API 가 없으면 존재하지 않는 것과 같다.
+#   그 결과 **데이터 품질 게이트가 Packet 생성 앞에 서 있지 않았다.**
+DQ_FAIL_HALTS = True          # FAIL 이면 분석을 안 한다. 나쁜 데이터로 낸 결론은
+                              # 없는 결론보다 나쁘다 - 사람이 그걸 믿기 때문이다
+
+# ▶ **분석이 실제로 쓰는 스트림만 막는다.** 첫 실측에서 derivatives 스트림
+#   FAIL 때문에 주식 종목(006800) 분석이 통째로 멈췄다 - 우리 분석가 6인 중
+#   파생 데이터를 쓰는 사람은 없다. 무관한 장애로 막으면 게이트가 과하고,
+#   과한 게이트는 사람이 곧 꺼버린다(가드 오탐과 같은 실패 방식).
+#   관련 없는 스트림의 FAIL 은 기록하되 통과시킨다.
+EQUITY_STREAMS = ("ticks", "quotes", "bars", "breadth", "index")
+
+
+def check_data_quality(state: ResearchState) -> dict:
+    """수집 품질을 확인하고 나쁘면 막는다. **행 0건은 PASS 가 아니다.**"""
+    try:
+        rows = _get(f"{MARKET_API}/dq/windows?hours=24")
+    except Exception as e:
+        # 조회 실패를 통과로 위장하지 않는다. 다만 품질 API 장애가 리서치를
+        # 통째로 세우는 것도 과하므로, 미확인으로 남기고 진행한다.
+        return {"data_quality": {"status": "UNKNOWN",
+                                 "reason": f"품질 조회 실패: {type(e).__name__}"}}
+    rows = rows if isinstance(rows, list) else []
+    if not rows:
+        # 감사가 안 돌았다는 뜻이다. 정상 0 과 구분한다.
+        return {"data_quality": {"status": "UNKNOWN",
+                                 "reason": "최근 24시간 품질 감사 기록 0건"}}
+
+    def _relevant(r) -> bool:
+        st = str(r.get("stream_type") or "").lower()
+        return any(k in st for k in EQUITY_STREAMS)
+
+    failed = [r for r in rows if str(r.get("quality_status")) == "FAIL"]
+    bad = [r for r in failed if _relevant(r)]          # 우리가 쓰는 스트림만
+    unrelated = sorted({str(r.get("stream_type")) for r in failed
+                        if not _relevant(r)})
+    warn = [r for r in rows if str(r.get("quality_status")) == "WARN"]
+    streams = sorted({str(r.get("stream_type")) for r in bad})
+    dq = {
+        "status": "FAIL" if bad else ("WARN" if warn else "PASS"),
+        "windows": len(rows),
+        "failed_streams": streams,
+        "warned_streams": sorted({str(r.get("stream_type")) for r in warn}),
+        # 무관한 스트림 장애도 **숨기지 않는다** - 막지 않을 뿐이다
+        "failed_unrelated_streams": unrelated,
+        "reason": "; ".join(
+            str((r.get("metrics") or {}).get("reasons") or "")[:80] for r in bad[:3]),
+    }
+    if bad and DQ_FAIL_HALTS:
+        return {"data_quality": dq,
+                "halted": f"데이터 품질 FAIL - 스트림 {', '.join(streams)} "
+                          f"(RES-02 감사). 나쁜 데이터로 낸 판단은 내지 않는다"}
+    return {"data_quality": dq}
 
 
 # ── 노드 2: Evidence Bundle 조립 (결정론 - evidence/bundle.py) ─────────────
@@ -895,10 +962,252 @@ def challenge_packet(state: ResearchState) -> dict:
                                       verification=verification)}
 
 
+# ── Evidence Gap Loop ──────────────────────────────────────────────────────
+# ▶ 분석가가 INSUFFICIENT_DATA 를 내면 지금은 **그냥 다음으로 갔다.** 근거가
+#   부족하다고 스스로 말했는데 아무도 메우려 하지 않는다 - 도구를 쥐여준
+#   의미가 여기서 사라졌다. framework 의 Evidence Gap Loop 가 이 자리다.
+#
+#   되돌아가는 곳은 assemble_evidence 다. 분석가 개별 재실행이 아니라 근거를
+#   더 모아 **전원이 다시 보게** 한다 - 한 분석가만 다시 돌리면 다른 분석가는
+#   옛 근거로 판단한 채 남아 Packet 안에서 시점이 갈라진다.
+MAX_GAP_FILLS = 1        # 한 번만. 못 메우면 부족한 채로 내되 그 사실을 남긴다
+
+
+def gap_report(state: ResearchState) -> dict:
+    """어느 분석가가 무엇이 없다고 했는가. 순수 함수."""
+    gaps: dict[str, list[str]] = {}
+    for node in ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment"):
+        st = state.get(node)
+        if not isinstance(st, dict):
+            continue
+        ro = st.get("readout") or {}
+        missing = [str(x) for x in (ro.get("unavailable") or [])][:8]
+        if str(st.get("verdict") or ro.get("verdict")) == "INSUFFICIENT_DATA":
+            missing = missing or ["(사유 미기재)"]
+        if missing:
+            gaps[node] = missing
+    return gaps
+
+
+def needs_gap_fill(state: ResearchState) -> str:
+    """근거를 더 모을 가치가 있는가. **판정은 결정론이다.**
+
+    빈 구멍이 있다고 무조건 되돌아가지 않는다 - 어떤 지표는 그 종목에
+    원래 없다(비상장 파생, 미상장 기간). 무한히 다시 모아도 안 채워진다.
+    **분석가가 INSUFFICIENT_DATA 로 판정 자체를 못 낸 경우**만 되돌아간다.
+    """
+    if int(state.get("gap_fills") or 0) >= MAX_GAP_FILLS:
+        return "done"
+    for node in ("technical", "fundamental", "regime", "geopolitical",
+                 "microstructure", "sentiment"):
+        st = state.get(node)
+        if not isinstance(st, dict):
+            continue
+        if str(st.get("verdict") or (st.get("readout") or {}).get("verdict"))                 == "INSUFFICIENT_DATA":
+            return "fill"
+    return "done"
+
+
+def bump_gap_fill(state: ResearchState) -> dict:
+    """재수집 횟수를 올리고 무엇이 비었는지 남긴다.
+
+    **메우려 했다는 사실과 무엇이 비었는지가 남아야** 다음에 수집기를 고친다.
+    조용히 다시 돌면 같은 구멍이 영원히 반복된다.
+    """
+    gaps = gap_report(state)
+    return {"gap_fills": int(state.get("gap_fills") or 0) + 1,
+            "evidence_gaps": gaps}
+
+
+# ── 노드 10.5: 해석 (인사이트) ─────────────────────────────────────────────
+# ▶ **인사이트가 나올 자리가 없었다.** 분석가는 compute -> narrate -> verify 로
+#   돌고 라벨은 코드가 정한다. LLM 은 그 라벨을 문장으로 옮길 뿐이라 여섯 축을
+#   가로질러 "그래서 무슨 뜻인가" 를 말하는 자리가 통째로 비어 있었다.
+#
+#   마스터 플랜이 결정론에 묶은 것은 **규칙 판정**(PIT·인용검증·한도)이다.
+#   "이 세 신호가 같이 나타난다는 게 무슨 뜻인가" 는 규칙 판정이 아니다 -
+#   둘을 같은 것으로 묶어 해석까지 결정론에 넘긴 것이 지금까지의 한계였다.
+MAX_REVISIONS = 1        # 반박 -> 재해석은 한 번만. 무한 순환은 비용만 태운다
+MAX_INSIGHTS = 5
+
+_INTERPRET_SYSTEM = """너는 리서치본부 총괄(RES-00)이다.
+분석가 여섯의 판정을 **가로질러** 해석한다. 숫자를 다시 쓰는 것이 아니라
+서로 다른 축이 함께 무엇을 가리키는지 말한다.
+
+반드시 지켜라:
+- 각 해석은 **서로 다른 분석가 2인 이상**의 Fact 를 참조한다.
+  하나만 가리키면 그건 해석이 아니라 그 Fact 의 재진술이다.
+- 각 해석에 **반증 조건**을 쓴다: 무엇이 관측되면 이 해석이 틀리는가.
+  "없다", "알 수 없음" 같은 회피는 거부된다. 틀릴 수 없는 문장은 분석이 아니다.
+- 판정 지평(일)을 정한다. 언제 맞았는지 볼 수 있어야 한다.
+- 새 수치를 만들지 않는다. 주어진 Fact 를 가리키기만 한다.
+- **[주의] 로 시작하는 Fact 를 반드시 존중한다.** 어떤 지표가 이 업종에
+  적용되지 않는다고 적혀 있으면 그 지표를 근거로 삼지 않는다.
+- source_nodes 에는 **분석가 이름**을 넣는다(주어진 analysts 목록에서 고른다).
+  claim 문장 안에 적지 말고 반드시 이 필드에 넣어라.
+
+kind 는 다음 중 하나: CROSS_SIGNAL, CAUSAL_HYPOTHESIS, REGIME_READ,
+RISK_ASYMMETRY, DIVERGENCE
+
+JSON 만 낸다: {"insights": [{"kind": "...", "claim": "...",
+"supporting_fact_ids": ["..."], "source_nodes": ["..."], "falsifier": "...",
+"horizon_days": 5, "confidence": "MEDIUM"}]}"""
+
+
+def _fact_index(packet: dict) -> dict:
+    """Packet facts -> {id: fact}. id 가 없으면 순번으로 만든다."""
+    out = {}
+    for i, f in enumerate(packet.get("facts") or []):
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or f.get("fact_id") or f"f{i + 1}")
+        out[fid] = f
+    return out
+
+
+def interpret(state: ResearchState) -> dict:
+    """여섯 축을 가로질러 해석을 만든다. **수치 대조가 아니라 반증 가능성으로
+    검증한다** - 수치 대조를 걸면 다시 숫자 나열로 수렴한다."""
+    sys.path.insert(0, str(_BASE / "contracts"))
+    from evidence.llm_client import extract_json
+    from insight import to_claims, validate_insights
+
+    packet = state.get("packet") or {}
+    nodes = {k for k in ("technical", "fundamental", "regime", "geopolitical",
+                         "microstructure", "sentiment")
+             if isinstance(state.get(k), dict)}
+    # ▶ **가로지를 재료는 분석가 readout 이다.** 처음엔 Packet 의 facts 만
+    #   줬는데, 그건 공시·뉴스 기반(d1, n1)이라 **분석가 귀속이 없다** -
+    #   그래서 source_nodes 를 채울 수가 없었고 좋은 해석이 전부 거부됐다.
+    #   교차 해석은 "어느 분석가가 무엇을 봤나" 가 있어야 성립한다.
+    facts = _fact_index(packet)
+    for node in sorted(nodes):
+        ro = (state.get(node) or {}).get("readout") or {}
+        hi = pick_highlights(ro, flags=(ro.get("flags") or []))
+        for it in (hi.get("items") or [])[:6]:
+            k = str(it.get("key") or "")
+            if not k:
+                continue
+            unit = str(it.get("unit") or "")
+            facts[f"{node}.{k}"] = {
+                "claim": f"{k} = {it.get('value')}{unit}", "source_node": node}
+        for fl in (hi.get("flags") or [])[:3]:
+            facts[f"{node}.flag.{fl}"] = {"claim": f"플래그: {fl}",
+                                          "source_node": node}
+        note = ((state.get(node) or {}).get("note") or {}).get("summary")             or (state.get(node) or {}).get("summary")
+        if note:
+            facts[f"{node}.소견"] = {"claim": str(note)[:200],
+                                    "source_node": node}
+        # ▶ **주의사항도 재료다.** 실측(006800): RES-05 가 "부채비율은 금융업에
+        #   적용되지 않는다" 를 cautions 에 실었고 Skeptic 은 그것을 읽어 약한
+        #   주장을 지목했는데, 해석 노드는 수치만 받아 같은 오독을 반복했다 -
+        #   경고가 닿지 않는 층은 경고가 없는 것과 같다.
+        for ci, c in enumerate((ro.get("cautions")
+                                or (state.get(node) or {}).get("cautions")
+                                or [])[:4]):
+            facts[f"{node}.주의{ci + 1}"] = {"claim": f"[주의] {str(c)[:200]}",
+                                            "source_node": node}
+    revision = int(state.get("revisions") or 0)
+    if not facts or len(nodes) < 2:
+        # 가로지를 것이 없으면 해석도 없다. 억지로 만들면 재진술이 된다.
+        return {"insights": [], "insight_rejected": [],
+                "insight_note": f"Fact {len(facts)}건 / 분석가 {len(nodes)}인 - "
+                                f"교차 해석 불가"}
+
+    # ▶ Fact -> 분석가 대응은 **코드가 안다.** 이것을 LLM 에게 물었더니 이름을
+    #   claim 안에 적고 필드는 비워 냈고, 그래서 실측에서 좋은 해석 4건이
+    #   전부 거부됐다(source_nodes=[]). 코드가 아는 것을 LLM 에게 묻지 않는다.
+    fact_node = {fid: str(f.get("source_node") or f.get("node") or "")
+                 for fid, f in facts.items()}
+    brief = {fid: {"claim": str(f.get("claim") or f.get("text") or "")[:180],
+                   "분석가": fact_node.get(fid) or "(미상)"}
+             for fid, f in list(facts.items())[:48]}
+    # 재해석이면 반박 내용을 같이 준다 - 그것이 이 순환의 이유다
+    chal = (packet.get("challenge") or {}) if revision else {}
+    user = json.dumps({
+        "facts": brief,
+        "analysts": sorted(nodes),
+        "thesis": str(packet.get("thesis", ""))[:600],
+        "skeptic_반박": {k: chal.get(k) for k in
+                        ("alternative_explanations", "weakest_claim",
+                         "what_would_overturn_it")} if chal else None,
+        "지시": ("반박을 반영해 해석을 다시 하라" if revision
+                else f"최대 {MAX_INSIGHTS}개"),
+    }, ensure_ascii=False)
+
+    try:
+        raw = _ollama_chat(_INTERPRET_SYSTEM, user)
+        parsed = json.loads(extract_json(raw))
+    except Exception as e:  # noqa: BLE001
+        # 해석 실패가 Packet 실패는 아니다. 다만 침묵하지 않는다.
+        return {"insights": [], "insight_rejected": [],
+                "insight_note": f"해석 미실행: {type(e).__name__}"}
+
+    raw_items = (parsed.get("insights") or [])[:MAX_INSIGHTS]
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        # 참조한 Fact 로부터 분석가를 채운다. LLM 이 채웠으면 그것도 합치되
+        # **없는 분석가는 넣지 않는다** - 참조 무결성은 계약이 다시 본다.
+        derived = {fact_node.get(str(f)) for f in
+                   (item.get("supporting_fact_ids") or [])}
+        given = {str(n) for n in (item.get("source_nodes") or [])}
+        merged = sorted((derived | given) & nodes)
+        if merged:
+            item["source_nodes"] = merged
+
+    ok, rejected = validate_insights(raw_items, fact_ids=set(facts),
+                                     known_nodes=nodes)
+    return {
+        "insights": [i.model_dump() for i in ok],
+        # ▶ 거부를 조용히 버리지 않는다 - 왜 인사이트가 안 나오는지 보여야
+        #   다음에 프롬프트를 고칠 수 있다
+        "insight_rejected": rejected,
+        "insight_claims": to_claims(ok, symbol=str(state.get("symbol") or "")),
+        "insight_note": f"채택 {len(ok)} / 거부 {len(rejected)}"
+                        + (f" (재해석 {revision}회)" if revision else ""),
+    }
+
+
+def needs_revision(state: ResearchState) -> str:
+    """반박이 실질적인데 해석이 그것을 안 다뤘으면 되돌아간다.
+
+    ▶ **LangGraph 가 처음으로 값을 하는 자리다.** 지금까지 그래프는 선형
+      간선뿐이라 함수를 순서대로 부르는 것과 다를 게 없었다. 되돌아가는 경로가
+      있어야 심의(deliberation)가 되고, 심의가 있어야 판단이 깊어진다.
+
+    판정은 결정론이다. "다시 할까?" 를 LLM 에게 물으면 매번 다르게 답하고
+    재현이 깨진다.
+    """
+    if int(state.get("revisions") or 0) >= MAX_REVISIONS:
+        return "done"
+    packet = state.get("packet") or {}
+    conflicts = (packet.get("disagreements") or
+                 (packet.get("challenge") or {}).get("disagreements") or [])
+    if not conflicts:
+        return "done"
+    # 반박이 지목한 분석가를 해석이 실제로 가로질렀는가
+    flagged = set()
+    for c in conflicts:
+        if isinstance(c, dict):
+            flagged |= {str(x) for x in (c.get("nodes") or []) if x}
+    covered = set()
+    for ins in (state.get("insights") or []):
+        covered |= {str(n) for n in (ins.get("source_nodes") or [])}
+    return "revise" if (flagged and not (flagged & covered)) else "done"
+
+
+def bump_revision(state: ResearchState) -> dict:
+    """재해석 횟수를 올린다. **상한이 없으면 순환이 멈추지 않는다.**"""
+    return {"revisions": int(state.get("revisions") or 0) + 1}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def build_pipeline():
     g = StateGraph(ResearchState)
     g.add_node("check_universe", check_universe)
+    g.add_node("check_data_quality", check_data_quality)
     g.add_node("assemble_evidence", assemble_evidence)
     g.add_node("analyze_sentiment", analyze_sentiment)
     g.add_node("analyze_technical", analyze_technical)
@@ -908,9 +1217,17 @@ def build_pipeline():
     g.add_node("analyze_microstructure", analyze_microstructure)
     g.add_node("draft_packet", draft_packet)
     g.add_node("challenge_packet", challenge_packet)
+    g.add_node("interpret", interpret)
+    g.add_node("bump_revision", bump_revision)
+    g.add_node("bump_gap_fill", bump_gap_fill)
     g.set_entry_point("check_universe")
     # 거래 불가면 즉시 종료 - 죽은 종목에 분석 비용을 쓰지 않는다
     g.add_conditional_edges("check_universe",
+                            lambda s: "END" if s.get("halted") else "go",
+                            {"END": END, "go": "check_data_quality"})
+    # RES-02 품질 게이트가 Evidence 조립 **앞**에 선다. 뒤에 두면 이미 나쁜
+    # 데이터로 계산을 다 한 뒤에 막는 셈이라 게이트가 아니라 사후 라벨이다.
+    g.add_conditional_edges("check_data_quality",
                             lambda s: "END" if s.get("halted") else "go",
                             {"END": END, "go": "assemble_evidence"})
     # 분석가 6인은 순차다 - GPU 하나에 모델 하나(agent-research 공유)라
@@ -922,9 +1239,19 @@ def build_pipeline():
     # 레짐(국내 단면) 다음에 지정학(외생 환경) - 안에서 밖으로 넓히는 순서
     g.add_edge("analyze_regime", "analyze_geopolitical")
     g.add_edge("analyze_geopolitical", "analyze_microstructure")
-    g.add_edge("analyze_microstructure", "draft_packet")
-    g.add_edge("draft_packet", "challenge_packet")
-    g.add_edge("challenge_packet", END)
+    # Evidence Gap Loop - 분석가가 판정을 못 냈으면 근거를 더 모아 전원이
+    # 다시 본다. 한 분석가만 다시 돌리면 Packet 안에서 시점이 갈라진다.
+    g.add_conditional_edges("analyze_microstructure", needs_gap_fill,
+                            {"fill": "bump_gap_fill", "done": "draft_packet"})
+    g.add_edge("bump_gap_fill", "assemble_evidence")
+    g.add_edge("draft_packet", "interpret")
+    # 해석 -> 반박 -> (필요하면) 재해석. **이 순환이 LangGraph 를 쓰는 이유다.**
+    # 지금까지 그래프는 선형 간선뿐이라 함수를 순서대로 부르는 것과 다를 게
+    # 없었다. 되돌아가는 경로가 있어야 심의가 되고, 심의가 있어야 판단이 깊어진다.
+    g.add_edge("interpret", "challenge_packet")
+    g.add_conditional_edges("challenge_packet", needs_revision,
+                            {"revise": "bump_revision", "done": END})
+    g.add_edge("bump_revision", "interpret")
     return g.compile()
 
 
@@ -1206,6 +1533,34 @@ def append_occurrences(events: list[dict], *,
         return 0
 
 
+def fetch_method_performance(used_keys: list[str], *,
+                             get: Optional[Callable] = None) -> dict:
+    """방법별 사후 성과를 되읽어 이번 근거의 성적을 붙인다 (학습 계층 2단).
+
+    ▶ 이 한 칸이 비어 자가 발전이 안 됐다. 주장 발행(packet_claims.method_key),
+      사후 채점(packet_outcome_scorer), 집계(research.method_calibration)까지
+      다 있었는데 **그 숫자를 다음 실행이 읽지 않았다** - 적중률 30% 짜리와
+      70% 짜리를 리포트가 똑같은 어조로 인용했다.
+
+    실패는 비치명이다. 성적을 못 읽었다고 오늘 리포트를 못 내면 안 된다 -
+    다만 **못 읽었다는 사실을 남긴다.** 조용히 빈 값을 주면 "성적이 없는 것"과
+    "성적이 나쁜 것"이 구분되지 않는다.
+    """
+    from evidence.method_performance import grade_all, performance_note
+
+    if not used_keys:
+        return {"available": False, "reason": "이번 실행이 쓴 method_key 가 없다"}
+    try:
+        rows = (get or _get)(f"{RESEARCH_API}/methods/performance?min_scored=1")
+    except Exception as e:
+        return {"available": False,
+                "reason": f"성과 조회 실패: {type(e).__name__}"}
+    rows = rows if isinstance(rows, list) else []
+    note = performance_note(grade_all(rows), used_keys=used_keys)
+    note["available"] = True
+    return note
+
+
 def run_research_department(symbol: str) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
     import uuid
@@ -1270,6 +1625,15 @@ def run_research_department(symbol: str) -> dict:
     # 선순환 1단: 반증 가능한 주장을 발행해 남긴다. 채점은 지평이 지난 뒤
     # collectors/packet_outcome_scorer.py 가 시세로 대조한다.
     claims = build_packet_claims(out, packet)
+    # ▶ **해석도 채점 대상이다.** 반증 조건과 지평이 있으므로 같은 경로로
+    #   발행한다 - 자가 발전의 대상이 지표에서 판단으로 넓어지는 지점이다.
+    #   생성만 하고 발행을 안 하면 인사이트는 영원히 성적이 안 매겨진다.
+    insight_claims = out.get("insight_claims") or []
+    claims = claims + insight_claims
+    packet["_insights"] = out.get("insights") or []
+    packet["_insight_rejected"] = out.get("insight_rejected") or []
+    packet["_insight_note"] = out.get("insight_note")
+    packet["_revisions"] = int(out.get("revisions") or 0)
     packet["_claims"] = claims
     packet["_claims_recorded"] = _record_packet_claims(
         trace_id=trace_id, symbol=symbol, claims=claims,
@@ -1278,6 +1642,10 @@ def run_research_department(symbol: str) -> dict:
     # 실행에서 3번 반복되면 skill_forge 가 절차로 굳힌다.
     packet["_occurrences_logged"] = append_occurrences(collect_occurrences(
         out, run_id=trace_id, symbol=symbol, at=started.isoformat()))
+    # 선순환 3단: 이번에 쓴 방법들의 **과거 성적**을 붙인다. 리포트가 스스로
+    # "이 신호는 최근 성적이 나쁘다" 고 말하면 그것만으로 판단의 질이 오른다.
+    packet["_method_performance"] = fetch_method_performance(
+        sorted({c["method_key"] for c in claims if c.get("method_key")}))
     return packet
 
 
@@ -1285,6 +1653,7 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
     """Packet 을 그대로 옮겨 적는 순수 함수 - 동규님 리스크본부 리포트 패턴
     (departments/03-risk/scripts.py _render_report_md, 2026-08-01) 채택.
     LLM 이 리포트 구조·내용을 창작하지 않는다. now 주입은 자체점검 결정성용."""
+    _mp = packet.get("_method_performance") or {}
     nc = packet.get("numeric_check") or {}
     dc = packet.get("date_check") or {}
     qq = (nc.get("quote_quality") or {})
@@ -1311,9 +1680,48 @@ def _render_packet_md(packet: dict, *, now: str | None = None) -> str:
         f" (창 {dc.get('window', '-')}) |"),
         "| **분석가 판정** | " + " · ".join(
             f"{k}={v}" for k, v in verdicts.items() if v) + " |",
+        # ▶ **이번 근거의 과거 성적** (학습 계층 2단). 적중률 30% 짜리와 70%
+        #   짜리를 같은 어조로 인용하던 것을 드러낸다. 성적이 '없는' 것과
+        #   '나쁜' 것을 구분해 적는다 - 새 지표가 표본 없다는 이유로 나쁜
+        #   기법처럼 읽히면 아무도 새 지표를 안 넣는다.
+        (f"| **근거 성적** | "
+         + (("우수 " + ", ".join(_mp["strong_methods"]) + " · ") if _mp.get("strong_methods") else "")
+         + (("⚠ 저조 " + ", ".join(_mp["weak_methods"]) + " · ") if _mp.get("weak_methods") else "")
+         + (f"미채점 {len(_mp['unscored_methods'])}종" if _mp.get("unscored_methods") else "")
+         + " |") if _mp.get("available") else
+        f"| **근거 성적** | 미확인 ({_mp.get('reason', '조회 안 함')}) |",
         f"| **생성** | {PIPELINE_VERSION}, {now or datetime.now(timezone.utc).isoformat()} |",
         "",
         "## Thesis", "", str(packet.get("thesis", "")), "",
+    ]
+    # ── 해석 (인사이트) ─────────────────────────────────────────────────────
+    # 수치 나열과 분리해 싣는다. 검증 방식이 다르므로 읽는 사람도 다르게
+    # 읽어야 한다 - Fact 는 확정치 대조를 통과한 것이고, 해석은 **반증 가능한
+    # 가설**이다. 섞어 놓으면 가설이 사실처럼 읽힌다.
+    _ins = packet.get("_insights") or []
+    if _ins:
+        lines += ["## 인사이트 (교차 해석)", "",
+                  f"_{len(_ins)}건. 각 해석은 서로 다른 분석가 2인 이상의 "
+                  f"근거를 가로지르며 **반증 조건**을 함께 낸다 - 틀릴 수 있어야 "
+                  f"분석이다._", ""]
+        for k, ins in enumerate(_ins, 1):
+            lines += [
+                f"**{k}. [{ins.get('kind')}]** {ins.get('claim')}",
+                f"- 근거: {', '.join(ins.get('source_nodes') or [])} "
+                f"({len(ins.get('supporting_fact_ids') or [])}개 Fact)",
+                f"- **반증 조건**: {ins.get('falsifier')}",
+                f"- 지평 {ins.get('horizon_days')}일 · 신뢰도 {ins.get('confidence')}",
+                "",
+            ]
+    _rej = packet.get("_insight_rejected") or []
+    if _rej:
+        # ▶ 거부를 숨기지 않는다. 왜 인사이트가 적은지 보여야 프롬프트를 고친다
+        lines += [f"_거부된 해석 {len(_rej)}건: "
+                  + "; ".join(str(r.get("reason", ""))[:70] for r in _rej[:3])
+                  + "_", ""]
+    if packet.get("_revisions"):
+        lines += [f"_반박을 받아 해석을 {packet['_revisions']}회 재작성했다._", ""]
+    lines += [
     ]
     for title, key in (("사실 (facts)", "facts"),
                        ("해석 (interpretation)", "interpretation"),
@@ -1748,6 +2156,225 @@ def _check_occurrence_log_failure_is_not_fatal():
         blocker.unlink(missing_ok=True)
 
 
+def _check_method_performance_readback():
+    """성과 되읽기가 **없는 것과 나쁜 것을 구분**하는가 (학습 계층 2단).
+
+    조용히 빈 값을 주면 성적이 없는 기법과 나쁜 기법이 같아 보인다. 조회
+    실패도 마찬가지 - 못 읽었으면 못 읽었다고 남아야 사람이 판단한다.
+    """
+    rows = [{"method_key": "momentum_20d", "horizon_days": 20, "scored": 40,
+             "trigger_rate": 0.20, "brier_score": None},
+            {"method_key": "adx_trend", "horizon_days": 20, "scored": 60,
+             "trigger_rate": 0.75, "brier_score": None},
+            {"method_key": "신규", "horizon_days": 20, "scored": 2,
+             "trigger_rate": 1.0, "brier_score": None}]
+    r = fetch_method_performance(["momentum_20d", "adx_trend", "신규", "미채점"],
+                                 get=lambda url: rows)
+    assert r["available"] is True, r
+    assert r["weak_methods"] == ["momentum_20d"], r
+    assert r["strong_methods"] == ["adx_trend"], r
+    # 표본 2건짜리는 INSUFFICIENT 라 약체가 아니다 - 새 지표를 죽이면 안 된다
+    assert "신규" not in r["weak_methods"], r
+    # 아예 집계에 없는 것은 이름을 남긴다
+    assert "미채점" in r["unscored_methods"], r
+    assert "momentum_20d" in (r["caution"] or ""), r
+
+    # 조회 실패는 비치명이되 **사유가 남는다**
+    def boom(url):
+        raise OSError("연결 거부")
+    bad = fetch_method_performance(["x"], get=boom)
+    assert bad["available"] is False and "실패" in bad["reason"], bad
+    # 쓴 기법이 없으면 그것도 사유로 남는다
+    none = fetch_method_performance([], get=lambda url: rows)
+    assert none["available"] is False, none
+
+
+def _check_data_quality_gate():
+    """품질 게이트가 **Evidence 조립 앞**에 서고, 행 0을 PASS 로 안 보는가.
+
+    RES-02 는 P0 페르소나인데 감사 결과를 노출하는 엔드포인트가 없어
+    파이프라인 어디에도 배선돼 있지 않았다. 게이트를 뒤에 두면 이미 나쁜
+    데이터로 계산을 다 한 뒤에 막는 셈이라 게이트가 아니라 사후 라벨이다.
+    """
+    # 조회를 가짜로 바꿔 네 경우를 본다
+    orig = globals()["_get"]
+    try:
+        globals()["_get"] = lambda url: [
+            {"stream_type": "ticks", "quality_status": "FAIL",
+             "metrics": {"reasons": ["중복 12%"]}}]
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "FAIL", out
+        assert out.get("halted"), "FAIL 인데 안 막았다"
+
+        # ▶ **무관한 스트림 장애로 막지 않는다.** 실측: derivatives FAIL 이
+        #   주식 종목 분석을 통째로 멈췄다 - 분석가 6인 중 파생을 쓰는
+        #   사람이 없다. 과한 게이트는 사람이 곧 꺼버린다.
+        globals()["_get"] = lambda url: [
+            {"stream_type": "derivatives", "quality_status": "FAIL",
+             "metrics": {"reasons": ["지연"]}}]
+        out = check_data_quality({"symbol": "x"})
+        assert not out.get("halted"), "무관한 스트림으로 막았다"
+        # 다만 **숨기지도 않는다**
+        assert out["data_quality"]["failed_unrelated_streams"] == ["derivatives"], out
+
+        globals()["_get"] = lambda url: [
+            {"stream_type": "ticks", "quality_status": "WARN", "metrics": {}}]
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "WARN" and not out.get("halted"), out
+
+        # ▶ 행 0 은 PASS 가 아니다 - 감사가 안 돌았다는 뜻이다
+        globals()["_get"] = lambda url: []
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "UNKNOWN", out
+        assert "0건" in out["data_quality"]["reason"], out
+
+        # 조회 실패도 통과가 아니다
+        def boom(url):
+            raise OSError("거부")
+        globals()["_get"] = boom
+        out = check_data_quality({"symbol": "x"})
+        assert out["data_quality"]["status"] == "UNKNOWN", out
+    finally:
+        globals()["_get"] = orig
+
+    # 그래프에서 게이트가 assemble_evidence 앞에 있는가
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    i_gate = src.index('g.add_node("check_data_quality"')
+    i_asm = src.index('"go": "assemble_evidence"')
+    assert i_gate < i_asm, "게이트가 Evidence 조립 뒤에 있다"
+
+
+def _check_revision_cycle_terminates():
+    """**순환이 반드시 끝나는가.** 무한 반복은 최악의 실패다 - 비용을 태우고
+    사람이 개입할 때까지 안 멈춘다.
+
+    그리고 되돌아가는 조건이 결정론인지 본다. "다시 할까?" 를 LLM 에게 물으면
+    매번 다르게 답하고 재현이 깨진다.
+    """
+    conflict = {"packet": {"disagreements": [{"nodes": ["technical", "regime"]}]}}
+
+    # 갈등이 있고 해석이 그 축을 안 다뤘으면 되돌아간다
+    st = dict(conflict, insights=[{"source_nodes": ["fundamental", "sentiment"]}])
+    assert needs_revision(st) == "revise", st
+
+    # 해석이 그 축을 다뤘으면 안 돌아간다 - 이미 답했는데 또 시키면 낭비다
+    st2 = dict(conflict, insights=[{"source_nodes": ["technical", "regime"]}])
+    assert needs_revision(st2) == "done", st2
+
+    # 갈등이 없으면 안 돌아간다
+    assert needs_revision({"packet": {"disagreements": []}}) == "done"
+
+    # ▶ 상한에 닿으면 **무조건** 끝난다. 갈등이 남아 있어도 끝낸다 -
+    #   해결 못 한 갈등은 Packet 에 남아 사람이 본다
+    st3 = dict(conflict, insights=[], revisions=MAX_REVISIONS)
+    assert needs_revision(st3) == "done", st3
+    assert bump_revision({"revisions": 0})["revisions"] == 1
+
+    # 실제로 유한한가 - 상한까지 돌리고 멈추는지 시뮬레이션
+    state = dict(conflict, insights=[{"source_nodes": ["x", "y"]}], revisions=0)
+    steps = 0
+    while needs_revision(state) == "revise":
+        state["revisions"] = bump_revision(state)["revisions"]
+        steps += 1
+        assert steps <= MAX_REVISIONS + 1, "순환이 안 멈춘다"
+    assert steps == MAX_REVISIONS, steps
+
+    # 그래프에 순환 간선이 실제로 있는가 (선형으로 되돌아가면 의미가 없다)
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    assert 'g.add_edge("bump_revision", "interpret")' in src, "순환 간선이 없다"
+    assert '"revise": "bump_revision"' in src, "조건부 되돌림이 없다"
+
+
+def _check_interpret_refuses_thin_input():
+    """가로지를 것이 없으면 해석을 만들지 않는다.
+
+    Fact 가 없거나 분석가가 1인이면 '교차 해석' 이 성립하지 않는다. 억지로
+    만들면 그 Fact 의 재진술이 되고, 재진술을 인사이트라 부르면 리포트가
+    길어지기만 한다.
+    """
+    r = interpret({"packet": {"facts": []}, "technical": {}, "regime": {}})
+    assert r["insights"] == [] and "불가" in r["insight_note"], r
+    # 분석가 1인
+    r2 = interpret({"packet": {"facts": [{"id": "f1", "claim": "x"}]},
+                    "technical": {}})
+    assert r2["insights"] == [], r2
+
+
+def _check_insight_render_and_publish():
+    """인사이트가 **리포트에 실리고 채점 행으로 발행되는가.**
+
+    생성만 하고 발행을 안 하면 영원히 성적이 안 매겨진다 - 자가 발전의
+    대상이 지표에 머문다. 렌더링도 마찬가지로, 안 보이면 없는 것과 같다.
+    """
+    sys.path.insert(0, str(_BASE / "contracts"))
+    from insight import Insight, to_claims
+
+    ins = {"kind": "DIVERGENCE",
+           "claim": "추세는 섰는데 폭이 안 따라와 저변이 좁다",
+           "source_nodes": ["technical", "regime"],
+           "supporting_fact_ids": ["f1", "f2"],
+           "falsifier": "5거래일 내 상승비율이 55% 를 넘으면 틀렸다",
+           "horizon_days": 5, "confidence": "MEDIUM"}
+    md = _render_packet_md(
+        {"symbol": "005380", "thesis": "t", "facts": [], "_insights": [ins],
+         "_insight_rejected": [{"reason": "없는 Fact 참조"}], "_revisions": 1},
+        now="2026-08-04T00:00:00Z")
+    assert "## 인사이트 (교차 해석)" in md, "인사이트 절이 없다"
+    # ▶ 절 이름이 기존 interpretation 절과 겹치면 읽는 사람이 헷갈린다
+    assert md.count("## 해석 (교차") == 0, "절 이름이 interpretation 과 겹친다"
+    assert "반증 조건" in md, "반증 조건이 안 보인다 - 이게 인사이트의 핵심이다"
+    assert "거부된 해석" in md, "거부를 숨기면 왜 적은지 모른다"
+    assert "재작성" in md, "재해석 횟수가 안 보인다"
+
+    # 발행 행이 반증 조건을 싣는가 (채점의 기준이다)
+    claims = to_claims([Insight(**ins)], symbol="005380")
+    assert claims[0]["falsification_note"], "반증 조건이 채점 행에 없다"
+    assert claims[0]["kind"] == "INSIGHT_DIVERGENCE"
+
+
+def _check_gap_loop_terminates_and_is_selective():
+    """근거 재수집 순환이 **끝나고, 아무 때나 돌지 않는가.**
+
+    빈 구멍이 있다고 무조건 되돌아가면 안 된다 - 어떤 지표는 그 종목에
+    원래 없어서 몇 번을 다시 모아도 안 채워진다. 그러면 순환이 낭비가 되고,
+    낭비하는 순환은 곧 꺼진다.
+    """
+    # 판정을 못 낸 분석가가 있으면 되돌아간다
+    st = {"technical": {"verdict": "INSUFFICIENT_DATA"}}
+    assert needs_gap_fill(st) == "fill", st
+
+    # ▶ 미확인 항목이 있어도 **판정은 냈으면** 되돌아가지 않는다
+    st2 = {"technical": {"verdict": "POSITIVE",
+                         "readout": {"unavailable": ["amihud", "vpin"]}}}
+    assert needs_gap_fill(st2) == "done", st2
+
+    # 상한에 닿으면 무조건 끝난다 - 못 메우면 부족한 채로 내되 사실을 남긴다
+    st3 = dict(st, gap_fills=MAX_GAP_FILLS)
+    assert needs_gap_fill(st3) == "done", st3
+
+    # 유한성 - 실제로 돌려본다
+    state = dict(st, gap_fills=0)
+    steps = 0
+    while needs_gap_fill(state) == "fill":
+        state.update(bump_gap_fill(state))
+        steps += 1
+        assert steps <= MAX_GAP_FILLS + 1, "재수집 순환이 안 멈춘다"
+    assert steps == MAX_GAP_FILLS, steps
+
+    # 무엇이 비었는지 남는가 - 안 남기면 같은 구멍이 영원히 반복된다
+    g = bump_gap_fill({"technical": {"verdict": "INSUFFICIENT_DATA",
+                                     "readout": {"unavailable": ["amihud"]}},
+                       "regime": {"verdict": "OK",
+                                  "readout": {"unavailable": ["vkospi_52w"]}}})
+    assert g["evidence_gaps"]["technical"] == ["amihud"], g
+    assert g["evidence_gaps"]["regime"] == ["vkospi_52w"], g
+
+    # 그래프에 순환 간선이 있는가
+    src = __import__("pathlib").Path(__file__).read_text(encoding="utf-8")
+    assert 'g.add_edge("bump_gap_fill", "assemble_evidence")' in src
+    assert '"fill": "bump_gap_fill"' in src
+
+
 def _check_korean_guard():
     """서술이 한국어인가 - **지시만 하고 검사하지 않으면 지켜지지 않는다.**"""
     # 실제 사고 문장(005380, 2026-08-03)
@@ -1804,6 +2431,12 @@ if __name__ == "__main__":
     _check_graph_shape()
     _check_korean_guard()
     _check_occurrence_collection()
+    _check_method_performance_readback()
+    _check_data_quality_gate()
+    _check_revision_cycle_terminates()
+    _check_interpret_refuses_thin_input()
+    _check_insight_render_and_publish()
+    _check_gap_loop_terminates_and_is_selective()
     _check_occurrence_log_failure_is_not_fatal()
     _check_halt_short_circuit()
     _check_packet_guard()

@@ -6,8 +6,10 @@
 #       11.1절(Image 기준), departments/03-risk/Dockerfile·departments/06-ai-qa-audit/Dockerfile 패턴
 #
 # ▶ Build Context가 저장소 루트가 아니라 **departments/00-ceo-office** 다 (risk/audit
-#   Dockerfile과 다른 점, research Dockerfile과 같은 이유). api/app.py는 src/mandate,
-#   src/reporting, src/notification만 import하고 다른 본부 코드를 참조하지 않는다.
+#   Dockerfile과 다른 점, research Dockerfile과 같은 이유). api/app.py는 src/ 하위
+#   (mandate, reporting, notification, approval, case, escalation)만 import하고 다른
+#   본부 코드를 참조하지 않는다. `COPY src ./src`가 전체를 담으므로 모듈이 늘어도
+#   이 파일은 그대로다.
 #
 # ▶ 하나의 Image, command만 바꿔 governance-api와 notification-worker를 둘 다 돌린다
 #   (research/risk와 동일 원칙). reporting-worker/lifecycle-worker류는 아직 안 만들었다 -

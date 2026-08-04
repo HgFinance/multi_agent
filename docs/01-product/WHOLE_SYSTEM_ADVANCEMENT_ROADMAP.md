@@ -659,7 +659,7 @@ Strategy 계약은 유지돼야 한다.
 - 모든 Tick을 LLM 또는 LangGraph State에 넣는 구조
 - Agent가 Risk Limit, Position, Cash와 Ledger를 직접 수정하는 Tool
 - 실패 Trial을 남기지 않는 자동 전략 생성
-- 유명 투자자 문체를 흉내 내는 Persona Fine-tuning
+- 유명 투자자의 정체성·문체를 흉내 내는 Persona Fine-tuning
 - 충분한 Label과 평가 없이 Agent를 강화학습하는 구조
 - Kafka, Flink, Kubernetes와 Graph DB를 동시에 도입하는 Platform 재작성
 - LLM Judge 하나로 전략, Agent 또는 배포를 자동 승인하는 구조
@@ -814,12 +814,15 @@ subject to mandate, risk, liquidity, operational, legal and cost constraints
 - MLflow의 Agent Trace까지의 확장 범위
 - Feast, Dagster, Ray와 ABIDES/JAX-LOB
 - OPA를 Runtime Policy에 사용할 범위
+- InvestmentDoctrine의 Prompt/RAG 대비 SFT/LoRA 개선 폭과 Bedrock·Open-weight Training 경로
 
 ### Trigger 전 보류
 
 - Kafka/Redpanda, Flink, ClickHouse, Neo4j와 Kubernetes
 - Agent 강화학습과 자동 조직 재편
-- Persona Fine-tuning
+- 인물 정체성·문체 Persona Fine-tuning. 이름을 제거한 Doctrine Adapter는
+  [Investment Doctrine Model Factory](../02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)의
+  Dataset·Frozen Eval·QA Trigger 통과 후에만 허용
 - 외부 투자자 대상 자동 자문·일임·Fund 기능
 
 ## 13. 연구 근거와 공개 자료

@@ -305,7 +305,13 @@ def evidence_financials(
         """
         select distinct on (f.account_code, f.period_end, f.consolidation_scope)
                f.account_code, f.value, f.unit, f.currency, f.period_end,
-               f.consolidation_scope, f.published_at, f.observed_at, f.revision
+               f.consolidation_scope, f.published_at, f.observed_at, f.revision,
+               -- 업종(KSIC). issuers 를 이미 join 하는데 안 실어서 RES-05 가
+               -- 업종을 몰랐고, 증권사 부채비율을 제조업 기준으로 읽는 오독이
+               -- 났다(/bars 의 notional 과 같은 유형).
+               -- ▶ 주석에 퍼센트 기호를 쓰지 않는다 - psycopg2 가 SQL 전체에서
+               --   그것을 파라미터 자리로 읽어 IndexError 를 낸다(실측).
+               iss.industry_code
         from research.financial_facts f
         join reference.issuers iss on iss.issuer_id = f.issuer_id
         join reference.instruments i on i.issuer_id = iss.issuer_id
@@ -360,6 +366,32 @@ def universe_restrictions(as_of: Annotated[datetime | None, Query()] = None):
             "total_rows": snap["total_rows"],
             "stale_days": (asof_kst - snap["as_of"]).days,
             "collected_at": snap["collected_at"], "restrictions": rows}
+
+
+@app.get("/methods/performance")
+def methods_performance(
+    min_scored: int = Query(1, ge=0, le=10_000,
+                            description="이 표본 수 이상만. 0 이면 전부"),
+    limit: int = Query(200, gt=0, le=1000),
+):
+    """방법 단위 사후 성과 (학습 계층 2단 - 선순환의 되읽기 경로).
+
+    research.method_calibration 뷰를 그대로 낸다. **등급 판정은 여기서 하지
+    않는다** - evidence/method_performance.py 가 결정론으로 매긴다. API 는
+    숫자만 주고 판정은 한 곳에서만 하게 해야 기준이 갈라지지 않는다.
+
+    ▶ 표본 수(scored)를 **반드시 함께** 준다. 발동률만 보면 n=2 짜리 100% 가
+      n=200 짜리 62% 보다 좋아 보인다. 소표본 과적합은 되먹임이 아니라
+      잡음 증폭이다(마이그레이션 20260802001400 주석과 같은 규율).
+    """
+    return _query("""
+        select method_key, kind, horizon_days, claims, scored,
+               trigger_rate, brier_score, with_probability
+        from research.method_calibration
+        where scored >= %s
+        order by scored desc, method_key, horizon_days
+        limit %s
+    """, (min_scored, limit))
 
 
 @app.get("/macro/observations")

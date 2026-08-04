@@ -1710,6 +1710,7 @@ Strategy Factory는 수집된 시장, 뉴스, 공시, 특징, 주문 및 성과 
 | Alpha Researcher | 시장 이상현상과 가설 발굴 | Hypothesis Spec |
 | Data Scientist | Dataset, Feature, Label 설계 | Dataset Manifest |
 | Quant Researcher | 통계 검증과 모델 개발 | Experiment Run |
+| Investment Doctrine & Model Engineer | 투자 원칙 계약, 조건부 Fine-tuned Reviewer와 Model Card | Doctrine Model Candidate |
 | Market Microstructure Researcher | 체결 가능성과 비용 모델 검증 | Execution Assumption |
 | Bear/Red Team Researcher | 누수, 과적합, 논리 취약점 공격 | Validation Report |
 | Model Risk Manager | 독립 검증과 위험 등급 부여 | Model Risk Decision |
@@ -1744,6 +1745,11 @@ flowchart LR
 실험 결과를 Research Query, Calibration과 검증된 Hermes Skill 후보로 되돌린다. Research와 Quant의
 세부 Graph는 [Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
 따른다.
+
+투자자 Persona는 인물의 문체와 정체성을 모방하지 않고 `InvestmentDoctrine`으로 변환한다. 조건부
+`QNT-08`이 Prompt/RAG Baseline보다 개선 필요성이 입증된 경우에만 Fine-tuned Model Candidate를
+만들며, 자세한 계약과 독립 평가 기준은
+[Investment Doctrine Model Factory](02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
 
 ### 18.4 전략 가설 계약
 

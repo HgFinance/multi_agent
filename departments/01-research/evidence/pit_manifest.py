@@ -116,16 +116,36 @@ MANIFEST: tuple[ToolCapability, ...] = (
     ToolCapability("market-api", "/bars/{symbol}", PitSupport.SUPPORTED, "to",
                    "`to` 로 끝 시각을 자른다. 다만 evidence/bundle.py 는 아직 안 쓴다 - "
                    "Replay 배선 시 반드시 넘겨야 한다"),
-    ToolCapability("market-api", "/snapshot/{symbol}", PitSupport.UNSUPPORTED, None,
-                   "최신 스냅샷 1행. 시간 인자가 없다"),
-    ToolCapability("market-api", "/breadth", PitSupport.UNSUPPORTED, None,
-                   "최신 Breadth. 과거 날짜를 지정할 방법이 없다"),
+    # 2026-08-04: 금지 -> 파라미터. ticks·quotes 는 event_time 으로 이력이 있다.
+    ToolCapability("market-api", "/snapshot/{symbol}", PitSupport.SUPPORTED,
+                   "as_of", "as_of 시각까지의 마지막 체결·호가. 없으면 최신"),
+    # 2026-08-04: 금지 -> 파라미터. market_breadth 는 event_time 으로 이력이
+    # 원래 다 있었고 컷오프만 없었다. 금지는 도구를 없애지만 파라미터는 도구를
+    # 살린다 - **에이전트가 값을 하는지 증명하려면 과거로 돌려볼 수 있어야 한다.**
+    ToolCapability("market-api", "/breadth", PitSupport.SUPPORTED, "as_of",
+                   "as_of 시각까지의 Breadth. 없으면 최신"),
+    # 2026-08-04 신설. **Replay 에서 금지다** - 오늘의 방법 성적은 Replay 시점
+    # 이후에 일어난 결과까지 포함한다. 6월 판단에 "이 기법이 잘 맞는다" 를
+    # 쓰면 그건 그때 몰랐던 것을 아는 셈이고, 정확히 look-ahead 다.
+    # 학습 되먹임과 백테스트는 이 지점에서 반드시 갈라져야 한다.
+    ToolCapability("research-api", "/methods/performance", PitSupport.UNSUPPORTED,
+                   None, "누적 성적은 Replay 시점 이후 결과를 포함한다"),
+    # 2026-08-04 신설. /dq/summary 와 같은 이유 - 그때 몰랐던 품질 결함을
+    # 아는 셈이 된다.
+    ToolCapability("market-api", "/dq/windows", PitSupport.UNSUPPORTED, None,
+                   "현재 품질 감사. Replay 근거로 쓰면 그때 몰랐던 결함을 아는 셈"),
     ToolCapability("market-api", "/dq/summary", PitSupport.UNSUPPORTED, None,
                    "현재 데이터 품질. Replay 판단 근거로 쓰면 그때 몰랐던 결함을 아는 셈"),
-    ToolCapability("market-api", "/regime/daily", PitSupport.UNSUPPORTED, None,
-                   "최신 레짐. RES-07 이 쓴다 - Replay 에서 가장 위험한 경로"),
-    ToolCapability("market-api", "/microstructure/{symbol}", PitSupport.UNSUPPORTED, None,
-                   "최신 미시구조 집계. RES-03 이 쓴다"),
+    # 2026-08-04: 같은 이유로 해제. 일봉 bucket_time 으로 계산하므로 이력이
+    # 있다. RES-07 이 Replay 에서 가장 위험한 경로였는데, 이제 그 경로가
+    # **막힌 것이 아니라 시점이 지정된다.**
+    ToolCapability("market-api", "/regime/daily", PitSupport.SUPPORTED, "as_of",
+                   "as_of 거래일까지의 레짐. 없으면 최신"),
+    # ▶ 2026-08-04 정정: **코드는 진작 trade_date 를 받고 있었다.** 선언만
+    #   UNSUPPORTED 로 남아 RES-03 의 도구가 Replay 에서 불필요하게 막혀 있었다 -
+    #   선언과 실재가 어긋난 자리이고, 이번엔 실재 쪽이 더 나았다.
+    ToolCapability("market-api", "/microstructure/{symbol}", PitSupport.SUPPORTED,
+                   "trade_date", "지정 거래일의 미시구조 집계. RES-03 이 쓴다"),
 )
 
 _BY_PATH = {(c.service, c.path): c for c in MANIFEST}
@@ -141,19 +161,34 @@ def capability(service: str, path: str) -> ToolCapability:
     return cap
 
 
-def ensure_callable(service: str, path: str, *, run_mode: RunMode | str) -> ToolCapability:
+def ensure_callable(service: str, path: str, *, run_mode: RunMode | str,
+                    url: str | None = None) -> ToolCapability:
     """이 실행 모드에서 이 Tool 을 불러도 되는가. 안 되면 예외.
 
     LIVE 에서는 전부 통과한다 - 실시간에서는 '지금' 이 곧 컷오프이므로
     UNSUPPORTED 여도 거짓이 아니다. REPLAY 에서만 막는다.
+
+    ▶ **PIT 지원과 PIT 사용은 다르다.** 엔드포인트가 as_of 를 받는다고 해서
+      호출부가 그것을 넘긴다는 보장이 없다. 넘기지 않으면 REPLAY 에서 조용히
+      현재 값이 오고, 그건 **금지돼 있던 것보다 나쁘다** - 막혀 있으면 사람이
+      알지만 조용히 틀리면 아무도 모른다. url 을 주면 파라미터가 실제로 실렸는지
+      확인한다(2026-08-04: /breadth·/regime/daily·/snapshot 금지를 풀면서
+      이 구멍이 열렸다).
     """
     mode = RunMode(run_mode)
     cap = capability(service, path)
-    if mode is RunMode.REPLAY and cap.support is PitSupport.UNSUPPORTED:
+    if mode is not RunMode.REPLAY:
+        return cap
+    if cap.support is PitSupport.UNSUPPORTED:
         raise PitViolation(
             f"REPLAY 에서 {service}{path} 를 부를 수 없다 - {cap.note}. "
             f"이 Tool 은 언제 불러도 지금 값을 돌려주므로 과거 재현에 쓰면 "
             f"look-ahead 가 된다. 시간 축을 넣거나, 이 근거 없이 Packet 을 만든다")
+    if url is not None and cap.time_param and f"{cap.time_param}=" not in url:
+        raise PitViolation(
+            f"REPLAY 에서 {service}{path} 를 {cap.time_param} 없이 불렀다 - "
+            f"엔드포인트는 PIT 를 지원하지만 이 호출은 컷오프를 안 넘겼다. "
+            f"그대로 두면 현재 값이 과거 판단의 근거로 조용히 기록된다")
     return cap
 
 
@@ -286,6 +321,33 @@ def _check_replay_fail_closed():
     print("  Replay Fail-closed       OK")
 
 
+def _check_pit_param_must_be_used_in_replay():
+    """**지원과 사용은 다르다.** as_of 를 받는 엔드포인트라도 호출부가 안
+    넘기면 REPLAY 에서 현재 값이 온다 - 막혀 있던 것보다 나쁘다. 막혀 있으면
+    사람이 알지만 조용히 틀리면 아무도 모른다.
+    """
+    sup = [c for c in MANIFEST if c.support is PitSupport.SUPPORTED and c.time_param]
+    assert sup, "PIT 지원 Tool 이 하나도 없다"
+    c = sup[0]
+    # 파라미터 없이 부르면 REPLAY 에서 거부
+    try:
+        ensure_callable(c.service, c.path, run_mode=RunMode.REPLAY,
+                        url=f"http://x{c.path}?days=60")
+    except PitViolation as e:
+        assert c.time_param in str(e), str(e)
+    else:
+        raise AssertionError(f"{c.path} 를 {c.time_param} 없이 불렀는데 통과했다")
+    # 넘기면 통과
+    ensure_callable(c.service, c.path, run_mode=RunMode.REPLAY,
+                    url=f"http://x{c.path}?{c.time_param}=2026-06-01")
+    # LIVE 에서는 파라미터가 없어도 통과한다 - '지금' 이 곧 컷오프다
+    ensure_callable(c.service, c.path, run_mode=RunMode.LIVE,
+                    url=f"http://x{c.path}?days=60")
+    # url 을 안 주면 옛 동작(선언만 확인) - 호출부가 아직 안 고쳐진 곳을
+    # 깨뜨리지 않는다
+    ensure_callable(c.service, c.path, run_mode=RunMode.REPLAY)
+
+
 def _check_matches_source():
     """선언이 실제 API 코드와 일치하는가 - 이게 이 모듈의 존재 이유다."""
     problems = audit_against_source()
@@ -310,6 +372,8 @@ if __name__ == "__main__":
     print(f"{MODULE_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_declaration_invariants()
     _check_replay_fail_closed()
+    _check_pit_param_must_be_used_in_replay()
+    print("  PIT 파라미터 실사용      OK")
     _check_matches_source()
     _check_summary_hides_nothing()
 

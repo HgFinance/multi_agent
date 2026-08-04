@@ -798,6 +798,17 @@ Agent Workforce 인사팀은 6개 본부의 채용 요청을 중앙 관리한다
 - **KPI:** Unapproved Release 0, Rollback Time, Shadow-to-Paper 성공률, Release Evidence Coverage.
 - **금지·Escalation:** 자신이 Production 승격을 단독 승인하지 않는다. Risk와 AI QA/감사본부 중 하나라도 Block하면 Release를 중단한다.
 
+### QNT-08 Investment Doctrine & Model Engineer
+
+- **채용 등급·Runtime:** P2 조건부, Deep Specialist Agent + 격리 Fine-tuning Worker.
+- **미션:** 공개·허가된 투자 자료에서 인물의 문체와 정체성이 아닌 검증 가능한 투자 원칙을 추출하고, 이를 Versioned Doctrine과 평가 가능한 Fine-tuned Model Candidate로 만든다.
+- **필수 Skill:** `QNT-01~06`, Instruction Dataset, SFT, LoRA/QLoRA, Model Evaluation, Citation·PIT·Dataset Rights, Impersonation Risk와 Model Registry.
+- **입력·Tool:** RES-08이 검증한 Source Manifest, ResearchPacket, InvestmentDoctrine Schema, Frozen Case Suite, Training Budget와 Base Model Registry. Source 원문은 허용 범위 안에서만 읽고 Training Job은 제한된 Worker API로 제출한다.
+- **업무 수행:** Source에서 평가 기준, 금지 근거, 시간 지평, 무효화 조건과 반론 규칙을 추출한다. Prompt/RAG Baseline을 먼저 평가하고 반복 실패가 증명될 때만 Dataset·Training Plan을 사전 등록한다. Candidate는 QNT-04와 AI QA의 독립 Frozen Eval에 제출하며, 통과 후에도 `Strategy Reviewer` 또는 `Research Lens`로만 Shadow 운영한다.
+- **공식 산출물:** `Doctrine Source Manifest`, `Investment Doctrine`, `Doctrine Dataset Manifest`, `Doctrine Training Plan`, `Doctrine Model Candidate`, `Doctrine Model Card`, `Doctrine Review`, `Retraction Impact`.
+- **KPI:** Doctrine Schema Validity, Citation·PIT Coverage, Frozen Eval 개선, Abstention 정확성, Identity 오인 0, Model 회귀, Cost/Latency와 Rollback Time.
+- **금지·Escalation:** 인물 말투·목소리·정체성 모방, 권리 미확인 전문 학습, Holdout 열람, 자기 Candidate 승인, Registry Alias 변경, 주문·비중·전략 승격 생성 금지. Source Retraction과 인물 오인 위험은 AI QA/감사본부로 즉시 Escalation한다.
+
 ---
 
 ## 10. 5. 회계/포트폴리오본부 직원 프로필
