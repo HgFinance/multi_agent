@@ -132,6 +132,15 @@ MANIFEST: tuple[ToolCapability, ...] = (
                    None, "누적 성적은 Replay 시점 이후 결과를 포함한다"),
     # 2026-08-04 신설. /dq/summary 와 같은 이유 - 그때 몰랐던 품질 결함을
     # 아는 셈이 된다.
+    # 2026-08-04 신설. **Replay 금지** - 봉 신선도는 "지금 기준" 판정이다.
+    #   과거 재현에 오늘의 수집 지연을 쓰면 그때 몰랐던 것을 아는 셈이다.
+    ToolCapability("market-api", "/dq/bar_freshness", PitSupport.UNSUPPORTED,
+                   None, "최신 봉 기준 신선도. 지금 시점 판정이다"),
+    # 거래일 달력은 **선언된 사실**이라 소급해도 안전하다 - since 로 과거
+    #   시점을 지정할 수 있고, 그 시점에도 달력은 같았다.
+    ToolCapability("research-api", "/calendar/sessions_since",
+                   PitSupport.SUPPORTED, "since",
+                   "since 이후 거래일 수. 달력은 선언 사실이라 소급 안전"),
     ToolCapability("market-api", "/dq/windows", PitSupport.UNSUPPORTED, None,
                    "현재 품질 감사. Replay 근거로 쓰면 그때 몰랐던 결함을 아는 셈"),
     ToolCapability("market-api", "/dq/summary", PitSupport.UNSUPPORTED, None,
