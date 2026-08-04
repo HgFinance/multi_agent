@@ -152,7 +152,7 @@ deterministic_services:
 implementation:
   runtime_activation:
     as_of: "2026-08-04"
-    worker_registry: "5 canonical LangGraph workers seeded as ACTIVE by 20260804000200"
+    worker_registry: "5 canonical LangGraph workers seeded as ACTIVE by 20260804000400"
     qa_check_contract: "approved_v1; production still requires QA_CHECK_CONTRACT_APPROVED=true"
     policy_corpus: "corpus status endpoint and pgvector retriever implemented; SAMPLE_PLACEHOLDER remains fail-closed"
     operational_trace: "QA_TRACE_PERSIST=true enables ACTIVE-profile agent_runs/tool_calls bridge"
