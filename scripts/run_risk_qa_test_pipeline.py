@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from departments.risk_qa_testkit import PipelineMode, run_risk_qa_pipeline
+from departments.risk_qa_testkit import PipelineMode, WorkerRuntime, run_risk_qa_pipeline
 
 
 def main() -> int:
@@ -24,8 +24,14 @@ def main() -> int:
         default=PipelineMode.TEST.value,
         help="test runs synthetic end-to-end; production is intentionally OFF",
     )
+    parser.add_argument(
+        "--worker-runtime",
+        choices=[runtime.value for runtime in WorkerRuntime],
+        default=WorkerRuntime.DETERMINISTIC.value,
+        help="deterministic stub or real local Ollama Worker; Head remains TEST stub",
+    )
     args = parser.parse_args()
-    result = run_risk_qa_pipeline(args.mode)
+    result = run_risk_qa_pipeline(args.mode, worker_runtime=args.worker_runtime)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0 if result["pipeline_status"] == "COMPLETED" else 2
 
