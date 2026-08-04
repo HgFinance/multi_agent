@@ -47,6 +47,17 @@ _QA_DIR = Path(__file__).resolve().parent.parent
 _EVIDENCE_DIR = _QA_DIR / "evidence"
 _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+
+
+def _configured_evidence_corpus() -> Path:
+    """Resolve the operator-provided QA corpus without exposing its contents."""
+
+    configured = os.environ.get("QA_EVIDENCE_CORPUS_DIR", "").strip()
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else _AGENTIC_RAG_DIR / "corpus" / "evidence"
+    )
 for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 from corpus_registry import inspect_policy_corpus
@@ -626,7 +637,23 @@ def evidence_check(body: ComplianceCheckRequest):
         run_compliance_check,  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
     )
 
-    return run_compliance_check(body.query, body.as_of, persona="evidence-qa-agent")
+    corpus_dir = _configured_evidence_corpus()
+    if os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production":
+        status = inspect_policy_corpus(corpus_dir)
+        if not status.ready:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "QA_EVIDENCE_CORPUS_NOT_READY",
+                    "reason": status.reason,
+                },
+            )
+    return run_compliance_check(
+        body.query,
+        body.as_of,
+        corpus_dir=corpus_dir,
+        persona="evidence-qa-agent",
+    )
 
 
 @app.get("/qa/v1/observability/runtime")
@@ -646,7 +673,7 @@ def prometheus_metrics():
 def evidence_corpus_status():
     """Expose readiness only; document contents never leave the QA service."""
 
-    corpus_dir = (_QA_DIR.parents[1] / "skills" / "agentic-rag" / "corpus" / "evidence").resolve()
+    corpus_dir = _configured_evidence_corpus()
     status = inspect_policy_corpus(corpus_dir)
     return {
         "directory": status.directory,

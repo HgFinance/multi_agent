@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,12 @@ PERSONA_CORPUS = {
 }
 
 
+def _configured_corpus(persona: str) -> Path:
+    env_name = "QA_POLICY_CORPUS_DIR" if persona == "compliance-policy-agent" else "QA_EVIDENCE_CORPUS_DIR"
+    configured = os.environ.get(env_name, "").strip()
+    return Path(configured).expanduser().resolve() if configured else PERSONA_CORPUS[persona]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Agentic RAG baseline (retrieve->grade->generate->hallucination-check->retry)")
     parser.add_argument("--persona", default="compliance-policy-agent", choices=sorted(PERSONA_CORPUS))
@@ -47,7 +54,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    corpus_dir = PERSONA_CORPUS[args.persona]
+    corpus_dir = _configured_corpus(args.persona)
     if not corpus_dir.exists():
         print(json.dumps({"error": f"No corpus configured for persona '{args.persona}'"}), file=sys.stderr)
         return 1
