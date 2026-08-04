@@ -14,12 +14,11 @@
 #   같은 상대 경로(/app/departments/05-accounting-portfolio/...)를 유지해야 한다.
 #   compose에서는 build.context: ../.. / build.dockerfile: 이 파일.
 #
-# ▶ 의존성이 fastapi/uvicorn/pydantic 셋뿐이다. 감싸는 5개 모듈(ledger, portfolio,
+# ▶ 의존성이 fastapi/uvicorn/pydantic/psycopg2 넷이다. 감싸는 5개 모듈(ledger, portfolio,
 #   reconciliation, corporate_actions, daily_report)의 외부 import는 없고 전부 표준
 #   라이브러리이며, 넘어오는 contracts.py만 pydantic을 쓴다.
-#   psycopg2를 넣지 않은 것은 빠뜨린 게 아니라 **아직 쓰지 않기 때문**이다 -
-#   원장이 프로세스 메모리라 DB를 안 붙었다(설계서 4절). 안 쓰는 자격·의존성이
-#   퍼지는 것 자체가 위험이라는 02-trading/Dockerfile과 같은 원칙이다.
+#   psycopg2는 2026-08-04 원장 저장소(ledger/repository.py)가 들어오면서 추가했다 -
+#   DATABASE_URL이 있을 때만 실제로 import된다(`_load_driver()`).
 #
 # ▶ 계획서 6.6의 ledger-worker / portfolio-projector는 넣지 않았다 - 코드가 없다.
 #   코드 없는 역할을 컨테이너부터 만들지 않는다.
@@ -28,7 +27,7 @@ FROM python:3.12-slim
 
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit/ceo/trading Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
-    fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3
+    fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 psycopg2-binary==2.9.12
 
 WORKDIR /app
 # 저장소 루트 기준 상대 경로를 그대로 유지한다 - ledger.py의 parent.parent.parent 계산과 맞아야 한다.

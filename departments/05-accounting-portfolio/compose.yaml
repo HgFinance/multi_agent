@@ -20,20 +20,22 @@ services:
   #   최상위에서 departments/02-trading/contracts를 import해서 이미지 안에서도 같은
   #   상대 경로가 유지돼야 한다(03-risk와 같은 사정).
   #
-  # ▶ DATABASE_URL을 주지 않는다. trading-api와 같은 이유다 - 원장이 프로세스 메모리라
-  #   아직 안 쓴다(설계서 4절). accounting.* 테이블은 Supabase에 이미 있고, psycopg
-  #   구현이 들어오는 순간 여기에 DATABASE_URL을 추가한다. 안 쓰는 자격을 미리
-  #   주입하지 않는다.
+  # ▶ DATABASE_URL이 원장의 위치를 정한다(설계서 4절, 2026-08-04 psycopg 구현).
+  #   **없으면 조용히 인메모리로 뜬다** - 컨테이너를 지우면 분개가 사라지므로
+  #   .env에 DATABASE_URL이 있는지 확인하고 띄운다. trading-api는 아직 안 쓴다.
   #
-  # ▶ 상태가 프로세스 메모리라 **복제하면 안 된다.** replica를 늘리면 원장이
-  #   컨테이너별로 갈라지고, 그러면 대사할 내부 원천이 어느 쪽인지 알 수 없어진다.
-  #   DB store가 들어오기 전까지 단일 인스턴스로 둔다.
+  # ▶ **복제하면 안 된다.** DB 모드에서 원장이 갈라지지는 않지만, 같은 장부에 동시에
+  #   분개하면 로드 -> 계산 -> INSERT 사이에 경합 창이 생긴다. 이중 분개는 DB의
+  #   unique (event_type, source_event_id)가 막고, 평균원가가 오래된 상태를 볼 수 있는
+  #   것은 아직 안 막았다. 단일 인스턴스로 둔다.
   accounting-api:
     build:
       context: ../..
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     container_name: hedgefund-accounting-api
     restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
     ports:
       - "127.0.0.1:8046:8000"   # 로컬 전용 - 외부 노출 금지 (8041~8045 사용 중)
     mem_limit: 256m
