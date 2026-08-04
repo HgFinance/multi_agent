@@ -182,6 +182,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `RQF-02` | `DOCUMENTED` | Research Branch/Fan-in, Hermes Case Adapter와 부분 복구 | 분석가 실패 Fixture가 Checkpoint에서 PARTIAL 복구 |
 | `RQF-03` | `DOCUMENTED` | Evidence-linked 가설 사전 등록과 독립 Quant Validation | Packet→Claim→Hypothesis→Experiment 역추적, 생성자 자기 승인 0건 |
 | `RQF-WEB-01` | `DOCUMENTED` | RES-08 전담 SearXNG/Playwright Web Search MCP와 Evidence 승격 | 타 Persona Search 403, Replay 호출 0건, 검증 전 Fact 승격 0건 |
+| `RQF-IDM-01` | `DOCUMENTED` | QNT-08 InvestmentDoctrine 계약, Fine-tuning Need Gate와 독립 Frozen Eval | 인물 모방 0건, Prompt/RAG Baseline 비교, 자기 승인 0건 |
 | `MODEL-04` | `IMPLEMENTED` | Claude Code Host Proxy 보안·비용·지연 검증 | Commit·Self-check·Probe·429/Timeout·Fallback 증거 |
 
 ### 4.2 도현님: 트레이딩본부, 회계/포트폴리오본부와 공통 Platform

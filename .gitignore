@@ -57,3 +57,7 @@ rag_index_batch.*
 
 # 학습 계층 실행 기록 - 머신별 상태다
 departments/01-research/var/
+
+# 실행 산출물 - 매 실행마다 쌓인다. 리포트는 Notion·DB 에 남으므로 git 은 코드만 본다
+departments/01-research/reports/
+ai-office/*.log

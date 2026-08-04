@@ -1474,6 +1474,9 @@ Quota는 SearXNG 장애 또는 Material Case Coverage 보완에만 사용한다.
 | `HypothesisSpecV2` | Quant Planner | Preregistration Policy | Experiment Designer |
 | `ExperimentCardV1` | Quant Reporter | 독립 Validator + QA | Strategy Registry, Risk, CEO |
 | `CalibrationGuidelineV1` | Outcome/Calibration Worker | Held-out Eval + QA | Versioned Hermes Skill |
+| `InvestmentDoctrineV1` | QNT-08 | RES-08 Citation/Rights + AI QA | Doctrine Baseline·Dataset |
+| `DoctrineModelCandidateV1` | 격리 Training Worker + QNT-08 | QNT-04 Frozen Eval + AI QA | QNT-07 Shadow Registry |
+| `DoctrineReviewV1` | 승인된 Shadow Doctrine Model | Claim/Evidence + Output Policy | QNT-01 Hypothesis Seed |
 
 ### 12.4 Research 구현 순서
 
@@ -1497,6 +1500,17 @@ Quota는 SearXNG 장애 또는 Material Case Coverage 보완에만 사용한다.
 6. Trial Family와 Trial Budget을 DB에 저장해 Parameter 탐색 수를 숨길 수 없게 한다.
 7. 기존 Walk-Forward에 Purge/Embargo를 먼저 넣고 CPCV, DSR와 PBO는 독립 Validation 모듈로 추가한다.
 8. Quant Hermes는 결과를 다시 계산하지 않고 상태, 실패 원인과 Candidate 제출만 관리한다.
+
+#### 12.5.1 Investment Doctrine Model 구현 순서
+
+1. `QNT-08`은 인물 이름과 문체가 아니라 평가 기준, 금지 근거, 시간 지평과 무효화 조건을 `InvestmentDoctrineV1`로 만든다.
+2. RES-08이 Source Citation, Published/Observed Time, License와 Retraction을 먼저 검증한다.
+3. Prompt + RAG Baseline을 Frozen Case에서 측정하고 기준을 만족하면 Fine-tuning하지 않는다.
+4. 반복 실패가 확인된 경우에만 QNT-02가 Temporal Split과 Decontamination을 가진 Dataset Manifest를 고정한다.
+5. QNT-08은 Training Plan을 사전 등록하고 네트워크·운영 DB Write가 없는 격리 Worker가 SFT/LoRA를 실행한다.
+6. QNT-04와 AI QA가 Doctrine 충실도, Citation, Abstention, 일반 능력 회귀와 인물 오인을 독립 평가한다.
+7. 통과 Candidate는 QNT-07이 Shadow Reviewer로만 등록하며 주문·포지션·전략 승격 권한을 주지 않는다.
+8. Source 정정, Drift 또는 Eval 저하 시 Adapter와 관련 Review를 중단하고 이전 Version으로 Rollback한다.
 
 ### 12.6 팀 간 Handoff
 
@@ -1525,6 +1539,10 @@ Quota는 SearXNG 장애 또는 Material Case Coverage 보완에만 사용한다.
 - [ ] `SEARCH_HIT`은 Citation·Time·Numeric 검증 전 Fact Claim으로 사용되지 않는다.
 - [ ] Historical Replay와 Backtest에서 실시간 Web MCP 호출이 0건이다.
 - [ ] Browser Container가 로그인 Profile, 내부망, Secret, 다운로드와 파일 실행에 접근하지 못한다.
+- [ ] 투자자 자료가 Citation, Usage Rights와 `as_known_at`을 가진 Source Manifest로 관리된다.
+- [ ] Doctrine Model이 인물의 정체성·문체, 주문·비중 또는 승인 상태를 생성하지 않는다.
+- [ ] Fine-tuning Candidate가 Prompt/RAG Baseline, Frozen Eval과 일반 능력 회귀 검사를 통과한다.
+- [ ] QNT-08은 자기 Candidate 승인, Holdout 열람과 Registry Alias 변경 권한이 없다.
 
 ## 13. 공식 참고 자료
 

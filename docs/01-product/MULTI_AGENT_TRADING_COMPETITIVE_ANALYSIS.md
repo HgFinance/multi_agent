@@ -520,8 +520,9 @@ AI Office는 Agent가 움직이는 모습을 보여주는 장식 화면이 아�
 | 4 | Adaptive Research Budget | 4 | 4 | 5 | 5 | 5 | 89 | P0 즉시 |
 | 6 | Digital Pod Shop Allocator | 5 | 5 | 4 | 2 | 4 | 85 | P2 |
 | 7 | Organization Credit Assignment | 5 | 4 | 4 | 2 | 2 | 76 | P0 Trace, P2 학습 |
-| 8 | KRX Market Digital Twin | 4 | 4 | 2 | 1 | 4 | 63 | P3 Execution 연구 |
-| 9 | 유명 투자자 Persona Fine-tuning | 1 | 2 | 3 | 4 | 2 | 44 | P3 보류, Doctrine 대체 |
+| 8 | Investment Doctrine Adapter Factory | 4 | 4 | 4 | 2 | 4 | 74 | P2 조건부 |
+| 9 | KRX Market Digital Twin | 4 | 4 | 2 | 1 | 4 | 63 | P3 Execution 연구 |
+| 10 | 유명 투자자 정체성·문체 Persona Fine-tuning | 1 | 2 | 3 | 4 | 2 | 44 | 보류, Doctrine으로 대체 |
 
 ### 12.4 P0-1. Forecast·Calibration Ledger
 
@@ -783,7 +784,7 @@ reconciliation_error
 - 실제 RL·Fine-tuning은 충분한 Case 수, GPU 예산과 Rollback 평가가 준비된 뒤 별도 ADR로 결정한다.
 - Agent Lightning을 즉시 필수 의존성으로 추가하지 않고 Trace Schema와 분리 원칙부터 채택한다.
 
-### 12.11 P3. Market Digital Twin과 Persona Fine-tuning
+### 12.11 P2/P3. Investment Doctrine Model과 Market Digital Twin
 
 ABIDES와 JAX-LOB는 주문장, Latency, Market Impact와 Execution Agent를 시험하는 데 유용하다.
 하지만 KRX 미시구조와 실제 주문 흐름에 맞춘 Calibration이 어렵기 때문에 초기 Alpha 검증 수단으로
@@ -796,7 +797,9 @@ ABIDES와 JAX-LOB는 주문장, Latency, Market Impact와 Execution Agent를 시
 - 선물·옵션 Multi-leg Execution과 Margin Scenario
 - 동일 주문 알고리즘의 반복 가능한 Chaos Test
 
-유명 투자자 Persona Fine-tuning은 보류한다. 대신 다음 `InvestmentDoctrine`을 사용한다.
+유명 투자자의 정체성과 문체를 모방하는 Persona Fine-tuning은 계속 보류한다. 대신 다음
+`InvestmentDoctrine`을 먼저 사용하고, Prompt/RAG Baseline이 고정 Eval을 반복 실패할 때만
+인물 이름을 제거한 Doctrine Adapter Fine-tuning을 조건부로 허용한다.
 
 ```text
 doctrine_id / version
@@ -812,6 +815,11 @@ calibration_history
 
 Doctrine은 유명인의 정체성을 모방하지 않고 평가 가능한 투자 원칙만 표현한다. 동일 Case에서
 실적이 나쁜 Doctrine은 이름의 유명세와 무관하게 비활성화한다.
+
+조건부 `QNT-08 Investment Doctrine & Model Engineer`의 역할, Dataset, SFT/LoRA, 독립 Eval과
+Shadow 배포 기준은 [Investment Doctrine Model Factory](../02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를
+따른다. Doctrine Model은 `Strategy Reviewer` 또는 `Research Lens`이며 주문이나 Risk 승인을
+생성하지 않는다.
 
 ### 12.12 12주 실행안
 

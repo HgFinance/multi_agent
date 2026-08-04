@@ -7,11 +7,15 @@
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Graph와 계약은
 [Research-Quant Evidence-to-Strategy Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
+투자자 Persona를 측정 가능한 투자 원칙과 조건부 Fine-tuned Reviewer로 만드는 설계는
+[Investment Doctrine Model Factory](../../docs/02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
 
 ## Mission
 
 전략 가설, Point-in-Time Dataset, Backtest, Walk-Forward와 Release Candidate를 담당한다. 검증된 불변
 Strategy Bundle만 Shadow/Paper 배포 후보로 제출하며, 실시간 운용 중 전략 코드를 직접 수정하지 않는다.
+조건부 `QNT-08`은 인물의 말투가 아닌 투자 원칙을 `InvestmentDoctrine`으로 구조화하고, 필요성이
+검증된 경우에만 Fine-tuned Model Candidate를 만들어 Shadow Reviewer로 제출한다.
 
 `quant-backtest-department`는 Production 승격을 직접 하지 않는다. QA 독립 검증, Risk Capability와
 CEO 승인이 필요하다. Backtest 수익률이 좋아도 미래 데이터, 거래비용, 과적합 또는 필요한 거래 기능이
@@ -60,6 +64,14 @@ Quant Hermes Intake
   -> Model/Strategy Arbitrator
   -> ExperimentCardV1
   -> QA · Risk · CEO Gate
+
+Optional Doctrine Branch
+  -> Verified Source와 InvestmentDoctrineV1
+  -> Prompt/RAG Baseline
+  -> 필요할 때만 격리 SFT/LoRA Training
+  -> Independent Frozen Eval
+  -> DoctrineReviewV1
+  -> QNT-01 Hypothesis Seed
 ```
 
 핵심 규칙:
@@ -99,6 +111,8 @@ python departments/04-quant-backtest/pipeline/experiment_orchestrator.py
 - Dataset·Code·Dependency·Seed·Cost Model을 CI에서 같은 결과로 재현한다.
 - 현재 `TESTING` Hypothesis 2개의 종료 조건을 명시하고 고아 Experiment를 방지한다.
 - AI Office에는 Tick 원문이 아니라 Experiment·Candidate Read Model만 제공한다.
+- `QNT-08` Doctrine Profile을 실제 `doctrine-trainer` Worker, Dataset Registry와 Frozen Eval에 연결한다.
+- 인물 Persona가 아닌 `InvestmentDoctrineV1` Fixture부터 구현하고 Fine-tuning은 Need Gate 통과 후 실행한다.
 
 ## Handoff
 
