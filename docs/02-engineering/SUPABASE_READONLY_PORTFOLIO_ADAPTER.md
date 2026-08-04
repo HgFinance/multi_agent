@@ -32,6 +32,31 @@ python scripts/run_portfolio_supabase_readonly.py \
 `SUPABASE_UNAVAILABLE` 또는 `DEGRADED/HOLD`로 끝난다. 자동으로 TEST 후보를
 대체하거나 외부 시스템에 쓰지 않는다.
 
+연결과 PIT 데이터가 정상인 뒤에는 동일 `as_of`를 2~3회 반복해 추천·Risk/QA advisory 결과의 결정론적 Replay를 확인할 수 있다.
+
+```bash
+python scripts/run_portfolio_supabase_readonly.py \
+  --profile-file profile.json \
+  --replay-count 2
+```
+
+이 명령은 OrderIntent를 만들거나 Paper Broker를 호출하지 않는다. 포트폴리오 적합성 추천과 주문 실행은 서로 다른 계약이므로 Paper 주문 검증은 별도 명시적 OrderIntent 테스트에서만 수행한다.
+
+## 연결 복구 진단
+
+프로필 없이 연결 경로만 점검할 수 있다. 출력에는 DSN, 호스트, 사용자, 비밀번호가 포함되지 않는다.
+
+```bash
+python scripts/run_portfolio_supabase_readonly.py --diagnose-only
+# 연결 후 실제 PIT row 존재 여부까지 확인
+python scripts/run_portfolio_supabase_readonly.py --diagnose-only \
+  --as-of 2026-08-04T00:00:00+00:00
+```
+
+진단 순서는 DNS → read-only DB 연결 → canonical table visibility다. 대표적인 원인은 `DSN_NOT_CONFIGURED`, `INVALID_POSTGRES_DSN`, `DNS_RESOLUTION_FAILED`, `DATABASE_CONNECTION_FAILED`, `SCHEMA_PROBE_FAILED`다. 일시적인 DNS/연결 오류는 bounded retry 후에도 실패하면 `HOLD`로 종료한다.
+
+현재 환경에서 `DNS_RESOLUTION_FAILED`가 나오면 Supabase 데이터가 없다는 뜻이 아니다. 실행 호스트의 DNS/방화벽/네트워크 경로가 Supabase Pooler에 도달하지 못한 상태이므로, 로컬 실행 환경의 DNS와 Pooler 주소·포트를 먼저 확인해야 한다.
+
 ## 권한 경계
 
 Adapter에는 INSERT/UPDATE/DELETE 경로가 없다. DB 연결도 read-only transaction으로

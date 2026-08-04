@@ -1,8 +1,10 @@
-"""CLI profile input validation tests."""
+"""CLI profile input validation and preflight tests."""
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -40,3 +42,52 @@ def test_load_profile_requires_exactly_one_input() -> None:
 
     with pytest.raises(SystemExit, match="exactly one"):
         cli._load_profile("", Path("profile.json"))
+
+
+def test_diagnose_only_does_not_require_a_profile(monkeypatch, capsys) -> None:
+    before_database_url = os.environ.get("DATABASE_URL")
+    before_tracing = os.environ.get("LANGCHAIN_TRACING_V2")
+
+    class Diagnostics:
+        status = "PASS"
+
+        def as_dict(self):
+            return {"status": self.status, "external_writes": False}
+
+    class Snapshot:
+        def as_pipeline_context(self):
+            return {
+                "source": "SUPABASE",
+                "as_of": "2026-08-04T00:00:00+00:00",
+                "quality_status": "PASS",
+                "candidates": [{"portfolio_id": "balanced"}],
+                "research": {"documents": [{}]},
+                "market": {"snapshots": [{}]},
+                "reasons": [],
+                "read_only": True,
+                "external_writes": False,
+            }
+
+    class Adapter:
+        async def diagnose_connection(self):
+            return Diagnostics()
+
+        async def load_snapshot(self, *, as_of):
+            assert as_of == "2026-08-04T00:00:00+00:00"
+            return Snapshot()
+
+    monkeypatch.setattr(cli, "_load_readonly_adapter", lambda: Adapter())
+    exit_code = asyncio.run(
+        cli.main_async(
+            [
+                "--diagnose-only",
+                "--as-of",
+                "2026-08-04T00:00:00+00:00",
+            ]
+        )
+    )
+
+    assert exit_code == 0
+    assert '"candidate_count": 1' in capsys.readouterr().out
+    assert os.environ.get("DATABASE_URL") == before_database_url
+    assert os.environ.get("LANGCHAIN_TRACING_V2") == before_tracing
