@@ -166,12 +166,15 @@ class BrokerOrder:
 
 
 class OrderStore:
-    """인메모리 저장소.
+    """인메모리 저장소. **OMS가 쓰는 저장소 인터페이스가 곧 이 클래스의 메서드다.**
 
-    ponytail: DB 자격증명이 확보되면 supabase/migrations/ 위의 psycopg 구현으로
-              교체한다. 상태 전이 강제는 이미 execution.validate_order_state_transition()
-              트리거가 하므로 그때는 이 클래스의 검증이 이중 방어가 된다.
-              로직은 그대로 둔다.
+    OMS는 dict를 직접 만지지 않고 아래 메서드만 부른다. 그래야 같은 인터페이스의
+    psycopg 구현(`store_postgres.PostgresOrderStore`)을 끼워 넣을 수 있고, 그때
+    OMS의 상태 머신 코드는 한 줄도 안 바뀐다 - 회계 원장에서 `post()` 하나만
+    가로챘던 것과 같은 이유다.
+
+    `intents`/`orders`/`events` 속성은 인메모리 구현의 내부 자료구조이며
+    **저장소 인터페이스가 아니다.** 밖에서 읽어야 하면 메서드를 쓴다.
     """
 
     def __init__(self) -> None:
@@ -186,6 +189,57 @@ class OrderStore:
         # (intent_group_id, leg_index) -> order_id. F30 판정이 실제 주문 상태를
         # 읽으려면 Leg와 BrokerOrder가 연결돼 있어야 한다.
         self._order_by_leg: dict[tuple[UUID, int], UUID] = {}
+
+    # -- 쓰기 -----------------------------------------------------------------
+
+    def add_intent(self, rec: OrderIntentRecord, idempotency_key: str) -> None:
+        self.intents[rec.order_intent_id] = rec
+        self._by_idempotency[idempotency_key] = rec.order_intent_id
+
+    def add_order(self, order: BrokerOrder) -> None:
+        self.orders[order.order_id] = order
+        self._order_by_intent[order.order_intent_id] = order.order_id
+
+    def add_group(self, group: IntentGroup) -> None:
+        self.groups[group.intent_group_id] = group
+        self._group_by_idempotency[group.idempotency_key] = group.intent_group_id
+
+    def link_order_to_leg(self, group_id: UUID, leg_index: int, order_id: UUID) -> None:
+        self._order_by_leg[(group_id, leg_index)] = order_id
+
+    def add_event(self, event: StateEvent) -> None:
+        """상태 변화가 지나가는 유일한 길목. DB 구현은 여기서 Projection도 갱신한다."""
+        self.events.append(event)
+        if event.broker_event_id is not None:
+            self._seen_broker_events.add((event.broker_adapter, event.broker_event_id))
+
+    # -- 읽기 -----------------------------------------------------------------
+
+    def get_intent(self, intent_id: UUID) -> OrderIntentRecord | None:
+        return self.intents.get(intent_id)
+
+    def get_order(self, order_id: UUID) -> BrokerOrder | None:
+        return self.orders.get(order_id)
+
+    def list_intents(self, limit: int | None = None) -> list[OrderIntentRecord]:
+        values = list(self.intents.values())
+        return values[:limit] if limit else values
+
+    def list_orders(self, limit: int | None = None) -> list[BrokerOrder]:
+        values = list(self.orders.values())
+        return values[:limit] if limit else values
+
+    def find_unknown_order(self, fund_id: UUID) -> BrokerOrder | None:
+        """가이드 4.3: UNKNOWN이면 그 Fund의 신규 주문을 막는다.
+
+        ponytail: 전체 주문 스캔이다. DB 구현에서는 orders(fund_id, state) 조회
+                  한 방이 된다. 인메모리 Paper 규모에서는 이걸로 충분하다.
+        """
+        return next(
+            (o for o in self.orders.values()
+             if o.fund_id == fund_id and o.state is BrokerOrderState.UNKNOWN),
+            None,
+        )
 
     def find_intent_by_idempotency(self, key: str) -> OrderIntentRecord | None:
         intent_id = self._by_idempotency.get(key)
@@ -261,8 +315,7 @@ class OMS:
             requested_quantity=intent.quantity,
             valid_until=intent.valid_until,
         )
-        self.store.intents[rec.order_intent_id] = rec
-        self.store._by_idempotency[intent.idempotency_key] = rec.order_intent_id
+        self.store.add_intent(rec, intent.idempotency_key)
         self._append("intent", rec.order_intent_id, "intent_registered",
                      IntentState.DRAFT, IntentState.DRAFT,
                      {"trace_id": intent.trace_id, "evidence_hash": intent.evidence_hash()})
@@ -340,7 +393,7 @@ class OMS:
         if existing is not None:
             return existing  # 불변식 3: Intent 하나에 Broker Order 하나
 
-        blocked = self._unknown_order_for(rec.fund_id)
+        blocked = self.store.find_unknown_order(rec.fund_id)
         if blocked is not None:
             raise OMSError(
                 f"같은 Fund에 상태 불명 주문({blocked.client_order_id})이 있어 신규 주문을 막습니다. "
@@ -358,8 +411,7 @@ class OMS:
             requested_quantity=rec.requested_quantity,  # 축소 승인이 반영된 수량
             limit_price=intent.limit_price,
         )
-        self.store.orders[order.order_id] = order
-        self.store._order_by_intent[rec.order_intent_id] = order.order_id
+        self.store.add_order(order)
         self._append("broker_order", order.order_id, "order_created",
                      BrokerOrderState.CREATED, BrokerOrderState.CREATED,
                      {"order_intent_id": str(rec.order_intent_id),
@@ -374,8 +426,7 @@ class OMS:
         if existing is not None:
             return existing
 
-        self.store.groups[group.intent_group_id] = group
-        self.store._group_by_idempotency[group.idempotency_key] = group.intent_group_id
+        self.store.add_group(group)
         self._append("intent_group", group.intent_group_id, "group_registered",
                      GroupStatus.DRAFT, GroupStatus.DRAFT,
                      {"atomicity": str(group.atomicity_policy),
@@ -386,11 +437,10 @@ class OMS:
     def link_leg(self, group: IntentGroup, leg_index: int, order: BrokerOrder) -> None:
         """Leg와 Broker Order를 연결한다. 판정이 실제 주문 상태를 읽으려면 필요하다."""
         group.leg_at(leg_index)  # 없는 leg_index면 여기서 걸린다
-        key = (group.intent_group_id, leg_index)
-        linked = self.store._order_by_leg.get(key)
-        if linked is not None and linked != order.order_id:
+        linked = self.store.find_order_by_leg(group.intent_group_id, leg_index)
+        if linked is not None and linked.order_id != order.order_id:
             raise OMSError(f"leg {leg_index}에 이미 다른 주문이 연결돼 있습니다")
-        self.store._order_by_leg[key] = order.order_id
+        self.store.link_order_to_leg(group.intent_group_id, leg_index, order.order_id)
 
     def evaluate_group(self, group: IntentGroup) -> RecoveryPlan:
         """연결된 Broker Order 상태를 읽어 그룹 판정을 낸다.
@@ -558,18 +608,6 @@ class OMS:
         """
         return self._move_order(order, BrokerOrderState.UNKNOWN, "unknown", {"reason": reason})
 
-    def _unknown_order_for(self, fund_id: UUID) -> BrokerOrder | None:
-        """가이드 4.3: UNKNOWN이면 그 Fund의 신규 주문을 막는다.
-
-        ponytail: 전체 주문 스캔이다. DB로 옮기면 orders(fund_id, state) 부분 인덱스
-                  한 방 조회가 된다. 인메모리 Paper 규모에서는 이걸로 충분하다.
-        """
-        return next(
-            (o for o in self.store.orders.values()
-             if o.fund_id == fund_id and o.state is BrokerOrderState.UNKNOWN),
-            None,
-        )
-
     # -- 내부 ------------------------------------------------------------------
 
     def _move_intent(self, rec, to_state, event_type, payload) -> OrderIntentRecord:
@@ -606,9 +644,7 @@ class OMS:
             broker_event_id=broker_event_id,
             payload=payload,
         )
-        self.store.events.append(event)
-        if broker_event_id is not None:
-            self.store._seen_broker_events.add((self.adapter, broker_event_id))
+        self.store.add_event(event)
         return event
 
     # -- Projection 재구축 -------------------------------------------------------
@@ -716,9 +752,9 @@ if __name__ == "__main__":
     # 5. 멱등성 - 같은 idempotency_key 재등록, 같은 Intent로 주문 재생성
     again = oms.register_intent(make_intent("idem_0001"))
     assert again.order_intent_id == rec.order_intent_id, "중복 Intent가 생겼다"
-    assert len(oms.store.intents) == 1
+    assert len(oms.store.list_intents()) == 1
     assert oms.create_broker_order(rec, i).order_id == o.order_id, "중복 Broker Order가 생겼다"
-    assert len(oms.store.orders) == 1
+    assert len(oms.store.list_orders()) == 1
 
     # 6. 초과 체결 거부 (DoD - filled <= requested)
     oms3 = OMS()

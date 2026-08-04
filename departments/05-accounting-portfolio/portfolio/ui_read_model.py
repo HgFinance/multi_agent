@@ -90,7 +90,7 @@ def _trading(oms) -> dict:
             "risk_approved_qty": _d(rec.risk_approved_qty),
             "valid_until": rec.valid_until.isoformat(),
         }
-        for rec in list(oms.store.intents.values())[:MAX_ROWS]
+        for rec in oms.store.list_intents(MAX_ROWS)
     ]
     orders = [
         {
@@ -110,7 +110,7 @@ def _trading(oms) -> dict:
             "fill_count": len(o.fills),
             "is_terminal": o.is_terminal,
         }
-        for o in list(oms.store.orders.values())[:MAX_ROWS]
+        for o in oms.store.list_orders(MAX_ROWS)
     ]
     return {
         "intents": intents,
