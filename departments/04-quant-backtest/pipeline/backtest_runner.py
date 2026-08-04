@@ -48,11 +48,35 @@ KST = timezone(timedelta(hours=9))
 
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
 COST_MODEL = {
-    "version": "krx-cost-v1",
+    "version": "krx-cost-v2",
     "commission_bps": 1.5,   # 위탁수수료 왕복의 절반 (매수·매도 각각 부과)
     "sell_tax_bps": 15.0,    # 증권거래세+농특세 매도측 0.15% 가정 (2026 코스피 기준)
-    "slippage_bps": 5.0,     # 시가 체결 가정에 대한 보수적 슬리피지
+    # ▶ **실측으로 교체** (2026-08-04). v1 의 5.0bps 는 가정이었고 실제보다
+    #   낮았다. market.market_quotes 2,000,000 표본:
+    #     스프레드 평균 16.38bps · 중앙값 14.40bps · 상위10% 27.47bps
+    #   체결 시 부담하는 것은 반쪽이므로 중앙값 기준 7.20bps 다.
+    #   회전율 344배 전략에서 이 2.2bps 차이가 연 7%p 넘게 갈린다 - 가정
+    #   하나로 결론이 뒤집히는 자리라 실측이 아니면 결과를 믿을 수 없다.
+    "slippage_bps": 7.2,
+    "slippage_source": "market.market_quotes 중앙값 스프레드/2 (2026-08-04 실측)",
+    # 종목별 스프레드가 오면 그것을 쓴다. 없으면 위 기본값(보수적 중앙값).
+    "slippage_p90_bps": 13.7,   # 상위10% 스프레드/2 - 스트레스 시나리오용
 }
+
+
+def slippage_bps_for(symbol: str | None = None,
+                     spreads: dict | None = None) -> float:
+    """체결 슬리피지(bps). **종목 실측이 있으면 그것을, 없으면 시장 중앙값.**
+
+    유동성이 얇은 종목일수록 스프레드가 넓은데 전 종목에 같은 값을 물리면
+    소형주 전략이 부당하게 유리해진다. 반대로 없는 값을 지어내지도 않는다 -
+    실측이 없으면 시장 중앙값이라는 **사실을 밝힌 기본값**을 쓴다.
+    """
+    if spreads and symbol:
+        v = spreads.get(str(symbol))
+        if v is not None and v > 0:
+            return float(v) / 2.0          # 왕복 스프레드의 절반이 편도 비용
+    return float(COST_MODEL["slippage_bps"])
 DEFAULT_CONFIG = {
     "strategy": "MOM-20-SMOKE",
     "lookback_days": 20,
@@ -681,9 +705,21 @@ def _check_fifo_and_costs():
     pnl = _fifo_sell(q, 12.0, 120.0)          # 10@100 + 2@110 매도
     assert abs(pnl - (10 * 20 + 2 * 10)) < 1e-9
     assert len(q) == 1 and abs(q[0][0] - 3.0) < 1e-9
-    buy = _apply_costs("BUY", 1_000_000)      # 1.5 + 5 bps
-    sell = _apply_costs("SELL", 1_000_000)    # + 세금 15 bps
-    assert abs(buy - 650.0) < 1e-9 and abs(sell - 2150.0) < 1e-9
+    # ▶ **기대값을 하드코딩한다** - COST_MODEL 에서 다시 계산하면 비용이
+    #   바뀌어도 검사가 따라 바뀌어 아무것도 못 지킨다. 실제로 슬리피지를
+    #   5.0 -> 7.2bps(실측)로 올렸을 때 이 검사가 먼저 걸렸다.
+    #   매수 1.5 + 7.2 = 8.7bps / 매도 + 세금 15.0 = 23.7bps
+    buy = _apply_costs("BUY", 1_000_000)
+    sell = _apply_costs("SELL", 1_000_000)
+    assert abs(buy - 870.0) < 1e-9, buy
+    assert abs(sell - 2370.0) < 1e-9, sell
+
+    # 종목별 실측이 있으면 그것을 쓰고, 없으면 시장 중앙값으로 떨어진다
+    assert slippage_bps_for("005930", {"005930": 4.0}) == 2.0      # 왕복/2
+    assert slippage_bps_for("005930", {}) == COST_MODEL["slippage_bps"]
+    assert slippage_bps_for(None, {"005930": 4.0}) == COST_MODEL["slippage_bps"]
+    # 0 이나 음수는 실측이 아니다 - 기본값으로 떨어진다
+    assert slippage_bps_for("X", {"X": 0}) == COST_MODEL["slippage_bps"]
     print("  FIFO 손익·비용 산식      OK")
 
 
