@@ -248,7 +248,12 @@ def _risk_decision_repository() -> RiskDecisionRepository | None:
     if not dsn:
         return None
     if _decision_repository is None:
-        _decision_repository = RiskDecisionRepository.connect(dsn)
+        try:
+            _decision_repository = RiskDecisionRepository.connect(dsn)
+        except Exception as exc:  # noqa: BLE001 - API boundary must not leak DSN details.
+            raise RiskDecisionPersistenceError(
+                "Canonical Risk DB connection failed; decision was not persisted"
+            ) from exc
     return _decision_repository
 
 

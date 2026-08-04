@@ -13,16 +13,29 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 READ_ONLY_DRIVER_ENV = "SUPABASE_READONLY_DRIVER"
 DEFAULT_DSN_ENVIRONMENTS = ("SUPABASE_DATABASE_URL", "DATABASE_URL")
+DEFAULT_CONNECT_RETRIES = 2
+DEFAULT_CONNECT_BACKOFF_SECONDS = 0.5
+
+CONNECTION_PROBE_SQL = "SELECT current_setting('transaction_read_only') AS transaction_read_only"
+SCHEMA_PROBE_SQL = """
+SELECT
+    to_regclass('strategy.versions')::text AS strategy_versions,
+    to_regclass('research.documents')::text AS research_documents,
+    to_regclass('execution.market_snapshots')::text AS market_snapshots,
+    to_regclass('accounting.portfolio_snapshots')::text AS accounting_snapshots
+"""
 
 PORTFOLIO_CATALOG_SQL = """
 SELECT
@@ -116,6 +129,36 @@ class SupabaseReadOnlyError(RuntimeError):
     """Raised when a read-only adapter cannot be configured or queried."""
 
 
+@dataclass(frozen=True)
+class SupabasePreflight:
+    """Safe, credential-free connectivity and schema diagnostics."""
+
+    status: str
+    driver: str
+    dsn_configured: bool
+    dns_status: str
+    connection_status: str
+    schema_status: str
+    schema_objects: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+    read_only: bool = True
+    external_writes: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "driver": self.driver,
+            "dsn_configured": self.dsn_configured,
+            "dns_status": self.dns_status,
+            "connection_status": self.connection_status,
+            "schema_status": self.schema_status,
+            "schema_objects": list(self.schema_objects),
+            "reasons": list(self.reasons),
+            "read_only": self.read_only,
+            "external_writes": self.external_writes,
+        }
+
+
 RowFetcher = Callable[[str, tuple[Any, ...]], Awaitable[Sequence[Mapping[str, Any]]]]
 
 
@@ -134,6 +177,7 @@ class SupabaseReadSnapshot:
     queries: tuple[str, ...] = ()
     read_only: bool = True
     external_writes: bool = False
+    preflight: dict[str, Any] = field(default_factory=dict)
 
     def as_pipeline_context(self) -> dict[str, Any]:
         """Return JSON-safe context with explicit provenance and safety flags."""
@@ -146,6 +190,7 @@ class SupabaseReadSnapshot:
             "queries": list(self.queries),
             "read_only": self.read_only,
             "external_writes": self.external_writes,
+            "preflight": dict(self.preflight),
             "candidates": [dict(candidate) for candidate in self.candidates],
             "research": self.research_context,
             "market": self.market_context,
@@ -377,6 +422,174 @@ class SupabaseReadOnlyAdapter:
         )
         self._fetcher = fetcher
         self.driver = (driver or os.getenv(READ_ONLY_DRIVER_ENV, "auto")).lower()
+        try:
+            retries = int(os.getenv("SUPABASE_CONNECT_RETRIES", str(DEFAULT_CONNECT_RETRIES)))
+        except ValueError:
+            retries = DEFAULT_CONNECT_RETRIES
+        try:
+            backoff = float(
+                os.getenv(
+                    "SUPABASE_CONNECT_BACKOFF_SECONDS",
+                    str(DEFAULT_CONNECT_BACKOFF_SECONDS),
+                )
+            )
+        except ValueError:
+            backoff = DEFAULT_CONNECT_BACKOFF_SECONDS
+        self.connect_retries = min(max(retries, 0), 3)
+        self.connect_backoff_seconds = min(max(backoff, 0.0), 5.0)
+
+    def _driver_name(self) -> str:
+        if self._fetcher is not None:
+            return "injected"
+        if self.driver in {"psycopg2", "asyncpg"}:
+            return self.driver
+        try:
+            import asyncpg  # noqa: F401
+        except ModuleNotFoundError:
+            return "psycopg2"
+        return "asyncpg"
+
+    def _dsn_endpoint(self) -> tuple[str, int]:
+        if not self.dsn:
+            raise SupabaseReadOnlyError("DSN_NOT_CONFIGURED")
+        parsed = urlsplit(self.dsn)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            raise SupabaseReadOnlyError("INVALID_POSTGRES_DSN")
+        try:
+            port = parsed.port or 5432
+        except ValueError as exc:
+            raise SupabaseReadOnlyError("INVALID_POSTGRES_PORT") from exc
+        return parsed.hostname, port
+
+    async def diagnose_connection(self) -> SupabasePreflight:
+        """Check DNS, read-only connectivity, and canonical table visibility.
+
+        The result intentionally contains no host, user, password, or driver error
+        text. It is safe to return in CLI output and operational logs.
+        """
+        if self._fetcher is not None:
+            return SupabasePreflight(
+                "BYPASSED",
+                "injected",
+                False,
+                "BYPASSED",
+                "BYPASSED",
+                "BYPASSED",
+                reasons=("INJECTED_FETCHER",),
+            )
+        if not self.dsn:
+            return SupabasePreflight(
+                "FAIL",
+                self.driver,
+                False,
+                "NOT_CHECKED",
+                "NOT_CHECKED",
+                "NOT_CHECKED",
+                reasons=("DSN_NOT_CONFIGURED",),
+            )
+
+        try:
+            host, port = self._dsn_endpoint()
+        except SupabaseReadOnlyError as exc:
+            return SupabasePreflight(
+                "FAIL",
+                self.driver,
+                True,
+                "INVALID",
+                "NOT_CHECKED",
+                "NOT_CHECKED",
+                reasons=(str(exc),),
+            )
+
+        try:
+            await asyncio.to_thread(
+                socket.getaddrinfo,
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except Exception as exc:  # noqa: BLE001 - return a sanitized diagnostic code.
+            return SupabasePreflight(
+                "FAIL",
+                self._driver_name(),
+                True,
+                "FAIL",
+                "NOT_CHECKED",
+                "NOT_CHECKED",
+                reasons=(f"DNS_RESOLUTION_FAILED:{type(exc).__name__}",),
+            )
+
+        try:
+            fetcher = self._get_fetcher()
+            connection_rows = await self._fetch(fetcher, CONNECTION_PROBE_SQL, ())
+            transaction_read_only = str(
+                dict(connection_rows[0]).get("transaction_read_only", "")
+                if connection_rows
+                else ""
+            ).lower()
+            if transaction_read_only not in {"on", "true", "1"}:
+                return SupabasePreflight(
+                    "FAIL",
+                    self._driver_name(),
+                    True,
+                    "PASS",
+                    "FAIL",
+                    "NOT_CHECKED",
+                    reasons=("READ_ONLY_TRANSACTION_NOT_CONFIRMED",),
+                )
+        except Exception as exc:  # noqa: BLE001 - do not expose DSN-bearing text.
+            return SupabasePreflight(
+                "FAIL",
+                self._driver_name(),
+                True,
+                "PASS",
+                "FAIL",
+                "NOT_CHECKED",
+                reasons=(f"DATABASE_CONNECTION_FAILED:{type(exc).__name__}",),
+            )
+
+        try:
+            rows = await self._fetch(fetcher, SCHEMA_PROBE_SQL, ())
+            row = dict(rows[0]) if rows else {}
+            expected = (
+                "strategy_versions",
+                "research_documents",
+                "market_snapshots",
+                "accounting_snapshots",
+            )
+            objects = tuple(name for name in expected if row.get(name))
+            missing = tuple(name for name in expected if not row.get(name))
+            if missing:
+                return SupabasePreflight(
+                    "FAIL",
+                    self._driver_name(),
+                    True,
+                    "PASS",
+                    "PASS",
+                    "FAIL",
+                    objects,
+                    tuple(f"SCHEMA_OBJECT_MISSING:{name}" for name in missing),
+                )
+        except Exception as exc:  # noqa: BLE001 - do not expose DSN-bearing text.
+            return SupabasePreflight(
+                "FAIL",
+                self._driver_name(),
+                True,
+                "PASS",
+                "PASS",
+                "FAIL",
+                reasons=(f"SCHEMA_PROBE_FAILED:{type(exc).__name__}",),
+            )
+
+        return SupabasePreflight(
+            "PASS",
+            self._driver_name(),
+            True,
+            "PASS",
+            "PASS",
+            "PASS",
+            objects,
+        )
 
     def _get_fetcher(self) -> RowFetcher:
         if self._fetcher is not None:
@@ -385,15 +598,11 @@ class SupabaseReadOnlyAdapter:
             raise SupabaseReadOnlyError(
                 "SUPABASE_DATABASE_URL or DATABASE_URL is required for read-only access"
             )
-        if self.driver == "psycopg2":
+        if self._driver_name() == "psycopg2":
             return _Psycopg2Fetcher(self.dsn)
-        if self.driver == "asyncpg":
+        if self._driver_name() == "asyncpg":
             return _AsyncpgFetcher(self.dsn)
-        try:
-            import asyncpg  # noqa: F401
-        except ModuleNotFoundError:
-            return _Psycopg2Fetcher(self.dsn)
-        return _AsyncpgFetcher(self.dsn)
+        raise SupabaseReadOnlyError("READ_ONLY_DRIVER_UNAVAILABLE")
 
     async def _fetch(
         self, fetcher: RowFetcher, query: str, args: tuple[Any, ...]
@@ -410,6 +619,38 @@ class SupabaseReadOnlyAdapter:
         """Load PIT data; any query failure produces a safe degraded snapshot."""
 
         cutoff = _as_utc(as_of)
+        preflight = SupabasePreflight(
+            "BYPASSED",
+            "injected",
+            False,
+            "BYPASSED",
+            "BYPASSED",
+            "BYPASSED",
+            reasons=("INJECTED_FETCHER",),
+        )
+        if self._fetcher is None:
+            for attempt in range(self.connect_retries + 1):
+                preflight = await self.diagnose_connection()
+                if preflight.status == "PASS":
+                    break
+                retryable = any(
+                    reason.startswith(("DNS_RESOLUTION_FAILED", "DATABASE_CONNECTION_FAILED"))
+                    for reason in preflight.reasons
+                )
+                if not retryable or attempt >= self.connect_retries:
+                    return SupabaseReadSnapshot(
+                        cutoff,
+                        "SUPABASE_UNAVAILABLE",
+                        "UNAVAILABLE",
+                        (),
+                        {"status": "UNAVAILABLE", "read_only": True},
+                        {"status": "UNAVAILABLE", "read_only": True},
+                        {"status": "NOT_REQUESTED" if not fund_id else "UNAVAILABLE", "read_only": True},
+                        preflight.reasons,
+                        ("connection_preflight",),
+                        preflight=preflight.as_dict(),
+                    )
+                await asyncio.sleep(self.connect_backoff_seconds * (attempt + 1))
         try:
             fetcher = self._get_fetcher()
         except SupabaseReadOnlyError as exc:
@@ -422,6 +663,8 @@ class SupabaseReadOnlyAdapter:
                 {"status": "UNAVAILABLE", "read_only": True},
                 {"status": "NOT_REQUESTED" if not fund_id else "UNAVAILABLE", "read_only": True},
                 (type(exc).__name__,),
+                ("connection_preflight",),
+                preflight=preflight.as_dict(),
             )
 
         jobs: list[tuple[str, str, tuple[Any, ...]]] = [
@@ -479,6 +722,7 @@ class SupabaseReadOnlyAdapter:
             accounting_context,
             tuple(reasons),
             tuple(name for name, _, _ in jobs),
+            preflight=preflight.as_dict(),
         )
 
 
@@ -489,5 +733,6 @@ __all__ = [
     "RESEARCH_DOCUMENTS_SQL",
     "SupabaseReadOnlyAdapter",
     "SupabaseReadOnlyError",
+    "SupabasePreflight",
     "SupabaseReadSnapshot",
 ]

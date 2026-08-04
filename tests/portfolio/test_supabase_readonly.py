@@ -166,6 +166,37 @@ def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> Non
     assert result["external_writes"] is False
 
 
+def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
+    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    diagnostics = asyncio.run(
+        adapter_module.SupabaseReadOnlyAdapter(dsn=None).diagnose_connection()
+    )
+
+    assert diagnostics.status == "FAIL"
+    assert diagnostics.reasons == ("DSN_NOT_CONFIGURED",)
+    assert diagnostics.external_writes is False
+
+
+def test_preflight_classifies_dns_failure_without_exposing_dsn(monkeypatch) -> None:
+    def fail_dns(*_args, **_kwargs):
+        raise OSError("simulated DNS failure")
+
+    monkeypatch.setattr(adapter_module.socket, "getaddrinfo", fail_dns)
+    adapter = adapter_module.SupabaseReadOnlyAdapter(
+        dsn="postgresql://user:secret@example.invalid:5432/postgres",
+        driver="psycopg2",
+    )
+
+    diagnostics = asyncio.run(adapter.diagnose_connection())
+
+    assert diagnostics.status == "FAIL"
+    assert diagnostics.dns_status == "FAIL"
+    assert diagnostics.reasons == ("DNS_RESOLUTION_FAILED:OSError",)
+    assert "secret" not in str(diagnostics.as_dict())
+
+
 def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
     monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -189,3 +220,34 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
     assert result["safe_action"] == "HOLD"
     assert result["data_context"]["source"] == "SUPABASE_UNAVAILABLE"
     assert result["external_writes"] is False
+
+
+def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
+    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    diagnostics = asyncio.run(
+        adapter_module.SupabaseReadOnlyAdapter(dsn=None).diagnose_connection()
+    )
+
+    assert diagnostics.status == "FAIL"
+    assert diagnostics.reasons == ("DSN_NOT_CONFIGURED",)
+    assert diagnostics.external_writes is False
+
+
+def test_preflight_classifies_dns_failure_without_exposing_dsn(monkeypatch) -> None:
+    def fail_dns(*_args, **_kwargs):
+        raise OSError("simulated DNS failure")
+
+    monkeypatch.setattr(adapter_module.socket, "getaddrinfo", fail_dns)
+    adapter = adapter_module.SupabaseReadOnlyAdapter(
+        dsn="postgresql://user:secret@example.invalid:5432/postgres",
+        driver="psycopg2",
+    )
+
+    diagnostics = asyncio.run(adapter.diagnose_connection())
+
+    assert diagnostics.status == "FAIL"
+    assert diagnostics.dns_status == "FAIL"
+    assert diagnostics.reasons == ("DNS_RESOLUTION_FAILED:OSError",)
+    assert "secret" not in str(diagnostics.as_dict())
