@@ -64,18 +64,53 @@ COST_MODEL = {
 }
 
 
+# ── 유동성 계층별 슬리피지 ──────────────────────────────────────────────────
+# ▶ 왜 계층인가 (2026-08-04 실측)
+#   종목별 실측 스프레드를 쓰고 싶었지만 **호가가 4거래일치뿐**이다
+#   (market_quotes 2026-07-30~08-04). 백테스트는 2024-01 부터인데 오늘 호가로
+#   2024 년 비용을 매기면 미래 유동성을 아는 셈이라 look-ahead 다.
+#   일봉 고저가 추정(Corwin-Schultz)도 시도했으나 이 데이터에서 중앙값이
+#   -3.57bps 로 나와(절반 이상 음수) 비용 입력으로 쓸 수 없었다.
+#
+#   대신 **거래대금은 2024 년부터 있다.** 실측 호가로 확인한 관계:
+#     거래대금 5분위   평균거래대금        스프레드 중앙값
+#       1 (하위)            1,825              18.59 bps
+#       2                   4,990              16.88
+#       3                  12,805              13.51
+#       4                  38,519              13.34
+#       5 (상위)          454,539              12.81
+#   거래대금이 250배 차이나는데 스프레드는 1.45배 - 완만하지만 단조롭다.
+#
+# ▶ 이 방식의 한계를 숨기지 않는다
+#   계층↔스프레드 **수준**은 2026-08 표본으로 보정한 것이라 2024 년의 절대
+#   수준과 다를 수 있다. 다만 "얇을수록 넓다" 는 **관계**는 구조적이므로
+#   전 종목 단일값보다 낫다. 호가 이력이 쌓이면 시점별로 교체한다.
+LIQUIDITY_TIERS = (
+    # (거래대금 상한, 왕복 스프레드 bps) - 상한 미만이면 이 계층
+    (3_000, 18.59),
+    (8_000, 16.88),
+    (25_000, 13.51),
+    (100_000, 13.34),
+    (float("inf"), 12.81),
+)
+
+
 def slippage_bps_for(symbol: str | None = None,
-                     spreads: dict | None = None) -> float:
-    """체결 슬리피지(bps). **종목 실측이 있으면 그것을, 없으면 시장 중앙값.**
+                     spreads: dict | None = None,
+                     adv: float | None = None) -> float:
+    """체결 슬리피지(bps). 우선순위: **종목 실측 > 유동성 계층 > 시장 중앙값.**
 
     유동성이 얇은 종목일수록 스프레드가 넓은데 전 종목에 같은 값을 물리면
-    소형주 전략이 부당하게 유리해진다. 반대로 없는 값을 지어내지도 않는다 -
-    실측이 없으면 시장 중앙값이라는 **사실을 밝힌 기본값**을 쓴다.
+    소형주 전략이 부당하게 유리해진다. 반대로 없는 값을 지어내지도 않는다.
     """
     if spreads and symbol:
         v = spreads.get(str(symbol))
         if v is not None and v > 0:
             return float(v) / 2.0          # 왕복 스프레드의 절반이 편도 비용
+    if adv is not None and adv > 0:
+        for cap, bps in LIQUIDITY_TIERS:
+            if adv < cap:
+                return bps / 2.0
     return float(COST_MODEL["slippage_bps"])
 DEFAULT_CONFIG = {
     "strategy": "MOM-20-SMOKE",
@@ -123,17 +158,39 @@ class Market:
     opens: dict[tuple[date, str], float]
     closes: dict[tuple[date, str], float]
     symbols: list[str]
+    notionals: dict[tuple[date, str], float] = field(default_factory=dict)
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> Market:
         dates = sorted({r["trade_date"] for r in rows})
-        opens, closes, symbols = {}, {}, set()
+        opens, closes, notionals, symbols = {}, {}, {}, set()
         for r in rows:
             iid = str(r["instrument_id"])
             symbols.add(iid)
             opens[(r["trade_date"], iid)] = float(r["open"])
             closes[(r["trade_date"], iid)] = float(r["close"])
-        return cls(dates=dates, opens=opens, closes=closes, symbols=sorted(symbols))
+            nv = r.get("notional")
+            if nv is not None:
+                notionals[(r["trade_date"], iid)] = float(nv)
+        return cls(dates=dates, opens=opens, closes=closes,
+                   symbols=sorted(symbols), notionals=notionals)
+
+    def adv_until(self, until: date, window: int = 20) -> dict[str, float]:
+        """until **까지의** 평균 거래대금. 미래 거래대금을 보지 않는다.
+
+        유동성 계층을 이 값으로 정하므로 여기서 PIT 가 깨지면 비용 전체가
+        미래 정보가 된다.
+        """
+        idx = [d for d in self.dates if d <= until][-window:]
+        if not idx:
+            return {}
+        out: dict[str, float] = {}
+        for s_ in self.symbols:
+            vals = [self.notionals[(d, s_)] for d in idx
+                    if self.notionals.get((d, s_))]
+            if vals:
+                out[s_] = sum(vals) / len(vals)
+        return out
 
     def momentum(self, until: date, lookback: int) -> dict[str, float]:
         """until **포함까지의 종가**로 lookback 수익률. 호출부가 t-1 을 넘긴다."""
@@ -204,8 +261,11 @@ class BacktestResult:
     notes: list[str] = field(default_factory=list)
 
 
-def _apply_costs(side: str, notional: float) -> float:
-    bps = COST_MODEL["commission_bps"] + COST_MODEL["slippage_bps"]
+def _apply_costs(side: str, notional: float,
+                 slip_bps: float | None = None) -> float:
+    # 종목별 슬리피지를 받으면 그것을 쓴다. 안 주면 시장 중앙값(옛 동작 유지)
+    bps = COST_MODEL["commission_bps"] + (
+        COST_MODEL["slippage_bps"] if slip_bps is None else float(slip_bps))
     if side == "SELL":
         bps += COST_MODEL["sell_tax_bps"]
     return notional * bps / 1e4
@@ -339,6 +399,9 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
         # ── 리밸런스: 시그널은 어제까지, 체결은 오늘 시가 ──
         if d in rebal_days and i > 0 and (ntb is None or d >= ntb):
             ranked = select_targets(market, i, config)
+            # ▶ **오늘까지의** 거래대금으로 유동성 계층을 정한다. 미래
+            #   거래대금을 보면 비용 전체가 미래 정보가 된다.
+            adv = market.adv_until(market.dates[i - 1])
             if ranked:
                 tradable = [s for s in ranked if (d, s) in market.opens]
                 port_value = cash + sum(
@@ -353,9 +416,10 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
                     want = target_value / px if s in tradable else 0.0
                     diff = shares[s] - want
                     if diff * px > 1.0:     # 1원 미만 잔차는 무시
-                        exec_px = px * (1 - COST_MODEL["slippage_bps"] / 1e4)
+                        sb = slippage_bps_for(s, adv=adv.get(s))
+                        exec_px = px * (1 - sb / 1e4)
                         notional = diff * exec_px
-                        fee = _apply_costs("SELL", notional)
+                        fee = _apply_costs("SELL", notional, sb)
                         pnl = _fifo_sell(lots.setdefault(s, deque()), diff, exec_px) - fee
                         cash += notional - fee
                         shares[s] -= diff
@@ -366,12 +430,13 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
                 # 매수
                 for s in tradable:
                     px = market.opens[(d, s)]
-                    exec_px = px * (1 + COST_MODEL["slippage_bps"] / 1e4)
+                    sb = slippage_bps_for(s, adv=adv.get(s))
+                    exec_px = px * (1 + sb / 1e4)
                     want = target_value / px
                     diff = want - shares.get(s, 0.0)
                     if diff * px > 1.0:
                         notional = diff * exec_px
-                        fee = _apply_costs("BUY", notional)
+                        fee = _apply_costs("BUY", notional, sb)
                         if notional + fee > cash:
                             diff = max((cash - fee) / exec_px, 0.0)
                             notional = diff * exec_px
@@ -720,6 +785,17 @@ def _check_fifo_and_costs():
     assert slippage_bps_for(None, {"005930": 4.0}) == COST_MODEL["slippage_bps"]
     # 0 이나 음수는 실측이 아니다 - 기본값으로 떨어진다
     assert slippage_bps_for("X", {"X": 0}) == COST_MODEL["slippage_bps"]
+
+    # ▶ **유동성 계층이 단조로운가.** 얇을수록 비싸야 한다 - 뒤집히면
+    #   소형주 전략이 부당하게 유리해지고 백테스트가 거짓말을 한다.
+    tiers = [slippage_bps_for(adv=a) for a in (1_000, 5_000, 15_000, 50_000, 1e6)]
+    assert tiers == sorted(tiers, reverse=True), tiers
+    assert tiers[0] > tiers[-1], tiers
+    # 실측 있으면 계층보다 우선한다
+    assert slippage_bps_for("A", {"A": 4.0}, adv=1_000) == 2.0
+    # 거래대금이 없으면 계층을 못 쓴다 - 기본값(지어내지 않는다)
+    assert slippage_bps_for("A", None, adv=None) == COST_MODEL["slippage_bps"]
+    assert slippage_bps_for("A", None, adv=0) == COST_MODEL["slippage_bps"]
     print("  FIFO 손익·비용 산식      OK")
 
 
