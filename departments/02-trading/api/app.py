@@ -123,7 +123,7 @@ def _on_validation_error(request, exc: RequestValidationError):
 
 
 def _intent_record(order_intent_id: UUID) -> OrderIntentRecord:
-    rec = _oms.store.intents.get(order_intent_id)
+    rec = _oms.store.get_intent(order_intent_id)
     if rec is None:
         raise HTTPException(404, _envelope("TRADING_INTENT_NOT_FOUND",
                                            f"그런 order_intent_id 가 없습니다: {order_intent_id}"))
@@ -141,7 +141,7 @@ def _intent_body(order_intent_id: UUID) -> OrderIntent:
 
 
 def _order(order_id: UUID) -> BrokerOrder:
-    order = _oms.store.orders.get(order_id)
+    order = _oms.store.get_order(order_id)
     if order is None:
         raise HTTPException(404, _envelope("TRADING_ORDER_NOT_FOUND",
                                            f"그런 order_id 가 없습니다: {order_id}"))
@@ -486,7 +486,7 @@ def cancel_case_orders(case_id: UUID, body: CancelIn) -> dict:
     되면 store 에 case_id 인덱스를 추가한다(DB store 로 가면 자연히 해결된다).
     """
     targets = [
-        o for o in _oms.store.orders.values()
+        o for o in _oms.store.list_orders()
         if not o.is_terminal
         and (i := _intents.get(o.order_intent_id)) is not None
         and i.trade_case_id == case_id
@@ -504,8 +504,8 @@ def health() -> dict:
         "api_version": API_VERSION,
         "adapter": _oms.adapter,
         # 이 두 값이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
-        "intents": len(_oms.store.intents),
-        "orders": len(_oms.store.orders),
+        "intents": len(_oms.store.list_intents()),
+        "orders": len(_oms.store.list_orders()),
         "store": "in-memory (execution.* 미연결)",
     }
 
