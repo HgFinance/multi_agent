@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -28,18 +28,21 @@ def invoke_tool(
     payload: dict[str, Any],
     context: QASkillContext,
     *,
-    tool_name: str,
+    tool_name: str | Sequence[str],
 ) -> ToolInvocation:
     started = time.perf_counter()
+    tool_names = [tool_name] if isinstance(tool_name, str) else list(tool_name)
+    if not tool_names:
+        tool_names = ["qa.tool.unknown"]
     try:
         result = normalize_tool_output(tool(payload))
-        result = result.model_copy(update={"tool_calls": [tool_name]})
+        result = result.model_copy(update={"tool_calls": tool_names})
     except Exception as exc:  # noqa: BLE001 - fail closed at the Tool boundary.
         result = make_result(
             "context.internal_api.v1",
             "ESCALATE",
             {"worker_id": context.worker_id},
-            tool_calls=[tool_name],
+            tool_calls=tool_names,
             error_code=type(exc).__name__,
             escalate=True,
         )
@@ -73,5 +76,5 @@ class InternalHttpTool:
         response.raise_for_status()
         body = response.json()
         if not isinstance(body, dict):
-            raise RuntimeError("INVALID_INTERNAL_API_RESPONSE")
+            raise TypeError("INVALID_INTERNAL_API_RESPONSE")
         return body

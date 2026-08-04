@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from orchestration.workflows.portfolio_recommendation import (
+    _stage_payload,
     run_portfolio_recommendation_pipeline_async,
 )
 
@@ -100,3 +101,25 @@ def test_full_pipeline_holds_when_no_suitable_candidate_exists():
     assert result["suitability"]["recommendations"] == []
     assert result["risk_gate"]["verdict"] == "reject"
     assert result["qa_gate"]["decision"] == "WARN"
+
+
+def test_live_stage_payload_does_not_invent_conditional_worker_signals():
+    payload = _stage_payload(
+        {
+            "trace_id": "trace-live",
+            "case_id": "case-live",
+            "as_of": "2026-08-04T00:00:00+00:00",
+            "data_context": {"source": "SUPABASE", "quality_status": "WARN"},
+        },
+        "qa",
+    )
+
+    assert payload["compliance"] == {}
+    assert payload["counterparty"] == {}
+    assert payload["derivatives"] == {}
+    assert payload["assessment"] == {}
+    assert payload["model_risk"] == {}
+    assert payload["internal_audit"] == {}
+    assert payload["ops_assessment"] == {}
+    assert payload["permission_check"] == {}
+    assert payload["incident"] == {}

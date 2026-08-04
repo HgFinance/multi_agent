@@ -357,7 +357,7 @@ def build_worker_graph(
                 tool,
                 payload,
                 context,
-                tool_name=spec.tools[0] if spec.tools else "qa.tool.unknown",
+                tool_name=spec.tools,
             )
             skill_results.append(invocation.result.model_dump(mode="json"))
             if trace is not None:
