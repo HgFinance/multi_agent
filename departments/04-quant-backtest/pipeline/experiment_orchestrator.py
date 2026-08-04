@@ -62,6 +62,7 @@ class OrchestratorReport:
     transitions: list = field(default_factory=list)
     experiment_refs: dict = field(default_factory=dict)
     backlog: list = field(default_factory=list)
+    trial_pressure: dict = field(default_factory=dict)   # 몇 번째 시도인가
 
 
 # ---------------------------------------------------------------------------
@@ -93,15 +94,34 @@ def feasibility(hypothesis: dict, existing_datasets: set,
     return (not missing), missing, backlog
 
 
-def robustness_to_status(fragility_verdict: str) -> str:
-    """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐."""
+def robustness_to_status(fragility_verdict: str,
+                         pressure: dict | None = None) -> str:
+    """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐.
+
+    ▶ **시도 횟수를 같이 본다** (재일님 2026-08-04)
+      웹에서 컨셉을 빌려 우리가 구현하면 파라미터 자유도가 전부 우리 것이 된다.
+      한 컨셉으로 변형 20개를 돌려 제일 좋은 것을 고르면 그 성적은 실력이
+      아니라 **다중검정**이다 - 12번째 시도의 Sharpe 1.5 는 1번째와 다르다.
+
+      contracts/quant_v2.trial_pressure() 가 이 계산을 진작 하고 있었는데
+      **호출처가 0개였다.** 예산을 넘긴 Family 의 ROBUST 는 SUPPORTED 로
+      올리지 않고 INCONCLUSIVE 로 둔다 - 틀렸다는 뜻이 아니라 이 표본으로는
+      실력과 운을 못 가린다는 뜻이다.
+    """
     v = (fragility_verdict or "").strip().upper()
     if v == "FRAGILE":
         return "REJECTED"
     if v == "ROBUST":
+        if (pressure or {}).get("over_budget"):
+            return "INCONCLUSIVE"
         return "SUPPORTED"
     raise ValueError(f"알 수 없는 강건성 판정: {fragility_verdict!r} - "
                      f"모르는 값을 상태 전이로 옮기지 않는다")
+
+
+# 한 컨셉(edge type)에 허용하는 변형 시도 수. 넘으면 ROBUST 라도 SUPPORTED 로
+# 올리지 않는다 - 많이 돌려 고른 최고치는 실력과 운을 못 가린다.
+TRIAL_BUDGET_DEFAULT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +183,24 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
-        new_status = robustness_to_status(result["fragility"])
+        # ▶ 같은 Family 에서 몇 번째 시도인지 세어 상태 전이에 반영한다.
+        #   가설의 edge type + universe 를 Family 로 본다(같은 컨셉의 변형들).
+        try:
+            cur.execute(
+                """
+                select count(*) as used
+                from quant.experiments e
+                join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                where h.expected_edge->>'type' = %s
+                """, (str((hyp.get("expected_edge") or {}).get("type") or ""),))
+            used = int((cur.fetchone() or [0])[0])
+        except Exception:
+            used = 0                     # 못 세면 0 - 없는 압력을 지어내지 않는다
+        budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
+        report.trial_pressure = {"trials_used": used, "trial_budget": budget,
+                                 "over_budget": used > budget}
+        new_status = robustness_to_status(result["fragility"],
+                                          report.trial_pressure)
         cur.execute("update quant.hypotheses set status=%s "
                     "where hypothesis_id=%s and status='TESTING'", (new_status, hid))
         conn.commit()
@@ -318,6 +355,14 @@ def _check_feasibility_gate():
 def _check_status_mapping():
     assert robustness_to_status("FRAGILE") == "REJECTED"
     assert robustness_to_status("ROBUST") == "SUPPORTED"
+    # ▶ **예산을 넘긴 Family 의 ROBUST 는 SUPPORTED 가 아니다.**
+    #   틀렸다는 뜻이 아니라 이 표본으로는 실력과 운을 못 가린다는 뜻이다.
+    over = {"trials_used": 12, "trial_budget": 5, "over_budget": True}
+    assert robustness_to_status("ROBUST", over) == "INCONCLUSIVE"
+    # FRAGILE 은 시도 수와 무관하게 REJECTED (많이 돌렸다고 구제되지 않는다)
+    assert robustness_to_status("FRAGILE", over) == "REJECTED"
+    ok = {"trials_used": 2, "trial_budget": 5, "over_budget": False}
+    assert robustness_to_status("ROBUST", ok) == "SUPPORTED"
     for bad in ("", "MAYBE", None):
         try:
             robustness_to_status(bad)

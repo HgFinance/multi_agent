@@ -9,20 +9,28 @@
   QNT-01 프로필도 "why should this edge exist and who is on the other side"
   를 요구하는데, 그 답을 내부 데이터만으로는 쓸 수 없다.
 
-▶ 그런데 전략 탐색에는 리서치 근거 수집에 없는 함정이 있다
-  **전략 자체가 미래 정보다.**
+▶ 가져오는 것은 **컨셉이지 전략이 아니다** (재일님 2026-08-04 정정)
+  "웹검색으로 전략의 컨셉을 가져와서 알파가 있는 전략으로 개조하라는 의미이지
+   그대로 따라하라는 건 아니었음"
 
-  오늘 논문에서 찾은 기법을 2024-01 부터 백테스트하면 좋은 성적이 나온다.
-  당연하다 - 그 논문은 2024~2026 데이터를 보고 쓰였을 수 있고, 애초에
-  잘 통한 기법이라 발표된 것이다. 데이터 누수가 아니라 **전략 누수**이고,
-  백테스트 과적합의 가장 흔한 형태다.
+  이 구분이 위험의 성격을 바꾼다.
 
-  게다가 공표된 알파는 발표 후 감쇠한다(post-publication decay). 발표 전
-  구간의 성적을 그대로 미래 기대치로 쓰면 두 번 속는다.
+  전략을 **그대로 복제**하면 위험은 공표일이다 - 그때 몰랐던 기법을 아는 셈이라
+  전략 누수가 되고, 공표 후 알파 감쇠까지 겹친다.
 
-  그래서 이 모듈은 **발견 시각과 원출처 공표일을 반드시 남기고**,
-  그 날짜 이전 구간이 구조적으로 in-sample 임을 명시한다. 감추면
-  백테스트 결과가 실력처럼 읽힌다.
+  컨셉만 빌려 **우리가 구현**하면 그 위험은 옅어지는 대신 **다른 위험이
+  커진다**: 파라미터를 고르는 자유도가 전부 우리 것이 된다. 한 컨셉으로 변형
+  20개를 돌려 제일 좋은 것을 고르면, 그 성적은 실력이 아니라 **다중검정**이다.
+  12번째 시도에서 나온 Sharpe 1.5 는 1번째와 다르다.
+
+  그래서 이 모듈이 남기는 것은 두 가지다:
+    · 컨셉과 **경제적 근거** - 왜 이 엣지가 존재하고 반대편에 누가 있나
+    · 공표 연도 - **참고 문맥**이다(하드 벽이 아니다). 우리 구현이 원본과
+      다르면 그 날짜로 구간을 잘라낼 근거가 약하다. 다만 컨셉이 널리 퍼진
+      뒤라면 감쇠를 의심할 재료는 된다.
+
+  **진짜 가드는 시도 횟수**이고 그건 contracts/quant_v2.trial_pressure() 가
+  이미 계산한다 - 호출처가 0개였을 뿐이다.
 
 ▶ 검증된 것으로 다루지 않는다
   웹에서 온 것은 SEARCH_HIT 이지 사실이 아니다. 정찰 결과는 **가설 후보**로만
@@ -76,10 +84,10 @@ class StrategyLead:
         return (m.group(1) if m else "").lower().removeprefix("www.")
 
     def oos_start(self) -> Optional[date]:
-        """이 날짜 **이후**만 진짜 out-of-sample 이다.
+        """컨셉이 공표된 시점. **사양을 복제했을 때만 out-of-sample 경계다.**
 
-        공표 연도를 모르면 None - 그러면 전 구간을 in-sample 로 다뤄야 한다.
-        모르는 것을 오늘로 가정하면 백테스트가 부당하게 유리해진다.
+        컨셉만 빌려 우리가 구현했다면 이 날짜는 문맥이지 벽이 아니다.
+        모르면 None - 오늘로 가정하지 않는다.
         """
         if self.source_year is None:
             return None
@@ -125,11 +133,16 @@ def to_leads(hits: Iterable, *, now: Optional[datetime] = None) -> list[Strategy
 
 
 def sample_boundary(leads: Iterable[StrategyLead], *,
-                    backtest_start: date) -> dict:
-    """백테스트 구간 중 **어디까지가 구조적 in-sample 인가.**
+                    backtest_start: date,
+                    derived: bool = True) -> dict:
+    """공표일 문맥. **derived=True(컨셉 차용)면 경고이지 차단이 아니다.**
 
-    이 판정을 안 붙이면 "2024부터 +233%" 가 실력처럼 읽힌다. 전략을 오늘
-    알았다면 2024~오늘 전체가 사후 선택된 구간이다.
+    컨셉만 빌려 우리가 구현했다면 공표일로 구간을 잘라낼 근거가 약하다 -
+    우리 구현은 원본과 다른 물건이다. 다만 컨셉이 퍼진 뒤라면 알파 감쇠를
+    의심할 재료는 되므로 사실은 남긴다.
+
+    derived=False(사양을 그대로 복제)면 얘기가 다르다 - 그때는 공표 이전
+    구간이 구조적 in-sample 이고, 그 성적을 미래 기대치로 쓰면 안 된다.
     """
     leads = list(leads)
     if not leads:
@@ -141,8 +154,11 @@ def sample_boundary(leads: Iterable[StrategyLead], *,
             "has_lead": True, "oos_start": None,
             # ▶ 모르면 **전 구간 in-sample** 이다. 유리한 쪽으로 가정하지 않는다.
             "in_sample_through": None,
-            "caution": "원출처 공표일을 확인하지 못했다 - 백테스트 전 구간을 "
-                       "in-sample 로 다룬다(전략 자체가 사후 선택일 수 있다)",
+            "caution": ("원출처 공표일 미상 - 컨셉 차용이므로 구간을 자르지 "
+                        "않되, 시도 횟수(trial_pressure)로 과적합을 본다"
+                        if derived else
+                        "원출처 공표일 미상 - 사양 복제이므로 전 구간을 "
+                        "in-sample 로 다룬다"),
         }
 
     oos = date(max(years), 12, 31)
@@ -150,11 +166,17 @@ def sample_boundary(leads: Iterable[StrategyLead], *,
     return {
         "has_lead": True,
         "oos_start": oos.isoformat(),
-        "in_sample_through": None if covered else oos.isoformat(),
+        "derived_from_concept": derived,
+        # 컨셉 차용이면 구간을 자르지 않는다 - 우리 구현은 원본과 다른 물건이다
+        "in_sample_through": None if (covered or derived) else oos.isoformat(),
         "caution": None if covered else
-        (f"백테스트 시작({backtest_start})부터 {oos} 까지는 전략 공표 이전이라 "
-         f"구조적 in-sample 이다 - 그 구간 성적을 미래 기대치로 쓰지 않는다. "
-         f"공표 후 알파 감쇠도 함께 본다"),
+        (f"컨셉이 {oos.year} 에 공표됐다 - 구간을 자르지는 않되(우리 구현은 "
+         f"원본과 다르다) 공표 후 알파 감쇠를 의심할 재료다. 과적합의 주된 "
+         f"위험은 우리가 고른 파라미터이므로 trial_pressure 로 본다"
+         if derived else
+         f"백테스트 시작({backtest_start})부터 {oos} 까지는 공표 이전이라 "
+         f"구조적 in-sample 이다 - 사양을 복제했다면 그 성적을 미래 기대치로 "
+         f"쓰지 않는다"),
     }
 
 
@@ -222,16 +244,20 @@ def _check_year_extraction_rejects_future():
     assert _year_from("no year here", now_year=2026) is None
 
 
-def _check_unknown_year_means_full_in_sample():
-    """**공표일을 모르면 전 구간 in-sample 이다.** 유리하게 가정하지 않는다.
+def _check_derived_vs_replicated():
+    """**컨셉 차용과 사양 복제는 다르게 다뤄야 한다.**
 
-    이게 이 모듈의 존재 이유다 - 오늘 찾은 전략을 2024부터 돌리면 좋은
-    성적이 나오는 게 당연하고, 그것을 실력으로 읽으면 두 번 속는다.
+    컨셉만 빌려 우리가 구현했으면 공표일로 구간을 자를 근거가 약하다 -
+    우리 구현은 원본과 다른 물건이다. 과적합의 주된 위험은 우리가 고른
+    파라미터이고 그건 trial_pressure 가 본다.
+
+    반대로 사양을 그대로 복제했으면 공표 이전 구간은 구조적 in-sample 이다.
     """
     leads = to_leads([_Hit("https://x.com/a", "no date", "")], now=_NOW)
-    b = sample_boundary(leads, backtest_start=date(2024, 1, 2))
-    assert b["has_lead"] is True and b["oos_start"] is None, b
-    assert "전 구간을 in-sample" in b["caution"], b
+    d = sample_boundary(leads, backtest_start=date(2024, 1, 2), derived=True)
+    assert d["oos_start"] is None and "trial_pressure" in d["caution"], d
+    r = sample_boundary(leads, backtest_start=date(2024, 1, 2), derived=False)
+    assert "전 구간을 in-sample" in r["caution"], r
 
 
 def _check_publication_before_backtest_is_clean():
@@ -243,10 +269,15 @@ def _check_publication_before_backtest_is_clean():
 
 
 def _check_publication_inside_window_is_flagged():
+    """구간 안에서 공표됐으면 사실은 남기되, 차용 여부로 처분이 갈린다."""
     leads = to_leads([_Hit("https://ssrn.com/abs/2", "New factor", "2025")], now=_NOW)
-    b = sample_boundary(leads, backtest_start=date(2024, 1, 2))
-    assert b["in_sample_through"] == "2025-12-31", b
-    assert "구조적 in-sample" in b["caution"] and "감쇠" in b["caution"], b
+    d = sample_boundary(leads, backtest_start=date(2024, 1, 2), derived=True)
+    # 컨셉 차용 - 구간을 자르지 않되 감쇠는 의심 재료로 남긴다
+    assert d["in_sample_through"] is None and "감쇠" in d["caution"], d
+    r = sample_boundary(leads, backtest_start=date(2024, 1, 2), derived=False)
+    # 사양 복제 - 공표 이전은 구조적 in-sample
+    assert r["in_sample_through"] == "2025-12-31", r
+    assert "구조적 in-sample" in r["caution"], r
 
 
 def _check_search_failure_is_not_empty_result():
@@ -284,7 +315,7 @@ if __name__ == "__main__":
     print(f"{AGENT_VERSION} 자체 점검 (네트워크 없음)")
     _check_primary_source_first();            print("  원출처 우선            OK")
     _check_year_extraction_rejects_future();  print("  미래 연도 거부          OK")
-    _check_unknown_year_means_full_in_sample(); print("  공표일 미상=전구간 IS   OK")
+    _check_derived_vs_replicated();           print("  컨셉차용 != 사양복제    OK")
     _check_publication_before_backtest_is_clean(); print("  공표 선행=경고 없음     OK")
     _check_publication_inside_window_is_flagged(); print("  구간 내 공표=경고       OK")
     _check_search_failure_is_not_empty_result(); print("  검색 실패 != 0건        OK")
