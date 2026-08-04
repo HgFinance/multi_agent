@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hgfinance.local/contracts/event-registry.v1.json",
+  "schema_version": "event-registry.v1",
+  "envelope_schema": "event-envelope-v1",
+  "description": "Canonical Event 이름, 실제 Producer와 Planned Event를 분리하는 Registry",
+  "statuses": ["IMPLEMENTED", "IMPLEMENTED_INTERNAL", "PLANNED", "LEGACY_ALIAS"],
+  "case_bindings": ["required", "optional", "none"],
+  "ownership": {
+    "registry": "platform-api-architecture",
+    "payload_schema": "producer-domain",
+    "decision_and_ledger_events": "owning-domain"
+  },
+  "events": [
+    {
+      "event_type": "risk.decision.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "risk-management",
+      "consumers": ["trading-department", "qa-department", "ceo-agent"],
+      "source": "departments/03-risk/risk_events/redis_event_bus.py",
+      "case_binding": "optional",
+      "notes": "내부 Risk bus contract. 외부 canonical Case event로 승격하지 않는다."
+    },
+    {
+      "event_type": "qa.decision.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "qa-department",
+      "consumers": ["trading-department", "ceo-agent", "hr-department"],
+      "source": "departments/06-ai-qa-audit/qa_events/redis_event_bus.py",
+      "case_binding": "optional",
+      "notes": "내부 QA bus contract. PASS는 독립 검증 조건을 대체하지 않는다."
+    },
+    {
+      "event_type": "trading.order_intent.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "domain",
+      "producer": "trading-department",
+      "consumers": ["risk-management", "qa-department", "accounting-portfolio-department"],
+      "source": "departments/02-trading/contracts/contracts.py",
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "governance.mandate.changed.v1",
+      "status": "IMPLEMENTED",
+      "layer": "cross_domain",
+      "producer": "ceo-agent",
+      "consumers": ["risk-management", "trading-department", "quant-backtest-department", "qa-department"],
+      "source": "departments/00-ceo-office/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "governance.case.created.v1",
+      "status": "IMPLEMENTED",
+      "layer": "cross_domain",
+      "producer": "ceo-agent",
+      "consumers": ["research-department", "trading-department", "risk-management", "qa-department"],
+      "source": "departments/00-ceo-office/api/app.py",
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "report.ready.v1",
+      "status": "IMPLEMENTED",
+      "layer": "cross_domain",
+      "producer": "ceo-agent",
+      "consumers": ["ceo-agent", "platform"],
+      "source": "departments/00-ceo-office/api/app.py",
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "workforce.eval.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "qa-department",
+      "consumers": ["hr-department"],
+      "source": "departments/07-agent-workforce/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "workforce.hiring_request.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "hr-department",
+      "consumers": ["qa-department", "ceo-agent"],
+      "source": "departments/07-agent-workforce/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "workforce.profile_candidate.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "hr-department",
+      "consumers": ["qa-department", "ceo-agent"],
+      "source": "departments/07-agent-workforce/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "workforce.lifecycle_changed.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "hr-department",
+      "consumers": ["platform", "qa-department"],
+      "source": "departments/07-agent-workforce/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "workforce.access_request.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "hr-department",
+      "consumers": ["platform", "qa-department"],
+      "source": "departments/07-agent-workforce/api/app.py",
+      "case_binding": "none"
+    },
+    {
+      "event_type": "research.packet.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "research-department",
+      "consumers": ["quant-backtest-department", "trading-department", "qa-department", "ceo-agent"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "research.data_quality.warning.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "research-department",
+      "consumers": ["qa-department", "ceo-agent"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "quant.dataset.certified.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "quant-backtest-department",
+      "consumers": ["qa-department", "trading-department"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "quant.experiment.completed.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "quant-backtest-department",
+      "consumers": ["qa-department", "ceo-agent"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "strategy.candidate.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "quant-backtest-department",
+      "consumers": ["qa-department", "risk-management", "ceo-agent"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "qa.review.requested.v1",
+      "status": "PLANNED",
+      "layer": "cross_domain",
+      "producer": "research-department",
+      "consumers": ["qa-department"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "investment_case.risk_approved.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "risk-management",
+      "consumers": ["qa-department", "trading-department"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "investment_case.risk_resized.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "risk-management",
+      "consumers": ["qa-department", "trading-department"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "investment_case.risk_rejected.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "risk-management",
+      "consumers": ["qa-department", "ceo-agent"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "risk.trading_state.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "risk-management",
+      "consumers": ["qa-department", "ceo-agent"],
+      "case_binding": "none"
+    },
+    {
+      "event_type": "investment_case.qa_passed.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "qa-department",
+      "consumers": ["trading-department", "ceo-agent"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "investment_case.qa_warned.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "qa-department",
+      "consumers": ["trading-department", "ceo-agent"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "investment_case.qa_blocked.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "qa-department",
+      "consumers": ["trading-department", "ceo-agent"],
+      "case_binding": "required"
+    },
+    {
+      "event_type": "trading.fill.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "trading-department",
+      "consumers": ["accounting-portfolio-department", "qa-department"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "portfolio.snapshot.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "accounting-portfolio-department",
+      "consumers": ["ceo-agent", "qa-department", "platform"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "nav.official.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "accounting-portfolio-department",
+      "consumers": ["ceo-agent", "qa-department"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "qa.finding.opened.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "qa-department",
+      "consumers": ["ceo-agent", "owning-domain"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "governance.decision.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "ceo-agent",
+      "consumers": ["owning-domain", "qa-department"],
+      "case_binding": "optional"
+    },
+    {
+      "event_type": "governance.capital_allocation.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "ceo-agent",
+      "consumers": ["accounting-portfolio-department"],
+      "case_binding": "none"
+    },
+    {
+      "event_type": "governance.escalation.v1",
+      "status": "PLANNED",
+      "layer": "canonical",
+      "producer": "ceo-agent",
+      "consumers": ["owner", "qa-department"],
+      "case_binding": "optional"
+    }
+  ],
+  "aliases": [
+    {"alias": "investment_case.risk_approved", "canonical": "investment_case.risk_approved.v1", "status": "LEGACY_ALIAS"},
+    {"alias": "investment_case.risk_resized", "canonical": "investment_case.risk_resized.v1", "status": "LEGACY_ALIAS"},
+    {"alias": "investment_case.risk_rejected", "canonical": "investment_case.risk_rejected.v1", "status": "LEGACY_ALIAS"},
+    {"alias": "investment_case.qa_passed", "canonical": "investment_case.qa_passed.v1", "status": "LEGACY_ALIAS"},
+    {"alias": "investment_case.qa_warned", "canonical": "investment_case.qa_warned.v1", "status": "LEGACY_ALIAS"},
+    {"alias": "investment_case.qa_blocked", "canonical": "investment_case.qa_blocked.v1", "status": "LEGACY_ALIAS"}
+  ]
+}
