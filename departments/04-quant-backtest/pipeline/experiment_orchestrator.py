@@ -95,6 +95,25 @@ def feasibility(hypothesis: dict, existing_datasets: set,
     return (not missing), missing, backlog
 
 
+# ▶ **상태 머신이 세 갈래로 갈라져 있다** (2026-08-04 실측)
+#     계약 quant_v2.HypothesisStatus : INTAKE -> PREREGISTERED ->
+#                                      DATASET_CERTIFIED -> RUNNING ->
+#                                      ROBUSTNESS_REVIEW -> SUPPORTED/REJECTED
+#     DB 제약 quant.hypotheses        : PROPOSED/APPROVED/TESTING/SUPPORTED/
+#                                      REJECTED/INCONCLUSIVE/ARCHIVED
+#     이 실행부                       : PROPOSED -> TESTING -> {SUPPORTED,
+#                                      REJECTED, INCONCLUSIVE}
+#
+#   계약의 7단계는 사전등록(PREREGISTERED)과 데이터셋 인증(DATASET_CERTIFIED)을
+#   별도 관문으로 두는데 **호출처가 0개**다 - 지금은 그 두 관문 없이 바로
+#   TESTING 으로 간다. 결과를 본 뒤 설정을 바꾸는 것을 막는 장치가 그 자리인데
+#   비어 있다는 뜻이다(계획 2번 "사전등록 강화" 가 이것이다).
+#
+#   지금 갈라진 채로 두는 이유: 상태를 계약 쪽으로 옮기려면 DB 제약·기존 14행·
+#   실행부를 같이 바꿔야 하고, 그 사이 어느 하나만 먼저 바뀌면 UPDATE 가 죽는다.
+#   실제로 오늘 INCONCLUSIVE 를 코드에만 넣었다가 DB 제약에 없어 예산 초과가
+#   나는 순간 죽을 뻔했다(마이그레이션 20260804001000 으로 메웠다).
+#   **다음 작업에서 세 갈래를 하나로 합친다.**
 def robustness_to_status(fragility_verdict: str,
                          pressure: dict | None = None) -> str:
     """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐.
