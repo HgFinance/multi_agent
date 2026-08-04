@@ -24,6 +24,15 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/risk/v1/p2", tags=["risk-p2"])
 
 
+def _canonical_database_url() -> str:
+    """Select a writable Risk/QA DSN without using the portfolio read-only DSN."""
+
+    return (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
+
+
 class DerivativePositionIn(BaseModel):
     instrument_id: str = Field(min_length=1)
     option_type: str = Field(min_length=1)
@@ -85,7 +94,7 @@ def derivatives_check(body: DerivativeGateRequest) -> dict[str, Any]:
 
 
 def _persist_snapshot(body: DerivativeGateRequest, snapshot: Any, decision: str) -> None:
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = _canonical_database_url()
     if not database_url:
         raise HTTPException(status_code=503, detail="DATABASE_URL required for P2 persistence")
     try:

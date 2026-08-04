@@ -95,7 +95,10 @@ class WorkerTraceBridge:
 def build_default_trace_bridge() -> WorkerTraceBridge | None:
     if os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() != "true":
         return None
-    dsn = os.environ.get("DATABASE_URL", "").strip()
+    dsn = (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
     if not dsn:
         raise WorkerTraceBridgeError("QA_TRACE_PERSIST requires DATABASE_URL")
     return WorkerTraceBridge(PostgresAuditRepository.connect(dsn))

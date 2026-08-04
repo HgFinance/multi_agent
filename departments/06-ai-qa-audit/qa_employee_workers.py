@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
+from uuid import UUID
 
 from langgraph.graph import END, StateGraph
 
@@ -505,8 +506,66 @@ def _hallucination_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tools": ["qa.model_risk.evaluate", "qa.internal_audit.evaluate"],
-            "model_risk": payload.get("model_risk"), "internal_audit": payload.get("internal_audit")}
+    result: dict[str, Any] = {
+        "tools": ["qa.model_risk.evaluate", "qa.internal_audit.evaluate"],
+        "model_risk": payload.get("model_risk"),
+        "internal_audit": payload.get("internal_audit"),
+    }
+    model_risk_input = payload.get("model_risk_input")
+    if model_risk_input is not None:
+        try:
+            from model_risk import ModelRiskEngine, ModelRiskInput
+
+            assessment = ModelRiskEngine().evaluate(
+                ModelRiskInput(
+                    model_id=UUID(str(model_risk_input["model_id"])),
+                    model_version=str(model_risk_input["model_version"]),
+                    prompt_version=str(model_risk_input["prompt_version"]),
+                    dataset_version=str(model_risk_input["dataset_version"]),
+                    evaluation_count=int(model_risk_input["evaluation_count"]),
+                    accuracy=float(model_risk_input["accuracy"]),
+                    calibration_error=float(model_risk_input["calibration_error"]),
+                    drift_score=float(model_risk_input["drift_score"]),
+                    protected_failure_rate=float(model_risk_input["protected_failure_rate"]),
+                )
+            )
+            result["model_risk"] = {
+                "decision": assessment.decision.value,
+                "reason_codes": list(assessment.reason_codes),
+                "calculation_version": assessment.calculation_version,
+                "input_hash": assessment.input_hash,
+            }
+        except Exception as exc:  # noqa: BLE001 - invalid audit input escalates
+            result["model_risk"] = {
+                "decision": "ESCALATE",
+                "reason_codes": ["model_risk_input_invalid"],
+                "calculation_version": "qa-model-risk-v1",
+                "error": type(exc).__name__,
+            }
+
+    audit_events = payload.get("internal_audit_events")
+    if audit_events is not None:
+        try:
+            from internal_audit import InternalAuditEngine
+
+            assessment = InternalAuditEngine().evaluate(
+                events=audit_events,
+                expected_department=str(payload.get("internal_audit_department", "qa")),
+            )
+            result["internal_audit"] = {
+                "decision": assessment.decision.value,
+                "findings": list(assessment.findings),
+                "calculation_version": assessment.calculation_version,
+                "input_hash": assessment.input_hash,
+            }
+        except Exception as exc:  # noqa: BLE001 - invalid audit input escalates
+            result["internal_audit"] = {
+                "decision": "ESCALATE",
+                "findings": ["internal_audit_input_invalid"],
+                "calculation_version": "qa-internal-audit-v1",
+                "error": type(exc).__name__,
+            }
+    return result
 
 
 def _ops_tool(payload: dict[str, Any]) -> dict[str, Any]:

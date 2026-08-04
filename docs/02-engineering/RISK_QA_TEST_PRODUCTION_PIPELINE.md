@@ -179,7 +179,7 @@ python scripts/run_risk_qa_production_preflight.py \
 
 다음 조건 중 하나라도 실패하면 실행하지 않고 원인을 먼저 해결한다.
 
-- `DATABASE_URL`, `REDIS_URL`(Trading State 필수), `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
+- `RISK_QA_DATABASE_URL` 또는 `DATABASE_URL`, `REDIS_URL`(Trading State 필수), `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
 - `RISK_QA_RUNTIME=production`, `RISK_QA_PRODUCTION_ENABLED=true`
 - `QA_CHECK_CONTRACT_APPROVED=true`, `QA_TRACE_PERSIST=true`, `RISK_REQUIRE_P1_ANALYTICS=true`
 - `RISK_CONTEXT_SOURCE=database`와 실제 `RISK_BROKER_ADAPTER` 설정
@@ -201,3 +201,35 @@ Risk/QA의 실제 DB write-through와 Redis 중복·재시작 검증은 별도 s
 ```bash
 python scripts/run_risk_qa_integration_smoke.py
 ```
+
+### 11.1 Supabase 연결 복구 순서
+
+`supabase db push --linked`의 `EAUTHQUERY auth_query secret check timed out`은
+마이그레이션 SQL이 실행되기 전에 Supabase Pooler의 CLI 로그인 role secret 조회가
+타임아웃된 경우다. 이 메시지만으로 migration 파일을 수정하지 않는다.
+
+1. Supabase Dashboard에서 해당 프로젝트의 최신 PostgreSQL connection string을 다시
+   복사한다. 포트폴리오 read-only 진단은 `SUPABASE_DATABASE_URL`에, Risk/QA
+   write-through는 `RISK_QA_DATABASE_URL` 또는 `DATABASE_URL`에 저장한다. 두 DSN 모두
+   `sslmode=require`를 포함하고, 값은 저장소나 로그에 기록하지 않는다.
+2. Jaeil님이 CLI 세션과 linked project를 확인한 뒤 `npx supabase db push --linked`를
+   재시도한다. `--debug` 출력에는 DSN·token이 포함될 수 있으므로 원문을 공유하지 않는다.
+3. 같은 오류가 반복되면 Supabase Pooler 장애/프로젝트 상태를 Dashboard에서 확인하고,
+   migration SQL을 Dashboard SQL Editor 또는 승인된 직접 PostgreSQL 연결로 적용한다.
+   앱 preflight가 PASS가 되기 전에는 Risk/QA Production 실행을 시작하지 않는다.
+4. 앱 연결은 아래 순서로 검증한다. 이 명령들은 주문·Ledger·migration 쓰기를 수행하지
+   않는다.
+
+```bash
+python scripts/run_portfolio_supabase_readonly.py --diagnose-only \
+  --as-of 2026-08-04T00:00:00+00:00
+python scripts/run_risk_qa_production_preflight.py \
+  --as-of 2026-08-04T00:00:00+00:00
+```
+
+`RISK_QA_DATABASE_URL`이 있으면 Risk/QA API, Trace bridge, policy ingestion,
+projection worker와 preflight가 그 값을 우선 사용하고, 없을 때만 `DATABASE_URL`로
+fallback한다. `SUPABASE_DATABASE_URL`은 포트폴리오 Read-only Adapter 전용이며
+Risk/QA write-through에 사용하지 않는다. DB 접속 PASS만으로 Production 준비가 된
+것은 아니며, PIT data, RLS, 실제 정책 corpus, active worker profile, Redis 및 승인
+flag가 모두 PASS여야 한다.

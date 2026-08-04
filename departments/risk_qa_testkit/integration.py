@@ -141,7 +141,10 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _check_supabase_event(environ: Mapping[str, str]) -> dict[str, Any]:
-    dsn = environ.get("DATABASE_URL", "").strip()
+    dsn = (
+        environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or environ.get("DATABASE_URL", "").strip()
+    )
     if not dsn:
         return {"configured": False, "status": "SKIPPED", "reason": "DATABASE_URL_MISSING"}
     conn = None

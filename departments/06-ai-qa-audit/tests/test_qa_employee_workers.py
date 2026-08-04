@@ -8,7 +8,7 @@ from pathlib import Path
 QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 
-from qa_employee_workers import run_employee_workers
+from qa_employee_workers import _audit_tool, run_employee_workers
 
 import scripts as qa_scripts
 
@@ -82,3 +82,33 @@ def test_model_and_internal_audit_graph_stage_runs_with_governed_inputs():
     report = run_employee_workers(output, llm=_llm)
     assert "model-and-internal-audit-worker" in report["executed"]
     assert "model-and-internal-audit-worker" not in report["not_executed"]
+
+
+def test_audit_worker_tool_runs_deterministic_engines_for_explicit_inputs():
+    output = _audit_tool(
+        {
+            "model_risk_input": {
+                "model_id": "00000000-0000-0000-0000-000000000001",
+                "model_version": "model-v1",
+                "prompt_version": "prompt-v1",
+                "dataset_version": "dataset-v1",
+                "evaluation_count": 500,
+                "accuracy": 0.9,
+                "calibration_error": 0.02,
+                "drift_score": 0.04,
+                "protected_failure_rate": 0.01,
+            },
+            "internal_audit_events": [
+                {
+                    "action": "qa.evidence.check",
+                    "department": "qa",
+                    "trace_id": "trace-qa-tool-1",
+                    "profile_status": "ACTIVE",
+                    "authorized": True,
+                }
+            ],
+        }
+    )
+
+    assert output["model_risk"]["decision"] == "PASS"
+    assert output["internal_audit"]["decision"] == "PASS"

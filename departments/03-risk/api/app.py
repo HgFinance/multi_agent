@@ -255,11 +255,20 @@ _decision_repository: RiskDecisionRepository | None = None
 _event_publisher: RedisEventPublisher | None = None
 
 
+def _canonical_database_url() -> str:
+    """Select a writable Risk/QA DSN without using the portfolio read-only DSN."""
+
+    return (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
+
+
 def _risk_decision_repository() -> RiskDecisionRepository | None:
     """DATABASE_URL이 주입된 Domain Runtime에서만 Canonical DB를 사용한다."""
 
     global _decision_repository
-    dsn = os.environ.get("DATABASE_URL")
+    dsn = _canonical_database_url()
     if not dsn:
         return None
     if _decision_repository is None:
@@ -383,7 +392,7 @@ def risk_check(case_id: str, body: RiskCheckRequest):
         or os.environ.get("RISK_CONTEXT_SOURCE", "request").strip().lower() == "database"
     )
     if use_database_context:
-        dsn = os.environ.get("DATABASE_URL", "").strip()
+        dsn = _canonical_database_url()
         broker_adapter = os.environ.get("RISK_BROKER_ADAPTER", "").strip()
         if not dsn or not broker_adapter:
             raise HTTPException(

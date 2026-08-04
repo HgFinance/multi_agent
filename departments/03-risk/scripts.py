@@ -755,7 +755,7 @@ def _record_execution_evidence(
             "external_dependencies": {
                 "redis": "DEGRADED" if any(item.get("stage") == "trading_state" for item in fallbacks) else "NOT_OBSERVED",
                 "compliance_rag": "EXECUTED" if compliance else "NOT_EXECUTED",
-                "canonical_db": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
+"canonical_db": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
                 "portfolio_market_snapshot": "SUPPLIED_UNVERIFIED" if payload.get("context", {}).get("portfolio") else "MISSING",
             },
             "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],

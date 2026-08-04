@@ -22,6 +22,15 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/risk/v1/p1", tags=["risk-p1"])
 
 
+def _canonical_database_url() -> str:
+    """Select a writable Risk/QA DSN without using the portfolio read-only DSN."""
+
+    return (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
+
+
 class InstrumentMappingIn(BaseModel):
     broker_symbol: str = Field(min_length=1)
     instrument_id: UUID
@@ -43,7 +52,7 @@ class ExternalP1SnapshotRequest(BaseModel):
 
 
 def _resolve_mappings(body: ExternalP1SnapshotRequest) -> tuple[InstrumentMapping, ...]:
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = _canonical_database_url()
     if database_url:
         import psycopg2
 
@@ -102,7 +111,7 @@ def external_p1_snapshot(body: ExternalP1SnapshotRequest) -> dict[str, Any]:
 
 
 def _persist_snapshot(snapshot: Any, *, trace_id: UUID) -> None:
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = _canonical_database_url()
     raw_scenarios = os.environ.get("RISK_STRESS_SCENARIO_IDS_JSON", "")
     if not database_url or not raw_scenarios:
         raise RiskExternalRuntimeError(
