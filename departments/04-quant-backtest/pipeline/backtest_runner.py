@@ -187,6 +187,111 @@ def _apply_costs(side: str, notional: float) -> float:
     return notional * bps / 1e4
 
 
+
+def buy_and_hold_equity(market: Market, config: dict) -> list[tuple[date, float]]:
+    """동일가중 매수 후 보유 벤치마크. **같은 PIT 데이터·같은 비용 모델.**
+
+    ▶ 왜 필요한가 (2026-08-04 실측에서 드러난 공백)
+      백테스트가 "+26.30%, Sharpe 0.4371" 을 냈는데 **그게 좋은 건지 나쁜 건지
+      판단할 기준이 없었다.** 같은 기간 시장이 +40% 였으면 그 전략은 가치를
+      파괴한 것이다. 리서치본부가 이미 지키는 원칙과 같다 -
+      "비교 기준 없는 단일 값은 판정이 아니다".
+
+    ▶ 공정하게 비교하기 위한 규칙
+      · 같은 Market(같은 PIT Manifest) 을 쓴다 - 다른 데이터로 비교하면 무의미
+      · **진입 비용을 벤치마크에도 물린다** - 무비용 벤치마크와 비교하면
+        전략이 부당하게 불리해진다
+      · 첫날 상장돼 있던 종목만 동일가중으로 산다. 중간 신규 상장을 사후에
+        편입하면 그게 look-ahead 다
+      · 리밸런싱 없음 - 그것이 buy-and-hold 의 정의다(회전율 0)
+    """
+    if not market.dates:
+        return []
+    d0 = market.dates[0]
+    # Market 은 (date, symbol) -> price 평면 dict 다. 첫날 종가가 있는 종목만.
+    day0 = {s_: market.closes[(d0, s_)] for s_ in market.symbols
+            if market.closes.get((d0, s_))}
+    names = sorted(k for k, v in day0.items() if v and v > 0)
+    if not names:
+        return []
+
+    capital = float(config["initial_capital"])
+    per = capital / len(names)
+    shares: dict[str, float] = {}
+    spent = 0.0
+    for s_ in names:
+        px = day0[s_]
+        # 비용을 먼저 떼고 남은 돈으로 산다(전략과 같은 방식)
+        fee = _apply_costs("BUY", per)
+        q = max((per - fee) / px, 0.0)
+        shares[s_] = q
+        spent += q * px + fee
+    cash = capital - spent
+
+    out: list[tuple[date, float]] = []
+    last: dict[str, float] = dict(day0)
+    for d in market.dates:
+        for k in shares:
+            v = market.closes.get((d, k))
+            if v and v > 0:
+                last[k] = v
+        out.append((d, cash + sum(q * last.get(k, 0.0) for k, q in shares.items())))
+    return out
+
+
+def excess_metrics(strategy_equity: list[tuple[date, float]],
+                   bench_equity: list[tuple[date, float]]) -> dict:
+    """전략 - 벤치마크. **초과가 없으면 그 전략은 존재 이유가 없다.**
+
+    행이 비면 0 이 아니라 None 이다 - 계산 못 한 것과 초과가 0 인 것은 다르다.
+    """
+    if len(strategy_equity) < 2 or len(bench_equity) < 2:
+        return {}          # 계산 못 했으면 **키를 안 만든다** (0 이 아니다)
+
+    def _total(eq):
+        a, b = eq[0][1], eq[-1][1]
+        return None if not a else (b / a - 1.0)
+
+    st, bt = _total(strategy_equity), _total(bench_equity)
+    if st is None or bt is None:
+        return {}          # 기준 자산이 0 - 판정 불가지 초과 0 이 아니다
+
+    # 일별 초과수익의 변동성으로 정보비율. 날짜를 맞춰 곱셈오차를 막는다
+    bmap = dict(bench_equity)
+    diffs = []
+    prev_s = prev_b = None
+    for d, sv in strategy_equity:
+        bv = bmap.get(d)
+        if bv is None or not sv or not bv:
+            continue
+        if prev_s and prev_b:
+            diffs.append((sv / prev_s - 1.0) - (bv / prev_b - 1.0))
+        prev_s, prev_b = sv, bv
+
+    ir = None
+    if len(diffs) > 20:
+        mu = sum(diffs) / len(diffs)
+        var = sum((x - mu) ** 2 for x in diffs) / (len(diffs) - 1)
+        sd = var ** 0.5
+        if sd > 0:
+            ir = round(mu / sd * (252 ** 0.5), 4)
+
+    # ▶ **수치만 담는다.** metrics 는 numeric 컬럼에 그대로 적재되므로
+    #   불리언·문자열을 섞으면 DatatypeMismatch 로 실행이 죽는다(실측).
+    #   판정은 excess_return_pct 부호가 이미 말한다 - 별도 플래그를 수치
+    #   테이블에 억지로 넣지 않는다.
+    out = {
+        "benchmark_total_return_pct": round(bt * 100.0, 2),
+        # 초과가 음수면 숨기지 않는다 - 절대수익이 양수여도 시장을 못 이기면
+        # 그 전략은 채택할 이유가 없다
+        "excess_return_pct": round((st - bt) * 100.0, 2),
+        "excess_days_used": float(len(diffs)),
+    }
+    if ir is not None:
+        out["information_ratio"] = ir       # 표본 부족이면 키를 아예 안 넣는다
+    return out
+
+
 def run_backtest(market: Market, config: dict) -> BacktestResult:
     _lookback = int(config["lookback_days"])
     _top_n = int(config["top_n"])
@@ -266,6 +371,17 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
         notes.append(f"기말에 시세 없는 보유 {len(held_wo_price)}종목 - 직전 종가 평가")
 
     metrics = compute_metrics(equity, fills, capital, traded_notional)
+    # ▶ 벤치마크 대비를 **항상** 붙인다. 절대수익만 보면 시장이 오른 것을
+    #   전략의 실력으로 착각한다.
+    bench_note = "benchmark=equal_weight_buy_and_hold (동일 PIT·동일 비용)"
+    try:
+        ex = excess_metrics(equity, buy_and_hold_equity(market, config))
+        metrics.update(ex)
+        if not ex:
+            bench_note = "benchmark 계산 불가 - 곡선 부족 또는 기준 자산 0"
+    except Exception as e:  # noqa: BLE001
+        bench_note = f"benchmark 계산 실패: {type(e).__name__}"
+    notes.append(bench_note)
     return BacktestResult(equity=equity, fills=fills, metrics=metrics,
                           config=config, notes=notes)
 
