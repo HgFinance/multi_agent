@@ -179,9 +179,10 @@ python scripts/run_risk_qa_production_preflight.py \
 
 다음 조건 중 하나라도 실패하면 실행하지 않고 원인을 먼저 해결한다.
 
-- `DATABASE_URL`, `REDIS_URL` 또는 `RISK_QA_EVENT_REDIS_URL`, `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
+- `DATABASE_URL`, `REDIS_URL`(Trading State 필수), `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
 - `RISK_QA_RUNTIME=production`, `RISK_QA_PRODUCTION_ENABLED=true`
 - `QA_CHECK_CONTRACT_APPROVED=true`, `QA_TRACE_PERSIST=true`, `RISK_REQUIRE_P1_ANALYTICS=true`
+- `RISK_CONTEXT_SOURCE=database`와 실제 `RISK_BROKER_ADAPTER` 설정
 - 실제 정책 문서 경로 `QA_POLICY_CORPUS_DIR`가 설정되고 `SAMPLE_PLACEHOLDER`가 없음
 - Supabase canonical table, RLS policy, active worker profile, PIT Fund/Policy/Portfolio/Market 데이터
 - Redis PING 성공
