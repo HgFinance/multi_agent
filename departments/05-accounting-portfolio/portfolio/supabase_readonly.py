@@ -37,6 +37,38 @@ SELECT
     to_regclass('accounting.portfolio_snapshots')::text AS accounting_snapshots
 """
 
+PORTFOLIO_DATA_DIAGNOSTIC_SQL = """
+SELECT
+    COUNT(*) AS versions_total,
+    COUNT(*) FILTER (
+        WHERE v.effective_from <= %s
+          AND (v.effective_to IS NULL OR v.effective_to > %s)
+    ) AS versions_as_of,
+    COUNT(*) FILTER (
+        WHERE v.deployment_state IN ('SHADOW', 'PAPER', 'LIVE_CANDIDATE', 'LIVE')
+    ) AS versions_deployable,
+    COUNT(*) FILTER (WHERE v.target_portfolio_schema IS NOT NULL) AS versions_with_schema,
+    COUNT(*) FILTER (
+        WHERE v.effective_from <= %s
+          AND (v.effective_to IS NULL OR v.effective_to > %s)
+          AND v.deployment_state IN ('SHADOW', 'PAPER', 'LIVE_CANDIDATE', 'LIVE')
+          AND s.status IN ('SHADOW', 'PAPER', 'LIVE_CANDIDATE', 'LIVE')
+          AND v.target_portfolio_schema IS NOT NULL
+          AND v.target_portfolio_schema <> '{}'::jsonb
+    ) AS candidate_rows_before_contract
+FROM strategy.versions AS v
+JOIN strategy.strategies AS s ON s.strategy_id = v.strategy_id
+"""
+
+MARKET_DATA_DIAGNOSTIC_SQL = """
+SELECT
+    COUNT(*) AS snapshots_total,
+    COUNT(*) FILTER (WHERE as_of <= %s) AS snapshots_as_of,
+    COUNT(*) FILTER (WHERE as_of <= %s AND quality_status IN ('PASS', 'WARN'))
+        AS usable_snapshots_as_of
+FROM execution.market_snapshots
+"""
+
 PORTFOLIO_CATALOG_SQL = """
 SELECT
     s.strategy_id::text AS strategy_id,
@@ -178,6 +210,7 @@ class SupabaseReadSnapshot:
     read_only: bool = True
     external_writes: bool = False
     preflight: dict[str, Any] = field(default_factory=dict)
+    data_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def as_pipeline_context(self) -> dict[str, Any]:
         """Return JSON-safe context with explicit provenance and safety flags."""
@@ -191,6 +224,7 @@ class SupabaseReadSnapshot:
             "read_only": self.read_only,
             "external_writes": self.external_writes,
             "preflight": dict(self.preflight),
+            "data_diagnostics": dict(self.data_diagnostics),
             "candidates": [dict(candidate) for candidate in self.candidates],
             "research": self.research_context,
             "market": self.market_context,
@@ -689,6 +723,32 @@ class SupabaseReadOnlyAdapter:
             else:
                 by_name[name] = result
 
+        data_diagnostics: dict[str, Any] = {}
+        diagnostic_query_names: list[str] = []
+        if self._fetcher is None:
+            diagnostic_jobs = (
+                (
+                    "portfolio_data_diagnostic",
+                    PORTFOLIO_DATA_DIAGNOSTIC_SQL,
+                    (cutoff, cutoff, cutoff, cutoff),
+                ),
+                (
+                    "market_data_diagnostic",
+                    MARKET_DATA_DIAGNOSTIC_SQL,
+                    (cutoff, cutoff),
+                ),
+            )
+            diagnostic_results = await asyncio.gather(
+                *(self._fetch(fetcher, query, args) for _, query, args in diagnostic_jobs),
+                return_exceptions=True,
+            )
+            for (name, _, _), result in zip(diagnostic_jobs, diagnostic_results, strict=True):
+                diagnostic_query_names.append(name)
+                if isinstance(result, Exception):
+                    reasons.append(f"DATA_DIAGNOSTICS_FAILED:{name}:{type(result).__name__}")
+                    continue
+                data_diagnostics[name] = dict(result[0]) if result else {}
+
         candidates, candidate_reasons = _normalize_candidates(
             by_name.get("portfolio_catalog", ()), as_of=cutoff
         )
@@ -712,6 +772,10 @@ class SupabaseReadOnlyAdapter:
             quality = "WARN"
         else:
             quality = "PASS"
+        if research_context["status"] == "EMPTY":
+            reasons.append("NO_PIT_RESEARCH_DOCUMENTS")
+        if market_context["status"] == "EMPTY":
+            reasons.append("NO_PIT_MARKET_SNAPSHOTS")
         return SupabaseReadSnapshot(
             cutoff,
             "SUPABASE",
@@ -721,14 +785,17 @@ class SupabaseReadOnlyAdapter:
             market_context,
             accounting_context,
             tuple(reasons),
-            tuple(name for name, _, _ in jobs),
+            tuple(name for name, _, _ in jobs) + tuple(diagnostic_query_names),
             preflight=preflight.as_dict(),
+            data_diagnostics=data_diagnostics,
         )
 
 
 __all__ = [
     "ACCOUNTING_SNAPSHOT_SQL",
+    "MARKET_DATA_DIAGNOSTIC_SQL",
     "MARKET_SNAPSHOTS_SQL",
+    "PORTFOLIO_DATA_DIAGNOSTIC_SQL",
     "PORTFOLIO_CATALOG_SQL",
     "RESEARCH_DOCUMENTS_SQL",
     "SupabaseReadOnlyAdapter",

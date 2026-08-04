@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+profile.json
 
 # Hermes Profile - 설치자(개인) 영역. 배포 대상에서 하드 제외.
 # 담당자 배포 영역(distribution.yaml, SOUL.md, config.yaml, skills/, cron/, mcp.json)은 커밋한다.

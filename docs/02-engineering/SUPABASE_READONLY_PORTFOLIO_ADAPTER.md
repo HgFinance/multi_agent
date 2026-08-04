@@ -34,7 +34,10 @@ python scripts/run_portfolio_supabase_readonly.py \
 
 연결과 PIT 데이터가 정상인 뒤에는 동일 `as_of`를 2~3회 반복해 추천·Risk/QA advisory 결과의 결정론적 Replay를 확인할 수 있다.
 
+`--diagnose-only --as-of ...` 결과의 `data_diagnostics`는 후보가 없는 이유를 `versions_total`, `versions_as_of`, `versions_deployable`, `versions_with_schema`, `candidate_rows_before_contract`와 시장 Snapshot의 전체/시점/사용 가능 건수로 분리한다.
+
 ```bash
+cp profile.example.json profile.json
 python scripts/run_portfolio_supabase_readonly.py \
   --profile-file profile.json \
   --replay-count 2

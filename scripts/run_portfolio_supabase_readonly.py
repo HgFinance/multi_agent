@@ -54,7 +54,9 @@ def _load_profile(profile_json: str | None, profile_file: Path | None) -> dict:
         try:
             raw = profile_file.read_text(encoding="utf-8")
         except OSError as exc:
-            raise SystemExit(f"cannot read --profile-file: {exc}") from exc
+            raise SystemExit(
+                f"cannot read --profile-file: {exc}; create the JSON file or use --profile-json"
+            ) from exc
     try:
         profile = json.loads(raw or "")
     except json.JSONDecodeError as exc:
@@ -151,6 +153,7 @@ async def _main_async_runtime(argv: list[str] | None = None) -> int:
                     "research_count": len(context.get("research", {}).get("documents", [])),
                     "market_count": len(context.get("market", {}).get("snapshots", [])),
                     "reasons": context.get("reasons", []),
+                    "data_diagnostics": context.get("data_diagnostics", {}),
                     "read_only": context.get("read_only"),
                     "external_writes": context.get("external_writes"),
                 }
