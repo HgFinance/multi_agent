@@ -1,6 +1,7 @@
 "use client";
 
 import type { Agent, Snapshot } from "../game/sim";
+import { useBffFeed } from "./bffClient";
 import {
   getRiskQaActivity,
   RISK_QA_CONNECTION,
@@ -25,6 +26,8 @@ const statusClass: Record<string, string> = {
   "출근 전": "waiting",
   휴식: "waiting",
   "상태 미수신": "blocked",
+  OFFLINE: "blocked",
+  DEGRADED: "approval",
 };
 
 export default function RiskQaPanel({
@@ -34,9 +37,13 @@ export default function RiskQaPanel({
   agents: readonly Agent[];
   snapshot: Snapshot;
 }) {
+  const { snapshot: backendSnapshot } = useBffFeed();
   const activities = RISK_QA_CONNECTION.map((department) => ({
     department,
     activity: getRiskQaActivity(department, agents, snapshot),
+    backend: backendSnapshot?.operations?.departments.find(
+      (item) => item.department_code === (department.id === "ops" ? "risk-management" : "qa-department"),
+    ),
   }));
   const totalWorkers = activities.reduce((total, item) => total + item.department.employees.length, 0);
   const totalWorking = activities.reduce((total, item) => total + item.activity.workingCount, 0);
@@ -95,15 +102,15 @@ export default function RiskQaPanel({
         </div>
 
         <div className="risk-qa-departments">
-          {activities.map(({ department, activity }) => (
+          {activities.map(({ department, activity, backend }) => (
             <article className="risk-qa-department" key={department.id}>
               <div className="risk-qa-department-heading">
                 <div>
                   <span className="tiny-label">{department.domain}</span>
                   <h3>{department.name}</h3>
                 </div>
-                <span className={`status-pill ${statusClass[activity.statusLabel] ?? "waiting"}`}>
-                  {activity.statusLabel}
+                <span className={`status-pill ${statusClass[backend?.status ?? activity.statusLabel] ?? "waiting"}`}>
+                  {backend?.status ?? activity.statusLabel}
                 </span>
               </div>
 
@@ -119,9 +126,9 @@ export default function RiskQaPanel({
 
               <div className="risk-qa-live-summary">
                 <strong>
-                  {activity.workingCount}/{department.employees.length}명 working · {activity.onDutyCount}명 on duty
+                  {backend ? `${backend.active_worker_count}/${backend.worker_count}명 registry active` : "BFF 상태 대기"}
                 </strong>
-                <span>{activity.taskLabel}</span>
+                <span>{backend?.status_reason ?? activity.taskLabel}</span>
               </div>
 
               <div className="risk-qa-staff" aria-label={`${department.name} Worker 목록`}>

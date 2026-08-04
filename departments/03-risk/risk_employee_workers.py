@@ -335,6 +335,7 @@ def build_worker_graph(
                 payload,
                 worker_id=spec.worker_id,
                 profile_version=spec.output_contract,
+                allowed_scopes=spec.tools,
             )
             skill_results: list[dict[str, Any]] = []
             rag_plan = choose_rag_route(payload, worker_id=spec.worker_id).as_dict()

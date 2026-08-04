@@ -38,9 +38,15 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path:
         "QA_TRACE_PERSIST": "true",
         "QA_INGEST_MODE": "production",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
-        "RISK_CONTEXT_SOURCE": "database",
-        "RISK_BROKER_ADAPTER": "paper",
-    }
+            "RISK_CONTEXT_SOURCE": "database",
+            "RISK_BROKER_ADAPTER": "paper",
+            "RISK_SERVICE_AUTH_SECRET": "x" * 32,
+            "RISK_SERVICE_AUTH_ISSUER": "test-issuer",
+            "RISK_SERVICE_AUTH_AUDIENCE": "test-audience",
+            "QA_SERVICE_AUTH_SECRET": "y" * 32,
+            "QA_SERVICE_AUTH_ISSUER": "test-issuer",
+            "QA_SERVICE_AUTH_AUDIENCE": "test-audience",
+        }
 
     report = run_preflight(environment, as_of="2026-08-04T00:00:00+00:00")
     serialized = json.dumps(report, ensure_ascii=False)

@@ -78,6 +78,8 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
   assert.match(page, /<RiskQaPanel/);
+  assert.match(page, /<DepartmentCommunicationPanel/);
+  assert.match(page, /<BffProvider>/);
   assert.match(layout, /title: COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);

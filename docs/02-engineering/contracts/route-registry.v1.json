@@ -285,6 +285,8 @@
       "operations": [
         {"method": "GET", "path": "/health"},
         {"method": "GET", "path": "/ui/snapshot"},
+        {"method": "POST", "path": "/ui/portfolio-recommendations"},
+        {"method": "GET", "path": "/ui/portfolio-recommendations/{run_id}"},
         {"method": "GET", "path": "/accounting/v1/portfolio-snapshot"},
         {"method": "POST", "path": "/accounting/agent/ask"},
         {"method": "POST", "path": "/trading/agent/ask"}

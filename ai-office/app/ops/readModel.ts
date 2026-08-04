@@ -87,13 +87,124 @@ export type TradingSnapshot = {
     balanced: boolean;
     accounts: Record<string, Money>;
   };
+  operations?: OperationsSnapshot;
+};
+
+export type RuntimeStatus =
+  | "OFFLINE"
+  | "IDLE"
+  | "QUEUED"
+  | "RUNNING"
+  | "WAITING_APPROVAL"
+  | "BLOCKED"
+  | "DEGRADED"
+  | "ERROR";
+
+export type OperationsWorker = {
+  worker_id: string;
+  status: string;
+  trigger: string | null;
+};
+
+export type OperationsDepartment = {
+  department_code: string;
+  name: string;
+  domain: string;
+  status: RuntimeStatus;
+  status_reason: string;
+  runtime_observed: boolean;
+  head_persona: string | null;
+  head_provider: string | null;
+  head_model: string | null;
+  executor: string | null;
+  worker_model: string | null;
+  output_contract: string | null;
+  failure_action: string | null;
+  worker_count: number;
+  active_worker_count: number;
+  conditional_worker_count: number;
+  active_workers?: string[];
+  current_stage?: string | null;
+  workers: OperationsWorker[];
+  source_profile: string;
+};
+
+export type OperationsCommunication = {
+  event_type: string;
+  status: "IMPLEMENTED" | "IMPLEMENTED_INTERNAL" | "PLANNED" | "LEGACY_ALIAS" | string;
+  layer: string;
+  producer: string;
+  consumers: string[];
+  case_binding: string | null;
+  source: string;
+  live: boolean;
+  transport: string;
+};
+
+export type OperationsSnapshot = {
+  schema_version: "operator-operations.v1";
+  observed_at: string;
+  status: "DEGRADED" | "CONNECTED" | string;
+  runtime_connected: boolean;
+  event_bridge_connected: boolean;
+  message_count: number;
+  implemented_event_contracts: number;
+  planned_event_contracts: number;
+  departments: OperationsDepartment[];
+  communications: OperationsCommunication[];
+  runtime: OperationsRuntime;
+  warnings: string[];
+};
+
+export type OperationsRuntimeWorker = {
+  worker_id: string;
+  department_code: string;
+  stage: string;
+  role: string;
+  status: string;
+  summary: string | null;
+};
+
+export type OperationsRuntimeMessage = {
+  id: string;
+  occurred_at: string;
+  kind: string;
+  department_code: string | null;
+  worker_id: string | null;
+  text: string;
+};
+
+export type OperationsRuntimeHandoff = {
+  from_department: string;
+  to_department: string;
+  from_head: string;
+  to_head: string;
+  status: string;
+  title: string;
+  message: string;
+  occurred_at: string;
+  expires_at: number;
+};
+
+export type OperationsRuntime = {
+  status: RuntimeStatus | "COMPLETED";
+  run_id: string | null;
+  workflow: string | null;
+  phase: string | null;
+  departments: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
+  active_workers: OperationsRuntimeWorker[];
+  active_handoff: OperationsRuntimeHandoff | null;
+  messages: OperationsRuntimeMessage[];
+  result: Record<string, unknown> | null;
+  error: string | null;
 };
 
 /** 이 파일이 아는 Major Version. 다르면 적용하지 않는다 (계획 5.3). */
 export const SUPPORTED_SCHEMA_VERSION = 1;
 
 /** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 넘긴다. */
-export const BFF = process.env.NEXT_PUBLIC_BFF_URL ?? "http://localhost:8000";
+const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
+export const BFF = (configuredBff || "http://localhost:8000").replace(/\/+$/, "");
 
 /**
  * Snapshot 형태 검증.
@@ -120,6 +231,21 @@ export function parseSnapshot(input: unknown): TradingSnapshot {
   for (const key of ["portfolio", "trading", "ledger"] as const) {
     if (typeof doc[key] !== "object" || doc[key] === null) {
       throw new Error(`Snapshot에 ${key}가 없습니다`);
+    }
+  }
+  if (doc.operations !== undefined) {
+    if (typeof doc.operations !== "object" || doc.operations === null) {
+      throw new Error("Snapshot의 operations가 객체가 아닙니다");
+    }
+    const operations = doc.operations as Record<string, unknown>;
+    if (operations.schema_version !== "operator-operations.v1") {
+      throw new Error(`지원하지 않는 operations schema_version ${String(operations.schema_version)}`);
+    }
+    if (!Array.isArray(operations.departments) || !Array.isArray(operations.communications)) {
+      throw new Error("Snapshot operations에 부서 또는 통신 목록이 없습니다");
+    }
+    if (typeof operations.runtime !== "object" || operations.runtime === null) {
+      throw new Error("Snapshot operations에 runtime projection이 없습니다");
     }
   }
   return doc as unknown as TradingSnapshot;

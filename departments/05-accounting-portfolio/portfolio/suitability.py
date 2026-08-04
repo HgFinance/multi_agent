@@ -155,6 +155,7 @@ class PortfolioRecommendation(BaseModel):
     name: str
     risk_band: PortfolioRiskBand
     fit_score: int = Field(ge=0, le=100)
+    target_allocations: dict[str, Decimal]
     reasons: list[str] = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1)
 
@@ -268,6 +269,7 @@ def recommend_portfolios(
                 portfolio_id=candidate.portfolio_id,
                 name=candidate.name,
                 risk_band=candidate.risk_band,
+                target_allocations=dict(candidate.target_allocations),
                 fit_score=_fit_score(normalized_profile, candidate),
                 reasons=[
                     "RISK_BAND_WITHIN_EFFECTIVE_PROFILE_LIMIT",

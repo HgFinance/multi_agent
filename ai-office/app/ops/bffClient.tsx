@@ -1,0 +1,83 @@
+"use client";
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { BFF, parseSnapshot, type TradingSnapshot } from "./readModel";
+
+export type BffConnection = "connecting" | "connected" | "stale" | "offline";
+
+export type BffFeed = {
+  snapshot: TradingSnapshot | null;
+  connection: BffConnection;
+  error: string;
+  lastUpdated: string | null;
+  refresh: () => Promise<void>;
+};
+
+const POLL_INTERVAL_MS = 5_000;
+const BffContext = createContext<BffFeed | null>(null);
+
+export async function fetchBffSnapshot(): Promise<TradingSnapshot> {
+  const response = await fetch(`${BFF}/ui/snapshot`, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail =
+      typeof body === "object" && body !== null && "detail" in body
+        ? String((body as { detail?: unknown }).detail)
+        : `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+  return parseSnapshot(body);
+}
+
+export function BffProvider({ children }: { children: React.ReactNode }) {
+  const [snapshot, setSnapshot] = useState<TradingSnapshot | null>(null);
+  const snapshotRef = useRef<TradingSnapshot | null>(null);
+  const [connection, setConnection] = useState<BffConnection>("connecting");
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setConnection((current) => (current === "connected" ? "connected" : "connecting"));
+    try {
+      const next = await fetchBffSnapshot();
+      snapshotRef.current = next;
+      setSnapshot(next);
+      setLastUpdated(new Date().toISOString());
+      setError("");
+      setConnection("connected");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setConnection(snapshotRef.current ? "stale" : "offline");
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const initialTimer = window.setTimeout(() => {
+      if (active) void refresh();
+    }, 0);
+    const timer = window.setInterval(() => {
+      if (active) void refresh();
+    }, POLL_INTERVAL_MS);
+    return () => {
+      active = false;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
+  }, [refresh]);
+
+  const value = useMemo(
+    () => ({ snapshot, connection, error, lastUpdated, refresh }),
+    [snapshot, connection, error, lastUpdated, refresh],
+  );
+  return <BffContext.Provider value={value}>{children}</BffContext.Provider>;
+}
+
+export function useBffFeed(): BffFeed {
+  const value = useContext(BffContext);
+  if (!value) throw new Error("useBffFeed는 BffProvider 안에서 사용해야 합니다");
+  return value;
+}

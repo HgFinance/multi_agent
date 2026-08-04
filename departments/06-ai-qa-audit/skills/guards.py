@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,12 +18,16 @@ def build_context(
     *,
     worker_id: str,
     profile_version: str = "qa.worker-context.v1",
+    allowed_scopes: Sequence[str] | None = None,
     timeout_ms: int = 8_000,
     attempt: int = 1,
 ) -> QASkillContext:
     if not isinstance(payload, dict):
         raise QASkillGuardError("INVALID_INPUT")
-    raw_scopes = payload.get("allowed_scopes", ())
+    # Worker Registry scopes are trusted.  Payload scopes remain available for
+    # direct Skill tests, but a compiled Worker must pass its registry scopes
+    # explicitly so a missing payload field cannot widen access.
+    raw_scopes = allowed_scopes if allowed_scopes is not None else payload.get("allowed_scopes", ())
     if isinstance(raw_scopes, str):
         raw_scopes = (raw_scopes,)
     if not isinstance(raw_scopes, (list, tuple, set)):
@@ -47,7 +52,7 @@ def build_context(
 def scope_check(
     context: QASkillContext, requested_scope: str | None
 ) -> QASkillResult:
-    if requested_scope and context.allowed_scopes and requested_scope not in context.allowed_scopes:
+    if not requested_scope or not context.allowed_scopes or requested_scope not in context.allowed_scopes:
         return make_result(
             "guard.scope_check.v1",
             "ESCALATE",

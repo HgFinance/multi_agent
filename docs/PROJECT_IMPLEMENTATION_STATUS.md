@@ -4,6 +4,8 @@
 
 > **문서 해석 규칙(2026-08-03)**: 최신 런타임 사실은 상단 Registry와 각 부서 `config.yaml`·Worker 구현을 기준으로 한다. 날짜가 붙은 Commit·DB·Container 수치는 당시의 Historical snapshot이다. `IMPLEMENTED`는 코드·계약 존재, `TEST_VERIFIED`는 재실행 테스트 통과, `RUNTIME_VERIFIED`는 실제 API·DB 입출력 확인, `BLOCKED`는 안전한 중단 상태를 뜻한다. 과거 모델·Profile row·외부 연동 성공을 현재 운영 완료로 승격하지 않는다.
 
+> **Risk/QA 보안 보정(2026-08-05)**: Worker Scope fail-closed, QA runtime 미설정 DENY, Risk Trading State/QA Corrective Action의 명령 단위 Service Token 검증은 코드·단위 테스트 기준 `IMPLEMENTED`/`TEST_VERIFIED`다. Redis/Docker/DB Replay와 전역 Issuer·mTLS·IAM 매핑은 아직 `RUNTIME_VERIFIED`가 아니며 운영 배포는 `BLOCKED`다.
+
 > 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2

@@ -13,6 +13,9 @@ import app
 def test_qa_check_is_open_in_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RISK_QA_RUNTIME", raising=False)
     monkeypatch.delenv("QA_CHECK_CONTRACT_APPROVED", raising=False)
+    assert app._qa_check_contract_is_approved() is False
+
+    monkeypatch.setenv("RISK_QA_RUNTIME", "test")
     assert app._qa_check_contract_is_approved() is True
 
 

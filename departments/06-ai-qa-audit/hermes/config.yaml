@@ -153,11 +153,11 @@ implementation:
   runtime_activation:
     as_of: "2026-08-04"
     worker_registry: "5 canonical LangGraph workers seeded as ACTIVE by 20260804000400"
-    qa_check_contract: "approved_v1; production still requires QA_CHECK_CONTRACT_APPROVED=true"
+    qa_check_contract: "approved_v1; RISK_QA_RUNTIME is fail-closed when unset; production still requires QA_CHECK_CONTRACT_APPROVED=true"
     policy_corpus: "corpus status endpoint and pgvector retriever implemented; SAMPLE_PLACEHOLDER remains fail-closed"
     operational_trace: "QA_TRACE_PERSIST=true enables ACTIVE-profile agent_runs/tool_calls bridge"
     production_readiness: "real policy documents, embeddings, DATABASE_URL and applied migrations remain deployment prerequisites"
-    current_status: "code_and_tests_ready_external_activation_pending"
+    current_status: "code_and_unit_tests_ready_external_runtime_activation_pending; scope_and_command_auth_regressions_verified_2026-08-05"
   # The historical implementation notes below are retained for audit context.
   # Current runtime status is defined by implementation.runtime_activation above.
   status: "Sprint K2 P0 완료. P1 결정론적 Model-Risk·Internal-Audit 검사기/API·QA 운영 Trace RLS baseline 구현. scripts.py LangGraph 배선은 agent-ops-monitor·incident-postmortem-agent·tool-permission-security-reviewer까지 완료(2026-08-03, run_ops_incident_review/run_tool_permission_review); model-risk-agent·internal-audit-agent는 엔진/API/테스트만 있고 배선은 in_progress. 실제 정책 Corpus/pgvector 적재, qa-check 상위 계약 승인, ACTIVE Profile·운영 agent_runs/tool_calls·E2E 활성화는 외부 조건 대기"

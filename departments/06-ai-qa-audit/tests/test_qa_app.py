@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
@@ -21,6 +22,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 sys.modules.pop("app", None)  # 03-risk도 모듈명 app이라 캐시 충돌 방지
 from app import app, evidence_store
 from evidence_qa_engine import EvidenceChunk
+
+from tests.security.service_auth_test_utils import make_token
+
+QA_TEST_SECRET = "test-qa-service-auth-secret-0123456789"
+
+
+@pytest.fixture(autouse=True)
+def _qa_runtime_and_auth(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RISK_QA_RUNTIME", "test")
+    monkeypatch.setenv("QA_SERVICE_AUTH_SECRET", QA_TEST_SECRET)
+
+
+def _qa_close_headers(subject: str) -> dict[str, str]:
+    token = make_token(
+        QA_TEST_SECRET,
+        subject=subject,
+        department="qa-department",
+        service="qa-api",
+        scopes=["qa.corrective_action.close"],
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 now = datetime.now(timezone.utc)
 client = TestClient(app)
@@ -146,22 +168,32 @@ def test_05_incident_timeline_and_corrective_action_full_flow():
     client.post(f"/qa/v1/corrective-actions/{action_id}/start")
     client.post(f"/qa/v1/corrective-actions/{action_id}/submit-for-verification")
 
+    missing_auth = client.post(
+        f"/qa/v1/corrective-actions/{action_id}/verify-and-close",
+        json={
+            "verifier": "qa-audit-supervisor",
+            "verification": {"passed": True},
+        },
+    )
+    assert missing_auth.status_code == 401
+
     mismatched = client.post(
         f"/qa/v1/corrective-actions/{action_id}/verify-and-close",
         json={"verifier": "qa-audit-supervisor", "verification": {}},
-        headers={"x-auth-subject": "someone-else"},
+        headers=_qa_close_headers("someone-else"),
     )
     assert mismatched.status_code == 403, mismatched.text
 
     self_verify = client.post(
         f"/qa/v1/corrective-actions/{action_id}/verify-and-close",
         json={"verifier": "research-department", "verification": {}},
+        headers=_qa_close_headers("research-department"),
     )
     assert self_verify.status_code == 409, self_verify.text
 
     closed = client.post(
         f"/qa/v1/corrective-actions/{action_id}/verify-and-close",
         json={"verifier": "qa-audit-supervisor", "verification": {"checked": "확인함"}},
-        headers={"x-auth-subject": "qa-audit-supervisor"},
+        headers=_qa_close_headers("qa-audit-supervisor"),
     ).json()
     assert closed["status"] == "COMPLETED", closed

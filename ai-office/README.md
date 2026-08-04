@@ -40,6 +40,21 @@ npm run dev
 
 기본 주소는 `http://localhost:3000`이다.
 
+## BFF 연결
+
+AI Office는 브라우저에서 부서 API나 DB를 직접 호출하지 않고 `operator-bff`의 `GET /ui/snapshot`만 읽는다. 두 프로세스를 각각 실행한다.
+
+```bash
+# 저장소 루트, 외부 DB 없이 DEMO Read Model로 실행
+DATABASE_URL='' python -m uvicorn apps.api.main:app --reload --port 8000
+
+# 별도 터미널
+cd ai-office
+npm run dev
+```
+
+프론트는 `NEXT_PUBLIC_BFF_URL`이 없으면 `http://localhost:8000`을 사용하고, 연결 후 Snapshot을 5초마다 갱신한다. BFF가 꺼져 있으면 오래된 Fixture를 표시하지 않고 `OFFLINE` 상태를 보여준다.
+
 ## 검증
 
 ```bash

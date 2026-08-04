@@ -1,0 +1,47 @@
+[
+  {
+    "portfolio_id": "starter-safety",
+    "name": "처음 시작하는 안전형",
+    "risk_band": "LOW",
+    "minimum_experience": "BEGINNER",
+    "minimum_horizon_years": 1,
+    "max_drawdown_pct": "0.08",
+    "max_exit_days": 7,
+    "target_allocations": {
+      "GLOBAL_EQUITY": "0.30",
+      "SHORT_TERM_BOND": "0.70"
+    },
+    "evidence_refs": ["research:portfolio-catalog:v1"],
+    "as_of": "2026-01-01T00:00:00+00:00"
+  },
+  {
+    "portfolio_id": "balanced-core",
+    "name": "기본 균형형",
+    "risk_band": "MEDIUM",
+    "minimum_experience": "BEGINNER",
+    "minimum_horizon_years": 3,
+    "max_drawdown_pct": "0.15",
+    "max_exit_days": 14,
+    "target_allocations": {
+      "GLOBAL_EQUITY": "0.60",
+      "SHORT_TERM_BOND": "0.40"
+    },
+    "evidence_refs": ["research:portfolio-catalog:v1"],
+    "as_of": "2026-01-01T00:00:00+00:00"
+  },
+  {
+    "portfolio_id": "long-horizon-growth",
+    "name": "장기 성장형",
+    "risk_band": "HIGH",
+    "minimum_experience": "EXPERIENCED",
+    "minimum_horizon_years": 7,
+    "max_drawdown_pct": "0.35",
+    "max_exit_days": 30,
+    "target_allocations": {
+      "GLOBAL_EQUITY": "0.80",
+      "SHORT_TERM_BOND": "0.20"
+    },
+    "evidence_refs": ["research:portfolio-catalog:v1"],
+    "as_of": "2026-01-01T00:00:00+00:00"
+  }
+]

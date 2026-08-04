@@ -17,6 +17,18 @@ Risk·QA 직원 Worker Graph 기준은 [Department Worker Graph Architecture](..
 > 실행 상태와 다음 Task: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md#43-동규님-리스크본부와-ai-qa감사본부)의 `RSK-01`·`QA-01`~`QA-03`·`MODEL-03`·`OPS-01`·`RPT-01`
 > 체크박스 해석: 14절은 전 본부 Runtime·Canonical DB 연결까지 포함한 최종 DoD
 
+## 0.1 현재 검증 상태 (2026-08-05)
+
+이 절은 코드·단위검증과 실제 Runtime 검증을 분리하기 위한 보정 기록이다.
+
+- [x] Risk/QA Worker Skill Scope는 명시적 allow-list가 없으면 `SCOPE_DENIED`/`ESCALATE`로 종료한다. 회귀 테스트가 있다.
+- [x] QA `qa-check`는 `RISK_QA_RUNTIME=test`를 명시한 테스트에서만 허용되며, Runtime 미설정은 거부한다.
+- [x] Risk Trading State 변경/삭제와 QA Corrective Action 종결은 서명된 Service Token의 department/scope/subject/expiry를 검증한다.
+- [ ] Redis Event Bus, Docker/Compose, DB 영속화와 Risk↔QA Replay는 실제 인프라에서 검증되지 않았다. 이 상태는 `RUNTIME_VERIFIED`가 아니다.
+- [ ] `MODEL-03`, `OPS-01`, 운영 Issuer/JWKS·mTLS·IAM 매핑은 미완료다.
+
+따라서 위의 `[x]`는 `IMPLEMENTED + 단위검증` 의미이며 운영 승인이나 배포 가능을 뜻하지 않는다.
+
 ---
 
 ## 0. Daily Scrum (필수)

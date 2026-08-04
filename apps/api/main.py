@@ -31,8 +31,10 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "ledger"))
@@ -43,6 +45,8 @@ import db_read_model
 import hermes_cli
 import trading
 from ui_read_model import build_ui_snapshot
+from operations_read_model import build_operations_snapshot
+from portfolio_runtime import RUNTIME
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
@@ -57,6 +61,42 @@ app.add_middleware(
 # 권한 경계가 무너진다(마스터플랜 5.6).
 app.include_router(accounting.router)
 app.include_router(trading.router)
+
+
+class PortfolioRecommendationRequest(BaseModel):
+    """User suitability inputs; this route never accepts orders or credentials."""
+
+    user_id: str = Field(min_length=1, max_length=128)
+    mindset: str
+    experience: str
+    investment_horizon_years: int = Field(ge=1, le=100)
+    max_drawdown_pct: str = Field(pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$")
+    liquidity_need: str
+    as_of: str | None = None
+    fund_id: str | None = None
+
+
+@app.post("/ui/portfolio-recommendations", status_code=202)
+async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
+    """Start the advisory LangGraph and return a process-local run reference."""
+
+    profile = request.model_dump(exclude_none=True)
+    if "as_of" not in profile:
+        from datetime import datetime, timezone
+
+        profile["as_of"] = datetime.now(timezone.utc).isoformat()
+    try:
+        return RUNTIME.start(profile)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/ui/portfolio-recommendations/{run_id}")
+def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
+    run = RUNTIME.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    return run
 
 
 @lru_cache(maxsize=1)
@@ -127,13 +167,15 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
                      "book_id": str(book_id),
                      "sources": {"portfolio": "supabase", "ledger": "supabase"}}
 
-    return build_ui_snapshot(
+    snapshot = build_ui_snapshot(
         oms=loop.oms,
         ledger=loop.ledger,
         snapshot=loop.snapshot(),
         mode="DEMO",
         overrides=overrides,
     )
+    snapshot["operations"] = build_operations_snapshot()
+    return snapshot
 
 
 if __name__ == "__main__":

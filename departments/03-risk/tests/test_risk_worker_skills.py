@@ -35,6 +35,15 @@ def test_context_hash_and_scope_are_deterministic():
     assert denied.error_code == "SCOPE_DENIED"
 
 
+def test_missing_scope_is_denied_fail_closed():
+    context = build_context({}, worker_id="pre-trade-risk-worker")
+
+    denied = scope_check(context, "risk.case.check")
+
+    assert denied.status == "ESCALATE"
+    assert denied.error_code == "SCOPE_DENIED"
+
+
 def test_pit_freshness_rejects_future_and_stale_data():
     context = build_context(
         {"as_of": "2026-08-04T00:00:00Z"}, worker_id="market-liquidity-worker"
