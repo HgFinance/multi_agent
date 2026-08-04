@@ -65,6 +65,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804000300_unify_department_code.sql",
                 "20260804000400_risk_qa_runtime_activation.sql",
                 "20260804000500_api_accounting_read_views.sql",
+                "20260804000600_order_events_broker_id_unique.sql",
                 "20260804001000_quant_hypothesis_inconclusive.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
@@ -185,6 +186,11 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "risk_status",
             "strategy_registry",
             "agent_registry",
+            # 회계·포트폴리오 읽기 뷰 (20260804000500). `/ui/snapshot`의 회계 구간 원천이다.
+            "portfolio_snapshot_latest",
+            "position_holdings",
+            "ledger_balances",
+            "open_breaks",
         }
         actual_views = set(
             re.findall(

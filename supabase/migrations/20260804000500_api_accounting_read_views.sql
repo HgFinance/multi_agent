@@ -1,3 +1,5 @@
+begin;
+
 -- 회계·포트폴리오 읽기 뷰. `/ui/snapshot`의 원천을 Scripted Loop에서 Canonical 표로 옮긴다.
 --
 -- 소유: 도현 (회계·포트폴리오본부)
@@ -16,8 +18,6 @@
 -- **트레이딩 쪽 뷰는 여기 없다.** `execution.orders`/`fills`가 아직 0행이고 OMS
 -- 상태가 프로세스 메모리라, 뷰를 만들면 항상 빈 화면을 보여주면서 "실데이터"인 척
 -- 하게 된다. TRD-01이 psycopg OrderStore를 넣은 뒤에 같은 방식으로 추가한다.
-
-begin;
 
 -- Fund/Book별 최신 스냅샷 한 장. 화면의 NAV·현금·Exposure가 여기서 나온다.
 --

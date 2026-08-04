@@ -1,3 +1,5 @@
+begin;
+
 -- `execution.order_events`의 브로커 이벤트 중복 방지 제약을 고친다.
 --
 -- 소유: 도현 (트레이딩본부 — `execution` 스키마)
@@ -28,8 +30,6 @@
 --
 -- 내부 전이의 중복 방지는 `unique (order_id, sequence)`가 이미 맡고 있다.
 -- 같은 주문에 같은 순번이 두 번 생길 수 없다.
-
-begin;
 
 alter table execution.order_events
   drop constraint if exists order_events_broker_adapter_broker_event_id_key;
