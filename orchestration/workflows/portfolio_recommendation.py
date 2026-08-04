@@ -23,10 +23,10 @@ from langgraph.types import Send
 from departments.employee_worker_runtime import (
     WorkerSpec,
     build_independent_worker_graph,
+    default_worker_llm,
     should_run,
     tools_for_specs,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_VERSION = "portfolio-recommendation-full-async-v1"
@@ -313,17 +313,22 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
             "error": "tool_not_registered",
             "binding": False,
         }
+    worker_llm = (
+        _deterministic_worker_llm
+        if str(payload.get("source", "TEST")).upper() == "TEST"
+        else default_worker_llm
+    )
     try:
         if stage in {"risk", "qa"}:
             trace = module.SkillTrace()
             app = module.build_worker_graph(
                 spec,
                 tool,
-                _deterministic_worker_llm,
+                worker_llm,
                 trace=trace,
             )
         else:
-            app = build_independent_worker_graph(spec, tool, _deterministic_worker_llm)
+            app = build_independent_worker_graph(spec, tool, worker_llm)
         # Required async LangGraph boundary: never replace this with invoke().
         state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
         return {
@@ -493,9 +498,65 @@ def build_portfolio_recommendation_graph() -> Any:
             }
         }
 
+    def _live_worker_inputs_ready(state: PortfolioPipelineState) -> bool:
+        """Allow live workers only when the canonical PIT packet is usable."""
+        data_context = state.get("data_context", {})
+        if data_context.get("source") == "TEST":
+            return True
+        market = data_context.get("market", {})
+        return (
+            data_context.get("source") == "SUPABASE"
+            and data_context.get("quality_status") == "PASS"
+            and bool(state.get("portfolio_candidates"))
+            and bool(market.get("snapshots"))
+        )
+
+
+    def _safe_skip_reports(
+        stage: str,
+        specs: Sequence[WorkerSpec],
+        input_hash: str | None,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "stage": stage,
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "status": "SKIPPED_SAFE",
+                "attempts": 0,
+                "output": {
+                    "worker_id": spec.worker_id,
+                    "summary": "Live PIT inputs are not ready; worker execution was blocked.",
+                    "confidence": 0.0,
+                    "evidence_refs": [],
+                    "escalate": True,
+                    "schema_valid": False,
+                },
+                "error": "LIVE_DATA_NOT_READY",
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+                "binding": False,
+            }
+            for spec in specs
+        ]
+
+
     def route_stage(stage: str) -> Callable[[PortfolioPipelineState], list[Send]]:
         def route(state: PortfolioPipelineState) -> list[Send]:
             payload = _stage_payload(state, stage)
+            if not _live_worker_inputs_ready(state):
+                return [
+                    Send(
+                        f"{stage}_fan_in",
+                        {
+                            "worker_reports": _safe_skip_reports(
+                                stage,
+                                _specs(stage),
+                                payload.get("input_hash"),
+                            ),
+                        },
+                    )
+                ]
             selected = _selected_specs(stage, payload)
             if not selected:
                 return [
@@ -543,7 +604,7 @@ def build_portfolio_recommendation_graph() -> Any:
         def fan_in(state: PortfolioPipelineState) -> dict[str, Any]:
             reports = [item for item in state.get("worker_reports", []) if item.get("stage") == stage]
             failed = [item["worker_id"] for item in reports if item.get("status") != "COMPLETED"]
-            return {
+            result: dict[str, Any] = {
                 "department_reports": {
                     stage: {
                         "status": "DEGRADED" if failed else "COMPLETED",
@@ -556,6 +617,9 @@ def build_portfolio_recommendation_graph() -> Any:
                     }
                 }
             }
+            if any(item.get("status") == "SKIPPED_SAFE" for item in reports):
+                result["worker_reports"] = reports
+            return result
 
         return fan_in
 

@@ -12,7 +12,6 @@ from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
 )
 
-
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
 SPEC = importlib.util.spec_from_file_location("test_supabase_readonly_adapter", ADAPTER_PATH)
@@ -166,7 +165,7 @@ def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> Non
     assert result["external_writes"] is False
 
 
-def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
+def test_preflight_reports_missing_dsn_without_connecting_legacy(monkeypatch) -> None:
     monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
@@ -179,7 +178,7 @@ def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
     assert diagnostics.external_writes is False
 
 
-def test_preflight_classifies_dns_failure_without_exposing_dsn(monkeypatch) -> None:
+def test_preflight_classifies_dns_failure_without_exposing_dsn_legacy(monkeypatch) -> None:
     def fail_dns(*_args, **_kwargs):
         raise OSError("simulated DNS failure")
 
@@ -220,9 +219,17 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
     assert result["safe_action"] == "HOLD"
     assert result["data_context"]["source"] == "SUPABASE_UNAVAILABLE"
     assert result["external_writes"] is False
+    assert result["worker_reports"]
+    assert {item["status"] for item in result["worker_reports"]} == {"SKIPPED_SAFE"}
+    assert all(
+        not item["output"]["summary"].startswith("TEST")
+        for item in result["worker_reports"]
+    )
 
 
-def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
+def test_preflight_reports_missing_dsn_without_connecting_legacy_duplicate(
+    monkeypatch,
+) -> None:
     monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
@@ -235,7 +242,9 @@ def test_preflight_reports_missing_dsn_without_connecting(monkeypatch) -> None:
     assert diagnostics.external_writes is False
 
 
-def test_preflight_classifies_dns_failure_without_exposing_dsn(monkeypatch) -> None:
+def test_preflight_classifies_dns_failure_without_exposing_dsn_legacy_duplicate(
+    monkeypatch,
+) -> None:
     def fail_dns(*_args, **_kwargs):
         raise OSError("simulated DNS failure")
 
