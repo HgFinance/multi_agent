@@ -250,6 +250,7 @@ API는 서비스 호출자용이고, 불변식이 HTTP 계층이 아니라 도�
 | Corporate Action (F25) | **구현 완료.** 배당수익 계정(4200) 신설은 DB 델타 대기 — 지금은 배당이 실현손익(4000)에 섞인다 |
 | Daily Report (F23) | **구현 완료.** 전략별 분해는 호출자 매핑 의존(원장에 전략 차원 없음 — DB 델타) |
 | Case 종속 경로 | **없음.** `evaluate`는 D4 TCA + QA 판정이 필요해 우리 것이 아니다(§1.1) |
+| `accounting-api` Container | **구현 완료.** `127.0.0.1:8046`. Build Context가 저장소 루트다(§8) |
 | 저장소(in-memory → `accounting.*`) | **미결 — 트레이딩 OMS와 같은 결정**(§4) |
 | MCP 도구 면 | **설계만, 구현 없음** (§6) |
 | 인증(Service Token) | **미정** — 발급 주체 미결. 지금은 `127.0.0.1` 바인딩으로 대체 |
@@ -257,3 +258,30 @@ API는 서비스 호출자용이고, 불변식이 HTTP 계층이 아니라 도�
 | BFF `/accounting/v1/portfolio-snapshot`과의 접두사 중복 | **정리 대상** (§1.1). 그 경로는 Domain 읽기인데 BFF에 있다 |
 | Long/Short 분리, Borrow/Financing 비용 | **범위 밖** — 팀 가이드 v1.2 1.1, 미구현 |
 | 관리보수·성과보수·High-Water Mark | **범위 밖** — Mandate 미확정 |
+
+## 8. Container
+
+```bash
+docker compose up -d accounting-api      # 127.0.0.1:8046 (로컬 전용)
+```
+
+**Build Context가 저장소 루트다** — `departments/05-accounting-portfolio`가 아니다.
+트레이딩(`trading-api`)은 자기 폴더 안에서 닫히지만 회계는 `ledger.py`와
+`reconciliation.py`가 **모듈 최상위에서** 부서 경계를 넘기 때문이다:
+
+```python
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"))
+from contracts import Side
+```
+
+이 계산이 `departments/<본부>/<모듈>/x.py` 배치를 전제하므로 이미지 안에서도 같은 상대
+경로를 유지해야 한다(`03-risk`와 같은 사정). compose는
+`context: ../..` + `dockerfile: departments/05-accounting-portfolio/Dockerfile`이다.
+
+**`DATABASE_URL`을 주지 않는다.** 빠뜨린 게 아니라 아직 안 쓰기 때문이다(§4). 안 쓰는
+자격증명이 퍼지는 것 자체가 위험이므로 psycopg 구현이 들어올 때 함께 추가한다.
+
+**복제하면 안 된다.** 상태가 프로세스 메모리라 replica를 늘리면 원장이 컨테이너별로
+갈라지고, 그러면 대사할 내부 원천이 어느 쪽인지 알 수 없어진다. 단일 인스턴스로 둔다.
+
+계획서 6.6의 `ledger-worker`/`portfolio-projector`는 넣지 않았다 — 코드가 없다.
