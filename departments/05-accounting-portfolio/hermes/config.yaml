@@ -62,7 +62,7 @@ config:
   chart_of_accounts: "최소 세트 9개 - 계정은 테이블 row라 추가 시 스키마 변경 없음"
 
 implementation:
-  status: "D2 구현됨. D3(Valuation/PnL/NAV)는 market-api 종가 대기"
+  status: "D2 구현됨. D3(Valuation/PnL/NAV)는 계산 구현됐고 Mark 공급원(market-api 종가) 대기"
   done:
     - "이중분개 원장 - 체결 -> 분개 규칙, 차대 균형 강제(지연 제약 트리거)"
     - "Posted Journal 수정 금지, Reversal 정정"
@@ -71,12 +71,16 @@ implementation:
     - "OMS/Fill/Ledger 대사, Break 생성과 Severity 분류"
     - "F25 Corporate Action - 배당·분할·종목변경 분개. Announcement 거부, 선택형 승인 게이트"
     - "F23 Daily Report - PnL/Drawdown/비용/오류, NAV 항등식 검산과 미설명 손익 노출"
+    - "D3 Valuation/PnL/NAV 계산 - portfolio.py. 보유 종목에 신선한 Mark 가 하나라도
+       없으면 부분 NAV 를 만들지 않고 거부한다. is_official 은 항상 False"
+    - "Domain API - departments/05-accounting-portfolio/api/app.py. 도메인 모듈을 감싸기만
+       하고 판정 로직 없음. PUT/PATCH/DELETE 부재로 Posted Journal 수정 금지를 집행"
   in_progress:
     - "Long/Short Position 분리, Borrow/Financing Cost 계정 (팀 가이드 v1.2 1.1)"
     - "strategy_allocations.governance_allocation_id - CEO 승인 결정과 회계 적용 분리 추적"
     - "Alembic 이전 (스택 확정: Supabase PostgreSQL)"
   not_started:
-    - "Valuation / PnL / NAV (D3) - market-api 종가와 데이터 품질 필요"
+    - "D3 Mark 공급원 연결 - market-api 종가. 계산은 있고 입력이 없다"
     - "Performance Attribution"
     - "관리보수·성과보수·High-Water Mark - Mandate 미확정 항목"
 

@@ -8,10 +8,40 @@
 # 루트 docker-compose.yml이 `include:`로 이 파일을 끌어온다. 구조 설명은
 # departments/02-trading/compose.yaml 상단 주석과 같다.
 #
-# ▶ 지금은 Hermes 하나뿐이다. 계획서 6.6의 accounting-api / ledger-worker /
-#   portfolio-projector는 넣지 않았다 - departments/05-accounting-portfolio에 api/app.py가
-#   아직 없고, 조회면은 apps/api BFF가 겸한다. 코드 없는 역할을 컨테이너부터 만들지 않는다.
+# ▶ 계획서 6.6의 ledger-worker / portfolio-projector는 아직 없다 - 코드가 없다.
+#   코드 없는 역할을 컨테이너부터 만들지 않는다. accounting-api는 2026-08-04에
+#   api/app.py가 생기면서 추가했다(trading-api가 2026-08-03에 그랬던 것과 같다).
 services:
+  # accounting-api: 원장·평가·대사·기업행위·일일보고의 조회·명령면.
+  # 계약은 docs/02-engineering/ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md.
+  #
+  # ▶ build.context가 이 폴더가 아니라 **저장소 루트(../..)** 다. trading-api와 다른
+  #   점이며 이유는 Dockerfile 상단 주석에 있다 - ledger.py/reconciliation.py가 모듈
+  #   최상위에서 departments/02-trading/contracts를 import해서 이미지 안에서도 같은
+  #   상대 경로가 유지돼야 한다(03-risk와 같은 사정).
+  #
+  # ▶ DATABASE_URL이 원장의 위치를 정한다(설계서 4절, 2026-08-04 psycopg 구현).
+  #   **없으면 조용히 인메모리로 뜬다** - 컨테이너를 지우면 분개가 사라지므로
+  #   .env에 DATABASE_URL이 있는지 확인하고 띄운다. trading-api는 아직 안 쓴다.
+  #
+  # ▶ **복제하면 안 된다.** DB 모드에서 원장이 갈라지지는 않지만, 같은 장부에 동시에
+  #   분개하면 로드 -> 계산 -> INSERT 사이에 경합 창이 생긴다. 이중 분개는 DB의
+  #   unique (event_type, source_event_id)가 막고, 평균원가가 오래된 상태를 볼 수 있는
+  #   것은 아직 안 막았다. 단일 인스턴스로 둔다.
+  accounting-api:
+    build:
+      context: ../..
+      dockerfile: departments/05-accounting-portfolio/Dockerfile
+    container_name: hedgefund-accounting-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:8046:8000"   # 로컬 전용 - 외부 노출 금지 (8041~8045 사용 중)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
   # 주의 사항은 departments/02-trading/compose.yaml과 동일하다 - 볼륨 이름 = Profile 이름,
   # 부서별 데이터 디렉터리 분리, CLAUDE.md 배정표대로 OPENAI_API_KEY만 주입.
   accounting-hermes:

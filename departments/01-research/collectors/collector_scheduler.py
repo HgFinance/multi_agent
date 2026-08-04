@@ -92,6 +92,17 @@ JOBS: tuple[Job, ...] = (
     Job("universe-restrictions",
         ("collectors/universe_restriction_collector.py", "--collect"),
         daily_at=time(7, 5)),
+    # ▶ 일봉 증분 - **이게 스케줄에 없어서 7/31 이후 봉이 멈춰 있었다.**
+    #   chart_backfill_collector 는 손으로 돌리는 백필 도구로만 있었고, 매일
+    #   도는 자리가 없었다. 그 사이 리포트는 나흘 전 종가를 "최신" 으로 인용했고
+    #   아무도 그것을 잡지 못했다(2026-08-04 재일님 지적).
+    #   15:50: 정규장 마감(15:30) 직후. VKOSPI(16:05)·라벨 스냅샷(16:30)보다
+    #   먼저 둬서 그날 봉이 뒤 배치의 재료가 되게 한다.
+    #   최근 7일을 겹쳐 받는다 - PK 가 멱등이고, 연휴·장애로 며칠 빠져도
+    #   다음 실행이 스스로 메운다(사람이 백필을 기억할 필요가 없어야 한다).
+    Job("chart-daily",
+        ("collectors/chart_backfill_collector.py", "--daily", "--recent-days", "7"),
+        daily_at=time(15, 50)),
     # 일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다. 16:30:
     # VKOSPI(16:05) 뒤라 그날 시장 상태가 다 반영된 시점. 이 이력이 있어야
     # Packet 의 REGIME_FLIP·GEO_ESCALATION 주장을 채점할 수 있다.
@@ -345,7 +356,8 @@ def _check_job_table():
         # 실행 플래그가 없으면 수집기 규약상 자체점검만 돌게 된다.
         # --collect(수집) / --audit(Steward 감사) / --export(Archive) /
         # --score(Packet 사후 채점) 가 실행 동사다.
-        assert {"--collect", "--audit", "--export", "--score"} & set(j.argv), \
+        assert {"--collect", "--audit", "--export", "--score",
+                "--daily", "--minute"} & set(j.argv), \
             f"{j.name}: 실행 플래그가 없다 - 자체점검만 돈다"
     try:
         Job("bad", ("x.py", "--collect"))

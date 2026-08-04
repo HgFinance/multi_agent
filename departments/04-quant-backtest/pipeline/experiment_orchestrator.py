@@ -62,6 +62,8 @@ class OrchestratorReport:
     transitions: list = field(default_factory=list)
     experiment_refs: dict = field(default_factory=dict)
     backlog: list = field(default_factory=list)
+    trial_pressure: dict = field(default_factory=dict)   # 몇 번째 시도인가
+    release: dict = field(default_factory=dict)          # QNT-07 관문 판정
 
 
 # ---------------------------------------------------------------------------
@@ -93,15 +95,53 @@ def feasibility(hypothesis: dict, existing_datasets: set,
     return (not missing), missing, backlog
 
 
-def robustness_to_status(fragility_verdict: str) -> str:
-    """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐."""
+# ▶ **상태 머신이 세 갈래로 갈라져 있다** (2026-08-04 실측)
+#     계약 quant_v2.HypothesisStatus : INTAKE -> PREREGISTERED ->
+#                                      DATASET_CERTIFIED -> RUNNING ->
+#                                      ROBUSTNESS_REVIEW -> SUPPORTED/REJECTED
+#     DB 제약 quant.hypotheses        : PROPOSED/APPROVED/TESTING/SUPPORTED/
+#                                      REJECTED/INCONCLUSIVE/ARCHIVED
+#     이 실행부                       : PROPOSED -> TESTING -> {SUPPORTED,
+#                                      REJECTED, INCONCLUSIVE}
+#
+#   계약의 7단계는 사전등록(PREREGISTERED)과 데이터셋 인증(DATASET_CERTIFIED)을
+#   별도 관문으로 두는데 **호출처가 0개**다 - 지금은 그 두 관문 없이 바로
+#   TESTING 으로 간다. 결과를 본 뒤 설정을 바꾸는 것을 막는 장치가 그 자리인데
+#   비어 있다는 뜻이다(계획 2번 "사전등록 강화" 가 이것이다).
+#
+#   지금 갈라진 채로 두는 이유: 상태를 계약 쪽으로 옮기려면 DB 제약·기존 14행·
+#   실행부를 같이 바꿔야 하고, 그 사이 어느 하나만 먼저 바뀌면 UPDATE 가 죽는다.
+#   실제로 오늘 INCONCLUSIVE 를 코드에만 넣었다가 DB 제약에 없어 예산 초과가
+#   나는 순간 죽을 뻔했다(마이그레이션 20260804001000 으로 메웠다).
+#   **다음 작업에서 세 갈래를 하나로 합친다.**
+def robustness_to_status(fragility_verdict: str,
+                         pressure: dict | None = None) -> str:
+    """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐.
+
+    ▶ **시도 횟수를 같이 본다** (재일님 2026-08-04)
+      웹에서 컨셉을 빌려 우리가 구현하면 파라미터 자유도가 전부 우리 것이 된다.
+      한 컨셉으로 변형 20개를 돌려 제일 좋은 것을 고르면 그 성적은 실력이
+      아니라 **다중검정**이다 - 12번째 시도의 Sharpe 1.5 는 1번째와 다르다.
+
+      contracts/quant_v2.trial_pressure() 가 이 계산을 진작 하고 있었는데
+      **호출처가 0개였다.** 예산을 넘긴 Family 의 ROBUST 는 SUPPORTED 로
+      올리지 않고 INCONCLUSIVE 로 둔다 - 틀렸다는 뜻이 아니라 이 표본으로는
+      실력과 운을 못 가린다는 뜻이다.
+    """
     v = (fragility_verdict or "").strip().upper()
     if v == "FRAGILE":
         return "REJECTED"
     if v == "ROBUST":
+        if (pressure or {}).get("over_budget"):
+            return "INCONCLUSIVE"
         return "SUPPORTED"
     raise ValueError(f"알 수 없는 강건성 판정: {fragility_verdict!r} - "
                      f"모르는 값을 상태 전이로 옮기지 않는다")
+
+
+# 한 컨셉(edge type)에 허용하는 변형 시도 수. 넘으면 ROBUST 라도 SUPPORTED 로
+# 올리지 않는다 - 많이 돌려 고른 최고치는 실력과 운을 못 가린다.
+TRIAL_BUDGET_DEFAULT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +203,50 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
-        new_status = robustness_to_status(result["fragility"])
+        # ▶ 같은 Family 에서 몇 번째 시도인지 세어 상태 전이에 반영한다.
+        #   가설의 edge type + universe 를 Family 로 본다(같은 컨셉의 변형들).
+        try:
+            cur.execute(
+                """
+                select count(*) as used
+                from quant.experiments e
+                join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                where h.expected_edge->>'type' = %s
+                """, (str((hyp.get("expected_edge") or {}).get("type") or ""),))
+            used = int((cur.fetchone() or [0])[0])
+        except Exception:
+            used = 0                     # 못 세면 0 - 없는 압력을 지어내지 않는다
+        budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
+        report.trial_pressure = {"trials_used": used, "trial_budget": budget,
+                                 "over_budget": used > budget}
+        new_status = robustness_to_status(result["fragility"],
+                                          report.trial_pressure)
         cur.execute("update quant.hypotheses set status=%s "
                     "where hypothesis_id=%s and status='TESTING'", (new_status, hid))
         conn.commit()
         report.transitions.append(f"TESTING->{new_status}")
+
+        # ▶ QNT-07 릴리스 관문. SUPPORTED 까지 온 것만 본다.
+        #   **승격이 아니라 제출 판정이다** - Production 은 CEO·Risk·QA 몫이다.
+        if new_status == "SUPPORTED":
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from release_gate import evaluate as gate_evaluate
+
+                cur.execute(
+                    """select metric, value from quant.experiment_metrics
+                       where experiment_id = %s""",
+                    (result.get("experiment_id"),))
+                metrics = {m: float(v) for m, v in cur.fetchall()}
+                # walk_forward 가 쓰는 이름과 맞춘다
+                metrics.setdefault("max_drawdown_pct", metrics.get("mdd_pct"))
+                d = gate_evaluate(metrics, fragility=result["fragility"],
+                                  trial_pressure=report.trial_pressure)
+                report.release = d.as_dict()
+            except Exception as e:  # noqa: BLE001
+                # 관문 실패를 통과로 위장하지 않는다 - HOLD 가 안전한 기본값이다
+                report.release = {"decision": "HOLD",
+                                  "reasons": [f"관문 실행 실패: {type(e).__name__}"]}
         return report
     finally:
         if own_conn:
@@ -247,6 +326,11 @@ def _print_report(r: OrchestratorReport) -> None:
         print(f"  부족: {', '.join(r.missing)}")
     for b in r.backlog:
         print(f"  백로그: {b}")
+    if r.release:
+        print(f"  릴리스: {r.release.get('decision')} "
+              f"(미달 {r.release.get('failed') or '-'})")
+        for msg in (r.release.get("reasons") or [])[:3]:
+            print(f"    · {msg}")
     for t in r.transitions:
         print(f"  전이: {t}")
     if r.experiment_refs:
@@ -318,6 +402,14 @@ def _check_feasibility_gate():
 def _check_status_mapping():
     assert robustness_to_status("FRAGILE") == "REJECTED"
     assert robustness_to_status("ROBUST") == "SUPPORTED"
+    # ▶ **예산을 넘긴 Family 의 ROBUST 는 SUPPORTED 가 아니다.**
+    #   틀렸다는 뜻이 아니라 이 표본으로는 실력과 운을 못 가린다는 뜻이다.
+    over = {"trials_used": 12, "trial_budget": 5, "over_budget": True}
+    assert robustness_to_status("ROBUST", over) == "INCONCLUSIVE"
+    # FRAGILE 은 시도 수와 무관하게 REJECTED (많이 돌렸다고 구제되지 않는다)
+    assert robustness_to_status("FRAGILE", over) == "REJECTED"
+    ok = {"trials_used": 2, "trial_budget": 5, "over_budget": False}
+    assert robustness_to_status("ROBUST", ok) == "SUPPORTED"
     for bad in ("", "MAYBE", None):
         try:
             robustness_to_status(bad)
