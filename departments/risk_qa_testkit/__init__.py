@@ -10,6 +10,7 @@ from .pipeline import (
     make_test_packet,
 )
 from .department_graph import DepartmentGraphSpec, run_department_graph
+from .portfolio_pipeline import run_portfolio_recommendation_pipeline
 
 __all__ = [
     "PipelineMode",
@@ -20,5 +21,6 @@ __all__ = [
  "run_risk_qa_pipeline",
  "make_test_packet",
  "DepartmentGraphSpec",
- "run_department_graph",
+    "run_department_graph",
+    "run_portfolio_recommendation_pipeline",
 ]

@@ -53,6 +53,16 @@ WEB_SEARCH_VERSION = "research-web-search-v1"
 # 검색은 RES-08 만 한다. 다른 페르소나가 부르면 예외다(가이드 12.2.1).
 SEARCH_PERSONA = "rag-librarian-evidence-curator"
 
+# ▶ 검색이 허용된 페르소나. **목록으로 둔다** - 부서가 늘 때마다 상수를
+#   바꿔치면 기존 호출부가 조용히 깨진다.
+#   퀀트 전략 정찰(QNT-01)을 2026-08-04 추가했다. 리서치의 근거 큐레이션과
+#   목적이 다르지만(사실 수집 vs 전략 문헌 탐색) **규율은 같다** -
+#   사유 필수, Replay 금지, SEARCH_HIT 은 검증 전까지 사실이 아니다.
+SEARCH_ALLOWED_PERSONAS = frozenset({
+    SEARCH_PERSONA,
+    "strategy-research-agent",       # QNT-01 전략 문헌·최신 기법 정찰
+})
+
 TAVILY_URL = "https://api.tavily.com/search"
 
 # ── 검색 백엔드 ──────────────────────────────────────────────────────────────
@@ -149,10 +159,11 @@ def search(req: SearchRequest, *, persona: str = SEARCH_PERSONA,
            run_mode: str = "LIVE", api_key: str | None = None,
            post=None) -> list[SearchHit]:
     """웹검색 1회. **RES-08 만 부를 수 있고 Replay 에서는 금지다.**"""
-    if persona != SEARCH_PERSONA:
+    if persona not in SEARCH_ALLOWED_PERSONAS:
         raise NotAuthorizedToSearch(
             f"{persona} 는 직접 검색할 수 없다 - WebSearchRequest 를 내면 "
-            f"{SEARCH_PERSONA} 가 수행한다(가이드 12.2.1)")
+            f"{SEARCH_PERSONA} 가 수행한다(가이드 12.2.1). "
+            f"허용: {sorted(SEARCH_ALLOWED_PERSONAS)}")
     if str(run_mode).upper() == "REPLAY":
         raise ReplayForbidden(
             "과거 재현에서 실시간 웹검색을 부를 수 없다 - 지금의 웹은 그때의 "
@@ -463,6 +474,30 @@ def _check_backend_absent_is_explicit():
             os.environ["TAVILY_API_KEY"] = key
 
 
+def _check_persona_allowlist():
+    """허용 목록이 **넓어져도 아무나 통과하지 않는가.**
+
+    퀀트 정찰을 추가하면서 상수 하나를 목록으로 바꿨다. 이때 검사를 안 고치면
+    "누구나 검색 가능" 으로 열려도 아무도 모른다.
+    """
+    req = SearchRequest(question="q", reason="내부 근거 없음",
+                        requester="strategy-research-agent")
+    for bad in ("technical-analyst", "quant-backtest-supervisor", "", "아무나"):
+        try:
+            search(req, persona=bad, post=lambda *a, **k: {"results": []})
+        except NotAuthorizedToSearch:
+            continue
+        raise AssertionError(f"권한 없는 페르소나가 통과했다: {bad!r}")
+    # 허용된 둘은 권한 단계를 넘어간다(백엔드 부재로 그 뒤에서 막히는 건 별개)
+    for ok in SEARCH_ALLOWED_PERSONAS:
+        try:
+            search(req, persona=ok, api_key="", post=lambda *a, **k: {"results": []})
+        except NotAuthorizedToSearch:
+            raise AssertionError(f"허용 페르소나가 막혔다: {ok}")
+        except WebSearchError:
+            pass          # 백엔드 없음 - 권한과 무관
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -478,4 +513,5 @@ if __name__ == "__main__":
     _check_snippet_not_full_body()
     _check_searxng_backend();          print("  SearXNG 백엔드·출처      OK")
     _check_backend_absent_is_explicit();print("  백엔드 부재 = 명시 실패  OK")
-    print("웹검색 10개 영역 통과.")
+    _check_persona_allowlist();        print("  검색 권한 목록          OK")
+    print("웹검색 11개 영역 통과.")

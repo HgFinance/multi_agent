@@ -48,11 +48,70 @@ KST = timezone(timedelta(hours=9))
 
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
 COST_MODEL = {
-    "version": "krx-cost-v1",
+    "version": "krx-cost-v2",
     "commission_bps": 1.5,   # 위탁수수료 왕복의 절반 (매수·매도 각각 부과)
     "sell_tax_bps": 15.0,    # 증권거래세+농특세 매도측 0.15% 가정 (2026 코스피 기준)
-    "slippage_bps": 5.0,     # 시가 체결 가정에 대한 보수적 슬리피지
+    # ▶ **실측으로 교체** (2026-08-04). v1 의 5.0bps 는 가정이었고 실제보다
+    #   낮았다. market.market_quotes 2,000,000 표본:
+    #     스프레드 평균 16.38bps · 중앙값 14.40bps · 상위10% 27.47bps
+    #   체결 시 부담하는 것은 반쪽이므로 중앙값 기준 7.20bps 다.
+    #   회전율 344배 전략에서 이 2.2bps 차이가 연 7%p 넘게 갈린다 - 가정
+    #   하나로 결론이 뒤집히는 자리라 실측이 아니면 결과를 믿을 수 없다.
+    "slippage_bps": 7.2,
+    "slippage_source": "market.market_quotes 중앙값 스프레드/2 (2026-08-04 실측)",
+    # 종목별 스프레드가 오면 그것을 쓴다. 없으면 위 기본값(보수적 중앙값).
+    "slippage_p90_bps": 13.7,   # 상위10% 스프레드/2 - 스트레스 시나리오용
 }
+
+
+# ── 유동성 계층별 슬리피지 ──────────────────────────────────────────────────
+# ▶ 왜 계층인가 (2026-08-04 실측)
+#   종목별 실측 스프레드를 쓰고 싶었지만 **호가가 4거래일치뿐**이다
+#   (market_quotes 2026-07-30~08-04). 백테스트는 2024-01 부터인데 오늘 호가로
+#   2024 년 비용을 매기면 미래 유동성을 아는 셈이라 look-ahead 다.
+#   일봉 고저가 추정(Corwin-Schultz)도 시도했으나 이 데이터에서 중앙값이
+#   -3.57bps 로 나와(절반 이상 음수) 비용 입력으로 쓸 수 없었다.
+#
+#   대신 **거래대금은 2024 년부터 있다.** 실측 호가로 확인한 관계:
+#     거래대금 5분위   평균거래대금        스프레드 중앙값
+#       1 (하위)            1,825              18.59 bps
+#       2                   4,990              16.88
+#       3                  12,805              13.51
+#       4                  38,519              13.34
+#       5 (상위)          454,539              12.81
+#   거래대금이 250배 차이나는데 스프레드는 1.45배 - 완만하지만 단조롭다.
+#
+# ▶ 이 방식의 한계를 숨기지 않는다
+#   계층↔스프레드 **수준**은 2026-08 표본으로 보정한 것이라 2024 년의 절대
+#   수준과 다를 수 있다. 다만 "얇을수록 넓다" 는 **관계**는 구조적이므로
+#   전 종목 단일값보다 낫다. 호가 이력이 쌓이면 시점별로 교체한다.
+LIQUIDITY_TIERS = (
+    # (거래대금 상한, 왕복 스프레드 bps) - 상한 미만이면 이 계층
+    (3_000, 18.59),
+    (8_000, 16.88),
+    (25_000, 13.51),
+    (100_000, 13.34),
+    (float("inf"), 12.81),
+)
+
+
+def slippage_bps_for(symbol: str | None = None,
+                     spreads: dict | None = None,
+                     adv: float | None = None) -> float:
+    """체결 슬리피지(bps). 우선순위: **종목 실측 > 유동성 계층 > 시장 중앙값.**
+
+    유동성이 얇은 종목일수록 스프레드가 넓은데 전 종목에 같은 값을 물리면
+    소형주 전략이 부당하게 유리해진다. 반대로 없는 값을 지어내지도 않는다.
+    """
+    if spreads and symbol:
+        v = spreads.get(str(symbol))
+        if v is not None and v > 0:
+            return float(v) / 2.0          # 왕복 스프레드의 절반이 편도 비용
+    if adv is not None and adv > 0:
+        for cap, bps in LIQUIDITY_TIERS:
+            if adv < cap:
+                return bps / 2.0
+    return float(COST_MODEL["slippage_bps"])
 DEFAULT_CONFIG = {
     "strategy": "MOM-20-SMOKE",
     "lookback_days": 20,
@@ -99,17 +158,39 @@ class Market:
     opens: dict[tuple[date, str], float]
     closes: dict[tuple[date, str], float]
     symbols: list[str]
+    notionals: dict[tuple[date, str], float] = field(default_factory=dict)
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> Market:
         dates = sorted({r["trade_date"] for r in rows})
-        opens, closes, symbols = {}, {}, set()
+        opens, closes, notionals, symbols = {}, {}, {}, set()
         for r in rows:
             iid = str(r["instrument_id"])
             symbols.add(iid)
             opens[(r["trade_date"], iid)] = float(r["open"])
             closes[(r["trade_date"], iid)] = float(r["close"])
-        return cls(dates=dates, opens=opens, closes=closes, symbols=sorted(symbols))
+            nv = r.get("notional")
+            if nv is not None:
+                notionals[(r["trade_date"], iid)] = float(nv)
+        return cls(dates=dates, opens=opens, closes=closes,
+                   symbols=sorted(symbols), notionals=notionals)
+
+    def adv_until(self, until: date, window: int = 20) -> dict[str, float]:
+        """until **까지의** 평균 거래대금. 미래 거래대금을 보지 않는다.
+
+        유동성 계층을 이 값으로 정하므로 여기서 PIT 가 깨지면 비용 전체가
+        미래 정보가 된다.
+        """
+        idx = [d for d in self.dates if d <= until][-window:]
+        if not idx:
+            return {}
+        out: dict[str, float] = {}
+        for s_ in self.symbols:
+            vals = [self.notionals[(d, s_)] for d in idx
+                    if self.notionals.get((d, s_))]
+            if vals:
+                out[s_] = sum(vals) / len(vals)
+        return out
 
     def momentum(self, until: date, lookback: int) -> dict[str, float]:
         """until **포함까지의 종가**로 lookback 수익률. 호출부가 t-1 을 넘긴다."""
@@ -180,11 +261,119 @@ class BacktestResult:
     notes: list[str] = field(default_factory=list)
 
 
-def _apply_costs(side: str, notional: float) -> float:
-    bps = COST_MODEL["commission_bps"] + COST_MODEL["slippage_bps"]
+def _apply_costs(side: str, notional: float,
+                 slip_bps: float | None = None) -> float:
+    # 종목별 슬리피지를 받으면 그것을 쓴다. 안 주면 시장 중앙값(옛 동작 유지)
+    bps = COST_MODEL["commission_bps"] + (
+        COST_MODEL["slippage_bps"] if slip_bps is None else float(slip_bps))
     if side == "SELL":
         bps += COST_MODEL["sell_tax_bps"]
     return notional * bps / 1e4
+
+
+
+def buy_and_hold_equity(market: Market, config: dict) -> list[tuple[date, float]]:
+    """동일가중 매수 후 보유 벤치마크. **같은 PIT 데이터·같은 비용 모델.**
+
+    ▶ 왜 필요한가 (2026-08-04 실측에서 드러난 공백)
+      백테스트가 "+26.30%, Sharpe 0.4371" 을 냈는데 **그게 좋은 건지 나쁜 건지
+      판단할 기준이 없었다.** 같은 기간 시장이 +40% 였으면 그 전략은 가치를
+      파괴한 것이다. 리서치본부가 이미 지키는 원칙과 같다 -
+      "비교 기준 없는 단일 값은 판정이 아니다".
+
+    ▶ 공정하게 비교하기 위한 규칙
+      · 같은 Market(같은 PIT Manifest) 을 쓴다 - 다른 데이터로 비교하면 무의미
+      · **진입 비용을 벤치마크에도 물린다** - 무비용 벤치마크와 비교하면
+        전략이 부당하게 불리해진다
+      · 첫날 상장돼 있던 종목만 동일가중으로 산다. 중간 신규 상장을 사후에
+        편입하면 그게 look-ahead 다
+      · 리밸런싱 없음 - 그것이 buy-and-hold 의 정의다(회전율 0)
+    """
+    if not market.dates:
+        return []
+    d0 = market.dates[0]
+    # Market 은 (date, symbol) -> price 평면 dict 다. 첫날 종가가 있는 종목만.
+    day0 = {s_: market.closes[(d0, s_)] for s_ in market.symbols
+            if market.closes.get((d0, s_))}
+    names = sorted(k for k, v in day0.items() if v and v > 0)
+    if not names:
+        return []
+
+    capital = float(config["initial_capital"])
+    per = capital / len(names)
+    shares: dict[str, float] = {}
+    spent = 0.0
+    for s_ in names:
+        px = day0[s_]
+        # 비용을 먼저 떼고 남은 돈으로 산다(전략과 같은 방식)
+        fee = _apply_costs("BUY", per)
+        q = max((per - fee) / px, 0.0)
+        shares[s_] = q
+        spent += q * px + fee
+    cash = capital - spent
+
+    out: list[tuple[date, float]] = []
+    last: dict[str, float] = dict(day0)
+    for d in market.dates:
+        for k in shares:
+            v = market.closes.get((d, k))
+            if v and v > 0:
+                last[k] = v
+        out.append((d, cash + sum(q * last.get(k, 0.0) for k, q in shares.items())))
+    return out
+
+
+def excess_metrics(strategy_equity: list[tuple[date, float]],
+                   bench_equity: list[tuple[date, float]]) -> dict:
+    """전략 - 벤치마크. **초과가 없으면 그 전략은 존재 이유가 없다.**
+
+    행이 비면 0 이 아니라 None 이다 - 계산 못 한 것과 초과가 0 인 것은 다르다.
+    """
+    if len(strategy_equity) < 2 or len(bench_equity) < 2:
+        return {}          # 계산 못 했으면 **키를 안 만든다** (0 이 아니다)
+
+    def _total(eq):
+        a, b = eq[0][1], eq[-1][1]
+        return None if not a else (b / a - 1.0)
+
+    st, bt = _total(strategy_equity), _total(bench_equity)
+    if st is None or bt is None:
+        return {}          # 기준 자산이 0 - 판정 불가지 초과 0 이 아니다
+
+    # 일별 초과수익의 변동성으로 정보비율. 날짜를 맞춰 곱셈오차를 막는다
+    bmap = dict(bench_equity)
+    diffs = []
+    prev_s = prev_b = None
+    for d, sv in strategy_equity:
+        bv = bmap.get(d)
+        if bv is None or not sv or not bv:
+            continue
+        if prev_s and prev_b:
+            diffs.append((sv / prev_s - 1.0) - (bv / prev_b - 1.0))
+        prev_s, prev_b = sv, bv
+
+    ir = None
+    if len(diffs) > 20:
+        mu = sum(diffs) / len(diffs)
+        var = sum((x - mu) ** 2 for x in diffs) / (len(diffs) - 1)
+        sd = var ** 0.5
+        if sd > 0:
+            ir = round(mu / sd * (252 ** 0.5), 4)
+
+    # ▶ **수치만 담는다.** metrics 는 numeric 컬럼에 그대로 적재되므로
+    #   불리언·문자열을 섞으면 DatatypeMismatch 로 실행이 죽는다(실측).
+    #   판정은 excess_return_pct 부호가 이미 말한다 - 별도 플래그를 수치
+    #   테이블에 억지로 넣지 않는다.
+    out = {
+        "benchmark_total_return_pct": round(bt * 100.0, 2),
+        # 초과가 음수면 숨기지 않는다 - 절대수익이 양수여도 시장을 못 이기면
+        # 그 전략은 채택할 이유가 없다
+        "excess_return_pct": round((st - bt) * 100.0, 2),
+        "excess_days_used": float(len(diffs)),
+    }
+    if ir is not None:
+        out["information_ratio"] = ir       # 표본 부족이면 키를 아예 안 넣는다
+    return out
 
 
 def run_backtest(market: Market, config: dict) -> BacktestResult:
@@ -210,6 +399,9 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
         # ── 리밸런스: 시그널은 어제까지, 체결은 오늘 시가 ──
         if d in rebal_days and i > 0 and (ntb is None or d >= ntb):
             ranked = select_targets(market, i, config)
+            # ▶ **오늘까지의** 거래대금으로 유동성 계층을 정한다. 미래
+            #   거래대금을 보면 비용 전체가 미래 정보가 된다.
+            adv = market.adv_until(market.dates[i - 1])
             if ranked:
                 tradable = [s for s in ranked if (d, s) in market.opens]
                 port_value = cash + sum(
@@ -224,9 +416,10 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
                     want = target_value / px if s in tradable else 0.0
                     diff = shares[s] - want
                     if diff * px > 1.0:     # 1원 미만 잔차는 무시
-                        exec_px = px * (1 - COST_MODEL["slippage_bps"] / 1e4)
+                        sb = slippage_bps_for(s, adv=adv.get(s))
+                        exec_px = px * (1 - sb / 1e4)
                         notional = diff * exec_px
-                        fee = _apply_costs("SELL", notional)
+                        fee = _apply_costs("SELL", notional, sb)
                         pnl = _fifo_sell(lots.setdefault(s, deque()), diff, exec_px) - fee
                         cash += notional - fee
                         shares[s] -= diff
@@ -237,12 +430,13 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
                 # 매수
                 for s in tradable:
                     px = market.opens[(d, s)]
-                    exec_px = px * (1 + COST_MODEL["slippage_bps"] / 1e4)
+                    sb = slippage_bps_for(s, adv=adv.get(s))
+                    exec_px = px * (1 + sb / 1e4)
                     want = target_value / px
                     diff = want - shares.get(s, 0.0)
                     if diff * px > 1.0:
                         notional = diff * exec_px
-                        fee = _apply_costs("BUY", notional)
+                        fee = _apply_costs("BUY", notional, sb)
                         if notional + fee > cash:
                             diff = max((cash - fee) / exec_px, 0.0)
                             notional = diff * exec_px
@@ -266,6 +460,37 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
         notes.append(f"기말에 시세 없는 보유 {len(held_wo_price)}종목 - 직전 종가 평가")
 
     metrics = compute_metrics(equity, fills, capital, traded_notional)
+    # ▶ 벤치마크 대비를 **항상** 붙인다. 절대수익만 보면 시장이 오른 것을
+    #   전략의 실력으로 착각한다.
+    # ── 과적합 통계 (계약 quant_v2 가 요구하는 필드) ────────────────────────
+    # ▶ 계산과 판정을 **같이** 붙인다. 계약에 필드만 있고 채우는 코드가
+    #   없던 상태가 오늘만 세 번째였다(F-Score, industry_code, trial_pressure).
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from overfit_stats import bootstrap_ci, deflated_sharpe
+
+        eq = [v for _, v in equity]
+        rets = [eq[i] / eq[i - 1] - 1.0
+                for i in range(1, len(eq)) if eq[i - 1]]
+        # trials 는 오케스트레이터가 세는 시도 횟수. 없으면 1(보수적으로
+        # 낙관하지 않되, 없는 압력을 지어내지도 않는다).
+        trials = int(config.get("trials") or 1)
+        for src in (deflated_sharpe(rets, trials=trials), bootstrap_ci(rets)):
+            for k, v in src.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    metrics[k] = v          # metrics 는 numeric 전용이다
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"과적합 통계 실패: {type(e).__name__}")
+
+    bench_note = "benchmark=equal_weight_buy_and_hold (동일 PIT·동일 비용)"
+    try:
+        ex = excess_metrics(equity, buy_and_hold_equity(market, config))
+        metrics.update(ex)
+        if not ex:
+            bench_note = "benchmark 계산 불가 - 곡선 부족 또는 기준 자산 0"
+    except Exception as e:  # noqa: BLE001
+        bench_note = f"benchmark 계산 실패: {type(e).__name__}"
+    notes.append(bench_note)
     return BacktestResult(equity=equity, fills=fills, metrics=metrics,
                           config=config, notes=notes)
 
@@ -565,9 +790,32 @@ def _check_fifo_and_costs():
     pnl = _fifo_sell(q, 12.0, 120.0)          # 10@100 + 2@110 매도
     assert abs(pnl - (10 * 20 + 2 * 10)) < 1e-9
     assert len(q) == 1 and abs(q[0][0] - 3.0) < 1e-9
-    buy = _apply_costs("BUY", 1_000_000)      # 1.5 + 5 bps
-    sell = _apply_costs("SELL", 1_000_000)    # + 세금 15 bps
-    assert abs(buy - 650.0) < 1e-9 and abs(sell - 2150.0) < 1e-9
+    # ▶ **기대값을 하드코딩한다** - COST_MODEL 에서 다시 계산하면 비용이
+    #   바뀌어도 검사가 따라 바뀌어 아무것도 못 지킨다. 실제로 슬리피지를
+    #   5.0 -> 7.2bps(실측)로 올렸을 때 이 검사가 먼저 걸렸다.
+    #   매수 1.5 + 7.2 = 8.7bps / 매도 + 세금 15.0 = 23.7bps
+    buy = _apply_costs("BUY", 1_000_000)
+    sell = _apply_costs("SELL", 1_000_000)
+    assert abs(buy - 870.0) < 1e-9, buy
+    assert abs(sell - 2370.0) < 1e-9, sell
+
+    # 종목별 실측이 있으면 그것을 쓰고, 없으면 시장 중앙값으로 떨어진다
+    assert slippage_bps_for("005930", {"005930": 4.0}) == 2.0      # 왕복/2
+    assert slippage_bps_for("005930", {}) == COST_MODEL["slippage_bps"]
+    assert slippage_bps_for(None, {"005930": 4.0}) == COST_MODEL["slippage_bps"]
+    # 0 이나 음수는 실측이 아니다 - 기본값으로 떨어진다
+    assert slippage_bps_for("X", {"X": 0}) == COST_MODEL["slippage_bps"]
+
+    # ▶ **유동성 계층이 단조로운가.** 얇을수록 비싸야 한다 - 뒤집히면
+    #   소형주 전략이 부당하게 유리해지고 백테스트가 거짓말을 한다.
+    tiers = [slippage_bps_for(adv=a) for a in (1_000, 5_000, 15_000, 50_000, 1e6)]
+    assert tiers == sorted(tiers, reverse=True), tiers
+    assert tiers[0] > tiers[-1], tiers
+    # 실측 있으면 계층보다 우선한다
+    assert slippage_bps_for("A", {"A": 4.0}, adv=1_000) == 2.0
+    # 거래대금이 없으면 계층을 못 쓴다 - 기본값(지어내지 않는다)
+    assert slippage_bps_for("A", None, adv=None) == COST_MODEL["slippage_bps"]
+    assert slippage_bps_for("A", None, adv=0) == COST_MODEL["slippage_bps"]
     print("  FIFO 손익·비용 산식      OK")
 
 

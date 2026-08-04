@@ -51,8 +51,12 @@ INTERVAL = "1D"
 DATA_ROOT = Path(__file__).resolve().parents[3] / "quant-data"
 
 # Dataset 행 스키마 - 컬럼 순서가 content_hash 의 일부다. 바꾸면 새 스키마다.
+# ▶ notional(거래대금) 추가 2026-08-04. **유동성 계층 슬리피지의 유일한
+#   재료**인데 SELECT·파티션 어디에도 없어서 전 종목이 시장 중앙값으로
+#   떨어졌다 - 리서치본부 /bars 의 notional 누락과 같은 유형이다.
+#   열이 늘었으므로 content_hash 가 바뀐다(데이터가 바뀐 것이니 맞다).
 COLUMNS = ("instrument_id", "trade_date", "open", "high", "low", "close",
-           "volume", "observed_at")
+           "volume", "notional", "observed_at")
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +82,9 @@ def row_line(row: dict) -> str:
         canon_number(row["open"]), canon_number(row["high"]),
         canon_number(row["low"]), canon_number(row["close"]),
         canon_number(row["volume"]),
+        # 거래대금. 값이 없는 행이 있으므로 빈 문자열로 정규화한다 - 0 으로
+        # 채우면 "거래대금 0" 과 "미확인" 이 같아져 유동성 계층이 오염된다.
+        canon_number(row["notional"]) if row.get("notional") is not None else "",
         row["observed_at"].astimezone(timezone.utc).isoformat()
         if isinstance(row["observed_at"], datetime) else str(row["observed_at"]),
     ))
@@ -180,8 +187,13 @@ def fetch_bars(tconn, start: date, end: date) -> list[dict]:
     with tconn.cursor() as cur:
         cur.execute(
             """
+            -- ▶ **열 순서는 COLUMNS 와 같아야 한다.** 행을 위치로 매핑하므로
+            --   notional 을 뒤에 붙였다가 observed_at 자리와 어긋나
+            --   Decimal 변환이 깨졌다(실측).
             select instrument_id, (bucket_time at time zone 'Asia/Seoul')::date,
-                   open, high, low, close, volume, observed_at
+                   open, high, low, close, volume,
+                   -- 거래대금: 유동성 계층 슬리피지의 유일한 재료
+                   notional, observed_at
             from market.market_bars
             where interval_code = %s and source = %s
               and bucket_time >= %s and bucket_time < %s
@@ -261,6 +273,7 @@ def export_partitions(rows: list[dict], out_dir: Path) -> list[dict]:
                     canon_number(r["open"]), canon_number(r["high"]),
                     canon_number(r["low"]), canon_number(r["close"]),
                     canon_number(r["volume"]),
+                    canon_number(r["notional"]) if r.get("notional") is not None else "",
                     r["observed_at"].astimezone(timezone.utc).isoformat(),
                 ])
         dates = [r["trade_date"] for r in chunk]
@@ -286,6 +299,9 @@ def load_partition(path: Path) -> list[dict]:
                 "open": Decimal(rec["open"]), "high": Decimal(rec["high"]),
                 "low": Decimal(rec["low"]), "close": Decimal(rec["close"]),
                 "volume": Decimal(rec["volume"]),
+                # 옛 파티션엔 이 열이 없다 - get 으로 읽고 빈 값은 None
+                "notional": (Decimal(rec["notional"])
+                             if (rec.get("notional") or "").strip() else None),
                 "observed_at": datetime.fromisoformat(rec["observed_at"]),
             })
     return rows

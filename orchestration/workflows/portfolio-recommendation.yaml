@@ -1,0 +1,90 @@
+name: portfolio-recommendation-full
+version: portfolio-recommendation-full-v1
+kind: advisory-portfolio
+description: >-
+  사용자 투자 성향과 경험으로 적합 포트폴리오 후보를 계산하고,
+  Research·Trading·Risk·QA·Accounting·CEO의 비바인딩 Context를
+  async LangGraph fan-out/fan-in으로 연결한다.
+boundary_rules:
+  - User profile and portfolio suitability are advisory inputs, not OrderIntent or Order.
+  - Risk and QA results remain independent non-binding gates for this TEST flow.
+  - Department failure never upgrades a recommendation and ends in HOLD/ESCALATE.
+  - No broker submission, ledger posting, credential use, or production promotion is allowed.
+steps:
+  - id: profile-suitability
+    sequence: 1
+    department: accounting-portfolio-department
+    owner: portfolio
+    task: User profile and registered portfolio suitability match
+    input_contract: user_investor_profile
+    output_contract: portfolio_suitability_context
+    timeout_seconds: 30
+    retry: {max_attempts: 1}
+    failure_action: HOLD
+    forbidden_actions: [order_submission, ledger_write, risk_approval]
+  - id: research
+    sequence: 2
+    department: research-department
+    owner: research
+    task: Evidence context for portfolio candidate catalog
+    input_contract: portfolio_suitability_context
+    output_contract: research_context
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: HOLD
+    forbidden_actions: [order_submission, risk_approval]
+  - id: trading
+    sequence: 3
+    department: trading-department
+    owner: trading
+    task: Advisory portfolio construction context without OrderIntent submission
+    input_contract: research_context
+    output_contract: trading_context
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: HOLD
+    forbidden_actions: [order_submission, risk_approval]
+  - id: risk
+    sequence: 4
+    department: risk-management
+    owner: risk
+    task: Deterministic suitability risk ceiling and advisory context
+    input_contract: trading_context
+    output_contract: risk_context
+    timeout_seconds: 60
+    retry: {max_attempts: 2}
+    failure_action: HOLD
+    forbidden_actions: [risk_override, order_submission]
+  - id: qa
+    sequence: 5
+    department: qa-department
+    owner: qa
+    task: Independent evidence and reproducibility review
+    input_contract: risk_context
+    output_contract: qa_context
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: ESCALATE
+    forbidden_actions: [risk_override, order_submission, qa_gate_bypass]
+  - id: accounting
+    sequence: 6
+    department: accounting-portfolio-department
+    owner: accounting
+    task: Read-only portfolio projection context
+    input_contract: qa_context
+    output_contract: accounting_context
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: HOLD
+    forbidden_actions: [ledger_write, nav_finalize]
+  - id: ceo
+    sequence: 7
+    department: ceo-agent
+    owner: ceo
+    task: Explain recommendation and unresolved review state
+    input_contract: accounting_context
+    output_contract: portfolio_recommendation_summary
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: ESCALATE
+    forbidden_actions: [order_submission, risk_approval, ledger_write]

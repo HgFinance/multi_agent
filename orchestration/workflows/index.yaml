@@ -1,8 +1,8 @@
 version: orchestration-index-v1
 workflows:
+  portfolio-recommendation-full: portfolio-recommendation.yaml
   investment-case: investment-case.yaml
   strategy-research: strategy-research.yaml
   workforce-management: workforce-management.yaml
   agent-evolution: agent-evolution.yaml
   event-routing: event-routing.yaml
-
