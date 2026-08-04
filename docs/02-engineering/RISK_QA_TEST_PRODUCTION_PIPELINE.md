@@ -168,3 +168,35 @@ python scripts/run_jaeil_p0_p2_checks.py
 
 P0 contract self-check를 먼저 실행하고, P1/P2는 runtime evidence가 없으면 `DOCUMENTED_ONLY` 또는
 `NOT_RUN`으로 남긴다. 이 가이드에는 P3 priority 항목이 없으며 `RQF-3`은 별도의 phase다.
+## 11. 재일님 Production 실행 전 preflight
+
+Production 실행 담당자는 먼저 아래 게이트를 통과시킨다. 이 명령은 주문, Ledger, Trading State 변경을 수행하지 않으며 credential 값도 출력하지 않는다.
+
+```bash
+python scripts/run_risk_qa_production_preflight.py \
+  --as-of 2026-08-04T00:00:00+00:00
+```
+
+다음 조건 중 하나라도 실패하면 실행하지 않고 원인을 먼저 해결한다.
+
+- `DATABASE_URL`, `REDIS_URL` 또는 `RISK_QA_EVENT_REDIS_URL`, `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
+- `RISK_QA_RUNTIME=production`, `RISK_QA_PRODUCTION_ENABLED=true`
+- `QA_CHECK_CONTRACT_APPROVED=true`, `QA_TRACE_PERSIST=true`, `RISK_REQUIRE_P1_ANALYTICS=true`
+- 실제 정책 문서 경로 `QA_POLICY_CORPUS_DIR`가 설정되고 `SAMPLE_PLACEHOLDER`가 없음
+- Supabase canonical table, RLS policy, active worker profile, PIT Fund/Policy/Portfolio/Market 데이터
+- Redis PING 성공
+
+정책 문서는 저장소 샘플을 운영 근거로 사용하지 않는다. 실제 문서를 별도 경로에 배치한 뒤 ingestion한다.
+
+```bash
+export QA_POLICY_CORPUS_DIR=/secure/path/policies
+export QA_INGEST_MODE=production
+python departments/06-ai-qa-audit/evidence/production_ingestion.py \
+  "$QA_POLICY_CORPUS_DIR"
+```
+
+Risk/QA의 실제 DB write-through와 Redis 중복·재시작 검증은 별도 smoke에서 수행한다. 이 검증도 Broker 주문과 Ledger Posting은 호출하지 않는다.
+
+```bash
+python scripts/run_risk_qa_integration_smoke.py
+```

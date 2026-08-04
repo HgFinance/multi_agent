@@ -40,6 +40,20 @@ _RISK_DIR = Path(__file__).resolve().parent.parent
 _ENGINE_DIR = _RISK_DIR / "engine"
 _CONTRACTS_DIR = Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"
 _AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+
+
+def _configured_policy_corpus() -> Path:
+    """Resolve the real policy corpus configured for the Risk compliance gate."""
+
+    configured = (
+        os.environ.get("RISK_POLICY_CORPUS_DIR", "").strip()
+        or os.environ.get("QA_POLICY_CORPUS_DIR", "").strip()
+    )
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else _AGENTIC_RAG_DIR / "corpus" / "compliance"
+    )
 for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
@@ -405,7 +419,23 @@ def compliance_check(body: ComplianceCheckRequest):
         run_compliance_check,  # 지연 import - langgraph/OpenAI는 호출 시점에만 필요
     )
 
-    return run_compliance_check(body.query, body.as_of, persona="compliance-policy-agent")
+    corpus_dir = _configured_policy_corpus()
+    if os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production":
+        paths = tuple(path for path in corpus_dir.glob("*.md") if path.is_file())
+        if not paths or any(b"SAMPLE_PLACEHOLDER" in path.read_bytes() for path in paths):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "RISK_POLICY_CORPUS_NOT_READY",
+                    "reason": "real policy corpus is required before production compliance checks",
+                },
+            )
+    return run_compliance_check(
+        body.query,
+        body.as_of,
+        corpus_dir=corpus_dir,
+        persona="compliance-policy-agent",
+    )
 
 
 @app.get("/risk/v1/observability/rag")
