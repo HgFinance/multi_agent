@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -71,7 +72,7 @@ def _load_profile(profile_json: str | None, profile_file: Path | None) -> dict:
     return profile
 
 
-def _load_readonly_adapter() -> object:
+def _load_readonly_adapter() -> Any:
     module_name = "portfolio_supabase_readonly_cli"
     path = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -83,7 +84,7 @@ def _load_readonly_adapter() -> object:
     return module.SupabaseReadOnlyAdapter()
 
 
-def _replay_digest(result: dict) -> str:
+def _replay_digest(result: dict[str, Any]) -> str:
     """Hash only deterministic recommendation and PIT provenance fields."""
     context = result.get("data_context", {})
     stable = {
