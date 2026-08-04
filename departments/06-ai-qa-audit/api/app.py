@@ -98,7 +98,10 @@ from trace_recorder import TraceRecorder, TraceRecorderError
 # DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
 # write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
 # .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
-_DATABASE_URL = os.environ.get("DATABASE_URL")
+_DATABASE_URL = (
+    os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+    or os.environ.get("DATABASE_URL", "").strip()
+)
 if _DATABASE_URL:
     from repository import (
         PostgresAuditRepository,

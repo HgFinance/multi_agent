@@ -347,7 +347,10 @@ def _main() -> int:
     mode = os.environ.get("QA_INGEST_MODE", "production").strip().lower()
     chunks = build_policy_chunks(args.corpus_dir, allow_placeholders=mode == "test")
     source_id = os.environ.get("QA_POLICY_SOURCE_ID", "").strip()
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
     if not source_id or not database_url:
         raise IngestionError("QA_POLICY_SOURCE_ID and DATABASE_URL are required")
     try:

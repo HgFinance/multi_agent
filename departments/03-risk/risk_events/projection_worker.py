@@ -172,7 +172,10 @@ def run_forever(worker: RiskProjectionWorker, *, interval_seconds: float = 1.0) 
 
 def main() -> None:
     redis_url = os.environ.get("RISK_PROJECTION_REDIS_URL") or os.environ.get("REDIS_URL")
-    database_url = os.environ.get("DATABASE_URL")
+    database_url = (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
     if not redis_url or not database_url:
         raise SystemExit("RISK_PROJECTION_REDIS_URL/REDIS_URL and DATABASE_URL are required")
     import psycopg2

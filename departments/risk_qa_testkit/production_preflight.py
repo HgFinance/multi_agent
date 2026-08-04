@@ -16,8 +16,10 @@ from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY_CORPUS = ROOT / "skills" / "agentic-rag" / "corpus" / "compliance"
+DATABASE_ENV_NAMES: tuple[str, ...] = ("RISK_QA_DATABASE_URL", "DATABASE_URL")
 
 REQUIRED_TABLES: tuple[tuple[str, str], ...] = (
+    ("reference", "data_sources"),
     ("accounting", "funds"),
     ("accounting", "portfolio_snapshots"),
     ("execution", "market_snapshots"),
@@ -62,6 +64,16 @@ REQUIRED_FLAGS: tuple[str, ...] = (
 
 def _present(environ: Mapping[str, str], name: str) -> bool:
     return bool(environ.get(name, "").strip())
+
+
+def _database_dsn(environ: Mapping[str, str]) -> tuple[str, str]:
+    """Return the canonical app DSN without exposing its value in reports."""
+
+    for name in DATABASE_ENV_NAMES:
+        value = environ.get(name, "").strip()
+        if value:
+            return name, value
+    return "", ""
 
 
 def _check(name: str, status: str, *, reason: str | None = None, **details: Any) -> dict[str, Any]:
@@ -116,7 +128,17 @@ def _check_policy_corpus(environ: Mapping[str, str]) -> dict[str, Any]:
 
 def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    required_values = ("DATABASE_URL", "QA_POLICY_SOURCE_ID", "OPENAI_API_KEY")
+    database_env, _ = _database_dsn(environ)
+    checks.append(
+        _check(
+            "DATABASE_URL",
+            "PASS" if database_env else "FAIL",
+            reason=None if database_env else "DATABASE_URL_MISSING",
+            configured=bool(database_env),
+            configured_env=database_env or None,
+        )
+    )
+    required_values = ("QA_POLICY_SOURCE_ID", "OPENAI_API_KEY")
     for name in required_values:
         checks.append(
             _check(
@@ -180,7 +202,7 @@ def _load_psycopg2() -> Any:
 
 
 def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]:
-    dsn = environ.get("DATABASE_URL", "").strip()
+    database_env, dsn = _database_dsn(environ)
     if not dsn:
         return _check("postgres", "FAIL", reason="DATABASE_URL_MISSING")
     conn = None
@@ -257,6 +279,20 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
                 (as_of, as_of, as_of, as_of, as_of, as_of, as_of),
             )
         counts = cur.fetchone()
+        qa_source_id = environ.get("QA_POLICY_SOURCE_ID", "").strip()
+        qa_policy_source_authorized = 0
+        if qa_source_id:
+            cur.execute(
+                """
+                SELECT count(*)
+                FROM reference.data_sources
+                WHERE source_id = %s::uuid
+                  AND status = 'ACTIVE'
+                  AND COALESCE(production_authorized, false) = true
+                """,
+                (qa_source_id,),
+            )
+            qa_policy_source_authorized = int(cur.fetchone()[0])
         conn.rollback()
         data_counts = {
             "active_funds": int(counts[0]),
@@ -265,6 +301,7 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             "deployable_portfolio_versions_as_of": int(counts[3]),
             "usable_market_snapshots_as_of": int(counts[4]),
             "active_worker_profiles": int(counts[5]),
+            "qa_policy_source_authorized": qa_policy_source_authorized,
         }
         if missing:
             return _check(
@@ -291,6 +328,7 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             "deployable_portfolio_versions_as_of": 1,
             "usable_market_snapshots_as_of": 1,
             "active_worker_profiles": 5,
+            "qa_policy_source_authorized": 1,
         }
         data_failures = [
             name for name, minimum in data_requirements.items() if data_counts[name] < minimum
@@ -315,7 +353,12 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
     except Exception as exc:  # noqa: BLE001 - preflight returns sanitized class only
         if conn is not None:
             conn.rollback()
-        return _check("postgres", "FAIL", reason=f"DATABASE_PROBE_FAILED:{type(exc).__name__}")
+        return _check(
+            "postgres",
+            "FAIL",
+            reason=f"DATABASE_PROBE_FAILED:{type(exc).__name__}",
+            configured_env=database_env or None,
+        )
     finally:
         if conn is not None:
             conn.close()

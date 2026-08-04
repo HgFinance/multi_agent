@@ -660,8 +660,8 @@ def _record_execution_evidence(
             "retry_policy": {"max_retries": 2, "max_attempts": 3},
             "external_dependencies": {
                 "policy_corpus": "PLACEHOLDER_OR_UNVERIFIED",
-                "canonical_db": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
-                "agent_runs_tool_calls": "CONFIGURED" if os.environ.get("DATABASE_URL") else "NOT_CONFIGURED",
+"canonical_db": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
+"agent_runs_tool_calls": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
             },
             "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],
             "replay_ready": review["replay_ready"],

@@ -3,7 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from departments.risk_qa_testkit.production_preflight import run_preflight
+from departments.risk_qa_testkit.production_preflight import _database_dsn, run_preflight
+
+
+def test_canonical_database_dsn_prefers_supabase_specific_environment() -> None:
+    selected, dsn = _database_dsn(
+        {
+            "DATABASE_URL": "postgresql://legacy.invalid/app",
+            "RISK_QA_DATABASE_URL": "postgresql://canonical.invalid/app",
+        }
+    )
+
+    assert selected == "RISK_QA_DATABASE_URL"
+    assert dsn == "postgresql://canonical.invalid/app"
 
 
 def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path: Path) -> None:
