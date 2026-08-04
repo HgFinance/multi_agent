@@ -52,6 +52,7 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
     packet_url = environ.get("RISK_QA_RESEARCH_PACKET_URL", "").strip()
     result: dict[str, Any] = {
         "configured": True,
+        "status": "FAILED",
         "base_url": base_url,
         "health": "FAILED",
         "packet_contract": "NOT_CONFIGURED",
@@ -59,6 +60,7 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
     try:
         health = _http_json(f"{base_url}/health")
         result["health"] = "READY"
+        result["status"] = "READY"
         result["health_status"] = str(health.get("status", "unknown"))
         if packet_url:
             payload = _http_json(packet_url)
@@ -68,8 +70,10 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
             result["input_hash"] = packet.input_hash
             pipeline = run_risk_qa_pipeline("test", packet=packet)
             result["risk_qa_pipeline"] = pipeline["pipeline_status"]
+            result["status"] = "READY" if pipeline["pipeline_status"] == "COMPLETED" else "FAILED"
         return result
     except (OSError, URLError, ValueError, RuntimeError) as exc:
+        result["status"] = "FAILED"
         result["error_class"] = type(exc).__name__
         return result
 
