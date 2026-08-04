@@ -192,9 +192,15 @@ class OrderStore:
 
     # -- 쓰기 -----------------------------------------------------------------
 
-    def add_intent(self, rec: OrderIntentRecord, idempotency_key: str) -> None:
+    def add_intent(self, rec: OrderIntentRecord, intent: OrderIntent) -> None:
+        """심사 기록과 원본 계약을 함께 받는다.
+
+        인메모리는 idempotency_key만 쓰지만, DB 구현은 `execution.order_intents`의
+        NOT NULL 컬럼(instrument_id, side, order_type, book_id...)을 채워야 해서
+        원본이 필요하다. 저장소마다 다른 인자를 받게 하면 그게 곧 두 인터페이스다.
+        """
         self.intents[rec.order_intent_id] = rec
-        self._by_idempotency[idempotency_key] = rec.order_intent_id
+        self._by_idempotency[intent.idempotency_key] = rec.order_intent_id
 
     def add_order(self, order: BrokerOrder) -> None:
         self.orders[order.order_id] = order
@@ -212,6 +218,11 @@ class OrderStore:
         self.events.append(event)
         if event.broker_event_id is not None:
             self._seen_broker_events.add((event.broker_adapter, event.broker_event_id))
+
+    def add_fill(self, order: BrokerOrder, fill: Fill) -> None:
+        """체결 사실. 주문을 함께 받는 것은 DB 구현이 instrument/side/통화를 알아야
+        `execution.fills`를 채울 수 있기 때문이다 - Fill 자체는 그걸 모른다."""
+        order.fills.append(fill)
 
     # -- 읽기 -----------------------------------------------------------------
 
@@ -315,7 +326,7 @@ class OMS:
             requested_quantity=intent.quantity,
             valid_until=intent.valid_until,
         )
-        self.store.add_intent(rec, intent.idempotency_key)
+        self.store.add_intent(rec, intent)
         self._append("intent", rec.order_intent_id, "intent_registered",
                      IntentState.DRAFT, IntentState.DRAFT,
                      {"trace_id": intent.trace_id, "evidence_hash": intent.evidence_hash()})
@@ -574,7 +585,8 @@ class OMS:
                                  broker_event_id=broker_event_id, event_time=event_time,
                                  return_event=True)
         order.filled_quantity += qty
-        order.fills.append(
+        self.store.add_fill(
+            order,
             Fill(
                 fill_id=uuid4(),
                 order_id=order.order_id,
@@ -585,7 +597,7 @@ class OMS:
                 tax=Decimal(str(payload.get("tax", 0))),
                 event_time=event_time,
                 broker_fill_id=payload.get("broker_fill_id"),
-            )
+            ),
         )
         return order
 
