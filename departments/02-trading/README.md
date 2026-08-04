@@ -31,15 +31,19 @@ python departments/02-trading/oms/oms.py
 python departments/02-trading/broker/paper_broker.py
 python departments/02-trading/multileg/intent_group.py
 python departments/02-trading/capability/derivatives.py
+python departments/02-trading/api/app.py
+
+uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
 ```
 
 ## 테스트
 
 - `contracts/contracts.py` — 계약 8개 영역 자체 점검
-- `oms/oms.py` — OMS 불변식 11개 자체 점검
+- `oms/oms.py` — OMS 불변식 13개 자체 점검
 - `broker/paper_broker.py` — Paper Broker 8개 영역 자체 점검
 - `multileg/intent_group.py` — F30 Multi-leg 13개 영역
 - `capability/derivatives.py` — F31 Derivatives Capability 14개 영역
+- `api/app.py` — Domain API 15개 영역 (TestClient. 네트워크·DB 없음)
 
 ## Handoff
 
@@ -55,4 +59,8 @@ python departments/02-trading/capability/derivatives.py
   계약 모델과 접수 차단 게이트를 만든다. Broker·Risk·Accounting 3개 Certification이 전부
   서명돼야 파생·공매도 주문이 통과하고, 그 전에는 Risk 승인이 있어도 접수 단계에서 막힌다.
   명목금액은 반드시 승수를 곱한다 — 빼먹으면 한도가 조용히 느슨해진다
-- D0-D2 Prototype 단계이며 팀 가이드 v1.2(상태 머신 2단 분리, Multi-Strategy) 반영 전 재작업 예정
+- `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 주문 판정 로직이 없다.**
+  Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
+  설계서: [TRADING_DOMAIN_API_SPEC.md](../../docs/02-engineering/TRADING_DOMAIN_API_SPEC.md)
+- 팀 가이드 v1.2 상태 머신 2단 분리는 **반영 완료**(2026-08-03). 남은 것은 저장소다 —
+  OMS 상태가 아직 프로세스 메모리이고 `execution.*` 연결은 미결이다(설계서 4절)
