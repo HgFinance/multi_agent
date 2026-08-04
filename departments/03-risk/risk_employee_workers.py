@@ -21,7 +21,6 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 
-
 def _load_skill_package() -> None:
     package_name = "risk_worker_skill_runtime"
     if package_name in sys.modules:
@@ -43,9 +42,9 @@ _load_skill_package()
 
 from risk_worker_skill_runtime.contracts import RiskSkillContext, make_result
 from risk_worker_skill_runtime.guards import build_context, scope_check
+from risk_worker_skill_runtime.rag_router import choose_rag_route
 from risk_worker_skill_runtime.tools import invoke_tool
 from risk_worker_skill_runtime.trace import SkillTrace
-from risk_worker_skill_runtime.rag_router import choose_rag_route
 
 WorkerLLM = Callable[[str, str], str]
 WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
@@ -235,7 +234,11 @@ def _parse_worker_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool
     return output, valid
 
 
-def build_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: WorkerLLM | None = None):
+def _build_legacy_worker_graph(
+    spec: WorkerSpec,
+    tool: WorkerTool,
+    llm: WorkerLLM | None = None,
+):
     """Build one independent employee graph: tool -> Qwen -> schema check."""
 
     def read_tool(state: WorkerState) -> dict[str, Any]:
@@ -369,7 +372,7 @@ def build_worker_graph(
                 tool,
                 payload,
                 context,
-                tool_name=spec.tools[0] if spec.tools else "risk.tool.unknown",
+                tool_name=spec.tools,
             )
             skill_results.append(invocation.result.model_dump(mode="json"))
             if trace is not None:
@@ -509,8 +512,12 @@ def build_worker_graph(
 
 
 def _market_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": "risk.trading_state.read", "trading_state": payload.get("trading_state"),
-            "context": payload.get("context", {})}
+    return {
+        "tools": ["risk.trading_state.read", "risk.p1.snapshot"],
+        "trading_state": payload.get("trading_state"),
+        "p1_snapshot": payload.get("p1_snapshot", payload.get("market_snapshot")),
+        "context": payload.get("context", {}),
+    }
 
 
 def _pre_trade_tool(payload: dict[str, Any]) -> dict[str, Any]:

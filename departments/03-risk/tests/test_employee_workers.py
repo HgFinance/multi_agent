@@ -42,3 +42,34 @@ def test_conditional_workers_run_only_when_their_signal_exists():
     assert {item["worker_id"] for item in report["workers"]} == {
         spec.worker_id for spec in WORKER_SPECS
     }
+
+
+def test_each_worker_trace_contains_all_declared_tools():
+    report = run_employee_workers(
+        {
+            "trading_state": "ENABLED",
+            "p1_snapshot": {"status": "PASS"},
+            "assessment": {"verdict": "approve"},
+            "compliance": {"grounded": True},
+            "counterparty": {"status": "DEGRADED"},
+        },
+        llm=_llm,
+    )
+
+    for worker in report["workers"]:
+        tool_events = [
+            event
+            for event in worker["skill_results"]
+            if event["skill_id"] == "context.internal_api.v1"
+        ]
+        assert len(tool_events) == 1
+        assert tool_events[0]["tool_calls"] == worker["tools"]
+
+    market_event = next(
+        event
+        for event in next(
+            worker for worker in report["workers"] if worker["worker_id"] == "market-liquidity-worker"
+        )["skill_results"]
+        if event["skill_id"] == "context.internal_api.v1"
+    )
+    assert market_event["output"]["p1_snapshot"] == {"status": "PASS"}

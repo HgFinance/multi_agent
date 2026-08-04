@@ -185,6 +185,48 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     accounting_context = data_context.get("accounting", {})
     live_source = data_context.get("source") == "SUPABASE"
     default_status = "LIVE" if live_source else "TEST"
+    optional_inputs: dict[str, Any] = {
+        "compliance": data_context.get("compliance", state.get("compliance", {})),
+        "trading_state": data_context.get("trading_state", state.get("trading_state", {})),
+        "counterparty": data_context.get("counterparty", state.get("counterparty", {})),
+        "derivatives": data_context.get("derivatives", state.get("derivatives", {})),
+        "assessment": state.get("assessment", state.get("risk_gate", {})),
+        "hallucination_reviews": state.get("hallucination_reviews", []),
+        "model_risk": state.get("model_risk", {}),
+        "internal_audit": state.get("internal_audit", {}),
+        "ops_assessment": state.get("ops_assessment", {}),
+        "permission_check": state.get("permission_check", {}),
+        "incident": state.get("incident", {}),
+        "incident_events": state.get("incident_events", []),
+    }
+    if not live_source:
+        optional_inputs.update(
+            {
+                "compliance": {
+                    "grounded": True,
+                    "evidence_refs": ["research:portfolio-catalog:v1"],
+                },
+                "trading_state": "ENABLED",
+                "counterparty": {"status": "HEALTHY"},
+                "derivatives": {"status": "NONE"},
+                "assessment": {
+                    "verdict": "approve",
+                    "claim_checks": [
+                        {"result": "SUPPORTED"},
+                        {"result": "UNSUPPORTED", "claim_id": "portfolio-test-claim"},
+                    ],
+                },
+                "hallucination_reviews": [
+                    {"claim_id": "portfolio-test-claim", "result": "UNSUPPORTED"}
+                ],
+                "model_risk": {"status": "TESTING"},
+                "internal_audit": {"status": "TESTING"},
+                "ops_assessment": {"status": "HEALTHY", "breaches": []},
+                "permission_check": {"result": "ALLOWED"},
+                "incident": {"incident_id": "incident-portfolio-test", "severity": "SEV3"},
+                "incident_events": [],
+            }
+        )
     context: dict[str, Any] = {
         "trace_id": state.get("trace_id", ""),
         "case_id": state.get("case_id", ""),
@@ -247,26 +289,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "order_constraints": {"status": "NOT_APPLICABLE"},
         "order_intent": {"status": "ADVISORY_ONLY", "binding": False},
         "venue_costs": {"status": "TEST"},
-        "compliance": {"grounded": True, "evidence_refs": ["research:portfolio-catalog:v1"]},
-        "trading_state": "ENABLED",
-        "counterparty": {"status": "HEALTHY"},
-        "derivatives": {"status": "NONE"},
-        "assessment": {
-            "verdict": "approve",
-            "claim_checks": [
-                {"result": "SUPPORTED"},
-                {"result": "UNSUPPORTED", "claim_id": "portfolio-test-claim"},
-            ],
-        },
-        "hallucination_reviews": [
-            {"claim_id": "portfolio-test-claim", "result": "UNSUPPORTED"}
-        ],
-        "model_risk": {"status": "TESTING"},
-        "internal_audit": {"status": "TESTING"},
-        "ops_assessment": {"status": "HEALTHY", "breaches": []},
-        "permission_check": {"result": "ALLOWED"},
-        "incident": {"incident_id": "incident-portfolio-test", "severity": "SEV3"},
-        "incident_events": [],
+        **optional_inputs,
         "nav_close": {"status": "TEST"},
         "open_breaks": [],
         "approval_state": "ADVISORY_ONLY",

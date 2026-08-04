@@ -112,3 +112,26 @@ def test_audit_worker_tool_runs_deterministic_engines_for_explicit_inputs():
 
     assert output["model_risk"]["decision"] == "PASS"
     assert output["internal_audit"]["decision"] == "PASS"
+
+
+def test_each_worker_trace_contains_all_declared_tools():
+    report = run_employee_workers(
+        {
+            "assessment": {"claim_checks": [{"result": "UNSUPPORTED"}]},
+            "model_risk": {"status": "TESTING"},
+            "internal_audit": {"status": "TESTING"},
+            "ops_assessment": {"status": "HEALTHY"},
+            "permission_check": {"result": "ALLOWED"},
+            "incident": {"incident_id": "incident-test"},
+        },
+        llm=_llm,
+    )
+
+    for worker in report["workers"]:
+        tool_events = [
+            event
+            for event in worker["skill_results"]
+            if event["skill_id"] == "context.internal_api.v1"
+        ]
+        assert len(tool_events) == 1
+        assert tool_events[0]["tool_calls"] == worker["tools"]
