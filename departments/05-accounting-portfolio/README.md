@@ -36,16 +36,21 @@ python departments/05-accounting-portfolio/portfolio/ui_read_model.py
 python departments/05-accounting-portfolio/reconciliation/reconciliation.py
 python departments/05-accounting-portfolio/corporate_actions/corporate_actions.py
 python departments/05-accounting-portfolio/reporting/daily_report.py
+python departments/05-accounting-portfolio/api/app.py
 python apps/api/main.py
+
+uvicorn app:app --app-dir departments/05-accounting-portfolio/api   # Domain API 실행
 ```
 
 ## 테스트
 
 - `ledger/ledger.py` — 원장 불변식 10개 자체 점검
+- `portfolio/portfolio.py` — Portfolio/NAV 12개 영역
 - `reconciliation/reconciliation.py` — 대사 12개 자체 점검
 - `corporate_actions/corporate_actions.py` — F25 Corporate Action 13개 영역
 - `reporting/daily_report.py` — F23 Daily Report 14개 영역
 - `portfolio/ui_read_model.py` — OMS·Ledger·Portfolio DEMO Snapshot 계약
+- `api/app.py` — Domain API 16개 영역 (TestClient. 네트워크·DB 없음)
 - `apps/api/main.py` — `/health`, `/ui/snapshot`, 부서별 Agent 경로 BFF 7개 영역 점검
 
 ## Handoff
@@ -66,4 +71,10 @@ python apps/api/main.py
 - `apps/api/accounting.py` — 회계본부 Router. `POST /accounting/agent/ask`가 이 본부 Hermes Profile
   하나만 부른다. 부서 이름을 요청 Body로 받지 않으므로 다른 본부 Agent를 부를 경로가 없다(5.6).
   Auth·Tool Allowlist 전까지 `ENABLE_AGENT_ASK` 없이는 503
-- D2 Prototype 단계이며 팀 가이드 v1.2 반영 전 재작업 예정
+- `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 회계 판정 로직이 없다.**
+  Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
+  **`PUT`·`PATCH`·`DELETE`가 하나도 없다** — 불변식 2를 라우팅 표로 집행한 것이고,
+  자체 점검이 라우팅 표를 훑어 이를 강제한다. 정정은 `/reverse` 하나뿐.
+  설계서: [ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md](../../docs/02-engineering/ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md)
+- D2 Prototype 단계다. 남은 것은 저장소 — 원장이 아직 프로세스 메모리이고
+  `accounting.*` 연결은 트레이딩 OMS와 같은 미결 항목이다(설계서 4절)
