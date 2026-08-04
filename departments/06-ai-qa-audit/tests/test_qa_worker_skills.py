@@ -53,8 +53,20 @@ def test_graph_route_and_trace_are_explicit():
         worker_id="hallucination-critic-worker",
     )
     assert plan.route == "GRAPH"
-    context = build_context({}, worker_id="hallucination-critic-worker")
+    context = build_context(
+        {"allowed_scopes": ["qa.evidence.rag"]},
+        worker_id="hallucination-critic-worker",
+    )
     trace = SkillTrace()
     result = scope_check(context, "qa.evidence.rag")
     trace.record(context, result)
     assert trace.manifest(context)["events"][0]["status"] == "COMPLETED"
+
+
+def test_missing_scope_is_denied_fail_closed():
+    context = build_context({}, worker_id="evidence-qa-worker")
+
+    denied = scope_check(context, "qa.evidence.check")
+
+    assert denied.status == "ESCALATE"
+    assert denied.error_code == "SCOPE_DENIED"

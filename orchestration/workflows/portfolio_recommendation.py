@@ -30,6 +30,7 @@ from departments.employee_worker_runtime import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_VERSION = "portfolio-recommendation-full-async-v1"
+RuntimeEventCallback = Callable[[Mapping[str, Any]], None]
 
 DEPARTMENTS: tuple[str, ...] = (
     "research",
@@ -324,7 +325,13 @@ def _worker_tools(stage: str, module: Any) -> Mapping[str, Callable[[dict[str, A
     return tools_for_specs(tuple(module.WORKER_SPECS))
 
 
-async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any]) -> dict[str, Any]:
+async def _invoke_worker(
+    stage: str,
+    spec: WorkerSpec,
+    payload: Mapping[str, Any],
+    *,
+    event_callback: RuntimeEventCallback | None = None,
+) -> dict[str, Any]:
     module = _load_module(stage)
     tools = _worker_tools(stage, module)
     tool = tools.get(spec.worker_id)
@@ -336,6 +343,8 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
             "error": "tool_not_registered",
             "binding": False,
         }
+    if event_callback:
+        event_callback({"kind": "worker_started", "stage": stage, "worker_id": spec.worker_id, "role": spec.role})
     worker_llm = (
         _deterministic_worker_llm
         if str(payload.get("source", "TEST")).upper() == "TEST"
@@ -354,7 +363,7 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
             app = build_independent_worker_graph(spec, tool, worker_llm)
         # Required async LangGraph boundary: never replace this with invoke().
         state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
-        return {
+        report = {
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
@@ -366,8 +375,20 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
             "input_hash": payload.get("input_hash"),
             "binding": False,
         }
+        if event_callback:
+            event_callback(
+                {
+                    "kind": "worker_completed",
+                    "stage": stage,
+                    "worker_id": spec.worker_id,
+                    "role": spec.role,
+                    "status": report["status"],
+                    "summary": report.get("output", {}).get("summary"),
+                }
+            )
+        return report
     except Exception as exc:  # noqa: BLE001 - cross-department boundary fails closed.
-        return {
+        report = {
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
@@ -385,6 +406,18 @@ async def _invoke_worker(stage: str, spec: WorkerSpec, payload: Mapping[str, Any
             "input_hash": payload.get("input_hash"),
             "binding": False,
         }
+        if event_callback:
+            event_callback(
+                {
+                    "kind": "worker_completed",
+                    "stage": stage,
+                    "worker_id": spec.worker_id,
+                    "role": spec.role,
+                    "status": report["status"],
+                    "summary": report.get("output", {}).get("summary"),
+                }
+            )
+        return report
 
 
 def _initial_state(
@@ -419,7 +452,9 @@ def _initial_state(
     }
 
 
-def build_portfolio_recommendation_graph() -> Any:
+def build_portfolio_recommendation_graph(
+    event_callback: RuntimeEventCallback | None = None,
+) -> Any:
     """Compile the complete async LangGraph fan-out/fan-in pipeline."""
 
     graph = StateGraph(PortfolioPipelineState)
@@ -448,6 +483,8 @@ def build_portfolio_recommendation_graph() -> Any:
                 ),
                 profile_user_id=normalized_profile.user_id,
                 effective_risk_band=effective_risk_band,
+                investment_amount=normalized_profile.investment_amount,
+                currency=normalized_profile.currency,
                 recommendations=[],
                 exclusions=[],
                 manual_review_required=True,
@@ -568,6 +605,8 @@ def build_portfolio_recommendation_graph() -> Any:
         def route(state: PortfolioPipelineState) -> list[Send]:
             payload = _stage_payload(state, stage)
             if not _live_worker_inputs_ready(state):
+                if event_callback:
+                    event_callback({"kind": "department_blocked", "stage": stage, "message": "PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다."})
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -582,6 +621,8 @@ def build_portfolio_recommendation_graph() -> Any:
                 ]
             selected = _selected_specs(stage, payload)
             if not selected:
+                if event_callback:
+                    event_callback({"kind": "department_blocked", "stage": stage, "message": "조건에 맞는 Worker가 없어 안전하게 보류했습니다."})
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -598,6 +639,14 @@ def build_portfolio_recommendation_graph() -> Any:
                         },
                     )
                 ]
+            if event_callback:
+                event_callback(
+                    {
+                        "kind": "department_started",
+                        "stage": stage,
+                        "worker_ids": [spec.worker_id for spec in selected],
+                    }
+                )
             return [
                 Send(
                     f"{stage}_worker",
@@ -618,7 +667,7 @@ def build_portfolio_recommendation_graph() -> Any:
             worker_id = str(state["worker_id"])
             payload = dict(state.get("worker_input", {}))
             spec = next(spec for spec in _specs(stage) if spec.worker_id == worker_id)
-            report = await _invoke_worker(stage, spec, payload)
+            report = await _invoke_worker(stage, spec, payload, event_callback=event_callback)
             return {"worker_reports": [report]}
 
         return run
@@ -642,6 +691,17 @@ def build_portfolio_recommendation_graph() -> Any:
             }
             if any(item.get("status") == "SKIPPED_SAFE" for item in reports):
                 result["worker_reports"] = reports
+            if event_callback:
+                event_callback(
+                    {
+                        "kind": "department_completed",
+                        "stage": stage,
+                        "status": result["department_reports"][stage]["status"],
+                        "message": (
+                            f"{stage} 부서가 {result['department_reports'][stage]['executed']}개 Worker 결과를 취합했습니다."
+                        ),
+                    }
+                )
             return result
 
         return fan_in
@@ -733,6 +793,7 @@ async def run_portfolio_recommendation_pipeline_async(
     candidates: Sequence[Mapping[str, Any]] | None = None,
     *,
     data_adapter: Any | None = None,
+    event_callback: RuntimeEventCallback | None = None,
 ) -> dict[str, Any]:
     """Run complete async graph with TEST or Supabase read-only inputs.
 
@@ -752,7 +813,7 @@ async def run_portfolio_recommendation_pipeline_async(
         candidates = snapshot.candidates
         data_context = snapshot.as_pipeline_context()
 
-    app = build_portfolio_recommendation_graph()
+    app = build_portfolio_recommendation_graph(event_callback=event_callback)
     state = await app.ainvoke(_initial_state(profile, candidates, data_context))
     return dict(state.get("result", state))
 

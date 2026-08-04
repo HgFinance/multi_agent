@@ -96,6 +96,38 @@ export type ChatEntry = {
   text: string;
 };
 
+export type RuntimeOperations = {
+  status: string;
+  run_id: string | null;
+  workflow: string | null;
+  phase: string | null;
+  departments?: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
+  active_workers: Array<{
+    worker_id: string;
+    department_code: string;
+    stage: string;
+    role: string;
+    status: string;
+    summary: string | null;
+  }>;
+  active_handoff: {
+    from_department: string;
+    to_department: string;
+    title: string;
+    message: string;
+  } | null;
+  messages: Array<{
+    id: string;
+    occurred_at: string;
+    kind: string;
+    department_code: string | null;
+    worker_id: string | null;
+    text: string;
+  }>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+};
+
 type Slot = {
   gen: Generator<number | (() => boolean), void, void> | null;
   wait: number;
@@ -198,6 +230,8 @@ export class Company {
   private seatBook = new Map<string, Pt>();
   /** 시나리오 장면에 참여 중인 직원 — 자율 행동(커피·잡담)이 끼어들지 못하게 잠근다 */
   private locked = new Set<string>();
+  private remoteMessageIds = new Set<string>();
+  private remoteRuntime = true;
 
   constructor() {
     this.reset();
@@ -221,6 +255,8 @@ export class Company {
     this.side = { gen: null, wait: 0, until: null };
     this.seatBook.clear();
     this.locked.clear();
+    this.remoteMessageIds.clear();
+    this.remoteRuntime = true;
     this.chat = [];
     this.focusMode = false;
     this.spotlight = null;
@@ -239,7 +275,7 @@ export class Company {
     this.spawn(CEO, CEO_SEAT, CEO_SEAT);
 
     const ceo = this.agentById.get("ceo")!;
-    ceo.status = "업무 중";
+    ceo.status = "대기";
     ceo.anim = "sit";
     ceo.facing = "down";
 
@@ -248,6 +284,110 @@ export class Company {
     }
     this.pushLog("👑", "대표실 준비 완료. 출근 버튼을 기다리는 중이에요.", "lav");
     this.pushChat("staff", "김세리", "대표님, 비서실장 김세리입니다. 궁금한 건 여기에 바로 물어보세요.");
+  }
+
+  /**
+   * Project the actual BFF LangGraph runtime into the pixel office.
+   * No runtime event means no simulated work, movement, or dialogue.
+   */
+  applyRuntime(runtime: RuntimeOperations | null) {
+    this.remoteRuntime = true;
+    const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
+    const completed = Boolean(runtime?.result) && !running;
+    this.running = running;
+    // A recommendation result is not a simulated workday completion and must
+    // not trigger the legacy content-report publisher.
+    this.dayComplete = false;
+    this.phaseIndex = running ? 2 : completed ? 12 : 0;
+    this.meetingTitle = runtime?.active_handoff?.title ?? null;
+    this.approvalPending = false;
+    this.approved = false;
+    this.briefingReady = false;
+
+    const departmentMap: Record<string, string> = {
+      "research-department": "research",
+      "trading-department": "strategy2",
+      "risk-management": "ops",
+      "quant-backtest-department": "strategy1",
+      "accounting-portfolio-department": "finance",
+      "qa-department": "qa",
+      "hr-department": "review",
+      "ceo-agent": "ceo",
+    };
+    const active = new Map((runtime?.active_workers ?? []).map((worker) => [worker.worker_id, worker]));
+    const headFor = (departmentCode: string) =>
+      this.agents.find((agent) => (agent.rank === "lead" || agent.rank === "ceo") && agent.deptId === departmentMap[departmentCode]);
+    const handoff = runtime?.active_handoff;
+    const handoffHeads = handoff
+      ? [headFor(handoff.from_department), headFor(handoff.to_department)].filter(Boolean) as Agent[]
+      : [];
+    const spoken = new Set(handoffHeads.map((agent) => agent.id));
+
+    for (const agent of this.agents) {
+      const worker = active.get(agent.role);
+      if (worker) {
+        agent.x = agent.home.x;
+        agent.y = agent.home.y;
+        agent.path = [];
+        agent.pathIdx = 0;
+        agent.queue = [];
+        agent.current = null;
+        agent.anim = "type";
+        agent.status = "업무 중";
+        agent.progress = 0.5;
+        agent.taskLabel = worker.role;
+        continue;
+      }
+      if (spoken.has(agent.id)) continue;
+      agent.x = agent.home.x;
+      agent.y = agent.home.y;
+      agent.path = [];
+      agent.pathIdx = 0;
+      agent.queue = [];
+      agent.current = null;
+      agent.anim = "sit";
+      agent.status = "대기";
+      agent.progress = 0;
+      agent.taskLabel = "LangGraph 실행 대기";
+      agent.speech = null;
+      agent.speechFor = 0;
+    }
+
+    handoffHeads.forEach((agent, index) => {
+      const seat = MEETING_SEATS[index % MEETING_SEATS.length];
+      agent.x = seat.x;
+      agent.y = seat.y;
+      agent.anim = "talk";
+      agent.status = "회의 중";
+      agent.taskLabel = "부서장 간 handoff";
+      agent.speech = handoff?.message ?? null;
+      agent.speechKind = "talk";
+      agent.speechFor = 3;
+    });
+
+    const runtimeDepartments = runtime ? Object.entries(departmentMap) : [];
+    for (const [departmentCode, departmentId] of runtimeDepartments) {
+      const department = runtime?.departments?.[departmentCode];
+      const status = department?.status ?? (active.size ? "RUNNING" : "IDLE");
+      this.deptStatus[departmentId] = status === "RUNNING" ? "진행 중" : status === "COMPLETED" ? "완료" : status === "BLOCKED" || status === "DEGRADED" ? "연동 대기" : "대기";
+    }
+
+    for (const message of runtime?.messages ?? []) {
+      if (this.remoteMessageIds.has(message.id)) continue;
+      this.remoteMessageIds.add(message.id);
+      const name = message.kind === "department_handoff" ? "부서장 handoff" : message.worker_id ?? message.department_code ?? "LangGraph";
+      this.pushChat("staff", name, message.text);
+      this.pushLog(message.kind === "department_handoff" ? "🤝" : "🧠", message.text, message.kind === "run_error" ? "lav" : "mint");
+      if (message.kind === "worker_summary" && message.worker_id) {
+        const speaker = this.agents.find((agent) => agent.role === message.worker_id);
+        if (speaker) {
+          speaker.speech = message.text;
+          speaker.speechKind = "talk";
+          speaker.speechFor = 3;
+          speaker.anim = "talk";
+        }
+      }
+    }
   }
 
   private spawn(seed: StaffSeed, home: Pt, at: Pt) {
@@ -704,6 +844,10 @@ export class Company {
   command(raw: string) {
     const text = raw.trim();
     if (!text) return;
+    if (this.remoteRuntime) {
+      this.pushChat("staff", "AI Office", "실제 LangGraph 실행 이벤트만 표시합니다. 사용자 적합성 입력으로 분석을 시작하세요.");
+      return;
+    }
     this.pushChat("ceo", CEO.name, text);
     const q = text.toLowerCase();
 
@@ -1038,6 +1182,14 @@ export class Company {
   // ── 틱 ──────────────────────────────────────────────────
   tick(rawDt: number) {
     if (this.paused) return;
+    if (this.remoteRuntime) {
+      const dt = Math.min(rawDt, 0.05) * this.speed;
+      for (const agent of this.agents) {
+        if (agent.speechFor > 0) agent.speechFor = Math.max(0, agent.speechFor - dt);
+        if (agent.speechFor === 0) agent.speech = null;
+      }
+      return;
+    }
     // 터보(건너뛰기)는 대표 결정이 필요한 지점이나 업무 종료에서 자동 해제된다
     if (this.turbo && (this.approvalPending || this.dayComplete || !this.running)) this.turbo = false;
 

@@ -16,6 +16,10 @@ import { DEPT_ROOMS } from "./game/world";
 import { COMPANY, STORAGE_LINK } from "../company.config";
 import OpsPanel from "./ops/OpsPanel";
 import RiskQaPanel from "./ops/RiskQaPanel";
+import DepartmentCommunicationPanel from "./ops/DepartmentCommunicationPanel";
+import { BffProvider } from "./ops/bffClient";
+import { useBffFeed } from "./ops/bffClient";
+import PortfolioInterviewPanel from "./ops/PortfolioInterviewPanel";
 
 type View = "live" | "dashboard";
 const CANONICAL_DEPARTMENT_COUNT = 7;
@@ -56,9 +60,19 @@ function PixelEmployee({ hair, shirt, accent }: { hair: string; shirt: string; a
   );
 }
 
+function RuntimeSync({ engine, onSync }: { engine: Company; onSync: () => void }) {
+  const { snapshot } = useBffFeed();
+  useEffect(() => {
+    engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    onSync();
+  }, [engine, onSync, snapshot?.operations?.runtime]);
+  return null;
+}
+
 export default function Home() {
   const [engine] = useState(() => new Company());
   const [snap, setSnap] = useState<Snapshot>(() => engine.snapshot());
+  const syncRuntime = useCallback(() => setSnap(engine.snapshot()), [engine]);
   const [view, setView] = useState<View>("live");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
@@ -155,20 +169,19 @@ export default function Home() {
         () => document.getElementById("ceo-console")?.scrollIntoView({ behavior: "smooth", block: "center" }),
         60,
       );
-    },
-    [engine],
+  },
+  [engine],
   );
 
   const start = () => {
-    engine.start();
-    setBriefing(false);
     setView("live");
- showToast(`07:00 — Worker ${CANONICAL_WORKER_COUNT}명이 시뮬레이션에 참여합니다 ✨`);
+    const form = document.getElementById("portfolio-interview-form") as HTMLFormElement | null;
+    form?.scrollIntoView({ behavior: "smooth", block: "center" });
+    form?.requestSubmit();
   };
 
   const approve = () => {
-    engine.approve();
-    showToast("승인 완료! 제작팀이 바로 움직여요");
+    showToast("추천 결과는 비바인딩 자문입니다. 별도 수동 검토가 필요합니다.");
   };
 
   const teams = useMemo(
@@ -192,7 +205,7 @@ export default function Home() {
   const filteredTeams = filter === "전체" ? teams : teams.filter((team) => team.status === filter);
   const selected = selectedId ? engine.agentById.get(selectedId) ?? null : null;
   const todo = snap.approvalPending ? 1 : 0;
-  const onDuty = engine.agents.filter((a) => a.status !== "출근 전").length;
+  const onDuty = engine.agents.filter((a) => a.status === "업무 중").length;
 
   return (
     <main className="page-shell">
@@ -224,6 +237,9 @@ export default function Home() {
           </div>
         </nav>
 
+      <BffProvider>
+        <RuntimeSync engine={engine} onSync={syncRuntime} />
+        <PortfolioInterviewPanel />
         {view === "live" ? (
           <LiveView
             engine={engine}
@@ -235,25 +251,24 @@ export default function Home() {
             onStart={start}
             onApprove={approve}
             onDuty={onDuty}
-            onPublish={() => void sendReport(false)}
+            onPublish={() => showToast("포트폴리오 결과는 BFF에서 확인하고 별도 수동 검토합니다.")}
             publishBusy={publishState.busy}
             publishResult={publishState.result}
           />
         ) : (
           <DashboardView
-            teams={teams}
             filteredTeams={filteredTeams}
             filter={filter}
             setFilter={setFilter}
             snap={snap}
             agents={engine.agents}
-            onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
             integrations={integrations}
             publishResult={publishState.result}
           />
         )}
+      </BffProvider>
 
         <footer>
           {COMPANY.name} · {COMPANY.titlePrefix} {COMPANY.titleAccent}
@@ -305,17 +320,19 @@ function LiveView({
   publishBusy: boolean;
   publishResult: PublishResult | null;
 }) {
+  const { snapshot: bffSnapshot } = useBffFeed();
+  const runtime = bffSnapshot?.operations?.runtime;
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
 
   return (
     <>
       <header className="live-hero">
         <div>
- <p className="eyebrow">DEMO OFFICE · {CANONICAL_WORKER_COUNT} WORKERS · SIMULATION</p>
+<p className="eyebrow">AI OFFICE · {CANONICAL_WORKER_COUNT} WORKERS · LANGGRAPH PROJECTION</p>
           <h1>
             {COMPANY.titlePrefix} <em className="highlight">{COMPANY.titleAccent}</em>
           </h1>
-          <p>출근하고, 자리에서 일하고, 회의실에 모여 회의하고, 대표실로 보고하러 갑니다.</p>
+<p>실제 LangGraph가 실행 중인 Worker만 부서 안에서 작업하고, 부서 간 handoff는 부서장끼리만 진행합니다.</p>
         </div>
         <div className="live-clock">
           <span>SEOUL</span>
@@ -326,7 +343,7 @@ function LiveView({
 
       <section className="live-bar">
         <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-          {snap.running ? "직원들이 일하는 중…" : snap.dayComplete ? "다시 출근시키기" : "오늘 업무 시작하기"}
+          {snap.running ? "실제 Worker가 분석 중…" : "사용자 입력으로 분석 시작"}
         </button>
         <button className="btn btn-ghost" onClick={() => engine.togglePause()}>
           {snap.paused ? "▶ 재생" : "⏸ 일시정지"}
@@ -415,9 +432,9 @@ function LiveView({
               ) : (
                 <>
                   <div className="approval-top">
-                    <span className="mini-badge mint">{snap.approved ? "오늘 결재 완료" : "결재 대기 없음"}</span>
+<span className="mini-badge mint">{runtime?.result ? "추천 결과 준비" : "결정 대기 없음"}</span>
                   </div>
-                  <h3>{snap.approved ? "승인하신 안으로 제작 중이에요" : "아직 올라온 안건이 없어요"}</h3>
+<h3>{runtime?.result ? "사용자 적합성 결과가 준비됐습니다" : runtime?.phase ?? "프로필 입력을 기다리고 있습니다"}</h3>
                   <p>
                     {snap.approved
                       ? "대표 승인 이후 원고 → 제작 → 보관까지 이어집니다."
@@ -686,25 +703,21 @@ type TeamRow = {
 };
 
 function DashboardView({
-  teams,
   filteredTeams,
   filter,
   setFilter,
   snap,
   agents,
-  onStart,
   onApprove,
   onSelect,
   integrations,
   publishResult,
 }: {
-  teams: TeamRow[];
   filteredTeams: TeamRow[];
   filter: "전체" | DeptStatus;
   setFilter: (value: "전체" | DeptStatus) => void;
   snap: Snapshot;
   agents: readonly Agent[];
-  onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
   integrations: IntegrationStatus | null;
@@ -758,9 +771,6 @@ function DashboardView({
  <p>Worker는 context를 만들고, 결정은 권한을 가진 결정론적 Gate와 대표님이 맡아요. {CANONICAL_DEPARTMENT_COUNT}개 부서 {CANONICAL_WORKER_COUNT}명의 흐름을 Projection으로 보여줘요.</p>
           </div>
           <div className="hero-actions">
-            <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-              {snap.running ? "AI 팀원들이 근무 중…" : "오늘 업무 시작하기"}
-            </button>
             <span className="trust-copy">실제 전송·게시·결제는 대표 승인 후 진행해요</span>
           </div>
         </div>
@@ -952,6 +962,7 @@ function DashboardView({
 
       <OpsPanel />
       <RiskQaPanel agents={agents} snapshot={snap} />
+      <DepartmentCommunicationPanel />
 
       <section className="win storage">
         <div className="win-bar">

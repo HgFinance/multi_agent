@@ -61,6 +61,15 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "RISK_BROKER_ADAPTER",
 )
 
+SERVICE_AUTH_ENV_NAMES: tuple[str, ...] = (
+    "RISK_SERVICE_AUTH_SECRET",
+    "RISK_SERVICE_AUTH_ISSUER",
+    "RISK_SERVICE_AUTH_AUDIENCE",
+    "QA_SERVICE_AUTH_SECRET",
+    "QA_SERVICE_AUTH_ISSUER",
+    "QA_SERVICE_AUTH_AUDIENCE",
+)
+
 
 def _present(environ: Mapping[str, str], name: str) -> bool:
     return bool(environ.get(name, "").strip())
@@ -138,7 +147,7 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
             configured_env=database_env or None,
         )
     )
-    required_values = ("QA_POLICY_SOURCE_ID", "OPENAI_API_KEY")
+    required_values = ("QA_POLICY_SOURCE_ID", "OPENAI_API_KEY", *SERVICE_AUTH_ENV_NAMES)
     for name in required_values:
         checks.append(
             _check(
@@ -146,6 +155,16 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
                 "PASS" if _present(environ, name) else "FAIL",
                 reason=None if _present(environ, name) else f"{name}_MISSING",
                 configured=_present(environ, name),
+            )
+        )
+    for name in ("RISK_SERVICE_AUTH_SECRET", "QA_SERVICE_AUTH_SECRET"):
+        secret_length = len(environ.get(name, "").strip())
+        checks.append(
+            _check(
+                f"{name}_FORMAT",
+                "PASS" if secret_length >= 32 else "FAIL",
+                reason=None if secret_length >= 32 else f"{name}_TOO_SHORT",
+                configured=bool(secret_length),
             )
         )
 

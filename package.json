@@ -1,0 +1,12 @@
+{
+  "name": "multi-agent-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix ai-office run dev",
+    "bff": "DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8000",
+    "bff:alt": "DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
+    "build": "npm --prefix ai-office run build",
+    "test": "npm --prefix ai-office test",
+    "lint": "npm --prefix ai-office run lint"
+  }
+}

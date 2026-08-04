@@ -18,21 +18,26 @@
    (팀 가이드 원칙 5: 회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
 
 실행:
-    uv run --python .venv/Scripts/python.exe uvicorn apps.api.main:app --reload --port 8000
+    DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8000
 자체 점검:
     python apps/api/main.py
 """
 from __future__ import annotations
 
+import os
 import sys
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "ledger"))
@@ -43,12 +48,23 @@ import db_read_model
 import hermes_cli
 import trading
 from ui_read_model import build_ui_snapshot
+from operations_read_model import build_operations_snapshot
+from portfolio_runtime import RUNTIME
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     # ponytail: 개발용 로컬 Origin 고정. 배포 Origin이 정해지면 환경변수로 뺀다.
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:3002",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -57,6 +73,107 @@ app.add_middleware(
 # 권한 경계가 무너진다(마스터플랜 5.6).
 app.include_router(accounting.router)
 app.include_router(trading.router)
+
+
+def _integration_status() -> dict[str, dict[str, object]]:
+    """Return configuration presence only; never expose integration secrets."""
+
+    def configured(*names: str) -> bool:
+        return all(os.getenv(name, "").strip() for name in names)
+
+    return {
+        "notion": {
+            "configured": configured("NOTION_TOKEN", "NOTION_BRIEFING_DB"),
+            "label": "Notion 저장",
+            "need": "NOTION_TOKEN / NOTION_BRIEFING_DB 미설정",
+        },
+        "discord": {
+            "configured": configured("DISCORD_WEBHOOK_URL"),
+            "label": "Discord 전송",
+            "need": "DISCORD_WEBHOOK_URL 미설정",
+        },
+        "instagram": {
+            "configured": False,
+            "label": "Instagram",
+            "need": "OAuth 연동 대기",
+        },
+        "gmail": {
+            "configured": False,
+            "label": "Gmail",
+            "need": "OAuth 연동 대기",
+        },
+        "finance": {
+            "configured": False,
+            "label": "재무 파일",
+            "need": "자료 업로드 대기",
+        },
+    }
+
+
+@app.get("/ui/integrations")
+def ui_integrations() -> dict[str, dict[str, object]]:
+    """Read-only integration readiness projection for the operator UI."""
+
+    return _integration_status()
+
+
+class PortfolioRecommendationRequest(BaseModel):
+    """User suitability inputs; this route never accepts orders or credentials."""
+
+    user_id: str = Field(min_length=1, max_length=128)
+    mindset: str
+    experience: str
+    investment_horizon_years: int = Field(ge=1, le=100)
+    max_drawdown_pct: str = Field(pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$")
+    liquidity_need: str = "MEDIUM"
+    investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    as_of: str | None = None
+    fund_id: str | None = None
+
+
+@app.post("/ui/portfolio-recommendations", status_code=202)
+async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
+    """Start the advisory LangGraph and return a process-local run reference."""
+
+    profile = request.model_dump(exclude_none=True)
+    if "as_of" not in profile:
+        from datetime import datetime, timezone
+
+        profile["as_of"] = datetime.now(timezone.utc).isoformat()
+    try:
+        return RUNTIME.start(profile)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/ui/portfolio-recommendations/{run_id}")
+def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
+    run = RUNTIME.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    return run
+
+
+class PortfolioRecommendationApprovalRequest(BaseModel):
+    decision: Literal["APPROVE", "REJECT"]
+    comment: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/ui/portfolio-recommendations/{run_id}/approval")
+def decide_portfolio_recommendation(
+    run_id: str,
+    request: PortfolioRecommendationApprovalRequest,
+) -> dict[str, object]:
+    """Approve or reject the advisory recommendation, never an order."""
+
+    try:
+        run = RUNTIME.decide(run_id, request.decision, request.comment)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if run is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    return run
 
 
 @lru_cache(maxsize=1)
@@ -127,13 +244,15 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
                      "book_id": str(book_id),
                      "sources": {"portfolio": "supabase", "ledger": "supabase"}}
 
-    return build_ui_snapshot(
+    snapshot = build_ui_snapshot(
         oms=loop.oms,
         ledger=loop.ledger,
         snapshot=loop.snapshot(),
         mode="DEMO",
         overrides=overrides,
     )
+    snapshot["operations"] = build_operations_snapshot()
+    return snapshot
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
@@ -93,7 +93,9 @@ class InvestorProfile(BaseModel):
     experience: ExperienceLevel
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: Decimal = Field(gt=0, le=Decimal("1"))
-    liquidity_need: LiquidityNeed
+    liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
+    investment_amount: Decimal = Field(default=Decimal("1000000"), gt=0)
+    currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
     as_of: datetime
     profile_version: int = Field(default=1, ge=1)
 
@@ -155,6 +157,8 @@ class PortfolioRecommendation(BaseModel):
     name: str
     risk_band: PortfolioRiskBand
     fit_score: int = Field(ge=0, le=100)
+    target_allocations: dict[str, Decimal]
+    target_amounts: dict[str, Decimal]
     reasons: list[str] = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1)
 
@@ -176,6 +180,8 @@ class SuitabilityResult(BaseModel):
     input_hash: str = Field(min_length=64, max_length=64)
     profile_user_id: str
     effective_risk_band: PortfolioRiskBand
+    investment_amount: Decimal
+    currency: str
     recommendations: list[PortfolioRecommendation]
     exclusions: list[PortfolioExclusion]
     manual_review_required: bool = True
@@ -240,6 +246,21 @@ def _exclusion_reasons(profile: InvestorProfile, candidate: PortfolioCandidate) 
     return reasons
 
 
+def _target_amounts(profile: InvestorProfile, candidate: PortfolioCandidate) -> dict[str, Decimal]:
+    """Return deterministic currency amounts whose rounded total equals input amount."""
+
+    allocations = list(candidate.target_allocations.items())
+    amounts = {
+        asset: (profile.investment_amount * weight).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        for asset, weight in allocations
+    }
+    remainder = profile.investment_amount.quantize(Decimal("0.01")) - sum(amounts.values(), Decimal("0"))
+    if allocations:
+        last_asset = allocations[-1][0]
+        amounts[last_asset] += remainder
+    return amounts
+
+
 def recommend_portfolios(
     profile: InvestorProfile | Mapping[str, Any],
     candidates: Sequence[PortfolioCandidate | Mapping[str, Any]],
@@ -268,6 +289,8 @@ def recommend_portfolios(
                 portfolio_id=candidate.portfolio_id,
                 name=candidate.name,
                 risk_band=candidate.risk_band,
+                target_allocations=dict(candidate.target_allocations),
+                target_amounts=_target_amounts(normalized_profile, candidate),
                 fit_score=_fit_score(normalized_profile, candidate),
                 reasons=[
                     "RISK_BAND_WITHIN_EFFECTIVE_PROFILE_LIMIT",
@@ -287,6 +310,8 @@ def recommend_portfolios(
         input_hash=input_hash,
         profile_user_id=normalized_profile.user_id,
         effective_risk_band=_risk_band(normalized_profile.effective_risk_score),
+        investment_amount=normalized_profile.investment_amount,
+        currency=normalized_profile.currency,
         recommendations=recommendations,
         exclusions=exclusions,
     )

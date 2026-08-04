@@ -35,7 +35,7 @@
 | LLM | 결정론적 Qwen-shaped test stub 또는 별도 Ollama 검증 | 승인된 Ollama Worker와 Hermes Head |
 | DB/Event | 계약 검증용 optional adapter | Supabase·Redis·필수 migration·RLS·Event Bus 필수 |
 | Risk/QA gate | `binding=false` skeleton; 실제 주문·원장 변경 없음 | acceptance와 승인된 adapter가 모두 있어야 활성 |
-| QA `qa-check` | 기본 `RISK_QA_RUNTIME=test`에서 호출 가능 | `RISK_QA_RUNTIME=production` 및 `QA_CHECK_CONTRACT_APPROVED=true` 필요 |
+| QA `qa-check` | `RISK_QA_RUNTIME=test`를 명시한 테스트에서만 호출 가능; 미설정은 DENY | `RISK_QA_RUNTIME=production` 및 `QA_CHECK_CONTRACT_APPROVED=true` 필요 |
 | 실패 방향 | `DEGRADED`, `HOLD`, `ESCALATE` | 신규 진입 차단, `HOLD`, `REJECT`, `ESCALATE` |
 
 통합 실행기는 다음 명령으로 관리한다.
@@ -82,9 +82,9 @@ Pydantic 모델과 route decorator가 실행 가능한 API 계약의 최종 검�
 
 ### 1.3 권한 경계
 
-- 현재 FastAPI 코드에는 전역 Service Token 검증기가 연결되어 있지 않다. 호출자 인증·`sub`와 `agent_id/profile_version_id`의 매핑은 배포 전 필수 작업이다.
+- Risk Trading State 변경과 QA Corrective Action 종결에는 현재 서명된 HS256 Bearer Service Token 검증이 연결되어 있다. 토큰의 `sub`, `department`, `service`, `scopes`, `exp`를 확인하고 요청 주체와 `set_by`/`verifier`를 일치시킨다. 전역 Token Issuer/JWKS, mTLS, `agent_id/profile_version_id` 매핑은 아직 배포 경계에서 연결해야 하므로 운영 인증 완료로 표시하지 않는다.
 - Browser/Frontend가 Domain API를 직접 호출하지 않고 BFF 또는 승인된 내부 서비스가 호출하는 것을 전제로 한다.
-- `verify-and-close`는 선택적 `X-Auth-Subject`가 들어오면 `body.verifier`와 일치하는지만 추가 확인한다. 이것은 서명된 토큰 검증을 대체하지 않는다.
+- `verify-and-close`는 `Authorization: Bearer <signed-service-token>`가 필수이며 `qa.corrective_action.close` scope와 토큰 `sub == body.verifier`를 검증한다. `X-Auth-Subject` 문자열 비교만으로는 인증으로 취급하지 않는다.
 - LLM과 Worker는 trading-state 변경, 주문 제출, 원장 기록, QA 판정 승격을 직접 수행하지 않는다.
 
 ### 1.4 오류 응답
@@ -100,14 +100,15 @@ Pydantic 모델과 route decorator가 실행 가능한 API 계약의 최종 검�
 }
 ```
 
-현재 `HTTPException`을 직접 발생시키는 일부 경로(P1 gate, Redis record `404`, QA contract gate, verifier mismatch)는 FastAPI 기본 `{"detail": ...}` 형태를 유지한다. 이 차이는 현재 구현의 사실이며, Service Token 도입 시 공통 HTTPException handler로 통일하는 백로그다.
+현재 `HTTPException`을 직접 발생시키는 일부 경로(P1 gate, Redis record `404`, QA contract gate, verifier mismatch)는 FastAPI 기본 `{"detail": ...}` 형태를 유지한다. 명령 단위 Service Token 검증은 연결됐지만, 전역 인증 미들웨어와 공통 HTTPException handler로 통일하는 작업은 백로그다.
 
 주요 상태 코드:
 
 | 상태 | 의미 |
 |---:|---|
+| `401` | Service Token 누락·형식 오류·서명 오류·만료 |
 | `200` | 결정·조회·상태 전이가 처리됨 |
-| `403` | 호출자와 verifier가 불일치 |
+| `403` | department/service/scope/subject 불일치 |
 | `404` | Trading State 기록 또는 Incident/Action 자원 없음 |
 | `409` | Trace/Incident 상태 전이 충돌, 또는 P1 gate reject |
 | `422` | 입력 검증 실패 또는 결정론 Engine rejection/error |
@@ -200,7 +201,7 @@ PUT request:
 }
 ```
 
-현재 코드의 `set_by`는 문자열 필수값 검증까지 수행한다. 운영에서는 이를 승인된 Operator/Service Token subject 검증으로 강화해야 한다. LLM이나 Browser가 이 API를 직접 호출하는 것은 금지한다.
+`set_by`는 문자열 필수값 검증과 함께 `Authorization: Bearer <signed-service-token>`의 `sub`와 일치해야 한다. 토큰에는 `risk.trading_state.write` 또는 `risk.trading_state.clear` scope가 필요하다. LLM이나 Browser가 이 API를 직접 호출하는 것은 금지한다.
 
 ### 2.5 Risk Compliance RAG
 
@@ -521,7 +522,7 @@ LLM은 관련성 판단과 비바인딩 서술만 수행한다. PIT filter, cita
 
 다음 항목은 현재 API에 이미 구현됐다고 표시하지 않는다.
 
-- 전역 Service Token 발급·검증 및 `sub → agent/profile` 매핑
+- 전역 Service Token Issuer/JWKS·mTLS 연동 및 `sub → agent/profile` 매핑 (도메인 API의 명령 단위 HS256 검증은 구현됐지만 배포 IAM 연결은 미완료)
 - 외부 P1의 non-PAPER governed ID/실제 LS API 연결
 - 실제 정책 corpus ingestion, embedding, ACL, PIT golden set
 - PIKE-RAG/LightRAG/Hyper-Extraction 전용 HTTP endpoint

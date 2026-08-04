@@ -30,7 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -230,6 +230,32 @@ class TradingStateBody(BaseModel):
     set_by: str = Field(min_length=1)
 
 
+def _require_service_token(
+    authorization: str | None,
+    *,
+    required_scope: str,
+    expected_subject: str | None = None,
+):
+    from apps.security.service_auth import ServiceAuthError, authenticate_service_token
+
+    try:
+        return authenticate_service_token(
+            authorization,
+            required_scope=required_scope,
+            expected_department="risk-management",
+            expected_service="risk-api",
+            expected_subject=expected_subject,
+            secret_env="RISK_SERVICE_AUTH_SECRET",
+            issuer_env="RISK_SERVICE_AUTH_ISSUER",
+            audience_env="RISK_SERVICE_AUTH_AUDIENCE",
+        )
+    except ServiceAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error_code": exc.code, "message": str(exc)},
+        ) from exc
+
+
 class ComplianceCheckRequest(BaseModel):
     query: str = Field(min_length=1)
     as_of: str
@@ -244,6 +270,7 @@ app.include_router(p2_derivatives_router)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
 from fastapi.responses import Response
 
 from apps.observability.risk_qa import get_runtime_telemetry
@@ -388,7 +415,7 @@ def _on_validation_error(request, exc: RequestValidationError):
 @app.post("/investment-cases/{case_id}/risk-check")
 def risk_check(case_id: str, body: RiskCheckRequest):
     use_database_context = (
-        os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production"
+        os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "production"
         or os.environ.get("RISK_CONTEXT_SOURCE", "request").strip().lower() == "database"
     )
     if use_database_context:
@@ -446,16 +473,27 @@ def get_trading_state_record(scope: str):
 
 
 @app.put("/risk/v1/trading-state/{scope}")
-def put_trading_state(scope: str, body: TradingStateBody):
-    # ponytail: set_by를 Authorized Operator Identity와 대조하는 인증 계층은 없음.
-    # Service Token 발급 주체(스펙 6절)가 정해지면 여기서 토큰 sub == set_by를 강제한다.
+def put_trading_state(
+    scope: str,
+    body: TradingStateBody,
+    authorization: str | None = Header(default=None),
+):
+    _require_service_token(
+        authorization,
+        required_scope="risk.trading_state.write",
+        expected_subject=body.set_by,
+    )
     return _redis_store().set_state(scope, body.state, body.reason, body.set_by)
 
 
 @app.delete("/risk/v1/trading-state/{scope}")
-def delete_trading_state(scope: str):
+def delete_trading_state(scope: str, authorization: str | None = Header(default=None)):
+    identity = _require_service_token(
+        authorization,
+        required_scope="risk.trading_state.clear",
+    )
     _redis_store().clear_state(scope)
-    return {"scope": scope, "cleared": True}
+    return {"scope": scope, "cleared": True, "cleared_by": identity.subject}
 
 
 @app.post("/risk/v1/compliance/check")
@@ -465,7 +503,7 @@ def compliance_check(body: ComplianceCheckRequest):
     )
 
     corpus_dir = _configured_policy_corpus()
-    if os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production":
+    if os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "production":
         paths = tuple(path for path in corpus_dir.glob("*.md") if path.is_file())
         if not paths or any(b"SAMPLE_PLACEHOLDER" in path.read_bytes() for path in paths):
             raise HTTPException(

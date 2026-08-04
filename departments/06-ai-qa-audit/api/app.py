@@ -354,6 +354,7 @@ app = FastAPI(title="QA Domain API", version="v1")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
 from fastapi.responses import Response
 
 from apps.observability.risk_qa import get_runtime_telemetry
@@ -412,10 +413,38 @@ def _on_qa_event_bus_error(request, exc: QaEventBusError):
 
 def _qa_check_contract_is_approved() -> bool:
     """Keep the proposed gate inactive until the owning service approves v1."""
-    runtime = os.environ.get("RISK_QA_RUNTIME", "test").strip().lower()
-    if runtime != "production":
+    runtime = os.environ.get("RISK_QA_RUNTIME", "").strip().lower()
+    if runtime == "test":
         return True
+    if runtime != "production":
+        return False
     return os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
+
+
+def _require_service_token(
+    authorization: str | None,
+    *,
+    required_scope: str,
+    expected_subject: str | None = None,
+):
+    from apps.security.service_auth import ServiceAuthError, authenticate_service_token
+
+    try:
+        return authenticate_service_token(
+            authorization,
+            required_scope=required_scope,
+            expected_department="qa-department",
+            expected_service="qa-api",
+            expected_subject=expected_subject,
+            secret_env="QA_SERVICE_AUTH_SECRET",
+            issuer_env="QA_SERVICE_AUTH_ISSUER",
+            audience_env="QA_SERVICE_AUTH_AUDIENCE",
+        )
+    except ServiceAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error_code": exc.code, "message": str(exc)},
+        ) from exc
 
 
 # 3.1 승인된 QA Evidence Gate v1 — Case에 종속된 판정 -------------------------------
@@ -615,14 +644,14 @@ def submit_for_verification(corrective_action_id: UUID):
 @app.post("/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close")
 def verify_and_close(
     corrective_action_id: UUID, body: VerifyAndCloseRequest,
-    x_auth_subject: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    # 스펙 3.5: "API 레이어에서도 verifier == owner를 인증 토큰 기준으로 한 번 더 막는다".
-    # ponytail: 서명된 Service Token이 아니라 호출자가 넣은 헤더를 그대로 믿는다 - Service
-    # Token 발급 주체(스펙 6절) 확정 후 검증된 토큰 sub로 교체한다. 지금도 verifier==owner
-    # 자체는 engine이 막으므로, 여기선 "토큰 주체와 주장하는 verifier가 다른" 경우만 막는다.
-    if x_auth_subject is not None and x_auth_subject != body.verifier:
-        raise HTTPException(status_code=403, detail="인증 주체와 요청한 verifier가 일치하지 않습니다")
+    # API 레이어에서 서명된 Service Token의 sub와 verifier를 일치시킨다.
+    _require_service_token(
+        authorization,
+        required_scope="qa.corrective_action.close",
+        expected_subject=body.verifier,
+    )
     return timeline.verify_and_close(corrective_action_id, body.verifier, body.verification)
 
 
@@ -641,7 +670,7 @@ def evidence_check(body: ComplianceCheckRequest):
     )
 
     corpus_dir = _configured_evidence_corpus()
-    if os.environ.get("RISK_QA_RUNTIME", "test").strip().lower() == "production":
+    if os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "production":
         status = inspect_policy_corpus(corpus_dir)
         if not status.ready:
             raise HTTPException(

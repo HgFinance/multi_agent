@@ -33,12 +33,40 @@
 ## 실행
 
 ```bash
-cd ai-office
-npm install
-npm run dev
+# 저장소 루트에서 실행
+npm --prefix ai-office install
+NEXT_PUBLIC_BFF_URL=http://localhost:8000 npm run dev -- --port 3000
 ```
 
 기본 주소는 `http://localhost:3000`이다.
+
+## BFF 연결
+
+AI Office는 브라우저에서 부서 API나 DB를 직접 호출하지 않고 `operator-bff`의 Read Model을 읽는다. 화면의 직원 이동·착석·대화는 실제 `portfolio-recommendation-full` LangGraph runtime projection이 있을 때만 발생한다. 사용자 적합성 입력은 BFF의 `POST /ui/portfolio-recommendations`로 전달된다. 두 프로세스를 각각 실행한다.
+
+```bash
+# 저장소 루트, 외부 DB 없이 DEMO Read Model로 실행
+DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8000
+
+# 별도 터미널, 저장소 루트에서 실행
+NEXT_PUBLIC_BFF_URL=http://localhost:8000 npm run dev -- --port 3000
+```
+
+프론트 폴더에서 직접 실행하려면 `npm run dev`를 사용한다. 저장소 루트에서 `npm run dev`를 실행하면 루트 스크립트가 `ai-office`로 전달한다.
+
+이미 `ai-office` 디렉터리에 있다면 BFF 명령은 `cd ..`로 저장소 루트로 이동한 뒤 실행한다. 루트의 `.venv`는 프론트 폴더 안에 있지 않다.
+
+프론트는 `NEXT_PUBLIC_BFF_URL`이 없으면 `http://localhost:8000`을 사용하고, 연결 후 Snapshot을 5초마다 갱신한다. BFF가 꺼져 있거나 실제 LangGraph run이 없으면 오래된 Fixture나 가짜 업무를 표시하지 않고 `OFFLINE`/대기 상태를 보여준다. 투자금액별 목표 금액과 사용자 추천 승인 단계까지 표시한다. 현금화 필요 기간은 화면에서 받지 않고 BFF가 `MEDIUM` 기본값으로 처리한다. 추천 승인은 주문 제출·Risk 승인·원장 변경을 수행하지 않는다.
+
+연동 상태는 BFF의 `GET /ui/integrations`에서 읽으며, 비밀값은 브라우저로 보내지 않는다.
+
+`8000` 포트가 이미 사용 중이면 기존 프로세스를 확인한 뒤 종료하거나 다른 포트를 사용한다.
+
+```bash
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+npm run bff:alt
+NEXT_PUBLIC_BFF_URL=http://localhost:8001 npm run dev -- --port 3002
+```
 
 ## 검증
 

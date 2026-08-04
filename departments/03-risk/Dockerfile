@@ -33,6 +33,7 @@ COPY departments/03-risk ./departments/03-risk
 COPY departments/02-trading/contracts ./departments/02-trading/contracts
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability
+COPY apps/security ./apps/security
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

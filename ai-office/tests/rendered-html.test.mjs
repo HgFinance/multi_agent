@@ -78,6 +78,8 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
   assert.match(page, /<RiskQaPanel/);
+  assert.match(page, /<DepartmentCommunicationPanel/);
+  assert.match(page, /<BffProvider>/);
   assert.match(layout, /title: COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);
@@ -94,4 +96,26 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(riskQaBridge, /orchestrator: "Hermes"/);
   assert.match(riskQaBridge, /employeeExecutor: "LangGraph"/);
   assert.match(riskQaBridge, /InputSnapshot/);
+});
+
+test("keeps one portfolio analysis entry point", async () => {
+  const [page, panel, client] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ops/PortfolioInterviewPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ops/portfolioClient.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.equal((page.match(/사용자 입력으로 분석 시작/g) ?? []).length, 1);
+  assert.match(page, /portfolio-interview-form/);
+  assert.match(page, /requestSubmit\(\)/);
+  assert.match(page, /a\.status === "업무 중"/);
+  assert.doesNotMatch(panel, /LangGraph 분석 시작/);
+  assert.doesNotMatch(panel, /현금화 필요/);
+  assert.doesNotMatch(client, /liquidity_need/);
+});
+
+test("routes integration readiness through the operator BFF", async () => {
+  const report = await readFile(new URL("../app/game/report.ts", import.meta.url), "utf8");
+  assert.match(report, /\/ui\/integrations/);
+  assert.doesNotMatch(report, /fetch\("\/api\/integrations"\)/);
 });

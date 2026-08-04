@@ -83,6 +83,7 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 ### 3.1 인증과 권한
 
 - Production 목표는 Service Token과 mTLS다. Token Subject의 department, service, scopes를 검증한다.
+- 현재 구현은 Risk Trading State 명령과 QA Corrective Action 종결에 대해 짧은 수명의 HS256 Bearer Service Token(`sub`, `department`, `service`, `scopes`, `exp`)을 검증한다. 전역 Issuer/JWKS·mTLS·IAM 및 `sub`와 `agent_id/profile_version_id` 매핑은 배포 전 연결 대상이며, 이 명령 단위 검증만으로 Production 인증 완료로 간주하지 않는다.
 - Scope 형식은 department.resource.action.read 또는 department.resource.action이다. Fund·Book·Case 범위를 벗어나면 403이다.
 - Browser와 Agent는 Domain API를 직접 공개 호출하지 않는다. BFF 또는 승인된 내부 Service/MCP Gateway를 사용한다.
 - CEO·Worker·LLM에게 Supabase Service Role, Broker Credential, LS Credential을 제공하지 않는다.
@@ -339,6 +340,43 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 10. Worker DEGRADED/ESCALATE Context가 Head를 통과해도 APPROVE/PASS로 자동 승격되지 않는다.
 11. HR 개선 Candidate의 작성자와 승인자가 같으면 403이고 Access Request가 Credential을 직접 만들지 않는다.
 12. Event를 중복 소비해도 Ledger Posting·Profile Transition·QA Finding이 중복 생성되지 않는다.
+
+### 10.1 Operator BFF의 부서·통신 Projection
+
+`GET /ui/snapshot`은 기존 Trading·Portfolio Read Model에 선택적 `operations` 블록을 포함할 수 있다. 이 블록은 브라우저가 Hermes Profile, Worker Registry, Event Registry를 직접 읽지 않도록 하는 읽기 전용 Projection이다.
+
+- `operations.schema_version`: `operator-operations.v1`
+- `operations.departments`: Hermes Profile 이름, Worker 수·모델·output contract와 runtime 상태를 포함한다. Kanban Status Bridge와 heartbeat가 연결되지 않은 환경에서는 `status: OFFLINE`, `runtime_observed: false`를 사용한다.
+- `operations.communications`: Event Registry의 producer·consumer·layer·status를 포함한다. Registry 항목은 live message가 아니므로 `live: false`, `transport: registry-only`로 표시한다.
+- `operations.message_count`: 실제로 BFF가 관측한 live message 수이며 Registry 항목 수가 아니다.
+- `operations.runtime_connected`와 `operations.event_bridge_connected`가 모두 `true`가 아니면 화면은 runtime 상태나 Event 수신을 정상 상태로 표시하지 않는다.
+
+### 10.2 BFF 포트폴리오 추천 실행
+
+사용자 적합성 입력은 `POST /ui/portfolio-recommendations`로 전달한다. BFF는 기존
+`portfolio-recommendation-full` LangGraph를 비동기로 실행하고 `run_id`를 반환한다.
+
+- 입력은 `mindset`, `experience`, `investment_horizon_years`, `max_drawdown_pct`,
+  `investment_amount`, `currency`를 포함한다. 목표 금액은 서버가 결정론적으로 계산한다.
+  `liquidity_need`는 선택적 내부 적합성 조건이며 생략하면 `MEDIUM`으로 정규화한다.
+- 결과 조회는 `GET /ui/portfolio-recommendations/{run_id}` 또는 `GET /ui/snapshot`의
+  `operations.runtime` projection을 사용한다.
+- 추천 결과가 `MATCHED`이고 pipeline이 `COMPLETED`인 경우 `POST
+  /ui/portfolio-recommendations/{run_id}/approval`에서 사용자가 `APPROVE` 또는
+  `REJECT`할 수 있다. 이는 추천 자문 승인 기록이며 주문 승인과 다르다.
+- 결과는 `portfolio suitability` 자문이며 `binding: false`, `production_enabled: false`,
+  `manual_review_required: true`를 유지한다. 주문 제출·Risk 승인·Ledger Posting은 이 경로에서 수행하지 않는다.
+- 실제 LangGraph run이 없을 때 `operations.runtime.status`는 `OFFLINE`이고, 브라우저는
+  직원 이동·착석 작업·대화를 시작하지 않는다.
+- 부서 간 handoff는 `operations.runtime.active_handoff`로 노출하며 producer/consumer
+  부서장만 참여한다. Worker의 완료 요약은 줄바꿈을 제거한 단일 문장으로 `messages`에 기록한다.
+
+### 10.3 BFF 연동 상태
+
+`GET /ui/integrations`는 Notion·Discord·향후 외부 연동의 설정 준비 상태만 반환한다.
+토큰·Webhook URL·파일 경로 등 비밀값은 응답에 포함하지 않는다. 브라우저는 이 Projection을
+사용해 연결됨·미설정·OAuth 대기 상태를 표시하며, 외부 발행은 별도 Worker의 명시적 사용자
+동작으로 제한한다.
 
 ## 11. 연계 문서
 

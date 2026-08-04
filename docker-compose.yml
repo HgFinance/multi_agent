@@ -495,8 +495,17 @@ services:
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RISK_SERVICE_AUTH_SECRET: ${RISK_SERVICE_AUTH_SECRET:-}
+      RISK_SERVICE_AUTH_ISSUER: ${RISK_SERVICE_AUTH_ISSUER:-}
+      RISK_SERVICE_AUTH_AUDIENCE: ${RISK_SERVICE_AUTH_AUDIENCE:-}
     ports:
       - "127.0.0.1:8041:8000"   # 로컬 전용 - 외부 노출 금지 (research-api와 같은 정책)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/risk/v1/observability/runtime', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -515,8 +524,17 @@ services:
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      QA_SERVICE_AUTH_SECRET: ${QA_SERVICE_AUTH_SECRET:-}
+      QA_SERVICE_AUTH_ISSUER: ${QA_SERVICE_AUTH_ISSUER:-}
+      QA_SERVICE_AUTH_AUDIENCE: ${QA_SERVICE_AUTH_AUDIENCE:-}
     ports:
       - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/qa/v1/observability/runtime', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -538,6 +556,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:-}
       RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}
       QA_EVENT_POLL_INTERVAL_SECONDS: ${QA_EVENT_POLL_INTERVAL_SECONDS:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, redis; assert b'qa_events/worker.py' in open('/proc/1/cmdline', 'rb').read(); redis.Redis.from_url(os.environ['RISK_QA_EVENT_REDIS_URL'], socket_connect_timeout=2).ping()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     mem_limit: 256m
     cpus: 0.3
     pids_limit: 64
