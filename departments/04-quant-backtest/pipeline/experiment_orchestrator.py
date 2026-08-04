@@ -63,6 +63,7 @@ class OrchestratorReport:
     experiment_refs: dict = field(default_factory=dict)
     backlog: list = field(default_factory=list)
     trial_pressure: dict = field(default_factory=dict)   # 몇 번째 시도인가
+    release: dict = field(default_factory=dict)          # QNT-07 관문 판정
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +206,28 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                     "where hypothesis_id=%s and status='TESTING'", (new_status, hid))
         conn.commit()
         report.transitions.append(f"TESTING->{new_status}")
+
+        # ▶ QNT-07 릴리스 관문. SUPPORTED 까지 온 것만 본다.
+        #   **승격이 아니라 제출 판정이다** - Production 은 CEO·Risk·QA 몫이다.
+        if new_status == "SUPPORTED":
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from release_gate import evaluate as gate_evaluate
+
+                cur.execute(
+                    """select metric, value from quant.experiment_metrics
+                       where experiment_id = %s""",
+                    (result.get("experiment_id"),))
+                metrics = {m: float(v) for m, v in cur.fetchall()}
+                # walk_forward 가 쓰는 이름과 맞춘다
+                metrics.setdefault("max_drawdown_pct", metrics.get("mdd_pct"))
+                d = gate_evaluate(metrics, fragility=result["fragility"],
+                                  trial_pressure=report.trial_pressure)
+                report.release = d.as_dict()
+            except Exception as e:  # noqa: BLE001
+                # 관문 실패를 통과로 위장하지 않는다 - HOLD 가 안전한 기본값이다
+                report.release = {"decision": "HOLD",
+                                  "reasons": [f"관문 실행 실패: {type(e).__name__}"]}
         return report
     finally:
         if own_conn:
@@ -284,6 +307,11 @@ def _print_report(r: OrchestratorReport) -> None:
         print(f"  부족: {', '.join(r.missing)}")
     for b in r.backlog:
         print(f"  백로그: {b}")
+    if r.release:
+        print(f"  릴리스: {r.release.get('decision')} "
+              f"(미달 {r.release.get('failed') or '-'})")
+        for msg in (r.release.get("reasons") or [])[:3]:
+            print(f"    · {msg}")
     for t in r.transitions:
         print(f"  전이: {t}")
     if r.experiment_refs:
