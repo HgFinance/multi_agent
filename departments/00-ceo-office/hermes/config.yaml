@@ -66,9 +66,9 @@ implementation:
     - "GOV-02 에스컬레이션 — src/escalation/. 엔드포인트 4개 + governance.escalation.v1 발행. RESOLVED에 resolution 필수, severity 무기록 하향 차단"
     - "플레이스홀더 회원 seed — auth.users/user_profiles 1건(RFC 2606 .invalid, 로그인 불가). Mandate owner_user_id NOT NULL 차단 해제. 자동 기본값으로는 쓰지 않는다"
     - "부서 코드 통일 — Hermes Profile 이름(ceo-agent/hr-department 등)으로 정본 확정. 스펙 2.2·2.3 갱신 + AGENT-WORKFORCE 행 rename 마이그레이션"
+    - "Mandate 쓰기 경로 왕복 검증 — TEST-CEO-MANDATE Fund + 플레이스홀더 회원으로 governance.mandates 부모 행을 만들어 MandateVersionService.propose_version()/MandateActivationService.activate()를 그대로 실행. insert/set_mandate_current/set_effective_to/record_decision 4개 전부 실 DB에서 확인(v1 최초 활성화 + v2 TIGHTEN 자동 활성화), 2회 연속 실행으로 정리 로직 멱등성도 확인"
   in_progress: []
   not_started:
-    - "Mandate 쓰기 경로 왕복 검증 — 플레이스홀더 회원으로 owner_user_id FK는 통과 확인(롤백 검증)했으나 insert/set_mandate_current/set_effective_to/record_decision 전 구간 검증은 미실행"
     - "F01 완료조건 2번(Signal·Risk Decision이 mandate_version 기록) — 트레이딩·리스크본부 코드 의존이라 CEO Office 단독으로 못 닫는다"
     - "5.1 Mandate 변경 Workflow의 Risk/QA 사전 검토와 사용자 승인 Interrupt/Resume (LangGraph) — 방향 판정·활성화 게이트만 있고 위원회 경유 경로 없음"
     - "Y1 나머지 — Daily Summary. Case 생성·Escalation은 GOV-02로 해소됨"
