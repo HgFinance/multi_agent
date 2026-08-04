@@ -304,12 +304,18 @@ def build_department_graph(
             report["worker_id"]
             for report in state.get("worker_reports", [])
             if report.get("status") != "COMPLETED"
-            or bool((report.get("output") or {}).get("escalate", True))
         ]
-        if failed_workers:
+        advisory_workers = [
+            report["worker_id"]
+            for report in state.get("worker_reports", [])
+            if bool((report.get("output") or {}).get("escalate", False))
+        ]
+        if advisory_workers:
             head_output["escalate"] = True
             head_output["recommendation"] = "ESCALATE"
             head_output["safe_action"] = "HOLD" if spec.department == "risk-management" else "ESCALATE"
+            head_output["worker_advisories"] = advisory_workers
+        if failed_workers:
             head_output["worker_failures"] = failed_workers
         return {
             "head_output": head_output,

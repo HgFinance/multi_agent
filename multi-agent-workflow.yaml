@@ -53,6 +53,13 @@ workflow:
   order: [research, trading, risk, qa, oms-fill-gate, accounting, ceo]
   timeout_seconds: 450
 
+portfolio_recommendation_cycle:
+  manifest: orchestration/workflows/portfolio-recommendation.yaml
+  order: [profile-suitability, research, trading, risk, qa, accounting, ceo]
+  timeout_seconds: 300
+  mode: test
+  external_writes: false
+
 strategy_research_cycle:
   manifest: orchestration/workflows/strategy-research.yaml
   order: [quant-backtest, qa-release-review, ceo-promotion-review]

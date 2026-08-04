@@ -128,6 +128,27 @@ Risk/QA E2E의 authoritative input은 `ResearchPacketV2`다. `RiskQaPacket` enve
 `trace_id`, `input_hash`와 결정론적 Risk/QA read model만 추가하며 canonical Packet을 대체하지 않는다.
 PIT와 canonical packet hash가 검증되지 않으면 파이프라인은 시작하지 않는다.
 
+## 8.1 사용자 적합 포트폴리오 목록 TEST 경로
+
+현재 제품 목적의 사용자 경로는 주문을 생성하는 Investment Case와 별도로 다음 TEST adapter를 사용한다.
+
+```text
+InvestorProfile
+  → portfolio suitability deterministic match
+  → Risk 읽기 전용 context / safe limit check
+  → QA 읽기 전용 evidence·reproducibility check
+  → 적합 포트폴리오 목록 + 제외 이유
+```
+
+실행 명령:
+
+```bash
+python scripts/run_portfolio_recommendation_test.py
+python -m pytest tests/portfolio/test_suitability.py tests/e2e/test_portfolio_recommendation_pipeline.py -q -p no:warnings
+```
+
+이 경로의 `RISK_QA` 결과도 `binding=false`다. 적합 후보가 없으면 `NO_MATCH`와 `HOLD`를 반환하며 공격형 후보를 fallback으로 추천하지 않는다. QA `WARN`은 PASS로 올리지 않고 `manual_review_required=true`로 남긴다. 실제 사용자 프로필 저장, 후보 카탈로그 승인, 운영 Evidence와 API 연결은 Production 전환 조건에 포함되지 않은 별도 백로그다.
+
 ## 9. External integration probe
 
 ```bash
