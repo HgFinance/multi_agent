@@ -76,6 +76,14 @@ python apps/api/main.py                                          # Read-only DEM
 
 ## Claude Code 작업 시 주의
 
+### Risk·QA 브랜치 실행 환경
+
+Risk·QA 부서 브랜치의 Python 테스트, 계약 검증, 실행 점검과 lint는 전용 Claude 환경을 사용한다.
+작업 시작 전에 `source ~/claude/bin/activate`를 실행하고 `python --version`과
+`command -v ruff`를 확인한다. 저장소 `.venv`와 `~/claude` 환경을 혼용하지 않으며,
+CI workflow의 Python 버전과 로컬 검증 결과를 구분한다. `ruff`, `pyright`, `bandit`,
+`pip-audit`가 없으면 설치 명령과 미설치 상태를 기록한다.
+
 - When running `/graphify` or analyzing code graphs, execute strictly in a single thread without spawning subagents.
 
 - **저비용 하위 에이전트 모델 기용**:

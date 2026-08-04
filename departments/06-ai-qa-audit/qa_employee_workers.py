@@ -21,7 +21,6 @@ from uuid import UUID
 from langgraph.graph import END, StateGraph
 
 
-
 def _load_skill_package() -> None:
     package_name = "qa_worker_skill_runtime"
     if package_name in sys.modules:
@@ -43,9 +42,9 @@ _load_skill_package()
 
 from qa_worker_skill_runtime.contracts import QASkillContext, make_result
 from qa_worker_skill_runtime.guards import build_context, scope_check
+from qa_worker_skill_runtime.rag_router import choose_rag_route
 from qa_worker_skill_runtime.tools import invoke_tool
 from qa_worker_skill_runtime.trace import SkillTrace
-from qa_worker_skill_runtime.rag_router import choose_rag_route
 
 WorkerLLM = Callable[[str, str], str]
 WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
@@ -237,7 +236,7 @@ def _parse_worker_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool
             "escalate": parsed.get("escalate", True), "schema_valid": valid}, valid
 
 
-def build_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: WorkerLLM | None = None):
+def _build_legacy_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: WorkerLLM | None = None):
     def read_tool(state: WorkerState) -> dict[str, Any]:
         return {"tool_output": tool(state.get("input", {}))}
 

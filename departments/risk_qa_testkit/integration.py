@@ -13,15 +13,15 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-from departments.risk_qa_testkit.pipeline import make_test_packet, run_risk_qa_pipeline
+from departments.risk_qa_testkit.pipeline import run_risk_qa_pipeline
 from departments.risk_qa_testkit.research_packet import packet_from_api_payload
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,10 +40,10 @@ def _load_module(path: Path, name: str) -> Any:
 
 def _http_json(url: str, *, timeout: float = 5.0) -> dict[str, Any]:
     request = Request(url, headers={"Accept": "application/json"})
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL is operator-configured
+    with urlopen(request, timeout=timeout) as response:
         data = json.load(response)
     if not isinstance(data, dict):
-        raise ValueError("Research API response must be a JSON object")
+        raise TypeError("Research API response must be a JSON object")
     return data
 
 
@@ -137,7 +137,7 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
                 client.delete(stream)
                 client.close()
             except Exception:  # noqa: BLE001 - cleanup must not hide probe result
-                pass
+                client = None
 
 
 def _check_supabase_event(environ: Mapping[str, str]) -> dict[str, Any]:

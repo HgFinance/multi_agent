@@ -66,6 +66,7 @@ from p1.analytics import (
 )
 from p1_runtime_api import router as p1_runtime_router
 from p2_derivatives_api import router as p2_derivatives_router
+from risk_context_repository import PostgresRiskContextRepository, RiskContextLoadError
 from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
@@ -92,7 +93,6 @@ from trading_state_store import (
     RedisTradingStateStore,
     TradingStateStoreError,
 )
-from risk_context_repository import PostgresRiskContextRepository, RiskContextLoadError
 
 
 class MandateScopeIn(BaseModel):
@@ -274,7 +274,7 @@ def _risk_decision_repository() -> RiskDecisionRepository | None:
     if _decision_repository is None:
         try:
             _decision_repository = RiskDecisionRepository.connect(dsn)
-        except Exception as exc:  # noqa: BLE001 - API boundary must not leak DSN details.
+        except Exception as exc:
             raise RiskDecisionPersistenceError(
                 "Canonical Risk DB connection failed; decision was not persisted"
             ) from exc

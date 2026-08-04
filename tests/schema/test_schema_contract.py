@@ -66,6 +66,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804000400_risk_qa_runtime_activation.sql",
                 "20260804000500_api_accounting_read_views.sql",
                 "20260804000600_order_events_broker_id_unique.sql",
+                "20260804000700_risk_qa_production_read_paths.sql",
                 "20260804001000_quant_hypothesis_inconclusive.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)

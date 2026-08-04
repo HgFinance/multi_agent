@@ -103,6 +103,13 @@
 6. 새 Library를 추가할 때는 기존 Stack으로 해결할 수 없는 이유와 제거 기준을 함께 기록한다.
 7. 구현 완료는 코드 작성이 아니라 Acceptance Scenario 통과로 판단한다.
 
+## Risk·QA 브랜치 실행 환경
+
+- Risk·QA 부서 브랜치의 Python 테스트, 계약 검증, 실행 점검과 lint는 전용 Claude 환경을 사용한다.
+  작업 시작 전에 `source ~/claude/bin/activate`를 실행하고 `python --version`과 `command -v ruff`를 확인한다.
+- 저장소 `.venv`와 `~/claude` 환경을 혼용하지 않는다. CI는 workflow에 명시된 Python 버전을 사용하므로 로컬 결과와 CI 결과를 구분해 기록한다.
+- `ruff`, `pyright`, `bandit`, `pip-audit`가 전용 환경에 없으면 임의로 저장소에 추가하지 말고 설치 명령과 미설치 상태를 보고한다.
+
 ## 자주 쓰는 검증 명령
 
 ```bash
