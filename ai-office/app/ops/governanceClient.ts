@@ -37,10 +37,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = typeof body === "object" && body !== null && "detail" in body
-      ? String((body as { detail?: unknown }).detail)
-      : `HTTP ${response.status}`;
-    throw new Error(detail === "governance_api_unavailable" ? "CEO Governance API에 연결할 수 없습니다." : detail);
+    const payload = typeof body === "object" && body !== null ? body as { detail?: unknown; error_code?: unknown; message?: unknown } : {};
+    const detail = typeof payload.detail === "string" ? payload.detail : "";
+    const code = typeof payload.error_code === "string" ? payload.error_code : detail;
+    const message = typeof payload.message === "string" ? payload.message : "";
+    if (code === "governance_api_unavailable") throw new Error("CEO Governance API에 연결할 수 없습니다.");
+    if (code === "MandatePersistenceError") throw new Error(message || "Mandate를 저장할 수 없습니다. 고급 설정의 Fund ID가 운영 DB의 canonical fund인지 확인하세요.");
+    if (code === "MissingActorUserError") throw new Error("대표 승인을 기록하려면 NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID에 유효한 사용자 UUID가 필요합니다.");
+    if (code === "InvalidUpdateError") throw new Error("승인 Case를 중복 재개했습니다. 승인 상태를 새로고침해 다시 확인하세요.");
+    throw new Error(message || detail || `CEO Governance API 오류 (HTTP ${response.status})`);
   }
   return body as T;
 }
@@ -85,7 +90,7 @@ export function decideMandateApproval(approvalId: string, decision: "APPROVED" |
     method: "POST",
     body: JSON.stringify({
       decision,
-      actor_user_id: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim() || "web-user",
+      actor_user_id: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim(),
       at: new Date().toISOString(),
     }),
   });

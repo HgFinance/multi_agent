@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import orchestration.workflows.portfolio_recommendation as portfolio_pipeline
 from orchestration.workflows.portfolio_recommendation import (
@@ -86,6 +88,18 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         assert report["fan_in"] is True
 
     assert all(worker["binding"] is False for worker in result["worker_reports"])
+
+
+def test_worker_registry_loading_is_atomic_under_parallel_fanout():
+    module_name = "portfolio_full_pipeline_risk_workers"
+    portfolio_pipeline.sys.modules.pop(module_name, None)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        modules = list(pool.map(lambda _: portfolio_pipeline._load_module("risk"), range(8)))
+
+    assert all(module is modules[0] for module in modules)
+    assert len(modules[0].WORKER_SPECS) == 4
+    assert sys.modules[module_name] is modules[0]
 
 
 def test_full_pipeline_holds_when_no_suitable_candidate_exists():

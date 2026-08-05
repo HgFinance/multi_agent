@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 os.environ["DATABASE_URL"] = ""
+os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
@@ -44,7 +45,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3003")
 
-    def test_asset_visibility_toggles_exclude_bonds(self) -> None:
+    def test_domestic_stock_projection_is_backend_owned(self) -> None:
         client = TestClient(app)
         response = client.post(
             "/ui/portfolio-recommendations",
@@ -56,10 +57,10 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 "max_drawdown_pct": "0.10",
                 "investment_amount": "1000000",
                 "currency": "KRW",
-                "universe_id": "KOREA_GLOBAL_MIXED",
+                    "universe_id": "KOREA_EQUITY_WATCHLIST",
                 "category": "PORTFOLIO_RECOMMENDATION",
-                "include_stock": False,
-                "include_derivatives": True,
+                    "include_stock": True,
+                    "include_derivatives": False,
                 "query": "",
             },
         )
@@ -74,10 +75,40 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 break
         self.assertIsNotNone(result, runtime)
         assert result is not None
-        self.assertEqual(result["asset_visibility"]["include_stock"], False)
-        self.assertTrue(result["asset_visibility"]["include_derivatives"])
-        self.assertTrue(all(item["asset_class"] in {"LEVERAGED_ETF", "SHORT_EXPOSURE", "DERIVATIVES_HEDGE"} for item in result["instrument_recommendations"]))
-        self.assertFalse(any(item["asset_class"] == "SHORT_TERM_BOND" for item in result["instrument_recommendations"]))
+        self.assertTrue(result["asset_visibility"]["include_stock"])
+        self.assertFalse(result["asset_visibility"]["include_derivatives"])
+        self.assertTrue(result["instrument_recommendations"])
+        self.assertTrue(all(item["asset_class"] == "KOREA_EQUITY" for item in result["instrument_recommendations"]))
+
+    def test_drawdown_ratio_contract_rejects_percent_points(self) -> None:
+        response = TestClient(app).post(
+            "/ui/portfolio-recommendations",
+            json={
+                "user_id": "bff-invalid-drawdown",
+                "mindset": "BALANCED",
+                "experience": "BEGINNER",
+                "investment_horizon_years": 3,
+                "max_drawdown_pct": "10",
+                "investment_amount": "1000000",
+                "currency": "KRW",
+            },
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_drawdown_ratio_contract_rejects_zero(self) -> None:
+        response = TestClient(app).post(
+            "/ui/portfolio-recommendations",
+            json={
+                "user_id": "bff-zero-drawdown",
+                "mindset": "BALANCED",
+                "experience": "BEGINNER",
+                "investment_horizon_years": 3,
+                "max_drawdown_pct": "0",
+                "investment_amount": "1000000",
+                "currency": "KRW",
+            },
+        )
+        self.assertEqual(response.status_code, 422, response.text)
 
     def test_domestic_universe_ignores_out_of_scope_global_allocation(self) -> None:
         result = enrich_suitability_result(
@@ -101,6 +132,30 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(result["unresolved_asset_classes"], [])
         self.assertTrue(all(item["asset_class"] == "KOREA_EQUITY" for item in result["instrument_recommendations"]))
 
+    def test_live_universe_does_not_fallback_to_static_catalog(self) -> None:
+        result = enrich_suitability_result(
+            {
+                "safe_action": "NO_ACTION",
+                "currency": "KRW",
+                "suitability": {
+                    "recommendations": [
+                        {
+                            "portfolio_id": "starter-safety",
+                            "target_allocations": {"KOREA_EQUITY": "1.00"},
+                            "target_amounts": {"KOREA_EQUITY": "1000000.00"},
+                        }
+                    ]
+                },
+            },
+            "KOREA_EQUITY_WATCHLIST",
+            live_instruments=[],
+            live_universe_status="UNAVAILABLE",
+        )
+        self.assertEqual(result["universe"]["status"], "UNAVAILABLE")
+        self.assertEqual(result["instrument_recommendations"], [])
+        self.assertEqual(result["instrument_recommendations_status"], "UNAVAILABLE")
+        self.assertEqual(result["safe_action"], "HOLD")
+
     def test_both_asset_toggles_off_is_safe_hold(self) -> None:
         result = enrich_suitability_result(
             {
@@ -116,7 +171,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                     ]
                 },
             },
-            "KOREA_GLOBAL_MIXED",
+            "KOREA_EQUITY_WATCHLIST",
             include_stock=False,
             include_derivatives=False,
         )
@@ -141,7 +196,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 "max_drawdown_pct": "0.10",
                 "investment_amount": "1000000",
             "currency": "KRW",
-            "universe_id": "KOREA_GLOBAL_MIXED",
+                    "universe_id": "KOREA_EQUITY_WATCHLIST",
             "category": "PORTFOLIO_RECOMMENDATION",
             "query": "국내 종목의 손실 위험과 근거를 설명해줘",
             },
@@ -160,7 +215,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         assert result is not None
         self.assertEqual(result["task_plan"]["category"], "PORTFOLIO_RECOMMENDATION")
         self.assertEqual(result["task_plan"]["requested_departments"], ["research", "risk", "qa", "ceo"])
-        self.assertEqual(result["universe"]["universe_id"], "KOREA_GLOBAL_MIXED")
+        self.assertEqual(result["universe"]["universe_id"], "KOREA_EQUITY_WATCHLIST")
         self.assertTrue(result["instrument_recommendations"])
         self.assertTrue(result["suitability"]["recommendations"][0]["instrument_recommendations"])
         self.assertTrue(any(item["symbol"] == "005930" for item in result["instrument_recommendations"]))
@@ -204,7 +259,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(result["suitability"]["recommendations"][0]["portfolio_id"], "starter-safety")
         self.assertTrue(result["suitability"]["recommendations"][0]["target_allocations"])
         self.assertEqual(result["suitability"]["currency"], "KRW")
-        self.assertEqual(result["suitability"]["recommendations"][0]["target_amounts"]["KOREA_EQUITY"], "100000.00")
+        self.assertEqual(result["suitability"]["recommendations"][0]["target_amounts"]["KOREA_EQUITY"], "1000000.00")
         self.assertTrue(any(message["kind"] == "worker_summary" for message in runtime["messages"]))
         self.assertTrue(any(message["kind"] == "department_handoff" for message in runtime["messages"]))
 

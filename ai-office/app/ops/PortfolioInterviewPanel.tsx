@@ -14,6 +14,7 @@ import {
   advanceMandateCase,
   decideMandateApproval,
   fetchMandateApprovals,
+  fetchCurrentMandate,
   fetchMandateTimeline,
   submitMandateChange,
   type MandateApproval,
@@ -435,14 +436,25 @@ const MANDATE_STAGE_LABEL: Record<string, string> = {
 
 const TERMINAL_MANDATE_STAGES = new Set(["ACTIVATED", "FAST_APPLIED", "REVIEW_REJECTED", "USER_REJECTED", "CANCELLED"]);
 
+function approvalsNeedAdvance(stage: string, approvals: MandateApproval[]): boolean {
+  if (stage === "AWAITING_REVIEW") {
+    const reviews = approvals.filter((approval) => approval.required_role === "RISK" || approval.required_role === "QA");
+    return reviews.some((approval) => ["REJECTED", "EXPIRED", "REVOKED"].includes(approval.decision))
+      || reviews.length >= 2 && reviews.every((approval) => approval.decision === "APPROVED");
+  }
+  return stage === "AWAITING_USER_APPROVAL" && approvals.some((approval) => approval.required_role === "USER" && approval.decision !== "PENDING");
+}
+
 async function refreshMandateWorkflow(state: MandateWorkflowState): Promise<MandateWorkflowState> {
   if (!state.change.case_id) return state;
-  const change = await advanceMandateCase(state.change.case_id);
   const timeline = await fetchMandateTimeline(state.change.case_id);
   const versionObjectId = timeline.events
     .map((event) => event.payload.mandate_version_id)
     .find((value): value is string => typeof value === "string") ?? state.versionObjectId;
   const approvals = versionObjectId ? (await fetchMandateApprovals(versionObjectId)).approvals : state.approvals;
+  const change = approvalsNeedAdvance(state.change.stage, approvals)
+    ? await advanceMandateCase(state.change.case_id)
+    : state.change;
   return { change, approvals, versionObjectId };
 }
 
@@ -476,6 +488,7 @@ function MandateWorkflowStatus({
       )}
       {userApproval ? <div className="mandate-workflow-actions"><button type="button" className="btn btn-primary" onClick={() => onUserDecision("APPROVED")} disabled={busy}>대표 승인</button><button type="button" className="btn btn-ghost" onClick={() => onUserDecision("REJECTED")} disabled={busy}>거절</button></div> : null}
       {workflow.change.stage === "ACTIVATED" ? <button type="button" className="btn btn-primary mandate-analysis-button" onClick={onStartRecommendation} disabled={busy}>활성화된 Mandate로 분석 시작</button> : null}
+      {(workflow.change.stage === "AWAITING_REVIEW" || workflow.change.stage === "AWAITING_USER_APPROVAL") ? <div className="mandate-advisory-action"><button type="button" className="btn btn-ghost mandate-analysis-button" onClick={onStartRecommendation} disabled={busy}>승인 대기 중에도 자문 분석 시작</button><small>Governance 승인과 별개인 비구속 분석이며 주문·원장 변경은 없습니다.</small></div> : null}
       {workflow.change.case_id && workflow.change.stage !== "ACTIVATED" && !userApproval ? <button type="button" className="text-button" onClick={onRefresh} disabled={busy}>승인 상태 새로고침</button> : null}
       {error ? <small className="form-error">⚠️ {error}</small> : null}
     </section>
@@ -498,6 +511,7 @@ export default function PortfolioInterviewPanel({
   const [editing, setEditing] = useState(false);
   const [workflow, setWorkflow] = useState<MandateWorkflowState | null>(null);
   const [workflowError, setWorkflowError] = useState("");
+  const [backendMandate, setBackendMandate] = useState<{ current_version: number; status: string } | null>(null);
   const runtime = snapshot?.operations?.runtime;
   const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
   const connectionError = submitError || (!runtime?.run_id && error) || "";
@@ -536,6 +550,9 @@ export default function PortfolioInterviewPanel({
       setConfigured(true);
     }, 0) : 0;
     let active = true;
+    void fetchCurrentMandate(saved?.mandate_id ?? DEFAULT_MANDATE_DRAFT.mandate_id).then((current) => {
+      if (active) setBackendMandate({ current_version: current.current_version, status: current.status });
+    }).catch(() => undefined);
     void fetchPortfolioUniverses().then((payload) => {
       if (!active) return;
         const domestic = payload.universes.filter((item) => item.universe_id === "KOREA_EQUITY_WATCHLIST");
@@ -604,18 +621,20 @@ export default function PortfolioInterviewPanel({
         priority: 50,
         review_expires_at: new Date(now.getTime() + 86_400_000).toISOString(),
         user_approval_ttl_seconds: 86_400,
-        version_created_by: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim() || input.user_id,
+        version_created_by: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim() || undefined,
         fund_base_currency: input.currency,
       });
       saveMandate(input, policy);
       setWorkflow({ change, approvals: [], versionObjectId: null });
+      setBackendMandate({ current_version: change.version, status: change.stage });
       setConfigured(true);
       setEditing(false);
       onConfigured?.();
       if (change.stage === "FAST_APPLIED") await startRecommendation();
     } catch (cause) {
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
-      setEditing(true);
+      setConfigured(true);
+      setEditing(false);
     } finally {
       setBusy(false);
     }
@@ -636,7 +655,7 @@ export default function PortfolioInterviewPanel({
     }
   }
 
-  async function startActivatedRecommendation() {
+  async function startAnalysis() {
     setBusy(true);
     setSubmitError("");
     try {
@@ -664,12 +683,13 @@ export default function PortfolioInterviewPanel({
           <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : runtime?.status ?? connection.toUpperCase()}</span>
         </div>
         <p className="dash-note portfolio-intro">기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.</p>
-        {workflow && <MandateWorkflowStatus workflow={workflow} busy={busy} error={workflowError} onRefresh={() => { if (workflow) void refreshMandateWorkflow(workflow).then(setWorkflow).catch((cause) => setWorkflowError(cause instanceof Error ? cause.message : String(cause))); }} onUserDecision={(decision) => void decideUser(decision)} onStartRecommendation={() => void startActivatedRecommendation()} />}
+        <p className="dash-note portfolio-source-note">{backendMandate ? `Governance 현재 상태(버전만 조회) · v${backendMandate.current_version} · ${backendMandate.status}` : "현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다."}</p>
+        {workflow && <MandateWorkflowStatus workflow={workflow} busy={busy} error={workflowError} onRefresh={() => { if (workflow) void refreshMandateWorkflow(workflow).then(setWorkflow).catch((cause) => setWorkflowError(cause instanceof Error ? cause.message : String(cause))); }} onUserDecision={(decision) => void decideUser(decision)} onStartRecommendation={() => void startAnalysis()} />}
         {configured && !editing ? (
           <div className="mandate-saved" aria-live="polite">
-            <div><span className="mini-badge mint">ONE-TIME SETUP</span><strong>{input.objective}</strong></div>
+            <div><span className="mini-badge mint">ONE-TIME SETUP</span><span className={`mini-badge ${backendMandate ? "mint" : "yellow"}`}>{backendMandate ? `GOVERNANCE v${backendMandate.current_version}` : "LOCAL DRAFT"}</span><strong>{input.objective}</strong></div>
             <dl><div><dt>성향</dt><dd>{MINDSET_OPTIONS.find((item) => item.value === input.mindset)?.label}</dd></div><div><dt>기준 자본</dt><dd>{Number(input.investment_amount).toLocaleString("ko-KR")} {input.currency}</dd></div><div><dt>단일 종목</dt><dd>{input.max_instrument_weight_pct}%</dd></div><div><dt>총 익스포저</dt><dd>{input.max_gross_exposure_pct}%</dd></div><div><dt>승인</dt><dd>{input.approval_mode === "AUTO" ? "자동" : "수동 승인"}</dd></div></dl>
-            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
+            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
           </div>
         ) : (
           <form id="portfolio-interview-form" className="mandate-form" onSubmit={submit}>

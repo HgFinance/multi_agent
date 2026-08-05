@@ -15,6 +15,7 @@ import json
 import operator
 import os
 import sys
+from threading import RLock
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,6 +111,17 @@ CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _configured_worker_runtime() -> str:
+    """Resolve the portfolio Worker runtime without hiding explicit config."""
+
+    configured = os.getenv("PORTFOLIO_WORKER_RUNTIME", "").strip().lower()
+    if configured:
+        return configured
+    if os.getenv("OLLAMA_BASE_URL") and os.getenv("OLLAMA_CHAT_MODEL"):
+        return "ollama"
+    return "deterministic_test"
+
+
 def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Create a bounded department plan from a free-form user request.
 
@@ -172,19 +184,27 @@ _MODULE_PATHS = {
     "ceo": ROOT / "departments/00-ceo-office/employee_workers.py",
 }
 
+_MODULE_LOAD_LOCK = RLock()
+
 
 def _load_module(stage: str) -> Any:
     name = f"portfolio_full_pipeline_{stage}_workers"
-    if name in sys.modules:
-        return sys.modules[name]
-    path = _MODULE_PATHS[stage]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"worker module unavailable: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    with _MODULE_LOAD_LOCK:
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "WORKER_SPECS"):
+            return module
+        path = _MODULE_PATHS[stage]
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"worker module unavailable: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(name, None)
+            raise
+        return module
 
 
 def _deterministic_worker_llm(system: str, prompt: str) -> str:
@@ -397,7 +417,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
         "data_source": data_context.get("source", "TEST"),
-        "worker_runtime": os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test"),
+        "worker_runtime": _configured_worker_runtime(),
         "data_quality": data_context.get("quality_status", "TEST"),
         "read_only": True,
         "external_writes": False,
@@ -555,7 +575,7 @@ async def _invoke_worker(
         # Let the operator projection observe a real running Worker graph in
         # local TEST mode; this does not create work or alter any result.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
-        configured_runtime = os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test").strip().lower()
+        configured_runtime = _configured_worker_runtime()
         use_ollama = configured_runtime in {"ollama", "live"}
         worker_llm = (
             default_worker_llm
@@ -1137,7 +1157,13 @@ async def run_portfolio_recommendation_pipeline_async(
             event_callback(forwarded)
 
     app = build_portfolio_recommendation_graph(event_callback=emit)
-    state = await app.ainvoke(_initial_state(profile, candidates, data_context))
+    state = await app.ainvoke(
+        _initial_state(profile, candidates, data_context),
+        config={
+            "run_name": "portfolio-recommendation-full",
+            "tags": ["hgfinance", "portfolio-recommendation", f"trace_id:{event_run_id}"],
+        },
+    )
     result = dict(state.get("result", state))
     result["pipeline_events"] = pipeline_events
     result["pipeline_event_count"] = len(pipeline_events)

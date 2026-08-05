@@ -27,18 +27,20 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(ROOT / ".env", override=False)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
@@ -46,6 +48,7 @@ sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "ledge
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 
 import accounting
+
 # 여러 부서의 prototype이 `repository`, `ledger`, `portfolio` 같은 최상위
 # 모듈명을 사용한다. pytest가 Risk/QA를 먼저 수집해도 회계 Read Model이
 # 다른 부서 파일을 잡지 않도록, 회계 모듈을 로드하는 동안만 의존성을 격리한다.
@@ -62,10 +65,6 @@ finally:
             sys.modules[_name] = _accounting_previous_modules[_name]
 import hermes_cli
 import trading
-from ui_read_model import build_ui_snapshot
-from operations_read_model import build_operations_snapshot
-from portfolio_runtime import RUNTIME
-from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 from agent_status import agent_status_snapshot
 from command_service import (
     COMMAND_SERVICE,
@@ -75,6 +74,15 @@ from command_service import (
 )
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
+from operations_read_model import build_operations_snapshot
+from portfolio_runtime import RUNTIME
+from portfolio_schemas import (
+    PortfolioRecommendationStartResponse,
+    PortfolioRecommendationStatusResponse,
+    PortfolioUniverseListResponse,
+)
+from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
+from ui_read_model import build_ui_snapshot
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
@@ -209,7 +217,7 @@ def ui_integrations() -> dict[str, dict[str, object]]:
     return _integration_status()
 
 
-@app.get("/ui/portfolio-universes")
+@app.get("/ui/portfolio-universes", response_model=PortfolioUniverseListResponse)
 def ui_portfolio_universes() -> dict[str, object]:
     """Return backend-owned, read-only universe choices for the interview form."""
     return {
@@ -225,20 +233,42 @@ class PortfolioRecommendationRequest(BaseModel):
     mindset: str
     experience: str
     investment_horizon_years: int = Field(ge=1, le=100)
-    max_drawdown_pct: str = Field(pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$")
+    max_drawdown_pct: str = Field(
+        pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$",
+        description=(
+            "허용 가능한 최대 손실률의 비율값입니다. 10%는 '0.10'으로 입력하며 "
+            "'10'은 허용하지 않습니다. 범위는 0 초과 1 이하입니다."
+        ),
+        examples=["0.10"],
+    )
+
+    @field_validator("max_drawdown_pct")
+    @classmethod
+    def validate_max_drawdown_ratio(cls, value: str) -> str:
+        try:
+            ratio = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError("max_drawdown_pct must be a decimal ratio") from exc
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("max_drawdown_pct must be greater than 0 and at most 1")
+        return value
     liquidity_need: str = "MEDIUM"
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
     category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
     include_stock: bool = Field(default=True, description="주식 자산을 추천 결과에 포함할지 여부")
-    include_derivatives: bool = Field(default=True, description="파생상품 자산을 추천 결과에 포함할지 여부")
+    include_derivatives: bool = Field(default=False, description="파생상품 자산을 추천 결과에 포함할지 여부(현재 국내 주식 전용 범위에서는 기본 OFF)")
     query: str = Field(default="", max_length=2000)
     as_of: str | None = None
     fund_id: str | None = None
 
 
-@app.post("/ui/portfolio-recommendations", status_code=202)
+@app.post(
+    "/ui/portfolio-recommendations",
+    status_code=202,
+    response_model=PortfolioRecommendationStartResponse,
+)
 async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
     """Start the advisory LangGraph and return a process-local run reference."""
 
@@ -255,7 +285,10 @@ async def start_portfolio_recommendation(request: PortfolioRecommendationRequest
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/ui/portfolio-recommendations/{run_id}")
+@app.get(
+    "/ui/portfolio-recommendations/{run_id}",
+    response_model=PortfolioRecommendationStatusResponse,
+)
 def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
     run = RUNTIME.get(run_id)
     if run is None:
@@ -268,7 +301,10 @@ class PortfolioRecommendationApprovalRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=500)
 
 
-@app.post("/ui/portfolio-recommendations/{run_id}/approval")
+@app.post(
+    "/ui/portfolio-recommendations/{run_id}/approval",
+    response_model=PortfolioRecommendationStatusResponse,
+)
 def decide_portfolio_recommendation(
     run_id: str,
     request: PortfolioRecommendationApprovalRequest,
