@@ -8,9 +8,11 @@ No order, ledger, credential, or production side effect is permitted.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
+import os
 import operator
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -40,6 +42,94 @@ DEPARTMENTS: tuple[str, ...] = (
     "accounting",
     "ceo",
 )
+
+_QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
+    "research-data-worker": ("종목", "주식", "시장", "가격", "시세", "유니버스", "국내", "글로벌"),
+    "microstructure-worker": ("유동성", "거래량", "호가", "체결", "스프레드"),
+    "technical-signal-worker": ("차트", "기술적", "추세", "모멘텀", "기술 분석"),
+    "fundamental-valuation-worker": ("재무", "실적", "밸류", "가치", "저평가", "고평가"),
+    "news-macro-worker": ("뉴스", "금리", "환율", "거시", "경제", "정책"),
+    "evidence-rag-worker": ("근거", "출처", "자료", "검증", "인용"),
+    "market-thesis-worker": ("전망", "강세", "약세", "시장 논리"),
+    "trade-proposal-worker": ("매수", "매도", "거래", "리밸런싱"),
+    "order-constraint-worker": ("주문", "한도", "제약", "컴플라이언스"),
+    "execution-planning-worker": ("체결", "실행", "집행"),
+    "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
+    "derivatives-structure-worker": ("파생", "레버리지", "공매도", "옵션", "선물"),
+    "market-liquidity-worker": ("위험", "리스크", "손실", "변동", "유동성"),
+    "pre-trade-risk-worker": ("주문", "매수", "매도", "리밸런싱", "한도"),
+    "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사"),
+    "derivatives-counterparty-worker": ("파생", "레버리지", "공매도", "헤지", "거래상대방"),
+    "portfolio-control-worker": ("포트폴리오", "비중", "보유", "포지션"),
+    "ledger-reconciliation-worker": ("원장", "대사", "거래내역"),
+    "nav-close-worker": ("nav", "기준가", "마감"),
+    "treasury-liquidity-worker": ("현금", "유동성", "자금"),
+    "pnl-attribution-worker": ("pnl", "손익", "성과"),
+    "investor-reporting-worker": ("보고서", "투자자", "리포트"),
+    "valuation-corporate-actions-worker": ("평가", "기업행동", "배당", "분할"),
+    "fee-accrual-tax-worker": ("세금", "수수료", "보수", "비용"),
+    "evidence-qa-worker": ("근거", "출처", "검증", "인용"),
+    "hallucination-critic-worker": ("환각", "모순", "검증", "신뢰"),
+    "model-and-internal-audit-worker": ("모델", "감사", "재현"),
+    "ops-and-permission-worker": ("권한", "운영", "도구", "승인"),
+    "incident-postmortem-worker": ("사고", "장애", "재발", "인시던트"),
+}
+
+_QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "research": ("research-data-worker", "evidence-rag-worker"),
+    "trading": ("market-thesis-worker", "trade-proposal-worker"),
+    "risk": ("market-liquidity-worker", "pre-trade-risk-worker"),
+    "qa": ("evidence-qa-worker", "hallucination-critic-worker"),
+    "accounting": ("portfolio-control-worker", "investor-reporting-worker"),
+    "ceo": ("executive-briefing-worker",),
+}
+
+
+def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Create a bounded department plan from a free-form user request.
+
+    The request remains available to the workers. This deterministic first pass
+    is a safety guard: it limits which department may be called, while the CEO
+    worker can explain and refine the plan. It never creates orders or changes
+    financial state.
+    """
+    query = " ".join(str(profile.get("query", "")).split())
+    if not query:
+        return {
+            "mode": "portfolio_default",
+            "rewritten_query": "사용자 투자성향과 투자 유니버스에 맞는 비구속적 포트폴리오 후보를 검토한다.",
+            "requested_departments": list(DEPARTMENTS),
+            "routing_basis": "structured_suitability_default",
+        }
+
+    normalized = query.lower()
+    stages: set[str] = {"research", "risk", "qa", "ceo"}
+    keywords: dict[str, tuple[str, ...]] = {
+        "trading": ("주문", "매수", "매도", "체결", "리밸런싱", "거래"),
+        "accounting": ("세금", "수수료", "원장", "nav", "현금", "현금흐름", "대사", "회계"),
+        "research": ("종목", "주식", "etf", "뉴스", "시장", "수익", "유니버스", "업종", "국내", "글로벌"),
+        "risk": ("위험", "리스크", "손실", "변동", "헤지", "레버리지", "공매도", "보수적"),
+        "qa": ("검증", "근거", "신뢰", "감사", "오류", "검토", "출처"),
+    }
+    matched_terms: dict[str, list[str]] = {}
+    for stage, terms in keywords.items():
+        hits = [term for term in terms if term in normalized]
+        if hits:
+            stages.add(stage)
+            matched_terms[stage] = hits
+
+    ordered = [stage for stage in DEPARTMENTS if stage in stages]
+    return {
+        "mode": "free_query",
+        "original_query": query,
+        "rewritten_query": (
+            f"{query} 사용자 요청을 적합성·근거·리스크 관점에서 검토하고, "
+            "주문이나 장부 변경 없이 결과를 설명한다."
+        ),
+        "requested_departments": ordered,
+        "matched_terms": matched_terms,
+        "routing_basis": "bounded_query_intent_router",
+    }
 
 _MODULE_PATHS = {
     "research": ROOT / "departments/01-research/employee_workers.py",
@@ -107,12 +197,40 @@ def _specs(stage: str) -> tuple[WorkerSpec, ...]:
     return tuple(_load_module(stage).WORKER_SPECS)
 
 
+def _query_selected_specs(
+    stage: str,
+    specs: Sequence[WorkerSpec],
+    payload: Mapping[str, Any],
+) -> tuple[WorkerSpec, ...]:
+    task_plan = payload.get("task_plan")
+    query = str(payload.get("user_query", "")).lower().strip()
+    if not query or not isinstance(task_plan, Mapping) or task_plan.get("mode") != "free_query":
+        return tuple(specs)
+
+    matched = tuple(
+        spec
+        for spec in specs
+        if any(term in query for term in _QUERY_WORKER_TERMS.get(spec.worker_id, ()))
+    )
+    if matched:
+        return matched
+    fallback_ids = set(_QUERY_WORKER_FALLBACKS.get(stage, ()))
+    return tuple(spec for spec in specs if spec.worker_id in fallback_ids)
+
+
 def _selected_specs(stage: str, payload: Mapping[str, Any]) -> tuple[WorkerSpec, ...]:
+    task_plan = payload.get("task_plan")
+    if isinstance(task_plan, Mapping):
+        requested_departments = task_plan.get("requested_departments")
+        if isinstance(requested_departments, Sequence) and stage not in requested_departments:
+            return ()
     module = _load_module(stage)
     selector = getattr(module, "_should_run", None)
     if selector is None:
-        return tuple(spec for spec in module.WORKER_SPECS if should_run(spec, payload))
-    return tuple(spec for spec in module.WORKER_SPECS if selector(spec, dict(payload)))
+        selected = tuple(spec for spec in module.WORKER_SPECS if should_run(spec, payload))
+    else:
+        selected = tuple(spec for spec in module.WORKER_SPECS if selector(spec, dict(payload)))
+    return _query_selected_specs(stage, selected, payload)
 
 
 def _hash(value: Any) -> str:
@@ -131,6 +249,7 @@ class PortfolioPipelineState(TypedDict, total=False):
     case_id: str
     as_of: str
     user_profile: dict[str, Any]
+    task_plan: dict[str, Any]
     portfolio_candidates: list[dict[str, Any]]
     data_context: dict[str, Any]
     suitability: dict[str, Any]
@@ -240,6 +359,8 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
             }
         ),
         "user_profile": _profile_context(state.get("user_profile", {})),
+        "user_query": state.get("user_profile", {}).get("query", ""),
+        "task_plan": state.get("task_plan", {}),
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
         "data_source": data_context.get("source", "TEST"),
@@ -345,6 +466,10 @@ async def _invoke_worker(
         }
     if event_callback:
         event_callback({"kind": "worker_started", "stage": stage, "worker_id": spec.worker_id, "role": spec.role})
+    if str(payload.get("source", "TEST")).upper() == "TEST":
+        # Let the operator projection observe a real running Worker graph in
+        # local TEST mode; this does not create work or alter any result.
+        await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
     worker_llm = (
         _deterministic_worker_llm
         if str(payload.get("source", "TEST")).upper() == "TEST"
@@ -433,6 +558,7 @@ def _initial_state(
         "case_id": f"case-{trace_id}",
         "as_of": now,
         "user_profile": dict(profile),
+        "task_plan": build_ceo_task_plan(profile),
         "portfolio_candidates": [dict(item) for item in candidates],
         "data_context": dict(
             data_context
@@ -601,22 +727,60 @@ def build_portfolio_recommendation_graph(
         ]
 
 
+    def _plan_skip_reports(
+        stage: str,
+        specs: Sequence[WorkerSpec],
+        input_hash: str | None,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "stage": stage,
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "status": "SKIPPED_SAFE",
+                "attempts": 0,
+                "output": {
+                    "worker_id": spec.worker_id,
+                    "summary": "CEO task plan did not select this department for the user request.",
+                    "confidence": 1.0,
+                    "evidence_refs": [],
+                    "escalate": False,
+                    "schema_valid": True,
+                },
+                "error": None,
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+                "binding": False,
+            }
+            for spec in specs
+        ]
+
+
     def route_stage(stage: str) -> Callable[[PortfolioPipelineState], list[Send]]:
         def route(state: PortfolioPipelineState) -> list[Send]:
             payload = _stage_payload(state, stage)
+            task_plan = payload.get("task_plan", {})
+            requested_departments = task_plan.get("requested_departments", DEPARTMENTS) if isinstance(task_plan, Mapping) else DEPARTMENTS
+            if stage not in requested_departments:
+                if event_callback:
+                    event_callback({
+                        "kind": "department_skipped",
+                        "stage": stage,
+                        "message": "CEO task plan에 따라 이 부서는 이번 요청에서 호출하지 않습니다.",
+                    })
+                return [
+                    Send(
+                        f"{stage}_fan_in",
+                        {"worker_reports": _plan_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
+                    )
+                ]
             if not _live_worker_inputs_ready(state):
                 if event_callback:
                     event_callback({"kind": "department_blocked", "stage": stage, "message": "PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다."})
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {
-                            "worker_reports": _safe_skip_reports(
-                                stage,
-                                _specs(stage),
-                                payload.get("input_hash"),
-                            ),
-                        },
+                        {"worker_reports": _safe_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
                     )
                 ]
             selected = _selected_specs(stage, payload)
@@ -626,35 +790,15 @@ def build_portfolio_recommendation_graph(
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {
-                            "worker_reports": [
-                                {
-                                    "stage": stage,
-                                    "worker_id": f"{stage}-no-worker",
-                                    "status": "DEGRADED",
-                                    "error": "NO_ELIGIBLE_WORKER",
-                                    "binding": False,
-                                }
-                            ]
-                        },
+                        {"worker_reports": [{"stage": stage, "worker_id": f"{stage}-no-worker", "status": "DEGRADED", "error": "NO_ELIGIBLE_WORKER", "binding": False}]},
                     )
                 ]
             if event_callback:
-                event_callback(
-                    {
-                        "kind": "department_started",
-                        "stage": stage,
-                        "worker_ids": [spec.worker_id for spec in selected],
-                    }
-                )
+                event_callback({"kind": "department_started", "stage": stage, "worker_ids": [spec.worker_id for spec in selected]})
             return [
                 Send(
                     f"{stage}_worker",
-                    {
-                        "stage": stage,
-                        "worker_id": spec.worker_id,
-                        "worker_input": payload,
-                    },
+                    {"stage": stage, "worker_id": spec.worker_id, "worker_input": payload},
                 )
                 for spec in selected
             ]
@@ -675,11 +819,16 @@ def build_portfolio_recommendation_graph(
     def fan_in_node(stage: str) -> Callable[[PortfolioPipelineState], dict[str, Any]]:
         def fan_in(state: PortfolioPipelineState) -> dict[str, Any]:
             reports = [item for item in state.get("worker_reports", []) if item.get("stage") == stage]
-            failed = [item["worker_id"] for item in reports if item.get("status") != "COMPLETED"]
+            failed = [
+                item["worker_id"]
+                for item in reports
+                if item.get("status") not in {"COMPLETED", "SKIPPED_SAFE"}
+            ]
+            skipped = bool(reports) and all(item.get("status") == "SKIPPED_SAFE" for item in reports)
             result: dict[str, Any] = {
                 "department_reports": {
                     stage: {
-                        "status": "DEGRADED" if failed else "COMPLETED",
+                        "status": "SKIPPED" if skipped else "DEGRADED" if failed else "COMPLETED",
                         "worker_ids": [item["worker_id"] for item in reports],
                         "executed": len(reports),
                         "failed": failed,
@@ -697,9 +846,11 @@ def build_portfolio_recommendation_graph(
                         "kind": "department_completed",
                         "stage": stage,
                         "status": result["department_reports"][stage]["status"],
-                        "message": (
-                            f"{stage} 부서가 {result['department_reports'][stage]['executed']}개 Worker 결과를 취합했습니다."
-                        ),
+                            "message": (
+                                "CEO task plan에 따라 이번 요청에서 호출하지 않았습니다."
+                                if result["department_reports"][stage]["status"] == "SKIPPED"
+                                else f"{stage} 부서가 {result['department_reports'][stage]['executed']}개 Worker 결과를 취합했습니다."
+                            ),
                     }
                 )
             return result
@@ -709,7 +860,9 @@ def build_portfolio_recommendation_graph(
     def finalize(state: PortfolioPipelineState) -> dict[str, Any]:
         reports = state.get("department_reports", {})
         degraded = [
-            stage for stage, report in reports.items() if report.get("status") != "COMPLETED"
+            stage
+            for stage, report in reports.items()
+            if report.get("status") not in {"COMPLETED", "SKIPPED"}
         ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})
@@ -729,6 +882,8 @@ def build_portfolio_recommendation_graph(
             "binding": False,
             "trace_id": state.get("trace_id"),
             "case_id": state.get("case_id"),
+            "user_query": state.get("user_profile", {}).get("query", ""),
+            "task_plan": state.get("task_plan", {}),
             "suitability": state.get("suitability", {}),
             "data_context": data_context,
             "risk_gate": state.get("risk_gate", {}),

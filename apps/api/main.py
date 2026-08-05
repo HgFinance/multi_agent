@@ -50,6 +50,7 @@ import trading
 from ui_read_model import build_ui_snapshot
 from operations_read_model import build_operations_snapshot
 from portfolio_runtime import RUNTIME
+from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
@@ -117,6 +118,15 @@ def ui_integrations() -> dict[str, dict[str, object]]:
     return _integration_status()
 
 
+@app.get("/ui/portfolio-universes")
+def ui_portfolio_universes() -> dict[str, object]:
+    """Return backend-owned, read-only universe choices for the interview form."""
+    return {
+        "default_universe_id": DEFAULT_UNIVERSE_ID,
+        "universes": universe_options(),
+    }
+
+
 class PortfolioRecommendationRequest(BaseModel):
     """User suitability inputs; this route never accepts orders or credentials."""
 
@@ -128,6 +138,8 @@ class PortfolioRecommendationRequest(BaseModel):
     liquidity_need: str = "MEDIUM"
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
+    universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
+    query: str = Field(default="", max_length=2000)
     as_of: str | None = None
     fund_id: str | None = None
 
@@ -136,6 +148,8 @@ class PortfolioRecommendationRequest(BaseModel):
 async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
     """Start the advisory LangGraph and return a process-local run reference."""
 
+    if get_universe(request.universe_id) is None:
+        raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
     profile = request.model_dump(exclude_none=True)
     if "as_of" not in profile:
         from datetime import datetime, timezone

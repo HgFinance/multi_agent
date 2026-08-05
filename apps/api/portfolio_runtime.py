@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from portfolio_universe import DEFAULT_UNIVERSE_ID, enrich_suitability_result
+
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
 )
@@ -41,6 +43,38 @@ def _now() -> str:
 def _one_line(value: Any, limit: int = 180) -> str:
     text = " ".join(str(value or "").split())
     return text[:limit].rstrip() or "실행 결과 요약이 없습니다."
+
+
+def _department_label(department: str | None) -> str:
+    return {
+        "research-department": "리서치본부",
+        "trading-department": "트레이딩본부",
+        "risk-management": "리스크관리본부",
+        "qa-department": "AI QA·감사",
+        "accounting-portfolio-department": "회계·포트폴리오본부",
+        "ceo-agent": "CEO 오피스",
+    }.get(department or "", department or "부서")
+
+
+def _event_message(
+    *,
+    kind: str,
+    department: str | None,
+    worker_id: str | None = None,
+    role: str | None = None,
+    summary: Any = None,
+) -> str:
+    """Turn internal TEST output into one dynamic operator-facing sentence."""
+    department_name = _department_label(department)
+    worker_name = " ".join(str(role or worker_id or "Worker").split())
+    if kind == "worker_started":
+        return f"{department_name}의 {worker_name}가 근거 검토를 시작했습니다."
+    if kind == "worker_completed":
+        clean = _one_line(summary)
+        if clean.lower().startswith("test ") or clean.lower().startswith("worker graph"):
+            return f"{department_name}의 {worker_name}가 검토를 완료했습니다."
+        return f"{department_name}의 {worker_name} 검토 완료 — {clean}"
+    return _one_line(summary or f"{department_name} 실행 이벤트")
 
 
 def load_test_catalog() -> list[dict[str, Any]]:
@@ -147,7 +181,7 @@ class PortfolioRuntime:
                 row = job["departments"][department]
                 row.update({"status": "RUNNING", "current_stage": stage, "active_worker_ids": worker_ids, "updated_at": _now()})
                 job["phase"] = f"{department} worker 실행 중"
-                self._message(job, f"{department}의 독립 Worker {len(worker_ids)}개 그래프 실행을 시작합니다.", kind="department_started", department=department)
+                self._message(job, f"{_department_label(department)}의 독립 Worker {len(worker_ids)}개 그래프 실행을 시작합니다.", kind="department_started", department=department)
             elif kind == "worker_started" and department:
                 worker = {
                     "worker_id": str(event.get("worker_id", "")),
@@ -160,19 +194,53 @@ class PortfolioRuntime:
                 }
                 job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker["worker_id"]]
                 job["active_workers"].append(worker)
+                self._message(
+                    job,
+                    _event_message(
+                        kind="worker_started",
+                        department=department,
+                        worker_id=worker["worker_id"],
+                        role=worker["role"],
+                    ),
+                    kind="worker_started",
+                    department=department,
+                    worker_id=worker["worker_id"],
+                )
                 job["departments"][department]["active_worker_ids"] = [item["worker_id"] for item in job["active_workers"] if item["department_code"] == department]
             elif kind == "worker_completed" and department:
                 worker_id = str(event.get("worker_id", ""))
                 summary = _one_line(event.get("summary"))
                 job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker_id]
                 job["departments"][department]["active_worker_ids"] = [item["worker_id"] for item in job["active_workers"] if item["department_code"] == department]
-                self._message(job, summary, kind="worker_summary", department=department, worker_id=worker_id)
+                self._message(
+                    job,
+                    _event_message(
+                        kind="worker_completed",
+                        department=department,
+                        worker_id=worker_id,
+                        role=str(event.get("role", "")),
+                        summary=summary,
+                    ),
+                    kind="worker_summary",
+                    department=department,
+                    worker_id=worker_id,
+                )
+            elif kind == "department_skipped" and department:
+                row = job["departments"][department]
+                row.update({
+                    "status": "SKIPPED",
+                    "current_stage": None,
+                    "active_worker_ids": [],
+                    "last_message": _one_line(event.get("message")),
+                    "updated_at": _now(),
+                })
+                self._message(job, f"{_department_label(department)}는 CEO task plan에 따라 이번 요청에서 호출하지 않습니다.", kind="department_skipped", department=department)
             elif kind == "department_completed" and department:
                 status = str(event.get("status", "DEGRADED"))
                 row = job["departments"][department]
-                row.update({"status": "COMPLETED" if status == "COMPLETED" else "DEGRADED", "current_stage": None, "active_worker_ids": [], "last_message": _one_line(event.get("message")), "updated_at": _now()})
+                row.update({"status": "COMPLETED" if status == "COMPLETED" else "SKIPPED" if status == "SKIPPED" else "DEGRADED", "current_stage": None, "active_worker_ids": [], "last_message": _one_line(event.get("message")), "updated_at": _now()})
                 current_index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else -1
-                if current_index >= 0 and current_index + 1 < len(STAGE_ORDER):
+                if status != "SKIPPED" and current_index >= 0 and current_index + 1 < len(STAGE_ORDER):
                     next_stage = STAGE_ORDER[current_index + 1]
                     self._handoff(job, stage, next_stage, str(event.get("message", "")))
             elif kind == "department_blocked" and department:
@@ -194,6 +262,10 @@ class PortfolioRuntime:
                     load_test_catalog(),
                     event_callback=lambda event: self._event(job_id, event),
                 )
+            result = enrich_suitability_result(
+                result,
+                str(profile.get("universe_id", DEFAULT_UNIVERSE_ID)),
+            )
             with self._lock:
                 job = self._job_for(job_id)
                 if job is None:
@@ -229,10 +301,12 @@ class PortfolioRuntime:
             result = job.get("result")
             if not isinstance(result, dict):
                 raise RuntimeError("portfolio_recommendation_result_not_ready")
-            if decision == "APPROVE":
-                suitability = result.get("suitability", {})
-                if result.get("pipeline_status") != "COMPLETED" or suitability.get("status") != "MATCHED":
-                    raise RuntimeError("portfolio_recommendation_approval_blocked")
+        if decision == "APPROVE":
+            suitability = result.get("suitability", {})
+            if result.get("pipeline_status") != "COMPLETED" or suitability.get("status") != "MATCHED":
+                raise RuntimeError("portfolio_recommendation_approval_blocked")
+            if result.get("instrument_recommendations_status") != "COMPLETE":
+                raise RuntimeError("portfolio_instrument_recommendations_incomplete")
             if decision not in {"APPROVE", "REJECT"}:
                 raise RuntimeError("portfolio_recommendation_approval_invalid")
             approval = {

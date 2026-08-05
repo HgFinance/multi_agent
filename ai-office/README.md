@@ -38,6 +38,8 @@ npm --prefix ai-office install
 NEXT_PUBLIC_BFF_URL=http://localhost:8000 npm run dev -- --port 3000
 ```
 
+현재 Worker 실행 구간을 화면에 반영하기 위해 Snapshot 폴링은 `400ms`로 동작한다.
+
 기본 주소는 `http://localhost:3000`이다.
 
 ## BFF 연결

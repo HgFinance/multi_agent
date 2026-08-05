@@ -96,6 +96,8 @@ class InvestorProfile(BaseModel):
     liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
     investment_amount: Decimal = Field(default=Decimal("1000000"), gt=0)
     currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
+    universe_id: str = Field(default="KOREA_GLOBAL_MIXED", min_length=1, max_length=128)
+    query: str = Field(default="", max_length=2000)
     as_of: datetime
     profile_version: int = Field(default=1, ge=1)
 

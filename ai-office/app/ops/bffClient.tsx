@@ -13,7 +13,9 @@ export type BffFeed = {
   refresh: () => Promise<void>;
 };
 
-const POLL_INTERVAL_MS = 5_000;
+// Worker runs are short in TEST mode; a 5s interval only showed the final batch.
+// Keep the projection read-only while polling often enough to render live workers.
+const POLL_INTERVAL_MS = 400;
 const BffContext = createContext<BffFeed | null>(null);
 
 function explainBffError(cause: unknown): string {
