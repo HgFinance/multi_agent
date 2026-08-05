@@ -139,6 +139,7 @@ class PortfolioRecommendationRequest(BaseModel):
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
+    category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
     query: str = Field(default="", max_length=2000)
     as_of: str | None = None
     fund_id: str | None = None

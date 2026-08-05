@@ -127,6 +127,10 @@ def enrich_suitability_result(
         portfolio_id = recommendation.get("portfolio_id")
         for row in rows:
             row["portfolio_id"] = portfolio_id
+        # Keep the rows both at the result root and beside each portfolio
+        # candidate. The nested copy makes the UI resilient to older BFF
+        # projections while the root copy remains the canonical collection.
+        recommendation["instrument_recommendations"] = rows
         instrument_recommendations.extend(rows)
         unresolved.update(missing)
 

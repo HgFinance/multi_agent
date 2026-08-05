@@ -21,6 +21,7 @@ export type PortfolioInterviewInput = {
   investment_amount: string;
   currency: "KRW" | "USD" | "EUR";
   universe_id: string;
+  category: string;
   query: string;
 };
 

@@ -54,9 +54,10 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 "investment_horizon_years": 3,
                 "max_drawdown_pct": "0.10",
                 "investment_amount": "1000000",
-                "currency": "KRW",
-                "universe_id": "KOREA_GLOBAL_MIXED",
-                "query": "국내 종목의 손실 위험과 근거를 설명해줘",
+            "currency": "KRW",
+            "universe_id": "KOREA_GLOBAL_MIXED",
+            "category": "PORTFOLIO_RECOMMENDATION",
+            "query": "국내 종목의 손실 위험과 근거를 설명해줘",
             },
         )
         self.assertEqual(response.status_code, 202, response.text)
@@ -71,9 +72,11 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 break
         self.assertIsNotNone(result, runtime)
         assert result is not None
+        self.assertEqual(result["task_plan"]["category"], "PORTFOLIO_RECOMMENDATION")
         self.assertEqual(result["task_plan"]["requested_departments"], ["research", "risk", "qa", "ceo"])
         self.assertEqual(result["universe"]["universe_id"], "KOREA_GLOBAL_MIXED")
         self.assertTrue(result["instrument_recommendations"])
+        self.assertTrue(result["suitability"]["recommendations"][0]["instrument_recommendations"])
         self.assertTrue(any(item["symbol"] == "005930" for item in result["instrument_recommendations"]))
         self.assertTrue(all(item["expected_return"] is None for item in result["instrument_recommendations"]))
         self.assertFalse(any("TEST async" in message["text"] for message in runtime["messages"]))

@@ -111,6 +111,9 @@ test("keeps one portfolio analysis entry point", async () => {
   assert.match(page, /a\.status === "업무 중"/);
   assert.doesNotMatch(panel, /LangGraph 분석 시작/);
   assert.doesNotMatch(panel, /현금화 필요/);
+  assert.match(panel, /분석 카테고리/);
+  assert.match(panel, /CEO TASK ROUTING/);
+  assert.match(panel, /className="ticker"/);
   assert.doesNotMatch(client, /liquidity_need/);
 });
 
