@@ -27,6 +27,25 @@ CEO router
                  └─ next department head
 ```
 
+## 부서 Worker 실행 계약
+
+각 부서의 `employee_workers.py`는 명시된 `WorkerSpec.trigger`가 참일 때만
+해당 Worker를 실행한다. 실행 가능한 Worker는 `asyncio.gather`로 각각의
+독립 LangGraph(`tool → worker_llm → validate`)에 fan-out하고, 입력 순서를
+보존한 결과 목록으로 fan-in한다. 따라서 결과의 `workers`, `executed`,
+`failed`, `not_executed`가 모두 같은 `input_hash`를 공유한다.
+
+동기 CLI/Paper 경계는 `run_coroutine_sync`를 통해 이 비동기 실행 경로를
+호출한다. 동기 호환 API가 있다고 해서 순차 Worker 실행으로 되돌아가지
+않는다. Risk·QA는 같은 토폴로지를 사용하되 각 부서의 Skill 검증과
+`SkillTrace`/감사 Trace를 각 Worker 그래프 내부에 유지한다.
+
+실행 결과의 `runtime.topology`는
+`async_fan_out_fan_in_independent_graphs`여야 한다. 트리거가 거짓인 Worker는
+그래프를 만들거나 LLM을 호출하지 않고 `not_executed`에 기록한다. Worker
+실패는 다른 Worker의 결과를 성공으로 바꾸지 않으며 부서 결과는
+`DEGRADED`/안전 동작으로 전달된다.
+
 - 사용자의 자유 질의와 카테고리는 CEO task plan의 입력이다. `requested_departments`
   에서 선택되지 않은 부서는 `SKIPPED_SAFE`로 기록하고 실행하지 않는다.
 - 부서 간 전달자는 `department:head`이고, Worker끼리 다른 부서를 직접 호출하지

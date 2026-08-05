@@ -7,6 +7,7 @@ non-binding context; deterministic QA engines remain the source of truth.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -16,9 +17,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langgraph.graph import END, StateGraph
+
+from departments.employee_worker_runtime import run_coroutine_sync
 
 
 def _load_skill_package() -> None:
@@ -583,7 +586,7 @@ def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     return bool(payload.get("incident"))
 
 
-def run_employee_workers(
+def _run_employee_workers_sequential(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
     trace_bridge: Any | None = None,
@@ -667,3 +670,139 @@ def run_employee_workers(
         "degraded": bool(failed),
         "input_hash": input_hash,
     }
+
+
+async def run_employee_workers_async(
+    payload: dict[str, Any],
+    llm: WorkerLLM | None = None,
+    trace_bridge: Any | None = None,
+) -> dict[str, Any]:
+    """Fan out guarded QA Worker graphs and deterministically fan them in."""
+
+    tools: dict[str, WorkerTool] = {
+        "evidence-qa-worker": _evidence_tool,
+        "hallucination-critic-worker": _hallucination_tool,
+        "model-and-internal-audit-worker": _audit_tool,
+        "ops-and-permission-worker": _ops_tool,
+        "incident-postmortem-worker": _incident_tool,
+    }
+    reports: list[dict[str, Any]] = []
+    trace_errors: list[str] = []
+    input_hash = str(
+        payload.get("input_hash")
+        or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
+    )
+
+    if (
+        trace_bridge is None
+        and os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() == "true"
+    ):
+        try:
+            from audit.worker_trace_bridge import build_default_trace_bridge
+
+            trace_bridge = build_default_trace_bridge()
+        except Exception as exc:  # noqa: BLE001 - trace failure escalates safely.
+            trace_errors.append(type(exc).__name__)
+
+    not_executed = [
+        spec.worker_id for spec in WORKER_SPECS if not _should_run(spec, payload)
+    ]
+    eligible = [spec for spec in WORKER_SPECS if _should_run(spec, payload)]
+
+    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+        worker_trace = SkillTrace()
+        try:
+            state = await build_worker_graph(
+                spec,
+                tools[spec.worker_id],
+                llm,
+                trace=worker_trace,
+            ).ainvoke({"worker_id": spec.worker_id, "input": payload})
+            report = {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": state.get("status", "DEGRADED"),
+                "attempts": state.get("attempts", 0),
+                "output": state.get("output", {}),
+                "error": state.get("error"),
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+                "skills": list(spec.skill_ids),
+                "skill_results": state.get("skill_results", []),
+                "rag_plan": state.get("rag_plan", {}),
+                "trace": state.get("trace_manifest", {}),
+            }
+        except Exception as exc:  # noqa: BLE001 - Worker boundary fails closed.
+            report = {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": "DEGRADED",
+                "attempts": 0,
+                "output": {
+                    "worker_id": spec.worker_id,
+                    "summary": "QA Worker graph failed; human review is required.",
+                    "confidence": 0.0,
+                    "evidence_refs": [],
+                    "escalate": True,
+                    "schema_valid": False,
+                },
+                "error": type(exc).__name__,
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+                "skills": list(spec.skill_ids),
+                "skill_results": [],
+                "rag_plan": {},
+                "trace": {},
+            }
+
+        if trace_bridge is not None:
+            try:
+                await asyncio.to_thread(
+                    trace_bridge.record,
+                    worker_id=spec.worker_id,
+                    trace_id=str(payload.get("trace_id") or uuid4()),
+                    input_hash=input_hash,
+                    tools=spec.tools,
+                    payload=payload,
+                    output=report.get("output", {}),
+                )
+            except Exception as exc:  # noqa: BLE001 - audit must escalate.
+                trace_errors.append(f"{spec.worker_id}:{type(exc).__name__}")
+                report["trace_error"] = type(exc).__name__
+        return report
+
+    reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
+    failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
+    failed.extend(f"trace:{error}" for error in trace_errors)
+    return {
+        "runtime": {
+            "executor": "LangGraph",
+            "topology": "async_fan_out_fan_in_independent_graphs",
+            "provider": "ollama",
+            "model": _model_name(),
+            "max_retries": 2,
+            "max_attempts": 3,
+        },
+        "workers": reports,
+        "executed": [
+            item["worker_id"] for item in reports if item["status"] == "COMPLETED"
+        ],
+        "failed": failed,
+        "not_executed": not_executed,
+        "degraded": bool(failed),
+        "input_hash": input_hash,
+    }
+
+
+def run_employee_workers(
+    payload: dict[str, Any],
+    llm: WorkerLLM | None = None,
+    trace_bridge: Any | None = None,
+) -> dict[str, Any]:
+    """Synchronous compatibility boundary for the async QA fan-in."""
+
+    return run_coroutine_sync(
+        run_employee_workers_async(payload, llm=llm, trace_bridge=trace_bridge)
+    )

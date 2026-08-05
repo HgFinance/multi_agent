@@ -191,7 +191,7 @@ staff_registry:
     excluded_from_worker_count: true
 employee_runtime:
   executor: langgraph
-  topology: independent_graph_per_worker
+  topology: async_fan_out_fan_in_independent_graphs
   worker_graph_module: departments/01-research/employee_workers.py
   provider: ollama
   model_env: OLLAMA_CHAT_MODEL
