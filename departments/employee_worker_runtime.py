@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypedDict
@@ -77,6 +78,39 @@ def default_worker_llm(system: str, prompt: str) -> str:
 def _compact(value: Any, limit: int = 8000) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return raw[:limit]
+
+
+def run_coroutine_sync(coroutine: Any) -> Any:
+    """Bridge an async LangGraph boundary for legacy synchronous callers.
+
+    Department adapters are still exposed as synchronous functions because the
+    Paper pipeline and a few CLI entrypoints use that contract.  The actual
+    Worker execution remains asynchronous.  When a caller already owns an
+    event loop, run the coroutine in a short-lived helper thread instead of
+    falling back to the old sequential implementation or raising
+    ``RuntimeError: asyncio.run() cannot be called from a running event loop``.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(asyncio.run(coroutine))
+        except BaseException as exc:  # noqa: BLE001 - preserve boundary error.
+            error.append(exc)
+
+    thread = threading.Thread(target=run, name="worker-async-bridge", daemon=True)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 def context_tool(tool_name: str, input_fields: tuple[str, ...] = ()) -> WorkerTool:
@@ -201,7 +235,7 @@ def should_run(spec: WorkerSpec, payload: Mapping[str, Any]) -> bool:
     return value not in (None, "", [], {})
 
 
-def run_worker_registry(
+def _run_worker_registry_sequential(
     specs: tuple[WorkerSpec, ...],
     payload: Mapping[str, Any],
     *,
@@ -235,7 +269,7 @@ def run_worker_registry(
         })
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
     return {
-        "runtime": {"executor": "LangGraph", "topology": "independent_graph_per_worker", "provider": "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
+        "runtime": {"executor": "LangGraph", "topology": "async_fan_out_fan_in_independent_graphs", "provider": "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
         "workers": reports,
         "executed": [item["worker_id"] for item in reports if item["status"] == "COMPLETED"],
         "failed": failed,
@@ -244,6 +278,20 @@ def run_worker_registry(
         "input_hash": input_hash,
         "binding": False,
     }
+
+
+def run_worker_registry(
+    specs: tuple[WorkerSpec, ...],
+    payload: Mapping[str, Any],
+    *,
+    tools: Mapping[str, WorkerTool],
+    llm: WorkerLLM | None = None,
+) -> dict[str, Any]:
+    """Synchronous compatibility boundary for async fan-out/fan-in execution."""
+
+    return run_coroutine_sync(
+        run_worker_registry_async(specs, payload, tools=tools, llm=llm)
+    )
 
 
 async def run_worker_registry_async(

@@ -98,29 +98,39 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(riskQaBridge, /InputSnapshot/);
 });
 
-test("keeps one portfolio analysis entry point", async () => {
+test("keeps the one-time Mandate setup as the portfolio analysis entry point", async () => {
   const [page, panel, client] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/PortfolioInterviewPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/portfolioClient.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.equal((page.match(/사용자 입력으로 분석 시작/g) ?? []).length, 1);
-  assert.equal((page.match(/<PortfolioInterviewPanel \/>/g) ?? []).length, 1);
-  assert.match(page, /view === "live"[\s\S]*<PortfolioInterviewPanel \/>/);
-  assert.match(page, /portfolio-interview-form/);
-  assert.match(page, /requestSubmit\(\)/);
+  assert.match(page, /type View = "live" \| "dashboard" \| "mandate"/);
+  assert.match(page, /Mandate 설정/);
+  assert.match(page, /<MandateConfigView onAnalyzed=/);
   assert.match(page, /a\.status === "업무 중"/);
-  assert.doesNotMatch(panel, /LangGraph 분석 시작/);
-  assert.doesNotMatch(panel, /현금화 필요/);
-  assert.match(panel, /분석 카테고리/);
-  assert.match(panel, /include_stock/);
-  assert.match(panel, /include_derivatives/);
-  assert.match(panel, /사용자 입력으로 분석 시작/);
-  assert.doesNotMatch(panel, /SHORT_TERM_BOND: "단기채권"/);
+  assert.match(panel, /Mandate Configuration/);
+  assert.match(panel, /portfolio-interview-form/);
+  assert.match(panel, /Mandate 제출하고 검토 시작/);
+  assert.match(panel, /이 설정으로 분석 시작/);
+  assert.match(panel, /max_instrument_weight_pct/);
+  assert.match(panel, /고급 설정/);
+  assert.match(panel, /자연어 입력/);
+  assert.match(panel, /allowed_assets/);
   assert.match(panel, /CEO TASK ROUTING/);
+  assert.match(panel, /submitMandateChange/);
+  assert.match(panel, /MandateWorkflowStatus/);
+  assert.match(panel, /활성화된 Mandate로 분석 시작/);
   assert.match(panel, /className="ticker"/);
   assert.doesNotMatch(client, /liquidity_need/);
+});
+
+test("keeps runtime-driven employee movement continuous across polling", async () => {
+  const sim = await readFile(new URL("../app/game/sim.ts", import.meta.url), "utf8");
+  assert.match(sim, /remoteWorkerIds/);
+  assert.match(sim, /runtime-driven walk actions/);
+  assert.doesNotMatch(sim, /agent\.x = agent\.home\.x/);
+  assert.doesNotMatch(sim, /agent\.y = agent\.home\.y/);
 });
 
 test("routes integration readiness through the operator BFF", async () => {

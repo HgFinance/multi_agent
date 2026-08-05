@@ -14,7 +14,9 @@ from typing import Any, Mapping
 
 
 UNIVERSE_PATH = Path(__file__).with_name("portfolio_universes.json")
-DEFAULT_UNIVERSE_ID = "KOREA_GLOBAL_MIXED"
+# Current product scope is domestic equities.  The legacy mixed universe stays
+# readable for replay/backward-compatible requests, but is never the default.
+DEFAULT_UNIVERSE_ID = "KOREA_EQUITY_WATCHLIST"
 STOCK_ASSET_CLASSES = frozenset({"KOREA_EQUITY", "GLOBAL_EQUITY"})
 DERIVATIVE_ASSET_CLASSES = frozenset({"LEVERAGED_ETF", "SHORT_EXPOSURE", "DERIVATIVES_HEDGE"})
 

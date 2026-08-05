@@ -135,7 +135,10 @@ def test_profile_worker_registry_counts_and_models() -> None:
         registry = config["staff_registry"]
         assert len(workers) == expected_counts[directory]
         assert registry["worker_count"] == expected_counts[directory]
-        assert config["employee_runtime"]["topology"] == "independent_graph_per_worker"
+        assert (
+            config["employee_runtime"]["topology"]
+            == "async_fan_out_fan_in_independent_graphs"
+        )
         assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
         assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
         assert config["employee_runtime"]["max_retries"] == 2
@@ -154,6 +157,10 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         assert result["degraded"] is False
         assert result["not_executed"] == []
         assert result["runtime"]["executor"] == "LangGraph"
+        assert (
+            result["runtime"]["topology"]
+            == "async_fan_out_fan_in_independent_graphs"
+        )
         assert result["runtime"]["provider"] == "ollama"
         assert result["runtime"]["model"] == "qwen3:1.7b"
 

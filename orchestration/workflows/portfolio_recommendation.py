@@ -12,10 +12,11 @@ import asyncio
 import hashlib
 import importlib.util
 import json
-import os
 import operator
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -28,6 +29,13 @@ from departments.employee_worker_runtime import (
     default_worker_llm,
     should_run,
     tools_for_specs,
+)
+from orchestration.contracts.mas import (
+    DepartmentHandoff,
+    build_replay_metadata,
+    make_pipeline_event,
+    stable_hash,
+    validate_worker_context,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -285,6 +293,7 @@ class PortfolioPipelineState(TypedDict, total=False):
     pipeline_status: str
     safe_action: str
     manual_review_required: bool
+    pipeline_events: Annotated[list[dict[str, Any]], operator.add]
     result: dict[str, Any]
 
 
@@ -388,6 +397,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
         "data_source": data_context.get("source", "TEST"),
+        "worker_runtime": os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test"),
         "data_quality": data_context.get("quality_status", "TEST"),
         "read_only": True,
         "external_writes": False,
@@ -459,6 +469,27 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "qa_assessment": state.get("qa_gate", {"decision": "PENDING", "binding": False}),
     }
     context["stage"] = stage
+    plan = state.get("task_plan", {})
+    requested = plan.get("requested_departments", DEPARTMENTS) if isinstance(plan, Mapping) else DEPARTMENTS
+    requested_stages = [item for item in DEPARTMENTS if item in requested]
+    current_index = requested_stages.index(stage) if stage in requested_stages else 0
+    previous_stage = requested_stages[current_index - 1] if current_index > 0 else "ceo"
+    handoff = DepartmentHandoff(
+        run_id=str(state.get("trace_id", "unknown-run")),
+        trace_id=str(state.get("trace_id", "unknown-trace")),
+        from_department=previous_stage,
+        to_department=stage,
+        from_role=f"{previous_stage}:head",
+        to_role=f"{stage}:head",
+        input_contract="mas.department-context.v1",
+        output_contract="mas.department-context.v1",
+        input_hash=stable_hash(context),
+        purpose="비구속적 사용자 요청 분석 컨텍스트의 부서장 간 handoff",
+        as_of=datetime.fromisoformat(str(state.get("as_of")))
+        if state.get("as_of")
+        else datetime.now(timezone.utc),
+    )
+    context["handoff"] = handoff.model_dump(mode="json")
     return context
 
 
@@ -468,6 +499,27 @@ def _worker_tools(stage: str, module: Any) -> Mapping[str, Callable[[dict[str, A
     if stage == "qa":
         return _qa_tools(module)
     return tools_for_specs(tuple(module.WORKER_SPECS))
+
+
+def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Close the Worker boundary before its output reaches fan-in."""
+
+    try:
+        validate_worker_context(report.get("output", {}))
+    except Exception as exc:  # noqa: BLE001 - contract boundary must fail closed.
+        report["status"] = "DEGRADED"
+        report["error"] = f"worker_context_contract_invalid:{type(exc).__name__}"
+        report["contract_validation"] = {
+            "status": "FAIL",
+            "safe_action": "HOLD",
+            "reason": str(exc)[:240],
+        }
+        output = dict(report.get("output", {}))
+        output.update({"schema_valid": False, "escalate": True, "confidence": 0.0})
+        report["output"] = output
+    else:
+        report["contract_validation"] = {"status": "PASS", "safe_action": "NO_ACTION"}
+    return report
 
 
 async def _invoke_worker(
@@ -489,16 +541,27 @@ async def _invoke_worker(
             "binding": False,
         }
     if event_callback:
-        event_callback({"kind": "worker_started", "stage": stage, "worker_id": spec.worker_id, "role": spec.role})
+        event_callback(
+            {
+                "kind": "worker_started",
+                "stage": stage,
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "input_hash": payload.get("input_hash"),
+                "output_contract": spec.output_contract,
+            }
+        )
     if str(payload.get("source", "TEST")).upper() == "TEST":
         # Let the operator projection observe a real running Worker graph in
         # local TEST mode; this does not create work or alter any result.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
-    worker_llm = (
-        _deterministic_worker_llm
-        if str(payload.get("source", "TEST")).upper() == "TEST"
-        else default_worker_llm
-    )
+        configured_runtime = os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test").strip().lower()
+        use_ollama = configured_runtime in {"ollama", "live"}
+        worker_llm = (
+            default_worker_llm
+            if str(payload.get("source", "TEST")).upper() != "TEST" or use_ollama
+            else _deterministic_worker_llm
+        )
     try:
         if stage in {"risk", "qa"}:
             trace = module.SkillTrace()
@@ -524,6 +587,7 @@ async def _invoke_worker(
             "input_hash": payload.get("input_hash"),
             "binding": False,
         }
+        report = _validate_worker_report(report)
         if event_callback:
             event_callback(
                 {
@@ -533,6 +597,9 @@ async def _invoke_worker(
                     "role": spec.role,
                     "status": report["status"],
                     "summary": report.get("output", {}).get("summary"),
+                    "input_hash": report.get("input_hash"),
+                    "output_contract": report.get("output_contract"),
+                    "attempts": report.get("attempts", 0),
                 }
             )
         return report
@@ -564,6 +631,9 @@ async def _invoke_worker(
                     "role": spec.role,
                     "status": report["status"],
                     "summary": report.get("output", {}).get("summary"),
+                    "input_hash": report.get("input_hash"),
+                    "output_contract": report.get("output_contract"),
+                    "attempts": report.get("attempts", 0),
                 }
             )
         return report
@@ -653,6 +723,22 @@ def build_portfolio_recommendation_graph(
             "suitability_context": context,
         }
 
+    def upstream_contracts_safe(state: PortfolioPipelineState, stages: Sequence[str]) -> bool:
+        """Require completed upstream fan-in before a gate can pass."""
+
+        reports = state.get("department_reports", {})
+        for stage in stages:
+            department = reports.get(stage, {})
+            if department.get("status") not in {"COMPLETED", "SKIPPED"}:
+                return False
+            if any(
+                item.get("contract_validation", {}).get("status") == "FAIL"
+                for item in state.get("worker_reports", [])
+                if item.get("stage") == stage
+            ):
+                return False
+        return True
+
     def risk_precheck(state: PortfolioPipelineState) -> dict[str, Any]:
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})
@@ -661,18 +747,21 @@ def build_portfolio_recommendation_graph(
             data_context.get("source") not in {None, "TEST"}
             and data_quality != "PASS"
         )
-        approved = matched and not live_data_blocked
+        upstream_safe = upstream_contracts_safe(state, ("research",))
+        approved = matched and not live_data_blocked and upstream_safe
         return {
             "risk_gate": {
                 "status": "COMPLETED",
                 "verdict": "approve" if approved else "reject",
                 "safe_action": "NO_ACTION" if approved else "HOLD",
                 "reason": (
-                    "SUITABILITY_MATCHED"
-                    if approved
-                    else "LIVE_DATA_QUALITY_BLOCKED"
-                    if matched and live_data_blocked
-                    else "NO_SUITABLE_PORTFOLIO"
+                "SUITABILITY_MATCHED"
+                if approved
+                else "UPSTREAM_WORKER_CONTRACT_FAILED"
+                if not upstream_safe
+                else "LIVE_DATA_QUALITY_BLOCKED"
+                if matched and live_data_blocked
+                else "NO_SUITABLE_PORTFOLIO"
                 ),
                 "data_quality": data_quality,
                 "binding": False,
@@ -688,9 +777,13 @@ def build_portfolio_recommendation_graph(
         # hallucination worker is exercised without turning WARN into PASS.
         unsupported_claim_fixture = state.get("data_context", {}).get("source") != "SUPABASE"
         live_data_quality = state.get("data_context", {}).get("quality_status", "TEST")
+        upstream_safe = upstream_contracts_safe(state, ("research", "risk"))
         decision = (
             "PASS"
-            if evidence_ok and not unsupported_claim_fixture and live_data_quality == "PASS"
+            if evidence_ok
+            and not unsupported_claim_fixture
+            and live_data_quality == "PASS"
+            and upstream_safe
             else "WARN"
         )
         return {
@@ -698,7 +791,9 @@ def build_portfolio_recommendation_graph(
                 "status": "COMPLETED",
                 "decision": decision,
                 "reason": (
-                    "EVIDENCE_PRESENT_BUT_TEST_UNSUPPORTED_CLAIM"
+                "UPSTREAM_WORKER_CONTRACT_FAILED"
+                if not upstream_safe
+                else "EVIDENCE_PRESENT_BUT_TEST_UNSUPPORTED_CLAIM"
                     if unsupported_claim_fixture and evidence_ok
                     else "LIVE_DATA_QUALITY_WARNING"
                     if live_data_quality != "PASS"
@@ -818,7 +913,17 @@ def build_portfolio_recommendation_graph(
                     )
                 ]
             if event_callback:
-                event_callback({"kind": "department_started", "stage": stage, "worker_ids": [spec.worker_id for spec in selected]})
+                # Publish the validated head-to-head handoff together with the stage
+                # start event.  The worker receives the same object in ``worker_input``;
+                # exposing it here makes the runtime projection and replay auditable.
+                event_callback(
+                    {
+                        "kind": "department_started",
+                        "stage": stage,
+                        "worker_ids": [spec.worker_id for spec in selected],
+                        "handoff": payload.get("handoff"),
+                    }
+                )
             return [
                 Send(
                     f"{stage}_worker",
@@ -894,8 +999,32 @@ def build_portfolio_recommendation_graph(
             data_context.get("source") not in {None, "TEST"}
             and data_context.get("quality_status") != "PASS"
         )
-        pipeline_status = "DEGRADED" if degraded or live_data_blocked else "COMPLETED"
-        safe_action = "NO_ACTION" if matched and not degraded and not live_data_blocked else "HOLD"
+        risk_gate = state.get("risk_gate", {})
+        qa_gate = state.get("qa_gate", {})
+        # A completed precheck is not necessarily an approval.  Keep the
+        # final action fail-closed when an upstream contract or risk gate
+        # rejects the case; otherwise a rejected gate could still surface as
+        # ``NO_ACTION`` merely because its department node completed.
+        risk_safe = risk_gate.get("safe_action") == "NO_ACTION"
+        qa_safe = qa_gate.get("decision") not in {"FAIL", "REJECT", "ESCALATE"}
+        gate_degraded = any(
+            gate.get("reason") == "UPSTREAM_WORKER_CONTRACT_FAILED"
+            for gate in (risk_gate, qa_gate)
+        )
+        pipeline_status = (
+            "DEGRADED"
+            if degraded or live_data_blocked or gate_degraded
+            else "COMPLETED"
+        )
+        safe_action = (
+            "NO_ACTION"
+            if matched
+            and not degraded
+            and not live_data_blocked
+            and risk_safe
+            and qa_safe
+            else "HOLD"
+        )
         result = {
             "workflow": "portfolio-recommendation-full",
             "pipeline_version": PIPELINE_VERSION,
@@ -992,9 +1121,28 @@ async def run_portfolio_recommendation_pipeline_async(
         candidates = snapshot.candidates
         data_context = snapshot.as_pipeline_context()
 
-    app = build_portfolio_recommendation_graph(event_callback=event_callback)
+    pipeline_events: list[dict[str, Any]] = []
+    event_run_id = stable_hash({"profile": profile, "candidates": candidates})[:24]
+
+    def emit(event: Mapping[str, Any]) -> None:
+        normalized = make_pipeline_event(
+            event_id=f"{event_run_id}:{len(pipeline_events) + 1:05d}",
+            run_id=event_run_id,
+            event=event,
+        )
+        pipeline_events.append(normalized.model_dump(mode="json"))
+        if event_callback:
+            forwarded = dict(event)
+            forwarded["pipeline_event"] = normalized.model_dump(mode="json")
+            event_callback(forwarded)
+
+    app = build_portfolio_recommendation_graph(event_callback=emit)
     state = await app.ainvoke(_initial_state(profile, candidates, data_context))
-    return dict(state.get("result", state))
+    result = dict(state.get("result", state))
+    result["pipeline_events"] = pipeline_events
+    result["pipeline_event_count"] = len(pipeline_events)
+    result["replay"] = build_replay_metadata(profile, candidates, result).model_dump(mode="json")
+    return result
 
 
 __all__ = [

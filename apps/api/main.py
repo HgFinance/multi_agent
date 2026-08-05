@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
+import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -100,6 +101,70 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+
+
+# Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
+# 이 BFF가 얇게 전달하고, 정책 검증·Risk/QA/사용자 승인·영속화는 governance-api가 한다.
+GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "http://127.0.0.1:8043").rstrip("/")
+GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
+
+
+async def _governance_request(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, str] | None = None,
+    body: dict[str, object] | None = None,
+) -> object:
+    try:
+        async with httpx.AsyncClient(base_url=GOVERNANCE_API_URL, timeout=GOVERNANCE_API_TIMEOUT_SECONDS) as client:
+            response = await client.request(method, path, params=params, json=body)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="governance_api_unavailable") from exc
+
+    payload: object
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {"detail": f"governance_api_http_{response.status_code}"}
+    if response.status_code >= 400:
+        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return payload
+
+
+@app.post("/ui/mandates/{mandate_id}/change-requests")
+async def ui_submit_mandate_change(mandate_id: str, body: dict[str, object]) -> object:
+    return await _governance_request("POST", f"/governance/v1/mandates/{mandate_id}/change-requests", body=body)
+
+
+@app.get("/ui/mandates/{mandate_id}/current")
+async def ui_get_current_mandate(mandate_id: str) -> object:
+    return await _governance_request("GET", f"/governance/v1/mandates/{mandate_id}/current")
+
+
+@app.post("/ui/mandate-cases/{case_id}/advance")
+async def ui_advance_mandate_case(case_id: str, body: dict[str, object]) -> object:
+    return await _governance_request("POST", f"/governance/v1/cases/{case_id}/advance", body=body)
+
+
+@app.get("/ui/mandate-cases/{case_id}/timeline")
+async def ui_get_mandate_case_timeline(case_id: str) -> object:
+    return await _governance_request("GET", f"/governance/v1/cases/{case_id}/timeline")
+
+
+@app.get("/ui/mandate-approvals")
+async def ui_list_mandate_approvals(object_type: str, object_id: str) -> object:
+    return await _governance_request(
+        "GET",
+        "/governance/v1/approvals",
+        params={"object_type": object_type, "object_id": object_id},
+    )
+
+
+@app.post("/ui/mandate-approvals/{approval_id}/decide")
+async def ui_decide_mandate_approval(approval_id: str, body: dict[str, object]) -> object:
+    return await _governance_request("POST", f"/governance/v1/approvals/{approval_id}/decide", body=body)
 
 
 def _integration_status() -> dict[str, dict[str, object]]:
@@ -511,6 +576,12 @@ if __name__ == "__main__":
         "/ui/integrations", "/ui/portfolio-universes", "/ui/portfolio-recommendations",
         "/ui/portfolio-recommendations/{run_id}",
         "/ui/portfolio-recommendations/{run_id}/approval",
+        "/ui/mandates/{mandate_id}/change-requests",
+        "/ui/mandates/{mandate_id}/current",
+        "/ui/mandate-cases/{case_id}/advance",
+        "/ui/mandate-cases/{case_id}/timeline",
+        "/ui/mandate-approvals",
+        "/ui/mandate-approvals/{approval_id}/decide",
     }, c.get("/openapi.json").json()["paths"].keys()
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다

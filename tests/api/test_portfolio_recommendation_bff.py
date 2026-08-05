@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 os.environ["DATABASE_URL"] = ""
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
@@ -17,6 +18,21 @@ from apps.api.portfolio_universe import enrich_suitability_result
 
 
 class PortfolioRecommendationBffTest(unittest.TestCase):
+    @patch("apps.api.main._governance_request", new_callable=AsyncMock)
+    def test_mandate_change_is_proxied_without_browser_domain_access(self, request: AsyncMock) -> None:
+        request.return_value = {"stage": "AWAITING_REVIEW", "mandate_id": "m1"}
+        response = TestClient(app).post(
+            "/ui/mandates/m1/change-requests",
+            json={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["stage"], "AWAITING_REVIEW")
+        request.assert_awaited_once_with(
+            "POST",
+            "/governance/v1/mandates/m1/change-requests",
+            body={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
+        )
+
     def test_frontend_port_3003_is_allowed_by_bff_cors(self) -> None:
         response = TestClient(app).options(
             "/ui/snapshot",
@@ -112,7 +128,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         client = TestClient(app)
         universes = client.get("/ui/portfolio-universes")
         self.assertEqual(universes.status_code, 200)
-        self.assertEqual(universes.json()["default_universe_id"], "KOREA_GLOBAL_MIXED")
+        self.assertEqual(universes.json()["default_universe_id"], "KOREA_EQUITY_WATCHLIST")
         self.assertTrue(universes.json()["universes"])
 
         response = client.post(

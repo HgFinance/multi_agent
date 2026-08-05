@@ -235,6 +235,9 @@ export class Company {
   /** 시나리오 장면에 참여 중인 직원 — 자율 행동(커피·잡담)이 끼어들지 못하게 잠근다 */
   private locked = new Set<string>();
   private remoteMessageIds = new Set<string>();
+  private remoteWorkerIds = new Set<string>();
+  private remoteHandoffKey: string | null = null;
+  private remoteHandoffAgentIds = new Set<string>();
   private remoteRuntime = true;
   private remoteRunId: string | null = null;
   private remoteCompletionSeen = false;
@@ -264,6 +267,9 @@ export class Company {
     this.seatBook.clear();
     this.locked.clear();
     this.remoteMessageIds.clear();
+    this.remoteWorkerIds.clear();
+    this.remoteHandoffKey = null;
+    this.remoteHandoffAgentIds.clear();
     this.remoteRuntime = true;
     this.remoteRunId = null;
     this.remoteCompletionSeen = false;
@@ -309,6 +315,9 @@ export class Company {
     const runId = runtime?.run_id ?? null;
     if (runId !== this.remoteRunId) {
       this.remoteRunId = runId;
+      this.remoteWorkerIds.clear();
+      this.remoteHandoffKey = null;
+      this.remoteHandoffAgentIds.clear();
       this.remoteCompletionSeen = false;
       this.remoteCompletionHold = 0;
       this.remoteRunElapsed = 0;
@@ -360,13 +369,16 @@ export class Company {
     for (const agent of this.agents) {
       const worker = active.get(agent.role);
       if (worker) {
-        agent.x = agent.home.x;
-        agent.y = agent.home.y;
-        agent.path = [];
-        agent.pathIdx = 0;
-        agent.queue = [];
-        agent.current = null;
-        agent.anim = "type";
+        if (!this.remoteWorkerIds.has(agent.id)) {
+          agent.path = [];
+          agent.pathIdx = 0;
+          agent.queue = [];
+          agent.current = null;
+          this.stand(agent);
+          this.enqueue(agent, { k: "walk", to: agent.home }, { k: "face", dir: "up" }, { k: "anim", a: "type" }, { k: "status", s: "업무 중" });
+          this.remoteWorkerIds.add(agent.id);
+        }
+        if (!agent.current && agent.queue.length === 0) agent.anim = "type";
         agent.status = "업무 중";
         agent.progress = 0.5;
         agent.taskLabel = worker.role;
@@ -382,12 +394,7 @@ export class Company {
         agent.taskLabel = "LangGraph 결과 기록";
         continue;
       }
-      agent.x = agent.home.x;
-      agent.y = agent.home.y;
-      agent.path = [];
-      agent.pathIdx = 0;
-      agent.queue = [];
-      agent.current = null;
+      if (agent.current || agent.queue.length) continue;
       agent.anim = "sit";
       agent.status = "대기";
       agent.progress = 0;
@@ -396,17 +403,53 @@ export class Company {
       agent.speechFor = 0;
     }
 
-    handoffHeads.forEach((agent, index) => {
-      const seat = MEETING_SEATS[index % MEETING_SEATS.length];
-      agent.x = seat.x;
-      agent.y = seat.y;
-      agent.anim = "talk";
-      agent.status = "회의 중";
-      agent.taskLabel = "부서장 간 handoff";
-      agent.speech = handoff?.message ?? null;
-      agent.speechKind = "talk";
-      agent.speechFor = REMOTE_SPEECH_SECONDS;
-    });
+    const handoffKey = handoff ? `${runId}:${handoff.from_department}:${handoff.to_department}:${handoff.title}:${handoff.message}` : null;
+    if (!handoff && this.remoteHandoffAgentIds.size > 0) {
+      for (const agent of this.agents) {
+        if (!this.remoteHandoffAgentIds.has(agent.id)) continue;
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.sitAtDesk(agent);
+      }
+      this.remoteHandoffAgentIds.clear();
+    }
+    if (handoffKey !== this.remoteHandoffKey) {
+      const nextHandoffAgentIds = new Set(handoffHeads.map((agent) => agent.id));
+      for (const agent of this.agents) {
+        if (!this.remoteHandoffAgentIds.has(agent.id) || nextHandoffAgentIds.has(agent.id)) continue;
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.sitAtDesk(agent);
+      }
+      this.remoteHandoffKey = handoffKey;
+      this.remoteHandoffAgentIds = nextHandoffAgentIds;
+      handoffHeads.forEach((agent, index) => {
+        const seat = MEETING_SEATS[index % MEETING_SEATS.length];
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.enqueue(agent, { k: "status", s: "회의 중" }, { k: "walk", to: seat }, { k: "anim", a: "talk" });
+        agent.status = "회의 중";
+        agent.taskLabel = "부서장 간 handoff";
+        agent.speech = handoff?.message ?? null;
+        agent.speechKind = "talk";
+        agent.speechFor = REMOTE_SPEECH_SECONDS;
+      });
+    } else {
+      handoffHeads.forEach((agent) => {
+        agent.status = "회의 중";
+        agent.taskLabel = "부서장 간 handoff";
+        agent.speech = handoff?.message ?? null;
+        agent.speechKind = "talk";
+        agent.speechFor = REMOTE_SPEECH_SECONDS;
+        if (!agent.current && agent.queue.length === 0) agent.anim = "talk";
+      });
+    }
 
     const runtimeDepartments = runtime ? Object.entries(departmentMap) : [];
     for (const [departmentCode, departmentId] of runtimeDepartments) {
@@ -1247,16 +1290,16 @@ export class Company {
         if (agent.speechFor > 0) agent.speechFor = Math.max(0, agent.speechFor - dt);
         if (agent.speechFor === 0) agent.speech = null;
       }
-      // Remote mode never creates work. When LangGraph is idle, the office may
-      // still show harmless idle movement so the projection does not look frozen.
-      if (!this.running) {
-        this.occupancy.clear();
-        for (const agent of this.agents) {
-          this.occupancy.add(Math.round(agent.y) * COLS + Math.round(agent.x));
-        }
-        for (const agent of this.agents) {
-          if (agent.status !== "업무 중" && agent.status !== "회의 중") this.stepAgent(agent, dt);
-        }
+      // Remote mode never creates work, but it must still advance existing
+      // runtime-driven walk actions. Polling a snapshot must not pause or reset
+      // the movement between two events.
+      this.occupancy.clear();
+      for (const agent of this.agents) {
+        this.occupancy.add(Math.round(agent.y) * COLS + Math.round(agent.x));
+      }
+      for (const agent of this.agents) {
+        const remoteBusy = agent.status === "업무 중" || agent.status === "회의 중" || agent.status === "보고 중";
+        if (agent.current || agent.queue.length || !remoteBusy) this.stepAgent(agent, dt);
       }
       return;
     }
