@@ -1,8 +1,14 @@
-"""BFF acceptance checks for live process-local MAS events and handoffs."""
+"""BFF acceptance checks for durable MAS events and handoffs."""
 
 from __future__ import annotations
 
+import os
+import tempfile
 import time
+
+os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
+os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
+os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
 
 from fastapi.testclient import TestClient
 

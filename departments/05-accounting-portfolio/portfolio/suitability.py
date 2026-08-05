@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 CALCULATION_VERSION = "portfolio-suitability-v1"
 
@@ -92,15 +92,20 @@ class InvestorProfile(BaseModel):
     mindset: InvestmentMindset
     experience: ExperienceLevel
     investment_horizon_years: int = Field(ge=1, le=100)
-    max_drawdown_pct: Decimal = Field(gt=0, le=Decimal("1"))
+    max_drawdown_pct: Decimal = Field(gt=0, le=Decimal(1))
     liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
-    investment_amount: Decimal = Field(default=Decimal("1000000"), gt=0)
+    investment_amount: Decimal = Field(default=Decimal(1000000), gt=0)
     currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default="KOREA_EQUITY_WATCHLIST", min_length=1, max_length=128)
     category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
     include_stock: bool = Field(default=True)
     include_derivatives: bool = Field(default=True)
     query: str = Field(default="", max_length=2000)
+    max_sector_weight_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    max_gross_exposure_pct: Decimal | None = Field(default=None, ge=0, le=500, max_digits=7, decimal_places=2)
+    max_daily_loss_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    allowed_asset_classes: list[str] = Field(default_factory=list, max_length=32)
+    forbidden_asset_classes: list[str] = Field(default_factory=list, max_length=32)
     as_of: datetime
     profile_version: int = Field(default=1, ge=1)
 
@@ -126,7 +131,7 @@ class PortfolioCandidate(BaseModel):
     risk_band: PortfolioRiskBand
     minimum_experience: ExperienceLevel
     minimum_horizon_years: int = Field(ge=1, le=100)
-    max_drawdown_pct: Decimal = Field(gt=0, le=Decimal("1"))
+    max_drawdown_pct: Decimal = Field(gt=0, le=Decimal(1))
     max_exit_days: int = Field(ge=0, le=365)
     target_allocations: dict[str, Decimal] = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1)
@@ -140,10 +145,10 @@ class PortfolioCandidate(BaseModel):
     @field_validator("target_allocations")
     @classmethod
     def validate_target_allocations(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:
-        if any(weight <= 0 or weight > Decimal("1") for weight in value.values()):
+        if any(weight <= 0 or weight > Decimal(1) for weight in value.values()):
             raise ValueError("target allocation weights must be in (0, 1]")
         total = sum(value.values())
-        if abs(total - Decimal("1")) > Decimal("0.0001"):
+        if abs(total - Decimal(1)) > Decimal("0.0001"):
             raise ValueError("target allocation weights must sum to 1")
         return value
 
@@ -259,7 +264,7 @@ def _target_amounts(profile: InvestorProfile, candidate: PortfolioCandidate) -> 
         asset: (profile.investment_amount * weight).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         for asset, weight in allocations
     }
-    remainder = profile.investment_amount.quantize(Decimal("0.01")) - sum(amounts.values(), Decimal("0"))
+    remainder = profile.investment_amount.quantize(Decimal("0.01")) - sum(amounts.values(), Decimal(0))
     if allocations:
         last_asset = allocations[-1][0]
         amounts[last_asset] += remainder

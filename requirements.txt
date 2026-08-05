@@ -7,14 +7,11 @@ httpx
 # --- LLM providers (matches keys already in .env) ---
 anthropic
 openai
-google-genai
-tavily-python
 
 # --- Data / Quant (Research, Quant/Backtest departments) ---
 pandas
 numpy
 scipy
-pandas-ta
 
 # --- API & realtime (initial stack per HEDGE_FUND_MASTER_PLAN.md 13.1) ---
 fastapi
