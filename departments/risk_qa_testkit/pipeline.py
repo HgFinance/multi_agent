@@ -33,6 +33,11 @@ from departments.risk_qa_testkit.research_packet import (
     make_canonical_test_packet,
     packet_from_api_payload,
 )
+from departments.risk_qa_testkit.replay import (
+    ReplayValidationError,
+    build_test_replay_bundle,
+    validate_replay_bundle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -472,6 +477,21 @@ def run_risk_qa_pipeline(
         and qa_gate["status"] == "COMPLETED"
     )
     completed = completed and skeleton_ok
+    try:
+        replay_bundle = build_test_replay_bundle(
+            packet,
+            risk_verdict=str(risk_gate.get("verdict", "HOLD")),
+            qa_decision=str(qa_gate.get("decision", "WARN")),
+        )
+        replay_contract = validate_replay_bundle(replay_bundle)
+    except ReplayValidationError as exc:
+        replay_contract = {
+            "status": "DEGRADED",
+            "replayable": False,
+            "error_code": "RISK_QA_REPLAY_CONTRACT_INVALID",
+            "error": str(exc),
+        }
+    completed = completed and replay_contract.get("replayable") is True
     manual_review_required = bool(
         qa_gate.get("decision") != "PASS"
         or qa_report.get("head", {}).get("escalate")
@@ -495,6 +515,7 @@ def run_risk_qa_pipeline(
         },
         "risk_gate": risk_gate,
         "qa_gate": qa_gate,
+        "replay_contract": replay_contract,
         "stages": [
             {"stage": "research_packet_fixture", "status": "COMPLETED" if packet_ok else "DEGRADED"},
             {"stage": "risk_deterministic_gate_skeleton", "status": risk_gate["status"], "binding": False},
@@ -503,6 +524,7 @@ def run_risk_qa_pipeline(
         {"stage": "qa_deterministic_gate_skeleton", "status": qa_gate["status"], "binding": False},
         {"stage": "qa_department_head_employee_graph", "status": "COMPLETED" if qa_ok else "DEGRADED", "summary": _worker_summary(qa_report), "head_id": "qa-audit-supervisor", "handoff_count": len(qa_report.get("handoffs", []))},
             {"stage": "risk_qa_test_gate", "status": "COMPLETED" if completed else "DEGRADED"},
+            {"stage": "cross_domain_replay_contract", "status": replay_contract["status"]},
         ],
         "risk": risk_report,
         "qa": qa_report,

@@ -7,7 +7,7 @@ function explainPortfolioApiError(body: unknown, status: number): string {
     ? String((body as { detail?: unknown }).detail)
     : `HTTP ${status}`;
   if (detail === "Not Found" || status === 404) {
-    return "포트폴리오 BFF를 찾지 못했습니다. FastAPI BFF를 8000 포트로 실행하세요.";
+    return "포트폴리오 BFF를 찾지 못했습니다. FastAPI BFF를 8001 포트로 실행하세요.";
   }
   return detail;
 }
@@ -22,6 +22,8 @@ export type PortfolioInterviewInput = {
   currency: "KRW" | "USD" | "EUR";
   universe_id: string;
   category: string;
+  include_stock: boolean;
+  include_derivatives: boolean;
   query: string;
 };
 

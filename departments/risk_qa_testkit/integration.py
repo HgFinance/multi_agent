@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from departments.risk_qa_testkit.pipeline import run_risk_qa_pipeline
 from departments.risk_qa_testkit.research_packet import packet_from_api_payload
+from departments.risk_qa_testkit.replay import validate_replay_bundle
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,7 +61,10 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
     try:
         health = _http_json(f"{base_url}/health")
         result["health"] = "READY"
-        result["status"] = "READY"
+        # Health alone does not prove the real Research Packet -> Risk -> QA
+        # boundary. Keep the probe partial until an explicit packet URL is
+        # supplied and the test pipeline validates that packet.
+        result["status"] = "PARTIAL" if not packet_url else "READY"
         result["health_status"] = str(health.get("status", "unknown"))
         if packet_url:
             payload = _http_json(packet_url)
@@ -70,6 +74,7 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
             result["input_hash"] = packet.input_hash
             pipeline = run_risk_qa_pipeline("test", packet=packet)
             result["risk_qa_pipeline"] = pipeline["pipeline_status"]
+            result["replay_contract"] = pipeline["replay_contract"]
             result["status"] = "READY" if pipeline["pipeline_status"] == "COMPLETED" else "FAILED"
         return result
     except (OSError, URLError, ValueError, RuntimeError) as exc:
@@ -104,13 +109,72 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
             ROOT / "departments/06-ai-qa-audit/qa_events/redis_event_bus.py",
             "qa_event_bus_integration_probe",
         )
-        event_id = uuid4()
+        risk_event_id = uuid4()
+        qa_decision_id = uuid4()
+        risk_decision_id = uuid4()
         trace_id = uuid4()
+        input_hash = f"integration-probe-{uuid4().hex}"
+        replay_bundle: dict[str, Any] = {
+            "packet_id": f"integration-packet-{uuid4().hex}",
+            "artifact_id": f"integration-artifact-{uuid4().hex}",
+            "case_id": f"integration-case-{uuid4().hex}",
+            "trace_id": str(trace_id),
+            "input_hash": input_hash,
+            "risk_decision": {
+                "risk_decision_id": str(risk_decision_id),
+                "decision": "HOLD",
+                "trace_id": str(trace_id),
+                "input_hash": input_hash,
+            },
+            "qa_decision": {
+                "qa_decision_id": str(qa_decision_id),
+                "decision": "WARN",
+                "trace_id": str(trace_id),
+                "input_hash": input_hash,
+            },
+            "entities": [
+                {
+                    "entity_type": "research_packet",
+                    "entity_id": f"integration-packet-{uuid4().hex}",
+                    "trace_id": str(trace_id),
+                    "input_hash": input_hash,
+                },
+                {"entity_type": "risk_decision", "entity_id": str(risk_decision_id), "trace_id": str(trace_id), "input_hash": input_hash},
+                {"entity_type": "qa_decision", "entity_id": str(qa_decision_id), "trace_id": str(trace_id), "input_hash": input_hash},
+            ],
+            "events": [],
+        }
+        # Keep the packet entity ID stable with the bundle root.
+        replay_bundle["entities"][0]["entity_id"] = replay_bundle["packet_id"]
         publisher = risk_bus.RedisEventPublisher(client, stream=stream)
         publisher.publish(
-            event_id=event_id,
+            event_id=risk_event_id,
             trace_id=trace_id,
-            payload={"decision": "HOLD", "source": "risk-qa-integration-probe"},
+            payload={
+                "risk_decision_id": str(risk_decision_id),
+                "decision": "HOLD",
+                "input_hash": input_hash,
+                "trace_id": str(trace_id),
+                "source": "risk-qa-integration-probe",
+            },
+        )
+        qa_publisher = qa_bus.RedisEventBus(
+            client,
+            stream=stream,
+            group=f"{group}-publisher",
+            consumer="qa-integration-publisher",
+            dedupe_prefix=f"risk-qa:integration:publisher:{uuid4().hex}:",
+        )
+        qa_publisher.publish(
+            event_id=qa_decision_id,
+            event_type=qa_bus.QA_DECISION_EVENT,
+            trace_id=trace_id,
+            payload={
+                "qa_decision_id": str(qa_decision_id),
+                "input_hash": input_hash,
+                "trace_id": str(trace_id),
+                "source": "risk-qa-integration-probe",
+            },
         )
         received: list[dict[str, Any]] = []
         consumer = qa_bus.RedisEventBus(
@@ -120,13 +184,25 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
             consumer="qa-integration-probe",
             dedupe_prefix=f"risk-qa:integration:{uuid4().hex}:",
         )
-        processed = consumer.consume_once(received.append, min_idle_ms=0)
-        matched = bool(received) and received[0]["event_id"] == str(event_id)
+        processed = consumer.consume_once(received.append, count=10, min_idle_ms=0)
+        for event in received:
+            payload = event.get("payload", {})
+            replay_bundle["events"].append(
+                {
+                    "event_id": event.get("event_id"),
+                    "event_type": event.get("event_type"),
+                    "trace_id": event.get("trace_id"),
+                    "payload": payload,
+                }
+            )
+        replay_report = validate_replay_bundle(replay_bundle)
+        matched = processed == 2 and replay_report["replayable"] is True
         return {
             "configured": True,
-            "status": "READY" if processed == 1 and matched else "FAILED",
+            "status": "READY" if processed == 2 and matched else "FAILED",
             "processed": processed,
-            "trace_preserved": bool(received) and received[0]["trace_id"] == str(trace_id),
+            "trace_preserved": bool(received) and all(event["trace_id"] == str(trace_id) for event in received),
+            "replay_contract": replay_report,
             "dedupe_consumer_group": group,
         }
     except Exception as exc:  # noqa: BLE001 - probe reports a safe error class
@@ -209,13 +285,14 @@ def run_external_integration_probe(
     }
     checks = [report["research_api"], report["redis"], report["supabase_event"]]
     configured_checks = [check for check in checks if check.get("configured")]
-    report["status"] = (
-        "READY"
-        if configured_checks and all(check.get("status") == "READY" for check in configured_checks)
-        else "PARTIAL"
-        if not configured_checks
-        else "FAILED"
-    )
+    if any(check.get("status") == "FAILED" for check in configured_checks):
+        report["status"] = "FAILED"
+    elif configured_checks and all(check.get("status") == "READY" for check in configured_checks):
+        report["status"] = "READY"
+    else:
+        # A healthy service with an unconfigured packet/DB boundary is useful
+        # evidence, but it is not an end-to-end pass.
+        report["status"] = "PARTIAL"
     report["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
     return report
 

@@ -101,7 +101,7 @@ export default function DepartmentCommunicationPanel() {
           <div className="backend-empty-state" role="status">
             <strong>{connection === "offline" ? "BFF에 연결되지 않았습니다" : "BFF 상태를 확인하는 중입니다"}</strong>
             <p>{error || "GET /ui/snapshot 응답을 기다리고 있습니다."}</p>
-            <code>uvicorn apps.api.main:app --port 8000</code>
+            <code>uvicorn apps.api.main:app --port 8001</code>
           </div>
         ) : (
           <>

@@ -391,7 +391,11 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 `POST /ui/portfolio-recommendations`는 다음 선택 입력을 추가로 받는다.
 
 - `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL` 중 하나다.
+- `include_stock`: 주식 종목·배분 표시 여부이며 기본값은 `true`다.
+- `include_derivatives`: 파생상품 종목·배분 표시 여부이며 기본값은 `true`다.
 - `query`: 사용자가 자유롭게 작성하는 투자 질문·조건이다. 빈 문자열이어도 되며, 카테고리와 구조화된 프로필만으로 기본 라우팅한다.
+
+프론트엔드 공개 자산 Projection은 주식과 파생상품만 포함한다. 채권·현금성 자산은 `instrument_recommendations`와 사용자 화면에 노출하지 않는다. 두 토글이 모두 꺼지면 종목 결과는 `UNAVAILABLE`, `safe_action`은 `HOLD`가 된다.
 
 CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `query`의 의도를 결정론적으로 정규화한다. 응답의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 포함된다. 이는 부서·Worker 배정과 설명을 위한 값이며 주문, Risk 승인, 원장 변경을 실행하지 않는다.
 

@@ -46,6 +46,7 @@
 | Risk/QA 명령 인증 | `IMPLEMENTED` + `TEST_VERIFIED` | Secret Manager 주입, Issuer/JWKS 또는 mTLS/IAM 매핑, 양성 Runtime 검증 필요 |
 | Risk 결정론적 Gate | `TEST_VERIFIED` | Trading의 실제 OrderIntent와 DB/Event hash 연결 필요 |
 | QA Evidence/Trace/Incident | `TEST_VERIFIED` | 실제 Case Replay와 운영 `agent_runs`/`tool_calls` 영속화 필요 |
+| 공통 Replay 계약 | `TEST_VERIFIED` + Redis probe `RUNTIME_VERIFIED` | `departments/risk_qa_testkit/replay.py`와 실제 Redis 두 Event를 검증했지만 실제 API/DB Decision Replay는 미완료 |
 | Risk↔QA Redis Event Bus | `RUNTIME_VERIFIED` snapshot | 재시작 복구·Transactional Outbox까지 공통 Pipeline에서 재검증 |
 | Compose Risk/QA Runtime | `RUNTIME_VERIFIED` snapshot | Trading·Accounting을 포함한 전체 Core Compose 필요 |
 | DB/Event rollback smoke | `RUNTIME_VERIFIED` snapshot | 실제 API 생성 Decision/Case의 commit·replay 증거 필요 |
@@ -53,13 +54,15 @@
 | `MODEL-03`, `QA-03`, `OPS-01` | `BLOCKED` | 모델 선언·Gateway·운영 Credential/권한 경계 확정 필요 |
 | `RPT-01` 보존 경계 | 부분 구현 | DB Artifact hash·보존정책·Notion idempotency를 운영 계약으로 확정해야 함 |
 
-2026-08-05 외부 Redis 통합 테스트는 `11 passed`, Risk/QA 전체 테스트는 `195 passed`, skip 0으로 기록됐다. 이는 당시 실행 증거이며 이후 코드 변경 때 자동으로 유지되는 보증이 아니다.
+2026-08-05 재검증에서 Replay·통합 회귀 테스트 13개가 통과했고 Risk/QA 전체 테스트의 비외부 케이스가 통과했다. 샌드박스에서는 외부 Redis 의존 테스트 8개가 skip되었으며, 승인된 외부 smoke에서는 Redis Risk·QA Event 2건과 PostgreSQL rollback이 `READY`, Research Packet `packet_contract`는 `NOT_CONFIGURED`, 전체 상태는 `PARTIAL`이었다. 이는 실행 증거이며 이후 코드 변경 때 자동으로 유지되는 보증이 아니다.
 
 ## 3. Override 작업 순서
 
 ### P0-1. Risk Decision–QA Decision 공통 Replay
 
 **담당:** 동규, 도현, 재일 공동. **선행:** `RQ-01`, `TRD-01`, `PLAT-01`.
+
+**현재 진행:** 공통 Replay validator와 TEST pipeline 연결은 `TEST_VERIFIED`, 실제 Redis 두 Event Envelope probe는 `RUNTIME_VERIFIED`다. 실제 API가 생성한 Risk/QA Decision과 PostgreSQL row를 함께 재생한 것은 아니므로 전체 P0-1은 완료되지 않았다.
 
 - 고정 Research Packet Fixture 하나가 `packet_id`, `trace_id`, `as_of`, `input_hash`를 유지한 채 OrderIntent로 변환되게 한다.
 - Risk API의 `risk.decision.v1`, QA의 `qa.decision.v1`, OrderIntent, Fill, Journal, Event가 동일한 trace와 결정 hash를 보존하게 한다.

@@ -98,6 +98,8 @@ class InvestorProfile(BaseModel):
     currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default="KOREA_GLOBAL_MIXED", min_length=1, max_length=128)
     category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
+    include_stock: bool = Field(default=True)
+    include_derivatives: bool = Field(default=True)
     query: str = Field(default="", max_length=2000)
     as_of: datetime
     profile_version: int = Field(default=1, ge=1)
