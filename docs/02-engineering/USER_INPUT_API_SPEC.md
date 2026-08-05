@@ -112,7 +112,9 @@ create table accounting.investor_profiles (
 
 ### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**필수 선행**)
 
-현재 `{mandate_id, current_version, status}`만 반환해 **변경 화면이 기존 값을 채울 수 없다.** `policy` 전체를 포함하도록 확장한다.
+> **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있다. 화면 자체는 동작한다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채운다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**다.
+
+현재 `{mandate_id, current_version, status}`만 반환한다. `policy` 전체를 포함하도록 확장한다.
 
 ```json
 {
@@ -145,7 +147,9 @@ create table accounting.investor_profiles (
 }
 ```
 
-`fund_id` 기준 조회도 함께 지원한다(`GET /governance/v1/mandates/by-fund/{fund_id}/current` 또는 쿼리 파라미터). 화면은 Fund 단위로 접근하므로 `mandate_id`를 미리 알 수 없다.
+`fund_id` 기준 조회도 함께 지원한다(`GET /governance/v1/mandates/by-fund/{fund_id}/current` 또는 쿼리 파라미터).
+
+> **정정(2026-08-06)**: 이 조회를 신설하는 이유는 "화면이 `mandate_id`를 몰라서"가 아니다. 실제로는 `PortfolioInterviewPanel.tsx`의 "고급 설정"에서 **사용자가 Mandate ID를 손으로 입력**하고 있다(필수 텍스트 필드). `fund_id` 조회가 생기면 이 수동 입력 필드를 없애고 Fund 선택만으로 화면이 알아서 현재 Mandate를 찾게 할 수 있다.
 
 ### 2.2 온보딩 제출 — 기존 Route 재사용
 
@@ -296,15 +300,15 @@ approval_rules.*, base_capital, currency
 |---|---|
 | **영주** (CEO Office) | §1.1~1.3 `policy.py`·`service.py` 확장 / §2.1 응답 확장 + fund_id 조회 / §2.4 챗봇 제안 API / §3 Registry 등재 |
 | **동규** (리스크·QA) | 프리셋 9칸 수치 확정 / 프리셋 이탈 처리 규칙 / `max_sector_weight` 집행(포트폴리오 풀 자가점검) / `forbidden_asset_classes` 집행 / §2.4 allow-list가 실제로 지켜지는지 QA 검증 |
-| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 governance·portfolio Router 등록 / 온보딩 화면 / `asset_class` 표준값 |
+| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 **portfolio Router 신설**(governance Router는 이미 등록됨, §6.1) / 온보딩 화면의 localStorage 우회를 §2.1 서버 조회로 교체 / `asset_class` 표준값 |
 | **재일** (리서치·퀀트) | §2.5 3개 Route / KRX 업종 코드 수집 / 업종 별칭 사전 / 종목 검색 |
 
 ## 6. 선행·미해결
 
 ### 6.1 반드시 선행돼야 하는 것
 
-1. **§2.1 응답 확장** — 없으면 Mandate 변경 화면이 기존 값을 못 채운다.
-2. **BFF Router 등록** — `apps/api`에 governance Router가 없어 화면이 호출할 경로가 아직 없다.
+1. **§2.1 응답 확장** — 없으면 Mandate 변경 화면이 localStorage 우회에 계속 의존한다(§2.1 정정 참고).
+2. **portfolio Router 신설** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). §2.3 `investor-profiles` Route를 실을 portfolio Router만 없다.
 3. **KRX 업종 코드 수집** — §2.5가 이것 없이는 동작하지 않는다.
 
 ### 6.2 미확정

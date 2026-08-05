@@ -88,6 +88,12 @@ from approval import (
 from approval import (
     revoke as revoke_approval,
 )
+from actor_identity import (
+    ActorUserStatus,
+    InMemoryActorIdentityRepository,
+    UnverifiedActorUserError,
+    verify_actor_user,
+)
 from case_root import (
     CaseEvent,
     CaseRecord,
@@ -199,9 +205,15 @@ except ImportError:
     PostgresReportRunRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_notification_repository import PostgresNotificationRepository
+    from postgres_notification_repository import (
+        NotificationPersistenceError,
+        PostgresNotificationRepository,
+    )
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+    class NotificationPersistenceError(RuntimeError):  # type: ignore[no-redef]
+        pass
 
 try:
     from postgres_approval_repository import PostgresApprovalRepository
@@ -222,6 +234,11 @@ try:
     from postgres_committee_repository import PostgresCommitteeRepository
 except ImportError:
     PostgresCommitteeRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from actor_identity import PostgresActorIdentityRepository
+except ImportError:
+    PostgresActorIdentityRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -553,6 +570,16 @@ if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
 else:
     committee_repo = InMemoryCommitteeRepository()
 
+# P0-1(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md v2.0) - actor_user_id 실재성 검증.
+# 서명된 Subject 인증(mTLS/JWT)은 아직 없다(Platform/IAM 선행 과제, actor_identity.py
+# 모듈 docstring 참고) - 팀 합의로 governance.user_profiles에 심어둔 테스트 회원을
+# "로그인된 사용자"로 간주하고, actor_user_id가 그 행을 실제로 가리키는지(존재 + ACTIVE)만
+# 검증한다. 이전에는 빈 문자열만 아니면 통과했다.
+if os.environ.get("DATABASE_URL") and PostgresActorIdentityRepository is not None:
+    actor_identity_repo = PostgresActorIdentityRepository.connect(os.environ["DATABASE_URL"])
+else:
+    actor_identity_repo = InMemoryActorIdentityRepository()
+
 # HITL Mandate 변경 워크플로 (change_workflow.py) - 위 5개 Repository/Service를 그대로
 # 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 governance.approvals다"
 # 라는 그 모듈의 설계상, 이 오케스트레이터는 "실행이 어디서 멈췄는지"만 checkpointer에 둔다.
@@ -758,6 +785,13 @@ def _on_missing_actor_user(request, exc: MissingActorUserError):
     })
 
 
+@app.exception_handler(UnverifiedActorUserError)
+def _on_unverified_actor_user(request, exc: UnverifiedActorUserError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnverifiedActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(IllegalCaseTransition)
 def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
     return JSONResponse(status_code=409, content={
@@ -828,6 +862,17 @@ def _on_value_error(request, exc: ValueError):
 def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     return JSONResponse(status_code=409, content={
         "error_code": "MANDATE_PERSISTENCE_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# P0-2(2026-08-05) - 이전엔 핸들러가 없어 DB 오류가 원시 스택트레이스 500으로 새나갔다.
+# "의존 서비스 오류는 BLOCKED/ESCALATE다"(TEAM_YOUNGJU_CEO_HR_GUIDE.md P0-2) 원칙대로
+# 503로 닫는다 - 발송 성공으로 오인될 수 있는 200을 절대 내지 않는다.
+@app.exception_handler(NotificationPersistenceError)
+def _on_notification_persistence_error(request, exc: NotificationPersistenceError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "NOTIFICATION_PERSISTENCE_ERROR", "message": str(exc), "detail": {},
+        "trace_id": None,
     })
 
 
@@ -1419,7 +1464,13 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
     CEO Office가 호스팅하는 API지만 required_role=RISK/QA인 승인은 CEO Office가 결정할 수
     없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
     자동 승격되지 않는다.
+
+    actor_user_id가 있으면(주로 required_role=USER, HITL 사용자 승인) P0-1 게이트를 먼저
+    통과해야 한다 - governance.user_profiles에 실재하는 ACTIVE 계정이어야 한다(위 모듈
+    "팀 합의" 참고, 서명된 인증은 아니다).
     """
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = decide_approval(
         _load_approval(approval_id), decision=body.decision,
         actor_department=body.actor_department, at=body.at,
@@ -1432,7 +1483,12 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
 
 @app.post("/governance/v1/approvals/{approval_id}/revoke")
 def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
-    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다.
+
+    actor_user_id가 있으면 decide와 같은 P0-1 게이트를 거친다.
+    """
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = revoke_approval(
         _load_approval(approval_id), actor_department=body.actor_department, at=body.at,
         reason=body.reason, actor_agent_id=body.actor_agent_id,
@@ -1485,6 +1541,12 @@ if __name__ == "__main__":
         committee_repo = InMemoryCommitteeRepository()
     if not isinstance(_mandate_checkpointer, InMemorySaver):
         _mandate_checkpointer = InMemorySaver()
+    if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
+        actor_identity_repo = InMemoryActorIdentityRepository()
+    # 자체 점검이 쓰는 테스트 로그인 Identity를 미리 심어둔다(P0-1 게이트가 이제 실재성을
+    # 검사하므로, 임의 문자열은 더 이상 통과하지 않는다).
+    actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
+    actor_identity_repo.seed("user-1")
     mandate_change_workflow = MandateChangeWorkflow(
         version_repo=_mandate_repo, version_service=mandate_service,
         activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
@@ -1669,6 +1731,23 @@ if __name__ == "__main__":
     })
     assert d_user.status_code == 200 and d_user.json()["decision"] == "APPROVED", d_user.text
     assert d_user.json()["actor_user_id"] == "00000000-0000-4000-8000-00000000cec0"
+
+    # 15c. P0-1 - governance.user_profiles에 실재하지 않는 actor_user_id는 403(비어있지 않은
+    # 문자열이라는 것만으로 통과하던 이전 상태보다 좁힌 검증). 존재하는 사용자는 여전히 통과.
+    a5b = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-user-2",
+        "required_role": "USER", "fund_id": "f1",
+    })
+    assert a5b.status_code == 200, a5b.text
+    d_ghost = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "00000000-0000-0000-0000-000000000000",
+    })
+    assert d_ghost.status_code == 403 and d_ghost.json()["error_code"] == "UnverifiedActorUserError", \
+        d_ghost.text
+    d_real = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "user-1",
+    })
+    assert d_real.status_code == 200, d_real.text
 
     # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
     c1 = client.post("/governance/v1/cases", json={
@@ -1870,7 +1949,7 @@ if __name__ == "__main__":
         == "2026-08-03T00:00:00+00:00"
     user_approval_id_m3 = next(a["approval_id"] for a in user_pending_m3 if a["required_role"] == "USER")
     du = client.post(f"/governance/v1/approvals/{user_approval_id_m3}/decide", json={
-        "decision": "APPROVED", "actor_user_id": "u1", "at": now,
+        "decision": "APPROVED", "actor_user_id": "user-1", "at": now,
     })
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
@@ -1899,5 +1978,6 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    print("ok - CEO Office Domain API 34개 시나리오 점검 통과 "
-          "(승인 9개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 + HITL 변경요청 3개 포함)")
+    print("ok - CEO Office Domain API 35개 시나리오 점검 통과 "
+          "(승인 10개(P0-1 actor_user_id 실재성 포함) + Case Root 5개 + 에스컬레이션 4개 + "
+          "위원회 6개 + HITL 변경요청 3개 포함)")

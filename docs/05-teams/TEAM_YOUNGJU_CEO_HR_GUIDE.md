@@ -48,7 +48,7 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 | Committee Quorum/Veto | 결정론적 모듈·테스트 baseline | API/DB append-only 왕복과 committee type 정책 승인 필요 |
 | Case/Escalation | 부분 구현 | Repository 모든 상태 전이와 Notification 연결 필요 |
 | Notification | 심각도·dedup 규칙 있음 | Notification Repository/실제 수신자 Routing Table 미완료 |
-| `GOV-02` | `DOCUMENTED`/부분 구현 | Investment Case→Approval→Committee→Escalation 전체 API Replay 필요 |
+| `GOV-02` | `RUNTIME_VERIFIED`(P0-2 Replay 통과, 2026-08-05) | Governance Decision 전용 테이블(record_decision, 스펙 2.2)은 여전히 미정 - Committee Decision으로 근사 중 |
 | `HR-01` | `IMPLEMENTED` | 독립 승인 DB Replay와 운영 Access 경계 필요 |
 | `HR-02` | `IMPLEMENTED` | QA Eval·CEO 승인·Profile/Tool Version의 실제 ACTIVE 검증 필요 |
 | Workforce Registry | `IMPLEMENTED` baseline | Quality Snapshot·Workforce Plan 집계/저장 로직 필요 |
@@ -63,24 +63,46 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 
 **담당:** 영주. **협업:** 동규, Platform/IAM.
 
-- Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다.
-- Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다.
+> **⚠️ 팀 합의 (2026-08-05) — 이건 실제 로그인 인증이 아니다.** 이 저장소에는 서명된
+> Subject 인증(mTLS/JWT, Supabase Auth 로그인)이 아직 없다 - Platform/IAM이 전체 인증
+> 아키텍처를 결정하기 전까지는 CEO Office 혼자 이 항목을 완전히 닫을 수 없다(설계
+> 공백을 임의로 채우지 않는다). 그래서 팀은 **`supabase/seed.sql`에 심어둔 테스트 회원
+> 행을 "로그인된 사용자"로 간주**하기로 합의했다: `actor_user_id`가 `governance.
+> user_profiles`에 실재하고 `status='ACTIVE'`인지만 결정론적으로 검증한다
+> (`departments/00-ceo-office/src/approval/actor_identity.py`,
+> `UnverifiedActorUserError` → 403). 이건 "서명으로 신원을 증명"이 아니라 "최소한 DB에
+> 실재하는 활성 계정인가"까지만 좁힌 검증이다 - **Production 배포 전 실제 Auth로 반드시
+> 교체해야 한다.** 아래 §6 Release Gate의 "승인자 Identity가 서명/검증됨"은 이 상태로는
+> 체크할 수 없다.
+
+- Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다. → **현재는 위 팀 합의로 대체(실재성+ACTIVE만 검증), 서명 검증은 BLOCKED**
+- Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다. → department/role/expiry는 기존대로 검증(`_ROLE_DECIDERS`, `is_expired`). scope(Fund 단위 권한 범위)는 `governance.fund_memberships`가 비어 있어 여전히 미검증
 - Risk/QA는 자체 업무의 독립 veto/verification 권한을 유지하며 CEO가 대신 결정하지 않는다.
-- `actor_agent_id`가 NULL이거나 Profile/Role과 매핑되지 않으면 `DENY`다.
+- `actor_agent_id`가 NULL이거나 Profile/Role과 매핑되지 않으면 `DENY`다. → **BLOCKED로 유지.** 2026-08-04 팀 결정("Agent Roster 등재는 전체 Prototype까지 미룬다")과 정면 충돌한다 - 지금 이 규칙을 적용하면 Roster 미등재 상태인 현재 모든 결정이 막힌다. Roster 등재가 끝난 뒤에 켠다.
 - 최초 Mandate, `LOOSEN`, 상한 확대, LIVE 관련 변경은 승인 증거 없이는 저장·활성화하지 않는다.
 
-**완료 증거:** 올바른 Actor, 잘못된 Department, 만료 Approval, 자기승인, Risk veto, quorum 부족, revoke 후 재사용 각각의 결과가 고정 테스트와 DB Audit row에 남는다.
+**완료 증거:** 올바른 Actor, 잘못된 Department, 만료 Approval, 자기승인, Risk veto, quorum 부족, revoke 후 재사용 각각의 결과가 고정 테스트와 DB Audit row에 남는다. **actor_user_id 실재성 검증(신규)**도 고정 테스트로 남는다(`api/app.py` 자체점검 15c번 시나리오 - 실재하지 않는 actor_user_id는 403).
 
-### P0-2. GOV-02 전체 상태 Replay
+### P0-2. GOV-02 전체 상태 Replay — 완료 (2026-08-05)
 
 다음 그래프를 실제 DB Repository와 API로 재현한다.
 
 `Investment Case → Approval Request → Committee Open/Vote/Close → Governance Decision → Escalation → Notification → Case Resolve/Cancel`
 
-- 모든 상태 전이는 append-only event와 `trace_id`를 보존한다.
-- 정족수 미달은 `DEFER`, veto는 `REJECT`, 의존 서비스 오류는 `BLOCKED`/`ESCALATE`다.
-- `GET /governance/v1/mandates/{fund_id}/current` 같은 공식 Read Model을 누락한 채 downstream이 임의로 Mandate를 조회하지 않는다.
-- Notification 수신자·채널이 결정되지 않으면 발송 성공으로 만들지 않고 `PENDING`/`ESCALATE`한다.
+`departments/00-ceo-office/tests/test_gov02_replay.py`가 이 전 구간을 실 Postgres +
+`TestClient(app)`로 한 번에 이어서 검증한다("Governance Decision"에 대응하는 범용
+`governance.decisions` 테이블은 아직 없어 — 스펙 2.2 Request 본문 미정, 여전히
+not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대신한다).
+
+- 모든 상태 전이는 append-only event와 `trace_id`를 보존한다. → **검증됨** - Case
+  `OPEN→ACKNOWLEDGED→RESOLVED` 3건 event가 timeline에 순서대로 남고 trace_id가 끝까지
+  유지되는 것을 확인, RESOLVED 이후 재전이는 409.
+- 정족수 미달은 `DEFER`, veto는 `REJECT`, 의존 서비스 오류는 `BLOCKED`/`ESCALATE`다. →
+  같은 Case에 걸린 위원회 세션 3개(정족수 충족/미달/veto)로 APPROVE·DEFER·REJECT 각각
+  재현. resolution 없이 Escalation을 닫으려 하면 409(의존 조건 미충족 차단).
+- `GET /governance/v1/mandates/{fund_id}/current` 같은 공식 Read Model을 누락한 채 downstream이 임의로 Mandate를 조회하지 않는다. (기존 구조 유지, 새로 건드리지 않음)
+- Notification 수신자·채널이 결정되지 않으면 발송 성공으로 만들지 않고 `PENDING`/`ESCALATE`한다. → 이 모듈엔 애초에 `DELIVERED` 상태가 없다(F24 발송 Adapter 미구현) - 모든 호출이 `PENDING`/`SUPPRESSED`로만 끝나 허위 성공 표시가 구조적으로 불가능함을 확인. 심각도 불명은 억제되지 않고 `CRITICAL`로 승격(불변식 2).
+- **이 Replay가 실제로 잡은 버그**: `governance.notifications.dedup_key`가 단일 컬럼 `unique`라 CRITICAL/HIGH/MEDIUM처럼 채널이 2개 이상인 알림은 두 번째 채널 insert부터 항상 실패했다 — 지금까지 모든 자체점검이 `InMemoryNotificationRepository`로 강제 전환돼 있어 못 잡혔던 결함(In-Memory 자체점검의 구조적 한계 - "실제 DB로 재현"해야만 드러난다). `supabase/migrations/20260805000100_notifications_dedup_key_per_channel.sql`로 `unique(dedup_key, channel)`로 교정, 적용 완료. `NotificationPersistenceError`도 이전엔 처리기가 없어 500 스택트레이스가 그대로 샜다 - 503으로 닫도록 `api/app.py`에 추가.
 
 ### P0-3. HR-02 Active Gate와 Profile Review
 
