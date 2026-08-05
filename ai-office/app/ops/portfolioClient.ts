@@ -69,6 +69,7 @@ export type PortfolioInterviewInput = {
   include_derivatives: boolean;
   query: string;
   trace_id?: string;
+  mandate_id?: string;
   case_id?: string;
   mandate_version_id?: string;
   policy_hash?: string;
@@ -127,6 +128,7 @@ export async function startPortfolioRecommendation(input: PortfolioInterviewInpu
   status: string;
   trace_id?: string;
   case_id?: string | null;
+  mandate_id?: string | null;
   mandate_version_id?: string | null;
   policy_hash?: string | null;
   input_hash?: string;
@@ -152,6 +154,7 @@ export async function startPortfolioRecommendation(input: PortfolioInterviewInpu
     status: requireString(payload, "status", "추천 시작"),
     trace_id: typeof payload.trace_id === "string" ? payload.trace_id : undefined,
     case_id: typeof payload.case_id === "string" ? payload.case_id : null,
+    mandate_id: typeof payload.mandate_id === "string" ? payload.mandate_id : null,
     mandate_version_id: typeof payload.mandate_version_id === "string" ? payload.mandate_version_id : null,
     policy_hash: typeof payload.policy_hash === "string" ? payload.policy_hash : null,
     input_hash: typeof payload.input_hash === "string" ? payload.input_hash : undefined,
@@ -223,6 +226,7 @@ export type PortfolioRunStatus = {
   profile_user_id: string;
   trace_id: string;
   case_id: string | null;
+  mandate_id: string | null;
   mandate_version_id: string | null;
   policy_hash: string | null;
   input_hash: string;
@@ -252,6 +256,7 @@ export async function fetchPortfolioRecommendation(runId: string, ownerId?: stri
     profile_user_id: requireString(payload, "profile_user_id", "추천 실행 상태"),
     trace_id: typeof payload.trace_id === "string" ? payload.trace_id : "",
     case_id: typeof payload.case_id === "string" ? payload.case_id : null,
+    mandate_id: typeof payload.mandate_id === "string" ? payload.mandate_id : null,
     mandate_version_id: typeof payload.mandate_version_id === "string" ? payload.mandate_version_id : null,
     policy_hash: typeof payload.policy_hash === "string" ? payload.policy_hash : null,
     input_hash: requireString(payload, "input_hash", "추천 실행 상태"),

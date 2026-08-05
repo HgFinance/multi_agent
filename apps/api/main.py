@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
@@ -115,7 +116,20 @@ app.include_router(department_agent_router)
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
 # 이 BFF가 얇게 전달하고, 정책 검증·Risk/QA/사용자 승인·영속화는 governance-api가 한다.
-GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "http://127.0.0.1:8043").rstrip("/")
+GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "").rstrip("/")
+# Canonical mandate verification is an explicit deployment opt-in. Deterministic
+# tests leave this disabled; an empty Governance URL can never be treated as ready.
+PORTFOLIO_GOVERNANCE_BINDING_ENABLED = os.getenv(
+    "PORTFOLIO_GOVERNANCE_BINDING_ENABLED", "false"
+).casefold() in {"1", "true", "yes", "on"}
+PORTFOLIO_GOVERNANCE_BINDING_PATH = (
+    os.getenv(
+        "PORTFOLIO_GOVERNANCE_BINDING_PATH",
+        "/governance/v1/mandates/{mandate_id}/current",
+    ).strip()
+    or "/governance/v1/mandates/{mandate_id}/current"
+)
+GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
 # The deployment must provide a trusted authenticated subject header. Local
 # deterministic tests explicitly opt out; missing identity is never accepted in
 # the production default.
@@ -136,9 +150,25 @@ async def _governance_request(
     params: dict[str, str] | None = None,
     body: dict[str, object] | None = None,
 ) -> object:
+    if not GOVERNANCE_API_URL:
+        raise HTTPException(status_code=503, detail="governance_api_unavailable")
+    headers = (
+        {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
+        if GOVERNANCE_API_AUTH_TOKEN
+        else None
+    )
     try:
-        async with httpx.AsyncClient(base_url=GOVERNANCE_API_URL, timeout=GOVERNANCE_API_TIMEOUT_SECONDS) as client:
-            response = await client.request(method, path, params=params, json=body)
+        async with httpx.AsyncClient(
+            base_url=GOVERNANCE_API_URL,
+            timeout=GOVERNANCE_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.request(
+                method,
+                path,
+                params=params,
+                json=body,
+                headers=headers,
+            )
     except httpx.RequestError as exc:
         raise HTTPException(status_code=503, detail="governance_api_unavailable") from exc
 
@@ -151,6 +181,58 @@ async def _governance_request(
         detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
         raise HTTPException(status_code=response.status_code, detail=detail)
     return payload
+
+
+_PORTFOLIO_BINDING_FIELDS = ("mandate_id", "case_id", "mandate_version_id", "policy_hash")
+
+
+def _canonical_binding_matches(
+    submitted: Mapping[str, object],
+    payload: object,
+) -> bool:
+    """Match every binding field against one explicit Governance response object."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    candidates: list[Mapping[str, object]] = [payload]
+    for key in ("binding", "mandate_binding", "canonical_binding", "data"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    for candidate in candidates:
+        if any(
+            field not in candidate or candidate[field] != submitted.get(field)
+            for field in _PORTFOLIO_BINDING_FIELDS
+        ):
+            continue
+        for marker in ("valid", "binding_valid"):
+            if marker in candidate and candidate.get(marker) is not True:
+                break
+        else:
+            return True
+    return False
+
+
+async def _verify_portfolio_governance_binding(request: PortfolioRecommendationRequest) -> None:
+    if not PORTFOLIO_GOVERNANCE_BINDING_ENABLED:
+        return
+    binding = {field: getattr(request, field) for field in _PORTFOLIO_BINDING_FIELDS}
+    for field, value in binding.items():
+        if field != "case_id" and not value:
+            raise HTTPException(status_code=422, detail=f"{field}_binding_required")
+    if not GOVERNANCE_API_URL:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable")
+    try:
+        path = PORTFOLIO_GOVERNANCE_BINDING_PATH.replace(
+            "{mandate_id}", str(binding["mandate_id"])
+        )
+        canonical = await _governance_request("GET", path)
+    except HTTPException as exc:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable") from exc
+    if not _canonical_binding_matches(binding, canonical):
+        raise HTTPException(status_code=409, detail="governance_mandate_binding_mismatch")
 
 
 def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None = None) -> None:
@@ -302,6 +384,7 @@ class PortfolioRecommendationRequest(BaseModel):
     allowed_asset_classes: list[str] = Field(default_factory=list, max_length=32)
     forbidden_asset_classes: list[str] = Field(default_factory=list, max_length=32)
     trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    mandate_id: str | None = Field(default=None, min_length=1, max_length=128)
     case_id: str | None = Field(default=None, min_length=1, max_length=128)
     mandate_version_id: str | None = Field(default=None, min_length=1, max_length=128)
     policy_hash: str | None = Field(default=None, min_length=1, max_length=128)
@@ -328,12 +411,11 @@ async def start_portfolio_recommendation(
         raise HTTPException(status_code=422, detail="mandate_version_binding_required")
     if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.policy_hash:
         raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
-    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.case_id:
-        raise HTTPException(status_code=422, detail="mandate_case_binding_required")
     if request.mandate_version_id and not request.policy_hash:
         raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
     if request.policy_hash and not request.mandate_version_id:
         raise HTTPException(status_code=422, detail="mandate_version_binding_required")
+    await _verify_portfolio_governance_binding(request)
     profile = request.model_dump(exclude_none=True)
     if idempotency_key:
         profile["idempotency_key"] = idempotency_key
@@ -350,6 +432,7 @@ async def start_portfolio_recommendation(
             **result,
             "trace_id": run.get("trace_id", ""),
             "case_id": run.get("case_id"),
+            "mandate_id": run.get("mandate_id"),
             "mandate_version_id": run.get("mandate_version_id"),
             "policy_hash": run.get("policy_hash"),
             "input_hash": run["input_hash"],
@@ -460,7 +543,19 @@ def health_ready() -> dict[str, object]:
         },
         "pipeline": {"status": "READY" if RUNTIME is not None else "UNAVAILABLE"},
         "runtime_store": {"status": "READY" if RUNTIME.durable else "NOT_CONFIGURED"},
-        "mandate_binding": {"status": "READY" if PORTFOLIO_REQUIRE_MANDATE_BINDING else "NOT_CONFIGURED"},
+        "mandate_binding": {
+            "status": (
+                "READY"
+                if (PORTFOLIO_REQUIRE_MANDATE_BINDING or PORTFOLIO_GOVERNANCE_BINDING_ENABLED)
+                and GOVERNANCE_API_URL
+                else "NOT_CONFIGURED"
+            ),
+            "canonical_verification": (
+                "READY"
+                if PORTFOLIO_GOVERNANCE_BINDING_ENABLED and GOVERNANCE_API_URL
+                else "NOT_CONFIGURED"
+            ),
+        },
     }
     status = "ready" if all(item["status"] == "READY" for item in dependencies.values()) else "degraded"
     return {"status": status, "dependencies": dependencies, "external_writes": False}

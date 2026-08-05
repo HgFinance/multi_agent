@@ -176,6 +176,20 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
             return str(row[0]) if row else None
         finally:
             self._pool.putconn(conn)
+    def get_mandate_content_hash(self, mandate_id: str, version: int) -> str | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select content_hash from governance.mandate_versions "
+                    "where mandate_id = %s and version = %s",
+                    (mandate_id, version),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return str(row[0]) if row and row[0] else None
+        finally:
+            self._pool.putconn(conn)
 
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 

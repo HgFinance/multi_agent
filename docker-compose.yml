@@ -44,6 +44,44 @@ include:
   - departments/07-agent-workforce/compose.yaml
 
 services:
+  # Portfolio advisory API and worker share only the durable queue volume.
+  # The API never embeds a worker by default; the worker owns queue claims.
+  portfolio-bff:
+    profiles: ["portfolio"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-portfolio-bff
+    restart: unless-stopped
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
+      PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-}
+      GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
+    volumes:
+      - portfolio_runtime_data:/var/lib/portfolio
+    ports:
+      - "${PORTFOLIO_BFF_PORT:-8001}:8000"
+
+  portfolio-worker:
+    profiles: ["portfolio"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-portfolio-worker
+    restart: unless-stopped
+    command: ["python", "apps/api/portfolio_worker.py"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
+      PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
+      PORTFOLIO_WORKER_POLL_SECONDS: ${PORTFOLIO_WORKER_POLL_SECONDS:-0.5}
+    volumes:
+      - portfolio_runtime_data:/var/lib/portfolio
+
   timescaledb:
     image: timescale/timescaledb-ha:pg17
     container_name: hedgefund-timescaledb
@@ -656,3 +694,4 @@ services:
 
 volumes:
   tsdb_data:
+  portfolio_runtime_data:

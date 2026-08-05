@@ -623,8 +623,9 @@ export default function PortfolioInterviewPanel({
       include_derivatives: input.allowed_assets.futures || input.allowed_assets.options || input.allowed_assets.derivatives,
       query: input.objective,
       trace_id: trace,
+      mandate_id: input.mandate_id,
       case_id: activeWorkflow?.change.case_id ?? undefined,
-      mandate_version_id: activeWorkflow?.change.version ? String(activeWorkflow.change.version) : undefined,
+      mandate_version_id: activeWorkflow?.versionObjectId ?? undefined,
       policy_hash: activeWorkflow?.policyHash ?? undefined,
       max_sector_weight_pct: input.max_sector_weight_pct,
       max_gross_exposure_pct: input.max_gross_exposure_pct,
@@ -770,6 +771,7 @@ export default function PortfolioInterviewPanel({
             <span>run_id: {portfolioRun.run_id}</span>
             <span>trace_id: {portfolioRun.trace_id || "미지정"}</span>
             {portfolioRun.case_id ? <span>case_id: {portfolioRun.case_id}</span> : null}
+            {portfolioRun.mandate_id ? <span>mandate_id: {portfolioRun.mandate_id}</span> : null}
             {portfolioRun.mandate_version_id ? <span>mandate_version_id: {portfolioRun.mandate_version_id}</span> : null}
             {portfolioRun.policy_hash ? <span>policy_hash: {portfolioRun.policy_hash}</span> : null}
             <span>input_hash: {portfolioRun.input_hash}</span>

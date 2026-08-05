@@ -36,6 +36,7 @@ mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_N
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import sys
@@ -44,7 +45,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,24 @@ from pydantic import BaseModel, Field
 # 위치(cwd)나 uvicorn --app-dir 여부와 무관). 이미 설정된 프로세스 환경변수는 덮어쓰지
 # 않는다(override=False 기본값) - 배포 환경 값이 항상 우선한다.
 load_dotenv()
+GOVERNANCE_API_AUTH_REQUIRED = os.getenv(
+    "GOVERNANCE_API_AUTH_REQUIRED", "false"
+).casefold() in {"1", "true", "yes", "on"}
+GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
+
+
+def _require_internal_auth(
+    x_governance_internal_token: str | None = Header(default=None),
+) -> None:
+    """Enforce the deployment-provided service identity for canonical reads."""
+    if not GOVERNANCE_API_AUTH_REQUIRED:
+        return
+    if not GOVERNANCE_API_AUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="governance_auth_not_configured")
+    if not x_governance_internal_token or not hmac.compare_digest(
+        x_governance_internal_token, GOVERNANCE_API_AUTH_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="governance_auth_required")
 
 _BASE = Path(__file__).resolve().parent.parent
 _MANDATE_DIR = _BASE / "src" / "mandate"
@@ -103,7 +122,6 @@ from case_root import (
     transition as transition_case,
 )
 from committee import (
-    CommitteeDecision,
     CommitteeDecisionRecord,
     CommitteeSession,
     DuplicateVoteError,
@@ -112,7 +130,6 @@ from committee import (
     InvalidQuorumPolicyError,
     QuorumPolicy,
     SelfReviewError,
-    SessionStatus,
     Vote,
     VoteDecision,
 )
@@ -927,10 +944,32 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
     }
 
 
-@app.get("/governance/v1/mandates/{mandate_id}/current")
+@app.get(
+    "/governance/v1/mandates/{mandate_id}/current",
+    dependencies=[Depends(_require_internal_auth)],
+)
 def get_mandate_current(mandate_id: str):
     version, status = _mandate_repo.get_mandate_current(mandate_id)
-    return {"mandate_id": mandate_id, "current_version": version, "status": status}
+    mandate_version_id = (
+        _mandate_repo.get_mandate_version_id(mandate_id, version)
+        if version > 0
+        else None
+    )
+    policy_hash = (
+        _mandate_repo.get_mandate_content_hash(mandate_id, version)
+        if version > 0
+        else None
+    )
+    if status == "ACTIVE" and (not mandate_version_id or not policy_hash):
+        raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
+    return {
+        "mandate_id": mandate_id,
+        "case_id": None,
+        "current_version": version,
+        "mandate_version_id": mandate_version_id,
+        "policy_hash": policy_hash,
+        "status": status,
+    }
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -1534,7 +1573,14 @@ if __name__ == "__main__":
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
-    assert r5.json() == {"mandate_id": "m1", "current_version": 1, "status": "ACTIVE"}
+    assert r5.json() == {
+        "mandate_id": "m1",
+        "case_id": None,
+        "current_version": 1,
+        "mandate_version_id": _mandate_repo.get_mandate_version_id("m1", 1),
+        "policy_hash": _mandate_repo.get_mandate_content_hash("m1", 1),
+        "status": "ACTIVE",
+    }
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1876,7 +1922,12 @@ if __name__ == "__main__":
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
     assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
     assert client.get("/governance/v1/mandates/m3/current").json() == {
-        "mandate_id": "m3", "current_version": 1, "status": "ACTIVE",
+        "mandate_id": "m3",
+        "case_id": None,
+        "current_version": 1,
+        "mandate_version_id": _mandate_repo.get_mandate_version_id("m3", 1),
+        "policy_hash": _mandate_repo.get_mandate_content_hash("m3", 1),
+        "status": "ACTIVE",
     }
 
     # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
