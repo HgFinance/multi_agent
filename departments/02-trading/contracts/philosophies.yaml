@@ -26,6 +26,18 @@ execution_defaults: &execution_defaults
   cancel_after_min: 30
   max_weight: 0.03                # 종목당 목표 비중 상한 (마스터플랜 2.3)
 
+# TCA 환류(집행 기억) 튜닝값. execution/tca_memory.py 가 읽는다.
+# 이 블록은 **제안 생성 규칙**이지 한도가 아니다 - 제안이 반영되려면 리스크본부(한도)와
+# 퀀트본부(전략 승격) 승인이 있어야 한다. 근거 없는 초기 가정치이며 실측 후 재보정한다.
+tca_memory:
+  min_samples: 20                 # 이보다 적으면 제안하지 않는다 (근거 부족)
+  lookback_days: 90
+  notional_buckets_krw: [10000000, 50000000]   # small | mid | large 경계
+  tighten_ratio: 1.2              # 실현 슬리피지 중앙값이 예산의 1.2배 초과 -> 집행을 조인다
+  loosen_ratio: 0.5               # 예산의 0.5배 미만 -> 완화 제안 가능 (승인 필요)
+  participation_step: 0.005       # 참여율 조정 폭
+  slices_step: 1                  # 분할 수 조정 폭
+
 philosophies:
 
   trend_following:

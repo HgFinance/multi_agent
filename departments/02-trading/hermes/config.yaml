@@ -78,6 +78,11 @@ deterministic_services:
   paper_broker: departments/02-trading/broker/paper_broker.py
   multileg: departments/02-trading/multileg/intent_group.py   # F30 Leg 관계, 부분 체결 복구 판정
   capability: departments/02-trading/capability/derivatives.py  # F31 파생 계약 모델, 접수 차단 게이트
+  # 2026-08-05: 집행 계층. 브로커 초당 한도를 넘는 분할 설계는 서술로 통과할 수 없다 -
+  # check_plan_feasible()이 LLM 앞에서 결정론으로 거부한다(정정·취소 3/s, 계좌 조회 1~2/s).
+  broker_rules: departments/02-trading/execution/broker_rules.py
+  # TCA 환류는 **제안만** 만든다. 한도 반영은 리스크본부, 전략 승격은 퀀트본부 권한이다.
+  tca_memory: departments/02-trading/execution/tca_memory.py
 
 implementation:
   status: "D0-D2 구현됨. 팀 가이드 v1.2 반영 재작업 진행 중"
@@ -245,16 +250,20 @@ workers:
     status: conditional
     trigger: risk_decision
     tools: [trading.risk_decision.read]
+  # 아래 두 직원만 거래소·브로커 규칙 근거를 주입받는다(2026-08-05, employee_workers.py).
+  # 규칙 표 밖의 숫자를 쓰면 evidence_refs 인용 검증에서 잡혀 escalate 된다.
   execution-planning-worker:
     role: Risk-approved execution planning analyst
     status: conditional
     trigger: approved_risk
     tools: [trading.execution_constraints.read]
+    grounded_by: departments/02-trading/execution/broker_rules.py
   venue-cost-worker:
     role: Broker venue, slippage and transaction-cost analyst
     status: conditional
     trigger: execution_request
     tools: [trading.venue_cost.read]
+    grounded_by: departments/02-trading/execution/broker_rules.py
   derivatives-structure-worker:
     role: Derivatives structure and margin planning analyst
     status: conditional
