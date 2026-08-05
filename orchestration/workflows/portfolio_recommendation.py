@@ -793,7 +793,7 @@ def build_portfolio_recommendation_graph(
         reports = state.get("department_reports", {})
         for stage in stages:
             department = reports.get(stage, {})
-            if department.get("status") not in {"COMPLETED", "SKIPPED"}:
+            if department.get("status") not in {"COMPLETED", "NOT_REQUESTED"}:
                 return False
             if any(
                 item.get("contract_validation", {}).get("status") == "FAIL"
@@ -904,6 +904,8 @@ def build_portfolio_recommendation_graph(
                 "worker_id": spec.worker_id,
                 "role": spec.role,
                 "status": "SKIPPED_SAFE",
+                "skip_reason": "LIVE_DATA_NOT_READY",
+                "execution_reason": "LIVE_DATA_NOT_READY",
                 "attempts": 0,
                 "output": {
                     "worker_id": spec.worker_id,
@@ -917,6 +919,7 @@ def build_portfolio_recommendation_graph(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "binding": False,
+                "technology": _technology_profile(spec),
             }
             for spec in specs
         ]
@@ -933,6 +936,8 @@ def build_portfolio_recommendation_graph(
                 "worker_id": spec.worker_id,
                 "role": spec.role,
                 "status": "SKIPPED_SAFE",
+                "skip_reason": "NOT_REQUESTED",
+                "execution_reason": "NOT_REQUESTED",
                 "attempts": 0,
                 "output": {
                     "worker_id": spec.worker_id,
@@ -946,6 +951,7 @@ def build_portfolio_recommendation_graph(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "binding": False,
+                "technology": _technology_profile(spec),
             }
             for spec in specs
         ]
@@ -1029,13 +1035,41 @@ def build_portfolio_recommendation_graph(
                 for item in reports
                 if item.get("status") not in {"COMPLETED", "SKIPPED_SAFE"}
             ]
-            skipped = bool(reports) and all(item.get("status") == "SKIPPED_SAFE" for item in reports)
+            completed = [item for item in reports if item.get("status") == "COMPLETED"]
+            skipped_safe = [item for item in reports if item.get("status") == "SKIPPED_SAFE"]
+            not_requested = [
+                item for item in reports if item.get("skip_reason") == "NOT_REQUESTED"
+            ]
+            skip_reasons: dict[str, int] = {}
+            for item in reports:
+                reason = item.get("skip_reason")
+                if reason:
+                    skip_reasons[str(reason)] = skip_reasons.get(str(reason), 0) + 1
+            all_not_requested = bool(reports) and len(not_requested) == len(reports)
+            all_live_blocked = bool(reports) and all(
+                item.get("skip_reason") == "LIVE_DATA_NOT_READY" for item in reports
+            )
+            if all_not_requested:
+                department_status = "NOT_REQUESTED"
+            elif all_live_blocked:
+                department_status = "BLOCKED"
+            elif failed:
+                department_status = "DEGRADED"
+            else:
+                department_status = "COMPLETED"
             result: dict[str, Any] = {
                 "department_reports": {
                     stage: {
-                        "status": "SKIPPED" if skipped else "DEGRADED" if failed else "COMPLETED",
+                        "status": department_status,
+                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED"} else department_status,
                         "worker_ids": [item["worker_id"] for item in reports],
-                        "executed": len(reports),
+                        "executed": len(completed),
+                        "completed": len(completed),
+                        "skipped_safe": len(skipped_safe),
+                        "not_requested": len(not_requested),
+                        "failed_count": len(failed),
+                        "skip_reasons": skip_reasons,
+                        "skip_reason": next(iter(skip_reasons), None),
                         "failed": failed,
                         "binding": False,
                         "fan_out": True,
@@ -1043,7 +1077,7 @@ def build_portfolio_recommendation_graph(
                     }
                 }
             }
-            if any(item.get("status") == "SKIPPED_SAFE" for item in reports):
+            if skipped_safe or not_requested:
                 result["worker_reports"] = reports
             if event_callback:
                 event_callback(
@@ -1053,7 +1087,7 @@ def build_portfolio_recommendation_graph(
                         "status": result["department_reports"][stage]["status"],
                             "message": (
                                 "CEO task plan에 따라 이번 요청에서 호출하지 않았습니다."
-                                if result["department_reports"][stage]["status"] == "SKIPPED"
+                    if result["department_reports"][stage]["status"] in {"NOT_REQUESTED", "BLOCKED"}
                                 else f"{stage} 부서가 {result['department_reports'][stage]['executed']}개 Worker 결과를 취합했습니다."
                             ),
                     }
@@ -1067,7 +1101,7 @@ def build_portfolio_recommendation_graph(
         degraded = [
             stage
             for stage, report in reports.items()
-            if report.get("status") not in {"COMPLETED", "SKIPPED"}
+        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED"}
         ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})
@@ -1212,6 +1246,15 @@ async def run_portfolio_recommendation_pipeline_async(
             forwarded["pipeline_event"] = normalized.model_dump(mode="json")
             event_callback(forwarded)
 
+    emit(
+        {
+            "kind": "pipeline_started",
+            "stage": "portfolio-recommendation",
+            "department": "orchestration",
+            "status": "RUNNING",
+            "summary": "Portfolio recommendation pipeline started.",
+        }
+    )
     app = build_portfolio_recommendation_graph(event_callback=emit)
     with redacted_trace(
         trace_id=event_run_id,
@@ -1235,6 +1278,16 @@ async def run_portfolio_recommendation_pipeline_async(
             },
         )
     result = dict(state.get("result", state))
+    emit(
+        {
+            "kind": "pipeline_completed",
+            "stage": "portfolio-recommendation",
+            "department": "orchestration",
+            "status": str(result.get("pipeline_status", "DEGRADED")),
+            "safe_action": str(result.get("safe_action", "HOLD")),
+            "summary": "Portfolio recommendation pipeline completed.",
+        }
+    )
     result["pipeline_events"] = pipeline_events
     result["pipeline_event_count"] = len(pipeline_events)
     result["replay"] = build_replay_metadata(profile, candidates, result).model_dump(mode="json")

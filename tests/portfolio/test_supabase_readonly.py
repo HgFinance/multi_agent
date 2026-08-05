@@ -265,6 +265,15 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
         not item["output"]["summary"].startswith("TEST")
         for item in result["worker_reports"]
     )
+    assert result["pipeline_events"]
+    assert result["pipeline_event_count"] == len(result["pipeline_events"])
+    for stage, expected_skipped in (("research", 6), ("risk", 4), ("qa", 5), ("ceo", 1)):
+        report = result["department_reports"][stage]
+        assert report["executed"] == 0
+        assert report["completed"] == 0
+        assert report["skipped_safe"] == expected_skipped
+        assert report["failed_count"] == 0
+        assert report["skip_reason"] == "LIVE_DATA_NOT_READY"
 
 
 def test_preflight_reports_missing_dsn_without_connecting_legacy_duplicate(

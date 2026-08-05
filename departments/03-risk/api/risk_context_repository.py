@@ -173,7 +173,32 @@ class PostgresRiskContextRepository:
     ) -> MandateScope:
         cursor.execute(
             """
-            SELECT p.scope, p.rules
+            SELECT p.scope,
+                   p.rules,
+                   (
+                       SELECT mv.universe_policy
+                       FROM governance.mandates m2
+                       JOIN governance.mandate_versions mv
+                         ON mv.mandate_id = m2.mandate_id
+                       WHERE m2.fund_id = p.fund_id
+                         AND m2.status = 'ACTIVE'
+                         AND mv.version = m2.current_version
+                         AND mv.effective_from <= %s
+                         AND (mv.effective_to IS NULL OR mv.effective_to > %s)
+                       LIMIT 1
+                   ) AS universe_policy,
+                   (
+                       SELECT mv.risk_bounds
+                       FROM governance.mandates m3
+                       JOIN governance.mandate_versions mv
+                         ON mv.mandate_id = m3.mandate_id
+                       WHERE m3.fund_id = p.fund_id
+                         AND m3.status = 'ACTIVE'
+                         AND mv.version = m3.current_version
+                         AND mv.effective_from <= %s
+                         AND (mv.effective_to IS NULL OR mv.effective_to > %s)
+                       LIMIT 1
+                   ) AS risk_bounds
             FROM risk.policies p
             JOIN governance.approvals a ON a.approval_id = p.approval_id
             WHERE p.fund_id = %s AND p.status = 'ACTIVE'
@@ -194,7 +219,7 @@ class PostgresRiskContextRepository:
             ORDER BY p.effective_from DESC, p.version DESC
             LIMIT 1
             """,
-            (fund_id, as_of, as_of, as_of, as_of, as_of),
+            (fund_id, as_of, as_of, as_of, as_of, as_of, as_of, as_of, as_of, as_of),
         )
         row = cursor.fetchone()
         if row is None:
@@ -203,7 +228,19 @@ class PostgresRiskContextRepository:
         rules = _mapping(row[1], "risk.policies.rules")
         allowed = _first(rules, "allowed_instrument_ids", "allowed_instruments")
         if allowed is None:
-            allowed = _first(scope, "allowed_instrument_ids", "allowed_instruments")
+                allowed = _first(scope, "allowed_instrument_ids", "allowed_instruments")
+        universe = _mapping(
+            row[2] if len(row) > 2 and row[2] else {},
+            "governance.mandate_versions.universe_policy",
+        )
+        risk_bounds = _mapping(
+            row[3] if len(row) > 3 and row[3] else {},
+            "governance.mandate_versions.risk_bounds",
+        )
+        allowed_asset_classes = _first(universe, "allowed_asset_classes")
+        forbidden_asset_classes = _first(universe, "forbidden_asset_classes") or []
+        preferred_sectors = _first(universe, "preferred_sectors") or []
+        excluded_sectors = _first(universe, "excluded_sectors") or []
         return MandateScope(
             fund_id=fund_id,
             allowed_instrument_ids=_uuid_set(allowed, "allowed_instrument_ids"),
@@ -219,6 +256,29 @@ class PostgresRiskContextRepository:
                 "max_order_notional",
                 "maximum_order_notional",
             ),
+            max_instrument_weight=(
+                _decimal(risk_bounds["max_instrument_weight"], "max_instrument_weight")
+                if risk_bounds.get("max_instrument_weight") is not None
+                else None
+            ),
+            max_sector_weight=(
+                _decimal(risk_bounds["max_sector_weight"], "max_sector_weight")
+                if risk_bounds.get("max_sector_weight") is not None
+                else None
+            ),
+            max_gross_exposure=(
+                _decimal(risk_bounds["max_gross_exposure"], "max_gross_exposure")
+                if risk_bounds.get("max_gross_exposure") is not None
+                else None
+            ),
+            allowed_asset_classes=(
+                frozenset(str(value) for value in allowed_asset_classes)
+                if allowed_asset_classes is not None
+                else None
+            ),
+            forbidden_asset_classes=frozenset(str(value) for value in forbidden_asset_classes),
+            preferred_sectors=frozenset(str(value) for value in preferred_sectors),
+            excluded_sectors=frozenset(str(value) for value in excluded_sectors),
         )
 
     def _load_limits(self, cursor: Any, fund_id: UUID, as_of: datetime) -> LimitSet:

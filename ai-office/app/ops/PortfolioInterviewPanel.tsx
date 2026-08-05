@@ -20,6 +20,7 @@ import {
   type MandateApproval,
   type MandateChange,
 } from "./governanceClient";
+import { readPitReadiness, readablePitReason, readableRuntimeStatus } from "./statusLabels";
 
 type InstrumentRecommendation = {
   portfolio_id: string;
@@ -117,23 +118,6 @@ function explainPortfolioConnectionError(value: string): string {
     return "BFF에 연결할 수 없습니다. 저장소 루트에서 8001 포트 서버가 실행 중인지 확인하세요.";
   }
   return value;
-}
-
-type PitReadiness = {
-  quality_status?: string;
-  reasons?: string[];
-  candidate_count?: number;
-  research_document_count?: number;
-  market_snapshot_count?: number;
-  domestic_instrument_count?: number;
-  as_of?: string;
-};
-
-function readPitReadiness(runtime?: OperationsRuntime): PitReadiness | null {
-  const context = runtime?.result?.data_context;
-  if (typeof context !== "object" || context === null) return null;
-  const diagnostics = (context as { data_diagnostics?: { pit_readiness?: unknown } }).data_diagnostics?.pit_readiness;
-  return typeof diagnostics === "object" && diagnostics !== null ? diagnostics as PitReadiness : null;
 }
 
 function shortRunId(runId: string | null): string {
@@ -451,6 +435,12 @@ const MANDATE_STAGE_LABEL: Record<string, string> = {
   USER_REJECTED: "대표님 거절 · 안전 보류",
 };
 
+const APPROVAL_ROLE_LABEL: Record<string, string> = {
+  RISK: "Risk",
+  QA: "QA",
+  USER: "대표",
+};
+
 const TERMINAL_MANDATE_STAGES = new Set(["ACTIVATED", "FAST_APPLIED", "REVIEW_REJECTED", "USER_REJECTED", "CANCELLED"]);
 
 function approvalsNeedAdvance(stage: string, approvals: MandateApproval[]): boolean {
@@ -500,7 +490,7 @@ function MandateWorkflowStatus({
       <p>{workflow.change.detail}</p>
       {workflow.approvals.length > 0 && (
         <div className="mandate-approval-statuses">
-          {workflow.approvals.map((approval) => <span key={approval.approval_id} className={`mandate-approval-status ${approval.decision.toLowerCase()}`}><b>{approval.required_role}</b> {approval.decision}</span>)}
+          {workflow.approvals.map((approval) => <span key={approval.approval_id} className={`mandate-approval-status ${approval.decision.toLowerCase()}`}><b>{APPROVAL_ROLE_LABEL[approval.required_role] ?? approval.required_role}</b> {readableRuntimeStatus(approval.decision)}</span>)}
         </div>
       )}
       {userApproval ? <div className="mandate-workflow-actions"><button type="button" className="btn btn-primary" onClick={() => onUserDecision("APPROVED")} disabled={busy}>대표 승인</button><button type="button" className="btn btn-ghost" onClick={() => onUserDecision("REJECTED")} disabled={busy}>거절</button></div> : null}
@@ -698,10 +688,10 @@ export default function PortfolioInterviewPanel({
       <div className="win-body">
         <div className="section-heading portfolio-heading">
           <div><p className="eyebrow">USER INPUT → CEO ROUTER → RISK / QA GATE</p><h2 id="portfolio-interview-title">Mandate Configuration</h2></div>
-          <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : runtime?.status ?? connection.toUpperCase()}</span>
+          <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : readableRuntimeStatus(runtime?.status ?? connection)}</span>
         </div>
         <p className="dash-note portfolio-intro">기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.</p>
-        <p className="dash-note portfolio-source-note">{backendMandate ? `Governance 현재 상태(버전만 조회) · v${backendMandate.current_version} · ${backendMandate.status}` : "현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다."}</p>
+        <p className="dash-note portfolio-source-note">{backendMandate ? `Governance 현재 상태(버전만 조회) · v${backendMandate.current_version} · ${readableRuntimeStatus(backendMandate.status)}` : "현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다."}</p>
         {workflow && <MandateWorkflowStatus workflow={workflow} busy={busy} error={workflowError} onRefresh={() => { if (workflow) void refreshMandateWorkflow(workflow).then(setWorkflow).catch((cause) => setWorkflowError(cause instanceof Error ? cause.message : String(cause))); }} onUserDecision={(decision) => void decideUser(decision)} onStartRecommendation={() => void startAnalysis()} />}
         {configured && !editing ? (
           <div className="mandate-saved" aria-live="polite">
@@ -738,12 +728,17 @@ export default function PortfolioInterviewPanel({
         {runtime?.phase && <p className="runtime-phase"><b>현재 단계:</b> {runtime.phase}</p>}
         {pitReadiness && pitReadiness.quality_status !== "PASS" && (
           <div className="pit-diagnostic" role="status">
-            <strong>PIT 입력 진단 · {pitReadiness.quality_status}</strong>
+            <strong>분석 입력 진단 · {pitReadiness.quality_status === "PASS" ? "준비됨" : "보류"}</strong>
             <span>
               후보 {pitReadiness.candidate_count ?? 0}개 · 연구 문서 {pitReadiness.research_document_count ?? 0}개 · 시장 스냅샷 {pitReadiness.market_snapshot_count ?? 0}개 · 국내 종목 {pitReadiness.domestic_instrument_count ?? 0}개
             </span>
-            <small>차단 사유: {(pitReadiness.reasons ?? ["PIT_DATA_NOT_READY"]).slice(0, 3).join(" · ")}</small>
-            <button type="button" className="text-button" onClick={() => void refresh()}>진단 새로고침</button>
+            <small>확인 필요: {(pitReadiness.reasons ?? ["PIT_DATA_NOT_READY"]).slice(0, 3).map(readablePitReason).join(" · ")}</small>
+            <small>데이터를 확인한 뒤 저장된 Mandate로 안전하게 다시 요청할 수 있습니다.</small>
+            <div className="pit-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => void refresh()}>데이터 새로고침</button>
+              {!editing ? <button type="button" className="btn btn-ghost" onClick={() => { setEditing(true); window.requestAnimationFrame(() => document.getElementById("portfolio-interview-form")?.scrollIntoView({ behavior: "smooth", block: "start" })); }}>Mandate 설정 확인</button> : null}
+              <button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "분석 다시 시작"}</button>
+            </div>
           </div>
         )}
       </div>

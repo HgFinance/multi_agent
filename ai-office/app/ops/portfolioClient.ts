@@ -68,6 +68,36 @@ export async function startPortfolioRecommendation(input: PortfolioInterviewInpu
   return body as { run_id: string; status: string };
 }
 
+export async function startSavedPortfolioRecommendation(): Promise<{ run_id: string; status: string }> {
+  if (typeof window === "undefined") throw new Error("Mandate 설정은 브라우저에서만 다시 시작할 수 있습니다.");
+  let saved: { draft?: Partial<PortfolioInterviewInput & { objective: string; allowed_assets: Record<string, boolean> }> };
+  try {
+    saved = JSON.parse(window.localStorage.getItem("hgfinance.mandate-config.v1") || "null") as typeof saved;
+  } catch {
+    throw new Error("저장된 Mandate 초안을 읽을 수 없습니다. Mandate 설정에서 다시 저장하세요.");
+  }
+  const draft = saved?.draft;
+  if (!draft?.user_id || !draft.investment_amount || !draft.universe_id) {
+    throw new Error("저장된 Mandate가 없습니다. Mandate 설정을 먼저 저장하세요.");
+  }
+  return startPortfolioRecommendation({
+    user_id: draft.user_id,
+    mindset: draft.mindset ?? "SAFETY_FIRST",
+    experience: draft.experience ?? "BEGINNER",
+    investment_horizon_years: draft.investment_horizon_years ?? 3,
+    max_drawdown_pct: draft.max_drawdown_pct ?? "0.10",
+    investment_amount: draft.investment_amount,
+    currency: draft.currency ?? "KRW",
+    universe_id: draft.universe_id,
+    category: draft.category ?? "PORTFOLIO_RECOMMENDATION",
+    include_stock: draft.allowed_assets?.stock ?? draft.include_stock ?? true,
+    include_derivatives: Boolean(
+      draft.allowed_assets?.futures || draft.allowed_assets?.options || draft.allowed_assets?.derivatives || draft.include_derivatives,
+    ),
+    query: draft.objective ?? draft.query ?? "",
+  });
+}
+
 export async function decidePortfolioRecommendation(
   runId: string,
   decision: "APPROVE" | "REJECT",
