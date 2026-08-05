@@ -96,7 +96,7 @@ class InvestorProfile(BaseModel):
     liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
     investment_amount: Decimal = Field(default=Decimal("1000000"), gt=0)
     currency: str = Field(default="KRW", pattern=r"^[A-Z]{3}$")
-    universe_id: str = Field(default="KOREA_GLOBAL_MIXED", min_length=1, max_length=128)
+    universe_id: str = Field(default="KOREA_EQUITY_WATCHLIST", min_length=1, max_length=128)
     category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
     include_stock: bool = Field(default=True)
     include_derivatives: bool = Field(default=True)

@@ -273,80 +273,195 @@ export function PortfolioResultConsole() {
   );
 }
 
-export default function PortfolioInterviewPanel() {
+type AssetKey = "stock" | "etf" | "leveraged_etf" | "futures" | "options" | "derivatives" | "crypto";
+type ApprovalMode = "AUTO" | "USER_APPROVAL";
+
+type MandateDraft = PortfolioInterviewInput & {
+  objective: string;
+  max_instrument_weight_pct: number;
+  max_sector_weight_pct: number;
+  max_gross_exposure_pct: number;
+  max_concurrent_positions: number;
+  max_daily_loss_pct: number;
+  allowed_markets: string;
+  trading_start: string;
+  trading_end: string;
+  approval_mode: ApprovalMode;
+  allowed_assets: Record<AssetKey, boolean>;
+};
+
+const MANDATE_STORAGE_KEY = "hgfinance.mandate-config.v1";
+const ASSET_OPTIONS: Array<{ key: AssetKey; label: string; icon: string }> = [
+  { key: "stock", label: "단일 주식", icon: "📈" },
+  { key: "etf", label: "ETF", icon: "◒" },
+  { key: "leveraged_etf", label: "레버리지", icon: "↗" },
+  { key: "futures", label: "선물", icon: "⌁" },
+  { key: "options", label: "옵션", icon: "◎" },
+  { key: "derivatives", label: "파생상품", icon: "✣" },
+  { key: "crypto", label: "암호화폐", icon: "₿" },
+];
+const MINDSET_OPTIONS = [
+  { value: "SAFETY_FIRST", label: "보수적", icon: "🛡️", copy: "원금 보존을 우선하고 변동성을 최소화합니다." },
+  { value: "BALANCED", label: "중립적", icon: "⚖️", copy: "성장과 위험의 균형을 추구합니다." },
+  { value: "RISK_SEEKING", label: "공격적", icon: "🚀", copy: "높은 성장 잠재력과 변동성을 감수합니다." },
+] as const;
+const DEFAULT_MANDATE_DRAFT: MandateDraft = {
+  user_id: "web-user",
+  objective: "장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화합니다.",
+  mindset: "SAFETY_FIRST",
+  experience: "BEGINNER",
+  investment_horizon_years: 3,
+  max_drawdown_pct: "0.10",
+  investment_amount: "100000000",
+  currency: "KRW",
+  universe_id: "KOREA_EQUITY_WATCHLIST",
+  category: "PORTFOLIO_RECOMMENDATION",
+  include_stock: true,
+  include_derivatives: false,
+  query: "",
+  max_instrument_weight_pct: 30,
+  max_sector_weight_pct: 50,
+  max_gross_exposure_pct: 200,
+  max_concurrent_positions: 10,
+  max_daily_loss_pct: 2,
+  allowed_markets: "KR",
+  trading_start: "09:00",
+  trading_end: "15:30",
+  approval_mode: "USER_APPROVAL",
+  allowed_assets: {
+    stock: true,
+    etf: true,
+    leveraged_etf: true,
+    futures: false,
+    options: false,
+    derivatives: false,
+    crypto: false,
+  },
+};
+
+function readSavedMandate(): MandateDraft | null {
+  try {
+    const raw = window.localStorage.getItem(MANDATE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { draft?: MandateDraft };
+    return parsed.draft ? { ...DEFAULT_MANDATE_DRAFT, ...parsed.draft, allowed_assets: { ...DEFAULT_MANDATE_DRAFT.allowed_assets, ...parsed.draft.allowed_assets } } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveMandate(draft: MandateDraft) {
+  window.localStorage.setItem(MANDATE_STORAGE_KEY, JSON.stringify({ version: 1, saved_at: new Date().toISOString(), draft }));
+}
+
+export default function PortfolioInterviewPanel({
+  onConfigured,
+  onAnalyzed,
+}: {
+  onConfigured?: () => void;
+  onAnalyzed?: () => void;
+}) {
   const { snapshot, connection, error, refresh } = useBffFeed();
-  const [input, setInput] = useState<PortfolioInterviewInput>({
-    user_id: "web-user",
-    mindset: "BALANCED",
-    experience: "BEGINNER",
-    investment_horizon_years: 3,
-    max_drawdown_pct: "0.10",
-    investment_amount: "1000000",
-    currency: "KRW",
-    universe_id: "KOREA_EQUITY_WATCHLIST",
-    category: "PORTFOLIO_RECOMMENDATION",
-    include_stock: true,
-    include_derivatives: false,
-    query: "",
-  });
+  const [input, setInput] = useState<MandateDraft>(DEFAULT_MANDATE_DRAFT);
   const [universes, setUniverses] = useState<PortfolioUniverseOption[]>([]);
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  const [configured, setConfigured] = useState(false);
+  const [editing, setEditing] = useState(false);
   const runtime = snapshot?.operations?.runtime;
   const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
   const connectionError = submitError || (!runtime?.run_id && error) || "";
 
   useEffect(() => {
+    const saved = readSavedMandate();
+    const hydrateTimer = saved ? window.setTimeout(() => {
+      setInput(saved);
+      setConfigured(true);
+    }, 0) : 0;
     let active = true;
     void fetchPortfolioUniverses().then((payload) => {
       if (!active) return;
         const domestic = payload.universes.filter((item) => item.universe_id === "KOREA_EQUITY_WATCHLIST");
         setUniverses(domestic);
     }).catch(() => undefined);
-    return () => { active = false; };
+    return () => { active = false; if (hydrateTimer) window.clearTimeout(hydrateTimer); };
   }, []);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function persist() {
+    saveMandate(input);
+    setConfigured(true);
+    setEditing(false);
+    setSubmitError("");
+    onConfigured?.();
+  }
+
+  async function submit(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
     setBusy(true);
     setSubmitError("");
+    const apiInput: PortfolioInterviewInput = {
+      user_id: input.user_id,
+      mindset: input.mindset,
+      experience: input.experience,
+      investment_horizon_years: input.investment_horizon_years,
+      max_drawdown_pct: input.max_drawdown_pct,
+      investment_amount: input.investment_amount,
+      currency: input.currency,
+      universe_id: input.universe_id,
+      category: input.category,
+      include_stock: input.allowed_assets.stock,
+      include_derivatives: input.allowed_assets.futures || input.allowed_assets.options || input.allowed_assets.derivatives,
+      query: input.objective,
+    };
     try {
-      await startPortfolioRecommendation(input);
+      saveMandate(input);
+      await startPortfolioRecommendation(apiInput);
       await refresh();
+      setConfigured(true);
+      setEditing(false);
+      onConfigured?.();
+      onAnalyzed?.();
     } catch (cause) {
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
+      setEditing(true);
     } finally {
       setBusy(false);
     }
   }
 
+  const toggleAsset = (key: AssetKey) => {
+    setInput((current) => ({
+      ...current,
+      allowed_assets: { ...current.allowed_assets, [key]: !current.allowed_assets[key] },
+    }));
+  };
+
   return (
     <section className="win portfolio-interview" id="portfolio-interview" aria-labelledby="portfolio-interview-title">
-      <div className="win-bar"><span>🧭 portfolio.suitability.interview</span><span className="window-controls" aria-hidden="true">— ✕</span></div>
+      <div className="win-bar"><span>🗂 mandate.configuration · F01</span><span className="window-controls" aria-hidden="true">— ✕</span></div>
       <div className="win-body">
         <div className="section-heading portfolio-heading">
-          <div><p className="eyebrow">USER PROFILE → CEO ROUTER → DOMESTIC EQUITY</p><h2 id="portfolio-interview-title">국내 주식 포트폴리오 받기</h2></div>
-          <span className={`status-pill ${running ? "status-running" : ""}`}>{busy ? "요청 중" : running ? "실행 중" : runtime?.status ?? connection.toUpperCase()}</span>
+          <div><p className="eyebrow">USER INPUT → CEO ROUTER → RISK / QA GATE</p><h2 id="portfolio-interview-title">Mandate Configuration</h2></div>
+          <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : runtime?.status ?? connection.toUpperCase()}</span>
         </div>
-        <p className="dash-note portfolio-intro">질문과 투자 성향을 입력하면 CEO가 필요한 부서와 Worker만 배정합니다.</p>
-        <form id="portfolio-interview-form" className="portfolio-form portfolio-form-compact" onSubmit={submit}>
-          <label>분석 카테고리<select value={input.category} onChange={(event) => setInput({ ...input, category: event.target.value })}>{CATEGORY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <label>국내 주식 유니버스<select value={input.universe_id} onChange={(event) => setInput({ ...input, universe_id: event.target.value })} required>{universes.length > 0 ? universes.map((universe) => <option key={universe.universe_id} value={universe.universe_id}>{universe.name} · {universe.instrument_count}개</option>) : <option value="KOREA_EQUITY_WATCHLIST">국내 주식 Watchlist</option>}</select></label>
-          <fieldset className="portfolio-asset-toggles"><legend>표시할 자산</legend><label className="portfolio-toggle"><input type="checkbox" checked={input.include_stock} onChange={(event) => setInput({ ...input, include_stock: event.target.checked })} /><span>국내 주식</span><small>{input.include_stock ? "ON" : "OFF"}</small></label><label className="portfolio-toggle"><input type="checkbox" checked={input.include_derivatives} onChange={(event) => setInput({ ...input, include_derivatives: event.target.checked })} /><span>파생상품</span><small>{input.include_derivatives ? "ON" : "OFF"}</small></label></fieldset>
-          <label className="portfolio-query">사용자 질문·조건<input type="text" value={input.query} onChange={(event) => setInput({ ...input, query: event.target.value })} maxLength={2000} placeholder="예: 3년 동안 삼성전자·SK하이닉스 중심으로 검토해줘" /><small>비워도 됩니다. 기본값은 국내 주식 분석입니다.</small></label>
-          <details className="portfolio-advanced"><summary>투자 프로필 상세 입력</summary><div className="portfolio-advanced-grid">
-            <label>사용자 식별자<input value={input.user_id} onChange={(event) => setInput({ ...input, user_id: event.target.value })} required /></label>
-            <label>투자 성향<select value={input.mindset} onChange={(event) => setInput({ ...input, mindset: event.target.value as PortfolioInterviewInput["mindset"] })}><option value="SAFETY_FIRST">안전 우선</option><option value="BALANCED">균형형</option><option value="RISK_SEEKING">성장·위험 감수</option></select></label>
-            <label>투자 경험<select value={input.experience} onChange={(event) => setInput({ ...input, experience: event.target.value as PortfolioInterviewInput["experience"] })}><option value="BEGINNER">처음 접함</option><option value="INTERMEDIATE">어느 경험</option><option value="EXPERIENCED">경험 많음</option></select></label>
-            <label>투자 예정 기간(년)<input type="number" min="1" max="100" value={input.investment_horizon_years} onChange={(event) => setInput({ ...input, investment_horizon_years: Number(event.target.value) })} required /></label>
-            <label>투자 가능 금액<input inputMode="decimal" min="1" value={input.investment_amount} onChange={(event) => setInput({ ...input, investment_amount: event.target.value })} required /></label>
-            <label>통화<select value={input.currency} onChange={(event) => setInput({ ...input, currency: event.target.value as PortfolioInterviewInput["currency"] })}><option value="KRW">KRW · 원화</option><option value="USD">USD · 달러</option><option value="EUR">EUR · 유로</option></select></label>
-            <label>감내 가능한 최대 손실률<input type="number" min="1" max="100" step="1" value={Number(input.max_drawdown_pct) * 100} onChange={(event) => setInput({ ...input, max_drawdown_pct: (Number(event.target.value) / 100).toFixed(4) })} required /><small>예: 10 = 최대 -10%</small></label>
-        </div></details>
-        <button className="btn btn-primary portfolio-submit" type="submit" disabled={busy || running}>
-          {busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "사용자 입력으로 분석 시작"}
-        </button>
-      </form>
+        <p className="dash-note portfolio-intro">기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.</p>
+        {configured && !editing ? (
+          <div className="mandate-saved" aria-live="polite">
+            <div><span className="mini-badge mint">ONE-TIME SETUP</span><strong>{input.objective}</strong></div>
+            <dl><div><dt>성향</dt><dd>{MINDSET_OPTIONS.find((item) => item.value === input.mindset)?.label}</dd></div><div><dt>기준 자본</dt><dd>{Number(input.investment_amount).toLocaleString("ko-KR")} {input.currency}</dd></div><div><dt>단일 종목</dt><dd>{input.max_instrument_weight_pct}%</dd></div><div><dt>총 익스포저</dt><dd>{input.max_gross_exposure_pct}%</dd></div><div><dt>승인</dt><dd>{input.approval_mode === "AUTO" ? "자동" : "수동 승인"}</dd></div></dl>
+            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
+          </div>
+        ) : (
+          <form id="portfolio-interview-form" className="mandate-form" onSubmit={submit}>
+            <section className="mandate-form-section"><h3><span>1.</span> 목표 및 위험 성향</h3><div className="mandate-objective-grid"><label className="mandate-objective">투자 목표 <small>(자연어 입력)</small><textarea value={input.objective} onChange={(event) => setInput({ ...input, objective: event.target.value })} maxLength={2000} required /><small>구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다.</small></label><fieldset className="mandate-risk-options"><legend>위험 성향 <small>(하나 선택)</small></legend>{MINDSET_OPTIONS.map((item) => <label className={`mandate-risk-card ${input.mindset === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="mindset" value={item.value} checked={input.mindset === item.value} onChange={() => setInput({ ...input, mindset: item.value })} /><span className="mandate-risk-icon">{item.icon}</span><b>{item.label}</b><small>{item.copy}</small></label>)}</fieldset></div></section>
+            <section className="mandate-form-section"><h3><span>2.</span> 자본 및 통화</h3><div className="mandate-inline-fields"><label>기준 자본 <small>(risk_bounds.base_capital)</small><input inputMode="decimal" min="1" value={input.investment_amount} onChange={(event) => setInput({ ...input, investment_amount: event.target.value })} required /></label><label>통화<select value={input.currency} onChange={(event) => setInput({ ...input, currency: event.target.value as PortfolioInterviewInput["currency"] })}><option value="KRW">KRW · 대한민국 원</option><option value="USD">USD · 달러</option><option value="EUR">EUR · 유로</option></select></label></div></section>
+            <section className="mandate-form-section"><h3><span>3.</span> 비중 한도 및 익스포저</h3><div className="mandate-range-grid"><label>최대 단일 종목 비중 <output>{input.max_instrument_weight_pct}%</output><input type="range" min="5" max="50" step="5" value={input.max_instrument_weight_pct} onChange={(event) => setInput({ ...input, max_instrument_weight_pct: Number(event.target.value) })} /><small>5%　　25%　　50%</small></label><label>최대 총 익스포저 <output>{input.max_gross_exposure_pct}%</output><input type="range" min="100" max="500" step="25" value={input.max_gross_exposure_pct} onChange={(event) => setInput({ ...input, max_gross_exposure_pct: Number(event.target.value) })} /><small>100%　　300%　　500%</small></label></div></section>
+            <section className="mandate-form-section"><h3><span>4.</span> 자산 정책 <small>(허용 vs 금지)</small></h3><div className="mandate-asset-grid">{ASSET_OPTIONS.map((item) => <button type="button" key={item.key} className={`mandate-asset-card ${input.allowed_assets[item.key] ? "allowed" : "blocked"}`} aria-pressed={input.allowed_assets[item.key]} onClick={() => toggleAsset(item.key)}><span>{item.icon}</span><b>{item.label}</b><small>{input.allowed_assets[item.key] ? "✓ 허용됨" : "× 금지됨"}</small></button>)}</div></section>
+            <section className="mandate-form-section"><h3><span>5.</span> 주문 승인 방식 <small>(approval_rules.paper_order_mode)</small></h3><div className="mandate-approval-grid">{([{ value: "AUTO", icon: "⚡", label: "자동 주문", copy: "정책에 따라 주문이 자동으로 실행됩니다." }, { value: "USER_APPROVAL", icon: "✋", label: "수동 승인 필요", copy: "모든 주문은 실행 전에 수동 승인이 필요합니다." }] as const).map((item) => <label className={`mandate-approval-card ${input.approval_mode === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="approval_mode" value={item.value} checked={input.approval_mode === item.value} onChange={() => setInput({ ...input, approval_mode: item.value })} /><span>{item.icon}</span><div><b>{item.label}</b><small>{item.copy}</small></div></label>)}</div></section>
+            <details className="portfolio-advanced mandate-advanced"><summary>고급 설정 · 에이전트가 대화로 확인할 세부 필드</summary><div className="portfolio-advanced-grid"><label>사용자 식별자<input value={input.user_id} onChange={(event) => setInput({ ...input, user_id: event.target.value })} required /></label><label>분석 카테고리<select value={input.category} onChange={(event) => setInput({ ...input, category: event.target.value })}>{CATEGORY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>국내 주식 유니버스<select value={input.universe_id} onChange={(event) => setInput({ ...input, universe_id: event.target.value })} required>{universes.length > 0 ? universes.map((universe) => <option key={universe.universe_id} value={universe.universe_id}>{universe.name} · {universe.instrument_count}개</option>) : <option value="KOREA_EQUITY_WATCHLIST">국내 주식 Watchlist</option>}</select></label><label>투자 경험<select value={input.experience} onChange={(event) => setInput({ ...input, experience: event.target.value as PortfolioInterviewInput["experience"] })}><option value="BEGINNER">처음 접함</option><option value="INTERMEDIATE">어느 경험</option><option value="EXPERIENCED">경험 많음</option></select></label><label>투자 예정 기간(년)<input type="number" min="1" max="100" value={input.investment_horizon_years} onChange={(event) => setInput({ ...input, investment_horizon_years: Number(event.target.value) })} required /></label><label>누적 손실 감내율<input type="number" min="1" max="100" step="1" value={Number(input.max_drawdown_pct) * 100} onChange={(event) => setInput({ ...input, max_drawdown_pct: (Number(event.target.value) / 100).toFixed(4) })} required /><small>예: 10 = 최대 -10%</small></label><label>최대 섹터 비중(%)<input type="number" min="5" max="100" value={input.max_sector_weight_pct} onChange={(event) => setInput({ ...input, max_sector_weight_pct: Number(event.target.value) })} /></label><label>동시 보유 종목 수<input type="number" min="1" max="100" value={input.max_concurrent_positions} onChange={(event) => setInput({ ...input, max_concurrent_positions: Number(event.target.value) })} /></label><label>일일 최대 손실(%)<input type="number" min="0.1" max="20" step="0.1" value={input.max_daily_loss_pct} onChange={(event) => setInput({ ...input, max_daily_loss_pct: Number(event.target.value) })} /></label><label>허용 시장<input value={input.allowed_markets} onChange={(event) => setInput({ ...input, allowed_markets: event.target.value })} /></label><label>거래 시작<input type="time" value={input.trading_start} onChange={(event) => setInput({ ...input, trading_start: event.target.value })} /></label><label>거래 종료<input type="time" value={input.trading_end} onChange={(event) => setInput({ ...input, trading_end: event.target.value })} /></label></div></details>
+            <div className="mandate-submit-row"><button type="button" className="btn btn-ghost" onClick={persist}>설정만 저장</button><button className="btn btn-primary portfolio-submit" type="submit" disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "설정 저장하고 분석 시작"}</button></div>
+          </form>
+        )}
       {connectionError && (
         <div className="form-error portfolio-error" role="alert">
           <span>⚠️ {explainPortfolioConnectionError(connectionError)}</span>

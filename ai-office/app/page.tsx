@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
 import {
@@ -21,7 +21,7 @@ import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
 
-type View = "live" | "dashboard";
+type View = "live" | "dashboard" | "mandate";
 const CANONICAL_DEPARTMENT_COUNT = 7;
 const CANONICAL_WORKER_COUNT = 42;
 
@@ -174,10 +174,7 @@ export default function Home() {
   );
 
   const start = () => {
-    setView("live");
-    const form = document.getElementById("portfolio-interview-form") as HTMLFormElement | null;
-    form?.scrollIntoView({ behavior: "smooth", block: "center" });
-    form?.requestSubmit();
+    setView("mandate");
   };
 
   const approve = () => {
@@ -222,6 +219,9 @@ export default function Home() {
             <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>
               📊 대시보드
             </button>
+            <button className={view === "mandate" ? "active" : ""} onClick={() => setView("mandate")}>
+              🗂 Mandate 설정
+            </button>
             <button
               className={`todo-tab ${todo ? "urgent" : ""}`}
               onClick={() => {
@@ -239,9 +239,10 @@ export default function Home() {
 
       <BffProvider>
         <RuntimeSync engine={engine} onSync={syncRuntime} />
-        {view === "live" ? (
+        {view === "mandate" ? (
+          <MandateConfigView onAnalyzed={() => setView("live")} />
+        ) : view === "live" ? (
           <>
-            <PortfolioInterviewPanel />
             <LiveView
               engine={engine}
               snap={snap}
@@ -292,6 +293,64 @@ export default function Home() {
         {toast}
       </div>
     </main>
+  );
+}
+
+function MandateConfigView({ onAnalyzed }: { onAnalyzed: () => void }) {
+  return (
+    <>
+      <header className="mandate-hero win">
+        <div className="win-bar"><span>📁 Mandate Configuration [F01]</span><span className="window-controls" aria-hidden="true">—　▢　✕</span></div>
+        <div className="mandate-hero-body">
+          <div><p className="eyebrow">ONE-TIME USER SETUP · ADVISORY ONLY</p><h1>대표님의 투자 기준을<br /><em className="highlight">한 번만 알려주세요</em></h1><p>기본값을 확인하고 저장하면, 이후 세부 조건은 AI Assistant가 대화로 확인합니다. 저장된 설정은 주문·원장 변경을 직접 수행하지 않습니다.</p></div>
+          <div className="mandate-hero-stamp"><span>MODE</span><b>DEMO</b><small>프론트엔드 설정 화면</small></div>
+        </div>
+      </header>
+      <section className="mandate-layout">
+        <div><PortfolioInterviewPanel onAnalyzed={onAnalyzed} /></div>
+        <aside className="mandate-sidebar">
+          <MandateAssistant />
+          <section className="win mandate-guide"><div className="win-bar"><span>💡 parameter.guide</span><span className="window-controls" aria-hidden="true">—　▢　✕</span></div><div className="win-body"><ul><li>목표 문장은 Risk·QA 검토자가 맥락을 이해하는 데 사용됩니다.</li><li>기본값은 안전한 방향으로 채워져 있으며 고급 설정에서 바꿀 수 있습니다.</li><li>추천 승인도 주문 제출이나 원장 변경을 의미하지 않습니다.</li></ul></div></section>
+        </aside>
+      </section>
+    </>
+  );
+}
+
+type AssistantMessage = { from: "agent" | "user"; text: string };
+
+function MandateAssistant() {
+  const [draft, setDraft] = useState("");
+  const [step, setStep] = useState(0);
+  const [messages, setMessages] = useState<AssistantMessage[]>([
+    { from: "agent", text: "안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다.\n기본 설정은 준비해 두었어요. 세부 조건은 제가 하나씩 여쭤볼게요." },
+    { from: "agent", text: "먼저 투자 기간을 알려주세요. 예: 3년 이상, 은퇴 전까지, 단기 자금이에요." },
+  ]);
+  const questions = [
+    "현금화가 필요한 시점이나 유동성 조건이 있나요?",
+    "특정 업종이나 피하고 싶은 자산이 있나요?",
+    "손실이 발생했을 때 어느 수준까지 감내할 수 있나요?",
+  ];
+
+  function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const value = draft.trim();
+    if (!value) return;
+    setMessages((current) => [...current, { from: "user", text: value }, { from: "agent", text: questions[step] ?? "확인했어요. 이 내용은 설정 초안에 반영해둘게요." }]);
+    setStep((current) => Math.min(current + 1, questions.length));
+    setDraft("");
+  }
+
+  return (
+    <section className="win mandate-assistant" aria-label="Mandate AI Assistant">
+      <div className="win-bar"><span>🤖 CEO Console · AI Assistant</span><span className="window-controls" aria-hidden="true">—　▢　✕</span></div>
+      <div className="win-body">
+        <div className="assistant-heading"><div className="assistant-avatar">AI</div><div><strong>김세리</strong><small>Mandate interview worker · ONLINE</small></div><span className="mini-badge mint">ONLINE</span></div>
+        <div className="assistant-chat" aria-live="polite">{messages.map((message, index) => <div className={`assistant-bubble ${message.from}`} key={`${message.from}-${index}`}><b>{message.from === "agent" ? "김세리 AI" : "대표님"}</b><p>{message.text}</p></div>)}</div>
+        <form className="assistant-input" onSubmit={send}><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="자연어로 답해주세요…" aria-label="AI Assistant 답변" /><button type="submit">전송</button></form>
+        <small className="assistant-note">대화 내용은 현재 화면의 설정 초안에만 표시됩니다.</small>
+      </div>
+    </section>
   );
 }
 

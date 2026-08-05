@@ -195,6 +195,7 @@ export type RiskQaProjection = {
   departments: ReadonlyArray<{
     department_code: string;
     status: string;
+    status_reason?: string;
     worker_count?: number;
     active_worker_count?: number;
     active_workers?: readonly string[];

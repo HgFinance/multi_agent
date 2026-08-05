@@ -112,7 +112,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         client = TestClient(app)
         universes = client.get("/ui/portfolio-universes")
         self.assertEqual(universes.status_code, 200)
-        self.assertEqual(universes.json()["default_universe_id"], "KOREA_GLOBAL_MIXED")
+        self.assertEqual(universes.json()["default_universe_id"], "KOREA_EQUITY_WATCHLIST")
         self.assertTrue(universes.json()["universes"])
 
         response = client.post(

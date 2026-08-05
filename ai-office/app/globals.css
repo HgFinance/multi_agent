@@ -850,6 +850,86 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .mode-paper { color: #2b6c70; background: #dff5ef; }
 .mode-live { color: #8a2f54; background: #ffe0eb; }
 .live-clock .mode-badge { margin: 0 0 4px; }
+.mandate-hero { margin-bottom: 14px; }
+.mandate-hero-body { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 20px; align-items: center; padding: 24px 26px; background: linear-gradient(120deg, #fff 58%, #f5efe2); }
+.mandate-hero-body h1 { font-size: clamp(25px, 3.4vw, 39px); }
+.mandate-hero-body p:last-child { max-width: 720px; margin: 10px 0 0; color: var(--ink-soft); font-size: 13px; line-height: 1.7; }
+.mandate-hero-stamp { display: grid; gap: 4px; justify-items: center; padding: 14px 10px; border: 2px solid var(--ink); border-radius: 10px; background: #241811; color: #efe6da; box-shadow: 4px 4px 0 rgba(107, 63, 34, .3); }
+.mandate-hero-stamp span { color: var(--pink); font: 900 9px "Archivo", sans-serif; letter-spacing: .18em; }
+.mandate-hero-stamp b { color: #b4d56e; font: 900 24px "Archivo", sans-serif; }
+.mandate-hero-stamp small { color: var(--mint); font-size: 9px; text-align: center; }
+.mandate-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; align-items: start; }
+.mandate-sidebar { position: sticky; top: 84px; display: grid; gap: 12px; }
+.mandate-form { display: grid; gap: 0; margin-top: 14px; }
+.mandate-form-section { padding: 15px 0 17px; border-bottom: 1px solid var(--pink-line); }
+.mandate-form-section:first-child { padding-top: 0; }
+.mandate-form-section h3 { margin: 0 0 11px; font-size: 16px; }
+.mandate-form-section h3 > span { margin-right: 6px; color: var(--pink-deep); }
+.mandate-form-section h3 small, .mandate-objective > small, .mandate-risk-options legend small { color: var(--ink-faint); font-size: 10px; font-weight: 700; }
+.mandate-objective-grid { display: grid; grid-template-columns: minmax(220px, .86fr) minmax(0, 1.5fr); gap: 14px; }
+.mandate-objective, .mandate-risk-options, .mandate-inline-fields label, .mandate-range-grid label { display: grid; gap: 6px; min-width: 0; color: var(--ink-soft); font-size: 11px; font-weight: 900; }
+.mandate-objective textarea { width: 100%; min-height: 142px; resize: vertical; padding: 11px; border: 1.5px solid var(--pink-line); border-radius: 8px; background: #fffdf8; color: var(--ink); line-height: 1.55; }
+.mandate-objective > small { color: var(--ink-faint); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.mandate-risk-options { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; border: 0; }
+.mandate-risk-options legend { grid-column: 1 / -1; padding: 0; color: var(--ink-soft); font-size: 11px; }
+.mandate-risk-card { display: grid; grid-template-columns: auto 1fr; gap: 5px 7px; align-content: start; min-height: 142px; padding: 12px 10px; border: 1.5px solid var(--pink-line); border-radius: 8px; background: #fffdf8; cursor: pointer; }
+.mandate-risk-card.selected { border-color: var(--ink); background: #edf0dc; box-shadow: 3px 3px 0 rgba(46, 33, 25, .15); }
+.mandate-risk-card input, .mandate-approval-card input { accent-color: var(--pink-deep); }
+.mandate-risk-icon { grid-column: 2; font-size: 22px; }
+.mandate-risk-card b { grid-column: 2; font-size: 14px; }
+.mandate-risk-card small { grid-column: 2; color: var(--ink-soft); font-size: 10px; font-weight: 500; line-height: 1.45; }
+.mandate-inline-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.mandate-inline-fields input, .mandate-inline-fields select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1.5px solid var(--pink-line); border-radius: 7px; background: #fffdf8; color: var(--ink); }
+.mandate-inline-fields label small { color: var(--ink-faint); font-size: 9px; font-weight: 500; }
+.mandate-range-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.mandate-range-grid output { justify-self: end; margin-top: -24px; padding: 5px 8px; border: 1.5px solid var(--pink-line); border-radius: 6px; background: #fffdf8; color: var(--pink-deep); font: 900 14px "Archivo", sans-serif; }
+.mandate-range-grid input { width: 100%; accent-color: var(--pink-deep); }
+.mandate-range-grid small { color: var(--ink-faint); font-size: 9px; font-weight: 500; word-spacing: 8px; }
+.mandate-asset-grid { display: grid; grid-template-columns: repeat(7, minmax(72px, 1fr)); gap: 7px; }
+.mandate-asset-card { display: grid; min-height: 108px; align-content: center; justify-items: center; gap: 6px; padding: 8px 5px; border: 1.5px solid var(--pink-line); border-radius: 8px; background: #fffdf8; color: var(--ink); cursor: pointer; }
+.mandate-asset-card.allowed { background: #edf0dc; }
+.mandate-asset-card.blocked { border-color: #d59a89; background: #fff5ef; }
+.mandate-asset-card > span { font-size: 22px; }
+.mandate-asset-card b { font-size: 11px; }
+.mandate-asset-card small { color: var(--ink-soft); font-size: 9px; font-weight: 900; }
+.mandate-asset-card.blocked small { color: #a33b5e; }
+.mandate-approval-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mandate-approval-card { display: grid; grid-template-columns: auto auto 1fr; gap: 9px; align-items: start; padding: 13px; border: 1.5px solid var(--pink-line); border-radius: 8px; background: #fffdf8; cursor: pointer; }
+.mandate-approval-card.selected { border-color: var(--ink); background: #edf0dc; box-shadow: 3px 3px 0 rgba(46, 33, 25, .15); }
+.mandate-approval-card > span { font-size: 22px; }
+.mandate-approval-card b, .mandate-approval-card small { display: block; }
+.mandate-approval-card b { font-size: 13px; }
+.mandate-approval-card small { margin-top: 4px; color: var(--ink-soft); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.mandate-advanced { margin-top: 14px; }
+.mandate-submit-row { display: flex; justify-content: flex-end; gap: 8px; padding-top: 15px; }
+.mandate-submit-row .portfolio-submit { min-width: 230px; }
+.mandate-saved { display: grid; gap: 16px; margin-top: 14px; padding: 16px; border: 1.5px solid var(--pink-line); border-radius: 9px; background: #f7f1e7; }
+.mandate-saved > div:first-child { display: grid; gap: 8px; }
+.mandate-saved strong { font-size: 14px; line-height: 1.55; }
+.mandate-saved dl { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin: 0; }
+.mandate-saved dl > div { display: grid; gap: 3px; padding: 8px; border: 1px solid var(--pink-line); border-radius: 6px; background: #fffdf8; }
+.mandate-saved dt { color: var(--ink-faint); font-size: 9px; }
+.mandate-saved dd { margin: 0; color: var(--ink); font-size: 11px; font-weight: 900; }
+.mandate-saved-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mandate-guide ul { display: grid; gap: 9px; margin: 0; padding-left: 17px; color: var(--ink-soft); font-size: 11px; line-height: 1.5; }
+.assistant-heading { display: flex; align-items: center; gap: 8px; }
+.assistant-heading > div:not(.assistant-avatar) { display: grid; gap: 2px; min-width: 0; }
+.assistant-heading strong { font-size: 14px; }
+.assistant-heading small { color: var(--ink-faint); font-size: 9px; }
+.assistant-heading .mini-badge { margin-left: auto; }
+.assistant-avatar { display: grid; width: 36px; height: 36px; place-items: center; border: 2px solid var(--ink); border-radius: 50%; background: var(--yellow); color: var(--pink-deep); font: 900 12px "Archivo", sans-serif; }
+.assistant-chat { display: grid; gap: 8px; max-height: 390px; margin-top: 13px; overflow-y: auto; padding: 9px; border: 2px solid var(--ink); border-radius: 9px; background: #faf6ef; }
+.assistant-bubble { max-width: 92%; padding: 8px 10px; border: 1.5px solid var(--ink); border-radius: 11px; background: #fff; }
+.assistant-bubble.user { justify-self: end; background: var(--pink); color: #fff; }
+.assistant-bubble b { display: block; color: var(--pink-deep); font-size: 9px; }
+.assistant-bubble.user b { color: #fff; }
+.assistant-bubble p { margin: 3px 0 0; font-size: 11px; line-height: 1.5; white-space: pre-line; }
+.assistant-input { display: flex; gap: 6px; margin-top: 10px; }
+.assistant-input input { min-width: 0; flex: 1; padding: 9px 10px; border: 1.5px solid var(--ink); border-radius: 8px; background: #fff; font-size: 11px; }
+.assistant-input button { padding: 8px 11px; border: 1.5px solid var(--ink); border-radius: 8px; background: var(--pink-deep); color: #fff; font-size: 11px; font-weight: 900; cursor: pointer; }
+.assistant-note { display: block; margin-top: 8px; color: var(--ink-faint); font-size: 9px; line-height: 1.4; }
 @media (max-width: 1100px) { .portfolio-form { grid-template-columns: repeat(3, minmax(0, 1fr)); } .kanban-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); } }
 @media (max-width: 1100px) { .portfolio-form-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } .portfolio-advanced-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .portfolio-form { grid-template-columns: 1fr; } .portfolio-form-compact { grid-template-columns: 1fr; } .result-heading { align-items: flex-start; flex-direction: column; } .portfolio-recommendation { grid-template-columns: 1fr; } .instrument-row { grid-template-columns: 1fr; } .portfolio-advanced-grid { grid-template-columns: 1fr; } .kanban-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
+@media (max-width: 1100px) { .mandate-layout { grid-template-columns: 1fr; } .mandate-sidebar { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); } .mandate-asset-grid { grid-template-columns: repeat(4, minmax(72px, 1fr)); } }
+@media (max-width: 760px) { .mandate-hero-body { grid-template-columns: 1fr; padding: 18px 14px; } .mandate-hero-stamp { justify-self: start; } .mandate-objective-grid, .mandate-range-grid, .mandate-approval-grid { grid-template-columns: 1fr; } .mandate-risk-options { grid-template-columns: 1fr; } .mandate-risk-card { min-height: auto; grid-template-columns: auto 1fr; } .mandate-risk-icon { grid-column: 1; grid-row: 1 / span 2; } .mandate-risk-card b, .mandate-risk-card small { grid-column: 2; } .mandate-asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .mandate-saved dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } .mandate-saved-actions, .mandate-submit-row { display: grid; grid-template-columns: 1fr; } .mandate-saved-actions .btn, .mandate-submit-row .btn { width: 100%; } .mandate-sidebar { grid-template-columns: 1fr; } }
