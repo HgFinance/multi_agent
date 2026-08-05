@@ -890,6 +890,17 @@ class SupabaseReadOnlyAdapter:
             reasons.append("NO_PIT_RESEARCH_DOCUMENTS")
         if market_context["status"] == "EMPTY":
             reasons.append("NO_PIT_MARKET_SNAPSHOTS")
+        pit_diagnostics = {
+            "ready": quality == "PASS",
+            "quality_status": quality,
+            "reasons": list(dict.fromkeys(reasons)),
+            "candidate_count": len(candidates),
+            "research_document_count": len(research_context.get("documents", [])),
+            "market_snapshot_count": len(market_context.get("snapshots", [])),
+            "domestic_instrument_count": len(market_context.get("instrument_universe", {}).get("instruments", [])),
+            "as_of": cutoff.isoformat(),
+        }
+        data_diagnostics["pit_readiness"] = pit_diagnostics
         return SupabaseReadSnapshot(
             cutoff,
             "SUPABASE",

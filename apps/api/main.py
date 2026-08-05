@@ -41,6 +41,8 @@ from pydantic import BaseModel, Field, field_validator
 
 ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env", override=False)
+# Backend-only integration readiness. Never return these values to the browser.
+load_dotenv(ROOT / "ai-office" / ".dev.vars", override=False)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "portfolio"))
@@ -181,11 +183,28 @@ def _integration_status() -> dict[str, dict[str, object]]:
     def configured(*names: str) -> bool:
         return all(os.getenv(name, "").strip() for name in names)
 
+    notion_databases = tuple(
+        name
+        for name in (
+            "NOTION_BRIEFING_DB",
+            "NOTION_RESEARCH_DB",
+            "NOTION_TRADING_DB",
+            "NOTION_RISK_DB",
+            "NOTION_QUANT_BACKTEST_DB",
+            "NOTION_ACCOUNTING_DB",
+            "NOTION_QA_DB",
+            "NOTION_HR_DB",
+        )
+        if os.getenv(name, "").strip()
+    )
+
     return {
         "notion": {
             "configured": configured("NOTION_TOKEN", "NOTION_BRIEFING_DB"),
             "label": "Notion 저장",
             "need": "NOTION_TOKEN / NOTION_BRIEFING_DB 미설정",
+            "database_count": len(notion_databases),
+            "database_scope": "projection_only",
         },
         "discord": {
             "configured": configured("DISCORD_WEBHOOK_URL"),

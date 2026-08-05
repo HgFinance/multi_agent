@@ -151,6 +151,7 @@ class PortfolioRecommendationStatusResponse(_ApiModel):
     active_workers: list[PortfolioActiveWorker] = Field(default_factory=list)
     departments: dict[str, PortfolioDepartmentRuntime] = Field(default_factory=dict)
     messages: list[PortfolioRuntimeMessage] = Field(default_factory=list)
+    performance_metrics: list[dict[str, Any]] = Field(default_factory=list)
     pipeline_events: list[dict[str, Any]] = Field(default_factory=list)
     active_handoff: PortfolioHandoff | None = None
     result: PortfolioRecommendationResult | None = None

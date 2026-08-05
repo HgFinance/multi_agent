@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useBffFeed } from "./bffClient";
-import type { OperationsCommunication, OperationsDepartment, OperationsSnapshot } from "./readModel";
+import type { LlmPerformanceMetric, OperationsCommunication, OperationsDepartment } from "./readModel";
 
 type Scope = "all" | "internal" | "cross_domain";
 
@@ -19,8 +19,6 @@ const statusTone: Record<string, string> = {
   IMPLEMENTED_INTERNAL: "done",
   PLANNED: "waiting",
 };
-
-type AgentStatus = NonNullable<OperationsSnapshot["agent_statuses"]>[number];
 
 const statusLabel: Record<string, string> = {
   IDLE: "대기",
@@ -79,25 +77,18 @@ function CommunicationRow({ event }: { event: OperationsCommunication }) {
   );
 }
 
-function WorkerActivityRow({ agent, departmentName }: { agent: AgentStatus; departmentName: string }) {
-  const status = String(agent.status).toUpperCase();
-  return (
-    <article className="worker-activity-row">
-      <div>
-        <strong>{agent.role || agent.worker_id || agent.agent_id}</strong>
-        <small>{departmentName} · {agent.worker_id || agent.agent_id}</small>
-      </div>
-      <span className={`status-pill ${statusTone[status] ?? "waiting"}`}>
-        {statusLabel[status] ?? status}
-      </span>
-      <p>{agent.reason || "최근 Worker 상태 이벤트를 수신했습니다."}</p>
-    </article>
-  );
+function departmentStage(department: OperationsDepartment): string {
+  return {
+    governance: "ceo",
+    workforce: "hr",
+    accounting: "accounting",
+  }[department.domain] ?? department.domain;
 }
 
 export default function DepartmentCommunicationPanel() {
   const { snapshot, connection, error, lastUpdated, refresh } = useBffFeed();
   const [scope, setScope] = useState<Scope>("all");
+  const [selectedDepartmentCode, setSelectedDepartmentCode] = useState("research-department");
   const operations = snapshot?.operations;
   const events = useMemo(
     () =>
@@ -117,10 +108,39 @@ export default function DepartmentCommunicationPanel() {
     }),
     [operations?.agent_statuses],
   );
-  const internalMessages = useMemo(
-    () => operations?.runtime.messages.filter((message) => message.worker_id).slice(-12).reverse() ?? [],
-    [operations?.runtime.messages],
+  const performanceMetrics = operations?.runtime.performance_metrics ?? [];
+  const selectedDepartment =
+    operations?.departments.find((department) => department.department_code === selectedDepartmentCode) ??
+    operations?.departments[0];
+  const selectedDepartmentCodeResolved = selectedDepartment?.department_code ?? selectedDepartmentCode;
+  const selectedLiveAgents = useMemo(
+    () => new Map(
+      (operations?.agent_statuses ?? [])
+        .filter((agent) => agent.department_code === selectedDepartmentCodeResolved)
+        .map((agent) => [agent.worker_id ?? agent.agent_id, agent]),
+    ),
+    [operations?.agent_statuses, selectedDepartmentCodeResolved],
   );
+  const selectedWorkers = selectedDepartment?.workers.map((worker) => {
+    const live = selectedLiveAgents.get(worker.worker_id);
+    const active = operations?.runtime.active_workers.some(
+      (item) => item.worker_id === worker.worker_id && item.department_code === selectedDepartmentCodeResolved,
+    );
+    return {
+      ...worker,
+      role: live?.role ?? worker.worker_id,
+      status: live?.status ?? (active ? "RUNNING" : "REGISTERED"),
+      reason: live?.reason ?? (active ? "LangGraph runtime에서 실행 중입니다." : "실행 상태 이벤트 대기 중입니다."),
+    };
+  }) ?? [];
+  const selectedMessages = operations?.runtime.messages
+    .filter((message) => message.department_code === selectedDepartmentCodeResolved && message.worker_id)
+    .slice(-8)
+    .reverse() ?? [];
+  const selectedMetrics = performanceMetrics
+    .filter((metric) => metric.stage === (selectedDepartment ? departmentStage(selectedDepartment) : ""))
+    .slice(-8)
+    .reverse();
 
   return (
     <section className="win department-operations" aria-labelledby="department-operations-title">
@@ -180,33 +200,90 @@ export default function DepartmentCommunicationPanel() {
                   {workerActivity.filter((agent) => agent.status === "RUNNING").length}명 업무 중
                 </span>
               </div>
-              {workerActivity.length > 0 ? (
-                <div className="worker-activity-list" aria-label="실제 직원별 작업 상태">
-                  {workerActivity.map((agent) => (
-                    <WorkerActivityRow
-                      key={agent.agent_id}
-                      agent={agent}
-                      departmentName={departmentNames.get(agent.department_code) ?? agent.department_code}
-                    />
-                  ))}
+              <div className="department-selector" role="tablist" aria-label="내부 실행을 볼 부서 선택">
+                {operations.departments.map((department) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={department.department_code === selectedDepartmentCodeResolved}
+                    className={department.department_code === selectedDepartmentCodeResolved ? "active" : ""}
+                    key={department.department_code}
+                    onClick={() => setSelectedDepartmentCode(department.department_code)}
+                  >
+                    <span>{department.domain.toUpperCase()}</span>
+                    <b>{department.name}</b>
+                    <small>{department.active_worker_count}/{department.worker_count}</small>
+                  </button>
+                ))}
+              </div>
+              {selectedDepartment ? (
+                <div className="department-inspector">
+                  <div className="department-inspector-heading">
+                    <div>
+                      <span className="tiny-label">SELECTED DEPARTMENT</span>
+                      <h4>{selectedDepartment.name}</h4>
+                      <code>{selectedDepartment.department_code}</code>
+                    </div>
+                    <span className={`status-pill ${statusTone[selectedDepartment.status] ?? "waiting"}`}>
+                      {statusLabel[selectedDepartment.status] ?? selectedDepartment.status}
+                    </span>
+                  </div>
+                  <div className="department-inspector-meta">
+                    <span>등록 Worker <b>{selectedWorkers.length}</b></span>
+                    <span>업무 중 <b>{selectedWorkers.filter((worker) => worker.status === "RUNNING").length}</b></span>
+                    <span>내부 메시지 <b>{selectedMessages.length}</b></span>
+                    <span>LLM 성과 <b>{selectedMetrics.length}</b></span>
+                  </div>
+                  <div className="department-inspector-grid">
+                    <div>
+                      <span className="tiny-label">WORKER REGISTRY + LIVE STATUS</span>
+                      <div className="worker-activity-list" aria-label={`실제 직원별 작업 상태 · ${selectedDepartment.name}`}>
+                        {selectedWorkers.length > 0 ? selectedWorkers.map((worker) => (
+                          <article className="worker-activity-row" key={worker.worker_id}>
+                            <div>
+                              <strong>{worker.role}</strong>
+                              <small>{worker.worker_id} · {worker.trigger ?? "always"}</small>
+                            </div>
+                            <span className={`status-pill worker-status-pill ${statusTone[worker.status] ?? "waiting"}`}>
+                              {statusLabel[worker.status] ?? (worker.status === "REGISTERED" ? "등록됨" : worker.status)}
+                            </span>
+                            <p>{worker.reason}</p>
+                          </article>
+                        )) : <p className="backend-empty-state">이 부서의 Worker Registry를 기다리는 중입니다.</p>}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="tiny-label">INTERNAL MESSAGES</span>
+                      {selectedMessages.length > 0 ? (
+                        <div className="internal-message-list">
+                          {selectedMessages.map((message) => (
+                            <div className="internal-message-row" key={message.id}>
+                              <code>{message.worker_id}</code>
+                              <span>{message.text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <p className="backend-empty-state">실제 내부 메시지가 아직 없습니다.</p>}
+                      <span className="tiny-label department-metric-label">LLM PERFORMANCE · REDACTED</span>
+                      {selectedMetrics.length > 0 ? (
+                        <div className="llm-metric-list">
+                          {selectedMetrics.map((metric: LlmPerformanceMetric) => (
+                            <div className="llm-metric-row" key={`${metric.worker_id}-${metric.latency_ms}-${metric.attempts}`}>
+                              <b>{metric.worker_id}</b>
+                              <span>{metric.model_name}</span>
+                              <span>{metric.latency_ms}ms</span>
+                              <span>eval {metric.eval_score == null ? "—" : metric.eval_score.toFixed(2)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <p className="backend-empty-state">Worker 실행 후 정량 성과가 표시됩니다.</p>}
+                    </div>
+                  </div>
+                  <p className="dash-note">LangSmith Input/Output 원문은 정책상 비활성화되어 있으며, 정량 메타데이터와 해시 식별자만 추적합니다.</p>
                 </div>
               ) : (
-                <p className="backend-empty-state">
-                  실제 Worker status event가 아직 없습니다. Registry 직원은 실행 이벤트를 받은 뒤 이곳에 표시됩니다.
-                </p>
+                <p className="backend-empty-state">부서 Registry를 기다리는 중입니다.</p>
               )}
-              {internalMessages.length > 0 ? (
-                <div className="internal-message-list" aria-label="부서 내부 Worker 메시지">
-                  <span className="tiny-label">INTERNAL WORKER MESSAGES</span>
-                  {internalMessages.map((message) => (
-                    <div className="internal-message-row" key={message.id}>
-                      <b>{departmentNames.get(message.department_code ?? "") ?? message.department_code ?? "runtime"}</b>
-                      <code>{message.worker_id}</code>
-                      <span>{message.text}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
             </div>
 
             <div className="communication-toolbar">
@@ -239,7 +316,7 @@ export default function DepartmentCommunicationPanel() {
  등록된 Event Contract {operations.implemented_event_contracts}개 · 계획 {operations.planned_event_contracts}개.
  Registry 항목은 실시간 message가 아니며, live event는 연결 후에만 표시됩니다.
  </p>
- {operations.runtime.messages.length > 0 && <div className="communication-list" aria-label="실제 LangGraph runtime 메시지">{operations.runtime.messages.slice(-12).reverse().map((message) => <article className="communication-row" key={message.id}><div className="communication-heading"><code>{message.kind}</code><span className="status-pill done">LIVE</span></div><p>{message.text}</p><small>{message.department_code ?? "runtime"} · {message.worker_id ?? "department-head"}</small></article>)}</div>}
+ {operations.runtime.messages.length > 0 && <div className="communication-list" aria-label="실제 LangGraph runtime 메시지">{operations.runtime.messages.slice(-12).reverse().map((message) => <article className="communication-row" key={message.id}><div className="communication-heading"><code>{message.kind}</code><span className="status-pill done">LIVE</span></div><p>{message.text}</p><small>{departmentNames.get(message.department_code ?? "") ?? message.department_code ?? "runtime"} · {message.worker_id ?? "department-head"}</small></article>)}</div>}
             <div className="communication-list" aria-label="부서간 Event Contract">
               {events.map((event) => (
                 <CommunicationRow key={event.event_type} event={event} />

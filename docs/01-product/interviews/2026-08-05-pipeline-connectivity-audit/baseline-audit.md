@@ -125,4 +125,11 @@
 - 직원 추적 UI가 실제로 동작하는지 확인한다.
 - 기존 실행 프로세스에 남은 `WORKER_SPECS` 오류를 해결하고 새 코드가 BFF에 반영되었는지 검증한다.
 - 저장소 `.env`의 LangSmith 설정을 확인해 API 연결에 사용할 수 있는 안전한 상태 정보와 프론트 관제 표시를 추가한다.
+
+## Round 8 — Operations Console과 부서별 내부 관제
+
+- Operation Console에 실행 상태, 부서별 Worker, Gate, 최근 이벤트, LangSmith 관측성을 한 흐름으로 배치한다.
+- LangSmith Input/Output 원문은 보안 정책상 표시하거나 전송하지 않는다. 대신 원문 차단 상태, 모델명, 역할, latency, token usage, eval score, 해시 식별자를 보여준다.
+- 부서 간 Event Registry 목록만 나열하지 않고, 작은 부서 선택 버튼으로 Risk·Research 등 한 부서를 고른 뒤 해당 부서의 등록 Worker, 실행 중 Worker, 내부 메시지와 LLM 성과를 확인한다.
+- 기본 선택 부서는 Research로 두고, 실행 이벤트가 없는 직원은 업무 중으로 추측하지 않고 `등록됨/상태 이벤트 대기`로 표시한다.
 - API Key 원문은 프론트·로그·문서에 노출하지 않는다.
