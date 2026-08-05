@@ -35,10 +35,15 @@ from functools import lru_cache
 from typing import Any
 
 from cost import CapacitySnapshot, CostSnapshot
+from quality import QualitySnapshot
 
 
 class ScorecardQueryError(RuntimeError):
     """Snapshot 조회에 실패한 경우."""
+
+
+class QualitySnapshotPersistenceError(RuntimeError):
+    """workforce.quality_snapshots 기록/조회에 실패한 경우."""
 
 
 @lru_cache(maxsize=1)
@@ -54,7 +59,13 @@ def _load_postgres_driver() -> Any:
 
 
 class PostgresScorecardRepository:
-    """`workforce.cost_snapshots`/`workforce.capacity_snapshots` 읽기 전용 조회."""
+    """`workforce.cost_snapshots`/`workforce.capacity_snapshots` 읽기 전용 조회 +
+    `workforce.quality_snapshots` 읽기/쓰기.
+
+    cost/capacity 는 플랫폼/인프라가 쓰고 인사팀은 읽기만 한다(F27 담당 분리). quality
+    는 반대다 - 인사팀이 직접 집계해서 쓴다(quality_snapshots 테이블 주석: "여기 채우는
+    값은 인사팀이 집계하는 finding_count/rework_rate 뿐"). 그래서 이 Repository에서
+    quality 관련 메서드만 쓰기를 갖는다 - cost/capacity 에 쓰기를 추가하지 않는다."""
 
     def __init__(self, pool: Any) -> None:
         self._pool = pool
@@ -184,6 +195,87 @@ class PostgresScorecardRepository:
             utilization=Decimal(utilization) if utilization is not None else None,
             department_id=str(department_id) if department_id else None,
             agent_id=str(agent_id) if agent_id else None,
+        )
+
+
+    def append_quality_snapshot(self, snapshot: QualitySnapshot) -> str:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into workforce.quality_snapshots (
+                        department_id, agent_id, profile_version_id, window_start, window_end,
+                        eval_run_id, finding_count, rework_rate, role_kpi, recorded_by
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    returning snapshot_id
+                    """,
+                    (snapshot.department_id, snapshot.agent_id, snapshot.profile_version_id,
+                     snapshot.window_start, snapshot.window_end, snapshot.eval_run_id,
+                     snapshot.finding_count,
+                     str(snapshot.rework_rate) if snapshot.rework_rate is not None else None,
+                     snapshot.role_kpi, snapshot.recorded_by),
+                )
+                snapshot_id = cur.fetchone()[0]
+            conn.commit()
+            return str(snapshot_id)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            raise QualitySnapshotPersistenceError(f"quality_snapshot 기록 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    def list_quality_snapshots_by_department(
+        self, department_id: str, *, window_start: datetime, window_end: datetime
+    ) -> list[QualitySnapshot]:
+        return self._list_quality_snapshots(
+            "where department_id = %s and window_start >= %s and window_end <= %s",
+            (department_id, window_start, window_end),
+        )
+
+    def list_quality_snapshots_by_agent(
+        self, agent_id: str, *, window_start: datetime, window_end: datetime
+    ) -> list[QualitySnapshot]:
+        return self._list_quality_snapshots(
+            "where agent_id = %s and window_start >= %s and window_end <= %s",
+            (agent_id, window_start, window_end),
+        )
+
+    def _list_quality_snapshots(self, where_clause: str, params: tuple) -> list[QualitySnapshot]:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    select department_id, agent_id, profile_version_id, window_start, window_end,
+                           eval_run_id, finding_count, rework_rate, role_kpi, recorded_by
+                    from workforce.quality_snapshots
+                    {where_clause}
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [self._to_quality_snapshot(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            raise QualitySnapshotPersistenceError(f"quality_snapshot 조회 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    @staticmethod
+    def _to_quality_snapshot(db_row: tuple) -> QualitySnapshot:
+        (department_id, agent_id, profile_version_id, window_start, window_end,
+         eval_run_id, finding_count, rework_rate, role_kpi, recorded_by) = db_row
+        return QualitySnapshot(
+            window_start=window_start, window_end=window_end, recorded_by=recorded_by,
+            department_id=str(department_id) if department_id else None,
+            agent_id=str(agent_id) if agent_id else None,
+            profile_version_id=str(profile_version_id) if profile_version_id else None,
+            eval_run_id=str(eval_run_id) if eval_run_id else None,
+            finding_count=finding_count,
+            rework_rate=Decimal(rework_rate) if rework_rate is not None else None,
+            role_kpi=role_kpi or {},
         )
 
 

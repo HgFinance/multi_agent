@@ -78,6 +78,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260805000300_notifications_dedup_key_history_repair_note.sql",
                 # HR-03 P1-1: Eval HOLD 종료와 후보별 관찰 Scorecard
                 "20260806000100_workforce_improvement_hold_and_scorecards.sql",
+                # HR-04 P1-2: quality_snapshots에 누락됐던 recorded_by 추가
+                "20260806000200_workforce_quality_snapshot_recorded_by.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
