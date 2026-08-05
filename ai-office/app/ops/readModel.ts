@@ -253,6 +253,19 @@ export const SUPPORTED_SCHEMA_VERSION = 1;
 /** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 넘긴다. */
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
+/**
+ * Sequence는 단조 증가하는 canonical projection 버전이다.
+ * 알 수 없는 값은 최신 상태로 해석하지 않는다.
+ */
+export function isValidSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function getSnapshotSequence(snapshot: TradingSnapshot): number | null {
+  if (snapshot.operations === undefined) return 0;
+  const sequence = snapshot.operations.sequence;
+  return isValidSequence(sequence) ? sequence : null;
+}
 
 /**
  * Snapshot 형태 검증.
@@ -294,6 +307,9 @@ export function parseSnapshot(input: unknown): TradingSnapshot {
     }
     if (typeof operations.runtime !== "object" || operations.runtime === null) {
       throw new Error("Snapshot operations에 runtime projection이 없습니다");
+    }
+    if (operations.sequence !== undefined && !isValidSequence(operations.sequence)) {
+      throw new Error("Snapshot operations의 sequence가 유효하지 않습니다");
     }
   }
   return doc as unknown as TradingSnapshot;

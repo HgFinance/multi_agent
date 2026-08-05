@@ -1,0 +1,8 @@
+{
+  "kind": "api-package-test-report",
+  "schemaVersion": 1,
+  "commands": ["npm --prefix ai-office run build", "npm --prefix ai-office test", "npm --prefix ai-office run lint"],
+  "status": "passed",
+  "evidence": "Frontend build completed; 5 rendered HTML tests passed; ESLint completed with zero errors and zero warnings.",
+  "scope": ["DEMO/PAPER projection boundary", "Snapshot sequence validation", "Governance command stale/offline gating"]
+}

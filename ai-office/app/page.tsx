@@ -23,6 +23,7 @@ import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type 
 import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
 import type { LlmPerformanceMetric } from "./ops/readModel";
 import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
+import { canUseSimulation } from "./ops/projectionSource";
 
 type View = "live" | "dashboard" | "mandate";
 type DashboardAudience = "executive" | "operations";
@@ -116,9 +117,13 @@ function PixelEmployee({ hair, shirt, accent }: { hair: string; shirt: string; a
 function RuntimeSync({ engine, onSync }: { engine: Company; onSync: () => void }) {
   const { snapshot } = useBffFeed();
   useEffect(() => {
-    engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    const mode = snapshot?.mode ?? "DEMO";
+    engine.setSimulationMode(canUseSimulation(mode));
+    if (!canUseSimulation(mode)) {
+      engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    }
     onSync();
-  }, [engine, onSync, snapshot?.operations?.runtime]);
+  }, [engine, onSync, snapshot?.mode, snapshot?.operations?.runtime]);
   return null;
 }
 

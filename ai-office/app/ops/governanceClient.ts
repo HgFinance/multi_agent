@@ -28,6 +28,11 @@ export type MandateTimelineEvent = {
   payload: Record<string, unknown>;
   occurred_at: string;
 };
+export function assertGovernanceCommandable(connection: "connecting" | "connected" | "stale" | "offline"): void {
+  if (connection !== "connected") {
+    throw new Error("BFF 연결이 안정적이지 않아 승인·상태 변경을 잠시 차단했습니다.");
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BFF}${path}`, {
