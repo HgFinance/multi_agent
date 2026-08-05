@@ -63,13 +63,25 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 
 **담당:** 영주. **협업:** 동규, Platform/IAM.
 
-- Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다.
-- Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다.
+> **⚠️ 팀 합의 (2026-08-05) — 이건 실제 로그인 인증이 아니다.** 이 저장소에는 서명된
+> Subject 인증(mTLS/JWT, Supabase Auth 로그인)이 아직 없다 - Platform/IAM이 전체 인증
+> 아키텍처를 결정하기 전까지는 CEO Office 혼자 이 항목을 완전히 닫을 수 없다(설계
+> 공백을 임의로 채우지 않는다). 그래서 팀은 **`supabase/seed.sql`에 심어둔 테스트 회원
+> 행을 "로그인된 사용자"로 간주**하기로 합의했다: `actor_user_id`가 `governance.
+> user_profiles`에 실재하고 `status='ACTIVE'`인지만 결정론적으로 검증한다
+> (`departments/00-ceo-office/src/approval/actor_identity.py`,
+> `UnverifiedActorUserError` → 403). 이건 "서명으로 신원을 증명"이 아니라 "최소한 DB에
+> 실재하는 활성 계정인가"까지만 좁힌 검증이다 - **Production 배포 전 실제 Auth로 반드시
+> 교체해야 한다.** 아래 §6 Release Gate의 "승인자 Identity가 서명/검증됨"은 이 상태로는
+> 체크할 수 없다.
+
+- Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다. → **현재는 위 팀 합의로 대체(실재성+ACTIVE만 검증), 서명 검증은 BLOCKED**
+- Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다. → department/role/expiry는 기존대로 검증(`_ROLE_DECIDERS`, `is_expired`). scope(Fund 단위 권한 범위)는 `governance.fund_memberships`가 비어 있어 여전히 미검증
 - Risk/QA는 자체 업무의 독립 veto/verification 권한을 유지하며 CEO가 대신 결정하지 않는다.
-- `actor_agent_id`가 NULL이거나 Profile/Role과 매핑되지 않으면 `DENY`다.
+- `actor_agent_id`가 NULL이거나 Profile/Role과 매핑되지 않으면 `DENY`다. → **BLOCKED로 유지.** 2026-08-04 팀 결정("Agent Roster 등재는 전체 Prototype까지 미룬다")과 정면 충돌한다 - 지금 이 규칙을 적용하면 Roster 미등재 상태인 현재 모든 결정이 막힌다. Roster 등재가 끝난 뒤에 켠다.
 - 최초 Mandate, `LOOSEN`, 상한 확대, LIVE 관련 변경은 승인 증거 없이는 저장·활성화하지 않는다.
 
-**완료 증거:** 올바른 Actor, 잘못된 Department, 만료 Approval, 자기승인, Risk veto, quorum 부족, revoke 후 재사용 각각의 결과가 고정 테스트와 DB Audit row에 남는다.
+**완료 증거:** 올바른 Actor, 잘못된 Department, 만료 Approval, 자기승인, Risk veto, quorum 부족, revoke 후 재사용 각각의 결과가 고정 테스트와 DB Audit row에 남는다. **actor_user_id 실재성 검증(신규)**도 고정 테스트로 남는다(`api/app.py` 자체점검 15c번 시나리오 - 실재하지 않는 actor_user_id는 403).
 
 ### P0-2. GOV-02 전체 상태 Replay
 
