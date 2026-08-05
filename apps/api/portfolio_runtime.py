@@ -1,13 +1,14 @@
 """BFF adapter for the advisory portfolio-recommendation LangGraph.
 
 The browser never runs a worker. This module starts the existing orchestration
-graph in a background task, records only its runtime projection, and exposes a
-safe, non-binding portfolio result to the operator BFF.
+graph in a background task, records only its durable runtime projection, and
+exposes a safe, non-binding portfolio result to the operator BFF.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -24,6 +25,8 @@ try:
     from kanban_status_bridge import KANBAN_STATUS_BRIDGE
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
+
+from portfolio_store import PortfolioRuntimeStore
 
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
@@ -45,6 +48,13 @@ STAGE_ORDER = tuple(STAGE_DEPARTMENT)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _correlation_hash(profile: Mapping[str, Any]) -> str:
+    payload = json.dumps(dict(profile), ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def _request_fingerprint(profile: Mapping[str, Any]) -> str:
+    return _correlation_hash({key: value for key, value in profile.items() if key != "as_of"})
 
 
 def _one_line(value: Any, limit: int = 180) -> str:
@@ -126,12 +136,22 @@ def _runtime_department(code: str) -> dict[str, Any]:
 
 
 class PortfolioRuntime:
-    """Small process-local projection; it is not a source of financial truth."""
+    """Durable advisory projection; it is not a source of financial truth."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tasks: dict[str, threading.Thread] = {}
-        self._job: dict[str, Any] | None = None
+        default_store_dir = os.getenv("PORTFOLIO_RUNTIME_STORE_DIR", "/tmp").strip() or "/tmp"
+        store_path = os.getenv("PORTFOLIO_RUNTIME_STORE_PATH", "").strip()
+        self._store = PortfolioRuntimeStore(store_path or str(Path(default_store_dir) / "hgfinance-portfolio.sqlite3"))
+        self._job: dict[str, Any] | None = self._store.latest()
+        if self._job and self._job.get("status") in {"QUEUED", "RUNNING"}:
+            self._job["status"] = "ERROR"
+            self._job["phase"] = "실행 재시작 감지 — 안전 보류"
+            self._job["error"] = "portfolio_runtime_restarted_before_terminal_state"
+            self._job["updated_at"] = _now()
+            self._store.save(self._job)
+        self._idempotency: dict[tuple[str, str], tuple[str, str]] = {}
 
     def _base_job(self, job_id: str, profile: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -142,6 +162,13 @@ class PortfolioRuntime:
             "started_at": None,
             "updated_at": _now(),
             "profile_user_id": str(profile.get("user_id", "")),
+            "trace_id": str(profile.get("trace_id") or ""),
+            "case_id": profile.get("case_id"),
+            "mandate_version_id": profile.get("mandate_version_id"),
+            "policy_hash": profile.get("policy_hash"),
+            "idempotency_key": profile.get("idempotency_key"),
+            "request_fingerprint": _request_fingerprint(profile),
+            "input_hash": _correlation_hash(profile),
             "active_workers": [],
             "departments": {code: _runtime_department(code) for code in STAGE_DEPARTMENT.values()},
             "active_handoff": None,
@@ -155,16 +182,51 @@ class PortfolioRuntime:
 
     def start(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
+            idempotency_key = str(profile.get("idempotency_key") or "").strip()
+            owner = str(profile.get("user_id") or "")
+            fingerprint = _request_fingerprint(profile)
+            if idempotency_key:
+                existing = self._idempotency.get((owner, idempotency_key))
+                if existing is not None:
+                    existing_id, existing_fingerprint = existing
+                    if existing_fingerprint != fingerprint:
+                        raise RuntimeError("portfolio_recommendation_idempotency_conflict")
+                    existing_job = self._job_for(existing_id)
+                    if existing_job is not None:
+                        return {
+                            "run_id": existing_job["run_id"],
+                            "status": existing_job["status"],
+                            "workflow": existing_job["workflow"],
+                            "idempotent_replay": True,
+                        }
+                persisted_job = self._store.find_by_idempotency(owner, idempotency_key)
+                if persisted_job is not None:
+                    if persisted_job.get("request_fingerprint") != fingerprint:
+                        raise RuntimeError("portfolio_recommendation_idempotency_conflict")
+                    return {
+                        "run_id": persisted_job["run_id"],
+                        "status": persisted_job["status"],
+                        "workflow": persisted_job["workflow"],
+                        "idempotent_replay": True,
+                    }
             if self._job and self._job.get("status") in {"QUEUED", "RUNNING"}:
                 raise RuntimeError("portfolio_recommendation_already_running")
             job_id = f"portfolio-run-{uuid4().hex}"
             normalized_profile = dict(profile)
             normalized_profile.setdefault("as_of", _now())
             self._job = self._base_job(job_id, normalized_profile)
+            self._store.save(self._job)
+            if idempotency_key:
+                self._idempotency[(owner, idempotency_key)] = (job_id, fingerprint)
             task = threading.Thread(target=lambda: asyncio.run(self._run(job_id, normalized_profile)), daemon=True)
             self._tasks[job_id] = task
             task.start()
-            return {"run_id": job_id, "status": "QUEUED", "workflow": self._job["workflow"]}
+            return {
+                "run_id": job_id,
+                "status": "QUEUED",
+                "workflow": self._job["workflow"],
+                "idempotent_replay": False,
+            }
 
     def _job_for(self, job_id: str) -> dict[str, Any] | None:
         return self._job if self._job and self._job.get("run_id") == job_id else None
@@ -373,6 +435,7 @@ class PortfolioRuntime:
                     kind="department_blocked",
                     department=department,
                 )
+            self._store.save(job)
 
     def _event(self, job_id: str, event: Mapping[str, Any]) -> None:
         # Kept as the stable callback name for existing callers.
@@ -541,6 +604,7 @@ class PortfolioRuntime:
                     self._message(job, "추천 결과가 준비되었습니다. 주문·승인·원장 변경은 수행하지 않았습니다.", kind="run_completed")
                 else:
                     self._message(job, "LangGraph 실행은 끝났지만 Worker 또는 Gate 검증이 안전 보류되어 추천 결과를 확정하지 않았습니다.", kind="run_degraded")
+                self._store.save(job)
         except Exception as exc:  # noqa: BLE001 - BFF boundary fails closed.
             with self._lock:
                 job = self._job_for(job_id)
@@ -580,6 +644,7 @@ class PortfolioRuntime:
                 job["error"] = f"{type(exc).__name__}: {_one_line(exc)}"
                 job["updated_at"] = _now()
                 self._message(job, "LangGraph 실행이 실패해 추천 결과를 확정하지 않았습니다.", kind="run_error")
+                self._store.save(job)
 
     def decide(self, run_id: str, decision: str, comment: str | None = None) -> dict[str, Any] | None:
         """Record user approval of an advisory result, never an order approval."""
@@ -616,13 +681,23 @@ class PortfolioRuntime:
                 else "사용자가 추천 포트폴리오를 거절했습니다.",
                 kind="user_approval",
             )
-            return json.loads(json.dumps(job, default=str))
+            self._store.save(job)
+            return self._public_job(job)
+    @staticmethod
+    def _public_job(job: Mapping[str, Any]) -> dict[str, Any]:
+        value = json.loads(json.dumps(dict(job), default=str))
+        value.pop("idempotency_key", None)
+        value.pop("request_fingerprint", None)
+        return value
+    @property
+    def durable(self) -> bool:
+        return self._store.enabled
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             if self._job is None:
                 return {"status": "OFFLINE", "run": None}
-            job = json.loads(json.dumps(self._job, default=str))
+            job = self._public_job(self._job)
             handoff = job.get("active_handoff")
             if handoff and float(handoff.get("expires_at", 0)) <= datetime.now(timezone.utc).timestamp():
                 job["active_handoff"] = None
@@ -631,7 +706,10 @@ class PortfolioRuntime:
     def get(self, run_id: str) -> dict[str, Any] | None:
         snapshot = self.snapshot()
         run = snapshot.get("run")
-        return run if isinstance(run, dict) and run.get("run_id") == run_id else None
+        if isinstance(run, dict) and run.get("run_id") == run_id:
+            return run
+        persisted = self._store.get(run_id)
+        return self._public_job(persisted) if isinstance(persisted, dict) else None
 
 
 RUNTIME = PortfolioRuntime()

@@ -35,7 +35,7 @@ from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -116,6 +116,16 @@ app.include_router(department_agent_router)
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
 # 이 BFF가 얇게 전달하고, 정책 검증·Risk/QA/사용자 승인·영속화는 governance-api가 한다.
 GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "http://127.0.0.1:8043").rstrip("/")
+# The deployment must provide a trusted authenticated subject header. Local
+# deterministic tests explicitly opt out; missing identity is never accepted in
+# the production default.
+PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "true").casefold() in {"1", "true", "yes", "on"}
+PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING", "true").casefold() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
 
 
@@ -141,6 +151,13 @@ async def _governance_request(
         detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
         raise HTTPException(status_code=response.status_code, detail=detail)
     return payload
+
+
+def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None = None) -> None:
+    if PORTFOLIO_AUTH_REQUIRED and not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    if owner_id and expected_user_id and owner_id != expected_user_id:
+        raise HTTPException(status_code=403, detail="portfolio_recommendation_forbidden")
 
 
 @app.post("/ui/mandates/{mandate_id}/change-requests")
@@ -249,8 +266,8 @@ class PortfolioRecommendationRequest(BaseModel):
     """User suitability inputs; this route never accepts orders or credentials."""
 
     user_id: str = Field(min_length=1, max_length=128)
-    mindset: str
-    experience: str
+    mindset: Literal["SAFETY_FIRST", "BALANCED", "RISK_SEEKING"]
+    experience: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"]
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: str = Field(
         pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$",
@@ -271,7 +288,7 @@ class PortfolioRecommendationRequest(BaseModel):
         if ratio <= 0 or ratio > 1:
             raise ValueError("max_drawdown_pct must be greater than 0 and at most 1")
         return value
-    liquidity_need: str = "MEDIUM"
+    liquidity_need: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
@@ -279,6 +296,15 @@ class PortfolioRecommendationRequest(BaseModel):
     include_stock: bool = Field(default=True, description="주식 자산을 추천 결과에 포함할지 여부")
     include_derivatives: bool = Field(default=False, description="파생상품 자산을 추천 결과에 포함할지 여부(현재 국내 주식 전용 범위에서는 기본 OFF)")
     query: str = Field(default="", max_length=2000)
+    max_sector_weight_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    max_gross_exposure_pct: Decimal | None = Field(default=None, ge=0, le=500, max_digits=7, decimal_places=2)
+    max_daily_loss_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    allowed_asset_classes: list[str] = Field(default_factory=list, max_length=32)
+    forbidden_asset_classes: list[str] = Field(default_factory=list, max_length=32)
+    trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    case_id: str | None = Field(default=None, min_length=1, max_length=128)
+    mandate_version_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_hash: str | None = Field(default=None, min_length=1, max_length=128)
     as_of: str | None = None
     fund_id: str | None = None
 
@@ -288,18 +314,46 @@ class PortfolioRecommendationRequest(BaseModel):
     status_code=202,
     response_model=PortfolioRecommendationStartResponse,
 )
-async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
-    """Start the advisory LangGraph and return a process-local run reference."""
+async def start_portfolio_recommendation(
+    request: PortfolioRecommendationRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+) -> dict[str, object]:
+    """Start the advisory LangGraph and return a run reference."""
+    _require_portfolio_owner(owner_id, request.user_id)
 
     if get_universe(request.universe_id) is None:
         raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
+    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.mandate_version_id:
+        raise HTTPException(status_code=422, detail="mandate_version_binding_required")
+    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.policy_hash:
+        raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
+    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.case_id:
+        raise HTTPException(status_code=422, detail="mandate_case_binding_required")
+    if request.mandate_version_id and not request.policy_hash:
+        raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
+    if request.policy_hash and not request.mandate_version_id:
+        raise HTTPException(status_code=422, detail="mandate_version_binding_required")
     profile = request.model_dump(exclude_none=True)
+    if idempotency_key:
+        profile["idempotency_key"] = idempotency_key
     if "as_of" not in profile:
         from datetime import datetime, timezone
 
         profile["as_of"] = datetime.now(timezone.utc).isoformat()
     try:
-        return RUNTIME.start(profile)
+        result = RUNTIME.start(profile)
+        run = RUNTIME.get(result["run_id"])
+        if run is None:
+            raise HTTPException(status_code=503, detail="portfolio_recommendation_projection_unavailable")
+        return {
+            **result,
+            "trace_id": run.get("trace_id", ""),
+            "case_id": run.get("case_id"),
+            "mandate_version_id": run.get("mandate_version_id"),
+            "policy_hash": run.get("policy_hash"),
+            "input_hash": run["input_hash"],
+        }
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -308,10 +362,14 @@ async def start_portfolio_recommendation(request: PortfolioRecommendationRequest
     "/ui/portfolio-recommendations/{run_id}",
     response_model=PortfolioRecommendationStatusResponse,
 )
-def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
+def portfolio_recommendation_status(
+    run_id: str,
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+) -> dict[str, object]:
     run = RUNTIME.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    _require_portfolio_owner(owner_id, str(run.get("profile_user_id", "")))
     return run
 
 
@@ -327,9 +385,14 @@ class PortfolioRecommendationApprovalRequest(BaseModel):
 def decide_portfolio_recommendation(
     run_id: str,
     request: PortfolioRecommendationApprovalRequest,
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> dict[str, object]:
     """Approve or reject the advisory recommendation, never an order."""
 
+    current = RUNTIME.get(run_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    _require_portfolio_owner(owner_id, str(current.get("profile_user_id", "")))
     try:
         run = RUNTIME.decide(run_id, request.decision, request.comment)
     except RuntimeError as exc:
@@ -381,6 +444,26 @@ def health() -> dict:
         "status_event_type": "agent.status.v1",
         "status_sequence": agent_status_snapshot()["sequence"],
     }
+@app.get("/health/ready")
+def health_ready() -> dict[str, object]:
+    """Expose dependency readiness without secrets or claiming operational durability."""
+
+    dependencies = {
+        "bff": {"status": "READY"},
+        "governance": {"status": "READY" if GOVERNANCE_API_URL else "NOT_CONFIGURED"},
+        "supabase": {"status": "READY" if os.getenv("DATABASE_URL", "").strip() else "NOT_CONFIGURED"},
+        "ollama": {
+            "status": "READY"
+            if os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test") == "deterministic_test"
+            or os.getenv("OLLAMA_BASE_URL", "").strip()
+            else "NOT_CONFIGURED"
+        },
+        "pipeline": {"status": "READY" if RUNTIME is not None else "UNAVAILABLE"},
+        "runtime_store": {"status": "READY" if RUNTIME.durable else "NOT_CONFIGURED"},
+        "mandate_binding": {"status": "READY" if PORTFOLIO_REQUIRE_MANDATE_BINDING else "NOT_CONFIGURED"},
+    }
+    status = "ready" if all(item["status"] == "READY" for item in dependencies.values()) else "degraded"
+    return {"status": status, "dependencies": dependencies, "external_writes": False}
 
 
 @lru_cache(maxsize=1)

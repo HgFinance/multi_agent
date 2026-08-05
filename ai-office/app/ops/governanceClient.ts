@@ -15,7 +15,7 @@ export type MandateApproval = {
   approval_id: string;
   object_id: string;
   required_role: "RISK" | "QA" | "USER" | string;
-  decision: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | string;
+  decision: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "REVOKED" | string;
   reason: string | null;
   expires_at: string | null;
   decided_at: string | null;

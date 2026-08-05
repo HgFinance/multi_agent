@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -247,28 +246,10 @@ def assign_revisions(facts: list, known: dict) -> tuple[list, int]:
     return revisions, fresh
 
 
-class ReferenceRepository(ABC):
-    """Instrument Master 경계. 영구 instrument_id 는 이 뒤에서만 발급된다."""
+class SupabaseReferenceRepository:
+    """Instrument Master 경계. 영구 instrument_id 는 이 뒤에서만 발급된다.
 
-    @abstractmethod
-    def ingest_instruments(
-        self, records: list[InstrumentRecord], *, provider: str, as_of: datetime
-    ) -> IngestResult:
-        ...
-
-    @abstractmethod
-    def resolve_symbols(
-        self, symbols: list[str], *, provider: str, market: str = MARKET_KRX
-    ) -> dict[str, UUID]:
-        """열려 있는(valid_to is null) 매핑만 돌려준다. 없는 symbol 은 key 가 없다."""
-
-    @abstractmethod
-    def close(self) -> None:
-        ...
-
-
-class SupabaseReferenceRepository(ReferenceRepository):
-    """psycopg2 기반 Supabase 구현.
+    psycopg2 기반 Supabase 구현.
 
     DSN 은 .env 의 DATABASE_URL 을 그대로 libpq 에 넘긴다. 손으로 쪼개지 않는다 -
     비밀번호가 percent-encoding 돼 있어서 직접 파싱하면 디코딩을 빼먹는다(실제로 겪었다).

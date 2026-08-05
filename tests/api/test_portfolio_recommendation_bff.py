@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
 os.environ["DATABASE_URL"] = ""
+os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
 os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
+os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
+os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from apps.api.main import app
+from apps.api.portfolio_runtime import PortfolioRuntime
+from apps.api.portfolio_schemas import PortfolioRecommendationResult
 from apps.api.portfolio_universe import enrich_suitability_result
 
 
@@ -45,6 +52,13 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3003")
 
+    def test_health_ready_exposes_safe_dependency_projection(self) -> None:
+        response = TestClient(app).get("/health/ready")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn(payload["status"], {"ready", "degraded"})
+        self.assertFalse(payload["external_writes"])
+        self.assertNotIn("DATABASE_URL", str(payload))
     def test_domestic_stock_projection_is_backend_owned(self) -> None:
         client = TestClient(app)
         response = client.post(
@@ -110,6 +124,173 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422, response.text)
 
+    def test_mandate_version_requires_policy_hash_binding(self) -> None:
+        payload = {
+            "user_id": "bff-binding",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_version_id": "version-7",
+        }
+        response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"], "mandate_policy_binding_required")
+    def test_idempotency_key_replays_same_advisory_run(self) -> None:
+        client = TestClient(app)
+        payload = {
+            "user_id": "bff-idempotency",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+        }
+        first = client.post(
+            "/ui/portfolio-recommendations",
+            json=payload,
+            headers={"Idempotency-Key": "same-request"},
+        )
+        replay = client.post(
+            "/ui/portfolio-recommendations",
+            json=payload,
+            headers={"Idempotency-Key": "same-request"},
+        )
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(first.json()["run_id"], replay.json()["run_id"])
+        self.assertTrue(replay.json()["idempotent_replay"])
+        for _ in range(160):
+            if client.get(f"/ui/portfolio-recommendations/{first.json()['run_id']}").json()["status"] not in {"QUEUED", "RUNNING"}:
+                break
+            time.sleep(0.05)
+
+    def test_production_binding_mode_rejects_unversioned_analysis(self) -> None:
+        payload = {
+            "user_id": "binding-required-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+        }
+        with patch("apps.api.main.PORTFOLIO_REQUIRE_MANDATE_BINDING", True):
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"], "mandate_version_binding_required")
+    def test_auth_required_mode_rejects_missing_portfolio_identity(self) -> None:
+        payload = {
+            "user_id": "auth-required-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+        }
+        with patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True):
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.json()["detail"], "portfolio_authentication_required")
+
+    def test_auth_required_mode_allows_owner_bound_status(self) -> None:
+        client = TestClient(app)
+        payload = {
+            "user_id": "auth-required-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+        }
+        with patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True):
+            response = client.post(
+                "/ui/portfolio-recommendations",
+                json=payload,
+                headers={"X-User-Id": payload["user_id"]},
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            run_id = response.json()["run_id"]
+            status = client.get(
+                f"/ui/portfolio-recommendations/{run_id}",
+                headers={"X-User-Id": payload["user_id"]},
+            )
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["profile_user_id"], payload["user_id"])
+        for _ in range(160):
+            if client.get(
+                f"/ui/portfolio-recommendations/{run_id}",
+                headers={"X-User-Id": payload["user_id"]},
+            ).json()["status"] not in {"QUEUED", "RUNNING"}:
+                break
+            time.sleep(0.05)
+    def test_run_status_rejects_mismatched_owner_header(self) -> None:
+        client = TestClient(app)
+        response = client.post(
+            "/ui/portfolio-recommendations",
+            json={
+                "user_id": "bff-owner",
+                "mindset": "BALANCED",
+                "experience": "BEGINNER",
+                "investment_horizon_years": 3,
+                "max_drawdown_pct": "0.10",
+                "investment_amount": "1000000",
+                "currency": "KRW",
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        run_id = response.json()["run_id"]
+        forbidden = client.get(
+            f"/ui/portfolio-recommendations/{run_id}",
+            headers={"X-User-Id": "different-owner"},
+        )
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        for _ in range(160):
+            if client.get(f"/ui/portfolio-recommendations/{run_id}").json()["status"] not in {"QUEUED", "RUNNING"}:
+                break
+            time.sleep(0.05)
+
+    def test_runtime_store_recovers_terminal_projection_after_new_instance(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "runtime.sqlite3")
+            previous = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")
+            os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = path
+            try:
+                runtime = PortfolioRuntime()
+                with runtime._lock:
+                    older = runtime._base_job("older-run", {"user_id": "persisted-owner"})
+                    older["status"] = "HOLD"
+                    older["updated_at"] = "2026-08-04T00:00:00+00:00"
+                    runtime._store.save(older)
+                    profile = {"user_id": "persisted-owner", "idempotency_key": "recovered-key", "query": "same"}
+                    job = runtime._base_job("persisted-run", profile)
+                    job["status"] = "HOLD"
+                    job["updated_at"] = "2026-08-05T00:00:00+00:00"
+                    runtime._job = job
+                    runtime._store.save(job)
+                recovered = PortfolioRuntime()
+                self.assertEqual(recovered.get("persisted-run")["status"], "HOLD")
+                self.assertEqual(recovered.get("older-run")["run_id"], "older-run")
+                self.assertEqual(
+                    recovered._store.find_by_idempotency("persisted-owner", "recovered-key")["run_id"],
+                    "persisted-run",
+                )
+                self.assertEqual(
+                    recovered.start(profile)["idempotent_replay"],
+                    True,
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
+                else:
+                    os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
     def test_domestic_universe_ignores_out_of_scope_global_allocation(self) -> None:
         result = enrich_suitability_result(
             {
@@ -271,6 +452,26 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(approval.json()["approval"]["status"], "APPROVE")
         self.assertFalse(approval.json()["approval"]["binding"])
 
+    def test_nested_result_contract_rejects_unknown_gate_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            PortfolioRecommendationResult.model_validate(
+                {
+                    "pipeline_status": "HOLD",
+                    "workflow": "portfolio-recommendation-full",
+                    "pipeline_version": "v1",
+                    "trace_id": "trace-contract",
+                    "safe_action": "HOLD",
+                    "risk_gate": {
+                        "status": "HOLD",
+                        "verdict": "REJECT",
+                        "safe_action": "HOLD",
+                        "reason": "PIT data unavailable",
+                        "data_quality": "FAIL",
+                        "binding": False,
+                        "unexpected": "must fail closed",
+                    },
+                }
+            )
 
 if __name__ == "__main__":
     unittest.main()
