@@ -378,6 +378,14 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 사용해 연결됨·미설정·OAuth 대기 상태를 표시하며, 외부 발행은 별도 Worker의 명시적 사용자
 동작으로 제한한다.
 
+### 10.4 BFF 유니버스·자유 질의 라우팅
+
+`GET /ui/portfolio-universes`는 프론트가 종목 목록을 직접 하드코딩하지 않도록 백엔드가 소유한 선택 가능한 투자 유니버스 메타데이터를 반환한다. 현재 국내 Research Watchlist를 포함한 국내·글로벌 혼합 유니버스는 `TEST` 상태이며, 근거 없는 예상 수익률을 임의로 채우지 않는다.
+
+`POST /ui/portfolio-recommendations`는 구조화된 적합성 입력과 함께 `universe_id`와 자유 형식 `query`를 받을 수 있다. 백엔드는 원문을 보존하고 안전한 범위의 CEO task plan을 만들어 필요한 부서만 Worker Graph를 호출한다. 결과의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 기록된다. Query rewriting은 부서 선택·설명에만 사용하며 주문, Risk 승인, 원장 변경을 만들 수 없다.
+
+추천 결과의 `instrument_recommendations`는 `symbol`, `exchange`, `name`, `target_weight`, `target_amount`, `expected_return`, `expected_return_status`, `expected_return_basis`, `data_status`를 포함한다. `TEST` 또는 PIT 검증 시장 근거가 없는 상태에서 `expected_return`은 `null`이어야 하며 수익률 보장 문구를 표시하지 않는다.
+
 ## 11. 연계 문서
 
 - [Route Status Registry](contracts/route-registry.v1.json)

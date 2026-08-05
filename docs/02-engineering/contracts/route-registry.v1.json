@@ -286,6 +286,8 @@
         {"method": "GET", "path": "/health"},
         {"method": "GET", "path": "/ui/snapshot"},
         {"method": "GET", "path": "/ui/integrations"},
+
+        {"method": "GET", "path": "/ui/portfolio-universes"},
         {"method": "POST", "path": "/ui/portfolio-recommendations"},
         {"method": "GET", "path": "/ui/portfolio-recommendations/{run_id}"},
         {"method": "POST", "path": "/ui/portfolio-recommendations/{run_id}/approval"},

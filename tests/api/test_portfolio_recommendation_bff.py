@@ -13,9 +13,73 @@ os.environ["LANGSMITH_TRACING"] = "false"
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.portfolio_universe import enrich_suitability_result
 
 
 class PortfolioRecommendationBffTest(unittest.TestCase):
+    def test_incomplete_universe_mapping_holds_and_cannot_be_approved(self) -> None:
+        result = enrich_suitability_result(
+            {
+                "safe_action": "NO_ACTION",
+                "currency": "KRW",
+                "suitability": {
+                    "recommendations": [
+                        {
+                            "portfolio_id": "balanced-core",
+                            "target_allocations": {"KOREA_EQUITY": "0.20", "GLOBAL_EQUITY": "0.50"},
+                            "target_amounts": {"KOREA_EQUITY": "200000.00", "GLOBAL_EQUITY": "500000.00"},
+                        }
+                    ]
+                },
+            },
+            "KOREA_EQUITY_WATCHLIST",
+        )
+        self.assertEqual(result["instrument_recommendations_status"], "INCOMPLETE")
+        self.assertEqual(result["safe_action"], "HOLD")
+        self.assertEqual(result["unresolved_asset_classes"], ["GLOBAL_EQUITY"])
+
+    def test_universe_and_free_query_route_are_backend_owned(self) -> None:
+        client = TestClient(app)
+        universes = client.get("/ui/portfolio-universes")
+        self.assertEqual(universes.status_code, 200)
+        self.assertEqual(universes.json()["default_universe_id"], "KOREA_GLOBAL_MIXED")
+        self.assertTrue(universes.json()["universes"])
+
+        response = client.post(
+            "/ui/portfolio-recommendations",
+            json={
+                "user_id": "bff-e2e-free-query",
+                "mindset": "BALANCED",
+                "experience": "BEGINNER",
+                "investment_horizon_years": 3,
+                "max_drawdown_pct": "0.10",
+                "investment_amount": "1000000",
+                "currency": "KRW",
+                "universe_id": "KOREA_GLOBAL_MIXED",
+                "query": "국내 종목의 손실 위험과 근거를 설명해줘",
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        run_id = response.json()["run_id"]
+        result = None
+        runtime = None
+        for _ in range(160):
+            time.sleep(0.05)
+            runtime = client.get(f"/ui/portfolio-recommendations/{run_id}").json()
+            if runtime["result"] is not None:
+                result = runtime["result"]
+                break
+        self.assertIsNotNone(result, runtime)
+        assert result is not None
+        self.assertEqual(result["task_plan"]["requested_departments"], ["research", "risk", "qa", "ceo"])
+        self.assertEqual(result["universe"]["universe_id"], "KOREA_GLOBAL_MIXED")
+        self.assertTrue(result["instrument_recommendations"])
+        self.assertTrue(any(item["symbol"] == "005930" for item in result["instrument_recommendations"]))
+        self.assertTrue(all(item["expected_return"] is None for item in result["instrument_recommendations"]))
+        self.assertFalse(any("TEST async" in message["text"] for message in runtime["messages"]))
+        self.assertEqual(runtime["departments"]["trading-department"]["status"], "SKIPPED")
+        self.assertEqual(runtime["departments"]["research-department"]["last_message"], "research 부서가 2개 Worker 결과를 취합했습니다.")
+
     def test_beginner_profile_returns_non_binding_backend_recommendation(self) -> None:
         client = TestClient(app)
         response = client.post(

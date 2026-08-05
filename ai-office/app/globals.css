@@ -766,5 +766,13 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .portfolio-recommendation p, .portfolio-recommendation small { grid-column: 1 / -1; margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.5; }
 .approval-actions { display: grid; gap: 8px; padding-top: 4px; }
 .risk-warning { color: #a33b5e !important; font-weight: 800; }
+.portfolio-query { grid-column: 1 / -1; }
+.portfolio-query textarea { min-height: 66px; resize: vertical; padding: 9px 10px; border: 1.5px solid var(--pink-line); border-radius: 7px; background: #fffdf8; color: var(--ink); font: inherit; }
+.universe-summary, .forecast-notice { margin: 0; padding: 9px 11px; border-radius: 7px; background: #f5f0e5; color: var(--ink-soft); font-size: 11px; }
+.instrument-recommendations { grid-column: 1 / -1; display: grid; gap: 5px; margin-top: 4px; padding-top: 8px; border-top: 1px dashed var(--pink-line); }
+.instrument-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(120px, .8fr) minmax(140px, 1fr); gap: 8px; align-items: baseline; padding: 6px 0; color: var(--ink-soft); font-size: 11px; }
+.instrument-row code { color: var(--ink-faint); font-size: 10px; }
+.instrument-row small { color: var(--ink-faint); }
 .approval-actions > div { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 760px) { .portfolio-form { grid-template-columns: 1fr; } .portfolio-form .btn { width: 100%; } .result-heading { align-items: flex-start; flex-direction: column; } .portfolio-recommendation { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .instrument-row { grid-template-columns: 1fr; } }

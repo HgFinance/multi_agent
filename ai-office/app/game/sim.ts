@@ -376,8 +376,9 @@ export class Company {
       if (this.remoteMessageIds.has(message.id)) continue;
       this.remoteMessageIds.add(message.id);
       const name = message.kind === "department_handoff" ? "부서장 handoff" : message.worker_id ?? message.department_code ?? "LangGraph";
-      this.pushChat("staff", name, message.text);
-      this.pushLog(message.kind === "department_handoff" ? "🤝" : "🧠", message.text, message.kind === "run_error" ? "lav" : "mint");
+      const eventTime = this.runtimeClock(message.occurred_at);
+      this.pushChat("staff", name, message.text, eventTime);
+      this.pushLog(message.kind === "department_handoff" ? "🤝" : "🧠", message.text, message.kind === "run_error" ? "lav" : "mint", eventTime);
       if (message.kind === "worker_summary" && message.worker_id) {
         const speaker = this.agents.find((agent) => agent.role === message.worker_id);
         if (speaker) {
@@ -418,8 +419,8 @@ export class Company {
   }
 
   // ── 로그 ────────────────────────────────────────────────
-  pushLog(icon: string, text: string, tone = "pink") {
-    this.log.unshift({ id: this.logSeq++, time: this.clockText(), icon, text, tone });
+  pushLog(icon: string, text: string, tone = "pink", time = this.clockText()) {
+    this.log.unshift({ id: this.logSeq++, time, icon, text, tone });
     if (this.log.length > 60) this.log.pop();
   }
 
@@ -428,6 +429,11 @@ export class Company {
     const h = Math.floor(total / 60);
     const m = total % 60;
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+
+  private runtimeClock(value: string) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? this.clockText() : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   }
 
   // ── 액션 큐 ──────────────────────────────────────────────
@@ -835,8 +841,8 @@ export class Company {
   }
 
   // ── 대표 지시창 ──────────────────────────────────────────
-  pushChat(from: "ceo" | "staff", name: string, text: string) {
-    this.chat.push({ id: this.logSeq++, time: this.clockText(), from, name, text });
+  pushChat(from: "ceo" | "staff", name: string, text: string, time = this.clockText()) {
+    this.chat.push({ id: this.logSeq++, time, from, name, text });
     if (this.chat.length > 60) this.chat.shift();
   }
 
@@ -1187,6 +1193,17 @@ export class Company {
       for (const agent of this.agents) {
         if (agent.speechFor > 0) agent.speechFor = Math.max(0, agent.speechFor - dt);
         if (agent.speechFor === 0) agent.speech = null;
+      }
+      // Remote mode never creates work. When LangGraph is idle, the office may
+      // still show harmless idle movement so the projection does not look frozen.
+      if (!this.running) {
+        this.occupancy.clear();
+        for (const agent of this.agents) {
+          this.occupancy.add(Math.round(agent.y) * COLS + Math.round(agent.x));
+        }
+        for (const agent of this.agents) {
+          if (agent.status !== "업무 중" && agent.status !== "회의 중") this.stepAgent(agent, dt);
+        }
       }
       return;
     }

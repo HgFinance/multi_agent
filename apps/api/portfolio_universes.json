@@ -1,0 +1,34 @@
+[
+  {
+    "universe_id": "KOREA_GLOBAL_MIXED",
+    "name": "국내·글로벌 혼합 유니버스",
+    "description": "리서치 국내 Watchlist와 글로벌 ETF를 함께 검토하는 기본 유니버스입니다.",
+    "status": "TEST",
+    "source": "research:news_watchlist + portfolio-catalog:v1",
+    "instruments": [
+      {"symbol": "005930", "exchange": "KRX", "name": "삼성전자", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "000660", "exchange": "KRX", "name": "SK하이닉스", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "005380", "exchange": "KRX", "name": "현대차", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "035420", "exchange": "KRX", "name": "NAVER", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "VT", "exchange": "NYSEARCA", "name": "글로벌 주식 ETF (VT)", "asset_class": "GLOBAL_EQUITY", "currency": "USD", "data_status": "TEST", "evidence_refs": ["portfolio-catalog:v1"]},
+      {"symbol": "SHY", "exchange": "NASDAQ", "name": "미국 단기국채 ETF (SHY)", "asset_class": "SHORT_TERM_BOND", "currency": "USD", "data_status": "TEST", "evidence_refs": ["portfolio-catalog:v1"]},
+      {"symbol": "TQQQ", "exchange": "NASDAQ", "name": "나스닥 3배 레버리지 ETF (TQQQ)", "asset_class": "LEVERAGED_ETF", "currency": "USD", "data_status": "TEST", "evidence_refs": ["risk:derivatives-satellite:v1"]},
+      {"symbol": "SH", "exchange": "NYSEARCA", "name": "S&P 500 인버스 ETF (SH)", "asset_class": "SHORT_EXPOSURE", "currency": "USD", "data_status": "TEST", "evidence_refs": ["risk:derivatives-satellite:v1"]},
+      {"symbol": "GLD", "exchange": "NYSEARCA", "name": "금 ETF (GLD)", "asset_class": "DERIVATIVES_HEDGE", "currency": "USD", "data_status": "TEST", "evidence_refs": ["risk:derivatives-satellite:v1"]}
+    ]
+  },
+  {
+    "universe_id": "KOREA_EQUITY_WATCHLIST",
+    "name": "국내 주식 Watchlist",
+    "description": "Research 부서가 관리하는 국내 주식 후보만 검토합니다. 현금성 자산은 별도 표기합니다.",
+    "status": "TEST",
+    "source": "departments/01-research/config/news_watchlist.txt",
+    "instruments": [
+      {"symbol": "005930", "exchange": "KRX", "name": "삼성전자", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "000660", "exchange": "KRX", "name": "SK하이닉스", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "005380", "exchange": "KRX", "name": "현대차", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "035420", "exchange": "KRX", "name": "NAVER", "asset_class": "KOREA_EQUITY", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["research:news_watchlist"]},
+      {"symbol": "KRW-CASH", "exchange": "CASH", "name": "원화 현금성 자산", "asset_class": "SHORT_TERM_BOND", "currency": "KRW", "data_status": "TEST", "evidence_refs": ["portfolio-catalog:v1"]}
+    ]
+  }
+]

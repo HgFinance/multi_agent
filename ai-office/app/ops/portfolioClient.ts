@@ -20,7 +20,36 @@ export type PortfolioInterviewInput = {
   max_drawdown_pct: string;
   investment_amount: string;
   currency: "KRW" | "USD" | "EUR";
+  universe_id: string;
+  query: string;
 };
+
+export type PortfolioUniverseOption = {
+  universe_id: string;
+  name: string;
+  description: string;
+  status: string;
+  source: string;
+  instrument_count: number;
+};
+
+export async function fetchPortfolioUniverses(): Promise<{
+  default_universe_id: string;
+  universes: PortfolioUniverseOption[];
+}> {
+  const response = await fetch(`${BFF}/ui/portfolio-universes`, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(explainPortfolioApiError(body, response.status));
+  }
+  return body as {
+    default_universe_id: string;
+    universes: PortfolioUniverseOption[];
+  };
+}
 
 export async function startPortfolioRecommendation(input: PortfolioInterviewInput): Promise<{ run_id: string; status: string }> {
   const response = await fetch(`${BFF}/ui/portfolio-recommendations`, {
