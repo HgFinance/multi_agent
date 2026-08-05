@@ -93,7 +93,9 @@ class RiskP1Repository:
             for scenario_code, loss in snapshot.stress_losses.items():
                 scenario_id = stress_scenario_ids.get(scenario_code)
                 if scenario_id is None:
-                    raise RiskP1PersistenceError(f"approved stress scenario id missing: {scenario_code}")
+                    raise RiskP1PersistenceError(
+                        f"approved stress scenario id missing: {scenario_code}"
+                    )
                 cursor.execute(
                     """
                     insert into risk.stress_results
@@ -115,7 +117,9 @@ class RiskP1Repository:
                 )
 
             if kill_switch_transition is not None:
-                self._insert_kill_switch_event(cursor, snapshot, trace_id, kill_switch_transition)
+                self._insert_kill_switch_event(
+                    cursor, snapshot, trace_id, kill_switch_transition
+                )
             self.connection.commit()
             return risk_snapshot_id
         except Exception as exc:
@@ -127,11 +131,18 @@ class RiskP1Repository:
             cursor.close()
 
     @staticmethod
-    def _insert_kill_switch_event(cursor: Any, snapshot: P1RiskSnapshot, trace_id: UUID, transition: Mapping[str, Any]) -> None:
+    def _insert_kill_switch_event(
+        cursor: Any,
+        snapshot: P1RiskSnapshot,
+        trace_id: UUID,
+        transition: Mapping[str, Any],
+    ) -> None:
         required = ("to_state", "trigger_type", "requested_by")
         missing = [key for key in required if not str(transition.get(key, "")).strip()]
         if missing:
-            raise RiskP1PersistenceError(f"kill switch transition missing: {', '.join(missing)}")
+            raise RiskP1PersistenceError(
+                f"kill switch transition missing: {', '.join(missing)}"
+            )
         cursor.execute(
             """
             insert into risk.kill_switch_events
@@ -145,7 +156,11 @@ class RiskP1Repository:
                 transition["to_state"],
                 transition["trigger_type"],
                 _json(transition.get("trigger_details", {})),
-                _json(transition.get("evidence", {"risk_snapshot_id": str(snapshot.fund_id)})),
+                _json(
+                    transition.get(
+                        "evidence", {"risk_snapshot_id": str(snapshot.fund_id)}
+                    )
+                ),
                 transition["requested_by"],
                 transition.get("approved_release_by"),
                 trace_id,

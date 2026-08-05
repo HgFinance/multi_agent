@@ -12,12 +12,12 @@ import hashlib
 import importlib.util
 import json
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,7 +85,7 @@ class RiskQaPacket(BaseModel):
     qa_input: dict[str, Any]
 
     @model_validator(mode="after")
-    def _hash_matches_canonical_packet(self) -> "RiskQaPacket":
+    def _hash_matches_canonical_packet(self) -> RiskQaPacket:
         expected = _canonical_hash(
             self.research_packet,
             self.artifact_id,

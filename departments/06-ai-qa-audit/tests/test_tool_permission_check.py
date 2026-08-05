@@ -5,6 +5,7 @@
 
 실행: python -m pytest departments/06-ai-qa-audit/tests/test_tool_permission_check.py -v
 """
+
 from __future__ import annotations
 
 import sys
@@ -26,7 +27,8 @@ from trace_recorder import ToolCallStatus, TraceRecorder
 now = datetime.now(timezone.utc)
 trace, agent, profile = uuid4(), uuid4(), uuid4()
 policy = AgentToolPolicy(
-    agent_id=agent, profile_version_id=profile,
+    agent_id=agent,
+    profile_version_id=profile,
     allowed_tools=frozenset({"market-api", "portfolio-api"}),
 )
 
@@ -47,17 +49,29 @@ def test_03_integration_allowed_tool_recorded_as_allowed():
     recorder = TraceRecorder()
     run = recorder.start_run(trace, agent, profile, "hash_perm_1", started_at=now)
     allowed_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "market-api", {"symbol": "AAPL"}, "call_h1",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "market-api",
+        {"symbol": "AAPL"},
+        "call_h1",
     )
     assert allowed_call.status is ToolCallStatus.ALLOWED
-    assert not allowed_call.is_terminal, "ALLOWED는 아직 완료 전이라 종결 상태가 아니어야 함"
+    assert not allowed_call.is_terminal, (
+        "ALLOWED는 아직 완료 전이라 종결 상태가 아니어야 함"
+    )
 
 
 def test_04_integration_denied_tool_recorded_as_terminal_denied():
     recorder = TraceRecorder()
     run = recorder.start_run(trace, agent, profile, "hash_perm_1", started_at=now)
     denied_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "broker-adapter-submit", {}, "call_h2",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "broker-adapter-submit",
+        {},
+        "call_h2",
     )
     assert denied_call.status is ToolCallStatus.DENIED
     assert denied_call.is_terminal, "DENIED는 종결 상태여야 함"
@@ -68,10 +82,20 @@ def test_05_unauthorized_call_count_only_counts_denied():
     recorder = TraceRecorder()
     run = recorder.start_run(trace, agent, profile, "hash_perm_1", started_at=now)
     allowed_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "market-api", {"symbol": "AAPL"}, "call_h1",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "market-api",
+        {"symbol": "AAPL"},
+        "call_h1",
     )
     denied_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "broker-adapter-submit", {}, "call_h2",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "broker-adapter-submit",
+        {},
+        "call_h2",
     )
     recorder.complete_tool_call(allowed_call.tool_call_id, "out_h1")
     assert count_unauthorized_calls([allowed_call, denied_call]) == 1
@@ -81,10 +105,20 @@ def test_06_run_completes_after_open_tool_calls_are_resolved():
     recorder = TraceRecorder()
     run = recorder.start_run(trace, agent, profile, "hash_perm_1", started_at=now)
     allowed_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "market-api", {"symbol": "AAPL"}, "call_h1",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "market-api",
+        {"symbol": "AAPL"},
+        "call_h1",
     )
     record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "broker-adapter-submit", {}, "call_h2",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "broker-adapter-submit",
+        {},
+        "call_h2",
     )
     recorder.complete_tool_call(allowed_call.tool_call_id, "out_h1")
     recorder.complete_run(run.agent_run_id)

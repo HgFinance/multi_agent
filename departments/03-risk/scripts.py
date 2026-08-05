@@ -43,10 +43,10 @@ counterparty_health 체크가 이미 실측(ctx.counterparty.health)을 CheckOut
 
   --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요) 은 .env(프로젝트 루트)를 셸에 먼저 로드해야 한다.
   departments/03-risk 안에서 바로 실행하면 .env를 못 찾아 KeyError: 'REDIS_URL' 이 난다:
-    
+
     cd /Users/baiohelseu/Desktop/Project/multi_agent
-    set -a && source .env && set +a 
-    source ~/claude/bin/activate      
+    set -a && source .env && set +a
+    source ~/claude/bin/activate
     cd departments/03-risk
     python scripts.py --run
 
@@ -54,6 +54,7 @@ counterparty_health 체크가 이미 실측(ctx.counterparty.health)을 CheckOut
   순수 함수(run_risk_department 반환값을 그대로 옮김) 이고 LLM은 narrative/compliance answer 필드에만
   관여한다 (QA 패턴과 동일).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -111,7 +112,9 @@ def _journal_module():
     global _JOURNAL_MODULE
     if _JOURNAL_MODULE is None:
         journal_path = _BASE / "harness" / "journal.py"
-        spec = importlib.util.spec_from_file_location("risk_execution_journal", journal_path)
+        spec = importlib.util.spec_from_file_location(
+            "risk_execution_journal", journal_path
+        )
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Risk journal을 로드할 수 없습니다: {journal_path}")
         module = importlib.util.module_from_spec(spec)
@@ -122,20 +125,24 @@ def _journal_module():
 
 
 class RiskState(TypedDict, total=False):
-    order_intent: dict     # OrderIntent JSON
-    context: dict           # RiskContextIn JSON (trading_state 필드는 아래서 실측으로 덮어씀)
-    scope: str               # trading_state_store 조회 scope (예: "fund:<uuid>")
-    trading_state: str      # market-liquidity-risk-agent 결과
-    assessment: dict        # pre-trade-risk-analyst 결과 (RiskAssessment)
-    counterparty: dict | None  # operational-counterparty-risk-agent 결과 (플래그 안 되면 생략)
+    order_intent: dict  # OrderIntent JSON
+    context: dict  # RiskContextIn JSON (trading_state 필드는 아래서 실측으로 덮어씀)
+    scope: str  # trading_state_store 조회 scope (예: "fund:<uuid>")
+    trading_state: str  # market-liquidity-risk-agent 결과
+    assessment: dict  # pre-trade-risk-analyst 결과 (RiskAssessment)
+    counterparty: (
+        dict | None
+    )  # operational-counterparty-risk-agent 결과 (플래그 안 되면 생략)
     compliance: dict | None  # compliance-policy-agent 결과 (REJECT면 생략)
-    verdict: str             # 최종 case-level 값 - 항상 assessment 에서만 옴
+    verdict: str  # 최종 case-level 값 - 항상 assessment 에서만 옴
     narrative: str
     supervisor_llm_called: bool
     supervisor_call_status: str
     hermes_runtime: dict
     escalate: bool
-    notion_upload: dict | None  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    notion_upload: (
+        dict | None
+    )  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
     fallbacks: list[dict]
     observability: dict
     report_markdown: str
@@ -220,23 +227,38 @@ def _fallback(stage: str, exc: Exception) -> dict:
 
 def _fallback_narrative(stage: str, exc: Exception) -> str:
     details = _failure_details(stage, exc)
-    return (f"{stage} Agent를 사용할 수 없어 결정론적 안전 기본값만 유지했습니다 "
-            f"(node={details['node']}, error={details['error']}, "
-            f"fingerprint={details['error_fingerprint']}). "
-            "이 결과는 비바인딩 fallback이며 HOLD/수동 검토가 필요합니다.")
+    return (
+        f"{stage} Agent를 사용할 수 없어 결정론적 안전 기본값만 유지했습니다 "
+        f"(node={details['node']}, error={details['error']}, "
+        f"fingerprint={details['error_fingerprint']}). "
+        "이 결과는 비바인딩 fallback이며 HOLD/수동 검토가 필요합니다."
+    )
 
 
 def _fallback_assessment(order_intent: dict, context: dict, exc: Exception) -> dict:
-    payload = json.dumps({"order_intent": order_intent, "context": context},
-                         ensure_ascii=False, sort_keys=True, default=str)
+    payload = json.dumps(
+        {"order_intent": order_intent, "context": context},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
     failure = _failure_details("pipeline", exc)
-    return {"risk_request_id": f"fallback-{hashlib.sha256(payload.encode()).hexdigest()[:16]}",
-            "verdict": "reject", "approved_quantity": None, "reason_codes": ["pipeline_fallback"],
-            "check_results": [], "calculation_version": "risk-pipeline-fallback-v1",
-            "input_hash": hashlib.sha256(payload.encode()).hexdigest(),
-            "trading_state": "HALTED", "decision_status": "INCONCLUSIVE",
-            "decision_origin": "FALLBACK", "binding": False, "safe_action": "HOLD",
-            "risk_checks_executed": False, "failure": failure}
+    return {
+        "risk_request_id": f"fallback-{hashlib.sha256(payload.encode()).hexdigest()[:16]}",
+        "verdict": "reject",
+        "approved_quantity": None,
+        "reason_codes": ["pipeline_fallback"],
+        "check_results": [],
+        "calculation_version": "risk-pipeline-fallback-v1",
+        "input_hash": hashlib.sha256(payload.encode()).hexdigest(),
+        "trading_state": "HALTED",
+        "decision_status": "INCONCLUSIVE",
+        "decision_origin": "FALLBACK",
+        "binding": False,
+        "safe_action": "HOLD",
+        "risk_checks_executed": False,
+        "failure": failure,
+    }
 
 
 # ── 노드 1: Trading State 실측 (결정론 직원) ────────────────────────────────
@@ -259,7 +281,10 @@ def check_trading_state(state: RiskState) -> dict:
         return {"trading_state": ts.value}
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary.
         # Redis failure is a state-uncertainty condition, never an ENABLED fallback.
-        return {"trading_state": "HALTED", "fallbacks": [_fallback("trading_state", exc)]}
+        return {
+            "trading_state": "HALTED",
+            "fallbacks": [_fallback("trading_state", exc)],
+        }
 
 
 # ── 노드 2: Pre-trade Gate (결정론 직원 - RiskEngine) ───────────────────────
@@ -269,18 +294,27 @@ def pre_trade_check(state: RiskState) -> dict:
     from risk_engine import RiskEngine
 
     intent = OrderIntent(**state["order_intent"])
-    ctx = RiskContextIn(**{**state["context"], "trading_state": state["trading_state"]}).to_context()
+    ctx = RiskContextIn(
+        **{**state["context"], "trading_state": state["trading_state"]}
+    ).to_context()
     result = RiskEngine().check_order(intent, ctx)
     d = result.decision
-    return {"assessment": {
-        "risk_request_id": str(result.risk_request_id),
-        "verdict": d.verdict.value,
-        "approved_quantity": str(d.approved_quantity) if d.approved_quantity is not None else None,
-        "reason_codes": [r.value for r in result.reason_codes],
-        "calculation_version": result.calculation_version, "input_hash": result.input_hash,
-        "check_results": [{"name": c.check_name, "passed": c.passed, "detail": c.detail}
-                          for c in result.check_results],
-    }}
+    return {
+        "assessment": {
+            "risk_request_id": str(result.risk_request_id),
+            "verdict": d.verdict.value,
+            "approved_quantity": str(d.approved_quantity)
+            if d.approved_quantity is not None
+            else None,
+            "reason_codes": [r.value for r in result.reason_codes],
+            "calculation_version": result.calculation_version,
+            "input_hash": result.input_hash,
+            "check_results": [
+                {"name": c.check_name, "passed": c.passed, "detail": c.detail}
+                for c in result.check_results
+            ],
+        }
+    }
 
 
 # ── 노드 3: Counterparty (조건부 - operational-counterparty-risk-agent) ────
@@ -294,59 +328,19 @@ def _counterparty_flagged(assessment: dict) -> bool:
     return "counterparty_unhealthy" in assessment.get("reason_codes", [])
 
 
-def _legacy_counterparty_check(state: RiskState, *, chat=None) -> dict:
-    a = state["assessment"]
-    cp = next((c for c in a["check_results"] if c["name"] == "counterparty_health"), None)
-    if a.get("verdict") == "reject" and chat is None:
-        detail = (cp or {}).get("detail") or "counterparty health check failed"
-        return {
-            "counterparty": {
-                "counterparty_narrative": f"결정론적 Risk Engine이 counterparty_health를 확인했습니다: {detail}",
-                "escalate": True,
-            },
-            "counterparty_llm_called": False,
-        }
-    task = f"""Using ONLY the evidence below, write a 1-2 sentence Korean note on Broker/Counterparty
-status for this case. Prioritize status confirmation and Reconciliation over new orders when the
-Broker state is not healthy - you cannot change the deterministic verdict "{a['verdict']}", only
-explain the counterparty angle of it.
-Schema (JSON only):
-{{"counterparty_narrative": "1-2 sentences", "escalate": true or false}}
-
-Evidence:
-{json.dumps({"order_intent": state["order_intent"], "counterparty_health_check": cp,
-             "reason_codes": a["reason_codes"], "verdict": a["verdict"]}, ensure_ascii=False, indent=1)}"""
-
-    try:
-        call = chat or _hermes_chat
-        out = call(_persona("operational-counterparty-risk-agent"), task)
-        s, e = out.find("{"), out.rfind("}")
-        note = json.loads(out[s:e + 1])
-        for k in ("counterparty_narrative", "escalate"):
-            if k not in note:
-                raise ValueError(f"Counterparty 점검 결과에 {k} 가 없다 - 초안 거부")
-        return {"counterparty": note, "counterparty_llm_called": True}
-    except Exception as exc:  # counterparty fallback must escalate safely.
-        if chat is not None:
-            raise
-        return {
-        "counterparty": {"counterparty_narrative": _fallback_narrative("Counterparty", exc),
-                          "escalate": True},
-        "counterparty_llm_called": True,
-        "fallbacks": [_fallback("counterparty", exc)],
-        }
-
-
-# Counterparty employee logic lives in the LangGraph worker.  Keep this gate
-# deterministic so an old Hermes persona cannot be called as a duplicate employee.
 def counterparty_check(state: RiskState, *, chat=None) -> dict:
     assessment = state["assessment"]
     check = next(
-        (item for item in assessment.get("check_results", [])
-         if item.get("name") == "counterparty_health"),
+        (
+            item
+            for item in assessment.get("check_results", [])
+            if item.get("name") == "counterparty_health"
+        ),
         None,
     )
-    detail = (check or {}).get("detail") or "counterparty health check recorded by RiskEngine"
+    detail = (check or {}).get(
+        "detail"
+    ) or "counterparty health check recorded by RiskEngine"
     return {
         "counterparty": {
             "counterparty_narrative": f"RiskEngine counterparty_health 결과: {detail}",
@@ -362,17 +356,34 @@ def compliance_check(state: RiskState) -> dict:
         from src.graph import run_compliance_check
 
         oi = state["order_intent"]
-        query = (f"Can we execute a {oi['side']} order for {oi['quantity']} units of "
-                 f"instrument {oi['instrument_id']} under fund {oi['fund_id']} today?")
-        as_of_date = state["context"]["as_of"][:10]  # PIT 필터는 date-only(YYYY-MM-DD)를 요구한다
-        return {"compliance": run_compliance_check(query, as_of_date, persona="compliance-policy-agent")}
+        query = (
+            f"Can we execute a {oi['side']} order for {oi['quantity']} units of "
+            f"instrument {oi['instrument_id']} under fund {oi['fund_id']} today?"
+        )
+        as_of_date = state["context"]["as_of"][
+            :10
+        ]  # PIT 필터는 date-only(YYYY-MM-DD)를 요구한다
+        return {
+            "compliance": run_compliance_check(
+                query, as_of_date, persona="compliance-policy-agent"
+            )
+        }
     except Exception as exc:  # noqa: BLE001 - unavailable policy evidence is inconclusive.
         return {
-            "compliance": {"answer": {"verdict": "ambiguous", "cited_documents": [],
-                                        "rationale": _fallback_narrative("Compliance", exc),
-                                        "confidence": 0.0, "escalate": True},
-                            "grounded": False, "fallback": True, "attempts": 0,
-                            "fallback_reason": type(exc).__name__, "relevant_documents": []},
+            "compliance": {
+                "answer": {
+                    "verdict": "ambiguous",
+                    "cited_documents": [],
+                    "rationale": _fallback_narrative("Compliance", exc),
+                    "confidence": 0.0,
+                    "escalate": True,
+                },
+                "grounded": False,
+                "fallback": True,
+                "attempts": 0,
+                "fallback_reason": type(exc).__name__,
+                "relevant_documents": [],
+            },
             "fallbacks": [_fallback("compliance", exc)],
         }
 
@@ -404,7 +415,12 @@ def _hermes_model_config() -> dict[str, str | None]:
         provider = base_url = api_mode = None
     if not model:
         raise ValueError("Hermes config model.default is required")
-    return {"model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode}
+    return {
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "api_mode": api_mode,
+    }
 
 
 def _profile_dir() -> Path:
@@ -427,21 +443,38 @@ def _hermes_runtime_metadata() -> dict:
         profile_dir = _profile_dir()
         skills_dir = profile_dir / "skills"
         memories_dir = profile_dir / "memories"
-        runtime_config = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
-        runtime_model = runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
-        runtime_provider = runtime_model.get("provider") if isinstance(runtime_model, dict) else None
-        runtime_default = runtime_model.get("default") if isinstance(runtime_model, dict) else runtime_model
+        runtime_config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        runtime_model = (
+            runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
+        )
+        runtime_provider = (
+            runtime_model.get("provider") if isinstance(runtime_model, dict) else None
+        )
+        runtime_default = (
+            runtime_model.get("default")
+            if isinstance(runtime_model, dict)
+            else runtime_model
+        )
         metadata.update(
             {
                 "runtime_profile_dir": str(profile_dir),
                 "runtime_config_provider": runtime_provider,
                 "runtime_config_model": runtime_default,
-                "runtime_config_matches_source": runtime_provider == model["provider"] and runtime_default == model["model"],
+                "runtime_config_matches_source": runtime_provider == model["provider"]
+                and runtime_default == model["model"],
                 "soul_md_present": (profile_dir / "SOUL.md").is_file(),
                 "skills_dir_present": skills_dir.is_dir(),
-                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md")) if skills_dir.is_dir() else 0,
+                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md"))
+                if skills_dir.is_dir()
+                else 0,
                 "memories_dir_present": memories_dir.is_dir(),
-                "memory_file_count": sum(1 for path in memories_dir.iterdir() if path.is_file()) if memories_dir.is_dir() else 0,
+                "memory_file_count": sum(
+                    1 for path in memories_dir.iterdir() if path.is_file()
+                )
+                if memories_dir.is_dir()
+                else 0,
                 "auth_present": (profile_dir / "auth.json").is_file(),
                 "env_present": (profile_dir / ".env").is_file(),
             }
@@ -465,7 +498,9 @@ def _hermes_profile_scope():
 
 def _persona(name: str) -> str:
     personalities = _hermes_config().get("agent", {}).get("personalities", {})
-    if not isinstance(personalities, dict) or not isinstance(personalities.get(name), str):
+    if not isinstance(personalities, dict) or not isinstance(
+        personalities.get(name), str
+    ):
         raise TypeError(f"{name} persona is missing from hermes/config.yaml")
     return personalities[name]
 
@@ -494,7 +529,10 @@ def _deterministic_supervisor_note(state: RiskState) -> dict:
     """Render a reject/fallback note without paying for a second LLM call."""
 
     assessment = state["assessment"]
-    reasons = ", ".join(str(code) for code in assessment.get("reason_codes", [])) or "deterministic_rule"
+    reasons = (
+        ", ".join(str(code) for code in assessment.get("reason_codes", []))
+        or "deterministic_rule"
+    )
     fallback = state.get("fallbacks") or []
     if fallback:
         narrative = (
@@ -521,14 +559,22 @@ def supervise(state: RiskState, *, chat=None) -> dict:
     a = state["assessment"]
     # REJECT도 직원 context를 Hermes 부서장에게 전달한다. Hermes는
     # 결정론적 verdict를 바꾸지 않고 설명·에스컬레이션만 만든다.
-    if a.get("verdict") == "reject" and chat is None and not state.get("employee_workers"):
+    if (
+        a.get("verdict") == "reject"
+        and chat is None
+        and not state.get("employee_workers")
+    ):
         return _deterministic_supervisor_note(state)
-    bundle = {"order_intent": state["order_intent"], "trading_state": state["trading_state"],
-              "assessment": a, "compliance": state.get("compliance"),
-              "counterparty": state.get("counterparty"),
-              "employee_workers": state.get("employee_workers", {})}
+    bundle = {
+        "order_intent": state["order_intent"],
+        "trading_state": state["trading_state"],
+        "assessment": a,
+        "compliance": state.get("compliance"),
+        "counterparty": state.get("counterparty"),
+        "employee_workers": state.get("employee_workers", {}),
+    }
     task = f"""Using ONLY the evidence below, write a case-level risk narrative in Korean for
-CEO/Audit review. The binding verdict is "{a['verdict']}" from the deterministic Risk Engine -
+CEO/Audit review. The binding verdict is "{a["verdict"]}" from the deterministic Risk Engine -
 you cannot change it, only cite and explain it. If "counterparty" evidence is present, weave its
 counterparty_narrative into the case narrative.
 Schema (JSON only):
@@ -542,7 +588,7 @@ Evidence:
         call = chat or _hermes_chat
         out = call(_persona("risk-supervisor"), task)
         s, e = out.find("{"), out.rfind("}")
-        note = json.loads(out[s:e + 1])
+        note = json.loads(out[s : e + 1])
         for k in ("narrative", "escalate", "cited_checks"):
             if k not in note:
                 raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
@@ -567,7 +613,11 @@ Evidence:
             "escalate": True,
             "supervisor_llm_called": True,
             "supervisor_call_status": "failed",
-            "hermes_runtime": {**_hermes_runtime_metadata(), "call_status": "failed", "error_type": type(exc).__name__},
+            "hermes_runtime": {
+                **_hermes_runtime_metadata(),
+                "call_status": "failed",
+                "error_type": type(exc).__name__,
+            },
             "fallbacks": [_fallback("supervisor", exc)],
         }
 
@@ -577,54 +627,79 @@ def _assemble_out(state: RiskState) -> dict:
     유지한다 - 그래프 노드(notion_report)와 외부 인터페이스(run_risk_department)가 따로 베끼면
     한쪽만 필드를 늘렸을 때 드리프트가 생긴다."""
     a = state["assessment"]
-    trace_id = (state.get("context") or {}).get("trace_id") or (state.get("order_intent") or {}).get("trace_id")
+    trace_id = (state.get("context") or {}).get("trace_id") or (
+        state.get("order_intent") or {}
+    ).get("trace_id")
     trace_id = trace_id or f"{PIPELINE_VERSION}:{a['risk_request_id']}"
     worker_execution = state.get("employee_workers") or {}
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
     if a.get("check_results") and not worker_execution:
         executed_agents += ["market-liquidity-worker", "pre-trade-risk-worker"]
-    if (state.get("counterparty") and state.get("counterparty_llm_called", True)
-            and not worker_execution):
+    if (
+        state.get("counterparty")
+        and state.get("counterparty_llm_called", True)
+        and not worker_execution
+    ):
         executed_agents.append("derivatives-counterparty-worker")
     if state.get("compliance") and not worker_execution:
         executed_agents.append("compliance-policy-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if state.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("risk-supervisor")
-    risk_agents = ["risk-supervisor", "market-liquidity-worker", "pre-trade-risk-worker",
-                   "compliance-policy-worker", "derivatives-counterparty-worker"]
+    risk_agents = [
+        "risk-supervisor",
+        "market-liquidity-worker",
+        "pre-trade-risk-worker",
+        "compliance-policy-worker",
+        "derivatives-counterparty-worker",
+    ]
     failed_agents = list(failed_worker_agents)
     if supervisor_status == "failed":
         failed_agents.append("risk-supervisor")
     attempted_agents = list(dict.fromkeys(executed_agents + failed_agents))
     fallbacks = list(state.get("fallbacks", []))
     fallback = fallbacks[0] if fallbacks else None
-    return {"risk_request_id": a["risk_request_id"], "verdict": state["verdict"],
-            "approved_quantity": a["approved_quantity"], "reason_codes": a["reason_codes"],
-            "check_results": a["check_results"], "calculation_version": a["calculation_version"],
-            "input_hash": a["input_hash"], "trading_state": state["trading_state"],
-            "decision_status": a.get("decision_status", "FINAL" if not fallbacks else "DEGRADED"),
-            "decision_origin": a.get(
-                "decision_origin",
-                "DEGRADED_RISK_ENGINE" if fallbacks else "DETERMINISTIC_RISK_ENGINE",
-            ),
-            "safe_action": a.get("safe_action", "HOLD" if fallbacks else None),
-            "risk_checks_executed": a.get("risk_checks_executed", bool(a.get("check_results"))),
-            "failure": a.get("failure", fallback),
-            "counterparty": state.get("counterparty"), "compliance": state.get("compliance"),
-            "employee_workers": worker_execution,
-            "narrative": state["narrative"], "escalate": state["escalate"],
-            "fallbacks": state.get("fallbacks", []), "observability": langsmith_handoff(str(trace_id)),
+    return {
+        "risk_request_id": a["risk_request_id"],
+        "verdict": state["verdict"],
+        "approved_quantity": a["approved_quantity"],
+        "reason_codes": a["reason_codes"],
+        "check_results": a["check_results"],
+        "calculation_version": a["calculation_version"],
+        "input_hash": a["input_hash"],
+        "trading_state": state["trading_state"],
+        "decision_status": a.get(
+            "decision_status", "FINAL" if not fallbacks else "DEGRADED"
+        ),
+        "decision_origin": a.get(
+            "decision_origin",
+            "DEGRADED_RISK_ENGINE" if fallbacks else "DETERMINISTIC_RISK_ENGINE",
+        ),
+        "safe_action": a.get("safe_action", "HOLD" if fallbacks else None),
+        "risk_checks_executed": a.get(
+            "risk_checks_executed", bool(a.get("check_results"))
+        ),
+        "failure": a.get("failure", fallback),
+        "counterparty": state.get("counterparty"),
+        "compliance": state.get("compliance"),
+        "employee_workers": worker_execution,
+        "narrative": state["narrative"],
+        "escalate": state["escalate"],
+        "fallbacks": state.get("fallbacks", []),
+        "observability": langsmith_handoff(str(trace_id)),
         "supervisor_call_status": supervisor_status,
         "hermes_runtime": state.get("hermes_runtime"),
         "agent_execution": {
             "executed": executed_agents,
             "failed": failed_agents,
             "attempted": attempted_agents,
-            "not_executed": [agent for agent in risk_agents if agent not in attempted_agents],
+            "not_executed": [
+                agent for agent in risk_agents if agent not in attempted_agents
+            ],
         },
-        "execution_evidence": state.get("execution_evidence")}
+        "execution_evidence": state.get("execution_evidence"),
+    }
 
 
 def _record_execution_evidence(
@@ -665,10 +740,16 @@ def _record_execution_evidence(
         not_executed = list(execution.get("not_executed") or [])
         fallbacks = list(result.get("fallbacks") or [])
         compliance = result.get("compliance") or {}
-        degraded = bool(fallbacks or result.get("escalate") or compliance.get("grounded") is False)
+        degraded = bool(
+            fallbacks or result.get("escalate") or compliance.get("grounded") is False
+        )
         schema_valid = bool(result.get("assessment")) and not bool(fallbacks)
-        domain_valid = result.get("verdict") in {"approve", "resize", "reject"} and not degraded
-        agents_for_log = list(dict.fromkeys(executed + failed)) or ["risk-pipeline-fallback"]
+        domain_valid = (
+            result.get("verdict") in {"approve", "resize", "reject"} and not degraded
+        )
+        agents_for_log = list(dict.fromkeys(executed + failed)) or [
+            "risk-pipeline-fallback"
+        ]
         for employee in agents_for_log:
             journal.agent_output(
                 run_id=run_id,
@@ -676,21 +757,27 @@ def _record_execution_evidence(
                 employee_profile=employee,
                 output={
                     "employee_profile": employee,
-                    "supervisor_call_status": result.get("supervisor_call_status") if employee == "risk-supervisor" else None,
-                    "hermes_runtime": result.get("hermes_runtime") if employee == "risk-supervisor" else None,
+                    "supervisor_call_status": result.get("supervisor_call_status")
+                    if employee == "risk-supervisor"
+                    else None,
+                    "hermes_runtime": result.get("hermes_runtime")
+                    if employee == "risk-supervisor"
+                    else None,
                     "verdict": result.get("verdict"),
-                "decision_status": result.get("decision_status"),
-                "decision_origin": result.get("decision_origin"),
-                "failure": result.get("failure"),
-                "evidence_refs": ("compliance-policy-agent",) if compliance else (),
-            },
+                    "decision_status": result.get("decision_status"),
+                    "decision_origin": result.get("decision_origin"),
+                    "failure": result.get("failure"),
+                    "evidence_refs": ("compliance-policy-agent",) if compliance else (),
+                },
                 inputs_hash=input_event.inputs_hash,
                 schema_id="risk.agent-output.v1",
                 schema_valid=schema_valid,
                 domain_valid=domain_valid,
                 failed_rule=(result.get("reason_codes") or [None])[0],
                 fallback_reason=(fallbacks[0].get("stage") if fallbacks else None),
-                retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+                retry_count=max(
+                    (item.get("attempt", 0) for item in fallbacks), default=0
+                ),
                 as_of=as_of,
                 asset=asset,
                 model_version=PIPELINE_VERSION,
@@ -742,23 +829,39 @@ def _record_execution_evidence(
             "input_hash": input_event.inputs_hash,
             "pipeline_status": "DEGRADED" if degraded else "COMPLETED",
             "candidate_verdict": result.get("verdict"),
-            "decision_status": result.get("decision_status", "INCONCLUSIVE" if degraded else "FINAL"),
-            "decision_origin": result.get("decision_origin", "FALLBACK" if degraded else "DETERMINISTIC_RISK_ENGINE"),
+            "decision_status": result.get(
+                "decision_status", "INCONCLUSIVE" if degraded else "FINAL"
+            ),
+            "decision_origin": result.get(
+                "decision_origin",
+                "FALLBACK" if degraded else "DETERMINISTIC_RISK_ENGINE",
+            ),
             "failure": result.get("failure"),
             "safe_action": safe_action,
             "binding": False,
             "hermes_profile": "risk-management",
-        "employees_executed": executed,
-        "employees_failed": failed,
-        "employees_not_executed": not_executed,
+            "employees_executed": executed,
+            "employees_failed": failed,
+            "employees_not_executed": not_executed,
             "retry_policy": {"max_retries": 2, "max_attempts": 3},
             "external_dependencies": {
-                "redis": "DEGRADED" if any(item.get("stage") == "trading_state" for item in fallbacks) else "NOT_OBSERVED",
+                "redis": "DEGRADED"
+                if any(item.get("stage") == "trading_state" for item in fallbacks)
+                else "NOT_OBSERVED",
                 "compliance_rag": "EXECUTED" if compliance else "NOT_EXECUTED",
-"canonical_db": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
-                "portfolio_market_snapshot": "SUPPLIED_UNVERIFIED" if payload.get("context", {}).get("portfolio") else "MISSING",
+                "canonical_db": "CONFIGURED"
+                if (
+                    os.environ.get("RISK_QA_DATABASE_URL")
+                    or os.environ.get("DATABASE_URL")
+                )
+                else "NOT_CONFIGURED",
+                "portfolio_market_snapshot": "SUPPLIED_UNVERIFIED"
+                if payload.get("context", {}).get("portfolio")
+                else "MISSING",
             },
-            "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],
+            "event_types": [
+                event.event_type.value for event in journal.events_for_run(run_id)
+            ],
             "replay_ready": review["replay_ready"],
             "journal_event_count": len(journal.events_for_run(run_id)),
             "journal_path": str(log_path) if log_path else None,
@@ -784,17 +887,24 @@ def notion_report(state: RiskState, *, uploader=None) -> dict:
     out = _assemble_out(state)
     report_md = _render_report_md(state["order_intent"], state["context"], out)
     evaluation = evaluation_metrics(out, report_md)
-    report_md = _render_report_md(state["order_intent"], state["context"],
-                                   {**out, "evaluation": evaluation})
+    report_md = _render_report_md(
+        state["order_intent"], state["context"], {**out, "evaluation": evaluation}
+    )
     evaluation = evaluation_metrics(out, report_md)
     upload = uploader or upload_case
     try:
-        notion_upload = upload(state["order_intent"], state["context"], out, report_md=report_md)
+        notion_upload = upload(
+            state["order_intent"], state["context"], out, report_md=report_md
+        )
     except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] += 1
     evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
-    return {"notion_upload": notion_upload, "report_markdown": report_md, "evaluation": evaluation}
+    return {
+        "notion_upload": notion_upload,
+        "report_markdown": report_md,
+        "evaluation": evaluation,
+    }
 
 
 # ── 직원 Worker Graph ──────────────────────────────────────────────────────
@@ -818,15 +928,23 @@ def employee_workers(state: RiskState) -> dict:
     report = run_risk_employee_workers(payload)
     fallbacks = list(state.get("fallbacks", []))
     for worker_id in report.get("failed", []):
-        fallbacks.append({
-            "stage": f"employee:{worker_id}",
-            "node": "employee_workers",
-            "error": next((item.get("error") for item in report.get("workers", [])
-                           if item.get("worker_id") == worker_id), "worker_failed"),
-            "action": "ESCALATE",
-            "safe_action": "HOLD",
-            "decision_origin": "FALLBACK",
-        })
+        fallbacks.append(
+            {
+                "stage": f"employee:{worker_id}",
+                "node": "employee_workers",
+                "error": next(
+                    (
+                        item.get("error")
+                        for item in report.get("workers", [])
+                        if item.get("worker_id") == worker_id
+                    ),
+                    "worker_failed",
+                ),
+                "action": "ESCALATE",
+                "safe_action": "HOLD",
+                "decision_origin": "FALLBACK",
+            }
+        )
     return {"employee_workers": report, "fallbacks": fallbacks}
 
 
@@ -846,7 +964,11 @@ def _route_after_counterparty(state: RiskState) -> str:
         return "compliance"
     # A failed counterparty health signal requires the supervisor to review the
     # operational failure; it must not be treated as an ordinary trade reject.
-    return "supervise" if _counterparty_flagged(state["assessment"]) else "employee_workers"
+    return (
+        "supervise"
+        if _counterparty_flagged(state["assessment"])
+        else "employee_workers"
+    )
 
 
 def build_pipeline():
@@ -863,13 +985,25 @@ def build_pipeline():
         g.add_node(node, _guard_node(node, handler))
     g.set_entry_point("check_trading_state")
     g.add_edge("check_trading_state", "pre_trade_check")
-    g.add_conditional_edges("pre_trade_check", _route_after_pretrade,
-                            {"counterparty": "counterparty_check",
-                             "employee_workers": "employee_workers",
-                             "supervise": "supervise", "compliance": "compliance_check"})
-    g.add_conditional_edges("counterparty_check", _route_after_counterparty,
-                            {"employee_workers": "employee_workers",
-                             "supervise": "supervise", "compliance": "compliance_check"})
+    g.add_conditional_edges(
+        "pre_trade_check",
+        _route_after_pretrade,
+        {
+            "counterparty": "counterparty_check",
+            "employee_workers": "employee_workers",
+            "supervise": "supervise",
+            "compliance": "compliance_check",
+        },
+    )
+    g.add_conditional_edges(
+        "counterparty_check",
+        _route_after_counterparty,
+        {
+            "employee_workers": "employee_workers",
+            "supervise": "supervise",
+            "compliance": "compliance_check",
+        },
+    )
     g.add_edge("compliance_check", "employee_workers")
     g.add_edge("employee_workers", "supervise")
     g.add_edge("supervise", "notion_report")
@@ -888,18 +1022,37 @@ def run_risk_department(
 ) -> dict:
     """본부 단독 실행 - QA/연구본부의 run_<dept>_department 와 같은 외부 인터페이스."""
     execution_run_id = run_id or str(uuid4())
-    trace_id = str(context.get("trace_id") or order_intent.get("trace_id") or f"risk:{execution_run_id}")
+    trace_id = str(
+        context.get("trace_id")
+        or order_intent.get("trace_id")
+        or f"risk:{execution_run_id}"
+    )
     payload = {"order_intent": order_intent, "context": context, "scope": scope}
-    as_of = str(context.get("as_of") or order_intent.get("snapshot", {}).get("as_of") or "") or None
-    asset = str(order_intent.get("instrument_id")) if order_intent.get("instrument_id") else None
+    as_of = (
+        str(context.get("as_of") or order_intent.get("snapshot", {}).get("as_of") or "")
+        or None
+    )
+    asset = (
+        str(order_intent.get("instrument_id"))
+        if order_intent.get("instrument_id")
+        else None
+    )
     try:
-        out = build_pipeline().invoke({"order_intent": order_intent, "context": context, "scope": scope})
+        out = build_pipeline().invoke(
+            {"order_intent": order_intent, "context": context, "scope": scope}
+        )
     except Exception as exc:  # noqa: BLE001 - self-check preserves fail-closed behavior.
-        out = {"order_intent": order_intent, "context": context, "scope": scope,
-               "assessment": _fallback_assessment(order_intent, context, exc),
-               "trading_state": "HALTED", "verdict": "reject",
-               "narrative": _fallback_narrative("Risk pipeline", exc), "escalate": True,
-               "fallbacks": [_fallback("pipeline", exc)]}
+        out = {
+            "order_intent": order_intent,
+            "context": context,
+            "scope": scope,
+            "assessment": _fallback_assessment(order_intent, context, exc),
+            "trading_state": "HALTED",
+            "verdict": "reject",
+            "narrative": _fallback_narrative("Risk pipeline", exc),
+            "escalate": True,
+            "fallbacks": [_fallback("pipeline", exc)],
+        }
     result = _assemble_out(out)
     out["execution_evidence"] = _record_execution_evidence(
         payload,
@@ -945,8 +1098,10 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         f"| **판정 엔진** | {engine_label} (`{out['calculation_version']}`) |",
         f"| **input_hash** | `{out['input_hash']}` (같은 OrderIntent·Context면 재현 가능) |",
         f"| **trading_state** | {md_cell(out['trading_state'])} |",
-        (f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
-         f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |"),
+        (
+            f"| **주문** | {md_cell(order_intent.get('side'))} {md_cell(order_intent.get('quantity'))} x "
+            f"{md_cell(order_intent.get('instrument_id'))} (fund {md_cell(order_intent.get('fund_id'))}) |"
+        ),
         f"| **escalate** | {md_cell(out['escalate'])} |",
         f"| **생성** | {PIPELINE_VERSION}, {datetime.now(timezone.utc).isoformat()} |",
         "",
@@ -957,66 +1112,118 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
         "| Check | 통과 | 상세 |",
         "|---|---|---|",
     ]
-    lines += [f"| {md_cell(c.get('name'))} | {md_cell(c.get('passed'))} | {md_cell(c.get('detail'))} |" for c in checks]
+    lines += [
+        f"| {md_cell(c.get('name'))} | {md_cell(c.get('passed'))} | {md_cell(c.get('detail'))} |"
+        for c in checks
+    ]
     if not checks:
         lines.append("| — | — | (check_results 없음) |")
 
-    lines += ["", "## Counterparty / Broker 점검 (operational-counterparty-risk-agent)", ""]
+    lines += [
+        "",
+        "## Counterparty / Broker 점검 (operational-counterparty-risk-agent)",
+        "",
+    ]
     counterparty = out.get("counterparty")
     if counterparty:
-        lines += [md_cell(counterparty.get("counterparty_narrative")),
-                  f"(escalate: {md_cell(counterparty.get('escalate'))})"]
+        lines += [
+            md_cell(counterparty.get("counterparty_narrative")),
+            f"(escalate: {md_cell(counterparty.get('escalate'))})",
+        ]
     else:
         lines.append("counterparty_health 미플래그 - 조건부 노드 미호출")
 
-    lines += ["", "## Reason Codes", "",
-              ", ".join(f"`{r}`" for r in out["reason_codes"]) if out["reason_codes"] else "없음",
-              "", "## Compliance (compliance-policy-agent, Agentic RAG)", ""]
+    lines += [
+        "",
+        "## Reason Codes",
+        "",
+        ", ".join(f"`{r}`" for r in out["reason_codes"])
+        if out["reason_codes"]
+        else "없음",
+        "",
+        "## Compliance (compliance-policy-agent, Agentic RAG)",
+        "",
+    ]
     if compliance:
-        lines += ["| 필드 | 값 |", "|---|---|",
-                  f"| grounded | {md_cell(compliance.get('grounded'))} |",
-                  f"| attempts | {md_cell(compliance.get('attempts'))} |",
-                  f"| answer | {json_cell(compliance.get('answer'))} |", ""]
+        lines += [
+            "| 필드 | 값 |",
+            "|---|---|",
+            f"| grounded | {md_cell(compliance.get('grounded'))} |",
+            f"| attempts | {md_cell(compliance.get('attempts'))} |",
+            f"| answer | {json_cell(compliance.get('answer'))} |",
+            "",
+        ]
         docs = compliance.get("relevant_documents") or []
         if docs:
             lines += ["| 참조 문서 | version | score |", "|---|---|---|"]
-            lines += [f"| {md_cell(d.get('title'))} (`{md_cell(d.get('document_id'))}`) | "
-                      f"{md_cell(d.get('version'))} | {md_cell(d.get('score'))} |" for d in docs]
+            lines += [
+                f"| {md_cell(d.get('title'))} (`{md_cell(d.get('document_id'))}`) | "
+                f"{md_cell(d.get('version'))} | {md_cell(d.get('score'))} |"
+                for d in docs
+            ]
     else:
         lines.append("REJECT 조기 종료 - compliance_check 생략됨")
 
     lines += [
-        "", "## 종합 서술 (risk-supervisor, Hermes)", "",
+        "",
+        "## 종합 서술 (risk-supervisor, Hermes)",
+        "",
         md_cell(out["narrative"]),
     ]
 
     evaluation = out.get("evaluation") or {}
     if evaluation:
         lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
-        lines += [f"| {md_cell(key)} | {json_cell(value)} |" for key, value in evaluation.items()]
+        lines += [
+            f"| {md_cell(key)} | {json_cell(value)} |"
+            for key, value in evaluation.items()
+        ]
 
     observability = out.get("observability") or {}
     if observability:
-        lines += ["", "## LangSmith / HR 관측성 전달", "", "| 필드 | 값 |", "|---|---|",
-                  f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
-                  f"| LangSmith | {json_cell(observability.get('langsmith'))} |"]
+        lines += [
+            "",
+            "## LangSmith / HR 관측성 전달",
+            "",
+            "| 필드 | 값 |",
+            "|---|---|",
+            f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
+            f"| LangSmith | {json_cell(observability.get('langsmith'))} |",
+        ]
 
     agent_execution = out.get("agent_execution") or {}
     if agent_execution:
         lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
-        lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
-        lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
-        lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        lines += [
+            f"| 실행 | {md_cell(agent)} |"
+            for agent in agent_execution.get("executed", [])
+        ]
+        lines += [
+            f"| 실패 | {md_cell(agent)} |"
+            for agent in agent_execution.get("failed", [])
+        ]
+        lines += [
+            f"| 미실행/조건부 | {md_cell(agent)} |"
+            for agent in agent_execution.get("not_executed", [])
+        ]
         worker_execution = out.get("employee_workers") or {}
         if worker_execution:
-            lines += ["", "### LangGraph Employee Workers", "", "| Worker | 상태 | 도구 |", "|---|---|---|"]
+            lines += [
+                "",
+                "### LangGraph Employee Workers",
+                "",
+                "| Worker | 상태 | 도구 |",
+                "|---|---|---|",
+            ]
             lines += [
                 f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
                 f"{md_cell(', '.join(item.get('tools') or []))} |"
                 for item in worker_execution.get("workers", [])
             ]
-            lines += [f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
-                      f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`"]
+            lines += [
+                f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
+                f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`",
+            ]
         runtime = out.get("hermes_runtime") or {}
         if runtime:
             lines += [
@@ -1039,22 +1246,34 @@ def _render_report_md(order_intent: dict, context: dict, out: dict) -> str:
             else "> 의존성 fallback이 기록되었습니다. Risk Engine은 fail-closed로 실행됐으며, "
             "정상 승인 경로로 해석하지 말고 안전 조치를 우선합니다."
         )
-        lines += ["", "## Fallback / Escalation", "",
-                  fallback_note, "",
-                  "| 단계 | 노드 | 오류 | 메시지 | 조치 |", "|---|---|---|---|---|"]
-        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('node'))} | "
-                   f"{md_cell(item.get('error'))} | {md_cell(item.get('error_message'))} | "
-                   f"{md_cell(item.get('action'))} |"
-                  for item in fallbacks]
+        lines += [
+            "",
+            "## Fallback / Escalation",
+            "",
+            fallback_note,
+            "",
+            "| 단계 | 노드 | 오류 | 메시지 | 조치 |",
+            "|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {md_cell(item.get('stage'))} | {md_cell(item.get('node'))} | "
+            f"{md_cell(item.get('error'))} | {md_cell(item.get('error_message'))} | "
+            f"{md_cell(item.get('action'))} |"
+            for item in fallbacks
+        ]
 
     notion = out.get("notion_upload")
     if notion is not None:
         lines += ["", "## Notion 업로드 (Reporter Node)", ""]
-        lines.append(f"업로드 성공: {notion['url']}" if notion.get("ok")
-                     else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}")
+        lines.append(
+            f"업로드 성공: {notion['url']}"
+            if notion.get("ok")
+            else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}"
+        )
 
     lines += [
-        "", "---",
+        "",
+        "---",
         "> 이 문서는 risk_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
         "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
     ]
@@ -1073,23 +1292,50 @@ def _check_reject_short_circuit():
     # supervise 는 REJECT 여도 여전히 불린다(감사용 서술은 필요) 라서 Hermes 콜도 같이 스텁한다.
     # notion_report 도 스텁한다 - 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때
     # 자체 점검(네트워크 없음이 원칙) 이 진짜 Notion에 네트워크 호출을 낸다.
-    global check_trading_state, pre_trade_check, compliance_check, _hermes_chat, notion_report
+    global \
+        check_trading_state, \
+        pre_trade_check, \
+        compliance_check, \
+        _hermes_chat, \
+        notion_report
     orig_ts, orig_pt, orig_cc, orig_chat, orig_nr = (
-        check_trading_state, pre_trade_check, compliance_check, _hermes_chat, notion_report)
+        check_trading_state,
+        pre_trade_check,
+        compliance_check,
+        _hermes_chat,
+        notion_report,
+    )
     check_trading_state = lambda s: {"trading_state": "HALTED"}
-    pre_trade_check = lambda s: {"assessment": {
-        "risk_request_id": "r1", "verdict": "reject", "approved_quantity": None,
-        "reason_codes": ["trading_state_blocked"], "check_results": []}}
-    compliance_check = lambda s: (_ for _ in ()).throw(AssertionError("REJECT인데 compliance_check 가 불렸다"))
-    _hermes_chat = lambda persona, task: '{"narrative": "차단됨", "escalate": true, "cited_checks": []}'
-    notion_report = lambda s: {"notion_upload": {"ok": False, "reason": "self-check stub"}}
+    pre_trade_check = lambda s: {
+        "assessment": {
+            "risk_request_id": "r1",
+            "verdict": "reject",
+            "approved_quantity": None,
+            "reason_codes": ["trading_state_blocked"],
+            "check_results": [],
+        }
+    }
+    compliance_check = lambda s: (_ for _ in ()).throw(
+        AssertionError("REJECT인데 compliance_check 가 불렸다")
+    )
+    _hermes_chat = lambda persona, task: (
+        '{"narrative": "차단됨", "escalate": true, "cited_checks": []}'
+    )
+    notion_report = lambda s: {
+        "notion_upload": {"ok": False, "reason": "self-check stub"}
+    }
     try:
         out = build_pipeline().invoke({"order_intent": {}, "context": {}})
         assert out["verdict"] == "reject"
         assert "compliance" not in out
     finally:
-        check_trading_state, pre_trade_check, compliance_check, _hermes_chat, notion_report = (
-            orig_ts, orig_pt, orig_cc, orig_chat, orig_nr)
+        (
+            check_trading_state,
+            pre_trade_check,
+            compliance_check,
+            _hermes_chat,
+            notion_report,
+        ) = (orig_ts, orig_pt, orig_cc, orig_chat, orig_nr)
     print("  REJECT 조기 종료          OK")
 
 
@@ -1097,7 +1343,10 @@ def _check_supervisor_guard():
     a = {"verdict": "approve", "reason_codes": [], "check_results": []}
     bad_chat = lambda persona, task: '{"narrative": "n"}'  # escalate/cited_checks 누락
     try:
-        supervise({"order_intent": {}, "trading_state": "ENABLED", "assessment": a}, chat=bad_chat)
+        supervise(
+            {"order_intent": {}, "trading_state": "ENABLED", "assessment": a},
+            chat=bad_chat,
+        )
         raise AssertionError("불완전 종합 결과가 통과했다")
     except ValueError:
         pass
@@ -1107,63 +1356,124 @@ def _check_supervisor_guard():
 def _check_counterparty_routing():
     # counterparty_health가 실측으로 플래그된 케이스(DEGRADED 통과, DOWN 거부) 는 verdict 와
     # 무관하게 counterparty_check 로 먼저 가고, 플래그가 없으면 기존 REJECT short-circuit 그대로다
-    degraded = {"assessment": {"verdict": "approve",
-                "check_results": [{"name": "counterparty_health", "passed": True, "detail": "DEGRADED 상태 - 통과하되 기록"}],
-                "reason_codes": []}}
+    degraded = {
+        "assessment": {
+            "verdict": "approve",
+            "check_results": [
+                {
+                    "name": "counterparty_health",
+                    "passed": True,
+                    "detail": "DEGRADED 상태 - 통과하되 기록",
+                }
+            ],
+            "reason_codes": [],
+        }
+    }
     assert _route_after_pretrade(degraded) == "counterparty"
     assert _route_after_counterparty(degraded) == "compliance"
 
-    down_reject = {"assessment": {"verdict": "reject",
-                   "check_results": [{"name": "counterparty_health", "passed": False, "detail": "paper 브로커 상태가 DOWN입니다"}],
-                   "reason_codes": ["counterparty_unhealthy"]}}
+    down_reject = {
+        "assessment": {
+            "verdict": "reject",
+            "check_results": [
+                {
+                    "name": "counterparty_health",
+                    "passed": False,
+                    "detail": "paper 브로커 상태가 DOWN입니다",
+                }
+            ],
+            "reason_codes": ["counterparty_unhealthy"],
+        }
+    }
     assert _route_after_pretrade(down_reject) == "counterparty"
     assert _route_after_counterparty(down_reject) == "supervise"
 
-    healthy = {"assessment": {"verdict": "approve",
-               "check_results": [{"name": "counterparty_health", "passed": True, "detail": ""}], "reason_codes": []}}
+    healthy = {
+        "assessment": {
+            "verdict": "approve",
+            "check_results": [
+                {"name": "counterparty_health", "passed": True, "detail": ""}
+            ],
+            "reason_codes": [],
+        }
+    }
     assert _route_after_pretrade(healthy) == "compliance"
 
-    other_reject = {"assessment": {"verdict": "reject", "check_results": [], "reason_codes": ["turnover_limit"]}}
+    other_reject = {
+        "assessment": {
+            "verdict": "reject",
+            "check_results": [],
+            "reason_codes": ["turnover_limit"],
+        }
+    }
     assert _route_after_pretrade(other_reject) == "supervise"
     print("  Counterparty 조건부 라우팅  OK")
-
-
-def _check_counterparty_schema_guard():
-    a = {"verdict": "reject", "check_results": [{"name": "counterparty_health", "passed": False, "detail": "d"}],
-         "reason_codes": ["counterparty_unhealthy"]}
-    bad_chat = lambda persona, task: '{"counterparty_narrative": "n"}'  # escalate 누락
-    try:
-        _legacy_counterparty_check({"order_intent": {}, "assessment": a}, chat=bad_chat)
-        raise AssertionError("불완전 Counterparty 결과가 통과했다")
-    except ValueError:
-        pass
-    print("  Counterparty 스키마 가드    OK")
 
 
 def _check_counterparty_full_invoke():
     # DEGRADED(비거부) 케이스로 전체 그래프를 실제로 돌려 conditional edge 매핑이 오타 없이
     # counterparty_check -> compliance_check -> supervise -> notion_report 순으로 이어지는지 확인한다.
     # notion_report 도 called 리스트에 남기되 실제 업로드는 스텁한다(네트워크 없음 원칙).
-    global check_trading_state, pre_trade_check, counterparty_check, compliance_check, _hermes_chat, notion_report
-    orig = (check_trading_state, pre_trade_check, counterparty_check, compliance_check, _hermes_chat, notion_report)
+    global \
+        check_trading_state, \
+        pre_trade_check, \
+        counterparty_check, \
+        compliance_check, \
+        _hermes_chat, \
+        notion_report
+    orig = (
+        check_trading_state,
+        pre_trade_check,
+        counterparty_check,
+        compliance_check,
+        _hermes_chat,
+        notion_report,
+    )
     called = []
     check_trading_state = lambda s: {"trading_state": "ENABLED"}
-    pre_trade_check = lambda s: {"assessment": {
-        "risk_request_id": "r1", "verdict": "approve", "approved_quantity": "1",
-        "reason_codes": [], "calculation_version": "v", "input_hash": "h",
-        "check_results": [{"name": "counterparty_health", "passed": True, "detail": "DEGRADED 상태 - 통과하되 기록"}]}}
-    counterparty_check = lambda s: called.append("counterparty") or {"counterparty": {"counterparty_narrative": "d", "escalate": False}}
+    pre_trade_check = lambda s: {
+        "assessment": {
+            "risk_request_id": "r1",
+            "verdict": "approve",
+            "approved_quantity": "1",
+            "reason_codes": [],
+            "calculation_version": "v",
+            "input_hash": "h",
+            "check_results": [
+                {
+                    "name": "counterparty_health",
+                    "passed": True,
+                    "detail": "DEGRADED 상태 - 통과하되 기록",
+                }
+            ],
+        }
+    }
+    counterparty_check = lambda s: (
+        called.append("counterparty")
+        or {"counterparty": {"counterparty_narrative": "d", "escalate": False}}
+    )
     compliance_check = lambda s: called.append("compliance") or {"compliance": None}
-    _hermes_chat = lambda persona, task: '{"narrative": "n", "escalate": false, "cited_checks": []}'
-    notion_report = lambda s: called.append("notion") or {"notion_upload": {"ok": False, "reason": "self-check stub"}}
+    _hermes_chat = lambda persona, task: (
+        '{"narrative": "n", "escalate": false, "cited_checks": []}'
+    )
+    notion_report = lambda s: (
+        called.append("notion")
+        or {"notion_upload": {"ok": False, "reason": "self-check stub"}}
+    )
     try:
         out = build_pipeline().invoke({"order_intent": {}, "context": {}})
         assert called == ["counterparty", "compliance", "notion"], called
         assert out["counterparty"]["counterparty_narrative"] == "d"
         assert out["notion_upload"] == {"ok": False, "reason": "self-check stub"}
     finally:
-        (check_trading_state, pre_trade_check, counterparty_check, compliance_check,
-         _hermes_chat, notion_report) = orig
+        (
+            check_trading_state,
+            pre_trade_check,
+            counterparty_check,
+            compliance_check,
+            _hermes_chat,
+            notion_report,
+        ) = orig
     print("  Counterparty 조건부 호출    OK")
 
 
@@ -1174,16 +1484,30 @@ def _check_notion_report_node():
         captured["out"], captured["report_md"] = out, report_md
         return {"ok": True, "url": "https://notion.so/fake"}
 
-    state = {"order_intent": {"trade_case_id": "t1"}, "context": {},
-             "trading_state": "ENABLED", "verdict": "approve", "narrative": "n", "escalate": False,
-             "assessment": {"risk_request_id": "r1", "verdict": "approve", "approved_quantity": "1",
-                            "reason_codes": [], "check_results": [], "calculation_version": "v",
-                            "input_hash": "h"}}
+    state = {
+        "order_intent": {"trade_case_id": "t1"},
+        "context": {},
+        "trading_state": "ENABLED",
+        "verdict": "approve",
+        "narrative": "n",
+        "escalate": False,
+        "assessment": {
+            "risk_request_id": "r1",
+            "verdict": "approve",
+            "approved_quantity": "1",
+            "reason_codes": [],
+            "check_results": [],
+            "calculation_version": "v",
+            "input_hash": "h",
+        },
+    }
     result = notion_report(state, uploader=stub_uploader)
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["out"]["risk_request_id"] == "r1"
-    assert "risk_request_id" in captured["report_md"]  # _render_report_md 가 실제로 불렸는지
+    assert (
+        "risk_request_id" in captured["report_md"]
+    )  # _render_report_md 가 실제로 불렸는지
     print("  Notion Reporter 노드        OK")
 
 
@@ -1205,44 +1529,84 @@ if __name__ == "__main__":
         now = datetime.now(timezone.utc)
         fund, book, strategy, aapl = (str(uuid4()) for _ in range(4))
         demo_intent = {
-            "trade_case_id": str(uuid4()), "fund_id": fund, "book_id": book,
-            "strategy_id": strategy, "instrument_id": aapl, "side": "BUY",
-            "order_type": "LIMIT", "quantity": "100", "limit_price": "70000",
-            "time_in_force": "DAY", "valid_until": (now + timedelta(hours=1)).isoformat(),
-            "snapshot": {"market_snapshot_id": "s1", "as_of": now.isoformat(),
-                        "bid": "69900", "ask": "70000"},
-            "idempotency_key": "idem_scripts_001", "created_by": "trader-pm-agent", "trace_id": "t1",
+            "trade_case_id": str(uuid4()),
+            "fund_id": fund,
+            "book_id": book,
+            "strategy_id": strategy,
+            "instrument_id": aapl,
+            "side": "BUY",
+            "order_type": "LIMIT",
+            "quantity": "100",
+            "limit_price": "70000",
+            "time_in_force": "DAY",
+            "valid_until": (now + timedelta(hours=1)).isoformat(),
+            "snapshot": {
+                "market_snapshot_id": "s1",
+                "as_of": now.isoformat(),
+                "bid": "69900",
+                "ask": "70000",
+            },
+            "idempotency_key": "idem_scripts_001",
+            "created_by": "trader-pm-agent",
+            "trace_id": "t1",
         }
         demo_context = {
-            "mandate": {"fund_id": fund, "allowed_instrument_ids": None,
-                       "min_order_notional": "100000", "max_order_notional": "50000000"},
-            "limits": {"soft_single_issuer_pct": "0.20", "hard_single_issuer_pct": "0.30",
-                      "max_daily_turnover_notional": "100000000", "max_daily_order_count": 50,
-                      "max_daily_loss": "10000000", "max_drawdown_pct": "0.20"},
+            "mandate": {
+                "fund_id": fund,
+                "allowed_instrument_ids": None,
+                "min_order_notional": "100000",
+                "max_order_notional": "50000000",
+            },
+            "limits": {
+                "soft_single_issuer_pct": "0.20",
+                "hard_single_issuer_pct": "0.30",
+                "max_daily_turnover_notional": "100000000",
+                "max_daily_order_count": 50,
+                "max_daily_loss": "10000000",
+                "max_drawdown_pct": "0.20",
+            },
             "restricted_items": [],
-            "portfolio": {"fund_id": fund, "cash": "100000000", "buying_power": "100000000",
-                         "gross_exposure": "100000000", "peak_equity": "1000000000", "equity": "1000000000"},
+            "portfolio": {
+                "fund_id": fund,
+                "cash": "100000000",
+                "buying_power": "100000000",
+                "gross_exposure": "100000000",
+                "peak_equity": "1000000000",
+                "equity": "1000000000",
+            },
             "market_status": {"tradable": "--reject" not in sys.argv},
             "counterparty": {"broker_adapter": "paper", "health": "ok"},
-            "trading_state": "ENABLED", "as_of": now.isoformat(),
+            "trading_state": "ENABLED",
+            "as_of": now.isoformat(),
         }
-        print(f"{PIPELINE_VERSION} 실행 (데모 주문{' - REJECT 유도' if '--reject' in sys.argv else ''})")
-        log_path = Path(os.environ.get(
-            "RISK_RUN_LOG_PATH",
-            _BASE / "reports" / "runs" / f"risk_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
-        ))
+        print(
+            f"{PIPELINE_VERSION} 실행 (데모 주문{' - REJECT 유도' if '--reject' in sys.argv else ''})"
+        )
+        log_path = Path(
+            os.environ.get(
+                "RISK_RUN_LOG_PATH",
+                _BASE
+                / "reports"
+                / "runs"
+                / f"risk_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
+            )
+        )
         if "--log-path" in sys.argv:
             log_index = sys.argv.index("--log-path") + 1
             if log_index >= len(sys.argv):
                 raise SystemExit("--log-path requires a file path")
             log_path = Path(sys.argv[log_index])
-        out = run_risk_department(demo_intent, demo_context, scope=f"fund:{fund}", log_path=log_path)
+        out = run_risk_department(
+            demo_intent, demo_context, scope=f"fund:{fund}", log_path=log_path
+        )
         print(json.dumps(out, ensure_ascii=False, indent=1))
 
         report_dir = _BASE / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"risk_case_report_{out['risk_request_id']}.md"
-        report_path.write_text(_render_report_md(demo_intent, demo_context, out), encoding="utf-8")
+        report_path.write_text(
+            _render_report_md(demo_intent, demo_context, out), encoding="utf-8"
+        )
         print(f"결정론적 MD 리포트 저장: {report_path}")
         raise SystemExit(0)
 
@@ -1251,7 +1615,8 @@ if __name__ == "__main__":
     _check_reject_short_circuit()
     _check_supervisor_guard()
     _check_counterparty_routing()
-    _check_counterparty_schema_guard()
     _check_counterparty_full_invoke()
     _check_notion_report_node()
-    print("본부 파이프라인 7개 영역 통과. 실행은 --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요)")
+    print(
+        "본부 파이프라인 7개 영역 통과. 실행은 --run (REDIS_URL, OPENAI_API_KEY, Hermes 필요)"
+    )

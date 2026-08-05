@@ -62,9 +62,13 @@ def _resolve_mappings(body: ExternalP1SnapshotRequest) -> tuple[InstrumentMappin
                 as_of=body.as_of,
             )
     if os.environ.get("LS_ENV", "PAPER").strip().upper() != "PAPER":
-        raise RiskExternalRuntimeError("DATABASE_URL is required for non-PAPER instrument resolution")
+        raise RiskExternalRuntimeError(
+            "DATABASE_URL is required for non-PAPER instrument resolution"
+        )
     if not body.mappings:
-        raise RiskExternalRuntimeError("mappings are required in PAPER without DATABASE_URL")
+        raise RiskExternalRuntimeError(
+            "mappings are required in PAPER without DATABASE_URL"
+        )
     mappings = tuple(
         InstrumentMapping(
             broker_symbol=item.broker_symbol,
@@ -107,7 +111,9 @@ def external_p1_snapshot(body: ExternalP1SnapshotRequest) -> dict[str, Any]:
     except RiskExternalRuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="external Risk snapshot unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail="external Risk snapshot unavailable"
+        ) from exc
 
 
 def _persist_snapshot(snapshot: Any, *, trace_id: UUID) -> None:
@@ -122,12 +128,16 @@ def _persist_snapshot(snapshot: Any, *, trace_id: UUID) -> None:
     import psycopg2
 
     try:
-        scenario_ids = {name: UUID(value) for name, value in json.loads(raw_scenarios).items()}
+        scenario_ids = {
+            name: UUID(value) for name, value in json.loads(raw_scenarios).items()
+        }
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RiskExternalRuntimeError("RISK_STRESS_SCENARIO_IDS_JSON is invalid") from exc
+        raise RiskExternalRuntimeError(
+            "RISK_STRESS_SCENARIO_IDS_JSON is invalid"
+        ) from exc
     with psycopg2.connect(database_url) as connection:
         RiskP1Repository(connection).save_snapshot(
             snapshot,
             stress_scenario_ids=scenario_ids,
-        trace_id=trace_id,
+            trace_id=trace_id,
         )

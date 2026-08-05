@@ -12,6 +12,7 @@ Notion은 Projection일 뿐이다 - 이 모듈이 실패해도(미설정, 네트
 RiskState의 바인딩 판정은 절대 바뀌지 않는다. 모든 실패를 흡수하고 {"ok": False, ...}로만
 기록한다 - scripts.py의 notion_report 노드가 이 함수를 부른 뒤 그대로 리턴할 뿐 raise 하지 않는다.
 """
+
 from __future__ import annotations
 
 import json
@@ -49,8 +50,11 @@ def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
     req = urllib.request.Request(
         f"https://api.notion.com/v1/{path}",
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Notion-Version": _NOTION_VERSION,
-                 "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": _NOTION_VERSION,
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     try:
@@ -72,27 +76,55 @@ def _report_path(risk_request_id: object) -> Path:
     )
 
 
-def upload_case(order_intent: dict, context: dict, out: dict, *, report_md: str = "", env: dict | None = None) -> dict:
+def upload_case(
+    order_intent: dict,
+    context: dict,
+    out: dict,
+    *,
+    report_md: str = "",
+    env: dict | None = None,
+) -> dict:
     """out(run_risk_department 반환 형태)을 Notion Risk DB에 1건 업로드한다. 절대 예외를 던지지 않는다."""
     env = env if env is not None else _load_dev_vars()
     token, db_id = env.get("NOTION_TOKEN"), env.get("NOTION_RISK_DB")
     if not token or not db_id:
-        return {"ok": False, "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략"}
+        return {
+            "ok": False,
+            "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략",
+        }
 
     cp = out.get("counterparty") or {}
-    compliance_verdict = ((out.get("compliance") or {}).get("answer") or {}).get("verdict")
+    compliance_verdict = ((out.get("compliance") or {}).get("answer") or {}).get(
+        "verdict"
+    )
     approved_qty = out.get("approved_quantity")
     props = {
-        "제목": {"title": [{"text": {"content": f"risk_request_id: {out['risk_request_id']}"}}]},
+        "제목": {
+            "title": [
+                {"text": {"content": f"risk_request_id: {out['risk_request_id']}"}}
+            ]
+        },
         "trade_case_id": _rich_text(order_intent.get("trade_case_id")),
         "판정": {"select": {"name": out["verdict"]}},
-        "trading_state": {"select": {"name": out.get("trading_state") or context.get("trading_state") or "ENABLED"}},
-        "승인 수량": {"number": float(approved_qty) if approved_qty is not None else None},
-        "reason_codes": {"multi_select": [{"name": c} for c in out.get("reason_codes", [])]},
+        "trading_state": {
+            "select": {
+                "name": out.get("trading_state")
+                or context.get("trading_state")
+                or "ENABLED"
+            }
+        },
+        "승인 수량": {
+            "number": float(approved_qty) if approved_qty is not None else None
+        },
+        "reason_codes": {
+            "multi_select": [{"name": c} for c in out.get("reason_codes", [])]
+        },
         "escalate": {"checkbox": bool(out.get("escalate", False))},
         "input_hash": _rich_text(out.get("input_hash")),
         "calculation_version": _rich_text(out.get("calculation_version")),
-        "check_results": _rich_text(json.dumps(out.get("check_results", []), ensure_ascii=False)),
+        "check_results": _rich_text(
+            json.dumps(out.get("check_results", []), ensure_ascii=False)
+        ),
         "counterparty_narrative": _rich_text(cp.get("counterparty_narrative")),
         "서술": _rich_text(out.get("narrative")),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
@@ -120,11 +152,17 @@ def upload_case(order_intent: dict, context: dict, out: dict, *, report_md: str 
 def _check_missing_config_skips_without_network():
     def _boom(*a, **k):
         raise AssertionError("설정 없는데 네트워크 호출을 시도했다")
+
     orig = _post
     globals()["_post"] = _boom
     try:
-        result = upload_case({}, {}, {"risk_request_id": "r1", "verdict": "approve"}, env={})
-        assert result == {"ok": False, "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략"}
+        result = upload_case(
+            {}, {}, {"risk_request_id": "r1", "verdict": "approve"}, env={}
+        )
+        assert result == {
+            "ok": False,
+            "reason": "NOTION_TOKEN/NOTION_RISK_DB 미설정 - 업로드 생략",
+        }
     finally:
         globals()["_post"] = orig
     print("  미설정 시 네트워크 미호출   OK")
@@ -140,12 +178,26 @@ def _check_payload_shape():
     orig = _post
     globals()["_post"] = _fake_post
     try:
-        out = {"risk_request_id": "r1", "verdict": "approve", "approved_quantity": "100",
-               "reason_codes": [], "check_results": [], "calculation_version": "v1",
-               "input_hash": "h1", "trading_state": "ENABLED", "escalate": False,
-               "narrative": "n", "counterparty": None, "compliance": None}
-        result = upload_case({"trade_case_id": "t1"}, {}, out,
-                              env={"NOTION_TOKEN": "tok", "NOTION_RISK_DB": "db1"})
+        out = {
+            "risk_request_id": "r1",
+            "verdict": "approve",
+            "approved_quantity": "100",
+            "reason_codes": [],
+            "check_results": [],
+            "calculation_version": "v1",
+            "input_hash": "h1",
+            "trading_state": "ENABLED",
+            "escalate": False,
+            "narrative": "n",
+            "counterparty": None,
+            "compliance": None,
+        }
+        result = upload_case(
+            {"trade_case_id": "t1"},
+            {},
+            out,
+            env={"NOTION_TOKEN": "tok", "NOTION_RISK_DB": "db1"},
+        )
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         assert captured["path"] == "pages"
         assert captured["body"]["parent"]["database_id"] == "db1"

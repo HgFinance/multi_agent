@@ -8,11 +8,15 @@ from pathlib import Path
 QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 
-import qa_employee_workers  # noqa: E402,F401 - loads the isolated skill package.
-from qa_worker_skill_runtime.guards import build_context, pit_check, scope_check  # noqa: E402
-from qa_worker_skill_runtime.rag_router import choose_rag_route  # noqa: E402
-from qa_worker_skill_runtime.tools import invoke_tool  # noqa: E402
-from qa_worker_skill_runtime.trace import SkillTrace  # noqa: E402
+import qa_employee_workers  # noqa: F401 - loads the isolated skill package.
+from qa_worker_skill_runtime.guards import (
+    build_context,
+    pit_check,
+    scope_check,
+)
+from qa_worker_skill_runtime.rag_router import choose_rag_route
+from qa_worker_skill_runtime.tools import invoke_tool
+from qa_worker_skill_runtime.trace import SkillTrace
 
 
 def test_scope_denial_is_escalation():
@@ -29,10 +33,7 @@ def test_pit_check_rejects_future_evidence_and_missing_time():
         {"as_of": "2026-08-04T00:00:00Z"}, worker_id="evidence-qa-worker"
     )
     assert pit_check(context, None).error_code == "MISSING_OBSERVED_AT"
-    assert (
-        pit_check(context, "2026-08-04T00:00:01Z").error_code
-        == "FUTURE_EVIDENCE"
-    )
+    assert pit_check(context, "2026-08-04T00:00:01Z").error_code == "FUTURE_EVIDENCE"
 
 
 def test_tool_exception_is_inconclusive_and_escalates():

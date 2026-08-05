@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-
 RAGRoute = Literal["NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"]
 
 
@@ -37,9 +36,7 @@ class WorkerRAGPolicy:
 WORKER_RAG_POLICIES: dict[str, WorkerRAGPolicy] = {
     "market-liquidity-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "pre-trade-risk-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
-    "derivatives-counterparty-worker": WorkerRAGPolicy(
-        frozenset({"NO_RAG"}), "NO_RAG"
-    ),
+    "derivatives-counterparty-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "compliance-policy-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH"})
     ),
@@ -85,7 +82,11 @@ def choose_rag_route(payload: dict[str, Any], *, worker_id: str = "") -> RAGPlan
     explicit = str(payload.get("rag_route", "")).upper()
     if explicit in {"NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"}:
         route = explicit if explicit in policy.allowed_routes else "NO_RAG"
-        reason = "explicit route requested" if route == explicit else "worker policy denied route"
+        reason = (
+            "explicit route requested"
+            if route == explicit
+            else "worker policy denied route"
+        )
         return _plan(route, reason)
     if payload.get("hypergraph") or payload.get("hyper_extract"):
         route = "HYPERGRAPH" if "HYPERGRAPH" in policy.allowed_routes else "NO_RAG"
@@ -99,9 +100,19 @@ def choose_rag_route(payload: dict[str, Any], *, worker_id: str = "") -> RAGPlan
         return _plan("NO_RAG", "no retrieval query or evidence signal")
     graph_signal = any(
         marker in text
-        for marker in ("contradict", "unsupported", "entity", "relationship", "counterparty", "dependency")
+        for marker in (
+            "contradict",
+            "unsupported",
+            "entity",
+            "relationship",
+            "counterparty",
+            "dependency",
+        )
     )
-    policy_signal = any(marker in text for marker in ("policy", "compliance", "regulation", "citation", "pit"))
+    policy_signal = any(
+        marker in text
+        for marker in ("policy", "compliance", "regulation", "citation", "pit")
+    )
     if graph_signal:
         route = "GRAPH" if "GRAPH" in policy.allowed_routes else "NO_RAG"
         return _plan(route, "claim or relationship consistency signal")

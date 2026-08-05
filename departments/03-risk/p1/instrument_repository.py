@@ -31,9 +31,19 @@ class PostgresInstrumentMappingRepository:
         provider: str | None = None,
         as_of: datetime | None = None,
     ) -> tuple[InstrumentMapping, ...]:
-        normalized = tuple(sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}))
+        normalized = tuple(
+            sorted(
+                {
+                    str(symbol).strip().upper()
+                    for symbol in symbols
+                    if str(symbol).strip()
+                }
+            )
+        )
         if not normalized:
-            raise InstrumentMappingRepositoryError("at least one broker symbol is required")
+            raise InstrumentMappingRepositoryError(
+                "at least one broker symbol is required"
+            )
 
         cursor = self._connection.cursor()
         try:
@@ -55,7 +65,9 @@ class PostgresInstrumentMappingRepository:
             cursor.execute(query, params)
             rows = cursor.fetchall()
         except Exception as exc:
-            raise InstrumentMappingRepositoryError("canonical instrument mapping lookup failed") from exc
+            raise InstrumentMappingRepositoryError(
+                "canonical instrument mapping lookup failed"
+            ) from exc
         finally:
             cursor.close()
 

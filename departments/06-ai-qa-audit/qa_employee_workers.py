@@ -210,7 +210,10 @@ def default_worker_llm(system: str, prompt: str) -> str:
     response = client.chat.completions.create(
         model=_model_name(),
         temperature=0,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
     )
     return response.choices[0].message.content or ""
 
@@ -225,61 +228,31 @@ def _parse_worker_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError:
-        return {"worker_id": worker_id, "summary": text[:4000], "confidence": None,
-                "evidence_refs": [], "escalate": True, "schema_valid": False}, False
+        return {
+            "worker_id": worker_id,
+            "summary": text[:4000],
+            "confidence": None,
+            "evidence_refs": [],
+            "escalate": True,
+            "schema_valid": False,
+        }, False
     if not isinstance(parsed, dict) or not isinstance(parsed.get("summary"), str):
-        return {"worker_id": worker_id, "summary": "", "schema_valid": False, "escalate": True}, False
+        return {
+            "worker_id": worker_id,
+            "summary": "",
+            "schema_valid": False,
+            "escalate": True,
+        }, False
     refs = parsed.get("evidence_refs", [])
     valid = isinstance(refs, list) and isinstance(parsed.get("escalate", False), bool)
-    return {"worker_id": worker_id, "summary": parsed["summary"][:4000],
-            "confidence": parsed.get("confidence"), "evidence_refs": refs,
-            "escalate": parsed.get("escalate", True), "schema_valid": valid}, valid
-
-
-def _build_legacy_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: WorkerLLM | None = None):
-    def read_tool(state: WorkerState) -> dict[str, Any]:
-        return {"tool_output": tool(state.get("input", {}))}
-
-    def call_llm(state: WorkerState) -> dict[str, Any]:
-        worker_llm = llm or default_worker_llm
-        system = (
-            f"You are {spec.role}. You are a QA employee, not the Hermes supervisor. "
-            "Use only supplied evidence. Never change a binding QA verdict, approve an order, "
-            "write a ledger, or close a finding. Return JSON with summary, confidence, "
-            "evidence_refs, escalate."
-        )
-        prompt = (f"Worker: {spec.worker_id}\nAllowed tools: {', '.join(spec.tools)}\n"
-                  f"Output contract: {spec.output_contract}\nEvidence:\n{_compact(state.get('tool_output', {}))}")
-        errors: list[str] = []
-        for attempt in range(1, spec.max_attempts + 1):
-            try:
-                output, schema_valid = _parse_worker_output(worker_llm(system, prompt), spec.worker_id)
-                if schema_valid:
-                    return {"output": output, "status": "COMPLETED", "attempts": attempt, "error": None}
-                errors.append("worker_output_schema_invalid")
-            except Exception as exc:  # noqa: BLE001 - fail-closed worker boundary.
-                errors.append(type(exc).__name__)
-        return {"output": {"worker_id": spec.worker_id,
-                            "summary": "직원 LLM 결과를 검증하지 못했습니다.",
-                            "confidence": 0.0, "evidence_refs": [], "escalate": True,
-                            "schema_valid": False},
-                "status": "DEGRADED", "attempts": spec.max_attempts,
-                "error": ";".join(errors[-3:])}
-
-    def validate(state: WorkerState) -> dict[str, Any]:
-        if state.get("status") == "COMPLETED" and state.get("output", {}).get("schema_valid"):
-            return {}
-        return {"status": "DEGRADED"}
-
-    graph = StateGraph(WorkerState)
-    graph.add_node("tool", read_tool)
-    graph.add_node("worker_llm", call_llm)
-    graph.add_node("validate", validate)
-    graph.set_entry_point("tool")
-    graph.add_edge("tool", "worker_llm")
-    graph.add_edge("worker_llm", "validate")
-    graph.add_edge("validate", END)
-    return graph.compile()
+    return {
+        "worker_id": worker_id,
+        "summary": parsed["summary"][:4000],
+        "confidence": parsed.get("confidence"),
+        "evidence_refs": refs,
+        "escalate": parsed.get("escalate", True),
+        "schema_valid": valid,
+    }, valid
 
 
 def build_worker_graph(
@@ -301,7 +274,9 @@ def build_worker_graph(
 
     def _manifest(state: WorkerState) -> dict[str, Any]:
         context = _context(state)
-        return trace.manifest(context) if trace is not None and context is not None else {}
+        return (
+            trace.manifest(context) if trace is not None and context is not None else {}
+        )
 
     def _safe_output(error: str) -> dict[str, Any]:
         return {
@@ -362,7 +337,9 @@ def build_worker_graph(
             )
             skill_results.append(invocation.result.model_dump(mode="json"))
             if trace is not None:
-                trace.record(context, invocation.result, latency_ms=invocation.latency_ms)
+                trace.record(
+                    context, invocation.result, latency_ms=invocation.latency_ms
+                )
             if invocation.result.status != "COMPLETED":
                 fallback = make_result(
                     "fallback.human_escalation.v1",
@@ -482,7 +459,9 @@ def build_worker_graph(
         }
 
     def validate(state: WorkerState) -> dict[str, Any]:
-        if state.get("status") == "COMPLETED" and state.get("output", {}).get("schema_valid"):
+        if state.get("status") == "COMPLETED" and state.get("output", {}).get(
+            "schema_valid"
+        ):
             return {}
         return {"status": "DEGRADED", "trace_manifest": _manifest(state)}
 
@@ -502,7 +481,10 @@ def _evidence_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hallucination_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": "qa.evidence.rag", "reviews": payload.get("hallucination_reviews", [])}
+    return {
+        "tool": "qa.evidence.rag",
+        "reviews": payload.get("hallucination_reviews", []),
+    }
 
 
 def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -526,7 +508,9 @@ def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
                     accuracy=float(model_risk_input["accuracy"]),
                     calibration_error=float(model_risk_input["calibration_error"]),
                     drift_score=float(model_risk_input["drift_score"]),
-                    protected_failure_rate=float(model_risk_input["protected_failure_rate"]),
+                    protected_failure_rate=float(
+                        model_risk_input["protected_failure_rate"]
+                    ),
                 )
             )
             result["model_risk"] = {
@@ -569,21 +553,29 @@ def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ops_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tools": ["qa.ops.evaluate", "qa.tool_permission.check"],
-            "ops": payload.get("ops_assessment"), "permission": payload.get("permission_check")}
+    return {
+        "tools": ["qa.ops.evaluate", "qa.tool_permission.check"],
+        "ops": payload.get("ops_assessment"),
+        "permission": payload.get("permission_check"),
+    }
 
 
 def _incident_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": "qa.incident.record", "incident": payload.get("incident"),
-            "incident_events": payload.get("incident_events", [])}
+    return {
+        "tool": "qa.incident.record",
+        "incident": payload.get("incident"),
+        "incident_events": payload.get("incident_events", []),
+    }
 
 
 def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     if spec.trigger == "always":
         return True
     if spec.trigger == "when_unsupported_claim_exists":
-        return any(c.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
-                   for c in payload.get("assessment", {}).get("claim_checks", []))
+        return any(
+            c.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
+            for c in payload.get("assessment", {}).get("claim_checks", [])
+        )
     if spec.trigger == "when_audit_input_exists":
         return bool(payload.get("model_risk") or payload.get("internal_audit"))
     if spec.trigger == "when_ops_input_exists":
@@ -610,7 +602,10 @@ def run_employee_workers(
         payload.get("input_hash")
         or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
     )
-    if trace_bridge is None and os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() == "true":
+    if (
+        trace_bridge is None
+        and os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() == "true"
+    ):
         try:
             from audit.worker_trace_bridge import build_default_trace_bridge
 
@@ -624,14 +619,24 @@ def run_employee_workers(
         worker_trace = SkillTrace()
         state = build_worker_graph(
             spec, tools[spec.worker_id], llm, trace=worker_trace
-        ).invoke(
-            {"worker_id": spec.worker_id, "input": payload}
+        ).invoke({"worker_id": spec.worker_id, "input": payload})
+        reports.append(
+            {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": state.get("status", "DEGRADED"),
+                "attempts": state.get("attempts", 0),
+                "output": state.get("output", {}),
+                "error": state.get("error"),
+                "output_contract": spec.output_contract,
+                "input_hash": input_hash,
+                "skills": list(spec.skill_ids),
+                "skill_results": state.get("skill_results", []),
+                "rag_plan": state.get("rag_plan", {}),
+                "trace": state.get("trace_manifest", {}),
+            }
         )
-        reports.append({"worker_id": spec.worker_id, "role": spec.role,
-                        "tools": list(spec.tools), "status": state.get("status", "DEGRADED"),
-                        "attempts": state.get("attempts", 0), "output": state.get("output", {}),
-                        "error": state.get("error"), "output_contract": spec.output_contract,
- "input_hash": input_hash, "skills": list(spec.skill_ids), "skill_results": state.get("skill_results", []), "rag_plan": state.get("rag_plan", {}), "trace": state.get("trace_manifest", {})})
         if trace_bridge is not None:
             try:
                 trace_bridge.record(
@@ -647,9 +652,18 @@ def run_employee_workers(
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
     if trace_errors:
         failed.extend(f"trace:{error}" for error in trace_errors)
-    return {"runtime": {"executor": "LangGraph", "provider": "ollama", "model": _model_name(),
-                         "max_retries": 2, "max_attempts": 3},
-            "workers": reports,
-            "executed": [r["worker_id"] for r in reports if r["status"] == "COMPLETED"],
-            "failed": failed, "not_executed": not_executed, "degraded": bool(failed),
-            "input_hash": input_hash}
+    return {
+        "runtime": {
+            "executor": "LangGraph",
+            "provider": "ollama",
+            "model": _model_name(),
+            "max_retries": 2,
+            "max_attempts": 3,
+        },
+        "workers": reports,
+        "executed": [r["worker_id"] for r in reports if r["status"] == "COMPLETED"],
+        "failed": failed,
+        "not_executed": not_executed,
+        "degraded": bool(failed),
+        "input_hash": input_hash,
+    }

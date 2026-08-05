@@ -24,6 +24,7 @@ tool_permission_check.py/incident_timeline.py/agentic-rag를 감싸는 FastAPI �
 실행: uvicorn app:app --app-dir departments/06-ai-qa-audit/api
 자체 점검: python departments/06-ai-qa-audit/api/app.py
 """
+
 from __future__ import annotations
 
 # Current contract status: qa-check is approved as Evidence QA Gate v1. The
@@ -46,7 +47,9 @@ from pydantic import BaseModel, Field
 _QA_DIR = Path(__file__).resolve().parent.parent
 _EVIDENCE_DIR = _QA_DIR / "evidence"
 _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
-_AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+_AGENTIC_RAG_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+)
 
 
 def _configured_evidence_corpus() -> Path:
@@ -58,6 +61,8 @@ def _configured_evidence_corpus() -> Path:
         if configured
         else _AGENTIC_RAG_DIR / "corpus" / "evidence"
     )
+
+
 for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 from corpus_registry import inspect_policy_corpus
@@ -177,7 +182,9 @@ def _record_risk_event(event: dict) -> None:
     """Risk Decision Event를 QA Audit 수신 이력으로 남긴다."""
 
     if event.get("event_type") != RISK_DECISION_EVENT:
-        raise QaEventBusError(f"QA Consumer가 알 수 없는 Event를 받았습니다: {event.get('event_type')}")
+        raise QaEventBusError(
+            f"QA Consumer가 알 수 없는 Event를 받았습니다: {event.get('event_type')}"
+        )
     if _audit_repository is None:
         raise QaEventBusError("Risk Event를 기록할 DATABASE_URL이 없습니다")
     try:
@@ -190,7 +197,9 @@ def _record_risk_event(event: dict) -> None:
             occurred_at=datetime.fromisoformat(event["occurred_at"]),
         )
     except (KeyError, ValueError) as exc:
-        raise QaEventBusError(f"Risk Event Envelope이 유효하지 않습니다: {exc}") from exc
+        raise QaEventBusError(
+            f"Risk Event Envelope이 유효하지 않습니다: {exc}"
+        ) from exc
 
 
 # --- Request 모델 ------------------------------------------------------------------
@@ -299,7 +308,8 @@ class AgentToolPolicyIn(BaseModel):
 
     def to_policy(self) -> AgentToolPolicy:
         return AgentToolPolicy(
-            agent_id=self.agent_id, profile_version_id=self.profile_version_id,
+            agent_id=self.agent_id,
+            profile_version_id=self.profile_version_id,
             allowed_tools=frozenset(self.allowed_tools),
         )
 
@@ -371,7 +381,12 @@ evidence_store = EvidenceStore()  # rag-librarian-evidence-curator 실연동 전
 def _on_trace_recorder_error(request, exc: TraceRecorderError):
     return JSONResponse(
         status_code=409,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -379,7 +394,12 @@ def _on_trace_recorder_error(request, exc: TraceRecorderError):
 def _on_incident_timeline_error(request, exc: IncidentTimelineError):
     return JSONResponse(
         status_code=409,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -389,8 +409,10 @@ def _on_validation_error(request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
         content={
-            "error_code": "RequestValidationError", "message": "요청 스키마 검증 실패",
-            "detail": {"errors": jsonable_encoder(exc.errors())}, "trace_id": None,
+            "error_code": "RequestValidationError",
+            "message": "요청 스키마 검증 실패",
+            "detail": {"errors": jsonable_encoder(exc.errors())},
+            "trace_id": None,
         },
     )
 
@@ -399,7 +421,12 @@ def _on_validation_error(request, exc: RequestValidationError):
 def _on_qa_persistence_error(request, exc: QaDecisionPersistenceError):
     return JSONResponse(
         status_code=503,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -407,7 +434,12 @@ def _on_qa_persistence_error(request, exc: QaDecisionPersistenceError):
 def _on_qa_event_bus_error(request, exc: QaEventBusError):
     return JSONResponse(
         status_code=503,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -418,7 +450,9 @@ def _qa_check_contract_is_approved() -> bool:
         return True
     if runtime != "production":
         return False
-    return os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
+    return (
+        os.environ.get("QA_CHECK_CONTRACT_APPROVED", "false").strip().lower() == "true"
+    )
 
 
 def _require_service_token(
@@ -463,7 +497,9 @@ def model_risk_evaluate(body: ModelRiskCheckRequest):
 
 @app.post("/qa/v1/internal-audit/evaluate")
 def internal_audit_evaluate(body: InternalAuditCheckRequest):
-    result = InternalAuditEngine().evaluate(events=body.events, expected_department=body.expected_department)
+    result = InternalAuditEngine().evaluate(
+        events=body.events, expected_department=body.expected_department
+    )
     return {
         "decision": result.decision.value,
         "findings": list(result.findings),
@@ -482,7 +518,9 @@ def qa_check(case_id: str, body: QaCheckRequest):
                 "message": "상위 서비스 계약 승인 전에는 production qa-check를 활성화할 수 없습니다",
             },
         )
-    ctx = QaContext(evidence_store=evidence_store, decision_time=body.context.decision_time)
+    ctx = QaContext(
+        evidence_store=evidence_store, decision_time=body.context.decision_time
+    )
     assessment = evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
     _persist_qa_decision(assessment)
     return assessment
@@ -532,8 +570,13 @@ def ops_evaluate(body: OpsEvaluateRequest):
 @app.post("/qa/v1/runs")
 def start_run(body: StartRunRequest):
     return recorder.start_run(
-        body.trace_id, body.agent_id, body.profile_version_id, body.input_hash,
-        case_id=body.case_id, fund_id=body.fund_id, model_id=body.model_id,
+        body.trace_id,
+        body.agent_id,
+        body.profile_version_id,
+        body.input_hash,
+        case_id=body.case_id,
+        fund_id=body.fund_id,
+        model_id=body.model_id,
     )
 
 
@@ -541,8 +584,11 @@ def start_run(body: StartRunRequest):
 def complete_run(agent_run_id: UUID, body: CompleteRunRequest | None = None):
     body = body or CompleteRunRequest()
     return recorder.complete_run(
-        agent_run_id, output_artifact_version_id=body.output_artifact_version_id,
-        token_usage=body.token_usage, cost=body.cost, trace_uri=body.trace_uri,
+        agent_run_id,
+        output_artifact_version_id=body.output_artifact_version_id,
+        token_usage=body.token_usage,
+        cost=body.cost,
+        trace_uri=body.trace_uri,
     )
 
 
@@ -564,7 +610,11 @@ def cancel_run(agent_run_id: UUID):
 @app.post("/qa/v1/runs/{agent_run_id}/tool-calls")
 def record_tool_call(agent_run_id: UUID, body: RecordToolCallRequest):
     return recorder.record_tool_call(
-        agent_run_id, body.tool_name, body.scope, body.input_hash, policy_version=body.policy_version,
+        agent_run_id,
+        body.tool_name,
+        body.scope,
+        body.input_hash,
+        policy_version=body.policy_version,
     )
 
 
@@ -599,7 +649,12 @@ def tool_permission_check(body: ToolPermissionCheckRequest):
 @app.post("/qa/v1/runs/{agent_run_id}/tool-calls:checked")
 def record_and_check(agent_run_id: UUID, body: RecordAndCheckToolCallRequest):
     return record_and_check_tool_call(
-        recorder, agent_run_id, body.policy.to_policy(), body.tool_name, body.scope, body.input_hash,
+        recorder,
+        agent_run_id,
+        body.policy.to_policy(),
+        body.tool_name,
+        body.scope,
+        body.input_hash,
     )
 
 
@@ -614,7 +669,12 @@ def unauthorized_count():
 @app.post("/qa/v1/incidents/{incident_id}/events")
 def add_event(incident_id: UUID, body: AddEventRequest):
     return timeline.add_event(
-        incident_id, body.source, body.entry_type, body.summary, body.occurred_at, body.recorded_by,
+        incident_id,
+        body.source,
+        body.entry_type,
+        body.summary,
+        body.occurred_at,
+        body.recorded_by,
         evidence=body.evidence,
     )
 
@@ -627,7 +687,11 @@ def get_timeline(incident_id: UUID):
 @app.post("/qa/v1/corrective-actions")
 def open_corrective_action(body: OpenCorrectiveActionRequest):
     return timeline.open_corrective_action(
-        body.owner, body.action_plan, body.due_at, incident_id=body.incident_id, finding_id=body.finding_id,
+        body.owner,
+        body.action_plan,
+        body.due_at,
+        incident_id=body.incident_id,
+        finding_id=body.finding_id,
     )
 
 
@@ -643,7 +707,8 @@ def submit_for_verification(corrective_action_id: UUID):
 
 @app.post("/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close")
 def verify_and_close(
-    corrective_action_id: UUID, body: VerifyAndCloseRequest,
+    corrective_action_id: UUID,
+    body: VerifyAndCloseRequest,
     authorization: str | None = Header(default=None),
 ):
     # API 레이어에서 서명된 Service Token의 sub와 verifier를 일치시킨다.
@@ -652,7 +717,9 @@ def verify_and_close(
         required_scope="qa.corrective_action.close",
         expected_subject=body.verifier,
     )
-    return timeline.verify_and_close(corrective_action_id, body.verifier, body.verification)
+    return timeline.verify_and_close(
+        corrective_action_id, body.verifier, body.verification
+    )
 
 
 @app.post("/qa/v1/corrective-actions/{corrective_action_id}/cancel")
@@ -730,9 +797,13 @@ if __name__ == "__main__":
     # --- 3.1 qa-check: evidence_store에 근거를 미리 심어두고 두 시나리오 확인 ---------------
     ev_id = uuid4()
     evidence_store.chunks[ev_id] = EvidenceChunk(
-        evidence_id=ev_id, source="research-api", published_at=now - timedelta(hours=1),
-        observed_at=now - timedelta(hours=1), excerpt="근거 원문",
-        numeric_value=Decimal(70000), unit="KRW",
+        evidence_id=ev_id,
+        source="research-api",
+        published_at=now - timedelta(hours=1),
+        observed_at=now - timedelta(hours=1),
+        excerpt="근거 원문",
+        numeric_value=Decimal(70000),
+        unit="KRW",
     )
     fund, trace, artifact_id = uuid4(), uuid4(), uuid4()
 
@@ -740,12 +811,22 @@ if __name__ == "__main__":
         "/investment-cases/case-1/qa-check",
         json={
             "artifact": {
-                "artifact_version_id": str(artifact_id), "artifact_type": "research_packet",
-                "producer": "research-supervisor", "fund_id": str(fund), "trace_id": str(trace),
-                "claims": [{
-                    "claim_index": 0, "text": "AAPL 종가는 70000원", "kind": "fact", "subject": "AAPL",
-                    "numeric_value": "70000", "unit": "KRW", "evidence_ids": [str(ev_id)],
-                }],
+                "artifact_version_id": str(artifact_id),
+                "artifact_type": "research_packet",
+                "producer": "research-supervisor",
+                "fund_id": str(fund),
+                "trace_id": str(trace),
+                "claims": [
+                    {
+                        "claim_index": 0,
+                        "text": "AAPL 종가는 70000원",
+                        "kind": "fact",
+                        "subject": "AAPL",
+                        "numeric_value": "70000",
+                        "unit": "KRW",
+                        "evidence_ids": [str(ev_id)],
+                    }
+                ],
             },
             "context": {"decision_time": now.isoformat()},
         },
@@ -757,9 +838,19 @@ if __name__ == "__main__":
         "/investment-cases/case-1/qa-check",
         json={
             "artifact": {
-                "artifact_version_id": str(uuid4()), "artifact_type": "research_packet",
-                "producer": "research-supervisor", "fund_id": str(fund), "trace_id": str(trace),
-                "claims": [{"claim_index": 0, "text": "AAPL은 반등한다", "kind": "fact", "subject": "AAPL"}],
+                "artifact_version_id": str(uuid4()),
+                "artifact_type": "research_packet",
+                "producer": "research-supervisor",
+                "fund_id": str(fund),
+                "trace_id": str(trace),
+                "claims": [
+                    {
+                        "claim_index": 0,
+                        "text": "AAPL은 반등한다",
+                        "kind": "fact",
+                        "subject": "AAPL",
+                    }
+                ],
             },
             "context": {"decision_time": now.isoformat()},
         },
@@ -770,13 +861,20 @@ if __name__ == "__main__":
     # --- 3.2 ops/evaluate --------------------------------------------------------------
     ops_body = {
         "metrics": {
-            "scope": "research-department", "window_start": (now - timedelta(minutes=5)).isoformat(),
-            "window_end": now.isoformat(), "request_count": 1000, "error_count": 150,
-            "p95_latency_ms": "800", "cost_usd": "2.5",
+            "scope": "research-department",
+            "window_start": (now - timedelta(minutes=5)).isoformat(),
+            "window_end": now.isoformat(),
+            "request_count": 1000,
+            "error_count": 150,
+            "p95_latency_ms": "800",
+            "cost_usd": "2.5",
         },
         "thresholds": {
-            "max_error_rate": "0.02", "critical_error_rate": "0.10", "max_p95_latency_ms": "2000",
-            "critical_p95_latency_ms": "5000", "max_cost_usd_per_window": "10",
+            "max_error_rate": "0.02",
+            "critical_error_rate": "0.10",
+            "max_p95_latency_ms": "2000",
+            "critical_p95_latency_ms": "5000",
+            "max_cost_usd_per_window": "10",
         },
     }
     r3 = client.post("/qa/v1/ops/evaluate", json=ops_body)
@@ -790,55 +888,107 @@ if __name__ == "__main__":
 
     # --- 3.3 Agent/Tool Trace ------------------------------------------------------------
     agent_id, profile_id, trace_id = uuid4(), uuid4(), uuid4()
-    run = client.post("/qa/v1/runs", json={
-        "trace_id": str(trace_id), "agent_id": str(agent_id), "profile_version_id": str(profile_id),
-        "input_hash": "hash_1",
-    }).json()
-    call = client.post(f"/qa/v1/runs/{run['agent_run_id']}/tool-calls", json={
-        "tool_name": "market-api", "scope": {"symbol": "AAPL"}, "input_hash": "call_hash_1",
-    }).json()
+    run = client.post(
+        "/qa/v1/runs",
+        json={
+            "trace_id": str(trace_id),
+            "agent_id": str(agent_id),
+            "profile_version_id": str(profile_id),
+            "input_hash": "hash_1",
+        },
+    ).json()
+    call = client.post(
+        f"/qa/v1/runs/{run['agent_run_id']}/tool-calls",
+        json={
+            "tool_name": "market-api",
+            "scope": {"symbol": "AAPL"},
+            "input_hash": "call_hash_1",
+        },
+    ).json()
     client.post(f"/qa/v1/tool-calls/{call['tool_call_id']}/allow")
-    client.post(f"/qa/v1/tool-calls/{call['tool_call_id']}/complete", json={"output_hash": "out_1"})
+    client.post(
+        f"/qa/v1/tool-calls/{call['tool_call_id']}/complete",
+        json={"output_hash": "out_1"},
+    )
     finished = client.post(f"/qa/v1/runs/{run['agent_run_id']}/complete").json()
     assert finished["status"] == "COMPLETED", finished
 
     # --- 3.4 Tool Permission ---------------------------------------------------------------
-    policy = {"agent_id": str(agent_id), "profile_version_id": str(profile_id), "allowed_tools": ["market-api"]}
-    ok_check = client.post("/qa/v1/tool-permission/check", json={"policy": policy, "tool_name": "market-api"}).json()
+    policy = {
+        "agent_id": str(agent_id),
+        "profile_version_id": str(profile_id),
+        "allowed_tools": ["market-api"],
+    }
+    ok_check = client.post(
+        "/qa/v1/tool-permission/check",
+        json={"policy": policy, "tool_name": "market-api"},
+    ).json()
     assert ok_check["result"] == "ALLOWED"
     bad_check = client.post(
-        "/qa/v1/tool-permission/check", json={"policy": policy, "tool_name": "broker-adapter-submit"},
+        "/qa/v1/tool-permission/check",
+        json={"policy": policy, "tool_name": "broker-adapter-submit"},
     ).json()
     assert bad_check["result"] == "DENIED"
-    run2 = client.post("/qa/v1/runs", json={
-        "trace_id": str(trace_id), "agent_id": str(agent_id), "profile_version_id": str(profile_id),
-        "input_hash": "hash_2",
-    }).json()
-    denied_call = client.post(f"/qa/v1/runs/{run2['agent_run_id']}/tool-calls:checked", json={
-        "policy": policy, "tool_name": "broker-adapter-submit", "scope": {}, "input_hash": "call_hash_2",
-    }).json()
+    run2 = client.post(
+        "/qa/v1/runs",
+        json={
+            "trace_id": str(trace_id),
+            "agent_id": str(agent_id),
+            "profile_version_id": str(profile_id),
+            "input_hash": "hash_2",
+        },
+    ).json()
+    denied_call = client.post(
+        f"/qa/v1/runs/{run2['agent_run_id']}/tool-calls:checked",
+        json={
+            "policy": policy,
+            "tool_name": "broker-adapter-submit",
+            "scope": {},
+            "input_hash": "call_hash_2",
+        },
+    ).json()
     assert denied_call["status"] == "DENIED"
     count = client.get("/qa/v1/tool-calls/unauthorized-count").json()["count"]
     assert count == 1, count
 
     # --- 3.5 Incident/Corrective Action -----------------------------------------------------
     incident_id, finding_id = uuid4(), uuid4()
-    client.post(f"/qa/v1/incidents/{incident_id}/events", json={
-        "source": "agent-ops-monitor", "entry_type": "FACT", "summary": "에러율 15% 관측",
-        "occurred_at": now.isoformat(), "recorded_by": "svc_audit_collector",
-    })
-    client.post(f"/qa/v1/incidents/{incident_id}/events", json={
-        "source": "incident-postmortem-agent", "entry_type": "INFERENCE",
-        "summary": "market-api 지연이 원인으로 추정", "occurred_at": now.isoformat(),
-        "recorded_by": "svc_audit_collector",
-    })
+    client.post(
+        f"/qa/v1/incidents/{incident_id}/events",
+        json={
+            "source": "agent-ops-monitor",
+            "entry_type": "FACT",
+            "summary": "에러율 15% 관측",
+            "occurred_at": now.isoformat(),
+            "recorded_by": "svc_audit_collector",
+        },
+    )
+    client.post(
+        f"/qa/v1/incidents/{incident_id}/events",
+        json={
+            "source": "incident-postmortem-agent",
+            "entry_type": "INFERENCE",
+            "summary": "market-api 지연이 원인으로 추정",
+            "occurred_at": now.isoformat(),
+            "recorded_by": "svc_audit_collector",
+        },
+    )
     tl = client.get(f"/qa/v1/incidents/{incident_id}/timeline").json()
-    assert len(tl) == 2 and tl[0]["entry_type"] == "FACT" and tl[1]["entry_type"] == "INFERENCE"
+    assert (
+        len(tl) == 2
+        and tl[0]["entry_type"] == "FACT"
+        and tl[1]["entry_type"] == "INFERENCE"
+    )
 
-    action = client.post("/qa/v1/corrective-actions", json={
-        "owner": "research-department", "action_plan": {"plan": "타임아웃 값 상향"},
-        "due_at": (now + timedelta(days=3)).isoformat(), "incident_id": str(incident_id),
-    }).json()
+    action = client.post(
+        "/qa/v1/corrective-actions",
+        json={
+            "owner": "research-department",
+            "action_plan": {"plan": "타임아웃 값 상향"},
+            "due_at": (now + timedelta(days=3)).isoformat(),
+            "incident_id": str(incident_id),
+        },
+    ).json()
     action_id = action["corrective_action_id"]
     client.post(f"/qa/v1/corrective-actions/{action_id}/start")
     client.post(f"/qa/v1/corrective-actions/{action_id}/submit-for-verification")

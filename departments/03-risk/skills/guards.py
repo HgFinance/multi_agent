@@ -28,7 +28,11 @@ def build_context(
     # Worker Registry scopes are trusted.  Payload scopes remain available for
     # direct Skill tests, but a compiled Worker must pass its registry scopes
     # explicitly so a missing payload field cannot widen access.
-    raw_scopes = allowed_scopes if allowed_scopes is not None else payload.get("allowed_scopes", ())
+    raw_scopes = (
+        allowed_scopes
+        if allowed_scopes is not None
+        else payload.get("allowed_scopes", ())
+    )
     if isinstance(raw_scopes, str):
         raw_scopes = (raw_scopes,)
     if not isinstance(raw_scopes, (list, tuple, set)):
@@ -36,7 +40,9 @@ def build_context(
 
     return RiskSkillContext(
         trace_id=str(payload.get("trace_id") or f"local:{hash_payload(payload)[:16]}"),
-        case_id=(str(payload["case_id"]) if payload.get("case_id") is not None else None),
+        case_id=(
+            str(payload["case_id"]) if payload.get("case_id") is not None else None
+        ),
         worker_id=worker_id,
         profile_version=profile_version,
         as_of=payload.get("as_of") or datetime.now(timezone.utc),
@@ -52,7 +58,11 @@ def scope_check(
 ) -> RiskSkillResult:
     """Allow only an explicitly granted scope when scopes are supplied."""
 
-    if not requested_scope or not context.allowed_scopes or requested_scope not in context.allowed_scopes:
+    if (
+        not requested_scope
+        or not context.allowed_scopes
+        or requested_scope not in context.allowed_scopes
+    ):
         return make_result(
             "guard.scope_check.v1",
             "ESCALATE",
@@ -60,9 +70,7 @@ def scope_check(
             error_code="SCOPE_DENIED",
             escalate=True,
         )
-    return make_result(
-        "guard.scope_check.v1", "COMPLETED", {"scope": requested_scope}
-    )
+    return make_result("guard.scope_check.v1", "COMPLETED", {"scope": requested_scope})
 
 
 def freshness_check(

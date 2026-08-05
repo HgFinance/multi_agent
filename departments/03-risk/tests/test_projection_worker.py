@@ -18,7 +18,9 @@ from risk_events.projection_worker import (
 
 
 class _Redis:
-    def __init__(self, messages: list[tuple[str, list[tuple[str, dict[str, str]]]]]) -> None:
+    def __init__(
+        self, messages: list[tuple[str, list[tuple[str, dict[str, str]]]]]
+    ) -> None:
         self.messages = messages
         self.acks: list[tuple[str, str, str]] = []
 

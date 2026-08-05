@@ -29,6 +29,7 @@
 이 모듈은 live DB를 요구하므로 __main__ 자체 점검이 없다(F19 repository.py와 같은 이유).
 검증은 tests/에서 DATABASE_URL이 있을 때만 도는 통합 테스트로 한다.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -49,6 +50,7 @@ def _load_postgres_driver() -> tuple[Any, Any]:
     try:
         from psycopg2.extras import Json, register_uuid
         from psycopg2.pool import ThreadedConnectionPool
+
         register_uuid()
     except ModuleNotFoundError as exc:
         raise QaDecisionPersistenceError(
@@ -71,7 +73,9 @@ class PostgresAuditRepository:
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str, *, minconn: int = 1, maxconn: int = 4) -> PostgresAuditRepository:
+    def connect(
+        cls, dsn: str, *, minconn: int = 1, maxconn: int = 4
+    ) -> PostgresAuditRepository:
         _, ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
 
@@ -205,7 +209,9 @@ class PostgresAuditRepository:
             conn.commit()
         except Exception as exc:
             conn.rollback()
-            raise QaDecisionPersistenceError(f"Canonical QA Decision 기록 실패: {exc}") from exc
+            raise QaDecisionPersistenceError(
+                f"Canonical QA Decision 기록 실패: {exc}"
+            ) from exc
         finally:
             self._pool.putconn(conn)
 
@@ -219,8 +225,18 @@ class PostgresAuditRepository:
                model_id, input_hash, started_at, status)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (run.agent_run_id, run.trace_id, run.case_id, run.fund_id, run.agent_id,
-             run.profile_version_id, run.model_id, run.input_hash, run.started_at, run.status.value),
+            (
+                run.agent_run_id,
+                run.trace_id,
+                run.case_id,
+                run.fund_id,
+                run.agent_id,
+                run.profile_version_id,
+                run.model_id,
+                run.input_hash,
+                run.started_at,
+                run.status.value,
+            ),
         )
 
     def update_run_terminal(self, run: AgentRunRecord) -> None:
@@ -231,8 +247,16 @@ class PostgresAuditRepository:
                 output_artifact_version_id = %s, trace_uri = %s
             where agent_run_id = %s
             """,
-            (run.status.value, run.ended_at, run.error_code, _json_param(run.token_usage), _json_param(run.cost),
-             run.output_artifact_version_id, run.trace_uri, run.agent_run_id),
+            (
+                run.status.value,
+                run.ended_at,
+                run.error_code,
+                _json_param(run.token_usage),
+                _json_param(run.cost),
+                run.output_artifact_version_id,
+                run.trace_uri,
+                run.agent_run_id,
+            ),
         )
 
     # -- audit.tool_calls (append-only - 종결 상태 1행만 insert) -----------------------
@@ -245,9 +269,22 @@ class PostgresAuditRepository:
                status, policy_version, latency_ms, error_code, occurred_at, completed_at, metadata)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (call.tool_call_id, call.agent_run_id, call.trace_id, call.tool_name, _json_param(call.scope),
-             call.input_hash, call.output_hash, call.status.value, call.policy_version, call.latency_ms,
-             call.error_code, call.occurred_at, call.completed_at, _json_param(call.metadata)),
+            (
+                call.tool_call_id,
+                call.agent_run_id,
+                call.trace_id,
+                call.tool_name,
+                _json_param(call.scope),
+                call.input_hash,
+                call.output_hash,
+                call.status.value,
+                call.policy_version,
+                call.latency_ms,
+                call.error_code,
+                call.occurred_at,
+                call.completed_at,
+                _json_param(call.metadata),
+            ),
         )
 
     # -- audit.incident_events (append-only) --------------------------------------
@@ -260,8 +297,17 @@ class PostgresAuditRepository:
                occurred_at, recorded_at, recorded_by)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (event.incident_event_id, event.incident_id, event.source, event.entry_type.value,
-             event.summary, _json_param(event.evidence), event.occurred_at, event.recorded_at, event.recorded_by),
+            (
+                event.incident_event_id,
+                event.incident_id,
+                event.source,
+                event.entry_type.value,
+                event.summary,
+                _json_param(event.evidence),
+                event.occurred_at,
+                event.recorded_at,
+                event.recorded_by,
+            ),
         )
 
     # -- audit.corrective_actions --------------------------------------------------
@@ -274,8 +320,16 @@ class PostgresAuditRepository:
                status, created_at)
             values (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (action.corrective_action_id, action.incident_id, action.finding_id, action.owner,
-             _json_param(action.action_plan), action.due_at, action.status.value, action.created_at),
+            (
+                action.corrective_action_id,
+                action.incident_id,
+                action.finding_id,
+                action.owner,
+                _json_param(action.action_plan),
+                action.due_at,
+                action.status.value,
+                action.created_at,
+            ),
         )
 
     def update_corrective_action(self, action: CorrectiveActionRecord) -> None:
@@ -285,8 +339,15 @@ class PostgresAuditRepository:
         set status = %s, verification = %s, verifier = %s, completed_at = %s
         where corrective_action_id = %s
             """,
-            (action.status.value, _json_param(action.verification) if action.verification is not None else None,
-             action.verifier, action.completed_at, action.corrective_action_id),
+            (
+                action.status.value,
+                _json_param(action.verification)
+                if action.verification is not None
+                else None,
+                action.verifier,
+                action.completed_at,
+                action.corrective_action_id,
+            ),
         )
 
     def _ensure_incident_parent(

@@ -85,7 +85,9 @@ def _database_dsn(environ: Mapping[str, str]) -> tuple[str, str]:
     return "", ""
 
 
-def _check(name: str, status: str, *, reason: str | None = None, **details: Any) -> dict[str, Any]:
+def _check(
+    name: str, status: str, *, reason: str | None = None, **details: Any
+) -> dict[str, Any]:
     result: dict[str, Any] = {"name": name, "status": status}
     if reason:
         result["reason"] = reason
@@ -95,7 +97,9 @@ def _check(name: str, status: str, *, reason: str | None = None, **details: Any)
 
 def _policy_corpus(environ: Mapping[str, str]) -> Path:
     configured = environ.get("QA_POLICY_CORPUS_DIR", "").strip()
-    return Path(configured).expanduser().resolve() if configured else DEFAULT_POLICY_CORPUS
+    return (
+        Path(configured).expanduser().resolve() if configured else DEFAULT_POLICY_CORPUS
+    )
 
 
 def _check_policy_corpus(environ: Mapping[str, str]) -> dict[str, Any]:
@@ -177,6 +181,34 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
             configured=redis_configured,
         )
     )
+    event_redis_name = (
+        "RISK_QA_EVENT_REDIS_URL"
+        if _present(environ, "RISK_QA_EVENT_REDIS_URL")
+        else "REDIS_URL"
+    )
+    event_redis_configured = _present(environ, event_redis_name)
+    checks.append(
+        _check(
+            "RISK_QA_EVENT_REDIS_URL",
+            "PASS" if event_redis_configured else "FAIL",
+            reason=None
+            if event_redis_configured
+            else "RISK_QA_EVENT_REDIS_URL_REQUIRED",
+            configured=event_redis_configured,
+            configured_env=event_redis_name if event_redis_configured else None,
+        )
+    )
+    packet_url_configured = _present(environ, "RISK_QA_RESEARCH_PACKET_URL")
+    checks.append(
+        _check(
+            "RISK_QA_RESEARCH_PACKET_URL",
+            "PASS" if packet_url_configured else "FAIL",
+            reason=None
+            if packet_url_configured
+            else "RISK_QA_RESEARCH_PACKET_URL_REQUIRED",
+            configured=packet_url_configured,
+        )
+    )
 
     expected = {
         "RISK_QA_RUNTIME": "production",
@@ -204,7 +236,9 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
             _check(
                 name,
                 "PASS" if actual == expected_value else "FAIL",
-                reason=None if actual == expected_value else f"EXPECTED_{expected_value.upper()}",
+                reason=None
+                if actual == expected_value
+                else f"EXPECTED_{expected_value.upper()}",
                 configured=bool(actual),
             )
         )
@@ -216,7 +250,9 @@ def _load_psycopg2() -> Any:
     try:
         import psycopg2
     except ImportError as exc:  # pragma: no cover - depends on deployment image
-        raise RuntimeError("psycopg2-binary is required for production preflight") from exc
+        raise RuntimeError(
+            "psycopg2-binary is required for production preflight"
+        ) from exc
     return psycopg2
 
 
@@ -234,7 +270,9 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             cur.execute("SELECT current_setting('transaction_read_only')")
             read_only = str(cur.fetchone()[0]).lower() in {"on", "true", "1"}
             if not read_only:
-                return _check("postgres", "FAIL", reason="READ_ONLY_TRANSACTION_NOT_CONFIRMED")
+                return _check(
+                    "postgres", "FAIL", reason="READ_ONLY_TRANSACTION_NOT_CONFIRMED"
+                )
 
             missing: list[str] = []
             for schema, table in REQUIRED_TABLES:
@@ -350,7 +388,9 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             "qa_policy_source_authorized": 1,
         }
         data_failures = [
-            name for name, minimum in data_requirements.items() if data_counts[name] < minimum
+            name
+            for name, minimum in data_requirements.items()
+            if data_counts[name] < minimum
         ]
         if data_failures:
             return _check(
@@ -390,12 +430,16 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
     try:
         import redis
 
-        client = redis.Redis.from_url(redis_url, socket_connect_timeout=5, socket_timeout=5)
+        client = redis.Redis.from_url(
+            redis_url, socket_connect_timeout=5, socket_timeout=5
+        )
         client.ping()
         client.close()
         return _check("redis", "PASS", probe="PING_ONLY", external_writes=False)
     except Exception as exc:  # noqa: BLE001 - preflight returns sanitized class only
-        return _check("redis", "FAIL", reason=f"REDIS_PROBE_FAILED:{type(exc).__name__}")
+        return _check(
+            "redis", "FAIL", reason=f"REDIS_PROBE_FAILED:{type(exc).__name__}"
+        )
 
 
 def run_preflight(
@@ -421,7 +465,9 @@ def run_preflight(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Risk/QA Production readiness preflight")
+    parser = argparse.ArgumentParser(
+        description="Risk/QA Production readiness preflight"
+    )
     parser.add_argument("--as-of", required=True, help="PIT cutoff in ISO-8601 format")
     return parser
 

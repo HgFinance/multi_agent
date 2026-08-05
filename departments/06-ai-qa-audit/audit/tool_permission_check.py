@@ -15,6 +15,7 @@ EvidenceStore와 같은 패턴이다.
 
 자체 점검: python departments/06-ai-qa-audit/audit/tool_permission_check.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -47,7 +48,9 @@ class ToolPermissionCheck:
     reason: str
 
 
-def check_tool_permission(policy: AgentToolPolicy, tool_name: str) -> ToolPermissionCheck:
+def check_tool_permission(
+    policy: AgentToolPolicy, tool_name: str
+) -> ToolPermissionCheck:
     """Allowlist 소속 여부만 본다 - 애매하면 판단하는 게 아니라 집합에 없으면 그냥 거부다."""
     if tool_name in policy.allowed_tools:
         return ToolPermissionCheck(ToolPermissionResult.ALLOWED, "")
@@ -89,7 +92,8 @@ if __name__ == "__main__":
     run = recorder.start_run(trace, agent, profile, "hash_perm_1", started_at=now)
 
     policy = AgentToolPolicy(
-        agent_id=agent, profile_version_id=profile,
+        agent_id=agent,
+        profile_version_id=profile,
         allowed_tools=frozenset({"market-api", "portfolio-api"}),
     )
 
@@ -105,14 +109,26 @@ if __name__ == "__main__":
 
     # 3. 통합 - 허용된 Tool은 기록되면서 ALLOWED 상태가 된다
     allowed_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "market-api", {"symbol": "AAPL"}, "call_h1",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "market-api",
+        {"symbol": "AAPL"},
+        "call_h1",
     )
     assert allowed_call.status is ToolCallStatus.ALLOWED
-    assert not allowed_call.is_terminal, "ALLOWED는 아직 완료 전이라 종결 상태가 아니어야 함"
+    assert not allowed_call.is_terminal, (
+        "ALLOWED는 아직 완료 전이라 종결 상태가 아니어야 함"
+    )
 
     # 4. 통합 - 금지된 Tool은 기록되면서 곧바로 DENIED(종결)로 끝난다
     denied_call = record_and_check_tool_call(
-        recorder, run.agent_run_id, policy, "broker-adapter-submit", {}, "call_h2",
+        recorder,
+        run.agent_run_id,
+        policy,
+        "broker-adapter-submit",
+        {},
+        "call_h2",
     )
     assert denied_call.status is ToolCallStatus.DENIED
     assert denied_call.is_terminal, "DENIED는 종결 상태여야 함"

@@ -73,7 +73,7 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 | qa-api | ready | 29 | Production blocked |
 | workforce-api | ready | 17 | Test implementation |
 | governance-api | ready | 19 | Test implementation |
-| operator-bff | ready | 5 | Projection/Test |
+| operator-bff | ready | 21 | Projection/Test |
 | Research Workflow, Quant, Accounting, MSU Case | planned | 0 | Planned |
 
 현재 Registry에는 ready 앱의 112개 actual operation과 55개 planned operation이 분리되어 있다. Quant와 Accounting의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다.
@@ -378,7 +378,17 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 사용해 연결됨·미설정·OAuth 대기 상태를 표시하며, 외부 발행은 별도 Worker의 명시적 사용자
 동작으로 제한한다.
 
-### 10.4 BFF 유니버스·자유 질의 라우팅
+### 10.4 BFF Agent Status·Domain Projection·안전 Command
+
+`agent.status.v1`은 BFF 내부의 Status Projector가 sequence를 부여해 `/ui/snapshot`의 `operations.agent_statuses`와 `/ws/operations`로 투영한다. WebSocket이 끊기거나 sequence gap이 감지되면 브라우저는 이벤트를 추측하지 않고 `/ui/snapshot`을 다시 읽는다.
+
+대시보드 전용 Domain Read Model은 `/ui/research`, `/ui/strategy`, `/ui/risk`, `/ui/qa`, `/ui/risk-qa`에서 제공한다. 실제 runtime event가 관찰되지 않은 domain은 `DEGRADED`로 남으며 registry metadata를 실행 상태로 표시하지 않는다.
+
+투자 본부 Agent 질의는 `/research/agent/ask`, `/trading/agent/ask`, `/risk/agent/ask`, `/quant/agent/ask`, `/accounting/agent/ask`, `/qa/agent/ask`에 부서별 Profile을 고정한다. `ENABLE_AGENT_ASK`가 꺼진 기본 환경에서는 모두 503이며, 요청 본문의 department로 임의 라우팅하지 않는다.
+
+`POST /ui/commands/trading-state`는 `idempotency_key`·`expected_version`·Audit Event를 검증하는 승인 요청 접수 계약이다. 현재 BFF는 `PENDING_APPROVAL`과 `NOT_EXECUTED`만 반환하고 OMS·Risk Engine·Broker·Ledger를 변경하지 않는다.
+
+### 10.5 BFF 유니버스·자유 질의 라우팅
 
 `GET /ui/portfolio-universes`는 프론트가 종목 목록을 직접 하드코딩하지 않도록 백엔드가 소유한 선택 가능한 투자 유니버스 메타데이터를 반환한다. 현재 국내 Research Watchlist를 포함한 국내·글로벌 혼합 유니버스는 `TEST` 상태이며, 근거 없는 예상 수익률을 임의로 채우지 않는다.
 

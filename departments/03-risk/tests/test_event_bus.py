@@ -45,7 +45,9 @@ def test_publisher_emits_versioned_event():
     client = RecordingRedis()
     publisher = RedisEventPublisher(client)
     event_id = uuid4()
-    publisher.publish(event_id=event_id, trace_id=uuid4(), payload={"decision": "REJECT"})
+    publisher.publish(
+        event_id=event_id, trace_id=uuid4(), payload={"decision": "REJECT"}
+    )
     assert client.calls[0][0] == "risk-qa-events"
     assert client.calls[0][1]["event_type"] == "risk.decision.v1"
     assert client.calls[0][1]["event_id"] == str(event_id)

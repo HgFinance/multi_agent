@@ -28,7 +28,9 @@ def redis_bus():
     if not redis_url:
         pytest.skip("RISK_QA_EVENT_REDIS_URL or REDIS_URL is not configured")
 
-    client = redis.Redis.from_url(redis_url, socket_connect_timeout=2, decode_responses=True)
+    client = redis.Redis.from_url(
+        redis_url, socket_connect_timeout=2, decode_responses=True
+    )
     try:
         client.ping()
     except redis.RedisError as exc:
@@ -87,7 +89,9 @@ def test_real_redis_pending_event_is_reclaimed_after_restart(redis_bus):
 
 def test_real_redis_rag_cache_round_trip_has_ttl(redis_bus):
     client, _stream, _group = redis_bus
-    cache = RedisJsonCache(f"risk-qa-rag-integration-{uuid4().hex}", ttl_seconds=60, client=client)
+    cache = RedisJsonCache(
+        f"risk-qa-rag-integration-{uuid4().hex}", ttl_seconds=60, client=client
+    )
     cache.set("prompt-fingerprint", {"decision": "HOLD"})
 
     assert cache.get("prompt-fingerprint") == {"decision": "HOLD"}

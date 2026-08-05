@@ -19,6 +19,7 @@ Key 원칙: Redis가 응답하지 않으면 ENABLED로 추정하지 않는다. �
 
 자체 점검: python departments/03-risk/engine/trading_state_store.py (REDIS_URL 필요)
 """
+
 from __future__ import annotations
 
 import json
@@ -52,25 +53,37 @@ class TradingStateRecord:
 class RedisTradingStateStore:
     """scope(예: "fund:<uuid>", "book:<uuid>")별 현재 Trading State를 Redis에 유지한다."""
 
-    def __init__(self, client: redis.Redis, key_prefix: str = DEFAULT_KEY_PREFIX) -> None:
+    def __init__(
+        self, client: redis.Redis, key_prefix: str = DEFAULT_KEY_PREFIX
+    ) -> None:
         self._client = client
         self._key_prefix = key_prefix
 
     def _key(self, scope: str) -> str:
         return f"{self._key_prefix}{scope}"
 
-    def set_state(self, scope: str, state: TradingState, reason: str, set_by: str) -> TradingStateRecord:
-        record = TradingStateRecord(state=state, reason=reason, set_by=set_by, set_at=_now())
-        payload = json.dumps({
-            "state": record.state.value, "reason": record.reason,
-            "set_by": record.set_by, "set_at": record.set_at.isoformat(),
-        })
+    def set_state(
+        self, scope: str, state: TradingState, reason: str, set_by: str
+    ) -> TradingStateRecord:
+        record = TradingStateRecord(
+            state=state, reason=reason, set_by=set_by, set_at=_now()
+        )
+        payload = json.dumps(
+            {
+                "state": record.state.value,
+                "reason": record.reason,
+                "set_by": record.set_by,
+                "set_at": record.set_at.isoformat(),
+            }
+        )
         try:
             # 만료 없이 유지한다 - Trading State는 캐시가 아니라 명시적으로 바뀌기 전까지
             # 계속 유효한 "현재 상태"다.
             self._client.set(self._key(scope), payload)
         except redis.RedisError as e:
-            raise TradingStateStoreError(f"Redis 쓰기 실패 - {scope} 상태가 반영 안 됐을 수 있습니다: {e}") from e
+            raise TradingStateStoreError(
+                f"Redis 쓰기 실패 - {scope} 상태가 반영 안 됐을 수 있습니다: {e}"
+            ) from e
         return record
 
     def get_record(self, scope: str) -> TradingStateRecord | None:
@@ -78,12 +91,16 @@ class RedisTradingStateStore:
         try:
             raw = self._client.get(self._key(scope))
         except redis.RedisError as e:
-            raise TradingStateStoreError(f"Redis 조회 실패 - {scope} 상태를 확인할 수 없습니다: {e}") from e
+            raise TradingStateStoreError(
+                f"Redis 조회 실패 - {scope} 상태를 확인할 수 없습니다: {e}"
+            ) from e
         if raw is None:
             return None
         data = json.loads(raw)
         return TradingStateRecord(
-            state=TradingState(data["state"]), reason=data["reason"], set_by=data["set_by"],
+            state=TradingState(data["state"]),
+            reason=data["reason"],
+            set_by=data["set_by"],
             set_at=datetime.fromisoformat(data["set_at"]),
         )
 
@@ -134,19 +151,30 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
 
     load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / ".env")
-    real_client = redis.Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=8)
+    real_client = redis.Redis.from_url(
+        os.environ["REDIS_URL"], socket_connect_timeout=8
+    )
     assert real_client.ping(), "Redis Cloud에 연결이 안 됩니다"
 
     test_scope = f"test:{uuid4()}"
-    store = RedisTradingStateStore(real_client, key_prefix="hgfinance:selfcheck:trading_state:")
+    store = RedisTradingStateStore(
+        real_client, key_prefix="hgfinance:selfcheck:trading_state:"
+    )
 
     try:
         # 1. 한 번도 안 건드린 scope -> ENABLED
-        assert store.get_state(test_scope) is TradingState.ENABLED, "미설정 상태는 ENABLED여야 함"
+        assert store.get_state(test_scope) is TradingState.ENABLED, (
+            "미설정 상태는 ENABLED여야 함"
+        )
         assert store.get_record(test_scope) is None
 
         # 2. ENTRY_BLOCKED로 설정 -> 그대로 읽힘, 메타데이터도 보존됨
-        store.set_state(test_scope, TradingState.ENTRY_BLOCKED, "일일 손실 한도 근접", "svc_risk_engine")
+        store.set_state(
+            test_scope,
+            TradingState.ENTRY_BLOCKED,
+            "일일 손실 한도 근접",
+            "svc_risk_engine",
+        )
         record = store.get_record(test_scope)
         assert record is not None
         assert record.state is TradingState.ENTRY_BLOCKED
@@ -155,7 +183,9 @@ if __name__ == "__main__":
         assert store.get_state(test_scope) is TradingState.ENTRY_BLOCKED
 
         # 3. 다른 상태로 덮어쓰기 -> 최신 값으로 교체됨 (이력이 아니라 "현재 상태"라서)
-        store.set_state(test_scope, TradingState.HALTED, "Kill Switch 발동", "risk-supervisor")
+        store.set_state(
+            test_scope, TradingState.HALTED, "Kill Switch 발동", "risk-supervisor"
+        )
         assert store.get_state(test_scope) is TradingState.HALTED
 
         # 4. clear -> 다시 미설정(ENABLED)으로 돌아감
@@ -171,8 +201,9 @@ if __name__ == "__main__":
             pass
 
         # 6. Redis 장애 시 get_state_fail_closed는 HALTED로 떨어진다 (예외를 안 올리고 차단)
-        assert broken_store.get_state_fail_closed(test_scope) is TradingState.HALTED, \
+        assert broken_store.get_state_fail_closed(test_scope) is TradingState.HALTED, (
             "Redis 장애를 ENABLED로 잘못 추정하면 안 됨"
+        )
 
         # 7. 쓰기도 장애 시 예외를 올린다 (조용히 무시하지 않음)
         try:
@@ -204,38 +235,69 @@ if __name__ == "__main__":
             RiskVerdict,
         )
 
-        store.set_state(test_scope, TradingState.ENTRY_BLOCKED, "통합 테스트", "selfcheck")
+        store.set_state(
+            test_scope, TradingState.ENTRY_BLOCKED, "통합 테스트", "selfcheck"
+        )
         now = _now()
         fund, book, strategy, aapl = uuid4(), uuid4(), uuid4(), uuid4()
         intent = OrderIntent(
-            trade_case_id=uuid4(), fund_id=fund, book_id=book, strategy_id=strategy,
-            instrument_id=aapl, side=Side.BUY, order_type=OrderType.LIMIT,
-            quantity=Decimal(10), limit_price=Decimal(70000), time_in_force=TimeInForce.DAY,
+            trade_case_id=uuid4(),
+            fund_id=fund,
+            book_id=book,
+            strategy_id=strategy,
+            instrument_id=aapl,
+            side=Side.BUY,
+            order_type=OrderType.LIMIT,
+            quantity=Decimal(10),
+            limit_price=Decimal(70000),
+            time_in_force=TimeInForce.DAY,
             valid_until=now + timedelta(hours=1),
-            snapshot=MarketSnapshot(market_snapshot_id="s1", as_of=now,
-                                    bid=Decimal(69900), ask=Decimal(70000)),
-            idempotency_key="idem_redis_test", created_by="trader-pm-agent",
-            trace_id="t1", created_at=now,
+            snapshot=MarketSnapshot(
+                market_snapshot_id="s1",
+                as_of=now,
+                bid=Decimal(69900),
+                ask=Decimal(70000),
+            ),
+            idempotency_key="idem_redis_test",
+            created_by="trader-pm-agent",
+            trace_id="t1",
+            created_at=now,
         )
         ctx = RiskContext(
-            mandate=MandateScope(fund_id=fund, allowed_instrument_ids=None,
-                                 min_order_notional=Decimal(1000), max_order_notional=Decimal(1000000000)),
-            limits=LimitSet(soft_single_issuer_pct=Decimal("0.5"), hard_single_issuer_pct=Decimal("0.9"),
-                            max_daily_turnover_notional=Decimal(1000000000), max_daily_order_count=1000,
-                            max_daily_loss=Decimal(1000000000), max_drawdown_pct=Decimal("0.9")),
-            restricted_items=(), portfolio=PortfolioState(fund_id=fund, cash=Decimal(1000000000),
-                                                           buying_power=Decimal(1000000000),
-                                                           gross_exposure=Decimal(0),
-                                                           peak_equity=Decimal(1000000000),
-                                                           equity=Decimal(1000000000)),
+            mandate=MandateScope(
+                fund_id=fund,
+                allowed_instrument_ids=None,
+                min_order_notional=Decimal(1000),
+                max_order_notional=Decimal(1000000000),
+            ),
+            limits=LimitSet(
+                soft_single_issuer_pct=Decimal("0.5"),
+                hard_single_issuer_pct=Decimal("0.9"),
+                max_daily_turnover_notional=Decimal(1000000000),
+                max_daily_order_count=1000,
+                max_daily_loss=Decimal(1000000000),
+                max_drawdown_pct=Decimal("0.9"),
+            ),
+            restricted_items=(),
+            portfolio=PortfolioState(
+                fund_id=fund,
+                cash=Decimal(1000000000),
+                buying_power=Decimal(1000000000),
+                gross_exposure=Decimal(0),
+                peak_equity=Decimal(1000000000),
+                equity=Decimal(1000000000),
+            ),
             market_status=MarketStatus(tradable=True),
             counterparty=CounterpartyStatus("paper", CounterpartyHealth.OK),
-            trading_state=store.get_state_fail_closed(test_scope),  # <- Redis에서 실제로 읽음
+            trading_state=store.get_state_fail_closed(
+                test_scope
+            ),  # <- Redis에서 실제로 읽음
             as_of=now,
         )
         assessment = RiskEngine().check_order(intent, ctx)
-        assert assessment.decision.verdict is RiskVerdict.REJECT, \
+        assert assessment.decision.verdict is RiskVerdict.REJECT, (
             "Redis의 ENTRY_BLOCKED 상태가 실제 주문 차단으로 이어져야 함"
+        )
         assert assessment.trading_state is TradingState.ENTRY_BLOCKED
 
         print("ok - Redis Trading State Store 8개 시나리오 점검 통과")

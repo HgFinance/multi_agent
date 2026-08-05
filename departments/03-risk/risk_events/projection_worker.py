@@ -80,7 +80,9 @@ class PostgresRiskProjectionStore:
             self._connection.commit()
         except Exception as exc:
             self._connection.rollback()
-            raise RiskProjectionError("Risk input projection transaction rolled back") from exc
+            raise RiskProjectionError(
+                "Risk input projection transaction rolled back"
+            ) from exc
         finally:
             cursor.close()
 
@@ -117,7 +119,9 @@ class RiskProjectionWorker:
                 self.client.xgroup_create(stream, self.group, id="0-0", mkstream=True)
             except Exception as exc:
                 if "BUSYGROUP" not in str(exc):
-                    raise RiskProjectionError(f"projection group setup failed for {stream}") from exc
+                    raise RiskProjectionError(
+                        f"projection group setup failed for {stream}"
+                    ) from exc
 
     def consume_once(self, *, count: int = 50) -> int:
         self.ensure_groups()
@@ -139,20 +143,30 @@ class RiskProjectionWorker:
         return handled
 
 
-def _parse_event(stream: str, message_id: str, fields: Mapping[Any, Any]) -> RiskProjectionEvent:
+def _parse_event(
+    stream: str, message_id: str, fields: Mapping[Any, Any]
+) -> RiskProjectionEvent:
     normalized = {_as_text(key): _as_text(value) for key, value in fields.items()}
     raw_payload = normalized.get("payload", "{}")
     try:
-        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+        payload = (
+            json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+        )
         event_id = UUID(normalized["event_id"])
         trace_id = UUID(normalized["trace_id"])
         occurred_at = datetime.fromisoformat(normalized["occurred_at"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RiskProjectionError(f"invalid projection event {stream}:{message_id}") from exc
+        raise RiskProjectionError(
+            f"invalid projection event {stream}:{message_id}"
+        ) from exc
     if not isinstance(payload, dict):
-        raise RiskProjectionError(f"projection payload is not an object {stream}:{message_id}")
+        raise RiskProjectionError(
+            f"projection payload is not an object {stream}:{message_id}"
+        )
     if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
-        raise RiskProjectionError(f"projection event timestamp is naive {stream}:{message_id}")
+        raise RiskProjectionError(
+            f"projection event timestamp is naive {stream}:{message_id}"
+        )
     return RiskProjectionEvent(
         message_id=message_id,
         event_id=event_id,
@@ -171,13 +185,17 @@ def run_forever(worker: RiskProjectionWorker, *, interval_seconds: float = 1.0) 
 
 
 def main() -> None:
-    redis_url = os.environ.get("RISK_PROJECTION_REDIS_URL") or os.environ.get("REDIS_URL")
+    redis_url = os.environ.get("RISK_PROJECTION_REDIS_URL") or os.environ.get(
+        "REDIS_URL"
+    )
     database_url = (
         os.environ.get("RISK_QA_DATABASE_URL", "").strip()
         or os.environ.get("DATABASE_URL", "").strip()
     )
     if not redis_url or not database_url:
-        raise SystemExit("RISK_PROJECTION_REDIS_URL/REDIS_URL and DATABASE_URL are required")
+        raise SystemExit(
+            "RISK_PROJECTION_REDIS_URL/REDIS_URL and DATABASE_URL are required"
+        )
     import psycopg2
     import redis
 
@@ -186,7 +204,10 @@ def main() -> None:
             redis.Redis.from_url(redis_url),
             PostgresRiskProjectionStore(connection),
         )
-        run_forever(worker, interval_seconds=float(os.environ.get("RISK_PROJECTION_POLL_SECONDS", "1")))
+        run_forever(
+            worker,
+            interval_seconds=float(os.environ.get("RISK_PROJECTION_POLL_SECONDS", "1")),
+        )
 
 
 if __name__ == "__main__":

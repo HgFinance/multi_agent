@@ -25,7 +25,7 @@ def test_production_ingestion_rejects_placeholder(tmp_path: Path) -> None:
 
 def test_test_ingestion_is_deterministic_and_preserves_metadata(tmp_path: Path) -> None:
     (tmp_path / "policy.md").write_text(
-        "---\ndocument_id: P-1\nlicense_scope: internal\n" \
+        "---\ndocument_id: P-1\nlicense_scope: internal\n"
         "published_at: 2026-01-01T00:00:00Z\n---\n# Policy\n\n## Rule\nUse a limit.\n",
         encoding="utf-8",
     )

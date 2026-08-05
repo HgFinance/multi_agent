@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from departments.risk_qa_testkit.production_preflight import (
+    _check_configuration,
     _database_dsn,
     run_preflight,
 )
@@ -21,10 +22,29 @@ def test_canonical_database_dsn_prefers_supabase_specific_environment() -> None:
     assert dsn == "postgresql://canonical.invalid/app"
 
 
-def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path: Path) -> None:
+def test_production_configuration_requires_event_bus_and_packet_contract() -> None:
+    checks = {item["name"]: item for item in _check_configuration({})}
+
+    assert checks["RISK_QA_EVENT_REDIS_URL"]["status"] == "FAIL"
+    assert (
+        checks["RISK_QA_EVENT_REDIS_URL"]["reason"]
+        == "RISK_QA_EVENT_REDIS_URL_REQUIRED"
+    )
+    assert checks["RISK_QA_RESEARCH_PACKET_URL"]["status"] == "FAIL"
+    assert (
+        checks["RISK_QA_RESEARCH_PACKET_URL"]["reason"]
+        == "RISK_QA_RESEARCH_PACKET_URL_REQUIRED"
+    )
+
+
+def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(
+    tmp_path: Path,
+) -> None:
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir()
-    (policy_dir / "policy.md").write_text("# Real policy\nActual policy text.\n", encoding="utf-8")
+    (policy_dir / "policy.md").write_text(
+        "# Real policy\nActual policy text.\n", encoding="utf-8"
+    )
     secret = "not-a-real-secret-for-test-only"
     environment = {
         "DATABASE_URL": f"postgresql://user:{secret}@db.invalid:5432/app",
@@ -38,15 +58,15 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path:
         "QA_TRACE_PERSIST": "true",
         "QA_INGEST_MODE": "production",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
-            "RISK_CONTEXT_SOURCE": "database",
-            "RISK_BROKER_ADAPTER": "paper",
-            "RISK_SERVICE_AUTH_SECRET": "x" * 32,
-            "RISK_SERVICE_AUTH_ISSUER": "test-issuer",
-            "RISK_SERVICE_AUTH_AUDIENCE": "test-audience",
-            "QA_SERVICE_AUTH_SECRET": "y" * 32,
-            "QA_SERVICE_AUTH_ISSUER": "test-issuer",
-            "QA_SERVICE_AUTH_AUDIENCE": "test-audience",
-        }
+        "RISK_CONTEXT_SOURCE": "database",
+        "RISK_BROKER_ADAPTER": "paper",
+        "RISK_SERVICE_AUTH_SECRET": "x" * 32,
+        "RISK_SERVICE_AUTH_ISSUER": "test-issuer",
+        "RISK_SERVICE_AUTH_AUDIENCE": "test-audience",
+        "QA_SERVICE_AUTH_SECRET": "y" * 32,
+        "QA_SERVICE_AUTH_ISSUER": "test-issuer",
+        "QA_SERVICE_AUTH_AUDIENCE": "test-audience",
+    }
 
     report = run_preflight(environment, as_of="2026-08-04T00:00:00+00:00")
     serialized = json.dumps(report, ensure_ascii=False)
@@ -55,21 +75,35 @@ def test_production_preflight_is_fail_closed_and_does_not_echo_secrets(tmp_path:
     assert report["production_enabled"] is False
     assert report["external_writes"] is False
     assert secret not in serialized
-    assert next(item for item in report["checks"] if item["name"] == "qa_policy_corpus")["status"] == "PASS"
-    assert next(item for item in report["checks"] if item["name"] == "postgres")["reason"].startswith("DATABASE_PROBE_FAILED:")
-    assert next(item for item in report["checks"] if item["name"] == "redis")["status"] == "FAIL"
+    assert (
+        next(item for item in report["checks"] if item["name"] == "qa_policy_corpus")[
+            "status"
+        ]
+        == "PASS"
+    )
+    assert next(item for item in report["checks"] if item["name"] == "postgres")[
+        "reason"
+    ].startswith("DATABASE_PROBE_FAILED:")
+    assert (
+        next(item for item in report["checks"] if item["name"] == "redis")["status"]
+        == "FAIL"
+    )
 
 
 def test_placeholder_policy_corpus_blocks_production(tmp_path: Path) -> None:
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir()
-    (policy_dir / "placeholder.md").write_text("# Policy\nSAMPLE_PLACEHOLDER\n", encoding="utf-8")
+    (policy_dir / "placeholder.md").write_text(
+        "# Policy\nSAMPLE_PLACEHOLDER\n", encoding="utf-8"
+    )
 
     report = run_preflight(
         {"QA_POLICY_CORPUS_DIR": str(policy_dir)},
         as_of="2026-08-04T00:00:00+00:00",
     )
 
-    policy_check = next(item for item in report["checks"] if item["name"] == "qa_policy_corpus")
+    policy_check = next(
+        item for item in report["checks"] if item["name"] == "qa_policy_corpus"
+    )
     assert report["status"] == "BLOCKED"
     assert policy_check["reason"] == "PLACEHOLDER_POLICY_DOCUMENTS"

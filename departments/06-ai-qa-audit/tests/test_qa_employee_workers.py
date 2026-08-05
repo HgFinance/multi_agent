@@ -62,18 +62,22 @@ def test_model_and_internal_audit_graph_stage_runs_with_governed_inputs():
         "drift_score": 0.04,
         "protected_failure_rate": 0.01,
     }
-    audit_events = [{
-        "action": "qa.evidence.check",
-        "department": "qa",
-        "trace_id": "trace-qa-1",
-        "profile_status": "ACTIVE",
-        "authorized": True,
-    }]
+    audit_events = [
+        {
+            "action": "qa.evidence.check",
+            "department": "qa",
+            "trace_id": "trace-qa-1",
+            "profile_status": "ACTIVE",
+            "authorized": True,
+        }
+    ]
 
-    output = qa_scripts.model_and_internal_audit({
-        "model_risk_input": model_risk_input,
-        "internal_audit_events": audit_events,
-    })
+    output = qa_scripts.model_and_internal_audit(
+        {
+            "model_risk_input": model_risk_input,
+            "internal_audit_events": audit_events,
+        }
+    )
 
     assert output["model_risk"]["decision"] == "PASS"
     assert output["internal_audit"]["decision"] == "PASS"

@@ -16,7 +16,9 @@ from typing import Any
 
 from .journal import RunJournal
 
-SECRET_FIELDS = frozenset({"api_key", "apikey", "authorization", "password", "secret", "token", "private_key"})
+SECRET_FIELDS = frozenset(
+    {"api_key", "apikey", "authorization", "password", "secret", "token", "private_key"}
+)
 
 
 class HarnessDecision(StrEnum):
@@ -85,7 +87,9 @@ class DepartmentHarness:
         if _contains_secret_field(payload):
             return self._blocked(trace_id, "secret_field_in_skill_payload")
         skill = self._skills[skill_name]
-        if tool_name is not None and (tool_name in skill.forbidden_tools or tool_name not in skill.allowed_tools):
+        if tool_name is not None and (
+            tool_name in skill.forbidden_tools or tool_name not in skill.allowed_tools
+        ):
             return self._blocked(trace_id, "tool_not_allowed")
         input_hash = _hash_payload(payload)
         return SkillResult(HarnessDecision.READY, {}, input_hash, trace_id)
@@ -106,7 +110,9 @@ class DepartmentHarness:
         prompt_version: str | None = None,
         parameter_version: str | None = None,
     ) -> SkillResult:
-        preflight = self.preflight(skill_name, trace_id=trace_id, payload=payload, tool_name=tool_name)
+        preflight = self.preflight(
+            skill_name, trace_id=trace_id, payload=payload, tool_name=tool_name
+        )
         if preflight is None:
             return self._blocked(trace_id, "skill_not_registered")
         if preflight.decision is not HarnessDecision.READY:
@@ -258,7 +264,11 @@ class DepartmentHarness:
                     continue
                 result = SkillResult(
                     HarnessDecision.ESCALATE,
-                    {"verdict": "reject", "trading_state": "HALTED", "reason_codes": ["harness_fallback"]},
+                    {
+                        "verdict": "reject",
+                        "trading_state": "HALTED",
+                        "reason_codes": ["harness_fallback"],
+                    },
                     preflight.input_hash,
                     trace_id,
                     f"{type(exc).__name__}: {skill_name}",
@@ -295,12 +305,18 @@ class DepartmentHarness:
 
 def _contains_secret_field(value: Any) -> bool:
     if isinstance(value, Mapping):
-        return any(str(key).lower().replace("-", "_") in SECRET_FIELDS or _contains_secret_field(item) for key, item in value.items())
+        return any(
+            str(key).lower().replace("-", "_") in SECRET_FIELDS
+            or _contains_secret_field(item)
+            for key, item in value.items()
+        )
     if isinstance(value, (list, tuple)):
         return any(_contains_secret_field(item) for item in value)
     return False
 
 
 def _hash_payload(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()

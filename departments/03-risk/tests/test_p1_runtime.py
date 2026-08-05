@@ -17,7 +17,9 @@ from p1.instrument_repository import (
 from p1.runtime import ExternalRiskRuntimeConfig, RiskExternalRuntimeError
 
 
-def test_runtime_config_requires_explicit_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_config_requires_explicit_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("RISK_FUND_ID", str(uuid4()))
     monkeypatch.delenv("RISK_INSTRUMENT_MAPPINGS_JSON", raising=False)
 
@@ -25,7 +27,9 @@ def test_runtime_config_requires_explicit_mapping(monkeypatch: pytest.MonkeyPatc
         ExternalRiskRuntimeConfig.from_env()
 
 
-def test_runtime_config_parses_non_secret_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_config_parses_non_secret_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("RISK_FUND_ID", str(uuid4()))
     monkeypatch.setenv(
         "RISK_INSTRUMENT_MAPPINGS_JSON",

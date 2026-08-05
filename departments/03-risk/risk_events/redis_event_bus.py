@@ -43,7 +43,9 @@ class RedisEventPublisher:
         self._client = client
         self._stream = stream
 
-    def publish(self, *, event_id: UUID, trace_id: UUID, payload: dict[str, Any]) -> str:
+    def publish(
+        self, *, event_id: UUID, trace_id: UUID, payload: dict[str, Any]
+    ) -> str:
         fields = {
             "event_id": str(event_id),
             "event_type": EVENT_TYPE,
@@ -52,7 +54,9 @@ class RedisEventPublisher:
             "payload": json.dumps(_json_safe(payload), sort_keys=True),
         }
         try:
-            message_id = self._client.xadd(self._stream, fields, maxlen=10000, approximate=True)
+            message_id = self._client.xadd(
+                self._stream, fields, maxlen=10000, approximate=True
+            )
         except Exception as exc:
             raise RiskEventBusError(f"Risk Event 발행 실패: {exc}") from exc
         if isinstance(message_id, bytes):
@@ -60,7 +64,9 @@ class RedisEventPublisher:
         return str(message_id)
 
 
-def decision_event_id(*, risk_request_id: UUID, input_hash: str, calculation_version: str) -> UUID:
+def decision_event_id(
+    *, risk_request_id: UUID, input_hash: str, calculation_version: str
+) -> UUID:
     """동일 판정 재호출에서도 같은 Event ID를 만든다."""
 
     return uuid5(

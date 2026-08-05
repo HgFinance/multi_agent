@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-import sys
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.risk_engine import TradingState  # noqa: E402
-from risk_context_repository import PostgresRiskContextRepository  # noqa: E402
+from engine.risk_engine import TradingState
+from risk_context_repository import PostgresRiskContextRepository
 
 
 class _Cursor:
@@ -111,9 +111,12 @@ def test_repository_loads_complete_pit_context_read_only():
     )
 
     assert context.mandate.fund_id == FUND_ID
-    assert context.portfolio.cash == Decimal("5000")
-    assert context.portfolio.issuer_exposure[str(ISSUER_ID)] == Decimal("2000")
+    assert context.portfolio.cash == Decimal(5000)
+    assert context.portfolio.issuer_exposure[str(ISSUER_ID)] == Decimal(2000)
     assert context.market_status.tradable is True
     assert context.counterparty.health.name == "OK"
     assert connection.rolled_back is True
-    assert all("INSERT" not in query.upper() and "UPDATE" not in query.upper() for query in connection.cursor_instance.queries)
+    assert all(
+        "INSERT" not in query.upper() and "UPDATE" not in query.upper()
+        for query in connection.cursor_instance.queries
+    )

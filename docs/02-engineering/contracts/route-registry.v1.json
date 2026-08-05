@@ -295,7 +295,29 @@
         {"method": "POST", "path": "/ui/portfolio-recommendations/{run_id}/approval"},
         {"method": "GET", "path": "/accounting/v1/portfolio-snapshot"},
         {"method": "POST", "path": "/accounting/agent/ask"},
-        {"method": "POST", "path": "/trading/agent/ask"}
+        {"method": "POST", "path": "/trading/agent/ask"},
+
+        {"method": "POST", "path": "/research/agent/ask"},
+
+        {"method": "POST", "path": "/risk/agent/ask"},
+
+        {"method": "POST", "path": "/quant/agent/ask"},
+
+        {"method": "POST", "path": "/qa/agent/ask"},
+
+        {"method": "GET", "path": "/ui/research"},
+
+        {"method": "GET", "path": "/ui/strategy"},
+
+        {"method": "GET", "path": "/ui/risk"},
+
+        {"method": "GET", "path": "/ui/qa"},
+
+        {"method": "GET", "path": "/ui/risk-qa"},
+
+        {"method": "POST", "path": "/ui/commands/trading-state"},
+
+        {"method": "GET", "path": "/ui/commands/audit"}
       ]
     }
   },

@@ -117,7 +117,9 @@ def test_incident_event_rolls_back_parent_when_child_insert_fails() -> None:
 
 def test_corrective_action_creates_incident_parent_in_same_transaction() -> None:
     connection = FakeConnection()
-    PostgresAuditRepository(FakePool(connection)).insert_corrective_action(_action(uuid4()))
+    PostgresAuditRepository(FakePool(connection)).insert_corrective_action(
+        _action(uuid4())
+    )
 
     assert connection.commits == 1
     assert len(connection.cursor_instance.calls) == 2

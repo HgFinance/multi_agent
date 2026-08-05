@@ -23,7 +23,9 @@ from p1.repository import RiskP1PersistenceError, RiskP1Repository
 
 
 def _engine() -> RiskP1Engine:
-    return RiskP1Engine([InstrumentMapping("AAPL", uuid4()), InstrumentMapping("MSFT", uuid4())])
+    return RiskP1Engine(
+        [InstrumentMapping("AAPL", uuid4()), InstrumentMapping("MSFT", uuid4())]
+    )
 
 
 def _snapshot(**kwargs):
@@ -57,18 +59,28 @@ def test_missing_mapping_and_stale_market_fail_closed() -> None:
     now = datetime.now(timezone.utc)
     with pytest.raises(RiskP1Error, match="mapping"):
         RiskP1Engine([InstrumentMapping("MSFT", uuid4())]).build_snapshot(
-            fund_id=uuid4(), book_id=None, strategy_version_id=None, as_of=now,
-            equity=1000, positions=(PortfolioPosition("AAPL", 1),),
-            market=(MarketPoint("AAPL", 100, now),), stress_scenarios={},
+            fund_id=uuid4(),
+            book_id=None,
+            strategy_version_id=None,
+            as_of=now,
+            equity=1000,
+            positions=(PortfolioPosition("AAPL", 1),),
+            market=(MarketPoint("AAPL", 100, now),),
+            stress_scenarios={},
         )
     with pytest.raises(RiskP1Error, match="stale"):
         _engine().build_snapshot(
-            fund_id=uuid4(), book_id=None, strategy_version_id=None, as_of=now,
-            equity=1000, positions=(PortfolioPosition("AAPL", 1), PortfolioPosition("MSFT", 1)),
+            fund_id=uuid4(),
+            book_id=None,
+            strategy_version_id=None,
+            as_of=now,
+            equity=1000,
+            positions=(PortfolioPosition("AAPL", 1), PortfolioPosition("MSFT", 1)),
             market=(
                 MarketPoint("AAPL", 100, now - timedelta(minutes=6)),
                 MarketPoint("MSFT", 100, now),
-            ), stress_scenarios={},
+            ),
+            stress_scenarios={},
         )
 
 
@@ -185,7 +197,9 @@ class _LSClient:
 
 def test_ls_adapter_requires_explicit_canonical_mapping() -> None:
     mapping = InstrumentMapping("AAPL", uuid4())
-    inputs = collect_ls_inputs(_LSClient(), mappings=(mapping,), returns_by_symbol={"AAPL": (0.01, -0.01)})
+    inputs = collect_ls_inputs(
+        _LSClient(), mappings=(mapping,), returns_by_symbol={"AAPL": (0.01, -0.01)}
+    )
     assert inputs.equity == 1000
     assert inputs.positions[0].instrument_id == mapping.instrument_id
     with pytest.raises(RiskP1Error, match="mapping"):

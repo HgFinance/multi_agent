@@ -845,6 +845,11 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .ceo-recommendation-actions > small { color: var(--ink-faint); font-size: 9px; }
 .ceo-recommendation-actions > div { display: flex; gap: 6px; }
 .ceo-recommendation-actions button { min-height: 28px; padding: 4px 9px; font-size: 10px; }
+.mode-badge { display: inline-flex; align-items: center; width: fit-content; margin-left: 6px; padding: 3px 6px; border: 1px solid currentColor; border-radius: 999px; font-size: 9px; font-weight: 900; letter-spacing: .04em; vertical-align: middle; }
+.mode-demo { color: #876a42; background: #fff3cf; }
+.mode-paper { color: #2b6c70; background: #dff5ef; }
+.mode-live { color: #8a2f54; background: #ffe0eb; }
+.live-clock .mode-badge { margin: 0 0 4px; }
 @media (max-width: 1100px) { .portfolio-form { grid-template-columns: repeat(3, minmax(0, 1fr)); } .kanban-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); } }
 @media (max-width: 1100px) { .portfolio-form-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } .portfolio-advanced-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .portfolio-form { grid-template-columns: 1fr; } .portfolio-form-compact { grid-template-columns: 1fr; } .result-heading { align-items: flex-start; flex-direction: column; } .portfolio-recommendation { grid-template-columns: 1fr; } .instrument-row { grid-template-columns: 1fr; } .portfolio-advanced-grid { grid-template-columns: 1fr; } .kanban-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }

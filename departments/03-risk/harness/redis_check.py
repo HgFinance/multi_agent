@@ -11,10 +11,16 @@ def check_redis_urls(environ: Mapping[str, str] | None = None) -> dict:
     env = os.environ if environ is None else environ
     urls = {
         "risk_trading_state": env.get("REDIS_URL", "").strip(),
-        "risk_qa_events": (env.get("RISK_QA_EVENT_REDIS_URL") or env.get("REDIS_URL", "")).strip(),
+        "risk_qa_events": (
+            env.get("RISK_QA_EVENT_REDIS_URL") or env.get("REDIS_URL", "")
+        ).strip(),
     }
     checks = [_check_one(name, url) for name, url in urls.items()]
-    return {"ready": all(item["ready"] for item in checks), "checks": checks, "secret_values_exposed": False}
+    return {
+        "ready": all(item["ready"] for item in checks),
+        "checks": checks,
+        "secret_values_exposed": False,
+    }
 
 
 def _check_one(name: str, url: str) -> dict:

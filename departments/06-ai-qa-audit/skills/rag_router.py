@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-
 RAGRoute = Literal["NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"]
 
 
@@ -32,9 +31,7 @@ WORKER_RAG_POLICIES: dict[str, WorkerRAGPolicy] = {
     "hallucination-critic-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH"})
     ),
-    "model-and-internal-audit-worker": WorkerRAGPolicy(
-        frozenset({"NO_RAG", "GRAPH"})
-    ),
+    "model-and-internal-audit-worker": WorkerRAGPolicy(frozenset({"NO_RAG", "GRAPH"})),
     "ops-and-permission-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "incident-postmortem-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"})
@@ -81,7 +78,11 @@ def choose_rag_route(payload: dict[str, Any], *, worker_id: str = "") -> RAGPlan
     explicit = str(payload.get("rag_route", "")).upper()
     if explicit in {"NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"}:
         route = explicit if explicit in policy.allowed_routes else "NO_RAG"
-        reason = "explicit route requested" if route == explicit else "worker policy denied route"
+        reason = (
+            "explicit route requested"
+            if route == explicit
+            else "worker policy denied route"
+        )
         return _plan(route, reason)
     if payload.get("hypergraph") or payload.get("hyper_extract"):
         route = "HYPERGRAPH" if "HYPERGRAPH" in policy.allowed_routes else "NO_RAG"
@@ -95,7 +96,14 @@ def choose_rag_route(payload: dict[str, Any], *, worker_id: str = "") -> RAGPlan
         return _plan("NO_RAG", "no retrieval query or evidence signal")
     graph_signal = any(
         marker in text
-        for marker in ("contradict", "unsupported", "entity", "relationship", "citation", "dependency")
+        for marker in (
+            "contradict",
+            "unsupported",
+            "entity",
+            "relationship",
+            "citation",
+            "dependency",
+        )
     )
     if graph_signal:
         route = "GRAPH" if "GRAPH" in policy.allowed_routes else "NO_RAG"

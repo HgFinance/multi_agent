@@ -35,11 +35,15 @@ def test_ls_read_only_quote_and_portfolio_calls() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         if request.url.path == "/oauth2/token":
-            return httpx.Response(200, json={"access_token": "token", "expire_in": "300"})
+            return httpx.Response(
+                200, json={"access_token": "token", "expire_in": "300"}
+            )
         if request.headers.get("tr_cd") == "t1102":
             return httpx.Response(
                 200,
-                json={"t1102OutBlock": {"price": "100", "bidho1": "99", "offerho1": "101"}},
+                json={
+                    "t1102OutBlock": {"price": "100", "bidho1": "99", "offerho1": "101"}
+                },
             )
         if request.headers.get("tr_cd") == "t0424":
             return httpx.Response(
@@ -62,7 +66,9 @@ def test_ls_read_only_quote_and_portfolio_calls() -> None:
         app_key="key",
         app_secret_key="secret",
     )
-    with LSOpenAPIClient(config, client=httpx.Client(transport=httpx.MockTransport(handler))) as client:
+    with LSOpenAPIClient(
+        config, client=httpx.Client(transport=httpx.MockTransport(handler))
+    ) as client:
         quote = client.get_quote("A")
         portfolio = client.get_portfolio_snapshot()
 

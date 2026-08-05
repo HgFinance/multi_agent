@@ -34,9 +34,16 @@ def test_qa_harness_blocks_forbidden_tools_and_secrets() -> None:
 
 def test_qa_harness_escalates_ungrounded_rag_and_failures() -> None:
     harness = DepartmentHarness(QA_SKILLS)
-    rag = harness.execute("qa.evidence.rag", trace_id="trace-2", payload={}, handler=lambda _: {"grounded": False})
+    rag = harness.execute(
+        "qa.evidence.rag",
+        trace_id="trace-2",
+        payload={},
+        handler=lambda _: {"grounded": False},
+    )
     assert rag.decision is HarnessDecision.ESCALATE
-    failed = harness.execute("qa.model_risk.evaluate", trace_id="trace-3", payload={}, handler=lambda _: 1)
+    failed = harness.execute(
+        "qa.model_risk.evaluate", trace_id="trace-3", payload={}, handler=lambda _: 1
+    )
     assert failed.fallback_used is True
     assert failed.output["decision"] == "ESCALATE"
 

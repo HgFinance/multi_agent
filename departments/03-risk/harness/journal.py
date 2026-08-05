@@ -81,7 +81,9 @@ def _now() -> str:
 
 
 def canonical_hash(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -102,7 +104,8 @@ def jsonl_sink(path: str | Path) -> Callable[[LogEvent], None]:
 def _contains_secret(value: Any) -> bool:
     if isinstance(value, Mapping):
         return any(
-            str(key).lower().replace("-", "_") in SECRET_FIELDS or _contains_secret(item)
+            str(key).lower().replace("-", "_") in SECRET_FIELDS
+            or _contains_secret(item)
             for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):
@@ -208,7 +211,15 @@ class RunJournal:
             self._sink(event)
         return event
 
-    def input_snapshot(self, *, run_id: str, trace_id: str, employee_profile: str, payload: Mapping[str, Any], **kwargs: Any) -> LogEvent:
+    def input_snapshot(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> LogEvent:
         return self.append(
             LogEventType.INPUT_SNAPSHOT,
             run_id=run_id,
@@ -219,11 +230,24 @@ class RunJournal:
             **kwargs,
         )
 
-    def agent_output(self, *, run_id: str, trace_id: str, employee_profile: str, output: Mapping[str, Any], inputs_hash: str, **kwargs: Any) -> LogEvent:
+    def agent_output(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        output: Mapping[str, Any],
+        inputs_hash: str,
+        **kwargs: Any,
+    ) -> LogEvent:
         metadata = dict(kwargs)
-        metadata.setdefault("rationale", str(output["rationale"]) if output.get("rationale") else None)
+        metadata.setdefault(
+            "rationale", str(output["rationale"]) if output.get("rationale") else None
+        )
         metadata.setdefault("evidence_refs", _string_tuple(output.get("evidence_refs")))
-        metadata.setdefault("constraints_applied", _string_tuple(output.get("constraints_applied")))
+        metadata.setdefault(
+            "constraints_applied", _string_tuple(output.get("constraints_applied"))
+        )
         return self.append(
             LogEventType.AGENT_OUTPUT,
             run_id=run_id,
@@ -235,7 +259,15 @@ class RunJournal:
             **metadata,
         )
 
-    def validation(self, *, run_id: str, trace_id: str, employee_profile: str, inputs_hash: str, **kwargs: Any) -> LogEvent:
+    def validation(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        inputs_hash: str,
+        **kwargs: Any,
+    ) -> LogEvent:
         return self.append(
             LogEventType.VALIDATION,
             run_id=run_id,
@@ -245,7 +277,16 @@ class RunJournal:
             **kwargs,
         )
 
-    def decision(self, *, run_id: str, trace_id: str, employee_profile: str, inputs_hash: str, output: Mapping[str, Any], **kwargs: Any) -> LogEvent:
+    def decision(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        inputs_hash: str,
+        output: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> LogEvent:
         return self.append(
             LogEventType.DECISION,
             run_id=run_id,
@@ -256,7 +297,17 @@ class RunJournal:
             **kwargs,
         )
 
-    def order(self, *, run_id: str, trace_id: str, employee_profile: str, inputs_hash: str, order_id: str, payload: Mapping[str, Any], **kwargs: Any) -> LogEvent:
+    def order(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        inputs_hash: str,
+        order_id: str,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> LogEvent:
         return self.append(
             LogEventType.ORDER,
             run_id=run_id,
@@ -268,7 +319,17 @@ class RunJournal:
             **kwargs,
         )
 
-    def fill(self, *, run_id: str, trace_id: str, employee_profile: str, inputs_hash: str, fill_id: str, payload: Mapping[str, Any], **kwargs: Any) -> LogEvent:
+    def fill(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        employee_profile: str,
+        inputs_hash: str,
+        fill_id: str,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> LogEvent:
         return self.append(
             LogEventType.FILL,
             run_id=run_id,
@@ -285,24 +346,64 @@ class RunJournal:
 
     def to_jsonl(self, run_id: str | None = None) -> str:
         events = self._events if run_id is None else self.events_for_run(run_id)
-        return "\n".join(json.dumps(asdict(event), sort_keys=True, default=str) for event in events)
+        return "\n".join(
+            json.dumps(asdict(event), sort_keys=True, default=str) for event in events
+        )
 
-    def replay(self, run_id: str, executor: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> ReplayReport:
+    def replay(
+        self, run_id: str, executor: Callable[[Mapping[str, Any]], Mapping[str, Any]]
+    ) -> ReplayReport:
         events = self.events_for_run(run_id)
-        input_event = next((event for event in events if event.event_type is LogEventType.INPUT_SNAPSHOT), None)
-        output_event = next((event for event in reversed(events) if event.event_type is LogEventType.AGENT_OUTPUT), None)
-        decision_event = next((event for event in reversed(events) if event.event_type is LogEventType.DECISION), None)
+        input_event = next(
+            (
+                event
+                for event in events
+                if event.event_type is LogEventType.INPUT_SNAPSHOT
+            ),
+            None,
+        )
+        output_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type is LogEventType.AGENT_OUTPUT
+            ),
+            None,
+        )
+        decision_event = next(
+            (
+                event
+                for event in reversed(events)
+                if event.event_type is LogEventType.DECISION
+            ),
+            None,
+        )
         if input_event is None or output_event is None:
-            return ReplayReport(run_id, False, False, False, False, ("replay_inputs_or_output_missing",))
+            return ReplayReport(
+                run_id, False, False, False, False, ("replay_inputs_or_output_missing",)
+            )
         payload = input_event.raw.get("payload")
         if not isinstance(payload, Mapping):
-            return ReplayReport(run_id, False, False, False, False, ("replay_payload_missing",))
+            return ReplayReport(
+                run_id, False, False, False, False, ("replay_payload_missing",)
+            )
         replayed = dict(executor(payload))
         diffs: list[str] = []
         input_hash_match = canonical_hash(payload) == input_event.inputs_hash
         output_match = canonical_hash(replayed) == output_event.output_hash
-        version_match = len({(event.model_version, event.prompt_version, event.parameter_version) for event in events if event.event_type is LogEventType.AGENT_OUTPUT}) <= 1
-        decision_match = decision_event is None or replayed.get("decision", replayed.get("verdict")) == decision_event.raw.get("decision", decision_event.raw.get("verdict"))
+        version_match = (
+            len(
+                {
+                    (event.model_version, event.prompt_version, event.parameter_version)
+                    for event in events
+                    if event.event_type is LogEventType.AGENT_OUTPUT
+                }
+            )
+            <= 1
+        )
+        decision_match = decision_event is None or replayed.get(
+            "decision", replayed.get("verdict")
+        ) == decision_event.raw.get("decision", decision_event.raw.get("verdict"))
         if not input_hash_match:
             diffs.append("inputs_hash")
         if not version_match:
@@ -311,19 +412,40 @@ class RunJournal:
             diffs.append("agent_output")
         if not decision_match:
             diffs.append("decision")
-        return ReplayReport(run_id, input_hash_match, version_match, output_match, decision_match, tuple(diffs))
+        return ReplayReport(
+            run_id,
+            input_hash_match,
+            version_match,
+            output_match,
+            decision_match,
+            tuple(diffs),
+        )
 
     def review(self, run_id: str | None = None) -> dict[str, Any]:
         events = self._events if run_id is None else list(self.events_for_run(run_id))
-        validations = [event for event in events if event.event_type is LogEventType.VALIDATION]
-        decisions = [event for event in events if event.event_type is LogEventType.DECISION]
+        validations = [
+            event for event in events if event.event_type is LogEventType.VALIDATION
+        ]
+        decisions = [
+            event for event in events if event.event_type is LogEventType.DECISION
+        ]
         fallbacks = [event for event in decisions if event.fallback_reason]
-        failed_rules = Counter(event.failed_rule for event in validations if event.failed_rule)
+        failed_rules = Counter(
+            event.failed_rule for event in validations if event.failed_rule
+        )
         return {
             "run_count": len({event.run_id for event in events}),
             "event_count": len(events),
-            "validation_failure_count": sum(event.domain_valid is False or event.schema_valid is False for event in validations),
-            "fallback_rate": round(len(fallbacks) / len(decisions), 6) if decisions else 0.0,
+            "validation_failure_count": sum(
+                event.domain_valid is False or event.schema_valid is False
+                for event in validations
+            ),
+            "fallback_rate": round(len(fallbacks) / len(decisions), 6)
+            if decisions
+            else 0.0,
             "fallback_reasons": dict(failed_rules.most_common()),
-            "replay_ready": bool(events) and any(event.event_type is LogEventType.INPUT_SNAPSHOT for event in events),
+            "replay_ready": bool(events)
+            and any(
+                event.event_type is LogEventType.INPUT_SNAPSHOT for event in events
+            ),
         }

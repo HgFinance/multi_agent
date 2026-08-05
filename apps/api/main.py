@@ -5,7 +5,7 @@
       docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md 4절 `apps/api/`
 
 이 파일은 조립만 한다. 부서별 Agent 경로는 각 Router 파일이 소유한다
-(`accounting.py`, `trading.py`). 프로세스는 하나다 - 부서별로 프로세스를 쪼개는
+(`accounting.py`, `trading.py`, `department_agents.py`). 프로세스는 하나다 - 부서별로 프로세스를 쪼개는
 것은 Service Identity와 인증이 실제로 생긴 뒤에 한다.
 
 경계 두 개를 코드로 강제한다.
@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from decimal import Decimal
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -44,13 +45,35 @@ sys.path.insert(0, str(ROOT / "departments" / "05-accounting-portfolio" / "ledge
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 
 import accounting
-import db_read_model
+# 여러 부서의 prototype이 `repository`, `ledger`, `portfolio` 같은 최상위
+# 모듈명을 사용한다. pytest가 Risk/QA를 먼저 수집해도 회계 Read Model이
+# 다른 부서 파일을 잡지 않도록, 회계 모듈을 로드하는 동안만 의존성을 격리한다.
+_accounting_import_names = ("db_read_model", "repository", "ledger", "portfolio", "contracts")
+_accounting_previous_modules = {name: sys.modules.get(name) for name in _accounting_import_names}
+for _name in _accounting_import_names:
+    sys.modules.pop(_name, None)
+try:
+    import db_read_model
+finally:
+    for _name in _accounting_import_names[1:]:
+        sys.modules.pop(_name, None)
+        if _accounting_previous_modules[_name] is not None:
+            sys.modules[_name] = _accounting_previous_modules[_name]
 import hermes_cli
 import trading
 from ui_read_model import build_ui_snapshot
 from operations_read_model import build_operations_snapshot
 from portfolio_runtime import RUNTIME
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
+from agent_status import agent_status_snapshot
+from command_service import (
+    COMMAND_SERVICE,
+    CommandVersionConflict,
+    IdempotencyConflict,
+    TradingStateCommand,
+)
+from department_agents import router as department_agent_router
+from domain_read_models import build_domain_read_model
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
@@ -68,14 +91,15 @@ app.add_middleware(
         "http://127.0.0.1:3002",
         "http://127.0.0.1:5173",
     ],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# 도현 파트 2개만 등록한다. 다른 본부 Agent를 우리 BFF가 대신 호출하면
-# 권한 경계가 무너진다(마스터플랜 5.6).
+# 각 투자 본부의 Router는 해당 Hermes Profile을 명시적으로 소유한다. CEO·HR은
+# 투자 본부 Agent ask 경로에 섞지 않는다(마스터플랜 5.6).
 app.include_router(accounting.router)
 app.include_router(trading.router)
+app.include_router(department_agent_router)
 
 
 def _integration_status() -> dict[str, dict[str, object]]:
@@ -226,16 +250,23 @@ def health() -> dict:
         "status": "ok",
         "mode": "DEMO",
         "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
-        "departments": [accounting.DEPARTMENT, trading.DEPARTMENT],
+        "departments": [
+            "research-department",
+            trading.DEPARTMENT,
+            "risk-management",
+            "quant-backtest-department",
+            accounting.DEPARTMENT,
+            "qa-department",
+        ],
+        "status_event_type": "agent.status.v1",
+        "status_sequence": agent_status_snapshot()["sequence"],
     }
 
 
 @lru_cache(maxsize=1)
 def _repo():
     """회계 원장 저장소. DATABASE_URL이 없으면 None이고 Snapshot은 전부 DEMO다."""
-    from repository import LedgerRepository
-
-    return LedgerRepository.from_env()
+    return db_read_model.LedgerRepository.from_env()
 
 
 @app.get("/ui/snapshot")
@@ -272,6 +303,108 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
     )
     snapshot["operations"] = build_operations_snapshot()
     return snapshot
+
+
+def _domain_projection(domain: str) -> dict[str, object]:
+    return build_domain_read_model(domain)
+
+
+@app.get("/ui/research")
+def ui_research() -> dict[str, object]:
+    """Research Case read-only projection for the dashboard."""
+
+    return _domain_projection("research")
+
+
+@app.get("/ui/strategy")
+def ui_strategy() -> dict[str, object]:
+    """Strategy Factory / quant read-only projection for the dashboard."""
+
+    return _domain_projection("strategy")
+
+
+@app.get("/ui/risk")
+def ui_risk() -> dict[str, object]:
+    """Risk Center read-only projection for the dashboard."""
+
+    return _domain_projection("risk")
+
+
+@app.get("/ui/qa")
+def ui_qa() -> dict[str, object]:
+    """AI QA·Audit read-only projection for the dashboard."""
+
+    return _domain_projection("qa")
+
+
+@app.get("/ui/risk-qa")
+def ui_risk_qa() -> dict[str, object]:
+    """Combined Risk·QA projection consumed by the office panel."""
+
+    return _domain_projection("risk-qa")
+
+
+@app.post("/ui/commands/trading-state", status_code=202)
+def request_trading_state_command(command: TradingStateCommand) -> dict[str, object]:
+    """Record a versioned approval request without changing binding state."""
+
+    try:
+        return COMMAND_SERVICE.submit(command)
+    except CommandVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/ui/commands/audit")
+def ui_command_audit() -> dict[str, object]:
+    """Return BFF-local audit events; no broker or ledger credentials are exposed."""
+
+    return {"schema_version": "operator-command-audit.v1", "events": COMMAND_SERVICE.audit_events()}
+
+
+@app.websocket("/ws/operations")
+async def operations_websocket(websocket: WebSocket) -> None:
+    """Read-only Agent Status Event stream with REST snapshot recovery."""
+    await websocket.accept()
+    last_sequence = 0
+    initialized = False
+    heartbeat_at = asyncio.get_running_loop().time()
+    try:
+        while True:
+            operations = build_operations_snapshot()
+            sequence = int(operations.get("sequence", 0))
+            events = operations.get("agent_status_events", [])
+            if not initialized:
+                await websocket.send_json(
+                    {
+                        "event_type": "operations.snapshot_required.v1",
+                        "schema_version": 1,
+                        "sequence": sequence,
+                        "observed_at": operations["observed_at"],
+                    }
+                )
+                initialized = True
+            elif sequence > last_sequence:
+                for event in events:
+                    event_sequence = int(event.get("sequence", 0))
+                    if event_sequence > last_sequence:
+                        await websocket.send_json(event)
+            last_sequence = sequence
+            now = asyncio.get_running_loop().time()
+            if now - heartbeat_at >= 15:
+                await websocket.send_json(
+                    {
+                        "event_type": "operations.heartbeat.v1",
+                        "schema_version": 1,
+                        "sequence": sequence,
+                        "observed_at": operations["observed_at"],
+                    }
+                )
+                heartbeat_at = now
+            await asyncio.sleep(0.4)
+    except WebSocketDisconnect:
+        return
 
 
 if __name__ == "__main__":
@@ -356,12 +489,22 @@ if __name__ == "__main__":
     assert c.post("/accounting/agent/ask", json={"query": ""}).status_code == 422
     # 부서를 Body로 지정할 방법이 없다. 다른 본부 경로는 존재하지 않는다
     assert c.post("/agent/ask", json={"department": "risk-management", "query": "x"}).status_code == 404
-    assert c.post("/risk/agent/ask", json={"query": "x"}).status_code == 404
+    assert c.post("/risk/agent/ask", json={"query": "x"}).status_code == 503
+    assert c.post("/quant/agent/ask", json={"query": "x"}).status_code == 503
+    assert c.post("/qa/agent/ask", json={"query": "x"}).status_code == 503
     assert c.post("/ceo/agent/ask", json={"query": "x"}).status_code == 404
     # 공개 경로 전체를 못 박는다. Command 경로(Posting, NAV 확정, 주문 제출)가
     # 하나라도 늘면 여기서 깨진다 - 늘리려면 이 목록을 고쳐야 하고 Diff에 남는다
-    assert set(c.get("/openapi.json").json()["paths"]) == {
-        "/health", "/ui/snapshot", "/accounting/agent/ask", "/trading/agent/ask",
+    paths = set(c.get("/openapi.json").json()["paths"])
+    required_paths = {
+        "/health",
+        "/ui/snapshot",
+        "/accounting/agent/ask",
+        "/trading/agent/ask",
+        "/research/agent/ask",
+        "/risk/agent/ask",
+        "/quant/agent/ask",
+        "/qa/agent/ask",
         "/accounting/v1/portfolio-snapshot",
         # 2026-08-04 포트폴리오 추천 경로. 전부 읽기 또는 추천 실행이며 Posting·NAV 확정·
         # 주문 제출이 아니다. 승인 경로(/approval)는 추천 상태만 바꾸고 원장을 건드리지 않는다.
