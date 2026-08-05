@@ -50,7 +50,9 @@ class ExternalRiskRuntimeConfig:
         if self.as_of.tzinfo is None or self.as_of.utcoffset() is None:
             raise RiskExternalRuntimeError("as_of must be timezone-aware")
         if not self.mappings:
-            raise RiskExternalRuntimeError("at least one canonical instrument mapping is required")
+            raise RiskExternalRuntimeError(
+                "at least one canonical instrument mapping is required"
+            )
 
     @classmethod
     def from_env(cls, *, as_of: datetime | None = None) -> ExternalRiskRuntimeConfig:
@@ -76,14 +78,20 @@ class ExternalRiskRuntimeConfig:
         try:
             items = json.loads(raw_mappings)
         except json.JSONDecodeError as exc:
-            raise RiskExternalRuntimeError("RISK_INSTRUMENT_MAPPINGS_JSON is invalid JSON") from exc
+            raise RiskExternalRuntimeError(
+                "RISK_INSTRUMENT_MAPPINGS_JSON is invalid JSON"
+            ) from exc
         if not isinstance(items, list):
-            raise RiskExternalRuntimeError("RISK_INSTRUMENT_MAPPINGS_JSON must be a list")
+            raise RiskExternalRuntimeError(
+                "RISK_INSTRUMENT_MAPPINGS_JSON must be a list"
+            )
 
         mappings: list[InstrumentMapping] = []
         for item in items:
             if not isinstance(item, dict):
-                raise RiskExternalRuntimeError("instrument mapping entries must be objects")
+                raise RiskExternalRuntimeError(
+                    "instrument mapping entries must be objects"
+                )
             try:
                 mappings.append(
                     InstrumentMapping(
@@ -93,20 +101,28 @@ class ExternalRiskRuntimeConfig:
                     )
                 )
             except (KeyError, ValueError, TypeError) as exc:
-                raise RiskExternalRuntimeError("invalid instrument mapping entry") from exc
+                raise RiskExternalRuntimeError(
+                    "invalid instrument mapping entry"
+                ) from exc
 
         raw_stress = os.environ.get("RISK_STRESS_SCENARIOS_JSON", "{}")
         try:
             stress_scenarios = json.loads(raw_stress)
         except json.JSONDecodeError as exc:
-            raise RiskExternalRuntimeError("RISK_STRESS_SCENARIOS_JSON is invalid JSON") from exc
+            raise RiskExternalRuntimeError(
+                "RISK_STRESS_SCENARIOS_JSON is invalid JSON"
+            ) from exc
         if not isinstance(stress_scenarios, dict):
-            raise RiskExternalRuntimeError("RISK_STRESS_SCENARIOS_JSON must be an object")
+            raise RiskExternalRuntimeError(
+                "RISK_STRESS_SCENARIOS_JSON must be an object"
+            )
 
         confidence = float(os.environ.get("RISK_VAR_CONFIDENCE", "0.99"))
         return cls(
             fund_id=required_uuid("RISK_FUND_ID"),
-            book_id=UUID(os.environ["RISK_BOOK_ID"]) if os.environ.get("RISK_BOOK_ID") else None,
+            book_id=UUID(os.environ["RISK_BOOK_ID"])
+            if os.environ.get("RISK_BOOK_ID")
+            else None,
             strategy_version_id=(
                 UUID(os.environ["RISK_STRATEGY_VERSION_ID"])
                 if os.environ.get("RISK_STRATEGY_VERSION_ID")
@@ -141,7 +157,9 @@ class ExternalRiskAssessment:
             "gate": self.gate.value,
             "snapshot": {
                 "fund_id": str(self.snapshot.fund_id),
-                "book_id": str(self.snapshot.book_id) if self.snapshot.book_id else None,
+                "book_id": str(self.snapshot.book_id)
+                if self.snapshot.book_id
+                else None,
                 "as_of": self.snapshot.as_of.isoformat(),
                 "gross_exposure": self.snapshot.gross_exposure,
                 "net_exposure": self.snapshot.net_exposure,

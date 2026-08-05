@@ -18,6 +18,11 @@ from uuid import uuid4
 
 from portfolio_universe import DEFAULT_UNIVERSE_ID, enrich_suitability_result
 
+try:
+    from kanban_status_bridge import KANBAN_STATUS_BRIDGE
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
+
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
 )
@@ -194,6 +199,17 @@ class PortfolioRuntime:
                 }
                 job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker["worker_id"]]
                 job["active_workers"].append(worker)
+                KANBAN_STATUS_BRIDGE.publish_task_event(
+                    {
+                        "event_id": f"{job_id}:worker_started:{worker['worker_id']}",
+                        "department_code": department,
+                        "agent_id": worker["worker_id"],
+                        "worker_id": worker["worker_id"],
+                        "role": worker["role"],
+                        "status": "running",
+                        "reason": "LangGraph Worker graph 실행 시작",
+                    }
+                )
                 self._message(
                     job,
                     _event_message(
@@ -210,6 +226,17 @@ class PortfolioRuntime:
             elif kind == "worker_completed" and department:
                 worker_id = str(event.get("worker_id", ""))
                 summary = _one_line(event.get("summary"))
+                KANBAN_STATUS_BRIDGE.publish_task_event(
+                    {
+                        "event_id": f"{job_id}:worker_completed:{worker_id}",
+                        "department_code": department,
+                        "agent_id": worker_id,
+                        "worker_id": worker_id,
+                        "role": str(event.get("role", "")),
+                        "status": "completed",
+                        "reason": summary or "LangGraph Worker graph 실행 완료",
+                    }
+                )
                 job["active_workers"] = [item for item in job["active_workers"] if item["worker_id"] != worker_id]
                 job["departments"][department]["active_worker_ids"] = [item["worker_id"] for item in job["active_workers"] if item["department_code"] == department]
                 self._message(

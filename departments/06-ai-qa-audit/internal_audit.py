@@ -10,7 +10,13 @@ from enum import StrEnum
 
 CALCULATION_VERSION = "qa-internal-audit-v1"
 FORBIDDEN_CROSS_DOMAIN_ACTIONS = frozenset(
-    {"oms.submit", "ledger.write", "risk.limit.write", "risk.trading_state.write", "risk.trading_state.clear"}
+    {
+        "oms.submit",
+        "ledger.write",
+        "risk.limit.write",
+        "risk.trading_state.write",
+        "risk.trading_state.clear",
+    }
 )
 
 
@@ -30,7 +36,9 @@ class InternalAuditAssessment:
 class InternalAuditEngine:
     """Check traces and separation of duties without trusting narrative output."""
 
-    def evaluate(self, *, events: Sequence[Mapping[str, object]], expected_department: str = "qa") -> InternalAuditAssessment:
+    def evaluate(
+        self, *, events: Sequence[Mapping[str, object]], expected_department: str = "qa"
+    ) -> InternalAuditAssessment:
         findings: list[str] = []
         normalised: list[dict[str, object]] = []
         for index, event in enumerate(events):
@@ -52,9 +60,27 @@ class InternalAuditEngine:
             if action in FORBIDDEN_CROSS_DOMAIN_ACTIONS:
                 findings.append(f"event_{index}:forbidden_cross_domain_action")
             normalised.append(
-                {"action": action, "department": department, "trace_id": trace_id, "profile_status": profile_status, "authorized": authorized}
+                {
+                    "action": action,
+                    "department": department,
+                    "trace_id": trace_id,
+                    "profile_status": profile_status,
+                    "authorized": authorized,
+                }
             )
-        payload = {"events": normalised, "expected_department": expected_department, "calculation_version": CALCULATION_VERSION}
-        input_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        decision = InternalAuditDecision.PASS if not findings else InternalAuditDecision.ESCALATE
-        return InternalAuditAssessment(decision, tuple(findings), CALCULATION_VERSION, input_hash)
+        payload = {
+            "events": normalised,
+            "expected_department": expected_department,
+            "calculation_version": CALCULATION_VERSION,
+        }
+        input_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        decision = (
+            InternalAuditDecision.PASS
+            if not findings
+            else InternalAuditDecision.ESCALATE
+        )
+        return InternalAuditAssessment(
+            decision, tuple(findings), CALCULATION_VERSION, input_hash
+        )

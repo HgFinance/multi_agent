@@ -87,7 +87,9 @@ def calculate_derivative_snapshot(
             position.multiplier,
         )
         if not all(math.isfinite(float(value)) for value in values):
-            raise RiskAnalyticsError(f"non-finite derivatives input: {position.instrument_id}")
+            raise RiskAnalyticsError(
+                f"non-finite derivatives input: {position.instrument_id}"
+            )
         greek = black_scholes_greeks(
             spot=position.spot,
             strike=position.strike,
@@ -109,10 +111,15 @@ def calculate_derivative_snapshot(
         elif not math.isfinite(float(margin_rate)) or not 0 <= float(margin_rate) <= 1:
             reasons.append(f"margin_input_invalid:{position.instrument_id}")
         else:
-            margin_requirement += abs(position.quantity * position.spot * position.multiplier) * float(margin_rate)
+            margin_requirement += abs(
+                position.quantity * position.spot * position.multiplier
+            ) * float(margin_rate)
         if surface_volatility is None:
             reasons.append(f"vol_surface_input_missing:{position.instrument_id}")
-        elif not math.isfinite(float(surface_volatility)) or float(surface_volatility) <= 0:
+        elif (
+            not math.isfinite(float(surface_volatility))
+            or float(surface_volatility) <= 0
+        ):
             reasons.append(f"vol_surface_input_invalid:{position.instrument_id}")
         # A derivative's stressed notional is explicit; no implicit market value.
         stress_positions.append(
@@ -172,7 +179,9 @@ def evaluate_derivative_gate(
 
     limits = (max_abs_delta, max_abs_gamma, max_stress_loss)
     if not all(math.isfinite(float(value)) and value >= 0 for value in limits):
-        raise RiskAnalyticsError("derivative gate limits must be finite and non-negative")
+        raise RiskAnalyticsError(
+            "derivative gate limits must be finite and non-negative"
+        )
     if snapshot.quality_status != "PASS":
         return DerivativeGateDecision.REJECT
     if abs(snapshot.aggregate_delta) > max_abs_delta:
@@ -182,8 +191,13 @@ def evaluate_derivative_gate(
     if snapshot.stress_loss > max_stress_loss:
         return DerivativeGateDecision.REJECT
     if max_margin_requirement is not None:
-        if not math.isfinite(float(max_margin_requirement)) or max_margin_requirement < 0:
-            raise RiskAnalyticsError("max_margin_requirement must be finite and non-negative")
+        if (
+            not math.isfinite(float(max_margin_requirement))
+            or max_margin_requirement < 0
+        ):
+            raise RiskAnalyticsError(
+                "max_margin_requirement must be finite and non-negative"
+            )
         if snapshot.margin_requirement > max_margin_requirement:
             return DerivativeGateDecision.REJECT
     return DerivativeGateDecision.PASS

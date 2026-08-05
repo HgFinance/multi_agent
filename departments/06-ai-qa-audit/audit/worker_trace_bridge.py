@@ -50,7 +50,9 @@ class WorkerTraceBridge:
         finally:
             self._repository._pool.putconn(connection)
         if not row:
-            raise WorkerTraceBridgeError(f"active worker profile not found: {worker_id}")
+            raise WorkerTraceBridgeError(
+                f"active worker profile not found: {worker_id}"
+            )
         return UUID(str(row[0])), UUID(str(row[1])), UUID(str(row[2]))
 
     def record(

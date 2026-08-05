@@ -123,13 +123,20 @@ def _sample_volatility(values: Sequence[float]) -> float | None:
     if len(values) < 2:
         return None
     mean = sum(float(value) for value in values) / len(values)
-    return math.sqrt(sum((float(value) - mean) ** 2 for value in values) / (len(values) - 1))
+    return math.sqrt(
+        sum((float(value) - mean) ** 2 for value in values) / (len(values) - 1)
+    )
 
 
 class RiskP1Engine:
     """Build an auditable exposure and market-risk snapshot."""
 
-    def __init__(self, mappings: Sequence[InstrumentMapping], *, max_age: timedelta = timedelta(minutes=5)) -> None:
+    def __init__(
+        self,
+        mappings: Sequence[InstrumentMapping],
+        *,
+        max_age: timedelta = timedelta(minutes=5),
+    ) -> None:
         if not mappings:
             raise RiskP1Error("at least one instrument mapping is required")
         self._mappings = {item.broker_symbol.strip().upper(): item for item in mappings}
@@ -140,9 +147,16 @@ class RiskP1Engine:
     def _resolve(self, position: PortfolioPosition) -> InstrumentMapping:
         mapping = self._mappings.get(position.broker_symbol.strip().upper())
         if mapping is None:
-            raise RiskP1Error(f"instrument mapping missing for {position.broker_symbol}")
-        if position.instrument_id is not None and position.instrument_id != mapping.instrument_id:
-            raise RiskP1Error(f"instrument mapping mismatch for {position.broker_symbol}")
+            raise RiskP1Error(
+                f"instrument mapping missing for {position.broker_symbol}"
+            )
+        if (
+            position.instrument_id is not None
+            and position.instrument_id != mapping.instrument_id
+        ):
+            raise RiskP1Error(
+                f"instrument mapping mismatch for {position.broker_symbol}"
+            )
         return mapping
 
     def build_snapshot(
@@ -170,18 +184,26 @@ class RiskP1Engine:
         if not 0.0 < confidence < 1.0:
             raise RiskP1Error("confidence must be between 0 and 1")
 
-        market_by_symbol = {point.broker_symbol.strip().upper(): point for point in market}
+        market_by_symbol = {
+            point.broker_symbol.strip().upper(): point for point in market
+        }
         if len(market_by_symbol) != len(market):
             raise RiskP1Error("duplicate market point")
-        resolved: list[tuple[InstrumentMapping, PortfolioPosition, MarketPoint, float]] = []
+        resolved: list[
+            tuple[InstrumentMapping, PortfolioPosition, MarketPoint, float]
+        ] = []
         for position in positions:
             mapping = self._resolve(position)
             point = market_by_symbol.get(mapping.broker_symbol.strip().upper())
             if point is None:
                 raise RiskP1Error(f"market point missing for {mapping.broker_symbol}")
-            observed_at = _utc(point.observed_at, f"{mapping.broker_symbol}.observed_at")
+            observed_at = _utc(
+                point.observed_at, f"{mapping.broker_symbol}.observed_at"
+            )
             if observed_at > as_of or as_of - observed_at > self._max_age:
-                raise RiskP1Error(f"market point stale or outside PIT window for {mapping.broker_symbol}")
+                raise RiskP1Error(
+                    f"market point stale or outside PIT window for {mapping.broker_symbol}"
+                )
             quantity = _finite(position.quantity, "quantity")
             multiplier = _finite(position.multiplier, "multiplier")
             price = _finite(point.price, "price")
@@ -200,14 +222,20 @@ class RiskP1Engine:
                 "dimension_id": str(mapping.instrument_id),
                 "value": value / equity,
                 "unit": "EQUITY_FRACTION",
-                "metadata": {"broker_symbol": mapping.broker_symbol, "instrument_type": mapping.instrument_type},
+                "metadata": {
+                    "broker_symbol": mapping.broker_symbol,
+                    "instrument_type": mapping.instrument_type,
+                },
             }
             for mapping, _, _, value in resolved
         )
 
         return_series: dict[str, tuple[float, ...]] = {}
         for mapping, _, point, value in resolved:
-            returns = tuple(_finite(item, f"{mapping.broker_symbol}.return") for item in point.returns)
+            returns = tuple(
+                _finite(item, f"{mapping.broker_symbol}.return")
+                for item in point.returns
+            )
             return_series[mapping.broker_symbol] = returns
         history_lengths = [len(values) for values in return_series.values() if values]
         portfolio_returns: tuple[float, ...] = ()
@@ -235,7 +263,15 @@ class RiskP1Engine:
                 raise RiskP1Error("stress scenario name is required")
             stressed = 0.0
             for mapping, _, _, value in resolved:
-                shock = _finite(float(shocks.get(mapping.broker_symbol, shocks.get(mapping.broker_symbol.upper(), 0.0))), "shock")
+                shock = _finite(
+                    float(
+                        shocks.get(
+                            mapping.broker_symbol,
+                            shocks.get(mapping.broker_symbol.upper(), 0.0),
+                        )
+                    ),
+                    "shock",
+                )
                 if shock < -1.0:
                     raise RiskP1Error("price shock cannot be below -100 percent")
                 stressed += value * (1.0 + shock)
@@ -245,7 +281,12 @@ class RiskP1Engine:
             correlation
             for index, left in enumerate(resolved)
             for right in resolved[index + 1 :]
-            for correlation in [_correlation(return_series[left[0].broker_symbol], return_series[right[0].broker_symbol])]
+            for correlation in [
+                _correlation(
+                    return_series[left[0].broker_symbol],
+                    return_series[right[0].broker_symbol],
+                )
+            ]
             if correlation is not None
         ]
         correlation_max = max(correlations) if correlations else None
@@ -254,11 +295,21 @@ class RiskP1Engine:
             volatilities = [
                 abs(value / equity) * volatility
                 for mapping, _, _, value in resolved
-                if (volatility := _sample_volatility(return_series[mapping.broker_symbol])) is not None
+                if (
+                    volatility := _sample_volatility(
+                        return_series[mapping.broker_symbol]
+                    )
+                )
+                is not None
             ]
             perfect_corr_vol = sum(volatilities)
             observed_vol = _sample_volatility(portfolio_returns) or 0.0
-            correlation_shock_loss = max(0.0, (perfect_corr_vol - observed_vol) * equity * NormalDist().inv_cdf(confidence))
+            correlation_shock_loss = max(
+                0.0,
+                (perfect_corr_vol - observed_vol)
+                * equity
+                * NormalDist().inv_cdf(confidence),
+            )
 
         quality_status = "PASS"
         breaches: list[str] = []
@@ -275,21 +326,36 @@ class RiskP1Engine:
         payload = {
             "fund_id": str(fund_id),
             "book_id": str(book_id) if book_id else None,
-            "strategy_version_id": str(strategy_version_id) if strategy_version_id else None,
+            "strategy_version_id": str(strategy_version_id)
+            if strategy_version_id
+            else None,
             "as_of": as_of.isoformat(),
             "positions": [
-                {"instrument_id": str(mapping.instrument_id), "quantity": position.quantity, "value": value}
+                {
+                    "instrument_id": str(mapping.instrument_id),
+                    "quantity": position.quantity,
+                    "value": value,
+                }
                 for mapping, position, _, value in resolved
             ],
             "market": [
-                {"symbol": point.broker_symbol, "price": point.price, "observed_at": _utc(point.observed_at, "observed_at").isoformat(), "returns": point.returns}
+                {
+                    "symbol": point.broker_symbol,
+                    "price": point.price,
+                    "observed_at": _utc(point.observed_at, "observed_at").isoformat(),
+                    "returns": point.returns,
+                }
                 for _, _, point, _ in resolved
             ],
             "stress_scenarios": stress_scenarios,
             "confidence": confidence,
             "calculation_version": CALCULATION_VERSION,
         }
-        input_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        input_hash = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), default=str
+            ).encode()
+        ).hexdigest()
         return P1RiskSnapshot(
             fund_id=fund_id,
             book_id=book_id,
@@ -311,7 +377,9 @@ class RiskP1Engine:
         )
 
 
-def evaluate_p1_gate(snapshot: P1RiskSnapshot, *, entry_requested: bool = True) -> P1GateDecision:
+def evaluate_p1_gate(
+    snapshot: P1RiskSnapshot, *, entry_requested: bool = True
+) -> P1GateDecision:
     """Allow only a complete, healthy snapshot; never allow uncertainty."""
 
     if not entry_requested:
@@ -322,6 +390,9 @@ def evaluate_p1_gate(snapshot: P1RiskSnapshot, *, entry_requested: bool = True) 
         return P1GateDecision.REJECT
     if snapshot.value_at_risk is None or snapshot.expected_shortfall is None:
         return P1GateDecision.REJECT
-    if any(value < 0 or not math.isfinite(value) for value in snapshot.stress_losses.values()):
+    if any(
+        value < 0 or not math.isfinite(value)
+        for value in snapshot.stress_losses.values()
+    ):
         return P1GateDecision.REJECT
     return P1GateDecision.PASS

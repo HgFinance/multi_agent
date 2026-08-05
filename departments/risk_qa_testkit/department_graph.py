@@ -16,7 +16,6 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-
 WorkerLLM = Callable[[str, str], str]
 HeadLLM = Callable[[str, str], str]
 WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
@@ -79,7 +78,7 @@ def _decode_head_output(raw: str, spec: DepartmentGraphSpec) -> dict[str, Any]:
         candidate = candidate.replace("```json", "", 1).replace("```", "").strip()
     parsed = json.loads(candidate)
     if not isinstance(parsed, dict):
-        raise ValueError("department head output must be an object")
+        raise TypeError("department head output must be an object")
     summary = parsed.get("summary")
     recommendation = parsed.get("recommendation")
     escalate = parsed.get("escalate")
@@ -88,7 +87,7 @@ def _decode_head_output(raw: str, spec: DepartmentGraphSpec) -> dict[str, Any]:
     if not isinstance(recommendation, str) or not recommendation:
         raise ValueError("department head recommendation is required")
     if not isinstance(escalate, bool):
-        raise ValueError("department head escalate must be boolean")
+        raise TypeError("department head escalate must be boolean")
     return {
         "head_id": spec.head_id,
         "department": spec.department,
@@ -96,14 +95,18 @@ def _decode_head_output(raw: str, spec: DepartmentGraphSpec) -> dict[str, Any]:
         "output_contract": spec.output_contract,
         "summary": summary[:4000],
         "recommendation": recommendation[:80],
-        "safe_action": parsed.get("safe_action", "ESCALATE" if escalate else "NO_ACTION"),
+        "safe_action": parsed.get(
+            "safe_action", "ESCALATE" if escalate else "NO_ACTION"
+        ),
         "escalate": escalate,
         "binding": False,
         "schema_valid": True,
     }
 
 
-def _head_failure(spec: DepartmentGraphSpec, input_hash: str, error: str) -> dict[str, Any]:
+def _head_failure(
+    spec: DepartmentGraphSpec, input_hash: str, error: str
+) -> dict[str, Any]:
     return {
         "head_id": spec.head_id,
         "department": spec.department,
@@ -174,7 +177,9 @@ def build_department_graph(
             "error": None,
         }
 
-    def make_worker_node(worker_spec: Any) -> Callable[[DepartmentState], DepartmentState]:
+    def make_worker_node(
+        worker_spec: Any,
+    ) -> Callable[[DepartmentState], DepartmentState]:
         def execute_worker(state: DepartmentState) -> DepartmentState:
             selected = set(state.get("selected_worker_ids", []))
             reports = list(state.get("worker_reports", []))
@@ -189,7 +194,11 @@ def build_department_graph(
             payload["department_head_context"] = state.get("head_context", {})
             payload["peer_context"] = compact_peers
             input_hash = str(payload.get("input_hash") or _hash(payload))
-            previous = reports[-1]["worker_id"] if reports else state["head_context"]["head_id"]
+            previous = (
+                reports[-1]["worker_id"]
+                if reports
+                else state["head_context"]["head_id"]
+            )
             handoffs.append(
                 {
                     "from": previous,
@@ -216,10 +225,12 @@ def build_department_graph(
                     worker_llm,
                     trace=worker_trace,
                 )
-                result = worker_graph.invoke({
-                    "worker_id": worker_spec.worker_id,
-                    "input": payload,
-                })
+                result = worker_graph.invoke(
+                    {
+                        "worker_id": worker_spec.worker_id,
+                        "input": payload,
+                    }
+                )
                 report = {
                     "worker_id": worker_spec.worker_id,
                     "role": worker_spec.role,
@@ -269,7 +280,9 @@ def build_department_graph(
     def head_synthesis(state: DepartmentState) -> DepartmentState:
         payload = state.get("input", {})
         input_hash = str(payload.get("input_hash") or _hash(payload))
-        compact_workers = [_compact_report(report) for report in state.get("worker_reports", [])]
+        compact_workers = [
+            _compact_report(report) for report in state.get("worker_reports", [])
+        ]
         system = (
             f"You are the {spec.head_id}, the Hermes department head for {spec.department}. "
             "Synthesize employee context only. You do not make a binding Risk or QA decision, "
@@ -294,7 +307,9 @@ def build_department_graph(
         head_output.update(
             {
                 "input_hash": input_hash,
-                "worker_ids": [report["worker_id"] for report in state.get("worker_reports", [])],
+                "worker_ids": [
+                    report["worker_id"] for report in state.get("worker_reports", [])
+                ],
                 "not_executed": list(state.get("not_executed", [])),
                 "handoff_count": len(state.get("handoffs", [])),
             }
@@ -313,13 +328,17 @@ def build_department_graph(
         if advisory_workers:
             head_output["escalate"] = True
             head_output["recommendation"] = "ESCALATE"
-            head_output["safe_action"] = "HOLD" if spec.department == "risk-management" else "ESCALATE"
+            head_output["safe_action"] = (
+                "HOLD" if spec.department == "risk-management" else "ESCALATE"
+            )
             head_output["worker_advisories"] = advisory_workers
         if failed_workers:
             head_output["worker_failures"] = failed_workers
         return {
             "head_output": head_output,
-            "status": "COMPLETED" if head_output.get("schema_valid") and not failed_workers else "DEGRADED",
+            "status": "COMPLETED"
+            if head_output.get("schema_valid") and not failed_workers
+            else "DEGRADED",
             "error": head_output.get("error"),
         }
 
@@ -355,11 +374,15 @@ def run_department_graph(
     graph = build_department_graph(spec, worker_llm=worker_llm, head_llm=head_llm)
     state = graph.invoke({"input": dict(payload)})
     reports = list(state.get("worker_reports", []))
-    failed = [report["worker_id"] for report in reports if report.get("status") != "COMPLETED"]
+    failed = [
+        report["worker_id"] for report in reports if report.get("status") != "COMPLETED"
+    ]
     input_hash = str(payload.get("input_hash") or _hash(payload))
     return {
         "department": spec.department,
-        "head": state.get("head_output", _head_failure(spec, input_hash, "HEAD_OUTPUT_MISSING")),
+        "head": state.get(
+            "head_output", _head_failure(spec, input_hash, "HEAD_OUTPUT_MISSING")
+        ),
         "workers": reports,
         "executed": [report["worker_id"] for report in reports],
         "failed": failed,

@@ -57,7 +57,9 @@ class FakeRedis:
         for message_id, owner in list(pending.items()):
             if owner != consumer:
                 pending[message_id] = consumer
-                fields = next(fields for mid, fields in self.streams[stream] if mid == message_id)
+                fields = next(
+                    fields for mid, fields in self.streams[stream] if mid == message_id
+                )
                 messages.append((message_id, fields))
                 if len(messages) >= count:
                     break

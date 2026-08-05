@@ -21,6 +21,7 @@ Token 발급 주체가 아직 미정이라(스펙 6절) 여기서 검증하지 �
 실행: uvicorn app:app --app-dir departments/03-risk/api
 자체 점검: python departments/03-risk/api/app.py
 """
+
 from __future__ import annotations
 
 import os
@@ -38,8 +39,12 @@ from pydantic import BaseModel, Field
 
 _RISK_DIR = Path(__file__).resolve().parent.parent
 _ENGINE_DIR = _RISK_DIR / "engine"
-_CONTRACTS_DIR = Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"
-_AGENTIC_RAG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+_CONTRACTS_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "02-trading" / "contracts"
+)
+_AGENTIC_RAG_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
+)
 
 
 def _configured_policy_corpus() -> Path:
@@ -54,6 +59,8 @@ def _configured_policy_corpus() -> Path:
         if configured
         else _AGENTIC_RAG_DIR / "corpus" / "compliance"
     )
+
+
 for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
     sys.path.insert(0, str(_p))
 
@@ -167,7 +174,9 @@ class RiskContextIn(BaseModel):
                 max_order_notional=self.mandate.max_order_notional,
             ),
             limits=LimitSet(**self.limits.model_dump()),
-            restricted_items=tuple(RestrictedItem(**item.model_dump()) for item in self.restricted_items),
+            restricted_items=tuple(
+                RestrictedItem(**item.model_dump()) for item in self.restricted_items
+            ),
             portfolio=PortfolioState(**self.portfolio.model_dump()),
             market_status=MarketStatus(**self.market_status.model_dump()),
             counterparty=CounterpartyStatus(**self.counterparty.model_dump()),
@@ -334,7 +343,9 @@ def _persist_risk_decision(case_id: str, trace_id: UUID, assessment) -> None:
     risk_decision_id = repository.save(assessment)
     publisher = _risk_event_publisher()
     if publisher is None:
-        raise RiskEventBusError("Canonical Risk DB는 연결됐지만 Risk→QA Event Bus가 없습니다")
+        raise RiskEventBusError(
+            "Canonical Risk DB는 연결됐지만 Risk→QA Event Bus가 없습니다"
+        )
     publisher.publish(
         event_id=decision_event_id(
             risk_request_id=assessment.risk_request_id,
@@ -363,7 +374,9 @@ def _redis_store() -> RedisTradingStateStore:
 
         import redis as redis_lib
 
-        _state_store = RedisTradingStateStore(redis_lib.Redis.from_url(os.environ["REDIS_URL"]))
+        _state_store = RedisTradingStateStore(
+            redis_lib.Redis.from_url(os.environ["REDIS_URL"])
+        )
     return _state_store
 
 
@@ -371,7 +384,12 @@ def _redis_store() -> RedisTradingStateStore:
 def _on_risk_engine_error(request, exc: RiskEngineError):
     return JSONResponse(
         status_code=422,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -379,7 +397,12 @@ def _on_risk_engine_error(request, exc: RiskEngineError):
 def _on_trading_state_store_error(request, exc: TradingStateStoreError):
     return JSONResponse(
         status_code=503,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -387,7 +410,12 @@ def _on_trading_state_store_error(request, exc: TradingStateStoreError):
 def _on_risk_persistence_error(request, exc: RiskDecisionPersistenceError):
     return JSONResponse(
         status_code=503,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -395,7 +423,12 @@ def _on_risk_persistence_error(request, exc: RiskDecisionPersistenceError):
 def _on_risk_event_bus_error(request, exc: RiskEventBusError):
     return JSONResponse(
         status_code=503,
-        content={"error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None},
+        content={
+            "error_code": type(exc).__name__,
+            "message": str(exc),
+            "detail": {},
+            "trace_id": None,
+        },
     )
 
 
@@ -406,8 +439,10 @@ def _on_validation_error(request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
         content={
-            "error_code": "RequestValidationError", "message": "요청 스키마 검증 실패",
-            "detail": {"errors": jsonable_encoder(exc.errors())}, "trace_id": None,
+            "error_code": "RequestValidationError",
+            "message": "요청 스키마 검증 실패",
+            "detail": {"errors": jsonable_encoder(exc.errors())},
+            "trace_id": None,
         },
     )
 
@@ -416,7 +451,8 @@ def _on_validation_error(request, exc: RequestValidationError):
 def risk_check(case_id: str, body: RiskCheckRequest):
     use_database_context = (
         os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "production"
-        or os.environ.get("RISK_CONTEXT_SOURCE", "request").strip().lower() == "database"
+        or os.environ.get("RISK_CONTEXT_SOURCE", "request").strip().lower()
+        == "database"
     )
     if use_database_context:
         dsn = _canonical_database_url()
@@ -430,7 +466,9 @@ def risk_check(case_id: str, body: RiskCheckRequest):
                 },
             )
         try:
-            trading_state = _redis_store().get_state_fail_closed(f"fund:{body.order_intent.fund_id}")
+            trading_state = _redis_store().get_state_fail_closed(
+                f"fund:{body.order_intent.fund_id}"
+            )
             context = PostgresRiskContextRepository.connect(dsn).load(
                 fund_id=body.order_intent.fund_id,
                 book_id=body.order_intent.book_id,
@@ -447,14 +485,20 @@ def risk_check(case_id: str, body: RiskCheckRequest):
     elif body.context is not None:
         context = body.context.to_context()
     else:
-        raise HTTPException(status_code=503, detail={"error_code": "RISK_CONTEXT_REQUIRED"})
+        raise HTTPException(
+            status_code=503, detail={"error_code": "RISK_CONTEXT_REQUIRED"}
+        )
 
     assessment = engine.check_order(body.order_intent, context, body.risk_request_id)
     if os.environ.get("RISK_REQUIRE_P1_ANALYTICS", "false").strip().lower() == "true":
         if body.p1_snapshot is None:
-            raise HTTPException(status_code=503, detail="P1 risk analytics snapshot is required")
+            raise HTTPException(
+                status_code=503, detail="P1 risk analytics snapshot is required"
+            )
         if evaluate_p1_gate(body.p1_snapshot.to_snapshot()) is not P1GateDecision.PASS:
-            raise HTTPException(status_code=409, detail="P1 risk analytics gate rejected entry")
+            raise HTTPException(
+                status_code=409, detail="P1 risk analytics gate rejected entry"
+            )
     _persist_risk_decision(case_id, body.order_intent.trace_id, assessment)
     return assessment
 
@@ -468,7 +512,9 @@ def get_trading_state(scope: str):
 def get_trading_state_record(scope: str):
     record = _redis_store().get_record(scope)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"'{scope}'는 설정된 적 없는 Trading State입니다")
+        raise HTTPException(
+            status_code=404, detail=f"'{scope}'는 설정된 적 없는 Trading State입니다"
+        )
     return record
 
 
@@ -505,7 +551,9 @@ def compliance_check(body: ComplianceCheckRequest):
     corpus_dir = _configured_policy_corpus()
     if os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "production":
         paths = tuple(path for path in corpus_dir.glob("*.md") if path.is_file())
-        if not paths or any(b"SAMPLE_PLACEHOLDER" in path.read_bytes() for path in paths):
+        if not paths or any(
+            b"SAMPLE_PLACEHOLDER" in path.read_bytes() for path in paths
+        ):
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -558,31 +606,52 @@ if __name__ == "__main__":
 
     def order_intent_payload(qty="100", side="BUY") -> dict:
         return {
-            "trade_case_id": str(uuid4()), "fund_id": str(fund), "book_id": str(book),
-            "strategy_id": str(strategy), "instrument_id": str(aapl), "side": side,
-            "order_type": "LIMIT", "quantity": qty, "limit_price": "70000",
-            "time_in_force": "DAY", "valid_until": (now + timedelta(hours=1)).isoformat(),
+            "trade_case_id": str(uuid4()),
+            "fund_id": str(fund),
+            "book_id": str(book),
+            "strategy_id": str(strategy),
+            "instrument_id": str(aapl),
+            "side": side,
+            "order_type": "LIMIT",
+            "quantity": qty,
+            "limit_price": "70000",
+            "time_in_force": "DAY",
+            "valid_until": (now + timedelta(hours=1)).isoformat(),
             "snapshot": {
-                "market_snapshot_id": "s1", "as_of": now.isoformat(), "bid": "69900", "ask": "70000",
+                "market_snapshot_id": "s1",
+                "as_of": now.isoformat(),
+                "bid": "69900",
+                "ask": "70000",
             },
-            "idempotency_key": "idem_api_001", "created_by": "trader-pm-agent", "trace_id": "t1",
+            "idempotency_key": "idem_api_001",
+            "created_by": "trader-pm-agent",
+            "trace_id": "t1",
         }
 
     def context_payload(**overrides) -> dict:
         payload = {
             "mandate": {
-                "fund_id": str(fund), "allowed_instrument_ids": None,
-                "min_order_notional": "100000", "max_order_notional": "50000000",
+                "fund_id": str(fund),
+                "allowed_instrument_ids": None,
+                "min_order_notional": "100000",
+                "max_order_notional": "50000000",
             },
             "limits": {
-                "soft_single_issuer_pct": "0.20", "hard_single_issuer_pct": "0.30",
-                "max_daily_turnover_notional": "100000000", "max_daily_order_count": 50,
-                "max_daily_loss": "10000000", "max_drawdown_pct": "0.20",
+                "soft_single_issuer_pct": "0.20",
+                "hard_single_issuer_pct": "0.30",
+                "max_daily_turnover_notional": "100000000",
+                "max_daily_order_count": 50,
+                "max_daily_loss": "10000000",
+                "max_drawdown_pct": "0.20",
             },
             "restricted_items": [],
             "portfolio": {
-                "fund_id": str(fund), "cash": "100000000", "buying_power": "100000000",
-                "gross_exposure": "100000000", "peak_equity": "1000000000", "equity": "1000000000",
+                "fund_id": str(fund),
+                "cash": "100000000",
+                "buying_power": "100000000",
+                "gross_exposure": "100000000",
+                "peak_equity": "1000000000",
+                "equity": "1000000000",
             },
             "market_status": {"tradable": True},
             "counterparty": {"broker_adapter": "paper", "health": "ok"},
@@ -621,20 +690,28 @@ if __name__ == "__main__":
     # 3. 잘못된 trading_state 값 -> 422 (Pydantic이 Enum 검증에서 이미 막음)
     r3 = client.post(
         "/investment-cases/case-1/risk-check",
-        json={"order_intent": order_intent_payload(), "context": context_payload(trading_state="NOT_A_STATE")},
+        json={
+            "order_intent": order_intent_payload(),
+            "context": context_payload(trading_state="NOT_A_STATE"),
+        },
     )
     assert r3.status_code == 422, r3.text
-    assert r3.json()["error_code"] == "RequestValidationError", r3.json()  # 스펙 1.4 봉투 확인
+    assert r3.json()["error_code"] == "RequestValidationError", (
+        r3.json()
+    )  # 스펙 1.4 봉투 확인
 
     # 4. risk_request_id를 지정하면 응답에 그대로 반영된다 (멱등키)
     fixed_id = str(uuid4())
     r4 = client.post(
         "/investment-cases/case-1/risk-check",
         json={
-            "risk_request_id": fixed_id, "order_intent": order_intent_payload(qty="101"),
+            "risk_request_id": fixed_id,
+            "order_intent": order_intent_payload(qty="101"),
             "context": context_payload(),
         },
     )
     assert r4.json()["risk_request_id"] == fixed_id
 
-    print("ok - Risk Domain API 4개 시나리오 점검 통과 (trading-state/compliance는 REDIS_URL/OPENAI_API_KEY 필요 - 제외)")
+    print(
+        "ok - Risk Domain API 4개 시나리오 점검 통과 (trading-state/compliance는 REDIS_URL/OPENAI_API_KEY 필요 - 제외)"
+    )

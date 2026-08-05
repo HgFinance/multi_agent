@@ -239,22 +239,24 @@ export default function Home() {
 
       <BffProvider>
         <RuntimeSync engine={engine} onSync={syncRuntime} />
-        <PortfolioInterviewPanel />
         {view === "live" ? (
-          <LiveView
-            engine={engine}
-            snap={snap}
-            follow={follow}
-            setFollow={setFollow}
-            selectedId={selectedId}
-            onSelect={onSelect}
-            onStart={start}
-            onApprove={approve}
-            onDuty={onDuty}
-            onPublish={() => showToast("포트폴리오 결과는 BFF에서 확인하고 별도 수동 검토합니다.")}
-            publishBusy={publishState.busy}
-            publishResult={publishState.result}
-          />
+          <>
+            <PortfolioInterviewPanel />
+            <LiveView
+              engine={engine}
+              snap={snap}
+              follow={follow}
+              setFollow={setFollow}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              onStart={start}
+              onApprove={approve}
+              onDuty={onDuty}
+              onPublish={() => showToast("포트폴리오 결과는 BFF에서 확인하고 별도 수동 검토합니다.")}
+              publishBusy={publishState.busy}
+              publishResult={publishState.result}
+            />
+          </>
         ) : (
           <DashboardView
             filteredTeams={filteredTeams}
@@ -322,6 +324,7 @@ function LiveView({
 }) {
   const { snapshot: bffSnapshot } = useBffFeed();
   const runtime = bffSnapshot?.operations?.runtime;
+  const mode = bffSnapshot?.mode ?? "DEMO";
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
 
   return (
@@ -335,9 +338,10 @@ function LiveView({
 <p>실제 LangGraph가 실행 중인 Worker만 부서 안에서 작업하고, 부서 간 handoff는 부서장끼리만 진행합니다.</p>
         </div>
         <div className="live-clock">
+          <span className={`mode-badge mode-${mode.toLowerCase()}`}>MODE · {mode}</span>
           <span>SEOUL</span>
           <b>{snap.clock}</b>
-          <small>{snap.phase}</small>
+          <small>업무시간 09:00–18:00 · {snap.phase}</small>
         </div>
       </header>
 
@@ -728,6 +732,7 @@ function DashboardView({
   const { snapshot: bffSnapshot } = useBffFeed();
   const portfolioRuntime = bffSnapshot?.operations?.runtime;
   const portfolioResult = portfolioRuntime?.result as RuntimeResult | null | undefined;
+  const mode = bffSnapshot?.mode ?? "DEMO";
 
   // 서버가 알려준 실제 설정 상태로 표시한다 (연결됐다고 거짓 보고하지 않는다)
   const liveRows = integrations
@@ -770,7 +775,7 @@ function DashboardView({
         </div>
         <div className="hero-body">
           <div className="hero-copy">
-            <p className="eyebrow">TODAY · 07:00 AUTO START</p>
+          <p className="eyebrow">TODAY · 07:00 AUTO START <span className={`mode-badge mode-${mode.toLowerCase()}`}>MODE · {mode}</span></p>
             <h1>
               오늘 회사가 어떻게 움직이는지 <em className="highlight">한눈에</em> 보여드려요
             </h1>

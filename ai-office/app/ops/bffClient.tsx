@@ -1,6 +1,15 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { BFF, parseSnapshot, type TradingSnapshot } from "./readModel";
 
 export type BffConnection = "connecting" | "connected" | "stale" | "offline";
@@ -13,10 +22,15 @@ export type BffFeed = {
   refresh: () => Promise<void>;
 };
 
-// Worker runs are short in TEST mode; a 5s interval only showed the final batch.
-// Keep the projection read-only while polling often enough to render live workers.
-const POLL_INTERVAL_MS = 400;
+// REST는 canonical snapshot fallback, WebSocket은 변경 신호와 sequence를 전달한다.
+const POLL_INTERVAL_MS = 1000;
+const WS_RECONNECT_BASE_MS = 500;
+const WS_RECONNECT_MAX_MS = 10000;
 const BffContext = createContext<BffFeed | null>(null);
+
+function operationsSocketUrl(): string {
+  return `${BFF.replace(/^http/, "ws")}/ws/operations`;
+}
 
 function explainBffError(cause: unknown): string {
   const message = cause instanceof Error ? cause.message : String(cause);
@@ -45,9 +59,10 @@ export async function fetchBffSnapshot(): Promise<TradingSnapshot> {
   return parseSnapshot(body);
 }
 
-export function BffProvider({ children }: { children: React.ReactNode }) {
+export function BffProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<TradingSnapshot | null>(null);
   const snapshotRef = useRef<TradingSnapshot | null>(null);
+  const lastSequenceRef = useRef(0);
   const [connection, setConnection] = useState<BffConnection>("connecting");
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -58,6 +73,10 @@ export function BffProvider({ children }: { children: React.ReactNode }) {
       const next = await fetchBffSnapshot();
       snapshotRef.current = next;
       setSnapshot(next);
+      const nextSequence = Number(next.operations?.sequence ?? 0);
+      if (Number.isFinite(nextSequence) && nextSequence >= lastSequenceRef.current) {
+        lastSequenceRef.current = nextSequence;
+      }
       setLastUpdated(new Date().toISOString());
       setError("");
       setConnection("connected");
@@ -69,16 +88,75 @@ export function BffProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let active = true;
+    let reconnectDelay = WS_RECONNECT_BASE_MS;
+    let reconnectTimer: number | undefined;
+    let socket: WebSocket | null = null;
+
+    const scheduleReconnect = () => {
+      if (!active || reconnectTimer !== undefined) return;
+      const delay = reconnectDelay;
+      reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX_MS);
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, delay);
+    };
+
+    function connect() {
+      if (!active || typeof window.WebSocket === "undefined") return;
+      try {
+        socket = new window.WebSocket(operationsSocketUrl());
+        socket.onopen = () => {
+          reconnectDelay = WS_RECONNECT_BASE_MS;
+          void refresh();
+        };
+        socket.onmessage = (event) => {
+          try {
+            const message = JSON.parse(String(event.data)) as {
+              event_type?: string;
+              sequence?: number;
+            };
+            if (message.event_type === "operations.heartbeat.v1") return;
+            const sequence = Number(message.sequence ?? 0);
+            const previous = lastSequenceRef.current;
+            // Gap 복구는 이벤트를 추측하지 않고 canonical REST snapshot을 다시 읽는다.
+            if (sequence > previous + 1 && previous > 0) {
+              void refresh();
+            } else if (sequence > previous || message.event_type === "operations.snapshot_required.v1") {
+              void refresh();
+            }
+            if (Number.isFinite(sequence) && sequence > lastSequenceRef.current) {
+              lastSequenceRef.current = sequence;
+            }
+          } catch {
+            // 잘못된 WS 메시지는 화면 상태를 추측하지 않고 다음 REST poll에 맡긴다.
+          }
+        };
+        socket.onerror = () => socket?.close();
+        socket.onclose = () => {
+          socket = null;
+          setConnection((current) => (current === "connected" ? "stale" : current));
+          scheduleReconnect();
+        };
+      } catch {
+        scheduleReconnect();
+      }
+    }
+
     const initialTimer = window.setTimeout(() => {
       if (active) void refresh();
     }, 0);
-    const timer = window.setInterval(() => {
+    const pollTimer = window.setInterval(() => {
       if (active) void refresh();
     }, POLL_INTERVAL_MS);
+    connect();
+
     return () => {
       active = false;
       window.clearTimeout(initialTimer);
-      window.clearInterval(timer);
+      window.clearInterval(pollTimer);
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket?.close();
     };
   }, [refresh]);
 

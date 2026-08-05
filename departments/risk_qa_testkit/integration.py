@@ -21,8 +21,8 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from departments.risk_qa_testkit.pipeline import run_risk_qa_pipeline
-from departments.risk_qa_testkit.research_packet import packet_from_api_payload
 from departments.risk_qa_testkit.replay import validate_replay_bundle
+from departments.risk_qa_testkit.research_packet import packet_from_api_payload
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -75,7 +75,9 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
             pipeline = run_risk_qa_pipeline("test", packet=packet)
             result["risk_qa_pipeline"] = pipeline["pipeline_status"]
             result["replay_contract"] = pipeline["replay_contract"]
-            result["status"] = "READY" if pipeline["pipeline_status"] == "COMPLETED" else "FAILED"
+            result["status"] = (
+                "READY" if pipeline["pipeline_status"] == "COMPLETED" else "FAILED"
+            )
         return result
     except (OSError, URLError, ValueError, RuntimeError) as exc:
         result["status"] = "FAILED"
@@ -84,7 +86,9 @@ def _check_research_api(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
-    url = (environ.get("RISK_QA_EVENT_REDIS_URL") or environ.get("REDIS_URL") or "").strip()
+    url = (
+        environ.get("RISK_QA_EVENT_REDIS_URL") or environ.get("REDIS_URL") or ""
+    ).strip()
     if not url:
         return {"configured": False, "status": "SKIPPED", "reason": "REDIS_URL_MISSING"}
 
@@ -139,8 +143,18 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
                     "trace_id": str(trace_id),
                     "input_hash": input_hash,
                 },
-                {"entity_type": "risk_decision", "entity_id": str(risk_decision_id), "trace_id": str(trace_id), "input_hash": input_hash},
-                {"entity_type": "qa_decision", "entity_id": str(qa_decision_id), "trace_id": str(trace_id), "input_hash": input_hash},
+                {
+                    "entity_type": "risk_decision",
+                    "entity_id": str(risk_decision_id),
+                    "trace_id": str(trace_id),
+                    "input_hash": input_hash,
+                },
+                {
+                    "entity_type": "qa_decision",
+                    "entity_id": str(qa_decision_id),
+                    "trace_id": str(trace_id),
+                    "input_hash": input_hash,
+                },
             ],
             "events": [],
         }
@@ -201,12 +215,17 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
             "configured": True,
             "status": "READY" if processed == 2 and matched else "FAILED",
             "processed": processed,
-            "trace_preserved": bool(received) and all(event["trace_id"] == str(trace_id) for event in received),
+            "trace_preserved": bool(received)
+            and all(event["trace_id"] == str(trace_id) for event in received),
             "replay_contract": replay_report,
             "dedupe_consumer_group": group,
         }
     except Exception as exc:  # noqa: BLE001 - probe reports a safe error class
-        return {"configured": True, "status": "FAILED", "error_class": type(exc).__name__}
+        return {
+            "configured": True,
+            "status": "FAILED",
+            "error_class": type(exc).__name__,
+        }
     finally:
         if client is not None:
             try:
@@ -222,7 +241,11 @@ def _check_supabase_event(environ: Mapping[str, str]) -> dict[str, Any]:
         or environ.get("DATABASE_URL", "").strip()
     )
     if not dsn:
-        return {"configured": False, "status": "SKIPPED", "reason": "DATABASE_URL_MISSING"}
+        return {
+            "configured": False,
+            "status": "SKIPPED",
+            "reason": "DATABASE_URL_MISSING",
+        }
     conn = None
     try:
         import psycopg2
@@ -234,7 +257,11 @@ def _check_supabase_event(environ: Mapping[str, str]) -> dict[str, Any]:
         relation = cur.fetchone()[0]
         if relation != "audit.domain_events":
             conn.rollback()
-            return {"configured": True, "status": "FAILED", "error_class": "EVENT_TABLE_MISSING"}
+            return {
+                "configured": True,
+                "status": "FAILED",
+                "error_class": "EVENT_TABLE_MISSING",
+            }
         event_id = uuid4()
         trace_id = uuid4()
         cur.execute(
@@ -263,7 +290,11 @@ def _check_supabase_event(environ: Mapping[str, str]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - probe reports a safe error class
         if conn is not None:
             conn.rollback()
-        return {"configured": True, "status": "FAILED", "error_class": type(exc).__name__}
+        return {
+            "configured": True,
+            "status": "FAILED",
+            "error_class": type(exc).__name__,
+        }
     finally:
         if conn is not None:
             conn.close()
@@ -287,7 +318,9 @@ def run_external_integration_probe(
     configured_checks = [check for check in checks if check.get("configured")]
     if any(check.get("status") == "FAILED" for check in configured_checks):
         report["status"] = "FAILED"
-    elif configured_checks and all(check.get("status") == "READY" for check in configured_checks):
+    elif configured_checks and all(
+        check.get("status") == "READY" for check in configured_checks
+    ):
         report["status"] = "READY"
     else:
         # A healthy service with an unconfigured packet/DB boundary is useful

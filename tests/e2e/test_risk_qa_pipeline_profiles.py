@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pytest
 
 from departments.risk_qa_testkit import (
-    ResearchPacket,
     ResearchPacketV2,
     RiskQaPacket,
     make_test_packet,

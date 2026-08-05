@@ -71,7 +71,12 @@ def test_agentic_rag_grounded_loop_reaches_done(monkeypatch):
             None,
         ),
     )
-    state = {"persona": "compliance-policy-agent", "query": "Can I open?", "as_of": "2026-07-29", "attempt": 1}
+    state = {
+        "persona": "compliance-policy-agent",
+        "query": "Can I open?",
+        "as_of": "2026-07-29",
+        "attempt": 1,
+    }
     state = make_retrieve_node(FakeIndex())(state)
     state = grade_node(state)
     state = generate_node(state)
@@ -82,8 +87,15 @@ def test_agentic_rag_grounded_loop_reaches_done(monkeypatch):
 
 
 def test_agentic_rag_llm_failure_is_safe_and_does_not_retry(monkeypatch):
-    monkeypatch.setattr(nodes, "_safe_chat_json", lambda **_kwargs: (None, "grade:CircuitOpenError"))
-    state = {"persona": "compliance-policy-agent", "query": "Can I open?", "as_of": "2026-07-29", "attempt": 1}
+    monkeypatch.setattr(
+        nodes, "_safe_chat_json", lambda **_kwargs: (None, "grade:CircuitOpenError")
+    )
+    state = {
+        "persona": "compliance-policy-agent",
+        "query": "Can I open?",
+        "as_of": "2026-07-29",
+        "attempt": 1,
+    }
     state = make_retrieve_node(FakeIndex())(state)
     state = grade_node(state)
     state = generate_node(state)

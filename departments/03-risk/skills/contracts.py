@@ -13,9 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 def hash_payload(value: Any) -> str:
     """Return a stable hash without persisting raw financial input."""
 
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, default=str
-    ).encode("utf-8")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 

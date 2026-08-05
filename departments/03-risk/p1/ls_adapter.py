@@ -32,7 +32,9 @@ def collect_ls_inputs(
 ) -> LSCollectedRiskInputs:
     """Collect account/quote data without ever creating an order."""
 
-    mapping_by_symbol = {mapping.broker_symbol.strip().upper(): mapping for mapping in mappings}
+    mapping_by_symbol = {
+        mapping.broker_symbol.strip().upper(): mapping for mapping in mappings
+    }
     if not mapping_by_symbol:
         raise RiskP1Error("instrument mapping is required before LS collection")
     portfolio = client.get_portfolio_snapshot()
@@ -48,18 +50,26 @@ def collect_ls_inputs(
         if quantity == 0:
             continue
         quote = client.get_quote(symbol)
-        positions.append(PortfolioPosition(symbol, float(quantity), instrument_id=mapping.instrument_id))
+        positions.append(
+            PortfolioPosition(
+                symbol, float(quantity), instrument_id=mapping.instrument_id
+            )
+        )
         market.append(
             MarketPoint(
                 broker_symbol=symbol,
                 price=float(quote.price),
                 observed_at=quote.observed_at,
-                returns=tuple(float(value) for value in returns_by_symbol.get(symbol, ())),
+                returns=tuple(
+                    float(value) for value in returns_by_symbol.get(symbol, ())
+                ),
             )
         )
     if not positions:
         raise RiskP1Error("LS portfolio has no non-zero mapped position")
-    return LSCollectedRiskInputs(float(portfolio.equity), tuple(positions), tuple(market))
+    return LSCollectedRiskInputs(
+        float(portfolio.equity), tuple(positions), tuple(market)
+    )
 
 
 def _required_text(raw: Mapping[str, Any], *names: str) -> str:

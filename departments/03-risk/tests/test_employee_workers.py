@@ -68,7 +68,9 @@ def test_each_worker_trace_contains_all_declared_tools():
     market_event = next(
         event
         for event in next(
-            worker for worker in report["workers"] if worker["worker_id"] == "market-liquidity-worker"
+            worker
+            for worker in report["workers"]
+            if worker["worker_id"] == "market-liquidity-worker"
         )["skill_results"]
         if event["skill_id"] == "context.internal_api.v1"
     )

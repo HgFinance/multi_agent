@@ -11,7 +11,9 @@ import pytest
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
-_SPEC = importlib.util.spec_from_file_location("risk_pipeline_scripts", RISK_DIR / "scripts.py")
+_SPEC = importlib.util.spec_from_file_location(
+    "risk_pipeline_scripts", RISK_DIR / "scripts.py"
+)
 assert _SPEC and _SPEC.loader
 risk_scripts = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(risk_scripts)
@@ -30,29 +32,38 @@ def test_supervisor_failure_preserves_binding_verdict(monkeypatch):
         raise TimeoutError("Hermes unavailable")
 
     monkeypatch.setattr(risk_scripts, "_hermes_chat", unavailable)
-    out = risk_scripts.supervise({
-        "assessment": {"verdict": "approve", "reason_codes": [], "check_results": []},
-        "order_intent": {}, "trading_state": "ENABLED",
-    })
+    out = risk_scripts.supervise(
+        {
+            "assessment": {
+                "verdict": "approve",
+                "reason_codes": [],
+                "check_results": [],
+            },
+            "order_intent": {},
+            "trading_state": "ENABLED",
+        }
+    )
     assert out["verdict"] == "approve"
     assert out["escalate"] is True
     assert out["fallbacks"][0]["stage"] == "supervisor"
     assert out["supervisor_call_status"] == "failed"
-    assembled = risk_scripts._assemble_out({
-        "assessment": {
-            "verdict": "approve",
-            "risk_request_id": "r1",
-            "approved_quantity": None,
-            "reason_codes": [],
-            "check_results": [],
-            "calculation_version": "v1",
-            "input_hash": "h1",
-        },
-        "order_intent": {},
-        "context": {},
-        "trading_state": "ENABLED",
-        **out,
-    })
+    assembled = risk_scripts._assemble_out(
+        {
+            "assessment": {
+                "verdict": "approve",
+                "risk_request_id": "r1",
+                "approved_quantity": None,
+                "reason_codes": [],
+                "check_results": [],
+                "calculation_version": "v1",
+                "input_hash": "h1",
+            },
+            "order_intent": {},
+            "context": {},
+            "trading_state": "ENABLED",
+            **out,
+        }
+    )
     assert assembled["agent_execution"]["failed"] == ["risk-supervisor"]
     assert "risk-supervisor" not in assembled["agent_execution"]["executed"]
 
@@ -64,7 +75,11 @@ def test_hermes_model_is_loaded_from_risk_profile_config():
 
 
 def test_pipeline_build_failure_returns_reject_report(monkeypatch):
-    monkeypatch.setattr(risk_scripts, "build_pipeline", lambda: (_ for _ in ()).throw(RuntimeError("graph")))
+    monkeypatch.setattr(
+        risk_scripts,
+        "build_pipeline",
+        lambda: (_ for _ in ()).throw(RuntimeError("graph")),
+    )
     out = risk_scripts.run_risk_department({}, {})
     assert out["verdict"] == "reject"
     assert out["trading_state"] == "HALTED"
@@ -144,7 +159,11 @@ def test_reject_counterparty_uses_deterministic_fast_path(monkeypatch):
 
 
 def test_pipeline_fallback_emits_replayable_execution_evidence(monkeypatch, tmp_path):
-    monkeypatch.setattr(risk_scripts, "build_pipeline", lambda: (_ for _ in ()).throw(RuntimeError("graph")))
+    monkeypatch.setattr(
+        risk_scripts,
+        "build_pipeline",
+        lambda: (_ for _ in ()).throw(RuntimeError("graph")),
+    )
     log_path = tmp_path / "risk-run.jsonl"
 
     out = risk_scripts.run_risk_department(
@@ -173,16 +192,29 @@ def test_notion_report_keeps_full_markdown_as_chunks():
 
 def test_markdown_table_escapes_untrusted_values():
     out = {
-        "risk_request_id": "r1", "verdict": "reject", "approved_quantity": None,
-        "calculation_version": "v1", "input_hash": "h1", "trading_state": "HALTED",
-        "escalate": True, "reason_codes": ["bad|value"], "check_results": [
-            {"name": "test|check", "passed": False, "detail": "line one\nline two"}],
-        "counterparty": None, "compliance": None, "narrative": "fallback | narrative",
+        "risk_request_id": "r1",
+        "verdict": "reject",
+        "approved_quantity": None,
+        "calculation_version": "v1",
+        "input_hash": "h1",
+        "trading_state": "HALTED",
+        "escalate": True,
+        "reason_codes": ["bad|value"],
+        "check_results": [
+            {"name": "test|check", "passed": False, "detail": "line one\nline two"}
+        ],
+        "counterparty": None,
+        "compliance": None,
+        "narrative": "fallback | narrative",
         "observability": {"trace_id": "t1", "langsmith": {"enabled": False}},
-        "fallbacks": [{"stage": "supervisor", "error": "TimeoutError", "action": "ESCALATE"}],
+        "fallbacks": [
+            {"stage": "supervisor", "error": "TimeoutError", "action": "ESCALATE"}
+        ],
         "evaluation": {"fallback_count": 1},
     }
-    report = risk_scripts._render_report_md({"side": "BUY", "quantity": "1", "instrument_id": "A|B"}, {}, out)
+    report = risk_scripts._render_report_md(
+        {"side": "BUY", "quantity": "1", "instrument_id": "A|B"}, {}, out
+    )
     assert "test\\|check" in report
     assert "line one<br>line two" in report
     assert "## 평가 지표" in report

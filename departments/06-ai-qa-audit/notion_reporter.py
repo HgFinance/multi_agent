@@ -8,6 +8,7 @@
 근거 - .env.example 18-24행). Notion은 Projection일 뿐이다 - 이 모듈이 실패해도 QAState의
 바인딩 판정은 절대 바뀌지 않는다. 모든 실패를 흡수하고 {"ok": False, ...}로만 기록한다.
 """
+
 from __future__ import annotations
 
 import json
@@ -45,8 +46,11 @@ def _post(path: str, body: dict, token: str) -> tuple[int, dict]:
     req = urllib.request.Request(
         f"https://api.notion.com/v1/{path}",
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Notion-Version": _NOTION_VERSION,
-                 "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": _NOTION_VERSION,
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     try:
@@ -68,7 +72,14 @@ def _report_path(qa_decision_id: object) -> Path:
     )
 
 
-def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str = "", env: dict | None = None) -> dict:
+def upload_case(
+    artifact: dict,
+    decision_time: str,
+    out: dict,
+    *,
+    report_md: str = "",
+    env: dict | None = None,
+) -> dict:
     """out(run_qa_department 반환 형태)을 Notion QA DB에 1건 업로드한다. 절대 예외를 던지지 않는다."""
     env = env if env is not None else _load_dev_vars()
     token, db_id = env.get("NOTION_TOKEN"), env.get("NOTION_QA_DB")
@@ -76,14 +87,20 @@ def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str
         return {"ok": False, "reason": "NOTION_TOKEN/NOTION_QA_DB 미설정 - 업로드 생략"}
 
     props = {
-        "제목": {"title": [{"text": {"content": f"qa_decision_id: {out['qa_decision_id']}"}}]},
+        "제목": {
+            "title": [{"text": {"content": f"qa_decision_id: {out['qa_decision_id']}"}}]
+        },
         "trade_case_id": _rich_text(artifact.get("trace_id")),
         "판정": {"select": {"name": out["verdict"]}},
-        "reason_codes": {"multi_select": [{"name": c} for c in out.get("reason_codes", [])]},
+        "reason_codes": {
+            "multi_select": [{"name": c} for c in out.get("reason_codes", [])]
+        },
         "escalate": {"checkbox": bool(out.get("escalate", False))},
         "input_hash": _rich_text(out.get("input_hash")),
         "calculation_version": _rich_text(out.get("calculation_version")),
-        "claim_checks": _rich_text(json.dumps(out.get("claim_checks", []), ensure_ascii=False)),
+        "claim_checks": _rich_text(
+            json.dumps(out.get("claim_checks", []), ensure_ascii=False)
+        ),
         "findings": _rich_text(json.dumps(out.get("findings", []), ensure_ascii=False)),
         "claim_narrative": _rich_text(out.get("claim_narrative")),
         "생성 시각": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
@@ -109,11 +126,17 @@ def upload_case(artifact: dict, decision_time: str, out: dict, *, report_md: str
 def _check_missing_config_skips_without_network():
     def _boom(*a, **k):
         raise AssertionError("설정 없는데 네트워크 호출을 시도했다")
+
     orig = _post
     globals()["_post"] = _boom
     try:
-        result = upload_case({}, "x", {"qa_decision_id": "d1", "verdict": "PASS"}, env={})
-        assert result == {"ok": False, "reason": "NOTION_TOKEN/NOTION_QA_DB 미설정 - 업로드 생략"}
+        result = upload_case(
+            {}, "x", {"qa_decision_id": "d1", "verdict": "PASS"}, env={}
+        )
+        assert result == {
+            "ok": False,
+            "reason": "NOTION_TOKEN/NOTION_QA_DB 미설정 - 업로드 생략",
+        }
     finally:
         globals()["_post"] = orig
     print("  미설정 시 네트워크 미호출   OK")
@@ -129,11 +152,23 @@ def _check_payload_shape():
     orig = _post
     globals()["_post"] = _fake_post
     try:
-        out = {"qa_decision_id": "d1", "verdict": "PASS", "reason_codes": [],
-               "claim_checks": [], "findings": [], "calculation_version": "v1",
-               "input_hash": "h1", "claim_narrative": "n", "escalate": False}
-        result = upload_case({"trace_id": "t1"}, "2026-08-01", out,
-                              env={"NOTION_TOKEN": "tok", "NOTION_QA_DB": "db1"})
+        out = {
+            "qa_decision_id": "d1",
+            "verdict": "PASS",
+            "reason_codes": [],
+            "claim_checks": [],
+            "findings": [],
+            "calculation_version": "v1",
+            "input_hash": "h1",
+            "claim_narrative": "n",
+            "escalate": False,
+        }
+        result = upload_case(
+            {"trace_id": "t1"},
+            "2026-08-01",
+            out,
+            env={"NOTION_TOKEN": "tok", "NOTION_QA_DB": "db1"},
+        )
         assert result == {"ok": True, "url": "https://notion.so/fake"}
         assert captured["body"]["parent"]["database_id"] == "db1"
         assert captured["body"]["properties"]["판정"]["select"]["name"] == "PASS"

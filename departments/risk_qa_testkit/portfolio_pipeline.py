@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from departments.risk_qa_testkit.pipeline import run_risk_qa_pipeline
-
 
 ROOT = Path(__file__).resolve().parents[2]
 _SUITABILITY_MODULE_NAME = "portfolio_suitability_testkit"

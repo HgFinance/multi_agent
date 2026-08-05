@@ -8,11 +8,10 @@ Risk Decision, QA Decision, Redis Event Envelope를 하나의 trace로 재생할
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
-import json
 from typing import Any
-
 
 RISK_DECISION_EVENT = "risk.decision.v1"
 QA_DECISION_EVENT = "qa.decision.v1"
@@ -35,14 +34,23 @@ def _text(value: Any, field: str) -> str:
 
 def _canonical(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): _canonical(item) for key, item in sorted(value.items(), key=lambda item: str(item[0]))}
+        return {
+            str(key): _canonical(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
     if isinstance(value, (list, tuple)):
         return [_canonical(item) for item in value]
     return value
 
 
 def _digest(value: Mapping[str, Any]) -> str:
-    payload = json.dumps(_canonical(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json.dumps(
+        _canonical(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -70,8 +78,14 @@ def canonical_replay_payload(bundle: Mapping[str, Any]) -> dict[str, Any]:
         "input_hash": _text(bundle.get("input_hash"), "input_hash"),
         "risk_decision": _canonical(bundle.get("risk_decision", {})),
         "qa_decision": _canonical(bundle.get("qa_decision", {})),
-        "entities": sorted((_canonical(entity) for entity in entities), key=lambda item: str(item.get("entity_id", ""))),
-        "events": sorted((_canonical(event) for event in events), key=lambda item: str(item.get("event_id", ""))),
+        "entities": sorted(
+            (_canonical(entity) for entity in entities),
+            key=lambda item: str(item.get("entity_id", "")),
+        ),
+        "events": sorted(
+            (_canonical(event) for event in events),
+            key=lambda item: str(item.get("event_id", "")),
+        ),
     }
 
 
@@ -162,9 +176,15 @@ def validate_replay_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
             errors.append(f"event {event_id} payload.trace_id does not match bundle")
         if str(payload.get("input_hash", input_hash)).strip() != input_hash:
             errors.append(f"event {event_id} payload.input_hash does not match bundle")
-        if event_type == RISK_DECISION_EVENT and str(payload.get("risk_decision_id", "")).strip() != risk_decision_id:
+        if (
+            event_type == RISK_DECISION_EVENT
+            and str(payload.get("risk_decision_id", "")).strip() != risk_decision_id
+        ):
             errors.append(f"event {event_id} does not reference risk decision")
-        if event_type == QA_DECISION_EVENT and str(payload.get("qa_decision_id", "")).strip() != qa_decision_id:
+        if (
+            event_type == QA_DECISION_EVENT
+            and str(payload.get("qa_decision_id", "")).strip() != qa_decision_id
+        ):
             errors.append(f"event {event_id} does not reference QA decision")
 
     missing_event_types = REQUIRED_EVENT_TYPES - event_types
@@ -187,7 +207,9 @@ def validate_replay_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_test_replay_bundle(packet: Any, *, risk_verdict: str = "REJECT", qa_decision: str = "WARN") -> dict[str, Any]:
+def build_test_replay_bundle(
+    packet: Any, *, risk_verdict: str = "REJECT", qa_decision: str = "WARN"
+) -> dict[str, Any]:
     """Build a deterministic contract fixture from a canonical Risk/QA packet."""
 
     trace_id = _text(packet.trace_id, "packet.trace_id")
@@ -197,33 +219,73 @@ def build_test_replay_bundle(packet: Any, *, risk_verdict: str = "REJECT", qa_de
     assessment = packet.risk_input.get("assessment") or {}
     order_intent_id = str(assessment.get("order_intent_id", ""))
     entities = [
-        {"entity_type": "research_packet", "entity_id": packet.packet_id, "trace_id": trace_id, "input_hash": input_hash},
-        {"entity_type": "risk_decision", "entity_id": risk_decision_id, "trace_id": trace_id, "input_hash": input_hash},
-        {"entity_type": "qa_decision", "entity_id": qa_decision_id, "trace_id": trace_id, "input_hash": input_hash},
+        {
+            "entity_type": "research_packet",
+            "entity_id": packet.packet_id,
+            "trace_id": trace_id,
+            "input_hash": input_hash,
+        },
+        {
+            "entity_type": "risk_decision",
+            "entity_id": risk_decision_id,
+            "trace_id": trace_id,
+            "input_hash": input_hash,
+        },
+        {
+            "entity_type": "qa_decision",
+            "entity_id": qa_decision_id,
+            "trace_id": trace_id,
+            "input_hash": input_hash,
+        },
     ]
     if order_intent_id:
-        entities.append({"entity_type": "order_intent", "entity_id": order_intent_id, "trace_id": trace_id, "input_hash": input_hash})
+        entities.append(
+            {
+                "entity_type": "order_intent",
+                "entity_id": order_intent_id,
+                "trace_id": trace_id,
+                "input_hash": input_hash,
+            }
+        )
     return {
         "packet_id": packet.packet_id,
         "artifact_id": packet.artifact_id,
         "case_id": packet.case_id,
         "trace_id": trace_id,
         "input_hash": input_hash,
-        "risk_decision": {"risk_decision_id": risk_decision_id, "decision": risk_verdict, "trace_id": trace_id, "input_hash": input_hash},
-        "qa_decision": {"qa_decision_id": qa_decision_id, "decision": qa_decision, "trace_id": trace_id, "input_hash": input_hash},
+        "risk_decision": {
+            "risk_decision_id": risk_decision_id,
+            "decision": risk_verdict,
+            "trace_id": trace_id,
+            "input_hash": input_hash,
+        },
+        "qa_decision": {
+            "qa_decision_id": qa_decision_id,
+            "decision": qa_decision,
+            "trace_id": trace_id,
+            "input_hash": input_hash,
+        },
         "entities": entities,
         "events": [
             {
                 "event_id": f"risk-event:{trace_id}:{input_hash[:16]}",
                 "event_type": RISK_DECISION_EVENT,
                 "trace_id": trace_id,
-                "payload": {"risk_decision_id": risk_decision_id, "input_hash": input_hash, "trace_id": trace_id},
+                "payload": {
+                    "risk_decision_id": risk_decision_id,
+                    "input_hash": input_hash,
+                    "trace_id": trace_id,
+                },
             },
             {
                 "event_id": qa_decision_id,
                 "event_type": QA_DECISION_EVENT,
                 "trace_id": trace_id,
-                "payload": {"qa_decision_id": qa_decision_id, "input_hash": input_hash, "trace_id": trace_id},
+                "payload": {
+                    "qa_decision_id": qa_decision_id,
+                    "input_hash": input_hash,
+                    "trace_id": trace_id,
+                },
             },
         ],
     }

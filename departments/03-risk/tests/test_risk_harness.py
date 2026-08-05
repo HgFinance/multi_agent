@@ -35,10 +35,17 @@ def test_risk_harness_blocks_forbidden_tools_and_secrets() -> None:
 
 def test_risk_harness_fallback_and_grounding_are_fail_closed() -> None:
     harness = DepartmentHarness(RISK_SKILLS)
-    failed = harness.execute("risk.pre_trade.check", trace_id="trace-2", payload={}, handler=lambda _: 1)
+    failed = harness.execute(
+        "risk.pre_trade.check", trace_id="trace-2", payload={}, handler=lambda _: 1
+    )
     assert failed.fallback_used is True
     assert failed.output["verdict"] == "reject"
-    rag = harness.execute("risk.compliance.check", trace_id="trace-3", payload={}, handler=lambda _: {"grounded": False})
+    rag = harness.execute(
+        "risk.compliance.check",
+        trace_id="trace-3",
+        payload={},
+        handler=lambda _: {"grounded": False},
+    )
     assert rag.decision is HarnessDecision.ESCALATE
 
 

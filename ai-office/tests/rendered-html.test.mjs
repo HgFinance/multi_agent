@@ -106,6 +106,8 @@ test("keeps one portfolio analysis entry point", async () => {
   ]);
 
   assert.equal((page.match(/사용자 입력으로 분석 시작/g) ?? []).length, 1);
+  assert.equal((page.match(/<PortfolioInterviewPanel \/>/g) ?? []).length, 1);
+  assert.match(page, /view === "live"[\s\S]*<PortfolioInterviewPanel \/>/);
   assert.match(page, /portfolio-interview-form/);
   assert.match(page, /requestSubmit\(\)/);
   assert.match(page, /a\.status === "업무 중"/);

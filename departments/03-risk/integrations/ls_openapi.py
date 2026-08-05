@@ -70,7 +70,9 @@ class LSOpenAPIConfig:
             account_password=os.environ.get(f"LS_ACCOUNT_PWD{suffix}") or None,
             mac_address=os.environ.get("LS_MAC_ADDRESS") or None,
             scope=os.environ.get("LS_OAUTH_SCOPE", "oob"),
-            timeout_seconds=float(os.environ.get("RISK_EXTERNAL_API_TIMEOUT_SECONDS", "5")),
+            timeout_seconds=float(
+                os.environ.get("RISK_EXTERNAL_API_TIMEOUT_SECONDS", "5")
+            ),
         )
 
 
@@ -170,7 +172,9 @@ class LSOpenAPIClient:
         self._token_expires_at = now + timedelta(seconds=expires_in)
         return token
 
-    def _post_tr(self, path: str, tr_code: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _post_tr(
+        self, path: str, tr_code: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
         headers = {
             "content-type": "application/json; charset=UTF-8",
             "authorization": f"Bearer {self._access_token()}",
@@ -180,7 +184,9 @@ class LSOpenAPIClient:
         }
         if self.config.mac_address:
             headers["mac_address"] = self.config.mac_address
-        response = self._client.post(f"{self.config.base_url}{path}", json=payload, headers=headers)
+        response = self._client.post(
+            f"{self.config.base_url}{path}", json=payload, headers=headers
+        )
         response.raise_for_status()
         return _json_object(response)
 
@@ -225,13 +231,17 @@ class LSOpenAPIClient:
         position_block = positions_body.get("t0424OutBlock1", [])
         if not isinstance(position_block, list):
             raise LSOpenAPIError("LS t0424OutBlock1 must be an array")
-        balance = _object(balance_body.get("CSPAQ12200OutBlock2"), "CSPAQ12200OutBlock2")
+        balance = _object(
+            balance_body.get("CSPAQ12200OutBlock2"), "CSPAQ12200OutBlock2"
+        )
         observed_at = datetime.now(timezone.utc)
         return PortfolioSnapshot(
             account_no=self.config.account_no,
             cash=_decimal(balance.get("Dps"), "Dps"),
             buying_power=_decimal(balance.get("MnyOrdAbleAmt"), "MnyOrdAbleAmt"),
-            equity=_decimal(positions_body.get("t0424OutBlock", {}).get("sunamt"), "sunamt"),
+            equity=_decimal(
+                positions_body.get("t0424OutBlock", {}).get("sunamt"), "sunamt"
+            ),
             positions=tuple(position_block),
             observed_at=observed_at,
         )

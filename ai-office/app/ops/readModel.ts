@@ -144,6 +144,20 @@ export type OperationsCommunication = {
 export type OperationsSnapshot = {
   schema_version: "operator-operations.v1";
   observed_at: string;
+  sequence?: number;
+  agent_statuses?: Array<{
+    event_id: string;
+    event_type: "agent.status.v1";
+    schema_version: 1;
+    sequence: number;
+    department_code: string;
+    agent_id: string;
+    worker_id: string | null;
+    status: RuntimeStatus;
+    role: string | null;
+    reason: string | null;
+  }>;
+  agent_status_events?: Array<Record<string, unknown>>;
   status: "DEGRADED" | "CONNECTED" | string;
   runtime_connected: boolean;
   event_bridge_connected: boolean;

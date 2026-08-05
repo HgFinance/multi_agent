@@ -1,12 +1,16 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 import type { Agent, Snapshot } from "../game/sim";
 import { useBffFeed } from "./bffClient";
 import {
+  fetchRiskQaProjection,
   getRiskQaActivity,
   RISK_QA_CONNECTION,
   RISK_QA_LOG_EVENTS,
   RISK_QA_RETRY_POLICY,
+  type RiskQaProjection,
 } from "./riskQaBridge";
 
 function compactSkills(skills: readonly string[]): string {
@@ -28,6 +32,11 @@ const statusClass: Record<string, string> = {
   "상태 미수신": "blocked",
   OFFLINE: "blocked",
   DEGRADED: "approval",
+  RUNNING: "working",
+  QUEUED: "waiting",
+  IDLE: "waiting",
+  BLOCKED: "blocked",
+  ERROR: "blocked",
 };
 
 export default function RiskQaPanel({
@@ -38,10 +47,28 @@ export default function RiskQaPanel({
   snapshot: Snapshot;
 }) {
   const { snapshot: backendSnapshot } = useBffFeed();
+  const [riskQaProjection, setRiskQaProjection] = useState<RiskQaProjection | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void fetchRiskQaProjection()
+      .then((next) => {
+        if (active) setRiskQaProjection(next);
+      })
+      .catch(() => {
+        if (active) setRiskQaProjection(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [backendSnapshot?.operations?.sequence]);
+
   const activities = RISK_QA_CONNECTION.map((department) => ({
     department,
     activity: getRiskQaActivity(department, agents, snapshot),
-    backend: backendSnapshot?.operations?.departments.find(
+    backend: riskQaProjection?.departments.find(
+      (item) => item.department_code === (department.id === "ops" ? "risk-management" : "qa-department"),
+    ) ?? backendSnapshot?.operations?.departments.find(
       (item) => item.department_code === (department.id === "ops" ? "risk-management" : "qa-department"),
     ),
   }));
@@ -62,15 +89,15 @@ export default function RiskQaPanel({
             <p className="eyebrow">ALLOWLISTED CONNECTION · 2 DEPARTMENTS</p>
             <h2 id="risk-qa-title">Risk · QA 현황</h2>
           </div>
-          <span className={`mini-badge ${snapshot.running ? "live" : "idle"}`}>
-            {snapshot.running ? "SIMULATION" : "IDLE"}
+          <span className={`mini-badge ${riskQaProjection?.status === "CONNECTED" ? "live" : snapshot.running ? "live" : "idle"}`}>
+            {riskQaProjection?.status === "CONNECTED" ? "EVENT CONNECTED" : snapshot.running ? "SIMULATION" : "DEGRADED"}
           </span>
         </div>
 
         <p className="risk-qa-note">
           Hermes Head가 부서 단위로 조율하고, 각 Worker는 독립 LangGraph + Ollama qwen3:1.7b로
-          non-binding context를 제공합니다. 이 패널의 작업 중 표시는 AI Office 시뮬레이션 Projection이며,
-          외부 런타임·주문·원장·Risk Limit 변경의 증거가 아닙니다.
+          non-binding context를 제공합니다. Worker 상태는 BFF의 agent.status.v1 projection을 우선 표시하며,
+          상태 event가 없을 때만 로컬 Office 상태를 보조 표시합니다. 주문·원장·Risk Limit 변경의 증거는 아닙니다.
         </p>
 
         <div className="risk-qa-metrics" aria-label="Risk와 QA Worker">
@@ -132,20 +159,28 @@ export default function RiskQaPanel({
               </div>
 
               <div className="risk-qa-staff" aria-label={`${department.name} Worker 목록`}>
-                {activity.employees.map(({ employee, agent }) => (
+                {activity.employees.map(({ employee, agent }) => {
+                  const runtimeAgent = riskQaProjection?.agents.find(
+                    (item) => item.agent_id === employee.profileId || item.worker_id === employee.profileId,
+                  );
+                  const displayedStatus = runtimeAgent?.status ?? agent?.status ?? "상태 미수신";
+                  return (
                   <div className="risk-qa-employee" key={employee.profileId}>
                     <div>
                       <b>{employee.name}</b>
                       <span>{employee.role}</span>
                     </div>
                     <code>{employee.profileId}</code>
-                    <span className={`risk-qa-agent-status ${agent ? statusClass[agent.status] ?? "waiting" : "blocked"}`}>
-                      {agent ? agent.status : "runtime 미수신"}
+                    <span className={`risk-qa-agent-status ${statusClass[displayedStatus] ?? "waiting"}`}>
+                      {runtimeAgent?.status ?? (agent ? agent.status : "runtime 미수신")}
                     </span>
                     <small>{compactSkills(employee.skills)}</small>
-                    {agent?.taskLabel ? <small className="risk-qa-agent-task">{agent.taskLabel}</small> : null}
+                    {runtimeAgent?.reason || agent?.taskLabel ? (
+                      <small className="risk-qa-agent-task">{runtimeAgent?.reason ?? agent?.taskLabel}</small>
+                    ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </article>
           ))}

@@ -35,7 +35,9 @@ def test_replay_bundle_preserves_trace_hash_and_is_deterministic() -> None:
         (("events", 0, "payload", "risk_decision_id"), "other-decision"),
     ],
 )
-def test_replay_bundle_rejects_cross_domain_mismatch(path: tuple[object, ...], value: str) -> None:
+def test_replay_bundle_rejects_cross_domain_mismatch(
+    path: tuple[object, ...], value: str
+) -> None:
     bundle = build_test_replay_bundle(make_test_packet())
     mutated = copy.deepcopy(bundle)
     target = mutated

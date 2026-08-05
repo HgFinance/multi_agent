@@ -8,6 +8,7 @@
  */
 
 import type { Agent, Snapshot } from "../game/sim";
+import { BFF } from "./readModel";
 
 export const RISK_QA_RETRY_POLICY = {
   maxRetries: 2,
@@ -182,6 +183,46 @@ export const RISK_QA_CONNECTION: readonly RiskQaDepartment[] = [
     ],
   },
 ] as const;
+
+export type RiskQaProjection = {
+  schema_version: "operator-domain.v1";
+  domain: "risk-qa";
+  mode: "DEMO";
+  status: "CONNECTED" | "DEGRADED";
+  observed_at: string;
+  event_bridge_connected: boolean;
+  sequence: number;
+  departments: ReadonlyArray<{
+    department_code: string;
+    status: string;
+    worker_count?: number;
+    active_worker_count?: number;
+    active_workers?: readonly string[];
+  }>;
+  agents: ReadonlyArray<{
+    agent_id: string;
+    worker_id: string | null;
+    status: string;
+    reason: string | null;
+  }>;
+  warnings: readonly string[];
+};
+
+export async function fetchRiskQaProjection(): Promise<RiskQaProjection> {
+  const response = await fetch(`${BFF}/ui/risk-qa`, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail =
+      typeof body === "object" && body !== null && "detail" in body
+        ? String((body as { detail?: unknown }).detail)
+        : `HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+  return body as RiskQaProjection;
+}
 
 export type RiskQaActivity = {
   departmentStatus: Snapshot["deptStatus"][string];

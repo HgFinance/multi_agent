@@ -56,6 +56,8 @@
 
 2026-08-05 재검증에서 Replay·통합 회귀 테스트 13개가 통과했고 Risk/QA 전체 테스트의 비외부 케이스가 통과했다. 샌드박스에서는 외부 Redis 의존 테스트 8개가 skip되었으며, 승인된 외부 smoke에서는 Redis Risk·QA Event 2건과 PostgreSQL rollback이 `READY`, Research Packet `packet_contract`는 `NOT_CONFIGURED`, 전체 상태는 `PARTIAL`이었다. 이는 실행 증거이며 이후 코드 변경 때 자동으로 유지되는 보증이 아니다.
 
+동일 재검증에서 Claude 환경(`/Users/baiohelseu/claude`)의 Risk/QA 전체 `ruff check`와 `ruff format --check`가 모두 통과했다. 참조가 없는 legacy Worker Graph·구형 Research Packet fixture·중복 Counterparty self-check도 제거했다. 실제 정책 Corpus·Issuer/JWKS·mTLS/IAM·API 생성 Decision Replay가 없다는 이유로 운영 승인은 계속 `BLOCKED`다.
+
 ## 3. Override 작업 순서
 
 ### P0-1. Risk Decision–QA Decision 공통 Replay

@@ -70,7 +70,14 @@ class RedisEventBus:
             if "BUSYGROUP" not in str(exc):
                 raise QaEventBusError(f"Redis Consumer Group 생성 실패: {exc}") from exc
 
-    def publish(self, *, event_id: UUID, event_type: str, trace_id: UUID, payload: dict[str, Any]) -> str:
+    def publish(
+        self,
+        *,
+        event_id: UUID,
+        event_type: str,
+        trace_id: UUID,
+        payload: dict[str, Any],
+    ) -> str:
         try:
             message_id = self.client.xadd(
                 self.stream,
@@ -140,7 +147,9 @@ class RedisEventBus:
             processed += 1
         return processed
 
-    def _claim_pending(self, *, count: int, min_idle_ms: int) -> list[tuple[Any, dict[Any, Any]]]:
+    def _claim_pending(
+        self, *, count: int, min_idle_ms: int
+    ) -> list[tuple[Any, dict[Any, Any]]]:
         if not hasattr(self.client, "xautoclaim"):
             return []
         try:
@@ -155,7 +164,11 @@ class RedisEventBus:
         except Exception as exc:
             raise QaEventBusError(f"Redis Pending Event 재확보 실패: {exc}") from exc
         # redis-py: (next_id, [(message_id, fields)], deleted_ids)
-        return self._flatten([("ignored", result[1])]) if result and len(result) > 1 else []
+        return (
+            self._flatten([("ignored", result[1])])
+            if result and len(result) > 1
+            else []
+        )
 
     @staticmethod
     def _flatten(streams: Any) -> list[tuple[Any, dict[Any, Any]]]:

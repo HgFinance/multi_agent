@@ -39,12 +39,15 @@ def test_p2_snapshot_and_gate_are_deterministic() -> None:
 
     assert snapshot.calculation_version == "risk-p2-derivatives-v1"
     assert len(snapshot.input_hash) == 64
-    assert evaluate_derivative_gate(
-        snapshot,
-        max_abs_delta=2,
-        max_abs_gamma=2,
-        max_stress_loss=10_000,
-    ) is DerivativeGateDecision.PASS
+    assert (
+        evaluate_derivative_gate(
+            snapshot,
+            max_abs_delta=2,
+            max_abs_gamma=2,
+            max_stress_loss=10_000,
+        )
+        is DerivativeGateDecision.PASS
+    )
 
 
 def test_p2_gate_rejects_stress_limit() -> None:
@@ -55,12 +58,15 @@ def test_p2_gate_rejects_stress_limit() -> None:
         vol_surface={"AAPL-C-200": 0.25},
     )
 
-    assert evaluate_derivative_gate(
-        snapshot,
-        max_abs_delta=2,
-        max_abs_gamma=2,
-        max_stress_loss=0,
-    ) is DerivativeGateDecision.REJECT
+    assert (
+        evaluate_derivative_gate(
+            snapshot,
+            max_abs_delta=2,
+            max_abs_gamma=2,
+            max_stress_loss=0,
+        )
+        is DerivativeGateDecision.REJECT
+    )
 
 
 def test_p2_rejects_empty_positions() -> None:

@@ -15,30 +15,25 @@ import importlib.util
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from departments.risk_qa_testkit.department_graph import (
     DepartmentGraphSpec,
     run_department_graph,
-)
-from departments.risk_qa_testkit.research_packet import (
-    ResearchPacketV2,
-    RiskQaPacket,
-    make_canonical_test_packet,
-    packet_from_api_payload,
 )
 from departments.risk_qa_testkit.replay import (
     ReplayValidationError,
     build_test_replay_bundle,
     validate_replay_bundle,
 )
-
+from departments.risk_qa_testkit.research_packet import (
+    ResearchPacketV2,
+    RiskQaPacket,
+    make_canonical_test_packet,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -58,54 +53,10 @@ class ProductionDisabled(RuntimeError):
 
 
 def _hash_payload(value: Any) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, default=str
-    ).encode("utf-8")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
-
-
-class _LegacyResearchPacket(BaseModel):
-    """Minimal cross-team handoff contract from Research to Risk and QA."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    packet_id: str
-    artifact_id: str
-    case_id: str
-    trace_id: str
-    as_known_at: datetime
-    input_hash: str = Field(min_length=16)
-    source_refs: list[str] = Field(min_length=1)
-    claims: list[dict[str, Any]] = Field(min_length=1)
-    risk_input: dict[str, Any]
-    qa_input: dict[str, Any]
-
-    @field_validator("as_known_at")
-    @classmethod
-    def as_known_at_must_be_timezone_aware(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            raise ValueError("as_known_at must include timezone")
-        return value
-
-    @model_validator(mode="after")
-    def claims_must_be_point_in_time(self) -> "ResearchPacket":
-        for claim in self.claims:
-            observed_at = claim.get("observed_at")
-            if observed_at is None:
-                raise ValueError("every claim requires observed_at")
-            try:
-                observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise ValueError("claim observed_at must be ISO datetime") from exc
-            if observed.tzinfo is None:
-                raise ValueError("claim observed_at must include timezone")
-            if observed > self.as_known_at:
-                raise ValueError("future claim is not allowed by ResearchPacket PIT")
-        return self
-
-
-# Compatibility name for callers; the authoritative payload is now V2.
-ResearchPacket = RiskQaPacket
 
 
 def _load_worker_module(path: Path, module_name: str) -> Any:
@@ -180,109 +131,9 @@ def _test_department_head_llm(system: str, prompt: str) -> str:
     )
 
 
-def _legacy_make_test_packet(*, as_known_at: datetime | None = None) -> ResearchPacket:
-    """Build a complete handoff fixture and activate every conditional Worker."""
-
-    known_at = as_known_at or datetime(2026, 8, 4, tzinfo=timezone.utc)
-    if known_at.tzinfo is None:
-        raise ValueError("test packet as_known_at must include timezone")
-    packet_id = "research-packet-test-001"
-    artifact_id = "artifact-test-001"
-    case_id = "case-test-001"
-    trace_id = "trace-test-risk-qa-001"
-    source_refs = [
-        "research:evidence:test-citation-001",
-        "research:market_snapshot:test-snapshot-001",
-    ]
-    scopes = [
-        "risk.trading_state.read",
-        "risk.p1.snapshot",
-        "risk.case.check",
-        "risk.compliance.check",
-        "risk.trading_state.record.read",
-        "qa.evidence.check",
-        "qa.evidence.rag",
-        "qa.model_risk.evaluate",
-        "qa.internal_audit.evaluate",
-        "qa.ops.evaluate",
-        "qa.tool_permission.check",
-        "qa.incident.record",
-    ]
-    claims = [
-        {
-            "claim_id": "claim-test-supported",
-            "text": "TEST fixture market evidence is available",
-            "result": "SUPPORTED",
-            "evidence_refs": [source_refs[0]],
-            "observed_at": known_at.isoformat(),
-        },
-        {
-            "claim_id": "claim-test-unsupported",
-            "text": "TEST fixture intentionally exercises unsupported-claim routing",
-            "result": "UNSUPPORTED",
-            "evidence_refs": [],
-            "observed_at": known_at.isoformat(),
-        },
-    ]
-    risk_input = {
-        "trace_id": trace_id,
-        "case_id": case_id,
-        "as_of": known_at.isoformat(),
-        "allowed_scopes": scopes,
-        "query": "test compliance policy PIT citation and counterparty evidence",
-        "trading_state": "ENABLED",
-        "assessment": {"verdict": "approve", "source": "test-risk-engine"},
-        "compliance": {
-            "grounded": True,
-            "observed_at": known_at.isoformat(),
-            "evidence_refs": [source_refs[0]],
-        },
-        "counterparty": {"status": "HEALTHY", "observed_at": known_at.isoformat()},
-        "derivatives": {"greeks": {"delta": "0.10"}, "observed_at": known_at.isoformat()},
-    }
-    qa_input = {
-        "trace_id": trace_id,
-        "case_id": case_id,
-        "decision_time": known_at.isoformat(),
-        "allowed_scopes": scopes,
-        "query": "test citation contradiction and entity relationship review",
-        "artifact": {
-            "artifact_id": artifact_id,
-            "packet_id": packet_id,
-            "source_refs": source_refs,
-        },
-        "evidence_store": {"source_refs": source_refs, "as_known_at": known_at.isoformat()},
-        "assessment": {"claim_checks": claims},
-        "hallucination_reviews": claims,
-        "model_risk": {"status": "TESTING", "model_id": "qwen3:1.7b"},
-        "internal_audit": {"status": "TESTING", "events": []},
-        "ops_assessment": {"status": "HEALTHY", "breaches": []},
-        "permission_check": {"result": "ALLOWED", "reason": "test allowlist"},
-        "incident": {
-            "incident_id": "incident-test-001",
-            "severity": "SEV3",
-            "observed_at": known_at.isoformat(),
-        },
-        "incident_events": [],
-    }
-    core = {
-        "packet_id": packet_id,
-        "artifact_id": artifact_id,
-        "case_id": case_id,
-        "trace_id": trace_id,
-        "as_known_at": known_at.isoformat(),
-        "source_refs": source_refs,
-        "claims": claims,
-    }
-    packet_hash = _hash_payload(core)
-    risk_input["input_hash"] = packet_hash
-    qa_input["input_hash"] = packet_hash
-    return ResearchPacket(
-        **core,
-        input_hash=packet_hash,
-        risk_input=risk_input,
-        qa_input=qa_input,
-    )
+# Compatibility export used by the existing Risk/QA testkit callers. The
+# canonical payload remains RiskQaPacket backed by ResearchPacketV2.
+ResearchPacket = RiskQaPacket
 
 
 def make_test_packet(*, as_known_at: datetime | None = None) -> RiskQaPacket:
@@ -300,13 +151,12 @@ def _worker_summary(report: dict[str, Any]) -> dict[str, Any]:
         "degraded": report.get("degraded"),
         "worker_count": len(report.get("workers", [])),
         "skill_result_count": sum(
-            len(worker.get("skill_results", []))
-            for worker in report.get("workers", [])
+            len(worker.get("skill_results", [])) for worker in report.get("workers", [])
         ),
     }
 
 
-def _risk_deterministic_gate_skeleton(packet: ResearchPacket) -> dict[str, Any]:
+def _risk_deterministic_gate_skeleton(packet: RiskQaPacket) -> dict[str, Any]:
     """Represent the production RiskEngine owner without binding execution."""
 
     trading_state = packet.risk_input.get("trading_state")
@@ -331,13 +181,12 @@ def _risk_deterministic_gate_skeleton(packet: ResearchPacket) -> dict[str, Any]:
     }
 
 
-def _qa_deterministic_gate_skeleton(packet: ResearchPacket) -> dict[str, Any]:
+def _qa_deterministic_gate_skeleton(packet: RiskQaPacket) -> dict[str, Any]:
     """Represent EvidenceQaEngine ownership without declaring an operational PASS."""
 
     claims = packet.qa_input.get("assessment", {}).get("claim_checks", [])
     unsupported = sum(
-        claim.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
-        for claim in claims
+        claim.get("result") in {"UNSUPPORTED", "CONTRADICTED"} for claim in claims
     )
     return {
         "status": "COMPLETED",
@@ -352,7 +201,7 @@ def _qa_deterministic_gate_skeleton(packet: ResearchPacket) -> dict[str, Any]:
 def run_risk_qa_pipeline(
     mode: PipelineMode | str = PipelineMode.TEST,
     *,
-    packet: ResearchPacket | None = None,
+    packet: RiskQaPacket | None = None,
     worker_llm: Any | None = None,
     head_llm: Any | None = None,
     worker_runtime: WorkerRuntime | str = WorkerRuntime.DETERMINISTIC,
@@ -467,14 +316,14 @@ def run_risk_qa_pipeline(
         and len(qa_report.get("workers", [])) == 5
         and not qa_report.get("not_executed")
         and len(qa_report.get("handoffs", [])) == 5
-        and qa_report.get("received_department_handoff", {}).get("from") == "risk-supervisor"
+        and qa_report.get("received_department_handoff", {}).get("from")
+        == "risk-supervisor"
     )
     # RiskQaPacket validates this against the canonical ResearchPacketV2 hash.
     packet_ok = isinstance(packet.research_packet, ResearchPacketV2)
     completed = packet_ok and risk_ok and qa_ok
     skeleton_ok = (
-        risk_gate["status"] == "COMPLETED"
-        and qa_gate["status"] == "COMPLETED"
+        risk_gate["status"] == "COMPLETED" and qa_gate["status"] == "COMPLETED"
     )
     completed = completed and skeleton_ok
     try:
@@ -493,8 +342,7 @@ def run_risk_qa_pipeline(
         }
     completed = completed and replay_contract.get("replayable") is True
     manual_review_required = bool(
-        qa_gate.get("decision") != "PASS"
-        or qa_report.get("head", {}).get("escalate")
+        qa_gate.get("decision") != "PASS" or qa_report.get("head", {}).get("escalate")
     )
     return {
         "mode": selected.value,
@@ -517,14 +365,47 @@ def run_risk_qa_pipeline(
         "qa_gate": qa_gate,
         "replay_contract": replay_contract,
         "stages": [
-            {"stage": "research_packet_fixture", "status": "COMPLETED" if packet_ok else "DEGRADED"},
-            {"stage": "risk_deterministic_gate_skeleton", "status": risk_gate["status"], "binding": False},
-        {"stage": "risk_department_head_employee_graph", "status": "COMPLETED" if risk_ok else "DEGRADED", "summary": _worker_summary(risk_report), "head_id": "risk-supervisor", "handoff_count": len(risk_report.get("handoffs", []))},
-        {"stage": "risk_to_qa_department_handoff", "status": "COMPLETED", "binding": False},
-        {"stage": "qa_deterministic_gate_skeleton", "status": qa_gate["status"], "binding": False},
-        {"stage": "qa_department_head_employee_graph", "status": "COMPLETED" if qa_ok else "DEGRADED", "summary": _worker_summary(qa_report), "head_id": "qa-audit-supervisor", "handoff_count": len(qa_report.get("handoffs", []))},
-            {"stage": "risk_qa_test_gate", "status": "COMPLETED" if completed else "DEGRADED"},
-            {"stage": "cross_domain_replay_contract", "status": replay_contract["status"]},
+            {
+                "stage": "research_packet_fixture",
+                "status": "COMPLETED" if packet_ok else "DEGRADED",
+            },
+            {
+                "stage": "risk_deterministic_gate_skeleton",
+                "status": risk_gate["status"],
+                "binding": False,
+            },
+            {
+                "stage": "risk_department_head_employee_graph",
+                "status": "COMPLETED" if risk_ok else "DEGRADED",
+                "summary": _worker_summary(risk_report),
+                "head_id": "risk-supervisor",
+                "handoff_count": len(risk_report.get("handoffs", [])),
+            },
+            {
+                "stage": "risk_to_qa_department_handoff",
+                "status": "COMPLETED",
+                "binding": False,
+            },
+            {
+                "stage": "qa_deterministic_gate_skeleton",
+                "status": qa_gate["status"],
+                "binding": False,
+            },
+            {
+                "stage": "qa_department_head_employee_graph",
+                "status": "COMPLETED" if qa_ok else "DEGRADED",
+                "summary": _worker_summary(qa_report),
+                "head_id": "qa-audit-supervisor",
+                "handoff_count": len(qa_report.get("handoffs", [])),
+            },
+            {
+                "stage": "risk_qa_test_gate",
+                "status": "COMPLETED" if completed else "DEGRADED",
+            },
+            {
+                "stage": "cross_domain_replay_contract",
+                "status": replay_contract["status"],
+            },
         ],
         "risk": risk_report,
         "qa": qa_report,

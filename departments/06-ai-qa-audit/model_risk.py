@@ -64,12 +64,26 @@ class ModelRiskEngine:
 
     def evaluate(self, evidence: ModelRiskInput) -> ModelRiskAssessment:
         payload = evidence.__dict__ | {"model_id": str(evidence.model_id)}
-        input_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        input_hash = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         reasons: list[str] = []
-        if not evidence.model_version.strip() or not evidence.prompt_version.strip() or not evidence.dataset_version.strip():
+        if (
+            not evidence.model_version.strip()
+            or not evidence.prompt_version.strip()
+            or not evidence.dataset_version.strip()
+        ):
             reasons.append("version_lineage_missing")
-        values = (evidence.accuracy, evidence.calibration_error, evidence.drift_score, evidence.protected_failure_rate)
-        if any(not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0 for value in values):
+        values = (
+            evidence.accuracy,
+            evidence.calibration_error,
+            evidence.drift_score,
+            evidence.protected_failure_rate,
+        )
+        if any(
+            not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0
+            for value in values
+        ):
             reasons.append("metric_out_of_range")
         if evidence.evaluation_count < self.min_evaluations:
             reasons.append("insufficient_evaluation_count")
@@ -87,4 +101,6 @@ class ModelRiskEngine:
             decision = ModelRiskDecision.WARN
         else:
             decision = ModelRiskDecision.PASS
-        return ModelRiskAssessment(decision, tuple(reasons), CALCULATION_VERSION, input_hash)
+        return ModelRiskAssessment(
+            decision, tuple(reasons), CALCULATION_VERSION, input_hash
+        )

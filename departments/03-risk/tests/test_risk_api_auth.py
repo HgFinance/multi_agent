@@ -21,7 +21,12 @@ class _FakeStateStore:
 
     def set_state(self, scope, state, reason, set_by):
         self.calls.append((scope, state.value, reason, set_by))
-        return {"scope": scope, "state": state.value, "reason": reason, "set_by": set_by}
+        return {
+            "scope": scope,
+            "state": state.value,
+            "reason": reason,
+            "set_by": set_by,
+        }
 
     def clear_state(self, scope):
         self.calls.append((scope, "CLEARED", "", ""))
@@ -67,7 +72,9 @@ def test_trading_state_write_requires_signed_service_identity(client):
     wrong_service = http.put(
         "/risk/v1/trading-state/fund:test",
         json=body,
-        headers=_headers("svc-risk-operator", ["risk.trading_state.write"], service="other-api"),
+        headers=_headers(
+            "svc-risk-operator", ["risk.trading_state.write"], service="other-api"
+        ),
     )
     assert wrong_service.status_code == 403
 

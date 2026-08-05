@@ -17,6 +17,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api.portfolio_runtime import runtime_snapshot
 
+try:
+    from agent_status import agent_status_snapshot
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from apps.api.agent_status import agent_status_snapshot
+
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -141,6 +146,31 @@ def build_operations_snapshot() -> dict[str, Any]:
             )
 
     live_messages = list(run.get("messages", [])) if run else []
+    agent_statuses = agent_status_snapshot()
+    for row in departments:
+        department_agents = [
+            item
+            for item in agent_statuses["agents"]
+            if item.get("department_code") == row["department_code"]
+        ]
+        if not department_agents:
+            continue
+        active_agents = [
+            item["agent_id"]
+            for item in department_agents
+            if item.get("status") in {"QUEUED", "RUNNING", "WAITING_APPROVAL"}
+        ]
+        row["runtime_observed"] = True
+        row["active_worker_count"] = len(active_agents)
+        row["active_workers"] = active_agents
+        if active_agents:
+            row["status"] = "RUNNING"
+        elif any(item.get("status") == "ERROR" for item in department_agents):
+            row["status"] = "ERROR"
+        elif any(item.get("status") == "BLOCKED" for item in department_agents):
+            row["status"] = "BLOCKED"
+        else:
+            row["status"] = "IDLE"
     implemented = sum(1 for item in communications if str(item["status"]).startswith("IMPLEMENTED"))
     planned = sum(1 for item in communications if item["status"] == "PLANNED")
     runtime_status = str(runtime.get("status", "OFFLINE"))
@@ -151,7 +181,10 @@ def build_operations_snapshot() -> dict[str, Any]:
         "observed_at": observed_at,
         "status": "CONNECTED" if runtime_connected and runtime_status in {"QUEUED", "RUNNING", "COMPLETED"} else "DEGRADED",
         "runtime_connected": runtime_connected,
-        "event_bridge_connected": False,
+        "event_bridge_connected": bool(agent_statuses["sequence"]),
+        "sequence": agent_statuses["sequence"],
+        "agent_statuses": agent_statuses["agents"],
+        "agent_status_events": agent_statuses["events"],
         "message_count": len(live_messages),
         "implemented_event_contracts": implemented,
         "planned_event_contracts": planned,

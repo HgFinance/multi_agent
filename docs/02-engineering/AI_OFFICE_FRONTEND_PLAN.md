@@ -14,7 +14,7 @@
 
 ## 2. 현재 구현과 목표의 차이
 
-현재 `ai-office`는 Next.js, React, TypeScript 기반 시각·상호작용 Prototype이다. 원본의 12개 부서를 CEO Office, 6개 투자 본부와 Agent Workforce 등 8개 조직·2개 층으로 바꿨고, Trading/Portfolio DEMO Snapshot Panel, Risk·QA 계약 Panel과 `apps/api/main.py`의 Read-only BFF도 추가했다. 2026-08-03 clean Node 22 환경에서 Build와 Render Test `2/2`를 통과했다. 다만 직원 이동과 업무 흐름은 여전히 Frontend 메모리의 Scripted Simulation이며, Snapshot과 Risk·QA Panel도 실제 운영 API가 아니라 DEMO·정적 계약 Projection이다.
+현재 `ai-office`는 Next.js, React, TypeScript 기반 시각·상호작용 Prototype이다. 원본의 12개 부서를 CEO Office, 6개 투자 본부와 Agent Workforce 등 8개 조직·2개 층으로 바꿨고, Trading/Portfolio DEMO Snapshot Panel, Risk·QA 계약 Panel과 `apps/api/main.py`의 Read-only BFF도 추가했다. BFF는 `agent.status.v1` Projector·REST Snapshot·WebSocket Event를 제공하고, 포트폴리오 추천 실행 중에만 Worker Projection을 활성화한다. 외부 Hermes Kanban/Redis Stream을 직접 연결한 운영 Bridge는 아직 아니며 mode는 계속 DEMO로 명시한다.
 
 | 구분 | 현재 `ai-office` | 목표 상태 |
 |---|---|---|
@@ -132,7 +132,7 @@ Hermes Kanban은 Agent 업무 배정·진행·차단 상태의 Source다. `Kanba
 멱등 소비해 Supabase Agent Status Read Model을 갱신한다. Browser와 BFF는 Kanban SQLite를 직접 읽거나
 Task를 수정하지 않는다. 상세 결정은 [ADR-0001](adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
 
-현재 `apps/api/main.py`는 `/health`와 테스트 Paper Loop 기반 `/ui/snapshot`만 제공하는 DEMO BFF다.
+현재 `apps/api/main.py`는 `/health`, `/ui/snapshot`, `/ws/operations`, domain Read Model과 안전한 승인 요청 Command 계약을 제공하는 DEMO BFF다.
 `/agent/ask`는 Hermes Tool 실행 가능성 때문에 기본 비활성화하며, Supabase Auth·사용자 권한·Profile
 Tool Allowlist가 연결되기 전에는 운영에서 열지 않는다.
 

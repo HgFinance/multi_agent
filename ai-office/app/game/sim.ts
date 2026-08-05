@@ -32,9 +32,13 @@ export type Anim = "idle" | "walk" | "type" | "talk" | "sit";
 export type Facing = "up" | "down" | "left" | "right";
 
 const WALK_SPEED = 3.6; // tiles / sec
+const REMOTE_SPEECH_SECONDS = 8;
+const REMOTE_COMPLETION_HOLD_SECONDS = 10;
+const REMOTE_WORK_START_MINUTES = 9 * 60;
+const REMOTE_WORK_END_MINUTES = 18 * 60;
 /**
  * 사내 시계는 '시뮬레이션 시간' 기준으로 흐른다 — 시뮬 1초 = 1.6분.
- * 배속을 올리면 시계도 같이 빨라지므로, 몇 배속으로 보든 하루는 07:00 → 약 17:00으로 끝난다.
+ * portfolio LangGraph run 중에는 09:00 → 18:00 근무시간으로 표시한다.
  */
 const SIM_MIN_PER_SEC = 1.6;
 /** ⏭ 건너뛰기(터보)일 때의 배속 */
@@ -232,6 +236,10 @@ export class Company {
   private locked = new Set<string>();
   private remoteMessageIds = new Set<string>();
   private remoteRuntime = true;
+  private remoteRunId: string | null = null;
+  private remoteCompletionSeen = false;
+  private remoteCompletionHold = 0;
+  private remoteRunElapsed = 0;
 
   constructor() {
     this.reset();
@@ -257,6 +265,10 @@ export class Company {
     this.locked.clear();
     this.remoteMessageIds.clear();
     this.remoteRuntime = true;
+    this.remoteRunId = null;
+    this.remoteCompletionSeen = false;
+    this.remoteCompletionHold = 0;
+    this.remoteRunElapsed = 0;
     this.chat = [];
     this.focusMode = false;
     this.spotlight = null;
@@ -294,11 +306,33 @@ export class Company {
     this.remoteRuntime = true;
     const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
     const completed = Boolean(runtime?.result) && !running;
+    const runId = runtime?.run_id ?? null;
+    if (runId !== this.remoteRunId) {
+      this.remoteRunId = runId;
+      this.remoteCompletionSeen = false;
+      this.remoteCompletionHold = 0;
+      this.remoteRunElapsed = 0;
+    }
+    if (running) {
+      this.remoteCompletionSeen = false;
+      this.remoteCompletionHold = 0;
+    } else if (completed && !this.remoteCompletionSeen) {
+      this.remoteCompletionSeen = true;
+      this.remoteCompletionHold = REMOTE_COMPLETION_HOLD_SECONDS;
+    }
     this.running = running;
     // A recommendation result is not a simulated workday completion and must
     // not trigger the legacy content-report publisher.
     this.dayComplete = false;
-    this.phaseIndex = running ? 2 : completed ? 12 : 0;
+    const showingRemoteScripts = this.agents.some((agent) => agent.speechFor > 0);
+    this.phaseIndex = running ? 2 : completed ? (this.remoteCompletionHold > 0 || showingRemoteScripts ? 11 : 12) : 0;
+    if (running) {
+      this.clockMinutes = Math.min(REMOTE_WORK_END_MINUTES - 60, REMOTE_WORK_START_MINUTES + this.remoteRunElapsed * 60);
+    } else if (completed) {
+      this.clockMinutes = this.remoteCompletionHold > 0 ? REMOTE_WORK_END_MINUTES - 60 : REMOTE_WORK_END_MINUTES;
+    } else {
+      this.clockMinutes = REMOTE_WORK_START_MINUTES;
+    }
     this.meetingTitle = runtime?.active_handoff?.title ?? null;
     this.approvalPending = false;
     this.approved = false;
@@ -339,6 +373,15 @@ export class Company {
         continue;
       }
       if (spoken.has(agent.id)) continue;
+      // Snapshot polling runs more often than the runtime event stream. Keep a
+      // worker's latest script visible until its display window expires instead
+      // of clearing it on every completed-runtime projection.
+      if (agent.speechFor > 0) {
+        agent.anim = "talk";
+        agent.status = "업무 중";
+        agent.taskLabel = "LangGraph 결과 기록";
+        continue;
+      }
       agent.x = agent.home.x;
       agent.y = agent.home.y;
       agent.path = [];
@@ -362,7 +405,7 @@ export class Company {
       agent.taskLabel = "부서장 간 handoff";
       agent.speech = handoff?.message ?? null;
       agent.speechKind = "talk";
-      agent.speechFor = 3;
+      agent.speechFor = REMOTE_SPEECH_SECONDS;
     });
 
     const runtimeDepartments = runtime ? Object.entries(departmentMap) : [];
@@ -380,11 +423,19 @@ export class Company {
       this.pushChat("staff", name, message.text, eventTime);
       this.pushLog(message.kind === "department_handoff" ? "🤝" : "🧠", message.text, message.kind === "run_error" ? "lav" : "mint", eventTime);
       if (message.kind === "worker_summary" && message.worker_id) {
-        const speaker = this.agents.find((agent) => agent.role === message.worker_id);
+        const speaker =
+          this.agents.find((agent) => agent.role === message.worker_id) ??
+          this.agents.find(
+            (agent) =>
+              agent.deptId === departmentMap[message.department_code ?? ""] &&
+              agent.rank !== "lead" &&
+              agent.rank !== "ceo" &&
+              agent.speechFor <= 0,
+          );
         if (speaker) {
           speaker.speech = message.text;
           speaker.speechKind = "talk";
-          speaker.speechFor = 3;
+          speaker.speechFor = REMOTE_SPEECH_SECONDS;
           speaker.anim = "talk";
         }
       }
@@ -1190,6 +1241,8 @@ export class Company {
     if (this.paused) return;
     if (this.remoteRuntime) {
       const dt = Math.min(rawDt, 0.05) * this.speed;
+      this.remoteCompletionHold = Math.max(0, this.remoteCompletionHold - dt);
+      if (this.running) this.remoteRunElapsed += dt;
       for (const agent of this.agents) {
         if (agent.speechFor > 0) agent.speechFor = Math.max(0, agent.speechFor - dt);
         if (agent.speechFor === 0) agent.speech = null;

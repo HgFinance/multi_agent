@@ -9,16 +9,16 @@ from pathlib import Path
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
-import risk_employee_workers  # noqa: E402,F401 - loads the isolated skill package.
-from risk_worker_skill_runtime.contracts import hash_payload  # noqa: E402
-from risk_worker_skill_runtime.guards import (  # noqa: E402
+import risk_employee_workers  # noqa: F401 - loads the isolated skill package.
+from risk_worker_skill_runtime.contracts import hash_payload
+from risk_worker_skill_runtime.guards import (
     build_context,
     freshness_check,
     scope_check,
 )
-from risk_worker_skill_runtime.rag_router import choose_rag_route  # noqa: E402
-from risk_worker_skill_runtime.tools import invoke_tool  # noqa: E402
-from risk_worker_skill_runtime.trace import SkillTrace  # noqa: E402
+from risk_worker_skill_runtime.rag_router import choose_rag_route
+from risk_worker_skill_runtime.tools import invoke_tool
+from risk_worker_skill_runtime.trace import SkillTrace
 
 
 def test_context_hash_and_scope_are_deterministic():
@@ -48,12 +48,8 @@ def test_pit_freshness_rejects_future_and_stale_data():
     context = build_context(
         {"as_of": "2026-08-04T00:00:00Z"}, worker_id="market-liquidity-worker"
     )
-    future = freshness_check(
-        context, "2026-08-04T00:00:01Z", max_age_seconds=3600
-    )
-    stale = freshness_check(
-        context, "2026-08-03T00:00:00Z", max_age_seconds=3600
-    )
+    future = freshness_check(context, "2026-08-04T00:00:01Z", max_age_seconds=3600)
+    stale = freshness_check(context, "2026-08-03T00:00:00Z", max_age_seconds=3600)
     assert future.error_code == "FUTURE_INPUT"
     assert stale.error_code == "STALE_INPUT"
 

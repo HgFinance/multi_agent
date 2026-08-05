@@ -118,9 +118,13 @@ class OpenAIEmbeddingProvider:
         try:
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - depends on deployment image
-            raise IngestionError("openai package is required for production ingestion") from exc
+            raise IngestionError(
+                "openai package is required for production ingestion"
+            ) from exc
         self._client = OpenAI()
-        self.model = model or os.environ.get("AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small")
+        self.model = model or os.environ.get(
+            "AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small"
+        )
         self.dimensions = dimensions
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
@@ -132,8 +136,12 @@ class OpenAIEmbeddingProvider:
             dimensions=self.dimensions,
         )
         vectors = [list(item.embedding) for item in response.data]
-        if len(vectors) != len(texts) or any(len(vector) != self.dimensions for vector in vectors):
-            raise IngestionError("embedding provider returned an unexpected vector shape")
+        if len(vectors) != len(texts) or any(
+            len(vector) != self.dimensions for vector in vectors
+        ):
+            raise IngestionError(
+                "embedding provider returned an unexpected vector shape"
+            )
         return vectors
 
 
@@ -203,7 +211,9 @@ class PgvectorEvidenceRepository:
             for external_id, document_chunks in grouped.items():
                 document_id, current_version = documents[external_id]
                 document_hash = hashlib.sha256(
-                    "|".join(chunk.content_hash for _, chunk, _ in document_chunks).encode()
+                    "|".join(
+                        chunk.content_hash for _, chunk, _ in document_chunks
+                    ).encode()
                 ).hexdigest()
                 cursor.execute(
                     """
@@ -233,7 +243,10 @@ class PgvectorEvidenceRepository:
                         version,
                         document_hash,
                         document_chunks[0][1].source_path,
-                        sum(len(chunk.content.encode("utf-8")) for _, chunk, _ in document_chunks),
+                        sum(
+                            len(chunk.content.encode("utf-8"))
+                            for _, chunk, _ in document_chunks
+                        ),
                         document_chunks[0][1].license_scope,
                         document_chunks[0][1].published_at,
                         document_chunks[0][1].observed_at,
@@ -261,7 +274,9 @@ class PgvectorEvidenceRepository:
                             len(chunk.content.split()),
                             len(chunk.content),
                             _vector_literal(vector, embedder.dimensions),
-                            os.environ.get("AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small"),
+                            os.environ.get(
+                                "AGENTIC_RAG_EMBEDDING_MODEL", "text-embedding-3-small"
+                            ),
                             chunk.license_scope,
                             chunk.published_at,
                             chunk.observed_at,
@@ -299,7 +314,9 @@ def _front_matter(raw: str) -> tuple[dict[str, str], str]:
 
 
 def _chunk_text(body: str, *, max_chars: int) -> list[str]:
-    sections = [part.strip() for part in re.split(r"\n(?=## )", body.strip()) if part.strip()]
+    sections = [
+        part.strip() for part in re.split(r"\n(?=## )", body.strip()) if part.strip()
+    ]
     result: list[str] = []
     for section in sections:
         if len(section) <= max_chars:
@@ -329,7 +346,9 @@ def _optional_timestamp(value: str | None) -> str | None:
 def _vector_literal(vector: Sequence[float], dimensions: int) -> str:
     if len(vector) != dimensions:
         raise IngestionError("vector dimension mismatch")
-    if any(not isinstance(value, (int, float)) or not isfinite(value) for value in vector):
+    if any(
+        not isinstance(value, (int, float)) or not isfinite(value) for value in vector
+    ):
         raise IngestionError("embedding contains a non-finite value")
     return "[" + ",".join(format(float(value), ".10g") for value in vector) + "]"
 
@@ -341,7 +360,9 @@ def _json(value: dict[str, Any]) -> str:
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Ingest real QA policy documents into pgvector")
+    parser = argparse.ArgumentParser(
+        description="Ingest real QA policy documents into pgvector"
+    )
     parser.add_argument("corpus_dir", type=Path)
     args = parser.parse_args()
     mode = os.environ.get("QA_INGEST_MODE", "production").strip().lower()

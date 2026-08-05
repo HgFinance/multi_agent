@@ -57,6 +57,7 @@ agent-ops-monitor/incident-postmortem-agent/tool-permission-security-reviewer는
                                    # _render_report_md는 run_qa_department() 반환값을 그대로 옮기기만
                                    # 하는 순수 함수다 - LLM이 리포트 형식·내용을 자유 창작하지 않는다.
 """
+
 from __future__ import annotations
 
 # Current runtime: Evidence QA is always evaluated first; Model Risk and Internal
@@ -116,7 +117,9 @@ def _journal_module():
     global _JOURNAL_MODULE
     if _JOURNAL_MODULE is None:
         journal_path = _BASE / "harness" / "journal.py"
-        spec = importlib.util.spec_from_file_location("qa_execution_journal", journal_path)
+        spec = importlib.util.spec_from_file_location(
+            "qa_execution_journal", journal_path
+        )
         if spec is None or spec.loader is None:
             raise RuntimeError(f"QA journal을 로드할 수 없습니다: {journal_path}")
         module = importlib.util.module_from_spec(spec)
@@ -125,6 +128,7 @@ def _journal_module():
         _JOURNAL_MODULE = module
     return _JOURNAL_MODULE
 
+
 def _ollama_base_url() -> str:
     raw = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/v1").rstrip("/")
     return raw if raw.endswith("/v1") else f"{raw}/v1"
@@ -132,11 +136,13 @@ def _ollama_base_url() -> str:
 
 # 직원 LLM은 부서장 Hermes와 분리된 로컬/팀 Ollama 런타임이다.
 # 주소와 모델은 환경변수로 주입해 개발·CI·운영 환경을 섞지 않는다.
-internal_llm = wrap_openai(OpenAI(
-    base_url=_ollama_base_url(),
-    api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
-    timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
-))
+internal_llm = wrap_openai(
+    OpenAI(
+        base_url=_ollama_base_url(),
+        api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+        timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
+    )
+)
 
 
 def _call_internal_llm(prompt: str) -> str:
@@ -173,7 +179,12 @@ def _hermes_model_config() -> dict[str, str | None]:
         provider = base_url = api_mode = None
     if not model:
         raise ValueError("Hermes config model.default is required")
-    return {"model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode}
+    return {
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "api_mode": api_mode,
+    }
 
 
 def _profile_dir() -> Path:
@@ -196,21 +207,38 @@ def _hermes_runtime_metadata() -> dict:
         profile_dir = _profile_dir()
         skills_dir = profile_dir / "skills"
         memories_dir = profile_dir / "memories"
-        runtime_config = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
-        runtime_model = runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
-        runtime_provider = runtime_model.get("provider") if isinstance(runtime_model, dict) else None
-        runtime_default = runtime_model.get("default") if isinstance(runtime_model, dict) else runtime_model
+        runtime_config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
+        runtime_model = (
+            runtime_config.get("model", {}) if isinstance(runtime_config, dict) else {}
+        )
+        runtime_provider = (
+            runtime_model.get("provider") if isinstance(runtime_model, dict) else None
+        )
+        runtime_default = (
+            runtime_model.get("default")
+            if isinstance(runtime_model, dict)
+            else runtime_model
+        )
         metadata.update(
             {
                 "runtime_profile_dir": str(profile_dir),
                 "runtime_config_provider": runtime_provider,
                 "runtime_config_model": runtime_default,
-                "runtime_config_matches_source": runtime_provider == model["provider"] and runtime_default == model["model"],
+                "runtime_config_matches_source": runtime_provider == model["provider"]
+                and runtime_default == model["model"],
                 "soul_md_present": (profile_dir / "SOUL.md").is_file(),
                 "skills_dir_present": skills_dir.is_dir(),
-                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md")) if skills_dir.is_dir() else 0,
+                "skill_file_count": sum(1 for _ in skills_dir.rglob("SKILL.md"))
+                if skills_dir.is_dir()
+                else 0,
                 "memories_dir_present": memories_dir.is_dir(),
-                "memory_file_count": sum(1 for path in memories_dir.iterdir() if path.is_file()) if memories_dir.is_dir() else 0,
+                "memory_file_count": sum(
+                    1 for path in memories_dir.iterdir() if path.is_file()
+                )
+                if memories_dir.is_dir()
+                else 0,
                 "auth_present": (profile_dir / "auth.json").is_file(),
                 "env_present": (profile_dir / ".env").is_file(),
             }
@@ -234,7 +262,9 @@ def _hermes_profile_scope():
 
 def _persona(name: str) -> str:
     personalities = _hermes_config().get("agent", {}).get("personalities", {})
-    if not isinstance(personalities, dict) or not isinstance(personalities.get(name), str):
+    if not isinstance(personalities, dict) or not isinstance(
+        personalities.get(name), str
+    ):
         raise TypeError(f"{name} persona is missing from hermes/config.yaml")
     return personalities[name]
 
@@ -246,19 +276,23 @@ class QAState(TypedDict, total=False):
     internal_audit: dict
     internal_audit_department: str
     audit_escalate: bool
-    artifact: dict          # Artifact JSON (Claim 포함) - 검토 대상
-    evidence_store: dict    # {evidence_id: EvidenceChunk 필드} - QA는 근거를 직접 수집하지 않는다
-    decision_time: str      # PIT 기준 시각 (ISO8601)
-    assessment: dict        # evidence-qa-agent 결정론 결과 (QaAssessment)
-    claim_narrative: str    # evidence-qa-agent LLM 결과 (grounded 서술)
+    artifact: dict  # Artifact JSON (Claim 포함) - 검토 대상
+    evidence_store: (
+        dict  # {evidence_id: EvidenceChunk 필드} - QA는 근거를 직접 수집하지 않는다
+    )
+    decision_time: str  # PIT 기준 시각 (ISO8601)
+    assessment: dict  # evidence-qa-agent 결정론 결과 (QaAssessment)
+    claim_narrative: str  # evidence-qa-agent LLM 결과 (grounded 서술)
     hallucination_reviews: list  # hallucination-critic 결과 (UNSUPPORTED/CONTRADICTED claim만, 비었으면 전부 SUPPORTED/PARTIAL)
-    verdict: str            # 최종 값 - 항상 assessment 에서만 옴
+    verdict: str  # 최종 값 - 항상 assessment 에서만 옴
     narrative: str
     supervisor_llm_called: bool
     supervisor_call_status: str
     hermes_runtime: dict
     escalate: bool
-    notion_upload: dict     # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    notion_upload: (
+        dict  # Reporter Node 결과 ({"ok": bool, "url"|"reason"|"error": ...})
+    )
     fallbacks: list[dict]
     employee_workers: dict
     observability: dict
@@ -271,19 +305,36 @@ def _fallback(stage: str, exc: Exception) -> dict:
 
 
 def _fallback_narrative(stage: str, exc: Exception) -> str:
-    return (f"{stage} Agent를 사용할 수 없어 결정론적 QA 판정만 유지했습니다 "
-            f"({type(exc).__name__}). 원본 부서와 독립 검토자에게 수동 확인을 요청합니다.")
+    return (
+        f"{stage} Agent를 사용할 수 없어 결정론적 QA 판정만 유지했습니다 "
+        f"({type(exc).__name__}). 원본 부서와 독립 검토자에게 수동 확인을 요청합니다."
+    )
 
 
 def _fallback_assessment(state: QAState, exc: Exception) -> dict:
-    payload = json.dumps(state.get("artifact", {}), ensure_ascii=False, sort_keys=True, default=str)
+    payload = json.dumps(
+        state.get("artifact", {}), ensure_ascii=False, sort_keys=True, default=str
+    )
     input_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return {"assessment": {
-        "qa_decision_id": str(uuid4()), "decision": "FAIL", "reason_codes": ["pipeline_fallback"],
-        "calculation_version": "qa-pipeline-fallback-v1", "input_hash": input_hash,
-        "claim_checks": [], "findings": [{"finding_id": str(uuid4()), "finding_type": "pipeline_failure",
-                                             "severity": "CRITICAL", "description": _fallback_narrative("Evidence QA", exc)}],
-    }, "fallbacks": [_fallback("evidence_check", exc)]}
+    return {
+        "assessment": {
+            "qa_decision_id": str(uuid4()),
+            "decision": "FAIL",
+            "reason_codes": ["pipeline_fallback"],
+            "calculation_version": "qa-pipeline-fallback-v1",
+            "input_hash": input_hash,
+            "claim_checks": [],
+            "findings": [
+                {
+                    "finding_id": str(uuid4()),
+                    "finding_type": "pipeline_failure",
+                    "severity": "CRITICAL",
+                    "description": _fallback_narrative("Evidence QA", exc),
+                }
+            ],
+        },
+        "fallbacks": [_fallback("evidence_check", exc)],
+    }
 
 
 # ── 노드 1: Evidence 검사 (결정론 직원 - EvidenceQaEngine) ─────────────────
@@ -296,22 +347,42 @@ def check_evidence(state: QAState) -> dict:
         QaContext,
     )
 
-    chunks = {UUID(eid): EvidenceChunk(evidence_id=UUID(eid), **fields)
-              for eid, fields in state["evidence_store"].items()}
-    ctx = QaContext(evidence_store=EvidenceStore(chunks=chunks),
-                     decision_time=datetime.fromisoformat(state["decision_time"]))
+    chunks = {
+        UUID(eid): EvidenceChunk(evidence_id=UUID(eid), **fields)
+        for eid, fields in state["evidence_store"].items()
+    }
+    ctx = QaContext(
+        evidence_store=EvidenceStore(chunks=chunks),
+        decision_time=datetime.fromisoformat(state["decision_time"]),
+    )
     result = EvidenceQaEngine().check_artifact(Artifact(**state["artifact"]), ctx)
-    return {"assessment": {
-        "qa_decision_id": str(result.qa_decision_id), "decision": result.decision.value,
-        "reason_codes": [r.value for r in result.reason_codes],
-        "calculation_version": result.calculation_version, "input_hash": result.input_hash,
-        "claim_checks": [{"claim_index": c.claim_index, "claim": c.claim,
-                          "result": c.result.value, "reason": c.reason}
-                         for c in result.claim_checks],
-        "findings": [{"finding_id": str(f.finding_id), "finding_type": f.finding_type,
-                     "severity": f.severity.value, "description": f.description}
-                    for f in result.findings],
-    }}
+    return {
+        "assessment": {
+            "qa_decision_id": str(result.qa_decision_id),
+            "decision": result.decision.value,
+            "reason_codes": [r.value for r in result.reason_codes],
+            "calculation_version": result.calculation_version,
+            "input_hash": result.input_hash,
+            "claim_checks": [
+                {
+                    "claim_index": c.claim_index,
+                    "claim": c.claim,
+                    "result": c.result.value,
+                    "reason": c.reason,
+                }
+                for c in result.claim_checks
+            ],
+            "findings": [
+                {
+                    "finding_id": str(f.finding_id),
+                    "finding_type": f.finding_type,
+                    "severity": f.severity.value,
+                    "description": f.description,
+                }
+                for f in result.findings
+            ],
+        }
+    }
 
 
 # ── 노드 1.25: Model Risk / Internal Audit (결정론적 엔진 + 직원 Worker) ────────
@@ -379,7 +450,9 @@ def model_and_internal_audit(state: QAState) -> dict:
                 "findings": ["internal_audit_input_invalid"],
                 "calculation_version": "qa-internal-audit-v1",
                 "input_hash": hashlib.sha256(
-                    json.dumps(audit_events, sort_keys=True, default=str).encode("utf-8")
+                    json.dumps(audit_events, sort_keys=True, default=str).encode(
+                        "utf-8"
+                    )
                 ).hexdigest(),
                 "error": type(exc).__name__,
             }
@@ -398,18 +471,29 @@ def hallucination_review(state: QAState) -> dict:
     from src.graph import run_compliance_check
 
     a = state["assessment"]
-    flagged = [c for c in a["claim_checks"] if c["result"] in ("UNSUPPORTED", "CONTRADICTED")]
+    flagged = [
+        c for c in a["claim_checks"] if c["result"] in ("UNSUPPORTED", "CONTRADICTED")
+    ]
     if not flagged:
         # config.yaml 페르소나 프롬프트 원칙 - 이미 나온 근거를 우선하고, 불필요한 외부 호출은 피한다
         return {"hallucination_reviews": []}
 
     corpus_dir = _AGENTIC_RAG_DIR / "corpus" / "evidence"
     as_of_date = state["decision_time"][:10]
-    return {"hallucination_reviews": [
-        {"claim_index": c["claim_index"],
-         **run_compliance_check(c["claim"], as_of_date, corpus_dir=corpus_dir, persona="hallucination-critic")}
-        for c in flagged
-    ]}
+    return {
+        "hallucination_reviews": [
+            {
+                "claim_index": c["claim_index"],
+                **run_compliance_check(
+                    c["claim"],
+                    as_of_date,
+                    corpus_dir=corpus_dir,
+                    persona="hallucination-critic",
+                ),
+            }
+            for c in flagged
+        ]
+    }
 
 
 # ── 노드 2: Claim 서술 (LLM 직원 - 내부 Ollama, grounded 서술만) ───────────
@@ -430,27 +514,37 @@ def draft_claim_narrative(state: QAState) -> dict:
         llm=lambda system, prompt: _call_internal_llm(f"{system}\n{prompt}"),
     )
     evidence_worker = next(
-        (item for item in report.get("workers", []) if item.get("worker_id") == "evidence-qa-worker"),
+        (
+            item
+            for item in report.get("workers", [])
+            if item.get("worker_id") == "evidence-qa-worker"
+        ),
         {},
     )
     output = evidence_worker.get("output") or {}
     fallbacks = []
     if report.get("failed"):
-        fallbacks = [{
-            "stage": "claim_narrative",
-            "node": "evidence-qa-worker",
-            "error": ";".join(str(item.get("error")) for item in report.get("workers", [])
-                               if item.get("status") != "COMPLETED"),
-            "action": "ESCALATE",
-            "safe_action": "ESCALATE",
-            "decision_origin": "FALLBACK",
-        }]
+        fallbacks = [
+            {
+                "stage": "claim_narrative",
+                "node": "evidence-qa-worker",
+                "error": ";".join(
+                    str(item.get("error"))
+                    for item in report.get("workers", [])
+                    if item.get("status") != "COMPLETED"
+                ),
+                "action": "ESCALATE",
+                "safe_action": "ESCALATE",
+                "decision_origin": "FALLBACK",
+            }
+        ]
     deterministic_summary = "; ".join(
         f"Claim {item.get('claim_index')}: {item.get('result')} ({item.get('reason', '')})"
         for item in a.get("claim_checks", [])
     )
     return {
-        "claim_narrative": (output.get("summary") if not report.get("failed") else "") or (
+        "claim_narrative": (output.get("summary") if not report.get("failed") else "")
+        or (
             "직원 LLM 서술을 생성하지 못했습니다. 결정론적 결과를 그대로 전달합니다: "
             + deterministic_summary
         ),
@@ -482,16 +576,20 @@ def _hermes_chat(persona: str, task: str) -> str:
 
 def supervise(state: QAState, *, chat=None) -> dict:
     a = state["assessment"]
-    bundle = {"decision": a["decision"], "reason_codes": a["reason_codes"],
-              "claim_checks": a["claim_checks"], "findings": a["findings"],
-              "claim_narrative": state["claim_narrative"],
-              "hallucination_reviews": state.get("hallucination_reviews", []),
-              "model_risk": state.get("model_risk"),
-              "internal_audit": state.get("internal_audit"),
-              "audit_escalate": state.get("audit_escalate", False),
-              "employee_workers": state.get("employee_workers", {})}
+    bundle = {
+        "decision": a["decision"],
+        "reason_codes": a["reason_codes"],
+        "claim_checks": a["claim_checks"],
+        "findings": a["findings"],
+        "claim_narrative": state["claim_narrative"],
+        "hallucination_reviews": state.get("hallucination_reviews", []),
+        "model_risk": state.get("model_risk"),
+        "internal_audit": state.get("internal_audit"),
+        "audit_escalate": state.get("audit_escalate", False),
+        "employee_workers": state.get("employee_workers", {}),
+    }
     task = f"""Using ONLY the evidence below, write a case-level QA audit narrative in Korean for
-CEO/department review. The binding decision is "{a['decision']}" from the deterministic Evidence QA
+CEO/department review. The binding decision is "{a["decision"]}" from the deterministic Evidence QA
 Engine - you cannot change it, only interpret and escalate it.
 Schema (JSON only):
 {{"narrative": "2-4 sentences, cite claim_checks/findings",
@@ -503,7 +601,7 @@ Evidence:
     call = chat or _hermes_chat
     out = call(_persona("qa-audit-supervisor"), task)
     s, e = out.find("{"), out.rfind("}")
-    note = json.loads(out[s:e + 1])
+    note = json.loads(out[s : e + 1])
     for k in ("narrative", "escalate", "cited_checks"):
         if k not in note:
             raise ValueError(f"Supervisor 종합 결과에 {k} 가 없다 - 초안 거부")
@@ -524,16 +622,23 @@ def _assemble_out(state: QAState) -> dict:
     유지한다(03-risk/scripts.py와 동일 패턴) - 그래프 노드와 외부 인터페이스가 따로 베끼면
     한쪽만 필드를 늘렸을 때 드리프트가 생긴다."""
     a = state["assessment"]
-    return {"qa_decision_id": a["qa_decision_id"], "verdict": state["verdict"],
-            "reason_codes": a["reason_codes"], "claim_checks": a["claim_checks"], "findings": a["findings"],
-            "calculation_version": a["calculation_version"], "input_hash": a["input_hash"],
-            "claim_narrative": state["claim_narrative"],
-            "hallucination_reviews": state.get("hallucination_reviews", []),
-            "model_risk": state.get("model_risk"),
-            "internal_audit": state.get("internal_audit"),
-            "audit_escalate": state.get("audit_escalate", False),
-        "narrative": state["narrative"], "escalate": state["escalate"],
-        "execution_evidence": state.get("execution_evidence")}
+    return {
+        "qa_decision_id": a["qa_decision_id"],
+        "verdict": state["verdict"],
+        "reason_codes": a["reason_codes"],
+        "claim_checks": a["claim_checks"],
+        "findings": a["findings"],
+        "calculation_version": a["calculation_version"],
+        "input_hash": a["input_hash"],
+        "claim_narrative": state["claim_narrative"],
+        "hallucination_reviews": state.get("hallucination_reviews", []),
+        "model_risk": state.get("model_risk"),
+        "internal_audit": state.get("internal_audit"),
+        "audit_escalate": state.get("audit_escalate", False),
+        "narrative": state["narrative"],
+        "escalate": state["escalate"],
+        "execution_evidence": state.get("execution_evidence"),
+    }
 
 
 def _record_execution_evidence(
@@ -575,8 +680,12 @@ def _record_execution_evidence(
         fallbacks = list(result.get("fallbacks") or [])
         degraded = bool(fallbacks or result.get("escalate"))
         schema_valid = bool(result.get("qa_decision_id")) and not bool(fallbacks)
-        domain_valid = result.get("verdict") in {"PASS", "WARN", "FAIL"} and not degraded
-        agents_for_log = list(dict.fromkeys(executed + failed)) or ["qa-pipeline-fallback"]
+        domain_valid = (
+            result.get("verdict") in {"PASS", "WARN", "FAIL"} and not degraded
+        )
+        agents_for_log = list(dict.fromkeys(executed + failed)) or [
+            "qa-pipeline-fallback"
+        ]
         for employee in agents_for_log:
             journal.agent_output(
                 run_id=run_id,
@@ -584,8 +693,12 @@ def _record_execution_evidence(
                 employee_profile=employee,
                 output={
                     "employee_profile": employee,
-                    "supervisor_call_status": result.get("supervisor_call_status") if employee == "qa-audit-supervisor" else None,
-                    "hermes_runtime": result.get("hermes_runtime") if employee == "qa-audit-supervisor" else None,
+                    "supervisor_call_status": result.get("supervisor_call_status")
+                    if employee == "qa-audit-supervisor"
+                    else None,
+                    "hermes_runtime": result.get("hermes_runtime")
+                    if employee == "qa-audit-supervisor"
+                    else None,
                     "decision": result.get("verdict"),
                     "evidence_refs": tuple(
                         str(check.get("claim_index"))
@@ -599,7 +712,9 @@ def _record_execution_evidence(
                 domain_valid=domain_valid,
                 failed_rule=(result.get("reason_codes") or [None])[0],
                 fallback_reason=(fallbacks[0].get("stage") if fallbacks else None),
-                retry_count=max((item.get("attempt", 0) for item in fallbacks), default=0),
+                retry_count=max(
+                    (item.get("attempt", 0) for item in fallbacks), default=0
+                ),
                 as_of=as_of,
                 asset=asset,
                 model_version=PIPELINE_VERSION,
@@ -654,22 +769,34 @@ def _record_execution_evidence(
             "safe_action": safe_action,
             "binding": False,
             "hermes_profile": "qa-department",
-        "employees_executed": executed,
-        "employees_failed": failed,
-        "employees_not_executed": not_executed,
+            "employees_executed": executed,
+            "employees_failed": failed,
+            "employees_not_executed": not_executed,
             "retry_policy": {"max_retries": 2, "max_attempts": 3},
             "external_dependencies": {
                 "policy_corpus": "PLACEHOLDER_OR_UNVERIFIED",
-"canonical_db": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
-"agent_runs_tool_calls": "CONFIGURED" if (os.environ.get("RISK_QA_DATABASE_URL") or os.environ.get("DATABASE_URL")) else "NOT_CONFIGURED",
+                "canonical_db": "CONFIGURED"
+                if (
+                    os.environ.get("RISK_QA_DATABASE_URL")
+                    or os.environ.get("DATABASE_URL")
+                )
+                else "NOT_CONFIGURED",
+                "agent_runs_tool_calls": "CONFIGURED"
+                if (
+                    os.environ.get("RISK_QA_DATABASE_URL")
+                    or os.environ.get("DATABASE_URL")
+                )
+                else "NOT_CONFIGURED",
             },
-            "event_types": [event.event_type.value for event in journal.events_for_run(run_id)],
+            "event_types": [
+                event.event_type.value for event in journal.events_for_run(run_id)
+            ],
             "replay_ready": review["replay_ready"],
             "journal_event_count": len(journal.events_for_run(run_id)),
             "journal_path": str(log_path) if log_path else None,
             "review": review,
         }
-    except Exception as exc:  # logging must never turn a safe decision into approval  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - logging must never turn a safe decision into approval
         return {
             "run_id": run_id,
             "trace_id": trace_id,
@@ -689,7 +816,11 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
     out = _assemble_out(state)
     report_md = _render_report_md(state["artifact"], state["decision_time"], out)
     upload = uploader or upload_case
-    return {"notion_upload": upload(state["artifact"], state["decision_time"], out, report_md=report_md)}
+    return {
+        "notion_upload": upload(
+            state["artifact"], state["decision_time"], out, report_md=report_md
+        )
+    }
 
 
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
@@ -714,9 +845,13 @@ def build_pipeline():
 @observe_pipeline(QA_TELEMETRY, "pipeline")
 def run_qa_department(artifact: dict, evidence_store: dict, decision_time: str) -> dict:
     """본부 단독 실행 - Risk/Research 의 run_<dept>_department 와 같은 외부 인터페이스."""
-    out = build_pipeline().invoke({
-        "artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
-    })
+    out = build_pipeline().invoke(
+        {
+            "artifact": artifact,
+            "evidence_store": evidence_store,
+            "decision_time": decision_time,
+        }
+    )
     result = _assemble_out(out)
     result["notion_upload"] = out.get("notion_upload")
     return result
@@ -734,27 +869,69 @@ def _check_fail_still_narrates():
     # 그대로 유지되는지 - Ollama·Hermes·Agentic RAG 콜은 전부 스텁으로 대체한다. notion_report 도
     # 스텁한다 - 안 그러면 ai-office/.dev.vars 에 실제 토큰이 있을 때 자체 점검이 진짜 Notion에
     # 네트워크 호출을 낸다(03-risk/scripts.py와 동일 이유).
-    global check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report
-    orig = (check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report)
-    check_evidence = lambda s: {"assessment": {
-        "qa_decision_id": "d1", "decision": "FAIL",
-        "reason_codes": ["fact_without_evidence"],
-        "claim_checks": [{"claim_index": 0, "claim": "x", "result": "UNSUPPORTED", "reason": "근거 없음"}],
-        "findings": [{"finding_type": "unsupported_claim", "severity": "HIGH", "description": "d"}],
-    }}
-    hallucination_review = lambda s: {"hallucination_reviews": [
-        {"claim_index": 0, "answer": {"verdict": "HALLUCINATION"}, "grounded": True}]}
+    global \
+        check_evidence, \
+        hallucination_review, \
+        _call_internal_llm, \
+        _hermes_chat, \
+        notion_report
+    orig = (
+        check_evidence,
+        hallucination_review,
+        _call_internal_llm,
+        _hermes_chat,
+        notion_report,
+    )
+    check_evidence = lambda s: {
+        "assessment": {
+            "qa_decision_id": "d1",
+            "decision": "FAIL",
+            "reason_codes": ["fact_without_evidence"],
+            "claim_checks": [
+                {
+                    "claim_index": 0,
+                    "claim": "x",
+                    "result": "UNSUPPORTED",
+                    "reason": "근거 없음",
+                }
+            ],
+            "findings": [
+                {
+                    "finding_type": "unsupported_claim",
+                    "severity": "HIGH",
+                    "description": "d",
+                }
+            ],
+        }
+    }
+    hallucination_review = lambda s: {
+        "hallucination_reviews": [
+            {"claim_index": 0, "answer": {"verdict": "HALLUCINATION"}, "grounded": True}
+        ]
+    }
     _call_internal_llm = lambda prompt: "요약: 근거 없는 주장 1건"
-    _hermes_chat = lambda persona, task: '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
-    notion_report = lambda s: {"notion_upload": {"ok": False, "reason": "self-check stub"}}
+    _hermes_chat = lambda persona, task: (
+        '{"narrative": "차단됨", "escalate": true, "cited_checks": ["0"]}'
+    )
+    notion_report = lambda s: {
+        "notion_upload": {"ok": False, "reason": "self-check stub"}
+    }
     try:
-        out = build_pipeline().invoke({"artifact": {}, "evidence_store": {}, "decision_time": "x"})
+        out = build_pipeline().invoke(
+            {"artifact": {}, "evidence_store": {}, "decision_time": "x"}
+        )
         assert out["assessment"]["decision"] == "FAIL"
         assert out["verdict"] == "FAIL"
         assert out["escalate"] is True
         assert out["hallucination_reviews"][0]["answer"]["verdict"] == "HALLUCINATION"
     finally:
-        check_evidence, hallucination_review, _call_internal_llm, _hermes_chat, notion_report = orig
+        (
+            check_evidence,
+            hallucination_review,
+            _call_internal_llm,
+            _hermes_chat,
+            notion_report,
+        ) = orig
     print("  FAIL 판정에도 서술 계속됨   OK")
 
 
@@ -764,12 +941,32 @@ def _check_hallucination_review_conditional():
     # src.graph 모듈에서 직접 스텁해 네트워크 없이 점검한다(hallucination_review는 함수 안에서 Lazy Import).
     import src.graph as agentic_graph
 
-    clean = {"assessment": {"claim_checks": [
-        {"claim_index": 0, "claim": "x", "result": "SUPPORTED", "reason": "ok"}]}}
-    flagged = {"assessment": {"claim_checks": [
-        {"claim_index": 0, "claim": "ok", "result": "SUPPORTED", "reason": "ok"},
-        {"claim_index": 1, "claim": "bad", "result": "UNSUPPORTED", "reason": "근거 없음"}]},
-        "decision_time": "2026-08-02T00:00:00+00:00"}
+    clean = {
+        "assessment": {
+            "claim_checks": [
+                {"claim_index": 0, "claim": "x", "result": "SUPPORTED", "reason": "ok"}
+            ]
+        }
+    }
+    flagged = {
+        "assessment": {
+            "claim_checks": [
+                {
+                    "claim_index": 0,
+                    "claim": "ok",
+                    "result": "SUPPORTED",
+                    "reason": "ok",
+                },
+                {
+                    "claim_index": 1,
+                    "claim": "bad",
+                    "result": "UNSUPPORTED",
+                    "reason": "근거 없음",
+                },
+            ]
+        },
+        "decision_time": "2026-08-02T00:00:00+00:00",
+    }
     calls = []
 
     def stub(query, as_of, corpus_dir=None, persona="compliance-policy-agent"):
@@ -824,8 +1021,11 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
         "| # | Claim | 검사 결과 | 사유 |",
         "|---|---|---|---|",
     ]
-    lines += [f"| {md_cell(c.get('claim_index'))} | {md_cell(c.get('claim'))} | "
-              f"{md_cell(c.get('result'))} | {md_cell(c.get('reason'))} |" for c in checks]
+    lines += [
+        f"| {md_cell(c.get('claim_index'))} | {md_cell(c.get('claim'))} | "
+        f"{md_cell(c.get('result'))} | {md_cell(c.get('reason'))} |"
+        for c in checks
+    ]
     if not checks:
         lines.append("| — | (claim_checks 없음) | — | — |")
 
@@ -834,61 +1034,109 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
     if reviews:
         for r in reviews:
             answer = r.get("answer") or {}
-            lines += [f"### Claim #{r['claim_index']}", "",
-                      "| 필드 | 값 |", "|---|---|",
-                      f"| verdict | {md_cell(answer.get('verdict'))} |",
-                      f"| grounded | {md_cell(r.get('grounded'))} |",
-                      f"| rationale | {md_cell(answer.get('rationale'))} |", ""]
+            lines += [
+                f"### Claim #{r['claim_index']}",
+                "",
+                "| 필드 | 값 |",
+                "|---|---|",
+                f"| verdict | {md_cell(answer.get('verdict'))} |",
+                f"| grounded | {md_cell(r.get('grounded'))} |",
+                f"| rationale | {md_cell(answer.get('rationale'))} |",
+                "",
+            ]
     else:
         lines.append("UNSUPPORTED/CONTRADICTED claim 없음 - 조건부 노드 미호출")
 
-    lines += ["", "## Reason Codes", "",
-              ", ".join(f"`{r}`" for r in out["reason_codes"]) if out["reason_codes"] else "없음",
-              "", "## Findings", ""]
+    lines += [
+        "",
+        "## Reason Codes",
+        "",
+        ", ".join(f"`{r}`" for r in out["reason_codes"])
+        if out["reason_codes"]
+        else "없음",
+        "",
+        "## Findings",
+        "",
+    ]
     if findings:
         for f in findings:
-            lines += [f"### `{md_cell(f.get('finding_id'))}`", "",
-                      "| 필드 | 값 |", "|---|---|",
-                      f"| 유형 | `{md_cell(f.get('finding_type'))}` |",
-                      f"| 심각도 | {md_cell(f.get('severity'))} |",
-                      f"| 설명 | {md_cell(f.get('description'))} |", ""]
+            lines += [
+                f"### `{md_cell(f.get('finding_id'))}`",
+                "",
+                "| 필드 | 값 |",
+                "|---|---|",
+                f"| 유형 | `{md_cell(f.get('finding_type'))}` |",
+                f"| 심각도 | {md_cell(f.get('severity'))} |",
+                f"| 설명 | {md_cell(f.get('description'))} |",
+                "",
+            ]
     else:
         lines.append("없음")
 
     lines += [
-        "", "## Claim 서술 (evidence-qa-agent, 내부 Ollama - 판정 재해석 없이 결과만 풀어씀)", "",
+        "",
+        "## Claim 서술 (evidence-qa-agent, 내부 Ollama - 판정 재해석 없이 결과만 풀어씀)",
+        "",
         md_cell(out["claim_narrative"]),
-        "", "## 종합 서술 (qa-audit-supervisor, Hermes)", "",
+        "",
+        "## 종합 서술 (qa-audit-supervisor, Hermes)",
+        "",
         md_cell(out["narrative"]),
     ]
 
     evaluation = out.get("evaluation") or {}
     if evaluation:
         lines += ["", "## 평가 지표", "", "| 지표 | 값 |", "|---|---|"]
-        lines += [f"| {md_cell(key)} | {json_cell(value)} |" for key, value in evaluation.items()]
+        lines += [
+            f"| {md_cell(key)} | {json_cell(value)} |"
+            for key, value in evaluation.items()
+        ]
 
     observability = out.get("observability") or {}
     if observability:
-        lines += ["", "## LangSmith / HR 관측성 전달", "", "| 필드 | 값 |", "|---|---|",
-                  f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
-                  f"| LangSmith | {json_cell(observability.get('langsmith'))} |"]
+        lines += [
+            "",
+            "## LangSmith / HR 관측성 전달",
+            "",
+            "| 필드 | 값 |",
+            "|---|---|",
+            f"| trace_id | `{md_cell(observability.get('trace_id'))}` |",
+            f"| LangSmith | {json_cell(observability.get('langsmith'))} |",
+        ]
 
     agent_execution = out.get("agent_execution") or {}
     if agent_execution:
         lines += ["", "## Agent 실행 매니페스트", "", "| 구분 | Agent |", "|---|---|"]
-        lines += [f"| 실행 | {md_cell(agent)} |" for agent in agent_execution.get("executed", [])]
-        lines += [f"| 실패 | {md_cell(agent)} |" for agent in agent_execution.get("failed", [])]
-        lines += [f"| 미실행/조건부 | {md_cell(agent)} |" for agent in agent_execution.get("not_executed", [])]
+        lines += [
+            f"| 실행 | {md_cell(agent)} |"
+            for agent in agent_execution.get("executed", [])
+        ]
+        lines += [
+            f"| 실패 | {md_cell(agent)} |"
+            for agent in agent_execution.get("failed", [])
+        ]
+        lines += [
+            f"| 미실행/조건부 | {md_cell(agent)} |"
+            for agent in agent_execution.get("not_executed", [])
+        ]
         worker_execution = out.get("employee_workers") or {}
         if worker_execution:
-            lines += ["", "### LangGraph Employee Workers", "", "| Worker | 상태 | 도구 |", "|---|---|---|"]
+            lines += [
+                "",
+                "### LangGraph Employee Workers",
+                "",
+                "| Worker | 상태 | 도구 |",
+                "|---|---|---|",
+            ]
             lines += [
                 f"| `{md_cell(item.get('worker_id'))}` | {md_cell(item.get('status'))} | "
                 f"{md_cell(', '.join(item.get('tools') or []))} |"
                 for item in worker_execution.get("workers", [])
             ]
-            lines += [f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
-                      f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`"]
+            lines += [
+                f"- executor: `{md_cell((worker_execution.get('runtime') or {}).get('executor'))}`",
+                f"- model: `{md_cell((worker_execution.get('runtime') or {}).get('model'))}`",
+            ]
         runtime = out.get("hermes_runtime") or {}
         if runtime:
             lines += [
@@ -904,18 +1152,31 @@ def _render_report_md(artifact: dict, decision_time: str, out: dict) -> str:
 
     fallbacks = out.get("fallbacks") or []
     if fallbacks:
-        lines += ["", "## Fallback / Escalation", "", "| 단계 | 오류 | 조치 |", "|---|---|---|"]
-        lines += [f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | "
-                  f"{md_cell(item.get('action'))} |" for item in fallbacks]
+        lines += [
+            "",
+            "## Fallback / Escalation",
+            "",
+            "| 단계 | 오류 | 조치 |",
+            "|---|---|---|",
+        ]
+        lines += [
+            f"| {md_cell(item.get('stage'))} | {md_cell(item.get('error'))} | "
+            f"{md_cell(item.get('action'))} |"
+            for item in fallbacks
+        ]
 
     notion = out.get("notion_upload")
     if notion is not None:
         lines += ["", "## Notion 업로드 (Reporter Node)", ""]
-        lines.append(f"업로드 성공: {notion['url']}" if notion.get("ok")
-                     else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}")
+        lines.append(
+            f"업로드 성공: {notion['url']}"
+            if notion.get("ok")
+            else f"업로드 생략/실패: {notion.get('reason') or notion.get('error')}"
+        )
 
     lines += [
-        "", "---",
+        "",
+        "---",
         "> 이 문서는 evidence_qa_engine.py의 결정론적 판정과 스키마 검증된 LLM 서술을 Python이 그대로",
         "> 옮긴 것이다 - LLM이 이 파일의 형식이나 내용을 자유롭게 창작하지 않았다.",
     ]
@@ -929,15 +1190,30 @@ def _check_notion_report_node():
         captured["out"], captured["report_md"] = out, report_md
         return {"ok": True, "url": "https://notion.so/fake"}
 
-    state = {"artifact": {"trace_id": "t1"}, "decision_time": "2026-08-01", "narrative": "n", "escalate": False,
-             "claim_narrative": "cn", "verdict": "PASS",
-             "assessment": {"qa_decision_id": "d1", "decision": "PASS", "reason_codes": [],
-                            "claim_checks": [], "findings": [], "calculation_version": "v", "input_hash": "h"}}
+    state = {
+        "artifact": {"trace_id": "t1"},
+        "decision_time": "2026-08-01",
+        "narrative": "n",
+        "escalate": False,
+        "claim_narrative": "cn",
+        "verdict": "PASS",
+        "assessment": {
+            "qa_decision_id": "d1",
+            "decision": "PASS",
+            "reason_codes": [],
+            "claim_checks": [],
+            "findings": [],
+            "calculation_version": "v",
+            "input_hash": "h",
+        },
+    }
     result = notion_report(state, uploader=stub_uploader)
     assert result["notion_upload"] == {"ok": True, "url": "https://notion.so/fake"}
     assert result["report_markdown"]
     assert captured["out"]["qa_decision_id"] == "d1"
-    assert "qa_decision_id" in captured["report_md"]  # _render_report_md 가 실제로 불렸는지
+    assert (
+        "qa_decision_id" in captured["report_md"]
+    )  # _render_report_md 가 실제로 불렸는지
     print("  Notion Reporter 노드        OK")
 
 
@@ -958,14 +1234,30 @@ def hallucination_review(state: QAState) -> dict:
     try:
         return _RAW_HALLUCINATION_REVIEW(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
-        flagged = [c for c in state.get("assessment", {}).get("claim_checks", [])
-                   if c.get("result") in ("UNSUPPORTED", "CONTRADICTED")]
-        return {"hallucination_reviews": [{"claim_index": c.get("claim_index"), "answer": {
-                    "verdict": "HALLUCINATION", "cited_documents": [],
-                    "rationale": _fallback_narrative("Hallucination Critic", exc),
-                    "confidence": 0.0, "escalate": True}, "grounded": False,
-                    "fallback": True, "fallback_reason": type(exc).__name__} for c in flagged],
-                "fallbacks": [_fallback("hallucination_review", exc)]}
+        flagged = [
+            c
+            for c in state.get("assessment", {}).get("claim_checks", [])
+            if c.get("result") in ("UNSUPPORTED", "CONTRADICTED")
+        ]
+        return {
+            "hallucination_reviews": [
+                {
+                    "claim_index": c.get("claim_index"),
+                    "answer": {
+                        "verdict": "HALLUCINATION",
+                        "cited_documents": [],
+                        "rationale": _fallback_narrative("Hallucination Critic", exc),
+                        "confidence": 0.0,
+                        "escalate": True,
+                    },
+                    "grounded": False,
+                    "fallback": True,
+                    "fallback_reason": type(exc).__name__,
+                }
+                for c in flagged
+            ],
+            "fallbacks": [_fallback("hallucination_review", exc)],
+        }
 
 
 def draft_claim_narrative(state: QAState) -> dict:
@@ -973,10 +1265,17 @@ def draft_claim_narrative(state: QAState) -> dict:
         return _RAW_DRAFT_CLAIM_NARRATIVE(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         checks = state.get("assessment", {}).get("claim_checks", [])
-        summary = "; ".join(f"Claim {c.get('claim_index')}: {c.get('result')} — {c.get('reason')}"
-                            for c in checks) or "검사된 Claim 없음"
-        return {"claim_narrative": f"결정론적 Evidence QA 결과를 전달합니다. {summary}",
-                "fallbacks": [_fallback("claim_narrative", exc)]}
+        summary = (
+            "; ".join(
+                f"Claim {c.get('claim_index')}: {c.get('result')} — {c.get('reason')}"
+                for c in checks
+            )
+            or "검사된 Claim 없음"
+        )
+        return {
+            "claim_narrative": f"결정론적 Evidence QA 결과를 전달합니다. {summary}",
+            "fallbacks": [_fallback("claim_narrative", exc)],
+        }
 
 
 def supervise(state: QAState, *, chat=None) -> dict:
@@ -1022,9 +1321,14 @@ def _assemble_out(state: QAState) -> dict:
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if out.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("qa-audit-supervisor")
-    qa_agents = ["qa-audit-supervisor", "evidence-qa-worker", "hallucination-critic-worker",
-                 "model-and-internal-audit-worker", "ops-and-permission-worker",
-                 "incident-postmortem-worker"]
+    qa_agents = [
+        "qa-audit-supervisor",
+        "evidence-qa-worker",
+        "hallucination-critic-worker",
+        "model-and-internal-audit-worker",
+        "ops-and-permission-worker",
+        "incident-postmortem-worker",
+    ]
     failed_agents = list(failed_worker_agents)
     if supervisor_status == "failed":
         failed_agents.append("qa-audit-supervisor")
@@ -1049,18 +1353,26 @@ def notion_report(state: QAState, *, uploader=None) -> dict:
     out = _assemble_out(state)
     report_md = _render_report_md(state["artifact"], state["decision_time"], out)
     evaluation = evaluation_metrics(out, report_md)
-    report_md = _render_report_md(state["artifact"], state["decision_time"],
-                                   {**out, "evaluation": evaluation})
+    report_md = _render_report_md(
+        state["artifact"], state["decision_time"], {**out, "evaluation": evaluation}
+    )
     evaluation = evaluation_metrics(out, report_md)
     from notion_reporter import upload_case
+
     try:
         upload = uploader or upload_case
-        notion_upload = upload(state["artifact"], state["decision_time"], out, report_md=report_md)
+        notion_upload = upload(
+            state["artifact"], state["decision_time"], out, report_md=report_md
+        )
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
         notion_upload = {"ok": False, "reason": f"Reporter 예외: {type(exc).__name__}"}
         evaluation["fallback_count"] += 1
     evaluation = evaluation_metrics({**out, "notion_upload": notion_upload}, report_md)
-    return {"notion_upload": notion_upload, "report_markdown": report_md, "evaluation": evaluation}
+    return {
+        "notion_upload": notion_upload,
+        "report_markdown": report_md,
+        "evaluation": evaluation,
+    }
 
 
 _RAW_RUN_QA_DEPARTMENT = run_qa_department
@@ -1079,23 +1391,40 @@ def run_qa_department(
 ) -> dict:
     execution_run_id = run_id or str(uuid4())
     trace_id = str((artifact or {}).get("trace_id") or f"qa:{execution_run_id}")
-    payload = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time}
-    asset = str((artifact or {}).get("asset") or (artifact or {}).get("instrument_id") or "") or None
+    payload = {
+        "artifact": artifact,
+        "evidence_store": evidence_store,
+        "decision_time": decision_time,
+    }
+    asset = (
+        str(
+            (artifact or {}).get("asset") or (artifact or {}).get("instrument_id") or ""
+        )
+        or None
+    )
     try:
-        out = build_pipeline().invoke({
+        out = build_pipeline().invoke(
+            {
+                "artifact": artifact,
+                "evidence_store": evidence_store,
+                "decision_time": decision_time,
+                "model_risk_input": model_risk_input,
+                "internal_audit_events": internal_audit_events,
+                "internal_audit_department": internal_audit_department,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
+        out = {
             "artifact": artifact,
             "evidence_store": evidence_store,
             "decision_time": decision_time,
-            "model_risk_input": model_risk_input,
-            "internal_audit_events": internal_audit_events,
-            "internal_audit_department": internal_audit_department,
-        })
-    except Exception as exc:  # noqa: BLE001 - fail-closed boundary
-        out = {"artifact": artifact, "evidence_store": evidence_store, "decision_time": decision_time,
-               **_fallback_assessment({"artifact": artifact}, exc),
-               "claim_narrative": _fallback_narrative("QA pipeline", exc),
-               "hallucination_reviews": [], "verdict": "FAIL",
-               "narrative": _fallback_narrative("QA Supervisor", exc), "escalate": True}
+            **_fallback_assessment({"artifact": artifact}, exc),
+            "claim_narrative": _fallback_narrative("QA pipeline", exc),
+            "hallucination_reviews": [],
+            "verdict": "FAIL",
+            "narrative": _fallback_narrative("QA Supervisor", exc),
+            "escalate": True,
+        }
     result = _assemble_out(out)
     out["execution_evidence"] = _record_execution_evidence(
         payload,
@@ -1118,34 +1447,48 @@ def run_qa_department(
 # ── Ops Health -> Incident Postmortem (agent-ops-monitor, incident-postmortem-agent) ──
 # QAState의 artifact/evidence_store와 무관한 별도 소형 파이프라인 - 근거는 위 모듈 docstring.
 class OpsIncidentState(TypedDict, total=False):
-    metrics: dict            # AgentHealthMetrics 필드 (scope/window/*_count/p95_latency_ms/cost_usd)
-    thresholds: dict         # OpsThresholds 필드
+    metrics: (
+        dict  # AgentHealthMetrics 필드 (scope/window/*_count/p95_latency_ms/cost_usd)
+    )
+    thresholds: dict  # OpsThresholds 필드
     trace_id: str | None
-    ops_assessment: dict     # agent-ops-monitor 결정론 결과 (OpsAssessment)
-    incident_events: list    # IncidentTimeline에 실제로 남긴 FACT/INFERENCE 행
+    ops_assessment: dict  # agent-ops-monitor 결정론 결과 (OpsAssessment)
+    incident_events: list  # IncidentTimeline에 실제로 남긴 FACT/INFERENCE 행
     postmortem_narrative: str
     fallbacks: list[dict]
 
 
 def _event_dict(event) -> dict:
-    return {"incident_event_id": str(event.incident_event_id), "source": event.source,
-            "entry_type": event.entry_type.value, "summary": event.summary, "evidence": event.evidence}
+    return {
+        "incident_event_id": str(event.incident_event_id),
+        "source": event.source,
+        "entry_type": event.entry_type.value,
+        "summary": event.summary,
+        "evidence": event.evidence,
+    }
 
 
 def _fallback_ops_assessment(state: OpsIncidentState, exc: Exception) -> dict:
     # 모니터 자체가 죽으면 "정상"으로 침묵하지 않는다 - 판정 불가를 SEV2 Incident로 격상한다
     # (원칙 9: 위험한 기능은 실패 시 확대가 아니라 차단 방향으로 - risk_engine.py와 동일 정신).
     now = datetime.now(timezone.utc)
-    return {"ops_assessment": {
-        "scope": (state.get("metrics") or {}).get("scope", "unknown"), "status": "critical",
-        "breaches": ["monitor_pipeline_failure"],
-        "incident": {
-            "incident_id": str(uuid4()),
-            "incident_code": f"OPS-MONITOR-FAILURE-{now.strftime('%Y%m%dT%H%M%S')}",
-            "severity": "SEV2", "title": f"agent-ops-monitor 파이프라인 실패 ({type(exc).__name__})",
-            "impact": {"error": type(exc).__name__}, "started_at": now.isoformat(), "detected_at": now.isoformat(),
+    return {
+        "ops_assessment": {
+            "scope": (state.get("metrics") or {}).get("scope", "unknown"),
+            "status": "critical",
+            "breaches": ["monitor_pipeline_failure"],
+            "incident": {
+                "incident_id": str(uuid4()),
+                "incident_code": f"OPS-MONITOR-FAILURE-{now.strftime('%Y%m%dT%H%M%S')}",
+                "severity": "SEV2",
+                "title": f"agent-ops-monitor 파이프라인 실패 ({type(exc).__name__})",
+                "impact": {"error": type(exc).__name__},
+                "started_at": now.isoformat(),
+                "detected_at": now.isoformat(),
+            },
         },
-    }, "fallbacks": [_fallback("evaluate_ops_health", exc)]}
+        "fallbacks": [_fallback("evaluate_ops_health", exc)],
+    }
 
 
 def evaluate_ops_health(state: OpsIncidentState) -> dict:
@@ -1155,29 +1498,44 @@ def evaluate_ops_health(state: OpsIncidentState) -> dict:
 
     m, t = state["metrics"], state["thresholds"]
     metrics = AgentHealthMetrics(
-        scope=m["scope"], window_start=datetime.fromisoformat(m["window_start"]),
-        window_end=datetime.fromisoformat(m["window_end"]), request_count=int(m["request_count"]),
-        error_count=int(m["error_count"]), p95_latency_ms=Decimal(str(m["p95_latency_ms"])),
+        scope=m["scope"],
+        window_start=datetime.fromisoformat(m["window_start"]),
+        window_end=datetime.fromisoformat(m["window_end"]),
+        request_count=int(m["request_count"]),
+        error_count=int(m["error_count"]),
+        p95_latency_ms=Decimal(str(m["p95_latency_ms"])),
         cost_usd=Decimal(str(m["cost_usd"])),
     )
     thresholds = OpsThresholds(
-        max_error_rate=Decimal(str(t["max_error_rate"])), critical_error_rate=Decimal(str(t["critical_error_rate"])),
+        max_error_rate=Decimal(str(t["max_error_rate"])),
+        critical_error_rate=Decimal(str(t["critical_error_rate"])),
         max_p95_latency_ms=Decimal(str(t["max_p95_latency_ms"])),
         critical_p95_latency_ms=Decimal(str(t["critical_p95_latency_ms"])),
         max_cost_usd_per_window=Decimal(str(t["max_cost_usd_per_window"])),
     )
     trace_id = state.get("trace_id")
-    assessment = OpsHealthMonitor().evaluate(metrics, thresholds, UUID(trace_id) if trace_id else None)
+    assessment = OpsHealthMonitor().evaluate(
+        metrics, thresholds, UUID(trace_id) if trace_id else None
+    )
     incident = assessment.incident
-    return {"ops_assessment": {
-        "scope": assessment.scope, "status": assessment.status.value,
-        "breaches": [b.value for b in assessment.breaches],
-        "incident": None if incident is None else {
-            "incident_id": str(incident.incident_id), "incident_code": incident.incident_code,
-            "severity": incident.severity.value, "title": incident.title, "impact": incident.impact,
-            "started_at": incident.started_at.isoformat(), "detected_at": incident.detected_at.isoformat(),
-        },
-    }}
+    return {
+        "ops_assessment": {
+            "scope": assessment.scope,
+            "status": assessment.status.value,
+            "breaches": [b.value for b in assessment.breaches],
+            "incident": None
+            if incident is None
+            else {
+                "incident_id": str(incident.incident_id),
+                "incident_code": incident.incident_code,
+                "severity": incident.severity.value,
+                "title": incident.title,
+                "impact": incident.impact,
+                "started_at": incident.started_at.isoformat(),
+                "detected_at": incident.detected_at.isoformat(),
+            },
+        }
+    }
 
 
 def _ops_incident_detected(state: OpsIncidentState) -> bool:
@@ -1190,8 +1548,12 @@ def record_incident_fact(state: OpsIncidentState) -> dict:
 
     incident = state["ops_assessment"]["incident"]
     event = IncidentTimeline().add_event(
-        UUID(incident["incident_id"]), "agent-ops-monitor", IncidentEntryType.FACT,
-        incident["title"], datetime.fromisoformat(incident["detected_at"]), "agent-ops-monitor",
+        UUID(incident["incident_id"]),
+        "agent-ops-monitor",
+        IncidentEntryType.FACT,
+        incident["title"],
+        datetime.fromisoformat(incident["detected_at"]),
+        "agent-ops-monitor",
         evidence=incident["impact"],
     )
     return {"incident_events": [_event_dict(event)]}
@@ -1201,17 +1563,24 @@ def draft_incident_postmortem(state: OpsIncidentState) -> dict:
     from incident_timeline import IncidentEntryType, IncidentTimeline
 
     incident = state["ops_assessment"]["incident"]
-    prompt = f"""{_persona('incident-postmortem-agent')}
+    prompt = f"""{_persona("incident-postmortem-agent")}
 
 아래는 agent-ops-monitor가 결정론적으로 감지한 Incident FACT다. 이미 확인된 사실 밖의 내용을
 지어내지 말고, 원인 추정(INFERENCE)이라는 것을 분명히 밝히며 한국어로 1-2문장만 작성하라:
 {json.dumps(incident, ensure_ascii=False, indent=1)}"""
     narrative = _call_internal_llm(prompt)
     event = IncidentTimeline().add_event(
-        UUID(incident["incident_id"]), "incident-postmortem-agent", IncidentEntryType.INFERENCE,
-        narrative, datetime.fromisoformat(incident["detected_at"]), "incident-postmortem-agent",
+        UUID(incident["incident_id"]),
+        "incident-postmortem-agent",
+        IncidentEntryType.INFERENCE,
+        narrative,
+        datetime.fromisoformat(incident["detected_at"]),
+        "incident-postmortem-agent",
     )
-    return {"postmortem_narrative": narrative, "incident_events": state.get("incident_events", []) + [_event_dict(event)]}
+    return {
+        "postmortem_narrative": narrative,
+        "incident_events": state.get("incident_events", []) + [_event_dict(event)],
+    }
 
 
 def build_ops_incident_pipeline():
@@ -1220,17 +1589,28 @@ def build_ops_incident_pipeline():
     g.add_node("record_incident_fact", record_incident_fact)
     g.add_node("draft_incident_postmortem", draft_incident_postmortem)
     g.set_entry_point("evaluate_ops_health")
-    g.add_conditional_edges("evaluate_ops_health", _ops_incident_detected,
-                             {True: "record_incident_fact", False: END})
+    g.add_conditional_edges(
+        "evaluate_ops_health",
+        _ops_incident_detected,
+        {True: "record_incident_fact", False: END},
+    )
     g.add_edge("record_incident_fact", "draft_incident_postmortem")
     g.add_edge("draft_incident_postmortem", END)
     return g.compile()
 
 
-def run_ops_incident_review(metrics: dict, thresholds: dict, trace_id: str | None = None) -> dict:
-    out = build_ops_incident_pipeline().invoke({"metrics": metrics, "thresholds": thresholds, "trace_id": trace_id})
-    return {"ops_assessment": out["ops_assessment"], "incident_events": out.get("incident_events", []),
-            "postmortem_narrative": out.get("postmortem_narrative"), "fallbacks": out.get("fallbacks", [])}
+def run_ops_incident_review(
+    metrics: dict, thresholds: dict, trace_id: str | None = None
+) -> dict:
+    out = build_ops_incident_pipeline().invoke(
+        {"metrics": metrics, "thresholds": thresholds, "trace_id": trace_id}
+    )
+    return {
+        "ops_assessment": out["ops_assessment"],
+        "incident_events": out.get("incident_events", []),
+        "postmortem_narrative": out.get("postmortem_narrative"),
+        "fallbacks": out.get("fallbacks", []),
+    }
 
 
 _RAW_EVALUATE_OPS_HEALTH = evaluate_ops_health
@@ -1249,16 +1629,21 @@ def record_incident_fact(state: OpsIncidentState) -> dict:
     try:
         return _RAW_RECORD_INCIDENT_FACT(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
-        return {"incident_events": [], "fallbacks": [_fallback("record_incident_fact", exc)]}
+        return {
+            "incident_events": [],
+            "fallbacks": [_fallback("record_incident_fact", exc)],
+        }
 
 
 def draft_incident_postmortem(state: OpsIncidentState) -> dict:
     try:
         return _RAW_DRAFT_INCIDENT_POSTMORTEM(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
-        return {"postmortem_narrative": _fallback_narrative("Incident Postmortem", exc),
-                "incident_events": state.get("incident_events", []),
-                "fallbacks": [_fallback("draft_incident_postmortem", exc)]}
+        return {
+            "postmortem_narrative": _fallback_narrative("Incident Postmortem", exc),
+            "incident_events": state.get("incident_events", []),
+            "fallbacks": [_fallback("draft_incident_postmortem", exc)],
+        }
 
 
 def _check_ops_incident_conditional():
@@ -1266,13 +1651,27 @@ def _check_ops_incident_conditional():
     # OpsAssessment.incident를 그대로 물려받아 FACT/INFERENCE가 남는지 확인한다.
     global _call_internal_llm
     orig = _call_internal_llm
-    _call_internal_llm = lambda prompt: "지연 원인은 market-api 응답 지연으로 추정됨(확정 아님)"
+    _call_internal_llm = lambda prompt: (
+        "지연 원인은 market-api 응답 지연으로 추정됨(확정 아님)"
+    )
     now = datetime.now(timezone.utc)
-    healthy_metrics = {"scope": "research-department", "window_start": now.isoformat(), "window_end": now.isoformat(),
-                        "request_count": 1000, "error_count": 5, "p95_latency_ms": "800", "cost_usd": "2.5"}
+    healthy_metrics = {
+        "scope": "research-department",
+        "window_start": now.isoformat(),
+        "window_end": now.isoformat(),
+        "request_count": 1000,
+        "error_count": 5,
+        "p95_latency_ms": "800",
+        "cost_usd": "2.5",
+    }
     breach_metrics = {**healthy_metrics, "error_count": 150}
-    thresholds = {"max_error_rate": "0.02", "critical_error_rate": "0.10", "max_p95_latency_ms": "2000",
-                  "critical_p95_latency_ms": "5000", "max_cost_usd_per_window": "10"}
+    thresholds = {
+        "max_error_rate": "0.02",
+        "critical_error_rate": "0.10",
+        "max_p95_latency_ms": "2000",
+        "critical_p95_latency_ms": "5000",
+        "max_cost_usd_per_window": "10",
+    }
     try:
         healthy = run_ops_incident_review(healthy_metrics, thresholds)
         assert healthy["ops_assessment"]["status"] == "healthy"
@@ -1281,7 +1680,10 @@ def _check_ops_incident_conditional():
 
         breached = run_ops_incident_review(breach_metrics, thresholds)
         assert breached["ops_assessment"]["incident"] is not None
-        assert [e["entry_type"] for e in breached["incident_events"]] == ["FACT", "INFERENCE"]
+        assert [e["entry_type"] for e in breached["incident_events"]] == [
+            "FACT",
+            "INFERENCE",
+        ]
         assert breached["postmortem_narrative"]
     finally:
         _call_internal_llm = orig
@@ -1290,7 +1692,7 @@ def _check_ops_incident_conditional():
 
 # ── Tool Permission Security Review (tool-permission-security-reviewer) ─────
 class ToolPermissionState(TypedDict, total=False):
-    policy: dict           # AgentToolPolicy 필드 (agent_id/profile_version_id/allowed_tools)
+    policy: dict  # AgentToolPolicy 필드 (agent_id/profile_version_id/allowed_tools)
     tool_name: str
     permission_check: dict  # {"result": "ALLOWED"|"DENIED", "reason": str}
     violation_narrative: str
@@ -1301,10 +1703,15 @@ def check_tool_permission_node(state: ToolPermissionState) -> dict:
     from tool_permission_check import AgentToolPolicy, check_tool_permission
 
     p = state["policy"]
-    policy = AgentToolPolicy(agent_id=UUID(p["agent_id"]), profile_version_id=UUID(p["profile_version_id"]),
-                              allowed_tools=frozenset(p["allowed_tools"]))
+    policy = AgentToolPolicy(
+        agent_id=UUID(p["agent_id"]),
+        profile_version_id=UUID(p["profile_version_id"]),
+        allowed_tools=frozenset(p["allowed_tools"]),
+    )
     result = check_tool_permission(policy, state["tool_name"])
-    return {"permission_check": {"result": result.result.value, "reason": result.reason}}
+    return {
+        "permission_check": {"result": result.result.value, "reason": result.reason}
+    }
 
 
 def _permission_denied(state: ToolPermissionState) -> bool:
@@ -1312,7 +1719,7 @@ def _permission_denied(state: ToolPermissionState) -> bool:
 
 
 def narrate_permission_violation(state: ToolPermissionState) -> dict:
-    prompt = f"""{_persona('tool-permission-security-reviewer')}
+    prompt = f"""{_persona("tool-permission-security-reviewer")}
 
 아래는 결정론적 Tool Allowlist 판정 결과다(DENIED). 새 판정을 내리지 말고, 위반 사실과 왜
 Escalation이 필요한지만 한국어 1-2문장으로 서술하라:
@@ -1325,16 +1732,24 @@ def build_tool_permission_pipeline():
     g.add_node("check_tool_permission_node", check_tool_permission_node)
     g.add_node("narrate_permission_violation", narrate_permission_violation)
     g.set_entry_point("check_tool_permission_node")
-    g.add_conditional_edges("check_tool_permission_node", _permission_denied,
-                             {True: "narrate_permission_violation", False: END})
+    g.add_conditional_edges(
+        "check_tool_permission_node",
+        _permission_denied,
+        {True: "narrate_permission_violation", False: END},
+    )
     g.add_edge("narrate_permission_violation", END)
     return g.compile()
 
 
 def run_tool_permission_review(policy: dict, tool_name: str) -> dict:
-    out = build_tool_permission_pipeline().invoke({"policy": policy, "tool_name": tool_name})
-    return {"permission_check": out["permission_check"], "violation_narrative": out.get("violation_narrative"),
-            "fallbacks": out.get("fallbacks", [])}
+    out = build_tool_permission_pipeline().invoke(
+        {"policy": policy, "tool_name": tool_name}
+    )
+    return {
+        "permission_check": out["permission_check"],
+        "violation_narrative": out.get("violation_narrative"),
+        "fallbacks": out.get("fallbacks", []),
+    }
 
 
 _RAW_CHECK_TOOL_PERMISSION_NODE = check_tool_permission_node
@@ -1345,24 +1760,36 @@ def check_tool_permission_node(state: ToolPermissionState) -> dict:
     try:
         return _RAW_CHECK_TOOL_PERMISSION_NODE(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary (애매하면 거부, tool_permission_check.py와 동일 원칙)
-        return {"permission_check": {"result": "DENIED",
-                                      "reason": f"판정 파이프라인 실패로 안전하게 거부 ({type(exc).__name__})"},
-                "fallbacks": [_fallback("check_tool_permission", exc)]}
+        return {
+            "permission_check": {
+                "result": "DENIED",
+                "reason": f"판정 파이프라인 실패로 안전하게 거부 ({type(exc).__name__})",
+            },
+            "fallbacks": [_fallback("check_tool_permission", exc)],
+        }
 
 
 def narrate_permission_violation(state: ToolPermissionState) -> dict:
     try:
         return _RAW_NARRATE_PERMISSION_VIOLATION(state)
     except Exception as exc:  # noqa: BLE001 - fail-closed boundary
-        return {"violation_narrative": _fallback_narrative("Tool Permission Security Reviewer", exc),
-                "fallbacks": [_fallback("narrate_permission_violation", exc)]}
+        return {
+            "violation_narrative": _fallback_narrative(
+                "Tool Permission Security Reviewer", exc
+            ),
+            "fallbacks": [_fallback("narrate_permission_violation", exc)],
+        }
 
 
 def _check_tool_permission_conditional():
     global _call_internal_llm
     orig = _call_internal_llm
     _call_internal_llm = lambda prompt: "Allowlist 밖 Tool 호출 - 즉시 Escalation 필요"
-    policy = {"agent_id": str(uuid4()), "profile_version_id": str(uuid4()), "allowed_tools": ["market-api"]}
+    policy = {
+        "agent_id": str(uuid4()),
+        "profile_version_id": str(uuid4()),
+        "allowed_tools": ["market-api"],
+    }
     try:
         allowed = run_tool_permission_review(policy, "market-api")
         assert allowed["permission_check"]["result"] == "ALLOWED"
@@ -1393,32 +1820,61 @@ if __name__ == "__main__":
         now_iso = datetime.now(timezone.utc).isoformat()
         eid = str(uuid4())
         demo_artifact = {
-            "artifact_version_id": str(uuid4()), "artifact_type": "research_packet",
-            "producer": "research-supervisor", "fund_id": str(uuid4()), "trace_id": str(uuid4()),
-            "claims": [{"claim_index": 0, "text": "AAPL 종가는 70000원", "kind": "fact",
-                       "subject": "AAPL", "numeric_value": "70000", "unit": "KRW",
-                       "evidence_ids": [] if "--fail" in sys.argv else [eid]}],
+            "artifact_version_id": str(uuid4()),
+            "artifact_type": "research_packet",
+            "producer": "research-supervisor",
+            "fund_id": str(uuid4()),
+            "trace_id": str(uuid4()),
+            "claims": [
+                {
+                    "claim_index": 0,
+                    "text": "AAPL 종가는 70000원",
+                    "kind": "fact",
+                    "subject": "AAPL",
+                    "numeric_value": "70000",
+                    "unit": "KRW",
+                    "evidence_ids": [] if "--fail" in sys.argv else [eid],
+                }
+            ],
         }
-        demo_evidence_store = {eid: {"source": "market-api", "published_at": now_iso,
-                                     "observed_at": now_iso, "excerpt": "종가 70000원",
-                                     "numeric_value": "70000", "unit": "KRW"}}
-        print(f"{PIPELINE_VERSION} 실행 (데모 Artifact{' - FAIL 유도' if '--fail' in sys.argv else ''})")
-        log_path = Path(os.environ.get(
-            "QA_RUN_LOG_PATH",
-            _BASE / "reports" / "runs" / f"qa_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
-        ))
+        demo_evidence_store = {
+            eid: {
+                "source": "market-api",
+                "published_at": now_iso,
+                "observed_at": now_iso,
+                "excerpt": "종가 70000원",
+                "numeric_value": "70000",
+                "unit": "KRW",
+            }
+        }
+        print(
+            f"{PIPELINE_VERSION} 실행 (데모 Artifact{' - FAIL 유도' if '--fail' in sys.argv else ''})"
+        )
+        log_path = Path(
+            os.environ.get(
+                "QA_RUN_LOG_PATH",
+                _BASE
+                / "reports"
+                / "runs"
+                / f"qa_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl",
+            )
+        )
         if "--log-path" in sys.argv:
             log_index = sys.argv.index("--log-path") + 1
             if log_index >= len(sys.argv):
                 raise SystemExit("--log-path requires a file path")
             log_path = Path(sys.argv[log_index])
-        out = run_qa_department(demo_artifact, demo_evidence_store, now_iso, log_path=log_path)
+        out = run_qa_department(
+            demo_artifact, demo_evidence_store, now_iso, log_path=log_path
+        )
         print(json.dumps(out, ensure_ascii=False, indent=1))
 
         report_dir = _BASE / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"qa_audit_report_{out['qa_decision_id']}.md"
-        report_path.write_text(_render_report_md(demo_artifact, now_iso, out), encoding="utf-8")
+        report_path.write_text(
+            _render_report_md(demo_artifact, now_iso, out), encoding="utf-8"
+        )
         print(f"결정론적 MD 리포트 저장: {report_path}")
         raise SystemExit(0)
 
@@ -1430,4 +1886,6 @@ if __name__ == "__main__":
     _check_notion_report_node()
     _check_ops_incident_conditional()
     _check_tool_permission_conditional()
-    print("본부 파이프라인 7개 영역 통과. 실행은 --run (내부 Ollama·Hermes·OPENAI_API_KEY 필요)")
+    print(
+        "본부 파이프라인 7개 영역 통과. 실행은 --run (내부 Ollama·Hermes·OPENAI_API_KEY 필요)"
+    )

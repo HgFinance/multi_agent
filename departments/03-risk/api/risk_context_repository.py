@@ -8,9 +8,10 @@ passed in separately because Redis is the live kill-switch source.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any
 from uuid import UUID
 
 from engine.risk_engine import (
@@ -35,12 +36,16 @@ def _decimal(value: Any, field_name: str) -> Decimal:
     try:
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise RiskContextLoadError(f"invalid canonical Risk field: {field_name}") from exc
+        raise RiskContextLoadError(
+            f"invalid canonical Risk field: {field_name}"
+        ) from exc
 
 
 def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise RiskContextLoadError(f"canonical Risk JSON field is not an object: {field_name}")
+        raise RiskContextLoadError(
+            f"canonical Risk JSON field is not an object: {field_name}"
+        )
     return value
 
 
@@ -51,7 +56,9 @@ def _first(mapping: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
-def _required_decimal(mapping: Mapping[str, Any], field_name: str, *keys: str) -> Decimal:
+def _required_decimal(
+    mapping: Mapping[str, Any], field_name: str, *keys: str
+) -> Decimal:
     value = _first(mapping, *keys)
     if value is None:
         raise RiskContextLoadError(f"canonical Risk policy field missing: {field_name}")
@@ -62,16 +69,22 @@ def _uuid_set(value: Any, field_name: str) -> frozenset[UUID] | None:
     if value is None:
         raise RiskContextLoadError(f"canonical Risk policy field missing: {field_name}")
     if not isinstance(value, (list, tuple, set)):
-        raise RiskContextLoadError(f"canonical Risk policy field is not a list: {field_name}")
+        raise RiskContextLoadError(
+            f"canonical Risk policy field is not a list: {field_name}"
+        )
     try:
         return frozenset(UUID(str(item)) for item in value)
     except (TypeError, ValueError) as exc:
-        raise RiskContextLoadError(f"invalid canonical Risk UUID list: {field_name}") from exc
+        raise RiskContextLoadError(
+            f"invalid canonical Risk UUID list: {field_name}"
+        ) from exc
 
 
 def _row_value(row: Any, index: int, field_name: str) -> Any:
     if row is None or len(row) <= index:
-        raise RiskContextLoadError(f"canonical Risk query returned incomplete row: {field_name}")
+        raise RiskContextLoadError(
+            f"canonical Risk query returned incomplete row: {field_name}"
+        )
     return row[index]
 
 
@@ -93,11 +106,13 @@ class PostgresRiskContextRepository:
         self._connection_factory = connection_factory
 
     @classmethod
-    def connect(cls, dsn: str) -> "PostgresRiskContextRepository":
+    def connect(cls, dsn: str) -> PostgresRiskContextRepository:
         try:
             import psycopg2
         except ImportError as exc:  # pragma: no cover - deployment dependency
-            raise RiskContextLoadError("psycopg2-binary is required for canonical Risk context") from exc
+            raise RiskContextLoadError(
+                "psycopg2-binary is required for canonical Risk context"
+            ) from exc
         return cls(lambda: psycopg2.connect(dsn, connect_timeout=6))
 
     def load(
@@ -118,11 +133,15 @@ class PostgresRiskContextRepository:
                 cursor.execute("SET TRANSACTION READ ONLY")
                 cursor.execute("SELECT current_setting('transaction_read_only')")
                 if str(cursor.fetchone()[0]).lower() not in {"on", "true", "1"}:
-                    raise RiskContextLoadError("canonical Risk transaction is not read-only")
+                    raise RiskContextLoadError(
+                        "canonical Risk transaction is not read-only"
+                    )
 
                 mandate = self._load_mandate(cursor, fund_id, as_of)
                 limits = self._load_limits(cursor, fund_id, as_of)
-                restricted = self._load_restricted(cursor, fund_id, instrument_id, as_of)
+                restricted = self._load_restricted(
+                    cursor, fund_id, instrument_id, as_of
+                )
                 portfolio = self._load_portfolio(cursor, fund_id, book_id, as_of)
                 market = self._load_market(cursor, instrument_id, as_of)
                 counterparty = self._load_counterparty(cursor, broker_adapter, as_of)
@@ -141,7 +160,7 @@ class PostgresRiskContextRepository:
             if connection is not None:
                 connection.rollback()
             raise
-        except Exception as exc:  # noqa: BLE001 - API converts to sanitized 503
+        except Exception as exc:
             if connection is not None:
                 connection.rollback()
             raise RiskContextLoadError("canonical Risk context query failed") from exc
@@ -149,7 +168,9 @@ class PostgresRiskContextRepository:
             if connection is not None:
                 connection.close()
 
-    def _load_mandate(self, cursor: Any, fund_id: UUID, as_of: datetime) -> MandateScope:
+    def _load_mandate(
+        self, cursor: Any, fund_id: UUID, as_of: datetime
+    ) -> MandateScope:
         cursor.execute(
             """
             SELECT p.scope, p.rules
@@ -228,10 +249,16 @@ class PostgresRiskContextRepository:
             raise RiskContextLoadError(f"canonical Risk limit missing: {names[0]}")
 
         return LimitSet(
-            soft_single_issuer_pct=value("single_issuer_pct", "single_issuer_soft_pct", soft=True),
+            soft_single_issuer_pct=value(
+                "single_issuer_pct", "single_issuer_soft_pct", soft=True
+            ),
             hard_single_issuer_pct=value("single_issuer_pct", "single_issuer_hard_pct"),
-            max_daily_turnover_notional=value("daily_turnover_notional", "max_daily_turnover_notional"),
-            max_daily_order_count=int(value("daily_order_count", "max_daily_order_count")),
+            max_daily_turnover_notional=value(
+                "daily_turnover_notional", "max_daily_turnover_notional"
+            ),
+            max_daily_order_count=int(
+                value("daily_order_count", "max_daily_order_count")
+            ),
             max_daily_loss=value("daily_loss", "max_daily_loss"),
             max_drawdown_pct=value("drawdown_pct", "max_drawdown_pct"),
         )
@@ -255,7 +282,12 @@ class PostgresRiskContextRepository:
             (fund_id, instrument_id, as_of, as_of),
         )
         result: list[RestrictedItem] = []
-        for restricted_instrument_id, restriction_type, effective_from, effective_to in cursor.fetchall():
+        for (
+            restricted_instrument_id,
+            restriction_type,
+            effective_from,
+            effective_to,
+        ) in cursor.fetchall():
             result.append(
                 RestrictedItem(
                     instrument_id=restricted_instrument_id or instrument_id,
@@ -266,7 +298,9 @@ class PostgresRiskContextRepository:
             )
         return tuple(result)
 
-    def _load_portfolio(self, cursor: Any, fund_id: UUID, book_id: UUID, as_of: datetime) -> PortfolioState:
+    def _load_portfolio(
+        self, cursor: Any, fund_id: UUID, book_id: UUID, as_of: datetime
+    ) -> PortfolioState:
         cursor.execute(
             """
             SELECT gross_exposure, nav
@@ -281,7 +315,9 @@ class PostgresRiskContextRepository:
         snapshot = cursor.fetchone()
         if snapshot is None:
             raise RiskContextLoadError("no usable PIT portfolio snapshot for Fund/Book")
-        gross_exposure = _decimal(_row_value(snapshot, 0, "gross_exposure"), "gross_exposure")
+        gross_exposure = _decimal(
+            _row_value(snapshot, 0, "gross_exposure"), "gross_exposure"
+        )
         nav = _decimal(_row_value(snapshot, 1, "nav"), "nav")
 
         cursor.execute(
@@ -296,7 +332,7 @@ class PostgresRiskContextRepository:
         )
         positions: dict[UUID, Decimal] = {}
         issuer_of: dict[UUID, str] = {}
-        realized = Decimal("0")
+        realized = Decimal(0)
         for position_instrument_id, quantity, realized_pnl, issuer in cursor.fetchall():
             positions[position_instrument_id] = _decimal(quantity, "position.quantity")
             issuer_of[position_instrument_id] = str(issuer)
@@ -350,7 +386,9 @@ class PostgresRiskContextRepository:
             equity=nav,
         )
 
-    def _load_market(self, cursor: Any, instrument_id: UUID, as_of: datetime) -> MarketStatus:
+    def _load_market(
+        self, cursor: Any, instrument_id: UUID, as_of: datetime
+    ) -> MarketStatus:
         cursor.execute(
             """
             SELECT quality_status, COALESCE(mid, last_price)
@@ -368,7 +406,9 @@ class PostgresRiskContextRepository:
         tradable = quality in {"PASS", "WARN"} and price is not None
         return MarketStatus(tradable=tradable, reason=f"market_quality={quality}")
 
-    def _load_counterparty(self, cursor: Any, broker_adapter: str, as_of: datetime) -> CounterpartyStatus:
+    def _load_counterparty(
+        self, cursor: Any, broker_adapter: str, as_of: datetime
+    ) -> CounterpartyStatus:
         cursor.execute(
             """
             SELECT status, health

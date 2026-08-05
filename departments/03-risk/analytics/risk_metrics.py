@@ -26,7 +26,9 @@ class Position:
 
     def market_value(self) -> float:
         value = self.quantity * self.price * self.multiplier
-        if not all(map(_is_finite, (self.quantity, self.price, self.multiplier, value))):
+        if not all(
+            map(_is_finite, (self.quantity, self.price, self.multiplier, value))
+        ):
             raise RiskAnalyticsError("position contains a non-finite value")
         return value
 
@@ -132,11 +134,20 @@ def black_scholes_greeks(
 ) -> GreekResult:
     """Calculate vanilla European option Greeks without a mutable model state."""
 
-    values = (spot, strike, time_to_expiry_years, risk_free_rate, volatility, dividend_yield)
+    values = (
+        spot,
+        strike,
+        time_to_expiry_years,
+        risk_free_rate,
+        volatility,
+        dividend_yield,
+    )
     if any(not _is_finite(float(value)) for value in values):
         raise RiskAnalyticsError("option inputs must be finite")
     if spot <= 0 or strike <= 0 or time_to_expiry_years <= 0 or volatility <= 0:
-        raise RiskAnalyticsError("spot, strike, expiry, and volatility must be positive")
+        raise RiskAnalyticsError(
+            "spot, strike, expiry, and volatility must be positive"
+        )
     normalized_type = option_type.lower()
     if normalized_type not in {"call", "put"}:
         raise RiskAnalyticsError("option_type must be call or put")
@@ -159,7 +170,8 @@ def black_scholes_greeks(
     if normalized_type == "call":
         delta = discounted_spot * nd1
         theta = (
-            -(spot * discounted_spot * pdf_d1 * volatility) / (2.0 * sqrt(time_to_expiry_years))
+            -(spot * discounted_spot * pdf_d1 * volatility)
+            / (2.0 * sqrt(time_to_expiry_years))
             - risk_free_rate * strike * discounted_strike * nd2
             + dividend_yield * spot * discounted_spot * nd1
         )
@@ -167,7 +179,8 @@ def black_scholes_greeks(
     else:
         delta = discounted_spot * (nd1 - 1.0)
         theta = (
-            -(spot * discounted_spot * pdf_d1 * volatility) / (2.0 * sqrt(time_to_expiry_years))
+            -(spot * discounted_spot * pdf_d1 * volatility)
+            / (2.0 * sqrt(time_to_expiry_years))
             + risk_free_rate * strike * discounted_strike * nmd2
             - dividend_yield * spot * discounted_spot * nmd1
         )

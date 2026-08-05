@@ -66,7 +66,9 @@ def derivatives_check(body: DerivativeGateRequest) -> dict[str, Any]:
 
     if body.as_of.tzinfo is None or body.as_of.utcoffset() is None:
         raise HTTPException(status_code=422, detail="as_of must be timezone-aware")
-    positions = tuple(DerivativePosition(**item.model_dump()) for item in body.positions)
+    positions = tuple(
+        DerivativePosition(**item.model_dump()) for item in body.positions
+    )
     snapshot = calculate_derivative_snapshot(
         positions,
         stress_shocks=body.stress_shocks,
@@ -93,15 +95,22 @@ def derivatives_check(body: DerivativeGateRequest) -> dict[str, Any]:
     }
 
 
-def _persist_snapshot(body: DerivativeGateRequest, snapshot: Any, decision: str) -> None:
+def _persist_snapshot(
+    body: DerivativeGateRequest, snapshot: Any, decision: str
+) -> None:
     database_url = _canonical_database_url()
     if not database_url:
-        raise HTTPException(status_code=503, detail="DATABASE_URL required for P2 persistence")
+        raise HTTPException(
+            status_code=503, detail="DATABASE_URL required for P2 persistence"
+        )
     try:
         import psycopg2
         from psycopg2.extras import Json
 
-        with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+        with (
+            psycopg2.connect(database_url) as connection,
+            connection.cursor() as cursor,
+        ):
             cursor.execute(
                 """
                 insert into risk.derivative_snapshots (
@@ -126,11 +135,15 @@ def _persist_snapshot(body: DerivativeGateRequest, snapshot: Any, decision: str)
                     snapshot.vol_surface_hash,
                     snapshot.quality_status,
                     Json(list(snapshot.reason_codes)),
-                    Json({key: asdict(value) for key, value in snapshot.greeks.items()}),
+                    Json(
+                        {key: asdict(value) for key, value in snapshot.greeks.items()}
+                    ),
                     decision,
                 ),
             )
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="P2 snapshot persistence failed") from exc
+        raise HTTPException(
+            status_code=503, detail="P2 snapshot persistence failed"
+        ) from exc

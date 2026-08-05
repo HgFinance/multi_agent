@@ -83,7 +83,9 @@ def assessment():
         approved_legs=(),
         aggregate_exposure={},
         reason_codes=(SimpleNamespace(value="stale_snapshot"),),
-        check_results=(SimpleNamespace(check_name="freshness", passed=False, detail="stale"),),
+        check_results=(
+            SimpleNamespace(check_name="freshness", passed=False, detail="stale"),
+        ),
         calculation_version="risk-p0-v1",
         input_hash="hash-1",
     )

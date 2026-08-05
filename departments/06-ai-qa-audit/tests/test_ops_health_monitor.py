@@ -4,6 +4,7 @@
 
 실행: python -m pytest departments/06-ai-qa-audit/tests/test_ops_health_monitor.py -v
 """
+
 from __future__ import annotations
 
 import sys
@@ -26,17 +27,29 @@ now = datetime.now(timezone.utc)
 window_start = now - timedelta(minutes=5)
 monitor = OpsHealthMonitor()
 thresholds = OpsThresholds(
-    max_error_rate=Decimal("0.02"), critical_error_rate=Decimal("0.10"),
-    max_p95_latency_ms=Decimal(2000), critical_p95_latency_ms=Decimal(5000),
+    max_error_rate=Decimal("0.02"),
+    critical_error_rate=Decimal("0.10"),
+    max_p95_latency_ms=Decimal(2000),
+    critical_p95_latency_ms=Decimal(5000),
     max_cost_usd_per_window=Decimal(10),
 )
 
 
-def metrics(scope="research-department", requests=1000, errors=5,
-            p95=Decimal(800), cost=Decimal("2.5")) -> AgentHealthMetrics:
+def metrics(
+    scope="research-department",
+    requests=1000,
+    errors=5,
+    p95=Decimal(800),
+    cost=Decimal("2.5"),
+) -> AgentHealthMetrics:
     return AgentHealthMetrics(
-        scope=scope, window_start=window_start, window_end=now,
-        request_count=requests, error_count=errors, p95_latency_ms=p95, cost_usd=cost,
+        scope=scope,
+        window_start=window_start,
+        window_end=now,
+        request_count=requests,
+        error_count=errors,
+        p95_latency_ms=p95,
+        cost_usd=cost,
     )
 
 
@@ -80,9 +93,13 @@ def test_06_cost_over_budget_alone_degraded():
 
 
 def test_07_simultaneous_critical_breaches_escalate_to_sev1():
-    a7 = monitor.evaluate(metrics(requests=1000, errors=150, p95=Decimal(6000)), thresholds)
+    a7 = monitor.evaluate(
+        metrics(requests=1000, errors=150, p95=Decimal(6000)), thresholds
+    )
     assert a7.status is OpsHealthStatus.CRITICAL
-    assert a7.incident.severity is IncidentSeverity.SEV1, "동시 Critical은 SEV1이어야 함"
+    assert a7.incident.severity is IncidentSeverity.SEV1, (
+        "동시 Critical은 SEV1이어야 함"
+    )
 
 
 def test_08_zero_traffic_avoids_false_positive():
@@ -93,5 +110,7 @@ def test_08_zero_traffic_avoids_false_positive():
 def test_09_incident_code_reproducible_for_same_input():
     a9a = monitor.evaluate(metrics(requests=1000, errors=30), thresholds)
     a9b = monitor.evaluate(metrics(requests=1000, errors=30), thresholds)
-    assert a9a.incident.incident_code == a9b.incident.incident_code, "같은 scope·시각인데 코드가 다름"
+    assert a9a.incident.incident_code == a9b.incident.incident_code, (
+        "같은 scope·시각인데 코드가 다름"
+    )
     assert a9a.incident.severity == a9b.incident.severity
