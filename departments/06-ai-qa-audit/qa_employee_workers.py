@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,12 @@ from uuid import UUID, uuid4
 from langgraph.graph import END, StateGraph
 
 from departments.employee_worker_runtime import run_coroutine_sync
+from departments.risk_qa_worker_profiles import (
+    QA_WORKER_TECH,
+    WorkerTechProfile,
+    tech_profile_for,
+)
+from orchestration.llm_observability import record_llm_call
 
 
 def _load_skill_package() -> None:
@@ -76,6 +83,7 @@ class WorkerSpec:
     output_contract: str = "qa.worker-context.v1"
     max_attempts: int = 3
     skill_ids: tuple[str, ...] = ()
+    tech_profile: WorkerTechProfile | None = None
 
 
 _QA_GUARDS = (
@@ -96,6 +104,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Evidence and citation QA analyst",
         ("qa.evidence.check",),
         "always",
+        tech_profile=tech_profile_for(QA_WORKER_TECH, "evidence-qa-worker"),
         skill_ids=_QA_GUARDS
         + (
             "context.internal_api.v1",
@@ -116,6 +125,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Hallucination and contradiction critic",
         ("qa.evidence.rag",),
         "when_unsupported_claim_exists",
+        tech_profile=tech_profile_for(QA_WORKER_TECH, "hallucination-critic-worker"),
         skill_ids=_QA_GUARDS
         + (
             "guard.pit_filter.v1",
@@ -145,6 +155,9 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Model risk and internal audit analyst",
         ("qa.model_risk.evaluate", "qa.internal_audit.evaluate"),
         "when_audit_input_exists",
+        tech_profile=tech_profile_for(
+            QA_WORKER_TECH, "model-and-internal-audit-worker"
+        ),
         skill_ids=_QA_GUARDS
         + (
             "context.internal_api.v1",
@@ -162,6 +175,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Agent operations and tool permission analyst",
         ("qa.ops.evaluate", "qa.tool_permission.check"),
         "when_ops_input_exists",
+        tech_profile=tech_profile_for(QA_WORKER_TECH, "ops-and-permission-worker"),
         skill_ids=_QA_GUARDS
         + (
             "context.internal_api.v1",
@@ -178,6 +192,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Incident timeline and postmortem analyst",
         ("qa.incident.record",),
         "when_incident_exists",
+        tech_profile=tech_profile_for(QA_WORKER_TECH, "incident-postmortem-worker"),
         skill_ids=_QA_GUARDS
         + (
             "context.internal_api.v1",
@@ -210,15 +225,24 @@ def default_worker_llm(system: str, prompt: str) -> str:
         api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
         timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
     )
-    response = client.chat.completions.create(
-        model=_model_name(),
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    return response.choices[0].message.content or ""
+    started = time.perf_counter()
+    try:
+        response = client.chat.completions.create(
+            model=_model_name(),
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        record_llm_call(
+            usage=getattr(response, "usage", None),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        return response.choices[0].message.content or ""
+    except Exception:
+        record_llm_call(latency_ms=int((time.perf_counter() - started) * 1000), error=True)
+        raise
 
 
 def _compact(value: Any, limit: int = 9000) -> str:
@@ -389,6 +413,7 @@ def build_worker_graph(
                 "trace_manifest": _manifest(state),
             }
         worker_llm = llm or default_worker_llm
+        tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
         system = (
             f"You are the {spec.role}. You are an AI-QA employee, not Hermes supervisor. "
             "Use only supplied evidence. Never change a binding QA verdict, approve an order, "
@@ -399,6 +424,8 @@ def build_worker_graph(
             f"Worker: {spec.worker_id}\n"
             f"Allowed tools: {', '.join(spec.tools)}\n"
             f"Required skills: {', '.join(spec.skill_ids)}\n"
+            f"Technology stack: {', '.join(tech_profile.get('stack', ()))}\n"
+            f"Technology usage: {'; '.join(tech_profile.get('usage', ()))}\n"
             f"Output contract: {spec.output_contract}\n"
             f"Evidence:\n{_compact(state.get('tool_output', {}))}"
         )
@@ -635,6 +662,7 @@ def _run_employee_workers_sequential(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "skills": list(spec.skill_ids),
+                "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
                 "trace": state.get("trace_manifest", {}),
@@ -662,6 +690,11 @@ def _run_employee_workers_sequential(
             "model": _model_name(),
             "max_retries": 2,
             "max_attempts": 3,
+            "technology_profiles": {
+                spec.worker_id: spec.tech_profile.as_dict()
+                for spec in WORKER_SPECS
+                if spec.tech_profile is not None
+            },
         },
         "workers": reports,
         "executed": [r["worker_id"] for r in reports if r["status"] == "COMPLETED"],
@@ -729,6 +762,7 @@ async def run_employee_workers_async(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "skills": list(spec.skill_ids),
+                "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
                 "trace": state.get("trace_manifest", {}),
@@ -752,6 +786,7 @@ async def run_employee_workers_async(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "skills": list(spec.skill_ids),
+                "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": [],
                 "rag_plan": {},
                 "trace": {},
@@ -784,6 +819,11 @@ async def run_employee_workers_async(
             "model": _model_name(),
             "max_retries": 2,
             "max_attempts": 3,
+            "technology_profiles": {
+                spec.worker_id: spec.tech_profile.as_dict()
+                for spec in WORKER_SPECS
+                if spec.tech_profile is not None
+            },
         },
         "workers": reports,
         "executed": [

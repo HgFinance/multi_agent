@@ -147,6 +147,7 @@ class PortfolioRuntime:
             "active_handoff": None,
             "messages": [],
             "pipeline_events": [],
+            "performance_metrics": [],
             "result": None,
             "approval": {"status": "PENDING", "binding": False, "approved_at": None, "comment": None},
             "error": None,
@@ -278,6 +279,10 @@ class PortfolioRuntime:
             elif kind == "worker_completed" and department:
                 worker_id = str(event.get("worker_id", ""))
                 summary = _one_line(event.get("summary"))
+                performance = event.get("performance")
+                if isinstance(performance, Mapping):
+                    job["performance_metrics"].append(dict(performance))
+                    job["performance_metrics"] = job["performance_metrics"][-100:]
                 KANBAN_STATUS_BRIDGE.publish_task_event(
                     {
                         "event_id": f"{job_id}:worker_completed:{worker_id}",

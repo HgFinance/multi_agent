@@ -151,6 +151,12 @@ audit.rag_graph_extractions
 
 새 Python 모듈은 기존 `risk_employee_workers.py`가 소유한 Worker Registry를 우회하지 않는다. `WORKER_SPECS`의 Skill 목록과 `hermes/config.yaml`의 Tool allowlist가 일치해야 한다.
 
+## 9.1 실행 코드와 기술 프로필 동기화
+
+이 문서의 Worker별 Stack 표는 이제 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)의 `RISK_WORKER_TECH`와 Risk `WORKER_SPECS`에 반영된 실행 메타데이터와 동기화한다. Worker 결과의 `technology`와 런타임의 `technology_profiles`에서 실제 사용 기술·입력·성과 지표를 확인할 수 있다. 역할 변경은 문서만 수정하지 말고 프로필·`WORKER_SPECS`·allowlist·계약 테스트를 함께 수정한다.
+
+현재 활성화된 경로는 LangGraph guard/skill/tool adapter → Pydantic contract → 필요한 경우 Ollama advisory → trace/replay다. pgvector/BM25, PIKE-RAG, LightRAG, GraphRAG는 데이터·평가셋·비용 게이트를 통과하기 전까지 후보 설계이며 자동 활성화하지 않는다. 특히 pre-trade hot path에는 RAG·외부 HTTP·재시도형 LLM을 추가하지 않는다.
+
 ## 10. Risk별 Graph Acceptance
 
 - Market/Liquidity: stale Snapshot, Trading State `HALTED`, API timeout은 모두 신규 진입 차단 방향이어야 한다.

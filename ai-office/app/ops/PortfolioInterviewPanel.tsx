@@ -119,6 +119,23 @@ function explainPortfolioConnectionError(value: string): string {
   return value;
 }
 
+type PitReadiness = {
+  quality_status?: string;
+  reasons?: string[];
+  candidate_count?: number;
+  research_document_count?: number;
+  market_snapshot_count?: number;
+  domestic_instrument_count?: number;
+  as_of?: string;
+};
+
+function readPitReadiness(runtime?: OperationsRuntime): PitReadiness | null {
+  const context = runtime?.result?.data_context;
+  if (typeof context !== "object" || context === null) return null;
+  const diagnostics = (context as { data_diagnostics?: { pit_readiness?: unknown } }).data_diagnostics?.pit_readiness;
+  return typeof diagnostics === "object" && diagnostics !== null ? diagnostics as PitReadiness : null;
+}
+
 function shortRunId(runId: string | null): string {
   if (!runId) return "—";
   return runId.length > 16 ? `…${runId.slice(-12)}` : runId;
@@ -513,6 +530,7 @@ export default function PortfolioInterviewPanel({
   const [workflowError, setWorkflowError] = useState("");
   const [backendMandate, setBackendMandate] = useState<{ current_version: number; status: string } | null>(null);
   const runtime = snapshot?.operations?.runtime;
+  const pitReadiness = readPitReadiness(runtime);
   const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
   const connectionError = submitError || (!runtime?.run_id && error) || "";
 
@@ -718,6 +736,16 @@ export default function PortfolioInterviewPanel({
         </div>
       )}
         {runtime?.phase && <p className="runtime-phase"><b>현재 단계:</b> {runtime.phase}</p>}
+        {pitReadiness && pitReadiness.quality_status !== "PASS" && (
+          <div className="pit-diagnostic" role="status">
+            <strong>PIT 입력 진단 · {pitReadiness.quality_status}</strong>
+            <span>
+              후보 {pitReadiness.candidate_count ?? 0}개 · 연구 문서 {pitReadiness.research_document_count ?? 0}개 · 시장 스냅샷 {pitReadiness.market_snapshot_count ?? 0}개 · 국내 종목 {pitReadiness.domestic_instrument_count ?? 0}개
+            </span>
+            <small>차단 사유: {(pitReadiness.reasons ?? ["PIT_DATA_NOT_READY"]).slice(0, 3).join(" · ")}</small>
+            <button type="button" className="text-button" onClick={() => void refresh()}>진단 새로고침</button>
+          </div>
+        )}
       </div>
     </section>
   );

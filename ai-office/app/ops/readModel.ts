@@ -179,6 +179,24 @@ export type OperationsRuntimeWorker = {
   summary: string | null;
 };
 
+export type LlmPerformanceMetric = {
+  schema_version: "llm.performance.v1" | string;
+  worker_id: string;
+  role: string;
+  stage: string;
+  model_name: string;
+  status: string;
+  attempts: number;
+  llm_calls: number;
+  retries: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  latency_ms: number;
+  eval_score: number | null;
+  error_count: number;
+  raw_payloads_sent: false;
+};
+
 export type OperationsRuntimeMessage = {
   id: string;
   occurred_at: string;
@@ -207,6 +225,7 @@ export type OperationsRuntime = {
   phase: string | null;
   departments: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
   active_workers: OperationsRuntimeWorker[];
+  performance_metrics?: LlmPerformanceMetric[];
   active_handoff: OperationsRuntimeHandoff | null;
   observability?: {
     langsmith?: {

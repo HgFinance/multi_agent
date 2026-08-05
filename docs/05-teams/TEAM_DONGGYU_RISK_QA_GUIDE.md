@@ -117,6 +117,24 @@
 | 영주 | Mandate/Approval/Actor identity/Policy version | unsigned actor, 만료 승인, SoD 위반이면 거부 |
 | 동규 | Risk Decision·QA Decision·Finding | 근거 없는 `APPROVE`/`PASS`는 생성하지 않음 |
 
+## Risk·QA 역할 분배 최적화 기준 (2026-08-05)
+
+현재 추천 파이프라인에서 항상 실행하는 최소 통제는 Risk의 `market-liquidity-worker`·`pre-trade-risk-worker`, QA의 `evidence-qa-worker`다. 나머지는 입력이 있을 때만 팬아웃한다.
+
+| 입력 조건 | 실행 Worker | 안전한 미실행/실패 결과 |
+|---|---|---|
+| 모든 포트폴리오 추천 | Risk market/liquidity + pre-trade, QA evidence | Worker 실패는 `DEGRADED`, downstream은 `HOLD/ESCALATE` |
+| compliance evidence 존재 | Risk compliance-policy | PIT·ACL·citation 미통과 시 `ESCALATE`, 근거 없는 정책 판정 금지 |
+| 파생·상대방·증거금 신호 존재 | Risk derivatives-counterparty | 상태 누락 시 승인 방향 보간 금지, `HOLD/ESCALATE` |
+| unsupported/contradicted claim 존재 | QA hallucination-critic | 미해결 claim이면 QA PASS 금지 |
+| model-risk/internal-audit 입력 존재 | QA model-and-internal-audit | SoD·권한·재현성 미검증 시 `WARN/ESCALATE` |
+| ops/permission 입력 존재 | QA ops-and-permission | allowlist/scope 위반 시 `DENY/ESCALATE` |
+| incident 입력 존재 | QA incident-postmortem | append-only timeline과 human review로 종료 |
+
+기술 스택과 Worker별 성과 지표는 [`WORKER_ROLE_BOUNDARIES.md`](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와 실행 메타데이터 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)에 함께 정의한다. 성과는 단순 완료 수가 아니라 freshness·PIT·citation·determinism·false-clear·permission violation·latency·replay completeness를 기록한다. Ollama `qwen3:1.7b`는 구조화된 근거의 advisory 서술만 담당하고, 바인딩 판정·권한·상태 전이는 결정론적 Engine/API가 담당한다.
+
+외부 쓰기는 이 부서 Worker의 기본 권한이 아니다. Risk/QA 도메인 API의 write scope가 존재하더라도 현재 포트폴리오 추천 실행은 `external_writes=false`이며, Worker allowlist는 read/calculation 도구만 허용한다. 실제 write를 연결할 때는 별도 command path, service token, SoD, `idempotency_key`, `expected_version`, append-only audit event와 음성 테스트가 먼저 필요하다.
+
 ## 5. 검증 명령과 보고 형식
 
 검증 시 Secret·Cookie·DATABASE_URL·Redis URL의 credential 부분을 출력하지 않는다.

@@ -8,6 +8,7 @@ from pathlib import Path
 QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 
+import qa_employee_workers
 from qa_employee_workers import _audit_tool, run_employee_workers
 
 import scripts as qa_scripts
@@ -22,13 +23,14 @@ def test_evidence_worker_is_langgraph_qwen_and_conditional_roles_sleep():
         {"assessment": {"decision": "PASS", "claim_checks": []}},
         llm=_llm,
     )
-    assert report["runtime"] == {
-        "executor": "LangGraph",
-        "topology": "async_fan_out_fan_in_independent_graphs",
-        "provider": "ollama",
-        "model": "qwen3:1.7b",
-        "max_retries": 2,
-        "max_attempts": 3,
+    assert report["runtime"]["executor"] == "LangGraph"
+    assert report["runtime"]["topology"] == "async_fan_out_fan_in_independent_graphs"
+    assert report["runtime"]["provider"] == "ollama"
+    assert report["runtime"]["model"] == "qwen3:1.7b"
+    assert report["runtime"]["max_retries"] == 2
+    assert report["runtime"]["max_attempts"] == 3
+    assert set(report["runtime"]["technology_profiles"]) == {
+        spec.worker_id for spec in qa_employee_workers.WORKER_SPECS
     }
     assert report["executed"] == ["evidence-qa-worker"]
     assert "model-and-internal-audit-worker" in report["not_executed"]

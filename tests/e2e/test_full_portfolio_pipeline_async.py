@@ -88,6 +88,12 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         assert report["fan_in"] is True
 
     assert all(worker["binding"] is False for worker in result["worker_reports"])
+    risk_qa_workers = [
+        worker for worker in result["worker_reports"] if worker["stage"] in {"risk", "qa"}
+    ]
+    assert len(risk_qa_workers) == 9
+    assert all(worker["technology"]["write_capability"] == "NONE" for worker in risk_qa_workers)
+    assert all(worker["technology"]["stack"] for worker in risk_qa_workers)
 
 
 def test_worker_registry_loading_is_atomic_under_parallel_fanout():

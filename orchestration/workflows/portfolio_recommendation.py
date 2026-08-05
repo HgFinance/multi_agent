@@ -15,10 +15,10 @@ import json
 import operator
 import os
 import sys
-from threading import RLock
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -37,6 +37,12 @@ from orchestration.contracts.mas import (
     make_pipeline_event,
     stable_hash,
     validate_worker_context,
+)
+from orchestration.llm_observability import (
+    begin_worker_metric,
+    end_worker_metric,
+    publish_metric,
+    redacted_trace,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -542,6 +548,11 @@ def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _technology_profile(spec: WorkerSpec) -> dict[str, Any]:
+    profile = getattr(spec, "tech_profile", None)
+    return profile.as_dict() if profile is not None else {}
+
+
 async def _invoke_worker(
     stage: str,
     spec: WorkerSpec,
@@ -567,21 +578,31 @@ async def _invoke_worker(
                 "stage": stage,
                 "worker_id": spec.worker_id,
                 "role": spec.role,
+                "technology": _technology_profile(spec),
                 "input_hash": payload.get("input_hash"),
                 "output_contract": spec.output_contract,
             }
         )
+    configured_runtime = _configured_worker_runtime()
+    use_ollama = configured_runtime in {"ollama", "live"}
+    worker_llm = default_worker_llm
     if str(payload.get("source", "TEST")).upper() == "TEST":
         # Let the operator projection observe a real running Worker graph in
         # local TEST mode; this does not create work or alter any result.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
-        configured_runtime = _configured_worker_runtime()
-        use_ollama = configured_runtime in {"ollama", "live"}
         worker_llm = (
             default_worker_llm
-            if str(payload.get("source", "TEST")).upper() != "TEST" or use_ollama
+            if use_ollama
             else _deterministic_worker_llm
         )
+    metric_token = begin_worker_metric(
+        worker_id=spec.worker_id,
+        role=spec.role,
+        stage=stage,
+        model_name=(os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b")
+        if worker_llm is default_worker_llm
+        else "deterministic-test",
+    )
     try:
         if stage in {"risk", "qa"}:
             trace = module.SkillTrace()
@@ -599,6 +620,7 @@ async def _invoke_worker(
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
+            "technology": _technology_profile(spec),
             "status": state.get("status", "DEGRADED"),
             "attempts": state.get("attempts", 0),
             "output": state.get("output", {}),
@@ -608,6 +630,19 @@ async def _invoke_worker(
             "binding": False,
         }
         report = _validate_worker_report(report)
+        performance = end_worker_metric(
+            metric_token,
+            status=report["status"],
+            attempts=int(report.get("attempts", 0)),
+            eval_score=1.0
+            if report.get("contract_validation", {}).get("status") == "PASS"
+            else 0.0,
+        )
+        report["performance"] = performance
+        publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -620,6 +655,7 @@ async def _invoke_worker(
                     "input_hash": report.get("input_hash"),
                     "output_contract": report.get("output_contract"),
                     "attempts": report.get("attempts", 0),
+                    "performance": performance,
                 }
             )
         return report
@@ -628,6 +664,7 @@ async def _invoke_worker(
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
+            "technology": _technology_profile(spec),
             "status": "DEGRADED",
             "attempts": 0,
             "output": {
@@ -642,6 +679,12 @@ async def _invoke_worker(
             "input_hash": payload.get("input_hash"),
             "binding": False,
         }
+        performance = end_worker_metric(metric_token, status="DEGRADED", attempts=0, eval_score=0.0)
+        report["performance"] = performance
+        publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -654,6 +697,7 @@ async def _invoke_worker(
                     "input_hash": report.get("input_hash"),
                     "output_contract": report.get("output_contract"),
                     "attempts": report.get("attempts", 0),
+                    "performance": performance,
                 }
             )
         return report
@@ -836,6 +880,18 @@ def build_portfolio_recommendation_graph(
             and bool(market.get("snapshots"))
         )
 
+    def _live_input_block_message(state: PortfolioPipelineState) -> str:
+        data_context = state.get("data_context", {})
+        diagnostics = data_context.get("data_diagnostics", {}).get("pit_readiness", {})
+        reasons = diagnostics.get("reasons") or data_context.get("reasons") or ["PIT_DATA_NOT_READY"]
+        counts = (
+            f"후보 {diagnostics.get('candidate_count', len(state.get('portfolio_candidates', [])))}개 · "
+            f"연구 문서 {diagnostics.get('research_document_count', 0)}개 · "
+            f"시장 스냅샷 {diagnostics.get('market_snapshot_count', 0)}개 · "
+            f"국내 종목 {diagnostics.get('domestic_instrument_count', 0)}개"
+        )
+        return f"PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다. {counts} · 사유: {', '.join(map(str, reasons[:3]))}"
+
 
     def _safe_skip_reports(
         stage: str,
@@ -915,7 +971,7 @@ def build_portfolio_recommendation_graph(
                 ]
             if not _live_worker_inputs_ready(state):
                 if event_callback:
-                    event_callback({"kind": "department_blocked", "stage": stage, "message": "PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다."})
+                    event_callback({"kind": "department_blocked", "stage": stage, "message": _live_input_block_message(state)})
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -1157,13 +1213,27 @@ async def run_portfolio_recommendation_pipeline_async(
             event_callback(forwarded)
 
     app = build_portfolio_recommendation_graph(event_callback=emit)
-    state = await app.ainvoke(
-        _initial_state(profile, candidates, data_context),
-        config={
-            "run_name": "portfolio-recommendation-full",
-            "tags": ["hgfinance", "portfolio-recommendation", f"trace_id:{event_run_id}"],
-        },
-    )
+    with redacted_trace(
+        trace_id=event_run_id,
+        model_name=os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b",
+        stage="portfolio-recommendation",
+    ):
+        state = await app.ainvoke(
+            _initial_state(profile, candidates, data_context),
+            config={
+                "run_name": "portfolio-recommendation-full",
+                "tags": [
+                    "hgfinance",
+                    "portfolio-recommendation",
+                    "redacted",
+                    f"trace_id:{event_run_id}",
+                ],
+                "metadata": {
+                    "observability_schema": "llm.performance.v1",
+                    "raw_payloads_sent": False,
+                },
+            },
+        )
     result = dict(state.get("result", state))
     result["pipeline_events"] = pipeline_events
     result["pipeline_event_count"] = len(pipeline_events)

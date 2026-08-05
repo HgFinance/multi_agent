@@ -14,11 +14,14 @@ import hashlib
 import json
 import os
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
+
+from orchestration.llm_observability import record_llm_call
 
 WorkerLLM = Callable[[str, str], str]
 WorkerTool = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -67,12 +70,21 @@ def default_worker_llm(system: str, prompt: str) -> str:
         base_url=_ollama_base_url(),
         timeout=float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "8")),
     )
-    response = client.chat.completions.create(
-        model=model_name(),
-        temperature=0,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-    )
-    return str(response.choices[0].message.content or "")
+    started = time.perf_counter()
+    try:
+        response = client.chat.completions.create(
+            model=model_name(),
+            temperature=0,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        )
+        record_llm_call(
+            usage=getattr(response, "usage", None),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        return str(response.choices[0].message.content or "")
+    except Exception:
+        record_llm_call(latency_ms=int((time.perf_counter() - started) * 1000), error=True)
+        raise
 
 
 def _compact(value: Any, limit: int = 8000) -> str:

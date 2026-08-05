@@ -20,6 +20,7 @@ import DepartmentCommunicationPanel from "./ops/DepartmentCommunicationPanel";
 import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
+import type { LlmPerformanceMetric } from "./ops/readModel";
 
 type View = "live" | "dashboard" | "mandate";
 type DashboardAudience = "executive" | "operations";
@@ -1064,9 +1065,9 @@ function DashboardView({
         </div>
       </section>
 
-      <OpsPanel />
       <DepartmentRuntimePanel />
       <DepartmentCommunicationPanel />
+      <OpsPanel />
 
       <section className="win storage">
         <div className="win-bar">
@@ -1131,6 +1132,7 @@ function OperationsConsoleView({
   const departmentRows = operations?.departments ?? [];
   const activeWorkers = runtime?.active_workers ?? [];
   const observedAgents = operations?.agent_statuses ?? [];
+  const performanceMetrics = runtime?.performance_metrics ?? [];
   const tone = (status: string | undefined) => {
     const value = String(status ?? "OFFLINE").toUpperCase();
     if (["RUNNING", "CONNECTED", "COMPLETED", "PASS", "APPROVE"].includes(value)) return "done";
@@ -1193,6 +1195,50 @@ function OperationsConsoleView({
             <span><b>LangSmith</b> {runtime?.observability?.langsmith?.status ?? "UNKNOWN"}</span>
           </div>
           {runtime?.error ? <p className="ops-runtime-error" role="alert">실행 오류 원인 · {runtime.error}</p> : null}
+
+          <section className="ops-observability-panel" aria-labelledby="ops-observability-title">
+            <div className="communication-toolbar">
+              <div>
+                <p className="eyebrow">LANGSMITH · REDACTED OBSERVABILITY</p>
+                <h3 id="ops-observability-title">LLM 성과 추적 <span>{performanceMetrics.length}개 metric</span></h3>
+              </div>
+              <span className={`status-pill ${tone(runtime?.observability?.langsmith?.status)}`}>
+                {runtime?.observability?.langsmith?.status ?? "UNKNOWN"}
+              </span>
+            </div>
+            <div className="ops-observability-grid">
+              <article>
+                <span>Input</span>
+                <strong>원문 비활성화</strong>
+                <small>LangSmith에 입력 텍스트를 보내지 않습니다.</small>
+              </article>
+              <article>
+                <span>Output</span>
+                <strong>원문 비활성화</strong>
+                <small>출력 텍스트 대신 상태·해시·계약 검증만 추적합니다.</small>
+              </article>
+              <article>
+                <span>Metadata</span>
+                <strong>정량 지표만</strong>
+                <small>model, role, latency, tokens, eval score</small>
+              </article>
+            </div>
+            {performanceMetrics.length > 0 ? (
+              <div className="llm-metric-list" aria-label="LangSmith 정량 성과 목록">
+                {performanceMetrics.slice(-8).reverse().map((metric: LlmPerformanceMetric) => (
+                  <div className="llm-metric-row" key={`${metric.worker_id}-${metric.stage}-${metric.latency_ms}-${metric.attempts}`}>
+                    <b>{metric.worker_id}</b>
+                    <span>{metric.model_name}</span>
+                    <span>{metric.stage}</span>
+                    <span>{metric.latency_ms}ms</span>
+                    <span>eval {metric.eval_score == null ? "—" : metric.eval_score.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="dash-note">Worker가 실행되면 여기와 LangSmith에 동일한 정량 metric이 표시됩니다. 현재는 실행 전이거나 PIT 안전 보류 상태입니다.</p>
+            )}
+          </section>
 
           <div className="ops-stage-list" aria-label="부서별 실행 단계">
             {departmentRows.map((department) => (
@@ -1262,6 +1308,7 @@ function OperationsConsoleView({
               {runtime.messages.slice(-8).reverse().map((message) => (
                 <div key={message.id}>
                   <time>{new Date(message.occurred_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                  <small>{message.department_code ?? "runtime"}</small>
                   <b>{message.kind}</b>
                   <span>{message.text}</span>
                 </div>
@@ -1271,6 +1318,8 @@ function OperationsConsoleView({
         </div>
       </section>
 
+      <DepartmentRuntimePanel />
+      <DepartmentCommunicationPanel />
       <OpsPanel />
     </>
   );
