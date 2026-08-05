@@ -34,8 +34,13 @@ python departments/05-accounting-portfolio/ledger/ledger.py
 python departments/05-accounting-portfolio/portfolio/portfolio.py
 python departments/05-accounting-portfolio/portfolio/ui_read_model.py
 python departments/05-accounting-portfolio/reconciliation/reconciliation.py
+python departments/05-accounting-portfolio/reconciliation/break_triage.py
 python departments/05-accounting-portfolio/corporate_actions/corporate_actions.py
 python departments/05-accounting-portfolio/reporting/daily_report.py
+python departments/05-accounting-portfolio/query_router.py
+python departments/05-accounting-portfolio/nav_close_memory.py
+python departments/05-accounting-portfolio/employee_workers.py
+python departments/05-accounting-portfolio/scripts.py
 python departments/05-accounting-portfolio/api/app.py
 python apps/api/main.py
 
@@ -50,8 +55,13 @@ curl http://127.0.0.1:8046/health
 - `ledger/ledger.py` — 원장 불변식 10개 자체 점검
 - `portfolio/portfolio.py` — Portfolio/NAV 12개 영역
 - `reconciliation/reconciliation.py` — 대사 12개 자체 점검
+- `reconciliation/break_triage.py` — Break 원인 후보·Aging/SLA 9개 영역 (실 DB 이력 조회 포함)
 - `corporate_actions/corporate_actions.py` — F25 Corporate Action 13개 영역
 - `reporting/daily_report.py` — F23 Daily Report 14개 영역
+- `query_router.py` — 질의 Level 분류 8개 영역
+- `nav_close_memory.py` — 마감 Layered Memory 9개 영역
+- `employee_workers.py` — 직원 근거 주입·인용 검증 6개 영역
+- `scripts.py` — 마감 파이프라인 20개 영역 (Hermes·네트워크 없음)
 - `portfolio/ui_read_model.py` — OMS·Ledger·Portfolio DEMO Snapshot 계약
 - `api/app.py` — Domain API 16개 영역 (TestClient. 네트워크·DB 없음)
 - `apps/api/main.py` — `/health`, `/ui/snapshot`, 부서별 Agent 경로 BFF 7개 영역 점검
@@ -63,6 +73,25 @@ curl http://127.0.0.1:8046/health
   2026-07-30에 삭제됐다
 - `reconciliation/` — OMS/Fill/Ledger Reconciliation(Sprint D2). 구 경로 `accounting/reconciliation.py`는
   2026-07-30에 삭제됐다
+- `reconciliation/break_triage.py` — Break Triage(2026-08-05). **판정을 하지 않는다** —
+  Break 생성과 Severity는 `reconciliation.py`가 그대로 유지하고, 여기는 이미 만들어진
+  Break에 원인 후보와 과거 해소 사례를 붙인다. 코퍼스는 `accounting.breaks`의 실제 해소
+  이력이고, 이력이 없는 동안은 `accounting_ops.yaml`의 원인 분류표가 Cold Start 근거다
+  (이력이 쌓이면 이력이 분류표를 이긴다). **Aging/SLA는 LLM을 안 부른다** — Severity별
+  기한을 넘긴 Break를 결정론으로 `OVERDUE`로 만든다. 조용히 늙는 Break가 제일 위험하다
+- `query_router.py` — 회계 질의 Level 분류(2026-08-05). L0/L1/L2/L3와 모델 등급을 결정론으로
+  정한다. **L0은 모델을 아예 안 부르고** 원장 읽기 경로를 알려준다 — 제일 싼 모델은 안 부르는
+  모델이고, 덤으로 원장 수치가 LLM 문장을 거치지 않는다. 등급→모델 표는 지금 셋 다 같은
+  모델을 가리키며(`tier_routing_approved: false`) 배선만 먼저 깔아둔 상태다.
+  직원 Worker 모델은 이 라우팅과 무관하다 — `employee_runtime`이 소유하고
+  [WORKER_MODEL_MATRIX](../../docs/02-engineering/WORKER_MODEL_MATRIX.md) 절차를 따른다.
+  지식 그래프는 **만들지 않는다.** L2가 관계형으로 안 풀린다는 것이 실측될 때만 논의를 연다
+- `nav_close_memory.py` — 마감 Layered Memory(2026-08-05, FinMem 계층 구조). shallow/
+  intermediate/deep 반감기와 relevance×recency×importance 검색, 접근 강화에 따른 계층 승격.
+  **기억 계층과 System of Record를 섞지 않는다** — `MemoryEntry`에 금액 필드가 아예 없고,
+  수치가 들어간 문장은 `remember()`가 거부한다(금액 대신 `refs`로 원본 id를 가리킨다).
+  `is_official`은 어떤 회상 뒤에도 False다 — NAV 확정은 기억이 아니라 승인 절차다
+- `accounting_ops.yaml` — 위 셋의 튜닝값(SLA 시간, 원인 분류표, Level 규칙, 반감기)
 - `corporate_actions/` — F25. 배당·분할·종목변경 분개. **공시(Announcement)로는 분개하지 않고**
   `EFFECTIVE`만 반영하며, 선택형 Action은 `approval_id` 없이 거부한다. `action_id`가 멱등 키다
 - `reporting/daily_report.py` — F23. 하루치 PnL·Drawdown·비용·오류. 수치를 새로 만들지 않고

@@ -51,6 +51,12 @@ deterministic_services:
   reconciliation: departments/05-accounting-portfolio/reconciliation/reconciliation.py  # OMS/Fill/Ledger 대사와 Break
   corporate_actions: departments/05-accounting-portfolio/corporate_actions/corporate_actions.py  # F25 배당·분할·종목변경
   daily_report: departments/05-accounting-portfolio/reporting/daily_report.py   # F23 전략별 PnL/Drawdown/비용/오류
+  # 2026-08-05 추가. 셋 다 판정이 아니라 근거·분류·계측이며 회계 수치를 만들지 않는다.
+  # Break 생성과 Severity 는 여전히 reconciliation.py 만 한다.
+  break_triage: departments/05-accounting-portfolio/reconciliation/break_triage.py   # 원인 후보·과거 사례·Aging/SLA
+  query_router: departments/05-accounting-portfolio/query_router.py                  # 질의 Level 분류(L0 은 모델 호출 없음)
+  close_memory: departments/05-accounting-portfolio/nav_close_memory.py              # 마감 Layered Memory(비공식)
+  ops_tuning: departments/05-accounting-portfolio/accounting_ops.yaml                # 위 셋의 튜닝값
   schema: db/002_accounting.sql
   seed: db/004_seed.sql                         # 계정과목, 초기 Fund/Book, 자본 납입
 
@@ -194,16 +200,21 @@ workers:
     status: active
     trigger: always
     tools: [accounting.portfolio_snapshot.read]
+  # 아래 두 직원만 근거를 주입받는다(2026-08-05, employee_workers.py). 목록 밖 id 를
+  # 인용하면 evidence_refs 검증에서 잡혀 escalate 된다.
   ledger-reconciliation-worker:
     role: Ledger, fund-accounting and broker-reconciliation analyst
     status: active
     trigger: always
     tools: [accounting.ledger.read, accounting.reconciliation.read]
+    grounded_by: departments/05-accounting-portfolio/reconciliation/break_triage.py
   nav-close-worker:
     role: NAV close and official-figure readiness analyst
     status: conditional
     trigger: nav_close
     tools: [accounting.nav_close.read]
+    # 기억은 비공식 보조다. is_official 은 어떤 회상 뒤에도 false 를 유지한다.
+    grounded_by: departments/05-accounting-portfolio/nav_close_memory.py
   treasury-liquidity-worker:
     role: Treasury, collateral and liquidity analyst
     status: conditional

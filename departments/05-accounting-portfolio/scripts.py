@@ -90,6 +90,7 @@ from portfolio import (
     ValuationError,
     value_portfolio,
 )
+from break_triage import BreakTriageError, check_aging, triage, triage_context
 from reconciliation import (
     Break,
     ReconResult,
@@ -112,6 +113,8 @@ class CloseState(TypedDict, total=False):
     as_of: Any                       # datetime
     accounting_date: Any             # date
     external: dict                   # 브로커 명세서 {fills, positions, cash}
+    carried_open_breaks: list        # 전일까지 미종결 Break (recon_repository.open_breaks)
+    triage_corpus: list              # 과거 해소 사례 (break_triage.load_corpus) - 근거 검색용
     opening_snapshot: Any            # PortfolioSnapshot | None
     stored_projection: dict | None   # {"positions": {...}, "cash": Decimal} - DB Read Model
     strategy_of: dict | None
@@ -124,6 +127,9 @@ class CloseState(TypedDict, total=False):
     book_id: str
     recon: dict                      # 대사 결과 요약
     breaks: list                     # Break 목록 (dict 화)
+    break_aging: dict                # Break Aging/SLA (결정론 - break_triage)
+    break_triage: list               # 원인 후보와 과거 해소 사례 (근거만, 판정 아님)
+    break_citations: dict            # 서술이 인용한 근거 id 검증 결과
     break_narrative: str | None      # ACC-02 LLM (서술만)
     projection_check: dict           # rebuild 재현성 + 저장본 대조 + 차대 균형
     snapshot: dict | None            # 평가 결과 (금액은 문자열)
@@ -306,7 +312,25 @@ def reconcile(state: CloseState) -> dict:
         # 브로커 명세서가 없으면 대사를 "통과"로 기록하지 않는다 - 안 한 것이다.
         results["_none"] = {"result": "not_reconciled",
                             "detail": "브로커 명세서가 없어 대사를 수행하지 않았다"}
-    return {"recon": results, "breaks": [_break_dict(b) for b in breaks]}
+
+    # Aging/SLA 와 원인 후보. 둘 다 결정론이고 severity 를 바꾸지 않는다.
+    # 오늘 난 Break 는 당연히 SLA 안이지만, 호출자가 미종결 이력(open_breaks)을 주면
+    # **어제 것이 늙고 있다**는 사실이 마감 팩에 같이 올라온다 - 조용히 늙는 Break 가 제일 위험하다.
+    carried = list(state.get("carried_open_breaks") or [])
+    aging_rows = carried + [{"break_id": b["break_id"], "severity": b["severity"],
+                             "status": b["status"], "kind": b["kind"],
+                             "created_at": as_of} for b in map(_break_dict, breaks)]
+    corpus = list(state.get("triage_corpus") or [])
+    try:
+        aging = check_aging(aging_rows, now=as_of)
+        triage_notes = [triage(b, corpus, recon_type=b.kind.split("_")[0]) for b in breaks]
+    except BreakTriageError as exc:
+        # 근거를 못 만드는 것이 대사 결과를 지우지 않는다. Break 는 그대로 남는다.
+        aging = {"decided_by": "deterministic", "error": type(exc).__name__,
+                 "detail": _sanitize(exc), "sla_breached": False, "overdue": []}
+        triage_notes = []
+    return {"recon": results, "breaks": [_break_dict(b) for b in breaks],
+            "break_aging": aging, "break_triage": triage_notes}
 
 
 # ── 노드 3: Break 서술 (ACC-02 LLM - 조건부, 서술만) ───────────────────────
@@ -347,21 +371,50 @@ def narrate_breaks(state: CloseState, *, chat=None) -> dict:
     breaks = state.get("breaks") or []
     if not breaks:
         return {}
-    task = f"""Using ONLY the reconciliation breaks below, write a Korean narrative for the
-Portfolio Control close pack. You cannot change any severity or count — they are already
-determined by deterministic code. Describe what each break means operationally and who owns it.
-Never confirm a fuzzy candidate and never state a position or cash figure you computed yourself.
+    # Triage 근거를 프롬프트에 넣는다. 원인은 이 목록 안에서만 고르고, 목록 밖 id 를
+    # 인용하면 아래 verify_citations 가 날조로 잡는다(skills/agentic-rag 와 같은 원칙).
+    triaged = state.get("break_triage") or []
+    evidence = "\n\n".join(triage_context(t) for t in triaged) or "근거 없음"
+    citable = {ref for t in triaged for ref in t.get("citable_ids", [])}
+    aging = state.get("break_aging") or {}
+    task = f"""Using ONLY the reconciliation breaks and the evidence below, write a Korean
+narrative for the Portfolio Control close pack. You cannot change any severity or count — they
+are already determined by deterministic code. Describe what each break means operationally,
+which cause candidates fit, and who owns it.
+Cite the evidence ids you used in `evidence_refs` (e.g. "case:ab12cd34ef56", "cause:...").
+Do not invent ids. Never confirm a fuzzy candidate and never state a position, cash or NAV
+figure you computed yourself — figures come from the ledger, not from this narrative.
+If a break is OVERDUE, say so; an aged break is not a resolved break.
 Schema (JSON only):
 {{"break_narrative": "2-4 sentences in Korean",
- "owner_hint": ["who should resolve each break"]}}
+ "owner_hint": ["who should resolve each break"],
+ "evidence_refs": ["ids actually used"]}}
 
 Breaks:
-{json.dumps(breaks, ensure_ascii=False, indent=1)}"""
+{json.dumps(breaks, ensure_ascii=False, indent=1)}
+
+Aging / SLA (deterministic):
+{json.dumps({k: aging.get(k) for k in ("sla_breached", "overdue", "by_aging_status")},
+            ensure_ascii=False, indent=1)}
+
+Evidence:
+{evidence}"""
     try:
         call = chat or _hermes_chat
         note = _parse_json_block(call(_persona("reconciliation-agent"), task),
                                  ("break_narrative", "owner_hint"), "Reconciliation")
-        return {"break_narrative": note["break_narrative"]}
+        refs = [str(r) for r in (note.get("evidence_refs") or [])]
+        unknown = sorted({r for r in refs if r not in citable})
+        citations = {"refs": refs, "unknown_refs": unknown,
+                     "grounded": bool(refs) and not unknown,
+                     "citable_count": len(citable)}
+        if unknown:
+            # 날조된 근거로 쓴 서술은 채택하지 않는다. 대사 결과는 그대로 남는다.
+            return {"break_narrative": None, "break_citations": citations,
+                    "fallbacks": [{"stage": "narrate_breaks", "error": "FabricatedCitation",
+                                   "error_message": f"근거 색인에 없는 인용: {unknown}",
+                                   "safe_action": "HOLD", "decision_origin": "DETERMINISTIC_GATE"}]}
+        return {"break_narrative": note["break_narrative"], "break_citations": citations}
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         # 서술 실패가 대사 결과를 지우지 않는다. Break 는 그대로 남는다.
         return {"break_narrative": None, "fallbacks": [_fallback("narrate_breaks", exc)]}
@@ -589,6 +642,10 @@ def _assemble_out(state: CloseState) -> dict:
         "recon": state.get("recon", {}),
         "breaks": breaks,
         "material_break_count": len(materials),
+        # Aging/Triage 는 결정론이다. 서술(break_narrative)과 나란히 두되 섞지 않는다.
+        "break_aging": state.get("break_aging", {}),
+        "break_triage": state.get("break_triage", []),
+        "break_citations": state.get("break_citations", {}),
         "break_narrative": state.get("break_narrative"),
         "projection_check": projection,
         "snapshot": state.get("snapshot"),
@@ -620,15 +677,24 @@ def run_accounting_close(
     opening_snapshot: PortfolioSnapshot | None = None,
     stored_projection: dict | None = None,
     strategy_of: dict | None = None,
+    carried_open_breaks: list | None = None,
+    triage_corpus: list | None = None,
     trace_id: str | None = None,
     chat=None,
     uploader=None,
 ) -> dict:
-    """본부 단독 실행 - 다른 본부의 run_<dept>_department 와 같은 외부 인터페이스."""
+    """본부 단독 실행 - 다른 본부의 run_<dept>_department 와 같은 외부 인터페이스.
+
+    `carried_open_breaks` 는 전일까지 미종결 Break(recon_repository.open_breaks),
+    `triage_corpus` 는 과거 해소 사례(break_triage.load_corpus)다. 둘 다 없어도 마감은
+    돌지만, 없으면 **어제 것이 늙고 있다는 사실이 이 마감 팩에 안 실린다.**
+    """
     initial: dict = {"ledger": ledger, "as_of": as_of, "accounting_date": accounting_date,
                      "marks": marks or {}, "external": external or {},
                      "opening_snapshot": opening_snapshot,
                      "stored_projection": stored_projection, "strategy_of": strategy_of,
+                     "carried_open_breaks": carried_open_breaks or [],
+                     "triage_corpus": triage_corpus or [],
                      "trace_id": trace_id, "fallbacks": []}
     try:
         # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
@@ -662,6 +728,10 @@ def _md_lines(title: str, value) -> list[str]:
         lines.append(_md_cell(value) if value is not None else "—")
     lines.append("")
     return lines
+
+
+def _md_refs(values) -> str:
+    return _md_cell(", ".join(str(v) for v in (values or [])) or "없음")
 
 
 def _render_report_md(out: dict) -> str:
@@ -706,8 +776,34 @@ def _render_report_md(out: dict) -> str:
         lines += [f"| {_md_cell(b.get('kind'))} | {_md_cell(b.get('severity'))} | "
                   f"{_md_cell(b.get('detail'))} | {_md_cell(b.get('status'))} |"
                   for b in out["breaks"]]
+    aging = out.get("break_aging") or {}
+    if aging:
+        lines += ["", "### Break Aging / SLA (결정론)", "",
+                  f"- **SLA 초과:** {'**있음**' if aging.get('sla_breached') else '없음'} "
+                  f"(미종결 {_md_cell(aging.get('total_open'))}건)"]
+        lines += [f"- 기한 초과 `{_md_cell(o.get('break_id'))}` "
+                  f"{_md_cell(o.get('severity'))} — 경과 {_md_cell(o.get('age_hours'))}h / "
+                  f"기한 {_md_cell(o.get('sla_hours'))}h (초과 {_md_cell(o.get('overdue_hours'))}h)"
+                  for o in (aging.get("overdue") or [])]
+        if aging.get("unknown_sla"):
+            lines.append(f"- **SLA 미상:** {_md_refs(aging['unknown_sla'])} — 기한 없음으로 읽지 않는다")
+
+    if out.get("break_triage"):
+        lines += ["", "### 원인 후보 (근거 제시 — 판정 아님)", ""]
+        for t in out["break_triage"]:
+            lines.append(f"- `{_md_cell(t.get('break_id'))}` {_md_cell(t.get('kind'))} "
+                         f"(근거: {_md_cell(t.get('evidence_basis'))})")
+            lines += [f"  - {_md_cell(c.get('id'))} — {_md_cell(c.get('cause'))}"
+                      for c in (t.get("cause_candidates") or [])]
+            lines += [f"  - 유사 사례 {_md_cell(c.get('case_id'))} — {_md_cell(c.get('resolution'))}"
+                      for c in (t.get("similar_cases") or [])]
+
     if out.get("break_narrative"):
         lines += _md_lines("Break 서술 (ACC-02, 비바인딩)", out["break_narrative"])
+        citations = out.get("break_citations") or {}
+        if citations:
+            lines.append(f"**인용 검증:** {'통과' if citations.get('grounded') else '**미인용/실패**'}"
+                         f" — 인용 {_md_refs(citations.get('refs'))}")
 
     lines += [
         "", "## 2. Projection 대조 (F15 완료 조건 1·3)", "",
@@ -1114,6 +1210,91 @@ def _check_langsmith_observability():
     print("  LangSmith 관측성           OK")
 
 
+def _check_break_aging_and_triage():
+    """Break Aging/SLA 와 원인 후보. **둘 다 결정론이고 판정을 못 바꾼다.**"""
+    # 브로커에만 있는 체결 -> material Break 가 난다
+    ext = {"positions": {_AAA: Decimal(90)}}
+    seen: dict = {}
+    out = _run(external=ext, chat=_stub(capture=seen))
+
+    # 1) Aging 이 붙고, 오늘 난 Break 는 아직 기한 안이다
+    aging = out["break_aging"]
+    assert aging["decided_by"] == "deterministic"
+    assert aging["total_open"] == len(out["breaks"]) and aging["sla_breached"] is False
+
+    # 2) 전일 미종결 Break 를 넘기면 늙은 것이 드러난다 - 조용히 늙지 않는다
+    carried = [{"break_id": "b-old", "severity": "material", "status": "OPEN",
+                "kind": "position_mismatch",
+                "created_at": (_NOW - timedelta(hours=30)).isoformat()}]
+    aged = _run(external=ext, chat=_stub(), carried_open_breaks=carried)["break_aging"]
+    assert aged["sla_breached"] is True, aged
+    assert aged["by_aging_status"]["OVERDUE"] == ["b-old"]
+    assert aged["overdue"][0]["overdue_hours"] == 26.0, aged["overdue"][0]
+
+    # 3) 원인 후보가 붙되 severity 는 reconciliation.py 값 그대로다
+    triaged = out["break_triage"]
+    assert triaged and all(t["changes_severity"] is False for t in triaged)
+    assert all(t["authoritative"] is False for t in triaged)
+    kinds = {t["kind"] for t in triaged}
+    assert "position_mismatch" in kinds, kinds
+    pos = next(t for t in triaged if t["kind"] == "position_mismatch")
+    assert pos["severity"] == "material" and pos["escalates"] is True
+    assert any(c["id"] == "cause:corporate_action_unapplied" for c in pos["cause_candidates"])
+    # 이력이 없으면 사례 기반이라고 말하지 않는다
+    assert pos["evidence_basis"] == "taxonomy_only" and pos["corpus_size"] == 0
+
+    # 4) 근거가 프롬프트에 실제로 들어가고 금지 문구가 붙는다
+    assert "cause:corporate_action_unapplied" in seen["recon"], "근거가 프롬프트에 없다"
+    assert "Do not invent ids" in seen["recon"]
+    assert "figures come from the ledger" in seen["recon"]
+    assert "OVERDUE" in seen["recon"], "Aging 이 프롬프트에 없다"
+
+    # 5) **날조된 인용으로 쓴 서술은 채택하지 않는다**
+    faked = _run(external=ext, chat=_stub(recon={
+        "break_narrative": "지어낸 사례로 설명", "owner_hint": ["운영"],
+        "evidence_refs": ["case:does_not_exist"]}))
+    assert faked["break_narrative"] is None, "날조 인용 서술이 채택됐다"
+    assert faked["break_citations"]["unknown_refs"] == ["case:does_not_exist"]
+    assert any(f["error"] == "FabricatedCitation" for f in faked["fallbacks"])
+    # 대사 결과는 그대로 남는다 - 서술 거부가 Break 를 지우지 않는다
+    assert len(faked["breaks"]) == len(out["breaks"])
+    assert faked["material_break_count"] == out["material_break_count"]
+
+    # 6) 색인 안 인용은 통과한다 (게이트가 항상 막기만 하는 게 아니다)
+    cited = _run(external=ext, chat=_stub(recon={
+        "break_narrative": "배당 미반영 가능성", "owner_hint": ["운영"],
+        "evidence_refs": ["cause:corporate_action_unapplied"]}))
+    assert cited["break_narrative"] == "배당 미반영 가능성"
+    assert cited["break_citations"]["grounded"] is True
+
+    # 7) 리포트에 Aging 과 원인 후보가 그대로 적힌다
+    md = aged_md = _run(external=ext, chat=_stub(), carried_open_breaks=carried)["report_markdown"]
+    assert "### Break Aging / SLA (결정론)" in md and "b-old" in md
+    assert "### 원인 후보 (근거 제시 — 판정 아님)" in aged_md
+    print("  Break Aging + 원인 후보    OK")
+
+
+def _check_close_memory_boundary():
+    """마감 기억은 비공식이고 is_official 을 못 바꾼다."""
+    sys.path.insert(0, str(_BASE))
+    from nav_close_memory import CloseMemoryError, close_memory_context, recall, remember
+
+    # 기억이 있든 없든 마감 산출의 is_official 은 False 다
+    out = _run(chat=_stub())
+    assert out["is_official"] is False
+    memories = recall("브로커 지연", [], now=_NOW)
+    assert memories["is_official"] is False and memories["authoritative"] is False
+
+    # 기억 본문에 회계 수치를 넣을 수 없다 (두 번째 회계 기록 방지)
+    try:
+        remember("전월 NAV 는 1,204,000,000", path=Path("nonexistent"))
+        raise AssertionError("수치가 든 기억이 저장됐다")
+    except CloseMemoryError:
+        pass
+    assert "원장" in close_memory_context({"recalled": []})
+    print("  마감 기억 경계 (비공식)    OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("value", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1155,6 +1336,8 @@ if __name__ == "__main__":
     _check_malformed_input()
     _check_report_renders()
     _check_notion_report_node()
+    _check_break_aging_and_triage()
+    _check_close_memory_boundary()
     _check_secret_redaction()
     _check_langsmith_observability()
-    print("회계본부 마감 파이프라인 18개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    print("회계본부 마감 파이프라인 20개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
