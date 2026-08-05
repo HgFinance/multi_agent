@@ -12,6 +12,7 @@ import {
 } from "./portfolioClient";
 import {
   advanceMandateCase,
+  assertGovernanceCommandable,
   decideMandateApproval,
   fetchMandateApprovals,
   fetchCurrentMandate,
@@ -595,6 +596,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function startRecommendation() {
+    assertGovernanceCommandable(connection);
     await startPortfolioRecommendation(recommendationInput());
     await refresh();
     setConfigured(true);
@@ -604,6 +606,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function submit(event?: FormEvent<HTMLFormElement>) {
+    assertGovernanceCommandable(connection);
     event?.preventDefault();
     setBusy(true);
     setSubmitError("");
@@ -649,6 +652,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function decideUser(decision: "APPROVED" | "REJECTED") {
+    assertGovernanceCommandable(connection);
     const approval = workflow?.approvals.find((item) => item.required_role === "USER" && item.decision === "PENDING");
     if (!approval) return;
     setBusy(true);
@@ -664,6 +668,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function startAnalysis() {
+    assertGovernanceCommandable(connection);
     setBusy(true);
     setSubmitError("");
     try {
