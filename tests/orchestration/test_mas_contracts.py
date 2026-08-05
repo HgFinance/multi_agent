@@ -22,7 +22,6 @@ from orchestration.contracts.mas import (
     validate_worker_context,
 )
 
-
 AS_OF = datetime(2026, 8, 5, 0, 0, tzinfo=timezone.utc)
 
 
@@ -154,10 +153,26 @@ def test_pipeline_event_and_replay_metadata_are_credential_free() -> None:
             "status": "COMPLETED",
             "input_hash": stable_hash({"query": "국내 주식"}),
             "summary": "근거 수집 완료",
+            "handoff": DepartmentHandoff(
+                run_id="run-1",
+                trace_id="trace-1",
+                from_department="ceo",
+                to_department="research",
+                from_role="ceo:head",
+                to_role="research:head",
+                input_contract="mas.department-context.v1",
+                output_contract="mas.department-context.v1",
+                input_hash=stable_hash({"query": "국내 주식"}),
+                purpose="advisory context",
+                as_of=AS_OF,
+            ).model_dump(mode="json"),
         },
         occurred_at=AS_OF,
     )
     assert event.schema_id == "mas.pipeline-event.v1"
+    assert event.handoff is not None
+    assert event.handoff.from_role == "ceo:head"
+    assert event.handoff.to_role == "research:head"
     metadata = build_replay_metadata(
         {"query": "국내 주식"},
         [{"symbol": "005930"}],

@@ -12,8 +12,8 @@ import asyncio
 import hashlib
 import importlib.util
 import json
-import os
 import operator
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -913,7 +913,17 @@ def build_portfolio_recommendation_graph(
                     )
                 ]
             if event_callback:
-                event_callback({"kind": "department_started", "stage": stage, "worker_ids": [spec.worker_id for spec in selected]})
+                # Publish the validated head-to-head handoff together with the stage
+                # start event.  The worker receives the same object in ``worker_input``;
+                # exposing it here makes the runtime projection and replay auditable.
+                event_callback(
+                    {
+                        "kind": "department_started",
+                        "stage": stage,
+                        "worker_ids": [spec.worker_id for spec in selected],
+                        "handoff": payload.get("handoff"),
+                    }
+                )
             return [
                 Send(
                     f"{stage}_worker",
@@ -989,8 +999,32 @@ def build_portfolio_recommendation_graph(
             data_context.get("source") not in {None, "TEST"}
             and data_context.get("quality_status") != "PASS"
         )
-        pipeline_status = "DEGRADED" if degraded or live_data_blocked else "COMPLETED"
-        safe_action = "NO_ACTION" if matched and not degraded and not live_data_blocked else "HOLD"
+        risk_gate = state.get("risk_gate", {})
+        qa_gate = state.get("qa_gate", {})
+        # A completed precheck is not necessarily an approval.  Keep the
+        # final action fail-closed when an upstream contract or risk gate
+        # rejects the case; otherwise a rejected gate could still surface as
+        # ``NO_ACTION`` merely because its department node completed.
+        risk_safe = risk_gate.get("safe_action") == "NO_ACTION"
+        qa_safe = qa_gate.get("decision") not in {"FAIL", "REJECT", "ESCALATE"}
+        gate_degraded = any(
+            gate.get("reason") == "UPSTREAM_WORKER_CONTRACT_FAILED"
+            for gate in (risk_gate, qa_gate)
+        )
+        pipeline_status = (
+            "DEGRADED"
+            if degraded or live_data_blocked or gate_degraded
+            else "COMPLETED"
+        )
+        safe_action = (
+            "NO_ACTION"
+            if matched
+            and not degraded
+            and not live_data_blocked
+            and risk_safe
+            and qa_safe
+            else "HOLD"
+        )
         result = {
             "workflow": "portfolio-recommendation-full",
             "pipeline_version": PIPELINE_VERSION,

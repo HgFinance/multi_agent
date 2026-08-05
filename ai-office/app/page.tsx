@@ -240,7 +240,7 @@ export default function Home() {
       <BffProvider>
         <RuntimeSync engine={engine} onSync={syncRuntime} />
         {view === "mandate" ? (
-          <MandateConfigView onAnalyzed={() => setView("live")} />
+          <MandateConfigView onAnalyzed={() => setView("dashboard")} />
         ) : view === "live" ? (
           <>
             <LiveView
@@ -847,6 +847,7 @@ function DashboardView({
       </header>
 
       {portfolioRuntime?.run_id && <PortfolioKanban runtime={portfolioRuntime} result={portfolioResult} observedAt={bffSnapshot?.operations?.observed_at} />}
+      {portfolioRuntime?.run_id && <PortfolioResultConsole />}
 
       <section className="summary-grid" aria-label="오늘 업무 요약">
         <article className="metric yellow">

@@ -8,11 +8,11 @@ database, broker or ledger dependency.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
-import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -40,7 +40,7 @@ class EvidenceRef(_Contract):
     as_of: datetime | None = None
 
     @model_validator(mode="after")
-    def validate_as_of(self) -> "EvidenceRef":
+    def validate_as_of(self) -> EvidenceRef:
         if self.as_of is not None and self.as_of.tzinfo is None:
             raise ValueError("evidence.as_of must be timezone-aware")
         return self
@@ -64,7 +64,7 @@ class AnalysisOutput(_Contract):
     assumptions: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def validate_as_of(self) -> "AnalysisOutput":
+    def validate_as_of(self) -> AnalysisOutput:
         if self.as_of.tzinfo is None:
             raise ValueError("analysis.as_of must be timezone-aware")
         return self
@@ -76,7 +76,7 @@ class ProbabilityDistribution(_Contract):
     side: float = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
-    def sums_to_one(self) -> "ProbabilityDistribution":
+    def sums_to_one(self) -> ProbabilityDistribution:
         if abs((self.up + self.down + self.side) - 1.0) > 0.001:
             raise ValueError("prediction probabilities must sum to 1 ± 0.001")
         return self
@@ -90,7 +90,7 @@ class PredictionOutput(_Contract):
     notes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def validate_horizons(self) -> "PredictionOutput":
+    def validate_horizons(self) -> PredictionOutput:
         required = set(Horizon)
         if set(self.horizons) != required:
             raise ValueError("prediction requires exactly T1, T5 and T20 horizons")
@@ -123,7 +123,7 @@ class DecisionOutput(_Contract):
     evidence: tuple[EvidenceRef, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_action(self) -> "DecisionOutput":
+    def validate_action(self) -> DecisionOutput:
         if self.action not in ACTIONS:
             raise ValueError(f"action must be one of {sorted(ACTIONS)}")
         if self.as_of.tzinfo is None:
@@ -148,7 +148,7 @@ class DepartmentHandoff(_Contract):
     as_of: datetime
 
     @model_validator(mode="after")
-    def heads_only_and_safe(self) -> "DepartmentHandoff":
+    def heads_only_and_safe(self) -> DepartmentHandoff:
         if not self.from_role.endswith(":head"):
             raise ValueError("cross-department handoff sender must be a department head")
         if not self.to_role.endswith(":head"):
@@ -173,7 +173,7 @@ class WorkerContextOutput(_Contract):
     schema_valid: bool = True
 
     @model_validator(mode="after")
-    def require_evidence_or_escalation(self) -> "WorkerContextOutput":
+    def require_evidence_or_escalation(self) -> WorkerContextOutput:
         if not self.evidence_refs and not self.escalate:
             raise ValueError("worker output without evidence must escalate")
         if not self.schema_valid:
@@ -197,9 +197,13 @@ class PipelineEvent(_Contract):
     occurred_at: datetime
     summary: str = Field(default="", max_length=4000)
     payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # Keep the validated head-to-head boundary in the audit envelope so the
+    # runtime projection cannot represent a peer/worker call as a department
+    # handoff.
+    handoff: DepartmentHandoff | None = None
 
     @model_validator(mode="after")
-    def validate_time(self) -> "PipelineEvent":
+    def validate_time(self) -> PipelineEvent:
         if self.occurred_at.tzinfo is None:
             raise ValueError("pipeline event timestamp must be timezone-aware")
         return self
@@ -346,6 +350,11 @@ def make_pipeline_event(
         occurred_at=occurred_at or datetime.now(timezone.utc),
         summary=str(event.get("summary", event.get("message", "")))[:4000],
         payload_hash=stable_hash(event),
+        handoff=(
+            DepartmentHandoff.model_validate(event["handoff"])
+            if isinstance(event.get("handoff"), Mapping)
+            else None
+        ),
     )
 
 

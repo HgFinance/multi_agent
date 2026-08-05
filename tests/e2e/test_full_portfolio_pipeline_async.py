@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import orchestration.workflows.portfolio_recommendation as portfolio_pipeline
 from orchestration.workflows.portfolio_recommendation import (
     _stage_payload,
     run_portfolio_recommendation_pipeline_async,
@@ -123,3 +124,51 @@ def test_live_stage_payload_does_not_invent_conditional_worker_signals():
     assert payload["ops_assessment"] == {}
     assert payload["permission_check"] == {}
     assert payload["incident"] == {}
+
+
+def test_failed_research_contract_cannot_surface_as_no_action(monkeypatch):
+    original_invoke = portfolio_pipeline._invoke_worker
+
+    async def invalid_research_worker(stage, spec, payload, *, event_callback=None):
+        if stage != "research":
+            return await original_invoke(
+                stage,
+                spec,
+                payload,
+                event_callback=event_callback,
+            )
+        return {
+            "stage": stage,
+            "worker_id": spec.worker_id,
+            "status": "DEGRADED",
+            "attempts": 1,
+            "output": {
+                "worker_id": spec.worker_id,
+                "summary": "invalid research contract",
+                "confidence": 0.0,
+                "evidence_refs": [],
+                "escalate": True,
+                "schema_valid": False,
+            },
+            "error": "worker_context_contract_invalid",
+            "contract_validation": {
+                "status": "FAIL",
+                "safe_action": "HOLD",
+            },
+            "output_contract": spec.output_contract,
+            "input_hash": payload["input_hash"],
+            "binding": False,
+        }
+
+    monkeypatch.setattr(portfolio_pipeline, "_invoke_worker", invalid_research_worker)
+    result = asyncio.run(
+        run_portfolio_recommendation_pipeline_async(
+            _profile(),
+            [_candidate("balanced-core")],
+        )
+    )
+
+    assert result["risk_gate"]["reason"] == "UPSTREAM_WORKER_CONTRACT_FAILED"
+    assert result["risk_gate"]["safe_action"] == "HOLD"
+    assert result["pipeline_status"] == "DEGRADED"
+    assert result["safe_action"] == "HOLD"

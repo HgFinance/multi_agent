@@ -858,7 +858,7 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .mandate-hero-stamp span { color: var(--pink); font: 900 9px "Archivo", sans-serif; letter-spacing: .18em; }
 .mandate-hero-stamp b { color: #b4d56e; font: 900 24px "Archivo", sans-serif; }
 .mandate-hero-stamp small { color: var(--mint); font-size: 9px; text-align: center; }
-.mandate-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; align-items: start; }
+.mandate-layout { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 14px; align-items: start; }
 .mandate-sidebar { position: sticky; top: 84px; display: grid; gap: 12px; }
 .mandate-form { display: grid; gap: 0; margin-top: 14px; }
 .mandate-form-section { padding: 15px 0 17px; border-bottom: 1px solid var(--pink-line); }
@@ -911,6 +911,18 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .mandate-saved dt { color: var(--ink-faint); font-size: 9px; }
 .mandate-saved dd { margin: 0; color: var(--ink); font-size: 11px; font-weight: 900; }
 .mandate-saved-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mandate-workflow { display: grid; gap: 8px; margin-top: 14px; padding: 12px; border: 1.5px solid var(--pink-line); border-radius: 9px; background: #fffaf1; }
+.mandate-workflow-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mandate-workflow-heading > div { display: grid; gap: 3px; }
+.mandate-workflow-heading strong { font-size: 13px; }
+.mandate-workflow-heading code { color: var(--ink-faint); font-size: 9px; }
+.mandate-workflow > p { margin: 0; color: var(--ink-soft); font-size: 10px; line-height: 1.45; }
+.mandate-approval-statuses { display: flex; flex-wrap: wrap; gap: 5px; }
+.mandate-approval-status { padding: 4px 6px; border-radius: 5px; background: #eee8dc; color: var(--ink-soft); font-size: 9px; }
+.mandate-approval-status.approved { background: #dff0df; color: #286c43; }
+.mandate-approval-status.rejected, .mandate-approval-status.expired { background: #f7dcd4; color: #963f35; }
+.mandate-workflow-actions { display: flex; gap: 6px; }
+.mandate-workflow-actions .btn, .mandate-analysis-button { min-height: 30px; padding: 5px 9px; font-size: 10px; }
 .mandate-guide ul { display: grid; gap: 9px; margin: 0; padding-left: 17px; color: var(--ink-soft); font-size: 11px; line-height: 1.5; }
 .assistant-heading { display: flex; align-items: center; gap: 8px; }
 .assistant-heading > div:not(.assistant-avatar) { display: grid; gap: 2px; min-width: 0; }
@@ -918,7 +930,7 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .assistant-heading small { color: var(--ink-faint); font-size: 9px; }
 .assistant-heading .mini-badge { margin-left: auto; }
 .assistant-avatar { display: grid; width: 36px; height: 36px; place-items: center; border: 2px solid var(--ink); border-radius: 50%; background: var(--yellow); color: var(--pink-deep); font: 900 12px "Archivo", sans-serif; }
-.assistant-chat { display: grid; gap: 8px; max-height: 390px; margin-top: 13px; overflow-y: auto; padding: 9px; border: 2px solid var(--ink); border-radius: 9px; background: #faf6ef; }
+.assistant-chat { display: grid; gap: 8px; min-height: 430px; max-height: 540px; margin-top: 13px; overflow-y: auto; padding: 9px; border: 2px solid var(--ink); border-radius: 9px; background: #faf6ef; }
 .assistant-bubble { max-width: 92%; padding: 8px 10px; border: 1.5px solid var(--ink); border-radius: 11px; background: #fff; }
 .assistant-bubble.user { justify-self: end; background: var(--pink); color: #fff; }
 .assistant-bubble b { display: block; color: var(--pink-deep); font-size: 9px; }
