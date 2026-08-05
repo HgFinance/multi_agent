@@ -11,9 +11,11 @@ import asyncio
 import json
 import os
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from portfolio_universe import DEFAULT_UNIVERSE_ID, enrich_suitability_result
@@ -59,6 +61,26 @@ def _department_label(department: str | None) -> str:
         "accounting-portfolio-department": "회계·포트폴리오본부",
         "ceo-agent": "CEO 오피스",
     }.get(department or "", department or "부서")
+
+
+def langsmith_observability() -> dict[str, Any]:
+    """Expose only safe tracing configuration metadata to the operator UI."""
+
+    tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", os.getenv("LANGSMITH_TRACING", "")).casefold() in {
+        "1", "true", "yes", "on"
+    }
+    endpoint = os.getenv("LANGSMITH_ENDPOINT", "").strip()
+    api_key_configured = bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+    project = os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGSMITH_PROJECT")
+    parsed = urlsplit(endpoint)
+    safe_endpoint = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else None
+    return {
+        "status": "READY" if tracing_enabled and api_key_configured and safe_endpoint else "DISABLED",
+        "configured": bool(api_key_configured and safe_endpoint),
+        "tracing_enabled": tracing_enabled,
+        "endpoint": safe_endpoint,
+        "project": project or None,
+    }
 
 
 def _event_message(
@@ -135,8 +157,10 @@ class PortfolioRuntime:
             if self._job and self._job.get("status") in {"QUEUED", "RUNNING"}:
                 raise RuntimeError("portfolio_recommendation_already_running")
             job_id = f"portfolio-run-{uuid4().hex}"
-            self._job = self._base_job(job_id, profile)
-            task = threading.Thread(target=lambda: asyncio.run(self._run(job_id, dict(profile))), daemon=True)
+            normalized_profile = dict(profile)
+            normalized_profile.setdefault("as_of", _now())
+            self._job = self._base_job(job_id, normalized_profile)
+            task = threading.Thread(target=lambda: asyncio.run(self._run(job_id, normalized_profile)), daemon=True)
             self._tasks[job_id] = task
             task.start()
             return {"run_id": job_id, "status": "QUEUED", "workflow": self._job["workflow"]}
@@ -457,10 +481,12 @@ class PortfolioRuntime:
 
     async def _run(self, job_id: str, profile: dict[str, Any]) -> None:
         try:
-            # The BFF is a local read-only projection; never send a browser-triggered
-            # prototype run to an external LangSmith endpoint.
-            os.environ["LANGCHAIN_TRACING_V2"] = "false"
-            os.environ["LANGSMITH_TRACING"] = "false"
+            # Respect explicit backend LangSmith configuration. The browser never
+            # receives credentials; only safe observability metadata is projected.
+            if "LANGCHAIN_TRACING_V2" not in os.environ:
+                os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGSMITH_TRACING", "false")
+            if os.getenv("LANGSMITH_PROJECT") and not os.getenv("LANGCHAIN_PROJECT"):
+                os.environ["LANGCHAIN_PROJECT"] = os.environ["LANGSMITH_PROJECT"]
             database_url = os.getenv("DATABASE_URL", "").strip()
             if database_url:
                 result = await run_portfolio_recommendation_pipeline_async(profile, event_callback=lambda event: self._event(job_id, event))
@@ -470,11 +496,30 @@ class PortfolioRuntime:
                     load_test_catalog(),
                     event_callback=lambda event: self._event(job_id, event),
                 )
+            data_context = result.get("data_context", {})
+            live_source = data_context.get("source") == "SUPABASE"
+            live_instruments = None
+            live_universe_status = None
+            if database_url:
+                # A configured live DB must never fall back to the browser TEST
+                # catalog.  An unavailable live source therefore yields an empty
+                # live universe and a HOLD result.
+                live_instruments = (
+                    data_context.get("market", {})
+                    .get("instrument_universe", {})
+                    .get("instruments", [])
+                    if live_source
+                    else []
+                )
+                live_universe_status = "LIVE" if live_source else "UNAVAILABLE"
+
             result = enrich_suitability_result(
                 result,
                 str(profile.get("universe_id", DEFAULT_UNIVERSE_ID)),
                 include_stock=bool(profile.get("include_stock", True)),
-                include_derivatives=bool(profile.get("include_derivatives", True)),
+                include_derivatives=bool(profile.get("include_derivatives", False)),
+                live_instruments=live_instruments,
+                live_universe_status=live_universe_status,
             )
             with self._lock:
                 job = self._job_for(job_id)
@@ -487,12 +532,42 @@ class PortfolioRuntime:
                 job["status"] = str(result.get("pipeline_status", "DEGRADED"))
                 job["phase"] = "포트폴리오 추천 결과 준비 완료" if job["status"] == "COMPLETED" else "안전 보류 — 추가 검토 필요"
                 job["updated_at"] = _now()
-                self._message(job, "추천 결과가 준비되었습니다. 주문·승인·원장 변경은 수행하지 않았습니다.", kind="run_completed")
+                if job["status"] == "COMPLETED":
+                    self._message(job, "추천 결과가 준비되었습니다. 주문·승인·원장 변경은 수행하지 않았습니다.", kind="run_completed")
+                else:
+                    self._message(job, "LangGraph 실행은 끝났지만 Worker 또는 Gate 검증이 안전 보류되어 추천 결과를 확정하지 않았습니다.", kind="run_degraded")
         except Exception as exc:  # noqa: BLE001 - BFF boundary fails closed.
             with self._lock:
                 job = self._job_for(job_id)
                 if job is None:
                     return
+                error_reason = f"LangGraph 실행 오류: {type(exc).__name__}"
+                for worker in list(job.get("active_workers", [])):
+                    worker_id = str(worker.get("worker_id", ""))
+                    department = str(worker.get("department_code", ""))
+                    if not worker_id or not department:
+                        continue
+                    KANBAN_STATUS_BRIDGE.publish_task_event(
+                        {
+                            "event_id": f"{job_id}:worker_error:{worker_id}",
+                            "department_code": department,
+                            "agent_id": worker_id,
+                            "worker_id": worker_id,
+                            "role": worker.get("role"),
+                            "status": "error",
+                            "reason": error_reason,
+                        }
+                    )
+                    self._message(
+                        job,
+                        error_reason,
+                        kind="worker_error",
+                        department=department,
+                        worker_id=worker_id,
+                    )
+                for row in job.get("departments", {}).values():
+                    if isinstance(row, dict) and row.get("status") == "RUNNING":
+                        row.update({"status": "ERROR", "active_worker_ids": [], "last_message": error_reason, "updated_at": _now()})
                 job["active_workers"] = []
                 job["active_handoff"] = None
                 job["status"] = "ERROR"
@@ -510,7 +585,7 @@ class PortfolioRuntime:
                 return None
             result = job.get("result")
             if not isinstance(result, dict):
-                raise RuntimeError("portfolio_recommendation_result_not_ready")
+                raise TypeError("portfolio_recommendation_result_not_ready")
         if decision == "APPROVE":
             suitability = result.get("suitability", {})
             if result.get("pipeline_status") != "COMPLETED" or suitability.get("status") != "MATCHED":
@@ -558,4 +633,6 @@ RUNTIME = PortfolioRuntime()
 
 
 def runtime_snapshot() -> dict[str, Any]:
-    return RUNTIME.snapshot()
+    snapshot = RUNTIME.snapshot()
+    snapshot["observability"] = {"langsmith": langsmith_observability()}
+    return snapshot

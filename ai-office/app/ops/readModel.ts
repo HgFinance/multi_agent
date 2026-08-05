@@ -208,6 +208,15 @@ export type OperationsRuntime = {
   departments: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
   active_workers: OperationsRuntimeWorker[];
   active_handoff: OperationsRuntimeHandoff | null;
+  observability?: {
+    langsmith?: {
+      status: string;
+      configured: boolean;
+      tracing_enabled: boolean;
+      endpoint: string | null;
+      project: string | null;
+    };
+  };
   messages: OperationsRuntimeMessage[];
   result: Record<string, unknown> | null;
   approval: {

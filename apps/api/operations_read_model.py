@@ -198,6 +198,7 @@ def build_operations_snapshot() -> dict[str, Any]:
             "departments": run.get("departments", {}) if run else {},
             "active_workers": run.get("active_workers", []) if run else [],
             "active_handoff": run.get("active_handoff") if run else None,
+            "observability": runtime.get("observability", {}),
             "messages": live_messages,
             "result": run.get("result") if run else None,
             "approval": run.get("approval") if run else None,

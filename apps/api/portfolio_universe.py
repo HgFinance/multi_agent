@@ -8,16 +8,16 @@ adapter can replace the TEST catalog later while keeping this response shape.
 from __future__ import annotations
 
 import json
-from decimal import Decimal, ROUND_DOWN
+from collections.abc import Mapping, Sequence
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
-from typing import Any, Mapping
-
+from typing import Any
 
 UNIVERSE_PATH = Path(__file__).with_name("portfolio_universes.json")
-# Current product scope is domestic equities.  The legacy mixed universe stays
-# readable for replay/backward-compatible requests, but is never the default.
+# Current product scope is domestic equities. Legacy mixed/bond catalogs are
+# intentionally not accepted by the BFF projection.
 DEFAULT_UNIVERSE_ID = "KOREA_EQUITY_WATCHLIST"
-STOCK_ASSET_CLASSES = frozenset({"KOREA_EQUITY", "GLOBAL_EQUITY"})
+STOCK_ASSET_CLASSES = frozenset({"KOREA_EQUITY"})
 DERIVATIVE_ASSET_CLASSES = frozenset({"LEVERAGED_ETF", "SHORT_EXPOSURE", "DERIVATIVES_HEDGE"})
 
 
@@ -54,7 +54,7 @@ def _split_amount(total: Decimal, count: int) -> list[Decimal]:
         return []
     unit = (total / count).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
     values = [unit for _ in range(count)]
-    values[-1] = total - sum(values[:-1], Decimal("0"))
+    values[-1] = total - sum(values[:-1], Decimal(0))
     return values
 
 
@@ -63,8 +63,10 @@ def _instrument_rows(
     universe: Mapping[str, Any],
     currency: str,
     allowed_asset_classes: frozenset[str] | None = None,
+    instruments: Sequence[Mapping[str, Any]] | None = None,
+    data_status: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    instruments = [
+    source_instruments = list(instruments) if instruments is not None else [
         item
         for item in universe.get("instruments", [])
         if isinstance(item, Mapping)
@@ -78,7 +80,9 @@ def _instrument_rows(
         # projection. An explicit toggle controls the remaining two groups.
         if allowed_asset_classes is not None and asset_class not in allowed_asset_classes:
             continue
-        matches = [item for item in instruments if item.get("asset_class") == asset_class]
+        matches = [
+            item for item in source_instruments if item.get("asset_class") == asset_class
+        ]
         if not matches:
             unresolved.append(str(asset_class))
             continue
@@ -104,7 +108,7 @@ def _instrument_rows(
                         "expected_return_basis",
                         "실시간 시장·리서치 데이터 연결 후 산출",
                     ),
-                    "data_status": item.get("data_status", universe.get("status", "TEST")),
+                "data_status": item.get("data_status", data_status or universe.get("status", "TEST")),
                     "evidence_refs": list(item.get("evidence_refs", [])),
                 }
             )
@@ -116,7 +120,9 @@ def enrich_suitability_result(
     universe_id: str | None,
     *,
     include_stock: bool = True,
-    include_derivatives: bool = True,
+    include_derivatives: bool = False,
+    live_instruments: Sequence[Mapping[str, Any]] | None = None,
+    live_universe_status: str | None = None,
 ) -> dict[str, Any]:
     """Attach instrument-level advisory rows to the deterministic result."""
     output = dict(result)
@@ -132,6 +138,16 @@ def enrich_suitability_result(
         return output
 
     currency = str(output.get("currency", "KRW"))
+    source_instruments = (
+        list(live_instruments) if live_instruments is not None else None
+    )
+    instrument_status = (
+        live_universe_status
+        if live_universe_status is not None
+        else "LIVE"
+        if live_instruments is not None
+        else universe.get("status", "TEST")
+    )
     allowed_asset_classes = frozenset()
     if include_stock:
         allowed_asset_classes |= STOCK_ASSET_CLASSES
@@ -147,6 +163,8 @@ def enrich_suitability_result(
             universe,
             currency,
             allowed_asset_classes,
+            source_instruments,
+            instrument_status,
         )
         portfolio_id = recommendation.get("portfolio_id")
         for row in rows:
@@ -163,8 +181,12 @@ def enrich_suitability_result(
         "universe_id": universe["universe_id"],
         "name": universe["name"],
         "description": universe.get("description"),
-        "status": universe.get("status", "TEST"),
-        "source": universe.get("source"),
+        "status": instrument_status,
+        "source": (
+            "supabase.reference.instruments"
+            if live_instruments is not None
+            else universe.get("source")
+        ),
     }
     output["instrument_recommendations"] = instrument_recommendations
     output["asset_visibility"] = {
@@ -181,8 +203,8 @@ def enrich_suitability_result(
     if unresolved or not instrument_recommendations:
         output["safe_action"] = "HOLD"
     output["forecast_notice"] = (
-        "예상 수익률은 보장값이 아닙니다. 현재 유니버스가 TEST 상태이므로 "
-        "PIT 검증된 시장·리서치 데이터가 연결될 때까지 산출하지 않습니다."
+        "예상 수익률은 보장값이 아니며, PIT 검증된 시장·리서치 데이터가 없는 경우 "
+        "산출하지 않습니다."
     )
     return output
 
