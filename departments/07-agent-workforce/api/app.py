@@ -79,6 +79,7 @@ from access import (
     SelfApprovalError as AccessSelfApprovalError,
 )
 from candidate import ImprovementCandidate
+from observation import CandidateScorecard
 from cost import (
     CapacitySnapshot,
     CostSnapshot,
@@ -279,6 +280,19 @@ class BudgetAssessmentRequest(BaseModel):
     cost_snapshots: list[CostSnapshotIn] = []
 
 
+class CandidateScorecardIn(BaseModel):
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_cost: Decimal | None = Field(default=None, ge=0)
+    qa_eval_run_id: str | None = None
+    quality_score: Decimal | None = Field(default=None, ge=0, le=1)
+    safety_finding_count: int | None = Field(default=None, ge=0)
+    regression_count: int | None = Field(default=None, ge=0)
+
+
 def _dec(v: str | None) -> Decimal | None:
     return None if v is None else Decimal(v)
 
@@ -437,7 +451,9 @@ def _handle_workforce_event(event: dict) -> None:
     if candidate is None:
         raise WorkforceEventBusError(f"candidate_id={candidate_id}를 찾을 수 없습니다")
 
-    to_status = CandidateStatus.SHADOW if result == "PASS" else CandidateStatus.REJECTED
+    # Eval 실패는 후보를 영구 반려하지 않는다. 기존 Profile을 유지한 HOLD로 종료해
+    # 독립 QA의 후속 재평가가 새 후보로 명시적으로 시작되게 한다.
+    to_status = CandidateStatus.SHADOW if result == "PASS" else CandidateStatus.HOLD
     occurred_at = event.get("occurred_at")
     at = datetime.fromisoformat(occurred_at) if occurred_at else datetime.now(timezone.utc)
     updated = _workflow.transition(
@@ -697,6 +713,25 @@ def get_improvement_events(candidate_id: str):
     ]}
 
 
+@app.post("/workforce/v1/improvements/{candidate_id}/scorecards")
+def record_improvement_scorecard(candidate_id: str, body: CandidateScorecardIn):
+    candidate = _improvement_repo.get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
+    if candidate.status != CandidateStatus.OBSERVING:
+        raise HTTPException(status_code=409, detail="후보별 Scorecard는 OBSERVING 상태에서만 기록한다")
+    scorecard = CandidateScorecard(candidate_id=candidate_id, **body.model_dump())
+    _improvement_repo.append_scorecard(scorecard)
+    return scorecard.model_dump(mode="json")
+
+
+@app.get("/workforce/v1/improvements/{candidate_id}/scorecards")
+def get_improvement_scorecards(candidate_id: str):
+    if _improvement_repo.get_candidate(candidate_id) is None:
+        raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
+    return {"scorecards": [s.model_dump(mode="json") for s in _improvement_repo.scorecards_for(candidate_id)]}
+
+
 # --- 3.4 Scorecard / Budget ----------------------------------------------------------
 
 
@@ -871,8 +906,25 @@ if __name__ == "__main__":
     })
     assert r10.status_code == 200 and r10.json()["status"] == "APPROVED", r10.text
 
+    r10a = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "DEPLOYED", "actor": "independent-operator", "reason": "v4 배포", "at": t0,
+    })
+    assert r10a.status_code == 200 and r10a.json()["status"] == "DEPLOYED", r10a.text
+    r10b = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "OBSERVING", "actor": "hr", "reason": "관찰 시작", "at": t0,
+    })
+    assert r10b.status_code == 200 and r10b.json()["status"] == "OBSERVING", r10b.text
+    r10c = client.post("/workforce/v1/improvements/ic-1/scorecards", json={
+        "window_start": t0, "window_end": t_exp, "recorded_by": "hr-03",
+        "input_tokens": 100, "output_tokens": 50, "total_cost": "1.25",
+        "quality_score": "0.98", "safety_finding_count": 0, "regression_count": 0,
+    })
+    assert r10c.status_code == 200 and r10c.json()["quality_score"] == "0.98", r10c.text
+
     r11 = client.get("/workforce/v1/improvements/ic-1/events")
-    assert len(r11.json()["events"]) == 4
+    assert len(r11.json()["events"]) == 6
+    r11a = client.get("/workforce/v1/improvements/ic-1/scorecards")
+    assert len(r11a.json()["scorecards"]) == 1
 
     # 3. Scorecard - Snapshot 없으면 0이 아니라 None.
     r12 = client.post("/workforce/v1/departments/07-agent-workforce/scorecard", json={
