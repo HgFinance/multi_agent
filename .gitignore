@@ -42,6 +42,7 @@ CLAUDE.local.md
 .claude/.headroom_wrap_marker.json
 .serena/
 graphify-out/
+.gjc/
 
 # TypeScript 증분 빌드 캐시. tsc를 돌릴 때마다 diff가 나서 커밋 노이즈가 된다.
 ai-office/tsconfig.tsbuildinfo
