@@ -165,6 +165,7 @@ from notification import (
     NotificationRequest,
     NotificationService,
 )
+from langgraph.checkpoint.memory import InMemorySaver
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -173,6 +174,13 @@ from service import (
     InMemoryMandateVersionRepository,
     MandateVersionService,
 )
+
+try:
+    import psycopg
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg.rows import dict_row
+except ImportError:  # langgraph-checkpoint-postgres 미설치 환경에서도 앱 자체는 뜬다
+    PostgresSaver = None  # type: ignore[assignment,misc]
 
 try:
     from postgres_repository import (
@@ -546,11 +554,28 @@ else:
     committee_repo = InMemoryCommitteeRepository()
 
 # HITL Mandate 변경 워크플로 (change_workflow.py) - 위 5개 Repository/Service를 그대로
-# 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 DB다"라는 그 모듈의
-# 설계상, 이 오케스트레이터가 스스로 상태를 들고 있지 않기 때문이다.
+# 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 governance.approvals다"
+# 라는 그 모듈의 설계상, 이 오케스트레이터는 "실행이 어디서 멈췄는지"만 checkpointer에 둔다.
+#
+# checkpointer는 프로세스 생애주기 동안 하나만 만들어 재사용한다 - 매 요청마다 새로
+# PostgresSaver를 만들면 그 사이의 interrupt() 재개 스레드를 잃는다(change_workflow.py
+# 모듈 docstring "checkpointer는 생성자 필수 인자다" 참고). psycopg(v3)는 prepare_threshold=
+# None으로 연다 - Supabase Pooler가 transaction 모드(6543 포트)면 서버사이드 prepared
+# statement가 풀링된 연결 사이에서 충돌한다(known psycopg3+PgBouncer 비호환, 자체 점검에서
+# 실측).
+if os.environ.get("DATABASE_URL") and PostgresSaver is not None:
+    _checkpoint_conn = psycopg.connect(
+        os.environ["DATABASE_URL"], autocommit=True, prepare_threshold=None, row_factory=dict_row,
+    )
+    _mandate_checkpointer: object = PostgresSaver(_checkpoint_conn)
+    _mandate_checkpointer.setup()
+else:
+    _mandate_checkpointer = InMemorySaver()
+
 mandate_change_workflow = MandateChangeWorkflow(
     version_repo=_mandate_repo, version_service=mandate_service,
     activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
+    checkpointer=_mandate_checkpointer,
 )
 
 
@@ -1458,9 +1483,12 @@ if __name__ == "__main__":
         escalation_repo = InMemoryEscalationRepository()
     if not isinstance(committee_repo, InMemoryCommitteeRepository):
         committee_repo = InMemoryCommitteeRepository()
+    if not isinstance(_mandate_checkpointer, InMemorySaver):
+        _mandate_checkpointer = InMemorySaver()
     mandate_change_workflow = MandateChangeWorkflow(
         version_repo=_mandate_repo, version_service=mandate_service,
         activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
+        checkpointer=_mandate_checkpointer,
     )
 
     client = TestClient(app)

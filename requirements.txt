@@ -36,6 +36,10 @@ pgvector
 
 # --- Agentic RAG (skills/agentic-rag — evidence-qa-agent, hallucination-critic, compliance-policy-agent) ---
 langgraph
+# langgraph-checkpoint-postgres: TECH_STACK_DECISIONS.md 39행 "LangGraph Persistence" P0 필수.
+# PostgresSaver가 psycopg(v3)를 쓴다 - 위 psycopg2-binary(Repository 직접 접근용)와는 별개 드라이버다.
+# HITL Mandate 변경 Workflow(change_workflow.py)의 interrupt()/재개에 사용(2026-08-05).
+langgraph-checkpoint-postgres
 
 # --- Observability ---
 opentelemetry-sdk
