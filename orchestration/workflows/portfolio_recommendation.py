@@ -84,6 +84,23 @@ _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "ceo": ("executive-briefing-worker",),
 }
 
+# Category is the first routing hint. The free-form query may expand this
+# bounded set when it clearly needs another domain.
+CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
+    "PORTFOLIO_RECOMMENDATION": ("research", "risk", "qa", "ceo"),
+    "MARKET_RESEARCH": ("research", "qa", "ceo"),
+    "RISK_REVIEW": ("research", "risk", "qa", "ceo"),
+    "TAX_LIQUIDITY": ("research", "risk", "accounting", "qa", "ceo"),
+    "REBALANCING_PROPOSAL": (
+        "research",
+        "trading",
+        "risk",
+        "accounting",
+        "qa",
+        "ceo",
+    ),
+}
+
 
 def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Create a bounded department plan from a free-form user request.
@@ -94,16 +111,22 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     financial state.
     """
     query = " ".join(str(profile.get("query", "")).split())
+    category = str(profile.get("category", "")).strip().upper()
+    category_departments = CATEGORY_DEPARTMENTS.get(category)
     if not query:
+        requested_departments = list(category_departments or DEPARTMENTS)
         return {
-            "mode": "portfolio_default",
-            "rewritten_query": "사용자 투자성향과 투자 유니버스에 맞는 비구속적 포트폴리오 후보를 검토한다.",
-            "requested_departments": list(DEPARTMENTS),
-            "routing_basis": "structured_suitability_default",
+            "mode": "category_default" if category_departments else "portfolio_default",
+            "category": category or "PORTFOLIO_RECOMMENDATION",
+            "original_query": "",
+            "rewritten_query": "카테고리와 사용자 프로필에 맞는 비구속적 포트폴리오 후보를 검토한다.",
+            "requested_departments": requested_departments,
+            "routing_basis": "category_default" if category_departments else "structured_suitability_default",
+            "matched_terms": {},
         }
 
     normalized = query.lower()
-    stages: set[str] = {"research", "risk", "qa", "ceo"}
+    stages: set[str] = set(category_departments or ("research", "risk", "qa", "ceo"))
     keywords: dict[str, tuple[str, ...]] = {
         "trading": ("주문", "매수", "매도", "체결", "리밸런싱", "거래"),
         "accounting": ("세금", "수수료", "원장", "nav", "현금", "현금흐름", "대사", "회계"),
@@ -121,6 +144,7 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     ordered = [stage for stage in DEPARTMENTS if stage in stages]
     return {
         "mode": "free_query",
+        "category": category or "PORTFOLIO_RECOMMENDATION",
         "original_query": query,
         "rewritten_query": (
             f"{query} 사용자 요청을 적합성·근거·리스크 관점에서 검토하고, "

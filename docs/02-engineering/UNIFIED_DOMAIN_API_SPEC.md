@@ -386,6 +386,17 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 추천 결과의 `instrument_recommendations`는 `symbol`, `exchange`, `name`, `target_weight`, `target_amount`, `expected_return`, `expected_return_status`, `expected_return_basis`, `data_status`를 포함한다. `TEST` 또는 PIT 검증 시장 근거가 없는 상태에서 `expected_return`은 `null`이어야 하며 수익률 보장 문구를 표시하지 않는다.
 
+### 10.5 자유 쿼리·카테고리 라우팅 Projection
+
+`POST /ui/portfolio-recommendations`는 다음 선택 입력을 추가로 받는다.
+
+- `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL` 중 하나다.
+- `query`: 사용자가 자유롭게 작성하는 투자 질문·조건이다. 빈 문자열이어도 되며, 카테고리와 구조화된 프로필만으로 기본 라우팅한다.
+
+CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `query`의 의도를 결정론적으로 정규화한다. 응답의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 포함된다. 이는 부서·Worker 배정과 설명을 위한 값이며 주문, Risk 승인, 원장 변경을 실행하지 않는다.
+
+`GET /ui/snapshot`의 `operations.runtime`는 `run_id`, `active_workers`, 부서별 `status`, `department_reports`, 최근 실행 메시지를 제공한다. 프론트엔드는 이를 Kanban Projection으로 표시하며, `SKIPPED` 부서는 요청 범위에 포함되지 않은 부서로 표시한다. 실행이 완료된 뒤에도 결과의 출처는 새 `run_id`로 식별하며 캐시된 금융 상태로 간주하지 않는다.
+
 ## 11. 연계 문서
 
 - [Route Status Registry](contracts/route-registry.v1.json)
