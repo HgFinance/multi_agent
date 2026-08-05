@@ -43,6 +43,8 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
   - `repository.py` — asyncpg 실 저장 계층(`PostgresImprovementRepository`). 위 도메인 타입을
     `workforce.improvement_candidates`/`improvement_candidate_events` 컬럼과 1:1 매핑. `.env` 의
     `DATABASE_URL` 사용, 비밀번호/service_role Key 는 로그에 남기지 않는다.
+  - `observation.py` — P1-1 후보별 관찰 Scorecard 계약. 비용·품질·안전·회귀 지표를
+    후보 ID에 append-only로 귀속하며, 원천 판정(QA Eval·Platform 비용 측정)은 소유하지 않는다.
 
 **실 DB 상태**: `workforce.improvement_candidates`, `access_requests`와 관련 Migration의 적용을
 2026-08-01 실제 DB에서 확인했다. 현재 두 Table은 0건이므로 Repository의 Live Create→Transition→Read

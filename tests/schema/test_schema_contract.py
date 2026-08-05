@@ -76,6 +76,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 000200 병합 후에도 재발 - 진짜 원인은 supabase_migrations.schema_migrations
                 # 이력 누락이었다(수동 수복 완료). 방어적 재확인 + 사고 기록
                 "20260805000300_notifications_dedup_key_history_repair_note.sql",
+                # HR-03 P1-1: Eval HOLD 종료와 후보별 관찰 Scorecard
+                "20260806000100_workforce_improvement_hold_and_scorecards.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -123,6 +125,16 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             migration,
         )
 
+    def test_improvement_hold_constraint_migration_is_idempotent(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260806000100_workforce_improvement_hold_and_scorecards.sql"
+        ).lower()
+        self.assertIn("drop constraint if exists improvement_candidates_status_check", migration)
+        self.assertIn("drop trigger if exists improvement_candidate_scorecards_append_only", migration)
+        self.assertIn("'hold'", migration)
+
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
@@ -137,7 +149,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "research": 23,
             "risk": 19,
             "strategy": 9,
-            "workforce": 24,
+            "workforce": 25,
         }
         actual_counts = {
             schema: sum(1 for table_schema, _ in self.tables if table_schema == schema)
