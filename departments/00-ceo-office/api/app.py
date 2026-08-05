@@ -205,9 +205,15 @@ except ImportError:
     PostgresReportRunRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_notification_repository import PostgresNotificationRepository
+    from postgres_notification_repository import (
+        NotificationPersistenceError,
+        PostgresNotificationRepository,
+    )
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+    class NotificationPersistenceError(RuntimeError):  # type: ignore[no-redef]
+        pass
 
 try:
     from postgres_approval_repository import PostgresApprovalRepository
@@ -856,6 +862,17 @@ def _on_value_error(request, exc: ValueError):
 def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     return JSONResponse(status_code=409, content={
         "error_code": "MANDATE_PERSISTENCE_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# P0-2(2026-08-05) - 이전엔 핸들러가 없어 DB 오류가 원시 스택트레이스 500으로 새나갔다.
+# "의존 서비스 오류는 BLOCKED/ESCALATE다"(TEAM_YOUNGJU_CEO_HR_GUIDE.md P0-2) 원칙대로
+# 503로 닫는다 - 발송 성공으로 오인될 수 있는 200을 절대 내지 않는다.
+@app.exception_handler(NotificationPersistenceError)
+def _on_notification_persistence_error(request, exc: NotificationPersistenceError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "NOTIFICATION_PERSISTENCE_ERROR", "message": str(exc), "detail": {},
+        "trace_id": None,
     })
 
 
