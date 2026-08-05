@@ -401,6 +401,10 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
 |---|---|
 | `GET /workforce/v1/departments/{department_code}/scorecard` | `get_department_scorecard` ✅ |
 | `GET /workforce/v1/skill-gap` | `get_skill_gap` ✅ |
+| `POST` / `GET /workforce/v1/departments/{department_code}/quality-snapshots` | P1-2 신규 ✅ — `quality_snapshots` 기록/조회 |
+| `POST /workforce/v1/departments/{department_code}/workforce-plans` | P1-2 신규 ✅ — DRAFT 생성 |
+| `GET /workforce/v1/departments/{department_code}/workforce-plans` | P1-2 신규 ✅ — 목록 조회 |
+| `POST /workforce/v1/workforce-plans/{plan_id}/approve` \| `.../activate` \| `.../retire` | P1-2 신규 ✅ — CEO 승인 실재성 검증 후 전이 |
 
 ```json
 {
@@ -629,8 +633,8 @@ Agent 상태(`OFFLINE|IDLE|QUEUED|RUNNING|WAITING_APPROVAL|BLOCKED|DEGRADED|ERRO
 | Improvement Candidate 엔드포인트 (§3.3) | 🟡 제안 |
 | Case timeline·Escalation·Candidate 조회 등 보조 엔드포인트 | 🟡 제안 |
 | `request_access` (§3.5) | ✅ 구현 — `20260731000700_workforce_access_lifecycle.sql` |
-| Scorecard `quality` 일부 | ⚠️ 저장소 미구현 — `quality_snapshots` 없음 |
-| Workforce Plan 저장 | ⚠️ 저장소 미구현 — `workforce_plans` 없음 |
+| Scorecard `quality` 일부 (`finding_count`/`rework_rate`) | ✅ 구현(P1-2) — `scorecard/quality.py` + `postgres_scorecard_repository.py`. `eval_score`는 여전히 QA 소유라 `None` |
+| Workforce Plan 저장 | ✅ 구현(P1-2) — `planning/workforce_plan.py`(DRAFT/APPROVED/ACTIVE/RETIRED, CEO 승인 실재성 검증) + `postgres_plan_repository.py` |
 | 위원회 (§2.3) | ⚠️ 로직 미구현 (테이블은 있음, Y2) |
 | 한도 집행 기준 자본 = 당일 장 시작 시점 `nav_runs.total_nav` (§2.1) | ✅ 결정 2026-07-31 |
 | `base_capital` = Paper 시작 자본. 첫날 회계 초기 현금 근거로만 사용 | ✅ 결정 2026-07-31 |

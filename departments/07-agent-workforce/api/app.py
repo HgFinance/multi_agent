@@ -59,7 +59,8 @@ _LIFECYCLE_DIR = _BASE / "lifecycle"
 _IMPROVEMENTS_DIR = _BASE / "improvements"
 _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR):
+_PLANNING_DIR = _BASE / "planning"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -87,6 +88,7 @@ from cost import (
     assess_budget,
     build_department_scorecard,
 )
+from quality import QualitySnapshot, aggregate_quality
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -114,6 +116,18 @@ from workflow import (
 from workflow import (
     SelfApprovalError as CandidateSelfApprovalError,
 )
+from workforce_plan import (
+    InMemoryPlanApprovalEvidenceRepository,
+    InMemoryPlanRepository,
+    UnverifiedPlanApprovalError,
+    WorkforcePlan,
+    activate_plan,
+    approve_plan,
+    retire_plan,
+)
+from workforce_plan import (
+    IllegalTransition as PlanIllegalTransition,
+)
 
 try:
     from postgres_access_repository import PostgresAccessRepository
@@ -139,6 +153,15 @@ try:
     from activation_evidence import PostgresActivationEvidenceRepository
 except ImportError:
     PostgresActivationEvidenceRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_plan_repository import (
+        PostgresPlanApprovalEvidenceRepository,
+        PostgresPlanRepository,
+    )
+except ImportError:
+    PostgresPlanRepository = None  # type: ignore[assignment,misc]
+    PostgresPlanApprovalEvidenceRepository = None  # type: ignore[assignment,misc]
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
@@ -211,6 +234,31 @@ class CostSnapshotIn(BaseModel):
     infra_cost: str = "0"
     case_count: int = 0
     currency: str = "USD"
+
+
+class QualitySnapshotIn(BaseModel):
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    agent_id: str | None = None
+    profile_version_id: str | None = None
+    eval_run_id: str | None = None
+    finding_count: int | None = Field(default=None, ge=0)
+    rework_rate: str | None = None
+    role_kpi: dict = {}
+
+
+class WorkforcePlanIn(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    skill_gaps: dict = {}
+    actions: list = []
+    budget: dict = {}
+    assumptions: dict = {}
+
+
+class PlanApprovalIn(BaseModel):
+    approval_id: str = Field(min_length=1)
 
 
 class CapacitySnapshotIn(BaseModel):
@@ -487,6 +535,31 @@ if os.environ.get("DATABASE_URL") and PostgresActivationEvidenceRepository is no
 else:
     _activation_evidence_repo = InMemoryActivationEvidenceRepository()
 
+# P1-2 HR-04 - Workforce Plan은 access.py처럼 In-Memory 대체가 유의미하다(요청·승인
+# 절차 자체를 검증하는 게 목적이라 실제 등록된 Department가 없어도 self-check가 의미
+# 있다). governance.approvals 승인 증거 조회는 P0-3 activation_evidence와 같은 이유로
+# DATABASE_URL 없으면 In-Memory.
+if os.environ.get("DATABASE_URL") and PostgresPlanRepository is not None:
+    _plan_repo = PostgresPlanRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _plan_repo = InMemoryPlanRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresPlanApprovalEvidenceRepository is not None:
+    _plan_evidence_repo = PostgresPlanApprovalEvidenceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
+
+
+def _resolve_department_id(department_code: str) -> str:
+    """department_code -> department_id. 실 DB가 있으면 workforce.departments를
+    조회하고, 없으면(In-Memory 데모) department_code를 그대로 department_id로 쓴다."""
+    if _scorecard_repo is not None:
+        department_id = _scorecard_repo.get_department_id(department_code)
+        if department_id is None:
+            raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+        return department_id
+    return department_code
+
 
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
@@ -499,6 +572,7 @@ for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
     MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
+    PlanIllegalTransition, UnverifiedPlanApprovalError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -510,6 +584,9 @@ for _exc_type in (
         # 취급, CEO 쪽 UnverifiedActorUserError와 같은 방향). tool_allowlist 누락은
         # 증거 위조가 아니라 설정 미비라 기존 MissingActivationEvidenceError와 같은 409.
         UnverifiedActivationEvidenceError: 403, ToolAllowlistMissingError: 409,
+        # P1-2 - Workforce Plan도 같은 원칙: 위조/미실재 승인은 403, 허용 안 된 상태
+        # 전이는 409.
+        PlanIllegalTransition: 409, UnverifiedPlanApprovalError: 403,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -793,10 +870,132 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
     cost_snapshots = _scorecard_repo.list_cost_snapshots_by_department(
         department_id, window_start=window_start, window_end=window_end,
     )
+    # P1-2 - quality_snapshots가 없던 시절엔 이 블록이 항상 None이었다(빈 집계를 위해
+    # 여기서 0을 만들지 않는다 - aggregate_quality가 그 불변식을 그대로 지킨다).
+    quality_snapshots = _scorecard_repo.list_quality_snapshots_by_department(
+        department_id, window_start=window_start, window_end=window_end,
+    )
+    finding_count, rework_rate = aggregate_quality(quality_snapshots)
     return build_department_scorecard(
         department_code=department_code, window_start=window_start, window_end=window_end,
         capacity=capacity, cost_snapshots=cost_snapshots,
+        finding_count=finding_count, rework_rate=rework_rate,
     )
+
+
+def _quality_snapshot_dict(s: QualitySnapshot) -> dict:
+    return {
+        "department_id": s.department_id, "agent_id": s.agent_id,
+        "profile_version_id": s.profile_version_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "eval_run_id": s.eval_run_id, "finding_count": s.finding_count,
+        "rework_rate": str(s.rework_rate) if s.rework_rate is not None else None,
+        "role_kpi": s.role_kpi, "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/departments/{department_code}/quality-snapshots")
+def record_quality_snapshot(department_code: str, body: QualitySnapshotIn):
+    """인사팀이 직접 집계하는 finding_count/rework_rate만 기록한다 - eval_score 원본은
+    QA/감사본부 소유(audit.eval_runs)라 여기서 복제하지 않고 eval_run_id로만 참조한다."""
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Quality Snapshot 기록 불가",
+        )
+    department_id = _scorecard_repo.get_department_id(department_code)
+    if department_id is None:
+        raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+    snapshot = QualitySnapshot(
+        window_start=body.window_start, window_end=body.window_end, recorded_by=body.recorded_by,
+        department_id=department_id, agent_id=body.agent_id,
+        profile_version_id=body.profile_version_id, eval_run_id=body.eval_run_id,
+        finding_count=body.finding_count, rework_rate=_dec(body.rework_rate), role_kpi=body.role_kpi,
+    )
+    _scorecard_repo.append_quality_snapshot(snapshot)
+    return _quality_snapshot_dict(snapshot)
+
+
+@app.get("/workforce/v1/departments/{department_code}/quality-snapshots")
+def list_quality_snapshots(department_code: str, window_start: datetime, window_end: datetime):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Quality Snapshot 조회 불가",
+        )
+    department_id = _scorecard_repo.get_department_id(department_code)
+    if department_id is None:
+        raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+    snapshots = _scorecard_repo.list_quality_snapshots_by_department(
+        department_id, window_start=window_start, window_end=window_end,
+    )
+    return {"quality_snapshots": [_quality_snapshot_dict(s) for s in snapshots]}
+
+
+# --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------
+#
+# DRAFT는 인사팀(workforce-planning-agent)이 쓴다. APPROVED로 넘어가려면 이 plan_id를
+# 대상으로 한 실재 CEO 승인(governance.approvals, object_type=WORKFORCE_PLAN)이 있어야
+# 한다 - HR이 자기 계획을 스스로 ACTIVE로 올리지 못하게 막는다(workforce_plan.py 참고).
+
+
+def _plan_dict(p: WorkforcePlan) -> dict:
+    return {
+        "plan_id": p.plan_id, "department_id": p.department_id,
+        "period_start": p.period_start.isoformat(), "period_end": p.period_end.isoformat(),
+        "skill_gaps": p.skill_gaps, "actions": p.actions, "budget": p.budget,
+        "assumptions": p.assumptions, "status": p.status.value, "approval_id": p.approval_id,
+    }
+
+
+@app.post("/workforce/v1/departments/{department_code}/workforce-plans")
+def create_workforce_plan(department_code: str, body: WorkforcePlanIn):
+    department_id = _resolve_department_id(department_code)
+    plan = WorkforcePlan(
+        plan_id=str(uuid4()), department_id=department_id,
+        period_start=body.period_start, period_end=body.period_end,
+        skill_gaps=body.skill_gaps, actions=body.actions, budget=body.budget,
+        assumptions=body.assumptions,
+    )
+    created = _plan_repo.create_plan(plan)
+    return _plan_dict(created)
+
+
+@app.get("/workforce/v1/departments/{department_code}/workforce-plans")
+def list_workforce_plans(department_code: str):
+    department_id = _resolve_department_id(department_code)
+    return {"workforce_plans": [_plan_dict(p) for p in _plan_repo.list_plans_by_department(department_id)]}
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/approve")
+def approve_workforce_plan(plan_id: str, body: PlanApprovalIn):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    decision = _plan_evidence_repo.get_ceo_approval_decision(body.approval_id, plan_id)
+    updated = approve_plan(plan, approval_id=body.approval_id, approval_decision=decision)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/activate")
+def activate_workforce_plan(plan_id: str):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    updated = activate_plan(plan)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/retire")
+def retire_workforce_plan(plan_id: str):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    updated = retire_plan(plan)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
 
 
 @app.get("/workforce/v1/agents/{agent_id}/budget-assessment")
@@ -836,6 +1035,10 @@ if __name__ == "__main__":
     _roster_repo = None  # 아래 5번 블록까지는 "미설정시 501"을 그대로 검증한다.
     if not isinstance(_activation_evidence_repo, InMemoryActivationEvidenceRepository):
         _activation_evidence_repo = InMemoryActivationEvidenceRepository()
+    if not isinstance(_plan_repo, InMemoryPlanRepository):
+        _plan_repo = InMemoryPlanRepository()
+    if not isinstance(_plan_evidence_repo, InMemoryPlanApprovalEvidenceRepository):
+        _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
 
     client = TestClient(app)
     t0 = "2026-08-02T00:00:00+00:00"
@@ -939,6 +1142,18 @@ if __name__ == "__main__":
                             "output_tokens": 100, "model_cost": "1", "case_count": 1}],
     })
     assert r13.status_code == 200 and r13.json()["cost"]["case_count"] == 1, r13.text
+
+    # 3a. Quality Snapshot - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야
+    # 한다(실 DB 왕복 검증은 postgres_scorecard_repository.py 자체 점검이 담당).
+    r13a = client.post("/workforce/v1/departments/07-agent-workforce/quality-snapshots", json={
+        "window_start": t0, "window_end": t_exp, "recorded_by": "hr-01", "finding_count": 1,
+    })
+    assert r13a.status_code == 501, r13a.text
+    r13b = client.get(
+        "/workforce/v1/departments/07-agent-workforce/quality-snapshots",
+        params={"window_start": t0, "window_end": t_exp},
+    )
+    assert r13b.status_code == 501, r13b.text
 
     # 4. Budget Assessment - 예산 초과 시 강등 제안.
     r14 = client.post("/workforce/v1/budget-assessments", json={
@@ -1044,4 +1259,42 @@ if __name__ == "__main__":
     print("ok - P0-3 ACTIVE 전이 증거 실재성 게이트 5개 시나리오 통과 "
           "(위조 증거 403, 미완료/미승인 403, 증거 재사용 차단 403, tool_allowlist 없음 409, 정상 승인 200)")
 
-    print("ok - Workforce Domain API 6개 영역(access/improvements/scorecard/budget/roster/P0-3 게이트) 점검 통과")
+    # 7. Workforce Plan (P1-2 HR-04) - DRAFT 생성 -> 위조/미실재 승인 차단 -> 실재 승인
+    # -> 승인 없이 ACTIVE 시도 차단 -> 활성화 -> 종료 상태 재전이 차단.
+    r24 = client.post("/workforce/v1/departments/07-agent-workforce/workforce-plans", json={
+        "period_start": t0, "period_end": t_exp,
+        "skill_gaps": {"research": 1}, "actions": [{"type": "HIRE", "role": "HR-01"}],
+        "budget": {"monthly_usd": "5000"},
+    })
+    assert r24.status_code == 200 and r24.json()["status"] == "DRAFT", r24.text
+    plan_id = r24.json()["plan_id"]
+
+    r25 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/approve", json={
+        "approval_id": "appr-ghost",
+    })
+    assert r25.status_code == 403 and r25.json()["error_code"] == "UnverifiedPlanApprovalError", r25.text
+
+    r26 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r26.status_code == 409, r26.text  # 승인 없이 바로 ACTIVE 불가
+
+    _plan_evidence_repo.seed_ceo_approval("appr-plan-1", plan_id, "APPROVED")
+    r27 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/approve", json={
+        "approval_id": "appr-plan-1",
+    })
+    assert r27.status_code == 200 and r27.json()["status"] == "APPROVED", r27.text
+
+    r28 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r28.status_code == 200 and r28.json()["status"] == "ACTIVE", r28.text
+
+    r29 = client.get("/workforce/v1/departments/07-agent-workforce/workforce-plans")
+    assert len(r29.json()["workforce_plans"]) == 1
+
+    r30 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/retire")
+    assert r30.status_code == 200 and r30.json()["status"] == "RETIRED", r30.text
+    r31 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r31.status_code == 409, r31.text  # 종료 상태 재전이 차단
+    print("ok - Workforce Plan(P1-2 HR-04) 6개 시나리오 통과 "
+          "(DRAFT 생성, 위조 승인 403, 승인 없는 ACTIVE 409, 실재 승인 200, 활성화 200, 종료 후 재전이 409)")
+
+    print("ok - Workforce Domain API 7개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan) 점검 통과")

@@ -82,6 +82,30 @@ Scorecard 관찰의 실제 API 배선.
 
 `quality.eval_score`는 QA/감사본부 소유(`audit.eval_runs`)라 항상 `None`으로 두고 audit-api가 채운다.
 
+- `scorecard/quality.py` — **P1-2 HR-04 Quality Snapshot**. `get_department_scorecard`의
+  `quality.finding_count`/`quality.rework_rate`를 실제로 채우는 저장소(대응 테이블
+  `workforce.quality_snapshots`, `supabase/migrations/20260731000800_...` +
+  `20260806000200_...`의 `recorded_by`). `eval_score`는 여기서도 QA 소유라 만들지 않는다 —
+  이 모듈이 직접 집계하는 값은 `finding_count`/`rework_rate`뿐이다.
+  - `aggregate_quality()` — Snapshot 목록을 합산/평균한다. **Snapshot이 없으면 `(None, None)`이다
+    (0건으로 채우지 않는다)** — cost.py의 `UNKNOWN`과 같은 원칙.
+  - 실제 조회/기록은 `postgres_scorecard_repository.py`의 `append_quality_snapshot()`/
+    `list_quality_snapshots_by_department()`/`list_quality_snapshots_by_agent()`가 맡는다
+    (cost/capacity와 달리 quality는 인사팀이 직접 쓴다 — F27 소유 분리와 반대 방향).
+
+## planning/
+
+- `planning/workforce_plan.py` — **P1-2 HR-04 Workforce Plan** 상태 머신. HR-01
+  (workforce-planning-agent)의 Capacity Report/Staffing Scenario 산출물을 저장한다
+  (대응 테이블 `workforce.workforce_plans`, `supabase/migrations/20260731000800_...`).
+  - `DRAFT -> APPROVED -> ACTIVE -> RETIRED`. **DRAFT -> APPROVED는 이 `plan_id`를 대상으로
+    한 실재 CEO 승인(`governance.approvals`, `object_type=WORKFORCE_PLAN`,
+    `decision=APPROVED`) 없이는 통과하지 않는다** — 인사팀이 자기 계획을 스스로
+    `ACTIVE`로 올리지 못하게 막는다(roster.py `verify_activation_evidence`와 같은
+    조회-판정 분리 원칙).
+  - `postgres_plan_repository.py` — 실 저장 계층. `PostgresPlanRepository`(CRUD) +
+    `PostgresPlanApprovalEvidenceRepository`(`governance.approvals` 읽기 전용 조회).
+
 ## lifecycle/
 
 - `lifecycle/access.py` — **Y4 Access Lifecycle** (HR-04 Lifecycle Coordinator).
@@ -107,7 +131,9 @@ Scorecard 관찰의 실제 API 배선.
 python departments/07-agent-workforce/improvements/candidate.py  # 후보 계약·근거·롤백 검증
 python departments/07-agent-workforce/improvements/workflow.py   # 상태 머신·자기승인 차단·감사
 python departments/07-agent-workforce/scorecard/cost.py          # 예산·비용 Scorecard
+python departments/07-agent-workforce/scorecard/quality.py        # Quality Snapshot 집계 불변식
 python departments/07-agent-workforce/lifecycle/access.py        # 권한 요청·부여·회수 불변식
+python departments/07-agent-workforce/planning/workforce_plan.py # Workforce Plan 상태 머신·승인 게이트
 ```
 
 `__main__` assert 자체 점검 (F01 CEO Office 모듈과 동일 관례).
