@@ -15,10 +15,17 @@
 엔드포인트 두 개다.
   POST /accounting/agent/ask            회계본부 Hermes Agent 질의 (텍스트만)
   GET  /accounting/v1/portfolio-snapshot  portfolio-api. CEO Daily Report용 참조
+
+**질의는 Level 로 분류한 뒤 처리한다 (2026-08-05).** 난이도 편차가 커서 다 같은 값으로
+태우면 한쪽은 낭비고 한쪽은 부족하다. 분류는 결정론이며
+`departments/05-accounting-portfolio/query_router.py` 가 한다.
+L0(결정론 조회)은 **모델을 아예 안 부르고** 원장 읽기 경로를 알려준다 - 제일 싼 모델은
+안 부르는 모델이고, 덤으로 원장 수치가 LLM 문장을 거치지 않으니 원칙 5 도 같이 지켜진다.
 """
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -31,6 +38,12 @@ from fastapi import APIRouter, HTTPException
 DEPARTMENT = "accounting-portfolio-department"   # Hermes Profile 이름
 CONFIG = "departments/05-accounting-portfolio/hermes/config.yaml"  # 저장소 사본
 
+_DEPT_DIR = Path(__file__).resolve().parents[2] / "departments" / "05-accounting-portfolio"
+if str(_DEPT_DIR) not in sys.path:
+    sys.path.append(str(_DEPT_DIR))
+
+from query_router import classify, routing_note  # noqa: E402 - sys.path 조정 뒤
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 router = APIRouter(prefix="/accounting", tags=["accounting-portfolio"])
@@ -42,8 +55,35 @@ def agent_ask(req: hermes_cli.AgentAsk) -> dict:
 
     돌아오는 것은 텍스트뿐이다. Position·PnL·NAV는 여기서 읽지 않는다 -
     팀 가이드 원칙 5(회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
+
+    질의 Level 을 먼저 정하고, L0 은 모델을 부르지 않고 결정론 원천으로 돌려보낸다.
+    응답에 `routing` 이 항상 붙어 왜 그 등급이었는지가 감사에서 설명된다.
     """
-    return hermes_cli.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
+    # **게이트가 라우팅보다 먼저다.** L0 이 모델을 안 부른다고 해서 비활성 엔드포인트가
+    # 일부만 열리면, 최적화가 조용히 보안 경계를 깎은 것이 된다. 라우팅은 게이트 안쪽의
+    # 비용 최적화일 뿐이다.
+    if not hermes_cli.ENABLE_AGENT_ASK:
+        raise HTTPException(
+            503,
+            "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",
+        )
+
+    routing = classify(req.query)
+    if not routing.calls_model:
+        # 모델을 안 부른다. 답을 지어내지도 않는다 - 어디서 읽으면 되는지만 알려준다.
+        return {
+            "department": DEPARTMENT,
+            "answer": (f"이 질의는 {routing.level}({routing.level_name})입니다. "
+                       f"모델을 호출하지 않았습니다. 수치는 {routing.deterministic_source} "
+                       "에서 읽으십시오."),
+            "session_id": None,
+            "authoritative": False,
+            "source_of_record": "/ui/snapshot",
+            "routing": routing.as_dict(),
+            "routing_note": routing_note(routing),
+        }
+    result = hermes_cli.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
+    return {**result, "routing": routing.as_dict(), "routing_note": routing_note(routing)}
 
 
 # --- portfolio-api -----------------------------------------------------------

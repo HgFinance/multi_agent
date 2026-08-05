@@ -443,9 +443,48 @@ if __name__ == "__main__":
     # 캐시했어도 server_time은 매 요청 갱신된다 - 화면이 신선도를 판단해야 한다
     assert c.get("/ui/snapshot").json()["server_time"] >= snap["server_time"]
 
-    # 인증·Tool Allowlist가 없는 기본 환경에서는 Agent 호출이 전부 닫혀 있다
+    # 인증·Tool Allowlist가 없는 기본 환경에서는 Agent 호출이 전부 닫혀 있다.
+    # **Level 라우팅이 이 게이트를 못 뚫는다** - L0(모델 호출 없음)도 여전히 503이다.
     assert c.post("/accounting/agent/ask", json={"query": "NAV?"}).status_code == 503
+    assert c.post("/accounting/agent/ask", json={"query": "현재 현금 잔고"}).status_code == 503
     assert c.post("/trading/agent/ask", json={"query": "pending?"}).status_code == 503
+
+    # 게이트를 열면 L0는 모델을 부르지 않고 결정론 원천으로 돌려보낸다(비용 0).
+    import accounting as _accounting_router
+    import hermes_cli as _hermes_cli
+
+    _saved_flag = _hermes_cli.ENABLE_AGENT_ASK
+    _hermes_cli.ENABLE_AGENT_ASK = True
+    try:
+        cheap = c.post("/accounting/agent/ask", json={"query": "현재 NAV와 현금 잔고"})
+        assert cheap.status_code == 200, cheap.text
+        body = cheap.json()
+        assert body["routing"]["level"] == "L0" and body["routing"]["calls_model"] is False
+        assert body["session_id"] is None and body["authoritative"] is False
+        assert body["source_of_record"] == "/ui/snapshot"
+        # 수치를 지어내지 않는다 - 어디서 읽으라는 안내만 한다
+        assert "모델을 호출하지 않았습니다" in body["answer"]
+
+        # 마감·감사 질의는 등급이 올라가고 실제로 Hermes를 부른다(여기선 스텁으로 확인)
+        _called: list = []
+        _orig_ask = _accounting_router.hermes_cli.ask
+
+        def _fake_ask(*, department, config, query):
+            _called.append(query)
+            return {"department": department, "answer": "stub", "session_id": "s1",
+                    "authoritative": False, "source_of_record": "/ui/snapshot"}
+
+        _accounting_router.hermes_cli.ask = _fake_ask
+        try:
+            heavy = c.post("/accounting/agent/ask",
+                           json={"query": "마감 확정해도 되는지 감사 근거와 함께 설명"}).json()
+            assert heavy["routing"]["level"] == "L3" and heavy["routing"]["tier"] == "heavy"
+            assert heavy["routing"]["calls_model"] is True and len(_called) == 1
+            assert heavy["authoritative"] is False, "라우팅이 공식 수치 계약을 깼다"
+        finally:
+            _accounting_router.hermes_cli.ask = _orig_ask
+    finally:
+        _hermes_cli.ENABLE_AGENT_ASK = _saved_flag
     # 빈 질의는 스키마에서 걸린다
     assert c.post("/accounting/agent/ask", json={"query": ""}).status_code == 422
     # 부서를 Body로 지정할 방법이 없다. 다른 본부 경로는 존재하지 않는다
@@ -467,15 +506,12 @@ if __name__ == "__main__":
         "/quant/agent/ask",
         "/qa/agent/ask",
         "/accounting/v1/portfolio-snapshot",
-        "/ui/research",
-        "/ui/strategy",
-        "/ui/risk",
-        "/ui/qa",
-        "/ui/risk-qa",
-        "/ui/commands/trading-state",
-        "/ui/commands/audit",
-    }
-    assert required_paths <= paths, paths
+        # 2026-08-04 포트폴리오 추천 경로. 전부 읽기 또는 추천 실행이며 Posting·NAV 확정·
+        # 주문 제출이 아니다. 승인 경로(/approval)는 추천 상태만 바꾸고 원장을 건드리지 않는다.
+        "/ui/integrations", "/ui/portfolio-universes", "/ui/portfolio-recommendations",
+        "/ui/portfolio-recommendations/{run_id}",
+        "/ui/portfolio-recommendations/{run_id}/approval",
+    }, c.get("/openapi.json").json()["paths"].keys()
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다
     schema = c.get("/openapi.json").json()

@@ -110,8 +110,11 @@ class PaperPipelineAdapterTest(unittest.TestCase):
         risk = _default_risk_runner(Path.cwd())
         qa = _default_qa_runner(Path.cwd())
 
-        risk_file = risk.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
-        qa_file = qa.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
+        # __file__ carries the native separator, so compare on a posix-normalized
+        # path — the assertion is about which department module was loaded, not
+        # about which OS the suite runs on.
+        risk_file = Path(risk.__paper_module__.__dict__["md_cell"].__globals__["__file__"]).as_posix()
+        qa_file = Path(qa.__paper_module__.__dict__["md_cell"].__globals__["__file__"]).as_posix()
         self.assertIn("departments/03-risk/reporting.py", risk_file)
         self.assertIn("departments/06-ai-qa-audit/reporting.py", qa_file)
         self.assertIsNot(

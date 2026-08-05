@@ -17,9 +17,23 @@
   bull_researcher   TRD-01 (LLM, hermes/config.yaml 페르소나 원문)  ┐ 병렬
   bear_researcher   TRD-02 (LLM, hermes/config.yaml 페르소나 원문)  ┘ 서로 못 본다
   debate_merge      결정론 - 인용 검증 / 독립성 측정 / 쟁점 대조
+  propose_intent    결정론 - grounded 토론에서만 OrderIntent **제안**을 만든다 (2026-08-05)
   notion_report     Reporter (결정론 - notion_reporter.upload_debate, LLM 아님) - 결과를
                     Notion Trading DB(NOTION_TRADING_DB)에 Projection 으로 올린다.
                     업로드가 실패해도 grounded/escalate 는 못 바꾼다.
+
+**토론 -> OrderIntent 제안까지 (2026-08-05 추가).** 토론 결과가 아무 데도 안 닿으면
+근거만 쌓이고 주문이 안 나온다. 그래서 `propose_intent` 를 붙였는데, 붙이면서 지킨 선 넷:
+
+  - **grounded 토론에서만 만든다.** 인용이 날조거나 Packet 이 stale 이면 제안이 없다.
+  - **수량·가격을 토론이 정하지 않는다.** 수량은 Signal 의 target_weight 에서,
+    지정가는 philosophies.yaml 프리셋에서 나온다(F11 intent_builder 그대로 재사용).
+    토론이 target_weight 를 만들기 시작하면 근거 생성이 전략 결정으로 번진다.
+  - **Risk Gate 가 선행한다.** 제안에는 `risk_decision_id` 가 없고 `submittable: False` 다.
+    OMS 는 유효한 RiskDecision 없이 제출을 거부하므로 이 제안만으로는 주문이 못 된다
+    (팀 가이드 4.3 "RISK_APPROVED 는 상태가 아니라 전제조건").
+  - **입력이 없으면 제안이 없다.** Signal·시세·NAV·현재 수량은 다른 본부/회계에서 온다.
+    없으면 추정하지 않고 사유를 기록한 채 제안을 비운다.
 
 **Bull 과 Bear 는 병렬이며 서로의 출력을 입력으로 받지 않는다.** 근거:
   - TRD-01 "Bear 결과는 생성 전 보지 않는다", KPI "독립성 위반 0"
@@ -114,6 +128,8 @@ class DebateState(TypedDict, total=False):
     contested: dict              # 양측이 같은 Claim 을 다뤘는지
     grounded: bool
     escalate: bool
+    intent_inputs: dict | None   # 호출자가 준 Signal/시세/NAV/현재수량 - 없으면 제안 없음
+    order_intent_proposal: dict  # 결정론 - 제안이지 주문이 아니다
     notion_upload: dict          # Reporter 결과 - 실패해도 위 판정은 안 바뀐다
     report_markdown: str
     # 병렬 노드 둘이 같은 키에 쓰므로 reducer 가 없으면 LangGraph 가 InvalidUpdateError 를 낸다.
@@ -464,6 +480,80 @@ def debate_merge(state: DebateState) -> dict:
             "grounded": grounded, "escalate": not grounded or bool(state.get("fallbacks"))}
 
 
+# ── 노드 5: OrderIntent 제안 (결정론 - 주문이 아니다) ──────────────────────
+def _no_proposal(reason: str, detail: str) -> dict:
+    return {"order_intent_proposal": {
+        "available": False, "reason": reason, "detail": detail,
+        "risk_gate_required": True, "submittable": False}}
+
+
+def propose_intent(state: DebateState) -> dict:
+    """grounded 토론 + 외부 입력이 다 있을 때만 OrderIntent 제안을 만든다.
+
+    Packet 접수 게이트(packet_gate)와 F11(intent_builder)을 그대로 재사용한다 - 여기서
+    수량·가격 계산을 다시 쓰면 같은 규칙이 두 곳에 생기고 한쪽만 바뀐다.
+    """
+    if not state.get("grounded"):
+        return _no_proposal("not_grounded",
+                            "인용·독립성·신선도 검증을 통과하지 못한 토론으로는 주문을 제안하지 않는다")
+    inputs = state.get("intent_inputs") or {}
+    missing = [k for k in ("packet", "signal", "snapshot", "nav", "current_quantity")
+               if inputs.get(k) is None]
+    if missing:
+        return _no_proposal(
+            "inputs_missing",
+            f"제안에 필요한 입력이 없다: {missing}. Signal 은 strategy-registry-api, 시세는 "
+            "market-api, NAV·보유수량은 회계본부에서 온다 - 추정하지 않는다")
+
+    # Lazy Import - contracts 계층은 pydantic 등 의존이 있고, 제안을 안 만드는 실행에서는
+    # 불러올 이유가 없다(_hermes_chat 과 같은 이유).
+    for sub in ("contracts", "oms"):
+        path = str(_BASE / sub)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    from intent_builder import IntentBuildError, build_order_intent, load_presets
+    from packet_gate import PacketGateError, check_packet_admissible
+
+    # 토론이 읽은 Packet 과 게이트가 검사할 Packet 이 같은 것인지 확인한다. 다르면 A 의 근거
+    # 위에 B 의 주문이 올라탄다 - packet_gate 가 Case 동일성을 보는 것과 같은 이유다.
+    debated_id = (state.get("research_packet") or {}).get("packet_id")
+    gate_id = getattr(inputs["packet"], "packet_id", None)
+    if debated_id and gate_id and str(debated_id) != str(gate_id):
+        return _no_proposal(
+            "packet_mismatch",
+            f"토론한 Packet({debated_id})과 제안 입력 Packet({gate_id})이 다르다")
+
+    signal, snapshot = inputs["signal"], inputs["snapshot"]
+    try:
+        packet_ref = check_packet_admissible(inputs["packet"], signal, snapshot)
+        preset = load_presets()[signal.philosophy]
+        intent = build_order_intent(
+            signal, snapshot=snapshot, nav=inputs["nav"],
+            current_quantity=inputs["current_quantity"], preset=preset,
+            trade_case_id=inputs.get("trade_case_id") or signal.strategy_id,
+            now=inputs.get("now") or datetime.now(timezone.utc))
+    except (PacketGateError, IntentBuildError, KeyError) as exc:
+        # 게이트에 막힌 것은 파이프라인 장애가 아니다 - 제안이 없을 뿐이고 사유가 남는다.
+        return _no_proposal(type(exc).__name__, _sanitize(exc))
+
+    if intent is None:
+        return _no_proposal("no_delta", "목표 비중에 이미 도달해 만들 주문이 없다")
+
+    return {"order_intent_proposal": {
+        "available": True,
+        "order_intent": intent.model_dump(mode="json"),
+        "packet_ref": {"packet_id": packet_ref.packet_id, "case_id": packet_ref.case_id,
+                       "status": packet_ref.status,
+                       "as_known_at": packet_ref.as_known_at.isoformat()},
+        # **이 셋이 이 제안의 요지다.** 제안은 주문 권한이 아니다.
+        "risk_gate_required": True,
+        "risk_decision_id": None,
+        "submittable": False,
+        "next_step": ("risk-api 판정 -> contracts/risk_gate.to_risk_decision -> "
+                      "oms.apply_risk_decision -> oms.create_broker_order"),
+    }}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def _route_after_validate(state: DebateState):
     # 토론을 열면 Bull/Bear 를 같은 superstep 에 병렬로 띄운다. 둘 다 끝나야 debate_merge 가 돈다.
@@ -502,13 +592,15 @@ def build_pipeline(chat=None, uploader=None):
     g.add_node("bear_researcher",
                _guard_node("bear_researcher", lambda s: bear_researcher(s, chat=chat)))
     g.add_node("debate_merge", _guard_node("debate_merge", debate_merge))
+    g.add_node("propose_intent", _guard_node("propose_intent", propose_intent))
     g.add_node("notion_report",
                _guard_node("notion_report", lambda s: notion_report(s, uploader=uploader)))
     g.set_entry_point("validate_packet")
     g.add_conditional_edges("validate_packet", _route_after_validate)
     g.add_edge("bull_researcher", "debate_merge")
     g.add_edge("bear_researcher", "debate_merge")
-    g.add_edge("debate_merge", "notion_report")
+    g.add_edge("debate_merge", "propose_intent")
+    g.add_edge("propose_intent", "notion_report")
     g.add_edge("notion_report", END)
     return g.compile()
 
@@ -540,19 +632,34 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
             "agent_versions": {"model": _model_version(),
                                "bull_prompt": _prompt_version("bull-researcher"),
                                "bear_prompt": _prompt_version("bear-researcher")},
+            "order_intent_proposal": state.get("order_intent_proposal") or {
+                "available": False, "reason": "not_reached",
+                "detail": "제안 노드 전에 파이프라인이 끝났다",
+                "risk_gate_required": True, "submittable": False},
             # 이 파이프라인은 판정을 만들지 않는다 - 소비자가 착각하지 않게 계약으로 박는다.
+            # OrderIntent 는 **제안**까지만 만든다. 제출 권한은 Risk 판정 뒤에 생긴다.
             "authoritative": False,
-            "produces_order_intent": False}
+            "produces_order_intent": bool(
+                (state.get("order_intent_proposal") or {}).get("available")),
+            "submittable": False}
 
 
-def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None) -> dict:
-    """본부 단독 실행 - 리스크/QA/리서치의 run_<dept>_department 와 같은 외부 인터페이스."""
+def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None,
+                         intent_inputs: dict | None = None) -> dict:
+    """본부 단독 실행 - 리스크/QA/리서치의 run_<dept>_department 와 같은 외부 인터페이스.
+
+    `intent_inputs` 를 주면 grounded 토론에 한해 OrderIntent **제안**까지 만든다.
+    키: packet(ResearchPacketV2), signal(StrategySignal), snapshot(MarketSnapshot),
+    nav(Decimal), current_quantity(Decimal), trade_case_id?, now?.
+    안 주면 토론까지만 하고 제안은 `available: False` 로 사유를 남긴다.
+    """
     try:
         # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
         # 그대로 꺼진 채고, 켜져 있을 때만 트레이딩본부 Project 로 보낸다.
         with tracing_context(project_name=_ls_project()):
             state = build_pipeline(chat=chat, uploader=uploader).invoke(
-                {"research_packet": research_packet, "fallbacks": []})
+                {"research_packet": research_packet, "fallbacks": [],
+                 "intent_inputs": intent_inputs})
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         state = {"research_packet": research_packet, "claims": {}, "debate_opened": False,
                  "bull": None, "bear": None, "grounded": False, "escalate": True,
@@ -665,6 +772,29 @@ def _render_report_md(out: dict) -> str:
         f"- **Bull 만 인용:** {_md_refs(contested.get('bull_only_refs'))}",
         f"- **Bear 만 인용:** {_md_refs(contested.get('bear_only_refs'))}",
         f"- **아무도 다루지 않은 Claim:** {_md_refs(contested.get('untouched_refs'))}",
+    ]
+
+    proposal = out.get("order_intent_proposal") or {}
+    lines += ["", "## OrderIntent 제안 (주문이 아니다)", "",
+              "| 항목 | 값 |", "|---|---|",
+              f"| 제안 생성 | {'예' if proposal.get('available') else '**아니오**'} |"]
+    if proposal.get("available"):
+        intent = proposal.get("order_intent") or {}
+        lines += [
+            f"| 방향 / 수량 | {_md_cell(intent.get('side'))} / {_md_cell(intent.get('quantity'))} |",
+            f"| 지정가 | {_md_cell(intent.get('limit_price'))} |",
+            f"| idempotency_key | `{_md_cell(intent.get('idempotency_key'))}` |",
+            f"| 근거 Packet | `{_md_cell((proposal.get('packet_ref') or {}).get('packet_id'))}` |",
+        ]
+    else:
+        lines.append(f"| 사유 | {_md_cell(proposal.get('reason'))} — "
+                     f"{_md_cell(proposal.get('detail'))} |")
+    lines += [
+        f"| risk_decision_id | {_md_cell(proposal.get('risk_decision_id'))} |",
+        f"| 제출 가능 | {'예' if proposal.get('submittable') else '**아니오 — Risk 판정 선행**'} |",
+        "",
+        "> 이 제안에는 `risk_decision_id` 가 없다. OMS 는 유효한 Risk 판정 없이 제출을",
+        "> 거부하므로 이 문서만으로는 주문이 나가지 않는다(팀 가이드 4.3).",
     ]
 
     if out.get("fallbacks"):
@@ -1037,6 +1167,103 @@ def _check_langsmith_observability():
     print("  LangSmith 관측성           OK")
 
 
+def _intent_fixture(*, weight="0.02", held="0"):
+    """제안 검사용 입력 묶음. Packet 은 동규님 testkit canonical Fixture 를 쓴다 -
+    우리가 지어내면 재일님 계약이 바뀌어도 이 검사가 안 깨진다."""
+    from decimal import Decimal
+    from uuid import uuid4
+
+    sys.path.insert(0, str(_BASE / "contracts"))
+    from contracts import MarketSnapshot, StrategySignal
+    from departments.risk_qa_testkit.research_packet import make_canonical_test_packet
+
+    now = datetime.now(timezone.utc)
+    instrument_id = uuid4()
+    canonical = make_canonical_test_packet(as_known_at=now - timedelta(hours=1))
+    packet = canonical.research_packet.model_copy(
+        update={"instrument_id": str(instrument_id), "status": "PUBLISHED"})
+    signal = StrategySignal(
+        strategy_id=uuid4(), strategy_version="v1", fund_id=uuid4(), book_id=uuid4(),
+        instrument_id=instrument_id, philosophy="momentum", target_weight=Decimal(weight),
+        stage="paper", as_of=now, valid_until=now + timedelta(hours=6), trace_id="t_prop")
+    snapshot = MarketSnapshot(market_snapshot_id="snap_prop", as_of=now,
+                              bid=Decimal("69900"), ask=Decimal("70100"))
+    debated = {**_PACKET, "as_of": now.isoformat(), "packet_id": packet.packet_id}
+    return debated, {"packet": packet, "signal": signal, "snapshot": snapshot,
+                     "nav": Decimal("1000000000"), "current_quantity": Decimal(held),
+                     "now": now}
+
+
+def _check_intent_proposal():
+    """토론 -> OrderIntent 제안. **grounded 일 때만, 그리고 Risk 없이는 주문이 안 된다.**"""
+    from decimal import Decimal
+
+    debated, inputs = _intent_fixture()
+
+    # 1. 입력이 없으면 제안이 없다 - 추정해서 만들지 않는다
+    bare = _run(debated, chat=_stub())
+    assert bare["grounded"] is True and bare["produces_order_intent"] is False
+    assert bare["order_intent_proposal"]["reason"] == "inputs_missing", bare["order_intent_proposal"]
+
+    # 2. grounded 가 아니면 입력이 다 있어도 제안이 없다 (인용 날조 토론)
+    ungrounded = _run(debated, chat=_stub(bear={**_BEAR_OK, "claim_refs": ["fact:99"]}),
+                      intent_inputs=inputs)
+    assert ungrounded["grounded"] is False
+    assert ungrounded["order_intent_proposal"]["reason"] == "not_grounded"
+    assert ungrounded["produces_order_intent"] is False
+
+    # 3. grounded + 입력 -> 제안이 생긴다. 단 제출 권한은 없다
+    out = _run(debated, chat=_stub(), intent_inputs=inputs)
+    proposal = out["order_intent_proposal"]
+    assert proposal["available"] is True, proposal
+    assert out["produces_order_intent"] is True and out["submittable"] is False
+    assert proposal["risk_gate_required"] is True and proposal["risk_decision_id"] is None
+    intent_dict = proposal["order_intent"]
+    assert intent_dict["side"] == "BUY" and Decimal(intent_dict["quantity"]) == Decimal("285")
+    assert proposal["packet_ref"]["packet_id"] == inputs["packet"].packet_id
+    assert out["authoritative"] is False
+
+    # 4. **제안만으로는 OMS 가 주문을 만들지 않는다** - Risk Gate 가 선행한다는 증명
+    sys.path.insert(0, str(_BASE / "oms"))
+    from contracts import OrderIntent
+    from oms import OMS, OMSError
+
+    intent = OrderIntent.model_validate(intent_dict)
+    oms = OMS(adapter="paper")
+    rec = oms.register_intent(intent)
+    try:
+        oms.create_broker_order(rec, intent)
+        raise AssertionError("Risk 판정 없는 제안이 주문이 됐다")
+    except OMSError:
+        pass
+
+    # 5. Packet 게이트에 막히면 제안만 없고 토론 판정은 그대로다
+    blocked_packet = inputs["packet"].model_copy(update={"status": "PARTIAL"})
+    blocked = _run(debated, chat=_stub(), intent_inputs={**inputs, "packet": blocked_packet})
+    assert blocked["grounded"] is True, "게이트 차단이 토론 판정을 바꿨다"
+    assert blocked["order_intent_proposal"]["available"] is False
+    assert blocked["order_intent_proposal"]["reason"] == "PacketGateError"
+
+    # 6. 다른 Packet 을 물고 오면 거부한다 - A 의 근거 위에 B 의 주문이 못 올라탄다
+    other = inputs["packet"].model_copy(update={"packet_id": "pkt-other"})
+    mixed = _run(debated, chat=_stub(), intent_inputs={**inputs, "packet": other})
+    assert mixed["order_intent_proposal"]["reason"] == "packet_mismatch", \
+        mixed["order_intent_proposal"]
+
+    # 7. 목표에 이미 도달했으면 0주 주문을 제안하지 않는다
+    _, held = _intent_fixture(held="285")
+    reached = _run(debated, chat=_stub(), intent_inputs={**held, "packet": inputs["packet"],
+                                                         "signal": inputs["signal"]})
+    assert reached["order_intent_proposal"]["reason"] == "no_delta", \
+        reached["order_intent_proposal"]
+
+    # 8. 리포트에 제안과 "Risk 판정 선행"이 그대로 적힌다
+    md = out["report_markdown"]
+    assert "## OrderIntent 제안 (주문이 아니다)" in md
+    assert "Risk 판정 선행" in md and intent_dict["idempotency_key"] in md
+    print("  OrderIntent 제안 + Risk 선행 OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("bull_researcher", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1077,6 +1304,7 @@ if __name__ == "__main__":
     _check_report_is_deterministic()
     _check_agent_has_no_tools()
     _check_notion_report_node()
+    _check_intent_proposal()
     _check_secret_redaction()
     _check_langsmith_observability()
-    print("트레이딩본부 토론 파이프라인 17개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    print("트레이딩본부 토론 파이프라인 18개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
