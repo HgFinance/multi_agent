@@ -175,6 +175,8 @@ from notification import (
     NotificationService,
 )
 from langgraph.checkpoint.memory import InMemorySaver
+from mandate_assistant import AssistantMessage as _AssistantMessage
+from mandate_assistant import suggest as _mandate_assistant_suggest
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -274,6 +276,19 @@ class ProposeVersionRequest(BaseModel):
         description="In-Memory Repository 데모용 seed - accounting-api 없이 통화 검증하려면 채운다. "
                     "Postgres Repository를 쓸 때는 무시하고 accounting.funds를 그대로 조회한다.",
     )
+
+
+class SuggestRequestIn(BaseModel):
+    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4).
+
+    Stateless - fund_id는 미래에 Fund별 컨텍스트(허용 자산군 등)를 프롬프트에
+    반영할 자리로만 받아두고 아직 쓰지 않는다. messages/current_draft만 실제로
+    LLM 제안을 만든다.
+    """
+
+    fund_id: str
+    messages: list[_AssistantMessage] = Field(min_length=1)
+    current_draft: dict | None = None
 
 
 class ApprovalIn(BaseModel):
@@ -1025,6 +1040,34 @@ def get_mandate_current_by_fund(fund_id: str):
                    f"{mandate_ids}",
         )
     return get_mandate_current(mandate_ids[0])
+
+
+# --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
+#
+# USER_INPUT_API_SPEC.md 2.4. Stateless - 이 endpoint 는 governance.mandate_versions나
+# 다른 어떤 테이블도 쓰지 않는다. LLM 실패는 500 으로 전파하지 않고 빈 제안 +
+# 안내 reply 로 감싼다(mandate_assistant.py docstring "왜 Schema 위반 시 예외를
+# 던지는가" 참고) - 채팅 UI가 LLM 장애 한 번으로 멈추면 안 된다.
+
+
+@app.post("/governance/v1/mandate-assistant/suggest")
+def mandate_assistant_suggest(body: SuggestRequestIn):
+    try:
+        result = _mandate_assistant_suggest(
+            messages=body.messages, current_draft=body.current_draft,
+        )
+    except ValueError:
+        raise  # messages 검증 실패(빈 목록 등)는 호출부 버그다 - 감추지 않는다.
+    except Exception:
+        # RuntimeError(Schema 2회 위반·ANTHROPIC_API_KEY 없음)뿐 아니라 anthropic
+        # 패키지 미설치·네트워크 오류·Rate limit도 전부 여기서 잡는다 - LLM 경로의
+        # 어떤 실패든 채팅 UI를 500으로 멈추지 않고 빈 제안으로 감싼다.
+        _logger.exception("Mandate assistant 제안 실패 (fund_id=%s)", body.fund_id)
+        return {
+            "reply": "죄송합니다, 지금은 제안을 만들 수 없습니다. 직접 입력해 주세요.",
+            "suggestions": [], "requires_user_confirmation": True, "dropped_fields": [],
+        }
+    return result.model_dump()
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -2050,6 +2093,26 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    print("ok - CEO Office Domain API 35개 시나리오 점검 통과 "
+    # 34. Mandate assistant - 정상 응답(FastAPI TestClient는 실제 anthropic 호출 없이
+    # mandate_assistant._anthropic_call이 ANTHROPIC_API_KEY 부재로 RuntimeError를 내는
+    # 경로를 그대로 태운다 - 즉 이 자체 점검은 "LLM 실패 시 500이 아니라 빈 제안으로
+    # 감싼다"는 계약을 실제로 검증한다).
+    r36 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [{"role": "user", "content": "10년 정도 투자할 생각이에요"}],
+    })
+    assert r36.status_code == 200, r36.text
+    body36 = r36.json()
+    assert body36["requires_user_confirmation"] is True
+    assert body36["suggestions"] == [] and body36["dropped_fields"] == []
+    assert "제안을 만들 수 없습니다" in body36["reply"]
+
+    # 34b. 빈 messages는 422(Pydantic min_length).
+    r37 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [],
+    })
+    assert r37.status_code == 422, r37.text
+    print("ok - Mandate assistant suggest API 통과 (LLM 실패를 500이 아니라 빈 제안으로 감쌈, 빈 messages 422)")
+
+    print("ok - CEO Office Domain API 36개 시나리오 점검 통과 "
           "(승인 10개(P0-1 actor_user_id 실재성 포함) + Case Root 5개 + 에스컬레이션 4개 + "
-          "위원회 6개 + HITL 변경요청 3개 포함)")
+          "위원회 6개 + HITL 변경요청 3개 + Mandate assistant 2개 포함)")
