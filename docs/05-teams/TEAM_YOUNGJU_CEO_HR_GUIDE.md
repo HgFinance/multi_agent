@@ -50,7 +50,7 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 | Notification | 심각도·dedup 규칙 있음 | Notification Repository/실제 수신자 Routing Table 미완료 |
 | `GOV-02` | `DOCUMENTED`/부분 구현 | Investment Case→Approval→Committee→Escalation 전체 API Replay 필요 |
 | `HR-01` | `IMPLEMENTED` | 독립 승인 DB Replay와 운영 Access 경계 필요 |
-| `HR-02` | `IMPLEMENTED` | QA Eval·CEO 승인·Profile/Tool Version의 실제 ACTIVE 검증 필요 |
+| `HR-02` | `TEST_VERIFIED`(P0-3 실재성 게이트, 2026-08-05) | Draft Profile 13개 Review(조직 판단, 미착수) + 활성화 결정 자체를 스냅샷으로 남기는 감사 테이블 필요 |
 | Workforce Registry | `IMPLEMENTED` baseline | Quality Snapshot·Workforce Plan 집계/저장 로직 필요 |
 | Access Lifecycle | 구현 baseline | Platform/IAM 이벤트·Provisioning Worker 연결 필요 |
 | `HR-03` | `DOCUMENTED` | Eval Runner·Shadow Router·Promotion·Rollback 실체화 필요 |
@@ -82,12 +82,12 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 - `GET /governance/v1/mandates/{fund_id}/current` 같은 공식 Read Model을 누락한 채 downstream이 임의로 Mandate를 조회하지 않는다.
 - Notification 수신자·채널이 결정되지 않으면 발송 성공으로 만들지 않고 `PENDING`/`ESCALATE`한다.
 
-### P0-3. HR-02 Active Gate와 Profile Review
+### P0-3. HR-02 Active Gate와 Profile Review — 코드 부분 완료 (2026-08-05), Review는 미착수
 
-- Profile Version, Tool Allowlist, Model Assignment, QA Eval, CEO Approval의 version/hash를 함께 저장한다.
-- 작성자와 승인자를 분리하고, QA Eval 또는 CEO 승인 하나라도 없으면 `ACTIVE` 전환을 409/deny한다.
-- Draft Profile 13개를 역할·trigger·tool·data boundary·model tier별로 review하고, 미승인은 `DRAFT`로 유지한다.
-- Tool Allowlist가 없는 Persona는 실행 권한을 주지 않는다.
+- Profile Version, Tool Allowlist, Model Assignment, QA Eval, CEO Approval의 version/hash를 함께 저장한다. → **부분 완료.** `artifact_hash`는 이미 `agent_profile_versions`에 저장돼 있었다(기존). 이번에 추가한 건 "저장"이 아니라 "실재성 검증" — `qa_eval_run_id`는 `audit.eval_runs`에서 이 `profile_version_id`를 candidate로 하는 `COMPLETED` 행을, `ceo_approval_id`는 `governance.approvals`에서 이 `profile_version_id`를 대상으로 한 `APPROVED` CEO 결정을 실제로 가리켜야 결정이 통과한다(`departments/07-agent-workforce/roster/activation_evidence.py`, `UnverifiedActivationEvidenceError` → 403). 다른 Version의 증거를 재사용하는 것도 매칭 조건으로 막힌다. **다만 "이 ACTIVE 결정이 정확히 어떤 eval_run/approval을 근거로 했는지"를 스냅샷으로 남기는 새 감사 테이블은 아직 없다** — 매 조회 시점에 다시 검증할 뿐 별도로 저장하지 않는다. 필요하면 후속 작업.
+- 작성자와 승인자를 분리하고, QA Eval 또는 CEO 승인 하나라도 없으면 `ACTIVE` 전환을 409/deny한다. → **기존 게이트(`MissingActivationEvidenceError`, 빈 값 검사) + 이번 실재성 검증으로 사실상 충족.** 별도 `created_by` 필드를 추가하는 대신, HR이 QA `eval_runs`도 CEO의 `governance.approvals` 결정도 스스로 만들 수 없는 구조 자체가 작성자/승인자 분리를 강제한다.
+- Draft Profile 13개를 역할·trigger·tool·data boundary·model tier별로 review하고, 미승인은 `DRAFT`로 유지한다. → **미착수.** 이건 코드가 아니라 13개 실제 Agent Profile에 대한 조직 판단(역할·권한 범위가 적절한지)이라 임의로 승인/반려하지 않는다 - 담당자 review 필요.
+- Tool Allowlist가 없는 Persona는 실행 권한을 주지 않는다. → **완료.** `tool_allowlist`가 빈 Version은 QA/CEO 증거가 완벽해도 `ACTIVE` 전환이 `ToolAllowlistMissingError`(409)로 막힌다.
 
 ### P1-1. HR-03 자기개선 폐쇄 루프
 
