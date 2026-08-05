@@ -265,6 +265,8 @@ class PortfolioRuntime:
             result = enrich_suitability_result(
                 result,
                 str(profile.get("universe_id", DEFAULT_UNIVERSE_ID)),
+                include_stock=bool(profile.get("include_stock", True)),
+                include_derivatives=bool(profile.get("include_derivatives", True)),
             )
             with self._lock:
                 job = self._job_for(job_id)

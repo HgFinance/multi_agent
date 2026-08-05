@@ -210,7 +210,7 @@ export const SUPPORTED_SCHEMA_VERSION = 1;
 
 /** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 넘긴다. */
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
-export const BFF = (configuredBff || "http://localhost:8000").replace(/\/+$/, "");
+export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
 
 /**
  * Snapshot 형태 검증.

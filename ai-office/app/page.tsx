@@ -19,7 +19,7 @@ import RiskQaPanel from "./ops/RiskQaPanel";
 import DepartmentCommunicationPanel from "./ops/DepartmentCommunicationPanel";
 import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
-import PortfolioInterviewPanel from "./ops/PortfolioInterviewPanel";
+import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
 
 type View = "live" | "dashboard";
 const CANONICAL_DEPARTMENT_COUNT = 7;
@@ -406,7 +406,7 @@ function LiveView({
         <aside className="live-rail">
           <CeoConsole engine={engine} snap={snap} />
 
-          <section className="win rail-card" id="ceo-approval">
+        <section className="win rail-card" id="legacy-ceo-approval">
             <div className="win-bar">
               <span>✅ ceo.approval</span>
               <span className="window-controls">—　▢　✕</span>
@@ -553,6 +553,8 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
             </div>
           ))}
         </div>
+
+        <PortfolioResultConsole />
 
         <div className="console-quick">
           {QUICK_ORDERS.map((item) => (
@@ -723,6 +725,10 @@ function DashboardView({
   integrations: IntegrationStatus | null;
   publishResult: PublishResult | null;
 }) {
+  const { snapshot: bffSnapshot } = useBffFeed();
+  const portfolioRuntime = bffSnapshot?.operations?.runtime;
+  const portfolioResult = portfolioRuntime?.result as RuntimeResult | null | undefined;
+
   // 서버가 알려준 실제 설정 상태로 표시한다 (연결됐다고 거짓 보고하지 않는다)
   const liveRows = integrations
     ? [
@@ -775,6 +781,8 @@ function DashboardView({
           </div>
         </div>
       </header>
+
+      {portfolioRuntime?.run_id && <PortfolioKanban runtime={portfolioRuntime} result={portfolioResult} observedAt={bffSnapshot?.operations?.observed_at} />}
 
       <section className="summary-grid" aria-label="오늘 업무 요약">
         <article className="metric yellow">

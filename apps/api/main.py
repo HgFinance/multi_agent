@@ -18,7 +18,7 @@
    (팀 가이드 원칙 5: 회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
 
 실행:
-    DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8000
+    DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
 자체 점검:
     python apps/api/main.py
 """
@@ -55,7 +55,9 @@ from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_optio
 app = FastAPI(title="AI Office BFF", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    # ponytail: 개발용 로컬 Origin 고정. 배포 Origin이 정해지면 환경변수로 뺀다.
+    # 로컬 개발 포트는 3000/3001/3002/3003처럼 바뀔 수 있다.
+    # 배포 시에는 이 정규식을 환경변수 기반 allowlist로 교체한다.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
@@ -140,6 +142,8 @@ class PortfolioRecommendationRequest(BaseModel):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
     category: str = Field(default="PORTFOLIO_RECOMMENDATION", min_length=1, max_length=64)
+    include_stock: bool = Field(default=True, description="주식 자산을 추천 결과에 포함할지 여부")
+    include_derivatives: bool = Field(default=True, description="파생상품 자산을 추천 결과에 포함할지 여부")
     query: str = Field(default="", max_length=2000)
     as_of: str | None = None
     fund_id: str | None = None

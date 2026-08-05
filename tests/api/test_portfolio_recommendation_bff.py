@@ -17,7 +17,53 @@ from apps.api.portfolio_universe import enrich_suitability_result
 
 
 class PortfolioRecommendationBffTest(unittest.TestCase):
-    def test_incomplete_universe_mapping_holds_and_cannot_be_approved(self) -> None:
+    def test_frontend_port_3003_is_allowed_by_bff_cors(self) -> None:
+        response = TestClient(app).options(
+            "/ui/snapshot",
+            headers={
+                "Origin": "http://localhost:3003",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3003")
+
+    def test_asset_visibility_toggles_exclude_bonds(self) -> None:
+        client = TestClient(app)
+        response = client.post(
+            "/ui/portfolio-recommendations",
+            json={
+                "user_id": "bff-toggle-check",
+                "mindset": "BALANCED",
+                "experience": "BEGINNER",
+                "investment_horizon_years": 3,
+                "max_drawdown_pct": "0.10",
+                "investment_amount": "1000000",
+                "currency": "KRW",
+                "universe_id": "KOREA_GLOBAL_MIXED",
+                "category": "PORTFOLIO_RECOMMENDATION",
+                "include_stock": False,
+                "include_derivatives": True,
+                "query": "",
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        run_id = response.json()["run_id"]
+        result = None
+        for _ in range(160):
+            time.sleep(0.05)
+            runtime = client.get(f"/ui/portfolio-recommendations/{run_id}").json()
+            if runtime["result"] is not None:
+                result = runtime["result"]
+                break
+        self.assertIsNotNone(result, runtime)
+        assert result is not None
+        self.assertEqual(result["asset_visibility"]["include_stock"], False)
+        self.assertTrue(result["asset_visibility"]["include_derivatives"])
+        self.assertTrue(all(item["asset_class"] in {"LEVERAGED_ETF", "SHORT_EXPOSURE", "DERIVATIVES_HEDGE"} for item in result["instrument_recommendations"]))
+        self.assertFalse(any(item["asset_class"] == "SHORT_TERM_BOND" for item in result["instrument_recommendations"]))
+
+    def test_domestic_universe_ignores_out_of_scope_global_allocation(self) -> None:
         result = enrich_suitability_result(
             {
                 "safe_action": "NO_ACTION",
@@ -34,9 +80,33 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
             },
             "KOREA_EQUITY_WATCHLIST",
         )
-        self.assertEqual(result["instrument_recommendations_status"], "INCOMPLETE")
+        self.assertEqual(result["instrument_recommendations_status"], "COMPLETE")
+        self.assertEqual(result["safe_action"], "NO_ACTION")
+        self.assertEqual(result["unresolved_asset_classes"], [])
+        self.assertTrue(all(item["asset_class"] == "KOREA_EQUITY" for item in result["instrument_recommendations"]))
+
+    def test_both_asset_toggles_off_is_safe_hold(self) -> None:
+        result = enrich_suitability_result(
+            {
+                "safe_action": "NO_ACTION",
+                "currency": "KRW",
+                "suitability": {
+                    "recommendations": [
+                        {
+                            "portfolio_id": "starter-safety",
+                            "target_allocations": {"KOREA_EQUITY": "1.00"},
+                            "target_amounts": {"KOREA_EQUITY": "1000000.00"},
+                        }
+                    ]
+                },
+            },
+            "KOREA_GLOBAL_MIXED",
+            include_stock=False,
+            include_derivatives=False,
+        )
+        self.assertEqual(result["instrument_recommendations"], [])
+        self.assertEqual(result["instrument_recommendations_status"], "UNAVAILABLE")
         self.assertEqual(result["safe_action"], "HOLD")
-        self.assertEqual(result["unresolved_asset_classes"], ["GLOBAL_EQUITY"])
 
     def test_universe_and_free_query_route_are_backend_owned(self) -> None:
         client = TestClient(app)

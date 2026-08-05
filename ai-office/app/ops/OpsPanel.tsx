@@ -76,7 +76,7 @@ function BackendEmptyState({
         <h2 id="ops-snapshot-title">백엔드 Snapshot을 기다리는 중입니다</h2>
         <p>{error || "GET /ui/snapshot 응답을 기다리고 있습니다."}</p>
         <p>
-          <code>uvicorn apps.api.main:app --port 8000</code>
+          <code>uvicorn apps.api.main:app --port 8001</code>
         </p>
         <button type="button" className="btn-small" onClick={() => void refresh()}>
           다시 연결

@@ -11,6 +11,7 @@ from .pipeline import (
 )
 from .department_graph import DepartmentGraphSpec, run_department_graph
 from .portfolio_pipeline import run_portfolio_recommendation_pipeline
+from .replay import ReplayValidationError, build_test_replay_bundle, validate_replay_bundle
 
 __all__ = [
     "PipelineMode",
@@ -23,4 +24,7 @@ __all__ = [
  "DepartmentGraphSpec",
     "run_department_graph",
     "run_portfolio_recommendation_pipeline",
+    "ReplayValidationError",
+    "build_test_replay_bundle",
+    "validate_replay_bundle",
 ]

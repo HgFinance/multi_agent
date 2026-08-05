@@ -15,6 +15,8 @@ from typing import Any, Mapping
 
 UNIVERSE_PATH = Path(__file__).with_name("portfolio_universes.json")
 DEFAULT_UNIVERSE_ID = "KOREA_GLOBAL_MIXED"
+STOCK_ASSET_CLASSES = frozenset({"KOREA_EQUITY", "GLOBAL_EQUITY"})
+DERIVATIVE_ASSET_CLASSES = frozenset({"LEVERAGED_ETF", "SHORT_EXPOSURE", "DERIVATIVES_HEDGE"})
 
 
 def load_universes() -> list[dict[str, Any]]:
@@ -58,6 +60,7 @@ def _instrument_rows(
     recommendation: Mapping[str, Any],
     universe: Mapping[str, Any],
     currency: str,
+    allowed_asset_classes: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     instruments = [
         item
@@ -69,6 +72,10 @@ def _instrument_rows(
     allocations = recommendation.get("target_allocations", {})
     amounts = recommendation.get("target_amounts", {})
     for asset_class, raw_weight in allocations.items():
+        # Bonds and cash-like assets are intentionally outside this UI
+        # projection. An explicit toggle controls the remaining two groups.
+        if allowed_asset_classes is not None and asset_class not in allowed_asset_classes:
+            continue
         matches = [item for item in instruments if item.get("asset_class") == asset_class]
         if not matches:
             unresolved.append(str(asset_class))
@@ -105,6 +112,9 @@ def _instrument_rows(
 def enrich_suitability_result(
     result: Mapping[str, Any],
     universe_id: str | None,
+    *,
+    include_stock: bool = True,
+    include_derivatives: bool = True,
 ) -> dict[str, Any]:
     """Attach instrument-level advisory rows to the deterministic result."""
     output = dict(result)
@@ -120,10 +130,22 @@ def enrich_suitability_result(
         return output
 
     currency = str(output.get("currency", "KRW"))
+    allowed_asset_classes = frozenset()
+    if include_stock:
+        allowed_asset_classes |= STOCK_ASSET_CLASSES
+    if include_derivatives:
+        allowed_asset_classes |= DERIVATIVE_ASSET_CLASSES
+    if universe.get("universe_id") == "KOREA_EQUITY_WATCHLIST":
+        allowed_asset_classes &= {"KOREA_EQUITY"}
     instrument_recommendations: list[dict[str, Any]] = []
     unresolved: set[str] = set()
     for recommendation in output.get("suitability", {}).get("recommendations", []):
-        rows, missing = _instrument_rows(recommendation, universe, currency)
+        rows, missing = _instrument_rows(
+            recommendation,
+            universe,
+            currency,
+            allowed_asset_classes,
+        )
         portfolio_id = recommendation.get("portfolio_id")
         for row in rows:
             row["portfolio_id"] = portfolio_id
@@ -143,9 +165,18 @@ def enrich_suitability_result(
         "source": universe.get("source"),
     }
     output["instrument_recommendations"] = instrument_recommendations
+    output["asset_visibility"] = {
+        "include_stock": include_stock,
+        "include_derivatives": include_derivatives,
+        "bond_data_excluded": True,
+    }
     output["unresolved_asset_classes"] = sorted(unresolved)
-    output["instrument_recommendations_status"] = "INCOMPLETE" if unresolved else "COMPLETE"
-    if unresolved:
+    if not instrument_recommendations:
+        output["instrument_recommendations_status"] = "UNAVAILABLE"
+        output["safe_action"] = "HOLD"
+    else:
+        output["instrument_recommendations_status"] = "INCOMPLETE" if unresolved else "COMPLETE"
+    if unresolved or not instrument_recommendations:
         output["safe_action"] = "HOLD"
     output["forecast_notice"] = (
         "예상 수익률은 보장값이 아닙니다. 현재 유니버스가 TEST 상태이므로 "
@@ -156,6 +187,8 @@ def enrich_suitability_result(
 
 __all__ = [
     "DEFAULT_UNIVERSE_ID",
+    "DERIVATIVE_ASSET_CLASSES",
+    "STOCK_ASSET_CLASSES",
     "enrich_suitability_result",
     "get_universe",
     "load_universes",

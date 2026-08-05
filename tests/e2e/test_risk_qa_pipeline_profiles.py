@@ -32,10 +32,13 @@ def test_test_profile_runs_full_risk_and_qa_skeleton():
         "qa_deterministic_gate_skeleton",
         "qa_department_head_employee_graph",
         "risk_qa_test_gate",
+        "cross_domain_replay_contract",
     ]
     assert result["risk_gate"]["binding"] is False
     assert result["qa_gate"]["binding"] is False
     assert result["qa_gate"]["decision"] == "WARN"
+    assert result["replay_contract"]["status"] == "READY"
+    assert result["replay_contract"]["replayable"] is True
     assert len(result["risk"]["workers"]) == 4
     assert len(result["qa"]["workers"]) == 5
     assert result["risk"]["not_executed"] == []
