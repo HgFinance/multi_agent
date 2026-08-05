@@ -73,6 +73,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 위 마이그레이션의 ADD CONSTRAINT가 재실행에 안전하지 않아 병합 후
                 # Supabase 자동 적용이 "already exists"로 실패한 것을 고치는 후속 마이그레이션
                 "20260805000200_notifications_dedup_key_constraint_idempotent.sql",
+                # 000200 병합 후에도 재발 - 진짜 원인은 supabase_migrations.schema_migrations
+                # 이력 누락이었다(수동 수복 완료). 방어적 재확인 + 사고 기록
+                "20260805000300_notifications_dedup_key_history_repair_note.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
