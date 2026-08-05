@@ -68,6 +68,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804001000_quant_hypothesis_inconclusive.sql",
                 "20260804001100_order_events_broker_id_unique.sql",
                 "20260804001200_risk_qa_production_read_paths.sql",
+                # CEO Office (영주, 2026-08-05) - P0-2 GOV-02 Replay가 실 DB로 잡은 버그 수정
+                "20260805000100_notifications_dedup_key_per_channel.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
