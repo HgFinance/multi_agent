@@ -1,6 +1,7 @@
 # 담당자: 영주 (CEO Office)
 # 근거: HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F01(사용자 Mandate),
-#       TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.1(사용자 Mandate 변경), 10.1(Version/Effective Time)
+#       TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.1(사용자 Mandate 변경), 10.1(Version/Effective Time),
+#       docs/02-engineering/USER_INPUT_API_SPEC.md 1.3(2026-08-05 결정 B/C-1/D 방향 판정)
 #
 # F01 의 Version/Effective Time 저장과 장중 변경 방향 판정.
 #   - 기존 Version 을 덮어쓰지 않고 새 Version 을 만든다 (10.1, DDL 의 unique(mandate_id, version)).
@@ -53,12 +54,13 @@ def classify_change(current: MandatePolicy, proposed: MandatePolicy) -> ChangeDi
     tighten = False
 
     c, p = current.risk_bounds, proposed.risk_bounds
-    # 값이 커질수록 더 위험한 한도들.
+    # 값이 커질수록 더 위험한 한도들. max_drawdown_pct 는 결정 B 로 신설.
     for field in (
         "max_instrument_weight",
         "max_sector_weight",
         "max_gross_exposure",
         "max_daily_loss",
+        "max_drawdown_pct",
     ):
         cv, pv = _num(getattr(c, field)), _num(getattr(p, field))
         if pv > cv:
@@ -81,6 +83,27 @@ def classify_change(current: MandatePolicy, proposed: MandatePolicy) -> ChangeDi
     if cf - pf:
         loosen = True
     if pf - cf:
+        tighten = True
+
+    cu, pu = current.universe_policy, proposed.universe_policy
+    # 허용 자산군 추가 = 확대, 제거 = 완화 (결정 C-1).
+    caa, paa = set(cu.allowed_asset_classes), set(pu.allowed_asset_classes)
+    if paa - caa:
+        loosen = True
+    if caa - paa:
+        tighten = True
+    # 금지 자산군 제거 = 확대, 추가 = 완화 (결정 C-1).
+    cfa, pfa = set(cu.forbidden_asset_classes), set(pu.forbidden_asset_classes)
+    if cfa - pfa:
+        loosen = True
+    if pfa - cfa:
+        tighten = True
+    # 제외 업종 제거 = 확대, 추가 = 완화 (결정 D). preferred_sectors 는 제약이 아니라
+    # 우선순위 힌트일 뿐이라 방향 판정에서 뺀다(USER_INPUT_API_SPEC.md 1.3).
+    ces, pes = set(cu.excluded_sectors), set(pu.excluded_sectors)
+    if ces - pes:
+        loosen = True
+    if pes - ces:
         tighten = True
 
     # 자동 주문 전환: USER_APPROVAL -> AUTO = 확대, 반대 = 완화.
@@ -441,13 +464,15 @@ if __name__ == "__main__":
             "max_daily_loss": "0.03",
         }
         risk.update(over.pop("risk", {}))
+        universe = {
+            "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30",
+        }
+        universe.update(over.pop("universe", {}))
         p = {
             "allowed_assets": over.pop("allowed_assets", ["A005930"]),
             "forbidden_assets": over.pop("forbidden_assets", []),
             "risk_bounds": risk,
-            "universe_policy": {
-                "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"
-            },
+            "universe_policy": universe,
             "approval_rules": {
                 "paper_order_mode": over.pop("mode", "USER_APPROVAL")
             },
@@ -485,6 +510,44 @@ if __name__ == "__main__":
         )
         == ChangeDirection.LOOSEN
     )
+
+    # 1-1) 결정 B: max_drawdown_pct 방향 판정 (기본값 0.10).
+    assert (
+        classify_change(base, _policy(risk={"max_drawdown_pct": "0.05"}))
+        == ChangeDirection.TIGHTEN
+    ), "누적 손실 한도 축소는 완화"
+    assert (
+        classify_change(base, _policy(risk={"max_drawdown_pct": "0.50"}))
+        == ChangeDirection.LOOSEN
+    ), "누적 손실 한도 확대는 확대"
+
+    # 1-2) 결정 C-1: 자산군 허용/금지 방향 판정.
+    assert (
+        classify_change(
+            base, _policy(universe={"allowed_asset_classes": ["EQUITY"]})
+        )
+        == ChangeDirection.LOOSEN
+    ), "허용 자산군 추가는 확대"
+    with_forbidden = _policy(universe={"forbidden_asset_classes": ["CRYPTO"]})
+    assert (
+        classify_change(base, with_forbidden) == ChangeDirection.TIGHTEN
+    ), "금지 자산군 추가는 완화"
+    assert (
+        classify_change(with_forbidden, base) == ChangeDirection.LOOSEN
+    ), "금지 자산군 제거는 확대"
+
+    # 1-3) 결정 D: excluded_sectors 는 방향 판정, preferred_sectors 는 NEUTRAL.
+    with_excluded = _policy(universe={"excluded_sectors": ["G2510"]})
+    assert (
+        classify_change(base, with_excluded) == ChangeDirection.TIGHTEN
+    ), "제외 업종 추가는 완화"
+    assert (
+        classify_change(with_excluded, base) == ChangeDirection.LOOSEN
+    ), "제외 업종 제거는 확대"
+    assert (
+        classify_change(base, _policy(universe={"preferred_sectors": ["G2510"]}))
+        == ChangeDirection.NEUTRAL
+    ), "선호 업종은 제약이 아니라 힌트 - 방향 판정에서 제외"
 
     # 2) 재승인 요구 매핑.
     assert requires_user_reapproval(ChangeDirection.LOOSEN) is True
