@@ -50,7 +50,7 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 | Notification | 심각도·dedup 규칙 있음 | Notification Repository/실제 수신자 Routing Table 미완료 |
 | `GOV-02` | `RUNTIME_VERIFIED`(P0-2 Replay 통과, 2026-08-05) | Governance Decision 전용 테이블(record_decision, 스펙 2.2)은 여전히 미정 - Committee Decision으로 근사 중 |
 | `HR-01` | `IMPLEMENTED` | 독립 승인 DB Replay와 운영 Access 경계 필요 |
-| `HR-02` | `IMPLEMENTED` | QA Eval·CEO 승인·Profile/Tool Version의 실제 ACTIVE 검증 필요 |
+| `HR-02` | `TEST_VERIFIED`(P0-3 실재성 게이트, 2026-08-05) | Draft Profile 13개 Review(조직 판단, 미착수) + 활성화 결정 자체를 스냅샷으로 남기는 감사 테이블 필요 |
 | Workforce Registry | `IMPLEMENTED` baseline | Quality Snapshot·Workforce Plan 집계/저장 로직 필요 |
 | Access Lifecycle | 구현 baseline | Platform/IAM 이벤트·Provisioning Worker 연결 필요 |
 | `HR-03` | `DOCUMENTED` | Eval Runner·Shadow Router·Promotion·Rollback 실체화 필요 |
@@ -104,12 +104,12 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 - Notification 수신자·채널이 결정되지 않으면 발송 성공으로 만들지 않고 `PENDING`/`ESCALATE`한다. → 이 모듈엔 애초에 `DELIVERED` 상태가 없다(F24 발송 Adapter 미구현) - 모든 호출이 `PENDING`/`SUPPRESSED`로만 끝나 허위 성공 표시가 구조적으로 불가능함을 확인. 심각도 불명은 억제되지 않고 `CRITICAL`로 승격(불변식 2).
 - **이 Replay가 실제로 잡은 버그**: `governance.notifications.dedup_key`가 단일 컬럼 `unique`라 CRITICAL/HIGH/MEDIUM처럼 채널이 2개 이상인 알림은 두 번째 채널 insert부터 항상 실패했다 — 지금까지 모든 자체점검이 `InMemoryNotificationRepository`로 강제 전환돼 있어 못 잡혔던 결함(In-Memory 자체점검의 구조적 한계 - "실제 DB로 재현"해야만 드러난다). `supabase/migrations/20260805000100_notifications_dedup_key_per_channel.sql`로 `unique(dedup_key, channel)`로 교정, 적용 완료. `NotificationPersistenceError`도 이전엔 처리기가 없어 500 스택트레이스가 그대로 샜다 - 503으로 닫도록 `api/app.py`에 추가.
 
-### P0-3. HR-02 Active Gate와 Profile Review
+### P0-3. HR-02 Active Gate와 Profile Review — 코드 부분 완료 (2026-08-05), Review는 미착수
 
-- Profile Version, Tool Allowlist, Model Assignment, QA Eval, CEO Approval의 version/hash를 함께 저장한다.
-- 작성자와 승인자를 분리하고, QA Eval 또는 CEO 승인 하나라도 없으면 `ACTIVE` 전환을 409/deny한다.
-- Draft Profile 13개를 역할·trigger·tool·data boundary·model tier별로 review하고, 미승인은 `DRAFT`로 유지한다.
-- Tool Allowlist가 없는 Persona는 실행 권한을 주지 않는다.
+- Profile Version, Tool Allowlist, Model Assignment, QA Eval, CEO Approval의 version/hash를 함께 저장한다. → **부분 완료.** `artifact_hash`는 이미 `agent_profile_versions`에 저장돼 있었다(기존). 이번에 추가한 건 "저장"이 아니라 "실재성 검증" — `qa_eval_run_id`는 `audit.eval_runs`에서 이 `profile_version_id`를 candidate로 하는 `COMPLETED` 행을, `ceo_approval_id`는 `governance.approvals`에서 이 `profile_version_id`를 대상으로 한 `APPROVED` CEO 결정을 실제로 가리켜야 결정이 통과한다(`departments/07-agent-workforce/roster/activation_evidence.py`, `UnverifiedActivationEvidenceError` → 403). 다른 Version의 증거를 재사용하는 것도 매칭 조건으로 막힌다. **다만 "이 ACTIVE 결정이 정확히 어떤 eval_run/approval을 근거로 했는지"를 스냅샷으로 남기는 새 감사 테이블은 아직 없다** — 매 조회 시점에 다시 검증할 뿐 별도로 저장하지 않는다. 필요하면 후속 작업.
+- 작성자와 승인자를 분리하고, QA Eval 또는 CEO 승인 하나라도 없으면 `ACTIVE` 전환을 409/deny한다. → **기존 게이트(`MissingActivationEvidenceError`, 빈 값 검사) + 이번 실재성 검증으로 사실상 충족.** 별도 `created_by` 필드를 추가하는 대신, HR이 QA `eval_runs`도 CEO의 `governance.approvals` 결정도 스스로 만들 수 없는 구조 자체가 작성자/승인자 분리를 강제한다.
+- Draft Profile 13개를 역할·trigger·tool·data boundary·model tier별로 review하고, 미승인은 `DRAFT`로 유지한다. → **미착수.** 이건 코드가 아니라 13개 실제 Agent Profile에 대한 조직 판단(역할·권한 범위가 적절한지)이라 임의로 승인/반려하지 않는다 - 담당자 review 필요.
+- Tool Allowlist가 없는 Persona는 실행 권한을 주지 않는다. → **완료.** `tool_allowlist`가 빈 Version은 QA/CEO 증거가 완벽해도 `ACTIVE` 전환이 `ToolAllowlistMissingError`(409)로 막힌다.
 
 ### P1-1. HR-03 자기개선 폐쇄 루프
 

@@ -195,6 +195,21 @@ class PostgresRosterRepository(RosterRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get_profile_version_tool_allowlist(self, profile_version_id: str) -> dict | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select tool_allowlist from workforce.agent_profile_versions "
+                    "where profile_version_id = %s",
+                    (profile_version_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return row[0] if row else None
+        finally:
+            self._pool.putconn(conn)
+
     def change_status(self, agent_id: str, *, to_status: EmploymentStatus, at) -> None:
         conn = self._pool.getconn()
         try:
@@ -255,6 +270,10 @@ if __name__ == "__main__":
     from datetime import datetime, timezone
 
     print("ok - import 확인 (psycopg2 lazy load)")
+
+    from dotenv import load_dotenv
+
+    load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 않는다.
 
     dsn = os.environ.get("GOVERNANCE_WORKFORCE_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:

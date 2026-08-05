@@ -43,9 +43,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
+# (override=False 기본값). CEO Office api/app.py와 동일한 이유(2026-08-05) - 이게
+# 없으면 .env에 DATABASE_URL이 있어도 이 프로세스는 그 값을 못 보고 조용히 In-Memory/
+# 501 경로로 빠진다.
+load_dotenv()
 
 _BASE = Path(__file__).resolve().parent.parent
 _LIFECYCLE_DIR = _BASE / "lifecycle"
@@ -87,8 +94,12 @@ from roster import (
     ProfileVersionRow,
     ProfileVersionSubmission,
     StatusChangeRequest,
+    ToolAllowlistMissingError,
+    UnverifiedActivationEvidenceError,
     validate_status_change,
+    verify_activation_evidence,
 )
+from activation_evidence import InMemoryActivationEvidenceRepository
 from workflow import (
     Approval,
     CandidateStatus,
@@ -122,6 +133,11 @@ try:
     from postgres_roster_repository import PostgresRosterRepository
 except ImportError:
     PostgresRosterRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from activation_evidence import PostgresActivationEvidenceRepository
+except ImportError:
+    PostgresActivationEvidenceRepository = None  # type: ignore[assignment,misc]
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
@@ -447,6 +463,14 @@ if os.environ.get("DATABASE_URL") and PostgresRosterRepository is not None:
 else:
     _roster_repo = None
 
+# P0-3(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md) - ACTIVE 전이 증거(qa_eval_run_id/
+# ceo_approval_id) 실재성 검증. Roster와 같은 이유로 DATABASE_URL 없으면 In-Memory -
+# 개발 환경에서도 이 게이트 자체는 계약대로 동작해야 self-check가 의미 있다.
+if os.environ.get("DATABASE_URL") and PostgresActivationEvidenceRepository is not None:
+    _activation_evidence_repo = PostgresActivationEvidenceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _activation_evidence_repo = InMemoryActivationEvidenceRepository()
+
 
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
@@ -458,7 +482,7 @@ def _on_value_error(request, exc: ValueError):
 for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
-    MissingActivationEvidenceError,
+    MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -466,6 +490,10 @@ for _exc_type in (
         MissingRevocationEvidenceError: 409, IllegalTransition: 409,
         CandidateSelfApprovalError: 403, MissingEvidenceError: 409, CandidateIllegalTransition: 409,
         MissingActivationEvidenceError: 409,
+        # P0-3 - 칸은 채워졌지만 실재하지 않는/조건 미충족 증거는 403(신원 위조에 준하는
+        # 취급, CEO 쪽 UnverifiedActorUserError와 같은 방향). tool_allowlist 누락은
+        # 증거 위조가 아니라 설정 미비라 기존 MissingActivationEvidenceError와 같은 409.
+        UnverifiedActivationEvidenceError: 403, ToolAllowlistMissingError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -594,7 +622,14 @@ def submit_profile_version(agent_id: str, body: ProfileVersionSubmissionIn):
 
 @app.post("/workforce/v1/agents/{agent_id}/status")
 def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
-    """to_status=ACTIVE는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다."""
+    """to_status=ACTIVE는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다.
+
+    P0-3(2026-08-05): 그 둘이 실재하는 증거인지도 검증한다 - qa_eval_run_id는
+    audit.eval_runs에서 이 profile_version_id를 candidate로 하는 COMPLETED 행을,
+    ceo_approval_id는 governance.approvals에서 이 profile_version_id를 대상으로 한
+    APPROVED CEO 결정을 가리켜야 한다(UnverifiedActivationEvidenceError -> 403).
+    tool_allowlist가 비어있는 Persona도 ACTIVE로 못 간다(ToolAllowlistMissingError -> 409).
+    """
     request = StatusChangeRequest(
         to_status=body.to_status, profile_version_id=body.profile_version_id, reason=body.reason,
         idempotency_key=body.idempotency_key, qa_eval_run_id=body.qa_eval_run_id,
@@ -602,6 +637,18 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
     )
     validate_status_change(request)
     _require_roster_repo()
+    if body.to_status is EmploymentStatus.ACTIVE:
+        tool_allowlist = _roster_repo.get_profile_version_tool_allowlist(body.profile_version_id) or {}
+        eval_run_status = _activation_evidence_repo.get_eval_run_status(
+            body.qa_eval_run_id, body.profile_version_id
+        )
+        ceo_approval_decision = _activation_evidence_repo.get_ceo_approval_decision(
+            body.ceo_approval_id, body.profile_version_id
+        )
+        verify_activation_evidence(
+            eval_run_status=eval_run_status, approval_decision=ceo_approval_decision,
+            tool_allowlist=tool_allowlist,
+        )
     _roster_repo.change_status(agent_id, to_status=body.to_status, at=datetime.now(timezone.utc))
     return _agent_summary_dict(_roster_repo.get_agent(agent_id))
 
@@ -741,6 +788,20 @@ def get_budget_assessment_real(
 if __name__ == "__main__":
     from fastapi.testclient import TestClient
 
+    # 이 자체 점검은 "a1"/"pv1" 같은 합성 ID로 계약을 검증한다 - DATABASE_URL이 .env에
+    # 있어도(위 load_dotenv()) 실 DB로 새면 대부분의 조회가 빈 결과나 FK 에러로 깨진다.
+    # CEO Office api/app.py와 같은 이유로 In-Memory로 강제한다.
+    if not isinstance(_access_repo, InMemoryAccessRepository):
+        _access_repo = InMemoryAccessRepository()
+    if not isinstance(_improvement_repo, InMemoryImprovementRepository):
+        _improvement_repo = InMemoryImprovementRepository()
+        _workflow = ImprovementWorkflow(_improvement_repo)  # _workflow는 모듈 로드 시점
+        # 원래 _improvement_repo를 이미 캡처했다 - 재배선 안 하면 실 DB를 계속 쓴다.
+    _scorecard_repo = None
+    _roster_repo = None  # 아래 5번 블록까지는 "미설정시 501"을 그대로 검증한다.
+    if not isinstance(_activation_evidence_repo, InMemoryActivationEvidenceRepository):
+        _activation_evidence_repo = InMemoryActivationEvidenceRepository()
+
     client = TestClient(app)
     t0 = "2026-08-02T00:00:00+00:00"
     t_exp = "2026-09-01T00:00:00+00:00"
@@ -856,4 +917,79 @@ if __name__ == "__main__":
     })
     assert r18.status_code == 409, r18.text  # validate_status_change가 501 확인보다 먼저 막는다
 
-    print("ok - Workforce Domain API 5개 영역(access/improvements/scorecard/budget/roster) 점검 통과")
+    # 6. P0-3 ACTIVE 전이 증거 실재성 게이트 - In-Memory Roster/Evidence Repository를
+    # 채운 뒤에만 의미가 있으므로 여기서부터 module 전역을 재배선한다.
+    from roster import InMemoryRosterRepository, ProfileVersionStatus
+
+    _roster_repo = InMemoryRosterRepository()
+    _roster_repo.seed_agent(AgentSummary(
+        agent_id="a-p03", employee_code="HR-P03-SELFCHECK", display_name="p0-3-selfcheck-agent",
+        department_code="hr-department", role_code="HR-01",
+        employment_status=EmploymentStatus.CANDIDATE, current_version=0,
+        current_profile_version=None, owner_user_id=None,
+    ))
+    submitted = _roster_repo.submit_profile("a-p03", ProfileVersionSubmission(
+        model_id="m1", prompt_artifact_path="x", skill_manifest={},
+        tool_allowlist={"read": ["capacity_snapshots"]}, data_scopes={}, memory_namespace="x",
+        token_budget={}, sla={}, eval_requirements={}, forbidden_actions=[], effective_from=t0,
+    ))
+    pv_id = submitted.profile_version_id
+
+    # 6a. qa_eval_run_id/ceo_approval_id가 채워져 있어도 실재하지 않으면 403.
+    r19 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-1", "qa_eval_run_id": "eval-ghost",
+        "ceo_approval_id": "appr-ghost",
+    })
+    assert r19.status_code == 403 and r19.json()["error_code"] == "UnverifiedActivationEvidenceError", \
+        r19.text
+
+    # 6b. 실재하지만 아직 안 끝난 Eval(RUNNING)/미승인(PENDING)도 403.
+    _activation_evidence_repo.seed_eval_run("eval-running", pv_id, "RUNNING")
+    _activation_evidence_repo.seed_ceo_approval("appr-pending", pv_id, "PENDING")
+    r20 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-2", "qa_eval_run_id": "eval-running",
+        "ceo_approval_id": "appr-pending",
+    })
+    assert r20.status_code == 403, r20.text
+
+    # 6c. 다른 Profile Version을 대상으로 한 증거는 재사용할 수 없다(매칭 조건).
+    _activation_evidence_repo.seed_eval_run("eval-other-pv", "다른-pv", "COMPLETED")
+    r21 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-3", "qa_eval_run_id": "eval-other-pv",
+        "ceo_approval_id": "appr-pending",
+    })
+    assert r21.status_code == 403, r21.text
+
+    # 6d. tool_allowlist가 빈 Version은 QA/CEO 증거가 완벽해도 409(실행 권한 없음).
+    empty_allowlist_agent = _roster_repo.submit_profile(
+        "a-p03",
+        ProfileVersionSubmission(
+            model_id="m1", prompt_artifact_path="x", skill_manifest={}, tool_allowlist={},
+            data_scopes={}, memory_namespace="x", token_budget={}, sla={}, eval_requirements={},
+            forbidden_actions=[], effective_from=t0,
+        ),
+    )
+    _activation_evidence_repo.seed_eval_run("eval-empty-tools", empty_allowlist_agent.profile_version_id, "COMPLETED")
+    _activation_evidence_repo.seed_ceo_approval("appr-empty-tools", empty_allowlist_agent.profile_version_id, "APPROVED")
+    r22 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": empty_allowlist_agent.profile_version_id,
+        "reason": "x", "idempotency_key": "idem-p03-4", "qa_eval_run_id": "eval-empty-tools",
+        "ceo_approval_id": "appr-empty-tools",
+    })
+    assert r22.status_code == 409 and r22.json()["error_code"] == "ToolAllowlistMissingError", r22.text
+
+    # 6e. 정상 증거(완료된 Eval + 승인된 CEO 결정 + 채워진 tool_allowlist) -> ACTIVE 성공.
+    _activation_evidence_repo.seed_eval_run("eval-ok", pv_id, "COMPLETED")
+    _activation_evidence_repo.seed_ceo_approval("appr-ok", pv_id, "APPROVED")
+    r23 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-5", "qa_eval_run_id": "eval-ok", "ceo_approval_id": "appr-ok",
+    })
+    assert r23.status_code == 200 and r23.json()["employment_status"] == "ACTIVE", r23.text
+    print("ok - P0-3 ACTIVE 전이 증거 실재성 게이트 5개 시나리오 통과 "
+          "(위조 증거 403, 미완료/미승인 403, 증거 재사용 차단 403, tool_allowlist 없음 409, 정상 승인 200)")
+
+    print("ok - Workforce Domain API 6개 영역(access/improvements/scorecard/budget/roster/P0-3 게이트) 점검 통과")

@@ -69,6 +69,7 @@ implementation:
     - "LangGraph 파이프라인 & Notion Reporter — departments/07-agent-workforce/scripts.py, notion_reporter.py. F19 후보 정보를 공용 Notion Markdown 렌더러로 서식화하여 Notion HR DB 연동"
     - "Tool Allowlist / Forbidden Tools 선언 — API Spec 3.6절 기준 페르소나별 최소 권한 통제 정의"
     - "HR-02 Roster/Profile API — Roster 조회, Profile Version 제출, 상태 변경 엔드포인트 구현. QA Eval/CEO 승인 누락 시 ACTIVE 전이 차단(SoD 강제)"
+    - "P0-3 ACTIVE 전이 증거 실재성 게이트(2026-08-05) — roster/activation_evidence.py 신규. 이전엔 qa_eval_run_id/ceo_approval_id가 빈 문자열만 아니면 통과했다(MissingActivationEvidenceError는 '비어있는지'만 검사) - 이제 qa_eval_run_id는 audit.eval_runs에서 이 profile_version_id를 candidate로 하는 COMPLETED 행을, ceo_approval_id는 governance.approvals에서 이 profile_version_id를 object_id로 하는 APPROVED CEO 결정을 실제로 가리켜야 한다(UnverifiedActivationEvidenceError -> 403). 다른 Profile Version을 대상으로 한 증거 재사용도 매칭 조건으로 차단됨. tool_allowlist가 빈 Persona는 ACTIVE(실행 권한) 전이 불가(ToolAllowlistMissingError -> 409). '작성자/승인자 분리'는 HR이 QA eval_runs도 CEO 결정도 스스로 못 만드는 구조로 이미 강제되므로 별도 author 필드 없이 이 실재성 검증만으로 충족. api/app.py의 change_agent_status에 배선. 자체 점검: roster.py 10개 + activation_evidence.py 6개(+ 실 DB 조회) + postgres_roster_repository.py get_profile_version_tool_allowlist 실 DB 확인 + api/app.py 5개(위조/미완료/재사용/tool_allowlist 없음/정상 승인) 통과"
     - "Workforce Plans/Quality Snapshots DDL — supabase/migrations/20260731000800_workforce_plan_quality_probation.sql 마이그레이션 반영"
     - "부서 코드 통일 — department_code 정본을 Hermes Profile 이름으로 확정(hr-department). seed.sql·roster.py·scorecard 조회 반영. GOV-02와 원자적이라 ceo-agent 브랜치에서 함께 커밋"
 
