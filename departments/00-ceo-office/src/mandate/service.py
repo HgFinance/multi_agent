@@ -282,6 +282,21 @@ class MandateVersionRepository:
         """
         raise NotImplementedError
 
+    def get(self, mandate_id: str, version: int) -> MandateVersionRow | None:
+        """(mandate_id, version) 의 전체 Row(policy 포함). 없으면 None.
+
+        USER_INPUT_API_SPEC.md 2.1(2026-08-06) - GET .../current 응답을
+        {mandate_id, current_version, status}에서 전체 policy 포함으로 확장하는 데 쓴다.
+        """
+        raise NotImplementedError
+
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        """fund_id -> mandate_id 목록. governance.mandates.unique(fund_id, name)이라
+        한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있다 - 호출자가 개수로 판단한다
+        (0개=404, 1개=단일 조회, 2개 이상=모호하므로 409, 임의로 하나를 고르지 않는다).
+        """
+        raise NotImplementedError
+
 
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
@@ -289,6 +304,7 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
         self._decisions: list[MandateDecisionRow] = []
         self._mandate_state: dict[str, tuple[int, str]] = {}
         self._fund_currency: dict[str, str] = {}
+        self._fund_of: dict[str, str] = {}
 
     def set_fund_base_currency(self, mandate_id: str, currency: str) -> None:
         """테스트·개발용 seed. 실 구현에서는 accounting.funds 를 조회한다."""
@@ -296,6 +312,13 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
 
     def get_fund_base_currency(self, mandate_id: str) -> str | None:
         return self._fund_currency.get(mandate_id)
+
+    def set_fund_id(self, mandate_id: str, fund_id: str) -> None:
+        """테스트·개발용 seed. 실 구현에서는 governance.mandates.fund_id 를 조회한다."""
+        self._fund_of[mandate_id] = fund_id
+
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        return [mid for mid, fid in self._fund_of.items() if fid == fund_id]
 
     def latest_version(self, mandate_id: str) -> int:
         versions = [r.version for r in self._rows if r.mandate_id == mandate_id]
@@ -647,5 +670,19 @@ if __name__ == "__main__":
     assert set(row.risk_bounds.keys()) >= {"base_capital", "max_gross_exposure"}
     assert row.effective_to is None
     assert isinstance(row.content_hash, str) and len(row.content_hash) == 64
+
+    # 7) get() - 전체 Row 조회 (USER_INPUT_API_SPEC.md 2.1, GET .../current 응답 확장용).
+    fetched = repo.get("m1", 1)
+    assert fetched is not None and fetched.content_hash == row.content_hash
+    assert repo.get("m1", 999) is None, "없는 Version은 None"
+    assert repo.get("no-such-mandate", 1) is None
+
+    # 8) mandate_ids_for_fund() - 0/1/2개 각각의 개수 그대로 돌려준다(임의 선택 없음).
+    fund_repo = InMemoryMandateVersionRepository()
+    assert fund_repo.mandate_ids_for_fund("f-empty") == []
+    fund_repo.set_fund_id("m-a", "f1")
+    assert fund_repo.mandate_ids_for_fund("f1") == ["m-a"]
+    fund_repo.set_fund_id("m-b", "f1")
+    assert sorted(fund_repo.mandate_ids_for_fund("f1")) == ["m-a", "m-b"], "같은 Fund에 여러 Mandate - 개수 그대로 반환"
 
     print("service.py 자체 점검 통과")

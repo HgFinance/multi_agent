@@ -23,8 +23,11 @@ Stream을 소비해 report.ready.v1/risk.breach.v1 등을 알림으로 바꾸는
 mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_NON_NOTIFICATION_EVENTS).
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
-  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
-    쿼리가 아직 없어(accounting-api 미구현) mandate_id로 대신 조회한다.
+  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 여전히 mandate_id 기준이다.
+    fund_id 기준 조회는 별도 Route GET .../mandates/by-fund/{fund_id}/current로 분리했다
+    (2026-08-06, USER_INPUT_API_SPEC.md 2.1) - accounting-api 없이 governance.mandates를
+    직접 조회하며, 같은 Fund에 이름이 다른 Mandate가 여러 개면(unique(fund_id, name))
+    하나를 임의로 고르지 않고 409를 돌려준다.
   - POST .../versions는 In-Memory Repository일 때 Fund 기준 통화를 accounting-api에서
     조회할 수 없으므로, 요청에 fund_base_currency를 선택 필드로 받아 seed한다(데모용,
     Postgres Repository를 쓸 때는 무시 - 실제 accounting.funds를 그대로 조회한다).
@@ -974,8 +977,54 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
 
 @app.get("/governance/v1/mandates/{mandate_id}/current")
 def get_mandate_current(mandate_id: str):
+    """USER_INPUT_API_SPEC.md 2.1(2026-08-06) - 전체 policy 를 포함하도록 확장했다.
+
+    이전에는 {mandate_id, current_version, status}만 돌려줘 Mandate 변경 화면이
+    localStorage 우회에 의존했다(정정 메모, 같은 문서 참고). Version 이 아직 없으면
+    (0, 'DRAFT')이라 policy 를 조회하지 않고 최소 필드만 돌려준다 - 없는 Version 을
+    조회하면 get() 이 None을 주므로 그 경우도 동일하게 최소 필드만 남긴다.
+    """
     version, status = _mandate_repo.get_mandate_current(mandate_id)
-    return {"mandate_id": mandate_id, "current_version": version, "status": status}
+    response: dict = {"mandate_id": mandate_id, "current_version": version, "status": status}
+    if version <= 0:
+        return response
+    row = _mandate_repo.get(mandate_id, version)
+    if row is None:
+        return response
+    response.update({
+        "effective_from": row.effective_from.isoformat(),
+        "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+        "content_hash": row.content_hash,
+        "objective_text": row.objective_text,
+        "objective": row.objective,
+        "policy": {
+            "allowed_assets": row.allowed_assets,
+            "forbidden_assets": row.forbidden_assets,
+            "risk_bounds": row.risk_bounds,
+            "universe_policy": row.universe_policy,
+            "approval_rules": row.approval_rules,
+        },
+    })
+    return response
+
+
+@app.get("/governance/v1/mandates/by-fund/{fund_id}/current")
+def get_mandate_current_by_fund(fund_id: str):
+    """USER_INPUT_API_SPEC.md 2.1 - fund_id 만 알고 mandate_id 를 모르는 화면(온보딩,
+    Mandate Config)이 쓴다. Fund 에 이름이 다른 Mandate 가 여러 개 있으면(governance.
+    mandates.unique(fund_id, name)) 임의로 하나를 고르지 않고 409 로 알린다 - 어느 걸
+    보여줄지는 이 endpoint 가 결정할 문제가 아니다.
+    """
+    mandate_ids = _mandate_repo.mandate_ids_for_fund(fund_id)
+    if not mandate_ids:
+        raise HTTPException(status_code=404, detail=f"fund_id={fund_id}에 연결된 Mandate가 없습니다")
+    if len(mandate_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"fund_id={fund_id}에 Mandate가 {len(mandate_ids)}개 있어 단일 조회가 모호합니다: "
+                   f"{mandate_ids}",
+        )
+    return get_mandate_current(mandate_ids[0])
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -1002,8 +1051,12 @@ def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
     /approvals/{id}/decide로 결정할 때마다 POST .../cases/{case_id}/advance를 다시
     불러야 한다(재개가 아니라 매번 새로 판단하는 짧은 호출).
     """
-    if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
-        _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
+    if isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        # by-fund 조회(2.1) 데모용 seed. Postgres Repository는 governance.mandates.fund_id를
+        # 그대로 조회하므로 여기서 채울 필요가 없다 - fund_base_currency seed와 같은 패턴.
+        _mandate_repo.set_fund_id(mandate_id, body.fund_id)
+        if body.fund_base_currency:
+            _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
 
     result = mandate_change_workflow.submit(
         mandate_id=mandate_id, fund_id=body.fund_id, policy=body.policy,
@@ -1590,13 +1643,32 @@ if __name__ == "__main__":
     })
     assert r3.status_code == 200 and r3.json()["activated"] is False, r3.text
 
-    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인.
+    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인(2026-08-06부터 policy 포함).
     r4 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
         "direction": "NEUTRAL", "at": now, "approval": {"approved_by": "u1", "trace_id": "t1"},
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
-    assert r5.json() == {"mandate_id": "m1", "current_version": 1, "status": "ACTIVE"}
+    body5 = r5.json()
+    assert body5["mandate_id"] == "m1" and body5["current_version"] == 1 and body5["status"] == "ACTIVE"
+    assert body5["objective_text"] == "장기 성장"
+    assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1", body5["policy"]
+    assert body5["policy"]["universe_policy"]["allowed_markets"] == ["KRX"]
+    assert isinstance(body5["content_hash"], str) and len(body5["content_hash"]) == 64
+
+    # 4a. Version 이 아직 없는 mandate_id는 policy 없이 최소 필드만(0, DRAFT).
+    r5b = client.get("/governance/v1/mandates/never-proposed/current")
+    assert r5b.json() == {"mandate_id": "never-proposed", "current_version": 0, "status": "DRAFT"}
+
+    # 4b. by-fund 조회 - m1 은 propose 경로로 만들어 fund_id seed 가 없었으니 여기서 수동 seed.
+    _mandate_repo.set_fund_id("m1", "f1")
+    r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
+    assert r5d.status_code == 404, r5d.text
+    _mandate_repo.set_fund_id("m1b", "f1")  # 같은 Fund에 두 번째 Mandate -> 모호하므로 409.
+    r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5e.status_code == 409, r5e.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1954,9 +2026,9 @@ if __name__ == "__main__":
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
     assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
-    assert client.get("/governance/v1/mandates/m3/current").json() == {
-        "mandate_id": "m3", "current_version": 1, "status": "ACTIVE",
-    }
+    m3_current = client.get("/governance/v1/mandates/m3/current").json()
+    assert m3_current["mandate_id"] == "m3" and m3_current["current_version"] == 1
+    assert m3_current["status"] == "ACTIVE" and "policy" in m3_current
 
     # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
     # v1의 effective_to가 v1의 effective_from(now)보다 뒤여야 한다(DDL check) - 같은 시각을

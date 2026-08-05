@@ -110,11 +110,17 @@ create table accounting.investor_profiles (
 
 ## 2. Route 변경
 
-### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**필수 선행**)
+### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**✅ 구현 완료, 2026-08-06**)
 
-> **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있다. 화면 자체는 동작한다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채운다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**다.
+> **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있었다. 화면 자체는 동작했다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채웠다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**였다.
+>
+> **구현 완료**: `departments/00-ceo-office/api/app.py`의 `get_mandate_current()`가 `policy`/`objective_text`/`objective`/`content_hash`/`effective_from`/`effective_to`를 포함하도록 확장됐다. Version이 아직 없으면(`current_version=0`) 기존과 동일하게 최소 필드만 반환한다. `MandateVersionRepository`에 `get(mandate_id, version)`을 신설해 `InMemoryMandateVersionRepository`·`PostgresMandateVersionRepository` 양쪽에 구현했다(Postgres는 jsonb 컬럼이 psycopg2로 dict/list 자동 변환됨을 실 DB로 확인).
+>
+> **`by-fund` 조회도 별도 Route로 구현했다**: `GET /governance/v1/mandates/by-fund/{fund_id}/current`. `governance.mandates`가 `unique(fund_id, name)`이라 한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있어, `MandateVersionRepository.mandate_ids_for_fund(fund_id)`가 목록을 그대로 돌려주고 app.py가 0개=404, 1개=단일 조회, 2개 이상=409(모호, 임의 선택 안 함)로 판단한다. Route Registry에 등재 완료, `app.openapi()`와 정확히 일치 확인.
+>
+> 남은 것은 프론트가 이 Route를 실제로 호출해 localStorage 우회를 걷어내는 작업뿐이다(도현, §5).
 
-현재 `{mandate_id, current_version, status}`만 반환한다. `policy` 전체를 포함하도록 확장한다.
+`{mandate_id, current_version, status}` + `policy` 전체를 반환한다.
 
 ```json
 {
@@ -279,7 +285,7 @@ approval_rules.*, base_capital, currency
 | (미정) | `POST /portfolio/v1/investor-profiles` 등 | 회계본부 App 결정 후 |
 | `research-*` | `sectors/resolve`, `sectors/{code}/instruments` | 리서치본부 App |
 
-`GET .../current`의 응답 확장은 Route 목록이 바뀌지 않으므로 Registry 변경이 없다.
+`GET .../current`의 응답 확장 자체는 Route 목록이 바뀌지 않아 Registry 변경이 없었지만, `by-fund` 조회는 신규 Route라 위 표대로 등재했다(2026-08-06, `app.openapi()`와 exact match 확인).
 
 ## 4. 결정론 경계 요약
 
@@ -298,17 +304,17 @@ approval_rules.*, base_capital, currency
 
 | 담당 | 작업 |
 |---|---|
-| **영주** (CEO Office) | §1.1~1.3 `policy.py`·`service.py` 확장 / §2.1 응답 확장 + fund_id 조회 / §2.4 챗봇 제안 API / §3 Registry 등재 |
+| **영주** (CEO Office) | ~~§1.1~1.3 `policy.py`·`service.py` 확장~~ ✅(main 병합 완료, classify_change 보완 포함) / ~~§2.1 응답 확장 + fund_id 조회~~ ✅(2026-08-06) / §2.4 챗봇 제안 API / ~~§3 Registry 등재~~ ✅(by-fund Route) |
 | **동규** (리스크·QA) | 프리셋 9칸 수치 확정 / 프리셋 이탈 처리 규칙 / `max_sector_weight` 집행(포트폴리오 풀 자가점검) / `forbidden_asset_classes` 집행 / §2.4 allow-list가 실제로 지켜지는지 QA 검증 |
-| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 **portfolio Router 신설**(governance Router는 이미 등록됨, §6.1) / 온보딩 화면의 localStorage 우회를 §2.1 서버 조회로 교체 / `asset_class` 표준값 |
+| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 **portfolio Router 신설**(governance Router는 이미 등록됨, §6.1) + **`by-fund` 프록시 추가**(신규 Route라 아직 BFF에 안 뚫려 있음) / 온보딩 화면의 localStorage 우회를 §2.1 서버 조회로 교체 / `asset_class` 표준값 |
 | **재일** (리서치·퀀트) | §2.5 3개 Route / KRX 업종 코드 수집 / 업종 별칭 사전 / 종목 검색 |
 
 ## 6. 선행·미해결
 
 ### 6.1 반드시 선행돼야 하는 것
 
-1. **§2.1 응답 확장** — 없으면 Mandate 변경 화면이 localStorage 우회에 계속 의존한다(§2.1 정정 참고).
-2. **portfolio Router 신설** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). §2.3 `investor-profiles` Route를 실을 portfolio Router만 없다.
+1. ~~**§2.1 응답 확장**~~ — ✅ 완료(2026-08-06). 남은 건 프론트가 이 값을 실제로 써서 localStorage 우회를 걷어내는 작업(도현).
+2. **portfolio Router 신설 + by-fund 프록시** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). 신규 `by-fund/{fund_id}/current`(§2.1)는 아직 이 프록시 목록에 없다 — governance-api 자체는 구현됐지만 BFF를 안 거치면 Frontend가 직접 호출할 수 없다(AI_OFFICE_FRONTEND_PLAN §6). §2.3 `investor-profiles` Route를 실을 portfolio Router도 여전히 없다.
 3. **KRX 업종 코드 수집** — §2.5가 이것 없이는 동작하지 않는다.
 
 ### 6.2 미확정
