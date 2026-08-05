@@ -23,8 +23,11 @@ Stream을 소비해 report.ready.v1/risk.breach.v1 등을 알림으로 바꾸는
 mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_NON_NOTIFICATION_EVENTS).
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
-  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
-    쿼리가 아직 없어(accounting-api 미구현) mandate_id로 대신 조회한다.
+  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 여전히 mandate_id 기준이다.
+    fund_id 기준 조회는 별도 Route GET .../mandates/by-fund/{fund_id}/current로 분리했다
+    (2026-08-06, USER_INPUT_API_SPEC.md 2.1) - accounting-api 없이 governance.mandates를
+    직접 조회하며, 같은 Fund에 이름이 다른 Mandate가 여러 개면(unique(fund_id, name))
+    하나를 임의로 고르지 않고 409를 돌려준다.
   - POST .../versions는 In-Memory Repository일 때 Fund 기준 통화를 accounting-api에서
     조회할 수 없으므로, 요청에 fund_base_currency를 선택 필드로 받아 seed한다(데모용,
     Postgres Repository를 쓸 때는 무시 - 실제 accounting.funds를 그대로 조회한다).
@@ -172,6 +175,8 @@ from notification import (
     NotificationService,
 )
 from langgraph.checkpoint.memory import InMemorySaver
+from mandate_assistant import AssistantMessage as _AssistantMessage
+from mandate_assistant import suggest as _mandate_assistant_suggest
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -271,6 +276,19 @@ class ProposeVersionRequest(BaseModel):
         description="In-Memory Repository 데모용 seed - accounting-api 없이 통화 검증하려면 채운다. "
                     "Postgres Repository를 쓸 때는 무시하고 accounting.funds를 그대로 조회한다.",
     )
+
+
+class SuggestRequestIn(BaseModel):
+    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4).
+
+    Stateless - fund_id는 미래에 Fund별 컨텍스트(허용 자산군 등)를 프롬프트에
+    반영할 자리로만 받아두고 아직 쓰지 않는다. messages/current_draft만 실제로
+    LLM 제안을 만든다.
+    """
+
+    fund_id: str
+    messages: list[_AssistantMessage] = Field(min_length=1)
+    current_draft: dict | None = None
 
 
 class ApprovalIn(BaseModel):
@@ -974,8 +992,82 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
 
 @app.get("/governance/v1/mandates/{mandate_id}/current")
 def get_mandate_current(mandate_id: str):
+    """USER_INPUT_API_SPEC.md 2.1(2026-08-06) - 전체 policy 를 포함하도록 확장했다.
+
+    이전에는 {mandate_id, current_version, status}만 돌려줘 Mandate 변경 화면이
+    localStorage 우회에 의존했다(정정 메모, 같은 문서 참고). Version 이 아직 없으면
+    (0, 'DRAFT')이라 policy 를 조회하지 않고 최소 필드만 돌려준다 - 없는 Version 을
+    조회하면 get() 이 None을 주므로 그 경우도 동일하게 최소 필드만 남긴다.
+    """
     version, status = _mandate_repo.get_mandate_current(mandate_id)
-    return {"mandate_id": mandate_id, "current_version": version, "status": status}
+    response: dict = {"mandate_id": mandate_id, "current_version": version, "status": status}
+    if version <= 0:
+        return response
+    row = _mandate_repo.get(mandate_id, version)
+    if row is None:
+        return response
+    response.update({
+        "effective_from": row.effective_from.isoformat(),
+        "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+        "content_hash": row.content_hash,
+        "objective_text": row.objective_text,
+        "objective": row.objective,
+        "policy": {
+            "allowed_assets": row.allowed_assets,
+            "forbidden_assets": row.forbidden_assets,
+            "risk_bounds": row.risk_bounds,
+            "universe_policy": row.universe_policy,
+            "approval_rules": row.approval_rules,
+        },
+    })
+    return response
+
+
+@app.get("/governance/v1/mandates/by-fund/{fund_id}/current")
+def get_mandate_current_by_fund(fund_id: str):
+    """USER_INPUT_API_SPEC.md 2.1 - fund_id 만 알고 mandate_id 를 모르는 화면(온보딩,
+    Mandate Config)이 쓴다. Fund 에 이름이 다른 Mandate 가 여러 개 있으면(governance.
+    mandates.unique(fund_id, name)) 임의로 하나를 고르지 않고 409 로 알린다 - 어느 걸
+    보여줄지는 이 endpoint 가 결정할 문제가 아니다.
+    """
+    mandate_ids = _mandate_repo.mandate_ids_for_fund(fund_id)
+    if not mandate_ids:
+        raise HTTPException(status_code=404, detail=f"fund_id={fund_id}에 연결된 Mandate가 없습니다")
+    if len(mandate_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"fund_id={fund_id}에 Mandate가 {len(mandate_ids)}개 있어 단일 조회가 모호합니다: "
+                   f"{mandate_ids}",
+        )
+    return get_mandate_current(mandate_ids[0])
+
+
+# --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
+#
+# USER_INPUT_API_SPEC.md 2.4. Stateless - 이 endpoint 는 governance.mandate_versions나
+# 다른 어떤 테이블도 쓰지 않는다. LLM 실패는 500 으로 전파하지 않고 빈 제안 +
+# 안내 reply 로 감싼다(mandate_assistant.py docstring "왜 Schema 위반 시 예외를
+# 던지는가" 참고) - 채팅 UI가 LLM 장애 한 번으로 멈추면 안 된다.
+
+
+@app.post("/governance/v1/mandate-assistant/suggest")
+def mandate_assistant_suggest(body: SuggestRequestIn):
+    try:
+        result = _mandate_assistant_suggest(
+            messages=body.messages, current_draft=body.current_draft,
+        )
+    except ValueError:
+        raise  # messages 검증 실패(빈 목록 등)는 호출부 버그다 - 감추지 않는다.
+    except Exception:
+        # RuntimeError(Schema 2회 위반·ANTHROPIC_API_KEY 없음)뿐 아니라 anthropic
+        # 패키지 미설치·네트워크 오류·Rate limit도 전부 여기서 잡는다 - LLM 경로의
+        # 어떤 실패든 채팅 UI를 500으로 멈추지 않고 빈 제안으로 감싼다.
+        _logger.exception("Mandate assistant 제안 실패 (fund_id=%s)", body.fund_id)
+        return {
+            "reply": "죄송합니다, 지금은 제안을 만들 수 없습니다. 직접 입력해 주세요.",
+            "suggestions": [], "requires_user_confirmation": True, "dropped_fields": [],
+        }
+    return result.model_dump()
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -1002,8 +1094,12 @@ def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
     /approvals/{id}/decide로 결정할 때마다 POST .../cases/{case_id}/advance를 다시
     불러야 한다(재개가 아니라 매번 새로 판단하는 짧은 호출).
     """
-    if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
-        _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
+    if isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        # by-fund 조회(2.1) 데모용 seed. Postgres Repository는 governance.mandates.fund_id를
+        # 그대로 조회하므로 여기서 채울 필요가 없다 - fund_base_currency seed와 같은 패턴.
+        _mandate_repo.set_fund_id(mandate_id, body.fund_id)
+        if body.fund_base_currency:
+            _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
 
     result = mandate_change_workflow.submit(
         mandate_id=mandate_id, fund_id=body.fund_id, policy=body.policy,
@@ -1590,13 +1686,32 @@ if __name__ == "__main__":
     })
     assert r3.status_code == 200 and r3.json()["activated"] is False, r3.text
 
-    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인.
+    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인(2026-08-06부터 policy 포함).
     r4 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
         "direction": "NEUTRAL", "at": now, "approval": {"approved_by": "u1", "trace_id": "t1"},
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
-    assert r5.json() == {"mandate_id": "m1", "current_version": 1, "status": "ACTIVE"}
+    body5 = r5.json()
+    assert body5["mandate_id"] == "m1" and body5["current_version"] == 1 and body5["status"] == "ACTIVE"
+    assert body5["objective_text"] == "장기 성장"
+    assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1", body5["policy"]
+    assert body5["policy"]["universe_policy"]["allowed_markets"] == ["KRX"]
+    assert isinstance(body5["content_hash"], str) and len(body5["content_hash"]) == 64
+
+    # 4a. Version 이 아직 없는 mandate_id는 policy 없이 최소 필드만(0, DRAFT).
+    r5b = client.get("/governance/v1/mandates/never-proposed/current")
+    assert r5b.json() == {"mandate_id": "never-proposed", "current_version": 0, "status": "DRAFT"}
+
+    # 4b. by-fund 조회 - m1 은 propose 경로로 만들어 fund_id seed 가 없었으니 여기서 수동 seed.
+    _mandate_repo.set_fund_id("m1", "f1")
+    r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
+    assert r5d.status_code == 404, r5d.text
+    _mandate_repo.set_fund_id("m1b", "f1")  # 같은 Fund에 두 번째 Mandate -> 모호하므로 409.
+    r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5e.status_code == 409, r5e.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1954,9 +2069,9 @@ if __name__ == "__main__":
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
     assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
-    assert client.get("/governance/v1/mandates/m3/current").json() == {
-        "mandate_id": "m3", "current_version": 1, "status": "ACTIVE",
-    }
+    m3_current = client.get("/governance/v1/mandates/m3/current").json()
+    assert m3_current["mandate_id"] == "m3" and m3_current["current_version"] == 1
+    assert m3_current["status"] == "ACTIVE" and "policy" in m3_current
 
     # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
     # v1의 effective_to가 v1의 effective_from(now)보다 뒤여야 한다(DDL check) - 같은 시각을
@@ -1978,6 +2093,26 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    print("ok - CEO Office Domain API 35개 시나리오 점검 통과 "
+    # 34. Mandate assistant - 정상 응답(FastAPI TestClient는 실제 anthropic 호출 없이
+    # mandate_assistant._anthropic_call이 ANTHROPIC_API_KEY 부재로 RuntimeError를 내는
+    # 경로를 그대로 태운다 - 즉 이 자체 점검은 "LLM 실패 시 500이 아니라 빈 제안으로
+    # 감싼다"는 계약을 실제로 검증한다).
+    r36 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [{"role": "user", "content": "10년 정도 투자할 생각이에요"}],
+    })
+    assert r36.status_code == 200, r36.text
+    body36 = r36.json()
+    assert body36["requires_user_confirmation"] is True
+    assert body36["suggestions"] == [] and body36["dropped_fields"] == []
+    assert "제안을 만들 수 없습니다" in body36["reply"]
+
+    # 34b. 빈 messages는 422(Pydantic min_length).
+    r37 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [],
+    })
+    assert r37.status_code == 422, r37.text
+    print("ok - Mandate assistant suggest API 통과 (LLM 실패를 500이 아니라 빈 제안으로 감쌈, 빈 messages 422)")
+
+    print("ok - CEO Office Domain API 36개 시나리오 점검 통과 "
           "(승인 10개(P0-1 actor_user_id 실재성 포함) + Case Root 5개 + 에스컬레이션 4개 + "
-          "위원회 6개 + HITL 변경요청 3개 포함)")
+          "위원회 6개 + HITL 변경요청 3개 + Mandate assistant 2개 포함)")

@@ -110,11 +110,17 @@ create table accounting.investor_profiles (
 
 ## 2. Route 변경
 
-### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**필수 선행**)
+### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**✅ 구현 완료, 2026-08-06**)
 
-> **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있다. 화면 자체는 동작한다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채운다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**다.
+> **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있었다. 화면 자체는 동작했다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채웠다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**였다.
+>
+> **구현 완료**: `departments/00-ceo-office/api/app.py`의 `get_mandate_current()`가 `policy`/`objective_text`/`objective`/`content_hash`/`effective_from`/`effective_to`를 포함하도록 확장됐다. Version이 아직 없으면(`current_version=0`) 기존과 동일하게 최소 필드만 반환한다. `MandateVersionRepository`에 `get(mandate_id, version)`을 신설해 `InMemoryMandateVersionRepository`·`PostgresMandateVersionRepository` 양쪽에 구현했다(Postgres는 jsonb 컬럼이 psycopg2로 dict/list 자동 변환됨을 실 DB로 확인).
+>
+> **`by-fund` 조회도 별도 Route로 구현했다**: `GET /governance/v1/mandates/by-fund/{fund_id}/current`. `governance.mandates`가 `unique(fund_id, name)`이라 한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있어, `MandateVersionRepository.mandate_ids_for_fund(fund_id)`가 목록을 그대로 돌려주고 app.py가 0개=404, 1개=단일 조회, 2개 이상=409(모호, 임의 선택 안 함)로 판단한다. Route Registry에 등재 완료, `app.openapi()`와 정확히 일치 확인.
+>
+> 남은 것은 프론트가 이 Route를 실제로 호출해 localStorage 우회를 걷어내는 작업뿐이다(도현, §5).
 
-현재 `{mandate_id, current_version, status}`만 반환한다. `policy` 전체를 포함하도록 확장한다.
+`{mandate_id, current_version, status}` + `policy` 전체를 반환한다.
 
 ```json
 {
@@ -196,11 +202,13 @@ create table accounting.investor_profiles (
 
 `effective_risk_band`는 `suitability.py`의 `min(mindset_score, experience_score)`를 그대로 노출한다. **화면이 재계산하지 않는다.**
 
-### 2.4 챗봇 제안 — 신규 Route (**Stateless**)
+### 2.4 챗봇 제안 — 신규 Route (**Stateless**) (**✅ 부분 구현, 2026-08-06**)
 
 대화 중간 상태를 서버에 저장하지 않는다. 화면이 대화 이력을 들고 있다가 매번 함께 보낸다.
 
 > **왜 draft 테이블을 만들지 않나**: 미완성 정책을 Mandate Version으로 만들면 `content_hash` 중복·승인 흐름 발동 문제가 생긴다. 별도 draft 테이블은 온보딩 한 번을 위해 수명주기·정리 정책을 새로 만들어야 한다. 화면 상태로 두면 둘 다 피할 수 있다.
+
+> **구현 범위(2026-08-06)**: `departments/00-ceo-office/src/mandate/mandate_assistant.py` + `app.py`의 `POST /governance/v1/mandate-assistant/suggest`. 아래 예시 중 **`investment_horizon_years`/`liquidity_need`/`objective_text` 3개 필드만 실제로 동작한다.** `universe_policy.preferred_sectors`(업종)와 `forbidden_assets`(종목)는 §2.5(재일, KRX 업종 코드·종목 검색)가 없어 **`ALLOWED_SUGGESTION_FIELDS`에 아직 포함하지 않았다** — LLM이 존재하지 않는 코드를 지어내지 않도록 의도적으로 막은 것이다. §2.5가 붙으면 이 문서와 `ALLOWED_SUGGESTION_FIELDS`를 함께 확장한다.
 
 `POST /governance/v1/mandate-assistant/suggest`
 
@@ -208,9 +216,9 @@ create table accounting.investor_profiles (
 {
   "fund_id": "uuid",
   "messages": [
-    {"role": "user", "content": "반도체 쪽에 관심 있고, 10년쯤 묻어둘 생각이에요. 담배 회사는 빼주세요."}
+    {"role": "user", "content": "10년쯤 투자할 생각이고, 급하게 현금화할 일은 없어요."}
   ],
-  "current_draft": { "...": "화면이 현재 들고 있는 policy 초안" }
+  "current_draft": { "...": "화면이 현재 들고 있는 policy 초안 (선택, 맥락용)" }
 }
 ```
 
@@ -218,31 +226,45 @@ create table accounting.investor_profiles (
 
 ```json
 {
-  "reply": "반도체 업종 선호와 10년 투자 기간으로 이해했습니다. 아래를 확인해 주세요.",
+  "reply": "장기 투자와 낮은 유동성 필요를 확인했습니다.",
   "suggestions": [
-    {"field": "universe_policy.preferred_sectors", "value": ["G2510"],
-     "label": "반도체", "confidence": "HIGH", "source": "sector_alias"},
     {"field": "investment_horizon_years", "value": 10,
      "label": "10년", "confidence": "HIGH", "source": "llm_extraction"},
-    {"field": "forbidden_assets", "value": ["A033780"],
-     "label": "KT&G", "confidence": "MEDIUM", "source": "instrument_search"}
+    {"field": "liquidity_need", "value": "LOW",
+     "label": "낮음", "confidence": "HIGH", "source": "llm_extraction"}
   ],
-  "requires_user_confirmation": true
+  "requires_user_confirmation": true,
+  "dropped_fields": []
 }
 ```
 
-**계약 불변식**
+업종·종목처럼 아직 지원하지 않는 필드를 LLM이 언급해도(§2.5 붙기 전) 응답에 나타나지 않는다 — allow-list 밖 출력은 `dropped_fields`에 필드명만 기록되고 버려진다.
+
+**계약 불변식 (전부 구현·자체 점검으로 확인)**
 
 1. **`requires_user_confirmation`은 항상 `true`다.** 이 응답만으로 저장되는 값은 없다.
-2. `suggestions[].field`는 **allow-list**된 경로만 허용한다. `mindset`·`experience`는 목록에 없다 — LLM이 성향을 추론하지 않는다(`suitability.py` 계약).
+2. `suggestions[].field`는 **allow-list**(`ALLOWED_SUGGESTION_FIELDS`)된 경로만 허용한다. `mindset`·`experience`는 목록에 없다 — LLM이 성향을 추론하지 않는다(`suitability.py` 계약). 목록 밖 필드는 `dropped_fields`에 남고 조용히 사라지지 않는다.
 3. 이 Route는 **어떤 상태도 변경하지 않는다.** 저장은 §2.2·§2.3 경로로만 일어난다.
-4. LLM 실패·저신뢰는 제안을 비우고 끝낸다. **추측값으로 채우지 않는다**(개발 원칙 9).
+4. LLM 실패(Schema 2회 위반, API 오류, 패키지 미설치, Rate limit 등)는 endpoint가 **500이 아니라 빈 제안 + 안내 문구**로 감싼다 — 채팅 UI가 LLM 장애 한 번으로 멈추지 않는다. **추측값으로 채우지는 않는다**(개발 원칙 9) — 실패 시 채워지는 값은 없다, reply만 안내 문구로 바뀐다.
 
-**금지 필드 목록 (allow-list 밖)**
+**현재 allow-list (`ALLOWED_SUGGESTION_FIELDS`)**
 
 ```
-mindset, experience,
-risk_bounds.* 중 프리셋 대상 4개는 "조정 제안"만 가능하고 직접 확정 불가,
+investment_horizon_years, liquidity_need, objective_text
+```
+
+**확장 예정, 아직 없음** — §2.5 완료 후 추가
+
+```
+universe_policy.preferred_sectors, universe_policy.excluded_sectors,
+allowed_assets, forbidden_assets
+```
+
+**영구 금지 (allow-list에 절대 넣지 않음)**
+
+```
+mindset, experience,               # 성향·경험 추론 금지 (suitability.py 계약)
+risk_bounds.*,                     # 한도 값 적정성 판정 금지 - "조정 제안" UX가 생기면 별도 계약 필요
 approval_rules.*, base_capital, currency
 ```
 
@@ -279,7 +301,7 @@ approval_rules.*, base_capital, currency
 | (미정) | `POST /portfolio/v1/investor-profiles` 등 | 회계본부 App 결정 후 |
 | `research-*` | `sectors/resolve`, `sectors/{code}/instruments` | 리서치본부 App |
 
-`GET .../current`의 응답 확장은 Route 목록이 바뀌지 않으므로 Registry 변경이 없다.
+`GET .../current`의 응답 확장 자체는 Route 목록이 바뀌지 않아 Registry 변경이 없었지만, `by-fund` 조회는 신규 Route라 위 표대로 등재했다(2026-08-06, `app.openapi()`와 exact match 확인).
 
 ## 4. 결정론 경계 요약
 
@@ -298,17 +320,18 @@ approval_rules.*, base_capital, currency
 
 | 담당 | 작업 |
 |---|---|
-| **영주** (CEO Office) | §1.1~1.3 `policy.py`·`service.py` 확장 / §2.1 응답 확장 + fund_id 조회 / §2.4 챗봇 제안 API / §3 Registry 등재 |
-| **동규** (리스크·QA) | 프리셋 9칸 수치 확정 / 프리셋 이탈 처리 규칙 / `max_sector_weight` 집행(포트폴리오 풀 자가점검) / `forbidden_asset_classes` 집행 / §2.4 allow-list가 실제로 지켜지는지 QA 검증 |
-| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 **portfolio Router 신설**(governance Router는 이미 등록됨, §6.1) / 온보딩 화면의 localStorage 우회를 §2.1 서버 조회로 교체 / `asset_class` 표준값 |
-| **재일** (리서치·퀀트) | §2.5 3개 Route / KRX 업종 코드 수집 / 업종 별칭 사전 / 종목 검색 |
+| **영주** (CEO Office) | ~~§1.1~1.3 `policy.py`·`service.py` 확장~~ ✅(main 병합 완료, classify_change 보완 포함) / ~~§2.1 응답 확장 + fund_id 조회~~ ✅(2026-08-06) / ~~§2.4 챗봇 제안 API~~ ✅(2026-08-06, 3개 필드만 — 업종·종목은 §2.5 대기) / ~~§3 Registry 등재~~ ✅(by-fund·mandate-assistant Route) |
+| **동규** (리스크·QA) | 프리셋 9칸 수치 확정 / 프리셋 이탈 처리 규칙 / `max_sector_weight` 집행(포트폴리오 풀 자가점검) / `forbidden_asset_classes` 집행 / §2.4 allow-list가 실제로 지켜지는지 QA 검증(자체 점검은 있으나 독립 검증 아님) |
+| **도현** (트레이딩·회계, Frontend Platform) | §1.5 마이그레이션 + Repository / §2.3 Route / `suitability.py` 저장 연동 / BFF에 **portfolio Router 신설**(governance Router는 이미 등록됨, §6.1) + **`by-fund`·`mandate-assistant` 프록시 추가**(신규 Route 2개 모두 아직 BFF에 안 뚫려 있음) / 온보딩 화면의 localStorage 우회를 §2.1 서버 조회로 교체 / `asset_class` 표준값 |
+| **재일** (리서치·퀀트) | §2.5 3개 Route / KRX 업종 코드 수집 / 업종 별칭 사전 / 종목 검색 — **완료되면 §2.4 `ALLOWED_SUGGESTION_FIELDS`에 4개 필드 추가하는 작업이 뒤따른다(영주)** |
 
 ## 6. 선행·미해결
 
 ### 6.1 반드시 선행돼야 하는 것
 
-1. **§2.1 응답 확장** — 없으면 Mandate 변경 화면이 localStorage 우회에 계속 의존한다(§2.1 정정 참고).
-2. **portfolio Router 신설** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). §2.3 `investor-profiles` Route를 실을 portfolio Router만 없다.
+1. ~~**§2.1 응답 확장**~~ — ✅ 완료(2026-08-06). 남은 건 프론트가 이 값을 실제로 써서 localStorage 우회를 걷어내는 작업(도현).
+1a. ~~**§2.4 챗봇 제안 API**~~ — ✅ 완료(2026-08-06), 3개 필드만. `anthropic` 패키지는 `requirements.txt`에 있으나 현재 개발 환경에 설치돼 있지 않다(자체 점검이 이 경우도 커버 — LLM 실패 시 500 대신 빈 제안으로 감싸는 경로가 바로 이 상태로 검증됐다). 배포 전 `pip install anthropic` 확인 필요.
+2. **portfolio Router 신설 + by-fund 프록시** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). 신규 `by-fund/{fund_id}/current`(§2.1)는 아직 이 프록시 목록에 없다 — governance-api 자체는 구현됐지만 BFF를 안 거치면 Frontend가 직접 호출할 수 없다(AI_OFFICE_FRONTEND_PLAN §6). §2.3 `investor-profiles` Route를 실을 portfolio Router도 여전히 없다.
 3. **KRX 업종 코드 수집** — §2.5가 이것 없이는 동작하지 않는다.
 
 ### 6.2 미확정
