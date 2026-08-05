@@ -25,6 +25,20 @@ DEPARTMENTS = (
 )
 
 
+def _read_profile(directory: str) -> str:
+    """Read a department Hermes profile as UTF-8.
+
+    ``Path.read_text()`` without an explicit encoding uses the platform default,
+    which is cp949 on a Korean Windows install — every profile carries Korean
+    comments, so the bare call raises UnicodeDecodeError there while passing on
+    UTF-8 hosts.  The files are UTF-8 on every platform; say so.
+    """
+
+    return (ROOT / "departments" / directory / "hermes" / "config.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
 def _fake_worker_llm(_system: str, prompt: str) -> str:
     worker_id = next(
         (line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("Worker id:")),
@@ -116,7 +130,7 @@ def _payload() -> dict[str, Any]:
 def test_profile_worker_registry_counts_and_models() -> None:
     expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 6, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
     for _, directory in DEPARTMENTS:
-        config = yaml.safe_load((ROOT / "departments" / directory / "hermes" / "config.yaml").read_text())
+        config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
         registry = config["staff_registry"]
         assert len(workers) == expected_counts[directory]
@@ -148,9 +162,7 @@ def test_profile_worker_metadata_matches_runtime_specs() -> None:
     """Prevent config registry drift from the executable WorkerSpec registry."""
 
     for department, directory in DEPARTMENTS:
-        config = yaml.safe_load(
-            (ROOT / "departments" / directory / "hermes" / "config.yaml").read_text()
-        )
+        config = yaml.safe_load(_read_profile(directory))
         runtime_specs = {
             spec.worker_id: spec for spec in load_worker_specs(ROOT, department)
         }
@@ -271,9 +283,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         "qa": (5, 1, 4),
     }
     for department, directory in DEPARTMENTS:
-        config = yaml.safe_load(
-            (ROOT / "departments" / directory / "hermes" / "config.yaml").read_text()
-        )
+        config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
         active = sum(item["trigger"] == "always" for item in workers.values())
         conditional = len(workers) - active

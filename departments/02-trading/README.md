@@ -31,6 +31,10 @@ python departments/02-trading/oms/oms.py
 python departments/02-trading/broker/paper_broker.py
 python departments/02-trading/multileg/intent_group.py
 python departments/02-trading/capability/derivatives.py
+python departments/02-trading/execution/broker_rules.py
+python departments/02-trading/execution/tca_memory.py
+python departments/02-trading/employee_workers.py
+python departments/02-trading/scripts.py
 python departments/02-trading/api/app.py
 
 uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
@@ -43,6 +47,10 @@ uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
 - `broker/paper_broker.py` — Paper Broker 8개 영역 자체 점검
 - `multileg/intent_group.py` — F30 Multi-leg 13개 영역
 - `capability/derivatives.py` — F31 Derivatives Capability 14개 영역
+- `execution/broker_rules.py` — 거래소·브로커 규칙 RAG 8개 영역 (TR 365개 색인)
+- `execution/tca_memory.py` — TCA 집행 기억 8개 영역 (`DATABASE_URL` 있으면 실 DB 읽기까지)
+- `employee_workers.py` — 직원 규칙 근거 주입·인용 검증 4개 영역
+- `scripts.py` — Bull/Bear 토론 파이프라인 18개 영역 (Hermes·네트워크 없음)
 - `api/app.py` — Domain API 15개 영역 (TestClient. 네트워크·DB 없음)
 
 ## Handoff
@@ -59,6 +67,21 @@ uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
   계약 모델과 접수 차단 게이트를 만든다. Broker·Risk·Accounting 3개 Certification이 전부
   서명돼야 파생·공매도 주문이 통과하고, 그 전에는 Risk 승인이 있어도 접수 단계에서 막힌다.
   명목금액은 반드시 승수를 곱한다 — 빼먹으면 한도가 조용히 느슨해진다
+- `execution/` — D4 집행 계층 (2026-08-05 신설).
+  - `broker_rules.py` — 거래소·브로커 규칙 RAG. `docs/06-integrations/ls-openapi/` 문서를
+    **그대로 읽어** TR 규칙을 색인한다(숫자를 코드에 복사해두지 않는다). 두 가지를 한다:
+    검색 결과만 인용하게 하고 색인 밖 `rule_id`를 날조로 잡는 것, 그리고 **초당 한도를 넘는
+    분할 설계를 결정론적으로 거부**하는 것(정정·취소 3/s, 계좌 조회 1~2/s). 임베딩을 쓰지
+    않는 이유는 파일 상단 주석에 있다 — 규칙 검색에서 근사 이웃은 개선이 아니라 결함이다
+  - `tca_memory.py` — TCA 환류. 과거 유사 집행의 실현 슬리피지로 `philosophies.yaml`
+    참여율·분할 **조정안만** 만든다. 예산 초과는 예산을 올리지 않고 집행을 조이는 방향으로
+    제안하며(개발 원칙 9), Paper 근거와 실집행 근거를 절대 섞지 않는다. 한도 반영은
+    리스크본부, 전략 승격은 퀀트본부 권한이라 이 모듈에는 YAML 쓰기 경로가 없다
+- `employee_workers.py` — `execution-planning-worker`·`venue-cost-worker` 두 직원에게만
+  위 규칙 근거를 주입하고 인용을 검증한다. 판정은 직원이 서술하기 전에 이미 끝나 있다
+- `scripts.py` — Bull/Bear 독립 병렬 토론. grounded 토론에 한해 **OrderIntent 제안**까지
+  만든다(2026-08-05). 제안에는 `risk_decision_id`가 없고 `submittable: False`라
+  OMS가 제출을 거부한다 — Risk Gate 선행이 문서가 아니라 코드로 강제된다
 - `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 주문 판정 로직이 없다.**
   Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
   설계서: [TRADING_DOMAIN_API_SPEC.md](../../docs/02-engineering/TRADING_DOMAIN_API_SPEC.md)

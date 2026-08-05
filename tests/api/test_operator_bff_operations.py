@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
+from unittest import mock
 
 
 # The BFF must remain testable in DEMO mode without attempting a configured
@@ -47,12 +49,40 @@ class OperatorBffOperationsTest(unittest.TestCase):
         self.assertEqual(body["trading"]["orders"][0]["state"], "FILLED")
         self.assertEqual(body["sources"]["portfolio"], "scripted-loop")
 
-    def test_integration_projection_exposes_readiness_without_secrets(self) -> None:
-        response = self.client.get("/ui/integrations")
+    def _integrations(self, **env: str) -> dict:
+        """Read the projection under a controlled environment.
+
+        Importing the BFF calls ``load_dotenv`` (apps/api/accounting.py), so the
+        developer's real ``.env`` lands in ``os.environ``.  Asserting a raw
+        ``configured is False`` therefore asserted "this machine has no Notion
+        token", which is a property of the checkout and not of the code.  Pin the
+        variables the projection reads instead.
+        """
+
+        keys = ("NOTION_TOKEN", "NOTION_BRIEFING_DB", "DISCORD_WEBHOOK_URL")
+        with mock.patch.dict(os.environ, {k: env.get(k, "") for k in keys}, clear=False):
+            response = self.client.get("/ui/integrations")
         self.assertEqual(response.status_code, 200)
-        body = response.json()
+        return response.json()
+
+    def test_integration_projection_exposes_readiness_without_secrets(self) -> None:
+        body = self._integrations()
         self.assertEqual(set(body), {"notion", "discord", "instagram", "gmail", "finance"})
         self.assertFalse(body["notion"]["configured"])
+        self.assertFalse(body["discord"]["configured"])
+
+        # Readiness flips with configuration, but the secret itself never appears
+        # in the payload — that is what this projection is for.
+        configured = self._integrations(
+            NOTION_TOKEN="ntn_secret_value",
+            NOTION_BRIEFING_DB="db_secret_value",
+            DISCORD_WEBHOOK_URL="https://discord.test/webhook_secret",
+        )
+        self.assertTrue(configured["notion"]["configured"])
+        self.assertTrue(configured["discord"]["configured"])
+        serialized = json.dumps(configured, ensure_ascii=False)
+        for secret in ("ntn_secret_value", "db_secret_value", "webhook_secret"):
+            self.assertNotIn(secret, serialized)
         self.assertNotIn("TOKEN", body["notion"].get("value", ""))
         self.assertNotIn("WEBHOOK", body["discord"].get("value", ""))
 
