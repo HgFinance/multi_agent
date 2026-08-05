@@ -157,6 +157,43 @@ curl -fsS http://127.0.0.1:8042/qa/v1/observability/runtime
 4. 다음 작업의 선행 팀과 완료 증거.
 5. 운영 승인 가능 여부. 승인 불가하면 반드시 `BLOCKED` 사유를 쓴다.
 
+## 5-A. 사용자 입력 명세 구현 현황 (Risk/QA 기준, 2026-08-05)
+
+아래 상태는 문서만이 아니라 현재 코드와 결정론적 테스트를 기준으로 판정한다. `TEST_VERIFIED`는 운영 데이터·권한·실서비스 연결을 의미하지 않는다.
+
+| 동규님 담당 항목 | 상태 | 현재 구현·검증 증거 | 남은 운영 조건 |
+|---|---|---|---|
+| 경험×성향 9개 프리셋 | `IMPLEMENTED` + `TEST_VERIFIED` | `departments/03-risk/mandate_presets.py`, 9개 조합·정렬 테스트 | Risk가 제품 기본값으로 승인하고 API/온보딩에 연결 |
+| 성향↔한도 정렬 | `IMPLEMENTED` + `TEST_VERIFIED` | 프리셋보다 완화된 값은 `REQUIRES_RISK_REVIEW`; 자동 완화하지 않음 | 고급 설정 API에서 review 결과를 실제 승인 상태와 연결 |
+| `max_sector_weight` | `IMPLEMENTED` + `TEST_VERIFIED` | `MandateScope`와 Risk Engine이 섹터 메타데이터·현재 섹터 노출을 검증하고 초과 주문을 축소/거부 | 실시간 PIT instrument/sector metadata와 portfolio exposure 적재 |
+| `allowed_asset_classes` / `forbidden_asset_classes` | `IMPLEMENTED` + `TEST_VERIFIED` | Mandate → Risk Context → pre-trade gate 연결. 금지 자산군 또는 메타데이터 누락은 fail-closed | 기준 자산군 코드와 전체 유니버스 적재 |
+| `preferred_sectors` / `excluded_sectors` | `IMPLEMENTED` + `TEST_VERIFIED` | 선호는 후보 우선순위 맥락, 제외는 신규 노출 차단 | KRX 업종 taxonomy와 종목 매핑의 PIT 품질 확보 |
+| LLM 제안 → 사용자 확인 → Risk/QA → 활성화 | `IMPLEMENTED` + `TEST_VERIFIED` | `orchestration/contracts/mandate_confirmation.py`와 CEO HITL workflow. 정책 검증·Risk 승인·QA 승인·사용자 승인 모두 필요 | 실제 governance API와 인증·영속 checkpoint 연동 |
+| QA evidence/hallucination/permission/audit | `IMPLEMENTED` + `TEST_VERIFIED` | Worker Registry, 계약 검증, 실패 시 `DEGRADED/HOLD`, 스킵 기술 메타데이터 기록 | `SAMPLE_PLACEHOLDER` Corpus를 승인된 실제 정책 문서로 교체 |
+
+### 실행 상태 집계와 안전 스킵 의미
+
+부서 fan-in 결과의 `executed`는 **완료된 Worker 수**만 의미한다. `skipped_safe`와 `not_requested`를 섞지 않는다.
+
+| 필드 | 의미 |
+|---|---|
+| `completed` / `executed` | Worker가 실제 실행되어 유효한 계약 결과를 낸 수 |
+| `skipped_safe` | 라우팅은 되었지만 `LIVE_DATA_NOT_READY`로 안전 차단된 수 |
+| `not_requested` | CEO task plan이 해당 부서를 선택하지 않은 수 (`NOT_REQUESTED`) |
+| `failed` | 실행 중 오류로 계약 결과를 만들지 못한 수 |
+| `skip_reasons` | 위 사유별 집계. 운영 리뷰와 Replay에서 필수 |
+
+따라서 데이터가 없는 실행에서 Risk 4개와 QA 5개가 모두 안전 차단되면 `executed=0`, `skipped_safe=4/5`, `failed=0`, `skip_reason=LIVE_DATA_NOT_READY`가 맞다. 이는 성공 추천이 아니며 pipeline은 `DEGRADED/HOLD`여야 한다. 라우팅 미선택은 `NOT_REQUESTED`로 별도 기록한다.
+
+모든 파이프라인 실행은 최소 `pipeline_started`와 `pipeline_completed` 이벤트를 남긴다. 각 Worker 보고서에는 실행 여부와 무관하게 WorkerSpec의 `technology` 메타데이터를 포함해 감사·Replay가 가능해야 한다.
+
+### 현재 Acceptance 판단
+
+- 결정론적 계약·Risk Engine·confirmation gate: 약 **80~85%**
+- QA Worker 계약·실패 전파·Replay 메타데이터: 약 **75~80%**
+- 외부 운영 연결: **BLOCKED** — Supabase에 PIT 국내주식 instrument/market snapshot이 없으면 후보를 만들지 않고 HOLD한다.
+- `SAMPLE_PLACEHOLDER` 정책 Corpus, 실제 service identity/JWKS·mTLS/IAM, Redis/PostgreSQL transactional outbox, Ollama 연결은 별도 운영 Gate다.
+
 ## 6. 최종 Release Gate
 
 - [ ] Research Packet → OrderIntent → Risk → QA → Fill → Journal → Projection 전체 Replay 통과

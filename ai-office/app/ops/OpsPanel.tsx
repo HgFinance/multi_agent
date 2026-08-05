@@ -18,6 +18,19 @@ const orderTone: Record<string, string> = {
   UNKNOWN: "blocked",
 };
 
+const orderLabel: Record<string, string> = {
+  FILLED: "체결 완료",
+  PARTIALLY_FILLED: "부분 체결",
+  ACKNOWLEDGED: "접수됨",
+  SUBMITTED: "제출됨",
+  CREATED: "생성됨",
+  CANCEL_PENDING: "취소 대기",
+  CANCELLED: "취소됨",
+  REJECTED: "거절됨",
+  EXPIRED: "만료됨",
+  UNKNOWN: "상태 확인 필요",
+};
+
 const intentTone: Record<string, string> = {
   READY_TO_SUBMIT: "done",
   APPROVED: "done",
@@ -28,6 +41,18 @@ const intentTone: Record<string, string> = {
   DRAFT: "waiting",
   REJECTED: "blocked",
   EXPIRED: "blocked",
+};
+
+const intentLabel: Record<string, string> = {
+  READY_TO_SUBMIT: "제출 준비",
+  APPROVED: "승인됨",
+  RESIZED: "수량 조정됨",
+  RISK_PENDING: "Risk 검토 대기",
+  USER_PENDING: "대표 승인 대기",
+  USER_APPROVED: "대표 승인됨",
+  DRAFT: "초안",
+  REJECTED: "거절됨",
+  EXPIRED: "만료됨",
 };
 
 function shortId(value: string): string {
@@ -49,7 +74,7 @@ function OrderRow({ order }: { order: BrokerOrderRow }) {
         {order.filled_quantity} / {order.requested_quantity}
       </span>
       <span>{won(order.average_fill_price)}</span>
-      <span className={`status-pill ${orderTone[order.state] ?? "waiting"}`}>{order.state}</span>
+      <span className={`status-pill ${orderTone[order.state] ?? "waiting"}`} title={order.state}>{orderLabel[order.state] ?? order.state}</span>
     </div>
   );
 }
@@ -58,20 +83,22 @@ function BackendEmptyState({
   connection,
   error,
   refresh,
+  compact = false,
 }: {
   connection: string;
   error: string;
   refresh: () => Promise<void>;
+  compact?: boolean;
 }) {
   return (
-    <section className="win ops-snap" aria-labelledby="ops-snapshot-title">
-      <div className="win-bar">
+    <section className={`${compact ? "ops-snap-compact" : "win"} ops-snap`} aria-labelledby="ops-snapshot-title">
+      {!compact && <div className="win-bar">
         <span>📉 trading_portfolio.snapshot</span>
         <span className="window-controls" aria-hidden="true">
           — ▢ ✕
         </span>
-      </div>
-      <div className="win-body backend-empty-state">
+      </div>}
+      <div className={`${compact ? "ops-snap-body" : "win-body"} backend-empty-state`}>
         <p className="eyebrow">READ MODEL · {connection.toUpperCase()}</p>
         <h2 id="ops-snapshot-title">백엔드 Snapshot을 기다리는 중입니다</h2>
         <p>{error || "GET /ui/snapshot 응답을 기다리고 있습니다."}</p>
@@ -86,20 +113,20 @@ function BackendEmptyState({
   );
 }
 
-export default function OpsPanel() {
+export default function OpsPanel({ compact = false }: { compact?: boolean }) {
   const { snapshot, connection, error, lastUpdated, refresh } = useBffFeed();
-  if (!snapshot) return <BackendEmptyState connection={connection} error={error} refresh={refresh} />;
+  if (!snapshot) return <BackendEmptyState connection={connection} error={error} refresh={refresh} compact={compact} />;
 
   const { portfolio, trading, ledger, mode } = snapshot;
   return (
-    <section className="win ops-snap" aria-labelledby="ops-snapshot-title">
-      <div className="win-bar">
+    <section className={`${compact ? "ops-snap-compact" : "win"} ops-snap`} aria-labelledby="ops-snapshot-title">
+      {!compact && <div className="win-bar">
         <span>📉 trading_portfolio.snapshot</span>
         <span className="window-controls" aria-hidden="true">
           — ▢ ✕
         </span>
-      </div>
-      <div className="win-body">
+      </div>}
+      <div className={compact ? "ops-snap-body" : "win-body"}>
         <div className="section-heading">
           <div>
             <p className="eyebrow">트레이딩 · 회계/포트폴리오</p>
@@ -218,7 +245,7 @@ export default function OpsPanel() {
                 <span>
                   {intent.risk_decision_id ? <code>{shortId(intent.risk_decision_id)}</code> : "미심사"}
                 </span>
-                <span className={`status-pill ${intentTone[intent.state] ?? "waiting"}`}>{intent.state}</span>
+                <span className={`status-pill ${intentTone[intent.state] ?? "waiting"}`} title={intent.state}>{intentLabel[intent.state] ?? intent.state}</span>
               </div>
             ))}
           </div>

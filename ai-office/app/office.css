@@ -83,7 +83,7 @@
 .live-progress { flex: 1 1 200px; min-width: 180px; }
 .live-progress span { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 700; color: var(--pink-deep); }
 .live-progress i { display: block; height: 10px; overflow: hidden; border: 2px solid var(--ink); border-radius: 99px; background: var(--pink-bg); }
-.live-progress b { display: block; height: 100%; background: linear-gradient(90deg, var(--pink), var(--lav)); transition: width .4s ease; }
+.live-progress b { display: block; width: 100%; height: 100%; transform-origin: left center; background: linear-gradient(90deg, var(--pink), var(--lav)); transition: transform .4s ease; }
 .live-counts { display: flex; gap: 6px; flex-wrap: wrap; }
 .lc { padding: 6px 10px; border: 2px solid var(--ink); border-radius: 99px; font-size: 11px; font-weight: 900; }
 .lc.on-duty { background: var(--yellow); }
@@ -484,6 +484,10 @@
 .approval-body h3 { margin: 8px 0; font-size: 16px; }
 .approval-body p { margin: 0 0 10px; color: var(--ink-soft); font-size: 13px; }
 .feed-body { max-height: 300px; overflow-y: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .rm.hot, .rm-dot.working, .rm-dot.approval, .a-walk .p-leg.l, .a-walk .p-leg.r, .a-walk .ag-body, .a-type .p-arm.l, .a-type .p-arm.r, .a-talk .p-head, .score.blink { animation: none; }
+  .live-progress b { transition: none; }
+}
 .feed-now {
   margin-bottom: 8px;
   padding: 7px 10px;

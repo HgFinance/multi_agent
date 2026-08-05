@@ -303,6 +303,20 @@ Version 관리 필요 여부(성향이 바뀌면 이력을 남길지)도 함께 
 
 → 결정 필요: 영주(Mandate) + 동규(검토 맥락 필요 여부) + 도현(적합성 입력)
 
+## 5-A. 구현 반영 정정 (2026-08-05)
+
+이 분석 문서의 §2·§5·부록 A에는 결정 전 조사 시점의 표현이 남아 있다. 아래 구현 상태가 현재 코드의 사실 기준이며, 설계 문장과 운영 완료를 혼동하지 않는다.
+
+| 항목 | 현재 상태 | 결정론적 연결 |
+|---|---|---|
+| 9개 경험×성향 프리셋 | 구현·테스트 완료 | `departments/03-risk/mandate_presets.py`가 Risk 소유 상수와 정렬 검증 제공 |
+| `max_drawdown_pct` | 구현·테스트 완료 | `RiskBounds`의 비율 필드이며 `max_daily_loss <= max_drawdown_pct`를 검증 |
+| 자산군 허용/금지 | 구현·테스트 완료 | `UniversePolicy` → `MandateScope` → Risk pre-trade gate. 금지 또는 메타데이터 누락은 fail-closed |
+| 선호/제외 업종 | 구현·테스트 완료 | 선호는 후보 맥락, 제외 업종은 신규 노출 차단. `max_sector_weight`는 현재 섹터 노출과 함께 검사 |
+| LLM 제안 경계 | 구현·테스트 완료 | LLM은 제안만 하고 `MandateConfirmationGate`가 정책 스키마·Risk·QA·사용자 확인을 모두 통과시켜야 활성화 |
+
+위 연결은 코드·계약 테스트 기준으로 `TEST_VERIFIED`다. Supabase에 PIT 국내주식 instrument/sector와 시장 스냅샷이 없으면 추천 후보를 만들지 않으며, 그 실행은 `DEGRADED/HOLD`다. 따라서 위 구현 완료를 실거래 운영 준비 완료로 해석하지 않는다.
+
 ## 6. 결정 후 작업 순서 (의존 관계)
 
 ```text

@@ -38,8 +38,8 @@ def test_bff_runtime_keeps_worker_events_and_dynamic_skip_states() -> None:
     assert runtime["status"] == "COMPLETED"
     assert runtime["pipeline_events"]
     assert any(
-        event.get("handoff", {}).get("from_role") == "ceo:head"
-        and event.get("handoff", {}).get("to_role") == "research:head"
+        (event.get("handoff") or {}).get("from_role") == "ceo:head"
+        and (event.get("handoff") or {}).get("to_role") == "research:head"
         for event in runtime["pipeline_events"]
     )
     assert any(message["kind"] == "worker_started" for message in runtime["messages"])

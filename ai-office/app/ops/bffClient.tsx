@@ -23,7 +23,7 @@ export type BffFeed = {
 };
 
 // REST는 canonical snapshot fallback, WebSocket은 변경 신호와 sequence를 전달한다.
-const POLL_INTERVAL_MS = 1000;
+const POLL_INTERVAL_MS = 2500;
 const WS_RECONNECT_BASE_MS = 500;
 const WS_RECONNECT_MAX_MS = 10000;
 const BffContext = createContext<BffFeed | null>(null);
@@ -66,8 +66,11 @@ export function BffProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<BffConnection>("connecting");
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const refreshInFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setConnection((current) => (current === "connected" ? "connected" : "connecting"));
     try {
       const next = await fetchBffSnapshot();
@@ -83,6 +86,8 @@ export function BffProvider({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(explainBffError(cause));
       setConnection(snapshotRef.current ? "stale" : "offline");
+    } finally {
+      refreshInFlightRef.current = false;
     }
   }, []);
 
@@ -147,7 +152,7 @@ export function BffProvider({ children }: { children: ReactNode }) {
       if (active) void refresh();
     }, 0);
     const pollTimer = window.setInterval(() => {
-      if (active) void refresh();
+      if (active && document.visibilityState !== "hidden") void refresh();
     }, POLL_INTERVAL_MS);
     connect();
 

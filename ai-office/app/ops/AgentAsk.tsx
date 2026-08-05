@@ -60,12 +60,12 @@ export default function AgentAsk() {
       </p>
 
       <textarea
+        className="agent-ask-input"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         rows={2}
         maxLength={2000}
         placeholder="예: 오늘 대사에서 확인할 항목은?"
-        style={{ width: "100%" }}
       />
       <button className="btn btn-small" onClick={ask} disabled={busy || !query.trim()}>
         {busy ? "묻는 중… (최대 60초)" : "묻기"}

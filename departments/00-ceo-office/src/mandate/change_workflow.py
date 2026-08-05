@@ -96,6 +96,9 @@ from langgraph.types import Command, interrupt
 
 _THIS_DIR = Path(__file__).resolve().parent
 _SRC_DIR = _THIS_DIR.parent
+_REPO_ROOT = _THIS_DIR.parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 for _p in (_SRC_DIR / "approval", _SRC_DIR / "case"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
@@ -130,6 +133,9 @@ from service import (  # noqa: E402
     MandateVersionRepository,
     MandateVersionService,
     requires_user_reapproval,
+)
+from orchestration.contracts.mandate_confirmation import (  # noqa: E402
+    evaluate_mandate_confirmation,
 )
 
 
@@ -452,52 +458,107 @@ class MandateChangeWorkflow:
             interrupt({"awaiting": ["RISK", "QA"], "case_id": case_id,
                        "risk": risk.decision.value, "qa": qa.decision.value})
 
+    # Keep the user gate single-pass so a pending approval cannot spin while
+    # LangGraph is paused and resumed.
     def _node_await_user(self, state: _GraphState) -> dict[str, Any]:
         version_id = state["version_id"]
         case_id = state["case_id"]
+        at = state.get("at", state["now"])
+        user_approval = self._find_current(
+            ObjectType.MANDATE_VERSION, version_id, RequiredRole.USER, at
+        )
+        if user_approval is None:
+            raise ReviewApprovalMissingError(
+                f"case_id={case_id}에 USER 승인 행이 없다 - await_review가 만들었어야 한다"
+            )
+        case = self._case_repo.get(case_id)
+        risk_approval = self._find_current(
+            ObjectType.MANDATE_VERSION, version_id, RequiredRole.RISK, at
+        )
+        qa_approval = self._find_current(
+            ObjectType.MANDATE_VERSION, version_id, RequiredRole.QA, at
+        )
 
-        while True:
-            at = state.get("at", state["now"])
-            user_approval = self._find_current(ObjectType.MANDATE_VERSION, version_id, RequiredRole.USER, at)
-            if user_approval is None:
+        if user_approval.decision is ApprovalDecision.PENDING:
+            return interrupt({"awaiting": ["USER"], "case_id": case_id})
+
+        if user_approval.decision is ApprovalDecision.APPROVED:
+            confirmation = evaluate_mandate_confirmation(
+                proposal_id=str(version_id),
+                policy_payload=(
+                    state["policy"].model_dump(mode="json")
+                    if isinstance(state["policy"], MandatePolicy)
+                    else dict(state["policy"])
+                ),
+                risk_approved=(
+                    risk_approval is not None
+                    and risk_approval.decision is ApprovalDecision.APPROVED
+                ),
+                qa_approved=(
+                    qa_approval is not None
+                    and qa_approval.decision is ApprovalDecision.APPROVED
+                ),
+                user_confirmed=True,
+                user_confirmation_id=user_approval.approval_id,
+                user_confirmed_at=user_approval.decided_at,
+            )
+            if confirmation.action != "ACTIVATE":
                 raise ReviewApprovalMissingError(
-                    f"case_id={case_id}에 USER 승인 행이 없다 - await_review가 만들었어야 한다"
+                    f"mandate confirmation gate blocked activation: {confirmation.reason}"
                 )
-            case = self._case_repo.get(case_id)
+            self._activation_service.activate(
+                mandate_id=state["mandate_id"],
+                version=state["version"],
+                direction=ChangeDirection(state["direction"]),
+                at=at,
+                approval=UserApproval(
+                    approved_by=user_approval.actor_user_id or "",
+                    trace_id=case.trace_id,
+                    reason=user_approval.reason or "사용자 승인",
+                ),
+            )
+            resolved, event = transition_case(
+                case,
+                to_status=CaseStatus.RESOLVED,
+                actor="governance-api",
+                at=at,
+                next_sequence=self._case_repo.next_sequence(case_id),
+                idempotency_key=str(uuid.uuid4()),
+                reason="사용자 승인 - 활성화 완료",
+                payload={
+                    "outcome": "activated",
+                    "approved_by": user_approval.actor_user_id,
+                },
+            )
+            self._case_repo.apply_transition(resolved, event)
+            return {
+                "stage": ChangeStage.ACTIVATED.value,
+                "detail": "사용자 승인 -> 활성화 완료",
+            }
 
-            if user_approval.decision is ApprovalDecision.APPROVED:
-                self._activation_service.activate(
-                    mandate_id=state["mandate_id"], version=state["version"],
-                    direction=ChangeDirection(state["direction"]), at=at,
-                    approval=UserApproval(
-                        approved_by=user_approval.actor_user_id or "",
-                        trace_id=case.trace_id, reason=user_approval.reason or "사용자 승인",
-                    ),
-                )
-                resolved, event = transition_case(
-                    case, to_status=CaseStatus.RESOLVED, actor="governance-api", at=at,
-                    next_sequence=self._case_repo.next_sequence(case_id),
-                    idempotency_key=str(uuid.uuid4()), reason="사용자 승인 - 활성화 완료",
-                    payload={"outcome": "activated", "approved_by": user_approval.actor_user_id},
-                )
-                self._case_repo.apply_transition(resolved, event)
-                return {"stage": ChangeStage.ACTIVATED.value, "detail": "사용자 승인 -> 활성화 완료"}
+        if user_approval.decision in _TERMINAL_DECISIONS:
+            resolved, event = transition_case(
+                case,
+                to_status=CaseStatus.RESOLVED,
+                actor="governance-api",
+                at=at,
+                next_sequence=self._case_repo.next_sequence(case_id),
+                idempotency_key=str(uuid.uuid4()),
+                reason=f"사용자 {user_approval.decision.value} - 이전 Version 유지",
+                payload={
+                    "outcome": "user_rejected",
+                    "user_decision": user_approval.decision.value,
+                },
+            )
+            self._case_repo.apply_transition(resolved, event)
+            return {
+                "stage": ChangeStage.USER_REJECTED.value,
+                "detail": f"사용자 {user_approval.decision.value}",
+            }
 
-            if user_approval.decision in _TERMINAL_DECISIONS:
-                resolved, event = transition_case(
-                    case, to_status=CaseStatus.RESOLVED, actor="governance-api", at=at,
-                    next_sequence=self._case_repo.next_sequence(case_id),
-                    idempotency_key=str(uuid.uuid4()),
-                    reason=f"사용자 {user_approval.decision.value} - 이전 Version 유지",
-                    payload={"outcome": "user_rejected", "user_decision": user_approval.decision.value},
-                )
-                self._case_repo.apply_transition(resolved, event)
-                return {
-                    "stage": ChangeStage.USER_REJECTED.value,
-                    "detail": f"사용자 {user_approval.decision.value}",
-                }
-
-            interrupt({"awaiting": ["USER"], "case_id": case_id, "user": user_approval.decision.value})
+        return interrupt(
+            {"awaiting": ["USER"], "case_id": case_id, "user": user_approval.decision.value}
+        )
 
     def _find_current(self, object_type, object_id: str, role: RequiredRole, at: datetime):
         """조회 + 지연 만료 평가 (불변식 4). PENDING+기한초과면 EXPIRED로 저장하고 그 값을 돌려준다."""

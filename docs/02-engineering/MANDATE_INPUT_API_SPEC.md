@@ -239,6 +239,38 @@ UNIFIED_DOMAIN_API_SPEC §3.2는 모든 POST Command에 `Idempotency-Key`를 요
 4. **`MANDATE_CONTRADICTORY_BOUNDS`가 두 가지 다른 원인(상호 모순 vs 중복 제출)을 같은 코드로 뭉뚱그리는 것**을 세분화할지 — Frontend §6 에러 메시지 매핑의 정확도에 영향.
 5. Case 진행 상태를 Frontend가 어떻게 갱신할지 — 폴링 주기를 둘지, AI_OFFICE_FRONTEND_PLAN §5.2의 WebSocket Event(`agent.status.v1`류)에 `governance.mandate.changed.v1`을 얹어 실시간화할지.
 
+## 10-A. Risk/QA 집행 및 최종 확인 계약 (2026-08-05)
+
+`MandatePolicy`의 다음 필드는 API payload에 포함할 수 있으며, 서버 결정론 검증과 Risk Context로 전달된다.
+
+```json
+{
+  "risk_bounds": {
+    "max_drawdown_pct": "0.10",
+    "max_daily_loss": "0.03"
+  },
+  "universe_policy": {
+    "allowed_asset_classes": ["EQUITY"],
+    "forbidden_asset_classes": ["LEVERAGED_ETF"],
+    "preferred_sectors": ["KRX_SEMICONDUCTOR"],
+    "excluded_sectors": ["KRX_TOBACCO"]
+  }
+}
+```
+
+- 모든 weight/loss 비율은 `0~1`의 decimal 비율이다. 예를 들어 `0.10`은 10%다.
+- `max_daily_loss <= max_drawdown_pct`, `max_instrument_weight <= max_sector_weight <= max_gross_exposure`를 `policy.py`가 검증한다.
+- Risk Context가 자산군·업종 메타데이터를 받지 못하면 `MANDATE_METADATA_MISSING`으로 fail-closed한다. `forbidden_asset_classes`와 `excluded_sectors`는 신규 노출을 거부하고, `max_sector_weight` 초과는 허용 범위로 resize하거나 0이면 거부한다.
+- `preferred_sectors`는 추천 후보의 맥락/우선순위이며 매수를 강제하지 않는다.
+
+### 제안 → 확인 → 활성화 순서
+
+자연어 또는 LLM이 만든 구조화 값은 제안으로만 취급한다. `MandateConfirmationGate`는 `policy_schema_valid`, Risk 승인, QA 승인, 사용자 확인 ID가 모두 있어야 `ACTIVATE`를 반환한다. 하나라도 빠지거나 정책 스키마가 틀리면 `HOLD`이며, 자동 완화·자동 승인을 하지 않는다. 이 계약은 `orchestration/contracts/mandate_confirmation.py`와 CEO `change_workflow.py`에서 사용한다.
+
+### 운영 한계
+
+결정론적 계약·Engine 테스트가 통과해도 Supabase PIT 국내 instrument/sector 및 market snapshot이 비어 있으면 추천 파이프라인은 후보를 만들지 않고 `DEGRADED/HOLD`로 종료한다. 이는 API 오류가 아니라 안전한 데이터 품질 결과다. 실제 운영 전에는 승인된 KRX taxonomy, PIT snapshot, QA 정책 Corpus, service identity와 영속 checkpoint를 별도 Release Gate로 검증한다.
+
 ## 11. 연계 문서
 
 - [USER_INPUT_SCOPE_ANALYSIS.md](../01-product/USER_INPUT_SCOPE_ANALYSIS.md) — 사용자 입력 범위 현황과 미결정 안건

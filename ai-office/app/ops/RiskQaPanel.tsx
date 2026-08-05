@@ -2,6 +2,7 @@
 
 import { useBffFeed } from "./bffClient";
 import type { OperationsDepartment } from "./readModel";
+import { readableRuntimeMessage } from "./statusLabels";
 
 const STATUS_TONE: Record<string, string> = {
   RUNNING: "working",
@@ -11,6 +12,16 @@ const STATUS_TONE: Record<string, string> = {
   DEGRADED: "approval",
   BLOCKED: "blocked",
   ERROR: "blocked",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  RUNNING: "업무 중",
+  QUEUED: "실행 대기",
+  IDLE: "대기",
+  OFFLINE: "미연결",
+  DEGRADED: "안전 보류",
+  BLOCKED: "실행 차단",
+  ERROR: "오류",
 };
 
 function DepartmentCard({ department }: { department: OperationsDepartment }) {
@@ -23,14 +34,14 @@ function DepartmentCard({ department }: { department: OperationsDepartment }) {
           <h3>{department.name}</h3>
           <code>{department.department_code}</code>
         </div>
-        <span className={`status-pill ${STATUS_TONE[status] ?? "waiting"}`}>{status}</span>
+        <span className={`status-pill ${STATUS_TONE[status] ?? "waiting"}`}>{STATUS_LABEL[status] ?? status}</span>
       </div>
       <div className="all-department-meta">
         <span><b>{department.active_worker_count}</b>/{department.worker_count} active</span>
-        <span>{department.conditional_worker_count} conditional</span>
+        <span>조건부 Worker {department.conditional_worker_count}</span>
         <span>{department.current_stage ?? "대기"}</span>
       </div>
-      <p>{department.status_reason}</p>
+      <p>{readableRuntimeMessage(department.status_reason).summary}</p>
       <small>{department.executor ?? "LangGraph"} · {department.worker_model ?? "qwen3:1.7b"} · {department.output_contract ?? "worker-context.v1"}</small>
     </article>
   );

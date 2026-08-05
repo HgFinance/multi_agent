@@ -341,7 +341,7 @@ class PortfolioRuntime:
                             "COMPLETED"
                             if status == "COMPLETED"
                             else "SKIPPED"
-                            if status == "SKIPPED"
+                            if status in {"SKIPPED", "NOT_REQUESTED"}
                             else "DEGRADED"
                         ),
                         "current_stage": None,
@@ -475,7 +475,7 @@ class PortfolioRuntime:
             elif kind == "department_completed" and department:
                 status = str(event.get("status", "DEGRADED"))
                 row = job["departments"][department]
-                row.update({"status": "COMPLETED" if status == "COMPLETED" else "SKIPPED" if status == "SKIPPED" else "DEGRADED", "current_stage": None, "active_worker_ids": [], "last_message": _one_line(event.get("message")), "updated_at": _now()})
+                row.update({"status": "COMPLETED" if status == "COMPLETED" else "SKIPPED" if status in {"SKIPPED", "NOT_REQUESTED"} else "DEGRADED", "current_stage": None, "active_worker_ids": [], "last_message": _one_line(event.get("message")), "updated_at": _now()})
                 current_index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else -1
                 if status != "SKIPPED" and current_index >= 0 and current_index + 1 < len(STAGE_ORDER):
                     next_stage = STAGE_ORDER[current_index + 1]
