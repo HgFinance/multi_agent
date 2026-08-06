@@ -156,6 +156,40 @@ def test_each_llm_worker_trace_contains_all_declared_tools():
         assert tool_events[0]["tool_calls"] == worker["tools"]
 
 
+def test_incident_postmortem_worker_persists_classified_entries_to_timeline():
+    from audit.incident_timeline import IncidentTimeline
+
+    def _incident_llm(_system: str, prompt: str) -> str:
+        if "incident-postmortem-worker" not in prompt:
+            return _llm(_system, prompt)
+        return (
+            '{"summary":"outage traced","confidence":0.7,"evidence_refs":["tool"],'
+            '"escalate":false,"entries":['
+            '{"entry_type":"FACT","summary":"error rate spiked to 15%",'
+            '"occurred_at":"2026-08-06T00:00:00+00:00"},'
+            '{"entry_type":"INFERENCE","summary":"likely upstream timeout",'
+            '"occurred_at":"2026-08-06T00:02:00+00:00"}]}'
+        )
+
+    timeline = IncidentTimeline()  # 인메모리 - Postgres 없이 분류/저장 경로만 검증한다
+    incident_id = "00000000-0000-0000-0000-0000000000aa"
+    report = run_employee_workers(
+        {"incident": {"incident_id": incident_id}, "incident_events": []},
+        llm=_incident_llm,
+        incident_timeline=timeline,
+    )
+
+    worker_report = next(
+        w for w in report["workers"] if w["worker_id"] == "incident-postmortem-worker"
+    )
+    assert worker_report["status"] == "COMPLETED"
+    assert "incident_persist_errors" not in worker_report
+
+    stored = timeline.timeline_for(incident_id)
+    assert [e.entry_type.value for e in stored] == ["FACT", "INFERENCE"]
+    assert stored[0].source == "incident-postmortem-worker"
+
+
 def test_qa_runner_is_deterministic_and_derives_blockers_from_engine_output():
     report = qa_runner(
         {
