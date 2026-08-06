@@ -38,7 +38,7 @@ function DepartmentCard({ department }: { department: OperationsDepartment }) {
       </div>
       <div className="all-department-meta">
         <span><b>{department.active_worker_count}</b>/{department.worker_count} active</span>
-        <span>조건부 Worker {department.conditional_worker_count}</span>
+        <span>LLM {department.llm_worker_count} · Runner {department.deterministic_worker_count}</span>
         <span>{department.current_stage ?? "대기"}</span>
       </div>
       <p>{readableRuntimeMessage(department.status_reason).summary}</p>
@@ -74,7 +74,7 @@ export default function DepartmentRuntimePanel() {
         <p className="all-department-note">Risk·QA 전용 화면이 아니라 CEO Office, HR, Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI QA/Audit의 전체 Registry와 현재 runtime 상태를 한 번만 표시합니다.</p>
         <div className="all-department-metrics" aria-label="전체 부서 요약">
           <span>부서 <b>{departments.length || 8}</b></span>
-          <span>등록 Worker <b>{registeredWorkers}</b></span>
+          <span>등록 직원 <b>{registeredWorkers}</b></span>
           <span>실행 중 <b>{activeWorkers}</b></span>
           <span>보류·오류 <b>{degradedDepartments}</b></span>
         </div>

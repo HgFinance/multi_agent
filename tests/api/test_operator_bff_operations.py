@@ -62,6 +62,34 @@ class OperatorBffOperationsTest(unittest.TestCase):
         self.assertIs(_profile_data("01-research"), first)
         self.assertIs(_registry(), _registry())
 
+    def test_department_worker_counts_include_deterministic_runners(self) -> None:
+        body = self.client.get("/ui/snapshot").json()
+        departments = {
+            row["department_code"]: row for row in body["operations"]["departments"]
+        }
+
+        risk = departments["risk-management"]
+        self.assertEqual(risk["worker_count"], 2)
+        self.assertEqual(risk["llm_worker_count"], 1)
+        self.assertEqual(risk["deterministic_worker_count"], 1)
+        self.assertEqual(
+            {worker["worker_id"] for worker in risk["workers"]},
+            {"compliance-policy-worker", "risk-runner"},
+        )
+
+        qa = departments["qa-department"]
+        self.assertEqual(qa["worker_count"], 3)
+        self.assertEqual(qa["llm_worker_count"], 2)
+        self.assertEqual(qa["deterministic_worker_count"], 1)
+        self.assertEqual(
+            {worker["worker_id"] for worker in qa["workers"]},
+            {
+                "hallucination-critic-worker",
+                "incident-postmortem-worker",
+                "qa-runner",
+            },
+        )
+
     def test_existing_read_model_remains_the_single_financial_source(self) -> None:
         body = self.client.get("/ui/snapshot").json()
         self.assertEqual(body["mode"], "DEMO")
