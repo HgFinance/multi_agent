@@ -278,9 +278,17 @@ export default function Home() {
             <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>
               📊 대시보드
             </button>
-            <button className={view === "mandate" ? "active" : ""} onClick={() => setView("mandate")}>
+            <a
+              className={`nav-link ${view === "mandate" ? "active" : ""}`}
+              href="/mandate"
+              role="button"
+              onClick={(event) => {
+                event.preventDefault();
+                setView("mandate");
+              }}
+            >
               🗂 Mandate 설정
-            </button>
+            </a>
             <button
               className={`todo-tab ${todo ? "urgent" : ""}`}
               onClick={() => {
@@ -359,7 +367,7 @@ export default function Home() {
   );
 }
 
-function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () => void; onBackToOperations?: () => void }) {
+export function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () => void; onBackToOperations?: () => void }) {
   return (
     <>
       <header className="mandate-hero win">
