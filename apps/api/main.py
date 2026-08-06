@@ -36,7 +36,14 @@ from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -86,6 +93,11 @@ from portfolio_schemas import (
     PortfolioUniverseListResponse,
 )
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
+
+try:
+    from .risk import router as risk_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
@@ -113,6 +125,7 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+app.include_router(risk_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
@@ -832,6 +845,7 @@ if __name__ == "__main__":
         "/ui/portfolio-recommendations/{run_id}/approval",
         "/ui/mandates/{mandate_id}/change-requests",
         "/ui/mandates/{mandate_id}/current",
+        "/ui/risk/mandates/{mandate_id}/assess",
         "/ui/mandate-cases/{case_id}/advance",
         "/ui/mandate-cases/{case_id}/timeline",
         "/ui/mandate-approvals",

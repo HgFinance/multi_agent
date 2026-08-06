@@ -152,6 +152,11 @@ RAG 감사 테이블에는 원문 Prompt·Secret을 저장하지 않는다. `que
 
 별도 Vector DB는 즉시 추가하지 않는다. Supabase pgvector가 Source of Truth이며, Qdrant나 Neo4j가 필요해져도 재생성 가능한 read Projection으로만 운용한다.
 
+예외: `hallucination-critic-worker`가 참조하는 정적 규정·Incident 참고 코퍼스는
+[ADR-0006](../../docs/02-engineering/adr/0006-pinecone-for-risk-qa-static-corpora.md)에
+따라 Pinecone을 쓴다 — Order/Ledger에 SQL Join이 필요 없는 참조 데이터이기 때문이며,
+QA 판정·Audit Trail(`audit.rag_runs` 등)의 Source of Truth는 계속 Supabase다.
+
 ## 9. 공통 안전·Acceptance
 
 - Evidence가 없거나 citation/PIT/ACL 검증에 실패하면 `UNSUPPORTED` 또는 `ESCALATE`로 낮춘다.

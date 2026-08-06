@@ -169,6 +169,7 @@
         {"method": "PUT", "path": "/risk/v1/trading-state/{scope}"},
         {"method": "DELETE", "path": "/risk/v1/trading-state/{scope}"},
         {"method": "POST", "path": "/risk/v1/compliance/check"},
+        {"method": "POST", "path": "/risk/v1/mandates/{mandate_id}/assess"},
         {"method": "GET", "path": "/risk/v1/observability/rag"},
         {"method": "GET", "path": "/risk/v1/observability/runtime"}
       ]
@@ -307,6 +308,7 @@
         {"method": "POST", "path": "/ui/portfolio-recommendations/{run_id}/approval"},
         {"method": "POST", "path": "/ui/mandates/{mandate_id}/change-requests"},
         {"method": "GET", "path": "/ui/mandates/{mandate_id}/current"},
+        {"method": "POST", "path": "/ui/risk/mandates/{mandate_id}/assess"},
         {"method": "POST", "path": "/ui/mandate-cases/{case_id}/advance"},
         {"method": "GET", "path": "/ui/mandate-cases/{case_id}/timeline"},
         {"method": "GET", "path": "/ui/mandate-approvals"},
