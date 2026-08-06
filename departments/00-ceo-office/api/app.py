@@ -23,8 +23,10 @@ Stream을 소비해 report.ready.v1/risk.breach.v1 등을 알림으로 바꾸는
 mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_NON_NOTIFICATION_EVENTS).
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
-  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
-    쿼리가 아직 없어(accounting-api 미구현) mandate_id로 대신 조회한다.
+  - GET /governance/v1/mandates/{mandate_id}/current는 canonical binding과 정책 snapshot을
+    함께 반환한다. fund_id 기준 GET .../mandates/by-fund/{fund_id}/current는 canonical
+    Repository가 역참조를 제공할 때만 단일 Mandate를 반환하며, 구형 Prototype에서는
+    임의 선택하지 않고 503으로 닫는다.
   - POST .../versions는 In-Memory Repository일 때 Fund 기준 통화를 accounting-api에서
     조회할 수 없으므로, 요청에 fund_base_currency를 선택 필드로 받아 seed한다(데모용,
     Postgres Repository를 쓸 때는 무시 - 실제 accounting.funds를 그대로 조회한다).
@@ -121,6 +123,13 @@ from case_root import (
 from case_root import (
     transition as transition_case,
 )
+from change_workflow import (
+    CaseAlreadyResolvedError,
+    ChangeRequestResult,
+    MandateChangeWorkflow,
+    NotAMandateChangeCaseError,
+    ReviewApprovalMissingError,
+)
 from committee import (
     CommitteeDecisionRecord,
     CommitteeSession,
@@ -165,13 +174,7 @@ from escalation import (
 from escalation import (
     transition as transition_escalation,
 )
-from change_workflow import (
-    CaseAlreadyResolvedError,
-    ChangeRequestResult,
-    MandateChangeWorkflow,
-    NotAMandateChangeCaseError,
-    ReviewApprovalMissingError,
-)
+from langgraph.checkpoint.memory import InMemorySaver
 from lifecycle import (
     ActivationResult,
     MandateActivationService,
@@ -182,7 +185,6 @@ from notification import (
     NotificationRequest,
     NotificationService,
 )
-from langgraph.checkpoint.memory import InMemorySaver
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -949,6 +951,15 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
     dependencies=[Depends(_require_internal_auth)],
 )
 def get_mandate_current(mandate_id: str):
+    """Return the canonical binding and the available Mandate snapshot.
+
+    The portfolio BFF consumes ``mandate_version_id`` and ``policy_hash`` as
+    the binding contract.  The user-input API also needs the policy itself,
+    so keep both contracts in one response instead of making callers choose
+    between two incompatible shapes.  Older repository implementations may
+    not expose ``get`` yet; in that case the canonical binding remains
+    available and an ACTIVE mandate fails closed when its binding is absent.
+    """
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     mandate_version_id = (
         _mandate_repo.get_mandate_version_id(mandate_id, version)
@@ -962,7 +973,7 @@ def get_mandate_current(mandate_id: str):
     )
     if status == "ACTIVE" and (not mandate_version_id or not policy_hash):
         raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
-    return {
+    response = {
         "mandate_id": mandate_id,
         "case_id": None,
         "current_version": version,
@@ -970,6 +981,57 @@ def get_mandate_current(mandate_id: str):
         "policy_hash": policy_hash,
         "status": status,
     }
+
+    get_version = getattr(_mandate_repo, "get", None)
+    row = get_version(mandate_id, version) if version > 0 and callable(get_version) else None
+    if row is not None:
+        response.update({
+            "effective_from": row.effective_from.isoformat(),
+            "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+            "content_hash": row.content_hash,
+            "objective_text": row.objective_text,
+            "objective": row.objective,
+            "policy": {
+                "allowed_assets": row.allowed_assets,
+                "forbidden_assets": row.forbidden_assets,
+                "risk_bounds": row.risk_bounds,
+                "universe_policy": row.universe_policy,
+                "approval_rules": row.approval_rules,
+                "execution_rules": row.execution_rules,
+            },
+        })
+    return response
+
+
+@app.get(
+    "/governance/v1/mandates/by-fund/{fund_id}/current",
+    dependencies=[Depends(_require_internal_auth)],
+)
+def get_mandate_current_by_fund(fund_id: str):
+    """Resolve a Fund to exactly one Mandate without choosing arbitrarily.
+
+    ``mandate_ids_for_fund`` is supplied by the canonical repository.  The
+    explicit 503 fallback keeps older prototype repositories fail-closed
+    instead of silently returning a stale or guessed Mandate.
+    """
+    lookup = getattr(_mandate_repo, "mandate_ids_for_fund", None)
+    if not callable(lookup):
+        raise HTTPException(status_code=503, detail="mandate_fund_lookup_unavailable")
+    mandate_ids = lookup(fund_id)
+    if not mandate_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"fund_id={fund_id}에 연결된 Mandate가 없습니다",
+        )
+    if len(mandate_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"fund_id={fund_id}에 Mandate가 {len(mandate_ids)}개 있어 단일 조회가 모호합니다: "
+                f"{mandate_ids}"
+            ),
+        )
+    return get_mandate_current(mandate_ids[0])
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -996,8 +1058,15 @@ def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
     /approvals/{id}/decide로 결정할 때마다 POST .../cases/{case_id}/advance를 다시
     불러야 한다(재개가 아니라 매번 새로 판단하는 짧은 호출).
     """
-    if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
-        _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
+    if isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        # The canonical repository records this relation from governance.mandates.
+        # Prototype repositories that do not yet expose set_fund_id simply keep
+        # the older mandate-change behavior; they must not guess a Fund later.
+        set_fund_id = getattr(_mandate_repo, "set_fund_id", None)
+        if callable(set_fund_id):
+            set_fund_id(mandate_id, body.fund_id)
+        if body.fund_base_currency:
+            _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
 
     result = mandate_change_workflow.submit(
         mandate_id=mandate_id, fund_id=body.fund_id, policy=body.policy,
@@ -1573,14 +1642,15 @@ if __name__ == "__main__":
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
-    assert r5.json() == {
-        "mandate_id": "m1",
-        "case_id": None,
-        "current_version": 1,
-        "mandate_version_id": _mandate_repo.get_mandate_version_id("m1", 1),
-        "policy_hash": _mandate_repo.get_mandate_content_hash("m1", 1),
-        "status": "ACTIVE",
-    }
+    body5 = r5.json()
+    assert body5["mandate_id"] == "m1"
+    assert body5["case_id"] is None
+    assert body5["current_version"] == 1
+    assert body5["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m1", 1)
+    assert body5["policy_hash"] == _mandate_repo.get_mandate_content_hash("m1", 1)
+    assert body5["status"] == "ACTIVE"
+    assert body5["content_hash"] == body5["policy_hash"]
+    assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1"
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1921,14 +1991,13 @@ if __name__ == "__main__":
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
     assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
-    assert client.get("/governance/v1/mandates/m3/current").json() == {
-        "mandate_id": "m3",
-        "case_id": None,
-        "current_version": 1,
-        "mandate_version_id": _mandate_repo.get_mandate_version_id("m3", 1),
-        "policy_hash": _mandate_repo.get_mandate_content_hash("m3", 1),
-        "status": "ACTIVE",
-    }
+    m3_current = client.get("/governance/v1/mandates/m3/current").json()
+    assert m3_current["mandate_id"] == "m3"
+    assert m3_current["case_id"] is None
+    assert m3_current["current_version"] == 1
+    assert m3_current["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m3", 1)
+    assert m3_current["policy_hash"] == _mandate_repo.get_mandate_content_hash("m3", 1)
+    assert m3_current["status"] == "ACTIVE"
 
     # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
     # v1의 effective_to가 v1의 effective_from(now)보다 뒤여야 한다(DDL check) - 같은 시각을
