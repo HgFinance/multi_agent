@@ -222,6 +222,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def build_default_incident_timeline() -> IncidentTimeline:
+    """QA_INCIDENT_PERSIST=true + DATABASE_URL(또는 RISK_QA_DATABASE_URL)이 모두 있을 때만
+    Postgres에 쓴다. 기본은 인메모리라 테스트/개발 환경은 DB 없이 같은 경로를 돈다 -
+    worker_trace_bridge.build_default_trace_bridge와 같은 production/test 분리 기준이다."""
+    import os
+
+    if os.environ.get("QA_INCIDENT_PERSIST", "false").strip().lower() != "true":
+        return IncidentTimeline()
+    dsn = (
+        os.environ.get("RISK_QA_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
+    if not dsn:
+        raise IncidentTimelineError("QA_INCIDENT_PERSIST requires DATABASE_URL")
+    try:
+        from repository import PostgresAuditRepository
+    except ImportError:
+        from audit.repository import PostgresAuditRepository
+    return IncidentTimeline(PostgresAuditRepository.connect(dsn))
+
+
 if __name__ == "__main__":
     now = datetime.now(timezone.utc)
     incident_id, finding_id = uuid4(), uuid4()

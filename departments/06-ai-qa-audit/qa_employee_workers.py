@@ -42,6 +42,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID, uuid4
@@ -217,7 +218,38 @@ def _compact(value: Any, limit: int = 9000) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)[:limit]
 
 
-def _parse_worker_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
+_INCIDENT_ENTRY_TYPES = {"FACT", "INFERENCE", "ACTION", "DECISION"}
+
+
+def _validate_incident_entries(raw: Any) -> tuple[list[dict[str, Any]], bool]:
+    """FACT/INFERENCE 분류는 incident-postmortem-worker 자신의 몫이다(IncidentTimeline은
+    보관·정렬만 한다). entries가 없으면 유효(빈 목록) - 형식이 틀리면만 무효로 재시도시킨다."""
+    if raw is None:
+        return [], True
+    if not isinstance(raw, list):
+        return [], False
+    cleaned: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return [], False
+        entry_type = str(item.get("entry_type", "")).upper()
+        summary = item.get("summary")
+        occurred_at = item.get("occurred_at")
+        if entry_type not in _INCIDENT_ENTRY_TYPES or not isinstance(summary, str):
+            return [], False
+        try:
+            datetime.fromisoformat(str(occurred_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return [], False
+        cleaned.append(
+            {"entry_type": entry_type, "summary": summary[:2000], "occurred_at": occurred_at}
+        )
+    return cleaned, True
+
+
+def _parse_worker_output(
+    raw: str, worker_id: str, *, require_entries: bool = False
+) -> tuple[dict[str, Any], bool]:
     text = (raw or "").strip()
     candidate = text.replace("```json", "").replace("```", "").strip()
     try:
@@ -240,14 +272,21 @@ def _parse_worker_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool
         }, False
     refs = parsed.get("evidence_refs", [])
     valid = isinstance(refs, list) and isinstance(parsed.get("escalate", False), bool)
-    return {
+    entries: list[dict[str, Any]] = []
+    if require_entries:
+        entries, entries_valid = _validate_incident_entries(parsed.get("entries"))
+        valid = valid and entries_valid
+    result = {
         "worker_id": worker_id,
         "summary": parsed["summary"][:4000],
         "confidence": parsed.get("confidence"),
         "evidence_refs": refs,
         "escalate": parsed.get("escalate", True),
         "schema_valid": valid,
-    }, valid
+    }
+    if require_entries:
+        result["entries"] = entries
+    return result, valid
 
 
 def build_worker_graph(
@@ -382,12 +421,20 @@ def build_worker_graph(
             }
         worker_llm = llm or default_worker_llm
         tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
+        require_entries = spec.worker_id == "incident-postmortem-worker"
         system = (
             f"You are the {spec.role}. You are an AI-QA employee, not Hermes supervisor. "
             "Use only supplied evidence. Never change a binding QA verdict, approve an order, "
             "write a ledger, or close a finding. Return JSON with summary, confidence, "
             "evidence_refs, and escalate."
         )
+        if require_entries:
+            system += (
+                ' Additionally return "entries": a list of {entry_type, summary, occurred_at} '
+                "objects reconstructing the incident timeline. entry_type must be FACT (directly "
+                "observed, cite evidence) or INFERENCE (your interpretation) - never blend the "
+                "two in one entry. occurred_at is ISO-8601. Omit entries you cannot support."
+            )
         prompt = (
             f"Worker: {spec.worker_id}\n"
             f"Allowed tools: {', '.join(spec.tools)}\n"
@@ -401,7 +448,9 @@ def build_worker_graph(
         for attempt in range(1, spec.max_attempts + 1):
             try:
                 output, schema_valid = _parse_worker_output(
-                    worker_llm(system, prompt), spec.worker_id
+                    worker_llm(system, prompt),
+                    spec.worker_id,
+                    require_entries=require_entries,
                 )
                 if schema_valid:
                     context = _context(state)
@@ -564,6 +613,35 @@ def _incident_tool(payload: dict[str, Any]) -> dict[str, Any]:
         "incident": payload.get("incident"),
         "incident_events": payload.get("incident_events", []),
     }
+
+
+def _persist_incident_entries(
+    timeline: Any, payload: dict[str, Any], output: dict[str, Any]
+) -> list[str]:
+    """incident-postmortem-worker가 분류한 FACT/INFERENCE entries를 audit.incident_events로
+    옮긴다. IncidentTimeline은 QA_INCIDENT_PERSIST 여부에 따라 인메모리거나 Postgres다
+    (build_default_incident_timeline). 저장 실패는 삼키지 않고 에러 목록으로 돌려준다 -
+    호출자가 trace_errors/degraded에 반영한다."""
+    entries = output.get("entries") or []
+    incident_id = (payload.get("incident") or {}).get("incident_id")
+    if not entries or not incident_id or timeline is None:
+        return []
+    from audit.incident_timeline import IncidentEntryType
+
+    errors: list[str] = []
+    for entry in entries:
+        try:
+            timeline.add_event(
+                incident_id,
+                "incident-postmortem-worker",
+                IncidentEntryType(entry["entry_type"]),
+                entry["summary"],
+                datetime.fromisoformat(str(entry["occurred_at"]).replace("Z", "+00:00")),
+                "svc_qa_incident_worker",
+            )
+        except Exception as exc:  # noqa: BLE001 - persistence failure must escalate.
+            errors.append(f"incident_event:{type(exc).__name__}")
+    return errors
 
 
 # ── qa-runner: 결정론 잡무 (LLM 없음, 2026-08-06) ────────────────────────────
@@ -745,6 +823,7 @@ async def run_employee_workers_async(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
     trace_bridge: Any | None = None,
+    incident_timeline: Any | None = None,
 ) -> dict[str, Any]:
     """Fan out guarded QA Worker graphs and deterministically fan them in."""
 
@@ -774,6 +853,16 @@ async def run_employee_workers_async(
         spec.worker_id for spec in WORKER_SPECS if not _should_run(spec, payload)
     ]
     eligible = [spec for spec in WORKER_SPECS if _should_run(spec, payload)]
+
+    if incident_timeline is None and any(
+        spec.worker_id == "incident-postmortem-worker" for spec in eligible
+    ):
+        try:
+            from audit.incident_timeline import build_default_incident_timeline
+
+            incident_timeline = build_default_incident_timeline()
+        except Exception as exc:  # noqa: BLE001 - persistence boundary escalates safely.
+            trace_errors.append(f"incident_timeline:{type(exc).__name__}")
 
     async def run_one(spec: WorkerSpec) -> dict[str, Any]:
         worker_trace = SkillTrace()
@@ -839,6 +928,14 @@ async def run_employee_workers_async(
             except Exception as exc:  # noqa: BLE001 - audit must escalate.
                 trace_errors.append(f"{spec.worker_id}:{type(exc).__name__}")
                 report["trace_error"] = type(exc).__name__
+
+        if spec.worker_id == "incident-postmortem-worker" and report["status"] == "COMPLETED":
+            persist_errors = await asyncio.to_thread(
+                _persist_incident_entries, incident_timeline, payload, report.get("output", {})
+            )
+            if persist_errors:
+                trace_errors.extend(persist_errors)
+                report["incident_persist_errors"] = persist_errors
         return report
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
@@ -875,9 +972,15 @@ def run_employee_workers(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
     trace_bridge: Any | None = None,
+    incident_timeline: Any | None = None,
 ) -> dict[str, Any]:
     """Synchronous compatibility boundary for the async QA fan-in."""
 
     return run_coroutine_sync(
-        run_employee_workers_async(payload, llm=llm, trace_bridge=trace_bridge)
+        run_employee_workers_async(
+            payload,
+            llm=llm,
+            trace_bridge=trace_bridge,
+            incident_timeline=incident_timeline,
+        )
     )
