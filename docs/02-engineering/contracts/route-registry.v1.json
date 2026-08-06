@@ -223,8 +223,17 @@
         {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}"},
         {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/transitions"},
         {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/events"},
+        {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
+        {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
         {"method": "POST", "path": "/workforce/v1/departments/{department_code}/scorecard"},
         {"method": "GET", "path": "/workforce/v1/departments/{department_code}/scorecard"},
+        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
+        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
+        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
+        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/approve"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/activate"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/retire"},
         {"method": "POST", "path": "/workforce/v1/budget-assessments"},
         {"method": "GET", "path": "/workforce/v1/agents/{agent_id}/budget-assessment"}
       ]
@@ -288,6 +297,7 @@
       "status": "IMPLEMENTED_TEST",
       "operations": [
         {"method": "GET", "path": "/health"},
+        {"method": "GET", "path": "/health/ready"},
         {"method": "GET", "path": "/ui/snapshot"},
         {"method": "GET", "path": "/ui/integrations"},
 

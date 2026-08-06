@@ -65,8 +65,8 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "fundamental-valuation-worker": ("재무", "실적", "밸류", "가치", "저평가", "고평가"),
     "news-macro-worker": ("뉴스", "금리", "환율", "거시", "경제", "정책"),
     "evidence-rag-worker": ("근거", "출처", "자료", "검증", "인용"),
-    "market-thesis-worker": ("전망", "강세", "약세", "시장 논리"),
-    "trade-proposal-worker": ("매수", "매도", "거래", "리밸런싱"),
+    "bull-thesis-worker": ("전망", "강세", "상승", "시장 논리"),
+    "bear-thesis-worker": ("약세", "하락", "하방", "반대 논리"),
     "order-constraint-worker": ("주문", "한도", "제약", "컴플라이언스"),
     "execution-planning-worker": ("체결", "실행", "집행"),
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
@@ -90,7 +90,7 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
 # 이 free-text query 라우팅 대상에도 없다.
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "research": ("research-data-worker", "evidence-rag-worker"),
-    "trading": ("market-thesis-worker", "trade-proposal-worker"),
+    "trading": ("bull-thesis-worker", "bear-thesis-worker"),
     "risk": ("compliance-policy-worker",),
     "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
     "accounting": ("portfolio-control-worker", "investor-reporting-worker"),
