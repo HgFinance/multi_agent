@@ -172,7 +172,14 @@ async function installBffFixture(page, config = {}) {
       });
     }
     if (/^\/ui\/mandates\/[^/]+\/current$/.test(pathname) && request.method() === "GET") {
-      return json(200, { mandate_id: "web-mandate", current_version: 6, status: "ACTIVE" });
+      return json(200, {
+        mandate_id: "web-mandate",
+        case_id: null,
+        current_version: 6,
+        mandate_version_id: "mandate-version-uuid",
+        policy_hash: "sha256:fixture-policy",
+        status: "ACTIVE",
+      });
     }
     if (/^\/ui\/mandates\/[^/]+\/change-requests$/.test(pathname) && request.method() === "POST") {
       if (config.governanceResponse) {
@@ -478,6 +485,68 @@ test("keeps distinct Risk reject and QA inconclusive states fail closed", async 
 
   await expect(page.locator(".ops-gate-grid article").nth(0)).toContainText("거절됨");
   await expect(page.locator(".ops-gate-grid article").nth(1)).toContainText("INCONCLUSIVE");
+  await expect(page.getByRole("button", { name: "주문 전송" })).toHaveCount(0);
+  await expect(page.getByText("Ledger Posting", { exact: true })).toHaveCount(0);
+});
+test("F-09: restarting from a saved Mandate populates mandate_version_id/policy_hash from a fresh lookup", async ({ page }) => {
+  // Regression coverage for the "저장된 Mandate로 분석 재시작" button: it must
+  // fetch the currently-active Mandate and forward mandate_version_id/policy_hash
+  // rather than silently omitting them (see portfolioClient.ts:startSavedPortfolioRecommendation).
+  const restartRunId = "run-restarted-from-saved-mandate";
+  const state = await installBffFixture(page, {
+    snapshot: makeSnapshot({
+      status: "COMPLETED",
+      run_id: "run-prior",
+      workflow: "portfolio-recommendation-full",
+      phase: "QA",
+      result: {
+        pipeline_status: "COMPLETED",
+        workflow: "portfolio-recommendation-full",
+        safe_action: "HOLD",
+        manual_review_required: true,
+        data_context: { pit_readiness: { quality_status: "FAIL", reasons: ["fixture_pit_not_ready"] } },
+      },
+      approval: null,
+    }),
+    startResponse: { status: 202, body: { run_id: restartRunId, status: "QUEUED", trace_id: "trace-restart-fixture" } },
+    statusResponses: [makeRunStatus(restartRunId, "QUEUED")],
+    onStart: (fixtureState, request) => {
+      try {
+        const rawBody = request.postData?.() ?? "";
+        fixtureState.startPayload = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        fixtureState.startPayload = {};
+      }
+    },
+  });
+
+  // Seed the saved-Mandate draft the restart button reads from localStorage.
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "hgfinance.mandate-config.v1",
+      JSON.stringify({
+        draft: {
+          user_id: "web-user",
+          mandate_id: "web-mandate",
+          investment_amount: "10000000",
+          universe_id: "KOREA_EQUITY_WATCHLIST",
+        },
+      }),
+    );
+  });
+
+  await page.goto("/");
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "📊 대시보드" }).click();
+  await page.getByRole("button", { name: "Operations Console" }).click();
+
+  await expect(page.getByRole("heading", { name: "분석 입력이 준비되지 않아 실행을 보류했습니다." })).toBeVisible();
+  await page.getByRole("button", { name: "분석 다시 시작" }).click();
+
+  await expect.poll(() => state.startPayload?.mandate_id).toBe("web-mandate");
+  await expect.poll(() => state.startPayload?.mandate_version_id).toBe("mandate-version-uuid");
+  await expect.poll(() => state.startPayload?.policy_hash).toBe("sha256:fixture-policy");
+  await expect(page.getByText("저장된 Mandate로 분석을 다시 요청했습니다. 실행 단계에서 상태를 확인하세요.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "주문 전송" })).toHaveCount(0);
   await expect(page.getByText("Ledger Posting", { exact: true })).toHaveCount(0);
 });
