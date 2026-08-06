@@ -3,7 +3,11 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 운영 활성화나 신규 Library 도입을 의미하지 않는다.
 
-이 문서는 Risk 부서의 4개 독립 Worker에 필요한 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. `qwen3:8b`나 `qwen2.5:7b`는 HR·QA benchmark와 CEO 승인을 거친 후보일 뿐 자동 활성화하지 않는다.
+이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. `qwen3:8b`나 `qwen2.5:7b`는 HR·QA benchmark와 CEO 승인을 거친 후보일 뿐 자동 활성화하지 않는다.
+
+**2026-08-06 tool 강등**: `core-risk-worker`·`derivatives-counterparty-worker`는 결정론 `risk-runner` 하나로
+합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 두 Worker 행은 강등 전 설계를
+그대로 남긴 이력 기록이다 — 실제 실행 경로는 `departments/03-risk/risk_employee_workers.py`의 `risk_runner()`를 따른다.
 
 ## 1. 절대 경계
 
@@ -62,7 +66,7 @@ query normalize
 
 ### 3.2 Hot Path 금지
 
-`core-risk-worker`와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. Risk Worker가 계산 결과를 설명해야 할 때도 먼저 Risk Engine 결과를 확정한 뒤 비바인딩 서술만 생성한다.
+`risk-runner`(옛 `core-risk-worker`)와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. `risk-runner`는 애초에 LLM을 호출하지 않는다(`llm: False`) — Risk Engine 결과를 그대로 옮기기만 한다.
 
 ## 4. HTTP·API 호출
 
@@ -125,13 +129,13 @@ audit.rag_graph_extractions
 
 ## 8. 직원별 Required Skill ID
 
-공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다.
+공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다. `core-risk-worker`/`derivatives-counterparty-worker` 두 행은 2026-08-06 tool 강등 전 설계의 이력 기록이다 — 실제로는 LangGraph Skill 자체가 없는 결정론 `risk-runner`가 대신한다(3절 참고).
 
 | Worker | Required Skill ID |
 |---|---|
-| `core-risk-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
+| `core-risk-worker` (강등, `risk-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `compliance-policy-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.pit_filter.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `rag.route.v1`, `rag.hybrid_retrieve.v1`, `rag.rerank.v1`, `rag.decompose.v1`, `rag.context_stitch.v1`, `rag.self_check.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.numeric_temporal.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
-| `derivatives-counterparty-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
+| `derivatives-counterparty-worker` (강등, `risk-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
 
 `rag.graph_context.v1`은 Compliance 문서 간 관계가 실제로 증가한 뒤에만 Compliance Worker에 추가한다. Pre-trade와 계산 Hot Path에는 추가하지 않는다.
 

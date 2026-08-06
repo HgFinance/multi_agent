@@ -31,7 +31,9 @@ agent:
   head_persona: qa-audit-supervisor
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
-  runtime_personalities: [evidence-qa-worker, hallucination-critic-worker, model-and-internal-audit-worker, ops-and-permission-worker, incident-postmortem-worker]
+  # 2026-08-06 tool 강등. LLM 직원은 hallucination-critic-worker/incident-postmortem-worker
+  # 둘뿐이고 나머지 3명은 결정론 qa-runner 하나로 합쳐졌다 — 아래 deterministic_workers 참고.
+  runtime_personalities: [hallucination-critic-worker, incident-postmortem-worker]
   max_turns: 100
   reasoning_effort: high
   timeout_seconds: 60  # 개별 명령어 타임아웃
@@ -208,7 +210,7 @@ hiring_priority:
   qa-audit-supervisor: {role_codes: ["QAA-00"], tier: "P0"}
   tool-permission-security-reviewer: {role_codes: ["QAA-03"], tier: "P1"}
   incident-postmortem-agent: {role_codes: ["QAA-07"], tier: "P1"}
- # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 5개 Worker다.
+ # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 3명(hallucination-critic-worker, incident-postmortem-worker, qa-runner)이다.
 
 skills:
   - hermes-agent
@@ -222,14 +224,20 @@ usage:
 # Worker Graph에서 Ollama Qwen을 사용한다.
 staff_registry:
   head_count: 1
-  worker_count: 5
+  # 2026-08-06: tool 강등으로 5 -> 2. worker_count 는 **LLM 직원 수**다 -
+  #   결정론 qa-runner 는 deterministic_worker_count 로 따로 센다(조직 인원은 3명).
+  #   강등 기준: 같은 입력에서 다른 출력이 나오는 것이 산출물인가, 결정론 모듈이
+  #   이미 그 답을 만들고 있지 않은가. 둘 다 아니면 에이전트가 아니라 함수다.
+  worker_count: 2
   default_execution_count: 1
-  max_execution_count: 5
-  active_worker_count: 1
-  conditional_worker_count: 4
+  max_execution_count: 2
+  active_worker_count: 0
+  conditional_worker_count: 2
+  deterministic_worker_count: 1
+  headcount_total: 3          # 부서장 제외 - hallucination-critic-worker / incident-postmortem-worker / qa-runner
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
-  runtime_personalities: [evidence-qa-worker, hallucination-critic-worker, model-and-internal-audit-worker, ops-and-permission-worker, incident-postmortem-worker]
+  runtime_personalities: [hallucination-critic-worker, incident-postmortem-worker]
   legacy_personas:
     source: agent.personalities
     runtime: compatibility_only
@@ -255,14 +263,10 @@ employee_runtime:
   binding_decision_owner: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py
   failure_action: ESCALATE
 
+# ⚠ 이 블록은 **LLM 직원 레지스트리**다(qa_employee_workers.WORKER_SPECS 와 1:1).
+#   결정론 직원은 아래 deterministic_workers 에 따로 있다 - 섞으면
+#   "workers 에 있다 = 모델을 태운다"가 깨져서 비용·감사 판단이 흐려진다.
 workers:
-  evidence-qa-worker:
-    role: Evidence and citation QA analyst
-    status: active
-    trigger: always
-    replaces: [evidence-qa-agent]
-    tools: [qa.evidence.check]
-    output: advisory_context
   hallucination-critic-worker:
     role: Hallucination and contradiction critic
     status: conditional
@@ -270,26 +274,39 @@ workers:
     trigger: when_unsupported_claim_exists
     tools: [qa.evidence.rag]
     output: advisory_context
-  model-and-internal-audit-worker:
-    role: Model risk and internal audit analyst
-    status: conditional
-    replaces: [model-risk-agent, internal-audit-agent]
-    trigger: when_audit_input_exists
-    tools: [qa.model_risk.evaluate, qa.internal_audit.evaluate]
-    output: advisory_context
-  ops-and-permission-worker:
-    role: Agent operations and tool permission analyst
-    status: conditional
-    replaces: [agent-ops-monitor, tool-permission-security-reviewer]
-    trigger: when_ops_input_exists
-    tools: [qa.ops.evaluate, qa.tool_permission.check]
-    output: advisory_context
   incident-postmortem-worker:
     role: Incident timeline and postmortem analyst
     status: conditional
     replaces: [incident-postmortem-agent]
     trigger: when_incident_exists
     tools: [qa.incident.record]
+    output: advisory_context
+
+# 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
+# 2026-08-06 tool 강등으로 evidence-qa-worker(EvidenceQaEngine.check_artifact 서술),
+# model-and-internal-audit-worker(ModelRiskEngine/InternalAuditEngine 서술),
+# ops-and-permission-worker(OpsHealthMonitor/check_tool_permission 서술)가 여기로
+# 합쳐졌다. 셋 다 답이 하나로 정해지는 일이었고, 그 답은 이미 각 결정론 엔진이
+# 만들고 있었다(tool_permission_check.py 자체 docstring: "판정은 결정론적 코드가
+# 하고 LLM은 결과를 설명만 한다") - 위에 qwen3:1.7b 를 얹는 것은 나온 판정을 다시
+# 서술하는 계층일 뿐이다(CLAUDE.md 개발 원칙 4·9번).
+deterministic_workers:
+  qa-runner:
+    role: QA desk runner — evidence/model risk/internal audit/ops/permission 결과 조회(결정론, LLM 없음)
+    status: active
+    trigger: always
+    llm: false
+    absorbed:            # 강등된 직원과 그 답을 원래 만들던 모듈
+      evidence-qa-worker: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py (EvidenceQaEngine.check_artifact)
+      model-and-internal-audit-worker: departments/06-ai-qa-audit/model_risk.py (ModelRiskEngine.evaluate), departments/06-ai-qa-audit/internal_audit.py (InternalAuditEngine.evaluate)
+      ops-and-permission-worker: departments/06-ai-qa-audit/audit/ops_health_monitor.py (OpsHealthMonitor.evaluate), departments/06-ai-qa-audit/audit/tool_permission_check.py (check_tool_permission)
+    tools: [qa.evidence.check, qa.model_risk.evaluate, qa.internal_audit.evaluate,
+            qa.ops.evaluate, qa.tool_permission.check]
+    # rag_router 정책표에 항목이 없다. 라우터는 *LLM 이 무엇을 볼 수 있나*를 제한하는
+    # 장치인데 이 직원은 서술을 만들지 않는다. 항목이 없으면
+    # rag_policy_for_worker() 가 ValueError 를 내는데 그게 옳은 fail-closed 다 -
+    # 나중에 누가 이 직원을 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다.
+    rag_route: null
     output: advisory_context
 
 validation_record:

@@ -26,13 +26,14 @@ class WorkerRAGPolicy:
     forced_route: RAGRoute | None = None
 
 
+# qa-runner(결정론 잡무, LLM 없음)는 여기 항목이 없다 - 라우터는 *LLM이 무엇을
+# 볼 수 있나*를 제한하는 장치고 그 직원은 LLM이 없다. 항목을 비워두면
+# `rag_policy_for_worker("qa-runner")`가 ValueError를 내는데, 그게 옳은
+# fail-closed다: 나중에 qa-runner를 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다.
 WORKER_RAG_POLICIES: dict[str, WorkerRAGPolicy] = {
-    "evidence-qa-worker": WorkerRAGPolicy(frozenset({"NO_RAG", "HYBRID", "GRAPH"})),
     "hallucination-critic-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH"})
     ),
-    "model-and-internal-audit-worker": WorkerRAGPolicy(frozenset({"NO_RAG", "GRAPH"})),
-    "ops-and-permission-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "incident-postmortem-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH", "HYPERGRAPH"})
     ),

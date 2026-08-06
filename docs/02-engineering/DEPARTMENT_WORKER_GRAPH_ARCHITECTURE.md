@@ -41,27 +41,24 @@ case_request
 
 ## Risk 직원 구성
 
-부서장 `risk-supervisor`는 Hermes가 담당한다. 중복 역할은 다음 세 Worker로 정리했다 (2026-08-06, `market-liquidity-worker`+`pre-trade-risk-worker` 병합 — 둘 다 항상 실행되는 정형 계산 Worker라 LangGraph 노드 수준 추적을 유지한 채 합쳤다).
+부서장 `risk-supervisor`는 Hermes가 담당한다. 2026-08-06에 `core-risk-worker`(옛 `market-liquidity-worker`+`pre-trade-risk-worker` 병합)와 `derivatives-counterparty-worker`를 **tool로 강등**해 결정론 `risk-runner`로 합쳤다 — 둘 다 결정론 Risk Engine이 이미 답을 만들고 LLM은 서술만 하고 있었다. 남은 LLM Worker는 조건부 `compliance-policy-worker` 하나뿐이다.
 
 | Worker | 상태 | 도구 | 입력·출력 경계 |
 |---|---|---|---|
-| `core-risk-worker` | active | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check` | 시장·유동성·노출·RiskEngine 결과를 설명만 함 |
 | `compliance-policy-worker` | conditional | `risk.compliance.check` | 정책 근거가 있을 때만 PIT context 생성 |
-| `derivatives-counterparty-worker` | conditional | `risk.trading_state.record.read` | 거래상대방·파생 신호가 있을 때만 실행 |
+| `risk-runner` (결정론, LLM 없음) | 항상 실행 | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, `risk.trading_state.record.read` | 시장·유동성·노출·Counterparty RiskEngine 결과를 그대로 옮김. `WORKER_SPECS` 밖 — LLM Registry에 없다 |
 
 `RiskEngine.check_order`가 `approve/resize/reject`의 유일한 바인딩 소유자다. Worker 또는 Hermes가 그 값을 덮어쓸 수 없다.
 
 ## QA 직원 구성
 
-부서장 `qa-audit-supervisor`는 Hermes가 담당한다. 중복 역할은 다음 다섯 Worker로 정리했다.
+부서장 `qa-audit-supervisor`는 Hermes가 담당한다. 2026-08-06에 `evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`를 **tool로 강등**해 결정론 `qa-runner`로 합쳤다 — 셋 다 결정론 Engine이 이미 PASS/WARN/FAIL을 정하고 있었고 LLM은 서술만 했다. 남은 LLM Worker는 조건부 `hallucination-critic-worker`, `incident-postmortem-worker` 둘뿐이다.
 
 | Worker | 상태 | 도구 | 입력·출력 경계 |
 |---|---|---|---|
-| `evidence-qa-worker` | active | `qa.evidence.check` | EvidenceQaEngine Claim 결과를 설명만 함 |
 | `hallucination-critic-worker` | conditional | `qa.evidence.rag` | UNSUPPORTED/CONTRADICTED claim만 검토 |
-| `model-and-internal-audit-worker` | conditional | `qa.model_risk.evaluate`, `qa.internal_audit.evaluate` | 모델 재현성·SoD 감사 신호를 함께 검토 |
-| `ops-and-permission-worker` | conditional | `qa.ops.evaluate`, `qa.tool_permission.check` | 운영 장애·권한 위반 신호를 함께 검토 |
 | `incident-postmortem-worker` | conditional | `qa.incident.record` | 실제 Incident가 있을 때 FACT/INFERENCE context 생성 |
+| `qa-runner` (결정론, LLM 없음) | 항상 실행 | `qa.evidence.check`, `qa.model_risk.evaluate`, `qa.internal_audit.evaluate`, `qa.ops.evaluate`, `qa.tool_permission.check` | EvidenceQaEngine/ModelRiskEngine/InternalAuditEngine/OpsHealthMonitor/ToolPermissionCheck 결과를 그대로 옮김. `WORKER_SPECS` 밖 — LLM Registry에 없다 |
 
 `EvidenceQaEngine.check_artifact`가 PASS/WARN/FAIL의 유일한 바인딩 소유자다. QA Worker 또는 Hermes는 Claim 결과, Finding 상태, Corrective Action 상태를 변경할 수 없다.
 

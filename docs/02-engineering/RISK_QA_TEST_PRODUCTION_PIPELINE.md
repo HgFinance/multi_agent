@@ -19,21 +19,23 @@ ResearchPacket fixture
   → packet contract / input_hash / PIT guard
   → Risk deterministic gate skeleton (binding=false)
   → risk-supervisor (Hermes-shaped Head Graph)
-      → core-risk-worker (nested LangGraph)
-      → compliance-policy-worker (peer context)
-      → derivatives-counterparty-worker (peer context)
+      → compliance-policy-worker (nested LangGraph)
   → risk-supervisor synthesis (non-binding)
   → Risk Head → QA Head department handoff
   → QA deterministic gate skeleton (binding=false)
   → qa-audit-supervisor (Hermes-shaped Head Graph)
-      → evidence-qa-worker (nested LangGraph)
-      → hallucination-critic-worker (peer context)
-      → model-and-internal-audit-worker (peer context)
-      → ops-and-permission-worker (peer context)
+      → hallucination-critic-worker (nested LangGraph)
       → incident-postmortem-worker (peer context)
   → qa-audit-supervisor synthesis (non-binding)
   → test gate / trace-replay inspection
 ```
+
+**2026-08-06 tool 강등**: 이 TEST 파이프라인(`departments/risk_qa_testkit/pipeline.py`)은 `WORKER_SPECS`
+LLM Worker만 시뮬레이션한다. `core-risk-worker`·`derivatives-counterparty-worker`(risk)와
+`evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`(qa)는 결정론
+`risk-runner`/`qa-runner`로 흡수돼 `WORKER_SPECS` 밖으로 빠졌다 — 이 TEST 시뮬레이션 대상이 아니다.
+러너는 부서의 실제 실행 경로(`risk_employee_workers.run_employee_workers()`/
+`qa_employee_workers.run_employee_workers()`)에서만 항상 실행된다.
 
 각 직원은 별도 `StateGraph`로 compile된다. 상위 Department Graph의 직원 노드는 해당 Worker Graph를 invoke한다. 직원 간 handoff에는 요약, confidence, evidence refs, status, input hash와 trace manifest만 전달하며 원문 Prompt·Secret·binding decision은 전달하지 않는다.
 

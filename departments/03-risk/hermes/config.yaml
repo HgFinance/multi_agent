@@ -32,7 +32,9 @@ agent:
   head_persona: risk-supervisor
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
-  runtime_personalities: [core-risk-worker, compliance-policy-worker, derivatives-counterparty-worker]
+  # 2026-08-06 tool 강등. LLM 직원은 compliance-policy-worker 하나뿐이고 나머지
+  # 둘은 결정론 risk-runner 하나로 합쳐졌다 — 아래 deterministic_workers 참고.
+  runtime_personalities: [compliance-policy-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60  # 개별 명령어 타임아웃
@@ -149,7 +151,7 @@ hiring_priority:
   compliance-policy-agent: {role_codes: ["RSK-04"], tier: "P0"}
   pre-trade-risk-analyst: {role_codes: ["RSK-01"], tier: "P0"}
   operational-counterparty-risk-agent: {role_codes: ["RSK-06"], tier: "P1"}
- # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 3개 Worker다.
+ # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 2명(compliance-policy-worker, risk-runner)이다.
 
 skills:
   - hermes-agent
@@ -162,14 +164,20 @@ usage:
 # Worker Graph에서 Ollama Qwen을 사용한다.
 staff_registry:
   head_count: 1
-  worker_count: 3
+  # 2026-08-06: tool 강등으로 3 -> 1. worker_count 는 **LLM 직원 수**다 -
+  #   결정론 risk-runner 는 deterministic_worker_count 로 따로 센다(조직 인원은 2명).
+  #   강등 기준: 같은 입력에서 다른 출력이 나오는 것이 산출물인가, 결정론 모듈이
+  #   이미 그 답을 만들고 있지 않은가. 둘 다 아니면 에이전트가 아니라 함수다.
+  worker_count: 1
   default_execution_count: 1
-  max_execution_count: 3
-  active_worker_count: 1
-  conditional_worker_count: 2
+  max_execution_count: 1
+  active_worker_count: 0
+  conditional_worker_count: 1
+  deterministic_worker_count: 1
+  headcount_total: 2          # 부서장 제외 - compliance-policy-worker / risk-runner
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
-  runtime_personalities: [core-risk-worker, compliance-policy-worker, derivatives-counterparty-worker]
+  runtime_personalities: [compliance-policy-worker]
   legacy_personas:
     source: agent.personalities
     runtime: compatibility_only
@@ -195,14 +203,10 @@ employee_runtime:
   binding_decision_owner: departments/03-risk/engine/risk_engine.py
   failure_action: HOLD_ESCALATE
 
+# ⚠ 이 블록은 **LLM 직원 레지스트리**다(risk_employee_workers.WORKER_SPECS 와 1:1).
+#   결정론 직원은 아래 deterministic_workers 에 따로 있다 - 섞으면
+#   "workers 에 있다 = 모델을 태운다"가 깨져서 비용·감사 판단이 흐려진다.
 workers:
-  core-risk-worker:
-    role: Market, liquidity, and pre-trade risk analyst
-    status: active
-    trigger: always
-    replaces: [market-liquidity-risk-agent, pre-trade-risk-analyst]
-    tools: [risk.trading_state.read, risk.p1.snapshot, risk.case.check]
-    output: advisory_context
   compliance-policy-worker:
     role: Point-in-time policy evidence analyst
     status: conditional
@@ -210,13 +214,29 @@ workers:
     trigger: when_compliance_evidence_exists
     tools: [risk.compliance.check]
     output: advisory_context
-  derivatives-counterparty-worker:
-    role: Derivatives and counterparty exposure analyst
-    status: conditional
-    replaces: [derivatives-margin-risk-agent, operational-counterparty-risk-agent]
-    trigger: when_counterparty_or_derivatives_signal_exists
-    tools: [risk.trading_state.record.read]
-    output: advisory_context
+
+# 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
+# 2026-08-06 tool 강등으로 core-risk-worker(RiskEngine.check_order 서술)와
+# derivatives-counterparty-worker(counterparty_health CheckOutcome 서술)가 여기로
+# 합쳐졌다. 둘 다 답이 하나로 정해지는 일이었고, 그 답은 이미 RiskEngine이 만들고
+# 있었다 - 위에 qwen3:1.7b 를 얹는 것은 나온 verdict 를 다시 서술하는 계층일 뿐이고,
+# 그 과정에서 Risk 수치가 LLM 문장을 거치는 경로만 생긴다(CLAUDE.md 개발 원칙 4·9번).
+deterministic_workers:
+  risk-runner:
+    role: Risk desk runner — market/liquidity/counterparty gate 결과 조회(결정론, LLM 없음)
+    status: active
+    trigger: always
+    llm: false
+    absorbed:            # 강등된 직원과 그 답을 원래 만들던 모듈
+      core-risk-worker: departments/03-risk/engine/risk_engine.py (RiskEngine.check_order)
+      derivatives-counterparty-worker: departments/03-risk/engine/risk_engine.py (counterparty_health CheckOutcome)
+    tools: [risk.trading_state.read, risk.p1.snapshot, risk.case.check,
+            risk.trading_state.record.read]
+    # rag_router 정책표에 항목이 없다. 라우터는 *LLM 이 무엇을 볼 수 있나*를 제한하는
+    # 장치인데 이 직원은 서술을 만들지 않는다. 항목이 없으면
+    # rag_policy_for_worker() 가 ValueError 를 내는데 그게 옳은 fail-closed 다 -
+    # 나중에 누가 이 직원을 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다.
+    rag_route: null
 
 validation_record:
   recorded_at: "2026-08-03"

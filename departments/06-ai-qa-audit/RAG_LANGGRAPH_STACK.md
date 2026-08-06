@@ -3,7 +3,13 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 구현·운영 활성화와 향후 확장을 구분한다.
 
-AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 5개 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. Worker 결과는 `qa.worker-context.v1` advisory이며 `EvidenceQaEngine`, `ModelRiskEngine`, `InternalAuditEngine`, Permission Engine, Incident 상태 머신이 최종 통제한다.
+AI-QA 부서는 Risk·Research·Trading·Quant·Accounting의 결과를 독립 검증한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. Worker 결과는 `qa.worker-context.v1` advisory이며 `EvidenceQaEngine`, `ModelRiskEngine`, `InternalAuditEngine`, Permission Engine, Incident 상태 머신이 최종 통제한다.
+
+**2026-08-06 tool 강등**: `evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`는
+결정론 `qa-runner` 하나로 합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 세
+Worker 행은 강등 전 설계를 그대로 남긴 이력 기록이다 — 실제 실행 경로는
+`departments/06-ai-qa-audit/qa_employee_workers.py`의 `qa_runner()`를 따른다. 남은 LLM Worker는
+`hallucination-critic-worker`·`incident-postmortem-worker` 둘뿐이다.
 
 ## 1. 절대 경계
 
@@ -39,10 +45,10 @@ QA에서 `AdaptiveRAG`는 LLM이 임의로 통제하는 Agent가 아니다. 입�
 
 | Worker | LangGraph 스킬 | RAG/Graph 배정 | 허용 Tool/API | 저장소 경계 |
 |---|---|---|---|---|
-| `evidence-qa-worker` | `claim_atomize`, `hybrid_retrieve`, `PIKE_decompose`, `SelfRAG_sufficiency`, `citation_verify`, `numeric_date_check` | Agentic RAG 기본. 복합 claim은 PIKE-RAG, cross-document entity는 LightRAG | `qa.evidence.check`, `POST /qa/v1/evidence/check`, 향후 `check:decomposed` | Research Evidence read-only, `audit.claim_checks`·`audit.qa_decisions`는 QA API를 통해 기록 |
+| `evidence-qa-worker` (강등, `qa-runner`로 흡수) | `claim_atomize`, `hybrid_retrieve`, `PIKE_decompose`, `SelfRAG_sufficiency`, `citation_verify`, `numeric_date_check` | Agentic RAG 기본. 복합 claim은 PIKE-RAG, cross-document entity는 LightRAG | `qa.evidence.check`, `POST /qa/v1/evidence/check`, 향후 `check:decomposed` | Research Evidence read-only, `audit.claim_checks`·`audit.qa_decisions`는 QA API를 통해 기록 |
 | `hallucination-critic-worker` | `retrieve_again`, `contradiction_check`, `citation_audit`, `verdict_lock` | Self-RAG 형태의 제한된 재검색. Evidence Worker의 근거를 우선 재사용 | `qa.evidence.rag`, 내부 Evidence API | `UNSUPPORTED`·`CONTRADICTED` claim과 근거만 읽기 |
-| `model-and-internal-audit-worker` | `lineage_traversal`, `artifact_replay`, `model_prompt_dataset_join`, `SoD_check` | `audit.artifact_lineage` 기반 GraphRAG. Neo4j는 후순위 Projection | `/qa/v1/model-risk/evaluate`, `/qa/v1/internal-audit/evaluate` | `audit.artifact_versions`, `artifact_lineage`, `agent_runs`, `tool_calls`, `access_events`, Workforce read-only |
-| `ops-and-permission-worker` | `metric_threshold`, `trace_join`, `allowlist_check`, `anomaly_summary` | 기본 RAG 없음. 운영 로그 설명이 필요할 때만 제한적 AdaptiveRAG | `/qa/v1/ops/evaluate`, `/qa/v1/tool-permission/check`, OTEL/Prometheus 내부 API | `audit.agent_runs`, `audit.tool_calls`, `audit.access_events` read-only |
+| `model-and-internal-audit-worker` (강등, `qa-runner`로 흡수) | `lineage_traversal`, `artifact_replay`, `model_prompt_dataset_join`, `SoD_check` | `audit.artifact_lineage` 기반 GraphRAG. Neo4j는 후순위 Projection | `/qa/v1/model-risk/evaluate`, `/qa/v1/internal-audit/evaluate` | `audit.artifact_versions`, `artifact_lineage`, `agent_runs`, `tool_calls`, `access_events`, Workforce read-only |
+| `ops-and-permission-worker` (강등, `qa-runner`로 흡수) | `metric_threshold`, `trace_join`, `allowlist_check`, `anomaly_summary` | 기본 RAG 없음. 운영 로그 설명이 필요할 때만 제한적 AdaptiveRAG | `/qa/v1/ops/evaluate`, `/qa/v1/tool-permission/check`, OTEL/Prometheus 내부 API | `audit.agent_runs`, `audit.tool_calls`, `audit.access_events` read-only |
 | `incident-postmortem-worker` | `timeline_normalize`, `fact_inference_split`, `entity_coreference`, `hyperedge_extract`, `human_review_gate` | HyperExtraction/Hypergraph. Self-RAG로 근거를 검증하고 LightRAG는 보조 | Incident Timeline API, 향후 `/qa/v1/incidents/{id}/extract-hypergraph` | `audit.incidents`, `incident_events`, `corrective_actions`, hyperedge 결과 |
 
 ## 4. Evidence·Citation RAG
@@ -170,14 +176,14 @@ RAG 감사 테이블에는 원문 Prompt·Secret을 저장하지 않는다. `que
 
 ## 11. 직원별 Required Skill ID
 
-공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 QA 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다.
+공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 QA 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다. `evidence-qa-worker`/`model-and-internal-audit-worker`/`ops-and-permission-worker` 세 행은 2026-08-06 tool 강등 전 설계의 이력 기록이다 — 실제로는 LangGraph Skill 자체가 없는 결정론 `qa-runner`가 대신한다(3절 참고).
 
 | Worker | Required Skill ID |
 |---|---|
-| `evidence-qa-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.pit_filter.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `rag.route.v1`, `rag.hybrid_retrieve.v1`, `rag.rerank.v1`, `rag.decompose.v1`, `rag.context_stitch.v1`, `rag.entity_link.v1`, `rag.self_check.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.numeric_temporal.v1`, `verify.contradiction.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
+| `evidence-qa-worker` (강등, `qa-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.pit_filter.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `rag.route.v1`, `rag.hybrid_retrieve.v1`, `rag.rerank.v1`, `rag.decompose.v1`, `rag.context_stitch.v1`, `rag.entity_link.v1`, `rag.self_check.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.numeric_temporal.v1`, `verify.contradiction.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `hallucination-critic-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `rag.hybrid_retrieve.v1`, `rag.self_check.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.contradiction.v1`, `audit.trace_record.v1`, `fallback.human_escalation.v1` |
-| `model-and-internal-audit-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.repository_read.v1`, `rag.route.v1`, `rag.entity_link.v1`, `rag.graph_context.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `verify.contradiction.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
-| `ops-and-permission-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
+| `model-and-internal-audit-worker` (강등, `qa-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.repository_read.v1`, `rag.route.v1`, `rag.entity_link.v1`, `rag.graph_context.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `verify.contradiction.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
+| `ops-and-permission-worker` (강등, `qa-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `incident-postmortem-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `guard.pit_filter.v1`, `rag.route.v1`, `rag.entity_link.v1`, `rag.graph_context.v1`, `rag.hyper_extract.v1`, `rag.self_check.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
 
 `rag.hyper_extract.v1`은 Incident 데이터가 충분히 쌓인 뒤 `incident-postmortem-worker`에만 추가한다. Hyperedge를 자동 Root Cause나 Finding close의 근거로 사용하지 않는다.

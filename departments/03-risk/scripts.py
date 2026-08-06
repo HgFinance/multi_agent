@@ -634,14 +634,13 @@ def _assemble_out(state: RiskState) -> dict:
     worker_execution = state.get("employee_workers") or {}
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
-    if a.get("check_results") and not worker_execution:
-        executed_agents += ["core-risk-worker"]
-    if (
-        state.get("counterparty")
-        and state.get("counterparty_llm_called", True)
-        and not worker_execution
+    # core-risk-worker/derivatives-counterparty-worker는 2026-08-06에 risk-runner
+    # 하나로 합쳐졌다 - 둘 중 하나라도 실행 근거가 있으면 risk-runner 한 번만 기록한다.
+    if not worker_execution and (
+        a.get("check_results")
+        or (state.get("counterparty") and state.get("counterparty_llm_called", True))
     ):
-        executed_agents.append("derivatives-counterparty-worker")
+        executed_agents.append("risk-runner")
     if state.get("compliance") and not worker_execution:
         executed_agents.append("compliance-policy-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
@@ -649,9 +648,8 @@ def _assemble_out(state: RiskState) -> dict:
         executed_agents.append("risk-supervisor")
     risk_agents = [
         "risk-supervisor",
-        "core-risk-worker",
+        "risk-runner",
         "compliance-policy-worker",
-        "derivatives-counterparty-worker",
     ]
     failed_agents = list(failed_worker_agents)
     if supervisor_status == "failed":
