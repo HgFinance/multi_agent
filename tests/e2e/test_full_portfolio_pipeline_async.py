@@ -72,7 +72,8 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
 
     expected_counts = {
         "research": 6,
-        "trading": 6,
+        # 2026-08-05: market-thesis-worker 를 bull/bear 로 분리해 6 -> 7 (ADR-0005).
+        "trading": 7,
         "risk": 4,
         "qa": 5,
         "accounting": 8,

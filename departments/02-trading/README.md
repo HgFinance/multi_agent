@@ -77,11 +77,16 @@ uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
     참여율·분할 **조정안만** 만든다. 예산 초과는 예산을 올리지 않고 집행을 조이는 방향으로
     제안하며(개발 원칙 9), Paper 근거와 실집행 근거를 절대 섞지 않는다. 한도 반영은
     리스크본부, 전략 승격은 퀀트본부 권한이라 이 모듈에는 YAML 쓰기 경로가 없다
-- `employee_workers.py` — `execution-planning-worker`·`venue-cost-worker` 두 직원에게만
-  위 규칙 근거를 주입하고 인용을 검증한다. 판정은 직원이 서술하기 전에 이미 끝나 있다
-- `scripts.py` — Bull/Bear 독립 병렬 토론. grounded 토론에 한해 **OrderIntent 제안**까지
-  만든다(2026-08-05). 제안에는 `risk_decision_id`가 없고 `submittable: False`라
-  OMS가 제출을 거부한다 — Risk Gate 선행이 문서가 아니라 코드로 강제된다
+- `employee_workers.py` — 직원 3명. **LLM 은 Bull/Bear 둘뿐**이고 나머지는 결정론
+  `desk-runner` 하나로 합쳐졌다(2026-08-06 tool 강등). 러너가 위 규칙 근거를 받아
+  판정을 그대로 옮긴다 — 판정은 러너가 서술하기 전에 이미 끝나 있다
+- `scripts.py` — Bull/Bear 독립 병렬 **2라운드** 토론. 두 토론자는 직원 런타임
+  (LangGraph + Ollama)이고 사회는 부서장 Hermes(`trading-supervisor`)가 본다.
+  토론자는 라운드마다 답하기 전에 혼자 사고하며(`config.debate.max_thinking_passes`),
+  그 사고는 인용 근거가 아니고 상대에게 넘어가지 않는다. grounded 토론에 한해
+  **OrderIntent 제안**까지 만든다(2026-08-05). 제안에는 `risk_decision_id`가 없고
+  `submittable: False`라 OMS가 제출을 거부한다 — Risk Gate 선행이 문서가 아니라
+  코드로 강제된다
 - `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 주문 판정 로직이 없다.**
   Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
   설계서: [TRADING_DOMAIN_API_SPEC.md](../../docs/02-engineering/TRADING_DOMAIN_API_SPEC.md)

@@ -128,7 +128,10 @@ def _payload() -> dict[str, Any]:
 
 
 def test_profile_worker_registry_counts_and_models() -> None:
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 6, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
+    # 이 표는 **LLM 직원 수**다. 2026-08-06 트레이딩 tool 강등으로 7 -> 2 —
+    # 결정론 desk-runner 는 config 의 deterministic_workers 로 빠져서 여기 안 센다
+    # (조직 인원은 3명). 강등 기준은 departments/02-trading/hermes/config.yaml 참고.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -283,7 +286,9 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         "ceo": (1, 1, 0),
         "hr": (5, 2, 3),
         "research": (6, 2, 4),
-        "trading": (6, 2, 4),
+        # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
+        # desk-runner 가 결정론으로 항상 모아 온다.
+        "trading": (2, 2, 0),
         "risk": (4, 2, 2),
         "quant-backtest": (7, 2, 5),
         "accounting-portfolio": (8, 2, 6),

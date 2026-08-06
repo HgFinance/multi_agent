@@ -4,7 +4,7 @@
 
 현재 직원 모델은 검증 전까지 `qwen3:1.7b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark → HR 제안 → QA 독립 검증 → CEO 승인 후에만 Worker별로 변경한다. 자동 교체와 무제한 재시도는 금지한다. 기존 `Modelfile` alias는 호환·개발용이며, 실행 기준은 각 부서의 `employee_workers.py` Registry다.
 
-> 현재 구현 범위: CEO 1, HR 5, Research 6, Trading 6, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5 Worker. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
+> 현재 구현 범위: CEO 1, HR 5, Research 6, Trading 7, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5 Worker. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
 >
 > 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)
 >

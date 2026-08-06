@@ -12,15 +12,39 @@
 내용 근거: docs/04-organization/AGENT_EMPLOYEE_PROFILES.md TRD-01/TRD-02, 200행
       "동일 Evidence에서 찬반 논거를 독립 생성 | LangGraph Parallel Nodes".
 
-범위 (2026-08-03 1차) - 직원 2명만:
+범위 - 토론자 2명 + 부서장 사회 1명:
   validate_packet   결정론 - 필수 필드, PIT 신선도, evidence_quality 게이트, Claim 색인
-  bull_researcher   TRD-01 (LLM, hermes/config.yaml 페르소나 원문)  ┐ 병렬
-  bear_researcher   TRD-02 (LLM, hermes/config.yaml 페르소나 원문)  ┘ 서로 못 본다
+  bull_researcher   TRD-01 (**직원 LLM**, 사고 -> 답변)  ┐ 병렬
+  bear_researcher   TRD-02 (**직원 LLM**, 사고 -> 답변)  ┘ 서로 못 본다
+  contest_round1    결정론 - 1라운드 쟁점을 Claim id 로만 정리
+  supervise_round2  **부서장 LLM(Hermes)** - 2라운드 초점을 좁힌다. Claim id 만 본다
+  bull/bear_rebuttal 2라운드. 상대 원문 없이 id 목록 + 감독 초점만 받는다
   debate_merge      결정론 - 인용 검증 / 독립성 측정 / 쟁점 대조
+  synthesize        결정론 - 3라운드 종합 (verdict 없음)
+  supervisor_review **부서장 LLM** - 마감 소견. escalate 를 켤 수만 있다
   propose_intent    결정론 - grounded 토론에서만 OrderIntent **제안**을 만든다 (2026-08-05)
+  employee_workers  직원 레지스트리 자문 (binding: false)
   notion_report     Reporter (결정론 - notion_reporter.upload_debate, LLM 아님) - 결과를
                     Notion Trading DB(NOTION_TRADING_DB)에 Projection 으로 올린다.
                     업로드가 실패해도 grounded/escalate 는 못 바꾼다.
+
+**토론자와 감독자는 다른 런타임이다 (2026-08-06).** CLAUDE.md 실행 계층 그대로 —
+부서는 Hermes, 부서 안의 직원은 독립 LangGraph + Ollama. Bull/Bear 는 직원이므로
+`_worker_chat`(Ollama `qwen3:1.7b`)으로 돌고, 사회는 부서장 페르소나
+`trading-supervisor` 가 `_hermes_chat` 으로 본다. 종전에는 양측 다 부서장 모델이라
+"부서장이 감독한다"가 기록상 구분되지 않았다.
+
+**감독자 권한은 안전한 방향으로만 열려 있다.** 초점을 Claim 색인 안에서 좁히고,
+라운드를 닫고, escalate 를 켤 수 있다. 반대로 색인 밖 Claim 을 만들거나, 깨진
+1라운드 위에 2라운드를 열거나, grounded 를 바꾸거나, escalate 를 끄지는 못한다 —
+`supervise_round2` / `supervisor_review` 가 그 비대칭을 코드로 집행한다.
+
+**토론자는 답하기 전에 혼자 생각한다 (2026-08-06).** 라운드마다 `_think` 루프가
+돌고(`config.debate.max_thinking_passes` 상한), 그 사고는 자기 답변 프롬프트에만
+붙는다. 사고는 **근거가 아니다** — claim_refs 로 들어가지 않고, 인용 검증 대상도
+독립성 측정 대상도 아니며, 상대에게 넘어가지 않는다. 사고 호출이 실패해도
+fallbacks 에 올리지 않는다: Ollama 가 한 번 끊길 때마다 escalate 가 켜지면
+논지 품질과 무관한 이유로 토론이 보류된다.
 
 **토론 -> OrderIntent 제안까지 (2026-08-05 추가).** 토론 결과가 아무 데도 안 닿으면
 근거만 쌓이고 주문이 안 나온다. 그래서 `propose_intent` 를 붙였는데, 붙이면서 지킨 선 넷:
@@ -123,9 +147,20 @@ class DebateState(TypedDict, total=False):
     debate_opened: bool
     bull: dict | None
     bear: dict | None
+    contest_r1: dict             # 1라운드 쟁점 목록 - **Claim id 만, 문장 없음**
+    bull_r2: dict | None         # 2라운드 보강 (서로 다른 키라 reducer 불필요)
+    bear_r2: dict | None
+    # 각 측이 답하기 전에 혼자 한 사고. **인용 근거가 아니다** - claim_refs 로 안 들어간다.
+    # 서로 다른 키라 병렬 노드가 같은 칸에 안 쓴다(reducer 불필요).
+    bull_thoughts: list[dict]
+    bear_thoughts: list[dict]
+    supervisor_round2: dict      # 부서장 감독 - 2라운드 초점. **좁히기만 한다**
+    supervisor: dict             # 부서장 감독 - 마감 소견. escalate 를 켜기만 한다
     citations: dict              # 결정론 인용 검증
     independence: dict           # 결정론 독립성 측정
     contested: dict              # 양측이 같은 Claim 을 다뤘는지
+    synthesis: dict              # 3라운드 결정론 종합 - verdict 를 만들지 않는다
+    employee_workers: dict       # 직원 7명 자문 - binding: false
     grounded: bool
     escalate: bool
     intent_inputs: dict | None   # 호출자가 준 Signal/시세/NAV/현재수량 - 없으면 제안 없음
@@ -134,6 +169,9 @@ class DebateState(TypedDict, total=False):
     report_markdown: str
     # 병렬 노드 둘이 같은 키에 쓰므로 reducer 가 없으면 LangGraph 가 InvalidUpdateError 를 낸다.
     fallbacks: Annotated[list[dict], operator.add]
+    # 실행당 LLM 호출 수를 런타임별로 센다. **직원 분리가 실제로 싼지를 재는 값이다** -
+    # "부서장 혼자 하면 비싸다"는 주장이라 실측 없이 유지 근거가 될 수 없다.
+    llm_calls: Annotated[list[dict], operator.add]
 
 
 class DebatePipelineNodeError(RuntimeError):
@@ -205,6 +243,17 @@ def _max_attempts() -> int:
     return 3
 
 
+def _max_thinking_passes() -> int:
+    """한 라운드에서 답하기 전에 혼자 생각할 수 있는 최대 횟수.
+
+    상한이 필요한 이유는 비용이 아니라 종료다 - `need_more_thought` 를 모델이 정하므로
+    상한이 없으면 스스로 "더 생각하겠다"를 반복하는 실행이 나온다. 튜닝 대상 숫자라
+    코드가 아니라 config.yaml 에 둔다(규약: 튜닝값은 YAML).
+    """
+    return int((_config().get("config") or {}).get("debate", {})
+               .get("max_thinking_passes", 2))
+
+
 # ── LangSmith 관측성 ──────────────────────────────────────────────────────
 # 기본은 꺼져 있다 (LANGSMITH_TRACING=false). 켜면 이 그래프의 노드·LLM 호출이
 # 외부(LangSmith)로 나간다 - 토론 Trace 에는 미공개 Research Packet 과 종목·논거가
@@ -231,8 +280,16 @@ def _langsmith_handoff(trace_id: str) -> dict[str, Any]:
 
 
 def _model_version() -> str:
-    """F08 완료 조건 "Model, Prompt, 입력 Snapshot과 결과를 기록한다" 중 Model."""
+    """F08 완료 조건 "Model, Prompt, 입력 Snapshot과 결과를 기록한다" 중 Model.
+
+    **부서장 모델이다.** 토론자는 직원 모델을 쓰므로 `_worker_model_version()` 이 따로 있다.
+    """
     return str((_config().get("model") or {}).get("default", "unknown"))
+
+
+def _worker_model_version() -> str:
+    """토론자(Bull/Bear) 모델. 부서장과 다른 런타임이라 기록도 따로 남는다."""
+    return str((_config().get("employee_runtime") or {}).get("model_default", "unknown"))
 
 
 def _prompt_version(persona_name: str) -> str:
@@ -337,6 +394,100 @@ def _hermes_chat(persona: str, task: str) -> str:
     return agent.chat(task)
 
 
+def _worker_chat(persona: str, task: str) -> str:
+    """직원 LLM. **부서장 모델이 아니다.**
+
+    CLAUDE.md 실행 계층: 부서는 Hermes, 부서 안의 직원은 독립 LangGraph + Ollama.
+    Bull/Bear 는 직원(TRD-01/TRD-02)이므로 직원 런타임으로 돈다 - 여기를 부서장
+    모델로 돌리면 감독자와 토론자가 같은 모델이 되어 "부서장이 감독한다"가
+    말뿐이 된다. 부서장은 `_hermes_chat` 으로 감독 노드에서만 등장한다.
+    """
+    try:
+        from departments.employee_worker_runtime import default_worker_llm
+    except ModuleNotFoundError:  # 저장소 루트가 sys.path 에 없는 단독 실행 경로
+        from employee_worker_runtime import default_worker_llm
+
+    return default_worker_llm(persona, task)
+
+
+# ── 사고(thinking) - 답하기 전에 혼자 생각한다 ─────────────────────────────
+# **생각은 근거가 아니다.** notes 는 claim_refs 로 들어가지 않고 인용 검증 대상도
+# 아니며, 독립성 측정(_sentences)도 보지 않는다. 상대에게도 절대 안 넘어간다 -
+# 자기 사고를 상대가 읽으면 2라운드가 앵커링되고 ADR-0005 가 무너진다.
+def _parse_thought(out: str) -> dict:
+    """사고 응답 파서. `_parse_json_block` 은 claim_refs 를 요구하는데 사고에는 없다 -
+    사고는 인용을 만들지 않기 때문이다. 그 차이를 살리려고 따로 둔다."""
+    start, end = out.find("{"), out.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("사고 응답에 JSON 이 없다")
+    note = json.loads(out[start:end + 1])
+    if not isinstance(note.get("notes"), list):
+        raise TypeError("사고 결과의 notes 가 배열이 아니다")
+    return note
+
+
+def _think_task(state: DebateState, *, side: str, round_no: int,
+                previous: list[dict]) -> str:
+    stance = "bullish" if side == "bull" else "bearish"
+    seen = [n for note in previous for n in (note.get("notes") or [])]
+    carry = ("\n\nYour earlier notes this round:\n"
+             + "\n".join(f"- {n}" for n in seen)) if seen else ""
+    return f"""Think privately before you answer. This is scratch work, not your answer.
+
+You hold the {stance} position in an independent debate (round {round_no}). Nobody else
+ever sees these notes — not the other side, not the report. Use them to work out what the
+claims actually support, where your own position is weakest, and what you still need to
+check. Do not decide quantity, side or order type.
+
+Set need_more_thought to true ONLY if another pass would change what you write. Saying
+"true" costs a round and you have a hard cap; when your notes stop changing, say false.
+
+Schema (JSON only):
+{{"notes": ["short Korean notes to yourself"],
+ "need_more_thought": false}}
+
+Claims:
+{_substrate(state)}{carry}"""
+
+
+def _think(state: DebateState, *, side: str, persona: str, round_no: int,
+           chat) -> list[dict]:
+    """답하기 전 사고 루프. **실패해도 토론을 막지 않는다.**
+
+    사고는 보조 과정이라 여기서 예외가 나면 notes 없이 답변 단계로 간다 - fallbacks
+    에 넣지 않는다. 넣으면 Ollama 가 한 번 끊길 때마다 `debate_merge` 가 escalate 를
+    켜서, 논지 품질과 무관한 이유로 토론이 통째로 보류된다.
+    """
+    call = chat or _worker_chat
+    persona_text = _persona(persona)
+    passes: list[dict] = []
+    for index in range(1, max(_max_thinking_passes(), 1) + 1):
+        try:
+            note = _parse_thought(call(
+                persona_text,
+                _think_task(state, side=side, round_no=round_no, previous=passes)))
+            record = {"pass": index, "round": round_no,
+                      "notes": [str(n) for n in (note.get("notes") or [])],
+                      "need_more_thought": bool(note.get("need_more_thought"))}
+        except Exception as exc:  # noqa: BLE001 - 사고 실패는 토론 실패가 아니다
+            passes.append({"pass": index, "round": round_no, "notes": [],
+                           "error": type(exc).__name__, "detail": _sanitize(exc)})
+            break
+        passes.append(record)
+        if not record["need_more_thought"]:
+            break
+    return passes
+
+
+def _thought_block(passes: list[dict], round_no: int) -> str:
+    """자기 사고를 답변 프롬프트에 붙인다. **자기 것만** — 상대 사고는 인자로도 안 온다."""
+    notes = [n for p in passes if p.get("round") == round_no for n in (p.get("notes") or [])]
+    if not notes:
+        return ""
+    return ("\n\nYour own private notes (yours alone; cite claims, not these notes):\n"
+            + "\n".join(f"- {n}" for n in notes))
+
+
 def _substrate(state: DebateState) -> str:
     """Bull 과 Bear 가 **똑같이** 받는 근거면. 여기 이외의 입력은 어느 쪽에도 주지 않는다."""
     packet = state["research_packet"]
@@ -399,17 +550,40 @@ Claims:
 
 
 def _researcher(state: DebateState, *, key: str, persona: str, build_task,
-                required: tuple[str, ...], who: str, chat) -> dict:
+                required: tuple[str, ...], who: str, chat,
+                side: str | None = None, round_no: int = 1) -> dict:
+    """사고 -> 답변. 두 단계 다 **직원 런타임**이고 부서장 모델이 아니다.
+
+    `side` 를 주면 답하기 전에 `_think` 루프를 돈다. 그 사고 기록은 `{side}_thoughts`
+    로 나가고 답변 note 안에는 안 들어간다 - 독립성 측정과 인용 검증이 서술만 보게
+    하려는 것이다.
+    """
     if not state.get("debate_opened"):
         return {}
-    call = chat or _hermes_chat
+    call = chat or _worker_chat
     persona_text, task = _persona(persona), build_task(state)
+
+    thoughts: list[dict] = []
+    if side is not None:
+        thoughts = _think(state, side=side, persona=persona, round_no=round_no, chat=call)
+        task += _thought_block(thoughts, round_no)
+    extra = {f"{side}_thoughts": (list(state.get(f"{side}_thoughts") or []) + thoughts)} \
+        if side is not None else {}
+
+    def counted(answer_calls: int) -> dict:
+        # 사고 1패스 = 1콜, 답변 시도 1회 = 1콜. 전부 **직원 런타임**이다.
+        return {"llm_calls": [{"runtime": "employee", "stage": key,
+                               "thinking": len(thoughts), "answer": answer_calls,
+                               "calls": len(thoughts) + answer_calls}]}
+
     repair, last = "", None
     for attempt in range(1, _max_attempts() + 1):
         try:
             note = _parse_json_block(call(persona_text, task + repair), required, who)
             note["attempts"] = attempt
-            return {key: note}
+            # 사고 횟수는 기록만 한다 - 논지 내용이 아니라 과정이라 인용·독립성 대상이 아니다.
+            note["thinking_passes"] = len(thoughts)
+            return {key: note, **extra, **counted(attempt)}
         except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
             last = exc
             # 일반 문구만으로는 같은 실수를 반복한다 - 무엇이 거부됐는지 알려준다(리서치본부 실측).
@@ -418,29 +592,120 @@ def _researcher(state: DebateState, *, key: str, persona: str, build_task,
                       f"({', '.join(required)}) present and claim_refs as a JSON array.")
     # 재시도를 다 쓰고도 실패하면 파이프라인을 죽이지 않고 fallback 으로 남긴다 - debate_merge 가
     # grounded=False / escalate=True 로 떨어뜨린다 (F08 "재시도 후 PASS", workflow on_failure HOLD).
-    return {key: None,
+    return {key: None, **extra, **counted(_max_attempts()),
             "fallbacks": [_fallback(f"{key}_researcher", last, attempts=_max_attempts())]}
 
 
 def bull_researcher(state: DebateState, *, chat=None) -> dict:
     return _researcher(state, key="bull", persona="bull-researcher", build_task=_bull_task,
-                       required=_BULL_KEYS, who="Bull", chat=chat)
+                       required=_BULL_KEYS, who="Bull", chat=chat,
+                       side="bull", round_no=1)
 
 
 def bear_researcher(state: DebateState, *, chat=None) -> dict:
     return _researcher(state, key="bear", persona="bear-researcher", build_task=_bear_task,
-                       required=_BEAR_KEYS, who="Bear", chat=chat)
+                       required=_BEAR_KEYS, who="Bear", chat=chat,
+                       side="bear", round_no=1)
+
+
+# ── 노드 4: 2라운드 보강 (LLM - 병렬, **Claim id 목록만** 받는다) ──────────
+_REBUTTAL_KEYS = ("addressed", "still_unaddressed", "added_case", "claim_refs")
+
+
+def _rebuttal_task(state: DebateState, *, side: str) -> str:
+    """2라운드 프롬프트. **상대 문장이 한 글자도 안 들어간다.**
+
+    넘기는 것은 Claim id 목록뿐이다. 상대 원문을 주면 먼저 말한 쪽이 앵커가 되어
+    확증편향이 생기고, 그것이 두 직원을 나눈 이유를 무효로 만든다(ADR-0005).
+    그래서 요구도 "상대를 반박하라"가 아니라 "네가 아직 안 다룬 Claim 을 다뤄라"다.
+    """
+    contest = state.get("contest_r1") or {}
+    opponent = "bear" if side == "bull" else "bull"
+    mine = contest.get(f"{side}_only_refs") or []
+    theirs = contest.get(f"{opponent}_only_refs") or []
+    untouched = contest.get("untouched_refs") or []
+    claims = state.get("claims", {})
+    stance = "bullish" if side == "bull" else "bearish"
+    # 부서장 감독 지시. 사회자가 초점을 좁힌 것이며 **양측에 똑같이** 간다 -
+    # 한쪽만 지시를 받으면 사회가 아니라 편들기가 된다.
+    moderation = state.get("supervisor_round2") or {}
+    focus = moderation.get("focus_refs") or []
+    focus_block = (f"\nThe department head is moderating this debate and asks both sides to "
+                   f"prioritise these claims: {focus}"
+                   f"\nModerator note: {moderation.get('note') or '—'}") if focus else ""
+    return f"""Round 2 of an independent debate. You already produced your Round 1 case.
+
+You are NOT shown the other side's text and never will be — only which claim ids each
+side cited. Do not guess, reconstruct or quote the opposing argument.
+
+Claims the opposing side cited but you did not: {theirs or "none"}
+Claims only you cited: {mine or "none"}
+Claims neither side has addressed: {untouched or "none"}{focus_block}
+
+Task: for the claims you have not yet addressed, state what they mean **from your own
+{stance} position**. If a claim genuinely does not change your case, say so and put it in
+still_unaddressed with the reason. Do not decide quantity, side or order type.
+
+Schema (JSON only):
+{{"addressed": ["claim ids you now address"],
+ "still_unaddressed": ["claim ids you deliberately leave, Korean reason after a colon"],
+ "added_case": "2-3 sentences in Korean - what your position adds after these claims",
+ "claim_refs": ["every claim id used in this reply"]}}
+
+Claim index:
+{json.dumps(claims, ensure_ascii=False, indent=1)}"""
+
+
+def _bull_rebuttal_task(state: DebateState) -> str:
+    return _rebuttal_task(state, side="bull")
+
+
+def _bear_rebuttal_task(state: DebateState) -> str:
+    return _rebuttal_task(state, side="bear")
+
+
+def _rebuttal(state: DebateState, *, side: str, chat) -> dict:
+    """2라운드 실행. **R1 산출이 없으면 아예 돌지 않는다.**
+
+    `_researcher` 의 게이트는 `debate_opened` 하나뿐이라 R2 조건을 모른다. 실패한
+    1라운드 위에 LLM 을 두 번 더 태울 이유가 없으므로 여기서 먼저 막는다.
+    """
+    if not (state.get("bull") and state.get("bear")):
+        return {}
+    if (state.get("supervisor_round2") or {}).get("open_round2") is False:
+        # 부서장이 라운드를 닫았다. **닫기만 할 수 있다** - 여는 판단은 위 게이트가 한다.
+        return {}
+    persona = f"{side}-researcher"
+    build = _bull_rebuttal_task if side == "bull" else _bear_rebuttal_task
+    return _researcher(state, key=f"{side}_r2", persona=persona, build_task=build,
+                       required=_REBUTTAL_KEYS, who=f"{side.capitalize()} R2", chat=chat,
+                       side=side, round_no=2)
+
+
+def bull_rebuttal(state: DebateState, *, chat=None) -> dict:
+    return _rebuttal(state, side="bull", chat=chat)
+
+
+def bear_rebuttal(state: DebateState, *, chat=None) -> dict:
+    return _rebuttal(state, side="bear", chat=chat)
 
 
 # ── 노드 4: 대조 (결정론 - 판정 아님) ──────────────────────────────────────
+# 서술이 아닌 필드. **이름으로 명시한다** - 2라운드의 addressed/still_unaddressed 는
+# Claim id 목록이라 문장으로 세면 독립성 수치가 오염된다. 길이 필터(>12자)가 우연히
+# 걸러주긴 하지만(fact:0=6자, catalyst:12=11자) 우연에 기대지 않는다.
+_REF_FIELDS = frozenset({"claim_refs", "addressed", "still_unaddressed"})
+
+
 def _sentences(obj) -> set[str]:
     """서술 필드를 문장 단위로 정규화. 독립성(Bull 문장 복제 0) 측정용.
 
-    서술이 아닌 필드(claim_refs, attempts 같은 메타)는 이름이 아니라 **타입으로** 거른다 -
-    이름으로 거르면 새 메타 필드가 늘 때마다 여기서 터진다(실측: attempts 추가 때 터졌다)."""
+    메타 필드(attempts 같은 것)는 이름이 아니라 **타입으로** 거른다 - 이름으로 거르면
+    새 메타 필드가 늘 때마다 여기서 터진다(실측: attempts 추가 때 터졌다).
+    id 목록 필드만 _REF_FIELDS 로 이름 지정해 뺀다."""
     parts: list[str] = []
     for key, value in (obj or {}).items():
-        if key == "claim_refs":
+        if key in _REF_FIELDS:
             continue
         if isinstance(value, str):
             parts.append(value)
@@ -450,25 +715,236 @@ def _sentences(obj) -> set[str]:
     return {s for s in (" ".join(p.split()) for p in re.split(r"[.!?。\n]", text)) if len(s) > 12}
 
 
+def _contest(claims: dict, bull_refs, bear_refs) -> dict:
+    """쟁점 집합 대수. `contest_round1` 과 `debate_merge` 가 **공유한다**.
+
+    복붙하면 한쪽만 고쳐질 자리다. 색인 밖 인용은 여기서 조용히 빠진다 -
+    날조 판정은 citations 가 따로 한다.
+    """
+    b = set(bull_refs) & set(claims)
+    r = set(bear_refs) & set(claims)
+    return {"contested_refs": sorted(b & r), "bull_only_refs": sorted(b - r),
+            "bear_only_refs": sorted(r - b),
+            "untouched_refs": sorted(set(claims) - b - r)}
+
+
+def _refs_of(*notes) -> list[str]:
+    """여러 라운드 note 의 claim_refs 합집합(순서 보존)."""
+    seen: list[str] = []
+    for note in notes:
+        for ref in (note or {}).get("claim_refs", []):
+            if ref not in seen:
+                seen.append(ref)
+    return seen
+
+
+# ── 노드 3: 1라운드 쟁점 대조 (결정론 - 문장을 만들지 않는다) ──────────────
+def contest_round1(state: DebateState) -> dict:
+    """1라운드 인용을 쟁점 목록으로 바꾼다. **Claim id 만 만들고 문장은 안 만든다.**
+
+    2라운드가 받을 유일한 입력이다. 여기서 상대 문장을 한 글자라도 실으면 앵커링이
+    생기고 두 직원을 나눈 의미가 사라진다(ADR-0005).
+    """
+    claims = state.get("claims", {})
+    bull_refs = list((state.get("bull") or {}).get("claim_refs", []))
+    bear_refs = list((state.get("bear") or {}).get("claim_refs", []))
+    return {"contest_r1": {**_contest(claims, bull_refs, bear_refs),
+                           "round": 1, "decided_by": "deterministic"}}
+
+
+# ── 부서장 감독 (Hermes - 사회자이지 판정자가 아니다) ──────────────────────
+# **감독자가 할 수 있는 것과 없는 것을 코드로 가른다.**
+#   할 수 있다 : 2라운드 초점을 Claim 색인 안에서 좁힌다 / 라운드를 닫는다 /
+#                escalate 를 **켠다** / 마감 소견을 쓴다
+#   할 수 없다 : 색인 밖 Claim 을 초점으로 만든다 / 1라운드가 성립했는데 라운드를
+#                억지로 연다 / grounded 를 바꾼다 / escalate 를 **끈다** /
+#                수량·방향·verdict 를 만든다
+# 안전한 방향(덜 말하고, 더 올리는 쪽)으로만 권한을 준 것이다 - 개발 원칙 9번.
+_SUPERVISOR_PERSONA = "trading-supervisor"
+_MODERATION_KEYS = ("focus_refs", "note", "open_round2")
+_REVIEW_KEYS = ("moderation", "unresolved", "recommend_escalate")
+
+
+def _supervisor_chat(state: DebateState, task: str, required: tuple[str, ...],
+                     chat) -> dict | None:
+    """부서장 호출. **실패하면 None 이고 토론은 그대로 간다.**
+
+    사회자가 죽었다고 토론을 멈추지 않는다 - 결정론 경로가 이미 라운드를 열고 닫을 수
+    있기 때문이다. 대신 사유는 supervisor 블록에 남는다.
+    """
+    call = chat or _hermes_chat
+    try:
+        raw = call(_persona(_SUPERVISOR_PERSONA), task)
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("감독 응답에 JSON 이 없다")
+        note = json.loads(raw[start:end + 1])
+        missing = [k for k in required if k not in note]
+        if missing:
+            raise ValueError(f"감독 결과에 {missing} 가 없다")
+        return note
+    except Exception as exc:  # noqa: BLE001 - 감독 실패는 토론 실패가 아니다
+        return {"_error": type(exc).__name__, "_detail": _sanitize(exc)}
+
+
+def supervise_round2(state: DebateState, *, chat=None) -> dict:
+    """부서장이 2라운드를 감독한다. **Claim id 만 보고 양측 원문은 안 본다.**
+
+    사회자에게 논지 원문을 주면 사회자가 심판이 되고, 그 요약이 다음 라운드 프롬프트로
+    들어가 양측이 같은 문장에 앵커링된다 - 두 직원을 나눈 이유가 사라진다(ADR-0005).
+    """
+    claims = state.get("claims", {})
+    contest = state.get("contest_r1") or {}
+    deterministic = sorted(set(contest.get("untouched_refs") or [])
+                           | set(contest.get("bull_only_refs") or [])
+                           | set(contest.get("bear_only_refs") or []))
+    if not (state.get("bull") and state.get("bear")):
+        return {"supervisor_round2": {
+            "open_round2": False, "focus_refs": [], "decided_by": "deterministic",
+            "note": "1라운드가 성립하지 않아 감독을 부르지 않았다", "authoritative": False}}
+
+    task = f"""You are moderating round 2 of an independent Bull/Bear debate in your own
+department. You see only claim ids and the deterministic contest summary — never either
+side's text — because your summary would otherwise anchor both sides in round 2.
+
+Contested by both: {contest.get("contested_refs") or []}
+Cited only by one side: {sorted(set(contest.get("bull_only_refs") or []) | set(contest.get("bear_only_refs") or []))}
+Addressed by neither: {contest.get("untouched_refs") or []}
+
+Pick the claim ids round 2 should prioritise. Choose only from the claim index below; ids
+outside it are dropped. Set open_round2 to false only if another round would add nothing.
+You do not decide direction, quantity, or whether the trade happens.
+
+Schema (JSON only):
+{{"focus_refs": ["claim ids to prioritise"],
+ "note": "1-2 sentences in Korean for both sides",
+ "open_round2": true}}
+
+Claim index:
+{json.dumps(claims, ensure_ascii=False, indent=1)}"""
+
+    note = _supervisor_chat(state, task, _MODERATION_KEYS, chat)
+    # 감독은 **상용 모델**이라 콜 수를 따로 센다 - 실패한 호출도 과금된다.
+    billed = {"llm_calls": [{"runtime": "supervisor", "stage": "supervise_round2",
+                             "thinking": 0, "answer": 1, "calls": 1}]}
+    if note is None or "_error" in note:
+        # 감독이 없으면 결정론 초점으로 간다. 라운드는 계속 열린다.
+        return {**billed, "supervisor_round2": {
+            "open_round2": True, "focus_refs": deterministic,
+            "note": "감독 호출 실패 — 결정론 초점(미접촉 + 한쪽만 인용)으로 진행한다",
+            "decided_by": "deterministic_fallback",
+            "error": (note or {}).get("_error"), "authoritative": False}}
+
+    requested = [str(r) for r in (note.get("focus_refs") or [])]
+    focus = [ref for ref in requested if ref in claims]
+    dropped = sorted(set(requested) - set(focus))
+    return {**billed, "supervisor_round2": {
+        # 라운드를 **닫을 수만** 있다. open_round2=True 여도 1라운드 게이트가 우선한다.
+        "open_round2": bool(note.get("open_round2", True)),
+        "focus_refs": focus or deterministic,
+        "dropped_refs": dropped,          # 색인 밖 초점은 조용히 사라지지 않는다
+        "note": str(note.get("note") or "")[:500],
+        "decided_by": "trading-supervisor",
+        "moderated_by": _prompt_version(_SUPERVISOR_PERSONA),
+        "authoritative": False,
+    }}
+
+
+def supervisor_review(state: DebateState, *, chat=None) -> dict:
+    """마감 소견. **escalate 를 켤 수는 있고 끌 수는 없다.**
+
+    여기서는 양측 논지를 다 본다 - 토론이 이미 닫혔고, 부서장의 일이 "Bull/Bear 토론을
+    통합해 Case 로 만드는 것"이기 때문이다(config.yaml trading-supervisor). 다만 통합
+    결과가 판정이 되지는 않는다: grounded 와 인용·독립성은 앞에서 결정론으로 확정됐다.
+    """
+    synthesis = state.get("synthesis") or {}
+    deterministic_escalate = bool(state.get("escalate"))
+    if not (state.get("bull") and state.get("bear")):
+        # 감독할 토론이 없다. 근거 부족·PIT 위반으로 안 열렸거나 한쪽이 초안을 못 냈다 -
+        # 어느 쪽이든 부서장을 부를 이유가 없고, escalate 는 이미 결정론이 세웠다.
+        return {"supervisor": {
+            "available": False, "decided_by": "deterministic",
+            "note": "토론이 성립하지 않아 감독을 부르지 않았다", "authoritative": False}}
+
+    task = f"""The debate is closed. Write your moderation note as the department head.
+
+Deterministic result (you cannot change these):
+  grounded={state.get("grounded")} escalate={deterministic_escalate}
+  evidence_coverage={synthesis.get("evidence_coverage")}
+  still_contested={synthesis.get("still_contested")}
+  unresolved_issues={synthesis.get("unresolved_issues")}
+  unaddressed_claims={synthesis.get("unaddressed_claims")}
+  independence={synthesis.get("independence")}
+
+Bull case: {json.dumps(state.get("bull"), ensure_ascii=False)}
+Bear case: {json.dumps(state.get("bear"), ensure_ascii=False)}
+Bull round 2: {json.dumps(state.get("bull_r2"), ensure_ascii=False)}
+Bear round 2: {json.dumps(state.get("bear_r2"), ensure_ascii=False)}
+
+Say what the debate settled and what it did not. Recommend escalation if a human should
+look before this goes further. You do not set direction, quantity, or approval — Risk
+decides that and you cannot clear an escalation the deterministic checks raised.
+
+Schema (JSON only):
+{{"moderation": "3-5 sentences in Korean",
+ "unresolved": ["claim ids still open"],
+ "recommend_escalate": false}}"""
+
+    note = _supervisor_chat(state, task, _REVIEW_KEYS, chat)
+    billed = {"llm_calls": [{"runtime": "supervisor", "stage": "supervisor_review",
+                             "thinking": 0, "answer": 1, "calls": 1}]}
+    if note is None or "_error" in note:
+        return {**billed,
+                "supervisor": {"available": False, "decided_by": "trading-supervisor",
+                               "error": (note or {}).get("_error"),
+                               "note": "감독 소견 없음 — 결정론 판정은 그대로다",
+                               "authoritative": False}}
+    claims = state.get("claims", {})
+    recommends = bool(note.get("recommend_escalate"))
+    return {
+        **billed,
+        "supervisor": {
+            "available": True,
+            "moderation": str(note.get("moderation") or "")[:2000],
+            "unresolved": [r for r in (note.get("unresolved") or []) if r in claims],
+            "recommend_escalate": recommends,
+            "moderated_by": _prompt_version(_SUPERVISOR_PERSONA),
+            "authoritative": False,
+        },
+        # **켜기만 한다.** 결정론이 escalate 를 세웠으면 감독이 내려도 그대로 True 다.
+        "escalate": deterministic_escalate or recommends,
+    }
+
+
 def debate_merge(state: DebateState) -> dict:
-    claims, bull, bear = state.get("claims", {}), state.get("bull"), state.get("bear")
-    bull_refs = list((bull or {}).get("claim_refs", []))
-    bear_refs = list((bear or {}).get("claim_refs", []))
+    """두 라운드 합산 대조. 인용·독립성·쟁점을 라운드별로 나눠 본다."""
+    claims = state.get("claims", {})
+    bull, bear = state.get("bull"), state.get("bear")
+    bull_r2, bear_r2 = state.get("bull_r2"), state.get("bear_r2")
+
+    bull_refs = _refs_of(bull, bull_r2)
+    bear_refs = _refs_of(bear, bear_r2)
 
     # 인용 검증 - 색인에 없는 Claim ID 는 날조다. LLM 이 아니라 여기서 잡는다.
     unknown = sorted({r for r in bull_refs + bear_refs if r not in claims})
     citations = {"bull_refs": bull_refs, "bear_refs": bear_refs, "unknown_refs": unknown,
                  "bull_uncited": bool(bull) and not bull_refs,
-                 "bear_uncited": bool(bear) and not bear_refs}
+                 "bear_uncited": bool(bear) and not bear_refs,
+                 "by_round": {
+                     "r1": {"bull": _refs_of(bull), "bear": _refs_of(bear)},
+                     "r2": {"bull": _refs_of(bull_r2), "bear": _refs_of(bear_r2)}}}
 
-    # 독립성 - 병렬이라 원래 0 이어야 한다. 0 이 아니면 배선이 샌 것이다.
-    shared = _sentences(bull) & _sentences(bear)
-    independence = {"duplicated_sentences": sorted(shared), "violations": len(shared)}
+    # 독립성 - 두 라운드 다 병렬이라 원래 0 이어야 한다. 0 이 아니면 배선이 샌 것이다.
+    r1_shared = _sentences(bull) & _sentences(bear)
+    r2_shared = _sentences(bull_r2) & _sentences(bear_r2)
+    # 라운드를 넘어선 복제도 본다 - 2라운드가 상대의 1라운드 문장을 베끼면 그것도 위반이다.
+    cross = (_sentences(bull_r2) & _sentences(bear)) | (_sentences(bear_r2) & _sentences(bull))
+    shared = r1_shared | r2_shared | cross
+    independence = {"duplicated_sentences": sorted(shared), "violations": len(shared),
+                    "by_round": {"r1": len(r1_shared), "r2": len(r2_shared),
+                                 "cross_round": len(cross)}}
 
-    b, r = set(bull_refs) & set(claims), set(bear_refs) & set(claims)
-    contested = {"contested_refs": sorted(b & r), "bull_only_refs": sorted(b - r),
-                 "bear_only_refs": sorted(r - b),
-                 "untouched_refs": sorted(set(claims) - b - r)}
+    contested = {**_contest(claims, bull_refs, bear_refs), "round": 2}
 
     stale = (state.get("pit") or {}).get("status") in {"STALE", "FUTURE"}
     grounded = bool(
@@ -478,6 +954,54 @@ def debate_merge(state: DebateState) -> dict:
     )
     return {"citations": citations, "independence": independence, "contested": contested,
             "grounded": grounded, "escalate": not grounded or bool(state.get("fallbacks"))}
+
+
+# ── 노드 5: 3라운드 종합 (결정론 - verdict 를 만들지 않는다) ───────────────
+def synthesize(state: DebateState) -> dict:
+    """토론의 결론을 결정론으로 종합한다.
+
+    **verdict·수량·방향을 만들지 않는다.** 어느 쟁점이 해소되고 무엇이 미해결인지,
+    근거가 얼마나 덮였는지, 인용과 독립성이 지켜졌는지를 셈할 뿐이다. 방향과 수량은
+    여전히 Signal 의 target_weight 와 리스크본부가 정한다(ADR-0005 "지키는 경계").
+    """
+    claims = state.get("claims", {})
+    r1 = state.get("contest_r1") or {}
+    final = state.get("contested") or {}
+    citations = state.get("citations") or {}
+    independence = state.get("independence") or {}
+
+    covered = set(claims) - set(final.get("untouched_refs") or [])
+    # 1라운드에 한쪽만 인용했던 Claim 중 2라운드에서 양측이 다루게 된 것 = 해소됨.
+    r1_one_sided = set(r1.get("bull_only_refs") or []) | set(r1.get("bear_only_refs") or [])
+    resolved = sorted(r1_one_sided & set(final.get("contested_refs") or []))
+    unresolved = sorted(r1_one_sided - set(resolved))
+
+    by_round = citations.get("by_round") or {}
+    discipline = {"unknown_refs": list(citations.get("unknown_refs") or []),
+                  "bull_uncited": bool(citations.get("bull_uncited")),
+                  "bear_uncited": bool(citations.get("bear_uncited")),
+                  "clean": not citations.get("unknown_refs")
+                  and not citations.get("bull_uncited")
+                  and not citations.get("bear_uncited")}
+
+    return {"synthesis": {
+        "round": 3,
+        "evidence_coverage": round(len(covered) / len(claims), 4) if claims else 0.0,
+        "covered_claims": sorted(covered),
+        "unaddressed_claims": sorted(final.get("untouched_refs") or []),
+        "resolved_issues": resolved,
+        "unresolved_issues": unresolved,
+        "still_contested": sorted(final.get("contested_refs") or []),
+        "citation_discipline": discipline,
+        "independence": dict(independence.get("by_round") or {}),
+        "rounds_completed": 2 if (state.get("bull_r2") or state.get("bear_r2")) else 1,
+        "grounded": bool(state.get("grounded")),
+        "refs_by_round": by_round,
+        # 이 종합은 판정이 아니다 - 소비자가 착각하지 않게 계약으로 박는다.
+        "decided_by": "deterministic",
+        "authoritative": False,
+        "produces_verdict": False,
+    }}
 
 
 # ── 노드 5: OrderIntent 제안 (결정론 - 주문이 아니다) ──────────────────────
@@ -554,11 +1078,70 @@ def propose_intent(state: DebateState) -> dict:
     }}
 
 
+# ── 노드 7: 직원 7명 자문 (Worker Registry - binding: false) ───────────────
+def employee_workers(state: DebateState, *, run=None) -> dict:
+    """부서 직원 레지스트리를 돌려 자문 맥락을 얻는다.
+
+    방향은 **scripts.py -> employee_workers.py 단방향**이다. 반대로 직원 모듈이 이
+    파일을 import 하면 langgraph·langsmith·notion_reporter 가 직원 레지스트리에
+    끌려 들어오고 순환이 생긴다(리스크본부 scripts.py 와 같은 방향).
+
+    `propose_intent` 뒤에 있어야 `order_intent_proposal` 로 execution_request 가 켜져
+    venue-cost-worker 가 돈다. **bull/bear 원문은 payload 에 넣지 않는다** - 직원
+    계층에서도 상대 논지 복제를 막는다(ADR-0005).
+    """
+    runner = run
+    if runner is None:
+        from employee_workers import run_employee_workers  # Lazy Import (_BASE 는 sys.path 에 있다)
+
+        runner = run_employee_workers
+
+    payload = {
+        "research_packet": state.get("research_packet") or {},
+        "market_snapshot": (state.get("intent_inputs") or {}).get("snapshot"),
+        "trade_case_id": state.get("trade_case_id"),
+        "debate": {
+            "claims": state.get("claims", {}),
+            "citations": state.get("citations", {}),
+            "contested": state.get("contested", {}),
+            "independence": state.get("independence", {}),
+            "synthesis": state.get("synthesis", {}),
+            "grounded": bool(state.get("grounded")),
+            "order_intent_proposal": state.get("order_intent_proposal", {}),
+            # bull / bear 원문은 의도적으로 없다.
+        },
+    }
+    try:
+        return {"employee_workers": runner(payload)}
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
+        # 직원 자문 실패가 토론 판정을 못 바꾼다. grounded 는 이미 앞에서 확정됐다.
+        return {"employee_workers": {"binding": False, "degraded": True,
+                                     "error": type(exc).__name__,
+                                     "detail": _sanitize(exc)},
+                "fallbacks": [_fallback("employee_workers", exc)]}
+
+
 # ── 그래프 조립 ────────────────────────────────────────────────────────────
 def _route_after_validate(state: DebateState):
-    # 토론을 열면 Bull/Bear 를 같은 superstep 에 병렬로 띄운다. 둘 다 끝나야 debate_merge 가 돈다.
+    # 토론을 열면 Bull/Bear 를 같은 superstep 에 병렬로 띄운다(1라운드).
     if state.get("debate_opened"):
         return ["bull_researcher", "bear_researcher"]
+    return "debate_merge"
+
+
+def _route_after_supervision(state: DebateState):
+    """2라운드 진입. **1라운드 성립 AND 부서장이 닫지 않았을 때만.**
+
+    한쪽이라도 초안을 못 냈으면 쟁점 목록이 반쪽이라 2라운드가 의미가 없고, 실패한
+    토론에 LLM 을 두 번 더 태울 이유도 없다. 바로 debate_merge 로 가서 grounded=False
+    로 떨어진다.
+
+    두 조건이 AND 인 것이 요지다 - 부서장은 라운드를 **닫을** 수만 있고, 1라운드가
+    깨졌는데 열 수는 없다. 사회자에게 준 권한이 안전한 방향뿐이다.
+    """
+    opened = (state.get("supervisor_round2") or {}).get("open_round2", True)
+    if state.get("bull") and state.get("bear") and opened:
+        return ["bull_rebuttal", "bear_rebuttal"]
     return "debate_merge"
 
 
@@ -581,28 +1164,82 @@ def notion_report(state: DebateState, *, uploader=None) -> dict:
     return {"notion_upload": result, "report_markdown": report_md}
 
 
-def build_pipeline(chat=None, uploader=None):
-    """chat / uploader 를 주입받아 자체 점검이 전역 함수를 바꿔치기하지 않아도 되게 한다
-    (리스크본부는 global 스왑을 쓴다 - 같은 결과인데 되돌리기 코드가 길어져서 여기선 주입).
-    자체 점검이 Hermes 설치·Notion 토큰 유무에 의존하지 않게 하는 효과도 있다."""
+def build_pipeline(chat=None, uploader=None, workers=None):
+    """chat / uploader / workers 를 주입받아 자체 점검이 전역 함수를 바꿔치기하지 않아도
+    되게 한다 (리스크본부는 global 스왑을 쓴다 - 같은 결과인데 되돌리기 코드가 길어져서
+    여기선 주입). 자체 점검이 Hermes·Notion·Ollama 유무에 의존하지 않게 하는 효과도 있다.
+
+    3라운드 배선:
+      R1  bull_researcher ∥ bear_researcher   같은 Claim 색인, 서로 못 봄. 각자 사고 후 답변
+      --  supervise_round2                    **부서장(Hermes)** 사회 - 초점을 좁힌다
+      R2  bull_rebuttal   ∥ bear_rebuttal     Claim id 목록 + 감독 초점. 여기서도 사고 후 답변
+      R3  synthesize                          결정론 종합 (verdict 없음)
+      --  supervisor_review                   **부서장** 마감 소견 - escalate 를 켜기만 한다
+
+    토론자는 직원 런타임(Ollama), 감독자는 부서장 런타임(Hermes)이다. `chat` 을 주입하면
+    자체 점검이 둘 다 스텁으로 받는다 - 페르소나로 갈린다.
+    """
     g = StateGraph(DebateState)
     g.add_node("validate_packet", _guard_node("validate_packet", validate_packet))
     g.add_node("bull_researcher",
                _guard_node("bull_researcher", lambda s: bull_researcher(s, chat=chat)))
     g.add_node("bear_researcher",
                _guard_node("bear_researcher", lambda s: bear_researcher(s, chat=chat)))
+    g.add_node("contest_round1", _guard_node("contest_round1", contest_round1))
+    g.add_node("supervise_round2",
+               _guard_node("supervise_round2", lambda s: supervise_round2(s, chat=chat)))
+    g.add_node("bull_rebuttal",
+               _guard_node("bull_rebuttal", lambda s: bull_rebuttal(s, chat=chat)))
+    g.add_node("bear_rebuttal",
+               _guard_node("bear_rebuttal", lambda s: bear_rebuttal(s, chat=chat)))
     g.add_node("debate_merge", _guard_node("debate_merge", debate_merge))
+    g.add_node("synthesize", _guard_node("synthesize", synthesize))
+    g.add_node("supervisor_review",
+               _guard_node("supervisor_review", lambda s: supervisor_review(s, chat=chat)))
     g.add_node("propose_intent", _guard_node("propose_intent", propose_intent))
+    g.add_node("employee_workers",
+               _guard_node("employee_workers", lambda s: employee_workers(s, run=workers)))
     g.add_node("notion_report",
                _guard_node("notion_report", lambda s: notion_report(s, uploader=uploader)))
     g.set_entry_point("validate_packet")
     g.add_conditional_edges("validate_packet", _route_after_validate)
-    g.add_edge("bull_researcher", "debate_merge")
-    g.add_edge("bear_researcher", "debate_merge")
-    g.add_edge("debate_merge", "propose_intent")
-    g.add_edge("propose_intent", "notion_report")
+    g.add_edge("bull_researcher", "contest_round1")
+    g.add_edge("bear_researcher", "contest_round1")
+    g.add_edge("contest_round1", "supervise_round2")
+    g.add_conditional_edges("supervise_round2", _route_after_supervision)
+    g.add_edge("bull_rebuttal", "debate_merge")
+    g.add_edge("bear_rebuttal", "debate_merge")
+    g.add_edge("debate_merge", "synthesize")
+    g.add_edge("synthesize", "supervisor_review")
+    g.add_edge("supervisor_review", "propose_intent")
+    # 직원 자문은 제안 **뒤**다 - order_intent_proposal 이 있어야 execution_request 가
+    # 켜져 venue-cost-worker 가 돈다.
+    g.add_edge("propose_intent", "employee_workers")
+    g.add_edge("employee_workers", "notion_report")
     g.add_edge("notion_report", END)
     return g.compile()
+
+
+def _llm_call_summary(entries: list[dict]) -> dict:
+    """런타임별 LLM 호출 수. **직원 분리의 비용 근거를 실측으로 바꾸는 값이다.**
+
+    "부서장이 혼자 하면 비싸다"는 유지 근거인데, 실측 없이는 검증도 반박도 못 한다.
+    여기 숫자가 곧 그 논거의 근거다 - `supervisor` 가 상용 모델이고 `employee` 가
+    로컬이므로, employee 가 크고 supervisor 가 작을수록 분리가 실제로 이득이다.
+    반대로 나오면 분리를 다시 논의할 근거가 된다(숫자 없이 논의하지 않는다).
+    """
+    by_runtime: dict[str, int] = {}
+    for entry in entries:
+        by_runtime[entry["runtime"]] = by_runtime.get(entry["runtime"], 0) + entry["calls"]
+    return {
+        "by_runtime": by_runtime,
+        "employee_model": _worker_model_version(),
+        "supervisor_model": _model_version(),
+        "total": sum(by_runtime.values()),
+        "detail": list(entries),
+        # 토큰이 아니라 호출 수다. 토큰 계측은 LangSmith 가 켜졌을 때만 나온다.
+        "unit": "calls",
+    }
 
 
 def _assemble_out(state: DebateState, packet: dict) -> dict:
@@ -619,9 +1256,24 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
             "debate_opened": state.get("debate_opened", False),
             "claims": state.get("claims", {}),
             "bull": state.get("bull"), "bear": state.get("bear"),
+            # 2라운드. 1라운드가 실패하면 없다(건너뛴다).
+            "contest_r1": state.get("contest_r1", {}),
+            "bull_r2": state.get("bull_r2"), "bear_r2": state.get("bear_r2"),
+            # 사고 기록. **자기 쪽만 담기고 상대에게도 부서장에게도 간 적이 없다.**
+            # 감사 기록이지 부서장 입력이 아니다 - MD 리포트·Notion·직원 payload 어디에도
+            # 안 실린다(_check_thinking_stays_private 가 세 경로를 다 검사한다).
+            "thoughts": {"bull": state.get("bull_thoughts", []),
+                         "bear": state.get("bear_thoughts", [])},
+            # 실행당 LLM 호출 계측. 직원 분리의 비용 근거를 주장이 아니라 숫자로 남긴다.
+            "llm_calls": _llm_call_summary(state.get("llm_calls", [])),
+            # 부서장 감독. 둘 다 비구속이며 grounded 를 못 바꾼다.
+            "supervisor_round2": state.get("supervisor_round2", {}),
+            "supervisor": state.get("supervisor", {}),
             "citations": state.get("citations", {}),
             "independence": state.get("independence", {}),
             "contested": state.get("contested", {}),
+            "synthesis": state.get("synthesis", {}),
+            "employee_workers": state.get("employee_workers", {}),
             "grounded": state.get("grounded", False),
             "escalate": state.get("escalate", True),
             "fallbacks": state.get("fallbacks", []),
@@ -629,9 +1281,13 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
                 state.get("trace_id") or f"{PIPELINE_VERSION}:{ihash[:16]}"),
             # F08 완료 조건 "Model, Prompt, 입력 Snapshot과 결과를 기록한다".
             # 입력 Snapshot 은 input_hash, 결과는 이 dict 자체가 기록이다.
+            # 토론자와 감독자가 **다른 런타임**이라 모델을 둘 다 적는다.
             "agent_versions": {"model": _model_version(),
+                               "supervisor_model": _model_version(),
+                               "debater_model": _worker_model_version(),
                                "bull_prompt": _prompt_version("bull-researcher"),
-                               "bear_prompt": _prompt_version("bear-researcher")},
+                               "bear_prompt": _prompt_version("bear-researcher"),
+                               "supervisor_prompt": _prompt_version(_SUPERVISOR_PERSONA)},
             "order_intent_proposal": state.get("order_intent_proposal") or {
                 "available": False, "reason": "not_reached",
                 "detail": "제안 노드 전에 파이프라인이 끝났다",
@@ -645,20 +1301,23 @@ def _assemble_out(state: DebateState, packet: dict) -> dict:
 
 
 def run_bull_bear_debate(research_packet: dict, *, chat=None, uploader=None,
-                         intent_inputs: dict | None = None) -> dict:
+                         intent_inputs: dict | None = None, workers=None) -> dict:
     """본부 단독 실행 - 리스크/QA/리서치의 run_<dept>_department 와 같은 외부 인터페이스.
 
     `intent_inputs` 를 주면 grounded 토론에 한해 OrderIntent **제안**까지 만든다.
     키: packet(ResearchPacketV2), signal(StrategySignal), snapshot(MarketSnapshot),
     nav(Decimal), current_quantity(Decimal), trade_case_id?, now?.
     안 주면 토론까지만 하고 제안은 `available: False` 로 사유를 남긴다.
+
+    `workers` 는 직원 레지스트리 러너 주입구다(자체 점검용). 안 주면 실제
+    `employee_workers.run_employee_workers` 를 부른다.
     """
     try:
         # tracing_context 는 enabled 를 건드리지 않는다 - LANGSMITH_TRACING 이 꺼져 있으면
         # 그대로 꺼진 채고, 켜져 있을 때만 트레이딩본부 Project 로 보낸다.
         with tracing_context(project_name=_ls_project()):
-            state = build_pipeline(chat=chat, uploader=uploader).invoke(
-                {"research_packet": research_packet, "fallbacks": [],
+            state = build_pipeline(chat=chat, uploader=uploader, workers=workers).invoke(
+                {"research_packet": research_packet, "fallbacks": [], "llm_calls": [],
                  "intent_inputs": intent_inputs})
     except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
         state = {"research_packet": research_packet, "claims": {}, "debate_opened": False,
@@ -755,16 +1414,35 @@ def _render_report_md(out: dict) -> str:
     else:
         lines.append("초안 없음 — 아래 Fallback 참고.")
 
+    # 2라운드 — 상대 원문이 아니라 Claim id 목록만 보고 보강한 결과다.
+    bull_r2, bear_r2 = out.get("bull_r2") or {}, out.get("bear_r2") or {}
+    if bull_r2 or bear_r2:
+        lines += ["", "## 2라운드 보강 (쟁점 id 만 받음 — 상대 원문 미제공)", ""]
+        for who, note in (("Bull", bull_r2), ("Bear", bear_r2)):
+            lines += [f"### {who} R2", ""]
+            if note:
+                lines += [f"- **보강:** {_md_cell(note.get('added_case'))}",
+                          f"- **다룬 Claim:** {_md_refs(note.get('addressed'))}",
+                          f"- **의도적으로 남긴 Claim:** {_md_refs(note.get('still_unaddressed'))}"]
+            else:
+                lines.append("초안 없음 — 아래 Fallback 참고.")
+            lines.append("")
+
     citations, independence = out.get("citations") or {}, out.get("independence") or {}
     contested = out.get("contested") or {}
+    by_round = independence.get("by_round") or {}
     lines += [
-        "", "## 결정론 검증", "",
+        "", "## 결정론 검증 (두 라운드 합산)", "",
         "| 검사 | 결과 |",
         "|---|---|",
         f"| 색인에 없는 인용 (날조) | {_md_refs(citations.get('unknown_refs'))} |",
         f"| Bull 무인용 | {'**예**' if citations.get('bull_uncited') else '아니오'} |",
         f"| Bear 무인용 | {'**예**' if citations.get('bear_uncited') else '아니오'} |",
         f"| 독립성 위반 (문장 복제) | {_md_cell(independence.get('violations', 0))} |",
+        f"| ↳ 라운드별 (R1 / R2 / 교차) | {_md_cell(by_round.get('r1', 0))} / "
+        f"{_md_cell(by_round.get('r2', 0))} / {_md_cell(by_round.get('cross_round', 0))} |",
+        "",
+        "> 교차 라운드 복제는 2라운드가 상대의 1라운드 문장을 베낀 경우다. 0 이어야 한다.",
         "",
         "## 쟁점 대조 — TRD-03(PM)이 읽을 산출물",
         "",
@@ -773,6 +1451,37 @@ def _render_report_md(out: dict) -> str:
         f"- **Bear 만 인용:** {_md_refs(contested.get('bear_only_refs'))}",
         f"- **아무도 다루지 않은 Claim:** {_md_refs(contested.get('untouched_refs'))}",
     ]
+
+    synthesis = out.get("synthesis") or {}
+    if synthesis:
+        lines += [
+            "", "## 3라운드 종합 (결정론 — 판정이 아니다)", "",
+            "| 항목 | 값 |", "|---|---|",
+            f"| 근거 커버리지 | {_md_cell(synthesis.get('evidence_coverage'))} |",
+            f"| 완료 라운드 | {_md_cell(synthesis.get('rounds_completed'))} |",
+            f"| 2라운드에 해소된 쟁점 | {_md_refs(synthesis.get('resolved_issues'))} |",
+            f"| 끝까지 미해결 | {_md_refs(synthesis.get('unresolved_issues'))} |",
+            f"| 여전히 다투는 Claim | {_md_refs(synthesis.get('still_contested'))} |",
+            f"| 끝까지 미인용 Claim | {_md_refs(synthesis.get('unaddressed_claims'))} |",
+            f"| 인용 규율 | {'통과' if (synthesis.get('citation_discipline') or {}).get('clean') else '**실패**'} |",
+            f"| verdict 생성 | {'**예**' if synthesis.get('produces_verdict') else '아니오'} |",
+            "",
+            "> 이 종합은 **방향·수량을 정하지 않는다.** 그것은 Signal 의 target_weight 와",
+            "> 리스크본부가 정한다 (ADR-0005 \"지키는 경계\").",
+        ]
+
+    staff = out.get("employee_workers") or {}
+    if staff:
+        lines += [
+            "", "## 직원 자문 (비바인딩)", "",
+            f"- 실행 {_md_refs(staff.get('executed'))}",
+            f"- 미실행 {_md_refs(staff.get('not_executed'))}",
+            f"- 실패 {_md_refs(staff.get('failed'))}",
+            f"- binding: {_md_cell(staff.get('binding'))}",
+        ]
+        for name, prov in (staff.get("trigger_provenance") or {}).items():
+            lines.append(f"  - `{_md_cell(name)}` = {_md_cell(prov.get('value'))} — "
+                         f"{_md_cell(prov.get('reason'))}")
 
     proposal = out.get("order_intent_proposal") or {}
     lines += ["", "## OrderIntent 제안 (주문이 아니다)", "",
@@ -826,21 +1535,67 @@ def _no_upload(out, *, report_md=""):
     return {"ok": False, "reason": "self-check stub - 네트워크 없음"}
 
 
+_BULL_R2_OK = {"addressed": ["invalid:0"], "still_unaddressed": [],
+               "added_case": "무효화 조건까지 감안해도 상승 논지가 유지된다",
+               "claim_refs": ["invalid:0"]}
+_BEAR_R2_OK = {"addressed": ["fact:1"], "still_unaddressed": ["catalyst:0: 시점 불명"],
+               "added_case": "컨센서스 상향은 이미 가격에 반영됐을 수 있다",
+               "claim_refs": ["fact:1"]}
+
+
+def _no_workers(_payload):
+    """자체 점검 전용 직원 러너 스텁. 실제 러너는 Ollama 를 부르므로 네트워크를 탄다."""
+    return {"binding": False, "executed": [], "failed": [], "not_executed": [],
+            "degraded": False, "workers": [], "trigger_provenance": {}}
+
+
 def _run(packet, **kw):
-    """자체 점검용 실행기 - uploader 를 반드시 스텁으로 채운다(네트워크 금지 규칙을
-    검사마다 반복해 적는 대신 여기 한 곳에서 강제한다)."""
+    """자체 점검용 실행기 - uploader 와 workers 를 반드시 스텁으로 채운다(네트워크 금지
+    규칙을 검사마다 반복해 적는 대신 여기 한 곳에서 강제한다)."""
     kw.setdefault("uploader", _no_upload)
+    kw.setdefault("workers", _no_workers)
     return run_bull_bear_debate(packet, **kw)
 
 
-def _stub(bull=_BULL_OK, bear=_BEAR_OK, capture=None):
+_THINK_OK = {"notes": ["근거를 다시 본다"], "need_more_thought": False}
+_MODERATION_OK = {"focus_refs": ["invalid:0"], "note": "무효화 조건을 양측 다 다뤄라",
+                  "open_round2": True}
+_REVIEW_OK = {"moderation": "쟁점은 좁혀졌고 미해결은 남아 있다.",
+              "unresolved": ["fact:0"], "recommend_escalate": False}
+
+
+def _stub(bull=_BULL_OK, bear=_BEAR_OK, capture=None,
+          bull_r2=_BULL_R2_OK, bear_r2=_BEAR_R2_OK,
+          think=_THINK_OK, moderation=_MODERATION_OK, review=_REVIEW_OK):
+    """토론자·감독자·사고를 한 스텁으로 받는다. 실제로는 런타임이 둘로 갈린다."""
+
     def chat(persona, task):
+        # **부서장이 먼저다** - 감독 페르소나는 역할 코드가 없어서 뒤로 미루면 Bull 로 샌다.
+        if "Trading Supervisor" in persona:
+            payload = moderation if "round 2 of an independent" in task.lower() else review
+            if capture is not None:
+                capture["moderation" if payload is moderation else "review"] = task
+            if isinstance(payload, Exception):
+                raise payload
+            return json.dumps(payload, ensure_ascii=False)
+
         # 역할 코드로 가른다 - Bull 페르소나도 "the Bear Researcher"를 언급하므로(병렬 독립
         # 선언) 이름 부분일치로 가르면 Bull 을 Bear 로 오인한다.
         who = "bear" if "(TRD-02)" in persona else "bull"
+        # 라운드는 페르소나가 같으므로 task 문구로 가른다. 사고 프롬프트는 소문자
+        # "(round 2)" 를 쓰고 답변 프롬프트는 "Round 2" 를 쓴다 - 둘 다 본다.
+        rnd = "r2" if ("Round 2" in task or "(round 2)" in task) else "r1"
+        # 사고 단계는 답변과 스키마가 다르다. 프롬프트 첫 줄로 가른다.
+        if task.startswith("Think privately"):
+            if capture is not None:
+                capture[f"think_{who}_{rnd}"] = task
+            if isinstance(think, Exception):
+                raise think
+            return json.dumps(think, ensure_ascii=False)
         if capture is not None:
-            capture[who] = task
-        payload = bear if who == "bear" else bull
+            capture[f"{who}_{rnd}" if rnd == "r2" else who] = task
+        payload = {("bull", "r1"): bull, ("bear", "r1"): bear,
+                   ("bull", "r2"): bull_r2, ("bear", "r2"): bear_r2}[(who, rnd)]
         if isinstance(payload, Exception):
             raise payload
         return json.dumps(payload, ensure_ascii=False)
@@ -869,15 +1624,45 @@ def _check_persona_lookup():
 
 
 def _check_bear_never_sees_bull():
-    # 이 파이프라인의 존재 이유. Bear 에게 가는 payload 에 Bull 출력이 섞이면 실패한다.
+    """이 파이프라인의 존재 이유. **두 라운드 모두** 상대 원문이 안 섞여야 한다.
+
+    프롬프트가 독립을 선언하는 것과 배선이 실제로 독립인 것은 다르다 - 여기서는
+    payload 를 직접 본다(ADR-0005).
+    """
     seen: dict = {}
     out = _run(_PACKET, chat=_stub(capture=seen))
-    assert "bull" in seen and "bear" in seen, seen.keys()
+    assert set(seen) == {"bull", "bear", "bull_r2", "bear_r2",
+                         "think_bull_r1", "think_bear_r1",
+                         "think_bull_r2", "think_bear_r2",
+                         "moderation", "review"}, sorted(seen)
+
+    # 1라운드 - 같은 Claim 색인만 받고 서로를 모른다
     for distinctive in (_BULL_OK["bull_case"], _BULL_OK["upside_scenario"]):
-        assert distinctive not in seen["bear"], "Bear task 에 Bull 출력이 샜다"
-    assert seen["bull"] == _bull_task({"research_packet": _PACKET, "claims": out["claims"]})
+        assert distinctive not in seen["bear"], "Bear R1 task 에 Bull 출력이 샜다"
+    assert _BEAR_OK["bear_case"] not in seen["bull"], "Bull R1 task 에 Bear 출력이 샜다"
+    # 답변 프롬프트 = 원래 task + 자기 사고 블록. 사고 부분을 떼면 원래 task 와 같다.
+    base_task = _bull_task({"research_packet": _PACKET, "claims": out["claims"]})
+    assert seen["bull"].startswith(base_task), "R1 task 가 바뀌었다"
+    assert "Your own private notes" in seen["bull"], "자기 사고가 답변에 안 붙었다"
+
+    # 2라운드 - **여기가 새 위험 지점이다.** 쟁점 id 만 받고 상대 문장은 못 받는다.
+    # 양측이 정당하게 공유하는 Claim 색인 원문과 겹치지 않는 **서술 전용 필드**로 본다
+    # (catalyst_timeline "1월 실적"은 Claim "1월 실적 발표"의 부분 문자열이라 오탐이 된다).
+    for text in (_BULL_OK["bull_case"], _BULL_OK["upside_scenario"], *_BULL_OK["bull_invalidation"]):
+        assert text not in seen["bear_r2"], "Bear R2 task 에 Bull 1라운드 원문이 샜다"
+    for text in (_BEAR_OK["bear_case"], _BEAR_OK["downside_scenario"], *_BEAR_OK["failure_mode"]):
+        assert text not in seen["bull_r2"], "Bull R2 task 에 Bear 1라운드 원문이 샜다"
+    # 상대가 인용한 Claim **id** 는 들어간다 - 그게 쟁점 목록의 내용이다
+    assert "invalid:0" in seen["bull_r2"], "Bear 만 인용한 Claim id 가 안 넘어갔다"
+    assert "fact:1" in seen["bear_r2"], "Bull 만 인용한 Claim id 가 안 넘어갔다"
+    # 2라운드 프롬프트가 독립을 명시하는지 - 배선(위)과 문구(아래)를 둘 다 본다
+    assert "Round 2" in seen["bull_r2"]
+    assert "never will be" in seen["bull_r2"], "R2 프롬프트에 독립 선언이 없다"
+
+    # 라운드별 독립성 측정 - 교차 라운드 복제까지 0 이어야 한다
     assert out["independence"]["violations"] == 0
-    print("  Bear 독립성 (배선)         OK")
+    assert out["independence"]["by_round"] == {"r1": 0, "r2": 0, "cross_round": 0}
+    print("  Bear 독립성 (2라운드 배선) OK")
 
 
 def _check_citation_guard():
@@ -885,10 +1670,22 @@ def _check_citation_guard():
     out = _run(_PACKET, chat=_stub(bear={**_BEAR_OK, "claim_refs": ["fact:0", "fact:99"]}))
     assert out["citations"]["unknown_refs"] == ["fact:99"], out["citations"]
     assert out["grounded"] is False and out["escalate"] is True
-    # 인용이 아예 없어도 통과시키지 않는다
-    out2 = _run(_PACKET, chat=_stub(bull={**_BULL_OK, "claim_refs": []}))
+    # 2라운드 인용도 같은 색인으로 검증된다 - R2 에서 날조해도 잡힌다
+    r2_fake = _run(_PACKET, chat=_stub(bear_r2={**_BEAR_R2_OK, "claim_refs": ["fact:77"]}))
+    assert r2_fake["citations"]["unknown_refs"] == ["fact:77"], r2_fake["citations"]
+    assert r2_fake["grounded"] is False
+
+    # 인용이 아예 없어도 통과시키지 않는다. **두 라운드 다 무인용이어야 무인용이다** -
+    # R1 에서 안 하고 R2 에서 했으면 인용을 한 것이다.
+    out2 = _run(_PACKET, chat=_stub(bull={**_BULL_OK, "claim_refs": []},
+                                    bull_r2={**_BULL_R2_OK, "claim_refs": []}))
     assert out2["citations"]["bull_uncited"] is True and out2["grounded"] is False
-    print("  인용 검증 (결정론)         OK")
+    # R1 만 비었으면 무인용이 아니다
+    partial = _run(_PACKET, chat=_stub(bull={**_BULL_OK, "claim_refs": []}))
+    assert partial["citations"]["bull_uncited"] is False, partial["citations"]
+    assert partial["citations"]["by_round"]["r1"]["bull"] == []
+    assert partial["citations"]["by_round"]["r2"]["bull"] == ["invalid:0"]
+    print("  인용 검증 (결정론, 2라운드) OK")
 
 
 def _check_schema_guard():
@@ -927,7 +1724,10 @@ def _check_retry_and_versions():
 
     def flaky(persona, task):
         calls.append(task)
-        if "(TRD-02)" in persona:
+        bear = "(TRD-02)" in persona
+        if "Round 2" in task:      # 2라운드는 흔들지 않는다 - 재시도 검사는 1라운드가 대상이다
+            return json.dumps(_BEAR_R2_OK if bear else _BULL_R2_OK, ensure_ascii=False)
+        if bear:
             return json.dumps(_BEAR_OK, ensure_ascii=False)
         # Bull 은 첫 두 번 스키마를 어기고 세 번째에 성공한다
         bull_calls = sum(1 for t in calls if "bullish case" in t)
@@ -940,8 +1740,10 @@ def _check_retry_and_versions():
     assert out["bull"]["attempts"] == 3, out["bull"]["attempts"]
     assert out["bear"]["attempts"] == 1
     assert out["grounded"] is True and not out["fallbacks"]
-    # 거부 사유가 다음 시도 프롬프트에 실려야 같은 실수를 반복하지 않는다
-    assert "was rejected" in calls[-1] or "was rejected" in calls[-2]
+    # 거부 사유가 다음 시도 프롬프트에 실려야 같은 실수를 반복하지 않는다.
+    # 2라운드가 뒤에 붙어서 마지막 호출은 R2 다 - 1라운드 호출들 중에서 찾는다.
+    r1_calls = [t for t in calls if "Round 2" not in t]
+    assert any("was rejected" in t for t in r1_calls), "거부 사유가 재시도 프롬프트에 없다"
 
     # 3회를 다 쓰고도 실패하면 attempts=3 으로 기록되고 HOLD 로 떨어진다
     dead = _run(_PACKET, chat=_stub(bull=RuntimeError("hermes down")))
@@ -1017,15 +1819,26 @@ def _check_parallel_fallback_merge():
 
 
 def _check_contested_math():
+    """라운드별 쟁점 대조. 1라운드 쟁점이 2라운드에서 어떻게 해소되는지까지 본다."""
     out = _run(_PACKET, chat=_stub())
+
+    # 1라운드 - 상대만 인용한 Claim 이 쟁점으로 드러난다
+    r1 = out["contest_r1"]
+    assert r1["contested_refs"] == ["fact:0"], r1        # 양측이 같이 다툰 Claim
+    assert r1["bull_only_refs"] == ["fact:1"]
+    assert r1["bear_only_refs"] == ["invalid:0"]
+    assert "catalyst:0" in r1["untouched_refs"]          # 아무도 안 건드린 Claim
+    assert r1["decided_by"] == "deterministic"
+
+    # 2라운드 합산 - 각자 상대만 인용했던 Claim 을 다뤄 쟁점이 좁혀진다
     c = out["contested"]
-    assert c["contested_refs"] == ["fact:0"]          # 양측이 같이 다툰 Claim
-    assert c["bull_only_refs"] == ["fact:1"]
-    assert c["bear_only_refs"] == ["invalid:0"]
-    assert "catalyst:0" in c["untouched_refs"]        # 아무도 안 건드린 Claim 이 드러난다
+    assert c["contested_refs"] == ["fact:0", "fact:1", "invalid:0"], c
+    assert c["bull_only_refs"] == [] and c["bear_only_refs"] == []
+    assert "catalyst:0" in c["untouched_refs"], "끝까지 안 다룬 Claim 이 사라졌다"
+
     assert out["grounded"] is True and out["escalate"] is False
     assert out["produces_order_intent"] is False      # 이 본부 단계에서 주문은 안 만든다
-    print("  쟁점 대조 + 판정 부재      OK")
+    print("  쟁점 대조 (라운드별)       OK")
 
 
 def _check_reproducibility_and_keys():
@@ -1264,6 +2077,262 @@ def _check_intent_proposal():
     print("  OrderIntent 제안 + Risk 선행 OK")
 
 
+def _check_three_round_debate():
+    """3라운드 구조. **종합은 결정론이고 verdict 를 만들지 않는다.**"""
+    out = _run(_PACKET, chat=_stub())
+    s = out["synthesis"]
+
+    # 1. 3라운드 종합이 셈한 것들
+    assert s["round"] == 3 and s["rounds_completed"] == 2
+    # Claim 5개 중 2라운드까지 다뤄진 것 3개 (catalyst:0, interp:0 은 끝까지 미인용)
+    assert s["evidence_coverage"] == 0.6, s["evidence_coverage"]
+    assert set(s["unaddressed_claims"]) == {"catalyst:0", "interp:0"}, s["unaddressed_claims"]
+    # 1라운드에 한쪽만 인용했던 Claim 을 2라운드에서 양측이 다뤘다 -> 해소
+    assert s["resolved_issues"] == ["fact:1", "invalid:0"], s["resolved_issues"]
+    assert s["unresolved_issues"] == []
+    assert s["citation_discipline"]["clean"] is True
+    assert s["independence"] == {"r1": 0, "r2": 0, "cross_round": 0}
+
+    # 2. **판정을 만들지 않는다** - 이게 3라운드의 경계다
+    assert s["produces_verdict"] is False and s["authoritative"] is False
+    assert s["decided_by"] == "deterministic"
+    forbidden = {"verdict", "recommendation", "side", "quantity", "action", "direction"}
+    assert not (forbidden & set(s)), f"종합이 판정 필드를 만들었다: {forbidden & set(s)}"
+
+    # 3. **1라운드가 실패하면 2라운드를 건너뛴다** - 실패한 토론에 LLM 을 더 안 태운다
+    calls: list = []
+
+    def counting(persona, task):
+        calls.append(task)
+        if "(TRD-01)" in persona:
+            raise RuntimeError("bull down")
+        return json.dumps(_BEAR_OK if "Round 2" not in task else _BEAR_R2_OK,
+                          ensure_ascii=False)
+
+    dead = _run(_PACKET, chat=counting)
+    assert dead["bull"] is None and dead["grounded"] is False
+    assert not any("Round 2" in t for t in calls), "1라운드 실패인데 2라운드를 태웠다"
+    assert dead["bull_r2"] is None and dead["bear_r2"] is None
+    assert dead["synthesis"]["rounds_completed"] == 1
+    assert dead["escalate"] is True
+
+    # 4. 2라운드만 실패해도 1라운드 결과는 남는다
+    half = _run(_PACKET, chat=_stub(bull_r2=RuntimeError("r2 down")))
+    assert half["bull"] is not None and half["bull_r2"] is None
+    assert half["contest_r1"]["contested_refs"] == ["fact:0"], "1라운드 쟁점이 사라졌다"
+    assert any(f["stage"] == "bull_r2_researcher" for f in half["fallbacks"]), half["fallbacks"]
+
+    # 5. 리포트에 라운드별 섹션과 종합표가 나온다
+    md = out["report_markdown"]
+    assert "## 2라운드 보강 (쟁점 id 만 받음 — 상대 원문 미제공)" in md
+    assert "## 3라운드 종합 (결정론 — 판정이 아니다)" in md
+    assert "교차 라운드 복제" in md
+    print("  3라운드 토론 + 종합        OK")
+
+
+def _check_employee_workers_node():
+    """직원 자문 노드. **상대 원문을 직원에게도 안 준다. 실패해도 토론 판정은 그대로.**"""
+    seen: dict = {}
+
+    def spy(payload):
+        seen["payload"] = payload
+        return {"binding": False, "executed": ["bull-thesis-worker"], "failed": [],
+                "not_executed": [], "degraded": False, "workers": [],
+                "trigger_provenance": {"approved_risk": {"value": False, "reason": "테스트"}}}
+
+    out = _run(_PACKET, chat=_stub(), workers=spy)
+    payload = seen["payload"]
+
+    # 1. 토론 산출이 근거로 넘어간다
+    assert set(payload["debate"]) >= {"claims", "citations", "contested", "independence",
+                                      "synthesis", "grounded", "order_intent_proposal"}
+    assert payload["debate"]["claims"] == out["claims"]
+    assert payload["debate"]["contested"]["contested_refs"] == ["fact:0", "fact:1", "invalid:0"]
+
+    # 2. **bull/bear 원문은 안 넘어간다** - 직원 계층에서도 논지 복제를 막는다
+    assert "bull" not in payload["debate"] and "bear" not in payload["debate"]
+    dumped = json.dumps(payload, ensure_ascii=False, default=str)
+    assert _BULL_OK["bull_case"] not in dumped, "직원 payload 에 Bull 원문이 샜다"
+    assert _BEAR_OK["bear_case"] not in dumped, "직원 payload 에 Bear 원문이 샜다"
+
+    # 3. 결과가 실려 나오고 리포트에 적힌다
+    assert out["employee_workers"]["binding"] is False
+    assert "## 직원 자문 (비바인딩)" in out["report_markdown"]
+    assert "approved_risk" in out["report_markdown"]
+
+    # 4. **직원 실패가 토론 판정을 못 바꾼다**
+    def boom(_payload):
+        raise RuntimeError("ollama down")
+
+    broken = _run(_PACKET, chat=_stub(), workers=boom)
+    assert broken["grounded"] is True, "직원 실패가 grounded 를 바꿨다"
+    assert broken["employee_workers"]["degraded"] is True
+    assert broken["employee_workers"]["binding"] is False
+    assert broken["report_markdown"], "직원이 죽었는데 리포트가 없다"
+    print("  직원 자문 노드 (경계)      OK")
+
+
+def _check_thinking_loop():
+    """토론자는 답하기 전에 혼자 생각한다. **생각은 근거도 서술도 아니다.**"""
+    seen: dict = {}
+    out = _run(_PACKET, chat=_stub(capture=seen))
+
+    # 1. 두 라운드 다, 양측 다 사고를 거쳤다
+    for key in ("think_bull_r1", "think_bear_r1", "think_bull_r2", "think_bear_r2"):
+        assert key in seen, f"{key} 사고 단계가 없다"
+        assert seen[key].startswith("Think privately"), seen[key][:40]
+    assert out["thoughts"]["bull"] and out["thoughts"]["bear"]
+    assert {p["round"] for p in out["thoughts"]["bull"]} == {1, 2}
+
+    # 2. **사고가 상대에게 안 간다** - 자기 사고는 자기 답변 프롬프트에만 붙는다
+    note = _THINK_OK["notes"][0]
+    assert note in seen["bull"] and note in seen["bear"], "자기 사고가 답변에 안 붙었다"
+    # 사고 프롬프트 자체에는 상대 원문이 없다 (1라운드 근거면과 같은 Claim 색인뿐)
+    assert _BEAR_OK["bear_case"] not in seen["think_bull_r2"]
+    assert _BULL_OK["bull_case"] not in seen["think_bear_r2"]
+
+    # 3. 사고는 인용이 되지 않는다 - claim_refs 에도 독립성 측정에도 안 들어간다
+    assert note not in out["citations"]["bull_refs"]
+    assert out["independence"]["violations"] == 0, "양측이 같은 사고 문구를 써서 복제로 잡혔다"
+    assert out["bull"]["thinking_passes"] >= 1
+
+    # 4. **상한이 있다** - need_more_thought 를 계속 true 로 내도 멈춘다
+    greedy = _run(_PACKET, chat=_stub(think={"notes": ["더"], "need_more_thought": True}))
+    per_round = [p for p in greedy["thoughts"]["bull"] if p["round"] == 1]
+    assert len(per_round) == _max_thinking_passes(), per_round
+    assert greedy["grounded"] is True, "사고를 많이 했다고 토론이 무너졌다"
+
+    # 5. **사고 실패는 토론 실패가 아니다** - 논지는 그대로 나온다
+    broken = _run(_PACKET, chat=_stub(think=RuntimeError("ollama 응답 없음")))
+    assert broken["bull"] is not None and broken["bear"] is not None
+    assert broken["grounded"] is True, "사고 장애가 grounded 를 무너뜨렸다"
+    assert broken["fallbacks"] == [], "사고 실패가 fallback 으로 올라갔다"
+    assert broken["thoughts"]["bull"][0]["error"] == "RuntimeError"
+    print("  사고 루프 (상한·격리)      OK")
+
+
+def _check_thinking_stays_private():
+    """**사고는 부서장 입력이 아니다.** 컨텍스트 격리가 주석이 아니라 배선인지 본다.
+
+    직원을 따로 두는 근거 중 하나가 "부서장 컨텍스트를 아끼는 것"인데, 사고 기록이
+    부서장이 읽는 경로로 새면 그 근거가 사라진다. 새어나갈 수 있는 경로는 셋이다 -
+    MD 리포트, Notion Projection, 직원 레지스트리 payload. 셋 다 검사한다.
+    """
+    marker = "사고흔적표식"
+    seen: dict = {}
+    staff_payload: dict = {}
+
+    def capture_workers(payload):
+        staff_payload.update(payload)
+        return _no_workers(payload)
+
+    from notion_reporter import deterministic_summary  # Lazy - scripts 는 최상단에서 안 쓴다
+
+    def upload(out, *, report_md=""):
+        seen["notion"] = json.dumps(deterministic_summary(out), ensure_ascii=False)
+        return {"ok": True}
+
+    out = _run(_PACKET, uploader=upload, workers=capture_workers,
+               chat=_stub(think={"notes": [marker], "need_more_thought": False}))
+
+    # 사고는 실제로 기록됐다 (검사가 빈 문자열을 확인하는 것이 아님을 먼저 보장)
+    assert any(marker in n for p in out["thoughts"]["bull"] for n in p["notes"])
+
+    # 1. MD 리포트에 없다
+    assert marker not in out["report_markdown"], "사고가 MD 리포트로 샜다"
+    # 2. Notion Projection 에 없다
+    assert marker not in seen["notion"], "사고가 Notion 으로 샜다"
+    # 3. **직원 레지스트리 payload 에 없다** - 여기가 부서장이 실제로 읽는 것이다
+    assert marker not in json.dumps(staff_payload, ensure_ascii=False, default=str), \
+        "사고가 직원 payload 로 샜다"
+    # 양측 논지 원문도 직원 payload 에 없다 (ADR-0005 - 기존 계약 재확인)
+    assert _BULL_OK["bull_case"] not in json.dumps(staff_payload, ensure_ascii=False)
+    print("  사고 격리 (3경로)          OK")
+
+
+def _check_llm_call_accounting():
+    """호출 계측. **직원 분리의 비용 근거를 숫자로 남긴다.**"""
+    out = _run(_PACKET, chat=_stub())
+    calls = out["llm_calls"]
+
+    # 직원 4콜(사고 1 + 답변 1) x (bull,bear) x (R1,R2) = 8, 감독 2콜
+    assert calls["by_runtime"]["employee"] == 8, calls
+    assert calls["by_runtime"]["supervisor"] == 2, calls
+    assert calls["total"] == 10 and calls["unit"] == "calls"
+    # **분리의 요지가 이 비율이다** - 비싼 쪽이 적어야 한다
+    assert calls["by_runtime"]["supervisor"] < calls["by_runtime"]["employee"], \
+        "상용 모델 호출이 직원 호출보다 많다 - 분리 근거가 뒤집혔다"
+    assert calls["employee_model"] != calls["supervisor_model"]
+
+    # 사고를 더 하면 직원 콜만 늘고 감독 콜은 그대로다
+    deep = _run(_PACKET, chat=_stub(think={"notes": ["더"], "need_more_thought": True}))
+    assert deep["llm_calls"]["by_runtime"]["employee"] > calls["by_runtime"]["employee"]
+    assert deep["llm_calls"]["by_runtime"]["supervisor"] == 2
+
+    # 실패한 감독 호출도 센다 - 과금되기 때문이다
+    down = _run(_PACKET, chat=_stub(moderation=RuntimeError("hermes 없음")))
+    assert down["llm_calls"]["by_runtime"]["supervisor"] == 2, down["llm_calls"]
+    print("  LLM 호출 계측 (비용 근거)  OK")
+
+
+def _check_supervisor_moderation():
+    """감독은 부서장이 한다. **좁히고 올릴 수만 있고 넓히고 내릴 수 없다.**"""
+    seen: dict = {}
+    out = _run(_PACKET, chat=_stub(capture=seen))
+
+    # 1. 부서장이 실제로 두 번 불렸고, **양측 원문을 안 봤다**
+    assert "moderation" in seen and "review" in seen
+    for text in (_BULL_OK["bull_case"], _BEAR_OK["bear_case"]):
+        assert text not in seen["moderation"], "감독 프롬프트에 논지 원문이 샜다"
+    # 마감 소견은 토론이 닫힌 뒤라 양측을 다 본다 - 그게 부서장의 통합 업무다
+    assert _BULL_OK["bull_case"] in seen["review"] and _BEAR_OK["bear_case"] in seen["review"]
+    assert out["supervisor_round2"]["decided_by"] == "trading-supervisor"
+    assert out["supervisor"]["available"] is True
+
+    # 2. 감독 초점이 2라운드 프롬프트에 **양측 다** 들어간다
+    for side in ("bull_r2", "bear_r2"):
+        assert _MODERATION_OK["note"] in seen[side], f"{side} 에 감독 지시가 안 갔다"
+        assert "invalid:0" in seen[side]
+
+    # 3. **색인 밖 초점은 버려진다** - 감독이 없는 Claim 을 만들 수 없다
+    ghost = _run(_PACKET, chat=_stub(
+        moderation={**_MODERATION_OK, "focus_refs": ["fact:0", "ghost:99"]}))
+    assert ghost["supervisor_round2"]["focus_refs"] == ["fact:0"]
+    assert ghost["supervisor_round2"]["dropped_refs"] == ["ghost:99"]
+
+    # 4. **라운드를 닫을 수만 있다** - 1라운드가 깨졌으면 열라고 해도 안 열린다
+    closed = _run(_PACKET, chat=_stub(moderation={**_MODERATION_OK, "open_round2": False}))
+    assert closed["bull_r2"] is None and closed["bear_r2"] is None
+    assert closed["synthesis"]["rounds_completed"] == 1
+    dead = _run(_PACKET, chat=_stub(bull=RuntimeError("죽음"),
+                                    moderation={**_MODERATION_OK, "open_round2": True}))
+    assert dead["bull_r2"] is None, "1라운드가 깨졌는데 감독이 2라운드를 열었다"
+    assert dead["supervisor_round2"]["open_round2"] is False
+
+    # 5. **escalate 를 켤 수만 있다**
+    raised = _run(_PACKET, chat=_stub(review={**_REVIEW_OK, "recommend_escalate": True}))
+    assert raised["grounded"] is True and raised["escalate"] is True, "감독이 못 올렸다"
+    lowered = _run(_PACKET, chat=_stub(bear={**_BEAR_OK, "claim_refs": ["fact:99"]},
+                                       review={**_REVIEW_OK, "recommend_escalate": False}))
+    assert lowered["grounded"] is False and lowered["escalate"] is True, "감독이 내렸다"
+
+    # 6. 감독 장애는 토론을 멈추지 않는다 - 결정론 초점으로 2라운드가 계속된다
+    down = _run(_PACKET, chat=_stub(moderation=RuntimeError("hermes 없음"),
+                                    review=RuntimeError("hermes 없음")))
+    assert down["supervisor_round2"]["decided_by"] == "deterministic_fallback"
+    assert down["bull_r2"] is not None, "감독이 죽자 2라운드가 멈췄다"
+    assert down["supervisor"]["available"] is False
+    assert down["grounded"] is True
+
+    # 7. 감독자와 토론자는 **다른 런타임**이고 기록도 따로 남는다
+    versions = out["agent_versions"]
+    assert versions["supervisor_model"] == _model_version()
+    assert versions["debater_model"] == _worker_model_version()
+    assert versions["supervisor_model"] != versions["debater_model"], "감독자와 토론자가 같은 모델이다"
+    assert versions["supervisor_prompt"].startswith("trading-supervisor@")
+    print("  부서장 감독 (권한 경계)    OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("bull_researcher", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1305,6 +2374,12 @@ if __name__ == "__main__":
     _check_agent_has_no_tools()
     _check_notion_report_node()
     _check_intent_proposal()
+    _check_three_round_debate()
+    _check_thinking_loop()
+    _check_thinking_stays_private()
+    _check_llm_call_accounting()
+    _check_supervisor_moderation()
+    _check_employee_workers_node()
     _check_secret_redaction()
     _check_langsmith_observability()
-    print("트레이딩본부 토론 파이프라인 18개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    print("트레이딩본부 토론 파이프라인 24개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
