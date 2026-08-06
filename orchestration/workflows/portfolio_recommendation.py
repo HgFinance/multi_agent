@@ -71,8 +71,7 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "execution-planning-worker": ("체결", "실행", "집행"),
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
     "derivatives-structure-worker": ("파생", "레버리지", "공매도", "옵션", "선물"),
-    "market-liquidity-worker": ("위험", "리스크", "손실", "변동", "유동성"),
-    "pre-trade-risk-worker": ("주문", "매수", "매도", "리밸런싱", "한도"),
+    "core-risk-worker": ("위험", "리스크", "손실", "변동", "유동성", "주문", "매수", "매도", "리밸런싱", "한도"),
     "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사"),
     "derivatives-counterparty-worker": ("파생", "레버리지", "공매도", "헤지", "거래상대방"),
     "portfolio-control-worker": ("포트폴리오", "비중", "보유", "포지션"),
@@ -93,7 +92,7 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "research": ("research-data-worker", "evidence-rag-worker"),
     "trading": ("market-thesis-worker", "trade-proposal-worker"),
-    "risk": ("market-liquidity-worker", "pre-trade-risk-worker"),
+    "risk": ("core-risk-worker", "compliance-policy-worker"),
     "qa": ("evidence-qa-worker", "hallucination-critic-worker"),
     "accounting": ("portfolio-control-worker", "investor-reporting-worker"),
     "ceo": ("executive-briefing-worker",),
@@ -234,8 +233,7 @@ def _deterministic_worker_llm(system: str, prompt: str) -> str:
 
 def _risk_tools(module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
     return {
-        "market-liquidity-worker": module._market_tool,
-        "pre-trade-risk-worker": module._pre_trade_tool,
+        "core-risk-worker": module._core_risk_tool,
         "compliance-policy-worker": module._compliance_tool,
         "derivatives-counterparty-worker": module._counterparty_tool,
     }

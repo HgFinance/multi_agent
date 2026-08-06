@@ -237,8 +237,7 @@ def run_risk_qa_pipeline(
         output_contract="risk.department-head-context.v1",
         worker_module=risk_module,
         worker_tools={
-            "market-liquidity-worker": risk_module._market_tool,
-            "pre-trade-risk-worker": risk_module._pre_trade_tool,
+            "core-risk-worker": risk_module._core_risk_tool,
             "compliance-policy-worker": risk_module._compliance_tool,
             "derivatives-counterparty-worker": risk_module._counterparty_tool,
         },
@@ -306,9 +305,9 @@ def run_risk_qa_pipeline(
     risk_ok = (
         risk_report.get("degraded") is False
         and risk_report.get("head", {}).get("binding") is False
-        and len(risk_report.get("workers", [])) == 4
+        and len(risk_report.get("workers", [])) == 3
         and not risk_report.get("not_executed")
-        and len(risk_report.get("handoffs", [])) == 4
+        and len(risk_report.get("handoffs", [])) == 3
     )
     qa_ok = (
         qa_report.get("degraded") is False

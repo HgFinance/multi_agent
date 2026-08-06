@@ -41,12 +41,11 @@ case_request
 
 ## Risk 직원 구성
 
-부서장 `risk-supervisor`는 Hermes가 담당한다. 중복 역할은 다음 네 Worker로 정리했다.
+부서장 `risk-supervisor`는 Hermes가 담당한다. 중복 역할은 다음 세 Worker로 정리했다 (2026-08-06, `market-liquidity-worker`+`pre-trade-risk-worker` 병합 — 둘 다 항상 실행되는 정형 계산 Worker라 LangGraph 노드 수준 추적을 유지한 채 합쳤다).
 
 | Worker | 상태 | 도구 | 입력·출력 경계 |
 |---|---|---|---|
-| `market-liquidity-worker` | active | `risk.trading_state.read`, `risk.p1.snapshot` | 시장·유동성·노출 context만 생성 |
-| `pre-trade-risk-worker` | active | `risk.case.check` | RiskEngine 결과를 설명만 함 |
+| `core-risk-worker` | active | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check` | 시장·유동성·노출·RiskEngine 결과를 설명만 함 |
 | `compliance-policy-worker` | conditional | `risk.compliance.check` | 정책 근거가 있을 때만 PIT context 생성 |
 | `derivatives-counterparty-worker` | conditional | `risk.trading_state.record.read` | 거래상대방·파생 신호가 있을 때만 실행 |
 
@@ -78,7 +77,7 @@ case_request
 | HR | 5 | 2 | 3 | 5 |
 | Research | 6 | 2 | 4 | 6 |
 | Trading | 6 | 2 | 4 | 6 |
-| Risk | 4 | 2 | 2 | 4 |
+| Risk | 3 | 1 | 2 | 3 |
 | Quant / Backtest | 7 | 2 | 5 | 7 |
 | Accounting / Portfolio | 8 | 2 | 6 | 8 |
 | QA | 5 | 1 | 4 | 5 |

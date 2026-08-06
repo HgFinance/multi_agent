@@ -72,9 +72,9 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
 
     expected_counts = {
         "research": 6,
+        "risk": 3,
         # 2026-08-05: market-thesis-worker 를 bull/bear 로 분리해 6 -> 7 (ADR-0005).
         "trading": 7,
-        "risk": 4,
         "qa": 5,
         "accounting": 8,
         "ceo": 1,
@@ -92,7 +92,7 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
     risk_qa_workers = [
         worker for worker in result["worker_reports"] if worker["stage"] in {"risk", "qa"}
     ]
-    assert len(risk_qa_workers) == 9
+    assert len(risk_qa_workers) == 8
     assert all(worker["technology"]["write_capability"] == "NONE" for worker in risk_qa_workers)
     assert all(worker["technology"]["stack"] for worker in risk_qa_workers)
 
@@ -105,7 +105,7 @@ def test_worker_registry_loading_is_atomic_under_parallel_fanout():
         modules = list(pool.map(lambda _: portfolio_pipeline._load_module("risk"), range(8)))
 
     assert all(module is modules[0] for module in modules)
-    assert len(modules[0].WORKER_SPECS) == 4
+    assert len(modules[0].WORKER_SPECS) == 3
     assert sys.modules[module_name] is modules[0]
 
 

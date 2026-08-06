@@ -36,7 +36,7 @@ def test_test_profile_runs_full_risk_and_qa_skeleton():
     assert result["qa_gate"]["decision"] == "WARN"
     assert result["replay_contract"]["status"] == "READY"
     assert result["replay_contract"]["replayable"] is True
-    assert len(result["risk"]["workers"]) == 4
+    assert len(result["risk"]["workers"]) == 3
     assert len(result["qa"]["workers"]) == 5
     assert result["risk"]["not_executed"] == []
     assert result["qa"]["not_executed"] == []
@@ -47,7 +47,6 @@ def test_test_profile_runs_full_risk_and_qa_skeleton():
     assert result["qa"]["head"]["escalate"] is True  # intentional fixture WARN
     assert [handoff["type"] for handoff in result["risk"]["handoffs"]] == [
         "HEAD_DELEGATION",
-        "PEER_CONTEXT",
         "PEER_CONTEXT",
         "PEER_CONTEXT",
     ]
@@ -133,7 +132,7 @@ def test_worker_runtime_ollama_mode_uses_worker_injection_boundary():
     )
 
     assert result["worker_runtime"] == "ollama"
-    assert len(calls) == 9
+    assert len(calls) == 8
     assert result["risk"]["runtime"]["worker_provider"] == "ollama"
     assert result["qa"]["runtime"]["worker_provider"] == "ollama"
 
@@ -146,8 +145,7 @@ def test_worker_rag_policy_is_fail_closed_per_role():
         for worker in result[domain]["workers"]
     }
 
-    assert routes["market-liquidity-worker"] == "NO_RAG"
-    assert routes["pre-trade-risk-worker"] == "NO_RAG"
+    assert routes["core-risk-worker"] == "NO_RAG"
     assert routes["derivatives-counterparty-worker"] == "NO_RAG"
     assert routes["ops-and-permission-worker"] == "NO_RAG"
     assert routes["compliance-policy-worker"] in {"HYBRID", "GRAPH"}

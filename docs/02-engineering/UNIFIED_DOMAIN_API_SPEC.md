@@ -140,7 +140,7 @@ Worker Context는 같은 부서 Head와 독립 LangGraph Worker Graph 사이의 
       "department": "risk-management",
       "trace_id": "uuid",
       "case_id": null,
-      "producer_worker": "pre-trade-risk-worker",
+      "producer_worker": "core-risk-worker",
       "consumer_worker": "risk-supervisor",
       "status": "COMPLETED",
       "advisory": {"summary": "Risk evidence collected", "suggested_verdict": "RESIZE"},

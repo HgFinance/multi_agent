@@ -22,10 +22,31 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import apps.api.main as bff_main
 from apps.api.main import app
 from apps.api.portfolio_runtime import PortfolioRuntime
 from apps.api.portfolio_schemas import PortfolioRecommendationResult
 from apps.api.portfolio_universe import enrich_suitability_result
+
+# apps.api.main freezes PORTFOLIO_AUTH_REQUIRED, PORTFOLIO_REQUIRE_MANDATE_BINDING and
+# PORTFOLIO_GOVERNANCE_BINDING_ENABLED into module constants at import time, and the
+# module is cached across test files within one pytest session. The os.environ lines
+# above only take effect if this is the first file to import it; when another test file
+# imports it first, this file's env vars are set too late. Patch the already-imported
+# module's attributes directly so these defaults hold regardless of collection order
+# (per-test `patch("apps.api.main.PORTFOLIO_AUTH_REQUIRED", True)` calls below still
+# override this as expected).
+bff_main.PORTFOLIO_AUTH_REQUIRED = False
+bff_main.PORTFOLIO_REQUIRE_MANDATE_BINDING = False
+bff_main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED = False
+
+# main.py imports portfolio_runtime *unqualified* via its own sys.path hack
+# (`from portfolio_runtime import RUNTIME`), so `import apps.api.portfolio_runtime`
+# here would be a distinct module object with its own EMBEDDED_WORKER_ENABLED copy -
+# patching it would not affect the RUNTIME singleton main.py actually uses. Patch the
+# real one via the bound method's own globals instead, so it's correct regardless of
+# which sys.modules key the module ended up under.
+bff_main.RUNTIME._dispatch.__func__.__globals__["EMBEDDED_WORKER_ENABLED"] = True
 
 
 class PortfolioRecommendationBffTest(unittest.TestCase):

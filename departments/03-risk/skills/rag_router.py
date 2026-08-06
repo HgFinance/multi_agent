@@ -34,8 +34,7 @@ class WorkerRAGPolicy:
 
 
 WORKER_RAG_POLICIES: dict[str, WorkerRAGPolicy] = {
-    "market-liquidity-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
-    "pre-trade-risk-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
+    "core-risk-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "derivatives-counterparty-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "compliance-policy-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH"})

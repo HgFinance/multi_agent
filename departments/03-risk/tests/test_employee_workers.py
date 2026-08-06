@@ -23,7 +23,7 @@ def test_active_workers_are_independent_and_use_allowlisted_tools():
     assert report["runtime"]["executor"] == "LangGraph"
     assert report["runtime"]["model"] == "qwen3:1.7b"
     assert report["failed"] == []
-    assert report["executed"] == ["market-liquidity-worker", "pre-trade-risk-worker"]
+    assert report["executed"] == ["core-risk-worker"]
     assert "compliance-policy-worker" in report["not_executed"]
     assert all(item["tools"] for item in report["workers"])
 
@@ -65,13 +65,13 @@ def test_each_worker_trace_contains_all_declared_tools():
         assert len(tool_events) == 1
         assert tool_events[0]["tool_calls"] == worker["tools"]
 
-    market_event = next(
+    core_event = next(
         event
         for event in next(
             worker
             for worker in report["workers"]
-            if worker["worker_id"] == "market-liquidity-worker"
+            if worker["worker_id"] == "core-risk-worker"
         )["skill_results"]
         if event["skill_id"] == "context.internal_api.v1"
     )
-    assert market_event["output"]["p1_snapshot"] == {"status": "PASS"}
+    assert core_event["output"]["p1_snapshot"] == {"status": "PASS"}

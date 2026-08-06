@@ -100,33 +100,17 @@ _RISK_TRACE = (
 
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
     WorkerSpec(
-        "market-liquidity-worker",
-        "Market and liquidity risk analyst",
-        ("risk.trading_state.read", "risk.p1.snapshot"),
+        "core-risk-worker",
+        "Market, liquidity, and pre-trade risk analyst",
+        ("risk.trading_state.read", "risk.p1.snapshot", "risk.case.check"),
         "always",
-        tech_profile=tech_profile_for(RISK_WORKER_TECH, "market-liquidity-worker"),
+        tech_profile=tech_profile_for(RISK_WORKER_TECH, "core-risk-worker"),
         skill_ids=_RISK_GUARDS
         + (
             "context.internal_api.v1",
             "context.repository_read.v1",
             "context.cache_read.v1",
             "guard.pit_filter.v1",
-            "calc.deterministic_gate.v1",
-            "verify.schema.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _RISK_TRACE
-        + ("fallback.human_escalation.v1",),
-    ),
-    WorkerSpec(
-        "pre-trade-risk-worker",
-        "Pre-trade deterministic gate analyst",
-        ("risk.case.check",),
-        "always",
-        tech_profile=tech_profile_for(RISK_WORKER_TECH, "pre-trade-risk-worker"),
-        skill_ids=_RISK_GUARDS
-        + (
-            "context.internal_api.v1",
             "calc.deterministic_gate.v1",
             "verify.schema.v1",
             "advisory.grounded_summary.v1",
@@ -495,17 +479,14 @@ def build_worker_graph(
     return graph.compile()
 
 
-def _market_tool(payload: dict[str, Any]) -> dict[str, Any]:
+def _core_risk_tool(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "tools": ["risk.trading_state.read", "risk.p1.snapshot"],
+        "tools": ["risk.trading_state.read", "risk.p1.snapshot", "risk.case.check"],
         "trading_state": payload.get("trading_state"),
         "p1_snapshot": payload.get("p1_snapshot", payload.get("market_snapshot")),
         "context": payload.get("context", {}),
+        "assessment": payload.get("assessment", {}),
     }
-
-
-def _pre_trade_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": "risk.case.check", "assessment": payload.get("assessment", {})}
 
 
 def _compliance_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -535,8 +516,7 @@ def _run_employee_workers_sequential(
     payload: dict[str, Any], llm: WorkerLLM | None = None
 ) -> dict[str, Any]:
     tools: dict[str, WorkerTool] = {
-        "market-liquidity-worker": _market_tool,
-        "pre-trade-risk-worker": _pre_trade_tool,
+        "core-risk-worker": _core_risk_tool,
         "compliance-policy-worker": _compliance_tool,
         "derivatives-counterparty-worker": _counterparty_tool,
     }
@@ -602,8 +582,7 @@ async def run_employee_workers_async(
     """Fan out guarded Risk Worker graphs and deterministically fan them in."""
 
     tools: dict[str, WorkerTool] = {
-        "market-liquidity-worker": _market_tool,
-        "pre-trade-risk-worker": _pre_trade_tool,
+        "core-risk-worker": _core_risk_tool,
         "compliance-policy-worker": _compliance_tool,
         "derivatives-counterparty-worker": _counterparty_tool,
     }

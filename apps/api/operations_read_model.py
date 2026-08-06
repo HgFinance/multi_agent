@@ -39,6 +39,7 @@ DEPARTMENT_PROFILES: tuple[dict[str, str], ...] = (
 )
 
 
+@lru_cache(maxsize=None)
 def _profile_data(profile: str) -> dict[str, Any]:
     path = ROOT / "departments" / profile / "hermes" / "config.yaml"
     try:
@@ -48,6 +49,7 @@ def _profile_data(profile: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+@lru_cache(maxsize=1)
 def _registry() -> dict[str, Any]:
     try:
         value = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))

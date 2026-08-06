@@ -31,10 +31,10 @@
 
 ## Worker Registry 수와 실제 실행 수
 
-- Registry에 등록된 실제 Worker는 4개다.
-- 기본 입력에서 항상 실행되는 Worker는 2개(`market-liquidity-worker`, `pre-trade-risk-worker`)다.
+- Registry에 등록된 실제 Worker는 3개다 (2026-08-06, `market-liquidity-worker`+`pre-trade-risk-worker`를 `core-risk-worker`로 병합).
+- 기본 입력에서 항상 실행되는 Worker는 1개(`core-risk-worker`)다.
 - 조건부 Worker는 2개(`compliance-policy-worker`, `derivatives-counterparty-worker`)이며, 사건 신호가 있을 때 호출된다.
-- 한 케이스의 최대 실행 수는 4개다. `agent.personalities`의 기존 6개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
+- 한 케이스의 최대 실행 수는 3개다. `agent.personalities`의 기존 6개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
 직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:1.7b`이며, `agent-risk`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `risk-management`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission

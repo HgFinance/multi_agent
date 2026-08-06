@@ -130,13 +130,18 @@ class PortfolioWorkerReport(_ApiModel):
 
 class PortfolioDataContext(_ApiModel):
     source: str | None = None
+    as_of: str | None = None
     quality_status: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    queries: list[str] = Field(default_factory=list)
     read_only: bool = True
     external_writes: bool = False
+    preflight: dict[str, object] = Field(default_factory=dict)
     research: dict[str, object] = Field(default_factory=dict)
     market: dict[str, object] = Field(default_factory=dict)
     accounting: dict[str, object] = Field(default_factory=dict)
     data_diagnostics: dict[str, object] = Field(default_factory=dict)
+    candidates: list[dict[str, object]] = Field(default_factory=list)
 
 
 class PortfolioPipelineEvent(_ApiModel):
