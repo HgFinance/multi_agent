@@ -198,9 +198,6 @@ from notification import (
     NotificationRequest,
     NotificationService,
 )
-from langgraph.checkpoint.memory import InMemorySaver
-from mandate_assistant import AssistantMessage as _AssistantMessage
-from mandate_assistant import suggest as _mandate_assistant_suggest
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -1696,10 +1693,6 @@ if __name__ == "__main__":
         escalation_repo = InMemoryEscalationRepository()
     if not isinstance(committee_repo, InMemoryCommitteeRepository):
         committee_repo = InMemoryCommitteeRepository()
-    if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
-        actor_identity_repo = InMemoryActorIdentityRepository()
-    actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
-    actor_identity_repo.seed("user-1")
     if not isinstance(_mandate_checkpointer, InMemorySaver):
         _mandate_checkpointer = InMemorySaver()
     if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
