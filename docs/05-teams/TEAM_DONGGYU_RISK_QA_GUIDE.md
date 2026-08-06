@@ -119,11 +119,11 @@
 
 ## Risk·QA 역할 분배 최적화 기준 (2026-08-05)
 
-현재 추천 파이프라인에서 항상 실행하는 최소 통제는 Risk의 `market-liquidity-worker`·`pre-trade-risk-worker`, QA의 `evidence-qa-worker`다. 나머지는 입력이 있을 때만 팬아웃한다.
+현재 추천 파이프라인에서 항상 실행하는 최소 통제는 Risk의 `core-risk-worker`(2026-08-06, `market-liquidity-worker`+`pre-trade-risk-worker` 병합), QA의 `evidence-qa-worker`다. 나머지는 입력이 있을 때만 팬아웃한다.
 
 | 입력 조건 | 실행 Worker | 안전한 미실행/실패 결과 |
 |---|---|---|
-| 모든 포트폴리오 추천 | Risk market/liquidity + pre-trade, QA evidence | Worker 실패는 `DEGRADED`, downstream은 `HOLD/ESCALATE` |
+| 모든 포트폴리오 추천 | Risk core-risk-worker, QA evidence | Worker 실패는 `DEGRADED`, downstream은 `HOLD/ESCALATE` |
 | compliance evidence 존재 | Risk compliance-policy | PIT·ACL·citation 미통과 시 `ESCALATE`, 근거 없는 정책 판정 금지 |
 | 파생·상대방·증거금 신호 존재 | Risk derivatives-counterparty | 상태 누락 시 승인 방향 보간 금지, `HOLD/ESCALATE` |
 | unsupported/contradicted claim 존재 | QA hallucination-critic | 미해결 claim이면 QA PASS 금지 |

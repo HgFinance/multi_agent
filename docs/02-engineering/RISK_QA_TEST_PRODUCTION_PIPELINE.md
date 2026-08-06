@@ -19,8 +19,7 @@ ResearchPacket fixture
   → packet contract / input_hash / PIT guard
   → Risk deterministic gate skeleton (binding=false)
   → risk-supervisor (Hermes-shaped Head Graph)
-      → market-liquidity-worker (nested LangGraph)
-      → pre-trade-risk-worker (peer context)
+      → core-risk-worker (nested LangGraph)
       → compliance-policy-worker (peer context)
       → derivatives-counterparty-worker (peer context)
   → risk-supervisor synthesis (non-binding)

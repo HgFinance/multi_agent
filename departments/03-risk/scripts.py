@@ -635,7 +635,7 @@ def _assemble_out(state: RiskState) -> dict:
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
     if a.get("check_results") and not worker_execution:
-        executed_agents += ["market-liquidity-worker", "pre-trade-risk-worker"]
+        executed_agents += ["core-risk-worker"]
     if (
         state.get("counterparty")
         and state.get("counterparty_llm_called", True)
@@ -649,8 +649,7 @@ def _assemble_out(state: RiskState) -> dict:
         executed_agents.append("risk-supervisor")
     risk_agents = [
         "risk-supervisor",
-        "market-liquidity-worker",
-        "pre-trade-risk-worker",
+        "core-risk-worker",
         "compliance-policy-worker",
         "derivatives-counterparty-worker",
     ]

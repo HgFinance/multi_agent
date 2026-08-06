@@ -305,9 +305,9 @@ def run_risk_qa_pipeline(
     risk_ok = (
         risk_report.get("degraded") is False
         and risk_report.get("head", {}).get("binding") is False
-        and len(risk_report.get("workers", [])) == 4
+        and len(risk_report.get("workers", [])) == 3
         and not risk_report.get("not_executed")
-        and len(risk_report.get("handoffs", [])) == 4
+        and len(risk_report.get("handoffs", [])) == 3
     )
     qa_ok = (
         qa_report.get("degraded") is False

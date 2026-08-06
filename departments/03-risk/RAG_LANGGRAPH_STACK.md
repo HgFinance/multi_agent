@@ -41,8 +41,7 @@ intake
 
 | Worker | LangGraph 스킬 | RAG 배정 | 허용 Tool/API | 저장소 경계 |
 |---|---|---|---|---|
-| `market-liquidity-worker` | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. | `risk.trading_state.read`, `risk.p1.snapshot`, 내부 `market-api`·`portfolio-api` | `risk.input_snapshots`와 Exposure Snapshot read-only |
-| `pre-trade-risk-worker` | `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | RAG 금지. 정책 문서는 Compliance Worker가 검증한다. | `risk.case.check`, `POST /investment-cases/{case_id}/risk-check` | Risk Engine을 통해서만 Risk Request/Decision에 접근 |
+| `core-risk-worker` | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay`, `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. 정책 문서는 Compliance Worker가 검증한다. | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, 내부 `market-api`·`portfolio-api`, `POST /investment-cases/{case_id}/risk-check` | `risk.input_snapshots`와 Exposure Snapshot read-only, Risk Engine을 통해서만 Risk Request/Decision에 접근 |
 | `compliance-policy-worker` | `PIT_filter`, `hybrid_retrieve`, `claim_decompose`, `citation_verify`, `grounded_fallback`, `retry_budget` | Agentic RAG 기본. 문서가 커지면 PIKE-RAG, 다문서 관계가 반복되면 LightRAG | `risk.compliance.check`, `POST /risk/v1/compliance/check`, 내부 vector gateway | `research.documents`·`document_versions`·`evidence_chunks` read-only, 구조화 정책은 `risk.policies` |
 | `derivatives-counterparty-worker` | `snapshot_freshness`, `greeks_margin_gate`, `counterparty_state`, `stress_check`, `escalation` | 계산 경로에는 RAG를 사용하지 않는다. 계약·상대방 관계 설명이 필요할 때만 GraphRAG 후보 | `risk.trading_state.record.read`, P2 derivatives API, `market-api`, `portfolio-api` | `risk.derivative_snapshots`, `risk.input_snapshots`, 승인된 Exposure read-only |
 
@@ -63,7 +62,7 @@ query normalize
 
 ### 3.2 Hot Path 금지
 
-`pre-trade-risk-worker`와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. Risk Worker가 계산 결과를 설명해야 할 때도 먼저 Risk Engine 결과를 확정한 뒤 비바인딩 서술만 생성한다.
+`core-risk-worker`와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. Risk Worker가 계산 결과를 설명해야 할 때도 먼저 Risk Engine 결과를 확정한 뒤 비바인딩 서술만 생성한다.
 
 ## 4. HTTP·API 호출
 
@@ -130,8 +129,7 @@ audit.rag_graph_extractions
 
 | Worker | Required Skill ID |
 |---|---|
-| `market-liquidity-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
-| `pre-trade-risk-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
+| `core-risk-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `compliance-policy-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.pit_filter.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `rag.route.v1`, `rag.hybrid_retrieve.v1`, `rag.rerank.v1`, `rag.decompose.v1`, `rag.context_stitch.v1`, `rag.self_check.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.numeric_temporal.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `derivatives-counterparty-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
 

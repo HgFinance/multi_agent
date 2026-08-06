@@ -128,7 +128,7 @@ def _payload() -> dict[str, Any]:
 
 
 def test_profile_worker_registry_counts_and_models() -> None:
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 6, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 6, "03-risk": 3, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -284,7 +284,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         "hr": (5, 2, 3),
         "research": (6, 2, 4),
         "trading": (6, 2, 4),
-        "risk": (4, 2, 2),
+        "risk": (3, 1, 2),
         "quant-backtest": (7, 2, 5),
         "accounting-portfolio": (8, 2, 6),
         "qa": (5, 1, 4),
