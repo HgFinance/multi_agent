@@ -68,6 +68,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804001000_quant_hypothesis_inconclusive.sql",
                 "20260804001100_order_events_broker_id_unique.sql",
                 "20260804001200_risk_qa_production_read_paths.sql",
+                # 도현 2026-08-06: Transactional Outbox + consumer idempotency (P0-2, PLAT-03)
+                "20260806000100_execution_outbox.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -103,7 +105,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         expected_counts = {
             "accounting": 18,
             "audit": 21,
-            "execution": 12,
+            # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
+            # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
+            "execution": 14,
             "governance": 20,
             "quant": 12,
             "reference": 9,

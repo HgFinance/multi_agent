@@ -16,6 +16,12 @@ provider 6개. **전부 기존 모듈만 부르고 새 검색 로직을 짜지 �
   tca_evidence           과거 유사 집행의 실현 슬리피지 그룹 + 조정 제안
   certification_evidence 파생 Certification 서명 현황
 
+**2026-08-06 소비자가 바뀌었다. provider 는 그대로다.** 아래 넷을 쓰던 조건부 직원
+4명(order-constraint / execution-planning / venue-cost / derivatives-structure)이
+tool 로 강등돼 `desk-runner-worker` 하나로 합쳐졌다. provider 는 원래부터 결정론
+모듈을 부르기만 했으므로 지울 이유가 없다 - `desk_runner_evidence()` 가 넷을 한 번에
+돌린다. 사라진 것은 그 결과를 1.7b 모델로 다시 서술하던 계층뿐이다.
+
 **상대 원문을 절대 넣지 않는다.** Bull evidence 에 Bear 문장이 들어가면 확증편향을
 막으려고 두 직원을 나눈 의미가 없어진다 - 자체 점검이 그것을 직접 검사한다.
 
@@ -51,7 +57,13 @@ from derivatives import (  # noqa: E402
     CERTIFICATION_REQUIRED,
     DERIVATIVE_CERTIFIERS,
 )
-from rag_router import RAGPlan, allows, choose_rag_route, route_denied  # noqa: E402
+from rag_router import (  # noqa: E402
+    DETERMINISTIC_PLAN,
+    RAGPlan,
+    allows,
+    choose_rag_route,
+    route_denied,
+)
 from risk_gate import ENTRY_ALLOWED_TRADING_STATES  # noqa: E402
 from tca_memory import TcaMemoryError  # noqa: E402
 
@@ -88,13 +100,18 @@ def _debate_evidence(payload: Mapping[str, Any], plan: RAGPlan, *, side: str) ->
                            "reason": "토론 산출이 없다 — 논지를 추정해 단정하지 마십시오"}}
     contested = _mapping(debate.get("contested"))
     mine = _mapping(debate.get(side))
+    # 2라운드 보강도 **자기 것만** 읽는다. 키가 side 로 고정돼 있어 상대 r2 는 닿지 않는다.
+    mine_r2 = _mapping(debate.get(f"{side}_r2"))
     opponent = "bear" if side == "bull" else "bull"
     return {"debate": {
         "side": side,
         # Claim 은 id 목록만. 원문 전체를 실으면 프롬프트가 폭증한다.
         "claims": sorted(debate.get("claims") or {}),
         "my_case": {k: v for k, v in mine.items() if k != "claim_refs"} if mine else None,
-        "my_refs": sorted(mine.get("claim_refs") or []),
+        "my_round2": ({k: v for k, v in mine_r2.items() if k != "claim_refs"}
+                      if mine_r2 else None),
+        "my_refs": sorted(set(mine.get("claim_refs") or [])
+                          | set(mine_r2.get("claim_refs") or [])),
         # 상대는 **어떤 Claim id 를 인용했는지만** 알 수 있다. 문장은 안 준다.
         "opponent_refs": sorted(contested.get(f"{opponent}_only_refs") or []),
         "contested_refs": sorted(contested.get("contested_refs") or []),
@@ -132,7 +149,7 @@ def _outgoing(table, enum, current: str | None) -> dict[str, Any]:
 def state_machine_evidence(payload: Mapping[str, Any], plan: RAGPlan) -> dict[str, Any]:
     """제약 매핑에 필요한 것: 지금 상태에서 어디로 갈 수 있나 + 승인 매핑 규칙."""
     if not allows(plan, "graph_context"):
-        return {"state_transitions": route_denied("order-constraint-worker", plan,
+        return {"state_transitions": route_denied("desk-runner-worker", plan,
                                                   "graph_context")}
     intent = _mapping(payload.get("order_intent"))
     order = _mapping(payload.get("broker_order"))
@@ -173,7 +190,7 @@ def _plan_draft(payload: Mapping[str, Any]) -> ExecutionPlanDraft | None:
 
 def broker_rules_evidence(payload: Mapping[str, Any], plan: RAGPlan) -> dict[str, Any]:
     if not allows(plan, "lexical"):
-        return {"broker_rules": route_denied("execution", plan, "lexical")}
+        return {"broker_rules": route_denied("desk-runner-worker", plan, "lexical")}
     rules = _rules()
     adapter = str(_mapping(payload.get("execution_plan")).get("adapter") or "")
     context = broker_rules.rule_context(f"{_RULE_QUERY} {adapter}", k=_MAX_RULES, rules=rules)
@@ -207,7 +224,7 @@ def _records(payload: Mapping[str, Any]) -> tuple[list[Any], str]:
 def tca_evidence(payload: Mapping[str, Any], plan: RAGPlan) -> dict[str, Any]:
     """과거 유사 집행의 실현 슬리피지. **Paper 근거는 시뮬레이션으로 표시된다.**"""
     if not allows(plan, "structured_filter"):
-        return {"tca_memory": route_denied("execution", plan, "structured_filter")}
+        return {"tca_memory": route_denied("desk-runner-worker", plan, "structured_filter")}
     try:
         records, source = _records(payload)
     except (TcaMemoryError, TypeError) as exc:
@@ -273,14 +290,44 @@ def certification_evidence(payload: Mapping[str, Any], plan: RAGPlan) -> dict[st
     return {"certification": body}
 
 
+# ── OrderIntent 제안 현황 근거 ─────────────────────────────────────────────
+def proposal_evidence(payload: Mapping[str, Any], _plan: RAGPlan) -> dict[str, Any]:
+    """제안이 있는지·왜 없는지. **검색이 아니라 상태 조회라 경로 검사가 없다.**
+
+    `propose_intent()` 가 이미 결정론으로 만든 결과를 옮기기만 한다 - 여기서 수량·가격을
+    다시 계산하면 같은 규칙이 두 곳에 생긴다.
+    """
+    proposal = (_mapping(payload.get("order_intent_proposal"))
+                or _mapping(_mapping(payload.get("debate")).get("order_intent_proposal")))
+    if not proposal:
+        return {"order_intent_proposal": {
+            "checked": False,
+            "reason": "제안 블록이 없다 — 토론이 propose_intent 전에 끝났거나 호출자가 안 줬다"}}
+    return {"order_intent_proposal": {
+        "checked": True,
+        **{k: proposal.get(k) for k in ("available", "reason", "detail",
+                                        "submittable", "risk_gate_required")},
+        # 제안은 주문이 아니다. 러너가 옮겨도 이 사실은 안 바뀐다.
+        "decided_by": "deterministic",
+        "rule": "제안은 Risk 판정 전이며 그 자체로 제출 권한이 아니다",
+    }}
+
+
 PROVIDERS: dict[str, tuple[EvidenceProvider, ...]] = {
     "bull-thesis-worker": (bull_debate_evidence,),
     "bear-thesis-worker": (bear_debate_evidence,),
-    "order-constraint-worker": (state_machine_evidence,),
-    "execution-planning-worker": (broker_rules_evidence, tca_evidence),
-    "venue-cost-worker": (broker_rules_evidence, tca_evidence),
-    "derivatives-structure-worker": (certification_evidence,),
 }
+
+# desk-runner(결정론 잡무)가 한 번에 도는 provider. **정책표가 아니라 실행 목록이다.**
+# 이 목록이 곧 "러너가 무엇을 볼 수 있는가"이며 payload 로 바뀌지 않는다 - 그래서
+# rag_router 의 정책표에 항목을 두지 않아도 감사가 된다.
+DESK_RUNNER_PROVIDERS: tuple[EvidenceProvider, ...] = (
+    proposal_evidence,        # 구 trade-proposal-worker
+    state_machine_evidence,   # 구 order-constraint-worker
+    broker_rules_evidence,    # 구 execution-planning-worker
+    tca_evidence,             # 구 execution-planning / venue-cost-worker
+    certification_evidence,   # 구 derivatives-structure-worker
+)
 
 
 def _safe(provider: EvidenceProvider, payload: Mapping[str, Any], plan: RAGPlan) -> dict[str, Any]:
@@ -291,6 +338,20 @@ def _safe(provider: EvidenceProvider, payload: Mapping[str, Any], plan: RAGPlan)
     except (BrokerRuleError, TcaMemoryError, Exception) as exc:  # noqa: BLE001 - 근거 경계
         return {f"{provider.__name__}_error": {
             "checked": False, "error": type(exc).__name__, "detail": str(exc)[:200]}}
+
+
+def desk_runner_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """desk-runner 가 모으는 사실 전체. **LLM 을 부르지 않는다.**
+
+    payload 로 경로를 못 바꾼다 - `DETERMINISTIC_PLAN` 고정이라 `choose_rag_route()` 를
+    거치지 않는다. provider 하나가 죽어도 `_safe` 가 `checked: False` 로 남기므로
+    러너 보고가 통째로 사라지지 않는다.
+    """
+    evidence: dict[str, Any] = {"rag_plan": DETERMINISTIC_PLAN.as_dict(),
+                                "decided_by": "deterministic", "authoritative": False}
+    for provider in DESK_RUNNER_PROVIDERS:
+        evidence.update(_safe(provider, payload, DETERMINISTIC_PLAN))
+    return evidence
 
 
 def grounded_tool(base, worker_id: str, *,
@@ -341,6 +402,8 @@ if __name__ == "__main__":
     def plan_for(worker_id: str) -> RAGPlan:
         return choose_rag_route({}, worker_id=worker_id)
 
+    RUNNER = DETERMINISTIC_PLAN   # desk-runner 는 정책표가 아니라 고정 플랜을 쓴다
+
     # 1. **Bull evidence 에 Bear 원문이 없다** — 이 파일의 존재 이유
     bull = bull_debate_evidence({"debate": DEBATE}, plan_for("bull-thesis-worker"))
     dumped = json.dumps(bull, ensure_ascii=False)
@@ -357,18 +420,16 @@ if __name__ == "__main__":
 
     # 2. 상태 전이 — 현재 상태에서 나가는 간선만
     state = state_machine_evidence(
-        {"order_intent": {"intent_status": "APPROVED"}},
-        plan_for("order-constraint-worker"))["state_transitions"]
+        {"order_intent": {"intent_status": "APPROVED"}}, RUNNER)["state_transitions"]
     assert state["intent"]["current_state"] == "APPROVED"
     assert "APPROVED->READY_TO_SUBMIT" in state["intent"]["outgoing"]
     assert "DRAFT->RISK_PENDING" not in state["intent"]["outgoing"], "무관한 간선이 실렸다"
     assert state["risk_mapping"]["entry_allowed_trading_states"] == ["ENABLED"]
     # 종단 상태는 나가는 간선이 없다
-    dead = state_machine_evidence({"order_intent": {"intent_status": "REJECTED"}},
-                                  plan_for("order-constraint-worker"))
+    dead = state_machine_evidence({"order_intent": {"intent_status": "REJECTED"}}, RUNNER)
     assert dead["state_transitions"]["intent"]["outgoing"] == []
     # 상태 미상이면 전체 표를 주되 current_state 를 null 로 명시한다
-    unknown = state_machine_evidence({}, plan_for("order-constraint-worker"))
+    unknown = state_machine_evidence({}, RUNNER)
     assert unknown["state_transitions"]["intent"]["current_state"] is None
     assert unknown["state_transitions"]["intent"]["all_transitions"]
     print("  상태 전이 근거              OK")
@@ -378,23 +439,22 @@ if __name__ == "__main__":
     assert denied["broker_rules"]["checked"] is False
     assert denied["broker_rules"]["reason"] == "route_denied:NO_RAG"
     assert tca_evidence({}, plan_for("bull-thesis-worker"))["tca_memory"]["checked"] is False
-    assert state_machine_evidence({}, plan_for("venue-cost-worker"))[
-        "state_transitions"]["reason"] == "route_denied:HYBRID"
+    assert state_machine_evidence({}, plan_for("bear-thesis-worker"))[
+        "state_transitions"]["reason"] == "route_denied:NO_RAG"
     print("  라우터 복종 (route_denied)  OK")
 
     # 4. 브로커 규칙 + 분할 판정 — 프리셋 초안이 실제 판정을 낸다
     exec_plan = {"slices": 40, "window_minutes": 0.1667, "replaces_per_slice": 2,
                  "adapter": "ls-live", "source": "philosophies.yaml:momentum",
                  "approved": False}
-    rules_ev = broker_rules_evidence({"execution_plan": exec_plan},
-                                     plan_for("execution-planning-worker"))
+    rules_ev = broker_rules_evidence({"execution_plan": exec_plan}, RUNNER)
     assert "ls:CSPAT00701" in rules_ev["broker_rules"]
     feasible = rules_ev["plan_feasibility"]
     assert feasible["feasible"] is False and feasible["min_window_seconds"] == 40.0
     assert feasible["plan_source"] == "philosophies.yaml:momentum"
     assert feasible["plan_approved"] is False, "검사용 초안이 승인된 계획으로 보인다"
     # 계획이 없으면 없다고 적는다
-    bare = broker_rules_evidence({}, plan_for("venue-cost-worker"))
+    bare = broker_rules_evidence({}, RUNNER)
     assert bare["plan_feasibility"]["checked"] is False
     print("  브로커 규칙 + 분할 판정     OK")
 
@@ -407,29 +467,26 @@ if __name__ == "__main__":
         return tca_memory.ExecutionRecord(**kw)
 
     live = tca_evidence({"tca_records": [record(order_id=f"o{i}") for i in range(25)],
-                         "execution_plan": {"adapter": "ls-live"}},
-                        plan_for("venue-cost-worker"))["tca_memory"]
+                         "execution_plan": {"adapter": "ls-live"}}, RUNNER)["tca_memory"]
     assert live["checked"] is True and live["source"] == "payload.tca_records"
     key = "momentum/BUY/mid/ls-live"
     assert live["groups"][key]["samples"] == 25 and live["groups"][key]["sufficient"] is True
     assert live["evidence_is_simulated"] is False and live["proposals"]
     # 표본이 적으면 sufficient 가 아니다 -> tca: 인용이 막힌다
     thin = tca_evidence({"tca_records": [record(order_id=f"t{i}") for i in range(3)]},
-                        plan_for("venue-cost-worker"))["tca_memory"]
+                        RUNNER)["tca_memory"]
     assert thin["groups"][key]["sufficient"] is False
     # Paper 근거는 시뮬레이션으로 표시된다
     sim = tca_evidence({"tca_records": [record(order_id=f"p{i}", adapter="paper")
                                         for i in range(25)],
-                        "execution_plan": {"adapter": "paper"}},
-                       plan_for("venue-cost-worker"))["tca_memory"]
+                        "execution_plan": {"adapter": "paper"}}, RUNNER)["tca_memory"]
     assert sim["evidence_is_simulated"] is True
     assert sim["groups"]["momentum/BUY/mid/paper"]["simulated"] is True
-    assert tca_evidence({}, plan_for("venue-cost-worker"))["tca_memory"]["checked"] is False
+    assert tca_evidence({}, RUNNER)["tca_memory"]["checked"] is False
     print("  집행 기억 그룹 + 시뮬 표시  OK")
 
     # 6. Certification — 프로필 없으면 허용으로 안 떨어진다
-    none_profile = certification_evidence({"derivatives": {"asset_class": "FUTURE"}},
-                                          plan_for("derivatives-structure-worker"))
+    none_profile = certification_evidence({"derivatives": {"asset_class": "FUTURE"}}, RUNNER)
     assert none_profile["certification"]["verdict_unknown"] is True
     assert none_profile["certification"]["missing"] == ["accounting", "broker", "risk"]
 
@@ -441,14 +498,14 @@ if __name__ == "__main__":
                                 certified_by=frozenset({"broker"}))
     blocked = certification_evidence({"capability_profile": partial,
                                       "derivatives": {"asset_class": "FUTURE"}},
-                                     plan_for("derivatives-structure-worker"))["certification"]
+                                     RUNNER)["certification"]
     assert blocked["blocked"] is True and blocked["certified_by"] == ["broker"]
     assert blocked["missing"] == ["accounting", "risk"]
     full = CapabilityProfile(capability_profile_id=uuid4(), profile_code="P", version=1,
                              certified_by=frozenset(DERIVATIVE_CERTIFIERS))
     allowed = certification_evidence({"capability_profile": full,
                                       "derivatives": {"asset_class": "FUTURE"}},
-                                     plan_for("derivatives-structure-worker"))["certification"]
+                                     RUNNER)["certification"]
     assert allowed["blocked"] is False and allowed["missing"] == []
     print("  Certification 게이트        OK")
 
@@ -457,47 +514,63 @@ if __name__ == "__main__":
         raise RuntimeError("근거 소스 장애")
 
     boom.__name__ = "boom"
-    caught = _safe(boom, {}, plan_for("venue-cost-worker"))
+    caught = _safe(boom, {}, RUNNER)
     assert caught["boom_error"]["checked"] is False
     assert caught["boom_error"]["error"] == "RuntimeError"
     print("  provider 예외 흡수          OK")
 
-    # 8. grounded_tool 배선 — RAG 플랜과 capture
+    # 8. grounded_tool 배선 — RAG 플랜과 capture (LLM 직원 전용)
     def base(payload):
-        return {"worker_id": "venue-cost-worker", "evidence": dict(payload)}
+        return {"worker_id": "bull-thesis-worker", "evidence": dict(payload)}
 
     capture: dict = {}
-    tool = grounded_tool(base, "venue-cost-worker", capture=capture)
-    out = tool({"execution_plan": exec_plan, "market_snapshot": {"bid": "1"}})
-    assert out["rag_plan"]["route"] == "HYBRID"
-    assert "broker_rules" in out and "tca_memory" in out
-    assert capture["venue-cost-worker"] is out, "capture 가 evidence 를 안 담았다"
-    # provider 가 없는 직원은 근거 없이 그대로 지나간다
-    plain = grounded_tool(base, "trade-proposal-worker")({"research_packet": {}})
-    assert "broker_rules" not in plain and plain["rag_plan"]["route"] == "NO_RAG"
+    tool = grounded_tool(base, "bull-thesis-worker", capture=capture)
+    out = tool({"debate": DEBATE})
+    assert out["rag_plan"]["route"] == "NO_RAG"
+    assert "debate" in out and "broker_rules" not in out, "LLM 직원에 검색 근거가 붙었다"
+    assert capture["bull-thesis-worker"] is out, "capture 가 evidence 를 안 담았다"
     print("  grounded_tool 배선          OK")
+
+    # 8b. **desk-runner 는 다섯 근거를 한 번에 모은다** — 조건부 직원 4명의 대체물
+    runner_ev = desk_runner_evidence({
+        "debate": DEBATE, "execution_plan": exec_plan,
+        "order_intent": {"intent_status": "APPROVED", "asset_class": "EQUITY"},
+        "tca_records": [record(order_id=f"r{i}") for i in range(25)],
+        "derivatives": {"asset_class": "FUTURE"},
+    })
+    for key_name in ("order_intent_proposal", "state_transitions", "broker_rules",
+                     "plan_feasibility", "tca_memory", "certification"):
+        assert key_name in runner_ev, f"러너 근거에 {key_name} 이 없다"
+    assert runner_ev["order_intent_proposal"]["available"] is True
+    assert runner_ev["state_transitions"]["intent"]["current_state"] == "APPROVED"
+    assert runner_ev["tca_memory"]["checked"] is True
+    assert runner_ev["certification"]["verdict_unknown"] is True   # 프로필 없음 -> 허용 아님
+    assert runner_ev["rag_plan"]["route"] == DETERMINISTIC_PLAN.route
+    assert runner_ev["authoritative"] is False
+    # **상대 원문이 아니라 아예 토론 서술이 안 들어간다** - 러너는 사실만 옮긴다
+    dumped_runner = json.dumps(runner_ev, ensure_ascii=False, default=str)
+    assert BULL_TEXT not in dumped_runner and BEAR_TEXT not in dumped_runner
+    # 제안이 없으면 없다고 적는다
+    assert desk_runner_evidence({})["order_intent_proposal"]["checked"] is False
+    print("  desk-runner 근거 5종        OK")
 
     # 9. 프롬프트 폭증 방지 — provider 가 얹는 근거의 크기 상한.
     #    공용 런타임이 evidence JSON 을 8000자에서 자르므로 상한이 없으면 뒤에 붙은
     #    근거가 조용히 잘려나간다. 실제 base 는 input_fields 만 노출하므로(원본 payload 를
     #    통째로 되싣지 않는다) 여기서도 같은 조건으로 잰다.
-    _VENUE_INPUTS = ("order_intent", "market_snapshot", "venue_costs", "execution_plan")
-
-    def real_base(payload):
-        return {"worker_id": "venue-cost-worker", "tools": ["trading.venue_cost.read"],
-                "evidence": {k: payload[k] for k in _VENUE_INPUTS if k in payload}}
-
-    big = grounded_tool(real_base, "venue-cost-worker")({
+    big = desk_runner_evidence({
         "execution_plan": exec_plan,
+        "order_intent": {"intent_status": "APPROVED"},
         "market_snapshot": {"bid": "69900", "ask": "70100"},
         "tca_records": [record(order_id=f"x{i}", philosophy=p, side=s)
                         for i in range(200)
                         for p, s in [("momentum", "BUY")]],
     })
     size = len(json.dumps(big, ensure_ascii=False, default=str))
-    assert size < 6000, f"evidence 가 너무 크다: {size}자"
+    assert size < 8000, f"evidence 가 너무 크다: {size}자"
     assert len(big["tca_memory"]["groups"]) <= _MAX_TCA_GROUPS
     print(f"  evidence 크기 상한 ({size}자)  OK")
 
-    print("ok - 직원 근거 주입 9개 영역 점검 통과 "
-          f"(provider {len(PROVIDERS)}직원, 상대 원문 차단, 라우터 복종)")
+    print("ok - 직원 근거 주입 10개 영역 점검 통과 "
+          f"(LLM 직원 {len(PROVIDERS)}명 + desk-runner provider "
+          f"{len(DESK_RUNNER_PROVIDERS)}개, 상대 원문 차단, 라우터 복종)")

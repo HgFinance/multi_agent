@@ -206,12 +206,15 @@ export const STAFF_LIST: StaffEntry[] = [
     "무효화 조건 없는 상승 논리는 그냥 기대예요.",
     "이번엔 현서가 맞았으면 좋겠는데.",
   ]),
-  staff("strategy2", "member", "한지우", "market-thesis-worker", 3),
-  staff("strategy2", "member", "윤서준", "trade-proposal-worker", 4),
-  staff("strategy2", "member", "임채린", "order-constraint-worker", 5),
-  staff("strategy2", "member", "정하람", "execution-planning-worker", 6),
-  staff("strategy2", "member", "서지호", "venue-cost-worker", 7),
-  staff("strategy2", "member", "박서연", "derivatives-structure-worker", 0),
+  // 2026-08-06 tool 강등. 조건부 직원 5명(윤서준·임채린·정하람·서지호·박서연)과
+  // 이미 분리돼 사라진 market-thesis-worker 자리를 잡무 담당 하나로 합쳤다.
+  // 위 Bull/Bear 의 고정 멘트는 **사무실 화면용 연출**이다 — 실제 토론은
+  // departments/02-trading/scripts.py 가 직원 모델로 2라운드를 돌리고 부서장이 사회를 본다.
+  staff("strategy2", "member", "한지우", "desk-runner", 3, undefined, [
+    "저는 판단 안 합니다. 숫자만 가져와요.",
+    "브로커 초당 한도 넘는 분할은 제 선에서 반려됩니다. 규칙이 그래서요.",
+    "인증 서명 없으면 없다고 적습니다. 있다고 못 씁니다.",
+  ]),
 
   staff("ops", "lead", "이예주", "Hermes Head · Risk", 3, "이리스"),
   staff("ops", "member", "문가온", "market-liquidity-worker", 4),
