@@ -88,6 +88,11 @@ for _p in (
 ):
     sys.path.insert(0, str(_p))
 
+from actor_identity import (
+    InMemoryActorIdentityRepository,
+    UnverifiedActorUserError,
+    verify_actor_user,
+)
 from approval import (
     AlreadyDecidedError,
     ApprovalDecision,
@@ -180,6 +185,8 @@ from lifecycle import (
     MandateActivationService,
     UserApproval,
 )
+from mandate_assistant import AssistantMessage as _AssistantMessage
+from mandate_assistant import suggest as _mandate_assistant_suggest
 from notification import (
     InMemoryNotificationRepository,
     NotificationRequest,
@@ -218,9 +225,15 @@ except ImportError:
     PostgresReportRunRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_notification_repository import PostgresNotificationRepository
+    from postgres_notification_repository import (
+        NotificationPersistenceError,
+        PostgresNotificationRepository,
+    )
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+    class NotificationPersistenceError(RuntimeError):  # type: ignore[no-redef]
+        pass
 
 try:
     from postgres_approval_repository import PostgresApprovalRepository
@@ -241,6 +254,11 @@ try:
     from postgres_committee_repository import PostgresCommitteeRepository
 except ImportError:
     PostgresCommitteeRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from actor_identity import PostgresActorIdentityRepository
+except ImportError:
+    PostgresActorIdentityRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -273,6 +291,14 @@ class ProposeVersionRequest(BaseModel):
         description="In-Memory Repository 데모용 seed - accounting-api 없이 통화 검증하려면 채운다. "
                     "Postgres Repository를 쓸 때는 무시하고 accounting.funds를 그대로 조회한다.",
     )
+
+
+class SuggestRequestIn(BaseModel):
+    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4)."""
+
+    fund_id: str
+    messages: list[_AssistantMessage] = Field(min_length=1)
+    current_draft: dict | None = None
 
 
 class ApprovalIn(BaseModel):
@@ -572,6 +598,11 @@ if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
 else:
     committee_repo = InMemoryCommitteeRepository()
 
+if os.environ.get("DATABASE_URL") and PostgresActorIdentityRepository is not None:
+    actor_identity_repo = PostgresActorIdentityRepository.connect(os.environ["DATABASE_URL"])
+else:
+    actor_identity_repo = InMemoryActorIdentityRepository()
+
 # HITL Mandate 변경 워크플로 (change_workflow.py) - 위 5개 Repository/Service를 그대로
 # 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 governance.approvals다"
 # 라는 그 모듈의 설계상, 이 오케스트레이터는 "실행이 어디서 멈췄는지"만 checkpointer에 둔다.
@@ -850,6 +881,21 @@ def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     })
 
 
+@app.exception_handler(UnverifiedActorUserError)
+def _on_unverified_actor_user(request, exc: UnverifiedActorUserError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnverifiedActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(NotificationPersistenceError)
+def _on_notification_persistence_error(request, exc: NotificationPersistenceError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "NOTIFICATION_PERSISTENCE_ERROR", "message": str(exc), "detail": {},
+        "trace_id": None,
+    })
+
+
 # HITL Mandate 변경 워크플로(change_workflow.py) 예외 -> HTTP.
 #   종료된 Case 재advance 409 / MANDATE_CHANGE 아닌·없는 case_id 404 /
 #   submit()이 만들었어야 할 RISK·QA 승인 행 누락(데이터 정합성 문제) 500
@@ -961,15 +1007,15 @@ def get_mandate_current(mandate_id: str):
     available and an ACTIVE mandate fails closed when its binding is absent.
     """
     version, status = _mandate_repo.get_mandate_current(mandate_id)
+    if version <= 0:
+        return {"mandate_id": mandate_id, "current_version": version, "status": status}
     mandate_version_id = (
         _mandate_repo.get_mandate_version_id(mandate_id, version)
-        if version > 0
-        else None
+        if version > 0 else None
     )
     policy_hash = (
         _mandate_repo.get_mandate_content_hash(mandate_id, version)
-        if version > 0
-        else None
+        if version > 0 else None
     )
     if status == "ACTIVE" and (not mandate_version_id or not policy_hash):
         raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
@@ -983,7 +1029,7 @@ def get_mandate_current(mandate_id: str):
     }
 
     get_version = getattr(_mandate_repo, "get", None)
-    row = get_version(mandate_id, version) if version > 0 and callable(get_version) else None
+    row = get_version(mandate_id, version) if callable(get_version) else None
     if row is not None:
         response.update({
             "effective_from": row.effective_from.isoformat(),
@@ -1032,6 +1078,27 @@ def get_mandate_current_by_fund(fund_id: str):
             ),
         )
     return get_mandate_current(mandate_ids[0])
+
+
+# --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
+
+
+@app.post("/governance/v1/mandate-assistant/suggest")
+def mandate_assistant_suggest(body: SuggestRequestIn):
+    """Stateless Mandate 제안. LLM 장애는 빈 제안으로 fail-closed한다."""
+    try:
+        result = _mandate_assistant_suggest(
+            messages=body.messages, current_draft=body.current_draft,
+        )
+    except ValueError:
+        raise
+    except Exception:
+        _logger.exception("Mandate assistant 제안 실패 (fund_id=%s)", body.fund_id)
+        return {
+            "reply": "죄송합니다, 지금은 제안을 만들 수 없습니다. 직접 입력해 주세요.",
+            "suggestions": [], "requires_user_confirmation": True, "dropped_fields": [],
+        }
+    return result.model_dump()
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -1528,6 +1595,8 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
     없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
     자동 승격되지 않는다.
     """
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = decide_approval(
         _load_approval(approval_id), decision=body.decision,
         actor_department=body.actor_department, at=body.at,
@@ -1541,6 +1610,8 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
 @app.post("/governance/v1/approvals/{approval_id}/revoke")
 def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
     """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = revoke_approval(
         _load_approval(approval_id), actor_department=body.actor_department, at=body.at,
         reason=body.reason, actor_agent_id=body.actor_agent_id,
@@ -1591,6 +1662,10 @@ if __name__ == "__main__":
         escalation_repo = InMemoryEscalationRepository()
     if not isinstance(committee_repo, InMemoryCommitteeRepository):
         committee_repo = InMemoryCommitteeRepository()
+    if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
+        actor_identity_repo = InMemoryActorIdentityRepository()
+    actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
+    actor_identity_repo.seed("user-1")
     if not isinstance(_mandate_checkpointer, InMemorySaver):
         _mandate_checkpointer = InMemorySaver()
     mandate_change_workflow = MandateChangeWorkflow(
@@ -1651,6 +1726,21 @@ if __name__ == "__main__":
     assert body5["status"] == "ACTIVE"
     assert body5["content_hash"] == body5["policy_hash"]
     assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1"
+    assert body5["objective_text"] == "장기 성장"
+    assert body5["policy"]["universe_policy"]["allowed_markets"] == ["KRX"]
+    assert isinstance(body5["content_hash"], str) and len(body5["content_hash"]) == 64
+
+    r5b = client.get("/governance/v1/mandates/never-proposed/current")
+    assert r5b.json() == {"mandate_id": "never-proposed", "current_version": 0, "status": "DRAFT"}
+
+    _mandate_repo.set_fund_id("m1", "f1")
+    r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
+    assert r5d.status_code == 404, r5d.text
+    _mandate_repo.set_fund_id("m1b", "f1")
+    r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5e.status_code == 409, r5e.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1986,7 +2076,7 @@ if __name__ == "__main__":
         == "2026-08-03T00:00:00+00:00"
     user_approval_id_m3 = next(a["approval_id"] for a in user_pending_m3 if a["required_role"] == "USER")
     du = client.post(f"/governance/v1/approvals/{user_approval_id_m3}/decide", json={
-        "decision": "APPROVED", "actor_user_id": "u1", "at": now,
+        "decision": "APPROVED", "actor_user_id": "user-1", "at": now,
     })
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
@@ -2019,5 +2109,19 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    print("ok - CEO Office Domain API 34개 시나리오 점검 통과 "
-          "(승인 9개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 + HITL 변경요청 3개 포함)")
+    # 34. Mandate assistant - LLM 장애는 500이 아닌 빈 제안으로 fail-closed한다.
+    r36 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [{"role": "user", "content": "10년 정도 투자할 생각이에요"}],
+    })
+    assert r36.status_code == 200, r36.text
+    body36 = r36.json()
+    assert body36["requires_user_confirmation"] is True
+    assert body36["suggestions"] == [] and body36["dropped_fields"] == []
+
+    r37 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [],
+    })
+    assert r37.status_code == 422, r37.text
+
+    print("ok - CEO Office Domain API 36개 시나리오 점검 통과 "
+          "(Mandate assistant·by-fund·canonical binding 포함)")

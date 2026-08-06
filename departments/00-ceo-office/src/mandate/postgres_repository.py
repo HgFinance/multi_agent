@@ -191,6 +191,21 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        """Return all Mandates for a Fund; the API rejects ambiguous results."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select mandate_id from governance.mandates where fund_id = %s",
+                    (fund_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [str(row[0]) for row in rows]
+        finally:
+            self._pool.putconn(conn)
+
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 
     def insert(self, row: MandateVersionRow) -> None:

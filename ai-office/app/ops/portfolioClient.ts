@@ -1,6 +1,7 @@
 "use client";
 
 import { BFF } from "./readModel";
+import { fetchCurrentMandate } from "./governanceClient";
 
 function explainPortfolioApiError(body: unknown, status: number): string {
   const detail = typeof body === "object" && body !== null && "detail" in body
@@ -173,6 +174,16 @@ export async function startSavedPortfolioRecommendation(): Promise<{ run_id: str
   if (!draft?.user_id || !draft.investment_amount || !draft.universe_id) {
     throw new Error("저장된 Mandate가 없습니다. Mandate 설정을 먼저 저장하세요.");
   }
+  if (!draft.mandate_id) {
+    throw new Error("저장된 Mandate에 mandate_id가 없습니다. Mandate 설정을 다시 저장하세요.");
+  }
+  // F-09: 재시작 시점의 활성 Mandate를 다시 조회해 mandate_version_id/policy_hash를
+  // 채운다. 저장된 draft 값을 그대로 신뢰하지 않는다 -- 재시작 사이에 Mandate가
+  // 바뀌었을 수 있고, PORTFOLIO_REQUIRE_MANDATE_BINDING=true(기본값)에서는 두 필드가
+  // 없으면 서버가 422로 거부한다. Mandate가 ACTIVE인데 binding 정보가 없으면
+  // governance-api가 503(canonical_mandate_binding_unavailable)으로 닫으므로,
+  // fetchCurrentMandate의 실패는 여기서 그대로 throw되어 사용자에게 명확히 보인다.
+  const currentMandate = await fetchCurrentMandate(draft.mandate_id);
   return startPortfolioRecommendation({
     user_id: draft.user_id,
     mindset: draft.mindset ?? "SAFETY_FIRST",
@@ -188,6 +199,9 @@ export async function startSavedPortfolioRecommendation(): Promise<{ run_id: str
       draft.allowed_assets?.futures || draft.allowed_assets?.options || draft.allowed_assets?.derivatives || draft.include_derivatives,
     ),
     query: draft.objective ?? draft.query ?? "",
+    mandate_id: draft.mandate_id,
+    mandate_version_id: currentMandate.mandate_version_id ?? undefined,
+    policy_hash: currentMandate.policy_hash ?? undefined,
   });
 }
 
