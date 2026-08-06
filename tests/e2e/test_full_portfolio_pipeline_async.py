@@ -72,14 +72,14 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
 
     expected_counts = {
         "research": 6,
-        # 2026-08-06: core-risk-worker/derivatives-counterparty-worker 를
-        # risk-runner(결정론, LLM 없음)로 흡수해 3 -> 1.
+        # 2026-08-06: Risk는 LLM 1명(compliance-policy-worker)과
+        # 결정론 risk-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
         "risk": 1,
         # 2026-08-06: 기존 7명 중 결정론적 데스크 업무 5개를 desk-runner로
         # 흡수했다. 실행되는 LLM Worker는 bull/bear 2명이다.
         "trading": 2,
-        # 2026-08-06: evidence-qa-worker/model-and-internal-audit-worker/
-        # ops-and-permission-worker 를 qa-runner(결정론, LLM 없음)로 흡수해 5 -> 2.
+        # 2026-08-06: QA는 LLM 2명(hallucination/incident)과 결정론
+        # qa-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
         "qa": 2,
         "accounting": 8,
         "ceo": 1,

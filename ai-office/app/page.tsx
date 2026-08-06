@@ -28,7 +28,7 @@ import { canUseSimulation } from "./ops/projectionSource";
 type View = "live" | "dashboard" | "mandate";
 type DashboardAudience = "executive" | "operations";
 const CANONICAL_DEPARTMENT_COUNT = 8;
-const CANONICAL_WORKER_COUNT = 42;
+const CANONICAL_WORKER_COUNT = 35;
 
 const statusClass: Record<DeptStatus, string> = {
   "완료": "done",

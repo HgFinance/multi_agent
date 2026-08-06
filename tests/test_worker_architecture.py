@@ -294,14 +294,13 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
         # desk-runner 가 결정론으로 항상 모아 온다.
         "trading": (2, 2, 0),
-        # 2026-08-06: core-risk-worker/derivatives-counterparty-worker 를
-        # risk-runner 로 흡수해 (3, 1, 2) -> (1, 0, 1) - 남은 LLM Worker
-        # (compliance-policy-worker)는 조건부뿐이다.
+        # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
+
         "risk": (1, 0, 1),
         "quant-backtest": (7, 2, 5),
         "accounting-portfolio": (8, 2, 6),
-        # 2026-08-06: evidence-qa-worker/model-and-internal-audit-worker/
-        # ops-and-permission-worker 를 qa-runner 로 흡수해 (5, 1, 4) -> (2, 0, 2).
+        # 2026-08-06: QA의 결정론 검사는 qa-runner로 이동해 LLM 2명만 남겼다.
+
         "qa": (2, 0, 2),
     }
     for department, directory in DEPARTMENTS:

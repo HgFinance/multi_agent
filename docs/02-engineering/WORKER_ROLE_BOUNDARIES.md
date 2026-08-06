@@ -1,6 +1,6 @@
 # HgFinance Worker 역할·통합 판정
 
-검토일: 2026-08-03 (KST)  
+검토일: 2026-08-06 (KST)
 상태: **최종 확정**
 
 이 문서는 직원 수를 늘리거나 줄일 때 사용하는 역할 경계와 통합 판정의 기준이다. 실행 기준은 각 부서의 `hermes/config.yaml`과 `employee_workers.py`의 `WORKER_SPECS`이며, `agent.personalities`의 예전 역할명은 호환용 Alias로만 취급한다.

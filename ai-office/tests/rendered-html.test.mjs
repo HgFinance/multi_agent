@@ -69,8 +69,8 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(config, /name: "HgFinance"/);
   assert.match(config, /pageTitle: "HgFinance - AI 헤지펀드 오피스"/);
   assert.match(config, /staff\("ops", "member"/);
-  assert.equal((config.match(/staff\("ops", "member"/g) ?? []).length, 4);
-  assert.equal((config.match(/staff\("qa", "member"/g) ?? []).length, 5);
+  assert.equal((config.match(/staff\("ops", "member"/g) ?? []).length, 2);
+  assert.equal((config.match(/staff\("qa", "member"/g) ?? []).length, 3);
   assert.match(config, /executive-briefing-worker/);
   // sim.ts의 debate()가 role 문자열로 두 사람을 찾는다. 이름이 바뀌면 토론이 조용히 사라진다.
   for (const role of ["Bull 리서처", "Bear 리서처"]) {
@@ -96,7 +96,7 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(packageJson, /"name": "hgfinance-ai-office"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 
-  assert.match(riskQaBridge, /market-liquidity-worker/);
+  assert.match(riskQaBridge, /risk-runner/);
   assert.match(riskQaBridge, /incident-postmortem-worker/);
   assert.doesNotMatch(riskQaBridge, /RSK-00|QAA-07/);
   assert.match(riskQaBridge, /headModel: "gpt-5\.6-luna"/);

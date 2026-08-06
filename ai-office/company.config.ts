@@ -217,10 +217,8 @@ export const STAFF_LIST: StaffEntry[] = [
   ]),
 
   staff("ops", "lead", "이예주", "Hermes Head · Risk", 3, "이리스"),
-  staff("ops", "member", "문가온", "market-liquidity-worker", 4),
-  staff("ops", "member", "노은우", "pre-trade-risk-worker", 5),
-  staff("ops", "member", "류하진", "compliance-policy-worker", 6),
-  staff("ops", "member", "안유하", "derivatives-counterparty-worker", 7),
+  staff("ops", "member", "류하진", "compliance-policy-worker", 4),
+  staff("ops", "member", "문가온", "risk-runner", 5),
 
   staff("finance", "lead", "김승리", "Hermes Head · Accounting/Portfolio", 4, "김회계"),
   staff("finance", "member", "지수아", "portfolio-control-worker", 5),
@@ -233,11 +231,9 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("finance", "member", "김서현", "fee-accrual-tax-worker", 4),
 
   staff("qa", "lead", "김동규", "Hermes Head · AI QA/Audit", 5, "김QA"),
-  staff("qa", "member", "강태오", "evidence-qa-worker", 6),
   staff("qa", "member", "문세라", "hallucination-critic-worker", 7),
-  staff("qa", "member", "정하은", "model-and-internal-audit-worker", 0),
-  staff("qa", "member", "배준서", "ops-and-permission-worker", 1),
   staff("qa", "member", "이수빈", "incident-postmortem-worker", 2),
+  staff("qa", "member", "강태오", "qa-runner", 3),
 
   staff("review", "lead", "류영주", "Hermes Head · Agent Workforce", 6, "류인사"),
   staff("review", "member", "임도훈", "workforce-planning-worker", 7),

@@ -184,7 +184,7 @@ curl -fsS http://127.0.0.1:8042/qa/v1/observability/runtime
 | `failed` | 실행 중 오류로 계약 결과를 만들지 못한 수 |
 | `skip_reasons` | 위 사유별 집계. 운영 리뷰와 Replay에서 필수 |
 
-따라서 데이터가 없는 실행에서 Risk 4개와 QA 5개가 모두 안전 차단되면 `executed=0`, `skipped_safe=4/5`, `failed=0`, `skip_reason=LIVE_DATA_NOT_READY`가 맞다. 이는 성공 추천이 아니며 pipeline은 `DEGRADED/HOLD`여야 한다. 라우팅 미선택은 `NOT_REQUESTED`로 별도 기록한다.
+따라서 데이터가 없는 실행에서 Risk 2개와 QA 3개가 모두 안전 차단되면 `executed=0`, `skipped_safe=1/3`, `failed=0`, `skip_reason=LIVE_DATA_NOT_READY`가 맞다. 이는 성공 추천이 아니며 pipeline은 `DEGRADED/HOLD`여야 한다. 라우팅 미선택은 `NOT_REQUESTED`로 별도 기록한다.
 
 모든 파이프라인 실행은 최소 `pipeline_started`와 `pipeline_completed` 이벤트를 남긴다. 각 Worker 보고서에는 실행 여부와 무관하게 WorkerSpec의 `technology` 메타데이터를 포함해 감사·Replay가 가능해야 한다.
 
