@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -11,10 +12,19 @@ from unittest import mock
 # The BFF must remain testable in DEMO mode without attempting a configured
 # remote database.  This does not expose or print the caller's real DSN.
 os.environ["DATABASE_URL"] = ""
+# PortfolioRuntime is a module-level singleton that reads its "latest job" from
+# this store at import time. Without a private path, it picks up whatever real
+# job a previous app run or another test process left in the shared default
+# (/tmp/hgfinance-portfolio.sqlite3), making runtime_connected flaky. Match the
+# isolation already used by test_pipeline_observability.py / test_portfolio_recommendation_bff.py.
+os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(
+    tempfile.gettempdir(), f"hgfinance-portfolio-operations-tests-{os.getpid()}.sqlite3"
+)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from apps.api.main import app, _repo  # noqa: E402
+from apps.api.operations_read_model import _profile_data, _registry  # noqa: E402
 
 
 class OperatorBffOperationsTest(unittest.TestCase):
@@ -42,6 +52,15 @@ class OperatorBffOperationsTest(unittest.TestCase):
             "risk.decision.v1",
             {event["event_type"] for event in operations["communications"]},
         )
+
+    def test_profile_and_registry_reads_are_cached(self) -> None:
+        # /ws/operations polls build_operations_snapshot() every 0.4s per client;
+        # without caching this re-reads+parses 8 YAML files and a JSON registry
+        # synchronously on every tick, blocking the event loop.
+        self.client.get("/ui/snapshot")
+        first = _profile_data("01-research")
+        self.assertIs(_profile_data("01-research"), first)
+        self.assertIs(_registry(), _registry())
 
     def test_existing_read_model_remains_the_single_financial_source(self) -> None:
         body = self.client.get("/ui/snapshot").json()

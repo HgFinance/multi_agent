@@ -27,54 +27,40 @@ class WorkerTechProfile:
 
 
 RISK_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
-    "market-liquidity-worker": WorkerTechProfile(
+    "core-risk-worker": WorkerTechProfile(
         stack=(
             "LangGraph StateGraph",
             "Pydantic RiskSkillContext/RiskSkillResult",
             "Risk TradingState·P1 snapshot read adapter",
             "Redis hot-state read model",
+            "deterministic RiskEngine.check_order",
+            "idempotency·fail-closed gate",
             "Ollama OpenAI-compatible advisory node",
         ),
         usage=(
             "PIT·freshness guard를 먼저 통과시킨다",
             "TradingState·시장 스냅샷·노출을 결정론적으로 요약한다",
             "신규 진입 차단·HALTED 상태를 우선 판단한다",
-            "LLM은 수치와 근거를 설명하는 non-binding 문장만 생성한다",
+            "OrderIntent·RiskContext·Policy version을 스키마 검증한다",
+            "RiskEngine의 한도·현금·집중도·TradingState 결과만 사용한다",
+            "RAG·외부 HTTP·재시도형 LLM은 hot path에서 금지한다",
+            "LLM은 수치와 근거를 설명하는 non-binding 문장만 생성하고, 실패는 RESIZE·REJECT·HOLD로만 전파한다",
         ),
         inputs=(
             "risk.trading_state.read",
             "risk.p1.snapshot",
+            "risk.case.check",
             "market_snapshot",
             "portfolio_state",
+            "order_intent",
+            "risk_context",
+            "policy_version",
         ),
         metrics=(
             "snapshot_freshness_rate",
             "liquidity_gate_latency_ms",
             "missing_input_rate",
             "degraded_rate",
-        ),
-    ),
-    "pre-trade-risk-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph StateGraph",
-            "Pydantic contract validation",
-            "deterministic RiskEngine.check_order",
-            "idempotency·fail-closed gate",
-            "Ollama advisory explanation node",
-        ),
-        usage=(
-            "OrderIntent·RiskContext·Policy version을 스키마 검증한다",
-            "RiskEngine의 한도·현금·집중도·TradingState 결과만 사용한다",
-            "RAG·외부 HTTP·재시도형 LLM은 hot path에서 금지한다",
-            "실패는 RESIZE·REJECT·HOLD로만 전파한다",
-        ),
-        inputs=(
-            "risk.case.check",
-            "order_intent",
-            "risk_context",
-            "policy_version",
-        ),
-        metrics=(
             "risk_gate_latency_ms",
             "schema_reject_rate",
             "fail_closed_rate",

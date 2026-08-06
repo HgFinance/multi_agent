@@ -36,8 +36,9 @@ from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,6 +144,27 @@ PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING
 GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
 
 
+class GovernanceProxyError(HTTPException):
+    """Carries the upstream Governance API error body through untouched.
+
+    A plain ``HTTPException(detail=payload)`` gets re-wrapped by FastAPI into
+    ``{"detail": payload}``, nesting ``error_code``/``message`` one level too
+    deep for the frontend (``governanceClient.ts``), which reads them at the
+    top level. Every governance-api error handler already emits that
+    ``{error_code, message, detail, trace_id}`` shape, so pass it straight
+    through instead of collapsing it into FastAPI's single ``detail`` field.
+    """
+
+    def __init__(self, status_code: int, payload: object) -> None:
+        super().__init__(status_code=status_code, detail=payload)
+        self.payload = payload
+
+
+@app.exception_handler(GovernanceProxyError)
+async def _on_governance_proxy_error(request: Request, exc: GovernanceProxyError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
 async def _governance_request(
     method: str,
     path: str,
@@ -178,8 +200,7 @@ async def _governance_request(
     except ValueError:
         payload = {"detail": f"governance_api_http_{response.status_code}"}
     if response.status_code >= 400:
-        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
-        raise HTTPException(status_code=response.status_code, detail=detail)
+        raise GovernanceProxyError(response.status_code, payload)
     return payload
 
 

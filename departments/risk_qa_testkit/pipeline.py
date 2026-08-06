@@ -237,8 +237,7 @@ def run_risk_qa_pipeline(
         output_contract="risk.department-head-context.v1",
         worker_module=risk_module,
         worker_tools={
-            "market-liquidity-worker": risk_module._market_tool,
-            "pre-trade-risk-worker": risk_module._pre_trade_tool,
+            "core-risk-worker": risk_module._core_risk_tool,
             "compliance-policy-worker": risk_module._compliance_tool,
             "derivatives-counterparty-worker": risk_module._counterparty_tool,
         },
