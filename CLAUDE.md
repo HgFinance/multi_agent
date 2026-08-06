@@ -121,7 +121,7 @@ CI workflow의 Python 버전과 로컬 검증 결과를 구분한다. `ruff`, `p
 
 - Hermes Profile(8개 `config.yaml` = 8개 Supervisor)이 부서 단위 오케스트레이션·Queue·Memory Namespace·Tool Allowlist를 맡는다.
 - 부서 소속 직원은 직원별 독립 LangGraph Worker Graph로 구현하고 사건별로 필요한 Worker만 동적으로 호출한다. Worker는 허용된 읽기 도구 결과를 `worker-context.v1`로 만들어 Hermes 부서장에게 전달하며 주문·Risk/QA 판정·원장·권한 변경은 수행하지 않는다.
-- **현재 Worker Registry**: CEO 1, HR 5, Research 6, Trading 6, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5. 실제 런타임 수는 `workers`와 `runtime_personalities`를 기준으로 하며 `agent.personalities`의 기존 ID는 호환·감사 Alias로만 유지한다.
+- **현재 Worker Registry**: CEO 1, HR 5, Research 6, Trading 7, Risk 4, Quant/Backtest 7, Accounting/Portfolio 8, AI QA 5. 실제 런타임 수는 `workers`와 `runtime_personalities`를 기준으로 하며 `agent.personalities`의 기존 ID는 호환·감사 Alias로만 유지한다.
 - **현재 실행 기준**: 모든 Worker는 독립 LangGraph + Ollama `qwen3:1.7b`를 사용한다. Worker별 경량·표준·중량 모델 배치는 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md)의 benchmark·HR 제안·QA 검증·CEO 승인 절차를 거친 뒤에만 변경한다.
 
 ### 절대 깨면 안 되는 권한 분리
