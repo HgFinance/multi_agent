@@ -2,7 +2,7 @@
 
 검토일: 2026-08-03 (KST)
 
-이 문서는 8개 Hermes Profile 안에서 실행되는 42개 LangGraph Worker의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다.
+이 문서는 8개 Hermes Profile 안에서 실행되는 32개 LangGraph Worker(LLM)의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다. 결정론 Worker(`desk-runner`, `risk-runner`, `qa-runner`)는 모델을 부르지 않으므로 이 표에 포함하지 않는다.
 
 ## 실행 계층
 
@@ -26,16 +26,16 @@
 
 ## 부서별 배치
 
-| 부서 | Worker 수 | 항상 / 조건부 |
+| 부서 | Worker 수(LLM) | 항상 / 조건부 |
 |---|---:|---:|
 | CEO | 1 | 1 / 0 |
 | HR | 5 | 2 / 3 |
 | Research | 6 | 2 / 4 |
-| Trading | 6 | 2 / 4 |
-| Risk | 4 | 2 / 2 |
+| Trading | 2 (+결정론 1) | 2 / 0 |
+| Risk | 1 (+결정론 1) | 0 / 1 |
 | Quant / Backtest | 7 | 2 / 5 |
 | Accounting / Portfolio | 8 | 2 / 6 |
-| QA | 5 | 1 / 4 |
+| QA | 2 (+결정론 1) | 0 / 2 |
 
 세부 Worker ID·역할·통합 판정은 [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md)에 둔다. 실제 실행 메타데이터는 `config.yaml`과 `WORKER_SPECS`에서 읽으며, `agent.personalities`는 호환 Alias다.
 

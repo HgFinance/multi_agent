@@ -45,9 +45,9 @@ intake
 
 | Worker | LangGraph 스킬 | RAG 배정 | 허용 Tool/API | 저장소 경계 |
 |---|---|---|---|---|
-| `core-risk-worker` | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay`, `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. 정책 문서는 Compliance Worker가 검증한다. | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, 내부 `market-api`·`portfolio-api`, `POST /investment-cases/{case_id}/risk-check` | `risk.input_snapshots`와 Exposure Snapshot read-only, Risk Engine을 통해서만 Risk Request/Decision에 접근 |
+| `core-risk-worker` (강등, `risk-runner`로 흡수) | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay`, `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. 정책 문서는 Compliance Worker가 검증한다. | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, 내부 `market-api`·`portfolio-api`, `POST /investment-cases/{case_id}/risk-check` | `risk.input_snapshots`와 Exposure Snapshot read-only, Risk Engine을 통해서만 Risk Request/Decision에 접근 |
 | `compliance-policy-worker` | `PIT_filter`, `hybrid_retrieve`, `claim_decompose`, `citation_verify`, `grounded_fallback`, `retry_budget` | Agentic RAG 기본. 문서가 커지면 PIKE-RAG, 다문서 관계가 반복되면 LightRAG | `risk.compliance.check`, `POST /risk/v1/compliance/check`, 내부 vector gateway | `research.documents`·`document_versions`·`evidence_chunks` read-only, 구조화 정책은 `risk.policies` |
-| `derivatives-counterparty-worker` | `snapshot_freshness`, `greeks_margin_gate`, `counterparty_state`, `stress_check`, `escalation` | 계산 경로에는 RAG를 사용하지 않는다. 계약·상대방 관계 설명이 필요할 때만 GraphRAG 후보 | `risk.trading_state.record.read`, P2 derivatives API, `market-api`, `portfolio-api` | `risk.derivative_snapshots`, `risk.input_snapshots`, 승인된 Exposure read-only |
+| `derivatives-counterparty-worker` (강등, `risk-runner`로 흡수) | `snapshot_freshness`, `greeks_margin_gate`, `counterparty_state`, `stress_check`, `escalation` | 계산 경로에는 RAG를 사용하지 않는다. 계약·상대방 관계 설명이 필요할 때만 GraphRAG 후보 | `risk.trading_state.record.read`, P2 derivatives API, `market-api`, `portfolio-api` | `risk.derivative_snapshots`, `risk.input_snapshots`, 승인된 Exposure read-only |
 
 ### 3.1 Compliance Agentic RAG
 
