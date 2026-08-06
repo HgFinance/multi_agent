@@ -6,8 +6,12 @@
       CLAUDE.local.md "LS증권 Open API 참조" — 정정·취소 초당 3건, 계좌 조회 초당 1~2건
       docs/HEDGE_FUND_MASTER_PLAN.md 19.8 (Execution Desk), 개발 원칙 9번
 
-두 직원(execution-planning-worker, venue-cost-worker)이 집행 계획을 서술할 때
-**규칙 숫자를 지어내지 못하게** 하는 계층이다. 둘로 나뉜다:
+집행 계획이 **규칙 숫자를 지어내지 못하게** 하는 계층이다. 둘로 나뉜다:
+
+2026-08-06 이전에는 execution-planning-worker / venue-cost-worker 두 직원이 이 근거를
+받아 서술했다. 그 둘이 tool 로 강등되면서(답이 하나로 정해지는 일이었다) 소비자는
+`desk-runner` 하나가 됐다 — **이 모듈은 그대로다.** 원래부터 판정을 결정론으로
+내놓고 있었고, 사라진 것은 그 판정을 다시 서술하던 계층뿐이다.
 
   1. 검색(RAG) — `search()` 가 저장소의 LS 문서에서 해당 TR 규칙만 뽑아 준다.
      LLM 은 이 표 밖의 숫자를 쓸 수 없고, 쓰면 `verify_citations()` 가 잡는다.
@@ -199,7 +203,7 @@ def verify_citations(refs: Iterable[str], *,
 # ── 분할 설계 실현가능성 (결정론 - LLM 을 부르지 않는다) ────────────────────
 @dataclass(frozen=True)
 class ExecutionPlanDraft:
-    """집행 계획 초안. execution-planning-worker 가 서술로 제안하는 값들이다.
+    """집행 계획 초안. `trigger_payload.derive_execution_plan()` 이 프리셋에서 뽑는다.
 
     `philosophies.yaml` 의 slices / cancel_after_min 이 그대로 여기 들어온다.
     """

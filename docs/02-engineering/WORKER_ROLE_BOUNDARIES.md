@@ -25,21 +25,27 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
 | HR | 5 | 2 | 3 | 업무량·Profile·성과·Lifecycle·SoD 유지 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
-| Trading | 6 | 2 | 4 | Thesis·OrderIntent·제약·집행·비용·파생 유지 |
+| Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
 | Risk | 4 | 2 | 2 | 기존 통합 완료; 추가 감원 없음 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
 | Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
 | QA | 5 | 1 | 4 | 기존 통합 완료; 추가 감원 없음 |
 
-총 42개 Worker와 8개 Hermes Profile이다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 38개(트레이딩 강등 전 42개)와 8개 Hermes Profile, 그리고 결정론 Worker 1개(`desk-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+
+**표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
 ## 부서별 역할과 병합 판정
 
 - **CEO**: `executive-briefing-worker` — 각 부서 보고서와 차단 사유를 종합해 최종 Case Summary를 작성한다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 없다.
 - **HR**: `workforce-planning-worker`, `profile-architecture-worker`, `selection-performance-worker`, `lifecycle-coordination-worker`, `workforce-governance-worker`. 계획·Profile 설계·평가·Lifecycle·승인/SoD는 서로 다른 상태 전이를 다루므로 유지한다.
 - **Research**: `research-data-worker`, `microstructure-worker`, `technical-signal-worker`, `fundamental-valuation-worker`, `news-macro-worker`, `evidence-rag-worker`. 데이터 정본·유동성 증거·지표·가치·이벤트·인용 검증은 서로 다른 입력과 Evidence 책임이므로 유지한다.
-- **Trading**: `market-thesis-worker`, `trade-proposal-worker`, `order-constraint-worker`, `execution-planning-worker`, `venue-cost-worker`, `derivatives-structure-worker`. OrderIntent 이전의 논리, 제약 매핑, Risk 승인 후 집행계획, 거래비용, 파생 구조는 권한과 실행 시점이 달라 유지한다.
 - **Risk**: `core-risk-worker`, `compliance-policy-worker`, `derivatives-counterparty-worker`. 시장·유동성과 사전 Risk Gate는 `core-risk-worker`로, 파생·Margin과 Counterparty·Operational 위험은 `derivatives-counterparty-worker`로 이미 통합되었다. 최종 판정은 결정론적 Risk Engine이 한다.
+- **Trading**: `bull-thesis-worker`, `bear-thesis-worker` (LLM) + `desk-runner` (결정론, LLM 없음). Bull과 Bear는 **합치지 않는다** — 한 직원이 양쪽 논지를 다 만들면 먼저 세운 논지가 나중 논지의 앵커가 되어 확증편향이 구조적으로 생기고, "독립성 위반 0 / 문장 복제 0"(TRD-01/TRD-02 KPI)을 측정할 수 없게 된다([ADR-0005](adr/0005-bull-bear-worker-split.md)).
+
+  2026-08-06에 `trade-proposal-worker`·`order-constraint-worker`·`execution-planning-worker`·`venue-cost-worker`·`derivatives-structure-worker` 5명을 **tool로 강등**해 `desk-runner` 하나로 합쳤다. 강등 기준 둘: (1) 같은 입력에서 다른 출력이 나오는 것이 산출물인가, (2) 결정론 모듈이 이미 그 답을 만들고 있지 않은가. 다섯 다 둘 다 아니었다 — 주문 제안은 `propose_intent()`→`intent_builder`, 제약 매핑은 `contracts` 전이표, 집행 계획은 `philosophies.yaml` 프리셋 + `check_plan_feasible()`, 비용은 `tca_memory`, Certification은 서명 조회가 이미 답을 낸다. 위에 모델을 얹는 것은 나온 답을 다시 쓰는 계층일 뿐이고, 그 과정에서 집행 수치가 LLM 문장을 거치는 경로만 생긴다. Bull/Bear만 (1)을 통과한다.
+
+  토론은 2라운드이며 **토론자와 감독자의 런타임이 다르다** — 토론자는 직원 런타임(LangGraph + Ollama), 사회는 부서장 Hermes(`trading-supervisor`)다. 감독자 권한은 안전한 방향으로만 열려 있다: 초점을 Claim 색인 안에서 좁히고, 라운드를 닫고, escalate를 켤 수 있으나, 색인 밖 Claim을 만들거나 깨진 1라운드 위에 2라운드를 열거나 `grounded`를 바꾸거나 escalate를 끄지는 못한다.
 - **Quant**: `strategy-hypothesis-worker`, `dataset-feature-worker`, `backtest-optimization-worker`, `strategy-release-worker`, `ml-quant-worker`, `execution-cost-worker`, `regime-robustness-worker`. 연구 가설, PIT Dataset, Backtest, Release, ML, 비용, Regime의 실패 원인을 독립적으로 재현해야 하므로 유지한다.
 - **Accounting**: `portfolio-control-worker`, `ledger-reconciliation-worker`, `nav-close-worker`, `treasury-liquidity-worker`, `pnl-attribution-worker`, `investor-reporting-worker`, `valuation-corporate-actions-worker`, `fee-accrual-tax-worker`. 공식 원장·NAV·대사와 설명용 분석은 분리해야 하므로 유지한다.
 - **QA**: `evidence-qa-worker`, `hallucination-critic-worker`, `model-and-internal-audit-worker`, `ops-and-permission-worker`, `incident-postmortem-worker`. Model Risk와 Internal Audit, Agent Ops와 Tool Permission은 이미 각각 통합되었다. Evidence QA Gate가 최종 판정을 한다.

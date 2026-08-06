@@ -6,7 +6,7 @@
 
 > **Risk/QA 보안 보정(2026-08-05)**: Worker Scope fail-closed, QA runtime 미설정 DENY, Risk/QA 명령 인증과 공통 Replay contract는 `IMPLEMENTED`/`TEST_VERIFIED`다. Redis 두 Decision Event Replay probe와 rollback형 DB/Event smoke, Risk/QA Compose 기동·formal healthcheck는 `RUNTIME_VERIFIED`다. Claude 환경에서 Risk/QA 전체 `ruff check`·`ruff format --check`가 통과했고 참조 없는 legacy Worker Graph·구형 fixture·중복 Counterparty self-check를 제거했다. Production preflight는 Event Redis와 Research Packet URL을 명시적으로 요구하며, 실제 API·PostgreSQL Decision/Case Replay, 승인 Corpus, 전역 Issuer·mTLS·IAM 매핑은 여전히 `BLOCKED`다.
 
-> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 6·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
+> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 7·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST

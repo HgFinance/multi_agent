@@ -80,6 +80,11 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260806000100_workforce_improvement_hold_and_scorecards.sql",
                 # HR-04 P1-2: quality_snapshots에 누락됐던 recorded_by 추가
                 "20260806000200_workforce_quality_snapshot_recorded_by.sql",
+                # 도현 2026-08-06: Transactional Outbox + consumer idempotency (P0-2, PLAT-03)
+                # ⚠ 원래 20260806000100 이었으나 머지에서 HR-03 과 **버전이 겹쳤다.**
+                # Supabase 는 앞 14자리를 version 으로 쓰므로 중복이면 하나가 "이미 적용됨"
+                # 으로 조용히 건너뛴다. 아직 main 에 없던 이쪽을 000300 으로 옮겼다.
+                "20260806000300_execution_outbox.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -141,7 +146,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         expected_counts = {
             "accounting": 18,
             "audit": 21,
-            "execution": 12,
+            # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
+            # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
+            "execution": 14,
             "governance": 20,
             "quant": 12,
             "reference": 9,
