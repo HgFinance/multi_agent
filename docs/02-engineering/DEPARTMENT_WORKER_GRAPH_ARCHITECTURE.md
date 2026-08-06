@@ -73,13 +73,13 @@ case_request
 | CEO | 1 | 1 | 0 | 1 |
 | HR | 5 | 2 | 3 | 5 |
 | Research | 6 | 2 | 4 | 6 |
-| Trading | 6 | 2 | 4 | 6 |
-| Risk | 3 | 1 | 2 | 3 |
+| Trading | 3 (LLM 2 + 결정론 1) | 3 | 0 | 3 |
+| Risk | 2 (LLM 1 + 결정론 1) | 1 | 1 | 2 |
 | Quant / Backtest | 7 | 2 | 5 | 7 |
 | Accounting / Portfolio | 8 | 2 | 6 | 8 |
-| QA | 5 | 1 | 4 | 5 |
+| QA | 3 (LLM 2 + 결정론 1) | 1 | 2 | 3 |
 
-기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다.
+기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다. Trading·Risk·QA는 2026-08-06 tool 강등으로 결정론 Worker(`desk-runner`/`risk-runner`/`qa-runner`)가 매 케이스 항상 실행되므로 기본 실행에 포함했다 — LLM은 호출하지 않는다.
 
 Profile에 정의된 직원은 자동으로 실행되는 직원이 아니다. `workers.<id>.status`와 trigger를 기준으로 Registry가 호출 대상을 정한다.
 

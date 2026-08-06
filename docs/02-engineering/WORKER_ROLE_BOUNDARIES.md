@@ -26,12 +26,12 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | HR | 5 | 2 | 3 | 업무량·Profile·성과·Lifecycle·SoD 유지 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
 | Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
-| Risk | 4 | 2 | 2 | 기존 통합 완료; 추가 감원 없음 |
+| Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
 | Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
-| QA | 5 | 1 | 4 | 기존 통합 완료; 추가 감원 없음 |
+| QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 38개(트레이딩 강등 전 42개)와 8개 Hermes Profile, 그리고 결정론 Worker 1개(`desk-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 32개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개)와 8개 Hermes Profile, 그리고 결정론 Worker 3개(`desk-runner`, `risk-runner`, `qa-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
