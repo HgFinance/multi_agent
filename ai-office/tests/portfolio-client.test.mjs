@@ -24,10 +24,11 @@ function fakeLocalStorage(store) {
 }
 
 beforeEach(() => {
-  // startSavedPortfolioRecommendation() guards on `typeof window === "undefined"`,
-  // so a minimal window/localStorage shim is required to exercise the browser path.
-  globalThis.window = {};
-  globalThis.localStorage = fakeLocalStorage({});
+  // startSavedPortfolioRecommendation() guards on `typeof window === "undefined"`
+  // and reads via `window.localStorage`, so both must be shimmed together.
+  const storage = fakeLocalStorage({});
+  globalThis.localStorage = storage;
+  globalThis.window = { localStorage: storage };
 });
 
 afterEach(() => {
