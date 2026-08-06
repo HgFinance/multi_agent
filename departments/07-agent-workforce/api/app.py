@@ -43,16 +43,24 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
+# (override=False 기본값). CEO Office api/app.py와 동일한 이유(2026-08-05) - 이게
+# 없으면 .env에 DATABASE_URL이 있어도 이 프로세스는 그 값을 못 보고 조용히 In-Memory/
+# 501 경로로 빠진다.
+load_dotenv()
 
 _BASE = Path(__file__).resolve().parent.parent
 _LIFECYCLE_DIR = _BASE / "lifecycle"
 _IMPROVEMENTS_DIR = _BASE / "improvements"
 _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR):
+_PLANNING_DIR = _BASE / "planning"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -72,6 +80,7 @@ from access import (
     SelfApprovalError as AccessSelfApprovalError,
 )
 from candidate import ImprovementCandidate
+from observation import CandidateScorecard
 from cost import (
     CapacitySnapshot,
     CostSnapshot,
@@ -79,6 +88,7 @@ from cost import (
     assess_budget,
     build_department_scorecard,
 )
+from quality import QualitySnapshot, aggregate_quality
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -87,8 +97,12 @@ from roster import (
     ProfileVersionRow,
     ProfileVersionSubmission,
     StatusChangeRequest,
+    ToolAllowlistMissingError,
+    UnverifiedActivationEvidenceError,
     validate_status_change,
+    verify_activation_evidence,
 )
+from activation_evidence import InMemoryActivationEvidenceRepository
 from workflow import (
     Approval,
     CandidateStatus,
@@ -101,6 +115,18 @@ from workflow import (
 )
 from workflow import (
     SelfApprovalError as CandidateSelfApprovalError,
+)
+from workforce_plan import (
+    InMemoryPlanApprovalEvidenceRepository,
+    InMemoryPlanRepository,
+    UnverifiedPlanApprovalError,
+    WorkforcePlan,
+    activate_plan,
+    approve_plan,
+    retire_plan,
+)
+from workforce_plan import (
+    IllegalTransition as PlanIllegalTransition,
 )
 
 try:
@@ -122,6 +148,20 @@ try:
     from postgres_roster_repository import PostgresRosterRepository
 except ImportError:
     PostgresRosterRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from activation_evidence import PostgresActivationEvidenceRepository
+except ImportError:
+    PostgresActivationEvidenceRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_plan_repository import (
+        PostgresPlanApprovalEvidenceRepository,
+        PostgresPlanRepository,
+    )
+except ImportError:
+    PostgresPlanRepository = None  # type: ignore[assignment,misc]
+    PostgresPlanApprovalEvidenceRepository = None  # type: ignore[assignment,misc]
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
@@ -196,6 +236,31 @@ class CostSnapshotIn(BaseModel):
     currency: str = "USD"
 
 
+class QualitySnapshotIn(BaseModel):
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    agent_id: str | None = None
+    profile_version_id: str | None = None
+    eval_run_id: str | None = None
+    finding_count: int | None = Field(default=None, ge=0)
+    rework_rate: str | None = None
+    role_kpi: dict = {}
+
+
+class WorkforcePlanIn(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    skill_gaps: dict = {}
+    actions: list = []
+    budget: dict = {}
+    assumptions: dict = {}
+
+
+class PlanApprovalIn(BaseModel):
+    approval_id: str = Field(min_length=1)
+
+
 class CapacitySnapshotIn(BaseModel):
     window_start: datetime
     window_end: datetime
@@ -261,6 +326,19 @@ class BudgetAssessmentRequest(BaseModel):
     per_case_tokens: int
     daily_tokens: int
     cost_snapshots: list[CostSnapshotIn] = []
+
+
+class CandidateScorecardIn(BaseModel):
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_cost: Decimal | None = Field(default=None, ge=0)
+    qa_eval_run_id: str | None = None
+    quality_score: Decimal | None = Field(default=None, ge=0, le=1)
+    safety_finding_count: int | None = Field(default=None, ge=0)
+    regression_count: int | None = Field(default=None, ge=0)
 
 
 def _dec(v: str | None) -> Decimal | None:
@@ -421,7 +499,9 @@ def _handle_workforce_event(event: dict) -> None:
     if candidate is None:
         raise WorkforceEventBusError(f"candidate_id={candidate_id}를 찾을 수 없습니다")
 
-    to_status = CandidateStatus.SHADOW if result == "PASS" else CandidateStatus.REJECTED
+    # Eval 실패는 후보를 영구 반려하지 않는다. 기존 Profile을 유지한 HOLD로 종료해
+    # 독립 QA의 후속 재평가가 새 후보로 명시적으로 시작되게 한다.
+    to_status = CandidateStatus.SHADOW if result == "PASS" else CandidateStatus.HOLD
     occurred_at = event.get("occurred_at")
     at = datetime.fromisoformat(occurred_at) if occurred_at else datetime.now(timezone.utc)
     updated = _workflow.transition(
@@ -447,6 +527,39 @@ if os.environ.get("DATABASE_URL") and PostgresRosterRepository is not None:
 else:
     _roster_repo = None
 
+# P0-3(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md) - ACTIVE 전이 증거(qa_eval_run_id/
+# ceo_approval_id) 실재성 검증. Roster와 같은 이유로 DATABASE_URL 없으면 In-Memory -
+# 개발 환경에서도 이 게이트 자체는 계약대로 동작해야 self-check가 의미 있다.
+if os.environ.get("DATABASE_URL") and PostgresActivationEvidenceRepository is not None:
+    _activation_evidence_repo = PostgresActivationEvidenceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _activation_evidence_repo = InMemoryActivationEvidenceRepository()
+
+# P1-2 HR-04 - Workforce Plan은 access.py처럼 In-Memory 대체가 유의미하다(요청·승인
+# 절차 자체를 검증하는 게 목적이라 실제 등록된 Department가 없어도 self-check가 의미
+# 있다). governance.approvals 승인 증거 조회는 P0-3 activation_evidence와 같은 이유로
+# DATABASE_URL 없으면 In-Memory.
+if os.environ.get("DATABASE_URL") and PostgresPlanRepository is not None:
+    _plan_repo = PostgresPlanRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _plan_repo = InMemoryPlanRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresPlanApprovalEvidenceRepository is not None:
+    _plan_evidence_repo = PostgresPlanApprovalEvidenceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
+
+
+def _resolve_department_id(department_code: str) -> str:
+    """department_code -> department_id. 실 DB가 있으면 workforce.departments를
+    조회하고, 없으면(In-Memory 데모) department_code를 그대로 department_id로 쓴다."""
+    if _scorecard_repo is not None:
+        department_id = _scorecard_repo.get_department_id(department_code)
+        if department_id is None:
+            raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+        return department_id
+    return department_code
+
 
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
@@ -458,7 +571,8 @@ def _on_value_error(request, exc: ValueError):
 for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
-    MissingActivationEvidenceError,
+    MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
+    PlanIllegalTransition, UnverifiedPlanApprovalError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -466,6 +580,13 @@ for _exc_type in (
         MissingRevocationEvidenceError: 409, IllegalTransition: 409,
         CandidateSelfApprovalError: 403, MissingEvidenceError: 409, CandidateIllegalTransition: 409,
         MissingActivationEvidenceError: 409,
+        # P0-3 - 칸은 채워졌지만 실재하지 않는/조건 미충족 증거는 403(신원 위조에 준하는
+        # 취급, CEO 쪽 UnverifiedActorUserError와 같은 방향). tool_allowlist 누락은
+        # 증거 위조가 아니라 설정 미비라 기존 MissingActivationEvidenceError와 같은 409.
+        UnverifiedActivationEvidenceError: 403, ToolAllowlistMissingError: 409,
+        # P1-2 - Workforce Plan도 같은 원칙: 위조/미실재 승인은 403, 허용 안 된 상태
+        # 전이는 409.
+        PlanIllegalTransition: 409, UnverifiedPlanApprovalError: 403,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -594,7 +715,14 @@ def submit_profile_version(agent_id: str, body: ProfileVersionSubmissionIn):
 
 @app.post("/workforce/v1/agents/{agent_id}/status")
 def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
-    """to_status=ACTIVE는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다."""
+    """to_status=ACTIVE는 qa_eval_run_id와 ceo_approval_id가 둘 다 있어야 한다.
+
+    P0-3(2026-08-05): 그 둘이 실재하는 증거인지도 검증한다 - qa_eval_run_id는
+    audit.eval_runs에서 이 profile_version_id를 candidate로 하는 COMPLETED 행을,
+    ceo_approval_id는 governance.approvals에서 이 profile_version_id를 대상으로 한
+    APPROVED CEO 결정을 가리켜야 한다(UnverifiedActivationEvidenceError -> 403).
+    tool_allowlist가 비어있는 Persona도 ACTIVE로 못 간다(ToolAllowlistMissingError -> 409).
+    """
     request = StatusChangeRequest(
         to_status=body.to_status, profile_version_id=body.profile_version_id, reason=body.reason,
         idempotency_key=body.idempotency_key, qa_eval_run_id=body.qa_eval_run_id,
@@ -602,6 +730,18 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
     )
     validate_status_change(request)
     _require_roster_repo()
+    if body.to_status is EmploymentStatus.ACTIVE:
+        tool_allowlist = _roster_repo.get_profile_version_tool_allowlist(body.profile_version_id) or {}
+        eval_run_status = _activation_evidence_repo.get_eval_run_status(
+            body.qa_eval_run_id, body.profile_version_id
+        )
+        ceo_approval_decision = _activation_evidence_repo.get_ceo_approval_decision(
+            body.ceo_approval_id, body.profile_version_id
+        )
+        verify_activation_evidence(
+            eval_run_status=eval_run_status, approval_decision=ceo_approval_decision,
+            tool_allowlist=tool_allowlist,
+        )
     _roster_repo.change_status(agent_id, to_status=body.to_status, at=datetime.now(timezone.utc))
     return _agent_summary_dict(_roster_repo.get_agent(agent_id))
 
@@ -648,6 +788,25 @@ def get_improvement_events(candidate_id: str):
          "qa_eval_run_id": e.qa_eval_run_id}
         for e in _workflow.events_for(candidate_id)
     ]}
+
+
+@app.post("/workforce/v1/improvements/{candidate_id}/scorecards")
+def record_improvement_scorecard(candidate_id: str, body: CandidateScorecardIn):
+    candidate = _improvement_repo.get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
+    if candidate.status != CandidateStatus.OBSERVING:
+        raise HTTPException(status_code=409, detail="후보별 Scorecard는 OBSERVING 상태에서만 기록한다")
+    scorecard = CandidateScorecard(candidate_id=candidate_id, **body.model_dump())
+    _improvement_repo.append_scorecard(scorecard)
+    return scorecard.model_dump(mode="json")
+
+
+@app.get("/workforce/v1/improvements/{candidate_id}/scorecards")
+def get_improvement_scorecards(candidate_id: str):
+    if _improvement_repo.get_candidate(candidate_id) is None:
+        raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
+    return {"scorecards": [s.model_dump(mode="json") for s in _improvement_repo.scorecards_for(candidate_id)]}
 
 
 # --- 3.4 Scorecard / Budget ----------------------------------------------------------
@@ -711,10 +870,132 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
     cost_snapshots = _scorecard_repo.list_cost_snapshots_by_department(
         department_id, window_start=window_start, window_end=window_end,
     )
+    # P1-2 - quality_snapshots가 없던 시절엔 이 블록이 항상 None이었다(빈 집계를 위해
+    # 여기서 0을 만들지 않는다 - aggregate_quality가 그 불변식을 그대로 지킨다).
+    quality_snapshots = _scorecard_repo.list_quality_snapshots_by_department(
+        department_id, window_start=window_start, window_end=window_end,
+    )
+    finding_count, rework_rate = aggregate_quality(quality_snapshots)
     return build_department_scorecard(
         department_code=department_code, window_start=window_start, window_end=window_end,
         capacity=capacity, cost_snapshots=cost_snapshots,
+        finding_count=finding_count, rework_rate=rework_rate,
     )
+
+
+def _quality_snapshot_dict(s: QualitySnapshot) -> dict:
+    return {
+        "department_id": s.department_id, "agent_id": s.agent_id,
+        "profile_version_id": s.profile_version_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "eval_run_id": s.eval_run_id, "finding_count": s.finding_count,
+        "rework_rate": str(s.rework_rate) if s.rework_rate is not None else None,
+        "role_kpi": s.role_kpi, "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/departments/{department_code}/quality-snapshots")
+def record_quality_snapshot(department_code: str, body: QualitySnapshotIn):
+    """인사팀이 직접 집계하는 finding_count/rework_rate만 기록한다 - eval_score 원본은
+    QA/감사본부 소유(audit.eval_runs)라 여기서 복제하지 않고 eval_run_id로만 참조한다."""
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Quality Snapshot 기록 불가",
+        )
+    department_id = _scorecard_repo.get_department_id(department_code)
+    if department_id is None:
+        raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+    snapshot = QualitySnapshot(
+        window_start=body.window_start, window_end=body.window_end, recorded_by=body.recorded_by,
+        department_id=department_id, agent_id=body.agent_id,
+        profile_version_id=body.profile_version_id, eval_run_id=body.eval_run_id,
+        finding_count=body.finding_count, rework_rate=_dec(body.rework_rate), role_kpi=body.role_kpi,
+    )
+    _scorecard_repo.append_quality_snapshot(snapshot)
+    return _quality_snapshot_dict(snapshot)
+
+
+@app.get("/workforce/v1/departments/{department_code}/quality-snapshots")
+def list_quality_snapshots(department_code: str, window_start: datetime, window_end: datetime):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Quality Snapshot 조회 불가",
+        )
+    department_id = _scorecard_repo.get_department_id(department_code)
+    if department_id is None:
+        raise HTTPException(status_code=404, detail=f"department_code={department_code} 없음")
+    snapshots = _scorecard_repo.list_quality_snapshots_by_department(
+        department_id, window_start=window_start, window_end=window_end,
+    )
+    return {"quality_snapshots": [_quality_snapshot_dict(s) for s in snapshots]}
+
+
+# --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------
+#
+# DRAFT는 인사팀(workforce-planning-agent)이 쓴다. APPROVED로 넘어가려면 이 plan_id를
+# 대상으로 한 실재 CEO 승인(governance.approvals, object_type=WORKFORCE_PLAN)이 있어야
+# 한다 - HR이 자기 계획을 스스로 ACTIVE로 올리지 못하게 막는다(workforce_plan.py 참고).
+
+
+def _plan_dict(p: WorkforcePlan) -> dict:
+    return {
+        "plan_id": p.plan_id, "department_id": p.department_id,
+        "period_start": p.period_start.isoformat(), "period_end": p.period_end.isoformat(),
+        "skill_gaps": p.skill_gaps, "actions": p.actions, "budget": p.budget,
+        "assumptions": p.assumptions, "status": p.status.value, "approval_id": p.approval_id,
+    }
+
+
+@app.post("/workforce/v1/departments/{department_code}/workforce-plans")
+def create_workforce_plan(department_code: str, body: WorkforcePlanIn):
+    department_id = _resolve_department_id(department_code)
+    plan = WorkforcePlan(
+        plan_id=str(uuid4()), department_id=department_id,
+        period_start=body.period_start, period_end=body.period_end,
+        skill_gaps=body.skill_gaps, actions=body.actions, budget=body.budget,
+        assumptions=body.assumptions,
+    )
+    created = _plan_repo.create_plan(plan)
+    return _plan_dict(created)
+
+
+@app.get("/workforce/v1/departments/{department_code}/workforce-plans")
+def list_workforce_plans(department_code: str):
+    department_id = _resolve_department_id(department_code)
+    return {"workforce_plans": [_plan_dict(p) for p in _plan_repo.list_plans_by_department(department_id)]}
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/approve")
+def approve_workforce_plan(plan_id: str, body: PlanApprovalIn):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    decision = _plan_evidence_repo.get_ceo_approval_decision(body.approval_id, plan_id)
+    updated = approve_plan(plan, approval_id=body.approval_id, approval_decision=decision)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/activate")
+def activate_workforce_plan(plan_id: str):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    updated = activate_plan(plan)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
+
+
+@app.post("/workforce/v1/workforce-plans/{plan_id}/retire")
+def retire_workforce_plan(plan_id: str):
+    plan = _plan_repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workforce_plan {plan_id} 없음")
+    updated = retire_plan(plan)
+    _plan_repo.save_plan(updated)
+    return _plan_dict(updated)
 
 
 @app.get("/workforce/v1/agents/{agent_id}/budget-assessment")
@@ -740,6 +1021,24 @@ def get_budget_assessment_real(
 
 if __name__ == "__main__":
     from fastapi.testclient import TestClient
+
+    # 이 자체 점검은 "a1"/"pv1" 같은 합성 ID로 계약을 검증한다 - DATABASE_URL이 .env에
+    # 있어도(위 load_dotenv()) 실 DB로 새면 대부분의 조회가 빈 결과나 FK 에러로 깨진다.
+    # CEO Office api/app.py와 같은 이유로 In-Memory로 강제한다.
+    if not isinstance(_access_repo, InMemoryAccessRepository):
+        _access_repo = InMemoryAccessRepository()
+    if not isinstance(_improvement_repo, InMemoryImprovementRepository):
+        _improvement_repo = InMemoryImprovementRepository()
+        _workflow = ImprovementWorkflow(_improvement_repo)  # _workflow는 모듈 로드 시점
+        # 원래 _improvement_repo를 이미 캡처했다 - 재배선 안 하면 실 DB를 계속 쓴다.
+    _scorecard_repo = None
+    _roster_repo = None  # 아래 5번 블록까지는 "미설정시 501"을 그대로 검증한다.
+    if not isinstance(_activation_evidence_repo, InMemoryActivationEvidenceRepository):
+        _activation_evidence_repo = InMemoryActivationEvidenceRepository()
+    if not isinstance(_plan_repo, InMemoryPlanRepository):
+        _plan_repo = InMemoryPlanRepository()
+    if not isinstance(_plan_evidence_repo, InMemoryPlanApprovalEvidenceRepository):
+        _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
 
     client = TestClient(app)
     t0 = "2026-08-02T00:00:00+00:00"
@@ -810,8 +1109,25 @@ if __name__ == "__main__":
     })
     assert r10.status_code == 200 and r10.json()["status"] == "APPROVED", r10.text
 
+    r10a = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "DEPLOYED", "actor": "independent-operator", "reason": "v4 배포", "at": t0,
+    })
+    assert r10a.status_code == 200 and r10a.json()["status"] == "DEPLOYED", r10a.text
+    r10b = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "OBSERVING", "actor": "hr", "reason": "관찰 시작", "at": t0,
+    })
+    assert r10b.status_code == 200 and r10b.json()["status"] == "OBSERVING", r10b.text
+    r10c = client.post("/workforce/v1/improvements/ic-1/scorecards", json={
+        "window_start": t0, "window_end": t_exp, "recorded_by": "hr-03",
+        "input_tokens": 100, "output_tokens": 50, "total_cost": "1.25",
+        "quality_score": "0.98", "safety_finding_count": 0, "regression_count": 0,
+    })
+    assert r10c.status_code == 200 and r10c.json()["quality_score"] == "0.98", r10c.text
+
     r11 = client.get("/workforce/v1/improvements/ic-1/events")
-    assert len(r11.json()["events"]) == 4
+    assert len(r11.json()["events"]) == 6
+    r11a = client.get("/workforce/v1/improvements/ic-1/scorecards")
+    assert len(r11a.json()["scorecards"]) == 1
 
     # 3. Scorecard - Snapshot 없으면 0이 아니라 None.
     r12 = client.post("/workforce/v1/departments/07-agent-workforce/scorecard", json={
@@ -826,6 +1142,18 @@ if __name__ == "__main__":
                             "output_tokens": 100, "model_cost": "1", "case_count": 1}],
     })
     assert r13.status_code == 200 and r13.json()["cost"]["case_count"] == 1, r13.text
+
+    # 3a. Quality Snapshot - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야
+    # 한다(실 DB 왕복 검증은 postgres_scorecard_repository.py 자체 점검이 담당).
+    r13a = client.post("/workforce/v1/departments/07-agent-workforce/quality-snapshots", json={
+        "window_start": t0, "window_end": t_exp, "recorded_by": "hr-01", "finding_count": 1,
+    })
+    assert r13a.status_code == 501, r13a.text
+    r13b = client.get(
+        "/workforce/v1/departments/07-agent-workforce/quality-snapshots",
+        params={"window_start": t0, "window_end": t_exp},
+    )
+    assert r13b.status_code == 501, r13b.text
 
     # 4. Budget Assessment - 예산 초과 시 강등 제안.
     r14 = client.post("/workforce/v1/budget-assessments", json={
@@ -856,4 +1184,117 @@ if __name__ == "__main__":
     })
     assert r18.status_code == 409, r18.text  # validate_status_change가 501 확인보다 먼저 막는다
 
-    print("ok - Workforce Domain API 5개 영역(access/improvements/scorecard/budget/roster) 점검 통과")
+    # 6. P0-3 ACTIVE 전이 증거 실재성 게이트 - In-Memory Roster/Evidence Repository를
+    # 채운 뒤에만 의미가 있으므로 여기서부터 module 전역을 재배선한다.
+    from roster import InMemoryRosterRepository, ProfileVersionStatus
+
+    _roster_repo = InMemoryRosterRepository()
+    _roster_repo.seed_agent(AgentSummary(
+        agent_id="a-p03", employee_code="HR-P03-SELFCHECK", display_name="p0-3-selfcheck-agent",
+        department_code="hr-department", role_code="HR-01",
+        employment_status=EmploymentStatus.CANDIDATE, current_version=0,
+        current_profile_version=None, owner_user_id=None,
+    ))
+    submitted = _roster_repo.submit_profile("a-p03", ProfileVersionSubmission(
+        model_id="m1", prompt_artifact_path="x", skill_manifest={},
+        tool_allowlist={"read": ["capacity_snapshots"]}, data_scopes={}, memory_namespace="x",
+        token_budget={}, sla={}, eval_requirements={}, forbidden_actions=[], effective_from=t0,
+    ))
+    pv_id = submitted.profile_version_id
+
+    # 6a. qa_eval_run_id/ceo_approval_id가 채워져 있어도 실재하지 않으면 403.
+    r19 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-1", "qa_eval_run_id": "eval-ghost",
+        "ceo_approval_id": "appr-ghost",
+    })
+    assert r19.status_code == 403 and r19.json()["error_code"] == "UnverifiedActivationEvidenceError", \
+        r19.text
+
+    # 6b. 실재하지만 아직 안 끝난 Eval(RUNNING)/미승인(PENDING)도 403.
+    _activation_evidence_repo.seed_eval_run("eval-running", pv_id, "RUNNING")
+    _activation_evidence_repo.seed_ceo_approval("appr-pending", pv_id, "PENDING")
+    r20 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-2", "qa_eval_run_id": "eval-running",
+        "ceo_approval_id": "appr-pending",
+    })
+    assert r20.status_code == 403, r20.text
+
+    # 6c. 다른 Profile Version을 대상으로 한 증거는 재사용할 수 없다(매칭 조건).
+    _activation_evidence_repo.seed_eval_run("eval-other-pv", "다른-pv", "COMPLETED")
+    r21 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-3", "qa_eval_run_id": "eval-other-pv",
+        "ceo_approval_id": "appr-pending",
+    })
+    assert r21.status_code == 403, r21.text
+
+    # 6d. tool_allowlist가 빈 Version은 QA/CEO 증거가 완벽해도 409(실행 권한 없음).
+    empty_allowlist_agent = _roster_repo.submit_profile(
+        "a-p03",
+        ProfileVersionSubmission(
+            model_id="m1", prompt_artifact_path="x", skill_manifest={}, tool_allowlist={},
+            data_scopes={}, memory_namespace="x", token_budget={}, sla={}, eval_requirements={},
+            forbidden_actions=[], effective_from=t0,
+        ),
+    )
+    _activation_evidence_repo.seed_eval_run("eval-empty-tools", empty_allowlist_agent.profile_version_id, "COMPLETED")
+    _activation_evidence_repo.seed_ceo_approval("appr-empty-tools", empty_allowlist_agent.profile_version_id, "APPROVED")
+    r22 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": empty_allowlist_agent.profile_version_id,
+        "reason": "x", "idempotency_key": "idem-p03-4", "qa_eval_run_id": "eval-empty-tools",
+        "ceo_approval_id": "appr-empty-tools",
+    })
+    assert r22.status_code == 409 and r22.json()["error_code"] == "ToolAllowlistMissingError", r22.text
+
+    # 6e. 정상 증거(완료된 Eval + 승인된 CEO 결정 + 채워진 tool_allowlist) -> ACTIVE 성공.
+    _activation_evidence_repo.seed_eval_run("eval-ok", pv_id, "COMPLETED")
+    _activation_evidence_repo.seed_ceo_approval("appr-ok", pv_id, "APPROVED")
+    r23 = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-5", "qa_eval_run_id": "eval-ok", "ceo_approval_id": "appr-ok",
+    })
+    assert r23.status_code == 200 and r23.json()["employment_status"] == "ACTIVE", r23.text
+    print("ok - P0-3 ACTIVE 전이 증거 실재성 게이트 5개 시나리오 통과 "
+          "(위조 증거 403, 미완료/미승인 403, 증거 재사용 차단 403, tool_allowlist 없음 409, 정상 승인 200)")
+
+    # 7. Workforce Plan (P1-2 HR-04) - DRAFT 생성 -> 위조/미실재 승인 차단 -> 실재 승인
+    # -> 승인 없이 ACTIVE 시도 차단 -> 활성화 -> 종료 상태 재전이 차단.
+    r24 = client.post("/workforce/v1/departments/07-agent-workforce/workforce-plans", json={
+        "period_start": t0, "period_end": t_exp,
+        "skill_gaps": {"research": 1}, "actions": [{"type": "HIRE", "role": "HR-01"}],
+        "budget": {"monthly_usd": "5000"},
+    })
+    assert r24.status_code == 200 and r24.json()["status"] == "DRAFT", r24.text
+    plan_id = r24.json()["plan_id"]
+
+    r25 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/approve", json={
+        "approval_id": "appr-ghost",
+    })
+    assert r25.status_code == 403 and r25.json()["error_code"] == "UnverifiedPlanApprovalError", r25.text
+
+    r26 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r26.status_code == 409, r26.text  # 승인 없이 바로 ACTIVE 불가
+
+    _plan_evidence_repo.seed_ceo_approval("appr-plan-1", plan_id, "APPROVED")
+    r27 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/approve", json={
+        "approval_id": "appr-plan-1",
+    })
+    assert r27.status_code == 200 and r27.json()["status"] == "APPROVED", r27.text
+
+    r28 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r28.status_code == 200 and r28.json()["status"] == "ACTIVE", r28.text
+
+    r29 = client.get("/workforce/v1/departments/07-agent-workforce/workforce-plans")
+    assert len(r29.json()["workforce_plans"]) == 1
+
+    r30 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/retire")
+    assert r30.status_code == 200 and r30.json()["status"] == "RETIRED", r30.text
+    r31 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/activate")
+    assert r31.status_code == 409, r31.text  # 종료 상태 재전이 차단
+    print("ok - Workforce Plan(P1-2 HR-04) 6개 시나리오 통과 "
+          "(DRAFT 생성, 위조 승인 403, 승인 없는 ACTIVE 409, 실재 승인 200, 활성화 200, 종료 후 재전이 409)")
+
+    print("ok - Workforce Domain API 7개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan) 점검 통과")

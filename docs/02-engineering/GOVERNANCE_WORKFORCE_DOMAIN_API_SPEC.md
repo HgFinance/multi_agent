@@ -88,20 +88,27 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 
 ### 2.1 Mandate
 
+> **정정(2026-08-06)**: 이 표는 오래 "제안" 상태로 남아 있었지만 `departments/00-ceo-office/api/app.py`에 실제로 전부 구현·자체 점검돼 있다. 실행 상세·요청/응답 스키마·에러코드는 이 문서를 갱신하는 대신 [USER_INPUT_API_SPEC.md](USER_INPUT_API_SPEC.md)를 기준으로 삼는다 — 그 문서가 구현을 직접 읽고 검증한 최신 상태이고, 이 문서를 다시 매번 손으로 맞추면 또 벌어진다.
+
 | Method/Path | 감싸는 것 | 상태 |
 |---|---|---|
-| `GET /governance/v1/mandates/{fund_id}/current` | effective 구간의 `mandate_versions` | `get_mandate` ✅ |
-| `GET /governance/v1/mandates/{mandate_id}/versions/{version}` | 특정 Version | 제안 |
-| `POST /governance/v1/mandates/{mandate_id}/versions` | `MandateVersionService.propose_version()` | 제안 |
-| `POST /governance/v1/mandates/{mandate_id}/versions/{version}/activate` | `MandateActivationService.activate()` | 제안 |
+| `GET /governance/v1/mandates/{mandate_id}/current` | effective 구간의 `mandate_versions`(policy 전체 포함) | ✅ 구현(2026-08-06 응답 확장) |
+| `GET /governance/v1/mandates/by-fund/{fund_id}/current` | 위와 동일, `fund_id` 기준 조회 | ✅ 구현(2026-08-06 신설) — 아래 §"fund_id vs mandate_id" 참고 |
+| `GET /governance/v1/mandates/{mandate_id}/versions/{version}` | 특정 Version 직접 조회 | 🟡 제안 — Repository 계층(`MandateVersionRepository.get()`)엔 있으나 전용 HTTP Route는 아직 없다. `GET .../current`가 현재 Version만 노출한다 |
+| `POST /governance/v1/mandates/{mandate_id}/versions` | `MandateVersionService.propose_version()` | ✅ 구현 |
+| `POST /governance/v1/mandates/{mandate_id}/versions/{version}/activate` | `MandateActivationService.activate()` | ✅ 구현 |
+| `POST /governance/v1/mandates/{mandate_id}/change-requests` | `MandateChangeWorkflow.submit()` — Risk/QA 동시 승인 요청까지 오케스트레이션하는 상위 경로 | ✅ 구현 — **Frontend가 실제로 쓸 경로는 이쪽이다**, 위 propose/activate 2개는 그 내부 빌딩 블록 |
+| `POST /governance/v1/cases/{case_id}/advance` | `MandateChangeWorkflow.advance()` | ✅ 구현 |
+| `POST /governance/v1/mandate-assistant/suggest` | 온보딩 챗봇 자연어 → 구조화 제안(Stateless) | ✅ 구현(2026-08-06, 3개 필드만 — USER_INPUT_API_SPEC.md §2.4) |
 
-**`get_mandate` Response**
+> **`fund_id` vs `mandate_id`(2026-08-06)**: 이 절 첫 줄이 원래 `GET .../mandates/{fund_id}/current` 하나로 설계됐었지만, 실제 구현은 **Path Parameter가 `mandate_id`인 Route**를 기준으로 하고 `fund_id` 조회는 **별도 Route**(`by-fund/...`)로 분리했다. `governance.mandates`가 `unique(fund_id, name)`이라 한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있어서다 — `by-fund` 조회는 0개=404, 1개=조회, 2개 이상=409(모호, 임의로 하나를 고르지 않음)로 판단한다.
+
+**`GET .../current` Response** (실제 필드명, 2026-08-06 확인 — `version`이 아니라 `current_version`, 최상위 `fund_id` 없음)
 
 ```json
 {
   "mandate_id": "uuid",
-  "fund_id": "uuid",
-  "version": 3,
+  "current_version": 3,
   "status": "ACTIVE",
   "effective_from": "2026-07-30T00:00:00Z",
   "effective_to": null,
@@ -115,10 +122,12 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
       "base_capital": "100000000", "currency": "KRW",
       "max_instrument_weight": "0.1", "max_sector_weight": "0.3",
       "max_gross_exposure": "1.0", "max_concurrent_positions": 10,
-      "max_daily_loss": "0.03"
+      "max_daily_loss": "0.03", "max_drawdown_pct": "0.20"
     },
     "universe_policy": {
-      "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"
+      "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30",
+      "allowed_asset_classes": [], "forbidden_asset_classes": [],
+      "preferred_sectors": [], "excluded_sectors": []
     },
     "approval_rules": {
       "paper_order_mode": "USER_APPROVAL",
@@ -127,6 +136,8 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
   }
 }
 ```
+
+`current_version`이 아직 0이면(Version이 없으면) 위 필드 없이 `{mandate_id, current_version: 0, status: "DRAFT"}`만 돌아온다.
 
 > **기준 자본 계약** (2026-07-31 결정, §7 참고)
 >
@@ -177,14 +188,22 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 
 ### 2.2 Case / Decision / Approval
 
+> **정정(2026-08-06)**: 아래 상태 열을 실제 `app.py` Route와 대조해 다시 확인했다.
+
 | Method/Path | 상태 | 비고 |
 |---|---|---|
 | `POST /governance/v1/cases` | `create_case` ✅ | `governance.cases`는 전사 Case Root. 투자 Case는 MSU_SPEC §11 `POST /investment-cases`를 쓰고 여기를 복제하지 않는다 |
-| `GET /governance/v1/cases/{case_id}` | 제안 | |
-| `GET /governance/v1/cases/{case_id}/timeline` | 제안 | 기존 `api.get_case_timeline` RPC를 감싼다 |
-| `POST /governance/v1/cases/{case_id}/decisions` | `record_decision` ✅ | |
+| `GET /governance/v1/cases/{case_id}` | ✅ 구현 | |
+| `GET /governance/v1/cases/{case_id}/timeline` | ✅ 구현 | |
+| `POST /governance/v1/cases/{case_id}/transitions` | ✅ 구현(제안 Route였으나 실제로 있음) | |
+| `POST /governance/v1/cases/{case_id}/decisions` | 🔴 **미구현** | 표에 `record_decision` ✅로 오래 적혀 있었으나 실제로는 없다. 범용 `governance.decisions` 테이블이 없어(`mandate_decisions`/`committee_decisions`만 존재) `app.py`가 계약을 지어내지 않고 의도적으로 비워뒀다(별도 작업으로 남음, `app.py` 주석 참고) |
 | `POST /governance/v1/approvals` | `request_approval` ✅ | |
-| `POST /governance/v1/escalations` | 제안 | |
+| `GET /governance/v1/approvals` / `GET .../approvals/{approval_id}` | ✅ 구현(제안 상태였으나 실제로 있음) | |
+| `POST /governance/v1/approvals/{approval_id}/decide` | ✅ 구현 | actor_user_id 실재성 검증(P0-1) 포함 |
+| `POST /governance/v1/approvals/{approval_id}/revoke` | ✅ 구현 | |
+| `POST /governance/v1/escalations` | ✅ 구현(제안 상태였으나 실제로 있음) | |
+| `GET /governance/v1/escalations` / `GET .../escalations/{escalation_id}` | ✅ 구현 | |
+| `POST /governance/v1/escalations/{escalation_id}/transitions` | ✅ 구현 | |
 
 **`create_case` Request** — 필드는 MSU_SPEC §12 `governance.cases` 스키마를 따른다.
 
@@ -234,7 +253,11 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 | Method/Path | 상태 |
 |---|---|
 | `POST /governance/v1/committee/sessions` / `.../close` | `open/close_session` ✅ |
+| `GET /governance/v1/committee/sessions/{session_id}` | ✅ 구현 |
 | `POST /governance/v1/committee/sessions/{session_id}/votes` | `submit_vote` ✅ |
+| `POST /governance/v1/committee/sessions/{session_id}/cancel` | ✅ 구현 |
+
+> **정정(2026-08-06)**: §7 상태표가 "위원회 로직 미구현(Y2)"으로 오래 적혀 있었으나, `departments/00-ceo-office/src/committee/committee.py`에 `evaluate_quorum()` 결정론 로직이 이미 있다. Veto 부서 REJECT는 정족수와 무관하게 즉시 REJECT, 정족수 미달은 DEFER(자동 승인 방향 fallback 없음), `SelfReviewError`로 Case owner_department의 자기 투표를 막는다 — 표만 안 고쳐져 있었다.
 
 ```json
 {
@@ -252,8 +275,8 @@ body가 된다. **Transport를 바꿔도 타입은 바뀌지 않으므로** 타�
 
 | 호출자 (Hermes Specialist) | 호출 대상 |
 |---|---|
-| `executive-orchestrator` (CEO-00 + CEO-01 합친 페르소나) | `GET /governance/v1/mandates/{fund_id}/current`, `POST /governance/v1/cases`, `POST /governance/v1/cases/{case_id}/decisions`, `POST /governance/v1/approvals`, `POST /governance/v1/committee/*` |
-| Mandate 변경 Workflow (LangGraph) | `POST .../versions` → `POST .../versions/{version}/activate`. 두 노드 사이는 `VersionResult`를 State로 넘기며 API를 다시 타지 않는다 |
+| `executive-orchestrator` (CEO-00 + CEO-01 합친 페르소나) | `GET /governance/v1/mandates/{mandate_id}/current`, `GET .../mandates/by-fund/{fund_id}/current`, `POST /governance/v1/cases`, `POST /governance/v1/approvals`, `POST /governance/v1/committee/*` — `POST .../cases/{case_id}/decisions`(record_decision)는 표에서 뺐다: **구현되지 않았다.** 범용 `governance.decisions` 테이블이 없어 `app.py`가 의도적으로 만들지 않은 상태다(2026-08-06 확인, 별도 작업으로 남음) |
+| Mandate 변경 Workflow | `POST .../mandates/{mandate_id}/change-requests` → (Risk/QA 승인 대기) → `POST .../cases/{case_id}/advance`. `MandateChangeWorkflow`가 오케스트레이션하며, 내부적으로 `POST .../versions` → `POST .../versions/{version}/activate`를 호출한다(2026-08-06 확인 — LangGraph는 진행 상태 checkpoint만 담당, 승인 대기의 진실은 여전히 `governance.approvals`) |
 | 값 범위·상호 모순 검증 | `policy.py` 결정론 함수 — LLM이 판정하지 않는다 |
 | 활성화 게이트 | `lifecycle.py` 결정론 함수. LOOSEN·최초 활성화는 승인 없으면 차단 |
 
@@ -401,6 +424,10 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
 |---|---|
 | `GET /workforce/v1/departments/{department_code}/scorecard` | `get_department_scorecard` ✅ |
 | `GET /workforce/v1/skill-gap` | `get_skill_gap` ✅ |
+| `POST` / `GET /workforce/v1/departments/{department_code}/quality-snapshots` | P1-2 신규 ✅ — `quality_snapshots` 기록/조회 |
+| `POST /workforce/v1/departments/{department_code}/workforce-plans` | P1-2 신규 ✅ — DRAFT 생성 |
+| `GET /workforce/v1/departments/{department_code}/workforce-plans` | P1-2 신규 ✅ — 목록 조회 |
+| `POST /workforce/v1/workforce-plans/{plan_id}/approve` \| `.../activate` \| `.../retire` | P1-2 신규 ✅ — CEO 승인 실재성 검증 후 전이 |
 
 ```json
 {
@@ -501,17 +528,19 @@ CEO는 다른 본부의 공식 수치를 **직접 계산하지 않고 조회만*
 반대로 다른 부서가 우리를 동기 호출하는 경우는 아래 하나다.
 
 ```
-risk-management / trading-department → GET /governance/v1/mandates/{fund_id}/current → governance
+risk-management / trading-department → GET /governance/v1/mandates/by-fund/{fund_id}/current → governance
 ```
 
 Risk Engine이 한도를 판정하려면 Mandate 비율이 필요하다. 이 호출은 **읽기 전용이며 판정을 대신하지 않는다** —
 승인/축소/거절은 Risk Engine이 결정한다.
 
+> **구현 상태(2026-08-06)**: 이 조회 경로 자체는 ✅ 구현됐다(§2.1의 `by-fund/{fund_id}/current`). 다만 **Risk Engine이 실제로 이 경로를 호출하도록 배선하는 작업은 아직이다** — `departments/03-risk/api/risk_context_repository.py`는 여전히 `risk.policies`/`risk.limits`를 읽고 `governance.mandate_versions`를 직접 읽지 않는다(동규 담당, [USER_INPUT_SCOPE_ANALYSIS.md](../01-product/USER_INPUT_SCOPE_ANALYSIS.md) 부록 A.9 §L). 즉 governance 쪽 API는 준비됐고 Risk 쪽 소비만 남았다.
+
 §2.1 기준 자본 계약에 따라 Risk Engine은 **두 곳을 각각 조회**한다. governance는 비율만 주고 기준 자본을 주지 않는다.
 
 ```
-비율     ← GET /governance/v1/mandates/{fund_id}/current   (governance)
-기준 자본 ← 회계 API의 당일 장 시작 시점 nav_runs.total_nav  (accounting)
+비율     ← GET /governance/v1/mandates/by-fund/{fund_id}/current   (governance)
+기준 자본 ← 회계 API의 당일 장 시작 시점 nav_runs.total_nav        (accounting)
 ```
 
 Mandate 저장 시 governance는 `accounting.funds.base_currency`를 조회해 통화 일치를 검증한다(§2.1).
@@ -624,14 +653,14 @@ Agent 상태(`OFFLINE|IDLE|QUEUED|RUNNING|WAITING_APPROVAL|BLOCKED|DEGRADED|ERRO
 | 항목 | 상태 |
 |---|---|
 | API 3개 이름과 §8.1 등재 메서드 (`get_mandate`, `create_case`, `record_decision`, `request_approval`, `open/close_session`, `submit_vote`, `get_roster`, `request_hire`, `submit_profile`, `request_access`, `change_status`, `get_department_scorecard`, `get_skill_gap`, `request_report`, `get_report`, `get_source_snapshots`) | ✅ 확정 |
-| 위 메서드들의 **입출력 타입** (본문 전체) | 🟡 제안 — 승인 필요 |
-| Mandate Version/Activate 엔드포인트 | 🟡 제안 |
-| Improvement Candidate 엔드포인트 (§3.3) | 🟡 제안 |
-| Case timeline·Escalation·Candidate 조회 등 보조 엔드포인트 | 🟡 제안 |
+| 위 메서드들의 **입출력 타입** (본문 전체) | governance-api 쪽(§2.1~2.3 Mandate·Case·Approval·Escalation·Committee)은 ✅ 구현·`app.py` 코드와 대조 확인(2026-08-06). workforce-api·reporting-api 쪽은 미확인 — 이 문서를 다시 검증한 사람이 확인분을 추가한다 |
+| Mandate Version/Activate/HITL 엔드포인트 (§2.1) | ✅ 구현(2026-08-06 상세 확인) — `POST .../versions`, `.../activate`, `.../change-requests`, `POST .../cases/{case_id}/advance`, `GET .../current`(policy 포함), `GET .../by-fund/{fund_id}/current`, `POST .../mandate-assistant/suggest` 전부 |
+| Improvement Candidate 엔드포인트 (§3.3) | 🟡 제안 — workforce-api 쪽이라 이번 확인 범위 밖(미확인, 임의로 상태를 바꾸지 않음) |
+| Case/Approval/Escalation 조회·전이 보조 엔드포인트 (§2.2) | ✅ 구현(2026-08-06 확인) — `POST .../cases/{case_id}/decisions`(record_decision)만 예외로 **미구현** — 표에 오래 ✅로 잘못 적혀 있었다(§2.2 정정 참고) |
 | `request_access` (§3.5) | ✅ 구현 — `20260731000700_workforce_access_lifecycle.sql` |
-| Scorecard `quality` 일부 | ⚠️ 저장소 미구현 — `quality_snapshots` 없음 |
-| Workforce Plan 저장 | ⚠️ 저장소 미구현 — `workforce_plans` 없음 |
-| 위원회 (§2.3) | ⚠️ 로직 미구현 (테이블은 있음, Y2) |
+| Scorecard `quality` 일부 (`finding_count`/`rework_rate`) | ✅ 구현(P1-2) — `scorecard/quality.py` + `postgres_scorecard_repository.py`. `eval_score`는 여전히 QA 소유라 `None` |
+| Workforce Plan 저장 | ✅ 구현(P1-2) — `planning/workforce_plan.py`(DRAFT/APPROVED/ACTIVE/RETIRED, CEO 승인 실재성 검증) + `postgres_plan_repository.py` |
+| 위원회 (§2.3) | ✅ 구현(2026-08-06 정정) — `committee.py`의 `evaluate_quorum()`이 Veto·정족수·SoD를 결정론적으로 판정한다. "로직 미구현"으로 오래 적혀 있었으나 사실이 아니었다 |
 | 한도 집행 기준 자본 = 당일 장 시작 시점 `nav_runs.total_nav` (§2.1) | ✅ 결정 2026-07-31 |
 | `base_capital` = Paper 시작 자본. 첫날 회계 초기 현금 근거로만 사용 | ✅ 결정 2026-07-31 |
 | `mandate.currency` ↔ `funds.base_currency` 검증은 governance가 저장 시점에 수행 | ✅ 결정 2026-07-31 — **F01 구현 필요** |

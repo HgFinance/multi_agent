@@ -52,6 +52,25 @@ class MissingActivationEvidenceError(Exception):
     """ACTIVE 전이에 qa_eval_run_id/ceo_approval_id 중 하나 이상이 없다 (불변식 2)."""
 
 
+class UnverifiedActivationEvidenceError(Exception):
+    """P0-3(2026-08-05) - qa_eval_run_id/ceo_approval_id가 비어있지 않아도 실재하지
+    않거나 조건을 안 채우면 거절한다.
+
+    불변식 2(MissingActivationEvidenceError)는 "칸이 비어있는지"만 봤다 - 아무 문자열이나
+    넣으면 통과했다. 이 예외는 그보다 좁혀서: qa_eval_run_id는 이 profile_version_id를
+    대상으로 한 audit.eval_runs 행이 실재하고 status='COMPLETED'여야 하고,
+    ceo_approval_id는 이 profile_version_id를 object_id로 하는 governance.approvals
+    행(object_type=AGENT_PROFILE_VERSION, required_role=CEO)이 실재하고
+    decision='APPROVED'여야 한다. 그 결과 "작성자(HR)와 승인자(QA+CEO)가 분리된다"는
+    요구도 자동으로 지켜진다 - HR은 QA eval_runs도 governance.approvals의 CEO 결정도
+    스스로 만들 수 없는 부서라서다.
+    """
+
+
+class ToolAllowlistMissingError(Exception):
+    """P0-3 - tool_allowlist가 비어있는 Persona는 ACTIVE(실행 권한)로 전이할 수 없다."""
+
+
 class AgentNotFoundError(Exception):
     """agent_id가 Roster에 없다."""
 
@@ -176,6 +195,31 @@ def validate_status_change(request: StatusChangeRequest) -> None:
         )
 
 
+def verify_activation_evidence(
+    *, eval_run_status: str | None, approval_decision: str | None, tool_allowlist: dict,
+) -> None:
+    """P0-3 - validate_status_change 다음 단계. 실재성까지 검증한다.
+
+    호출자가 audit.eval_runs/governance.approvals를 먼저 조회해 얻은 값을 넘긴다 -
+    이 함수 자체는 DB를 모른다(actor_identity.py verify_actor_user와 같은 분리 원칙:
+    조회는 Repository, 판정은 순수 함수).
+    """
+    if eval_run_status != "COMPLETED":
+        raise UnverifiedActivationEvidenceError(
+            f"qa_eval_run_id가 이 Profile Version을 대상으로 한 완료된 Eval Run을 "
+            f"가리키지 않는다 (조회된 status={eval_run_status!r})"
+        )
+    if approval_decision != "APPROVED":
+        raise UnverifiedActivationEvidenceError(
+            f"ceo_approval_id가 이 Profile Version에 대한 승인된 CEO 결정을 가리키지 "
+            f"않는다 (조회된 decision={approval_decision!r})"
+        )
+    if not tool_allowlist:
+        raise ToolAllowlistMissingError(
+            "tool_allowlist가 비어있는 Persona는 ACTIVE(실행 권한)로 전이할 수 없다"
+        )
+
+
 class RosterRepository:
     """조회·저장 인터페이스. 실제 구현은 workforce.agent_profiles/agent_profile_versions에 반영한다."""
 
@@ -197,6 +241,13 @@ class RosterRepository:
     def change_status(
         self, agent_id: str, *, to_status: EmploymentStatus, at: datetime
     ) -> None:
+        raise NotImplementedError
+
+    def get_profile_version_tool_allowlist(self, profile_version_id: str) -> dict | None:
+        """P0-3 - ACTIVE 전이 게이트가 tool_allowlist 비어있음을 판정하려면 필요하다.
+        AgentSummary/ProfileVersionSummary(list_roster/get_agent의 Read View)에는 이
+        필드가 없다 - 목록 응답을 무겁게 만들지 않으려는 기존 설계라 별도 조회로 뺀다.
+        존재하지 않는 profile_version_id는 None."""
         raise NotImplementedError
 
 
@@ -236,6 +287,13 @@ class InMemoryRosterRepository(RosterRepository):
             **{**agent.__dict__, "current_version": row.version, "current_profile_version": updated_version}
         )
         return row
+
+    def get_profile_version_tool_allowlist(self, profile_version_id: str) -> dict | None:
+        for versions in self._versions.values():
+            for row in versions:
+                if row.profile_version_id == profile_version_id:
+                    return row.submission.tool_allowlist
+        return None
 
     def change_status(self, agent_id: str, *, to_status: EmploymentStatus, at: datetime) -> None:
         agent = self._agents.get(agent_id)
@@ -338,4 +396,36 @@ if __name__ == "__main__":
     except AgentNotFoundError:
         pass
 
-    print("ok - HR-02 Roster 도메인 계약 9개 시나리오 통과")
+    # 9) P0-3 - 증거 실재성 검증. eval_run_status/approval_decision이 조건을 못 채우면
+    # UnverifiedActivationEvidenceError, tool_allowlist가 비면 ToolAllowlistMissingError.
+    for bad_eval_status in (None, "RUNNING", "FAILED", "QUEUED"):
+        try:
+            verify_activation_evidence(
+                eval_run_status=bad_eval_status, approval_decision="APPROVED",
+                tool_allowlist={"read": ["x"]},
+            )
+            raise AssertionError(f"eval_run_status={bad_eval_status!r}가 통과함")
+        except UnverifiedActivationEvidenceError:
+            pass
+    for bad_decision in (None, "PENDING", "REJECTED", "EXPIRED"):
+        try:
+            verify_activation_evidence(
+                eval_run_status="COMPLETED", approval_decision=bad_decision,
+                tool_allowlist={"read": ["x"]},
+            )
+            raise AssertionError(f"approval_decision={bad_decision!r}가 통과함")
+        except UnverifiedActivationEvidenceError:
+            pass
+    try:
+        verify_activation_evidence(
+            eval_run_status="COMPLETED", approval_decision="APPROVED", tool_allowlist={},
+        )
+        raise AssertionError("빈 tool_allowlist가 통과함")
+    except ToolAllowlistMissingError:
+        pass
+    verify_activation_evidence(  # 셋 다 만족하면 통과 (raise 없음).
+        eval_run_status="COMPLETED", approval_decision="APPROVED", tool_allowlist={"read": ["x"]},
+    )
+    print("ok - P0-3 증거 실재성 검증 10개 시나리오 통과")
+
+    print("ok - HR-02 Roster 도메인 계약 19개 시나리오 통과")

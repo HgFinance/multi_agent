@@ -114,6 +114,12 @@ from approval import (
 from approval import (
     revoke as revoke_approval,
 )
+from actor_identity import (
+    ActorUserStatus,
+    InMemoryActorIdentityRepository,
+    UnverifiedActorUserError,
+    verify_actor_user,
+)
 from case_root import (
     CaseEvent,
     CaseRecord,
@@ -192,6 +198,9 @@ from notification import (
     NotificationRequest,
     NotificationService,
 )
+from langgraph.checkpoint.memory import InMemorySaver
+from mandate_assistant import AssistantMessage as _AssistantMessage
+from mandate_assistant import suggest as _mandate_assistant_suggest
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -294,7 +303,12 @@ class ProposeVersionRequest(BaseModel):
 
 
 class SuggestRequestIn(BaseModel):
-    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4)."""
+    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4).
+
+    Stateless - fund_id는 미래에 Fund별 컨텍스트(허용 자산군 등)를 프롬프트에
+    반영할 자리로만 받아두고 아직 쓰지 않는다. messages/current_draft만 실제로
+    LLM 제안을 만든다.
+    """
 
     fund_id: str
     messages: list[_AssistantMessage] = Field(min_length=1)
@@ -598,6 +612,11 @@ if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
 else:
     committee_repo = InMemoryCommitteeRepository()
 
+# P0-1(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md v2.0) - actor_user_id 실재성 검증.
+# 서명된 Subject 인증(mTLS/JWT)은 아직 없다(Platform/IAM 선행 과제, actor_identity.py
+# 모듈 docstring 참고) - 팀 합의로 governance.user_profiles에 심어둔 테스트 회원을
+# "로그인된 사용자"로 간주하고, actor_user_id가 그 행을 실제로 가리키는지(존재 + ACTIVE)만
+# 검증한다. 이전에는 빈 문자열만 아니면 통과했다.
 if os.environ.get("DATABASE_URL") and PostgresActorIdentityRepository is not None:
     actor_identity_repo = PostgresActorIdentityRepository.connect(os.environ["DATABASE_URL"])
 else:
@@ -808,6 +827,13 @@ def _on_missing_actor_user(request, exc: MissingActorUserError):
     })
 
 
+@app.exception_handler(UnverifiedActorUserError)
+def _on_unverified_actor_user(request, exc: UnverifiedActorUserError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnverifiedActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(IllegalCaseTransition)
 def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
     return JSONResponse(status_code=409, content={
@@ -881,13 +907,9 @@ def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     })
 
 
-@app.exception_handler(UnverifiedActorUserError)
-def _on_unverified_actor_user(request, exc: UnverifiedActorUserError):
-    return JSONResponse(status_code=403, content={
-        "error_code": "UnverifiedActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
-    })
-
-
+# P0-2(2026-08-05) - 이전엔 핸들러가 없어 DB 오류가 원시 스택트레이스 500으로 새나갔다.
+# "의존 서비스 오류는 BLOCKED/ESCALATE다"(TEAM_YOUNGJU_CEO_HR_GUIDE.md P0-2) 원칙대로
+# 503로 닫는다 - 발송 성공으로 오인될 수 있는 200을 절대 내지 않는다.
 @app.exception_handler(NotificationPersistenceError)
 def _on_notification_persistence_error(request, exc: NotificationPersistenceError):
     return JSONResponse(status_code=503, content={
@@ -1081,6 +1103,11 @@ def get_mandate_current_by_fund(fund_id: str):
 
 
 # --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
+#
+# USER_INPUT_API_SPEC.md 2.4. Stateless - 이 endpoint 는 governance.mandate_versions나
+# 다른 어떤 테이블도 쓰지 않는다. LLM 실패는 500 으로 전파하지 않고 빈 제안 +
+# 안내 reply 로 감싼다(mandate_assistant.py docstring "왜 Schema 위반 시 예외를
+# 던지는가" 참고) - 채팅 UI가 LLM 장애 한 번으로 멈추면 안 된다.
 
 
 @app.post("/governance/v1/mandate-assistant/suggest")
@@ -1594,6 +1621,10 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
     CEO Office가 호스팅하는 API지만 required_role=RISK/QA인 승인은 CEO Office가 결정할 수
     없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
     자동 승격되지 않는다.
+
+    actor_user_id가 있으면(주로 required_role=USER, HITL 사용자 승인) P0-1 게이트를 먼저
+    통과해야 한다 - governance.user_profiles에 실재하는 ACTIVE 계정이어야 한다(위 모듈
+    "팀 합의" 참고, 서명된 인증은 아니다).
     """
     if body.actor_user_id:
         verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
@@ -1609,7 +1640,10 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
 
 @app.post("/governance/v1/approvals/{approval_id}/revoke")
 def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
-    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다.
+
+    actor_user_id가 있으면 decide와 같은 P0-1 게이트를 거친다.
+    """
     if body.actor_user_id:
         verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = revoke_approval(
@@ -1668,6 +1702,12 @@ if __name__ == "__main__":
     actor_identity_repo.seed("user-1")
     if not isinstance(_mandate_checkpointer, InMemorySaver):
         _mandate_checkpointer = InMemorySaver()
+    if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
+        actor_identity_repo = InMemoryActorIdentityRepository()
+    # 자체 점검이 쓰는 테스트 로그인 Identity를 미리 심어둔다(P0-1 게이트가 이제 실재성을
+    # 검사하므로, 임의 문자열은 더 이상 통과하지 않는다).
+    actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
+    actor_identity_repo.seed("user-1")
     mandate_change_workflow = MandateChangeWorkflow(
         version_repo=_mandate_repo, version_service=mandate_service,
         activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
@@ -1711,7 +1751,7 @@ if __name__ == "__main__":
     })
     assert r3.status_code == 200 and r3.json()["activated"] is False, r3.text
 
-    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인.
+    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인(2026-08-06부터 policy 포함).
     r4 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
         "direction": "NEUTRAL", "at": now, "approval": {"approved_by": "u1", "trace_id": "t1"},
     })
@@ -1875,6 +1915,23 @@ if __name__ == "__main__":
     })
     assert d_user.status_code == 200 and d_user.json()["decision"] == "APPROVED", d_user.text
     assert d_user.json()["actor_user_id"] == "00000000-0000-4000-8000-00000000cec0"
+
+    # 15c. P0-1 - governance.user_profiles에 실재하지 않는 actor_user_id는 403(비어있지 않은
+    # 문자열이라는 것만으로 통과하던 이전 상태보다 좁힌 검증). 존재하는 사용자는 여전히 통과.
+    a5b = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-user-2",
+        "required_role": "USER", "fund_id": "f1",
+    })
+    assert a5b.status_code == 200, a5b.text
+    d_ghost = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "00000000-0000-0000-0000-000000000000",
+    })
+    assert d_ghost.status_code == 403 and d_ghost.json()["error_code"] == "UnverifiedActorUserError", \
+        d_ghost.text
+    d_real = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "user-1",
+    })
+    assert d_real.status_code == 200, d_real.text
 
     # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
     c1 = client.post("/governance/v1/cases", json={
@@ -2109,7 +2166,10 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    # 34. Mandate assistant - LLM 장애는 500이 아닌 빈 제안으로 fail-closed한다.
+    # 34. Mandate assistant - 정상 응답(FastAPI TestClient는 실제 anthropic 호출 없이
+    # mandate_assistant._anthropic_call이 ANTHROPIC_API_KEY 부재로 RuntimeError를 내는
+    # 경로를 그대로 태운다 - 즉 이 자체 점검은 "LLM 실패 시 500이 아니라 빈 제안으로
+    # 감싼다"는 계약을 실제로 검증한다).
     r36 = client.post("/governance/v1/mandate-assistant/suggest", json={
         "fund_id": "f1", "messages": [{"role": "user", "content": "10년 정도 투자할 생각이에요"}],
     })
@@ -2117,11 +2177,15 @@ if __name__ == "__main__":
     body36 = r36.json()
     assert body36["requires_user_confirmation"] is True
     assert body36["suggestions"] == [] and body36["dropped_fields"] == []
+    assert "제안을 만들 수 없습니다" in body36["reply"]
 
+    # 34b. 빈 messages는 422(Pydantic min_length).
     r37 = client.post("/governance/v1/mandate-assistant/suggest", json={
         "fund_id": "f1", "messages": [],
     })
     assert r37.status_code == 422, r37.text
+    print("ok - Mandate assistant suggest API 통과 (LLM 실패를 500이 아니라 빈 제안으로 감쌈, 빈 messages 422)")
 
     print("ok - CEO Office Domain API 36개 시나리오 점검 통과 "
-          "(Mandate assistant·by-fund·canonical binding 포함)")
+          "(승인 10개(P0-1 actor_user_id 실재성 포함) + Case Root 5개 + 에스컬레이션 4개 + "
+          "위원회 6개 + HITL 변경요청 3개 + Mandate assistant 2개 포함)")

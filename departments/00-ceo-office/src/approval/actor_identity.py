@@ -201,4 +201,3 @@ if __name__ == "__main__":
             print(f"ok - 실 DB 조회 검증 통과 - 플레이스홀더 테스트 Identity status={status.value}")
     finally:
         pg_repo.close()
-

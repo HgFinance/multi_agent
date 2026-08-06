@@ -206,6 +206,60 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get(self, mandate_id: str, version: int) -> MandateVersionRow | None:
+        """USER_INPUT_API_SPEC.md 2.1 - GET .../current 가 전체 policy 를 돌려주는 데 쓴다.
+
+        jsonb 컬럼(objective/allowed_assets/forbidden_assets/universe_policy/risk_bounds/
+        approval_rules/execution_rules)은 psycopg2 가 dict/list 로 자동 변환해 돌려준다 -
+        insert() 의 Json() 래핑과 대칭이라 여기선 추가 파싱이 필요 없다.
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select mandate_id, version, objective_text, objective, allowed_assets,
+                           forbidden_assets, universe_policy, risk_bounds, approval_rules,
+                           execution_rules, effective_from, effective_to, content_hash, created_by
+                    from governance.mandate_versions
+                    where mandate_id = %s and version = %s
+                    """,
+                    (mandate_id, version),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if row is None:
+                return None
+            return MandateVersionRow(
+                mandate_id=str(row[0]), version=row[1], objective_text=row[2], objective=row[3],
+                allowed_assets=row[4], forbidden_assets=row[5], universe_policy=row[6],
+                risk_bounds=row[7], approval_rules=row[8], execution_rules=row[9],
+                effective_from=row[10], effective_to=row[11], content_hash=row[12],
+                created_by=str(row[13]) if row[13] is not None else None,
+            )
+        finally:
+            self._pool.putconn(conn)
+
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        """USER_INPUT_API_SPEC.md 2.1 - fund_id 기준 조회(by-fund Route)가 쓴다.
+
+        unique(fund_id, name) 이라 한 Fund에 이름이 다른 Mandate가 여러 개 있을 수
+        있다 - 여기서 하나를 임의로 고르지 않고 전부 돌려준다. 몇 개인지 판단은
+        호출자(app.py)가 한다(0=404, 1=단일 조회, 2개 이상=409 모호).
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select mandate_id from governance.mandates where fund_id = %s",
+                    (fund_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [str(r[0]) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 
     def insert(self, row: MandateVersionRow) -> None:
@@ -496,6 +550,25 @@ if __name__ == "__main__":
             assert v1_id is not None and v2_id is not None and v1_id != v2_id
             assert repo.get_mandate_version_id(mandate_id, 99) is None
             print(f"ok - get_mandate_version_id (실 DB) 통과 (v1={v1_id[:8]}..., v2={v2_id[:8]}...)")
+
+            # 4c) get() - USER_INPUT_API_SPEC.md 2.1, GET .../current 가 전체 policy 를
+            # 돌려주는 데 쓴다. jsonb 왕복(psycopg2 자동 dict 변환)이 실제로 되는지 확인.
+            fetched_v2 = repo.get(mandate_id, 2)
+            assert fetched_v2 is not None
+            assert fetched_v2.content_hash == r2.row.content_hash
+            assert fetched_v2.risk_bounds["max_instrument_weight"] == "0.05", fetched_v2.risk_bounds
+            assert isinstance(fetched_v2.universe_policy, dict)
+            assert isinstance(fetched_v2.allowed_assets, list)
+            assert repo.get(mandate_id, 99) is None, "없는 Version 은 None"
+            print("ok - get() (실 DB) 통과 - jsonb 컬럼 dict/list 왕복 확인")
+
+            # 4d) mandate_ids_for_fund() - 방금 만든 mandate_id 가 포함되는지만 확인한다
+            # (TEST-CEO-MANDATE Fund 에 다른 자체 점검이 남긴 행이 있을 수 있어 exact match 안 함).
+            fund_mandates = repo.mandate_ids_for_fund(fund_id)
+            assert mandate_id in fund_mandates
+            assert repo.mandate_ids_for_fund(str(uuid.uuid4())) == [], "없는 fund_id 는 빈 목록"
+            print(f"ok - mandate_ids_for_fund (실 DB) 통과 - fund_id={fund_id[:8]}... 에 "
+                  f"{len(fund_mandates)}개")
 
             # 5) DB에서 직접 확인 - v1이 실제로 종료됐는지, Decision이 2건 쌓였는지.
             conn = repo._pool.getconn()
