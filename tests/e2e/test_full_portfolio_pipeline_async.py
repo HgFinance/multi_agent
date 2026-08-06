@@ -75,8 +75,9 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         # 2026-08-06: core-risk-worker/derivatives-counterparty-worker 를
         # risk-runner(결정론, LLM 없음)로 흡수해 3 -> 1.
         "risk": 1,
-        # 2026-08-05: market-thesis-worker 를 bull/bear 로 분리해 6 -> 7 (ADR-0005).
-        "trading": 7,
+        # 2026-08-06: 기존 7명 중 결정론적 데스크 업무 5개를 desk-runner로
+        # 흡수했다. 실행되는 LLM Worker는 bull/bear 2명이다.
+        "trading": 2,
         # 2026-08-06: evidence-qa-worker/model-and-internal-audit-worker/
         # ops-and-permission-worker 를 qa-runner(결정론, LLM 없음)로 흡수해 5 -> 2.
         "qa": 2,
