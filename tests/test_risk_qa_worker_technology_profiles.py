@@ -38,14 +38,21 @@ def test_every_risk_and_qa_worker_has_an_executable_technology_profile() -> None
 
 def test_risk_runtime_exposes_profiles_and_conditional_roles_remain_safe() -> None:
     report = risk_employee_workers.run_employee_workers(
-        {"trading_state": "ENABLED", "assessment": {"verdict": "approve"}},
+        {
+            "trading_state": "ENABLED",
+            "assessment": {"verdict": "approve"},
+            "compliance": {"grounded": True},
+        },
         llm=_llm,
     )
     expected = {spec.worker_id for spec in risk_employee_workers.WORKER_SPECS}
     assert set(report["runtime"]["technology_profiles"]) == expected
-    assert all(item["technology"]["write_capability"] == "NONE" for item in report["workers"])
-    assert "compliance-policy-worker" in report["not_executed"]
-    assert "derivatives-counterparty-worker" in report["not_executed"]
+    # risk-runner는 레지스트리 밖 결정론 직원이라 technology 프로필이 없다 - 별도로 다룬다.
+    llm_workers = [w for w in report["workers"] if w["worker_id"] != "risk-runner"]
+    assert llm_workers
+    assert all(item["technology"]["write_capability"] == "NONE" for item in llm_workers)
+    assert report["not_executed"] == []
+    assert any(w["worker_id"] == "risk-runner" and w["llm"] is False for w in report["workers"])
 
 
 def test_qa_runtime_exposes_profiles_and_worker_reports() -> None:
@@ -55,7 +62,10 @@ def test_qa_runtime_exposes_profiles_and_worker_reports() -> None:
     )
     expected = {spec.worker_id for spec in qa_employee_workers.WORKER_SPECS}
     assert set(report["runtime"]["technology_profiles"]) == expected
-    assert report["executed"] == ["evidence-qa-worker"]
-    assert report["workers"][0]["technology"]["write_capability"] == "NONE"
+    assert report["executed"] == ["qa-runner"]
     assert "hallucination-critic-worker" in report["not_executed"]
+    assert "incident-postmortem-worker" in report["not_executed"]
+    runner_report = next(w for w in report["workers"] if w["worker_id"] == "qa-runner")
+    assert runner_report["llm"] is False
+    assert "technology" not in runner_report
 

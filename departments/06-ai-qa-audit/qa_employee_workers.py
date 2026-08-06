@@ -1,8 +1,34 @@
-"""QA department employee LangGraph workers.
+"""QA department employee Workers.
 
-Hermes remains the QA department head.  Every active employee below is an
-independent LangGraph worker using the local Ollama/Qwen model for bounded
-non-binding context; deterministic QA engines remain the source of truth.
+직원 2명. **그중 LLM 을 쓰는 것은 2명뿐이다**(2026-08-06).
+
+  hallucination-critic-worker   Unsupported/contradicted claim 검증 — LLM
+  incident-postmortem-worker    FACT/INFERENCE 분리 postmortem — LLM
+  qa-runner                     evidence·model risk·internal audit·ops·permission
+                                 잡무 — **LLM 없음.** 결정론 엔진 출력을 그대로 옮긴다
+
+기존 evidence-qa-worker / model-and-internal-audit-worker / ops-and-permission-worker
+를 `qa-runner` 하나로 흡수했다. 셋 다 **답이 하나로 정해지는 일**이었다 -
+`EvidenceQaEngine.check_artifact()`, `ModelRiskEngine.evaluate()`,
+`InternalAuditEngine.evaluate()`, `OpsHealthMonitor.evaluate()`,
+`check_tool_permission()` 이 이미 PASS/WARN/FAIL/ESCALATE 나 ALLOWED/DENIED를
+결정론으로 낸다(`tool_permission_check.py` 자체 docstring: "판정은 결정론적
+코드가 하고 LLM은 결과를 설명만 한다"). 그 위에 `qwen3:1.7b` 를 얹어봐야 이미
+나온 판정을 다시 서술하는 것뿐이다(CLAUDE.md 개발 원칙 4·9번, risk의
+risk-runner·trading의 desk-runner와 같은 기준).
+
+hallucination-critic-worker와 incident-postmortem-worker만 남긴 이유는 이 둘은
+결정론 엔진이 대신할 수 없는 일을 한다. Contradiction 탐지는
+`verify.contradiction.v1`을 뒷받침하는 엔진이 없어 실제 semantic 비교가 필요하고,
+FACT/INFERENCE 분리는 `IncidentTimeline`이 보관·정렬만 할 뿐 분류하지 않으므로
+worker 자신이 분류한다.
+
+The Hermes profile is the department-head boundary.  This module owns only the
+employee layer: `hallucination-critic-worker`/`incident-postmortem-worker` are
+independently compiled LangGraph workers that read an allow-listed
+deterministic tool result and ask the local Ollama model for bounded,
+non-binding context; `qa-runner` calls no model at all.  Neither can change a
+binding QA verdict, approve an order, write a ledger, or close a finding.
 """
 
 from __future__ import annotations
@@ -100,27 +126,6 @@ _QA_TRACE = (
 
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
     WorkerSpec(
-        "evidence-qa-worker",
-        "Evidence and citation QA analyst",
-        ("qa.evidence.check",),
-        "always",
-        tech_profile=tech_profile_for(QA_WORKER_TECH, "evidence-qa-worker"),
-        skill_ids=_QA_GUARDS
-        + (
-            "context.internal_api.v1",
-            "context.repository_read.v1",
-            "context.cache_read.v1",
-            "guard.pit_filter.v1",
-            "verify.schema.v1",
-            "verify.citation.v1",
-            "verify.provenance_chain.v1",
-            "verify.numeric_temporal.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _QA_TRACE
-        + ("fallback.retry_budget.v1", "fallback.human_escalation.v1"),
-    ),
-    WorkerSpec(
         "hallucination-critic-worker",
         "Hallucination and contradiction critic",
         ("qa.evidence.rag",),
@@ -149,43 +154,6 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         )
         + _QA_TRACE
         + ("fallback.retry_budget.v1", "fallback.human_escalation.v1"),
-    ),
-    WorkerSpec(
-        "model-and-internal-audit-worker",
-        "Model risk and internal audit analyst",
-        ("qa.model_risk.evaluate", "qa.internal_audit.evaluate"),
-        "when_audit_input_exists",
-        tech_profile=tech_profile_for(
-            QA_WORKER_TECH, "model-and-internal-audit-worker"
-        ),
-        skill_ids=_QA_GUARDS
-        + (
-            "context.internal_api.v1",
-            "context.repository_read.v1",
-            "verify.schema.v1",
-            "verify.provenance_chain.v1",
-            "calc.deterministic_gate.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _QA_TRACE
-        + ("fallback.human_escalation.v1",),
-    ),
-    WorkerSpec(
-        "ops-and-permission-worker",
-        "Agent operations and tool permission analyst",
-        ("qa.ops.evaluate", "qa.tool_permission.check"),
-        "when_ops_input_exists",
-        tech_profile=tech_profile_for(QA_WORKER_TECH, "ops-and-permission-worker"),
-        skill_ids=_QA_GUARDS
-        + (
-            "context.internal_api.v1",
-            "verify.schema.v1",
-            "verify.provenance_chain.v1",
-            "calc.deterministic_gate.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _QA_TRACE
-        + ("fallback.human_escalation.v1",),
     ),
     WorkerSpec(
         "incident-postmortem-worker",
@@ -598,6 +566,79 @@ def _incident_tool(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── qa-runner: 결정론 잡무 (LLM 없음, 2026-08-06) ────────────────────────────
+# evidence-qa-worker(EvidenceQaEngine.check_artifact 서술), model-and-internal-audit-worker
+# (ModelRiskEngine/InternalAuditEngine 서술), ops-and-permission-worker
+# (OpsHealthMonitor/check_tool_permission 서술)를 합쳐 흡수했다. 셋 다 답이 하나로
+# 정해지는 일이었다 - PASS/WARN/FAIL/ESCALATE·ALLOWED/DENIED를 결정론 엔진이 이미
+# 낸다(tool_permission_check.py 자체 docstring: "판정은 결정론적 코드가 하고
+# LLM은 결과를 설명만 한다"). risk의 risk-runner·trading의 desk-runner와 같은 기준.
+RUNNER_ID = "qa-runner"
+RUNNER_ROLE = (
+    "QA desk runner — evidence/model risk/internal audit/ops/permission 결과 조회"
+    "(결정론, LLM 없음)"
+)
+RUNNER_TOOLS = (
+    "qa.evidence.check",
+    "qa.model_risk.evaluate",
+    "qa.internal_audit.evaluate",
+    "qa.ops.evaluate",
+    "qa.tool_permission.check",
+)
+
+
+def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
+    """evidence·model risk·internal audit·ops·permission 잡무. **모델을 부르지 않는다.**
+
+    EvidenceQaEngine/ModelRiskEngine/InternalAuditEngine/OpsHealthMonitor/
+    check_tool_permission이 이미 만든 판정을 그대로 옮긴다 - `summary` 필드가
+    없는 것이 이 직원의 요지다.
+    """
+    evidence = _evidence_tool(payload)
+    audit = _audit_tool(payload)
+    ops = _ops_tool(payload)
+
+    blockers: list[str] = []
+    evidence_decision = (evidence.get("assessment") or {}).get("decision")
+    if evidence_decision and str(evidence_decision).upper() != "PASS":
+        blockers.append(f"evidence_{str(evidence_decision).lower()}")
+
+    model_risk_decision = (audit.get("model_risk") or {}).get("decision")
+    if model_risk_decision and str(model_risk_decision).upper() != "PASS":
+        blockers.append(f"model_risk_{str(model_risk_decision).lower()}")
+
+    internal_audit_decision = (audit.get("internal_audit") or {}).get("decision")
+    if internal_audit_decision and str(internal_audit_decision).upper() != "PASS":
+        blockers.append(f"internal_audit_{str(internal_audit_decision).lower()}")
+
+    ops_status = (ops.get("ops") or {}).get("status")
+    if ops_status and str(ops_status).lower() != "healthy":
+        blockers.append(f"ops_{str(ops_status).lower()}")
+
+    permission_result = (ops.get("permission") or {}).get("result")
+    if permission_result and str(permission_result).upper() != "ALLOWED":
+        blockers.append(f"permission_{str(permission_result).lower()}")
+
+    return {
+        "worker_id": RUNNER_ID,
+        "role": RUNNER_ROLE,
+        "tools": list(RUNNER_TOOLS),
+        "status": "COMPLETED",
+        "attempts": 1,
+        "llm": False,  # 이 직원은 모델을 안 부른다. 계약으로 박는다
+        "output": {
+            "worker_id": RUNNER_ID,
+            "facts": {"evidence": evidence, "audit": audit, "ops": ops},
+            "blockers": blockers,
+            "escalate": bool(blockers),
+            "decided_by": "deterministic",
+            "authoritative": False,  # 판정은 각 결정론 엔진이 한다. 이건 옮긴 것일 뿐이다
+        },
+        "error": None,
+        "output_contract": "qa.qa-runner.v1",
+    }
+
+
 def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     if spec.trigger == "always":
         return True
@@ -606,10 +647,6 @@ def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
             c.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
             for c in payload.get("assessment", {}).get("claim_checks", [])
         )
-    if spec.trigger == "when_audit_input_exists":
-        return bool(payload.get("model_risk") or payload.get("internal_audit"))
-    if spec.trigger == "when_ops_input_exists":
-        return bool(payload.get("ops_assessment") or payload.get("permission_check"))
     return bool(payload.get("incident"))
 
 
@@ -619,10 +656,7 @@ def _run_employee_workers_sequential(
     trace_bridge: Any | None = None,
 ) -> dict[str, Any]:
     tools: dict[str, WorkerTool] = {
-        "evidence-qa-worker": _evidence_tool,
         "hallucination-critic-worker": _hallucination_tool,
-        "model-and-internal-audit-worker": _audit_tool,
-        "ops-and-permission-worker": _ops_tool,
         "incident-postmortem-worker": _incident_tool,
     }
     reports: list[dict[str, Any]] = []
@@ -683,6 +717,8 @@ def _run_employee_workers_sequential(
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
     if trace_errors:
         failed.extend(f"trace:{error}" for error in trace_errors)
+    # qa-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
+    reports.append(qa_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",
@@ -713,10 +749,7 @@ async def run_employee_workers_async(
     """Fan out guarded QA Worker graphs and deterministically fan them in."""
 
     tools: dict[str, WorkerTool] = {
-        "evidence-qa-worker": _evidence_tool,
         "hallucination-critic-worker": _hallucination_tool,
-        "model-and-internal-audit-worker": _audit_tool,
-        "ops-and-permission-worker": _ops_tool,
         "incident-postmortem-worker": _incident_tool,
     }
     reports: list[dict[str, Any]] = []
@@ -811,6 +844,8 @@ async def run_employee_workers_async(
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
     failed.extend(f"trace:{error}" for error in trace_errors)
+    # qa-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
+    reports.append(qa_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",

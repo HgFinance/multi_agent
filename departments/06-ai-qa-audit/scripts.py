@@ -513,21 +513,16 @@ def draft_claim_narrative(state: QAState) -> dict:
         },
         llm=lambda system, prompt: _call_internal_llm(f"{system}\n{prompt}"),
     )
-    evidence_worker = next(
-        (
-            item
-            for item in report.get("workers", [])
-            if item.get("worker_id") == "evidence-qa-worker"
-        ),
-        {},
-    )
-    output = evidence_worker.get("output") or {}
+    # evidence-qa-worker는 2026-08-06에 qa-runner로 흡수됐고 qa-runner는
+    # LLM 서술이 없다(summary 필드 자체가 없음) - claim_narrative는 항상
+    # 결정론적 claim_checks 요약을 쓴다. fallbacks만 다른 Worker(예:
+    # hallucination-critic-worker) 실패 여부로 기록한다.
     fallbacks = []
     if report.get("failed"):
         fallbacks = [
             {
                 "stage": "claim_narrative",
-                "node": "evidence-qa-worker",
+                "node": "qa-employee-workers",
                 "error": ";".join(
                     str(item.get("error"))
                     for item in report.get("workers", [])
@@ -543,11 +538,7 @@ def draft_claim_narrative(state: QAState) -> dict:
         for item in a.get("claim_checks", [])
     )
     return {
-        "claim_narrative": (output.get("summary") if not report.get("failed") else "")
-        or (
-            "직원 LLM 서술을 생성하지 못했습니다. 결정론적 결과를 그대로 전달합니다: "
-            + deterministic_summary
-        ),
+        "claim_narrative": "결정론적 Evidence QA 결과를 전달합니다: " + deterministic_summary,
         "employee_workers": report,
         "fallbacks": fallbacks,
     }
@@ -1312,21 +1303,22 @@ def _assemble_out(state: QAState) -> dict:
     worker_execution = state.get("employee_workers") or {}
     executed_agents = list(worker_execution.get("executed") or [])
     failed_worker_agents = list(worker_execution.get("failed") or [])
-    if out.get("claim_checks") is not None and not worker_execution:
-        executed_agents.append("evidence-qa-worker")
+    # evidence-qa-worker/model-and-internal-audit-worker/ops-and-permission-worker는
+    # 2026-08-06에 qa-runner 하나로 합쳐졌다 - 셋 중 하나라도 실행 근거가 있으면
+    # qa-runner 한 번만 기록한다.
+    if not worker_execution and (
+        out.get("claim_checks") is not None or out.get("claim_narrative")
+    ):
+        executed_agents.append("qa-runner")
     if out.get("hallucination_reviews") and not worker_execution:
         executed_agents.append("hallucination-critic-worker")
-    if out.get("claim_narrative") and not worker_execution:
-        executed_agents.append("evidence-qa-worker")
     supervisor_status = state.get("supervisor_call_status", "not_called")
     if out.get("narrative") and supervisor_status in {"succeeded", "injected"}:
         executed_agents.append("qa-audit-supervisor")
     qa_agents = [
         "qa-audit-supervisor",
-        "evidence-qa-worker",
+        "qa-runner",
         "hallucination-critic-worker",
-        "model-and-internal-audit-worker",
-        "ops-and-permission-worker",
         "incident-postmortem-worker",
     ]
     failed_agents = list(failed_worker_agents)

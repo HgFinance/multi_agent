@@ -71,9 +71,7 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "execution-planning-worker": ("체결", "실행", "집행"),
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
     "derivatives-structure-worker": ("파생", "레버리지", "공매도", "옵션", "선물"),
-    "core-risk-worker": ("위험", "리스크", "손실", "변동", "유동성", "주문", "매수", "매도", "리밸런싱", "한도"),
     "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사"),
-    "derivatives-counterparty-worker": ("파생", "레버리지", "공매도", "헤지", "거래상대방"),
     "portfolio-control-worker": ("포트폴리오", "비중", "보유", "포지션"),
     "ledger-reconciliation-worker": ("원장", "대사", "거래내역"),
     "nav-close-worker": ("nav", "기준가", "마감"),
@@ -82,18 +80,19 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "investor-reporting-worker": ("보고서", "투자자", "리포트"),
     "valuation-corporate-actions-worker": ("평가", "기업행동", "배당", "분할"),
     "fee-accrual-tax-worker": ("세금", "수수료", "보수", "비용"),
-    "evidence-qa-worker": ("근거", "출처", "검증", "인용"),
-    "hallucination-critic-worker": ("환각", "모순", "검증", "신뢰"),
-    "model-and-internal-audit-worker": ("모델", "감사", "재현"),
-    "ops-and-permission-worker": ("권한", "운영", "도구", "승인"),
+    "hallucination-critic-worker": ("근거", "출처", "검증", "인용", "환각", "모순", "신뢰"),
     "incident-postmortem-worker": ("사고", "장애", "재발", "인시던트"),
 }
 
+# core-risk-worker/derivatives-counterparty-worker(risk)와 evidence-qa-worker/
+# model-and-internal-audit-worker/ops-and-permission-worker(qa)는 2026-08-06에
+# risk-runner/qa-runner(결정론, LLM 없음)로 흡수됐다 - WORKER_SPECS에 더 없으니
+# 이 free-text query 라우팅 대상에도 없다.
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "research": ("research-data-worker", "evidence-rag-worker"),
     "trading": ("market-thesis-worker", "trade-proposal-worker"),
-    "risk": ("core-risk-worker", "compliance-policy-worker"),
-    "qa": ("evidence-qa-worker", "hallucination-critic-worker"),
+    "risk": ("compliance-policy-worker",),
+    "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
     "accounting": ("portfolio-control-worker", "investor-reporting-worker"),
     "ceo": ("executive-briefing-worker",),
 }
@@ -232,19 +231,18 @@ def _deterministic_worker_llm(system: str, prompt: str) -> str:
 
 
 def _risk_tools(module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+    # core-risk-worker/derivatives-counterparty-worker는 risk-runner로 흡수됐고
+    # module.WORKER_SPECS에 더 없다 - 이 dict는 남은 LLM Worker만 다룬다.
     return {
-        "core-risk-worker": module._core_risk_tool,
         "compliance-policy-worker": module._compliance_tool,
-        "derivatives-counterparty-worker": module._counterparty_tool,
     }
 
 
 def _qa_tools(module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+    # evidence-qa-worker/model-and-internal-audit-worker/ops-and-permission-worker는
+    # qa-runner로 흡수됐고 module.WORKER_SPECS에 더 없다.
     return {
-        "evidence-qa-worker": module._evidence_tool,
         "hallucination-critic-worker": module._hallucination_tool,
-        "model-and-internal-audit-worker": module._audit_tool,
-        "ops-and-permission-worker": module._ops_tool,
         "incident-postmortem-worker": module._incident_tool,
     }
 
@@ -984,12 +982,42 @@ def build_portfolio_recommendation_graph(
                 ]
             selected = _selected_specs(stage, payload)
             if not selected:
+                # 조건부 Worker가 전부 트리거되지 않은 것은 실패가 아니다 (예: risk-runner/
+                # qa-runner 흡수 이후 risk/qa 는 조건부 LLM Worker만 남았고, 근거가 없으면
+                # LLM 서술 없이 결정론 판정만으로 끝나는 게 정상이다). NOT_REQUESTED(CEO
+                # task plan 제외)와는 다른 사유이므로 skip_reason을 구분해 DEGRADED로
+                # 떨어뜨리지 않고 SKIPPED_SAFE로 안전하게 취급한다.
                 if event_callback:
                     event_callback({"kind": "department_blocked", "stage": stage, "message": "조건에 맞는 Worker가 없어 안전하게 보류했습니다."})
+                no_trigger_reports = [
+                    {
+                        "stage": stage,
+                        "worker_id": spec.worker_id,
+                        "role": spec.role,
+                        "status": "SKIPPED_SAFE",
+                        "skip_reason": "NO_TRIGGER_SIGNAL",
+                        "execution_reason": "NO_TRIGGER_SIGNAL",
+                        "attempts": 0,
+                        "output": {
+                            "worker_id": spec.worker_id,
+                            "summary": "No conditional trigger signal was present; worker execution was not needed.",
+                            "confidence": 1.0,
+                            "evidence_refs": [],
+                            "escalate": False,
+                            "schema_valid": True,
+                        },
+                        "error": None,
+                        "output_contract": spec.output_contract,
+                        "input_hash": payload.get("input_hash"),
+                        "binding": False,
+                        "technology": _technology_profile(spec),
+                    }
+                    for spec in _specs(stage)
+                ]
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {"worker_reports": [{"stage": stage, "worker_id": f"{stage}-no-worker", "status": "DEGRADED", "error": "NO_ELIGIBLE_WORKER", "binding": False}]},
+                        {"worker_reports": no_trigger_reports},
                     )
                 ]
             if event_callback:

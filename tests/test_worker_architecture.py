@@ -131,7 +131,9 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 이 표는 **LLM 직원 수**다. 2026-08-06 트레이딩 tool 강등으로 7 -> 2 —
     # 결정론 desk-runner 는 config 의 deterministic_workers 로 빠져서 여기 안 센다
     # (조직 인원은 3명). 강등 기준은 departments/02-trading/hermes/config.yaml 참고.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 3, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
+    # 2026-08-06: risk-runner/qa-runner 흡수로 03-risk 3 -> 1, 06-ai-qa-audit 5 -> 2 —
+    # 결정론 러너는 config 의 deterministic_workers 로 빠져서 여기 안 센다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -196,7 +198,10 @@ def test_worker_failure_is_degraded_and_non_binding() -> None:
     assert result["binding"] is False
     assert result["degraded"] is True
     assert result["failed"]
-    assert all(item["status"] == "DEGRADED" for item in result["workers"])
+    # risk-runner는 결정론이라 LLM 실패와 무관하게 항상 COMPLETED다 - LLM Worker만 본다.
+    llm_workers = [item for item in result["workers"] if item["worker_id"] != "risk-runner"]
+    assert llm_workers
+    assert all(item["status"] == "DEGRADED" for item in llm_workers)
 
 
 def test_paper_pipeline_passes_worker_context_to_department_head(monkeypatch: Any) -> None:
@@ -289,10 +294,15 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
         # desk-runner 가 결정론으로 항상 모아 온다.
         "trading": (2, 2, 0),
-        "risk": (3, 1, 2),
+        # 2026-08-06: core-risk-worker/derivatives-counterparty-worker 를
+        # risk-runner 로 흡수해 (3, 1, 2) -> (1, 0, 1) - 남은 LLM Worker
+        # (compliance-policy-worker)는 조건부뿐이다.
+        "risk": (1, 0, 1),
         "quant-backtest": (7, 2, 5),
         "accounting-portfolio": (8, 2, 6),
-        "qa": (5, 1, 4),
+        # 2026-08-06: evidence-qa-worker/model-and-internal-audit-worker/
+        # ops-and-permission-worker 를 qa-runner 로 흡수해 (5, 1, 4) -> (2, 0, 2).
+        "qa": (2, 0, 2),
     }
     for department, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))

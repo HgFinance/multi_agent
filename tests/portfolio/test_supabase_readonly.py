@@ -267,7 +267,11 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
     )
     assert result["pipeline_events"]
     assert result["pipeline_event_count"] == len(result["pipeline_events"])
-    for stage, expected_skipped in (("research", 6), ("risk", 3), ("qa", 5), ("ceo", 1)):
+    # 2026-08-06: risk 는 core-risk-worker/derivatives-counterparty-worker 를 risk-runner
+    # (결정론)로 흡수해 3 -> 1, qa 는 evidence-qa-worker/model-and-internal-audit-worker/
+    # ops-and-permission-worker 를 qa-runner 로 흡수해 5 -> 2. risk-runner/qa-runner는
+    # WORKER_SPECS 밖이라 이 LLM SKIPPED_SAFE 집계에는 안 잡힌다.
+    for stage, expected_skipped in (("research", 6), ("risk", 1), ("qa", 2), ("ceo", 1)):
         report = result["department_reports"][stage]
         assert report["executed"] == 0
         assert report["completed"] == 0

@@ -230,6 +230,10 @@ def run_risk_qa_pipeline(
         "artifact_id": packet.artifact_id,
         "deterministic_gate": risk_gate,
     }
+    # core-risk-worker/derivatives-counterparty-worker는 2026-08-06에 risk-runner로
+    # 흡수됐고 risk_module.WORKER_SPECS에 더 없다 - 이 testkit graph는 WORKER_SPECS
+    # 기준으로만 노드를 만들기 때문에 여기 목록에도 없다. risk-runner는 LLM이 없는
+    # 결정론 직원이라 이 LLM department-graph 시뮬레이션 대상이 아니다.
     risk_spec = DepartmentGraphSpec(
         department="risk-management",
         profile="risk-management",
@@ -237,9 +241,7 @@ def run_risk_qa_pipeline(
         output_contract="risk.department-head-context.v1",
         worker_module=risk_module,
         worker_tools={
-            "core-risk-worker": risk_module._core_risk_tool,
             "compliance-policy-worker": risk_module._compliance_tool,
-            "derivatives-counterparty-worker": risk_module._counterparty_tool,
         },
     )
     if worker_llm is None and runtime is WorkerRuntime.DETERMINISTIC:
@@ -280,6 +282,9 @@ def run_risk_qa_pipeline(
             ],
         },
     }
+    # evidence-qa-worker/model-and-internal-audit-worker/ops-and-permission-worker는
+    # 2026-08-06에 qa-runner로 흡수됐고 qa_module.WORKER_SPECS에 더 없다 - risk와
+    # 같은 이유로 여기 목록에도 없다.
     qa_spec = DepartmentGraphSpec(
         department="qa-department",
         profile="qa-department",
@@ -287,10 +292,7 @@ def run_risk_qa_pipeline(
         output_contract="qa.department-head-context.v1",
         worker_module=qa_module,
         worker_tools={
-            "evidence-qa-worker": qa_module._evidence_tool,
             "hallucination-critic-worker": qa_module._hallucination_tool,
-            "model-and-internal-audit-worker": qa_module._audit_tool,
-            "ops-and-permission-worker": qa_module._ops_tool,
             "incident-postmortem-worker": qa_module._incident_tool,
         },
     )
@@ -302,19 +304,24 @@ def run_risk_qa_pipeline(
         worker_runtime=runtime.value,
     )
     qa_report["received_department_handoff"] = department_handoff
+    # Worker/handoff 개수는 risk_module/qa_module의 WORKER_SPECS 크기를 그대로
+    # 따른다 - 하드코딩하면 desk-runner류 흡수(2026-08-06 risk-runner/qa-runner)로
+    # WORKER_SPECS가 줄 때마다 조용히 어긋난다.
+    risk_worker_count = len(tuple(risk_module.WORKER_SPECS))
+    qa_worker_count = len(tuple(qa_module.WORKER_SPECS))
     risk_ok = (
         risk_report.get("degraded") is False
         and risk_report.get("head", {}).get("binding") is False
-        and len(risk_report.get("workers", [])) == 3
+        and len(risk_report.get("workers", [])) == risk_worker_count
         and not risk_report.get("not_executed")
-        and len(risk_report.get("handoffs", [])) == 3
+        and len(risk_report.get("handoffs", [])) == risk_worker_count
     )
     qa_ok = (
         qa_report.get("degraded") is False
         and qa_report.get("head", {}).get("binding") is False
-        and len(qa_report.get("workers", [])) == 5
+        and len(qa_report.get("workers", [])) == qa_worker_count
         and not qa_report.get("not_executed")
-        and len(qa_report.get("handoffs", [])) == 5
+        and len(qa_report.get("handoffs", [])) == qa_worker_count
         and qa_report.get("received_department_handoff", {}).get("from")
         == "risk-supervisor"
     )

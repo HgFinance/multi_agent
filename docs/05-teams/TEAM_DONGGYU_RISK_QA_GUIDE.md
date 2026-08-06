@@ -119,17 +119,18 @@
 
 ## Risk·QA 역할 분배 최적화 기준 (2026-08-05)
 
-현재 추천 파이프라인에서 항상 실행하는 최소 통제는 Risk의 `core-risk-worker`(2026-08-06, `market-liquidity-worker`+`pre-trade-risk-worker` 병합), QA의 `evidence-qa-worker`다. 나머지는 입력이 있을 때만 팬아웃한다.
+**2026-08-06 tool 강등**: Risk의 `core-risk-worker`(옛 `market-liquidity-worker`+`pre-trade-risk-worker`
+병합)+`derivatives-counterparty-worker`, QA의 `evidence-qa-worker`+`model-and-internal-audit-worker`+
+`ops-and-permission-worker`는 결정론 Engine이 이미 답을 내고 있었으므로 LLM Registry(`WORKER_SPECS`)
+밖의 결정론 러너 `risk-runner`/`qa-runner`로 흡수했다. 두 러너는 매 케이스마다 항상 실행되며 `llm: False`다.
+남은 LLM Worker는 전부 조건부다 — 근거가 있을 때만 팬아웃한다.
 
 | 입력 조건 | 실행 Worker | 안전한 미실행/실패 결과 |
 |---|---|---|
-| 모든 포트폴리오 추천 | Risk core-risk-worker, QA evidence | Worker 실패는 `DEGRADED`, downstream은 `HOLD/ESCALATE` |
-| compliance evidence 존재 | Risk compliance-policy | PIT·ACL·citation 미통과 시 `ESCALATE`, 근거 없는 정책 판정 금지 |
-| 파생·상대방·증거금 신호 존재 | Risk derivatives-counterparty | 상태 누락 시 승인 방향 보간 금지, `HOLD/ESCALATE` |
-| unsupported/contradicted claim 존재 | QA hallucination-critic | 미해결 claim이면 QA PASS 금지 |
-| model-risk/internal-audit 입력 존재 | QA model-and-internal-audit | SoD·권한·재현성 미검증 시 `WARN/ESCALATE` |
-| ops/permission 입력 존재 | QA ops-and-permission | allowlist/scope 위반 시 `DENY/ESCALATE` |
-| incident 입력 존재 | QA incident-postmortem | append-only timeline과 human review로 종료 |
+| 모든 포트폴리오 추천 | Risk risk-runner, QA qa-runner (결정론, LLM 없음) | 각 Engine 판정을 그대로 옮김 — 실패는 blockers/escalate로 직접 반영, HOLD/ESCALATE로 fail-closed |
+| compliance evidence 존재 | Risk compliance-policy-worker (LLM) | PIT·ACL·citation 미통과 시 `ESCALATE`, 근거 없는 정책 판정 금지 |
+| unsupported/contradicted claim 존재 | QA hallucination-critic-worker (LLM) | 미해결 claim이면 QA PASS 금지 |
+| incident 입력 존재 | QA incident-postmortem-worker (LLM) | append-only timeline과 human review로 종료 |
 
 기술 스택과 Worker별 성과 지표는 [`WORKER_ROLE_BOUNDARIES.md`](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와 실행 메타데이터 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)에 함께 정의한다. 성과는 단순 완료 수가 아니라 freshness·PIT·citation·determinism·false-clear·permission violation·latency·replay completeness를 기록한다. Ollama `qwen3:1.7b`는 구조화된 근거의 advisory 서술만 담당하고, 바인딩 판정·권한·상태 전이는 결정론적 Engine/API가 담당한다.
 
