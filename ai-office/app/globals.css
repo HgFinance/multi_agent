@@ -374,8 +374,25 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
   font-weight: 900;
   cursor: pointer;
 }
+.nav-tabs .nav-link {
+  position: relative;
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  padding: 7px 12px;
+  border: 1.5px solid var(--ink);
+  border-radius: 9px;
+  background: white;
+  box-shadow: 2px 2px 0 rgba(46, 33, 25, .16);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 900;
+  text-decoration: none;
+}
 .nav-tabs button:active { transform: translate(2px, 2px); box-shadow: none; }
 .nav-tabs button.active { background: var(--yellow); }
+.nav-tabs .nav-link:active { transform: translate(2px, 2px); box-shadow: none; }
+.nav-tabs .nav-link.active { background: var(--yellow); }
 .nav-tabs .todo-tab { background: var(--pink-bg); }
 .todo-tab i {
   display: inline-grid;
@@ -705,7 +722,7 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
   .app-nav { position: static; display: grid; padding: 8px; }
   .brand-chip { justify-content: center; }
   .nav-tabs { display: grid; grid-template-columns: 1fr 1fr; }
-  .nav-tabs button { padding-inline: 7px; }
+  .nav-tabs button, .nav-tabs .nav-link { padding-inline: 7px; }
   .nav-tabs .todo-tab { grid-column: 1 / -1; }
   .office-hero { padding: 18px 16px; }
   .office-hero-actions { grid-template-columns: 1fr; }
