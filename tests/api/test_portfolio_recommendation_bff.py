@@ -10,12 +10,15 @@ from unittest.mock import AsyncMock, patch
 
 os.environ["DATABASE_URL"] = ""
 os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
+os.environ["PORTFOLIO_RUNTIME_EMBEDDED_WORKER"] = "true"
 os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
+os.environ["PORTFOLIO_GOVERNANCE_BINDING_ENABLED"] = "false"
 os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -167,6 +170,172 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
             if client.get(f"/ui/portfolio-recommendations/{first.json()['run_id']}").json()["status"] not in {"QUEUED", "RUNNING"}:
                 break
             time.sleep(0.05)
+    def test_governance_binding_success_verifies_all_submitted_fields(self) -> None:
+        payload = {
+            "user_id": "governance-bound-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_id": "mandate-1",
+            "case_id": None,
+            "mandate_version_id": "version-1",
+            "policy_hash": "hash-1",
+        }
+        canonical = {key: payload[key] for key in ("mandate_id", "case_id", "mandate_version_id", "policy_hash")}
+        with (
+            patch("apps.api.main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED", True),
+            patch("apps.api.main.GOVERNANCE_API_URL", "http://governance.test"),
+            patch("apps.api.main._governance_request", new_callable=AsyncMock) as request,
+            patch("apps.api.main.RUNTIME.start", return_value={"run_id": "binding-run", "status": "QUEUED", "workflow": "portfolio-recommendation-full", "idempotent_replay": False}) as start,
+            patch(
+                "apps.api.main.RUNTIME.get",
+                return_value={
+                    "trace_id": "trace-binding",
+                    "case_id": None,
+                    "mandate_version_id": "version-1",
+                    "policy_hash": "hash-1",
+                    "input_hash": "input-binding",
+                },
+            ),
+        ):
+            request.return_value = canonical
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 202, response.text)
+        start.assert_called_once()
+        request.assert_awaited_once_with(
+            "GET",
+            "/governance/v1/mandates/mandate-1/current",
+        )
+
+    def test_governance_binding_mismatch_rejects_before_runtime_start(self) -> None:
+        payload = {
+            "user_id": "governance-mismatch-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_id": "mandate-1",
+            "case_id": "case-1",
+            "mandate_version_id": "version-1",
+            "policy_hash": "hash-1",
+        }
+        with (
+            patch("apps.api.main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED", True),
+            patch("apps.api.main.GOVERNANCE_API_URL", "http://governance.test"),
+            patch("apps.api.main._governance_request", new_callable=AsyncMock, return_value={**payload, "policy_hash": "wrong"}),
+            patch("apps.api.main.RUNTIME.start") as start,
+        ):
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"], "governance_mandate_binding_mismatch")
+        start.assert_not_called()
+
+    def test_governance_binding_unavailable_fails_closed(self) -> None:
+        payload = {
+            "user_id": "governance-unavailable-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_id": "mandate-1",
+            "case_id": "case-1",
+            "mandate_version_id": "version-1",
+            "policy_hash": "hash-1",
+        }
+        with (
+            patch("apps.api.main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED", True),
+            patch(
+                "apps.api.main._governance_request",
+                new_callable=AsyncMock,
+                side_effect=HTTPException(status_code=503, detail="governance_api_unavailable"),
+            ),
+            patch("apps.api.main.RUNTIME.start") as start,
+        ):
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"], "governance_binding_unavailable")
+        start.assert_not_called()
+
+    def test_governance_binding_malformed_response_fails_closed(self) -> None:
+        payload = {
+            "user_id": "governance-malformed-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_id": "mandate-1",
+            "case_id": "case-1",
+            "mandate_version_id": "version-1",
+            "policy_hash": "hash-1",
+        }
+        with (
+            patch("apps.api.main.PORTFOLIO_GOVERNANCE_BINDING_ENABLED", True),
+            patch("apps.api.main.GOVERNANCE_API_URL", "http://governance.test"),
+            patch("apps.api.main._governance_request", new_callable=AsyncMock, return_value={"binding": True}),
+            patch("apps.api.main.RUNTIME.start") as start,
+        ):
+            response = TestClient(app).post("/ui/portfolio-recommendations", json=payload)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"], "governance_mandate_binding_mismatch")
+        start.assert_not_called()
+
+    def test_runtime_store_rejects_second_active_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")
+            os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(directory, "runtime.sqlite3")
+            try:
+                first = PortfolioRuntime()
+                second = PortfolioRuntime()
+                self.assertTrue(first._store.reserve_active_run("active-first", "2026-08-05T00:00:00+00:00", os.getpid()))
+                queued = first._base_job("active-first", {"user_id": "owner"})
+                first._store.save(queued)
+                self.assertFalse(second._store.reserve_active_run("active-second", "2026-08-05T00:00:01+00:00", os.getpid()))
+                first._store.release_active_run("active-first")
+            finally:
+                if previous is None:
+                    os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
+                else:
+                    os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
+    def test_runtime_requeues_persisted_profile_after_worker_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")
+            os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(directory, "runtime.sqlite3")
+            try:
+                seed = PortfolioRuntime()
+                job = seed._base_job(
+                    "restartable-run",
+                    {
+                        "user_id": "restart-owner",
+                        "investment_amount": "1000000",
+                        "max_drawdown_pct": "0.10",
+                    },
+                )
+                seed._store.save(job)
+                self.assertTrue(seed._store.reserve_active_run("restartable-run", job["updated_at"], 999999))
+                with patch("apps.api.portfolio_runtime._process_alive", return_value=False), patch.object(
+                    PortfolioRuntime,
+                    "_dispatch",
+                ) as dispatch:
+                    recovered = PortfolioRuntime()
+                restored = recovered.get("restartable-run")
+                self.assertIsNotNone(restored)
+                self.assertEqual(restored["status"], "QUEUED")
+                self.assertEqual(restored["error"], "portfolio_runtime_requeued_after_worker_restart")
+                dispatch.assert_called_once()
+            finally:
+                if previous is None:
+                    os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
+                else:
+                    os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
 
     def test_production_binding_mode_rejects_unversioned_analysis(self) -> None:
         payload = {

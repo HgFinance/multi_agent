@@ -16,3 +16,8 @@ graphify-out
 .venv
 venv
 node_modules
+.env*
+.dev.vars*
+**/auth.json
+**/*.sqlite3
+**/state.db*

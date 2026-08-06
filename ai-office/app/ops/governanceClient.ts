@@ -63,7 +63,14 @@ export function submitMandateChange(mandateId: string, body: Record<string, unkn
 }
 
 export function fetchCurrentMandate(mandateId: string) {
-  return request<{ mandate_id: string; current_version: number; status: string }>(
+  return request<{
+    mandate_id: string;
+    case_id: string | null;
+    current_version: number;
+    mandate_version_id: string | null;
+    policy_hash: string | null;
+    status: string;
+  }>(
     `/ui/mandates/${encodeURIComponent(mandateId)}/current`,
     { method: "GET" },
   );

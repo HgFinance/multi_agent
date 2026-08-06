@@ -281,6 +281,13 @@ class MandateVersionRepository:
         번역할 수 있게 판단을 미룬다).
         """
         raise NotImplementedError
+    def get_mandate_content_hash(self, mandate_id: str, version: int) -> str | None:
+        """Return the canonical policy hash for one persisted mandate version."""
+        raise NotImplementedError
+
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        """Return every mandate linked to a Fund; callers handle ambiguity."""
+        raise NotImplementedError
 
     def get(self, mandate_id: str, version: int) -> MandateVersionRow | None:
         """(mandate_id, version) 의 전체 Row(policy 포함). 없으면 None.
@@ -346,6 +353,9 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
             if r.mandate_id == mandate_id and r.version == version:
                 return r
         return None
+    def get_mandate_content_hash(self, mandate_id: str, version: int) -> str | None:
+        row = self.get(mandate_id, version)
+        return row.content_hash if row is not None else None
 
     def get_mandate_current(self, mandate_id: str) -> tuple[int, str]:
         return self._mandate_state.get(mandate_id, (0, "DRAFT"))

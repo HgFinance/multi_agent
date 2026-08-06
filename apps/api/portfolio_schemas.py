@@ -25,6 +25,7 @@ class PortfolioRecommendationStartResponse(_ApiModel):
     idempotent_replay: bool = False
     trace_id: str = ""
     case_id: str | None = None
+    mandate_id: str | None = None
     mandate_version_id: str | None = None
     policy_hash: str | None = None
     input_hash: str = Field(min_length=1)
@@ -286,6 +287,7 @@ class PortfolioRecommendationStatusResponse(_ApiModel):
     phase: str = Field(min_length=1)
     trace_id: str = ""
     case_id: str | None = None
+    mandate_id: str | None = None
     mandate_version_id: str | None = None
     policy_hash: str | None = None
     input_hash: str = Field(min_length=1)

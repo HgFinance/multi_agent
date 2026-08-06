@@ -176,6 +176,35 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
             return str(row[0]) if row else None
         finally:
             self._pool.putconn(conn)
+    def get_mandate_content_hash(self, mandate_id: str, version: int) -> str | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select content_hash from governance.mandate_versions "
+                    "where mandate_id = %s and version = %s",
+                    (mandate_id, version),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return str(row[0]) if row and row[0] else None
+        finally:
+            self._pool.putconn(conn)
+
+    def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
+        """Return all Mandates for a Fund; the API rejects ambiguous results."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select mandate_id from governance.mandates where fund_id = %s",
+                    (fund_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [str(row[0]) for row in rows]
+        finally:
+            self._pool.putconn(conn)
 
     def get(self, mandate_id: str, version: int) -> MandateVersionRow | None:
         """USER_INPUT_API_SPEC.md 2.1 - GET .../current 가 전체 policy 를 돌려주는 데 쓴다.
