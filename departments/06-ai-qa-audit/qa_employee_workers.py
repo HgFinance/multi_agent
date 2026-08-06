@@ -57,6 +57,14 @@ from departments.risk_qa_worker_profiles import (
 )
 from orchestration.llm_observability import record_llm_call
 
+# This module is loaded directly from its file path by the shared dispatcher.
+# The QA ``audit`` directory is intentionally a namespace package (no
+# ``__init__.py``), so its department directory must be importable explicitly
+# before the incident timeline persistence boundary is resolved.
+_BASE = Path(__file__).resolve().parent
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+
 
 def _load_skill_package() -> None:
     package_name = "qa_worker_skill_runtime"

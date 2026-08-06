@@ -526,6 +526,20 @@ def _worker_tools(stage: str, module: Any) -> Mapping[str, Callable[[dict[str, A
 def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:
     """Close the Worker boundary before its output reaches fan-in."""
 
+    # Incident entries are QA-local Timeline persistence metadata. They are
+    # intentionally not part of the shared worker-context.v1 contract, whose
+    # additionalProperties guard must remain strict for every department.
+    if (
+        report.get("stage") == "qa"
+        and report.get("worker_id") == "incident-postmortem-worker"
+    ):
+        output = dict(report.get("output", {}))
+        # The read-only portfolio pipeline does not own IncidentTimeline
+        # persistence. Keep the QA-only entries out of the public worker
+        # report so strict BFF response schemas remain unchanged.
+        output.pop("entries", None)
+        report["output"] = output
+
     try:
         validate_worker_context(report.get("output", {}))
     except Exception as exc:  # noqa: BLE001 - contract boundary must fail closed.
