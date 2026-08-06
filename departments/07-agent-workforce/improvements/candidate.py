@@ -48,6 +48,7 @@ class CandidateStatus(str, Enum):
     PENDING_APPROVAL  HR Build-vs-Extend 검토 후 승인 대기
     APPROVED       독립 승인자 승인 완료
     REJECTED       (종료) 반려
+    HOLD           (종료) Eval 실패/보류 — 기존 Profile을 유지하고 재평가를 기다림
     DEPLOYED       새 Version 배포 (agent_profile_versions 등)
     OBSERVING      Scorecard 관찰
     KEPT           (종료) 유지 성공
@@ -61,6 +62,7 @@ class CandidateStatus(str, Enum):
     PENDING_APPROVAL = "PENDING_APPROVAL"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    HOLD = "HOLD"
     DEPLOYED = "DEPLOYED"
     OBSERVING = "OBSERVING"
     KEPT = "KEPT"
@@ -71,6 +73,7 @@ class CandidateStatus(str, Enum):
 TERMINAL_STATUSES: frozenset[CandidateStatus] = frozenset(
     {
         CandidateStatus.REJECTED,
+        CandidateStatus.HOLD,
         CandidateStatus.KEPT,
         CandidateStatus.ROLLED_BACK,
         CandidateStatus.RETIRED,

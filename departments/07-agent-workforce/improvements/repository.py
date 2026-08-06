@@ -36,6 +36,7 @@ from functools import lru_cache
 from typing import Any
 
 from candidate import CandidateStatus, ImprovementCandidate
+from observation import CandidateScorecard
 from workflow import CandidateEvent, ImprovementRepository
 
 
@@ -214,6 +215,55 @@ class PostgresImprovementRepository(ImprovementRepository):
                 rows = cur.fetchall()
             conn.commit()
             return [self._to_event(r) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
+    # --- candidate scorecards (append-only) ---------------------------------
+
+    def append_scorecard(self, scorecard: CandidateScorecard) -> None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into workforce.improvement_candidate_scorecards (
+                        candidate_id, window_start, window_end, input_tokens, output_tokens,
+                        total_cost, qa_eval_run_id, quality_score, safety_finding_count,
+                        regression_count, recorded_by
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (scorecard.candidate_id, scorecard.window_start, scorecard.window_end,
+                     scorecard.input_tokens, scorecard.output_tokens, scorecard.total_cost,
+                     scorecard.qa_eval_run_id, scorecard.quality_score,
+                     scorecard.safety_finding_count, scorecard.regression_count,
+                     scorecard.recorded_by),
+                )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise ImprovementPersistenceError(f"개선 후보 Scorecard 기록 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    def scorecards_for(self, candidate_id: str) -> list[CandidateScorecard]:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select candidate_id, window_start, window_end, recorded_by, input_tokens,
+                           output_tokens, total_cost, qa_eval_run_id, quality_score,
+                           safety_finding_count, regression_count
+                    from workforce.improvement_candidate_scorecards
+                    where candidate_id = %s order by recorded_at
+                    """, (candidate_id,))
+                rows = cur.fetchall()
+            conn.commit()
+            return [CandidateScorecard(
+                candidate_id=str(r[0]), window_start=r[1], window_end=r[2], recorded_by=r[3],
+                input_tokens=r[4], output_tokens=r[5], total_cost=r[6],
+                qa_eval_run_id=str(r[7]) if r[7] else None, quality_score=r[8],
+                safety_finding_count=r[9], regression_count=r[10]) for r in rows]
         finally:
             self._pool.putconn(conn)
 

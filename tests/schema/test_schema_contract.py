@@ -68,6 +68,18 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804001000_quant_hypothesis_inconclusive.sql",
                 "20260804001100_order_events_broker_id_unique.sql",
                 "20260804001200_risk_qa_production_read_paths.sql",
+                # CEO Office (영주, 2026-08-05) - P0-2 GOV-02 Replay가 실 DB로 잡은 버그 수정
+                "20260805000100_notifications_dedup_key_per_channel.sql",
+                # 위 마이그레이션의 ADD CONSTRAINT가 재실행에 안전하지 않아 병합 후
+                # Supabase 자동 적용이 "already exists"로 실패한 것을 고치는 후속 마이그레이션
+                "20260805000200_notifications_dedup_key_constraint_idempotent.sql",
+                # 000200 병합 후에도 재발 - 진짜 원인은 supabase_migrations.schema_migrations
+                # 이력 누락이었다(수동 수복 완료). 방어적 재확인 + 사고 기록
+                "20260805000300_notifications_dedup_key_history_repair_note.sql",
+                # HR-03 P1-1: Eval HOLD 종료와 후보별 관찰 Scorecard
+                "20260806000100_workforce_improvement_hold_and_scorecards.sql",
+                # HR-04 P1-2: quality_snapshots에 누락됐던 recorded_by 추가
+                "20260806000200_workforce_quality_snapshot_recorded_by.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -99,6 +111,32 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             migration,
         )
 
+    def test_notifications_dedup_key_constraint_migration_is_idempotent(self) -> None:
+        """2026-08-05 실측: ADD CONSTRAINT만 있고 DROP CONSTRAINT IF EXISTS가 없는
+        마이그레이션을 개발 DB에 먼저 수동 적용한 뒤 그대로 커밋했더니, 병합 후
+        Supabase 자동 마이그레이션 적용기가 재실행하면서 "already exists"로 실패했다
+        (order_events_broker_id_unique.sql과 같은 종류의 실수 - 위 테스트와 같은
+        이유로 재발 방지)."""
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260805000200_notifications_dedup_key_constraint_idempotent.sql"
+        ).lower()
+        self.assertIn(
+            "drop constraint if exists notifications_dedup_key_channel_unique",
+            migration,
+        )
+
+    def test_improvement_hold_constraint_migration_is_idempotent(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260806000100_workforce_improvement_hold_and_scorecards.sql"
+        ).lower()
+        self.assertIn("drop constraint if exists improvement_candidates_status_check", migration)
+        self.assertIn("drop trigger if exists improvement_candidate_scorecards_append_only", migration)
+        self.assertIn("'hold'", migration)
+
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
@@ -113,7 +151,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "research": 23,
             "risk": 19,
             "strategy": 9,
-            "workforce": 24,
+            "workforce": 25,
         }
         actual_counts = {
             schema: sum(1 for table_schema, _ in self.tables if table_schema == schema)
