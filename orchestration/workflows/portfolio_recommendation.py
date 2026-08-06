@@ -18,6 +18,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -36,6 +37,12 @@ from orchestration.contracts.mas import (
     make_pipeline_event,
     stable_hash,
     validate_worker_context,
+)
+from orchestration.llm_observability import (
+    begin_worker_metric,
+    end_worker_metric,
+    publish_metric,
+    redacted_trace,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,6 +117,17 @@ CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _configured_worker_runtime() -> str:
+    """Resolve the portfolio Worker runtime without hiding explicit config."""
+
+    configured = os.getenv("PORTFOLIO_WORKER_RUNTIME", "").strip().lower()
+    if configured:
+        return configured
+    if os.getenv("OLLAMA_BASE_URL") and os.getenv("OLLAMA_CHAT_MODEL"):
+        return "ollama"
+    return "deterministic_test"
+
+
 def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Create a bounded department plan from a free-form user request.
 
@@ -172,19 +190,27 @@ _MODULE_PATHS = {
     "ceo": ROOT / "departments/00-ceo-office/employee_workers.py",
 }
 
+_MODULE_LOAD_LOCK = RLock()
+
 
 def _load_module(stage: str) -> Any:
     name = f"portfolio_full_pipeline_{stage}_workers"
-    if name in sys.modules:
-        return sys.modules[name]
-    path = _MODULE_PATHS[stage]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"worker module unavailable: {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    with _MODULE_LOAD_LOCK:
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "WORKER_SPECS"):
+            return module
+        path = _MODULE_PATHS[stage]
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"worker module unavailable: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(name, None)
+            raise
+        return module
 
 
 def _deterministic_worker_llm(system: str, prompt: str) -> str:
@@ -397,7 +423,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
         "data_source": data_context.get("source", "TEST"),
-        "worker_runtime": os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test"),
+        "worker_runtime": _configured_worker_runtime(),
         "data_quality": data_context.get("quality_status", "TEST"),
         "read_only": True,
         "external_writes": False,
@@ -522,6 +548,11 @@ def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _technology_profile(spec: WorkerSpec) -> dict[str, Any]:
+    profile = getattr(spec, "tech_profile", None)
+    return profile.as_dict() if profile is not None else {}
+
+
 async def _invoke_worker(
     stage: str,
     spec: WorkerSpec,
@@ -547,21 +578,31 @@ async def _invoke_worker(
                 "stage": stage,
                 "worker_id": spec.worker_id,
                 "role": spec.role,
+                "technology": _technology_profile(spec),
                 "input_hash": payload.get("input_hash"),
                 "output_contract": spec.output_contract,
             }
         )
+    configured_runtime = _configured_worker_runtime()
+    use_ollama = configured_runtime in {"ollama", "live"}
+    worker_llm = default_worker_llm
     if str(payload.get("source", "TEST")).upper() == "TEST":
         # Let the operator projection observe a real running Worker graph in
         # local TEST mode; this does not create work or alter any result.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
-        configured_runtime = os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test").strip().lower()
-        use_ollama = configured_runtime in {"ollama", "live"}
         worker_llm = (
             default_worker_llm
-            if str(payload.get("source", "TEST")).upper() != "TEST" or use_ollama
+            if use_ollama
             else _deterministic_worker_llm
         )
+    metric_token = begin_worker_metric(
+        worker_id=spec.worker_id,
+        role=spec.role,
+        stage=stage,
+        model_name=(os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b")
+        if worker_llm is default_worker_llm
+        else "deterministic-test",
+    )
     try:
         if stage in {"risk", "qa"}:
             trace = module.SkillTrace()
@@ -579,6 +620,7 @@ async def _invoke_worker(
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
+            "technology": _technology_profile(spec),
             "status": state.get("status", "DEGRADED"),
             "attempts": state.get("attempts", 0),
             "output": state.get("output", {}),
@@ -588,6 +630,19 @@ async def _invoke_worker(
             "binding": False,
         }
         report = _validate_worker_report(report)
+        performance = end_worker_metric(
+            metric_token,
+            status=report["status"],
+            attempts=int(report.get("attempts", 0)),
+            eval_score=1.0
+            if report.get("contract_validation", {}).get("status") == "PASS"
+            else 0.0,
+        )
+        report["performance"] = performance
+        publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -600,6 +655,7 @@ async def _invoke_worker(
                     "input_hash": report.get("input_hash"),
                     "output_contract": report.get("output_contract"),
                     "attempts": report.get("attempts", 0),
+                    "performance": performance,
                 }
             )
         return report
@@ -608,6 +664,7 @@ async def _invoke_worker(
             "stage": stage,
             "worker_id": spec.worker_id,
             "role": spec.role,
+            "technology": _technology_profile(spec),
             "status": "DEGRADED",
             "attempts": 0,
             "output": {
@@ -622,6 +679,12 @@ async def _invoke_worker(
             "input_hash": payload.get("input_hash"),
             "binding": False,
         }
+        performance = end_worker_metric(metric_token, status="DEGRADED", attempts=0, eval_score=0.0)
+        report["performance"] = performance
+        publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -634,6 +697,7 @@ async def _invoke_worker(
                     "input_hash": report.get("input_hash"),
                     "output_contract": report.get("output_contract"),
                     "attempts": report.get("attempts", 0),
+                    "performance": performance,
                 }
             )
         return report
@@ -729,7 +793,7 @@ def build_portfolio_recommendation_graph(
         reports = state.get("department_reports", {})
         for stage in stages:
             department = reports.get(stage, {})
-            if department.get("status") not in {"COMPLETED", "SKIPPED"}:
+            if department.get("status") not in {"COMPLETED", "NOT_REQUESTED"}:
                 return False
             if any(
                 item.get("contract_validation", {}).get("status") == "FAIL"
@@ -816,6 +880,18 @@ def build_portfolio_recommendation_graph(
             and bool(market.get("snapshots"))
         )
 
+    def _live_input_block_message(state: PortfolioPipelineState) -> str:
+        data_context = state.get("data_context", {})
+        diagnostics = data_context.get("data_diagnostics", {}).get("pit_readiness", {})
+        reasons = diagnostics.get("reasons") or data_context.get("reasons") or ["PIT_DATA_NOT_READY"]
+        counts = (
+            f"후보 {diagnostics.get('candidate_count', len(state.get('portfolio_candidates', [])))}개 · "
+            f"연구 문서 {diagnostics.get('research_document_count', 0)}개 · "
+            f"시장 스냅샷 {diagnostics.get('market_snapshot_count', 0)}개 · "
+            f"국내 종목 {diagnostics.get('domestic_instrument_count', 0)}개"
+        )
+        return f"PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다. {counts} · 사유: {', '.join(map(str, reasons[:3]))}"
+
 
     def _safe_skip_reports(
         stage: str,
@@ -828,6 +904,8 @@ def build_portfolio_recommendation_graph(
                 "worker_id": spec.worker_id,
                 "role": spec.role,
                 "status": "SKIPPED_SAFE",
+                "skip_reason": "LIVE_DATA_NOT_READY",
+                "execution_reason": "LIVE_DATA_NOT_READY",
                 "attempts": 0,
                 "output": {
                     "worker_id": spec.worker_id,
@@ -841,6 +919,7 @@ def build_portfolio_recommendation_graph(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "binding": False,
+                "technology": _technology_profile(spec),
             }
             for spec in specs
         ]
@@ -857,6 +936,8 @@ def build_portfolio_recommendation_graph(
                 "worker_id": spec.worker_id,
                 "role": spec.role,
                 "status": "SKIPPED_SAFE",
+                "skip_reason": "NOT_REQUESTED",
+                "execution_reason": "NOT_REQUESTED",
                 "attempts": 0,
                 "output": {
                     "worker_id": spec.worker_id,
@@ -870,6 +951,7 @@ def build_portfolio_recommendation_graph(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
                 "binding": False,
+                "technology": _technology_profile(spec),
             }
             for spec in specs
         ]
@@ -895,7 +977,7 @@ def build_portfolio_recommendation_graph(
                 ]
             if not _live_worker_inputs_ready(state):
                 if event_callback:
-                    event_callback({"kind": "department_blocked", "stage": stage, "message": "PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다."})
+                    event_callback({"kind": "department_blocked", "stage": stage, "message": _live_input_block_message(state)})
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -953,13 +1035,41 @@ def build_portfolio_recommendation_graph(
                 for item in reports
                 if item.get("status") not in {"COMPLETED", "SKIPPED_SAFE"}
             ]
-            skipped = bool(reports) and all(item.get("status") == "SKIPPED_SAFE" for item in reports)
+            completed = [item for item in reports if item.get("status") == "COMPLETED"]
+            skipped_safe = [item for item in reports if item.get("status") == "SKIPPED_SAFE"]
+            not_requested = [
+                item for item in reports if item.get("skip_reason") == "NOT_REQUESTED"
+            ]
+            skip_reasons: dict[str, int] = {}
+            for item in reports:
+                reason = item.get("skip_reason")
+                if reason:
+                    skip_reasons[str(reason)] = skip_reasons.get(str(reason), 0) + 1
+            all_not_requested = bool(reports) and len(not_requested) == len(reports)
+            all_live_blocked = bool(reports) and all(
+                item.get("skip_reason") == "LIVE_DATA_NOT_READY" for item in reports
+            )
+            if all_not_requested:
+                department_status = "NOT_REQUESTED"
+            elif all_live_blocked:
+                department_status = "BLOCKED"
+            elif failed:
+                department_status = "DEGRADED"
+            else:
+                department_status = "COMPLETED"
             result: dict[str, Any] = {
                 "department_reports": {
                     stage: {
-                        "status": "SKIPPED" if skipped else "DEGRADED" if failed else "COMPLETED",
+                        "status": department_status,
+                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED"} else department_status,
                         "worker_ids": [item["worker_id"] for item in reports],
-                        "executed": len(reports),
+                        "executed": len(completed),
+                        "completed": len(completed),
+                        "skipped_safe": len(skipped_safe),
+                        "not_requested": len(not_requested),
+                        "failed_count": len(failed),
+                        "skip_reasons": skip_reasons,
+                        "skip_reason": next(iter(skip_reasons), None),
                         "failed": failed,
                         "binding": False,
                         "fan_out": True,
@@ -967,7 +1077,7 @@ def build_portfolio_recommendation_graph(
                     }
                 }
             }
-            if any(item.get("status") == "SKIPPED_SAFE" for item in reports):
+            if skipped_safe or not_requested:
                 result["worker_reports"] = reports
             if event_callback:
                 event_callback(
@@ -977,7 +1087,7 @@ def build_portfolio_recommendation_graph(
                         "status": result["department_reports"][stage]["status"],
                             "message": (
                                 "CEO task plan에 따라 이번 요청에서 호출하지 않았습니다."
-                                if result["department_reports"][stage]["status"] == "SKIPPED"
+                    if result["department_reports"][stage]["status"] in {"NOT_REQUESTED", "BLOCKED"}
                                 else f"{stage} 부서가 {result['department_reports'][stage]['executed']}개 Worker 결과를 취합했습니다."
                             ),
                     }
@@ -991,7 +1101,7 @@ def build_portfolio_recommendation_graph(
         degraded = [
             stage
             for stage, report in reports.items()
-            if report.get("status") not in {"COMPLETED", "SKIPPED"}
+        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED"}
         ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})
@@ -1136,9 +1246,48 @@ async def run_portfolio_recommendation_pipeline_async(
             forwarded["pipeline_event"] = normalized.model_dump(mode="json")
             event_callback(forwarded)
 
+    emit(
+        {
+            "kind": "pipeline_started",
+            "stage": "portfolio-recommendation",
+            "department": "orchestration",
+            "status": "RUNNING",
+            "summary": "Portfolio recommendation pipeline started.",
+        }
+    )
     app = build_portfolio_recommendation_graph(event_callback=emit)
-    state = await app.ainvoke(_initial_state(profile, candidates, data_context))
+    with redacted_trace(
+        trace_id=event_run_id,
+        model_name=os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b",
+        stage="portfolio-recommendation",
+    ):
+        state = await app.ainvoke(
+            _initial_state(profile, candidates, data_context),
+            config={
+                "run_name": "portfolio-recommendation-full",
+                "tags": [
+                    "hgfinance",
+                    "portfolio-recommendation",
+                    "redacted",
+                    f"trace_id:{event_run_id}",
+                ],
+                "metadata": {
+                    "observability_schema": "llm.performance.v1",
+                    "raw_payloads_sent": False,
+                },
+            },
+        )
     result = dict(state.get("result", state))
+    emit(
+        {
+            "kind": "pipeline_completed",
+            "stage": "portfolio-recommendation",
+            "department": "orchestration",
+            "status": str(result.get("pipeline_status", "DEGRADED")),
+            "safe_action": str(result.get("safe_action", "HOLD")),
+            "summary": "Portfolio recommendation pipeline completed.",
+        }
+    )
     result["pipeline_events"] = pipeline_events
     result["pipeline_event_count"] = len(pipeline_events)
     result["replay"] = build_replay_metadata(profile, candidates, result).model_dump(mode="json")

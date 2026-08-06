@@ -15,14 +15,19 @@ import { CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { COMPANY, STORAGE_LINK } from "../company.config";
 import OpsPanel from "./ops/OpsPanel";
-import RiskQaPanel from "./ops/RiskQaPanel";
+import DepartmentRuntimePanel from "./ops/RiskQaPanel";
 import DepartmentCommunicationPanel from "./ops/DepartmentCommunicationPanel";
 import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
+import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
+import type { LlmPerformanceMetric } from "./ops/readModel";
+import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
+import { canUseSimulation } from "./ops/projectionSource";
 
 type View = "live" | "dashboard" | "mandate";
-const CANONICAL_DEPARTMENT_COUNT = 7;
+type DashboardAudience = "executive" | "operations";
+const CANONICAL_DEPARTMENT_COUNT = 8;
 const CANONICAL_WORKER_COUNT = 42;
 
 const statusClass: Record<DeptStatus, string> = {
@@ -32,6 +37,55 @@ const statusClass: Record<DeptStatus, string> = {
   "연동 대기": "blocked",
   "대기": "waiting",
 };
+
+
+function useDialogBehavior(onClose: () => void) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!dialog) return undefined;
+    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ));
+    focusable()[0]?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", handleKeyDown);
+    return () => {
+      dialog.removeEventListener("keydown", handleKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
+  return dialogRef;
+}
 
 /** 링크만 걸려 있는 항목 (서버 연동과 무관) */
 const integrations2Static = STORAGE_LINK
@@ -63,9 +117,13 @@ function PixelEmployee({ hair, shirt, accent }: { hair: string; shirt: string; a
 function RuntimeSync({ engine, onSync }: { engine: Company; onSync: () => void }) {
   const { snapshot } = useBffFeed();
   useEffect(() => {
-    engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    const mode = snapshot?.mode ?? "DEMO";
+    engine.setSimulationMode(canUseSimulation(mode));
+    if (!canUseSimulation(mode)) {
+      engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    }
     onSync();
-  }, [engine, onSync, snapshot?.operations?.runtime]);
+  }, [engine, onSync, snapshot?.mode, snapshot?.operations?.runtime]);
   return null;
 }
 
@@ -74,6 +132,7 @@ export default function Home() {
   const [snap, setSnap] = useState<Snapshot>(() => engine.snapshot());
   const syncRuntime = useCallback(() => setSnap(engine.snapshot()), [engine]);
   const [view, setView] = useState<View>("live");
+  const [dashboardAudience, setDashboardAudience] = useState<DashboardAudience>("executive");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [briefing, setBriefing] = useState(false);
@@ -216,12 +275,28 @@ export default function Home() {
             <button className={view === "live" ? "active" : ""} onClick={() => setView("live")}>
               🎮 라이브 오피스
             </button>
-            <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>
+            <a
+              className={`nav-link ${view === "dashboard" ? "active" : ""}`}
+              href="/dashboard"
+              role="button"
+              onClick={(event) => {
+                event.preventDefault();
+                setView("dashboard");
+              }}
+            >
               📊 대시보드
-            </button>
-            <button className={view === "mandate" ? "active" : ""} onClick={() => setView("mandate")}>
+            </a>
+            <a
+              className={`nav-link ${view === "mandate" ? "active" : ""}`}
+              href="/mandate"
+              role="button"
+              onClick={(event) => {
+                event.preventDefault();
+                setView("mandate");
+              }}
+            >
               🗂 Mandate 설정
-            </button>
+            </a>
             <button
               className={`todo-tab ${todo ? "urgent" : ""}`}
               onClick={() => {
@@ -240,7 +315,9 @@ export default function Home() {
       <BffProvider>
         <RuntimeSync engine={engine} onSync={syncRuntime} />
         {view === "mandate" ? (
-          <MandateConfigView onAnalyzed={() => setView("dashboard")} />
+          <MandateConfigView onAnalyzed={() => setView("dashboard")}
+            onBackToOperations={dashboardAudience === "operations" ? () => { setView("dashboard"); setDashboardAudience("operations"); } : undefined}
+          />
         ) : view === "live" ? (
           <>
             <LiveView
@@ -264,11 +341,13 @@ export default function Home() {
             filter={filter}
             setFilter={setFilter}
             snap={snap}
-            agents={engine.agents}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
             integrations={integrations}
             publishResult={publishState.result}
+            audience={dashboardAudience}
+            setAudience={setDashboardAudience}
+            onOpenMandate={() => { setDashboardAudience("operations"); setView("mandate"); }}
           />
         )}
       </BffProvider>
@@ -296,14 +375,14 @@ export default function Home() {
   );
 }
 
-function MandateConfigView({ onAnalyzed }: { onAnalyzed: () => void }) {
+export function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () => void; onBackToOperations?: () => void }) {
   return (
     <>
       <header className="mandate-hero win">
         <div className="win-bar"><span>📁 Mandate Configuration [F01]</span><span className="window-controls" aria-hidden="true">—　▢　✕</span></div>
         <div className="mandate-hero-body">
           <div><p className="eyebrow">ONE-TIME USER SETUP · ADVISORY ONLY</p><h1>대표님의 투자 기준을<br /><em className="highlight">한 번만 알려주세요</em></h1><p>기본값을 확인하고 저장하면, 이후 세부 조건은 AI Assistant가 대화로 확인합니다. 저장된 설정은 주문·원장 변경을 직접 수행하지 않습니다.</p></div>
-          <div className="mandate-hero-stamp"><span>MODE</span><b>DEMO</b><small>프론트엔드 설정 화면</small></div>
+          <div className="mandate-hero-stamp"><span>MODE</span><b>DEMO</b><small>프론트엔드 설정 화면</small>{onBackToOperations ? <button type="button" className="btn btn-ghost" onClick={onBackToOperations}>Operations Console로 돌아가기</button> : null}</div>
         </div>
       </header>
       <section className="mandate-layout">
@@ -317,11 +396,47 @@ function MandateConfigView({ onAnalyzed }: { onAnalyzed: () => void }) {
   );
 }
 
+/** Hydration fallback for the dashboard navigation. */
+export function DashboardRouteView() {
+  const { snapshot } = useBffFeed();
+  const [operations, setOperations] = useState(false);
+
+  if (operations) {
+    return (
+      <OperationsConsoleView
+        snapshot={snapshot}
+        onBack={() => setOperations(false)}
+        onOpenMandate={() => window.location.assign("/mandate")}
+      />
+    );
+  }
+
+  return (
+    <section className="win hero" aria-labelledby="dashboard-route-title">
+      <div className="win-bar">
+        <span>👑 CEO Dashboard</span>
+        <span className="window-controls" aria-hidden="true">— ▢ ✕</span>
+      </div>
+      <div className="hero-body">
+        <div className="hero-copy">
+          <p className="eyebrow">READ MODEL · {snapshot ? "CONNECTED" : "OFFLINE"}</p>
+          <h1 id="dashboard-route-title">대표 Dashboard</h1>
+          <p>운영 상태와 실행 경계를 BFF Read Model로 확인합니다.</p>
+        </div>
+        <button type="button" className="btn btn-primary" onClick={() => setOperations(true)}>
+          Operations Console
+        </button>
+      </div>
+    </section>
+  );
+}
+
 type AssistantMessage = { from: "agent" | "user"; text: string };
 
 function MandateAssistant() {
   const [draft, setDraft] = useState("");
   const [step, setStep] = useState(0);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const [messages, setMessages] = useState<AssistantMessage[]>([
     { from: "agent", text: "안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다.\n기본 설정은 준비해 두었어요. 세부 조건은 제가 하나씩 여쭤볼게요." },
     { from: "agent", text: "먼저 투자 기간을 알려주세요. 예: 3년 이상, 은퇴 전까지, 단기 자금이에요." },
@@ -331,6 +446,10 @@ function MandateAssistant() {
     "특정 업종이나 피하고 싶은 자산이 있나요?",
     "손실이 발생했을 때 어느 수준까지 감내할 수 있나요?",
   ];
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [messages.length]);
 
   function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -346,7 +465,7 @@ function MandateAssistant() {
       <div className="win-bar"><span>🤖 CEO Console · AI Assistant</span><span className="window-controls" aria-hidden="true">—　▢　✕</span></div>
       <div className="win-body">
         <div className="assistant-heading"><div className="assistant-avatar">AI</div><div><strong>김세리</strong><small>Mandate interview worker · ONLINE</small></div><span className="mini-badge mint">ONLINE</span></div>
-        <div className="assistant-chat" aria-live="polite">{messages.map((message, index) => <div className={`assistant-bubble ${message.from}`} key={`${message.from}-${index}`}><b>{message.from === "agent" ? "김세리 AI" : "대표님"}</b><p>{message.text}</p></div>)}</div>
+        <div className="assistant-chat" aria-live="polite" aria-label="Mandate 인터뷰 대화" tabIndex={0}>{messages.map((message, index) => <div className={`assistant-bubble ${message.from}`} key={`${message.from}-${index}`}><b>{message.from === "agent" ? "김세리 AI" : "대표님"}</b><p>{message.text}</p></div>)}<div ref={chatEndRef} aria-hidden="true" /></div>
         <form className="assistant-input" onSubmit={send}><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="자연어로 답해주세요…" aria-label="AI Assistant 답변" /><button type="submit">전송</button></form>
         <small className="assistant-note">대화 내용은 현재 화면의 설정 초안에만 표시됩니다.</small>
       </div>
@@ -452,7 +571,7 @@ function LiveView({
             {snap.phase} · {progress}%
           </span>
           <i>
-            <b style={{ width: `${progress}%` }} />
+            <b style={{ transform: `scaleX(${progress / 100})` }} />
           </i>
         </div>
         <div className="live-counts">
@@ -656,18 +775,22 @@ function ProfileModal({
   onClose: () => void;
   onAsk: (agent: Agent) => void;
 }) {
+  const dialogRef = useDialogBehavior(onClose);
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section
+        ref={dialogRef}
         className="win team-modal"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={`${agent.name} 프로필`}
+        tabIndex={-1}
       >
         <div className="win-bar">
           <span>👤 employee_profile.exe</span>
-          <button className="window-close" onClick={onClose}>
+          <button type="button" className="window-close" aria-label="프로필 닫기" onClick={onClose}>
             ✕
           </button>
         </div>
@@ -711,18 +834,22 @@ function ProfileModal({
 }
 
 function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
+  const dialogRef = useDialogBehavior(onClose);
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section
+        ref={dialogRef}
         className="win team-modal"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="김비서 브리핑"
+        tabIndex={-1}
       >
         <div className="win-bar">
           <span>📋 kim_secretary.brief</span>
-          <button className="window-close" onClick={onClose}>
+          <button type="button" className="window-close" aria-label="브리핑 닫기" onClick={onClose}>
             ✕
           </button>
         </div>
@@ -772,21 +899,25 @@ function DashboardView({
   filter,
   setFilter,
   snap,
-  agents,
   onApprove,
   onSelect,
   integrations,
   publishResult,
+  audience,
+  setAudience,
+  onOpenMandate,
 }: {
   filteredTeams: TeamRow[];
   filter: "전체" | DeptStatus;
   setFilter: (value: "전체" | DeptStatus) => void;
   snap: Snapshot;
-  agents: readonly Agent[];
   onApprove: () => void;
   onSelect: (id: string) => void;
   integrations: IntegrationStatus | null;
   publishResult: PublishResult | null;
+  audience: DashboardAudience;
+  setAudience: (value: DashboardAudience) => void;
+  onOpenMandate: () => void;
 }) {
   const { snapshot: bffSnapshot } = useBffFeed();
   const portfolioRuntime = bffSnapshot?.operations?.runtime;
@@ -823,6 +954,16 @@ function DashboardView({
     : [];
   const rows = [...integrations2Static, ...liveRows];
 
+  if (audience === "operations") {
+    return (
+      <OperationsConsoleView
+        snapshot={bffSnapshot}
+        onBack={() => setAudience("executive")}
+        onOpenMandate={onOpenMandate}
+      />
+    );
+  }
+
   return (
     <>
       <header className="win hero">
@@ -842,6 +983,25 @@ function DashboardView({
           </div>
           <div className="hero-actions">
             <span className="trust-copy">실제 전송·게시·결제는 대표 승인 후 진행해요</span>
+            <div className="dashboard-audience-switch" role="group" aria-label="대시보드 사용자 전환">
+              <span>VIEW</span>
+              <button
+                type="button"
+                className={audience === "executive" ? "active" : ""}
+                aria-pressed={audience === "executive"}
+                onClick={() => setAudience("executive")}
+              >
+                대표 Dashboard
+              </button>
+              <button
+                type="button"
+                className=""
+                aria-pressed={false}
+                onClick={() => setAudience("operations")}
+              >
+                Operations Console
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -942,7 +1102,7 @@ function DashboardView({
                 </div>
                 <div className="filter-tabs" role="group" aria-label="팀 상태 필터">
                   {(["전체", "진행 중", "완료", "승인 대기", "연동 대기"] as const).map((item) => (
-                    <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>
+                    <button key={item} type="button" aria-pressed={filter === item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>
                       {item}
                     </button>
                   ))}
@@ -1033,9 +1193,17 @@ function DashboardView({
         </div>
       </section>
 
-      <OpsPanel />
-      <RiskQaPanel agents={agents} snapshot={snap} />
-      <DepartmentCommunicationPanel />
+      <details className="dashboard-detail-disclosure">
+        <summary>
+          <span>실행·직원·장부 상세 보기</span>
+          <small>실제 runtime 상태, 부서 통신, 공식 Snapshot</small>
+        </summary>
+        <div className="dashboard-detail-stack">
+          <DepartmentRuntimePanel />
+          <DepartmentCommunicationPanel />
+          <OpsPanel />
+        </div>
+      </details>
 
       <section className="win storage">
         <div className="win-bar">
@@ -1081,6 +1249,347 @@ function DashboardView({
         대표 {CEO.name}({CEO.callsign}) · {CANONICAL_DEPARTMENT_COUNT}개 Hermes 부서 · {CANONICAL_WORKER_COUNT}개 독립 LangGraph Worker · 화면은
         DEMO Projection입니다.
       </p>
+    </>
+  );
+}
+
+function OperationsConsoleView({
+  snapshot,
+  onBack,
+  onOpenMandate,
+}: {
+  snapshot: ReturnType<typeof useBffFeed>["snapshot"];
+  onBack: () => void;
+  onOpenMandate: () => void;
+}) {
+  const { refresh: refreshBff } = useBffFeed();
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState("");
+  const [departmentFilter, setDepartmentFilter] = useState<"attention" | "running" | "all">("attention");
+  const [departmentQuery, setDepartmentQuery] = useState("");
+  const traceDisclosureRef = useRef<HTMLDetailsElement>(null);
+  const operations = snapshot?.operations;
+  const runtime = operations?.runtime;
+  const result = runtime?.result as Record<string, unknown> | null | undefined;
+  const riskGate = (result?.risk_gate as Record<string, unknown> | undefined) ?? {};
+  const qaGate = (result?.qa_gate as Record<string, unknown> | undefined) ?? {};
+  const departmentRows = useMemo(() => operations?.departments ?? [], [operations?.departments]);
+  const activeWorkers = runtime?.active_workers ?? [];
+  const observedAgents = operations?.agent_statuses ?? [];
+  const performanceMetrics = runtime?.performance_metrics ?? [];
+  const groupedMessages = useMemo(() => groupRuntimeMessages(runtime?.messages ?? []), [runtime?.messages]);
+  const pitReadiness = readPitReadiness(runtime);
+  const pitBlocked = pitReadiness?.quality_status
+    ? pitReadiness.quality_status !== "PASS"
+    : runtime?.messages.some((message) => message.text.includes("PIT 입력이 준비되지 않아")) ?? false;
+  const attentionDepartments = useMemo(
+    () => departmentRows.filter((department) => ["ERROR", "BLOCKED", "DEGRADED", "WAITING_APPROVAL"].includes(department.status)),
+    [departmentRows],
+  );
+  const visibleDepartments = useMemo(() => {
+    const query = departmentQuery.trim().toLowerCase();
+    const hasAttention = attentionDepartments.length > 0;
+    const effectiveFilter = departmentFilter === "attention" && !hasAttention ? "all" : departmentFilter;
+    return departmentRows.filter((department) => {
+      const matchesFilter = effectiveFilter === "all"
+        || effectiveFilter === "attention" && attentionDepartments.some((item) => item.department_code === department.department_code)
+        || effectiveFilter === "running" && (department.active_worker_count > 0 || ["RUNNING", "QUEUED"].includes(department.status));
+      const haystack = `${department.name} ${department.department_code}`.toLowerCase();
+      return matchesFilter && (!query || haystack.includes(query));
+    });
+  }, [attentionDepartments, departmentFilter, departmentQuery, departmentRows]);
+  const tone = (status: string | undefined) => {
+    const value = String(status ?? "OFFLINE").toUpperCase().replace(/\s+/g, "_");
+    if (["RUNNING", "CONNECTED", "COMPLETED", "PASS", "APPROVE"].includes(value)) return "done";
+    if (["DEGRADED", "WAITING_APPROVAL", "PENDING", "WARN"].includes(value)) return "approval";
+    if (["ERROR", "BLOCKED", "FAIL", "REJECT"].includes(value)) return "blocked";
+    return "waiting";
+  };
+
+  async function restartAnalysis() {
+    setRecoveryBusy(true);
+    setRecoveryMessage("");
+    try {
+      await startSavedPortfolioRecommendation();
+      await refreshBff();
+      setRecoveryMessage("저장된 Mandate로 분석을 다시 요청했습니다. 실행 단계에서 상태를 확인하세요.");
+    } catch (cause) {
+      setRecoveryMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }
+
+  function focusDepartment(department: { department_code: string }) {
+    setDepartmentFilter("all");
+    setDepartmentQuery(department.department_code);
+    traceDisclosureRef.current?.setAttribute("open", "");
+    window.requestAnimationFrame(() => document.getElementById("ops-department-search")?.focus());
+  }
+
+  return (
+    <>
+      <header className="win operations-hero">
+        <div className="win-bar">
+          <span>🛰 operations.console · execution observability</span>
+          <span className="window-controls" aria-hidden="true">— ▢ ✕</span>
+        </div>
+        <div className="operations-hero-body">
+          <div>
+            <p className="eyebrow">FOR OPERATORS · LIVE READ MODEL</p>
+            <h1>실행의 모든 흔적을 <em className="highlight">한 화면에</em></h1>
+            <p>부서 handoff, Worker, Gate, 이벤트 순서를 확인합니다. 이 화면은 금융 상태를 직접 변경하지 않습니다.</p>
+          </div>
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 대표 Dashboard</button>
+        </div>
+      </header>
+
+      <div className="ops-glossary" role="note" aria-label="운영 화면 용어 안내">
+        <span><b>PIT</b> 특정 시점으로 고정한 데이터</span>
+        <span><b>Registry</b> 등록된 직원 목록</span>
+        <span><b>Live event</b> 실제 실행 중 수신한 메시지</span>
+      </div>
+
+      {attentionDepartments.length > 0 ? (
+        <section className="ops-attention-strip" aria-label="주의가 필요한 부서">
+          <strong>주의 부서 {attentionDepartments.length}개</strong>
+          <div>
+            {attentionDepartments.map((department) => (
+              <button type="button" key={department.department_code} onClick={() => focusDepartment(department)}>
+                {department.name} · {readableRuntimeStatus(department.status)}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      <section className="ops-health-grid" aria-label="운영 연결 상태">
+        {[
+          ["BFF", operations?.status ?? "OFFLINE", operations?.runtime_connected ? "runtime projection 수신" : "snapshot 대기"],
+          ["Event bridge", operations?.event_bridge_connected ? "CONNECTED" : "DEGRADED", `sequence ${operations?.sequence ?? 0}`],
+          ["LangGraph run", runtime?.status ?? "OFFLINE", runtime?.run_id ? `run ${runtime.run_id.slice(0, 10)}…` : "실행 대기"],
+          ["Paper Order", "USER APPROVAL", "백엔드 제출 API 연결 전까지 생성하지 않음"],
+        ].map(([label, status, detail]) => (
+          <article className="ops-health-card" key={label}>
+            <span className="tiny-label">{label}</span>
+            <strong className={`status-pill ${tone(status)}`}>{readableRuntimeStatus(status)}</strong>
+            <p>{detail}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="win operations-run-panel" aria-labelledby="operations-run-title">
+        <div className="win-bar">
+          <span>🧭 run.timeline · trace projection</span>
+          <span className="window-controls" aria-hidden="true">— ▢ ✕</span>
+        </div>
+        <div className="win-body">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">RUN / TRACE / GATE</p>
+              <h2 id="operations-run-title">현재 실행과 다음 안전 경계</h2>
+            </div>
+            <span className={`status-pill ${tone(runtime?.status)}`}>{readableRuntimeStatus(runtime?.status)}</span>
+          </div>
+
+          <div className="ops-run-meta">
+            <span><b>Phase</b> {runtime?.phase ?? "실행 없음"}</span>
+            <span><b>Active workers</b> {activeWorkers.length}</span>
+            <span><b>Messages</b> {runtime?.messages.length ?? 0}</span>
+            <span><b>최근 이벤트</b> {readableRuntimeKind(runtime?.messages.at(-1)?.kind ?? "—")}</span>
+            <span><b>LangSmith</b> {readableRuntimeStatus(runtime?.observability?.langsmith?.status)}</span>
+          </div>
+          {runtime?.error ? (
+            <div className="ops-runtime-error" role="alert">
+              <strong>실행을 완료하지 못했습니다.</strong>
+              <p>Worker 실행을 확인하고, 연결 또는 입력 상태를 점검한 뒤 다시 시도하세요.</p>
+              <details>
+                <summary>기술 상세 보기</summary>
+                <code>{runtime.error}</code>
+              </details>
+            </div>
+          ) : null}
+
+          {pitBlocked ? (
+            <section className="ops-recovery-panel" aria-labelledby="ops-recovery-title" role="status">
+              <div>
+                <span className="tiny-label">PIT RECOVERY</span>
+                <h3 id="ops-recovery-title">분석 입력이 준비되지 않아 실행을 보류했습니다.</h3>
+                <p>{pitReadiness?.reasons?.length ? pitReadiness.reasons.slice(0, 2).map(readablePitReason).join(" · ") : "시점 고정 데이터 상태를 다시 확인하세요."}</p>
+                <small className="ops-recovery-hint">PIT는 분석 기준 시점에 맞춰 고정한 데이터입니다.</small>
+              </div>
+              <div className="ops-recovery-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => void refreshBff()} disabled={recoveryBusy}>데이터 새로고침</button>
+                <button type="button" className="btn btn-ghost" onClick={onOpenMandate}>Mandate 설정 확인</button>
+                <button type="button" className="btn btn-primary" onClick={() => void restartAnalysis()} disabled={recoveryBusy || runtime?.status === "RUNNING" || runtime?.status === "QUEUED"}>
+                  {recoveryBusy ? "재실행 요청 중…" : "분석 다시 시작"}
+                </button>
+              </div>
+              {recoveryMessage ? <p className="ops-recovery-feedback" aria-live="polite">{recoveryMessage}</p> : null}
+            </section>
+          ) : null}
+
+          <section className="ops-observability-panel" aria-labelledby="ops-observability-title">
+            <div className="communication-toolbar">
+              <div>
+                <p className="eyebrow">LANGSMITH · REDACTED OBSERVABILITY</p>
+                <h3 id="ops-observability-title">LLM 성과 추적 <span>{performanceMetrics.length}개 metric</span></h3>
+              </div>
+              <span className={`status-pill ${tone(runtime?.observability?.langsmith?.status)}`}>
+                {readableRuntimeStatus(runtime?.observability?.langsmith?.status)}
+              </span>
+            </div>
+            <div className="ops-observability-grid">
+              <article>
+                <span>Input</span>
+                <strong>원문 비활성화</strong>
+                <small>LangSmith에 입력 텍스트를 보내지 않습니다.</small>
+              </article>
+              <article>
+                <span>Output</span>
+                <strong>원문 비활성화</strong>
+                <small>출력 텍스트 대신 상태·해시·계약 검증만 추적합니다.</small>
+              </article>
+              <article>
+                <span>Metadata</span>
+                <strong>정량 지표만</strong>
+                <small>model, role, latency, tokens, eval score</small>
+              </article>
+            </div>
+            {performanceMetrics.length > 0 ? (
+              <div className="llm-metric-list" aria-label="LangSmith 정량 성과 목록">
+                {performanceMetrics.slice(-8).reverse().map((metric: LlmPerformanceMetric) => (
+                  <div className="llm-metric-row" key={`${metric.worker_id}-${metric.stage}-${metric.latency_ms}-${metric.attempts}`}>
+                    <b>{metric.worker_id}</b>
+                    <span>{metric.model_name}</span>
+                    <span>{metric.stage}</span>
+                    <span>{metric.latency_ms}ms</span>
+                    <span>eval {metric.eval_score == null ? "—" : metric.eval_score.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="dash-note">Worker가 실행되면 여기와 LangSmith에 동일한 정량 metric이 표시됩니다. 현재는 실행 전이거나 PIT 안전 보류 상태입니다.</p>
+            )}
+          </section>
+
+          <details ref={traceDisclosureRef} className="ops-detail-disclosure ops-trace-disclosure">
+            <summary>
+              <span>실행 단계·직원 추적·최근 이벤트</span>
+              <small>{visibleDepartments.length}/{departmentRows.length}개 부서 · {observedAgents.length}명 관찰 · {groupedMessages.length}개 요약</small>
+            </summary>
+            <div className="ops-department-tools" aria-label="부서 실행 필터">
+              <div className="filter-tabs" role="group" aria-label="부서 상태 필터">
+                {([[
+                  "attention", `오류·보류 ${attentionDepartments.length}`,
+                ], ["running", "업무 중"], ["all", "전체 부서"]] as const).map(([value, label]) => (
+                  <button type="button" key={value} aria-pressed={departmentFilter === value} className={departmentFilter === value ? "active" : ""} onClick={() => setDepartmentFilter(value)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="ops-department-search">
+                <span className="sr-only">부서 검색</span>
+                <input id="ops-department-search" value={departmentQuery} onChange={(event) => setDepartmentQuery(event.target.value)} placeholder="부서명 또는 코드 검색" />
+              </label>
+            </div>
+            <div className="ops-trace-stack">
+              <div className="ops-stage-list" aria-label="부서별 실행 단계">
+                {visibleDepartments.map((department) => (
+                  <article className="ops-stage-row" key={department.department_code}>
+                    <div>
+                      <strong>{department.name}</strong>
+                      <code>{department.department_code}</code>
+                    </div>
+                    <span className={`status-pill ${tone(department.status)}`}>{readableRuntimeStatus(department.status)}</span>
+                    <span>{department.active_worker_count}/{department.worker_count}명 업무 중</span>
+                    <p>{department.current_stage ? `${department.current_stage} · ` : ""}{readableRuntimeMessage(department.status_reason).summary}</p>
+                  </article>
+                ))}
+                {visibleDepartments.length === 0 && <p className="backend-empty-state">조건에 맞는 부서가 없습니다. 필터나 검색어를 바꿔보세요.</p>}
+              </div>
+
+              <div className="ops-worker-trace" aria-labelledby="ops-worker-trace-title">
+                <div className="communication-toolbar">
+                  <div>
+                    <p className="eyebrow">EMPLOYEE TRACE · agent.status.v1</p>
+                    <h3 id="ops-worker-trace-title">부서원 실행 상태 <span>{observedAgents.length}명 관찰됨</span></h3>
+                  </div>
+                  <span className="status-pill working">
+                    {observedAgents.filter((agent) => agent.status === "RUNNING").length}명 업무 중
+                  </span>
+                </div>
+                {observedAgents.length > 0 ? (
+                  <div className="ops-worker-grid" aria-label="직원별 실행 상태">
+                    {observedAgents.map((agent) => (
+                      <article className="ops-worker-row" key={agent.agent_id}>
+                        <div>
+                          <strong>{agent.role || agent.worker_id || agent.agent_id}</strong>
+                          <small>{agent.department_code} · {agent.worker_id || agent.agent_id}</small>
+                        </div>
+                        <span className={`status-pill ${tone(agent.status)}`}>{readableRuntimeStatus(agent.status)}</span>
+                        <p>{agent.reason || "최근 Worker 상태 이벤트를 수신했습니다."}</p>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="backend-empty-state">실제 Worker status event가 아직 없어 직원 상태를 추측하지 않습니다.</p>
+                )}
+              </div>
+
+              {groupedMessages.length ? (
+                <div className="ops-event-list" aria-label="최근 runtime 이벤트">
+                  <span className="tiny-label">RECENT RUNTIME MESSAGES</span>
+                  {groupedMessages.map((message) => {
+                    const readable = readableRuntimeMessage(message.text);
+                    return <div key={`${message.kind}-${message.department_code}-${message.id}`}>
+                      <time>{new Date(message.occurred_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                      <small>{message.department_code ?? "runtime"}</small>
+                      <b title={message.kind}>{readableRuntimeKind(message.kind)}{message.count > 1 ? ` · ${message.count}회` : ""}</b>
+                      <span>{readable.summary}{readable.action ? ` · 다음: ${readable.action}` : ""}</span>
+                    </div>;
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </details>
+
+          <div className="ops-gate-grid" aria-label="Risk QA 사용자 승인 Gate">
+            {([
+              ["Risk Gate", String(riskGate.verdict ?? riskGate.status ?? "PENDING"), String(riskGate.reason ?? "검토 대기")],
+              ["QA Gate", String(qaGate.decision ?? qaGate.status ?? "PENDING"), String(qaGate.reason ?? "검토 대기")],
+              ["대표 승인", String(runtime?.approval?.status ?? "PENDING"), String(runtime?.approval?.comment ?? "명시적 승인 필요")],
+            ] as Array<[string, string, string]>).map(([label, status, detail]) => (
+              <article key={label}>
+                <span>{label}</span>
+                <strong className={`status-pill ${tone(status)}`}>{readableRuntimeStatus(status)}</strong>
+                <small>{detail}</small>
+              </article>
+            ))}
+          </div>
+
+          <div className="ops-paper-note">
+            <strong>Paper 제출 경계</strong>
+            <p>Risk·QA 통과와 대표의 명시적 승인이 모두 확인되기 전에는 프론트에서 Paper Order를 만들지 않습니다. 현재 화면은 관찰 전용입니다.</p>
+          </div>
+
+        </div>
+      </section>
+
+      <details className="ops-detail-disclosure">
+        <summary>
+          <span>부서원·부서 통신 상세</span>
+          <small>문제가 있는 부서를 선택하면 직원 상태와 내부 메시지를 확인합니다.</small>
+        </summary>
+        <DepartmentCommunicationPanel compact />
+      </details>
+      <details className="ops-detail-disclosure">
+        <summary>
+          <span>주문·체결 공식 Snapshot</span>
+          <small>OMS·원장·평가가 확정한 읽기 전용 데이터입니다.</small>
+        </summary>
+        <OpsPanel compact />
+      </details>
     </>
   );
 }

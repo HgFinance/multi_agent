@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-
 READ_ONLY_DRIVER_ENV = "SUPABASE_READONLY_DRIVER"
 DEFAULT_DSN_ENVIRONMENTS = ("SUPABASE_DATABASE_URL", "DATABASE_URL")
 DEFAULT_CONNECT_RETRIES = 2
@@ -132,6 +131,56 @@ WHERE as_of <= %s
   AND quality_status IN ('PASS', 'WARN')
 ORDER BY as_of DESC
 LIMIT 200
+"""
+
+# The portfolio UI must not derive symbols from a static browser catalog when
+# Supabase is the live source.  Resolve the canonical instrument identity,
+# primary symbol, domestic asset class and the latest PIT market value in one
+# read-only query.  The join is intentionally restricted to Korean equities;
+# bonds, global assets and derivatives cannot enter the current product scope.
+DOMESTIC_EQUITY_UNIVERSE_SQL = """
+SELECT
+    i.instrument_id::text AS instrument_id,
+    s.symbol,
+    s.market AS exchange,
+    i.display_name AS name,
+    i.instrument_type,
+    i.asset_class,
+    i.currency,
+    i.status AS instrument_status,
+    m.market_snapshot_id::text AS market_snapshot_id,
+    m.as_of AS market_as_of,
+    m.last_price::text AS last_price,
+    m.mid::text AS mid,
+    m.quality_status,
+    m.source_ref
+FROM reference.instruments AS i
+JOIN reference.instrument_symbols AS s
+  ON s.instrument_id = i.instrument_id
+ AND s.is_primary = TRUE
+ AND s.valid_from <= %s
+ AND (s.valid_to IS NULL OR s.valid_to > %s)
+JOIN LATERAL (
+    SELECT
+        ms.market_snapshot_id,
+        ms.as_of,
+        ms.last_price,
+        ms.mid,
+        ms.quality_status,
+        ms.source_ref
+    FROM execution.market_snapshots AS ms
+    WHERE ms.instrument_id = i.instrument_id
+      AND ms.as_of <= %s
+      AND ms.quality_status IN ('PASS', 'WARN')
+    ORDER BY ms.as_of DESC
+    LIMIT 1
+) AS m ON TRUE
+WHERE i.instrument_type IN ('EQUITY', 'STOCK')
+  AND i.market IN ('KRX', 'KOSPI', 'KOSDAQ')
+  AND i.currency = 'KRW'
+  AND i.status = 'ACTIVE'
+ORDER BY s.symbol
+LIMIT 500
 """
 
 ACCOUNTING_SNAPSHOT_SQL = """
@@ -331,6 +380,12 @@ def _normalize_candidates(
             candidate["name"] = str(candidate.get("name") or row.get("name") or strategy_code)
             if "target_allocations" not in candidate:
                 candidate["target_allocations"] = _allocations(candidate.get("target_portfolio"))
+            asset_classes = set((candidate.get("target_allocations") or {}).keys())
+            if asset_classes != {"KOREA_EQUITY"}:
+                reasons.append(
+                    f"NON_DOMESTIC_PORTFOLIO:{strategy_code}:{','.join(sorted(asset_classes))}"
+                )
+                continue
             candidate.setdefault("as_of", _json_value(version_as_of))
             candidate.setdefault(
                 "evidence_refs", [f"supabase:strategy.versions:{version_id}"]
@@ -372,6 +427,50 @@ def _market_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> dict[
         "source": "supabase.execution.market_snapshots",
         "as_of": as_of.isoformat(),
         "snapshots": snapshots,
+        "read_only": True,
+    }
+
+
+def _instrument_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> dict[str, Any]:
+    """Normalize the PIT domestic-equity universe for the BFF projection."""
+
+    instruments: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        asset_class = str(row.get("asset_class") or "").upper()
+        instrument_type = str(row.get("instrument_type") or "").upper()
+        if not symbol or (
+            asset_class not in {"KOREA_EQUITY", "EQUITY", "STOCK"}
+            and instrument_type not in {"EQUITY", "STOCK"}
+        ):
+            continue
+        instruments.append(
+            {
+                "instrument_id": str(row.get("instrument_id") or ""),
+                "symbol": symbol,
+                "exchange": str(row.get("exchange") or row.get("market") or "KRX"),
+                "name": str(row.get("name") or symbol),
+                "asset_class": "KOREA_EQUITY",
+                "currency": str(row.get("currency") or "KRW"),
+                "data_status": str(row.get("quality_status") or "LIVE"),
+                "market_as_of": row.get("market_as_of") or row.get("as_of"),
+                "last_price": row.get("last_price"),
+                "mid": row.get("mid"),
+                "evidence_refs": [
+                    ref
+                    for ref in (
+                        f"supabase:reference.instruments:{row.get('instrument_id')}",
+                        f"supabase:execution.market_snapshots:{row.get('market_snapshot_id')}",
+                    )
+                    if not ref.endswith(":None") and not ref.endswith(":")
+                ],
+            }
+        )
+    return {
+        "status": "LIVE" if instruments else "EMPTY",
+        "source": "supabase.reference.instruments",
+        "as_of": as_of.isoformat(),
+        "instruments": instruments,
         "read_only": True,
     }
 
@@ -705,6 +804,11 @@ class SupabaseReadOnlyAdapter:
             ("portfolio_catalog", PORTFOLIO_CATALOG_SQL, (cutoff, cutoff)),
             ("research_documents", RESEARCH_DOCUMENTS_SQL, (cutoff, cutoff)),
             ("market_snapshots", MARKET_SNAPSHOTS_SQL, (cutoff,)),
+            (
+                "domestic_equity_universe",
+                DOMESTIC_EQUITY_UNIVERSE_SQL,
+                (cutoff, cutoff, cutoff),
+            ),
         ]
         if fund_id:
             jobs.append(("accounting_snapshot", ACCOUNTING_SNAPSHOT_SQL, (fund_id, cutoff)))
@@ -755,15 +859,25 @@ class SupabaseReadOnlyAdapter:
         reasons.extend(candidate_reasons)
         research_context = _documents_context(by_name.get("research_documents", ()), cutoff)
         market_context = _market_context(by_name.get("market_snapshots", ()), cutoff)
+        market_context["instrument_universe"] = _instrument_context(
+            by_name.get("domestic_equity_universe", ()), cutoff
+        )
         accounting_context = _accounting_context(
             by_name.get("accounting_snapshot", ()), cutoff, fund_id
         )
 
+        quality = "PASS"
         if "portfolio_catalog" in failed_queries:
             quality = "FAIL"
         elif not candidates:
             quality = "WARN"
             reasons.append("NO_VALID_PORTFOLIO_CANDIDATES")
+        if "domestic_equity_universe" in failed_queries:
+            quality = "WARN" if quality != "FAIL" else quality
+            reasons.append("DOMESTIC_EQUITY_UNIVERSE_QUERY_FAILED")
+        elif not market_context["instrument_universe"]["instruments"]:
+            quality = "WARN" if quality != "FAIL" else quality
+            reasons.append("NO_PIT_DOMESTIC_EQUITY_INSTRUMENTS")
         elif (
             failed_queries
             or research_context["status"] == "EMPTY"
@@ -776,6 +890,17 @@ class SupabaseReadOnlyAdapter:
             reasons.append("NO_PIT_RESEARCH_DOCUMENTS")
         if market_context["status"] == "EMPTY":
             reasons.append("NO_PIT_MARKET_SNAPSHOTS")
+        pit_diagnostics = {
+            "ready": quality == "PASS",
+            "quality_status": quality,
+            "reasons": list(dict.fromkeys(reasons)),
+            "candidate_count": len(candidates),
+            "research_document_count": len(research_context.get("documents", [])),
+            "market_snapshot_count": len(market_context.get("snapshots", [])),
+            "domestic_instrument_count": len(market_context.get("instrument_universe", {}).get("instruments", [])),
+            "as_of": cutoff.isoformat(),
+        }
+        data_diagnostics["pit_readiness"] = pit_diagnostics
         return SupabaseReadSnapshot(
             cutoff,
             "SUPABASE",
@@ -793,13 +918,14 @@ class SupabaseReadOnlyAdapter:
 
 __all__ = [
     "ACCOUNTING_SNAPSHOT_SQL",
+    "DOMESTIC_EQUITY_UNIVERSE_SQL",
     "MARKET_DATA_DIAGNOSTIC_SQL",
     "MARKET_SNAPSHOTS_SQL",
-    "PORTFOLIO_DATA_DIAGNOSTIC_SQL",
     "PORTFOLIO_CATALOG_SQL",
+    "PORTFOLIO_DATA_DIAGNOSTIC_SQL",
     "RESEARCH_DOCUMENTS_SQL",
+    "SupabasePreflight",
     "SupabaseReadOnlyAdapter",
     "SupabaseReadOnlyError",
-    "SupabasePreflight",
     "SupabaseReadSnapshot",
 ]

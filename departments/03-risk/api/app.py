@@ -107,6 +107,13 @@ class MandateScopeIn(BaseModel):
     allowed_instrument_ids: list[UUID] | None = None
     min_order_notional: Decimal
     max_order_notional: Decimal
+    max_instrument_weight: Decimal | None = None
+    max_sector_weight: Decimal | None = None
+    max_gross_exposure: Decimal | None = None
+    allowed_asset_classes: list[str] | None = None
+    forbidden_asset_classes: list[str] = []
+    preferred_sectors: list[str] = []
+    excluded_sectors: list[str] = []
 
 
 class LimitSetIn(BaseModel):
@@ -133,6 +140,9 @@ class PortfolioStateIn(BaseModel):
     positions: dict[UUID, Decimal] = {}
     issuer_of: dict[UUID, str] = {}
     issuer_exposure: dict[str, Decimal] = {}
+    instrument_asset_class: dict[UUID, str] = {}
+    instrument_sector: dict[UUID, str] = {}
+    sector_exposure: dict[str, Decimal] = {}
     realized_pnl_today: Decimal = Decimal(0)
     unrealized_pnl_today: Decimal = Decimal(0)
     peak_equity: Decimal = Decimal(0)
@@ -172,6 +182,19 @@ class RiskContextIn(BaseModel):
                 ),
                 min_order_notional=self.mandate.min_order_notional,
                 max_order_notional=self.mandate.max_order_notional,
+                max_instrument_weight=self.mandate.max_instrument_weight,
+                max_sector_weight=self.mandate.max_sector_weight,
+                max_gross_exposure=self.mandate.max_gross_exposure,
+                allowed_asset_classes=(
+                    frozenset(self.mandate.allowed_asset_classes)
+                    if self.mandate.allowed_asset_classes is not None
+                    else None
+                ),
+                forbidden_asset_classes=frozenset(
+                    self.mandate.forbidden_asset_classes
+                ),
+                preferred_sectors=frozenset(self.mandate.preferred_sectors),
+                excluded_sectors=frozenset(self.mandate.excluded_sectors),
             ),
             limits=LimitSet(**self.limits.model_dump()),
             restricted_items=tuple(

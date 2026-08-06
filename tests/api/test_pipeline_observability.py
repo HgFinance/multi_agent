@@ -1,8 +1,15 @@
-"""BFF acceptance checks for live process-local MAS events and handoffs."""
+"""BFF acceptance checks for durable MAS events and handoffs."""
 
 from __future__ import annotations
 
+import os
+import tempfile
 import time
+
+os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
+os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
+os.environ["PORTFOLIO_RUNTIME_EMBEDDED_WORKER"] = "true"
+os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
 
 from fastapi.testclient import TestClient
 
@@ -38,8 +45,8 @@ def test_bff_runtime_keeps_worker_events_and_dynamic_skip_states() -> None:
     assert runtime["status"] == "COMPLETED"
     assert runtime["pipeline_events"]
     assert any(
-        event.get("handoff", {}).get("from_role") == "ceo:head"
-        and event.get("handoff", {}).get("to_role") == "research:head"
+        (event.get("handoff") or {}).get("from_role") == "ceo:head"
+        and (event.get("handoff") or {}).get("to_role") == "research:head"
         for event in runtime["pipeline_events"]
     )
     assert any(message["kind"] == "worker_started" for message in runtime["messages"])

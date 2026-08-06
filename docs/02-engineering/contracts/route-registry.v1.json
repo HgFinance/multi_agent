@@ -235,6 +235,8 @@
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions"},
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"},
         {"method": "GET", "path": "/governance/v1/mandates/{mandate_id}/current"},
+        {"method": "GET", "path": "/governance/v1/mandates/by-fund/{fund_id}/current"},
+        {"method": "POST", "path": "/governance/v1/mandate-assistant/suggest"},
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/change-requests"},
         {"method": "POST", "path": "/governance/v1/cases"},
         {"method": "GET", "path": "/governance/v1/cases/{case_id}"},

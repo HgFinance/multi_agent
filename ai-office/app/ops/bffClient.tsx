@@ -10,9 +10,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { BFF, parseSnapshot, type TradingSnapshot } from "./readModel";
+import { BFF, getSnapshotSequence, isValidSequence, parseSnapshot, type TradingSnapshot } from "./readModel";
 
 export type BffConnection = "connecting" | "connected" | "stale" | "offline";
+export function isCommandableConnection(connection: BffConnection): boolean {
+  return connection === "connected";
+}
 
 export type BffFeed = {
   snapshot: TradingSnapshot | null;
@@ -23,7 +26,7 @@ export type BffFeed = {
 };
 
 // REST는 canonical snapshot fallback, WebSocket은 변경 신호와 sequence를 전달한다.
-const POLL_INTERVAL_MS = 1000;
+const POLL_INTERVAL_MS = 2500;
 const WS_RECONNECT_BASE_MS = 500;
 const WS_RECONNECT_MAX_MS = 10000;
 const BffContext = createContext<BffFeed | null>(null);
@@ -66,15 +69,24 @@ export function BffProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<BffConnection>("connecting");
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const refreshInFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     setConnection((current) => (current === "connected" ? "connected" : "connecting"));
     try {
       const next = await fetchBffSnapshot();
+      const nextSequence = getSnapshotSequence(next);
+      // A newer WebSocket notification may arrive while REST is in flight.
+      // Never roll the canonical projection backwards or accept an unknown sequence.
+      if (nextSequence === null || nextSequence < lastSequenceRef.current) {
+        setConnection(snapshotRef.current ? "stale" : "offline");
+        return;
+      }
       snapshotRef.current = next;
       setSnapshot(next);
-      const nextSequence = Number(next.operations?.sequence ?? 0);
-      if (Number.isFinite(nextSequence) && nextSequence >= lastSequenceRef.current) {
+      if (nextSequence >= lastSequenceRef.current) {
         lastSequenceRef.current = nextSequence;
       }
       setLastUpdated(new Date().toISOString());
@@ -83,6 +95,8 @@ export function BffProvider({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(explainBffError(cause));
       setConnection(snapshotRef.current ? "stale" : "offline");
+    } finally {
+      refreshInFlightRef.current = false;
     }
   }, []);
 
@@ -113,19 +127,28 @@ export function BffProvider({ children }: { children: ReactNode }) {
         socket.onmessage = (event) => {
           try {
             const message = JSON.parse(String(event.data)) as {
-              event_type?: string;
-              sequence?: number;
+              event_type?: unknown;
+              sequence?: unknown;
             };
-            if (message.event_type === "operations.heartbeat.v1") return;
-            const sequence = Number(message.sequence ?? 0);
+            const eventType = message.event_type;
+            const sequence = message.sequence;
+            if (typeof eventType !== "string" || !isValidSequence(sequence)) return;
+            if (
+              eventType !== "operations.snapshot_required.v1" &&
+              eventType !== "operations.heartbeat.v1" &&
+              eventType !== "agent.status.v1"
+            ) {
+              return;
+            }
+            if (eventType === "operations.heartbeat.v1") return;
             const previous = lastSequenceRef.current;
             // Gap 복구는 이벤트를 추측하지 않고 canonical REST snapshot을 다시 읽는다.
             if (sequence > previous + 1 && previous > 0) {
               void refresh();
-            } else if (sequence > previous || message.event_type === "operations.snapshot_required.v1") {
+            } else if (sequence > previous || eventType === "operations.snapshot_required.v1") {
               void refresh();
             }
-            if (Number.isFinite(sequence) && sequence > lastSequenceRef.current) {
+            if (sequence > lastSequenceRef.current) {
               lastSequenceRef.current = sequence;
             }
           } catch {
@@ -147,7 +170,7 @@ export function BffProvider({ children }: { children: ReactNode }) {
       if (active) void refresh();
     }, 0);
     const pollTimer = window.setInterval(() => {
-      if (active) void refresh();
+      if (active && document.visibilityState !== "hidden") void refresh();
     }, POLL_INTERVAL_MS);
     connect();
 

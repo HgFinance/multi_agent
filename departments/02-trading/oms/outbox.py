@@ -7,7 +7,7 @@
       docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 6.1
         "Event Bus는 at-least-once를 전제로 하며 Outbox 또는 동등한 재시도 가능한 발행,
          DLQ, 원인 코드를 사용한다"
-      supabase/migrations/20260806000100_execution_outbox.sql
+      supabase/migrations/20260806000300_execution_outbox.sql
 
 **`enqueue()`가 커서를 인자로 받는 것이 이 파일의 요지다.** 새 연결을 열 방법이
 시그니처에 없다 - 상태 변경과 다른 트랜잭션에서 기록하면 "Transactional" Outbox가

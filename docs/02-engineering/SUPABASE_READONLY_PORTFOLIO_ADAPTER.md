@@ -6,6 +6,7 @@
 - `strategy.versions.target_portfolio_schema`: 포트폴리오 후보 메타데이터
 - `research.documents`: Point-in-Time Research 근거
 - `execution.market_snapshots`: `as_of` 이전 시장 Snapshot
+- `reference.instruments` + `reference.instrument_symbols`: 국내 주식 canonical instrument와 PIT 유효 ticker
 - `accounting.portfolio_snapshots`: 선택된 `fund_id`의 회계 Snapshot
 
 모든 조회는 `as_of`/`observed_at`/`published_at` 컷오프를 적용한다. 후보 JSON에
@@ -31,6 +32,9 @@ python scripts/run_portfolio_supabase_readonly.py \
 `DATABASE_URL`/`SUPABASE_DATABASE_URL`이 없거나 DB 조회가 실패하면 결과는
 `SUPABASE_UNAVAILABLE` 또는 `DEGRADED/HOLD`로 끝난다. 자동으로 TEST 후보를
 대체하거나 외부 시스템에 쓰지 않는다.
+DB DSN이 설정된 경우 국내 주식 PIT instrument가 0건이어도 정적
+`portfolio_universes.json`을 사용하지 않고 `UNAVAILABLE/HOLD`로 종료한다.
+정적 fixture는 DB DSN이 없는 명시적 TEST 실행에서만 사용한다.
 
 연결과 PIT 데이터가 정상인 뒤에는 동일 `as_of`를 2~3회 반복해 추천·Risk/QA advisory 결과의 결정론적 Replay를 확인할 수 있다.
 

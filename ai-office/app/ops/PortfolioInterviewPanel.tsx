@@ -4,21 +4,25 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useBffFeed } from "./bffClient";
 import type { OperationsRuntime } from "./readModel";
 import {
-  decidePortfolioRecommendation,
   fetchPortfolioUniverses,
+  fetchPortfolioRecommendation,
   startPortfolioRecommendation,
   type PortfolioInterviewInput,
+  type PortfolioRunStatus,
   type PortfolioUniverseOption,
 } from "./portfolioClient";
 import {
   advanceMandateCase,
+  assertGovernanceCommandable,
   decideMandateApproval,
   fetchMandateApprovals,
+  fetchCurrentMandate,
   fetchMandateTimeline,
   submitMandateChange,
   type MandateApproval,
   type MandateChange,
 } from "./governanceClient";
+import { readPitReadiness, readablePitReason, readableRuntimeStatus } from "./statusLabels";
 
 type InstrumentRecommendation = {
   portfolio_id: string;
@@ -213,25 +217,28 @@ export function PortfolioKanban({
   );
 }
 
-export function PortfolioResultConsole() {
+export function PortfolioResultConsole({ run }: { run?: PortfolioRunStatus | null } = {}) {
   const { snapshot, refresh } = useBffFeed();
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [approvalError, setApprovalError] = useState("");
   const runtime = snapshot?.operations?.runtime;
-  const result = runtime?.result as RuntimeResult | null | undefined;
+  const runId = run?.run_id ?? runtime?.run_id;
+  const result = run
+    ? run.result as RuntimeResult | null
+    : runtime?.result as RuntimeResult | null | undefined;
   const recommendations = useMemo(() => asRecommendations(result?.suitability), [result?.suitability]);
   const domesticRows = useMemo(
     () => asInstrumentRecommendations(result?.instrument_recommendations).filter((item) => item.asset_class === "KOREA_EQUITY"),
     [result?.instrument_recommendations],
   );
-  if (!runtime?.run_id) return null;
+  if (!runId) return null;
 
   async function decide(decision: "APPROVE" | "REJECT") {
-    if (!runtime?.run_id) return;
+    if (!runId) return;
     setApprovalBusy(true);
     setApprovalError("");
     try {
-      await decidePortfolioRecommendation(runtime.run_id, decision);
+      await decidePortfolioRecommendation(runId, decision, run?.profile_user_id ?? runtime?.profile_user_id);
       await refresh();
     } catch (cause) {
       setApprovalError(cause instanceof Error ? cause.message : String(cause));
@@ -268,7 +275,7 @@ export function PortfolioResultConsole() {
           })}
         </div>
       )}
-      {runtime.approval?.status === "PENDING" && recommendations.length > 0 && (
+      {runtime?.run_id === runId && runtime.approval?.status === "PENDING" && recommendations.length > 0 && (
         <div className="ceo-recommendation-actions">
           <small>사용자 승인 후에도 주문·원장 변경은 수행하지 않습니다.</small>
           <div>
@@ -277,7 +284,7 @@ export function PortfolioResultConsole() {
           </div>
         </div>
       )}
-      {approvalError && <small className="form-error">⚠️ {approvalError}</small>}
+      {approvalError && <small className="form-error" role="alert">⚠️ {approvalError}</small>}
     </section>
   );
 }
@@ -422,6 +429,7 @@ type MandateWorkflowState = {
   change: MandateChange;
   approvals: MandateApproval[];
   versionObjectId: string | null;
+  policyHash: string | null;
 };
 
 const MANDATE_STAGE_LABEL: Record<string, string> = {
@@ -433,17 +441,37 @@ const MANDATE_STAGE_LABEL: Record<string, string> = {
   USER_REJECTED: "대표님 거절 · 안전 보류",
 };
 
+const APPROVAL_ROLE_LABEL: Record<string, string> = {
+  RISK: "Risk",
+  QA: "QA",
+  USER: "대표",
+};
+
 const TERMINAL_MANDATE_STAGES = new Set(["ACTIVATED", "FAST_APPLIED", "REVIEW_REJECTED", "USER_REJECTED", "CANCELLED"]);
+
+function approvalsNeedAdvance(stage: string, approvals: MandateApproval[]): boolean {
+  if (stage === "AWAITING_REVIEW") {
+    const reviews = approvals.filter((approval) => approval.required_role === "RISK" || approval.required_role === "QA");
+    return reviews.some((approval) => ["REJECTED", "EXPIRED", "REVOKED"].includes(approval.decision))
+      || reviews.length >= 2 && reviews.every((approval) => approval.decision === "APPROVED");
+  }
+  return stage === "AWAITING_USER_APPROVAL" && approvals.some((approval) => approval.required_role === "USER" && approval.decision !== "PENDING");
+}
 
 async function refreshMandateWorkflow(state: MandateWorkflowState): Promise<MandateWorkflowState> {
   if (!state.change.case_id) return state;
-  const change = await advanceMandateCase(state.change.case_id);
   const timeline = await fetchMandateTimeline(state.change.case_id);
   const versionObjectId = timeline.events
     .map((event) => event.payload.mandate_version_id)
     .find((value): value is string => typeof value === "string") ?? state.versionObjectId;
+  const policyHash = timeline.events
+    .map((event) => event.payload.policy_hash)
+    .find((value): value is string => typeof value === "string") ?? state.policyHash;
   const approvals = versionObjectId ? (await fetchMandateApprovals(versionObjectId)).approvals : state.approvals;
-  return { change, approvals, versionObjectId };
+  const change = approvalsNeedAdvance(state.change.stage, approvals)
+    ? await advanceMandateCase(state.change.case_id)
+    : state.change;
+  return { change, approvals, versionObjectId, policyHash };
 }
 
 function MandateWorkflowStatus({
@@ -471,13 +499,14 @@ function MandateWorkflowStatus({
       <p>{workflow.change.detail}</p>
       {workflow.approvals.length > 0 && (
         <div className="mandate-approval-statuses">
-          {workflow.approvals.map((approval) => <span key={approval.approval_id} className={`mandate-approval-status ${approval.decision.toLowerCase()}`}><b>{approval.required_role}</b> {approval.decision}</span>)}
+          {workflow.approvals.map((approval) => <span key={approval.approval_id} className={`mandate-approval-status ${approval.decision.toLowerCase()}`}><b>{APPROVAL_ROLE_LABEL[approval.required_role] ?? approval.required_role}</b> {readableRuntimeStatus(approval.decision)}</span>)}
         </div>
       )}
       {userApproval ? <div className="mandate-workflow-actions"><button type="button" className="btn btn-primary" onClick={() => onUserDecision("APPROVED")} disabled={busy}>대표 승인</button><button type="button" className="btn btn-ghost" onClick={() => onUserDecision("REJECTED")} disabled={busy}>거절</button></div> : null}
       {workflow.change.stage === "ACTIVATED" ? <button type="button" className="btn btn-primary mandate-analysis-button" onClick={onStartRecommendation} disabled={busy}>활성화된 Mandate로 분석 시작</button> : null}
+      {(workflow.change.stage === "AWAITING_REVIEW" || workflow.change.stage === "AWAITING_USER_APPROVAL") ? <div className="mandate-advisory-action"><button type="button" className="btn btn-ghost mandate-analysis-button" onClick={onStartRecommendation} disabled={busy}>승인 대기 중에도 자문 분석 시작</button><small>Governance 승인과 별개인 비구속 분석이며 주문·원장 변경은 없습니다.</small></div> : null}
       {workflow.change.case_id && workflow.change.stage !== "ACTIVATED" && !userApproval ? <button type="button" className="text-button" onClick={onRefresh} disabled={busy}>승인 상태 새로고침</button> : null}
-      {error ? <small className="form-error">⚠️ {error}</small> : null}
+      {error ? <small className="form-error" role="alert">⚠️ {error}</small> : null}
     </section>
   );
 }
@@ -495,12 +524,45 @@ export default function PortfolioInterviewPanel({
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [configured, setConfigured] = useState(false);
+  const [trace] = useState(traceId);
   const [editing, setEditing] = useState(false);
   const [workflow, setWorkflow] = useState<MandateWorkflowState | null>(null);
+  const [portfolioRun, setPortfolioRun] = useState<PortfolioRunStatus | null>(null);
   const [workflowError, setWorkflowError] = useState("");
+  const [backendMandate, setBackendMandate] = useState<{
+    current_version: number;
+    mandate_version_id: string | null;
+    policy_hash: string | null;
+    status: string;
+  } | null>(null);
   const runtime = snapshot?.operations?.runtime;
+  const pitReadiness = readPitReadiness(runtime);
   const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
   const connectionError = submitError || (!runtime?.run_id && error) || "";
+  const mandateBindingReady = Boolean(
+    (workflow?.versionObjectId ?? backendMandate?.mandate_version_id) &&
+    (workflow?.policyHash ?? backendMandate?.policy_hash),
+  );
+
+  useEffect(() => {
+    const runId = portfolioRun?.run_id;
+    if (!runId || ["COMPLETED", "DEGRADED", "HOLD", "FAILED", "CANCELLED"].includes(portfolioRun.status)) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const next = await fetchPortfolioRecommendation(runId, portfolioRun?.profile_user_id);
+        if (active) setPortfolioRun(next);
+      } catch (cause) {
+        if (active) setSubmitError(cause instanceof Error ? cause.message : String(cause));
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [portfolioRun?.run_id, portfolioRun?.status, portfolioRun?.profile_user_id]);
 
   useEffect(() => {
     const caseId = workflow?.change.case_id;
@@ -536,6 +598,16 @@ export default function PortfolioInterviewPanel({
       setConfigured(true);
     }, 0) : 0;
     let active = true;
+    void fetchCurrentMandate(saved?.mandate_id ?? DEFAULT_MANDATE_DRAFT.mandate_id).then((current) => {
+      if (active) {
+        setBackendMandate({
+          current_version: current.current_version,
+          mandate_version_id: current.mandate_version_id,
+          policy_hash: current.policy_hash,
+          status: current.status,
+        });
+      }
+    }).catch(() => undefined);
     void fetchPortfolioUniverses().then((payload) => {
       if (!active) return;
         const domestic = payload.universes.filter((item) => item.universe_id === "KOREA_EQUITY_WATCHLIST");
@@ -552,7 +624,7 @@ export default function PortfolioInterviewPanel({
     onConfigured?.();
   }
 
-  function recommendationInput(): PortfolioInterviewInput {
+  function recommendationInput(activeWorkflow: MandateWorkflowState | null = workflow): PortfolioInterviewInput {
     return {
       user_id: input.user_id,
       mindset: input.mindset,
@@ -566,11 +638,27 @@ export default function PortfolioInterviewPanel({
       include_stock: input.allowed_assets.stock,
       include_derivatives: input.allowed_assets.futures || input.allowed_assets.options || input.allowed_assets.derivatives,
       query: input.objective,
+      trace_id: trace,
+      mandate_id: input.mandate_id,
+      case_id: activeWorkflow?.change.case_id ?? undefined,
+      mandate_version_id: activeWorkflow?.versionObjectId ?? backendMandate?.mandate_version_id ?? undefined,
+      policy_hash: activeWorkflow?.policyHash ?? backendMandate?.policy_hash ?? undefined,
+      max_sector_weight_pct: input.max_sector_weight_pct,
+      max_gross_exposure_pct: input.max_gross_exposure_pct,
+      max_daily_loss_pct: input.max_daily_loss_pct,
+      allowed_asset_classes: Object.entries(input.allowed_assets).filter(([, allowed]) => allowed).map(([key]) => key.toUpperCase()),
+      forbidden_asset_classes: Object.entries(input.allowed_assets).filter(([, allowed]) => !allowed).map(([key]) => key.toUpperCase()),
     };
   }
 
-  async function startRecommendation() {
-    await startPortfolioRecommendation(recommendationInput());
+  async function startRecommendation(activeWorkflow: MandateWorkflowState | null = workflow) {
+    assertGovernanceCommandable(connection);
+    const request = recommendationInput(activeWorkflow);
+    if (!request.mandate_version_id || !request.policy_hash) {
+      throw new Error("활성 Mandate version과 policy hash 확인 후 분석을 시작할 수 있습니다.");
+    }
+    const started = await startPortfolioRecommendation(request);
+    setPortfolioRun(await fetchPortfolioRecommendation(started.run_id, input.user_id));
     await refresh();
     setConfigured(true);
     setEditing(false);
@@ -579,6 +667,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function submit(event?: FormEvent<HTMLFormElement>) {
+    assertGovernanceCommandable(connection);
     event?.preventDefault();
     setBusy(true);
     setSubmitError("");
@@ -604,24 +693,37 @@ export default function PortfolioInterviewPanel({
         priority: 50,
         review_expires_at: new Date(now.getTime() + 86_400_000).toISOString(),
         user_approval_ttl_seconds: 86_400,
-        version_created_by: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim() || input.user_id,
+        version_created_by: process.env.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID?.trim() || undefined,
         fund_base_currency: input.currency,
       });
       saveMandate(input, policy);
-      setWorkflow({ change, approvals: [], versionObjectId: null });
+      const submittedWorkflow: MandateWorkflowState = { change, approvals: [], versionObjectId: null, policyHash: null };
+      setWorkflow(submittedWorkflow);
+      setBackendMandate({
+        current_version: change.version,
+        mandate_version_id: null,
+        policy_hash: null,
+        status: change.stage,
+      });
       setConfigured(true);
       setEditing(false);
       onConfigured?.();
-      if (change.stage === "FAST_APPLIED") await startRecommendation();
+      if (change.stage === "FAST_APPLIED") {
+        const hydratedWorkflow = await refreshMandateWorkflow(submittedWorkflow);
+        setWorkflow(hydratedWorkflow);
+        await startRecommendation(hydratedWorkflow);
+      }
     } catch (cause) {
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
-      setEditing(true);
+      setConfigured(true);
+      setEditing(false);
     } finally {
       setBusy(false);
     }
   }
 
   async function decideUser(decision: "APPROVED" | "REJECTED") {
+    assertGovernanceCommandable(connection);
     const approval = workflow?.approvals.find((item) => item.required_role === "USER" && item.decision === "PENDING");
     if (!approval) return;
     setBusy(true);
@@ -636,7 +738,8 @@ export default function PortfolioInterviewPanel({
     }
   }
 
-  async function startActivatedRecommendation() {
+  async function startAnalysis() {
+    assertGovernanceCommandable(connection);
     setBusy(true);
     setSubmitError("");
     try {
@@ -661,43 +764,75 @@ export default function PortfolioInterviewPanel({
       <div className="win-body">
         <div className="section-heading portfolio-heading">
           <div><p className="eyebrow">USER INPUT → CEO ROUTER → RISK / QA GATE</p><h2 id="portfolio-interview-title">Mandate Configuration</h2></div>
-          <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : runtime?.status ?? connection.toUpperCase()}</span>
+          <span className={`status-pill ${configured ? "status-ready" : running ? "status-running" : ""}`}>{configured ? "설정 완료" : busy ? "요청 중" : running ? "실행 중" : readableRuntimeStatus(runtime?.status ?? connection)}</span>
         </div>
         <p className="dash-note portfolio-intro">기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.</p>
-        {workflow && <MandateWorkflowStatus workflow={workflow} busy={busy} error={workflowError} onRefresh={() => { if (workflow) void refreshMandateWorkflow(workflow).then(setWorkflow).catch((cause) => setWorkflowError(cause instanceof Error ? cause.message : String(cause))); }} onUserDecision={(decision) => void decideUser(decision)} onStartRecommendation={() => void startActivatedRecommendation()} />}
+        <p className="dash-note portfolio-source-note">{backendMandate ? `Governance 현재 상태(버전만 조회) · v${backendMandate.current_version} · ${readableRuntimeStatus(backendMandate.status)}` : "현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다."}</p>
+        {workflow && <MandateWorkflowStatus workflow={workflow} busy={busy} error={workflowError} onRefresh={() => { if (workflow) void refreshMandateWorkflow(workflow).then(setWorkflow).catch((cause) => setWorkflowError(cause instanceof Error ? cause.message : String(cause))); }} onUserDecision={(decision) => void decideUser(decision)} onStartRecommendation={() => void startAnalysis()} />}
         {configured && !editing ? (
           <div className="mandate-saved" aria-live="polite">
-            <div><span className="mini-badge mint">ONE-TIME SETUP</span><strong>{input.objective}</strong></div>
+            <div><span className="mini-badge mint">ONE-TIME SETUP</span><span className={`mini-badge ${backendMandate ? "mint" : "yellow"}`}>{backendMandate ? `GOVERNANCE v${backendMandate.current_version}` : "LOCAL DRAFT"}</span><strong>{input.objective}</strong></div>
             <dl><div><dt>성향</dt><dd>{MINDSET_OPTIONS.find((item) => item.value === input.mindset)?.label}</dd></div><div><dt>기준 자본</dt><dd>{Number(input.investment_amount).toLocaleString("ko-KR")} {input.currency}</dd></div><div><dt>단일 종목</dt><dd>{input.max_instrument_weight_pct}%</dd></div><div><dt>총 익스포저</dt><dd>{input.max_gross_exposure_pct}%</dd></div><div><dt>승인</dt><dd>{input.approval_mode === "AUTO" ? "자동" : "수동 승인"}</dd></div></dl>
-            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
+            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running || !mandateBindingReady}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
+            {!mandateBindingReady ? <small className="form-error">활성 Mandate가 없거나 version·policy hash를 아직 확인하지 못했습니다. 먼저 Mandate를 제출하고 Governance 승인을 완료하세요.</small> : null}
           </div>
         ) : (
           <form id="portfolio-interview-form" className="mandate-form" onSubmit={submit}>
-            <section className="mandate-form-section"><h3><span>1.</span> 목표 및 위험 성향</h3><div className="mandate-objective-grid"><label className="mandate-objective">투자 목표 <small>(자연어 입력)</small><textarea value={input.objective} onChange={(event) => setInput({ ...input, objective: event.target.value })} maxLength={2000} required /><small>구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다.</small></label><fieldset className="mandate-risk-options"><legend>위험 성향 <small>(하나 선택)</small></legend>{MINDSET_OPTIONS.map((item) => <label className={`mandate-risk-card ${input.mindset === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="mindset" value={item.value} checked={input.mindset === item.value} onChange={() => setInput({ ...input, mindset: item.value })} /><span className="mandate-risk-icon">{item.icon}</span><b>{item.label}</b><small>{item.copy}</small></label>)}</fieldset></div></section>
+            <section className="mandate-form-section"><h3><span>1.</span> 목표 및 위험 성향</h3><div className="mandate-objective-grid"><label className="mandate-objective">투자 목표 <small>(자연어 입력)</small><textarea value={input.objective} onChange={(event) => setInput({ ...input, objective: event.target.value })} maxLength={2000} required /><small>구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다.</small></label><fieldset className="mandate-risk-options"><legend>위험 성향 <small>(하나 선택)</small></legend>{MINDSET_OPTIONS.map((item) => <label className={`mandate-risk-card ${input.mindset === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="mindset" value={item.value} checked={input.mindset === item.value} onChange={() => setInput({ ...input, mindset: item.value })} /><span className="mandate-risk-icon" aria-hidden="true">{item.icon}</span><b>{item.label}</b><small>{item.copy}</small></label>)}</fieldset></div></section>
             <section className="mandate-form-section"><h3><span>2.</span> 자본 및 통화</h3><div className="mandate-inline-fields"><label>기준 자본 <small>(risk_bounds.base_capital)</small><input inputMode="decimal" min="1" value={input.investment_amount} onChange={(event) => setInput({ ...input, investment_amount: event.target.value })} required /></label><label>통화<select value={input.currency} onChange={(event) => setInput({ ...input, currency: event.target.value as PortfolioInterviewInput["currency"] })}><option value="KRW">KRW · 대한민국 원</option><option value="USD">USD · 달러</option><option value="EUR">EUR · 유로</option></select></label></div></section>
-            <section className="mandate-form-section"><h3><span>3.</span> 비중 한도 및 익스포저</h3><div className="mandate-range-grid"><label>최대 단일 종목 비중 <output>{input.max_instrument_weight_pct}%</output><input type="range" min="5" max="50" step="5" value={input.max_instrument_weight_pct} onChange={(event) => setInput({ ...input, max_instrument_weight_pct: Number(event.target.value) })} /><small>5%　　25%　　50%</small></label><label>최대 총 익스포저 <output>{input.max_gross_exposure_pct}%</output><input type="range" min="100" max="500" step="25" value={input.max_gross_exposure_pct} onChange={(event) => setInput({ ...input, max_gross_exposure_pct: Number(event.target.value) })} /><small>100%　　300%　　500%</small></label></div></section>
-            <section className="mandate-form-section"><h3><span>4.</span> 자산 정책 <small>(허용 vs 금지)</small></h3><div className="mandate-asset-grid">{ASSET_OPTIONS.map((item) => <button type="button" key={item.key} className={`mandate-asset-card ${input.allowed_assets[item.key] ? "allowed" : "blocked"}`} aria-pressed={input.allowed_assets[item.key]} onClick={() => toggleAsset(item.key)}><span>{item.icon}</span><b>{item.label}</b><small>{input.allowed_assets[item.key] ? "✓ 허용됨" : "× 금지됨"}</small></button>)}</div></section>
-            <section className="mandate-form-section"><h3><span>5.</span> 주문 승인 방식 <small>(approval_rules.paper_order_mode)</small></h3><div className="mandate-approval-grid">{([{ value: "AUTO", icon: "⚡", label: "자동 주문", copy: "정책에 따라 주문이 자동으로 실행됩니다." }, { value: "USER_APPROVAL", icon: "✋", label: "수동 승인 필요", copy: "모든 주문은 실행 전에 수동 승인이 필요합니다." }] as const).map((item) => <label className={`mandate-approval-card ${input.approval_mode === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="approval_mode" value={item.value} checked={input.approval_mode === item.value} onChange={() => setInput({ ...input, approval_mode: item.value })} /><span>{item.icon}</span><div><b>{item.label}</b><small>{item.copy}</small></div></label>)}</div></section>
+            <section className="mandate-form-section"><h3><span>3.</span> 비중 한도 및 익스포저</h3><div className="mandate-range-grid"><label><span className="mandate-range-head">최대 단일 종목 비중 <output>{input.max_instrument_weight_pct}%</output></span><input type="range" min="5" max="50" step="5" value={input.max_instrument_weight_pct} onChange={(event) => setInput({ ...input, max_instrument_weight_pct: Number(event.target.value) })} /><small>5%　　25%　　50%</small></label><label><span className="mandate-range-head">최대 총 익스포저 <output>{input.max_gross_exposure_pct}%</output></span><input type="range" min="100" max="500" step="25" value={input.max_gross_exposure_pct} onChange={(event) => setInput({ ...input, max_gross_exposure_pct: Number(event.target.value) })} /><small>100%　　300%　　500%</small></label></div></section>
+            <section className="mandate-form-section"><h3><span>4.</span> 자산 정책 <small>(허용 vs 금지)</small></h3><div className="mandate-asset-grid">{ASSET_OPTIONS.map((item) => <button type="button" key={item.key} className={`mandate-asset-card ${input.allowed_assets[item.key] ? "allowed" : "blocked"}`} aria-pressed={input.allowed_assets[item.key]} onClick={() => toggleAsset(item.key)}><span aria-hidden="true">{item.icon}</span><b>{item.label}</b><small>{input.allowed_assets[item.key] ? "✓ 허용됨" : "× 금지됨"}</small></button>)}</div></section>
+            <section className="mandate-form-section"><h3><span>5.</span> 주문 승인 방식 <small>(approval_rules.paper_order_mode)</small></h3><div className="mandate-approval-grid">{([{ value: "AUTO", icon: "⚡", label: "자동 주문", copy: "정책에 따라 주문이 자동으로 실행됩니다." }, { value: "USER_APPROVAL", icon: "✋", label: "수동 승인 필요", copy: "모든 주문은 실행 전에 수동 승인이 필요합니다." }] as const).map((item) => <label className={`mandate-approval-card ${input.approval_mode === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="approval_mode" value={item.value} checked={input.approval_mode === item.value} onChange={() => setInput({ ...input, approval_mode: item.value })} /><span aria-hidden="true">{item.icon}</span><div><b>{item.label}</b><small>{item.copy}</small></div></label>)}</div></section>
             <details className="portfolio-advanced mandate-advanced"><summary>고급 설정 · 에이전트가 대화로 확인할 세부 필드</summary><div className="portfolio-advanced-grid"><label>사용자 식별자<input value={input.user_id} onChange={(event) => setInput({ ...input, user_id: event.target.value })} required /></label><label>Mandate ID<input value={input.mandate_id} onChange={(event) => setInput({ ...input, mandate_id: event.target.value })} required /></label><label>Fund ID<input value={input.fund_id} onChange={(event) => setInput({ ...input, fund_id: event.target.value })} required /></label><label>분석 카테고리<select value={input.category} onChange={(event) => setInput({ ...input, category: event.target.value })}>{CATEGORY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>국내 주식 유니버스<select value={input.universe_id} onChange={(event) => setInput({ ...input, universe_id: event.target.value })} required>{universes.length > 0 ? universes.map((universe) => <option key={universe.universe_id} value={universe.universe_id}>{universe.name} · {universe.instrument_count}개</option>) : <option value="KOREA_EQUITY_WATCHLIST">국내 주식 Watchlist</option>}</select></label><label>투자 경험<select value={input.experience} onChange={(event) => setInput({ ...input, experience: event.target.value as PortfolioInterviewInput["experience"] })}><option value="BEGINNER">처음 접함</option><option value="INTERMEDIATE">어느 경험</option><option value="EXPERIENCED">경험 많음</option></select></label><label>투자 예정 기간(년)<input type="number" min="1" max="100" value={input.investment_horizon_years} onChange={(event) => setInput({ ...input, investment_horizon_years: Number(event.target.value) })} required /></label><label>누적 손실 감내율<input type="number" min="1" max="100" step="1" value={Number(input.max_drawdown_pct) * 100} onChange={(event) => setInput({ ...input, max_drawdown_pct: (Number(event.target.value) / 100).toFixed(4) })} required /><small>예: 10 = 최대 -10%</small></label><label>최대 섹터 비중(%)<input type="number" min="5" max="100" value={input.max_sector_weight_pct} onChange={(event) => setInput({ ...input, max_sector_weight_pct: Number(event.target.value) })} /></label><label>동시 보유 종목 수<input type="number" min="1" max="100" value={input.max_concurrent_positions} onChange={(event) => setInput({ ...input, max_concurrent_positions: Number(event.target.value) })} /></label><label>일일 최대 손실(%)<input type="number" min="0.1" max="20" step="0.1" value={input.max_daily_loss_pct} onChange={(event) => setInput({ ...input, max_daily_loss_pct: Number(event.target.value) })} /></label><label>허용 시장<input value={input.allowed_markets} onChange={(event) => setInput({ ...input, allowed_markets: event.target.value })} /></label><label>거래 시작<input type="time" value={input.trading_start} onChange={(event) => setInput({ ...input, trading_start: event.target.value })} /></label><label>거래 종료<input type="time" value={input.trading_end} onChange={(event) => setInput({ ...input, trading_end: event.target.value })} /></label></div></details>
             <div className="mandate-submit-row"><button type="button" className="btn btn-ghost" onClick={persist}>설정만 저장</button><button className="btn btn-primary portfolio-submit" type="submit" disabled={busy || running}>{busy ? "Mandate 제출 중…" : running ? "분석 실행 중…" : "Mandate 제출하고 검토 시작"}</button></div>
           </form>
         )}
-      {connectionError && (
-        <div className="form-error portfolio-error" role="alert">
-          <span>⚠️ {explainPortfolioConnectionError(connectionError)}</span>
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => {
-              setSubmitError("");
-              void refresh();
-            }}
-          >
-            연결 재시도
-          </button>
-        </div>
-      )}
+        {portfolioRun && (
+          <div className="runtime-result" role="status" aria-live="polite">
+            <strong>추천 실행 · {portfolioRun.status}</strong>
+            <span>run_id: {portfolioRun.run_id}</span>
+            <span>trace_id: {portfolioRun.trace_id || "미지정"}</span>
+            {portfolioRun.case_id ? <span>case_id: {portfolioRun.case_id}</span> : null}
+            {portfolioRun.mandate_id ? <span>mandate_id: {portfolioRun.mandate_id}</span> : null}
+            {portfolioRun.mandate_version_id ? <span>mandate_version_id: {portfolioRun.mandate_version_id}</span> : null}
+            {portfolioRun.policy_hash ? <span>policy_hash: {portfolioRun.policy_hash}</span> : null}
+            <span>input_hash: {portfolioRun.input_hash}</span>
+            {portfolioRun.phase ? <span>현재 단계: {portfolioRun.phase}</span> : null}
+            {portfolioRun.error ? <span className="form-error">{portfolioRun.error}</span> : null}
+          </div>
+        )}
+        {portfolioRun && <PortfolioResultConsole run={portfolioRun} />}
+        {connectionError && (
+          <div className="form-error portfolio-error" role="alert">
+            <span>⚠️ {explainPortfolioConnectionError(connectionError)}</span>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => {
+                setSubmitError("");
+                void refresh();
+              }}
+            >
+              연결 재시도
+            </button>
+          </div>
+        )}
         {runtime?.phase && <p className="runtime-phase"><b>현재 단계:</b> {runtime.phase}</p>}
+        {pitReadiness && pitReadiness.quality_status !== "PASS" && (
+          <div className="pit-diagnostic" role="status">
+            <strong>분석 입력 진단 · {pitReadiness.quality_status === "PASS" ? "준비됨" : "보류"}</strong>
+            <span>
+              후보 {pitReadiness.candidate_count ?? 0}개 · 연구 문서 {pitReadiness.research_document_count ?? 0}개 · 시장 스냅샷 {pitReadiness.market_snapshot_count ?? 0}개 · 국내 종목 {pitReadiness.domestic_instrument_count ?? 0}개
+            </span>
+            <small>확인 필요: {(pitReadiness.reasons ?? ["PIT_DATA_NOT_READY"]).slice(0, 3).map(readablePitReason).join(" · ")}</small>
+            <small>데이터를 확인한 뒤 저장된 Mandate로 안전하게 다시 요청할 수 있습니다.</small>
+            <div className="pit-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => void refresh()}>데이터 새로고침</button>
+              {!editing ? <button type="button" className="btn btn-ghost" onClick={() => { setEditing(true); window.requestAnimationFrame(() => document.getElementById("portfolio-interview-form")?.scrollIntoView({ behavior: "smooth", block: "start" })); }}>Mandate 설정 확인</button> : null}
+              <button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "분석 다시 시작"}</button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

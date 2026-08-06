@@ -304,6 +304,15 @@ export class Company {
     this.pushChat("staff", "김세리", "대표님, 비서실장 김세리입니다. 궁금한 건 여기에 바로 물어보세요.");
   }
 
+  setSimulationMode(enabled: boolean): void {
+    this.remoteRuntime = !enabled;
+    if (enabled) {
+      this.remoteRunId = null;
+      this.remoteWorkerIds.clear();
+      this.remoteMessageIds.clear();
+    }
+  }
+
   /**
    * Project the actual BFF LangGraph runtime into the pixel office.
    * No runtime event means no simulated work, movement, or dialogue.

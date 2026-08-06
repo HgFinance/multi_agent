@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from pathlib import Path
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
 )
+
+os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
@@ -38,8 +41,7 @@ def _catalog_row() -> dict:
             "max_drawdown_pct": "0.15",
             "max_exit_days": 14,
             "target_allocations": {
-                "GLOBAL_EQUITY": "0.60",
-                "SHORT_TERM_BOND": "0.40",
+                "KOREA_EQUITY": "1.00",
             },
             "evidence_refs": ["research:db-catalog:v1"],
             "as_of": AS_OF.isoformat(),
@@ -54,6 +56,24 @@ def test_supabase_adapter_reads_pit_context_without_writes() -> None:
 
     async def fetch(query: str, args: tuple[object, ...]):
         calls.append((query, args))
+        if "reference.instruments" in query:
+            return [
+                {
+                    "instrument_id": "instrument-1",
+                    "symbol": "005930",
+                    "exchange": "KRX",
+                    "name": "삼성전자",
+                    "instrument_type": "EQUITY",
+                    "asset_class": "KOREA_EQUITY",
+                    "currency": "KRW",
+                    "status": "ACTIVE",
+                    "market_snapshot_id": "market-1",
+                    "market_as_of": AS_OF,
+                    "last_price": "100.00",
+                    "quality_status": "PASS",
+                    "source_ref": "market-test",
+                }
+            ]
         if "strategy.versions" in query:
             return [_catalog_row()]
         if "research.documents" in query:
@@ -96,10 +116,12 @@ def test_supabase_adapter_reads_pit_context_without_writes() -> None:
     assert [item["portfolio_id"] for item in snapshot.candidates] == ["db-balanced"]
     assert snapshot.research_context["status"] == "LIVE"
     assert snapshot.market_context["status"] == "LIVE"
+    assert snapshot.market_context["instrument_universe"]["status"] == "LIVE"
+    assert snapshot.market_context["instrument_universe"]["instruments"][0]["symbol"] == "005930"
     assert snapshot.accounting_context["status"] == "LIVE"
     assert snapshot.read_only is True
     assert snapshot.external_writes is False
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert all(query.lstrip().startswith("SELECT") for query, _ in calls)
     assert all(args[-1] == AS_OF for _, args in calls)
 
@@ -132,6 +154,24 @@ def test_missing_database_configuration_is_safe(monkeypatch) -> None:
 
 def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> None:
     async def fetch(query: str, args: tuple[object, ...]):
+        if "reference.instruments" in query:
+            return [
+                {
+                    "instrument_id": "instrument-1",
+                    "symbol": "005930",
+                    "exchange": "KRX",
+                    "name": "삼성전자",
+                    "instrument_type": "EQUITY",
+                    "asset_class": "KOREA_EQUITY",
+                    "currency": "KRW",
+                    "status": "ACTIVE",
+                    "market_snapshot_id": "market-1",
+                    "market_as_of": AS_OF,
+                    "last_price": "100.00",
+                    "quality_status": "PASS",
+                    "source_ref": "market-test",
+                }
+            ]
         if "strategy.versions" in query:
             return [_catalog_row()]
         if "research.documents" in query:
@@ -225,6 +265,15 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
         not item["output"]["summary"].startswith("TEST")
         for item in result["worker_reports"]
     )
+    assert result["pipeline_events"]
+    assert result["pipeline_event_count"] == len(result["pipeline_events"])
+    for stage, expected_skipped in (("research", 6), ("risk", 4), ("qa", 5), ("ceo", 1)):
+        report = result["department_reports"][stage]
+        assert report["executed"] == 0
+        assert report["completed"] == 0
+        assert report["skipped_safe"] == expected_skipped
+        assert report["failed_count"] == 0
+        assert report["skip_reason"] == "LIVE_DATA_NOT_READY"
 
 
 def test_preflight_reports_missing_dsn_without_connecting_legacy_duplicate(

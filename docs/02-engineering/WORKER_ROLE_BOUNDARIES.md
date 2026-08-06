@@ -25,13 +25,15 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
 | HR | 5 | 2 | 3 | 업무량·Profile·성과·Lifecycle·SoD 유지 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
-| Trading | 6 | 2 | 4 | Thesis·OrderIntent·제약·집행·비용·파생 유지 |
+| Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
 | Risk | 4 | 2 | 2 | 기존 통합 완료; 추가 감원 없음 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
 | Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
 | QA | 5 | 1 | 4 | 기존 통합 완료; 추가 감원 없음 |
 
-총 42개 Worker와 8개 Hermes Profile이다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 38개(트레이딩 강등 전 42개)와 8개 Hermes Profile, 그리고 결정론 Worker 1개(`desk-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+
+**표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
 ## 부서별 역할과 병합 판정
 
@@ -70,6 +72,33 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 - **Notion**: 부서별 Reporter와 Markdown-to-Notion block 변환기는 어댑터다. 실제 업로드는 `NOTION_TOKEN`과 부서별 DB ID가 설정되고 API 호출이 성공한 경우에만 `upload_succeeded=true`로 본다. Notion은 Projection이며 원본 판정을 소유하지 않는다.
 - **LangSmith**: 일부 부서의 handoff 필드는 존재하지만 기본 tracing은 꺼져 있다. 환경변수·자격증명·DNS·네트워크가 모두 확인되고 민감 필드 마스킹을 통과한 실제 run만 trace 성공으로 본다. 코드나 API Key의 존재만으로 연결 완료로 표시하지 않는다.
 - **PIKE-RAG / Light-RAG**: 현재 전사 적용 완료가 아니다. Risk의 Policy RAG, Research의 Evidence RAG, QA의 Evidence/Hallucination Audit 범위를 우선 유지하고, PIKE/LightRAG는 corpus·평가셋·운영비용이 준비될 때 제한적으로 도입한다.
+
+## Risk·QA Worker 기술 스택·역할·성과 계약
+
+이 절은 역할 문서와 실행 코드의 드리프트를 막기 위한 명시적 계약이다. 상세 메타데이터의 Source of Truth는 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)이며, 각 부서의 `WORKER_SPECS`가 해당 프로필을 반드시 참조한다. 문서에 적힌 기술은 권한을 확장하지 않는다. Risk·QA Worker의 출력은 `worker-context.v1` advisory이고, 주문·Risk 승인·원장·QA Finding 종결을 직접 수행하지 않는다.
+
+공통 실행 경로는 `allow-listed read/calculation tool → 결정론적 guard/skill → Pydantic context/result 검증 → 필요한 경우 Ollama qwen3:1.7b advisory → trace/replay`다. Risk의 `pre-trade-risk-worker`와 Risk Engine 사이에는 RAG·외부 HTTP·재시도형 LLM을 넣지 않는다. Compliance와 Hallucination만 증거가 필요한 경우 Agentic RAG 경로를 사용하며, PIT·ACL·citation·provenance 검증이 실패하면 `DEGRADED/HOLD/ESCALATE`로 끝낸다.
+
+### Risk 본부
+
+| Worker | 역할과 실행 조건 | 기술 스택과 사용 방식 | 입력·도구 | 성과 지표 |
+|---|---|---|---|---|
+| `market-liquidity-worker` | 시장·유동성 상태 분석; 항상 실행 | LangGraph StateGraph, Pydantic `RiskSkillContext/Result`, TradingState·P1 snapshot adapter, Redis read model, Ollama advisory. PIT/freshness를 먼저 확인하고 HALTED·stale·timeout은 신규 진입 차단 방향으로 요약 | `risk.trading_state.read`, `risk.p1.snapshot`, 시장/포트폴리오 snapshot | freshness pass rate, stale-block rate, snapshot fan-in latency, replay completeness |
+| `pre-trade-risk-worker` | 사전 Risk Gate 분석; 항상 실행 | LangGraph deterministic graph, Pydantic `OrderIntent/RiskContext`, `RiskEngine`, idempotency·fail-closed guard. LLM/RAG 없이 같은 입력에 같은 결과를 만들고 설명만 advisory로 생성 | `risk.case.check` | deterministic decision consistency, gate latency, invalid-intent rejection rate, fail-closed coverage |
+| `compliance-policy-worker` | PIT 정책 근거 분석; compliance evidence가 있을 때만 실행 | LangGraph conditional RAG, PIT/ACL filter, pgvector·BM25 hybrid retrieval, rerank, citation/provenance verifier, Ollama grounded summary. PIKE/LightRAG는 평가 후 도입할 후보 | `risk.compliance.check`, research documents/policies read-only | citation coverage, grounded rate, PIT violation catch rate, escalation precision, RAG latency |
+| `derivatives-counterparty-worker` | 파생·상대방·증거금 노출 분석; 관련 신호가 있을 때만 실행 | LangGraph StateGraph, TradingState record adapter, deterministic exposure/state-uncertainty check, Broker/FCM reconciliation, Ollama advisory. Greeks·margin·counterparty 상태 누락은 승인으로 보간하지 않음 | `risk.trading_state.record.read` | missing-state detection rate, exposure reconciliation coverage, counterparty escalation rate, tool latency |
+
+### AI QA·감사 본부
+
+| Worker | 역할과 실행 조건 | 기술 스택과 사용 방식 | 입력·도구 | 성과 지표 |
+|---|---|---|---|---|
+| `evidence-qa-worker` | 인용·근거 품질의 1차 검사; 항상 실행 | LangGraph `EvidenceQAEngine`, Pydantic QA context/result, PIT·provenance·numeric temporal checker, RunJournal. PASS/WARN/FAIL은 결정론적 엔진이 정하고 LLM은 설명만 생성 | `qa.evidence.check`, claim checks, research packet, evidence refs | citation coverage, claim verification rate, unsupported claim rate, QA latency |
+| `hallucination-critic-worker` | unsupported/contradicted claim 비판; 해당 claim이 있을 때만 실행 | LangGraph conditional graph, Agentic RAG retrieval/rerank, contradiction·prompt-injection·provenance guard, Ollama critique. 새 자료를 임의 수집하지 않고 제출된 evidence를 우선 비교하며 미해결이면 ESCALATE | `qa.evidence.rag`, claim checks, source evidence | unsupported detection rate, contradiction detection rate, false-clear rate, critique latency |
+| `model-and-internal-audit-worker` | 모델 위험·내부통제 점검; audit input이 있을 때만 실행 | LangGraph, deterministic `ModelRiskEngine`·`InternalAuditEngine`, SoD/권한 검사, RunJournal append-only trace, Ollama 설명 | `qa.model_risk.evaluate`, `qa.internal_audit.evaluate` | model drift detection, audit finding coverage, SoD violation catch rate, audit latency |
+| `ops-and-permission-worker` | 운영 건강성·도구 권한 점검; ops/permission input이 있을 때만 실행 | LangGraph, `OpsHealthMonitor`, `ToolPermissionCheck`, allowlist·scope·department·SoD·cost/latency 검사, Ollama 설명 | `qa.ops.evaluate`, `qa.tool_permission.check` | permission violation catch rate, unauthorized-call rate, queue/model health, check latency |
+| `incident-postmortem-worker` | Incident timeline·재발방지 분석; incident가 있을 때만 실행 | LangGraph, `IncidentTimeline`, `RunJournal`, FACT/INFERENCE 분리, replay metadata, Ollama 요약. incident 기록은 append-only이며 Finding 종결 권한은 없음 | `qa.incident.record`, incident events | timeline completeness, root-cause evidence coverage, recurrence-control coverage, postmortem latency |
+
+조건부 Worker는 자유 텍스트만으로 실행하지 않는다. 해당 구조화 입력과 trigger가 함께 있어야 실행하며, 입력이 없으면 `not_executed/SKIPPED_SAFE`로 남긴다. 이는 성능 저하가 아니라 근거 없는 QA·Risk 판정을 막는 안전장치다. 외부 쓰기(`risk.trading_state.write`, QA corrective-action close 등)는 별도 인증·SoD·idempotency API 경계에 있으며 이 Worker Registry와 포트폴리오 추천 파이프라인에서는 사용하지 않는다.
 
 ## 검증 명령
 

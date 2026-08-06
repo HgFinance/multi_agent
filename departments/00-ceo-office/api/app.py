@@ -23,8 +23,10 @@ Stream을 소비해 report.ready.v1/risk.breach.v1 등을 알림으로 바꾸는
 mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_NON_NOTIFICATION_EVENTS).
 
 스펙과 의도적으로 다른 부분(투명하게 남긴다, 조용히 어기지 않는다):
-  - GET /governance/v1/mandates/{fund_id}/current(스펙 2.1)는 fund_id -> mandate_id 역참조
-    쿼리가 아직 없어(accounting-api 미구현) mandate_id로 대신 조회한다.
+  - GET /governance/v1/mandates/{mandate_id}/current는 canonical binding과 정책 snapshot을
+    함께 반환한다. fund_id 기준 GET .../mandates/by-fund/{fund_id}/current는 canonical
+    Repository가 역참조를 제공할 때만 단일 Mandate를 반환하며, 구형 Prototype에서는
+    임의 선택하지 않고 503으로 닫는다.
   - POST .../versions는 In-Memory Repository일 때 Fund 기준 통화를 accounting-api에서
     조회할 수 없으므로, 요청에 fund_base_currency를 선택 필드로 받아 seed한다(데모용,
     Postgres Repository를 쓸 때는 무시 - 실제 accounting.funds를 그대로 조회한다).
@@ -36,6 +38,7 @@ mandate.changed.v1 같은 다른 본부용 Event는 조용히 넘긴다(_KNOWN_N
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import sys
@@ -44,7 +47,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -52,6 +55,24 @@ from pydantic import BaseModel, Field
 # 위치(cwd)나 uvicorn --app-dir 여부와 무관). 이미 설정된 프로세스 환경변수는 덮어쓰지
 # 않는다(override=False 기본값) - 배포 환경 값이 항상 우선한다.
 load_dotenv()
+GOVERNANCE_API_AUTH_REQUIRED = os.getenv(
+    "GOVERNANCE_API_AUTH_REQUIRED", "false"
+).casefold() in {"1", "true", "yes", "on"}
+GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
+
+
+def _require_internal_auth(
+    x_governance_internal_token: str | None = Header(default=None),
+) -> None:
+    """Enforce the deployment-provided service identity for canonical reads."""
+    if not GOVERNANCE_API_AUTH_REQUIRED:
+        return
+    if not GOVERNANCE_API_AUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="governance_auth_not_configured")
+    if not x_governance_internal_token or not hmac.compare_digest(
+        x_governance_internal_token, GOVERNANCE_API_AUTH_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="governance_auth_required")
 
 _BASE = Path(__file__).resolve().parent.parent
 _MANDATE_DIR = _BASE / "src" / "mandate"
@@ -67,6 +88,11 @@ for _p in (
 ):
     sys.path.insert(0, str(_p))
 
+from actor_identity import (
+    InMemoryActorIdentityRepository,
+    UnverifiedActorUserError,
+    verify_actor_user,
+)
 from approval import (
     AlreadyDecidedError,
     ApprovalDecision,
@@ -88,6 +114,12 @@ from approval import (
 from approval import (
     revoke as revoke_approval,
 )
+from actor_identity import (
+    ActorUserStatus,
+    InMemoryActorIdentityRepository,
+    UnverifiedActorUserError,
+    verify_actor_user,
+)
 from case_root import (
     CaseEvent,
     CaseRecord,
@@ -102,8 +134,14 @@ from case_root import (
 from case_root import (
     transition as transition_case,
 )
+from change_workflow import (
+    CaseAlreadyResolvedError,
+    ChangeRequestResult,
+    MandateChangeWorkflow,
+    NotAMandateChangeCaseError,
+    ReviewApprovalMissingError,
+)
 from committee import (
-    CommitteeDecision,
     CommitteeDecisionRecord,
     CommitteeSession,
     DuplicateVoteError,
@@ -112,7 +150,6 @@ from committee import (
     InvalidQuorumPolicyError,
     QuorumPolicy,
     SelfReviewError,
-    SessionStatus,
     Vote,
     VoteDecision,
 )
@@ -148,24 +185,19 @@ from escalation import (
 from escalation import (
     transition as transition_escalation,
 )
-from change_workflow import (
-    CaseAlreadyResolvedError,
-    ChangeRequestResult,
-    MandateChangeWorkflow,
-    NotAMandateChangeCaseError,
-    ReviewApprovalMissingError,
-)
+from langgraph.checkpoint.memory import InMemorySaver
 from lifecycle import (
     ActivationResult,
     MandateActivationService,
     UserApproval,
 )
+from mandate_assistant import AssistantMessage as _AssistantMessage
+from mandate_assistant import suggest as _mandate_assistant_suggest
 from notification import (
     InMemoryNotificationRepository,
     NotificationRequest,
     NotificationService,
 )
-from langgraph.checkpoint.memory import InMemorySaver
 from policy import MandatePolicy
 from service import (
     ChangeDirection,
@@ -199,9 +231,15 @@ except ImportError:
     PostgresReportRunRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_notification_repository import PostgresNotificationRepository
+    from postgres_notification_repository import (
+        NotificationPersistenceError,
+        PostgresNotificationRepository,
+    )
 except ImportError:
     PostgresNotificationRepository = None  # type: ignore[assignment,misc]
+
+    class NotificationPersistenceError(RuntimeError):  # type: ignore[no-redef]
+        pass
 
 try:
     from postgres_approval_repository import PostgresApprovalRepository
@@ -222,6 +260,11 @@ try:
     from postgres_committee_repository import PostgresCommitteeRepository
 except ImportError:
     PostgresCommitteeRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from actor_identity import PostgresActorIdentityRepository
+except ImportError:
+    PostgresActorIdentityRepository = None  # type: ignore[assignment,misc]
 
 _GOVERNANCE_EVENTS_DIR = _BASE / "governance_events"
 sys.path.insert(0, str(_GOVERNANCE_EVENTS_DIR))
@@ -254,6 +297,19 @@ class ProposeVersionRequest(BaseModel):
         description="In-Memory Repository 데모용 seed - accounting-api 없이 통화 검증하려면 채운다. "
                     "Postgres Repository를 쓸 때는 무시하고 accounting.funds를 그대로 조회한다.",
     )
+
+
+class SuggestRequestIn(BaseModel):
+    """POST /governance/v1/mandate-assistant/suggest (USER_INPUT_API_SPEC.md 2.4).
+
+    Stateless - fund_id는 미래에 Fund별 컨텍스트(허용 자산군 등)를 프롬프트에
+    반영할 자리로만 받아두고 아직 쓰지 않는다. messages/current_draft만 실제로
+    LLM 제안을 만든다.
+    """
+
+    fund_id: str
+    messages: list[_AssistantMessage] = Field(min_length=1)
+    current_draft: dict | None = None
 
 
 class ApprovalIn(BaseModel):
@@ -553,6 +609,16 @@ if os.environ.get("DATABASE_URL") and PostgresCommitteeRepository is not None:
 else:
     committee_repo = InMemoryCommitteeRepository()
 
+# P0-1(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md v2.0) - actor_user_id 실재성 검증.
+# 서명된 Subject 인증(mTLS/JWT)은 아직 없다(Platform/IAM 선행 과제, actor_identity.py
+# 모듈 docstring 참고) - 팀 합의로 governance.user_profiles에 심어둔 테스트 회원을
+# "로그인된 사용자"로 간주하고, actor_user_id가 그 행을 실제로 가리키는지(존재 + ACTIVE)만
+# 검증한다. 이전에는 빈 문자열만 아니면 통과했다.
+if os.environ.get("DATABASE_URL") and PostgresActorIdentityRepository is not None:
+    actor_identity_repo = PostgresActorIdentityRepository.connect(os.environ["DATABASE_URL"])
+else:
+    actor_identity_repo = InMemoryActorIdentityRepository()
+
 # HITL Mandate 변경 워크플로 (change_workflow.py) - 위 5개 Repository/Service를 그대로
 # 재사용한다. 별도 저장소를 새로 만들지 않는다 - "승인 대기의 진실은 governance.approvals다"
 # 라는 그 모듈의 설계상, 이 오케스트레이터는 "실행이 어디서 멈췄는지"만 checkpointer에 둔다.
@@ -758,6 +824,13 @@ def _on_missing_actor_user(request, exc: MissingActorUserError):
     })
 
 
+@app.exception_handler(UnverifiedActorUserError)
+def _on_unverified_actor_user(request, exc: UnverifiedActorUserError):
+    return JSONResponse(status_code=403, content={
+        "error_code": "UnverifiedActorUserError", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(IllegalCaseTransition)
 def _on_illegal_case_transition(request, exc: IllegalCaseTransition):
     return JSONResponse(status_code=409, content={
@@ -828,6 +901,17 @@ def _on_value_error(request, exc: ValueError):
 def _on_mandate_persistence_error(request, exc: MandatePersistenceError):
     return JSONResponse(status_code=409, content={
         "error_code": "MANDATE_PERSISTENCE_ERROR", "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+# P0-2(2026-08-05) - 이전엔 핸들러가 없어 DB 오류가 원시 스택트레이스 500으로 새나갔다.
+# "의존 서비스 오류는 BLOCKED/ESCALATE다"(TEAM_YOUNGJU_CEO_HR_GUIDE.md P0-2) 원칙대로
+# 503로 닫는다 - 발송 성공으로 오인될 수 있는 200을 절대 내지 않는다.
+@app.exception_handler(NotificationPersistenceError)
+def _on_notification_persistence_error(request, exc: NotificationPersistenceError):
+    return JSONResponse(status_code=503, content={
+        "error_code": "NOTIFICATION_PERSISTENCE_ERROR", "message": str(exc), "detail": {},
+        "trace_id": None,
     })
 
 
@@ -927,10 +1011,118 @@ def activate_version(mandate_id: str, version: int, body: ActivateRequest):
     }
 
 
-@app.get("/governance/v1/mandates/{mandate_id}/current")
+@app.get(
+    "/governance/v1/mandates/{mandate_id}/current",
+    dependencies=[Depends(_require_internal_auth)],
+)
 def get_mandate_current(mandate_id: str):
+    """Return the canonical binding and the available Mandate snapshot.
+
+    The portfolio BFF consumes ``mandate_version_id`` and ``policy_hash`` as
+    the binding contract.  The user-input API also needs the policy itself,
+    so keep both contracts in one response instead of making callers choose
+    between two incompatible shapes.  Older repository implementations may
+    not expose ``get`` yet; in that case the canonical binding remains
+    available and an ACTIVE mandate fails closed when its binding is absent.
+    """
     version, status = _mandate_repo.get_mandate_current(mandate_id)
-    return {"mandate_id": mandate_id, "current_version": version, "status": status}
+    if version <= 0:
+        return {"mandate_id": mandate_id, "current_version": version, "status": status}
+    mandate_version_id = (
+        _mandate_repo.get_mandate_version_id(mandate_id, version)
+        if version > 0 else None
+    )
+    policy_hash = (
+        _mandate_repo.get_mandate_content_hash(mandate_id, version)
+        if version > 0 else None
+    )
+    if status == "ACTIVE" and (not mandate_version_id or not policy_hash):
+        raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
+    response = {
+        "mandate_id": mandate_id,
+        "case_id": None,
+        "current_version": version,
+        "mandate_version_id": mandate_version_id,
+        "policy_hash": policy_hash,
+        "status": status,
+    }
+
+    get_version = getattr(_mandate_repo, "get", None)
+    row = get_version(mandate_id, version) if callable(get_version) else None
+    if row is not None:
+        response.update({
+            "effective_from": row.effective_from.isoformat(),
+            "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+            "content_hash": row.content_hash,
+            "objective_text": row.objective_text,
+            "objective": row.objective,
+            "policy": {
+                "allowed_assets": row.allowed_assets,
+                "forbidden_assets": row.forbidden_assets,
+                "risk_bounds": row.risk_bounds,
+                "universe_policy": row.universe_policy,
+                "approval_rules": row.approval_rules,
+                "execution_rules": row.execution_rules,
+            },
+        })
+    return response
+
+
+@app.get(
+    "/governance/v1/mandates/by-fund/{fund_id}/current",
+    dependencies=[Depends(_require_internal_auth)],
+)
+def get_mandate_current_by_fund(fund_id: str):
+    """Resolve a Fund to exactly one Mandate without choosing arbitrarily.
+
+    ``mandate_ids_for_fund`` is supplied by the canonical repository.  The
+    explicit 503 fallback keeps older prototype repositories fail-closed
+    instead of silently returning a stale or guessed Mandate.
+    """
+    lookup = getattr(_mandate_repo, "mandate_ids_for_fund", None)
+    if not callable(lookup):
+        raise HTTPException(status_code=503, detail="mandate_fund_lookup_unavailable")
+    mandate_ids = lookup(fund_id)
+    if not mandate_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"fund_id={fund_id}에 연결된 Mandate가 없습니다",
+        )
+    if len(mandate_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"fund_id={fund_id}에 Mandate가 {len(mandate_ids)}개 있어 단일 조회가 모호합니다: "
+                f"{mandate_ids}"
+            ),
+        )
+    return get_mandate_current(mandate_ids[0])
+
+
+# --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
+#
+# USER_INPUT_API_SPEC.md 2.4. Stateless - 이 endpoint 는 governance.mandate_versions나
+# 다른 어떤 테이블도 쓰지 않는다. LLM 실패는 500 으로 전파하지 않고 빈 제안 +
+# 안내 reply 로 감싼다(mandate_assistant.py docstring "왜 Schema 위반 시 예외를
+# 던지는가" 참고) - 채팅 UI가 LLM 장애 한 번으로 멈추면 안 된다.
+
+
+@app.post("/governance/v1/mandate-assistant/suggest")
+def mandate_assistant_suggest(body: SuggestRequestIn):
+    """Stateless Mandate 제안. LLM 장애는 빈 제안으로 fail-closed한다."""
+    try:
+        result = _mandate_assistant_suggest(
+            messages=body.messages, current_draft=body.current_draft,
+        )
+    except ValueError:
+        raise
+    except Exception:
+        _logger.exception("Mandate assistant 제안 실패 (fund_id=%s)", body.fund_id)
+        return {
+            "reply": "죄송합니다, 지금은 제안을 만들 수 없습니다. 직접 입력해 주세요.",
+            "suggestions": [], "requires_user_confirmation": True, "dropped_fields": [],
+        }
+    return result.model_dump()
 
 
 # --- 2.1b HITL Mandate 변경 워크플로 (change_workflow.py) --------------------------
@@ -957,8 +1149,15 @@ def submit_change_request(mandate_id: str, body: SubmitChangeRequestIn):
     /approvals/{id}/decide로 결정할 때마다 POST .../cases/{case_id}/advance를 다시
     불러야 한다(재개가 아니라 매번 새로 판단하는 짧은 호출).
     """
-    if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
-        _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
+    if isinstance(_mandate_repo, InMemoryMandateVersionRepository):
+        # The canonical repository records this relation from governance.mandates.
+        # Prototype repositories that do not yet expose set_fund_id simply keep
+        # the older mandate-change behavior; they must not guess a Fund later.
+        set_fund_id = getattr(_mandate_repo, "set_fund_id", None)
+        if callable(set_fund_id):
+            set_fund_id(mandate_id, body.fund_id)
+        if body.fund_base_currency:
+            _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
 
     result = mandate_change_workflow.submit(
         mandate_id=mandate_id, fund_id=body.fund_id, policy=body.policy,
@@ -1419,7 +1618,13 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
     CEO Office가 호스팅하는 API지만 required_role=RISK/QA인 승인은 CEO Office가 결정할 수
     없다(CLAUDE.md 권한 경계). 만료·중복 결정도 409로 막고 어떤 경로로도 APPROVED로
     자동 승격되지 않는다.
+
+    actor_user_id가 있으면(주로 required_role=USER, HITL 사용자 승인) P0-1 게이트를 먼저
+    통과해야 한다 - governance.user_profiles에 실재하는 ACTIVE 계정이어야 한다(위 모듈
+    "팀 합의" 참고, 서명된 인증은 아니다).
     """
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = decide_approval(
         _load_approval(approval_id), decision=body.decision,
         actor_department=body.actor_department, at=body.at,
@@ -1432,7 +1637,12 @@ def decide_approval_endpoint(approval_id: str, body: ApprovalDecisionIn):
 
 @app.post("/governance/v1/approvals/{approval_id}/revoke")
 def revoke_approval_endpoint(approval_id: str, body: ApprovalRevokeIn):
-    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다."""
+    """이미 내준 승인을 철회한다. APPROVED만 REVOKED가 될 수 있고 사유가 필수다.
+
+    actor_user_id가 있으면 decide와 같은 P0-1 게이트를 거친다.
+    """
+    if body.actor_user_id:
+        verify_actor_user(actor_identity_repo.get_status(body.actor_user_id), body.actor_user_id)
     updated = revoke_approval(
         _load_approval(approval_id), actor_department=body.actor_department, at=body.at,
         reason=body.reason, actor_agent_id=body.actor_agent_id,
@@ -1485,6 +1695,12 @@ if __name__ == "__main__":
         committee_repo = InMemoryCommitteeRepository()
     if not isinstance(_mandate_checkpointer, InMemorySaver):
         _mandate_checkpointer = InMemorySaver()
+    if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
+        actor_identity_repo = InMemoryActorIdentityRepository()
+    # 자체 점검이 쓰는 테스트 로그인 Identity를 미리 심어둔다(P0-1 게이트가 이제 실재성을
+    # 검사하므로, 임의 문자열은 더 이상 통과하지 않는다).
+    actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
+    actor_identity_repo.seed("user-1")
     mandate_change_workflow = MandateChangeWorkflow(
         version_repo=_mandate_repo, version_service=mandate_service,
         activation_service=activation_service, approval_repo=approval_repo, case_repo=case_repo,
@@ -1528,13 +1744,36 @@ if __name__ == "__main__":
     })
     assert r3.status_code == 200 and r3.json()["activated"] is False, r3.text
 
-    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인.
+    # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인(2026-08-06부터 policy 포함).
     r4 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
         "direction": "NEUTRAL", "at": now, "approval": {"approved_by": "u1", "trace_id": "t1"},
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
-    assert r5.json() == {"mandate_id": "m1", "current_version": 1, "status": "ACTIVE"}
+    body5 = r5.json()
+    assert body5["mandate_id"] == "m1"
+    assert body5["case_id"] is None
+    assert body5["current_version"] == 1
+    assert body5["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m1", 1)
+    assert body5["policy_hash"] == _mandate_repo.get_mandate_content_hash("m1", 1)
+    assert body5["status"] == "ACTIVE"
+    assert body5["content_hash"] == body5["policy_hash"]
+    assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1"
+    assert body5["objective_text"] == "장기 성장"
+    assert body5["policy"]["universe_policy"]["allowed_markets"] == ["KRX"]
+    assert isinstance(body5["content_hash"], str) and len(body5["content_hash"]) == 64
+
+    r5b = client.get("/governance/v1/mandates/never-proposed/current")
+    assert r5b.json() == {"mandate_id": "never-proposed", "current_version": 0, "status": "DRAFT"}
+
+    _mandate_repo.set_fund_id("m1", "f1")
+    r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
+    assert r5d.status_code == 404, r5d.text
+    _mandate_repo.set_fund_id("m1b", "f1")
+    r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
+    assert r5e.status_code == 409, r5e.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={
@@ -1669,6 +1908,23 @@ if __name__ == "__main__":
     })
     assert d_user.status_code == 200 and d_user.json()["decision"] == "APPROVED", d_user.text
     assert d_user.json()["actor_user_id"] == "00000000-0000-4000-8000-00000000cec0"
+
+    # 15c. P0-1 - governance.user_profiles에 실재하지 않는 actor_user_id는 403(비어있지 않은
+    # 문자열이라는 것만으로 통과하던 이전 상태보다 좁힌 검증). 존재하는 사용자는 여전히 통과.
+    a5b = client.post("/governance/v1/approvals", json={
+        "object_type": "MANDATE_VERSION", "object_id": "mv-user-2",
+        "required_role": "USER", "fund_id": "f1",
+    })
+    assert a5b.status_code == 200, a5b.text
+    d_ghost = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "00000000-0000-0000-0000-000000000000",
+    })
+    assert d_ghost.status_code == 403 and d_ghost.json()["error_code"] == "UnverifiedActorUserError", \
+        d_ghost.text
+    d_real = client.post(f"/governance/v1/approvals/{a5b.json()['approval_id']}/decide", json={
+        "decision": "APPROVED", "at": now, "actor_user_id": "user-1",
+    })
+    assert d_real.status_code == 200, d_real.text
 
     # 16. Case 생성 - OPEN + display_id 자동 생성 + timeline 1건.
     c1 = client.post("/governance/v1/cases", json={
@@ -1870,14 +2126,18 @@ if __name__ == "__main__":
         == "2026-08-03T00:00:00+00:00"
     user_approval_id_m3 = next(a["approval_id"] for a in user_pending_m3 if a["required_role"] == "USER")
     du = client.post(f"/governance/v1/approvals/{user_approval_id_m3}/decide", json={
-        "decision": "APPROVED", "actor_user_id": "u1", "at": now,
+        "decision": "APPROVED", "actor_user_id": "user-1", "at": now,
     })
     assert du.status_code == 200, du.text
     r33 = client.post(f"/governance/v1/cases/{case_id_m3}/advance", json={"at": now})
     assert r33.status_code == 200 and r33.json()["stage"] == "ACTIVATED", r33.text
-    assert client.get("/governance/v1/mandates/m3/current").json() == {
-        "mandate_id": "m3", "current_version": 1, "status": "ACTIVE",
-    }
+    m3_current = client.get("/governance/v1/mandates/m3/current").json()
+    assert m3_current["mandate_id"] == "m3"
+    assert m3_current["case_id"] is None
+    assert m3_current["current_version"] == 1
+    assert m3_current["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m3", 1)
+    assert m3_current["policy_hash"] == _mandate_repo.get_mandate_content_hash("m3", 1)
+    assert m3_current["status"] == "ACTIVE"
 
     # 32. TIGHTEN — 이미 활성 v1이 있으니 승인 없이 즉시 적용(FAST_APPLIED), Case 없음.
     # v1의 effective_to가 v1의 effective_from(now)보다 뒤여야 한다(DDL check) - 같은 시각을
@@ -1899,5 +2159,26 @@ if __name__ == "__main__":
 
     print("ok - HITL 변경요청/advance API 3개 시나리오 통과 (최초활성화·TIGHTEN즉시적용·재advance차단)")
 
-    print("ok - CEO Office Domain API 34개 시나리오 점검 통과 "
-          "(승인 9개 + Case Root 5개 + 에스컬레이션 4개 + 위원회 6개 + HITL 변경요청 3개 포함)")
+    # 34. Mandate assistant - 정상 응답(FastAPI TestClient는 실제 anthropic 호출 없이
+    # mandate_assistant._anthropic_call이 ANTHROPIC_API_KEY 부재로 RuntimeError를 내는
+    # 경로를 그대로 태운다 - 즉 이 자체 점검은 "LLM 실패 시 500이 아니라 빈 제안으로
+    # 감싼다"는 계약을 실제로 검증한다).
+    r36 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [{"role": "user", "content": "10년 정도 투자할 생각이에요"}],
+    })
+    assert r36.status_code == 200, r36.text
+    body36 = r36.json()
+    assert body36["requires_user_confirmation"] is True
+    assert body36["suggestions"] == [] and body36["dropped_fields"] == []
+    assert "제안을 만들 수 없습니다" in body36["reply"]
+
+    # 34b. 빈 messages는 422(Pydantic min_length).
+    r37 = client.post("/governance/v1/mandate-assistant/suggest", json={
+        "fund_id": "f1", "messages": [],
+    })
+    assert r37.status_code == 422, r37.text
+    print("ok - Mandate assistant suggest API 통과 (LLM 실패를 500이 아니라 빈 제안으로 감쌈, 빈 messages 422)")
+
+    print("ok - CEO Office Domain API 36개 시나리오 점검 통과 "
+          "(승인 10개(P0-1 actor_user_id 실재성 포함) + Case Root 5개 + 에스컬레이션 4개 + "
+          "위원회 6개 + HITL 변경요청 3개 + Mandate assistant 2개 포함)")

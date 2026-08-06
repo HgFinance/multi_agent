@@ -46,7 +46,7 @@ test("server-renders the HgFinance organization projection", async () => {
 });
 
 test("keeps the current organization and Risk/QA bridge wired", async () => {
-  const [config, page, layout, staff, world, packageJson, riskQaBridge, sim] = await Promise.all([
+  const [config, page, layout, staff, world, packageJson, riskQaBridge, sim, departmentPanel, communicationPanel] = await Promise.all([
     readFile(new URL("../company.config.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -55,6 +55,8 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/riskQaBridge.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/game/sim.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/ops/RiskQaPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ops/DepartmentCommunicationPanel.tsx", import.meta.url), "utf8"),
   ]);
 
   const departmentBlock = config.match(/export const DEPARTMENTS = \[(?<departments>[\s\S]*?)\] as const/);
@@ -77,9 +79,15 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   }
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
-  assert.match(page, /<RiskQaPanel/);
+  assert.match(page, /<DepartmentRuntimePanel/);
   assert.match(page, /<DepartmentCommunicationPanel/);
+  assert.match(page, /부서원 실행 상태/);
+  assert.match(page, /EMPLOYEE TRACE/);
   assert.match(page, /<BffProvider>/);
+  assert.match(page, /대표 Dashboard/);
+  assert.match(page, /Operations Console/);
+  assert.match(page, /Paper 제출 경계/);
+  assert.match(page, /대표의 명시적 승인이 모두 확인되기 전에는 프론트에서 Paper Order를 만들지 않습니다/);
   assert.match(layout, /title: COMPANY\.pageTitle/);
   assert.match(layout, /<html lang="ko">/);
   assert.match(staff, /STAFF_LIST\.map/);
@@ -96,13 +104,21 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.match(riskQaBridge, /orchestrator: "Hermes"/);
   assert.match(riskQaBridge, /employeeExecutor: "LangGraph"/);
   assert.match(riskQaBridge, /InputSnapshot/);
+  assert.match(departmentPanel, /전체 부서 실행 현황/);
+  assert.match(departmentPanel, /8 DEPARTMENTS/);
+  assert.match(departmentPanel, /all-department-grid/);
+  assert.match(communicationPanel, /부서 내부 실행 추적/);
+  assert.match(communicationPanel, /agent\.status\.v1/);
+  assert.match(communicationPanel, /실제 직원별 작업 상태/);
+  assert.match(communicationPanel, /LangSmith/);
 });
 
 test("keeps the one-time Mandate setup as the portfolio analysis entry point", async () => {
-  const [page, panel, client] = await Promise.all([
+  const [page, panel, client, css] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/PortfolioInterviewPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/ops/portfolioClient.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /type View = "live" \| "dashboard" \| "mandate"/);
@@ -121,6 +137,12 @@ test("keeps the one-time Mandate setup as the portfolio analysis entry point", a
   assert.match(panel, /submitMandateChange/);
   assert.match(panel, /MandateWorkflowStatus/);
   assert.match(panel, /활성화된 Mandate로 분석 시작/);
+  assert.match(panel, /승인 대기 중에도 자문 분석 시작/);
+  assert.match(panel, /approvalsNeedAdvance/);
+  assert.match(panel, /version_created_by: process\.env\.NEXT_PUBLIC_GOVERNANCE_ACTOR_USER_ID\?\.trim\(\) \|\| undefined/);
+  assert.match(panel, /현재 설정은 브라우저 초안/);
+  assert.match(css, /\.assistant-bubble p[^}]*font-size: 14px/);
+  assert.match(css, /\.portfolio-advanced-grid label/);
   assert.match(panel, /className="ticker"/);
   assert.doesNotMatch(client, /liquidity_need/);
 });

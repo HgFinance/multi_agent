@@ -88,6 +88,10 @@ class RejectReason(StrEnum):
     STALE_SNAPSHOT = "stale_snapshot"
     MARKET_NOT_TRADABLE = "market_not_tradable"
     OUTSIDE_MANDATE = "outside_mandate"
+    FORBIDDEN_ASSET_CLASS = "forbidden_asset_class"
+    EXCLUDED_SECTOR = "excluded_sector"
+    SECTOR_LIMIT = "sector_limit"
+    MANDATE_METADATA_MISSING = "mandate_metadata_missing"
     RESTRICTED_INSTRUMENT = "restricted_instrument"
     NOTIONAL_BELOW_MINIMUM = "notional_below_minimum"
     NOTIONAL_ABOVE_MAXIMUM = "notional_above_maximum"
@@ -121,6 +125,13 @@ class MandateScope:
     allowed_instrument_ids: frozenset[UUID] | None  # None이면 유니버스 전체 허용
     min_order_notional: Decimal
     max_order_notional: Decimal
+    max_instrument_weight: Decimal | None = None
+    max_sector_weight: Decimal | None = None
+    max_gross_exposure: Decimal | None = None
+    allowed_asset_classes: frozenset[str] | None = None
+    forbidden_asset_classes: frozenset[str] = frozenset()
+    preferred_sectors: frozenset[str] = frozenset()
+    excluded_sectors: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,9 @@ class PortfolioState:
     issuer_exposure: dict[str, Decimal] = field(
         default_factory=dict
     )  # issuer -> notional
+    instrument_asset_class: dict[UUID, str] = field(default_factory=dict)
+    instrument_sector: dict[UUID, str] = field(default_factory=dict)
+    sector_exposure: dict[str, Decimal] = field(default_factory=dict)
     realized_pnl_today: Decimal = Decimal(0)
     unrealized_pnl_today: Decimal = Decimal(0)
     peak_equity: Decimal = Decimal(0)
@@ -353,6 +367,49 @@ class RiskEngine:
             )
         checks.append(CheckOutcome("mandate", True))
 
+        # Governance mandate metadata is binding for entry decisions. Missing
+        # metadata is a fail-closed condition when the mandate uses a filter.
+        asset_class = ctx.portfolio.instrument_asset_class.get(intent.instrument_id)
+        if ctx.mandate.allowed_asset_classes or ctx.mandate.forbidden_asset_classes:
+            if not asset_class:
+                return reject(
+                    "mandate_asset_class",
+                    RejectReason.MANDATE_METADATA_MISSING,
+                    "자산군 정보가 없어 Mandate 자산군 제약을 검증할 수 없습니다",
+                )
+            if (
+                ctx.mandate.allowed_asset_classes is not None
+                and asset_class not in ctx.mandate.allowed_asset_classes
+            ):
+                return reject(
+                    "mandate_asset_class",
+                    RejectReason.OUTSIDE_MANDATE,
+                    f"자산군 {asset_class}가 허용 자산군 밖입니다",
+                )
+            if asset_class in ctx.mandate.forbidden_asset_classes:
+                return reject(
+                    "mandate_asset_class",
+                    RejectReason.FORBIDDEN_ASSET_CLASS,
+                    f"자산군 {asset_class}는 Mandate에서 금지되었습니다",
+                )
+            checks.append(CheckOutcome("mandate_asset_class", True))
+
+        sector = ctx.portfolio.instrument_sector.get(intent.instrument_id)
+        if ctx.mandate.excluded_sectors:
+            if not sector:
+                return reject(
+                    "mandate_sector",
+                    RejectReason.MANDATE_METADATA_MISSING,
+                    "섹터 정보가 없어 Mandate 섹터 제약을 검증할 수 없습니다",
+                )
+            if sector in ctx.mandate.excluded_sectors:
+                return reject(
+                    "mandate_sector",
+                    RejectReason.EXCLUDED_SECTOR,
+                    f"섹터 {sector}는 Mandate에서 제외되었습니다",
+                )
+            checks.append(CheckOutcome("mandate_sector", True))
+
         # 4. Restricted List와 Compliance Policy.
         for item in ctx.restricted_items:
             if item.instrument_id != intent.instrument_id or not item.applies_at(
@@ -462,7 +519,54 @@ class RiskEngine:
                 "매수 여력/보유 수량 한도를 적용하면 남는 수량이 없습니다",
             )
 
-        # 7. 단일 종목·Issuer Concentration (Long만 가정 - 공매도 미인증).
+        # 7. Governance sector cap (Long entry only; missing metadata fails closed).
+        if intent.side == Side.BUY and ctx.mandate.max_sector_weight is not None:
+            exposure_base = (
+                ctx.portfolio.equity
+                if ctx.portfolio.equity > 0
+                else ctx.portfolio.gross_exposure
+            )
+            if not sector or exposure_base <= 0:
+                return reject(
+                    "sector_limit",
+                    RejectReason.MANDATE_METADATA_MISSING,
+                    "섹터 한도 검증에 필요한 섹터 또는 Gross Exposure가 없습니다",
+                )
+            current_sector_exposure = ctx.portfolio.sector_exposure.get(
+                sector, Decimal(0)
+            )
+            projected_sector_exposure = (
+                current_sector_exposure + allowed_qty * ref_price
+            )
+            sector_pct = projected_sector_exposure / exposure_base
+            if sector_pct > ctx.mandate.max_sector_weight:
+                max_allowed_notional = max(
+                    Decimal(0),
+                    ctx.mandate.max_sector_weight * exposure_base
+                    - current_sector_exposure,
+                )
+                capped_qty = (max_allowed_notional / ref_price).quantize(
+                    Decimal(1), rounding=ROUND_DOWN
+                )
+                if capped_qty < allowed_qty:
+                    allowed_qty = capped_qty
+                    reasons.append(RejectReason.SECTOR_LIMIT)
+                    checks.append(
+                        CheckOutcome(
+                            "sector_limit",
+                            True,
+                            f"{sector} 섹터 한도로 {allowed_qty}주로 축소",
+                        )
+                    )
+                if allowed_qty <= 0:
+                    return reject(
+                        "sector_limit",
+                        RejectReason.RESIZED_TO_ZERO,
+                        "섹터 한도를 적용하면 남는 수량이 없습니다",
+                    )
+            checks.append(CheckOutcome("sector_limit", True))
+
+        # 8. 단일 종목·Issuer Concentration (Long만 가정 - 공매도 미인증).
         issuer = ctx.portfolio.issuer_of_instrument(intent.instrument_id)
         signed_notional = (
             allowed_qty * ref_price * (1 if intent.side is Side.BUY else -1)

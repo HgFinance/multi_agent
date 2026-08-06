@@ -390,11 +390,11 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 ### 10.5 BFF 유니버스·자유 질의 라우팅
 
-`GET /ui/portfolio-universes`는 프론트가 종목 목록을 직접 하드코딩하지 않도록 백엔드가 소유한 선택 가능한 투자 유니버스 메타데이터를 반환한다. 현재 국내 Research Watchlist를 포함한 국내·글로벌 혼합 유니버스는 `TEST` 상태이며, 근거 없는 예상 수익률을 임의로 채우지 않는다.
+`GET /ui/portfolio-universes`는 프론트가 종목 목록을 직접 하드코딩하지 않도록 백엔드가 소유한 선택 가능한 투자 유니버스 메타데이터를 반환한다. 현재 선택 가능한 유니버스는 국내 주식 `KOREA_EQUITY_WATCHLIST` 하나이며, 정적 목록은 DB가 없는 TEST 실행에서만 사용한다. 근거 없는 예상 수익률을 임의로 채우지 않는다.
 
 `POST /ui/portfolio-recommendations`는 구조화된 적합성 입력과 함께 `universe_id`와 자유 형식 `query`를 받을 수 있다. 백엔드는 원문을 보존하고 안전한 범위의 CEO task plan을 만들어 필요한 부서만 Worker Graph를 호출한다. 결과의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 기록된다. Query rewriting은 부서 선택·설명에만 사용하며 주문, Risk 승인, 원장 변경을 만들 수 없다.
 
-추천 결과의 `instrument_recommendations`는 `symbol`, `exchange`, `name`, `target_weight`, `target_amount`, `expected_return`, `expected_return_status`, `expected_return_basis`, `data_status`를 포함한다. `TEST` 또는 PIT 검증 시장 근거가 없는 상태에서 `expected_return`은 `null`이어야 하며 수익률 보장 문구를 표시하지 않는다.
+추천 결과의 `instrument_recommendations`는 `portfolio_id`, `symbol`, `exchange`, `name`, `asset_class`, `currency`, `target_weight`, `target_amount`, `expected_return`, `expected_return_status`, `expected_return_basis`, `data_status`, `evidence_refs`를 포함한다. `TEST` 또는 PIT 검증 시장 근거가 없는 상태에서 `expected_return`은 `null`이어야 하며 수익률 보장 문구를 표시하지 않는다.
 
 ### 10.5 자유 쿼리·카테고리 라우팅 Projection
 
@@ -402,14 +402,22 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 - `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL` 중 하나다.
 - `include_stock`: 주식 종목·배분 표시 여부이며 기본값은 `true`다.
-- `include_derivatives`: 파생상품 종목·배분 표시 여부이며 기본값은 `true`다.
+- `include_derivatives`: 파생상품 종목·배분 표시 여부이며 현재 국내 주식 전용 범위에서는 기본값이 `false`다.
 - `query`: 사용자가 자유롭게 작성하는 투자 질문·조건이다. 빈 문자열이어도 되며, 카테고리와 구조화된 프로필만으로 기본 라우팅한다.
 
-프론트엔드 공개 자산 Projection은 주식과 파생상품만 포함한다. 채권·현금성 자산은 `instrument_recommendations`와 사용자 화면에 노출하지 않는다. 두 토글이 모두 꺼지면 종목 결과는 `UNAVAILABLE`, `safe_action`은 `HOLD`가 된다.
+프론트엔드 공개 자산 Projection은 현재 국내 주식만 포함한다. 파생상품 토글은 계약 호환성을 위해 유지하지만 국내 주식 전용 유니버스에서는 후보를 만들지 않는다. 채권·현금성 자산은 `instrument_recommendations`와 사용자 화면에 노출하지 않는다. 두 토글이 모두 꺼지거나 PIT 국내 종목이 없으면 종목 결과는 `UNAVAILABLE`, `safe_action`은 `HOLD`가 된다.
 
 CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `query`의 의도를 결정론적으로 정규화한다. 응답의 `task_plan`에는 `original_query`, `rewritten_query`, `requested_departments`, `matched_terms`가 포함된다. 이는 부서·Worker 배정과 설명을 위한 값이며 주문, Risk 승인, 원장 변경을 실행하지 않는다.
 
 `GET /ui/snapshot`의 `operations.runtime`는 `run_id`, `active_workers`, 부서별 `status`, `department_reports`, 최근 실행 메시지를 제공한다. 프론트엔드는 이를 Kanban Projection으로 표시하며, `SKIPPED` 부서는 요청 범위에 포함되지 않은 부서로 표시한다. 실행이 완료된 뒤에도 결과의 출처는 새 `run_id`로 식별하며 캐시된 금융 상태로 간주하지 않는다.
+
+## 10.6 BFF 응답·수치·국내 유니버스 계약 보완
+
+- BFF 포트폴리오 경로의 `POST /ui/portfolio-recommendations`, `GET /ui/portfolio-recommendations/{run_id}`, `POST /ui/portfolio-recommendations/{run_id}/approval`, `GET /ui/portfolio-universes`는 `apps/api/portfolio_schemas.py`의 Pydantic response DTO를 사용한다. 외부 응답 envelope와 `result` core는 `extra=forbid`이며, 새 필드는 DTO·OpenAPI·계약 테스트를 함께 갱신하는 additive change로만 추가한다.
+- `max_drawdown_pct`는 퍼센트가 아닌 비율이다. `0.10`은 최대 손실률 10%를 뜻하며 `10`은 유효하지 않다. 허용 범위는 `0 < value <= 1`이다.
+- 현재 제품 범위는 국내 주식이며, 기본 `KOREA_EQUITY_WATCHLIST`는 `KOREA_EQUITY`만 노출하고 채권·글로벌 주식·파생상품·현금성 자산을 후보 목록에 포함하지 않는다.
+- Supabase live 실행에서는 `reference.instruments`와 `reference.instrument_symbols`를 `execution.market_snapshots`와 Point-in-Time 조인해 티커를 만든다. 연결 실패나 PIT 종목 부재 시 정적 TEST 카탈로그로 조용히 대체하지 않고 `UNAVAILABLE/HOLD`로 종료한다.
+- Worker 모델 실행은 `PORTFOLIO_WORKER_RUNTIME=ollama`, `OLLAMA_BASE_URL=http://localhost:11434/v1`, `OLLAMA_CHAT_MODEL=qwen3:1.7b`를 사용한다. Ollama 장애·계약 오류는 `DEGRADED/HOLD`이며 자동 승격하지 않는다.
 
 ## 11. 연계 문서
 
