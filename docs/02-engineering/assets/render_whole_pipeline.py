@@ -126,8 +126,8 @@ def main() -> None:
 
     dept_box(draw, 40, 160, "1", "Research", "Employees: 6 Workers", "2 always + 4 conditional", "Output: research_packet")
     dept_box(draw, 390, 160, "2", "Trading", "Employees: 6 Workers", "2 always + 4 conditional", "Output: order_intent")
-    dept_box(draw, 740, 160, "3", "Risk Management", "Employees: 4 Workers", "2 always + 2 conditional", "", gate="DETERMINISTIC RISK GATE")
-    dept_box(draw, 1090, 160, "6", "AI QA / Audit", "Employees: 5 Workers", "1 always + 4 conditional", "", gate="DETERMINISTIC EVIDENCE QA GATE")
+    dept_box(draw, 740, 160, "3", "Risk Management", "Employees: 2 Workers", "1 LLM + 1 deterministic", "", gate="DETERMINISTIC RISK GATE")
+    dept_box(draw, 1090, 160, "6", "AI QA / Audit", "Employees: 3 Workers", "2 LLM + 1 deterministic", "", gate="DETERMINISTIC EVIDENCE QA GATE")
 
     arrow(draw, [(340, 260), (390, 260)])
     label(draw, 365, 238, "research_packet", 12, "#1d4ed8", True, "mm")

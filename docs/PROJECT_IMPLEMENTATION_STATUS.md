@@ -6,7 +6,7 @@
 
 > **Risk/QA 보안 보정(2026-08-05)**: Worker Scope fail-closed, QA runtime 미설정 DENY, Risk/QA 명령 인증과 공통 Replay contract는 `IMPLEMENTED`/`TEST_VERIFIED`다. Redis 두 Decision Event Replay probe와 rollback형 DB/Event smoke, Risk/QA Compose 기동·formal healthcheck는 `RUNTIME_VERIFIED`다. Claude 환경에서 Risk/QA 전체 `ruff check`·`ruff format --check`가 통과했고 참조 없는 legacy Worker Graph·구형 fixture·중복 Counterparty self-check를 제거했다. Production preflight는 Event Redis와 Research Packet URL을 명시적으로 요구하며, 실제 API·PostgreSQL Decision/Case Replay, 승인 Corpus, 전역 Issuer·mTLS·IAM 매핑은 여전히 `BLOCKED`다.
 
-> 전사 런타임 기준(2026-08-03): 8개 부서장은 Hermes + Codex/Claude Code, 직원은 직원별 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. Registry는 CEO 1·HR 5·Research 6·Trading 7·Risk 4·Quant 7·Accounting 8·QA 5다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 실제 실행 수는 각 Profile의 `workers`와 `runtime_personalities`로 판정한다.
+> 전사 런타임 기준(2026-08-06): 8개 부서장은 Hermes + Codex/Claude Code다. LLM Worker Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant 7·Accounting 8·QA 2이고, 결정론 runner는 Trading/Risk/QA 각 1개(`desk-runner`·`risk-runner`·`qa-runner`)다. 따라서 실제 직원 수는 부서별 1·5·6·3·2·7·8·3, 총 35명이다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 현재 실행 수는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
@@ -234,7 +234,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 - 운영 Credential에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 비어 있다.
 - Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:1.7b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
 - QA/Risk Script의 직원 Ollama 주소·모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수로 주입된다. 실제 Ollama Health와 응답 증거는 운영 전 별도 확인한다.
-- Risk·QA의 기존 14개 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 실제 실행 직원 수는 Risk 4개·QA 5개 Worker Registry다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.
+- Risk·QA의 기존 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 현재 실행 직원 수는 Risk 2명(LLM 1 + `risk-runner`)·QA 3명(LLM 2 + `qa-runner`)이다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.
 - 생성 보고서의 Git 보존 여부, Canonical Artifact Storage, Report Hash와 Notion Idempotency 정책이 미확정이다.
 
 **다음 작업**

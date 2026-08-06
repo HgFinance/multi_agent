@@ -31,9 +31,10 @@ ResearchPacket fixture
 ```
 
 **2026-08-06 tool 강등**: 이 TEST 파이프라인(`departments/risk_qa_testkit/pipeline.py`)은 `WORKER_SPECS`
-LLM Worker만 시뮬레이션한다. `core-risk-worker`·`derivatives-counterparty-worker`(risk)와
-`evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`(qa)는 결정론
-`risk-runner`/`qa-runner`로 흡수돼 `WORKER_SPECS` 밖으로 빠졌다 — 이 TEST 시뮬레이션 대상이 아니다.
+LLM Worker만 시뮬레이션한다. Risk의 LLM 대상은 `compliance-policy-worker` 1개이고, QA의 LLM 대상은
+`hallucination-critic-worker`·`incident-postmortem-worker` 2개다. 시장·유동성·Counterparty Risk와
+Evidence·Model Risk·Internal Audit·Ops·Permission 검사는 결정론 `risk-runner`/`qa-runner`로 실행돼
+`WORKER_SPECS` 밖에 있다 — 두 runner는 실제 부서 실행 경로에서 별도로 검증한다.
 러너는 부서의 실제 실행 경로(`risk_employee_workers.run_employee_workers()`/
 `qa_employee_workers.run_employee_workers()`)에서만 항상 실행된다.
 
@@ -69,8 +70,8 @@ TEST에서 다음을 확인한다.
 
 - `pipeline_status=COMPLETED`
 - `manual_review_required=true`는 fixture의 QA `WARN`을 의미하며, 파이프라인 실행 완료와 QA PASS를 혼동하지 않게 한다.
-- Risk `risk-supervisor`가 4개 Worker를 위임하고 4개 Worker Graph가 실행됨
-- QA `qa-audit-supervisor`가 5개 Worker를 위임하고 5개 Worker Graph가 실행됨
+- Risk `risk-supervisor`가 1개 LLM Worker와 `risk-runner` 결정론 경로를 위임·실행함
+- QA `qa-audit-supervisor`가 2개 LLM Worker와 `qa-runner` 결정론 경로를 위임·실행함
 - Risk/QA 각각의 `handoffs`에 Head delegation 1개와 peer context handoff가 기록됨
 - Risk Head → QA Head department handoff가 같은 `trace_id`와 `input_hash`로 기록됨
 - 모든 Worker에 `skill_results`, `trace.events`, `trace_id`, `input_hash`가 존재함
