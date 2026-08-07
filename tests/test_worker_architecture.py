@@ -136,7 +136,11 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 2026-08-07: back-office-runner 흡수로 05-accounting-portfolio 8 -> 1. 회계는
     # 헌장상(마스터플랜 19.12) 에이전트 일이 "예외 조사와 설명" 하나뿐이라 도메인별로
     # 나뉘어 있던 7명이 전부 결정론 전달 계층이었다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않는다 —
+    # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
+    # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너를 새로 만들
+    # 필요도 없었다. 0 을 "설정 누락"으로 읽지 않는다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -153,7 +157,10 @@ def test_profile_worker_registry_counts_and_models() -> None:
         assert config["employee_runtime"]["max_attempts"] == 3
         assert config["model"]["provider"] == "openai-codex"
         assert config["model"]["default"] == "gpt-5.6-luna"
-        runtime_personalities = config["agent"].get("runtime_personalities") or registry["runtime_personalities"]
+        # `or` 로 폴백하면 빈 목록(직원 없는 부서)이 "키 없음"으로 잘못 읽힌다 - None 만 폴백한다.
+        runtime_personalities = config["agent"].get("runtime_personalities")
+        if runtime_personalities is None:
+            runtime_personalities = registry["runtime_personalities"]
         assert set(runtime_personalities) == set(workers)
 
 
@@ -292,7 +299,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
     """Keep the approved head/worker topology explicit and reviewable."""
     expected = {
         "ceo": (1, 1, 0),
-        "hr": (5, 2, 3),
+        "hr": (0, 0, 0),
         "research": (6, 2, 4),
         # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
         # desk-runner 가 결정론으로 항상 모아 온다.

@@ -40,7 +40,9 @@ def load_worker_specs(repo_root: Path, department: str) -> tuple[Any, ...]:
         raise EmployeeDispatchError(f"department_worker_registry_missing:{department}")
     module = _load_module(repo_root, department, relative_path)
     specs = getattr(module, "WORKER_SPECS", None)
-    if not isinstance(specs, tuple) or not specs:
+    # 빈 tuple 은 허용한다 - "직원 LLM 계층을 두지 않는 부서"(HR, 2026-08-07)와 "registry 가
+    # 깨졌다"를 구분해야 한다. 속성 자체가 없거나 tuple 이 아니면 여전히 고장이다.
+    if not isinstance(specs, tuple):
         raise EmployeeDispatchError(f"worker_specs_missing:{department}")
     if any(not getattr(spec, "worker_id", None) for spec in specs):
         raise EmployeeDispatchError(f"worker_spec_invalid:{department}")
