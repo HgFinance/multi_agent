@@ -144,16 +144,118 @@ class LawApiClient:
             },
         )
 
-    def get_law(self, law_id: str) -> dict[str, Any]:
-        """Fetch a law body by its Law.go.kr identifier."""
+    def get_law(self, law_id: str = "", *, mst: str = "") -> dict[str, Any]:
+        """Fetch a law body by its Law.go.kr 법령ID (ID) or 법령일련번호 (MST).
+
+        Pass exactly one of `law_id` (법령ID, stable across revisions) or `mst`
+        (법령일련번호, a specific revision's serial number — what search_laws
+        returns as `법령일련번호`, e.g. the value used to build 법령상세링크).
+        """
 
         law_id = law_id.strip()
-        if not law_id:
-            raise ValueError("law_id must not be empty")
+        mst = mst.strip()
+        if bool(law_id) == bool(mst):
+            raise ValueError("exactly one of law_id or mst must be provided")
+        params: dict[str, str | int] = {"target": "law"}
+        params["MST" if mst else "ID"] = mst or law_id
+        return self._get_json("/DRF/lawService.do", params=params)
+
+    def search_admrul(
+        self, query: str, *, page: int = 1, display: int = 20
+    ) -> dict[str, Any]:
+        """Search current administrative rules (행정규칙, e.g. 금융투자업규정)."""
+
+        query = query.strip()
+        if not query:
+            raise ValueError("query must not be empty")
+        if page < 1 or display < 1:
+            raise ValueError("page and display must be positive")
+        return self._get_json(
+            "/DRF/lawSearch.do",
+            params={
+                "target": "admrul",
+                "query": query,
+                "page": page,
+                "display": display,
+            },
+        )
+
+    def get_admrul(self, admrul_id: str) -> dict[str, Any]:
+        """Fetch an administrative rule body by its 행정규칙일련번호 (ID)."""
+
+        admrul_id = admrul_id.strip()
+        if not admrul_id:
+            raise ValueError("admrul_id must not be empty")
         return self._get_json(
             "/DRF/lawService.do",
-            params={"target": "law", "ID": law_id},
+            params={"target": "admrul", "ID": admrul_id},
         )
+
+    def search_expc(
+        self, query: str, *, page: int = 1, display: int = 20
+    ) -> dict[str, Any]:
+        """Search legal interpretation cases (법령해석례, e.g. 금융위원회 해석)."""
+
+        query = query.strip()
+        if not query:
+            raise ValueError("query must not be empty")
+        if page < 1 or display < 1:
+            raise ValueError("page and display must be positive")
+        return self._get_json(
+            "/DRF/lawSearch.do",
+            params={
+                "target": "expc",
+                "query": query,
+                "page": page,
+                "display": display,
+            },
+        )
+
+    def get_expc(self, expc_id: str) -> dict[str, Any]:
+        """Fetch a legal interpretation case body by its ID."""
+
+        expc_id = expc_id.strip()
+        if not expc_id:
+            raise ValueError("expc_id must not be empty")
+        return self._get_json(
+            "/DRF/lawService.do",
+            params={"target": "expc", "ID": expc_id},
+        )
+
+    def search_prec(
+        self, query: str, *, page: int = 1, display: int = 20
+    ) -> dict[str, Any]:
+        """Search court precedents (판례)."""
+
+        query = query.strip()
+        if not query:
+            raise ValueError("query must not be empty")
+        if page < 1 or display < 1:
+            raise ValueError("page and display must be positive")
+        return self._get_json(
+            "/DRF/lawSearch.do",
+            params={
+                "target": "prec",
+                "query": query,
+                "page": page,
+                "display": display,
+            },
+        )
+
+    def get_prec(self, prec_id: str) -> dict[str, Any]:
+        """Fetch a court precedent body by its 판례일련번호 (ID)."""
+
+        prec_id = prec_id.strip()
+        if not prec_id:
+            raise ValueError("prec_id must not be empty")
+        return self._get_json(
+            "/DRF/lawService.do",
+            params={"target": "prec", "ID": prec_id},
+        )
+
+    # ponytail: 지능형 법령검색(target=?)과 조문-법령용어 연계 API는 공식 가이드에서
+    # 정확한 target 코드를 확정하지 못했다. 확인되면 위와 같은 _get_json 패턴으로
+    # search_lstrm/get_lstrm 등을 추가한다. 그 전까지는 미구현으로 남긴다.
 
 
 def credential_status(env: Mapping[str, str] | None = None) -> dict[str, bool]:
