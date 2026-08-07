@@ -37,7 +37,7 @@ from src.nodes import MAX_CONTEXT_CHARS, PERSONA_PROMPTS  # noqa: E402
 from src.resilience import CircuitBreaker, RedisJsonCache, emit_metric  # noqa: E402
 
 from bm25 import BM25Index  # noqa: E402
-from grep_seed import grep_seed  # noqa: E402
+from grep_seed import grep_seed, keyword_seed  # noqa: E402
 from wiki_reader import read_bounded  # noqa: E402
 
 RAW_DIR = Path(__file__).resolve().parent / "data" / "raw"
@@ -170,10 +170,21 @@ def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str,
 
 
 def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
-    """Arm C — grep-first(조항번호 정확 매칭), 실패 시 BM25 폴백 → bounded read → generate."""
+    """Arm C — grep 2단계(조항번호 정확 매칭 + 핵심어 매칭), 그래도 없으면 BM25 폴백.
+
+    튜닝(2026-08-07): golden set 15문항 대상 무-LLM 리콜 스윕(gold_page_ids 기준,
+    results/retrieval_tuning.md) 결과 top_k/Tmax를 키워도 리콜이 늘지 않았고
+    (top_k 1->3, Tmax 3->5 모두 무변화 또는 context만 증가), 조항번호 매칭 성공 시
+    키워드 매칭을 버리는 elif 대신 **둘을 합집합**으로 seed에 같이 넣은 것만
+    q15(의도된 코퍼스 밖 질문) 제외 리콜을 0.867 -> 1.0으로 올렸다 — 처벌 수위를
+    같이 묻는 질문(예: "제178조 위반하면 처벌은?")은 조항 자체 페이지만으로는
+    벌칙(443조) 페이지에 닿지 못했기 때문. 그래서 top_k=1/Tmax=3 기본값은 유지하고
+    seed 결합 방식만 바꾼다.
+    """
 
     full_query = _wrap_query(query, mandate)
     seeds = grep_seed(full_query)
+    seeds += [p for p in keyword_seed(full_query) if p not in seeds]
     if not seeds:
         top = _bm25_index().score(full_query, top_k=1)
         seeds = [page_id for page_id, _score in top]

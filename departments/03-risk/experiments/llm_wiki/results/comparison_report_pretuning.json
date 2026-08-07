@@ -1,0 +1,684 @@
+[
+  {
+    "arm": "A_plain_rag",
+    "avg_f1": 0.0286,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.5333,
+    "avg_context_chars": 1813.3,
+    "avg_elapsed_ms": 3489.1,
+    "per_question": [
+      {
+        "id": "q01",
+        "f1": 0.4286,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 7401.3
+      },
+      {
+        "id": "q02",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174",
+          "law-283193-71"
+        ],
+        "elapsed_ms": 2755.1
+      },
+      {
+        "id": "q03",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174",
+          "admrul-2100000282072"
+        ],
+        "elapsed_ms": 2607.9
+      },
+      {
+        "id": "q04",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-173",
+          "law-283193-174",
+          "law-283193-54"
+        ],
+        "elapsed_ms": 3170.1
+      },
+      {
+        "id": "q05",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 800,
+        "pages_visited": [
+          "law-283193-172"
+        ],
+        "elapsed_ms": 2985.1
+      },
+      {
+        "id": "q06",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "no_breach",
+        "gold_verdict": "no_breach",
+        "verdict_match": true,
+        "context_chars": 800,
+        "pages_visited": [
+          "law-283193-173"
+        ],
+        "elapsed_ms": 2669.0
+      },
+      {
+        "id": "q07",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-174",
+          "law-283193-54",
+          "law-283193-178"
+        ],
+        "elapsed_ms": 4965.3
+      },
+      {
+        "id": "q08",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "law-283193-176"
+        ],
+        "elapsed_ms": 3288.5
+      },
+      {
+        "id": "q09",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 3072.0
+      },
+      {
+        "id": "q10",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "prec-601495"
+        ],
+        "elapsed_ms": 3093.8
+      },
+      {
+        "id": "q11",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "prec-601495",
+          "law-283193-172"
+        ],
+        "elapsed_ms": 3920.7
+      },
+      {
+        "id": "q12",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 2887.8
+      },
+      {
+        "id": "q13",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "prec-601495",
+          "prec-601495"
+        ],
+        "elapsed_ms": 3318.7
+      },
+      {
+        "id": "q14",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 3200,
+        "pages_visited": [
+          "prec-601495",
+          "law-283193-174",
+          "law-283193-178",
+          "law-283193-173"
+        ],
+        "elapsed_ms": 3517.7
+      },
+      {
+        "id": "q15",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-174",
+          "law-283193-173"
+        ],
+        "elapsed_ms": 2683.5
+      }
+    ]
+  },
+  {
+    "arm": "B_llm_wiki_bm25",
+    "avg_f1": 0.0581,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.4667,
+    "avg_context_chars": 1423.5,
+    "avg_elapsed_ms": 1925.3,
+    "per_question": [
+      {
+        "id": "q01",
+        "f1": 0.2927,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1787.7
+      },
+      {
+        "id": "q02",
+        "f1": 0.2857,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1633.0
+      },
+      {
+        "id": "q03",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1917.8
+      },
+      {
+        "id": "q04",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1420,
+        "pages_visited": [
+          "자본시장법_제71조_불건전영업행위의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2355.5
+      },
+      {
+        "id": "q05",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1845,
+        "pages_visited": [
+          "자본시장법_제172조_내부자의단기매매차익반환",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 3252.6
+      },
+      {
+        "id": "q06",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1676.4
+      },
+      {
+        "id": "q07",
+        "f1": 0.1538,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1829.5
+      },
+      {
+        "id": "q08",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 360,
+        "pages_visited": [
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 1659.7
+      },
+      {
+        "id": "q09",
+        "f1": 0.1395,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2140.6
+      },
+      {
+        "id": "q10",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1325.9
+      },
+      {
+        "id": "q11",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1611.1
+      },
+      {
+        "id": "q12",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 2564,
+        "pages_visited": [
+          "금융투자업규정_제4의6조_정보교류의차단",
+          "자본시장법_제54조_직무관련정보의이용금지",
+          "자본시장법_제443조_벌칙"
+        ],
+        "elapsed_ms": 1262.8
+      },
+      {
+        "id": "q13",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1717.9
+      },
+      {
+        "id": "q14",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2026,
+        "pages_visited": [
+          "대법원_2019도12887_부정거래행위판단기준",
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환"
+        ],
+        "elapsed_ms": 2442.5
+      },
+      {
+        "id": "q15",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2266.6
+      }
+    ]
+  },
+  {
+    "arm": "C_llm_wiki_grep_bm25",
+    "avg_f1": 0.0488,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.4,
+    "avg_context_chars": 1476.9,
+    "avg_elapsed_ms": 1945.7,
+    "per_question": [
+      {
+        "id": "q01",
+        "f1": 0.2927,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1574.5
+      },
+      {
+        "id": "q02",
+        "f1": 0.2857,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1472.4
+      },
+      {
+        "id": "q03",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2095.2
+      },
+      {
+        "id": "q04",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1420,
+        "pages_visited": [
+          "자본시장법_제71조_불건전영업행위의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2332.4
+      },
+      {
+        "id": "q05",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1845,
+        "pages_visited": [
+          "자본시장법_제172조_내부자의단기매매차익반환",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 1993.6
+      },
+      {
+        "id": "q06",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1479.8
+      },
+      {
+        "id": "q07",
+        "f1": 0.1538,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1967.2
+      },
+      {
+        "id": "q08",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 360,
+        "pages_visited": [
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2083.7
+      },
+      {
+        "id": "q09",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1715.3
+      },
+      {
+        "id": "q10",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1845,
+        "pages_visited": [
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2444.7
+      },
+      {
+        "id": "q11",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2216.3
+      },
+      {
+        "id": "q12",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 2564,
+        "pages_visited": [
+          "금융투자업규정_제4의6조_정보교류의차단",
+          "자본시장법_제54조_직무관련정보의이용금지",
+          "자본시장법_제443조_벌칙"
+        ],
+        "elapsed_ms": 1434.6
+      },
+      {
+        "id": "q13",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 2026,
+        "pages_visited": [
+          "대법원_2019도12887_부정거래행위판단기준",
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환"
+        ],
+        "elapsed_ms": 2787.9
+      },
+      {
+        "id": "q14",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2026,
+        "pages_visited": [
+          "대법원_2019도12887_부정거래행위판단기준",
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환"
+        ],
+        "elapsed_ms": 2164.2
+      },
+      {
+        "id": "q15",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1424.3
+      }
+    ]
+  }
+]
