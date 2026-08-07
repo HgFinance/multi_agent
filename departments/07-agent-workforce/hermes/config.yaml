@@ -22,7 +22,7 @@ agent:
   head_persona: agent-workforce-supervisor
   runtime_personalities_source: workers
   legacy_personalities_are_aliases: true
-  runtime_personalities: [workforce-planning-worker, profile-architecture-worker, selection-performance-worker, lifecycle-coordination-worker, workforce-governance-worker]
+  runtime_personalities: [workforce-planning-worker, profile-architecture-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60
@@ -110,11 +110,11 @@ head_runtime:
   binding_decision: false
 staff_registry:
   head_count: 1
-  worker_count: 5
+  worker_count: 2
   default_execution_count: 2
-  max_execution_count: 5
+  max_execution_count: 2
   active_worker_count: 2
-  conditional_worker_count: 3
+  conditional_worker_count: 0
   runtime_persona_source: workers
   legacy_personas_are_aliases: true
   legacy_personas:
@@ -139,34 +139,29 @@ employee_runtime:
   max_attempts: 3
   binding_decision_owner: departments/07-agent-workforce/lifecycle
   failure_action: ESCALATE
+# ▶ 5 -> 2 통합 (2026-08-06 제안). 근거와 제거한 셋의 이관처는 employee_workers.py 상단 주석 참고.
+#   이 변경은 agent_evolution_cycle 대상이다 - QA 독립검증과 CEO 승인 전까지 확정이 아니다.
+#   인사팀은 자기 Profile 변경을 스스로 최종 승인할 수 없다(SOUL.md Hard Boundaries).
+#   지금 이 파일을 고쳐도 배포되는 것은 없다 - HR 워커는 아직 아무도 ACTIVE 가 아니며
+#   (아래 not_started "HR 직원 5명 ACTIVE 활성화", 블로커는 QA Eval) workforce.agent_profiles
+#   의 HR-00~04 5명은 이 워커 계층이 아니라 agent.personalities(호환 Alias) 계층이라 그대로다.
 workers:
   workforce-planning-worker:
-    role: Queue, SLA, cost and staffing-gap analyst
+    role: Queue, SLA, cost and performance narration analyst
     status: active
     trigger: always
-    tools: [workforce.queue.read, workforce.sla.read]
+    # selection-performance-worker 의 평가 서술을 흡수하며 evaluation.read 가 추가됐다(읽기 전용).
+    tools: [workforce.queue.read, workforce.sla.read, workforce.evaluation.read]
     output: advisory_context
   profile-architecture-worker:
-    role: Agent profile and role-boundary architect
+    role: Agent profile, role-boundary and prohibited-authority architect
     status: active
     trigger: always
-    tools: [workforce.profile.read]
+    # workforce-governance-worker 의 권한 경계 서술을 흡수한다. SoD 판정 자체는
+    # improvements/workflow.py 와 roster/activation_evidence.py 가 계속 소유한다.
+    tools: [workforce.profile.read, workforce.governance.read]
     output: advisory_context
-  selection-performance-worker:
-    role: Candidate selection and performance-evaluation analyst
-    status: conditional
-    trigger: performance_signal
-    tools: [workforce.evaluation.read]
-    output: advisory_context
-  lifecycle-coordination-worker:
-    role: Joiner, mover and leaver lifecycle coordinator
-    status: conditional
-    trigger: lifecycle_event
-    tools: [workforce.lifecycle.read]
-    output: advisory_context
-  workforce-governance-worker:
-    role: Workforce approval routing and segregation-of-duties analyst
-    status: conditional
-    trigger: governance_request
-    tools: [workforce.governance.read]
-    output: advisory_context
+  # 제거(2026-08-06 제안): selection-performance-worker, lifecycle-coordination-worker,
+  # workforce-governance-worker. 셋 다 결정론 모듈이 이미 같은 판정을 소유하고 있어
+  # LLM 은 그 결과를 문장으로 옮기기만 했다. 되살리려면 "결정론 코드가 못 하는 판정이
+  # 무엇인지"를 먼저 적는다 - 역할 이름이 다르다는 것은 근거가 아니다.
