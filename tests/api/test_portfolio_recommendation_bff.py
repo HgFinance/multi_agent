@@ -403,6 +403,33 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         start.assert_called_once()
         self.assertNotIn("advisory_only", start.call_args.args[0])
 
+    def test_advisory_only_cannot_bypass_canonical_mandate_verification(self) -> None:
+        payload = {
+            "user_id": "advisory-bound-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "mandate_id": "mandate-1",
+            "mandate_version_id": "version-1",
+            "policy_hash": "hash-1",
+            "advisory_only": True,
+        }
+        with patch.object(bff_main.RUNTIME, "start") as start:
+            response = TestClient(app).post(
+                "/ui/portfolio-recommendations",
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(
+            response.json()["detail"],
+            "advisory_only_cannot_include_mandate_binding",
+        )
+        start.assert_not_called()
+
 
     def test_production_binding_mode_rejects_unversioned_analysis(self) -> None:
         payload = {

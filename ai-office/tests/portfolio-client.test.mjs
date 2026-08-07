@@ -31,6 +31,46 @@ beforeEach(() => {
   globalThis.window = { localStorage: storage };
 });
 
+test("startPortfolioRecommendation sends local draft as advisory-only", async () => {
+  let sentBody;
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      status: 202,
+      json: async () => ({
+        run_id: "draft-run",
+        status: "QUEUED",
+        workflow: "portfolio-recommendation-full",
+        input_hash: "draft-hash",
+      }),
+    };
+  };
+
+  const { startPortfolioRecommendation } = await import(
+    "../app/ops/portfolioClient.ts"
+  );
+  const result = await startPortfolioRecommendation({
+    user_id: "web-user",
+    mindset: "SAFETY_FIRST",
+    experience: "BEGINNER",
+    investment_horizon_years: 3,
+    max_drawdown_pct: "0.10",
+    investment_amount: "100000000",
+    currency: "KRW",
+    universe_id: "KOREA_EQUITY_WATCHLIST",
+    category: "PORTFOLIO_RECOMMENDATION",
+    include_stock: true,
+    include_derivatives: false,
+    query: "로컬 초안 분석",
+    mandate_id: "draft-mandate",
+    advisory_only: true,
+  });
+
+  assert.equal(result.run_id, "draft-run");
+  assert.equal(sentBody.advisory_only, true);
+});
+
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
   if (ORIGINAL_WINDOW === undefined) delete globalThis.window;
