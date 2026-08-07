@@ -23,7 +23,7 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | 부서 | 전체 | 항상 실행 | 조건부 | 현재 통합 판정 |
 |---|---:|---:|---:|---|
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
-| HR | 0 | 0 | 0 | 부서장 + 결정론 함수만. 직원 LLM 계층 없음(제안) |
+| HR | 1 | 0 | 1 | `profile-architecture-worker`만 실행; Job Profile/Eval Set 제안 전용 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
 | Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
@@ -31,23 +31,23 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 20개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 21개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
-**HR만 결정론 Worker도 0이다.** 타 부서의 tool 강등은 LLM을 결정론 러너로 **바꾼** 것이지만, HR은 그 판정을 이미 일반 모듈(`quality.py`/`access.py`/`workflow.py`)이 갖고 있어 러너를 새로 만들 필요조차 없었다. 0은 설정 누락이 아니라 "직원 계층을 두지 않는다"는 결정이다.
+**HR은 결정론 Worker가 0이고 LLM Worker가 1이다.** `profile-architecture-worker`만 비정형 채용·개선 요구를 Job Profile 및 Golden/Adversarial Eval Set 제안으로 바꾼다. 상태 전이·Eval 실행·승인·권한 부여는 모두 독립 서비스의 결정론 경계에 남는다.
 
 ## 부서별 역할과 병합 판정
 
 - **CEO**: `executive-briefing-worker` — 각 부서 보고서와 차단 사유를 종합해 최종 Case Summary를 작성한다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 없다.
-- **HR**(2026-08-07 개정 제안): Worker를 두지 않는다. 인사팀은 Hermes 부서장 1명과 결정론 함수로 운영한다. 제거 사유가 둘로 갈리므로 섞지 않는다.
+- **HR**: `profile-architecture-worker` — 채용·개선 요구와 경계 증거를 읽어 Job Profile 및 Golden/Adversarial Eval Set을 제안한다. 제안은 항상 non-binding이며, Eval 실행은 QA, 승인과 활성화는 CEO/결정론 게이트, Identity·권한 생성은 Platform/IAM 소유다. 나머지 HR 역할은 결정론 모듈 또는 소비자 부재로 Worker를 두지 않는다.
   - **(A) 결정론 코드가 이미 그 판정을 소유함** — 일은 그대로 일어나고 수행 주체만 바뀐다. 계획·평가·Lifecycle·SoD가 서로 다른 상태 전이라는 2026-08-03 판단 자체는 맞지만, **그 상태 전이를 소유한 것은 Worker LLM이 아니라 결정론 모듈이다.** `selection-performance` → `scorecard/quality.py`의 `aggregate_quality()`(Snapshot이 없으면 0이 아니라 `None`을 돌려 "결함 없음"과 "집계할 데이터 없음"을 구분)와 `cost.py`의 `assess_budget()`, Eval 원본은 QA 소유 `audit.eval_runs`. `lifecycle-coordination` → `lifecycle/access.py`의 `approve_request()`·`provision()`·`revoke()`·`find_expired()`(다섯 개가 전부 거부 규칙이라 프롬프트 부탁이 예외로 바뀐다). `workforce-governance` → `improvements/workflow.py`의 `transition()`과 `roster/activation_evidence.py`(문자열이 비었는지가 아니라 그 ID가 DB에 실재하는지 조회해 판정 — LLM이 원리적으로 못 하는 검사다).
-  - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `profile-architecture`의 Job Profile 초안은 받아서 채용을 실행할 주체가 없다(Eval Runner·Platform/IAM 미구현 — 아래 코드 실측 참고, Roster 등재 유예, `workforce-management.yaml`의 승인 단계는 QA·CEO뿐이고 `required_role=USER`가 없다). `workforce-planning`의 인력 상황 서술도 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
+  - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `workforce-planning`의 인력 상황 서술은 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
   - 임계값을 스스로 정하고 갱신하는 판단("Queue 10건이 맞는 기준인가")은 Worker가 아니라 Hermes 부서장 몫이며 제안까지만 허용된다(`workforce.hiring_request.propose`). 기준값 자체는 결정론 코드의 상수이고 변경은 사람의 PR이다.
   - **Eval Runner 미구현 — 2026-08-07 코드 실측 재확인.** 문서만 믿지 않고 코드를 직접 확인한 결과다. `audit.eval_runs`/`eval_results`/`eval_sets` 3개 테이블 DDL은 `20260729000500_audit_api_security.sql`에 있으나 **저장소 전체에 INSERT·UPDATE 코드가 0건**이고 참조는 전부 SELECT다(`roster/activation_evidence.py`, `improvements/candidate.py` 등). QA API의 `/qa/v1/model-risk/evaluate`·`/qa/v1/internal-audit/evaluate`·`/qa/v1/ops/evaluate`는 Model Risk·Internal Audit·운영 건강성 평가이지 **후보 Agent를 Golden/Adversarial Eval Set으로 채점하는 Runner가 아니다** — 이름에 `evaluate`가 들어간다고 구현된 것으로 오인하지 않는다. Golden/Adversarial Eval 실행 코드도 0건이다(`technical_analyst.py`의 `GOLDEN`은 골든크로스라 무관). `workforce.eval.v1` 소비자(`workforce_events/worker.py`)는 구현돼 있으나 **발행자가 없다.**
-  - 위 결과로 HR 직원의 ACTIVE 전이는 `roster/activation_evidence.py`의 실재성 게이트를 통과할 방법이 **원리적으로 없다** — `qa_eval_run_id`가 가리킬 COMPLETED 행이 생성될 경로가 존재하지 않기 때문이다. 이것이 "HR 직원 5명 ACTIVE 활성화"가 계속 `not_started`인 실제 이유다.
-  - **되살릴 조건**: Eval Runner가 실체화되면 Adversarial Eval Case 작성은 역할마다 새로 써야 하는 창작이라 결정론화 대상이 아니다. 그때 `profile-architecture-worker` **1명**을 되살린다. Platform/IAM 쪽은 권한 목록이 카탈로그 선택이라 함수로도 충분하므로 되살릴 근거가 되지 못한다.
-  - 이 항목은 QA 독립검증·CEO 승인 전까지 확정이 아니다.
+  - 위 결과로 HR이 제안한 후보 Agent의 ACTIVE 전이는 `roster/activation_evidence.py`의 실재성 게이트를 통과할 방법이 **원리적으로 없다** — `qa_eval_run_id`가 가리킬 COMPLETED 행이 생성될 경로가 존재하지 않기 때문이다.
+  - **복원 근거**: Adversarial Eval Case 작성은 역할마다 새로 써야 하는 창작이라 결정론화 대상이 아니다. `profile-architecture-worker` **1명**이 이 제안만 맡는다. Platform/IAM 쪽은 권한 목록이 카탈로그 선택이라 함수로도 충분하므로 Worker를 둘 근거가 되지 못한다.
+  - Worker 실행은 구현됐지만, 후보 Agent의 Eval·승인·ACTIVE 전이는 QA Eval Runner 및 Platform/IAM의 독립 검증이 구현되기 전까지 닫히지 않는다.
 - **Research**: `research-data-worker`, `microstructure-worker`, `technical-signal-worker`, `fundamental-valuation-worker`, `news-macro-worker`, `evidence-rag-worker`. 데이터 정본·유동성 증거·지표·가치·이벤트·인용 검증은 서로 다른 입력과 Evidence 책임이므로 유지한다.
 - **Risk**: `compliance-policy-worker` (LLM) + `risk-runner` (결정론, LLM 없음). 2026-08-06에 `core-risk-worker`(시장·유동성·사전 Risk Gate)와 `derivatives-counterparty-worker`(파생·Margin·Counterparty)를 **tool로 강등**해 `risk-runner` 하나로 합쳤다 — 둘 다 결정론 Risk Engine이 이미 답을 만들고 있었고 LLM은 그 답을 옮기기만 했다. `compliance-policy-worker`만 LLM이 유지된다(정책 문서 인용·근거 검증은 결정론화가 아니라 Agentic RAG의 몫). 최종 판정은 결정론적 Risk Engine이 한다.
 - **Trading**: `bull-thesis-worker`, `bear-thesis-worker` (LLM) + `desk-runner` (결정론, LLM 없음). Bull과 Bear는 **합치지 않는다** — 한 직원이 양쪽 논지를 다 만들면 먼저 세운 논지가 나중 논지의 앵커가 되어 확증편향이 구조적으로 생기고, "독립성 위반 0 / 문장 복제 0"(TRD-01/TRD-02 KPI)을 측정할 수 없게 된다([ADR-0005](adr/0005-bull-bear-worker-split.md)).

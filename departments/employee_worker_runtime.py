@@ -48,6 +48,7 @@ class WorkerSpec:
     input_fields: tuple[str, ...] = ()
     output_contract: str = "worker-context.v1"
     max_attempts: int = 3
+    prompt_instructions: str = ""
 
 
 def model_name() -> str:
@@ -182,6 +183,8 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
         "escalate": parsed.get("escalate", True),
         "schema_valid": valid,
     }
+    if "proposal" in parsed:
+        output["proposal"] = parsed["proposal"]
     return output, valid
 
 
@@ -200,6 +203,8 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
             "change QA findings, grant permissions, or claim missing evidence. "
             "Return JSON with summary, confidence, evidence_refs, and escalate."
         )
+        if spec.prompt_instructions:
+            system = f"{system}\nAdditional Worker contract: {spec.prompt_instructions}"
         prompt = (
             f"Worker id: {spec.worker_id}\n"
             f"Allowed tools: {', '.join(spec.tools)}\n"
