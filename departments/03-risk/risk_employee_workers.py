@@ -1,9 +1,28 @@
-"""Risk department employee LangGraph workers.
+"""Risk department employee Workers.
+
+직원 1명. **그중 LLM 을 쓰는 것은 1명뿐이다**(2026-08-06).
+
+  compliance-policy-worker   Point-in-time 정책 근거(Agentic RAG) — LLM
+  risk-runner                시장·유동성·파생/counterparty 잡무 — **LLM 없음.**
+                              결정론 모듈(RiskEngine) 출력을 그대로 옮긴다
+
+기존 core-risk-worker / derivatives-counterparty-worker 를 `risk-runner` 하나로
+흡수했다. 둘 다 **답이 하나로 정해지는 일**이었다 - market/liquidity 판정은
+`pre_trade_check()` 의 `RiskEngine.check_order()` 가 이미 verdict 로 내리고,
+counterparty 판정도 같은 RiskEngine 결과의 counterparty_health CheckOutcome 이
+이미 낸다. 그 위에 `qwen3:1.7b` 를 얹어봐야 이미 나온 verdict 를 다시 서술하는
+것뿐이고, 그 과정에서 Risk 수치가 LLM 문장을 거치는 경로만 생긴다
+(CLAUDE.md 개발 원칙 4·9번, trading 의 desk-runner 와 같은 기준).
+
+compliance-policy-worker 만 남긴 이유는 하나다. Policy 문서 원문에 대한
+관련성·인용 판단은 결정론 모듈이 대신 만들 수 없다(Agentic RAG:
+retrieve→grade→generate→hallucination_check) - `grounded: false` 면 escalate 한다.
 
 The Hermes profile is the department-head boundary.  This module owns only the
-employee layer: each worker is an independently compiled LangGraph that reads
-an allow-listed deterministic tool result and asks the local Ollama model for
-bounded, non-binding context.  It cannot approve an order or change a gate.
+employee layer: `compliance-policy-worker` is an independently compiled
+LangGraph that reads an allow-listed deterministic tool result and asks the
+local Ollama model for bounded, non-binding context; `risk-runner` calls no
+model at all.  Neither can approve an order or change a gate.
 """
 
 from __future__ import annotations
@@ -100,41 +119,6 @@ _RISK_TRACE = (
 
 WORKER_SPECS: tuple[WorkerSpec, ...] = (
     WorkerSpec(
-        "market-liquidity-worker",
-        "Market and liquidity risk analyst",
-        ("risk.trading_state.read", "risk.p1.snapshot"),
-        "always",
-        tech_profile=tech_profile_for(RISK_WORKER_TECH, "market-liquidity-worker"),
-        skill_ids=_RISK_GUARDS
-        + (
-            "context.internal_api.v1",
-            "context.repository_read.v1",
-            "context.cache_read.v1",
-            "guard.pit_filter.v1",
-            "calc.deterministic_gate.v1",
-            "verify.schema.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _RISK_TRACE
-        + ("fallback.human_escalation.v1",),
-    ),
-    WorkerSpec(
-        "pre-trade-risk-worker",
-        "Pre-trade deterministic gate analyst",
-        ("risk.case.check",),
-        "always",
-        tech_profile=tech_profile_for(RISK_WORKER_TECH, "pre-trade-risk-worker"),
-        skill_ids=_RISK_GUARDS
-        + (
-            "context.internal_api.v1",
-            "calc.deterministic_gate.v1",
-            "verify.schema.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _RISK_TRACE
-        + ("fallback.retry_budget.v1", "fallback.human_escalation.v1"),
-    ),
-    WorkerSpec(
         "compliance-policy-worker",
         "Point-in-time policy evidence analyst",
         ("risk.compliance.check",),
@@ -160,28 +144,6 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         )
         + _RISK_TRACE
         + ("fallback.retry_budget.v1", "fallback.human_escalation.v1"),
-    ),
-    WorkerSpec(
-        "derivatives-counterparty-worker",
-        "Derivatives and counterparty exposure analyst",
-        ("risk.trading_state.record.read",),
-        "when_counterparty_or_derivatives_signal_exists",
-        tech_profile=tech_profile_for(
-            RISK_WORKER_TECH, "derivatives-counterparty-worker"
-        ),
-        skill_ids=_RISK_GUARDS
-        + (
-            "context.internal_api.v1",
-            "context.repository_read.v1",
-            "context.cache_read.v1",
-            "guard.pit_filter.v1",
-            "calc.deterministic_gate.v1",
-            "verify.schema.v1",
-            "verify.provenance_chain.v1",
-            "advisory.grounded_summary.v1",
-        )
-        + _RISK_TRACE
-        + ("fallback.human_escalation.v1",),
     ),
 )
 
@@ -495,17 +457,14 @@ def build_worker_graph(
     return graph.compile()
 
 
-def _market_tool(payload: dict[str, Any]) -> dict[str, Any]:
+def _core_risk_tool(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "tools": ["risk.trading_state.read", "risk.p1.snapshot"],
+        "tools": ["risk.trading_state.read", "risk.p1.snapshot", "risk.case.check"],
         "trading_state": payload.get("trading_state"),
         "p1_snapshot": payload.get("p1_snapshot", payload.get("market_snapshot")),
         "context": payload.get("context", {}),
+        "assessment": payload.get("assessment", {}),
     }
-
-
-def _pre_trade_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"tool": "risk.case.check", "assessment": payload.get("assessment", {})}
 
 
 def _compliance_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -523,22 +482,76 @@ def _counterparty_tool(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── risk-runner: 결정론 잡무 (LLM 없음, 2026-08-06) ──────────────────────────
+# core-risk-worker(RiskEngine.check_order 서술)와 derivatives-counterparty-worker
+# (counterparty_health CheckOutcome 서술)를 합쳐 흡수했다. 둘 다 답이 하나로
+# 정해지는 일이었다 - market/liquidity 판정은 pre_trade_check()의
+# RiskEngine.check_order()가 이미 verdict로 내리고, counterparty 판정도 같은
+# RiskEngine 결과의 counterparty_health CheckOutcome이 이미 낸다
+# (scripts.py의 counterparty_check()가 이미 LLM 없이 동작하는 것과 같은 원칙,
+# trading의 desk-runner와 같은 기준: 답이 하나로 정해지는 일에 LLM을 얹지 않는다).
+RUNNER_ID = "risk-runner"
+RUNNER_ROLE = "Risk desk runner — market/liquidity/counterparty gate 결과 조회(결정론, LLM 없음)"
+RUNNER_TOOLS = (
+    "risk.trading_state.read",
+    "risk.p1.snapshot",
+    "risk.case.check",
+    "risk.trading_state.record.read",
+)
+
+
+def risk_runner(payload: dict[str, Any]) -> dict[str, Any]:
+    """시장·유동성·파생/counterparty 잡무. **모델을 부르지 않는다.**
+
+    RiskEngine.check_order()가 이미 만든 verdict/check_results를 그대로 옮긴다 -
+    `summary` 필드가 없는 것이 이 직원의 요지다.
+    """
+    core = _core_risk_tool(payload)
+    counterparty = _counterparty_tool(payload)
+    assessment = core.get("assessment") or {}
+    check_results = assessment.get("check_results", [])
+    verdict = assessment.get("verdict")
+
+    blockers: list[str] = []
+    if verdict and str(verdict).upper() != "APPROVE":
+        blockers.append(f"risk_verdict_{str(verdict).lower()}")
+    blockers.extend(
+        f"check_failed:{c.get('name')}"
+        for c in check_results
+        if not c.get("passed", True) and c.get("name")
+    )
+
+    return {
+        "worker_id": RUNNER_ID,
+        "role": RUNNER_ROLE,
+        "tools": list(RUNNER_TOOLS),
+        "status": "COMPLETED",
+        "attempts": 1,
+        "llm": False,  # 이 직원은 모델을 안 부른다. 계약으로 박는다
+        "output": {
+            "worker_id": RUNNER_ID,
+            "facts": {"core_risk": core, "counterparty": counterparty},
+            "blockers": blockers,
+            "escalate": bool(blockers),
+            "decided_by": "deterministic",
+            "authoritative": False,  # 판정은 RiskEngine이 한다. 이건 옮긴 것일 뿐이다
+        },
+        "error": None,
+        "output_contract": "risk.risk-runner.v1",
+    }
+
+
 def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     if spec.trigger == "always":
         return True
-    if spec.trigger == "when_compliance_evidence_exists":
-        return bool(payload.get("compliance"))
-    return bool(payload.get("counterparty") or payload.get("derivatives"))
+    return bool(payload.get("compliance"))
 
 
 def _run_employee_workers_sequential(
     payload: dict[str, Any], llm: WorkerLLM | None = None
 ) -> dict[str, Any]:
     tools: dict[str, WorkerTool] = {
-        "market-liquidity-worker": _market_tool,
-        "pre-trade-risk-worker": _pre_trade_tool,
         "compliance-policy-worker": _compliance_tool,
-        "derivatives-counterparty-worker": _counterparty_tool,
     }
     reports: list[dict[str, Any]] = []
     not_executed: list[str] = []
@@ -573,6 +586,8 @@ def _run_employee_workers_sequential(
             }
         )
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
+    # risk-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
+    reports.append(risk_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",
@@ -602,10 +617,7 @@ async def run_employee_workers_async(
     """Fan out guarded Risk Worker graphs and deterministically fan them in."""
 
     tools: dict[str, WorkerTool] = {
-        "market-liquidity-worker": _market_tool,
-        "pre-trade-risk-worker": _pre_trade_tool,
         "compliance-policy-worker": _compliance_tool,
-        "derivatives-counterparty-worker": _counterparty_tool,
     }
     input_hash = str(
         payload.get("input_hash")
@@ -668,6 +680,8 @@ async def run_employee_workers_async(
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
+    # risk-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
+    reports.append(risk_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",

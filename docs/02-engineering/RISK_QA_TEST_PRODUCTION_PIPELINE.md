@@ -19,22 +19,24 @@ ResearchPacket fixture
   → packet contract / input_hash / PIT guard
   → Risk deterministic gate skeleton (binding=false)
   → risk-supervisor (Hermes-shaped Head Graph)
-      → market-liquidity-worker (nested LangGraph)
-      → pre-trade-risk-worker (peer context)
-      → compliance-policy-worker (peer context)
-      → derivatives-counterparty-worker (peer context)
+      → compliance-policy-worker (nested LangGraph)
   → risk-supervisor synthesis (non-binding)
   → Risk Head → QA Head department handoff
   → QA deterministic gate skeleton (binding=false)
   → qa-audit-supervisor (Hermes-shaped Head Graph)
-      → evidence-qa-worker (nested LangGraph)
-      → hallucination-critic-worker (peer context)
-      → model-and-internal-audit-worker (peer context)
-      → ops-and-permission-worker (peer context)
+      → hallucination-critic-worker (nested LangGraph)
       → incident-postmortem-worker (peer context)
   → qa-audit-supervisor synthesis (non-binding)
   → test gate / trace-replay inspection
 ```
+
+**2026-08-06 tool 강등**: 이 TEST 파이프라인(`departments/risk_qa_testkit/pipeline.py`)은 `WORKER_SPECS`
+LLM Worker만 시뮬레이션한다. Risk의 LLM 대상은 `compliance-policy-worker` 1개이고, QA의 LLM 대상은
+`hallucination-critic-worker`·`incident-postmortem-worker` 2개다. 시장·유동성·Counterparty Risk와
+Evidence·Model Risk·Internal Audit·Ops·Permission 검사는 결정론 `risk-runner`/`qa-runner`로 실행돼
+`WORKER_SPECS` 밖에 있다 — 두 runner는 실제 부서 실행 경로에서 별도로 검증한다.
+러너는 부서의 실제 실행 경로(`risk_employee_workers.run_employee_workers()`/
+`qa_employee_workers.run_employee_workers()`)에서만 항상 실행된다.
 
 각 직원은 별도 `StateGraph`로 compile된다. 상위 Department Graph의 직원 노드는 해당 Worker Graph를 invoke한다. 직원 간 handoff에는 요약, confidence, evidence refs, status, input hash와 trace manifest만 전달하며 원문 Prompt·Secret·binding decision은 전달하지 않는다.
 
@@ -68,8 +70,8 @@ TEST에서 다음을 확인한다.
 
 - `pipeline_status=COMPLETED`
 - `manual_review_required=true`는 fixture의 QA `WARN`을 의미하며, 파이프라인 실행 완료와 QA PASS를 혼동하지 않게 한다.
-- Risk `risk-supervisor`가 4개 Worker를 위임하고 4개 Worker Graph가 실행됨
-- QA `qa-audit-supervisor`가 5개 Worker를 위임하고 5개 Worker Graph가 실행됨
+- Risk `risk-supervisor`가 1개 LLM Worker와 `risk-runner` 결정론 경로를 위임·실행함
+- QA `qa-audit-supervisor`가 2개 LLM Worker와 `qa-runner` 결정론 경로를 위임·실행함
 - Risk/QA 각각의 `handoffs`에 Head delegation 1개와 peer context handoff가 기록됨
 - Risk Head → QA Head department handoff가 같은 `trace_id`와 `input_hash`로 기록됨
 - 모든 Worker에 `skill_results`, `trace.events`, `trace_id`, `input_hash`가 존재함

@@ -251,7 +251,7 @@ class JsonSchemaSubsetTest(unittest.TestCase):
             "department": "risk-management",
             "trace_id": "00000000-0000-0000-0000-000000000012",
             "case_id": None,
-            "producer_worker": "pre-trade-risk-worker",
+            "producer_worker": "compliance-policy-worker",
             "consumer_worker": "risk-supervisor",
             "status": "COMPLETED",
             "advisory": {"summary": "Risk evidence collected", "suggested_verdict": "RESIZE"},

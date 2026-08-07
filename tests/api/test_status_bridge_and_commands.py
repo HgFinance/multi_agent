@@ -43,10 +43,10 @@ class StatusBridgeAndCommandTest(unittest.TestCase):
     def test_status_event_projects_to_snapshot_and_websocket(self) -> None:
         publish_agent_status(
             department_code="trading-department",
-            agent_id="pre-trade-risk-worker",
-            worker_id="pre-trade-risk-worker",
+            agent_id="risk-runner",
+            worker_id="risk-runner",
             status="RUNNING",
-            role="Pre-trade Risk",
+            role="Deterministic Risk Runner",
             reason="test event",
         )
         snapshot = self.client.get("/ui/snapshot").json()

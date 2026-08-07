@@ -55,6 +55,7 @@ sys.path.insert(0, str(_DEPT / "oms"))
 sys.path.insert(0, str(_DEPT / "contracts"))
 sys.path.insert(0, str(_DEPT / "multileg"))
 
+import outbox
 from contracts import BrokerOrderState, IntentState, OrderIntent, Side
 from intent_group import IntentGroup
 from oms import BrokerOrder, Fill, OrderIntentRecord, StateEvent
@@ -344,6 +345,16 @@ class PostgresOrderStore:
                 "version = version + 1 where order_id = %s and state <> %s",
                 (event.to_state, event.event_time, event.stream_id, event.to_state),
             )
+            # **같은 커서다.** 상태가 롤백되면 outbox 행도 같이 사라진다 - 이게
+            # Transactional Outbox 의 전부이고, 자체 점검 10번이 그 불변식을 검사한다.
+            outbox.enqueue(cur, outbox.envelope_for(
+                event_type=outbox.ORDER_STATE_CHANGED,
+                trace_id=str(_trace_uuid("", event.stream_id)),
+                idempotency_key=f"osc_{event.event_id}",
+                occurred_at=event.event_time,
+                artifact_type="ORDER_EVENT", artifact_id=event.event_id,
+                artifact_schema=f"trading-order-event-v{SCHEMA_VERSION}",
+                content_hash=f"sha256:{_hash(event.payload)}"))
 
     def add_fill(self, order: BrokerOrder, fill: Fill) -> None:
         """체결 사실. 회계본부의 `fill_consumer`가 이 표를 읽는다.
@@ -373,6 +384,18 @@ class PostgresOrderStore:
                 "where order_id = %s",
                 (order.filled_quantity, order.average_fill_price, order.order_id),
             )
+            # 회계 Ledger Consumer 가 `execution.fills` 를 폴링하는 대신 이 이벤트를
+            # 읽는다(P0-1 "Fill 은 실제 Event/Consumer 경로에서 생성한다").
+            # 체결 자체는 위 표가 사실이고 봉투는 그 표를 가리키기만 한다 - 금액을
+            # payload 에 싣지 않는다(6.1 "payload 본문을 내보내지 않는다").
+            outbox.enqueue(cur, outbox.envelope_for(
+                event_type=outbox.FILL_RECORDED,
+                trace_id=str(_trace_uuid("", order.order_id)),
+                idempotency_key=f"fill_{self.adapter}_{fill.broker_fill_id or fill.fill_id}",
+                occurred_at=fill.event_time,
+                artifact_type="FILL", artifact_id=fill.fill_id,
+                artifact_schema=f"trading-fill-v{SCHEMA_VERSION}",
+                content_hash=f"sha256:{_hash({'fill_id': str(fill.fill_id), 'order_id': str(fill.order_id), 'quantity': str(fill.quantity), 'price': str(fill.price)})}"))
         order.fills.append(fill)
 
     # -- 읽기 -----------------------------------------------------------------
@@ -710,11 +733,80 @@ if __name__ == "__main__":
         assert store.find_intent_by_idempotency("trd01_selfcheck_0001") is not None
         assert store.find_unknown_order(fund_id) is None, "UNKNOWN이 없는데 있다고 나온다"
 
+        # 10. **Transactional Outbox** — 상태 변경이 outbox 행을 같은 트랜잭션에 남긴다
+        cur.execute("select event_type, status, trace_id, payload_ref "
+                    "  from execution.outbox where idempotency_key like %s",
+                    (f"fill_{store.adapter}_trd01_bf_1",))
+        fill_row = cur.fetchone()
+        assert fill_row is not None, "체결이 outbox 이벤트를 안 남겼다"
+        assert fill_row[0] == outbox.FILL_RECORDED and fill_row[1] == "PENDING"
+        assert fill_row[3]["artifact_type"] == "FILL", fill_row[3]
+        assert fill_row[3]["content_hash"].startswith("sha256:")
+        cur.execute("select count(*) from execution.outbox where event_type = %s",
+                    (outbox.ORDER_STATE_CHANGED,))
+        assert cur.fetchone()[0] >= 1, "상태 전이가 outbox 이벤트를 안 남겼다"
+
+        # 같은 체결을 다시 받아도 이벤트가 두 번 나가지 않는다 (봉투 멱등)
+        oms.on_broker_event(order, "fill", "trd01_fill_1", now,
+                            {"quantity": "40", "price": "70000", "fee": "105", "tax": "0",
+                             "broker_fill_id": "trd01_bf_1"})
+        cur.execute("select count(*) from execution.outbox where idempotency_key = %s",
+                    (f"fill_{store.adapter}_trd01_bf_1",))
+        assert cur.fetchone()[0] == 1, "중복 체결이 이벤트를 두 번 냈다"
+
+        # 11. **롤백 불변식** — 상태가 사라지면 outbox 도 같이 사라진다.
+        #     이게 "Transactional" Outbox 의 전부다. 다른 트랜잭션에서 넣었다면 여기서 남는다.
+        cur.execute("savepoint before_outbox_rollback")
+        oms.on_broker_event(order, "fill", "trd01_fill_2", now,
+                            {"quantity": "10", "price": "70000", "fee": "26", "tax": "0",
+                             "broker_fill_id": "trd01_bf_rollback"})
+        cur.execute("select count(*) from execution.outbox where idempotency_key = %s",
+                    (f"fill_{store.adapter}_trd01_bf_rollback",))
+        assert cur.fetchone()[0] == 1, "롤백 전인데 이벤트가 없다"
+        cur.execute("rollback to savepoint before_outbox_rollback")
+        cur.execute("select count(*) from execution.outbox where idempotency_key = %s",
+                    (f"fill_{store.adapter}_trd01_bf_rollback",))
+        assert cur.fetchone()[0] == 0, "상태는 롤백됐는데 outbox 행이 남았다"
+        cur.execute("select filled_quantity from execution.orders where order_id = %s",
+                    (order.order_id,))
+        assert cur.fetchone()[0] == D("40"), "롤백 후 체결 수량이 안 되돌아갔다"
+
+        # 12. **재시작 복구** — 연결을 새로 열어도 상태·수량·hash 가 같다.
+        #     같은 트랜잭션을 보려면 커밋해야 하는데 자체 점검은 아무것도 안 남긴다.
+        #     그래서 같은 연결에서 저장소 객체만 새로 만들어 Projection 재구축을 확인한다.
+        #     ponytail: 진짜 프로세스 재시작 검증은 커밋이 필요하다. 전용 스키마나
+        #               throwaway DB 가 생기면 그때 붙인다 - 지금 커밋하면 공용 DB 를 더럽힌다.
+        reopened = PostgresOrderStore(conn=conn, adapter="paper")
+        again = reopened.get_order(order.order_id)
+        assert again is not None and again.state is restored.state
+        assert again.filled_quantity == restored.filled_quantity
+        assert again.average_fill_price == restored.average_fill_price
+        before = [(e.sequence, e.to_state, e.event_id) for e in
+                  store.events_for("broker_order", order.order_id)]
+        after = [(e.sequence, e.to_state, e.event_id) for e in
+                 reopened.events_for("broker_order", order.order_id)]
+        assert before == after, "재조회에서 이벤트 열이 달라졌다"
+
+        # 13. Relay 가 미발행 이벤트를 집고, 소비자 중복 제거가 동작한다
+        published: list = []
+        result = outbox.drain(cur, published.append)
+        assert result.sent >= 2 and result.clean, result
+        fill_events = [p for p in published if p["event_type"] == outbox.FILL_RECORDED]
+        assert fill_events, "체결 이벤트가 발행되지 않았다"
+        target = fill_events[0]["event_id"]
+        assert outbox.mark_processed(cur, "accounting-ledger", target) is True
+        assert outbox.mark_processed(cur, "accounting-ledger", target) is False
+        todo = outbox.unconsumed(cur, "accounting-ledger", outbox.FILL_RECORDED)
+        assert target not in {t["event_id"] for t in todo}, "처리한 이벤트가 다시 잡힌다"
+
     finally:
         conn.rollback()  # 선행 행까지 전부 되돌린다. 남의 표에 아무것도 남기지 않는다
         cur.execute("select count(*) from execution.order_intents")
         assert cur.fetchone()[0] == 0, "롤백 후에도 주문이 남았다"
+        cur.execute("select count(*) from execution.outbox")
+        assert cur.fetchone()[0] == 0, "롤백 후에도 outbox 이벤트가 남았다"
         conn.close()
 
-    print("ok - psycopg OrderStore 9개 영역 점검 통과 "
-          "(실 DB 트랜잭션, 롤백으로 선행 행 미영속, 전이표는 DB 트리거가 강제)")
+    print("ok - psycopg OrderStore 13개 영역 점검 통과 "
+          "(실 DB 트랜잭션, 롤백으로 선행 행 미영속, 전이표는 DB 트리거가 강제, "
+          "Outbox 는 상태와 같은 트랜잭션)")

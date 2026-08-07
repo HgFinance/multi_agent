@@ -95,6 +95,7 @@ from risk_events.redis_event_bus import (
     RiskEventBusError,
     decision_event_id,
 )
+from risk_mandate_workers import RiskMandateAssessmentRequest, assess_mandate
 from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
 from trading_state_store import (
     RedisTradingStateStore,
@@ -190,9 +191,7 @@ class RiskContextIn(BaseModel):
                     if self.mandate.allowed_asset_classes is not None
                     else None
                 ),
-                forbidden_asset_classes=frozenset(
-                    self.mandate.forbidden_asset_classes
-                ),
+                forbidden_asset_classes=frozenset(self.mandate.forbidden_asset_classes),
                 preferred_sectors=frozenset(self.mandate.preferred_sectors),
                 excluded_sectors=frozenset(self.mandate.excluded_sectors),
             ),
@@ -291,6 +290,20 @@ def _require_service_token(
 class ComplianceCheckRequest(BaseModel):
     query: str = Field(min_length=1)
     as_of: str
+
+
+class MandateAssessmentResponse(BaseModel):
+    schema_version: str
+    mandate_id: str
+    trace_id: str
+    pipeline_status: str
+    status: str
+    decision: str
+    authoritative_source: str
+    dispatch: dict[str, object]
+    employees: dict[str, dict[str, object]]
+    tool_calls: list[str]
+    risk_head: dict[str, object]
 
 
 # --- App -------------------------------------------------------------------------
@@ -590,6 +603,29 @@ def compliance_check(body: ComplianceCheckRequest):
         corpus_dir=corpus_dir,
         persona="compliance-policy-agent",
     )
+
+
+@app.post(
+    "/risk/v1/mandates/{mandate_id}/assess", response_model=MandateAssessmentResponse
+)
+def assess_mandate_for_risk_head(mandate_id: str, body: RiskMandateAssessmentRequest):
+    """Dispatch one immutable user mandate to both Risk employees.
+
+    The Risk Head receives the two independent reports only after both
+    employee boundaries have run. This endpoint is advisory and never creates
+    an Order or calls a broker.
+    """
+
+    if mandate_id != body.mandate_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "MANDATE_ID_MISMATCH",
+                "path_mandate_id": mandate_id,
+                "body_mandate_id": body.mandate_id,
+            },
+        )
+    return assess_mandate(body)
 
 
 @app.get("/risk/v1/observability/rag")

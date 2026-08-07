@@ -83,6 +83,41 @@ break_triage:
         cause: 입출금이 원장에 반영되지 않았다
         check: 계좌 입출금 내역과 cash_balances 대조
 
+# 1-b) 미설명 손익 원인 분류표 - Break 과 다른 축이다
+#
+# Break 은 "내부와 외부가 안 맞는다"이고 이쪽은 "내부끼리 항등식이 안 맞는다"다.
+#   NAV 변화 = 총손익 - 비용 + 자본 유출입   (reporting/daily_report.py)
+# 잔차가 `DailyReport.unexplained_pnl` 이며 **0 으로 반올림하지 않는다**(SOUL 27행).
+# 그래서 잔차가 0 이 아닐 때 조사할 후보가 필요하고, 없으면 직원이 지어낸다.
+#
+# 마스터플랜 19.12 "Agent 는 예외 조사와 설명을 담당한다" 의 조사 대상이다.
+# SOUL #6 의 Signal/Sizing/Timing/Execution/Cost/Regime 은 **기대 대비 실현** 갭의
+# 분류이고 여기 항등식 잔차와 다른 것이다 - 섞지 않는다.
+pnl_exception:
+  # 잔차가 이 금액 이하면 조사 대상으로 올리지 않는다. 통화 최소단위 기준이며
+  # 근거 없는 초기 가정치다 - 실제 마감 운영 데이터로 재보정한다.
+  # **0 으로 반올림하는 것과 다르다.** 값은 그대로 보고되고 조사만 생략된다.
+  residual_tolerance: 1
+  cause_candidates:
+    - id: cause:unposted_journal
+      cause: 체결·비용 분개가 아직 posting 되지 않아 손익에 안 잡혔다
+      check: execution.fills 대 accounting.journals 건수 대조 (ledger/fill_consumer.py)
+    - id: cause:valuation_asof_gap
+      cause: NAV 기초·기말의 Mark as_of 가 서로 다른 시점이다
+      check: portfolio/portfolio.py 의 MarkPrice.as_of 를 기초·기말 각각 확인
+    - id: cause:capital_flow_missing
+      cause: 입출금·자본 유출입이 capital_flow 에 반영되지 않았다
+      check: _capital_flow() 가 집계한 계정과 실제 입출금 내역 대조
+    - id: cause:corporate_action_unapplied
+      cause: 배당·분할이 Position 에만 반영되고 손익에는 안 잡혔다
+      check: corporate_actions.py 미처리 EFFECTIVE 이벤트 확인
+    - id: cause:reversal_asymmetry
+      cause: 정정 Reversal 이 원분개와 다른 회계일에 걸렸다
+      check: reversal_count 와 해당 journals 의 accounting_date 대조
+    - id: cause:fee_accrual_timing
+      cause: 발생주의 수수료가 현금 지급일 기준으로 잡혔다
+      check: 수수료 계정의 발생일 대 결제일 확인
+
 # 2) 작업 Level 분류 - 회계 질의 비용·성능 최적화
 #    질의를 난이도로 나눠 필요한 만큼만 태운다. **L0 는 LLM 을 아예 안 부른다.**
 query_levels:
@@ -138,7 +173,8 @@ query_levels:
     min_samples: 50
     note: 조건 충족 전에 그래프를 만들지 않는다. 실측 근거 없이 저장소를 하나 더 늘리지 않는다.
 
-# 3) Layered Memory - nav-close-worker 마감 기억 (FinMem 계층 구조)
+# 3) Layered Memory - 마감 기억 (FinMem 계층 구조)
+#    2026-08-07 개명: 옛 nav-close-worker 몫이며 지금은 exception-investigation-worker 의 근거다.
 #    **기억은 비공식이다.** System of Record 는 execution.* / accounting.* 스키마다.
 close_memory:
   # 계층별 반감기(일)와 검색 가중치. FinMem 의 shallow/intermediate/deep 에 대응한다.

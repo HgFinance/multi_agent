@@ -169,6 +169,7 @@
         {"method": "PUT", "path": "/risk/v1/trading-state/{scope}"},
         {"method": "DELETE", "path": "/risk/v1/trading-state/{scope}"},
         {"method": "POST", "path": "/risk/v1/compliance/check"},
+        {"method": "POST", "path": "/risk/v1/mandates/{mandate_id}/assess"},
         {"method": "GET", "path": "/risk/v1/observability/rag"},
         {"method": "GET", "path": "/risk/v1/observability/runtime"}
       ]
@@ -204,7 +205,8 @@
         {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"},
         {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"},
         {"method": "POST", "path": "/qa/v1/evidence/check"},
-        {"method": "GET", "path": "/qa/v1/evidence/corpus/status"}
+        {"method": "GET", "path": "/qa/v1/evidence/corpus/status"},
+        {"method": "POST", "path": "/qa/v1/verifications/{verification_id}/assess"}
       ]
     },
     "workforce-api": {
@@ -223,8 +225,17 @@
         {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}"},
         {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/transitions"},
         {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/events"},
+        {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
+        {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
         {"method": "POST", "path": "/workforce/v1/departments/{department_code}/scorecard"},
         {"method": "GET", "path": "/workforce/v1/departments/{department_code}/scorecard"},
+        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
+        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
+        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
+        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/approve"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/activate"},
+        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/retire"},
         {"method": "POST", "path": "/workforce/v1/budget-assessments"},
         {"method": "GET", "path": "/workforce/v1/agents/{agent_id}/budget-assessment"}
       ]
@@ -235,6 +246,8 @@
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions"},
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"},
         {"method": "GET", "path": "/governance/v1/mandates/{mandate_id}/current"},
+        {"method": "GET", "path": "/governance/v1/mandates/by-fund/{fund_id}/current"},
+        {"method": "POST", "path": "/governance/v1/mandate-assistant/suggest"},
         {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/change-requests"},
         {"method": "POST", "path": "/governance/v1/cases"},
         {"method": "GET", "path": "/governance/v1/cases/{case_id}"},
@@ -286,6 +299,7 @@
       "status": "IMPLEMENTED_TEST",
       "operations": [
         {"method": "GET", "path": "/health"},
+        {"method": "GET", "path": "/health/ready"},
         {"method": "GET", "path": "/ui/snapshot"},
         {"method": "GET", "path": "/ui/integrations"},
 
@@ -295,6 +309,8 @@
         {"method": "POST", "path": "/ui/portfolio-recommendations/{run_id}/approval"},
         {"method": "POST", "path": "/ui/mandates/{mandate_id}/change-requests"},
         {"method": "GET", "path": "/ui/mandates/{mandate_id}/current"},
+        {"method": "POST", "path": "/ui/risk/mandates/{mandate_id}/assess"},
+        {"method": "POST", "path": "/ui/qa/verifications/{verification_id}/assess"},
         {"method": "POST", "path": "/ui/mandate-cases/{case_id}/advance"},
         {"method": "GET", "path": "/ui/mandate-cases/{case_id}/timeline"},
         {"method": "GET", "path": "/ui/mandate-approvals"},

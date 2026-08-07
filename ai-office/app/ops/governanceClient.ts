@@ -15,7 +15,7 @@ export type MandateApproval = {
   approval_id: string;
   object_id: string;
   required_role: "RISK" | "QA" | "USER" | string;
-  decision: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | string;
+  decision: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "REVOKED" | string;
   reason: string | null;
   expires_at: string | null;
   decided_at: string | null;
@@ -63,7 +63,14 @@ export function submitMandateChange(mandateId: string, body: Record<string, unkn
 }
 
 export function fetchCurrentMandate(mandateId: string) {
-  return request<{ mandate_id: string; current_version: number; status: string }>(
+  return request<{
+    mandate_id: string;
+    case_id: string | null;
+    current_version: number;
+    mandate_version_id: string | null;
+    policy_hash: string | null;
+    status: string;
+  }>(
     `/ui/mandates/${encodeURIComponent(mandateId)}/current`,
     { method: "GET" },
   );

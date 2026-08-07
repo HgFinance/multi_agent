@@ -38,7 +38,7 @@ function DepartmentRow({ department }: { department: OperationsDepartment }) {
         <span className={`status-pill ${statusTone[department.status] ?? "waiting"}`}>
           {readableRuntimeStatus(department.status)}
         </span>
-        <span>등록 Worker {department.worker_count}명</span>
+        <span>등록 직원 {department.worker_count}명</span>
         <span>업무 중 {department.active_worker_count}명</span>
       </div>
       <p>{department.current_stage ? `${department.current_stage} · ` : ""}{readableRuntimeMessage(department.status_reason).summary}</p>

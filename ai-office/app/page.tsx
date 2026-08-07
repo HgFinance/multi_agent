@@ -28,7 +28,7 @@ import { canUseSimulation } from "./ops/projectionSource";
 type View = "live" | "dashboard" | "mandate";
 type DashboardAudience = "executive" | "operations";
 const CANONICAL_DEPARTMENT_COUNT = 8;
-const CANONICAL_WORKER_COUNT = 42;
+const CANONICAL_WORKER_COUNT = 35;
 
 const statusClass: Record<DeptStatus, string> = {
   "완료": "done",
@@ -275,12 +275,28 @@ export default function Home() {
             <button className={view === "live" ? "active" : ""} onClick={() => setView("live")}>
               🎮 라이브 오피스
             </button>
-            <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>
+            <a
+              className={`nav-link ${view === "dashboard" ? "active" : ""}`}
+              href="/dashboard"
+              role="button"
+              onClick={(event) => {
+                event.preventDefault();
+                setView("dashboard");
+              }}
+            >
               📊 대시보드
-            </button>
-            <button className={view === "mandate" ? "active" : ""} onClick={() => setView("mandate")}>
+            </a>
+            <a
+              className={`nav-link ${view === "mandate" ? "active" : ""}`}
+              href="/mandate"
+              role="button"
+              onClick={(event) => {
+                event.preventDefault();
+                setView("mandate");
+              }}
+            >
               🗂 Mandate 설정
-            </button>
+            </a>
             <button
               className={`todo-tab ${todo ? "urgent" : ""}`}
               onClick={() => {
@@ -359,7 +375,7 @@ export default function Home() {
   );
 }
 
-function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () => void; onBackToOperations?: () => void }) {
+export function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () => void; onBackToOperations?: () => void }) {
   return (
     <>
       <header className="mandate-hero win">
@@ -377,6 +393,41 @@ function MandateConfigView({ onAnalyzed, onBackToOperations }: { onAnalyzed: () 
         </aside>
       </section>
     </>
+  );
+}
+
+/** Hydration fallback for the dashboard navigation. */
+export function DashboardRouteView() {
+  const { snapshot } = useBffFeed();
+  const [operations, setOperations] = useState(false);
+
+  if (operations) {
+    return (
+      <OperationsConsoleView
+        snapshot={snapshot}
+        onBack={() => setOperations(false)}
+        onOpenMandate={() => window.location.assign("/mandate")}
+      />
+    );
+  }
+
+  return (
+    <section className="win hero" aria-labelledby="dashboard-route-title">
+      <div className="win-bar">
+        <span>👑 CEO Dashboard</span>
+        <span className="window-controls" aria-hidden="true">— ▢ ✕</span>
+      </div>
+      <div className="hero-body">
+        <div className="hero-copy">
+          <p className="eyebrow">READ MODEL · {snapshot ? "CONNECTED" : "OFFLINE"}</p>
+          <h1 id="dashboard-route-title">대표 Dashboard</h1>
+          <p>운영 상태와 실행 경계를 BFF Read Model로 확인합니다.</p>
+        </div>
+        <button type="button" className="btn btn-primary" onClick={() => setOperations(true)}>
+          Operations Console
+        </button>
+      </div>
+    </section>
   );
 }
 

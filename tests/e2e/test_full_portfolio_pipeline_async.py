@@ -72,10 +72,20 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
 
     expected_counts = {
         "research": 6,
-        "trading": 6,
-        "risk": 4,
-        "qa": 5,
-        "accounting": 8,
+        # 2026-08-06: Risk는 LLM 1명(compliance-policy-worker)과
+        # 결정론 risk-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
+        "risk": 1,
+        # 2026-08-06: 기존 7명 중 결정론적 데스크 업무 5개를 desk-runner로
+        # 흡수했다. 실행되는 LLM Worker는 bull/bear 2명이다.
+        "trading": 2,
+        # 2026-08-06: QA는 LLM 2명(hallucination/incident)과 결정론
+        # qa-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
+        "qa": 2,
+        # 2026-08-07: 회계는 LLM 1명(exception-investigation-worker)과 결정론
+        # back-office-runner 1명으로 축소했다. 헌장상(마스터플랜 19.12) 에이전트 일이
+        # "예외 조사와 설명" 하나뿐이라 도메인별 7명이 전부 결정론 전달 계층이었다.
+        # 이 파이프라인 count는 LLM만 센다.
+        "accounting": 1,
         "ceo": 1,
     }
     assert set(result["department_reports"]) == set(expected_counts)
@@ -91,7 +101,7 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
     risk_qa_workers = [
         worker for worker in result["worker_reports"] if worker["stage"] in {"risk", "qa"}
     ]
-    assert len(risk_qa_workers) == 9
+    assert len(risk_qa_workers) == 3
     assert all(worker["technology"]["write_capability"] == "NONE" for worker in risk_qa_workers)
     assert all(worker["technology"]["stack"] for worker in risk_qa_workers)
 
@@ -104,7 +114,7 @@ def test_worker_registry_loading_is_atomic_under_parallel_fanout():
         modules = list(pool.map(lambda _: portfolio_pipeline._load_module("risk"), range(8)))
 
     assert all(module is modules[0] for module in modules)
-    assert len(modules[0].WORKER_SPECS) == 4
+    assert len(modules[0].WORKER_SPECS) == 1
     assert sys.modules[module_name] is modules[0]
 
 

@@ -5,8 +5,9 @@
 ## 현재 승인 상태 (2026-08-04)
 
 - Evidence QA `qa-check`는 Evidence QA Gate v1로 승인됐고, production은 `QA_CHECK_CONTRACT_APPROVED=true`일 때만 활성화된다.
-- Model Risk/Internal Audit는 governed 입력 신호가 있을 때만 결정론 엔진과 `model-and-internal-audit-worker`가 실행되며, PASS가 아니면 에스컬레이션한다.
-- 5개 Worker의 ACTIVE Profile·운영 Trace는 migration 적용과 `QA_TRACE_PERSIST=true`가 필요하다. `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며 실제 문서·임베딩·pgvector 적재 전에는 ESCALATE한다.
+- Model Risk/Internal Audit는 governed 입력 신호가 있을 때만 결정론 엔진이 실행되며, 그 결과는
+  `qa-runner`(2026-08-06 tool 강등, 아래 참고)가 옮긴다. PASS가 아니면 에스컬레이션한다.
+- Worker의 ACTIVE Profile·운영 Trace는 migration 적용과 `QA_TRACE_PERSIST=true`가 필요하다. `SAMPLE_PLACEHOLDER` 정책 Corpus는 운영 근거가 아니며 실제 문서·임베딩·pgvector 적재 전에는 ESCALATE한다.
 
 ## P1 현재 상태 (2026-08-03)
 
@@ -31,10 +32,14 @@
 
 ## Worker Registry 수와 실제 실행 수
 
-- Registry에 등록된 실제 Worker는 5개다.
-- 기본 입력에서 항상 실행되는 Worker는 1개(`evidence-qa-worker`)다.
-- 조건부 Worker는 4개(`hallucination-critic-worker`, `model-and-internal-audit-worker`, `ops-and-permission-worker`, `incident-postmortem-worker`)이며, 근거·모델·운영·Incident 신호가 있을 때 호출된다.
-- 한 케이스의 최대 실행 수는 5개다. `agent.personalities`의 기존 8개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
+- **LLM은 `hallucination-critic-worker`+`incident-postmortem-worker` 둘뿐**이고 나머지는 결정론
+  `qa-runner` 하나로 합쳐졌다(2026-08-06 tool 강등: `evidence-qa-worker`+
+  `model-and-internal-audit-worker`+`ops-and-permission-worker` → `qa-runner`). 러너가 결정론
+  Evidence QA/Model Risk/Internal Audit/Ops 판정 근거를 그대로 옮긴다 — 판정은 러너가 서술하기
+  전에 이미 끝나 있다.
+- 두 LLM Worker는 조건부다(`when_unsupported_claim_exists` 등) — 근거·Incident 신호가 있을 때만
+  호출된다. `qa-runner`는 LLM Registry(`WORKER_SPECS`) 밖에 있고 매 케이스마다 항상 실행된다.
+- `agent.personalities`의 기존 8개 역할명은 감사·FK 호환 Alias이며 실행 직원 수에 포함하지 않는다.
 직원 Worker의 실제 모델은 `OLLAMA_CHAT_MODEL`로 주입되는 `qwen3:1.7b`이며, `agent-qa`는 수동 호환 Alias일 뿐 `scripts.py`의 실행 경로가 아니다. Hermes Profile은 `qa-department`다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 ## Mission

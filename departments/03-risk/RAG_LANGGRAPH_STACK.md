@@ -3,7 +3,11 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 운영 활성화나 신규 Library 도입을 의미하지 않는다.
 
-이 문서는 Risk 부서의 4개 독립 Worker에 필요한 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. `qwen3:8b`나 `qwen2.5:7b`는 HR·QA benchmark와 CEO 승인을 거친 후보일 뿐 자동 활성화하지 않는다.
+이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. `qwen3:8b`나 `qwen2.5:7b`는 HR·QA benchmark와 CEO 승인을 거친 후보일 뿐 자동 활성화하지 않는다.
+
+**2026-08-06 tool 강등**: `core-risk-worker`·`derivatives-counterparty-worker`는 결정론 `risk-runner` 하나로
+합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 두 Worker 행은 강등 전 설계를
+그대로 남긴 이력 기록이다 — 실제 실행 경로는 `departments/03-risk/risk_employee_workers.py`의 `risk_runner()`를 따른다.
 
 ## 1. 절대 경계
 
@@ -41,10 +45,9 @@ intake
 
 | Worker | LangGraph 스킬 | RAG 배정 | 허용 Tool/API | 저장소 경계 |
 |---|---|---|---|---|
-| `market-liquidity-worker` | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. | `risk.trading_state.read`, `risk.p1.snapshot`, 내부 `market-api`·`portfolio-api` | `risk.input_snapshots`와 Exposure Snapshot read-only |
-| `pre-trade-risk-worker` | `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | RAG 금지. 정책 문서는 Compliance Worker가 검증한다. | `risk.case.check`, `POST /investment-cases/{case_id}/risk-check` | Risk Engine을 통해서만 Risk Request/Decision에 접근 |
+| `core-risk-worker` (강등, `risk-runner`로 흡수) | `freshness_guard`, `snapshot_fan_in`, `exposure_summary`, `liquidity_metric`, `replay`, `contract_validate`, `risk_engine_call`, `reason_code_map`, `idempotency_check`, `fail_closed` | Pre-trade에는 RAG를 사용하지 않는다. 사후 설명에 한해 AdaptiveRAG를 검토한다. 정책 문서는 Compliance Worker가 검증한다. | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, 내부 `market-api`·`portfolio-api`, `POST /investment-cases/{case_id}/risk-check` | `risk.input_snapshots`와 Exposure Snapshot read-only, Risk Engine을 통해서만 Risk Request/Decision에 접근 |
 | `compliance-policy-worker` | `PIT_filter`, `hybrid_retrieve`, `claim_decompose`, `citation_verify`, `grounded_fallback`, `retry_budget` | Agentic RAG 기본. 문서가 커지면 PIKE-RAG, 다문서 관계가 반복되면 LightRAG | `risk.compliance.check`, `POST /risk/v1/compliance/check`, 내부 vector gateway | `research.documents`·`document_versions`·`evidence_chunks` read-only, 구조화 정책은 `risk.policies` |
-| `derivatives-counterparty-worker` | `snapshot_freshness`, `greeks_margin_gate`, `counterparty_state`, `stress_check`, `escalation` | 계산 경로에는 RAG를 사용하지 않는다. 계약·상대방 관계 설명이 필요할 때만 GraphRAG 후보 | `risk.trading_state.record.read`, P2 derivatives API, `market-api`, `portfolio-api` | `risk.derivative_snapshots`, `risk.input_snapshots`, 승인된 Exposure read-only |
+| `derivatives-counterparty-worker` (강등, `risk-runner`로 흡수) | `snapshot_freshness`, `greeks_margin_gate`, `counterparty_state`, `stress_check`, `escalation` | 계산 경로에는 RAG를 사용하지 않는다. 계약·상대방 관계 설명이 필요할 때만 GraphRAG 후보 | `risk.trading_state.record.read`, P2 derivatives API, `market-api`, `portfolio-api` | `risk.derivative_snapshots`, `risk.input_snapshots`, 승인된 Exposure read-only |
 
 ### 3.1 Compliance Agentic RAG
 
@@ -63,7 +66,7 @@ query normalize
 
 ### 3.2 Hot Path 금지
 
-`pre-trade-risk-worker`와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. Risk Worker가 계산 결과를 설명해야 할 때도 먼저 Risk Engine 결과를 확정한 뒤 비바인딩 서술만 생성한다.
+`risk-runner`(옛 `core-risk-worker`)와 결정론적 Risk Engine 사이에는 RAG, 외부 HTTP, 재시도형 LLM 호출을 넣지 않는다. `risk-runner`는 애초에 LLM을 호출하지 않는다(`llm: False`) — Risk Engine 결과를 그대로 옮기기만 한다.
 
 ## 4. HTTP·API 호출
 
@@ -104,6 +107,11 @@ audit.rag_graph_extractions
 
 별도 Qdrant나 Neo4j를 즉시 추가하지 않는다. 먼저 Supabase pgvector와 관계형 graph projection으로 정확도·latency를 측정한다. 별도 DB가 필요해질 경우에도 Supabase가 Source of Truth이고 Projection은 재생성 가능해야 한다.
 
+예외: `compliance-policy-worker`가 참조하는 정적 규정·정책 코퍼스는
+[ADR-0006](../../docs/02-engineering/adr/0006-pinecone-for-risk-qa-static-corpora.md)에
+따라 Pinecone을 쓴다 — Order/Ledger에 SQL Join이 필요 없는 참조 데이터이기 때문이며,
+이 예외는 Risk Snapshot에 결합되는 evidence(pgvector 유지)에는 적용되지 않는다.
+
 ## 6. RAG 기술 도입 순서
 
 1. 현재 Agentic RAG의 `retrieve → grade → generate → hallucination_check → retry`를 Risk Compliance에 유지한다.
@@ -126,14 +134,13 @@ audit.rag_graph_extractions
 
 ## 8. 직원별 Required Skill ID
 
-공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다.
+공통 계약은 [WORKER_SKILL_REGISTRY.md](../../docs/02-engineering/WORKER_SKILL_REGISTRY.md)를 따른다. 아래 목록은 직원 Graph를 작성할 때 처음 고정할 Skill 집합이다. `core-risk-worker`/`derivatives-counterparty-worker` 두 행은 2026-08-06 tool 강등 전 설계의 이력 기록이다 — 실제로는 LangGraph Skill 자체가 없는 결정론 `risk-runner`가 대신한다(3절 참고).
 
 | Worker | Required Skill ID |
 |---|---|
-| `market-liquidity-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
-| `pre-trade-risk-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `calc.deterministic_gate.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
+| `core-risk-worker` (강등, `risk-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
 | `compliance-policy-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `guard.pit_filter.v1`, `guard.prompt_injection_scan.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `rag.route.v1`, `rag.hybrid_retrieve.v1`, `rag.rerank.v1`, `rag.decompose.v1`, `rag.context_stitch.v1`, `rag.self_check.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.citation.v1`, `verify.provenance_chain.v1`, `verify.numeric_temporal.v1`, `audit.trace_record.v1`, `audit.cost_latency.v1`, `fallback.retry_budget.v1`, `fallback.human_escalation.v1` |
-| `derivatives-counterparty-worker` | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
+| `derivatives-counterparty-worker` (강등, `risk-runner`로 흡수) | `guard.input_normalize.v1`, `guard.scope_check.v1`, `context.internal_api.v1`, `context.repository_read.v1`, `context.cache_read.v1`, `guard.pit_filter.v1`, `calc.deterministic_gate.v1`, `advisory.grounded_summary.v1`, `verify.schema.v1`, `verify.provenance_chain.v1`, `audit.trace_record.v1`, `audit.replay_manifest.v1`, `audit.cost_latency.v1`, `fallback.human_escalation.v1` |
 
 `rag.graph_context.v1`은 Compliance 문서 간 관계가 실제로 증가한 뒤에만 Compliance Worker에 추가한다. Pre-trade와 계산 Hot Path에는 추가하지 않는다.
 

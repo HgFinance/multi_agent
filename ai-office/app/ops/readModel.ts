@@ -102,6 +102,7 @@ export type RuntimeStatus =
 
 export type OperationsWorker = {
   worker_id: string;
+  runtime_kind: "llm" | "deterministic";
   status: string;
   trigger: string | null;
 };
@@ -121,6 +122,8 @@ export type OperationsDepartment = {
   output_contract: string | null;
   failure_action: string | null;
   worker_count: number;
+  llm_worker_count: number;
+  deterministic_worker_count: number;
   active_worker_count: number;
   conditional_worker_count: number;
   active_workers?: string[];

@@ -206,35 +206,41 @@ export const STAFF_LIST: StaffEntry[] = [
     "무효화 조건 없는 상승 논리는 그냥 기대예요.",
     "이번엔 현서가 맞았으면 좋겠는데.",
   ]),
-  staff("strategy2", "member", "한지우", "market-thesis-worker", 3),
-  staff("strategy2", "member", "윤서준", "trade-proposal-worker", 4),
-  staff("strategy2", "member", "임채린", "order-constraint-worker", 5),
-  staff("strategy2", "member", "정하람", "execution-planning-worker", 6),
-  staff("strategy2", "member", "서지호", "venue-cost-worker", 7),
-  staff("strategy2", "member", "박서연", "derivatives-structure-worker", 0),
+  // 2026-08-06 tool 강등. 조건부 직원 5명(윤서준·임채린·정하람·서지호·박서연)과
+  // 이미 분리돼 사라진 market-thesis-worker 자리를 잡무 담당 하나로 합쳤다.
+  // 위 Bull/Bear 의 고정 멘트는 **사무실 화면용 연출**이다 — 실제 토론은
+  // departments/02-trading/scripts.py 가 직원 모델로 2라운드를 돌리고 부서장이 사회를 본다.
+  staff("strategy2", "member", "한지우", "desk-runner", 3, undefined, [
+    "저는 판단 안 합니다. 숫자만 가져와요.",
+    "브로커 초당 한도 넘는 분할은 제 선에서 반려됩니다. 규칙이 그래서요.",
+    "인증 서명 없으면 없다고 적습니다. 있다고 못 씁니다.",
+  ]),
 
   staff("ops", "lead", "이예주", "Hermes Head · Risk", 3, "이리스"),
-  staff("ops", "member", "문가온", "market-liquidity-worker", 4),
-  staff("ops", "member", "노은우", "pre-trade-risk-worker", 5),
-  staff("ops", "member", "류하진", "compliance-policy-worker", 6),
-  staff("ops", "member", "안유하", "derivatives-counterparty-worker", 7),
+  staff("ops", "member", "류하진", "compliance-policy-worker", 4),
+  staff("ops", "member", "문가온", "risk-runner", 5),
 
   staff("finance", "lead", "김승리", "Hermes Head · Accounting/Portfolio", 4, "김회계"),
-  staff("finance", "member", "지수아", "portfolio-control-worker", 5),
-  staff("finance", "member", "백승희", "ledger-reconciliation-worker", 6),
-  staff("finance", "member", "하지민", "nav-close-worker", 7),
-  staff("finance", "member", "오세인", "treasury-liquidity-worker", 0),
-  staff("finance", "member", "곽나은", "pnl-attribution-worker", 1),
-  staff("finance", "member", "성지우", "investor-reporting-worker", 2),
-  staff("finance", "member", "편하늘", "valuation-corporate-actions-worker", 3),
-  staff("finance", "member", "김서현", "fee-accrual-tax-worker", 4),
+  // 2026-08-07 tool 강등. 회계 직원 8명을 조사관 1 + 잡무 1 로 줄였다.
+  // 근거는 부서 헌장이다 — 마스터플랜 19.12 "공식 숫자는 Accounting Engine 이
+  // 계산하며 Agent 는 예외 조사와 설명을 담당한다". 기존 8명은 포트폴리오·자금·
+  // 손익·보고처럼 **수치 도메인**으로 나뉘어 있었는데 수치는 애초에 에이전트 것이
+  // 아니라서, 없는 권한을 축으로 직원을 나눈 꼴이었다.
+  staff("finance", "member", "백승희", "exception-investigation-worker", 6, undefined, [
+    "숫자가 안 맞네요. 왜 안 맞는지가 제 일입니다.",
+    "원인 후보까지만 냅니다. 확정은 원장이 해요.",
+    "근거 없으면 없다고 적습니다. 추측으로 안 채웁니다.",
+  ]),
+  staff("finance", "member", "지수아", "back-office-runner", 5, undefined, [
+    "저는 판단 안 합니다. 확정된 수치만 옮겨요.",
+    "자금이랑 세금은 아직 모듈이 없어요. 없다고 적습니다.",
+    "마감 확정이요? 제 권한 아닙니다.",
+  ]),
 
   staff("qa", "lead", "김동규", "Hermes Head · AI QA/Audit", 5, "김QA"),
-  staff("qa", "member", "강태오", "evidence-qa-worker", 6),
   staff("qa", "member", "문세라", "hallucination-critic-worker", 7),
-  staff("qa", "member", "정하은", "model-and-internal-audit-worker", 0),
-  staff("qa", "member", "배준서", "ops-and-permission-worker", 1),
   staff("qa", "member", "이수빈", "incident-postmortem-worker", 2),
+  staff("qa", "member", "강태오", "qa-runner", 3),
 
   staff("review", "lead", "류영주", "Hermes Head · Agent Workforce", 6, "류인사"),
   staff("review", "member", "임도훈", "workforce-planning-worker", 7),

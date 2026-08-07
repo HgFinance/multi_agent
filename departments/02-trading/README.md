@@ -1,7 +1,7 @@
 # 트레이딩본부 (Trading)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며 Hermes Profile은 `trading-department`다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+LLM 직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며, 결정론 `desk-runner`는 모델을 호출하지 않는다. Hermes Profile은 `trading-department`다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 현재 실행 상태와 도현님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)을 따른다.
 
 ## Mission
@@ -11,6 +11,20 @@ Trader/PM Agent가 진입·청산·크기·무효화 조건을 갖춘 구조화�
 
 `trader-pm-agent`는 주문을 직접 전송하지 않는다. Risk/Compliance Gate 통과가 선행 조건이다
 (`CLAUDE.md` "절대 깨면 안 되는 권한 분리" 참고). Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order.
+
+## Current Worker 구성
+
+구조조정 이후 Trading은 3명으로 실행된다.
+
+| Worker | 방식 | 역할 |
+|---|---|---|
+| `bull-thesis-worker` | LLM | Research Packet 근거 기반 Bull thesis 작성 |
+| `bear-thesis-worker` | LLM | Research Packet 근거 기반 Bear thesis 작성. Bull 결과와 독립 |
+| `desk-runner` | 결정론 | Intent Builder, 계약 전이, 실행 가능성·비용·파생 Certification 처리 |
+
+`desk-runner`는 기존 `trade-proposal-worker`, `order-constraint-worker`, `execution-planning-worker`,
+`venue-cost-worker`, `derivatives-structure-worker`의 결정론 업무를 흡수한다. Risk 승인·Broker Submit은
+여전히 Trading Worker의 권한이 아니다.
 
 ## Owner
 
@@ -77,11 +91,16 @@ uvicorn app:app --app-dir departments/02-trading/api      # Domain API 실행
     참여율·분할 **조정안만** 만든다. 예산 초과는 예산을 올리지 않고 집행을 조이는 방향으로
     제안하며(개발 원칙 9), Paper 근거와 실집행 근거를 절대 섞지 않는다. 한도 반영은
     리스크본부, 전략 승격은 퀀트본부 권한이라 이 모듈에는 YAML 쓰기 경로가 없다
-- `employee_workers.py` — `execution-planning-worker`·`venue-cost-worker` 두 직원에게만
-  위 규칙 근거를 주입하고 인용을 검증한다. 판정은 직원이 서술하기 전에 이미 끝나 있다
-- `scripts.py` — Bull/Bear 독립 병렬 토론. grounded 토론에 한해 **OrderIntent 제안**까지
-  만든다(2026-08-05). 제안에는 `risk_decision_id`가 없고 `submittable: False`라
-  OMS가 제출을 거부한다 — Risk Gate 선행이 문서가 아니라 코드로 강제된다
+- `employee_workers.py` — 직원 3명. **LLM 은 Bull/Bear 둘뿐**이고 나머지는 결정론
+  `desk-runner` 하나로 합쳐졌다(2026-08-06 tool 강등). 러너가 위 규칙 근거를 받아
+  판정을 그대로 옮긴다 — 판정은 러너가 서술하기 전에 이미 끝나 있다
+- `scripts.py` — Bull/Bear 독립 병렬 **2라운드** 토론. 두 토론자는 직원 런타임
+  (LangGraph + Ollama)이고 사회는 부서장 Hermes(`trading-supervisor`)가 본다.
+  토론자는 라운드마다 답하기 전에 혼자 사고하며(`config.debate.max_thinking_passes`),
+  그 사고는 인용 근거가 아니고 상대에게 넘어가지 않는다. grounded 토론에 한해
+  **OrderIntent 제안**까지 만든다(2026-08-05). 제안에는 `risk_decision_id`가 없고
+  `submittable: False`라 OMS가 제출을 거부한다 — Risk Gate 선행이 문서가 아니라
+  코드로 강제된다
 - `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 주문 판정 로직이 없다.**
   Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
   설계서: [TRADING_DOMAIN_API_SPEC.md](../../docs/02-engineering/TRADING_DOMAIN_API_SPEC.md)

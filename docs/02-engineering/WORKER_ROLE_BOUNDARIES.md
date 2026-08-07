@@ -1,7 +1,7 @@
 # HgFinance Worker 역할·통합 판정
 
-검토일: 2026-08-03 (KST)  
-상태: **최종 확정** (HR 5 -> 0 통합은 2026-08-07 **제안**, QA 독립검증·CEO 승인 대기)
+검토일: 2026-08-07 (KST)
+상태: **최종 확정** (단, HR 5 -> 0 통합은 2026-08-07 **제안**이며 QA 독립검증·CEO 승인 대기)
 
 이 문서는 직원 수를 늘리거나 줄일 때 사용하는 역할 경계와 통합 판정의 기준이다. 실행 기준은 각 부서의 `hermes/config.yaml`과 `employee_workers.py`의 `WORKER_SPECS`이며, `agent.personalities`의 예전 역할명은 호환용 Alias로만 취급한다.
 
@@ -25,28 +25,45 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
 | HR | 0 | 0 | 0 | 부서장 + 결정론 함수만. 직원 LLM 계층 없음(제안) |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
-| Trading | 6 | 2 | 4 | Thesis·OrderIntent·제약·집행·비용·파생 유지 |
-| Risk | 4 | 2 | 2 | 기존 통합 완료; 추가 감원 없음 |
+| Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
+| Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
-| Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
-| QA | 5 | 1 | 4 | 기존 통합 완료; 추가 감원 없음 |
+| Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
+| QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-총 37개 Worker와 8개 Hermes Profile이다(HR 통합 제안 반영 전 42개). 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다. HR은 Worker가 0이며 이는 설정 누락이 아니라 "직원 LLM 계층을 두지 않는다"는 결정이다.
+LLM Worker 20개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+
+**표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
+
+**HR만 결정론 Worker도 0이다.** 타 부서의 tool 강등은 LLM을 결정론 러너로 **바꾼** 것이지만, HR은 그 판정을 이미 일반 모듈(`quality.py`/`access.py`/`workflow.py`)이 갖고 있어 러너를 새로 만들 필요조차 없었다. 0은 설정 누락이 아니라 "직원 계층을 두지 않는다"는 결정이다.
 
 ## 부서별 역할과 병합 판정
 
 - **CEO**: `executive-briefing-worker` — 각 부서 보고서와 차단 사유를 종합해 최종 Case Summary를 작성한다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 없다.
 - **HR**(2026-08-07 개정 제안): Worker를 두지 않는다. 인사팀은 Hermes 부서장 1명과 결정론 함수로 운영한다. 제거 사유가 둘로 갈리므로 섞지 않는다.
   - **(A) 결정론 코드가 이미 그 판정을 소유함** — 일은 그대로 일어나고 수행 주체만 바뀐다. 계획·평가·Lifecycle·SoD가 서로 다른 상태 전이라는 2026-08-03 판단 자체는 맞지만, **그 상태 전이를 소유한 것은 Worker LLM이 아니라 결정론 모듈이다.** `selection-performance` → `scorecard/quality.py`의 `aggregate_quality()`(Snapshot이 없으면 0이 아니라 `None`을 돌려 "결함 없음"과 "집계할 데이터 없음"을 구분)와 `cost.py`의 `assess_budget()`, Eval 원본은 QA 소유 `audit.eval_runs`. `lifecycle-coordination` → `lifecycle/access.py`의 `approve_request()`·`provision()`·`revoke()`·`find_expired()`(다섯 개가 전부 거부 규칙이라 프롬프트 부탁이 예외로 바뀐다). `workforce-governance` → `improvements/workflow.py`의 `transition()`과 `roster/activation_evidence.py`(문자열이 비었는지가 아니라 그 ID가 DB에 실재하는지 조회해 판정 — LLM이 원리적으로 못 하는 검사다).
-  - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `profile-architecture`의 Job Profile 초안은 받아서 채용을 실행할 주체가 없다(Eval Runner·Platform/IAM 미구현, Roster 등재 유예, `workforce-management.yaml`의 승인 단계는 QA·CEO뿐이고 `required_role=USER`가 없다). `workforce-planning`의 인력 상황 서술도 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
+  - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `profile-architecture`의 Job Profile 초안은 받아서 채용을 실행할 주체가 없다(Eval Runner·Platform/IAM 미구현 — 아래 코드 실측 참고, Roster 등재 유예, `workforce-management.yaml`의 승인 단계는 QA·CEO뿐이고 `required_role=USER`가 없다). `workforce-planning`의 인력 상황 서술도 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
   - 임계값을 스스로 정하고 갱신하는 판단("Queue 10건이 맞는 기준인가")은 Worker가 아니라 Hermes 부서장 몫이며 제안까지만 허용된다(`workforce.hiring_request.propose`). 기준값 자체는 결정론 코드의 상수이고 변경은 사람의 PR이다.
+  - **Eval Runner 미구현 — 2026-08-07 코드 실측 재확인.** 문서만 믿지 않고 코드를 직접 확인한 결과다. `audit.eval_runs`/`eval_results`/`eval_sets` 3개 테이블 DDL은 `20260729000500_audit_api_security.sql`에 있으나 **저장소 전체에 INSERT·UPDATE 코드가 0건**이고 참조는 전부 SELECT다(`roster/activation_evidence.py`, `improvements/candidate.py` 등). QA API의 `/qa/v1/model-risk/evaluate`·`/qa/v1/internal-audit/evaluate`·`/qa/v1/ops/evaluate`는 Model Risk·Internal Audit·운영 건강성 평가이지 **후보 Agent를 Golden/Adversarial Eval Set으로 채점하는 Runner가 아니다** — 이름에 `evaluate`가 들어간다고 구현된 것으로 오인하지 않는다. Golden/Adversarial Eval 실행 코드도 0건이다(`technical_analyst.py`의 `GOLDEN`은 골든크로스라 무관). `workforce.eval.v1` 소비자(`workforce_events/worker.py`)는 구현돼 있으나 **발행자가 없다.**
+  - 위 결과로 HR 직원의 ACTIVE 전이는 `roster/activation_evidence.py`의 실재성 게이트를 통과할 방법이 **원리적으로 없다** — `qa_eval_run_id`가 가리킬 COMPLETED 행이 생성될 경로가 존재하지 않기 때문이다. 이것이 "HR 직원 5명 ACTIVE 활성화"가 계속 `not_started`인 실제 이유다.
+  - **되살릴 조건**: Eval Runner가 실체화되면 Adversarial Eval Case 작성은 역할마다 새로 써야 하는 창작이라 결정론화 대상이 아니다. 그때 `profile-architecture-worker` **1명**을 되살린다. Platform/IAM 쪽은 권한 목록이 카탈로그 선택이라 함수로도 충분하므로 되살릴 근거가 되지 못한다.
   - 이 항목은 QA 독립검증·CEO 승인 전까지 확정이 아니다.
 - **Research**: `research-data-worker`, `microstructure-worker`, `technical-signal-worker`, `fundamental-valuation-worker`, `news-macro-worker`, `evidence-rag-worker`. 데이터 정본·유동성 증거·지표·가치·이벤트·인용 검증은 서로 다른 입력과 Evidence 책임이므로 유지한다.
-- **Trading**: `market-thesis-worker`, `trade-proposal-worker`, `order-constraint-worker`, `execution-planning-worker`, `venue-cost-worker`, `derivatives-structure-worker`. OrderIntent 이전의 논리, 제약 매핑, Risk 승인 후 집행계획, 거래비용, 파생 구조는 권한과 실행 시점이 달라 유지한다.
-- **Risk**: `market-liquidity-worker`, `pre-trade-risk-worker`, `compliance-policy-worker`, `derivatives-counterparty-worker`. 파생·Margin과 Counterparty·Operational 위험은 `derivatives-counterparty-worker`로 이미 통합되었다. 최종 판정은 결정론적 Risk Engine이 한다.
+- **Risk**: `compliance-policy-worker` (LLM) + `risk-runner` (결정론, LLM 없음). 2026-08-06에 `core-risk-worker`(시장·유동성·사전 Risk Gate)와 `derivatives-counterparty-worker`(파생·Margin·Counterparty)를 **tool로 강등**해 `risk-runner` 하나로 합쳤다 — 둘 다 결정론 Risk Engine이 이미 답을 만들고 있었고 LLM은 그 답을 옮기기만 했다. `compliance-policy-worker`만 LLM이 유지된다(정책 문서 인용·근거 검증은 결정론화가 아니라 Agentic RAG의 몫). 최종 판정은 결정론적 Risk Engine이 한다.
+- **Trading**: `bull-thesis-worker`, `bear-thesis-worker` (LLM) + `desk-runner` (결정론, LLM 없음). Bull과 Bear는 **합치지 않는다** — 한 직원이 양쪽 논지를 다 만들면 먼저 세운 논지가 나중 논지의 앵커가 되어 확증편향이 구조적으로 생기고, "독립성 위반 0 / 문장 복제 0"(TRD-01/TRD-02 KPI)을 측정할 수 없게 된다([ADR-0005](adr/0005-bull-bear-worker-split.md)).
+
+  2026-08-06에 `trade-proposal-worker`·`order-constraint-worker`·`execution-planning-worker`·`venue-cost-worker`·`derivatives-structure-worker` 5명을 **tool로 강등**해 `desk-runner` 하나로 합쳤다. 강등 기준 둘: (1) 같은 입력에서 다른 출력이 나오는 것이 산출물인가, (2) 결정론 모듈이 이미 그 답을 만들고 있지 않은가. 다섯 다 둘 다 아니었다 — 주문 제안은 `propose_intent()`→`intent_builder`, 제약 매핑은 `contracts` 전이표, 집행 계획은 `philosophies.yaml` 프리셋 + `check_plan_feasible()`, 비용은 `tca_memory`, Certification은 서명 조회가 이미 답을 낸다. 위에 모델을 얹는 것은 나온 답을 다시 쓰는 계층일 뿐이고, 그 과정에서 집행 수치가 LLM 문장을 거치는 경로만 생긴다. Bull/Bear만 (1)을 통과한다.
+
+  토론은 2라운드이며 **토론자와 감독자의 런타임이 다르다** — 토론자는 직원 런타임(LangGraph + Ollama), 사회는 부서장 Hermes(`trading-supervisor`)다. 감독자 권한은 안전한 방향으로만 열려 있다: 초점을 Claim 색인 안에서 좁히고, 라운드를 닫고, escalate를 켤 수 있으나, 색인 밖 Claim을 만들거나 깨진 1라운드 위에 2라운드를 열거나 `grounded`를 바꾸거나 escalate를 끄지는 못한다.
 - **Quant**: `strategy-hypothesis-worker`, `dataset-feature-worker`, `backtest-optimization-worker`, `strategy-release-worker`, `ml-quant-worker`, `execution-cost-worker`, `regime-robustness-worker`. 연구 가설, PIT Dataset, Backtest, Release, ML, 비용, Regime의 실패 원인을 독립적으로 재현해야 하므로 유지한다.
-- **Accounting**: `portfolio-control-worker`, `ledger-reconciliation-worker`, `nav-close-worker`, `treasury-liquidity-worker`, `pnl-attribution-worker`, `investor-reporting-worker`, `valuation-corporate-actions-worker`, `fee-accrual-tax-worker`. 공식 원장·NAV·대사와 설명용 분석은 분리해야 하므로 유지한다.
-- **QA**: `evidence-qa-worker`, `hallucination-critic-worker`, `model-and-internal-audit-worker`, `ops-and-permission-worker`, `incident-postmortem-worker`. Model Risk와 Internal Audit, Agent Ops와 Tool Permission은 이미 각각 통합되었다. Evidence QA Gate가 최종 판정을 한다.
+- **Accounting**: `exception-investigation-worker` (LLM) + `back-office-runner` (결정론, LLM 없음). 2026-08-07에 8명을 둘로 줄였다. 근거는 부서 헌장이다 — 마스터플랜 19.12 "공식 숫자는 Accounting Engine이 계산하며 **Agent는 예외 조사와 설명을 담당한다**", 19.16 "Agent가 수치를 계산하거나 수정하지 않는다", SOUL "only figures the Accounting Engine has confirmed".
+
+  기존 8명은 portfolio / treasury / pnl / reporting / valuation / fee-tax라는 **도메인** 축으로 나뉘어 있었는데, 그 이름의 뜻은 "그 도메인의 *수치*를 보는 분석가"다. 수치는 헌장상 처음부터 에이전트 것이 아니므로 **에이전트에게 없는 권한을 축으로 직원을 나눈 것**이었다. 도메인마다 `qwen3:1.7b`를 하나씩 얹으면 각자 자기 도메인 수치를 한국어로 옮기는데, 그게 정확히 회계 수치가 LLM 문장을 거치는 경로다.
+
+  헌장이 쓰는 축은 도메인이 아니라 **예외 종류**이고, 조사가 필요한 예외는 둘 다 "차이가 났는데 원인이 확정되지 않았다"로 같은 모양이다 — 19.11 거래 사실 불일치(Break, `break_triage.py`)와 19.12 항등식 잔차(`DailyReport.unexplained_pnl`, `accounting_ops.yaml pnl_exception`). 조사 방법이 같으므로(원인 후보 → 근거 대조 → 인용 검증 → fail-closed) 직원 하나가 근거 provider 셋을 문다. `nav_close_memory`는 별도 직원이 아니라 이 직원의 근거다.
+
+  **Bull/Bear 같은 대립쌍은 두지 않는다.** Trading이 쪼갠 이유는 "논지가 틀렸다"고 말해 줄 결정론 모듈이 없어서였다([ADR-0005](adr/0005-bull-bear-worker-split.md)). 회계엔 있다 — `check_aging()`이 Break을 조용히 늙지 못하게 하고, `unexplained_pnl`이 잔차를 0으로 반올림하지 않고, `portfolio.py`가 Mark 없으면 NAV를 거부한다. 반대편 압력이 이미 코드이고 LLM 상대역보다 강하다. SOUL이 금지한 "발견한 Break을 스스로 immaterial로 닫는 것"은 상대역이 아니라 **권한을 안 주는 것**으로 막는다. 개명된 `ledger-reconciliation-worker`/`nav-close-worker`/`pnl-attribution-worker`는 config `staff_registry.renamed_workers`에 감사 추적용 alias로 남는다.
+- **QA**: `hallucination-critic-worker`, `incident-postmortem-worker` (LLM) + `qa-runner` (결정론, LLM 없음). 2026-08-06에 `evidence-qa-worker`(1차 인용·근거 검사)·`model-and-internal-audit-worker`(Model Risk·Internal Audit)·`ops-and-permission-worker`(운영 건강성·Tool 권한)를 **tool로 강등**해 `qa-runner` 하나로 합쳤다 — 셋 다 결정론 Engine(`EvidenceQaEngine`/`ModelRiskEngine`/`InternalAuditEngine`/`OpsHealthMonitor`/`ToolPermissionCheck`)이 이미 PASS/WARN/FAIL을 정하고 있었고 LLM은 서술만 했다. Hallucination 비판과 Incident Postmortem만 LLM이 유지된다(반박·재구성은 결정론화 대상이 아니다). Evidence QA Gate가 최종 판정을 한다.
 
 ### 추가 병합을 승인하지 않은 이유
 
@@ -75,25 +92,30 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 
 이 절은 역할 문서와 실행 코드의 드리프트를 막기 위한 명시적 계약이다. 상세 메타데이터의 Source of Truth는 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)이며, 각 부서의 `WORKER_SPECS`가 해당 프로필을 반드시 참조한다. 문서에 적힌 기술은 권한을 확장하지 않는다. Risk·QA Worker의 출력은 `worker-context.v1` advisory이고, 주문·Risk 승인·원장·QA Finding 종결을 직접 수행하지 않는다.
 
-공통 실행 경로는 `allow-listed read/calculation tool → 결정론적 guard/skill → Pydantic context/result 검증 → 필요한 경우 Ollama qwen3:1.7b advisory → trace/replay`다. Risk의 `pre-trade-risk-worker`와 Risk Engine 사이에는 RAG·외부 HTTP·재시도형 LLM을 넣지 않는다. Compliance와 Hallucination만 증거가 필요한 경우 Agentic RAG 경로를 사용하며, PIT·ACL·citation·provenance 검증이 실패하면 `DEGRADED/HOLD/ESCALATE`로 끝낸다.
+공통 실행 경로는 `allow-listed read/calculation tool → 결정론적 guard/skill → Pydantic context/result 검증 → 필요한 경우 Ollama qwen3:1.7b advisory → trace/replay`다. Risk의 `risk-runner`(옛 `core-risk-worker`)와 Risk Engine 사이에는 RAG·외부 HTTP·재시도형 LLM을 넣지 않는다 — `risk-runner`는 애초에 LLM을 호출하지 않는다. Compliance와 Hallucination만 증거가 필요한 경우 Agentic RAG 경로를 사용하며, PIT·ACL·citation·provenance 검증이 실패하면 `DEGRADED/HOLD/ESCALATE`로 끝낸다.
 
 ### Risk 본부
 
+**2026-08-06 tool 강등**: `core-risk-worker`·`derivatives-counterparty-worker`는 `risk-runner`(결정론, LLM 없음, `WORKER_SPECS` Registry 밖에서 매 케이스 항상 실행)로 합쳐졌다. 아래 두 행은 강등 전 설계의 이력 기록이다.
+
 | Worker | 역할과 실행 조건 | 기술 스택과 사용 방식 | 입력·도구 | 성과 지표 |
 |---|---|---|---|---|
-| `market-liquidity-worker` | 시장·유동성 상태 분석; 항상 실행 | LangGraph StateGraph, Pydantic `RiskSkillContext/Result`, TradingState·P1 snapshot adapter, Redis read model, Ollama advisory. PIT/freshness를 먼저 확인하고 HALTED·stale·timeout은 신규 진입 차단 방향으로 요약 | `risk.trading_state.read`, `risk.p1.snapshot`, 시장/포트폴리오 snapshot | freshness pass rate, stale-block rate, snapshot fan-in latency, replay completeness |
-| `pre-trade-risk-worker` | 사전 Risk Gate 분석; 항상 실행 | LangGraph deterministic graph, Pydantic `OrderIntent/RiskContext`, `RiskEngine`, idempotency·fail-closed guard. LLM/RAG 없이 같은 입력에 같은 결과를 만들고 설명만 advisory로 생성 | `risk.case.check` | deterministic decision consistency, gate latency, invalid-intent rejection rate, fail-closed coverage |
+| `risk-runner` | Market/liquidity/counterparty gate 결과 조회; 항상 실행, LLM 없음 | 평범한 Python 함수(LangGraph 아님). `RiskEngine.check_order()`가 만든 verdict/check_results를 그대로 옮긴다 — `summary` 필드가 없는 것이 이 직원의 요지다. `decided_by: deterministic`, `authoritative: False` | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, `risk.trading_state.record.read` | blockers 도출 정확도, Risk Engine verdict와의 일치율 |
+| `core-risk-worker` (강등, `risk-runner`로 흡수) | 시장·유동성 상태와 사전 Risk Gate 분석; 항상 실행 (2026-08-06 이전, `market-liquidity-worker`+`pre-trade-risk-worker` 병합) | LangGraph StateGraph, Pydantic `RiskSkillContext/Result`·`OrderIntent/RiskContext`, TradingState·P1 snapshot adapter, Redis read model, `RiskEngine`, idempotency·fail-closed guard, Ollama advisory. PIT/freshness를 먼저 확인하고 HALTED·stale·timeout은 신규 진입 차단 방향으로 요약하며, LLM/RAG 없이 같은 입력에 같은 결과를 만들고 설명만 advisory로 생성 | `risk.trading_state.read`, `risk.p1.snapshot`, `risk.case.check`, 시장/포트폴리오 snapshot | freshness pass rate, stale-block rate, snapshot fan-in latency, replay completeness, deterministic decision consistency, gate latency, invalid-intent rejection rate, fail-closed coverage |
 | `compliance-policy-worker` | PIT 정책 근거 분석; compliance evidence가 있을 때만 실행 | LangGraph conditional RAG, PIT/ACL filter, pgvector·BM25 hybrid retrieval, rerank, citation/provenance verifier, Ollama grounded summary. PIKE/LightRAG는 평가 후 도입할 후보 | `risk.compliance.check`, research documents/policies read-only | citation coverage, grounded rate, PIT violation catch rate, escalation precision, RAG latency |
-| `derivatives-counterparty-worker` | 파생·상대방·증거금 노출 분석; 관련 신호가 있을 때만 실행 | LangGraph StateGraph, TradingState record adapter, deterministic exposure/state-uncertainty check, Broker/FCM reconciliation, Ollama advisory. Greeks·margin·counterparty 상태 누락은 승인으로 보간하지 않음 | `risk.trading_state.record.read` | missing-state detection rate, exposure reconciliation coverage, counterparty escalation rate, tool latency |
+| `derivatives-counterparty-worker` (강등, `risk-runner`로 흡수) | 파생·상대방·증거금 노출 분석; 관련 신호가 있을 때만 실행 (2026-08-06 이전) | LangGraph StateGraph, TradingState record adapter, deterministic exposure/state-uncertainty check, Broker/FCM reconciliation, Ollama advisory. Greeks·margin·counterparty 상태 누락은 승인으로 보간하지 않음 | `risk.trading_state.record.read` | missing-state detection rate, exposure reconciliation coverage, counterparty escalation rate, tool latency |
 
 ### AI QA·감사 본부
 
+**2026-08-06 tool 강등**: `evidence-qa-worker`·`model-and-internal-audit-worker`·`ops-and-permission-worker`는 `qa-runner`(결정론, LLM 없음, `WORKER_SPECS` Registry 밖에서 매 케이스 항상 실행)로 합쳐졌다. 아래 세 행은 강등 전 설계의 이력 기록이다.
+
 | Worker | 역할과 실행 조건 | 기술 스택과 사용 방식 | 입력·도구 | 성과 지표 |
 |---|---|---|---|---|
-| `evidence-qa-worker` | 인용·근거 품질의 1차 검사; 항상 실행 | LangGraph `EvidenceQAEngine`, Pydantic QA context/result, PIT·provenance·numeric temporal checker, RunJournal. PASS/WARN/FAIL은 결정론적 엔진이 정하고 LLM은 설명만 생성 | `qa.evidence.check`, claim checks, research packet, evidence refs | citation coverage, claim verification rate, unsupported claim rate, QA latency |
+| `qa-runner` | Evidence/Model Risk/Internal Audit/Ops/Permission 결과 조회; 항상 실행, LLM 없음 | 평범한 Python 함수(LangGraph 아님). `EvidenceQaEngine`·`ModelRiskEngine`·`InternalAuditEngine`·`OpsHealthMonitor`·`ToolPermissionCheck`가 만든 판정을 그대로 옮긴다 — `summary` 필드가 없다. `decided_by: deterministic`, `authoritative: False` | `qa.evidence.check`, `qa.model_risk.evaluate`, `qa.internal_audit.evaluate`, `qa.ops.evaluate`, `qa.tool_permission.check` | blockers 도출 정확도, 각 결정론 Engine 판정과의 일치율 |
+| `evidence-qa-worker` (강등, `qa-runner`로 흡수) | 인용·근거 품질의 1차 검사; 항상 실행 (2026-08-06 이전) | LangGraph `EvidenceQAEngine`, Pydantic QA context/result, PIT·provenance·numeric temporal checker, RunJournal. PASS/WARN/FAIL은 결정론적 엔진이 정하고 LLM은 설명만 생성 | `qa.evidence.check`, claim checks, research packet, evidence refs | citation coverage, claim verification rate, unsupported claim rate, QA latency |
 | `hallucination-critic-worker` | unsupported/contradicted claim 비판; 해당 claim이 있을 때만 실행 | LangGraph conditional graph, Agentic RAG retrieval/rerank, contradiction·prompt-injection·provenance guard, Ollama critique. 새 자료를 임의 수집하지 않고 제출된 evidence를 우선 비교하며 미해결이면 ESCALATE | `qa.evidence.rag`, claim checks, source evidence | unsupported detection rate, contradiction detection rate, false-clear rate, critique latency |
-| `model-and-internal-audit-worker` | 모델 위험·내부통제 점검; audit input이 있을 때만 실행 | LangGraph, deterministic `ModelRiskEngine`·`InternalAuditEngine`, SoD/권한 검사, RunJournal append-only trace, Ollama 설명 | `qa.model_risk.evaluate`, `qa.internal_audit.evaluate` | model drift detection, audit finding coverage, SoD violation catch rate, audit latency |
-| `ops-and-permission-worker` | 운영 건강성·도구 권한 점검; ops/permission input이 있을 때만 실행 | LangGraph, `OpsHealthMonitor`, `ToolPermissionCheck`, allowlist·scope·department·SoD·cost/latency 검사, Ollama 설명 | `qa.ops.evaluate`, `qa.tool_permission.check` | permission violation catch rate, unauthorized-call rate, queue/model health, check latency |
+| `model-and-internal-audit-worker` (강등, `qa-runner`로 흡수) | 모델 위험·내부통제 점검; audit input이 있을 때만 실행 (2026-08-06 이전) | LangGraph, deterministic `ModelRiskEngine`·`InternalAuditEngine`, SoD/권한 검사, RunJournal append-only trace, Ollama 설명 | `qa.model_risk.evaluate`, `qa.internal_audit.evaluate` | model drift detection, audit finding coverage, SoD violation catch rate, audit latency |
+| `ops-and-permission-worker` (강등, `qa-runner`로 흡수) | 운영 건강성·도구 권한 점검; ops/permission input이 있을 때만 실행 (2026-08-06 이전) | LangGraph, `OpsHealthMonitor`, `ToolPermissionCheck`, allowlist·scope·department·SoD·cost/latency 검사, Ollama 설명 | `qa.ops.evaluate`, `qa.tool_permission.check` | permission violation catch rate, unauthorized-call rate, queue/model health, check latency |
 | `incident-postmortem-worker` | Incident timeline·재발방지 분석; incident가 있을 때만 실행 | LangGraph, `IncidentTimeline`, `RunJournal`, FACT/INFERENCE 분리, replay metadata, Ollama 요약. incident 기록은 append-only이며 Finding 종결 권한은 없음 | `qa.incident.record`, incident events | timeline completeness, root-cause evidence coverage, recurrence-control coverage, postmortem latency |
 
 조건부 Worker는 자유 텍스트만으로 실행하지 않는다. 해당 구조화 입력과 trigger가 함께 있어야 실행하며, 입력이 없으면 `not_executed/SKIPPED_SAFE`로 남긴다. 이는 성능 저하가 아니라 근거 없는 QA·Risk 판정을 막는 안전장치다. 외부 쓰기(`risk.trading_state.write`, QA corrective-action close 등)는 별도 인증·SoD·idempotency API 경계에 있으며 이 Worker Registry와 포트폴리오 추천 파이프라인에서는 사용하지 않는다.

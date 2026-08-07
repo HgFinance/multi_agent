@@ -27,60 +27,6 @@ class WorkerTechProfile:
 
 
 RISK_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
-    "market-liquidity-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph StateGraph",
-            "Pydantic RiskSkillContext/RiskSkillResult",
-            "Risk TradingState·P1 snapshot read adapter",
-            "Redis hot-state read model",
-            "Ollama OpenAI-compatible advisory node",
-        ),
-        usage=(
-            "PIT·freshness guard를 먼저 통과시킨다",
-            "TradingState·시장 스냅샷·노출을 결정론적으로 요약한다",
-            "신규 진입 차단·HALTED 상태를 우선 판단한다",
-            "LLM은 수치와 근거를 설명하는 non-binding 문장만 생성한다",
-        ),
-        inputs=(
-            "risk.trading_state.read",
-            "risk.p1.snapshot",
-            "market_snapshot",
-            "portfolio_state",
-        ),
-        metrics=(
-            "snapshot_freshness_rate",
-            "liquidity_gate_latency_ms",
-            "missing_input_rate",
-            "degraded_rate",
-        ),
-    ),
-    "pre-trade-risk-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph StateGraph",
-            "Pydantic contract validation",
-            "deterministic RiskEngine.check_order",
-            "idempotency·fail-closed gate",
-            "Ollama advisory explanation node",
-        ),
-        usage=(
-            "OrderIntent·RiskContext·Policy version을 스키마 검증한다",
-            "RiskEngine의 한도·현금·집중도·TradingState 결과만 사용한다",
-            "RAG·외부 HTTP·재시도형 LLM은 hot path에서 금지한다",
-            "실패는 RESIZE·REJECT·HOLD로만 전파한다",
-        ),
-        inputs=(
-            "risk.case.check",
-            "order_intent",
-            "risk_context",
-            "policy_version",
-        ),
-        metrics=(
-            "risk_gate_latency_ms",
-            "schema_reject_rate",
-            "fail_closed_rate",
-            "decision_replay_match_rate",
-        ),
-    ),
     "compliance-policy-worker": WorkerTechProfile(
         stack=(
             "LangGraph guarded Worker graph",
@@ -110,64 +56,10 @@ RISK_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
             "rag_latency_ms",
         ),
     ),
-    "derivatives-counterparty-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph StateGraph",
-            "Pydantic exposure context",
-            "TradingState record·counterparty read adapter",
-            "deterministic exposure and state-uncertainty checks",
-            "Ollama advisory explanation node",
-        ),
-        usage=(
-            "파생상품·상대방·미결제 상태가 명시된 경우에만 활성화한다",
-            "확정되지 않은 Broker/FCM 상태를 Filled·Cancelled로 추정하지 않는다",
-            "상대방 상태 불명·정산 불일치는 Reconciliation/ESCALATE로 보낸다",
-            "GraphRAG는 관계 데이터가 실제 적재된 뒤 별도 benchmark로 도입한다",
-        ),
-        inputs=(
-            "risk.trading_state.record.read",
-            "counterparty_state",
-            "derivatives_snapshot",
-            "settlement_status",
-        ),
-        metrics=(
-            "counterparty_state_coverage",
-            "unconfirmed_state_rate",
-            "exposure_reconciliation_rate",
-            "escalation_rate",
-        ),
-    ),
 }
 
 
 QA_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
-    "evidence-qa-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph guarded Worker graph",
-            "deterministic EvidenceQAEngine",
-            "Pydantic claim/citation contract",
-            "PIT·provenance·numeric temporal validators",
-            "Ollama grounded explanation node",
-        ),
-        usage=(
-            "모든 핵심 claim을 source/evidence와 1:1로 매핑한다",
-            "PASS/WARN/FAIL은 EvidenceQAEngine이 결정하고 LLM은 설명만 한다",
-            "미검증 인용·미래 데이터·수치 불일치는 WARN/ESCALATE로 남긴다",
-            "QA는 주문·Risk 승인·Finding 종결을 수행하지 않는다",
-        ),
-        inputs=(
-            "qa.evidence.check",
-            "assessment.claim_checks",
-            "research_packet",
-            "evidence_refs",
-        ),
-        metrics=(
-            "citation_coverage_rate",
-            "claim_verification_rate",
-            "unsupported_claim_rate",
-            "qa_gate_latency_ms",
-        ),
-    ),
     "hallucination-critic-worker": WorkerTechProfile(
         stack=(
             "LangGraph conditional Worker graph",
@@ -193,62 +85,6 @@ QA_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
             "contradiction_detection_rate",
             "false_clear_rate",
             "critique_latency_ms",
-        ),
-    ),
-    "model-and-internal-audit-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph conditional Worker graph",
-            "ModelRiskEngine",
-            "InternalAuditEngine",
-            "Pydantic model/audit contract",
-            "RunJournal replay metadata",
-            "Ollama advisory summary node",
-        ),
-        usage=(
-            "model·prompt·dataset version과 재현성 지표를 확인한다",
-            "InternalAuditEngine의 SoD·권한·감사 결과를 독립적으로 해석한다",
-            "PASS/WARN/FAIL/ESCALATE 결정은 결정론적 엔진을 따른다",
-            "재현 실패·보호 실패율·드리프트는 CEO/Risk로 에스컬레이션한다",
-        ),
-        inputs=(
-            "qa.model_risk.evaluate",
-            "qa.internal_audit.evaluate",
-            "model_risk_input",
-            "internal_audit_events",
-        ),
-        metrics=(
-            "replay_match_rate",
-            "model_drift_rate",
-            "audit_finding_coverage",
-            "escalation_rate",
-        ),
-    ),
-    "ops-and-permission-worker": WorkerTechProfile(
-        stack=(
-            "LangGraph conditional Worker graph",
-            "OpsHealthMonitor",
-            "ToolPermissionCheck",
-            "Pydantic permission/audit contract",
-            "trace and cost-latency projection",
-            "Ollama operational summary node",
-        ),
-        usage=(
-            "agent latency·error·cost와 queue/model health를 결정론적으로 집계한다",
-            "allowlist·scope·department·SoD 위반을 탐지한다",
-            "권한을 스스로 확장하거나 Secret 값을 출력하지 않는다",
-            "위반은 즉시 격리·ESCALATE하고 정상으로 완화하지 않는다",
-        ),
-        inputs=(
-            "qa.ops.evaluate",
-            "qa.tool_permission.check",
-            "ops_assessment",
-            "permission_check",
-        ),
-        metrics=(
-            "permission_violation_rate",
-            "agent_error_rate",
-            "p95_latency_ms",
-            "trace_completeness_rate",
         ),
     ),
     "incident-postmortem-worker": WorkerTechProfile(

@@ -36,8 +36,10 @@ def test_test_profile_runs_full_risk_and_qa_skeleton():
     assert result["qa_gate"]["decision"] == "WARN"
     assert result["replay_contract"]["status"] == "READY"
     assert result["replay_contract"]["replayable"] is True
-    assert len(result["risk"]["workers"]) == 4
-    assert len(result["qa"]["workers"]) == 5
+    # risk-runner/qa-runner(결정론, LLM 없음)는 2026-08-06 이후 이 LLM department-graph
+    # 시뮬레이션 대상이 아니다 - 여기 workers는 WORKER_SPECS(LLM Worker)만 반영한다.
+    assert len(result["risk"]["workers"]) == 1
+    assert len(result["qa"]["workers"]) == 2
     assert result["risk"]["not_executed"] == []
     assert result["qa"]["not_executed"] == []
     assert result["risk"]["head"]["head_id"] == "risk-supervisor"
@@ -47,15 +49,9 @@ def test_test_profile_runs_full_risk_and_qa_skeleton():
     assert result["qa"]["head"]["escalate"] is True  # intentional fixture WARN
     assert [handoff["type"] for handoff in result["risk"]["handoffs"]] == [
         "HEAD_DELEGATION",
-        "PEER_CONTEXT",
-        "PEER_CONTEXT",
-        "PEER_CONTEXT",
     ]
     assert [handoff["type"] for handoff in result["qa"]["handoffs"]] == [
         "HEAD_DELEGATION",
-        "PEER_CONTEXT",
-        "PEER_CONTEXT",
-        "PEER_CONTEXT",
         "PEER_CONTEXT",
     ]
     assert result["qa"]["received_department_handoff"]["from"] == "risk-supervisor"
@@ -133,7 +129,10 @@ def test_worker_runtime_ollama_mode_uses_worker_injection_boundary():
     )
 
     assert result["worker_runtime"] == "ollama"
-    assert len(calls) == 9
+    # risk-runner/qa-runner는 이 department-graph 시뮬레이션 밖이라 LLM을 안 부른다 -
+    # 남은 LLM Worker는 compliance-policy-worker(risk) + hallucination-critic-worker,
+    # incident-postmortem-worker(qa) 3명뿐이다.
+    assert len(calls) == 3
     assert result["risk"]["runtime"]["worker_provider"] == "ollama"
     assert result["qa"]["runtime"]["worker_provider"] == "ollama"
 
@@ -146,9 +145,6 @@ def test_worker_rag_policy_is_fail_closed_per_role():
         for worker in result[domain]["workers"]
     }
 
-    assert routes["market-liquidity-worker"] == "NO_RAG"
-    assert routes["pre-trade-risk-worker"] == "NO_RAG"
-    assert routes["derivatives-counterparty-worker"] == "NO_RAG"
-    assert routes["ops-and-permission-worker"] == "NO_RAG"
     assert routes["compliance-policy-worker"] in {"HYBRID", "GRAPH"}
+    assert routes["hallucination-critic-worker"] in {"NO_RAG", "HYBRID", "GRAPH"}
     assert routes["incident-postmortem-worker"] in {"HYBRID", "GRAPH", "HYPERGRAPH"}

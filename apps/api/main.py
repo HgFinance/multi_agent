@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
@@ -35,8 +36,16 @@ from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,6 +93,15 @@ from portfolio_schemas import (
     PortfolioUniverseListResponse,
 )
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
+
+try:
+    from .qa import router as qa_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from qa import router as qa_router
+try:
+    from .risk import router as risk_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
 app = FastAPI(title="AI Office BFF", version="0.2.0")
@@ -111,12 +129,58 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+app.include_router(risk_router)
+app.include_router(qa_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
 # 이 BFF가 얇게 전달하고, 정책 검증·Risk/QA/사용자 승인·영속화는 governance-api가 한다.
-GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "http://127.0.0.1:8043").rstrip("/")
+GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "").rstrip("/")
+# Canonical mandate verification is an explicit deployment opt-in. Deterministic
+# tests leave this disabled; an empty Governance URL can never be treated as ready.
+PORTFOLIO_GOVERNANCE_BINDING_ENABLED = os.getenv(
+    "PORTFOLIO_GOVERNANCE_BINDING_ENABLED", "false"
+).casefold() in {"1", "true", "yes", "on"}
+PORTFOLIO_GOVERNANCE_BINDING_PATH = (
+    os.getenv(
+        "PORTFOLIO_GOVERNANCE_BINDING_PATH",
+        "/governance/v1/mandates/{mandate_id}/current",
+    ).strip()
+    or "/governance/v1/mandates/{mandate_id}/current"
+)
+GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
+# The deployment must provide a trusted authenticated subject header. Local
+# deterministic tests explicitly opt out; missing identity is never accepted in
+# the production default.
+PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "true").casefold() in {"1", "true", "yes", "on"}
+PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING", "true").casefold() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
+
+
+class GovernanceProxyError(HTTPException):
+    """Carries the upstream Governance API error body through untouched.
+
+    A plain ``HTTPException(detail=payload)`` gets re-wrapped by FastAPI into
+    ``{"detail": payload}``, nesting ``error_code``/``message`` one level too
+    deep for the frontend (``governanceClient.ts``), which reads them at the
+    top level. Every governance-api error handler already emits that
+    ``{error_code, message, detail, trace_id}`` shape, so pass it straight
+    through instead of collapsing it into FastAPI's single ``detail`` field.
+    """
+
+    def __init__(self, status_code: int, payload: object) -> None:
+        super().__init__(status_code=status_code, detail=payload)
+        self.payload = payload
+
+
+@app.exception_handler(GovernanceProxyError)
+async def _on_governance_proxy_error(request: Request, exc: GovernanceProxyError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
 
 async def _governance_request(
@@ -126,9 +190,25 @@ async def _governance_request(
     params: dict[str, str] | None = None,
     body: dict[str, object] | None = None,
 ) -> object:
+    if not GOVERNANCE_API_URL:
+        raise HTTPException(status_code=503, detail="governance_api_unavailable")
+    headers = (
+        {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
+        if GOVERNANCE_API_AUTH_TOKEN
+        else None
+    )
     try:
-        async with httpx.AsyncClient(base_url=GOVERNANCE_API_URL, timeout=GOVERNANCE_API_TIMEOUT_SECONDS) as client:
-            response = await client.request(method, path, params=params, json=body)
+        async with httpx.AsyncClient(
+            base_url=GOVERNANCE_API_URL,
+            timeout=GOVERNANCE_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.request(
+                method,
+                path,
+                params=params,
+                json=body,
+                headers=headers,
+            )
     except httpx.RequestError as exc:
         raise HTTPException(status_code=503, detail="governance_api_unavailable") from exc
 
@@ -138,9 +218,67 @@ async def _governance_request(
     except ValueError:
         payload = {"detail": f"governance_api_http_{response.status_code}"}
     if response.status_code >= 400:
-        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
-        raise HTTPException(status_code=response.status_code, detail=detail)
+        raise GovernanceProxyError(response.status_code, payload)
     return payload
+
+
+_PORTFOLIO_BINDING_FIELDS = ("mandate_id", "case_id", "mandate_version_id", "policy_hash")
+
+
+def _canonical_binding_matches(
+    submitted: Mapping[str, object],
+    payload: object,
+) -> bool:
+    """Match every binding field against one explicit Governance response object."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    candidates: list[Mapping[str, object]] = [payload]
+    for key in ("binding", "mandate_binding", "canonical_binding", "data"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    for candidate in candidates:
+        if any(
+            field not in candidate or candidate[field] != submitted.get(field)
+            for field in _PORTFOLIO_BINDING_FIELDS
+        ):
+            continue
+        for marker in ("valid", "binding_valid"):
+            if marker in candidate and candidate.get(marker) is not True:
+                break
+        else:
+            return True
+    return False
+
+
+async def _verify_portfolio_governance_binding(request: PortfolioRecommendationRequest) -> None:
+    if not PORTFOLIO_GOVERNANCE_BINDING_ENABLED:
+        return
+    binding = {field: getattr(request, field) for field in _PORTFOLIO_BINDING_FIELDS}
+    for field, value in binding.items():
+        if field != "case_id" and not value:
+            raise HTTPException(status_code=422, detail=f"{field}_binding_required")
+    if not GOVERNANCE_API_URL:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable")
+    try:
+        path = PORTFOLIO_GOVERNANCE_BINDING_PATH.replace(
+            "{mandate_id}", str(binding["mandate_id"])
+        )
+        canonical = await _governance_request("GET", path)
+    except HTTPException as exc:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="governance_binding_unavailable") from exc
+    if not _canonical_binding_matches(binding, canonical):
+        raise HTTPException(status_code=409, detail="governance_mandate_binding_mismatch")
+
+
+def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None = None) -> None:
+    if PORTFOLIO_AUTH_REQUIRED and not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    if owner_id and expected_user_id and owner_id != expected_user_id:
+        raise HTTPException(status_code=403, detail="portfolio_recommendation_forbidden")
 
 
 @app.post("/ui/mandates/{mandate_id}/change-requests")
@@ -249,8 +387,8 @@ class PortfolioRecommendationRequest(BaseModel):
     """User suitability inputs; this route never accepts orders or credentials."""
 
     user_id: str = Field(min_length=1, max_length=128)
-    mindset: str
-    experience: str
+    mindset: Literal["SAFETY_FIRST", "BALANCED", "RISK_SEEKING"]
+    experience: Literal["BEGINNER", "INTERMEDIATE", "EXPERIENCED"]
     investment_horizon_years: int = Field(ge=1, le=100)
     max_drawdown_pct: str = Field(
         pattern=r"^0(?:\.\d+)?$|^1(?:\.0+)?$",
@@ -271,7 +409,7 @@ class PortfolioRecommendationRequest(BaseModel):
         if ratio <= 0 or ratio > 1:
             raise ValueError("max_drawdown_pct must be greater than 0 and at most 1")
         return value
-    liquidity_need: str = "MEDIUM"
+    liquidity_need: Literal["LOW", "MEDIUM", "HIGH"] = "MEDIUM"
     investment_amount: Decimal = Field(gt=0, max_digits=20, decimal_places=2)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     universe_id: str = Field(default=DEFAULT_UNIVERSE_ID, min_length=1, max_length=128)
@@ -279,6 +417,16 @@ class PortfolioRecommendationRequest(BaseModel):
     include_stock: bool = Field(default=True, description="주식 자산을 추천 결과에 포함할지 여부")
     include_derivatives: bool = Field(default=False, description="파생상품 자산을 추천 결과에 포함할지 여부(현재 국내 주식 전용 범위에서는 기본 OFF)")
     query: str = Field(default="", max_length=2000)
+    max_sector_weight_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    max_gross_exposure_pct: Decimal | None = Field(default=None, ge=0, le=500, max_digits=7, decimal_places=2)
+    max_daily_loss_pct: Decimal | None = Field(default=None, ge=0, le=100, max_digits=6, decimal_places=2)
+    allowed_asset_classes: list[str] = Field(default_factory=list, max_length=32)
+    forbidden_asset_classes: list[str] = Field(default_factory=list, max_length=32)
+    trace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    mandate_id: str | None = Field(default=None, min_length=1, max_length=128)
+    case_id: str | None = Field(default=None, min_length=1, max_length=128)
+    mandate_version_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_hash: str | None = Field(default=None, min_length=1, max_length=128)
     as_of: str | None = None
     fund_id: str | None = None
 
@@ -288,18 +436,46 @@ class PortfolioRecommendationRequest(BaseModel):
     status_code=202,
     response_model=PortfolioRecommendationStartResponse,
 )
-async def start_portfolio_recommendation(request: PortfolioRecommendationRequest) -> dict[str, object]:
-    """Start the advisory LangGraph and return a process-local run reference."""
+async def start_portfolio_recommendation(
+    request: PortfolioRecommendationRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+) -> dict[str, object]:
+    """Start the advisory LangGraph and return a run reference."""
+    _require_portfolio_owner(owner_id, request.user_id)
 
     if get_universe(request.universe_id) is None:
         raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
+    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.mandate_version_id:
+        raise HTTPException(status_code=422, detail="mandate_version_binding_required")
+    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.policy_hash:
+        raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
+    if request.mandate_version_id and not request.policy_hash:
+        raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
+    if request.policy_hash and not request.mandate_version_id:
+        raise HTTPException(status_code=422, detail="mandate_version_binding_required")
+    await _verify_portfolio_governance_binding(request)
     profile = request.model_dump(exclude_none=True)
+    if idempotency_key:
+        profile["idempotency_key"] = idempotency_key
     if "as_of" not in profile:
         from datetime import datetime, timezone
 
         profile["as_of"] = datetime.now(timezone.utc).isoformat()
     try:
-        return RUNTIME.start(profile)
+        result = RUNTIME.start(profile)
+        run = RUNTIME.get(result["run_id"])
+        if run is None:
+            raise HTTPException(status_code=503, detail="portfolio_recommendation_projection_unavailable")
+        return {
+            **result,
+            "trace_id": run.get("trace_id", ""),
+            "case_id": run.get("case_id"),
+            "mandate_id": run.get("mandate_id"),
+            "mandate_version_id": run.get("mandate_version_id"),
+            "policy_hash": run.get("policy_hash"),
+            "input_hash": run["input_hash"],
+        }
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -308,10 +484,14 @@ async def start_portfolio_recommendation(request: PortfolioRecommendationRequest
     "/ui/portfolio-recommendations/{run_id}",
     response_model=PortfolioRecommendationStatusResponse,
 )
-def portfolio_recommendation_status(run_id: str) -> dict[str, object]:
+def portfolio_recommendation_status(
+    run_id: str,
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+) -> dict[str, object]:
     run = RUNTIME.get(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    _require_portfolio_owner(owner_id, str(run.get("profile_user_id", "")))
     return run
 
 
@@ -327,9 +507,14 @@ class PortfolioRecommendationApprovalRequest(BaseModel):
 def decide_portfolio_recommendation(
     run_id: str,
     request: PortfolioRecommendationApprovalRequest,
+    owner_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> dict[str, object]:
     """Approve or reject the advisory recommendation, never an order."""
 
+    current = RUNTIME.get(run_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="portfolio_recommendation_run_not_found")
+    _require_portfolio_owner(owner_id, str(current.get("profile_user_id", "")))
     try:
         run = RUNTIME.decide(run_id, request.decision, request.comment)
     except RuntimeError as exc:
@@ -381,6 +566,38 @@ def health() -> dict:
         "status_event_type": "agent.status.v1",
         "status_sequence": agent_status_snapshot()["sequence"],
     }
+@app.get("/health/ready")
+def health_ready() -> dict[str, object]:
+    """Expose dependency readiness without secrets or claiming operational durability."""
+
+    dependencies = {
+        "bff": {"status": "READY"},
+        "governance": {"status": "READY" if GOVERNANCE_API_URL else "NOT_CONFIGURED"},
+        "supabase": {"status": "READY" if os.getenv("DATABASE_URL", "").strip() else "NOT_CONFIGURED"},
+        "ollama": {
+            "status": "READY"
+            if os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test") == "deterministic_test"
+            or os.getenv("OLLAMA_BASE_URL", "").strip()
+            else "NOT_CONFIGURED"
+        },
+        "pipeline": {"status": "READY" if RUNTIME is not None else "UNAVAILABLE"},
+        "runtime_store": {"status": "READY" if RUNTIME.durable else "NOT_CONFIGURED"},
+        "mandate_binding": {
+            "status": (
+                "READY"
+                if (PORTFOLIO_REQUIRE_MANDATE_BINDING or PORTFOLIO_GOVERNANCE_BINDING_ENABLED)
+                and GOVERNANCE_API_URL
+                else "NOT_CONFIGURED"
+            ),
+            "canonical_verification": (
+                "READY"
+                if PORTFOLIO_GOVERNANCE_BINDING_ENABLED and GOVERNANCE_API_URL
+                else "NOT_CONFIGURED"
+            ),
+        },
+    }
+    status = "ready" if all(item["status"] == "READY" for item in dependencies.values()) else "degraded"
+    return {"status": status, "dependencies": dependencies, "external_writes": False}
 
 
 @lru_cache(maxsize=1)
@@ -633,6 +850,7 @@ if __name__ == "__main__":
         "/ui/portfolio-recommendations/{run_id}/approval",
         "/ui/mandates/{mandate_id}/change-requests",
         "/ui/mandates/{mandate_id}/current",
+        "/ui/risk/mandates/{mandate_id}/assess",
         "/ui/mandate-cases/{case_id}/advance",
         "/ui/mandate-cases/{case_id}/timeline",
         "/ui/mandate-approvals",

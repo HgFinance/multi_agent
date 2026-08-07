@@ -33,10 +33,11 @@ class WorkerRAGPolicy:
     forced_route: RAGRoute | None = None
 
 
+# risk-runner(결정론 잡무, LLM 없음)는 여기 항목이 없다 - 라우터는 *LLM이 무엇을
+# 볼 수 있나*를 제한하는 장치고 그 직원은 LLM이 없다. 항목을 비워두면
+# `rag_policy_for_worker("risk-runner")`가 ValueError를 내는데, 그게 옳은
+# fail-closed다: 나중에 risk-runner를 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다.
 WORKER_RAG_POLICIES: dict[str, WorkerRAGPolicy] = {
-    "market-liquidity-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
-    "pre-trade-risk-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
-    "derivatives-counterparty-worker": WorkerRAGPolicy(frozenset({"NO_RAG"}), "NO_RAG"),
     "compliance-policy-worker": WorkerRAGPolicy(
         frozenset({"NO_RAG", "HYBRID", "GRAPH"})
     ),

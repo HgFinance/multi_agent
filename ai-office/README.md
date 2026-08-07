@@ -24,7 +24,7 @@
 ## 현재 구현
 
 - CEO·7개 부서·CEO 지원 공간을 2층 Pixel Office로 표시한다.
-- `RiskQaPanel`은 Risk 4명, QA 5명의 Worker Registry와 Head 모델을 별도로 표시한다.
+- `RiskQaPanel`은 Risk 2명(LLM 1명 + 결정론 runner 1명), QA 3명(LLM 2명 + 결정론 runner 1명)의 Worker Registry와 Head 모델을 별도로 표시한다.
 - Head는 Hermes + Codex/Luna, Worker는 독립 LangGraph + Ollama `qwen3:1.7b`로 표시한다.
 - `Simulation working`은 `app/game/sim.ts`의 데모 상태일 뿐 외부 런타임 성공 증거가 아니다.
 - Risk/QA의 주문 제출·원장 기록·Risk Limit 변경 권한은 화면과 연결하지 않는다.

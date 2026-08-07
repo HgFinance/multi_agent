@@ -39,6 +39,7 @@ DEPARTMENT_PROFILES: tuple[dict[str, str], ...] = (
 )
 
 
+@lru_cache(maxsize=None)
 def _profile_data(profile: str) -> dict[str, Any]:
     path = ROOT / "departments" / profile / "hermes" / "config.yaml"
     try:
@@ -48,6 +49,7 @@ def _profile_data(profile: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+@lru_cache(maxsize=1)
 def _registry() -> dict[str, Any]:
     try:
         value = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -65,6 +67,41 @@ def _department_rows() -> list[dict[str, Any]]:
         model = config.get("model") if isinstance(config.get("model"), dict) else {}
         agent = config.get("agent") if isinstance(config.get("agent"), dict) else {}
         workers = config.get("workers") if isinstance(config.get("workers"), dict) else {}
+        deterministic_workers = (
+            config.get("deterministic_workers")
+            if isinstance(config.get("deterministic_workers"), dict)
+            else {}
+        )
+        llm_worker_count = int(registry.get("worker_count", 0) or 0)
+        deterministic_worker_count = int(
+            registry.get("deterministic_worker_count", len(deterministic_workers)) or 0
+        )
+        total_worker_count = int(
+            registry.get("headcount_total", llm_worker_count + deterministic_worker_count)
+            or llm_worker_count + deterministic_worker_count
+        )
+        registered_workers = [
+            {
+                "worker_id": worker_id,
+                "runtime_kind": "llm",
+                "status": worker.get("status", "registered")
+                if isinstance(worker, dict)
+                else "registered",
+                "trigger": worker.get("trigger") if isinstance(worker, dict) else None,
+            }
+            for worker_id, worker in workers.items()
+        ]
+        registered_workers.extend(
+            {
+                "worker_id": worker_id,
+                "runtime_kind": "deterministic",
+                "status": worker.get("status", "registered")
+                if isinstance(worker, dict)
+                else "registered",
+                "trigger": worker.get("trigger") if isinstance(worker, dict) else None,
+            }
+            for worker_id, worker in deterministic_workers.items()
+        )
         rows.append(
             {
                 **item,
@@ -78,19 +115,16 @@ def _department_rows() -> list[dict[str, Any]]:
                 "worker_model": runtime.get("model_default"),
                 "output_contract": runtime.get("output_contract"),
                 "failure_action": runtime.get("failure_action"),
-                "worker_count": registry.get("worker_count", registry.get("active_worker_count", 0)),
+                # worker_count is the total employee count excluding the Hermes Head.
+                # Keep the LLM/deterministic split explicit for cost and runtime views.
+                "worker_count": total_worker_count,
+                "llm_worker_count": llm_worker_count,
+                "deterministic_worker_count": deterministic_worker_count,
                 "active_worker_count": 0,
                 "conditional_worker_count": registry.get("conditional_worker_count", 0),
                 "active_workers": [],
                 "current_stage": None,
-                "workers": [
-                    {
-                        "worker_id": worker_id,
-                        "status": worker.get("status", "registered") if isinstance(worker, dict) else "registered",
-                        "trigger": worker.get("trigger") if isinstance(worker, dict) else None,
-                    }
-                    for worker_id, worker in workers.items()
-                ],
+                "workers": registered_workers,
                 "source_profile": f"departments/{item['profile']}/hermes/config.yaml",
             }
         )

@@ -27,7 +27,7 @@ def test_context_hash_and_scope_are_deterministic():
         "as_of": "2026-08-04T00:00:00Z",
         "allowed_scopes": ["risk.case.check"],
     }
-    context = build_context(payload, worker_id="pre-trade-risk-worker")
+    context = build_context(payload, worker_id="compliance-policy-worker")
     assert context.input_hash == hash_payload(payload)
     assert scope_check(context, "risk.case.check").status == "COMPLETED"
     denied = scope_check(context, "ledger.write")
@@ -36,7 +36,7 @@ def test_context_hash_and_scope_are_deterministic():
 
 
 def test_missing_scope_is_denied_fail_closed():
-    context = build_context({}, worker_id="pre-trade-risk-worker")
+    context = build_context({}, worker_id="compliance-policy-worker")
 
     denied = scope_check(context, "risk.case.check")
 
@@ -45,9 +45,7 @@ def test_missing_scope_is_denied_fail_closed():
 
 
 def test_pit_freshness_rejects_future_and_stale_data():
-    context = build_context(
-        {"as_of": "2026-08-04T00:00:00Z"}, worker_id="market-liquidity-worker"
-    )
+    context = build_context({"as_of": "2026-08-04T00:00:00Z"}, worker_id="risk-runner")
     future = freshness_check(context, "2026-08-04T00:00:01Z", max_age_seconds=3600)
     stale = freshness_check(context, "2026-08-03T00:00:00Z", max_age_seconds=3600)
     assert future.error_code == "FUTURE_INPUT"
@@ -55,7 +53,7 @@ def test_pit_freshness_rejects_future_and_stale_data():
 
 
 def test_tool_exception_escalates_without_llm_fallback():
-    context = build_context({}, worker_id="pre-trade-risk-worker")
+    context = build_context({}, worker_id="compliance-policy-worker")
     invocation = invoke_tool(
         lambda _payload: (_ for _ in ()).throw(RuntimeError("down")),
         {},

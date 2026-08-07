@@ -21,7 +21,7 @@ from qa_worker_skill_runtime.trace import SkillTrace
 
 def test_scope_denial_is_escalation():
     context = build_context(
-        {"allowed_scopes": ["qa.evidence.check"]}, worker_id="evidence-qa-worker"
+        {"allowed_scopes": ["qa.evidence.check"]}, worker_id="qa-runner"
     )
     result = scope_check(context, "ledger.write")
     assert result.status == "ESCALATE"
@@ -30,14 +30,14 @@ def test_scope_denial_is_escalation():
 
 def test_pit_check_rejects_future_evidence_and_missing_time():
     context = build_context(
-        {"as_of": "2026-08-04T00:00:00Z"}, worker_id="evidence-qa-worker"
+        {"as_of": "2026-08-04T00:00:00Z"}, worker_id="qa-runner"
     )
     assert pit_check(context, None).error_code == "MISSING_OBSERVED_AT"
     assert pit_check(context, "2026-08-04T00:00:01Z").error_code == "FUTURE_EVIDENCE"
 
 
 def test_tool_exception_is_inconclusive_and_escalates():
-    context = build_context({}, worker_id="evidence-qa-worker")
+    context = build_context({}, worker_id="qa-runner")
     invocation = invoke_tool(
         lambda _payload: (_ for _ in ()).throw(RuntimeError("down")),
         {},
@@ -65,7 +65,7 @@ def test_graph_route_and_trace_are_explicit():
 
 
 def test_missing_scope_is_denied_fail_closed():
-    context = build_context({}, worker_id="evidence-qa-worker")
+    context = build_context({}, worker_id="qa-runner")
 
     denied = scope_check(context, "qa.evidence.check")
 

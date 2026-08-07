@@ -25,6 +25,8 @@ export const RUNTIME_STATUS_LABEL: Record<string, string> = {
   APPROVE: "승인됨",
   REJECTED: "거절됨",
   REJECT: "거절됨",
+  REVOKED: "철회됨",
+  EXPIRED: "기한 만료",
   PASS: "통과",
   FAIL: "실패",
   WARN: "주의",
