@@ -41,6 +41,14 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
+
+# orchestration.employee_dispatch는 이 파일을 spec_from_file_location으로 직접 로드한다 -
+# departments/03-risk가 sys.path에 없는 채로 실행될 수 있어 tools.legal_wiki_tool을
+# 절대 import하기 전에 직접 등록한다(같은 파일의 _load_skill_package()와 동일한 이유).
+_DEPARTMENT_DIR = Path(__file__).resolve().parent
+if str(_DEPARTMENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_DEPARTMENT_DIR))
+
 from tools.legal_wiki_tool import (
     LegalWikiAnswerFn,
     LegalWikiQueryInput,
@@ -550,7 +558,11 @@ def _route_query_mode(
         parsed = json.loads(candidate)
         mode = parsed.get("query_mode")
         if mode in _QUERY_MODES:
-            return mode, str(parsed.get("routing_rationale", ""))[:500], True
+            return (
+                mode,
+                str(parsed.get("routing_rationale", ""))[:500],
+                bool(getattr(worker_llm, "uses_model", True)),
+            )
     except Exception:  # noqa: BLE001, S110 - routing boundary fails closed.
         pass
     # 분류 실패 시 검색 범위를 줄이지 않고 가장 넓게 본다(정책+법률 모두) - 못 찾음을
@@ -664,10 +676,14 @@ def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
 
 
 def _run_employee_workers_sequential(
-    payload: dict[str, Any], llm: WorkerLLM | None = None
+    payload: dict[str, Any],
+    llm: WorkerLLM | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None
 ) -> dict[str, Any]:
     tools: dict[str, WorkerTool] = {
-        "compliance-policy-worker": _compliance_tool,
+        "compliance-policy-worker": lambda value: _compliance_tool(
+            value, legal_answer_fn=legal_answer_fn
+        ),
     }
     reports: list[dict[str, Any]] = []
     not_executed: list[str] = []
@@ -729,11 +745,14 @@ def _run_employee_workers_sequential(
 async def run_employee_workers_async(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None,
 ) -> dict[str, Any]:
     """Fan out guarded Risk Worker graphs and deterministically fan them in."""
 
     tools: dict[str, WorkerTool] = {
-        "compliance-policy-worker": _compliance_tool,
+        "compliance-policy-worker": lambda value: _compliance_tool(
+            value, legal_answer_fn=legal_answer_fn
+        ),
     }
     input_hash = str(
         payload.get("input_hash")
@@ -824,8 +843,16 @@ async def run_employee_workers_async(
 
 
 def run_employee_workers(
-    payload: dict[str, Any], llm: WorkerLLM | None = None
+    payload: dict[str, Any],
+    llm: WorkerLLM | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None
 ) -> dict[str, Any]:
     """Synchronous compatibility boundary for the async Risk fan-in."""
 
-    return run_coroutine_sync(run_employee_workers_async(payload, llm=llm))
+    return run_coroutine_sync(
+        run_employee_workers_async(
+            payload,
+            llm=llm,
+            legal_answer_fn=legal_answer_fn,
+        )
+    )

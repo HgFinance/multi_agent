@@ -304,6 +304,8 @@ class MandateAssessmentResponse(BaseModel):
     employees: dict[str, dict[str, object]]
     tool_calls: list[str]
     risk_head: dict[str, object]
+    risk_head_state: dict[str, object]
+    employee_runtime: dict[str, object]
 
 
 # --- App -------------------------------------------------------------------------

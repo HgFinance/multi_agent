@@ -114,6 +114,15 @@ export type RuntimeOperations = {
     status: string;
     summary: string | null;
   }>;
+  /** Sanitized agent.status.v1 projection for department APIs without a portfolio run. */
+  agent_statuses?: Array<{
+    agent_id: string;
+    worker_id: string | null;
+    department_code: string;
+    status: string;
+    role: string | null;
+    reason: string | null;
+  }>;
   active_handoff: {
     from_department: string;
     to_department: string;
@@ -317,7 +326,7 @@ export class Company {
    * Project the actual BFF LangGraph runtime into the pixel office.
    * No runtime event means no simulated work, movement, or dialogue.
    */
-  applyRuntime(runtime: RuntimeOperations | null) {
+  applyRuntime(runtime: RuntimeOperations | null, agentStatuses: RuntimeOperations["agent_statuses"] = []) {
     this.remoteRuntime = true;
     const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
     const completed = Boolean(runtime?.result) && !running;
@@ -366,7 +375,19 @@ export class Company {
       "hr-department": "review",
       "ceo-agent": "ceo",
     };
-    const active = new Map((runtime?.active_workers ?? []).map((worker) => [worker.worker_id, worker]));
+    const projectedWorkers = agentStatuses
+      .filter((item) => ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(item.status))
+      .map((item) => ({
+        worker_id: item.worker_id ?? item.agent_id,
+        department_code: item.department_code,
+        stage: item.status,
+        role: item.role ?? item.worker_id ?? item.agent_id,
+        status: item.status,
+        summary: item.reason,
+      }));
+    const active = new Map(
+      [...(runtime?.active_workers ?? []), ...projectedWorkers].map((worker) => [worker.worker_id, worker]),
+    );
     const headFor = (departmentCode: string) =>
       this.agents.find((agent) => (agent.rank === "lead" || agent.rank === "ceo") && agent.deptId === departmentMap[departmentCode]);
     const handoff = runtime?.active_handoff;
@@ -463,7 +484,10 @@ export class Company {
     const runtimeDepartments = runtime ? Object.entries(departmentMap) : [];
     for (const [departmentCode, departmentId] of runtimeDepartments) {
       const department = runtime?.departments?.[departmentCode];
-      const status = department?.status ?? (active.size ? "RUNNING" : "IDLE");
+      const hasDepartmentWorker = [...active.values()].some(
+        (worker) => worker.department_code === departmentCode,
+      );
+      const status = department?.status ?? (hasDepartmentWorker ? "RUNNING" : "IDLE");
       this.deptStatus[departmentId] = status === "RUNNING" ? "진행 중" : status === "COMPLETED" ? "완료" : status === "BLOCKED" || status === "DEGRADED" ? "연동 대기" : "대기";
     }
 
