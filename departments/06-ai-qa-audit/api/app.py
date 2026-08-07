@@ -92,6 +92,7 @@ from qa_events.redis_event_bus import (
     QaEventBusError,
     RedisEventBus,
 )
+from qa_mandate_workers import QaVerificationRequest, assess_qa_verification
 from tool_permission_check import (
     AgentToolPolicy,
     check_tool_permission,
@@ -235,6 +236,14 @@ class QaCheckRequest(BaseModel):
 class EventConsumeRequest(BaseModel):
     count: int = Field(default=10, ge=1, le=100)
     min_idle_ms: int = Field(default=0, ge=0)
+
+
+class QaVerificationResponse(BaseModel):
+    verification_id: str
+    pipeline_status: str
+    dispatch: dict[str, object]
+    employees: dict[str, dict[str, object]]
+    qa_head: dict[str, object]
 
 
 class AgentHealthMetricsIn(BaseModel):
@@ -524,6 +533,31 @@ def qa_check(case_id: str, body: QaCheckRequest):
     assessment = evidence_engine.check_artifact(body.artifact, ctx, body.qa_decision_id)
     _persist_qa_decision(assessment)
     return assessment
+
+
+@app.post(
+    "/qa/v1/verifications/{verification_id}/assess",
+    response_model=QaVerificationResponse,
+)
+def assess_qa_verification_for_head(verification_id: str, body: QaVerificationRequest):
+    """Dispatch one immutable QA verification to the three QA employees.
+
+    The QA Head receives the independent qa-runner/hallucination-critic-worker/
+    incident-postmortem-worker reports only after each has run. This endpoint
+    is advisory and never closes a Finding, changes a QA verdict, alters a
+    Risk verdict, or approves/submits an order.
+    """
+
+    if verification_id != body.verification_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "VERIFICATION_ID_MISMATCH",
+                "path_verification_id": verification_id,
+                "body_verification_id": body.verification_id,
+            },
+        )
+    return assess_qa_verification(body)
 
 
 @app.post("/qa/v1/events/consume")
@@ -1015,7 +1049,57 @@ if __name__ == "__main__":
     ).json()
     assert closed["status"] == "COMPLETED", closed
 
+    # --- 3.6 QA verification mandate (qa-runner/hallucination-critic/incident-postmortem) --
+    v_artifact_id, v_fund, v_trace = uuid4(), uuid4(), uuid4()
+    unsupported_verification = client.post(
+        "/qa/v1/verifications/ver-1/assess",
+        json={
+            "verification_id": "ver-1",
+            "artifact": {
+                "artifact_version_id": str(v_artifact_id),
+                "artifact_type": "research_packet",
+                "producer": "research-supervisor",
+                "fund_id": str(v_fund),
+                "trace_id": str(v_trace),
+                "claims": [
+                    {
+                        "claim_index": 0,
+                        "text": "AAPL은 반등한다",
+                        "kind": "fact",
+                        "subject": "AAPL",
+                    }
+                ],
+            },
+            "decision_time": now.isoformat(),
+        },
+    )
+    assert unsupported_verification.status_code == 200, unsupported_verification.text
+    v_body = unsupported_verification.json()
+    assert v_body["employees"]["qa-runner"]["decision"] == "FAIL", v_body
+    assert v_body["employees"]["hallucination-critic-worker"]["status"] == "DEGRADED", v_body
+    assert v_body["employees"]["hallucination-critic-worker"]["namespace"] == "qa-hallucination-reference"
+    assert v_body["qa_head"]["binding"] is False
+    assert v_body["dispatch"]["mutation_allowed"] is False
+
+    mismatched_verification = client.post(
+        "/qa/v1/verifications/ver-1/assess",
+        json={
+            "verification_id": "ver-mismatch",
+            "artifact": {
+                "artifact_version_id": str(uuid4()),
+                "artifact_type": "research_packet",
+                "producer": "research-supervisor",
+                "fund_id": str(v_fund),
+                "trace_id": str(v_trace),
+                "claims": [{"claim_index": 0, "text": "무관", "kind": "inference"}],
+            },
+            "decision_time": now.isoformat(),
+        },
+    )
+    assert mismatched_verification.status_code == 409, mismatched_verification.text
+    assert mismatched_verification.json()["detail"]["error_code"] == "VERIFICATION_ID_MISMATCH"
+
     print(
-        "ok - QA Domain API 5개 영역(qa-check/ops/trace/tool-permission/incident) 점검 통과 "
-        "(evidence/check는 OPENAI_API_KEY 필요 - 제외)"
+        "ok - QA Domain API 6개 영역(qa-check/ops/trace/tool-permission/incident/verification-mandate) "
+        "점검 통과 (evidence/check는 OPENAI_API_KEY 필요 - 제외)"
     )

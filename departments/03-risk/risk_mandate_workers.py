@@ -19,11 +19,15 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 import requests
+from integrations.pinecone_client import PineconeEvidenceClient, PineconeQueryError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from tools.order_tools import OrderComplianceInput, evaluate_order_compliance
+from tools.policy_tools import RiskPolicyQueryInput, query_pinecone_risk_policy
 
 RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 OrderMode = Literal["AUTO_EXECUTION", "MANUAL_APPROVAL"]
@@ -47,7 +51,13 @@ class PortfolioConstraints(BaseModel):
     max_total_exposure: Decimal = Field(ge=0)
     max_drawdown_limit: Decimal = Field(ge=-1, le=0)
 
-    @field_validator("base_capital", "max_single_stock_weight", "max_total_exposure", "max_drawdown_limit", mode="before")
+    @field_validator(
+        "base_capital",
+        "max_single_stock_weight",
+        "max_total_exposure",
+        "max_drawdown_limit",
+        mode="before",
+    )
     @classmethod
     def parse_decimal(cls, value: Any) -> Decimal:
         try:
@@ -72,7 +82,9 @@ class PositionSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     instrument_id: str = Field(min_length=1, max_length=100)
-    asset_class: Literal["SINGLE_STOCK", "ETF", "LEVERAGE", "FUTURES", "OPTIONS", "DERIVATIVES", "CRYPTO"]
+    asset_class: Literal[
+        "SINGLE_STOCK", "ETF", "LEVERAGE", "FUTURES", "OPTIONS", "DERIVATIVES", "CRYPTO"
+    ]
     weight: Decimal | None = Field(default=None, ge=0)
     issuer: str | None = Field(default=None, max_length=200)
 
@@ -129,6 +141,7 @@ class RiskMandateAssessmentRequest(BaseModel):
 
     mandate_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
     event_id: str | None = Field(default=None, max_length=100)
+    trace_id: str | None = Field(default=None, max_length=128)
     timestamp: str | None = None
     investor_profile: InvestorProfile
     portfolio_constraints: PortfolioConstraints
@@ -138,6 +151,7 @@ class RiskMandateAssessmentRequest(BaseModel):
     compliance_query: str | None = Field(default=None, max_length=4000)
     policy_query_vector: list[float] | None = Field(default=None, min_length=1)
     compliance_evidence: list[ComplianceEvidence] = Field(default_factory=list)
+    order_compliance: OrderComplianceInput | None = None
     as_of: str | None = None
 
     @model_validator(mode="after")
@@ -162,7 +176,9 @@ def _jsonable(value: Any) -> Any:
 
 
 def _input_hash(request: RiskMandateAssessmentRequest) -> str:
-    canonical = json.dumps(_jsonable(request), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        _jsonable(request), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -190,52 +206,164 @@ def run_risk_runner(request: RiskMandateAssessmentRequest) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     checks: list[dict[str, Any]] = []
     missing_observations: list[str] = []
+    order_compliance_result = None
+    if request.order_compliance is not None:
+        order_compliance_result = evaluate_order_compliance(request.order_compliance)
+        if order_compliance_result.verdict == "REJECT":
+            reasons.append("ORDER_COMPLIANCE_REJECT")
+        elif order_compliance_result.verdict == "RESIZE":
+            reasons.append("ORDER_COMPLIANCE_RESIZE")
 
     if snapshot is None:
-        missing_observations.extend(["current_var", "var_limit", "total_exposure", "current_drawdown", "positions"])
+        missing_observations.extend(
+            [
+                "current_var",
+                "var_limit",
+                "total_exposure",
+                "current_drawdown",
+                "positions",
+            ]
+        )
         checks.append({"check": "observed_portfolio_state", "status": "MISSING_INPUT"})
     else:
         if snapshot.current_var is None or snapshot.var_limit is None:
             missing_observations.append("var_current_or_limit")
         elif snapshot.current_var > snapshot.var_limit:
             reasons.append("VAR_LIMIT_BREACH")
-            actions.append({"type": "HEDGE_OR_UNWIND", "target": "DELTA_EXPOSURE", "mode": request.order_mode})
-            checks.append({"check": "portfolio_var", "status": "BREACH", "current": _decimal(snapshot.current_var), "limit": _decimal(snapshot.var_limit)})
+            actions.append(
+                {
+                    "type": "HEDGE_OR_UNWIND",
+                    "target": "DELTA_EXPOSURE",
+                    "mode": request.order_mode,
+                }
+            )
+            checks.append(
+                {
+                    "check": "portfolio_var",
+                    "status": "BREACH",
+                    "current": _decimal(snapshot.current_var),
+                    "limit": _decimal(snapshot.var_limit),
+                }
+            )
         else:
-            checks.append({"check": "portfolio_var", "status": "PASS", "current": _decimal(snapshot.current_var), "limit": _decimal(snapshot.var_limit)})
+            checks.append(
+                {
+                    "check": "portfolio_var",
+                    "status": "PASS",
+                    "current": _decimal(snapshot.current_var),
+                    "limit": _decimal(snapshot.var_limit),
+                }
+            )
 
         if snapshot.total_exposure is None:
             missing_observations.append("total_exposure")
         elif snapshot.total_exposure > request.portfolio_constraints.max_total_exposure:
             reasons.append("TOTAL_EXPOSURE_LIMIT_BREACH")
-            actions.append({"type": "REDUCE_EXPOSURE", "target": "TOTAL_EXPOSURE", "mode": request.order_mode})
-            checks.append({"check": "total_exposure", "status": "BREACH", "current": _decimal(snapshot.total_exposure), "limit": _decimal(request.portfolio_constraints.max_total_exposure)})
+            actions.append(
+                {
+                    "type": "REDUCE_EXPOSURE",
+                    "target": "TOTAL_EXPOSURE",
+                    "mode": request.order_mode,
+                }
+            )
+            checks.append(
+                {
+                    "check": "total_exposure",
+                    "status": "BREACH",
+                    "current": _decimal(snapshot.total_exposure),
+                    "limit": _decimal(request.portfolio_constraints.max_total_exposure),
+                }
+            )
         else:
-            checks.append({"check": "total_exposure", "status": "PASS", "current": _decimal(snapshot.total_exposure), "limit": _decimal(request.portfolio_constraints.max_total_exposure)})
+            checks.append(
+                {
+                    "check": "total_exposure",
+                    "status": "PASS",
+                    "current": _decimal(snapshot.total_exposure),
+                    "limit": _decimal(request.portfolio_constraints.max_total_exposure),
+                }
+            )
 
         if snapshot.current_drawdown is None:
             missing_observations.append("current_drawdown")
-        elif snapshot.current_drawdown < request.portfolio_constraints.max_drawdown_limit:
+        elif (
+            snapshot.current_drawdown < request.portfolio_constraints.max_drawdown_limit
+        ):
             reasons.append("DRAWDOWN_LIMIT_BREACH")
-            actions.append({"type": "ENTRY_BLOCK_OR_REDUCE", "target": "DRAWDOWN", "mode": request.order_mode})
-            checks.append({"check": "drawdown", "status": "BREACH", "current": _decimal(snapshot.current_drawdown), "limit": _decimal(request.portfolio_constraints.max_drawdown_limit)})
+            actions.append(
+                {
+                    "type": "ENTRY_BLOCK_OR_REDUCE",
+                    "target": "DRAWDOWN",
+                    "mode": request.order_mode,
+                }
+            )
+            checks.append(
+                {
+                    "check": "drawdown",
+                    "status": "BREACH",
+                    "current": _decimal(snapshot.current_drawdown),
+                    "limit": _decimal(request.portfolio_constraints.max_drawdown_limit),
+                }
+            )
         else:
-            checks.append({"check": "drawdown", "status": "PASS", "current": _decimal(snapshot.current_drawdown), "limit": _decimal(request.portfolio_constraints.max_drawdown_limit)})
+            checks.append(
+                {
+                    "check": "drawdown",
+                    "status": "PASS",
+                    "current": _decimal(snapshot.current_drawdown),
+                    "limit": _decimal(request.portfolio_constraints.max_drawdown_limit),
+                }
+            )
 
         for position in snapshot.positions:
-            permission = getattr(request.asset_policy, _policy_key(position.asset_class))
+            permission = getattr(
+                request.asset_policy, _policy_key(position.asset_class)
+            )
             if permission == "PROHIBITED":
                 reasons.append(f"PROHIBITED_ASSET:{position.asset_class}")
-                actions.append({"type": "REJECT_POSITION", "instrument_id": position.instrument_id, "mode": request.order_mode})
+                actions.append(
+                    {
+                        "type": "REJECT_POSITION",
+                        "instrument_id": position.instrument_id,
+                        "mode": request.order_mode,
+                    }
+                )
             if position.asset_class == "SINGLE_STOCK" and position.weight is None:
                 missing_observations.append(f"position_weight:{position.instrument_id}")
-            elif position.asset_class == "SINGLE_STOCK" and position.weight > request.portfolio_constraints.max_single_stock_weight:
+            elif (
+                position.asset_class == "SINGLE_STOCK"
+                and position.weight
+                > request.portfolio_constraints.max_single_stock_weight
+            ):
                 reasons.append(f"SINGLE_STOCK_LIMIT_BREACH:{position.instrument_id}")
-                actions.append({"type": "REBALANCE_SELL", "instrument_id": position.instrument_id, "target_weight": _decimal(request.portfolio_constraints.max_single_stock_weight), "mode": request.order_mode})
+                actions.append(
+                    {
+                        "type": "REBALANCE_SELL",
+                        "instrument_id": position.instrument_id,
+                        "target_weight": _decimal(
+                            request.portfolio_constraints.max_single_stock_weight
+                        ),
+                        "mode": request.order_mode,
+                    }
+                )
 
     if reasons:
-        verdict = "RESIZE" if not any(reason.startswith("PROHIBITED_ASSET") for reason in reasons) else "REJECT"
-        severity = "HIGH" if any(reason in {"VAR_LIMIT_BREACH", "DRAWDOWN_LIMIT_BREACH"} for reason in reasons) else "MEDIUM"
+        if order_compliance_result and order_compliance_result.verdict == "REJECT":
+            verdict = "REJECT"
+        else:
+            verdict = (
+                "RESIZE"
+                if not any(reason.startswith("PROHIBITED_ASSET") for reason in reasons)
+                else "REJECT"
+            )
+        severity = (
+            "HIGH"
+            if any(
+                reason in {"VAR_LIMIT_BREACH", "DRAWDOWN_LIMIT_BREACH"}
+                for reason in reasons
+            )
+            else "MEDIUM"
+        )
         action_required = True
     elif missing_observations:
         verdict, severity, action_required = "HOLD", "MEDIUM", True
@@ -259,23 +387,45 @@ def run_risk_runner(request: RiskMandateAssessmentRequest) -> dict[str, Any]:
         "checks": checks,
         "suggested_actions": actions,
         "order_mode": request.order_mode,
+        "tool_calls": (
+            ["evaluate_order_compliance"] if order_compliance_result is not None else []
+        ),
+        "order_compliance": (
+            order_compliance_result.model_dump(mode="json")
+            if order_compliance_result is not None
+            else None
+        ),
         "input_hash": _input_hash(request),
         "summary": "Deterministic RiskEngine-style mandate checks completed; no order was submitted.",
     }
 
 
-class PineconeEvidenceClient:
+class LegacyPineconeEvidenceClient:
     """Minimal Pinecone data-plane client using environment-only credentials."""
 
-    def __init__(self, *, api_key: str | None = None, index_host: str | None = None, timeout_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        index_host: str | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> None:
         self.api_key = api_key or os.getenv("PINECONE_API_KEY", "").strip()
-        self.index_host = (index_host or os.getenv("PINECONE_INDEX_HOST", "").strip()).rstrip("/")
+        self.index_host = (
+            index_host or os.getenv("PINECONE_INDEX_HOST", "").strip()
+        ).rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    def query(self, vector: list[float], *, namespace: str | None = None, top_k: int = 8) -> list[dict[str, Any]]:
+    def query(
+        self, vector: list[float], *, namespace: str | None = None, top_k: int = 8
+    ) -> list[dict[str, Any]]:
         if not self.api_key or not self.index_host:
             raise RuntimeError("PINECONE_NOT_CONFIGURED")
-        body: dict[str, Any] = {"vector": vector, "topK": top_k, "includeMetadata": True}
+        body: dict[str, Any] = {
+            "vector": vector,
+            "topK": top_k,
+            "includeMetadata": True,
+        }
         if namespace:
             body["namespace"] = namespace
         response = requests.post(
@@ -289,7 +439,11 @@ class PineconeEvidenceClient:
         return [item for item in matches if isinstance(item, dict)]
 
 
-def run_compliance_policy_worker(request: RiskMandateAssessmentRequest, *, pinecone: PineconeEvidenceClient | None = None) -> dict[str, Any]:
+def run_compliance_policy_worker(
+    request: RiskMandateAssessmentRequest,
+    *,
+    pinecone: PineconeEvidenceClient | None = None,
+) -> dict[str, Any]:
     """Produce non-authoritative policy findings from supplied/Pinecone evidence."""
 
     evidence = [item.model_dump(mode="json") for item in request.compliance_evidence]
@@ -297,26 +451,49 @@ def run_compliance_policy_worker(request: RiskMandateAssessmentRequest, *, pinec
     error: str | None = None
     if not evidence and request.policy_query_vector is not None:
         try:
-            matches = (pinecone or PineconeEvidenceClient()).query(request.policy_query_vector, namespace=os.getenv("PINECONE_NAMESPACE"))
+            query_result = query_pinecone_risk_policy(
+                RiskPolicyQueryInput(
+                    mandate_id=request.mandate_id,
+                    query=request.compliance_query or "Risk mandate policy compliance",
+                    query_vector=request.policy_query_vector,
+                    as_of=date.fromisoformat(
+                        (
+                            request.as_of
+                            or datetime.now(timezone.utc).date().isoformat()
+                        )[:10]
+                    ),
+                ),
+                client=pinecone or PineconeEvidenceClient.from_env(),
+            )
             source = "pinecone"
             evidence = [
                 {
-                    "evidence_id": str(match.get("id", "pinecone-match")),
-                    "title": str((match.get("metadata") or {}).get("title", "Pinecone policy evidence")),
-                    "text": str((match.get("metadata") or {}).get("text", "")),
+                    "evidence_id": match.match_id,
+                    "title": match.metadata.title or "Pinecone policy evidence",
+                    "text": match.text,
                     "source": "pinecone",
-                    "score": match.get("score"),
-                    "violation": bool((match.get("metadata") or {}).get("violation", False)),
+                    "score": match.score,
+                    "violation": False,
+                    "metadata": match.metadata.model_dump(mode="json"),
                 }
-                for match in matches
+                for match in query_result.matches
             ]
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            if query_result.status != "OK":
+                error = query_result.error_code or query_result.status
+        except (PineconeQueryError, RuntimeError, ValueError) as exc:
             error = type(exc).__name__
 
     violations = [item for item in evidence if item.get("violation") is True]
     if violations:
         verdict, severity, action_required = "ESCALATE", "MEDIUM", True
-        suggested_actions = [{"type": "REBALANCE_TO_POLICY", "evidence_id": item.get("evidence_id"), "mode": request.order_mode} for item in violations]
+        suggested_actions = [
+            {
+                "type": "REBALANCE_TO_POLICY",
+                "evidence_id": item.get("evidence_id"),
+                "mode": request.order_mode,
+            }
+            for item in violations
+        ]
     elif evidence:
         verdict, severity, action_required = "PASS", "LOW", False
         suggested_actions = []
@@ -336,9 +513,17 @@ def run_compliance_policy_worker(request: RiskMandateAssessmentRequest, *, pinec
         "verdict": verdict,
         "severity": severity,
         "action_required": action_required,
-        "reason_codes": [item.get("reason_code") or "POLICY_EVIDENCE_VIOLATION" for item in violations],
+        "reason_codes": [
+            item.get("reason_code") or "POLICY_EVIDENCE_VIOLATION"
+            for item in violations
+        ],
         "evidence_refs": [item.get("evidence_id") for item in evidence],
         "evidence_source": source,
+        "tool_calls": (
+            ["query_pinecone_risk_policy"]
+            if request.policy_query_vector is not None
+            else []
+        ),
         "suggested_actions": suggested_actions,
         "error": error,
         "order_mode": request.order_mode,
@@ -347,7 +532,11 @@ def run_compliance_policy_worker(request: RiskMandateAssessmentRequest, *, pinec
     }
 
 
-def synthesize_risk_head(risk_report: Mapping[str, Any], compliance_report: Mapping[str, Any], request: RiskMandateAssessmentRequest) -> dict[str, Any]:
+def synthesize_risk_head(
+    risk_report: Mapping[str, Any],
+    compliance_report: Mapping[str, Any],
+    request: RiskMandateAssessmentRequest,
+) -> dict[str, Any]:
     """Create a Hermes-head-ready fan-in without granting execution authority."""
 
     reports = [dict(risk_report), dict(compliance_report)]
@@ -361,10 +550,15 @@ def synthesize_risk_head(risk_report: Mapping[str, Any], compliance_report: Mapp
     return {
         "decision": decision,
         "execution_mode": request.order_mode,
-        "manual_approval_required": request.order_mode == "MANUAL_APPROVAL" or bool(high_or_actionable),
+        "manual_approval_required": request.order_mode == "MANUAL_APPROVAL"
+        or bool(high_or_actionable),
         "binding": False,
         "safe_action": "HOLD" if decision != "APPROVE" else "NO_ACTION",
-        "recommended_actions": [action for report in reports for action in report.get("suggested_actions", [])],
+        "recommended_actions": [
+            action
+            for report in reports
+            for action in report.get("suggested_actions", [])
+        ],
         "reports": reports,
         "hermes_context": {
             "mandate_id": request.mandate_id,
@@ -382,6 +576,7 @@ def build_risk_head_dispatch(request: RiskMandateAssessmentRequest) -> dict[str,
     return {
         "dispatcher": "risk-head",
         "mandate_id": request.mandate_id,
+        "trace_id": request.trace_id or request.event_id or digest[:16],
         "input_hash": digest,
         "worker_inputs": {
             "risk-runner": {"mandate": mandate, "input_hash": digest},
@@ -391,19 +586,48 @@ def build_risk_head_dispatch(request: RiskMandateAssessmentRequest) -> dict[str,
     }
 
 
-def assess_mandate(request: RiskMandateAssessmentRequest | Mapping[str, Any]) -> dict[str, Any]:
+def assess_mandate(
+    request: RiskMandateAssessmentRequest | Mapping[str, Any],
+    *,
+    pinecone: PineconeEvidenceClient | None = None,
+) -> dict[str, Any]:
     """Run both Risk employees and return their independent reports plus fan-in."""
 
-    normalized = request if isinstance(request, RiskMandateAssessmentRequest) else RiskMandateAssessmentRequest.model_validate(request)
+    normalized = (
+        request
+        if isinstance(request, RiskMandateAssessmentRequest)
+        else RiskMandateAssessmentRequest.model_validate(request)
+    )
     dispatch = build_risk_head_dispatch(normalized)
     risk_report = run_risk_runner(normalized)
-    compliance_report = run_compliance_policy_worker(normalized)
+    compliance_report = run_compliance_policy_worker(normalized, pinecone=pinecone)
+    risk_head = synthesize_risk_head(risk_report, compliance_report, normalized)
+    pipeline_status = (
+        "COMPLETED"
+        if risk_report["status"] == "COMPLETED"
+        and compliance_report["status"] == "COMPLETED"
+        else "DEGRADED"
+    )
     return {
+        "schema_version": "risk-assessment.v1",
         "mandate_id": normalized.mandate_id,
-        "pipeline_status": "COMPLETED" if risk_report["status"] == "COMPLETED" and compliance_report["status"] == "COMPLETED" else "DEGRADED",
+        "trace_id": normalized.trace_id
+        or normalized.event_id
+        or _input_hash(normalized)[:16],
+        "pipeline_status": pipeline_status,
+        "status": pipeline_status,
+        "decision": risk_head["decision"],
+        "authoritative_source": "risk-runner",
         "dispatch": dispatch,
-        "employees": {"risk-runner": risk_report, "compliance-policy-worker": compliance_report},
-        "risk_head": synthesize_risk_head(risk_report, compliance_report, normalized),
+        "employees": {
+            "risk-runner": risk_report,
+            "compliance-policy-worker": compliance_report,
+        },
+        "tool_calls": sorted(
+            set(risk_report.get("tool_calls", []))
+            | set(compliance_report.get("tool_calls", []))
+        ),
+        "risk_head": risk_head,
     }
 
 

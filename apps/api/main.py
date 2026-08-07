@@ -95,6 +95,10 @@ from portfolio_schemas import (
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
+    from .qa import router as qa_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from qa import router as qa_router
+try:
     from .risk import router as risk_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from risk import router as risk_router
@@ -126,6 +130,7 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
 app.include_router(risk_router)
+app.include_router(qa_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로

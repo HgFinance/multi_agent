@@ -205,7 +205,8 @@
         {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"},
         {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"},
         {"method": "POST", "path": "/qa/v1/evidence/check"},
-        {"method": "GET", "path": "/qa/v1/evidence/corpus/status"}
+        {"method": "GET", "path": "/qa/v1/evidence/corpus/status"},
+        {"method": "POST", "path": "/qa/v1/verifications/{verification_id}/assess"}
       ]
     },
     "workforce-api": {
@@ -309,6 +310,7 @@
         {"method": "POST", "path": "/ui/mandates/{mandate_id}/change-requests"},
         {"method": "GET", "path": "/ui/mandates/{mandate_id}/current"},
         {"method": "POST", "path": "/ui/risk/mandates/{mandate_id}/assess"},
+        {"method": "POST", "path": "/ui/qa/verifications/{verification_id}/assess"},
         {"method": "POST", "path": "/ui/mandate-cases/{case_id}/advance"},
         {"method": "GET", "path": "/ui/mandate-cases/{case_id}/timeline"},
         {"method": "GET", "path": "/ui/mandate-approvals"},

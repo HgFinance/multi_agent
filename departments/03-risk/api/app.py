@@ -191,9 +191,7 @@ class RiskContextIn(BaseModel):
                     if self.mandate.allowed_asset_classes is not None
                     else None
                 ),
-                forbidden_asset_classes=frozenset(
-                    self.mandate.forbidden_asset_classes
-                ),
+                forbidden_asset_classes=frozenset(self.mandate.forbidden_asset_classes),
                 preferred_sectors=frozenset(self.mandate.preferred_sectors),
                 excluded_sectors=frozenset(self.mandate.excluded_sectors),
             ),
@@ -295,10 +293,16 @@ class ComplianceCheckRequest(BaseModel):
 
 
 class MandateAssessmentResponse(BaseModel):
+    schema_version: str
     mandate_id: str
+    trace_id: str
     pipeline_status: str
+    status: str
+    decision: str
+    authoritative_source: str
     dispatch: dict[str, object]
     employees: dict[str, dict[str, object]]
+    tool_calls: list[str]
     risk_head: dict[str, object]
 
 
@@ -601,7 +605,9 @@ def compliance_check(body: ComplianceCheckRequest):
     )
 
 
-@app.post("/risk/v1/mandates/{mandate_id}/assess", response_model=MandateAssessmentResponse)
+@app.post(
+    "/risk/v1/mandates/{mandate_id}/assess", response_model=MandateAssessmentResponse
+)
 def assess_mandate_for_risk_head(mandate_id: str, body: RiskMandateAssessmentRequest):
     """Dispatch one immutable user mandate to both Risk employees.
 

@@ -49,10 +49,15 @@ def _mandate(**overrides: object) -> dict[str, object]:
 def test_mandate_is_dispatched_to_two_independent_risk_employees() -> None:
     result = assess_mandate(_mandate())
 
-    assert result["pipeline_status"] == "DEGRADED"  # no observed state/evidence is fail-closed
+    assert (
+        result["pipeline_status"] == "DEGRADED"
+    )  # no observed state/evidence is fail-closed
     assert result["dispatch"]["dispatcher"] == "risk-head"
     assert result["dispatch"]["mutation_allowed"] is False
-    assert result["dispatch"]["worker_inputs"]["risk-runner"]["input_hash"] == result["dispatch"]["worker_inputs"]["compliance-policy-worker"]["input_hash"]
+    assert (
+        result["dispatch"]["worker_inputs"]["risk-runner"]["input_hash"]
+        == result["dispatch"]["worker_inputs"]["compliance-policy-worker"]["input_hash"]
+    )
     assert set(result["employees"]) == {"risk-runner", "compliance-policy-worker"}
     risk_report = result["employees"]["risk-runner"]
     compliance_report = result["employees"]["compliance-policy-worker"]
@@ -64,7 +69,9 @@ def test_mandate_is_dispatched_to_two_independent_risk_employees() -> None:
     assert result["risk_head"]["safe_action"] == "HOLD"
 
 
-def test_risk_runner_reports_var_and_concentration_breaches_without_order_side_effects() -> None:
+def test_risk_runner_reports_var_and_concentration_breaches_without_order_side_effects() -> (
+    None
+):
     request = RiskMandateAssessmentRequest.model_validate(
         _mandate(
             portfolio_snapshot={
@@ -73,7 +80,12 @@ def test_risk_runner_reports_var_and_concentration_breaches_without_order_side_e
                 "total_exposure": 1.2,
                 "current_drawdown": -0.10,
                 "positions": [
-                    {"instrument_id": "005930", "asset_class": "SINGLE_STOCK", "weight": 0.35, "issuer": "삼성전자"}
+                    {
+                        "instrument_id": "005930",
+                        "asset_class": "SINGLE_STOCK",
+                        "weight": 0.35,
+                        "issuer": "삼성전자",
+                    }
                 ],
             }
         )
@@ -81,8 +93,13 @@ def test_risk_runner_reports_var_and_concentration_breaches_without_order_side_e
     report = run_risk_runner(request)
 
     assert report["verdict"] == "RESIZE"
-    assert report["reason_codes"] == ["SINGLE_STOCK_LIMIT_BREACH:005930", "VAR_LIMIT_BREACH"]
-    assert all(action["mode"] == "MANUAL_APPROVAL" for action in report["suggested_actions"])
+    assert report["reason_codes"] == [
+        "SINGLE_STOCK_LIMIT_BREACH:005930",
+        "VAR_LIMIT_BREACH",
+    ]
+    assert all(
+        action["mode"] == "MANUAL_APPROVAL" for action in report["suggested_actions"]
+    )
 
 
 def test_prohibited_asset_is_rejected_deterministically() -> None:
@@ -93,7 +110,9 @@ def test_prohibited_asset_is_rejected_deterministically() -> None:
                 "current_drawdown": -0.01,
                 "current_var": 100,
                 "var_limit": 1000,
-                "positions": [{"instrument_id": "FUT-1", "asset_class": "FUTURES", "weight": 0.1}],
+                "positions": [
+                    {"instrument_id": "FUT-1", "asset_class": "FUTURES", "weight": 0.1}
+                ],
             }
         )
     )
@@ -102,8 +121,12 @@ def test_prohibited_asset_is_rejected_deterministically() -> None:
 
 
 def test_compliance_worker_escalates_when_pinecone_evidence_is_unavailable() -> None:
-    request = RiskMandateAssessmentRequest.model_validate(_mandate(compliance_query="삼성전자 단일 종목 한도"))
-    report = run_compliance_policy_worker(request, pinecone=PineconeEvidenceClient(api_key="", index_host=""))
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(compliance_query="삼성전자 단일 종목 한도")
+    )
+    report = run_compliance_policy_worker(
+        request, pinecone=PineconeEvidenceClient(api_key="", index_host="")
+    )
 
     assert report["status"] == "DEGRADED"
     assert report["verdict"] == "ESCALATE"
