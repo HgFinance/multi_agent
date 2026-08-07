@@ -24,6 +24,10 @@
 | Render | 보류 | 초기 Demo 배포 후보, 실시간 Worker 적합성 검증 전 미확정 |
 | Frontend | `ai-office` 기반 Next.js + React + TypeScript | Pixel Office와 운영 Dashboard를 결합한 Operator Control Plane |
 
+Supabase pgvector가 기본 RAG Vector Store다. Risk/QA의 정적 규정·정책 코퍼스에 한한
+Pinecone 예외는 [ADR-0006](adr/0006-pinecone-for-risk-qa-static-corpora.md)과 3.5절을
+따른다.
+
 ### 1.2 추가 확정 권장 도구
 
 | 영역 | 권장 선택 | 필수도 |
@@ -191,6 +195,29 @@ index_version
 
 위 값을 모든 Chunk에 저장하고 Model 변경 시 새 Index를 만들어 재색인한다.
 
+### 3.5 Vector Store 분리: pgvector vs Pinecone
+
+기본값은 Supabase pgvector다. [ADR-0006](adr/0006-pinecone-for-risk-qa-static-corpora.md)에
+따라 다음 예외만 Pinecone을 쓴다.
+
+| 데이터 | Vector Store | 이유 |
+|---|---|---|
+| Risk/QA 정적 규정·정책 코퍼스 (`compliance-policy-worker`, `hallucination-critic-worker`) | Pinecone | Order/Ledger와 SQL Join 불필요, Metadata Filter로 PIT 후보 축소, 트레이딩 hot path와 IOPS/CPU 격리 |
+| 그 외 모든 RAG Evidence (research·execution·accounting에 Join되는 Evidence 포함) | Supabase pgvector | 관계형 Join 필요, Source of Truth 단일화 |
+
+- `skills/agentic-rag/src/retriever.py`의 `search()` 인터페이스(`DocumentChunk` in,
+  `list[ScoredChunk]` out)는 두 Store 모두에서 동일하게 유지한다 — Adapter만 바뀐다.
+- Pinecone Index는 Risk/QA가 같은 Index를 쓰더라도 **Namespace를 부서별로 분리**한다
+  (`risk-compliance-policy`, `qa-hallucination-reference`) — 현재 Baseline이 이미
+  `corpus/compliance/`와 `corpus/evidence/`로 완전히 나눠져 있는 것과 같은 경계다.
+- Pinecone Index에도 3.4의 `embedding_model_id`/`embedding_dimension`/
+  `embedding_version`/`index_version`을 Metadata로 저장한다.
+- RAG 감사 Trail(`audit.rag_runs` 등)은 Vector Store 선택과 무관하게 항상 Supabase에
+  남는다. Pinecone은 검색 백엔드일 뿐 감사 Source of Truth가 아니다.
+- 최종 PIT 필터·인용 검증은 Vector Store와 무관하게 항상 결정론적 Python
+  (`skills/agentic-rag/src/nodes.py`)이 한다. Pinecone Metadata Filter는 후보를
+  좁히는 1차 단계일 뿐이다.
+
 ## 4. Supabase 사용 범위
 
 ### Supabase에 저장
@@ -201,7 +228,7 @@ index_version
 - Strategy, Backtest Run과 Promotion
 - Risk Decision, Order, Fill, Position과 Portfolio Snapshot
 - LangGraph Checkpoint 전용 Schema
-- RAG Document Metadata와 pgvector
+- RAG Document Metadata와 pgvector (Risk/QA 정적 코퍼스 예외는 3.5, ADR-0006 참고)
 - 사용자 Auth와 Dashboard 접근 권한
 - 문서, Parquet와 Model Artifact의 Storage Object Metadata
 

@@ -45,9 +45,7 @@ def test_missing_scope_is_denied_fail_closed():
 
 
 def test_pit_freshness_rejects_future_and_stale_data():
-    context = build_context(
-        {"as_of": "2026-08-04T00:00:00Z"}, worker_id="risk-runner"
-    )
+    context = build_context({"as_of": "2026-08-04T00:00:00Z"}, worker_id="risk-runner")
     future = freshness_check(context, "2026-08-04T00:00:01Z", max_age_seconds=3600)
     stale = freshness_check(context, "2026-08-03T00:00:00Z", max_age_seconds=3600)
     assert future.error_code == "FUTURE_INPUT"

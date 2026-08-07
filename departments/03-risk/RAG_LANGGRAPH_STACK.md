@@ -107,6 +107,11 @@ audit.rag_graph_extractions
 
 별도 Qdrant나 Neo4j를 즉시 추가하지 않는다. 먼저 Supabase pgvector와 관계형 graph projection으로 정확도·latency를 측정한다. 별도 DB가 필요해질 경우에도 Supabase가 Source of Truth이고 Projection은 재생성 가능해야 한다.
 
+예외: `compliance-policy-worker`가 참조하는 정적 규정·정책 코퍼스는
+[ADR-0006](../../docs/02-engineering/adr/0006-pinecone-for-risk-qa-static-corpora.md)에
+따라 Pinecone을 쓴다 — Order/Ledger에 SQL Join이 필요 없는 참조 데이터이기 때문이며,
+이 예외는 Risk Snapshot에 결합되는 evidence(pgvector 유지)에는 적용되지 않는다.
+
 ## 6. RAG 기술 도입 순서
 
 1. 현재 Agentic RAG의 `retrieve → grade → generate → hallucination_check → retry`를 Risk Compliance에 유지한다.
