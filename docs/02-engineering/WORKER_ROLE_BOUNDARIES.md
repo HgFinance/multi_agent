@@ -80,6 +80,42 @@ LLM Worker 20개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개,
 
 향후 통합을 제안하려면 중복 실행률·품질·지연·권한 영향을 Worker별로 측정하고, HR 제안 → QA 독립 검증 → CEO 승인 → Rollback 계획 순서를 거쳐야 한다.
 
+### 결정론 Worker(러너)를 두는 부서와 두지 않는 부서
+
+2026-08-06~07에 다섯 부서가 LLM 직원을 줄였는데 결과 모양이 갈렸다. Trading·Risk·QA·Accounting은 결정론 러너(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`)를 남겼고 HR은 아무것도 남기지 않았다. **어느 쪽이 옳은지가 아니라 부서장이 데이터를 받는 방식이 달라서 갈린 것이므로**, 다음 부서가 감축할 때 앞선 부서를 그대로 따라하지 않는다.
+
+**용어부터 정확히 한다. 러너와 일반 결정론 모듈의 차이는 LLM 유무가 아니다** — 둘 다 LLM 호출이 0이다. 차이는 **계산 결과를 어디로 내보내는가** 하나다.
+
+| | 결정론 러너 | 일반 결정론 모듈 |
+|---|---|---|
+| LLM 호출 | 없음 | 없음 |
+| 호출하는 주체 | `run_employee_workers()`가 조건 없이 1회 | 부서 API 엔드포인트 또는 파이프라인 |
+| 결과가 가는 곳 | `worker-context` 봉투(`workers[]`)에 실려 부서장에게 | 반환값 → DB |
+| 예 | `departments/02-trading/employee_workers.py`의 `desk_runner()` | `departments/07-agent-workforce/`의 `scorecard/quality.py`, `lifecycle/access.py`, `improvements/workflow.py` |
+
+**즉 러너는 "봉투의 빈자리를 메우는 어댑터"다.** LLM 직원을 지웠는데 부서장이 그 직원 몫을 여전히 봉투로 받고 있으면, 그 자리를 채울 무언가가 필요하다. 부서장이 애초에 봉투로 받지 않았다면 채울 자리도 없다.
+
+#### 판단 기준 두 개 — 둘 다 충족해야 러너를 만든다
+
+1. **부서장의 `input_contract`가 하나로 고정인가?**
+   `investment-case.yaml`을 보면 Trading 부서장은 항상 `research_packet`을 받아 `order_intent`를 낸다. 역할이 하나라 봉투 모양이 고정이므로 밀어주기(push)가 성립한다.
+   반면 HR 부서장은 `workforce-management.yaml`과 `agent-evolution.yaml`에서 **여섯 단계에 걸쳐 여섯 가지 계약**(`hiring_request` / `job_profile` / `org_approval` / `agent_ops_signal` / `improvement_candidate` / `revision_approval`)을 받는다. 봉투를 하나로 만들면 여섯 경우를 다 담아 비대해지거나 매번 대부분이 비어 있게 된다. 이때는 필요한 시점에 필요한 엔드포인트만 부르는 끌어오기(pull)가 맞다.
+
+2. **러너가 쓸 입력이 dispatch payload 안에 이미 다 있는가?**
+   `desk_runner()`가 성립한 것은 `portfolio_state`·`risk_decision`·`execution_constraints`·`venue_cost`·`derivatives`가 전부 하나의 case payload 안에 있었기 때문이다.
+   HR의 결정론 모듈은 그렇지 않다 — `approve_request()`는 특정 `AccessRequest` 객체를, `transition()`은 특정 Candidate와 승인 근거를, `aggregate_quality()`는 Quality Snapshot 목록을 요구하는데 셋 다 dispatch payload(`case_request`)에 없다. **입력이 없으므로 러너를 만들어도 계산할 것이 없고, 빈 값을 봉투에 담으면 "직원이 있다"는 착시만 남는다.**
+
+"어느 단계인지 보고 필요한 것만 골라 오라"는 방식은 채택하지 않는다. 그 선택을 LLM에게 시키는 순간 결정론화로 없앤 환각 경로가 다시 열린다.
+
+#### 러너를 만들 때 반드시 함께 넣는 안전장치
+
+러너는 이름만 Worker이고 LLM이 없다. **그 사실을 프롬프트 문장이 아니라 코드로 강제한다.**
+
+- **`WORKER_SPECS` 레지스트리 밖에 둔다.** 공용 런타임(`run_worker_registry`)은 그래프마다 LLM을 부르므로, 레지스트리에 넣으면 "LLM 없음"이 프롬프트 문장이 되고 실행 경로로는 뚫린다. 대신 `run_employee_workers()` 안에서 직접 호출해 결과를 `workers[]`에 append 한다. **네 부서 모두 이 방식이다**(`desk_runner`/`risk_runner`/`qa_runner`/`back_office_runner` 전부 레지스트리 밖 직접 호출).
+- **RAG 정책표를 쓰는 부서라면 러너 항목을 비워 둔다.** 현재 Trading만 해당한다(`trading_worker_skills/rag_router.py`). 라우터는 *LLM이 무엇을 볼 수 있는가*를 제한하는 장치이고 이 Worker에는 LLM이 없다. 항목이 비어 있으면 `rag_policy_for_worker(RUNNER_ID)`가 `ValueError`를 내므로, 나중에 누군가 러너를 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다. Trading은 이 fail-closed를 자체 점검 테스트로 고정해 뒀다 — **정책표를 도입하는 부서는 이 장치를 함께 가져간다.**
+- **`summary` 같은 서술 필드를 만들지 않는다.** 결정론 모듈의 판정을 그대로 옮기고 `decided_by: deterministic`을 붙인다. 문장을 만들 자리가 없으면 그 자리에서 환각도 생기지 않는다.
+- **흡수한 Worker들의 `tool_allowlist` 합집합을 러너에 명시한다.** 감사에서 "이 직원이 무엇을 읽었나"가 남아야 한다.
+
 ## 모델과 연동 상태
 
 - **현재 고정**: 모든 Worker는 임시 테스트용 Ollama `qwen3:1.7b`; `qwen3:8b`, `qwen2.5`, `qwen2.5-coder`, `qwen3:14b`는 과거 기준·Modelfile/실험 표기이며 현재 Worker 기본값이 아니다.
