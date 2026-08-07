@@ -694,6 +694,10 @@ export default function PortfolioInterviewPanel({
       case_id: activeWorkflow?.change.case_id ?? undefined,
       mandate_version_id: activeWorkflow?.versionObjectId ?? backendMandate?.mandate_version_id ?? undefined,
       policy_hash: activeWorkflow?.policyHash ?? backendMandate?.policy_hash ?? undefined,
+      advisory_only: !(
+        (activeWorkflow?.versionObjectId ?? backendMandate?.mandate_version_id) &&
+        (activeWorkflow?.policyHash ?? backendMandate?.policy_hash)
+      ),
       max_sector_weight_pct: input.max_sector_weight_pct,
       max_gross_exposure_pct: input.max_gross_exposure_pct,
       max_daily_loss_pct: input.max_daily_loss_pct,
@@ -703,11 +707,7 @@ export default function PortfolioInterviewPanel({
   }
 
   async function startRecommendation(activeWorkflow: MandateWorkflowState | null = workflow) {
-    assertGovernanceCommandable(connection);
     const request = recommendationInput(activeWorkflow);
-    if (!request.mandate_version_id || !request.policy_hash) {
-      throw new Error("활성 Mandate version과 policy hash 확인 후 분석을 시작할 수 있습니다.");
-    }
     const started = await startPortfolioRecommendation(request);
     setPortfolioRun(await fetchPortfolioRecommendation(started.run_id, input.user_id));
     await refresh();
@@ -790,7 +790,6 @@ export default function PortfolioInterviewPanel({
   }
 
   async function startAnalysis() {
-    assertGovernanceCommandable(connection);
     setBusy(true);
     setSubmitError("");
     try {
@@ -824,8 +823,8 @@ export default function PortfolioInterviewPanel({
           <div className="mandate-saved" aria-live="polite">
             <div><span className="mini-badge mint">ONE-TIME SETUP</span><span className={`mini-badge ${backendMandate ? "mint" : "yellow"}`}>{backendMandate ? `GOVERNANCE v${backendMandate.current_version}` : "LOCAL DRAFT"}</span><strong>{input.objective}</strong></div>
             <dl><div><dt>성향</dt><dd>{MINDSET_OPTIONS.find((item) => item.value === input.mindset)?.label}</dd></div><div><dt>기준 자본</dt><dd>{Number(input.investment_amount).toLocaleString("ko-KR")} {input.currency}</dd></div><div><dt>단일 종목</dt><dd>{input.max_instrument_weight_pct}%</dd></div><div><dt>총 익스포저</dt><dd>{input.max_gross_exposure_pct}%</dd></div><div><dt>승인</dt><dd>{input.approval_mode === "AUTO" ? "자동" : "수동 승인"}</dd></div></dl>
-            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running || !mandateBindingReady}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
-            {!mandateBindingReady ? <small className="form-error">활성 Mandate가 없거나 version·policy hash를 아직 확인하지 못했습니다. 먼저 Mandate를 제출하고 Governance 승인을 완료하세요.</small> : null}
+            <div className="mandate-saved-actions"><button type="button" className="btn btn-ghost" onClick={() => setEditing(true)}>설정 수정</button><button type="button" className="btn btn-primary" onClick={() => void startAnalysis()} disabled={busy || running}>{busy ? "분석 요청 중…" : running ? "분석 실행 중…" : "이 설정으로 분석 시작"}</button></div>
+            {!mandateBindingReady ? <small className="portfolio-source-note">Governance 연결 전에는 이 설정을 로컬 초안 기반 비구속 자문 분석으로 실행합니다. 주문·원장 변경은 수행하지 않습니다.</small> : null}
           </div>
         ) : (
           <form id="portfolio-interview-form" className="mandate-form" onSubmit={submit}>
