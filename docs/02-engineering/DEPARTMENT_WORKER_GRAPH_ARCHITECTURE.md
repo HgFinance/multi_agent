@@ -76,10 +76,22 @@ case_request
 | Trading | 3 (LLM 2 + 결정론 1) | 3 | 0 | 3 |
 | Risk | 2 (LLM 1 + 결정론 1) | 1 | 1 | 2 |
 | Quant / Backtest | 7 | 2 | 5 | 7 |
-| Accounting / Portfolio | 8 | 2 | 6 | 8 |
+| Accounting / Portfolio | 2 (LLM 1 + 결정론 1) | 2 | 0 | 2 |
 | QA | 3 (LLM 2 + 결정론 1) | 1 | 2 | 3 |
 
-기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다. Trading·Risk·QA는 2026-08-06 tool 강등으로 결정론 Worker(`desk-runner`/`risk-runner`/`qa-runner`)가 매 케이스 항상 실행되므로 기본 실행에 포함했다 — LLM은 호출하지 않는다.
+기본 실행 수는 모든 입력에서 호출되는 Worker 수이고, 조건부 실행 수는 해당 신호가 있을 때만 호출되는 Worker 수다. 이 구분 없이 Registry 전체 수를 “매 실행 호출 수”로 해석하지 않는다. Trading·Risk·QA는 2026-08-06, Accounting/Portfolio는 2026-08-07 tool 강등으로 결정론 Worker(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`)가 매 케이스 항상 실행되므로 기본 실행에 포함했다 — LLM은 호출하지 않는다.
+
+### 도현님 담당 부서의 현재 실행 역할
+
+| 부서 | Worker | 실행 계층 | 담당 업무 | 금지 권한 |
+|---|---|---|---|---|
+| Trading | `bull-thesis-worker` | LangGraph + Ollama | Research Packet 근거 기반 상승 논지·촉매·기대수익 가설 | 주문·수량 확정, Bear 결과 참조 |
+| Trading | `bear-thesis-worker` | LangGraph + Ollama | Research Packet 근거 기반 반증·하락 위험·논리 취약점 | 주문·수량 확정, Bull 결과 참조 |
+| Trading | `desk-runner` | 결정론 Python | Intent Builder, 계약 전이, 실행 가능성, TCA 비용, 파생 Certification | LLM 호출, Risk 승인 대체, Broker Submit |
+| Accounting/Portfolio | `exception-investigation-worker` | LangGraph + Ollama | Reconciliation Break, 미설명 PnL, 마감 준비 예외 조사 | 수치 계산·수정, Break 종결, Official NAV 확정 |
+| Accounting/Portfolio | `back-office-runner` | 결정론 Python | Position·Cash·PnL·Reporting·Valuation·Corporate Action·Fee/Tax 결과 조회·투영 | LLM 호출, 공식 수치 임의 작성·수정 |
+
+Trading의 기존 제안·제약·집행·Venue Cost·Derivatives 역할과 Accounting의 기존 도메인별 역할은 현재 별도 LLM Worker가 아니라 결정론 Runner 또는 예외 조사 Worker가 흡수한다. 구 Worker ID는 `config.yaml`과 `employee_workers.py`의 감사용 Alias로만 유지한다.
 
 Profile에 정의된 직원은 자동으로 실행되는 직원이 아니다. `workers.<id>.status`와 trigger를 기준으로 Registry가 호출 대상을 정한다.
 

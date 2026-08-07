@@ -133,7 +133,10 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # (조직 인원은 3명). 강등 기준은 departments/02-trading/hermes/config.yaml 참고.
     # 2026-08-06: risk-runner/qa-runner 흡수로 03-risk 3 -> 1, 06-ai-qa-audit 5 -> 2 —
     # 결정론 러너는 config 의 deterministic_workers 로 빠져서 여기 안 센다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 2}
+    # 2026-08-07: back-office-runner 흡수로 05-accounting-portfolio 8 -> 1. 회계는
+    # 헌장상(마스터플랜 19.12) 에이전트 일이 "예외 조사와 설명" 하나뿐이라 도메인별로
+    # 나뉘어 있던 7명이 전부 결정론 전달 계층이었다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -298,7 +301,9 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
 
         "risk": (1, 0, 1),
         "quant-backtest": (7, 2, 5),
-        "accounting-portfolio": (8, 2, 6),
+        # 2026-08-07: 회계의 도메인별 수치 전달은 back-office-runner로 이동해 LLM 1명만
+        # 남겼다. 남은 하나는 도메인이 아니라 **예외**로 정의된 조사관이라 항상 실행이다.
+        "accounting-portfolio": (1, 1, 0),
         # 2026-08-06: QA의 결정론 검사는 qa-runner로 이동해 LLM 2명만 남겼다.
 
         "qa": (2, 0, 2),

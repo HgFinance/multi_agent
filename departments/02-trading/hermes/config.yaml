@@ -154,7 +154,8 @@ hiring_priority:
   trader-pm-agent: {role_codes: ["TRD-03", "TRD-04"], tier: "P0"}
   execution-agent: {role_codes: ["TRD-06"], tier: "P1"}
   derivatives-trader: {role_codes: ["TRD-05"], tier: "P2"}
-  # 2026-07-29: TRD-05 채용 완료 — 트레이딩본부는 7/7 전원 존재
+  # Historical snapshot (2026-07-29): legacy TRD-05 채용 완료 — 7개 논리 역할 존재.
+  # Current runtime (2026-08-06): LLM 2명 + deterministic desk-runner 1명.
 
 usage:
   run: "trading-department chat -q 'Turn this Research Packet into an OrderIntent for 005930'"

@@ -72,14 +72,12 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
     "derivatives-structure-worker": ("파생", "레버리지", "공매도", "옵션", "선물"),
     "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사"),
-    "portfolio-control-worker": ("포트폴리오", "비중", "보유", "포지션"),
-    "ledger-reconciliation-worker": ("원장", "대사", "거래내역"),
-    "nav-close-worker": ("nav", "기준가", "마감"),
-    "treasury-liquidity-worker": ("현금", "유동성", "자금"),
-    "pnl-attribution-worker": ("pnl", "손익", "성과"),
-    "investor-reporting-worker": ("보고서", "투자자", "리포트"),
-    "valuation-corporate-actions-worker": ("평가", "기업행동", "배당", "분할"),
-    "fee-accrual-tax-worker": ("세금", "수수료", "보수", "비용"),
+    # 회계 직원 8명이 2026-08-07에 exception-investigation-worker 하나로 합쳐졌다.
+    # 강등된 7명이 쓰던 용어도 여기로 모은다 - 사용자는 "손익"이나 "기준가"라고
+    # 물을 뿐 어느 직원이 남았는지 모른다. 용어를 지우면 그 질의가 회계본부로
+    # 라우팅되지 않고 조용히 빠진다.
+    "exception-investigation-worker": ("원장", "대사", "거래내역", "nav", "기준가", "마감",
+                                       "pnl", "손익", "성과", "차이", "불일치", "예외"),
     "hallucination-critic-worker": ("근거", "출처", "검증", "인용", "환각", "모순", "신뢰"),
     "incident-postmortem-worker": ("사고", "장애", "재발", "인시던트"),
 }
@@ -88,12 +86,15 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
 # model-and-internal-audit-worker/ops-and-permission-worker(qa)는 2026-08-06에
 # risk-runner/qa-runner(결정론, LLM 없음)로 흡수됐다 - WORKER_SPECS에 더 없으니
 # 이 free-text query 라우팅 대상에도 없다.
+# 2026-08-07: 회계 8명도 같은 이유로 back-office-runner에 흡수됐다. 기본 직원이던
+# portfolio-control-worker/investor-reporting-worker가 둘 다 강등돼서 남은 조사관
+# 하나로 바꿨다 - 없는 id를 남겨두면 fallback이 조용히 빈 목록이 된다.
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "research": ("research-data-worker", "evidence-rag-worker"),
     "trading": ("bull-thesis-worker", "bear-thesis-worker"),
     "risk": ("compliance-policy-worker",),
     "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
-    "accounting": ("portfolio-control-worker", "investor-reporting-worker"),
+    "accounting": ("exception-investigation-worker",),
     "ceo": ("executive-briefing-worker",),
 }
 

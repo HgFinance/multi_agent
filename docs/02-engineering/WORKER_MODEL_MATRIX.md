@@ -1,8 +1,8 @@
 # Worker 모델 배치 기준
 
-검토일: 2026-08-03 (KST)
+검토일: 2026-08-07 (KST)
 
-이 문서는 8개 Hermes Profile 안에서 실행되는 32개 LangGraph Worker(LLM)의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다. 결정론 Worker(`desk-runner`, `risk-runner`, `qa-runner`)는 모델을 부르지 않으므로 이 표에 포함하지 않는다.
+이 문서는 8개 Hermes Profile 안에서 실행되는 25개 LangGraph Worker(LLM)의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다. 결정론 Worker(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)는 모델을 부르지 않으므로 이 표에 포함하지 않는다.
 
 ## 실행 계층
 
@@ -34,10 +34,10 @@
 | Trading | 2 (+결정론 1) | 2 / 0 |
 | Risk | 1 (+결정론 1) | 0 / 1 |
 | Quant / Backtest | 7 | 2 / 5 |
-| Accounting / Portfolio | 8 | 2 / 6 |
+| Accounting / Portfolio | 1 (+결정론 1) | 1 / 0 |
 | QA | 2 (+결정론 1) | 0 / 2 |
 
-세부 Worker ID·역할·통합 판정은 [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md)에 둔다. 실제 실행 메타데이터는 `config.yaml`과 `WORKER_SPECS`에서 읽으며, `agent.personalities`는 호환 Alias다.
+세부 Worker ID·역할·통합 판정은 [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md)에 둔다. 현재 도현님 담당 부서는 Trading의 `bull-thesis-worker`·`bear-thesis-worker`와 Accounting/Portfolio의 `exception-investigation-worker`만 LLM 모델을 사용하고, `desk-runner`·`back-office-runner`는 결정론 경로다. 실제 실행 메타데이터는 `config.yaml`, `employee_workers.py`와 결정론 Worker Registry에서 읽으며, `agent.personalities`는 호환 Alias다.
 
 ## 모델 변경 승인 절차
 

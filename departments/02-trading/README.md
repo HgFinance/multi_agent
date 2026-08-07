@@ -1,7 +1,7 @@
 # 트레이딩본부 (Trading)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며 Hermes Profile은 `trading-department`다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+LLM 직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며, 결정론 `desk-runner`는 모델을 호출하지 않는다. Hermes Profile은 `trading-department`다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 현재 실행 상태와 도현님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)을 따른다.
 
 ## Mission
@@ -11,6 +11,20 @@ Trader/PM Agent가 진입·청산·크기·무효화 조건을 갖춘 구조화�
 
 `trader-pm-agent`는 주문을 직접 전송하지 않는다. Risk/Compliance Gate 통과가 선행 조건이다
 (`CLAUDE.md` "절대 깨면 안 되는 권한 분리" 참고). Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order.
+
+## Current Worker 구성
+
+구조조정 이후 Trading은 3명으로 실행된다.
+
+| Worker | 방식 | 역할 |
+|---|---|---|
+| `bull-thesis-worker` | LLM | Research Packet 근거 기반 Bull thesis 작성 |
+| `bear-thesis-worker` | LLM | Research Packet 근거 기반 Bear thesis 작성. Bull 결과와 독립 |
+| `desk-runner` | 결정론 | Intent Builder, 계약 전이, 실행 가능성·비용·파생 Certification 처리 |
+
+`desk-runner`는 기존 `trade-proposal-worker`, `order-constraint-worker`, `execution-planning-worker`,
+`venue-cost-worker`, `derivatives-structure-worker`의 결정론 업무를 흡수한다. Risk 승인·Broker Submit은
+여전히 Trading Worker의 권한이 아니다.
 
 ## Owner
 
