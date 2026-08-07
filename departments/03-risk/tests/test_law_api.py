@@ -72,3 +72,38 @@ def test_search_and_document_requests_are_read_only_json_calls() -> None:
     assert all(request.url.path.startswith("/DRF/") for request in requests)
     assert all(request.url.params["type"] == "JSON" for request in requests)
     assert all(request.url.params["OC"] == "secret-oc" for request in requests)
+
+
+def test_admrul_expc_prec_requests_use_correct_target_and_id_params() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/DRF/lawSearch.do":
+            target = request.url.params["target"]
+            return httpx.Response(200, json={"target": target, "totalCnt": "1"})
+        if request.url.path == "/DRF/lawService.do":
+            target = request.url.params["target"]
+            return httpx.Response(200, json={"target": target, "ID": request.url.params["ID"]})
+        return httpx.Response(404)
+
+    config = LawApiConfig(enabled=True, base_url="https://example.test", oc="secret-oc")
+    with LawApiClient(
+        config,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    ) as client:
+        admrul_search = client.search_admrul("금융투자업규정")
+        admrul_doc = client.get_admrul("2100000282072")
+        expc_search = client.search_expc("자본시장법")
+        expc_doc = client.get_expc("EXPC-ID")
+        prec_search = client.search_prec("자본시장법")
+        prec_doc = client.get_prec("601495")
+
+    assert admrul_search["target"] == "admrul"
+    assert admrul_doc == {"target": "admrul", "ID": "2100000282072"}
+    assert expc_search["target"] == "expc"
+    assert expc_doc == {"target": "expc", "ID": "EXPC-ID"}
+    assert prec_search["target"] == "prec"
+    assert prec_doc == {"target": "prec", "ID": "601495"}
+    assert all(request.url.params["type"] == "JSON" for request in requests)
+    assert all(request.url.params["OC"] == "secret-oc" for request in requests)
