@@ -450,6 +450,16 @@ async def start_portfolio_recommendation(
 
     if get_universe(request.universe_id) is None:
         raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
+    if request.advisory_only and (
+        request.mandate_version_id or request.policy_hash
+    ):
+        # An advisory draft may carry a local mandate label, but a canonical
+        # version/hash pair must never be accepted without Governance
+        # verification. Otherwise advisory_only becomes a binding-check bypass.
+        raise HTTPException(
+            status_code=422,
+            detail="advisory_only_cannot_include_mandate_binding",
+        )
     if (
         PORTFOLIO_REQUIRE_MANDATE_BINDING
         and not request.mandate_version_id
