@@ -36,10 +36,16 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
+from tools.legal_wiki_tool import (
+    LegalWikiAnswerFn,
+    LegalWikiQueryInput,
+    query_legal_wiki,
+)
 
 from departments.employee_worker_runtime import run_coroutine_sync
 from departments.risk_qa_worker_profiles import (
@@ -82,6 +88,9 @@ WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
 class WorkerState(TypedDict, total=False):
     worker_id: str
     input: dict[str, Any]
+    query_mode: str | None
+    routing_rationale: str | None
+    routing_by_llm: bool
     tool_output: dict[str, Any]
     output: dict[str, Any]
     status: str
@@ -103,6 +112,9 @@ class WorkerSpec:
     max_attempts: int = 3
     skill_ids: tuple[str, ...] = ()
     tech_profile: WorkerTechProfile | None = None
+    # RISK_MANDATE_WORKER_FLOW.md §11 — 이 worker가 스스로 query_mode를 판단해야 하면 True.
+    # 구조화된 query_mode가 이미 입력에 있으면(§4 구조화 우선) LLM 라우팅은 건너뛴다.
+    route_query_mode: bool = False
 
 
 _RISK_GUARDS = (
@@ -124,6 +136,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         ("risk.compliance.check",),
         "when_compliance_evidence_exists",
         tech_profile=tech_profile_for(RISK_WORKER_TECH, "compliance-policy-worker"),
+        route_query_mode=True,
         skill_ids=_RISK_GUARDS
         + (
             "guard.pit_filter.v1",
@@ -268,6 +281,8 @@ def build_worker_graph(
 
     def read_tool(state: WorkerState) -> dict[str, Any]:
         payload = state.get("input", {})
+        if state.get("query_mode") is not None:
+            payload = {**payload, "query_mode": state["query_mode"]}
         try:
             context = build_context(
                 payload,
@@ -387,6 +402,11 @@ def build_worker_graph(
                     worker_llm(system, prompt), spec.worker_id
                 )
                 if schema_valid:
+                    # 라우팅 결과를 그대로 흘려보낸다 - 부서장은 이 worker가 왜 그
+                    # query_mode를 골랐는지도 함께 받는다(RISK_MANDATE_WORKER_FLOW.md §11).
+                    output["query_mode"] = state.get("query_mode")
+                    output["routing_rationale"] = state.get("routing_rationale")
+                    output["routing_by_llm"] = state.get("routing_by_llm", False)
                     context = _context(state)
                     skill_results = list(state.get("skill_results", []))
                     advisory = make_result(
@@ -439,6 +459,17 @@ def build_worker_graph(
             "trace_manifest": _manifest(state),
         }
 
+    def route(state: WorkerState) -> dict[str, Any]:
+        worker_llm = llm or default_worker_llm
+        mode, rationale, routed_by_llm = _route_query_mode(
+            spec, state.get("input", {}), worker_llm=worker_llm
+        )
+        return {
+            "query_mode": mode,
+            "routing_rationale": rationale,
+            "routing_by_llm": routed_by_llm,
+        }
+
     def validate(state: WorkerState) -> dict[str, Any]:
         if state.get("status") == "COMPLETED" and state.get("output", {}).get(
             "schema_valid"
@@ -447,10 +478,12 @@ def build_worker_graph(
         return {"status": "DEGRADED", "trace_manifest": _manifest(state)}
 
     graph = StateGraph(WorkerState)
+    graph.add_node("route", route)
     graph.add_node("tool", read_tool)
     graph.add_node("worker_llm", call_llm)
     graph.add_node("validate", validate)
-    graph.set_entry_point("tool")
+    graph.set_entry_point("route")
+    graph.add_edge("route", "tool")
     graph.add_edge("tool", "worker_llm")
     graph.add_edge("worker_llm", "validate")
     graph.add_edge("validate", END)
@@ -467,11 +500,94 @@ def _core_risk_tool(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compliance_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+# ── compliance-policy-worker의 자체 라우팅 (RISK_MANDATE_WORKER_FLOW.md §11) ──────
+# 부서장이 query_mode를 구조화된 필드로 이미 보냈으면 그걸 우선한다(§4). 없고 자연어
+# 질문만 있으면 이 worker의 모델(Ollama, call_llm과 동일 인스턴스)이 직접 분류한다.
+_QUERY_MODES = (
+    "MANDATE_REVIEW",
+    "RISK_POLICY_REVIEW",
+    "LEGAL_QUERY",
+    "MIXED_REVIEW",
+    "NOT_APPLICABLE",
+)
+_LEGAL_QUERY_MODES = ("LEGAL_QUERY", "MIXED_REVIEW")
+
+_ROUTE_SYSTEM = (
+    "You are the compliance-policy-worker routing classifier. Classify the compliance "
+    "question into exactly one query_mode; do not judge compliance itself. "
+    "MANDATE_REVIEW: 사용자 목표/위험선호/자산정책의 자연어 모호성만 검토, 법률/정책 검색 안 함. "
+    "RISK_POLICY_REVIEW: 내부 Risk 정책/Restricted List만 검토. "
+    "LEGAL_QUERY: 법령/행정규칙/법령해석례/판례 검색이 필요. "
+    "MIXED_REVIEW: 내부 정책과 법률 근거를 함께 검토해야 함. "
+    "NOT_APPLICABLE: 정책/법률 검토와 무관. "
+    'Return JSON only: {"query_mode": "<one of the above>", "routing_rationale": '
+    '"<one short sentence>"}.'
+)
+
+
+def _route_query_mode(
+    spec: WorkerSpec, payload: dict[str, Any], *, worker_llm: WorkerLLM
+) -> tuple[str | None, str | None, bool]:
+    """Return (query_mode, routing_rationale, decided_by_llm)."""
+
+    if not spec.route_query_mode:
+        return None, None, False
+    explicit = payload.get("query_mode")
+    if explicit in _QUERY_MODES:
+        return explicit, "structured_input_priority", False
+    compliance = payload.get("compliance") or {}
+    question = compliance.get("query") or compliance.get("question", "")
+    if not question:
+        # 구조화된 query_mode도 자연어 질문도 없으면, 이미 공급된 evidence를 다루는
+        # 기존 RISK_POLICY_REVIEW 계약으로 취급한다 - 무근거로 NOT_APPLICABLE 단정 안 함.
+        mode = "RISK_POLICY_REVIEW" if compliance else "NOT_APPLICABLE"
+        return mode, "no_question_supplied", False
+    raw = worker_llm(_ROUTE_SYSTEM, f"Question: {question}")
+    try:
+        candidate = raw.strip()
+        if "```" in candidate:
+            candidate = candidate.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(candidate)
+        mode = parsed.get("query_mode")
+        if mode in _QUERY_MODES:
+            return mode, str(parsed.get("routing_rationale", ""))[:500], True
+    except Exception:  # noqa: BLE001, S110 - routing boundary fails closed.
+        pass
+    # 분류 실패 시 검색 범위를 줄이지 않고 가장 넓게 본다(정책+법률 모두) - 못 찾음을
+    # 근거 없음으로 단정하지 않는다(RISK_MANDATE_WORKER_FLOW.md §9).
+    return "MIXED_REVIEW", "routing_parse_failed_defaulted_to_mixed_review", True
+
+
+def _parse_as_of(raw: Any) -> date:
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return date.fromisoformat(raw[:10])
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).date()
+
+
+def _compliance_tool(
+    payload: dict[str, Any], *, legal_answer_fn: LegalWikiAnswerFn | None = None
+) -> dict[str, Any]:
+    mode = payload.get("query_mode")
+    compliance = payload.get("compliance") or {}
+    result: dict[str, Any] = {
         "tool": "risk.compliance.check",
-        "compliance": payload.get("compliance", {}),
+        "query_mode": mode,
+        "compliance": compliance,
     }
+    if mode in _LEGAL_QUERY_MODES:
+        question = compliance.get("query") or compliance.get("question", "")
+        if question:
+            legal = query_legal_wiki(
+                LegalWikiQueryInput(query=question, as_of=_parse_as_of(payload.get("as_of"))),
+                answer_fn=legal_answer_fn,
+            )
+            result["legal"] = legal.model_dump(mode="json")
+    return result
 
 
 def _counterparty_tool(payload: dict[str, Any]) -> dict[str, Any]:

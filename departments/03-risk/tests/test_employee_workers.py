@@ -8,6 +8,7 @@ from pathlib import Path
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
+import risk_employee_workers
 from risk_employee_workers import WORKER_SPECS, risk_runner, run_employee_workers
 
 
@@ -96,3 +97,98 @@ def test_risk_runner_has_no_blockers_when_engine_approves():
     report = risk_runner({"assessment": {"verdict": "approve", "check_results": []}})
     assert report["output"]["blockers"] == []
     assert report["output"]["escalate"] is False
+
+
+def _worker_output(report: dict) -> dict:
+    worker = next(
+        w for w in report["workers"] if w["worker_id"] == "compliance-policy-worker"
+    )
+    return worker["output"]
+
+
+def test_compliance_worker_prefers_structured_query_mode_over_llm_routing():
+    calls: list[str] = []
+
+    def counting_llm(system: str, prompt: str) -> str:
+        calls.append(system)
+        if "routing classifier" in system:
+            raise AssertionError("structured query_mode must skip LLM routing")
+        return '{"summary":"policy evidence reviewed","confidence":0.9,"evidence_refs":["p"],"escalate":false}'
+
+    report = run_employee_workers(
+        {"compliance": {"grounded": True}, "query_mode": "RISK_POLICY_REVIEW"},
+        llm=counting_llm,
+    )
+
+    output = _worker_output(report)
+    assert output["query_mode"] == "RISK_POLICY_REVIEW"
+    assert output["routing_by_llm"] is False
+    assert len(calls) == 1  # only the narration call, routing was skipped
+
+
+def _fake_legal_answer_fn(query: str, as_of: str, mandate: str) -> dict:
+    return {
+        "answer": {
+            "verdict": "breach",
+            "cited_documents": ["자본시장법_제178조"],
+            "rationale": "부정거래행위 소지.",
+            "confidence": 0.75,
+            "escalate": True,
+        },
+        "context_chars": 400,
+        "pages_visited": ["자본시장법_제178조"],
+    }
+
+
+def _patch_compliance_tool_with_fake_legal_answer(monkeypatch) -> None:
+    """Avoid a real OpenAI call from arms.py during a LEGAL_QUERY/MIXED_REVIEW test."""
+
+    original_compliance_tool = risk_employee_workers._compliance_tool
+
+    def patched(payload: dict) -> dict:
+        return original_compliance_tool(payload, legal_answer_fn=_fake_legal_answer_fn)
+
+    monkeypatch.setattr(risk_employee_workers, "_compliance_tool", patched)
+
+
+def test_compliance_worker_routes_natural_language_question_with_same_model(
+    monkeypatch,
+):
+    _patch_compliance_tool_with_fake_legal_answer(monkeypatch)
+
+    def dispatch_llm(system: str, prompt: str) -> str:
+        if "routing classifier" in system:
+            assert "부정거래행위" in prompt
+            return '{"query_mode": "LEGAL_QUERY", "routing_rationale": "법령 질문"}'
+        assert "breach" in prompt.lower()
+        return '{"summary":"법률 근거 확인됨","confidence":0.75,"evidence_refs":["자본시장법_제178조"],"escalate":true}'
+
+    report = run_employee_workers(
+        {"compliance": {"query": "부정거래행위 판단 기준이 뭐야"}},
+        llm=dispatch_llm,
+    )
+
+    output = _worker_output(report)
+    assert output["query_mode"] == "LEGAL_QUERY"
+    assert output["routing_by_llm"] is True
+    assert output["routing_rationale"] == "법령 질문"
+    assert output["escalate"] is True
+
+
+def test_compliance_worker_routing_parse_failure_defaults_to_mixed_review(monkeypatch):
+    _patch_compliance_tool_with_fake_legal_answer(monkeypatch)
+
+    def broken_router_llm(system: str, prompt: str) -> str:
+        if "routing classifier" in system:
+            return "not json at all"
+        return '{"summary":"fallback narration","confidence":0.5,"evidence_refs":[],"escalate":true}'
+
+    report = run_employee_workers(
+        {"compliance": {"query": "임직원 매매 규정 확인"}},
+        llm=broken_router_llm,
+    )
+
+    output = _worker_output(report)
+    assert output["query_mode"] == "MIXED_REVIEW"
+    assert output["routing_by_llm"] is True
+    assert output["routing_rationale"] == "routing_parse_failed_defaulted_to_mixed_review"
