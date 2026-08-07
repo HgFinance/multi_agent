@@ -541,8 +541,16 @@ def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:
         output.pop("entries", None)
         report["output"] = output
 
+    validation_output = dict(report.get("output", {}))
+    # Risk compliance keeps route metadata next to its advisory answer for
+    # Risk Head/Office traceability. Those fields are intentionally outside
+    # the shared MAS worker-context.v1 contract and must not invalidate the
+    # cross-department fan-in contract.
+    if report.get("stage") == "risk" and report.get("worker_id") == "compliance-policy-worker":
+        for field in ("query_mode", "routing_rationale", "routing_by_llm"):
+            validation_output.pop(field, None)
     try:
-        validate_worker_context(report.get("output", {}))
+        validate_worker_context(validation_output)
     except Exception as exc:  # noqa: BLE001 - contract boundary must fail closed.
         report["status"] = "DEGRADED"
         report["error"] = f"worker_context_contract_invalid:{type(exc).__name__}"

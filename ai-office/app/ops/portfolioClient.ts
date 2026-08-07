@@ -74,6 +74,7 @@ export type PortfolioInterviewInput = {
   case_id?: string;
   mandate_version_id?: string;
   policy_hash?: string;
+  advisory_only?: boolean;
   max_sector_weight_pct?: number;
   max_gross_exposure_pct?: number;
   max_daily_loss_pct?: number;

@@ -358,6 +358,52 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
                 else:
                     os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = previous
 
+    def test_local_draft_advisory_analysis_bypasses_governance_binding_only(self) -> None:
+        payload = {
+            "user_id": "local-draft-owner",
+            "mindset": "BALANCED",
+            "experience": "BEGINNER",
+            "investment_horizon_years": 3,
+            "max_drawdown_pct": "0.10",
+            "investment_amount": "1000000",
+            "currency": "KRW",
+            "advisory_only": True,
+        }
+        with (
+            patch("apps.api.main.PORTFOLIO_REQUIRE_MANDATE_BINDING", True),
+            patch.object(
+                bff_main.RUNTIME,
+                "start",
+                return_value={
+                    "run_id": "local-draft-run",
+                    "status": "QUEUED",
+                    "workflow": "portfolio-recommendation-full",
+                    "input_hash": "local-draft-hash",
+                },
+            ) as start,
+            patch.object(
+                bff_main.RUNTIME,
+                "get",
+                return_value={
+                    "run_id": "local-draft-run",
+                    "status": "QUEUED",
+                    "workflow": "portfolio-recommendation-full",
+                    "input_hash": "local-draft-hash",
+                    "profile_user_id": "local-draft-owner",
+                    "updated_at": "2026-08-07T00:00:00Z",
+                },
+            ),
+        ):
+            response = TestClient(app).post(
+                "/ui/portfolio-recommendations",
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        start.assert_called_once()
+        self.assertNotIn("advisory_only", start.call_args.args[0])
+
+
     def test_production_binding_mode_rejects_unversioned_analysis(self) -> None:
         payload = {
             "user_id": "binding-required-owner",

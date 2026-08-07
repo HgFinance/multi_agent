@@ -427,6 +427,10 @@ class PortfolioRecommendationRequest(BaseModel):
     case_id: str | None = Field(default=None, min_length=1, max_length=128)
     mandate_version_id: str | None = Field(default=None, min_length=1, max_length=128)
     policy_hash: str | None = Field(default=None, min_length=1, max_length=128)
+    # Governance binding is mandatory for bound mandate execution paths. A
+    # local draft may explicitly request advisory-only analysis; this path
+    # never grants approval or mutates orders, positions, or the ledger.
+    advisory_only: bool = False
     as_of: str | None = None
     fund_id: str | None = None
 
@@ -446,16 +450,29 @@ async def start_portfolio_recommendation(
 
     if get_universe(request.universe_id) is None:
         raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
-    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.mandate_version_id:
+    if (
+        PORTFOLIO_REQUIRE_MANDATE_BINDING
+        and not request.mandate_version_id
+        and not request.advisory_only
+    ):
         raise HTTPException(status_code=422, detail="mandate_version_binding_required")
-    if PORTFOLIO_REQUIRE_MANDATE_BINDING and not request.policy_hash:
+    if (
+        PORTFOLIO_REQUIRE_MANDATE_BINDING
+        and not request.policy_hash
+        and not request.advisory_only
+    ):
         raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
     if request.mandate_version_id and not request.policy_hash:
         raise HTTPException(status_code=422, detail="mandate_policy_binding_required")
     if request.policy_hash and not request.mandate_version_id:
         raise HTTPException(status_code=422, detail="mandate_version_binding_required")
-    await _verify_portfolio_governance_binding(request)
+    if not request.advisory_only:
+        await _verify_portfolio_governance_binding(request)
     profile = request.model_dump(exclude_none=True)
+    # ``advisory_only`` is a BFF authorization mode, not a LangGraph input.
+    # Keep it out of the strict worker profile so downstream schemas cannot
+    # mistake the transport flag for investor data.
+    profile.pop("advisory_only", None)
     if idempotency_key:
         profile["idempotency_key"] = idempotency_key
     if "as_of" not in profile:
