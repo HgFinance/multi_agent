@@ -403,6 +403,23 @@ Risk Head
 `compliance-policy-worker`가 법률 LLM-Wiki를 사용한다. 자연어 분류보다
 구조화된 `query_mode`와 `order != null` 규칙이 우선한다.
 
+**직원 자체 라우팅**(`departments/03-risk/risk_employee_workers.py`,
+`WorkerSpec.route_query_mode=True`): 부서장이 구조화된 `query_mode`를 이미
+보내면 그대로 쓰고 LLM은 부르지 않는다(§4 구조화 우선). 없고 자연어 질문
+(`compliance.query`/`compliance.question`)만 있으면 `compliance-policy-worker`의
+LangGraph가 `route → tool → worker_llm → validate` 순서로 스스로 분류한다 —
+라우팅 판단과 최종 서술 모두 **동일한 모델**(로컬 Ollama `qwen3:1.7b`,
+`default_worker_llm`)이 맡고, 별도 분류 모델을 새로 두지 않는다. 라우팅이 고른
+`query_mode`에 따라 `_compliance_tool`이 결정론적으로 근거를 채운다
+(`LEGAL_QUERY`/`MIXED_REVIEW` → `tools/legal_wiki_tool.py`, 그 외 → 기존
+evidence-passthrough). 이 tool의 결과(`tool_output`, LEGAL_QUERY의 경우 OpenAI
+기반 `arms.py` 인용·판정 포함)는 다시 같은 LangGraph state로 들어가고, 같은
+Ollama 모델이 이를 서술해 `summary`/`evidence_refs`/`escalate`와 함께
+`query_mode`/`routing_rationale`을 포장해 Hermes 부서장에게 돌려준다.
+라우팅 분류가 실패하면(JSON 파싱 실패 등) 범위를 좁히지 않고
+`MIXED_REVIEW`로 fail-open한다 — 근거 없음을 위반 없음으로 단정하지 않는다는
+§9 원칙과 동일하다.
+
 ## 12. 부서장 State의 routing 예시
 
 법률 질의가 아닌 Mandate 저장:
@@ -465,3 +482,14 @@ execution_mode = LIVE
 법률과 무관한 Risk 질의는 LLM-Wiki 실험 Arm을 호출하지 않고
 `MANDATE_REVIEW` 또는 `NOT_APPLICABLE` 결과를 남긴다. 이 결과는 Compliance Worker의
 자문 기록일 뿐이며, Mandate 위반 판정은 `risk-runner`의 `RISK_CHECK`에서만 가져온다.
+
+golden set(15문항) 평가에서 Arm C(grep+BM25 fallback)가 Arm A(plain RAG)를
+verdict_acc(0.87 vs 0.53)·semantic_acc(0.73 vs 0.33) 전 지표에서 앞서
+(`experiments/llm_wiki/results/comparison_report_final_judged.md`), `LEGAL_QUERY`/
+`MIXED_REVIEW`의 검색 경로로 Arm C가 채택됐다. 이 wiring은
+`departments/03-risk/tools/legal_wiki_tool.py`(얇은 wrapper) →
+`risk_mandate_workers.py`의 `_legal_query()`에만 있고, `hermes/config.yaml`·worker
+registry·`skills/agentic-rag`는 여전히 변경하지 않았다 — 즉 experiment 모듈
+(`experiments/llm_wiki/arms.py`)을 이 wrapper가 직접 import하는 과도기 상태다.
+`# ponytail` 주석대로, 다음 단계는 `experiments/llm_wiki`를 `skills/policy_rag.py`로
+승격하는 것이다.

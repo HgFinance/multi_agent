@@ -26,12 +26,24 @@ from typing import Any, Literal
 import requests
 from integrations.pinecone_client import PineconeEvidenceClient, PineconeQueryError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from tools.legal_wiki_tool import (
+    COMPLIANCE_MANDATE_CONTEXT,
+    LegalWikiAnswerFn,
+    LegalWikiQueryInput,
+    query_legal_wiki,
+)
 from tools.order_tools import OrderComplianceInput, evaluate_order_compliance
 from tools.policy_tools import RiskPolicyQueryInput, query_pinecone_risk_policy
 
 RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 OrderMode = Literal["AUTO_EXECUTION", "MANUAL_APPROVAL"]
 AssetPermission = Literal["ALLOWED", "PROHIBITED"]
+# compliance-policy-worker 전용 실행 계약(RISK_MANDATE_WORKER_FLOW.md §11) — risk-runner는
+# 같은 문자열을 쓰지 않고 별도 RISK_CHECK 경로를 쓴다. 기본값은 기존 Pinecone evidence
+# 흐름과 동일하게 RISK_POLICY_REVIEW로 둬서 이 필드를 안 보내는 기존 호출도 그대로 동작한다.
+QueryMode = Literal[
+    "MANDATE_REVIEW", "RISK_POLICY_REVIEW", "LEGAL_QUERY", "MIXED_REVIEW", "NOT_APPLICABLE"
+]
 
 
 class InvestorProfile(BaseModel):
@@ -147,6 +159,7 @@ class RiskMandateAssessmentRequest(BaseModel):
     portfolio_constraints: PortfolioConstraints
     asset_policy: AssetPolicy
     order_mode: OrderMode
+    query_mode: QueryMode = "RISK_POLICY_REVIEW"
     portfolio_snapshot: PortfolioSnapshot | None = None
     compliance_query: str | None = Field(default=None, max_length=4000)
     policy_query_vector: list[float] | None = Field(default=None, min_length=1)
@@ -439,12 +452,150 @@ class LegacyPineconeEvidenceClient:
         return [item for item in matches if isinstance(item, dict)]
 
 
-def run_compliance_policy_worker(
+def _as_of_date(request: RiskMandateAssessmentRequest) -> date:
+    return date.fromisoformat(
+        (request.as_of or datetime.now(timezone.utc).date().isoformat())[:10]
+    )
+
+
+def _worker_envelope(
     request: RiskMandateAssessmentRequest,
     *,
-    pinecone: PineconeEvidenceClient | None = None,
+    status: str,
+    verdict: str,
+    severity: str,
+    action_required: bool,
+    reason_codes: list[str],
+    tool_calls: list[str],
+    suggested_actions: list[dict[str, Any]],
+    summary: str,
+    error: str | None = None,
+    **extra: Any,
 ) -> dict[str, Any]:
-    """Produce non-authoritative policy findings from supplied/Pinecone evidence."""
+    return {
+        "worker_id": "compliance-policy-worker",
+        "department": "RISK",
+        "event_id": request.event_id,
+        "timestamp": request.timestamp or request.as_of,
+        "query_mode": request.query_mode,
+        "authoritative": False,
+        "binding": False,
+        "status": status,
+        "verdict": verdict,
+        "severity": severity,
+        "action_required": action_required,
+        "reason_codes": reason_codes,
+        "tool_calls": tool_calls,
+        "suggested_actions": suggested_actions,
+        "error": error,
+        "order_mode": request.order_mode,
+        "input_hash": _input_hash(request),
+        "summary": summary,
+        **extra,
+    }
+
+
+def _not_applicable_review(request: RiskMandateAssessmentRequest) -> dict[str, Any]:
+    """정책·법률 검토가 이번 요청과 무관함을 기록한다 — 검색은 수행하지 않는다."""
+
+    return _worker_envelope(
+        request,
+        status="COMPLETED",
+        verdict="NOT_APPLICABLE",
+        severity="LOW",
+        action_required=False,
+        reason_codes=[],
+        tool_calls=[],
+        suggested_actions=[],
+        summary="Current request is not a policy/legal review target; no evidence search was run.",
+        role="Not applicable for this query_mode",
+    )
+
+
+# ponytail: 아래 두 패턴은 RISK_MANDATE_WORKER_FLOW.md §11의 예시(레버리지+무경험,
+# 목표-성향 불일치)만 감지하는 키워드/수치 휴리스틱이다. investment_goal은 자유 텍스트라
+# 진짜 의미 모호성 판정에는 LLM 추론이 필요하다 — 지금은 명시된 두 패턴만 결정론적으로
+# 잡고, 그 외 자유 텍스트 해석은 사람이 확인하도록 남겨둔다(과잉판정보다 미탐이 안전한
+# 방향). 업그레이드 시점: 이 휴리스틱의 false negative가 실무에서 반복 관측될 때.
+_GOAL_PRESERVATION_KEYWORDS = ("원금 보존", "원금보존", "손실 없이", "자본 보존")
+
+
+def _mandate_findings(request: RiskMandateAssessmentRequest) -> list[dict[str, Any]]:
+    profile = request.investor_profile
+    policy = request.asset_policy
+    findings: list[dict[str, Any]] = []
+
+    if (
+        profile.financial_experience_years == 0
+        and profile.risk_tolerance == "CONSERVATIVE"
+        and policy.leverage == "ALLOWED"
+    ):
+        findings.append(
+            {
+                "code": "EXPERIENCE_LEVERAGE_MISMATCH",
+                "severity": "MEDIUM",
+                "field_paths": [
+                    "investor_profile.financial_experience_years",
+                    "asset_policy.leverage",
+                ],
+                "message": "투자 경험이 없고 보수적 성향인데 레버리지가 허용되어 있습니다.",
+                "question": "레버리지를 실제로 허용하려는 것이 맞습니까?",
+            }
+        )
+
+    if profile.risk_tolerance == "AGGRESSIVE" and any(
+        keyword in profile.investment_goal for keyword in _GOAL_PRESERVATION_KEYWORDS
+    ):
+        findings.append(
+            {
+                "code": "GOAL_RISK_TOLERANCE_MISMATCH",
+                "severity": "MEDIUM",
+                "field_paths": ["investor_profile.investment_goal", "investor_profile.risk_tolerance"],
+                "message": "투자 목표는 원금 보존을 언급하지만 위험 성향은 공격적으로 설정되어 있습니다.",
+                "question": "어느 값을 우선할지 확인해 주세요.",
+            }
+        )
+
+    if policy.leverage == "ALLOWED" and policy.futures == "PROHIBITED":
+        findings.append(
+            {
+                "code": "LEVERAGE_INSTRUMENT_UNSPECIFIED",
+                "severity": "LOW",
+                "field_paths": ["asset_policy.leverage", "asset_policy.futures"],
+                "message": "레버리지는 허용하지만 선물은 금지되어 있습니다.",
+                "question": "허용하려는 레버리지의 대상이 ETF·마진·기타 상품 중 무엇인지 확인해 주세요.",
+            }
+        )
+
+    return findings
+
+
+def _mandate_review(request: RiskMandateAssessmentRequest) -> dict[str, Any]:
+    """Mandate 자연어 의미의 모호성·확인 필요성만 자문한다 — 법률 위반 판단은 안 한다."""
+
+    findings = _mandate_findings(request)
+    return _worker_envelope(
+        request,
+        status="COMPLETED",
+        verdict="NEEDS_CLARIFICATION" if findings else "READY",
+        severity="MEDIUM" if findings else "LOW",
+        action_required=bool(findings),
+        reason_codes=[f["code"] for f in findings],
+        tool_calls=[],
+        suggested_actions=[],
+        summary="Mandate readiness review only; no legal or numeric limit determination was made.",
+        role="Mandate setup readiness advisor",
+        findings=findings,
+        questions=[f["question"] for f in findings],
+    )
+
+
+def _risk_policy_review(
+    request: RiskMandateAssessmentRequest,
+    *,
+    pinecone: PineconeEvidenceClient | None,
+) -> dict[str, Any]:
+    """내부 Risk 정책(Pinecone risk-compliance-policy namespace) 근거만 조회한다."""
 
     evidence = [item.model_dump(mode="json") for item in request.compliance_evidence]
     source = "request"
@@ -456,12 +607,7 @@ def run_compliance_policy_worker(
                     mandate_id=request.mandate_id,
                     query=request.compliance_query or "Risk mandate policy compliance",
                     query_vector=request.policy_query_vector,
-                    as_of=date.fromisoformat(
-                        (
-                            request.as_of
-                            or datetime.now(timezone.utc).date().isoformat()
-                        )[:10]
-                    ),
+                    as_of=_as_of_date(request),
                 ),
                 client=pinecone or PineconeEvidenceClient.from_env(),
             )
@@ -501,35 +647,113 @@ def run_compliance_policy_worker(
         verdict, severity, action_required = "ESCALATE", "MEDIUM", True
         suggested_actions = []
 
-    return {
-        "worker_id": "compliance-policy-worker",
-        "department": "RISK",
-        "event_id": request.event_id,
-        "timestamp": request.timestamp or request.as_of,
-        "role": "Point-in-time policy evidence monitor",
-        "authoritative": False,
-        "binding": False,
-        "status": "DEGRADED" if not evidence else "COMPLETED",
-        "verdict": verdict,
-        "severity": severity,
-        "action_required": action_required,
-        "reason_codes": [
-            item.get("reason_code") or "POLICY_EVIDENCE_VIOLATION"
-            for item in violations
+    return _worker_envelope(
+        request,
+        status="DEGRADED" if not evidence else "COMPLETED",
+        verdict=verdict,
+        severity=severity,
+        action_required=action_required,
+        reason_codes=[
+            item.get("reason_code") or "POLICY_EVIDENCE_VIOLATION" for item in violations
         ],
-        "evidence_refs": [item.get("evidence_id") for item in evidence],
-        "evidence_source": source,
-        "tool_calls": (
-            ["query_pinecone_risk_policy"]
-            if request.policy_query_vector is not None
-            else []
+        tool_calls=(
+            ["query_pinecone_risk_policy"] if request.policy_query_vector is not None else []
         ),
-        "suggested_actions": suggested_actions,
-        "error": error,
-        "order_mode": request.order_mode,
-        "input_hash": _input_hash(request),
-        "summary": "Policy evidence was evaluated as advisory; policy evidence never submits an order.",
-    }
+        suggested_actions=suggested_actions,
+        error=error,
+        summary="Internal Risk policy evidence was evaluated as advisory; policy evidence never submits an order.",
+        role="Point-in-time internal policy evidence monitor",
+        evidence_refs=[item.get("evidence_id") for item in evidence],
+        evidence_source=source,
+    )
+
+
+def _legal_query(
+    request: RiskMandateAssessmentRequest,
+    *,
+    legal_answer_fn: LegalWikiAnswerFn | None,
+) -> dict[str, Any]:
+    """법령·행정규칙·법령해석례·판례 근거를 LLM-Wiki(Arm C)로 조회한다."""
+
+    result = query_legal_wiki(
+        LegalWikiQueryInput(
+            query=request.compliance_query or "Risk mandate legal compliance",
+            mandate_context=COMPLIANCE_MANDATE_CONTEXT,
+            as_of=_as_of_date(request),
+        ),
+        answer_fn=legal_answer_fn,
+    )
+
+    if result.status in ("UNAVAILABLE", "NO_EVIDENCE") or result.escalate:
+        verdict, severity, action_required = "ESCALATE", "MEDIUM", True
+    elif result.verdict == "breach":
+        verdict, severity, action_required = "ESCALATE", "HIGH", True
+    else:
+        verdict, severity, action_required = "PASS", "LOW", False
+
+    return _worker_envelope(
+        request,
+        status="DEGRADED" if result.status != "OK" else "COMPLETED",
+        verdict=verdict,
+        severity=severity,
+        action_required=action_required,
+        reason_codes=(["NO_DIRECT_LEGAL_BASIS"] if result.status == "NO_EVIDENCE" else []),
+        tool_calls=["llm_wiki_grep_bm25_answer"],
+        suggested_actions=[],
+        error=result.error_code,
+        summary="Direct legal evidence was searched via LLM-Wiki; absence of evidence is not treated as compliance.",
+        role="Legal evidence analyst (law/admrul/expc/prec)",
+        legal_status=result.status,
+        legal_verdict=result.verdict,
+        legal_rationale=result.rationale,
+        cited_documents=result.cited_documents,
+        pages_visited=result.pages_visited,
+        confidence=result.confidence,
+    )
+
+
+def run_compliance_policy_worker(
+    request: RiskMandateAssessmentRequest,
+    *,
+    pinecone: PineconeEvidenceClient | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None,
+) -> dict[str, Any]:
+    """Route to the query_mode-specific advisory check; never authoritative, never binding.
+
+    ``query_mode`` is a worker-specific execution contract set by the Risk Head
+    (RISK_MANDATE_WORKER_FLOW.md §11) — risk-runner uses a separate RISK_CHECK
+    contract and never shares this literal.
+    """
+
+    mode = request.query_mode
+    if mode == "NOT_APPLICABLE":
+        return _not_applicable_review(request)
+    if mode == "MANDATE_REVIEW":
+        return _mandate_review(request)
+    if mode == "RISK_POLICY_REVIEW":
+        return _risk_policy_review(request, pinecone=pinecone)
+    if mode == "LEGAL_QUERY":
+        return _legal_query(request, legal_answer_fn=legal_answer_fn)
+
+    # MIXED_REVIEW: 내부 정책과 법률 근거를 모두 조회하고, 둘 중 하나라도 확인이
+    # 필요하면 ESCALATE로 합친다. 수치 한도 계산은 risk-runner가 별도로 수행한다.
+    policy_report = _risk_policy_review(request, pinecone=pinecone)
+    legal_report = _legal_query(request, legal_answer_fn=legal_answer_fn)
+    escalate = policy_report["verdict"] == "ESCALATE" or legal_report["verdict"] == "ESCALATE"
+    return _worker_envelope(
+        request,
+        status="COMPLETED" if policy_report["status"] == "COMPLETED" and legal_report["status"] == "COMPLETED" else "DEGRADED",
+        verdict="ESCALATE" if escalate else "PASS",
+        severity="HIGH" if legal_report["verdict"] == "ESCALATE" else policy_report["severity"],
+        action_required=bool(policy_report["action_required"] or legal_report["action_required"]),
+        reason_codes=sorted(set(policy_report["reason_codes"]) | set(legal_report["reason_codes"])),
+        tool_calls=sorted(set(policy_report["tool_calls"]) | set(legal_report["tool_calls"])),
+        suggested_actions=[*policy_report["suggested_actions"], *legal_report["suggested_actions"]],
+        error=policy_report["error"] or legal_report["error"],
+        summary="Internal policy and direct legal evidence were reviewed together; risk-runner remains the sole numeric authority.",
+        role="Combined internal policy + legal evidence analyst",
+        sub_reports={"risk_policy_review": policy_report, "legal_query": legal_report},
+    )
 
 
 def synthesize_risk_head(

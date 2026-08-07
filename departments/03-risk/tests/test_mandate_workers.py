@@ -153,3 +153,115 @@ def test_compliance_worker_marks_supplied_policy_violation_as_advisory() -> None
     assert report["verdict"] == "ESCALATE"
     assert report["authoritative"] is False
     assert report["reason_codes"] == ["SINGLE_ISSUER_LIMIT"]
+
+
+def test_not_applicable_mode_skips_all_search() -> None:
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(query_mode="NOT_APPLICABLE")
+    )
+    report = run_compliance_policy_worker(request)
+
+    assert report["verdict"] == "NOT_APPLICABLE"
+    assert report["tool_calls"] == []
+    assert report["action_required"] is False
+
+
+def test_mandate_review_flags_experience_leverage_mismatch_without_legal_search() -> None:
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(query_mode="MANDATE_REVIEW")
+    )
+    report = run_compliance_policy_worker(request)
+
+    assert report["verdict"] == "NEEDS_CLARIFICATION"
+    assert "EXPERIENCE_LEVERAGE_MISMATCH" in report["reason_codes"]
+    assert report["tool_calls"] == []  # 법률·정책 검색은 하지 않는다
+    assert report["questions"]
+
+
+def test_mandate_review_is_ready_when_no_mismatch_found() -> None:
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(
+            query_mode="MANDATE_REVIEW",
+            asset_policy={
+                "single_stocks": "ALLOWED",
+                "etf": "ALLOWED",
+                "leverage": "PROHIBITED",
+                "futures": "PROHIBITED",
+                "options": "PROHIBITED",
+                "crypto": "PROHIBITED",
+            },
+        )
+    )
+    report = run_compliance_policy_worker(request)
+
+    assert report["verdict"] == "READY"
+    assert report["findings"] == []
+
+
+def test_legal_query_mode_uses_llm_wiki_grep_bm25_arm() -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_answer_fn(query: str, as_of: str, mandate: str) -> dict[str, object]:
+        calls.append((query, as_of, mandate))
+        return {
+            "answer": {
+                "verdict": "breach",
+                "cited_documents": ["자본시장법_제178조_부정거래행위등의금지"],
+                "rationale": "제178조제1항제1호 위반 소지.",
+                "confidence": 0.8,
+                "escalate": False,
+            },
+            "context_chars": 900,
+            "pages_visited": ["자본시장법_제178조_부정거래행위등의금지"],
+        }
+
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(query_mode="LEGAL_QUERY", compliance_query="부정거래행위 판단 기준")
+    )
+    report = run_compliance_policy_worker(request, legal_answer_fn=fake_answer_fn)
+
+    assert calls and calls[0][0] == "부정거래행위 판단 기준"
+    assert report["verdict"] == "ESCALATE"  # breach는 사람 확인이 필요하므로 ESCALATE, REJECT는 risk-runner만
+    assert report["legal_status"] == "OK"
+    assert report["cited_documents"] == ["자본시장법_제178조_부정거래행위등의금지"]
+    assert report["tool_calls"] == ["llm_wiki_grep_bm25_answer"]
+
+
+def test_legal_query_mode_escalates_without_defaulting_to_no_violation_when_search_fails() -> (
+    None
+):
+    def boom(query: str, as_of: str, mandate: str) -> dict[str, object]:
+        raise RuntimeError("openai unavailable")
+
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(query_mode="LEGAL_QUERY", compliance_query="아무 질문")
+    )
+    report = run_compliance_policy_worker(request, legal_answer_fn=boom)
+
+    assert report["verdict"] == "ESCALATE"
+    assert report["legal_status"] == "UNAVAILABLE"
+
+
+def test_mixed_review_combines_policy_and_legal_reports() -> None:
+    def fake_answer_fn(query: str, as_of: str, mandate: str) -> dict[str, object]:
+        return {
+            "answer": {
+                "verdict": "no_breach",
+                "cited_documents": [],
+                "rationale": "근거 없음",
+                "confidence": 0.6,
+                "escalate": False,
+            },
+            "context_chars": 500,
+            "pages_visited": ["자본시장법_제63조_임직원의금융투자상품매매"],
+        }
+
+    request = RiskMandateAssessmentRequest.model_validate(
+        _mandate(query_mode="MIXED_REVIEW", compliance_query="임직원 매매명세 통지 주기")
+    )
+    report = run_compliance_policy_worker(request, legal_answer_fn=fake_answer_fn)
+
+    assert set(report["sub_reports"]) == {"risk_policy_review", "legal_query"}
+    assert report["sub_reports"]["legal_query"]["legal_verdict"] == "no_breach"
+    # 정책 evidence가 없으므로 ESCALATE로 합쳐진다(evidence 없음을 위반없음으로 단정하지 않음)
+    assert report["verdict"] == "ESCALATE"

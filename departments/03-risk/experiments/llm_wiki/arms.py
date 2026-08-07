@@ -49,30 +49,25 @@ MODEL = os.environ.get("LLM_WIKI_GENERATE_MODEL", "gpt-4o-mini")
 _BREAKER = CircuitBreaker("llm-wiki-arms", failure_threshold=3, recovery_timeout_seconds=30)
 _CACHE = RedisJsonCache("risk-qa:llm-wiki:generate", ttl_seconds=7 * 24 * 3600)
 
-# 생성 프롬프트 튜닝(2026-08-07): grep+keyword 튜닝으로 recall은 0.867->0.933까지
-# 올랐는데도(results/retrieval_tuning.md) 1차 LLM-judge 평가는 오히려 A(plain RAG)가
-# 더 높았다(semantic_acc A=0.33 vs B/C=0.20). q10/q11처럼 벌칙(443조)이 gold인
-# 질문에서 seed가 443에 닿지 못하는 게 원인이었다 — 원인은 두 가지였다:
-# (1) 이 프롬프트: wiki_reader의 컨텍스트는 WINDOW_CHARS=400짜리 짧은 발췌 여러 개
-#     (주 조항 + 연결된 조항 스니펫)로 쪼개져 있어, nodes.py 원본 프롬프트의
-#     "Never state a rule not present in excerpts"가 "두 발췌를 엮어야 답이 나오는
-#     경우"까지 ambiguous로 과잉 escalate시켰다 — 아래 additive 문구로 완화.
-# (2) grep_seed/keyword_seed/BM25/wiki_reader window pivot이 mandate가 섞인
-#     full_query를 받고 있었는데, mandate 고정 문구 자체에 TOPIC_KEYWORDS 키워드가
-#     들어 있어 매 질문마다 무관한 페이지가 seed 앞쪽을 채워 443이 Tmax=3 밖으로
-#     밀려났다 — llm_wiki_bm25_answer/llm_wiki_grep_bm25_answer에서 검색 신호는
-#     query만 쓰도록 분리(생성 단계 full_query는 그대로 유지)해서 고쳤다.
-# 두 가지를 함께 적용한 뒤 재측정(results/comparison_report_final_judged.md):
-# verdict_acc A=0.53/B=0.73/C=0.67, semantic_acc A=0.33/B=C=0.40 — B/C가 A를
-# 모든 지표에서 앞선다. 프로덕션 nodes.py의 PERSONA_PROMPTS는 Arm A가 그대로 쓰므로
-# 건드리지 않고, Arm B/C 전용으로만 문구를 덧붙인다 — grounding 제약(근거에 없는
-# 규칙 단정 금지)은 그대로 유지한다.
-# F1 튜닝(2026-08-07): rationale이 "위반이다/위반이 아니다"만 서술하고 근거 조항의
-# 항/호 번호나 구체적 수치(징역 연수, 벌금 배수, 기간 등)를 안 옮겨 적어서 골든셋
-# 정답 문장(늘 "제N조제M항..." + 구체 수치 인용체)과 토큰 겹침이 거의 없었다
-# (q10 f1=0.036, verdict는 맞았는데도). rationale에 발췌에 있는 조항 번호·수치를
-# 그대로 옮겨 적으라는 문구를 추가 — 이건 지표만 올리려는 게 아니라 컴플라이언스
-# 판정문 자체의 실무 가치이기도 하다(담당자가 다시 원문을 찾아볼 필요가 없게).
+# 생성 프롬프트 튜닝(2026-08-07, Arm B/C 전용 — 프로덕션 nodes.py PERSONA_PROMPTS는
+# Arm A가 그대로 쓰므로 손대지 않는다): 1차 LLM-judge 평가에서 A(plain RAG)가 B/C보다
+# 높게 나온 원인을 순서대로 고쳤다.
+# 1) wiki_reader의 짧은 발췌 여러 개를 "두 발췌를 엮어야 하는 경우"까지 ambiguous로
+#    과잉 escalate — 발췌들을 하나의 근거 집합으로 보라는 문구 추가.
+# 2) grep_seed/keyword_seed/BM25/window pivot이 mandate 섞인 full_query를 받아서,
+#    mandate 고정 문구 자체가 TOPIC_KEYWORDS와 겹쳐 매 질문마다 무관한 페이지가 seed를
+#    채우고 진짜 필요한 페이지가 Tmax 밖으로 밀려났다 — 검색 신호는 query만 쓰도록 분리.
+# 3) rationale이 "위반이다"만 서술하고 근거 조항 항/호 번호·구체 수치를 안 옮겨 적어
+#    골든셋 정답(늘 인용체)과 토큰 F1이 거의 0에 가까웠다 — 발췌의 조항 번호·수치를
+#    그대로 인용하라는 문구 추가(지표뿐 아니라 판정문 자체의 실무 가치이기도 하다).
+# 4) wiki_reader.WINDOW_CHARS=400이 너무 좁아 판례(prec) 페이지처럼 [1][2][3][4] 요지가
+#    한 문단에 이어진 경우 핵심 결론 문장이 window 밖으로 잘렸다 — 800으로 확대
+#    (wiki_reader.py 참고).
+# 5) 판례 요지의 "(적극)/(한정 적극)/(소극)" 표기를 모델이 결론이 아니라 쟁점 설명으로
+#    읽어서 ambiguous로 도피 — 이 표기가 법원의 실제 결론이라는 걸 명시.
+# 최종 재측정(results/comparison_report_final_judged.md, 15문항):
+# verdict_acc A=0.53/B=C=0.87, semantic_acc A=0.33/B=0.67/C=0.73 — B/C가 A를 모든
+# 지표에서 앞선다. grounding 제약(근거에 없는 규칙 단정 금지)은 그대로 유지한다.
 _LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
     " The context may contain several short excerpts from different linked wiki pages "
     "(a primary clause plus related or penalty clauses it links to) — treat all shown "
@@ -82,7 +77,13 @@ _LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
     "or question asked. In the rationale, quote the exact clause/sub-clause numbers "
     "(e.g. 제443조제1항제8호) and any specific figures (penalty ranges, deadlines, "
     "thresholds, day/month counts) verbatim from the excerpts whenever they are present, "
-    "instead of only describing the rule in general terms."
+    "instead of only describing the rule in general terms. Korean case-law (판례) "
+    "excerpts often phrase a holding as a legal question followed by a parenthetical "
+    "marker: (적극) or (한정 적극) means the court affirmed that question (a 'yes', "
+    "possibly qualified/limited); (소극) means the court denied it (a 'no'). Treat that "
+    "marker as the court's actual conclusion, not merely as a description of the issue "
+    "raised — do not answer 'ambiguous' when a case excerpt already resolves the "
+    "question via such a marker."
 )
 
 
