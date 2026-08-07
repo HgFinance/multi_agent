@@ -2,7 +2,7 @@
 
 검토일: 2026-08-03 (KST)
 
-이 문서는 8개 Hermes Profile 안에서 실행되는 39개 LangGraph Worker의 모델 정책이다(HR 5 -> 2 통합 제안 반영, 승인 대기). 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다.
+이 문서는 8개 Hermes Profile 안에서 실행되는 37개 LangGraph Worker의 모델 정책이다(HR 5 -> 0 통합 제안 반영, 승인 대기). HR은 직원 LLM 계층을 두지 않으므로 Worker 모델 배정 대상이 아니다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다.
 
 ## 실행 계층
 
@@ -29,7 +29,7 @@
 | 부서 | Worker 수 | 항상 / 조건부 |
 |---|---:|---:|
 | CEO | 1 | 1 / 0 |
-| HR | 2 | 2 / 0 |
+| HR | 0 | 0 / 0 |
 | Research | 6 | 2 / 4 |
 | Trading | 6 | 2 / 4 |
 | Risk | 4 | 2 / 2 |

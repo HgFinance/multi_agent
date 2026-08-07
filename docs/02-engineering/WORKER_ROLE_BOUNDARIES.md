@@ -1,7 +1,7 @@
 # HgFinance Worker 역할·통합 판정
 
 검토일: 2026-08-03 (KST)  
-상태: **최종 확정** (HR 5 -> 2 통합은 2026-08-06 **제안**, QA 독립검증·CEO 승인 대기)
+상태: **최종 확정** (HR 5 -> 0 통합은 2026-08-07 **제안**, QA 독립검증·CEO 승인 대기)
 
 이 문서는 직원 수를 늘리거나 줄일 때 사용하는 역할 경계와 통합 판정의 기준이다. 실행 기준은 각 부서의 `hermes/config.yaml`과 `employee_workers.py`의 `WORKER_SPECS`이며, `agent.personalities`의 예전 역할명은 호환용 Alias로만 취급한다.
 
@@ -23,7 +23,7 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | 부서 | 전체 | 항상 실행 | 조건부 | 현재 통합 판정 |
 |---|---:|---:|---:|---|
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
-| HR | 2 | 2 | 0 | 업무량·성과 서술과 Profile·권한경계 서술 2개로 통합(제안) |
+| HR | 0 | 0 | 0 | 부서장 + 결정론 함수만. 직원 LLM 계층 없음(제안) |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
 | Trading | 6 | 2 | 4 | Thesis·OrderIntent·제약·집행·비용·파생 유지 |
 | Risk | 4 | 2 | 2 | 기존 통합 완료; 추가 감원 없음 |
@@ -31,12 +31,16 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
 | QA | 5 | 1 | 4 | 기존 통합 완료; 추가 감원 없음 |
 
-총 39개 Worker와 8개 Hermes Profile이다(HR 통합 제안 반영 전 42개). 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+총 37개 Worker와 8개 Hermes Profile이다(HR 통합 제안 반영 전 42개). 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다. HR은 Worker가 0이며 이는 설정 누락이 아니라 "직원 LLM 계층을 두지 않는다"는 결정이다.
 
 ## 부서별 역할과 병합 판정
 
 - **CEO**: `executive-briefing-worker` — 각 부서 보고서와 차단 사유를 종합해 최종 Case Summary를 작성한다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 없다.
-- **HR**(2026-08-06 개정 제안): `workforce-planning-worker`, `profile-architecture-worker` 둘만 남긴다. 계획·Profile 설계·평가·Lifecycle·승인/SoD가 서로 다른 상태 전이라는 2026-08-03 판단 자체는 맞지만, **그 상태 전이를 소유한 것은 Worker LLM이 아니라 결정론 모듈이다** — 평가 집계는 `scorecard/quality.py`와 QA 소유 `audit.eval_runs`, Lifecycle은 `lifecycle/access.py`, 자기승인 차단과 활성화 증거 검증은 `improvements/workflow.py`·`roster/activation_evidence.py`가 이미 판정한다. 제거한 셋의 LLM 산출물은 그 판정 결과를 문장으로 옮긴 것뿐이라 성과 서술은 planning이, 권한 경계 문장은 profile이 흡수한다. 통합 비용은 planning의 읽기 범위가 `workforce.evaluation.read`만큼 넓어지는 것 하나다(읽기 전용). 이 항목은 QA 독립검증·CEO 승인 전까지 확정이 아니다.
+- **HR**(2026-08-07 개정 제안): Worker를 두지 않는다. 인사팀은 Hermes 부서장 1명과 결정론 함수로 운영한다. 제거 사유가 둘로 갈리므로 섞지 않는다.
+  - **(A) 결정론 코드가 이미 그 판정을 소유함** — 일은 그대로 일어나고 수행 주체만 바뀐다. 계획·평가·Lifecycle·SoD가 서로 다른 상태 전이라는 2026-08-03 판단 자체는 맞지만, **그 상태 전이를 소유한 것은 Worker LLM이 아니라 결정론 모듈이다.** `selection-performance` → `scorecard/quality.py`의 `aggregate_quality()`(Snapshot이 없으면 0이 아니라 `None`을 돌려 "결함 없음"과 "집계할 데이터 없음"을 구분)와 `cost.py`의 `assess_budget()`, Eval 원본은 QA 소유 `audit.eval_runs`. `lifecycle-coordination` → `lifecycle/access.py`의 `approve_request()`·`provision()`·`revoke()`·`find_expired()`(다섯 개가 전부 거부 규칙이라 프롬프트 부탁이 예외로 바뀐다). `workforce-governance` → `improvements/workflow.py`의 `transition()`과 `roster/activation_evidence.py`(문자열이 비었는지가 아니라 그 ID가 DB에 실재하는지 조회해 판정 — LLM이 원리적으로 못 하는 검사다).
+  - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `profile-architecture`의 Job Profile 초안은 받아서 채용을 실행할 주체가 없다(Eval Runner·Platform/IAM 미구현, Roster 등재 유예, `workforce-management.yaml`의 승인 단계는 QA·CEO뿐이고 `required_role=USER`가 없다). `workforce-planning`의 인력 상황 서술도 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
+  - 임계값을 스스로 정하고 갱신하는 판단("Queue 10건이 맞는 기준인가")은 Worker가 아니라 Hermes 부서장 몫이며 제안까지만 허용된다(`workforce.hiring_request.propose`). 기준값 자체는 결정론 코드의 상수이고 변경은 사람의 PR이다.
+  - 이 항목은 QA 독립검증·CEO 승인 전까지 확정이 아니다.
 - **Research**: `research-data-worker`, `microstructure-worker`, `technical-signal-worker`, `fundamental-valuation-worker`, `news-macro-worker`, `evidence-rag-worker`. 데이터 정본·유동성 증거·지표·가치·이벤트·인용 검증은 서로 다른 입력과 Evidence 책임이므로 유지한다.
 - **Trading**: `market-thesis-worker`, `trade-proposal-worker`, `order-constraint-worker`, `execution-planning-worker`, `venue-cost-worker`, `derivatives-structure-worker`. OrderIntent 이전의 논리, 제약 매핑, Risk 승인 후 집행계획, 거래비용, 파생 구조는 권한과 실행 시점이 달라 유지한다.
 - **Risk**: `market-liquidity-worker`, `pre-trade-risk-worker`, `compliance-policy-worker`, `derivatives-counterparty-worker`. 파생·Margin과 Counterparty·Operational 위험은 `derivatives-counterparty-worker`로 이미 통합되었다. 최종 판정은 결정론적 Risk Engine이 한다.

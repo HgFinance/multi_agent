@@ -28,7 +28,7 @@ runtime_layers:
     discovery_command: ollama list
     worker_counts:
       ceo-agent: 1
-      hr-department: 2
+      hr-department: 0   # 직원 LLM 계층 없음 - 부서장 + 결정론 함수
       research-department: 6
       trading-department: 6
       risk-management: 4

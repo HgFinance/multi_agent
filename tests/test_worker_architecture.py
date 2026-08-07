@@ -128,7 +128,9 @@ def _payload() -> dict[str, Any]:
 
 
 def test_profile_worker_registry_counts_and_models() -> None:
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 5, "01-research": 6, "02-trading": 6, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
+    # 07-agent-workforce 는 0 이다 - 인사팀은 Hermes 부서장 + 결정론 함수로만 운영하며
+    # 직원 LLM 계층을 두지 않는다(2026-08-07 통합 제안). 0 을 "설정 누락"으로 읽지 않는다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 6, "02-trading": 6, "03-risk": 4, "04-quant-backtest": 7, "05-accounting-portfolio": 8, "06-ai-qa-audit": 5}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -145,7 +147,10 @@ def test_profile_worker_registry_counts_and_models() -> None:
         assert config["employee_runtime"]["max_attempts"] == 3
         assert config["model"]["provider"] == "openai-codex"
         assert config["model"]["default"] == "gpt-5.6-luna"
-        runtime_personalities = config["agent"].get("runtime_personalities") or registry["runtime_personalities"]
+        # `or` 로 폴백하면 빈 목록(직원 없는 부서)이 "키 없음"으로 잘못 읽힌다 - None 만 폴백한다.
+        runtime_personalities = config["agent"].get("runtime_personalities")
+        if runtime_personalities is None:
+            runtime_personalities = registry["runtime_personalities"]
         assert set(runtime_personalities) == set(workers)
 
 
@@ -281,7 +286,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
     """Keep the approved head/worker topology explicit and reviewable."""
     expected = {
         "ceo": (1, 1, 0),
-        "hr": (5, 2, 3),
+        "hr": (0, 0, 0),
         "research": (6, 2, 4),
         "trading": (6, 2, 4),
         "risk": (4, 2, 2),
