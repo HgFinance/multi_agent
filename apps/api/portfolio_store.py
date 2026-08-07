@@ -12,20 +12,39 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 
-def _process_alive(pid: int) -> bool:
-    if pid <= 0:
+# Windows: os.kill(dead_pid, 0) raises ERROR_INVALID_PARAMETER, not ProcessLookupError.
+_WIN_ERROR_INVALID_PARAMETER = 87
+
+
+def _process_alive(pid: int | None) -> bool:
+    """Is this PID still running? Unknown answers count as *alive*.
+
+    The caller uses this to decide whether a crashed worker's durable slot may
+    be stolen. Guessing "dead" on a probe failure would hand a live owner's slot
+    to a second instance, so only a definite answer releases it.
+
+    This is the single definition — ``portfolio_runtime`` imports it. Two copies
+    used to exist and a test patching one silently left the other live.
+    """
+    if not pid or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        return True                      # exists, just not ours to signal
+    except OSError as exc:
+        # Windows reports a vanished PID as an invalid parameter.
+        if getattr(exc, "winerror", None) == _WIN_ERROR_INVALID_PARAMETER:
+            return False
+        return True                      # unknown -> never steal the slot
     return True
 
 
@@ -35,7 +54,7 @@ class PortfolioRuntimeStore:
         self._lock = threading.RLock()
         if self.path:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as connection:
+            with self._session() as connection:
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS portfolio_runtime_snapshots ("
                     "run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL)"
@@ -79,11 +98,30 @@ class PortfolioRuntimeStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        """Transaction *and* close.
+
+        ``with sqlite3.connect(...) as conn`` commits or rolls back but **never
+        closes** — that is the documented contract of ``Connection.__exit__``.
+        Every call site here used that form, so each store operation leaked an
+        open handle until garbage collection. POSIX hides it (an open file can
+        still be unlinked); Windows raises ``WinError 32`` when the temp
+        directory holding ``runtime.sqlite3`` is cleaned up. Either way a
+        long-running BFF leaks descriptors, so close explicitly.
+        """
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def save(self, job: Mapping[str, Any]) -> None:
         if not self.enabled:
             return
         payload = json.dumps(dict(job), ensure_ascii=False, default=str, separators=(",", ":"))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.execute(
                 "INSERT INTO portfolio_runtime_snapshots(run_id, updated_at, payload) VALUES (?, ?, ?) "
                 "ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, payload=excluded.payload",
@@ -92,7 +130,7 @@ class PortfolioRuntimeStore:
     def enqueue(self, run_id: str) -> None:
         if not self.enabled:
             return
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO portfolio_runtime_queue(run_id, enqueued_at) VALUES (?, ?)",
                 (run_id, time.time()),
@@ -101,7 +139,7 @@ class PortfolioRuntimeStore:
         """Ensure queued or interrupted snapshots have a durable queue row."""
         if not self.enabled:
             return 0
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             rows = connection.execute(
                 "SELECT run_id, payload FROM portfolio_runtime_snapshots"
             ).fetchall()
@@ -165,17 +203,19 @@ class PortfolioRuntimeStore:
     def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float = 60.0) -> bool:
         if not self.enabled:
             return False
-        with self._lock, self._connect() as connection:
-            result = connection.execute(
+        with self._lock, self._session() as connection:
+            # rowcount 는 커서 속성이다. 연결이 닫힌 뒤에 읽지 않도록 블록 안에서 뽑는다
+            # (Row 와 달리 커서는 연결 수명에 묶인다).
+            updated = connection.execute(
                 "UPDATE portfolio_runtime_queue SET lease_until = ? "
                 "WHERE run_id = ? AND claimed_by = ?",
                 (time.time() + lease_seconds, run_id, worker_id),
-            )
-        return result.rowcount == 1
+            ).rowcount
+        return updated == 1
     def is_claim_owner(self, run_id: str, worker_id: str) -> bool:
         if not self.enabled:
             return False
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             row = connection.execute(
                 "SELECT 1 FROM portfolio_runtime_queue "
                 "WHERE run_id = ? AND claimed_by = ? AND lease_until >= ?",
@@ -186,7 +226,7 @@ class PortfolioRuntimeStore:
     def release_claim(self, run_id: str, worker_id: str | None = None) -> None:
         if not self.enabled:
             return
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             if worker_id is None:
                 connection.execute(
                     "DELETE FROM portfolio_runtime_queue WHERE run_id = ?",
@@ -204,7 +244,7 @@ class PortfolioRuntimeStore:
 
         if not self.enabled:
             return None
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             row = connection.execute(
                 "SELECT run_id FROM portfolio_runtime_active WHERE slot = 1"
             ).fetchone()
@@ -215,7 +255,7 @@ class PortfolioRuntimeStore:
         """Return the process that reserved the durable execution slot."""
         if not self.enabled:
             return None
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             row = connection.execute(
                 "SELECT owner_pid FROM portfolio_runtime_active WHERE slot = 1"
             ).fetchone()
@@ -281,7 +321,7 @@ class PortfolioRuntimeStore:
         """Release the durable execution slot only when owned by ``run_id``."""
         if not self.enabled:
             return
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             if owner_token is None:
                 connection.execute(
                     "DELETE FROM portfolio_runtime_active WHERE slot = 1 AND run_id = ?",
@@ -297,7 +337,7 @@ class PortfolioRuntimeStore:
     def latest(self) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             row = connection.execute(
                 "SELECT payload FROM portfolio_runtime_snapshots ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
@@ -312,7 +352,7 @@ class PortfolioRuntimeStore:
     def get(self, run_id: str) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             row = connection.execute(
                 "SELECT payload FROM portfolio_runtime_snapshots WHERE run_id = ?",
                 (run_id,),
@@ -328,7 +368,7 @@ class PortfolioRuntimeStore:
     def find_by_idempotency(self, owner_id: str, idempotency_key: str) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        with self._lock, self._connect() as connection:
+        with self._lock, self._session() as connection:
             rows = connection.execute(
                 "SELECT payload FROM portfolio_runtime_snapshots ORDER BY updated_at DESC"
             ).fetchall()

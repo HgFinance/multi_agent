@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Layered Memory — nav-close-worker 마감 기억 (FinMem 계층 구조 적용).
+"""Layered Memory — 마감 기억 (FinMem 계층 구조 적용).
+
+2026-08-07 tool 강등 전에는 nav-close-worker 전용이었다. 지금은 별도 직원이 아니라
+`exception-investigation-worker` 의 근거 provider 셋 중 하나다 — 지난 마감에서 뭐가
+걸렸는지가 이번 예외 조사의 재료이기 때문이다.
 
 소유: 도현 (회계/포트폴리오본부)
 근거: references/references.md (FinMem: Performance-Enhanced LLM Trading Agent with
@@ -264,7 +268,7 @@ def reinforce(recalled: Mapping[str, Any], *, now: datetime | None = None,
 
 
 def close_memory_context(recalled: Mapping[str, Any]) -> str:
-    """nav-close-worker 프롬프트에 붙이는 블록."""
+    """exception-investigation-worker 프롬프트에 붙이는 블록. 비공식 보조다."""
     if not recalled.get("recalled"):
         return ("과거 마감 기억: 없음. 기억이 없다는 이유로 마감 상태를 추정하지 마십시오 — "
                 "수치와 상태는 원장에서 읽으십시오.")

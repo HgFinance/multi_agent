@@ -6,7 +6,7 @@
 
 > **Risk/QA 보안 보정(2026-08-05)**: Worker Scope fail-closed, QA runtime 미설정 DENY, Risk/QA 명령 인증과 공통 Replay contract는 `IMPLEMENTED`/`TEST_VERIFIED`다. Redis 두 Decision Event Replay probe와 rollback형 DB/Event smoke, Risk/QA Compose 기동·formal healthcheck는 `RUNTIME_VERIFIED`다. Claude 환경에서 Risk/QA 전체 `ruff check`·`ruff format --check`가 통과했고 참조 없는 legacy Worker Graph·구형 fixture·중복 Counterparty self-check를 제거했다. Production preflight는 Event Redis와 Research Packet URL을 명시적으로 요구하며, 실제 API·PostgreSQL Decision/Case Replay, 승인 Corpus, 전역 Issuer·mTLS·IAM 매핑은 여전히 `BLOCKED`다.
 
-> 전사 런타임 기준(2026-08-06): 8개 부서장은 Hermes + Codex/Claude Code다. LLM Worker Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant 7·Accounting 8·QA 2이고, 결정론 runner는 Trading/Risk/QA 각 1개(`desk-runner`·`risk-runner`·`qa-runner`)다. 따라서 실제 직원 수는 부서별 1·5·6·3·2·7·8·3, 총 35명이다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 현재 실행 수는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
+> 전사 런타임 기준(2026-08-07): 8개 부서장은 Hermes + Codex/Claude Code다. LLM Worker Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant 7·Accounting 1·QA 2이고, 결정론 runner는 `desk-runner`·`risk-runner`·`qa-runner`·`back-office-runner` 4개다. 따라서 실제 직원 수는 부서별 1·5·6·3·2·7·2·3, 총 29명이다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 현재 실행 수는 각 Profile의 `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST
@@ -188,6 +188,12 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `MODEL-04` | `IMPLEMENTED` | Claude Code Host Proxy 보안·비용·지연 검증 | Commit·Self-check·Probe·429/Timeout·Fallback 증거 |
 
 ### 4.2 도현님: 트레이딩본부, 회계/포트폴리오본부와 공통 Platform
+
+**현재 Worker 구성**
+
+- Trading 3명: `bull-thesis-worker`와 `bear-thesis-worker`는 독립 LLM 논지 작성, `desk-runner`는 OrderIntent·제약·실행 가능성·비용·파생 Certification을 결정론적으로 처리한다.
+- Accounting/Portfolio 2명: `exception-investigation-worker`는 Break·미설명 PnL·마감 예외를 조사하고, `back-office-runner`는 Position·Cash·PnL·Report·Valuation 관련 결정론 모듈의 결과를 옮긴다.
+- 두 부서 모두 Worker는 바인딩 승인이나 공식 수치 확정을 수행하지 않는다. 기존 도메인별 역할명은 Profile·감사 추적용 Alias다.
 
 **확인된 진척도**
 

@@ -81,7 +81,11 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
         # 2026-08-06: QA는 LLM 2명(hallucination/incident)과 결정론
         # qa-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
         "qa": 2,
-        "accounting": 8,
+        # 2026-08-07: 회계는 LLM 1명(exception-investigation-worker)과 결정론
+        # back-office-runner 1명으로 축소했다. 헌장상(마스터플랜 19.12) 에이전트 일이
+        # "예외 조사와 설명" 하나뿐이라 도메인별 7명이 전부 결정론 전달 계층이었다.
+        # 이 파이프라인 count는 LLM만 센다.
+        "accounting": 1,
         "ceo": 1,
     }
     assert set(result["department_reports"]) == set(expected_counts)

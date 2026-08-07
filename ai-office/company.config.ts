@@ -221,14 +221,21 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("ops", "member", "문가온", "risk-runner", 5),
 
   staff("finance", "lead", "김승리", "Hermes Head · Accounting/Portfolio", 4, "김회계"),
-  staff("finance", "member", "지수아", "portfolio-control-worker", 5),
-  staff("finance", "member", "백승희", "ledger-reconciliation-worker", 6),
-  staff("finance", "member", "하지민", "nav-close-worker", 7),
-  staff("finance", "member", "오세인", "treasury-liquidity-worker", 0),
-  staff("finance", "member", "곽나은", "pnl-attribution-worker", 1),
-  staff("finance", "member", "성지우", "investor-reporting-worker", 2),
-  staff("finance", "member", "편하늘", "valuation-corporate-actions-worker", 3),
-  staff("finance", "member", "김서현", "fee-accrual-tax-worker", 4),
+  // 2026-08-07 tool 강등. 회계 직원 8명을 조사관 1 + 잡무 1 로 줄였다.
+  // 근거는 부서 헌장이다 — 마스터플랜 19.12 "공식 숫자는 Accounting Engine 이
+  // 계산하며 Agent 는 예외 조사와 설명을 담당한다". 기존 8명은 포트폴리오·자금·
+  // 손익·보고처럼 **수치 도메인**으로 나뉘어 있었는데 수치는 애초에 에이전트 것이
+  // 아니라서, 없는 권한을 축으로 직원을 나눈 꼴이었다.
+  staff("finance", "member", "백승희", "exception-investigation-worker", 6, undefined, [
+    "숫자가 안 맞네요. 왜 안 맞는지가 제 일입니다.",
+    "원인 후보까지만 냅니다. 확정은 원장이 해요.",
+    "근거 없으면 없다고 적습니다. 추측으로 안 채웁니다.",
+  ]),
+  staff("finance", "member", "지수아", "back-office-runner", 5, undefined, [
+    "저는 판단 안 합니다. 확정된 수치만 옮겨요.",
+    "자금이랑 세금은 아직 모듈이 없어요. 없다고 적습니다.",
+    "마감 확정이요? 제 권한 아닙니다.",
+  ]),
 
   staff("qa", "lead", "김동규", "Hermes Head · AI QA/Audit", 5, "김QA"),
   staff("qa", "member", "문세라", "hallucination-critic-worker", 7),

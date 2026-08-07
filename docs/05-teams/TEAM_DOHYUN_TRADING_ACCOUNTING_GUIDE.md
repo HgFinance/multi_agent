@@ -16,6 +16,23 @@
 
 Paper Fixture나 Frontend Demo는 실제 Broker·공식 원장·운영 NAV를 대신하지 않는다.
 
+## 0.1 현재 직원 구성과 역할
+
+구조조정 이후 이 팀의 실행 직원은 Trading 3명, Accounting/Portfolio 2명이다. 아래 표의 LLM Worker는
+비바인딩 Context와 예외 설명을 만들고, 결정론 Runner는 계약·수치·상태를 계산하거나 조회한다.
+
+| 부서 | Worker | 방식 | 현재 역할 | 권한 경계 |
+|---|---|---|---|---|
+| Trading | `bull-thesis-worker` | LLM | Research Packet 근거만 사용해 Bull thesis, 촉매와 기대수익 가설 작성 | 주문·수량 확정 금지, Bear 출력 미참조 |
+| Trading | `bear-thesis-worker` | LLM | Research Packet 근거만 사용해 Bear thesis, 반증과 하락 위험 작성 | 주문·수량 확정 금지, Bull 출력 미참조 |
+| Trading | `desk-runner` | 결정론 | Intent Builder, 계약 상태 전이, 실행 가능성·Venue Cost·파생 Certification 처리 | Risk 승인 대체·Broker Submit 금지 |
+| Accounting/Portfolio | `exception-investigation-worker` | LLM | Reconciliation Break, 미설명 PnL, 마감 준비 예외의 원인 후보 조사와 근거 연결 | 수치 계산·수정, Break 종결, Official NAV 확정 금지 |
+| Accounting/Portfolio | `back-office-runner` | 결정론 | Position·Cash·PnL·Reporting·Valuation·Corporate Action·Fee/Tax 결과 조회·투영 | LLM 호출, 공식 수치 임의 작성·수정 금지 |
+
+기존 `trader-pm-agent`, `execution-agent`, `portfolio-controller`, `reconciliation-agent` 등은 현재 추가 실행
+직원이 아니라 Profile·DB·감사 추적용 호환 Alias 또는 결정론 Domain 기능이다. 실제 Worker 수와 trigger는 각 부서
+`hermes/config.yaml`, `employee_workers.py`, [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)를 따른다.
+
 ## 1. 책임과 절대 경계
 
 ### 트레이딩본부

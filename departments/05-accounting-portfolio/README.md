@@ -1,9 +1,9 @@
 # 회계/포트폴리오본부 (Accounting & Portfolio)
 
-> 현재 직원 런타임은 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. 이 기준이 아래의 과거 Modelfile 설명보다 우선한다.
+> 현재 LLM 직원 런타임은 독립 LangGraph Worker + Ollama `qwen3:1.7b`이고, `back-office-runner`는 모델을 호출하지 않는 결정론 실행기다. 이 기준이 아래의 과거 Modelfile 설명보다 우선한다.
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-현재 Head 런타임은 Hermes Profile `accounting-portfolio-department` + `openai-codex/gpt-5.6-luna`이며, 승인된 Claude Code를 대체 런타임으로 사용할 수 있다. 직원 8명은 독립 LangGraph Worker + Ollama `qwen3:1.7b`다. `Modelfile`의 `qwen3:14b`/`agent-accounting` alias는 로컬·역사적 보조 실행용이며 현재 Worker 기준이 아니다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+현재 Head 런타임은 Hermes Profile `accounting-portfolio-department` + `openai-codex/gpt-5.6-luna`이며, 승인된 Claude Code를 대체 런타임으로 사용할 수 있다. 직원은 2명으로 개편됐다: `exception-investigation-worker`는 Ollama LLM, `back-office-runner`는 LLM 없는 결정론 Runner다. `Modelfile`의 `qwen3:14b`/`agent-accounting` alias와 구 8개 역할명은 로컬·역사적 호환용이며 현재 Worker 기준이 아니다. Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 현재 실행 상태와 도현님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#42-도현님-트레이딩본부-회계포트폴리오본부와-공통-platform)을 따른다.
 
 ## Mission
@@ -13,6 +13,17 @@ Reconciliation과 PnL 계산을 수행한다. Accounting Engine의 공식 수치
 
 회계본부가 Signal을 생성하지 않는다. CEO는 원장 수정, NAV 확정 권한이 없다
 (`CLAUDE.md` "절대 깨면 안 되는 권한 분리" 참고).
+
+## Current Worker 구성
+
+| Worker | 방식 | 역할 |
+|---|---|---|
+| `exception-investigation-worker` | LLM | Reconciliation Break, 미설명 PnL, 마감 준비 상태의 원인 후보를 조사하고 근거를 연결 |
+| `back-office-runner` | 결정론 | Position·Cash·PnL·Reporting·Valuation·Corporate Action·Fee/Tax 관련 결정론 결과 조회·투영 |
+
+기존 `portfolio-control`, `ledger-reconciliation`, `nav-close`, `treasury-liquidity`, `pnl-attribution`,
+`investor-reporting`, `valuation-corporate-actions`, `fee-accrual-tax` 역할은 두 Worker와 결정론 Accounting
+Engine으로 흡수됐다. 공식 수치 계산·Journal Posting·Official NAV 확정 권한은 Worker에 없다.
 
 ## Owner
 
