@@ -28,10 +28,10 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
-| Accounting / Portfolio | 8 | 2 | 6 | Position·Ledger·NAV·유동성·PnL·보고·평가·Accrual 유지 |
+| Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 32개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개)와 8개 Hermes Profile, 그리고 결정론 Worker 3개(`desk-runner`, `risk-runner`, `qa-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 25개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
@@ -47,7 +47,13 @@ LLM Worker 32개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개)
 
   토론은 2라운드이며 **토론자와 감독자의 런타임이 다르다** — 토론자는 직원 런타임(LangGraph + Ollama), 사회는 부서장 Hermes(`trading-supervisor`)다. 감독자 권한은 안전한 방향으로만 열려 있다: 초점을 Claim 색인 안에서 좁히고, 라운드를 닫고, escalate를 켤 수 있으나, 색인 밖 Claim을 만들거나 깨진 1라운드 위에 2라운드를 열거나 `grounded`를 바꾸거나 escalate를 끄지는 못한다.
 - **Quant**: `strategy-hypothesis-worker`, `dataset-feature-worker`, `backtest-optimization-worker`, `strategy-release-worker`, `ml-quant-worker`, `execution-cost-worker`, `regime-robustness-worker`. 연구 가설, PIT Dataset, Backtest, Release, ML, 비용, Regime의 실패 원인을 독립적으로 재현해야 하므로 유지한다.
-- **Accounting**: `portfolio-control-worker`, `ledger-reconciliation-worker`, `nav-close-worker`, `treasury-liquidity-worker`, `pnl-attribution-worker`, `investor-reporting-worker`, `valuation-corporate-actions-worker`, `fee-accrual-tax-worker`. 공식 원장·NAV·대사와 설명용 분석은 분리해야 하므로 유지한다.
+- **Accounting**: `exception-investigation-worker` (LLM) + `back-office-runner` (결정론, LLM 없음). 2026-08-07에 8명을 둘로 줄였다. 근거는 부서 헌장이다 — 마스터플랜 19.12 "공식 숫자는 Accounting Engine이 계산하며 **Agent는 예외 조사와 설명을 담당한다**", 19.16 "Agent가 수치를 계산하거나 수정하지 않는다", SOUL "only figures the Accounting Engine has confirmed".
+
+  기존 8명은 portfolio / treasury / pnl / reporting / valuation / fee-tax라는 **도메인** 축으로 나뉘어 있었는데, 그 이름의 뜻은 "그 도메인의 *수치*를 보는 분석가"다. 수치는 헌장상 처음부터 에이전트 것이 아니므로 **에이전트에게 없는 권한을 축으로 직원을 나눈 것**이었다. 도메인마다 `qwen3:1.7b`를 하나씩 얹으면 각자 자기 도메인 수치를 한국어로 옮기는데, 그게 정확히 회계 수치가 LLM 문장을 거치는 경로다.
+
+  헌장이 쓰는 축은 도메인이 아니라 **예외 종류**이고, 조사가 필요한 예외는 둘 다 "차이가 났는데 원인이 확정되지 않았다"로 같은 모양이다 — 19.11 거래 사실 불일치(Break, `break_triage.py`)와 19.12 항등식 잔차(`DailyReport.unexplained_pnl`, `accounting_ops.yaml pnl_exception`). 조사 방법이 같으므로(원인 후보 → 근거 대조 → 인용 검증 → fail-closed) 직원 하나가 근거 provider 셋을 문다. `nav_close_memory`는 별도 직원이 아니라 이 직원의 근거다.
+
+  **Bull/Bear 같은 대립쌍은 두지 않는다.** Trading이 쪼갠 이유는 "논지가 틀렸다"고 말해 줄 결정론 모듈이 없어서였다([ADR-0005](adr/0005-bull-bear-worker-split.md)). 회계엔 있다 — `check_aging()`이 Break을 조용히 늙지 못하게 하고, `unexplained_pnl`이 잔차를 0으로 반올림하지 않고, `portfolio.py`가 Mark 없으면 NAV를 거부한다. 반대편 압력이 이미 코드이고 LLM 상대역보다 강하다. SOUL이 금지한 "발견한 Break을 스스로 immaterial로 닫는 것"은 상대역이 아니라 **권한을 안 주는 것**으로 막는다. 개명된 `ledger-reconciliation-worker`/`nav-close-worker`/`pnl-attribution-worker`는 config `staff_registry.renamed_workers`에 감사 추적용 alias로 남는다.
 - **QA**: `hallucination-critic-worker`, `incident-postmortem-worker` (LLM) + `qa-runner` (결정론, LLM 없음). 2026-08-06에 `evidence-qa-worker`(1차 인용·근거 검사)·`model-and-internal-audit-worker`(Model Risk·Internal Audit)·`ops-and-permission-worker`(운영 건강성·Tool 권한)를 **tool로 강등**해 `qa-runner` 하나로 합쳤다 — 셋 다 결정론 Engine(`EvidenceQaEngine`/`ModelRiskEngine`/`InternalAuditEngine`/`OpsHealthMonitor`/`ToolPermissionCheck`)이 이미 PASS/WARN/FAIL을 정하고 있었고 LLM은 서술만 했다. Hallucination 비판과 Incident Postmortem만 LLM이 유지된다(반박·재구성은 결정론화 대상이 아니다). Evidence QA Gate가 최종 판정을 한다.
 
 ### 추가 병합을 승인하지 않은 이유

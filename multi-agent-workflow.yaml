@@ -30,10 +30,10 @@ runtime_layers:
       ceo-agent: 1
       hr-department: 5
       research-department: 6
-      trading-department: 6
+      trading-department: 2  # LLM Worker only; deterministic desk-runner is separate
       risk-management: 4
       quant-backtest-department: 7
-      accounting-portfolio-department: 8
+      accounting-portfolio-department: 1  # LLM Worker only; deterministic back-office-runner is separate
       qa-department: 5
     output: non_binding_worker_context
     retry: {max_retries: 2, max_attempts: 3}

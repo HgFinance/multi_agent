@@ -52,7 +52,9 @@ pytest 미도입. 각 모듈 `__main__`의 assert 자체 점검으로 대체: `c
 
 ### Hermes(부서) vs LangGraph(직원) — 같은 층으로 섞지 않는다
 
-Hermes Profile 8개가 부서 오케스트레이션·Queue·Memory·Tool Allowlist를 맡고, 부서 소속 직원(총 35명)은 각자 독립 LangGraph Worker + Ollama `qwen3:1.7b`로 동작한다. Worker는 허용된 읽기 결과만 부서장에게 전달할 뿐 주문·Risk/QA 판정·원장·권한 변경은 하지 않는다. 모델 배치 변경은 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md) 절차를 거친 뒤에만.
+Hermes Profile 8개가 부서 오케스트레이션·Queue·Memory·Tool Allowlist를 맡고, 부서 소속 직원은 각자 독립 LangGraph Worker + Ollama `qwen3:1.7b`로 동작한다. Worker는 허용된 읽기 결과만 부서장에게 전달할 뿐 주문·Risk/QA 판정·원장·권한 변경은 하지 않는다. 모델 배치 변경은 [WORKER_MODEL_MATRIX.md](docs/02-engineering/WORKER_MODEL_MATRIX.md) 절차를 거친 뒤에만.
+
+**현재 Registry(2026-08-07): 총 29명.** LLM Worker 25 — CEO 1, HR 5, Research 6, Trading 2, Risk 1, Quant/Backtest 7, Accounting/Portfolio 1, AI QA 2. 결정론 runner 4 — `desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`(모델을 부르지 않으므로 LLM 수에 안 센다). 실제 런타임 수는 각 Profile의 `workers`·`runtime_personalities`를 따르며, `agent.personalities`의 기존 ID는 호환·감사 Alias다.
 
 ### 절대 깨면 안 되는 권한 분리
 

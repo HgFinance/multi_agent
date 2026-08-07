@@ -27,7 +27,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
 
-from portfolio_store import PortfolioRuntimeStore
+from portfolio_store import PortfolioRuntimeStore, _process_alive
 
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
@@ -60,16 +60,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _process_alive(pid: int | None) -> bool:
-    if not pid or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+# _process_alive 는 portfolio_store 가 정본이다(위 import). 여기 사본을 두면
+# 같은 판정이 두 곳에 생기고, 실제로 그래서 한쪽만 고쳐진 채로 남아 있었다 —
+# 테스트가 이 모듈의 이름만 patch 하면 store 쪽 사본은 그대로 살아 돈다.
 
 
 def _correlation_hash(profile: Mapping[str, Any]) -> str:

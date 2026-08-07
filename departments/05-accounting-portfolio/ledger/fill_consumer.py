@@ -95,6 +95,79 @@ def pending_fills(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[
     ]
 
 
+# 소비자 이름. `execution.outbox_consumed` 에 이 이름으로 기록된다.
+CONSUMER = "accounting-ledger"
+FILL_EVENT = "execution.fill.v1"
+
+
+def pending_fill_events(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[FillRow]:
+    """**Event 경로.** `execution.outbox` 의 미소비 체결 이벤트를 읽는다.
+
+    팀 가이드 Override v2.0 P0-1 이 "Fill 은 실제 Event/Consumer 경로에서 생성한다"고
+    요구한다. `pending_fills()`(표 폴링)와 달리 여기는 트레이딩본부가 **상태 변경과
+    같은 트랜잭션에서** 낸 이벤트를 소비하며, `outbox_consumed` 로 중복을 거른다.
+
+    봉투에는 금액이 없다(6.1 "payload 본문을 내보내지 않는다"). `payload_ref.artifact_id`
+    가 가리키는 `execution.fills` 행에서 수치를 읽는다 - **수치의 원천은 여전히 표 하나다.**
+
+    두 경로가 공존하는 것이 의도다. 같은 `broker_fill_id` 로 수렴하고
+    `accounting.journals` 의 `unique (event_type, source_event_id)` 가 이중 분개를 막는다.
+    """
+    with repo.cursor() as cur:
+        cur.execute(
+            """
+            select o.event_id,
+                   f.fill_id, f.instrument_id, f.side, f.quantity, f.price,
+                   f.fee_amount, f.tax_amount, f.event_time, f.broker_fill_id
+              from execution.outbox o
+              join execution.fills f
+                on f.fill_id = (o.payload_ref ->> 'artifact_id')::uuid
+              join execution.orders ord on ord.order_id = f.order_id
+              join execution.order_intents i on i.order_intent_id = ord.order_intent_id
+              left join execution.outbox_consumed c
+                     on c.event_id = o.event_id and c.consumer = %s
+              left join accounting.journals j
+                     on j.event_type = 'fill' and j.source_event_id = f.broker_fill_id
+             where o.event_type = %s and o.status <> 'DLQ'
+               and c.event_id is null and j.journal_id is null
+               and i.fund_id = %s and i.book_id = %s
+             order by o.outbox_id
+            """,
+            (CONSUMER, FILL_EVENT, fund_id, book_id),
+        )
+        rows = cur.fetchall()
+    return [
+        FillRow(fill_id=fill_id, instrument_id=instrument_id, side=Side(side),
+                quantity=quantity, price=price, fee=fee, tax=tax,
+                event_time=event_time, broker_fill_id=broker_fill_id)
+        for (_event_id, fill_id, instrument_id, side, quantity, price, fee, tax,
+             event_time, broker_fill_id) in rows
+    ]
+
+
+def ack_fill_events(repo: LedgerRepository, fill_ids: list[UUID]) -> int:
+    """분개가 끝난 체결 이벤트를 소비 완료로 기록한다.
+
+    **분개 뒤에 찍는다.** 먼저 찍고 분개하다 죽으면 그 체결은 영영 분개되지 않는다 -
+    at-least-once 에서 유실보다 중복이 낫고, 중복은 journals 의 unique 가 막는다.
+    """
+    if not fill_ids:
+        return 0
+    with repo.cursor() as cur:
+        cur.execute(
+            """
+            insert into execution.outbox_consumed (consumer, event_id)
+            select %s, o.event_id
+              from execution.outbox o
+             where o.event_type = %s
+               and (o.payload_ref ->> 'artifact_id')::uuid = any(%s)
+            on conflict do nothing
+            """,
+            (CONSUMER, FILL_EVENT, [str(f) for f in fill_ids]),
+        )
+        return cur.rowcount
+
+
 def consume_fill(ledger: PostgresLedger, fill: FillRow) -> Journal:
     """체결 하나를 분개로 만든다. 두 원천이 합류하는 지점이다.
 
@@ -122,11 +195,27 @@ def project(repo: LedgerRepository, ledger: PostgresLedger,
 
 
 def run_once(repo: LedgerRepository, fund_id: UUID, book_id: UUID,
-             marks: dict[UUID, MarkPrice], as_of: datetime
+             marks: dict[UUID, MarkPrice], as_of: datetime, *, events_first: bool = True
              ) -> tuple[list[Journal], PortfolioSnapshot]:
-    """`execution.fills`의 미처리 체결을 모두 반영하고 스냅샷을 만든다."""
+    """미처리 체결을 모두 반영하고 스냅샷을 만든다.
+
+    **Event 경로를 먼저 본다**(P0-1). 트레이딩본부가 Outbox 로 낸 체결 이벤트를 소비하고,
+    그 뒤 표 폴링으로 남은 것을 훑는다 - Outbox 이전에 들어온 체결이나 API 주입 경로가
+    누락되지 않게 두 경로를 다 돈다. 같은 체결은 `journals` 의
+    `unique (event_type, source_event_id)` 로 한 번만 분개된다.
+    """
     ledger = repo.load(fund_id, book_id)
-    journals = [consume_fill(ledger, fill) for fill in pending_fills(repo, fund_id, book_id)]
+    journals: list[Journal] = []
+    consumed: list[UUID] = []
+
+    if events_first:
+        for fill in pending_fill_events(repo, fund_id, book_id):
+            journals.append(consume_fill(ledger, fill))
+            consumed.append(fill.fill_id)
+        # 분개가 끝난 뒤에 소비 기록을 남긴다 - 순서를 뒤집으면 유실이 된다.
+        ack_fill_events(repo, consumed)
+
+    journals += [consume_fill(ledger, fill) for fill in pending_fills(repo, fund_id, book_id)]
     return journals, project(repo, ledger, marks, as_of)
 
 

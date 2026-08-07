@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Break Triage — 대사 Break 의 원인 후보 검색과 Aging/SLA (ledger-reconciliation-worker).
+"""Break Triage — 대사 Break 의 원인 후보 검색과 Aging/SLA (exception-investigation-worker).
 
 소유: 도현 (회계/포트폴리오본부)
 근거: docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md 4.5, 8.4, 11(DoD 7번)

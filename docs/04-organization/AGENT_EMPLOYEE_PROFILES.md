@@ -1,8 +1,8 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> **Current runtime override (2026-08-06)**: 실제 실행 기준은 8개 Hermes Head, 32개 LLM Worker, 3개 결정론 runner다. 총 직원 수는 35명이며 Risk는 2명(LLM 1 + `risk-runner`), AI QA는 3명(LLM 2 + `qa-runner`)이다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, LLM Worker는 Ollama `qwen3:1.7b`다. 아래의 논리적 역할·Specialist Agent·LangGraph Node 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`를 따른다.
+> **Current runtime override (2026-08-07)**: 실제 실행 기준은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner다. 총 직원 수는 29명이며 Trading은 3명(LLM 2 + `desk-runner`), Accounting/Portfolio는 2명(LLM 1 + `back-office-runner`)이다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, LLM Worker는 Ollama `qwen3:1.7b`다. 아래의 논리적 역할·Specialist Agent·LangGraph Node 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
 
-> 2026-08-06 전사 실행 계층 확정: LLM Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant/Backtest 7·Accounting/Portfolio 8·QA 2이고, 결정론 runner 3개를 포함한 총 직원 수는 35명이다. 기존 RSK/QAA Profile ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`와 `runtime_personalities`를 따른다.
+> 2026-08-07 전사 실행 계층 확정: LLM Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant/Backtest 7·Accounting/Portfolio 1·QA 2이고, 결정론 runner 4개를 포함한 총 직원 수는 29명이다. 기존 RSK/QAA Profile ID와 도현님 담당 부서의 구 역할 ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
 
 부서장 Hermes와 LangGraph 직원의 실행 경계는 [Department Worker Graph Architecture](../02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
@@ -29,6 +29,16 @@
 3. 전사 현재 Registry인 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md)
 
 따라서 이 문서의 `RSK-*`, `QAA-*`, `RES-*`, `TRD-*`, `QNT-*`, `ACC-*` 및 `Specialist Agent` 이름은 현재 Worker ID가 아니다. 현재 runtime은 부서장 Hermes + 독립 LangGraph Worker + Ollama `qwen3:1.7b`이며, 이 Historical taxonomy를 실행 설정으로 역해석하지 않는다.
+
+현재 도현님 담당 부서의 실행 역할은 다음과 같다.
+
+| 부서 | 현재 Worker | 역할 경계 |
+|---|---|---|
+| Trading | `bull-thesis-worker` | Research Packet 근거 기반 Bull thesis만 작성하며 주문·수량을 확정하지 않음 |
+| Trading | `bear-thesis-worker` | Research Packet 근거 기반 Bear thesis만 작성하며 Bull 결과를 입력으로 받지 않음 |
+| Trading | `desk-runner` | 결정론적 Intent Builder·계약 전이·실행 가능성·비용·파생 Certification을 수행하며 LLM을 호출하지 않음 |
+| Accounting/Portfolio | `exception-investigation-worker` | Break·미설명 PnL·마감 예외의 원인 후보와 근거를 조사하며 공식 수치·NAV를 확정하지 않음 |
+| Accounting/Portfolio | `back-office-runner` | 결정론 Accounting Engine의 Position·Cash·PnL·Report·Valuation 결과를 조회·투영하며 수치를 계산하거나 수정하지 않음 |
 
 ## 1. 이 문서가 정의하는 것
 
