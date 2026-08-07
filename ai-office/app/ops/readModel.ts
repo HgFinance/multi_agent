@@ -158,7 +158,8 @@ export type OperationsSnapshot = {
     worker_id: string | null;
     status: RuntimeStatus;
     role: string | null;
-    reason: string | null;
+ reason: string | null;
+ metadata?: Record<string, unknown>;
   }>;
   agent_status_events?: Array<Record<string, unknown>>;
   status: "DEGRADED" | "CONNECTED" | string;

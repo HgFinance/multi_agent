@@ -118,12 +118,18 @@ function RuntimeSync({ engine, onSync }: { engine: Company; onSync: () => void }
   const { snapshot } = useBffFeed();
   useEffect(() => {
     const mode = snapshot?.mode ?? "DEMO";
-    engine.setSimulationMode(canUseSimulation(mode));
-    if (!canUseSimulation(mode)) {
-      engine.applyRuntime(snapshot?.operations?.runtime ?? null);
+    const operations = snapshot?.operations;
+    const activeAgentStatuses = (operations?.agent_statuses ?? []).some((item) =>
+      ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(item.status),
+    );
+    const hasRuntimeWorkers = (operations?.runtime?.active_workers ?? []).length > 0;
+    const useLiveRuntime = !canUseSimulation(mode) || activeAgentStatuses || hasRuntimeWorkers;
+    engine.setSimulationMode(!useLiveRuntime);
+    if (useLiveRuntime) {
+      engine.applyRuntime(operations?.runtime ?? null, operations?.agent_statuses ?? []);
     }
     onSync();
-  }, [engine, onSync, snapshot?.mode, snapshot?.operations?.runtime]);
+  }, [engine, onSync, snapshot?.mode, snapshot?.operations]);
   return null;
 }
 
@@ -586,7 +592,8 @@ function LiveView({
         <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow={follow} onSelect={onSelect} />
 
         <aside className="live-rail">
-          <CeoConsole engine={engine} snap={snap} />
+<CeoConsole engine={engine} snap={snap} />
+<RiskOfficePanel />
 
         <section className="win rail-card" id="legacy-ceo-approval">
             <div className="win-bar">
@@ -683,6 +690,52 @@ function LiveView({
         </aside>
       </section>
     </>
+  );
+}
+
+function RiskOfficePanel() {
+  const { snapshot } = useBffFeed();
+  const statuses = (snapshot?.operations?.agent_statuses ?? []).filter(
+    (item) => item.department_code === "risk-management",
+  );
+  const compliance = statuses.find(
+    (item) => item.worker_id === "compliance-policy-worker",
+  );
+  const runner = statuses.find((item) => item.worker_id === "risk-runner");
+  const metadata = compliance?.metadata ?? {};
+  const queryMode =
+    typeof metadata.query_mode === "string" ? metadata.query_mode : "미분류";
+  const runId = typeof metadata.run_id === "string" ? metadata.run_id : "—";
+  const traceId = compliance?.trace_id ?? runner?.trace_id ?? "—";
+  const workerRows = [
+    ["risk-runner", runner],
+    ["compliance-policy-worker", compliance],
+  ] as const;
+
+  return (
+    <section className="win rail-card" aria-label="Risk department live tracking">
+      <div className="win-bar">
+        <span>🛡 risk-management.live</span>
+        <span className="window-controls" aria-hidden="true">— ✕</span>
+      </div>
+      <div className="win-body">
+        <div className="feed-now">Risk 직원 추적 · {runId}</div>
+        <div className="runtime-result">
+          {workerRows.map(([workerId, worker]) => (
+            <div className="runtime-row" key={workerId}>
+              <span>{workerId}</span>
+              <b className={`mini-badge ${worker ? "mint" : "yellow"}`}>
+                {worker?.status ?? "OFFLINE"}
+              </b>
+              <small>{worker?.reason ?? "아직 Risk assessment trace가 없습니다."}</small>
+            </div>
+          ))}
+        </div>
+        <small className="assistant-note">
+          compliance route: {queryMode} · trace: {traceId}
+        </small>
+      </div>
+    </section>
   );
 }
 

@@ -265,3 +265,53 @@ def test_mixed_review_combines_policy_and_legal_reports() -> None:
     assert report["sub_reports"]["legal_query"]["legal_verdict"] == "no_breach"
     # 정책 evidence가 없으므로 ESCALATE로 합쳐진다(evidence 없음을 위반없음으로 단정하지 않음)
     assert report["verdict"] == "ESCALATE"
+
+
+def test_assessment_fans_in_all_five_compliance_routes_into_risk_head_state() -> None:
+    """Each declared route must survive employee execution and Head fan-in."""
+
+    def employee_llm(system: str, prompt: str) -> str:
+        del system, prompt
+        return (
+            '{"summary":"검토 결과를 생성했습니다.","confidence":0.8,'
+            '"evidence_refs":[],"escalate":true}'
+        )
+
+    def legal_answer(query: str, as_of: str, mandate: str) -> dict[str, object]:
+        del query, as_of, mandate
+        return {
+            "answer": {
+                "verdict": "breach",
+                "rationale": "법률 근거 확인이 필요합니다.",
+                "confidence": 0.8,
+                "escalate": True,
+                "cited_documents": ["law-test-1"],
+            },
+            "pages_visited": ["law-test-1"],
+            "context_chars": 100,
+        }
+
+    for query_mode in (
+        "MANDATE_REVIEW",
+        "RISK_POLICY_REVIEW",
+        "LEGAL_QUERY",
+        "MIXED_REVIEW",
+        "NOT_APPLICABLE",
+    ):
+        result = assess_mandate(
+            _mandate(
+                query_mode=query_mode,
+                compliance_query="법률 및 내부정책을 확인해 주세요.",
+            ),
+            employee_llm=employee_llm,
+            legal_answer_fn=legal_answer,
+        )
+        compliance = result["employees"]["compliance-policy-worker"]
+        state = result["risk_head_state"]
+
+        assert compliance["routing"]["query_mode"] == query_mode
+        assert state["routing"]["query_mode"] == query_mode
+        assert state["worker_tasks"]["compliance-policy-worker"]["query_mode"] == query_mode
+        assert state["worker_results"]["compliance-policy-worker"]["generated_answer"]
+        assert state["audit"]["trace"]["compliance-policy-worker"]
+        assert result["employee_runtime"]["workers"]

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
 
@@ -106,24 +108,14 @@ def _worker_output(report: dict) -> dict:
     return worker["output"]
 
 
-def test_compliance_worker_prefers_structured_query_mode_over_llm_routing():
-    calls: list[str] = []
-
-    def counting_llm(system: str, prompt: str) -> str:
-        calls.append(system)
-        if "routing classifier" in system:
-            raise AssertionError("structured query_mode must skip LLM routing")
-        return '{"summary":"policy evidence reviewed","confidence":0.9,"evidence_refs":["p"],"escalate":false}'
-
-    report = run_employee_workers(
-        {"compliance": {"grounded": True}, "query_mode": "RISK_POLICY_REVIEW"},
-        llm=counting_llm,
+def _tool_output(report: dict) -> dict:
+    worker = next(
+        w for w in report["workers"] if w["worker_id"] == "compliance-policy-worker"
     )
-
-    output = _worker_output(report)
-    assert output["query_mode"] == "RISK_POLICY_REVIEW"
-    assert output["routing_by_llm"] is False
-    assert len(calls) == 1  # only the narration call, routing was skipped
+    (event,) = [
+        e for e in worker["skill_results"] if e["skill_id"] == "context.internal_api.v1"
+    ]
+    return event["output"]
 
 
 def _fake_legal_answer_fn(query: str, as_of: str, mandate: str) -> dict:
@@ -140,43 +132,189 @@ def _fake_legal_answer_fn(query: str, as_of: str, mandate: str) -> dict:
     }
 
 
-def _patch_compliance_tool_with_fake_legal_answer(monkeypatch) -> None:
-    """Avoid a real OpenAI call from arms.py during a LEGAL_QUERY/MIXED_REVIEW test."""
+def _spy_on_query_legal_wiki(monkeypatch) -> list:
+    """Patch legal_wiki_tool.query_legal_wiki to record calls but skip the real
+    OpenAI-backed Arm C (arms.py) — the fake only replaces the answer_fn boundary,
+    the same injection point risk_mandate_workers.py's own LEGAL_QUERY tests use."""
 
-    original_compliance_tool = risk_employee_workers._compliance_tool
+    calls: list = []
+    real_query_legal_wiki = risk_employee_workers.query_legal_wiki
 
-    def patched(payload: dict) -> dict:
-        return original_compliance_tool(payload, legal_answer_fn=_fake_legal_answer_fn)
+    def spy(request, *, answer_fn=None):
+        calls.append(request)
+        return real_query_legal_wiki(request, answer_fn=_fake_legal_answer_fn)
 
-    monkeypatch.setattr(risk_employee_workers, "_compliance_tool", patched)
+    monkeypatch.setattr(risk_employee_workers, "query_legal_wiki", spy)
+    return calls
 
 
-def test_compliance_worker_routes_natural_language_question_with_same_model(
+def _forbid_query_legal_wiki(monkeypatch) -> None:
+    def boom(request, *, answer_fn=None):
+        raise AssertionError("query_legal_wiki must not be called for this query_mode")
+
+    monkeypatch.setattr(risk_employee_workers, "query_legal_wiki", boom)
+
+
+# ── 1. 구조화된 query_mode: route가 LLM을 부르지 않고, tool→worker_llm→validate까지 유지 ──
+def test_structured_query_mode_skips_route_llm_and_flows_through_full_graph(
     monkeypatch,
 ):
-    _patch_compliance_tool_with_fake_legal_answer(monkeypatch)
+    legal_calls = _spy_on_query_legal_wiki(monkeypatch)
+    narration_calls: list[str] = []
+
+    def counting_llm(system: str, prompt: str) -> str:
+        if "routing classifier" in system:
+            raise AssertionError("structured query_mode must skip LLM routing")
+        narration_calls.append(prompt)
+        return '{"summary":"policy evidence reviewed","confidence":0.9,"evidence_refs":["p"],"escalate":false}'
+
+    report = run_employee_workers(
+        {"compliance": {"grounded": True}, "query_mode": "RISK_POLICY_REVIEW"},
+        llm=counting_llm,
+    )
+
+    worker = next(
+        w for w in report["workers"] if w["worker_id"] == "compliance-policy-worker"
+    )
+    assert worker["status"] == "COMPLETED"  # tool -> worker_llm -> validate 모두 통과
+    tool_events = [
+        e for e in worker["skill_results"] if e["skill_id"] == "context.internal_api.v1"
+    ]
+    assert len(tool_events) == 1  # tool 노드가 정확히 한 번 실행됨
+    assert len(narration_calls) == 1  # worker_llm 노드도 한 번 실행됨
+    assert legal_calls == []  # RISK_POLICY_REVIEW는 legal_wiki_tool을 안 씀
+
+    output = worker["output"]
+    assert output["query_mode"] == "RISK_POLICY_REVIEW"
+    assert output["routing_by_llm"] is False
+
+
+# ── 2. 자연어 compliance.query만 있는 경우: 동일 Qwen 모델이 5-mode 중 하나로 분류 ──
+def test_natural_language_query_is_classified_by_the_same_local_model(monkeypatch):
+    _spy_on_query_legal_wiki(monkeypatch)
+    route_prompts: list[str] = []
+    narration_prompts: list[str] = []
 
     def dispatch_llm(system: str, prompt: str) -> str:
         if "routing classifier" in system:
-            assert "부정거래행위" in prompt
+            route_prompts.append(prompt)
             return '{"query_mode": "LEGAL_QUERY", "routing_rationale": "법령 질문"}'
-        assert "breach" in prompt.lower()
+        narration_prompts.append(prompt)
         return '{"summary":"법률 근거 확인됨","confidence":0.75,"evidence_refs":["자본시장법_제178조"],"escalate":true}'
 
     report = run_employee_workers(
         {"compliance": {"query": "부정거래행위 판단 기준이 뭐야"}},
-        llm=dispatch_llm,
+        llm=dispatch_llm,  # route와 worker_llm 노드 둘 다 이 같은 콜백(=같은 모델)을 쓴다
     )
+
+    assert len(route_prompts) == 1 and "부정거래행위" in route_prompts[0]
+    assert len(narration_prompts) == 1  # 같은 콜러블이 narration도 수행
 
     output = _worker_output(report)
     assert output["query_mode"] == "LEGAL_QUERY"
     assert output["routing_by_llm"] is True
-    assert output["routing_rationale"] == "법령 질문"
+    assert output["routing_rationale"] == "법령 질문"  # 최종 output에 라우팅 사유가 남음
+
+
+# ── 3. LEGAL_QUERY: legal_wiki_tool(Arm C 경로)이 실제 호출되고, 그 근거가 worker_llm에 전달 ──
+def test_legal_query_mode_calls_legal_wiki_tool_and_feeds_evidence_to_worker_llm(
+    monkeypatch,
+):
+    legal_calls = _spy_on_query_legal_wiki(monkeypatch)
+    narration_prompts: list[str] = []
+
+    def llm(system: str, prompt: str) -> str:
+        if "routing classifier" in system:
+            raise AssertionError("query_mode is structured; routing must be skipped")
+        narration_prompts.append(prompt)
+        return '{"summary":"부정거래행위 위반 소지 확인","confidence":0.75,"evidence_refs":["자본시장법_제178조"],"escalate":true}'
+
+    report = run_employee_workers(
+        {
+            "compliance": {"query": "부정거래행위 판단 기준이 뭐야"},
+            "query_mode": "LEGAL_QUERY",
+        },
+        llm=llm,
+    )
+
+    assert len(legal_calls) == 1  # legal_wiki_tool이 정확히 한 번 실제 호출됨
+    assert legal_calls[0].query == "부정거래행위 판단 기준이 뭐야"
+
+    tool_output = _tool_output(report)
+    assert tool_output["legal"]["status"] == "OK"
+    assert tool_output["legal"]["cited_documents"] == ["자본시장법_제178조"]
+
+    # worker_llm(같은 모델)이 tool_output의 법률 근거를 실제로 프롬프트에서 받았는지 확인
+    assert "자본시장법_제178조" in narration_prompts[0]
+    assert "부정거래행위 소지" in narration_prompts[0]  # rationale도 전달됨
+
+    output = _worker_output(report)
+    assert output["evidence_refs"] == ["자본시장법_제178조"]
     assert output["escalate"] is True
 
 
+# ── 4. MIXED_REVIEW: legal_wiki_tool 호출 + 기존 evidence가 함께 worker_llm에 전달 ──
+def test_mixed_review_combines_legal_tool_and_existing_evidence_for_worker_llm(
+    monkeypatch,
+):
+    legal_calls = _spy_on_query_legal_wiki(monkeypatch)
+    narration_prompts: list[str] = []
+
+    def llm(system: str, prompt: str) -> str:
+        narration_prompts.append(prompt)
+        return '{"summary":"내부정책·법률 근거 모두 검토","confidence":0.6,"evidence_refs":["internal-policy-3","자본시장법_제178조"],"escalate":true}'
+
+    report = run_employee_workers(
+        {
+            "compliance": {
+                "query": "임직원 매매명세 통지 주기",
+                "internal_policy_note": "사전 신고 필요, internal-policy-3 참조",
+            },
+            "query_mode": "MIXED_REVIEW",
+        },
+        llm=llm,
+    )
+
+    assert len(legal_calls) == 1  # MIXED_REVIEW도 legal_wiki_tool을 호출한다
+
+    tool_output = _tool_output(report)
+    assert tool_output["legal"]["cited_documents"] == ["자본시장법_제178조"]
+    assert tool_output["compliance"]["internal_policy_note"] == (
+        "사전 신고 필요, internal-policy-3 참조"
+    )
+
+    # 두 근거가 같은 narration 프롬프트에 함께 들어갔는지 확인
+    assert "자본시장법_제178조" in narration_prompts[0]
+    assert "internal-policy-3" in narration_prompts[0]
+
+
+# ── 5. 나머지 mode: legal_wiki_tool을 부르지 않고 기존 evidence-passthrough만 쓴다 ──
+@pytest.mark.parametrize("mode", ["MANDATE_REVIEW", "RISK_POLICY_REVIEW", "NOT_APPLICABLE"])
+def test_non_legal_modes_never_call_legal_wiki_tool(monkeypatch, mode):
+    _forbid_query_legal_wiki(monkeypatch)
+
+    def llm(system: str, prompt: str) -> str:
+        return '{"summary":"evidence reviewed","confidence":0.8,"evidence_refs":[],"escalate":false}'
+
+    report = run_employee_workers(
+        {
+            "compliance": {"query": "이 질문은 법률 검색을 유발하면 안 됨", "grounded": True},
+            "query_mode": mode,
+        },
+        llm=llm,
+    )
+
+    tool_output = _tool_output(report)
+    assert "legal" not in tool_output
+    assert tool_output["compliance"]["grounded"] is True  # 기존 evidence-passthrough 유지
+
+    output = _worker_output(report)
+    assert output["query_mode"] == mode
+
+
+# ── 6. 라우팅 분류 실패/파싱 실패: MIXED_REVIEW로 fail-open(범위를 좁히지 않음) ──
 def test_compliance_worker_routing_parse_failure_defaults_to_mixed_review(monkeypatch):
-    _patch_compliance_tool_with_fake_legal_answer(monkeypatch)
+    legal_calls = _spy_on_query_legal_wiki(monkeypatch)
 
     def broken_router_llm(system: str, prompt: str) -> str:
         if "routing classifier" in system:
@@ -192,3 +330,51 @@ def test_compliance_worker_routing_parse_failure_defaults_to_mixed_review(monkey
     assert output["query_mode"] == "MIXED_REVIEW"
     assert output["routing_by_llm"] is True
     assert output["routing_rationale"] == "routing_parse_failed_defaulted_to_mixed_review"
+    assert len(legal_calls) == 1  # fail-open이 실제로 법률 검색까지 이어지는지 (근거 없음 != 무혐의)
+
+
+# ── 7. validate: summary/evidence_refs/escalate/query_mode/routing_rationale 보존 ──
+def test_validate_preserves_all_routing_and_narration_fields(monkeypatch):
+    _spy_on_query_legal_wiki(monkeypatch)
+
+    def llm(system: str, prompt: str) -> str:
+        if "routing classifier" in system:
+            return '{"query_mode": "MIXED_REVIEW", "routing_rationale": "정책+법률 모두 필요"}'
+        return '{"summary":"최종 요약","confidence":0.7,"evidence_refs":["ref-a","ref-b"],"escalate":true}'
+
+    report = run_employee_workers(
+        {"compliance": {"query": "임직원 매매 규정 확인"}},
+        llm=llm,
+    )
+
+    output = _worker_output(report)
+    assert output["summary"] == "최종 요약"
+    assert output["evidence_refs"] == ["ref-a", "ref-b"]
+    assert output["escalate"] is True
+    assert output["query_mode"] == "MIXED_REVIEW"
+    assert output["routing_rationale"] == "정책+법률 모두 필요"
+
+
+def test_compliance_policy_worker_graph_topology_is_route_tool_worker_llm_validate():
+    spec = next(s for s in WORKER_SPECS if s.worker_id == "compliance-policy-worker")
+    compiled = risk_employee_workers.build_worker_graph(
+        spec, risk_employee_workers._compliance_tool
+    )
+    graph = compiled.get_graph()
+
+    assert set(graph.nodes) == {
+        "__start__",
+        "route",
+        "tool",
+        "worker_llm",
+        "validate",
+        "__end__",
+    }
+    edges = {(edge.source, edge.target) for edge in graph.edges}
+    assert edges == {
+        ("__start__", "route"),
+        ("route", "tool"),
+        ("tool", "worker_llm"),
+        ("worker_llm", "validate"),
+        ("validate", "__end__"),
+    }

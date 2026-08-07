@@ -15,7 +15,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-
 AGENT_STATUS_EVENT_TYPE = "agent.status.v1"
 AgentRuntimeStatus = Literal[
     "OFFLINE",
@@ -44,6 +43,7 @@ class AgentStatusEvent(BaseModel):
     case_id: str | None = Field(default=None, max_length=256)
     trace_id: str | None = Field(default=None, max_length=256)
     reason: str | None = Field(default=None, max_length=1000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     producer: str = "portfolio-runtime-adapter"
 
 
@@ -66,6 +66,7 @@ class AgentStatusProjector:
         worker_id: str | None = None,
         role: str | None = None,
         reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
         case_id: str | None = None,
         trace_id: str | None = None,
         producer: str = "portfolio-runtime-adapter",
@@ -86,8 +87,9 @@ class AgentStatusProjector:
                 reason=reason,
                 case_id=case_id,
                 trace_id=trace_id,
-                producer=producer,
-            )
+            producer=producer,
+            metadata=metadata or {},
+        )
             payload = event.model_dump(mode="json")
             self._states[agent_id] = payload
             self._events.append(payload)

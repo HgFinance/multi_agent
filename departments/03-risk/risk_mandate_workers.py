@@ -195,6 +195,110 @@ def _input_hash(request: RiskMandateAssessmentRequest) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _fallback_query_mode(question: str) -> tuple[str, str]:
+    """Fail-safe local classifier used only when Ollama is unavailable."""
+
+    text = question.casefold()
+    legal = any(token in text for token in ("법률", "법령", "규정", "위반", "조항", "판례", "legal"))
+    policy = any(
+        token in text
+        for token in ("내부정책", "정책", "제한목록", "restricted", "한도", "policy")
+    )
+    mandate = any(
+        token in text
+        for token in ("투자목표", "위험성향", "레버리지", "투자경험", "자산정책", "mandate")
+    )
+    if legal and policy:
+        return "MIXED_REVIEW", "local_fallback_detected_policy_and_legal_terms"
+    if legal:
+        return "LEGAL_QUERY", "local_fallback_detected_legal_terms"
+    if policy:
+        return "RISK_POLICY_REVIEW", "local_fallback_detected_policy_terms"
+    if mandate:
+        return "MANDATE_REVIEW", "local_fallback_detected_mandate_terms"
+    return "NOT_APPLICABLE", "local_fallback_no_compliance_scope_detected"
+
+
+class _SafeComplianceLLM:
+    """Use the configured Ollama model and expose a transparent safe fallback."""
+
+    uses_model = True
+
+    def __init__(self, delegate: Any | None = None) -> None:
+        self._delegate = delegate
+
+    def __call__(self, system: str, prompt: str) -> str:
+        if self._delegate is None:
+            from risk_employee_workers import default_worker_llm
+
+            delegate = default_worker_llm
+        else:
+            delegate = self._delegate
+        try:
+            raw = delegate(system, prompt)
+        except Exception:  # noqa: BLE001 - worker boundary must fail closed
+            raw = None
+        if isinstance(raw, str) and raw.strip():
+            self.uses_model = True
+            return raw
+
+        self.uses_model = False
+        if "routing classifier" in system:
+            question = prompt.split("Question:", 1)[-1].strip()
+            mode, rationale = _fallback_query_mode(question)
+            return json.dumps(
+                {"query_mode": mode, "routing_rationale": rationale},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "summary": "compliance 모델을 사용할 수 없어 사람 검토로 전환합니다.",
+                "confidence": 0.0,
+                "evidence_refs": [],
+                "escalate": True,
+            },
+        )
+
+
+def _run_compliance_employee_graph(
+    request: RiskMandateAssessmentRequest,
+    risk_report: Mapping[str, Any],
+    *,
+    employee_llm: Any | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None,
+) -> dict[str, Any]:
+    """Run route → tool → answer → validation and return its trace envelope."""
+
+    from risk_employee_workers import run_employee_workers
+
+    payload = {
+        "mandate_id": request.mandate_id,
+        "as_of": request.as_of,
+        "input_hash": _input_hash(request),
+        "assessment": dict(risk_report),
+        "context": request.model_dump(mode="json"),
+        "compliance": {
+            "query": request.compliance_query or "",
+            "question": request.compliance_query or "",
+            "evidence": [item.model_dump(mode="json") for item in request.compliance_evidence],
+            "grounded": bool(request.compliance_evidence),
+        },
+    }
+    # Structured routing wins over model classification, exactly as the flow
+    # specification requires.  If absent, the worker must classify the query.
+    if "query_mode" in request.model_fields_set:
+        payload["query_mode"] = request.query_mode
+    runtime_llm = employee_llm or _SafeComplianceLLM()
+    runtime = run_employee_workers(
+        payload,
+        llm=runtime_llm,
+        legal_answer_fn=legal_answer_fn,
+    )
+    runtime["model_available"] = bool(getattr(runtime_llm, "uses_model", True))
+    runtime["generation_degraded"] = not runtime["model_available"]
+    return runtime
+
+
 def _decimal(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
 
@@ -810,10 +914,87 @@ def build_risk_head_dispatch(request: RiskMandateAssessmentRequest) -> dict[str,
     }
 
 
+def _build_risk_head_state(
+    request: RiskMandateAssessmentRequest,
+    dispatch: Mapping[str, Any],
+    risk_report: Mapping[str, Any],
+    compliance_report: Mapping[str, Any],
+    risk_head: Mapping[str, Any],
+    employee_runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persistable Risk Head state assembled after independent worker fan-in."""
+
+    trace_id = str(dispatch.get("trace_id") or _input_hash(request)[:16])
+    route = compliance_report.get("routing", {})
+    runtime_workers = {
+        str(worker.get("worker_id")): worker
+        for worker in employee_runtime.get("workers", [])
+        if isinstance(worker, Mapping)
+    }
+    return {
+        "schema_version": "risk-head-state.v1",
+        "run_id": f"RISK-{_input_hash(request)[:16]}",
+        "trace_id": trace_id,
+        "request": {
+            "intent": "PRE_TRADE" if request.order_compliance else "MANDATE_REVIEW",
+            "user_question": request.compliance_query or "Mandate Risk assessment",
+        },
+        "mandate": request.model_dump(mode="json"),
+        "context": {
+            "as_of": request.as_of,
+            "order": request.order_compliance.model_dump(mode="json")
+            if request.order_compliance
+            else None,
+            "portfolio_snapshot": request.portfolio_snapshot.model_dump(mode="json")
+            if request.portfolio_snapshot
+            else None,
+        },
+        "routing": route,
+        "worker_tasks": {
+            "risk-runner": {
+                "schema_version": "risk-runner.task.v1",
+                "input_hash": risk_report.get("input_hash"),
+                "dispatch": "REQUIRED",
+                "mode": "RISK_CHECK",
+            },
+            "compliance-policy-worker": {
+                "schema_version": "compliance-policy.task.v1",
+                "input_hash": compliance_report.get("input_hash"),
+                "query_mode": compliance_report.get("query_mode"),
+                "dispatch": "REQUIRED",
+            },
+        },
+        "worker_results": {
+            "risk-runner": dict(risk_report),
+            "compliance-policy-worker": dict(compliance_report),
+            "employee_runtime": runtime_workers,
+        },
+        "decision": dict(risk_head),
+        "escalation": {
+            "required": risk_head.get("decision") != "APPROVE",
+            "reason_codes": sorted(
+                set(risk_report.get("reason_codes", []))
+                | set(compliance_report.get("reason_codes", []))
+            ),
+        },
+        "audit": {
+            "input_hash": _input_hash(request),
+            "dispatch": dict(dispatch),
+            "runtime": employee_runtime.get("runtime", {}),
+            "trace": {
+                worker_id: worker.get("trace", {})
+                for worker_id, worker in runtime_workers.items()
+            },
+        },
+    }
+
+
 def assess_mandate(
     request: RiskMandateAssessmentRequest | Mapping[str, Any],
     *,
     pinecone: PineconeEvidenceClient | None = None,
+    employee_llm: Any | None = None,
+    legal_answer_fn: LegalWikiAnswerFn | None = None,
 ) -> dict[str, Any]:
     """Run both Risk employees and return their independent reports plus fan-in."""
 
@@ -824,12 +1005,69 @@ def assess_mandate(
     )
     dispatch = build_risk_head_dispatch(normalized)
     risk_report = run_risk_runner(normalized)
-    compliance_report = run_compliance_policy_worker(normalized, pinecone=pinecone)
+    employee_runtime = _run_compliance_employee_graph(
+        normalized,
+        risk_report,
+        employee_llm=employee_llm,
+        legal_answer_fn=legal_answer_fn,
+    )
+    runtime_worker = next(
+        (
+            worker
+            for worker in employee_runtime.get("workers", [])
+            if worker.get("worker_id") == "compliance-policy-worker"
+        ),
+        {},
+    )
+    generated = runtime_worker.get("output", {})
+    resolved_mode = generated.get("query_mode") or normalized.query_mode
+    routed_request = normalized.model_copy(update={"query_mode": resolved_mode})
+    compliance_report = run_compliance_policy_worker(
+        routed_request,
+        pinecone=pinecone,
+        legal_answer_fn=legal_answer_fn,
+    )
+    compliance_report["routing"] = {
+        "query_mode": resolved_mode,
+        "routing_rationale": generated.get("routing_rationale"),
+        "routing_by_llm": generated.get("routing_by_llm", False),
+        "source": "compliance-policy-worker",
+    }
+    generation_degraded = bool(employee_runtime.get("generation_degraded"))
+    compliance_report["generation_status"] = (
+        "DEGRADED"
+        if generation_degraded
+        else runtime_worker.get("status", "DEGRADED")
+    )
+    compliance_report["generated_answer"] = generated.get("summary", "")
+    compliance_report["generation_trace"] = runtime_worker.get("trace", {})
+    if generated.get("escalate") or generation_degraded:
+        compliance_report["verdict"] = "ESCALATE"
+        compliance_report["action_required"] = True
+        compliance_report.setdefault("reason_codes", []).append(
+            "COMPLIANCE_ANSWER_REQUIRES_ESCALATION"
+        )
+    if runtime_worker.get("status") != "COMPLETED":
+        compliance_report["status"] = "DEGRADED"
+        compliance_report["verdict"] = "ESCALATE"
+        compliance_report["action_required"] = True
+        compliance_report.setdefault("reason_codes", []).append(
+            "COMPLIANCE_ANSWER_GENERATION_FAILED"
+        )
     risk_head = synthesize_risk_head(risk_report, compliance_report, normalized)
+    risk_head_state = _build_risk_head_state(
+        normalized,
+        dispatch,
+        risk_report,
+        compliance_report,
+        risk_head,
+        employee_runtime,
+    )
     pipeline_status = (
         "COMPLETED"
         if risk_report["status"] == "COMPLETED"
         and compliance_report["status"] == "COMPLETED"
+        and not employee_runtime.get("degraded")
         else "DEGRADED"
     )
     return {
@@ -852,6 +1090,8 @@ def assess_mandate(
             | set(compliance_report.get("tool_calls", []))
         ),
         "risk_head": risk_head,
+        "risk_head_state": risk_head_state,
+        "employee_runtime": employee_runtime,
     }
 
 

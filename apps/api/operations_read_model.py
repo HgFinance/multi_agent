@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ DEPARTMENT_PROFILES: tuple[dict[str, str], ...] = (
 )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _profile_data(profile: str) -> dict[str, Any]:
     path = ROOT / "departments" / profile / "hermes" / "config.yaml"
     try:
@@ -181,6 +181,13 @@ def build_operations_snapshot() -> dict[str, Any]:
 
     live_messages = list(run.get("messages", [])) if run else []
     agent_statuses = agent_status_snapshot()
+    # Risk mandate assessments are served by the separate risk-api, so they
+    # do not create a portfolio-runtime ``run``.  Project their sanitized
+    # agent.status.v1 events into the same runtime shape consumed by Office;
+    # otherwise the BFF would report the workers while the Office could never
+    # animate or focus their characters.
+    projected_workers: list[dict[str, Any]] = []
+    projected_departments: dict[str, dict[str, Any]] = {}
     for row in departments:
         department_agents = [
             item
@@ -205,10 +212,54 @@ def build_operations_snapshot() -> dict[str, Any]:
             row["status"] = "BLOCKED"
         else:
             row["status"] = "IDLE"
+
+    for item in agent_statuses["agents"]:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "OFFLINE"))
+        department_code = str(item.get("department_code", ""))
+        worker_id = str(item.get("worker_id") or item.get("agent_id") or "")
+        if not department_code or not worker_id:
+            continue
+        if status in {"QUEUED", "RUNNING", "WAITING_APPROVAL"}:
+            projected_workers.append(
+                {
+                    "worker_id": worker_id,
+                    "department_code": department_code,
+                    "stage": status,
+                    "role": str(item.get("role") or worker_id),
+                    "status": status,
+                    "summary": item.get("reason"),
+                }
+            )
+            projected_departments.setdefault(
+                department_code,
+                {"status": "RUNNING", "current_stage": status, "active_worker_ids": []},
+            )["active_worker_ids"].append(worker_id)
+
+    if not run and projected_workers:
+        runtime_status = "RUNNING"
+        runtime_connected = True
+        for row in departments:
+            live = projected_departments.get(row["department_code"])
+            if not live:
+                continue
+            row["status"] = "RUNNING"
+            row["runtime_observed"] = True
+            row["active_worker_count"] = len(live["active_worker_ids"])
+            row["active_workers"] = list(live["active_worker_ids"])
+            row["current_stage"] = live["current_stage"]
+            row["status_reason"] = "Risk worker status projection"
+
     implemented = sum(1 for item in communications if str(item["status"]).startswith("IMPLEMENTED"))
     planned = sum(1 for item in communications if item["status"] == "PLANNED")
-    runtime_status = str(runtime.get("status", "OFFLINE"))
-    runtime_connected = run is not None
+    runtime_status = str(runtime.get("status", "OFFLINE")) if not projected_workers else "RUNNING"
+    runtime_connected = run is not None or bool(projected_workers)
+    runtime_departments = dict(run.get("departments", {})) if run else {}
+    for department_code, projected in projected_departments.items():
+        runtime_departments[department_code] = projected
+    runtime_active_workers = list(run.get("active_workers", [])) if run else []
+    runtime_active_workers.extend(projected_workers)
 
     return {
         "schema_version": "operator-operations.v1",
@@ -229,8 +280,8 @@ def build_operations_snapshot() -> dict[str, Any]:
             "run_id": run.get("run_id") if run else None,
             "workflow": run.get("workflow") if run else None,
             "phase": run.get("phase") if run else None,
-            "departments": run.get("departments", {}) if run else {},
-            "active_workers": run.get("active_workers", []) if run else [],
+            "departments": runtime_departments,
+            "active_workers": runtime_active_workers,
             "performance_metrics": run.get("performance_metrics", []) if run else [],
             "active_handoff": run.get("active_handoff") if run else None,
             "observability": runtime.get("observability", {}),
