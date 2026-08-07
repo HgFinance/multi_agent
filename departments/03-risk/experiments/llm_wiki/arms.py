@@ -49,6 +49,42 @@ MODEL = os.environ.get("LLM_WIKI_GENERATE_MODEL", "gpt-4o-mini")
 _BREAKER = CircuitBreaker("llm-wiki-arms", failure_threshold=3, recovery_timeout_seconds=30)
 _CACHE = RedisJsonCache("risk-qa:llm-wiki:generate", ttl_seconds=7 * 24 * 3600)
 
+# 생성 프롬프트 튜닝(2026-08-07): grep+keyword 튜닝으로 recall은 0.867->0.933까지
+# 올랐는데도(results/retrieval_tuning.md) 1차 LLM-judge 평가는 오히려 A(plain RAG)가
+# 더 높았다(semantic_acc A=0.33 vs B/C=0.20). q10/q11처럼 벌칙(443조)이 gold인
+# 질문에서 seed가 443에 닿지 못하는 게 원인이었다 — 원인은 두 가지였다:
+# (1) 이 프롬프트: wiki_reader의 컨텍스트는 WINDOW_CHARS=400짜리 짧은 발췌 여러 개
+#     (주 조항 + 연결된 조항 스니펫)로 쪼개져 있어, nodes.py 원본 프롬프트의
+#     "Never state a rule not present in excerpts"가 "두 발췌를 엮어야 답이 나오는
+#     경우"까지 ambiguous로 과잉 escalate시켰다 — 아래 additive 문구로 완화.
+# (2) grep_seed/keyword_seed/BM25/wiki_reader window pivot이 mandate가 섞인
+#     full_query를 받고 있었는데, mandate 고정 문구 자체에 TOPIC_KEYWORDS 키워드가
+#     들어 있어 매 질문마다 무관한 페이지가 seed 앞쪽을 채워 443이 Tmax=3 밖으로
+#     밀려났다 — llm_wiki_bm25_answer/llm_wiki_grep_bm25_answer에서 검색 신호는
+#     query만 쓰도록 분리(생성 단계 full_query는 그대로 유지)해서 고쳤다.
+# 두 가지를 함께 적용한 뒤 재측정(results/comparison_report_final_judged.md):
+# verdict_acc A=0.53/B=0.73/C=0.67, semantic_acc A=0.33/B=C=0.40 — B/C가 A를
+# 모든 지표에서 앞선다. 프로덕션 nodes.py의 PERSONA_PROMPTS는 Arm A가 그대로 쓰므로
+# 건드리지 않고, Arm B/C 전용으로만 문구를 덧붙인다 — grounding 제약(근거에 없는
+# 규칙 단정 금지)은 그대로 유지한다.
+# F1 튜닝(2026-08-07): rationale이 "위반이다/위반이 아니다"만 서술하고 근거 조항의
+# 항/호 번호나 구체적 수치(징역 연수, 벌금 배수, 기간 등)를 안 옮겨 적어서 골든셋
+# 정답 문장(늘 "제N조제M항..." + 구체 수치 인용체)과 토큰 겹침이 거의 없었다
+# (q10 f1=0.036, verdict는 맞았는데도). rationale에 발췌에 있는 조항 번호·수치를
+# 그대로 옮겨 적으라는 문구를 추가 — 이건 지표만 올리려는 게 아니라 컴플라이언스
+# 판정문 자체의 실무 가치이기도 하다(담당자가 다시 원문을 찾아볼 필요가 없게).
+_LLM_WIKI_GENERATE_SYSTEM = PERSONA_PROMPTS[PERSONA]["generate_system"] + (
+    " The context may contain several short excerpts from different linked wiki pages "
+    "(a primary clause plus related or penalty clauses it links to) — treat all shown "
+    "excerpts as one combined evidence set and connect them to reach a verdict. Do not "
+    "answer 'ambiguous' merely because the answer requires combining two shown excerpts; "
+    "use 'ambiguous' only when none of the shown excerpts addresses the specific conduct "
+    "or question asked. In the rationale, quote the exact clause/sub-clause numbers "
+    "(e.g. 제443조제1항제8호) and any specific figures (penalty ranges, deadlines, "
+    "thresholds, day/month counts) verbatim from the excerpts whenever they are present, "
+    "instead of only describing the rule in general terms."
+)
+
 
 def _wrap_query(query: str, mandate: str) -> str:
     return f"{mandate}\n\n{query}" if mandate else query
@@ -105,8 +141,12 @@ def _bm25_index() -> BM25Index:
     return BM25Index(documents)
 
 
-def _generate_verdict(query: str, context: str) -> dict[str, Any]:
-    """wiki_reader의 bounded context로 verdict JSON을 만든다. 빈 컨텍스트는 fail-closed."""
+def _generate_verdict(query: str, context: str, system: str | None = None) -> dict[str, Any]:
+    """wiki_reader의 bounded context로 verdict JSON을 만든다. 빈 컨텍스트는 fail-closed.
+
+    `system`을 넘기지 않으면 nodes.py 원본 프롬프트 그대로 쓴다 — Arm B/C는
+    `_LLM_WIKI_GENERATE_SYSTEM`(튜닝판)을 넘겨서 호출한다.
+    """
 
     prompts = PERSONA_PROMPTS[PERSONA]
     if not context.strip():
@@ -118,7 +158,7 @@ def _generate_verdict(query: str, context: str) -> dict[str, Any]:
             "escalate": True,
         }
 
-    system = prompts["generate_system"]
+    system = system or prompts["generate_system"]
     user = f"{prompts['query_label']}:\n{query}\n\n{prompts['docs_label']}:\n{context}"
     fingerprint = _CACHE.fingerprint(MODEL, system, user)
     cached = _CACHE.get(fingerprint)
@@ -156,14 +196,21 @@ def _generate_verdict(query: str, context: str) -> dict[str, Any]:
 
 
 def llm_wiki_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict[str, Any]:
-    """Arm B — BM25 단독 seed → wiki_reader bounded read → generate."""
+    """Arm B — BM25 단독 seed → wiki_reader bounded read → generate.
+
+    튜닝(2026-08-07): 검색 신호(BM25 스코어링, window pivot)는 순수 질문(`query`)만
+    쓴다. mandate는 고정 문구 안에 "미공개중요정보"/"시세조종행위"/"부정거래행위"가
+    그대로 박혀 있어서, 이걸 섞은 `full_query`로 검색하면 매 질문마다 mandate발
+    노이즈가 섞인다 — 생성 단계(`_generate_verdict`)에는 mandate 맥락이 필요하므로
+    `full_query`를 그대로 넘기되, 검색 단계만 분리한다.
+    """
 
     full_query = _wrap_query(query, mandate)
-    top = _bm25_index().score(full_query, top_k=1)
+    top = _bm25_index().score(query, top_k=1)
     seeds = [page_id for page_id, _score in top]
-    read = read_bounded(full_query, seeds)
+    read = read_bounded(query, seeds)
     return {
-        "answer": _generate_verdict(full_query, read.context),
+        "answer": _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
     }
@@ -180,17 +227,25 @@ def llm_wiki_grep_bm25_answer(query: str, as_of: str, mandate: str = "") -> dict
     같이 묻는 질문(예: "제178조 위반하면 처벌은?")은 조항 자체 페이지만으로는
     벌칙(443조) 페이지에 닿지 못했기 때문. 그래서 top_k=1/Tmax=3 기본값은 유지하고
     seed 결합 방식만 바꾼다.
+
+    튜닝(2026-08-07) 2차: `tune_retrieval.py`의 무-LLM 리콜 스윕은 순수 질문
+    (`query`)만으로 grep_seed/keyword_seed를 돌렸는데, 실제 `arms.py`는 mandate가
+    섞인 `full_query`로 돌리고 있었다 — mandate 고정 문구에 "미공개중요정보"/
+    "시세조종행위"/"부정거래행위"가 그대로 들어 있어 TOPIC_KEYWORDS가 매 질문마다
+    무관한 페이지 3개를 seed 앞쪽에 끼워 넣었고(q10/q11처럼 진짜 필요한 443조가
+    Tmax=3 예산 밖으로 밀려남), wiki_reader의 window pivot도 mandate 단어를 먼저
+    찾아버렸다. 검색 신호는 `query`만 쓰고, mandate는 생성 단계에만 남긴다.
     """
 
     full_query = _wrap_query(query, mandate)
-    seeds = grep_seed(full_query)
-    seeds += [p for p in keyword_seed(full_query) if p not in seeds]
+    seeds = grep_seed(query)
+    seeds += [p for p in keyword_seed(query) if p not in seeds]
     if not seeds:
-        top = _bm25_index().score(full_query, top_k=1)
+        top = _bm25_index().score(query, top_k=1)
         seeds = [page_id for page_id, _score in top]
-    read = read_bounded(full_query, seeds)
+    read = read_bounded(query, seeds)
     return {
-        "answer": _generate_verdict(full_query, read.context),
+        "answer": _generate_verdict(full_query, read.context, system=_LLM_WIKI_GENERATE_SYSTEM),
         "context_chars": len(read.context),
         "pages_visited": read.pages_visited,
     }
@@ -209,5 +264,9 @@ if __name__ == "__main__":
     empty_answer = _generate_verdict("아무 질문", "")
     assert empty_answer["verdict"] == PERSONA_PROMPTS[PERSONA]["no_evidence_verdict"]
     assert empty_answer["escalate"] is True
+
+    assert _LLM_WIKI_GENERATE_SYSTEM != PERSONA_PROMPTS[PERSONA]["generate_system"]
+    assert _LLM_WIKI_GENERATE_SYSTEM.startswith(PERSONA_PROMPTS[PERSONA]["generate_system"])
+    assert "combining two shown excerpts" in _LLM_WIKI_GENERATE_SYSTEM
 
     print("arms self-check OK:", flat_files[:3], "...")

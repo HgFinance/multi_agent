@@ -6,7 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"))
 
-from arms import PERSONA, _generate_verdict, build_flat_corpus  # noqa: E402
+from arms import (  # noqa: E402
+    _LLM_WIKI_GENERATE_SYSTEM,
+    PERSONA,
+    _generate_verdict,
+    build_flat_corpus,
+)
 from src.nodes import PERSONA_PROMPTS  # noqa: E402
 
 
@@ -48,3 +53,12 @@ def test_generate_verdict_fails_closed_on_empty_context() -> None:
     assert answer["cited_documents"] == []
     assert answer["escalate"] is True
     assert answer["confidence"] == 0.0
+
+
+def test_llm_wiki_generate_system_extends_base_prompt_without_mutating_it() -> None:
+    base = PERSONA_PROMPTS[PERSONA]["generate_system"]
+
+    assert _LLM_WIKI_GENERATE_SYSTEM.startswith(base)
+    assert _LLM_WIKI_GENERATE_SYSTEM != base
+    assert "ambiguous" in _LLM_WIKI_GENERATE_SYSTEM
+    assert PERSONA_PROMPTS[PERSONA]["generate_system"] == base  # 프로덕션 프롬프트 불변
