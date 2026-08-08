@@ -16,193 +16,315 @@
           - generic [ref=e13] [cursor=pointer]: "0"
     - generic [ref=e14]:
       - generic [ref=e15]:
-        - generic [ref=e16]: 📁 Mandate Configuration [F01]
-        - generic [ref=e17]: — ▢ ✕
-      - generic [ref=e18]:
-        - generic [ref=e19]:
-          - paragraph [ref=e20]: ONE-TIME USER SETUP · ADVISORY ONLY
-          - heading "대표님의 투자 기준을 한 번만 알려주세요" [level=1] [ref=e21]:
-            - text: 대표님의 투자 기준을
-            - emphasis [ref=e22]: 한 번만 알려주세요
-          - paragraph [ref=e23]: 기본값을 확인하고 저장하면, 이후 세부 조건은 AI Assistant가 대화로 확인합니다. 저장된 설정은 주문·원장 변경을 직접 수행하지 않습니다.
-        - generic [ref=e24]:
-          - generic [ref=e25]: MODE
-          - generic [ref=e26]: DEMO
-          - generic [ref=e27]: 프론트엔드 설정 화면
-    - generic [ref=e28]:
-      - region "Mandate Configuration" [ref=e30]:
-        - generic [ref=e31]:
-          - generic [ref=e32]: 🗂 mandate.configuration · F01
-          - generic [ref=e33]: — ✕
-        - generic [ref=e34]:
-          - generic [ref=e35]:
-            - generic [ref=e36]:
-              - paragraph [ref=e37]: USER INPUT → CEO ROUTER → RISK / QA GATE
-              - heading "Mandate Configuration" [level=2] [ref=e38]
-            - generic [ref=e39]: 미연결
-          - paragraph [ref=e40]: 기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.
-          - paragraph [ref=e41]: 현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다.
-          - generic [ref=e42]:
-            - generic [ref=e43]:
-              - heading "1. 목표 및 위험 성향" [level=3] [ref=e44]:
-                - generic [ref=e45]: "1."
-                - text: 목표 및 위험 성향
-              - generic [ref=e46]:
-                - generic [ref=e47]:
-                  - text: 투자 목표
-                  - generic [ref=e48]: (자연어 입력)
-                  - textbox "투자 목표 (자연어 입력) 구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다." [ref=e49]: 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화합니다.
-                  - generic [ref=e50]: 구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다.
-                - group "위험 성향 (하나 선택)" [ref=e51]:
-                  - generic [ref=e52]:
-                    - text: 위험 성향
-                    - generic [ref=e53]: (하나 선택)
-                  - generic [ref=e54] [cursor=pointer]:
-                    - radio "보수적 원금 보존을 우선하고 변동성을 최소화합니다." [checked] [ref=e55]
-                    - generic [ref=e56] [cursor=pointer]: 🛡️
-                    - generic [ref=e57] [cursor=pointer]: 보수적
-                    - generic [ref=e58] [cursor=pointer]: 원금 보존을 우선하고 변동성을 최소화합니다.
-                  - generic [ref=e59] [cursor=pointer]:
-                    - radio "중립적 성장과 위험의 균형을 추구합니다." [ref=e60]
-                    - generic [ref=e61] [cursor=pointer]: ⚖️
-                    - generic [ref=e62] [cursor=pointer]: 중립적
-                    - generic [ref=e63] [cursor=pointer]: 성장과 위험의 균형을 추구합니다.
-                  - generic [ref=e64] [cursor=pointer]:
-                    - radio "공격적 높은 성장 잠재력과 변동성을 감수합니다." [ref=e65]
-                    - generic [ref=e66] [cursor=pointer]: 🚀
-                    - generic [ref=e67] [cursor=pointer]: 공격적
-                    - generic [ref=e68] [cursor=pointer]: 높은 성장 잠재력과 변동성을 감수합니다.
-            - generic [ref=e69]:
-              - heading "2. 자본 및 통화" [level=3] [ref=e70]:
-                - generic [ref=e71]: "2."
-                - text: 자본 및 통화
-              - generic [ref=e72]:
-                - generic [ref=e73]:
-                  - text: 기준 자본
-                  - generic [ref=e74]: (risk_bounds.base_capital)
-                  - textbox "기준 자본 (risk_bounds.base_capital)" [ref=e75]: "100000000"
-                - generic [ref=e76]:
-                  - text: 통화
-                  - combobox "통화" [ref=e77]:
-                    - option "KRW · 대한민국 원" [selected]
-                    - option "USD · 달러"
-                    - option "EUR · 유로"
-            - generic [ref=e78]:
-              - heading "3. 비중 한도 및 익스포저" [level=3] [ref=e79]:
-                - generic [ref=e80]: "3."
-                - text: 비중 한도 및 익스포저
-              - generic [ref=e81]:
-                - generic [ref=e82]:
-                  - generic [ref=e83]:
-                    - text: 최대 단일 종목 비중
-                    - status "최대 단일 종목 비중 30 5% 25% 50%" [ref=e84]: 30%
-                  - slider [ref=e85]: "30"
-                  - generic [ref=e86]: 5% 25% 50%
-                - generic [ref=e87]:
-                  - generic [ref=e88]:
-                    - text: 최대 총 익스포저
-                    - status "최대 총 익스포저 200 100% 300% 500%" [ref=e89]: 200%
-                  - slider [ref=e90]: "200"
-                  - generic [ref=e91]: 100% 300% 500%
-            - generic [ref=e92]:
-              - heading "4. 자산 정책 (허용 vs 금지)" [level=3] [ref=e93]:
-                - generic [ref=e94]: "4."
-                - text: 자산 정책
-                - generic [ref=e95]: (허용 vs 금지)
-              - generic [ref=e96]:
-                - button "단일 주식 ✓ 허용됨" [pressed] [ref=e97] [cursor=pointer]:
-                  - generic [ref=e98] [cursor=pointer]: 📈
-                  - generic [ref=e99] [cursor=pointer]: 단일 주식
-                  - generic [ref=e100] [cursor=pointer]: ✓ 허용됨
-                - button "ETF ✓ 허용됨" [pressed] [ref=e101] [cursor=pointer]:
-                  - generic [ref=e102] [cursor=pointer]: ◒
-                  - generic [ref=e103] [cursor=pointer]: ETF
-                  - generic [ref=e104] [cursor=pointer]: ✓ 허용됨
-                - button "레버리지 ✓ 허용됨" [pressed] [ref=e105] [cursor=pointer]:
-                  - generic [ref=e106] [cursor=pointer]: ↗
-                  - generic [ref=e107] [cursor=pointer]: 레버리지
-                  - generic [ref=e108] [cursor=pointer]: ✓ 허용됨
-                - button "선물 × 금지됨" [ref=e109] [cursor=pointer]:
-                  - generic [ref=e110] [cursor=pointer]: ⌁
-                  - generic [ref=e111] [cursor=pointer]: 선물
-                  - generic [ref=e112] [cursor=pointer]: × 금지됨
-                - button "옵션 × 금지됨" [ref=e113] [cursor=pointer]:
-                  - generic [ref=e114] [cursor=pointer]: ◎
-                  - generic [ref=e115] [cursor=pointer]: 옵션
-                  - generic [ref=e116] [cursor=pointer]: × 금지됨
-                - button "파생상품 × 금지됨" [ref=e117] [cursor=pointer]:
-                  - generic [ref=e118] [cursor=pointer]: ✣
-                  - generic [ref=e119] [cursor=pointer]: 파생상품
-                  - generic [ref=e120] [cursor=pointer]: × 금지됨
-                - button "암호화폐 × 금지됨" [ref=e121] [cursor=pointer]:
-                  - generic [ref=e122] [cursor=pointer]: ₿
-                  - generic [ref=e123] [cursor=pointer]: 암호화폐
-                  - generic [ref=e124] [cursor=pointer]: × 금지됨
-            - generic [ref=e125]:
-              - heading "5. 주문 승인 방식 (approval_rules.paper_order_mode)" [level=3] [ref=e126]:
-                - generic [ref=e127]: "5."
-                - text: 주문 승인 방식
-                - generic [ref=e128]: (approval_rules.paper_order_mode)
-              - generic [ref=e129]:
-                - generic [ref=e130] [cursor=pointer]:
-                  - radio "자동 주문 정책에 따라 주문이 자동으로 실행됩니다." [ref=e131]
-                  - generic [ref=e132] [cursor=pointer]: ⚡
-                  - generic [ref=e133] [cursor=pointer]:
-                    - generic [ref=e134] [cursor=pointer]: 자동 주문
-                    - generic [ref=e135] [cursor=pointer]: 정책에 따라 주문이 자동으로 실행됩니다.
-                - generic [ref=e136] [cursor=pointer]:
-                  - radio "수동 승인 필요 모든 주문은 실행 전에 수동 승인이 필요합니다." [checked] [ref=e137]
-                  - generic [ref=e138] [cursor=pointer]: ✋
-                  - generic [ref=e139] [cursor=pointer]:
-                    - generic [ref=e140] [cursor=pointer]: 수동 승인 필요
-                    - generic [ref=e141] [cursor=pointer]: 모든 주문은 실행 전에 수동 승인이 필요합니다.
-            - group [ref=e142]:
-              - option "포트폴리오 추천" [selected]
-              - option "시장·종목 리서치"
-              - option "위험·손실 검토"
-              - option "세금·현금흐름"
-              - option "리밸런싱 제안 · 주문 없음"
-              - option "국내 주식 Watchlist" [selected]
-              - option "처음 접함" [selected]
-              - option "어느 경험"
-              - option "경험 많음"
-            - generic [ref=e144]:
-              - button "설정만 저장" [ref=e145] [cursor=pointer]
-              - button "Mandate 제출하고 검토 시작" [ref=e146] [cursor=pointer]
-          - alert [ref=e147]:
-            - generic [ref=e148]: ⚠️ BFF 연결 대기 중입니다. 저장소 루트에서 FastAPI BFF를 8001 포트로 실행하세요.
-            - button "연결 재시도" [ref=e149] [cursor=pointer]
-      - complementary [ref=e150]:
-        - region "Mandate AI Assistant" [ref=e151]:
-          - generic [ref=e152]:
-            - generic [ref=e153]: 🤖 CEO Console · AI Assistant
-            - generic [ref=e154]: — ▢ ✕
-          - generic [ref=e155]:
-            - generic [ref=e156]:
-              - generic [ref=e157]: AI
-              - generic [ref=e158]:
-                - strong [ref=e159]: 김세리
-                - generic [ref=e160]: Mandate interview worker · ONLINE
-              - generic [ref=e161]: ONLINE
-            - generic "Mandate 인터뷰 대화" [ref=e162]:
-              - generic [ref=e163]:
-                - generic [ref=e164]: 김세리 AI
-                - paragraph [ref=e165]: 안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다. 기본 설정은 준비해 두었어요. 세부 조건은 제가 하나씩 여쭤볼게요.
-              - generic [ref=e166]:
-                - generic [ref=e167]: 김세리 AI
-                - paragraph [ref=e168]: "먼저 투자 기간을 알려주세요. 예: 3년 이상, 은퇴 전까지, 단기 자금이에요."
-            - generic [ref=e169]:
-              - textbox "AI Assistant 답변" [ref=e170]
-              - button "전송" [ref=e171] [cursor=pointer]
-            - generic [ref=e172]: 대화 내용은 현재 화면의 설정 초안에만 표시됩니다.
-        - generic [ref=e173]:
-          - generic [ref=e174]:
-            - generic [ref=e175]: 💡 parameter.guide
-            - generic [ref=e176]: — ▢ ✕
-          - list [ref=e178]:
-            - listitem [ref=e179]: 목표 문장은 Risk·QA 검토자가 맥락을 이해하는 데 사용됩니다.
-            - listitem [ref=e180]: 기본값은 안전한 방향으로 채워져 있으며 고급 설정에서 바꿀 수 있습니다.
-            - listitem [ref=e181]: 추천 승인도 주문 제출이나 원장 변경을 의미하지 않습니다.
-    - generic [ref=e182]: HgFinance · 개인형 헤지펀드 AI Office
+        - paragraph [ref=e16]: AI OFFICE · 35 WORKERS · LANGGRAPH PROJECTION
+        - heading "개인형 헤지펀드 AI Office" [level=1] [ref=e17]:
+          - text: 개인형 헤지펀드
+          - emphasis [ref=e18]: AI Office
+        - paragraph [ref=e19]: 실제 LangGraph가 실행 중인 Worker만 부서 안에서 작업하고, 부서 간 handoff는 부서장끼리만 진행합니다.
+      - generic [ref=e20]:
+        - generic [ref=e21]: MODE · DEMO
+        - generic [ref=e22]: SEOUL
+        - generic [ref=e23]: 12:06
+        - generic [ref=e24]: 업무시간 09:00–18:00 · 아이디어 10개
+    - generic [ref=e25]:
+      - button "전체 오피스 테스트 실행 중…" [disabled] [ref=e26]
+      - button "⏸ 일시정지" [ref=e27] [cursor=pointer]
+      - generic [ref=e28]:
+        - generic "시뮬레이션 전체(걷기·업무·대사)가 함께 빨라져요. 실제 외부 작업 속도와는 무관합니다." [ref=e29]: 재생 속도
+        - group "재생 속도" [ref=e30]:
+          - button "1x" [ref=e31] [cursor=pointer]
+          - button "2x" [ref=e32] [cursor=pointer]
+          - button "4x" [ref=e33] [cursor=pointer]
+          - button "⏭ 결정까지" [ref=e34] [cursor=pointer]
+      - button "🎥 자동 추적 ON" [ref=e35] [cursor=pointer]
+      - button "📤 보고 발행" [ref=e36] [cursor=pointer]
+      - generic [ref=e38]: 아이디어 10개 · 33%
+      - generic [ref=e41]:
+        - generic [ref=e42]: 근무 0
+        - generic [ref=e43]: 완료 1
+        - generic [ref=e44]: 진행 1
+        - generic [ref=e45]: 연동대기 0
+    - generic [ref=e46]:
+      - generic [ref=e48]:
+        - generic [ref=e49]:
+          - generic [ref=e53]: 🔎 리서치본부
+          - generic [ref=e57]: 📊 퀀트·백테스트본부
+          - generic [ref=e61]: 📈 트레이딩본부
+          - generic [ref=e65]: 🛡️ 리스크관리본부
+          - generic [ref=e127]: 🛗 ELEVATOR
+          - generic:
+            - generic: 근거와 시점을 먼저 확인해요.
+            - generic:
+              - text: 조재일
+              - emphasis: 팀장
+          - generic:
+            - generic: 워런 버핏
+          - generic:
+            - generic: 찰리 멍거
+          - generic:
+            - generic: 벤저민 그레이엄
+          - generic:
+            - generic: 하워드 막스
+          - generic:
+            - generic: 한소이
+          - generic:
+            - generic:
+              - text: 김재일
+              - emphasis: 팀장
+          - generic:
+            - generic: 박민성
+          - generic:
+            - generic: 신라온
+          - generic:
+            - generic: 방시혁
+          - generic:
+            - generic: 진하율
+          - generic:
+            - generic: 최윤슬
+          - generic:
+            - generic: 오세훈
+          - generic:
+            - generic: 장도현
+          - generic:
+            - generic:
+              - text: 윤도현
+              - emphasis: 팀장
+          - generic:
+            - generic: 이현서
+          - generic:
+            - generic: 장정훈
+          - generic:
+            - generic:
+              - text: 이예주
+              - emphasis: 팀장
+          - generic:
+            - generic: 류하진
+          - generic:
+            - generic: 문가온
+        - generic [ref=e374]:
+          - button "🗺️ 전체 보기" [ref=e375] [cursor=pointer]
+          - button "🔍 가까이" [ref=e376] [cursor=pointer]
+          - button "🏢 1층" [ref=e377] [cursor=pointer]
+          - button "🏢 2층" [ref=e378] [cursor=pointer]
+        - generic: 드래그로 둘러보기 · 직원 클릭하면 프로필
+      - complementary [ref=e379]:
+        - generic [ref=e380]:
+          - generic [ref=e381]:
+            - generic [ref=e382]: 🎤 ceo.console — 대표 지시창
+            - generic [ref=e383]: — ▢ ✕
+          - generic [ref=e384]:
+            - generic [ref=e386]: 평시 운영
+            - generic [ref=e388]:
+              - generic [ref=e389]: 김세리
+              - paragraph [ref=e390]: 대표님, 비서실장 김세리입니다. 궁금한 건 여기에 바로 물어보세요.
+              - generic [ref=e391]: 09:00
+            - generic [ref=e392]:
+              - button "현황 보고" [ref=e393] [cursor=pointer]
+              - button "왜 늦어져?" [ref=e394] [cursor=pointer]
+              - button "회의 소집" [ref=e395] [cursor=pointer]
+              - button "지금 브리핑" [ref=e396] [cursor=pointer]
+              - button "집중 모드" [ref=e397] [cursor=pointer]
+              - button "속도 올려" [ref=e398] [cursor=pointer]
+            - generic [ref=e399]:
+              - textbox "대표 지시 입력" [ref=e400]
+              - button "지시" [ref=e401] [cursor=pointer]
+        - generic [ref=e402]:
+          - generic [ref=e403]:
+            - generic [ref=e404]: 📡 live.feed
+            - generic [ref=e405]: — ▢ ✕
+          - list [ref=e407]:
+            - listitem [ref=e408]:
+              - generic [ref=e409]: 11:30
+              - generic [ref=e410]: 📊
+              - generic [ref=e411]: 퀀트·백테스트본부 업무 시작 — 아이디어 10개 · 100점 채점
+            - listitem [ref=e412]:
+              - generic [ref=e413]: 10:28
+              - generic [ref=e414]: 🗣️
+              - generic [ref=e415]: "김동규: “DNA랑 최근 7일 중복부터 확인할게요.”"
+            - listitem [ref=e416]:
+              - generic [ref=e417]: 10:24
+              - generic [ref=e418]: 🗣️
+              - generic [ref=e419]: "김재일: “좋아요. 콘텐츠 각도 10개로 풀게요.”"
+            - listitem [ref=e420]:
+              - generic [ref=e421]: 10:20
+              - generic [ref=e422]: 🗣️
+              - generic [ref=e423]: "조재일: “오늘 검증된 후보 5개예요. 전부 공식 출처 확인했어요.”"
+            - listitem [ref=e424]:
+              - generic [ref=e425]: 09:23
+              - generic [ref=e426]: 💬
+              - generic [ref=e427]: "회의 소집: 오늘의 후보 인수인계 (3명)"
+            - listitem [ref=e428]:
+              - generic [ref=e429]: 09:23
+              - generic [ref=e430]: 💌
+              - generic [ref=e431]: "파트너십·재무팀: Gmail·재무 파일 연동 전이라 오늘은 대기합니다."
+            - listitem [ref=e432]:
+              - generic [ref=e433]: 09:20
+              - generic [ref=e434]: 🔎
+              - generic [ref=e435]: 리서치본부 완료 — 출처·시점·근거가 확인된 사실만 Trading으로 넘겨요.
+            - listitem [ref=e436]:
+              - generic [ref=e437]: 09:14
+              - generic [ref=e438]: 🔎
+              - generic [ref=e439]: 리서치본부 업무 시작 — AI 뉴스·공식 출처 검증
+            - listitem [ref=e440]:
+              - generic [ref=e441]: 09:10
+              - generic [ref=e442]: ✅
+              - generic [ref=e443]: 전원 착석 완료. 오늘 업무를 시작합니다.
+            - listitem [ref=e444]:
+              - generic [ref=e445]: 09:00
+              - generic [ref=e446]: 🚪
+              - generic [ref=e447]: 09:00 자동 출근을 시작합니다. AI 직원 37명 입장!
+            - listitem [ref=e448]:
+              - generic [ref=e449]: 09:00
+              - generic [ref=e450]: 👑
+              - generic [ref=e451]: 대표실 준비 완료. 출근 버튼을 기다리는 중이에요.
+        - generic [ref=e452]:
+          - generic [ref=e453]:
+            - generic [ref=e454]: 👥 staff.roster
+            - generic [ref=e455]: — ▢ ✕
+          - generic [ref=e456]:
+            - generic [ref=e457]:
+              - paragraph [ref=e458]:
+                - generic [ref=e459]: 🔎 리서치본부
+              - generic [ref=e461]:
+                - button "조재일 대기" [ref=e462] [cursor=pointer]:
+                  - text: 조재일
+                  - generic [ref=e464] [cursor=pointer]: 대기
+                - button "워런 버핏 대기" [ref=e465] [cursor=pointer]:
+                  - text: 워런 버핏
+                  - generic [ref=e467] [cursor=pointer]: 대기
+                - button "찰리 멍거 이동 중" [ref=e468] [cursor=pointer]:
+                  - text: 찰리 멍거
+                  - generic [ref=e470] [cursor=pointer]: 이동 중
+                - button "피터 린치 이동 중" [ref=e471] [cursor=pointer]:
+                  - text: 피터 린치
+                  - generic [ref=e473] [cursor=pointer]: 이동 중
+                - button "벤저민 그레이엄 이동 중" [ref=e474] [cursor=pointer]:
+                  - text: 벤저민 그레이엄
+                  - generic [ref=e476] [cursor=pointer]: 이동 중
+                - button "하워드 막스 대기" [ref=e477] [cursor=pointer]:
+                  - text: 하워드 막스
+                  - generic [ref=e479] [cursor=pointer]: 대기
+                - button "한소이 대기" [ref=e480] [cursor=pointer]:
+                  - text: 한소이
+                  - generic [ref=e482] [cursor=pointer]: 대기
+            - generic [ref=e483]:
+              - paragraph [ref=e484]:
+                - generic [ref=e485]: 📊 퀀트·백테스트본부
+              - generic [ref=e487]:
+                - button "김재일 대기" [ref=e488] [cursor=pointer]:
+                  - text: 김재일
+                  - generic [ref=e490] [cursor=pointer]: 대기
+                - button "박민성 대기" [ref=e491] [cursor=pointer]:
+                  - text: 박민성
+                  - generic [ref=e493] [cursor=pointer]: 대기
+                - button "신라온 대기" [ref=e494] [cursor=pointer]:
+                  - text: 신라온
+                  - generic [ref=e496] [cursor=pointer]: 대기
+                - button "방시혁 이동 중" [ref=e497] [cursor=pointer]:
+                  - text: 방시혁
+                  - generic [ref=e499] [cursor=pointer]: 이동 중
+                - button "진하율 이동 중" [ref=e500] [cursor=pointer]:
+                  - text: 진하율
+                  - generic [ref=e502] [cursor=pointer]: 이동 중
+                - button "최윤슬 대기" [ref=e503] [cursor=pointer]:
+                  - text: 최윤슬
+                  - generic [ref=e505] [cursor=pointer]: 대기
+                - button "오세훈 이동 중" [ref=e506] [cursor=pointer]:
+                  - text: 오세훈
+                  - generic [ref=e508] [cursor=pointer]: 이동 중
+                - button "장도현 대기" [ref=e509] [cursor=pointer]:
+                  - text: 장도현
+                  - generic [ref=e511] [cursor=pointer]: 대기
+            - generic [ref=e512]:
+              - paragraph [ref=e513]:
+                - generic [ref=e514]: 📈 트레이딩본부
+              - generic [ref=e516]:
+                - button "윤도현 이동 중" [ref=e517] [cursor=pointer]:
+                  - text: 윤도현
+                  - generic [ref=e519] [cursor=pointer]: 이동 중
+                - button "이현서 이동 중" [ref=e520] [cursor=pointer]:
+                  - text: 이현서
+                  - generic [ref=e522] [cursor=pointer]: 이동 중
+                - button "장정훈 이동 중" [ref=e523] [cursor=pointer]:
+                  - text: 장정훈
+                  - generic [ref=e525] [cursor=pointer]: 이동 중
+                - button "한지우 이동 중" [ref=e526] [cursor=pointer]:
+                  - text: 한지우
+                  - generic [ref=e528] [cursor=pointer]: 이동 중
+            - generic [ref=e529]:
+              - paragraph [ref=e530]:
+                - generic [ref=e531]: 🛡️ 리스크관리본부
+              - generic [ref=e533]:
+                - button "이예주 이동 중" [ref=e534] [cursor=pointer]:
+                  - text: 이예주
+                  - generic [ref=e536] [cursor=pointer]: 이동 중
+                - button "류하진 이동 중" [ref=e537] [cursor=pointer]:
+                  - text: 류하진
+                  - generic [ref=e539] [cursor=pointer]: 이동 중
+                - button "문가온 대기" [ref=e540] [cursor=pointer]:
+                  - text: 문가온
+                  - generic [ref=e542] [cursor=pointer]: 대기
+            - generic [ref=e543]:
+              - paragraph [ref=e544]:
+                - generic [ref=e545]: 🧾 회계·포트폴리오본부
+              - generic [ref=e547]:
+                - button "김승리 이동 중" [ref=e548] [cursor=pointer]:
+                  - text: 김승리
+                  - generic [ref=e550] [cursor=pointer]: 이동 중
+                - button "백승희 이동 중" [ref=e551] [cursor=pointer]:
+                  - text: 백승희
+                  - generic [ref=e553] [cursor=pointer]: 이동 중
+                - button "지수아 대기" [ref=e554] [cursor=pointer]:
+                  - text: 지수아
+                  - generic [ref=e556] [cursor=pointer]: 대기
+            - generic [ref=e557]:
+              - paragraph [ref=e558]:
+                - generic [ref=e559]: 🕵️ AI QA·감사본부
+              - generic [ref=e561]:
+                - button "김동규 대기" [ref=e562] [cursor=pointer]:
+                  - text: 김동규
+                  - generic [ref=e564] [cursor=pointer]: 대기
+                - button "문세라 대기" [ref=e565] [cursor=pointer]:
+                  - text: 문세라
+                  - generic [ref=e567] [cursor=pointer]: 대기
+                - button "이수빈 이동 중" [ref=e568] [cursor=pointer]:
+                  - text: 이수빈
+                  - generic [ref=e570] [cursor=pointer]: 이동 중
+                - button "강태오 대기" [ref=e571] [cursor=pointer]:
+                  - text: 강태오
+                  - generic [ref=e573] [cursor=pointer]: 대기
+            - generic [ref=e574]:
+              - paragraph [ref=e575]:
+                - generic [ref=e576]: 🧑‍💼 Agent Workforce 인사팀
+              - generic [ref=e578]:
+                - button "류영주 이동 중" [ref=e579] [cursor=pointer]:
+                  - text: 류영주
+                  - generic [ref=e581] [cursor=pointer]: 이동 중
+                - button "임도훈 이동 중" [ref=e582] [cursor=pointer]:
+                  - text: 임도훈
+                  - generic [ref=e584] [cursor=pointer]: 이동 중
+                - button "최여은 대기" [ref=e585] [cursor=pointer]:
+                  - text: 최여은
+                  - generic [ref=e587] [cursor=pointer]: 대기
+                - button "조민규 대기" [ref=e588] [cursor=pointer]:
+                  - text: 조민규
+                  - generic [ref=e590] [cursor=pointer]: 대기
+                - button "이하윤 이동 중" [ref=e591] [cursor=pointer]:
+                  - text: 이하윤
+                  - generic [ref=e593] [cursor=pointer]: 이동 중
+                - button "박지현 대기" [ref=e594] [cursor=pointer]:
+                  - text: 박지현
+                  - generic [ref=e596] [cursor=pointer]: 대기
+            - generic [ref=e597]:
+              - paragraph [ref=e598]:
+                - generic [ref=e599]: 🗂️ CEO Office 지원
+              - generic [ref=e601]:
+                - button "박유안 대기" [ref=e602] [cursor=pointer]:
+                  - text: 박유안
+                  - generic [ref=e604] [cursor=pointer]: 대기
+                - button "박지현 이동 중" [ref=e605] [cursor=pointer]:
+                  - text: 박지현
+                  - generic [ref=e607] [cursor=pointer]: 이동 중
+    - generic [ref=e608]: HgFinance · 개인형 헤지펀드 AI Office
   - status
 ```
