@@ -150,6 +150,7 @@ type Slot = {
 export type Snapshot = {
   clock: string;
   running: boolean;
+  progress: number;
   paused: boolean;
   speed: number;
   turbo: boolean;
@@ -172,7 +173,7 @@ export type Snapshot = {
 
 const PHASES = [
   "출근 대기",
-  "07:00 전사 출근",
+  "09:00 전사 출근",
   "시장조사",
   "브랜드 분석",
   "아이디어 10개",
@@ -214,7 +215,7 @@ export class Company {
   agentById = new Map<string, Agent>();
   deptStatus: Record<string, DeptStatus> = {};
   log: LogEntry[] = [];
-  clockMinutes = 7 * 60;
+  clockMinutes = 9 * 60;
   /** 재생 속도 — 시뮬레이션 전체(걷기·업무·대사)를 함께 배속한다. 실제 외부 작업 속도와는 무관 */
   speed = 2;
   turbo = false;
@@ -252,6 +253,9 @@ export class Company {
   private remoteCompletionSeen = false;
   private remoteCompletionHold = 0;
   private remoteRunElapsed = 0;
+  private remoteProgress = 0;
+  private remotePhase = "";
+  private testMode = true;
 
   constructor() {
     this.reset();
@@ -262,7 +266,7 @@ export class Company {
     this.agentById.clear();
     this.log = [];
     this.logSeq = 0;
-    this.clockMinutes = 7 * 60;
+    this.clockMinutes = 9 * 60;
     this.running = false;
     this.paused = false;
     this.dayComplete = false;
@@ -284,6 +288,8 @@ export class Company {
     this.remoteCompletionSeen = false;
     this.remoteCompletionHold = 0;
     this.remoteRunElapsed = 0;
+    this.remoteProgress = 0;
+    this.remotePhase = "";
     this.chat = [];
     this.focusMode = false;
     this.spotlight = null;
@@ -297,7 +303,9 @@ export class Company {
     for (const seed of STAFF) {
       const pool = seats.get(seed.deptId);
       const home = pool?.shift() ?? { x: ELEVATOR.x, y: ELEVATOR.y - 2 };
-      this.spawn(seed, home, { x: ELEVATOR.x, y: ELEVATOR.y });
+      // Keep the roster visible before the demo is started. Runtime mode can
+      // still move workers to their home desks when a real worker is observed.
+      this.spawn(seed, home, home);
     }
     this.spawn(CEO, CEO_SEAT, CEO_SEAT);
 
@@ -317,6 +325,8 @@ export class Company {
     this.remoteRuntime = !enabled;
     if (enabled) {
       this.remoteRunId = null;
+      this.remoteProgress = 0;
+      this.remotePhase = "";
       this.remoteWorkerIds.clear();
       this.remoteMessageIds.clear();
     }
@@ -330,6 +340,30 @@ export class Company {
     this.remoteRuntime = true;
     const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
     const completed = Boolean(runtime?.result) && !running;
+    this.remotePhase = runtime?.phase ?? "";
+    const departmentRows = Object.values(runtime?.departments ?? {});
+    const completedDepartments = departmentRows.filter((department) =>
+      ["COMPLETED", "SKIPPED", "NOT_REQUESTED"].includes(department.status.toUpperCase()),
+    ).length;
+    const activeDepartments = departmentRows.filter((department) =>
+      ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(department.status.toUpperCase()),
+    ).length;
+    const hasActiveWorkers =
+      (runtime?.active_workers ?? []).length > 0 ||
+      agentStatuses.some((item) =>
+        ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(item.status),
+      );
+    this.remoteProgress = completed
+      ? 100
+      : running
+        ? Math.max(
+            hasActiveWorkers ? 1 : 0,
+            Math.min(
+              99,
+              Math.round(((completedDepartments + (activeDepartments ? 0.5 : 0)) / 6) * 100),
+            ),
+          )
+        : 0;
     const runId = runtime?.run_id ?? null;
     if (runId !== this.remoteRunId) {
       this.remoteRunId = runId;
@@ -518,6 +552,11 @@ export class Company {
     }
   }
 
+  /** DEMO is the deterministic end-to-end test harness for the whole office. */
+  setTestMode(enabled: boolean): void {
+    this.testMode = enabled;
+  }
+
   private spawn(seed: StaffSeed, home: Pt, at: Pt) {
     const agent: Agent = {
       ...seed,
@@ -619,15 +658,16 @@ export class Company {
   start() {
     if (this.running) return;
     this.reset();
+    this.remoteRuntime = false;
     this.running = true;
     this.main.gen = this.dayScript();
   }
 
   private *dayScript(): Generator<number | (() => boolean), void, void> {
-    // ① 07:00 출근
+    // ① 09:00 출근
     this.phaseIndex = 1;
     const workers = this.agents.filter((a) => a.rank !== "ceo");
-    this.pushLog("🚪", `07:00 자동 출근을 시작합니다. AI 직원 ${workers.length}명 입장!`, "yellow");
+    this.pushLog("🚪", `09:00 자동 출근을 시작합니다. AI 직원 ${workers.length}명 입장!`, "yellow");
     this.lock(workers);
     for (const agent of workers) {
       this.enqueue(
@@ -722,7 +762,9 @@ export class Company {
     yield 2.2;
     this.say(ceo, "확인해볼게요.", 2.4);
 
-    // 대표가 승인 버튼을 누를 때까지 대기
+    // DEMO 테스트 모드는 CEO 승인까지 포함한 전체 파이프라인을 자동으로 통과시킨다.
+    if (this.testMode) this.approved = true;
+    // 실환경 모드에서는 대표 승인 버튼을 누를 때까지 대기
     yield () => this.approved;
 
     this.approvalPending = false;
@@ -749,8 +791,24 @@ export class Company {
 
     // ⑪ 저장 + 성과 기록
     this.phaseIndex = 10;
-    this.startDept("ops", "Notion 결과물 저장·자동화 로그", 5);
-    this.startDept("review", "성과·학습점 기록", 5);
+    yield* this.runDept(
+      "finance",
+      "Position·Ledger·Reconciliation·NAV 점검",
+      5,
+      "공식 수치와 대사 상태를 확인했어요.",
+    );
+    yield* this.runDept(
+      "ops",
+      "Market·Pre-trade·Policy·Derivatives Risk 검토",
+      5,
+      "Risk Engine 기준으로 안전 조치를 정리했어요.",
+    );
+    yield* this.runDept(
+      "review",
+      "Worker 성과·학습점·Lifecycle 기록",
+      5,
+      "인사팀 검토와 Worker 상태 기록을 완료했어요.",
+    );
     yield () => this.deptStatus.ops === "완료" && this.deptStatus.review === "완료";
     this.pushLog("📦", "Notion 결과물 창고에 오늘 산출물 2건 저장 완료", "mint");
 
@@ -792,16 +850,22 @@ export class Company {
   private startDept(deptId: string, label: string, dur: number) {
     this.deptStatus[deptId] = "진행 중";
     const crew = this.deptAgents(deptId);
+    const workDuration = this.testMode ? Math.min(1.25, dur * 0.25) : dur;
     this.lock(crew);
     this.pushLog(roomOf(deptId).icon, `${roomOf(deptId).name} 업무 시작 — ${label}`, "pink");
     crew.forEach((agent, i) => {
+      agent.progress = 0;
       this.enqueue(
         agent,
         { k: "wait", dur: i * 0.35 },
         { k: "walk", to: agent.home },
         { k: "face", dir: "up" },
         { k: "status", s: "업무 중" },
-        { k: "work", dur: dur + Math.random() * 1.5, label },
+          {
+            k: "work",
+            dur: workDuration + (this.testMode ? i * 0.08 : Math.random() * 1.5),
+            label,
+          },
         { k: "anim", a: "sit" },
         { k: "status", s: "대기" },
         { k: "fn", fn: () => this.finishDept(deptId) },
@@ -810,10 +874,19 @@ export class Company {
   }
 
   private finishDept(deptId: string) {
-    if (this.deptAgents(deptId).some((a) => a.status === "업무 중")) return;
+    const crew = this.deptAgents(deptId);
+    if (
+      crew.some(
+        (agent) =>
+          agent.progress < 1 ||
+          agent.queue.length > 0 ||
+          (agent.current !== null && agent.current.k !== "fn"),
+      )
+    )
+      return;
     if (this.deptStatus[deptId] === "완료") return;
     this.deptStatus[deptId] = "완료";
-    this.unlock(this.deptAgents(deptId));
+    this.unlock(crew);
     const lead = DEPT_LEAD[deptId];
     const agent = lead ? this.agentById.get(lead.id) : null;
     if (agent) this.say(agent, "완료했어요!", 2.4);
@@ -1341,7 +1414,12 @@ export class Company {
 
     const raw = Math.min(rawDt, 0.05);
     const dt = raw * (this.turbo ? TURBO_SPEED : this.speed);
-    if (this.running) this.clockMinutes += dt * SIM_MIN_PER_SEC;
+    if (this.running) {
+      this.clockMinutes = Math.min(
+        REMOTE_WORK_END_MINUTES,
+        this.clockMinutes + dt * SIM_MIN_PER_SEC,
+      );
+    }
 
     this.occupancy.clear();
     for (const agent of this.agents) {
@@ -1551,12 +1629,19 @@ export class Company {
     return {
       clock: this.clockText(),
       running: this.running,
+      progress: this.remoteRuntime
+        ? this.remoteProgress
+        : Math.round((this.phaseIndex / (PHASES.length - 1)) * 100),
       paused: this.paused,
       speed: this.speed,
       turbo: this.turbo,
       dayComplete: this.dayComplete,
       phase:
-        this.phaseIndex === 7 && this.approved ? "승인 완료 · 자리 복귀" : PHASES[this.phaseIndex] ?? "",
+        this.remoteRuntime && this.remotePhase
+          ? this.remotePhase
+          : this.phaseIndex === 7 && this.approved
+            ? "승인 완료 · 자리 복귀"
+            : PHASES[this.phaseIndex] ?? "",
       phaseIndex: this.phaseIndex,
       approvalPending: this.approvalPending,
       approved: this.approved,

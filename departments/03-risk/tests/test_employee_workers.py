@@ -378,3 +378,26 @@ def test_compliance_policy_worker_graph_topology_is_route_tool_worker_llm_valida
         ("worker_llm", "validate"),
         ("validate", "__end__"),
     }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"trading_state": "ENABLED", "assessment": {"verdict": "approve"}},
+        {"compliance": {"query_mode": "RISK_POLICY_REVIEW", "query": "내부 정책 확인"}},
+        {"compliance": {"query_mode": "LEGAL_QUERY", "query": "법령 위반 여부"}},
+        {"compliance": {"query_mode": "MIXED_REVIEW", "query": "정책과 법률 모두 확인"}},
+    ],
+)
+def test_every_skill_result_conforms_to_the_fixed_risk_skill_result_schema(payload):
+    """`skills/contracts.py::RiskSkillResult` is the already-fixed receiving schema
+    (extra="forbid") — every worker's skill_results entry must round-trip through it."""
+
+    from risk_worker_skill_runtime.contracts import RiskSkillResult
+
+    report = run_employee_workers(payload, llm=_llm)
+    assert report["failed"] == []
+    # risk-runner는 레지스트리 밖 결정론 Worker라 skill_results가 없다(tools만 있음).
+    for worker in report["workers"]:
+        for entry in worker.get("skill_results", []):
+            RiskSkillResult.model_validate(entry)

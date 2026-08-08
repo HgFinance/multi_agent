@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from integrations.pinecone_client import PineconeEvidenceClient
 from risk_mandate_workers import assess_mandate
+
+
+def _fake_employee_llm(system: str, prompt: str) -> str:
+    """Deterministic narration double — this test asserts the Pinecone evidence
+    wiring, not qwen3:1.7b's live JSON formatting reliability."""
+
+    return json.dumps(
+        {
+            "summary": "Pinecone policy evidence reviewed for concentration limits.",
+            "confidence": 0.8,
+            "evidence_refs": ["policy-match-1"],
+            "escalate": False,
+        }
+    )
 
 
 def _mandate() -> dict[str, object]:
@@ -46,6 +61,11 @@ def _mandate() -> dict[str, object]:
         },
         "compliance_query": "Check the current portfolio concentration policy.",
         "policy_query_vector": [0.1, 0.2],
+        # 구조화된 query_mode를 명시해야 자체 LLM 라우팅(§4 구조화 우선)을 건너뛰고
+        # Pinecone 정책 근거 경로(_risk_policy_review)로 결정론적으로 들어간다 -
+        # 비워두면 실 Ollama 분류에 맡겨져 이 테스트가 검증하려는 evidence_refs가
+        # 나오지 않는 다른 query_mode로 갈 수 있다.
+        "query_mode": "RISK_POLICY_REVIEW",
     }
 
 
@@ -78,7 +98,9 @@ def test_risk_e2e_keeps_risk_engine_authoritative_and_returns_policy_metadata() 
         index_host="https://pinecone.example",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     ) as client:
-        result = assess_mandate(_mandate(), pinecone=client)
+        result = assess_mandate(
+            _mandate(), pinecone=client, employee_llm=_fake_employee_llm
+        )
 
     assert result["pipeline_status"] == "COMPLETED"
     assert result["employees"]["risk-runner"]["authoritative"] is True

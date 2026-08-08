@@ -124,6 +124,7 @@ function RuntimeSync({ engine, onSync }: { engine: Company; onSync: () => void }
     );
     const hasRuntimeWorkers = (operations?.runtime?.active_workers ?? []).length > 0;
     const useLiveRuntime = !canUseSimulation(mode) || activeAgentStatuses || hasRuntimeWorkers;
+    engine.setTestMode(mode === "DEMO");
     engine.setSimulationMode(!useLiveRuntime);
     if (useLiveRuntime) {
       engine.applyRuntime(operations?.runtime ?? null, operations?.agent_statuses ?? []);
@@ -509,7 +510,8 @@ function LiveView({
   const { snapshot: bffSnapshot } = useBffFeed();
   const runtime = bffSnapshot?.operations?.runtime;
   const mode = bffSnapshot?.mode ?? "DEMO";
-  const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
+  const progress = snap.progress;
+  const isTestMode = mode === "DEMO";
 
   return (
     <>
@@ -531,7 +533,13 @@ function LiveView({
 
       <section className="live-bar">
         <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-          {snap.running ? "실제 Worker가 분석 중…" : "사용자 입력으로 분석 시작"}
+        {snap.running
+          ? isTestMode
+            ? "전체 오피스 테스트 실행 중…"
+            : "실제 Worker가 분석 중…"
+          : isTestMode
+            ? "테스트 오피스 시작"
+            : "사용자 입력으로 분석 시작"}
         </button>
         <button className="btn btn-ghost" onClick={() => engine.togglePause()}>
           {snap.paused ? "▶ 재생" : "⏸ 일시정지"}
@@ -593,8 +601,6 @@ function LiveView({
 
         <aside className="live-rail">
 <CeoConsole engine={engine} snap={snap} />
-<RiskOfficePanel />
-
         <section className="win rail-card" id="legacy-ceo-approval">
             <div className="win-bar">
               <span>✅ ceo.approval</span>
@@ -690,52 +696,6 @@ function LiveView({
         </aside>
       </section>
     </>
-  );
-}
-
-function RiskOfficePanel() {
-  const { snapshot } = useBffFeed();
-  const statuses = (snapshot?.operations?.agent_statuses ?? []).filter(
-    (item) => item.department_code === "risk-management",
-  );
-  const compliance = statuses.find(
-    (item) => item.worker_id === "compliance-policy-worker",
-  );
-  const runner = statuses.find((item) => item.worker_id === "risk-runner");
-  const metadata = compliance?.metadata ?? {};
-  const queryMode =
-    typeof metadata.query_mode === "string" ? metadata.query_mode : "미분류";
-  const runId = typeof metadata.run_id === "string" ? metadata.run_id : "—";
-  const traceId = compliance?.trace_id ?? runner?.trace_id ?? "—";
-  const workerRows = [
-    ["risk-runner", runner],
-    ["compliance-policy-worker", compliance],
-  ] as const;
-
-  return (
-    <section className="win rail-card" aria-label="Risk department live tracking">
-      <div className="win-bar">
-        <span>🛡 risk-management.live</span>
-        <span className="window-controls" aria-hidden="true">— ✕</span>
-      </div>
-      <div className="win-body">
-        <div className="feed-now">Risk 직원 추적 · {runId}</div>
-        <div className="runtime-result">
-          {workerRows.map(([workerId, worker]) => (
-            <div className="runtime-row" key={workerId}>
-              <span>{workerId}</span>
-              <b className={`mini-badge ${worker ? "mint" : "yellow"}`}>
-                {worker?.status ?? "OFFLINE"}
-              </b>
-              <small>{worker?.reason ?? "아직 Risk assessment trace가 없습니다."}</small>
-            </div>
-          ))}
-        </div>
-        <small className="assistant-note">
-          compliance route: {queryMode} · trace: {traceId}
-        </small>
-      </div>
-    </section>
   );
 }
 
@@ -925,7 +885,7 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
           </ul>
           <div className="decision-box">
             <span className="tiny-label">오늘 대표님이 결정할 것</span>
-            <strong>없습니다. 내일 07:00에 다시 출근할게요 ✨</strong>
+        <strong>없습니다. 내일 09:00에 다시 출근할게요 ✨</strong>
           </div>
           <button className="btn btn-primary" onClick={onClose}>
             확인
@@ -1028,7 +988,7 @@ function DashboardView({
         </div>
         <div className="hero-body">
           <div className="hero-copy">
-          <p className="eyebrow">TODAY · 07:00 AUTO START <span className={`mode-badge mode-${mode.toLowerCase()}`}>MODE · {mode}</span></p>
+        <p className="eyebrow">TODAY · 09:00 AUTO START <span className={`mode-badge mode-${mode.toLowerCase()}`}>MODE · {mode}</span></p>
             <h1>
               오늘 회사가 어떻게 움직이는지 <em className="highlight">한눈에</em> 보여드려요
             </h1>
@@ -1101,7 +1061,7 @@ function DashboardView({
               <div className="schedule-card">
                 <div>
                   <span className="tiny-label">NEXT RUN</span>
-                  <strong>매일 오전 7:00</strong>
+            <strong>매일 오전 9:00</strong>
                   <p>컴퓨터 지시 없이 하루 업무 시작</p>
                 </div>
                 <span className="toggle-on">ON</span>
