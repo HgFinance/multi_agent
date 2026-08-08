@@ -557,6 +557,10 @@ export class Company {
     this.testMode = enabled;
   }
 
+  isSimulationMode(): boolean {
+    return !this.remoteRuntime;
+  }
+
   private spawn(seed: StaffSeed, home: Pt, at: Pt) {
     const agent: Agent = {
       ...seed,

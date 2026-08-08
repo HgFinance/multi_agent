@@ -240,6 +240,11 @@ export default function Home() {
   );
 
   const start = () => {
+    if (engine.isSimulationMode()) {
+      engine.start();
+      setView("live");
+      return;
+    }
     setView("mandate");
   };
 
