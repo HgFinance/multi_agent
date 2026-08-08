@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/portfolio-client.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/portfolio-client.test.mjs tests/office-simulation.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "e2e": "playwright test",
     "db:generate": "drizzle-kit generate"

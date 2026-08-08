@@ -1,0 +1,208 @@
+# Page snapshot
+
+```yaml
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - navigation "AI Company 화면 전환" [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: F
+        - generic [ref=e7]: HgFinance
+      - generic [ref=e8]:
+        - button "🎮 라이브 오피스" [ref=e9] [cursor=pointer]
+        - button "📊 대시보드" [ref=e10] [cursor=pointer]
+        - button "🗂 Mandate 설정" [ref=e11] [cursor=pointer]
+        - button "📋 대표 할 일 0" [ref=e12] [cursor=pointer]:
+          - text: 📋 대표 할 일
+          - generic [ref=e13] [cursor=pointer]: "0"
+    - generic [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e16]: 📁 Mandate Configuration [F01]
+        - generic [ref=e17]: — ▢ ✕
+      - generic [ref=e18]:
+        - generic [ref=e19]:
+          - paragraph [ref=e20]: ONE-TIME USER SETUP · ADVISORY ONLY
+          - heading "대표님의 투자 기준을 한 번만 알려주세요" [level=1] [ref=e21]:
+            - text: 대표님의 투자 기준을
+            - emphasis [ref=e22]: 한 번만 알려주세요
+          - paragraph [ref=e23]: 기본값을 확인하고 저장하면, 이후 세부 조건은 AI Assistant가 대화로 확인합니다. 저장된 설정은 주문·원장 변경을 직접 수행하지 않습니다.
+        - generic [ref=e24]:
+          - generic [ref=e25]: MODE
+          - generic [ref=e26]: DEMO
+          - generic [ref=e27]: 프론트엔드 설정 화면
+    - generic [ref=e28]:
+      - region "Mandate Configuration" [ref=e30]:
+        - generic [ref=e31]:
+          - generic [ref=e32]: 🗂 mandate.configuration · F01
+          - generic [ref=e33]: — ✕
+        - generic [ref=e34]:
+          - generic [ref=e35]:
+            - generic [ref=e36]:
+              - paragraph [ref=e37]: USER INPUT → CEO ROUTER → RISK / QA GATE
+              - heading "Mandate Configuration" [level=2] [ref=e38]
+            - generic [ref=e39]: 미연결
+          - paragraph [ref=e40]: 기본값을 확인해 한 번만 저장하세요. 세부 조건은 옆의 AI Assistant가 자연어로 이어서 물어봅니다.
+          - paragraph [ref=e41]: 현재 설정은 브라우저 초안입니다. Mandate 제출 후 Governance 버전이 표시됩니다.
+          - generic [ref=e42]:
+            - generic [ref=e43]:
+              - heading "1. 목표 및 위험 성향" [level=3] [ref=e44]:
+                - generic [ref=e45]: "1."
+                - text: 목표 및 위험 성향
+              - generic [ref=e46]:
+                - generic [ref=e47]:
+                  - text: 투자 목표
+                  - generic [ref=e48]: (자연어 입력)
+                  - textbox "투자 목표 (자연어 입력) 구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다." [ref=e49]: 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화합니다.
+                  - generic [ref=e50]: 구체적인 종목이나 기간은 AI Assistant가 다음 질문으로 확인합니다.
+                - group "위험 성향 (하나 선택)" [ref=e51]:
+                  - generic [ref=e52]:
+                    - text: 위험 성향
+                    - generic [ref=e53]: (하나 선택)
+                  - generic [ref=e54] [cursor=pointer]:
+                    - radio "보수적 원금 보존을 우선하고 변동성을 최소화합니다." [checked] [ref=e55]
+                    - generic [ref=e56] [cursor=pointer]: 🛡️
+                    - generic [ref=e57] [cursor=pointer]: 보수적
+                    - generic [ref=e58] [cursor=pointer]: 원금 보존을 우선하고 변동성을 최소화합니다.
+                  - generic [ref=e59] [cursor=pointer]:
+                    - radio "중립적 성장과 위험의 균형을 추구합니다." [ref=e60]
+                    - generic [ref=e61] [cursor=pointer]: ⚖️
+                    - generic [ref=e62] [cursor=pointer]: 중립적
+                    - generic [ref=e63] [cursor=pointer]: 성장과 위험의 균형을 추구합니다.
+                  - generic [ref=e64] [cursor=pointer]:
+                    - radio "공격적 높은 성장 잠재력과 변동성을 감수합니다." [ref=e65]
+                    - generic [ref=e66] [cursor=pointer]: 🚀
+                    - generic [ref=e67] [cursor=pointer]: 공격적
+                    - generic [ref=e68] [cursor=pointer]: 높은 성장 잠재력과 변동성을 감수합니다.
+            - generic [ref=e69]:
+              - heading "2. 자본 및 통화" [level=3] [ref=e70]:
+                - generic [ref=e71]: "2."
+                - text: 자본 및 통화
+              - generic [ref=e72]:
+                - generic [ref=e73]:
+                  - text: 기준 자본
+                  - generic [ref=e74]: (risk_bounds.base_capital)
+                  - textbox "기준 자본 (risk_bounds.base_capital)" [ref=e75]: "100000000"
+                - generic [ref=e76]:
+                  - text: 통화
+                  - combobox "통화" [ref=e77]:
+                    - option "KRW · 대한민국 원" [selected]
+                    - option "USD · 달러"
+                    - option "EUR · 유로"
+            - generic [ref=e78]:
+              - heading "3. 비중 한도 및 익스포저" [level=3] [ref=e79]:
+                - generic [ref=e80]: "3."
+                - text: 비중 한도 및 익스포저
+              - generic [ref=e81]:
+                - generic [ref=e82]:
+                  - generic [ref=e83]:
+                    - text: 최대 단일 종목 비중
+                    - status "최대 단일 종목 비중 30 5% 25% 50%" [ref=e84]: 30%
+                  - slider [ref=e85]: "30"
+                  - generic [ref=e86]: 5% 25% 50%
+                - generic [ref=e87]:
+                  - generic [ref=e88]:
+                    - text: 최대 총 익스포저
+                    - status "최대 총 익스포저 200 100% 300% 500%" [ref=e89]: 200%
+                  - slider [ref=e90]: "200"
+                  - generic [ref=e91]: 100% 300% 500%
+            - generic [ref=e92]:
+              - heading "4. 자산 정책 (허용 vs 금지)" [level=3] [ref=e93]:
+                - generic [ref=e94]: "4."
+                - text: 자산 정책
+                - generic [ref=e95]: (허용 vs 금지)
+              - generic [ref=e96]:
+                - button "단일 주식 ✓ 허용됨" [pressed] [ref=e97] [cursor=pointer]:
+                  - generic [ref=e98] [cursor=pointer]: 📈
+                  - generic [ref=e99] [cursor=pointer]: 단일 주식
+                  - generic [ref=e100] [cursor=pointer]: ✓ 허용됨
+                - button "ETF ✓ 허용됨" [pressed] [ref=e101] [cursor=pointer]:
+                  - generic [ref=e102] [cursor=pointer]: ◒
+                  - generic [ref=e103] [cursor=pointer]: ETF
+                  - generic [ref=e104] [cursor=pointer]: ✓ 허용됨
+                - button "레버리지 ✓ 허용됨" [pressed] [ref=e105] [cursor=pointer]:
+                  - generic [ref=e106] [cursor=pointer]: ↗
+                  - generic [ref=e107] [cursor=pointer]: 레버리지
+                  - generic [ref=e108] [cursor=pointer]: ✓ 허용됨
+                - button "선물 × 금지됨" [ref=e109] [cursor=pointer]:
+                  - generic [ref=e110] [cursor=pointer]: ⌁
+                  - generic [ref=e111] [cursor=pointer]: 선물
+                  - generic [ref=e112] [cursor=pointer]: × 금지됨
+                - button "옵션 × 금지됨" [ref=e113] [cursor=pointer]:
+                  - generic [ref=e114] [cursor=pointer]: ◎
+                  - generic [ref=e115] [cursor=pointer]: 옵션
+                  - generic [ref=e116] [cursor=pointer]: × 금지됨
+                - button "파생상품 × 금지됨" [ref=e117] [cursor=pointer]:
+                  - generic [ref=e118] [cursor=pointer]: ✣
+                  - generic [ref=e119] [cursor=pointer]: 파생상품
+                  - generic [ref=e120] [cursor=pointer]: × 금지됨
+                - button "암호화폐 × 금지됨" [ref=e121] [cursor=pointer]:
+                  - generic [ref=e122] [cursor=pointer]: ₿
+                  - generic [ref=e123] [cursor=pointer]: 암호화폐
+                  - generic [ref=e124] [cursor=pointer]: × 금지됨
+            - generic [ref=e125]:
+              - heading "5. 주문 승인 방식 (approval_rules.paper_order_mode)" [level=3] [ref=e126]:
+                - generic [ref=e127]: "5."
+                - text: 주문 승인 방식
+                - generic [ref=e128]: (approval_rules.paper_order_mode)
+              - generic [ref=e129]:
+                - generic [ref=e130] [cursor=pointer]:
+                  - radio "자동 주문 정책에 따라 주문이 자동으로 실행됩니다." [ref=e131]
+                  - generic [ref=e132] [cursor=pointer]: ⚡
+                  - generic [ref=e133] [cursor=pointer]:
+                    - generic [ref=e134] [cursor=pointer]: 자동 주문
+                    - generic [ref=e135] [cursor=pointer]: 정책에 따라 주문이 자동으로 실행됩니다.
+                - generic [ref=e136] [cursor=pointer]:
+                  - radio "수동 승인 필요 모든 주문은 실행 전에 수동 승인이 필요합니다." [checked] [ref=e137]
+                  - generic [ref=e138] [cursor=pointer]: ✋
+                  - generic [ref=e139] [cursor=pointer]:
+                    - generic [ref=e140] [cursor=pointer]: 수동 승인 필요
+                    - generic [ref=e141] [cursor=pointer]: 모든 주문은 실행 전에 수동 승인이 필요합니다.
+            - group [ref=e142]:
+              - option "포트폴리오 추천" [selected]
+              - option "시장·종목 리서치"
+              - option "위험·손실 검토"
+              - option "세금·현금흐름"
+              - option "리밸런싱 제안 · 주문 없음"
+              - option "국내 주식 Watchlist" [selected]
+              - option "처음 접함" [selected]
+              - option "어느 경험"
+              - option "경험 많음"
+            - generic [ref=e144]:
+              - button "설정만 저장" [ref=e145] [cursor=pointer]
+              - button "Mandate 제출하고 검토 시작" [ref=e146] [cursor=pointer]
+          - alert [ref=e147]:
+            - generic [ref=e148]: ⚠️ BFF 연결 대기 중입니다. 저장소 루트에서 FastAPI BFF를 8001 포트로 실행하세요.
+            - button "연결 재시도" [ref=e149] [cursor=pointer]
+      - complementary [ref=e150]:
+        - region "Mandate AI Assistant" [ref=e151]:
+          - generic [ref=e152]:
+            - generic [ref=e153]: 🤖 CEO Console · AI Assistant
+            - generic [ref=e154]: — ▢ ✕
+          - generic [ref=e155]:
+            - generic [ref=e156]:
+              - generic [ref=e157]: AI
+              - generic [ref=e158]:
+                - strong [ref=e159]: 김세리
+                - generic [ref=e160]: Mandate interview worker · ONLINE
+              - generic [ref=e161]: ONLINE
+            - generic "Mandate 인터뷰 대화" [ref=e162]:
+              - generic [ref=e163]:
+                - generic [ref=e164]: 김세리 AI
+                - paragraph [ref=e165]: 안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다. 기본 설정은 준비해 두었어요. 세부 조건은 제가 하나씩 여쭤볼게요.
+              - generic [ref=e166]:
+                - generic [ref=e167]: 김세리 AI
+                - paragraph [ref=e168]: "먼저 투자 기간을 알려주세요. 예: 3년 이상, 은퇴 전까지, 단기 자금이에요."
+            - generic [ref=e169]:
+              - textbox "AI Assistant 답변" [ref=e170]
+              - button "전송" [ref=e171] [cursor=pointer]
+            - generic [ref=e172]: 대화 내용은 현재 화면의 설정 초안에만 표시됩니다.
+        - generic [ref=e173]:
+          - generic [ref=e174]:
+            - generic [ref=e175]: 💡 parameter.guide
+            - generic [ref=e176]: — ▢ ✕
+          - list [ref=e178]:
+            - listitem [ref=e179]: 목표 문장은 Risk·QA 검토자가 맥락을 이해하는 데 사용됩니다.
+            - listitem [ref=e180]: 기본값은 안전한 방향으로 채워져 있으며 고급 설정에서 바꿀 수 있습니다.
+            - listitem [ref=e181]: 추천 승인도 주문 제출이나 원장 변경을 의미하지 않습니다.
+    - generic [ref=e182]: HgFinance · 개인형 헤지펀드 AI Office
+  - status
+```

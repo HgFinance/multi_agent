@@ -11,7 +11,6 @@ import {
   type PortfolioRunStatus,
   type PortfolioUniverseOption,
 } from "./portfolioClient";
-import { assessRiskMandate, type RiskMandateAssessment } from "./riskClient";
 import {
   advanceMandateCase,
   assertGovernanceCommandable,
@@ -426,41 +425,6 @@ function buildMandatePolicy(input: MandateDraft): Record<string, unknown> {
   };
 }
 
-function buildRiskMandate(input: MandateDraft): Record<string, unknown> {
-  const riskTolerance = input.mindset === "SAFETY_FIRST"
-    ? "CONSERVATIVE"
-    : input.mindset === "RISK_SEEKING"
-      ? "AGGRESSIVE"
-      : "BALANCED";
-  const experienceYears = input.experience === "BEGINNER" ? 0 : input.experience === "INTERMEDIATE" ? 3 : 10;
-  return {
-    mandate_id: input.mandate_id,
-    investor_profile: {
-      investment_goal: input.objective,
-      risk_tolerance: riskTolerance,
-      financial_experience_years: experienceYears,
-      perceived_risk_awareness: true,
-    },
-    portfolio_constraints: {
-      base_capital: input.investment_amount,
-      max_single_stock_weight: (input.max_instrument_weight_pct / 100).toFixed(4),
-      max_total_exposure: (input.max_gross_exposure_pct / 100).toFixed(4),
-      max_drawdown_limit: (-Number(input.max_drawdown_pct)).toFixed(4),
-    },
-    asset_policy: {
-      single_stocks: input.allowed_assets.stock ? "ALLOWED" : "PROHIBITED",
-      etf: input.allowed_assets.etf ? "ALLOWED" : "PROHIBITED",
-      leverage: input.allowed_assets.leveraged_etf ? "ALLOWED" : "PROHIBITED",
-      futures: input.allowed_assets.futures ? "ALLOWED" : "PROHIBITED",
-      options: input.allowed_assets.options ? "ALLOWED" : "PROHIBITED",
-      derivatives: input.allowed_assets.derivatives ? "ALLOWED" : "PROHIBITED",
-      crypto: input.allowed_assets.crypto ? "ALLOWED" : "PROHIBITED",
-    },
-    order_mode: input.approval_mode === "USER_APPROVAL" ? "MANUAL_APPROVAL" : "AUTO_EXECUTION",
-    as_of: new Date().toISOString(),
-  };
-}
-
 type MandateWorkflowState = {
   change: MandateChange;
   approvals: MandateApproval[];
@@ -564,9 +528,6 @@ export default function PortfolioInterviewPanel({
   const [editing, setEditing] = useState(false);
   const [workflow, setWorkflow] = useState<MandateWorkflowState | null>(null);
   const [portfolioRun, setPortfolioRun] = useState<PortfolioRunStatus | null>(null);
-  const [riskAssessment, setRiskAssessment] = useState<RiskMandateAssessment | null>(null);
-  const [riskBusy, setRiskBusy] = useState(false);
-  const [riskError, setRiskError] = useState("");
   const [workflowError, setWorkflowError] = useState("");
   const [backendMandate, setBackendMandate] = useState<{
     current_version: number;
@@ -576,7 +537,13 @@ export default function PortfolioInterviewPanel({
   } | null>(null);
   const runtime = snapshot?.operations?.runtime;
   const pitReadiness = readPitReadiness(runtime);
-  const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
+  const localRunRunning =
+    portfolioRun !== null &&
+    ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(portfolioRun.status);
+  const running =
+    localRunRunning ||
+    (portfolioRun === null &&
+      (runtime?.status === "QUEUED" || runtime?.status === "RUNNING"));
   const connectionError = submitError || (!runtime?.run_id && error) || "";
   const mandateBindingReady = Boolean(
     (workflow?.versionObjectId ?? backendMandate?.mandate_version_id) &&
@@ -585,14 +552,33 @@ export default function PortfolioInterviewPanel({
 
   useEffect(() => {
     const runId = portfolioRun?.run_id;
-    if (!runId || ["COMPLETED", "DEGRADED", "HOLD", "FAILED", "CANCELLED"].includes(portfolioRun.status)) return;
+    if (
+      !runId ||
+      [
+        "COMPLETED",
+        "DEGRADED",
+        "HOLD",
+        "FAILED",
+        "CANCELLED",
+        "ERROR",
+      ].includes(portfolioRun.status)
+    )
+      return;
     let active = true;
     const poll = async () => {
       try {
         const next = await fetchPortfolioRecommendation(runId, portfolioRun?.profile_user_id);
         if (active) setPortfolioRun(next);
       } catch (cause) {
-        if (active) setSubmitError(cause instanceof Error ? cause.message : String(cause));
+        if (active) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setSubmitError(message);
+          setPortfolioRun((current) =>
+            current?.run_id === runId
+              ? { ...current, status: "ERROR", phase: "ERROR", error: message }
+              : current,
+          );
+        }
       }
     };
     void poll();
@@ -661,18 +647,6 @@ export default function PortfolioInterviewPanel({
     setEditing(false);
     setSubmitError("");
     onConfigured?.();
-  }
-
-  async function checkRisk() {
-    setRiskBusy(true);
-    setRiskError("");
-    try {
-      setRiskAssessment(await assessRiskMandate(input.mandate_id, buildRiskMandate(input)));
-    } catch (cause) {
-      setRiskError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRiskBusy(false);
-    }
   }
 
   function recommendationInput(activeWorkflow: MandateWorkflowState | null = workflow): PortfolioInterviewInput {
@@ -834,18 +808,9 @@ export default function PortfolioInterviewPanel({
             <section className="mandate-form-section"><h3><span>4.</span> 자산 정책 <small>(허용 vs 금지)</small></h3><div className="mandate-asset-grid">{ASSET_OPTIONS.map((item) => <button type="button" key={item.key} className={`mandate-asset-card ${input.allowed_assets[item.key] ? "allowed" : "blocked"}`} aria-pressed={input.allowed_assets[item.key]} onClick={() => toggleAsset(item.key)}><span aria-hidden="true">{item.icon}</span><b>{item.label}</b><small>{input.allowed_assets[item.key] ? "✓ 허용됨" : "× 금지됨"}</small></button>)}</div></section>
             <section className="mandate-form-section"><h3><span>5.</span> 주문 승인 방식 <small>(approval_rules.paper_order_mode)</small></h3><div className="mandate-approval-grid">{([{ value: "AUTO", icon: "⚡", label: "자동 주문", copy: "정책에 따라 주문이 자동으로 실행됩니다." }, { value: "USER_APPROVAL", icon: "✋", label: "수동 승인 필요", copy: "모든 주문은 실행 전에 수동 승인이 필요합니다." }] as const).map((item) => <label className={`mandate-approval-card ${input.approval_mode === item.value ? "selected" : ""}`} key={item.value}><input type="radio" name="approval_mode" value={item.value} checked={input.approval_mode === item.value} onChange={() => setInput({ ...input, approval_mode: item.value })} /><span aria-hidden="true">{item.icon}</span><div><b>{item.label}</b><small>{item.copy}</small></div></label>)}</div></section>
             <details className="portfolio-advanced mandate-advanced"><summary>고급 설정 · 에이전트가 대화로 확인할 세부 필드</summary><div className="portfolio-advanced-grid"><label>사용자 식별자<input value={input.user_id} onChange={(event) => setInput({ ...input, user_id: event.target.value })} required /></label><label>Mandate ID<input value={input.mandate_id} onChange={(event) => setInput({ ...input, mandate_id: event.target.value })} required /></label><label>Fund ID<input value={input.fund_id} onChange={(event) => setInput({ ...input, fund_id: event.target.value })} required /></label><label>분석 카테고리<select value={input.category} onChange={(event) => setInput({ ...input, category: event.target.value })}>{CATEGORY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>국내 주식 유니버스<select value={input.universe_id} onChange={(event) => setInput({ ...input, universe_id: event.target.value })} required>{universes.length > 0 ? universes.map((universe) => <option key={universe.universe_id} value={universe.universe_id}>{universe.name} · {universe.instrument_count}개</option>) : <option value="KOREA_EQUITY_WATCHLIST">국내 주식 Watchlist</option>}</select></label><label>투자 경험<select value={input.experience} onChange={(event) => setInput({ ...input, experience: event.target.value as PortfolioInterviewInput["experience"] })}><option value="BEGINNER">처음 접함</option><option value="INTERMEDIATE">어느 경험</option><option value="EXPERIENCED">경험 많음</option></select></label><label>투자 예정 기간(년)<input type="number" min="1" max="100" value={input.investment_horizon_years} onChange={(event) => setInput({ ...input, investment_horizon_years: Number(event.target.value) })} required /></label><label>누적 손실 감내율<input type="number" min="1" max="100" step="1" value={Number(input.max_drawdown_pct) * 100} onChange={(event) => setInput({ ...input, max_drawdown_pct: (Number(event.target.value) / 100).toFixed(4) })} required /><small>예: 10 = 최대 -10%</small></label><label>최대 섹터 비중(%)<input type="number" min="5" max="100" value={input.max_sector_weight_pct} onChange={(event) => setInput({ ...input, max_sector_weight_pct: Number(event.target.value) })} /></label><label>동시 보유 종목 수<input type="number" min="1" max="100" value={input.max_concurrent_positions} onChange={(event) => setInput({ ...input, max_concurrent_positions: Number(event.target.value) })} /></label><label>일일 최대 손실(%)<input type="number" min="0.1" max="20" step="0.1" value={input.max_daily_loss_pct} onChange={(event) => setInput({ ...input, max_daily_loss_pct: Number(event.target.value) })} /></label><label>허용 시장<input value={input.allowed_markets} onChange={(event) => setInput({ ...input, allowed_markets: event.target.value })} /></label><label>거래 시작<input type="time" value={input.trading_start} onChange={(event) => setInput({ ...input, trading_start: event.target.value })} /></label><label>거래 종료<input type="time" value={input.trading_end} onChange={(event) => setInput({ ...input, trading_end: event.target.value })} /></label></div></details>
-        <div className="mandate-submit-row"><button type="button" className="btn btn-ghost" onClick={persist}>설정만 저장</button><button type="button" className="btn btn-ghost" onClick={() => void checkRisk()} disabled={riskBusy}>{riskBusy ? "Risk 점검 중…" : "Risk 직원 2명 점검"}</button><button className="btn btn-primary portfolio-submit" type="submit" disabled={busy || running}>{busy ? "Mandate 제출 중…" : running ? "분석 실행 중…" : "Mandate 제출하고 검토 시작"}</button></div>
+        <div className="mandate-submit-row"><button type="button" className="btn btn-ghost" onClick={persist}>설정만 저장</button><button className="btn btn-primary portfolio-submit" type="submit" disabled={busy || running}>{busy ? "Mandate 제출 중…" : running ? "분석 실행 중…" : "Mandate 제출하고 검토 시작"}</button></div>
       </form>
     )}
-    {riskAssessment && (
-      <div className="runtime-result" role="status" aria-live="polite">
-        <strong>Risk 직원 점검 · {riskAssessment.pipeline_status}</strong>
-        <span>risk-runner: {riskAssessment.employees["risk-runner"]?.verdict ?? "미확인"}</span>
-        <span>compliance-policy-worker: {riskAssessment.employees["compliance-policy-worker"]?.verdict ?? "미확인"}</span>
-        <span>부서장 안전 조치: {riskAssessment.risk_head.safe_action ?? "미확인"}</span>
-      </div>
-    )}
-    {riskError && <div className="form-error" role="alert">⚠️ Risk API: {riskError}</div>}
     {portfolioRun && (
           <div className="runtime-result" role="status" aria-live="polite">
             <strong>추천 실행 · {portfolioRun.status}</strong>
