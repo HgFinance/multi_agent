@@ -21,7 +21,7 @@ import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
 import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
-import type { LlmPerformanceMetric } from "./ops/readModel";
+import type { LlmPerformanceMetric, OperationsRuntime } from "./ops/readModel";
 import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
 import { canUseSimulation } from "./ops/projectionSource";
 
@@ -37,6 +37,30 @@ const statusClass: Record<DeptStatus, string> = {
   "연동 대기": "blocked",
   "대기": "waiting",
 };
+
+const ACTIVE_WORKER_STATUSES = new Set(["QUEUED", "RUNNING", "WAITING_APPROVAL"]);
+
+type WorkerActivity = { status: string; summary: string | null };
+
+/** worker_id(=STAFF.role) 기준으로 실행 중 상태 → 최근 worker_summary 순으로 최신 성과를 모은다. */
+function buildWorkerActivity(runtime: OperationsRuntime | null | undefined): Map<string, WorkerActivity> {
+  const activity = new Map<string, WorkerActivity>();
+  for (const worker of runtime?.active_workers ?? []) {
+    activity.set(worker.worker_id, { status: worker.status, summary: worker.summary });
+  }
+  for (const item of runtime?.agent_statuses ?? []) {
+    const workerId = item.worker_id ?? item.agent_id;
+    if (activity.has(workerId) || !ACTIVE_WORKER_STATUSES.has(item.status)) continue;
+    activity.set(workerId, { status: item.status, summary: item.reason });
+  }
+  for (const message of runtime?.messages ?? []) {
+    if (message.kind !== "worker_summary" || !message.worker_id) continue;
+    const existing = activity.get(message.worker_id);
+    if (existing && ACTIVE_WORKER_STATUSES.has(existing.status)) continue;
+    activity.set(message.worker_id, { status: "COMPLETED", summary: message.text });
+  }
+  return activity;
+}
 
 
 function useDialogBehavior(onClose: () => void) {
@@ -941,6 +965,7 @@ function DashboardView({
   const portfolioRuntime = bffSnapshot?.operations?.runtime;
   const portfolioResult = portfolioRuntime?.result as RuntimeResult | null | undefined;
   const mode = bffSnapshot?.mode ?? "DEMO";
+  const workerActivity = useMemo(() => buildWorkerActivity(portfolioRuntime), [portfolioRuntime]);
 
   // 서버가 알려준 실제 설정 상태로 표시한다 (연결됐다고 거짓 보고하지 않는다)
   const liveRows = integrations
@@ -1143,6 +1168,55 @@ function DashboardView({
                   </button>
                 ))}
               </div>
+            </div>
+          </section>
+
+          <section className="win">
+            <div className="win-bar">
+              <span>👥 employee.performance</span>
+              <span className="window-controls">—　▢　✕</span>
+            </div>
+            <div className="win-body">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">WORKER PROJECTION</p>
+                  <h2>직원별 역할 · 최근 성과</h2>
+                </div>
+              </div>
+              {DEPT_ROOMS.map((room) => {
+                const members = STAFF.filter((seed) => seed.deptId === room.id && seed.rank !== "lead");
+                if (!members.length) return null;
+                return (
+                  <div className="employee-dept-group" key={room.id}>
+                    <p className="employee-dept-heading">
+                      {room.icon} {room.name}
+                    </p>
+                    <div className="team-grid">
+                      {members.map((seed) => {
+                        const activity = workerActivity.get(seed.role);
+                        const tone = !activity ? "waiting" : ACTIVE_WORKER_STATUSES.has(activity.status) ? "working" : "done";
+                        const label = !activity ? "대기" : tone === "working" ? "실행 중" : "완료";
+                        return (
+                          <div className="team-card employee-card" key={seed.id}>
+                            <span className="mini-pixel">
+                              <PixelEmployee hair={seed.hair} shirt={seed.shirt} accent={seed.accent} />
+                            </span>
+                            <span className="team-copy">
+                              <b>{seed.name}</b>
+                              <small>{seed.role}</small>
+                              {activity?.summary && <span className="employee-summary">{activity.summary}</span>}
+                            </span>
+                            <span className={`status-pill ${tone}`}>{label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {!portfolioRuntime?.run_id && (
+                <p className="kanban-empty">실행 기록이 없어요. 포트폴리오 분석을 시작하면 직원별 역할과 성과가 여기 표시됩니다.</p>
+              )}
             </div>
           </section>
 

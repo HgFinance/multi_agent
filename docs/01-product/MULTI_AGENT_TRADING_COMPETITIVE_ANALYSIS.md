@@ -1,5 +1,29 @@
 # 멀티 에이전트 트레이딩 오픈소스 비교와 차별화 전략
 
+## 통합 요약: TradingAgents 대비 차별점과 최소 Acceptance Scenario
+
+이 절은 기존 요약 비교 문서의 결론을 통합한 것이다. 비교 시 설계 목표와 현재 구현을 분리하며, 공개 프로젝트의 README·논문·코드만으로 운영 안정성이나 투자 성과를 단정하지 않는다.
+
+TradingAgents는 한 종목·한 시점의 투자 판단을 만드는 연구용 멀티에이전트 프레임워크다. HgFinance의 목표는 그 범위를 넘어 데이터·판단·통제·회계·감사·전략 수명주기를 운영하는 개인형 헤지펀드 운영체제를 만드는 것이다.
+
+차별점은 Agent 수나 더 그럴듯한 투자 의견이 아니다. `OrderIntent`와 `Order`를 분리하고, Position·PnL·NAV를 Fill과 Ledger/Valuation 경로에서만 확정하며, Risk·Trading과 독립된 QA·감사본부가 근거·재현성·데이터 누수·환각·Model Risk를 검토하는 통제 경계를 하나의 Case에 연결하는 데 있다. 전체 종목을 LLM으로 호출하지 않고 Feed·Feature·Priority Queue를 거쳐 중요한 이벤트만 분석으로 승격하며, KRX 거래 단위·호가·거래일·LS API·국내 공시·원화 회계도 제품 경계에 포함한다. Priority/Event Engine과 핵심 연결이 부분 구현인 동안에는 운영 가능하다고 표현하지 않는다.
+
+동일한 Case는 다음 경로로 재현되어야 한다.
+
+```text
+시장 이벤트
+→ versioned Research Packet
+→ OrderIntent
+→ RiskDecision(input hash / calculation version)
+→ 멱등 OMS 상태 전이
+→ Paper Fill
+→ Ledger / Position / Reconciliation
+→ PnL·NAV Read Model
+→ QA·Audit Trace / Replay
+```
+
+데이터 단절, Risk Engine timeout, 중복 Intent, Broker `UNKNOWN`, 부분 체결, Ledger Break를 주입해도 신규 진입을 차단하고 감사 가능한 결과를 남겨야 한다. 이 Acceptance Scenario를 실제 Event·DB·Worker·UI까지 통과시키기 전에는 TradingAgents보다 운영 가능하다고 결론 내리지 않는다.
+
 > 기준일: 2026-07-31
 > 비교 대상: 공개 GitHub 저장소의 기본 브랜치, README, 공개 문서와 코드 구조
 > 목적: 투자 수익률 순위를 매기는 것이 아니라, 우리 서비스가 무엇을 만들고 어디에서 차별화해야 하는지 결정한다.

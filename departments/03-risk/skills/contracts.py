@@ -27,7 +27,8 @@ class RiskSkillContext(BaseModel):
     trace_id: str
     case_id: str | None = None
     worker_id: str
-    profile_version: str = "risk.worker-context.v1"
+    # Worker Profile version; the wire contract is carried separately in schema_version.
+    profile_version: str = "risk-profile-v1"
     as_of: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     input_hash: str
     allowed_scopes: tuple[str, ...] = ()

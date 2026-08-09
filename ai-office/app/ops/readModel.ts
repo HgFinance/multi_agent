@@ -227,7 +227,10 @@ export type OperationsRuntime = {
   run_id: string | null;
   workflow: string | null;
   phase: string | null;
-  departments: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
+  departments: Record<
+    string,
+    { status: string; current_stage: string | null; active_worker_ids: string[]; kanban_task_id?: string | null }
+  >;
   active_workers: OperationsRuntimeWorker[];
   performance_metrics?: LlmPerformanceMetric[];
   active_handoff: OperationsRuntimeHandoff | null;

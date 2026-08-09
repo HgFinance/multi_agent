@@ -1,0 +1,210 @@
+"""CEO Hermes profile as an opt-in LLM backend for the department task plan.
+
+Mirrors ``orchestration.adapters.ceo.LunaCeoAdapter``: bounded JSON-only
+prompt, regex+``json.loads`` extraction, an explicit department allow-list,
+and a hard fail-closed path. Risk/QA gates are enforced independently at the
+OMS/ReleaseGate state-machine layer (``departments/02-trading/oms/oms.py``),
+not by call order here, so the CEO profile may freely choose which
+departments to request without weakening those gates.
+
+This module never imports ``orchestration.workflows.portfolio_recommendation``
+(the deterministic fallback and department allow-list are passed in by the
+caller) to keep the adapters -> workflows import direction one-way.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class CeoTaskPlannerError(RuntimeError):
+    """Raised when the CEO Hermes profile cannot produce a valid task plan."""
+
+
+class LlmCeoTaskPlanner:
+    """Call the CEO Hermes profile to decide which departments a request needs."""
+
+    def __init__(
+        self,
+        repo_root: Path,
+        *,
+        executable: str | None = None,
+        profile: str = "ceo-agent",
+        timeout: float | None = None,
+    ) -> None:
+        self.repo_root = repo_root
+        self.executable = executable or os.environ.get("HERMES_BIN", "hermes")
+        self.profile = profile
+        self.timeout = timeout or float(os.environ.get("HERMES_CEO_PLANNER_TIMEOUT_SECONDS", "60"))
+        self.model = _load_model_config(repo_root)
+
+    def plan(
+        self,
+        *,
+        profile: Mapping[str, Any],
+        mandate_policy: Mapping[str, Any] | None,
+        valid_departments: Sequence[str],
+    ) -> dict[str, Any]:
+        query = " ".join(str(profile.get("query", "")).split())
+        category = str(profile.get("category", "")).strip().upper()
+        bundle = {
+            "query": query,
+            "category": category,
+            # Mandate content is advisory context for the planner, never a
+            # binding order/limit change -- risk_bounds enforcement stays in
+            # the deterministic Risk Engine regardless of what the CEO reads.
+            "mandate_policy": _bounded_mandate(mandate_policy),
+            "valid_departments": list(valid_departments),
+        }
+        prompt = f"""You are the CEO task planner for HgFinance. Decide which
+departments this request needs, from ONLY this allow-list: {list(valid_departments)}.
+You may include the user's Mandate (risk bounds, universe policy, approval
+rules) as context, but you cannot change it, approve orders, or skip a
+department's own internal Risk/QA/OMS gates -- those are enforced elsewhere
+regardless of what you choose here.
+
+Return ONLY one JSON object with these keys:
+requested_departments (non-empty array, each value from the allow-list),
+rewritten_query (short string restating the request),
+rationale (short string explaining the department choice).
+
+Input bundle:
+{json.dumps(bundle, ensure_ascii=False, sort_keys=True, default=str)}"""
+        try:
+            environment = os.environ.copy()
+            environment.setdefault("HERMES_HOME", str(Path.home() / ".hermes"))
+            process = subprocess.run(
+                [self.executable, "--profile", self.profile, "-z", prompt],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+                env=environment,
+            )
+        except FileNotFoundError as exc:
+            raise CeoTaskPlannerError("ceo_planner_executable_not_found") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CeoTaskPlannerError("ceo_planner_timeout") from exc
+        except OSError as exc:
+            raise CeoTaskPlannerError(f"ceo_planner_os_error:{type(exc).__name__}") from exc
+
+        if process.returncode != 0:
+            raise CeoTaskPlannerError(f"ceo_planner_exit_{process.returncode}")
+        try:
+            decision = _parse_plan(process.stdout, valid_departments)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CeoTaskPlannerError("ceo_planner_invalid_json") from exc
+
+        return {
+            "mode": "llm_task_plan",
+            "category": category or "PORTFOLIO_RECOMMENDATION",
+            "original_query": query,
+            "rewritten_query": decision["rewritten_query"],
+            "requested_departments": decision["requested_departments"],
+            "matched_terms": {},
+            "routing_basis": "ceo_llm_task_planner",
+            "mandate_considered": mandate_policy is not None,
+            "planner_rationale": decision["rationale"],
+            "runtime": {
+                "profile": self.profile,
+                "provider": self.model["provider"],
+                "model": self.model["model"],
+            },
+        }
+
+
+def build_task_plan(
+    profile: Mapping[str, Any],
+    *,
+    deterministic_fallback: Callable[[Mapping[str, Any]], dict[str, Any]],
+    valid_departments: Sequence[str],
+    planner_cls: type[LlmCeoTaskPlanner] = LlmCeoTaskPlanner,
+    repo_root: Path = ROOT,
+) -> dict[str, Any]:
+    """Fail-closed dispatcher: deterministic by default, opt-in LLM planner.
+
+    ``PORTFOLIO_CEO_TASK_PLANNER_MODE`` unset/anything but ``"llm"`` keeps the
+    existing deterministic behavior byte-for-byte. Any planner failure
+    (missing hermes binary, no credentials, timeout, invalid/out-of-allowlist
+    JSON) falls back to the deterministic plan instead of blocking the run.
+    """
+
+    mode = os.getenv("PORTFOLIO_CEO_TASK_PLANNER_MODE", "deterministic").strip().lower()
+    if mode != "llm":
+        return deterministic_fallback(profile)
+    try:
+        planner = planner_cls(repo_root)
+        return planner.plan(
+            profile=profile,
+            mandate_policy=profile.get("mandate_policy"),
+            valid_departments=valid_departments,
+        )
+    except CeoTaskPlannerError as exc:
+        fallback = deterministic_fallback(profile)
+        fallback["planner_fallback_reason"] = str(exc)
+        return fallback
+    except Exception as exc:  # noqa: BLE001 - any planner failure fails closed.
+        fallback = deterministic_fallback(profile)
+        fallback["planner_fallback_reason"] = f"ceo_planner_unexpected:{type(exc).__name__}"
+        return fallback
+
+
+def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]:
+    match = re.search(r"\{.*\}", stdout, re.DOTALL)
+    if match is None:
+        raise ValueError("CEO planner response contains no JSON object")
+    payload = json.loads(match.group(0))
+    if not isinstance(payload, dict):
+        raise TypeError("CEO planner response is not an object")
+
+    requested = payload.get("requested_departments")
+    if not isinstance(requested, list) or not requested:
+        raise ValueError("CEO planner returned no requested_departments")
+    allow_list = set(valid_departments)
+    requested_set = {str(item) for item in requested}
+    if not requested_set.issubset(allow_list):
+        raise ValueError("CEO planner requested a department outside the allow-list")
+    # Preserve the caller's canonical department order (same rule as the
+    # deterministic planner's `ordered = [stage for stage in DEPARTMENTS ...]`).
+    ordered = [stage for stage in valid_departments if stage in requested_set]
+
+    rewritten_query = str(payload.get("rewritten_query", "")).strip()
+    rationale = str(payload.get("rationale", "")).strip()
+    if not rationale:
+        raise ValueError("CEO planner rationale is empty")
+    return {
+        "requested_departments": ordered,
+        "rewritten_query": rewritten_query,
+        "rationale": rationale,
+    }
+
+
+def _load_model_config(repo_root: Path) -> dict[str, str]:
+    path = repo_root / "departments/00-ceo-office/hermes/config.yaml"
+    try:
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        model = config["model"]
+        provider = str(model["provider"]).strip()
+        name = str(model.get("default", model.get("model", ""))).strip()
+    except (KeyError, OSError, TypeError, yaml.YAMLError) as exc:
+        raise CeoTaskPlannerError("ceo_planner_model_config_invalid") from exc
+    if not provider or not name:
+        raise CeoTaskPlannerError("ceo_planner_model_config_invalid")
+    return {"provider": provider, "model": name}
+
+
+def _bounded_mandate(mandate_policy: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(mandate_policy, Mapping):
+        return None
+    return {key: value for key, value in mandate_policy.items() if key not in {"raw", "notes"}}

@@ -8,6 +8,7 @@ loading them into one Python process would make the comparison order-dependent.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -55,6 +56,18 @@ print("__UNIFIED_OPENAPI__" + json.dumps(openapi.get("paths", {}), sort_keys=Tru
         text=True,
         timeout=30,
         check=False,
+        env={
+            **os.environ,
+            **(
+                {}
+                if os.environ.get("RUN_EXTERNAL_DB_CONTRACTS") == "1"
+                else {
+                    "DATABASE_URL": "",
+                    "GOVERNANCE_WORKFORCE_DATABASE_URL": "",
+                    "RISK_QA_DATABASE_URL": "",
+                }
+            ),
+        },
     )
     if result.returncode != 0:
         raise AssertionError(
@@ -220,15 +233,18 @@ class JsonSchemaSubsetTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.envelope = load_json("event-envelope.v1.json")
         cls.worker = load_json("worker-context.v1.json")
+        cls.task = load_json("agent-task-context.v1.json")
+        cls.result = load_json("agent-task-result.v1.json")
+        cls.handoff = load_json("department-handoff.v1.json")
 
     def test_contract_schemas_have_required_object_shape(self) -> None:
-        for schema in (self.envelope, self.worker):
+        for schema in (self.envelope, self.worker, self.task, self.result, self.handoff):
             self.assertEqual(schema["type"], "object")
             self.assertTrue(schema["required"])
             self.assertIsInstance(schema["properties"], dict)
             self.assertFalse(schema["additionalProperties"])
 
-    def test_valid_event_envelope_and_worker_context(self) -> None:
+    def test_valid_runtime_contract_envelopes(self) -> None:
         envelope = {
             "event_id": "00000000-0000-0000-0000-000000000001",
             "event_type": "research.packet.v1",
@@ -250,7 +266,10 @@ class JsonSchemaSubsetTest(unittest.TestCase):
             "schema_version": "risk.worker-context.v1",
             "department": "risk-management",
             "trace_id": "00000000-0000-0000-0000-000000000012",
-            "case_id": None,
+            "case_id": "case-2026-0142",
+            "task_id": "task-2026-0142-risk",
+            "department_handoff_id": "handoff-2026-0142-research-risk",
+            "input_contract": "risk.department-input.v1",
             "producer_worker": "compliance-policy-worker",
             "consumer_worker": "risk-supervisor",
             "status": "COMPLETED",
@@ -265,6 +284,9 @@ class JsonSchemaSubsetTest(unittest.TestCase):
             ],
             "output_refs": [],
             "profile_version": "risk-worker-profile-v3",
+            "model_version": "qwen2.5-14b-instruct-fp8",
+            "adapter_version": "risk-lora:v1",
+            "input_hash": "sha256:" + "2" * 64,
             "created_at": "2026-08-04T00:30:00Z",
             "attempt": 1,
             "timeout_ms": 30000,
@@ -272,6 +294,102 @@ class JsonSchemaSubsetTest(unittest.TestCase):
         }
         validate_json_schema(envelope, self.envelope)
         validate_json_schema(worker, self.worker)
+
+        task = {
+            "schema_version": "agent-task-context.v1",
+            "case_id": "case-2026-0142",
+            "task_id": "task-2026-0142-risk",
+            "department": "risk-management",
+            "worker": "risk-department-head",
+            "route": "STOCK_RECOMMENDATION",
+            "department_handoff_id": "handoff-2026-0142-research-risk",
+            "input_refs": [
+                {
+                    "type": "MANDATE",
+                    "id": "mandate-0142",
+                    "content_hash": "sha256:" + "3" * 64,
+                    "as_of": "2026-08-04T00:00:00Z",
+                    "acl_scope": ["risk-management"],
+                }
+            ],
+            "trace_id": "trace-2026-0142",
+            "status": "QUEUED",
+            "attempt": 1,
+            "idempotency_key": "case-2026-0142:task-2026-0142-risk:v1",
+            "created_at": "2026-08-04T00:29:00Z",
+            "updated_at": "2026-08-04T00:29:00Z",
+        }
+        result = {
+            "schema_version": "agent-task-result.v1",
+            "case_id": "case-2026-0142",
+            "task_id": "task-2026-0142-risk",
+            "department": "risk-management",
+            "worker": "risk-compliance-worker",
+            "input_refs": task["input_refs"],
+            "evidence_refs": [
+                {
+                    "type": "RISK_EVIDENCE",
+                    "id": "risk-evidence-0142",
+                    "content_hash": "sha256:" + "4" * 64,
+                    "as_of": "2026-08-04T00:30:00Z",
+                    "acl_scope": ["risk-management", "qa-department"],
+                }
+            ],
+            "decision": "RESIZE",
+            "confidence": 0.88,
+            "escalate": False,
+            "model_version": "qwen2.5-14b-instruct-fp8",
+            "adapter_version": "risk-lora:v1",
+            "trace_id": "trace-2026-0142",
+            "status": "COMPLETED",
+            "summary": "Single-symbol and sector limits require a resized proposal.",
+            "reason_codes": ["MAX_SYMBOL_WEIGHT"],
+            "output_refs": [],
+            "input_hash": "sha256:" + "2" * 64,
+            "output_hash": "sha256:" + "5" * 64,
+            "calculation_version": "risk-engine-v2",
+            "created_at": "2026-08-04T00:30:00Z",
+        }
+        validate_json_schema(task, self.task)
+        validate_json_schema(result, self.result)
+
+        handoff = {
+            "handoff_id": "handoff-2026-0142-research-risk",
+            "schema_version": "department-handoff.v1",
+            "case_id": "case-2026-0142",
+            "source_task_id": "task-2026-0142-research",
+            "target_task_id": "task-2026-0142-risk",
+            "trace_id": "trace-2026-0142",
+            "from_department": "research-department",
+            "to_department": "risk-management",
+            "from_profile_version": "research-profile-v2",
+            "to_profile_version": "risk-profile-v1",
+            "from_role": "research-department-head",
+            "to_role": "risk-department-head",
+            "department_input_contract": "risk.department-input.v1",
+            "input_contract": "agent-task-result.v1",
+            "output_contract": "risk.department-input.v1",
+            "route": "STOCK_RECOMMENDATION",
+            "input_refs": result["output_refs"],
+            "evidence_refs": result["evidence_refs"],
+            "purpose": "Risk가 Research Evidence를 바탕으로 Mandate와 Concentration을 검토한다.",
+            "required_gates": ["MANDATE_PRESENT", "PIT_EVIDENCE"],
+            "read_only": True,
+            "binding": False,
+            "status": "DELIVERED",
+            "idempotency_key": "handoff:case-2026-0142:research:risk:v1",
+            "created_at": "2026-08-04T00:31:00Z",
+        }
+        handoff["input_refs"] = [
+            {
+                "type": "RESEARCH_PACKET",
+                "id": "research-packet-0142",
+                "content_hash": "sha256:" + "6" * 64,
+                "as_of": "2026-08-04T00:30:00Z",
+                "acl_scope": ["risk-management"],
+            }
+        ]
+        validate_json_schema(handoff, self.handoff)
 
     def test_missing_required_and_unknown_fields_fail(self) -> None:
         envelope = {

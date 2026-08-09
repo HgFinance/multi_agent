@@ -27,6 +27,16 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
 
+try:
+    from governance_client import fetch_mandate_policy_content
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from apps.api.governance_client import fetch_mandate_policy_content
+
+try:
+    import kanban_tracker
+except ModuleNotFoundError:  # pragma: no cover - package import path
+    from apps.api import kanban_tracker
+
 from portfolio_store import PortfolioRuntimeStore, _process_alive
 
 from orchestration.workflows.portfolio_recommendation import (
@@ -146,6 +156,7 @@ def _runtime_department(code: str) -> dict[str, Any]:
         "current_stage": None,
         "active_worker_ids": [],
         "last_message": None,
+        "kanban_task_id": None,
         "updated_at": _now(),
     }
 
@@ -416,6 +427,16 @@ class PortfolioRuntime:
         }
         self._message(job, job["active_handoff"]["message"], kind="department_handoff", department=source)
 
+    def _on_kanban_task_id(self, job_id: str, department: str, task_id: str) -> None:
+        """Callback invoked from a kanban_tracker daemon thread once the real Task id is known."""
+
+        with self._lock:
+            job = self._job_for(job_id)
+            if job is None:
+                return
+            job["departments"][department]["kanban_task_id"] = task_id
+            self._save_job(job)
+
     def _record_event(self, job_id: str, event: Mapping[str, Any]) -> None:
         """Apply one pipeline event to the process-local operator projection."""
 
@@ -452,6 +473,14 @@ class PortfolioRuntime:
                     f"{_department_label(department)}의 독립 Worker {len(worker_ids)}개 그래프 실행을 시작합니다.",
                     kind="department_started",
                     department=department,
+                )
+                kanban_tracker.track_department_started(
+                    job_id,
+                    department,
+                    f"{_department_label(department)} — {job.get('trace_id') or job_id}",
+                    on_task_id=lambda task_id, department=department: self._on_kanban_task_id(
+                        job_id, department, task_id
+                    ),
                 )
             elif kind == "worker_started" and department:
                 worker = {
@@ -578,6 +607,10 @@ class PortfolioRuntime:
                         STAGE_ORDER[current_index + 1],
                         str(event.get("message", "")),
                     )
+                if status != "SKIPPED":
+                    kanban_tracker.track_department_completed(
+                        job_id, department, status, str(event.get("message", ""))
+                    )
             elif kind == "department_blocked" and department:
                 job["departments"][department].update(
                     {
@@ -592,6 +625,9 @@ class PortfolioRuntime:
                     str(event.get("message", "실행 입력이 준비되지 않아 안전하게 중단했습니다.")),
                     kind="department_blocked",
                     department=department,
+                )
+                kanban_tracker.track_department_blocked(
+                    job_id, department, str(event.get("message", ""))
                 )
             self._save_job(job)
 
@@ -714,6 +750,11 @@ class PortfolioRuntime:
             if os.getenv("LANGSMITH_PROJECT") and not os.getenv("LANGCHAIN_PROJECT"):
                 os.environ["LANGCHAIN_PROJECT"] = os.environ["LANGSMITH_PROJECT"]
             database_url = os.getenv("DATABASE_URL", "").strip()
+            # CEO task planner input: best-effort, never blocks the run (see
+            # governance_client.fetch_mandate_policy_content docstring).
+            mandate_id = str(profile.get("mandate_id") or "").strip()
+            if mandate_id:
+                profile["mandate_policy"] = await fetch_mandate_policy_content(mandate_id)
             if database_url:
                 result = await run_portfolio_recommendation_pipeline_async(profile, event_callback=lambda event: self._event(job_id, event))
             else:

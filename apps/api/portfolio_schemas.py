@@ -37,6 +37,7 @@ class PortfolioDepartmentRuntime(_ApiModel):
     current_stage: str | None = None
     active_worker_ids: list[str] = Field(default_factory=list)
     last_message: str | None = None
+    kanban_task_id: str | None = None
     updated_at: datetime
 
 

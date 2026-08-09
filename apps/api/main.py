@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
@@ -85,6 +84,11 @@ from command_service import (
 )
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
+from governance_client import (
+    GOVERNANCE_API_URL,
+    GovernanceProxyError,
+    governance_request as _governance_request,
+)
 from operations_read_model import build_operations_snapshot
 from portfolio_runtime import RUNTIME
 from portfolio_schemas import (
@@ -135,7 +139,6 @@ app.include_router(qa_router)
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
 # 이 BFF가 얇게 전달하고, 정책 검증·Risk/QA/사용자 승인·영속화는 governance-api가 한다.
-GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "").rstrip("/")
 # Canonical mandate verification is an explicit deployment opt-in. Deterministic
 # tests leave this disabled; an empty Governance URL can never be treated as ready.
 PORTFOLIO_GOVERNANCE_BINDING_ENABLED = os.getenv(
@@ -148,7 +151,6 @@ PORTFOLIO_GOVERNANCE_BINDING_PATH = (
     ).strip()
     or "/governance/v1/mandates/{mandate_id}/current"
 )
-GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
 # The deployment must provide a trusted authenticated subject header. Local
 # deterministic tests explicitly opt out; missing identity is never accepted in
 # the production default.
@@ -159,67 +161,11 @@ PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING
     "yes",
     "on",
 }
-GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
-
-
-class GovernanceProxyError(HTTPException):
-    """Carries the upstream Governance API error body through untouched.
-
-    A plain ``HTTPException(detail=payload)`` gets re-wrapped by FastAPI into
-    ``{"detail": payload}``, nesting ``error_code``/``message`` one level too
-    deep for the frontend (``governanceClient.ts``), which reads them at the
-    top level. Every governance-api error handler already emits that
-    ``{error_code, message, detail, trace_id}`` shape, so pass it straight
-    through instead of collapsing it into FastAPI's single ``detail`` field.
-    """
-
-    def __init__(self, status_code: int, payload: object) -> None:
-        super().__init__(status_code=status_code, detail=payload)
-        self.payload = payload
 
 
 @app.exception_handler(GovernanceProxyError)
 async def _on_governance_proxy_error(request: Request, exc: GovernanceProxyError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
-
-
-async def _governance_request(
-    method: str,
-    path: str,
-    *,
-    params: dict[str, str] | None = None,
-    body: dict[str, object] | None = None,
-) -> object:
-    if not GOVERNANCE_API_URL:
-        raise HTTPException(status_code=503, detail="governance_api_unavailable")
-    headers = (
-        {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
-        if GOVERNANCE_API_AUTH_TOKEN
-        else None
-    )
-    try:
-        async with httpx.AsyncClient(
-            base_url=GOVERNANCE_API_URL,
-            timeout=GOVERNANCE_API_TIMEOUT_SECONDS,
-        ) as client:
-            response = await client.request(
-                method,
-                path,
-                params=params,
-                json=body,
-                headers=headers,
-            )
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail="governance_api_unavailable") from exc
-
-    payload: object
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {"detail": f"governance_api_http_{response.status_code}"}
-    if response.status_code >= 400:
-        raise GovernanceProxyError(response.status_code, payload)
-    return payload
 
 
 _PORTFOLIO_BINDING_FIELDS = ("mandate_id", "case_id", "mandate_version_id", "policy_hash")

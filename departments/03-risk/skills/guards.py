@@ -17,7 +17,7 @@ def build_context(
     payload: dict[str, Any],
     *,
     worker_id: str,
-    profile_version: str = "risk.worker-context.v1",
+    profile_version: str = "risk-profile-v1",
     allowed_scopes: Sequence[str] | None = None,
     timeout_ms: int = 8_000,
     attempt: int = 1,
