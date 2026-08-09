@@ -1,85 +1,59 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hgfinance.local/contracts/worker-context.v1.json",
-  "title": "HgFinance Worker Context v1",
-  "description": "Department Head와 독립 LangGraph Runner/Worker 사이에서 전달하는 비바인딩 실행 Context.",
+  "$id": "https://hgfinance.local/contracts/agent-task-result.v1.json",
+  "title": "HgFinance Agent Task Result v1",
+  "description": "Worker/Department Head가 CEO와 Kanban에 반환하는 비구속적 도메인 결과. 주문·한도·원장을 직접 변경하지 않는다.",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "context_id",
     "schema_version",
     "case_id",
     "task_id",
-    "input_contract",
     "department",
-    "trace_id",
-    "producer_worker",
-    "consumer_worker",
-    "status",
-    "advisory",
-    "reason_codes",
+    "worker",
     "input_refs",
-    "output_refs",
-    "profile_version",
+    "evidence_refs",
+    "decision",
+    "confidence",
+    "escalate",
     "model_version",
     "adapter_version",
+    "trace_id",
+    "status",
+    "summary",
+    "output_refs",
     "input_hash",
-    "attempt",
-    "timeout_ms",
+    "output_hash",
     "created_at"
   ],
   "properties": {
-    "context_id": {"$ref": "#/$defs/id"},
-    "schema_version": {
-      "type": "string",
-      "enum": [
-        "worker-context.v1",
-        "research.worker-context.v1",
-        "quant.worker-context.v1",
-        "trading.worker-context.v1",
-        "risk.worker-context.v1",
-        "qa.worker-context.v1",
-        "governance.worker-context.v1",
-        "workforce.worker-context.v1",
-        "accounting.worker-context.v1"
-      ]
-    },
+    "schema_version": {"const": "agent-task-result.v1"},
     "case_id": {"$ref": "#/$defs/id"},
     "task_id": {"$ref": "#/$defs/id"},
-    "department_handoff_id": {"$ref": "#/$defs/id"},
-    "input_contract": {"type": "string", "minLength": 1, "maxLength": 128},
     "department": {"$ref": "#/$defs/department"},
+    "worker": {"type": "string", "minLength": 1, "maxLength": 128},
+    "input_refs": {"$ref": "#/$defs/artifact_refs"},
+    "evidence_refs": {"$ref": "#/$defs/artifact_refs"},
+    "decision": {"type": "string", "minLength": 1, "maxLength": 64},
+    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "escalate": {"type": "boolean"},
+    "model_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "adapter_version": {"type": "string", "minLength": 1, "maxLength": 128},
     "trace_id": {"$ref": "#/$defs/id"},
-    "producer_worker": {"type": "string", "minLength": 1, "maxLength": 128},
-    "consumer_worker": {"type": "string", "minLength": 1, "maxLength": 128},
     "status": {
       "type": "string",
       "enum": ["COMPLETED", "DEGRADED", "HOLD", "ESCALATED", "REJECTED", "NOT_EXECUTED"]
     },
-    "advisory": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["summary"],
-      "properties": {
-        "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "suggested_verdict": {"type": "string", "minLength": 1, "maxLength": 64}
-      }
-    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
     "reason_codes": {
       "type": "array",
       "items": {"type": "string", "minLength": 1, "maxLength": 128},
       "uniqueItems": true
     },
-    "input_refs": {"$ref": "#/$defs/artifact_refs_non_empty"},
     "output_refs": {"$ref": "#/$defs/artifact_refs"},
-    "profile_version": {"type": "string", "minLength": 1, "maxLength": 128},
-    "model_version": {"type": "string", "minLength": 1, "maxLength": 128},
-    "adapter_version": {"type": "string", "minLength": 1, "maxLength": 128},
     "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "output_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "calculation_version": {"type": "string", "minLength": 1, "maxLength": 128},
-    "attempt": {"type": "integer", "minimum": 1, "maximum": 3},
-    "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 120000},
     "replay_manifest_ref": {"$ref": "#/$defs/id"},
     "created_at": {"type": "string", "format": "date-time"},
     "completed_at": {"type": "string", "format": "date-time"}
@@ -123,12 +97,6 @@
     },
     "artifact_refs": {
       "type": "array",
-      "items": {"$ref": "#/$defs/artifact_ref"},
-      "uniqueItems": true
-    },
-    "artifact_refs_non_empty": {
-      "type": "array",
-      "minItems": 1,
       "items": {"$ref": "#/$defs/artifact_ref"},
       "uniqueItems": true
     }

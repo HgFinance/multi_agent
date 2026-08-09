@@ -31,6 +31,7 @@ from departments.employee_worker_runtime import (
     should_run,
     tools_for_specs,
 )
+from orchestration.adapters.ceo_task_planner import build_task_plan
 from orchestration.contracts.mas import (
     DepartmentHandoff,
     build_replay_metadata,
@@ -735,7 +736,11 @@ def _initial_state(
         "case_id": f"case-{trace_id}",
         "as_of": now,
         "user_profile": dict(profile),
-        "task_plan": build_ceo_task_plan(profile),
+        "task_plan": build_task_plan(
+            profile,
+            deterministic_fallback=build_ceo_task_plan,
+            valid_departments=DEPARTMENTS,
+        ),
         "portfolio_candidates": [dict(item) for item in candidates],
         "data_context": dict(
             data_context

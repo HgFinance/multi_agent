@@ -196,6 +196,12 @@ a.integration-row:hover { border-color: var(--pink-deep); }
 .status-dot.approval { background: var(--pink-deep); }
 .status-dot.blocked { background: var(--lav); }
 .status-dot.waiting { background: #dcd1c0; }
+.employee-dept-group { margin-top: 14px; }
+.employee-dept-group:first-child { margin-top: 0; }
+.employee-dept-heading { margin: 0 0 7px; color: var(--pink-deep); font-size: 11px; font-weight: 900; }
+.employee-card { cursor: default; }
+.employee-card:hover { background: #fdfaf6; transform: none; }
+.employee-summary { display: -webkit-box; overflow: hidden; margin-top: 2px; color: var(--ink-soft); font-size: 10px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 .two-col { display: grid; grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr); gap: 18px; }
 .approval-body h3, .secretary h3 { margin: 12px 0 8px; font-family: "Noto Serif KR", serif; font-size: 20px; line-height: 1.45; }
@@ -915,6 +921,8 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .kanban-status.done { color: #266d48; background: #d8eedb; }
 .kanban-status.skipped { color: var(--ink-faint); background: #e8e0d4; }
 .kanban-status.blocked { color: #9a3c2f; background: #f5d1c6; }
+.kanban-task-ref { margin: 3px 0 0; }
+.kanban-task-ref code { overflow: hidden; color: var(--ink-faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .kanban-workers { display: grid; gap: 3px; margin-top: 10px; }
 .kanban-workers code { overflow: hidden; color: var(--ink-soft); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .kanban-empty { margin: 11px 0 0; color: var(--ink-faint); font-size: 10px; line-height: 1.35; }

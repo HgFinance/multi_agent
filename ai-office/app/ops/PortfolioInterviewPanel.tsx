@@ -186,6 +186,11 @@ export function PortfolioKanban({
                 <strong>{stage.label}</strong>
                 <span className={`kanban-status ${status.tone}`}>{status.label}</span>
               </div>
+              {department?.kanban_task_id && (
+                <p className="kanban-task-ref" title="Hermes Kanban Task ID">
+                  <code>#{department.kanban_task_id}</code>
+                </p>
+              )}
               {activeWorkerIds.length > 0 ? (
                 <div className="kanban-workers">
                   {activeWorkerIds.slice(0, 3).map((workerId) => <code key={workerId}>{workerId}</code>)}

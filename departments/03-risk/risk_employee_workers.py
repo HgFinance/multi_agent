@@ -117,6 +117,7 @@ class WorkerSpec:
     tools: tuple[str, ...]
     trigger: str
     output_contract: str = "risk.worker-context.v1"
+    profile_version: str = "risk-profile-v1"
     max_attempts: int = 3
     skill_ids: tuple[str, ...] = ()
     tech_profile: WorkerTechProfile | None = None
@@ -295,7 +296,7 @@ def build_worker_graph(
             context = build_context(
                 payload,
                 worker_id=spec.worker_id,
-                profile_version=spec.output_contract,
+            profile_version=spec.profile_version,
                 allowed_scopes=spec.tools,
             )
             skill_results: list[dict[str, Any]] = []

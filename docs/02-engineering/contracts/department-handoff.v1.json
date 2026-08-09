@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hgfinance.local/contracts/department-handoff.v1.json",
+  "title": "HgFinance Department Handoff v1",
+  "description": "Department Head/Profile 사이의 상황별 업무 연결 Packet. 비구속적이며 주문·Risk 승인·Ledger 변경 권한을 전달하지 않는다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "handoff_id",
+    "schema_version",
+    "case_id",
+    "source_task_id",
+    "target_task_id",
+    "trace_id",
+    "from_department",
+    "to_department",
+    "from_profile_version",
+    "to_profile_version",
+    "from_role",
+    "to_role",
+    "department_input_contract",
+    "input_contract",
+    "output_contract",
+    "route",
+    "input_refs",
+    "purpose",
+    "read_only",
+    "binding",
+    "status",
+    "idempotency_key",
+    "created_at"
+  ],
+  "properties": {
+    "handoff_id": {"$ref": "#/$defs/id"},
+    "schema_version": {"const": "department-handoff.v1"},
+    "case_id": {"$ref": "#/$defs/id"},
+    "source_task_id": {"$ref": "#/$defs/id"},
+    "target_task_id": {"$ref": "#/$defs/id"},
+    "trace_id": {"$ref": "#/$defs/id"},
+    "from_department": {"$ref": "#/$defs/department"},
+    "to_department": {"$ref": "#/$defs/department"},
+    "from_profile_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "to_profile_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "from_role": {"type": "string", "minLength": 1, "maxLength": 128},
+    "to_role": {"type": "string", "minLength": 1, "maxLength": 128},
+    "department_input_contract": {
+      "type": "string",
+      "enum": [
+        "ceo.department-input.v1",
+        "research.department-input.v1",
+        "trading.department-input.v1",
+        "risk.department-input.v1",
+        "quant.department-input.v1",
+        "accounting.department-input.v1",
+        "qa.department-input.v1",
+        "hr.department-input.v1"
+      ]
+    },
+    "input_contract": {"type": "string", "minLength": 1, "maxLength": 128},
+    "output_contract": {"type": "string", "minLength": 1, "maxLength": 128},
+    "route": {"type": "string", "minLength": 1, "maxLength": 64},
+    "input_refs": {"$ref": "#/$defs/artifact_refs_non_empty"},
+    "evidence_refs": {"$ref": "#/$defs/artifact_refs"},
+    "purpose": {"type": "string", "minLength": 1, "maxLength": 512},
+    "required_gates": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "uniqueItems": true
+    },
+    "read_only": {"const": true},
+    "binding": {"const": false},
+    "status": {
+      "type": "string",
+      "enum": ["QUEUED", "DELIVERED", "ACKNOWLEDGED", "COMPLETED", "HOLD", "ESCALATED", "REJECTED"]
+    },
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "created_at": {"type": "string", "format": "date-time"},
+    "acknowledged_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "department": {
+      "type": "string",
+      "enum": [
+        "ceo-agent",
+        "research-department",
+        "trading-department",
+        "risk-management",
+        "quant-backtest-department",
+        "accounting-portfolio-department",
+        "qa-department",
+        "hr-department"
+      ]
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "content_hash"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "id": {"$ref": "#/$defs/id"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "as_of": {"type": "string", "format": "date-time"},
+        "provenance_ref": {"$ref": "#/$defs/id"},
+        "acl_scope": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "uniqueItems": true
+        }
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact_ref"},
+      "uniqueItems": true
+    },
+    "artifact_refs_non_empty": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/artifact_ref"},
+      "uniqueItems": true
+    }
+  }
+}

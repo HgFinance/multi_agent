@@ -31,7 +31,7 @@ export type AgentStatus =
 export type Anim = "idle" | "walk" | "type" | "talk" | "sit";
 export type Facing = "up" | "down" | "left" | "right";
 
-const WALK_SPEED = 3.6; // tiles / sec
+const WALK_SPEED = 2; // tiles / sec — 재생 속도(기본 2x)·DEMO 4x가 곱해지므로 낮게 잡는다
 const REMOTE_SPEECH_SECONDS = 8;
 const REMOTE_COMPLETION_HOLD_SECONDS = 10;
 const REMOTE_WORK_START_MINUTES = 9 * 60;
@@ -1417,7 +1417,7 @@ export class Company {
     if (this.turbo && (this.approvalPending || this.dayComplete || !this.running)) this.turbo = false;
 
     const raw = Math.min(rawDt, 0.05);
-    const dt = raw * (this.turbo ? TURBO_SPEED : this.speed);
+    const dt = raw * (this.turbo ? TURBO_SPEED : this.speed) * (this.testMode ? 4 : 1);
     if (this.running) {
       this.clockMinutes = Math.min(
         REMOTE_WORK_END_MINUTES,
