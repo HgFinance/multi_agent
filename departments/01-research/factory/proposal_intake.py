@@ -246,8 +246,9 @@ insert into research.experiment_proposals
    counterparty, competing_explanation, competing_explanation_codes,
    skeptic_sign, edge_type, universe_key, label, baseline,
    falsification_tests, data_requirements, suggested_params,
-   trial_budget, prior_check, source_reported_effect, status)
-values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
+   trial_budget, prior_check, source_reported_effect,
+   planner_prompt_version, skeptic_prompt_version, status)
+values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
 on conflict (proposal_id) do nothing
 returning proposal_id
 """
@@ -267,7 +268,8 @@ def persist(conn, proposals) -> tuple[int, int]:
             json.dumps(p.data_requirements.model_dump(mode="json")),
             json.dumps(p.suggested_params), p.trial_budget,
             json.dumps(p.prior_check.model_dump(mode="json")),
-            json.dumps(p.source_reported_effect)))
+            json.dumps(p.source_reported_effect),
+            getattr(p, "_planner_prompt", ""), getattr(p, "_skeptic_prompt", "")))
         if cur.fetchone():
             new += 1
         else:
@@ -401,6 +403,16 @@ def _cli(argv: list[str]) -> int:
         r = intake(planner_text, skeptic_text, case_id=case_id,
                    planner_run=opt("--planner-run", ""),
                    skeptic_run=opt("--skeptic-run", ""), leads=leads)
+        # ▶ **어떤 지시 아래 서명했는지를 남긴다** (2026-08-11 회고)
+        #   1·2회차에 회의론자가 전부 기각하자 프롬프트를 바꿔 3회차에 통과시켰다.
+        #   서명자(skeptic_sign)만 남기면 그 조율이 원장에 안 잡히고, 그러면
+        #   프롬프트를 갈아가며 통과할 때까지 돌릴 수 있다 - 게이트가 아니라 장식이다.
+        pp, sp = opt("--planner-prompt", ""), opt("--skeptic-prompt", "")
+        if not sp:
+            print("  ! --skeptic-prompt 가 없다. 판정 근거를 못 남긴다")
+        for prop, _g in r.proposals:
+            object.__setattr__(prop, "_planner_prompt", pp) if hasattr(prop, "__slots__")                 else setattr(prop, "_planner_prompt", pp)
+            setattr(prop, "_skeptic_prompt", sp)
 
         print(f"{MODULE_VERSION}: 조립 {len(r.proposals)} / 반려 {len(r.rejected)}")
         for x in r.rejected:

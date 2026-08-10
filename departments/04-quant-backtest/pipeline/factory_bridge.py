@@ -46,6 +46,27 @@ REJECTING = frozenset({"REJECT", "GATE_HOLD", "KILLED", "DEMOTED"})
 # 예산을 세지 않는 판정 - 실험이 시작조차 못 한 것은 시도가 아니다.
 NOT_A_TRIAL = frozenset({"BLOCKED"})
 
+# ── 전략 구조 어휘 ─────────────────────────────────────────────────────────
+# ▶ **어휘가 없으면 개념이 조용히 사라진다** (2026-08-11 회고)
+#   기획안 초안은 롱숏이었다(하위 분위 롱 / 상위 분위 숏). 실행면이 읽는 키가
+#   horizon_days·top_n 뿐이라고 알려 주자, 기획자는 숏 다리를 **표현할 자리가
+#   없어서 개념째 지웠다.** 그런데 원장에는 그냥 "momentum 가설" 로 남았다 -
+#   "우리 엔진이 숏을 못 해 롱온리로 깎인 모멘텀" 이 아니라.
+#   그리고 그것이 결과를 정했을 수 있다: 상승장 벤치마크 +69.55% 를 롱온리
+#   선별로 이기는 것은 사실상 불가능하다. **깎인 채로 실험하고 "안 된다" 고
+#   기록한 셈이다.** 어휘 밖 구조는 깎지 말고 반려한다.
+STRUCTURE_VOCAB = frozenset({"long_only"})
+STRUCTURE_NOT_IMPLEMENTED = {
+    "long_short": "실행면이 숏 다리를 지원하지 않는다 - 롱온리로 깎아 돌리면 "
+                  "그 성적은 이 가설의 증거가 아니다",
+    "market_neutral": "베타 중립화 미구현",
+    "pairs": "페어 구성·헤지비 미구현",
+}
+
+# walk-forward 창이 최소 몇 개는 나와야 강건성을 판정할 수 있다. 이보다 적으면
+# 실험을 돌려도 INCONCLUSIVE 로 끝난다 - 그건 접수에서 막아야 할 낭비다.
+MIN_WF_WINDOWS = 4
+
 
 @dataclass
 class Gate0Result:
@@ -81,8 +102,22 @@ def _hyp_view(proposal: dict) -> dict:
     }
 
 
+def _horizon_of(proposal: dict) -> int:
+    """기획안이 쓰겠다는 형성·보유 창(거래일). 못 읽으면 0(검사 생략)."""
+    sp = proposal.get("suggested_params") or {}
+    for k in ("horizon_days", "holding_horizon", "lookback_days"):
+        v = sp.get(k)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def gate0(proposal: dict, *, trials_used: int = 0,
-          past_outcomes: list[dict] | None = None) -> Gate0Result:
+          past_outcomes: list[dict] | None = None,
+          available_days: int = 0) -> Gate0Result:
     """접수 검사. **순수 함수** - DB 없이 자체 점검이 돈다.
 
     ▶ **시도 계수와 교훈 조회의 출처를 나눈다.**
@@ -127,6 +162,30 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                      f"data_requirements.tables 의 {name!r} 가 원천 어휘 밖이다 - "
                      f"사용 가능: {sorted(SOURCE_TABLES)}. 파생 지표(수익률·베타·"
                      f"유동성 분위·비용 시나리오)는 실행면이 원천에서 계산한다")
+
+    # ①-c 전략 구조. 어휘 밖이면 **깎지 말고 반려한다.**
+    structure = str(proposal.get("strategy_structure") or "long_only").strip().lower()
+    if structure not in STRUCTURE_VOCAB:
+        why = STRUCTURE_NOT_IMPLEMENTED.get(structure)
+        r.reject("UNMAPPED_STRUCTURE",
+                 f"strategy_structure={structure!r} 를 실행면이 표현할 수 없다 - "
+                 + (why if why else f"사용 가능: {sorted(STRUCTURE_VOCAB)}")
+                 + ". 표현 못 하는 구조를 빼고 돌리면 등록한 가설과 다른 실험이 된다")
+
+    # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
+    #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
+    #   walk-forward 에서야 창 0개로 드러났다(2026-08-11 실측). 실험 한 번을
+    #   통째로 버린 셈이다 - 어휘·예산은 접수에서 보면서 이건 안 봤다.
+    horizon = _horizon_of(proposal)
+    avail = int(available_days or 0)
+    if horizon and avail:
+        windows = (avail - horizon) // max(horizon, 1)
+        if windows < MIN_WF_WINDOWS:
+            r.reject("UNDERPOWERED_DESIGN",
+                     f"형성·보유 {horizon}일을 표본 {avail}거래일에 태우면 "
+                     f"walk-forward 창이 {max(windows, 0)}개다(최소 {MIN_WF_WINDOWS}) - "
+                     f"돌려도 강건성을 못 재고 INCONCLUSIVE 로 끝난다. "
+                     f"창을 줄이거나 더 긴 이력을 요구하라")
 
     # ② 시도 압력. 어휘가 안 잡히면 Family 도 못 만든다.
     fam = family_id(_hyp_view(proposal)) if r.ok else ""
@@ -560,7 +619,7 @@ returning hypothesis_id
 """
 
 
-def intake_published(conn, *, limit: int = 20) -> list[dict]:
+def intake_published(conn, *, limit: int = 20, available_days: int = 0) -> list[dict]:
     """PUBLISHED 기획안을 Gate 0 에 태우고 통과분을 가설로 등록한다.
 
     ▶ 계수 출처를 섞지 않는다: 시도 횟수는 `quant.experiments`(실행 기록)에서,
@@ -572,9 +631,12 @@ def intake_published(conn, *, limit: int = 20) -> list[dict]:
     out: list[dict] = []
     for prop in fetch_published_proposals(conn, limit=limit):
         fam = family_id(_hyp_view(prop))
+        # ▶ 표본 일수를 접수에 넘긴다. 없으면 설계 검사가 조용히 생략되므로
+        #   못 잰 경우 0 을 넘겨 검사를 건너뛰되, 잰 경우엔 반드시 쓴다.
         gate = gate0(prop,
                      trials_used=count_family_trials(conn, fam),
-                     past_outcomes=fetch_family_outcomes(conn, fam))
+                     past_outcomes=fetch_family_outcomes(conn, fam),
+                     available_days=available_days)
         rec = {"proposal_id": prop.get("proposal_id"), "gate": gate,
                "hypothesis_id": None}
         if gate.ok:
@@ -604,9 +666,23 @@ def _cli_intake() -> int:
                            / "01-research" / "collectors"))
     from source_registry import load_project_env
 
-    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    env = load_project_env()
+    conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+    # 표본 일수는 시장 DB 에만 있다. 못 붙으면 0 -> 설계 검사는 건너뛰지만
+    # 그 사실이 로그에 남는다(조용히 통과시키지 않는다).
+    days = 0
     try:
-        for rec in intake_published(conn):
+        m = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=20)
+        c = m.cursor()
+        c.execute("select count(distinct bucket_time::date) from market.market_bars"
+                  " where interval_code = '1D'")
+        days = int(c.fetchone()[0] or 0)
+        m.close()
+        print(f"  표본 {days}거래일 기준으로 설계 실현가능성을 검사한다")
+    except Exception as e:
+        print(f"  ! 표본 일수를 못 쟀다({type(e).__name__}) - 설계 검사 생략")
+    try:
+        for rec in intake_published(conn, available_days=days):
             g = rec["gate"]
             mark = "접수" if g.ok else "반려"
             print(f"  [{mark}] {rec['proposal_id']}  family={g.trial_family_id}"
