@@ -9,9 +9,10 @@
 # 하나의 병합된 모델을 공유하므로 redis 같은 공통 Platform Container를 서비스 이름으로
 # 참조할 수 있다(계획서 5절 - 공통 인프라는 루트가 소유한다).
 #
-# ▶ 계획서 6.3의 oms-worker / broker-adapter는 아직 없다 - 코드가 없다.
-#   코드 없는 역할을 컨테이너부터 만들지 않는다(departments/03-risk/Dockerfile 상단 주석과
-#   같은 원칙). trading-api는 2026-08-03에 api/app.py가 생기면서 추가했다.
+# ▶ 계획서 6.3의 broker-adapter는 아직 없다 - 코드가 없다. 코드 없는 역할을 컨테이너부터
+#   만들지 않는다(departments/03-risk/Dockerfile 상단 주석과 같은 원칙).
+#   trading-api는 2026-08-03에 api/app.py가, trading-outbox-relay는 2026-08-10에
+#   oms/relay.py가 생기면서 추가했다.
 services:
   # trading-api: OrderIntent 심사, Broker Order 상태 머신, Paper 체결의 조회·명령면.
   # 계약은 docs/02-engineering/TRADING_DOMAIN_API_SPEC.md.
@@ -30,8 +31,49 @@ services:
       context: .
     container_name: hedgefund-trading-api
     restart: unless-stopped
+    environment:
+      # Paper 주문도 accounting-api와 같은 Supabase execution.*를 보도록
+      # durable 모드를 기본값으로 켠다. 명시적으로 PAPER_DB=false를 주면
+      # 로컬 오프라인/테스트 모드를 선택할 수 있다.
+      PAPER_DB: ${PAPER_DB:-true}
+      DATABASE_URL: ${DATABASE_URL:-}
     ports:
       - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # trading-outbox-relay: execution.outbox의 PENDING을 Redis Stream으로 발행하고 SENT로
+  # 찍는다. **이 컨테이너가 없으면 회계 원장이 영원히 비어 있다** - 회계 소비자는
+  # status='SENT' 행만 읽고, SENT를 찍는 것은 outbox.drain() 하나뿐이다.
+  #
+  # ▶ trading-api와 **같은 Image에 command만 다르다**(계획서 3.1). 별도 Dockerfile을
+  #   만들지 않는다.
+  #
+  # ▶ 복제해도 안전하다. outbox.pending()이 `for update skip locked`로 집으므로 두
+  #   인스턴스가 같은 행을 잡지 않는다(trading-api/accounting-api와 다른 점이다 -
+  #   그쪽은 상태를 들고 있어서 복제하면 갈라진다). 지금 처리량에 필요가 없어 1개로 둔다.
+  #
+  # ▶ RELAY_MAX_ATTEMPTS를 outbox 기본값(5)보다 높게 준다. 5는 backoff 합이 ~75초라
+  #   Redis를 재기동하는 것만으로도 체결이 DLQ로 떨어지고, DLQ는 pending()이 다시
+  #   집지 않아 사람이 SQL로 꺼내야 한다. 12면 ~66분을 버틴다.
+  #
+  # ▶ DATABASE_URL은 trading-api와 같은 값이어야 한다. 다른 DB를 보면 relay가 빈
+  #   outbox를 폴링하며 조용히 아무것도 안 한다.
+  trading-outbox-relay:
+    build:
+      context: .
+    container_name: hedgefund-trading-outbox-relay
+    restart: unless-stopped
+    command: ["python", "oms/relay.py", "--serve"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
+      RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
