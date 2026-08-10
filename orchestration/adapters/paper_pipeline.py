@@ -32,9 +32,7 @@ WorkerLLM = Callable[[str, str], str]
 _PAPER_NAMESPACE = UUID("d8ce7fb7-4b08-4e4f-8524-8a516a6f0b8d")
 
 AUXILIARY_WORKER_DEPARTMENT = {
-    # 2026-08-10 전략 공장 재편: strategy-research 흐름 앞뒤에 리서치 기획 단계와
-    # 결과 환류 단계가 붙었다. 환류가 없으면 이 흐름은 공장이 아니라 일방통행이다.
-    "research-proposal": "research",
+    # 2026-08-10 (재일): 퀀트 환류 단계. 기존 항목은 건드리지 않는다.
     "quant-outcome-feedback": "quant-backtest",
     "quant-backtest": "quant-backtest",
     "qa-release-review": "qa",
