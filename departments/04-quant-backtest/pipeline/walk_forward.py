@@ -94,6 +94,12 @@ class WFWindow:
     n_warmup_days: int
     n_test_days: int
     partial: bool         # 반기 달력 끝이 데이터 끝보다 뒤 = 미완 반기
+    # ▶ **embargo** - 시험창 앞쪽에서 잘라내는 거래일 수.
+    #   웜업 마지막 날의 시그널이 보유 지평만큼 미래로 이어지므로, 그 구간을
+    #   그대로 평가하면 **직전 구간 정보가 성적에 섞인다**(López de Prado
+    #   purging/embargo). 창이 붙어 있는 walk-forward 에서 특히 그렇다.
+    embargo_days: int = 0
+    embargoed_start: date | None = None   # embargo 적용 후 실제 평가 시작일
 
 
 def half_label(d: date) -> str:
@@ -105,7 +111,8 @@ def half_calendar_end(label: str) -> date:
     return date(year, 6, 30) if label.endswith("H1") else date(year, 12, 31)
 
 
-def make_windows(dates: list[date], warmup_days: int) -> list[WFWindow]:
+def make_windows(dates: list[date], warmup_days: int,
+                 embargo_days: int = 0) -> list[WFWindow]:
     """오름차순 거래일 -> 무겹침 반기 시험창. 웜업을 확보 못 하는 앞 반기는 제외.
 
     순수 함수다 - 같은 (dates, warmup_days)는 언제나 같은 창 목록이고,
@@ -123,16 +130,26 @@ def make_windows(dates: list[date], warmup_days: int) -> list[WFWindow]:
         i0 = index[ds[0]]
         if i0 < warmup_days:
             continue    # 데이터 맨 앞 반기는 웜업 전용으로만 쓰인다 - 창이 될 수 없다
+        # embargo 만큼 앞을 잘라낸다. 잘라낸 뒤 남는 날이 없으면 그 창은
+        # 평가할 수 없다 - 억지로 0일짜리 창을 만들지 않는다.
+        emb = max(0, int(embargo_days))
+        if emb >= len(ds):
+            continue
+        eff = ds[emb:]
         out.append(WFWindow(
             label=label, warmup_start=dates[i0 - warmup_days],
             test_start=ds[0], test_end=ds[-1],
-            n_warmup_days=warmup_days, n_test_days=len(ds),
+            n_warmup_days=warmup_days, n_test_days=len(eff),
+            embargo_days=emb,
+            embargoed_start=eff[0],
             partial=half_calendar_end(label) > dates[-1]))
     return out
 
 
 def slice_market(market: Market, w: WFWindow) -> Market:
     """[warmup_start, test_end] 밖을 물리적으로 제거 - 창 밖 미래가 못 들어온다."""
+    # ▶ 웜업은 그대로 두고(시그널 계산에 필요하다) 평가만 embargo 뒤부터
+    #   시작한다. 웜업까지 자르면 시그널이 아예 안 나온다.
     keep = [d for d in market.dates if w.warmup_start <= d <= w.test_end]
     kset = set(keep)
     opens = {k: v for k, v in market.opens.items() if k[0] in kset}
@@ -157,6 +174,9 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     # 웜업 중 무거래를 **구조로** 강제한다. MOM-20 은 월초 리밸런스+룩백 20이
     # 우연히 웜업 체결을 피했지만, REV-5(5일 리밸런스)에서 137건이 웜업에
     # 체결되며 아래 단언이 실측 발화했다(2026-08-01) - 운이 아니라 계약으로.
+    # ▶ **거래는 test_start 부터, 평가는 embargo 뒤부터.** 둘을 같게 두면
+    #   웜업 마지막 시그널의 보유 지평이 성적에 그대로 섞인다 - 직전 구간
+    #   정보가 새는 자리다.
     result = run_backtest(sub, dict(config,
                                     no_trade_before=w.test_start.isoformat()))
 
@@ -168,12 +188,41 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     assert abs(base_val - capital) <= 1e-6 * capital, \
         f"{w.label}: 웜업 말 자본 {base_val} != 초기자본 {capital}"
 
-    equity_test = result.equity[warmup_len - 1:]     # 기준점 = 초기자본
+    # embargo 만큼 평가 시작을 미룬다. 기준점은 그 직전 자산이다 -
+    # 초기자본으로 두면 embargo 구간 손익이 성적에 남는다.
+    emb = int(getattr(w, "embargo_days", 0) or 0)
+    start_i = max(warmup_len - 1, warmup_len - 1 + emb)
+    if start_i >= len(result.equity) - 1:
+        # 잘라내고 나면 평가할 구간이 없다 - 0 으로 채우지 않고 알린다
+        return {"label": w.label, "usable": False,
+                "reason": f"embargo {emb}일 적용 후 평가 구간이 없다"}
+    equity_test = result.equity[start_i:]
     traded = sum(abs(f.quantity * f.price) for f in result.fills)
     m = compute_metrics(equity_test, result.fills, capital, traded)
     # 판정 제외 규칙(fragility_summary min_test_days)의 재료 - 창 크기를 싣는다
     m["test_days"] = w.n_test_days
     m["partial_window"] = w.partial
+
+    # ▶ **같은 창의 시장 수익률**을 함께 낸다. 국면 분해(regime_breakdown)가
+    #   "이 전략이 상승장에서만 되는가" 를 보려면 창마다 시장이 어땠는지가
+    #   있어야 하는데, 지금까지 전략 성과만 냈다. 전략 성과로 국면을 나누면
+    #   "잘된 창" 과 "상승장" 이 같은 말이 되어 아무것도 못 가린다.
+    try:
+        from backtest_runner import buy_and_hold_equity
+
+        bh = buy_and_hold_equity(sub, config)
+        bh_test = [v for d, v in bh if d >= equity_test[0][0]]
+        if len(bh_test) >= 2 and bh_test[0]:
+            m["benchmark_return"] = bh_test[-1] / bh_test[0] - 1.0
+    except Exception:
+        pass          # 못 구하면 안 싣는다 - 없는 벤치마크를 0 으로 두지 않는다
+
+    # ▶ 창의 **일별 수익률**을 함께 돌려준다. 과적합 통계(DSR/부트스트랩)는
+    #   수익률 계열이 60개 이상 필요한데 창 요약은 5개뿐이라, 지금까지 이
+    #   경로에서는 계산 자체가 불가능했다(카드 validation 이 전부 null 이었다).
+    eq = [v for _, v in equity_test]
+    m["_daily_returns"] = [eq[i] / eq[i - 1] - 1.0
+                           for i in range(1, len(eq)) if eq[i - 1]]
     return m
 
 
@@ -251,7 +300,14 @@ def wf_input_hash(dataset_hash: str, windows: list[WFWindow],
 # 실행 + 등록 (hypothesis -> experiment -> 창별 metrics -> SUMMARY)
 # ---------------------------------------------------------------------------
 
-def register_and_validate(name: str, version: str) -> int:
+def register_and_validate(name: str, version: str, *,
+                          config: dict | None = None,
+                          edge: dict | None = None,
+                          title: str | None = None) -> int:
+    # ▶ config/edge 를 인자로 연다. 예전엔 둘 다 하드코딩(DEFAULT_CONFIG,
+    #   type='none')이라 **같은 Family 안 변형을 만들 수 없었고**, 그래서
+    #   PBO 가 요구하는 "변형 4개 이상" 을 영원히 못 채웠다. 실측 17건 중
+    #   11건이 edge type='none' 이라 Family 미사상이었던 것도 이 때문이다.
     import psycopg2
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "01-research" / "collectors"))
@@ -259,7 +315,7 @@ def register_and_validate(name: str, version: str) -> int:
 
     env = load_project_env()
     conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
-    config = dict(DEFAULT_CONFIG)
+    config = dict(config or DEFAULT_CONFIG)
     code_ver = wf_code_version()
     trace = str(uuid.uuid4())
     try:
@@ -287,17 +343,48 @@ def register_and_validate(name: str, version: str) -> int:
                 values (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, 'TESTING', %s, %s)
                 returning hypothesis_id
                 """,
-                ("[QNT-04] MOM-20 walk-forward 강건성 검증",
+                (title or "[QNT-04] MOM-20 walk-forward 강건성 검증",
                  ("MOM-20 스모크의 강건성 판정 - 전략 승인 목적이 아니다. "
                  "창별 성과의 부호 일관성·최악 창 MDD·창간 Sharpe 산포를 결정론 "
                  "규칙으로 요약해 QNT-03 스모크 결과가 특정 구간의 우연인지 "
                  "가려낸다. 판정으로 hypotheses.status 를 바꾸지 않는다(승인 "
                  "권한은 CEO·Risk·QA 체인)."),
-                 json.dumps({"type": "none", "note": "robustness check - edge 주장 없음"}),
+                 json.dumps(edge or {"type": "none",
+                                     "note": "robustness check - edge 주장 없음"}),
                  json.dumps({"fragility_rules": FRAGILITY_RULES,
                              "note": "규칙 위반 플래그가 하나라도 있으면 FRAGILE"}),
                  json.dumps([f"{name}/{version}"]), WF_VERSION, trace))
             hyp_id = str(cur.fetchone()[0])
+
+            # ▶ **사전등록을 건너뛰지 않는다.** 이 경로는 오케스트레이터를
+            #   안 타므로 material_fingerprint 가 비어 있었고, 그래서 여기서
+            #   나온 실험은 ExperimentCard 를 만들 수 없었다(지문이 없으면
+            #   결과를 보고 설정을 바꿨는지 확인할 방법이 없다).
+            #   관문을 우회하는 실행 경로를 남겨두면 규율이 선택사항이 된다.
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from preregistration import preregister
+
+            spec = {
+                "strategy_family": (edge or {}).get("type") or "robustness",
+                "universe_version": f"{name}/{version}",
+                "holding_horizon": config.get("lookback_days"),
+                "decision_frequency": config.get("rebalance"),
+                "cost_model_version": COST_MODEL["version"],
+                "preregistered_splits": [w.label for w in windows],
+                "baseline": "equal_weight_buy_and_hold",
+                "entry_exit_rules": {k: config[k] for k in sorted(config)},
+                "falsification_tests": FRAGILITY_RULES,
+                "label": "forward_return",
+            }
+            pre = preregister(spec)
+            if not pre.ok:
+                # 고정할 것이 없으면 실험하지 않는다 - 등록한 척만 하는 실험은
+                # 나중에 무엇을 바꿔도 지문이 같아 검사가 무력하다
+                raise RuntimeError(f"사전등록 불가: {pre.reason}")
+            cur.execute(
+                """update quant.hypotheses
+                      set material_fingerprint=%s, preregistered_at=now()
+                    where hypothesis_id=%s""", (pre.fingerprint, hyp_id))
 
             cur.execute(
                 """
@@ -326,6 +413,43 @@ def register_and_validate(name: str, version: str) -> int:
             for w in windows:
                 per_window.append((w.label, run_window(slice_market(market, w), w, config)))
             stats, flags, verdict = fragility_summary(per_window)
+
+            # ▶ **과적합 통계.** 창 요약은 5개뿐이라 계산이 불가능했는데,
+            #   창별 일별 수익률을 이어 붙이면 OOS 계열이 된다. 웜업은
+            #   빠져 있고 창은 겹치지 않으므로 이어 붙여도 미래가 안 샌다.
+            from overfit_stats import bootstrap_ci, deflated_sharpe
+
+            oos_rets = [r for _, m in per_window
+                        for r in (m.get("_daily_returns") or [])]
+            n_variants = 1
+            try:
+                with conn.cursor() as c2:
+                    c2.execute(
+                        """select count(distinct e.experiment_id)
+                             from quant.experiments e
+                             join quant.hypotheses h
+                               on h.hypothesis_id = e.hypothesis_id
+                            where h.expected_edge->>'type' = %s""",
+                        (str((edge or {}).get("type") or ""),))
+                    n_variants = max(1, int((c2.fetchone() or [1])[0]))
+            except Exception:
+                n_variants = 1        # 못 세면 1 - 없는 압력을 지어내지 않는다
+            for src in (deflated_sharpe(oos_rets, trials=n_variants),
+                        bootstrap_ci(oos_rets)):
+                for k, v in src.items():
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        stats[k] = v
+
+            # ▶ **국면 분해.** 창별 시장 수익률로 묶는다 - 상승장에서만 되는
+            #   전략을 총계 하나가 숨긴다. 계약이 SUBMIT_TO_QA 에 이걸 요구한다.
+            from regime_breakdown import build as regime_build
+
+            bench = {l: m["benchmark_return"] for l, m in per_window
+                     if m.get("benchmark_return") is not None}
+            reg = regime_build([(l, m) for l, m in per_window
+                                if l in bench], bench)
+            for k, v in reg["meta"].items():
+                stats[f"regime_{k}"] = v
         except Exception:
             # 실패도 기록한다 - 성공만 남기는 것이 p-hacking 의 시작이다
             with conn.cursor() as cur:
@@ -335,6 +459,21 @@ def register_and_validate(name: str, version: str) -> int:
             raise
 
         with conn.cursor() as cur:
+            # 국면별 지표를 dimensions={"regime": …} 로 남긴다 - 카드가
+            # regime_breakdown 을 여기서 읽는다
+            for rname, row in reg["regime_breakdown"].items():
+                for k, v in row.items():
+                    cur.execute(
+                        """
+                        insert into quant.experiment_metrics
+                          (experiment_id, split, metric, value, dimensions,
+                           cost_model_version)
+                        values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
+                        on conflict (experiment_id, split, metric, dimensions)
+                        do update set value = excluded.value
+                        """,
+                        (exp_id, k, v, json.dumps({"regime": rname}),
+                         COST_MODEL["version"]))
             for label, m in per_window + [("SUMMARY", stats)]:
                 for k, v in m.items():
                     if isinstance(v, (int, float)) and not isinstance(v, bool) and v is not None:  # bool 은 int 서브클래스 - DB numeric 에 못 들어간다 (실측)
@@ -470,6 +609,33 @@ def _check_no_lookahead_through_window():
     print("  선견 차단(창 경유 t-1)  OK")
 
 
+def _check_embargo_removes_leading_days():
+    """**embargo 가 시험창 앞을 실제로 잘라내는가.**
+
+    창이 붙어 있는 walk-forward 에서 웜업 마지막 시그널은 보유 지평만큼
+    미래로 이어진다. 그 구간을 그대로 평가하면 직전 구간 정보가 성적에
+    섞인다 - 이 모듈이 내는 fragility 도, 그 위에서 계산한 DSR·PBO 도
+    같이 오염된다.
+    """
+    days = _weekdays(date(2024, 1, 1), date(2026, 6, 30))
+    base = make_windows(days, WARMUP_TRADING_DAYS)
+    emb = make_windows(days, WARMUP_TRADING_DAYS, embargo_days=5)
+    assert base and emb, (len(base), len(emb))
+    b0, e0 = base[0], emb[0]
+    # 시험창 경계는 그대로다 - 잘라내는 것은 **평가 시작**이다
+    assert e0.test_start == b0.test_start and e0.test_end == b0.test_end
+    assert e0.embargo_days == 5 and b0.embargo_days == 0
+    assert e0.n_test_days == b0.n_test_days - 5, (b0.n_test_days, e0.n_test_days)
+    assert e0.embargoed_start > b0.test_start, (b0.test_start, e0.embargoed_start)
+
+    # ▶ 잘라내면 남는 날이 없는 창은 **만들지 않는다** - 0일짜리 창을
+    #   억지로 만들면 그 창의 지표가 전부 무의미한 값이 된다
+    huge = make_windows(days, WARMUP_TRADING_DAYS, embargo_days=10_000)
+    assert huge == [], huge
+    # 음수는 0 으로 본다(자르지 않음) - 미래를 당겨오지 않는다
+    assert make_windows(days, WARMUP_TRADING_DAYS, embargo_days=-5)[0].embargo_days == 0
+
+
 def _check_window_metrics_determinism():
     start, end = date(2025, 1, 2), date(2025, 12, 31)
     m = _synth_market(start, end, {"A": lambda i, d: 100.0 * (1.001 ** i),
@@ -553,10 +719,12 @@ if __name__ == "__main__":
             opt("--dataset-version", "v1")))
 
     print(f"{WF_VERSION} 자체 점검 (DB 없음)")
+    _check_embargo_removes_leading_days()
+    print("  embargo 적용            OK")
     _check_windows_pure()
     _check_slice_no_future()
     _check_no_lookahead_through_window()
     _check_window_metrics_determinism()
     _check_fragility_rules()
     _check_input_hash()
-    print("Walk-Forward 6개 영역 통과. 실행은 --run")
+    print("Walk-Forward 7개 영역 통과. 실행은 --run")
