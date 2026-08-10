@@ -672,11 +672,20 @@ services:
     depends_on:
       - research-hermes
     command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
-    # 대시보드는 **한 부서의 데이터만** 본다 - 부서 분리를 지켜야 하므로
-    # 여러 부서를 한 화면에 모으지 않는다. 다른 부서를 보려면 그 부서의
-    # 디렉터리를 마운트한 대시보드를 따로 띄운다(포트도 따로).
+    # 대시보드는 4명 팀원이 함께 보는 **공용 운영 콘솔**이다(2026-08-10) - CEO가
+    # 사용자 질의마다 동적으로 만드는 Task Graph/Kanban(고정 파이프라인이 아니라
+    # 그때그때 필요한 부서만 골라 병렬/순차 배치한 결과)의 상태·담당을 부서 경계
+    # 없이 한 화면에서 본다. 그래서 8개 profiles/ 전체와 공용 Kanban 상태가 있는
+    # 공용 Hermes Home(~/.hermes) 전체를 마운트한다 - research-department 하나만
+    # 보던 예전 구조에서 바뀌었다.
+    #
+    # ▶ 이건 **8개 실행 서비스(research-hermes 등)의 분리 원칙과는 다른 얘기다.**
+    #   실행 서비스는 여전히 각자 /home/ubuntu/.hermes/profiles/<department> 하나만
+    #   마운트해서 auth/config/memory/runtime을 독립 유지한다(위 "부서별 컨테이너
+    #   1개 = 부서별 데이터 디렉터리 1개" 원칙 그대로) - Dashboard는 조회 전용이라
+    #   그 위에서 전체를 보는 것이고, 실행 격리를 없애는 게 아니다.
     volumes:
-      - /home/ubuntu/.hermes/profiles/research-department:/opt/data
+      - /home/ubuntu/.hermes:/opt/data
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
