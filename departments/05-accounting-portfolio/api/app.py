@@ -27,14 +27,10 @@
 이 API는 서비스 호출자(BFF, 부서 워커)용이며, 그래도 안전한 이유는 불변식이 HTTP
 계층이 아니라 도메인 모듈에 있기 때문이다 - 불균형 분개는 누가 부르든 LedgerError다.
 
-**저장소는 `DATABASE_URL` 유무로 갈린다.**
-  - 있으면 Supabase `accounting.*`가 원장이다(`ledger/repository.py`). 재시작해도 남고
-    다른 프로세스도 같은 장부를 본다. 이때 `ledger_id`는 **`book_id`와 같다** - Book
-    하나가 Fund 하나에 속하므로 별도 매핑표가 필요 없고, 그 표가 없어야 재시작 후에도
-    같은 id로 같은 장부를 연다.
-  - 없으면 프로세스 메모리다. 자체 점검과 오프라인 실험용이며 재시작하면 사라진다.
-    **조용히 이 모드로 떨어지지 않는다** - DB 연결이 실패하면 예외를 낸다. 메모리로
-    말없이 후퇴하면 기록됐다고 믿은 분개가 사라진다.
+**저장소 모드:**
+  - `ACCOUNTING_MODE=OFFLINE`이면 인메모리 fixture 저장소를 쓴다.
+  - `ACCOUNTING_MODE=PAPER_DB`(또는 durable mode)이면 `DATABASE_URL`과 DB 드라이버가
+    필수다. 연결 실패는 503으로 fail closed 하며 memory로 후퇴하지 않는다.
 
 응답의 `authoritative`는 두 모드 모두 `false`다. 저장 위치가 바뀌었을 뿐 NAV 확정·
 Close 승인 절차는 아직 없기 때문이다 - `source_of_record` 필드가 실제 저장 위치를 말한다.
@@ -75,7 +71,12 @@ from fill_consumer import project
 from ledger import Journal, Ledger, LedgerError, Position, decimal_str
 from portfolio import MarkPrice, PortfolioSnapshot, ValuationError, value_portfolio
 from recon_repository import ReconRun, open_breaks, save_reconciliation
-from repository import LedgerConflictError, LedgerPersistenceError, LedgerRepository
+from repository import (
+    LedgerConflictError,
+    LedgerPersistenceError,
+    LedgerRepository,
+    durable_required_from_env,
+)
 from reconciliation import (
     FillRecord,
     ReconResult,
@@ -89,9 +90,17 @@ API_VERSION = "v1"
 app = FastAPI(title="Accounting/Portfolio Domain API", version=API_VERSION)
 
 # ── 저장소 ────────────────────────────────────────────────────────────────────
-# 파일 상단 참고. DATABASE_URL 이 있으면 Supabase, 없으면 아래 dict 들이 원장이다.
-# 엔드포인트는 두 모드를 구분하지 않는다 - `_ledger()` 아래만 안다.
-_repo: LedgerRepository | None = LedgerRepository.from_env()
+# DATABASE_URL이 없는 경우는 명시적 offline 모드일 때만 memory를 사용한다.
+# PAPER_DB/durable mode의 연결 실패는 `_store_error`로 남기고 모든 mutation/read를
+# 503으로 fail closed 한다.
+_store_error: LedgerPersistenceError | None = None
+try:
+    _repo: LedgerRepository | None = LedgerRepository.from_env(
+        required=durable_required_from_env()
+    )
+except LedgerPersistenceError as exc:
+    _repo = None
+    _store_error = exc
 # 인메모리 모드 전용. key 는 book_id 다(DB 모드의 ledger_id 규약과 같게 맞춘다).
 _ledgers: dict[UUID, Ledger] = {}
 # 확정된 스냅샷 이력. Daily Report 가 기초·기말 최소 2개를 요구한다.
@@ -170,6 +179,8 @@ def _ledger(ledger_id: UUID) -> Ledger:
               규모에서는 문제가 없고, 느려지면 Position/Cash projection 을 기점으로
               삼는 증분 복원으로 바꾼다(`repository.load()` 주석).
     """
+    if _store_error is not None:
+        raise _store_error
     if _repo is not None:
         fund_id = _repo.fund_of_book(ledger_id)
         if fund_id is None:
@@ -242,6 +253,7 @@ def _journal_view(j: Journal) -> dict:
              "quantity": _d(l.quantity), "unit_price": _d(l.unit_price)}
             for l in j.lines
         ],
+        "metadata": j.metadata,
         **_provenance(),
     }
 
@@ -467,6 +479,8 @@ def create_ledger(body: LedgerIn) -> dict:
     멱등이 아니면 같은 Fund/Book 에 원장이 둘 생기고 NAV 가 갈린다. 그래서 201 이어도
     새로 만들어진 것이 아닐 수 있다.
     """
+    if _store_error is not None:
+        raise _store_error
     if _repo is not None:
         # DB 모드에서는 Fund/Book 을 여기서 만들지 않는다. Fund 를 여는 것은 자본 구조
         # 결정이라 주문 처리 중에 일어날 일이 아니다(`repository.bootstrap()` 이 한다).
@@ -515,18 +529,26 @@ def post_capital(ledger_id: UUID, body: CapitalIn) -> dict:
 
 @app.post(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/fills", status_code=201)
 def post_fill(ledger_id: UUID, body: FillIn) -> dict:
-    """체결 하나를 균형 잡힌 분개로 바꾼다. 트레이딩본부 -> 회계본부의 접점이다.
+    """Offline fixture-only Fill ingress.
 
-    같은 `broker_fill_id` 로 다시 부르면 기존 분개를 그대로 돌려준다(불변식 3) -
-    재처리로 잔고가 두 배가 되지 않는다. 보유보다 많은 매도는 LedgerError 로 막힌다.
+    Durable PAPER_DB accounting accepts fills only from the canonical SENT
+    ``trading.fill.v1`` consumer. This endpoint remains for explicit offline
+    tests and is never treated as runtime evidence.
     """
     led = _ledger(ledger_id)
-    journal = led.post_fill(body, body.side, body.instrument_id,
-                            _position(led, body.instrument_id))
-    if _repo is not None:
-        # Position/Cash 는 체결에서 바로 나온다. 시세가 없어도 참이므로 평가를
-        # 기다리지 않고 여기서 갱신한다(ACC-01: 체결 1건 -> 분개 + Position).
-        _repo.save_projection(led)
+    if _repo is not None or durable_required_from_env():
+        raise HTTPException(409, _envelope(
+            "ACCOUNTING_CANONICAL_FILL_REQUIRED",
+            "API-injected Fill is fixture-only; canonical SENT trading.fill.v1 is required",
+        ))
+    journal = led.post_fill(
+        body, body.side, body.instrument_id, _position(led, body.instrument_id),
+        metadata={
+            "evidence_class": "fixture_only",
+            "canonical": False,
+            "source": "accounting-api",
+        },
+    )
     return _journal_view(journal)
 
 
@@ -751,11 +773,38 @@ def create_daily_report(ledger_id: UUID, body: DailyReportIn) -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness. **저장소가 죽어도 200이다.**
+
+    여기서 503을 내면 오케스트레이터(EB/ECS 헬스체크)가 DB 순단마다 멀쩡한 인스턴스를
+    교체한다 - 프로세스는 살아 있고 분개를 올바르게 거절하고 있는데 죽었다고 판정하는
+    것이다. 거절은 도메인 엔드포인트와 `/health/ready` 가 한다.
+
+    **저장소를 건드리지 않는다.** `_repo.counts()` 는 DB I/O 라 여기 두면 DB 가 죽었을
+    때 이 경로도 같이 503이 되어 분리한 의미가 없어진다. 수치는 `/health/ready` 에 있다.
+    """
+    return {
+        "status": "degraded" if _store_error is not None else "ok",
+        "api_version": API_VERSION,
+        "store": ("supabase accounting.*" if _repo is not None
+                  else "in-memory (accounting.* 미연결)"),
+        "store_available": _store_error is None,
+        "store_error": str(_store_error) if _store_error is not None else None,
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 저장소에 실제로 닿아 보고, 못 닿으면 503이다.
+
+    Load Balancer 가 트래픽을 끊을 판단은 이쪽을 본다(`apps/api/main.py` 와 같은 규약).
+    """
+    if _store_error is not None:
+        raise _store_error
     # 인메모리 모드의 값들이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
     ledgers, journals = (_repo.counts() if _repo is not None
                          else (len(_ledgers), sum(len(l.journals) for l in _ledgers.values())))
     return {
-        "status": "ok",
+        "status": "ready",
         "api_version": API_VERSION,
         "ledgers": ledgers,
         "journals": journals,
@@ -774,6 +823,7 @@ if __name__ == "__main__":
     # 점검용 분개를 남기면 안 된다. DB 모드 왕복 검증은 ledger/repository.py 와
     # ledger/fill_consumer.py 가 자기 Fixture 장부에서 한다.
     _repo = None
+    _store_error = None
 
     c = TestClient(app)
     now = _now()
@@ -934,6 +984,31 @@ if __name__ == "__main__":
     missing = c.get(f"/accounting/v1/ledgers/{uuid4()}")
     assert missing.status_code == 404 and \
         missing.json()["error_code"] == "ACCOUNTING_LEDGER_NOT_FOUND", missing.text
+
+    # 16-1. **Liveness 는 저장소를 건드리지 않는다.** `_repo.counts()` 는 DB I/O 라
+    #       여기 두면 DB 가 죽었을 때 liveness 도 같이 503이 되고, 그러면 EB/ECS
+    #       헬스체크가 멀쩡한 인스턴스를 교체한다. 수치와 판정은 /health/ready 가 한다.
+    live = c.get("/health")
+    assert live.status_code == 200 and live.json()["store_available"] is True
+    assert "journals" not in live.json(), "liveness 가 저장소를 조회했다"
+    ready = c.get("/health/ready")
+    assert ready.status_code == 200 and "journals" in ready.json(), ready.text
+
+    # 16-2. 저장소가 죽으면 liveness 는 200 degraded, readiness 와 도메인 경로만 503.
+    #       `import app` 으로는 안 된다 - 이 파일은 __main__ 으로 돌고 있어서 별개
+    #       모듈 객체가 생긴다. 여기가 모듈 최상위라 직접 대입이 곧 그 전역이다.
+    _saved_store_error = _store_error
+    _store_error = LedgerPersistenceError("durable accounting mode requires DATABASE_URL: 점검용")
+    try:
+        degraded = c.get("/health")
+        assert degraded.status_code == 200, "저장소 장애에 liveness 가 죽었다"
+        assert degraded.json()["status"] == "degraded", degraded.text
+        assert degraded.json()["store_available"] is False
+        assert c.get("/health/ready").status_code == 503, "readiness 가 장애를 숨겼다"
+        # degraded 가 "그래도 분개는 받는다"가 되면 안 된다
+        assert c.get(f"/accounting/v1/ledgers/{lid}").status_code == 503
+    finally:
+        _store_error = _saved_store_error
 
     print("ok - Accounting/Portfolio Domain API 16개 영역 점검 통과 "
           "(차대균형·멱등·Reversal 전용 정정·NAV 미확정 포함)")
