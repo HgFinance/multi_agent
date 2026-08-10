@@ -11,7 +11,8 @@
 services:
   governance-api:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-governance-api
     restart: unless-stopped
     environment:
@@ -28,7 +29,8 @@ services:
   # governance.mandate.changed.v1 등 다른 Consumer Group용 Event는 조용히 넘긴다.
   notification-worker:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-notification-worker
     restart: unless-stopped
     command: ["python", "governance_events/worker.py"]
@@ -45,21 +47,21 @@ services:
     stop_grace_period: 20s
 
   # ceo-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는 Backend Image에 안 넣고
-  # 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는 CLAUDE.md 배정표대로
-  # ANTHROPIC_API_KEY만 준다. 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의
-  # 매핑("ceo-agent")과 일치해야 한다 - 다른 부서(예: research-department)와 달리 CEO는
-  # CLI 명령 이름과 프로필 이름이 같다.
+  # 공식 Image를 별도 Container로 띄운다(계획서 3.1). Provider는 하드코딩하지 않는다 -
+  # /opt/data/config.yaml(provider:)과 auth.json이 결정한다(CEO는 Codex 배정, 2026-08-10
+  # 확정 매핑). 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의 매핑("ceo-agent")과
+  # 일치해야 한다 - 다른 부서(예: research-department)와 달리 CEO는 CLI 명령 이름과
+  # 프로필 이름이 같다.
   ceo-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-ceo-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data
+      - /home/ubuntu/.hermes/profiles/ceo-agent:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

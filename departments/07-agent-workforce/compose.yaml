@@ -44,20 +44,20 @@ services:
     stop_grace_period: 20s
 
   # workforce-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는 Backend Image에 안
-  # 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는 CLAUDE.md 배정표대로
-  # OPENAI_API_KEY만 준다. 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의
-  # 매핑("hr-department")과 일치해야 한다.
+  # 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). Provider는 하드코딩하지 않는다 -
+  # /opt/data/config.yaml(provider:)과 auth.json이 결정한다(HR은 Codex 배정, 2026-08-10
+  # 확정 매핑). 프로필 디렉터리 이름은 scripts/sync_hermes_profiles.sh의 매핑("hr-department")과
+  # 일치해야 한다.
   workforce-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-workforce-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-hr-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/hr-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

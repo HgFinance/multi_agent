@@ -114,31 +114,19 @@ services:
     cpus: 0.5
     pids_limit: 64
 
-  # 표준 Profile 경로는 ~/.hermes/profiles/accounting-portfolio-department다.
-  # Windows에서는 ${USERPROFILE}로 같은 호스트 경로를 마운트한다.
+  # 주의 사항은 departments/02-trading/compose.yaml과 동일하다 - 볼륨 이름 = Profile 이름,
+  # 부서별 데이터 디렉터리 분리. Provider는 하드코딩하지 않는다 - /opt/data/config.yaml과
+  # auth.json이 결정한다(Accounting은 Codex 배정, 2026-08-10 확정 매핑).
   accounting-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-accounting-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes/profiles/accounting-portfolio-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/accounting-portfolio-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # Claude 구독 한도로 Sonnet 사용 (2026-08-03). 근거와 주의는
-      # departments/02-trading/compose.yaml 같은 절 주석과 동일하다 -
-      # 호스트 프록시(scripts/claude_code_proxy.py --serve)가 선행 조건이고,
-      # ANTHROPIC_API_KEY는 일부러 주지 않는다(종량 과금으로 새지 않게).
-      # 자리표시자인 이유는 02-trading/compose.yaml 주석 참고 - Hermes는 자격이
-      # 비면 호출을 안 하는데 프록시는 그 값을 읽지 않는다. 진짜 구독 토큰을
-      # 컨테이너에 넣지 않으면서, BASE_URL이 빠지면 막히는 쪽으로 동작한다.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-proxy-placeholder-not-a-credential}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

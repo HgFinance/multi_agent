@@ -220,6 +220,16 @@ class PortfolioTaskPlan(_ApiModel):
     requested_departments: list[str] = Field(default_factory=list)
     routing_basis: str = Field(min_length=1)
     matched_terms: dict[str, list[str]] = Field(default_factory=dict)
+    # --- CEO Hermes 프로필이 라우팅한 경우에만 채워지는 필드 ---
+    # PORTFOLIO_CEO_TASK_PLANNER_MODE=llm 일 때 orchestration/adapters/ceo_task_planner.py
+    # 가 내보낸다. 결정론 경로에서는 전부 기본값이라 응답 모양이 바뀌지 않는다.
+    # extra="forbid" 라 여기 선언하지 않으면 LLM 라우팅을 켜는 순간 BFF 가 422 를 낸다.
+    mandate_considered: bool = False
+    planner_rationale: str | None = None
+    runtime: dict[str, str] = Field(default_factory=dict)
+    # LLM 라우팅이 실패해 결정론으로 되돌아간 이유. 값이 있으면 "켰는데 안 돌았다"는
+    # 뜻이므로 조용히 사라지지 않게 응답에 남긴다.
+    planner_fallback_reason: str | None = None
 
 
 class PortfolioInstrumentRecommendation(_ApiModel):

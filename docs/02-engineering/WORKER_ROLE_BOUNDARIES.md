@@ -25,13 +25,13 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
 | HR | 1 | 0 | 1 | `profile-architecture-worker`만 실행; Job Profile/Eval Set 제안 전용 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
-| Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
+| Trading | 0 (+결정론 1, +임시 전략 Worker) | 0 | 0 | **2026-08-10 Bull/Bear 제거** — 고정 LLM 0명, 전략 Bundle당 임시 결정론 Worker |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
 | Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 21개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
@@ -123,6 +123,7 @@ LLM Worker 21개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개,
 - **향후 모델 변경**: `ollama list` 확인 → Worker별 Golden/Adversarial benchmark → HR 제안 → QA 검증 → CEO 승인 후 Profile과 `OLLAMA_*_MODEL`을 함께 변경한다.
 - **Notion**: 부서별 Reporter와 Markdown-to-Notion block 변환기는 어댑터다. 실제 업로드는 `NOTION_TOKEN`과 부서별 DB ID가 설정되고 API 호출이 성공한 경우에만 `upload_succeeded=true`로 본다. Notion은 Projection이며 원본 판정을 소유하지 않는다.
 - **LangSmith**: 일부 부서의 handoff 필드는 존재하지만 기본 tracing은 꺼져 있다. 환경변수·자격증명·DNS·네트워크가 모두 확인되고 민감 필드 마스킹을 통과한 실제 run만 trace 성공으로 본다. 코드나 API Key의 존재만으로 연결 완료로 표시하지 않는다.
+- **Langfuse (2026-08-10 신규)**: HR(07-agent-workforce)이 6개 투자본부 Worker의 유휴 여부를 관측하는 전용 경로다. LangSmith와 이중 계측이며 부서 코드는 겹치지 않는다 — `orchestration/workflows/portfolio_recommendation.py`의 Worker 실행 지점 한 곳(`publish_langfuse_metric`)이 6개 부서 전부를 자동으로 계측하고, HR은 `departments/07-agent-workforce/scorecard/observability.py`(결정론, LLM 없음)로 timestamp만 조회한다. 자격증명이 없거나 조회가 실패하면 `IDLE`이 아니라 `UNAVAILABLE`로 판정한다 — "쉬고 있다"와 "우리가 모른다"를 구분한다. 근거·제거 기준은 [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md) 11절.
 - **PIKE-RAG / Light-RAG**: 현재 전사 적용 완료가 아니다. Risk의 Policy RAG, Research의 Evidence RAG, QA의 Evidence/Hallucination Audit 범위를 우선 유지하고, PIKE/LightRAG는 corpus·평가셋·운영비용이 준비될 때 제한적으로 도입한다.
 
 ## Risk·QA Worker 기술 스택·역할·성과 계약

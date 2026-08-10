@@ -51,6 +51,19 @@ CEO도 HR처럼 **부서장(Hermes) + 직원(LangGraph Worker) 2계층**이다.
 
 **결론**: 위임이 맞다. 판정 권한이 없는 종합 작업이고, 실제 위험한 판정은 이미 하류에서 끝난 데이터를 다루기 때문에 환각이 사고로 번질 경로가 없다.
 
+### 1-4. 왜 CEO 부서장은 "자율성 에이전트"인가
+
+판단 잣대는 [2-6](#2-6-왜-부서장은-자율성-에이전트인가)에서 세운 것과 같다 — **무엇을 할지 스스로 선택하는가, 정해진 변환만 하는가, 규칙표를 적용만 하는가.** CEO 부서장도 첫 번째다.
+
+1. **할 일 자체가 매번 다르다.** SOUL.md가 나열한 책임이 7개다 — Mandate 번역, 라우팅·예산 배정, 위원회 소집, 부서 산출물 통합, 에스컬레이션, Chief-of-Staff(Pod 성과 요약·재배분 후보 생성·의제 초안·Drawdown 조사 등 그 자체로 여러 하위 판단), HR 예산·조직 승인. "입력 X → 출력 Y"가 아니라 이번 요청이 이 7개 중 무엇에 해당하는지부터 정하는 게 역할이다.
+2. **"무엇을 부를지" 자체가 선택이고, 이미 코드로 구현·실측됐다.** [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md)의 `build_ceo_task_plan()`/`ceo_task_planner.py`가 정확히 이 선택을 다룬다 — 사용자가 "삼전 지금 사도 될까"라고 물으면 `research`·`qa`·`ceo` 3곳만, "전략 추천해줘"라면 `research`·`quant`·`risk`·`qa`·`ceo` 5곳을 부른다. 어느 부서를 부를지는 카테고리 기본값 + 자유 질의 해석으로 매번 다시 정해지며, opt-in LLM 라우터(`PORTFOLIO_CEO_TASK_PLANNER_MODE=llm`)를 켜면 이 선택 자체를 CEO Hermes 프로필이 직접 내린다.
+3. **선택지가 규칙표로 미리 못 정해진다.** 사용자의 자유 질의는 조합이 무한해 `approve_request()`류의 "허용된 전이 목록"으로 미리 나열할 수 없다. 그래서 결정론 코드는 **최소한만** 강제하고(아래), 세부 선택은 부서장(또는 LLM 라우터)의 판단으로 남긴다.
+
+**이 자율성이 위험하지 않은 이유**는 두 겹으로 막혀 있다.
+
+- **바인딩 권한이 없다.** `forbidden_tools: [oms.submit, ledger.write, accounting.nav.confirm, audit.finding.close, workforce.permission.grant, iam.identity.create]` — 어느 부서를 부르든, 그 결과로 주문을 내거나 원장을 고치거나 NAV를 확정하는 힘 자체가 없다. 무엇을 볼지는 자유지만 무엇을 바꿀지는 자유가 아니다.
+- **부서 선택 자체에도 상·하한이 코드로 강제된다.** LLM 라우터를 켜도 `REQUIRED_DEPARTMENTS = frozenset({"qa", "ceo"})`(`ceo_task_planner.py:39`)가 `qa`·`ceo`를 항상 되살리고, allow-list가 정의 밖 부서 호출을 거부한다. "어느 부서를 부를지"라는 자율성과 "그 결과가 최종 판정이 되는 힘"이 분리되어 있다는 점에서 HR 부서장(2-6)과 같은 안전장치 패턴이다.
+
 ---
 
 ## 2. HR 부서장
@@ -73,7 +86,25 @@ CEO도 HR처럼 **부서장(Hermes) + 직원(LangGraph Worker) 2계층**이다.
 
 코드: [departments/07-agent-workforce/hermes/config.yaml](../../departments/07-agent-workforce/hermes/config.yaml)
 
-### 2-3. 이중 방어 — 페르소나 allowlist를 부서 공통 forbidden이 덮어씀
+### 2-3. HR-00 실제 입력·산출물 — 어디서 오고 어디로 가는가
+
+실제로 실행되는 것은 `agent-workforce-supervisor`(HR-00) 하나다(2-1). 이 페르소나의 `tool_allowlist`([config.yaml:40](../../departments/07-agent-workforce/hermes/config.yaml)) 세 개를 코드로 추적한 결과다.
+
+**입력 3종**
+
+| 도구 | 경로 | 실제로 읽는 것 | 원본 발행 주체 |
+|---|---|---|---|
+| `workforce.roster.read` | `GET /workforce/v1/roster` → `_roster_repo.list_roster()` | 6개 투자본부 소속 Agent 명부 | HR 자신 — 입사·개정이 완료될 때 HR의 lifecycle 처리가 직접 씀([app.py:686](../../departments/07-agent-workforce/api/app.py)) |
+| `workforce.scorecard.read` | `GET /workforce/v1/departments/{code}/scorecard` → `build_department_scorecard()` | Capacity·비용·품질을 결정론 함수가 조립한 집계 | 원본 신호는 6개 투자본부의 Queue·비용 사용량(`cost_snapshots`, 별도 `POST .../cost_snapshots`로 기록). 품질 쪽 `eval_score`는 QA 소유 `audit.eval_runs`를 값으로 복제하지 않고 `eval_run_id`로만 참조한다([cost.py:206](../../departments/07-agent-workforce/scorecard/cost.py)) |
+| `workforce.idle_agents.read` (2026-08-10) | `GET /workforce/v1/departments/idle-agents` | 6개 투자본부 Worker의 최근 실행 timestamp | 각 투자본부의 Worker 실행 자체 — `portfolio_recommendation.py`가 Worker 실행마다 Langfuse에 이벤트를 발행하고([llm_observability.py](../../orchestration/llm_observability.py)), HR은 timestamp만 조회(원문은 절대 안 읽음) |
+
+**산출물 1종과 실측 공백**
+
+`workforce.hiring_request.propose`가 계약상 해야 할 일: `workforce.hiring_request.v1` 이벤트를 `hf:workforce` Redis Stream에 발행해, [workforce-management.yaml](../../orchestration/workflows/workforce-management.yaml)의 다음 단계(`hr-profile`, `input_contract: hiring_request`)로 넘긴다. 목적지는 `profile-architecture-worker`가 Job Profile 초안을 만드는 진입점이다.
+
+**⚠️ 이 발행 코드가 저장소에 없다.** `workforce.hiring_request.v1`이 등장하는 곳은 [app.py:435](../../departments/07-agent-workforce/api/app.py) `_KNOWN_NON_EVAL_EVENTS` 하나뿐이고, 이건 워크포스 이벤트 컨슈머가 "Eval 이벤트는 아니지만 이름은 안다"고 걸러내는 소비자 측 allowlist다. **발행하는 코드는 어디에도 없다.** 즉 `hiring_request.propose`는 **목적지(다음 계약)만 정의됐고 전송 메커니즘은 미구현**이다 — 부서장이 이 도구를 "쓸 수 있다"는 것과 그 결과가 실제로 다음 단계에 도달하는 것은 다른 문제다.
+
+### 2-4. 이중 방어 — 페르소나 allowlist를 부서 공통 forbidden이 덮어씀
 
 `profile-architect`(HR-02)의 개별 allowlist엔 `workforce.profile_version.submit`이 있는데, 부서 공통 `forbidden_tools`가 같은 도구를 다시 막아놨다.
 
@@ -83,7 +114,7 @@ forbidden_tools: [..., workforce.profile_version.submit, workforce.agent_status.
 
 `tool_gateway.py`의 규칙은 "forbidden이 allowlist보다 우선"이므로, 페르소나 이름이 `submit` 권한을 가진 것처럼 보여도 부서 차원에서 한 번 더 막는다. "제안만 하고 실행은 못 한다"는 원칙을 페르소나별 허용 목록 하나에만 맡기지 않고 부서 레벨에서 이중으로 강제한 것이다.
 
-### 2-4. 컨텍스트 위임 판단 — HR 부서장은 "로그"를 안 읽는다
+### 2-5. 컨텍스트 위임 판단 — HR 부서장은 "로그"를 안 읽는다
 
 부서장이 부르는 도구(`scorecard.read`, `roster.read`, `skill_gap.read`)는 이미 결정론 함수가 계산해 놓은 숫자다.
 
@@ -97,6 +128,24 @@ scorecard.read → {"queue_depth": 12, "sla_breach_rate": 0.03, "quality_score":
 **"로그를 직접 읽을지, 직원 LLM에게 위임해 요약시킬지"라는 선택지 자체가 없다.** 원본 로그가 HR 부서장 근처에 오지 않기 때문이다. 원본 텔레메트리(개별 실행 trace)가 필요해지면 그건 별도의 결정론 Telemetry Pipeline이 집계 계층을 새로 만들 문제지, HR 직원이 파싱할 일이 아니다 — LLM이 "품질이 좋아 보인다"고 뭉뚱그리면 `aggregate_quality()`의 `None`(데이터 없음)과 `0`(진짜 결함)을 하나로 섞어버려 오히려 위험해진다.
 
 **결론**: HR 부서장 계층엔 위임할 "로그"가 없다. 위임 여부를 고민할 필요 자체가 없는 경우다.
+
+### 2-6. 왜 부서장은 "자율성 에이전트"인가
+
+세 형태를 가르는 잣대는 하나다 — **무엇을 할지 스스로 선택하는가, 정해진 변환만 하는가, 규칙표를 적용만 하는가.**
+
+| 형태 | 입출력 | 판단 주체 |
+|---|---|---|
+| 자율성 에이전트 | 고정 안 됨 — 매 실행마다 "이번엔 뭘 할지"부터 정함 | 에이전트 자신 |
+| 고정 입출력 LLM | 정해진 입력 → 정해진 출력 (예: 요청 하나 → 제안서 하나) | 호출자가 이미 정함, LLM은 내용만 채움 |
+| 결정론 함수 | 정해진 입력 → 규칙표대로 계산된 출력 | 아무도 없음 — 규칙이 답 |
+
+HR 부서장은 첫 번째다. 근거는 이미 2-2·2-5에서 확인한 사실 셋이다.
+
+1. **할 일 자체가 매번 다르다.** 2-2절 표가 보여주듯 부서장 하나가 원래 5개 페르소나의 서로 다른 책임(주간 계획 종합·채용 우선순위·Profile 설계·Eval 관리·입퇴사 조율)을 흡수했다. "입력 X가 오면 출력 Y를 낸다"는 고정 계약이 없다 — 이번 사이클에 6개 본부 중 어느 신호가 의미 있는지, 채용을 제안할지 말지, 어느 Agent를 저성과로 볼지는 매번 다시 판단해야 하는 문제다.
+2. **"무엇을 읽을지"조차 선택이다.** `roster.read`·`scorecard.read`·`idle_agents.read`(2026-08-10 추가) 여러 읽기 도구가 있지만, 이번 사이클에 어느 부서 데이터를 근거로 쓸지 정하는 규칙표가 없다. SOUL.md가 요구하는 것도 정확히 이 선택이다 — *"Flag underperforming or idle existing Agents for retraining or deactivation **as readily as** you propose new hires"*: 유휴 신호와 채용 신호 중 이번엔 뭘 우선할지 정하는 게 역할 자체다.
+3. **선택지가 규칙표로 미리 못 정해진다.** 결정론 함수를 못 쓰는 이유가 이것이다 — `approve_request()`(4절)처럼 "허용된 전이 목록"을 미리 나열할 수 있는 문제가 아니라, "이 조합의 신호면 채용을 제안해야 하는가"라는 매번 다른 질문이다. 정답이 코드로 고정되지 않는다.
+
+**그런데 이 자율성이 위험하지 않은 이유**는 2-3(산출물은 제안뿐)·2-5(입력은 결정론 집계뿐)·§4(완충 단계)에서 이미 확인한 구조 때문이다. 부서장이 읽는 값은 전부 결정론 함수가 만든 집계(원본 로그가 아님)이고, 부서장이 낼 수 있는 산출물은 `workforce.hiring_request.propose` — **제안뿐**이다. `forbidden_tools`가 `profile_version.submit`·`agent_status.change`·`permission.grant`를 전부 막아, "무엇을 할지 자유롭게 정하되 그 결정이 시스템 상태를 직접 바꾸는 힘은 없는" 자율성만 허용한다. 자율성(선택권)과 바인딩 권한(실행력)을 분리했기 때문에, 선택을 잘못해도 사고가 아니라 다음 완충 단계(QA 검증·CEO 승인)에서 걸러진다.
 
 ---
 

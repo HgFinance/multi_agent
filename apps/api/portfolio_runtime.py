@@ -48,6 +48,14 @@ CATALOG_PATH = Path(__file__).with_name("portfolio_catalog.json")
 
 STAGE_DEPARTMENT = {
     "research": "research-department",
+    # 2026-08-10: orchestration/workflows/portfolio_recommendation.py의 DEPARTMENTS에
+    # quant를 research 바로 다음으로 배선했다(요청 시점 백테스트, 팀 합의). 이 dict가
+    # 그 파일과 별도로 유지되는 자기 것이라 여기 추가하지 않으면 quant 단계의
+    # department_started/completed/worker_* 이벤트가 department=None으로 떨어져
+    # (아래 STAGE_DEPARTMENT.get(stage) 가드) 조용히 Kanban·Operator UI에서 사라지고,
+    # handoff는 research -> trading으로 quant를 건너뛴 것처럼 보인다. 순서는
+    # STAGE_ORDER가 이 dict의 삽입 순서를 그대로 쓰므로 반드시 research 다음에 둔다.
+    "quant": "quant-backtest-department",
     "trading": "trading-department",
     "risk": "risk-management",
     "qa": "qa-department",
@@ -90,6 +98,7 @@ def _one_line(value: Any, limit: int = 180) -> str:
 def _department_label(department: str | None) -> str:
     return {
         "research-department": "리서치본부",
+        "quant-backtest-department": "퀀트/백테스트본부",
         "trading-department": "트레이딩본부",
         "risk-management": "리스크관리본부",
         "qa-department": "AI QA·감사",

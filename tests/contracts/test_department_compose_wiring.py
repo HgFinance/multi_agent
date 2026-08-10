@@ -33,10 +33,10 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         compose = (ROOT / "departments/02-trading/compose.yaml").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "${USERPROFILE}/.hermes/profiles/trading-department:/opt/data",
-            compose,
-        )
+        # 호스트 접두사(${USERPROFILE} / /home/ubuntu)는 배포 환경마다 다르므로
+        # 고정하지 않는다. 고정하는 것은 **레이아웃**이다 - profiles/<부서> 아래에
+        # 있고, 구형 ~/.hermes-<부서> 로 돌아가지 않는다.
+        self.assertIn("/.hermes/profiles/trading-department:/opt/data", compose)
         self.assertNotIn(".hermes-trading-department", compose)
 
         sync_script = (ROOT / "scripts/sync_hermes_profiles.sh").read_text(
@@ -59,7 +59,6 @@ class DepartmentComposeWiringTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "${USERPROFILE}/.hermes/profiles/accounting-portfolio-department:/opt/data",
-            compose,
+            "/.hermes/profiles/accounting-portfolio-department:/opt/data", compose
         )
         self.assertNotIn(".hermes-accounting-portfolio-department", compose)

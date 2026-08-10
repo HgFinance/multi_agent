@@ -112,7 +112,9 @@ keywords = {
 
 > *"This deterministic first pass is a safety guard: it limits which department may be called, while the CEO worker can explain and refine the plan. It never creates orders or changes financial state."*
 
-**"어느 부서를 호출할 수 있는가"는 권한 경계 문제**다. LLM이 이 결정을 하면 프롬프트 조작으로 부서 호출 범위가 바뀔 수 있다. 그래서 호출 가능 부서 집합은 결정론 코드가 정하고, LLM(CEO 부서장)은 그 결과를 **설명하고 다듬는 역할**만 한다.
+**"어느 부서를 호출할 수 있는가"는 권한 경계 문제**다. LLM이 이 결정을 하면 프롬프트 조작으로 부서 호출 범위가 바뀔 수 있다. 그래서 **기본 경로에서는** 호출 가능 부서 집합을 결정론 코드가 정하고, LLM(CEO 부서장)은 그 결과를 설명하고 다듬는 역할만 한다.
+
+> 2026-08-10부터 CEO 프로필이 부서를 직접 고르는 opt-in 경로가 있다([3.5](#35-자연어-의도-분류는-표-앞에-두되-표-대신-두지-않는다)). 그 경로도 이 원칙을 버리지 않는다 — 상한(allow-list)과 하한(`qa`·`ceo` 필수)을 코드가 강제하고, 어떤 실패든 결정론으로 되돌아간다. 기본값은 여전히 결정론이다.
 
 ### 2.4 감사 추적
 
@@ -258,7 +260,23 @@ CATEGORY_WORKFLOWS / CATEGORY_DEPARTMENTS 표    ← 권한 경계, 결정론 �
 | 방식 | 판정 |
 |---|---|
 | LLM이 **카테고리를 제안** | ✅ 안전 — 출력이 알려진 값 목록으로 제한되고, 모르면 fallback이 받는다 |
-| LLM이 **부서 목록을 직접 생성** | ❌ 위험 — 목록에 무엇이든 넣을 수 있어 권한 경계가 프롬프트에 의해 결정된다 |
+| LLM이 **부서 목록을 직접 생성** | ⚠️ 조건부 — 상·하한을 둘 다 강제해야만 성립한다(아래) |
+
+#### 실제 구현 (2026-08-10, opt-in)
+
+[orchestration/adapters/ceo_task_planner.py](../../orchestration/adapters/ceo_task_planner.py)가 **CEO Hermes 프로필을 직접 호출해 부서를 고르는** 경로를 제공한다. 위 표의 두 번째 방식이며, 다음 세 장치가 함께 있을 때만 안전하다.
+
+| 장치 | 내용 |
+|---|---|
+| **상한** (allow-list) | 호출부가 넘긴 `valid_departments` 밖을 요청하면 `ValueError` → 결정론 fallback |
+| **하한** (`REQUIRED_DEPARTMENTS`) | `qa`·`ceo`가 빠지면 **되살린다.** 결정론 표가 6개 카테고리 전부에 이 둘을 두고 있어 실질적 불변식이고, 빠지면 인용·환각 검증 없이 자문이 나간다. 거부가 아니라 보강인 이유는 그쪽이 안전 방향이기 때문 |
+| **fail-closed** | 바이너리 부재·타임아웃·JSON 오류·빈 rationale — 어떤 실패든 결정론 계획으로 되돌아가고 `planner_fallback_reason`에 이유를 남긴다 |
+
+**기본값은 결정론이다.** `PORTFOLIO_CEO_TASK_PLANNER_MODE=llm`일 때만 켜진다.
+
+**응답 봉투는 결정론 계획을 기반으로 만든다.** planner 모듈은 `workflows`를 import 하지 않아(단방향 유지) `CATEGORY_WORKFLOWS` 같은 호출부 전용 값을 계산할 수 없다. 그래서 결정론 계획을 먼저 만들고 LLM이 정한 것만 덮어쓴다 — 이렇게 하지 않으면 `workflow`·`category_recognized`가 LLM 경로에서 기본값으로 덮인다.
+
+계약은 [tests/test_ceo_task_planner.py](../../tests/test_ceo_task_planner.py) 8건이 고정한다. opt-in 경로는 평소 CI에서 돌지 않아 결함이 조용히 쌓이므로, 켜는 순간 드러나는 것들을 테스트로 잡아둔다.
 
 이 패턴은 저장소에 이미 선례가 있다. [mandate_assistant.py](../../departments/00-ceo-office/src/mandate/mandate_assistant.py)의 `ALLOWED_SUGGESTION_FIELDS`가 같은 구조다 — LLM이 제안하되 허용 목록 밖 필드는 `dropped_fields`로 버리고 조용히 통과시키지 않는다.
 
