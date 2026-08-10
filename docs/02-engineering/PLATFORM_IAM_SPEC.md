@@ -206,7 +206,7 @@ platform_iam/
 
 ### 4.5 보안
 
-- [ ] Role 비밀번호 저장소 — 코드 하드코딩 금지, 어딘가 안전하게 저장은 해야 함. **저장소가 뭐가 될지는 미정이다** — 8.6절 Cloud-neutral 배포표의 "Secret/KMS" 행이 이 문제와 같은 성격이지만 그 표 자체가 Cloud Provider 미정 상태의 후보 목록일 뿐 결정이 아니다(CLAUDE.md "아직 미결정" 목록 참고). 지금 `service.py`의 `role_password_provider` 기본값은 `os.urandom(16).hex()`로 매번 새로 생성만 하고 **아무 데도 저장하지 않는다** — Role은 만들어지지만 그 비밀번호를 다시 읽을 방법이 없다(§9 P2)
+- [x] Role은 `NOLOGIN`으로 생성 — 이 저장소의 모든 부서 API는 Postgres에 공유 `DATABASE_URL` 하나로만 접속하고, Agent가 이 Role로 직접 로그인하는 경로는 시스템 어디에도 없다. Role은 "이 Agent가 이 자원에 접근 가능하다"는 GRANT 기록이지 접속 계정이 아니다
 - [x] REVOKE 시 `DROP ROLE`까지 완전 정리 — `postgres_role_manager.py` `revoke_role()`(REASSIGN OWNED → DROP OWNED → DROP ROLE), `redis_namespace_manager.py` `revoke_namespace()`(레지스트리 삭제 + 프리픽스 스캔 삭제). 코드 완성, 실 DB/Redis 왕복은 미실행
 
 ---
@@ -310,7 +310,6 @@ def test_unmapped_resource_ref_fails_closed(): ...  # tool_gateway 패턴과 동
 
 **P2 (신규, 이번 구현 중 발견)**:
 - [ ] `TOOL` 자원 처리 — `workforce.agent_tool_permissions` 조회 엔드포인트가 HR API에 없어 `tool_permission_id`를 못 구한다. HR이 `GET /workforce/v1/agents/{agent_id}/tool-permissions` 류를 추가하면 `service.py`의 TOOL 분기(현재 `SKIPPED` 고정 반환)를 채울 수 있다
-- [ ] Role 비밀번호 저장/조회 경로 — 저장소 후보(전용 Secret 저장소, Supabase Vault, 암호화된 컬럼 등)를 정하는 것부터가 미정. Cloud Provider가 정해지기 전엔 특정 서비스명(AWS Secrets Manager 등)으로 못 박지 않는다. 지금은 매번 새로 생성해 아무 데도 안 남기므로 Role은 만들어지지만 그 비밀번호로 실제 로그인할 방법이 없다 — Agent 런타임이 이 Role로 실제 접속하려면 이 저장 경로가 먼저 필요하다
 - [ ] Redis ACL 실제 격리 — 지금은 네임스페이스 "등록"(레지스트리 기록)까지만. 다른 Agent의 접근을 실제로 막는 `ACL SETUSER`는 별도 작업
 
 ---

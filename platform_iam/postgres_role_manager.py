@@ -24,6 +24,25 @@ sql.Identifier가 결과를 항상 올바르게 인용부호로 감싼다 - 둘 
 PostgreSQL 문법에 그런 구문이 없다(CREATE TABLE과 다르다). 존재 여부를
 pg_roles에서 먼저 조회하고 없을 때만 만든다 - 멱등성을 이렇게 확보한다.
 
+## NOLOGIN이어야 하는 이유 (2026-08-10 정정 - 이전 판은 LOGIN PASSWORD였다)
+
+이 저장소의 모든 부서 API는 Postgres에 **공유 DATABASE_URL 하나**로만
+접속한다(postgres_access_repository.py 등 grep 결과 - 부서별로도 Agent별로도
+별도 접속 계정이 없다). Agent가 이 Role로 직접 로그인하는 경로 자체가
+시스템 어디에도 없다 - tool_gateway.py가 이미 HTTP 계층(X-Agent-Persona +
+config.yaml)에서 권한을 판정하고, 실제 쿼리는 그 뒤에서 공유 연결이 수행한다.
+
+이전 판은 `WITH LOGIN PASSWORD`로 만들어 "누가 로그인할 계정"을 흉내 냈는데,
+아무도 그 계정으로 접속하지 않으니 비밀번호를 저장할 이유도 없었다 -
+문제는 "비밀번호를 어디에 저장하나"가 아니라 애초에 로그인 가능한 Role이
+필요 없었다는 것이다. 이 Role의 실제 역할은 "이 Agent가 이 자원에 접근
+가능하다"는 GRANT 기록이지 접속 계정이 아니다 - NOLOGIN으로 만들면 그
+사실이 스키마로도 드러난다.
+
+향후 요청 단위 최소권한(공유 연결이 쿼리마다 `SET ROLE agent_x`로 권한을
+좁히는 방식)을 붙이려면 이 Role에 로그인 계정을 GRANT 멤버십으로 묶으면
+되고, 그때도 여전히 비밀번호는 필요 없다.
+
 자체 점검: python platform_iam/postgres_role_manager.py
   - DATABASE_URL 없으면 import만 확인한다.
 """
@@ -65,8 +84,11 @@ def _role_exists(cur: Any, role_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def apply_grant_plan(plan: PostgresGrantPlan, *, dsn: str, role_password: str) -> str:
+def apply_grant_plan(plan: PostgresGrantPlan, *, dsn: str) -> str:
     """계획대로 Role을 만들고(없으면) GRANT한다. 이미 있으면 GRANT만 재적용(멱등).
+
+    NOLOGIN이다 - 아무도 이 Role로 직접 접속하지 않는다(위 모듈 docstring).
+    비밀번호가 없으니 저장할 곳도 필요 없다.
 
     반환값은 plan.provisioning_ref 그대로다 - 호출부(service.py)가 이 반환값을
     그대로 HR의 /provision 엔드포인트에 넘긴다.
@@ -84,10 +106,9 @@ def apply_grant_plan(plan: PostgresGrantPlan, *, dsn: str, role_password: str) -
         with conn.cursor() as cur:
             if not _role_exists(cur, plan.role_name):
                 cur.execute(
-                    sql.SQL("create role {role} with login password %s").format(
+                    sql.SQL("create role {role} nologin").format(
                         role=sql.Identifier(plan.role_name)
-                    ),
-                    (role_password,),
+                    )
                 )
             cur.execute(
                 sql.SQL("grant {verb} on {target} to {role}").format(
@@ -135,7 +156,6 @@ def revoke_role(role_name: str, *, dsn: str) -> None:
 
 if __name__ == "__main__":
     import os
-    import secrets
 
     print("ok - import 확인 (psycopg2 lazy load)")
 
@@ -150,7 +170,7 @@ if __name__ == "__main__":
         grant_target="workspace.market_data", provisioning_ref="x",
     )
     try:
-        apply_grant_plan(bad_plan, dsn=dsn, role_password="unused")
+        apply_grant_plan(bad_plan, dsn=dsn)
         raise AssertionError("허용 안 된 verb(DROP)가 통과했다")
     except RoleManagerError:
         pass
@@ -162,13 +182,12 @@ if __name__ == "__main__":
         role_name=role_name, grant_verb="SELECT",
         grant_target="pg_catalog.pg_roles", provisioning_ref=f"postgres-role:{role_name}",
     )
-    password = secrets.token_urlsafe(16)
-    ref = apply_grant_plan(plan, dsn=dsn, role_password=password)
+    ref = apply_grant_plan(plan, dsn=dsn)
     assert ref == plan.provisioning_ref
-    print(f"ok - CREATE ROLE + GRANT 왕복 완료 ({role_name})")
+    print(f"ok - CREATE ROLE(NOLOGIN) + GRANT 왕복 완료 ({role_name})")
 
     # 멱등성 - 두 번째 호출도 에러 없이 통과해야 한다.
-    apply_grant_plan(plan, dsn=dsn, role_password=password)
+    apply_grant_plan(plan, dsn=dsn)
     print("ok - 재적용(멱등) 통과")
 
     revoke_role(role_name, dsn=dsn)

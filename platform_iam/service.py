@@ -35,7 +35,6 @@ PROVISIONED를 찍지 않는다.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -116,13 +115,11 @@ class PlatformIamService:
         hr_api_url: str = HR_API_URL,
         postgres_dsn: str | None = None,
         redis_url: str | None = None,
-        role_password_provider: Callable[[], str] | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         self._hr_api_url = hr_api_url
         self._postgres_dsn = postgres_dsn or os.environ.get("DATABASE_URL")
         self._redis_url = redis_url or os.environ.get("REDIS_URL")
-        self._role_password_provider = role_password_provider or (lambda: os.urandom(16).hex())
         self._client = client or httpx.Client(timeout=HR_API_TIMEOUT_SECONDS)
 
     def _fetch_approved_requests(self) -> list[dict[str, Any]]:
@@ -182,9 +179,7 @@ class PlatformIamService:
                         request_id, resource_kind, "FAILED", "DATABASE_URL 미설정 - DATA provisioning 불가"
                     )
                 from postgres_role_manager import apply_grant_plan  # lazy: psycopg2 optional
-                ref = apply_grant_plan(
-                    plan, dsn=self._postgres_dsn, role_password=self._role_password_provider()
-                )
+                ref = apply_grant_plan(plan, dsn=self._postgres_dsn)
             elif isinstance(plan, RedisNamespacePlan):
                 if not self._redis_url:
                     return ProvisioningOutcome(
