@@ -60,7 +60,8 @@ _IMPROVEMENTS_DIR = _BASE / "improvements"
 _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
 _PLANNING_DIR = _BASE / "planning"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR):
+_HIRING_DIR = _BASE / "hiring"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR, _HIRING_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -89,6 +90,14 @@ from cost import (
     assess_budget,
     build_department_scorecard,
 )
+from hiring_request import (
+    HiringRequest,
+    HiringRequestStatus,
+    HiringSelfApprovalError,
+    IllegalHiringTransition,
+    InMemoryHiringRequestRepository,
+)
+from hiring_request import transition as hiring_transition
 from observability import INVESTMENT_DEPARTMENT_STAGE, check_idle_agents
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
@@ -165,6 +174,11 @@ except ImportError:
     PostgresPlanRepository = None  # type: ignore[assignment,misc]
     PostgresPlanApprovalEvidenceRepository = None  # type: ignore[assignment,misc]
 
+try:
+    from postgres_hiring_repository import PostgresHiringRequestRepository
+except ImportError:
+    PostgresHiringRequestRepository = None  # type: ignore[assignment,misc]
+
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
 
@@ -213,6 +227,31 @@ class ProvisionRequestIn(BaseModel):
 class RevokeRequestIn(BaseModel):
     at: datetime
     evidence: dict = Field(min_length=1)
+
+
+class HiringRequestIn(BaseModel):
+    """POST /workforce/v1/hiring-requests 요청 본문.
+
+    workforce.hiring_request.propose 도구가 실제로 도달하는 자리다(hiring_request.py
+    모듈 docstring 참고). status는 여기서 받지 않는다 - propose는 항상 OPEN으로
+    시작한다(HiringRequest 기본값).
+    """
+
+    department_id: str
+    business_problem: str = Field(min_length=1)
+    evidence: dict = {}
+    required_capabilities: dict = {}
+    budget: dict = {}
+    requested_by: str = Field(min_length=1)
+    trace_id: str = ""
+    created_at: datetime
+
+
+class HiringTransitionIn(BaseModel):
+    to_status: HiringRequestStatus
+    actor: str = Field(min_length=1)
+    at: datetime
+    reason: str | None = None
 
 
 class TransitionRequestIn(BaseModel):
@@ -384,6 +423,19 @@ def _access_request_dict(r: AccessRequest) -> dict:
     }
 
 
+def _hiring_request_dict(r: HiringRequest) -> dict:
+    return {
+        "request_id": r.request_id, "department_id": r.department_id,
+        "business_problem": r.business_problem, "evidence": r.evidence,
+        "required_capabilities": r.required_capabilities, "budget": r.budget,
+        "status": r.status.value, "trace_id": r.trace_id,
+        "created_at": r.created_at.isoformat(), "requested_by": r.requested_by,
+        "decided_by": r.decided_by,
+        "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+        "decision_reason": r.decision_reason,
+    }
+
+
 def _agent_summary_dict(a: AgentSummary) -> dict:
     current_profile_version = None
     if a.current_profile_version is not None:
@@ -428,6 +480,11 @@ if os.environ.get("DATABASE_URL") and PostgresAccessRepository is not None:
     _access_repo = PostgresAccessRepository.connect(os.environ["DATABASE_URL"])
 else:
     _access_repo = InMemoryAccessRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresHiringRequestRepository is not None:
+    _hiring_repo = PostgresHiringRequestRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _hiring_repo = InMemoryHiringRequestRepository()
 
 if os.environ.get("DATABASE_URL") and PostgresImprovementRepository is not None:
     _improvement_repo = PostgresImprovementRepository.connect(os.environ["DATABASE_URL"])
@@ -700,6 +757,64 @@ def get_agent_access(agent_id: str):
     return {"assignments": [
         _access_assignment_dict(a) for a in _access_repo.list_assignments_by_agent(agent_id)
     ]}
+
+
+# --- 3.6 Hiring Request (HR-00 workforce.hiring_request.propose) -----------------
+
+
+@app.post("/workforce/v1/hiring-requests")
+def request_hiring(body: HiringRequestIn):
+    request_id = str(uuid4())
+    req = HiringRequest(
+        request_id=request_id, department_id=body.department_id,
+        business_problem=body.business_problem, evidence=body.evidence,
+        required_capabilities=body.required_capabilities, budget=body.budget,
+        requested_by=body.requested_by, trace_id=body.trace_id, created_at=body.created_at,
+    )
+    _hiring_repo.save_request(req)
+    return _hiring_request_dict(req)
+
+
+@app.get("/workforce/v1/hiring-requests")
+def list_hiring_requests(status: str | None = None):
+    if status is not None:
+        try:
+            statuses = [HiringRequestStatus(status)]
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"알 수 없는 status: {status}")
+    else:
+        statuses = list(HiringRequestStatus)
+    requests = [
+        req
+        for s in statuses
+        for req in _hiring_repo.list_requests_by_status(s)
+    ]
+    return {"hiring_requests": [_hiring_request_dict(r) for r in requests]}
+
+
+@app.get("/workforce/v1/hiring-requests/{request_id}")
+def get_hiring_request(request_id: str):
+    req = _hiring_repo.get_request(request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"hiring_request {request_id} 없음")
+    return _hiring_request_dict(req)
+
+
+@app.post("/workforce/v1/hiring-requests/{request_id}/transitions")
+def transition_hiring_request(request_id: str, body: HiringTransitionIn):
+    req = _hiring_repo.get_request(request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"hiring_request {request_id} 없음")
+    try:
+        updated = hiring_transition(
+            req, to_status=body.to_status, actor=body.actor, at=body.at, reason=body.reason
+        )
+    except HiringSelfApprovalError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IllegalHiringTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _hiring_repo.save_request(updated)
+    return _hiring_request_dict(updated)
 
 
 # --- 3.1 Roster / Profile (HR-02) ------------------------------------------------
