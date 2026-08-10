@@ -37,7 +37,7 @@ agent:
   # GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.6절(인사팀 부서 내 통신)을 그대로 옮긴 것
   # departments/07-agent-workforce/api/app.py가 실제로 감싸는 엔드포인트만 대상.
   tool_allowlist:
-    agent-workforce-supervisor: [workforce.roster.read, workforce.scorecard.read, workforce.hiring_request.propose]  # HR-00, 제안만 - 승인은 CEO
+    agent-workforce-supervisor: [workforce.roster.read, workforce.scorecard.read, workforce.idle_agents.read, workforce.hiring_request.propose]  # HR-00, 제안만 - 승인은 CEO. idle_agents.read는 2026-08-10 Langfuse 도입분(GET /workforce/v1/departments/idle-agents) - 원문 Trace가 아니라 timestamp 집계만 읽는다(.env.example 3-2절)
     workforce-planning-agent: [workforce.scorecard.read, workforce.skill_gap.read]  # HR-01, 읽기 전용
     profile-architect: [workforce.profile_version.submit, workforce.improvement.propose]  # HR-02, 개정안 제안
     profile-architecture-worker: [workforce.hiring_request.read, workforce.profile_version.read, workforce.improvement.read, workforce.tool_catalog.read, workforce.policy_boundary.read]
@@ -73,6 +73,7 @@ implementation:
     - "P0-3 ACTIVE 전이 증거 실재성 게이트(2026-08-05) — roster/activation_evidence.py 신규. 이전엔 qa_eval_run_id/ceo_approval_id가 빈 문자열만 아니면 통과했다(MissingActivationEvidenceError는 '비어있는지'만 검사) - 이제 qa_eval_run_id는 audit.eval_runs에서 이 profile_version_id를 candidate로 하는 COMPLETED 행을, ceo_approval_id는 governance.approvals에서 이 profile_version_id를 object_id로 하는 APPROVED CEO 결정을 실제로 가리켜야 한다(UnverifiedActivationEvidenceError -> 403). 다른 Profile Version을 대상으로 한 증거 재사용도 매칭 조건으로 차단됨. tool_allowlist가 빈 Persona는 ACTIVE(실행 권한) 전이 불가(ToolAllowlistMissingError -> 409). '작성자/승인자 분리'는 HR이 QA eval_runs도 CEO 결정도 스스로 못 만드는 구조로 이미 강제되므로 별도 author 필드 없이 이 실재성 검증만으로 충족. api/app.py의 change_agent_status에 배선. 자체 점검: roster.py 10개 + activation_evidence.py 6개(+ 실 DB 조회) + postgres_roster_repository.py get_profile_version_tool_allowlist 실 DB 확인 + api/app.py 5개(위조/미완료/재사용/tool_allowlist 없음/정상 승인) 통과"
     - "Workforce Plans/Quality Snapshots DDL — supabase/migrations/20260731000800_workforce_plan_quality_probation.sql 마이그레이션 반영"
     - "부서 코드 통일 — department_code 정본을 Hermes Profile 이름으로 확정(hr-department). seed.sql·roster.py·scorecard 조회 반영. GOV-02와 원자적이라 ceo-agent 브랜치에서 함께 커밋"
+    - "2026-08-10: HR 유휴 Agent 관측 파이프라인(2026-08-02 방향 결정의 실제 구현) — Langfuse를 LangSmith와 이중 계측으로 신규 도입. orchestration/llm_observability.py에 publish_langfuse_metric() 추가해 orchestration/workflows/portfolio_recommendation.py 2곳(성공/실패 경로)에 배선 — 이 한 지점이 6개 투자본부(research/quant/trading/risk/qa/accounting) Worker 실행을 전부 통과하므로 부서별 배선이 따로 필요 없다. departments/07-agent-workforce/scorecard/observability.py 신규(LLM 없음, 결정론) — GET /workforce/v1/departments/idle-agents로 노출. .env.example 3-2절이 명시한 대로 HR은 Trace 원문(input/output)을 절대 읽지 않고 timestamp만 조회한다. ACTIVE/IDLE/UNOBSERVED(lookback 안에 관측 안 됨 - conditional Worker의 trigger 미발화일 수 있음)/UNAVAILABLE(Langfuse 비활성·조회 실패)을 구분 — quality.py aggregate_quality()의 None/0 구분과 같은 원칙. 자격증명(LANGFUSE_PUBLIC_KEY/SECRET_KEY) 없으면 전원 UNAVAILABLE로 정직하게 응답하고 501을 던지지 않는다(DB 비의존 - quality-snapshots와 다른 에러 처리)"
 
   in_progress: []
 
