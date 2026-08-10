@@ -164,13 +164,20 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
     # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너를 새로 만들
     # 필요도 없었다. 0 을 "설정 누락"으로 읽지 않는다.
-    # 2026-08-10 공장 재편으로 01-research 6 -> 7, 04-quant-backtest 7 -> 4.
+    # 2026-08-11 편제 감축. 직원은 병렬성·맥락격리·독립성·권한격리 중 하나가
+    # 명확할 때만 둔다 - 본부장이 순차로 해도 되는 일은 본부장이 한다.
+    #   01-research 8 -> 4 : 스카우트 4렌즈를 2명으로 묶고(주기가 달라 시간 분리
+    #     가능), 기획은 편집장 본업이라 흡수, market-context 는 data_resolution 이
+    #     이미 커버리지를 실측하므로 폐지(서술이 코드 판정과 경쟁하면 안 된다).
+    #   04-quant-backtest 5 -> 2 : 접수·설계는 실험당 1회라 병렬성이 없고,
+    #     교훈 사상은 lessons_from() 결정론 기본값이 이미 한다 - 환류가 에이전트
+    #     가용성에 묶이면 안 된다. 남긴 둘은 맥락격리(코드 작성)와 병렬성(해석).
     # 리서치는 종목 애널리스트 6인에서 방법론 스카우트 4 + 회의론자 + 기획자 +
     # 시장맥락 1 로 바뀌었다(종목 분석가는 실험 실행 가능성 판정용 1명만 남겼다).
     # 퀀트는 계산·판정이 전부 결정론 pipeline/ 소유라 LLM 을 겹쳐 둘 자리가 없어
     # 접수·설계·해석·교훈 4명만 남겼다 - 줄어든 3명은 해고가 아니라 **코드가 이미
     # 하고 있던 일**이었다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 8, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 5, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 4, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]

@@ -36,7 +36,7 @@ Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Gr
   Strategy Candidate, **`ExperimentOutcomeV1`**(통제 어휘 `lesson_codes` → 리서치 환류)
 - Handoff: Release Gate(결정론) → QA 재현 검증 → Risk Capability Review → 인간 승인
 
-## 직원 편제 (LLM Worker 5인)
+## 직원 편제 (LLM Worker 2인)
 
 | Worker | 역할 | 실행 |
 |---|---|---|

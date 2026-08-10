@@ -37,7 +37,7 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 - 시장 시계열 저장·조회 경계는 `repository/market_repository.py`의 `MarketDataRepository`다.
   다른 본부는 이 Repository가 아니라 실행 중인 `market-api`를 호출한다
 
-## 직원 편제 (LLM Worker 8인)
+## 직원 편제 (LLM Worker 4인)
 
 | Worker | 역할 | 실행 |
 |---|---|---|
