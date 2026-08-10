@@ -12,14 +12,17 @@ Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Gr
 
 ## Mission
 
-전략 가설, Point-in-Time Dataset, Backtest, Walk-Forward와 Release Candidate를 담당한다. 검증된 불변
-Strategy Bundle만 Shadow/Paper 배포 후보로 제출하며, 실시간 운용 중 전략 코드를 직접 수정하지 않는다.
-조건부 `QNT-08`은 인물의 말투가 아닌 투자 원칙을 `InvestmentDoctrine`으로 구조화하고, 필요성이
-검증된 경우에만 Fine-tuned Model Candidate를 만들어 Shadow Reviewer로 제출한다.
+**실험 공장이다.** 리서치본부의 실험 기획안(`ExperimentProposalV1`)을 접수해 결과를 보기 전에
+사전 등록하고, Point-in-Time 데이터로 결정론 실험을 돌리고, 시도 압력·DSR·PBO·국면 분해로
+과적합을 검사해 `ExperimentCardV1`을 낸다. 그리고 **성공·기각·킬을 가리지 않고**
+`ExperimentOutcomeV1`으로 리서치에 환류한다 — 환류 적재가 실험 종결의 전제 조건이다.
 
-`quant-backtest-department`는 Production 승격을 직접 하지 않는다. QA 독립 검증, Risk Capability와
-CEO 승인이 필요하다. Backtest 수익률이 좋아도 미래 데이터, 거래비용, 과적합 또는 필요한 거래 기능이
-검증되지 않으면 후보를 거절한다.
+**가설 발굴은 이 부서 일이 아니다**(2026-08-10 이관). 스스로 낸 가설을 스스로 검증하면
+제안자와 승인자가 같아져 생성자·검증자 분리가 조직 안에서 무너진다. 발굴은 리서치, 검증은 퀀트다.
+
+`quant-backtest-department`는 Production 승격을 직접 하지 않는다. QA 재현 검증, Risk Capability와
+**사람의 최종 서명**이 필요하다. Backtest 수익률이 좋아도 미래 데이터, 거래비용, 과적합 또는 필요한
+거래 기능이 검증되지 않으면 후보를 거절한다.
 
 ## Owner
 
@@ -27,10 +30,25 @@ CEO 승인이 필요하다. Backtest 수익률이 좋아도 미래 데이터, �
 
 ## 입력·출력 계약
 
-- 입력: TimescaleDB 시장 시계열, Versioned Universe, Research Observation과 전략 가설
+- 입력: **`ExperimentProposalV1`**(리서치본부), TimescaleDB 시장 시계열, Versioned Universe
 - 내부 기록: `quant.dataset_*`, `hypotheses`, `experiments`, `backtest_*`, `experiment_metrics`
-- 출력: Dataset·Code·Cost·Metric·Fragility가 연결된 Strategy Candidate
-- Handoff: QA 독립 검증 → Risk Capability Review → CEO Shadow/Paper 승인
+- 출력: `ExperimentCardV1`(Dataset·Code·Cost·Metric·Fragility·과적합 통계 연결),
+  Strategy Candidate, **`ExperimentOutcomeV1`**(통제 어휘 `lesson_codes` → 리서치 환류)
+- Handoff: Release Gate(결정론) → QA 재현 검증 → Risk Capability Review → 인간 승인
+
+## 직원 편제 (LLM Worker 4인)
+
+| Worker | 역할 | 실행 |
+|---|---|---|
+| `proposal-intake-worker` (QNT-01) | 기획안 접수 → 사전등록 사양 초안, 어휘·데이터·예산 확인 | 상시 |
+| `experiment-design-worker` (QNT-02) | PIT Dataset, 창·Embargo, 파라미터 범위와 **그 범위의 시도 수** | 소집 (`experiment_design`) |
+| `result-interpretation-worker` (QNT-03) | DSR·PBO·국면 분해 해석 서술 — 수치 재계산·판정 금지 | 소집 (`experiment_card`) |
+| `outcome-lesson-worker` (QNT-04) | 종결 사유를 통제 어휘 `lesson_codes`로 사상 | 소집 (`experiment_outcome`) |
+
+직원이 7명에서 4명으로 줄어든 것은 감원이 아니다. 계산과 판정(사전등록·PIT·백테스트·
+walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결정론 코드가 하고 있고**,
+그 위에 LLM을 겹쳐 두면 계산을 두 번 하거나 판정을 흉내 낸다. 남은 4자리는 결정론 코드가
+못 하는 일 — 자연어 접수, 설계 제안, 결과 해석, 교훈 사상 — 만 맡는다.
 
 ## 현재 구현
 

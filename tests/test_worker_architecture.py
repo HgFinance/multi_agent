@@ -90,6 +90,23 @@ def _payload() -> dict[str, Any]:
         "backtest": {"run_id": "backtest-test"},
         "release_candidate": {"id": "release-test"},
         "ml_research": {"model": "baseline"},
+        # 2026-08-10 공장 재편 trigger. 리서치는 방법론 수집(scout_cycle) -> 기획
+        # (adopted_lead) -> 독립 반증(proposal_draft), 퀀트는 접수 -> 설계 -> 카드 ->
+        # 결과 환류 순서로 켜진다.
+        "scout_cycle": {"cycle_id": "scout-test", "lenses": ["academic"]},
+        "adopted_lead": {"lead_id": "lead-test"},
+        "proposal_draft": {"proposal_id": "proposal-test"},
+        "methodology_leads": [{"lead_id": "lead-test"}],
+        "universe": {"key": "krx_all"},
+        "experiment_proposal": {"proposal_id": "proposal-test"},
+        "experiment_design": {"windows": 5},
+        "experiment_card": {"card_id": "card-test"},
+        "experiment_outcome": {"decision": "REJECT"},
+        "trial_pressure": {"trial_number": 1},
+        "regime_breakdown": {"BULL": {"n_windows": 1.0}},
+        "failed_criteria": ["pbo"],
+        # 서비스 자리(RES-18) - 사용자가 보유 종목을 물을 때만 켜진다.
+        "holding_question": {"symbol": "005930"},
         "execution": {"cost": "0"},
         "cost_sensitivity": {"slippage": 0.0},
         "regime": {"label": "normal"},
@@ -140,7 +157,13 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
     # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너를 새로 만들
     # 필요도 없었다. 0 을 "설정 누락"으로 읽지 않는다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    # 2026-08-10 공장 재편으로 01-research 6 -> 7, 04-quant-backtest 7 -> 4.
+    # 리서치는 종목 애널리스트 6인에서 방법론 스카우트 4 + 회의론자 + 기획자 +
+    # 시장맥락 1 로 바뀌었다(종목 분석가는 실험 실행 가능성 판정용 1명만 남겼다).
+    # 퀀트는 계산·판정이 전부 결정론 pipeline/ 소유라 LLM 을 겹쳐 둘 자리가 없어
+    # 접수·설계·해석·교훈 4명만 남겼다 - 줄어든 3명은 해고가 아니라 **코드가 이미
+    # 하고 있던 일**이었다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 8, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 4, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -300,14 +323,17 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
     expected = {
         "ceo": (1, 1, 0),
         "hr": (0, 0, 0),
-        "research": (6, 2, 4),
+        # 2026-08-10: 상시는 market-context 하나다. 스카우트·회의론자·기획자를
+        # 상시로 켜두면 편집장이 읽지 못하는 리드만 쌓인다 - 소집형이 설계다.
+        "research": (8, 1, 7),
         # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
         # desk-runner 가 결정론으로 항상 모아 온다.
         "trading": (2, 2, 0),
         # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
 
         "risk": (1, 0, 1),
-        "quant-backtest": (7, 2, 5),
+        # 2026-08-10: 상시는 접수 하나다. 카드도 없는데 해석 워커를 돌릴 이유가 없다.
+        "quant-backtest": (4, 1, 3),
         # 2026-08-07: 회계의 도메인별 수치 전달은 back-office-runner로 이동해 LLM 1명만
         # 남겼다. 남은 하나는 도메인이 아니라 **예외**로 정의된 조사관이라 항상 실행이다.
         "accounting-portfolio": (1, 1, 0),

@@ -11,8 +11,16 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 
 ## Mission
 
-데이터 수집, RAG Evidence와 Research Packet 생성을 담당한다. Universe/Technical/Microstructure/News
-Analyst를 소집해 종목별 근거, 촉매, 무효화 조건을 갖춘 Research Packet을 만든다.
+**가설 공급 조직이다.** 웹(논문·투자자 서한·실무자 글·커뮤니티·타 분야)에서 방법론을 수집해
+반증 가능한 **실험 기획안**으로 만들어 퀀트본부에 넘긴다. 종목 방향·확률 예측은 하지 않는다 —
+방향 판단은 실험을 통과해 승격된 전략의 몫이다.
+
+수집·PIT·인용 검증 인프라는 그대로 쓴다. 바뀐 것은 **무엇을 만드느냐**다.
+
+> 2026-08-10 재편. 이전 Mission("종목별 Research Packet 생성")은 프레임워크 자체가
+> 투자판단을 내리는 구조를 전제했다. 종목 애널리스트 편제는 운영에서 내렸고, 코드는
+> 감사 계보로만 남는다. 근거는
+> [Research-Quant Strategy Factory Framework](../../docs/02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md) 1절.
 
 ## Owner
 
@@ -20,11 +28,30 @@ Analyst를 소집해 종목별 근거, 촉매, 무효화 조건을 갖춘 Resear
 
 ## 입력·출력 계약
 
-- 입력: LS Open API 종목 Master·체결·호가, OpenDART 공시·재무, 거시·Corporate Action,
-  NAVER/Alpaca/Tavily 뉴스와 향후 승인된 X 유명 인사 Watchlist
-- 출력: Research Packet (근거, 촉매, 무효화 조건) → `workflow` step 2 트레이딩본부로 전달
+- 입력: 웹 방법론 소스(논문·프리프린트·투자자 서한·실무 블로그·커뮤니티·영상·타 분야 문헌),
+  퀀트의 `ExperimentOutcomeV1` 기각 이력, 내부 시장 데이터(실행 가능성 판정용)
+- 출력: **`ExperimentProposalV1`** (경제적 근거, 반대편 주체, 경쟁 설명, 통제 어휘 사상,
+  데이터 요구, 반증 검사, 기각 이력 대응) → 퀀트본부 Gate 0
+- 부가 출력: `MethodologyLeadV1`(스카우트 리드), Holding Brief(사용자 질의 응답 —
+  **공장 입력이 아니고 주문 경로에도 닿지 않는다**)
 - 시장 시계열 저장·조회 경계는 `repository/market_repository.py`의 `MarketDataRepository`다.
   다른 본부는 이 Repository가 아니라 실행 중인 `market-api`를 호출한다
+
+## 직원 편제 (LLM Worker 8인)
+
+| Worker | 역할 | 실행 |
+|---|---|---|
+| `methodology-scout-academic` (RES-11) | 논문·프리프린트 렌즈 | 소집 (`scout_cycle`) |
+| `methodology-scout-practitioner` (RES-12) | 투자자 서한·실무자 글 렌즈 | 소집 |
+| `methodology-scout-community` (RES-13) | 커뮤니티·영상·오픈소스 렌즈 | 소집 |
+| `methodology-scout-crossdomain` (RES-14) | 타 분야 방법 전용(轉用) 렌즈 | 소집 |
+| `competing-explanation-worker` (RES-15) | 경쟁 설명·반증 — **기획자와 입력 격리** | 소집 (`proposal_draft`) |
+| `experiment-planner-worker` (RES-16) | 통제 어휘 사상, 데이터 요구, 반증 검사 | 소집 (`adopted_lead`) |
+| `market-context-worker` (RES-17) | 유니버스·히스토리·DQ — 실행 가능성 재료 | 상시 |
+| `holdings-analyst-worker` (RES-18) | 보유 종목 질의 응답 — **서비스 자리, 공장 미연결** | 소집 (`holding_question`) |
+
+스카우트 4인은 같은 도구를 쓰고 **렌즈만 다르다**. 서로의 결과를 보지 않고 병렬로 뒤지는 것이
+이 편제의 전부다 — 독립성은 프롬프트가 아니라 입력 격리로만 만들어진다.
 
 ## 구성
 

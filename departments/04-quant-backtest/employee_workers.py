@@ -1,4 +1,25 @@
-"""Quant/Backtest employee Worker registry: research artifacts, no promotion authority."""
+"""Quant/Backtest employee Worker registry: experiment factory, no promotion authority.
+
+2026-08-10 재편 (재일). 이전 편제는 LLM 직원 7인(hypothesis/dataset/backtest/release/ml/
+cost/regime)이었다. 그런데 이 부서의 일 대부분은 **이미 결정론 코드**다 - PIT 인증,
+백테스트, walk-forward, DSR, PBO(CSCV), 국면 분해, 릴리스 관문은 전부 pipeline/ 의
+파이썬이 계산하고 판정한다. LLM 을 그 자리에 겹쳐 두면 두 가지가 생긴다: 계산을
+두 번 하거나, 판정을 흉내 내거나. 둘 다 나쁘다.
+
+그래서 LLM 직원은 **결정론 코드가 못 하는 일**에만 남긴다.
+
+  ① 접수 - 리서치 기획안을 읽고 사양 초안을 만든다(어휘 사상·데이터 요구 확인).
+     기획안은 자연어가 섞여 있어 코드가 혼자 읽을 수 없다.
+  ② 설계 - EDA 결과를 보고 창·파라미터 범위를 제안한다. 제안일 뿐 판정이 아니다.
+  ③ 해석 - 카드의 통계(DSR·PBO·국면)를 사람이 읽을 문장으로 만든다. **숫자는
+     건드리지 않는다** - 판정은 release_gate 가 이미 내렸다.
+  ④ 교훈 - 기각 사유를 통제 어휘 lesson_code 로 사상한다. 이게 리서치 환류의
+     품질을 정한다. 자유 서술로 남기면 다음 가설이 기계 대조를 못 한다.
+
+가설 "발굴"은 이제 이 부서 일이 아니다. 리서치본부가 방법론을 수집해 실험 기획안
+(ExperimentProposalV1)으로 넘긴다 - 퀀트가 스스로 가설을 만들면 낸 사람이 검증까지
+하는 셈이라 생성자·검증자 분리가 깨진다.
+"""
 
 from __future__ import annotations
 
@@ -20,14 +41,14 @@ except ModuleNotFoundError:
         tools_for_specs,
     )
 
+# ▶ 상시(always)는 접수 하나다. 실험은 접수에서 시작하고, 나머지는 그 단계에
+#   도달했을 때만 켠다 - 카드도 없는데 해석 워커를 돌릴 이유가 없다.
+# ▶ 도구가 전부 .read 인 것은 의도다. 적재·판정은 pipeline/ 결정론 코드가 한다.
 WORKER_SPECS = (
-    WorkerSpec("strategy-hypothesis-worker", "Falsifiable strategy hypothesis analyst", ("quant.hypothesis.read",), "always", ("hypothesis", "market_regime")),
-    WorkerSpec("dataset-feature-worker", "Point-in-time dataset and feature quality analyst", ("quant.dataset.read",), "always", ("dataset_manifest", "features", "labels")),
-    WorkerSpec("backtest-optimization-worker", "Cost-aware backtest and capacity optimization analyst", ("quant.backtest.run", "quant.capacity.check"), "backtest_request", ("backtest_request", "cost_model", "capacity")),
-    WorkerSpec("strategy-release-worker", "Champion/challenger strategy release reviewer", ("quant.release.read",), "release_candidate", ("release_candidate", "evaluation")),
-    WorkerSpec("ml-quant-worker", "ML quant research and leakage review analyst", ("quant.ml_evaluation.read",), "ml_research", ("ml_evaluation", "dataset_manifest")),
-    WorkerSpec("execution-cost-worker", "Execution-cost and turnover sensitivity analyst", ("quant.cost_sensitivity.read",), "cost_sensitivity", ("cost_model", "turnover", "slippage")),
-    WorkerSpec("regime-robustness-worker", "Regime robustness and stress-sensitivity analyst", ("quant.regime_robustness.read",), "regime_analysis", ("market_regime", "stress_results", "evaluation")),
+    WorkerSpec("proposal-intake-worker", "Experiment proposal intake and hypothesis specification analyst", ("quant.proposal.read", "quant.hypothesis.read"), "always", ("experiment_proposal", "hypothesis")),
+    WorkerSpec("experiment-design-worker", "Point-in-time dataset and experiment design analyst", ("quant.dataset.read",), "experiment_design", ("dataset_manifest", "features", "labels")),
+    WorkerSpec("result-interpretation-worker", "Backtest result, overfitting and regime interpretation analyst", ("quant.experiment_card.read",), "experiment_card", ("experiment_card", "trial_pressure", "regime_breakdown")),
+    WorkerSpec("outcome-lesson-worker", "Experiment outcome and lesson-code mapping analyst", ("quant.outcome.read",), "experiment_outcome", ("experiment_outcome", "failed_criteria")),
 )
 
 
