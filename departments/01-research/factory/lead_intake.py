@@ -75,11 +75,15 @@ class Intake:
 
 
 # ── 파싱 ───────────────────────────────────────────────────────────────────
-def parse_blocks(text: str) -> list[dict]:
-    """스카우트 산출을 블록 리스트로 자른다.
+def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
+    """에이전트 산출을 블록 리스트로 자른다.
 
     JSON 배열이면 그대로 읽는다. 아니면 `KEY: value` 줄 형식으로 읽되, 다음
     TITLE 이 나오면 새 블록이다. 여러 줄에 걸친 값은 이어 붙인다.
+
+    `keys` 로 어휘를 바꿔 기획안·회의론자 산출에도 쓴다. 어휘를 넘기지 않으면
+    스카우트 어휘다. **모르는 키는 값의 일부로 흘려보낸다** - 새 키로 잘못 잡으면
+    앞 필드가 그 줄에서 끊겨 뜻이 바뀐다.
     """
     stripped = text.strip()
     if stripped.startswith("["):
@@ -88,11 +92,13 @@ def parse_blocks(text: str) -> list[dict]:
         except (ValueError, TypeError):
             pass          # JSON 인 척하다 실패하면 줄 파싱으로 내려간다
 
+    field_re = _FIELD_RE if keys is None else re.compile(
+        r"^(" + "|".join(re.escape(k) for k in keys) + r")\s*:\s*(.*)$")
     blocks: list[dict] = []
     cur: dict = {}
     key = ""
     for raw in text.splitlines():
-        m = _FIELD_RE.match(raw.strip())
+        m = field_re.match(raw.strip())
         if m:
             key, val = m.group(1), m.group(2).strip()
             if key == "TITLE" and cur:
