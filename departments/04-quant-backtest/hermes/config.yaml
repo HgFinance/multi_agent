@@ -105,6 +105,10 @@ hiring_priority:
 
 skills:
   - hermes-agent
+  # 2026-08-10: 공장 절차를 스킬로 명문화했다. Gate 0 접수, 사전등록, 커스텀 시그널
+  # 작성(PITView 계약·금지 문법·코드 해시), 결과 해석(DSR/PBO/국면/소스 대조),
+  # 통제 어휘 환류. 판정은 결정론 코드가 하고 에이전트는 제안·설명만 한다.
+  - experiment-factory
 
 usage:
   run: "quant-backtest-department chat -q 'Intake the research experiment proposal, preregister it and report the card'"

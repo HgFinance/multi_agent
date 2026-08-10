@@ -269,6 +269,9 @@ worker_model_tier_proposal:
 
 skills:
   - hermes-agent
+  # 2026-08-10: 본업 절차를 스킬로 명문화했다. 스카우트 렌즈, 출처 규율(발췌 필수·
+  # 기억 재구성 금지), 기각 이력 대조, 통제 어휘 사상, 회의론자 서명, 발행 게이트.
+  - methodology-scout
 
 usage:
   run: "research-department chat -q 'Scout methodology for a cross-sectional momentum crash hedge and draft an experiment proposal'"
