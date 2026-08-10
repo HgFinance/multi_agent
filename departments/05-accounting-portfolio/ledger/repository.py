@@ -56,6 +56,20 @@ from ledger import (
 from portfolio import PortfolioSnapshot, PositionValuation
 
 SNAPSHOT_SCHEMA_VERSION = 1
+# Durable mode is opt-in. In PAPER_DB (and equivalent durable deployments),
+# absence of DATABASE_URL is an operational error rather than permission to
+# discard accounting state into process memory.
+_DURABLE_MODES = {"PAPER_DB", "DURABLE", "PRODUCTION", "LIVE_DB"}
+
+def durable_required_from_env() -> bool:
+    mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
+    flag = os.environ.get("ACCOUNTING_DURABLE_REQUIRED", "").strip().lower()
+    paper_db = os.environ.get("PAPER_DB", "").strip().lower()
+    return (
+        mode in _DURABLE_MODES
+        or flag in {"1", "true", "yes", "on"}
+        or paper_db in {"1", "true", "yes", "on"}
+    )
 
 # ledger.py의 account_code -> DB `accounting.ledger_accounts.name`.
 # 계정과목 자체는 ledger.py가 소유한다. 여기엔 표시 이름만 둔다.
@@ -127,10 +141,21 @@ class LedgerRepository:
         return cls(ThreadedConnectionPool(1, 4, dsn))
 
     @classmethod
-    def from_env(cls) -> LedgerRepository | None:
-        """DATABASE_URL이 없으면 None. 호출자가 인메모리로 남을지 결정한다."""
+    def from_env(cls, *, required: bool | None = None) -> LedgerRepository | None:
+        """DATABASE_URL이 없으면 None (명시적 offline 모드일 때만)."""
+        mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
+        required = durable_required_from_env() if required is None else required
+        if mode == "OFFLINE" and not required:
+            return None
         dsn = os.environ.get("DATABASE_URL")
-        return cls.connect(dsn) if dsn else None
+        if not dsn:
+            if required:
+                raise LedgerPersistenceError(
+                    "durable accounting mode requires DATABASE_URL; "
+                    "offline memory mode was not selected"
+                )
+            return None
+        return cls.connect(dsn)
 
     def close(self) -> None:
         self._pool.closeall()
@@ -277,8 +302,9 @@ class LedgerRepository:
             raise LedgerPersistenceError(f"등록되지 않은 계정과목입니다: {sorted(set(missing))}")
 
         _, Json, _ = _load_driver()
-        metadata = {"reason": journal.reason} if journal.reason else {}
-
+        metadata = dict(journal.metadata)
+        if journal.reason:
+            metadata["reason"] = journal.reason
         with self.cursor() as cur:
             cur.execute(
                 """
@@ -366,6 +392,7 @@ class LedgerRepository:
             rows = cur.fetchall()
             journal_ids = [r[0] for r in rows]
             lines: dict[UUID, list[JournalLine]] = {}
+            metadata_by_journal: dict[UUID, dict[str, Any]] = {}
             if journal_ids:
                 cur.execute(
                     """
@@ -378,7 +405,9 @@ class LedgerRepository:
                     """,
                     (journal_ids,),
                 )
-                for jid, code, debit, credit, instrument_id, qty, price, _meta in cur.fetchall():
+                for jid, code, debit, credit, instrument_id, qty, price, meta in cur.fetchall():
+                    if meta:
+                        metadata_by_journal.setdefault(jid, dict(meta))
                     lines.setdefault(jid, []).append(JournalLine(
                         account_code=code, debit=debit, credit=credit,
                         instrument_id=instrument_id, quantity=qty, unit_price=price,
@@ -393,6 +422,8 @@ class LedgerRepository:
                 status=_DOMAIN_STATUS.get(status, status.lower()),
                 reversal_of=reversal_of, created_by_service=service,
                 trace_id=str(trace_id),
+                reason=str(metadata_by_journal.get(jid, {}).get("reason", "")),
+                metadata=metadata_by_journal.get(jid, {}),
             )
             for (jid, event_type, source_event_id, effective_at, accounting_date,
                  status, reversal_of, service, trace_id) in rows
@@ -594,7 +625,35 @@ class PostgresLedger(Ledger):
     def post(self, journal: Journal) -> Journal:
         posted = super().post(journal)
         if posted is journal:  # 새로 붙은 것만 저장한다. 중복이면 기존 분개가 돌아온다
-            self._repo.insert_journal(journal)
+            try:
+                inserted = self._repo.insert_journal(journal)
+            except Exception:
+                # A failed DB transaction must not leave a speculative in-memory
+                # Journal that a caller could mistake for durable evidence.
+                self.journals.remove(journal)
+                self._posted_sources.discard((journal.event_type, journal.source_event_id))
+                raise
+            if not inserted:
+                # Another worker won the source-event unique race. Do not keep
+                # the speculative local Journal in projections; reload the
+                # committed row and converge on its immutable evidence.
+                key = (journal.event_type, journal.source_event_id)
+                self.journals.remove(journal)
+                self._posted_sources.discard(key)
+                loaded = self._repo.load(self.fund_id, self.book_id)
+                existing = next(
+                    (j for j in loaded.journals
+                     if (j.event_type, j.source_event_id) == key
+                     and j.reversal_of is None),
+                    None,
+                )
+                if existing is None:
+                    raise LedgerPersistenceError(
+                        f"원천 이벤트 저장 경합 후 분개를 복원하지 못했습니다: {key}"
+                    )
+                self.journals.append(existing)
+                self._posted_sources.add(key)
+                return existing
         return posted
 
     def reverse(self, journal_id: UUID, reason: str) -> Journal:

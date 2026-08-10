@@ -56,7 +56,7 @@ sys.path.insert(0, str(_DEPT / "contracts"))
 sys.path.insert(0, str(_DEPT / "multileg"))
 
 import outbox
-from contracts import BrokerOrderState, IntentState, OrderIntent, Side
+from contracts import BrokerOrderState, IntentState, MarketSnapshot, OrderIntent, Side
 from intent_group import IntentGroup
 from oms import BrokerOrder, Fill, OrderIntentRecord, StateEvent
 
@@ -159,7 +159,7 @@ class PostgresOrderStore:
         cur.execute(
             """
             select strategy_version_id from strategy.versions
-             where strategy_id = %s and deployment_state in ('PAPER', 'LIVE', 'LIVE_CANDIDATE')
+             where strategy_id = %s and deployment_state = 'PAPER'
              order by version desc
             """,
             (strategy_id,),
@@ -177,6 +177,66 @@ class PostgresOrderStore:
             )
         return rows[0][0]
 
+    def _validate_owner_context(self, cur, intent: OrderIntent) -> None:
+        """Revalidate every owner-owned row before durable insertion.
+
+        A foreign key proves existence, not that all owners agree.  This
+        single-leg PAPER slice therefore requires the Case, Signal, Strategy
+        Version, Capability, Fund, Book, and instrument to describe exactly
+        the requested intent.
+        """
+        cur.execute(
+            """
+            select tc.trade_case_id
+              from execution.trade_cases tc
+              join accounting.funds f
+                on f.fund_id = tc.fund_id
+              join accounting.books b
+                on b.book_id = tc.book_id and b.fund_id = tc.fund_id
+              join strategy.versions sv
+                on sv.strategy_version_id = tc.strategy_version_id
+               and sv.strategy_id = %s
+               and sv.deployment_state = 'PAPER'
+              join strategy.strategies s
+                on s.strategy_id = sv.strategy_id and s.status = 'PAPER'
+              join strategy.capability_profiles cp
+                on cp.capability_profile_id = sv.capability_profile_id
+               and cp.status in ('ACTIVE', 'APPROVED')
+              join strategy.signals sig
+                on sig.signal_id = tc.signal_id
+               and sig.case_id = tc.trade_case_id
+               and sig.fund_id = tc.fund_id
+               and sig.strategy_version_id = tc.strategy_version_id
+              join reference.instruments i
+                on i.instrument_id = %s
+               and i.instrument_id = tc.primary_instrument_id
+               and i.asset_class = 'EQUITY'
+               and i.status = 'ACTIVE'
+              join strategy.signal_targets st
+                on st.signal_id = sig.signal_id
+               and st.leg_index = 0
+               and st.instrument_id = %s
+             where tc.trade_case_id = %s
+               and tc.fund_id = %s
+               and tc.book_id = %s
+               and f.status = 'ACTIVE'
+               and b.status = 'ACTIVE'
+               and tc.case_status = 'OPEN'
+            """,
+            (
+                intent.strategy_id,
+                intent.instrument_id,
+                intent.instrument_id,
+                intent.trade_case_id,
+                intent.fund_id,
+                intent.book_id,
+            ),
+        )
+        if cur.fetchone() is None:
+            raise OrderStorePersistenceError(
+                "Paper Intent의 Case/Signal/Strategy/Capability/Fund/Book/instrument "
+                "소유 증거가 없거나 서로 일치하지 않습니다"
+            )
     def _market_snapshot(self, cur, intent: OrderIntent) -> UUID:
         """Intent가 참조한 호가를 `execution.market_snapshots`에 남기고 id를 준다.
 
@@ -251,6 +311,7 @@ class PostgresOrderStore:
 
     def add_intent(self, rec: OrderIntentRecord, intent: OrderIntent) -> None:
         with self.cursor() as cur:
+            self._validate_owner_context(cur, intent)
             strategy_version_id = self._strategy_version(cur, intent.strategy_id)
             snapshot_id = self._market_snapshot(cur, intent)
             group_id = self._intent_group(
@@ -303,16 +364,67 @@ class PostgresOrderStore:
     def link_order_to_leg(self, group_id: UUID, leg_index: int, order_id: UUID) -> None:
         raise OrderStorePersistenceError("멀티레그 Leg 연결은 아직 구현하지 않았습니다(F30)")
 
+    def _write_order_event(self, cur, event: StateEvent, Json) -> bool:
+        """Persist one order event and projection on the caller's cursor."""
+        if event.broker_event_id is not None:
+            cur.execute(
+                """
+                select order_id, event_type, from_state, to_state, payload, event_time
+                  from execution.order_events
+                 where broker_adapter = %s and broker_event_id = %s
+                """,
+                (event.broker_adapter, event.broker_event_id),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                if (
+                    existing[0] != event.stream_id
+                    or existing[1] != event.event_type
+                    or existing[2] != event.from_state
+                    or existing[3] != event.to_state
+                    or existing[4] != event.payload
+                    or existing[5] != event.event_time
+                ):
+                    raise OrderStorePersistenceError(
+                        "같은 broker_event_id의 내용이 서로 다릅니다"
+                    )
+                return False
+
+        cur.execute(
+            """
+            insert into execution.order_events
+                (order_event_id, order_id, event_type, event_time, received_at,
+                 broker_adapter, broker_event_id, from_state, to_state, payload,
+                 payload_hash, sequence, trace_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (event.event_id, event.stream_id, event.event_type, event.event_time,
+             event.received_at, event.broker_adapter, event.broker_event_id,
+             event.from_state, event.to_state, Json(event.payload),
+             _hash(event.payload), event.sequence,
+             _trace_uuid("", event.stream_id)),
+        )
+        cur.execute(
+            "update execution.orders set state = %s, last_event_at = %s, "
+            "version = version + 1, broker_order_id = coalesce(%s, broker_order_id) "
+            "where order_id = %s and state <> %s",
+            (
+                event.to_state, event.event_time,
+                event.payload.get("broker_order_id"),
+                event.stream_id, event.to_state,
+            ),
+        )
+        outbox.enqueue(cur, outbox.envelope_for(
+            event_type=outbox.ORDER_STATE_CHANGED,
+            trace_id=str(_trace_uuid("", event.stream_id)),
+            idempotency_key=f"osc_{event.event_id}",
+            occurred_at=event.event_time,
+            artifact_type="ORDER_EVENT", artifact_id=event.event_id,
+            artifact_schema=f"trading-order-event-v{SCHEMA_VERSION}",
+            content_hash=f"sha256:{_hash(event.payload)}"))
+        return True
+
     def add_event(self, event: StateEvent) -> None:
-        """상태 변화 하나. **Projection 갱신을 같은 트랜잭션에서 한다.**
-
-        `orders.state` UPDATE가 `validate_order_state_transition` 트리거를 깨우므로
-        허용되지 않은 전이는 우리 코드를 우회해도 DB에서 거부된다.
-
-        Intent 스트림 이벤트는 넣을 표가 없다(파일 상단 계약 공백 2). Projection인
-        `order_intents.intent_status`만 갱신한다 - 이벤트를 버리는 것이 아니라
-        canonical 표가 아직 없는 것이고, 그 사실을 여기 적어 둔다.
-        """
         _, Json, _ = _load_driver()
         with self.cursor() as cur:
             if event.stream == "intent":
@@ -322,40 +434,71 @@ class PostgresOrderStore:
                     (event.to_state, event.stream_id),
                 )
                 return
-            if event.stream != "broker_order":
-                return
+            if event.stream == "broker_order":
+                self._write_order_event(cur, event, Json)
 
+    def apply_fill(
+        self,
+        order: BrokerOrder,
+        event: StateEvent,
+        fill: Fill,
+        *,
+        filled_quantity: Decimal,
+        average_fill_price: Decimal,
+    ) -> None:
+        """Persist event, Fill, projection, and payload-ref outbox atomically."""
+        _, Json, _ = _load_driver()
+        with self.cursor() as cur:
+            broker_fill_id = fill.broker_fill_id or str(fill.fill_id)
             cur.execute(
                 """
-                insert into execution.order_events
-                    (order_event_id, order_id, event_type, event_time, received_at,
-                     broker_adapter, broker_event_id, from_state, to_state, payload,
-                     payload_hash, sequence, trace_id)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (broker_adapter, broker_event_id) do nothing
+                select quantity, price, fee_amount, tax_amount
+                  from execution.fills
+                 where order_id = %s and broker_fill_id = %s
                 """,
-                (event.event_id, event.stream_id, event.event_type, event.event_time,
-                 event.received_at, event.broker_adapter, event.broker_event_id,
-                 event.from_state, event.to_state, Json(event.payload),
-                 _hash(event.payload), event.sequence,
-                 _trace_uuid("", event.stream_id)),
+                (fill.order_id, broker_fill_id),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                if tuple(existing) != (
+                    fill.quantity, fill.price, fill.fee, fill.tax
+                ):
+                    raise OrderStorePersistenceError(
+                        "같은 broker_fill_id의 내용이 서로 다릅니다"
+                    )
+                return
+            self._write_order_event(cur, event, Json)
+            cur.execute(
+                """
+                insert into execution.fills
+                    (fill_id, order_id, broker_fill_id, instrument_id, side, quantity,
+                     price, gross_amount, fee_amount, tax_amount, currency,
+                     event_time, received_at, trace_id)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (fill.fill_id, fill.order_id, broker_fill_id, order.instrument_id,
+                 str(order.side), fill.quantity, fill.price,
+                 fill.quantity * fill.price, fill.fee, fill.tax, DEFAULT_CURRENCY,
+                 fill.event_time, datetime.now(timezone.utc),
+                 _trace_uuid("", order.order_id)),
             )
             cur.execute(
-                "update execution.orders set state = %s, last_event_at = %s, "
-                "version = version + 1 where order_id = %s and state <> %s",
-                (event.to_state, event.event_time, event.stream_id, event.to_state),
+                "update execution.orders set filled_quantity = %s, average_fill_price = %s "
+                "where order_id = %s",
+                (filled_quantity, average_fill_price, order.order_id),
             )
-            # **같은 커서다.** 상태가 롤백되면 outbox 행도 같이 사라진다 - 이게
-            # Transactional Outbox 의 전부이고, 자체 점검 10번이 그 불변식을 검사한다.
             outbox.enqueue(cur, outbox.envelope_for(
-                event_type=outbox.ORDER_STATE_CHANGED,
-                trace_id=str(_trace_uuid("", event.stream_id)),
-                idempotency_key=f"osc_{event.event_id}",
-                occurred_at=event.event_time,
-                artifact_type="ORDER_EVENT", artifact_id=event.event_id,
-                artifact_schema=f"trading-order-event-v{SCHEMA_VERSION}",
-                content_hash=f"sha256:{_hash(event.payload)}"))
-
+                event_type=outbox.FILL_RECORDED,
+                trace_id=str(_trace_uuid("", order.order_id)),
+                idempotency_key=f"fill_{self.adapter}_{broker_fill_id}",
+                occurred_at=fill.event_time,
+                artifact_type="FILL", artifact_id=fill.fill_id,
+                artifact_schema=f"trading-fill-v{SCHEMA_VERSION}",
+                content_hash=f"sha256:{_hash({'fill_id': str(fill.fill_id), 'order_id': str(fill.order_id), 'quantity': str(fill.quantity), 'price': str(fill.price)})}"))
+        order.state = BrokerOrderState(event.to_state)
+        order.version += 1
+        order.filled_quantity = filled_quantity
+        order.fills.append(fill)
     def add_fill(self, order: BrokerOrder, fill: Fill) -> None:
         """체결 사실. 회계본부의 `fill_consumer`가 이 표를 읽는다.
 
@@ -404,9 +547,12 @@ class PostgresOrderStore:
         with self.cursor() as cur:
             cur.execute(
                 """
-                select order_intent_id, fund_id, idempotency_key, quantity, valid_until,
-                       intent_status, risk_decision_id
-                  from execution.order_intents where order_intent_id = %s
+                select oi.order_intent_id, oi.fund_id, oi.idempotency_key, oi.quantity,
+                       oi.valid_until, oi.intent_status, oi.risk_decision_id,
+                       rd.approved_quantity, rd.valid_until
+                  from execution.order_intents oi
+                  left join risk.risk_decisions rd on rd.risk_decision_id = oi.risk_decision_id
+                 where oi.order_intent_id = %s
                 """,
                 (intent_id,),
             )
@@ -417,9 +563,12 @@ class PostgresOrderStore:
         with self.cursor() as cur:
             cur.execute(
                 """
-                select order_intent_id, fund_id, idempotency_key, quantity, valid_until,
-                       intent_status, risk_decision_id
-                  from execution.order_intents where idempotency_key = %s
+                select oi.order_intent_id, oi.fund_id, oi.idempotency_key, oi.quantity,
+                       oi.valid_until, oi.intent_status, oi.risk_decision_id,
+                       rd.approved_quantity, rd.valid_until
+                  from execution.order_intents oi
+                  left join risk.risk_decisions rd on rd.risk_decision_id = oi.risk_decision_id
+                 where oi.idempotency_key = %s
                 """,
                 (key,),
             )
@@ -430,9 +579,12 @@ class PostgresOrderStore:
         with self.cursor() as cur:
             cur.execute(
                 """
-                select order_intent_id, fund_id, idempotency_key, quantity, valid_until,
-                       intent_status, risk_decision_id
-                  from execution.order_intents order by created_at desc limit %s
+                select oi.order_intent_id, oi.fund_id, oi.idempotency_key, oi.quantity,
+                       oi.valid_until, oi.intent_status, oi.risk_decision_id,
+                       rd.approved_quantity, rd.valid_until
+                  from execution.order_intents oi
+                  left join risk.risk_decisions rd on rd.risk_decision_id = oi.risk_decision_id
+                 order by oi.created_at desc limit %s
                 """,
                 (limit or 200,),
             )
@@ -443,19 +595,19 @@ class PostgresOrderStore:
         with self.cursor() as cur:
             cur.execute(_ORDER_SELECT + " where o.order_id = %s", (order_id,))
             row = cur.fetchone()
-        return _to_order(row) if row else None
+        return self._hydrate_fills(_to_order(row)) if row else None
 
     def find_order_by_intent(self, intent_id: UUID) -> BrokerOrder | None:
         with self.cursor() as cur:
             cur.execute(_ORDER_SELECT + " where o.order_intent_id = %s", (intent_id,))
             row = cur.fetchone()
-        return _to_order(row) if row else None
+        return self._hydrate_fills(_to_order(row)) if row else None
 
     def list_orders(self, limit: int | None = None) -> list[BrokerOrder]:
         with self.cursor() as cur:
             cur.execute(_ORDER_SELECT + " order by o.created_at desc limit %s", (limit or 200,))
             rows = cur.fetchall()
-        return [_to_order(r) for r in rows]
+        return [self._hydrate_fills(_to_order(r)) for r in rows]
 
     def find_unknown_order(self, fund_id: UUID) -> BrokerOrder | None:
         """전체 스캔이 아니라 조회 한 방이다(인메모리 구현의 ponytail 주석 참고)."""
@@ -463,7 +615,7 @@ class PostgresOrderStore:
             cur.execute(_ORDER_SELECT + " where i.fund_id = %s and o.state = 'UNKNOWN' limit 1",
                         (fund_id,))
             row = cur.fetchone()
-        return _to_order(row) if row else None
+        return self._hydrate_fills(_to_order(row)) if row else None
 
     def find_group_by_idempotency(self, key: str) -> IntentGroup | None:
         return None  # 멀티레그 미구현(add_group 참고)
@@ -482,6 +634,203 @@ class PostgresOrderStore:
             )
             return cur.fetchone() is not None
 
+    def existing_broker_event(
+        self, adapter: str, broker_event_id: str | None
+    ) -> StateEvent | None:
+        if broker_event_id is None:
+            return None
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select order_id, event_type, sequence, from_state, to_state,
+                       event_time, received_at, broker_event_id, payload
+                  from execution.order_events
+                 where broker_adapter = %s and broker_event_id = %s
+                """,
+                (adapter, broker_event_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        order_id, event_type, sequence, from_state, to_state, event_time, received_at, bid, payload = row
+        return StateEvent(
+            event_id=UUID(int=0), stream="broker_order", stream_id=order_id,
+            event_type=event_type, sequence=sequence, from_state=from_state,
+            to_state=to_state, event_time=event_time, received_at=received_at,
+            broker_adapter=adapter, broker_event_id=bid, payload=payload,
+        )
+
+    def existing_fill(self, order_id: UUID, broker_fill_id: str | None) -> Fill | None:
+        if broker_fill_id is None:
+            return None
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select fill_id, quantity, price, fee_amount, tax_amount, event_time
+                  from execution.fills
+                 where order_id = %s and broker_fill_id = %s
+                """,
+                (order_id, broker_fill_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        fill_id, quantity, price, fee, tax, event_time = row
+        return Fill(
+            fill_id=fill_id, order_id=order_id, event_id=UUID(int=0),
+            quantity=quantity, price=price, fee=fee, tax=tax,
+            event_time=event_time, broker_fill_id=broker_fill_id,
+        )
+
+    def reconstruct_intent(self, intent_id: UUID) -> OrderIntent | None:
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select oi.order_intent_id, oi.trade_case_id, oi.fund_id, oi.book_id,
+                       sv.strategy_id, oi.instrument_id, oi.side, oi.order_type,
+                       oi.quantity, oi.limit_price, oi.time_in_force, oi.valid_until,
+                       oi.idempotency_key, oi.trace_id, oi.created_at,
+                       ms.source_ref, ms.as_of, ms.bid, ms.ask
+                  from execution.order_intents oi
+                  join strategy.versions sv
+                    on sv.strategy_version_id = oi.strategy_version_id
+                  join execution.market_snapshots ms
+                    on ms.market_snapshot_id = oi.market_snapshot_id
+                 where oi.order_intent_id = %s
+                """,
+                (intent_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        (
+            oid, case_id, fund_id, book_id, strategy_id, instrument_id, side,
+            order_type, quantity, limit_price, tif, valid_until, idem, trace_id,
+            created_at, source_ref, as_of, bid, ask,
+        ) = row
+        return OrderIntent(
+            order_intent_id=oid, trade_case_id=case_id, fund_id=fund_id,
+            book_id=book_id, strategy_id=strategy_id, instrument_id=instrument_id,
+            side=Side(side), order_type=order_type, quantity=quantity,
+            limit_price=limit_price, time_in_force=tif, valid_until=valid_until,
+            snapshot=MarketSnapshot(
+                market_snapshot_id=source_ref, as_of=as_of, bid=bid, ask=ask,
+            ),
+            idempotency_key=idem, created_by="durable-reconstruction",
+            trace_id=str(trace_id), created_at=created_at,
+        )
+    def _risk_evidence(
+        self, cur, rec: OrderIntentRecord, decision_id: UUID | None = None
+    ):
+        cur.execute(
+            """
+            select rd.decision, rd.approved_quantity, rd.max_price, rd.valid_until,
+                   rr.fund_id, rr.book_id, rr.strategy_version_id,
+                   rr.capability_profile_id, ri.order_intent_id,
+                   oi.fund_id, oi.book_id, oi.strategy_version_id,
+                   oi.instrument_id, oi.side
+              from risk.risk_decisions rd
+              join risk.risk_requests rr on rr.risk_request_id = rd.risk_request_id
+              join risk.risk_request_items ri on ri.risk_request_id = rr.risk_request_id
+              join execution.order_intents oi on oi.order_intent_id = ri.order_intent_id
+             where rd.risk_decision_id = %s
+               and ri.order_intent_id = %s
+            """,
+            (decision_id or rec.risk_decision_id, rec.order_intent_id),
+        )
+        return cur.fetchone()
+
+    def validate_risk_decision(
+        self, rec: OrderIntentRecord, decision
+    ) -> None:
+        with self.cursor() as cur:
+            row = self._risk_evidence(cur, rec, decision.risk_decision_id)
+        if row is None:
+            raise OrderStorePersistenceError(
+                "Risk-owner의 canonical risk_decision/risk_request/item 증거가 없습니다"
+            )
+        (
+            verdict, approved_qty, max_price, expires_at, fund_id, book_id,
+            strategy_version_id, capability_profile_id, order_intent_id,
+            oi_fund_id, oi_book_id, oi_strategy_version_id, _instrument_id, _side,
+        ) = row
+        expected_verdict = str(decision.verdict).upper()
+        if expected_verdict == "APPROVE":
+            expected_verdict = "APPROVE"
+        if (
+            verdict != expected_verdict
+            or approved_qty != decision.approved_quantity
+            or max_price != decision.max_price
+            or expires_at != decision.expires_at
+            or order_intent_id != rec.order_intent_id
+            or fund_id != rec.fund_id
+            or oi_fund_id != rec.fund_id
+            or book_id != oi_book_id
+            or strategy_version_id != oi_strategy_version_id
+            or capability_profile_id is None
+        ):
+            raise OrderStorePersistenceError(
+                "Risk-owner 판정이 Intent의 canonical 소유 범위와 일치하지 않습니다"
+            )
+
+    def save_risk_decision(self, rec: OrderIntentRecord, decision) -> None:
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                update execution.order_intents
+                   set risk_decision_id = %s, quantity = %s
+                 where order_intent_id = %s
+                """,
+                (decision.risk_decision_id, rec.requested_quantity, rec.order_intent_id),
+            )
+            if cur.rowcount != 1:
+                raise OrderStorePersistenceError("Risk 판정을 저장할 Intent가 없습니다")
+
+    def revalidate_risk_decision(self, rec: OrderIntentRecord, order: BrokerOrder) -> None:
+        with self.cursor() as cur:
+            row = self._risk_evidence(cur, rec)
+        if row is None:
+            raise OrderStorePersistenceError(
+                "Submit 시 canonical Risk-owner 증거를 재검증할 수 없습니다"
+            )
+        verdict, approved_qty, max_price, expires_at = row[:4]
+        if (
+            verdict == "REJECT"
+            or approved_qty is None
+            or approved_qty < order.requested_quantity
+            or (
+                max_price is not None
+                and order.limit_price is not None
+                and order.limit_price > max_price
+            )
+            or expires_at != rec.risk_expires_at
+            or approved_qty != rec.risk_approved_qty
+        ):
+            raise OrderStorePersistenceError(
+                "Submit 시 canonical Risk 판정이 없거나 변경되었습니다"
+            )
+    def _hydrate_fills(self, order: BrokerOrder) -> BrokerOrder:
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select fill_id, broker_fill_id, quantity, price, fee_amount, tax_amount,
+                       event_time
+                  from execution.fills
+                 where order_id = %s
+                 order by event_time, created_at, fill_id
+                """,
+                (order.order_id,),
+            )
+            rows = cur.fetchall()
+        order.fills = [
+            Fill(
+                fill_id=row[0], order_id=order.order_id, event_id=UUID(int=0),
+                quantity=row[2], price=row[3], fee=row[4], tax=row[5],
+                event_time=row[6], broker_fill_id=row[1],
+            )
+            for row in rows
+        ]
+        return order
     def next_sequence(self, stream: str, stream_id: UUID) -> int:
         if stream != "broker_order":
             return 1  # Intent 스트림은 표가 없다(계약 공백 2)
@@ -519,24 +868,30 @@ class PostgresOrderStore:
 _ORDER_SELECT = """
 select o.order_id, o.order_intent_id, i.fund_id, o.client_order_id, o.broker_adapter,
        i.side, i.instrument_id, o.requested_quantity, i.limit_price, o.state,
-       o.broker_order_id, o.filled_quantity, o.version
+       o.broker_order_id, o.filled_quantity, o.version, o.average_fill_price
   from execution.orders o
   join execution.order_intents i on i.order_intent_id = o.order_intent_id
 """
 
 
 def _to_record(row) -> OrderIntentRecord:
-    (intent_id, fund_id, key, quantity, valid_until, status, risk_decision_id) = row
+    (
+        intent_id, fund_id, key, quantity, valid_until, status, risk_decision_id,
+        risk_approved_qty, risk_expires_at,
+    ) = (*row[:7], *(row[7:9] if len(row) >= 9 else (None, None)))
     return OrderIntentRecord(
         order_intent_id=intent_id, fund_id=fund_id, idempotency_key=key,
         requested_quantity=quantity, valid_until=valid_until,
         state=IntentState(status), risk_decision_id=risk_decision_id,
+        risk_approved_qty=risk_approved_qty, risk_expires_at=risk_expires_at,
     )
 
 
 def _to_order(row) -> BrokerOrder:
-    (order_id, intent_id, fund_id, client_order_id, adapter, side, instrument_id,
-     requested, limit_price, state, broker_order_id, filled, version) = row
+    (
+        order_id, intent_id, fund_id, client_order_id, adapter, side, instrument_id,
+        requested, limit_price, state, broker_order_id, filled, version, _average,
+    ) = row
     return BrokerOrder(
         order_id=order_id, order_intent_id=intent_id, fund_id=fund_id,
         client_order_id=client_order_id, broker_adapter=adapter, side=Side(side),
