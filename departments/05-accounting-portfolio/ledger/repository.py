@@ -218,6 +218,31 @@ class LedgerRepository:
         self._accounts.pop(fund_id, None)
         return fund_id, book_id
 
+    def default_book(self) -> tuple[UUID, UUID] | None:
+        """파라미터 없이 물었을 때 쓸 (fund_id, book_id). **모르면 안 고른다.**
+
+        `ACCOUNTING_DEFAULT_BOOK_ID`가 있으면 그게 이긴다. 없으면 ACTIVE 장부가
+        정확히 하나일 때만 그걸 쓴다 - 둘 이상인데 아무거나 고르면 화면과 보고가
+        남의 펀드 수치를 자기 것으로 말한다. 못 고르면 None이고, 호출자는 그때
+        수치를 지어내지 말고 "고르지 못했다"로 떨어져야 한다.
+
+        BFF(`/ui/snapshot`)와 마감 스케줄러가 같은 답을 써야 해서 여기 둔다 -
+        두 곳이 각자 고르면 화면과 보고서가 다른 장부를 말하게 된다.
+        """
+        pinned = os.environ.get("ACCOUNTING_DEFAULT_BOOK_ID", "").strip()
+        if pinned:
+            try:
+                book_id = UUID(pinned)
+            except ValueError:
+                return None
+            fund_id = self.fund_of_book(book_id)
+            return (fund_id, book_id) if fund_id else None
+        with self.cursor() as cur:
+            cur.execute("select fund_id, book_id from accounting.books "
+                        " where status = 'ACTIVE' order by book_id limit 2")
+            rows = cur.fetchall()
+        return (rows[0][0], rows[0][1]) if len(rows) == 1 else None
+
     def fund_of_book(self, book_id: UUID) -> UUID | None:
         """book_id 하나로 Fund가 정해진다. 그래서 ledger_id == book_id로 쓴다."""
         with self.cursor() as cur:
@@ -274,6 +299,33 @@ class LedgerRepository:
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    def symbols_for(self, instrument_ids: list[UUID], *, as_of: datetime | None = None,
+                    market: str = "KRX") -> dict[UUID, str]:
+        """instrument_id -> symbol. `instrument_by_symbol`의 역방향이다.
+
+        평가 경로가 이 방향을 쓴다 - 우리는 보유 종목을 UUID로 알고 있고 market-api는
+        symbol로만 답한다. PIT 규칙은 반대 방향과 같다(`valid_from`/`valid_to`).
+
+        모르는 종목은 **결과에 없다.** 짐작해서 아무 코드나 붙이면 남의 종목 시세로
+        NAV가 나온다 - 빠진 채로 두면 그 종목의 Mark가 없어 NAV가 거부된다.
+        """
+        ids = list(dict.fromkeys(instrument_ids))
+        if not ids:
+            return {}
+        as_of = as_of or datetime.now(timezone.utc)
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select distinct on (instrument_id) instrument_id, symbol
+                  from reference.instrument_symbols
+                 where instrument_id = any(%s) and market = %s
+                   and valid_from <= %s and (valid_to is null or valid_to > %s)
+                 order by instrument_id, is_primary desc, valid_from desc
+                """,
+                (ids, market, as_of, as_of),
+            )
+            return {instrument_id: symbol for instrument_id, symbol in cur.fetchall()}
 
     def base_currency(self, fund_id: UUID) -> str:
         cached = self._currency.get(fund_id)

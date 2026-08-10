@@ -117,7 +117,10 @@ export default function OpsPanel({ compact = false }: { compact?: boolean }) {
   const { snapshot, connection, error, lastUpdated, refresh } = useBffFeed();
   if (!snapshot) return <BackendEmptyState connection={connection} error={error} refresh={refresh} compact={compact} />;
 
-  const { portfolio, trading, ledger, mode } = snapshot;
+  const { portfolio, trading, ledger, mode, sources } = snapshot;
+  // 장부 구간의 출처. mode와 다른 축이라 따로 보여준다 — 같은 DEMO 배지 아래에서
+  // Supabase 실장부와 번들 Fixture가 구분되지 않으면 어느 쪽인지 알 수 없다.
+  const ledgerSource = sources?.portfolio;
   return (
     <section className={`${compact ? "ops-snap-compact" : "win"} ops-snap`} aria-labelledby="ops-snapshot-title">
       {!compact && <div className="win-bar">
@@ -137,6 +140,14 @@ export default function OpsPanel({ compact = false }: { compact?: boolean }) {
             <span className={`status-pill ${connection === "connected" ? "done" : "approval"}`}>
               {connection === "connected" ? "BFF Read Model" : connection.toUpperCase()}
             </span>
+            {ledgerSource && (
+              <span
+                className={`status-pill ${ledgerSource === "supabase" ? "done" : "approval"}`}
+                title="장부·평가 구간의 출처입니다. 트레이딩 구간은 아직 Scripted Loop입니다."
+              >
+                장부 {ledgerSource === "supabase" ? "Supabase" : "Scripted Loop"}
+              </span>
+            )}
             <span className="status-pill">v{snapshot.snapshot_version}</span>
             <button type="button" className="btn-small" onClick={() => void refresh()}>
               새로고침
