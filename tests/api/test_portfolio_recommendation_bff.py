@@ -585,7 +585,14 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertIsNotNone(result, runtime)
         assert result is not None
         self.assertEqual(result["task_plan"]["category"], "PORTFOLIO_RECOMMENDATION")
-        self.assertEqual(result["task_plan"]["requested_departments"], ["research", "risk", "qa", "ceo"])
+        # 2026-08-10 팀 합의로 포트폴리오 구성 요청은 요청 시점에 quant 를 거친다.
+        # 단순 종목 질문(MARKET_RESEARCH)은 응답성 때문에 여전히 quant 를 부르지 않는다.
+        self.assertEqual(
+            result["task_plan"]["requested_departments"],
+            ["research", "quant", "risk", "qa", "ceo"],
+        )
+        self.assertEqual(result["task_plan"]["workflow"], "portfolio-recommendation")
+        self.assertTrue(result["task_plan"]["category_recognized"])
         self.assertEqual(result["universe"]["universe_id"], "KOREA_EQUITY_WATCHLIST")
         self.assertTrue(result["instrument_recommendations"])
         self.assertTrue(result["suitability"]["recommendations"][0]["instrument_recommendations"])

@@ -400,7 +400,8 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 
 `POST /ui/portfolio-recommendations`는 다음 선택 입력을 추가로 받는다.
 
-- `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL` 중 하나다.
+- `category`: `PORTFOLIO_RECOMMENDATION`, `MARKET_RESEARCH`, `RISK_REVIEW`, `TAX_LIQUIDITY`, `REBALANCING_PROPOSAL`, `STRATEGY_PROPOSAL` 중 하나다. **다만 서버는 이 목록을 `Literal`로 강제하지 않는다** — 목록 밖 문자열이 와도 422가 아니라 더 넓은 부서 집합으로 fallback하고, 응답 `task_plan.category_recognized: false`로 그 사실을 남긴다. 대화형 제품에서 새 의도가 표보다 먼저 도착하므로 질문을 통째로 실패시키지 않되, 조용히 넘기지도 않는다는 뜻이다(근거: [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md) 2.5).
+- `STRATEGY_PROPOSAL`은 `task_plan.workflow`가 `strategy-research`로 나온다 — 이 그래프가 정식 처리 주체가 아니라는 표시다. 현재 BFF는 아직 워크플로별 디스패치를 하지 않으므로 자문 전용 축소 집합(`research`·`qa`·`ceo`)만 실행된다(같은 문서 3.1).
 - `include_stock`: 주식 종목·배분 표시 여부이며 기본값은 `true`다.
 - `include_derivatives`: 파생상품 종목·배분 표시 여부이며 현재 국내 주식 전용 범위에서는 기본값이 `false`다.
 - `query`: 사용자가 자유롭게 작성하는 투자 질문·조건이다. 빈 문자열이어도 되며, 카테고리와 구조화된 프로필만으로 기본 라우팅한다.

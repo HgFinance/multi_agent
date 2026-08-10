@@ -6,12 +6,18 @@
 
 | 경로 | 실행 부서 | 안전 스킵/분리 정책 |
 | --- | --- | --- |
-| 기본 포트폴리오 추천 | research → risk → qa → ceo | trading/accounting은 주문·원장 변경이 없어 `SKIPPED_SAFE` |
-| 전체 투자 검토(`REBALANCING_PROPOSAL` 또는 구조화 테스트 입력) | research → trading → risk → qa → accounting → ceo | 각 단계는 독립 Worker fan-out/fan-in |
-| 전략 연구 | quant-backtest → qa → ceo | `strategy-research` 별도 체인, Trading 승격·주문 제출 금지 |
+| 기본 포트폴리오 추천 | research → quant → risk → qa → ceo | trading/accounting은 주문·원장 변경이 없어 `SKIPPED_SAFE` |
+| 단순 종목 질의(`MARKET_RESEARCH`) | research → qa → ceo | 새 후보를 구성하지 않으므로 quant도 `SKIPPED_SAFE` |
+| 전체 투자 검토(`REBALANCING_PROPOSAL` 또는 구조화 테스트 입력) | research → quant → trading → risk → qa → accounting → ceo | 각 단계는 독립 Worker fan-out/fan-in |
+| 대화형 전략 제안(`STRATEGY_PROPOSAL`) | research → quant → qa → ceo | 백테스트 근거는 만들되 주문·원장 부서는 제외 |
+| 전략 승격 | quant-backtest → qa → ceo | `strategy-research` 별도 체인, Trading 승격·주문 제출 금지 |
 | HR/Agent 생명주기 | `workforce-management`/`agent-evolution` | 투자 포트폴리오 파이프라인과 혼합하지 않음 |
 
-따라서 “전체 부서 연결”의 검증 기준은 모든 경로를 무조건 실행하는 것이 아니라, 각 경로의 선택·스킵·실패 전파가 계약대로 동작하는 것이다. Quant와 HR은 포트폴리오 추천 그래프에 암묵적으로 끼워 넣지 않고 각 선언된 Workflow에서 별도로 검증한다.
+따라서 “전체 부서 연결”의 검증 기준은 모든 경로를 무조건 실행하는 것이 아니라, 각 경로의 선택·스킵·실패 전파가 계약대로 동작하는 것이다.
+
+**Quant의 위치 (2026-08-10 팀 합의로 변경)**: 이전 판은 "Quant와 HR은 포트폴리오 추천 그래프에 암묵적으로 끼워 넣지 않는다"였고, 그 결과 포트폴리오 추천에 백테스트 근거가 전혀 없었다. 팀은 검증된 전략 카탈로그를 미리 만드는 대신 **요청 시점에 `research → quant`를 호출**하기로 했다. 따라서 Quant는 이제 포트폴리오 그래프의 **선언된 단계**다 — 금지되는 것은 여전히 *암묵적* 삽입이며, 어느 카테고리가 Quant를 부르는지는 `CATEGORY_DEPARTMENTS`에 명시한다. 응답성 때문에 `MARKET_RESEARCH`·`RISK_REVIEW`·`TAX_LIQUIDITY`는 Quant를 부르지 않는다. 전략 **승격** 권한은 그대로 `strategy-research` 체인에 남는다. HR은 변함없이 포트폴리오 파이프라인과 혼합하지 않는다.
+
+세부 근거와 카테고리별 표는 [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md) 3.6을 따른다.
 
 이 문서는 사용자 적합성 포트폴리오 파이프라인의 내부 연결 기준이다. 현재
 파이프라인은 국내 주식 Watchlist를 기본 유니버스로 사용하며, 결과는 자문용
