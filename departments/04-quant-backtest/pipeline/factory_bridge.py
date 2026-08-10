@@ -80,8 +80,17 @@ def _hyp_view(proposal: dict) -> dict:
     }
 
 
-def gate0(proposal: dict, *, past_outcomes: list[dict] | None = None) -> Gate0Result:
+def gate0(proposal: dict, *, trials_used: int = 0,
+          past_outcomes: list[dict] | None = None) -> Gate0Result:
     """접수 검사. **순수 함수** - DB 없이 자체 점검이 돈다.
+
+    ▶ **시도 계수와 교훈 조회의 출처를 나눈다.**
+      trials_used   = quant.experiments 의 실행 기록(호출부가 센다)
+      past_outcomes = research.experiment_outcomes 의 종결 기록(교훈 대조용)
+
+      한 곳에서 세면 안 된다. 실행됐지만 아직 종결되지 않은 실험이 있으면 환류
+      기록만 세는 쪽이 적게 세고, 그러면 **예산을 넘겨서 접수된다.** DSR 감가도
+      실행 횟수를 보므로 계수 기준은 실행 기록이다.
 
     past_outcomes: 같은 Family 의 [{decision, lesson_codes:[...]}] 목록.
     """
@@ -105,9 +114,9 @@ def gate0(proposal: dict, *, past_outcomes: list[dict] | None = None) -> Gate0Re
 
     # ② 시도 압력. 어휘가 안 잡히면 Family 도 못 만든다.
     fam = family_id(_hyp_view(proposal)) if r.ok else ""
-    counted = [o for o in past if str(o.get("decision")) not in NOT_A_TRIAL]
     budget = int(proposal.get("trial_budget") or 5)
-    p = pressure(fam, [{"trial_family_id": fam} for _ in counted], budget=budget)
+    used = max(0, int(trials_used))
+    p = pressure(fam, [{"trial_family_id": fam} for _ in range(used)], budget=budget)
     r.trial_family_id = p["trial_family_id"]
     r.trial_number = int(p["trial_number"])
     r.trials_used = int(p["trials_used"])
@@ -242,6 +251,52 @@ def fetch_published_proposals(conn, limit: int = 20) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+_SQL_FAMILY_TRIALS = "select count(*) from quant.experiments where trial_family_id = %s"
+
+
+def count_family_trials(conn, trial_family_id: str) -> int:
+    """이 Family 에서 **실제로 실행된** 실험 수. 예산과 DSR 이 같은 값을 본다."""
+    if not trial_family_id:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(_SQL_FAMILY_TRIALS, (trial_family_id,))
+        return int(cur.fetchone()[0])
+
+
+def lessons_from(*, failed_criteria=(), regime_concerns=(),
+                 fragility: str = "") -> list[str]:
+    """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
+
+    LLM 워커(QNT-04)가 이 위에 서술을 얹을 수 있지만, 얹지 않아도 루프는 돈다 -
+    에이전트가 없으면 교훈이 안 남는 구조면 **환류가 에이전트 가용성에 묶인다.**
+    """
+    out: list[str] = []
+    f = {str(x).lower() for x in failed_criteria}
+    if any("pbo" in x for x in f):
+        out.append("OVERFIT_PBO")
+    if any("deflated_sharpe" in x for x in f):
+        out.append("OVERFIT_DSR")
+    if any("excess_return" in x or "information_ratio" in x for x in f):
+        out.append("BASELINE_NOT_BEATEN")
+    if any("turnover" in x for x in f):
+        out.append("COST_SENSITIVE")
+    if any("drawdown" in x for x in f):
+        out.append("BEAR_FRAGILE")
+    if str(fragility).upper() == "FRAGILE":
+        out.append("SINGLE_REGIME_ONLY")
+    joined = " ".join(str(c) for c in regime_concerns)
+    if "하락장" in joined:
+        out.append("BEAR_FRAGILE")
+    if "가로질러" in joined or "국면이 1개" in joined:
+        out.append("SINGLE_REGIME_ONLY")
+    seen, uniq = set(), []          # 순서 보존 중복 제거 - 대조가 지저분해진다
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return uniq
+
+
 def fetch_family_outcomes(conn, trial_family_id: str) -> list[dict]:
     if not trial_family_id:
         return []
@@ -308,19 +363,28 @@ def _check_unmapped_vocabulary_is_rejected():
 
 
 def _check_budget_is_enforced():
-    past = [{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]} for _ in range(5)]
     g = gate0(_prop(trial_budget=5,
                     prior_check={"lessons_addressed": {"OVERFIT_PBO": "파라미터 고정"}}),
-              past_outcomes=past)
+              trials_used=5,
+              past_outcomes=[{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]}])
     assert not g.ok and "OVER_BUDGET" in g.codes, g.as_dict()
     assert g.trials_used == 5
 
 
-def _check_blocked_does_not_consume_budget():
-    """실험이 시작조차 못 한 것은 시도가 아니다."""
-    past = [{"decision": "BLOCKED", "lesson_codes": []} for _ in range(9)]
-    g = gate0(_prop(trial_budget=5), past_outcomes=past)
-    assert g.ok and g.trials_used == 0, g.as_dict()
+def _check_trial_count_comes_from_executions_not_outcomes():
+    """**실행됐지만 아직 종결 안 된 실험을 안 세면 예산을 넘겨 접수된다.**
+
+    환류 기록이 1건인데 실행이 5건이면 계수 기준은 5여야 한다.
+    """
+    addressed = {"lessons_addressed": {"OVERFIT_PBO": "파라미터 고정"}}
+    past = [{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]}]
+    over = gate0(_prop(trial_budget=5, prior_check=addressed),
+                 trials_used=5, past_outcomes=past)
+    assert over.trials_used == 5 and not over.ok, over.as_dict()
+    # 반대로 실행이 0이면 환류가 있어도 예산은 남아 있다
+    fresh = gate0(_prop(trial_budget=5, prior_check=addressed),
+                  trials_used=0, past_outcomes=past)
+    assert fresh.ok and fresh.trial_number == 1, fresh.as_dict()
 
 
 def _check_unaddressed_lessons_block():
@@ -334,7 +398,7 @@ def _check_unaddressed_lessons_block():
 def _check_addressed_lessons_pass():
     past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE"]}]
     g = gate0(_prop(prior_check={"lessons_addressed": {"BEAR_FRAGILE": "표본 확대"}}),
-              past_outcomes=past)
+              trials_used=1, past_outcomes=past)
     assert g.ok, g.as_dict()
     assert g.trial_number == 2, g.as_dict()   # 두 번째 시도로 계수된다
 
@@ -430,10 +494,24 @@ def _check_finalize_is_atomic():
     assert len(boom.cur.ran) == 1, "환류 실패 후 상태 UPDATE 가 실행됐다"
 
 
+def _check_lessons_mapping_is_deterministic_baseline():
+    """**에이전트가 없어도 교훈이 남는다** - 환류가 에이전트 가용성에 묶이면 안 된다."""
+    assert lessons_from(failed_criteria=["pbo", "min_deflated_sharpe"]) == [
+        "OVERFIT_PBO", "OVERFIT_DSR"]
+    b = lessons_from(failed_criteria=["max_turnover"], fragility="FRAGILE")
+    assert "COST_SENSITIVE" in b and "SINGLE_REGIME_ONLY" in b, b
+    assert lessons_from(regime_concerns=["하락장 평균 수익률 -32.1%"]) == ["BEAR_FRAGILE"]
+    # 같은 교훈이 두 경로로 나와도 한 번만 (대조가 지저분해진다)
+    assert lessons_from(failed_criteria=["max_drawdown_pct"],
+                        regime_concerns=["하락장 손실"]) == ["BEAR_FRAGILE"]
+    assert lessons_from() == []
+
+
 def _check_gate0_is_deterministic():
     p = _prop()
-    past = [{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]}]
-    assert gate0(p, past_outcomes=past).as_dict() == gate0(p, past_outcomes=past).as_dict()
+    kw = dict(trials_used=1,
+              past_outcomes=[{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]}])
+    assert gate0(p, **kw).as_dict() == gate0(p, **kw).as_dict()
 
 
 if __name__ == "__main__":
@@ -444,7 +522,8 @@ if __name__ == "__main__":
     _check_clean_proposal_is_accepted();        print("  정상 기획안 접수         OK")
     _check_unmapped_vocabulary_is_rejected();   print("  어휘 미사상 거부         OK")
     _check_budget_is_enforced();                print("  시도 예산 강제           OK")
-    _check_blocked_does_not_consume_budget();   print("  BLOCKED 는 시도 아님     OK")
+    _check_trial_count_comes_from_executions_not_outcomes()
+    print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
@@ -453,5 +532,7 @@ if __name__ == "__main__":
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
     _check_finalize_is_atomic();                print("  환류+전이 원자성         OK")
+    _check_lessons_mapping_is_deterministic_baseline()
+    print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
-    print("공장 다리 13개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 14개 영역 통과. 루프가 닫혔다.")
