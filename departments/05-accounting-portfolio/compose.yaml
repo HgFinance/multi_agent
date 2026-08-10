@@ -72,6 +72,44 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       LEDGER_CONSUMER_POLL_SECONDS: ${LEDGER_CONSUMER_POLL_SECONDS:-1.0}
+      # 평가 시세. 컨테이너 안이라 127.0.0.1이 아니라 서비스 이름이다(market-api 주석과
+      # 같은 사정). 못 붙으면 분개는 그대로 가고 NAV만 보류된다 - 시세가 없다고 체결
+      # 기록까지 멈추지 않는다(consumer.poll).
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      # 비우면 장중 체결가, `1D`면 종가 봉. 종가로 돌릴 때는 max_staleness도 넓혀야 한다.
+      ACCOUNTING_MARK_INTERVAL: ${ACCOUNTING_MARK_INTERVAL:-}
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # accounting-close-scheduler: 장 마감 후 일일 마감 보고와 금요일 주간 포트폴리오
+  # 보고를 만들어 Discord로 보낸다. 시각·요일은 accounting_ops.yaml close_schedule.
+  #
+  # ▶ **복제하면 안 된다.** 두 인스턴스가 같은 시각에 깨면 같은 보고가 두 번 나가고,
+  #   중복 방지가 프로세스 메모리(`last`)에만 있어서 서로를 모른다. 중복이 원장을
+  #   깨뜨리진 않지만(읽기 전용) 채널이 두 배로 시끄럽고 어느 쪽이 진짜인지 헷갈린다.
+  #
+  # ▶ DISCORD_WEBHOOK_URL이 없으면 계산은 다 하고 발송만 생략된다(discord_reporter가
+  #   {"ok": false}로 흡수). 마감 자체는 안 막힌다 - Discord는 Projection이다.
+  #
+  # ▶ market-api가 있어야 종가 Mark를 받는다. 없으면 NAV가 보류되고 그 사유가
+  #   보고 대신 통지로 나간다 - 침묵하지 않는다.
+  accounting-close-scheduler:
+    build:
+      context: ../..
+      dockerfile: departments/05-accounting-portfolio/Dockerfile
+    container_name: hedgefund-accounting-close-scheduler
+    restart: unless-stopped
+    command: ["python", "departments/05-accounting-portfolio/close_scheduler.py", "--serve"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      # ACTIVE 장부가 둘 이상이면 이걸 지정해야 한다. 없으면 스케줄러가 아무거나
+      # 고르지 않고 "장부를 고르지 못했다"로 통지한다.
+      ACCOUNTING_DEFAULT_BOOK_ID: ${ACCOUNTING_DEFAULT_BOOK_ID:-}
+      # 부서장 서술용. 없으면 결정론 문장으로 떨어지고 수치는 그대로 나간다.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64

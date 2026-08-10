@@ -143,21 +143,27 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # Case 설계는 정답이 규칙표에 없는 창작이라 결정론화 대상이 아니고, 산출물이
     # QA 재검증을 거치는 비바인딩 제안이라 환각이 그대로 사고가 되지 않는다.
     # 나머지 4명은 여전히 결정론 함수가 소유한다(WORKER_ROLE_BOUNDARIES.md 참고).
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 6, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
         registry = config["staff_registry"]
         assert len(workers) == expected_counts[directory]
         assert registry["worker_count"] == expected_counts[directory]
-        assert (
-            config["employee_runtime"]["topology"]
-            == "async_fan_out_fan_in_independent_graphs"
-        )
-        assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
-        assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
-        assert config["employee_runtime"]["max_retries"] == 2
-        assert config["employee_runtime"]["max_attempts"] == 3
+        if directory == "02-trading":
+            assert config["employee_runtime"]["topology"] == "dynamic_parallel_fan_out_fan_in"
+            assert config["employee_runtime"]["provider"] == "none"
+            assert config["employee_runtime"]["max_attempts"] == 1
+            assert config["temporary_workers"]["one_worker_per_strategy"] is True
+        else:
+            assert (
+                config["employee_runtime"]["topology"]
+                == "async_fan_out_fan_in_independent_graphs"
+            )
+            assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
+            assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
+            assert config["employee_runtime"]["max_retries"] == 2
+            assert config["employee_runtime"]["max_attempts"] == 3
         assert config["model"]["provider"] == "openai-codex"
         assert config["model"]["default"] == "gpt-5.6-luna"
         # `or` 로 폴백하면 빈 목록(직원 없는 부서)이 "키 없음"으로 잘못 읽힌다 - None 만 폴백한다.
@@ -174,13 +180,21 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         assert result["failed"] == []
         assert result["degraded"] is False
         assert result["not_executed"] == []
-        assert result["runtime"]["executor"] == "LangGraph"
-        assert (
-            result["runtime"]["topology"]
-            == "async_fan_out_fan_in_independent_graphs"
-        )
-        assert result["runtime"]["provider"] == "ollama"
-        assert result["runtime"]["model"] == "qwen3:1.7b"
+        if department == "trading":
+            assert result["runtime"] == {
+                "executor": "deterministic_strategy_worker",
+                "topology": "dynamic_parallel_fan_out_fan_in",
+                "provider": "none",
+                "model": "none",
+            }
+        else:
+            assert result["runtime"]["executor"] == "LangGraph"
+            assert (
+                result["runtime"]["topology"]
+                == "async_fan_out_fan_in_independent_graphs"
+            )
+            assert result["runtime"]["provider"] == "ollama"
+            assert result["runtime"]["model"] == "qwen3:1.7b"
 
 
 def test_profile_worker_metadata_matches_runtime_specs() -> None:
@@ -306,9 +320,8 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         # 이라 조건부다 - 평시에 인사팀 LLM 이 도는 것이 아니다.
         "hr": (1, 0, 1),
         "research": (6, 2, 4),
-        # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
-        # desk-runner 가 결정론으로 항상 모아 온다.
-        "trading": (2, 2, 0),
+        # 고정 LLM 직원은 없고 전략별 결정론 Worker를 요청 단위로 생성한다.
+        "trading": (0, 0, 0),
         # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
 
         "risk": (1, 0, 1),

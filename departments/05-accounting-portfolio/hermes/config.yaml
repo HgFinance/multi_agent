@@ -65,6 +65,12 @@ deterministic_services:
 config:
   base_currency: KRW
   fund: "Paper Fund I"
+  # 마감 평가에 쓸 Mark 신선도 한도(_max_staleness). **종가 봉 기준이라 넓다** -
+  # `/bars` 의 bucket_time 은 봉의 *시작* 시각이라 15:40 마감 시점과 하루 가까이
+  # 벌어진다. 30분으로 두면 종가가 전부 stale 로 걸려 NAV 가 영구 보류된다.
+  # 장중 평가(ledger/consumer.py)는 이 값을 안 쓴다 - 거기는 portfolio.py 의
+  # DEFAULT_MAX_STALENESS(5분)이고, 두 경로의 기준이 다른 것이 의도다.
+  mark_max_staleness_minutes: 1440
   # Mandate가 자본과 한도의 기준이다. 원장과 어긋나면 원장이 사실이다.
   mandate: skills/agentic-rag/corpus/compliance/mandate.md
   chart_of_accounts: "최소 세트 9개 - 계정은 테이블 row라 추가 시 스키마 변경 없음"

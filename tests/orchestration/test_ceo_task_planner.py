@@ -58,7 +58,9 @@ class ParsePlanTest(unittest.TestCase):
             }
         )
         decision = _parse_plan(stdout, VALID_DEPARTMENTS)
-        self.assertEqual(decision["requested_departments"], ["research", "qa"])
+        # allow-list 는 상한만 정하고 REQUIRED_DEPARTMENTS({qa, ceo})가 하한이다.
+        # LLM 이 ceo 를 빼도 파싱 단계에서 되살아난다(ceo_task_planner.py 34~39행).
+        self.assertEqual(decision["requested_departments"], ["research", "qa", "ceo"])
         self.assertEqual(decision["rationale"], "리서치 후 QA 검증이 필요합니다.")
 
     def test_out_of_allowlist_department_is_rejected(self) -> None:
@@ -106,7 +108,8 @@ class LlmCeoTaskPlannerTest(unittest.TestCase):
                 valid_departments=VALID_DEPARTMENTS,
             )
         self.assertEqual(result["mode"], "llm_task_plan")
-        self.assertEqual(result["requested_departments"], ["research", "risk"])
+        # qa·ceo 는 REQUIRED_DEPARTMENTS 하한으로 되살아난다.
+        self.assertEqual(result["requested_departments"], ["research", "risk", "qa", "ceo"])
         self.assertTrue(result["mandate_considered"])
         self.assertEqual(result["runtime"]["provider"], "openai-codex")
 

@@ -25,13 +25,13 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 | CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
 | HR | 1 | 0 | 1 | `profile-architecture-worker`만 실행; Job Profile/Eval Set 제안 전용 |
 | Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
-| Trading | 2 (+결정론 1) | 2 | 0 | **2026-08-06 tool 강등** — Bull/Bear만 LLM, 나머지 5명은 `desk-runner`로 통합 |
+| Trading | 0 (+결정론 1, +임시 전략 Worker) | 0 | 0 | **2026-08-10 Bull/Bear 제거** — 고정 LLM 0명, 전략 Bundle당 임시 결정론 Worker |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
 | Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
 | Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 21개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
@@ -52,11 +52,11 @@ LLM Worker 21개(2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개,
   - **구현 지침**: Eval Runner의 구현 요구사항은 [EVAL_RUNNER_SPEC.md](EVAL_RUNNER_SPEC.md)(QA/감사본부 소유)에, Platform/IAM의 남은 범위(TOOL 처리, Redis ACL 실제 격리, GRANT 매핑표 채우기)는 [PLATFORM_IAM_SPEC.md](PLATFORM_IAM_SPEC.md)에 정리돼 있다.
 - **Research**: `research-data-worker`, `microstructure-worker`, `technical-signal-worker`, `fundamental-valuation-worker`, `news-macro-worker`, `evidence-rag-worker`. 데이터 정본·유동성 증거·지표·가치·이벤트·인용 검증은 서로 다른 입력과 Evidence 책임이므로 유지한다.
 - **Risk**: `compliance-policy-worker` (LLM) + `risk-runner` (결정론, LLM 없음). 2026-08-06에 `core-risk-worker`(시장·유동성·사전 Risk Gate)와 `derivatives-counterparty-worker`(파생·Margin·Counterparty)를 **tool로 강등**해 `risk-runner` 하나로 합쳤다 — 둘 다 결정론 Risk Engine이 이미 답을 만들고 있었고 LLM은 그 답을 옮기기만 했다. `compliance-policy-worker`만 LLM이 유지된다(정책 문서 인용·근거 검증은 결정론화가 아니라 Agentic RAG의 몫). 최종 판정은 결정론적 Risk Engine이 한다.
-- **Trading**: `bull-thesis-worker`, `bear-thesis-worker` (LLM) + `desk-runner` (결정론, LLM 없음). Bull과 Bear는 **합치지 않는다** — 한 직원이 양쪽 논지를 다 만들면 먼저 세운 논지가 나중 논지의 앵커가 되어 확증편향이 구조적으로 생기고, "독립성 위반 0 / 문장 복제 0"(TRD-01/TRD-02 KPI)을 측정할 수 없게 된다([ADR-0005](adr/0005-bull-bear-worker-split.md)).
+- **Trading**: 고정 LLM 직원 **0명** + `desk-runner` (결정론, LLM 없음) + 요청 단위로 생성되는 임시 전략 Worker. 임시 Worker도 LLM이 아니다 — 퀀트가 넘긴 Strategy Bundle 하나당 결정론 Worker 하나(`employee_workers.create_temporary_worker`)이며, 전략 로직을 실행할 뿐 스스로 선발·승격하거나 Risk를 우회하거나 실주문을 내지 못한다. 비교와 선발은 Worker가 아니라 결정론 오케스트레이션(`scripts.run_alpha_strategy_selection`)이 한다.
 
-  2026-08-06에 `trade-proposal-worker`·`order-constraint-worker`·`execution-planning-worker`·`venue-cost-worker`·`derivatives-structure-worker` 5명을 **tool로 강등**해 `desk-runner` 하나로 합쳤다. 강등 기준 둘: (1) 같은 입력에서 다른 출력이 나오는 것이 산출물인가, (2) 결정론 모듈이 이미 그 답을 만들고 있지 않은가. 다섯 다 둘 다 아니었다 — 주문 제안은 `propose_intent()`→`intent_builder`, 제약 매핑은 `contracts` 전이표, 집행 계획은 `philosophies.yaml` 프리셋 + `check_plan_feasible()`, 비용은 `tca_memory`, Certification은 서명 조회가 이미 답을 낸다. 위에 모델을 얹는 것은 나온 답을 다시 쓰는 계층일 뿐이고, 그 과정에서 집행 수치가 LLM 문장을 거치는 경로만 생긴다. Bull/Bear만 (1)을 통과한다.
+  2026-08-06에 `trade-proposal-worker`·`order-constraint-worker`·`execution-planning-worker`·`venue-cost-worker`·`derivatives-structure-worker` 5명을 **tool로 강등**해 `desk-runner` 하나로 합쳤다. 강등 기준 둘: (1) 같은 입력에서 다른 출력이 나오는 것이 산출물인가, (2) 결정론 모듈이 이미 그 답을 만들고 있지 않은가. 다섯 다 둘 다 아니었다 — 주문 제안은 `propose_intent()`→`intent_builder`, 제약 매핑은 `contracts` 전이표, 집행 계획은 `philosophies.yaml` 프리셋 + `check_plan_feasible()`, 비용은 `tca_memory`, Certification은 서명 조회가 이미 답을 낸다.
 
-  토론은 2라운드이며 **토론자와 감독자의 런타임이 다르다** — 토론자는 직원 런타임(LangGraph + Ollama), 사회는 부서장 Hermes(`trading-supervisor`)다. 감독자 권한은 안전한 방향으로만 열려 있다: 초점을 Claim 색인 안에서 좁히고, 라운드를 닫고, escalate를 켤 수 있으나, 색인 밖 Claim을 만들거나 깨진 1라운드 위에 2라운드를 열거나 `grounded`를 바꾸거나 escalate를 끄지는 못한다.
+  **`bull-thesis-worker`/`bear-thesis-worker`는 제거됐다.** 두 직원은 위 기준 (1)을 통과해 남아 있었고, 한 직원이 양쪽 논지를 다 만들면 확증편향이 구조적으로 생긴다는 [ADR-0005](adr/0005-bull-bear-worker-split.md)의 근거도 그대로 유효하다. 없앤 이유는 그 근거가 틀려서가 아니라 **투입이 바뀌었기 때문이다** — 트레이딩본부의 입력이 서술형 Research Packet에서 퀀트 소유 Strategy Bundle로 옮겨가면서, 논지를 세우고 반박할 대상 자체가 본부 밖(퀀트 백테스트)에서 이미 검증된 산출물이 됐다. 대립쌍이 아니라 **여러 전략을 같은 Paper 스트림에서 병렬로 돌리고 결정론 스코어카드로 하나를 고르는 것**이 그 자리를 대신한다. Bull/Bear를 다시 두려면 ADR-0005를 되살리는 것이 아니라 서술형 Packet이 다시 본부 입력이 되는지를 먼저 판단해야 한다.
 - **Quant**: `strategy-hypothesis-worker`, `dataset-feature-worker`, `backtest-optimization-worker`, `strategy-release-worker`, `ml-quant-worker`, `execution-cost-worker`, `regime-robustness-worker`. 연구 가설, PIT Dataset, Backtest, Release, ML, 비용, Regime의 실패 원인을 독립적으로 재현해야 하므로 유지한다.
 - **Accounting**: `exception-investigation-worker` (LLM) + `back-office-runner` (결정론, LLM 없음). 2026-08-07에 8명을 둘로 줄였다. 근거는 부서 헌장이다 — 마스터플랜 19.12 "공식 숫자는 Accounting Engine이 계산하며 **Agent는 예외 조사와 설명을 담당한다**", 19.16 "Agent가 수치를 계산하거나 수정하지 않는다", SOUL "only figures the Accounting Engine has confirmed".
 

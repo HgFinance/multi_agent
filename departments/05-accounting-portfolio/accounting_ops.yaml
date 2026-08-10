@@ -118,6 +118,28 @@ pnl_exception:
       cause: 발생주의 수수료가 현금 지급일 기준으로 잡혔다
       check: 수수료 계정의 발생일 대 결제일 확인
 
+# 1-c) 마감·주간 보고 스케줄 (close_scheduler.py)
+#
+# **거래소 캘린더가 아니다.** 휴장·반장 판정은 재일님 시세 파트 소관이고 우리는 만들지
+# 않는다. 여기서 거르는 것은 주말뿐이며, 공휴일은 "그날 평가 스냅샷이 없다"로 드러나
+# 보고 대신 사유 통지가 나간다. 시세 장애도 같은 모양으로 나가는데 그게 맞다 - 우리가
+# 아는 사실은 스냅샷 유무뿐이고, 둘을 구분해 말하려면 없는 근거를 지어내야 한다.
+close_schedule:
+  # KRX 정규장 15:30 마감. 종가 봉이 확정돼 market-api 에 실릴 여유를 둔 값이며
+  # 실측 후 재보정한다 - 너무 이르면 종가가 미확정(is_final=false)이라 quality_status 가
+  # WARN 으로 남는다.
+  daily_at: "15:40"
+  weekly_on: FRI
+  weekly_at: "16:00"
+  timezone_offset_hours: 9      # KST. 회계일 판정도 이 시각 기준이다
+  weekdays_only: true
+  # 보고를 못 만들었을 때 사유를 채널에 알린다. false 로 두면 휴장·시세 장애·
+  # 파이프라인 중단이 전부 같은 침묵이 된다.
+  notify_on_no_data: true
+  # 마감 평가에 쓸 봉. 비우면 장중 체결가라 quality_status 가 항상 WARN 이다.
+  mark_interval: "1D"
+  weekly_holdings_top_n: 10
+
 # 2) 작업 Level 분류 - 회계 질의 비용·성능 최적화
 #    질의를 난이도로 나눠 필요한 만큼만 태운다. **L0 는 LLM 을 아예 안 부른다.**
 query_levels:

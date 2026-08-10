@@ -15,18 +15,15 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SRC_ROOT="$REPO_ROOT/departments"
-# Hermes Profile 실제 위치는 OS마다 다르다. Windows 설치본은 ~/.hermes가 아니라
-# AppData/Local/hermes를 쓴다 - 여기가 틀리면 8개 부서가 전부 조용히 skip된다.
+# Hermes Profile runtime root는 ~/.hermes/profiles다. 다른 루트를 써야 할 때만
+# HERMES_HOME으로 명시적으로 override한다.
 DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
-[[ -d "$DEST_ROOT" ]] || DEST_ROOT="$HOME/AppData/Local/hermes/profiles"
 
-# 2026-08-02 (재일): 부서별 Hermes Container 로 가면서 데이터 디렉터리도 부서별로
-# 갈렸다(docker-compose.yml 의 ~/.hermes-<부서>). Credential·Memory Namespace 분리가
-# 목적이므로 한 곳에 몰아넣으면 분리가 무의미해진다. 부서별 경로가 있으면 그쪽을
-# 쓰고, 없으면 기존 공용 경로로 떨어진다 - 아직 안 옮긴 부서도 그대로 동작한다.
+# Docker Compose와 동일하게 모든 부서의 Runtime Profile을 canonical root 아래에서
+# 찾는다. 구형 ~/.hermes-<부서> 경로로 fallback하지 않는다.
 dest_for() {
-  local dept="$1" per_dept="${HERMES_HOME_PREFIX:-$HOME/.hermes}-$1/profiles/$1"
-  if [[ -d "$per_dept" ]]; then echo "$per_dept"; else echo "$DEST_ROOT/$dept"; fi
+  local dept="$1"
+  echo "$DEST_ROOT/$dept"
 }
 
 # dept -> departments/<n>/hermes 매핑. 순서는 CLAUDE.md 담당자 표와 무관하며
