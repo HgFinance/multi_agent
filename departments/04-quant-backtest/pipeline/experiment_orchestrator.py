@@ -225,6 +225,18 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
                        "lesson_codes": lessons, "oos_keys": sorted(oos)}
 
 
+def _norm_data_products(v) -> list:
+    """가설의 required_data_products 를 이름 리스트로 정규화한다."""
+    if v is None or v == "":
+        return []
+    if isinstance(v, str):
+        v = json.loads(v)
+    if isinstance(v, dict):
+        # DataRequirement {tables:[...], min_history_days:N} - 이름만 꺼낸다
+        return list(v.get("tables") or v.get("data_products") or [])
+    return list(v)
+
+
 def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 run_chain=None) -> OrchestratorReport:
     """가설 하나를 게이트에 태운다. conn/run_chain 주입은 자체점검용."""
@@ -261,8 +273,11 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                       verdict="NO_HYPOTHESIS")
         hid, title, edge, data_products, _status = row
         hyp = {"expected_edge": edge if isinstance(edge, dict) else json.loads(edge or "{}"),
-               "required_data_products": (data_products if isinstance(data_products, list)
-                                          else json.loads(data_products or "[]")),
+               # ▶ 세 모양을 다 받는다: 리스트(구 형식), dict(기획안의
+               #   DataRequirement {tables, min_history_days}), JSON 문자열.
+               #   기획안 경로가 dict 를 넣는데 리스트만 처리해 TypeError 로
+               #   실험이 죽었다(2026-08-10 실측).
+               "required_data_products": _norm_data_products(data_products),
                # ▶ status 를 언패킹만 하고 dict 에 안 넣어서 사전등록 관문이
                #   빈 문자열을 읽고 "순서를 건너뛴다" 로 막았다. 조회한 값을
                #   쓰지 않으면 조회하지 않은 것과 같다.
