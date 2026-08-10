@@ -207,6 +207,14 @@ class PortfolioSuitability(_ApiModel):
 class PortfolioTaskPlan(_ApiModel):
     mode: str = Field(min_length=1)
     category: str = Field(min_length=1)
+    # 이 요청이 어느 Workflow 소속인지. portfolio-recommendation 이 아니면 이 그래프가
+    # 정식 처리 주체가 아니라는 뜻이다(예: STRATEGY_PROPOSAL -> strategy-research).
+    # 값의 정본은 orchestration/workflows/portfolio_recommendation.py 의 CATEGORY_WORKFLOWS
+    # 이며, 이 스키마 파일은 orchestration 을 import 하지 않으므로 문자열로 둔다.
+    workflow: str = Field(default="portfolio-recommendation", min_length=1)
+    # category 가 알려진 값이었는지. False 면 더 넓은 부서 집합으로 fallback 한 것이라
+    # 호출부가 "왜 이렇게 많은 부서를 불렀나"를 설명할 수 있다.
+    category_recognized: bool = True
     original_query: str = ""
     rewritten_query: str = Field(min_length=1)
     requested_departments: list[str] = Field(default_factory=list)

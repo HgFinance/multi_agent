@@ -136,11 +136,14 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 2026-08-07: back-office-runner 흡수로 05-accounting-portfolio 8 -> 1. 회계는
     # 헌장상(마스터플랜 19.12) 에이전트 일이 "예외 조사와 설명" 하나뿐이라 도메인별로
     # 나뉘어 있던 7명이 전부 결정론 전달 계층이었다.
-    # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않는다 —
+    # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않았다 —
     # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
-    # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너를 새로 만들
-    # 필요도 없었다. 0 을 "설정 누락"으로 읽지 않는다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너가 필요 없었다.
+    # 2026-08-10: 0 -> 1. profile-architecture-worker 만 되살렸다 - Adversarial Eval
+    # Case 설계는 정답이 규칙표에 없는 창작이라 결정론화 대상이 아니고, 산출물이
+    # QA 재검증을 거치는 비바인딩 제안이라 환각이 그대로 사고가 되지 않는다.
+    # 나머지 4명은 여전히 결정론 함수가 소유한다(WORKER_ROLE_BOUNDARIES.md 참고).
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 6, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -299,7 +302,9 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
     """Keep the approved head/worker topology explicit and reviewable."""
     expected = {
         "ceo": (1, 1, 0),
-        "hr": (0, 0, 0),
+        # 2026-08-10: profile-architecture-worker 1명. trigger 가 채용·개정 요청일 때만
+        # 이라 조건부다 - 평시에 인사팀 LLM 이 도는 것이 아니다.
+        "hr": (1, 0, 1),
         "research": (6, 2, 4),
         # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
         # desk-runner 가 결정론으로 항상 모아 온다.

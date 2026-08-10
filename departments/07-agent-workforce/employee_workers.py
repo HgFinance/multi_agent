@@ -20,6 +20,7 @@ try:
     from departments.employee_worker_runtime import (
         WorkerLLM,
         WorkerSpec,
+        model_name,
         run_worker_registry,
         tools_for_specs,
     )
@@ -31,6 +32,7 @@ except ModuleNotFoundError:  # direct department-local execution
     from departments.employee_worker_runtime import (
         WorkerLLM,
         WorkerSpec,
+        model_name,
         run_worker_registry,
         tools_for_specs,
     )
@@ -127,11 +129,22 @@ def _hold_result(payload: Mapping[str, Any], missing: list[str]) -> dict[str, An
         json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
     return {
-        "runtime": {"executor": "deterministic-evidence-router"},
+        # 근거가 없어 LLM 을 부르지 않았더라도 runtime 봉투는 표준을 유지한다.
+        # 여기서 다른 executor 이름을 쓰면 "이 부서는 LangGraph 계층이 아니다"로 읽혀
+        # worker-context 계약(MAS_PIPELINE_CONTRACTS)이 깨진다 - 실행 여부는 executor 가
+        # 아니라 attempts/escalate 로 표현한다. 값은 employee_worker_runtime 과 동일.
+        "runtime": {
+            "executor": "LangGraph",
+            "topology": "async_fan_out_fan_in_independent_graphs",
+            "provider": "ollama",
+            "model": model_name(),
+            "max_retries": 2,
+            "max_attempts": 3,
+        },
         "workers": [
             {
                 "worker_id": "profile-architecture-worker",
-                "role": "Profile Architecture analyst",
+                "role": WORKER_SPECS[0].role,
                 "tools": list(WORKER_SPECS[0].tools),
                 "status": "COMPLETED",
                 "attempts": 0,
