@@ -83,7 +83,7 @@ implementation:
     - "workforce.skills / workforce.tools 카탈로그 팝퓰레이션 — 각 투자 본부 소유 정의 수령 후 Catalog Seed 구축 필요"
     - "F27 Telemetry Pipeline 연동 — cost_snapshots 데이터 부재로 현재 예산 평가 결과 UNKNOWN 반환 (플랫폼 텔레메트리 파이프라인 선행 필요)"
     - "Quality Snapshots / Workforce Plans 데이터 생성 로직 — DDL 적용 완료, 데이터 집계 및 저장 애플리케이션 로직 구현 필요"
-    - "lifecycle-worker 구현 — Platform/IAM Service 이벤트 계약 정의 후 Provisioning 요청 Worker 연동 필요. 구현 요구사항은 docs/02-engineering/PLATFORM_IAM_SPEC.md (소유 부서 미정)"
+    - "lifecycle-worker 구현 — Platform/IAM Service(2026-08-10 platform_iam/ 구현 완료: DATA/ENVIRONMENT provisioning, HR API GET .../access-requests?status= 폴링, provision 콜백)가 발급한 provisioning_ref를 HR이 실제로 소비하는 Worker/스케줄러 연동은 아직 없음. TOOL 자원은 workforce.agent_tool_permissions 조회 엔드포인트 부재로 여전히 SKIPPED"
     - "Eval Runner / Shadow Router 실체화 — F19 EVALUATING/SHADOW 단계 실행 엔진 구축 (QA/감사본부 소유). 2026-08-07 코드 실측 재확인: audit.eval_runs/eval_results/eval_sets 3개 테이블 DDL은 있으나 저장소 전체에 INSERT·UPDATE 코드가 0건이다(참조는 전부 SELECT). QA API에 있는 /qa/v1/{model-risk,internal-audit,ops}/evaluate 는 Model Risk·Internal Audit·운영 건강성 평가이지 후보 Agent를 Golden/Adversarial Eval Set으로 채점하는 Runner가 아니다 - 이름이 evaluate 라서 구현된 것으로 오인하지 않는다. Golden/Adversarial Eval 실행 코드도 0건(technical_analyst.py의 GOLDEN 은 골든크로스로 무관). 결과적으로 HR 직원 ACTIVE 전이는 roster/activation_evidence.py 의 실재성 게이트를 통과할 방법이 원리적으로 없다. 구현 요구사항은 docs/02-engineering/EVAL_RUNNER_SPEC.md 로 QA 에 전달했다"
     - "나머지 HR Persona LangGraph Sub-graph 전환 — workforce-planning, selection-performance, lifecycle-coordinator는 결정론 모듈 또는 소비자 부재로 계속 미구현"
 

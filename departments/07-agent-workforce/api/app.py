@@ -71,6 +71,7 @@ from access import (
     InMemoryAccessRepository,
     MissingProvisioningError,
     MissingRevocationEvidenceError,
+    RequestStatus,
     ResourceKind,
     approve_request,
     provision,
@@ -370,6 +371,16 @@ def _access_request_dict(r: AccessRequest) -> dict:
         "request_id": r.request_id, "agent_id": r.agent_id, "resource_kind": r.resource_kind.value,
         "resource_ref": r.resource_ref, "environment": r.environment.value, "status": r.status.value,
         "expires_at": r.expires_at.isoformat(), "approval_id": r.approval_id,
+        # tool_id/requested_at/justification/requested_by/profile_version_id는
+        # 2026-08-10 Platform/IAM 연동 전까지 응답에 없었다 - 순수 조회 목적으로는
+        # 8개 필드로 충분했기 때문이다. Platform/IAM은 이 값들이 실제로 필요하다
+        # (TOOL 요청은 tool_id 없이 원리적으로 처리 불가, AccessRequest 재구성에는
+        # requested_at이 필수). 기존 필드는 그대로 두고 추가만 한다 - 기존
+        # 호출부는 새 필드를 무시하면 그만이라 하위 호환이 깨지지 않는다.
+        "tool_id": r.tool_id, "profile_version_id": r.profile_version_id,
+        "justification": r.justification, "requested_by": r.requested_by,
+        "requested_at": r.requested_at.isoformat(), "scope": r.scope,
+        "approvals": r.approvals, "trace_id": r.trace_id or None,
     }
 
 
@@ -623,6 +634,29 @@ def request_access(body: AccessRequestIn):
     )
     _access_repo.save_request(req)
     return _access_request_dict(req)
+
+
+@app.get("/workforce/v1/access-requests")
+def list_access_requests(status: str | None = None):
+    """Platform/IAM이 처리할 작업(status=APPROVED)을 발견하는 유일한 경로.
+
+    Platform/IAM은 HR의 DB에 직접 접속하지 않는다 - 부서 경계는 이 API로 유지한다
+    (PLATFORM_IAM_SPEC.md 2.1·3.3). status 생략 시 전체 상태를 순회해 합친다 -
+    운영 콘솔에서 상태별로 훑어볼 때도 같은 엔드포인트를 쓸 수 있게 한다.
+    """
+    if status is not None:
+        try:
+            statuses = [RequestStatus(status)]
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"알 수 없는 status: {status}")
+    else:
+        statuses = list(RequestStatus)
+    requests = [
+        req
+        for s in statuses
+        for req in _access_repo.list_requests_by_status(s)
+    ]
+    return {"access_requests": [_access_request_dict(r) for r in requests]}
 
 
 @app.post("/workforce/v1/access-requests/{request_id}/approve")
