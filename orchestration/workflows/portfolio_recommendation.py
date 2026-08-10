@@ -1022,6 +1022,54 @@ def build_portfolio_recommendation_graph(
         ]
 
 
+    # 고정 Worker Registry가 비어 있는 부서(Trading: 전략별 임시 Worker만 존재)는
+    # 위/아래 skip 헬퍼가 전부 **빈 목록**을 돌려준다. 그런데 fan_in의 부서 판정은
+    # `bool(reports) and all(...)` 이라 빈 목록이면 어떤 skip 사유에도 걸리지 않고
+    # 마지막 else의 COMPLETED로 떨어진다 — 즉 **호출조차 안 된 부서가 성공으로 보인다.**
+    # 사유를 잃지 않도록 부서 단위 대체 보고 하나를 만들어 준다. Worker가 0명인 것은
+    # 설정 누락이 아니라 결정이므로(WORKER_ROLE_BOUNDARIES.md) 여기서 사유별로 감싼다.
+    def _registryless_report(
+        stage: str,
+        *,
+        skip_reason: str,
+        summary: str,
+        input_hash: str | None,
+        escalate: bool = False,
+        error: str | None = None,
+    ) -> list[dict[str, Any]]:
+        worker_id = "dynamic-alpha-strategy-worker" if stage == "trading" else f"{stage}-department"
+        return [{
+            "stage": stage,
+            "worker_id": worker_id,
+            "role": "Request-scoped Quant Alpha Strategy evaluator"
+            if stage == "trading"
+            else "Department without a fixed worker registry",
+            "status": "SKIPPED_SAFE",
+            "skip_reason": skip_reason,
+            "execution_reason": skip_reason,
+            "attempts": 0,
+            "output": {
+                "worker_id": worker_id,
+                "summary": summary,
+                "confidence": 1.0,
+                "evidence_refs": [],
+                "escalate": escalate,
+                "schema_valid": True,
+            },
+            "error": error,
+            "output_contract": "trading.temporary-strategy-worker.v1"
+            if stage == "trading"
+            else "worker-context.v1",
+            "input_hash": input_hash,
+            "binding": False,
+            "technology": {
+                "executor": "deterministic_strategy_worker",
+                "topology": "dynamic_parallel_fan_out_fan_in",
+                "provider": "none",
+                "model": "none",
+            },
+        }]
+
     def _plan_skip_reports(
         stage: str,
         specs: Sequence[WorkerSpec],
@@ -1069,7 +1117,13 @@ def build_portfolio_recommendation_graph(
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {"worker_reports": _plan_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
+                        {"worker_reports": _plan_skip_reports(stage, _specs(stage), payload.get("input_hash"))
+                         or _registryless_report(
+                             stage,
+                             skip_reason="NOT_REQUESTED",
+                             summary="CEO task plan did not select this department for the user request.",
+                             input_hash=payload.get("input_hash"),
+                         )},
                     )
                 ]
             if not _live_worker_inputs_ready(state):
@@ -1078,7 +1132,15 @@ def build_portfolio_recommendation_graph(
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {"worker_reports": _safe_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
+                        {"worker_reports": _safe_skip_reports(stage, _specs(stage), payload.get("input_hash"))
+                         or _registryless_report(
+                             stage,
+                             skip_reason="LIVE_DATA_NOT_READY",
+                             summary="Live PIT inputs are not ready; department execution was blocked.",
+                             input_hash=payload.get("input_hash"),
+                             escalate=True,
+                             error="LIVE_DATA_NOT_READY",
+                         )},
                     )
                 ]
             selected = _selected_specs(stage, payload)
@@ -1116,33 +1178,12 @@ def build_portfolio_recommendation_graph(
                     for spec in _specs(stage)
                 ]
                 if not no_trigger_reports:
-                    no_trigger_reports = [{
-                        "stage": stage,
-                        "worker_id": "dynamic-alpha-strategy-worker",
-                        "role": "Request-scoped Quant Alpha Strategy evaluator",
-                        "status": "SKIPPED_SAFE",
-                        "skip_reason": "NO_VALID_STRATEGY_BUNDLE",
-                        "execution_reason": "NO_VALID_STRATEGY_BUNDLE",
-                        "attempts": 0,
-                        "output": {
-                            "worker_id": "dynamic-alpha-strategy-worker",
-                            "summary": "No validated Quant Alpha Strategy Bundle was supplied.",
-                            "confidence": 1.0,
-                            "evidence_refs": [],
-                            "escalate": False,
-                            "schema_valid": True,
-                        },
-                        "error": None,
-                        "output_contract": "trading.temporary-strategy-worker.v1",
-                        "input_hash": payload.get("input_hash"),
-                        "binding": False,
-                        "technology": {
-                            "executor": "deterministic_strategy_worker",
-                            "topology": "dynamic_parallel_fan_out_fan_in",
-                            "provider": "none",
-                            "model": "none",
-                        },
-                    }]
+                    no_trigger_reports = _registryless_report(
+                        stage,
+                        skip_reason="NO_VALID_STRATEGY_BUNDLE",
+                        summary="No validated Quant Alpha Strategy Bundle was supplied.",
+                        input_hash=payload.get("input_hash"),
+                    )
                 return [
                     Send(
                         f"{stage}_fan_in",
