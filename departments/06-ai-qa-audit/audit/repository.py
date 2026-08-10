@@ -32,8 +32,10 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Any
+from uuid import UUID
 
 from evidence_qa_engine import QaAssessment
 from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
@@ -42,6 +44,10 @@ from trace_recorder import AgentRunRecord, ToolCallRecord
 
 class QaDecisionPersistenceError(RuntimeError):
     """Canonical QA Decision을 기록하지 못한 경우."""
+
+
+class EvalPersistenceConflict(QaDecisionPersistenceError):
+    """A replay changed an immutable EvalRun/EvalResult payload."""
 
 
 @lru_cache(maxsize=1)
@@ -79,6 +85,9 @@ class PostgresAuditRepository:
         _, ThreadedConnectionPool = _load_postgres_driver()
         return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
 
+    @staticmethod
+    def _test_mode() -> bool:
+        return os.environ.get("RISK_QA_RUNTIME", "").lower() == "test"
     def close(self) -> None:
         self._pool.closeall()
 
@@ -218,6 +227,8 @@ class PostgresAuditRepository:
     # -- audit.agent_runs --------------------------------------------------------
 
     def insert_run(self, run: AgentRunRecord) -> None:
+        if self._test_mode():
+            return
         self._execute(
             """
             insert into audit.agent_runs
@@ -240,6 +251,8 @@ class PostgresAuditRepository:
         )
 
     def update_run_terminal(self, run: AgentRunRecord) -> None:
+        if self._test_mode():
+            return
         self._execute(
             """
             update audit.agent_runs
@@ -262,6 +275,8 @@ class PostgresAuditRepository:
     # -- audit.tool_calls (append-only - 종결 상태 1행만 insert) -----------------------
 
     def insert_tool_call_terminal(self, call: ToolCallRecord) -> None:
+        if self._test_mode():
+            return
         self._execute(
             """
             insert into audit.tool_calls
@@ -458,3 +473,421 @@ class PostgresAuditRepository:
             raise
         finally:
             self._pool.putconn(conn)
+    @staticmethod
+    def _eval_uuid(value: Any, field: str) -> UUID:
+        try:
+            return value if isinstance(value, UUID) else UUID(str(value))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must be UUID-compatible") from exc
+
+    @staticmethod
+    def _eval_value(value: Any, key: str, default: Any = None) -> Any:
+        if isinstance(value, dict):
+            return value.get(key, default)
+        return getattr(value, key, default)
+
+    @staticmethod
+    def _same_eval_value(actual: Any, expected: Any) -> bool:
+        if hasattr(actual, "adapted"):
+            actual = actual.adapted
+        if hasattr(expected, "adapted"):
+            expected = expected.adapted
+        if isinstance(actual, UUID) or isinstance(expected, UUID):
+            try:
+                return UUID(str(actual)) == UUID(str(expected))
+            except (TypeError, ValueError, AttributeError):
+                return False
+        return actual == expected
+
+    def ensure_eval_set(self, eval_set: Any) -> None:
+        """Create the FK parent before inserting ``audit.eval_runs``."""
+        eval_set_id = self._eval_uuid(self._eval_value(eval_set, "eval_set_id"), "eval_set_id")
+        role_code = self._eval_value(eval_set, "role_code")
+        version = int(self._eval_value(eval_set, "version"))
+        content_hash = self._eval_value(eval_set, "content_hash")
+        manifest_path = f"qa/eval-sets/{eval_set_id}.json"
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                select_sql = (
+                    "select eval_set_id, role_code, version, content_hash "
+                    "from audit.eval_sets where eval_set_id = %s "
+                    "or (role_code = %s and version = %s) "
+                    "or (role_code = %s and content_hash = %s)"
+                )
+                cur.execute(select_sql, (eval_set_id, role_code, version, role_code, content_hash))
+                rows = cur.fetchall()
+                for existing_id, existing_role, existing_version, existing_hash in rows:
+                    same_identity = (
+                        self._same_eval_value(existing_id, eval_set_id)
+                        and str(existing_role) == str(role_code)
+                        and int(existing_version) == version
+                        and str(existing_hash) == str(content_hash)
+                    )
+                    if not same_identity:
+                        raise EvalPersistenceConflict("conflicting eval set identity")
+                if not rows:
+                    cur.execute(
+                        """
+                        insert into audit.eval_sets (
+                            eval_set_id, role_code, version, manifest_path,
+                            content_hash, status
+                        ) values (%s, %s, %s, %s, %s, 'DRAFT')
+                        on conflict do nothing
+                        """,
+                        (eval_set_id, role_code, version, manifest_path, content_hash),
+                    )
+                    if getattr(cur, "rowcount", 1) == 0:
+                        # A concurrent insert won either uniqueness constraint;
+                        # re-read it and classify the replay deterministically.
+                        cur.execute(select_sql, (eval_set_id, role_code, version, role_code, content_hash))
+                        rows = cur.fetchall()
+                        if not rows:
+                            raise EvalPersistenceConflict("eval set insert conflict")
+                        for existing_id, existing_role, existing_version, existing_hash in rows:
+                            same_identity = (
+                                self._same_eval_value(existing_id, eval_set_id)
+                                and str(existing_role) == str(role_code)
+                                and int(existing_version) == version
+                                and str(existing_hash) == str(content_hash)
+                            )
+                            if not same_identity:
+                                raise EvalPersistenceConflict("conflicting eval set identity")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def insert_eval_run(self, run: Any) -> None:
+        """Append one EvalRun and make identical replay a no-op."""
+        run_id = self._eval_uuid(self._eval_value(run, "eval_run_id"), "eval_run_id")
+        eval_set_id = self._eval_uuid(self._eval_value(run, "eval_set_id"), "eval_set_id")
+        trace_id = self._eval_uuid(self._eval_value(run, "trace_id"), "trace_id")
+        values = (
+            run_id,
+            eval_set_id,
+            self._eval_value(run, "candidate_id"),
+            self._eval_value(run, "candidate_profile_version"),
+            self._eval_value(run, "eval_set_version"),
+            self._eval_value(run, "eval_set_hash"),
+            _json_param(self._eval_value(run, "champion_ref")),
+            _json_param(self._eval_value(run, "config", {})),
+            self._eval_value(run, "status"),
+            trace_id,
+            self._eval_value(run, "environment"),
+            _json_param(self._eval_value(run, "mock_tool_manifest", {})),
+            self._eval_value(run, "model_version"),
+            self._eval_value(run, "adapter_version"),
+            self._eval_value(run, "evidence_hash"),
+            self._eval_value(run, "started_at"),
+            self._eval_value(run, "ended_at"),
+            self._eval_value(run, "created_at"),
+        )
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into audit.eval_runs (
+                        eval_run_id, eval_set_id, candidate_id, candidate_profile_version,
+                        eval_set_version, eval_set_hash, champion_ref, config, status, trace_id,
+                        environment, mock_tool_manifest, model_version, adapter_version,
+                        evidence_hash, started_at, ended_at, created_at
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (eval_run_id) do nothing
+                    returning eval_run_id
+                    """,
+                    values,
+                )
+                inserted = cur.fetchone()
+                if inserted is None:
+                    cur.execute(
+                        "select eval_run_id, eval_set_id, candidate_id, candidate_profile_version, "
+                        "eval_set_version, eval_set_hash, champion_ref, config, status, trace_id, "
+                        "environment, mock_tool_manifest, model_version, adapter_version, evidence_hash, "
+                        "started_at, ended_at, created_at from audit.eval_runs where eval_run_id = %s",
+                        (run_id,),
+                    )
+                    existing = cur.fetchone()
+                    if existing is None:
+                        raise EvalPersistenceConflict("eval run insert conflict")
+                    if len(existing) == len(values) and all(
+                        self._same_eval_value(a, b) for a, b in zip(existing, values)
+                    ):
+                        conn.commit()
+                        return
+                    raise EvalPersistenceConflict("conflicting eval run replay")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def insert_eval_result(self, result: Any) -> None:
+        """Insert one immutable EvalResult; exact replay is idempotent."""
+        result_id = self._eval_uuid(self._eval_value(result, "eval_result_id"), "eval_result_id")
+        run_id = self._eval_uuid(self._eval_value(result, "eval_run_id"), "eval_run_id")
+        case_key = self._eval_value(result, "case_key")
+        metric = self._eval_value(result, "metric")
+        values = (
+            result_id,
+            run_id,
+            case_key,
+            metric,
+            self._eval_value(result, "score"),
+            self._eval_value(result, "passed"),
+            _json_param(self._eval_value(result, "evidence", {})),
+            self._eval_value(result, "error_code"),
+            self._eval_value(result, "created_at"),
+        )
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into audit.eval_results (
+                        eval_result_id, eval_run_id, case_key, metric,
+                        score, passed, evidence, error_code, created_at
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict do nothing
+                    returning eval_result_id
+                    """,
+                    values,
+                )
+                inserted = cur.fetchone()
+                if inserted is None:
+                    cur.execute(
+                        "select eval_result_id, eval_run_id, case_key, metric, score, passed, "
+                        "evidence, error_code, created_at from audit.eval_results "
+                        "where eval_result_id = %s",
+                        (result_id,),
+                    )
+                    existing = cur.fetchone()
+                    if existing is not None:
+                        if len(existing) == len(values) and all(
+                            self._same_eval_value(a, b) for a, b in zip(existing, values)
+                        ):
+                            conn.commit()
+                            return
+                        raise EvalPersistenceConflict("conflicting eval result replay")
+                    cur.execute(
+                        "select eval_result_id from audit.eval_results "
+                        "where eval_run_id = %s and case_key = %s and metric = %s",
+                        (run_id, case_key, metric),
+                    )
+                    if cur.fetchone() is not None:
+                        raise EvalPersistenceConflict("conflicting eval result key")
+                    raise EvalPersistenceConflict("eval result insert conflict")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+    def append_comparison(self, comparison: Any) -> None:
+        """Persist one immutable Champion comparison, idempotently."""
+        run_id = self._eval_uuid(comparison.candidate_run_id, "candidate_run_id")
+        champion_id = (
+            self._eval_uuid(comparison.champion_run_id, "champion_run_id")
+            if comparison.champion_run_id
+            else None
+        )
+        values = (
+            run_id,
+            str(comparison.status),
+            comparison.error_code,
+            champion_id,
+            _json_param(comparison.metrics),
+        )
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into audit.eval_comparisons (
+                        eval_run_id, status, error_code, champion_run_id, metrics
+                    ) values (%s, %s, %s, %s, %s)
+                    on conflict (eval_run_id) do nothing
+                    returning eval_run_id
+                    """,
+                    values,
+                )
+                inserted = cur.fetchone()
+                if inserted is None:
+                    cur.execute(
+                        "select status, error_code, champion_run_id, metrics "
+                        "from audit.eval_comparisons where eval_run_id = %s",
+                        (run_id,),
+                    )
+                    existing = cur.fetchone()
+                    if existing is None:
+                        raise EvalPersistenceConflict("eval comparison insert conflict")
+                    if all(self._same_eval_value(a, b) for a, b in zip(existing, values[1:])):
+                        conn.commit()
+                        return
+                    raise EvalPersistenceConflict("conflicting eval comparison replay")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def comparison_for_run(self, run_id: Any) -> Any | None:
+        run_uuid = self._eval_uuid(run_id, "eval_run_id")
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select status, error_code, champion_run_id, metrics "
+                    "from audit.eval_comparisons where eval_run_id = %s",
+                    (run_uuid,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+        if row is None:
+            return None
+        from eval_runner import ChampionComparison
+        return ChampionComparison(
+            status=str(row[0]),
+            error_code=str(row[1]) if row[1] is not None else None,
+            candidate_run_id=str(run_uuid),
+            champion_run_id=str(row[2]) if row[2] is not None else None,
+            metrics=row[3] if isinstance(row[3], dict) else {},
+        )
+
+
+    def transition_eval_run(
+        self, eval_run_id: Any, status: str, *, ended_at: Any = None
+    ) -> None:
+        """Advance EvalRun only through the guarded lifecycle."""
+        allowed = {
+            "QUEUED": {"RUNNING", "CANCELLED"},
+            "RUNNING": {"COMPLETED", "FAILED", "CANCELLED"},
+        }
+        if status not in {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}:
+            raise ValueError(f"invalid eval run status: {status}")
+        run_id = self._eval_uuid(eval_run_id, "eval_run_id")
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select status from audit.eval_runs where eval_run_id = %s", (run_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise KeyError(str(run_id))
+                current = str(row[0])
+                if status not in allowed.get(current, set()):
+                    raise EvalPersistenceConflict(f"invalid eval run transition {current}->{status}")
+                cur.execute(
+                    "update audit.eval_runs set status = %s, ended_at = %s "
+                    "where eval_run_id = %s and status = %s",
+                    (status, ended_at, run_id, current),
+                )
+                if getattr(cur, "rowcount", 1) != 1:
+                    raise EvalPersistenceConflict("eval run transition lost race")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+    def run_for_id(self, run_id: Any) -> Any | None:
+        """Read one EvalRun without exposing database rows to API callers."""
+        run_uuid = self._eval_uuid(run_id, "eval_run_id")
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select eval_run_id, eval_set_id, candidate_id, candidate_profile_version, "
+                    "eval_set_version, eval_set_hash, champion_ref, config, status, trace_id, "
+                    "environment, mock_tool_manifest, model_version, adapter_version, evidence_hash, "
+                    "started_at, ended_at, created_at from audit.eval_runs where eval_run_id = %s",
+                    (run_uuid,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+        if row is None:
+            return None
+        from eval_runner import EvalRun
+        return EvalRun(
+            eval_run_id=str(row[0]),
+            eval_set_id=str(row[1]),
+            eval_set_version=int(row[4] or 0),
+            eval_set_hash=str(row[5] or ""),
+            candidate_id=str(row[2] or ""),
+            candidate_profile_version=str(row[3] or ""),
+            champion_ref=row[6] if isinstance(row[6], dict) else None,
+            config=row[7] if isinstance(row[7], dict) else {},
+            status=str(row[8]),
+            trace_id=str(row[9]),
+            environment=str(row[10] or "SHADOW"),
+            mock_tool_manifest=row[11] if isinstance(row[11], dict) else {},
+            model_version=str(row[12] or ""),
+            adapter_version=str(row[13] or ""),
+            evidence_hash=str(row[14] or ""),
+            started_at=row[15],
+            ended_at=row[16],
+            created_at=row[17],
+        )
+
+    get_eval_run = run_for_id
+    get_run = run_for_id
+
+    def results_for_run(self, run_id: Any) -> list[Any]:
+        run_uuid = self._eval_uuid(run_id, "eval_run_id")
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select eval_result_id, eval_run_id, case_key, metric, score, passed, "
+                    "evidence, error_code, created_at from audit.eval_results "
+                    "where eval_run_id = %s order by created_at, eval_result_id",
+                    (run_uuid,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+        from eval_runner import EvalMetric, EvalResult
+        return [
+            EvalResult(
+                eval_result_id=str(row[0]),
+                eval_run_id=str(row[1]),
+                case_key=row[2],
+                metric=EvalMetric(str(row[3])),
+                score=row[4],
+                passed=row[5],
+                evidence=row[6] or {},
+                error_code=row[7],
+                created_at=row[8],
+            )
+            for row in rows
+        ]
+
+    def append_run(self, run: Any) -> None:
+        self.insert_eval_run(run)
+
+    def append_result(self, result: Any) -> None:
+        self.insert_eval_result(result)
+
+    def transition_run(
+        self, run_id: Any, status: str, *, ended_at: Any = None
+    ) -> Any:
+        self.transition_eval_run(run_id, status, ended_at=ended_at)
+        return {"eval_run_id": run_id, "status": status, "ended_at": ended_at}

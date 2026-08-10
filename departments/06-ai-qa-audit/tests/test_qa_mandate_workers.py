@@ -12,6 +12,8 @@ QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 EVIDENCE_DIR = QA_DIR / "evidence"
 sys.path.insert(0, str(EVIDENCE_DIR))
+CONTRACTS_TEST_DIR = Path(__file__).resolve().parents[3] / "tests" / "contracts"
+sys.path.insert(0, str(CONTRACTS_TEST_DIR))
 
 from evidence_qa_engine import Claim, ClaimKind, EvidenceChunk
 from qa_mandate_workers import (
@@ -23,6 +25,7 @@ from qa_mandate_workers import (
     run_incident_postmortem_worker,
     run_qa_runner,
 )
+from test_unified_api_contract import load_json, validate_json_schema
 
 NOW = datetime.now(timezone.utc)
 FUND_ID, TRACE_ID, ARTIFACT_ID = uuid4(), uuid4(), uuid4()
@@ -154,3 +157,20 @@ def test_claim_import_type_is_reused_not_redefined() -> None:
     # not redefine its own copy.
     claim = Claim(claim_index=0, text="x", kind=ClaimKind.FACT, subject="AAPL")
     assert claim.kind is ClaimKind.FACT
+
+
+def test_qa_head_emits_agent_task_result_conformant_to_the_canonical_schema() -> None:
+    """FINAL_RUNTIME_ARCHITECTURE.md Phase 0: the QA Head's fan-in must be a
+    valid agent-task-result.v1, and never widen a FAIL/ESCALATE into a
+    success status."""
+
+    schema = load_json("agent-task-result.v1.json")
+    result = assess_qa_verification(_request())
+    agent_task_result = result["qa_head"]["agent_task_result"]
+
+    validate_json_schema(agent_task_result, schema)
+    assert agent_task_result["department"] == "qa-department"
+    assert agent_task_result["decision"] == result["qa_head"]["decision"]
+    if result["qa_head"]["decision"] in ("FAIL", "ESCALATE"):
+        assert agent_task_result["status"] in ("REJECTED", "ESCALATED")
+        assert agent_task_result["escalate"] is True

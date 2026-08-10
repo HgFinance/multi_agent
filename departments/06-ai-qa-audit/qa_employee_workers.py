@@ -40,7 +40,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -543,11 +543,19 @@ def _hallucination_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _normalize_qa_payload(payload)
     result: dict[str, Any] = {
         "tools": ["qa.model_risk.evaluate", "qa.internal_audit.evaluate"],
-        "model_risk": payload.get("model_risk"),
+        "model_risk": None,
         "internal_audit": payload.get("internal_audit"),
     }
+    supplied_model_risk = payload.get("model_risk")
+    if supplied_model_risk is not None:
+        result["model_risk"] = {
+            "decision": "ESCALATE",
+            "reason_codes": ["model_risk_provenance_untrusted"],
+            "calculation_version": "qa-model-risk-v1",
+        }
     model_risk_input = payload.get("model_risk_input")
     if model_risk_input is not None:
         try:
@@ -583,7 +591,15 @@ def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
             }
 
     audit_events = payload.get("internal_audit_events")
-    if audit_events is not None:
+    if audit_events is None:
+        pass
+    elif not audit_events:
+        result["internal_audit"] = {
+            "decision": "ESCALATE",
+            "findings": ["internal_audit_input_missing"],
+            "calculation_version": "qa-internal-audit-v1",
+        }
+    else:
         try:
             from internal_audit import InternalAuditEngine
 
@@ -608,10 +624,11 @@ def _audit_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ops_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _normalize_qa_payload(payload)
     return {
         "tools": ["qa.ops.evaluate", "qa.tool_permission.check"],
         "ops": payload.get("ops_assessment"),
-        "permission": payload.get("permission_check"),
+        "permission": payload.get("permission"),
     }
 
 
@@ -671,19 +688,129 @@ RUNNER_TOOLS = (
     "qa.ops.evaluate",
     "qa.tool_permission.check",
 )
+def _normalize_qa_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Map legacy governed-input aliases onto the canonical runner names."""
+    normalized = dict(payload)
+    if normalized.get("permission") is None and "permission_check" in normalized:
+        normalized["permission"] = normalized.get("permission_check")
+    return normalized
 
 
-def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
+def _qa_runner_failure(
+    code: str,
+    *,
+    detail: str | None = None,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code}
+    if detail:
+        error["detail"] = detail
+    if fields:
+        error["fields"] = fields
+    return {
+        "worker_id": RUNNER_ID,
+        "role": RUNNER_ROLE,
+        "tools": list(RUNNER_TOOLS),
+        "status": "ESCALATED",
+        "attempts": 1,
+        "llm": False,
+        "output": {
+            "worker_id": RUNNER_ID,
+            "facts": {},
+            "blockers": [code],
+            "escalate": True,
+            "decided_by": "canonical-runtime",
+            "authoritative": False,
+        },
+        "error": error,
+        "output_contract": "qa.qa-runner.v1",
+    }
+
+
+def _governed_input_errors(
+    governed: Mapping[str, Any],
+) -> list[str]:
+    required_fields = {
+        "model_risk": ("decision",),
+        "internal_audit": ("decision",),
+        "ops_assessment": ("status",),
+        "permission": ("result",),
+    }
+    errors: list[str] = []
+    for name, value in governed.items():
+        if value is None:
+            continue
+        if not isinstance(value, Mapping) or not value:
+            errors.append(name)
+            continue
+        if name == "assessment":
+            if value.get("decision") in (None, ""):
+                claim_checks = value.get("claim_checks")
+                if not isinstance(claim_checks, (list, tuple)) or not claim_checks:
+                    errors.append("assessment.decision")
+        else:
+            for field in required_fields[name]:
+                if value.get(field) in (None, ""):
+                    errors.append(f"{name}.{field}")
+        if name == "assessment" and "claim_checks" in value:
+            claim_checks = value.get("claim_checks")
+            valid_results = {
+                "SUPPORTED",
+                "PARTIAL",
+                "UNSUPPORTED",
+                "CONTRADICTED",
+                "NOT_APPLICABLE",
+            }
+            if (
+                isinstance(claim_checks, (str, bytes, bytearray))
+                or not isinstance(claim_checks, (list, tuple))
+                or any(
+                    not isinstance(claim, Mapping)
+                    or claim.get("result") not in valid_results
+                    for claim in claim_checks
+                )
+            ):
+                errors.append("assessment.claim_checks")
+    return errors
+
+
+def _qa_runner_projection(payload: dict[str, Any]) -> dict[str, Any]:
     """evidence·model risk·internal audit·ops·permission 잡무. **모델을 부르지 않는다.**
 
     EvidenceQaEngine/ModelRiskEngine/InternalAuditEngine/OpsHealthMonitor/
     check_tool_permission이 이미 만든 판정을 그대로 옮긴다 - `summary` 필드가
     없는 것이 이 직원의 요지다.
     """
+    payload = _normalize_qa_payload(payload)
     evidence = _evidence_tool(payload)
     audit = _audit_tool(payload)
     ops = _ops_tool(payload)
 
+    governed = {
+        "assessment": evidence.get("assessment") if "assessment" in payload else None,
+        "model_risk": (
+            audit.get("model_risk")
+            if "model_risk" in payload or "model_risk_input" in payload
+            else None
+        ),
+        "internal_audit": (
+            audit.get("internal_audit")
+            if "internal_audit" in payload or "internal_audit_events" in payload
+            else None
+        ),
+        "ops_assessment": ops.get("ops") if "ops_assessment" in payload else None,
+        "permission": (
+            ops.get("permission")
+            if "permission" in payload or "permission_check" in payload
+            else None
+        ),
+    }
+    malformed = _governed_input_errors(governed)
+    if malformed:
+        return _qa_runner_failure("SCHEMA_FAILURE", fields=malformed)
+
+    if not any(isinstance(value, Mapping) and value for value in governed.values()):
+        return _qa_runner_failure("MISSING_INPUT")
     blockers: list[str] = []
     evidence_decision = (evidence.get("assessment") or {}).get("decision")
     if evidence_decision and str(evidence_decision).upper() != "PASS":
@@ -705,11 +832,13 @@ def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
     if permission_result and str(permission_result).upper() != "ALLOWED":
         blockers.append(f"permission_{str(permission_result).lower()}")
 
+    decision = "FAIL" if blockers else "PASS"
     return {
         "worker_id": RUNNER_ID,
         "role": RUNNER_ROLE,
         "tools": list(RUNNER_TOOLS),
-        "status": "COMPLETED",
+        "status": "DEGRADED" if blockers else "COMPLETED",
+        "decision": decision,
         "attempts": 1,
         "llm": False,  # 이 직원은 모델을 안 부른다. 계약으로 박는다
         "output": {
@@ -725,15 +854,365 @@ def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility projection backed exclusively by the canonical QARunner."""
+
+    from qa_runtime import QARunner, ToolRegistry, build_qa_task_context, canonical_payload_hash
+
+    if not isinstance(payload, Mapping):
+        return _qa_runner_failure("INVALID_INPUT")
+
+    try:
+        normalized = _normalize_qa_payload(payload)
+        projected: dict[str, Any] = _qa_runner_failure("MISSING_INPUT")
+        digest = canonical_payload_hash(normalized)
+        case_id, task_id, trace_id = _qa_dispatch_ids(normalized, digest)
+        task_kwargs: dict[str, Any] = {
+            "worker": RUNNER_ID,
+            "case_id": case_id,
+            "task_id": task_id,
+            "trace_id": trace_id,
+        }
+        refs = _qa_input_refs(normalized)
+        if refs is not None:
+            task_kwargs["input_refs"] = refs
+        task = build_qa_task_context(normalized, **task_kwargs)
+
+        class _Executor:
+            def invoke(
+                self,
+                _task: Any,
+                _evidence_refs: Any,
+                input_payload: dict[str, Any],
+            ) -> dict[str, Any]:
+                nonlocal projected
+                projected = _qa_runner_projection(dict(input_payload))
+                error_code = (projected.get("error") or {}).get("code")
+                return {
+                    "status": projected.get("decision", projected["status"]),
+                    "decision": projected.get("decision"),
+                    "summary": "Canonical deterministic QA runner projection",
+                    "reason_codes": [error_code] if error_code else (),
+                    "error_code": error_code,
+                }
+
+        outcome = QARunner(
+            tools=ToolRegistry(),
+            executor=_Executor(),
+            profile_version="qa-employee-runner-v1",
+            model_version="deterministic:qa-employee-runner-v1",
+            adapter_version="qa-employee-adapter-v1",
+        ).run(task, normalized)
+    except Exception as exc:  # noqa: BLE001 - malformed input must fail closed.
+        return _qa_runner_failure("SCHEMA_FAILURE", detail=type(exc).__name__)
+
+    report = dict(projected)
+    report["status"] = outcome.status.value
+    report["input_hash"] = outcome.payload_hash
+    report["worker_context"] = (
+        outcome.worker_context.model_dump(mode="json", exclude_none=True)
+        if outcome.worker_context is not None
+        else None
+    )
+    report["replay_manifest"] = (
+        outcome.replay_manifest.model_dump(mode="json")
+        if outcome.replay_manifest is not None
+        else None
+    )
+    if outcome.error_code is not None:
+        report["error"] = {"code": outcome.error_code.value, "detail": outcome.error_detail}
+        report["output"]["escalate"] = True
+    return report
+
+
 def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     if spec.trigger == "always":
         return True
     if spec.trigger == "when_unsupported_claim_exists":
+        assessment = payload.get("assessment")
+        if not isinstance(assessment, Mapping):
+            return False
+        claim_checks = assessment.get("claim_checks", ())
+        if isinstance(claim_checks, (str, bytes, bytearray)) or not isinstance(
+            claim_checks, (list, tuple)
+        ):
+            return False
         return any(
-            c.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
-            for c in payload.get("assessment", {}).get("claim_checks", [])
+            isinstance(claim, Mapping)
+            and claim.get("result") in {"UNSUPPORTED", "CONTRADICTED"}
+            for claim in claim_checks
         )
-    return bool(payload.get("incident"))
+    if spec.trigger == "when_incident_exists":
+        return bool(payload.get("incident"))
+    raise ValueError(f"unsupported QA worker trigger: {spec.trigger!r}")
+def _normalize_worker_report_status(report: dict[str, Any]) -> dict[str, Any]:
+    """Transport escalation is never reported as a successful completion."""
+    output = report.get("output")
+    if (
+        str(report.get("status", "")).upper() == "COMPLETED"
+        and isinstance(output, Mapping)
+        and output.get("escalate") is True
+    ):
+        report["status"] = "DEGRADED"
+        report.setdefault("error", "WORKER_ESCALATED")
+    return report
+
+def _qa_dispatch_ids(payload: Mapping[str, Any], input_hash: str) -> tuple[str, str, str]:
+    """Return stable fan-out identity, preferring an upstream Artifact trace."""
+    if not isinstance(payload, Mapping):
+        payload = {}
+    case_id = str(
+        payload.get("case_id")
+        or payload.get("verification_id")
+        or payload.get("mandate_id")
+        or f"local:{input_hash[7:23]}"
+    )
+    task_id = str(payload.get("task_id") or f"{case_id}-task")
+    artifact = payload.get("artifact")
+    artifact_trace = (
+        artifact.get("trace_id")
+        if isinstance(artifact, Mapping)
+        else getattr(artifact, "trace_id", None)
+    )
+    trace_id = str(
+        artifact_trace
+        or payload.get("trace_id")
+        or payload.get("event_id")
+        or f"qa-trace-{input_hash[7:23]}"
+    )
+    return case_id, task_id, trace_id
+
+
+def _qa_input_refs(payload: Mapping[str, Any]) -> Any:
+    """Use supplied refs, or derive one ref from an upstream Artifact."""
+    if "input_refs" in payload:
+        return payload.get("input_refs")
+    artifact = payload.get("artifact")
+    if artifact is None:
+        return None
+    artifact_id = (
+        artifact.get("artifact_version_id")
+        if isinstance(artifact, Mapping)
+        else getattr(artifact, "artifact_version_id", None)
+    )
+    if artifact_id is None:
+        return None
+    artifact_type = (
+        artifact.get("artifact_type", "qa-artifact")
+        if isinstance(artifact, Mapping)
+        else getattr(artifact, "artifact_type", "qa-artifact")
+    )
+    from runtime_contracts import sha256_hash
+
+    return [{
+        "type": f"qa-{str(artifact_type)}"[:64],
+        "id": str(artifact_id),
+        "content_hash": sha256_hash(artifact),
+    }]
+
+
+def _adapt_employee_report(
+    report: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    input_hash: str,
+    case_id: str,
+    task_id: str,
+    trace_id: str,
+    worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Adapt one live employee report to strict qa.worker-context.v1."""
+    from qa_runtime import build_qa_task_context
+    from runtime_contracts import WorkerContext, sha256_hash, to_worker_context
+
+    normalized = dict(report) if isinstance(report, Mapping) else {}
+    context_worker = str(normalized.get("worker_id") or worker_id or "qa-worker")
+    try:
+        supplied_hash = normalized.get("input_hash")
+        if supplied_hash is not None and str(supplied_hash) != input_hash:
+            raise ValueError("worker input_hash does not match dispatch payload")
+        task_kwargs: dict[str, Any] = {
+            "worker": context_worker,
+            "case_id": case_id,
+            "task_id": task_id,
+            "trace_id": trace_id,
+        }
+        refs = _qa_input_refs(payload)
+        if refs is not None:
+            task_kwargs["input_refs"] = refs
+        task = build_qa_task_context(payload, **task_kwargs)
+        supplied_context = normalized.get("worker_context")
+        if supplied_context is not None:
+            existing_context = WorkerContext.model_validate(supplied_context)
+            if (
+                existing_context.schema_version != "qa.worker-context.v1"
+                or existing_context.case_id != task.case_id
+                or existing_context.task_id != task.task_id
+                or existing_context.trace_id != task.trace_id
+                or existing_context.consumer_worker != task.worker
+                or existing_context.input_refs != task.input_refs
+                or existing_context.input_hash != input_hash
+            ):
+                raise ValueError("worker context identity does not map to the dispatch task")
+        output = normalized.get("output")
+        output_mapping = output if isinstance(output, Mapping) else {}
+        status = str(normalized.get("status", "DEGRADED"))
+        decision = normalized.get("decision") or normalized.get("verdict")
+        if (
+            status.upper() == "COMPLETED"
+            and context_worker != RUNNER_ID
+            and decision is None
+            and not output_mapping
+            and not normalized.get("reason_codes")
+        ):
+            raise ValueError("completed worker report has no validated output")
+        error = normalized.get("error")
+        if status.upper() == "COMPLETED" and (
+            error
+            or output_mapping.get("escalate") is True
+            or str(decision).upper() in {"FAIL", "ESCALATE"}
+        ):
+            status = "DEGRADED"
+        error_code = (
+            error.get("code")
+            if isinstance(error, Mapping)
+            else "SCHEMA_FAILURE"
+            if error
+            else None
+        )
+        reason_codes = normalized.get("reason_codes") or ()
+        if isinstance(reason_codes, (str, bytes, bytearray)):
+            reason_codes = (str(reason_codes),)
+        summary = output_mapping.get("summary") or normalized.get("summary") or "QA worker completed"
+        context = to_worker_context(
+            task,
+            producer_worker=(
+                context_worker
+                if context_worker == RUNNER_ID
+                else f"{context_worker}-runner"
+            ),
+            profile_version="qa-worker-profile-v1",
+            model_version=(
+                f"deterministic:{context_worker}-v1"
+                if context_worker == RUNNER_ID
+                else _model_name()
+            ),
+            adapter_version="qa-employee-report-adapter-v1",
+            status=status,
+            advisory={
+                "summary": str(summary),
+                **(
+                    {"suggested_verdict": str(decision)}
+                    if decision is not None and str(decision)
+                    else {}
+                ),
+            },
+            decision=str(decision) if decision is not None else None,
+            reason_codes=reason_codes,
+            error_code=error_code,
+            input_hash=input_hash,
+            output_hash=sha256_hash(output_mapping),
+            attempt=max(1, min(3, int(normalized.get("attempts") or 1))),
+            timeout_ms=8_000,
+        )
+    except Exception as exc:  # noqa: BLE001 - malformed reports fail closed.
+        normalized["status"] = "DEGRADED"
+        normalized["error"] = {
+            "code": "SCHEMA_FAILURE",
+            "detail": f"worker_context:{type(exc).__name__}",
+        }
+        safe_output = (
+            dict(normalized["output"])
+            if isinstance(normalized.get("output"), Mapping)
+            else {}
+        )
+        safe_output["escalate"] = True
+        normalized["output"] = safe_output
+        fallback_payload = dict(payload)
+        fallback_payload.pop("input_refs", None)
+        try:
+            task = build_qa_task_context(
+                fallback_payload,
+                worker=context_worker,
+                case_id=case_id,
+                task_id=task_id,
+                trace_id=trace_id,
+            )
+            context = to_worker_context(
+                task,
+                producer_worker=(
+                    context_worker
+                    if context_worker == RUNNER_ID
+                    else f"{context_worker}-runner"
+                ),
+                profile_version="qa-worker-profile-v1",
+                model_version=(
+                    f"deterministic:{context_worker}-v1"
+                    if context_worker == RUNNER_ID
+                    else _model_name()
+                ),
+                adapter_version="qa-employee-report-adapter-v1",
+                status="DEGRADED",
+                advisory={
+                    "summary": "Malformed QA worker report; human review is required.",
+                    "suggested_verdict": "ESCALATE",
+                },
+                reason_codes=("SCHEMA_FAILURE",),
+                error_code="SCHEMA_FAILURE",
+                input_hash=input_hash,
+                output_hash=sha256_hash(safe_output),
+                attempt=1,
+                timeout_ms=8_000,
+            )
+        except Exception:
+            normalized["worker_context"] = None
+            normalized["context_error"] = "SCHEMA_FAILURE"
+            return normalized
+    normalized["worker_context"] = WorkerContext.model_validate(
+        context.model_dump(mode="json")
+    ).model_dump(mode="json", exclude_none=True)
+    return normalized
+def _trigger_failure_result(
+    payload: Any,
+    input_hash: str,
+    *,
+    topology: str,
+    detail: str,
+) -> dict[str, Any]:
+    report = _qa_runner_failure("SCHEMA_FAILURE", detail=detail)
+    safe_payload = payload if isinstance(payload, Mapping) else {}
+    case_id, task_id, trace_id = _qa_dispatch_ids(safe_payload, input_hash)
+    report = _adapt_employee_report(
+        report,
+        safe_payload,
+        input_hash=input_hash,
+        case_id=case_id,
+        task_id=task_id,
+        trace_id=trace_id,
+        worker_id=RUNNER_ID,
+    )
+    worker_ids = [spec.worker_id for spec in WORKER_SPECS]
+    return {
+        "runtime": {
+            "executor": "LangGraph",
+            "topology": topology,
+            "provider": "ollama",
+            "model": _model_name(),
+            "max_retries": 2,
+            "max_attempts": 3,
+            "technology_profiles": {
+                spec.worker_id: spec.tech_profile.as_dict()
+                for spec in WORKER_SPECS
+                if spec.tech_profile is not None
+            },
+        },
+        "workers": [report],
+        "executed": [RUNNER_ID],
+        "failed": [RUNNER_ID],
+        "not_executed": worker_ids,
+        "degraded": True,
+        "input_hash": input_hash,
+    }
 
 
 def _run_employee_workers_sequential(
@@ -748,10 +1227,21 @@ def _run_employee_workers_sequential(
     reports: list[dict[str, Any]] = []
     trace_errors: list[str] = []
     not_executed: list[str] = []
-    input_hash = str(
-        payload.get("input_hash")
-        or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
-    )
+    from qa_runtime import canonical_payload_hash
+
+    payload = _normalize_qa_payload(payload) if isinstance(payload, Mapping) else payload
+    input_hash = canonical_payload_hash(payload)
+    case_id, task_id, trace_id = _qa_dispatch_ids(payload, input_hash)
+    try:
+        for spec in WORKER_SPECS:
+            _should_run(spec, payload)
+    except Exception as exc:  # noqa: BLE001 - malformed triggers fail closed.
+        return _trigger_failure_result(
+            payload,
+            input_hash,
+            topology="sequential",
+            detail=type(exc).__name__,
+        )
     if (
         trace_bridge is None
         and os.environ.get("QA_TRACE_PERSIST", "false").strip().lower() == "true"
@@ -770,7 +1260,7 @@ def _run_employee_workers_sequential(
         state = build_worker_graph(
             spec, tools[spec.worker_id], llm, trace=worker_trace
         ).invoke({"worker_id": spec.worker_id, "input": payload})
-        reports.append(
+        report = _normalize_worker_report_status(
             {
                 "worker_id": spec.worker_id,
                 "role": spec.role,
@@ -788,11 +1278,21 @@ def _run_employee_workers_sequential(
                 "trace": state.get("trace_manifest", {}),
             }
         )
+        reports.append(
+            _adapt_employee_report(
+                report,
+                payload,
+                input_hash=input_hash,
+                case_id=case_id,
+                task_id=task_id,
+                trace_id=trace_id,
+            )
+        )
         if trace_bridge is not None:
             try:
                 trace_bridge.record(
                     worker_id=spec.worker_id,
-                    trace_id=str(payload.get("trace_id", "")),
+                    trace_id=trace_id,
                     input_hash=input_hash,
                     tools=spec.tools,
                     payload=payload,
@@ -800,11 +1300,20 @@ def _run_employee_workers_sequential(
                 )
             except Exception as exc:  # noqa: BLE001 - audit must escalate
                 trace_errors.append(f"{spec.worker_id}:{type(exc).__name__}")
+    reports.append(
+        _adapt_employee_report(
+            qa_runner(payload),
+            payload,
+            input_hash=input_hash,
+            case_id=case_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            worker_id=RUNNER_ID,
+        )
+    )
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
     if trace_errors:
         failed.extend(f"trace:{error}" for error in trace_errors)
-    # qa-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
-    reports.append(qa_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",
@@ -819,7 +1328,7 @@ def _run_employee_workers_sequential(
             },
         },
         "workers": reports,
-        "executed": [r["worker_id"] for r in reports if r["status"] == "COMPLETED"],
+        "executed": [r["worker_id"] for r in reports],
         "failed": failed,
         "not_executed": not_executed,
         "degraded": bool(failed),
@@ -841,10 +1350,11 @@ async def run_employee_workers_async(
     }
     reports: list[dict[str, Any]] = []
     trace_errors: list[str] = []
-    input_hash = str(
-        payload.get("input_hash")
-        or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
-    )
+    from qa_runtime import canonical_payload_hash
+
+    payload = _normalize_qa_payload(payload) if isinstance(payload, Mapping) else payload
+    input_hash = canonical_payload_hash(payload)
+    case_id, task_id, trace_id = _qa_dispatch_ids(payload, input_hash)
 
     if (
         trace_bridge is None
@@ -857,10 +1367,18 @@ async def run_employee_workers_async(
         except Exception as exc:  # noqa: BLE001 - trace failure escalates safely.
             trace_errors.append(type(exc).__name__)
 
-    not_executed = [
-        spec.worker_id for spec in WORKER_SPECS if not _should_run(spec, payload)
-    ]
-    eligible = [spec for spec in WORKER_SPECS if _should_run(spec, payload)]
+    try:
+        not_executed = [
+            spec.worker_id for spec in WORKER_SPECS if not _should_run(spec, payload)
+        ]
+        eligible = [spec for spec in WORKER_SPECS if _should_run(spec, payload)]
+    except Exception as exc:  # noqa: BLE001 - malformed triggers fail closed.
+        return _trigger_failure_result(
+            payload,
+            input_hash,
+            topology="async_fan_out_fan_in_independent_graphs",
+            detail=type(exc).__name__,
+        )
 
     if incident_timeline is None and any(
         spec.worker_id == "incident-postmortem-worker" for spec in eligible
@@ -921,13 +1439,22 @@ async def run_employee_workers_async(
                 "rag_plan": {},
                 "trace": {},
             }
+        report = _normalize_worker_report_status(report)
+        report = _adapt_employee_report(
+            report,
+            payload,
+            input_hash=input_hash,
+            case_id=case_id,
+            task_id=task_id,
+            trace_id=trace_id,
+        )
 
         if trace_bridge is not None:
             try:
                 await asyncio.to_thread(
                     trace_bridge.record,
                     worker_id=spec.worker_id,
-                    trace_id=str(payload.get("trace_id") or uuid4()),
+                    trace_id=trace_id,
                     input_hash=input_hash,
                     tools=spec.tools,
                     payload=payload,
@@ -947,10 +1474,23 @@ async def run_employee_workers_async(
         return report
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
+    try:
+        runner_report = qa_runner(payload)
+    except Exception as exc:  # noqa: BLE001 - fan-in fails closed.
+        runner_report = _qa_runner_failure("SCHEMA_FAILURE", detail=type(exc).__name__)
+    reports.append(
+        _adapt_employee_report(
+            _normalize_worker_report_status(runner_report),
+            payload,
+            input_hash=input_hash,
+            case_id=case_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            worker_id=RUNNER_ID,
+        )
+    )
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
     failed.extend(f"trace:{error}" for error in trace_errors)
-    # qa-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
-    reports.append(qa_runner(payload))
     return {
         "runtime": {
             "executor": "LangGraph",
@@ -966,9 +1506,7 @@ async def run_employee_workers_async(
             },
         },
         "workers": reports,
-        "executed": [
-            item["worker_id"] for item in reports if item["status"] == "COMPLETED"
-        ],
+        "executed": [item["worker_id"] for item in reports],
         "failed": failed,
         "not_executed": not_executed,
         "degraded": bool(failed),

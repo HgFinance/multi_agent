@@ -32,6 +32,10 @@ from __future__ import annotations
 # authoritative runtime boundary; older proposal wording in this module docstring
 # is retained only as historical context.
 import os
+import hashlib
+import json
+from functools import wraps
+from threading import Lock
 import sys
 from datetime import datetime
 from decimal import Decimal
@@ -42,7 +46,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 _QA_DIR = Path(__file__).resolve().parent.parent
 _EVIDENCE_DIR = _QA_DIR / "evidence"
@@ -93,6 +97,14 @@ from qa_events.redis_event_bus import (
     RedisEventBus,
 )
 from qa_mandate_workers import QaVerificationRequest, assess_qa_verification
+from eval_runner import (
+    CandidateSpec,
+    ChampionComparison,
+    EvalCase,
+    EvalRunner,
+    EvalSet,
+    InMemoryEvalAuditRepository,
+)
 from tool_permission_check import (
     AgentToolPolicy,
     check_tool_permission,
@@ -101,27 +113,22 @@ from tool_permission_check import (
 )
 from trace_recorder import TraceRecorder, TraceRecorderError
 
-# DATABASE_URL이 있을 때만 audit.agent_runs/tool_calls/incident_events/corrective_actions에
-# write-through 한다 - 없으면(로컬 자체 점검 등) 지금까지와 같은 인메모리 전용 동작이다.
-# .env는 여기서 자동으로 읽지 않는다(배포 환경이 실제로 주입한 환경변수만 신뢰한다).
+# DATABASE_URL이 있을 때만 audit 및 QA Eval write-through을 활성화한다.
+# Shadow import에서 DATABASE_URL이 없으면 어떤 PostgreSQL pool도 만들지 않는다.
 _DATABASE_URL = (
     os.environ.get("RISK_QA_DATABASE_URL", "").strip()
     or os.environ.get("DATABASE_URL", "").strip()
 )
-if _DATABASE_URL:
-    from repository import (
-        PostgresAuditRepository,
-        QaDecisionPersistenceError,
-    )
+_QA_RUNTIME = os.environ.get("RISK_QA_RUNTIME", "").strip().lower()
+from repository import (
+    PostgresAuditRepository,
+    QaDecisionPersistenceError,
+)
 
-    _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
-else:
-    from repository import (
-        PostgresAuditRepository,
-        QaDecisionPersistenceError,
-    )
-
+if _QA_RUNTIME == "test" or not _DATABASE_URL:
     _audit_repository = None
+else:
+    _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
 _event_bus: RedisEventBus | None = None
 
 
@@ -158,6 +165,8 @@ def _persist_qa_decision(assessment) -> None:
     """QA 결과를 DB에 기록하고 같은 trace의 Event를 발행한다."""
 
     if _audit_repository is None:
+        return
+    if os.environ.get("RISK_QA_RUNTIME", "").lower() == "test":
         return
     _audit_repository.save_qa_assessment(assessment)
     bus = _qa_event_bus()
@@ -369,6 +378,39 @@ class ComplianceCheckRequest(BaseModel):
 # --- App --------------------------------------------------------------------------
 
 
+class EvalRunRequest(BaseModel):
+    eval_set_id: str = Field(min_length=1)
+    role_code: str = Field(min_length=1)
+    version: int = Field(gt=0)
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    cases: list[dict[str, object]] = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    candidate_profile_version: str = Field(min_length=1)
+    champion_id: str | None = None
+    champion_profile_version: str | None = None
+    trace_id: str | None = None
+    config: dict = Field(default_factory=dict)
+
+
+class EvalRunResponse(BaseModel):
+    eval_run_id: str
+    status: str
+    trace_id: str
+    result_count: int
+    comparison: ChampionComparison | None = None
+
+
+class EvalResultResponse(BaseModel):
+    eval_run_id: str
+    case_key: str
+    metric: str
+    score: float | None
+    passed: bool
+    evidence: dict
+    error_code: str | None
+
+
+# --- App --------------------------------------------------------------------------
 app = FastAPI(title="QA Domain API", version="v1")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -384,6 +426,98 @@ ops_monitor = OpsHealthMonitor()
 recorder = TraceRecorder(repository=_audit_repository)
 timeline = IncidentTimeline(repository=_audit_repository)
 evidence_store = EvidenceStore()  # rag-librarian-evidence-curator 실연동 전까지 스텁
+_eval_repository = (
+    InMemoryEvalAuditRepository()
+    if _QA_RUNTIME == "test"
+    else _audit_repository
+)
+_eval_candidates: dict[str, object] = {}
+_eval_execution_lock = Lock()
+
+def _serialize_eval_execution(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _eval_execution_lock:
+            return function(*args, **kwargs)
+    return wrapped
+_eval_comparisons: dict[str, ChampionComparison | None] = {}
+_eval_idempotency: dict[str, tuple[str, EvalRunResponse]] = {}
+
+def _eval_request_fingerprint(body: EvalRunRequest) -> str:
+    payload = json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def set_eval_repository(repository: object) -> None:
+    """Inject a repository for focused tests without changing production defaults."""
+    global _eval_repository
+    _eval_repository = repository
+
+
+def register_eval_candidate(candidate_id: str, runner: object) -> None:
+    """Register an injected QA Candidate for the internal TEST/Shadow boundary."""
+    _eval_candidates[candidate_id] = runner
+
+
+def _require_eval_repository():
+    global _eval_repository
+    if _eval_repository is None and os.environ.get("RISK_QA_RUNTIME", "").strip().lower() == "test":
+        _eval_repository = InMemoryEvalAuditRepository()
+    if _eval_repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "EVAL_REPOSITORY_NOT_CONFIGURED",
+                "message": "QA Eval persistence requires DATABASE_URL",
+            },
+        )
+    return _eval_repository
+
+
+def _eval_run_for(run_id: str):
+    repository = _require_eval_repository()
+    getter = (
+        getattr(repository, "run_for_id", None)
+        or getattr(repository, "get_eval_run", None)
+        or getattr(repository, "get_run", None)
+    )
+    if getter is not None:
+        return getter(run_id)
+    return next(
+        (item for item in getattr(repository, "runs", ()) if item.eval_run_id == run_id),
+        None,
+    )
+
+
+def _eval_comparison_for(run_id: str):
+    repository = _require_eval_repository()
+    getter = getattr(repository, "comparison_for_run", None)
+    if getter is not None:
+        return getter(run_id)
+    return _eval_comparisons.get(run_id)
+
+def _eval_results_for(run_id: str) -> list[EvalResultResponse]:
+    repository = _require_eval_repository()
+    getter = getattr(repository, "results_for_run", None)
+    rows = (
+        list(getter(run_id))
+        if getter is not None
+        else [
+            item for item in getattr(repository, "results", ()) if item.eval_run_id == run_id
+        ]
+    )
+    return [
+        EvalResultResponse(
+            eval_run_id=result.eval_run_id,
+            case_key=result.case_key,
+            metric=result.metric.value,
+            score=result.score,
+            passed=result.passed,
+            evidence=result.evidence,
+            error_code=result.error_code,
+        )
+        for result in rows
+    ]
 
 
 @app.exception_handler(TraceRecorderError)
@@ -488,6 +622,18 @@ def _require_service_token(
             status_code=exc.status_code,
             detail={"error_code": exc.code, "message": str(exc)},
         ) from exc
+def _require_eval_service_token(
+    authorization: str | None,
+    *,
+    required_scope: str,
+):
+    """Protect Eval audit routes while keeping direct test fixtures deterministic."""
+    if _QA_RUNTIME == "test":
+        return None
+    return _require_service_token(
+        authorization,
+        required_scope=required_scope,
+    )
 
 
 # 3.1 승인된 QA Evidence Gate v1 — Case에 종속된 판정 -------------------------------
@@ -534,6 +680,150 @@ def qa_check(case_id: str, body: QaCheckRequest):
     _persist_qa_decision(assessment)
     return assessment
 
+
+@app.post("/qa/v1/eval-runs", response_model=EvalRunResponse)
+@_serialize_eval_execution
+def create_eval_run(
+    body: EvalRunRequest,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """Run an injected QA Candidate in Shadow/Mock and persist audit records only."""
+    _require_eval_service_token(authorization, required_scope="qa.eval.execute")
+    if _QA_RUNTIME != "test" and not idempotency_key:
+        raise HTTPException(
+            status_code=428,
+            detail={"error_code": "IDEMPOTENCY_KEY_REQUIRED"},
+        )
+    request_key = idempotency_key or f"test:{_eval_request_fingerprint(body)}"
+    fingerprint = _eval_request_fingerprint(body)
+    cached = _eval_idempotency.get(request_key)
+    if cached is not None:
+        if cached[0] != fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "IDEMPOTENCY_KEY_CONFLICT"},
+            )
+        return cached[1]
+    if _QA_RUNTIME != "test":
+        for field_name, value in (
+            ("eval_set_id", body.eval_set_id),
+            ("trace_id", body.trace_id),
+        ):
+            if value is None:
+                continue
+            try:
+                UUID(value)
+            except (ValueError, AttributeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error_code": "SCHEMA_FAILURE",
+                        "message": f"{field_name} must be a UUID in production runtime",
+                    },
+                ) from None
+    try:
+        eval_set = EvalSet(
+            eval_set_id=body.eval_set_id,
+            role_code=body.role_code,
+            version=body.version,
+            content_hash=body.content_hash,
+            cases=[EvalCase.from_mapping(case) for case in body.cases],
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "SCHEMA_FAILURE", "message": str(exc)},
+        ) from exc
+    if bool(body.champion_id) != bool(body.champion_profile_version):
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "CHAMPION_IDENTITY_INCOMPLETE"},
+        )
+    repository = _require_eval_repository()
+    candidate_runner = _eval_candidates.get(body.candidate_id)
+    if candidate_runner is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "CANDIDATE_NOT_REGISTERED"},
+        )
+    candidate = CandidateSpec(
+        candidate_id=body.candidate_id,
+        profile_version=body.candidate_profile_version,
+        model_version=str(body.config.get("model_version", "injected")),
+        adapter_version=str(body.config.get("adapter_version", "none")),
+        runner=candidate_runner,
+    )
+    champion = None
+    champion_set = None
+    if body.champion_id and body.champion_profile_version:
+        champion_runner = _eval_candidates.get(body.champion_id)
+        if champion_runner is None:
+            raise HTTPException(status_code=409, detail={"error_code": "CHAMPION_NOT_REGISTERED"})
+        champion = CandidateSpec(
+            candidate_id=body.champion_id,
+            profile_version=body.champion_profile_version,
+            model_version=str(body.config.get("champion_model_version", "injected")),
+            adapter_version=str(body.config.get("champion_adapter_version", "none")),
+            runner=champion_runner,
+        )
+        champion_set = eval_set
+    report = EvalRunner(repository=repository).evaluate(
+        eval_set,
+        candidate,
+        champion=champion,
+        champion_eval_set=champion_set,
+        trace_id=body.trace_id,
+        config={**body.config, "idempotency_key": request_key},
+    )
+    run = report.candidate_run
+    _eval_comparisons[run.eval_run_id] = report.comparison
+    comparison = _eval_comparison_for(run.eval_run_id)
+    response = EvalRunResponse(
+        eval_run_id=run.eval_run_id,
+        status=run.status,
+        trace_id=run.trace_id,
+        result_count=len(_eval_results_for(run.eval_run_id)),
+        comparison=comparison,
+    )
+    _eval_idempotency[request_key] = (fingerprint, response)
+    return response
+
+
+@app.get("/qa/v1/eval-runs/{eval_run_id}", response_model=EvalRunResponse)
+def get_eval_run_status(
+    eval_run_id: str,
+    authorization: str | None = Header(default=None),
+):
+    _require_eval_service_token(authorization, required_scope="qa.eval.read")
+    try:
+        run = _eval_run_for(eval_run_id)
+    except (TypeError, ValueError):
+        run = None
+    if run is None:
+        raise HTTPException(status_code=404, detail={"error_code": "EVAL_RUN_NOT_FOUND"})
+    return EvalRunResponse(
+        eval_run_id=run.eval_run_id,
+        status=run.status,
+        trace_id=run.trace_id,
+        result_count=len(_eval_results_for(run.eval_run_id)),
+        comparison=_eval_comparison_for(run.eval_run_id),
+    )
+
+
+@app.get("/qa/v1/eval-runs/{eval_run_id}/results", response_model=list[EvalResultResponse])
+def get_eval_results(
+    eval_run_id: str,
+    authorization: str | None = Header(default=None),
+):
+    _require_eval_service_token(authorization, required_scope="qa.eval.read")
+    try:
+        run = _eval_run_for(eval_run_id)
+    except (TypeError, ValueError):
+        run = None
+    if run is None:
+        raise HTTPException(status_code=404, detail={"error_code": "EVAL_RUN_NOT_FOUND"})
+    return _eval_results_for(eval_run_id)
 
 @app.post(
     "/qa/v1/verifications/{verification_id}/assess",

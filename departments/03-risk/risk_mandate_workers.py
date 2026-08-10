@@ -35,6 +35,8 @@ from tools.legal_wiki_tool import (
 from tools.order_tools import OrderComplianceInput, evaluate_order_compliance
 from tools.policy_tools import RiskPolicyQueryInput, query_pinecone_risk_policy
 
+from orchestration.contracts.mas import build_agent_task_result
+
 RiskTolerance = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 OrderMode = Literal["AUTO_EXECUTION", "MANUAL_APPROVAL"]
 AssetPermission = Literal["ALLOWED", "PROHIBITED"]
@@ -273,6 +275,9 @@ def _run_compliance_employee_graph(
 
     payload = {
         "mandate_id": request.mandate_id,
+        "case_id": request.mandate_id,
+        # §5.1.1: worker-context.trace_id must equal the Task/Head trace_id.
+        "trace_id": request.trace_id or request.event_id or _input_hash(request)[:16],
         "as_of": request.as_of,
         "input_hash": _input_hash(request),
         "assessment": dict(risk_report),
@@ -875,11 +880,30 @@ def synthesize_risk_head(
         decision = "ESCALATE"
     else:
         decision = "APPROVE"
+    manual_approval_required = request.order_mode == "MANUAL_APPROVAL" or bool(high_or_actionable)
+    trace_id = request.trace_id or request.event_id or _input_hash(request)[:16]
+    # docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md §5.1.1: the Risk Head's
+    # own decision vocabulary (APPROVE/ESCALATE/REJECT) already matches Task
+    # decision, so this only adds the surrounding agent-task-result.v1 envelope.
+    agent_task_result = build_agent_task_result(
+        department="risk-management",
+        worker="risk-department-head",
+        case_id=request.mandate_id,
+        task_id=f"{request.mandate_id}-risk-head",
+        trace_id=trace_id,
+        decision=decision,
+        escalate=manual_approval_required,
+        summary=f"Risk Head fan-in decision={decision} (manual_approval_required={manual_approval_required}).",
+        reports=reports,
+        model_version="deterministic:risk-head-fan-in-v1",
+        reason_codes=sorted(
+            {code for report in reports for code in report.get("reason_codes", [])}
+        ),
+    ).model_dump(mode="json", exclude_none=True)
     return {
         "decision": decision,
         "execution_mode": request.order_mode,
-        "manual_approval_required": request.order_mode == "MANUAL_APPROVAL"
-        or bool(high_or_actionable),
+        "manual_approval_required": manual_approval_required,
         "binding": False,
         "safe_action": "HOLD" if decision != "APPROVE" else "NO_ACTION",
         "recommended_actions": [
@@ -888,6 +912,7 @@ def synthesize_risk_head(
             for action in report.get("suggested_actions", [])
         ],
         "reports": reports,
+        "agent_task_result": agent_task_result,
         "hermes_context": {
             "mandate_id": request.mandate_id,
             "employee_reports": reports,

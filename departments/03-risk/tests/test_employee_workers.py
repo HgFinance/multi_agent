@@ -9,9 +9,12 @@ import pytest
 
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
+CONTRACTS_TEST_DIR = Path(__file__).resolve().parents[3] / "tests" / "contracts"
+sys.path.insert(0, str(CONTRACTS_TEST_DIR))
 
 import risk_employee_workers
 from risk_employee_workers import WORKER_SPECS, risk_runner, run_employee_workers
+from test_unified_api_contract import load_json, validate_json_schema
 
 
 def _llm(_system: str, _prompt: str) -> str:
@@ -401,3 +404,41 @@ def test_every_skill_result_conforms_to_the_fixed_risk_skill_result_schema(paylo
     for worker in report["workers"]:
         for entry in worker.get("skill_results", []):
             RiskSkillResult.model_validate(entry)
+
+
+def test_worker_context_conforms_to_the_canonical_worker_context_schema():
+    """FINAL_RUNTIME_ARCHITECTURE.md §6.3/§6.4 + §5.1.1: every LangGraph Worker
+    call's report carries a valid worker-context.v1 record, sharing the same
+    case_id/trace_id the Department Head uses for its own agent-task-result."""
+
+    schema = load_json("worker-context.v1.json")
+    report = run_employee_workers(
+        {"case_id": "MANDATE-001", "trace_id": "trace-001", "compliance": {"grounded": True}},
+        llm=_llm,
+    )
+    worker = next(w for w in report["workers"] if w["worker_id"] == "compliance-policy-worker")
+    worker_context = worker["worker_context"]
+
+    validate_json_schema(worker_context, schema)
+    assert worker_context["schema_version"] == "risk.worker-context.v1"
+    assert worker_context["department"] == "risk-management"
+    assert worker_context["case_id"] == "MANDATE-001"
+    assert worker_context["trace_id"] == "trace-001"
+    assert worker_context["consumer_worker"] == "compliance-policy-worker"
+    assert worker_context["status"] == "COMPLETED"
+
+
+def test_worker_context_escalates_instead_of_completing_when_the_worker_llm_fails():
+    """A Worker never gets to decide by staying silently COMPLETED — retry
+    exhaustion must surface as ESCALATED on the worker-context record too."""
+
+    def failing_llm(_system: str, _prompt: str) -> str:
+        return "not json"
+
+    schema = load_json("worker-context.v1.json")
+    report = run_employee_workers({"compliance": {"grounded": True}}, llm=failing_llm)
+    worker = next(w for w in report["workers"] if w["worker_id"] == "compliance-policy-worker")
+    worker_context = worker["worker_context"]
+
+    validate_json_schema(worker_context, schema)
+    assert worker_context["status"] == "ESCALATED"

@@ -111,6 +111,17 @@ curl -s http://127.0.0.1:8042/ | head -1
 python -m pytest departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q
 ```
 
+## Local Ollama and Redis startup contract
+
+Risk API와 QA API의 LangGraph Worker는 호스트 Ollama를 사용한다. 호스트 프로세스는 OLLAMA_BASE_URL을 사용하고, Docker 컨테이너는 OLLAMA_DOCKER_BASE_URL 또는 기본값 host.docker.internal을 사용한다. 기본 모델은 qwen3:1.7b이며 OLLAMA_CHAT_MODEL, OLLAMA_TIMEOUT_SECONDS로 변경할 수 있다.
+
+Redis는 healthcheck가 통과한 뒤 Risk API, QA API, QA Worker가 시작한다. 실제 모델 존재 여부는 다음 읽기 전용 preflight로 확인한다.
+
+    source ~/claude/bin/activate
+    python scripts/run_risk_qa_production_preflight.py --as-of 2026-08-10
+
+OLLAMA_MODEL_MISSING이면 호스트에서 ollama pull qwen3:1.7b를 실행해야 한다. 정책 Corpus가 SAMPLE_PLACEHOLDER인 동안에는 QA Production 승격을 수행하지 않는다.
+
 ## 6. 알려진 미결 (기록만, 코드 아님)
 
 - **risk-projection-worker 없음** — 계획서 6.4절이 말하는 "Position·Market·Mandate Event를 Risk Snapshot으로

@@ -45,6 +45,8 @@ from uuid import UUID
 import requests
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from orchestration.contracts.mas import build_agent_task_result
+
 _QA_DIR = Path(__file__).resolve().parent
 _EVIDENCE_DIR = _QA_DIR / "evidence"
 if str(_EVIDENCE_DIR) not in sys.path:
@@ -97,7 +99,7 @@ class QaVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     verification_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
-    event_id: str | None = Field(default=None, max_length=100)
+    event_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
     timestamp: str | None = None
     artifact: Artifact
     evidence_chunks: tuple[EvidenceChunk, ...] = ()
@@ -137,11 +139,12 @@ def _jsonable(value: Any) -> Any:
 
 
 def _input_hash(request: QaVerificationRequest) -> str:
-    canonical = json.dumps(_jsonable(request), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    from qa_runtime import canonical_payload_hash
+
+    return canonical_payload_hash(request)
 
 
-def run_qa_runner(request: QaVerificationRequest) -> dict[str, Any]:
+def _qa_runner_projection(request: QaVerificationRequest) -> dict[str, Any]:
     """EvidenceQaEngine.check_artifact()를 그대로 감싼 결정론적 직원."""
 
     store = EvidenceStore(
@@ -182,6 +185,81 @@ def run_qa_runner(request: QaVerificationRequest) -> dict[str, Any]:
     }
 
 
+def run_qa_runner(request: QaVerificationRequest) -> dict[str, Any]:
+    """Legacy mandate projection routed through the canonical QARunner."""
+
+    from qa_runtime import QARunner, ToolRegistry, build_qa_task_context
+    from runtime_contracts import ArtifactRef, sha256_hash
+
+    payload = request.model_dump(mode="json", exclude_none=True)
+    digest = _input_hash(request)
+    refs = [
+        ArtifactRef(
+            type="qa-artifact",
+            id=str(request.artifact.artifact_version_id),
+            content_hash=sha256_hash(request.artifact),
+        )
+    ]
+    case_id, task_id, trace_id = _mandate_dispatch_ids(request)
+    task = build_qa_task_context(
+        payload,
+        worker="qa-runner",
+        case_id=case_id,
+        task_id=task_id,
+        trace_id=trace_id,
+        input_refs=refs,
+    )
+    projected: dict[str, Any] = {
+        "worker_id": "qa-runner",
+        "department": "QA",
+        "event_id": request.event_id,
+        "status": "ESCALATED",
+        "decision": "FAIL",
+        "reason_codes": ["MISSING_INPUT"],
+        "action_required": True,
+        "input_hash": digest,
+        "summary": "Canonical QA runner did not produce a report.",
+    }
+
+    class _Executor:
+        def invoke(self, _task: Any, _evidence_refs: Any, _input_payload: Mapping[str, Any]) -> dict[str, Any]:
+            nonlocal projected
+            projected = _qa_runner_projection(request)
+            return {
+                "status": projected.get("decision", projected["status"]),
+                "summary": projected["summary"],
+                "decision": projected["decision"],
+                "reason_codes": projected["reason_codes"],
+            }
+
+    outcome = QARunner(
+        tools=ToolRegistry(),
+        executor=_Executor(),
+        profile_version="qa-mandate-runner-v1",
+        model_version="deterministic:qa-mandate-runner-v1",
+        adapter_version="qa-mandate-adapter-v1",
+    ).run(task, payload)
+    report = dict(projected)
+    report["status"] = outcome.status.value
+    report["input_hash"] = outcome.payload_hash
+    report["worker_context"] = (
+        outcome.worker_context.model_dump(mode="json", exclude_none=True)
+        if outcome.worker_context is not None
+        else None
+    )
+    report["replay_manifest"] = (
+        outcome.replay_manifest.model_dump(mode="json")
+        if outcome.replay_manifest is not None
+        else None
+    )
+    if outcome.error_code is not None:
+        report["error_code"] = outcome.error_code.value
+        report["error_detail"] = outcome.error_detail
+        report["decision"] = "FAIL" if report.get("decision") == "PASS" else report.get("decision")
+        report["action_required"] = True
+    return report
+
+
 class PineconeEvidenceClient:
     """QA 전용 최소 Pinecone data-plane 클라이언트. 환경변수로만 인증한다."""
 
@@ -206,6 +284,223 @@ class PineconeEvidenceClient:
 
 def _has_unsupported_claims(qa_report: Mapping[str, Any]) -> bool:
     return bool(qa_report.get("unsupported_claim_indexes"))
+
+
+def _normalize_fan_in_report(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Do not expose an escalated finding as a successful completion."""
+    normalized = (
+        dict(report)
+        if isinstance(report, Mapping)
+        else {
+            "worker_id": "unknown-qa-worker",
+            "status": "DEGRADED",
+            "verdict": "ESCALATE",
+            "action_required": True,
+            "error": {"code": "SCHEMA_FAILURE", "detail": "report is not an object"},
+        }
+    )
+    status = str(normalized.get("status", "")).upper()
+    escalation = normalized.get("escalate") is True
+    verdict = str(normalized.get("verdict", "")).upper()
+    decision = str(normalized.get("decision", "")).upper()
+    if status == "COMPLETED" and (
+        escalation or verdict in {"ESCALATE", "FAIL"} or decision in {"ESCALATE", "FAIL"}
+    ):
+        normalized["status"] = "DEGRADED"
+        normalized.setdefault("error", "WORKER_ESCALATED")
+    return normalized
+
+
+def _mandate_dispatch_ids(request: QaVerificationRequest) -> tuple[str, str, str]:
+    """Use Artifact.trace_id as the canonical upstream trace."""
+    case_id = request.verification_id
+    task_id = f"{case_id}-task"
+    return case_id, task_id, str(request.artifact.trace_id)
+
+
+def _adapt_mandate_report(
+    report: Mapping[str, Any],
+    request: QaVerificationRequest,
+) -> dict[str, Any]:
+    """Adapt and validate one report before QA-head fan-in."""
+    from qa_runtime import build_qa_task_context
+    from runtime_contracts import ArtifactRef, WorkerContext, sha256_hash, to_worker_context
+
+    normalized = dict(report) if isinstance(report, Mapping) else {}
+    worker_id = str(normalized.get("worker_id") or "unknown-qa-worker")
+    input_hash = _input_hash(request)
+    case_id, task_id, trace_id = _mandate_dispatch_ids(request)
+    refs = [
+        ArtifactRef(
+            type="qa-artifact",
+            id=str(request.artifact.artifact_version_id),
+            content_hash=sha256_hash(request.artifact),
+        )
+    ]
+    try:
+        supplied_hash = normalized.get("input_hash")
+        if supplied_hash is not None and str(supplied_hash) != input_hash:
+            raise ValueError("worker input_hash does not match the verification request")
+        payload = request.model_dump(mode="json", exclude_none=True)
+        task = build_qa_task_context(
+            payload,
+            worker=worker_id,
+            case_id=case_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            input_refs=refs,
+        )
+        supplied_context = normalized.get("worker_context")
+        if supplied_context is not None:
+            existing_context = WorkerContext.model_validate(supplied_context)
+            if (
+                existing_context.schema_version != "qa.worker-context.v1"
+                or existing_context.case_id != case_id
+                or existing_context.task_id != task_id
+                or existing_context.trace_id != trace_id
+                or existing_context.consumer_worker != worker_id
+                or existing_context.input_refs != refs
+                or existing_context.input_hash != input_hash
+            ):
+                raise ValueError("worker context identity does not map to the verification task")
+        output = normalized.get("output")
+        output_mapping = output if isinstance(output, Mapping) else {}
+        status = str(normalized.get("status", "DEGRADED"))
+        decision = normalized.get("decision") or normalized.get("verdict")
+        if (
+            status.upper() == "COMPLETED"
+            and worker_id != "qa-runner"
+            and decision is None
+            and not output_mapping
+            and not normalized.get("reason_codes")
+            and not any(
+                key in normalized
+                for key in ("findings", "claim_checks", "entries_recorded", "evidence_refs")
+            )
+        ):
+            raise ValueError("completed worker report has no validated output")
+        error = normalized.get("error") or normalized.get("error_code")
+        if status.upper() == "COMPLETED" and (
+            error
+            or normalized.get("action_required") is True
+            and str(decision).upper() in {"FAIL", "ESCALATE"}
+        ):
+            status = "DEGRADED"
+        reason_codes = normalized.get("reason_codes") or ()
+        if isinstance(reason_codes, (str, bytes, bytearray)):
+            reason_codes = (str(reason_codes),)
+        error_code = (
+            error.get("code")
+            if isinstance(error, Mapping)
+            else str(error)
+            if error
+            else None
+        )
+        summary = normalized.get("summary") or output_mapping.get("summary") or "QA worker completed"
+        context = to_worker_context(
+            task,
+            producer_worker=worker_id if worker_id == "qa-runner" else f"{worker_id}-runner",
+            profile_version="qa-mandate-worker-v1",
+            model_version=(
+                f"deterministic:{worker_id}-v1"
+                if worker_id == "qa-runner"
+                else "advisory:qa-mandate-v1"
+            ),
+            adapter_version="qa-mandate-report-adapter-v1",
+            status=status,
+            advisory={
+                "summary": str(summary),
+                **(
+                    {"suggested_verdict": str(decision)}
+                    if decision is not None and str(decision)
+                    else {}
+                ),
+            },
+            decision=str(decision) if decision is not None else None,
+            reason_codes=reason_codes,
+            error_code=error_code,
+            input_hash=input_hash,
+            output_hash=sha256_hash(output_mapping),
+            attempt=1,
+            timeout_ms=8_000,
+        )
+    except Exception as exc:  # noqa: BLE001 - malformed records fail closed.
+        normalized["status"] = "DEGRADED"
+        normalized["error"] = {
+            "code": "SCHEMA_FAILURE",
+            "detail": f"worker_context:{type(exc).__name__}",
+        }
+        normalized["action_required"] = True
+        normalized["verdict"] = "ESCALATE"
+        context = to_worker_context(
+            build_qa_task_context(
+                request.model_dump(mode="json", exclude_none=True),
+                worker=worker_id,
+                case_id=case_id,
+                task_id=task_id,
+                trace_id=trace_id,
+                input_refs=refs,
+            ),
+            producer_worker=worker_id if worker_id == "qa-runner" else f"{worker_id}-runner",
+            profile_version="qa-mandate-worker-v1",
+            model_version="advisory:qa-mandate-v1",
+            adapter_version="qa-mandate-report-adapter-v1",
+            status="DEGRADED",
+            advisory={
+                "summary": "Malformed QA worker report; human review is required.",
+                "suggested_verdict": "ESCALATE",
+            },
+            reason_codes=("SCHEMA_FAILURE",),
+            error_code="SCHEMA_FAILURE",
+            input_hash=input_hash,
+            output_hash=sha256_hash({}),
+            attempt=1,
+            timeout_ms=8_000,
+        )
+        normalized["context_error"] = "SCHEMA_FAILURE"
+    normalized["worker_context"] = WorkerContext.model_validate(
+        context.model_dump(mode="json")
+    ).model_dump(mode="json", exclude_none=True)
+    return normalized
+
+
+def _advisory_failure_report(
+    request: QaVerificationRequest,
+    worker_id: str,
+    error: BaseException,
+) -> dict[str, Any]:
+    base = {
+        "worker_id": worker_id,
+        "department": "QA",
+        "event_id": request.event_id,
+        "timestamp": request.timestamp,
+        "authoritative": False,
+        "binding": False,
+        "input_hash": _input_hash(request),
+        "status": "DEGRADED",
+        "verdict": "ESCALATE",
+        "action_required": True,
+        "error": type(error).__name__,
+        "summary": "Advisory QA worker failed; human review is required.",
+    }
+    if worker_id == "hallucination-critic-worker":
+        base.update(
+            {
+                "role": "Unsupported/contradicted claim corroboration critic",
+                "namespace": QA_NAMESPACE,
+                "evidence_refs": [],
+                "evidence_source": None,
+            }
+        )
+    else:
+        base.update(
+            {
+                "role": "Incident timeline entry-shape checker",
+                "entries_recorded": 0,
+                "unclassified_entries": 0,
+            }
+        )
+    return base
 
 
 def run_hallucination_critic_worker(
@@ -324,7 +619,7 @@ def run_incident_postmortem_worker(request: QaVerificationRequest) -> dict[str, 
     needs_review = bool(unclassified) or not entries
     return {
         **base,
-        "status": "COMPLETED",
+        "status": "COMPLETED" if entries else "NOT_EXECUTED",
         "verdict": "ESCALATE" if needs_review else "RECORDED",
         "action_required": needs_review,
         "entries_recorded": len(entries) - len(unclassified),
@@ -342,21 +637,69 @@ def synthesize_qa_head(
     """Hermes QA Head를 위한 non-binding fan-in. qa-runner의 decision을
     절대 뒤집지 않는다 — advisory 직원은 escalate만 추가할 수 있다."""
 
-    reports = [dict(qa_report), dict(hallucination_report), dict(incident_report)]
-    high_or_actionable = [report for report in reports if report.get("action_required")]
-    if qa_report.get("decision") == "FAIL":
+    reports = [
+        _adapt_mandate_report(_normalize_fan_in_report(qa_report), request),
+        _adapt_mandate_report(_normalize_fan_in_report(hallucination_report), request),
+        _adapt_mandate_report(_normalize_fan_in_report(incident_report), request),
+    ]
+    non_completed = [
+        report
+        for report in reports
+        if str(report.get("status", "")).upper()
+        not in {"COMPLETED", "PASS", "NOT_EXECUTED", "SKIPPED_SAFE"}
+    ]
+    high_or_actionable = [
+        report for report in reports if report.get("action_required") or report in non_completed
+    ]
+    qa_decision = str(reports[0].get("decision", "")).upper()
+    if qa_decision == "FAIL":
         decision = "FAIL"
+    elif not qa_decision:
+        decision = "ESCALATE"
     elif high_or_actionable:
         decision = "ESCALATE"
+    elif qa_decision in {"PASS", "WARN", "ESCALATE"}:
+        decision = qa_decision
     else:
-        decision = qa_report.get("decision", "PASS")
+        decision = "ESCALATE"
+
+    manual_review_required = decision != "PASS"
+    trace_id = _mandate_dispatch_ids(request)[2]
+    contract_reports = [
+        {
+            **report,
+            "input_hash": str(report.get("input_hash", ""))[7:]
+            if str(report.get("input_hash", "")).startswith("sha256:")
+            else report.get("input_hash"),
+        }
+        for report in reports
+    ]
+    # docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md §5.1.1: QA Head's own
+    # decision vocabulary (PASS/WARN/FAIL/ESCALATE) already matches Task
+    # decision, so this only adds the surrounding agent-task-result.v1 envelope.
+    agent_task_result = build_agent_task_result(
+        department="qa-department",
+        worker="qa-department-head",
+        case_id=request.verification_id,
+        task_id=f"{request.verification_id}-qa-head",
+        trace_id=trace_id,
+        decision=decision,
+        escalate=manual_review_required,
+        summary=f"QA Head fan-in decision={decision} (manual_review_required={manual_review_required}).",
+        reports=contract_reports,
+        model_version="deterministic:qa-head-fan-in-v1",
+        reason_codes=sorted(
+            {code for report in reports for code in report.get("reason_codes", [])}
+        ),
+    ).model_dump(mode="json", exclude_none=True)
 
     return {
         "decision": decision,
         "binding": False,
-        "manual_review_required": decision != "PASS",
+        "manual_review_required": manual_review_required,
         "safe_action": "HOLD_FINDING_OPEN" if decision != "PASS" else "NO_ACTION",
         "reports": reports,
+        "agent_task_result": agent_task_result,
         "hermes_context": {
             "verification_id": request.verification_id,
             "employee_reports": reports,
@@ -393,14 +736,48 @@ def assess_qa_verification(request: QaVerificationRequest | Mapping[str, Any]) -
         request if isinstance(request, QaVerificationRequest) else QaVerificationRequest.model_validate(request)
     )
     dispatch = build_qa_head_dispatch(normalized)
-    qa_report = run_qa_runner(normalized)
-    hallucination_report = run_hallucination_critic_worker(normalized, qa_report)
-    incident_report = run_incident_postmortem_worker(normalized)
+    try:
+        qa_report = run_qa_runner(normalized)
+    except Exception as exc:  # noqa: BLE001 - authoritative boundary fails closed.
+        qa_report = {
+            "worker_id": "qa-runner",
+            "department": "QA",
+            "status": "DEGRADED",
+            "decision": "FAIL",
+            "authoritative": True,
+            "binding": False,
+            "action_required": True,
+            "input_hash": _input_hash(normalized),
+            "error_code": type(exc).__name__,
+            "summary": "QA runner failed; human review is required.",
+        }
+    try:
+        hallucination_report = run_hallucination_critic_worker(normalized, qa_report)
+    except Exception as exc:  # noqa: BLE001 - advisory boundary escalates safely.
+        hallucination_report = _advisory_failure_report(
+            normalized, "hallucination-critic-worker", exc
+        )
+    try:
+        incident_report = run_incident_postmortem_worker(normalized)
+    except Exception as exc:  # noqa: BLE001 - advisory boundary escalates safely.
+        incident_report = _advisory_failure_report(
+            normalized, "incident-postmortem-worker", exc
+        )
+
+    qa_report = _adapt_mandate_report(_normalize_fan_in_report(qa_report), normalized)
+    hallucination_report = _adapt_mandate_report(
+        _normalize_fan_in_report(hallucination_report), normalized
+    )
+    incident_report = _adapt_mandate_report(
+        _normalize_fan_in_report(incident_report), normalized
+    )
 
     non_degraded_statuses = {"COMPLETED", "NOT_EXECUTED"}
+    qa_decision = str(qa_report.get("decision", "")).upper()
     pipeline_status = (
         "COMPLETED"
         if qa_report["status"] == "COMPLETED"
+        and qa_decision in {"PASS", "WARN", "FAIL", "ESCALATE"}
         and hallucination_report["status"] in non_degraded_statuses
         and incident_report["status"] in non_degraded_statuses
         else "DEGRADED"
