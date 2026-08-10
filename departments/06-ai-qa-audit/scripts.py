@@ -418,6 +418,7 @@ def model_and_internal_audit(state: QAState) -> dict:
                 "calculation_version": assessment.calculation_version,
                 "input_hash": assessment.input_hash,
             }
+            output["model_risk_input"] = model_input
         except Exception as exc:  # noqa: BLE001 - invalid audit input escalates
             output["model_risk"] = {
                 "decision": "ESCALATE",

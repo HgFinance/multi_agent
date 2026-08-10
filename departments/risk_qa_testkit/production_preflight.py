@@ -13,6 +13,8 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY_CORPUS = ROOT / "skills" / "agentic-rag" / "corpus" / "compliance"
@@ -444,6 +446,53 @@ def _check_redis(environ: Mapping[str, str]) -> dict[str, Any]:
         )
 
 
+def _check_ollama(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Verify that Ollama exposes the configured worker model (read-only)."""
+
+    base_url = environ.get("OLLAMA_BASE_URL", "").strip().rstrip("/")
+    model = environ.get("OLLAMA_CHAT_MODEL", "").strip()
+    if not base_url and not model:
+        return _check("ollama", "SKIPPED", reason="OLLAMA_NOT_CONFIGURED")
+    if not base_url or not model:
+        return _check(
+            "ollama",
+            "FAIL",
+            reason="OLLAMA_CONFIGURATION_INCOMPLETE",
+            configured=bool(base_url or model),
+        )
+
+    native_base_url = base_url.removesuffix("/v1")
+    request = Request(
+        f"{native_base_url}/api/tags",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=4) as response:
+            payload = json.load(response)
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        names = {
+            str(item.get("name"))
+            for item in models
+            if isinstance(item, dict) and item.get("name")
+        }
+        if model not in names:
+            return _check(
+                "ollama",
+                "FAIL",
+                reason="OLLAMA_MODEL_MISSING",
+                model=model,
+                available_model_count=len(names),
+            )
+        return _check("ollama", "PASS", model=model, probe="GET /api/tags")
+    except (OSError, URLError, ValueError) as exc:
+        return _check(
+            "ollama",
+            "FAIL",
+            reason=f"OLLAMA_PROBE_FAILED:{type(exc).__name__}",
+            model=model,
+        )
+
+
 def run_preflight(
     environ: Mapping[str, str] | None = None,
     *,
@@ -455,6 +504,7 @@ def run_preflight(
     checks = _check_configuration(env)
     checks.append(_check_database(env, as_of=as_of))
     checks.append(_check_redis(env))
+    checks.append(_check_ollama(env))
     failed = [item["name"] for item in checks if item.get("status") != "PASS"]
     return {
         "status": "PASS" if not failed else "BLOCKED",

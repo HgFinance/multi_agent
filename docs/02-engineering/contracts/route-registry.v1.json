@@ -206,7 +206,10 @@
         {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"},
         {"method": "POST", "path": "/qa/v1/evidence/check"},
         {"method": "GET", "path": "/qa/v1/evidence/corpus/status"},
-        {"method": "POST", "path": "/qa/v1/verifications/{verification_id}/assess"}
+        {"method": "POST", "path": "/qa/v1/verifications/{verification_id}/assess"},
+        {"method": "POST", "path": "/qa/v1/eval-runs"},
+        {"method": "GET", "path": "/qa/v1/eval-runs/{eval_run_id}"},
+        {"method": "GET", "path": "/qa/v1/eval-runs/{eval_run_id}/results"}
       ]
     },
     "workforce-api": {

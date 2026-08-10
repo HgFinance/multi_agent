@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "scope": "QA department runtime and deterministic Eval Runner",
+  "commands": [
+    "source ~/claude/bin/activate && python -m pytest departments/06-ai-qa-audit/tests tests/schema/test_schema_contract.py -q -rs",
+    "source ~/claude/bin/activate && python -m pytest departments/06-ai-qa-audit/tests/test_qa_app.py departments/06-ai-qa-audit/tests/test_eval_runner.py departments/06-ai-qa-audit/tests/test_qa_repository.py -q",
+    "source ~/claude/bin/activate && PYTHONPATH=.:departments/06-ai-qa-audit:departments/06-ai-qa-audit/audit:departments/06-ai-qa-audit/evidence python -m pytest departments/06-ai-qa-audit/tests/test_eval_runner.py departments/06-ai-qa-audit/tests/test_qa_repository.py -q"
+  ],
+  "status": "passed",
+  "results": {
+    "focused_suite": "154 passed, 2 warnings, 58 schema subtests passed",
+    "eval_repository_suite": "9 passed",
+    "worker_eval_api_focused": "35 passed, 2 warnings",
+    "api_eval_repository_suite": "15 passed, 1 warning",
+    "disposable_postgres_lifecycle": "PASS",
+    "disposable_postgres_guards": "PASS",
+    "disposable_postgres_payload_immutability": "PASS",
+    "disposable_postgres_delete_guard": "PASS",
+    "py_compile": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "limitations": [
+    "Disposable PostgreSQL lifecycle and guard checks were run against a disposable postgres:16-alpine container with the QA bootstrap and migration; the full SQL assertion body was not retained in this report.",
+    "No production database or historical agent_runs FK path was exercised.",
+    "The disposable PostgreSQL container was removed after verification.",
+    "Cross-process/restart idempotency and production PostgreSQL API were not exercised; same-process idempotency is serialized by a process lock."
+  ]
+}

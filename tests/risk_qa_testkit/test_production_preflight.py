@@ -5,6 +5,7 @@ from pathlib import Path
 
 from departments.risk_qa_testkit.production_preflight import (
     _check_configuration,
+    _check_ollama,
     _database_dsn,
     run_preflight,
 )
@@ -20,6 +21,18 @@ def test_canonical_database_dsn_prefers_supabase_specific_environment() -> None:
 
     assert selected == "RISK_QA_DATABASE_URL"
     assert dsn == "postgresql://canonical.invalid/app"
+
+
+def test_ollama_preflight_is_skipped_when_not_configured() -> None:
+    result = _check_ollama({})
+    assert result["status"] == "SKIPPED"
+    assert result["reason"] == "OLLAMA_NOT_CONFIGURED"
+
+
+def test_ollama_preflight_requires_endpoint_and_model() -> None:
+    result = _check_ollama({"OLLAMA_BASE_URL": "http://ollama:11434/v1"})
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "OLLAMA_CONFIGURATION_INCOMPLETE"
 
 
 def test_production_configuration_requires_event_bus_and_packet_contract() -> None:

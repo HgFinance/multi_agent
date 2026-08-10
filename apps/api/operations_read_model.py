@@ -80,8 +80,12 @@ def _department_rows() -> list[dict[str, Any]]:
             registry.get("headcount_total", llm_worker_count + deterministic_worker_count)
             or llm_worker_count + deterministic_worker_count
         )
-        registered_workers = [
-            {
+        # A worker id is the identity boundary.  Some legacy profiles expose the
+        # same role through both ``workers`` and ``deterministic_workers``; do not
+        # leak that compatibility alias as two employees to the operator UI.
+        registered_by_id: dict[str, dict[str, Any]] = {}
+        for worker_id, worker in workers.items():
+            registered_by_id[worker_id] = {
                 "worker_id": worker_id,
                 "runtime_kind": "llm",
                 "status": worker.get("status", "registered")
@@ -89,10 +93,10 @@ def _department_rows() -> list[dict[str, Any]]:
                 else "registered",
                 "trigger": worker.get("trigger") if isinstance(worker, dict) else None,
             }
-            for worker_id, worker in workers.items()
-        ]
-        registered_workers.extend(
-            {
+        for worker_id, worker in deterministic_workers.items():
+            # Deterministic execution is the stricter runtime truth when a legacy
+            # profile accidentally lists the same id in both registries.
+            registered_by_id[worker_id] = {
                 "worker_id": worker_id,
                 "runtime_kind": "deterministic",
                 "status": worker.get("status", "registered")
@@ -100,8 +104,14 @@ def _department_rows() -> list[dict[str, Any]]:
                 else "registered",
                 "trigger": worker.get("trigger") if isinstance(worker, dict) else None,
             }
-            for worker_id, worker in deterministic_workers.items()
+        registered_workers = list(registered_by_id.values())
+        # Counts shown in the read model must describe the same unique registry
+        # that is rendered below, rather than a separate legacy YAML counter.
+        llm_worker_count = sum(item["runtime_kind"] == "llm" for item in registered_workers)
+        deterministic_worker_count = sum(
+            item["runtime_kind"] == "deterministic" for item in registered_workers
         )
+        total_worker_count = len(registered_workers)
         rows.append(
             {
                 **item,

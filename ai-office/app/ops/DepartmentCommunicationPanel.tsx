@@ -2,13 +2,18 @@
 
 import { useMemo, useState } from "react";
 import { useBffFeed } from "./bffClient";
-import type { LlmPerformanceMetric, OperationsCommunication, OperationsDepartment } from "./readModel";
+import type {
+  LlmPerformanceMetric,
+  OperationsCommunication,
+  OperationsDepartment,
+} from "./readModel";
 import { groupRuntimeMessages, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./statusLabels";
 
 type Scope = "all" | "internal" | "cross_domain";
 
 const statusTone: Record<string, string> = {
   IDLE: "waiting",
+  REGISTERED: "waiting",
   QUEUED: "waiting",
   OFFLINE: "blocked",
   DEGRADED: "approval",
@@ -100,6 +105,8 @@ export default function DepartmentCommunicationPanel({ compact = false }: { comp
     }),
     [operations?.agent_statuses],
   );
+  const registeredWorkerCount =
+    operations?.departments.reduce((total, department) => total + department.workers.length, 0) ?? 0;
   const performanceMetrics = operations?.runtime.performance_metrics ?? [];
   const runtimeMessages = useMemo(() => groupRuntimeMessages(operations?.runtime.messages ?? []), [operations?.runtime.messages]);
   const selectedDepartment =
@@ -114,18 +121,31 @@ export default function DepartmentCommunicationPanel({ compact = false }: { comp
     ),
     [operations?.agent_statuses, selectedDepartmentCodeResolved],
   );
-  const selectedWorkers = selectedDepartment?.workers.map((worker) => {
+  const selectedWorkers = [
+    ...new Map(
+      (selectedDepartment?.workers ?? []).map((worker) => [worker.worker_id, worker]),
+    ).values(),
+  ].map((worker) => {
     const live = selectedLiveAgents.get(worker.worker_id);
     const active = operations?.runtime.active_workers.some(
       (item) => item.worker_id === worker.worker_id && item.department_code === selectedDepartmentCodeResolved,
     );
     return {
       ...worker,
-      role: live?.role ?? worker.worker_id,
+        roleLabel:
+          live?.role && live.role !== worker.worker_id
+            ? live.role
+            : worker.runtime_kind === "llm"
+              ? "LLM 직원"
+              : "결정론 Runner",
       status: live?.status ?? (active ? "RUNNING" : "REGISTERED"),
-      reason: live?.reason ?? (active ? "LangGraph runtime에서 실행 중입니다." : "실행 상태 이벤트 대기 중입니다."),
+        reason:
+          live?.reason ??
+          (active
+            ? "LangGraph runtime에서 실행 중입니다."
+            : "Registry에 등록됨 · agent.status.v1 실행 이벤트 수신 전입니다."),
     };
-  }) ?? [];
+  });
   const selectedMessages = operations?.runtime.messages
     .filter((message) => message.department_code === selectedDepartmentCodeResolved && message.worker_id)
     .slice(-8)
@@ -169,9 +189,10 @@ export default function DepartmentCommunicationPanel({ compact = false }: { comp
           <>
             {!compact && <div className="operations-notice">
               <b>{operations.status}</b>
+              <span>BFF {readableRuntimeStatus(connection.toUpperCase())}</span>
               <span>
-                runtime heartbeat {operations.runtime_connected ? "연결됨" : "미연결"} · event bridge{" "}
-                {operations.event_bridge_connected ? "연결됨" : "미연결"}
+                runtime projection {operations.runtime_connected ? "연결됨" : "미연결"} · agent.status.v1{" "}
+                {operations.event_bridge_connected ? "수신 중" : "실행 이벤트 없음"}
               </span>
               <span>LangSmith {readableRuntimeStatus(operations.runtime.observability?.langsmith?.status)}</span>
               <span>마지막 BFF 응답 {timeLabel(lastUpdated)}</span>
@@ -185,7 +206,12 @@ export default function DepartmentCommunicationPanel({ compact = false }: { comp
               <div className="communication-toolbar">
                 <div>
                   <p className="eyebrow">LIVE AGENT STATUS · agent.status.v1</p>
-                  <h3 id="internal-runtime-title">부서 내부 실행 추적 <span>{workerActivity.length}명 관찰됨</span></h3>
+            <h3 id="internal-runtime-title">
+              부서 내부 실행 추적
+              <span>
+                실행 이벤트 {workerActivity.length}건 · Registry {registeredWorkerCount}명
+              </span>
+            </h3>
                 </div>
                 <span className="status-pill working">
                   {workerActivity.filter((agent) => agent.status === "RUNNING").length}명 업무 중
@@ -243,8 +269,8 @@ export default function DepartmentCommunicationPanel({ compact = false }: { comp
                         {selectedWorkers.length > 0 ? selectedWorkers.map((worker) => (
                           <article className="worker-activity-row" key={worker.worker_id}>
                             <div>
-                              <strong>{worker.role}</strong>
-                              <small>{worker.worker_id} · {worker.trigger ?? "always"}</small>
+                          <strong>{worker.worker_id}</strong>
+                          <small>{worker.roleLabel} · {worker.trigger ?? "호출 조건 없음"}</small>
                             </div>
                             <span className={`status-pill worker-status-pill ${statusTone[worker.status] ?? "waiting"}`}>
                               {readableRuntimeStatus(worker.status)}

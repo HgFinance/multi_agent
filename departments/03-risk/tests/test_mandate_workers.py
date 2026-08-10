@@ -7,6 +7,8 @@ from pathlib import Path
 
 RISK_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RISK_DIR))
+CONTRACTS_TEST_DIR = Path(__file__).resolve().parents[3] / "tests" / "contracts"
+sys.path.insert(0, str(CONTRACTS_TEST_DIR))
 
 from risk_mandate_workers import (
     PineconeEvidenceClient,
@@ -15,6 +17,7 @@ from risk_mandate_workers import (
     run_compliance_policy_worker,
     run_risk_runner,
 )
+from test_unified_api_contract import load_json, validate_json_schema
 
 
 def _mandate(**overrides: object) -> dict[str, object]:
@@ -315,3 +318,20 @@ def test_assessment_fans_in_all_five_compliance_routes_into_risk_head_state() ->
         assert state["worker_results"]["compliance-policy-worker"]["generated_answer"]
         assert state["audit"]["trace"]["compliance-policy-worker"]
         assert result["employee_runtime"]["workers"]
+
+
+def test_risk_head_emits_agent_task_result_conformant_to_the_canonical_schema() -> None:
+    """FINAL_RUNTIME_ARCHITECTURE.md Phase 0: the Risk Head's fan-in must be a
+    valid agent-task-result.v1, and never widen a REJECT/ESCALATE into a
+    success status."""
+
+    schema = load_json("agent-task-result.v1.json")
+    result = assess_mandate(_mandate())
+    agent_task_result = result["risk_head"]["agent_task_result"]
+
+    validate_json_schema(agent_task_result, schema)
+    assert agent_task_result["department"] == "risk-management"
+    assert agent_task_result["decision"] == result["risk_head"]["decision"]
+    if result["risk_head"]["decision"] in ("REJECT", "ESCALATE"):
+        assert agent_task_result["status"] in ("REJECTED", "ESCALATED")
+        assert agent_task_result["escalate"] is True

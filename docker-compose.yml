@@ -517,6 +517,11 @@ services:
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # risk-api: Pre-trade Risk Check, Trading State, Compliance(agentic-rag) 조회면.
   # Build Context가 저장소 루트인 이유는 departments/03-risk/Dockerfile 상단 주석 참고.
@@ -527,15 +532,21 @@ services:
     container_name: hedgefund-risk-api
     restart: unless-stopped
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       RISK_SERVICE_AUTH_SECRET: ${RISK_SERVICE_AUTH_SECRET:-}
       RISK_SERVICE_AUTH_ISSUER: ${RISK_SERVICE_AUTH_ISSUER:-}
       RISK_SERVICE_AUTH_AUDIENCE: ${RISK_SERVICE_AUTH_AUDIENCE:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8041:8000"   # 로컬 전용 - 외부 노출 금지 (research-api와 같은 정책)
     healthcheck:
@@ -556,15 +567,21 @@ services:
     container_name: hedgefund-audit-api
     restart: unless-stopped
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       QA_SERVICE_AUTH_SECRET: ${QA_SERVICE_AUTH_SECRET:-}
       QA_SERVICE_AUTH_ISSUER: ${QA_SERVICE_AUTH_ISSUER:-}
       QA_SERVICE_AUTH_AUDIENCE: ${QA_SERVICE_AUTH_AUDIENCE:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
     healthcheck:
@@ -589,7 +606,8 @@ services:
     command: ["python", "qa_events/worker.py"]
     working_dir: /app/departments/06-ai-qa-audit
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
       RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}

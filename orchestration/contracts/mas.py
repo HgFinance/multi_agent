@@ -13,9 +13,28 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+TASK_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+
+TASK_DEPARTMENTS = frozenset(
+    {
+        "ceo-agent",
+        "research-department",
+        "trading-department",
+        "risk-management",
+        "quant-backtest-department",
+        "accounting-portfolio-department",
+        "qa-department",
+        "hr-department",
+    }
+)
+
+TASK_RESULT_STATUSES = frozenset(
+    {"COMPLETED", "DEGRADED", "HOLD", "ESCALATED", "REJECTED", "NOT_EXECUTED"}
+)
 
 
 class _Contract(BaseModel):
@@ -179,6 +198,195 @@ class WorkerContextOutput(_Contract):
         if not self.schema_valid:
             raise ValueError("worker output marked schema_valid=false")
         return self
+
+
+class TaskArtifactRef(_Contract):
+    """Mirrors agent-task-result.v1's $defs/artifact_ref. Never carries a raw
+    prompt or secret — only a content-addressed pointer."""
+
+    type: str = Field(min_length=1, max_length=64)
+    id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    as_of: datetime | None = None
+    provenance_ref: str | None = Field(default=None, min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    acl_scope: tuple[str, ...] = ()
+
+
+class AgentTaskResult(_Contract):
+    """docs/02-engineering/contracts/agent-task-result.v1.json.
+
+    The non-binding domain result a Department Head/Runner hands back to
+    CEO/Kanban. Only the deterministic Risk Engine/OMS/Ledger/Approval
+    Service can bind financial state — this object cannot.
+    """
+
+    schema_version: Literal["agent-task-result.v1"] = "agent-task-result.v1"
+    case_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    task_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    department: str
+    worker: str = Field(min_length=1, max_length=128)
+    input_refs: tuple[TaskArtifactRef, ...] = ()
+    evidence_refs: tuple[TaskArtifactRef, ...] = ()
+    decision: str = Field(min_length=1, max_length=64)
+    confidence: float = Field(ge=0.0, le=1.0)
+    escalate: bool
+    model_version: str = Field(min_length=1, max_length=128)
+    adapter_version: str = Field(min_length=1, max_length=128)
+    trace_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    status: str
+    summary: str = Field(min_length=1, max_length=4000)
+    reason_codes: tuple[str, ...] = ()
+    output_refs: tuple[TaskArtifactRef, ...] = ()
+    input_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    calculation_version: str | None = Field(default=None, min_length=1, max_length=128)
+    replay_manifest_ref: str | None = Field(default=None, min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    created_at: datetime
+    completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_enums_and_time(self) -> AgentTaskResult:
+        if self.department not in TASK_DEPARTMENTS:
+            raise ValueError(f"unknown department: {self.department}")
+        if self.status not in TASK_RESULT_STATUSES:
+            raise ValueError(f"unknown task status: {self.status}")
+        if self.created_at.tzinfo is None:
+            raise ValueError("agent-task-result.created_at must be timezone-aware")
+        if self.completed_at is not None and self.completed_at.tzinfo is None:
+            raise ValueError("agent-task-result.completed_at must be timezone-aware")
+        return self
+
+
+WORKER_CONTEXT_SCHEMA_VERSIONS = frozenset(
+    {
+        "worker-context.v1",
+        "research.worker-context.v1",
+        "quant.worker-context.v1",
+        "trading.worker-context.v1",
+        "risk.worker-context.v1",
+        "qa.worker-context.v1",
+        "governance.worker-context.v1",
+        "workforce.worker-context.v1",
+        "accounting.worker-context.v1",
+    }
+)
+
+
+class WorkerAdvisory(_Contract):
+    summary: str = Field(min_length=1, max_length=4000)
+    suggested_verdict: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class WorkerContextResult(_Contract):
+    """docs/02-engineering/contracts/worker-context.v1.json.
+
+    The non-binding execution context a Runner hands to its Worker and the
+    Worker hands back — never a confidence/escalate field (§5.1.1: those are
+    Task-level aggregates the Department Head computes across every
+    worker-context result, not something a single Worker call carries).
+    """
+
+    context_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    schema_version: str
+    case_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    task_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    department_handoff_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    input_contract: str = Field(min_length=1, max_length=128)
+    department: str
+    trace_id: str = Field(min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    producer_worker: str = Field(min_length=1, max_length=128)
+    consumer_worker: str = Field(min_length=1, max_length=128)
+    status: str
+    advisory: WorkerAdvisory
+    reason_codes: tuple[str, ...] = ()
+    input_refs: tuple[TaskArtifactRef, ...] = Field(min_length=1)
+    output_refs: tuple[TaskArtifactRef, ...] = ()
+    profile_version: str = Field(min_length=1, max_length=128)
+    model_version: str = Field(min_length=1, max_length=128)
+    adapter_version: str = Field(min_length=1, max_length=128)
+    input_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    output_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    calculation_version: str | None = Field(default=None, min_length=1, max_length=128)
+    attempt: int = Field(ge=1, le=3)
+    timeout_ms: int = Field(ge=1, le=120_000)
+    replay_manifest_ref: str | None = Field(default=None, min_length=1, max_length=128, pattern=TASK_ID_PATTERN)
+    created_at: datetime
+    completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_enums_and_time(self) -> WorkerContextResult:
+        if self.schema_version not in WORKER_CONTEXT_SCHEMA_VERSIONS:
+            raise ValueError(f"unknown worker-context schema_version: {self.schema_version}")
+        if self.department not in TASK_DEPARTMENTS:
+            raise ValueError(f"unknown department: {self.department}")
+        if self.status not in TASK_RESULT_STATUSES:
+            raise ValueError(f"unknown worker-context status: {self.status}")
+        if self.created_at.tzinfo is None:
+            raise ValueError("worker-context.created_at must be timezone-aware")
+        if self.completed_at is not None and self.completed_at.tzinfo is None:
+            raise ValueError("worker-context.completed_at must be timezone-aware")
+        return self
+
+
+def build_worker_context_result(
+    *,
+    schema_version: str,
+    case_id: str,
+    task_id: str,
+    input_contract: str,
+    department: str,
+    trace_id: str,
+    producer_worker: str,
+    consumer_worker: str,
+    status: str,
+    summary: str,
+    input_refs: Sequence[TaskArtifactRef],
+    profile_version: str,
+    model_version: str,
+    input_hash: str,
+    context_id: str | None = None,
+    output_refs: Sequence[TaskArtifactRef] = (),
+    adapter_version: str = "none",
+    suggested_verdict: str | None = None,
+    reason_codes: Sequence[str] = (),
+    attempt: int = 1,
+    timeout_ms: int = 8_000,
+    output_hash: str | None = None,
+    created_at: datetime | None = None,
+) -> WorkerContextResult:
+    """Build a single Runner→Worker call's worker-context.v1 record.
+
+    `context_id` defaults to a deterministic id (a Task can fan out to many
+    Worker calls, so it must differ per case_id/task_id/consumer_worker/trace_id
+    combination — §5.1.1). Caller resolves `status` beforehand; this builder
+    never infers a decision from Worker text.
+    """
+
+    return WorkerContextResult(
+        context_id=context_id
+        or f"ctx:{stable_hash({'case_id': case_id, 'task_id': task_id, 'consumer_worker': consumer_worker, 'trace_id': trace_id})[:32]}",
+        schema_version=schema_version,
+        case_id=case_id,
+        task_id=task_id,
+        input_contract=input_contract,
+        department=department,
+        trace_id=trace_id,
+        producer_worker=producer_worker,
+        consumer_worker=consumer_worker,
+        status=status,
+        advisory=WorkerAdvisory(summary=summary[:4000], suggested_verdict=suggested_verdict),
+        reason_codes=tuple(reason_codes),
+        input_refs=tuple(input_refs),
+        output_refs=tuple(output_refs),
+        profile_version=profile_version,
+        model_version=model_version,
+        adapter_version=adapter_version,
+        input_hash=f"sha256:{input_hash}",
+        output_hash=output_hash,
+        attempt=attempt,
+        timeout_ms=timeout_ms,
+        created_at=created_at or datetime.now(timezone.utc),
+    )
 
 
 class PipelineEvent(_Contract):
@@ -358,8 +566,94 @@ def make_pipeline_event(
     )
 
 
+# Decision -> Task Status. A department head's own decision vocabulary
+# (Risk: APPROVE/ESCALATE/REJECT, QA: PASS/WARN/FAIL/ESCALATE, ...) already
+# matches FINAL_RUNTIME_ARCHITECTURE.md's §5.3 vocabulary, so only the Task
+# Status projection needs mapping. Anything outside this table escalates
+# rather than completing (fail-closed, never widen into a success state).
+TASK_DECISION_STATUS: dict[str, str] = {
+    "APPROVE": "COMPLETED",
+    "PASS": "COMPLETED",
+    "NO_ACTION": "COMPLETED",
+    "RESIZE": "COMPLETED",
+    "RECOMMEND": "COMPLETED",
+    "HOLD": "HOLD",
+    "WARN": "DEGRADED",
+    "ESCALATE": "ESCALATED",
+    "REJECT": "REJECTED",
+    "FAIL": "REJECTED",
+    "NOT_EXECUTED": "NOT_EXECUTED",
+}
+
+
+def task_status_for_decision(decision: str) -> str:
+    return TASK_DECISION_STATUS.get(decision, "ESCALATED")
+
+
+def build_agent_task_result(
+    *,
+    department: str,
+    worker: str,
+    case_id: str,
+    task_id: str,
+    trace_id: str,
+    decision: str,
+    escalate: bool,
+    summary: str,
+    reports: Sequence[Mapping[str, Any]],
+    model_version: str,
+    adapter_version: str = "none",
+    reason_codes: Sequence[str] = (),
+    created_at: datetime | None = None,
+) -> AgentTaskResult:
+    """Build a Department Head's non-binding agent-task-result.v1 from its own
+    deterministic worker-fan-in reports (each report already carries a plain
+    hex input_hash from the department's skills/contracts.py helpers)."""
+
+    refs = tuple(
+        TaskArtifactRef(
+            type="worker-report",
+            id=f"{report.get('worker_id', 'worker')}:{trace_id}",
+            content_hash=f"sha256:{report['input_hash']}",
+        )
+        for report in reports
+        if report.get("input_hash")
+    )
+    input_hash = reports[0]["input_hash"] if reports and reports[0].get("input_hash") else stable_hash(case_id)
+    # ponytail: confidence is a binary proxy from the head's own escalate
+    # flag (these fan-ins are deterministic, not model-scored). Replace with
+    # real evidence-coverage scoring once Kanban ranks on this value.
+    confidence = 0.5 if escalate else 1.0
+    return AgentTaskResult(
+        case_id=case_id,
+        task_id=task_id,
+        department=department,
+        worker=worker,
+        input_refs=refs,
+        evidence_refs=refs,
+        decision=decision,
+        confidence=confidence,
+        escalate=escalate,
+        model_version=model_version,
+        adapter_version=adapter_version,
+        trace_id=trace_id,
+        status=task_status_for_decision(decision),
+        summary=summary[:4000],
+        reason_codes=tuple(reason_codes),
+        output_refs=refs,
+        input_hash=f"sha256:{input_hash}",
+        output_hash=f"sha256:{stable_hash({'decision': decision, 'reports': list(reports)})}",
+        created_at=created_at or datetime.now(timezone.utc),
+    )
+
+
 __all__ = [
     "ACTIONS",
+    "TASK_DECISION_STATUS",
+    "TASK_DEPARTMENTS",
+    "TASK_RESULT_STATUSES",
+    "WORKER_CONTEXT_SCHEMA_VERSIONS",
+    "AgentTaskResult",
     "AnalysisOutput",
     "ConflictResolution",
     "DecisionOutput",
@@ -372,10 +666,16 @@ __all__ = [
     "ProbabilityDistribution",
     "ReplayMetadata",
     "Signal",
+    "TaskArtifactRef",
+    "WorkerAdvisory",
     "WorkerContextOutput",
+    "WorkerContextResult",
+    "build_agent_task_result",
     "build_replay_metadata",
+    "build_worker_context_result",
     "make_pipeline_event",
     "resolve_signal_conflict",
     "stable_hash",
+    "task_status_for_decision",
     "validate_worker_context",
 ]

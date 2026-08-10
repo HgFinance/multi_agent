@@ -200,8 +200,18 @@ def test_qa_runner_is_deterministic_and_derives_blockers_from_engine_output():
         }
     )
     assert report["llm"] is False
-    assert report["status"] == "COMPLETED"
+    assert report["status"] == "REJECTED"
     assert "summary" not in report["output"]
     assert report["output"]["decided_by"] == "deterministic"
     assert report["output"]["authoritative"] is False
     assert report["output"]["escalate"] is True
+def test_raw_model_risk_decision_cannot_bypass_deterministic_validation():
+    report = qa_runner(
+        {
+            "model_risk_input": {"decision": "PASS"},
+        }
+    )
+
+    assert report["status"] != "COMPLETED"
+    assert report["decision"] != "PASS"
+    assert "model_risk" in report["output"]["blockers"][0]

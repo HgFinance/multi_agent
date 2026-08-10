@@ -877,6 +877,14 @@ function ProfileModal({
 
 function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
   const dialogRef = useDialogBehavior(onClose);
+  const approvalSummary = snap.approvalPending
+    ? "대표 승인 1건 대기 — 대표님 확인이 필요해요"
+    : snap.approved
+      ? "대표 승인 1건 반영 — TOP 1 콘텐츠 제작 완료"
+      : "대표 승인 대기 안건 없음";
+  const decisionSummary = snap.approvalPending
+    ? "TOP 1 콘텐츠를 제작할지 승인해주세요."
+    : "없습니다. 내일 09:00에 다시 출근할게요 ✨";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -897,15 +905,17 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
         </div>
         <div className="win-body">
           <p className="brief-date">{snap.clock} · 김세리 비서실장 최종 브리핑</p>
-          <h3>대표님, 오늘 회사 업무가 정리됐어요.</h3>
+          <h3>{snap.dayComplete ? "대표님, 오늘 회사 업무가 정리됐어요." : "대표님, 현재 진행 상황이에요."}</h3>
           <ul>
             <li>
               <span className="dot green" />
-              완료 {snap.stats.done}팀 — 조사·기획·QA·대본·제작·저장까지 마쳤어요
+              {snap.dayComplete
+                ? `완료 ${snap.stats.done}팀 — 조사·기획·QA·대본·제작·저장까지 마쳤어요`
+                : `완료 ${snap.stats.done}팀 · 진행 중 ${snap.stats.working}팀`}
             </li>
             <li>
-              <span className="dot green" />
-              대표 승인 1건 반영 — TOP 1 콘텐츠 제작 완료
+              <span className={`dot ${snap.approvalPending ? "yellow" : snap.approved ? "green" : "gray"}`} />
+              {approvalSummary}
             </li>
             <li>
               <span className="dot gray" />
@@ -914,7 +924,7 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
           </ul>
           <div className="decision-box">
             <span className="tiny-label">오늘 대표님이 결정할 것</span>
-        <strong>없습니다. 내일 09:00에 다시 출근할게요 ✨</strong>
+            <strong>{decisionSummary}</strong>
           </div>
           <button className="btn btn-primary" onClick={onClose}>
             확인

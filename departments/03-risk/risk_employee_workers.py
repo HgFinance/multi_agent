@@ -61,6 +61,11 @@ from departments.risk_qa_worker_profiles import (
     WorkerTechProfile,
     tech_profile_for,
 )
+from orchestration.contracts.mas import (
+    TaskArtifactRef,
+    build_worker_context_result,
+    stable_hash,
+)
 from orchestration.llm_observability import record_llm_call
 
 
@@ -676,6 +681,82 @@ def _should_run(spec: WorkerSpec, payload: dict[str, Any]) -> bool:
     return bool(payload.get("compliance"))
 
 
+def _dispatch_ids(payload: dict[str, Any], input_hash: str) -> tuple[str, str, str]:
+    """(case_id, task_id, trace_id) shared by every worker-context.v1 record
+    this dispatch issues — one Task can fan out to many Worker calls, so
+    these three stay fixed while `context_id` varies per call (§5.1.1)."""
+
+    case_id = str(payload.get("case_id") or payload.get("mandate_id") or f"local:{input_hash[:16]}")
+    trace_id = str(payload.get("trace_id") or f"local:{input_hash[:16]}")
+    return case_id, f"{case_id}-risk-worker-task", trace_id
+
+
+def _worker_context_for_report(
+    spec: WorkerSpec,
+    state: dict[str, Any],
+    *,
+    case_id: str,
+    task_id: str,
+    trace_id: str,
+    dispatch_input_hash: str,
+) -> dict[str, Any]:
+    """Assemble this Worker call's docs/02-engineering/contracts/worker-context.v1
+    record from what the LangGraph Runner already produced. §5.1.1: status +
+    advisory replace the Task's decision vocabulary here; confidence/escalate
+    stay Task-level and are never carried on a single worker-context result.
+    """
+
+    output = state.get("output") or {}
+    escalate = bool(output.get("escalate"))
+    status = (
+        "ESCALATED"
+        if escalate
+        else "COMPLETED"
+        if state.get("status") == "COMPLETED"
+        else "DEGRADED"
+    )
+    skill_context = state.get("skill_context") or {}
+    input_hash = str(skill_context.get("input_hash") or dispatch_input_hash)
+    timeout_ms = int(skill_context.get("timeout_ms") or 8_000)
+    attempt = max(1, min(3, int(state.get("attempts") or 1)))
+    evidence_refs = output.get("evidence_refs") or []
+    return build_worker_context_result(
+        schema_version="risk.worker-context.v1",
+        case_id=case_id,
+        task_id=task_id,
+        input_contract="risk.worker-context.v1",
+        department="risk-management",
+        trace_id=trace_id,
+        # ponytail: no separate Runner registry exists yet, so the Runner is
+        # named after the Worker it wraps. Point at a real Runner registry id
+        # if the department ever registers Runners independently of Workers.
+        producer_worker=f"{spec.worker_id}-runner",
+        consumer_worker=spec.worker_id,
+        status=status,
+        summary=str(output.get("summary") or "Worker degraded; human review required."),
+        input_refs=(
+            TaskArtifactRef(
+                type="worker-input",
+                id=f"{spec.worker_id}:{trace_id}"[:128],
+                content_hash=f"sha256:{input_hash}",
+            ),
+        ),
+        output_refs=tuple(
+            TaskArtifactRef(
+                type="evidence",
+                id=f"{spec.worker_id}:{index}",
+                content_hash=f"sha256:{stable_hash(ref)}",
+            )
+            for index, ref in enumerate(evidence_refs)
+        ),
+        profile_version=spec.profile_version,
+        model_version=_model_name(),
+        input_hash=input_hash,
+        attempt=attempt,
+        timeout_ms=timeout_ms,
+    ).model_dump(mode="json", exclude_none=True)
+
+
 def _run_employee_workers_sequential(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
@@ -692,6 +773,7 @@ def _run_employee_workers_sequential(
         payload.get("input_hash")
         or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
     )
+    case_id, task_id, trace_id = _dispatch_ids(payload, input_hash)
     for spec in WORKER_SPECS:
         if not _should_run(spec, payload):
             not_executed.append(spec.worker_id)
@@ -716,6 +798,14 @@ def _run_employee_workers_sequential(
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
                 "trace": state.get("trace_manifest", {}),
+                "worker_context": _worker_context_for_report(
+                    spec,
+                    state,
+                    case_id=case_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    dispatch_input_hash=input_hash,
+                ),
             }
         )
     failed = [r["worker_id"] for r in reports if r["status"] != "COMPLETED"]
@@ -759,6 +849,7 @@ async def run_employee_workers_async(
         payload.get("input_hash")
         or hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
     )
+    case_id, task_id, trace_id = _dispatch_ids(payload, input_hash)
     not_executed = [
         spec.worker_id for spec in WORKER_SPECS if not _should_run(spec, payload)
     ]
@@ -788,12 +879,17 @@ async def run_employee_workers_async(
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
                 "trace": state.get("trace_manifest", {}),
+                "worker_context": _worker_context_for_report(
+                    spec,
+                    state,
+                    case_id=case_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    dispatch_input_hash=input_hash,
+                ),
             }
         except Exception as exc:  # noqa: BLE001 - Worker boundary fails closed.
-            return {
-                "worker_id": spec.worker_id,
-                "role": spec.role,
-                "tools": list(spec.tools),
+            failure_state = {
                 "status": "DEGRADED",
                 "attempts": 0,
                 "output": {
@@ -804,6 +900,14 @@ async def run_employee_workers_async(
                     "escalate": True,
                     "schema_valid": False,
                 },
+            }
+            return {
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "tools": list(spec.tools),
+                "status": failure_state["status"],
+                "attempts": failure_state["attempts"],
+                "output": failure_state["output"],
                 "error": type(exc).__name__,
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
@@ -812,6 +916,14 @@ async def run_employee_workers_async(
                 "skill_results": [],
                 "rag_plan": {},
                 "trace": {},
+                "worker_context": _worker_context_for_report(
+                    spec,
+                    failure_state,
+                    case_id=case_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                    dispatch_input_hash=input_hash,
+                ),
             }
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))

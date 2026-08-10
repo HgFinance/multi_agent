@@ -85,6 +85,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # Supabase 는 앞 14자리를 version 으로 쓰므로 중복이면 하나가 "이미 적용됨"
                 # 으로 조용히 건너뛴다. 아직 main 에 없던 이쪽을 000300 으로 옮겼다.
                 "20260806000300_execution_outbox.sql",
+                "20260809000100_qa_eval_results_append_only.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -142,10 +143,39 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("drop trigger if exists improvement_candidate_scorecards_append_only", migration)
         self.assertIn("'hold'", migration)
 
+    def test_qa_eval_migration_hardening_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260809000100_qa_eval_results_append_only.sql"
+        ).lower()
+
+        # Existing eval_runs rows must be repaired and explicitly validated
+        # before identity NOT NULL/CHECK constraints are installed.
+        self.assertIn("update audit.eval_runs", migration)
+        self.assertIn("nullif(btrim(candidate_id), '')", migration)
+        self.assertIn("nullif(btrim(candidate_profile_version), '')", migration)
+        self.assertIn("raise exception using", migration)
+        self.assertIn("alter column candidate_id set not null", migration)
+        self.assertIn("alter column candidate_profile_version set not null", migration)
+
+        self.assertIn("eval_runs_environment_check", migration)
+        self.assertIn("check (environment in ('shadow', 'mock'))", migration)
+        self.assertIn("alter column environment set not null", migration)
+
+        for table in ("eval_runs", "eval_results", "eval_comparisons"):
+            self.assertIn(f"alter table audit.{table} enable row level security", migration)
+        self.assertIn("validate_eval_run_transition", migration)
+        self.assertIn("eval_runs_lifecycle_guard", migration)
+        self.assertIn("on delete restrict", migration)
+        self.assertIn("eval_results_append_only", migration)
+        self.assertIn("eval_comparisons_append_only", migration)
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 21,
+            "audit": 22,
+            # +1 (QA, 2026-08-09): eval_comparisons stores immutable Champion
+            # comparison evidence across API/process restarts.
             # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
             # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
             "execution": 14,
