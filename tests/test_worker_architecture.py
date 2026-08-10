@@ -25,11 +25,9 @@ DEPARTMENTS = (
 )
 
 
-# 부서별 본부장(Hermes) 모델. 여기 없으면 기본값(openai-codex / gpt-5.6-luna)이다.
-HEAD_MODEL = {
-    "01-research": ("anthropic-claude-code", "claude-opus-5"),
-    "04-quant-backtest": ("anthropic-claude-code", "claude-opus-5"),
-}
+# 부서별 본부장(Hermes) 모델 예외. 2026-08-10 현재 8개 부서가 같은 모델이라 비어 있다.
+# 표를 남겨 두는 이유: 한 줄로 8개 부서를 묶어 두면 한 부서의 결정이 다른 부서를 잠근다.
+HEAD_MODEL: dict[str, tuple[str, str]] = {}
 
 
 def _read_profile(directory: str) -> str:

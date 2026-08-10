@@ -12,14 +12,19 @@
 #
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #4, 8 / RESEARCH_QUANT_AGENTIC_FRAMEWORK.md
 
-# ▶ 2026-08-10: 본부장 모델을 Opus 5 로 (재일). 이 두 본부의 본부장 일은 논문 정독,
-#   출처 규율 준수(발췌를 지어내지 않기, 인용과 추론 구분), 전용 논증, 실험 코드 작성이라
-#   장문 이해와 지시 준수가 결과를 좌우한다. provider_choices 에 이미 있던 선택지라
-#   새 프로바이더 도입이 아니다. env 의 ANTHROPIC_API_KEY 를 그대로 쓴다.
-#   ⚠ 상주 가동이면 비용이 실제로 든다 - scout_operations.daily_head_token_cap 이 상한이다.
+# ▶ 2026-08-10: 본부장 모델은 openai-codex / gpt-5.6-luna 로 유지한다.
+#   Opus 5 로 올렸다가 되돌렸다 - 실측 두 가지가 이유다.
+#   ① provider 는 `anthropic` 이다. `anthropic-claude-code` 는 head_runtime 의
+#      provider_choices(저장소 스키마)에나 있는 값이고 Hermes 런타임은 모른다
+#      (Unknown provider 오류로 확인).
+#   ② OAuth 로 붙은 서드파티 앱은 플랜 한도가 아니라 extra usage 를 쓴다 -
+#      잔액이 없으면 HTTP 400 으로 거부된다. 서버 상주 운용에는 부적합하다.
+#   나중에 Anthropic 으로 갈 거면 API 키 방식이어야 하고, 그때 provider 는
+#   `anthropic` 으로 적는다.
 model:
-  provider: anthropic-claude-code
-  default: claude-opus-5
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
@@ -117,8 +122,8 @@ head_runtime:
   runtime: hermes
   role: department_head
   provider_choices: [openai-codex, anthropic-claude-code]
-  active_provider: anthropic-claude-code
-  active_model: claude-opus-5
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
   model_source: model
   responsibility: synthesize_worker_context_and_escalate
   binding_decision: false
