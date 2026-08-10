@@ -85,52 +85,20 @@ services:
   #   /opt/data를 공유하면 한 부서의 세션·기억·자격이 옆 부서에서 그대로 보인다 - 분리된
   #   척이 된다. HERMES_HOME=/opt/data가 이미지 기본값이라 마운트만 갈면 분리가 끝난다.
   #
-  # ▶ env는 CLAUDE.md 배정표대로 OPENAI_API_KEY만 준다(hermes/config.yaml의 env: 블록이
-  #   참조하는 키). 아무 키나 넣지 않는다.
+  # ▶ Provider는 하드코딩하지 않는다 - /opt/data/config.yaml(provider:)과 auth.json이
+  #   결정한다(Trading은 Codex 배정, 2026-08-10 확정 매핑). Claude Code CLI 프록시로
+  #   전환하려면 이 서비스를 docker-compose.claude.yml에 override로 추가한다(해당 파일
+  #   상단 주석에 근거·자리표시자 이유가 있다).
   trading-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-trading-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-trading-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/trading-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # ▶ Claude 구독 한도로 Sonnet 사용 (2026-08-03, 팀 합의)
-      #   research-hermes/quant-hermes와 같은 배선이다(재일님 2026-08-03).
-      #   근거: api.anthropic.com 직접 호출은 '서드파티'라 플랜 한도가 아니라
-      #   extra usage에서 차감된다(실측 HTTP 400). CLI로 부르면 Claude Code
-      #   자신이라 플랜 한도가 적용되므로 호스트 프록시를 거친다.
-      #     hermes(컨테이너) -> host.docker.internal:8787 -> claude -p -> 플랜 한도
-      #   프록시 기동: python scripts/claude_code_proxy.py --serve
-      #
-      #   ⚠ ANTHROPIC_API_KEY는 주지 않는다. .env에 sk-ant- 키가 있지만 그건
-      #   구독과 별개인 종량 과금이고, 자격 해석 순서가 ANTHROPIC_API_KEY 우선이라
-      #   넣으면 플랜이 아니라 그쪽으로 샐 여지가 생긴다.
-      #
-      #   ⚠ 프록시가 안 떠 있으면 이 부서 Agent 질의가 실패한다. 프록시는
-      #   실패를 성공으로 위장하지 않고 5xx를 낸다(호출부가 폴백하도록).
-      #   무료 모델로 되돌리려면 hermes/config.yaml의 model 블록만 바꾼다.
-      #
-      # ▶ 기본값이 자리표시자인 이유 (2026-08-03 실측)
-      #   Hermes는 자격이 **비어 있으면 호출 자체를 안 한다**("No Anthropic
-      #   credentials found"). 그런데 프록시는 이 값을 아예 읽지 않는다 -
-      #   가짜 토큰으로 실제 Sonnet 응답이 오는 것을 확인했다. 인증은 호스트
-      #   CLI 자신의 로그인으로 이뤄지기 때문이다.
-      #   그래서 **진짜 구독 토큰을 컨테이너에 넣지 않는다.** 안 쓰는 자격이
-      #   퍼지는 것 자체가 위험이고(Dockerfile 주석과 같은 원칙), 이 자리표시자는
-      #   ANTHROPIC_BASE_URL이 실수로 빠지면 조용히 과금되는 대신 인증 실패로
-      #   **막히는** 쪽으로 동작한다. 진짜 토큰을 쓰고 싶으면 .env에 넣으면 된다.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-proxy-placeholder-not-a-credential}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
-
-    # Docker Desktop(Windows/Mac)은 host.docker.internal을 자동 제공하지만 리눅스
-    # 엔진은 아니다 - VPS 이전 시에도 같은 파일이 동작하게 매핑을 명시한다
-    # (루트 compose의 research-api가 같은 이유로 이걸 갖고 있다).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
