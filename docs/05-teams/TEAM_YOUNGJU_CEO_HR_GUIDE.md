@@ -115,7 +115,8 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 
 `Candidate → Independent QA Eval → Shadow → Approval → Promotion → Rollback`
 
-- Eval Runner와 Shadow Router를 구현한다. **소유는 QA/감사본부(동규)다** — 인사팀이 자기 후보를 스스로 채점할 수 없으므로 HR이 만들 수 없다. 2026-08-07 실측상 완전 미착수이며, 이것이 풀리기 전에는 HR 직원 ACTIVE 전이가 원리적으로 불가능하다(`activation_evidence.py`가 `audit.eval_runs`의 COMPLETED 행을 요구하는데 그 행을 만들 경로가 없다).
+- Eval Runner와 Shadow Router를 구현한다. **소유는 QA/감사본부(동규)다** — 인사팀이 자기 후보를 스스로 채점할 수 없으므로 HR이 만들 수 없다. 2026-08-07 실측상 완전 미착수이며, 이것이 풀리기 전에는 HR 직원 ACTIVE 전이가 원리적으로 불가능하다(`activation_evidence.py`가 `audit.eval_runs`의 COMPLETED 행을 요구하는데 그 행을 만들 경로가 없다). 구현 요구사항은 [EVAL_RUNNER_SPEC.md](../02-engineering/EVAL_RUNNER_SPEC.md)로 QA에 전달한다.
+- Identity·권한 생성은 [PLATFORM_IAM_SPEC.md](../02-engineering/PLATFORM_IAM_SPEC.md)를 따른다. **소유 부서 미정**이며, 인사팀은 요청만 하고 생성은 하지 않는다는 경계는 그대로다.
 - 비용·품질·안전·회귀 지표를 Scorecard에 저장한다.
 - Promotion과 Rollback은 동일 Agent/작성자가 단독 수행하지 못하게 한다.
 - 실패한 Eval은 기존 Profile 유지와 `HOLD`로 끝낸다.
