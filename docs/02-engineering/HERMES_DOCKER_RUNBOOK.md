@@ -24,7 +24,10 @@ compose 프로젝트 hedgefund
 ├── research-hermes   ← hedgefund-research-hermes   ~/.hermes-research-department
 ├── quant-hermes      ← hedgefund-quant-hermes      ~/.hermes-quant-backtest-department
 │   (나머지 6개 본부는 같은 형태로 각 담당자가 추가 — 5절)
-├── hermes-dashboard  ← profiles:[dashboard] 옵트인, 한 부서만 본다
+├── hermes-dashboard  ← profiles:[dashboard] 옵트인, 공용 운영 콘솔(2026-08-10) -
+│     /home/ubuntu/.hermes:/opt/data 전체를 마운트해 8개 profiles/와 공용 Kanban을
+│     팀 전체가 조회한다. 위 "부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개" 원칙은
+│     8개 실행 서비스에만 적용되고, 조회 전용인 Dashboard는 예외다
 ├── research-api / market-api      ← 부서 읽기 전용 조회면
 ├── batch-collectors / ls-realtime / news-watcher / ls-news
 └── timescaledb
