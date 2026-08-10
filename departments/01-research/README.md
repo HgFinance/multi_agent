@@ -1,7 +1,7 @@
 # 리서치본부 (Research)
 
 전 본부 Backend·Event·Docker 연결 기준은 [Department Backend Integration and Docker Plan](../../docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)을 따른다.
-직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며 Hermes Profile은 `research-department`다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
+직원 런타임은 독립 LangGraph Worker와 Ollama `qwen3:1.7b`이며 Hermes Profile은 `research-department`(본부장 모델 `claude-opus-5`)다. `Modelfile`은 로컬 보조 실행용이고, Build·Eval·권한 기준은 [Ollama Department Modelfile Guide](../../docs/02-engineering/OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)를 따른다.
 
 실제 실행 상태와 재일님 2주 계획·Daily Scrum은 [실행 현황과 통합 계획 v2.2](../../docs/PROJECT_IMPLEMENTATION_STATUS.md#41-재일님-리서치본부와-퀀트백테스트본부)을 기준으로 한다.
 Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 순서는
@@ -49,6 +49,45 @@ Research와 Quant를 연결하는 목표 Graph, 계약과 논문 기반 도입 �
 | `experiment-planner-worker` (RES-16) | 통제 어휘 사상, 데이터 요구, 반증 검사 | 소집 (`adopted_lead`) |
 | `market-context-worker` (RES-17) | 유니버스·히스토리·DQ — 실행 가능성 재료 | 상시 |
 | `holdings-analyst-worker` (RES-18) | 보유 종목 질의 응답 — **서비스 자리, 공장 미연결** | 소집 (`holding_question`) |
+
+## 상주 운영과 처리량
+
+**"24시간 상주"는 프로세스가 살아 있다는 뜻이지 쉬지 않고 검색한다는 뜻이 아니다.**
+소스의 갱신 주기가 검색 주기의 상한이다 — arXiv는 하루 한 번 발행하는데 15분마다
+뒤지면 같은 것을 96번 본다. 렌즈마다 주기가 다른 이유다.
+
+숫자는 **병목에서 거꾸로** 잡았다. 공장의 처리량은 검색이 아니라 실험이 정한다.
+
+| 단계 | 하루 물량 | 통과율 | 담당 계층 |
+|---|---:|---:|---|
+| 스카우트 소집(렌즈 4) | 히트 ~238 | — | 로컬 |
+| 스니펫 스크리닝 | → 36 열람 | 15% | 로컬 |
+| 본문 훑기 | → 7 큐 적재 | 20% | **로컬**(하루 ~700k 토큰 — 여기가 로컬의 값어치) |
+| 편집장 정독·리드 작성 | 5건 | — | **본부장** |
+| 기획안 채택 | 주 3건 | 10% | **본부장** |
+| 실험 | 주 15회 | — | 결정론 파이프라인 |
+
+주 15회는 `신규 family 3 × trial_budget 5`다. **`trial_budget` 5는 낭비 상한이자
+PBO 성립 하한**이기도 하다(`pbo_cscv.MIN_VARIANTS = 4`) — 예산을 다 써야 변형 5개가
+생겨 과적합 확률을 계산할 수 있다.
+
+기획안 목표를 주 2건에서 **3건으로 올렸다.** 상주 가동인데 주 2건이면 입구를 열어둔
+의미가 없다.
+
+### 상주 운영의 두 가지 기본 실패 모드와 방어
+
+1. **읽히지 않을 리드를 계속 만든다** → 편집장 큐 20건(약 3일치) 초과 시 스카우트 정지,
+   퀀트 대기 10건 초과 시 기획안 발행 정지. 입구만 넓히면 재고만 쌓인다.
+2. **고갈된 광맥을 24시간 판다** → 연속 3회 소집에서 신규 리드 0이면 그 주제를 24시간
+   쉬게 하고 다른 데를 판다. 같은 질의 반복은 질의 대장(쿨다운 72시간)이 막는다
+   — `lead_id` 해시는 같은 *문서*를 접을 뿐 같은 *질의*를 또 도는 것은 못 막는다.
+
+파라미터 실체는 `hermes/config.yaml`의 `scout_operations` · `throughput_controls`다.
+
+> 계측 먼저. 상주 가동 전에 ①하루 히트 ②스크리닝 통과율 ③실제 정독 수 ④기획안 전환율
+> ⑤퀀트 대기 큐 다섯 수치를 볼 수 있게 해둔다. 없으면 어디가 막혔는지 모른 채 24시간 돈다.
+
+## 직원 편제 보충
 
 스카우트 4인은 같은 도구를 쓰고 **렌즈만 다르다**. 서로의 결과를 보지 않고 병렬로 뒤지는 것이
 이 편제의 전부다 — 독립성은 프롬프트가 아니라 입력 격리로만 만들어진다.

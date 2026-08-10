@@ -12,10 +12,14 @@
 #
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #4, 8 / RESEARCH_QUANT_AGENTIC_FRAMEWORK.md
 
+# ▶ 2026-08-10: 본부장 모델을 Opus 5 로 (재일). 이 두 본부의 본부장 일은 논문 정독,
+#   출처 규율 준수(발췌를 지어내지 않기, 인용과 추론 구분), 전용 논증, 실험 코드 작성이라
+#   장문 이해와 지시 준수가 결과를 좌우한다. provider_choices 에 이미 있던 선택지라
+#   새 프로바이더 도입이 아니다. env 의 ANTHROPIC_API_KEY 를 그대로 쓴다.
+#   ⚠ 상주 가동이면 비용이 실제로 든다 - scout_operations.daily_head_token_cap 이 상한이다.
 model:
-  provider: openai-codex
-  default: gpt-5.6-luna
-  base_url: https://chatgpt.com/backend-api/codex
+  provider: anthropic-claude-code
+  default: claude-opus-5
 
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
@@ -109,8 +113,8 @@ head_runtime:
   runtime: hermes
   role: department_head
   provider_choices: [openai-codex, anthropic-claude-code]
-  active_provider: openai-codex
-  active_model: gpt-5.6-luna
+  active_provider: anthropic-claude-code
+  active_model: claude-opus-5
   model_source: model
   responsibility: synthesize_worker_context_and_escalate
   binding_decision: false

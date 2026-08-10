@@ -25,6 +25,13 @@ DEPARTMENTS = (
 )
 
 
+# 부서별 본부장(Hermes) 모델. 여기 없으면 기본값(openai-codex / gpt-5.6-luna)이다.
+HEAD_MODEL = {
+    "01-research": ("anthropic-claude-code", "claude-opus-5"),
+    "04-quant-backtest": ("anthropic-claude-code", "claude-opus-5"),
+}
+
+
 def _read_profile(directory: str) -> str:
     """Read a department Hermes profile as UTF-8.
 
@@ -180,8 +187,11 @@ def test_profile_worker_registry_counts_and_models() -> None:
         assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
         assert config["employee_runtime"]["max_retries"] == 2
         assert config["employee_runtime"]["max_attempts"] == 3
-        assert config["model"]["provider"] == "openai-codex"
-        assert config["model"]["default"] == "gpt-5.6-luna"
+        # 2026-08-10: 본부장 모델이 부서마다 갈린다. 리서치·퀀트(재일)는 논문 정독과
+        # 실험 코드 작성이 본부장 일이라 Opus 5 로 올렸다. 나머지 부서는 현행 유지 -
+        # 한 줄로 8개 부서를 묶어 두면 한 부서의 결정이 다른 부서를 잠근다.
+        expected_head = HEAD_MODEL.get(directory, ("openai-codex", "gpt-5.6-luna"))
+        assert (config["model"]["provider"], config["model"]["default"]) == expected_head
         # `or` 로 폴백하면 빈 목록(직원 없는 부서)이 "키 없음"으로 잘못 읽힌다 - None 만 폴백한다.
         runtime_personalities = config["agent"].get("runtime_personalities")
         if runtime_personalities is None:
