@@ -669,21 +669,24 @@ services:
     container_name: hedgefund-hermes-dashboard
     restart: unless-stopped
     profiles: ["dashboard"]
-    depends_on:
-      - research-hermes
     command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
-    # 대시보드는 4명 팀원이 함께 보는 **공용 운영 콘솔**이다(2026-08-10) - CEO가
+    # 대시보드는 4명 팀원이 함께 쓰는 **공용 운영/관리 콘솔**이다(2026-08-10) - CEO가
     # 사용자 질의마다 동적으로 만드는 Task Graph/Kanban(고정 파이프라인이 아니라
     # 그때그때 필요한 부서만 골라 병렬/순차 배치한 결과)의 상태·담당을 부서 경계
-    # 없이 한 화면에서 본다. 그래서 8개 profiles/ 전체와 공용 Kanban 상태가 있는
-    # 공용 Hermes Home(~/.hermes) 전체를 마운트한다 - research-department 하나만
-    # 보던 예전 구조에서 바뀌었다.
+    # 없이 한 화면에서 보고 관리한다. 그래서 8개 profiles/ 전체와 공용 Kanban 상태가
+    # 있는 공용 Hermes Home(~/.hermes) 전체를 마운트한다 - research-department 하나만
+    # 보던 예전 구조에서 바뀌었다. 특정 부서에 종속되지 않으므로 depends_on도 두지
+    # 않는다.
     #
     # ▶ 이건 **8개 실행 서비스(research-hermes 등)의 분리 원칙과는 다른 얘기다.**
     #   실행 서비스는 여전히 각자 /home/ubuntu/.hermes/profiles/<department> 하나만
     #   마운트해서 auth/config/memory/runtime을 독립 유지한다(위 "부서별 컨테이너
-    #   1개 = 부서별 데이터 디렉터리 1개" 원칙 그대로) - Dashboard는 조회 전용이라
-    #   그 위에서 전체를 보는 것이고, 실행 격리를 없애는 게 아니다.
+    #   1개 = 부서별 데이터 디렉터리 1개" 원칙 그대로) - 실행 격리를 없애는 게 아니다.
+    #
+    # ▶ **읽기 전용이 아니다.** 대시보드 화면 자체에 Profile CREATE, Config, Keys,
+    #   Skills 편집 등이 있고 ~/.hermes를 RW로 마운트한다 - profile/config/shared
+    #   상태를 조회할 뿐 아니라 그 화면에서 직접 바꾼다. 그래서 팀원 접근을
+    #   127.0.0.1 + Tailscale 사설망 + 대시보드 자체 인증(위 안내)으로 제한한다.
     volumes:
       - /home/ubuntu/.hermes:/opt/data
     environment:
