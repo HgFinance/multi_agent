@@ -315,11 +315,12 @@ def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str
     """
     payload = dict(outcome)
     payload["oos_summary"] = json.dumps(payload.get("oos_summary") or {})
-    with conn.cursor() as cur:
-        cur.execute(_SQL_INSERT_OUTCOME, payload)
-        cur.execute(
-            "update quant.hypotheses set status = %s, status_changed_at = now() "
-            "where hypothesis_id = %s", (new_status, hypothesis_id))
+    # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
+    cur = conn.cursor()
+    cur.execute(_SQL_INSERT_OUTCOME, payload)
+    cur.execute(
+        "update quant.hypotheses set status = %s, status_changed_at = now() "
+        "where hypothesis_id = %s", (new_status, hypothesis_id))
     conn.commit()
     return payload["outcome_id"]
 
@@ -464,8 +465,6 @@ def _check_finalize_is_atomic():
 
     class _Cur:
         def __init__(self, boom_on): self.boom_on, self.ran = boom_on, []
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
         def execute(self, sql, params=None):
             self.ran.append(sql.strip()[:20])
             if self.boom_on and self.boom_on in sql:

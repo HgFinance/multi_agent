@@ -69,6 +69,9 @@ class OrchestratorReport:
     release: dict = field(default_factory=dict)          # QNT-07 관문 판정
     preregistration: dict = field(default_factory=dict)  # 사전등록 지문·검증
     lifecycle: dict = field(default_factory=dict)        # 전략 생명주기 요청
+    # 2026-08-10: 리서치 환류. **비어 있으면 루프가 안 닫힌 것**이다 -
+    # 종결됐는데 이 값이 없으면 그 교훈은 다음 기획안에 닿지 못한다.
+    feedback: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,72 @@ TRIAL_BUDGET_DEFAULT = 5
 # ▶ **상태를 바꾸는 UPDATE 는 status_changed_at 을 함께 쓴다.** 빠뜨리면 그
 #   실험은 /jobs/stuck 에서 영원히 멈춘 것으로 보인다 - 자체점검이 소스에서
 #   status= 를 쓰는 UPDATE 마다 그 컬럼이 있는지 확인한다.
+# 실행부 상태 -> 환류 판정. SUPPORTED 는 승격이 아니라 **제출 자격**이다.
+_STATUS_TO_DECISION = {
+    "REJECTED": "REJECT",
+    "SUPPORTED": "SUBMIT_TO_QA",
+    "INCONCLUSIVE": "GATE_HOLD",
+}
+
+# 환류 oos_summary 로 옮길 지표. **없는 것은 넣지 않는다**(미측정과 0 을 구분).
+_OOS_KEYS = ("excess_return_pct", "information_ratio", "max_drawdown_pct",
+             "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high")
+
+
+def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
+                            experiment_id, failed_criteria=None,
+                            lesson_codes=None, fragility: str = "",
+                            notes: str = "") -> None:
+    """상태 전이를 **환류와 함께** 커밋한다.
+
+    ▶ 왜 여기서 실패를 삼키지 않나
+      환류를 못 적재하면 그 실험의 교훈은 영영 Gate 0 에 닿지 않고, 회사는 같은
+      실험을 다시 산다. 조용히 상태만 바꾸느니 실험을 미종결로 두고 사람이 보는
+      편이 낫다 - 그래서 예외를 잡지 않는다(fail-closed).
+    """
+    from factory_bridge import build_outcome, finalize, lessons_from
+
+    tp = report.trial_pressure or {}
+    exp_id = str(experiment_id or "")
+    oos: dict = {}
+    if exp_id:
+        # 이 파일의 관례를 따라 컨텍스트 매니저를 쓰지 않는다(자체 점검의 가짜 커서 호환)
+        cur = conn.cursor()
+        cur.execute("""select metric, value from quant.experiment_metrics
+                        where experiment_id = %s
+                          and coalesce(dimensions->>'window','') in ('','SUMMARY')
+                          and dimensions->>'regime' is null""", (exp_id,))
+        # (metric, value) 2-튜플이 아닌 행은 지표 행이 아니다 - 조용히 건너뛴다
+        found = {r[0]: float(r[1]) for r in (cur.fetchall() or [])
+                 if isinstance(r, (list, tuple)) and len(r) == 2}
+        oos = {k: found[k] for k in _OOS_KEYS if k in found}
+        # 카드와 이름을 맞춘다 - 두 곳이 다른 이름을 쓰면 대조가 안 된다
+        for src, dst in (("bootstrap_ci_low", "ci_low"),
+                         ("bootstrap_ci_high", "ci_high")):
+            if src in oos:
+                oos[dst] = oos.pop(src)
+
+    failed = list(failed_criteria or [])
+    if not failed and new_status == "REJECTED" and fragility:
+        failed = [f"fragility_{str(fragility).lower()}"]
+    lessons = list(lesson_codes or []) or lessons_from(
+        failed_criteria=failed,
+        regime_concerns=report.notes if hasattr(report, "notes") else (),
+        fragility=fragility)
+    decision = _STATUS_TO_DECISION.get(new_status, "GATE_HOLD")
+
+    outcome = build_outcome(
+        experiment_id=exp_id or f"unknown-{hid}", hypothesis_id=str(hid),
+        trial_family_id=str(tp.get("trial_family_id") or ""),
+        trial_number=int(tp.get("trial_number") or 1),
+        decision=decision, failed_criteria=failed, lesson_codes=lessons,
+        oos_summary=oos, notes=notes)
+    oid = finalize(conn, hypothesis_id=str(hid), new_status=new_status,
+                   outcome=outcome)
+    report.feedback = {"outcome_id": oid, "decision": decision,
+                       "lesson_codes": lessons, "oos_keys": sorted(oos)}
+
+
 def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 run_chain=None) -> OrchestratorReport:
     """가설 하나를 게이트에 태운다. conn/run_chain 주입은 자체점검용."""
@@ -370,19 +439,25 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         if not vr.ok:
             report.preregistration["violation"] = vr.reason
             report.preregistration["changed_fields"] = list(vr.changed_fields)
-            cur.execute("update quant.hypotheses set status='REJECTED', "
-                        "status_changed_at=now() where hypothesis_id=%s", (hid,))
-            conn.commit()
+            # ▶ 환류와 함께 종결한다. 사전등록 위반은 가장 중요한 교훈이라
+            #   조용히 상태만 바꾸면 다음 기획안이 같은 실수를 반복한다.
+            _finalize_with_feedback(
+                conn, report=report, hid=hid, new_status="REJECTED",
+                experiment_id=result.get("experiment_id"),
+                failed_criteria=["preregistration_violation"],
+                lesson_codes=["LEAKAGE_SUSPECT"],
+                notes=f"사전등록 위반: {vr.reason}"[:400])
             report.transitions.append("RUNNING->REJECTED (사전등록 위반)")
             return report
 
         new_status = robustness_to_status(result["fragility"],
                                           report.trial_pressure)
-        cur.execute("update quant.hypotheses set status=%s, "
-                    "status_changed_at=now() "
-                    "where hypothesis_id=%s and status='RUNNING'",
-                    (new_status, hid))
-        conn.commit()
+        # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
+        #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
+        _finalize_with_feedback(
+            conn, report=report, hid=hid, new_status=new_status,
+            experiment_id=result.get("experiment_id"),
+            fragility=result.get("fragility", ""))
         report.transitions.append(f"RUNNING->{new_status}")
 
         # ▶ QNT-07 릴리스 관문. SUPPORTED 까지 온 것만 본다.
