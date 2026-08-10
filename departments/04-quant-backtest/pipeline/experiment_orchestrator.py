@@ -238,8 +238,13 @@ def _norm_data_products(v) -> list:
 
 
 def orchestrate(hypothesis_id: str | None = None, *, conn=None,
-                run_chain=None) -> OrchestratorReport:
-    """가설 하나를 게이트에 태운다. conn/run_chain 주입은 자체점검용."""
+                market_conn=None, run_chain=None) -> OrchestratorReport:
+    """가설 하나를 게이트에 태운다. conn/market_conn/run_chain 주입은 자체점검용.
+
+    ▶ 두 DB 를 걸친다: 메타(가설·매니페스트)는 `DATABASE_URL`, 시장 데이터는
+      `TIMESCALE_DATABASE_URL`. 데이터 요구를 **실제로 재려면** 후자가 있어야 하고,
+      없으면 `NOT_VERIFIED` 로 막힌다 - 못 잰 것을 통과로 세지 않는다.
+    """
     own_conn = conn is None
     if own_conn:
         import psycopg2
@@ -248,8 +253,11 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                / "01-research" / "collectors"))
         from source_registry import load_project_env
 
-        conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
-                                connect_timeout=20)
+        env = load_project_env()
+        conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+        if market_conn is None and env.get("TIMESCALE_DATABASE_URL"):
+            market_conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"],
+                                           connect_timeout=20)
     try:
         cur = conn.cursor()
         if hypothesis_id:
@@ -283,10 +291,26 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                #   쓰지 않으면 조회하지 않은 것과 같다.
                "status": _status}
 
-        cur.execute("select distinct name || '/' || version from quant.dataset_manifests")
-        datasets = {r[0] for r in cur.fetchall()}
+        # ── 데이터 요구 사상 + 실측 ──────────────────────────────────────
+        # ▶ 여기가 매니페스트 **이름만 대조**하던 자리다. 리서치는 원천 이름으로
+        #   말하고(`market_bars`) 실행면은 매니페스트 이름으로 물어서
+        #   (`krx-basket-daily/v2`) 공장을 거친 가설이 전부 NOT_RUNNABLE 로
+        #   떨어져 PROPOSED 에 영구 정체했다(2026-08-10 실측). 게다가 이름이
+        #   있으면 통과시키는 것은 fail-open 이었다 - 매니페스트는 빌드 시점의
+        #   주장이고 원천이 그 뒤 비었는지는 말해 주지 않는다.
+        #   이제 사상은 source_versions 에서 유도하고 커버리지는 로컬에서 잰다.
+        from data_resolution import resolve as resolve_data
 
-        ok, missing, backlog = feasibility(hyp, datasets)
+        res = resolve_data(data_products, meta_conn=conn, market_conn=market_conn)
+        if not res.ok:
+            return OrchestratorReport(
+                hypothesis_id=str(hid), title=title, verdict="NOT_RUNNABLE",
+                missing=[f"data:{res.verdict}"] + [f"source:{u}" for u in res.unmapped],
+                backlog=list(res.notes))
+        # 이후 단계는 실행면 이름만 쓴다 - 원천 이름이 더 내려가면 안 된다.
+        hyp["required_data_products"] = list(res.datasets)
+
+        ok, missing, backlog = feasibility(hyp, set(res.datasets))
         report = OrchestratorReport(hypothesis_id=str(hid), title=title,
                                     verdict="RUNNABLE" if ok else "NOT_RUNNABLE",
                                     missing=missing, backlog=backlog)
@@ -510,6 +534,8 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
     finally:
         if own_conn:
             conn.close()
+            if market_conn is not None:
+                market_conn.close()
 
 
 def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
@@ -651,7 +677,32 @@ class _FakeCursor:
         return self._row
 
     def fetchall(self):
+        # 매니페스트 조회는 (이름, 버전, source_versions) 3열이다. 데이터 사상이
+        # 이 열들에서 유도되므로 가짜도 같은 모양이어야 진짜 경로를 검사한다.
+        if "dataset_manifests" in getattr(self, "_last", ("", ()))[0]:
+            out = []
+            for d in self._datasets:
+                name, _, ver = str(d).rpartition("/")
+                out.append((name or str(d), ver or "v1",
+                            {"market_bars": "ls_chart/1D"}))
+            return out
         return [(d,) for d in self._datasets]
+
+
+class _FakeMarketCursor:
+    """로컬 시장 DB 흉내. 커버리지 1열 5칸을 돌려준다."""
+
+    def __init__(self, row): self._row = row
+    def execute(self, sql, params=()): pass
+    def fetchone(self): return self._row
+
+
+class _FakeMarket:
+    def __init__(self, row=(218985, "2024-01-01", "2026-08-09", 640, 350)):
+        self._row = row
+
+    def cursor(self):
+        return _FakeMarketCursor(self._row)
 
 
 class _FakeConn:
@@ -735,14 +786,14 @@ def _check_orchestrate_paths():
     row = ("h-1", "미구현 엣지 가설", {"type": "pairs_trading", "horizon_days": 5},
            ["krx-basket-daily/v1"], "PROPOSED")
     cur = _FakeCursor(row, ["krx-basket-daily/v1"])
-    r = orchestrate("h-1", conn=_FakeConn(cur))
+    r = orchestrate("h-1", conn=_FakeConn(cur), market_conn=_FakeMarket())
     assert r.verdict == "NOT_RUNNABLE" and not cur.updates, \
         "NOT_RUNNABLE 인데 상태를 건드렸다"
 
     row2 = ("h-2", "모멘텀 가설", {"type": "momentum"},
             ["krx-basket-daily/v1"], "PROPOSED")
     cur2 = _FakeCursor(row2, ["krx-basket-daily/v1"])
-    r2 = orchestrate("h-2", conn=_FakeConn(cur2),
+    r2 = orchestrate("h-2", conn=_FakeConn(cur2), market_conn=_FakeMarket(),
                      run_chain=lambda h, hid: {"experiment_id": "e-1",
                                                "fragility": "FRAGILE"})
     assert r2.verdict == "RUNNABLE", (r2.verdict, r2.backlog)
@@ -756,13 +807,13 @@ def _check_orchestrate_paths():
     assert r2.preregistration["verified"] is True, r2.preregistration
 
     cur3 = _FakeCursor(row2, ["krx-basket-daily/v1"])
-    r3 = orchestrate("h-2", conn=_FakeConn(cur3),
+    r3 = orchestrate("h-2", conn=_FakeConn(cur3), market_conn=_FakeMarket(),
                      run_chain=lambda h, hid: {"experiment_id": "e-2",
                                                "fragility": "ROBUST"})
     assert r3.transitions[-1] == "RUNNING->SUPPORTED", r3.transitions
 
     cur4 = _FakeCursor(None, [])
-    assert orchestrate("none", conn=_FakeConn(cur4)).verdict == "NO_HYPOTHESIS"
+    assert orchestrate("none", conn=_FakeConn(cur4), market_conn=_FakeMarket()).verdict == "NO_HYPOTHESIS"
     print("  오케스트레이션 경로       OK")
 
 
