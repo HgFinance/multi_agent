@@ -11,6 +11,10 @@ cost/regime)이었다. 그런데 이 부서의 일 대부분은 **이미 결정�
   ① 접수 - 리서치 기획안을 읽고 사양 초안을 만든다(어휘 사상·데이터 요구 확인).
      기획안은 자연어가 섞여 있어 코드가 혼자 읽을 수 없다.
   ② 설계 - EDA 결과를 보고 창·파라미터 범위를 제안한다. 제안일 뿐 판정이 아니다.
+  ②-b 전략 코드 작성 - 기성 템플릿으로 표현 안 되는 방법론은 **시그널 코드를 쓴다.**
+     이게 공장이 사람 손에 막히지 않는 지점이다. 코드는 사전등록 지문에 해시로
+     들어가고(strategy_spec.spec_hash), 결정론·PIT·반환형 검사를 통과해야만
+     스펙이 만들어진다 - 즉 **작성은 에이전트가, 승인은 결정론 코드가** 한다.
   ③ 해석 - 카드의 통계(DSR·PBO·국면)를 사람이 읽을 문장으로 만든다. **숫자는
      건드리지 않는다** - 판정은 release_gate 가 이미 내렸다.
   ④ 교훈 - 기각 사유를 통제 어휘 lesson_code 로 사상한다. 이게 리서치 환류의
@@ -48,6 +52,7 @@ WORKER_SPECS = (
     WorkerSpec("proposal-intake-worker", "Experiment proposal intake and hypothesis specification analyst", ("quant.proposal.read", "quant.hypothesis.read"), "always", ("experiment_proposal", "hypothesis")),
     WorkerSpec("experiment-design-worker", "Point-in-time dataset and experiment design analyst", ("quant.dataset.read",), "experiment_design", ("dataset_manifest", "features", "labels")),
     WorkerSpec("result-interpretation-worker", "Backtest result, overfitting and regime interpretation analyst", ("quant.experiment_card.read",), "experiment_card", ("experiment_card", "trial_pressure", "regime_breakdown")),
+    WorkerSpec("strategy-author-worker", "Custom strategy signal authoring analyst", ("quant.template_catalog.read", "quant.vocabulary.read"), "strategy_authoring", ("experiment_proposal", "methodology_leads", "template_catalog")),
     WorkerSpec("outcome-lesson-worker", "Experiment outcome and lesson-code mapping analyst", ("quant.outcome.read",), "experiment_outcome", ("experiment_outcome", "failed_criteria")),
 )
 

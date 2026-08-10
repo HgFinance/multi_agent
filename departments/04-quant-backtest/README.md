@@ -36,19 +36,27 @@ Research Evidence를 전략 가설과 독립 검증으로 연결하는 목표 Gr
   Strategy Candidate, **`ExperimentOutcomeV1`**(통제 어휘 `lesson_codes` → 리서치 환류)
 - Handoff: Release Gate(결정론) → QA 재현 검증 → Risk Capability Review → 인간 승인
 
-## 직원 편제 (LLM Worker 4인)
+## 직원 편제 (LLM Worker 5인)
 
 | Worker | 역할 | 실행 |
 |---|---|---|
 | `proposal-intake-worker` (QNT-01) | 기획안 접수 → 사전등록 사양 초안, 어휘·데이터·예산 확인 | 상시 |
 | `experiment-design-worker` (QNT-02) | PIT Dataset, 창·Embargo, 파라미터 범위와 **그 범위의 시도 수** | 소집 (`experiment_design`) |
-| `result-interpretation-worker` (QNT-03) | DSR·PBO·국면 분해 해석 서술 — 수치 재계산·판정 금지 | 소집 (`experiment_card`) |
+| `strategy-author-worker` (QNT-05) | **기성 템플릿에 없는 방법론의 시그널 코드 작성** — 코드 해시가 사전등록 지문에 들어간다 | 소집 (`strategy_authoring`) |
+| `result-interpretation-worker` (QNT-03) | DSR·PBO·국면 해석 + **소스 보고 지표와 우리 결과 대조** — 수치 재계산·판정 금지 | 소집 (`experiment_card`) |
 | `outcome-lesson-worker` (QNT-04) | 종결 사유를 통제 어휘 `lesson_codes`로 사상 | 소집 (`experiment_outcome`) |
 
-직원이 7명에서 4명으로 줄어든 것은 감원이 아니다. 계산과 판정(사전등록·PIT·백테스트·
+**전략 코드는 실험마다 달라도 된다 — 그게 정상이다.** 논문·서한에서 오는 방법론은 서로 다른
+계산이라 템플릿 파라미터로만 표현하면 공장이 손잡이 돌리기가 된다. 그래서 QNT-05 가 시그널
+코드를 쓴다. 막는 것은 코드가 다른 것이 아니라 **결과를 본 뒤 코드가 바뀌는 것**이고,
+그건 코드 해시를 사전등록 지문에 넣어 막는다(고치면 새 시도 → DSR 감가).
+시그널은 기준일 이하만 노출하는 뷰만 받으므로 미래를 꺼낼 경로가 아예 없다.
+**작성은 에이전트가, 승인은 결정론 검증이 한다.**
+
+직원이 7명에서 5명으로 줄어든 것은 감원이 아니다. 계산과 판정(사전등록·PIT·백테스트·
 walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결정론 코드가 하고 있고**,
-그 위에 LLM을 겹쳐 두면 계산을 두 번 하거나 판정을 흉내 낸다. 남은 4자리는 결정론 코드가
-못 하는 일 — 자연어 접수, 설계 제안, 결과 해석, 교훈 사상 — 만 맡는다.
+그 위에 LLM을 겹쳐 두면 계산을 두 번 하거나 판정을 흉내 낸다. 남은 5자리는 결정론 코드가
+못 하는 일 — 자연어 접수, 설계 제안, **시그널 코드 작성**, 결과 해석, 교훈 사상 — 만 맡는다.
 
 ## 현재 구현
 

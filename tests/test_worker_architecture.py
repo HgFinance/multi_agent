@@ -100,6 +100,8 @@ def _payload() -> dict[str, Any]:
         "universe": {"key": "krx_all"},
         "experiment_proposal": {"proposal_id": "proposal-test"},
         "experiment_design": {"windows": 5},
+        "strategy_authoring": {"edge_type": "liquidity_shock_reversal"},
+        "template_catalog": {"templates": 8},
         "experiment_card": {"card_id": "card-test"},
         "experiment_outcome": {"decision": "REJECT"},
         "trial_pressure": {"trial_number": 1},
@@ -163,7 +165,7 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 퀀트는 계산·판정이 전부 결정론 pipeline/ 소유라 LLM 을 겹쳐 둘 자리가 없어
     # 접수·설계·해석·교훈 4명만 남겼다 - 줄어든 3명은 해고가 아니라 **코드가 이미
     # 하고 있던 일**이었다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 8, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 4, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 8, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 5, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -333,7 +335,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
 
         "risk": (1, 0, 1),
         # 2026-08-10: 상시는 접수 하나다. 카드도 없는데 해석 워커를 돌릴 이유가 없다.
-        "quant-backtest": (4, 1, 3),
+        "quant-backtest": (5, 1, 4),
         # 2026-08-07: 회계의 도메인별 수치 전달은 back-office-runner로 이동해 LLM 1명만
         # 남겼다. 남은 하나는 도메인이 아니라 **예외**로 정의된 조사관이라 항상 실행이다.
         "accounting-portfolio": (1, 1, 0),

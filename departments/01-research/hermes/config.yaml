@@ -174,6 +174,23 @@ mcp_servers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
 
+  # ▶ 2026-08-10 방법론 스카우트용 도구 면. **둘 다 API 키가 필요 없다** -
+  #   키가 필요한 소스(OpenAlex 는 2026-02-13 부터 키 필수)는 켜지 않는다.
+  #   compose 에서 `--profile research-skills` 로만 뜬다(기본 up 을 안 건드린다).
+  #
+  # paper-search: arXiv·Semantic Scholar·Crossref·PubMed/PMC·dblp·bioRxiv 등.
+  #   무인증 Semantic Scholar 는 공유 풀이라 스로틀이 잦다 - 스카우트 4인이
+  #   동시에 때리면 즉시 막히므로 큐 간격을 둔다(본부장이 소집 간격으로 통제).
+  paper-search:
+    url: http://paper-search-mcp:8041/mcp
+    enabled: false        # 컨테이너 기동·계약 확인 후 true 로 올린다
+  # youtube-transcript: 자막 텍스트만. 영상 다운로드는 하지 않는다.
+  #   데이터센터 IP 는 봇 탐지로 막히는 사례가 많다 - 실패를 정상으로 취급하지
+  #   않고 리드 미생산으로 남긴다(스카우트 프롬프트가 그렇게 지시한다).
+  youtube-transcript:
+    url: http://youtube-transcript-mcp:8042/mcp
+    enabled: false
+
 skills:
   - hermes-agent
 
