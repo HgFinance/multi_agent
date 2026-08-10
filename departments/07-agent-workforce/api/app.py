@@ -60,7 +60,8 @@ _IMPROVEMENTS_DIR = _BASE / "improvements"
 _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
 _PLANNING_DIR = _BASE / "planning"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR):
+_HIRING_DIR = _BASE / "hiring"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR, _HIRING_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -71,6 +72,7 @@ from access import (
     InMemoryAccessRepository,
     MissingProvisioningError,
     MissingRevocationEvidenceError,
+    RequestStatus,
     ResourceKind,
     approve_request,
     provision,
@@ -88,6 +90,14 @@ from cost import (
     assess_budget,
     build_department_scorecard,
 )
+from hiring_request import (
+    HiringRequest,
+    HiringRequestStatus,
+    HiringSelfApprovalError,
+    IllegalHiringTransition,
+    InMemoryHiringRequestRepository,
+)
+from hiring_request import transition as hiring_transition
 from observability import INVESTMENT_DEPARTMENT_STAGE, check_idle_agents
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
@@ -164,6 +174,11 @@ except ImportError:
     PostgresPlanRepository = None  # type: ignore[assignment,misc]
     PostgresPlanApprovalEvidenceRepository = None  # type: ignore[assignment,misc]
 
+try:
+    from postgres_hiring_repository import PostgresHiringRequestRepository
+except ImportError:
+    PostgresHiringRequestRepository = None  # type: ignore[assignment,misc]
+
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
 
@@ -212,6 +227,31 @@ class ProvisionRequestIn(BaseModel):
 class RevokeRequestIn(BaseModel):
     at: datetime
     evidence: dict = Field(min_length=1)
+
+
+class HiringRequestIn(BaseModel):
+    """POST /workforce/v1/hiring-requests 요청 본문.
+
+    workforce.hiring_request.propose 도구가 실제로 도달하는 자리다(hiring_request.py
+    모듈 docstring 참고). status는 여기서 받지 않는다 - propose는 항상 OPEN으로
+    시작한다(HiringRequest 기본값).
+    """
+
+    department_id: str
+    business_problem: str = Field(min_length=1)
+    evidence: dict = {}
+    required_capabilities: dict = {}
+    budget: dict = {}
+    requested_by: str = Field(min_length=1)
+    trace_id: str = ""
+    created_at: datetime
+
+
+class HiringTransitionIn(BaseModel):
+    to_status: HiringRequestStatus
+    actor: str = Field(min_length=1)
+    at: datetime
+    reason: str | None = None
 
 
 class TransitionRequestIn(BaseModel):
@@ -370,6 +410,29 @@ def _access_request_dict(r: AccessRequest) -> dict:
         "request_id": r.request_id, "agent_id": r.agent_id, "resource_kind": r.resource_kind.value,
         "resource_ref": r.resource_ref, "environment": r.environment.value, "status": r.status.value,
         "expires_at": r.expires_at.isoformat(), "approval_id": r.approval_id,
+        # tool_id/requested_at/justification/requested_by/profile_version_id는
+        # 2026-08-10 Platform/IAM 연동 전까지 응답에 없었다 - 순수 조회 목적으로는
+        # 8개 필드로 충분했기 때문이다. Platform/IAM은 이 값들이 실제로 필요하다
+        # (TOOL 요청은 tool_id 없이 원리적으로 처리 불가, AccessRequest 재구성에는
+        # requested_at이 필수). 기존 필드는 그대로 두고 추가만 한다 - 기존
+        # 호출부는 새 필드를 무시하면 그만이라 하위 호환이 깨지지 않는다.
+        "tool_id": r.tool_id, "profile_version_id": r.profile_version_id,
+        "justification": r.justification, "requested_by": r.requested_by,
+        "requested_at": r.requested_at.isoformat(), "scope": r.scope,
+        "approvals": r.approvals, "trace_id": r.trace_id or None,
+    }
+
+
+def _hiring_request_dict(r: HiringRequest) -> dict:
+    return {
+        "request_id": r.request_id, "department_id": r.department_id,
+        "business_problem": r.business_problem, "evidence": r.evidence,
+        "required_capabilities": r.required_capabilities, "budget": r.budget,
+        "status": r.status.value, "trace_id": r.trace_id,
+        "created_at": r.created_at.isoformat(), "requested_by": r.requested_by,
+        "decided_by": r.decided_by,
+        "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+        "decision_reason": r.decision_reason,
     }
 
 
@@ -417,6 +480,11 @@ if os.environ.get("DATABASE_URL") and PostgresAccessRepository is not None:
     _access_repo = PostgresAccessRepository.connect(os.environ["DATABASE_URL"])
 else:
     _access_repo = InMemoryAccessRepository()
+
+if os.environ.get("DATABASE_URL") and PostgresHiringRequestRepository is not None:
+    _hiring_repo = PostgresHiringRequestRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _hiring_repo = InMemoryHiringRequestRepository()
 
 if os.environ.get("DATABASE_URL") and PostgresImprovementRepository is not None:
     _improvement_repo = PostgresImprovementRepository.connect(os.environ["DATABASE_URL"])
@@ -625,6 +693,29 @@ def request_access(body: AccessRequestIn):
     return _access_request_dict(req)
 
 
+@app.get("/workforce/v1/access-requests")
+def list_access_requests(status: str | None = None):
+    """Platform/IAM이 처리할 작업(status=APPROVED)을 발견하는 유일한 경로.
+
+    Platform/IAM은 HR의 DB에 직접 접속하지 않는다 - 부서 경계는 이 API로 유지한다
+    (PLATFORM_IAM_SPEC.md 2.1·3.3). status 생략 시 전체 상태를 순회해 합친다 -
+    운영 콘솔에서 상태별로 훑어볼 때도 같은 엔드포인트를 쓸 수 있게 한다.
+    """
+    if status is not None:
+        try:
+            statuses = [RequestStatus(status)]
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"알 수 없는 status: {status}")
+    else:
+        statuses = list(RequestStatus)
+    requests = [
+        req
+        for s in statuses
+        for req in _access_repo.list_requests_by_status(s)
+    ]
+    return {"access_requests": [_access_request_dict(r) for r in requests]}
+
+
 @app.post("/workforce/v1/access-requests/{request_id}/approve")
 def approve_access_request(request_id: str, body: ApproveRequestIn):
     req = _access_repo.get_request(request_id)
@@ -666,6 +757,64 @@ def get_agent_access(agent_id: str):
     return {"assignments": [
         _access_assignment_dict(a) for a in _access_repo.list_assignments_by_agent(agent_id)
     ]}
+
+
+# --- 3.6 Hiring Request (HR-00 workforce.hiring_request.propose) -----------------
+
+
+@app.post("/workforce/v1/hiring-requests")
+def request_hiring(body: HiringRequestIn):
+    request_id = str(uuid4())
+    req = HiringRequest(
+        request_id=request_id, department_id=body.department_id,
+        business_problem=body.business_problem, evidence=body.evidence,
+        required_capabilities=body.required_capabilities, budget=body.budget,
+        requested_by=body.requested_by, trace_id=body.trace_id, created_at=body.created_at,
+    )
+    _hiring_repo.save_request(req)
+    return _hiring_request_dict(req)
+
+
+@app.get("/workforce/v1/hiring-requests")
+def list_hiring_requests(status: str | None = None):
+    if status is not None:
+        try:
+            statuses = [HiringRequestStatus(status)]
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"알 수 없는 status: {status}")
+    else:
+        statuses = list(HiringRequestStatus)
+    requests = [
+        req
+        for s in statuses
+        for req in _hiring_repo.list_requests_by_status(s)
+    ]
+    return {"hiring_requests": [_hiring_request_dict(r) for r in requests]}
+
+
+@app.get("/workforce/v1/hiring-requests/{request_id}")
+def get_hiring_request(request_id: str):
+    req = _hiring_repo.get_request(request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"hiring_request {request_id} 없음")
+    return _hiring_request_dict(req)
+
+
+@app.post("/workforce/v1/hiring-requests/{request_id}/transitions")
+def transition_hiring_request(request_id: str, body: HiringTransitionIn):
+    req = _hiring_repo.get_request(request_id)
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"hiring_request {request_id} 없음")
+    try:
+        updated = hiring_transition(
+            req, to_status=body.to_status, actor=body.actor, at=body.at, reason=body.reason
+        )
+    except HiringSelfApprovalError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IllegalHiringTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _hiring_repo.save_request(updated)
+    return _hiring_request_dict(updated)
 
 
 # --- 3.1 Roster / Profile (HR-02) ------------------------------------------------

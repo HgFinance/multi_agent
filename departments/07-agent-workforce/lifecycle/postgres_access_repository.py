@@ -129,6 +129,27 @@ class PostgresAccessRepository(AccessRepository):
         finally:
             self._pool.putconn(conn)
 
+    def list_requests_by_status(self, status: RequestStatus) -> list[AccessRequest]:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select request_id, agent_id, resource_kind, tool_id, resource_ref, scope,
+                           environment, justification, requested_by, expires_at, approval_id,
+                           approvals, status, trace_id, created_at
+                    from workforce.access_requests
+                    where status = %s
+                    order by created_at asc
+                    """,
+                    (status.value,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [self._to_request(r) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
     @staticmethod
     def _to_request(db_row: tuple) -> AccessRequest:
         (request_id, agent_id, resource_kind, tool_id, resource_ref, scope, environment,

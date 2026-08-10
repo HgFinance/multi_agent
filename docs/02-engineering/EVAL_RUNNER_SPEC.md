@@ -5,6 +5,8 @@
 **우선순위**: P0 (신규 채용·개선 흐름의 필수 블로커)  
 **의존성**: 선행 작업 없음 (audit.eval_runs DDL 이미 존재)
 
+> **2026-08-10 갱신**: 아래 요구사항은 구현 완료 확인됨 — `departments/06-ai-qa-audit/eval_runner.py`(EvalRunner/EvalSet/MockToolRegistry/ShadowMemory), `audit/repository.py`의 `PostgresAuditRepository`(`audit.eval_runs`/`eval_results`/`eval_sets` 실제 INSERT·UPDATE), QA API `POST /qa/v1/eval-runs`·`GET /qa/v1/eval-runs/{id}`. 이하 본문은 요구사항 원본이라 남겨두되, "미구현" 서술은 이 갱신 시점 기준 과거 상태다. 남은 공백은 [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md) 참고(후보 Runner의 교차 프로세스 등록 경로 없음).
+
 ---
 
 ## 1. 개요
