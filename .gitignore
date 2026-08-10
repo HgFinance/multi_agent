@@ -63,3 +63,6 @@ departments/01-research/var/
 # 실행 산출물 - 매 실행마다 쌓인다. 리포트는 Notion·DB 에 남으므로 git 은 코드만 본다
 departments/01-research/reports/
 ai-office/*.log
+
+# EB 배포 번들 - scripts/package_eb_bundle.ps1 이 저장소 내용으로 매번 다시 만든다
+dist/

@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
+from typing import Any
 
 # 트레이딩본부 contracts.py를 직접 참조한다. contracts/가 아직 공용 최상위 경계로
 # 분리되지 않았기 때문이며(REPOSITORY_DEPARTMENT_STRUCTURE.md 4절), 그 전까지는
@@ -106,6 +107,9 @@ class Journal:
     # 정정 사유. trace_id에 섞어 넣던 것을 분리했다 - accounting.journals.trace_id는
     # uuid 컬럼이라 사람이 쓴 사유가 거기 들어가면 저장 자체가 안 된다.
     reason: str = ""
+    # Canonical envelope lineage is retained in the existing
+    # accounting.journal_lines.metadata column by the repository.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.lines:
@@ -141,10 +145,26 @@ class Ledger:
         key = (journal.event_type, journal.source_event_id)
         if key in self._posted_sources:
             # 이미 반영된 체결. 재처리에서 흔히 발생하며 두 번 잡히면 잔고가 틀어진다.
-            return next(
+            existing = next(
                 j for j in self.journals
                 if (j.event_type, j.source_event_id) == key and j.reversal_of is None
             )
+            # at-least-once 재전달에서 내용 해시는 같아야 같은 사실이다.
+            incoming_hash = journal.metadata.get("content_hash")
+            existing_hash = existing.metadata.get("content_hash")
+            if incoming_hash and existing_hash and incoming_hash != existing_hash:
+                raise LedgerError(
+                    f"같은 체결 원천의 content_hash가 다릅니다: {journal.source_event_id}"
+                )
+            if (
+                journal.metadata.get("canonical") is True
+                and existing.metadata.get("evidence_class") == "fixture_only"
+            ):
+                raise LedgerError(
+                    f"fixture-only Fill은 canonical event로 승격할 수 없습니다: "
+                    f"{journal.source_event_id}"
+                )
+            return existing
         self.journals.append(journal)
         self._posted_sources.add(key)
         return journal
@@ -185,11 +205,13 @@ class Ledger:
     # -- 분개 규칙 -----------------------------------------------------------
 
     def _journal(self, event_type: str, source_event_id: str, when: datetime,
-                 lines: list[JournalLine]) -> Journal:
+                 lines: list[JournalLine], *, trace_id: str = "",
+                 metadata: dict[str, Any] | None = None) -> Journal:
         return Journal(
             journal_id=uuid4(), fund_id=self.fund_id, book_id=self.book_id,
             event_type=event_type, source_event_id=source_event_id,
             effective_at=when, accounting_date=when.date(), lines=lines,
+            trace_id=trace_id, metadata=dict(metadata or {}),
         )
 
     def post_capital(self, amount: Decimal, when: datetime, source_event_id: str) -> Journal:
@@ -200,7 +222,9 @@ class Ledger:
         ]))
 
     def post_fill(self, fill, side: Side, instrument_id: UUID,
-                  position: Position, when: datetime | None = None) -> Journal:
+                  position: Position, when: datetime | None = None,
+                  *, trace_id: str = "",
+                  metadata: dict[str, Any] | None = None) -> Journal:
         """체결 하나를 균형 잡힌 분개로 변환한다 (팀 가이드 DoD 5번).
 
         매수:  차) 유가증권 + 수수료비용   대) 현금
@@ -247,7 +271,8 @@ class Ledger:
                 debit=-realized if realized < 0 else ZERO,
                 instrument_id=instrument_id)
 
-        return self.post(self._journal("fill", source, when, lines))
+        return self.post(self._journal("fill", source, when, lines,
+                                       trace_id=trace_id, metadata=metadata))
 
     # -- Projection ----------------------------------------------------------
 
