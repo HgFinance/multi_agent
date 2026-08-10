@@ -142,6 +142,7 @@
       "status": "IMPLEMENTED_PAPER",
       "operations": [
         {"method": "GET", "path": "/health"},
+        {"method": "GET", "path": "/health/ready"},
         {"method": "POST", "path": "/investment-cases/{case_id}/paper-orders"},
         {"method": "POST", "path": "/investment-cases/{case_id}/cancel"},
         {"method": "GET", "path": "/trading/v1/market-rules/tick-size"},

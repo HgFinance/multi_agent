@@ -77,8 +77,6 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "fundamental-valuation-worker": ("재무", "실적", "밸류", "가치", "저평가", "고평가"),
     "news-macro-worker": ("뉴스", "금리", "환율", "거시", "경제", "정책"),
     "evidence-rag-worker": ("근거", "출처", "자료", "검증", "인용"),
-    "bull-thesis-worker": ("전망", "강세", "상승", "시장 논리"),
-    "bear-thesis-worker": ("약세", "하락", "하방", "반대 논리"),
     "order-constraint-worker": ("주문", "한도", "제약", "컴플라이언스"),
     "execution-planning-worker": ("체결", "실행", "집행"),
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
@@ -110,7 +108,7 @@ _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     # quant 7명 중 trigger 가 always 인 둘. 나머지 5명은 backtest_request 등
     # 전용 신호가 있을 때만 켜지므로 자유 질의 fallback 에 넣지 않는다.
     "quant": ("strategy-hypothesis-worker", "dataset-feature-worker"),
-    "trading": ("bull-thesis-worker", "bear-thesis-worker"),
+    "trading": (),
     "risk": ("compliance-policy-worker",),
     "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
     "accounting": ("exception-investigation-worker",),
@@ -1102,6 +1100,34 @@ def build_portfolio_recommendation_graph(
                     }
                     for spec in _specs(stage)
                 ]
+                if not no_trigger_reports:
+                    no_trigger_reports = [{
+                        "stage": stage,
+                        "worker_id": "dynamic-alpha-strategy-worker",
+                        "role": "Request-scoped Quant Alpha Strategy evaluator",
+                        "status": "SKIPPED_SAFE",
+                        "skip_reason": "NO_VALID_STRATEGY_BUNDLE",
+                        "execution_reason": "NO_VALID_STRATEGY_BUNDLE",
+                        "attempts": 0,
+                        "output": {
+                            "worker_id": "dynamic-alpha-strategy-worker",
+                            "summary": "No validated Quant Alpha Strategy Bundle was supplied.",
+                            "confidence": 1.0,
+                            "evidence_refs": [],
+                            "escalate": False,
+                            "schema_valid": True,
+                        },
+                        "error": None,
+                        "output_contract": "trading.temporary-strategy-worker.v1",
+                        "input_hash": payload.get("input_hash"),
+                        "binding": False,
+                        "technology": {
+                            "executor": "deterministic_strategy_worker",
+                            "topology": "dynamic_parallel_fan_out_fan_in",
+                            "provider": "none",
+                            "model": "none",
+                        },
+                    }]
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -1163,10 +1189,15 @@ def build_portfolio_recommendation_graph(
             all_live_blocked = bool(reports) and all(
                 item.get("skip_reason") == "LIVE_DATA_NOT_READY" for item in reports
             )
+            all_no_valid_strategy = bool(reports) and all(
+                item.get("skip_reason") == "NO_VALID_STRATEGY_BUNDLE" for item in reports
+            )
             if all_not_requested:
                 department_status = "NOT_REQUESTED"
             elif all_live_blocked:
                 department_status = "BLOCKED"
+            elif all_no_valid_strategy:
+                department_status = "NOT_APPLICABLE"
             elif failed:
                 department_status = "DEGRADED"
             else:
@@ -1175,7 +1206,7 @@ def build_portfolio_recommendation_graph(
                 "department_reports": {
                     stage: {
                         "status": department_status,
-                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED"} else department_status,
+                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED", "NOT_APPLICABLE"} else department_status,
                         "worker_ids": [item["worker_id"] for item in reports],
                         "executed": len(completed),
                         "completed": len(completed),
@@ -1215,7 +1246,7 @@ def build_portfolio_recommendation_graph(
         degraded = [
             stage
             for stage, report in reports.items()
-        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED"}
+        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED", "NOT_APPLICABLE"}
         ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})

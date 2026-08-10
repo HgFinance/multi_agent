@@ -786,9 +786,8 @@ export class Company {
     yield this.allFree([...approvers, ceo]);
     this.unlock([...approvers, ceo]);
 
-    // ⑨ Bull·Bear 토론 -> 대본 작성
+    // ⑨ 대본 작성 (Bull·Bear 토론 연출은 2026-08-10 두 직원이 사라지면서 함께 제거)
     this.phaseIndex = 8;
-    yield* this.debate();
     yield* this.runDept("strategy2", "릴스·캐러셀 대본 집필", 7, "대본 2종 완성했어요. 결론까지 단정형으로 닫았어요.");
 
     this.phaseIndex = 9;
@@ -947,57 +946,6 @@ export class Company {
   }
 
   /** 부서 간 전달 — 직접 걸어가서 말하고 돌아온다 */
-  /** Bull·Bear 리서처가 마주 보고 티격태격한다.
-   *
-   * 서로 헐뜯는 게 아니라 같은 팀이라 말이 편하다 — 근거는 리서치본부 것만 쓰고,
-   * 마지막엔 무효화 조건에 합의한다. TradingAgents의 Bull/Bear 토론 구조를
-   * 화면에서 보이게 만든 것이다.
-   */
-  private *debate() {
-    const bull = this.agents.find((agent) => agent.role === "Bull 리서처");
-    const bear = this.agents.find((agent) => agent.role === "Bear 리서처");
-    if (!bull || !bear) return;
-
-    const rounds: [Agent, string][] = [
-      [bull, "이건 진짜 간다니까? 거래량이 3배야."],
-      [bear, "또 시작이네. 그 거래량 어제 공시 때문이잖아."],
-      [bull, "공시가 이유면 더 좋은 거 아냐?"],
-      [bear, "일회성이면 다음 주에 빠져. 내기할래?"],
-      [bull, "콜. 대신 지면 커피 사기다."],
-      [bear, "좋아. 근데 무효화 조건은 같이 적자."],
-      [bull, "그건 인정. 네 지적이 늘 거기서 맞더라."],
-      [bear, "이번엔 나도 네 쪽이 맞았으면 좋겠어."],
-    ];
-
-    this.lock([bull, bear]);
-    this.stand(bull);
-    this.stand(bear);
-    // 서로 마주 보게 세운다
-    this.goto(bull, { x: bear.home.x - 1, y: bear.home.y + 1 }, "회의 중");
-    yield this.allFree([bull]);
-    bull.facing = "right";
-    bear.facing = "left";
-    this.pushLog("⚔️", "Bull·Bear 리서처 토론 시작 — 같은 근거로 반대 결론을 만든다", "yellow");
-
-    for (const [speaker, line] of rounds) {
-      speaker.anim = "talk";
-      this.say(speaker, line, 2.4);
-      yield 1.5;
-      speaker.anim = "idle";
-    }
-
-    this.pushChat(
-      "staff",
-      bear.name,
-      `${bull.name}님이랑 오늘도 한판 했습니다. 무효화 조건까지는 합의했어요.`,
-    );
-    this.pushLog("🤝", "토론 종료 — 상승·하락 논리와 무효화 조건이 함께 기록됨", "mint");
-    this.sitAtDesk(bull);
-    this.sitAtDesk(bear);
-    yield this.allFree([bull, bear]);
-    this.unlock([bull, bear]);
-  }
-
   private *deliver(fromId: string, toDeptId: string, line: string, reply: string) {
     const from = this.agentById.get(fromId)!;
     const toLead = this.agentById.get(DEPT_LEAD[toDeptId].id)!;
