@@ -42,6 +42,7 @@ from orchestration.contracts.mas import (
 from orchestration.llm_observability import (
     begin_worker_metric,
     end_worker_metric,
+    publish_langfuse_metric,
     publish_metric,
     redacted_trace,
 )
@@ -723,6 +724,13 @@ async def _invoke_worker(
             performance,
             trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
         )
+        # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
+        # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
+        # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
+        publish_langfuse_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -762,6 +770,13 @@ async def _invoke_worker(
         performance = end_worker_metric(metric_token, status="DEGRADED", attempts=0, eval_score=0.0)
         report["performance"] = performance
         publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
+        # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
+        # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
+        # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
+        publish_langfuse_metric(
             performance,
             trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
         )

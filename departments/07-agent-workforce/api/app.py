@@ -88,6 +88,7 @@ from cost import (
     assess_budget,
     build_department_scorecard,
 )
+from observability import INVESTMENT_DEPARTMENT_STAGE, check_idle_agents
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
     AgentNotFoundError,
@@ -930,6 +931,32 @@ def list_quality_snapshots(department_code: str, window_start: datetime, window_
         department_id, window_start=window_start, window_end=window_end,
     )
     return {"quality_snapshots": [_quality_snapshot_dict(s) for s in snapshots]}
+
+
+# --- 3.5b 유휴 Agent 관측 (Langfuse read, DB 비의존) ---------------------------------
+#
+# quality-snapshots 와 달리 DATABASE_URL 이 필요 없다 - Langfuse 를 직접 조회하고,
+# 자격증명이 없거나 조회가 실패해도 501 이 아니라 워커별 UNAVAILABLE 로 응답한다
+# (observability.py check_idle_agents 가 이미 그렇게 접는다). "DB 안 붙었다"와
+# "관측 도구가 꺼져 있다"는 다른 문제라 에러 처리 방식도 다르게 간다.
+
+
+@app.get("/workforce/v1/departments/idle-agents")
+def list_idle_agents(
+    lookback_hours: float = 24.0,
+    idle_threshold_hours: float = 4.0,
+):
+    """6개 투자본부 Worker 전원의 유휴 판정. department_code 필터는 아직 없다 -
+    이 리포트의 소비자(HR 부서장 주간 계획)가 항상 전체를 보기 때문이다."""
+
+    if idle_threshold_hours <= 0:
+        raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
+    reports = check_idle_agents(
+        departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+        lookback_hours=lookback_hours,
+        idle_threshold_hours=idle_threshold_hours,
+    )
+    return {"idle_agents": [r.as_dict() for r in reports]}
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------
