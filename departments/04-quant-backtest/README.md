@@ -62,7 +62,13 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 
 | 경로 | 역할 | 상태 |
 |---|---|---|
-| `agents/strategy_hypothesis_agent.py` | 관측 근거에서 반증 가능한 가설 생성·등록 | 자체 점검 9개 통과 |
+| `agents/strategy_hypothesis_agent.py` | 관측 근거에서 가설 생성·등록 | **은퇴 예정.** 가설 생성은 리서치 소관이다 — 스스로 낸 가설을 스스로 검증하면 생성자·검증자 분리가 무너진다 |
+| **`pipeline/factory_bridge.py`** | Gate 0(어휘·원천·예산·기각이력 4검사)과 환류. `finalize()` 가 적재와 전이를 **한 트랜잭션**으로 묶는다 | 자체 점검 14개 영역, 실전이 확인 |
+| **`pipeline/data_resolution.py`** | 원천 테이블 -> 데이터셋 매니페스트 사상. 사상표를 코드에 박지 않고 `source_versions` 에서 유도하고, **로컬 DB 를 조회해 커버리지를 실측**한다 | 자체 점검 11/11 |
+| **`pipeline/strategy_templates.py`** | 시그널 템플릿 8종 + `PITView`(기준일 초과 데이터를 꺼낼 접근자가 **없다**) | 자체 점검 10개 영역 |
+| **`pipeline/strategy_spec.py`** | 템플릿에 없는 방법론을 위한 코드 작성면. AST 화이트리스트, 코드 해시가 사전등록 지문에 들어간다 | 자체 점검 12개 영역 |
+| **`pipeline/preregistration.py`** | 결과를 보기 전 실질 필드를 불변 지문으로 고정. 수정은 새 시도로만 | 실전 전이 확인 |
+| **`pipeline/config_binding.py`** | 가설 -> 백테스트 config. **읽지 않는 파라미터를 조용히 버리지 않는다** — 무시하면 등록한 가설과 실행한 실험이 달라진다 | 자체 점검 8개 영역 |
 | `pipeline/pit_dataset.py` | Universe·Available Time을 보존한 Dataset Manifest·Partition | 자체 점검 3개 통과, 실제 Dataset 1개 |
 | `pipeline/backtest_runner.py` | t-1 Signal, FIFO 손익, 비용과 재현 Hash | 자체 점검 5개 통과, 실제 Run 3개 |
 | `pipeline/walk_forward.py` | 겹치지 않는 Window와 Fragility 판정 | 자체 점검 6개 통과 |
@@ -128,17 +134,27 @@ python departments/04-quant-backtest/pipeline/experiment_orchestrator.py
 
 ## 남은 작업
 
-- Quant API와 Job Worker를 Docker Compose에 추가한다.
-- Job Request·완료 Event, 재시도, 중복 실행과 재시작 복구 계약을 만든다.
-- `ResearchPacketV2 -> HypothesisSpecV2 -> ExperimentCardV1` Lineage를 연결한다.
-- Preregistration, Trial Ledger와 독립 Robustness Validator를 추가한다.
-- Purge/Embargo를 먼저 구현하고 CPCV·DSR·PBO를 단계적으로 추가한다.
-- Strategy Registry에 Capability, QA, Risk, CEO 승인과 Shadow/Paper 상태를 연결한다.
-- Dataset·Code·Dependency·Seed·Cost Model을 CI에서 같은 결과로 재현한다.
-- 현재 `TESTING` Hypothesis 2개의 종료 조건을 명시하고 고아 Experiment를 방지한다.
-- AI Office에는 Tick 원문이 아니라 Experiment·Candidate Read Model만 제공한다.
-- `QNT-08` Doctrine Profile을 실제 `doctrine-trainer` Worker, Dataset Registry와 Frozen Eval에 연결한다.
-- 인물 Persona가 아닌 `InvestmentDoctrineV1` Fixture부터 구현하고 Fine-tuning은 Need Gate 통과 후 실행한다.
+### 완료 (2026-08-10 실전 관통으로 확인)
+
+계보 연결(`proposal_id` -> `hypothesis_id` -> `experiment_id` -> `outcome_id`),
+사전 등록, Trial Family·DSR·PBO(CSCV), Purge/Embargo, 환류 원자성.
+기획안 1건이 리드 -> 기획 -> 회의론자 -> Gate 0 -> 사전등록 -> 백테스트 -> 종결 -> 환류를
+실제로 통과했다.
+
+### 남은 것 — 실측에서 드러난 순서
+
+1. **형성 창과 보유 기간 분리.** 지금 `lookback_days` 하나에 묶여 있어 12-1 모멘텀 같은
+   표준 사양(252일 형성 / 21일 보유)을 표현할 수 없다. 형성을 늘리면 회전이 같이 떨어지고
+   walk-forward 창이 사라진다 — 실제로 126일 형성에서 창이 0개가 됐다.
+2. **실패한 체인의 복구 경로.** 크래시하면 가설이 `RUNNING` 에 갇히고, 실험은 이미
+   등록돼 재실행이 재현성 계약에 막힌다. 옳은 동작 둘이 겹쳐 교착이 된다 —
+   "기존 실험에서 종결" 명령이 필요하다.
+3. Quant API와 Job Worker를 Docker Compose에 추가한다.
+4. Strategy Registry에 Capability·QA·Risk·CEO 승인과 Shadow/Paper 상태를 연결한다.
+5. Dataset·Code·Dependency·Seed·Cost Model을 CI에서 같은 결과로 재현한다.
+6. AI Office에는 Tick 원문이 아니라 Experiment·Candidate Read Model만 제공한다.
+7. `QNT-08` Doctrine Profile — `InvestmentDoctrineV1` Fixture부터 구현하고 Fine-tuning은
+   Need Gate 통과 후 실행한다.
 
 ## Handoff
 
