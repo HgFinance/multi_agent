@@ -449,32 +449,14 @@ services:
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-research-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/research-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      # Profile 의 env: 가 참조하는 키만. 리서치는 ANTHROPIC 배정(CLAUDE.md) -
-      # 아무 키나 넣지 않는다. 모델은 무료 티어라 없어도 동작한다.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # ▶ Claude 구독 자격 (2026-08-03)
-      #   `claude setup-token` 이 발급하는 **장기 토큰**이다. anthropic provider 의
-      #   자격 해석 순서가 ANTHROPIC_API_KEY -> ANTHROPIC_TOKEN ->
-      #   CLAUDE_CODE_OAUTH_TOKEN 이라, API 키가 비어 있으면 이것이 쓰인다.
-      #
-      #   **~/.claude/.credentials.json 을 마운트하지 않는 이유**: 그 파일의
-      #   accessToken 은 1시간마다 만료되고 갱신 때 refreshToken 이 rotation 된다.
-      #   컨테이너가 갱신하는 순간 호스트의 대화형 세션이 무효가 된다
-      #   (2026-08-02 auth.json 복사로 실제 겪음 - invalid_grant, 네이티브
-      #   설치본까지 로그아웃). setup-token 은 그 세션과 **별도 자격**이라
-      #   서로를 무효화하지 않는다.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      # ▶ Claude Code CLI 프록시 (2026-08-03)
-      #   api.anthropic.com 직접 호출은 '서드파티'라 플랜 한도가 아니라
-      #   extra usage 에서 차감된다(실측 HTTP 400). CLI 로 부르면 Claude
-      #   Code 자신이라 플랜 한도가 적용되므로, 호스트의 프록시를 거친다.
-      #   프록시 기동: python scripts/claude_code_proxy.py --serve
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
-      # Profile 의 mcp_servers.research.headers 가 이 값을 Bearer 로 싣는다
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
+      # provider: 와 auth.json이 실제 Provider를 결정한다(docker-compose.claude.yml 참고).
+      # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
+      # MCP 서버 자체 인증이라 그대로 둔다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
@@ -488,14 +470,10 @@ services:
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Claude Code CLI 프록시 - 리서치와 같은 근거(2026-08-03).
-      # api.anthropic.com 직접 호출은 서드파티라 플랜 한도가 안 쓰인다.
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -624,19 +602,19 @@ services:
     stop_grace_period: 20s
 
   # risk-hermes / qa-hermes: research-hermes/quant-hermes와 같은 패턴 - Hermes는 Backend
-  # Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). env는 CLAUDE.md
-  # 배정표대로 risk는 OPENAI_API_KEY, qa는 ANTHROPIC_API_KEY만 준다(아무 키나 넣지 않는다).
+  # Image에 안 넣고 공식 Image를 별도 Container로 띄운다(계획서 3.1). Provider는 하드코딩
+  # 하지 않는다 - /opt/data/config.yaml(provider:)과 auth.json이 결정한다(Risk/QA 둘 다
+  # Codex 배정, 2026-08-10 확정 매핑).
   risk-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-risk-management:/opt/data
+      - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -649,11 +627,10 @@ services:
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
-      - ${USERPROFILE}/.hermes-qa-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      HERMES_UID: 1000
+      HERMES_GID: 1000
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -699,10 +676,10 @@ services:
     # 여러 부서를 한 화면에 모으지 않는다. 다른 부서를 보려면 그 부서의
     # 디렉터리를 마운트한 대시보드를 따로 띄운다(포트도 따로).
     volumes:
-      - ${USERPROFILE}/.hermes-research-department:/opt/data
+      - /home/ubuntu/.hermes/profiles/research-department:/opt/data
     environment:
-      HERMES_UID: 10000
-      HERMES_GID: 10000
+      HERMES_UID: 1000
+      HERMES_GID: 1000
       HERMES_DASHBOARD_HOST: 0.0.0.0
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
