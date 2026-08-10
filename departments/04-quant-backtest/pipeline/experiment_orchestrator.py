@@ -137,6 +137,10 @@ def robustness_to_status(fragility_verdict: str,
       실력과 운을 못 가린다는 뜻이다.
     """
     v = (fragility_verdict or "").strip().upper()
+    if v == "INSUFFICIENT":
+        # 창이 0개면 강건성을 잰 것이 아니다. 기각도 지지도 아니고 **판정 불가**다 -
+        # 여기서 REJECTED 로 밀면 데이터가 모자란 것을 가설의 죄로 기록하게 된다.
+        return "INCONCLUSIVE"
     if v == "FRAGILE":
         return "REJECTED"
     if v == "ROBUST":

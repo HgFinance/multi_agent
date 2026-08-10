@@ -34,6 +34,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from data_resolution import SOURCE_TABLES
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
 from trial_family import UNIVERSE_VOCAB, family_id, pressure
 
@@ -111,6 +112,21 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"universe_key={universe!r} 가 통제 어휘 밖이다 - "
                  f"사용 가능: {sorted(UNIVERSE_VOCAB)}. 자유 서술은 같은 컨셉을 "
                  f"여러 Family 로 흩어 다중검정 가드를 무력화한다")
+
+    # ①-b 원천 어휘. **접수는 실행 가능성의 약속**인데 여기서 안 보면 가설이
+    #     등록된 뒤 실행 단계에서 죽는다(2026-08-10 실측: 기획자가 DATA_TABLES 에
+    #     `derived_returns`·`cost_scenarios` 같은 **파생 산출물**을 적었다.
+    #     그건 우리가 계산할 것이지 리서치가 요구할 원천이 아니다).
+    req = proposal.get("data_requirements") or {}
+    tables = req.get("tables") if isinstance(req, dict) else None
+    for t in (tables or []):
+        # 설명이 붙어 오는 경우가 흔하다("market_bars 일봉 OHLCV"). 첫 토큰만 본다.
+        name = str(t).strip().split()[0] if str(t).strip() else ""
+        if name not in SOURCE_TABLES:
+            r.reject("UNMAPPED_SOURCE",
+                     f"data_requirements.tables 의 {name!r} 가 원천 어휘 밖이다 - "
+                     f"사용 가능: {sorted(SOURCE_TABLES)}. 파생 지표(수익률·베타·"
+                     f"유동성 분위·비용 시나리오)는 실행면이 원천에서 계산한다")
 
     # ② 시도 압력. 어휘가 안 잡히면 Family 도 못 만든다.
     fam = family_id(_hyp_view(proposal)) if r.ok else ""
@@ -264,7 +280,7 @@ def count_family_trials(conn, trial_family_id: str) -> int:
 
 
 def lessons_from(*, failed_criteria=(), regime_concerns=(),
-                 fragility: str = "") -> list[str]:
+                 fragility: str = "", oos_summary=None) -> list[str]:
     """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
 
     LLM 워커(QNT-04)가 이 위에 서술을 얹을 수 있지만, 얹지 않아도 루프는 돈다 -
@@ -284,6 +300,22 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         out.append("BEAR_FRAGILE")
     if str(fragility).upper() == "FRAGILE":
         out.append("SINGLE_REGIME_ONLY")
+    # ▶ **관문을 못 거쳐도 지표가 말하는 것은 남긴다** (2026-08-10 실측)
+    #   walk-forward 창이 0개라 종결했더니 교훈이 UNDERPOWERED_DATA 하나였다.
+    #   그런데 그 실험은 기준선에 58.83%p 뒤졌다 - 표본이 모자란 것과 별개로
+    #   **이미 아는 사실**이고, 안 남기면 다음 기획안이 같은 사양을 또 낸다.
+    #   failed_criteria 는 릴리스 관문이 만드는데, 관문에 도달 못 하면 비어 있다.
+    oos = {k: v for k, v in (oos_summary or {}).items() if v is not None}
+    if oos.get("excess_return_pct", 0) < 0 or oos.get("information_ratio", 0) < 0:
+        out.append("BASELINE_NOT_BEATEN")
+    if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
+        out.append("BEAR_FRAGILE")
+
+    if str(fragility).upper() == "INSUFFICIENT":
+        # 창이 0개라 강건성을 재지 못했다. "전략이 나쁘다" 가 아니라 **표본이
+        # 사양을 못 받친다** 는 뜻이고, 리서치가 다음 기획에서 창을 줄이거나
+        # 더 긴 이력을 요구해야 할 신호다.
+        out.append("UNDERPOWERED_DATA")
     joined = " ".join(str(c) for c in regime_concerns)
     if "하락장" in joined:
         out.append("BEAR_FRAGILE")
@@ -513,9 +545,89 @@ def _check_gate0_is_deterministic():
     assert gate0(p, **kw).as_dict() == gate0(p, **kw).as_dict()
 
 
+_SQL_REGISTER = """
+insert into quant.hypotheses
+  (title, rationale, expected_edge, falsification_criteria,
+   required_data_products, status, created_by, trace_id, proposal_id, lead_ids,
+   economic_rationale, counterparty, competing_explanation,
+   competing_explanation_codes, skeptic_sign, source_reported_effect)
+values (%s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
+        %s,%s,%s,%s,%s,%s,%s,%s)
+-- 부분 유니크 인덱스(proposal_id is not null)를 쓰므로 같은 술어를 적어야
+-- Postgres 가 그 인덱스를 추론한다. 빠뜨리면 제약이 있어도 못 찾는다.
+on conflict (proposal_id) where proposal_id is not null do nothing
+returning hypothesis_id
+"""
+
+
+def intake_published(conn, *, limit: int = 20) -> list[dict]:
+    """PUBLISHED 기획안을 Gate 0 에 태우고 통과분을 가설로 등록한다.
+
+    ▶ 계수 출처를 섞지 않는다: 시도 횟수는 `quant.experiments`(실행 기록)에서,
+      기각 교훈은 `research.experiment_outcomes`(대조 대상)에서 온다. 한 곳에서
+      세면 미종결 실험을 놓쳐 예산을 넘긴 채 접수한다.
+    """
+    import json as _json
+
+    out: list[dict] = []
+    for prop in fetch_published_proposals(conn, limit=limit):
+        fam = family_id(_hyp_view(prop))
+        gate = gate0(prop,
+                     trials_used=count_family_trials(conn, fam),
+                     past_outcomes=fetch_family_outcomes(conn, fam))
+        rec = {"proposal_id": prop.get("proposal_id"), "gate": gate,
+               "hypothesis_id": None}
+        if gate.ok:
+            row = to_hypothesis_row(prop, gate)
+            cur = conn.cursor()
+            cur.execute(_SQL_REGISTER, (
+                row["title"], row["rationale"], _json.dumps(row["expected_edge"]),
+                _json.dumps(row["falsification_criteria"]),
+                _json.dumps(row["required_data_products"]), row["created_by"],
+                row["proposal_id"], row["lead_ids"], row["economic_rationale"],
+                row["counterparty"], row["competing_explanation"],
+                row["competing_explanation_codes"], row["skeptic_sign"],
+                _json.dumps(row["source_reported_effect"])))
+            got = cur.fetchone()
+            rec["hypothesis_id"] = str(got[0]) if got else None
+        out.append(rec)
+    conn.commit()
+    return out
+
+
+def _cli_intake() -> int:
+    import psycopg2
+
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                           / "01-research" / "collectors"))
+    from source_registry import load_project_env
+
+    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        for rec in intake_published(conn):
+            g = rec["gate"]
+            mark = "접수" if g.ok else "반려"
+            print(f"  [{mark}] {rec['proposal_id']}  family={g.trial_family_id}"
+                  f" trial#{g.trial_number}")
+            for r in (g.reasons or []):
+                print(f"      X {r}")
+            if rec["hypothesis_id"]:
+                print(f"      -> 가설 {rec['hypothesis_id']}")
+            elif g.ok:
+                print("      (이미 등록된 기획안 - 중복 접수 안 함)")
+    finally:
+        conn.close()
+    return 0
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    if "--intake" in sys.argv:
+        raise SystemExit(_cli_intake())
 
     print(f"{MODULE_VERSION} 자체 점검 (DB 없음)")
     _check_clean_proposal_is_accepted();        print("  정상 기획안 접수         OK")

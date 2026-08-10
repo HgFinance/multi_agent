@@ -88,6 +88,24 @@ def _maybe_json(v: str) -> dict:
         return {}
 
 
+def _trial_budget(v) -> int:
+    """시도 예산은 **숫자다.** 서술로 쓰면 다중검정 방어가 계산을 못 한다.
+
+    'medium' 이나 '16개 조합을 사전등록' 같은 값이 실제로 들어왔다(2026-08-10).
+    조합을 여러 개 돌리겠다는 말은 예산이 그만큼 필요하다는 뜻인데, 그걸 숫자로
+    안 적으면 trial_family 가 분모를 못 세고 DSR 이 감가를 못 한다. 그래서
+    조용히 기본값으로 때우지 않고 무엇이 문제인지 말하며 막는다.
+    """
+    s = str(v or "").strip()
+    if not s:
+        return 5
+    if s.isdigit():
+        return int(s)
+    raise ValueError(
+        f"trial_budget 이 숫자가 아니다: {s[:60]!r} - 시도 횟수는 다중검정의 "
+        f"분모라서 서술로 쓸 수 없다. 변형을 N 개 돌릴 계획이면 N 을 적어라")
+
+
 def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
     """같은 리드로 같은 엣지·유니버스를 또 기획하면 같은 기획안이다."""
     blob = json.dumps([sorted(str(x) for x in lead_ids),
@@ -146,7 +164,7 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         data_requirements=DataRequirement(tables=list(tables),
                                           min_history_days=min_days),
         suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
-        trial_budget=int(str(planner.get("TRIAL_BUDGET", "")).strip() or 5),
+        trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
         prior_check=PriorCheck(),
         source_reported_effect=_maybe_json(
             planner.get("SOURCE_REPORTED_EFFECT", "")),
@@ -351,5 +369,60 @@ def _selfcheck() -> int:
     return 1 if [x for x in fails if x] else 0
 
 
+def _cli(argv: list[str]) -> int:
+    """python proposal_intake.py --planner a.txt --skeptic b.txt \
+           --planner-run r1 --skeptic-run r2 [--dry-run]"""
+    def opt(name, default=None):
+        return argv[argv.index(name) + 1] if name in argv else default
+
+    plan_path = opt("--planner")
+    if not plan_path:
+        return _selfcheck()
+
+    import psycopg2
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "collectors"))
+    from source_registry import load_project_env
+
+    planner_text = Path(plan_path).read_text(encoding="utf-8")
+    skeptic_text = Path(opt("--skeptic")).read_text(encoding="utf-8")
+    case_id = opt("--case", f"plan-{datetime.now(timezone.utc):%Y%m%d}")
+
+    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        # 근거 리드는 DB 에서 읽는다 - 에이전트가 댄 id 를 그대로 믿지 않는다.
+        wanted = {i for b in parse_blocks(planner_text, PLANNER_KEYS)
+                  for i in _split(b.get("LEAD_IDS", ""))}
+        leads = load_leads(conn, sorted(wanted))
+        missing = wanted - set(leads)
+        if missing:
+            print(f"  ! DB 에 없는 리드: {', '.join(sorted(missing))}")
+
+        r = intake(planner_text, skeptic_text, case_id=case_id,
+                   planner_run=opt("--planner-run", ""),
+                   skeptic_run=opt("--skeptic-run", ""), leads=leads)
+
+        print(f"{MODULE_VERSION}: 조립 {len(r.proposals)} / 반려 {len(r.rejected)}")
+        for x in r.rejected:
+            print(f"  - {x.title[:44]}: {x.reason}")
+        for p, g in r.proposals:
+            mark = "통과" if g.ok else "차단"
+            print(f"  [{mark}] {p.proposal_id}  {p.edge_type}/{p.universe_key}")
+            for b in g.blockers:
+                print(f"      X {b}")
+            for w in g.warnings:
+                print(f"      ! {w}")
+
+        pub = r.publishable
+        if "--dry-run" in argv or not pub:
+            print(f"  (적재하지 않았다 - 발행 가능 {len(pub)}건)")
+            return 0
+        new, dup = persist(conn, pub)
+        print(f"  적재: 신규 {new} / 중복 {dup}")
+    finally:
+        conn.close()
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(_selfcheck())
+    raise SystemExit(_cli(sys.argv[1:]))

@@ -43,6 +43,16 @@ from strategy_templates import (          # noqa: E402  (같은 디렉터리 모
 MODULE_VERSION = "quant-config-binding-v1"
 
 # 허용 범위. 벗어나면 자르지 않고 거부한다.
+# 실행면이 실제로 읽는 expected_edge 키. **여기 없는 키는 무시가 아니라 거부다.**
+# 기획안이 논문 용어(formation_window_days 등)로 쓰면 조용히 기본값으로 떨어지고,
+# 그러면 등록한 가설과 실행한 실험이 달라진다.
+EDGE_KEYS = frozenset({
+    "type",            # edge_type - 어느 시그널 템플릿인가
+    "universe_key",    # 유니버스
+    "horizon_days",    # 보유/형성 창 -> lookback_days
+    "top_n",           # 상위 N 종목
+})
+
 LIMITS = {
     "lookback_days": (2, 250),      # 1일은 신호가 아니고, 250일 초과는 표본 부족
     "top_n": (5, 100),              # 5 미만은 분산이 안 되고, 100 초과는 지수다
@@ -103,7 +113,11 @@ def bind(hyp: dict, base_config: dict) -> Binding:
         except (TypeError, ValueError):
             b.rejected.append(f"{name}={value!r} 를 정수로 읽을 수 없다")
             return
-        lo, hi = LIMITS.get(name, (None, None))
+        # ▶ 한도는 **값이 들어갈 자리**(target)의 것을 본다. 입력 이름의 것을
+        #   보면 엉뚱한 한도로 막힌다 - horizon_days=126 은 lookback_days(2~250)
+        #   로 들어가는데 holding_horizon(1~120) 한도에 걸려 거부됐다
+        #   (2026-08-10 실측). 6개월 형성 모멘텀은 정상 사양이다.
+        lo, hi = LIMITS.get(target, LIMITS.get(name, (None, None)))
         if lo is not None and not (lo <= v <= hi):
             # ▶ 자르지 않는다. 조용히 자르면 사전등록 지문과 실행 config 가
             #   달라져 같은 문제가 다시 생긴다.
@@ -117,6 +131,18 @@ def bind(hyp: dict, base_config: dict) -> Binding:
     horizon = edge.get("horizon_days") or hyp.get("holding_horizon")
     _take("holding_horizon", horizon, "lookback_days")
     _take("top_n", edge.get("top_n") or hyp.get("top_n"), "top_n")
+
+    # ▶ **읽지 않은 파라미터를 조용히 버리지 않는다** (2026-08-10 실측)
+    #   기획안이 `formation_window_days=42` 를 적었는데 바인더는 `horizon_days`
+    #   만 봐서 전부 무시했고, 실험이 기본값 5일로 돌았다. 그러면 **등록한 가설과
+    #   실제로 돈 실험이 다르고**, 그 성적은 이 가설의 증거가 아니다. 이번에는
+    #   input_hash 가 같아 중복 가드에 걸려 드러났을 뿐, 기본값이 달랐다면
+    #   조용히 엉뚱한 실험이 근거로 남았다.
+    unknown = sorted(k for k in edge if k not in EDGE_KEYS)
+    if unknown:
+        b.rejected.append(
+            f"실행면이 읽지 않는 파라미터가 있다: {unknown} - 무시하고 돌리면 "
+            f"등록한 가설과 실행한 실험이 달라진다. 사용 가능: {sorted(EDGE_KEYS)}")
 
     if b.rejected:
         return b

@@ -246,13 +246,21 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
     (없으면 구버전 호환으로 포함). 제외 수는 n_excluded_short 로 남는다 -
     조용한 절단 금지.
     """
-    assert window_metrics, "창이 0개면 판정할 수 없다"
+    # ▶ **표본이 없으면 판정하지 않는다. 다만 죽지도 않는다.** (2026-08-10 실측)
+    #   126일 형성 창을 634거래일 표본에 태우니 창이 0개가 되어 assert 로
+    #   프로세스가 죽었고, 그 바람에 가설이 RUNNING 에 갇히고 환류도 못 했다.
+    #   판정 불가는 예외가 아니라 **판정 결과**다 - INSUFFICIENT 로 돌려주면
+    #   호출부가 INCONCLUSIVE 로 종결하고 UNDERPOWERED_DATA 를 리서치에 돌려준다.
+    #   ROBUST 로 새지 않는 한 fail-closed 는 유지된다.
+    if not window_metrics:
+        return ({"n_windows": 0}, ["NO_WINDOWS"], "INSUFFICIENT")
     judgeable = [(l, m) for l, m in window_metrics
                  if m.get("test_days") is None or m["test_days"] >= min_test_days]
     excluded = [l for l, m in window_metrics
                 if not (m.get("test_days") is None or m["test_days"] >= min_test_days)]
-    assert judgeable, (f"판정 가능한 창이 없다 (전부 {min_test_days}일 미만) - "
-                       f"표본 없이 판정하지 않는다")
+    if not judgeable:
+        return ({"n_windows": 0, "n_excluded_short": len(excluded)},
+                ["ALL_WINDOWS_TOO_SHORT"], "INSUFFICIENT")
     rets = [m["total_return"] for _, m in judgeable]
     sharpes = [m["sharpe_rf0"] for _, m in judgeable]
     mdds = [m["max_drawdown"] for _, m in judgeable]
@@ -682,13 +690,19 @@ def _check_fragility_rules():
     s3, _f3, v3 = fragility_summary(mixed)
     assert v3 == "ROBUST" and s3["n_windows"] == 2 and s3["n_excluded_short"] == 1
     assert s3["worst_window_mdd"] == -0.06      # 부분창 수치가 판정에 안 들어감
-    try:
-        fragility_summary([("S", {"total_return": 0.0, "sharpe_rf0": 0.0,
-                                  "max_drawdown": 0.0, "test_days": 5})])
-        raise AssertionError("전부 표본 미달인데 판정이 나왔다")
-    except AssertionError as e:
-        if "판정이 나왔다" in str(e):
-            raise
+    # ▶ 표본이 없으면 **강건성 판정을 내지 않는다.** 예외로 죽는 대신
+    #   INSUFFICIENT 를 돌려주지만, ROBUST/FRAGILE 로 새면 안 된다 - 그것이
+    #   이 검사가 지키는 불변이다(죽느냐 마느냐는 호출부 편의고, 표본 없이
+    #   판정이 나오는 것이 진짜 사고다).
+    s4, f4, v4 = fragility_summary(
+        [("S", {"total_return": 0.0, "sharpe_rf0": 0.0,
+                "max_drawdown": 0.0, "test_days": 5})])
+    assert v4 == "INSUFFICIENT", f"전부 표본 미달인데 판정이 나왔다: {v4}"
+    assert s4["n_windows"] == 0 and s4["n_excluded_short"] == 1, s4
+    assert "ALL_WINDOWS_TOO_SHORT" in f4, f4
+
+    s5, f5, v5 = fragility_summary([])
+    assert v5 == "INSUFFICIENT" and "NO_WINDOWS" in f5, (s5, f5, v5)
     # test_days 없는 구버전 입력은 전부 판정 대상 (호환)
     assert fragility_summary(good)[0]["n_excluded_short"] == 0
     print("  Fragility 판정(결정론)  OK")
