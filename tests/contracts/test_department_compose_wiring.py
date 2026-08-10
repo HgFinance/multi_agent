@@ -29,6 +29,22 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertIn("PAPER_DB: ${PAPER_DB:-true}", service)
         self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", service)
 
+    def test_trading_hermes_uses_standard_profile_path(self) -> None:
+        compose = (ROOT / "departments/02-trading/compose.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "${USERPROFILE}/.hermes/profiles/trading-department:/opt/data",
+            compose,
+        )
+        self.assertNotIn(".hermes-trading-department", compose)
+
+        sync_script = (ROOT / "scripts/sync_hermes_profiles.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"', sync_script)
+        self.assertNotIn("HERMES_HOME_PREFIX", sync_script)
+
     def test_accounting_api_defaults_to_durable_paper_mode(self) -> None:
         compose = (ROOT / "departments/05-accounting-portfolio/compose.yaml").read_text(
             encoding="utf-8"
@@ -37,3 +53,13 @@ class DepartmentComposeWiringTests(unittest.TestCase):
 
         self.assertIn("ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}", service)
         self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", service)
+
+    def test_accounting_hermes_uses_standard_profile_path(self) -> None:
+        compose = (ROOT / "departments/05-accounting-portfolio/compose.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "${USERPROFILE}/.hermes/profiles/accounting-portfolio-department:/opt/data",
+            compose,
+        )
+        self.assertNotIn(".hermes-accounting-portfolio-department", compose)
