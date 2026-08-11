@@ -13,6 +13,14 @@ model:
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}  # loaded from .env, not hardcoded
 
+# "all"은 resolve_toolset()이 등록된 모든 toolset을 동적으로 합치는 예약어라 기존
+# 암묵적 전체 접근을 그대로 유지한다 - toolsets: 키가 없으면 기본이 "전체 허용"이지만
+# 일단 이 키를 명시하는 순간 목록 안에 없는 toolset은 전부 빠지는 allowlist가 되므로
+# "all"을 반드시 같이 적어야 한다. kanban_create/kanban_link/kanban_unblock의
+# check_fn(_profile_has_kanban_toolset)이 이 top-level toolsets 리스트에 "kanban"
+# 문자열이 있는지만 본다 (agent.disabled_toolsets가 아니다 - 이 프로필엔 그 키가 없다).
+toolsets: [all, kanban]
+
 agent:
   head_persona: executive-orchestrator
   runtime_personalities_source: workers
