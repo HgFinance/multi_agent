@@ -748,7 +748,7 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
-    mem_limit: 512m
+    mem_limit: 1536m
     cpus: 0.5
     pids_limit: 128
 
