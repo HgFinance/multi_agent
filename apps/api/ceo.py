@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal, InvalidOperation
 
 try:
-    from . import hermes_cli
+    from . import fact_router, hermes_cli
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import fact_router  # type: ignore[no-redef]
     import hermes_cli  # type: ignore[no-redef]
 
 from fastapi import APIRouter, HTTPException
@@ -47,6 +49,51 @@ ENABLE_CEO_CLI = os.getenv("ENABLE_CEO_CLI", "false").strip().lower() in {
 }
 
 
+def _won(value: object) -> str:
+    """원 단위 문자열을 사람이 읽는 형태로. **값을 바꾸지 않는다** - 자리수만 넣는다."""
+    text = str(value or "").strip()
+    if not text:
+        return "(값 없음)"
+    try:
+        return f"{int(Decimal(text)):,}원"
+    except (InvalidOperation, ValueError):
+        return text
+
+
+def _direct_answer_text(direct: dict[str, object]) -> str:
+    """직행 조회 결과를 한국어 한 문단으로. **LLM 을 쓰지 않는다.**
+
+    여기서 요약 모델을 부르면 0.5초짜리가 다시 몇십 초가 되고, 무엇보다
+    숫자가 한 번 더 옮겨 적힌다 - 그 지점에서 값이 틀어지는 것을 실측했다.
+    """
+    if direct.get("unavailable"):
+        return (
+            f"조회하지 못했습니다 — {direct.get('reason')}\n"
+            "본부에 맡기지 않았습니다. 같은 자료가 없어 결과가 같기 때문입니다."
+        )
+    fact = direct.get("fact") or {}
+    assert isinstance(fact, dict)
+    kind = fact.get("kind")
+    observed = fact.get("observed_at", "")
+    if kind == "broker_account":
+        return (
+            f"브로커 계좌 기준입니다({fact.get('environment', '')}).\n"
+            f"- 평가금액 {_won(fact.get('equity'))}\n"
+            f"- 현금 {_won(fact.get('cash'))} · 주문가능 {_won(fact.get('buying_power'))}\n"
+            f"- 보유 종목 {fact.get('position_count')}개\n"
+            f"- 조회시각 {observed}\n"
+            "공식 NAV 가 아니라 브로커 조회값입니다. 원장 확정치와 다를 수 있고, "
+            "차이 자체는 회계본부가 대사로 확인합니다."
+        )
+    if kind == "market_quote":
+        return (
+            f"{fact.get('symbol')} 현재가 {_won(fact.get('price'))} "
+            f"(조회시각 {observed}).\n"
+            "시세 조회값이며 매수·매도 권고가 아닙니다."
+        )
+    return str(fact)
+
+
 def _run_ceo_turn(query: str) -> dict[str, object]:
     """CEO 한 턴. transport 만 다르고 계약은 같다."""
     if CEO_TRANSPORT == "cli":
@@ -66,7 +113,29 @@ PROFILE_TO_DEPARTMENT_CODE: dict[str, str] = {}
 
 @router.post("/ask", operation_id="ceo_query")
 def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
-    """Send a non-binding natural-language query to the CEO Hermes Head."""
+    """Send a non-binding natural-language query to the CEO Hermes Head.
+
+    ▶ 사실 조회는 여기서 끝난다 (2026-08-11)
+      "내 계좌 잔고" 같은 질문은 CEO 를 거치지 않는다. 실측에서 그 한 마디가
+      CEO 라우팅 90~180초 + 부서 5곳(각 3~6분) + 종합을 태우고 5/5 "산출 불가"로
+      끝났다. 같은 입력에 같은 답이 나오는 질문에 LLM 7번을 쓸 이유가 없다.
+      분류는 결정론이고(`fact_router.classify`), **애매하면 에이전트 경로로 간다.**
+    """
+    direct = fact_router.answer(req.query)
+    if direct is not None:
+        # 카드를 만들지 않는다 - 부서가 할 일이 없는 질문이다.
+        return {
+            "schema_version": "ceo.query-result.v1",
+            "department": "ceo-agent",
+            "binding": False,
+            "task": None,
+            "answer": _direct_answer_text(direct),
+            "session_id": None,
+            # 화면이 수치를 여기서 가져가게 하려고 원본을 같이 싣는다.
+            # 에이전트 문장에서 숫자를 옮겨 적지 않는다(로컬 모델이 5억을
+            # "500만 원"으로 옮겨 쓴 것을 실측했다).
+            "direct": direct,
+        }
 
     task = hermes_cli.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
