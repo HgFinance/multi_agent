@@ -250,7 +250,17 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
       없으면 `NOT_VERIFIED` 로 막힌다 - 못 잰 것을 통과로 세지 않는다.
     """
     own_conn = conn is None
-    if own_conn:
+    # ▶ **두 연결은 따로 판단한다** (2026-08-12)
+    #   예전에는 시장 연결을 `if own_conn:` 안에서만 열었다. 그래서 메타 연결을
+    #   주입하는 쪽(experiment_worker)이 부르면 시장 연결이 **통째로 건너뛰어졌고**,
+    #   커버리지를 못 재 전건이 `NOT_RUNNABLE` 로 떨어졌다. 실측: 워커가 집은
+    #   실험 3건이 전부 "시장 DB 연결이 없어 커버리지를 재지 못했다"로 실패.
+    #
+    #   증상이 고약한 이유는 **막는 쪽이 옳게 동작했기 때문**이다 - 못 잰 것을
+    #   통과로 세지 않는다는 규칙은 제대로 지켜졌고, 그래서 로그만 보면 데이터가
+    #   모자란 것처럼 보인다. 실제로는 연결을 안 준 쪽이 문제였다.
+    own_market = market_conn is None
+    if own_conn or own_market:
         import psycopg2
 
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]
@@ -258,8 +268,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         from source_registry import load_project_env
 
         env = load_project_env()
-        conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
-        if market_conn is None and env.get("TIMESCALE_DATABASE_URL"):
+        if own_conn:
+            conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+        if own_market and env.get("TIMESCALE_DATABASE_URL"):
             market_conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"],
                                            connect_timeout=20)
     try:
@@ -543,10 +554,13 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                   "reasons": [f"관문 실행 실패: {type(e).__name__}"]}
         return report
     finally:
+        # **우리가 연 것만 닫는다.** 주입받은 연결을 닫으면 호출부의 다음 작업이
+        # 죽는다(워커는 한 연결로 여러 주문을 돈다). 여는 조건과 닫는 조건이
+        # 다르면 언젠가 한쪽이 새거나 남의 것을 닫는다 - 같은 깃발을 쓴다.
         if own_conn:
             conn.close()
-            if market_conn is not None:
-                market_conn.close()
+        if own_market and market_conn is not None:
+            market_conn.close()
 
 
 def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:

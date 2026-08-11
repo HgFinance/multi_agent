@@ -176,11 +176,42 @@ def _vocab_block() -> str:
     except Exception:  # noqa: BLE001 - 어휘를 못 읽으면 적지 않는다(지어내지 않는다)
         pass
     _ = SourceType
+
+    # ▶ **어휘에 있다고 돌 수 있는 것은 아니다** (2026-08-12 실측)
+    #   EDGE_VOCAB 은 접수 게이트가 받는 이름이고, 실제로 백테스트가 도는 것은
+    #   STRATEGY_CATALOG 에 구현이 등재된 것뿐이다. 둘이 갈린 채로 브리핑에
+    #   EDGE_VOCAB 만 실었더니, 기획자가 `low_volatility` 로 기획안을 냈고
+    #   접수·Gate 0 을 다 통과한 뒤 실험 단계에서 `'low_volatility' 전략 구현
+    #   (STRATEGY_CATALOG 등재 조건)` 으로 죽었다. **못 돌 것을 권한 쪽이 문제다.**
+    #
+    #   마찬가지로 파라미터도 실행면(config_binding.EDGE_KEYS)이 읽는 것만 쓸 수
+    #   있다. 밖의 키를 쓰면 "등록한 가설과 실행한 실험이 달라진다"며 거부되는데,
+    #   기획자는 그 목록을 볼 길이 없었다(실측: signal_window_days 로 거부).
+    runnable = params = ""
+    try:
+        from experiment_orchestrator import STRATEGY_CATALOG  # noqa: PLC0415
+
+        impl = sorted(STRATEGY_CATALOG)
+        runnable = ("\n  ▶ 지금 **실험까지 도는** EDGE_TYPE: "
+                    f"{', '.join(impl)}\n"
+                    "    나머지는 접수는 되지만 실험 단계에서 '전략 구현' 으로 "
+                    "막힌다 - 구현된 것 중에서 고르는 편이 한 주기를 아낀다.")
+    except Exception:  # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
+        pass
+    try:
+        from config_binding import EDGE_KEYS      # noqa: PLC0415
+
+        params = ("\n  SUGGESTED_PARAMS 에 쓸 수 있는 키: "
+                  f"{', '.join(sorted(EDGE_KEYS))}\n"
+                  "    이 밖의 키는 실행면이 읽지 않아 거부된다.")
+    except Exception:  # noqa: BLE001
+        pass
+
     return ("\n[통제 어휘 - 밖의 값은 반려된다]\n"
             f"  EDGE_TYPE    : {', '.join(sorted(EDGE_VOCAB))}\n"
             f"  UNIVERSE_KEY : {', '.join(sorted(UNIVERSE_VOCAB))}\n"
             f"  COMPETING_CODES: {', '.join(c.value for c in CompetingExplanation)}"
-            + sources)
+            + sources + runnable + params)
 
 
 REJECT_PATH = Path.home() / ".factory_autopilot_rejections"
@@ -533,6 +564,109 @@ def _promote(*, dry_run: bool = False) -> int:
     return 0
 
 
+_SQL_NEEDS_EXPERIMENT = """
+select h.hypothesis_id::text, left(h.title, 60)
+  from quant.hypotheses h
+ where h.status = 'PROPOSED'
+   -- 이미 대기·실행 중인 주문이 있으면 다시 넣지 않는다. enqueue 도 막지만,
+   -- 여기서 거르면 매 주기 "거부됨" 이 로그를 채우지 않는다.
+   and not exists (select 1 from quant.experiment_jobs j
+                    where j.hypothesis_id = h.hypothesis_id
+                      and j.status in ('QUEUED','LEASED'))
+ order by h.created_at
+ limit %s
+"""
+
+
+_SQL_RECENT_EXP_FAILURES = """
+select substr(h.title, 1, 60), replace(j.failure_reason, chr(10), ' ')
+  from quant.experiment_jobs j
+  join quant.hypotheses h using (hypothesis_id)
+ where j.status = 'FAILED'
+   and coalesce(j.failure_reason, '') <> ''
+   and j.finished_at >= now() - interval '24 hours'
+ order by j.finished_at desc
+ limit %s
+"""
+
+_SEEN_FAILURES = Path.home() / ".factory_autopilot_exp_failures"
+
+
+def _feed_back_experiment_failures(conn, *, limit: int = 6) -> int:
+    """실험 실패를 **다음 브리핑으로 되돌린다.** 반환: 새로 기록한 수.
+
+    ▶ 왜 필요한가 (2026-08-12 실측)
+      첫 실험 3건이 전부 실패했는데 사유가 하나같이 기획 단계에서 피할 수 있는
+      것이었다: 구현 안 된 전략(`low_volatility`), 실행면이 안 읽는 파라미터
+      (`signal_window_days`), 사상 안 되는 데이터셋. 그런데 그 사유는 퀀트 쪽
+      원장에만 남고 리서치 브리핑에는 실리지 않았다 - **같은 기획안을 다시
+      낼 수밖에 없는 구조였다.**
+
+      브리핑에 통제 어휘를 싣는 것과 "네가 낸 것이 실험에서 이렇게 죽었다"고
+      말해주는 것은 다른 신호다. 앞의 것은 규칙이고 뒤의 것은 결과다.
+    """
+    try:
+        seen = set(_SEEN_FAILURES.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        seen = set()
+    with conn.cursor() as cur:
+        cur.execute(_SQL_RECENT_EXP_FAILURES, (limit,))
+        rows = cur.fetchall()
+    fresh = [(t, r) for t, r in rows if f"{t}\t{r}"[:200] not in seen]
+    if not fresh:
+        return 0
+    record_rejections(
+        [SimpleNamespace(title=f"[실험 실패] {t}", reason=r) for t, r in fresh],
+        stamp="experiment")
+    try:
+        with _SEEN_FAILURES.open("a", encoding="utf-8") as fh:
+            for t, r in fresh:
+                fh.write(f"{t}\t{r}"[:200] + "\n")
+    except OSError as e:
+        # 기록 실패가 발주를 죽이면 안 된다 - 다음 주기에 한 번 더 실릴 뿐이다
+        print(f"      ⚠ 실험 실패 표식 기록 실패: {e}", flush=True)
+    print(f"      실험 실패 {len(fresh)}건을 다음 브리핑으로 되돌린다", flush=True)
+    return len(fresh)
+
+
+def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
+    """PROPOSED 가설을 실험 큐에 넣는다. 반환: 실패 수(0=정상).
+
+    ▶ 왜 결정론이 발주하는가
+      백테스트는 실행이지 판단이 아니다. 에이전트가 돌리면 같은 가설이 부를
+      때마다 다른 창·다른 비용가정을 쓴다. 퀀트 에이전트가 할 일은 나온 결과를
+      해석하는 것이고, 실제로 그 카드는 "읽기만 하고 아무것도 쓰지 않았다"고
+      정직하게 보고했다 - 시킬 수단이 없는 일을 시킨 쪽이 문제였다.
+    """
+    import job_queue                              # noqa: PLC0415 - 경로 주입 뒤
+
+    conn = _conn()
+    try:
+        _feed_back_experiment_failures(conn)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_NEEDS_EXPERIMENT, (limit,))
+            rows = cur.fetchall()
+        if not rows:
+            return 0
+        if dry_run:
+            print(f"  [dry-run] 발주 대상 {len(rows)}건: "
+                  f"{', '.join(t for _, t in rows)[:120]}", flush=True)
+            return 0
+        sent = 0
+        for hid, title in rows:
+            r = job_queue.enqueue(conn, hid, requested_by="factory-autopilot")
+            if r.get("accepted"):
+                sent += 1
+                print(f"      발주 {hid[:8]} <- {title}", flush=True)
+            else:
+                # 조용히 넘기지 않는다 - 왜 안 들어갔는지 남아야 추적된다
+                print(f"      발주 거부 {hid[:8]}: {r.get('reason')}", flush=True)
+        print(f"  발주: 실험 주문 {sent}건", flush=True)
+    finally:
+        conn.close()
+    return 0
+
+
 def cycle(*, dry_run: bool = False) -> int:
     """공장 한 주기. 실패한 부서 수를 돌려준다(0이면 정상)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
@@ -562,6 +696,21 @@ def cycle(*, dry_run: bool = False) -> int:
         fails += _promote(dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 승격 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
+        fails += 1
+
+    # ── 0.6 발주. **여기도 끊겨 있었다** (2026-08-12)
+    #      job_queue.enqueue 를 부르는 곳이 없어서, 가설이 PROPOSED 로 서고도
+    #      실험 큐에는 아무것도 안 들어갔다. 워커(experiment_worker --serve)는
+    #      멀쩡히 있는데 물 주문이 없었다.
+    #
+    #      **실험 실행은 에이전트 일이 아니다.** 백테스트는 결정론이고,
+    #      에이전트가 돌리면 같은 가설이 부를 때마다 다른 수를 쓴다. 퀀트
+    #      카드가 하는 일은 결과에 대한 판단이지 실행이 아니다 - 실제로
+    #      에이전트는 "읽기만 하고 아무것도 쓰지 않았다"고 정직하게 보고했다.
+    try:
+        fails += _dispatch_experiments(dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 발주 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
         fails += 1
 
     # ── 리서치: 다음 기획안 ──
