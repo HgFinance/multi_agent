@@ -242,7 +242,9 @@ class SupervisorDecision:
     retry_count: int = 0
 
 
-def _blocked_decision(state: SupervisorState, child: ChildTaskState) -> SupervisorDecision:
+def _blocked_decision(
+    state: SupervisorState, child: ChildTaskState
+) -> SupervisorDecision | None:
     if child.block_kind in {"needs_input", "user_input", "clarification"} or any(
         token in child.block_reason.casefold()
         for token in ("user input", "clarification", "missing input", "credentials")
@@ -269,6 +271,15 @@ def _blocked_decision(state: SupervisorState, child: ChildTaskState) -> Supervis
             reason="blocked_transient_retry",
         )
     if state.replan_count < state.max_retries:
+        # Do not fan out another replan while the previous replan child is
+        # still active. A later terminal event re-evaluates the full phase
+        # and may legitimately permit the next bounded replan.
+        if any(
+            not sibling.terminal
+            for sibling in state.analysis_children
+            if sibling.task_id != child.task_id
+        ):
+            return None
         assignee = validate_canonical_profile(child.profile)
         return SupervisorDecision(
             SupervisorAction.CREATE_TASK,
@@ -506,7 +517,12 @@ class HermesKanbanClient:
         return process.stdout
 
     def show(self, task_id: str) -> dict[str, Any]:
-        payload = json.loads(self._run(("kanban", "show", task_id, "--json")))
+        try:
+            payload = json.loads(self._run(("kanban", "show", task_id, "--json")))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HermesKanbanCommandError(
+                "hermes kanban show returned invalid JSON"
+            ) from exc
         if not isinstance(payload, dict):
             raise HermesKanbanCommandError("hermes kanban show returned a non-object")
         # Hermes exposes the task row under ``task`` and graph/run projections
@@ -548,7 +564,12 @@ class HermesKanbanClient:
             if initial_status not in {"blocked", "running"}:
                 raise SupervisorValidationError("invalid initial status")
             args.extend(("--initial-status", initial_status))
-        payload = json.loads(self._run(args))
+        try:
+            payload = json.loads(self._run(args))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HermesKanbanCommandError(
+                "hermes kanban create returned invalid JSON"
+            ) from exc
         if not isinstance(payload, dict):
             raise HermesKanbanCommandError("hermes kanban create returned a non-object")
         return payload
@@ -721,7 +742,6 @@ class CeoSupervisorService:
                 decision = self.decider(state)
                 action = decision.action.value if decision is not None else "NONE"
                 if decision is not None and decision.action in {
-                    SupervisorAction.CREATE_TASK,
                     SupervisorAction.REQUEST_USER_INPUT,
                     SupervisorAction.SYNTHESIZE,
                 } and state.has_action(decision.action):
@@ -755,7 +775,11 @@ class CeoSupervisorService:
                         root_id,
                         decision.action.value,
                         decision.target_task_id or decision.reason,
-                        str(decision.retry_count),
+                        str(
+                            state.replan_count
+                            if decision.action == SupervisorAction.CREATE_TASK
+                            else decision.retry_count
+                        ),
                     )
                 )
                 if action_key in self._executed_actions:
@@ -839,6 +863,11 @@ class CeoSupervisorService:
                 parent_task_ids=decision.parent_task_ids or (state.parent_task_id,),
                 idempotency_key=(
                     f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
+                    + (
+                        f":replan-{state.replan_count}"
+                        if decision.action == SupervisorAction.CREATE_TASK
+                        else ""
+                    )
                 ),
             )
 

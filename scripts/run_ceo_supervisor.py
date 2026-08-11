@@ -83,23 +83,26 @@ def watch_events(
     environment: dict[str, str],
     popen_factory: Callable[..., Any] = subprocess.Popen,
 ) -> Iterator[dict[str, object]]:
-    process = popen_factory(
-        [
-            executable,
-            "kanban",
-            "watch",
-            "--kinds",
-            "completed,blocked,gave_up,crashed,timed_out,spawn_failed",
-            "--interval",
-            str(interval),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=None,
-        text=True,
-        env=environment,
-    )
+    try:
+        process = popen_factory(
+            [
+                executable,
+                "kanban",
+                "watch",
+                "--kinds",
+                "completed,blocked,gave_up,crashed,timed_out,spawn_failed",
+                "--interval",
+                str(interval),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WatchProcessError("could not start hermes kanban watch") from exc
     if process.stdout is None:
-        raise RuntimeError("hermes kanban watch did not provide stdout")
+        raise WatchProcessError("hermes kanban watch did not provide stdout")
     saw_stopped = False
     try:
         for line in process.stdout:

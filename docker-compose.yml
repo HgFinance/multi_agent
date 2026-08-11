@@ -55,6 +55,8 @@ services:
     restart: unless-stopped
     environment:
       PYTHONPATH: /app:/app/apps/api
+      ENABLE_AGENT_ASK: "true"
+      ENABLE_KANBAN_TASK_TRACKING: "1"
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
