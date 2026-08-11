@@ -83,7 +83,7 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 - `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
 - `GET /ws/operations`: `agent.status.v1`·sequence 기반 운영 Event
-- `POST /ui/ceo/ask`: 자연어 질의를 CEO Hermes에 전달하고, Hermes CLI가 사용 가능하면 공유 Kanban Task를 생성
+- `POST /ui/ceo/ask`: 기존 `ceo-hermes` API Server로 자연어 질의를 전달하고, BFF의 공식 Hermes CLI로 공유 Kanban root Task를 생성
 - `POST /ui/portfolio-recommendations`: 비구속 포트폴리오 추천 실행
 - `GET /health`, `GET /health/ready`: BFF와 의존성 상태
 

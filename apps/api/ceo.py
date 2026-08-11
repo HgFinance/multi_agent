@@ -7,9 +7,11 @@ try:
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_cli  # type: ignore[no-redef]
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from orchestration.canonical_profiles import canonical_profile_for_department
+
+from apps.api.ceo_hermes_client import ask_ceo
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
@@ -25,10 +27,25 @@ def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
         body=req.query,
         idempotency_key=req.request_id,
     )
-    result = hermes_cli.ask(
-        department="ceo-agent",
-        config="departments/00-ceo-office/hermes/config.yaml",
-        query=req.query,
+    if not task or not task.get("task_id"):
+        # The root task is the durable anchor for the closed-loop workflow.
+        # Never call the CEO after this boundary failed: otherwise the user
+        # receives an answer with no Kanban graph to supervise.
+        raise HTTPException(
+            status_code=503,
+            detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
+        )
+
+    result = ask_ceo(
+        query=(
+            "Closed-loop Kanban context: the durable CEO root task is "
+            f"{task['task_id']}. Use this task as the parent for every "
+            "dynamic child task and keep the workflow closed-loop.\n\n"
+            f"Original user request:\n{req.query}"
+        ),
+        timeout=hermes_cli.timeout_of(
+            "departments/00-ceo-office/hermes/config.yaml"
+        ),
     )
     return {
         "schema_version": "ceo.query-result.v1",

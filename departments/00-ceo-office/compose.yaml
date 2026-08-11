@@ -65,6 +65,12 @@ services:
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Reuse this existing CEO gateway as the authenticated internal API
+      # runtime. No second CEO gateway is started in portfolio-bff.
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: ${CEO_HERMES_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
