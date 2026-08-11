@@ -23,6 +23,7 @@ import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type 
 import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
 import { askCeo } from "./ops/ceoClient";
 import HermesKanbanEmbed from "./ops/HermesKanbanEmbed";
+import CeoCommandPanel from "./ops/CeoCommandPanel";
 import type { LlmPerformanceMetric, OperationsRuntime } from "./ops/readModel";
 import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
 import { canUseSimulation } from "./ops/projectionSource";
@@ -467,7 +468,10 @@ export function DashboardRouteView() {
         </button>
       </div>
       </section>
-      <HermesKanbanEmbed />
+ <div className="dashboard-command-grid">
+  <CeoCommandPanel />
+  <HermesKanbanEmbed />
+ </div>
     </>
   );
 }
@@ -1082,7 +1086,10 @@ function DashboardView({
         </div>
       </header>
 
-      <HermesKanbanEmbed />
+ <div className="dashboard-command-grid">
+  <CeoCommandPanel />
+  <HermesKanbanEmbed />
+ </div>
 
       {portfolioRuntime?.run_id && <PortfolioKanban runtime={portfolioRuntime} result={portfolioResult} observedAt={bffSnapshot?.operations?.observed_at} />}
       {portfolioRuntime?.run_id && <PortfolioResultConsole />}
