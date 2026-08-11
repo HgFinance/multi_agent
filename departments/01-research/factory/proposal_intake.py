@@ -49,7 +49,11 @@ MODULE_VERSION = "research-proposal-intake-v1"
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
                 "FALSIFICATION_TESTS", "DATA_TABLES", "MIN_HISTORY_DAYS",
-                "SUGGESTED_PARAMS", "SOURCE_REPORTED_EFFECT", "TRIAL_BUDGET")
+                "SUGGESTED_PARAMS", "SOURCE_REPORTED_EFFECT", "TRIAL_BUDGET",
+                # 자기서명 경로에서 기획자가 직접 쓰는 반대 가설. 어휘에 없으면
+                # parse_blocks 가 새 키로 안 잡고 **앞 필드 값에 이어붙여** 버린다
+                # - 그러면 그 앞 필드의 뜻까지 바뀐다.
+                "COMPETING_EXPLANATION", "COMPETING_CODES")
 SKEPTIC_KEYS = ("TITLE", "COMPETING_EXPLANATION", "COMPETING_CODES", "VERDICT")
 
 PLANNER_REQUIRED = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
@@ -187,9 +191,28 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             out.rejected.append(Rejected(title, f"필수 항목 없음: {','.join(missing)}"))
             continue
         s = skeptics.get(title)
+        if s is None and (p.get("COMPETING_EXPLANATION") or "").strip():
+            # ▶ **자기서명 경로** (2026-08-11, 재일 결정).
+            #   독립 회의론자를 별도 실행으로 두면 주기가 두 배가 되고, 그 카드가
+            #   막히면 공장이 통째로 선다(실측). 그래서 기획자가 경쟁 설명을 직접
+            #   쓰는 경로를 연다 - 사전등록 시점에 반대 가설을 **적어두는 것**이
+            #   이 필드의 본래 목적이고, 그건 자기서명으로도 지켜진다.
+            #
+            #   **잃는 것은 숨기지 않는다.** 독립 서명이 막던 것은 사후
+            #   스토리텔링(결과를 보고 설명을 갖다 붙이기)이다. 자기서명은 그걸
+            #   못 막으므로 `skeptic_sign` 에 `#self` 를 박아 **원장에서 구분되게**
+            #   한다. 나중에 승격을 판정할 때 이 표식이 있는 기획안은 독립 검토를
+            #   거친 것과 같은 무게로 읽으면 안 된다.
+            s = {"TITLE": title,
+                 "COMPETING_EXPLANATION": p.get("COMPETING_EXPLANATION", ""),
+                 "COMPETING_CODES": p.get("COMPETING_CODES", ""),
+                 "VERDICT": SKEPTIC_PASS}
+            skeptic_run = f"{planner_run}#self"
         if s is None:
-            # 짝이 없으면 회의론자를 안 거친 것이다. 통과시키면 서명이 무의미해진다.
-            out.rejected.append(Rejected(title, "회의론자 검토가 없다"))
+            # 경쟁 설명조차 없으면 반대편을 한 번도 생각하지 않은 것이다.
+            out.rejected.append(
+                Rejected(title, "회의론자 검토도 COMPETING_EXPLANATION 도 없다 - "
+                                "반대 가설을 사전에 적지 않은 기획안은 접수하지 않는다"))
             continue
         try:
             prop = build(p, s, case_id=case_id, planner_run=planner_run,
@@ -346,11 +369,27 @@ def _selfcheck() -> int:
     check("회의론자 기각 존중",
           not r3.proposals and any("통과시키지" in x.reason for x in r3.rejected))
 
-    # 회의론자 검토가 없으면 짝이 안 맞는다
+    # 회의론자도 없고 기획자가 반대 가설도 안 썼으면 반려한다
     r4 = intake(planner, "", case_id="c", planner_run="p", skeptic_run="s",
                 leads=leads)
-    check("검토 없으면 반려",
-          any("회의론자 검토가 없다" in x.reason for x in r4.rejected))
+    check("반대 가설 없으면 반려",
+          any("반대 가설" in x.reason for x in r4.rejected))
+
+    # ▶ 자기서명 경로 (2026-08-11). 회의론자 카드를 없앤 대신 기획자가
+    #   COMPETING_EXPLANATION 을 직접 쓰면 접수한다. **다만 서명에 `#self` 가
+    #   박혀 원장에서 독립 검토와 구분된다** - 승격 판정 때 같은 무게로 읽으면
+    #   안 되므로, 표식이 사라지면 이 점검이 죽는다.
+    #   `_PLANNER` 는 블록이 둘이라(뒤엣것은 일부러 불완전) 끝에 덧붙이면 그
+    #   불완전한 블록에 들어간다 - 첫 블록만 잘라 쓴다.
+    _first = planner.split("TITLE:")[1]
+    self_signed = ("TITLE:" + _first
+                   + "\nCOMPETING_EXPLANATION: 단기 반전이 아니라 유동성 공급"
+                     " 보상일 수 있다\nCOMPETING_CODES: DATA_MINING\n")
+    r4b = intake(self_signed, "", case_id="c", planner_run="p", skeptic_run="s",
+                 leads=leads)
+    check("자기서명 접수됨", bool(r4b.proposals))
+    check("자기서명 표식 남음",
+          bool(r4b.proposals) and r4b.proposals[0][0].skeptic_sign.endswith("#self"))
 
     # 근거 리드가 DB 에 없으면 게이트가 막는다
     r5 = intake(planner, _SKEPTIC, case_id="c", planner_run="p",

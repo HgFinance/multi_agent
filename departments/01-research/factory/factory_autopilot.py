@@ -63,6 +63,9 @@ QUANT_ASSIGNEE = "quant-backtest-department"
 ATTACH_ROOT = Path(os.getenv(
     "KANBAN_ATTACH_ROOT",
     str(Path.home() / ".hermes-shared-kanban" / "kanban" / "attachments")))
+WORKSPACE_ROOT = Path(os.getenv(
+    "KANBAN_WORKSPACE_ROOT",
+    str(Path.home() / ".hermes-shared-kanban" / "kanban" / "workspaces")))
 
 # ▶ **형식을 알려주지 않으면 발행이 0건이다** (2026-08-11 실측).
 #   에이전트는 105초 동안 제대로 된 기획안을 썼는데 마크다운 산문이었고,
@@ -88,9 +91,16 @@ MIN_HISTORY_DAYS: (정수)
 SUGGESTED_PARAMS: {"horizon_days": 20, "top_n": 20}
 SOURCE_REPORTED_EFFECT: {"sharpe": null}
 TRIAL_BUDGET: 5
+COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가 - 구체적으로)
+COMPETING_CODES: (DATA_MINING, COST_UNACCOUNTED, SURVIVORSHIP, REGIME_ARTIFACT 중 해당하는 것을 쉼표로)
 
-필수: TITLE, LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, EDGE_TYPE, UNIVERSE_KEY.
-하나라도 비면 그 기획안은 접수 전에 반려된다."""
+필수: TITLE, LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, EDGE_TYPE, UNIVERSE_KEY,
+      COMPETING_EXPLANATION.
+하나라도 비면 그 기획안은 접수 전에 반려된다.
+
+COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 미리 안 적으면
+나중에 어떤 결과가 나와도 설명이 붙는다 - 그 순간 실험은 검증이 아니라 서사가
+된다. '과적합일 수 있다' 같은 일반론은 아무것도 막지 못하므로 구체적으로 써라."""
 
 SKEPTIC_FORMAT = """\
 [산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
@@ -289,9 +299,14 @@ def _agent_output(task_id: str) -> str:
       "에이전트가 아무것도 안 했다"고 잘못 읽었다.
     """
     parts: list[str] = []
-    folder = ATTACH_ROOT / task_id
-    if folder.is_dir():
-        for f in sorted(folder.iterdir()):
+    # ▶ **작업공간도 본다** (2026-08-11 실측). 에이전트는 산출을 첨부가 아니라
+    #   `workspaces/<task_id>/` 에 쓰기도 한다. 첨부만 읽었더니 수확이 118자짜리
+    #   요약 한 줄만 집어 blocks 0개 -> `발행 0 반려 0` 이 나왔다. 어디에 쓰든
+    #   에이전트가 낸 것은 낸 것이다.
+    for folder in (ATTACH_ROOT / task_id, WORKSPACE_ROOT / task_id):
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.rglob("*")):
             if f.is_file() and f.suffix in {".md", ".txt", ".json"}:
                 try:
                     parts.append(f.read_text(encoding="utf-8", errors="replace"))
@@ -332,31 +347,15 @@ def harvest(*, dry_run: bool = False) -> int:
                   flush=True)
             continue
 
-        sk = _board_rows(
-            "select id, status from tasks where title like ? limit 1",
-            (f"%[회의론자]%{stamp}",))
-        if not sk:
-            # 기획자가 끝났고 산출이 있다 -> 이제 회의론자를 건다. 산출을 본문에
-            # 실어 보내므로 회의론자는 카드만 읽으면 된다(다른 카드를 뒤지게
-            # 하면 못 찾고 빈손으로 완료한다).
-            _create_card(
-                title=f"공장 주기 [회의론자]: 기획안 반증 검토 {stamp}",
-                body=("아래는 같은 주기 기획자가 낸 산출이다. 이것을 **반증**하라.\n\n"
-                      "```\n" + planner_text[:6000] + "\n```\n\n"
-                      + SKEPTIC_FORMAT + "\n\n"
-                      "[규칙]\n"
-                      "- TITLE 은 위 기획안의 제목과 **글자 그대로** 같아야 짝이 맞는다.\n"
-                      "- 네 일은 통과시키는 것이 아니라 무너뜨려 보는 것이다. "
-                      "무너지면 STOP 이 옳은 답이다.\n"
-                      "- 경쟁 설명은 구체적으로 적어라. '과적합일 수 있다' 같은 "
-                      "일반론은 다음 주기에 아무 도움이 안 된다."),
-                assignee=RESEARCH_ASSIGNEE,
-                key=f"factory-skeptic-{stamp}", dry_run=dry_run)
-            continue
-        if sk[0][1] != "done":
-            continue                     # 검토 중 - 다음 주기에 본다
-        skeptic_text = _agent_output(sk[0][0])
-        if not planner_text or not skeptic_text:
+        # ▶ **회의론자 카드를 없앴다** (2026-08-11, 재일 결정).
+        #   별도 실행으로 두면 주기가 두 배가 되고, 그 카드 하나가 막히면 공장이
+        #   통째로 선다(실제로 버려진 카드 하나에 상태기계가 조용히 정지했다).
+        #   경쟁 설명은 기획자가 COMPETING_EXPLANATION 에 직접 쓴다 - 사전등록
+        #   시점에 반대 가설을 적어두는 것이 이 필드의 목적이고 그건 지켜진다.
+        #   `proposal_intake` 가 그 서명에 `#self` 를 박으므로 원장에서 독립 검토와
+        #   구분된다 - 승격 판정 때 같은 무게로 읽으면 안 된다.
+        skeptic_text = ""
+        if not planner_text:
             print(f"  수확: {stamp} 산출물이 비었다 - 건너뛴다", flush=True)
             continue
 
@@ -368,7 +367,10 @@ def harvest(*, dry_run: bool = False) -> int:
             unknown = sorted(wanted - set(leads))
             r = PI.intake(planner_text, skeptic_text,
                           case_id=f"auto-{stamp}",
-                          planner_run=planner_id, skeptic_run=sk[0][0],
+                          # 회의론자가 없으므로 intake 가 자기서명(`#self`)으로
+                          # 채운다. 여기서 가짜 서명을 만들어 넣지 않는다 -
+                          # 그러면 원장에서 독립 검토와 구분이 안 된다.
+                          planner_run=planner_id, skeptic_run=planner_id,
                           leads=leads)
             pub = r.publishable
             if dry_run:
