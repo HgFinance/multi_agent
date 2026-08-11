@@ -113,7 +113,9 @@ case "$MODE" in
     done
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
+    sync_local_skill "research-department" "research/financial-equity-research" "research/financial-equity-research"
     sync_local_skill "quant-backtest-department" "experiment-factory" "quant/experiment-factory"
+    sync_local_skill "quant-backtest-department" "quant/equity-quant-assessment" "quant/equity-quant-assessment"
     retire_legacy_skill "risk-management" "autonomous-ai-agents/hermes-multi-agent-pipelines"
   ;;
   pull)
