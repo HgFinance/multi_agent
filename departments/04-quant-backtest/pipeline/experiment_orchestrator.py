@@ -381,9 +381,16 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   예산을 다 썼다고 다른 하나를 막으면 안 된다.
         #   반대로 파라미터만 바꾼 변형은 같은 Family 다 - 그게 우리가 세려는
         #   다중검정이다.
-        from trial_family import family_id, pressure as fam_pressure
+        from trial_family import family_of_hypothesis_row, pressure as fam_pressure
 
-        fam = family_id(hyp)
+        # ▶ **접수(Gate 0)와 같은 함수로 계산한다**(2026-08-11 실측). 예전엔
+        #   family_id(hyp) 를 그대로 불러 label/baseline 이 빈 문자열로 해시됐고,
+        #   Gate 0 은 기본값을 넣어 해시했다. 같은 기획안이
+        #     접수 fam_42663e9f4b0f8233 / 실행 fam_65a4c7b6f4c75999
+        #   두 값을 가졌다 - 실험은 실행면 값으로 각인되는데 Gate 0 은 접수 값으로
+        #   세니 **count_family_trials 가 영원히 0** 이었고, 시도 예산·DSR 감가·
+        #   기각 교훈 대응이 전부 안 걸렸다.
+        fam = family_of_hypothesis_row(hyp)
         cards: list[dict] = []
         try:
             # ▶ **기록된 배정을 읽는다**(다시 계산하지 않는다). Family 는

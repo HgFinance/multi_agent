@@ -80,6 +80,18 @@ def _snapshot_now() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - 브로커 오류를 빈 값으로 위장하지 않는다
         raise HTTPException(502, f"브로커 조회 실패: {type(exc).__name__}: {exc}"[:400]) from exc
 
+    # ▶ **계좌를 식별 못 했으면 잔고를 주장하지 않는다** (2026-08-11 실측).
+    #   LIVE 자격으로 붙었는데 account_no=None / equity=0 / positions=0 이 예외
+    #   없이 돌아왔고, 사용자에게 "평가금액 0원" 이 **사실로** 나갔다. 계좌가 진짜
+    #   비었는지, 조회가 조용히 실패했는지 이 응답만으로는 구분되지 않는다 -
+    #   구분이 안 되면 단정하지 않는 쪽이 맞다(조회 실패 != 잔고 0).
+    #   계좌번호는 잔고 조회가 성공하면 반드시 따라오는 값이라 이것이 판별자다.
+    if not snap.account_no:
+        raise HTTPException(
+            502,
+            "브로커가 계좌를 식별하지 못했습니다(계좌번호 없음) - 잔고를 "
+            f"0으로 보고하지 않습니다. environment={status.get('environment')}")
+
     return {
         "schema_version": "account.broker-snapshot.v1",
         # 금액은 **문자열**이다. JSON number 는 double 이라 Decimal 이 깨진다

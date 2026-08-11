@@ -481,6 +481,131 @@ def _user_query(state: PortfolioPipelineState) -> str:
     return " ".join(str(state.get("user_profile", {}).get("query", "")).split())
 
 
+_EXPERIMENT_CONTEXT_SQL = """
+select e.experiment_id::text, e.trial_family_id, e.trial_number, e.status,
+       e.code_version, e.cost_model_version, h.title, h.expected_edge,
+       h.falsification_criteria, h.status
+  from quant.experiments e
+  join quant.hypotheses h using (hypothesis_id)
+ where e.status = 'COMPLETED' and e.trial_family_id is not null
+ order by e.created_at desc
+ limit %s
+"""
+
+_EXPERIMENT_METRICS_SQL = """
+select experiment_id::text, split, metric, value
+  from quant.experiment_metrics
+ where experiment_id = any(%s)
+"""
+
+
+def _experiment_context(limit: int = 3) -> dict[str, Any]:
+    """공장이 실제로 돌린 실험을 서비스 답변에 **닿게** 한다.
+
+    ▶ 왜 필요한가 (2026-08-11 실측)
+      퀀트 워커 두 명은 트리거가 `experiment_card`/`strategy_authoring` 인데 서비스
+      payload 에 그 키가 없어서 **사용자 질의에서 한 번도 안 켜졌다**(실행 0명).
+      그런데 부서 보고는 `COMPLETED` 로 나갔고 그 위에서 risk_gate 가 approve 를
+      냈다 - 정량 근거 없이 추천이 나가는 길이었다. 공장은 계속 도는데 그 산출물이
+      사용자에게 닿지 않으면 이 프로젝트의 목적 자체가 성립하지 않는다.
+
+    ▶ 지어내지 않는다
+      실험이 없거나 조회가 실패하면 **빈 dict** 를 돌려준다. 그러면 `should_run` 이
+      워커를 안 켜고, 부서는 NOT_APPLICABLE 로 정직하게 보고된다. 없는 실험을
+      있는 것처럼 만들면 그 위의 모든 판단이 오염된다.
+    """
+    try:
+        import psycopg2
+
+        sys.path.insert(0, str(ROOT / "departments" / "01-research" / "collectors"))
+        from source_registry import load_project_env  # type: ignore[import-not-found]
+
+        conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=10)
+    except Exception as exc:  # noqa: BLE001 - DB 없는 환경에서도 파이프라인은 돈다
+        return {"status": "UNAVAILABLE", "reason": f"{type(exc).__name__}"}
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_EXPERIMENT_CONTEXT_SQL, (int(limit),))
+            rows = cur.fetchall()
+            if not rows:
+                # 공장이 아직 한 바퀴도 안 돌았다 - 없는 근거를 지어내지 않는다
+                return {}
+            ids = [r[0] for r in rows]
+            cur.execute(_EXPERIMENT_METRICS_SQL, (ids,))
+            metrics: dict[str, list[dict[str, Any]]] = {}
+            for exp_id, split, metric, value in cur.fetchall():
+                metrics.setdefault(exp_id, []).append(
+                    {"split": split, "metric": metric, "value": str(value)})
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "UNAVAILABLE", "reason": str(exc)[:200]}
+    finally:
+        conn.close()          # WAL 을 남기지 않는다 - with 는 커밋만 하고 안 닫는다
+
+    cards = [{
+        "experiment_id": r[0],
+        "trial_family_id": r[1],
+        "trial_number": r[2],
+        "experiment_status": r[3],
+        "code_version": r[4],
+        "cost_model_version": r[5],
+        "title": r[6],
+        "expected_edge": r[7],
+        "falsification_criteria": r[8],
+        "hypothesis_status": r[9],
+        # 지표는 **측정된 것만** 싣는다. 없는 지표를 0 으로 채우면 워커가 그
+        # 0 을 "성과 없음" 으로 서술한다 - 미측정과 0 은 다르다.
+        "metrics": metrics.get(r[0], []),
+    } for r in rows]
+
+    return {
+        "schema_version": "quant.experiment-context.v1",
+        "cards": cards,
+        "source": "quant.experiments",
+        # 이 값들은 공장 기록이지 사용자 포트폴리오에 대한 판정이 아니다.
+        "authoritative": False,
+        "note": "완료된 실험 기록이다. 이 종목·이 계좌에 대한 판정이 아니다.",
+    }
+
+
+def _quant_experiment_inputs(state: PortfolioPipelineState) -> dict[str, Any]:
+    """`result-interpretation-worker` 가 요구하는 세 조각.
+
+    **사용자 질의가 있을 때만** 켠다. 질의 없이 도는 배치(적합성 재계산 등)에서까지
+    실험 해석을 붙이면, 아무도 안 물어본 서술이 근거처럼 쌓인다.
+    """
+    if not _user_query(state):
+        return {}
+    ctx = _experiment_context()
+    cards = ctx.get("cards") if isinstance(ctx, Mapping) else None
+    if not cards:
+        # 조회 실패(UNAVAILABLE)든 실험 0건이든 **워커를 켜지 않는다** -
+        # 근거 없이 정량 해석을 시키면 그게 곧 환각이다.
+        return {}
+
+    # 시도 압력은 카드에 이미 기록된 값을 읽는다(다시 계산하지 않는다 -
+    # 계열 배정은 기록된 사실이어야 한다, trial_family 모듈 주석 참고).
+    families: dict[str, int] = {}
+    for c in cards:
+        fam = c.get("trial_family_id")
+        if fam:
+            families[fam] = max(families.get(fam, 0), int(c.get("trial_number") or 0))
+    return {
+        "experiment_card": ctx,
+        "trial_pressure": {
+            "by_family": families,
+            "note": "같은 계열에서 몇 번째 시도인가 - 12번째의 Sharpe 는 1번째와 다르다",
+        },
+        # 국면별 분해는 실험 지표의 split 차원에 들어 있다. 없는 국면을
+        # 지어내지 않고, 측정된 split 만 그대로 넘긴다.
+        "regime_breakdown": {
+            "splits": sorted({m.get("split") for c in cards
+                              for m in c.get("metrics", []) if m.get("split")}),
+            "source": "quant.experiment_metrics",
+        },
+    }
+
+
 def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     suitability = state.get("suitability", {})
     data_context = state.get("data_context", {})
@@ -556,6 +681,12 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
             if _user_query(state)
             else {}
         ),
+        # ▶ 공장 -> 서비스 (2026-08-11 배선). `result-interpretation-worker` 의
+        #   트리거가 `experiment_card` 인데 서비스 payload 에 그 키가 없어 퀀트본부가
+        #   사용자 질의에서 **실행 0명**이었다. 공장이 돈 결과를 여기서 한 번 읽어
+        #   실으면 "우리 실험이 무엇을 말하는가"가 사용자 답변에 닿는다.
+        #   퀀트 단계에서만 조회한다 - 다른 부서는 이 키를 안 본다.
+        **(_quant_experiment_inputs(state) if stage == "quant" else {}),
         # 워커의 input_fields 가 요구하는 나머지 한 조각. 후보가 비어 있으면
         # 빈 목록 그대로 넘긴다 - "보유 없음"과 "조회 못 함"을 구분하려고
         # status 를 같이 싣는다.
@@ -1345,6 +1476,13 @@ def build_portfolio_recommendation_graph(
             all_no_valid_strategy = bool(reports) and all(
                 item.get("skip_reason") == "NO_VALID_STRATEGY_BUNDLE" for item in reports
             )
+            # ▶ 미해결로 남겨둔 것 (2026-08-11 실측, 재일)
+            #   선택된 워커가 0명이면 아래 분기가 전부 `bool(reports)` 에서 거짓이
+            #   되어 else 로 떨어지고, **한 명도 안 돈 부서가 `COMPLETED` 로**
+            #   보고된다. 실제로 리서치·퀀트가 0명인 실행에서 risk_gate 가
+            #   approve/SUITABILITY_MATCHED 를 냈다.
+            #   고치면 전 부서 판정이 바뀌므로 여기서 단독으로 손대지 않는다 -
+            #   부서 상태 어휘의 주인과 합의가 필요하다.
             if all_not_requested:
                 department_status = "NOT_REQUESTED"
             elif all_live_blocked:

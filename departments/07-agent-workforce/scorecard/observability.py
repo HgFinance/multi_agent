@@ -264,8 +264,20 @@ if __name__ == "__main__":
             return self._fixed.get(event_name)
 
     now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
-    active_name = langfuse_worker_event_name(stage="research", worker_id="research-data-worker")
-    idle_name = langfuse_worker_event_name(stage="research", worker_id="microstructure-worker")
+
+    # ▶ 워커 id 를 박아두지 않는다 (2026-08-11 실측). `research-data-worker` 등
+    #   개편 전 이름이 박혀 있어 판정 로직은 멀쩡한데 자체 점검이 KeyError 로
+    #   죽었다 - 이름 변경이 회귀처럼 보이면 진짜 회귀를 못 알아본다.
+    class _NoneReader(LangfuseTraceReader):
+        def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+            return None
+
+    _known = sorted(r.worker_id for r in
+                    check_idle_agents(reader=_NoneReader(), departments=("research",), now=now))
+    assert len(_known) >= 2, f"리서치 워커가 2명 미만이라 이 점검이 성립하지 않는다: {_known}"
+    active_worker, idle_worker = _known[0], _known[1]
+    active_name = langfuse_worker_event_name(stage="research", worker_id=active_worker)
+    idle_name = langfuse_worker_event_name(stage="research", worker_id=idle_worker)
     reader = _FakeReader(
         {
             active_name: now - timedelta(hours=1),
@@ -279,10 +291,11 @@ if __name__ == "__main__":
         now=now,
     )
     by_id = {r.worker_id: r for r in reports}
-    assert by_id["research-data-worker"].status is IdleStatus.ACTIVE, by_id["research-data-worker"]
-    assert by_id["microstructure-worker"].status is IdleStatus.IDLE, by_id["microstructure-worker"]
-    unobserved = [r for r in reports if r.worker_id not in ("research-data-worker", "microstructure-worker")]
-    assert unobserved and all(r.status is IdleStatus.UNOBSERVED for r in unobserved), unobserved
+    assert by_id[active_worker].status is IdleStatus.ACTIVE, by_id[active_worker]
+    assert by_id[idle_worker].status is IdleStatus.IDLE, by_id[idle_worker]
+    unobserved = [r for r in reports if r.worker_id not in (active_worker, idle_worker)]
+    # 워커가 딱 2명이면 나머지가 없다 - 없는 것을 있다고 요구하지 않는다
+    assert all(r.status is IdleStatus.UNOBSERVED for r in unobserved), unobserved
     print(f"  ACTIVE/IDLE/UNOBSERVED 판정 - OK ({len(reports)}개 Worker)")
 
     # reader=None 이고 자격증명도 없으면 전원 UNAVAILABLE - "쉬고 있다"로 오판하지 않는다.

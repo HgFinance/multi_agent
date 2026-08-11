@@ -195,6 +195,37 @@ def register_hypothesis(conn, row: dict) -> str:
     return str(hid)
 
 
+def _register_experiment(conn, hypothesis_id: str, gate) -> str:
+    """이 가설의 실험 행을 든다. **Gate 0 이 준 Family 를 그대로 각인한다.**
+
+    다시 계산하지 않는 것이 핵심이다 - 접수와 실행면이 각자 계산하다가 서로 다른
+    Family 를 써서, 실험은 한쪽에 각인되고 계수는 다른 쪽을 세는 일이 실제로
+    있었다(trial_family.hypothesis_view 주석). 계보는 접수에서 실행으로 **흐른다**.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select dataset_id from quant.dataset_manifests "
+                    "order by created_at desc limit 1")
+        got = cur.fetchone()
+        if got is None:
+            raise RuntimeError("dataset_manifests 가 비었다 - 실험을 등록할 수 없다")
+        cur.execute(
+            """
+            insert into quant.experiments
+              (hypothesis_id, dataset_id, code_version, config, seed,
+               split_policy, cost_model_version, status, input_hash, trace_id,
+               trial_family_id, trial_number, started_at, ended_at)
+            values (%s, %s, %s, %s::jsonb, 0, %s::jsonb, %s, 'COMPLETED', %s, %s,
+                    %s, %s, now(), now())
+            returning experiment_id
+            """,
+            (hypothesis_id, got[0], f"{TAG}-factory-loop",
+             json.dumps({"note": "실증용 - 수치로 전략 판단을 하지 않는다"}),
+             json.dumps({"policy": "single-window", "note": "실증"}),
+             "e2e-cost-v1", f"{TAG}-{hypothesis_id}", hypothesis_id,
+             gate.trial_family_id or None, gate.trial_number))
+        return str(cur.fetchone()[0])
+
+
 def run() -> int:
     print("전략 공장 한 바퀴 실증\n")
     conn = _conn()
@@ -236,12 +267,23 @@ def run() -> int:
               f"skeptic={got[2]} codes={got[3]}")
     _say("4", f"Family {g0.trial_family_id} / 시도 {g0.trial_number} 은 실험 행이 든다")
 
-    # 5. 판정 -> 환류 (실험 실행은 별도 - 여기서는 판정 재료를 가정해 환류를 검증한다)
+    # 5. 실험 등록 -> 판정 -> 환류
+    #
+    # ▶ **실험 행을 실제로 든다**(2026-08-11). 예전엔 experiment_id 를 지어내고
+    #   환류만 적재했는데, 그러면 "이 계열은 기각됐다" 는 판정이 있으면서
+    #   `quant.experiments` 에는 그 계열 행이 0개인 **모순된 상태**가 된다.
+    #   6번은 그 상태를 보고 "실행 0회인 계열" 로 판단해 막지 않았고, 우리는
+    #   게이트가 고장 났다고 읽었다. 실제로 고장 난 것은 실증 대본이었다.
+    #   판정이 있으면 실험도 있어야 한다 - 그게 운영에서 가능한 유일한 상태다.
+    exp_uuid = _register_experiment(conn, hid, g0)
+    _say("5", f"실험 등록 {exp_uuid[:8]} family={g0.trial_family_id} "
+              f"시도={g0.trial_number} (계수에 잡히는 실제 행)")
+
     failed = ["pbo", "min_deflated_sharpe"]
     concerns = ["하락장 평균 수익률 -32.1% - 상승장에서 벌고 하락장에서 토해내는 형태"]
     lessons = lessons_from(failed_criteria=failed, regime_concerns=concerns)
     outcome = build_outcome(
-        experiment_id=f"{TAG}-exp-1", hypothesis_id=hid,
+        experiment_id=exp_uuid, hypothesis_id=hid,
         trial_family_id=g0.trial_family_id, trial_number=g0.trial_number,
         decision="REJECT", failed_criteria=failed, lesson_codes=lessons,
         oos_summary={"pbo": 0.8, "deflated_sharpe": 0.13, "information_ratio": None},
@@ -298,8 +340,16 @@ def run() -> int:
 def cleanup() -> int:
     conn = _conn()
     with conn.cursor() as cur:
-        cur.execute("delete from research.experiment_outcomes where experiment_id like %s",
-                    (f"{TAG}-%",))
+        # ▶ **가설로도 지운다**(2026-08-11). experiment_id 가 지어낸 `e2e-…` 에서
+        #   진짜 UUID 로 바뀌었으므로 접두 검색만으로는 안 걸린다. 환류가 남으면
+        #   다음 실증의 Gate 0 이 이전 판의 교훈을 보고 막는다 - 정리 실패가
+        #   조용히 다음 실행을 오염시키는 그 결함이 다시 생긴다.
+        cur.execute(
+            "delete from research.experiment_outcomes "
+            " where experiment_id like %s"
+            "    or hypothesis_id in (select hypothesis_id::text from quant.hypotheses"
+            "                          where proposal_id like %s)",
+            (f"{TAG}-%", f"{TAG}-%"))
         n1 = cur.rowcount
         # ▶ 자손부터 지운다 (2026-08-11 실측)
         #   hypotheses 를 먼저 지우면 FK 로 막혀 정리가 통째로 실패하고, 그러면

@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 from data_resolution import SOURCE_TABLES
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
-from trial_family import UNIVERSE_VOCAB, family_id, pressure
+from trial_family import UNIVERSE_VOCAB, family_id, hypothesis_view, pressure
 
 MODULE_VERSION = "quant-factory-bridge-v1"
 
@@ -100,13 +100,16 @@ class Gate0Result:
 
 
 def _hyp_view(proposal: dict) -> dict:
-    """기획안 -> trial_family 가 읽는 모양. Family 키는 튜닝값을 안 본다."""
-    return {
-        "expected_edge": {"type": proposal.get("edge_type"),
-                          "universe_key": proposal.get("universe_key")},
-        "label": proposal.get("label") or "forward_return",
-        "baseline": proposal.get("baseline") or "equal_weight_buy_and_hold",
-    }
+    """기획안 -> trial_family 가 읽는 모양. Family 키는 튜닝값을 안 본다.
+
+    ▶ 기본값을 **여기서 정하지 않는다**(2026-08-11). 예전엔 label/baseline 기본값이
+      이 함수에 박혀 있었고 실행면은 그 값을 몰라서, 같은 기획안이 접수와 실행에서
+      서로 다른 Family 를 받았다 - 세는 장부와 각인하는 장부가 갈렸다.
+    """
+    return hypothesis_view(edge_type=proposal.get("edge_type"),
+                           universe_key=proposal.get("universe_key"),
+                           label=proposal.get("label"),
+                           baseline=proposal.get("baseline"))
 
 
 def _horizon_of(proposal: dict) -> int:
