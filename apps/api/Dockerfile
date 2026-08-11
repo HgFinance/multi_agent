@@ -19,16 +19,28 @@ RUN mkdir -p /opt/hermes-cli
 ARG HERMES_AGENT_REF=v2026.8.3
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent \
-    && git -C /tmp/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
-    && git -C /tmp/hermes-agent checkout --detach FETCH_HEAD \
-    && pip install --no-cache-dir /tmp/hermes-agent \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-installer.sh \
+    && UV_UNMANAGED_INSTALL=/usr/local/bin sh /tmp/uv-installer.sh \
+    && git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent \
+    && git -C /opt/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
+    && git -C /opt/hermes-agent checkout --detach FETCH_HEAD \
+    && UV_NO_CONFIG=1 uv pip install --system --no-cache -e "/opt/hermes-agent[all]" \
     && command -v hermes \
+    && test -x /usr/local/bin/hermes \
+    && test "$(command -v hermes)" = /usr/local/bin/hermes \
     && hermes --version \
     && hermes kanban --help >/dev/null \
-    && rm -rf /tmp/hermes-agent /root/.cache/pip /var/lib/apt/lists/*
+    && rm -rf /tmp/uv-installer.sh /root/.cache/uv /var/lib/apt/lists/*
 
 COPY . .
+
+# Keep this check after the application copy so it validates the final image
+# state, including the editable Hermes source retained at /opt/hermes-agent.
+RUN command -v hermes \
+    && test -x /usr/local/bin/hermes \
+    && test "$(command -v hermes)" = /usr/local/bin/hermes \
+    && hermes --version \
+    && hermes kanban --help >/dev/null
 
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
