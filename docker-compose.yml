@@ -448,16 +448,19 @@ services:
   # ▶ 공용 Kanban board(CEO 중심 동적 Task Graph): /home/ubuntu/.hermes/shared-kanban 는
   #   profiles/<부서>와 분리된 전용 디렉터리다(각 컨테이너 /opt/kanban에 마운트) - 8개
   #   본부가 이 하나의 kanban.db를 공유하면서도 서로의 profiles/<부서> auth/config/
-  #   memory는 여전히 못 본다. HERMES_KANBAN_HOME(HERMES_KANBAN_DB 아님)을 쓰는 이유는
-  #   Hermes의 dispatcher 중복 실행 방지용 singleton lock 경로(kanban_home()/"kanban"/
-  #   ".dispatcher.lock")가 HERMES_KANBAN_DB가 아니라 HERMES_KANBAN_HOME(=kanban_home())
-  #   기준이라서다 - DB 파일만 공유하고 HOME을 안 맞추면 컨테이너마다 lock이 따로 생겨
-  #   dispatch_in_gateway 기본값(true)에서 여러 컨테이너가 동시에 dispatch를 돌리다
-  #   WAL 체크포인트가 겹쳐 DB가 깨질 수 있다. HOME을 맞추면 그 singleton lock이 8개
-  #   컨테이너를 실제로 직렬화해서 dispatcher 중복 실행이 막힌다(공식 백스톱, 별도
-  #   daemon 불필요). 최초 기동 전 호스트에 `mkdir -p ~/.hermes/shared-kanban`을
-  #   먼저 해둬야 한다 - 없는 상태로 Docker가 파일 하나만 마운트하면 디렉터리로
-  #   잘못 만들어진다.
+  #   memory는 여전히 못 본다. 최초 기동 전 호스트에 `mkdir -p ~/.hermes/shared-kanban`을
+  #   먼저 해둬야 한다 - 없는 상태로 Docker가 파일 하나만 마운트하면 디렉터리로 잘못
+  #   만들어진다.
+  #
+  # ▶ HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false" - 이 8개 컨테이너의 embedded dispatcher는
+  #   끈다(공식 env override, kanban 설정 자체를 건드리지 않음). 이유는 lock 경합이 아니라
+  #   원천적으로 spawn이 불가능해서다: Hermes dispatcher가 worker를 띄울 때
+  #   `$HERMES_HOME/profiles/<assignee>`를 찾는데(hermes_cli/profiles.py get_profile_dir),
+  #   이 8개 컨테이너는 /opt/data 가 "그 부서 profile 내용 그 자체"라 profiles/ 서브
+  #   디렉터리가 없다 - 그래서 켜놔도 자기 자신에게 할당된 task조차 spawn 못 하고
+  #   skipped_nonspawnable 로 매번 건너뛴다. 그래서 dispatch는 아래 kanban-dispatcher
+  #   전용 컨테이너 하나가 전담한다(8개 profiles/ 전체를 보는 유일한 컨테이너) - 이 8개는
+  #   여전히 kanban_show/list/comment/complete 같은 조회·자기보고 tool만 쓴다.
   research-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-research-hermes
@@ -470,6 +473,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
       # provider: 와 auth.json이 실제 Provider를 결정한다(docker-compose.claude.yml 참고).
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
@@ -493,6 +497,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -636,6 +641,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -654,6 +660,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -730,6 +737,42 @@ services:
     cpus: 0.5
     pids_limit: 128
 
+  # kanban-dispatcher: 8개 부서의 Kanban embedded dispatcher(위 HERMES_KANBAN_DISPATCH_IN_GATEWAY
+  # 참고)를 대신하는 중앙 dispatcher 전용 컨테이너 - 유일하게 dispatch가 켜진 Gateway다.
+  #
+  # ▶ 왜 필요한가: Hermes dispatcher는 task를 spawn할 때 worker subprocess를
+  #   `$HERMES_HOME/profiles/<assignee>`에서 찾는다(hermes_cli/profiles.py get_profile_dir).
+  #   8개 부서 컨테이너는 /opt/data가 "그 부서 profile 내용 자체"라 profiles/ 서브
+  #   디렉터리가 없어서 embedded dispatcher를 켜놔도 자기 자신에게 할당된 task조차
+  #   spawn하지 못하고 skipped_nonspawnable로 건너뛴다. 그래서 8개 profiles/ 전체를
+  #   볼 수 있는 컨테이너 하나가 전담한다.
+  #
+  # ▶ /home/ubuntu/.hermes 전체를 RW로 마운트한다(read-only 아님) - spawn된 worker가 해당
+  #   profile 디렉터리를 자기 HERMES_HOME으로 그대로 써서 session/memory/log/state를
+  #   기록하기 때문이다. 첫 기동 전 호스트에 `mkdir -p ~/.hermes/shared-kanban`이
+  #   먼저 있어야 한다(위 research-hermes 주석 참고 - 없으면 Docker가 디렉터리 대신
+  #   빈 파일을 만든다).
+  #
+  # ▶ 고권한 Infrastructure Component다 - 침해 시 8개 profile의 auth.json/memory/session에
+  #   모두 접근 가능하다. 그래서 ports:를 절대 열지 않는다(외부/호스트에서 직접 접근할
+  #   이유가 없다). security_opt(no-new-privileges) 등 추가 하드닝은 E2E 성공 후
+  #   최소 변경 원칙에 따라 별도로 검토한다.
+  kanban-dispatcher:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-kanban-dispatcher
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+    environment:
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/data/shared-kanban
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
   # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────
   # **기본 `docker compose up` 에서는 뜨지 않는다.** profiles 로 묶어 두었으니
   # `docker compose --profile research-skills up -d` 로만 기동한다 - 검증 전
