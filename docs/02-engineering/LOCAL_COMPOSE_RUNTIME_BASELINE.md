@@ -1,127 +1,137 @@
-# 로컬 통합 Compose Runtime 기준선
+# Local Compose Runtime Baseline
 
-> 기준일: 2026-08-10
->
-> 이 문서는 루트 [`docker-compose.yml`](../../docker-compose.yml)의 현재 로컬 개발·통합 Runtime을 설명한다. 문서에 적힌 서비스 수나 실행 상태가 이 파일과 다르면 Compose 파일과 이 문서를 먼저 확인한다.
+검토 기준: 2026-08-11 (KST)
 
-## 1. 적용 범위
+이 문서는 루트 [`docker-compose.yml`](../../docker-compose.yml)의 실제 로컬 개발·통합 Runtime을 설명한다. 서비스 수·포트·Profile이 이 문서와 다르면 Compose 파일을 먼저 확인하고 문서를 갱신한다.
 
-루트 Compose는 `name: hedgefund`를 사용한다. 같은 머신의 별도 `trading` Compose 프로젝트와는 프로젝트 이름, 컨테이너 이름, 네트워크, 볼륨, 포트를 분리한다. 두 프로젝트의 DB를 공유하지 않는다.
+## 1. 기준과 경계
 
-이 파일은 로컬 개발·통합용이다. Production 배포 토폴로지, Cloud Provider, GPU Model Gateway, Broker Live Credential을 확정하는 문서가 아니다. Production으로 옮길 때는 동일한 서비스·권한 경계를 보존하되, Secret 주입·네트워크·볼륨·관측성·백업·SLO를 별도 배포 설계로 검증한다.
+- Compose project name은 `hedgefund`다.
+- 시장 시계열 DB는 `hedgefund_tsdb_data` named volume과 호스트 포트 `5434`를 사용한다. 다른 `trading` Compose 프로젝트와 DB·Network·Volume을 공유하지 않는다.
+- AWS로 옮길 때도 서비스·권한 경계를 유지하고 Secret·Network·Volume·Backup만 환경에 맞게 바꾼다. AWS Production 토폴로지와 GPU Model Gateway의 목표는 [`FINAL_RUNTIME_ARCHITECTURE.md`](FINAL_RUNTIME_ARCHITECTURE.md)가 다룬다.
+- 포함된 Compose Fragment는 CEO Office, Trading, Accounting/Portfolio, Agent Workforce가 소유한다. Root Compose는 공통 Platform과 Research·Quant·Risk·QA·Dashboard를 조립한다.
+- Frontend는 현재 `ai-office/`를 실행 기준으로 사용한다. Frontend는 BFF와 Hermes Dashboard만 호출하며 Supabase Service Role, Broker·LS Credential, Kanban SQLite를 직접 다루지 않는다.
 
-## 2. Compose 구성
+## 2. 현재 서비스 수
 
-루트 파일은 현재 다음 네 개의 부서 Fragment를 `include`한다.
+`docker compose config --services` 기준 서비스 수는 다음과 같다. Profile을 켜도 기존 서비스가 중복 생성되지 않는다.
 
-| Fragment | 소유 범위 |
-|---|---|
-| `departments/00-ceo-office/compose.yaml` | `governance-api`, `notification-worker`, `ceo-hermes` |
-| `departments/02-trading/compose.yaml` | `trading-api`, `trading-hermes` |
-| `departments/05-accounting-portfolio/compose.yaml` | `accounting-api`, `accounting-hermes` |
-| `departments/07-agent-workforce/compose.yaml` | `workforce-api`, `improvement-worker`, `workforce-hermes` |
-
-Research, 공통 Platform, Risk·QA, Portfolio BFF와 Dashboard의 루트 서비스는 아직 루트 파일이 소유한다. 모든 8개 부서가 Fragment를 갖는다고 문서에 쓰지 않는다.
-
-현재 Compose 병합 결과는 다음과 같다.
-
-| 기동 방식 | Compose 서비스 수 | 의미 |
+| 명령 | 서비스 수 | 추가 서비스 |
 |---|---:|---|
-| `docker compose config --services` | 26 | 기본 서비스. `portfolio`, `dashboard` Profile 제외 |
-| `docker compose --profile portfolio config --services` | 28 | Portfolio BFF·Worker 추가 |
-| `docker compose --profile dashboard config --services` | 27 | 공용 Hermes Dashboard 추가 |
-| `docker compose --profile portfolio --profile dashboard config --services` | 29 | 모든 현재 Profile 포함 |
+| `docker compose config --services` | 30 | 기본 통합 Runtime |
+| `docker compose --profile portfolio config --services` | 32 | `portfolio-bff`, `portfolio-worker` |
+| `docker compose --profile dashboard config --services` | 31 | `hermes-dashboard` |
+| `docker compose --profile portfolio --profile dashboard config --services` | 33 | Portfolio + Dashboard |
+| `docker compose --profile research-skills config --services` | 32 | `paper-search-mcp`, `youtube-transcript-mcp` |
 
-Profile 서비스는 기본 기동에 포함되지 않는다.
+`config --services`는 선언·include·interpolation 검증일 뿐 컨테이너가 실행 중이라는 뜻은 아니다. 실행 여부는 `docker compose ps`, Healthcheck, API smoke test로 확인한다.
 
-## 3. 서비스와 권한 경계
+## 3. 서비스 배치
 
-### 3.1 Research·Quant 및 공통 Platform
+### Market/Data Plane
 
-| 서비스 | 책임 |
+| 서비스 | 역할 |
 |---|---|
-| `timescaledb` | `market` 시계열 DB. named volume `tsdb_data` 사용 |
-| `news-watcher` | NAVER 뉴스 수집·Research 적재 |
-| `ls-realtime` | LS 실시간 호가·체결 수집·TimescaleDB 적재 |
-| `batch-collectors` | 공시·Breadth·Calendar·거시·재무·Corporate Action 등 배치 |
-| `ls-news` | LS NWS 실시간 뉴스 메타 수집 |
-| `market-api` | TimescaleDB Snapshot·Bar·Breadth·DQ read API |
-| `research-api` | Evidence·PIT 조회 API 및 Tool Gateway |
-| `research-mcp` | Research 도구 면. DB 직접 접근 대신 API를 호출 |
-| `research-hermes` | Research 부서 Hermes Supervisor |
-| `quant-hermes` | Quant 부서 Hermes Supervisor |
-| `redis` | Risk·QA 및 향후 공통 Event/Queue Platform. Canonical 원장이 아님 |
+| `timescaledb` | 로컬 시장 시계열 DB. 호스트 `0.0.0.0:5434` → 컨테이너 `5432` |
+| `news-watcher` | NAVER 뉴스 수집 및 Research DB 적재 |
+| `ls-realtime` | LS 실시간 호가·체결 수집 및 TimescaleDB 적재 |
+| `ls-news` | LS NWS 뉴스 메타데이터 수집 |
+| `batch-collectors` | 공시·Breadth·Calendar·거시·재무·Corporate Action 배치 |
+| `market-api` | TimescaleDB Snapshot·Bar·Breadth·DQ Read API. 호스트 `0.0.0.0:8036` |
+| `research-api` | Evidence·PIT Read API. 호스트 `127.0.0.1:8035` |
+| `research-mcp` | Research Tool Gateway. 호스트 포트 미공개 |
+| `paper-search-mcp`, `youtube-transcript-mcp` | Research 방법론 스카우트 도구. `research-skills` Profile 전용 |
 
-TimescaleDB Credential은 Collector와 Research/Quant Data Plane에만 둔다. 다른 본부와 팀원은 `market-api`를 사용한다. `research-mcp`에는 LS Credential을 주지 않는다.
+Collector와 Research Data Plane만 TimescaleDB Credential을 가진다. 다른 부서는 `market-api`와 `research-api`를 사용한다.
 
-### 3.2 Risk·QA
+### Hermes·Kanban Plane
 
-| 서비스 | 책임 |
+| 서비스 | 역할 |
 |---|---|
-| `risk-api` | Pre-trade Risk Check·Trading State·Compliance 조회면 |
-| `risk-hermes` | Risk Supervisor |
-| `audit-api` | Evidence QA·Trace·Tool Permission·Finding 조회면 |
-| `qa-worker` | Risk Decision Event를 QA 수신 이력으로 적재 |
-| `qa-hermes` | AI QA·감사 Supervisor |
+| `ceo-hermes`, `research-hermes`, `quant-hermes`, `trading-hermes` | CEO·Research·Quant·Trading Department Head |
+| `risk-hermes`, `qa-hermes`, `accounting-hermes`, `workforce-hermes` | Risk·QA·Accounting/Portfolio·Agent Workforce Department Head |
+| `kanban-dispatcher` | 공용 Hermes Kanban Dispatcher. 호스트 포트 미공개 |
+| `hermes-dashboard` | Hermes 공식 Dashboard와 Kanban 운영 콘솔. `dashboard` Profile, 호스트 `127.0.0.1:9119` |
 
-Risk Engine이 binding 판정을 소유하고 Risk Agent는 근거와 권고만 만든다. QA는 Risk와 권한을 합치지 않는다.
+8개 Hermes 실행 컨테이너는 각자 `/home/ubuntu/.hermes/profiles/<profile>:/opt/data`와 공용 `/home/ubuntu/.hermes/shared-kanban:/opt/kanban`을 마운트한다. Dashboard는 공용 `/home/ubuntu/.hermes:/opt/data`를 사용하고 `HERMES_KANBAN_HOME=/opt/data/shared-kanban`으로 같은 보드를 명시한다.
 
-### 3.3 Trading·Accounting·CEO·Workforce
+Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제하지 않고 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`을 iframe으로 표시한다. Browser와 BFF는 `kanban.db`를 직접 읽거나 수정하지 않는다.
 
-현재 Compose에 다음 서비스가 선언돼 있다.
+### Domain·Control Plane
 
-| 영역 | API/Worker | Hermes |
-|---|---|---|
-| CEO Office | `governance-api`, `notification-worker` | `ceo-hermes` |
-| Trading | `trading-api` | `trading-hermes` |
-| Accounting/Portfolio | `accounting-api` | `accounting-hermes` |
-| Agent Workforce | `workforce-api`, `improvement-worker` | `workforce-hermes` |
+| 서비스 | 역할 | 호스트 포트 |
+|---|---|---:|
+| `governance-api` | CEO Mandate·Approval·Governance API | `127.0.0.1:8043` |
+| `workforce-api` | Agent Workforce API | `127.0.0.1:8044` |
+| `trading-api` | Paper OMS·Trading Read/Command 경계 | `127.0.0.1:8045` |
+| `accounting-api` | Accounting/Portfolio Read API | `127.0.0.1:8046` |
+| `risk-api` | 결정론 Risk Check·Compliance Read API | `127.0.0.1:8041` |
+| `audit-api` | QA·Evidence·Trace·Finding Read API | `127.0.0.1:8042` |
+| `redis` | Risk·QA·Governance Event Stream 및 공통 Queue | 호스트 포트 미공개 |
+| `qa-worker` | Risk Decision Event를 QA 이력으로 적재 | 호스트 포트 미공개 |
+| `notification-worker` | Governance/Risk/QA 알림 Event 소비 | 호스트 포트 미공개 |
+| `improvement-worker` | Workforce 개선 후보 Event 소비 | 호스트 포트 미공개 |
+| `accounting-ledger-consumer` | Accounting Ledger Event 소비 | 호스트 포트 미공개 |
+| `accounting-close-scheduler` | Accounting Close 작업 스케줄 | 호스트 포트 미공개 |
+| `trading-outbox-relay` | Trading Outbox Event Relay | 호스트 포트 미공개 |
 
-이 선언은 Container·API 연결 상태를 뜻하지, Paper Investment의 전체 폐쇄 루프가 완성됐다는 뜻은 아니다. Order→Risk→Fill→Journal→Position/NAV의 Canonical Row와 Acceptance Scenario는 별도 검증 대상이다.
+### Operator BFF
 
-### 3.4 선택 서비스
+`portfolio-bff`는 `portfolio` Profile에서만 실행하는 `apps/api` FastAPI BFF다. 호스트 `${PORTFOLIO_BFF_PORT:-8001}` → 컨테이너 `8000`으로 게시한다.
 
-| 서비스 | Profile | 책임 |
-|---|---|---|
-| `portfolio-bff` | `portfolio` | Read/advisory BFF. 기본적으로 Worker를 임베드하지 않음 |
-| `portfolio-worker` | `portfolio` | Durable SQLite queue claim worker |
-| `hermes-dashboard` | `dashboard` | 공용 Hermes 운영·Kanban Dashboard. RW Profile 상태를 다루므로 인증 필수 |
+주요 경로:
 
-## 4. 로컬 네트워크·포트
+- `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
+- `GET /ws/operations`: `agent.status.v1`·sequence 기반 운영 Event
+- `POST /ui/ceo/ask`: 기존 `ceo-hermes` API Server로 자연어 질의를 전달하고, BFF의 공식 Hermes CLI로 공유 Kanban root Task를 생성
+- `POST /ui/portfolio-recommendations`: 비구속 포트폴리오 추천 실행
+- `GET /health`, `GET /health/ready`: BFF와 의존성 상태
 
-| 대상 | Host Binding | 정책 |
-|---|---|---|
-| TimescaleDB | `0.0.0.0:5434:5432` | Tailscale 사설망 전제. 공유기 Port Forwarding 금지 |
-| `market-api` | `0.0.0.0:8036:8036` | 팀원 조회용 read API |
-| `research-api` | `127.0.0.1:8035:8035` | 로컬 전용 |
-| `risk-api` | `127.0.0.1:8041:8000` | 로컬 전용 |
-| `audit-api` | `127.0.0.1:8042:8000` | 로컬 전용 |
-| CEO/Trading/Accounting/Workforce API | `127.0.0.1:8043`~`8046` | 로컬 전용 |
-| `portfolio-bff` | `${PORTFOLIO_BFF_PORT:-8001}:8000` | `portfolio` Profile에서만 |
-| `hermes-dashboard` | `127.0.0.1:9119:9119` | `dashboard` Profile에서만. 자체 인증·Tailscale 전제 |
+`/ui/ceo/ask`는 주문·Risk 승인·Ledger Posting을 수행하지 않는다. Agent 응답은 금융 수치의 Source of Truth가 아니며, 수치는 `/ui/snapshot`과 각 Domain API가 소유한다.
 
-TimescaleDB 데이터는 저장소 bind mount가 아닌 named volume에 둔다. `docker compose down`은 데이터를 보존하고, `docker compose down -v`만 볼륨을 삭제한다.
+## 4. AI Office 연결
 
-## 5. 검증 명령
-
-Secret 값을 출력하지 않고 Compose 병합 결과만 확인한다.
+호스트 개발 실행:
 
 ```bash
-docker compose config --services
-docker compose --profile portfolio --profile dashboard config --services
-docker compose config
-docker compose up -d
-docker compose ps
+DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
+NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 \
+NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119 \
+npm --prefix ai-office run dev -- --port 3002
 ```
 
-`config --services` 통과는 선언·include·interpolation 검증이며, 컨테이너가 실제로 실행 중이라는 증거가 아니다. 실제 상태는 `docker compose ps`, healthcheck, API smoke test와 DB 입출력으로 별도 기록한다.
+AI Office의 메인 대표 지시창은 `POST /ui/ceo/ask`를 사용한다. Hermes CLI가 설치되어 있고 `ENABLE_AGENT_ASK=true`일 때 CEO Head 응답을 표시한다. `ENABLE_KANBAN_TASK_TRACKING=true`이면 BFF가 Hermes CLI를 통해 `/home/ubuntu/.hermes/shared-kanban` 보드에 사용자 질의 Task를 기록한다.
+
+Dashboard 화면은 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`에 있는 Hermes 공식 Dashboard를 그대로 표시한다. Dashboard Profile과 자체 인증이 준비되지 않은 경우 AI Office는 연결 안내를 표시하며 자체 가짜 Kanban으로 대체하지 않는다.
+
+## 5. 시작·중지 명령
+
+```bash
+docker compose up -d
+docker compose logs -f timescaledb
+docker compose --profile portfolio up -d
+docker compose --profile dashboard up -d
+docker compose --profile portfolio --profile dashboard up -d
+docker compose ps
+docker compose down       # 컨테이너만 제거, named volume 유지
+docker compose down -v    # 데이터까지 삭제
+```
+
+Dashboard와 Kanban을 처음 쓰는 호스트에서는 먼저 공용 디렉터리를 준비한다.
+
+```bash
+mkdir -p /home/ubuntu/.hermes/shared-kanban
+docker compose --profile dashboard up -d hermes-dashboard kanban-dispatcher
+```
+
+Dashboard는 자체 인증 없이는 운영 화면으로 공개하지 않는다. 공유기 Port Forwarding은 금지하고, 접근 경로는 로컬·Reverse Proxy·승인된 사설망으로 제한한다.
 
 ## 6. 문서 우선순위
 
-1. 루트 `docker-compose.yml` 및 포함된 Fragment
+1. Root Compose와 포함된 Fragment
 2. 이 문서
-3. [`FINAL_RUNTIME_ARCHITECTURE.md`](FINAL_RUNTIME_ARCHITECTURE.md)의 Local Runtime 절
-4. [`DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md`](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)의 목표·이행 계획
-5. [`HEDGE_FUND_MASTER_PLAN.md`](../HEDGE_FUND_MASTER_PLAN.md)의 제품·통제 원칙과 Production 목표
+3. [`FINAL_RUNTIME_ARCHITECTURE.md`](FINAL_RUNTIME_ARCHITECTURE.md)의 목표 Runtime
+4. [`DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md`](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)의 이행 계획
+5. [`HEDGE_FUND_MASTER_PLAN.md`](../HEDGE_FUND_MASTER_PLAN.md)의 제품·통제 원칙
 
-Master Plan이 현재 Compose의 서비스 존재 여부를 직접 재정의하지 않는다. 현재 구현 상태는 [`PROJECT_IMPLEMENTATION_STATUS.md`](../PROJECT_IMPLEMENTATION_STATUS.md)에서 `CONFIG_VERIFIED`, `TEST_VERIFIED`, `RUNTIME_VERIFIED`를 구분해 기록한다.
+Production 목표와 현재 Local 구현을 같은 상태로 표현하지 않는다. 구현 여부는 [`PROJECT_IMPLEMENTATION_STATUS.md`](../PROJECT_IMPLEMENTATION_STATUS.md)의 `CONFIG_VERIFIED`, `TEST_VERIFIED`, `RUNTIME_VERIFIED`를 구분해 기록한다.

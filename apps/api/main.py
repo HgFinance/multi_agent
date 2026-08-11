@@ -75,6 +75,12 @@ finally:
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
 import hermes_cli
+try:
+    from . import ceo
+    from .ceo import router as ceo_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import ceo
+    from ceo import router as ceo_router
 import trading
 from agent_status import agent_status_snapshot
 from command_service import (
@@ -83,8 +89,6 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
-import ceo_intake
-from ceo_intake import router as user_intake_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -136,12 +140,9 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+app.include_router(ceo_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
-# 사용자 입구(`/ui/ask`)는 부서 ask 와 다른 계층이다 - 부서를 고르지 않고 CEO 가
-# 고른다. 그래서 투자 본부 Router 옆이 아니라 별도로 붙인다(마스터플랜 5.6:
-# CEO 는 주문·리스크 승인·원장 권한이 없다 - 여기서 하는 일은 라우팅과 종합뿐).
-app.include_router(user_intake_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
@@ -538,10 +539,9 @@ def health() -> dict:
         "status": "ok",
         "mode": "DEMO",
         "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
-        # 사용자 입구는 부서 ask 와 다른 스위치다(부서를 실제로 돌려 비용이 난다).
-        # 둘을 한 값으로 보이면 "열려 있는 줄 알았다"가 생긴다.
-        "user_intake_enabled": ceo_intake.ENABLE_USER_INTAKE,
-        # 어느 런타임에 붙어 있는지. 로컬 시험(docker)과 AWS(local)를 화면에서 구분한다.
+        # CEO 입구가 어느 런타임에 붙어 있는지. 로컬 시험(cli/docker)과
+        # AWS(api/local)를 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.
+        "ceo_transport": ceo.CEO_TRANSPORT,
         "hermes_exec_mode": hermes_cli.HERMES_EXEC_MODE,
         "departments": [
             "research-department",
@@ -667,9 +667,12 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
             # 평가된 적 없는 장부다. 0원 NAV를 지어내지 않고 그 사실을 알린다.
             raise HTTPException(404, f"book {book_id}의 확정 Snapshot이 없습니다")
         if sections is not None:
+            # 출처는 **실제로 갈아끼운 구간에만** 붙인다. 목록을 손으로 적어두면
+            # 뷰가 구간을 하나 더 내놓거나 덜 내놨을 때 화면이 Scripted Loop 값을
+            # supabase라고 읽는다.
             overrides = {**sections,
                          "book_id": str(chosen),
-                         "sources": {"portfolio": "supabase", "ledger": "supabase"}}
+                         "sources": {name: "supabase" for name in sections}}
 
     snapshot = build_ui_snapshot(
         oms=loop.oms,
@@ -803,11 +806,16 @@ if __name__ == "__main__":
     # 구간마다 출처가 반드시 있다. 트레이딩은 아직 Scripted Loop다(TRD-01 대기).
     # 회계 구간은 DB와 Canonical 장부가 있으면 supabase, 없으면 scripted-loop -
     # 어느 쪽이든 **화면이 출처를 모르는 상태로 나가지 않는다**는 게 계약이다.
-    assert set(snap["sources"]) == {"portfolio", "trading", "ledger"}, snap["sources"]
+    assert set(snap["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
+        snap["sources"]
     assert snap["sources"]["trading"] == "scripted-loop", snap["sources"]
     assert snap["sources"]["portfolio"] == snap["sources"]["ledger"], \
         f"회계 두 구간의 출처가 갈라졌다: {snap['sources']}"
     assert snap["sources"]["portfolio"] in ("supabase", "scripted-loop"), snap["sources"]
+    # 결제 사다리. **원장 현금과 가용 현금이 같은 값으로 나간다** - 화면이 현금을
+    # 두 군데서 다르게 말하면 어느 쪽으로 주문을 잡을지 알 수 없다.
+    assert snap["treasury"]["available_cash"] == snap["portfolio"]["cash"], snap["treasury"]
+    assert snap["treasury"]["buckets"], snap["treasury"]
 
     # 없는 book_id는 404다. 0원 NAV를 지어내지 않는다.
     # (DB가 없으면 book_id가 무시되므로 그때는 200이고, 그 경우도 출처는 전부 DEMO다)
@@ -826,7 +834,9 @@ if __name__ == "__main__":
     def _fake_sections(repo, book_id):
         reads.append(book_id)
         return {"portfolio": {"nav": "12345", "as_of": "2026-08-10T06:00:00+00:00"},
-                "ledger": {"balanced": True, "journal_count": 3}}
+                "ledger": {"balanced": True, "journal_count": 3},
+                "treasury": {"available_cash": "12345", "buckets": [],
+                             "overdue_count": 0, "overdue": []}}
 
     globals()["_repo"] = lambda: object()      # DB가 있는 척 - 뷰 호출은 위에서 가로챈다
     globals()["_default_book_id"] = lambda repo: _BOOK
@@ -839,6 +849,7 @@ if __name__ == "__main__":
         assert wired["book_id"] == str(_BOOK), wired["book_id"]
         assert wired["sources"]["portfolio"] == "supabase"
         assert wired["sources"]["ledger"] == "supabase"
+        assert wired["sources"]["treasury"] == "supabase"
         # 갈아끼우지 않은 구간의 출처는 그대로 남는다
         assert wired["sources"]["trading"] == "scripted-loop", wired["sources"]
         # mode는 여전히 DEMO다. 트레이딩이 Scripted Loop인 한 절반만 진짜다

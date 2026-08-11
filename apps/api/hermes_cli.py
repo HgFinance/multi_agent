@@ -18,15 +18,28 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import yaml
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[2]
+
+try:
+    from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+except ImportError:  # pragma: no cover - `python apps/api/hermes_cli.py` 직접 실행
+    # 스크립트로 직접 돌리면 sys.path[0] 이 apps/api 라 저장소 루트가 안 보인다.
+    # (원래 있던 `from ..orchestration...` 대안은 이 파일이 패키지 안이 아니라
+    #  어떤 경로로도 성립하지 않았다 - 자체 점검을 돌리려면 이쪽이 필요하다.)
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
 
 # Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
 # 권한과 Tool Allowlist가 붙기 전에는 명시적인 로컬 개발 Opt-in 없이는 열지 않는다.
@@ -39,14 +52,16 @@ class AgentAsk(BaseModel):
     """부서 Agent 질의 Body. 부서 이름이 없는 것이 이 계약의 핵심이다."""
 
     query: str = Field(min_length=1, max_length=2000)
+    request_id: str = Field(default_factory=lambda: uuid4().hex, min_length=8, max_length=128)
 
 
-# ▶ 어느 런타임에 붙을 것인가 (2026-08-11 추가)
-#   원래 이 모듈은 BFF 와 Hermes 가 같은 호스트에 있다고 가정했다. 로컬 시험에서는
-#   Hermes 가 부서마다 **컨테이너 안**에 있고 호스트(윈도우)에는 `hermes` 가 없다.
-#   그래서 실행 방식을 env 로 고른다 - AWS 로 올릴 때 `local` 로 두면 원래 동작 그대로다.
-#     HERMES_EXEC_MODE=local  : `hermes -p <profile> ...`         (기본, 지금까지의 동작)
-#     HERMES_EXEC_MODE=docker : `docker exec <컨테이너> hermes ...`
+# ▶ 어느 런타임에 붙을 것인가 (2026-08-11 추가, 로컬 시험용)
+#   이 모듈은 BFF 와 Hermes 가 같은 호스트에 있다고 가정한다. AWS 는 그게 맞지만
+#   로컬 시험에서는 Hermes 가 부서마다 **컨테이너 안**에 있고 호스트(윈도우)에는
+#   `hermes` 가 없다. 그래서 실행 방식을 env 로 고른다 - 기본이 `local` 이라
+#   AWS 동작은 바뀌지 않는다.
+#     HERMES_EXEC_MODE=local  : `hermes -p <profile> ...`          (기본)
+#     HERMES_EXEC_MODE=docker : `docker exec -u hermes <컨테이너> hermes ...`
 #   컨테이너 이름은 프로필 이름에서 짓지 않고 표에 적는다 - 이름 규칙이 어긋난 게
 #   하나라도 있으면(인사팀처럼) 규칙으로 지은 이름은 조용히 틀린 곳에 붙는다.
 HERMES_EXEC_MODE = os.getenv("HERMES_EXEC_MODE", "local").strip().lower()
@@ -58,14 +73,28 @@ PROFILE_CONTAINERS = {
     "quant-backtest-department": "hedgefund-quant-hermes",
     "accounting-portfolio-department": "hedgefund-accounting-hermes",
     "qa-department": "hedgefund-qa-hermes",
-    "workforce-management": "hedgefund-workforce-hermes",
+    # 인사팀만 프로필 이름(hr-department)과 컨테이너 이름이 어긋난다.
+    "hr-department": "hedgefund-workforce-hermes",
 }
+# 카드 생성처럼 부서를 특정하지 않는 kanban 명령을 돌릴 컨테이너.
+KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
 
 
-def argv_for(department: str, tail: list[str]) -> list[str]:
-    """실행 argv 를 만든다. shell 을 거치지 않으므로 사용자 문자열이 안전하다."""
+def argv_for(department: str | None, tail: list[str]) -> list[str]:
+    """실행 argv 를 만든다. shell 을 거치지 않으므로 사용자 문자열이 안전하다.
+
+    `department` 가 None 이면 부서에 매이지 않는 명령(kanban 등)이다.
+
+    ▶ `-u hermes` 는 빼면 안 된다. `docker exec` 는 기본이 root 라, 그렇게 부르면
+      세션·메모리·kanban WAL 파일이 root 소유로 생기고 **그다음부터 정작
+      에이전트(uid 1000)가 자기 파일을 못 쓴다.** 2026-08-11 에 보드 WAL 이
+      root:root 가 돼 부서 워커의 `kanban_complete` 가 전부 실패했다.
+    """
+    binary = os.environ.get("HERMES_BIN", "hermes")
     if HERMES_EXEC_MODE != "docker":
-        return ["hermes", "-p", department, *tail]
+        return [binary, *(["-p", department] if department else []), *tail]
+    if department is None:
+        return ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER, "hermes", *tail]
     container = PROFILE_CONTAINERS.get(department)
     if container is None:
         # 규칙으로 지어내지 않는다. 모르는 부서는 못 부르는 게 맞다.
@@ -73,12 +102,85 @@ def argv_for(department: str, tail: list[str]) -> list[str]:
     # 컨테이너 안에서는 /opt/data 가 그 부서 프로필 자체라 `-p` 를 붙이지 않는다.
     # 붙이면 `/opt/data/profiles/<이름>` 을 다시 찾아 들어가 memory·session 이
     # 부서 본체가 아니라 이름표 디렉터리에 쌓인다.
-    #
-    # ▶ `-u hermes` 는 빼면 안 된다. `docker exec` 는 기본이 root 라, 그렇게 부르면
-    #   세션·메모리·kanban WAL 파일이 root 소유로 생기고 **그다음부터 정작
-    #   에이전트(uid 1000)가 자기 파일을 못 쓴다.** 2026-08-11 에 보드 WAL 이
-    #   root:root 가 돼 부서 워커의 `kanban_complete` 가 전부 실패했다.
     return ["docker", "exec", "-u", "hermes", "-i", container, "hermes", *tail]
+
+
+def create_kanban_task(
+    *,
+    assignee: str,
+    title: str,
+    body: str,
+    idempotency_key: str,
+) -> dict[str, object] | None:
+    """Create a shared-board card through Hermes CLI when available.
+
+    The BFF never opens ``kanban.db`` directly. The Hermes CLI owns the board
+    path and applies the same profile/permission boundary as other Kanban
+    operations. When the CLI is not installed, the caller gets ``None`` and
+    the natural-language query can still use the normal Hermes path.
+    """
+
+    request = CanonicalKanbanTaskRequest(
+        assignee=assignee,
+        title=title,
+        body=body,
+        idempotency_key=idempotency_key,
+    )
+    if os.getenv("ENABLE_KANBAN_TASK_TRACKING", "1").casefold() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+
+    # 부서에 매이지 않는 명령이라 department=None 이다. 로컬(docker) 모드에서는
+    # 컨테이너 안에서 돌아 보드 경로·권한이 에이전트와 같아진다.
+    command = argv_for(None, [
+        "kanban",
+        "create",
+        request.title,
+        "--body",
+        request.body,
+        "--assignee",
+        request.assignee,
+        "--idempotency-key",
+        request.idempotency_key,
+        "--created-by",
+        "ai-office-bff",
+        "--json",
+    ])
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault("HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban"))
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            # 컨테이너 안 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면
+            # 한국어 제목이 깨진 채로 보드에 들어간다.
+            encoding="utf-8", errors="replace",
+            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
+            check=False,
+            cwd=ROOT,
+            env=cli_environment,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    task_id = payload.get("id") or payload.get("task_id")
+    return {
+        "task_id": str(task_id) if task_id else None,
+        "status": str(payload.get("status", "TODO")),
+        "source": "hermes-kanban",
+    }
 
 
 def ask(
@@ -97,7 +199,7 @@ def ask(
     `~/.local/bin`에 생기고 PATH에 없을 수 있으며, 내용도 이 명령 한 줄이다.
 
     `resume` 는 이전 세션을 이어받는다. 사용자 질의 하나가 여러 부서를 거칠 때
-    CEO 가 **자기가 뭘 시켰는지 기억한 채로** 종합해야 하기 때문이다(`ceo_intake`).
+    CEO 가 **자기가 뭘 시켰는지 기억한 채로** 종합해야 하기 때문이다.
 
     `enabled` 는 어느 스위치가 이 호출을 허가했는지 호출자가 명시하는 자리다.
     기본은 지금까지처럼 `ENABLE_AGENT_ASK` 다.
@@ -109,10 +211,10 @@ def ask(
         )
 
     # ▶ 기본은 부서 Profile 의 `agent.timeout_seconds` 다. 그 값은 **한 번 묻고 한 번
-    #   답하는** 조회용으로 잡혀 있다(CEO 는 30초). 사용자 입구의 라우팅·종합 턴은
-    #   도구를 여러 번 부르는 다른 작업이라 같은 초를 쓰면 매번 잘린다
-    #   (2026-08-11 실측: 30초에서 CEO 라우팅이 통째로 끊겼다). 그래서 그런 호출은
-    #   자기 timeout 을 명시한다 - 저장소의 부서 설정을 건드리지 않으려는 것이다.
+    #   답하는** 조회용으로 잡혀 있다(CEO 는 30초). 카드를 만들며 도구를 여러 번
+    #   부르는 라우팅·종합 턴은 같은 초를 쓰면 매번 잘린다 - 2026-08-11 실측에서
+    #   CEO 라우팅은 90~180초가 걸렸고 30초에서 통째로 끊겼다(그러고도 카드는 이미
+    #   만들어져 부서들이 실행됐다). 그래서 그런 호출은 자기 timeout 을 명시한다.
     timeout = timeout_of(config) if timeout is None else timeout
     tail = ["chat", "-Q"]
     if resume:
@@ -143,9 +245,9 @@ def ask(
 
     return {
         "department": department,
-        # -Q 여도 stdout 에 박스 테두리가 한 줄 섞여 나온다(2026-08-11 실측:
-        # `┌─ Reasoning ───┐` 머리글만 stdout, 본문은 stderr). 그대로 두면
-        # 사용자 화면에 테두리 문자가 찍힌다.
+        # -Q 여도 stdout 에 터미널 chrome 과 추론 스트림이 섞여 나온다
+        # (2026-08-11 실측). 그대로 두면 사용자 화면에 테두리 문자와
+        # `**Planning ...**` 이 찍힌다.
         "answer": clean_answer(proc.stdout),
         # 어느 Hermes Session이 이 문장을 만들었는지. 감사 추적에 필요하다.
         "session_id": session_id_of(proc.stderr or ""),
@@ -218,19 +320,18 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
         "13\n"
     )
     assert clean_answer(real) == "13", repr(clean_answer(real))
-    # 추론이 없으면 그대로
     assert clean_answer("\n입구 연결 확인\n") == "입구 연결 확인"
     # 답변 안의 굵은 제목은 지우지 않는다 - 본문이 시작된 뒤엔 스트립을 멈춘다
     kept = clean_answer("┌─ Reasoning ─┐\n**Thinking**\n결론입니다.\n**요약**\n- 한 줄\n")
     assert kept == "결론입니다.\n**요약**\n- 한 줄", repr(kept)
-    # 표 문자는 살린다
     assert clean_answer("| a | b |\n│ 표 │ 유지 │\n") == "| a | b |\n│ 표 │ 유지 │"
 
-    # 컨테이너 모드에서 모르는 프로필은 이름을 지어내지 않고 거절한다
+    # 컨테이너 모드: 부서 호출은 그 부서 컨테이너로, kanban 은 공용 컨테이너로
     saved = HERMES_EXEC_MODE
     try:
         globals()["HERMES_EXEC_MODE"] = "docker"
         assert argv_for("ceo-agent", ["chat"])[:5] == ["docker", "exec", "-u", "hermes", "-i"]
+        assert argv_for(None, ["kanban", "create"])[5] == KANBAN_CLI_CONTAINER
         try:
             argv_for("없는-부서", ["chat"])
         except HTTPException:
@@ -239,6 +340,14 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             raise AssertionError("모르는 프로필인데 argv 를 만들었다")
     finally:
         globals()["HERMES_EXEC_MODE"] = saved
+    # local 모드는 예전 동작 그대로여야 한다(AWS 가 이 경로다)
+    assert argv_for("ceo-agent", ["chat"])[:3] == ["hermes", "-p", "ceo-agent"]
+
+    # 부서 이름표가 정본과 어긋나지 않는가
+    from orchestration.canonical_profiles import CANONICAL_PROFILES
+    assert set(PROFILE_CONTAINERS) == set(CANONICAL_PROFILES), (
+        set(PROFILE_CONTAINERS) ^ set(CANONICAL_PROFILES)
+    )
 
     assert session_id_of("session_id: 20260811_x\n") == "20260811_x"
     assert session_id_of("아무것도 없음") is None

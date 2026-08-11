@@ -175,7 +175,114 @@ docker compose --profile dashboard up -d
 
 ---
 
-## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개는 이미 있다)
+## 4-1. 중앙 Kanban dispatcher (AWS)
+
+`kanban-dispatcher`는 `gateway run` 컨테이너가 아니다. `/home/ubuntu/.hermes:/opt/data`를 RW로 마운트한 단일 컨테이너에서 다음 명령만 실행한다.
+
+```yaml
+init: true
+command:
+  ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+environment:
+  HERMES_HOME: /opt/data
+  HERMES_KANBAN_HOME: /opt/data/shared-kanban
+  HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+```
+
+`init: true`는 Hermes 이미지가 지원하는 wrapped-runtime 경로를 선택한다. entrypoint가 PID 1이 아니므로 s6 `/init`와 `02-reconcile-profiles`가 실행되지 않고, `profiles/*`를 gateway 서비스로 reconcile/start하거나 `gateway.pid`·`processes.json`을 지우지 않는다. `/opt/data/profiles/<assignee>`는 그대로 보여 worker spawn과 profile resolution에 사용된다. 이 설정을 제거하면 중앙 컨테이너가 다시 모든 named profile gateway를 기동할 수 있다.
+
+8개 부서 gateway는 계속 `HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"`를 유지한다. 중앙 dispatcher와 gateway-embedded dispatcher를 같은 `shared-kanban/kanban.db`에 동시에 실행하지 않는다.
+
+주의: [`hermes kanban daemon --force`](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md)는 공식 CLI에 남아 있는 deprecated standalone escape hatch다. 공식 문서는 gateway-embedded dispatcher를 기본 경로로 안내하며, 두 dispatcher를 동시에 실행하면 claim race가 발생해 지원되지 않는다고 명시한다. [`entrypoint-dispatch.sh`](https://github.com/NousResearch/hermes-agent/blob/main/docker/entrypoint-dispatch.sh)의 wrapped-runtime fallback과 [`container_boot.py`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/container_boot.py)의 reconcile 동작을 근거로 `init: true`를 함께 둔다. 향후 Hermes release에서 `--force`가 제거될 수 있으므로 이미지 업데이트 때 아래 smoke check를 다시 통과시킨다.
+
+```bash
+docker compose config >/dev/null
+docker compose up -d kanban-dispatcher
+docker logs -f hedgefund-kanban-dispatcher
+docker exec hedgefund-kanban-dispatcher hermes kanban daemon --help
+docker exec hedgefund-kanban-dispatcher hermes kanban show t_186cb00d --json
+```
+
+`--help`에는 `--force`가 의도적으로 표시되지 않는다. 실제 지원 여부는 `hermes kanban daemon --force`가 “STANDALONE via --force”로 시작하는지로 확인한다. `docker logs`에 `reconcile: profile=... started`가 보이면 `init: true`가 적용되지 않은 것이므로 즉시 dispatcher를 중지하고 Compose 렌더링을 확인한다.
+
+### orphaned run 회수
+
+`t_186cb00d`는 수동 SQL로 수정하지 않는다. Hermes dispatcher의 첫 tick은 stale claim 회수를 먼저 수행하며, 기본 claim TTL(15분)이 지난 `running` claim을 `ready`로 되돌리고 이전 run을 `reclaimed`로 닫는다. `worker_pid`가 없으면 종료시킬 프로세스가 없어 즉시 reclaim 경로를 탄다.
+
+```bash
+docker exec hedgefund-kanban-dispatcher hermes kanban show t_186cb00d --json
+docker exec hedgefund-kanban-dispatcher hermes kanban runs t_186cb00d --json
+```
+
+기대 순서는 TTL 만료 후 `running → ready`(reclaimed run 기록) → dispatcher가 profile worker를 spawn하면 `running → done`이다. 첫 조회에서 즉시 바뀌지 않으면 TTL 만료 전일 수 있으므로 SQL 수정이나 강제 상태 전이를 하지 않고 다음 dispatcher tick을 기다린다.
+
+### 4-1-a. CEO closed-loop supervisor
+
+`ceo-kanban-supervisor`는 gateway나 dispatcher가 아니다. Hermes `kanban watch`가
+내보내는 `completed`, `blocked`, `gave_up`, `crashed`, `timed_out`,
+`spawn_failed` terminal event를 읽고, `kanban show`의 parent/child
+projection을 다시 조회해 CEO supervisor action을 결정한다. `reclaimed`는 stale claim을 `ready`로 되돌리는 non-terminal event이므로 supervisor wake-up 대상이 아니다. 현재 Hermes CLI에는 `kanban watch --json` 또는 동등한 structured output 옵션이 없어서 사람이 읽는 text contract를 엄격히 검증하며, malformed line이나 watch의 예기치 않은 EOF/non-zero 종료는 supervisor process failure로 처리한다. 같은 parent의 동시 event는 parent lock과 root comment marker(`hgfinance.ceo-supervisor.wakeup.v1`)로 중복 실행을 막고, wake-up/replan 상한은 root comments와 supervisor child task에 기록되어 restart 후에도 유지된다.
+projection을 통해 CEO supervisor action을 결정한다. DB를 직접 읽거나 SQL로 상태를
+변경하지 않는다.
+
+Supervisor action은 `SYNTHESIZE`, `CREATE_TASK`, `RETRY_TASK`,
+`REQUEST_USER_INPUT`, `RUN_QA`, `BLOCK/ABORT` 중 하나이며, retry 2회와 wake-up
+8회를 기본 상한으로 둔다. `blocked`는 실패와 구별한다. `needs_input` blocked는
+사용자 입력 요청으로 남기고, transient blocked만 retry하며, 그 외 blocked는 제한된
+replan 후 중단한다. QA는 기본 활성화하지만 CEO가 terminal completion metadata에
+`qa_required: false`를 명시한 경우 해당 요청에서는 생략할 수 있다.
+
+모든 Hermes `kanban create` 경계는 `orchestration/canonical_profiles.py`의 exact
+allowlist를 통과해야 한다. 논리 단계(`risk`, `qa`)는 CLI 직전에 각각
+`risk-management`, `qa-department`로 변환되고, `risk-department`나
+`ai-qa-audit-department` 같은 문자열은 fallback 없이 거부된다.
+
+주의: supervisor도 `/home/ubuntu/.hermes`를 보지만 `init: true`와 일반 Python
+command만 사용한다. dispatcher와 마찬가지로 gateway profile reconcile 로그가
+나오면 즉시 중지하고 Compose 렌더링을 확인한다. standalone daemon과 embedded
+dispatcher를 같은 Kanban DB에 동시에 실행하지 않는다.
+
+```bash
+docker compose config --quiet
+docker compose up -d kanban-dispatcher ceo-kanban-supervisor
+docker logs -f hedgefund-ceo-kanban-supervisor
+```
+
+향후 Hermes release에서 deprecated `hermes kanban daemon --force` escape hatch가
+제거되거나 `kanban watch` 출력 계약이 변경될 수 있다. update 후에는 CLI help/source와
+이 supervisor의 contract tests를 함께 재검증해야 한다.
+
+## 4-1-b. Portfolio BFF와 CEO Hermes 연결
+
+`portfolio-bff`는 자체 Hermes gateway를 시작하지 않는다. CEO 질의는 같은
+Compose 네트워크의 기존 `ceo-hermes`가 제공하는 인증된 Hermes API Server
+(`POST /v1/chat/completions`)로 전달한다. `ceo-hermes`의 CEO Profile·auth·
+Tool Allowlist는 `ceo-hermes` 컨테이너 안에만 남는다.
+
+BFF 이미지에는 공식 Hermes CLI를 pinned source revision으로 설치한다. 이 CLI는
+repository-owned canonical Kanban create boundary를 수행할 때만 사용한다.
+따라서 BFF에는 다음 최소 마운트만 있다.
+
+```yaml
+HERMES_HOME: /opt/hermes-cli
+HERMES_KANBAN_HOME: /opt/kanban
+HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
+HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+volumes:
+  - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+```
+
+`/home/ubuntu/.hermes` 전체 또는 `profiles/ceo-agent`를 BFF에 마운트하지 않고,
+BFF command도 `gateway run`이 아니다. 따라서 BFF 재생성으로 CEO gateway가
+중복 기동되거나 profile reconciliation이 발생하지 않는다. `ceo-hermes`는
+`API_SERVER_ENABLED=true`, `API_SERVER_HOST=0.0.0.0`, `API_SERVER_PORT=8642`,
+`API_SERVER_KEY=${CEO_HERMES_API_KEY}`를 사용하며 host port로 공개하지 않는다.
+
+`CEO_HERMES_API_KEY`는 `.env` 또는 AWS secret injection으로만 주입한다. API
+Server가 이 키 없이 기동되지 않도록 Hermes의 최소 16자 인증 조건을 유지한다.
+root Kanban create가 실패하면 BFF는 CEO API를 호출하지 않고 503을 반환한다.
+
+## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개가 이미 있다)
 
 8개 본부(research/quant/risk/qa는 이 파일에 직접, ceo/trading/accounting/hr은
 `departments/<n>/compose.yaml`에)는 2026-08-10 기준 이미 모두 컨테이너가 있다.
@@ -301,46 +408,52 @@ Provider 약관을 `MODEL-04`에서 검증하기 전 기본 Runtime이나 팀 �
 
 ## 5-2. 사용자 입구 — 질문 하나를 끝까지 돌리기 (2026-08-11 로컬 실측)
 
-사용자가 `ai-office` 에서 묻는 것부터 답이 돌아오기까지의 경로다. **부서를 직접
-부르는 `/{부서}/agent/ask` 와 다른 물건이다** — 여기선 어느 본부가 맡을지 CEO 가
-정한다.
+4-1-b 절이 `POST /ui/ceo/ask`(질문 → 뿌리 카드 + CEO 답변)를 정한다. 이 절은 그
+**뒤**를 적는다: 뿌리에 매달린 본부 카드가 실제로 도는지, 그리고 그 진행·실패가
+사용자에게 어떻게 보이는지.
 
 ```
-사용자 → POST /ui/ask → CEO Hermes 세션 → kanban 카드 N장
-                                          → dispatcher 가 부서마다 spawn
-                                          → 카드가 전부 끝나면
-        GET /ui/ask/{ticket} ← CEO 가 --resume 으로 같은 세션에서 종합
+사용자 → POST /ui/ceo/ask       → 뿌리 카드 생성 → CEO 가 자식 카드 N장
+                                                   → dispatcher 가 부서마다 spawn
+        GET /ui/ceo/ask/{뿌리}  ← 카드별 결말(아래 표)
 ```
 
-### 전제: dispatcher 가 떠 있어야 한다
+상관키는 **뿌리 카드**다. Hermes 세션 id 가 아니다 — CEO 프로세스가 끊기면
+세션 id 는 사라지지만 뿌리 카드는 보드에 남는다(실측: 30초에 잘린 CEO 턴이 카드
+4장을 만들어 놓고 죽었는데, 세션 id 를 못 읽어 어느 카드가 그 질문 것인지 알
+방법이 없었다).
+
+### 전제: dispatcher 가 떠 있어야 한다 (4-1절)
 
 ```bash
 docker compose up -d kanban-dispatcher   # 이게 없으면 카드가 ready 로 앉아 있다
-docker exec hedgefund-qa-hermes hermes kanban stats | tail -1
+docker exec -u hermes hedgefund-qa-hermes hermes kanban stats | tail -1
 #   Oldest ready task age: 0s   ← 이 숫자가 곧 dispatcher 가 멈춰 있던 시간이다
 ```
 
-8개 부서 컨테이너는 카드를 **띄우지 못한다**. dispatcher 가 worker 를
-`$HERMES_HOME/profiles/<assignee>` 에서 찾는데 부서 컨테이너는 `/opt/data` 자체가
-그 부서 프로필이라 `profiles/` 하위가 없기 때문이다(compose 주석 참고). 그래서
-8개 profiles/ 를 전부 보는 `kanban-dispatcher` 하나가 전담한다. compose 의
-`HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"` 는 **Hermes 가 읽지 않는 값이라 무효**
-이지만, 위 이유로 결과는 어차피 같다.
+로컬(윈도우)은 `~/.hermes` 한 덩어리가 아니라 부서마다 `~/.hermes-<부서>` 로
+흩어져 있어서, `docker-compose.override.yml` 이 그것들을 `profiles/<이름>` 자리에
+각각 물린다. **경로만 다르고 구조는 4-1절과 같다.**
 
-### BFF 기동
+### CEO 를 CLI 로 부르는 로컬 경로
+
+4-1-b 의 기본 경로는 `ceo-hermes` 의 OpenAI 호환 엔드포인트(`HERMES_CEO_API_URL`)
+다. 그 엔드포인트는 `hermes serve` 인증 설정이 선행 조건이라(4-2절) 로컬에는 아직
+없다. 그동안은 컨테이너 안 CLI 로 같은 턴을 돌린다.
 
 ```bash
 DATABASE_URL='' \
-ENABLE_USER_INTAKE=true \
+CEO_TRANSPORT=cli ENABLE_CEO_CLI=true \
 HERMES_EXEC_MODE=docker \
 KANBAN_ACCESS_MODE=docker \
   python -m uvicorn apps.api.main:app --port 8001
 ```
 
-- `ENABLE_USER_INTAKE` 는 부서 ask 스위치와 **따로** 둔다. 이 경로는 CEO 가 카드를
-  만들어 부서를 실제로 돌리므로 돈이 나간다. 기본은 닫혀 있다.
-- `HERMES_EXEC_MODE=docker` 는 컨테이너 안 Hermes 에 붙는 로컬 시험용이다.
-  AWS 처럼 BFF 와 Hermes 가 같은 호스트면 지정하지 않는다(기본 `local`).
+- **조용히 넘어가지 않는다.** URL 이 없다고 알아서 CLI 로 떨어지지 않는다 —
+  그러면 배포에서 URL 을 빠뜨렸을 때 "그래도 돌아가네"가 되어 경계가 무너진다.
+- `CEO_TURN_TIMEOUT_SECONDS`(기본 300)는 Profile 의 `agent.timeout_seconds`(30초)와
+  **일부러 다르다.** 30초는 한 번 묻고 한 번 답하는 조회 기준이고, 카드를 만들며
+  도구를 여러 번 부르는 CEO 턴은 실측 90~180초가 걸렸다.
 
 ### ⚠ 윈도우에서 `kanban.db` 를 호스트에서 열지 마라 (2026-08-11 실측)
 
@@ -374,18 +487,24 @@ rm ~/.hermes-shared-kanban/kanban.db-wal ~/.hermes-shared-kanban/kanban.db-shm
 | `BLOCKED` | 자료·입력이 없어 부서가 멈췄다 |
 | `FAILED` | 크래시·타임아웃·연속 실패 |
 | `STALE` | `ready` 인데 아무도 안 집어갔다 → dispatcher 를 본다 |
+| `NO_ASSIGNEE` | 없는 본부 이름이라 **영원히 안 돈다.** 기다릴 이유가 없다 |
 
 `NO_ANSWER` 는 실제로 나온다. 회계본부가 "공식 NAV 가 없어 수익률을 산출할 수
 없습니다"를 **완료**로 기록했다 — 부서는 정직하게 실패했지만 보드에는 `done` 으로
-남는다. 화면이 `done` 만 보면 그게 성공으로 보인다.
+남는다. **Kanban 대시보드 임베드는 이 구분을 못 한다** — 임베드는 보드 원본이고,
+`GET /ui/ceo/ask/{뿌리}` 는 같은 카드를 "답이 됐는가" 기준으로 다시 판정한 것이다.
+둘은 서로를 대체하지 않는다.
+
+`NO_ASSIGNEE` 도 실제로 나왔다. CEO 가 `--assignee accounting-portfolio` 로 카드를
+만들었는데 정식 이름은 `accounting-portfolio-department` 였다. **보드는 없는 이름도
+받아 준다** — 카드는 만들어지고, 그러고는 아무도 집어가지 못한다. 이름표의 정본은
+[`orchestration/canonical_profiles.py`](../../orchestration/canonical_profiles.py)다.
 
 ### 알아 둘 것
 
-- CEO 의 라우팅·종합 턴은 도구를 여러 번 부른다. 부서 Profile 의
-  `agent.timeout_seconds`(CEO 는 30초)로는 매번 잘린다 — 입구는 300초를 따로 쓴다.
 - **잘린 CEO 턴은 "아무 일도 없었음"이 아니다.** 30초에서 끊긴 턴이 이미 카드
-  4장을 만들었고 부서들이 그걸 실행했다. 세션 id 는 프로세스가 죽으며 유실돼
-  티켓으로 추적할 수 없다 — 보드를 직접 확인해야 한다.
+  4장을 만들었고 부서들이 그걸 실행했다. 뿌리 카드를 **먼저** 만드는 4-1-b 의
+  순서가 이걸 막는다 — 뿌리는 보드에 남으므로 나중에라도 추적할 수 있다.
 
 ---
 

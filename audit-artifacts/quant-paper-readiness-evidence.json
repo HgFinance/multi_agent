@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "kind": "api-package-test-report",
+  "title": "Quant-to-paper readiness audit evidence",
+  "status": "blocked",
+  "reviewedChangeSetHash": "ed2bd46ecf066335c3851b6aa52cdf1c4273bfc98016cd5c0c4ae0d6dd171a6",
+  "selfChecks": {
+    "quant": ["pit_dataset.py", "backtest_runner.py", "walk_forward.py", "experiment_orchestrator.py"],
+    "trading": ["contracts.py", "risk_gate.py", "oms.py", "paper_broker.py"],
+    "accounting": ["ledger.py", "reconciliation.py"],
+    "result": "focused self-checks exited successfully"
+  },
+  "criteria": [
+    {"id":"bundle-minimum","status":"PARTIAL","evidence":"Quant self-checks pass, but immutable Strategy Bundle handoff/Registry runtime evidence is not present."},
+    {"id":"independent-gates","status":"BLOCKED","evidence":"Canonical QA/Risk/CEO case-bound runtime decision evidence, credentials, and active policy proof are not available."},
+    {"id":"real-paper-path","status":"BLOCKED","evidence":"Repository status identifies missing/unfinished canonical execution integration; API-injected fills do not prove execution.fills."},
+    {"id":"restart-replay","status":"BLOCKED","evidence":"No current end-to-end restart/replay receipt for one approved Candidate/Case ID was observed."}
+  ],
+  "adversarialChecks": [
+    {"id":"projection-not-proof","verdict":"passed","evidence":"Plan rejects UI/Notion projections and seed rows as live proof."},
+    {"id":"injected-fill-not-proof","verdict":"passed","evidence":"Plan requires broker-originated execution.fills."},
+    {"id":"missing-runtime-fails-closed","verdict":"passed","evidence":"Missing runtime evidence is reported BLOCKED, not PASS."}
+  ]
+}

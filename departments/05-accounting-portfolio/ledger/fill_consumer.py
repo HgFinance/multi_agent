@@ -37,12 +37,14 @@ from uuid import UUID
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "portfolio"))
+sys.path.insert(0, str(_HERE.parent / "treasury"))
 sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
 
 from contracts import Side
 from ledger import Journal, Ledger, Position, decimal_str
 from portfolio import MarkPrice, PortfolioSnapshot, value_portfolio  # noqa: F401  (자체 점검이 value_portfolio를 직접 쓴다)
 from repository import LedgerPersistenceError, LedgerRepository, PostgresLedger
+from settlement import settle_due, settlement_date_for
 
 
 @dataclass(frozen=True)
@@ -242,12 +244,18 @@ def consume_fill(ledger: Ledger, fill: FillRow) -> Journal:
     """체결 하나를 분개로 만든다. 두 원천이 합류하는 지점이다.
 
     평균원가는 원장에서 재계산한다. 호출자가 주면 실현손익이 호출자가 정하는 값이 된다.
+
+    **현금은 체결일에 움직이지 않는다.** KOSPI/KOSDAQ 현물은 T+2 결제라 체결일
+    분개는 미지급금/미수금을 세우고 현금은 결제일에
+    `treasury/settlement.py::settle_due`가 옮긴다. NAV는 그대로다 - 미수/미지급이
+    이미 NAV에 들어 있다. 달라지는 것은 가용 현금이고, 그게 원래 사실이다.
     """
     positions, _ = ledger.rebuild()
     position = positions.get(fill.instrument_id, Position(fill.instrument_id))
     return ledger.post_fill(
         fill, fill.side, fill.instrument_id, position,
         trace_id=fill.trace_id, metadata=_fill_evidence(fill),
+        settlement_date=settlement_date_for(fill.event_time.date()),
     )
 
 
@@ -300,6 +308,11 @@ def run_once(
     if fixture_only:
         journals.extend(consume_fill(ledger, fill)
                         for fill in pending_fills(repo, fund_id, book_id))
+
+    # 결제일이 도래한 미지급금/미수금을 현금으로 옮긴다. 이 줄이 없으면 체결일
+    # 분개만 쌓이고 현금은 영원히 안 움직인다 - 매수 대금이 안 나간 것처럼 보여
+    # 가용 현금이 실제보다 많아진다. Projection 앞에 둬야 그 주기 스냅샷에 반영된다.
+    journals.extend(settle_due(ledger, as_of.date(), now=as_of))
     return journals, project(repo, ledger, marks, as_of)
 
 

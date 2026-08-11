@@ -550,3 +550,350 @@
   .live-counts { order: 10; }
   .world-viewport { height: 58vh; }
 }
+.hermes-kanban-embed { margin-top: 14px; overflow: hidden; }
+.hermes-kanban-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 18px; padding: 16px 18px; background: var(--surface-warm); }
+.hermes-kanban-toolbar h2 { margin: 3px 0 5px; font-size: 20px; }
+.hermes-kanban-toolbar p { margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.hermes-kanban-frame-wrap { min-height: 720px; background: #15110e; }
+.hermes-kanban-frame { display: block; width: 100%; height: 720px; border: 0; background: #15110e; }
+.hermes-kanban-note { margin: 0; padding: 9px 14px 12px; color: var(--ink-faint); font-size: 10px; line-height: 1.45; }
+.hermes-kanban-note code { margin-left: 4px; color: var(--pink-deep); overflow-wrap: anywhere; }
+.console-error { margin: 8px 0 0; color: #8b3128; font-size: 11px; line-height: 1.4; }
+@media (max-width: 760px) {
+  .hermes-kanban-toolbar { align-items: flex-start; flex-direction: column; }
+  .hermes-kanban-frame-wrap, .hermes-kanban-frame { min-height: 560px; height: 560px; }
+}
+
+/* ── 대표 입력 + Hermes 보드 작업면 ─────────────────────── */
+.dashboard-command-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, .47fr) minmax(0, 1.53fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+}
+
+.dashboard-command-grid .hermes-kanban-embed {
+  min-width: 0;
+  margin-top: 0;
+}
+
+.ceo-command-panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ceo-command-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: linear-gradient(90deg, #241811, #6e3b32);
+}
+
+.command-live-dot,
+.kanban-source-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #fff7ef;
+  font: 900 9px "Archivo", sans-serif;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.command-live-dot i,
+.kanban-source-status i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: #79d8a5;
+}
+
+.ceo-command-body {
+  display: grid;
+  gap: 13px;
+  padding: 16px;
+  background: var(--surface-warm);
+}
+
+.ceo-command-intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ceo-command-intro h2 {
+  margin: 3px 0 5px;
+  font-size: clamp(20px, 2vw, 26px);
+  line-height: 1.2;
+}
+
+.ceo-command-intro p:last-child {
+  max-width: 34ch;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.command-shortcut {
+  flex: 0 0 auto;
+  padding: 5px 7px;
+  border: 1px solid var(--pink-line);
+  border-radius: 6px;
+  color: var(--ink-faint);
+  font: 900 9px "Archivo", sans-serif;
+  white-space: nowrap;
+}
+
+.ceo-command-form {
+  display: grid;
+  gap: 7px;
+}
+
+.ceo-command-form label {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ceo-command-form textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ceo-command-form textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+.ceo-command-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ceo-command-form-footer > span {
+  color: var(--ink-faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.ceo-command-form-footer .btn {
+  min-height: 42px;
+  padding-inline: 13px;
+  font-size: 12px;
+}
+
+.ceo-quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ceo-quick-prompts > span {
+  margin-right: 2px;
+  color: var(--pink-deep);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ceo-quick-prompts button {
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--pink-line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ceo-quick-prompts button:hover:not(:disabled) {
+  border-color: var(--pink-deep);
+  color: var(--ink);
+  transform: translateY(-1px);
+}
+
+.ceo-quick-prompts button:disabled {
+  cursor: wait;
+  opacity: .6;
+}
+
+.ceo-command-state,
+.ceo-command-error,
+.ceo-command-result {
+  padding: 10px 11px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ceo-command-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--pink-line);
+  background: #f7f1e8;
+  color: var(--ink-soft);
+}
+
+.command-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--pink-line);
+  border-top-color: var(--pink-deep);
+  border-radius: 50%;
+  animation: commandSpin .8s linear infinite;
+}
+
+@keyframes commandSpin { to { transform: rotate(360deg); } }
+
+.ceo-command-error {
+  margin: 0;
+  border: 1px solid #bb6b59;
+  background: #fff0eb;
+  color: #7b3028;
+}
+
+.ceo-command-result {
+  border: 1.5px solid var(--ink);
+  background: #fff;
+}
+
+.ceo-command-result-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--pink-deep);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+/* 본부별 카드 진행·실패. 색은 장식이 아니라 상태다: 답한 것 / 답을 못 낸 것 /
+   실패한 것이 한눈에 갈려야 "완료 5건"처럼 실패를 성공에 섞어 세지 않는다.
+   아래 Kanban 임베드(보드 원본)에서는 이 구분이 안 보인다. */
+.ceo-progress { margin-top: 10px; display: grid; gap: 8px; }
+
+.ceo-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--pink-deep);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ceo-progress-heading small { color: var(--ink-faint); font-weight: 700; }
+
+.ceo-progress-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.ceo-progress-cards > li {
+  padding: 8px 10px;
+  border: 1.5px solid var(--ink);
+  border-left-width: 5px;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ceo-progress-cards > li[data-tone="ok"] { border-left-color: var(--mint, #3aa981); }
+.ceo-progress-cards > li[data-tone="warn"] { border-left-color: var(--yellow, #d8a11a); }
+.ceo-progress-cards > li[data-tone="bad"] { border-left-color: var(--pink-deep); }
+.ceo-progress-cards > li[data-tone="wait"] { border-left-color: var(--ink-faint); }
+
+.ceo-progress-reason {
+  margin-top: 4px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ceo-command-result-heading code {
+  max-width: 52%;
+  overflow: hidden;
+  color: var(--ink-faint);
+  font: 700 9px "Archivo", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ceo-command-result p {
+  margin: 0;
+  max-height: 190px;
+  overflow: auto;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-line;
+}
+
+.ceo-command-result > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.hermes-kanban-heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.kanban-source-badge {
+  padding: 4px 6px;
+  border: 1px solid var(--ink);
+  border-radius: 5px;
+  background: var(--yellow);
+  color: var(--ink);
+  font: 900 9px "Archivo", sans-serif;
+  letter-spacing: .05em;
+}
+
+.hermes-kanban-heading .kanban-source-status {
+  color: var(--ink-soft);
+}
+
+.hermes-kanban-heading .kanban-source-status i {
+  border-color: #328f62;
+}
+
+@media (max-width: 1040px) {
+  .dashboard-command-grid { grid-template-columns: 1fr; }
+  .dashboard-command-grid .hermes-kanban-embed { margin-top: 0; }
+}
+
+@media (max-width: 560px) {
+  .ceo-command-body { padding: 13px; }
+  .ceo-command-intro { display: grid; }
+  .command-shortcut { justify-self: start; }
+  .ceo-command-form-footer { align-items: stretch; flex-direction: column; }
+  .ceo-command-form-footer .btn { width: 100%; }
+  .ceo-quick-prompts { align-items: stretch; flex-direction: column; }
+  .ceo-quick-prompts > span { margin: 0; }
+  .ceo-quick-prompts button { width: 100%; text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-spinner { animation: none; }
+}

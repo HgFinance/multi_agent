@@ -48,6 +48,7 @@ from contracts import (
     BrokerOrderState,
     IntentState,
     MarketSnapshot,
+    RiskDecision,
     RiskVerdict,
     Side,
     StrategySignal,
@@ -330,6 +331,22 @@ class PaperLoopTest(unittest.TestCase):
         with self.assertRaises(OMSError):
             self.oms.create_broker_order(rec, intent)
 
+    def test_explicit_risk_rejection_blocks_broker_order(self):
+        intent = self.build_intent(self.signal(), self.snapshot())
+        rec = self.oms.register_intent(intent)
+        self.oms.request_risk_review(rec)
+        decision = RiskDecision(
+            order_intent_id=rec.order_intent_id,
+            verdict=RiskVerdict.REJECT,
+            expires_at=self.now + timedelta(hours=1),
+            reason="explicit_risk_rejection",
+            decided_by="risk-e2e",
+        )
+        self.oms.apply_risk_decision(rec, decision)
+        self.assertIs(rec.state, IntentState.REJECTED)
+        with self.assertRaises(OMSError):
+            self.oms.create_broker_order(rec, intent)
+
     def test_duplicate_broker_event_does_not_double_position(self):
         """브로커 재전송이 포지션을 두 배로 만들지 않는다."""
         intent = self.build_intent(self.signal(), self.snapshot())
@@ -371,6 +388,35 @@ class PaperLoopTest(unittest.TestCase):
         snap = self.snapshot()
         self.assertEqual(snap.quantity_of(self.instrument), D(0))
         self.assertEqual(snap.nav, CAPITAL)
+
+    def test_unknown_broker_state_requires_reconciliation(self):
+        intent = self.build_intent(self.signal(), self.snapshot())
+        _rec, order = self.route(intent)
+        self.oms.mark_unknown(order, "broker response missing")
+        with self.assertRaises(OMSError):
+            self.oms.on_broker_event(
+                order,
+                "fill",
+                "unknown-fill-1",
+                self.now,
+                {"quantity": "1", "price": str(PRICE)},
+            )
+        self.assertEqual(order.state, BrokerOrderState.UNKNOWN)
+        self.assertEqual(order.filled_quantity, D(0))
+
+    def test_overfill_is_rejected_without_mutation(self):
+        intent = self.build_intent(self.signal(), self.snapshot())
+        _rec, order = self.route(intent)
+        with self.assertRaises(OMSError):
+            self.oms.on_broker_event(
+                order,
+                "fill",
+                "overfill-1",
+                self.now,
+                {"quantity": str(intent.quantity + 1), "price": str(PRICE)},
+            )
+        self.assertEqual(order.filled_quantity, D(0))
+        self.assertEqual(order.state, BrokerOrderState.ACKNOWLEDGED)
 
 
 if __name__ == "__main__":

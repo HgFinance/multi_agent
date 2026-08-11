@@ -75,9 +75,10 @@ def durable_required_from_env() -> bool:
 # 계정과목 자체는 ledger.py가 소유한다. 여기엔 표시 이름만 둔다.
 ACCOUNT_NAMES = {
     "1000": "현금", "1100": "유가증권", "1200": "미수금",
-    "2000": "미지급금", "3000": "자본금",
+    "2000": "미지급금", "2100": "미지급보수", "3000": "자본금",
     "4000": "실현손익", "4100": "평가손익",
     "5000": "수수료비용", "5100": "세금비용",
+    "5200": "관리보수비용", "5300": "성과보수비용",
 }
 
 # 도메인 status <-> DB status. DB는 대문자 + DRAFT/VOID까지 가진다.
@@ -480,7 +481,20 @@ class LedgerRepository:
             for (jid, event_type, source_event_id, effective_at, accounting_date,
                  status, reversal_of, service, trace_id) in rows
         ]
-        return PostgresLedger(self, fund_id, book_id, journals)
+        # 마감 기준일. **여기서 붙이지 않으면 게이트가 영원히 안 걸린다** -
+        # 인메모리 기본값이 None(전 기간 열림)이라 DB 원장이 조용히 소급 분개를
+        # 받아준다. 값의 출처는 `close/nav_close.py::closed_through`(nav_runs)다.
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select max(valuation_date) from accounting.nav_runs
+                 where fund_id = %s and run_type = 'OFFICIAL' and status = 'APPROVED'
+                """,
+                (fund_id,),
+            )
+            row = cur.fetchone()
+        return PostgresLedger(self, fund_id, book_id, journals,
+                              closed_through=row[0] if row else None)
 
     # -- Projection ---------------------------------------------------------
 
@@ -667,9 +681,10 @@ class PostgresLedger(Ledger):
     """
 
     def __init__(self, repo: LedgerRepository, fund_id: UUID, book_id: UUID,
-                 journals: list[Journal]) -> None:
+                 journals: list[Journal], *, closed_through=None) -> None:
         super().__init__(
             fund_id=fund_id, book_id=book_id, journals=journals,
+            closed_through=closed_through,
             _posted_sources={(j.event_type, j.source_event_id) for j in journals},
         )
         self._repo = repo

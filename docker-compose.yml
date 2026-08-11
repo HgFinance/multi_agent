@@ -55,6 +55,13 @@ services:
     restart: unless-stopped
     environment:
       PYTHONPATH: /app:/app/apps/api
+      ENABLE_AGENT_ASK: "true"
+      ENABLE_KANBAN_TASK_TRACKING: "1"
+      HERMES_BIN: /usr/local/bin/hermes
+      HERMES_HOME: /opt/hermes-cli
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
+      HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
@@ -62,6 +69,10 @@ services:
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      # BFF uses Hermes CLI only for the repository-owned Kanban create
+      # boundary. CEO profile/auth stays inside ceo-hermes and is never
+      # mounted here; the BFF has no gateway command or full ~/.hermes view.
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     ports:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
 
@@ -761,18 +772,50 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
     restart: unless-stopped
-    command: ["gateway", "run"]
+    # Hermes image의 공식 wrapped-runtime 경로를 사용한다. `init: true`가
+    # 없으면 entrypoint가 PID 1이 되어 s6 `/init`와
+    # `02-reconcile-profiles`가 모든 profiles/* gateway를 다시 시작한다.
+    init: true
+    # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
+    # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
+    command:
+      ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
     environment:
+      HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s
+
+  ceo-kanban-supervisor:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-ceo-kanban-supervisor
+    restart: unless-stopped
+    init: true
+    command: ["python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py", "--interval", "1"]
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+      - .:/opt/hgfinance:ro
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      PYTHONPATH: /opt/hgfinance
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 20s
+
   # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────
   # **기본 `docker compose up` 에서는 뜨지 않는다.** profiles 로 묶어 두었으니
   # `docker compose --profile research-skills up -d` 로만 기동한다 - 검증 전

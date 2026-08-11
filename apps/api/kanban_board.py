@@ -69,20 +69,17 @@ CardOutcome = Literal[
 # 없는 이름이라 누구도 집어갈 수 없다. 둘을 같이 묶으면 사용자는 30분을 기다린다.
 TERMINAL_OUTCOMES = frozenset({"ANSWERED", "NO_ANSWER", "BLOCKED", "FAILED", "NO_ASSIGNEE"})
 
-# 실재하는 본부 프로필 이름. **`hermes_cli.PROFILE_CONTAINERS` 와 같아야 한다**
-# (`ceo_intake` 자체 점검이 두 표가 어긋나지 않는지 확인한다).
-# CEO 가 `accounting-portfolio` 처럼 줄여 쓰면 카드가 만들어지긴 하지만 아무도
-# 집어가지 못한다 - 보드는 없는 이름도 받아 주기 때문이다(2026-08-11 실측).
-KNOWN_ASSIGNEES = frozenset({
-    "ceo-agent",
-    "research-department",
-    "trading-department",
-    "risk-management",
-    "quant-backtest-department",
-    "accounting-portfolio-department",
-    "qa-department",
-    "workforce-management",
-})
+# 실재하는 본부 프로필 이름은 **`orchestration/canonical_profiles.py` 가 정본이다.**
+# 여기서 목록을 따로 적으면 언젠가 한쪽만 바뀐다. CEO 가 `accounting-portfolio`
+# 처럼 줄여 쓰면 카드는 만들어지지만 아무도 집어가지 못한다 - 보드가 없는 이름도
+# 받아 주기 때문이다(2026-08-11 실측).
+try:
+    from orchestration.canonical_profiles import CANONICAL_PROFILES as KNOWN_ASSIGNEES
+except ImportError:  # pragma: no cover - `python apps/api/kanban_board.py` 직접 실행
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from orchestration.canonical_profiles import CANONICAL_PROFILES as KNOWN_ASSIGNEES
 
 # ready 상태로 이만큼 지나면 "대기"가 아니라 "아무도 안 집어감"으로 본다.
 # dispatcher tick 이 15~60초이므로 그 몇 배. 짧으면 정상 대기를 고장으로 부른다.
@@ -145,11 +142,25 @@ KANBAN_READER_CONTAINER = os.getenv("KANBAN_READER_CONTAINER", "hedgefund-qa-her
 KANBAN_READER_DB = os.getenv("KANBAN_READER_DB", "/opt/kanban/kanban.db")
 
 # 두 모드가 **같은 SQL** 을 쓴다. 하나만 고치면 두 경로가 어긋나므로 여기 모은다.
-_SQL_TASKS = (
-    "select id, title, assignee, status, result, created_at, completed_at, "
-    "       last_failure_error, block_kind "
-    "from tasks where session_id = ? order by created_at"
+#
+# ▶ 상관키는 **뿌리 카드**다. `apps/api/ceo.py` 가 CEO 를 부르기 **전에** 뿌리 카드를
+#   먼저 만들고 그 id 를 CEO 에게 넘긴다. 그래서 CEO 턴이 중간에 끊겨도 뿌리는
+#   보드에 남는다 - Hermes 세션 id 를 상관키로 쓰면 프로세스가 죽는 순간 추적이
+#   끊긴다(2026-08-11 실측: 잘린 턴이 카드 4장을 만들어 놓고 죽었는데 세션 id 를
+#   못 읽어 어느 카드가 그 질문 것인지 알 수 없었다).
+#
+# 재귀 CTE 로 뿌리의 자손을 전부 모은다. CEO 가 2단계(리서치→QA)로 묶든 3단계로
+# 묶든 같은 질문의 카드는 전부 잡힌다.
+_SQL_TASKS = """
+with recursive tree(id) as (
+    select ?
+    union
+    select l.child_id from task_links l join tree t on l.parent_id = t.id
 )
+select id, title, assignee, status, result, created_at, completed_at,
+       last_failure_error, block_kind
+from tasks where id in (select id from tree) order by created_at
+"""
 _SQL_EVENTS = (
     "select task_id, kind, payload from task_events "
     "where task_id in ({marks}) "
@@ -161,11 +172,11 @@ _SQL_LINKS = "select parent_id, child_id from task_links where child_id in ({mar
 # 컨테이너 안에서 돌릴 조회 스크립트. **읽기 전용으로만 연다.**
 _READER_SCRIPT = f'''
 import json, sqlite3, sys
-db, session = sys.argv[1], sys.argv[2]
+db, root = sys.argv[1], sys.argv[2]
 conn = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=5.0)
 conn.row_factory = sqlite3.Row
 try:
-    tasks = [dict(r) for r in conn.execute({_SQL_TASKS!r}, (session,))]
+    tasks = [dict(r) for r in conn.execute({_SQL_TASKS!r}, (root,))]
     ids = [t["id"] for t in tasks]
     events, links = [], []
     if ids:
@@ -178,7 +189,7 @@ sys.stdout.write(json.dumps({{"tasks": tasks, "events": events, "links": links}}
 '''
 
 
-def _fetch_file(session_id: str) -> dict[str, list[dict[str, Any]]]:
+def _fetch_file(root_task_id: str) -> dict[str, list[dict[str, Any]]]:
     path = board_path()
     if not path.exists():
         # 규칙 1. 여기서 빈 목록을 돌려주면 "부서가 아무것도 안 했다"로 읽힌다.
@@ -186,7 +197,7 @@ def _fetch_file(session_id: str) -> dict[str, list[dict[str, Any]]]:
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
-        tasks = [dict(r) for r in conn.execute(_SQL_TASKS, (session_id,))]
+        tasks = [dict(r) for r in conn.execute(_SQL_TASKS, (root_task_id,))]
         ids = [t["id"] for t in tasks]
         events: list[dict[str, Any]] = []
         links: list[dict[str, Any]] = []
@@ -201,12 +212,12 @@ def _fetch_file(session_id: str) -> dict[str, list[dict[str, Any]]]:
     return {"tasks": tasks, "events": events, "links": links}
 
 
-def _fetch_docker(session_id: str) -> dict[str, list[dict[str, Any]]]:
+def _fetch_docker(root_task_id: str) -> dict[str, list[dict[str, Any]]]:
     """같은 조회를 컨테이너 안에서 돌린다. 호스트는 파일을 열지 않는다."""
     try:
         proc = subprocess.run(
             ["docker", "exec", "-u", "hermes", "-i", KANBAN_READER_CONTAINER,
-             "python3", "-", KANBAN_READER_DB, session_id],
+             "python3", "-", KANBAN_READER_DB, root_task_id],
             input=_READER_SCRIPT, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=30,
         )
@@ -226,8 +237,8 @@ def _fetch_docker(session_id: str) -> dict[str, list[dict[str, Any]]]:
         raise BoardUnavailable(f"보드 응답을 해석하지 못했습니다: {proc.stdout[:200]}") from exc
 
 
-def _fetch(session_id: str) -> dict[str, list[dict[str, Any]]]:
-    return _fetch_docker(session_id) if KANBAN_ACCESS_MODE == "docker" else _fetch_file(session_id)
+def _fetch(root_task_id: str) -> dict[str, list[dict[str, Any]]]:
+    return _fetch_docker(root_task_id) if KANBAN_ACCESS_MODE == "docker" else _fetch_file(root_task_id)
 
 
 def _event_payloads(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -288,18 +299,17 @@ def _classify(row: dict[str, Any], event: dict[str, Any], now: int) -> tuple[Car
     return "QUEUED", summary
 
 
-def cards_for_session(session_id: str) -> list[Card]:
-    """한 사용자 질의(= CEO 세션)에서 갈라져 나온 카드 전부.
+def cards_for_root(root_task_id: str) -> list[Card]:
+    """한 사용자 질의의 뿌리 카드와 그 자손 전부.
 
-    상관키를 새로 만들지 않는다. Hermes 가 세션 안에서 만들어진 카드에
-    `tasks.session_id` 를 이미 박아 준다(2026-08-11 실측: CEO 가 만든 두 장이
-    같은 `20260811_053455_2c23b7` 을 달고 있었다). 우리가 발명한 키는
-    에이전트가 지켜 줄 이유가 없지만, 이건 런타임이 채운다.
+    상관키를 새로 만들지 않는다. `apps/api/ceo.py` 가 CEO 를 부르기 전에 만드는
+    뿌리 카드가 그 자리다 - 보드에 durable 하게 남으므로 CEO 프로세스가 죽어도
+    추적이 끊기지 않는다.
     """
-    if not session_id.strip():
-        raise ValueError("session_id 가 비었습니다")
+    if not root_task_id.strip():
+        raise ValueError("root_task_id 가 비었습니다")
     now = int(time.time())
-    raw = _fetch(session_id)
+    raw = _fetch(root_task_id)
     rows = raw["tasks"]
     events = _event_payloads(raw["events"])
     links: dict[str, list[str]] = {r["id"]: [] for r in rows}
@@ -349,7 +359,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     # 규칙 1: 없는 보드는 빈 결과가 아니라 예외
     os.environ["HERMES_KANBAN_DB"] = str(Path(tempfile.gettempdir()) / "no-such-board.db")
     try:
-        cards_for_session("x")
+        cards_for_root("x")
     except BoardUnavailable:
         pass
     else:
@@ -369,12 +379,20 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     con.executemany(
         "insert into tasks values (?,?,?,?,?,?,?,?,?,?)",
         [
-            ("t1", "답한 카드", "research-department", "done", "본문 있음", now, now, None, None, "s1"),
-            ("t2", "빈 완료", "accounting-portfolio-department", "done", "", now, now, None, None, "s1"),
-            ("t3", "오래된 ready", "qa-department", "ready", "", now - 9999, None, None, None, "s1"),
-            ("t4", "막 만든 ready", "risk-management", "ready", "", now, None, None, None, "s1"),
-            ("t5", "없는 본부", "accounting-portfolio", "ready", "", now, None, None, None, "s1"),
+            ("root", "사용자 질의", "ceo-agent", "running", "", now, None, None, None, None),
+            ("t1", "답한 카드", "research-department", "done", "본문 있음", now, now, None, None, None),
+            ("t2", "빈 완료", "accounting-portfolio-department", "done", "", now, now, None, None, None),
+            ("t3", "오래된 ready", "qa-department", "ready", "", now - 9999, None, None, None, None),
+            ("t4", "막 만든 ready", "risk-management", "ready", "", now, None, None, None, None),
+            ("t5", "없는 본부", "accounting-portfolio", "ready", "", now, None, None, None, None),
+            # 뿌리에 매달리지 않은 남의 카드. **여기 섞이면 안 된다.**
+            ("other", "다른 질문", "research-department", "done", "남의 결과", now, now, None, None, None),
         ],
+    )
+    # t5 는 손자다 - 재귀 CTE 가 2단계 아래까지 잡는지 확인한다
+    con.executemany(
+        "insert into task_links values (?,?)",
+        [("root", "t1"), ("root", "t2"), ("root", "t3"), ("root", "t4"), ("t1", "t5")],
     )
     con.execute(
         "insert into task_events values (1,'t2','completed',?)",
@@ -384,18 +402,20 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     con.close()
     os.environ["HERMES_KANBAN_DB"] = str(fake)
 
-    got = {c.task_id: c.outcome for c in cards_for_session("s1")}
+    got = {c.task_id: c.outcome for c in cards_for_root("root")}
+    assert "other" not in got, got          # 남의 카드가 섞이지 않는다
+    assert "t5" in got, got                 # 손자까지 잡힌다
     assert got["t1"] == "ANSWERED", got
-    assert got["t2"] == "NO_ANSWER", got   # 규칙 2 - done 이지만 성공 아님
-    assert got["t3"] == "STALE", got       # 규칙 3
+    assert got["t2"] == "NO_ANSWER", got    # 규칙 2 - done 이지만 성공 아님
+    assert got["t3"] == "STALE", got        # 규칙 3
     assert got["t4"] == "QUEUED", got
     # 없는 본부는 기다릴 이유가 없다 - 즉시, 그리고 **끝난 것으로** 본다
     assert got["t5"] == "NO_ASSIGNEE", got
 
-    summary = {c.task_id: c.summary for c in cards_for_session("s1")}
+    summary = {c.task_id: c.summary for c in cards_for_root("root")}
     assert "NAV" in summary["t2"], summary  # 사유가 사용자까지 간다
 
-    prog = progress_of(cards_for_session("s1"))
+    prog = progress_of(cards_for_root("root"))
     assert prog["all_terminal"] is False, prog       # STALE·QUEUED 는 끝난 게 아니다
     assert prog["unusable"] == ["t2", "t5"], prog
     assert prog["stalled"] == ["t3"], prog

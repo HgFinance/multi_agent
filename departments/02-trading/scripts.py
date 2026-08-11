@@ -20,8 +20,9 @@ from threading import Lock
 from typing import Any, Callable, Iterable, Mapping
 
 _BASE = Path(__file__).resolve().parent
-if str(_BASE) not in sys.path:
-    sys.path.append(str(_BASE))
+for _p in (_BASE, _BASE / "contracts"):   # contracts/: intent_builder(F11)
+    if str(_p) not in sys.path:
+        sys.path.append(str(_p))
 
 from employee_workers import (  # noqa: E402
     StrategyBundleRejected,
@@ -333,6 +334,9 @@ def run_alpha_strategy_selection(
                 "reports": [], "rejected": rejected, "audit": audit}
 
     failures: dict[str, str] = {}
+    signals_by_worker: dict[str, list[dict[str, Any]]] = {
+        worker.spec.worker_id: [] for worker in workers
+    }
     active = {worker.spec.worker_id: worker for worker in workers}
     with ThreadPoolExecutor(max_workers=max_workers or len(workers)) as pool:
         for sequence, raw_event in enumerate(market_stream):
@@ -346,7 +350,9 @@ def run_alpha_strategy_selection(
             for future in as_completed(futures):
                 worker = futures[future]
                 try:
-                    signals[worker.spec.worker_id] = future.result()
+                    signal = dict(future.result())
+                    signals[worker.spec.worker_id] = signal
+                    signals_by_worker[worker.spec.worker_id].append(signal)
                 except Exception as exc:
                     failures[worker.spec.worker_id] = f"{type(exc).__name__}:{exc}"
             for worker_id in sorted(signals):
@@ -365,10 +371,17 @@ def run_alpha_strategy_selection(
         )
         for worker in workers
     }
+    for worker_id, report in reports_by_id.items():
+        report["signals"] = list(signals_by_worker[worker_id])
+        report["worker_id"] = worker_id
     for report in reports_by_id.values():
         report["run_id"] = trace_id
         report["trace_id"] = trace_id
         report["strategy_executor_version"] = strategy_executor_version
+        for signal in report["signals"]:
+            signal["trace_id"] = trace_id
+            signal["run_id"] = trace_id
+            signal["strategy_executor_version"] = strategy_executor_version
         for fill in report["fills"]:
             fill["trace_id"] = trace_id
             fill["run_id"] = trace_id
@@ -464,6 +477,100 @@ def run_alpha_strategy_selection(
     }
 
 
+def promoted_strategy(selection: Mapping[str, Any]) -> tuple[str, str] | None:
+    """주문 후보를 만들어도 되는 전략 하나. 아니면 None.
+
+    선발 결과의 조건 하나라도 어긋나면 None이다 - 승격되지 않은 전략의 시그널이
+    주문 후보가 되는 경로를 만들지 않는다. `live_order_submission_allowed`가
+    False가 **아닌** 결과도 통과시키지 않는다. 그 값이 뒤집혔다는 것은 선발 계약이
+    깨졌다는 뜻이고, 계약이 깨진 결과를 주문 쪽으로 흘리는 것이 제일 나쁘다.
+    """
+    selected = selection.get("selected_strategy")
+    if selection.get("status") != "SELECTED" or not isinstance(selected, Mapping):
+        return None
+    if selected.get("promotion_state") != "PROMOTED":
+        return None
+    if selected.get("live_order_submission_allowed") is not False:
+        return None
+    return str(selected["strategy_id"]), str(selected["strategy_version"])
+
+
+def propose_intents_from_selection(
+    selection: Mapping[str, Any],
+    signals: Iterable[Any],
+    *,
+    nav: Decimal,
+    positions: Mapping[Any, Decimal],
+    snapshots: Mapping[Any, Any],
+    trade_case_id: Any,
+    now: datetime,
+    presets: Mapping[str, Any] | None = None,
+    env: str = "paper",
+) -> dict[str, Any]:
+    """승격된 전략의 Signal만 OrderIntent 후보로 바꾼다. **제출하지 않는다.**
+
+    선발(`run_alpha_strategy_selection`)과 F11(`intent_builder.build_order_intent`)
+    사이의 배선이다. 선발은 "어느 전략이 일해도 되는가"까지만 답하고, 수량·지정가는
+    F11이 정한다. 여기서 하는 판단은 하나뿐이다 - **이 시그널이 승격된 그 전략에서
+    온 것인가.** 아니면 만들지 않는다.
+
+    거른 시그널은 조용히 사라지지 않고 `rejected`에 사유와 함께 남는다. "만들 이유가
+    없다"(이미 목표 도달)와 "만들면 안 된다"(정책 위반)를 사유 문자열로 구분한다.
+
+    nav와 positions는 회계본부 Projection에서 온다. 여기서 계산하지 않는다.
+    """
+    # 함수 안에서 import - 선발 파이프라인만 쓰는 호출자에게 pydantic/yaml 의존을
+    # 얹지 않는다.
+    from intent_builder import IntentBuildError, build_order_intent, load_presets
+
+    promoted = promoted_strategy(selection)
+    if promoted is None:
+        return {"promoted": None, "intents": [],
+                "rejected": [{"signal_id": None, "reason": "no_promoted_strategy"}]}
+
+    presets = presets if presets is not None else load_presets()
+    intents: list[Any] = []
+    rejected: list[dict[str, Any]] = []
+    for signal in signals:
+        signal_id = str(getattr(signal, "signal_id", ""))
+        if (str(signal.strategy_id), signal.strategy_version) != promoted:
+            rejected.append({"signal_id": signal_id, "reason": "strategy_not_promoted"})
+            continue
+        snapshot = snapshots.get(signal.instrument_id)
+        if snapshot is None:
+            rejected.append({"signal_id": signal_id, "reason": "missing_market_snapshot"})
+            continue
+        preset = presets.get(signal.philosophy)
+        if preset is None:
+            rejected.append({"signal_id": signal_id,
+                             "reason": f"unknown_philosophy:{signal.philosophy}"})
+            continue
+        try:
+            intent = build_order_intent(
+                signal,
+                snapshot=snapshot,
+                nav=nav,
+                current_quantity=positions.get(signal.instrument_id, D("0")),
+                preset=preset,
+                trade_case_id=trade_case_id,
+                now=now,
+                env=env,
+            )
+        except IntentBuildError as exc:
+            rejected.append({"signal_id": signal_id, "reason": f"intent_build_rejected:{exc}"})
+            continue
+        if intent is None:
+            rejected.append({"signal_id": signal_id, "reason": "already_at_target"})
+            continue
+        intents.append(intent)
+
+    return {
+        "promoted": {"strategy_id": promoted[0], "strategy_version": promoted[1]},
+        "intents": intents,
+        "rejected": rejected,
+    }
+
+
 def _self_test() -> None:
     bundles = [
         {"strategy_id": "a", "strategy_version": "v1", "capital_allocation": "400000",
@@ -497,6 +604,74 @@ def _self_test() -> None:
     assert all(report["trade_count"] >= 1 for report in out["reports"])
     assert out["selected_strategy"]["live_order_submission_allowed"] is False
     assert out["selected_strategy"]["promotion_state"] == "PROMOTED"
+
+    _self_test_intent_proposal()
+
+
+def _self_test_intent_proposal() -> None:
+    """선발 -> OrderIntent 후보 배선. 승격된 전략 하나만 통과한다."""
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from contracts import MarketSnapshot, Side, StrategySignal
+
+    now = datetime.now(timezone.utc)
+    strategy, other = uuid4(), uuid4()
+    fund, book, instrument = uuid4(), uuid4(), uuid4()
+
+    def selection(**over) -> dict[str, Any]:
+        selected = {"strategy_id": str(strategy), "strategy_version": "v1",
+                    "promotion_state": "PROMOTED", "live_order_submission_allowed": False}
+        selected.update(over)
+        return {"status": "SELECTED", "selected_strategy": selected}
+
+    def signal(strategy_id=None, **over) -> StrategySignal:
+        kw = {"strategy_id": strategy_id or strategy, "strategy_version": "v1",
+              "fund_id": fund, "book_id": book, "instrument_id": instrument,
+              "philosophy": "momentum", "target_weight": D("0.02"), "stage": "paper",
+              "as_of": now, "valid_until": now + timedelta(hours=1), "trace_id": "t1"}
+        kw.update(over)
+        return StrategySignal(**kw)
+
+    snapshots = {instrument: MarketSnapshot(market_snapshot_id="s1", as_of=now,
+                                            bid=D("69900"), ask=D("70100"))}
+
+    def propose(sel, sigs, positions=None):
+        return propose_intents_from_selection(
+            sel, sigs, nav=D("1000000000"), positions=positions or {},
+            snapshots=snapshots, trade_case_id=uuid4(), now=now)
+
+    # 1. 승격된 전략의 시그널은 주문 후보가 된다 (제출은 아니다)
+    out = propose(selection(), [signal()])
+    assert len(out["intents"]) == 1, out["rejected"]
+    assert out["intents"][0].side is Side.BUY and out["intents"][0].quantity == D("285")
+
+    # 2. 승격 전 상태는 하나도 통과하지 못한다 - 선발만으로 주문을 만들지 않는다
+    for state in ("SELECTED_PENDING_IAM", "IAM_DENIED", "TERMINATED"):
+        blocked = propose(selection(promotion_state=state), [signal()])
+        assert blocked["intents"] == [] and blocked["promoted"] is None, state
+    assert propose({"status": "REJECT", "selected_strategy": None}, [signal()])["intents"] == []
+    # 계약이 뒤집힌 결과(제출 허용)도 통과시키지 않는다
+    assert propose(selection(live_order_submission_allowed=True), [signal()])["intents"] == []
+
+    # 3. 승격되지 않은 다른 전략의 시그널은 섞여 들어와도 걸러진다
+    mixed = propose(selection(), [signal(), signal(strategy_id=other)])
+    assert len(mixed["intents"]) == 1
+    assert [r["reason"] for r in mixed["rejected"]] == ["strategy_not_promoted"]
+
+    # 4. 거른 이유는 남는다 - 조용히 사라지지 않는다
+    at_target = propose(selection(), [signal()], positions={instrument: D("285")})
+    assert [r["reason"] for r in at_target["rejected"]] == ["already_at_target"]
+    no_snap = propose_intents_from_selection(
+        selection(), [signal()], nav=D("1000000000"), positions={}, snapshots={},
+        trade_case_id=uuid4(), now=now)
+    assert [r["reason"] for r in no_snap["rejected"]] == ["missing_market_snapshot"]
+    unknown = propose(selection(), [signal(philosophy="astrology")])
+    assert unknown["rejected"][0]["reason"].startswith("unknown_philosophy"), unknown
+    # 승격된 전략이어도 시그널 자체가 주문 대상이 아니면 F11이 막는다(shadow 단계).
+    # 만료 시그널은 여기까지 오지도 못한다 - StrategySignal 계약이 먼저 거부한다.
+    shadow = propose(selection(), [signal(stage="shadow")])
+    assert shadow["rejected"][0]["reason"].startswith("intent_build_rejected"), shadow
 
 
 if __name__ == "__main__":

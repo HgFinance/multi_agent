@@ -21,7 +21,9 @@ import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
 import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
-import UserAskPanel from "./ops/UserAskPanel";
+import { askCeo } from "./ops/ceoClient";
+import HermesKanbanEmbed from "./ops/HermesKanbanEmbed";
+import CeoCommandPanel from "./ops/CeoCommandPanel";
 import type { LlmPerformanceMetric, OperationsRuntime } from "./ops/readModel";
 import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
 import { canUseSimulation } from "./ops/projectionSource";
@@ -449,7 +451,8 @@ export function DashboardRouteView() {
   }
 
   return (
-    <section className="win hero" aria-labelledby="dashboard-route-title">
+    <>
+      <section className="win hero" aria-labelledby="dashboard-route-title">
       <div className="win-bar">
         <span>👑 CEO Dashboard</span>
         <span className="window-controls" aria-hidden="true">— ▢ ✕</span>
@@ -464,7 +467,12 @@ export function DashboardRouteView() {
           Operations Console
         </button>
       </div>
-    </section>
+      </section>
+ <div className="dashboard-command-grid">
+  <CeoCommandPanel />
+  <HermesKanbanEmbed />
+ </div>
+    </>
   );
 }
 
@@ -740,6 +748,8 @@ const QUICK_ORDERS = [
 
 function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
   const [draft, setDraft] = useState("");
+  const [queryBusy, setQueryBusy] = useState(false);
+  const [queryError, setQueryError] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const count = snap.chat.length;
 
@@ -748,11 +758,26 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [count]);
 
-  const send = (text: string) => {
+  const send = async (text: string) => {
     const value = text.trim();
     if (!value) return;
-    engine.command(value);
     setDraft("");
+    setQueryError("");
+    engine.pushChat("ceo", "대표님", value);
+    setQueryBusy(true);
+    try {
+      const result = await askCeo(value);
+      engine.pushChat("staff", "CEO Hermes", result.answer);
+      if (result.task?.task_id) {
+        engine.pushLog("🗂", `Hermes Kanban Task 생성 — ${result.task.task_id}`, "mint");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setQueryError(message);
+      engine.pushChat("staff", "CEO Hermes", `질의를 전달하지 못했어요. ${message}`);
+    } finally {
+      setQueryBusy(false);
+    }
   };
 
   return (
@@ -781,15 +806,9 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
 
         <PortfolioResultConsole />
 
-        {/* 위 지시창은 픽셀 오피스 시뮬레이션(app/game/sim.ts)이고, 아래 상자는
-            **실제 CEO Hermes**로 간다. 둘을 한 창에 두되 섞지 않는다 - 시뮬레이션
-            대사를 실제 본부 응답처럼 보이게 하지 않는 것이 이 화면의 규칙이다
-            (ai-office/CLAUDE.md: 로컬 스크립트로 실행을 가장하지 않는다). */}
-        <UserAskPanel />
-
         <div className="console-quick">
-          {QUICK_ORDERS.map((item) => (
-            <button key={item.label} onClick={() => send(item.command)}>
+        {QUICK_ORDERS.map((item) => (
+          <button key={item.label} onClick={() => void send(item.command)} disabled={queryBusy}>
               {item.label}
             </button>
           ))}
@@ -799,7 +818,7 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
           className="console-input"
           onSubmit={(event) => {
             event.preventDefault();
-            send(draft);
+          void send(draft);
           }}
         >
           <input
@@ -808,8 +827,9 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
             placeholder="예: 리서치팀 지금 뭐해?"
             aria-label="대표 지시 입력"
           />
-          <button type="submit">지시</button>
+          <button type="submit" disabled={queryBusy}>{queryBusy ? "전달 중…" : "CEO에 전달"}</button>
         </form>
+        {queryError ? <p className="console-error" role="alert">⚠️ {queryError}</p> : null}
       </div>
     </section>
   );
@@ -1065,6 +1085,11 @@ function DashboardView({
           </div>
         </div>
       </header>
+
+ <div className="dashboard-command-grid">
+  <CeoCommandPanel />
+  <HermesKanbanEmbed />
+ </div>
 
       {portfolioRuntime?.run_id && <PortfolioKanban runtime={portfolioRuntime} result={portfolioResult} observedAt={bffSnapshot?.operations?.observed_at} />}
       {portfolioRuntime?.run_id && <PortfolioResultConsole />}

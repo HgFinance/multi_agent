@@ -66,6 +66,7 @@ from corporate_actions import (
     CorporateActionError,
     apply_corporate_action,
 )
+import financial_statements  # noqa: E402
 from daily_report import ReportError, build_daily_report
 from fill_consumer import project
 from ledger import Journal, Ledger, LedgerError, Position, decimal_str
@@ -604,6 +605,22 @@ def trial_balance(ledger_id: UUID) -> dict:
         "total": _d(sum(balances.values(), Decimal(0))),
         **_provenance(),
     }
+
+
+@app.get(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/statements")
+def financial_statements_view(ledger_id: UUID, until: date | None = None) -> dict:
+    """재무상태표·손익계산서. **취득원가 기준이다** - 시가 순자산은 NAV 쪽을 본다.
+
+    항등식이 깨지면 여기서 200을 주지 않는다. 맞춰서 내보내는 재무제표는
+    숫자가 아니라 거짓말이다.
+    """
+    try:
+        return {"ledger_id": str(ledger_id),
+                **financial_statements.statements(_ledger(ledger_id), until=until),
+                **_provenance()}
+    except financial_statements.StatementError as exc:
+        raise HTTPException(status_code=409, detail=_envelope(
+            "ACCOUNTING_STATEMENTS_UNBALANCED", str(exc), action="ESCALATE")) from exc
 
 
 @app.get(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/positions")

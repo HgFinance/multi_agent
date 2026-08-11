@@ -89,6 +89,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # HR: hiring_request.py가 requested_by/decided_by/decided_at/decision_reason으로
                 # 요청자-승인자 분리(마스터플랜 4.3절 자기승인 금지)를 강제하려 추가
                 "20260810000100_workforce_hiring_requests_requester_decision.sql",
+                # 회계: 보수 발생주의 계정 3개(2100/5200/5300). 거래 수수료(5000)와
+                # 섞으면 TCA가 집행 비용과 운용 보수를 분리하지 못한다
+                "20260811000100_accounting_fee_accounts.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:

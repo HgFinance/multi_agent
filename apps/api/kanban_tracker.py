@@ -22,6 +22,17 @@ import subprocess
 import threading
 from collections.abc import Callable
 
+try:
+    from orchestration.canonical_profiles import (
+        CanonicalKanbanTaskRequest,
+        canonical_profile_for_department,
+    )
+except ImportError:  # pragma: no cover - direct module execution
+    from ..orchestration.canonical_profiles import (
+        CanonicalKanbanTaskRequest,
+        canonical_profile_for_department,
+    )
+
 KANBAN_TRACKING_ENABLED = os.getenv("PORTFOLIO_KANBAN_TRACKING_ENABLED", "false").casefold() in {
     "1",
     "true",
@@ -53,17 +64,25 @@ def _ensure_task_id(*, department: str, idempotency_key: str, title: str) -> str
     creating a duplicate.
     """
 
+    request = CanonicalKanbanTaskRequest(
+        assignee=canonical_profile_for_department(department),
+        title=title,
+        body=title,
+        idempotency_key=idempotency_key,
+    )
     process = _run_cli(
         [
             "kanban",
             "create",
-            title,
+            request.title,
+            "--body",
+            request.body,
             "--assignee",
-            department,
+            request.assignee,
             "--initial-status",
             "running",
             "--idempotency-key",
-            idempotency_key,
+            request.idempotency_key,
             "--json",
         ]
     )
@@ -88,6 +107,7 @@ def track_department_started(
     *,
     on_task_id: Callable[[str], None] | None = None,
 ) -> None:
+    canonical_profile_for_department(department)
     if not KANBAN_TRACKING_ENABLED:
         return
 
@@ -104,6 +124,7 @@ def track_department_started(
 
 
 def track_department_completed(job_id: str, department: str, status: str, summary: str) -> None:
+    canonical_profile_for_department(department)
     if not KANBAN_TRACKING_ENABLED:
         return
 
@@ -124,6 +145,7 @@ def track_department_completed(job_id: str, department: str, status: str, summar
 
 
 def track_department_blocked(job_id: str, department: str, reason: str) -> None:
+    canonical_profile_for_department(department)
     if not KANBAN_TRACKING_ENABLED:
         return
 
