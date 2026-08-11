@@ -12,7 +12,7 @@
 
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
 - Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
-- Docker에서 실행 중인 LS 전 종목 WebSocket·뉴스·Batch Collector, API, Research MCP, Research·Quant Hermes와 TimescaleDB 등 기본 10개 Service
+- [Engineering 문서 안내](02-engineering/README.md) · 루트 Docker Compose에서 관리하는 기본 26개 Service(Research 수집·조회·MCP·Hermes, TimescaleDB, Redis, Risk·QA, CEO·Trading·Accounting·Workforce)와 선택 Profile 3개 서비스(`portfolio` 2개, `dashboard` 1개). 선언 수와 실제 실행 상태는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)과 실행 현황 문서에서 구분한다.
 - LS 종목 Master·구독 계획·실시간 Payload 정규화, DART·거시·Calendar·Corporate Action·뉴스 수집 Adapter
 - Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
 - 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype

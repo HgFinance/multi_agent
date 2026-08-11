@@ -22,7 +22,7 @@
 > - 결정이 나면 [ADR](../02-engineering/adr/)로 승인한 뒤, 해당 계약 문서(`policy.py`, `suitability.py`, 하위 Spec)를 같은 변경에서 함께 갱신한다. 이 문서는 그때 갱신하거나 폐기한다.
 >
 > 상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md) §첫 사용자 가치, [PORTFOLIO_SUITABILITY_SPEC.md](PORTFOLIO_SUITABILITY_SPEC.md), [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](../02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) F01
-> 관련 문서: [MANDATE_INPUT_API_SPEC.md](../02-engineering/MANDATE_INPUT_API_SPEC.md) — governance-api의 실제 Route·응답·에러·멱등성 현황
+> 관련 문서: [USER_INPUT_API_SPEC.md](../02-engineering/USER_INPUT_API_SPEC.md) — governance-api의 실제 Route·응답·에러·멱등성 현황
 >
 > 화면 설계 문서는 두지 않는다. §5 결정 전에 UI를 확정하면 미결정 사항을 고른 셈이 되므로, 결정 후 새로 작성한다.
 
@@ -48,7 +48,7 @@ ADR은 **하나의 결정**을 배경·선택지·결정·결과로 기록한다
 
 F(승인 세분화)·H(프리셋)·I(정렬도)는 위 결정에 종속되므로 별도 ADR을 먼저 쓰지 않는다.
 
-**L(Mandate → Risk 집행 경로)은 ADR 후보가 아니다.** 설계는 `GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md` §5.1에 이미 확정돼 있고 구현만 안 된 상태다 — ADR이 아니라 구현 백로그로 다룬다(A.9 §L). 다만 이 공백 때문에 **위 4개 ADR을 어떻게 결정하든 당장은 한도가 집행되지 않는다**는 점을 논의 전제로 공유해야 한다.
+**L(Mandate → Risk 집행 경로)은 ADR 후보가 아니다.** 설계는 `UNIFIED_DOMAIN_API_SPEC.md` Governance/Risk 절에 이미 확정돼 있고 구현만 안 된 상태다 — ADR이 아니라 구현 백로그로 다룬다(A.9 §L). 다만 이 공백 때문에 **위 4개 ADR을 어떻게 결정하든 당장은 한도가 집행되지 않는다**는 점을 논의 전제로 공유해야 한다.
 
 ## 1. 사용자 입력은 3개의 다른 객체다
 
@@ -345,7 +345,7 @@ J(후보 카탈로그) ─→ 추천 결과 화면 (별도 트랙)
 |---|---|
 | 이 문서 | 무엇을 물어보는가, 어디에 귀속되는가, 무엇이 미결정인가 |
 | (화면 설계 문서 없음) | §5 결정 후 신규 작성 |
-| [MANDATE_INPUT_API_SPEC.md](../02-engineering/MANDATE_INPUT_API_SPEC.md) | Mandate Transport — 실제 Route, 요청/응답 스키마, 에러 코드, 멱등성 한계 |
+| [USER_INPUT_API_SPEC.md](../02-engineering/USER_INPUT_API_SPEC.md) | Mandate Transport — 실제 Route, 요청/응답 스키마, 에러 코드, 멱등성 한계 |
 | [PORTFOLIO_SUITABILITY_SPEC.md](PORTFOLIO_SUITABILITY_SPEC.md) | `InvestorProfile` 계약과 적합성 판정 규칙 |
 
 §5 안건이 확정되면 해당 하위 문서와 `policy.py`/`suitability.py`를 같은 변경에서 함께 갱신한다. 마스터플랜을 바꿔야 하는 결정(예: J-3)은 ADR을 먼저 승인한다.
@@ -372,7 +372,7 @@ J(후보 카탈로그) ─→ 추천 결과 화면 (별도 트랙)
 | `max_daily_turnover_notional` / `max_daily_order_count` | 없음 | Risk에만 존재 |
 | 없음 | `max_sector_weight`, `max_gross_exposure`, `max_concurrent_positions`, `allowed_markets`, `trading_start/end` | Mandate에만 존재, **집행 주체 없음** |
 
-**단, 이것은 "연결할지 말지"의 문제가 아니다.** [GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md](../02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md) §5.1이 이미 "Risk Engine이 governance에서 비율을 조회한다"는 설계를 확정해 뒀다. 실제 코드가 그 설계를 아직 구현하지 않았을 뿐이다 — 상세와 남은 작업은 A.9 §L을 본다.
+**단, 이것은 "연결할지 말지"의 문제가 아니다.** [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md) Governance/Risk 절이 이미 "Risk Engine이 governance에서 비율을 조회한다"는 설계를 확정해 뒀다. 실제 코드가 그 설계를 아직 구현하지 않았을 뿐이다 — 상세와 남은 작업은 A.9 §L을 본다.
 
 지금 단계에서 중요한 점은 하나다. **어떤 필드를 물어보든 현재는 집행되지 않으므로, 화면과 문서가 "이 한도로 차단됩니다"라고 서술하면 안 된다.**
 
@@ -472,7 +472,7 @@ J(후보 카탈로그) ─→ 추천 결과 화면 (별도 트랙)
 
 > **정정(2026-08-05)**: 이 안건을 처음에 "연결할 것인가"라는 열린 질문으로 적었으나 부정확했다. **연결은 이미 설계로 확정돼 있다.**
 
-[GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md](../02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md) §5.1이 호출 경로를 명시한다.
+[UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md) Governance/Risk 절이 호출 경로를 명시한다.
 
 ```
 risk-management / trading-department → GET /governance/v1/mandates/{fund_id}/current → governance

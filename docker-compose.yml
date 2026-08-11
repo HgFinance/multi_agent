@@ -423,19 +423,21 @@ services:
   #   Credential·Memory Namespace 분리는 이름이 아니라 저장소 분리다.
   #   컨테이너만 쪼개고 /opt/data 를 공유하면 한 부서의 세션·기억·자격이 옆
   #   부서에서 그대로 보인다 - 분리된 척이 된다. 그래서 각 컨테이너는
-  #   `~/.hermes-<부서>` 를 따로 마운트하고, 그 안에는 자기 Profile 하나만 둔다.
-  #   HERMES_HOME=/opt/data 는 이미지 기본값이라 마운트만 갈면 분리가 끝난다.
+  #   `/home/ubuntu/.hermes/profiles/<부서>` 를 따로 마운트하고, 그 안에는
+  #   자기 Profile 하나만 둔다. HERMES_HOME=/opt/data 는 이미지 기본값이라
+  #   마운트만 갈면 분리가 끝난다.
   #
-  # ▶ 여기 있는 것은 재일 소유 2개 부서뿐이다. 나머지 6개는 같은 형태로 각
-  #   담당자가 추가한다(도현: trading/accounting, 동규: risk/qa, 영주: ceo/hr).
-  #   담당자 표는 CLAUDE.md - 남의 본부 컨테이너를 대신 만들지 않는다.
+  # ▶ 8개 본부 모두 이 파일(research/quant/risk/qa) 또는 `include:`된
+  #   부서 Compose Fragment(ceo/trading/accounting/hr)에 이미 컨테이너가
+  #   있다(2026-08-10 기준). 담당자 표는 CLAUDE.md - 남의 본부 컨테이너를
+  #   대신 고치지 않는다.
   #
-  # ▶ 데이터 경로 함정 (2026-08-02 실측)
+  # ▶ 데이터 경로 함정 (2026-08-02 실측, 로컬 개발 한정)
   #   Windows 네이티브 설치본은 %LOCALAPPDATA%\hermes 를 쓰지만 컨테이너는
-  #   ${USERPROFILE}/.hermes* 를 마운트한다 - **서로 다른 디렉터리다.**
-  #   섞으면 "분명 profile 을 만들었는데 목록에 없다"가 된다. 동기화는
-  #     HERMES_HOME=~/.hermes-research-department ./scripts/sync_hermes_profiles.sh push
-  #   처럼 부서 디렉터리를 명시해서 돌린다(스크립트가 부서별 경로를 자동 탐색).
+  #   `~/.hermes/profiles/<부서>` 를 마운트한다 - **서로 다른 디렉터리다.**
+  #   섞으면 "분명 profile 을 만들었는데 목록에 없다"가 된다. AWS는 이 함정이
+  #   없다(컨테이너가 EC2 위의 `/home/ubuntu/.hermes/profiles/<부서>` 하나만
+  #   본다). 로컬 동기화 절차는 `scripts/sync_hermes_profiles.sh`.
   #
   # ▶ 부서 간 호출(계획서 3.3 "본부 간 호출은 HTTP")은 `hermes serve` 가
   #   담당한다. 다만 2026-06 하드닝 이후 **비-loopback 바인딩은 인증 없이는

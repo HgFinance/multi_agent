@@ -2,7 +2,7 @@
 
 문서 상태: 통합 기준안 v1.2 (실행 계약 연결)
 
-기준일: 2026-08-04
+기준일: 2026-08-10
 
 소유: Platform/API Architecture
 
@@ -426,12 +426,12 @@ CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `q
 - [Event Registry](contracts/event-registry.v1.json)
 - [event-envelope.v1](contracts/event-envelope.v1.json)
 - [worker-context.v1](contracts/worker-context.v1.json)
-- [Risk·QA Domain API Specification](RISK_QA_DOMAIN_API_SPEC.md)
+- [Risk Mandate Worker Flow](RISK_MANDATE_WORKER_FLOW.md)
 - [Worker 역할·권한 경계](WORKER_ROLE_BOUNDARIES.md)
 - [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)
 - [Database Schema Foundation](../database/README.md)
 - [Investment Minimum Service Unit Specification](../01-product/MINIMUM_SERVICE_UNIT_SPEC.md)
-- RESEARCH_QUANT_DOMAIN_API_SPEC.md
-- TRADING_DOMAIN_API_SPEC.md
-- GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
-- ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md
+- Research·Quant 계약은 이 문서의 Research/Quant 절과 실제 API를 기준으로 한다.
+- Trading 계약은 이 문서의 Trading 절과 실제 API를 기준으로 한다.
+- `governance-api`·`workforce-api` 계약은 이 문서의 Governance/Workforce 절과 실제 API를 기준으로 한다.
+- Accounting/Portfolio 계약은 이 문서의 Accounting/Portfolio 절과 실제 API를 기준으로 한다.

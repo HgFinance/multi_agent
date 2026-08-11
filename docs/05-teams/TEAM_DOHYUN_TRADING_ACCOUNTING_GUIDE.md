@@ -2,7 +2,7 @@
 
 > Override v2.0 · 기준일 2026-08-05
 >
-> 이 문서는 이전 Trading/Accounting 팀 가이드의 운영 기준을 덮어쓴다. Trading의 Paper 구현과 Accounting의 API 주입 Fill 검증을 Production E2E로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [TRADING_DOMAIN_API_SPEC.md](../02-engineering/TRADING_DOMAIN_API_SPEC.md), [ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md](../02-engineering/ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md)다.
+> 이 문서는 이전 Trading/Accounting 팀 가이드의 운영 기준을 덮어쓴다. Trading의 Paper 구현과 Accounting의 API 주입 Fill 검증을 Production E2E로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
 ## 0. 상태 판정 규칙
 
