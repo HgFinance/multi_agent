@@ -75,6 +75,12 @@ class ExpectedEdge(BaseModel):
     type: str = Field(max_length=60, description="momentum | mean_reversion 등")
     horizon_days: int = Field(gt=0, le=365)
     universe: str = Field(max_length=200)
+    # ▶ **유니버스 크기를 가설이 정한다** (2026-08-04). 없으면 config 바인딩이
+    #   항상 기본값 20 을 쓰고, 그러면 "상위 몇 종목" 이 전략의 핵심인데
+    #   가설이 그것을 못 정하는 셈이다. 범위는 config_binding.LIMITS 와 같다 -
+    #   어긋나면 여기서 통과한 값이 바인딩에서 거부된다.
+    top_n: int | None = Field(default=None, ge=5, le=100,
+                              description="상위 몇 종목을 담는가")
 
     @field_validator("type", "universe", mode="before")
     @classmethod
@@ -214,6 +220,9 @@ Binding rules for this task:
   "breadth_rotation", "volatility".
 - expected_edge.horizon_days: positive integer holding horizon.
 - expected_edge.universe: short description of the target universe.
+- expected_edge.top_n: how many names to hold (5-100). This is a core strategy
+  parameter - concentration changes the result more than most signals. Pick it
+  from the rationale, not from habit.
 - falsification_criteria: Korean, at least 2 items, each MEASURABLE (explicit
   metric, threshold and window). A hypothesis without failure modes is
   incomplete and will be rejected.
@@ -221,7 +230,7 @@ Binding rules for this task:
 - observation_refs: ONLY keys that exist in the observation context JSON.
 Output JSON only, exactly this shape, no other text:
 {"title":"...","rationale":"...",
- "expected_edge":{"type":"mean_reversion","horizon_days":5,"universe":"..."},
+ "expected_edge":{"type":"mean_reversion","horizon_days":5,"universe":"...","top_n":20},
  "falsification_criteria":["...","..."],
  "required_data_products":["krx-basket-daily/v1"],
  "observation_refs":["latest_pct_above_sma20"]}"""
@@ -350,7 +359,10 @@ def verify(spec: HypothesisSpec, context: dict
 
 _SELECT_DUP = """
 select hypothesis_id from quant.hypotheses
-where title = %s and status in ('PROPOSED', 'TESTING')
+-- 진행 중인 것만 본다. 종결(REJECTED/SUPPORTED)된 같은 제목은 재시도가
+-- 정상이므로 막지 않는다.
+where title = %s and status in ('INTAKE', 'PREREGISTERED', 'RUNNING',
+                                'PROPOSED', 'TESTING')
 order by created_at limit 1
 """
 
@@ -358,7 +370,10 @@ _INSERT = """
 insert into quant.hypotheses
   (title, rationale, expected_edge, falsification_criteria,
    required_data_products, status, created_by, trace_id)
-values (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, 'PROPOSED', %s, %s)
+-- ▶ 계약(7.6절) 상태로 등록한다. 'PROPOSED' 는 옛 값이고, 오케스트레이터가
+-- INTAKE 부터 사전등록 관문을 태운다 - PROPOSED 로 넣으면 이행기 호환
+-- 경로로만 잡혀 언제 끊길지 모른다.
+values (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, 'INTAKE', %s, %s)
 returning hypothesis_id
 """
 

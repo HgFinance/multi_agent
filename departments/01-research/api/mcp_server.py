@@ -295,6 +295,141 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             from research.analyst_calibration
             order by n desc, node limit 50""")
 
+    # ── 공장 도구 ──────────────────────────────────────────────────────────
+    # ▶ **에이전트가 공장을 직접 돌리게 하는 손이다.** 지금까지 스카우트 산출을
+    #   사람이 파일로 받아 CLI 에 넣었다 - 그 사람이 빠지면 루프가 멈췄다.
+    #
+    # ▶ **쓰기 권한이 생기는 첫 도구들이라 경계를 좁게 긋는다.**
+    #   에이전트는 **제출만** 한다. 파싱·검증·판정·적재는 전부 코드가 한다.
+    #   그래서 `quant.hypotheses` 에 닿는 도구는 여기 없다 - 있으면 에이전트가
+    #   Gate 0 를 우회해 자기 가설을 등록할 수 있고, 그러면 생성자·검증자 분리가
+    #   조직이 아니라 코드 수준에서 무너진다. 접수는 `factory_bridge --intake`
+    #   가 별도로 돌린다.
+    def _factory_path():
+        import sys as _s
+        from pathlib import Path as _P
+        _s.path.insert(0, str(_P(__file__).resolve().parents[1] / "factory"))
+        _s.path.insert(0, str(_P(__file__).resolve().parents[1] / "collectors"))
+
+    @server.tool(
+        name="factory_brief",
+        description="회차 브리핑. 원장에서 읽은 사실만 준다 - 지난 실험이 왜 "
+                    "끝났는지(교훈), 계열별 남은 시도 예산, 최근 돌린 질의, 지금 "
+                    "데이터가 지원하는 범위. 스카우트를 소집하기 전에 반드시 읽어라: "
+                    "여기 적힌 기각 사유에 대응하지 않으면 Gate 0 가 접수를 막는다.")
+    def factory_brief() -> str:
+        _factory_path()
+        import cycle_brief
+
+        conn = _db()
+        mkt = None
+        try:
+            import psycopg2
+            from source_registry import load_project_env
+
+            try:
+                mkt = psycopg2.connect(
+                    load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10)
+            except Exception:
+                mkt = None          # 못 재면 커버리지를 비운다(지어내지 않는다)
+            return cycle_brief.build(conn, market_conn=mkt).as_prompt()
+        finally:
+            conn.close()
+            if mkt:
+                mkt.close()
+
+    @server.tool(
+        name="factory_submit_leads",
+        description="스카우트 산출을 방법론 리드로 제출한다. TITLE/URL/MECHANISM "
+                    "블록 형식 원문을 그대로 넣어라. 코드가 링크를 실제로 열어 보고, "
+                    "메커니즘 없는 블록을 반려하고, 중복을 접어서 적재한다. "
+                    "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
+    def factory_submit_leads(text: str, lens: str = "ACADEMIC",
+                             source_type: str = "PAPER",
+                             model_version: str = "", prompt_version: str = "") -> dict:
+        _factory_path()
+        import lead_intake
+
+        if not model_version.strip() or not prompt_version.strip():
+            # 계보 없는 리드는 재현할 수 없다. 여기서 막지 않으면 손으로 넣은
+            # 것과 에이전트가 찾은 것이 DB 에서 구분되지 않는다.
+            return {"ok": False,
+                    "error": "model_version·prompt_version 이 필요하다 - "
+                             "계보 없는 리드는 재현할 수 없어 받지 않는다"}
+        from datetime import datetime as _dt, timezone as _tz
+
+        case_id = f"scout-{lens.lower()}-{_dt.now(_tz.utc):%Y%m%d}"
+        r = lead_intake.intake(text, lens=lens, source_type=source_type,
+                               case_id=case_id, model_version=model_version,
+                               prompt_version=prompt_version)
+        new = dup = 0
+        if r.leads:
+            conn = _db()
+            try:
+                new, dup = lead_intake.persist(conn, r.leads)
+            finally:
+                conn.close()
+        return {"ok": bool(r.leads), "accepted": len(r.leads),
+                "new": new, "merged_as_mention": dup,
+                "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
+                "link_checks": r.link_notes}
+
+    @server.tool(
+        name="factory_submit_proposal",
+        description="기획안을 발행 게이트에 제출한다. 기획자 산출과 **독립 회의론자** "
+                    "산출을 함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. "
+                    "근거 리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
+                    "차단 사유를 받으면 그 사유에 답해 다시 제출하라.")
+    def factory_submit_proposal(planner_text: str, skeptic_text: str,
+                                planner_run: str, skeptic_run: str,
+                                planner_prompt: str = "",
+                                skeptic_prompt: str = "") -> dict:
+        _factory_path()
+        import proposal_intake as PI
+
+        from datetime import datetime as _dt, timezone as _tz
+
+        conn = _db()
+        try:
+            wanted = {i for b in PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
+                      for i in PI._split(b.get("LEAD_IDS", ""))}
+            leads = PI.load_leads(conn, sorted(wanted))
+            missing = sorted(wanted - set(leads))
+            r = PI.intake(planner_text, skeptic_text,
+                          case_id=f"plan-{_dt.now(_tz.utc):%Y%m%d}",
+                          planner_run=planner_run, skeptic_run=skeptic_run,
+                          leads=leads)
+            for prop, _g in r.proposals:
+                setattr(prop, "_planner_prompt", planner_prompt)
+                setattr(prop, "_skeptic_prompt", skeptic_prompt)
+            pub = r.publishable
+            new = dup = 0
+            if pub:
+                new, dup = PI.persist(conn, pub)
+            return {
+                "ok": bool(pub), "published": new, "already_present": dup,
+                "unknown_lead_ids": missing,
+                "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
+                "gate": [{"proposal_id": p.proposal_id, "passed": g.ok,
+                          "blockers": g.blockers, "warnings": g.warnings}
+                         for p, g in r.proposals],
+            }
+        finally:
+            conn.close()
+
+    @server.tool(
+        name="factory_outcomes",
+        description="최근 실험 종결 기록(판정·교훈 코드·지표). 같은 계열을 다시 "
+                    "제안하기 전에 읽어라 - 기각 교훈에 대응이 없으면 Gate 0 가 "
+                    "DUPLICATE_UNADDRESSED 로 막는다.")
+    def factory_outcomes(limit: int = 10) -> list[dict]:
+        n = max(1, min(int(limit), 50))
+        return _rows("""
+            select experiment_id::text, trial_family_id, decision, lesson_codes,
+                   oos_summary, coalesce(notes, '') as notes, created_at
+            from research.experiment_outcomes
+            order by created_at desc limit %s""", (n,))
+
     return server
 
 

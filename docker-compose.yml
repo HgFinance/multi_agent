@@ -773,6 +773,31 @@ services:
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s
+  # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────
+  # **기본 `docker compose up` 에서는 뜨지 않는다.** profiles 로 묶어 두었으니
+  # `docker compose --profile research-skills up -d` 로만 기동한다 - 검증 전
+  # 서비스가 기존 스택 기동을 깨뜨리지 않게 하려는 것이다.
+  #
+  # 둘 다 **API 키가 필요 없다**(키가 필요한 OpenAlex 커넥터는 쓰지 않는다).
+  # 최초 기동 후 `hermes -p research-department mcp test paper-search` 로 계약을
+  # 확인하고 나서 프로필 config 의 enabled 를 true 로 올린다.
+  paper-search-mcp:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    container_name: hedgefund-paper-search-mcp
+    profiles: ["research-skills"]
+    restart: unless-stopped
+    command: ["uvx", "paper-search-mcp", "--transport", "http", "--port", "8041"]
+    environment:
+      # Unpaywall 만 연락처 이메일을 요구한다(키가 아니다). 없으면 그 소스만 빠진다.
+      UNPAYWALL_EMAIL: ${UNPAYWALL_EMAIL:-}
+
+  youtube-transcript-mcp:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    container_name: hedgefund-youtube-transcript-mcp
+    profiles: ["research-skills"]
+    restart: unless-stopped
+    command: ["uvx", "--from", "mcp-youtube-transcript", "mcp-youtube-transcript",
+              "--transport", "http", "--port", "8042"]
 
 volumes:
   tsdb_data:

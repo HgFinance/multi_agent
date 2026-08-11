@@ -1,26 +1,51 @@
-# Research-Quant Evidence-to-Strategy Framework
+# Research-Quant Strategy Factory Framework
 
 > 상태: 채택 예정 설계 기준
 > 범위: 리서치본부, 퀀트/백테스트본부, 두 본부의 Hermes Supervisor와 LangGraph Workflow
 > 상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 구현 담당: [TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md)
 > 리서치 산출물 상세: [RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md](RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md)
+> 개정: 2026-08-10 전략 공장 재편 (재일). 이전 판은 리서치를 종목 분석 조직으로,
+> 가설 발굴을 퀀트 소속으로 두었다. 그 구조는 **프레임워크 자체가 투자판단을 내리는**
+> 형태이며, 아래 1절의 이유로 검증이 성립하지 않는다.
 
 ## 1. 한 문장 정의
 
-이 프레임워크는 **수집한 자료를 출처가 연결된 투자 주장으로 만들고, 그 주장을 반증 가능한
-전략 가설과 재현 가능한 실험으로 바꾼 뒤, 실패 결과까지 다시 연구 절차에 학습시키는
-Research-to-Strategy 폐쇄 루프**다.
+이 프레임워크는 **웹에서 방법론을 수집해 반증 가능한 실험 기획으로 만들고, 그 기획을
+사전 등록해 결정론적으로 실험한 뒤, 성공과 실패를 모두 다음 기획의 입력으로 되돌리는
+전략 공장**이다.
 
-쉽게 말하면 다음 세 질문에 순서대로 답한다.
+핵심 명제 하나가 나머지를 결정한다. **프레임워크는 투자를 판단하지 않는다.
+판단은 실험을 통과해 승격된 전략이 한다.**
 
-1. 지금까지 확인된 사실은 무엇인가?
-2. 그 사실에서 검증할 만한 투자 가설은 무엇인가?
-3. 과거에 같은 규칙을 적용했을 때 비용 후에도 반복해서 살아남았는가?
+이 명제를 택한 이유는 취향이 아니라 검증 가능성이다. 에이전트 조직이 사건마다 직접
+매매를 판단하는 구조(선행 연구의 분석가 위원회·Bull/Bear 토론형)는 세 가지가 동시에
+불가능해진다.
 
-리서치본부는 1번과 2번의 근거를 만들고, 퀀트/백테스트본부는 2번을 고정한 뒤 3번을
-검증한다. Hermes는 본부장으로서 일을 배정하고 실패를 복구하며 승인 후보를 올리지만,
-수치 계산이나 자기 결과의 최종 승인자는 아니다.
+1. **사전지식 누수** — LLM의 학습 데이터에 백테스트 구간의 미래가 들어 있다. 성과가
+   판단력에서 왔는지 기억에서 왔는지 구분할 수 없고, purged walk-forward나 embargo는
+   모델 내부의 기억 누수를 막지 못한다.
+2. **통제되지 않는 시도** — 프롬프트 한 줄을 고치면 새 전략인데 어떤 원장에도 계수되지
+   않는다. 다중검정 보정의 분모가 사라진다.
+3. **비재현성** — 같은 입력에 다른 판단이 나오면 실험 카드를 쓸 수 없고, 독립 재현
+   검증도 성립하지 않는다.
+
+그래서 세 질문을 순서대로 답한다.
+
+1. 지금 세상 어딘가에 있는 방법 중 우리가 시험해볼 가치가 있는 것은 무엇인가?
+2. 그 방법을 우리 데이터로 반증 가능하게 만들면 어떤 실험이 되는가?
+3. 그 실험이 비용과 시도 횟수를 감안하고도 살아남는가?
+
+리서치본부는 1번과 2번을 맡아 **실험 기획안**을 만들고, 퀀트/백테스트본부는 그것을
+사전 등록한 뒤 3번을 검증한다. **가설을 낸 부서가 검증까지 하지 않는다** — 생성자와
+검증자의 분리는 조직 경계로만 강제된다. Hermes는 본부장으로서 일을 배정하고 실패를
+복구하지만, 수치 계산자도 자기 결과의 승인자도 아니다.
+
+기존 종목 분석 파이프라인(분석가 위원회 + 종목별 Research Packet)은 **운영에서 내린다.**
+코드는 감사 계보를 위해 남기지만 어떤 흐름에도 연결하지 않는다. LLM이 사건을 읽어
+판단하는 방식이 쓸 만한지는 나중에 하나의 전략 후보로 실험해 확인하면 되는 일이고,
+지금 이 프레임워크의 초점은 공장 하나다. 위원회는 전략의 *내용물*이 될 수는 있어도
+회사의 *심사 제도*가 될 수 없다.
 
 ## 2. 결론부터 보는 채택안
 
@@ -122,41 +147,39 @@ experiment_orchestrator.py
 
 ```mermaid
 flowchart LR
-    T["Event · 정기 Mandate"] --> RH["Research Hermes Supervisor"]
-    RH --> RC["ResearchCaseV2 생성 · 예산 · SLA"]
-    RC --> RG["Research LangGraph"]
+    W["웹 방법론 소스<br/>논문·서한·커뮤니티·타 분야"] --> RH["Research Hermes<br/>편집장"]
+    RH --> SC["Scout Fan-out<br/>렌즈 4"]
+    SC --> LEAD["MethodologyLeadV1<br/>출처 필수"]
+    LEAD --> PLAN["Experiment Planner<br/>통제 어휘 사상"]
+    PLAN --> SKEP["Competing Explanation<br/>독립 회의론자"]
+    SKEP --> PUB["발행 게이트"]
+    PUB --> PROP["ExperimentProposalV1"]
 
-    RG --> CUT["PIT Cutoff Lock"]
-    CUT --> QP["Corpus-aware Retrieval Planner"]
-    QP --> EF["Evidence Foundation · Context Timeline"]
-    EF --> FAN["Specialist Fan-out"]
-    FAN --> CG["Claim/Evidence Graph"]
-    CG --> VAL["Coverage · Contradiction · Numeric Validator"]
-    VAL --> MAC["Macro Outlook"]
-    VAL --> MIC["Micro Outlook"]
-    MAC --> SYN["Synthesis"]
-    MIC --> SYN
-    SYN --> RED["Skeptic Challenge"]
-    RED --> RP["ResearchPacketV2"]
+    PROP --> G0{"Gate 0<br/>중복·예산 검사<br/>결정론"}
+    G0 -- 반려 --> RH
+    G0 --> QH["Quant Hermes"]
+    QH --> PRE["HypothesisSpecV2<br/>사전 등록 · 불변 지문"]
+    PRE --> CUR["Data Curator · PIT Dataset"]
+    CUR --> RUN["Deterministic Experiment Runner"]
+    RUN --> ROB["Trial Pressure · DSR · PBO · Regime"]
+    ROB --> CARD["ExperimentCardV1"]
+    CARD --> G1{"Release Gate<br/>결정론 CRITERIA"}
 
-    RP --> QH["Quant Hermes Supervisor"]
-    QH --> QG["Quant LangGraph"]
-    QG --> CUR["Data Curator · PIT Dataset"]
-    CUR --> HYP["Hypothesis Planner · Preregistration"]
-    HYP --> RUN["Deterministic Experiment Runner"]
-    RUN --> ROB["Independent Robustness Validator"]
-    ROB --> ARB["Model/Strategy Arbitrator"]
-    ARB --> CARD["ExperimentCard · Candidate"]
-    CARD --> GATE["QA · Risk · CEO Promotion Gate"]
+    G1 -- HOLD --> OUT["ExperimentOutcomeV1<br/>lesson_codes"]
+    G1 -- SUBMIT_TO_QA --> G2{"승격 관문<br/>QA 재현 → Risk 수용력<br/>→ 인간 서명"}
+    G2 -- HOLD --> OUT
+    G2 -- strategy.promoted.v1 --> TRD["트레이딩본부<br/>병렬 운용"]
+    TRD -- "킬 · 강등 · 실측" --> OUT
 
-    RP --> OUT["Outcome Scorer"]
-    CARD --> OUT
-    OUT --> CAL["Calibration Candidate"]
-    CAL --> QA["Held-out Eval · QA 승인"]
-    QA --> SK["Versioned Hermes Skill/Memory"]
-    SK -.-> RH
-    SK -.-> QH
+    OUT --> G0
+    OUT --> RH
 ```
+
+이 그림에서 **에이전트는 어디에도 판정자로 등장하지 않는다.** 수집·기획·반증은
+에이전트가, 판정(Gate 0/Release Gate/과적합 통계)은 결정론 코드가, 자본이 걸리는
+승격의 마지막 서명은 사람이 한다. 그리고 오른쪽 끝에서 왼쪽으로 돌아오는 간선
+(`ExperimentOutcomeV1 → Gate 0`)이 이 프레임워크를 공장으로 만든다 — 이 간선이 없으면
+같은 실험을 다시 사게 된다.
 
 ### 5.2 세 계층의 책임
 
@@ -175,18 +198,25 @@ Graph 의미를 하드웨어 제약에 맞춰 직렬로 고정하지 않는다. 
 
 ### 6.1 단계별 Workflow
 
+리서치본부의 산출물은 종목 견해가 아니라 **실험 기획안**이다. 아래 단계는 "무엇을 살 것인가"가
+아니라 "무엇을 시험할 것인가"에 답한다.
+
 | 단계 | 담당 | 하는 일 | 실패 시 |
 |---|---|---|---|
-| 1. Intake | Research Hermes | 사건, 종목, Horizon, 중요도, 예산과 SLA를 `ResearchCaseV2`로 고정 | 필수 Mandate 누락 시 `BLOCKED` |
+| 1. Scout Cycle | Research Hermes(편집장) | 어느 광맥을 팔지 정하고 렌즈별 스카우트를 소집. 주기·예산·SLA를 `ResearchCaseV2`로 고정 | 필수 Mandate 누락 시 `BLOCKED` |
 | 2. Cutoff Lock | PIT Service | `as_known_at`과 `event_time/available_time/observed_at` 규칙 고정 | Cutoff 미지원 Source는 제외 또는 Case 중단 |
-| 3. Query Plan | Retrieval Planner | 역할별 질문, Source, Metadata Filter, 숫자·표 필요 여부 생성 | 계획 Schema 오류 시 1회 재생성 |
-| 4. Contextualization | Evidence Service | 사건 타임라인, Entity, 가격 반응, 공시·뉴스 선후관계 구성 | 식별자 충돌은 Data Steward로 Escalation |
-| 5. Specialist Fan-out | LangGraph Workers | Fundamental, Technical, Microstructure, News, Macro/Regime, Geopolitical 독립 분석 | 필수 역할 실패만 Case 차단, 나머지는 부분 결과 표시 |
-| 6. Evidence Validation | 결정론적 Validator | Citation 존재, 숫자 일치, 시간 누수, 주장 Coverage와 모순 검사 | 최대 2회 Evidence Gap 재검색 |
-| 7. Dual Outlook | Outlook Workers | Macro/중기와 Micro/단기 전망을 서로 보지 않고 작성 | 근거 부족이면 `INCONCLUSIVE` |
-| 8. Synthesis | Synthesis Worker | 두 전망과 Claim Graph를 최종 Thesis·촉매·무효화 조건으로 결합 | 긴 원문 대신 Claim ID만 사용 |
-| 9. Challenge | Skeptic Worker | 대안 설명, 반대 근거, 과신과 누락 질문 제시 | 치명적 반증이면 `INSUFFICIENT` |
-| 10. Publish | Research Hermes | 계약 검증된 Packet을 서명하고 Event 발행, 후속 부서 Handoff | 미검증 Packet 발행 금지 |
+| 3. Lens Fan-out | Scout Workers (RES-11~14) | 학술·실무·커뮤니티·타분야 렌즈가 **서로의 결과를 보지 않고** 병렬 수집 | 소스 접근 실패는 리드 미생산으로 기록 — 기억으로 지어내지 않는다 |
+| 4. Lead Validation | 결정론적 Validator | 출처 존재(URL·시각·발췌), 인용 일치, 중복 리드 접기, 기존 `MethodologyLeadV1` 대조 | 출처 없는 리드는 폐기, 최대 2회 재검색 |
+| 5. Prior-art Check | 결정론적 Gate | 같은 trial family의 `ExperimentOutcomeV1` 기각 이력과 `lesson_codes` 조회 | 대응 없는 재도전은 `DUPLICATE_UNADDRESSED` 반려 |
+| 6. Feasibility | Market Context Worker (RES-17) | 유니버스 실재 여부, 히스토리 길이, 유동성, DQ 공백 — **실행 가능성 재료**(방향 예측 아님) | 커버리지 공백은 공백으로 보고, 우회하지 않는다 |
+| 7. Planning | Experiment Planner (RES-16) | 통제 어휘(edge type·universe·label·baseline) 사상, 데이터 요구, 파라미터 범위, 반증 검사 | 어휘 미사상은 `UNMAPPED_VOCAB` — 자유 서술 금지 |
+| 8. Challenge | Competing Explanation Worker (RES-15) | 베타·유동성 프리미엄·데이터 마이닝·비용 미반영 중 최소 1개를 최대한 강하게 논증 | 경쟁 설명 부재는 발행 불가 |
+| 9. Publish Gate | 결정론 검사 + 편집장 | 반대편 주체·경쟁 설명 코드·반증 검사·회의론자 서명 4필수 확인 | 미비 항목과 함께 7단계로 반려(예산 미소모) |
+| 10. Handoff | Research Hermes | 계약 검증된 `ExperimentProposalV1` 서명·Event 발행, 퀀트 Gate 0으로 전달 | 미검증 기획안 발행 금지 |
+
+3단계의 스카우트가 **서로의 결과를 보지 않는 것**과 8단계의 회의론자가 **편집장의 채택
+사유를 보지 않는 것**은 같은 원리다. 독립성은 프롬프트가 아니라 **입력 격리**로만 만들어진다 —
+같은 맥락을 공유한 반증자는 반증이 아니라 보강을 한다.
 
 `ResearchCaseV2`는 본부장이 직원에게 내리는 업무지시이자 Case 전체의 실행 경계다.
 
@@ -218,147 +248,182 @@ status: RECEIVED
 
 ### 6.2 역할별 Retrieval
 
-모든 직원에게 같은 검색 결과를 주지 않는다.
+모든 직원에게 같은 검색 결과를 주지 않는다. 렌즈가 다르다는 것은 **어디를 뒤지는지가
+다르다**는 뜻이다.
 
-| 역할 | 우선 Source | 필수 Filter와 Tool |
+| 렌즈 | 우선 Source | 필수 Filter와 Tool |
 |---|---|---|
-| Fundamental | DART 원문·재무·Corporate Action | 공시 유형, 보고기간, 연결/별도, 정정 이력, 표 단위 검색 |
-| News/Sentiment | NAVER/Alpaca, 승인된 X Watchlist | 게시·관측 시각, Entity, Story Cluster, 독립 출처 수 |
-| Technical | LS Bar와 결정론적 Feature | `as_known_at`, 조정주가 버전, Feature Version |
-| Microstructure | Tick, Quote, 거래대금·Spread·Impact | 거래 세션, 지연, 결측·Gap, 유동성 Bucket |
-| Macro/Regime | 금리·FX·지수·Breadth·Calendar | 공표 시각, Revision Vintage, 국내 시장 Mapping |
-| Geopolitical | 공식 발표·공신력 뉴스·GDELT 후보 | Event 시간, 지역·산업 Entity, Source Reliability |
+| Academic (RES-11) | 학술지·arXiv·SSRN·학위논문 | 발행일, 저널·프리프린트 구분, 표본 시장·기간, 저자가 밝힌 실패 조건 |
+| Practitioner (RES-12) | 투자자 서한·운용사 코멘터리·데스크 노트·실무 블로그 | 원문 우선(2차 보도 배제), 저자가 서술한 시기, 인용과 추론의 구분 |
+| Community (RES-13) | 포럼·커뮤니티·영상 트랜스크립트·오픈소스 저장소 | 독립 언급 수, 코드·데이터 제시 여부, 규칙으로 서술 가능한지 |
+| Cross-domain (RES-14) | 신호처리·정보이론·통계물리·생태학·제어이론 문헌 | 원 문제 정의, 방법이 성립하는 구조적 전제, 시장 양에 대응하는지 |
+| Market Context (RES-17) | 내부 Universe·Bar·DQ·Regime API | `as_known_at`, 히스토리 길이, 유동성 Bucket, 결측·Gap |
+| Holdings Q&A (RES-18) | 보유 종목의 공시·뉴스·시세 | 게시·관측 시각, 인용 가능성 — **공장 입력 아님**(6.2.2) |
 
 Semantic Similarity만으로 증거를 채택하지 않는다. `Metadata Filter -> Lexical/Vector Hybrid ->
-Rerank -> Citation/Time/Numeric Validation` 순서로 처리한다.
+Rerank -> Citation/Time/Numeric Validation` 순서로 처리한다. 이 순서는 종목 증거에서와
+똑같이 방법론 리드에도 적용된다 — 논문 초록의 유사도만 보고 리드를 만들면, 실제로는
+다른 시장·다른 기간을 다룬 글이 우리 가설의 근거로 둔갑한다.
 
-### 6.2.1 Web Search MCP와 직원 배정
+### 6.2.1 Web Search MCP와 두 개의 검색 트랙
 
-웹검색은 내부 RAG를 대체하는 공통 Tool이 아니라 Evidence Gap을 보완하는 제한된 Retrieval
-경로다. 초기에는 새 Agent를 만들지 않고 기존 `RES-08 RAG Librarian/Evidence Curator`를
-`RAG Librarian, Evidence Curator and Web Researcher`로 확장한다.
+**웹 검색은 이 본부의 본업이다.** 이전 판에서 웹은 "Evidence Gap을 보완하는 제한된
+Retrieval 경로"였는데, 공장 모델에서 그 격하는 곧 본업 봉쇄다 — 종목코드·별칭으로만
+질의를 허용하면 "모멘텀 크래시 헤지 방법론" 같은 검색이 정책상 불가능해진다.
+
+종목 증거 공백을 보충하던 기존 트랙은 그 소비자(분석가 위원회)와 함께 운영에서 내려간다.
+남는 것은 하나, **방법론 트랙**이다. 통제 취지 — 예산 상한, Source Tier 검사, 발견과 승격의
+분리 — 는 그대로 가져오고 질의 대상만 종목코드에서 방법 서술로 바뀐다.
 
 ```text
-전문 분석가의 Unanswered Question
-  -> WebSearchRequest
-  -> RES-08 내부 RAG 재검색
-  -> Evidence Gap 확인
-  -> SearXNG Search MCP
+Scout Cycle (렌즈 4, 서로의 결과를 보지 않음)
+  -> 렌즈별 자유 질의 (Self-hosted SearXNG search MCP)
   -> URL·시점·Source Tier·License 검사
-  -> 상위 URL만 ArticleReader/Read-only Playwright MCP
-  -> SEARCH_HIT
-  -> Citation·Time·Numeric Validator
-  -> VERIFIED_EVIDENCE
+  -> 상위 문서만 ArticleReader/Read-only Playwright MCP
+  -> SEARCH_HIT (URL·제목·발행일·접근시각·원문 발췌 필수)
+  -> Citation·Time Validator
+  -> MethodologyLeadV1
+  -> RES-08 큐레이션 -> VERIFIED (승격은 발견자가 하지 않는다)
 ```
 
-P0 권한 배정:
+권한 배정:
 
 | 역할 | `research.web.search` | `research.web.open` | `research.web.verify` | 비고 |
 |---|---:|---:|---:|---|
-| RES-08 RAG Librarian/Web Researcher | 허용 | 허용 | 검증 후보 제출 | 실제 MCP 사용자 |
-| RES-00 Research Supervisor | 금지 | 금지 | 금지 | Case 우선순위와 RES-08 위임만 수행 |
-| RES-05 Fundamental | 금지 | 금지 | 금지 | IR·공시·실적 원출처 요청 가능 |
-| RES-06 News/Sentiment | 금지 | 금지 | 금지 | 속보·루머·독립 출처 검색 요청 가능 |
-| RES-07 Sector/Macro | 금지 | 금지 | 금지 | 정책·통계 공식 원문 요청 가능 |
-| RES-09 Geopolitical | 금지 | 금지 | 금지 | 정부·국제기구·제재 원문 요청 가능 |
-| RES-01/02/03/04 | 금지 | 금지 | 금지 | Universe·DQ·Market/Feature API만 사용 |
+| RES-11~14 Methodology Scouts | 허용 | 허용 | 검증 후보 제출 | 자유 질의는 이 자리에서만 |
+| RES-08 RAG Librarian/Curator | 금지 | 허용 | **승격 판정** | 스카우트가 가져온 것을 검증·색인한다 |
+| RES-00 Research Editor | 금지 | 금지 | 금지 | 소집·채택·발행만 수행 |
+| RES-15 Competing Explanation | 금지 | 금지 | 금지 | **의도된 금지** — 검색을 주면 반증 대신 보강을 시작한다 |
+| RES-16 Experiment Planner | 금지 | 금지 | 금지 | 이미 채택된 리드만 다룬다 |
+| RES-17 Market Context | 금지 | 금지 | 금지 | 내부 Market/DQ API만 사용 |
 
-전문 분석가에게는 외부 검색 Tool 대신 `research.web.request`만 제공한다. 요청 계약은
-`case_id`, 질문, 검색 목적, `as_known_at`, 허용 Source Tier·Domain, 최대 Query/Page 수와
-Due Time을 가진다. RES-08은 결과를 긴 본문으로 반환하지 않고 `Search Hit Set`과 검증된
-Evidence ID를 반환한다.
+**발견과 승격은 여전히 분리한다.** 스카우트는 `SEARCH_HIT`과 `MethodologyLeadV1`까지만
+만들고, 그것이 검증된 근거로 승격되는 판정은 RES-08 큐레이션과 결정론 Validator가 한다 —
+검색한 사람이 자기 결과를 사실로 승인할 수 없다는 원칙은 트랙이 늘어도 그대로다.
 
 검색 인프라는 `Self-hosted SearXNG -> research-web-mcp`를 기본으로 하고, JavaScript·버튼·탭이
-필요한 상위 URL만 격리된 Playwright MCP로 연다. Tavily/SerpApi Quota는 SearXNG 장애 또는
+필요한 상위 URL만 격리된 Playwright MCP로 연다. 공개 SearXNG 인스턴스는 ToS 위반이라
+사용하지 않고 우리가 운영하는 주소만 쓴다. Tavily/SerpApi Quota는 SearXNG 장애 또는
 Material Case의 Coverage 보완에만 예약한다. Browser에는 로그인 Profile, Broker·DB Secret,
 내부망, 파일 실행과 Persistent Download 권한을 주지 않는다.
 
-`RES-10 Web Intelligence Researcher`는 초기 Roster에 넣지 않는다. 다음 조건이 최소 2개 평가
-주기에서 반복될 때 Agent Workforce에 Hiring Requisition을 제출한다.
+`RES-10 Web Intelligence Researcher`는 별도로 두지 않는다. 방법론 트랙이 생기면서 그
+직무가 RES-11~14로 흡수됐다. 스카우트 증원 트리거는 인력 SLO(리드 검토 대기 p95,
+주간 기획안 발행 건수)로 판정하며, 신설·증원은 Agent Workforce 절차를 따른다.
 
-1. Web Search Queue가 본부 SLO를 반복 위반한다.
-2. 검색 업무 때문에 RES-08의 Citation Resolution, Index Freshness 또는 Retraction 업무가 지연된다.
-3. 국제 정책·산업·법률 원출처 탐색이 일반 Evidence Curator와 다른 언어·도메인 Skill을 요구한다.
-4. 발견과 Evidence 승격을 분리해야 할 만큼 Source Conflict 또는 오승격 위험이 커진다.
+### 6.2.2 서비스 자리: 보유 종목 질의 응답 (RES-18)
 
-신설 후에는 RES-10이 `Search Hit Set` 발견만 맡고, RES-08이 독립적으로
-`VERIFIED_EVIDENCE` 승격을 맡는다. 검색 Agent가 자기 결과를 사실로 승인할 수 없다.
+사용자는 자기 포트폴리오의 개별 종목을 묻는다. 그 질문에 답할 자리는 있어야 한다 —
+없으면 사용자는 답을 얻지 못하거나, 더 나쁘게는 공장이 그 답을 하려고 방향 예측을
+다시 만들기 시작한다.
 
-### 6.3 `AnalystFindingV1`
+그래서 **자리는 두되 경계를 박는다.**
 
-각 직원은 자유 보고서 대신 같은 계약을 반환한다.
+| 구분 | Market Context (RES-17) | Holdings Q&A (RES-18) |
+|---|---|---|
+| 독자 | 실험 기획자 | 사람(자산 소유자) |
+| 목적 | 이 실험이 실행 가능한가 | 내가 가진 이것이 지금 어떤 상태인가 |
+| 산출물 소비처 | `ExperimentProposalV1` | **없음 — 사람이 읽고 끝난다** |
+| 금지 | 방향 예측 | 매수·매도·비중 권고, 기획안 근거로의 인용, 주문 경로 진입 |
+
+핵심은 마지막 줄이다. 이 답변은 **어디에도 입력되지 않는다.** 기획안의 근거가 되지도,
+주문 경로에 닿지도 않는다. 두 자리를 하나로 합치면 "사람에게 설명한 견해"가 조용히
+"실험의 근거"로 승격되고, 그 순간 프레임워크가 다시 투자판단을 하기 시작한다.
+
+### 6.3 `MethodologyLeadV1`
+
+스카우트는 자유 보고서 대신 같은 계약을 반환한다. 리드 하나 = "어딘가에서 본, 시험해볼
+가치가 있을지도 모르는 방법" 하나다.
 
 ```yaml
-finding_id: finding_...
+lead_id: lead_...                    # 내용 해시 - 같은 소스 재수집 시 같은 ID 로 접힌다
 case_id: research_case_...
-perspective: fundamental
-as_known_at: 2026-08-03T01:30:00Z
-horizon: 20d
-claims:
-  - claim_id: claim_...
-    statement: 영업이익률이 전년 동기 대비 개선됐다.
-    claim_type: fact        # fact | inference | forecast
-    evidence_ids: [dart_..., financial_...]
-    direction: supportive  # supportive | opposing | neutral
-    confidence: 0.72
-    numeric_refs: [metric_...]
-contradictions: [claim_...]
-unanswered_questions:
-  - 개선이 일회성 원가 요인인지 확인 필요
-status: COMPLETE            # COMPLETE | PARTIAL | INCONCLUSIVE | BLOCKED
+scout_lens: academic                 # academic | practitioner | community | cross_domain
+as_known_at: 2026-08-10T01:30:00Z
+source_type: PAPER                   # PAPER | BLOG | VIDEO | COMMUNITY | INVESTOR_LETTER
+refs:                                # **빈 리스트 금지** - 출처 없는 리드는 리드가 아니다
+  - url: https://...
+    title: ...
+    author: ...
+    published_at: 2025-11-02
+    accessed_at: 2026-08-10T01:22:00Z
+    excerpt: "원문 발췌 (<=500자, 요약이 아니라 인용)"
+claimed_edge: 소스가 주장하는 엣지 한 문장 (스카우트의 해석이 아니라 소스의 주장)
+stated_mechanism: 왜 지속되는가에 대한 소스의 설명
+inferred: false                      # 추론이면 true - 인용과 추론을 섞지 않는다
+market_context: 소스가 실제로 다룬 시장과 기간
+stated_failure_mode: 저자가 밝힌 무너지는 조건
+independent_mentions: 1              # community 렌즈에서 특히 중요
+testability: RULE_EXPRESSIBLE        # RULE_EXPRESSIBLE | VAGUE | UNUSABLE
+status: COMPLETE                     # COMPLETE | PARTIAL | UNUSABLE | BLOCKED
 model_version: agent-research@...
-prompt_version: res-fundamental@...
-tool_versions: [research-api@...]
+prompt_version: res-scout-academic@...
+tool_versions: [research-web-mcp@...]
 ```
 
-### 6.4 `ResearchPacketV2`
+`testability: UNUSABLE`은 실패가 아니라 정상 산출이다. 규칙으로 서술할 수 없는 주장을
+억지로 다듬어 넘기면 그 비용은 실험 예산에서 나간다.
+
+### 6.4 `ExperimentProposalV1`
+
+리서치본부의 정본 산출물이다. 종목 견해가 아니라 **퀀트가 사전 등록할 수 있는 실험**이다.
 
 ```yaml
-packet_id: rp_...
+proposal_id: prop_...
 case_id: research_case_...
-instrument_id: inst_...
-trigger: disclosure
-as_known_at: 2026-08-03T01:30:00Z
-horizons: [1d, 5d, 20d]
-evidence_manifest_id: em_...
-claim_graph_id: cg_...
-macro_outlook:
-  direction: neutral
-  confidence: 0.58
-  claim_ids: [claim_...]
-micro_outlook:
-  direction: positive
-  confidence: 0.66
-  claim_ids: [claim_...]
-thesis: 단기 촉매는 있으나 중기 시장 환경은 중립적이다.
-catalysts: []
-invalidation: []
-dissent: []
-evidence_gaps: []
-calibration:
-  cohort: disclosure_20d
-  historical_brier: null
+lead_ids: [lead_...]                 # 근거가 된 방법론 리드 (내부 실패 재도전이면 outcome_id 포함)
+as_known_at: 2026-08-10T01:30:00Z
+
+economic_rationale: |
+  누가 반대편에서 잃어주는가 / 어떤 제약·행동편향 때문에 엣지가 지속되는가.
+  "과거에 잘 됐다"는 rationale 이 아니다 - 발행 게이트에서 반려된다.
+counterparty: 반대편 주체 한 줄        # 비면 발행 불가(결정론 검사)
+competing_explanation: 이 수익을 설명할 수 있는 가장 강한 대안 서술
+competing_explanation_codes: [DATA_MINING]   # BETA_EXPOSURE | LIQUIDITY_PREMIUM | DATA_MINING | COST_UNACCOUNTED, >=1 필수
+skeptic_sign: worker_run_...         # RES-15 서명 - 없으면 발행 불가
+
+edge_type: mean_reversion            # 통제 어휘. 미사상이면 UNMAPPED_VOCAB 반려
+universe_key: above_sma20            # 통제 어휘. **자유 서술 금지**
+label: forward_return
+baseline: equal_weight_buy_and_hold
+falsification_tests:                 # >=1 필수
+  - 하락장 초과수익이 0 미만이면 기각
+data_requirements:
+  tables: [market_bars]
+  min_history_days: 750
+suggested_params: {lookback_days: [10, 20, 40], top_n: [10, 20]}   # 튜닝 파라미터 - Family 를 가르지 않는다
+trial_budget: 5
+
+prior_check:                         # Gate 0 결과 첨부 의무
+  trial_family_id: fam_...
+  trials_used: 2
+  past_outcomes: [out_...]
+  lessons_addressed:
+    BEAR_FRAGILE: 하락장 표본을 2창에서 5창으로 늘려 재검증한다
+
 status: PUBLISHED
 lineage:
-  graph_version: research-rqf-v1
+  graph_version: research-factory-v1
   model_versions: {}
   prompt_versions: {}
 ```
 
-Packet의 Confidence는 자연어 강도가 아니라 과거 같은 유형의 예측 오차로 보정한다.
-충분한 표본이 없으면 `uncalibrated: true`를 표시하고 숫자를 정밀한 확률처럼 사용하지 않는다.
+`universe_key`를 통제 어휘로 묶는 이유는 형식주의가 아니다. LLM의 자유 서술은 같은 뜻을
+매번 다르게 쓰고("KRX 전체 시장" vs "KRX 시장 전 종목"), 그러면 같은 아이디어가 서로 다른
+trial family로 흩어져 **다중검정 가드가 조용히 무력화된다.** 사상할 어휘가 없으면 기획안을
+발행하지 않고 어휘 등재를 요청한다.
 
 ### 6.5 Research 상태 머신
 
 ```text
 RECEIVED
   -> CUTOFF_LOCKED
-  -> EVIDENCE_READY
-  -> ANALYSIS_RUNNING
-  -> EVIDENCE_VALIDATING
-  -> OUTLOOK_READY
-  -> CHALLENGED
-  -> PACKET_PUBLISHED
+  -> SCOUTING
+  -> LEADS_VALIDATED
+  -> PRIOR_ART_CHECKED       # 같은 family 의 기각 이력·lesson 대조
+  -> PLANNING
+  -> CHALLENGED              # 독립 회의론자의 경쟁 설명
+  -> PROPOSAL_PUBLISHED
 
 어느 단계에서든 -> INSUFFICIENT_EVIDENCE | BLOCKED | FAILED
 ```
@@ -372,15 +437,21 @@ TimeSeriesScientist의 `Curator -> Planner -> Forecaster -> Reporter` 분리를 
 
 | 단계 | 담당 | 하는 일 | Agent 사용 범위 |
 |---|---|---|---|
-| 1. Intake | Quant Hermes | ResearchPacket, 연구 Mandate와 자원 예산 접수 | 우선순위와 Queue |
-| 2. Curator | Data/Feature Agent + Dataset Service | 가용 데이터 진단, PIT Dataset Manifest, 결측·Revision·Universe Bias 검사 | 진단 설명만 Agent, Dataset 생성은 코드 |
-| 3. Hypothesis Planner | Strategy Research Agent | 증거에 연결된 복수 가설과 대안 설명 생성 | 사전 등록 전까지만 수정 가능 |
-| 4. Experiment Designer | Experiment Agent | Feature, Label, Baseline, Split, Cost, Trial Budget와 폐기조건 고정 | Pydantic 계약 출력 |
+| 0. Gate 0 | 결정론 코드 | 접수 검사 — 통제 어휘 사상, trial family 예산, 기각 이력 대응 확인 | **Agent 없음** |
+| 1. Intake | Proposal Intake Worker (QNT-01) | `ExperimentProposalV1`을 읽고 사전등록 사양 초안 작성 | 자연어 해석만. 경제적 근거는 고쳐 쓰지 않는다 |
+| 2. Curator | Experiment Design Worker + Dataset Service | 가용 데이터 진단, PIT Dataset Manifest, 결측·Revision·Universe Bias 검사 | 진단 설명만 Agent, Dataset 생성은 코드 |
+| 3. Preregistration | 결정론 코드 | 실질 필드를 불변 지문으로 고정. 이후 수정은 새 시도 | **Agent 없음** — 결과를 보기 전에 잠근다 |
+| 4. Experiment Designer | Experiment Design Worker (QNT-02) | 창·Embargo·파라미터 범위 제안과 **그 범위가 몇 번의 시도인지** 명시 | 제안만. 값 선택은 사전등록 안에서 |
 | 5. Runner | 격리된 Deterministic Worker | 코드 실행, Fit, Backtest, Metric, Artifact와 Hash 생성 | LLM 호출 금지 |
-| 6. Robustness Validator | 독립 검증 Service/Red Team | Leakage, Purge/Embargo, CPCV, DSR, PBO, Bootstrap, Ablation, Regime/Capacity 검사 | 실패 설명에만 Agent 사용 |
+| 6. Robustness Validator | 독립 검증 Service | Leakage, Purge/Embargo, CPCV, Trial Pressure, DSR, PBO, Bootstrap, Regime/Capacity 검사 | 실패 설명에만 Agent 사용 |
 | 7. Arbitrator | Model/Strategy Selector | 단순 Baseline, 규칙, 통계, ML, TSFM과 Ensemble 비교 | 검증된 Metric만 읽음 |
-| 8. Reporter | Quant Reporter | 결과와 실패 원인을 `ExperimentCardV1`으로 정리 | 수치 재계산 금지 |
-| 9. Submit | Quant Hermes | QA/Risk Gate에 Candidate 제출 | Production 직접 승격 금지 |
+| 8. Reporter | Result Interpretation Worker (QNT-03) | 결과와 실패 원인을 `ExperimentCardV1`으로 정리 | **수치 재계산·판정 금지** — 관문이 이미 판정했다 |
+| 9. Submit | Quant Hermes | 승격 관문에 Candidate 제출 | Production 직접 승격 금지 |
+| 10. Feedback | Outcome Lesson Worker (QNT-04) + 결정론 코드 | 종결 사유를 `lesson_codes`로 사상해 `ExperimentOutcomeV1` 적재 | 어휘 사상만. **적재가 종결의 전제 조건** |
+
+**가설 생성 단계가 이 표에 없는 것은 누락이 아니다.** 가설 발굴은 리서치본부로 이관됐다
+(2026-08-10). 퀀트가 스스로 가설을 만들면 제안자와 승인자가 같아져, 이 문서가 원칙 6으로
+못 박은 생성자·검증자 분리가 조직 안에서 무너진다. 퀀트는 남이 낸 가설을 잠그고 때린다.
 
 ### 7.2 가설 사전 등록
 
@@ -484,8 +555,60 @@ INTAKE
   -> ROBUSTNESS_REVIEW
   -> SUPPORTED | REJECTED | NEEDS_DATA
 
-SUPPORTED -> QA_REVIEW -> RISK_REVIEW -> SHADOW_CANDIDATE
+SUPPORTED -> QA_REVIEW -> RISK_REVIEW -> HUMAN_APPROVAL -> SHADOW
 ```
+
+### 7.6.1 승격 관문
+
+이전 판에서 이 자리는 다이어그램 노드 라벨(`QA · Risk · CEO Promotion Gate`) 하나뿐이었다.
+관문에 판정 주체·입력·임계값·반려 전이가 없으면 그것은 관문이 아니라 문장이다.
+
+| 관문 | 판정 주체 | 입력 | 통과 조건 | 반려 |
+|---|---|---|---|---|
+| Release Gate | **코드** (`release_gate.py`) | `ExperimentCardV1` | 코드에 고정된 `CRITERIA` — 초과수익·IR·MDD·회전율·fragility·DSR·부트스트랩 CI 하한·PBO. 미측정 항목은 미달로 처리 | `HOLD` → 기각/수정 확정 후 Outcome 적재 |
+| QA 재현 | **코드**(재실행) + 에이전트(서술) | Card + lineage(dataset·code·dependency hash, seed) | 동일 lineage 재실행 결과가 허용 오차 이내, 재현 결손 없음, 카드 blocker 0 | `FAIL` → 자동 HOLD |
+| Risk 수용력 | **코드**(지표) + **사람**(거부·완화) | Card + 운용 중 전략 수익률 + 운용 실측 | 기존 전략과의 상관, 합산 스트레스 낙폭, 수용력 측정 여부 | `REJECT`/`RESIZE` → 자동 HOLD |
+| 최종 승인 | **사람** (에이전트는 초안만) | Card + QA 통과 + Risk 승인 **셋 다** | 셋 중 하나라도 없거나 실패면 시스템이 HOLD 를 강제한다 | 기본값 HOLD. SLA 초과도 HOLD 유지 |
+
+**비대칭은 의도다: 막는 것은 기계가 즉시, 여는 것은 사람이 서명한 뒤.** QA·Risk·CEO가
+모두 LLM 에이전트라면 형식만 바뀐 3단 직렬 위원회가 되므로, 자본이 걸리는 긍정 판정의
+마지막 서명은 사람 계정만 유효하다. 반대로 부결·보류·킬은 결정론 코드가 단독으로 발동한다.
+
+### 7.6.2 `ExperimentOutcomeV1` — 루프를 닫는 계약
+
+`RQF-P11`(실패 결과가 다음 검색·가설 설계로 구조화되지 않음)의 해소 지점이다. 이전 판의
+환류는 Hermes Skill/Memory 개선 루프였고, **실험 결과가 리서치의 가설 재고로 돌아가는
+배관은 없었다.**
+
+```yaml
+outcome_id: out_...
+experiment_id: exp_...
+hypothesis_id: hyp_...
+proposal_id: prop_...
+trial_family_id: fam_...            # Gate 0 재조회의 키
+trial_number: 3
+decision: REJECT                    # REJECT | REVISE | SUBMIT_TO_QA | GATE_HOLD | BLOCKED
+                                    # | PROMOTED | KILLED | DEMOTED | ARCHIVED
+failed_criteria: [pbo, min_deflated_sharpe]
+oos_summary:                        # 미측정은 null (0 이 아니다)
+  excess_return_pct: 3.1
+  deflated_sharpe: 0.13
+  pbo: 0.8
+  ci_low: -0.71
+  ci_high: 1.93
+regime_concerns: ["하락장 평균 수익률 -32.1% - 상승장에서 벌고 하락장에서 토해내는 형태"]
+lesson_codes: [OVERFIT_PBO, BEAR_FRAGILE]   # **통제 어휘** - 자유 서술 금지
+notes: 자유 서술은 이 한 필드에만 격리한다(Gate 0 대조에 사용하지 않는다)
+```
+
+세 가지가 이 계약의 전부다.
+
+1. **모든 종결에 대해 적재한다.** 성공(`PROMOTED`)도 적재한다 — 리서치는 무엇이 통했는지도
+   학습해야 한다. 운용 단계의 킬·강등·폐기도 포함한다. 실시장에서 반증된 전략이 가장
+   비싼 실패인데, 그 교훈이 돌아오지 않으면 같은 계열 가설이 그대로 재접수된다.
+2. **적재가 전이의 전제 조건이다.** Outcome 없이는 실험도 운용 상태도 확정되지 않는다.
+3. **교훈은 통제 어휘다.** 자유 서술 교훈은 다음 기획안과 기계 대조가 안 된다 — 대조가
+   안 되는 교훈은 Gate 0에서 아무것도 막지 못하고, 회사는 같은 실험을 두 번 산다.
 
 ### 7.7 Investment Doctrine Model Factory
 
@@ -523,25 +646,36 @@ Verified Source Corpus
 
 ### 8.1 결과를 다시 학습시키는 방법
 
+두 개의 루프가 있고, 서로 다른 것을 고친다. 섞으면 둘 다 무력해진다.
+
 ```text
-Research Claim/Forecast
-  -> 실제 가격·공시·Event 결과
-  -> Outcome Scorer
-  -> 역할·Horizon·Regime별 오차 분해
+[루프 A - 실험 재고]  ← 공장의 본체
+ExperimentCardV1 / 관문 판정 / 운용 킬
+  -> ExperimentOutcomeV1 (lesson_codes)
+  -> research.experiment_outcomes 적재
+  -> Gate 0 기계 대조 (같은 family 재접수 차단)
+  -> 리서치 편집장의 기획 우선순위
+
+[루프 B - 절차 품질]  ← 보조
+수집·인용·파싱 실패
   -> 개선 후보 생성
   -> 고정 Replay/Held-out Eval
   -> QA 승인
   -> Versioned Skill/Workflow/Query Policy
 ```
 
+**루프 A가 1차 방어이고 기억이 아니라 배관이다.** 편집장의 기억이 지워져도 Gate 0의
+기계 대조는 남으므로 공장은 중복 실험을 하지 않는다. 루프 B(헤르메스 기억·스킬)는 그 위의
+2차 방어로, 경향 파악과 우선순위 조정을 맡는다.
+
 개선 대상은 다음처럼 분리한다.
 
 | 관측된 실패 | 개선 후보 | 금지되는 자동 변경 |
 |---|---|---|
-| 관련 공시를 못 찾음 | Query Template, Metadata Filter, Source 우선순위 | 근거 없이 Confidence 상향 |
+| 방법론 리드에 출처가 없음 | Scout Query Template, Source Tier 정책 | 기억으로 출처 재구성 |
 | 표 숫자를 잘못 인용 | Table Parser와 Numeric Validator | LLM에게 다시 계산 지시 |
-| 단기/중기 방향 혼합 | Horizon Routing과 Outlook Skill | 과거 정답에 맞춰 Thesis 수정 |
-| 같은 가설 반복 실패 | Hypothesis Family Cooling, 추가 데이터 요청 | 실패 Experiment 삭제 |
+| 어휘 미사상이 반복됨 | 통제 어휘 확장 제안(퀀트 승인) | 자유 서술 유니버스 허용 |
+| 같은 family 반복 실패 | Hypothesis Family Cooling, 추가 데이터 요청 | 실패 Experiment 삭제 |
 | Backtest만 좋고 Paper에서 붕괴 | Cost/Latency Model Candidate | Champion 직접 덮어쓰기 |
 | 특정 Regime에서만 우수 | Regime Constraint 또는 Allocator Challenger | 전체 기간 결과 은폐 |
 
@@ -608,7 +742,7 @@ LangGraph와 Hermes가 모두 Orchestrator처럼 보일 수 있지만 계층이 
 
 ### Phase RQF-0: 계약과 사실 정리
 
-- `ResearchCaseV2`, `AnalystFindingV1`, `ResearchPacketV2` Schema와 Fixture 작성
+- `ResearchCaseV2`, `MethodologyLeadV1`, `ExperimentProposalV1`, `ExperimentOutcomeV1` Schema와 Fixture 작성
 - `HypothesisSpecV2`, `ExperimentCardV1`, `CalibrationGuidelineV1` Schema 작성
 - 기존 Packet과 Hypothesis를 V2로 변환하는 Adapter 작성
 - 모든 Research Tool에 `as_known_at` 지원 여부 선언
@@ -766,14 +900,17 @@ Nexus 한국어 번역과 프로젝트식 설명은
 확장하지 않는다. 최종 구조는 다음 원칙을 고정한다.
 
 1. 증거는 문장보다 먼저 구조화한다.
-2. 사실, 해석과 전망을 계약에서 분리한다.
-3. 단기와 중장기 전망을 독립적으로 만든다.
+2. 사실, 해석과 가설을 계약에서 분리한다.
+3. **프레임워크는 투자를 판단하지 않는다. 판단은 실험을 통과해 승격된 전략이 한다.**
 4. 가설은 결과를 보기 전에 등록한다.
 5. 숫자 계산과 통계 검증은 결정론적 Service가 수행한다.
-6. 생성자와 검증자, 제안자와 승인자를 분리한다.
-7. 실패도 삭제하지 않고 다음 연구의 입력으로 쓴다.
+6. 생성자와 검증자, 제안자와 승인자를 분리한다 — **가설을 낸 부서가 검증하지 않는다.**
+7. 실패도 삭제하지 않고 다음 연구의 입력으로 쓴다 — 성공·실패·킬을 모두 통제 어휘로
+   환류하고, 그 적재를 종결의 전제 조건으로 삼는다.
 8. Hermes의 자기 개선은 후보 생성까지만 자동화하고 검증된 Version만 활성화한다.
+9. 막는 것은 기계가 즉시, 여는 것은 사람이 서명한 뒤 — 승격의 마지막 서명은 사람이다.
 
-이 구조가 완성되면 리서치본부는 자료 요약 조직이 아니라 **검증 가능한 투자 증거를 만드는
-조직**, 퀀트/백테스트본부는 수익률이 높은 그래프를 고르는 조직이 아니라 **가설이 반복 가능하고
-실행 가능한지 반증하는 조직**이 된다.
+이 구조가 완성되면 리서치본부는 종목 리포트를 쓰는 조직이 아니라 **시험할 가치가 있는
+가설을 공급하는 조직**, 퀀트/백테스트본부는 수익률이 높은 그래프를 고르는 조직이 아니라
+**가설이 반복 가능하고 실행 가능한지 반증하는 조직**이 된다. 둘을 합치면 회사는 하나의
+투자 판단기가 아니라 **전략을 찍어내는 공장**이 된다.

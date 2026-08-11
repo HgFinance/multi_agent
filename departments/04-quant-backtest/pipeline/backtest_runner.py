@@ -47,6 +47,12 @@ RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
 
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
+from strategy_templates import (          # noqa: E402  (같은 디렉터리 모듈)
+    TEMPLATES,
+    resolve,
+    signal_scores,
+)
+
 COST_MODEL = {
     "version": "krx-cost-v2",
     "commission_bps": 1.5,   # 위탁수수료 왕복의 절반 (매수·매도 각각 부과)
@@ -120,12 +126,15 @@ DEFAULT_CONFIG = {
     "initial_capital": 100_000_000.0,
 }
 
-# 전략 카탈로그 - 시그널 순위 방향만 다르고 실행·비용·가드는 공유한다.
-# 여기 없는 strategy 문자열은 실행을 거부한다(비슷한 걸로 대충 돌리지 않는다).
+# 전략 카탈로그. **실체는 strategy_templates.TEMPLATES 이고 여기는 파생 뷰다** -
+# 시그널·순위·최소 히스토리는 그쪽이 소유하고 자체 점검도 그쪽에 있다.
+# 여기 없는(=resolve 가 못 찾는) strategy 문자열은 실행을 거부한다.
 STRATEGIES = {
-    "MOM-20-SMOKE": {"rank": "TOP", "note": "N일 수익률 상위 N 균등 (모멘텀)"},
-    "REV-5-SMOKE": {"rank": "BOTTOM", "note": "N일 수익률 하위 N 균등 (평균회귀 롱)"},
+    f"{t.template_id}": {"rank": t.rank, "edge_type": t.edge_type, "note": t.note}
+    for t in TEMPLATES.values()
 }
+# 과거 실험이 참조하는 명시 ID - 재현을 위해 유지한다(접두가 같아 resolve 가 찾는다).
+LEGACY_STRATEGY_IDS = ("MOM-20-SMOKE", "REV-5-SMOKE")
 REV_CONFIG = {
     "strategy": "REV-5-SMOKE",
     "lookback_days": 5,
@@ -226,15 +235,30 @@ def rebalance_days(dates: list[date], config: dict) -> set[date]:
 
 
 def select_targets(market: Market, i: int, config: dict) -> list[str]:
-    """시그널일 t-1 종가까지로 대상 선정 - 전략은 순위 방향만 다르다."""
+    """시그널일 t-1 종가까지로 대상 선정.
+
+    ▶ 2026-08-10: 시그널을 여기서 직접 계산하지 않고 strategy_templates 레지스트리에
+      위임한다. 이전에는 `market.momentum` 하나만 호출해서, 전략이 무엇이든 실제로
+      도는 시그널은 모멘텀 하나였다 - 순위 방향만 뒤집는 것이 전략 유형의 전부였다.
+
+    ▶ 실측 버그 수정: `config_binding` 이 가설 파라미터를 ID 에 새겨 `REV-5-20` 을
+      만드는데 카탈로그에는 그 문자열이 없어 **가설이 반영되는 순간 ValueError 로
+      실행이 거부**됐다(= 파라미터가 기본값과 같을 때만 실험이 돌았다).
+      `resolve()` 가 접두로 템플릿을 찾아 이 구멍을 막는다.
+    """
     strat = config["strategy"]
-    if strat not in STRATEGIES:
-        raise ValueError(f"카탈로그에 없는 전략: {strat!r} - 실행 거부")
-    signal = market.momentum(market.dates[i - 1], int(config["lookback_days"]))
-    if not signal:
+    tpl = resolve(strat)
+    if tpl is None:
+        raise ValueError(
+            f"카탈로그에 없는 전략: {strat!r} - 실행 거부 "
+            f"(사용 가능: {sorted(TEMPLATES)})")
+    scores = signal_scores(market, market.dates[i - 1], template=tpl,
+                           params=config)
+    if not scores:
         return []
-    top = STRATEGIES[strat]["rank"] == "TOP"
-    return sorted(signal, key=signal.get, reverse=top)[:int(config["top_n"])]
+    # 동점 시 순서는 market.symbols(정렬됨) 순서를 따른다 - 결정론 유지
+    return sorted(scores, key=scores.get,
+                  reverse=tpl.rank == "TOP")[:int(config["top_n"])]
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +400,8 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
     return out
 
 
-def run_backtest(market: Market, config: dict) -> BacktestResult:
+def run_backtest(market: Market, config: dict, *,
+                 trials: int = 1) -> BacktestResult:
     _lookback = int(config["lookback_days"])
     _top_n = int(config["top_n"])
     capital = float(config["initial_capital"])
@@ -472,10 +497,12 @@ def run_backtest(market: Market, config: dict) -> BacktestResult:
         eq = [v for _, v in equity]
         rets = [eq[i] / eq[i - 1] - 1.0
                 for i in range(1, len(eq)) if eq[i - 1]]
-        # trials 는 오케스트레이터가 세는 시도 횟수. 없으면 1(보수적으로
-        # 낙관하지 않되, 없는 압력을 지어내지도 않는다).
-        trials = int(config.get("trials") or 1)
-        for src in (deflated_sharpe(rets, trials=trials), bootstrap_ci(rets)):
+        # ▶ trials 는 **config 가 아니라 인자로** 받는다. config 는 통째로
+        #   input_hash 에 들어가므로, 여기 넣으면 같은 실험이 5번째냐 6번째냐에
+        #   따라 해시가 달라져 중복 가드가 무력해진다. 시도 횟수는 백테스트의
+        #   입력이 아니라 결과 Sharpe 에 거는 사후 보정이다.
+        n_trials = max(1, int(trials or 1))
+        for src in (deflated_sharpe(rets, trials=n_trials), bootstrap_ci(rets)):
             for k, v in src.items():
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     metrics[k] = v          # metrics 는 numeric 전용이다
@@ -585,7 +612,8 @@ def load_dataset(conn, name: str, version: str):
 
 def register_and_run(name: str, version: str, *, seed: int = 0,
                      config: dict | None = None,
-                     hypothesis_id: str | None = None) -> dict:
+                     hypothesis_id: str | None = None,
+                     trials: int = 1) -> dict:
     """백테스트 등록·실행. hypothesis_id 를 주면 그 가설에 실험을 묶는다
     (오케스트레이터 경로) - 없으면 SMOKE 가설을 만든다(단독 실행 경로).
 
@@ -604,6 +632,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
     trace = str(uuid.uuid4())
     try:
         dataset_id, universe_id, dhash, rows = load_dataset(conn, name, version)
+        # ▶ trials 는 해시에 **안 들어간다**(중복 가드 보존).
         ihash = input_hash(dhash, config, code_ver, seed)
 
         with conn.cursor() as cur:
@@ -658,7 +687,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
         market = Market.from_rows(rows)
         run_row_id = None
         try:
-            result = run_backtest(market, config)
+            result = run_backtest(market, config, trials=trials)
             status = "COMPLETED"
         except Exception as e:
             # 실패한 런도 등록한다 - 성공만 남기지 않는다
@@ -886,7 +915,11 @@ if __name__ == "__main__":
             return a[a.index(n) + 1] if n in a else d
         _r = register_and_run(
             opt("--dataset", "krx-basket-daily"),
-            opt("--dataset-version", "v1"),
+            # v2 부터 notional(유동성 계층 슬리피지 재료)을 담는다.
+            # v1 파티션 파일은 v2 빌드가 같은 경로에 덮어써
+            # 매니페스트와 해시가 어긋난다 - 해시 가드가 실제로
+            # 그것을 잡았다(재현성이 깨진 채 돌지 않는다).
+            opt("--dataset-version", "v2"),
             seed=int(opt("--seed", "0")),
             config=REV_CONFIG if "--strategy-rev5" in a else None)
         raise SystemExit(int(_r.get("status", 1)))
