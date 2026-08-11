@@ -21,6 +21,7 @@ import { BffProvider } from "./ops/bffClient";
 import { useBffFeed } from "./ops/bffClient";
 import PortfolioInterviewPanel, { PortfolioKanban, PortfolioResultConsole, type RuntimeResult } from "./ops/PortfolioInterviewPanel";
 import { startSavedPortfolioRecommendation } from "./ops/portfolioClient";
+import UserAskPanel from "./ops/UserAskPanel";
 import type { LlmPerformanceMetric, OperationsRuntime } from "./ops/readModel";
 import { groupRuntimeMessages, readPitReadiness, readablePitReason, readableRuntimeKind, readableRuntimeMessage, readableRuntimeStatus } from "./ops/statusLabels";
 import { canUseSimulation } from "./ops/projectionSource";
@@ -779,6 +780,12 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
         </div>
 
         <PortfolioResultConsole />
+
+        {/* 위 지시창은 픽셀 오피스 시뮬레이션(app/game/sim.ts)이고, 아래 상자는
+            **실제 CEO Hermes**로 간다. 둘을 한 창에 두되 섞지 않는다 - 시뮬레이션
+            대사를 실제 본부 응답처럼 보이게 하지 않는 것이 이 화면의 규칙이다
+            (ai-office/CLAUDE.md: 로컬 스크립트로 실행을 가장하지 않는다). */}
+        <UserAskPanel />
 
         <div className="console-quick">
           {QUICK_ORDERS.map((item) => (

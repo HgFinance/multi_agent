@@ -1058,6 +1058,19 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .assistant-input button { padding: 8px 11px; border: 1.5px solid var(--ink); border-radius: 8px; background: var(--pink-deep); color: #fff; font-size: 11px; font-weight: 900; cursor: pointer; }
 .assistant-note { display: block; margin-top: 8px; color: var(--ink-faint); font-size: 10px; line-height: 1.4; }
 .agent-ask-input { display: block; width: 100%; min-height: 88px; height: 88px; resize: vertical; }
+
+/* 사용자 입구(UserAskPanel) — 본부별 카드 진행·실패.
+   색은 장식이 아니라 상태다: 답한 것/못 답한 것/실패한 것이 한눈에 갈려야
+   "완료 5건"처럼 실패를 성공에 섞어 세는 화면이 안 된다. */
+.user-ask-result { margin-top: 10px; display: grid; gap: 8px; }
+.user-ask-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.user-ask-cards > li { padding: 8px 10px; border: 1.5px solid var(--ink); border-radius: 8px; background: #fff; font-size: 12px; line-height: 1.55; border-left-width: 5px; }
+.user-ask-cards > li[data-tone="ok"]   { border-left-color: var(--mint, #3aa981); }
+.user-ask-cards > li[data-tone="warn"] { border-left-color: var(--yellow, #d8a11a); }
+.user-ask-cards > li[data-tone="bad"]  { border-left-color: var(--pink-deep, #c8365c); }
+.user-ask-cards > li[data-tone="wait"] { border-left-color: var(--ink-faint, #9a9a9a); }
+.user-ask-reason { margin-top: 4px; color: var(--ink-faint); font-size: 11px; line-height: 1.5; }
+.user-ask-answer { padding: 10px; border: 1.5px solid var(--ink); border-radius: 8px; background: #fff; }
 @media (max-width: 1100px) { .portfolio-form { grid-template-columns: repeat(3, minmax(0, 1fr)); } .kanban-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); } }
 @media (max-width: 900px) { .ops-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1100px) { .portfolio-form-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } .portfolio-advanced-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

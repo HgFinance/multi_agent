@@ -77,6 +77,17 @@ PYEOF
     cp "$src/config.yaml" "$tmp"
   fi
   docker cp "$tmp" "$container:/opt/data/config.yaml"
+
+  # ▶ **루트 교체만으로는 kanban spawn 이 안 된다** (2026-08-11 실측)
+  #   활성 설정은 /opt/data 루트지만, `kanban dispatch` 는 카드의 assignee 를
+  #   **프로필 이름**으로 찾는다. profiles/<이름>/ 이 없으면
+  #   "non-spawnable assignee — terminal lane" 으로 조용히 건너뛴다.
+  #   둘 다 있어야 한다: 루트는 이 컨테이너가 무엇인지, profiles/ 는 남이 이
+  #   부서를 지목할 수 있는 이름표다.
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "mkdir -p /opt/data/profiles/$profile"
+  docker cp "$tmp" "$container:/opt/data/profiles/$profile/config.yaml"
+  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:/opt/data/profiles/$profile/SOUL.md"
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "chown -R hermes:hermes /opt/data/profiles; chmod 700 /opt/data/profiles/$profile"
   rm -f "$tmp"
   [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:/opt/data/SOUL.md"
 
