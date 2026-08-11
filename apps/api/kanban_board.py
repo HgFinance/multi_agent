@@ -165,6 +165,17 @@ select id, title, assignee, status, result, created_at, completed_at,
        last_failure_error, block_kind
 from tasks where id in (select id from tree) order by created_at
 """
+# 뿌리 자리에 이 값을 주면 "전부"라는 뜻이다. 카드 id 와 겹칠 수 없는 문자를 쓴다.
+ALL_ROOTS = "*"
+
+# 보드 **전체**. 뿌리를 모르는 감시자(card_watchdog)가 쓴다 - 막힌 카드를 찾으려면
+# 어느 질의인지 알기 전에 훑어야 한다. archived 는 뺀다: 손으로 치운 카드라
+# 다시 살릴 대상이 아니고, 넣으면 해제기가 과거를 계속 건드린다.
+_SQL_TASKS_ALL = """
+select id, title, assignee, status, result, created_at, completed_at,
+       last_failure_error, block_kind
+from tasks where status <> 'archived' order by created_at
+"""
 _SQL_EVENTS = (
     "select task_id, kind, payload from task_events "
     "where task_id in ({marks}) "
@@ -180,7 +191,10 @@ db, root = sys.argv[1], sys.argv[2]
 conn = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=5.0)
 conn.row_factory = sqlite3.Row
 try:
-    tasks = [dict(r) for r in conn.execute({_SQL_TASKS!r}, (root,))]
+    if root == {ALL_ROOTS!r}:
+        tasks = [dict(r) for r in conn.execute({_SQL_TASKS_ALL!r})]
+    else:
+        tasks = [dict(r) for r in conn.execute({_SQL_TASKS!r}, (root,))]
     ids = [t["id"] for t in tasks]
     events, links = [], []
     if ids:
@@ -201,7 +215,9 @@ def _fetch_file(root_task_id: str) -> dict[str, list[dict[str, Any]]]:
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
-        tasks = [dict(r) for r in conn.execute(_SQL_TASKS, (root_task_id,))]
+        tasks = ([dict(r) for r in conn.execute(_SQL_TASKS_ALL)]
+                 if root_task_id == ALL_ROOTS
+                 else [dict(r) for r in conn.execute(_SQL_TASKS, (root_task_id,))])
         ids = [t["id"] for t in tasks]
         events: list[dict[str, Any]] = []
         links: list[dict[str, Any]] = []
@@ -312,8 +328,26 @@ def cards_for_root(root_task_id: str) -> list[Card]:
     """
     if not root_task_id.strip():
         raise ValueError("root_task_id 가 비었습니다")
+    return cards_from_rows(_fetch(root_task_id), root_task_id=root_task_id)
+
+
+def board_rows_all() -> dict[str, list[dict[str, Any]]]:
+    """보드 **전체**의 원본 행. 뿌리를 모르는 감시자용.
+
+    질의 하나가 아니라 판 전체를 봐야 하는 쪽이 있다 - 어느 질의가 막혔는지
+    알기 전에 막힌 것을 먼저 찾아야 하기 때문이다(apps/api/card_watchdog.py).
+    """
+    return _fetch(ALL_ROOTS)
+
+
+def cards_from_rows(raw: dict[str, list[dict[str, Any]]], *,
+                    root_task_id: str | None = None) -> list[Card]:
+    """원본 행 -> Card. 판정 규칙을 한 곳에 둔다.
+
+    `cards_for_root` 와 `board_rows_all` 이 같은 분류를 쓰게 하려고 갈랐다 -
+    두 벌이 되면 언젠가 한쪽만 고쳐져 화면과 감시자가 다른 판정을 한다.
+    """
     now = int(time.time())
-    raw = _fetch(root_task_id)
     rows = raw["tasks"]
     events = _event_payloads(raw["events"])
     links: dict[str, list[str]] = {r["id"]: [] for r in rows}

@@ -40,6 +40,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 _HERE = Path(__file__).resolve().parent
 _RESEARCH = _HERE.parent
@@ -497,6 +498,41 @@ def harvest(*, dry_run: bool = False) -> int:
     return published
 
 
+def _promote(*, dry_run: bool = False) -> int:
+    """접수된 기획안을 Gate 0 에 태워 가설로 올린다. 반환: 실패 수(0=정상).
+
+    퀀트 모듈(factory_bridge)이 게이트의 주인이다 - 여기서는 부르기만 한다.
+    판정 규칙을 이쪽에 복사하면 언젠가 두 벌이 갈린다.
+    """
+    import factory_bridge as FB                    # noqa: PLC0415 - 경로 주입 뒤
+
+    conn = _conn()
+    try:
+        got = FB.promote_published(conn, limit=20,
+                                   created_by="factory-autopilot",
+                                   dry_run=dry_run)
+    finally:
+        conn.close()      # WAL 을 남기지 않는다
+    if not got:
+        return 0
+    ok = [p for p in got if p.accepted]
+    tag = "[dry-run] " if dry_run else ""
+    print(f"  {tag}승격: 가설 {len(ok)}건 / 게이트 거부 {len(got) - len(ok)}건",
+          flush=True)
+    for p in got:
+        if p.accepted:
+            print(f"      {p.proposal_id} -> {p.hypothesis_id or '(dry-run)'} "
+                  f"계열 {p.gate.get('trial_family_id')} "
+                  f"시도 {p.gate.get('trial_number')}", flush=True)
+        else:
+            # **거부도 결과다.** 조용히 사라지면 리서치가 대응할 수 없다.
+            print(f"      게이트 거부: {p.proposal_id} <- {p.why[:110]}", flush=True)
+            record_rejections(
+                [SimpleNamespace(title=p.proposal_id, reason=p.why)],
+                stamp="gate0")
+    return 0
+
+
 def cycle(*, dry_run: bool = False) -> int:
     """공장 한 주기. 실패한 부서 수를 돌려준다(0이면 정상)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
@@ -511,6 +547,21 @@ def cycle(*, dry_run: bool = False) -> int:
             print(f"  수확: 기획안 {n}건 발행 - 퀀트가 다음 주기에 집는다", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 수확 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
+        fails += 1
+
+    # ── 0.5 승격. **수확과 실험 사이가 끊겨 있었다** (2026-08-12)
+    #      gate0 을 부르는 곳이 E2E 하네스뿐이라, 접수된 기획안이 가설이 되는
+    #      운영 경로가 없었다. 에이전트는 계속 기획안을 내는데 quant.hypotheses
+    #      는 늘 비어 있었고 퀀트 브리핑은 언제나 "실험 대기 가설 0건"이었다.
+    #      루프가 도는 것처럼 보이면서 실제로는 여기서 끊겨 있었다.
+    #
+    #      Gate 0 은 판단이 아니라 검사(어휘 대조·다중검정 예산·계열 압력)라
+    #      결정론이 돌린다. 에이전트에게 맡기면 같은 기획안이 부를 때마다 다른
+    #      판정을 받는다.
+    try:
+        fails += _promote(dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 승격 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
         fails += 1
 
     # ── 리서치: 다음 기획안 ──
