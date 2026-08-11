@@ -20,10 +20,12 @@ SRC_ROOT="$REPO_ROOT/departments"
 DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
 [[ -d "$DEST_ROOT" ]] || DEST_ROOT="$HOME/AppData/Local/hermes/profiles"
 
-# 2026-08-02 (재일): 부서별 Hermes Container 로 가면서 데이터 디렉터리도 부서별로
-# 갈렸다(docker-compose.yml 의 ~/.hermes-<부서>). Credential·Memory Namespace 분리가
-# 목적이므로 한 곳에 몰아넣으면 분리가 무의미해진다. 부서별 경로가 있으면 그쪽을
-# 쓰고, 없으면 기존 공용 경로로 떨어진다 - 아직 안 옮긴 부서도 그대로 동작한다.
+# 2026-08-02 (재일): 당시 docker-compose.yml 은 부서별로 ~/.hermes-<부서> 를
+# 따로 마운트했다. 2026-08-10 부로 docker-compose.yml 은 통일된
+# ~/.hermes/profiles/<부서> (AWS: /home/ubuntu/.hermes/profiles/<부서>) 로
+# 정리됐고 DEST_ROOT 가 그 기본값이다. 아래 dest_for() 의 per_dept 분기는 그
+# 구 경로가 남아있는 로컬 설치본을 위한 하위호환 fallback일 뿐, 새로 만들
+# 필요는 없다.
 dest_for() {
   local dept="$1" per_dept="${HERMES_HOME_PREFIX:-$HOME/.hermes}-$1/profiles/$1"
   if [[ -d "$per_dept" ]]; then echo "$per_dept"; else echo "$DEST_ROOT/$dept"; fi

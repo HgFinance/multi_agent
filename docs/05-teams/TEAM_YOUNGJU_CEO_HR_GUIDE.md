@@ -2,7 +2,7 @@
 
 > Override v2.0 · 기준일 2026-08-05
 >
-> 이 문서는 이전 CEO/HR 팀 가이드의 운영 기준을 덮어쓴다. Mandate·Workforce API 코드가 있다는 사실을 실제 승인자 인증, 자기개선 운영, IAM Provisioning 완료로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md](../02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md)다.
+> 이 문서는 이전 CEO/HR 팀 가이드의 운영 기준을 덮어쓴다. Mandate·Workforce API 코드가 있다는 사실을 실제 승인자 인증, 자기개선 운영, IAM Provisioning 완료로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
 ## 0. 상태 판정 규칙
 

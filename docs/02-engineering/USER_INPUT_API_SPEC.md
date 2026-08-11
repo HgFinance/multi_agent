@@ -1,10 +1,10 @@
 # 사용자 입력 백엔드 API 명세서 (온보딩)
 
-> 문서 상태: **확정 설계** — 2026-08-05 팀 결정(A-2, B, C-1, D, E-1, F, G-2, H, I, K-2) 반영. 구현 전.
+> 문서 상태: **확정 계약·부분 구현** — 2026-08-10 기준. Mandate 조회·변경·승인과 Stateless mandate-assistant 일부 Endpoint가 구현됐으며, 남은 항목은 아래 미해결 절에 기록한다.
 > 작성: 영주님 (CEO Office) · 작성일: 2026-08-05
 > 제품 계약: [USER_INPUT_SPEC.md](../01-product/USER_INPUT_SPEC.md) — 무엇을 왜 받는지는 그 문서가 기준
-> 현황 기록: [MANDATE_INPUT_API_SPEC.md](MANDATE_INPUT_API_SPEC.md) — 변경 **전** governance-api의 실제 상태
-> 상위 계약: [UNIFIED_DOMAIN_API_SPEC.md](UNIFIED_DOMAIN_API_SPEC.md), [GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md](GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md)
+> 현황 기록: 이 문서의 구현 상태 절과 `departments/00-ceo-office/api/app.py`가 현재 governance-api 계약이다.
+> 상위 계약: [UNIFIED_DOMAIN_API_SPEC.md](UNIFIED_DOMAIN_API_SPEC.md)
 
 이 문서는 **신설·변경할 계약**만 다룬다. 기존 그대로인 Route(예: `POST .../change-requests`, `advance`, `approvals/decide`)는 현황 문서를 따르며 여기서 반복하지 않는다.
 
@@ -344,6 +344,6 @@ approval_rules.*, base_capital, currency
 
 ### 6.3 집행 공백 (변함 없음)
 
-Risk Engine은 여전히 `risk.policies`·`risk.limits`를 읽고 `governance.mandate_versions`를 읽지 않는다([MANDATE_INPUT_API_SPEC.md](MANDATE_INPUT_API_SPEC.md) 및 SCOPE_ANALYSIS 부록 A.9 §L).
+Risk Engine은 여전히 `risk.policies`·`risk.limits`를 읽고 `governance.mandate_versions`를 읽지 않는다([USER_INPUT_SPEC.md](../01-product/USER_INPUT_SPEC.md) 및 SCOPE_ANALYSIS 부록 A.9 §L).
 
 **이 명세를 전부 구현해도 그 공백이 남아 있는 한 한도는 집행되지 않는다.** 화면·API 문서 어디에도 "이 한도로 차단된다"고 쓰지 않는다.
