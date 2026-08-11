@@ -24,7 +24,11 @@ from typing import Any
 
 import yaml
 
-from orchestration.skill_contract import CanonicalSkillError, validate_required_skills
+from orchestration.canonical_profiles import canonical_profile_for_department
+from orchestration.skill_contract import (
+    CanonicalSkillError,
+    validate_skills_for_profiles,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -215,7 +219,15 @@ def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]
 
     rewritten_query = str(payload.get("rewritten_query", "")).strip()
     rationale = str(payload.get("rationale", "")).strip()
-    required_skills = list(validate_required_skills(payload.get("required_skills", [])))
+    selected_profiles = {
+        canonical_profile_for_department(department) for department in ordered
+    }
+    required_skills = list(
+        validate_skills_for_profiles(
+            payload.get("required_skills", []),
+            selected_profiles,
+        )
+    )
     if not rationale:
         raise ValueError("CEO planner rationale is empty")
     return {
