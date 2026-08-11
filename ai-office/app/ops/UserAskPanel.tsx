@@ -25,7 +25,8 @@ import { useEffect, useState } from "react";
 import { BFF } from "./readModel";
 
 type CardOutcome =
-  | "QUEUED" | "RUNNING" | "ANSWERED" | "NO_ANSWER" | "BLOCKED" | "FAILED" | "STALE";
+  | "QUEUED" | "RUNNING" | "ANSWERED" | "NO_ANSWER" | "BLOCKED" | "FAILED"
+  | "STALE" | "NO_ASSIGNEE";
 
 type Card = {
   task_id: string;
@@ -70,7 +71,9 @@ const OUTCOME: Record<CardOutcome, { label: string; tone: "ok" | "warn" | "bad" 
   NO_ANSWER: { label: "답을 못 냄", tone: "warn" },
   BLOCKED: { label: "보류", tone: "warn" },
   FAILED: { label: "실행 실패", tone: "bad" },
-  STALE: { label: "배정 안 됨", tone: "bad" },
+  STALE: { label: "아무도 안 집어감", tone: "bad" },
+  // 없는 본부에 배정된 카드는 기다려도 안 돈다. "대기"로 보이면 안 된다.
+  NO_ASSIGNEE: { label: "실행 불가", tone: "bad" },
 };
 
 const DEPARTMENT_LABEL: Record<string, string> = {
@@ -141,7 +144,9 @@ export default function UserAskPanel() {
   }
 
   const cards = ticket?.cards ?? [];
-  const unusable = cards.filter((c) => ["NO_ANSWER", "BLOCKED", "FAILED", "STALE"].includes(c.outcome));
+  const unusable = cards.filter((c) =>
+    ["NO_ANSWER", "BLOCKED", "FAILED", "STALE", "NO_ASSIGNEE"].includes(c.outcome),
+  );
 
   return (
     <section className="win-body" aria-label="대표이사실에 묻기">

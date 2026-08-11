@@ -62,9 +62,27 @@ CardOutcome = Literal[
     "BLOCKED",    # 사람 입력·자료가 없어 멈췄다
     "FAILED",     # 크래시·타임아웃·연속 실패
     "STALE",      # ready 인데 아무도 집어가지 않았다(dispatcher 문제)
+    "NO_ASSIGNEE",  # 없는 본부에 배정됐다 - **영원히 안 돈다**
 ]
 
-TERMINAL_OUTCOMES = frozenset({"ANSWERED", "NO_ANSWER", "BLOCKED", "FAILED"})
+# `STALE` 은 끝난 게 아니다(dispatcher 가 살아나면 돈다). `NO_ASSIGNEE` 는 끝났다 -
+# 없는 이름이라 누구도 집어갈 수 없다. 둘을 같이 묶으면 사용자는 30분을 기다린다.
+TERMINAL_OUTCOMES = frozenset({"ANSWERED", "NO_ANSWER", "BLOCKED", "FAILED", "NO_ASSIGNEE"})
+
+# 실재하는 본부 프로필 이름. **`hermes_cli.PROFILE_CONTAINERS` 와 같아야 한다**
+# (`ceo_intake` 자체 점검이 두 표가 어긋나지 않는지 확인한다).
+# CEO 가 `accounting-portfolio` 처럼 줄여 쓰면 카드가 만들어지긴 하지만 아무도
+# 집어가지 못한다 - 보드는 없는 이름도 받아 주기 때문이다(2026-08-11 실측).
+KNOWN_ASSIGNEES = frozenset({
+    "ceo-agent",
+    "research-department",
+    "trading-department",
+    "risk-management",
+    "quant-backtest-department",
+    "accounting-portfolio-department",
+    "qa-department",
+    "workforce-management",
+})
 
 # ready 상태로 이만큼 지나면 "대기"가 아니라 "아무도 안 집어감"으로 본다.
 # dispatcher tick 이 15~60초이므로 그 몇 배. 짧으면 정상 대기를 고장으로 부른다.
@@ -251,6 +269,14 @@ def _classify(row: dict[str, Any], event: dict[str, Any], now: int) -> tuple[Car
     if status == "running":
         return "RUNNING", summary
 
+    # 아직 안 끝난 카드라면, 애초에 돌 수 있는 카드인지 먼저 본다.
+    assignee = (row["assignee"] or "").strip()
+    if assignee not in KNOWN_ASSIGNEES:
+        return "NO_ASSIGNEE", (
+            f"'{assignee}' 라는 본부가 없어 아무도 이 작업을 맡지 못합니다"
+            " — CEO 가 본부 이름을 줄여 썼을 수 있습니다"
+        )
+
     if status == "ready":
         # 규칙 3 — ready 인데 오래되면 아무도 안 집어간 것이다.
         age = now - int(row["created_at"] or now)
@@ -304,7 +330,7 @@ def progress_of(cards: list[Card]) -> dict[str, Any]:
     """카드 묶음을 사용자에게 보일 한 덩어리로. **성공으로 반올림하지 않는다.**"""
     total = len(cards)
     done = sum(1 for c in cards if c.is_terminal)
-    unusable = [c for c in cards if c.outcome in {"NO_ANSWER", "BLOCKED", "FAILED"}]
+    unusable = [c for c in cards if c.outcome in {"NO_ANSWER", "BLOCKED", "FAILED", "NO_ASSIGNEE"}]
     stalled = [c for c in cards if c.outcome == "STALE"]
     return {
         "total": total,
@@ -347,6 +373,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             ("t2", "빈 완료", "accounting-portfolio-department", "done", "", now, now, None, None, "s1"),
             ("t3", "오래된 ready", "qa-department", "ready", "", now - 9999, None, None, None, "s1"),
             ("t4", "막 만든 ready", "risk-management", "ready", "", now, None, None, None, "s1"),
+            ("t5", "없는 본부", "accounting-portfolio", "ready", "", now, None, None, None, "s1"),
         ],
     )
     con.execute(
@@ -362,12 +389,14 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert got["t2"] == "NO_ANSWER", got   # 규칙 2 - done 이지만 성공 아님
     assert got["t3"] == "STALE", got       # 규칙 3
     assert got["t4"] == "QUEUED", got
+    # 없는 본부는 기다릴 이유가 없다 - 즉시, 그리고 **끝난 것으로** 본다
+    assert got["t5"] == "NO_ASSIGNEE", got
 
     summary = {c.task_id: c.summary for c in cards_for_session("s1")}
     assert "NAV" in summary["t2"], summary  # 사유가 사용자까지 간다
 
     prog = progress_of(cards_for_session("s1"))
     assert prog["all_terminal"] is False, prog       # STALE·QUEUED 는 끝난 게 아니다
-    assert prog["unusable"] == ["t2"], prog
+    assert prog["unusable"] == ["t2", "t5"], prog
     assert prog["stalled"] == ["t3"], prog
     print("kanban_board 자체 점검 통과")

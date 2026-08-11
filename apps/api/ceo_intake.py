@@ -48,11 +48,15 @@ from pydantic import BaseModel, Field
 
 try:  # ``python apps/api/main.py`` 와 package import 둘 다 지원한다.
     import hermes_cli
-    from kanban_board import BoardUnavailable, cards_for_session, progress_of
+    from kanban_board import (
+        KNOWN_ASSIGNEES, BoardUnavailable, cards_for_session, progress_of,
+    )
     from kanban_status_bridge import KANBAN_STATUS_BRIDGE
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api import hermes_cli
-    from apps.api.kanban_board import BoardUnavailable, cards_for_session, progress_of
+    from apps.api.kanban_board import (
+        KNOWN_ASSIGNEES, BoardUnavailable, cards_for_session, progress_of,
+    )
     from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
 
 CEO_PROFILE = "ceo-agent"
@@ -87,6 +91,21 @@ Phase = Literal[
 # 같은 것으로 조용히 뭉개면 화면에서 인사팀이 통째로 사라진다.
 PROFILE_TO_DEPARTMENT_CODE = {"workforce-management": "hr-department"}
 
+# CEO 프롬프트에 그대로 박아 넣을 담당자 이름표. **한 곳에서만 만든다** -
+# 사람이 손으로 두 번 적으면 언젠가 한쪽만 바뀐다.
+_ASSIGNEE_ROLES = {
+    "research-department": "종목·섹터·시장 조사, 방법론 스카우팅",
+    "quant-backtest-department": "실험·백테스트·과적합 통계",
+    "trading-department": "전략 집행, Bull/Bear 논지",
+    "risk-management": "한도·익스포저·수용력",
+    "accounting-portfolio-department": "원장·NAV·보유·수익률·배당",
+    "qa-department": "어떤 주장이든 독립 검증",
+    "workforce-management": "에이전트 채용·평가·개선",
+}
+_ASSIGNEE_LIST = "\n".join(
+    f"    {name:<32}{role}" for name, role in _ASSIGNEE_ROLES.items()
+)
+
 _ROUTING_PROMPT = """{query}
 
 ---
@@ -94,6 +113,10 @@ _ROUTING_PROMPT = """{query}
 본부를 정하고 kanban 카드를 만드십시오. 다음을 지키십시오.
 
 - 필요한 본부에만 카드를 만듭니다. 순서가 있으면 의존(부모)으로 묶습니다.
+- `--assignee` 는 **아래 이름을 글자 그대로** 씁니다. 줄여 쓰면 보드는 카드를
+  만들어 주지만 그런 본부가 없어 **아무도 집어가지 못하고 영영 멈춥니다**
+  (실측: `accounting-portfolio` 로 쓴 카드가 그렇게 됐습니다).
+{assignees}
 - 카드 본문에는 **그 본부가 사용자 질문을 몰라도 일할 수 있을 만큼** 맥락을 씁니다.
   부서는 서로의 카드를 보지 못하고 이 대화도 보지 못합니다.
 - 당신이 직접 조사해서 답하지 마십시오. 판단은 본부가 합니다.
@@ -182,15 +205,18 @@ class Intake:
             self._refresh(ticket)
         return ticket
 
-    def _refresh(self, ticket: Ticket) -> None:
+    def _refresh(self, ticket: Ticket) -> bool:
+        """보드를 다시 읽는다. **읽었으면 True.** 못 읽은 것과 카드가 없는 것은 다르다."""
         try:
             cards = cards_for_session(ticket.session_id or "")
         except BoardUnavailable as exc:
             # 보드를 못 읽는 것은 "카드 없음"이 아니다. 상태를 지어내지 않는다.
             ticket.error = str(exc)
-            return
+            return False
+        ticket.error = ""
         ticket.progress = progress_of(cards)
         self._publish_status(cards)
+        return True
 
     @staticmethod
     def _publish_status(cards) -> None:
@@ -205,7 +231,7 @@ class Intake:
             # 답을 못 낸 완료를 `done`(=IDLE)으로 흘리면 화면에서 성공으로 보인다.
             # 오피스 화면에서도 눈에 걸리도록 DEGRADED 로 올린다.
             "NO_ANSWER": "degraded", "BLOCKED": "blocked",
-            "FAILED": "error", "STALE": "degraded",
+            "FAILED": "error", "STALE": "degraded", "NO_ASSIGNEE": "error",
         }
         for card in cards:
             try:
@@ -232,7 +258,7 @@ class Intake:
             first = hermes_cli.ask(
                 department=CEO_PROFILE,
                 config=CEO_CONFIG,
-                query=_ROUTING_PROMPT.format(query=ticket.query),
+                query=_ROUTING_PROMPT.format(query=ticket.query, assignees=_ASSIGNEE_LIST),
                 # 이 경로를 연 스위치는 부서 ask 것이 아니라 사용자 입구 것이다.
                 enabled=ENABLE_USER_INTAKE,
                 timeout=CEO_TURN_TIMEOUT_SECONDS,
@@ -269,20 +295,23 @@ class Intake:
         ticket.phase = "WORKING"
         deadline = time.time() + WAIT_LIMIT_SECONDS
         while time.time() < deadline:
-            self._refresh(ticket)
-            if not ticket.progress.get("cards"):
-                # CEO 가 카드를 안 만들었다 = 본부 작업이 필요 없다고 판단.
-                # 그 판단을 존중하고 CEO 의 답을 그대로 사용자에게 준다.
-                ticket.answer = ticket.routing_note
-                ticket.phase = "ANSWERED"
-                ticket.finished_at = time.time()
-                return
-            if ticket.progress.get("all_terminal"):
-                break
+            # 보드를 **못 읽었으면 아무것도 결론짓지 않는다.** 여기서 빈 progress 를
+            # "카드 없음"으로 읽으면 CEO 가 5개 본부를 돌려 놓은 질문에도
+            # "본부 작업이 필요 없다고 판단했습니다"라고 답하게 된다 - fail-open 이다.
+            if self._refresh(ticket):
+                if not ticket.progress.get("cards"):
+                    # CEO 가 카드를 안 만들었다 = 본부 작업이 필요 없다고 판단.
+                    # 그 판단을 존중하고 CEO 의 답을 그대로 사용자에게 준다.
+                    ticket.answer = ticket.routing_note
+                    ticket.phase = "ANSWERED"
+                    ticket.finished_at = time.time()
+                    return
+                if ticket.progress.get("all_terminal"):
+                    break
             time.sleep(POLL_SECONDS)
         else:
             ticket.phase = "TIMEOUT"
-            ticket.error = (
+            ticket.error = ticket.error or (
                 f"{WAIT_LIMIT_SECONDS}초 안에 본부 작업이 끝나지 않았습니다. "
                 "아래 카드 상태가 지금까지 확인된 전부입니다."
             )
@@ -317,7 +346,8 @@ def card_report(progress: dict[str, Any]) -> str:
     for card in progress.get("cards", []):
         label = {
             "ANSWERED": "답변함", "NO_ANSWER": "답을 못 냄", "BLOCKED": "보류",
-            "FAILED": "실행 실패", "STALE": "배정 안 됨", "QUEUED": "대기",
+            "FAILED": "실행 실패", "STALE": "아무도 안 집어감",
+            "NO_ASSIGNEE": "없는 본부에 배정돼 실행 불가", "QUEUED": "대기",
             "RUNNING": "진행 중",
         }.get(card["outcome"], card["outcome"])
         lines.append(
@@ -388,6 +418,27 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
 
     # 인사팀 이름이 뭉개지지 않는가
     assert PROFILE_TO_DEPARTMENT_CODE["workforce-management"] == "hr-department"
+
+    # 세 곳의 부서 이름표가 어긋나지 않는가 - 어긋나면 카드가 조용히 안 돈다
+    assert set(_ASSIGNEE_ROLES) | {"ceo-agent"} == KNOWN_ASSIGNEES, (
+        set(_ASSIGNEE_ROLES) ^ KNOWN_ASSIGNEES
+    )
+    assert KNOWN_ASSIGNEES == set(hermes_cli.PROFILE_CONTAINERS), (
+        KNOWN_ASSIGNEES ^ set(hermes_cli.PROFILE_CONTAINERS)
+    )
+    # 프롬프트에 이름이 실제로 실려 나가는가
+    filled = _ROUTING_PROMPT.format(query="q", assignees=_ASSIGNEE_LIST)
+    assert "accounting-portfolio-department" in filled
+
+    # 보드를 못 읽은 것을 "카드 없음"으로 읽지 않는가 (fail-open 방지)
+    class _Broken(Intake):
+        def _refresh(self, ticket):  # noqa: D102 - 보드가 늘 죽어 있는 척한다
+            ticket.error = "보드 못 읽음"
+            return False
+
+    broken, probe = _Broken(), Ticket(ticket_id="z", query="q")
+    probe.session_id = "s"
+    assert broken._refresh(probe) is False and not probe.progress, probe.progress
 
     assert Ticket(ticket_id="y", query="q").public()["authoritative"] is False
     print("ceo_intake 자체 점검 통과")
