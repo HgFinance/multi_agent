@@ -35,7 +35,7 @@ Research·Quant의 최신 목표 편제는 `e2ed21e`(`research/quant: 전략 공
 
 | 부서 | Head | LLM Worker | 상시 | 조건부 | 결정론 Runner | 최신 목표 역할 |
 |---|---:|---:|---:|---:|---:|---|
-| CEO Office | 1 | 1 | 1 | 0 | 0 | `executive-briefing-worker` |
+| CEO Office | 1 | 1 | 1 | 0 | 1 | `executive-briefing-worker` + `ceo-runner`(결정론, 표의 모델 배정 대상 아님) |
 | Agent Workforce (HR) | 1 | 1 | 0 | 1 | 0 | `profile-architecture-worker` |
 | Research | 1 | 8 | 1 | 7 | 0 | 방법론 스카우트 4명, 경쟁 설명, 실험 기획, 시장 맥락, 보유종목 분석 |
 | Trading | 1 | 0 | 0 | 0 | 1 | `desk-runner`; 전략별 임시 Worker는 고정 직원 수에 포함하지 않음 |

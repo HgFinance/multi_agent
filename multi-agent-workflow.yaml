@@ -27,7 +27,7 @@ runtime_layers:
     model_selection: fixed_until_model_eval_approved
     discovery_command: ollama list
     worker_counts:
-      ceo-agent: 1
+      ceo-agent: 1  # LLM Worker only; deterministic ceo-runner is separate
       hr-department: 0   # 직원 LLM 계층 없음 - 부서장 + 결정론 함수
       research-department: 6
       trading-department: 2  # LLM Worker only; deterministic desk-runner is separate
