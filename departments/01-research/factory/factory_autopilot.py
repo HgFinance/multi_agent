@@ -92,7 +92,7 @@ SUGGESTED_PARAMS: {"horizon_days": 20, "top_n": 20}
 SOURCE_REPORTED_EFFECT: {"sharpe": null}
 TRIAL_BUDGET: 5
 COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가 - 구체적으로)
-COMPETING_CODES: (DATA_MINING, COST_UNACCOUNTED, SURVIVORSHIP, REGIME_ARTIFACT 중 해당하는 것을 쉼표로)
+COMPETING_CODES: (아래 통제 어휘 중 해당하는 것을 쉼표로. 밖의 값은 반려된다)
 
 필수: TITLE, LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, EDGE_TYPE, UNIVERSE_KEY,
       COMPETING_EXPLANATION.
@@ -106,7 +106,7 @@ SKEPTIC_FORMAT = """\
 [산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
 TITLE: (검토 대상 기획안의 **제목을 그대로**. 다르면 짝을 못 찾아 반려된다)
 COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가)
-COMPETING_CODES: (DATA_MINING, COST_UNACCOUNTED, SURVIVORSHIP, REGIME_ARTIFACT 중 해당하는 것을 쉼표로)
+COMPETING_CODES: (아래 통제 어휘 중 해당하는 것을 쉼표로. 밖의 값은 반려된다)
 VERDICT: PROCEED 또는 STOP
 
 VERDICT 가 PROCEED 가 아니면 그 기획안은 발행되지 않는다. 통과시키려고
@@ -154,14 +154,32 @@ select lead_id, scout_lens, claimed_edge, stated_mechanism, testability, status
 
 
 def _vocab_block() -> str:
-    """실행면이 표현할 수 있는 어휘. **여기 없는 값은 Gate 0 가 반려한다.**"""
+    """실행면이 표현할 수 있는 어휘. **여기 없는 값은 반려된다.**
+
+    ▶ **목록을 손으로 적지 않는다** (2026-08-11 실측). 프롬프트에 코드 목록을
+      직접 써넣었다가 실제 어휘에 없는 `REGIME_ARTIFACT` 를 시켜서, 제대로 쓴
+      기획안이 `경쟁 설명 코드가 어휘 밖이다` 로 반려됐다. 에이전트가 시킨 대로
+      했는데 막힌 것이다 - 어휘는 **정의된 곳에서 읽어온다.**
+    """
     sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
     from strategy_templates import EDGE_VOCAB      # noqa: PLC0415
     from trial_family import UNIVERSE_VOCAB        # noqa: PLC0415
 
+    from contracts.factory_contracts import (      # noqa: PLC0415
+        CompetingExplanation, SourceType)
+
+    sources = ""
+    try:
+        from data_resolution import SOURCE_TABLES  # noqa: PLC0415
+        sources = f"\n  DATA_TABLES  : {', '.join(sorted(SOURCE_TABLES))}"
+    except Exception:  # noqa: BLE001 - 어휘를 못 읽으면 적지 않는다(지어내지 않는다)
+        pass
+    _ = SourceType
     return ("\n[통제 어휘 - 밖의 값은 반려된다]\n"
             f"  EDGE_TYPE    : {', '.join(sorted(EDGE_VOCAB))}\n"
-            f"  UNIVERSE_KEY : {', '.join(sorted(UNIVERSE_VOCAB))}")
+            f"  UNIVERSE_KEY : {', '.join(sorted(UNIVERSE_VOCAB))}\n"
+            f"  COMPETING_CODES: {', '.join(c.value for c in CompetingExplanation)}"
+            + sources)
 
 
 def research_brief() -> str:
