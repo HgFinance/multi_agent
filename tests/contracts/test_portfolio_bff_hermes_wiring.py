@@ -53,8 +53,15 @@ def test_bff_dockerfile_pins_official_cli_without_gateway_command() -> None:
     assert "github.com/NousResearch/hermes-agent.git" in dockerfile
     assert "33f8e96a72945afb29f3bc9ef9991940f0bedcf" not in dockerfile
     assert "ARG HERMES_AGENT_REF=v2026.8.3" in dockerfile
-    assert "pip install --no-cache-dir /tmp/hermes-agent" in dockerfile
+    assert "UV_UNMANAGED_INSTALL=/usr/local/bin sh /tmp/uv-installer.sh" in dockerfile
+    assert 'git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent' in dockerfile
+    assert 'uv pip install --system --no-cache -e "/opt/hermes-agent[all]"' in dockerfile
+    assert "pip install --no-cache-dir /tmp/hermes-agent" not in dockerfile
+    assert "rm -rf /tmp/hermes-agent" not in dockerfile
+    assert "/opt/hermes-agent" in dockerfile
     assert "command -v hermes" in dockerfile
+    assert "test -x /usr/local/bin/hermes" in dockerfile
+    assert 'test "$(command -v hermes)" = /usr/local/bin/hermes' in dockerfile
     assert "hermes --version" in dockerfile
     assert "hermes kanban --help" in dockerfile
     assert 'CMD ["uvicorn"' in dockerfile
