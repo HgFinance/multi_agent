@@ -761,13 +761,22 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
     restart: unless-stopped
-    command: ["gateway", "run"]
+    # Hermes image의 공식 wrapped-runtime 경로를 사용한다. `init: true`가
+    # 없으면 entrypoint가 PID 1이 되어 s6 `/init`와
+    # `02-reconcile-profiles`가 모든 profiles/* gateway를 다시 시작한다.
+    init: true
+    # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
+    # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
+    command:
+      ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
     environment:
+      HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

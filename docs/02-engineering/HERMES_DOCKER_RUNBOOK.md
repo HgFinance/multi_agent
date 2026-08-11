@@ -175,6 +175,47 @@ docker compose --profile dashboard up -d
 
 ---
 
+## 4-1. 중앙 Kanban dispatcher (AWS)
+
+`kanban-dispatcher`는 `gateway run` 컨테이너가 아니다. `/home/ubuntu/.hermes:/opt/data`를 RW로 마운트한 단일 컨테이너에서 다음 명령만 실행한다.
+
+```yaml
+init: true
+command:
+  ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+environment:
+  HERMES_HOME: /opt/data
+  HERMES_KANBAN_HOME: /opt/data/shared-kanban
+  HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+```
+
+`init: true`는 Hermes 이미지가 지원하는 wrapped-runtime 경로를 선택한다. entrypoint가 PID 1이 아니므로 s6 `/init`와 `02-reconcile-profiles`가 실행되지 않고, `profiles/*`를 gateway 서비스로 reconcile/start하거나 `gateway.pid`·`processes.json`을 지우지 않는다. `/opt/data/profiles/<assignee>`는 그대로 보여 worker spawn과 profile resolution에 사용된다. 이 설정을 제거하면 중앙 컨테이너가 다시 모든 named profile gateway를 기동할 수 있다.
+
+8개 부서 gateway는 계속 `HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"`를 유지한다. 중앙 dispatcher와 gateway-embedded dispatcher를 같은 `shared-kanban/kanban.db`에 동시에 실행하지 않는다.
+
+주의: [`hermes kanban daemon --force`](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md)는 공식 CLI에 남아 있는 deprecated standalone escape hatch다. 공식 문서는 gateway-embedded dispatcher를 기본 경로로 안내하며, 두 dispatcher를 동시에 실행하면 claim race가 발생해 지원되지 않는다고 명시한다. [`entrypoint-dispatch.sh`](https://github.com/NousResearch/hermes-agent/blob/main/docker/entrypoint-dispatch.sh)의 wrapped-runtime fallback과 [`container_boot.py`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/container_boot.py)의 reconcile 동작을 근거로 `init: true`를 함께 둔다. 향후 Hermes release에서 `--force`가 제거될 수 있으므로 이미지 업데이트 때 아래 smoke check를 다시 통과시킨다.
+
+```bash
+docker compose config >/dev/null
+docker compose up -d kanban-dispatcher
+docker logs -f hedgefund-kanban-dispatcher
+docker exec hedgefund-kanban-dispatcher hermes kanban daemon --help
+docker exec hedgefund-kanban-dispatcher hermes kanban show t_186cb00d --json
+```
+
+`--help`에는 `--force`가 의도적으로 표시되지 않는다. 실제 지원 여부는 `hermes kanban daemon --force`가 “STANDALONE via --force”로 시작하는지로 확인한다. `docker logs`에 `reconcile: profile=... started`가 보이면 `init: true`가 적용되지 않은 것이므로 즉시 dispatcher를 중지하고 Compose 렌더링을 확인한다.
+
+### orphaned run 회수
+
+`t_186cb00d`는 수동 SQL로 수정하지 않는다. Hermes dispatcher의 첫 tick은 stale claim 회수를 먼저 수행하며, 기본 claim TTL(15분)이 지난 `running` claim을 `ready`로 되돌리고 이전 run을 `reclaimed`로 닫는다. `worker_pid`가 없으면 종료시킬 프로세스가 없어 즉시 reclaim 경로를 탄다.
+
+```bash
+docker exec hedgefund-kanban-dispatcher hermes kanban show t_186cb00d --json
+docker exec hedgefund-kanban-dispatcher hermes kanban runs t_186cb00d --json
+```
+
+기대 순서는 TTL 만료 후 `running → ready`(reclaimed run 기록) → dispatcher가 profile worker를 spawn하면 `running → done`이다. 첫 조회에서 즉시 바뀌지 않으면 TTL 만료 전일 수 있으므로 SQL 수정이나 강제 상태 전이를 하지 않고 다음 dispatcher tick을 기다린다.
+
 ## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개는 이미 있다)
 
 8개 본부(research/quant/risk/qa는 이 파일에 직접, ceo/trading/accounting/hr은
