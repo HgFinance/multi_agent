@@ -89,6 +89,18 @@ class ParsePlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _parse_plan(stdout, VALID_DEPARTMENTS)
 
+    def test_required_skill_owner_must_be_selected(self) -> None:
+        stdout = json.dumps(
+            {
+                "requested_departments": ["quant"],
+                "rewritten_query": "q",
+                "rationale": "r",
+                "required_skills": ["methodology-scout"],
+            }
+        )
+        with self.assertRaises(ValueError):
+            _parse_plan(stdout, VALID_DEPARTMENTS)
+
     def test_empty_rationale_is_rejected(self) -> None:
         stdout = json.dumps({"requested_departments": ["research"], "rewritten_query": "q", "rationale": ""})
         with self.assertRaises(ValueError):
