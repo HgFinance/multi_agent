@@ -782,6 +782,29 @@ services:
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s
+
+  ceo-kanban-supervisor:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-ceo-kanban-supervisor
+    restart: unless-stopped
+    init: true
+    command: ["python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py", "--interval", "1"]
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+      - .:/opt/hgfinance:ro
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      PYTHONPATH: /opt/hgfinance
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 20s
+
   # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────
   # **기본 `docker compose up` 에서는 뜨지 않는다.** profiles 로 묶어 두었으니
   # `docker compose --profile research-skills up -d` 로만 기동한다 - 검증 전

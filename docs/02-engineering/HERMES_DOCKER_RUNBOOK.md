@@ -216,7 +216,42 @@ docker exec hedgefund-kanban-dispatcher hermes kanban runs t_186cb00d --json
 
 기대 순서는 TTL 만료 후 `running → ready`(reclaimed run 기록) → dispatcher가 profile worker를 spawn하면 `running → done`이다. 첫 조회에서 즉시 바뀌지 않으면 TTL 만료 전일 수 있으므로 SQL 수정이나 강제 상태 전이를 하지 않고 다음 dispatcher tick을 기다린다.
 
-## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개는 이미 있다)
+### 4-1-a. CEO closed-loop supervisor
+
+`ceo-kanban-supervisor`는 gateway나 dispatcher가 아니다. Hermes `kanban watch`가
+내보내는 `completed`, `blocked`, `gave_up`, `crashed`, `timed_out`,
+`spawn_failed`, `reclaimed` terminal event를 읽고, `kanban show`의 parent/child
+projection을 통해 CEO supervisor action을 결정한다. DB를 직접 읽거나 SQL로 상태를
+변경하지 않는다.
+
+Supervisor action은 `SYNTHESIZE`, `CREATE_TASK`, `RETRY_TASK`,
+`REQUEST_USER_INPUT`, `RUN_QA`, `BLOCK/ABORT` 중 하나이며, retry 2회와 wake-up
+8회를 기본 상한으로 둔다. `blocked`는 실패와 구별한다. `needs_input` blocked는
+사용자 입력 요청으로 남기고, transient blocked만 retry하며, 그 외 blocked는 제한된
+replan 후 중단한다. QA는 기본 활성화하지만 CEO가 terminal completion metadata에
+`qa_required: false`를 명시한 경우 해당 요청에서는 생략할 수 있다.
+
+모든 Hermes `kanban create` 경계는 `orchestration/canonical_profiles.py`의 exact
+allowlist를 통과해야 한다. 논리 단계(`risk`, `qa`)는 CLI 직전에 각각
+`risk-management`, `qa-department`로 변환되고, `risk-department`나
+`ai-qa-audit-department` 같은 문자열은 fallback 없이 거부된다.
+
+주의: supervisor도 `/home/ubuntu/.hermes`를 보지만 `init: true`와 일반 Python
+command만 사용한다. dispatcher와 마찬가지로 gateway profile reconcile 로그가
+나오면 즉시 중지하고 Compose 렌더링을 확인한다. standalone daemon과 embedded
+dispatcher를 같은 Kanban DB에 동시에 실행하지 않는다.
+
+```bash
+docker compose config --quiet
+docker compose up -d kanban-dispatcher ceo-kanban-supervisor
+docker logs -f hedgefund-ceo-kanban-supervisor
+```
+
+향후 Hermes release에서 deprecated `hermes kanban daemon --force` escape hatch가
+제거되거나 `kanban watch` 출력 계약이 변경될 수 있다. update 후에는 CLI help/source와
+이 supervisor의 contract tests를 함께 재검증해야 한다.
+
+## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개가 이미 있다)
 
 8개 본부(research/quant/risk/qa는 이 파일에 직접, ceo/trading/accounting/hr은
 `departments/<n>/compose.yaml`에)는 2026-08-10 기준 이미 모두 컨테이너가 있다.
