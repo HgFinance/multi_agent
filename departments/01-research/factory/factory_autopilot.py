@@ -377,6 +377,21 @@ def _agent_output(task_id: str) -> str:
     rows = _board_rows("select coalesce(result,'') from tasks where id=?", (task_id,))
     if rows and rows[0][0]:
         parts.append(rows[0][0])
+    # ▶ **task_runs.summary 가 네 번째 자리다** (2026-08-11 실측)
+    #   T11~T14 네 주기 연속으로 "기획자 산출이 비었다"가 찍혔다. 카드는 done
+    #   이고 에이전트는 14분씩 돌았는데 위 세 곳이 전부 비어 있었다. 실제로는
+    #   완성된 기획안이 `task_runs.summary` 에 멀쩡히 들어 있었다 - 공장은
+    #   일하고 있었고 **수확기가 엉뚱한 곳을 보고 있었다.**
+    #
+    #   카드가 재시도되면 run 이 여러 개 생긴다(74 crashed -> 75 completed).
+    #   실패한 run 의 summary 는 없거나 쓸모없으므로 완료된 run 만 읽는다.
+    #   여러 개면 전부 이어 붙인다 - 어느 시도의 산출인지는 접수 게이트가
+    #   판정할 문제이지, 여기서 골라 버릴 일이 아니다.
+    parts.extend(
+        s for (s,) in _board_rows(
+            "select coalesce(summary,'') from task_runs"
+            " where task_id=? and status='done' order by rowid", (task_id,))
+        if s.strip())
     return "\n\n".join(parts)
 
 
