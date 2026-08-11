@@ -70,6 +70,17 @@ def _payload() -> dict[str, Any]:
         "fundamentals": {"pe": 20},
         "news_or_macro": {"headline": "test"},
         "evidence_request": {"query": "test"},
+        # ▶ QA 트리거. 이게 없어서 qa-runner 가 5개 도구에서 사실을 하나도 못 받고
+        #   facts:{} -> SCHEMA_FAILURE -> ESCALATED 로 떨어졌다. **워커 동작은
+        #   맞다** - 사실 없이 통과시키면 그게 사고다. 빠진 건 픽스처 쪽이었다.
+        #   모양은 짐작하지 않고 QA본부 자체 테스트에서 그대로 가져왔다
+        #   (departments/06-ai-qa-audit/tests/test_qa_employee_workers.py).
+        "assessment": {"claim_checks": [{"result": "UNSUPPORTED"}]},
+        "model_risk": {"status": "TESTING"},
+        "internal_audit": {"status": "TESTING"},
+        "ops_assessment": {"status": "HEALTHY"},
+        "permission_check": {"result": "ALLOWED"},
+        "incident": {"incident_id": "incident-test"},
         "order_book": {"spread": "0.01"},
         "price_history": [200.0],
         "filings": {"published_at": "2026-08-03"},
