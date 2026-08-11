@@ -75,6 +75,10 @@ finally:
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
 import hermes_cli
+try:
+    from .ceo import router as ceo_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from ceo import router as ceo_router
 import trading
 from agent_status import agent_status_snapshot
 from command_service import (
@@ -134,6 +138,7 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+app.include_router(ceo_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 

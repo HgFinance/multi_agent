@@ -62,3 +62,28 @@ class DepartmentComposeWiringTests(unittest.TestCase):
             "/.hermes/profiles/accounting-portfolio-department:/opt/data", compose
         )
         self.assertNotIn(".hermes-accounting-portfolio-department", compose)
+
+    def test_kanban_dispatcher_uses_standalone_escape_hatch_without_s6_reconcile(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "kanban-dispatcher")
+
+        self.assertIn("init: true", service)
+        self.assertIn('"kanban", "daemon", "--force"', service)
+        self.assertNotIn('command: ["gateway", "run"]', service)
+        self.assertIn("HERMES_HOME: /opt/data", service)
+        self.assertIn("HERMES_KANBAN_HOME: /opt/data/shared-kanban", service)
+        self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
+        self.assertIn("/home/ubuntu/.hermes:/opt/data", service)
+
+        for compose_path in (
+            ROOT / "docker-compose.yml",
+            ROOT / "departments/00-ceo-office/compose.yaml",
+            ROOT / "departments/02-trading/compose.yaml",
+            ROOT / "departments/05-accounting-portfolio/compose.yaml",
+            ROOT / "departments/07-agent-workforce/compose.yaml",
+        ):
+            self.assertIn(
+                'HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"',
+                compose_path.read_text(encoding="utf-8"),
+                msg=f"embedded dispatcher must remain disabled in {compose_path}",
+            )

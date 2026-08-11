@@ -48,11 +48,13 @@ class KanbanTrackerEnabledTest(unittest.TestCase):
             )
         run_cli.assert_called_once_with(
             [
-                "kanban",
-                "create",
-                "research-department — job-1",
-                "--assignee",
-                "research",
+            "kanban",
+            "create",
+            "research-department — job-1",
+            "--body",
+            "research-department — job-1",
+            "--assignee",
+            "research-department",
                 "--initial-status",
                 "running",
                 "--idempotency-key",

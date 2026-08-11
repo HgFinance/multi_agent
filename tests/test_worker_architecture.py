@@ -25,6 +25,11 @@ DEPARTMENTS = (
 )
 
 
+# 부서별 본부장(Hermes) 모델 예외. 2026-08-10 현재 8개 부서가 같은 모델이라 비어 있다.
+# 표를 남겨 두는 이유: 한 줄로 8개 부서를 묶어 두면 한 부서의 결정이 다른 부서를 잠근다.
+HEAD_MODEL: dict[str, tuple[str, str]] = {}
+
+
 def _read_profile(directory: str) -> str:
     """Read a department Hermes profile as UTF-8.
 
@@ -65,6 +70,39 @@ def _payload() -> dict[str, Any]:
         "fundamentals": {"pe": 20},
         "news_or_macro": {"headline": "test"},
         "evidence_request": {"query": "test"},
+        # ▶ QA 트리거. 이게 없어서 qa-runner 가 5개 도구에서 사실을 하나도 못 받고
+        #   facts:{} -> SCHEMA_FAILURE -> ESCALATED 로 떨어졌다. **워커 동작은
+        #   맞다** - 사실 없이 통과시키면 그게 사고다. 빠진 건 픽스처 쪽이었다.
+        #   모양은 짐작하지 않고 QA본부 자체 테스트에서 그대로 가져왔다
+        #   (departments/06-ai-qa-audit/tests/test_qa_employee_workers.py).
+        # 이 테스트가 묻는 것은 "워커가 독립 그래프로 도는가" 이지 "QA 가 나쁜 입력을
+        # 거르는가" 가 아니다(후자는 QA본부 자체 테스트 몫). 그래서 **통과하는 케이스**를
+        # 준다 - 판정 엔진에 원본 입력을 주면 engine 이 decision 을 계산한다.
+        # 모양은 departments/06-ai-qa-audit/tests/test_qa_employee_workers.py 에서 가져왔다.
+        "assessment": {"decision": "PASS", "claim_checks": [{"result": "SUPPORTED"}]},
+        "model_risk_input": {
+            "model_id": "00000000-0000-0000-0000-000000000001",
+            "model_version": "model-v1",
+            "prompt_version": "prompt-v1",
+            "dataset_version": "dataset-v1",
+            "evaluation_count": 500,
+            "accuracy": 0.9,
+            "calibration_error": 0.02,
+            "drift_score": 0.04,
+            "protected_failure_rate": 0.01,
+        },
+        "internal_audit_events": [
+            {
+                "action": "qa.evidence.check",
+                "department": "qa",
+                "trace_id": "trace-qa-tool-1",
+                "profile_status": "ACTIVE",
+                "authorized": True,
+            }
+        ],
+        "ops_assessment": {"status": "HEALTHY"},
+        "permission_check": {"result": "ALLOWED"},
+        "incident": {"incident_id": "incident-test"},
         "order_book": {"spread": "0.01"},
         "price_history": [200.0],
         "filings": {"published_at": "2026-08-03"},
@@ -90,6 +128,25 @@ def _payload() -> dict[str, Any]:
         "backtest": {"run_id": "backtest-test"},
         "release_candidate": {"id": "release-test"},
         "ml_research": {"model": "baseline"},
+        # 2026-08-10 공장 재편 trigger. 리서치는 방법론 수집(scout_cycle) -> 기획
+        # (adopted_lead) -> 독립 반증(proposal_draft), 퀀트는 접수 -> 설계 -> 카드 ->
+        # 결과 환류 순서로 켜진다.
+        "scout_cycle": {"cycle_id": "scout-test", "lenses": ["academic"]},
+        "adopted_lead": {"lead_id": "lead-test"},
+        "proposal_draft": {"proposal_id": "proposal-test"},
+        "methodology_leads": [{"lead_id": "lead-test"}],
+        "universe": {"key": "krx_all"},
+        "experiment_proposal": {"proposal_id": "proposal-test"},
+        "experiment_design": {"windows": 5},
+        "strategy_authoring": {"edge_type": "liquidity_shock_reversal"},
+        "template_catalog": {"templates": 8},
+        "experiment_card": {"card_id": "card-test"},
+        "experiment_outcome": {"decision": "REJECT"},
+        "trial_pressure": {"trial_number": 1},
+        "regime_breakdown": {"BULL": {"n_windows": 1.0}},
+        "failed_criteria": ["pbo"],
+        # 서비스 자리(RES-18) - 사용자가 보유 종목을 물을 때만 켜진다.
+        "holding_question": {"symbol": "005930"},
         "execution": {"cost": "0"},
         "cost_sensitivity": {"slippage": 0.0},
         "regime": {"label": "normal"},
@@ -139,11 +196,18 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않았다 —
     # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
     # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너가 필요 없었다.
-    # 2026-08-10: 0 -> 1. profile-architecture-worker 만 되살렸다 - Adversarial Eval
-    # Case 설계는 정답이 규칙표에 없는 창작이라 결정론화 대상이 아니고, 산출물이
-    # QA 재검증을 거치는 비바인딩 제안이라 환각이 그대로 사고가 되지 않는다.
-    # 나머지 4명은 여전히 결정론 함수가 소유한다(WORKER_ROLE_BOUNDARIES.md 참고).
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 6, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 7, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    # 2026-08-10: 07 은 0 -> 1. profile-architecture-worker 만 되살렸다(영주님) -
+    # Adversarial Eval Case 설계는 정답이 규칙표에 없는 창작이라 결정론화 대상이
+    # 아니고, 산출물이 QA 재검증을 거치는 비바인딩 제안이라 환각이 그대로 사고가
+    # 되지 않는다.
+    # 2026-08-11 재일: 01-research 8 -> 4, 04-quant-backtest 5 -> 2. 직원은
+    # 병렬성·맥락격리·독립성·권한격리 중 하나가 명확할 때만 둔다 - 본부장이 순차로
+    # 해도 되는 일은 본부장이 한다. 스카우트 4렌즈는 주기가 달라 2명이 시간 분리해
+    # 맡고, 기획은 편집장 본업이라 흡수했고, market-context 는 data_resolution 이
+    # 이미 커버리지를 실측하므로 폐지했다(서술이 코드 판정과 경쟁하면 안 된다).
+    # 퀀트는 접수·설계가 실험당 1회라 병렬성이 없고 교훈 사상은 lessons_from() 이
+    # 이미 결정론으로 한다 - 환류가 에이전트 가용성에 묶이면 안 된다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 4, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -164,8 +228,11 @@ def test_profile_worker_registry_counts_and_models() -> None:
             assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
             assert config["employee_runtime"]["max_retries"] == 2
             assert config["employee_runtime"]["max_attempts"] == 3
-        assert config["model"]["provider"] == "openai-codex"
-        assert config["model"]["default"] == "gpt-5.6-luna"
+        # 2026-08-10: 본부장 모델이 부서마다 갈린다. 리서치·퀀트(재일)는 논문 정독과
+        # 실험 코드 작성이 본부장 일이라 Opus 5 로 올렸다. 나머지 부서는 현행 유지 -
+        # 한 줄로 8개 부서를 묶어 두면 한 부서의 결정이 다른 부서를 잠근다.
+        expected_head = HEAD_MODEL.get(directory, ("openai-codex", "gpt-5.6-luna"))
+        assert (config["model"]["provider"], config["model"]["default"]) == expected_head
         # `or` 로 폴백하면 빈 목록(직원 없는 부서)이 "키 없음"으로 잘못 읽힌다 - None 만 폴백한다.
         runtime_personalities = config["agent"].get("runtime_personalities")
         if runtime_personalities is None:
@@ -319,13 +386,18 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         # 2026-08-10: profile-architecture-worker 1명. trigger 가 채용·개정 요청일 때만
         # 이라 조건부다 - 평시에 인사팀 LLM 이 도는 것이 아니다.
         "hr": (1, 0, 1),
-        "research": (6, 2, 4),
+        # 2026-08-11: 4명 전부 소집형이다. 상시였던 market-context 를 폐지하면서
+        # 상시가 0 이 됐다 - 스카우트·회의론자를 상시로 켜두면 편집장이 읽지 못하는
+        # 리드만 쌓인다.
+        "research": (4, 0, 4),
         # 고정 LLM 직원은 없고 전략별 결정론 Worker를 요청 단위로 생성한다.
         "trading": (0, 0, 0),
         # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
 
         "risk": (1, 0, 1),
-        "quant-backtest": (7, 2, 5),
+        # 2026-08-10: 상시는 접수 하나다. 카드도 없는데 해석 워커를 돌릴 이유가 없다.
+        # 2026-08-11: 2명 전부 소집형. 상시였던 proposal-intake 를 본부장이 흡수했다.
+        "quant-backtest": (2, 0, 2),
         # 2026-08-07: 회계의 도메인별 수치 전달은 back-office-runner로 이동해 LLM 1명만
         # 남겼다. 남은 하나는 도메인이 아니라 **예외**로 정의된 조사관이라 항상 실행이다.
         "accounting-portfolio": (1, 1, 0),

@@ -210,6 +210,30 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str,
 # 실행
 # ---------------------------------------------------------------------------
 
+def universe_symbols(limit: int = 0) -> tuple[str, ...]:
+    """전체 KRX 상장 종목 코드. 기본 바스켓(뉴스 워치리스트 350종목)의 대체다.
+
+    ▶ 왜 넓혀야 하나 (2026-08-10 실측)
+      호가·체결은 2,600종목인데 일봉은 350종목이라 **유니버스가 어긋난다.**
+      마이크로구조에서 찾은 것을 일봉으로 확인하려 해도 종목이 안 겹친다.
+      횡단면 전략은 표본 종목 수가 곧 검정력이기도 하다.
+    """
+    import psycopg2
+
+    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    cur = conn.cursor()
+    # 상장 폐지된 종목도 남긴다 - 살아남은 것만 받으면 생존 편향이 들어간다.
+    cur.execute("""
+        select sy.symbol from reference.instruments i
+        join reference.instrument_symbols sy using (instrument_id)
+        where sy.is_primary and sy.symbol ~ '^[0-9]{6}$'
+        group by sy.symbol order by sy.symbol
+    """)
+    out = tuple(r[0] for r in cur.fetchall())
+    conn.close()
+    return out[:limit] if limit else out
+
+
 def _symbols_and_ids(symbols: tuple[str, ...]):
     import psycopg2
     from news_watch_service import parse_watchlist_file
@@ -360,6 +384,9 @@ if __name__ == "__main__":
     a = sys.argv
     def opt(n, d): return a[a.index(n) + 1] if n in a else d
     syms = tuple(s.strip() for s in opt("--symbols", "").split(",") if s.strip())
+    if "--universe" in a and not syms:
+        syms = universe_symbols(int(opt("--universe-limit", "0")))
+        print(f"  전체 유니버스 {len(syms)}종목")
 
     if "--daily" in a:
         # ▶ --recent-days: 스케줄러용 상대 창. 매일 도는 증분 수집은 시작일을

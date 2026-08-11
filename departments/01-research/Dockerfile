@@ -35,6 +35,9 @@ COPY collectors ./collectors
 COPY contracts ./contracts
 COPY repository ./repository
 COPY api ./api
+# 공장 모듈. MCP 의 factory_* 도구가 cycle_brief/lead_intake/proposal_intake 를
+# 임포트하므로 이미지에 있어야 한다 - 없으면 도구는 등록되는데 호출이 죽는다.
+COPY factory ./factory
 # evidence/ 는 research-api /evidence/stories 가 story_cluster(결정론 군집)를
 # import 하기 위해 필요하다 - 표준 라이브러리만 써서 의존성은 늘지 않는다
 COPY evidence ./evidence

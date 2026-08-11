@@ -1,31 +1,40 @@
 # Research Output Advancement Strategy
 
 > 문서 상태: 구현 기준 제안
-> 적용 범위: 리서치본부의 Analyst Finding, Research Packet, 부서 간 Handoff, 사후 평가
-> 현재 기준: `ResearchCaseV2`, `AnalystFindingV1`, `ResearchPacketV2`
-> 목표 기준: 기존 V2를 호환하면서 `ResearchPacketV3` 산출물 체계로 확장
-> 상위 설계: [Research-Quant Evidence-to-Strategy Framework](RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)
+> 적용 범위: 리서치본부의 방법론 리드, 실험 기획안, 퀀트 Handoff, 사후 환류
+> 현재 기준: `ResearchCaseV2`
+> 목표 기준: `MethodologyLeadV1` -> `ExperimentProposalV1` 산출물 체계
+> 상위 설계: [Research-Quant Strategy Factory Framework](RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)
+> 구현 담당: [TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md)
+> 개정: 2026-08-10 전략 공장 재편 (재일). 이전 판의 산출물은 종목별 Research Packet 과
+> `종목 x 기간 x 방향 x 확률` Outlook 이었다. 그 축을 **방법론 x 실험**으로 갈아끼웠다.
+> 품질관리 설비(PIT 4시각, 인용·수치 Validator, 발행 Gate, Lifecycle·Event, 저장 원칙)는
+> 그대로 이식한다 - 바뀐 것은 무엇을 만드느냐이지 어떻게 검증하느냐가 아니다.
 
 ## 1. 결론
 
-리서치 Output 고도화의 목표는 보고서를 길게 만드는 것이 아니다. 하나의 분석 결과를 다음 네 가지 형태로 동시에 사용할 수 있게 만드는 것이다.
+리서치 Output 고도화의 목표는 보고서를 길게 만드는 것이 아니다. **퀀트가 질문 없이 사전
+등록할 수 있는 실험 기획안**을 만드는 것이다. 리서치의 산출물은 읽히는 것이 아니라 실행된다.
 
-1. 사용자는 30초 안에 `왜 지금 봐야 하는지`, `무엇이 확인됐는지`, `무엇이 아직 불확실한지`를 이해한다.
-2. 트레이딩, 퀀트, 리스크와 QA는 같은 내용을 각자 필요한 구조화 필드로 조회한다.
-3. 모든 중요 문장은 Claim, Evidence, 시각, 분석 방법과 연결되어 재현할 수 있다.
-4. 전망 기간이 지난 뒤 어떤 주장과 분석 방법이 유효했는지 자동으로 채점한다.
+1. 퀀트는 기획안을 받아 추가 협의 없이 `HypothesisSpecV2` 로 잠글 수 있다.
+2. 모든 주장은 리드의 원문 출처(URL·시각·발췌)까지 되짚을 수 있다.
+3. 발행 전에 같은 trial family 의 기각 이력과 대조되어, 같은 실험을 두 번 사지 않는다.
+4. 실험이 끝나면 결과가 통제 어휘로 돌아와 다음 기획의 입력이 된다.
 
 따라서 최종 산출물은 하나의 Markdown 보고서가 아니라 다음 산출물 묶음이다.
 
 ```text
-ResearchBriefV1                 사람이 읽는 1페이지 요약
-ResearchPacketV3               부서의 유일한 정본 JSON
+MethodologyLeadV1              스카우트가 가져온 방법론 리드(출처 필수)
+ExperimentProposalV1           부서의 유일한 정본 - 퀀트가 소비하는 실험 기획안
 EvidenceManifestV1             사용한 증거와 시점 목록
 ClaimGraphV1                   주장, 근거, 반론과 인과관계
-ResearchPacketDeltaV1          직전 패킷 이후 달라진 내용
-ResearchOutcomeScorecardV2     사후 결과와 보정 성과
-Consumer Views                 CEO/Trading/Quant/Risk/QA 전용 조회 화면
+ExperimentOutcomeV1            퀀트에서 돌아온 결과와 통제 어휘 교훈(입력이자 산출)
+Consumer View                  퀀트 전용 조회 (Trading/Risk 는 승격된 전략만 소비한다)
+Holding Brief                  사용자 질의 응답 - **공장 입력이 아니다**
 ```
+
+**사람이 읽는 1페이지 Brief 는 부산물이다.** 이전 판은 그것을 완료 정의의 첫 항목에
+두었는데, 그러면 조직의 목표가 "읽히는 문서"가 되고 실험은 부록이 된다.
 
 ## 2. 현재 구현에서 재사용할 것
 
@@ -182,23 +191,36 @@ Event
 
 예시는 `HBM 수요 증가 -> 판매량·가격 개선 -> 영업이익 추정치 상승 -> 밸류에이션 재평가 -> 20~60일 가격 영향`이다. 각 화살표는 Claim ID를 가져야 하며, 확인되지 않은 연결은 `hypothesis`로 표시한다.
 
-### 6.3 `OutlookByHorizonV1`
+### 6.3 `ExpectedEffectV1` (구 `OutlookByHorizonV1` 대체)
+
+**폐기: 종목 방향·확률 예측.** 이전 판의 `OutlookByHorizonV1`은 `direction: positive`,
+`forecast_probability: 0.63` 처럼 종목의 방향과 확률을 리서치가 직접 산출했다. 공장 모델에서
+방향 예측은 **실험을 통과해 승격된 전략의 산출물**이고, 리서치가 그것을 내면 프레임워크가
+다시 투자판단을 하게 된다. 같은 문서 4.5절이 "계산과 승인은 Agent 밖에 둔다"고 적어 놓고
+6.3에서 확률을 만들던 자기모순도 여기서 해소된다.
+
+대신 리서치는 **실험이 확인하려는 효과**를 적는다. 이것은 예측이 아니라 사전 등록될 가설이다.
 
 ```yaml
-- outlook_id: outlook_...
-  subject_id: inst_...
-  target_variable: relative_return
-  horizon: 5d
-  direction: positive
-  magnitude_band: [0.0, 0.05]
-  forecast_probability: 0.63
-  probability_method: calibrated_event_cohort_v1
-  claim_ids: [claim_1, claim_4]
-  scenario_ids: [scenario_base, scenario_down]
-  expires_at: 2026-08-10T06:30:00Z
+- effect_id: effect_...
+  proposal_id: prop_...
+  edge_type: mean_reversion        # 통제 어휘
+  universe_key: above_sma20        # 통제 어휘 (자유 서술 금지)
+  label: forward_return            # 실험이 예측할 대상
+  baseline: equal_weight_buy_and_hold
+  expected_direction_vs_baseline: positive   # 기준선 대비 초과 여부만. 종목 방향이 아니다
+  source_reported_effect:          # 소스가 보고한 값 - **우리 데이터의 결과가 아니다**
+    market: US equities
+    period: 1993-2018
+    reported_metric: annualized_excess_return
+    reported_value: 0.04
+  falsification_tests:
+    - 하락장 초과수익이 0 미만이면 기각
+  prereg_metric: [excess_return_pct, information_ratio, deflated_sharpe, pbo]
 ```
 
-`macro_outlook`과 `micro_outlook`은 삭제하지 않는다. 두 값은 기간별 Outlook을 만드는 독립 입력으로 보존하고, 최종 Output은 `대상 변수 × 기간` 단위로 제공한다.
+`source_reported_effect`와 우리 실험 결과를 **절대 같은 필드에 두지 않는다.** 남의 시장·남의
+기간에서 나온 숫자가 우리 백테스트 결과처럼 읽히는 순간, 검증되지 않은 값이 근거로 승격된다.
 
 ### 6.4 `ScenarioV1`
 
@@ -257,27 +279,33 @@ Research의 방향성과 별개로 사용 가능 상태를 평가한다.
 
 정본을 복제하지 않고 API Projection으로 제공한다.
 
+**리서치의 1차 소비자는 퀀트 하나다.** 이전 판은 Trading 에 `Horizon Outlook · Catalyst
+Clock` 을 직접 공급했는데, 그러면 리서치 견해가 실험을 건너뛰고 매매 근거가 된다. 트레이딩과
+리스크는 이제 리서치 산출물이 아니라 **승격된 전략**을 소비한다.
+
 | 소비자 | 보여줄 내용 | 숨기거나 금지할 내용 |
 |---|---|---|
-| CEO | Why now, 핵심 변화, Scenario, Dissent, Readiness | 원문 전체와 Tick 상세 |
-| Trading | Horizon Outlook, Catalyst Clock, Invalidation, Liquidity, Expiry | 리서치가 만든 주문 수량·목표 비중 |
-| Quant | Claim/Evidence ID, Hypothesis Seed, Feature·Label 후보, PIT Manifest | 검증되지 않은 자연어를 Feature로 직접 사용 |
-| Risk | Downside/Tail Scenario, Cross-book Impact, 데이터 불확실성 | Research 방향을 Risk 승인으로 간주 |
-| AI QA | Claim Graph, Citation, Numeric Ref, Prompt·Model·Tool Trace | 축약 Summary만 보고 승인 |
-| Frontend 사용자 | Brief, 근거 펼치기, 변경점, 상태와 만료 | 내부 Prompt, Secret과 권한 없는 원문 |
+| **Quant (1차 소비자)** | Lead 출처·발췌, 경제적 근거, 경쟁 설명, 통제 어휘 사상, 데이터 요구, 반증 검사, 기각 이력 대응 | 검증되지 않은 자연어를 Feature 로 직접 사용 |
+| AI QA | Claim Graph, Citation, Numeric Ref, Prompt·Model·Tool Trace | 축약 Summary 만 보고 승인 |
+| CEO | 기획 포트폴리오 현황, 발행 건수, 기각 사유 분포 | 원문 전체와 Tick 상세 |
+| Trading | **없음** — 승격된 전략의 시그널만 받는다 | 리서치 산출물을 매매 근거로 사용 |
+| Risk | **없음(승격 심사 시 ExperimentCard 로 받는다)** | Research 방향을 Risk 승인으로 간주 |
+| Frontend 사용자 | Holding Brief(보유 종목 질의 응답), 근거 펼치기, 상태와 만료 | 내부 Prompt, Secret, 권한 없는 원문. **이 답변은 공장 입력이 아니다** |
 
 ### 7.1 Quant Handoff
 
-V3에는 전략 승인이 아니라 다음과 같은 `hypothesis_seeds[]`를 포함한다.
+정본 `ExperimentProposalV1` 이 곧 Handoff 다. 이전 판의 `hypothesis_seeds[]` 가 정식 계약으로
+승격된 것이고, 필드는 다음을 반드시 포함한다.
 
-- 출처 `packet_id`, `claim_id`, `evidence_id`
-- 경제적 설명과 대안 설명
-- 예상 대상 변수와 기간
-- 후보 Feature와 Label
-- 반증 조건
-- 사용할 수 없는 데이터와 PIT 제한
+- 출처 `lead_id` 와 원문 참조(URL·발행일·접근시각·발췌)
+- 경제적 근거(**반대편 주체 명시**)와 경쟁 설명(통제 어휘 코드 >=1, 독립 회의론자 서명)
+- 통제 어휘로 사상된 `edge_type` / `universe_key` / `label` / `baseline`
+- 데이터 요구(테이블, 최소 히스토리)와 PIT 제한
+- 반증 검사 >=1
+- `prior_check` — 같은 trial family 의 기각 이력과 `lessons_addressed`
 
-Quant는 이를 그대로 채택하지 않고 `HypothesisSpecV2`로 사전 등록한 뒤 독립 검증한다.
+Quant 는 이를 그대로 채택하지 않고 Gate 0(중복·예산 검사)을 통과시킨 뒤 `HypothesisSpecV2`
+로 사전 등록하고 독립 검증한다. **기획안은 실험의 입력이지 결론이 아니다.**
 
 ## 8. 생성 Workflow
 
@@ -302,20 +330,25 @@ Hermes는 Case의 우선순위, 업무 배정, 재시도, 예산, Deadline과 �
 
 ## 9. 직원별 Output 책임
 
-| Agent | V3 책임 필드 |
+| Agent | 책임 필드 |
 |---|---|
-| `RES-00` Research Supervisor | Brief, 최종 Thesis, Readiness, Dissent 보존, 발행·정정 |
-| `RES-01` Universe/Event Triage | Subject Scope, Tradability, Why-now, Priority, Recheck Schedule |
-| `RES-02` Market Data Steward | PIT, Freshness, Completeness, Quarantine와 DQ 상태 |
-| `RES-03` Microstructure Analyst | Liquidity, Impact Risk, 초단기 Outlook과 실행 가능 시간대 |
-| `RES-04` Technical Analyst | Feature Claim, Trigger와 수치형 Invalidation |
-| `RES-05` Fundamental Analyst | Financial Claim, Causal Path, Valuation Assumption과 Earnings Catalyst |
-| `RES-06` News/Filing/Sentiment Analyst | Story Cluster, Novelty, Source Conflict와 Event Timeline |
-| `RES-07` Sector/Macro/Regime Analyst | Macro Outlook, Sector-relative Path와 Cross-book 영향 |
-| `RES-08` RAG/Evidence/Web Researcher | Evidence Manifest, Citation Resolution, Source Tier와 Retraction |
-| `RES-09` Geopolitical Analyst | Threat-versus-Act, Cross-asset Transmission과 Tail Scenario |
+| `RES-00` Research Editor | Lead 채택·보류·폐기, `prior_check`, 발행 판단, 기획 포트폴리오 |
+| `RES-11` Academic Scout | Lead(논문·프리프린트), 원문 참조, 저자가 밝힌 실패 조건 |
+| `RES-12` Practitioner Scout | Lead(서한·실무자 글), 서술된 메커니즘, 인용/추론 구분 |
+| `RES-13` Community Scout | Lead(커뮤니티·영상·저장소), 독립 언급 수, 규칙 서술 가능성 |
+| `RES-14` Cross-domain Scout | Lead(타 분야), 전용(轉用) 논증, 구조적 전제 |
+| `RES-15` Competing Explanation | 경쟁 설명, 반증 검사 제안, 회의론자 서명 |
+| `RES-16` Experiment Planner | 통제 어휘 사상, 데이터 요구, 파라미터 범위, 어휘 공백 요청 |
+| `RES-17` Market Context | 유니버스 실재·히스토리 길이·유동성·DQ 공백 (**실행 가능성 재료**) |
+| `RES-18` Holdings Analyst | Holding Brief, 인용, 미해결 질문 (**서비스 전용 — 공장 미연결**) |
+| `RES-08` RAG/Evidence Curator | Evidence Manifest, Citation Resolution, Source Tier, Retraction, 승격 판정 |
 
-Supervisor는 Specialist의 수치를 다시 계산하거나 반대 의견을 삭제하지 않는다. 필수 관점이 실패하면 성공한 Finding은 보존하되 Packet은 `READY_WITH_LIMITS` 또는 `INSUFFICIENT_EVIDENCE`로 종료한다.
+> 구 `RES-01~07`, `RES-09`(종목 애널리스트)는 2026-08-10 운영에서 내렸다. 코드는 감사
+> 계보로 남지만 이 표의 책임 필드를 갖지 않는다.
+
+Editor 는 Scout 의 인용을 다시 쓰거나 회의론자의 반대 의견을 삭제하지 않는다. 필수 항목이
+빠지면 성공한 Lead 는 보존하되 기획안은 `READY_WITH_LIMITS` 또는 `INSUFFICIENT_EVIDENCE`
+로 종료한다 — **발행하지 않는 것이 해석 불가능한 실험보다 싸다.**
 
 ## 10. 발행 전 Quality Gate
 
@@ -328,10 +361,18 @@ Supervisor는 Specialist의 수치를 다시 계산하거나 반대 의견을 �
 | Coverage | Critical·High Claim Evidence Coverage 100% | `INSUFFICIENT_EVIDENCE` |
 | Freshness | 데이터 유형별 TTL과 Source Lag 표시 | `READY_WITH_LIMITS` 또는 차단 |
 | Contradiction | 충돌을 해소하거나 Dissent로 명시 | 미기록 충돌은 차단 |
-| Forecast | Horizon, Method, Resolution Rule과 Falsification 존재 | Forecast 제외 |
-| Scenario | Weight 유형과 조건 명시, 합계 규칙 검사 | Scenario 제외 또는 제한 |
+| Rationale | 경제적 근거가 **반대편 주체**를 명시 (`counterparty` non-null) | 발행 차단 |
+| Competing Explanation | 통제 어휘 코드 >=1 + 독립 회의론자 서명(`skeptic_sign`) 존재 | 발행 차단 |
+| Falsification | 반증 검사 >=1 존재 | 발행 차단 |
+| Vocabulary | `edge_type`·`universe_key`가 통제 어휘로 사상됨 | `UNMAPPED_VOCAB` 반려 (자유 서술 금지) |
+| Prior-art | 같은 trial family 의 기각 `lesson_codes` 마다 `lessons_addressed` 대응 존재 | `DUPLICATE_UNADDRESSED` 반려 |
+| Budget | `trials_used < trial_budget` | `OVER_BUDGET` — CEO 증액 결정 없이 재접수 불가 |
 | Permission | 원문 License, PII, Secret과 Tool Scope 확인 | 발행 차단 |
-| Consumer Contract | Trading/Quant/Risk/QA Fixture로 역직렬화 | Event 발행 차단 |
+| Consumer Contract | Quant Fixture 로 역직렬화 | Event 발행 차단 |
+
+Rationale·Competing Explanation·Falsification·Vocabulary 네 Gate 는 **의미 품질을 판정하지
+않는다.** "그럴듯한 근거인가"는 어차피 실험이 판정한다. 이 Gate 들이 보는 것은 답해야 할
+질문에 답을 적었는가 하나이고, 그래서 결정론 코드로 검사할 수 있다.
 
 ## 11. Packet Lifecycle과 Event
 
@@ -492,14 +533,17 @@ Hermes Memory에는 원문 보고서를 무제한 저장하지 않는다. 검증
 
 리서치 Output 고도화는 다음 조건이 모두 충족되어야 완료로 본다.
 
-- 사람이 1페이지 Brief만 읽고 Why-now, 핵심 논리, 반론, 다음 일정과 제한 사항을 이해할 수 있다.
-- 모든 중요 Fact가 원문 위치와 시각까지 역추적된다.
-- Outlook과 Forecast는 대상 변수, 기간, 방법과 반증 규칙을 가진다.
-- Pair, Basket, 선물과 옵션 Case를 단일 계약으로 표현할 수 있다.
-- Trading, Quant, Risk와 QA가 같은 Packet ID를 서로 다른 View로 소비한다.
-- Packet이 갱신·만료·정정될 때 소비 본부에 Event가 전달된다.
-- Quant Hypothesis에서 원 Research Claim과 Evidence까지 역추적된다.
-- 사후 결과가 Claim, Method, Analyst와 Packet Cohort에 자동 귀속된다.
-- Hermes의 개선안은 Replay, Shadow, QA 승인과 Rollback을 거친 뒤에만 적용된다.
+- **퀀트가 기획안을 받아 추가 협의 없이 사전 등록할 수 있다.** (완료 정의 1번은 사람이 읽는
+  문서가 아니라 기계가 실행할 수 있는 기획안이다)
+- 모든 중요 Fact 가 원문 위치와 시각까지 역추적된다.
+- 모든 기획안이 반대편 주체·경쟁 설명·반증 검사·회의론자 서명을 갖는다.
+- `edge_type`·`universe_key` 가 통제 어휘로만 표현되고, 미사상은 어휘 등재 요청으로 처리된다.
+- 발행 전에 같은 trial family 의 기각 이력이 조회되고, 대응 없는 재도전이 차단된다.
+- 실험 결과(성공·기각·킬)가 `ExperimentOutcomeV1` 통제 어휘로 돌아와 Gate 0 에서 기계 대조된다.
+- Lead 에서 기획안, 사전등록 가설, 실험 카드까지 계보가 끊기지 않는다.
+- 기획안이 갱신·만료·정정될 때 퀀트에 Event 가 전달된다.
+- Hermes 의 개선안은 Replay, Shadow, QA 승인과 Rollback 을 거친 뒤에만 적용된다.
+- 사용자 질의 응답(Holding Brief)은 제공되되, 어떤 기획안의 근거로도 인용되지 않는다.
 
-이 구조가 완성되면 Research Packet은 읽기 좋은 리포트를 넘어, 회사 전체가 공유하는 검증 가능하고 학습 가능한 투자 근거 계약이 된다.
+이 구조가 완성되면 리서치본부의 산출물은 읽기 좋은 리포트가 아니라 **회사가 실행할 수 있는
+실험 계약**이 된다. 리포트는 그 부산물로 언제든 렌더링할 수 있지만, 조직의 목표가 되지는 않는다.
