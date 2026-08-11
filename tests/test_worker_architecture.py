@@ -75,15 +75,31 @@ def _payload() -> dict[str, Any]:
         #   맞다** - 사실 없이 통과시키면 그게 사고다. 빠진 건 픽스처 쪽이었다.
         #   모양은 짐작하지 않고 QA본부 자체 테스트에서 그대로 가져왔다
         #   (departments/06-ai-qa-audit/tests/test_qa_employee_workers.py).
-        "assessment": {"claim_checks": [{"result": "UNSUPPORTED"}]},
-        # _governed_input_errors(qa_employee_workers.py:730) 가 요구하는 필드:
-        #   assessment -> decision 또는 비지 않은 claim_checks
-        #   model_risk / internal_audit -> decision
-        #   ops_assessment -> status,  permission -> result
-        # 부서 자체 테스트가 status 만으로 통과한 것은 엔진이 decision 을 채워
-        # 주는 경로를 타서다. 디스패처는 준 값을 그대로 쓰므로 decision 이 있어야 한다.
-        "model_risk": {"decision": "PASS", "status": "TESTING"},
-        "internal_audit": {"decision": "PASS", "status": "TESTING"},
+        # 이 테스트가 묻는 것은 "워커가 독립 그래프로 도는가" 이지 "QA 가 나쁜 입력을
+        # 거르는가" 가 아니다(후자는 QA본부 자체 테스트 몫). 그래서 **통과하는 케이스**를
+        # 준다 - 판정 엔진에 원본 입력을 주면 engine 이 decision 을 계산한다.
+        # 모양은 departments/06-ai-qa-audit/tests/test_qa_employee_workers.py 에서 가져왔다.
+        "assessment": {"decision": "PASS", "claim_checks": [{"result": "SUPPORTED"}]},
+        "model_risk_input": {
+            "model_id": "00000000-0000-0000-0000-000000000001",
+            "model_version": "model-v1",
+            "prompt_version": "prompt-v1",
+            "dataset_version": "dataset-v1",
+            "evaluation_count": 500,
+            "accuracy": 0.9,
+            "calibration_error": 0.02,
+            "drift_score": 0.04,
+            "protected_failure_rate": 0.01,
+        },
+        "internal_audit_events": [
+            {
+                "action": "qa.evidence.check",
+                "department": "qa",
+                "trace_id": "trace-qa-tool-1",
+                "profile_status": "ACTIVE",
+                "authorized": True,
+            }
+        ],
         "ops_assessment": {"status": "HEALTHY"},
         "permission_check": {"result": "ALLOWED"},
         "incident": {"incident_id": "incident-test"},

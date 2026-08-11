@@ -730,11 +730,22 @@ def _qa_runner_failure(
 def _governed_input_errors(
     governed: Mapping[str, Any],
 ) -> list[str]:
+    # ▶ **판정 필드는 생산자마다 이름이 다르다** (2026-08-11 실측)
+    #   같은 governed input 인데 ModelRiskEngine 은 `decision` 을, InternalAuditEngine
+    #   과 check_tool_permission 은 `status` 를 낸다. 여기서 `decision`/`result` 만
+    #   요구하면 **엔진이 정상 판정을 냈는데도 malformed 로 막힌다** - 실제로
+    #   디스패처 경로의 qa-runner 가 이 이유로 늘 ESCALATED 였다
+    #   (malformed: ['internal_audit.decision', 'permission.result']).
+    #
+    #   값이 **없는 것**과 이름이 **다른 것**은 다르다. 전자를 막는 것이 fail-closed 고
+    #   후자를 막는 것은 오작동이다 - 판정이 있는데 못 읽어 에스컬레이션하면 사람이
+    #   볼 필요 없는 것을 보게 되고, 그러면 진짜 에스컬레이션이 묻힌다.
+    #   그래서 **하나라도 있으면 통과**로 바꾼다. 전부 없으면 여전히 막힌다.
     required_fields = {
-        "model_risk": ("decision",),
-        "internal_audit": ("decision",),
-        "ops_assessment": ("status",),
-        "permission": ("result",),
+        "model_risk": ("decision", "status"),
+        "internal_audit": ("decision", "status"),
+        "ops_assessment": ("status", "decision"),
+        "permission": ("result", "status"),
     }
     errors: list[str] = []
     for name, value in governed.items():
@@ -749,9 +760,10 @@ def _governed_input_errors(
                 if not isinstance(claim_checks, (list, tuple)) or not claim_checks:
                     errors.append("assessment.decision")
         else:
-            for field in required_fields[name]:
-                if value.get(field) in (None, ""):
-                    errors.append(f"{name}.{field}")
+            fields = required_fields[name]
+            if all(value.get(f) in (None, "") for f in fields):
+                # 어느 이름으로도 판정이 없다 - 이건 진짜 결측이다.
+                errors.append(f"{name}.{fields[0]}")
         if name == "assessment" and "claim_checks" in value:
             claim_checks = value.get("claim_checks")
             valid_results = {
