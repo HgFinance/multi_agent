@@ -1,4 +1,4 @@
-"""CEO Office query boundary for the operator UI."""
+"""CEO Office query boundary for closed-loop Kanban workflows."""
 
 from __future__ import annotations
 
@@ -11,15 +11,13 @@ from fastapi import APIRouter, HTTPException
 
 from orchestration.canonical_profiles import canonical_profile_for_department
 
-from apps.api.ceo_hermes_client import ask_ceo
-
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
 
-@router.post("/ask", operation_id="ceo_query")
+@router.post("/ask", operation_id="ceo_query", status_code=202)
 def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
-    """Send a non-binding natural-language query to the CEO Hermes Head."""
+    """Enqueue a CEO Kanban workflow without running a second CEO turn."""
 
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
@@ -27,33 +25,23 @@ def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
         body=req.query,
         idempotency_key=req.request_id,
     )
+
     if not task or not task.get("task_id"):
         # The root task is the durable anchor for the closed-loop workflow.
-        # Never call the CEO after this boundary failed: otherwise the user
-        # receives an answer with no Kanban graph to supervise.
+        # Never claim success when the Kanban graph was not created.
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
         )
 
-    result = ask_ceo(
-        query=(
-            "Closed-loop Kanban context: the durable CEO root task is "
-            f"{task['task_id']}. Use this task as the parent for every "
-            "dynamic child task and keep the workflow closed-loop.\n\n"
-            f"Original user request:\n{req.query}"
-        ),
-        timeout=hermes_boundary.timeout_of(
-            "departments/00-ceo-office/hermes/config.yaml"
-        ),
-    )
     return {
-        "schema_version": "ceo.query-result.v1",
+        "schema_version": "ceo.query-accepted.v1",
         "department": "ceo-agent",
         "binding": False,
+        "task_id": task["task_id"],
         "task": task,
-        "answer": result["answer"],
-        "session_id": result.get("session_id"),
+        "answer": "CEO Kanban workflow accepted. Final synthesis will be produced by the closed-loop supervisor.",
+        "session_id": None,
     }
 
 

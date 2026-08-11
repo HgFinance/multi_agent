@@ -56,26 +56,30 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:
         request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-1")
         with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=None):
-            with patch.object(ceo, "ask_ceo") as ask:
+            with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
                 with self.assertRaises(HTTPException) as raised:
                     ceo.ceo_query(request)
 
         self.assertEqual(raised.exception.status_code, 503)
         ask.assert_not_called()
 
-    def test_root_task_is_created_before_ceo_call(self) -> None:
+    def test_root_task_is_enqueued_without_direct_ceo_call(self) -> None:
         request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-2")
         task = {"task_id": "t_root", "status": "ready"}
-        result = {"answer": "ok", "session_id": "session-2"}
         with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-            with patch.object(ceo, "ask_ceo", return_value=result) as ask:
+            with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
                 response = ceo.ceo_query(request)
 
         create.assert_called_once()
-        ask.assert_called_once()
-        self.assertIn("t_root", ask.call_args.kwargs["query"])
+        ask.assert_not_called()
         self.assertEqual(response["task"], task)
-        self.assertEqual(response["answer"], "ok")
+        self.assertEqual(response["task_id"], "t_root")
+        self.assertEqual(response["schema_version"], "ceo.query-accepted.v1")
+        self.assertIsNone(response["session_id"])
+
+    def test_route_returns_accepted_status(self) -> None:
+        route = next(route for route in ceo.router.routes if route.path == "/ui/ceo/ask")
+        self.assertEqual(route.status_code, 202)
 
 
 if __name__ == "__main__":
