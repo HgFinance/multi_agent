@@ -52,6 +52,7 @@ from contracts.market_events import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ls_unified_parser import exchname_to_market
 from subscription_plan import DataKind, Venue
 
 ADAPTER_VERSION = "research-ls-realtime-adapter-v1"
@@ -65,11 +66,42 @@ TR_TO_KIND: dict[str, tuple[DataKind, Venue]] = {
     "K3_": (DataKind.TICK, Venue.KOSDAQ),
     "H1_": (DataKind.QUOTE, Venue.KOSPI),
     "HA_": (DataKind.QUOTE, Venue.KOSDAQ),
+    # ▶ 통합시세 US3/UH1 (2026-08-11 이식)
+    #   위 넷은 **KRX 단독**이다. 실측: 8/11 우리 수집 11,733,292행이 전부 KRX 였고
+    #   같은 날 NXT 3,842,266행이 통째로 빠졌다. NXT 로 흘러간 체결을 못 보면
+    #   거래량·OFI·유효스프레드가 전부 한쪽만 본 값이 된다.
+    #
+    #   Venue 자리에 KOSPI 를 넣지만 **이 값은 쓰이지 않는다** - 통합시세는
+    #   거래소가 payload 의 exchname 으로 오므로 market 은 거기서 읽는다
+    #   (아래 _market_of). 보드(코스피/코스닥) 구분은 reference 쪽 속성이라
+    #   시계열에는 애초에 안 들어간다.
+    "US3": (DataKind.TICK, Venue.KOSPI),
+    "UH1": (DataKind.QUOTE, Venue.KOSPI),
 }
+
+# 통합시세는 한 TR 이 두 거래소를 실어 온다 - TR 로는 거래소를 알 수 없다.
+UNIFIED_TRS = frozenset({"US3", "UH1"})
 
 # 시계열 Venue 는 거래소 단위다. Board(KOSPI/KOSDAQ)는 reference 쪽 속성이므로
 # market.market_ticks.market 에는 KRX 가 들어간다(reference_repository 관례와 같다).
 VENUE_TO_MARKET = {Venue.KOSPI: Market.KRX, Venue.KOSDAQ: Market.KRX}
+
+
+def _market_of(tr_cd: str, payload: dict, venue: Venue) -> Market:
+    """이 이벤트가 **어느 거래소에서 난 것인가.**
+
+    KRX 단독 TR 은 TR 이 곧 거래소다. 통합시세(US3/UH1)는 한 스트림에 두
+    거래소가 섞여 오므로 payload 의 `exchname` 을 읽어야 한다.
+
+    ▶ 미상은 KRX 로 본다 (ls_unified_parser 와 같은 규칙)
+      NXT 로 추정하지 않는다 - 통합시세 이전의 이력이 전부 KRX 이고, 모르는
+      것을 새 거래소로 몰면 없던 NXT 물량이 생긴다. 반대 방향의 오류는
+      '기존과 같다' 로 수렴하므로 덜 위험하다.
+    """
+    if tr_cd not in UNIFIED_TRS:
+        return VENUE_TO_MARKET[venue]
+    return Market.NXT if exchname_to_market(payload.get("exchname")) == "N" \
+        else Market.KRX
 
 # cgubun 체결구분. 수집 문서에 값이 없어 실제 payload 로 확인해야 한다.
 # 확인 전까지 여기 없는 값은 전부 Side.UNKNOWN 이다 - 매수로 추정하지 않는다.
@@ -243,7 +275,7 @@ def normalize(
         instrument_id=instrument_id,
         provider=PROVIDER_LS,
         provider_symbol=symbol,
-        market=VENUE_TO_MARKET[venue],
+        market=_market_of(tr_cd, payload, venue),
     )
     times = ObservationTimes(
         event_time=event_time,
@@ -306,12 +338,19 @@ def _session_from_status(payload) -> SessionType | None:
 
 
 def _quote(payload, tr_cd, ref, times, flags, trace_id) -> MarketQuote:
+    # ▶ 통합시세(UH1)의 잔량은 `unt_*` 다 - **이걸 틀리면 조용히 반쪽이 된다.**
+    #   UH1 은 같은 메시지에 `bidrem{i}`(KRX 단독)와 `unt_bidrem{i}`(KRX+NXT
+    #   합산)를 함께 싣는다. 가격 필드는 이름이 같아서, 잘못 읽어도 호가는
+    #   멀쩡히 들어오고 **깊이만 KRX 쪽으로 줄어든다.** 예외도 경고도 없다.
+    #   유효스프레드·호가불균형이 전부 한쪽만 본 값이 되는데 티가 안 난다.
+    #   ls_unified_parser 가 `unt_*` 를 쓰는 것과 같은 이유다.
+    rem = "unt_" if tr_cd in UNIFIED_TRS else ""
     bid_p, bid_s, ask_p, ask_s = [], [], [], []
     for i in range(1, QUOTE_DEPTH_MAX + 1):
         bp = _dec(payload.get(f"bidho{i}"), f"bidho{i}")
-        bs = _dec(payload.get(f"bidrem{i}"), f"bidrem{i}")
+        bs = _dec(payload.get(f"{rem}bidrem{i}"), f"{rem}bidrem{i}")
         ap = _dec(payload.get(f"offerho{i}"), f"offerho{i}")
-        asz = _dec(payload.get(f"offerrem{i}"), f"offerrem{i}")
+        asz = _dec(payload.get(f"{rem}offerrem{i}"), f"{rem}offerrem{i}")
         # 단계가 없으면(필드 부재) 거기서 멈춘다. 0 으로 채우지 않는다 -
         # 계약의 정렬 검사가 0 을 '단계 없음'으로 이미 처리한다.
         if bp is None and ap is None:
@@ -334,8 +373,8 @@ def _quote(payload, tr_cd, ref, times, flags, trace_id) -> MarketQuote:
         bid_sizes=tuple(bid_s),
         ask_prices=tuple(ask_p),
         ask_sizes=tuple(ask_s),
-        total_bid_size=_dec(payload.get("totbidrem"), "totbidrem"),
-        total_ask_size=_dec(payload.get("totofferrem"), "totofferrem"),
+        total_bid_size=_dec(payload.get(f"{rem}totbidrem"), f"{rem}totbidrem"),
+        total_ask_size=_dec(payload.get(f"{rem}totofferrem"), f"{rem}totofferrem"),
         sequence_no=seq,
         source_event_id=build_source_event_id(
             provider=PROVIDER_LS,
@@ -489,6 +528,45 @@ def _check_non_trading_day_flag():
     print("  비거래일 Flag               OK")
 
 
+def _check_unified_carries_nxt_and_unified_depth():
+    """통합시세(US3/UH1)가 **NXT 를 살려 오는가, 그리고 깊이가 통합인가.**
+
+    ▶ 왜 이 둘인가 (2026-08-11)
+      거래소 단독 TR(S3_/H1_)만 받던 동안 NXT 체결 하루 3,842,266행 - 전체의
+      25% - 이 통째로 빠져 있었다. 시장의 4분의 3만 보고 찾은 알파였다.
+
+      그리고 UH1 은 같은 메시지에 `bidrem{i}`(KRX 단독)와 `unt_bidrem{i}`
+      (KRX+NXT 합산)를 **함께** 싣는다. 가격 필드는 이름이 같아서 잔량을 잘못
+      읽어도 예외도 경고도 없다 - 호가는 멀쩡히 들어오고 **깊이만 조용히
+      반쪽**이 된다. 조용한 오차라서 자체 점검으로 고정한다.
+    """
+    us3 = {**S3, "exchname": "NXT"}
+    r = normalize("US3", us3, received_at=_recv(), resolve_instrument=_resolver)
+    assert isinstance(r, MarketTick), r
+    assert r.instrument.market is Market.NXT, "NXT 체결이 KRX 로 들어갔다"
+    assert normalize("US3", {**S3, "exchname": "KRX"}, received_at=_recv(),
+                     resolve_instrument=_resolver).instrument.market is Market.KRX
+    # 거래소 미상은 KRX 로 본다 - 모르는 것을 새 거래소로 몰면 없던 물량이 생긴다
+    assert normalize("US3", S3, received_at=_recv(),
+                     resolve_instrument=_resolver).instrument.market is Market.KRX
+
+    # 통합 호가: unt_* 를 읽어야 한다. KRX 단독 잔량과 다른 값을 넣어 구분한다.
+    uh1 = {**H1, "unt_bidrem1": "900", "unt_bidrem2": "800",
+           "unt_offerrem1": "700", "unt_offerrem2": "600",
+           "unt_totbidrem": "1700", "unt_totofferrem": "1300"}
+    q = normalize("UH1", uh1, received_at=_recv(), resolve_instrument=_resolver)
+    assert isinstance(q, MarketQuote), q
+    assert q.bid_sizes[0] == 900 and q.ask_sizes[0] == 700, \
+        f"KRX 단독 잔량을 읽었다 - 깊이가 반쪽이다: {q.bid_sizes} {q.ask_sizes}"
+    assert q.total_bid_size == 1700 and q.total_ask_size == 1300, \
+        "총잔량이 KRX 단독이다"
+
+    # 거래소 단독 TR 은 예전 필드를 그대로 읽는다 (되돌아가도 깨지지 않는다)
+    q2 = normalize("H1_", uh1, received_at=_recv(), resolve_instrument=_resolver)
+    assert q2.bid_sizes[0] == 100, f"단독 TR 이 통합 잔량을 읽었다: {q2.bid_sizes}"
+    print("  통합시세 NXT·통합깊이       OK")
+
+
 def _check_idempotent_source_event_id():
     """같은 payload 를 두 번 받으면 같은 source_event_id 다(재접속 중복 방지)."""
     a = normalize("S3_", S3, received_at=_recv(), resolve_instrument=_resolver)
@@ -513,5 +591,6 @@ if __name__ == "__main__":
     _check_side_not_guessed()
     _check_quarantine()
     _check_non_trading_day_flag()
+    _check_unified_carries_nxt_and_unified_depth()
     _check_idempotent_source_event_id()
     print("Adapter 7개 영역 통과")

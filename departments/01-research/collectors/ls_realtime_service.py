@@ -350,8 +350,15 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
 async def main_async() -> int:
     env = load_project_env()
-    pre = float(env.get("LS_PRE_OPEN_MINUTES") or 35)
-    post = float(env.get("LS_POST_CLOSE_MINUTES") or 10)
+    # ▶ 창은 **NXT 기준**이다 (2026-08-11, 통합시세 이식)
+    #   예전 값(35/10 = 08:25~15:40)은 KRX 정규장만 보던 때의 것이다. 통합시세를
+    #   구독하면 NXT 가 같이 오는데, NXT(넥스트레이드)는 프리마켓 08:00, 애프터마켓
+    #   20:00 까지 돈다. 창을 안 넓히면 **구독은 해놓고 그 시간대를 안 받는다** -
+    #   저쪽 원천에 08시대 912,608행, 19시대 187,962행이 있는 이유가 이것이다.
+    #   60: 개장(09:00) - 60분 = 08:00 (NXT 프리마켓 시작)
+    #   275: 마감(15:30) + 275분 = 20:05 (NXT 애프터마켓 20:00 + 잔여 수신)
+    pre = float(env.get("LS_PRE_OPEN_MINUTES") or 60)
+    post = float(env.get("LS_POST_CLOSE_MINUTES") or 275)
     symbols = load_symbols(env)
 
     stop = asyncio.Event()
@@ -429,9 +436,14 @@ def _check_window():
 
 
 def _check_subscriptions():
+    # 통합시세(US3/UH1)라 코스피·코스닥이 **같은 TR** 을 쓴다. 거래소(KRX/NXT)는
+    # payload 의 exchname 으로 갈린다 - TR 을 거래소별로 나누면 NXT 가 빠진다
+    # (2026-08-11 실측: 하루 체결의 25%).
     subs = build_subscriptions([("005930", "KOSPI"), ("196170", "KOSDAQ")])
-    assert subs == [("S3_", "005930"), ("H1_", "005930"),
-                    ("K3_", "196170"), ("HA_", "196170")], subs
+    assert subs == [("US3", "005930"), ("UH1", "005930"),
+                    ("US3", "196170"), ("UH1", "196170")], subs
+    assert not ({t for t, _ in subs} & {"S3_", "H1_", "K3_", "HA_"}), \
+        "KRX 단독 TR 로 돌아갔다 - NXT 가 빠진다"
     try:
         build_subscriptions([("000001", "NYSE")])
         raise AssertionError("모르는 venue 가 통과했다")

@@ -111,11 +111,22 @@ class SubscribeAction(StrEnum):
 
 # 전부 수집 문서 TR 목록에서 확인한 코드다. 추측한 값이 없다.
 TR_MATRIX: dict[tuple[Venue, AssetClass, DataKind], str] = {
-    # [주식] 실시간 시세 - 국내
-    (Venue.KOSPI, AssetClass.EQUITY, DataKind.TICK): "S3_",
-    (Venue.KOSPI, AssetClass.EQUITY, DataKind.QUOTE): "H1_",
-    (Venue.KOSDAQ, AssetClass.EQUITY, DataKind.TICK): "K3_",
-    (Venue.KOSDAQ, AssetClass.EQUITY, DataKind.QUOTE): "HA_",
+    # [주식] 실시간 시세 - 국내. **통합시세(US3/UH1)를 쓴다** (2026-08-11)
+    #   예전 값은 거래소별 단독이었다: 코스피 S3_/H1_, 코스닥 K3_/HA_.
+    #   전부 **KRX 만** 준다. 실측(8/11): 그렇게 받은 체결 11,733,292행이 전부
+    #   KRX 였고, 같은 날 NXT 3,842,266행(전체의 25%)이 통째로 빠졌다.
+    #   NXT 로 흘러간 체결을 못 보면 거래량·OFI·유효스프레드가 한쪽만 본 값이 되고,
+    #   그 위에서 찾은 알파는 시장의 4분의 3만 본 것이다.
+    #
+    #   US3/UH1 은 한 TR 로 두 거래소를 다 실어 온다 - 거래소는 payload 의
+    #   exchname 으로 갈린다(ls_realtime_adapter._market_of). 그래서 코스피·코스닥
+    #   둘 다 같은 TR 을 가리키며, 보드 구분은 reference 쪽 속성으로 남는다.
+    #
+    #   구독 수는 그대로다(종목당 체결 1 + 호가 1). 소켓 수도 안 변한다.
+    (Venue.KOSPI, AssetClass.EQUITY, DataKind.TICK): "US3",
+    (Venue.KOSPI, AssetClass.EQUITY, DataKind.QUOTE): "UH1",
+    (Venue.KOSDAQ, AssetClass.EQUITY, DataKind.TICK): "US3",
+    (Venue.KOSDAQ, AssetClass.EQUITY, DataKind.QUOTE): "UH1",
     # [해외주식] 실시간 시세 - 미국
     (Venue.US_EQUITY, AssetClass.EQUITY, DataKind.TICK): "GSC",
     (Venue.US_EQUITY, AssetClass.EQUITY, DataKind.QUOTE): "GSH",
@@ -575,11 +586,18 @@ def _m(n: int, venue: Venue, ac: AssetClass = AssetClass.EQUITY) -> list[Univers
 
 
 def _check_tr_matrix():
-    # 국내 주식
-    assert tr_code_for(Venue.KOSPI, AssetClass.EQUITY, DataKind.TICK) == "S3_"
-    assert tr_code_for(Venue.KOSPI, AssetClass.EQUITY, DataKind.QUOTE) == "H1_"
-    assert tr_code_for(Venue.KOSDAQ, AssetClass.EQUITY, DataKind.TICK) == "K3_"
-    assert tr_code_for(Venue.KOSDAQ, AssetClass.EQUITY, DataKind.QUOTE) == "HA_"
+    # 국내 주식 - **통합시세**. 거래소 단독(S3_/H1_/K3_/HA_)으로 돌아가면
+    # NXT 가 통째로 빠진다(2026-08-11 실측: 하루 체결의 25%).
+    assert tr_code_for(Venue.KOSPI, AssetClass.EQUITY, DataKind.TICK) == "US3"
+    assert tr_code_for(Venue.KOSPI, AssetClass.EQUITY, DataKind.QUOTE) == "UH1"
+    # 코스닥도 같은 TR 이다 - 통합시세는 보드가 아니라 거래소를 가른다
+    assert tr_code_for(Venue.KOSDAQ, AssetClass.EQUITY, DataKind.TICK) == "US3"
+    assert tr_code_for(Venue.KOSDAQ, AssetClass.EQUITY, DataKind.QUOTE) == "UH1"
+    for venue in (Venue.KOSPI, Venue.KOSDAQ):
+        for kind in (DataKind.TICK, DataKind.QUOTE):
+            assert tr_code_for(venue, AssetClass.EQUITY, kind) not in \
+                {"S3_", "H1_", "K3_", "HA_"}, \
+                f"{venue}/{kind} 가 KRX 단독 TR 로 돌아갔다 - NXT 가 빠진다"
     # 해외 주식
     assert tr_code_for(Venue.US_EQUITY, AssetClass.EQUITY, DataKind.TICK) == "GSC"
     assert tr_code_for(Venue.US_EQUITY, AssetClass.EQUITY, DataKind.QUOTE) == "GSH"
