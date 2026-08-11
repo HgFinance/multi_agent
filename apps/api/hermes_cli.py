@@ -27,6 +27,11 @@ import yaml
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+try:
+    from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+except ImportError:  # pragma: no cover - direct module execution
+    from ..orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
@@ -58,6 +63,12 @@ def create_kanban_task(
     the natural-language query can still use the normal Hermes path.
     """
 
+    request = CanonicalKanbanTaskRequest(
+        assignee=assignee,
+        title=title,
+        body=body,
+        idempotency_key=idempotency_key,
+    )
     if os.getenv("ENABLE_KANBAN_TASK_TRACKING", "1").casefold() not in {
         "1",
         "true",
@@ -70,13 +81,13 @@ def create_kanban_task(
         os.environ.get("HERMES_BIN", "hermes"),
         "kanban",
         "create",
-        title,
+        request.title,
         "--body",
-        body,
+        request.body,
         "--assignee",
-        assignee,
+        request.assignee,
         "--idempotency-key",
-        idempotency_key,
+        request.idempotency_key,
         "--created-by",
         "ai-office-bff",
         "--json",

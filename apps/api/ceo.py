@@ -9,6 +9,8 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
 
 from fastapi import APIRouter
 
+from orchestration.canonical_profiles import canonical_profile_for_department
+
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
@@ -18,7 +20,7 @@ def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
     """Send a non-binding natural-language query to the CEO Hermes Head."""
 
     task = hermes_cli.create_kanban_task(
-        assignee="ceo-agent",
+        assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
         body=req.query,
         idempotency_key=req.request_id,
