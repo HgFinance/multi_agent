@@ -208,9 +208,15 @@ select s.ts, null, s.ts, m.instrument_id,
        (s.av1+s.av2+s.av3+s.av4+s.av5+s.av6+s.av7+s.av8+s.av9+s.av10),
        -- ▶ 호가가 없으면(0) NULL 이다. 0 을 가격으로 쓰면 스프레드가 음수로
        --   튀고 mid 가 반토막 난다 - 미측정과 0 을 구분하는 것과 같은 원칙이다.
-       nullif(s.b1,0), nullif(s.a1,0),
-       case when s.b1>0 and s.a1>0 then (s.b1+s.a1)/2.0 end,
-       case when s.b1>0 and s.a1>0 then (s.a1-s.b1) end,
+       -- ▶ **역전 호가는 최우선호가로 쓰지 않는다** (2026-08-11 실측)
+       --   원본에 best_bid > best_ask 인 행이 있다(동시호가 구간이나 잡음).
+       --   market_quotes_check2 가 그것을 막는데, 통과시키려고 값을 뒤집거나
+       --   지어내면 스프레드가 음수인 시장을 만들어 낸다. 호가 사다리 원본은
+       --   그대로 남기고 **파생 지표만 비운다** - 미측정은 채우지 않는다.
+       case when s.b1>0 and s.a1>0 and s.a1>=s.b1 then s.b1 end,
+       case when s.b1>0 and s.a1>0 and s.a1>=s.b1 then s.a1 end,
+       case when s.b1>0 and s.a1>0 and s.a1>=s.b1 then (s.b1+s.a1)/2.0 end,
+       case when s.b1>0 and s.a1>0 and s.a1>=s.b1 then (s.a1-s.b1) end,
        case when (s.bv1+s.av1) > 0
             then (s.bv1-s.av1)::float8 / (s.bv1+s.av1) end,
        md5(s.symbol||':'||s.b1||':'||s.a1||':'||s.bv1||':'||s.av1||':'||
