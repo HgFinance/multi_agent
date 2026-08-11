@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import unittest
+import importlib.util
+import sys
+from pathlib import Path
 
-from scripts.run_ceo_supervisor import (
-    WatchOutputError,
-    WatchProcessError,
-    parse_watch_line,
-    watch_events,
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location(
+    "ceo_supervisor_runner", ROOT / "scripts/run_ceo_supervisor.py"
 )
+assert SPEC is not None and SPEC.loader is not None
+runner = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = runner
+SPEC.loader.exec_module(runner)
+
+WatchOutputError = runner.WatchOutputError
+WatchProcessError = runner.WatchProcessError
+parse_watch_line = runner.parse_watch_line
+watch_events = runner.watch_events
 
 
 class FakeWatchProcess:
@@ -77,6 +87,20 @@ class SupervisorRunnerTest(unittest.TestCase):
                     interval=0.1,
                     environment={},
                     popen_factory=lambda *args, **kwargs: process,
+                )
+            )
+
+    def test_watch_start_failure_is_fatal(self) -> None:
+        def popen(*args, **kwargs):
+            raise OSError("hermes not found")
+
+        with self.assertRaises(WatchProcessError):
+            list(
+                watch_events(
+                    executable="hermes",
+                    interval=0.1,
+                    environment={},
+                    popen_factory=popen,
                 )
             )
 

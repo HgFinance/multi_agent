@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
     HermesKanbanClient,
+    HermesKanbanCommandError,
     SupervisorAction,
     SupervisorState,
     SupervisorValidationError,
@@ -200,6 +201,14 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(client.created[1]["assignee"], "ceo-agent")
         self.assertEqual(client.created[1]["parent_task_ids"], ("r", "risk", "qa"))
 
+        duplicate_after_restart = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "e2", "task_id": "qa", "kind": "completed"}
+        )
+        self.assertIsNone(duplicate_after_restart)
+        self.assertEqual(
+            sum(item["assignee"] == "ceo-agent" for item in client.created), 1
+        )
+
     def test_reclaimed_does_not_wake_supervisor(self) -> None:
         client = FakeClient()
         service = CeoSupervisorService(client)
@@ -272,6 +281,21 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.BLOCK_ABORT)
         self.assertEqual(client.blocked, ["root"])
 
+    def test_restart_preserves_retry_guard_from_hermes_runs(self) -> None:
+        client = FakeClient()
+        client.payloads[0].update(
+            status="failed",
+            runs=[{"outcome": "failed"}, {"outcome": "failed"}],
+        )
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "failed-after-restart", "task_id": "r", "kind": "crashed"}
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.BLOCK_ABORT)
+        self.assertEqual(client.unblocked, [])
+        self.assertEqual(client.blocked, ["root"])
+
     def test_invalid_persisted_assignee_aborts_only_workflow(self) -> None:
         client = FakeClient()
         client.payloads[1]["assignee"] = "risk-department"
@@ -315,6 +339,19 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(task["assignee"], "research-department")
         self.assertEqual(task["parents"], ["root"])
         self.assertEqual(task["latest_summary"], "research summary")
+
+    def test_invalid_hermes_json_is_a_command_error(self) -> None:
+        import subprocess
+
+        completed = subprocess.CompletedProcess(
+            args=["hermes"], returncode=0, stdout="not-json", stderr=""
+        )
+
+        def runner(*args, **kwargs):
+            return completed
+
+        with self.assertRaises(HermesKanbanCommandError):
+            HermesKanbanClient(runner=runner).show("r")
 
 
 if __name__ == "__main__":
