@@ -160,38 +160,41 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 2026-08-07: back-office-runner 흡수로 05-accounting-portfolio 8 -> 1. 회계는
     # 헌장상(마스터플랜 19.12) 에이전트 일이 "예외 조사와 설명" 하나뿐이라 도메인별로
     # 나뉘어 있던 7명이 전부 결정론 전달 계층이었다.
-    # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않는다 —
+    # 2026-08-07: 07-agent-workforce 5 -> 0. 인사팀은 결정론 러너조차 두지 않았다 —
     # 타 부서의 tool 강등은 LLM 을 결정론 러너로 바꾼 것이지만, 인사팀은 그 판정을
-    # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너를 새로 만들
-    # 필요도 없었다. 0 을 "설정 누락"으로 읽지 않는다.
-    # 2026-08-11 편제 감축. 직원은 병렬성·맥락격리·독립성·권한격리 중 하나가
-    # 명확할 때만 둔다 - 본부장이 순차로 해도 되는 일은 본부장이 한다.
-    #   01-research 8 -> 4 : 스카우트 4렌즈를 2명으로 묶고(주기가 달라 시간 분리
-    #     가능), 기획은 편집장 본업이라 흡수, market-context 는 data_resolution 이
-    #     이미 커버리지를 실측하므로 폐지(서술이 코드 판정과 경쟁하면 안 된다).
-    #   04-quant-backtest 5 -> 2 : 접수·설계는 실험당 1회라 병렬성이 없고,
-    #     교훈 사상은 lessons_from() 결정론 기본값이 이미 한다 - 환류가 에이전트
-    #     가용성에 묶이면 안 된다. 남긴 둘은 맥락격리(코드 작성)와 병렬성(해석).
-    # 리서치는 종목 애널리스트 6인에서 방법론 스카우트 4 + 회의론자 + 기획자 +
-    # 시장맥락 1 로 바뀌었다(종목 분석가는 실험 실행 가능성 판정용 1명만 남겼다).
-    # 퀀트는 계산·판정이 전부 결정론 pipeline/ 소유라 LLM 을 겹쳐 둘 자리가 없어
-    # 접수·설계·해석·교훈 4명만 남겼다 - 줄어든 3명은 해고가 아니라 **코드가 이미
-    # 하고 있던 일**이었다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 0, "01-research": 4, "02-trading": 2, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    # 이미 일반 모듈(quality.py/access.py/workflow.py)이 갖고 있어 러너가 필요 없었다.
+    # 2026-08-10: 07 은 0 -> 1. profile-architecture-worker 만 되살렸다(영주님) -
+    # Adversarial Eval Case 설계는 정답이 규칙표에 없는 창작이라 결정론화 대상이
+    # 아니고, 산출물이 QA 재검증을 거치는 비바인딩 제안이라 환각이 그대로 사고가
+    # 되지 않는다.
+    # 2026-08-11 재일: 01-research 8 -> 4, 04-quant-backtest 5 -> 2. 직원은
+    # 병렬성·맥락격리·독립성·권한격리 중 하나가 명확할 때만 둔다 - 본부장이 순차로
+    # 해도 되는 일은 본부장이 한다. 스카우트 4렌즈는 주기가 달라 2명이 시간 분리해
+    # 맡고, 기획은 편집장 본업이라 흡수했고, market-context 는 data_resolution 이
+    # 이미 커버리지를 실측하므로 폐지했다(서술이 코드 판정과 경쟁하면 안 된다).
+    # 퀀트는 접수·설계가 실험당 1회라 병렬성이 없고 교훈 사상은 lessons_from() 이
+    # 이미 결정론으로 한다 - 환류가 에이전트 가용성에 묶이면 안 된다.
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 4, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
         registry = config["staff_registry"]
         assert len(workers) == expected_counts[directory]
         assert registry["worker_count"] == expected_counts[directory]
-        assert (
-            config["employee_runtime"]["topology"]
-            == "async_fan_out_fan_in_independent_graphs"
-        )
-        assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
-        assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
-        assert config["employee_runtime"]["max_retries"] == 2
-        assert config["employee_runtime"]["max_attempts"] == 3
+        if directory == "02-trading":
+            assert config["employee_runtime"]["topology"] == "dynamic_parallel_fan_out_fan_in"
+            assert config["employee_runtime"]["provider"] == "none"
+            assert config["employee_runtime"]["max_attempts"] == 1
+            assert config["temporary_workers"]["one_worker_per_strategy"] is True
+        else:
+            assert (
+                config["employee_runtime"]["topology"]
+                == "async_fan_out_fan_in_independent_graphs"
+            )
+            assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
+            assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
+            assert config["employee_runtime"]["max_retries"] == 2
+            assert config["employee_runtime"]["max_attempts"] == 3
         # 2026-08-10: 본부장 모델이 부서마다 갈린다. 리서치·퀀트(재일)는 논문 정독과
         # 실험 코드 작성이 본부장 일이라 Opus 5 로 올렸다. 나머지 부서는 현행 유지 -
         # 한 줄로 8개 부서를 묶어 두면 한 부서의 결정이 다른 부서를 잠근다.
@@ -211,13 +214,21 @@ def test_all_registered_workers_are_independent_graphs() -> None:
         assert result["failed"] == []
         assert result["degraded"] is False
         assert result["not_executed"] == []
-        assert result["runtime"]["executor"] == "LangGraph"
-        assert (
-            result["runtime"]["topology"]
-            == "async_fan_out_fan_in_independent_graphs"
-        )
-        assert result["runtime"]["provider"] == "ollama"
-        assert result["runtime"]["model"] == "qwen3:1.7b"
+        if department == "trading":
+            assert result["runtime"] == {
+                "executor": "deterministic_strategy_worker",
+                "topology": "dynamic_parallel_fan_out_fan_in",
+                "provider": "none",
+                "model": "none",
+            }
+        else:
+            assert result["runtime"]["executor"] == "LangGraph"
+            assert (
+                result["runtime"]["topology"]
+                == "async_fan_out_fan_in_independent_graphs"
+            )
+            assert result["runtime"]["provider"] == "ollama"
+            assert result["runtime"]["model"] == "qwen3:1.7b"
 
 
 def test_profile_worker_metadata_matches_runtime_specs() -> None:
@@ -339,18 +350,21 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
     """Keep the approved head/worker topology explicit and reviewable."""
     expected = {
         "ceo": (1, 1, 0),
-        "hr": (0, 0, 0),
-        # 2026-08-10: 상시는 market-context 하나다. 스카우트·회의론자·기획자를
-        # 상시로 켜두면 편집장이 읽지 못하는 리드만 쌓인다 - 소집형이 설계다.
-        "research": (8, 1, 7),
-        # tool 강등 후 조건부 LLM 직원이 0 이다 - 조건부로 켜지던 근거는 전부
-        # desk-runner 가 결정론으로 항상 모아 온다.
-        "trading": (2, 2, 0),
+        # 2026-08-10: profile-architecture-worker 1명. trigger 가 채용·개정 요청일 때만
+        # 이라 조건부다 - 평시에 인사팀 LLM 이 도는 것이 아니다.
+        "hr": (1, 0, 1),
+        # 2026-08-11: 4명 전부 소집형이다. 상시였던 market-context 를 폐지하면서
+        # 상시가 0 이 됐다 - 스카우트·회의론자를 상시로 켜두면 편집장이 읽지 못하는
+        # 리드만 쌓인다.
+        "research": (4, 0, 4),
+        # 고정 LLM 직원은 없고 전략별 결정론 Worker를 요청 단위로 생성한다.
+        "trading": (0, 0, 0),
         # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
 
         "risk": (1, 0, 1),
         # 2026-08-10: 상시는 접수 하나다. 카드도 없는데 해석 워커를 돌릴 이유가 없다.
-        "quant-backtest": (5, 1, 4),
+        # 2026-08-11: 2명 전부 소집형. 상시였던 proposal-intake 를 본부장이 흡수했다.
+        "quant-backtest": (2, 0, 2),
         # 2026-08-07: 회계의 도메인별 수치 전달은 back-office-runner로 이동해 LLM 1명만
         # 남겼다. 남은 하나는 도메인이 아니라 **예외**로 정의된 조사관이라 항상 실행이다.
         "accounting-portfolio": (1, 1, 0),

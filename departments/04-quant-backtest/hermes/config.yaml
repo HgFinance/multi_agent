@@ -130,7 +130,7 @@ head_runtime:
   binding_decision: false
 staff_registry:
   head_count: 1
-  worker_count: 5
+  worker_count: 2
   default_execution_count: 1
   max_execution_count: 5
   active_worker_count: 1
@@ -160,21 +160,6 @@ employee_runtime:
   binding_decision_owner: departments/04-quant-backtest/pipeline
   failure_action: HOLD_ESCALATE
 workers:
-  proposal-intake-worker:
-    role: Experiment proposal intake and hypothesis specification analyst
-    status: active
-    trigger: always
-    tools:
-    - quant.proposal.read
-    - quant.hypothesis.read
-    output: advisory_context
-  experiment-design-worker:
-    role: Point-in-time dataset and experiment design analyst
-    status: conditional
-    trigger: experiment_design
-    tools:
-    - quant.dataset.read
-    output: advisory_context
   strategy-author-worker:
     role: Custom strategy signal authoring analyst
     status: conditional
@@ -189,11 +174,4 @@ workers:
     trigger: experiment_card
     tools:
     - quant.experiment_card.read
-    output: advisory_context
-  outcome-lesson-worker:
-    role: Experiment outcome and lesson-code mapping analyst
-    status: conditional
-    trigger: experiment_outcome
-    tools:
-    - quant.outcome.read
     output: advisory_context

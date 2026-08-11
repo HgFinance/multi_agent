@@ -207,11 +207,29 @@ class PortfolioSuitability(_ApiModel):
 class PortfolioTaskPlan(_ApiModel):
     mode: str = Field(min_length=1)
     category: str = Field(min_length=1)
+    # 이 요청이 어느 Workflow 소속인지. portfolio-recommendation 이 아니면 이 그래프가
+    # 정식 처리 주체가 아니라는 뜻이다(예: STRATEGY_PROPOSAL -> strategy-research).
+    # 값의 정본은 orchestration/workflows/portfolio_recommendation.py 의 CATEGORY_WORKFLOWS
+    # 이며, 이 스키마 파일은 orchestration 을 import 하지 않으므로 문자열로 둔다.
+    workflow: str = Field(default="portfolio-recommendation", min_length=1)
+    # category 가 알려진 값이었는지. False 면 더 넓은 부서 집합으로 fallback 한 것이라
+    # 호출부가 "왜 이렇게 많은 부서를 불렀나"를 설명할 수 있다.
+    category_recognized: bool = True
     original_query: str = ""
     rewritten_query: str = Field(min_length=1)
     requested_departments: list[str] = Field(default_factory=list)
     routing_basis: str = Field(min_length=1)
     matched_terms: dict[str, list[str]] = Field(default_factory=dict)
+    # --- CEO Hermes 프로필이 라우팅한 경우에만 채워지는 필드 ---
+    # PORTFOLIO_CEO_TASK_PLANNER_MODE=llm 일 때 orchestration/adapters/ceo_task_planner.py
+    # 가 내보낸다. 결정론 경로에서는 전부 기본값이라 응답 모양이 바뀌지 않는다.
+    # extra="forbid" 라 여기 선언하지 않으면 LLM 라우팅을 켜는 순간 BFF 가 422 를 낸다.
+    mandate_considered: bool = False
+    planner_rationale: str | None = None
+    runtime: dict[str, str] = Field(default_factory=dict)
+    # LLM 라우팅이 실패해 결정론으로 되돌아간 이유. 값이 있으면 "켰는데 안 돌았다"는
+    # 뜻이므로 조용히 사라지지 않게 응답에 남긴다.
+    planner_fallback_reason: str | None = None
 
 
 class PortfolioInstrumentRecommendation(_ApiModel):

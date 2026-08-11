@@ -58,6 +58,13 @@ print("__UNIFIED_OPENAPI__" + json.dumps(openapi.get("paths", {}), sort_keys=Tru
         check=False,
         env={
             **os.environ,
+            # cwd 가 부서 api 디렉터리라 저장소 루트가 sys.path 에 없다. 배포는
+            # WORKDIR=//app(저장소 루트)에서 뜨므로 루트 패키지(orchestration 등)를
+            # import 할 수 있어야 프로브가 실제 앱과 같은 조건이 된다. 상대 경로는
+            # cwd 가 달라 소용없으므로 절대 경로로 준다.
+            "PYTHONPATH": os.pathsep.join(
+                [str(ROOT), os.environ.get("PYTHONPATH", "")]
+            ).rstrip(os.pathsep),
             **(
                 {}
                 if os.environ.get("RUN_EXTERNAL_DB_CONTRACTS") == "1"

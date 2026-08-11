@@ -189,6 +189,7 @@ class OrderStore:
         # (intent_group_id, leg_index) -> order_id. F30 판정이 실제 주문 상태를
         # 읽으려면 Leg와 BrokerOrder가 연결돼 있어야 한다.
         self._order_by_leg: dict[tuple[UUID, int], UUID] = {}
+        self._intent_bodies: dict[UUID, OrderIntent] = {}
 
     # -- 쓰기 -----------------------------------------------------------------
 
@@ -201,6 +202,7 @@ class OrderStore:
         """
         self.intents[rec.order_intent_id] = rec
         self._by_idempotency[intent.idempotency_key] = rec.order_intent_id
+        self._intent_bodies[rec.order_intent_id] = intent
 
     def add_order(self, order: BrokerOrder) -> None:
         self.orders[order.order_id] = order
@@ -224,6 +226,84 @@ class OrderStore:
         `execution.fills`를 채울 수 있기 때문이다 - Fill 자체는 그걸 모른다."""
         order.fills.append(fill)
 
+    def apply_fill(
+        self,
+        order: BrokerOrder,
+        event: StateEvent,
+        fill: Fill,
+        *,
+        filled_quantity: Decimal,
+        average_fill_price: Decimal,
+    ) -> None:
+        """Apply one Fill as a caller-owned atomic operation."""
+        if self.seen_broker_event(event.broker_adapter, event.broker_event_id):
+            return
+        prior_state, prior_version, prior_filled = (
+            order.state, order.version, order.filled_quantity
+        )
+        prior_event_count, prior_fill_count = len(self.events), len(order.fills)
+        try:
+            self.add_event(event)
+            order.state = BrokerOrderState(event.to_state)
+            order.version += 1
+            order.filled_quantity = filled_quantity
+            self.add_fill(order, fill)
+            if order.average_fill_price != average_fill_price:
+                raise OMSError("누적 체결 평균가 계산이 일치하지 않습니다")
+        except Exception:
+            order.state, order.version, order.filled_quantity = (
+                prior_state, prior_version, prior_filled
+            )
+            del self.events[prior_event_count:]
+            del order.fills[prior_fill_count:]
+            self._seen_broker_events = {
+                (e.broker_adapter, e.broker_event_id)
+                for e in self.events
+                if e.broker_event_id is not None
+            }
+            raise
+
+    def reconstruct_intent(self, intent_id: UUID) -> OrderIntent | None:
+        return self._intent_bodies.get(intent_id)
+
+    def existing_broker_event(
+        self, adapter: str, broker_event_id: str | None
+    ) -> StateEvent | None:
+        if broker_event_id is None:
+            return None
+        return next(
+            (
+                event for event in self.events
+                if event.broker_adapter == adapter
+                and event.broker_event_id == broker_event_id
+            ),
+            None,
+        )
+
+    def existing_fill(self, order_id: UUID, broker_fill_id: str | None) -> Fill | None:
+        if broker_fill_id is None:
+            return None
+        order = self.orders.get(order_id)
+        if order is None:
+            return None
+        return next(
+            (fill for fill in order.fills if fill.broker_fill_id == broker_fill_id),
+            None,
+        )
+    def validate_risk_decision(
+        self, rec: OrderIntentRecord, decision: RiskDecision
+    ) -> None:
+        return None
+
+    def save_risk_decision(
+        self, rec: OrderIntentRecord, decision: RiskDecision
+    ) -> None:
+        return None
+
+    def revalidate_risk_decision(
+        self, rec: OrderIntentRecord, order: BrokerOrder
+    ) -> None:
+        return None
     # -- 읽기 -----------------------------------------------------------------
 
     def get_intent(self, intent_id: UUID) -> OrderIntentRecord | None:
@@ -317,6 +397,9 @@ class OMS:
 
         existing = self.store.find_intent_by_idempotency(intent.idempotency_key)
         if existing is not None:
+            existing_body = self.store.reconstruct_intent(existing.order_intent_id)
+            if existing_body is not None and existing_body.evidence_hash() != intent.evidence_hash():
+                raise OMSError("같은 idempotency_key의 다른 Intent 사실입니다")
             return existing
 
         rec = OrderIntentRecord(
@@ -362,6 +445,7 @@ class OMS:
         """
         if decision.order_intent_id != rec.order_intent_id:
             raise OMSError("다른 Intent의 Risk 판정입니다")
+        self.store.validate_risk_decision(rec, decision)
 
         verdict_state = {
             "approve": IntentState.APPROVED,
@@ -377,6 +461,7 @@ class OMS:
         rec.risk_approved_qty = decision.approved_quantity
         rec.risk_expires_at = decision.expires_at
 
+        self.store.save_risk_decision(rec, decision)
         self._move_intent(rec, verdict_state, "risk_decided",
                           {"verdict": decision.verdict.value, "reason": decision.reason,
                            "risk_decision_id": str(decision.risk_decision_id)})
@@ -495,6 +580,8 @@ class OMS:
         """
         when = when or _now()
 
+        if rec.risk_decision_id is not None:
+            self.store.revalidate_risk_decision(rec, order)
         if rec.risk_decision_id is None:
             raise OMSError("Risk 승인이 없는 주문은 전송할 수 없습니다")
         if rec.state is not IntentState.READY_TO_SUBMIT:
@@ -541,7 +628,18 @@ class OMS:
         상태를 모르는 채로 흘러들어온 이벤트로 상태를 확정하면 UNKNOWN을 둔 의미가 없다.
         """
         payload = payload or {}
-        if self.store.seen_broker_event(self.adapter, broker_event_id):
+        existing_event = self.store.existing_broker_event(self.adapter, broker_event_id)
+        if existing_event is not None:
+            same_payload = (
+                existing_event.payload.get("quantity") == payload.get("quantity")
+                and existing_event.payload.get("price") == payload.get("price")
+                if event_type == "fill"
+                else existing_event.payload == payload
+            )
+            if existing_event.stream_id != order.order_id or (
+                existing_event.event_type != event_type or not same_payload
+            ):
+                raise OMSError("같은 broker_event_id의 내용이 서로 다릅니다")
             return order
         if order.state is BrokerOrderState.UNKNOWN and not reconciled:
             raise OMSError(
@@ -571,33 +669,50 @@ class OMS:
         if qty <= 0:
             raise OMSError("체결 수량이 0 이하입니다")
         if order.filled_quantity + qty > order.requested_quantity:
-            # 초과 체결은 조용히 받아들이면 포지션이 틀어진다. 예외로 올려 Break를 만든다.
             raise OMSError(
                 f"초과 체결: 기체결 {order.filled_quantity} + {qty} > 주문 {order.requested_quantity}"
             )
+
+        fee = Decimal(str(payload.get("fee", 0)))
+        tax = Decimal(str(payload.get("tax", 0)))
+        broker_fill_id = payload.get("broker_fill_id")
+        existing_fill = self.store.existing_fill(order.order_id, broker_fill_id)
+        if existing_fill is not None:
+            if (
+                existing_fill.quantity != qty
+                or existing_fill.price != price
+                or existing_fill.fee != fee
+                or existing_fill.tax != tax
+            ):
+                raise OMSError("같은 broker_fill_id의 내용이 서로 다릅니다")
+            return order
 
         target = (
             BrokerOrderState.FILLED
             if order.filled_quantity + qty == order.requested_quantity
             else BrokerOrderState.PARTIALLY_FILLED
         )
-        event = self._move_order(order, target, "fill", payload,
-                                 broker_event_id=broker_event_id, event_time=event_time,
-                                 return_event=True)
-        order.filled_quantity += qty
-        self.store.add_fill(
-            order,
-            Fill(
-                fill_id=uuid4(),
-                order_id=order.order_id,
-                event_id=event.event_id,
-                quantity=qty,
-                price=price,
-                fee=Decimal(str(payload.get("fee", 0))),
-                tax=Decimal(str(payload.get("tax", 0))),
-                event_time=event_time,
-                broker_fill_id=payload.get("broker_fill_id"),
-            ),
+        event = self._build_event(
+            "broker_order", order.order_id, "fill", order.state, target, payload,
+            broker_event_id=broker_event_id, event_time=event_time,
+        )
+        fill = Fill(
+            fill_id=uuid4(),
+            order_id=order.order_id,
+            event_id=event.event_id,
+            quantity=qty,
+            price=price,
+            fee=fee,
+            tax=tax,
+            event_time=event_time,
+            broker_fill_id=broker_fill_id,
+        )
+        new_filled = order.filled_quantity + qty
+        notional = sum(f.quantity * f.price for f in order.fills) + qty * price
+        average = notional / new_filled
+        self.store.apply_fill(
+            order, event, fill, filled_quantity=new_filled,
+            average_fill_price=average,
         )
         return order
 
@@ -640,9 +755,9 @@ class OMS:
         order.version += 1
         return event if return_event else order
 
-    def _append(self, stream, stream_id, event_type, from_state, to_state, payload, *,
-                broker_event_id=None, event_time=None) -> StateEvent:
-        event = StateEvent(
+    def _build_event(self, stream, stream_id, event_type, from_state, to_state, payload, *,
+                     broker_event_id=None, event_time=None) -> StateEvent:
+        return StateEvent(
             event_id=uuid4(),
             stream=stream,
             stream_id=stream_id,
@@ -655,6 +770,13 @@ class OMS:
             broker_adapter=self.adapter,
             broker_event_id=broker_event_id,
             payload=payload,
+        )
+
+    def _append(self, stream, stream_id, event_type, from_state, to_state, payload, *,
+                broker_event_id=None, event_time=None) -> StateEvent:
+        event = self._build_event(
+            stream, stream_id, event_type, from_state, to_state, payload,
+            broker_event_id=broker_event_id, event_time=event_time,
         )
         self.store.add_event(event)
         return event

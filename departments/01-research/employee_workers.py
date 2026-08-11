@@ -61,11 +61,7 @@ except ModuleNotFoundError:
 WORKER_SPECS = (
     WorkerSpec("methodology-scout-academic", "Academic methodology scout for papers and preprints", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
     WorkerSpec("methodology-scout-practitioner", "Practitioner methodology scout for investor letters and desk notes", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
-    WorkerSpec("methodology-scout-community", "Community and video methodology scout", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
-    WorkerSpec("methodology-scout-crossdomain", "Cross-domain method transfer scout", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
     WorkerSpec("competing-explanation-worker", "Competing explanation and falsification analyst", ("research.outcomes.read", "research.evidence.search"), "proposal_draft", ("proposal_draft",)),
-    WorkerSpec("experiment-planner-worker", "Experiment proposal drafting analyst", ("research.experiment_vocabulary.read", "research.outcomes.read"), "adopted_lead", ("adopted_lead", "methodology_leads")),
-    WorkerSpec("market-context-worker", "Universe, data-availability and market-context analyst", ("research.universe.read", "research.market_snapshot.read"), "always", ("universe", "market_snapshot")),
     WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", ("research.evidence.search", "research.news.read", "research.market_snapshot.read"), "holding_question", ("holding_question", "portfolio_state", "news")),
 )
 

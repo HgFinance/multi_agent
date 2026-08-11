@@ -49,11 +49,8 @@ except ModuleNotFoundError:
 #   도달했을 때만 켠다 - 카드도 없는데 해석 워커를 돌릴 이유가 없다.
 # ▶ 도구가 전부 .read 인 것은 의도다. 적재·판정은 pipeline/ 결정론 코드가 한다.
 WORKER_SPECS = (
-    WorkerSpec("proposal-intake-worker", "Experiment proposal intake and hypothesis specification analyst", ("quant.proposal.read", "quant.hypothesis.read"), "always", ("experiment_proposal", "hypothesis")),
-    WorkerSpec("experiment-design-worker", "Point-in-time dataset and experiment design analyst", ("quant.dataset.read",), "experiment_design", ("dataset_manifest", "features", "labels")),
     WorkerSpec("result-interpretation-worker", "Backtest result, overfitting and regime interpretation analyst", ("quant.experiment_card.read",), "experiment_card", ("experiment_card", "trial_pressure", "regime_breakdown")),
     WorkerSpec("strategy-author-worker", "Custom strategy signal authoring analyst", ("quant.template_catalog.read", "quant.vocabulary.read"), "strategy_authoring", ("experiment_proposal", "methodology_leads", "template_catalog")),
-    WorkerSpec("outcome-lesson-worker", "Experiment outcome and lesson-code mapping analyst", ("quant.outcome.read",), "experiment_outcome", ("experiment_outcome", "failed_criteria")),
 )
 
 

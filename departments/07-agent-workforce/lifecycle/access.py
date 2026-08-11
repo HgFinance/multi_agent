@@ -267,6 +267,14 @@ class AccessRepository:
     def list_assignments_by_agent(self, agent_id: str) -> list[AccessAssignment]:
         raise NotImplementedError
 
+    def list_requests_by_status(self, status: RequestStatus) -> list[AccessRequest]:
+        """Platform/IAM이 처리할 작업(status=APPROVED)을 찾는 유일한 경로.
+
+        Platform/IAM은 이 조회 하나로만 일감을 발견한다 - governance.approvals를
+        직접 폴링하지 않고, HR의 DB에도 직접 붙지 않는다(PLATFORM_IAM_SPEC.md 2.1).
+        """
+        raise NotImplementedError
+
 
 class InMemoryAccessRepository(AccessRepository):
     def __init__(self) -> None:
@@ -287,6 +295,9 @@ class InMemoryAccessRepository(AccessRepository):
 
     def list_assignments_by_agent(self, agent_id: str) -> list[AccessAssignment]:
         return [a for a in self._assignments.values() if a.agent_id == agent_id]
+
+    def list_requests_by_status(self, status: RequestStatus) -> list[AccessRequest]:
+        return [r for r in self._requests.values() if r.status is status]
 
 
 # ---------------------------------------------------------------------------

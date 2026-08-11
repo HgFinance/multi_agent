@@ -72,11 +72,17 @@ test("keeps the current organization and Risk/QA bridge wired", async () => {
   assert.equal((config.match(/staff\("ops", "member"/g) ?? []).length, 2);
   assert.equal((config.match(/staff\("qa", "member"/g) ?? []).length, 3);
   assert.match(config, /executive-briefing-worker/);
-  // sim.ts의 debate()가 role 문자열로 두 사람을 찾는다. 이름이 바뀌면 토론이 조용히 사라진다.
+  // 2026-08-10 Bull/Bear 리서처는 부서 config.yaml 에서 제거됐다(worker_count 0).
+  // 가드 방향을 뒤집는다 — 예전엔 "빠지면 토론이 조용히 사라진다"였고, 지금은
+  // **없는 Worker 를 사무실에 되살리지 못하게** 막는다(ai-office/CLAUDE.md:
+  // "미구현 Worker 를 실행 중으로 보여주지 않는다").
   for (const role of ["Bull 리서처", "Bear 리서처"]) {
-    assert.ok(config.includes(`"${role}"`), `${role} 누락 — debate()가 no-op이 된다`);
-    assert.ok(sim.includes(`=== "${role}"`), `sim.ts가 찾는 role 문자열과 불일치`);
+    assert.ok(!config.includes(`"${role}"`), `${role} 부활 — config.yaml 에 없는 Worker다`);
+    assert.ok(!sim.includes(`=== "${role}"`), `sim.ts 에 ${role} 연출이 되살아났다`);
   }
+  // 트레이딩 화면 인원은 desk-runner 하나뿐이다. 전략별 임시 Worker 는 요청 단위라
+  // 고정 좌석이 없다. 늘어나면 부서 config.yaml 과 대조하라는 신호다.
+  assert.equal((config.match(/staff\("strategy2", "member"/g) ?? []).length, 1);
   assert.match(page, /<OfficeWorld/);
   assert.match(page, /<OpsPanel/);
   assert.match(page, /<DepartmentRuntimePanel/);

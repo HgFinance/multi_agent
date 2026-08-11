@@ -42,6 +42,11 @@ langgraph-checkpoint-postgres
 opentelemetry-sdk
 opentelemetry-exporter-otlp
 prometheus-client
+# langfuse: HR(07-agent-workforce)이 6개 투자본부 Worker의 유휴 여부를 관측하는 용도
+# (2026-08-10, 영주 결정). langsmith 와 마찬가지로 orchestration/llm_observability.py 가
+# lazy import 하므로 설치 안 해도 나머지 파이프라인은 그대로 돈다 - LANGFUSE_TRACING=false
+# (기본값)일 때 이 패키지가 없어도 에러가 나지 않는다. 설치 확인 버전: langfuse==4.14.3.
+langfuse
 
 # --- Test (Risk/QA 자체 점검 pytest 전환분, departments/03-risk, 06-ai-qa-audit) ---
 pytest

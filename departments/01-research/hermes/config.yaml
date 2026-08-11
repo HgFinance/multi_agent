@@ -247,7 +247,7 @@ head_runtime:
   binding_decision: false
 staff_registry:
   head_count: 1
-  worker_count: 8
+  worker_count: 4
   default_execution_count: 1
   max_execution_count: 8
   active_worker_count: 1
@@ -295,24 +295,6 @@ workers:
     - research.web.open
     - research.web.verify
     output: methodology_lead
-  methodology-scout-community:
-    role: Community and video methodology scout
-    status: conditional
-    trigger: scout_cycle
-    tools:
-    - research.web.search
-    - research.web.open
-    - research.web.verify
-    output: methodology_lead
-  methodology-scout-crossdomain:
-    role: Cross-domain method transfer scout
-    status: conditional
-    trigger: scout_cycle
-    tools:
-    - research.web.search
-    - research.web.open
-    - research.web.verify
-    output: methodology_lead
   competing-explanation-worker:
     role: Competing explanation and falsification analyst
     status: conditional
@@ -321,22 +303,6 @@ workers:
     - research.outcomes.read
     - research.evidence.search
     output: competing_explanation
-  experiment-planner-worker:
-    role: Experiment proposal drafting analyst
-    status: conditional
-    trigger: adopted_lead
-    tools:
-    - research.experiment_vocabulary.read
-    - research.outcomes.read
-    output: proposal_draft
-  market-context-worker:
-    role: Universe, data-availability and market-context analyst
-    status: active
-    trigger: always
-    tools:
-    - research.universe.read
-    - research.market_snapshot.read
-    output: advisory_context
   holdings-analyst-worker:
     role: Portfolio holdings question-answering analyst
     status: conditional

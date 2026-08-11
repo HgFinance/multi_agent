@@ -38,6 +38,7 @@ psycopg OrderStore 구현은 팀장 확인 대기 항목이다(CLAUDE.local.md "
 from __future__ import annotations
 
 import sys
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -56,6 +57,7 @@ for _sub in ("contracts", "oms", "broker", "multileg", "capability"):
 
 from contracts import (
     LOT_SIZE,
+    BrokerOrderState,
     MarketSnapshot,
     OrderIntent,
     OrderType,
@@ -65,19 +67,48 @@ from contracts import (
     tick_size,
 )
 from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord
+from oms import OrderStore
+from store_postgres import OrderStorePersistenceError, PostgresOrderStore
 from paper_broker import PaperBroker, Quote
 
 API_VERSION = "v1"
 
 app = FastAPI(title="Trading Domain API", version=API_VERSION)
 
-# ── 단일 프로세스 상태 ────────────────────────────────────────────────────────
-# 파일 상단 ⚠ 참고. OMS 인스턴스 하나가 이 프로세스의 전체 주문 상태다.
-# DB store 로 바꿀 때 고칠 곳은 여기 한 줄이다 - 엔드포인트는 안 바뀐다.
-_oms = OMS(adapter="paper")
+# ── 저장 모드 ──────────────────────────────────────────────────────────────────
+# PAPER_DB is an explicit opt-in.  A missing/failed durable dependency never
+# falls back to an authoritative in-memory store.
+def _truthy(value: str | None) -> bool:
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+_paper_db_value = os.environ.get("PAPER_DB")
+_paper_db_required = _truthy(_paper_db_value)
+_paper_db_error: str | None = None
+if _paper_db_required:
+    _dsn = (
+        _paper_db_value
+        if _paper_db_value and "://" in _paper_db_value
+        else os.environ.get("PAPER_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    )
+    if not _dsn or _dsn.strip().lower() in {"1", "true", "yes", "on"}:
+        _paper_db_error = "PAPER_DB가 요구됐지만 PAPER_DATABASE_URL/DATABASE_URL이 없습니다"
+        _oms = OMS(adapter="paper")
+    else:
+        try:
+            _oms = OMS(
+                store=PostgresOrderStore.connect(_dsn, adapter="paper"),
+                adapter="paper",
+            )
+        except Exception as exc:
+            _paper_db_error = f"PAPER_DB 저장소를 초기화할 수 없습니다: {exc}"
+            _oms = OMS(adapter="paper")
+else:
+    _oms = OMS(store=OrderStore(), adapter="paper")
+
+_paper_db_durable = _paper_db_required and _paper_db_error is None
 _broker = PaperBroker()
-# OrderIntent 원본(frozen 계약)은 OMS 가 들고 있지 않다 - 증거로 따로 보존한다.
-# create_broker_order 와 Paper 체결이 side/limit_price 를 다시 필요로 한다.
+# OrderIntent 원본(frozen 계약)은 durable store가 재구축하며, offline mode에서는
+# OMS의 저장소가 함께 보존한다.
 _intents: dict[UUID, OrderIntent] = {}
 
 
@@ -91,8 +122,28 @@ def _now() -> datetime:
 
 def _envelope(code: str, message: str, **extra) -> dict:
     return {"error_code": code, "message": message, **extra}
+def _require_paper_store() -> None:
+    if _paper_db_error is not None:
+        raise HTTPException(
+            status_code=503,
+            detail=_envelope(
+                "TRADING_PAPER_DB_UNAVAILABLE",
+                _paper_db_error,
+                action="HOLD",
+            ),
+        )
 
 
+@app.exception_handler(OrderStorePersistenceError)
+def _on_persistence_error(request, exc: OrderStorePersistenceError):
+    return JSONResponse(
+        status_code=503,
+        content=_envelope(
+            "TRADING_PAPER_DB_UNAVAILABLE",
+            str(exc),
+            action="HOLD",
+        ),
+    )
 @app.exception_handler(OMSError)
 def _on_oms_error(request, exc: OMSError):
     """OMS 불변식 위반. 400이지 500이 아니다 - 호출자가 고칠 수 있는 요청이다."""
@@ -123,6 +174,7 @@ def _on_validation_error(request, exc: RequestValidationError):
 
 
 def _intent_record(order_intent_id: UUID) -> OrderIntentRecord:
+    _require_paper_store()
     rec = _oms.store.get_intent(order_intent_id)
     if rec is None:
         raise HTTPException(404, _envelope("TRADING_INTENT_NOT_FOUND",
@@ -131,16 +183,33 @@ def _intent_record(order_intent_id: UUID) -> OrderIntentRecord:
 
 
 def _intent_body(order_intent_id: UUID) -> OrderIntent:
-    """OrderIntent 원본. OMS 기록(`_intent_record`)과 달리 이건 프로세스 메모리에만 있다."""
+    """Reconstruct the immutable intent from durable evidence after restart."""
+    _require_paper_store()
+    if _paper_db_durable:
+        intent = _oms.store.reconstruct_intent(order_intent_id)
+        if intent is None:
+            raise HTTPException(
+                409,
+                _envelope(
+                    "TRADING_INTENT_RECONCILIATION_REQUIRED",
+                    "durable Intent 원본을 재구축할 수 없습니다",
+                    action="HOLD",
+                ),
+            )
+        return intent
     intent = _intents.get(order_intent_id)
     if intent is None:
-        raise HTTPException(409, _envelope("TRADING_INTENT_BODY_LOST",
-                                           "이 프로세스에 Intent 원본이 없습니다(재시작됨). "
-                                           "order-intents 로 다시 등록하세요"))
+        intent = _oms.store.reconstruct_intent(order_intent_id)
+    if intent is None:
+        raise HTTPException(409, _envelope(
+            "TRADING_INTENT_BODY_LOST",
+            "이 프로세스에 Intent 원본이 없습니다(재시작됨). order-intents 로 다시 등록하세요",
+        ))
     return intent
 
 
 def _order(order_id: UUID) -> BrokerOrder:
+    _require_paper_store()
     order = _oms.store.get_order(order_id)
     if order is None:
         raise HTTPException(404, _envelope("TRADING_ORDER_NOT_FOUND",
@@ -164,9 +233,11 @@ def _intent_view(rec: OrderIntentRecord) -> dict:
         "risk_approved_quantity": str(rec.risk_approved_qty) if rec.risk_approved_qty is not None else None,
         "risk_expires_at": rec.risk_expires_at.isoformat() if rec.risk_expires_at else None,
         "version": rec.version,
-        # 화면·에이전트가 이 수치를 공식 값으로 쓰지 못하게 계약에 박아둔다.
-        "authoritative": False,
-        "source_of_record": "execution.order_intents (미연결 - 프로세스 메모리)",
+        "authoritative": _paper_db_durable,
+        "source_of_record": (
+            "execution.order_intents (Supabase)"
+            if _paper_db_durable else "execution.order_intents (프로세스 메모리)"
+        ),
     }
 
 
@@ -184,8 +255,11 @@ def _order_view(order: BrokerOrder) -> dict:
         "average_fill_price": str(order.average_fill_price) if order.average_fill_price is not None else None,
         "is_terminal": order.is_terminal,
         "version": order.version,
-        "authoritative": False,
-        "source_of_record": "execution.orders (미연결 - 프로세스 메모리)",
+        "authoritative": _paper_db_durable,
+        "source_of_record": (
+            "execution.orders (Supabase)"
+            if _paper_db_durable else "execution.orders (프로세스 메모리)"
+        ),
     }
 
 
@@ -311,6 +385,16 @@ def create_order_intent(body: OrderIntentIn) -> dict:
     네트워크 재시도로 주문이 두 배 나가지 않는다. 그래서 201 이어도 새로 만들어진
     것이 아닐 수 있고, 그 구분은 응답의 intent_status 와 version 으로 한다.
     """
+    _require_paper_store()
+    if body.asset_class != "EQUITY":
+        raise HTTPException(
+            409,
+            _envelope(
+                "TRADING_PAPER_EQUITY_ONLY",
+                "PAPER 단일 Leg 경로는 EQUITY만 허용합니다",
+                action="HOLD",
+            ),
+        )
     try:
         intent = body.to_contract()
     except ValidationError as e:
@@ -485,28 +569,81 @@ def cancel_case_orders(case_id: UUID, body: CancelIn) -> dict:
     ponytail: Case -> 주문 역인덱스가 없어 전체 주문을 훑는다. 주문이 수천 건이
     되면 store 에 case_id 인덱스를 추가한다(DB store 로 가면 자연히 해결된다).
     """
-    targets = [
-        o for o in _oms.store.list_orders()
-        if not o.is_terminal
-        and (i := _intents.get(o.order_intent_id)) is not None
-        and i.trade_case_id == case_id
-    ]
+    _require_paper_store()
+    targets: list[BrokerOrder] = []
+    unresolved: list[str] = []
+    already: list[str] = []
+    for order in _oms.store.list_orders():
+        if order.is_terminal:
+            continue
+        if order.state is BrokerOrderState.CANCEL_PENDING:
+            # 이미 취소 요청이 나가 있다. 다시 요청하면 CANCEL_PENDING -> CANCEL_PENDING
+            # 전이 위반이라 **sweep 전체가 400** 이 된다 - 원하는 상태에 이미 도달한
+            # 주문 하나가 나머지 주문의 취소를 막는 것은 방향이 반대다.
+            already.append(str(order.order_id))
+            continue
+        try:
+            intent = _intent_body(order.order_intent_id)
+        except HTTPException:
+            # **Intent 원본 하나를 못 읽었다고 Case 전체 취소를 막지 않는다.**
+            # 취소는 안전한 방향이다(개발 원칙 9) - 여기서 409를 올리면 이 Case 의
+            # 멀쩡한 미체결 주문까지 끊지 못한 채 남는다.
+            #
+            # 대신 **조용히 건너뛰지 않는다.** 판정하지 못한 주문을 응답에 실어
+            # 호출자가 "전부 취소됐다"고 오해하지 못하게 한다 - 취소되지 않은 주문이
+            # 있다는 사실 자체가 Reconciliation 대상이다.
+            unresolved.append(str(order.order_id))
+            continue
+        if intent.trade_case_id == case_id:
+            targets.append(order)
     return {
         "case_id": str(case_id),
         "requested": [_order_view(_oms.request_cancel(o, body.reason)) for o in targets],
+        # 이미 취소 요청이 나가 있어 이번 호출이 건드리지 않은 주문. 원하는 방향에
+        # 이미 있으므로 실패가 아니다.
+        "already_cancelling": already,
+        # Case 소속 여부를 판정하지 못한 미종료 주문. 비어 있지 않으면 이 응답은
+        # "Case 의 전부"가 아니다.
+        "unresolved_orders": unresolved,
     }
 
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness. **저장소가 죽어도 200이다.**
+
+    여기서 503을 내면 오케스트레이터(EB/ECS 헬스체크)가 DB 순단마다 멀쩡한 인스턴스를
+    교체한다 - 프로세스는 살아 있고 주문을 올바르게 거절하고 있는데 죽었다고 판정하는
+    것이다. 거절은 도메인 엔드포인트와 `/health/ready` 가 한다.
+
+    **저장소를 건드리지 않는다.** 여기서 store 를 조회하면 DB 가 죽었을 때 이 경로도
+    같이 503이 되어 분리한 의미가 없어진다. 수치는 `/health/ready` 에 있다.
+    """
     return {
-        "status": "ok",
+        "status": "degraded" if _paper_db_error else "ok",
         "api_version": API_VERSION,
         "adapter": _oms.adapter,
-        # 이 두 값이 재시작마다 0으로 돌아간다는 사실을 숨기지 않는다.
+        "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
+        "store_available": _paper_db_error is None,
+        "store_error": _paper_db_error,
+        "authoritative": _paper_db_durable,
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 저장소에 실제로 닿아 보고, 못 닿으면 503이다.
+
+    Load Balancer 가 트래픽을 끊을 판단은 이쪽을 본다(`apps/api/main.py` 와 같은 규약).
+    """
+    _require_paper_store()
+    return {
+        "status": "ready",
+        "api_version": API_VERSION,
+        "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
         "intents": len(_oms.store.list_intents()),
         "orders": len(_oms.store.list_orders()),
-        "store": "in-memory (execution.* 미연결)",
+        "authoritative": _paper_db_durable,
     }
 
 
@@ -643,6 +780,45 @@ if __name__ == "__main__":
 
     # 14. health 가 in-memory 사실을 숨기지 않는다
     assert c.get("/health").json()["store"].startswith("in-memory")
+
+    # 14-1. **Liveness 는 저장소를 건드리지 않는다.** store 를 조회하면 DB 가 죽었을 때
+    #       이 경로도 같이 503이 되고, 그러면 EB/ECS 헬스체크가 멀쩡한 인스턴스를
+    #       교체한다. 판정은 /health/ready 가 한다.
+    live = c.get("/health")
+    assert live.status_code == 200 and live.json()["store_available"] is True
+    assert "intents" not in live.json(), "liveness 가 저장소를 조회했다"
+    ready = c.get("/health/ready")
+    assert ready.status_code == 200 and ready.json()["status"] == "ready", ready.text
+    assert "intents" in ready.json(), "readiness 가 저장소 수치를 안 냈다"
+
+    # 14-2. 저장소가 죽으면 liveness 는 200 degraded, readiness 만 503이다.
+    # `import app` 으로는 안 된다 - 이 파일은 __main__ 으로 돌고 있어서 별개 모듈
+    # 객체가 생기고, health() 가 읽는 전역은 그대로 남는다. 여기가 모듈 최상위라
+    # 직접 대입이 곧 그 전역이다.
+    _saved_error = _paper_db_error
+    _paper_db_error = "PAPER_DB 저장소를 초기화할 수 없습니다: 점검용"
+    try:
+        degraded = c.get("/health")
+        assert degraded.status_code == 200, "저장소 장애에 liveness 가 죽었다"
+        assert degraded.json()["status"] == "degraded", degraded.text
+        assert degraded.json()["store_available"] is False
+        assert c.get("/health/ready").status_code == 503, "readiness 가 장애를 숨겼다"
+        # 도메인 경로도 같이 닫혀 있어야 한다 - degraded 가 "그래도 주문은 받는다"가 되면 안 된다
+        assert c.get(f"/trading/v1/orders/{uuid4()}").status_code == 503
+    finally:
+        _paper_db_error = _saved_error
+
+    # 14-3. **Intent 원본 하나를 못 읽어도 Case 취소가 멈추지 않는다.**
+    #       취소는 안전한 방향이라 여기서 409를 올리면 멀쩡한 미체결 주문까지 남는다.
+    #       대신 판정 못 한 주문을 응답에 실어 "전부 취소됐다"는 오해를 막는다.
+    lost_order_id = noquote.json()["order"]["order_id"]
+    _intents.pop(UUID(o7), None)
+    _oms.store._intent_bodies.pop(UUID(o7), None)
+    swept = c.post(f"/investment-cases/{ids['case']}/cancel", json={"reason": "점검"})
+    assert swept.status_code == 200, swept.text
+    assert lost_order_id in swept.json()["unresolved_orders"], \
+        "원본을 잃은 주문이 조용히 사라졌다"
+    assert lost_order_id not in [o["order_id"] for o in swept.json()["requested"]]
 
     # 15. UNKNOWN — 맨 뒤에 둔다. 같은 Fund 의 신규 주문을 막으므로(불변식 8)
     #     이걸 앞에 두면 뒤따르는 모든 검사가 이 차단에 걸린다. 실제로 처음

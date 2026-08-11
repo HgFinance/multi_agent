@@ -42,6 +42,7 @@ from orchestration.contracts.mas import (
 from orchestration.llm_observability import (
     begin_worker_metric,
     end_worker_metric,
+    publish_langfuse_metric,
     publish_metric,
     redacted_trace,
 )
@@ -50,8 +51,19 @@ ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_VERSION = "portfolio-recommendation-full-async-v1"
 RuntimeEventCallback = Callable[[Mapping[str, Any]], None]
 
+# 2026-08-10 팀 합의: 포트폴리오 구성 요청은 요청 시점에 research -> quant 를 부른다.
+# 이전 설계는 "백테스트는 strategy_research_cycle 에서 미리 끝내고 추천은 그 결과를
+# 쓴다"였는데, 검증된 전략과 추천을 잇는 계보가 실제로 없었다(USER_INPUT_SCOPE_ANALYSIS
+# §J "포트폴리오 후보 카탈로그를 누가 만드는가"). 팀은 카탈로그를 만드는 대신 요청
+# 시점 백테스트로 가기로 했다.
+#
+# MAS_PIPELINE_CONTRACTS 의 "Quant 를 포트폴리오 추천 그래프에 **암묵적으로** 끼워
+# 넣지 않는다"와 충돌하지 않는다 - 금지된 것은 암묵적 삽입이고, 여기서는 선언된
+# 단계로 명시한다. strategy_research_cycle(전략 승격용 quant -> qa -> ceo)은 그대로
+# 별도 흐름으로 남는다. 한 부서가 두 흐름에 나오는 것은 research·risk 도 마찬가지다.
 DEPARTMENTS: tuple[str, ...] = (
     "research",
+    "quant",
     "trading",
     "risk",
     "qa",
@@ -66,8 +78,6 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
     "fundamental-valuation-worker": ("재무", "실적", "밸류", "가치", "저평가", "고평가"),
     "news-macro-worker": ("뉴스", "금리", "환율", "거시", "경제", "정책"),
     "evidence-rag-worker": ("근거", "출처", "자료", "검증", "인용"),
-    "bull-thesis-worker": ("전망", "강세", "상승", "시장 논리"),
-    "bear-thesis-worker": ("약세", "하락", "하방", "반대 논리"),
     "order-constraint-worker": ("주문", "한도", "제약", "컴플라이언스"),
     "execution-planning-worker": ("체결", "실행", "집행"),
     "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
@@ -81,6 +91,10 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
                                        "pnl", "손익", "성과", "차이", "불일치", "예외"),
     "hallucination-critic-worker": ("근거", "출처", "검증", "인용", "환각", "모순", "신뢰"),
     "incident-postmortem-worker": ("사고", "장애", "재발", "인시던트"),
+    "strategy-hypothesis-worker": ("전략", "가설", "아이디어", "전략 추천"),
+    "dataset-feature-worker": ("데이터셋", "피처", "지표 구성"),
+    "backtest-optimization-worker": ("백테스트", "과거 성과", "수익률 검증", "최적화"),
+    "regime-robustness-worker": ("국면", "레짐", "스트레스", "견고성"),
 }
 
 # core-risk-worker/derivatives-counterparty-worker(risk)와 evidence-qa-worker/
@@ -92,28 +106,62 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
 # 하나로 바꿨다 - 없는 id를 남겨두면 fallback이 조용히 빈 목록이 된다.
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
     "research": ("research-data-worker", "evidence-rag-worker"),
-    "trading": ("bull-thesis-worker", "bear-thesis-worker"),
+    # quant 7명 중 trigger 가 always 인 둘. 나머지 5명은 backtest_request 등
+    # 전용 신호가 있을 때만 켜지므로 자유 질의 fallback 에 넣지 않는다.
+    "quant": ("strategy-hypothesis-worker", "dataset-feature-worker"),
+    "trading": (),
     "risk": ("compliance-policy-worker",),
     "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
     "accounting": ("exception-investigation-worker",),
     "ceo": ("executive-briefing-worker",),
 }
 
+# 카테고리는 두 가지를 따로 결정한다 - (1) 어느 Workflow 소속인가, (2) 그 Workflow
+# 안에서 어느 부서를 부르는가. 이 둘을 분리해 두는 이유는 CLAUDE.md "5개 흐름 - 서로
+# 분리, 섞지 않는다"와 MAS_PIPELINE_CONTRACTS.md "Quant와 HR은 포트폴리오 추천 그래프에
+# 암묵적으로 끼워 넣지 않는다"를 코드에서도 지키기 위해서다.
+#
+# 특히 전략 연구 요청("이런 전략 어때?")은 quant-backtest 를 아래 DEPARTMENTS 에
+# 추가해서 푸는 문제가 **아니다.** 그건 strategy-research 체인(quant → qa → ceo)이
+# 소유하며, 이 그래프에 quant 를 끼워 넣으면 위 두 문서를 동시에 위반한다.
+PORTFOLIO_WORKFLOW = "portfolio-recommendation"
+STRATEGY_WORKFLOW = "strategy-research"
+
+CATEGORY_WORKFLOWS: dict[str, str] = {
+    "PORTFOLIO_RECOMMENDATION": PORTFOLIO_WORKFLOW,
+    "MARKET_RESEARCH": PORTFOLIO_WORKFLOW,
+    "RISK_REVIEW": PORTFOLIO_WORKFLOW,
+    "TAX_LIQUIDITY": PORTFOLIO_WORKFLOW,
+    "REBALANCING_PROPOSAL": PORTFOLIO_WORKFLOW,
+    # 이 그래프가 처리할 수 없다 - task_plan.workflow 로 호출부에 알린다.
+    "STRATEGY_PROPOSAL": STRATEGY_WORKFLOW,
+}
+
 # Category is the first routing hint. The free-form query may expand this
 # bounded set when it clearly needs another domain.
+# quant 는 **포트폴리오·전략을 구성하는 카테고리에만** 넣는다. 팀 합의는 "요청마다
+# research -> quant"였지만 그 대상은 구성 요청이다 - "삼전 지금 사도 돼?" 같은 단순
+# 종목 질문(MARKET_RESEARCH)까지 백테스트를 돌리면 3단계가 4단계 + 실제 연산으로
+# 늘어나 대화 응답성이 무너진다. RISK_REVIEW·TAX_LIQUIDITY 도 기존 보유분에 대한
+# 질문이라 새 후보를 만들지 않으므로 제외한다.
 CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
-    "PORTFOLIO_RECOMMENDATION": ("research", "risk", "qa", "ceo"),
+    "PORTFOLIO_RECOMMENDATION": ("research", "quant", "risk", "qa", "ceo"),
     "MARKET_RESEARCH": ("research", "qa", "ceo"),
     "RISK_REVIEW": ("research", "risk", "qa", "ceo"),
     "TAX_LIQUIDITY": ("research", "risk", "accounting", "qa", "ceo"),
     "REBALANCING_PROPOSAL": (
         "research",
+        "quant",
         "trading",
         "risk",
         "accounting",
         "qa",
         "ceo",
     ),
+    # 전략 제안. 정식 승격 흐름은 여전히 strategy-research(quant -> qa -> ceo)가
+    # 소유하지만(task_plan.workflow 참고), 대화에서 들어온 전략 질문에 답하려면
+    # 이 그래프에서도 백테스트 근거가 필요하다. 주문·원장 부서는 넣지 않는다.
+    "STRATEGY_PROPOSAL": ("research", "quant", "qa", "ceo"),
 }
 
 
@@ -139,11 +187,19 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     query = " ".join(str(profile.get("query", "")).split())
     category = str(profile.get("category", "")).strip().upper()
     category_departments = CATEGORY_DEPARTMENTS.get(category)
+    # 알 수 없는 카테고리를 거절하지 않는다 - 표에 없으면 더 넓은 집합으로 떨어져
+    # 자문 결과가 비는 대신 부서를 더 부른다(개발 원칙 9: 실패는 확대가 아니라
+    # 차단 방향이나, 여기서 "확대"는 주문이 아니라 읽기 부서 호출이라 안전하다).
+    # 다만 조용히 넘기지 않고 category_recognized 로 호출부·감사에 드러낸다.
+    category_recognized = category in CATEGORY_WORKFLOWS
+    workflow = CATEGORY_WORKFLOWS.get(category, PORTFOLIO_WORKFLOW)
     if not query:
         requested_departments = list(category_departments or DEPARTMENTS)
         return {
             "mode": "category_default" if category_departments else "portfolio_default",
             "category": category or "PORTFOLIO_RECOMMENDATION",
+            "workflow": workflow,
+            "category_recognized": category_recognized,
             "original_query": "",
             "rewritten_query": "카테고리와 사용자 프로필에 맞는 비구속적 포트폴리오 후보를 검토한다.",
             "requested_departments": requested_departments,
@@ -171,6 +227,8 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "mode": "free_query",
         "category": category or "PORTFOLIO_RECOMMENDATION",
+        "workflow": workflow,
+        "category_recognized": category_recognized,
         "original_query": query,
         "rewritten_query": (
             f"{query} 사용자 요청을 적합성·근거·리스크 관점에서 검토하고, "
@@ -183,6 +241,7 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 _MODULE_PATHS = {
     "research": ROOT / "departments/01-research/employee_workers.py",
+    "quant": ROOT / "departments/04-quant-backtest/employee_workers.py",
     "trading": ROOT / "departments/02-trading/employee_workers.py",
     "risk": ROOT / "departments/03-risk/risk_employee_workers.py",
     "qa": ROOT / "departments/06-ai-qa-audit/qa_employee_workers.py",
@@ -663,6 +722,13 @@ async def _invoke_worker(
             performance,
             trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
         )
+        # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
+        # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
+        # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
+        publish_langfuse_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
         if event_callback:
             event_callback(
                 {
@@ -702,6 +768,13 @@ async def _invoke_worker(
         performance = end_worker_metric(metric_token, status="DEGRADED", attempts=0, eval_score=0.0)
         report["performance"] = performance
         publish_metric(
+            performance,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        )
+        # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
+        # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
+        # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
+        publish_langfuse_metric(
             performance,
             trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
         )
@@ -949,6 +1022,54 @@ def build_portfolio_recommendation_graph(
         ]
 
 
+    # 고정 Worker Registry가 비어 있는 부서(Trading: 전략별 임시 Worker만 존재)는
+    # 위/아래 skip 헬퍼가 전부 **빈 목록**을 돌려준다. 그런데 fan_in의 부서 판정은
+    # `bool(reports) and all(...)` 이라 빈 목록이면 어떤 skip 사유에도 걸리지 않고
+    # 마지막 else의 COMPLETED로 떨어진다 — 즉 **호출조차 안 된 부서가 성공으로 보인다.**
+    # 사유를 잃지 않도록 부서 단위 대체 보고 하나를 만들어 준다. Worker가 0명인 것은
+    # 설정 누락이 아니라 결정이므로(WORKER_ROLE_BOUNDARIES.md) 여기서 사유별로 감싼다.
+    def _registryless_report(
+        stage: str,
+        *,
+        skip_reason: str,
+        summary: str,
+        input_hash: str | None,
+        escalate: bool = False,
+        error: str | None = None,
+    ) -> list[dict[str, Any]]:
+        worker_id = "dynamic-alpha-strategy-worker" if stage == "trading" else f"{stage}-department"
+        return [{
+            "stage": stage,
+            "worker_id": worker_id,
+            "role": "Request-scoped Quant Alpha Strategy evaluator"
+            if stage == "trading"
+            else "Department without a fixed worker registry",
+            "status": "SKIPPED_SAFE",
+            "skip_reason": skip_reason,
+            "execution_reason": skip_reason,
+            "attempts": 0,
+            "output": {
+                "worker_id": worker_id,
+                "summary": summary,
+                "confidence": 1.0,
+                "evidence_refs": [],
+                "escalate": escalate,
+                "schema_valid": True,
+            },
+            "error": error,
+            "output_contract": "trading.temporary-strategy-worker.v1"
+            if stage == "trading"
+            else "worker-context.v1",
+            "input_hash": input_hash,
+            "binding": False,
+            "technology": {
+                "executor": "deterministic_strategy_worker",
+                "topology": "dynamic_parallel_fan_out_fan_in",
+                "provider": "none",
+                "model": "none",
+            },
+        }]
+
     def _plan_skip_reports(
         stage: str,
         specs: Sequence[WorkerSpec],
@@ -996,7 +1117,13 @@ def build_portfolio_recommendation_graph(
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {"worker_reports": _plan_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
+                        {"worker_reports": _plan_skip_reports(stage, _specs(stage), payload.get("input_hash"))
+                         or _registryless_report(
+                             stage,
+                             skip_reason="NOT_REQUESTED",
+                             summary="CEO task plan did not select this department for the user request.",
+                             input_hash=payload.get("input_hash"),
+                         )},
                     )
                 ]
             if not _live_worker_inputs_ready(state):
@@ -1005,7 +1132,15 @@ def build_portfolio_recommendation_graph(
                 return [
                     Send(
                         f"{stage}_fan_in",
-                        {"worker_reports": _safe_skip_reports(stage, _specs(stage), payload.get("input_hash"))},
+                        {"worker_reports": _safe_skip_reports(stage, _specs(stage), payload.get("input_hash"))
+                         or _registryless_report(
+                             stage,
+                             skip_reason="LIVE_DATA_NOT_READY",
+                             summary="Live PIT inputs are not ready; department execution was blocked.",
+                             input_hash=payload.get("input_hash"),
+                             escalate=True,
+                             error="LIVE_DATA_NOT_READY",
+                         )},
                     )
                 ]
             selected = _selected_specs(stage, payload)
@@ -1042,6 +1177,13 @@ def build_portfolio_recommendation_graph(
                     }
                     for spec in _specs(stage)
                 ]
+                if not no_trigger_reports:
+                    no_trigger_reports = _registryless_report(
+                        stage,
+                        skip_reason="NO_VALID_STRATEGY_BUNDLE",
+                        summary="No validated Quant Alpha Strategy Bundle was supplied.",
+                        input_hash=payload.get("input_hash"),
+                    )
                 return [
                     Send(
                         f"{stage}_fan_in",
@@ -1103,10 +1245,15 @@ def build_portfolio_recommendation_graph(
             all_live_blocked = bool(reports) and all(
                 item.get("skip_reason") == "LIVE_DATA_NOT_READY" for item in reports
             )
+            all_no_valid_strategy = bool(reports) and all(
+                item.get("skip_reason") == "NO_VALID_STRATEGY_BUNDLE" for item in reports
+            )
             if all_not_requested:
                 department_status = "NOT_REQUESTED"
             elif all_live_blocked:
                 department_status = "BLOCKED"
+            elif all_no_valid_strategy:
+                department_status = "NOT_APPLICABLE"
             elif failed:
                 department_status = "DEGRADED"
             else:
@@ -1115,7 +1262,7 @@ def build_portfolio_recommendation_graph(
                 "department_reports": {
                     stage: {
                         "status": department_status,
-                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED"} else department_status,
+                        "legacy_status": "SKIPPED" if department_status in {"NOT_REQUESTED", "BLOCKED", "NOT_APPLICABLE"} else department_status,
                         "worker_ids": [item["worker_id"] for item in reports],
                         "executed": len(completed),
                         "completed": len(completed),
@@ -1155,7 +1302,7 @@ def build_portfolio_recommendation_graph(
         degraded = [
             stage
             for stage, report in reports.items()
-        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED"}
+        if report.get("status") not in {"COMPLETED", "NOT_REQUESTED", "NOT_APPLICABLE"}
         ]
         matched = state.get("suitability", {}).get("status") == "MATCHED"
         data_context = state.get("data_context", {})
@@ -1229,6 +1376,7 @@ def build_portfolio_recommendation_graph(
 
     # Explicit fan-out/fan-in barriers preserve the department sequence.
     graph.add_node("research_fanout", lambda state: {})
+    graph.add_node("quant_fanout", lambda state: {})
     graph.add_node("trading_fanout", lambda state: {})
     graph.add_node("risk_fanout", lambda state: {})
     graph.add_node("qa_fanout", lambda state: {})
@@ -1238,7 +1386,12 @@ def build_portfolio_recommendation_graph(
     graph.add_edge("validate_profile", "research_fanout")
     graph.add_conditional_edges("research_fanout", route_stage("research"))
     graph.add_edge("research_worker", "research_fan_in")
-    graph.add_edge("research_fan_in", "trading_fanout")
+    # quant 는 research 바로 다음이다 - 백테스트 입력(가격·유니버스·피처)이 리서치
+    # 산출물이고, 그 결과가 trading/risk/qa 판단의 근거가 되어야 하기 때문이다.
+    graph.add_edge("research_fan_in", "quant_fanout")
+    graph.add_conditional_edges("quant_fanout", route_stage("quant"))
+    graph.add_edge("quant_worker", "quant_fan_in")
+    graph.add_edge("quant_fan_in", "trading_fanout")
     graph.add_conditional_edges("trading_fanout", route_stage("trading"))
     graph.add_edge("trading_worker", "trading_fan_in")
     graph.add_edge("trading_fan_in", "risk_precheck")

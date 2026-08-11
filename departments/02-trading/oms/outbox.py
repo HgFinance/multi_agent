@@ -47,7 +47,7 @@ from contracts import EventEnvelope  # noqa: E402
 # 트레이딩이 내는 이벤트 타입. 새 타입을 늘리면 여기 먼저 적는다 - 소비자가 무엇을
 # 구독할 수 있는지가 코드 한 곳에 모여 있어야 한다.
 ORDER_STATE_CHANGED = "execution.order_state_changed.v1"
-FILL_RECORDED = "execution.fill.v1"
+FILL_RECORDED = "trading.fill.v1"
 PRODUCER = "trading-oms"
 
 # backoff. 실패마다 2배씩 늘리되 상한을 둔다.
@@ -94,6 +94,34 @@ def enqueue(cur, envelope: EventEnvelope) -> int:
     두 번 들어와도 이벤트가 두 번 나가지 않는다.
     """
     body = envelope.to_canonical()
+    # Idempotency is a content claim, not just a duplicate suppression key.  A
+    # caller that reuses the key for a different envelope must be rejected.
+    cur.execute(
+        """
+        select outbox_id, event_id, event_type, schema_version, case_id, trace_id,
+               producer, occurred_at, idempotency_key, payload_ref
+          from execution.outbox where idempotency_key = %s
+        """,
+        (body["idempotency_key"],),
+    )
+    existing = cur.fetchone()
+    if existing is not None:
+        existing_body = {
+            "event_id": str(existing[1]),
+            "event_type": existing[2],
+            "schema_version": existing[3],
+            "case_id": str(existing[4]) if existing[4] else None,
+            "trace_id": str(existing[5]),
+            "producer": existing[6],
+            "occurred_at": existing[7].isoformat(),
+            "idempotency_key": existing[8],
+            "payload_ref": existing[9],
+        }
+        if existing_body != body:
+            raise OutboxError(
+                f"동일 idempotency_key의 다른 Outbox 사실입니다: {body['idempotency_key']}"
+            )
+        return int(existing[0])
     cur.execute(
         """
         insert into execution.outbox
@@ -110,12 +138,34 @@ def enqueue(cur, envelope: EventEnvelope) -> int:
     row = cur.fetchone()
     if row is not None:
         return int(row[0])
-    # 이미 있던 행. 같은 사실이므로 그 id를 돌려준다.
-    cur.execute("select outbox_id from execution.outbox where idempotency_key = %s",
-                (body["idempotency_key"],))
+    # A concurrent insert can only be the same envelope (the pre-check above
+    # handles the normal path); verify it before returning its id.
+    cur.execute(
+        """
+        select outbox_id, event_id, event_type, schema_version, case_id, trace_id,
+               producer, occurred_at, idempotency_key, payload_ref
+          from execution.outbox where idempotency_key = %s
+        """,
+        (body["idempotency_key"],),
+    )
     existing = cur.fetchone()
     if existing is None:  # pragma: no cover - conflict 후 사라질 수 없다
         raise OutboxError(f"outbox 행을 넣지도 찾지도 못했습니다: {body['idempotency_key']}")
+    existing_body = {
+        "event_id": str(existing[1]),
+        "event_type": existing[2],
+        "schema_version": existing[3],
+        "case_id": str(existing[4]) if existing[4] else None,
+        "trace_id": str(existing[5]),
+        "producer": existing[6],
+        "occurred_at": existing[7].isoformat(),
+        "idempotency_key": existing[8],
+        "payload_ref": existing[9],
+    }
+    if existing_body != body:
+        raise OutboxError(
+            f"동일 idempotency_key의 다른 Outbox 사실입니다: {body['idempotency_key']}"
+        )
     return int(existing[0])
 
 
