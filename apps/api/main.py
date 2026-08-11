@@ -74,7 +74,7 @@ finally:
         sys.modules.pop(_name, None)
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
-import hermes_cli
+from apps.api import hermes_boundary
 try:
     from .ceo import router as ceo_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
@@ -536,7 +536,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "mode": "DEMO",
-        "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
+        "agent_ask_enabled": hermes_boundary.ENABLE_AGENT_ASK,
         "departments": [
             "research-department",
             trading.DEPARTMENT,
@@ -897,10 +897,10 @@ if __name__ == "__main__":
 
     # 게이트를 열면 L0는 모델을 부르지 않고 결정론 원천으로 돌려보낸다(비용 0).
     import accounting as _accounting_router
-    import hermes_cli as _hermes_cli
+    from apps.api import hermes_boundary as _hermes_boundary
 
-    _saved_flag = _hermes_cli.ENABLE_AGENT_ASK
-    _hermes_cli.ENABLE_AGENT_ASK = True
+    _saved_flag = _hermes_boundary.ENABLE_AGENT_ASK
+    _hermes_boundary.ENABLE_AGENT_ASK = True
     try:
         cheap = c.post("/accounting/agent/ask", json={"query": "현재 NAV와 현금 잔고"})
         assert cheap.status_code == 200, cheap.text
@@ -913,14 +913,14 @@ if __name__ == "__main__":
 
         # 마감·감사 질의는 등급이 올라가고 실제로 Hermes를 부른다(여기선 스텁으로 확인)
         _called: list = []
-        _orig_ask = _accounting_router.hermes_cli.ask
+        _orig_ask = _accounting_router.hermes_boundary.ask
 
         def _fake_ask(*, department, config, query):
             _called.append(query)
             return {"department": department, "answer": "stub", "session_id": "s1",
                     "authoritative": False, "source_of_record": "/ui/snapshot"}
 
-        _accounting_router.hermes_cli.ask = _fake_ask
+        _accounting_router.hermes_boundary.ask = _fake_ask
         try:
             heavy = c.post("/accounting/agent/ask",
                            json={"query": "마감 확정해도 되는지 감사 근거와 함께 설명"}).json()
@@ -928,9 +928,9 @@ if __name__ == "__main__":
             assert heavy["routing"]["calls_model"] is True and len(_called) == 1
             assert heavy["authoritative"] is False, "라우팅이 공식 수치 계약을 깼다"
         finally:
-            _accounting_router.hermes_cli.ask = _orig_ask
+            _accounting_router.hermes_boundary.ask = _orig_ask
     finally:
-        _hermes_cli.ENABLE_AGENT_ASK = _saved_flag
+        _hermes_boundary.ENABLE_AGENT_ASK = _saved_flag
     # 빈 질의는 스키마에서 걸린다
     assert c.post("/accounting/agent/ask", json={"query": ""}).status_code == 422
     # 부서를 Body로 지정할 방법이 없다. 다른 본부 경로는 존재하지 않는다
@@ -983,10 +983,10 @@ if __name__ == "__main__":
     assert c.get("/accounting/v1/portfolio-snapshot",
                  params={"fund_id": "not-a-uuid"}).status_code == 422
 
-    assert hermes_cli.timeout_of(accounting.CONFIG) == 60
+    assert hermes_boundary.timeout_of(accounting.CONFIG) == 60
 
     # session_id는 stderr에서 뽑는다. 없으면 None이지 빈 문자열이 아니다
-    assert hermes_cli.session_id_of("\nsession_id: abc123\n") == "abc123"
-    assert hermes_cli.session_id_of("") is None
+    assert hermes_boundary.session_id_of("\nsession_id: abc123\n") == "abc123"
+    assert hermes_boundary.session_id_of("") is None
 
     print("ok - BFF 8개 영역 점검 통과 (회계 구간 Supabase 배선 + TTL 캐시 포함)")

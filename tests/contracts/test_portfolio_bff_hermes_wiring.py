@@ -50,6 +50,8 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
 def test_bff_dockerfile_pins_official_cli_without_gateway_command() -> None:
     dockerfile = (ROOT / "apps/api/Dockerfile").read_text(encoding="utf-8")
 
+    assert not (ROOT / "apps/api/hermes_cli.py").exists()
+    assert (ROOT / "apps/api/hermes_boundary.py").exists()
     assert "github.com/NousResearch/hermes-agent.git" in dockerfile
     assert "33f8e96a72945afb29f3bc9ef9991940f0bedcf" not in dockerfile
     assert "ARG HERMES_AGENT_REF=v2026.8.3" in dockerfile
@@ -59,6 +61,10 @@ def test_bff_dockerfile_pins_official_cli_without_gateway_command() -> None:
     assert "pip install --no-cache-dir /tmp/hermes-agent" not in dockerfile
     assert "rm -rf /tmp/hermes-agent" not in dockerfile
     assert "/opt/hermes-agent" in dockerfile
+    assert "import hermes_cli; print(hermes_cli" in dockerfile
+    assert 'import sys; print("\\n".join(sys.path))' in dockerfile
+    assert "test -f /opt/hermes-agent/hermes_cli/main.py" in dockerfile
+    assert "import hermes_cli.main; print(hermes_cli.main.__file__)" in dockerfile
     assert "command -v hermes" in dockerfile
     assert "test -x /usr/local/bin/hermes" in dockerfile
     assert 'test "$(command -v hermes)" = /usr/local/bin/hermes' in dockerfile
