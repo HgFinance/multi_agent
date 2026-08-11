@@ -445,6 +445,19 @@ services:
   #   0.0.0.0 바인딩이 필요하므로 인증 설정이 선행 조건이다 - 이는 제약이
   #   아니라 권한 경계를 인증으로 강제하는 것이라 그대로 따른다.
   #   절차는 docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4절.
+  # ▶ 공용 Kanban board(CEO 중심 동적 Task Graph): /home/ubuntu/.hermes/shared-kanban 는
+  #   profiles/<부서>와 분리된 전용 디렉터리다(각 컨테이너 /opt/kanban에 마운트) - 8개
+  #   본부가 이 하나의 kanban.db를 공유하면서도 서로의 profiles/<부서> auth/config/
+  #   memory는 여전히 못 본다. HERMES_KANBAN_HOME(HERMES_KANBAN_DB 아님)을 쓰는 이유는
+  #   Hermes의 dispatcher 중복 실행 방지용 singleton lock 경로(kanban_home()/"kanban"/
+  #   ".dispatcher.lock")가 HERMES_KANBAN_DB가 아니라 HERMES_KANBAN_HOME(=kanban_home())
+  #   기준이라서다 - DB 파일만 공유하고 HOME을 안 맞추면 컨테이너마다 lock이 따로 생겨
+  #   dispatch_in_gateway 기본값(true)에서 여러 컨테이너가 동시에 dispatch를 돌리다
+  #   WAL 체크포인트가 겹쳐 DB가 깨질 수 있다. HOME을 맞추면 그 singleton lock이 8개
+  #   컨테이너를 실제로 직렬화해서 dispatcher 중복 실행이 막힌다(공식 백스톱, 별도
+  #   daemon 불필요). 최초 기동 전 호스트에 `mkdir -p ~/.hermes/shared-kanban`을
+  #   먼저 해둬야 한다 - 없는 상태로 Docker가 파일 하나만 마운트하면 디렉터리로
+  #   잘못 만들어진다.
   research-hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-research-hermes
@@ -452,9 +465,11 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
       # provider: 와 auth.json이 실제 Provider를 결정한다(docker-compose.claude.yml 참고).
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
@@ -473,9 +488,11 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -614,9 +631,11 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -630,9 +649,11 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -698,6 +719,11 @@ services:
       # Dashboard Chat의 /api/pty WebSocket(TUI)이 rebuild 경로에서 TUI 디렉터리를
       # 못 찾아 실패하는 upstream 이슈 대응 - 경로를 명시로 고정한다.
       HERMES_TUI_DIR: /opt/hermes/ui-tui
+      # 대시보드 자체 HERMES_HOME은 /opt/data(=~/.hermes 전체)라 안 정하면
+      # kanban_home()이 기본으로 /opt/data/kanban.db(=~/.hermes/kanban.db)를 본다 -
+      # 8개 부서 컨테이너가 실제로 쓰는 보드(~/.hermes/shared-kanban/kanban.db, 위
+      # research-hermes 주석 참고)와 다른 파일이라 이걸 명시로 맞춰야 같은 보드를 본다.
+      HERMES_KANBAN_HOME: /opt/data/shared-kanban
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
     mem_limit: 512m

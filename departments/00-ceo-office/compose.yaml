@@ -59,9 +59,11 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/ceo-agent:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
