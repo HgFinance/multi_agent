@@ -130,9 +130,11 @@ def ceo_query_progress(root_task_id: str) -> dict[str, object]:
     return {
         "schema_version": "ceo.query-progress.v1",
         "root_task_id": root_task_id,
-        # 부서가 실제로 답을 준 게 하나라도 있는가. 화면이 "답이 나왔다"와
-        # "답을 못 냈다"를 구분하는 근거다.
-        "answer_grounded": any(c.outcome == "ANSWERED" for c in cards),
+        # **본부가** 실제로 답을 준 게 하나라도 있는가. 뿌리 카드는 세지 않는다 -
+        # CEO 가 자기 카드에 뭘 적었다고 본부 근거가 생기는 것은 아니다.
+        "answer_grounded": any(
+            c.outcome == "ANSWERED" and not c.is_root for c in cards
+        ),
         "authoritative": False,
         "source_of_record": "/ui/snapshot",
         **progress_of(cards),

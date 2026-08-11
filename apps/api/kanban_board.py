@@ -104,6 +104,9 @@ class Card:
     depends_on: list[str] = field(default_factory=list)
     created_at: int = 0
     finished_at: int | None = None
+    # 뿌리 카드는 **질문 자체**를 붙들어 두는 말뚝이지 본부의 답이 아니다.
+    # 이걸 구분하지 않으면 "1개 본부가 결과를 못 냈다"에 CEO 자신이 섞인다.
+    is_root: bool = False
 
     @property
     def is_terminal(self) -> bool:
@@ -121,6 +124,7 @@ class Card:
             "depends_on": self.depends_on,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
+            "is_root": self.is_root,
         }
 
 
@@ -331,17 +335,25 @@ def cards_for_root(root_task_id: str) -> list[Card]:
                 depends_on=links.get(row["id"], []),
                 created_at=int(row["created_at"] or 0),
                 finished_at=int(row["completed_at"]) if row["completed_at"] else None,
+                is_root=row["id"] == root_task_id,
             )
         )
     return cards
 
 
 def progress_of(cards: list[Card]) -> dict[str, Any]:
-    """카드 묶음을 사용자에게 보일 한 덩어리로. **성공으로 반올림하지 않는다.**"""
-    total = len(cards)
-    done = sum(1 for c in cards if c.is_terminal)
-    unusable = [c for c in cards if c.outcome in {"NO_ANSWER", "BLOCKED", "FAILED", "NO_ASSIGNEE"}]
-    stalled = [c for c in cards if c.outcome == "STALE"]
+    """카드 묶음을 사용자에게 보일 한 덩어리로. **성공으로 반올림하지 않는다.**
+
+    집계는 **본부 카드만** 센다. 뿌리 카드는 질문을 붙들어 두는 말뚝이지 본부의
+    답이 아니다 - 같이 세면 "5개 본부"가 "6개"가 되고, CEO 자신이 "결과를 못 낸
+    본부" 목록에 섞인다(실측). 화면에는 그대로 넘기되(질문 제목이 필요하다)
+    숫자에서만 뺀다.
+    """
+    work = [c for c in cards if not c.is_root]
+    total = len(work)
+    done = sum(1 for c in work if c.is_terminal)
+    unusable = [c for c in work if c.outcome in {"NO_ANSWER", "BLOCKED", "FAILED", "NO_ASSIGNEE"}]
+    stalled = [c for c in work if c.outcome == "STALE"]
     return {
         "total": total,
         "finished": done,
@@ -419,4 +431,8 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert prog["all_terminal"] is False, prog       # STALE·QUEUED 는 끝난 게 아니다
     assert prog["unusable"] == ["t2", "t5"], prog
     assert prog["stalled"] == ["t3"], prog
+    # 뿌리는 말뚝이지 본부가 아니다 - 숫자에서 빠지되 화면에는 남는다
+    assert prog["total"] == 5, prog
+    assert len(prog["cards"]) == 6, prog
+    assert [c["is_root"] for c in prog["cards"]].count(True) == 1, prog
     print("kanban_board 자체 점검 통과")

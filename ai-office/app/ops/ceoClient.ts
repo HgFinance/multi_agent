@@ -36,6 +36,8 @@ export type CeoQueryCard = {
   summary: string;
   has_result: boolean;
   depends_on: string[];
+  /** 질문 자체를 붙들어 두는 뿌리 카드. 본부의 답이 아니라서 숫자에서 빠진다. */
+  is_root: boolean;
 };
 
 export type CeoQueryProgress = {

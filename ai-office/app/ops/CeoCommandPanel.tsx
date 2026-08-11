@@ -156,7 +156,9 @@ export default function CeoCommandPanel() {
               </small>
             </div>
             <ul className="ceo-progress-cards">
-              {progress.cards.map((card) => {
+              {/* 뿌리 카드는 질문 말뚝이라 본부 목록에 섞지 않는다 - 섞으면
+                  대표이사실이 "결과를 못 낸 본부"처럼 보인다. */}
+              {progress.cards.filter((card) => !card.is_root).map((card) => {
                 const view = OUTCOME[card.outcome];
                 return (
                   <li key={card.task_id} data-tone={view.tone}>

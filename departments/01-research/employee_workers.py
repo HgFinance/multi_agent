@@ -60,9 +60,7 @@ except ModuleNotFoundError:
 #   소집형이다 - 상시 켜두면 큐만 쌓이고 편집장이 읽지 못한다.
 WORKER_SPECS = (
     
-    
     WorkerSpec("competing-explanation-worker", "Competing explanation and falsification analyst", ("research.outcomes.read", "research.evidence.search"), "proposal_draft", ("proposal_draft",)),
-    
 )
 
 
