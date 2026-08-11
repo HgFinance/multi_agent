@@ -96,7 +96,8 @@ hiring_priority:
   executive-orchestrator: {role_codes: ["CEO-00", "CEO-01"], tier: "P0"}
 
 skills:
-  - hermes-agent
+  external_dirs:
+    - /opt/shared-skills
 
 usage:
   run: "ceo-agent chat -q 'Summarize current portfolio decisions and open risks'"

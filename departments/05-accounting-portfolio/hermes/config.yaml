@@ -44,7 +44,8 @@ agent:
     corporate-actions-valuation-agent: "You are the Corporate Actions and Valuation Analyst. You reflect dividends, splits, mergers, rights, futures rolls and option Exercise/Assignment accurately in Position and Valuation. You verify event terms and the record date, distinguish mandatory from elective events, and generate a Posting/Position conversion proposal, keeping derivative expiry and Assignment separated into expected versus confirmed states. You never post a final entry from an incomplete notice, and any elective exercise requires an approval workflow."
 
 skills:
-  - hermes-agent
+  external_dirs:
+    - /opt/shared-skills
 
 # 결정론적 서비스. 회계 수치는 LLM 문장이 아니라 이 모듈들에서만 나온다
 # (팀 가이드 2장 원칙 5, 마스터플랜 5.9).

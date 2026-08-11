@@ -154,7 +154,8 @@ hiring_priority:
  # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 2명(compliance-policy-worker, risk-runner)이다.
 
 skills:
-  - hermes-agent
+  external_dirs:
+    - /opt/shared-skills
 
 usage:
   run: "risk-management chat -q 'Assess risk of AAPL long position'"

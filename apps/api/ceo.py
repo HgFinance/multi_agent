@@ -10,6 +10,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
 from fastapi import APIRouter, HTTPException
 
 from orchestration.canonical_profiles import canonical_profile_for_department
+from orchestration.ceo_workflow_scope import build_root_body
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
@@ -22,7 +23,7 @@ def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
-        body=req.query,
+        body=build_root_body(req.query, req.request_id),
         idempotency_key=req.request_id,
     )
 
@@ -32,6 +33,16 @@ def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
+        )
+
+    if not hermes_boundary.comment_root_scope(
+        task_id=str(task["task_id"]), request_id=req.request_id
+    ):
+        # Fail closed: a ready root without its concrete scope binding could
+        # be dispatched with no durable proof of which root owns its children.
+        raise HTTPException(
+            status_code=503,
+            detail="CEO root Kanban scope를 기록하지 못했습니다. 재시도하세요.",
         )
 
     return {

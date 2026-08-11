@@ -29,8 +29,10 @@ from pydantic import BaseModel, Field
 
 try:
     from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+    from orchestration.ceo_workflow_scope import build_root_comment
 except ImportError:  # pragma: no cover - direct module execution
     from ..orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+    from ..orchestration.ceo_workflow_scope import build_root_comment
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -90,6 +92,8 @@ def create_kanban_task(
         request.idempotency_key,
         "--created-by",
         "ai-office-bff",
+        "--initial-status",
+        "ready",
         "--json",
     ]
     cli_environment = os.environ.copy()
@@ -120,6 +124,52 @@ def create_kanban_task(
         "status": str(payload.get("status", "TODO")),
         "source": "hermes-kanban",
     }
+
+
+def comment_kanban_task(*, task_id: str, text: str) -> bool:
+    """Write a durable Kanban comment through Hermes' supported CLI.
+
+    The BFF only uses this for the concrete CEO root scope marker.  It never
+    opens a gateway or writes the shared database directly.
+    """
+
+    if not task_id or not text.strip():
+        return False
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command = [
+        os.environ.get("HERMES_BIN", "hermes"),
+        "kanban",
+        "comment",
+        task_id,
+        text,
+        "--author",
+        "ai-office-bff",
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def comment_root_scope(*, task_id: str, request_id: str) -> bool:
+    """Bind a created root ID before its ready task can be dispatched."""
+
+    return comment_kanban_task(
+        task_id=task_id,
+        text=build_root_comment(task_id, request_id),
+    )
 
 
 def ask(*, department: str, config: str, query: str) -> dict:
