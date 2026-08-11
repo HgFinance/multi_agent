@@ -83,6 +83,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+import ceo_intake
 from ceo_intake import router as user_intake_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
@@ -537,6 +538,11 @@ def health() -> dict:
         "status": "ok",
         "mode": "DEMO",
         "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
+        # 사용자 입구는 부서 ask 와 다른 스위치다(부서를 실제로 돌려 비용이 난다).
+        # 둘을 한 값으로 보이면 "열려 있는 줄 알았다"가 생긴다.
+        "user_intake_enabled": ceo_intake.ENABLE_USER_INTAKE,
+        # 어느 런타임에 붙어 있는지. 로컬 시험(docker)과 AWS(local)를 화면에서 구분한다.
+        "hermes_exec_mode": hermes_cli.HERMES_EXEC_MODE,
         "departments": [
             "research-department",
             trading.DEPARTMENT,
