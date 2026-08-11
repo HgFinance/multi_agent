@@ -1,9 +1,10 @@
 import { BFF } from "./readModel";
 
 export type CeoQueryResult = {
-  schema_version: "ceo.query-result.v1";
+  schema_version: "ceo.query-accepted.v1";
   department: "ceo-agent";
   binding: false;
+  task_id: string;
   answer: string;
   session_id: string | null;
   task: {
@@ -38,7 +39,7 @@ export async function askCeo(query: string, requestId?: string): Promise<CeoQuer
     throw new Error("CEO Hermes 응답 계약이 올바르지 않습니다.");
   }
   const result = body as Partial<CeoQueryResult>;
-  if (result.schema_version !== "ceo.query-result.v1" || typeof result.answer !== "string") {
+  if (result.schema_version !== "ceo.query-accepted.v1" || typeof result.answer !== "string" || typeof result.task_id !== "string") {
     throw new Error("CEO Hermes 응답 계약이 올바르지 않습니다.");
   }
   return result as CeoQueryResult;
