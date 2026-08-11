@@ -37,7 +37,12 @@ COPY . .
 
 # Keep this check after the application copy so it validates the final image
 # state, including the editable Hermes source retained at /opt/hermes-agent.
-RUN command -v hermes \
+RUN python -c 'import hermes_cli; print(hermes_cli, getattr(hermes_cli, "__file__", None), getattr(hermes_cli, "__path__", None))' \
+    && python -c 'import sys; print("\n".join(sys.path))' \
+    && test -f /opt/hermes-agent/hermes_cli/main.py \
+    && python -c 'import hermes_cli.main; print(hermes_cli.main.__file__)' \
+    && test "$(python -c 'import hermes_cli.main; print(hermes_cli.main.__file__)')" = /opt/hermes-agent/hermes_cli/main.py \
+    && command -v hermes \
     && test -x /usr/local/bin/hermes \
     && test "$(command -v hermes)" = /usr/local/bin/hermes \
     && hermes --version \

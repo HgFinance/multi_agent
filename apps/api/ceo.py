@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 try:
-    from . import hermes_cli
+    from . import hermes_boundary
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-    import hermes_cli  # type: ignore[no-redef]
+    import hermes_boundary  # type: ignore[no-redef]
 
 from fastapi import APIRouter, HTTPException
 
@@ -18,10 +18,10 @@ router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
 
 @router.post("/ask", operation_id="ceo_query")
-def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
+def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
     """Send a non-binding natural-language query to the CEO Hermes Head."""
 
-    task = hermes_cli.create_kanban_task(
+    task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
         body=req.query,
@@ -43,7 +43,7 @@ def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
             "dynamic child task and keep the workflow closed-loop.\n\n"
             f"Original user request:\n{req.query}"
         ),
-        timeout=hermes_cli.timeout_of(
+        timeout=hermes_boundary.timeout_of(
             "departments/00-ceo-office/hermes/config.yaml"
         ),
     )

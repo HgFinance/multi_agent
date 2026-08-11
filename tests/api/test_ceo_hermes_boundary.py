@@ -54,8 +54,8 @@ class CeoHermesApiClientTest(unittest.TestCase):
 
 class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:
-        request = ceo.hermes_cli.AgentAsk(query="q", request_id="request-1")
-        with patch.object(ceo.hermes_cli, "create_kanban_task", return_value=None):
+        request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-1")
+        with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=None):
             with patch.object(ceo, "ask_ceo") as ask:
                 with self.assertRaises(HTTPException) as raised:
                     ceo.ceo_query(request)
@@ -64,10 +64,10 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         ask.assert_not_called()
 
     def test_root_task_is_created_before_ceo_call(self) -> None:
-        request = ceo.hermes_cli.AgentAsk(query="q", request_id="request-2")
+        request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-2")
         task = {"task_id": "t_root", "status": "ready"}
         result = {"answer": "ok", "session_id": "session-2"}
-        with patch.object(ceo.hermes_cli, "create_kanban_task", return_value=task) as create:
+        with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
             with patch.object(ceo, "ask_ceo", return_value=result) as ask:
                 response = ceo.ceo_query(request)
 
