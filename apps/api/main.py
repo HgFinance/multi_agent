@@ -83,6 +83,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+from ceo_intake import router as user_intake_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -136,6 +137,10 @@ app.include_router(trading.router)
 app.include_router(department_agent_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
+# 사용자 입구(`/ui/ask`)는 부서 ask 와 다른 계층이다 - 부서를 고르지 않고 CEO 가
+# 고른다. 그래서 투자 본부 Router 옆이 아니라 별도로 붙인다(마스터플랜 5.6:
+# CEO 는 주문·리스크 승인·원장 권한이 없다 - 여기서 하는 일은 라우팅과 종합뿐).
+app.include_router(user_intake_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
