@@ -5,11 +5,13 @@
 #       3.1절(부서당 Image 1개, command만 바꿔 역할 분리), 6.1절(CEO Office Container 목록),
 #       11.1절(Image 기준), departments/03-risk/Dockerfile·departments/06-ai-qa-audit/Dockerfile 패턴
 #
-# ▶ Build Context가 저장소 루트가 아니라 **departments/00-ceo-office** 다 (risk/audit
-#   Dockerfile과 다른 점, research Dockerfile과 같은 이유). api/app.py는 src/ 하위
-#   (mandate, reporting, notification, approval, case, escalation)만 import하고 다른
-#   본부 코드를 참조하지 않는다. `COPY src ./src`가 전체를 담으므로 모듈이 늘어도
-#   이 파일은 그대로다.
+# ▶ Build Context가 **저장소 루트**다 (risk-api Dockerfile과 같은 이유, 2026-08-10 변경 -
+#   change_workflow.py가 저장소 루트의 orchestration.contracts를 참조하면서 departments/
+#   00-ceo-office만으로는 이미지를 완성할 수 없어졌다). compose에서는 build.context: ../..
+#   (departments/00-ceo-office/compose.yaml 기준) / build.dockerfile: departments/00-ceo-office/
+#   Dockerfile. api/app.py의 `_BASE = Path(__file__).resolve().parent.parent` 계산은
+#   Build Context가 아니라 `__file__` 기준이라 이 변경에 영향받지 않는다 - 디렉터리 트리를
+#   이미지 안에서도 저장소와 같은 상대 구조로 유지하기만 하면 된다.
 #
 # ▶ 하나의 Image, command만 바꿔 governance-api와 notification-worker를 둘 다 돌린다
 #   (research/risk와 동일 원칙). reporting-worker/lifecycle-worker류는 아직 안 만들었다 -
@@ -27,13 +29,19 @@ FROM python:3.12-slim
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1
+    psycopg2-binary==2.9.12 redis==7.0.1 \
+    langgraph==0.6.11 langgraph-checkpoint-postgres
 
-WORKDIR /app/departments/00-ceo-office
-COPY api ./api
-COPY src ./src
-COPY governance_events ./governance_events
+WORKDIR /app
+COPY departments/00-ceo-office/api ./departments/00-ceo-office/api
+COPY departments/00-ceo-office/src ./departments/00-ceo-office/src
+COPY departments/00-ceo-office/governance_events ./departments/00-ceo-office/governance_events
+# change_workflow.py(src/mandate)가 저장소 루트의 orchestration.contracts.mandate_confirmation을
+# 참조한다(HITL Mandate 변경 Workflow의 Risk/QA/사용자 승인 게이트, 2026-08-05 도입) - Build Context를
+# 저장소 루트로 옮긴 이유. orchestration 패키지는 pydantic+표준 라이브러리만 써서 이 Image에 안전하게
+# 들어간다(다른 본부 코드에 대한 의존은 없음).
+COPY orchestration ./orchestration
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app
 
-CMD ["uvicorn", "app:app", "--app-dir", "api", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--app-dir", "departments/00-ceo-office/api", "--host", "0.0.0.0", "--port", "8000"]

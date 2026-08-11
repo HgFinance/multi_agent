@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -506,10 +507,13 @@ def _demo_state():
 
     ponytail: Scripted Loop는 입력이 고정이라 매번 같은 결과가 나온다. 요청마다
               OMS와 원장을 처음부터 다시 돌릴 이유가 없어 프로세스 수명 동안
-              한 번만 계산한다. **Supabase Read Model로 바꿀 때 이 데코레이터를
-              반드시 떼야 한다** - 실제 장부는 변하는데 캐시가 옛 값을 물고 있으면
-              화면이 조용히 낡은 NAV를 보여준다. 그때는 캐시가 아니라 Read Model의
-              snapshot_version으로 신선도를 판단한다.
+              한 번만 계산한다.
+
+              **2026-08-10: 회계 구간은 여기서 빠졌다.** portfolio·ledger는 이제
+              Supabase 뷰에서 오고(`_accounting_sections`) 짧은 TTL 캐시를 쓴다 -
+              변하는 장부를 프로세스 수명 캐시에 물리면 화면이 조용히 낡은 NAV를
+              보여준다는 옛 경고가 그 구간에 해당했다. 여기 남은 것은 트레이딩
+              구간뿐이고 그건 입력이 고정된 Scripted Loop라 계속 무기한 캐시다.
     """
     from test_paper_loop import PaperLoopTest
 
@@ -579,30 +583,82 @@ def _repo():
     return db_read_model.LedgerRepository.from_env()
 
 
+# 브라우저는 Book UUID를 모른다. `/ui/snapshot`을 파라미터 없이 부르고(bffClient.tsx),
+# 그게 맞다 - 어느 장부가 Canonical인지는 서버가 아는 사실이지 화면이 고를 일이 아니다.
+# 화면이 초 단위로 다시 묻는다. 같은 뷰를 그 주기로 때리면 Supabase가 그 부하를 다 받는다.
+UI_SNAPSHOT_CACHE_SECONDS = float(os.getenv("UI_SNAPSHOT_CACHE_SECONDS", "2"))
+
+# ponytail: 프로세스 로컬 dict. book_id -> (읽은 시각, sections). 여러 프로세스로
+#           늘어나면 Redis(P0 확정)로 옮긴다. **캐시가 신선도를 속이지 못한다** -
+#           화면이 보는 시각은 fetch 시각이 아니라 payload의 `portfolio.as_of`이고
+#           그건 평가 시각 그대로다. 캐시는 그 값을 잠깐 재사용할 뿐이다.
+_SECTIONS_CACHE: dict[UUID, tuple[float, dict | None]] = {}
+
+
+def _default_book_id(repo) -> UUID | None:
+    """파라미터가 없을 때 쓸 장부. 규칙은 `LedgerRepository.default_book()`이 소유한다.
+
+    **여기서 다시 고르지 않는다** - 마감 스케줄러도 같은 답을 써야 하고, 두 곳이
+    각자 고르면 화면과 보고서가 다른 장부를 말한다. 못 고르면 None이고 회계 구간은
+    Scripted Loop로 남는다(출처에 그대로 드러난다).
+    """
+    chosen = repo.default_book()
+    return chosen[1] if chosen else None
+
+
+def _accounting_sections(book_id: UUID | None) -> tuple[UUID, dict | None] | None:
+    """(장부, 회계 구간). DB가 없거나 장부를 못 고르면 None - 호출자가 DEMO로 떨어진다.
+
+    안쪽 `sections`가 None인 것은 다른 뜻이다 - **그 장부는 있는데 평가된 적이 없다.**
+    둘을 한 값으로 합치면 "DB 없음"과 "NAV 없음"을 호출자가 구분할 수 없다.
+    """
+    repo = _repo()
+    if repo is None:
+        return None
+    resolved = book_id or _default_book_id(repo)
+    if resolved is None:
+        return None
+
+    hit = _SECTIONS_CACHE.get(resolved)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < UI_SNAPSHOT_CACHE_SECONDS:
+        return resolved, hit[1]
+    sections = db_read_model.build_accounting_sections(repo, resolved)
+    _SECTIONS_CACHE[resolved] = (now, sections)
+    return resolved, sections
+
+
 @app.get("/ui/snapshot")
 def ui_snapshot(book_id: UUID | None = None) -> dict:
     """계획 5.2의 `GET /ui/snapshot`. 화면 State는 이 한 장에서 재구축된다.
 
-    `book_id`를 주고 DB가 붙어 있으면 **회계 구간(portfolio·ledger)이 Canonical
-    표에서** 온다(`api.portfolio_snapshot_latest` 등). 트레이딩 구간은 아직
+    DB가 붙어 있으면 **회계 구간(portfolio·ledger)이 Canonical 표에서** 온다
+    (`api.portfolio_snapshot_latest` 등). `book_id`는 생략할 수 있고, 그때는
+    서버가 Canonical 장부를 고른다(`_default_book_id`). 트레이딩 구간은 아직
     Scripted Loop다 - `execution.orders`가 0행이고 OMS 상태가 프로세스 메모리라
     뷰를 만들어도 빈 화면을 실데이터인 척 보여줄 뿐이다(TRD-01 대기).
 
     그래서 **구간별 출처를 `sources`에 밝힌다.** 최상위 `mode`는 트레이딩까지
     실데이터가 되기 전에는 DEMO로 둔다 - 절반만 진짜인 화면을 PAPER라고 부르면
     나머지 절반도 진짜라고 읽힌다.
+
+    **명시한 장부와 고른 장부는 실패 방향이 다르다.** `book_id`를 직접 준 요청은
+    그 장부의 NAV가 없으면 404다(다른 값을 대신 주지 않는다). 생략한 요청은 아직
+    아무것도 평가되지 않은 초기 상태일 수 있으므로 대시보드를 통째로 죽이지 않고
+    Scripted Loop로 남되 `sources`가 그 사실을 밝힌다.
     """
     loop = _demo_state()
     overrides = None
-    repo = _repo()
-    if book_id is not None and repo is not None:
-        sections = db_read_model.build_accounting_sections(repo, book_id)
-        if sections is None:
+    resolved = _accounting_sections(book_id)
+    if resolved is not None:
+        chosen, sections = resolved
+        if sections is None and book_id is not None:
             # 평가된 적 없는 장부다. 0원 NAV를 지어내지 않고 그 사실을 알린다.
             raise HTTPException(404, f"book {book_id}의 확정 Snapshot이 없습니다")
-        overrides = {**sections,
-                     "book_id": str(book_id),
-                     "sources": {"portfolio": "supabase", "ledger": "supabase"}}
+        if sections is not None:
+            overrides = {**sections,
+                         "book_id": str(chosen),
+                         "sources": {"portfolio": "supabase", "ledger": "supabase"}}
 
     snapshot = build_ui_snapshot(
         oms=loop.oms,
@@ -733,8 +789,14 @@ if __name__ == "__main__":
     assert snap["ledger"]["balanced"] is True, "차대가 맞지 않는 원장이 화면으로 나갔다"
     assert isinstance(snap["portfolio"]["nav"], str), "금액이 JSON number로 나갔다"
     assert snap["trading"]["orders"][0]["state"] == "FILLED"
-    # book_id 없이 부르면 전 구간이 Scripted Loop다. 출처를 숨기지 않는다
-    assert set(snap["sources"].values()) == {"scripted-loop"}, snap["sources"]
+    # 구간마다 출처가 반드시 있다. 트레이딩은 아직 Scripted Loop다(TRD-01 대기).
+    # 회계 구간은 DB와 Canonical 장부가 있으면 supabase, 없으면 scripted-loop -
+    # 어느 쪽이든 **화면이 출처를 모르는 상태로 나가지 않는다**는 게 계약이다.
+    assert set(snap["sources"]) == {"portfolio", "trading", "ledger"}, snap["sources"]
+    assert snap["sources"]["trading"] == "scripted-loop", snap["sources"]
+    assert snap["sources"]["portfolio"] == snap["sources"]["ledger"], \
+        f"회계 두 구간의 출처가 갈라졌다: {snap['sources']}"
+    assert snap["sources"]["portfolio"] in ("supabase", "scripted-loop"), snap["sources"]
 
     # 없는 book_id는 404다. 0원 NAV를 지어내지 않는다.
     # (DB가 없으면 book_id가 무시되므로 그때는 200이고, 그 경우도 출처는 전부 DEMO다)
@@ -743,6 +805,64 @@ if __name__ == "__main__":
         assert missing_book.status_code == 404, missing_book.text
     else:
         assert set(missing_book.json()["sources"].values()) == {"scripted-loop"}
+
+    # ── 회계 구간 배선: DB 없이도 검사한다 ────────────────────────────────
+    # 실 DB 유무로 검사가 사라지면 CI에서 이 경로는 영원히 안 돌아본다.
+    _saved = (_repo, _default_book_id, db_read_model.build_accounting_sections)
+    _BOOK = uuid4()
+    reads: list[UUID] = []
+
+    def _fake_sections(repo, book_id):
+        reads.append(book_id)
+        return {"portfolio": {"nav": "12345", "as_of": "2026-08-10T06:00:00+00:00"},
+                "ledger": {"balanced": True, "journal_count": 3}}
+
+    globals()["_repo"] = lambda: object()      # DB가 있는 척 - 뷰 호출은 위에서 가로챈다
+    globals()["_default_book_id"] = lambda repo: _BOOK
+    db_read_model.build_accounting_sections = _fake_sections
+    try:
+        _SECTIONS_CACHE.clear()
+        # 1. book_id 없이 불러도 Canonical 장부의 회계 구간이 실린다
+        wired = c.get("/ui/snapshot").json()
+        assert wired["portfolio"]["nav"] == "12345", wired["portfolio"]
+        assert wired["book_id"] == str(_BOOK), wired["book_id"]
+        assert wired["sources"]["portfolio"] == "supabase"
+        assert wired["sources"]["ledger"] == "supabase"
+        # 갈아끼우지 않은 구간의 출처는 그대로 남는다
+        assert wired["sources"]["trading"] == "scripted-loop", wired["sources"]
+        # mode는 여전히 DEMO다. 트레이딩이 Scripted Loop인 한 절반만 진짜다
+        assert wired["mode"] == "DEMO", "절반만 실데이터인 화면이 PAPER로 나갔다"
+
+        # 2. TTL 안에서는 뷰를 다시 읽지 않는다. 화면이 초 단위로 물어도 DB는 한 번이다
+        before = len(reads)
+        c.get("/ui/snapshot")
+        c.get("/ui/snapshot")
+        assert len(reads) == before, f"캐시가 안 먹었다 - {len(reads) - before}번 더 읽었다"
+
+        # 3. TTL이 지나면 다시 읽는다. 캐시가 낡은 NAV를 영구히 물고 있으면 안 된다
+        _SECTIONS_CACHE[_BOOK] = (time.monotonic() - UI_SNAPSHOT_CACHE_SECONDS - 1,
+                                  _SECTIONS_CACHE[_BOOK][1])
+        c.get("/ui/snapshot")
+        assert len(reads) == before + 1, "TTL이 지났는데 다시 안 읽었다"
+
+        # 4. 장부가 여럿이면 아무거나 고르지 않는다 - 남의 펀드 NAV를 보여주느니 DEMO다
+        globals()["_default_book_id"] = lambda repo: None
+        _SECTIONS_CACHE.clear()
+        ambiguous = c.get("/ui/snapshot").json()
+        assert set(ambiguous["sources"].values()) == {"scripted-loop"}, ambiguous["sources"]
+
+        # 5. 평가된 적 없는 장부: 명시하면 404, 생략하면 DEMO로 남는다(대시보드를 안 죽인다)
+        globals()["_default_book_id"] = lambda repo: _BOOK
+        db_read_model.build_accounting_sections = lambda repo, book_id: None
+        _SECTIONS_CACHE.clear()
+        assert c.get("/ui/snapshot", params={"book_id": str(_BOOK)}).status_code == 404
+        _SECTIONS_CACHE.clear()
+        never = c.get("/ui/snapshot").json()
+        assert set(never["sources"].values()) == {"scripted-loop"}, never["sources"]
+    finally:
+        globals()["_repo"], globals()["_default_book_id"] = _saved[0], _saved[1]
+        db_read_model.build_accounting_sections = _saved[2]
+        _SECTIONS_CACHE.clear()
 
     # 두 번 불러도 같은 Snapshot이다. Read-only가 상태를 바꾸면 안 된다
     assert c.get("/ui/snapshot").json()["portfolio"]["nav"] == snap["portfolio"]["nav"]
@@ -853,4 +973,4 @@ if __name__ == "__main__":
     assert hermes_cli.session_id_of("\nsession_id: abc123\n") == "abc123"
     assert hermes_cli.session_id_of("") is None
 
-    print("ok - BFF 7개 영역 점검 통과")
+    print("ok - BFF 8개 영역 점검 통과 (회계 구간 Supabase 배선 + TTL 캐시 포함)")

@@ -41,7 +41,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 
 검증된 Strategy Bundle만 트레이딩으로 넘어가고, 이미 배포된 Agent 개선(`agent_evolution_cycle`)도 QA·CEO 승인을 건너뛰지 않는다. 모든 step은 실패 시 안전한 기본값(REJECT/HOLD/DENY/ESCALATE/ROLLBACK)으로 떨어진다. `hr-department`는 투자 본부가 아니라 CEO 직속 Shared Service다.
 
-**Hermes(부서) vs LangGraph(직원)**: Hermes Profile 8개가 부서 오케스트레이션을 맡고, 소속 직원(총 35명)은 각자 독립 LangGraph Worker + Ollama `qwen3:1.7b`로 동작한다. Worker는 읽기 결과만 부서장에게 전달할 뿐 주문·판정·원장·권한 변경은 하지 않는다.
+**Hermes(부서) vs LangGraph(직원)**: Hermes Profile 8개가 부서 오케스트레이션을 맡고, 소속 직원(LLM Worker 19명)은 각자 독립 LangGraph Worker + Ollama `qwen3:1.7b`로 동작한다. Worker는 읽기 결과만 부서장에게 전달할 뿐 주문·판정·원장·권한 변경은 하지 않는다. 결정론 Worker 4개(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`)는 모델을 부르지 않으므로 따로 센다. HR은 LLM·결정론 Worker 모두 0이며(부서장 + 일반 결정론 모듈), 이는 설정 누락이 아니라 결정이다 — 근거는 [WORKER_ROLE_BOUNDARIES.md](docs/02-engineering/WORKER_ROLE_BOUNDARIES.md).
 
 **절대 깨면 안 되는 권한 분리** — 담당자가 같아도, 급해도 이전되지 않는다:
 - Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order. 모든 주문은 결정론적 Risk Engine을 통과하며, `risk-management`는 근거·권고만 만든다.

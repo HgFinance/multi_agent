@@ -56,6 +56,20 @@ from ledger import (
 from portfolio import PortfolioSnapshot, PositionValuation
 
 SNAPSHOT_SCHEMA_VERSION = 1
+# Durable mode is opt-in. In PAPER_DB (and equivalent durable deployments),
+# absence of DATABASE_URL is an operational error rather than permission to
+# discard accounting state into process memory.
+_DURABLE_MODES = {"PAPER_DB", "DURABLE", "PRODUCTION", "LIVE_DB"}
+
+def durable_required_from_env() -> bool:
+    mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
+    flag = os.environ.get("ACCOUNTING_DURABLE_REQUIRED", "").strip().lower()
+    paper_db = os.environ.get("PAPER_DB", "").strip().lower()
+    return (
+        mode in _DURABLE_MODES
+        or flag in {"1", "true", "yes", "on"}
+        or paper_db in {"1", "true", "yes", "on"}
+    )
 
 # ledger.py의 account_code -> DB `accounting.ledger_accounts.name`.
 # 계정과목 자체는 ledger.py가 소유한다. 여기엔 표시 이름만 둔다.
@@ -127,10 +141,21 @@ class LedgerRepository:
         return cls(ThreadedConnectionPool(1, 4, dsn))
 
     @classmethod
-    def from_env(cls) -> LedgerRepository | None:
-        """DATABASE_URL이 없으면 None. 호출자가 인메모리로 남을지 결정한다."""
+    def from_env(cls, *, required: bool | None = None) -> LedgerRepository | None:
+        """DATABASE_URL이 없으면 None (명시적 offline 모드일 때만)."""
+        mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
+        required = durable_required_from_env() if required is None else required
+        if mode == "OFFLINE" and not required:
+            return None
         dsn = os.environ.get("DATABASE_URL")
-        return cls.connect(dsn) if dsn else None
+        if not dsn:
+            if required:
+                raise LedgerPersistenceError(
+                    "durable accounting mode requires DATABASE_URL; "
+                    "offline memory mode was not selected"
+                )
+            return None
+        return cls.connect(dsn)
 
     def close(self) -> None:
         self._pool.closeall()
@@ -193,6 +218,31 @@ class LedgerRepository:
         self._accounts.pop(fund_id, None)
         return fund_id, book_id
 
+    def default_book(self) -> tuple[UUID, UUID] | None:
+        """파라미터 없이 물었을 때 쓸 (fund_id, book_id). **모르면 안 고른다.**
+
+        `ACCOUNTING_DEFAULT_BOOK_ID`가 있으면 그게 이긴다. 없으면 ACTIVE 장부가
+        정확히 하나일 때만 그걸 쓴다 - 둘 이상인데 아무거나 고르면 화면과 보고가
+        남의 펀드 수치를 자기 것으로 말한다. 못 고르면 None이고, 호출자는 그때
+        수치를 지어내지 말고 "고르지 못했다"로 떨어져야 한다.
+
+        BFF(`/ui/snapshot`)와 마감 스케줄러가 같은 답을 써야 해서 여기 둔다 -
+        두 곳이 각자 고르면 화면과 보고서가 다른 장부를 말하게 된다.
+        """
+        pinned = os.environ.get("ACCOUNTING_DEFAULT_BOOK_ID", "").strip()
+        if pinned:
+            try:
+                book_id = UUID(pinned)
+            except ValueError:
+                return None
+            fund_id = self.fund_of_book(book_id)
+            return (fund_id, book_id) if fund_id else None
+        with self.cursor() as cur:
+            cur.execute("select fund_id, book_id from accounting.books "
+                        " where status = 'ACTIVE' order by book_id limit 2")
+            rows = cur.fetchall()
+        return (rows[0][0], rows[0][1]) if len(rows) == 1 else None
+
     def fund_of_book(self, book_id: UUID) -> UUID | None:
         """book_id 하나로 Fund가 정해진다. 그래서 ledger_id == book_id로 쓴다."""
         with self.cursor() as cur:
@@ -250,6 +300,33 @@ class LedgerRepository:
             row = cur.fetchone()
         return row[0] if row else None
 
+    def symbols_for(self, instrument_ids: list[UUID], *, as_of: datetime | None = None,
+                    market: str = "KRX") -> dict[UUID, str]:
+        """instrument_id -> symbol. `instrument_by_symbol`의 역방향이다.
+
+        평가 경로가 이 방향을 쓴다 - 우리는 보유 종목을 UUID로 알고 있고 market-api는
+        symbol로만 답한다. PIT 규칙은 반대 방향과 같다(`valid_from`/`valid_to`).
+
+        모르는 종목은 **결과에 없다.** 짐작해서 아무 코드나 붙이면 남의 종목 시세로
+        NAV가 나온다 - 빠진 채로 두면 그 종목의 Mark가 없어 NAV가 거부된다.
+        """
+        ids = list(dict.fromkeys(instrument_ids))
+        if not ids:
+            return {}
+        as_of = as_of or datetime.now(timezone.utc)
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select distinct on (instrument_id) instrument_id, symbol
+                  from reference.instrument_symbols
+                 where instrument_id = any(%s) and market = %s
+                   and valid_from <= %s and (valid_to is null or valid_to > %s)
+                 order by instrument_id, is_primary desc, valid_from desc
+                """,
+                (ids, market, as_of, as_of),
+            )
+            return {instrument_id: symbol for instrument_id, symbol in cur.fetchall()}
+
     def base_currency(self, fund_id: UUID) -> str:
         cached = self._currency.get(fund_id)
         if cached:
@@ -277,8 +354,9 @@ class LedgerRepository:
             raise LedgerPersistenceError(f"등록되지 않은 계정과목입니다: {sorted(set(missing))}")
 
         _, Json, _ = _load_driver()
-        metadata = {"reason": journal.reason} if journal.reason else {}
-
+        metadata = dict(journal.metadata)
+        if journal.reason:
+            metadata["reason"] = journal.reason
         with self.cursor() as cur:
             cur.execute(
                 """
@@ -366,6 +444,7 @@ class LedgerRepository:
             rows = cur.fetchall()
             journal_ids = [r[0] for r in rows]
             lines: dict[UUID, list[JournalLine]] = {}
+            metadata_by_journal: dict[UUID, dict[str, Any]] = {}
             if journal_ids:
                 cur.execute(
                     """
@@ -378,7 +457,9 @@ class LedgerRepository:
                     """,
                     (journal_ids,),
                 )
-                for jid, code, debit, credit, instrument_id, qty, price, _meta in cur.fetchall():
+                for jid, code, debit, credit, instrument_id, qty, price, meta in cur.fetchall():
+                    if meta:
+                        metadata_by_journal.setdefault(jid, dict(meta))
                     lines.setdefault(jid, []).append(JournalLine(
                         account_code=code, debit=debit, credit=credit,
                         instrument_id=instrument_id, quantity=qty, unit_price=price,
@@ -393,6 +474,8 @@ class LedgerRepository:
                 status=_DOMAIN_STATUS.get(status, status.lower()),
                 reversal_of=reversal_of, created_by_service=service,
                 trace_id=str(trace_id),
+                reason=str(metadata_by_journal.get(jid, {}).get("reason", "")),
+                metadata=metadata_by_journal.get(jid, {}),
             )
             for (jid, event_type, source_event_id, effective_at, accounting_date,
                  status, reversal_of, service, trace_id) in rows
@@ -594,7 +677,35 @@ class PostgresLedger(Ledger):
     def post(self, journal: Journal) -> Journal:
         posted = super().post(journal)
         if posted is journal:  # 새로 붙은 것만 저장한다. 중복이면 기존 분개가 돌아온다
-            self._repo.insert_journal(journal)
+            try:
+                inserted = self._repo.insert_journal(journal)
+            except Exception:
+                # A failed DB transaction must not leave a speculative in-memory
+                # Journal that a caller could mistake for durable evidence.
+                self.journals.remove(journal)
+                self._posted_sources.discard((journal.event_type, journal.source_event_id))
+                raise
+            if not inserted:
+                # Another worker won the source-event unique race. Do not keep
+                # the speculative local Journal in projections; reload the
+                # committed row and converge on its immutable evidence.
+                key = (journal.event_type, journal.source_event_id)
+                self.journals.remove(journal)
+                self._posted_sources.discard(key)
+                loaded = self._repo.load(self.fund_id, self.book_id)
+                existing = next(
+                    (j for j in loaded.journals
+                     if (j.event_type, j.source_event_id) == key
+                     and j.reversal_of is None),
+                    None,
+                )
+                if existing is None:
+                    raise LedgerPersistenceError(
+                        f"원천 이벤트 저장 경합 후 분개를 복원하지 못했습니다: {key}"
+                    )
+                self.journals.append(existing)
+                self._posted_sources.add(key)
+                return existing
         return posted
 
     def reverse(self, journal_id: UUID, reason: str) -> Journal:

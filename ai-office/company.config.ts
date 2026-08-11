@@ -190,26 +190,18 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("strategy1", "member", "장도현", "regime-robustness-worker", 0),
 
   staff("strategy2", "lead", "윤도현", "Hermes Head · Trading", 2, "윤트레", [
-    "Bull/Bear 토론 없이 바로 주문 제안 안 나가요.",
+    "퀀트가 검증한 전략만 받아요. 여기서 전략을 만들지 않아요.",
     "여러 종목이면 trade_case_id 하나로 묶어요.",
   ]),
-  // 이현서·장정훈은 config.yaml agent.personalities의 TRD-01/TRD-02 페르소나다.
-  // runtime worker가 아니라 worker_count(6)에 포함되지 않는다.
-  // app/game/sim.ts의 debate()가 이 두 role 문자열로 둘을 찾으므로 문구를 바꾸지 않는다.
-  staff("strategy2", "member", "이현서", "Bull 리서처", 3, undefined, [
-    "정훈이가 또 딴지 걸겠지. 근거부터 챙기자.",
-    "리서치본부가 준 근거만 씁니다. 그래야 싸울 때 안 밀려요.",
-    "오늘은 커피 얻어먹는다.",
-  ]),
-  staff("strategy2", "member", "장정훈", "Bear 리서처", 4, undefined, [
-    "현서 논리 약점부터 찾습니다. 미워서가 아니라 그게 제 일이라서요.",
-    "무효화 조건 없는 상승 논리는 그냥 기대예요.",
-    "이번엔 현서가 맞았으면 좋겠는데.",
-  ]),
+  // 2026-08-10 Bull/Bear 리서처(이현서·장정훈) 제거. **화면에서도 지운다** —
+  // 두 직원은 config.yaml 에서 사라졌고(worker_count 0), 없는 Worker 를 사무실에서
+  // 일하는 것처럼 보여주면 ai-office/CLAUDE.md 의 "미구현 Worker 를 실행 중으로
+  // 보여주지 않는다"를 어긴다. 두 사람만 등장하던 sim.ts 의 debate() 연출도 같이 지웠다.
+  //
+  // 전략별 임시 Worker 는 요청 단위로 생겼다 사라지므로 고정 좌석을 주지 않는다.
+  //
   // 2026-08-06 tool 강등. 조건부 직원 5명(윤서준·임채린·정하람·서지호·박서연)과
   // 이미 분리돼 사라진 market-thesis-worker 자리를 잡무 담당 하나로 합쳤다.
-  // 위 Bull/Bear 의 고정 멘트는 **사무실 화면용 연출**이다 — 실제 토론은
-  // departments/02-trading/scripts.py 가 직원 모델로 2라운드를 돌리고 부서장이 사회를 본다.
   staff("strategy2", "member", "한지우", "desk-runner", 3, undefined, [
     "저는 판단 안 합니다. 숫자만 가져와요.",
     "브로커 초당 한도 넘는 분할은 제 선에서 반려됩니다. 규칙이 그래서요.",

@@ -658,7 +658,14 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertIsNotNone(result, runtime)
         assert result is not None
         self.assertEqual(result["task_plan"]["category"], "PORTFOLIO_RECOMMENDATION")
-        self.assertEqual(result["task_plan"]["requested_departments"], ["research", "risk", "qa", "ceo"])
+        # 2026-08-10 팀 합의로 포트폴리오 구성 요청은 요청 시점에 quant 를 거친다.
+        # 단순 종목 질문(MARKET_RESEARCH)은 응답성 때문에 여전히 quant 를 부르지 않는다.
+        self.assertEqual(
+            result["task_plan"]["requested_departments"],
+            ["research", "quant", "risk", "qa", "ceo"],
+        )
+        self.assertEqual(result["task_plan"]["workflow"], "portfolio-recommendation")
+        self.assertTrue(result["task_plan"]["category_recognized"])
         self.assertEqual(result["universe"]["universe_id"], "KOREA_EQUITY_WATCHLIST")
         self.assertTrue(result["instrument_recommendations"])
         self.assertTrue(result["suitability"]["recommendations"][0]["instrument_recommendations"])
@@ -667,6 +674,12 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertFalse(any("TEST async" in message["text"] for message in runtime["messages"]))
         self.assertEqual(runtime["departments"]["trading-department"]["status"], "SKIPPED")
         self.assertEqual(runtime["departments"]["research-department"]["last_message"], "research 부서가 2개 Worker 결과를 취합했습니다.")
+        # 2026-08-10: quant가 requested_departments에 있는데 STAGE_DEPARTMENT(portfolio_runtime.py)
+        # 가 이를 모르면 department=None 가드에 걸려 Kanban·Operator UI에서 조용히 사라진다
+        # (한 번 실제로 발생했던 결함 - orchestration/workflows/portfolio_recommendation.py의
+        # DEPARTMENTS는 고쳤는데 이 BFF 쪽 사본을 안 고쳐서 생겼다). COMPLETED여야
+        # SKIPPED나 dict에서 아예 빠진 상태와 구분된다.
+        self.assertEqual(runtime["departments"]["quant-backtest-department"]["status"], "COMPLETED")
 
     def test_beginner_profile_returns_non_binding_backend_recommendation(self) -> None:
         client = TestClient(app)

@@ -86,6 +86,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 으로 조용히 건너뛴다. 아직 main 에 없던 이쪽을 000300 으로 옮겼다.
                 "20260806000300_execution_outbox.sql",
                 "20260809000100_qa_eval_results_append_only.sql",
+                # HR: hiring_request.py가 requested_by/decided_by/decided_at/decision_reason으로
+                # 요청자-승인자 분리(마스터플랜 4.3절 자기승인 금지)를 강제하려 추가
+                "20260810000100_workforce_hiring_requests_requester_decision.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:

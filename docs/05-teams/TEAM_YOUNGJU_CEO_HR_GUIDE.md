@@ -53,9 +53,9 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 | `HR-02` | `TEST_VERIFIED`(P0-3 실재성 게이트, 2026-08-05) | Draft Profile 13개 Review(조직 판단, 미착수) + 활성화 결정 자체를 스냅샷으로 남기는 감사 테이블 필요 |
 | Workforce Registry | `IMPLEMENTED` baseline | Quality Snapshot·Workforce Plan 집계/저장 로직 필요 |
 | Access Lifecycle | 구현 baseline | Platform/IAM 이벤트·Provisioning Worker 연결 필요 |
-| `HR-03` | `DOCUMENTED` | Eval Runner·Shadow Router·Promotion·Rollback 실체화 필요 |
+| `HR-03` | `DOCUMENTED` | Eval Runner·Shadow Router·Promotion·Rollback 실체화 필요. **2026-08-07 코드 실측**: `audit.eval_runs`/`eval_results`/`eval_sets` DDL은 있으나 저장소 전체에 쓰기 코드 0건(참조는 전부 SELECT), Golden/Adversarial 실행 코드 0건, `workforce.eval.v1` 발행자 없음(소비자만 구현). QA API의 `*/evaluate` 3종은 Model Risk·Internal Audit·Ops 평가라 Agent 채점 Runner가 아니다 |
 | `HR-04` | `BLOCKED` | Draft Profile 13개 Review와 Tool Allowlist 보완 필요 |
-| HR LangGraph Sub-graph | 미완료 | prompt-only 5개 Persona의 State Machine·Worker Graph 필요 |
+| HR 직원 계층 | **0명(2026-08-07 제안)** | LLM·결정론 Worker 모두 없음 — 부서장 + 일반 결정론 모듈. QA 독립검증·CEO 승인 대기. 근거는 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md) |
 
 ## 3. Override 작업 순서
 
@@ -115,7 +115,8 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 
 `Candidate → Independent QA Eval → Shadow → Approval → Promotion → Rollback`
 
-- Eval Runner와 Shadow Router를 구현한다.
+- Eval Runner와 Shadow Router를 구현한다. **소유는 QA/감사본부(동규)다** — 인사팀이 자기 후보를 스스로 채점할 수 없으므로 HR이 만들 수 없다. 2026-08-07 실측상 완전 미착수이며, 이것이 풀리기 전에는 HR 직원 ACTIVE 전이가 원리적으로 불가능하다(`activation_evidence.py`가 `audit.eval_runs`의 COMPLETED 행을 요구하는데 그 행을 만들 경로가 없다). 구현 요구사항은 [EVAL_RUNNER_SPEC.md](../02-engineering/EVAL_RUNNER_SPEC.md)로 QA에 전달한다.
+- Identity·권한 생성은 [PLATFORM_IAM_SPEC.md](../02-engineering/PLATFORM_IAM_SPEC.md)를 따른다. **소유 부서 미정**이며, 인사팀은 요청만 하고 생성은 하지 않는다는 경계는 그대로다.
 - 비용·품질·안전·회귀 지표를 Scorecard에 저장한다.
 - Promotion과 Rollback은 동일 Agent/작성자가 단독 수행하지 못하게 한다.
 - 실패한 Eval은 기존 Profile 유지와 `HOLD`로 끝낸다.

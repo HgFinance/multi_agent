@@ -473,6 +473,12 @@ Render 검증 실패 시 Cloud Provider 선정 전에는 단일 VM과 Docker Com
 
 LangSmith는 선택적 LangGraph 개발 추적 어댑터다. 기본 tracing은 비활성(`LANGSMITH_TRACING=false` 또는 `LANGCHAIN_TRACING_V2=false`)이며, 금융 데이터 마스킹·외부 전송 정책·비용·자격증명·네트워크를 확인한 실제 run만 연결 성공으로 기록한다. 현재 Source of Truth는 OpenTelemetry와 자체 Agent Run Record이고, 코드나 API Key가 있다는 사실만으로 LangSmith 연결 완료로 표시하지 않는다.
 
+**Langfuse (2026-08-10 신규 도입, 영주 결정)** — LangSmith와 이중 계측되는 두 번째 선택적 추적 어댑터다. 기본값은 비활성(`LANGFUSE_TRACING=false`).
+
+- **기존 스택으로 못 푸는 문제**: LangSmith는 이미 8개 부서 전부에 배선돼 있지만, HR(07-agent-workforce)이 6개 투자본부 Worker의 "최근 실행 시각"만 안전하게 조회할 방법이 없었다. LangSmith Trace 원문에는 Mandate·제한종목 질의응답 같은 Risk/Compliance 내용이 그대로 담겨 있어(.env.example 3-1절), HR이 그 클라이언트로 직접 조회하면 권한 밖 데이터에 노출될 위험이 있다. Langfuse를 별도로 붙여 HR 전용 조회 경로(`departments/07-agent-workforce/scorecard/observability.py`)를 LangSmith와 분리했다 — 같은 SDK를 공유하지 않으므로 HR의 접근 범위가 코드 구조상으로도 LangSmith 원본과 섞이지 않는다.
+- **HR이 읽는 것**: `orchestration/llm_observability.py`의 `publish_langfuse_metric()`이 `_metric_metadata()`로 redact된 필드(worker_id·stage·상태·지연시간 등)만 이벤트로 보내고, HR은 그 이벤트의 timestamp만 조회한다. input/output(원문)은 항상 비어 있다.
+- **제거 기준**: LangSmith 쪽에 부서별 접근 범위 제한(예: HR 전용 Project/API Key 분리)이 구현되면 Langfuse는 불필요해진다 — 그 시점에 이 어댑터를 제거하고 HR도 LangSmith 하나로 합친다.
+
 ## 12. Secret과 설정
 
 - 개발 설정은 `.env.example`만 Version 관리한다.

@@ -108,6 +108,9 @@ class DailyReport:
     reversal_count: int = 0
     snapshot_count: int = 0
     is_official: bool = False      # 항상 False다. Official 확정은 승인 절차다
+    # 집계 구간의 시작일. None이면 `accounting_date` 하루치다. 주간 보고가 일간과
+    # 같은 얼굴을 하면 안 되므로 구간을 수치와 함께 싣는다.
+    period_start: date | None = None
 
     @property
     def pnl_total(self) -> Decimal:
@@ -165,6 +168,8 @@ class DailyReport:
 
         return {
             "accounting_date": self.accounting_date.isoformat(),
+            # 하루치면 accounting_date와 같다. 주간 보고는 여기가 월요일이다.
+            "period_start": (self.period_start or self.accounting_date).isoformat(),
             "fund_id": str(self.fund_id),
             "book_id": str(self.book_id),
             "is_official": self.is_official,
@@ -215,8 +220,15 @@ def build_daily_report(
     accounting_date: date,
     breaks: Sequence[Break] = (),
     strategy_of: Mapping[str, str] | None = None,
+    period_start: date | None = None,
 ) -> DailyReport:
     """하루치 Preliminary 보고서를 만든다.
+
+    `period_start`를 주면 그날부터 `accounting_date`까지의 **구간** 보고가 된다
+    (주간 보고가 이 경로를 쓴다). 나머지 계산은 하루치와 완전히 같다 - NAV·손익·
+    비용은 원래 기초·기말 스냅샷의 차이라 구간 길이를 안 따진다. 구간에 따라
+    달라지는 것은 전략별 분해와 Reversal 집계에 넣을 분개 범위뿐이다.
+    구간 보고를 따로 만들지 않는 이유가 그거다 - 두 벌이 되면 반드시 갈라진다.
 
     `snapshots`는 시각 오름차순 스냅샷들이다. 최소 2개(기초·기말)가 필요하고,
     중간 스냅샷이 많을수록 Drawdown이 정확해진다 - 기초·기말만 주면 장중
@@ -238,7 +250,10 @@ def build_daily_report(
     if any(s.fund_id != first.fund_id or s.book_id != first.book_id for s in ordered):
         raise ReportError("여러 Fund/Book의 스냅샷이 섞였습니다")
 
-    todays = [j for j in ledger.journals if j.accounting_date == accounting_date]
+    start = period_start or accounting_date
+    if start > accounting_date:
+        raise ReportError(f"구간 시작일 {start}이 종료일 {accounting_date}보다 뒤입니다")
+    todays = [j for j in ledger.journals if start <= j.accounting_date <= accounting_date]
 
     navs = [s.nav for s in ordered]
     max_dd, peak = _max_drawdown(navs)
@@ -265,6 +280,7 @@ def build_daily_report(
         breaks_by_severity=_count_breaks(breaks),
         reversal_count=sum(1 for j in todays if j.reversal_of is not None),
         snapshot_count=len(ordered),
+        period_start=start,
     )
 
 

@@ -31,6 +31,14 @@ class CeoTaskPlannerError(RuntimeError):
     """Raised when the CEO Hermes profile cannot produce a valid task plan."""
 
 
+# allow-list 는 **상한**만 정한다("이 부서 밖은 못 부른다"). 하한이 없으면 LLM 이
+# requested_departments 를 ["ceo"] 하나로 줄여도 통과하고, 그러면 인용·환각 검증
+# 없이 사용자에게 자문이 나간다. 결정론 표(CATEGORY_DEPARTMENTS)는 6개 카테고리
+# 전부에 qa 와 ceo 를 두고 있으므로 그 둘이 실질적 불변식이다 - LLM 경로에서도
+# 같은 하한을 강제한다. 프롬프트로 부탁하지 않고 파싱 단계에서 채운다.
+REQUIRED_DEPARTMENTS: frozenset[str] = frozenset({"qa", "ceo"})
+
+
 class LlmCeoTaskPlanner:
     """Call the CEO Hermes profile to decide which departments a request needs."""
 
@@ -143,21 +151,30 @@ def build_task_plan(
     mode = os.getenv("PORTFOLIO_CEO_TASK_PLANNER_MODE", "deterministic").strip().lower()
     if mode != "llm":
         return deterministic_fallback(profile)
+
+    # 결정론 계획을 먼저 만들어 **봉투 기반**으로 쓴다. 이 모듈은 workflows 를 import
+    # 하지 않으므로(위 docstring) CATEGORY_WORKFLOWS 같은 값을 직접 계산할 수 없다 -
+    # workflow·category_recognized 처럼 호출부만 아는 필드가 LLM 경로에서 누락돼
+    # 기본값으로 덮이는 것을 이 방식으로 막는다. 비용은 dict 조회 + 키워드 스캔뿐이다.
+    plan = deterministic_fallback(profile)
     try:
         planner = planner_cls(repo_root)
-        return planner.plan(
+        decided = planner.plan(
             profile=profile,
             mandate_policy=profile.get("mandate_policy"),
             valid_departments=valid_departments,
         )
     except CeoTaskPlannerError as exc:
-        fallback = deterministic_fallback(profile)
-        fallback["planner_fallback_reason"] = str(exc)
-        return fallback
+        plan["planner_fallback_reason"] = str(exc)
+        return plan
     except Exception as exc:  # noqa: BLE001 - any planner failure fails closed.
-        fallback = deterministic_fallback(profile)
-        fallback["planner_fallback_reason"] = f"ceo_planner_unexpected:{type(exc).__name__}"
-        return fallback
+        plan["planner_fallback_reason"] = f"ceo_planner_unexpected:{type(exc).__name__}"
+        return plan
+
+    # LLM 이 실제로 정한 것만 덮어쓴다. 부서 목록은 planner 가 이미 allow-list 로
+    # 걸러 정렬한 값이라 그대로 신뢰한다(_parse_plan 이 issubset 검사 후 예외).
+    plan.update(decided)
+    return plan
 
 
 def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]:
@@ -175,6 +192,10 @@ def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]
     requested_set = {str(item) for item in requested}
     if not requested_set.issubset(allow_list):
         raise ValueError("CEO planner requested a department outside the allow-list")
+    # 하한 강제: 호출부가 실제로 가진 부서에 한해 필수 부서를 되살린다. 거부가 아니라
+    # 보강인 이유는 이것이 안전 방향이기 때문이다 - LLM 이 qa 를 빠뜨렸다고 요청 전체를
+    # 실패시키면 사용자 질문이 죽지만, 되살리면 검증만 한 단계 더 도는 것으로 끝난다.
+    requested_set |= REQUIRED_DEPARTMENTS & allow_list
     # Preserve the caller's canonical department order (same rule as the
     # deterministic planner's `ordered = [stage for stage in DEPARTMENTS ...]`).
     ordered = [stage for stage in valid_departments if stage in requested_set]

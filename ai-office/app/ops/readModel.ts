@@ -87,6 +87,12 @@ export type TradingSnapshot = {
     balanced: boolean;
     accounts: Record<string, Money>;
   };
+  /**
+   * 구간마다 출처가 다를 수 있다 — 회계(portfolio·ledger)는 Supabase Canonical 뷰,
+   * 트레이딩은 아직 Scripted Loop다. `mode`(DEMO/PAPER/LIVE)와는 다른 축이라
+   * 한 배지로 합치지 않는다. 없으면 표시하지 않는다(지어내지 않는다).
+   */
+  sources?: Partial<Record<"portfolio" | "trading" | "ledger", string>>;
   operations?: OperationsSnapshot;
 };
 

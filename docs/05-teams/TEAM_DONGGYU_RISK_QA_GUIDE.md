@@ -92,6 +92,10 @@
 - `model-risk-agent`, `internal-audit-agent`의 엔진/API와 LangGraph 배선 상태를 분리 기록한다.
 - Evidence Retriever, citation 검증, hallucination check, retry, incident escalation의 결과를 `audit.*` append-only 구조에 기록한다.
 - QA Eval 없이 Profile을 `ACTIVE`로 전환하거나, QA가 자기 Finding을 종결하는 경로를 차단한다.
+- **Eval Runner 구축 (QA/감사본부 소유, 미착수)** — 후보 Agent를 Golden/Adversarial Eval Set으로 채점해 `audit.eval_runs`에 기록하는 실행 엔진이다. 요구사항은 [EVAL_RUNNER_SPEC.md](../02-engineering/EVAL_RUNNER_SPEC.md)를 따른다.
+  - 2026-08-07 코드 실측: `eval_runs`/`eval_results`/`eval_sets` DDL은 있으나 **저장소 전체에 쓰기 코드 0건**(참조는 전부 SELECT), Golden/Adversarial 실행 코드 0건, `workforce.eval.v1` 발행자 없음.
+  - 기존 `/qa/v1/{model-risk,internal-audit,ops}/evaluate` 3종은 **이 Runner가 아니다** — Model Risk·Internal Audit·운영 건강성 평가이며 후보 Agent 채점과 무관하다. 이름이 비슷해 구현된 것으로 오인하기 쉽다.
+  - 이것이 없으면 HR 후보의 ACTIVE 전이가 원리적으로 불가능하다(`roster/activation_evidence.py`가 COMPLETED 행을 요구). 인사팀은 자기 후보를 스스로 채점할 수 없으므로 대신 만들 수 없다.
 
 **완료 증거:** 실제 정책 1건과 의도적 unsupported claim 1건에 대해 `GROUNDED`와 `ESCALATE/BLOCKED`가 재현되고, Case Replay가 가능하다.
 

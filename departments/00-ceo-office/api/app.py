@@ -1386,7 +1386,8 @@ def create_escalation(body: CreateEscalationIn):
     escalation_repo.save(escalation)
     _publish_governance_event(
         event_type="governance.escalation.v1", trace_id=case.trace_id,
-        payload={"escalation_id": escalation.escalation_id, "case_id": escalation.case_id,
+        payload={"fund_id": case.fund_id, "scope_key": f"escalation:{escalation.escalation_id}",
+                 "escalation_id": escalation.escalation_id, "case_id": escalation.case_id,
                  "severity": escalation.severity.value, "target": escalation.target,
                  "status": escalation.status.value,
                  "due_at": escalation.due_at.isoformat() if escalation.due_at else None},

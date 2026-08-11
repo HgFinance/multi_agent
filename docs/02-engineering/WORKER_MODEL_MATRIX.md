@@ -2,7 +2,9 @@
 
 검토일: 2026-08-07 (KST)
 
-이 문서는 8개 Hermes Profile 안에서 실행되는 25개 LangGraph Worker(LLM)의 모델 정책이다. 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다. 결정론 Worker(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)는 모델을 부르지 않으므로 이 표에 포함하지 않는다.
+이 문서는 8개 Hermes Profile 안에서 실행되는 20개 LangGraph Worker(LLM)의 모델 정책이다(HR 5 -> 0 통합 제안 반영, QA 독립검증·CEO 승인 대기). 현재 Worker 모델은 역할과 무관하게 임시 저메모리 테스트용 Ollama `qwen3:1.7b`로 고정한다. 결정론 Worker(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)는 모델을 부르지 않으므로 이 표에 포함하지 않는다.
+
+HR은 LLM Worker도 결정론 Worker도 없다. 타 부서의 tool 강등은 LLM을 결정론 러너로 **바꾼** 것이지만, HR은 그 판정을 이미 일반 모듈(`scorecard/quality.py`, `lifecycle/access.py`, `improvements/workflow.py`)이 갖고 있어 러너를 새로 만들 필요도 없었다.
 
 ## 실행 계층
 
@@ -29,7 +31,7 @@
 | 부서 | Worker 수(LLM) | 항상 / 조건부 |
 |---|---:|---:|
 | CEO | 1 | 1 / 0 |
-| HR | 5 | 2 / 3 |
+| HR | 0 | 0 / 0 |
 | Research | 6 | 2 / 4 |
 | Trading | 2 (+결정론 1) | 2 / 0 |
 | Risk | 1 (+결정론 1) | 0 / 1 |

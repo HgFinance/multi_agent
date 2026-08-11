@@ -11,7 +11,8 @@
 services:
   governance-api:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-governance-api
     restart: unless-stopped
     environment:
@@ -28,7 +29,8 @@ services:
   # governance.mandate.changed.v1 등 다른 Consumer Group용 Event는 조용히 넘긴다.
   notification-worker:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-notification-worker
     restart: unless-stopped
     command: ["python", "governance_events/worker.py"]

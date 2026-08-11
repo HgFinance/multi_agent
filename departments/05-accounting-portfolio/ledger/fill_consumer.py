@@ -9,12 +9,11 @@
 체결 사실 -> 분개 -> Projection -> 스냅샷. 판정은 하나도 없다. 계산은 전부
 `ledger.py`/`portfolio.py`가 하고 저장은 `repository.py`가 한다. 이 파일은 순서만 안다.
 
-**체결의 원천은 두 갈래이고 둘 다 우리가 만들지 않는다:**
-  1. `execution.fills` — 정식 경로. 트레이딩본부가 브로커 사실을 기록한 표를 폴링한다.
-     오늘 이 표는 0행이다(TRD-01의 psycopg OrderStore 대기). 그래서 `pending_fills()`는
-     지금 항상 빈 리스트를 준다 - 그게 정상이며, 가짜 체결로 채우지 않는다.
-  2. 회계 API `POST /ledgers/{id}/fills` — 서비스 호출자가 밀어 넣는 경로.
-     Paper 루프가 지금 쓰는 길이고, 같은 `consume_fill()`로 합류한다.
+**체결의 정식 런타임 원천과 offline fixture 경계:**
+  1. `execution.outbox` — 트레이딩본부가 만든 `trading.fill.v1` 봉투를 Relay가
+     `SENT`로 표시한 뒤 소비한다. PENDING/FAILED는 소비하지 않는다.
+  2. 회계 API `POST /ledgers/{id}/fills` — 명시적인 offline fixture-only 경로다.
+     durable/PAPER_DB 런타임 증거로 승격하지 않는다.
 
 두 경로 모두 멱등 키는 `broker_fill_id`다. `accounting.journals`의
 `unique (event_type, source_event_id)`가 DB 수준에서 같은 체결의 이중 분개를 막는다.
@@ -31,6 +30,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from pathlib import Path
 from uuid import UUID
 
@@ -40,9 +40,9 @@ sys.path.insert(0, str(_HERE.parent / "portfolio"))
 sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
 
 from contracts import Side
-from ledger import Journal, Position, decimal_str
+from ledger import Journal, Ledger, Position, decimal_str
 from portfolio import MarkPrice, PortfolioSnapshot, value_portfolio  # noqa: F401  (자체 점검이 value_portfolio를 직접 쓴다)
-from repository import LedgerRepository, PostgresLedger
+from repository import LedgerPersistenceError, LedgerRepository, PostgresLedger
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,16 @@ class FillRow:
     tax: Decimal
     event_time: datetime
     broker_fill_id: str
+    # Envelope lineage is optional for the explicit offline fixture path.
+    event_id: UUID | None = None
+    case_id: UUID | None = None
+    trace_id: str = ""
+    schema_version: str = ""
+    occurred_at: datetime | None = None
+    idempotency_key: str = ""
+    producer: str = ""
+    content_hash: str | None = None
+    payload_ref: dict[str, Any] | None = None
 
 
 def pending_fills(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[FillRow]:
@@ -97,26 +107,21 @@ def pending_fills(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[
 
 # 소비자 이름. `execution.outbox_consumed` 에 이 이름으로 기록된다.
 CONSUMER = "accounting-ledger"
-FILL_EVENT = "execution.fill.v1"
+FILL_EVENT = "trading.fill.v1"
 
 
 def pending_fill_events(repo: LedgerRepository, fund_id: UUID, book_id: UUID) -> list[FillRow]:
-    """**Event 경로.** `execution.outbox` 의 미소비 체결 이벤트를 읽는다.
+    """Return only relay-delivered canonical Fill events.
 
-    팀 가이드 Override v2.0 P0-1 이 "Fill 은 실제 Event/Consumer 경로에서 생성한다"고
-    요구한다. `pending_fills()`(표 폴링)와 달리 여기는 트레이딩본부가 **상태 변경과
-    같은 트랜잭션에서** 낸 이벤트를 소비하며, `outbox_consumed` 로 중복을 거른다.
-
-    봉투에는 금액이 없다(6.1 "payload 본문을 내보내지 않는다"). `payload_ref.artifact_id`
-    가 가리키는 `execution.fills` 행에서 수치를 읽는다 - **수치의 원천은 여전히 표 하나다.**
-
-    두 경로가 공존하는 것이 의도다. 같은 `broker_fill_id` 로 수렴하고
-    `accounting.journals` 의 `unique (event_type, source_event_id)` 가 이중 분개를 막는다.
+    PENDING/FAILED rows are deliberately invisible to this consumer. A Journal
+    commit may precede acknowledgement; therefore rows with an existing Journal
+    are still selected until their exact envelope event_id is acknowledged.
     """
     with repo.cursor() as cur:
         cur.execute(
             """
-            select o.event_id,
+            select o.event_id, o.case_id, o.trace_id, o.schema_version,
+                   o.occurred_at, o.producer, o.idempotency_key, o.payload_ref,
                    f.fill_id, f.instrument_id, f.side, f.quantity, f.price,
                    f.fee_amount, f.tax_amount, f.event_time, f.broker_fill_id
               from execution.outbox o
@@ -125,57 +130,125 @@ def pending_fill_events(repo: LedgerRepository, fund_id: UUID, book_id: UUID) ->
               join execution.orders ord on ord.order_id = f.order_id
               join execution.order_intents i on i.order_intent_id = ord.order_intent_id
               left join execution.outbox_consumed c
-                     on c.event_id = o.event_id and c.consumer = %s
-              left join accounting.journals j
-                     on j.event_type = 'fill' and j.source_event_id = f.broker_fill_id
-             where o.event_type = %s and o.status <> 'DLQ'
-               and c.event_id is null and j.journal_id is null
+                on c.event_id = o.event_id and c.consumer = %s
+             where o.event_type = %s and o.status = 'SENT'
+               and c.event_id is null
                and i.fund_id = %s and i.book_id = %s
              order by o.outbox_id
             """,
             (CONSUMER, FILL_EVENT, fund_id, book_id),
         )
         rows = cur.fetchall()
-    return [
-        FillRow(fill_id=fill_id, instrument_id=instrument_id, side=Side(side),
-                quantity=quantity, price=price, fee=fee, tax=tax,
-                event_time=event_time, broker_fill_id=broker_fill_id)
-        for (_event_id, fill_id, instrument_id, side, quantity, price, fee, tax,
-             event_time, broker_fill_id) in rows
-    ]
+
+    result: list[FillRow] = []
+    for (
+        event_id, case_id, trace_id, schema_version, occurred_at, producer,
+        idempotency_key, payload_ref, fill_id, instrument_id, side, quantity,
+        price, fee, tax, event_time, broker_fill_id,
+    ) in rows:
+        payload_ref = dict(payload_ref or {})
+        if (
+            schema_version != "event-envelope-v1"
+            or payload_ref.get("artifact_type") != "FILL"
+            or str(payload_ref.get("artifact_id")) != str(fill_id)
+            or not payload_ref.get("artifact_schema")
+            or not payload_ref.get("content_hash")
+            or not idempotency_key
+            or not trace_id
+        ):
+            raise LedgerPersistenceError(
+                f"canonical Fill envelope is incomplete (event_id={event_id})"
+            )
+        result.append(FillRow(
+            fill_id=fill_id, instrument_id=instrument_id, side=Side(side),
+            quantity=quantity, price=price, fee=fee, tax=tax,
+            event_time=event_time, broker_fill_id=broker_fill_id,
+            event_id=event_id, case_id=case_id, trace_id=str(trace_id),
+            schema_version=schema_version, occurred_at=occurred_at,
+            idempotency_key=idempotency_key, producer=producer,
+            content_hash=payload_ref.get("content_hash"), payload_ref=payload_ref,
+        ))
+    return result
 
 
-def ack_fill_events(repo: LedgerRepository, fill_ids: list[UUID]) -> int:
-    """분개가 끝난 체결 이벤트를 소비 완료로 기록한다.
+def ack_fill_events(
+    repo: LedgerRepository,
+    fill_ids: list[UUID] | None = None,
+    *,
+    event_ids: list[UUID] | None = None,
+) -> int:
+    """Acknowledge canonical envelope IDs after Journal commit.
 
-    **분개 뒤에 찍는다.** 먼저 찍고 분개하다 죽으면 그 체결은 영영 분개되지 않는다 -
-    at-least-once 에서 유실보다 중복이 낫고, 중복은 journals 의 unique 가 막는다.
+    The historical positional ``fill_ids`` form remains an explicit offline
+    compatibility path. The canonical consumer always passes ``event_ids`` by
+    keyword, so it acknowledges exact envelope IDs.
     """
-    if not fill_ids:
+    fill_ids = fill_ids or []
+    event_ids = event_ids or []
+    if not event_ids and not fill_ids:
         return 0
     with repo.cursor() as cur:
-        cur.execute(
-            """
-            insert into execution.outbox_consumed (consumer, event_id)
-            select %s, o.event_id
-              from execution.outbox o
-             where o.event_type = %s
-               and (o.payload_ref ->> 'artifact_id')::uuid = any(%s)
-            on conflict do nothing
-            """,
-            (CONSUMER, FILL_EVENT, [str(f) for f in fill_ids]),
-        )
-        return cur.rowcount
+        inserted = 0
+        if event_ids:
+            cur.execute(
+                """
+                insert into execution.outbox_consumed (consumer, event_id)
+                select %s, o.event_id
+                  from execution.outbox o
+                 where o.event_type = %s and o.status = 'SENT'
+                   and o.event_id = any(%s)
+                on conflict do nothing
+                """,
+                (CONSUMER, FILL_EVENT, [str(e) for e in event_ids]),
+            )
+            inserted += cur.rowcount
+        if fill_ids:
+            cur.execute(
+                """
+                insert into execution.outbox_consumed (consumer, event_id)
+                select %s, o.event_id
+                  from execution.outbox o
+                 where o.event_type = %s and o.status = 'SENT'
+                   and (o.payload_ref ->> 'artifact_id')::uuid = any(%s)
+                on conflict do nothing
+                """,
+                (CONSUMER, FILL_EVENT, [str(f) for f in fill_ids]),
+            )
+            inserted += cur.rowcount
+        return inserted
 
 
-def consume_fill(ledger: PostgresLedger, fill: FillRow) -> Journal:
+def _fill_evidence(fill: FillRow) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "evidence_class": "canonical_event" if fill.event_id else "fixture_only",
+        "canonical": bool(fill.event_id),
+    }
+    if fill.event_id is not None:
+        evidence.update({
+            "event_id": str(fill.event_id),
+            "event_type": FILL_EVENT,
+            "schema_version": fill.schema_version,
+            "case_id": str(fill.case_id) if fill.case_id else None,
+            "trace_id": fill.trace_id,
+            "occurred_at": fill.occurred_at.isoformat() if fill.occurred_at else None,
+            "event_time": fill.event_time.isoformat(),
+            "idempotency_key": fill.idempotency_key,
+            "producer": fill.producer,
+            "content_hash": fill.content_hash,
+            "payload_ref": fill.payload_ref,
+        })
+    return evidence
+def consume_fill(ledger: Ledger, fill: FillRow) -> Journal:
     """체결 하나를 분개로 만든다. 두 원천이 합류하는 지점이다.
 
     평균원가는 원장에서 재계산한다. 호출자가 주면 실현손익이 호출자가 정하는 값이 된다.
     """
     positions, _ = ledger.rebuild()
     position = positions.get(fill.instrument_id, Position(fill.instrument_id))
-    return ledger.post_fill(fill, fill.side, fill.instrument_id, position)
+    return ledger.post_fill(
+        fill, fill.side, fill.instrument_id, position,
+        trace_id=fill.trace_id, metadata=_fill_evidence(fill),
+    )
 
 
 def project(repo: LedgerRepository, ledger: PostgresLedger,
@@ -194,28 +267,39 @@ def project(repo: LedgerRepository, ledger: PostgresLedger,
     return snapshot
 
 
-def run_once(repo: LedgerRepository, fund_id: UUID, book_id: UUID,
-             marks: dict[UUID, MarkPrice], as_of: datetime, *, events_first: bool = True
-             ) -> tuple[list[Journal], PortfolioSnapshot]:
-    """미처리 체결을 모두 반영하고 스냅샷을 만든다.
+def run_once(
+    repo: LedgerRepository,
+    fund_id: UUID,
+    book_id: UUID,
+    marks: dict[UUID, MarkPrice],
+    as_of: datetime,
+    *,
+    events_first: bool = True,
+    fixture_only: bool = False,
+) -> tuple[list[Journal], PortfolioSnapshot]:
+    """Consume canonical SENT events, then project.
 
-    **Event 경로를 먼저 본다**(P0-1). 트레이딩본부가 Outbox 로 낸 체결 이벤트를 소비하고,
-    그 뒤 표 폴링으로 남은 것을 훑는다 - Outbox 이전에 들어온 체결이나 API 주입 경로가
-    누락되지 않게 두 경로를 다 돈다. 같은 체결은 `journals` 의
-    `unique (event_type, source_event_id)` 로 한 번만 분개된다.
+    ``fixture_only`` is an explicit offline compatibility path. It is never
+    enabled by the durable canonical consumer, so API/table-injected fills
+    cannot become runtime evidence accidentally.
     """
     ledger = repo.load(fund_id, book_id)
     journals: list[Journal] = []
-    consumed: list[UUID] = []
+    event_ids: list[UUID] = []
 
     if events_first:
         for fill in pending_fill_events(repo, fund_id, book_id):
             journals.append(consume_fill(ledger, fill))
-            consumed.append(fill.fill_id)
-        # 분개가 끝난 뒤에 소비 기록을 남긴다 - 순서를 뒤집으면 유실이 된다.
-        ack_fill_events(repo, consumed)
+            if fill.event_id is None:
+                raise LedgerPersistenceError("canonical Fill is missing event_id")
+            event_ids.append(fill.event_id)
+        # Journal first, acknowledgement second. A restart re-selects SENT
+        # rows whose Journal already exists and safely acknowledges exact IDs.
+        ack_fill_events(repo, event_ids=event_ids)
 
-    journals += [consume_fill(ledger, fill) for fill in pending_fills(repo, fund_id, book_id)]
+    if fixture_only:
+        journals.extend(consume_fill(ledger, fill)
+                        for fill in pending_fills(repo, fund_id, book_id))
     return journals, project(repo, ledger, marks, as_of)
 
 

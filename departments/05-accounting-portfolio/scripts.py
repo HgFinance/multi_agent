@@ -468,6 +468,10 @@ def _snapshot_dict(s: PortfolioSnapshot) -> dict:
             "cash": _d(s.cash), "securities_value": _d(s.securities_value),
             "unrealized_pnl": _d(s.unrealized_pnl), "nav": _d(s.nav),
             "gross_exposure": _d(s.gross_exposure), "net_exposure": _d(s.net_exposure),
+            # 2026-08-10 추가. 빠져 있어서 **소비자(Notion·Discord 보고)에 도달하지
+            # 못했다** - 미확정 봉으로 만든 WARN NAV 와 확정 종가 PASS NAV 가 보고서에서
+            # 똑같아 보였다. quality_status 를 만든 이유가 그 구분이다(MarkPrice 주석).
+            "quality_status": s.quality_status,
             "position_count": len(s.positions)}
 
 
@@ -560,6 +564,48 @@ Evidence:
         # 서술 실패가 이미 확정된 수치를 지우지 않는다. 결정론 서술로 대체하고 fallback 만 남긴다.
         return {"narrative": _deterministic_close_note(state)["narrative"],
                 "supervisor_llm_called": True, "fallbacks": [_fallback("supervise", exc)]}
+
+
+def _deterministic_weekly_note(report: dict) -> str:
+    """LLM 없이도 주간 서술이 나온다. 수치는 인용만 하고 새로 만들지 않는다."""
+    pnl, nav = report.get("pnl") or {}, report.get("nav") or {}
+    residual = pnl.get("unexplained")
+    tail = ("" if residual in (None, "0") else
+            f" 미설명 손익 {residual} 이 남아 조사 대상이다.")
+    return (f"{report.get('period_start')}~{report.get('accounting_date')} 구간 "
+            f"NAV 는 {nav.get('open')} 에서 {nav.get('close')} 로 바뀌었고 "
+            f"순손익은 {pnl.get('net')} 이다.{tail} "
+            "이 수치는 Preliminary 이며 Official NAV 는 독립 승인이 필요하다.")
+
+
+def narrate_weekly(report: dict, holdings: list[dict], *, chat=None) -> dict:
+    """주간 포트폴리오 서술. 부서장(ACC-00) 이 쓰고 **수치는 못 바꾼다.**
+
+    마감 서술(`supervise`)과 같은 페르소나·같은 금지 규칙을 쓴다. 여기 따로 두는
+    이유는 주간이 CloseState 를 갖지 않기 때문이고, Hermes 호출을 이 파일 밖으로
+    내보내지 않기 위해서다(`_hermes_chat` 과 페르소나 조회가 여기 있다).
+    """
+    task = f"""Using ONLY the weekly evidence below, write a Korean weekly portfolio note for the
+CEO. Every figure is already final — quote them verbatim and never recompute, restate or round a
+NAV, PnL, weight or position number. These figures are PRELIMINARY; Official NAV requires an
+independent approval you do not hold, so never describe them as official or confirmed.
+Schema (JSON only):
+{{"narrative": "3-5 sentences in Korean covering NAV change, PnL drivers, cost and concentration",
+ "escalate": true or false,
+ "cited_figures": ["which figures you referenced"]}}
+
+Evidence:
+{json.dumps({"report": report, "holdings": holdings}, ensure_ascii=False, indent=1)}"""
+    try:
+        call = chat or _hermes_chat
+        note = _parse_json_block(call(_persona("portfolio-control-supervisor"), task),
+                                 ("narrative", "escalate", "cited_figures"), "Weekly")
+        return {"narrative": note["narrative"], "llm_called": True,
+                "escalate": bool(note["escalate"])}
+    except Exception as exc:  # noqa: BLE001 - intentional fallback boundary
+        # 서술 실패가 확정된 수치를 지우지 않는다. 결정론 문장으로 대체한다.
+        return {"narrative": _deterministic_weekly_note(report), "llm_called": True,
+                "fallbacks": [_fallback("narrate_weekly", exc)]}
 
 
 # ── 노드 8: Notion 업로드 (Reporter - 결정론) ──────────────────────────────
@@ -688,6 +734,13 @@ def run_accounting_close(
     `carried_open_breaks` 는 전일까지 미종결 Break(recon_repository.open_breaks),
     `triage_corpus` 는 과거 해소 사례(break_triage.load_corpus)다. 둘 다 없어도 마감은
     돌지만, 없으면 **어제 것이 늙고 있다는 사실이 이 마감 팩에 안 실린다.**
+
+    `marks` 는 여기서 조회하지 않는다 - 호출자가 준다. 종가 마감이면
+    `portfolio/mark_provider.py` 의 `fetch_marks(symbols, as_of, interval="1D")` 가
+    그 산출물이며(`LedgerRepository.symbols_for` 로 symbol 을 얻는다), 봉 시작 시각과
+    마감 시각이 벌어지므로 config.yaml 의 `mark_max_staleness_minutes`(기본 30분,
+    `_max_staleness()`) 도 같이 넓혀야 한다 - 그대로 두면 종가 봉이 전부 stale 이다.
+    직접 시세를 조회하는 코드를 여기에 새로 만들지 않는다.
     """
     initial: dict = {"ledger": ledger, "as_of": as_of, "accounting_date": accounting_date,
                      "marks": marks or {}, "external": external or {},
@@ -1004,8 +1057,11 @@ def _check_missing_mark_blocks_nav():
     assert out["nav_status"] == NAV_BLOCKED and out["escalate"] is True
     assert out["fallbacks"][0]["stage"] == "value"
     assert out["fallbacks"][0]["safe_action"] == "NAV_NOT_CONFIRMED"
-    # 낡은 Mark 도 같다
-    stale = _run(marks=_marks(minutes_old=999), chat=_stub())
+    # 낡은 Mark 도 같다. **한도는 config 에서 가져온다** - 여기 숫자를 박아두면
+    # mark_max_staleness_minutes 를 넓히는 순간 이 검사가 조용히 무력해진다
+    # (2026-08-10 종가 마감용으로 30분 -> 1440분 넓혔을 때 실제로 그랬다).
+    beyond = int(_max_staleness().total_seconds() // 60) + 60
+    stale = _run(marks=_marks(minutes_old=beyond), chat=_stub())
     assert stale["nav_status"] == NAV_BLOCKED, stale["nav_identity"]
     print("  Mark 없음/낡음 -> NAV 차단  OK")
 
@@ -1050,17 +1106,21 @@ def _check_projection_drift_blocks():
     print("  projection 대조 (백로그 1)  OK")
 
 
+def _opening_snapshot():
+    """자본만 있는 기초 스냅샷. 운영 경로에서는 그날 첫 스냅샷이 이 자리에 온다
+    (close_scheduler.run_daily). Fixture 두 곳이 같은 3줄을 쓰고 있어 합쳤다."""
+    opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
+    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
+    return value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
+
+
 def _check_daily_report_produced():
     """기초 스냅샷을 주면 일일 보고가 실제로 나온다.
 
     이 검사가 없어서 _snapshot_obj 를 State 에 선언 안 한 버그가 통과했다 - report 가 계속
     null 인데 fallback 도 없어서 아무도 안 죽었다(2026-08-03 실측).
     """
-    opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
-    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
-    opening = value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
-
-    out = _run(marks=_marks("77000"), opening_snapshot=opening, chat=_stub())
+    out = _run(marks=_marks("77000"), opening_snapshot=_opening_snapshot(), chat=_stub())
     assert out["report"] is not None, "기초 스냅샷을 줬는데 일일 보고가 없다"
     rep = out["report"]
     assert rep["is_official"] is False, "일일 보고가 공식으로 나왔다"
@@ -1169,9 +1229,7 @@ def _run_live() -> dict:
     ponytail: 원장·Mark 는 Fixture 다. 실제 Supabase 원장과 market-api 종가로 바꾸는 것은
     D3(Valuation/PnL/NAV) 착수 조건이며 지금은 market-api bulk 종가 조회면 대기 중이다.
     """
-    opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
-    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
-    opening = value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
+    opening = _opening_snapshot()
     return run_accounting_close(
         ledger=_ledger_with_position(), as_of=_NOW, accounting_date=_DATE,
         marks=_marks("77000"),
@@ -1295,6 +1353,42 @@ def _check_close_memory_boundary():
     print("  마감 기억 경계 (비공식)    OK")
 
 
+def _check_weekly_narration():
+    """주간 서술도 부서장이 쓰고, **수치는 못 바꾼다.**"""
+    report = {"period_start": "2026-08-03", "accounting_date": "2026-08-07",
+              "nav": {"open": "100000000", "close": "100694918"},
+              "pnl": {"net": "694918", "unexplained": "0"}}
+    holdings = [{"symbol": "005930", "weight": "0.046"}]
+
+    seen = {}
+
+    def _chat(persona, task):
+        seen["persona"], seen["task"] = persona, task
+        return json.dumps({"narrative": "주간 정상 마감", "escalate": False,
+                           "cited_figures": ["nav.close"]})
+
+    note = narrate_weekly(report, holdings, chat=_chat)
+    assert note["narrative"] == "주간 정상 마감" and note["llm_called"] is True
+    # 부서장 페르소나로 부른다. 서술 전용 계약이 프롬프트에 박혀 있어야 한다
+    assert "Portfolio Control" in seen["persona"] or "supervisor" in seen["persona"].lower()
+    assert "never recompute" in seen["task"] and "PRELIMINARY" in seen["task"]
+
+    # 서술이 죽어도 확정 수치는 남는다 - 결정론 문장으로 대체된다
+    def _dead(persona, task):
+        raise RuntimeError("hermes down")
+
+    fell = narrate_weekly(report, holdings, chat=_dead)
+    assert "694918" in fell["narrative"], fell
+    assert "Preliminary" in fell["narrative"], fell
+    assert fell["fallbacks"], "실패를 기록하지 않았다"
+
+    # 잔차가 0 이 아니면 결정론 문장이 그 사실을 말한다
+    residual = _deterministic_weekly_note(
+        {**report, "pnl": {**report["pnl"], "unexplained": "-12"}})
+    assert "미설명 손익 -12" in residual, residual
+    print("  주간 서술 (서술 전용)      OK")
+
+
 def _check_secret_redaction():
     leaked = _fallback("value", RuntimeError("connect https://x.notion.com/t ntn_abc123DEF"))
     assert "ntn_abc123DEF" not in leaked["error_message"], leaked
@@ -1338,6 +1432,7 @@ if __name__ == "__main__":
     _check_notion_report_node()
     _check_break_aging_and_triage()
     _check_close_memory_boundary()
+    _check_weekly_narration()
     _check_secret_redaction()
     _check_langsmith_observability()
-    print("회계본부 마감 파이프라인 20개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
+    print("회계본부 마감 파이프라인 21개 영역 통과. 실행은 --run (Hermes + Notion 필요)")
