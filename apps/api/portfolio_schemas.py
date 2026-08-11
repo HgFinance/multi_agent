@@ -218,6 +218,7 @@ class PortfolioTaskPlan(_ApiModel):
     original_query: str = ""
     rewritten_query: str = Field(min_length=1)
     requested_departments: list[str] = Field(default_factory=list)
+    required_skills: list[str] = Field(default_factory=list)
     routing_basis: str = Field(min_length=1)
     matched_terms: dict[str, list[str]] = Field(default_factory=dict)
     # --- CEO Hermes 프로필이 라우팅한 경우에만 채워지는 필드 ---

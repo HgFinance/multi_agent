@@ -112,8 +112,8 @@ hiring_priority:
     tier: P2-CONDITIONAL
     partially_moved_to: research_department
 skills:
-- hermes-agent
-- experiment-factory
+  external_dirs:
+    - /opt/shared-skills
 usage:
   run: quant-backtest-department chat -q 'Intake the research experiment proposal, preregister it and report the card'
   collaborate: quant-backtest-department chat -q 'Explain why this family was rejected and map the lesson codes for research'

@@ -479,6 +479,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -503,6 +504,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -647,6 +649,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -666,6 +669,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -782,6 +786,7 @@ services:
       ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
     environment:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000

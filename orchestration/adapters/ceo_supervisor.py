@@ -23,6 +23,10 @@ from orchestration.canonical_profiles import (
     department_for_canonical_profile,
     validate_canonical_profile,
 )
+from orchestration.ceo_workflow_scope import (
+    WorkflowScopeViolation,
+    validate_workflow_scope,
+)
 
 
 class SupervisorValidationError(ValueError):
@@ -715,6 +719,27 @@ class CeoSupervisorService:
                 # workflow-only fakes and adapters used by the supervisor tests.
                 show = getattr(self.client, "show", None)
                 root_payload = show(root_id) if callable(show) else {}
+                try:
+                    validate_workflow_scope(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        descendants=payloads,
+                    )
+                except WorkflowScopeViolation as exc:
+                    reason = f"workflow_scope_validation: {exc}"
+                    comment_task = getattr(self.client, "comment_task", None)
+                    if callable(comment_task):
+                        comment_task(
+                            root_id,
+                            f"hgfinance.ceo-workflow-scope-error.v1 "
+                            f"event={event_key} reason={reason}",
+                        )
+                    self._safe_abort(root_id, reason)
+                    return SupervisorDecision(
+                        SupervisorAction.BLOCK_ABORT,
+                        root_id,
+                        reason="workflow_scope_validation",
+                    )
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
                     for payload in payloads
@@ -831,9 +856,26 @@ class CeoSupervisorService:
         raise SupervisorValidationError("qa_required must be a boolean")
 
     def _execute(self, decision: SupervisorDecision, state: SupervisorState) -> None:
+        allowed_parent_ids = {state.parent_task_id} | {
+            child.task_id for child in state.children
+        }
+        requested_parent_ids = set(decision.parent_task_ids) or {state.parent_task_id}
+        outside_parent_ids = requested_parent_ids - allowed_parent_ids
+        if outside_parent_ids:
+            raise SupervisorValidationError(
+                "supervisor action references task IDs outside current root: "
+                f"{sorted(outside_parent_ids)}"
+            )
+
         if decision.action == SupervisorAction.RETRY_TASK:
             if not decision.target_task_id:
                 raise SupervisorValidationError("RETRY_TASK has no target")
+            if decision.target_task_id not in {
+                child.task_id for child in state.children
+            }:
+                raise SupervisorValidationError(
+                    "RETRY_TASK target is outside current root workflow"
+                )
             self.client.unblock_task(decision.target_task_id)
             return
         if decision.action == SupervisorAction.BLOCK_ABORT:
@@ -856,6 +898,30 @@ class CeoSupervisorService:
         }:
             if not decision.assignee or not decision.title or not decision.body:
                 raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
+            if decision.action == SupervisorAction.RUN_QA:
+                expected = {child.task_id for child in state.analysis_children}
+                if requested_parent_ids != expected:
+                    raise SupervisorValidationError(
+                        "RUN_QA dependencies must be the current root's "
+                        f"primary children: expected {sorted(expected)}, "
+                        f"got {sorted(requested_parent_ids)}"
+                    )
+            elif decision.action == SupervisorAction.SYNTHESIZE:
+                expected = {
+                    child.task_id
+                    for child in state.analysis_children + state.qa_children
+                    if child.done
+                }
+                if requested_parent_ids != expected:
+                    raise SupervisorValidationError(
+                        "SYNTHESIZE dependencies must be current root terminal "
+                        f"children: expected {sorted(expected)}, "
+                        f"got {sorted(requested_parent_ids)}"
+                    )
+            elif state.parent_task_id not in requested_parent_ids:
+                raise SupervisorValidationError(
+                    f"{decision.action.value} must remain parented to current root"
+                )
             self.client.create_task(
                 title=decision.title,
                 body=decision.body,

@@ -67,10 +67,12 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-2")
         task = {"task_id": "t_root", "status": "ready"}
         with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-            with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
-                response = ceo.ceo_query(request)
+            with patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True) as comment:
+                with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
+                    response = ceo.ceo_query(request)
 
         create.assert_called_once()
+        comment.assert_called_once_with(task_id="t_root", request_id="request-2")
         ask.assert_not_called()
         self.assertEqual(response["task"], task)
         self.assertEqual(response["task_id"], "t_root")

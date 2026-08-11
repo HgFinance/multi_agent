@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from orchestration.skill_contract import CanonicalSkillError, validate_required_skills
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -86,6 +88,8 @@ requested_departments (non-empty array, each value from the allow-list),
 rewritten_query (short string restating the request),
 rationale (short string explaining the department choice).
 
+required_skills is an optional array of canonical skill names; use [] when no specialist skill is needed.
+
 Input bundle:
 {json.dumps(bundle, ensure_ascii=False, sort_keys=True, default=str)}"""
         try:
@@ -111,6 +115,11 @@ Input bundle:
             raise CeoTaskPlannerError(f"ceo_planner_exit_{process.returncode}")
         try:
             decision = _parse_plan(process.stdout, valid_departments)
+        except CanonicalSkillError:
+            # An unresolvable skill is a contract violation, not a transient
+            # planner failure. Do not silently drop it via deterministic
+            # fallback and create executable children without the skill.
+            raise
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise CeoTaskPlannerError("ceo_planner_invalid_json") from exc
 
@@ -120,6 +129,7 @@ Input bundle:
             "original_query": query,
             "rewritten_query": decision["rewritten_query"],
             "requested_departments": decision["requested_departments"],
+            "required_skills": decision["required_skills"],
             "matched_terms": {},
             "routing_basis": "ceo_llm_task_planner",
             "mandate_considered": mandate_policy is not None,
@@ -164,6 +174,9 @@ def build_task_plan(
             mandate_policy=profile.get("mandate_policy"),
             valid_departments=valid_departments,
         )
+    except CanonicalSkillError:
+        # Unknown/unavailable skills must be rejected before child creation.
+        raise
     except CeoTaskPlannerError as exc:
         plan["planner_fallback_reason"] = str(exc)
         return plan
@@ -202,12 +215,14 @@ def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]
 
     rewritten_query = str(payload.get("rewritten_query", "")).strip()
     rationale = str(payload.get("rationale", "")).strip()
+    required_skills = list(validate_required_skills(payload.get("required_skills", [])))
     if not rationale:
         raise ValueError("CEO planner rationale is empty")
     return {
         "requested_departments": ordered,
         "rewritten_query": rewritten_query,
         "rationale": rationale,
+        "required_skills": required_skills,
     }
 
 
