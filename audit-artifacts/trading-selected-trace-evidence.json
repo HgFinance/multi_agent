@@ -1,0 +1,18 @@
+{
+  "kind": "test-report",
+  "schema_version": 1,
+  "command": "python -m unittest tests.e2e.test_selected_strategy_trace -v",
+  "status": "passed",
+  "test_count": 1,
+  "lineage": [
+    "actual worker-produced signal from selected reports",
+    "selected strategy promotion_state=PROMOTED",
+    "live_order_submission_allowed=false",
+    "risk_gate_required=true",
+    "same production trace_id copied from worker signal to OrderIntent",
+    "RiskEngine and OMS route",
+    "Paper Broker fill",
+    "Ledger posting and zero trial-balance residual"
+  ],
+  "runtime_ids": "Generated per run and asserted for equality/lineage by tests/e2e/test_selected_strategy_trace.py; no fixed IDs are treated as evidence."
+}
