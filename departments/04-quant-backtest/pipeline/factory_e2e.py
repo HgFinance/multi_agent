@@ -301,8 +301,30 @@ def cleanup() -> int:
         cur.execute("delete from research.experiment_outcomes where experiment_id like %s",
                     (f"{TAG}-%",))
         n1 = cur.rowcount
+        # ▶ 자손부터 지운다 (2026-08-11 실측)
+        #   hypotheses 를 먼저 지우면 FK 로 막혀 정리가 통째로 실패하고, 그러면
+        #   다음 실증이 이전 판 위에서 돈다(실제로 Gate 0 이 이전 교훈에 막혔다).
+        #   순서는 information_schema 로 확인한 실제 FK 그래프를 따른다:
+        #     backtest_runs/experiment_metrics/model_artifacts/strategy.candidates
+        #       -> experiments -> hypotheses  (experiment_jobs 도 hypotheses 참조)
+        _MINE = "select hypothesis_id from quant.hypotheses where proposal_id like %s"
+        _MY_EXP = f"select experiment_id from quant.experiments where hypothesis_id in ({_MINE})"
+        n_child = 0
+        for table in ("quant.backtest_runs", "quant.experiment_metrics",
+                      "quant.model_artifacts", "strategy.candidates"):
+            cur.execute(
+                f"delete from {table} where experiment_id in ({_MY_EXP})", (f"{TAG}-%",)
+            )
+            n_child += cur.rowcount
+        cur.execute(f"delete from quant.experiments where hypothesis_id in ({_MINE})",
+                    (f"{TAG}-%",))
+        n_exp = cur.rowcount
+        cur.execute(f"delete from quant.experiment_jobs where hypothesis_id in ({_MINE})",
+                    (f"{TAG}-%",))
+        n_job = cur.rowcount
         cur.execute("delete from quant.hypotheses where proposal_id like %s", (f"{TAG}-%",))
         n2 = cur.rowcount
+        print(f"  선행 삭제: 실험 자손 {n_child}, experiments {n_exp}, jobs {n_job}")
         cur.execute("delete from research.experiment_proposals where proposal_id like %s",
                     (f"{TAG}-%",))
         n3 = cur.rowcount

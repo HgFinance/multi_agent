@@ -78,18 +78,25 @@ class Gate0Result:
     trial_family_id: str = ""
     trial_number: int = 1
     trials_used: int = 0
+    # 막지는 않지만 사람이 봐야 하는 것. 경고를 거부로 올리면 게이트가
+    # "의심스러우면 차단"이 되고, 그건 신규 가설을 영영 못 사게 만든다.
+    warnings: list[str] = field(default_factory=list)
 
     def reject(self, code: str, why: str) -> None:
         self.ok = False
         self.codes.append(code)
         self.reasons.append(why)
 
+    def warn(self, why: str) -> None:
+        self.warnings.append(why)
+
     def as_dict(self) -> dict:
         return {"ok": self.ok, "codes": list(self.codes),
                 "reasons": list(self.reasons),
                 "trial_family_id": self.trial_family_id,
                 "trial_number": self.trial_number,
-                "trials_used": self.trials_used}
+                "trials_used": self.trials_used,
+                "warnings": list(self.warnings)}
 
 
 def _hyp_view(proposal: dict) -> dict:
@@ -201,6 +208,14 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"증액은 CEO 결정이 필요하다")
 
     # ③ 기각 이력 대응. **회사가 이미 산 실험을 다시 사지 않는다.**
+    #
+    # ▶ 전제: "이미 샀어야" 이 규칙이 성립한다 (2026-08-11 재설계)
+    #   환류의 목적은 **같은 실험을 두 번 사지 않는 것**이다. 그런데 이 검사가
+    #   `trials_used` 를 보지 않아서, **이 계열에서 한 번도 실행된 적이 없는데도**
+    #   교훈이 있다는 이유로 막았다(실측: `기존 실행 0, 환류 1` 인데
+    #   DUPLICATE_UNADDRESSED). 그건 중복 방지가 아니라 **신규 차단**이고,
+    #   아직 아무도 해보지 않은 가설이 영영 실험되지 못하는 교착이 된다.
+    #   가설은 실험해서 경험을 쌓아야 하고, 막는 것은 그 경험이 생긴 뒤다.
     needed: set[str] = set()
     for o in past:
         if str(o.get("decision")) in REJECTING:
@@ -208,9 +223,18 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     prior = proposal.get("prior_check") or {}
     answered = set((prior.get("lessons_addressed") or {}).keys())
     missing = sorted(needed - answered)
-    if missing:
+    if missing and r.trials_used > 0:
         r.reject("DUPLICATE_UNADDRESSED",
-                 f"같은 계열의 기각 교훈에 대응이 없다: {missing}")
+                 f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
+                 f"그 교훈에 대응이 없다: {missing}")
+    elif missing:
+        # 실행 0인데 기각 교훈이 있다 = 원장이 어긋났다는 신호다(다른 계열의
+        # 결과가 섞였거나 정리가 덜 됐다). **막지 않고 알린다** - 여기서 막으면
+        # 데이터 불일치가 곧 신규 실험 금지가 된다.
+        r.warn(
+            f"이 계열의 실행 기록은 0인데 기각 교훈이 있다: {missing}. "
+            "원장 정합성을 확인하되, 아직 실행된 적이 없으므로 접수는 막지 않는다."
+        )
     return r
 
 
@@ -480,11 +504,26 @@ def _check_trial_count_comes_from_executions_not_outcomes():
 
 
 def _check_unaddressed_lessons_block():
-    """**회사가 이미 산 실험을 다시 사지 않는다.**"""
+    """**회사가 이미 산 실험을 다시 사지 않는다.** 단, 산 적이 있어야 한다."""
     past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE", "COST_SENSITIVE"]}]
-    g = gate0(_prop(), past_outcomes=past)
+    g = gate0(_prop(), trials_used=1, past_outcomes=past)
     assert not g.ok and "DUPLICATE_UNADDRESSED" in g.codes
     assert "BEAR_FRAGILE" in g.reasons[-1] and "COST_SENSITIVE" in g.reasons[-1]
+
+
+def _check_never_run_family_is_not_blocked_by_lessons():
+    """**실행 0인 계열은 교훈이 있어도 막지 않는다** (2026-08-11 재설계).
+
+    환류의 목적은 같은 실험을 두 번 사지 않는 것이다. 한 번도 실행되지 않은
+    계열을 막으면 그건 중복 방지가 아니라 신규 차단이고, 아직 아무도 해보지
+    않은 가설이 영영 실험되지 못하는 교착이 된다. 실측에서 실제로 그렇게 막혔다.
+    """
+    past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE"]}]
+    g = gate0(_prop(), trials_used=0, past_outcomes=past)
+    assert g.ok, g.as_dict()
+    assert "DUPLICATE_UNADDRESSED" not in g.codes, g.as_dict()
+    # 조용히 통과시키지는 않는다 - 원장이 어긋났다는 신호이므로 경고로 남긴다.
+    assert g.warnings and "실행 기록은 0" in g.warnings[-1], g.as_dict()
 
 
 def _check_addressed_lessons_pass():
@@ -712,6 +751,7 @@ if __name__ == "__main__":
     _check_trial_count_comes_from_executions_not_outcomes()
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
+    _check_never_run_family_is_not_blocked_by_lessons(); print("  실행 0 계열은 안 막음    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
