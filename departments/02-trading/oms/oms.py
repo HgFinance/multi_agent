@@ -48,12 +48,14 @@ sys.path.insert(0, str(_DEPT / "capability"))
 from contracts import (
     BROKER_TERMINAL_STATES,
     BrokerOrderState,
+    ExecutionAuthority,
     IntentState,
     OrderIntent,
     RiskDecision,
     Side,
     can_transition,
 )
+from strategy_switch import SWITCHBOARD, StrategyDisabled, StrategySwitchboard
 from derivatives import (
     CERTIFICATION_REQUIRED,
     CapabilityProfile,
@@ -125,6 +127,13 @@ class OrderIntentRecord:
     risk_decision_id: UUID | None = None
     risk_approved_qty: Decimal | None = None
     risk_expires_at: datetime | None = None
+    # ▶ 실행 권한 출처 (2026-08-11)
+    #   Risk 승인은 "한도 안인가" 만 답한다. 자본을 걸어도 되는지는 사람 서명이
+    #   답하고, 그 서명이 **전략 승격**인지 **건별 승인**인지가 여기 남는다.
+    #   기본이 None 인 것이 핵심이다 - 아무도 허락하지 않은 주문은 나가지 않는다.
+    authority: ExecutionAuthority | None = None
+    authority_ref: str | None = None          # promotion_id 또는 approval_id
+    authority_expires_at: datetime | None = None
     version: int = 0
 
     @property
@@ -367,9 +376,13 @@ def _now() -> datetime:
 
 class OMS:
     def __init__(self, store: OrderStore | None = None, adapter: str = "paper",
-                 capability: CapabilityProfile | None = None) -> None:
+                 capability: CapabilityProfile | None = None,
+                 strategy_switchboard: StrategySwitchboard | None = None) -> None:
         self.store = store or OrderStore()
         self.adapter = adapter
+        # 전략 가동 스위치. 기본은 공용 판이지만 시험에서는 갈아끼운다.
+        # 전송 시점에 여기를 다시 본다(`submit`).
+        self.strategy_switchboard = strategy_switchboard or SWITCHBOARD
         # F31. 선언이 없으면 현물(EQUITY)만 받는다 - 파생·공매도는 Profile과
         # Certification이 있어야 열린다. 없는 것이 곧 허용이 되지 않게 한다.
         self.capability = capability
@@ -584,6 +597,25 @@ class OMS:
             self.store.revalidate_risk_decision(rec, order)
         if rec.risk_decision_id is None:
             raise OMSError("Risk 승인이 없는 주문은 전송할 수 없습니다")
+        # ▶ 실행 권한 관문 (2026-08-11)
+        #   Risk 승인은 "한도 안인가" 만 답한다. **자본을 걸어도 되는가** 는
+        #   사람 서명이 답하고, 그 서명이 어디 있는지가 authority 다.
+        #   없으면 보내지 않는다 - 기본값이 None 인 것이 이 관문의 핵심이다.
+        if rec.authority is None or not (rec.authority_ref or "").strip():
+            raise OMSError(
+                "실행 권한 출처가 없는 주문은 전송할 수 없습니다 "
+                "(전략 승격 또는 사용자 건별 승인이 필요합니다)"
+            )
+        if rec.authority_expires_at is not None and when >= rec.authority_expires_at:
+            raise OMSError("실행 권한이 만료됐습니다. 재승인이 필요합니다")
+        if rec.authority is ExecutionAuthority.STRATEGY:
+            # **전송 시점에 다시 본다.** 생성 때 켜져 있었다고 지금도 켜져 있다고
+            # 가정하지 않는다 - 사용자가 스위치를 내린 순간, 아직 안 나간 주문은
+            # 나가면 안 된다(Risk 재검증과 같은 이유).
+            try:
+                self.strategy_switchboard.require_enabled(rec.authority_ref or "")
+            except StrategyDisabled as exc:
+                raise OMSError(str(exc)) from exc
         if rec.state is not IntentState.READY_TO_SUBMIT:
             raise OMSError(f"Intent가 전송 가능한 상태가 아닙니다: {rec.state}")
         if rec.risk_expires_at is not None and when >= rec.risk_expires_at:
@@ -833,12 +865,32 @@ if __name__ == "__main__":
             return
         raise AssertionError(f"막혔어야 함: {why}")
 
+    _TEST_STRATEGY = "STRAT-TEST"
+
+    def grant(oms, rec):
+        """자체 점검용: 전략 권한 + 스위치 ON. 본 코드 경로가 아니라 시험 준비다."""
+        rec.authority = ExecutionAuthority.STRATEGY
+        rec.authority_ref = _TEST_STRATEGY
+        oms.strategy_switchboard.enable(
+            _TEST_STRATEGY, actor="user:self-check", reason="자체 점검"
+        )
+        return rec
+
     def approved_order(oms, key, qty="100", **over):
-        """심사를 통과시켜 전송 직전까지 만든다."""
+        """심사를 통과시켜 전송 직전까지 만든다.
+
+        Risk 승인만으로는 전송되지 않는다(2026-08-11) - 자본을 걸어도 되는지는
+        사람 서명이 답한다. 여기서는 전략 권한을 붙이고 스위치를 켜 둔다.
+        """
         i = make_intent(key, qty, **over)
         rec = oms.register_intent(i)
         oms.request_risk_review(rec)
         oms.apply_risk_decision(rec, approval(i, qty))
+        rec.authority = ExecutionAuthority.STRATEGY
+        rec.authority_ref = _TEST_STRATEGY
+        oms.strategy_switchboard.enable(
+            _TEST_STRATEGY, actor="user:self-check", reason="자체 점검"
+        )
         return i, rec, oms.create_broker_order(rec, i)
 
     # 1. Risk 승인 전에는 Broker Order 자체가 생기지 않는다 (DoD 2번)
@@ -866,6 +918,14 @@ if __name__ == "__main__":
     assert rec.state is IntentState.READY_TO_SUBMIT
     o = oms.create_broker_order(rec, i)
     assert o.state is BrokerOrderState.CREATED
+    # ▶ Risk 승인만으로는 못 나간다 - 실행 권한 관문(2026-08-11)
+    raises(lambda: oms.submit(o, rec), "실행 권한 없는 전송")
+    rec.authority = ExecutionAuthority.STRATEGY
+    rec.authority_ref = _TEST_STRATEGY
+    # ▶ 승격(자격)만으로도 못 나간다 - 사용자가 스위치를 켜야 한다
+    oms.strategy_switchboard.disable(_TEST_STRATEGY, actor="user:self-check", reason="시험")
+    raises(lambda: oms.submit(o, rec), "꺼진 전략의 전송")
+    oms.strategy_switchboard.enable(_TEST_STRATEGY, actor="user:self-check", reason="시험")
     oms.submit(o, rec)
     oms.on_broker_event(o, "ack", "brk_ack_1", now, {"broker_order_id": "B-1"})
     assert o.broker_order_id == "B-1"
@@ -893,6 +953,8 @@ if __name__ == "__main__":
     # 6. 초과 체결 거부 (DoD - filled <= requested)
     oms3 = OMS()
     i3, rec3, o3 = approved_order(oms3, "idem_0003")
+    grant(oms3, rec3)
+
     oms3.submit(o3, rec3)
     oms3.on_broker_event(o3, "ack", "b3_ack", now)
     raises(lambda: oms3.on_broker_event(o3, "fill", "b3_f1", now,
@@ -906,6 +968,8 @@ if __name__ == "__main__":
     oms4.request_risk_review(rec4)
     oms4.apply_risk_decision(rec4, approval(i4, minutes=1))
     o4 = oms4.create_broker_order(rec4, i4)
+    grant(oms4, rec4)
+
     raises(lambda: oms4.submit(o4, rec4, when=now + timedelta(minutes=2)), "만료된 승인")
 
     # 8. 축소 승인(RESIZED)은 Broker Order 수량을 줄인다
@@ -917,12 +981,16 @@ if __name__ == "__main__":
     assert rec5.state is IntentState.READY_TO_SUBMIT
     o5 = oms5.create_broker_order(rec5, i5)
     assert o5.requested_quantity == Decimal(40), "축소 승인이 반영 안 됨"
+    grant(oms5, rec5)
+
     oms5.submit(o5, rec5)
     assert o5.state is BrokerOrderState.SUBMITTED
 
     # 9. 상태 불명은 추정하지 않고, Reconciliation으로만 벗어난다
     oms6 = OMS()
     i6, rec6, o6 = approved_order(oms6, "idem_0006")
+    grant(oms6, rec6)
+
     oms6.submit(o6, rec6)
     oms6.mark_unknown(o6, "브로커 응답 없음")
     assert o6.state is BrokerOrderState.UNKNOWN
@@ -944,6 +1012,8 @@ if __name__ == "__main__":
     # 10. 취소는 CANCEL_PENDING을 거친다. 요청 즉시 취소로 쓰지 않는다
     oms7 = OMS()
     i7, rec7, o7 = approved_order(oms7, "idem_0007")
+    grant(oms7, rec7)
+
     oms7.submit(o7, rec7)
     oms7.on_broker_event(o7, "ack", "b7_ack", now)
     oms7.request_cancel(o7, "장 마감 임박")
@@ -1044,7 +1114,11 @@ if __name__ == "__main__":
     # 아직 아무 체결도 없다 -> 판정을 서두르지 않는다
     assert oms8.evaluate_group(grp).group_status is GroupStatus.EXECUTING
 
+    grant(oms8, rec8a)
+
     oms8.submit(o8a, rec8a)
+    grant(oms8, rec8b)
+
     oms8.submit(o8b, rec8b)
     oms8.on_broker_event(o8a, "ack", "wf_a_ack", now)
     oms8.on_broker_event(o8b, "ack", "wf_b_ack", now)
