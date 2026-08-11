@@ -38,6 +38,11 @@
   python import_external_microstructure.py --plan            # 무엇을 가져올지만 보고
   python import_external_microstructure.py --run --date 2026-07-29
   python import_external_microstructure.py --run             # 남은 전 구간
+  python import_external_microstructure.py --run --redo --date 2026-08-10   # 구멍 메우기
+
+▶ **'하루'는 UTC 기준이다** (`ts::date`). 2026-08-11 = 8/11 09:00 ~ 8/12 09:00 KST.
+  장전 시간외(08:00~09:00 KST)는 **전날 하루에 들어간다.** 하이퍼테이블 청크
+  경계가 09:00 인 것도 같은 이유다. KST 자정으로 하루를 셈하면 어긋난다.
 """
 
 from __future__ import annotations
@@ -310,8 +315,24 @@ def main(argv: list[str]) -> int:
         print(f"  기존 삭제: ticks {before['market_ticks']:,} / "
               f"quotes {before['market_quotes']:,}")
 
-    done = done_days("market_ticks")
+    # ▶ --redo: 이미 이관한 날을 **다시 받는다** (2026-08-11)
+    #   삽입이 `on conflict do nothing` 이라 재실행은 빠진 행만 채우고 있는
+    #   행은 건드리지 않는다. 그래서 구멍을 메우는 데 **삭제가 필요 없다** -
+    #   드롭 후 재적재보다 훨씬 안전하고, 그날의 나머지를 위험에 두지 않는다.
+    #
+    #   왜 필요했나: 이관기의 '하루'는 **UTC 기준**이다(`ts::date`). 즉
+    #   2026-08-11 = 8/11 09:00 ~ 8/12 09:00 KST 이고, 장전 시간외
+    #   (08:00~09:00 KST)는 **전날 하루에 속한다.** 이걸 모르고 KST 자정
+    #   기준으로 하루를 지웠다가 그 한 시간(체결 912,608행)이 비었는데,
+    #   done_days 가 그날을 완료로 보고 있어 다시 받을 방법이 없었다.
+    #
+    #   범위를 좁히려면 --date 와 같이 쓴다. --redo 만 주면 전 구간을 다시
+    #   훑으므로 실수로 몇 시간을 태우기 쉽다.
+    done = set() if "--redo" in argv else done_days("market_ticks")
     todo = [d for d in days if d not in done]
+    if "--redo" in argv and not only:
+        print("  ⚠ --redo 를 --date 없이 줬다 - 전 구간을 다시 훑는다"
+              f" ({len(todo)}일). 의도한 것이 아니면 지금 멈춰라.")
     print(f"{MODULE_VERSION}")
     print(f"  원천 거래일 {len(days)}건 / 이미 이관 {len(done)}건 / 남은 {len(todo)}건")
     if todo:
