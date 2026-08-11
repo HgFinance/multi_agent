@@ -14,6 +14,8 @@
 > 목적: 팀원별 진척도, 애로사항, 선행 의존성과 다음 실행 순서를 한곳에서 관리한다.
 > 완료 조건 기준: [Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 
+> **현재 Compose 기준선 (2026-08-10)**: 루트 `docker-compose.yml`과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이 현재 로컬 통합 Runtime의 기준이다. Compose 병합 결과는 기본 26개 서비스이며 `portfolio`와 `dashboard` Profile을 모두 켜면 29개다. 선언 수와 실제 실행 상태는 `CONFIG_VERIFIED`, `TEST_VERIFIED`, `RUNTIME_VERIFIED`로 구분한다.
+
 ## 1. 지금 프로젝트는 어디까지 왔는가
 
 이 프로젝트는 리서치 Data Plane을 넘어 Hermes와 본부 도구가 연결되는 단계에 들어왔다. LS 실시간 수집,
@@ -68,7 +70,18 @@ Feature Backlog의 End-to-End 완료 조건으로만 판정한다.
 
 ### 3.2 실제 실행 중인 서비스
 
-루트 `docker-compose.yml`은 10개 기본 서비스를 정의하며 감사 시 모두 실행 중이었다.
+현재 Compose 선언은 다음과 같이 판정한다.
+
+| 범위 | Compose 기준 | 판정 의미 |
+|---|---|---|
+| 기본 기동 | 26개 서비스 | `docker compose config --services` 통과. 실행 상태는 별도 확인 |
+| `portfolio` Profile | `portfolio-bff`, `portfolio-worker` 추가 | 기본 기동 제외 |
+| `dashboard` Profile | `hermes-dashboard` 추가 | 기본 기동 제외. 자체 인증 필요 |
+| 전체 Profile 포함 | 29개 서비스 | `docker compose --profile portfolio --profile dashboard config --services` 통과 |
+
+현재 환경에서 Docker socket에 접근할 수 없는 경우 `RUNTIME_VERIFIED`를 임의로 부여하지 않는다. 아래 2026-08-03 서비스 표는 당시 감사의 Historical snapshot이다.
+
+#### Historical snapshot (2026-08-03)
 
 | Service | 감사 시 상태 | 판정 |
 |---|---|---|
@@ -251,7 +264,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | `QA-01` | `IMPLEMENTED` | QA API Container와 Trace/Decision 영속화 | Claim→Evidence→Decision→Finding Replay |
 | `QA-02` | `IMPLEMENTED` | Workforce Tool Allowlist와 실제 Evidence API 연결 | 미허용 Tool 차단과 Trace |
 | `QA-03` | `BLOCKED` | 개인 GPU 주소 제거와 Model Gateway 전환 | 개인 IP 0건, Gateway Trace |
-| `MODEL-03` | `BLOCKED` | Risk·QA Hermes Head 모델 선언과 Worker Registry 일치 | Head/Worker 계층 Contract Check 통과 |
+| `MODEL-03` | `IMPLEMENTED` | Risk·QA Hermes Head 모델 선언과 Worker Registry 일치 | `scripts/check_hermes_profiles.py` 실행 결과 Risk·QA Head(openai-codex)·Worker(qwen3:1.7b) 계약 위반 0건(2026-08-10 재확인). 잔여 경고는 trading/quant-backtest/accounting-portfolio의 별개 `tool_allowlist` 미선언(`HR-04`)이며 Risk·QA와 무관. Bedrock 전환·공용 GPU Gateway·Model Digest/Eval Version 결정은 별도로 `MODEL-01`에 남아 있다 |
 | `OPS-01` | `BLOCKED` | Risk·QA 운영 Credential과 Governed FK 준비 | Preflight 필수 항목 전부 `true` |
 | `RPT-01` | `IMPLEMENTED` | 결정론적 Report Artifact·Notion Projection 운영 계약 | DB Artifact Hash·Notion Page ID·재실행 멱등성 |
 
@@ -288,13 +301,13 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 |---|---|---|---|
 | P0 | 전체 pytest가 같은 Smoke 파일명으로 수집 실패 | CI 신뢰 불가 | 도현·영주, `CI-01` |
 | P0 | 신규 Migration이 Schema 기대 목록에 없음 | CI 1건 실패 | 재일, `CI-06` |
-| P0 | Risk·QA 모델 선언과 Profile Checker 불일치 | Hermes 배포 기준 불명확 | 동규·영주, `MODEL-03` |
-| P0 | Compose에 Risk·QA·Trading·Accounting이 없음 | 전사 Runtime 불가 | 도현·동규, `PLAT-02` |
+| Historical resolved | Risk·QA 모델 선언과 Profile Checker 불일치 | 2026-08-10 `scripts/check_hermes_profiles.py` 재실행으로 Risk·QA 계약 위반 0건 확인. Bedrock/GPU Gateway 정책 결정만 `MODEL-01`에 남음 | `MODEL-03` 완료, 후속은 `MODEL-01` |
+| Historical resolved | Compose에 Risk·QA·Trading·Accounting이 없음 | 2026-08-03 당시의 누락. 현재 루트 Compose와 Department Fragment에 서비스 선언됨 | `PLAT-02` 후속: API·DB Runtime 검증 |
 | P0 | Execution·Risk·Accounting Canonical Row 0건 | Paper E2E 미완성 | 전 팀, Wave 2 |
 | P0 | QA 개인 GPU IP 하드코딩 | 재현성·보안·Failover 문제 | 동규, `QA-03` |
 | P0 | Risk·QA 필수 Credential 2개 누락 | Production Ingestion 불가 | 동규·영주, `OPS-01` |
 | P1 | AI Office npm High 취약점 13건 | Frontend 배포 위험 | 도현, `UI-03` |
-| P1 | Hermes Profile Tool Allowlist 미선언 — CEO·HR 2개는 해소(2026-08-03, GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4·3.6절 반영), 나머지 Owner 확인 필요 | 권한 경계 경고 | 해당 Owner, `HR-04` |
+| P1 | Hermes Profile Tool Allowlist 미선언 — CEO·HR 2개는 해소(2026-08-03, UNIFIED_DOMAIN_API_SPEC.md Governance/Workforce 절 반영), 나머지 Owner 확인 필요 | 권한 경계 경고 | 해당 Owner, `HR-04` |
 | P1 | Microstructure Feature 0건 | 전략·Risk Replay 제한 | 재일, `RQ-05` |
 | P1 | Kanban Bridge가 ADR만 있고 미구현 | Agent 상태는 Scripted | 도현·영주, `UI-02` |
 | P1 | Claude Host Proxy가 미커밋·미검증 | 구독 한도·보안·가용성 위험 | 재일·동규, `MODEL-04` |
@@ -329,7 +342,7 @@ Model Digest와 Eval Version을 함께 결정한다. 임시 모델 변경은 Che
 
 1. `CI-01`: CEO·HR Smoke Test 이름 또는 pytest 수집 범위를 고친다.
 2. `CI-06`: `20260802002200` Migration을 Schema Contract에 추가한다.
-3. `MODEL-03`: Risk·QA 모델 선언과 Profile Checker를 의도한 Provider로 일치시킨다.
+3. ~~`MODEL-03`~~ — 2026-08-10 `check_hermes_profiles.py` 재확인으로 완료(위 5.공통 Blocker 참고).
 4. Python 명시 Suite와 AI Office clean build/Test를 GitHub Actions에 추가한다.
 5. Credential Integration은 별도 Job으로 분리하고 Unit Test는 Clean Runner에서 한 명령으로 통과시킨다.
 
@@ -455,9 +468,7 @@ Owner / Reviewer:
 
 ## 11. 현재 결론
 
-Research는 실제 수집·MCP·Hermes·PIT·DQ까지 가장 앞서 있고 Risk·QA도 Prototype을 넘어 API, Event,
-Repository와 Harness를 갖췄다. 그러나 Risk·QA는 아직 서비스로 실행되지 않고 Trading·Accounting·Governance는
-Canonical DB를 사용하지 않는다. 다음 성공 기준은 코드 수가 아니라 **한 Paper Investment Case의 전사 폐쇄 루프**다.
+Research는 실제 수집·MCP·Hermes·PIT·DQ까지 가장 앞서 있고 Risk·QA·CEO·Trading·Accounting·Workforce 서비스도 현재 Compose에 선언돼 있다. 다만 서비스 선언과 실제 기동·DB 입출력·Canonical Row는 별도 Gate다. 다음 성공 기준은 서비스 수가 아니라 **한 Paper Investment Case의 전사 폐쇄 루프**다.
 
 매일의 Scrum은 이 문서의 Task ID와 팀별 `Yesterday / Today / Blocker`를 기준으로 진행하며, 실행 증거가
 바뀔 때 중앙 상태와 담당자 가이드를 같은 PR에서 함께 갱신한다.

@@ -19,8 +19,12 @@ SRC_ROOT="$REPO_ROOT/departments"
 # HERMES_HOME으로 명시적으로 override한다.
 DEST_ROOT="${HERMES_HOME:-$HOME/.hermes}/profiles"
 
-# Docker Compose와 동일하게 모든 부서의 Runtime Profile을 canonical root 아래에서
-# 찾는다. 구형 ~/.hermes-<부서> 경로로 fallback하지 않는다.
+# 2026-08-02 (재일): 당시 docker-compose.yml 은 부서별로 ~/.hermes-<부서> 를
+# 따로 마운트했다. 2026-08-10 부로 docker-compose.yml 은 통일된
+# ~/.hermes/profiles/<부서> (AWS: /home/ubuntu/.hermes/profiles/<부서>) 로
+# 정리됐고 DEST_ROOT 가 그 기본값이다. 아래 dest_for() 의 per_dept 분기는 그
+# 구 경로가 남아있는 로컬 설치본을 위한 하위호환 fallback일 뿐, 새로 만들
+# 필요는 없다.
 dest_for() {
   local dept="$1"
   echo "$DEST_ROOT/$dept"

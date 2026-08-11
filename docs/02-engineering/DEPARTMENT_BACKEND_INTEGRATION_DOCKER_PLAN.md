@@ -12,6 +12,10 @@
 
 ## 1. 이 문서가 결정하는 것
 
+> **현재 Compose 기준선 (2026-08-10)**: 루트 [`docker-compose.yml`](../../docker-compose.yml)은 `name: hedgefund`와 Compose `include`로 CEO Office·Trading·Accounting/Portfolio·Agent Workforce Fragment를 병합한다. 기본 Compose 서비스는 26개이고 `portfolio`·`dashboard` Profile을 모두 켜면 29개다. 현재 서비스·포트·볼륨은 [로컬 Compose Runtime 기준선](LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다. `docker compose config --services`는 설정 검증이며 실제 기동·health·DB 입출력 검증은 별도다.
+
+현재 Compose에는 `risk-api`, `audit-api`, `qa-worker`, `trading-api`, `accounting-api`, `governance-api`, `workforce-api`와 각 선언된 Hermes가 포함돼 있다. 아래의 “미구현/미연결” 표현은 Container 선언 여부가 아니라 API 연결, Canonical DB Row, Event Consumer 또는 Acceptance Scenario가 남아 있다는 의미로만 사용한다.
+
 이 프로젝트에는 이미 본부별 폴더, Domain Model, 일부 FastAPI, 데이터 수집기와 Docker Compose가 있다. 그러나 다음 내용은 여러 문서에 나뉘어 있었다.
 
 - 어느 본부가 어떤 Backend Service를 소유하는가
@@ -46,10 +50,7 @@
 
 ### 2.2 현재 Compose의 의미
 
-루트 `docker-compose.yml`은 리서치 수집, 조회 API, MCP, Research·Quant Hermes와 TimescaleDB를 실제로
-실행하는 초기 Compose다. 2026-08-03 감사에서 기본 10개 Service 실행을 확인했지만 전사 Backend
-Topology를 표현한 최종 파일은 아니다. 같은 PC의 별도 `trading-*` Compose와 Redis는 이 프로젝트
-Runtime이 아니며 제품이나 Acceptance Test가 의존해서는 안 된다.
+루트 `docker-compose.yml`은 현재 전사 로컬 통합 Compose다. 기본 26개 서비스와 선택 Profile 3개 서비스를 선언하며, 같은 PC의 별도 `trading-*` Compose와 Redis는 이 프로젝트와 분리된 외부 프로젝트로 취급한다. 제품이나 Acceptance Test는 그 외부 프로젝트에 의존하지 않는다. 실제 서비스 상태는 `docker compose ps`와 health/API/DB smoke test로 별도 기록한다.
 
 현재 정상 동작하는 수집기를 한 번에 재작성하지 않는다. 다음 구조로 옮길 때도 Service 이름, Volume과 Migration 순서를 유지하면서 한 서비스씩 이동한다.
 
@@ -129,7 +130,7 @@ Kafka는 현재 팀 규모와 운영 복잡도에 비해 과하므로 P0·P1 기
 | `qa.finding.opened` | `qa.finding.v1` | `action=OPENED/ESCALATED/CLOSED`로 표현 |
 | `qa.incident.opened` | `incident.opened.v1` | Incident Domain Event로 통합 |
 
-`investment_case.*`는 UI나 기존 Test를 위한 임시 Projection Alias로만 유지할 수 있다. 새 Producer는 Canonical Event만 발행하고, Alias가 필요하면 별도 Compatibility Projector가 생성한다. P0 Contract 확정 시 [Risk·QA API 설계](RISK_QA_DOMAIN_API_SPEC.md)와 [Governance·Workforce API 설계](GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md)의 Event 표도 이 기준으로 통일한다.
+`investment_case.*`는 UI나 기존 Test를 위한 임시 Projection Alias로만 유지할 수 있다. 새 Producer는 Canonical Event만 발행하고, Alias가 필요하면 별도 Compatibility Projector가 생성한다. P0 Contract 확정 시 [통합 Domain API 설계](UNIFIED_DOMAIN_API_SPEC.md)의 Risk·QA·Governance·Workforce Event 표를 기준으로 통일한다.
 
 ### 3.6 Outbox 적용 범위
 
@@ -721,6 +722,8 @@ Service마다 별도 Supabase Role 또는 Service Credential을 사용한다. �
 
 ## 10. Docker Compose 구조
 
+> **현재 기준 (2026-08-10)**: 실제 파일은 루트 `docker-compose.yml`이며, `include` 대상은 `departments/00-ceo-office/compose.yaml`, `departments/02-trading/compose.yaml`, `departments/05-accounting-portfolio/compose.yaml`, `departments/07-agent-workforce/compose.yaml`이다. Research·Risk·QA·공통 Platform·Profile 서비스는 현재 루트 파일에 정의돼 있다. 아래의 더 세분화된 디렉터리 트리는 장기 목표 구조이며 현재 저장소 구조로 읽지 않는다.
+
 Docker Compose 2.20.3 이상의 `include`를 사용해 본부가 자기 Compose Fragment를 소유하도록 한다.
 
 ```text
@@ -744,7 +747,16 @@ multi_agent/
     └── ...
 ```
 
-루트 `compose.yaml`은 다음 역할만 한다.
+아래 include 예시는 장기 목표 구조의 참고용이다. 현재 적용 명령과 서비스 목록은 루트 `docker-compose.yml` 및 [로컬 Compose Runtime 기준선](LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 사용한다.
+
+현재 검증 명령:
+
+```bash
+docker compose config --services
+docker compose --profile portfolio --profile dashboard config --services
+docker compose up -d
+docker compose ps
+```
 
 ```yaml
 name: hedgefund
@@ -1230,8 +1242,7 @@ B0 Contract와 B1 Runtime 기준을 통과하지 않으면 다음 본부가 운�
 - [저장소 본부 구조](REPOSITORY_DEPARTMENT_STRUCTURE.md)
 - [기술 스택 결정](TECH_STACK_DECISIONS.md)
 - [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
-- [Risk·QA Domain API](RISK_QA_DOMAIN_API_SPEC.md)
-- [Governance·Workforce Domain API](GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md)
+- [통합 Domain API](UNIFIED_DOMAIN_API_SPEC.md)
 - [AI Office Frontend](AI_OFFICE_FRONTEND_PLAN.md)
 - [데이터 거버넌스](../03-data/DATA_GOVERNANCE_GUIDE.md)
 - [리서치·퀀트 팀 가이드](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md)

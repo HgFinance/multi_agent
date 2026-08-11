@@ -1,6 +1,8 @@
 # Risk·AI QA/감사본부 Docker 컨테이너 명세서
 
-담당: 동규 (리스크/QA) · 작성: 2026-08-03
+담당: 동규 (리스크/QA) · 작성: 2026-08-03 · 기준 갱신: 2026-08-10
+
+현재 서비스·Profile·포트의 기준은 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](LOCAL_COMPOSE_RUNTIME_BASELINE.md)이며, 이 문서는 Risk·QA 서비스의 상세 운영 절차만 다룬다.
 근거: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) 6.4·6.7·9·10절, [HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md)(재일, Hermes 공통 절차)
 
 Hermes 로그인·프로필 동기화·모델/과금 같은 8부서 공통 절차는 여기서 반복하지 않는다.
@@ -73,11 +75,12 @@ research-hermes/quant-hermes와 같은 패턴 — Backend Image에 Hermes를 넣
 | 항목 | risk-hermes | qa-hermes |
 |---|---|---|
 | 이미지 | `nousresearch/hermes-agent:latest` | `nousresearch/hermes-agent:latest` |
-| volume | `${USERPROFILE}/.hermes-risk-management:/opt/data` | `${USERPROFILE}/.hermes-qa-department:/opt/data` |
-| API 키 | `OPENAI_API_KEY` | `ANTHROPIC_API_KEY` |
+| volume | `/home/ubuntu/.hermes/profiles/risk-management:/opt/data` | `/home/ubuntu/.hermes/profiles/qa-department:/opt/data` |
+| Provider | Codex(`config.yaml`+`auth.json`, 하드코딩 안 함) | Codex(`config.yaml`+`auth.json`, 하드코딩 안 함) |
 | command | `gateway run` | `gateway run` |
 
-키 배정은 CLAUDE.md 표(risk=OpenAI, qa=Anthropic)를 그대로 따른다. 로그인·`auth.json` 취급·프로필 동기화
+Provider는 컨테이너 env가 아니라 각 Profile의 `/opt/data/config.yaml`(`provider:`)과 `auth.json`이 결정한다
+(risk/qa 둘 다 2026-08-10 기준 Codex 배정 — CLAUDE.md 표). 로그인·`auth.json` 취급·프로필 동기화
 (`sync_hermes_profiles.sh`)는 [HERMES_DOCKER_RUNBOOK.md](HERMES_DOCKER_RUNBOOK.md) 4-3절을 그대로 따른다 — 여기서 반복하지 않는다.
 
 ## 4. 자원 한도

@@ -1,5 +1,7 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
+> **Local Compose runtime baseline (2026-08-10)**: 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. Compose 병합 결과는 기본 서비스 26개이며 `portfolio`와 `dashboard` Profile을 모두 켜면 29개다. 이 서비스 수는 Hermes Head·Worker의 논리적 수와 별도 축이다. `docker compose config`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
+
 > **Current runtime override (2026-08-07)**: 현재 실행 계층은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)로 구성된 총 29명이다. 도현님 담당 부서는 Trading 3명(LLM 2 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 상세 역할 경계는 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
 
 > 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, LLM 직원은 직원별 독립 LangGraph Worker Graph와 Ollama `qwen3:1.7b`를 사용한다. 결정론 runner는 별도 Python 실행 경로로 Trading·Risk·QA·Accounting의 계산·검증을 담당하며 LLM Registry와 구분한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
@@ -24,10 +26,7 @@
 > 실행 현황·2주 통합 보드·본부 간 의존성·Daily Scrum: [실행 현황과 통합 계획 v2.2](PROJECT_IMPLEMENTATION_STATUS.md)
 > 
 
-2026-08-03 기준 Research MCP와 Research·Quant Hermes까지 Docker에서 실행되며 Risk·QA는 API,
-Repository, Redis Event, Harness와 결정론적 Report Projection이 구현됐다. 다만 Risk·QA·Trading·
-Accounting·Governance Runtime과 전사 Paper Case는 아직 연결되지 않았다. 장기 단계 설명보다 현재
-실행 증거, 08-03~08-14 통합 순서와 개인 작업은 위 v2.2 문서를 우선한다.
+현재 루트 Compose에는 Research 수집·조회·MCP·Hermes, TimescaleDB, Redis, Risk·QA API/Worker/Hermes, CEO·Trading·Accounting·Workforce API/Worker/Hermes가 선언돼 있다. 다만 Compose 선언은 Paper Investment의 전체 폐쇄 루프를 보증하지 않는다. Order→Risk→Fill→Journal→Position/NAV와 QA/Audit의 Canonical Row, API·DB 실입출력은 상태 문서의 `CONFIG_VERIFIED`·`TEST_VERIFIED`·`RUNTIME_VERIFIED`를 구분해 기록한다. 과거 날짜가 붙은 실행 수치와 감사 결과는 Historical snapshot으로만 해석한다. 현재 Compose의 서비스·Profile·포트·볼륨 기준은 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다.
 
 ## 1. 프로젝트 개요
 
@@ -265,6 +264,8 @@ Hermes는 회사 운영 및 에이전트 오케스트레이션 계층을 담당�
 - 분석 예산, 시간 제한 및 호출 정책 관리
 
 ### 5.2 Investment Committee Service
+
+> **현재/목표 구분**: 위 다이어그램은 전체 제품의 목표 논리 아키텍처다. 2026-08-10 현재 로컬 Compose에서 실제로 선언된 실행 경계는 수집기·`market-api`·`research-api`·`research-mcp`·TimescaleDB·Redis·Risk/QA API·Worker·Hermes와 CEO/Trading/Accounting/Workforce API·Worker·Hermes다. Streaming Scoring, Investment Committee, Production Broker, HA DB와 Cloud Model Gateway는 목표 또는 별도 Acceptance 대상이며 현재 Compose 서비스 수에 포함된 것으로 해석하지 않는다. 현재 서비스 목록은 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)를 따른다.
 
 TradingAgents의 역할 분리와 토론 구조를 참고한 금융 도메인 전용 상태 그래프다.
 
@@ -1190,16 +1191,18 @@ Paper 환경은 Version이 있는 Borrow Availability와 Borrow Fee Scenario를 
 | Hot State | Redis | Managed Redis 호환 Cluster |
 | 관계형 DB | Supabase PostgreSQL | Multi-AZ/Zone HA PostgreSQL 또는 검증된 Supabase 운영 구성 |
 | Vector Search | pgvector | Managed pgvector 또는 Hybrid Search Engine |
-| 시계열 | 별도 TimescaleDB, 리서치·퀀트 직접 접근 | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
+| 시계열 | 별도 TimescaleDB. Collector·Research·Quant가 적재/직접 조회하고 그 외 본부는 `market-api` 사용 | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
 | Object Storage | Supabase private Storage | Versioning/Object Lock 지원 Object Storage |
 | 에이전트 상태 | 명시적 State Graph | 체크포인트 저장 |
 | 관측성 | OpenTelemetry + Prometheus + Grafana | Cloud-neutral Telemetry + 선택 Cloud의 Managed Monitoring |
 | 배포 | Docker Compose | Managed Container Platform, Kubernetes는 필요성 입증 후 검토 |
-| Secret/Key | 개발용 Secret Store | Managed Secret + KMS/HSM 검토 |
+| Secret/Key | 로컬 `.env`에서 서비스별 필요한 값만 주입 | Managed Secret + KMS/HSM 검토 |
 | Infrastructure | 수동 개발 환경 | 공급자별 Landing Zone + Terraform |
 | Delivery | 기본 CI | Workload Identity/OIDC + Registry + 서명 Artifact 승격 |
 
 초기에는 서비스 수를 과도하게 늘리지 않는다. 프로세스 경계가 필요한 실시간 수신, 에이전트 Worker, Risk/OMS를 우선 분리한다.
+
+현재 로컬 구현은 이 원칙을 루트 Compose로 구체화한다. `docker-compose.yml`은 `timescaledb`, Research 수집기·조회 API·MCP, `redis`, Risk·QA API/Worker, 8개 부서 계층의 선언된 Hermes와 CEO·Trading·Accounting·Workforce API/Worker를 병합한다. 기본 기동은 26개 서비스이고 `portfolio`·`dashboard` Profile을 모두 활성화하면 29개다. 이는 로컬 Integration Runtime의 현재 선언이며, 아래 Production 선택(Managed Container, HA DB, Object Storage)은 별도 전환 Gate를 통과해야 한다. 상세 목록과 포트는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다.
 
 ### 13.2 Hot Path와 Cold Path
 
@@ -1283,6 +1286,8 @@ RPO/RTO는 목표값이며 실제 Broker, Cloud, 데이터 공급자 계약과 �
 Capacity 증설보다 먼저 Load Shedding 우선순위를 정의한다. Position/Risk/Order 데이터가 리서치와 비보유 종목 분석보다 항상 우선한다.
 
 ### 13.7 Cloud Platform 선정과 AWS 후보안
+
+> **Runtime baseline alignment (2026-08-10)**: Production Advisory의 기준 토폴로지는 [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)의 AWS Pilot(`g6.xlarge`, Ubuntu 24.04, L4 GPU, EBS) 설계를 따른다. 이는 현재 로컬 Compose를 AWS에서 실행 중이라는 뜻이 아니라 전환 설계의 기준선이다. Production Cloud Provider의 최종 계약·Landing Zone·Managed Service 선택은 별도 승인 전까지 미확정이며, AWS·Azure·GCP·On-premise/Hybrid를 보안·비용·복구 기준으로 비교한다.
 
 현재 Cloud Provider는 확정하지 않는다. Production의 논리 경계와 계약을 먼저 확정하고 AWS, Azure, GCP 및 필요 시 On-premise/Hybrid를 동일한 기준으로 평가한다. 공급자 선정 전 애플리케이션은 Event Bus, Object Storage, Container Runtime, Secret Store, Model Provider와 Observability를 Adapter 및 OpenTelemetry 같은 개방형 계약 뒤에 둔다.
 
@@ -3721,6 +3726,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 에이전트 프롬프트보다 데이터와 Risk/OMS를 먼저 안정화해야 한다.
 
 ## 27. 다음 의사결정 항목
+
+현재 기준으로 로컬 개발·통합 Runtime은 `docker-compose.yml`과 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)로 고정되어 있다. Production Advisory는 [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)의 AWS Pilot을 기준으로 검토하지만, Cloud 계정·Managed DB·GPU/Model Gateway·Broker/Market Data 운영 계약은 아직 별도 의사결정 항목이다.
 
 아래 항목 중 가격 Data Plane은 확정됐으며, 나머지는 구현 또는 Production 전환 전에 결정한다.
 
