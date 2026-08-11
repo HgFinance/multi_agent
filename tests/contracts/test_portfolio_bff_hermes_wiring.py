@@ -51,7 +51,11 @@ def test_bff_dockerfile_pins_official_cli_without_gateway_command() -> None:
     dockerfile = (ROOT / "apps/api/Dockerfile").read_text(encoding="utf-8")
 
     assert "github.com/NousResearch/hermes-agent.git" in dockerfile
-    assert "ARG HERMES_AGENT_REF=" in dockerfile
+    assert "33f8e96a72945afb29f3bc9ef9991940f0bedcf" not in dockerfile
+    assert "ARG HERMES_AGENT_REF=v2026.8.3" in dockerfile
     assert "pip install --no-cache-dir /tmp/hermes-agent" in dockerfile
+    assert "command -v hermes" in dockerfile
+    assert "hermes --version" in dockerfile
+    assert "hermes kanban --help" in dockerfile
     assert 'CMD ["uvicorn"' in dockerfile
     assert 'command: ["gateway", "run"]' not in dockerfile
