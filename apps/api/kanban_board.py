@@ -11,6 +11,15 @@
   CLI 로는 카드마다 `show` 를 한 번씩 더 띄워야 해서 폴링 한 번에 프로세스가
   N개 뜬다. 보드는 SQLite 파일 하나이므로 read-only 로 여는 게 정직하다.
 
+▶ **윈도우 호스트에서는 파일을 직접 열면 안 된다** (2026-08-11 실측, 비싼 교훈)
+  보드는 WAL 모드다. 윈도우 호스트에서 `mode=ro` 로 열기만 해도 bind mount 위에
+  `-shm` 매핑이 생기고, 그 순간부터 **컨테이너 쪽 쓰기가 전부
+  `disk I/O error` 로 죽는다.** 부서 워커가 3분 12초짜리 조사를 마치고도
+  `kanban_complete` 를 못 써서 카드가 `running` 에 영원히 남았다 - 화면에는
+  "작업 중"으로 보였다. 원인은 dispatcher 도 권한도 아니고 **이 모듈의 읽기**였다.
+  그래서 `KANBAN_ACCESS_MODE=docker` 면 같은 SQL 을 컨테이너 안에서 돌린다.
+  리눅스(AWS)에서는 파일 직접 읽기가 정상이므로 기본은 `file` 이다.
+
 ▶ 여기서 하지 않는 것
   **쓰기를 하지 않는다.** 카드 생성·할당·완료·차단은 전부 에이전트의 일이다.
   이 모듈이 카드를 만들 수 있게 되는 순간 "누가 이 작업을 시켰나"가 흐려진다.
@@ -37,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,30 +120,102 @@ def board_path() -> Path:
     return Path.home() / ".hermes-shared-kanban" / "kanban.db"
 
 
-def _connect() -> sqlite3.Connection:
+# 보드를 어떻게 읽을 것인가. 위 경고 참고 - 윈도우에서는 `docker` 를 쓴다.
+KANBAN_ACCESS_MODE = os.getenv("KANBAN_ACCESS_MODE", "file").strip().lower()
+# 읽기를 대신 돌려 줄 컨테이너. 아무 부서나 되지만(보드는 공용) 이름은 명시한다.
+KANBAN_READER_CONTAINER = os.getenv("KANBAN_READER_CONTAINER", "hedgefund-qa-hermes")
+KANBAN_READER_DB = os.getenv("KANBAN_READER_DB", "/opt/kanban/kanban.db")
+
+# 두 모드가 **같은 SQL** 을 쓴다. 하나만 고치면 두 경로가 어긋나므로 여기 모은다.
+_SQL_TASKS = (
+    "select id, title, assignee, status, result, created_at, completed_at, "
+    "       last_failure_error, block_kind "
+    "from tasks where session_id = ? order by created_at"
+)
+_SQL_EVENTS = (
+    "select task_id, kind, payload from task_events "
+    "where task_id in ({marks}) "
+    "  and kind in ('completed','blocked','crashed','timed_out','gave_up','spawn_failed') "
+    "order by id"
+)
+_SQL_LINKS = "select parent_id, child_id from task_links where child_id in ({marks})"
+
+# 컨테이너 안에서 돌릴 조회 스크립트. **읽기 전용으로만 연다.**
+_READER_SCRIPT = f'''
+import json, sqlite3, sys
+db, session = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=5.0)
+conn.row_factory = sqlite3.Row
+try:
+    tasks = [dict(r) for r in conn.execute({_SQL_TASKS!r}, (session,))]
+    ids = [t["id"] for t in tasks]
+    events, links = [], []
+    if ids:
+        marks = ",".join("?" * len(ids))
+        events = [dict(r) for r in conn.execute({_SQL_EVENTS!r}.format(marks=marks), ids)]
+        links = [dict(r) for r in conn.execute({_SQL_LINKS!r}.format(marks=marks), ids)]
+finally:
+    conn.close()
+sys.stdout.write(json.dumps({{"tasks": tasks, "events": events, "links": links}}))
+'''
+
+
+def _fetch_file(session_id: str) -> dict[str, list[dict[str, Any]]]:
     path = board_path()
     if not path.exists():
         # 규칙 1. 여기서 빈 목록을 돌려주면 "부서가 아무것도 안 했다"로 읽힌다.
         raise BoardUnavailable(f"kanban 보드를 찾을 수 없습니다: {path}")
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        tasks = [dict(r) for r in conn.execute(_SQL_TASKS, (session_id,))]
+        ids = [t["id"] for t in tasks]
+        events: list[dict[str, Any]] = []
+        links: list[dict[str, Any]] = []
+        if ids:
+            marks = ",".join("?" * len(ids))
+            events = [dict(r) for r in conn.execute(_SQL_EVENTS.format(marks=marks), ids)]
+            links = [dict(r) for r in conn.execute(_SQL_LINKS.format(marks=marks), ids)]
+    finally:
+        # **반드시 닫는다.** `with sqlite3.connect(...)` 는 커밋만 하고 닫지 않는다 -
+        # 그렇게 새어 나간 연결이 WAL 매핑을 붙들어 컨테이너 쓰기를 막았다.
+        conn.close()
+    return {"tasks": tasks, "events": events, "links": links}
 
 
-def _event_payloads(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, dict[str, Any]]:
+def _fetch_docker(session_id: str) -> dict[str, list[dict[str, Any]]]:
+    """같은 조회를 컨테이너 안에서 돌린다. 호스트는 파일을 열지 않는다."""
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "-u", "hermes", "-i", KANBAN_READER_CONTAINER,
+             "python3", "-", KANBAN_READER_DB, session_id],
+            input=_READER_SCRIPT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise BoardUnavailable("docker 명령을 찾을 수 없습니다") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise BoardUnavailable("보드 조회가 30초를 넘겼습니다") from exc
+    if proc.returncode != 0:
+        # 못 읽은 것을 "카드 없음"으로 바꾸지 않는다(규칙 1).
+        raise BoardUnavailable(
+            f"{KANBAN_READER_CONTAINER} 에서 보드를 못 읽었습니다: "
+            f"{(proc.stderr or '').strip()[:300]}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        raise BoardUnavailable(f"보드 응답을 해석하지 못했습니다: {proc.stdout[:200]}") from exc
+
+
+def _fetch(session_id: str) -> dict[str, list[dict[str, Any]]]:
+    return _fetch_docker(session_id) if KANBAN_ACCESS_MODE == "docker" else _fetch_file(session_id)
+
+
+def _event_payloads(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """카드별 마지막 종결 이벤트의 payload. 실패 사유가 여기 있다."""
-    if not task_ids:
-        return {}
-    marks = ",".join("?" * len(task_ids))
-    rows = conn.execute(
-        f"select task_id, kind, payload from task_events "
-        f"where task_id in ({marks}) "
-        f"  and kind in ('completed','blocked','crashed','timed_out','gave_up','spawn_failed') "
-        f"order by id",
-        task_ids,
-    ).fetchall()
     out: dict[str, dict[str, Any]] = {}
-    for row in rows:
+    for row in events:
         try:
             payload = json.loads(row["payload"]) if row["payload"] else {}
         except (TypeError, ValueError):
@@ -145,7 +227,7 @@ def _event_payloads(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, 
     return out
 
 
-def _classify(row: sqlite3.Row, event: dict[str, Any], now: int) -> tuple[CardOutcome, str]:
+def _classify(row: dict[str, Any], event: dict[str, Any], now: int) -> tuple[CardOutcome, str]:
     """카드 한 장의 결말과 한 줄 사유. 규칙 2·3이 여기 들어 있다."""
     status = (row["status"] or "").strip().lower()
     summary = str(event.get("summary") or event.get("reason") or "").strip()
@@ -191,22 +273,12 @@ def cards_for_session(session_id: str) -> list[Card]:
     if not session_id.strip():
         raise ValueError("session_id 가 비었습니다")
     now = int(time.time())
-    with _connect() as conn:
-        rows = conn.execute(
-            "select id, title, assignee, status, result, created_at, completed_at, "
-            "       last_failure_error, block_kind "
-            "from tasks where session_id = ? order by created_at",
-            (session_id,),
-        ).fetchall()
-        ids = [r["id"] for r in rows]
-        events = _event_payloads(conn, ids)
-        links = {i: [] for i in ids}
-        if ids:
-            marks = ",".join("?" * len(ids))
-            for link in conn.execute(
-                f"select parent_id, child_id from task_links where child_id in ({marks})", ids
-            ):
-                links.setdefault(link["child_id"], []).append(link["parent_id"])
+    raw = _fetch(session_id)
+    rows = raw["tasks"]
+    events = _event_payloads(raw["events"])
+    links: dict[str, list[str]] = {r["id"]: [] for r in rows}
+    for link in raw["links"]:
+        links.setdefault(link["child_id"], []).append(link["parent_id"])
 
     cards = []
     for row in rows:

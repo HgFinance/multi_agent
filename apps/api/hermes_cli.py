@@ -73,7 +73,12 @@ def argv_for(department: str, tail: list[str]) -> list[str]:
     # 컨테이너 안에서는 /opt/data 가 그 부서 프로필 자체라 `-p` 를 붙이지 않는다.
     # 붙이면 `/opt/data/profiles/<이름>` 을 다시 찾아 들어가 memory·session 이
     # 부서 본체가 아니라 이름표 디렉터리에 쌓인다.
-    return ["docker", "exec", "-i", container, "hermes", *tail]
+    #
+    # ▶ `-u hermes` 는 빼면 안 된다. `docker exec` 는 기본이 root 라, 그렇게 부르면
+    #   세션·메모리·kanban WAL 파일이 root 소유로 생기고 **그다음부터 정작
+    #   에이전트(uid 1000)가 자기 파일을 못 쓴다.** 2026-08-11 에 보드 WAL 이
+    #   root:root 가 돼 부서 워커의 `kanban_complete` 가 전부 실패했다.
+    return ["docker", "exec", "-u", "hermes", "-i", container, "hermes", *tail]
 
 
 def ask(
@@ -225,7 +230,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     saved = HERMES_EXEC_MODE
     try:
         globals()["HERMES_EXEC_MODE"] = "docker"
-        assert argv_for("ceo-agent", ["chat"])[:3] == ["docker", "exec", "-i"]
+        assert argv_for("ceo-agent", ["chat"])[:5] == ["docker", "exec", "-u", "hermes", "-i"]
         try:
             argv_for("없는-부서", ["chat"])
         except HTTPException:
