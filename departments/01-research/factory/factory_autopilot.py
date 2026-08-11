@@ -356,6 +356,20 @@ def harvest(*, dry_run: bool = False) -> int:
     if not pairs:
         return 0
 
+    # ▶ **한 번 처리한 카드는 다시 안 태운다** (2026-08-11 실측). 반려된 카드를
+    #   매 주기 재수확하며 같은 사유를 반복 출력했다 - 에이전트 산출은 이미
+    #   확정이라 결과가 바뀔 수 없는데 계속 돌았고, 로그가 지저분해져 **새 반려를
+    #   못 알아보게** 됐다. 처리 기록은 파일 하나로 남긴다(보드에 쓰면 컨테이너
+    #   쓰기와 경합한다).
+    seen_path = Path.home() / ".factory_autopilot_harvested"
+    try:
+        seen = set(seen_path.read_text(encoding="utf-8").split())
+    except OSError:
+        seen = set()
+    pairs = [(i, t) for i, t in pairs if i not in seen]
+    if not pairs:
+        return 0
+
     published = 0
     for planner_id, title in pairs:
         stamp = title.rsplit(" ", 1)[-1]
@@ -405,6 +419,10 @@ def harvest(*, dry_run: bool = False) -> int:
                 print(f"      반려: {x.title[:40]} <- {x.reason[:90]}", flush=True)
             if unknown:
                 print(f"      원장에 없는 리드: {unknown}", flush=True)
+            # 발행이든 반려든 **판정이 났으면** 처리 완료다. 반려는 다시 태워도
+            # 같은 결과이므로, 고치려면 다음 주기가 새 카드를 낸다.
+            with seen_path.open("a", encoding="utf-8") as fh:
+                fh.write(planner_id + "\n")
         except Exception as exc:  # noqa: BLE001
             print(f"  !! 수확 실패({stamp}): {type(exc).__name__}: "
                   f"{str(exc)[:180]}", flush=True)
