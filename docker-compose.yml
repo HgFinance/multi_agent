@@ -57,6 +57,11 @@ services:
       PYTHONPATH: /app:/app/apps/api
       ENABLE_AGENT_ASK: "true"
       ENABLE_KANBAN_TASK_TRACKING: "1"
+      HERMES_BIN: /usr/local/bin/hermes
+      HERMES_HOME: /opt/hermes-cli
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
+      HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
@@ -64,6 +69,10 @@ services:
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      # BFF uses Hermes CLI only for the repository-owned Kanban create
+      # boundary. CEO profile/auth stays inside ceo-hermes and is never
+      # mounted here; the BFF has no gateway command or full ~/.hermes view.
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     ports:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
 

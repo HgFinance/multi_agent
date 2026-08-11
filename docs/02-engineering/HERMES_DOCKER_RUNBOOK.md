@@ -252,6 +252,36 @@ docker logs -f hedgefund-ceo-kanban-supervisor
 제거되거나 `kanban watch` 출력 계약이 변경될 수 있다. update 후에는 CLI help/source와
 이 supervisor의 contract tests를 함께 재검증해야 한다.
 
+## 4-1-b. Portfolio BFF와 CEO Hermes 연결
+
+`portfolio-bff`는 자체 Hermes gateway를 시작하지 않는다. CEO 질의는 같은
+Compose 네트워크의 기존 `ceo-hermes`가 제공하는 인증된 Hermes API Server
+(`POST /v1/chat/completions`)로 전달한다. `ceo-hermes`의 CEO Profile·auth·
+Tool Allowlist는 `ceo-hermes` 컨테이너 안에만 남는다.
+
+BFF 이미지에는 공식 Hermes CLI를 pinned source revision으로 설치한다. 이 CLI는
+repository-owned canonical Kanban create boundary를 수행할 때만 사용한다.
+따라서 BFF에는 다음 최소 마운트만 있다.
+
+```yaml
+HERMES_HOME: /opt/hermes-cli
+HERMES_KANBAN_HOME: /opt/kanban
+HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
+HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+volumes:
+  - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+```
+
+`/home/ubuntu/.hermes` 전체 또는 `profiles/ceo-agent`를 BFF에 마운트하지 않고,
+BFF command도 `gateway run`이 아니다. 따라서 BFF 재생성으로 CEO gateway가
+중복 기동되거나 profile reconciliation이 발생하지 않는다. `ceo-hermes`는
+`API_SERVER_ENABLED=true`, `API_SERVER_HOST=0.0.0.0`, `API_SERVER_PORT=8642`,
+`API_SERVER_KEY=${CEO_HERMES_API_KEY}`를 사용하며 host port로 공개하지 않는다.
+
+`CEO_HERMES_API_KEY`는 `.env` 또는 AWS secret injection으로만 주입한다. API
+Server가 이 키 없이 기동되지 않도록 Hermes의 최소 16자 인증 조건을 유지한다.
+root Kanban create가 실패하면 BFF는 CEO API를 호출하지 않고 503을 반환한다.
+
 ## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개가 이미 있다)
 
 8개 본부(research/quant/risk/qa는 이 파일에 직접, ceo/trading/accounting/hr은
