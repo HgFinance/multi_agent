@@ -89,6 +89,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+from account_snapshot import router as account_snapshot_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -141,6 +142,9 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
 app.include_router(ceo_router)
+# 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
+# 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
+app.include_router(account_snapshot_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 

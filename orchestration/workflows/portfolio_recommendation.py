@@ -71,18 +71,26 @@ DEPARTMENTS: tuple[str, ...] = (
     "ceo",
 )
 
+# ▶ 이 두 표는 **실재하는 worker_id 만** 담는다 (2026-08-11 감사).
+#   `_query_selected_specs` 는 fallback 이름으로 spec 을 걸러낸다. 이름이 하나도
+#   안 맞으면 결과가 `()` 가 되고, 자유 질의에 그 부서 Worker 맥락이 **조용히
+#   통째로 빠진다.** 감사에서 리서치·퀀트 4개가 이미 없어진 이름이었다
+#   (`research-data-worker`/`evidence-rag-worker`/`strategy-hypothesis-worker`/
+#   `dataset-feature-worker`) - 아래 주석이 경고하던 바로 그 상태였다. 그래서
+#   이제 `assert_query_router_ids_exist()` 로 대조해서 **틀리면 죽는다.**
 _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
-    "research-data-worker": ("종목", "주식", "시장", "가격", "시세", "유니버스", "국내", "글로벌"),
-    "microstructure-worker": ("유동성", "거래량", "호가", "체결", "스프레드"),
-    "technical-signal-worker": ("차트", "기술적", "추세", "모멘텀", "기술 분석"),
-    "fundamental-valuation-worker": ("재무", "실적", "밸류", "가치", "저평가", "고평가"),
-    "news-macro-worker": ("뉴스", "금리", "환율", "거시", "경제", "정책"),
-    "evidence-rag-worker": ("근거", "출처", "자료", "검증", "인용"),
-    "order-constraint-worker": ("주문", "한도", "제약", "컴플라이언스"),
-    "execution-planning-worker": ("체결", "실행", "집행"),
-    "venue-cost-worker": ("수수료", "슬리피지", "거래비용"),
-    "derivatives-structure-worker": ("파생", "레버리지", "공매도", "옵션", "선물"),
-    "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사"),
+    # 리서치 - 사용자가 자기 보유 종목을 물을 때의 자리. 방법론 스카우트는
+    # 본부장이 겸하므로(웹 도구가 본부장에만 있다) 여기 없다.
+    "holdings-analyst-worker": ("종목", "주식", "시장", "가격", "시세", "보유", "유니버스",
+                                "국내", "글로벌", "뉴스", "금리", "환율", "거시",
+                                "실적", "재무", "밸류", "가치", "자료"),
+    # 퀀트 - 전략·실험 쪽 질의.
+    "strategy-author-worker": ("전략", "가설", "아이디어", "전략 추천", "백테스트",
+                               "데이터셋", "피처", "지표 구성"),
+    "result-interpretation-worker": ("결과", "해석", "과적합", "국면", "레짐",
+                                     "견고성", "과거 성과", "수익률 검증", "최적화"),
+    "compliance-policy-worker": ("규정", "정책", "법", "컴플라이언스", "감사",
+                                 "주문", "한도", "제약"),
     # 회계 직원 8명이 2026-08-07에 exception-investigation-worker 하나로 합쳐졌다.
     # 강등된 7명이 쓰던 용어도 여기로 모은다 - 사용자는 "손익"이나 "기준가"라고
     # 물을 뿐 어느 직원이 남았는지 모른다. 용어를 지우면 그 질의가 회계본부로
@@ -91,24 +99,17 @@ _QUERY_WORKER_TERMS: dict[str, tuple[str, ...]] = {
                                        "pnl", "손익", "성과", "차이", "불일치", "예외"),
     "hallucination-critic-worker": ("근거", "출처", "검증", "인용", "환각", "모순", "신뢰"),
     "incident-postmortem-worker": ("사고", "장애", "재발", "인시던트"),
-    "strategy-hypothesis-worker": ("전략", "가설", "아이디어", "전략 추천"),
-    "dataset-feature-worker": ("데이터셋", "피처", "지표 구성"),
-    "backtest-optimization-worker": ("백테스트", "과거 성과", "수익률 검증", "최적화"),
-    "regime-robustness-worker": ("국면", "레짐", "스트레스", "견고성"),
+    # CEO - 전사 요약.
+    "executive-briefing-worker": ("요약", "브리핑", "현황", "전체"),
 }
 
-# core-risk-worker/derivatives-counterparty-worker(risk)와 evidence-qa-worker/
-# model-and-internal-audit-worker/ops-and-permission-worker(qa)는 2026-08-06에
-# risk-runner/qa-runner(결정론, LLM 없음)로 흡수됐다 - WORKER_SPECS에 더 없으니
-# 이 free-text query 라우팅 대상에도 없다.
-# 2026-08-07: 회계 8명도 같은 이유로 back-office-runner에 흡수됐다. 기본 직원이던
-# portfolio-control-worker/investor-reporting-worker가 둘 다 강등돼서 남은 조사관
-# 하나로 바꿨다 - 없는 id를 남겨두면 fallback이 조용히 빈 목록이 된다.
+# ▶ trading 이 비어 있는 것은 누락이 아니라 **편제다.** desk-runner(결정론)로
+#   흡수돼 LLM Worker 가 0명이다. risk/qa/회계는 러너로 흡수됐어도 조사관 자리가
+#   남아 있다 - 파일 이름이 `risk_employee_workers.py`/`qa_employee_workers.py` 라
+#   `employee_workers.py` 만 찾으면 "없다"고 잘못 읽는다(내가 한 번 그렇게 읽었다).
 _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
-    "research": ("research-data-worker", "evidence-rag-worker"),
-    # quant 7명 중 trigger 가 always 인 둘. 나머지 5명은 backtest_request 등
-    # 전용 신호가 있을 때만 켜지므로 자유 질의 fallback 에 넣지 않는다.
-    "quant": ("strategy-hypothesis-worker", "dataset-feature-worker"),
+    "research": ("holdings-analyst-worker",),
+    "quant": ("strategy-author-worker", "result-interpretation-worker"),
     "trading": (),
     "risk": ("compliance-policy-worker",),
     "qa": ("hallucination-critic-worker", "incident-postmortem-worker"),
@@ -272,6 +273,46 @@ def _load_module(stage: str) -> Any:
         return module
 
 
+def registered_worker_ids() -> dict[str, frozenset[str]]:
+    """부서별로 **실제 등록된** worker_id. 위 두 표를 대조할 근거다."""
+    out: dict[str, frozenset[str]] = {}
+    for stage in _MODULE_PATHS:
+        try:
+            specs = _load_module(stage).WORKER_SPECS
+        except Exception:  # noqa: BLE001 - 모듈이 없는 부서(결정론 러너)는 빈 집합
+            out[stage] = frozenset()
+            continue
+        out[stage] = frozenset(spec.worker_id for spec in specs)
+    return out
+
+
+def assert_query_router_ids_exist() -> None:
+    """자유 질의 라우팅 표가 없는 워커를 가리키면 **여기서 죽는다.**
+
+    ▶ 왜 예외인가 (2026-08-11 감사)
+      `_query_selected_specs` 는 이름이 하나도 안 맞으면 `()` 를 돌려준다 - 화면에는
+      "부서가 아무 결과도 안 냈다"로 보이고, 그게 정상인지 고장인지 구분할 방법이
+      없다. 실제로 fallback 9개 중 8개가 없어진 이름이었는데 아무도 몰랐다.
+      워커 편제가 바뀌면 이 표도 같이 바뀌어야 하고, 안 바뀌면 기동에서 걸려야 한다.
+    """
+    registered = registered_worker_ids()
+    known = frozenset().union(*registered.values()) if registered else frozenset()
+
+    unknown_terms = sorted(set(_QUERY_WORKER_TERMS) - known)
+    if unknown_terms:
+        raise RuntimeError(
+            f"_QUERY_WORKER_TERMS 가 없는 워커를 가리킵니다: {unknown_terms}. "
+            f"등록된 워커: {sorted(known)}"
+        )
+    for stage, names in _QUERY_WORKER_FALLBACKS.items():
+        unknown = sorted(set(names) - registered.get(stage, frozenset()))
+        if unknown:
+            raise RuntimeError(
+                f"_QUERY_WORKER_FALLBACKS['{stage}'] 가 그 부서에 없는 워커를 "
+                f"가리킵니다: {unknown}. 등록된 워커: {sorted(registered.get(stage, ()))}"
+            )
+
+
 def _deterministic_worker_llm(system: str, prompt: str) -> str:
     """TEST-only Worker response; production never uses this adapter."""
 
@@ -413,6 +454,33 @@ def _profile_context(profile: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in profile.items() if key != "user_id"}
 
 
+def _broker_account_context() -> dict[str, Any]:
+    """브로커 계좌 현황 한 조각. **조회 실패를 빈 잔고로 위장하지 않는다.**
+
+    결정론 조회다 - 같은 시각에 같은 답이 나온다. 이걸 LLM 에게 물어볼 이유가
+    없고(2026-08-11 실측: 잔고 하나 보는 데 LLM 7번·4분을 쓰고 결국 못 냈다),
+    여기서 한 번 읽어 payload 에 실으면 하위 워커가 전부 같은 사실을 본다.
+
+    `authoritative: False` 는 계약이다 - 브로커가 말하는 값이지 우리 원장이
+    확정한 공식 NAV 가 아니다. 둘이 어긋나는 것 자체가 회계본부의 조사 대상이다.
+    """
+    try:
+        from apps.api.account_snapshot import broker_account_snapshot
+    except Exception as exc:  # noqa: BLE001 - 조회 계층이 없는 환경
+        return {"status": "UNAVAILABLE", "reason": f"import_failed:{type(exc).__name__}"}
+    try:
+        return broker_account_snapshot()
+    except Exception as exc:  # noqa: BLE001 - HTTPException 포함
+        # 못 읽은 것을 "잔고 0" 으로 바꾸면 워커가 그 0 을 사실로 서술한다.
+        detail = getattr(exc, "detail", None) or str(exc)
+        return {"status": "UNAVAILABLE", "reason": str(detail)[:200]}
+
+
+def _user_query(state: PortfolioPipelineState) -> str:
+    """사용자가 실제로 입력한 자유 문장. 공백뿐이면 빈 문자열로 본다."""
+    return " ".join(str(state.get("user_profile", {}).get("query", "")).split())
+
+
 def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     suitability = state.get("suitability", {})
     data_context = state.get("data_context", {})
@@ -476,6 +544,35 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         ),
         "user_profile": _profile_context(state.get("user_profile", {})),
         "user_query": state.get("user_profile", {}).get("query", ""),
+        # ▶ `holdings-analyst-worker` 를 켜는 신호 (2026-08-11 배선)
+        #   이 워커의 trigger 가 `holding_question` 인데 payload 에 그 키가 없어서
+        #   **사용자가 보유 종목을 물어도 워커가 한 번도 안 켜졌다.** 라우팅 표를
+        #   고쳐도 소용없었다 - `should_run` 이 그 앞에서 이미 떨어뜨리기 때문이다
+        #   (관문이 둘인데 뒤엣것만 고쳤던 셈이다).
+        #   **질문이 없으면 빈 dict 다.** `should_run` 이 빈 값을 거짓으로 보므로
+        #   질문 없는 실행에서는 워커가 켜지지 않는다 - 없는 질문을 지어내지 않는다.
+        "holding_question": (
+            {"query": _user_query(state), "as_of": state.get("as_of", "")}
+            if _user_query(state)
+            else {}
+        ),
+        # 워커의 input_fields 가 요구하는 나머지 한 조각. 후보가 비어 있으면
+        # 빈 목록 그대로 넘긴다 - "보유 없음"과 "조회 못 함"을 구분하려고
+        # status 를 같이 싣는다.
+        #
+        # ▶ 브로커 잔고를 여기서 한 번 싣는다 (2026-08-11)
+        #   워커 도구(`tools_for_specs`)는 payload 를 되돌려주는 어댑터다 - 이름이
+        #   `accounting.ledger.read` 여도 **아무것도 조회하지 않는다.** 그래서
+        #   payload 에 없는 것은 워커에게 영원히 없다. 실제로 모든 부서가
+        #   "작업 컨텍스트에 없어"라고 답했고, 그건 도구가 정직하게
+        #   `{"context_present": False}` 를 돌려준 결과였다.
+        #   부서마다 MCP 를 붙이는 대신 **입구에서 한 번 채운다** - 워커를 입력으로
+        #   격리하는 이 설계와도 맞는다(워커는 스스로 끌어오지 않는다).
+        "portfolio_state": {
+            "status": accounting_context.get("status", default_status),
+            "candidates": state.get("portfolio_candidates", []),
+            "broker_account": _broker_account_context(),
+        },
         "task_plan": state.get("task_plan", {}),
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),

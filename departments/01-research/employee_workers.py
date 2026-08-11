@@ -54,13 +54,20 @@ except ModuleNotFoundError:
         tools_for_specs,
     )
 
-# ▶ 스카우트 4인은 같은 trigger(scout_cycle)와 같은 도구를 쓴다. 다른 것은 **렌즈**뿐이다 -
-#   같은 질문을 서로 다른 데서 찾게 하는 것이 이 편제의 전부다.
-# ▶ trigger 가 always 인 워커는 market-context 하나다. 스카우트·회의론자·기획자는
-#   소집형이다 - 상시 켜두면 큐만 쌓이고 편집장이 읽지 못한다.
+# ▶ 방법론 스카우트는 여기 없다. 웹 검색·열람·검증 도구가 **본부장(Hermes)에만**
+#   있어서 로컬 모델 워커로는 조사 자체가 성립하지 않기 때문이다 - 자리를 남겨두면
+#   "조사했는데 아무것도 못 찾았다"가 조용히 정상처럼 보인다. 공장 쪽 조사는
+#   본부장이 직접 하고, 필요하면 서브에이전트를 부른다.
+#
+# ▶ `holdings-analyst-worker` 는 **서비스 쪽 자리**라 남는다(위 ② 참고).
+#   빼놨다가 되살렸다 - 이 워커는 포트폴리오 자문 경로(`/ui/portfolio-recommendations`)
+#   가 실제로 부르는 유일한 리서치 워커다. 없애면 그 화면의 리서치 구간이
+#   "0개 Worker 결과"로 조용히 비고, 사용자는 그게 실패인지 원래 그런 건지 모른다.
+#   도구가 `research.*` **읽기 API** 라 본부장 전용 웹 도구와 사정이 다르다 -
+#   로컬 모델로도 성립한다(스카우트를 뺀 근거가 이 워커에는 해당하지 않는다).
 WORKER_SPECS = (
-    
     WorkerSpec("competing-explanation-worker", "Competing explanation and falsification analyst", ("research.outcomes.read", "research.evidence.search"), "proposal_draft", ("proposal_draft",)),
+    WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", ("research.evidence.search", "research.news.read", "research.market_snapshot.read"), "holding_question", ("holding_question", "portfolio_state", "news")),
 )
 
 

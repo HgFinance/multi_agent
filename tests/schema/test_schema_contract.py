@@ -186,12 +186,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
             "execution": 14,
             "governance": 20,
-            "quant": 12,
+            # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
+            "quant": 13,
             "reference": 9,
             # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
-            "research": 23,
+            "research": 26,
             "risk": 19,
             "strategy": 9,
             "workforce": 25,
