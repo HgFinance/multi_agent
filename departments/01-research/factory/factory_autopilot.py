@@ -58,6 +58,50 @@ KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
 RESEARCH_ASSIGNEE = "research-department"
 QUANT_ASSIGNEE = "quant-backtest-department"
 
+# 컨테이너의 /opt/kanban 이 호스트의 이 경로다. 에이전트 산출물(첨부)을
+# **호스트가 직접 읽는다** - 컨테이너에서 꺼내오는 왕복이 필요 없다.
+ATTACH_ROOT = Path(os.getenv(
+    "KANBAN_ATTACH_ROOT",
+    str(Path.home() / ".hermes-shared-kanban" / "kanban" / "attachments")))
+
+# ▶ **형식을 알려주지 않으면 발행이 0건이다** (2026-08-11 실측).
+#   에이전트는 105초 동안 제대로 된 기획안을 썼는데 마크다운 산문이었고,
+#   `parse_blocks` 가 한 블록도 못 잘라 `published=0, rejected=[], gate=[]` 이
+#   나왔다. 막힌 게 아니라 **읽히지 않은** 것이다. 요구 형식은 계약이므로
+#   요청과 함께 준다.
+PLANNER_FORMAT = """\
+[산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
+아래 `KEY: value` 줄만 낸다. 설명·머리말·코드펜스를 붙이지 마라.
+`TITLE:` 이 나올 때마다 새 기획안이다. 값이 길면 다음 줄에 이어 써도 된다.
+
+TITLE: (한 줄 제목)
+LEAD_IDS: (아래 '쓸 수 있는 리드' 의 lead_id 를 쉼표로. **목록에 없는 id 를 쓰면 막힌다**)
+ECONOMIC_RATIONALE: (왜 이 초과수익이 존재할 수 있는가 - 메커니즘)
+COUNTERPARTY: (누가 반대편에서 손해를 보는가. 이게 없으면 공짜 점심 주장이다)
+EDGE_TYPE: (아래 통제 어휘 중 하나)
+UNIVERSE_KEY: (아래 통제 어휘 중 하나)
+LABEL: forward_return
+BASELINE: equal_weight_buy_and_hold
+FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
+DATA_TABLES: (필요한 원천 테이블. 파생지표는 실행면이 계산하므로 적지 마라)
+MIN_HISTORY_DAYS: (정수)
+SUGGESTED_PARAMS: {"horizon_days": 20, "top_n": 20}
+SOURCE_REPORTED_EFFECT: {"sharpe": null}
+TRIAL_BUDGET: 5
+
+필수: TITLE, LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, EDGE_TYPE, UNIVERSE_KEY.
+하나라도 비면 그 기획안은 접수 전에 반려된다."""
+
+SKEPTIC_FORMAT = """\
+[산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
+TITLE: (검토 대상 기획안의 **제목을 그대로**. 다르면 짝을 못 찾아 반려된다)
+COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가)
+COMPETING_CODES: (DATA_MINING, COST_UNACCOUNTED, SURVIVORSHIP, REGIME_ARTIFACT 중 해당하는 것을 쉼표로)
+VERDICT: PROCEED 또는 STOP
+
+VERDICT 가 PROCEED 가 아니면 그 기획안은 발행되지 않는다. 통과시키려고
+PROCEED 를 쓰지 마라 - 회의론자가 통과 도장이면 서명이 무의미해진다."""
+
 
 # ── 원장 조회 ────────────────────────────────────────────────────────────────
 
@@ -90,16 +134,58 @@ def _conn():
     return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
 
 
+_SQL_LEADS = """
+select lead_id, scout_lens, claimed_edge, stated_mechanism, testability, status
+  from research.methodology_leads
+ where status in ('COMPLETE', 'PARTIAL')
+ order by (status = 'COMPLETE') desc, created_at desc
+ limit %s
+"""
+
+
+def _vocab_block() -> str:
+    """실행면이 표현할 수 있는 어휘. **여기 없는 값은 Gate 0 가 반려한다.**"""
+    sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
+    from strategy_templates import EDGE_VOCAB      # noqa: PLC0415
+    from trial_family import UNIVERSE_VOCAB        # noqa: PLC0415
+
+    return ("\n[통제 어휘 - 밖의 값은 반려된다]\n"
+            f"  EDGE_TYPE    : {', '.join(sorted(EDGE_VOCAB))}\n"
+            f"  UNIVERSE_KEY : {', '.join(sorted(UNIVERSE_VOCAB))}")
+
+
 def research_brief() -> str:
-    """리서치본부가 다음 기획안을 낼 때 볼 사실. 결론은 없다."""
+    """리서치본부가 다음 기획안을 낼 때 볼 사실. 결론은 없다.
+
+    ▶ 리드 id 를 **실제로 싣는다** (2026-08-11). 예전엔 "원장에 리드 12건이 있다"
+      고만 알려줬는데, `factory_submit_proposal` 은 LEAD_IDS 를 원장에서 다시 읽어
+      대조하므로 id 를 모르면 인용할 수가 없다. 에이전트는 정직하게
+      "근거 리드가 입력에 없어 문헌 근거로 가장하지 않는다"고 적고 멈췄다 -
+      맞는 판단이었고, 못 준 쪽이 문제였다.
+    """
     import cycle_brief                             # noqa: PLC0415
 
     conn = _conn()
     try:
         brief = cycle_brief.build(conn)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_LEADS, (12,))
+            leads = cur.fetchall()
     finally:
         conn.close()      # WAL 을 남기지 않는다 - with 는 커밋만 하고 안 닫는다
-    return brief.as_prompt()
+
+    out = [brief.as_prompt()]
+    if leads:
+        out.append("\n쓸 수 있는 리드 (LEAD_IDS 에 이 id 만 쓴다):")
+        for lid, lens, edge, mech, test, status in leads:
+            out.append(f"  - {lid}  [{lens}/{status}] {str(edge)[:70]}")
+            if mech:
+                out.append(f"      메커니즘: {str(mech)[:110]}")
+    else:
+        out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
+                   "LEAD_IDS 가 비면 접수 전에 반려된다.")
+    out.append(_vocab_block())
+    return "\n".join(out)
 
 
 def quant_brief() -> tuple[str, int]:
@@ -174,11 +260,154 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
     return out
 
 
+def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
+    """칸반 보드를 **컨테이너를 통해** 읽는다.
+
+    호스트에서 직접 열면 WAL/-shm 매핑이 생겨 컨테이너 쪽 쓰기가 전부
+    `disk I/O error` 로 죽는다(실측). 읽기 하나 때문에 부서가 멈춘다.
+    """
+    code = (
+        "import sqlite3,json,sys\n"
+        "c=sqlite3.connect('file:/opt/kanban/kanban.db?mode=ro',uri=True)\n"
+        "try: print(json.dumps(c.execute(sys.argv[1], json.loads(sys.argv[2])).fetchall()))\n"
+        "finally: c.close()\n")
+    import json as _json
+    r = subprocess.run(
+        ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER,
+         "python3", "-c", code, sql, _json.dumps(list(params))],
+        capture_output=True, text=True, encoding="utf-8", timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"보드 조회 실패: {(r.stderr or r.stdout).strip()[:200]}")
+    return [tuple(x) for x in _json.loads(r.stdout or "[]")]
+
+
+def _agent_output(task_id: str) -> str:
+    """그 카드에서 에이전트가 낸 것. 첨부 + 요약을 모두 본다.
+
+    ▶ `result` 만 보면 안 된다 (2026-08-11 실측). 완료 카드 21장 전부
+      `result_len=0` 이었고 산출물은 **첨부파일**로만 남아 있었다. 그래서
+      "에이전트가 아무것도 안 했다"고 잘못 읽었다.
+    """
+    parts: list[str] = []
+    folder = ATTACH_ROOT / task_id
+    if folder.is_dir():
+        for f in sorted(folder.iterdir()):
+            if f.is_file() and f.suffix in {".md", ".txt", ".json"}:
+                try:
+                    parts.append(f.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+    rows = _board_rows("select coalesce(result,'') from tasks where id=?", (task_id,))
+    if rows and rows[0][0]:
+        parts.append(rows[0][0])
+    return "\n\n".join(parts)
+
+
+def harvest(*, dry_run: bool = False) -> int:
+    """완료된 기획자·회의론자 카드를 원장으로 들인다. **여기서 루프가 닫힌다.**
+
+    ▶ 왜 호스트가 제출하나
+      제출은 `proposal_intake` 가 리드를 원장에서 다시 읽어 대조하고 발행 게이트를
+      돌리는 결정론 절차다. 에이전트에게 맡기면 그 절차가 에이전트의 성실성에
+      의존하게 된다 - 서명을 스스로 찍는 것과 같다. 판단은 에이전트가, 접수는
+      코드가 한다.
+
+    반환: 새로 발행된 기획안 수.
+    """
+    import proposal_intake as PI                   # noqa: PLC0415
+
+    pairs = _board_rows(
+        "select id, title from tasks "
+        " where status='done' and created_by like 'factory-autopilot%'"
+        "   and title like '%[기획자]%' order by created_at desc limit 6")
+    if not pairs:
+        return 0
+
+    published = 0
+    for planner_id, title in pairs:
+        stamp = title.rsplit(" ", 1)[-1]
+        planner_text = _agent_output(planner_id)
+        if not planner_text:
+            print(f"  수확: {stamp} 기획자 산출이 비었다 - 회의론자를 걸지 않는다",
+                  flush=True)
+            continue
+
+        sk = _board_rows(
+            "select id, status from tasks where title like ? limit 1",
+            (f"%[회의론자]%{stamp}",))
+        if not sk:
+            # 기획자가 끝났고 산출이 있다 -> 이제 회의론자를 건다. 산출을 본문에
+            # 실어 보내므로 회의론자는 카드만 읽으면 된다(다른 카드를 뒤지게
+            # 하면 못 찾고 빈손으로 완료한다).
+            _create_card(
+                title=f"공장 주기 [회의론자]: 기획안 반증 검토 {stamp}",
+                body=("아래는 같은 주기 기획자가 낸 산출이다. 이것을 **반증**하라.\n\n"
+                      "```\n" + planner_text[:6000] + "\n```\n\n"
+                      + SKEPTIC_FORMAT + "\n\n"
+                      "[규칙]\n"
+                      "- TITLE 은 위 기획안의 제목과 **글자 그대로** 같아야 짝이 맞는다.\n"
+                      "- 네 일은 통과시키는 것이 아니라 무너뜨려 보는 것이다. "
+                      "무너지면 STOP 이 옳은 답이다.\n"
+                      "- 경쟁 설명은 구체적으로 적어라. '과적합일 수 있다' 같은 "
+                      "일반론은 다음 주기에 아무 도움이 안 된다."),
+                assignee=RESEARCH_ASSIGNEE,
+                key=f"factory-skeptic-{stamp}", dry_run=dry_run)
+            continue
+        if sk[0][1] != "done":
+            continue                     # 검토 중 - 다음 주기에 본다
+        skeptic_text = _agent_output(sk[0][0])
+        if not planner_text or not skeptic_text:
+            print(f"  수확: {stamp} 산출물이 비었다 - 건너뛴다", flush=True)
+            continue
+
+        conn = _conn()
+        try:
+            wanted = {i for b in PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
+                      for i in PI._split(b.get("LEAD_IDS", ""))}
+            leads = PI.load_leads(conn, sorted(wanted))
+            unknown = sorted(wanted - set(leads))
+            r = PI.intake(planner_text, skeptic_text,
+                          case_id=f"auto-{stamp}",
+                          planner_run=planner_id, skeptic_run=sk[0][0],
+                          leads=leads)
+            pub = r.publishable
+            if dry_run:
+                print(f"  [dry-run] {stamp}: 발행가능 {len(pub)}건 "
+                      f"반려 {len(r.rejected)}건 미상리드 {unknown}")
+                continue
+            new, dup = (PI.persist(conn, pub) if pub else (0, 0))
+            published += new
+            print(f"  수확 {stamp}: 발행 {new} 중복 {dup} 반려 {len(r.rejected)}",
+                  flush=True)
+            for x in r.rejected:
+                # 왜 안 들어갔는지 **반드시 남긴다** - 조용히 0건이면 다음 주기가
+                # 같은 실수를 반복한다(실제로 published=0 을 며칠 몰랐다)
+                print(f"      반려: {x.title[:40]} <- {x.reason[:90]}", flush=True)
+            if unknown:
+                print(f"      원장에 없는 리드: {unknown}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  !! 수확 실패({stamp}): {type(exc).__name__}: "
+                  f"{str(exc)[:180]}", flush=True)
+        finally:
+            conn.close()
+    return published
+
+
 def cycle(*, dry_run: bool = False) -> int:
     """공장 한 주기. 실패한 부서 수를 돌려준다(0이면 정상)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
     print(f"[{stamp}] 공장 자동 조종 - 브리핑을 만들어 부서에 건다", flush=True)
     fails = 0
+
+    # ── 0. 수확 먼저. 지난 주기 산출을 원장에 들이지 않고 새 카드를 걸면
+    #      에이전트는 계속 일하는데 원장은 영영 비어 있다(실제로 그랬다).
+    try:
+        n = harvest(dry_run=dry_run)
+        if n:
+            print(f"  수확: 기획안 {n}건 발행 - 퀀트가 다음 주기에 집는다", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 수확 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
+        fails += 1
 
     # ── 리서치: 다음 기획안 ──
     try:
@@ -191,19 +420,30 @@ def cycle(*, dry_run: bool = False) -> int:
         rb = ""
         fails += 1
     if rb:
+        # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
+        #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
+        #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
+        #   둘 다 쓰게 하면 그 규칙을 형식만 만족시키게 된다.
         _create_card(
-            title="공장 주기: 다음 실험 기획안 1건",
-            body=(rb + "\n\n---\n"
-                  "요청: 위 사실만 근거로 **다음에 실험할 기획안 1건**을 내라.\n"
+            title=f"공장 주기 [기획자]: 다음 실험 기획안 1건 {stamp}",
+            body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n"
+                  "[규칙]\n"
                   "- 이미 기각된 계열을 다시 내려면 그 교훈에 어떻게 대응하는지 "
-                  "본문에 적어라(안 적으면 Gate 0 가 DUPLICATE_UNADDRESSED 로 막는다).\n"
+                  "ECONOMIC_RATIONALE 에 적어라(안 적으면 Gate 0 가 "
+                  "DUPLICATE_UNADDRESSED 로 막는다).\n"
                   "- 예산이 소진된 계열은 제안하지 마라.\n"
-                  "- 반대편(누가 손해를 보는가)과 경쟁 설명을 반드시 적어라 - "
-                  "없으면 발행 게이트에서 막힌다.\n"
+                  "- 쓸 수 있는 리드 목록에 없는 id 를 대지 마라 - 원장에서 다시 "
+                  "읽어 대조하므로 막힌다.\n"
                   "- 근거가 부족하면 **기획안을 내지 말고 무엇이 부족한지 적어라.** "
-                  "지어낸 가설은 원장을 오염시킨다."),
+                  "지어낸 가설은 원장을 오염시킨다.\n"
+                  "- 산출은 위 `KEY: value` 줄로만. 문서로 쓰면 파싱이 0건이 되어 "
+                  "아무것도 접수되지 않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            key=f"factory-research-{stamp}", dry_run=dry_run)
+            key=f"factory-planner-{stamp}", dry_run=dry_run)
+
+        # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
+        # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
+        # 검토한 척하게 된다. 기획자가 끝난 것을 보고 수확기가 건다.
 
     # ── 퀀트: 대기 중인 가설 실험 ──
     try:
