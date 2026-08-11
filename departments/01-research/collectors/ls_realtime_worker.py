@@ -61,6 +61,49 @@ from typing_extensions import Self
 WORKER_VERSION = "research-ls-realtime-worker-v1"
 SOURCE_ID = "ls_openapi_ws"
 
+# 통합시세 TR - `tr_key` 규격이 다르다(U + 6자리 + 공백 3개). 어댑터의
+# UNIFIED_TRS 와 같은 목록이지만, 수집기는 어댑터를 import 하지 않으므로
+# 여기 둔다. 한쪽만 늘리면 구독은 되고 정규화가 안 되거나 그 반대가 된다.
+UNIFIED_TR_KEYS = frozenset({"US3", "UH1"})
+
+# 시세 수집 환경. **주문 환경(LS_ENV)과 분리한다** (재일님 결정 2026-08-12).
+MARKET_ENV_VAR = "LS_MARKET_ENV"
+MARKET_ENV_DEFAULT = "LIVE"
+
+
+def market_env(env: dict) -> str:
+    """시세를 어디서 받을지. `LS_ENV`(주문)와 **다른 스위치**다.
+
+    ▶ 왜 갈랐나 (2026-08-12 실측)
+      하나의 `LS_ENV` 가 주문과 시세를 같이 정하고 있었다. 주문을 PAPER 로
+      두려고 `LS_ENV=PAPER` 를 쓰면 **시세까지 모의 서버로 붙는다.** 실제로
+      그날 아침 수집기가 `:29443`(PAPER)에 붙어 프리마켓 한 시간 동안 체결이
+      0건이었다. 그 위에서 찾은 알파는 검증할 수 없는 알파다.
+
+      시세 구독은 주문 권한과 무관하다 - LIVE 키로 시세를 받아도 주문이
+      나가지 않는다. derivatives_collector 가 이미 같은 이유로 `LS_ENV` 를
+      무시하고 LIVE 를 강제하고 있었는데, 그 예외를 이름 있는 스위치로
+      일반화한 것이다.
+
+    ▶ 기본값이 LIVE 인 이유 (안전한 실패 방향)
+      주문은 PAPER 로 떨어지는 것이 안전하지만, 시세는 반대다. 모의 시세는
+      **진짜처럼 생긴 가짜**라 조용히 흘러가면 백테스트가 그걸 사실로 읽는다.
+      못 받는 것은 티가 나고, 잘못 받는 것은 티가 안 난다.
+    """
+    return (env.get(MARKET_ENV_VAR) or MARKET_ENV_DEFAULT).strip().upper()
+
+
+def market_rest_client(env: dict):
+    """시세용 REST 클라이언트(토큰 발급). **소켓과 같은 환경을 쓴다.**
+
+    토큰은 `LS_ENV`(주문)로 받고 소켓만 `LS_MARKET_ENV` 로 붙으면, 모의 토큰으로
+    실전 소켓에 접속하는 꼴이 된다 - 붙긴 붙고 데이터만 안 온다. 두 곳이 같은
+    스위치를 보게 여기서 한 번에 만든다.
+    """
+    from ls_client import LsEnvironment, LsRestClient  # noqa: PLC0415
+
+    return LsRestClient(LsEnvironment.from_env({**env, "LS_ENV": market_env(env)}))
+
 KST = timezone(timedelta(hours=9))
 
 # 구독 등록/해제. 문서는 "거래 Type" String(1) 이라고만 적어놨고 값이 없어서
@@ -256,8 +299,29 @@ def make_trading_day_check(trading_days: set, *, stats: WorkerStats | None = Non
     return check
 
 
+def subscribe_key(tr_cd: str, symbol: str) -> str:
+    """그 TR 이 받는 `tr_key` 형태로 종목코드를 바꾼다.
+
+    ▶ 통합시세(US3/UH1)는 **`U` + 6자리 + 공백 3개** 다 (실측 2026-08-12)
+      거래소 단독 TR(S3_/H1_ 등)은 종목코드를 그대로 받는데, 통합시세는
+      접두사와 패딩이 붙은 10자 키를 받는다. 그냥 `005930` 을 보내면 소켓은
+      멀쩡히 붙고 등록도 거부 없이 지나간 뒤 **데이터만 안 온다** - 그날
+      아침 26개 소켓이 전부 연결된 채 40분간 수신 0건이었다.
+
+      티가 안 나는 실패라 자체 점검으로 고정한다. 같은 시각 같은 TR 로
+      받고 있던 다른 수집기의 로그(`tr_key='U476830   '`)가 규격의 근거다.
+    """
+    if tr_cd in UNIFIED_TR_KEYS:
+        return f"U{symbol}   "
+    return symbol
+
+
 def build_subscribe_message(tr_cd: str, tr_key: str, token: str, *, subscribe: bool = True) -> str:
-    """구독 등록/해제 메시지. 실측으로 확인한 형태 그대로다."""
+    """구독 등록/해제 메시지. 실측으로 확인한 형태 그대로다.
+
+    `tr_key` 는 이미 `subscribe_key()` 를 거친 값이어야 한다 - 여기서 다시
+    변환하면 해제 경로가 등록과 다른 키를 보낼 수 있다.
+    """
     return json.dumps(
         {
             "header": {
@@ -357,8 +421,9 @@ class LsRealtimeWorker:
         async with websockets.connect(self._ws_url, open_timeout=20, ping_interval=30) as ws:
             # **재접속하면 반드시 재구독한다.** 소켓만 열고 구독을 빠뜨리면
             # 조용히 아무것도 안 받는 상태가 된다.
-            for tr_cd, tr_key in self._subs:
-                await ws.send(build_subscribe_message(tr_cd, tr_key, token))
+            for tr_cd, symbol in self._subs:
+                await ws.send(build_subscribe_message(
+                    tr_cd, subscribe_key(tr_cd, symbol), token))
 
             loop = asyncio.get_running_loop()
             started = loop.time()
@@ -487,6 +552,22 @@ def _check_subscribe_message():
                  "body": {"tr_cd": "S3_", "tr_key": "005930"}}, m
     u = json.loads(build_subscribe_message("S3_", "005930", "tok", subscribe=False))
     assert u["header"]["tr_type"] == "4"
+
+    # ▶ **통합시세는 tr_key 규격이 다르다** (실측 2026-08-12)
+    #   `U` + 6자리 + 공백 3개. 종목코드를 그대로 보내면 소켓은 붙고 등록도
+    #   거부 없이 지나간 뒤 **데이터만 안 온다** - 26개 소켓이 전부 연결된 채
+    #   40분간 수신 0건이었다. 티가 안 나는 실패라 여기서 고정한다.
+    assert subscribe_key("US3", "005930") == "U005930   ", subscribe_key("US3", "005930")
+    assert subscribe_key("UH1", "196170") == "U196170   "
+    assert len(subscribe_key("US3", "005930")) == 10
+    # 거래소 단독 TR 은 예전 그대로 - 되돌아가도 깨지지 않는다
+    for tr in ("S3_", "K3_", "H1_", "HA_"):
+        assert subscribe_key(tr, "005930") == "005930", tr
+    # 등록과 해제가 **같은 키**를 써야 한다 - 다르면 해제가 안 먹는다
+    key = subscribe_key("US3", "005930")
+    for on in (True, False):
+        m2 = json.loads(build_subscribe_message("US3", key, "tok", subscribe=on))
+        assert m2["body"]["tr_key"] == "U005930   ", m2
     print("  구독 메시지              OK")
 
 
@@ -683,12 +764,12 @@ def _run(seconds: float, symbols: tuple[str, ...]) -> int:
 
     env = load_project_env()
     SourceRegistry(env=env).require(SOURCE_ID)
-    mode = (env.get("LS_ENV") or "PAPER").upper()
+    mode = market_env(env)
     ws_base = env["LS_WS_BASE_URL_PAPER"] if mode == "PAPER" else env["LS_WS_BASE_URL"]
     ws_url = ws_base.rstrip("/") + WEBSOCKET_PATH
 
     now_kst = datetime.now(KST)
-    print(f"  LS_ENV={mode}  {ws_url}")
+    print(f"  LS_MARKET_ENV={mode}  {ws_url}")
     print(f"  현재 KST {now_kst:%Y-%m-%d %H:%M:%S} (정규장 09:00~15:30)")
 
     ref = SupabaseReferenceRepository()
@@ -712,7 +793,7 @@ def _run(seconds: float, symbols: tuple[str, ...]) -> int:
     print(f"  구독 {len(subs)}건: {', '.join(f'{t}:{k}' for t, k in subs[:6])}"
           + (" ..." if len(subs) > 6 else ""))
 
-    client = LsRestClient()
+    client = market_rest_client(env)
     dsn = env.get("TIMESCALE_DATABASE_URL")
     if not dsn:
         raise LsRealtimeError("TIMESCALE_DATABASE_URL 이 없다")

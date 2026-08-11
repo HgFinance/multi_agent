@@ -52,7 +52,7 @@ from contracts.market_events import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ls_unified_parser import exchname_to_market
+from ls_unified_parser import exchname_to_market, normalize_symbol
 from subscription_plan import DataKind, Venue
 
 ADAPTER_VERSION = "research-ls-realtime-adapter-v1"
@@ -240,7 +240,13 @@ def normalize(
         )
     kind, venue = kind_venue
 
-    symbol = str(payload.get("shcode", "")).strip()
+    # ▶ 통합시세의 shcode 는 `' U005930  '` 처럼 온다 (실측 2026-08-12)
+    #   `.strip()` 만 하면 'U005930' 이 남아 Instrument Master 조회가 전부
+    #   빗나가고, 수신은 되는데 **전건이 UNMAPPED_SYMBOL 로 격리**된다.
+    #   격리는 조용하지 않지만(그건 잘 만들어 뒀다) 원인은 종목코드다.
+    #   파서가 이미 같은 정규화를 갖고 있으므로 그것을 쓴다 - 여기에 두 벌째를
+    #   만들면 언젠가 한쪽만 고쳐진다.
+    symbol = normalize_symbol(payload.get("shcode")) or ""
     if not symbol:
         return _quarantine(
             QuarantineReason.MISSING_REQUIRED_FIELD,
@@ -528,6 +534,25 @@ def _check_non_trading_day_flag():
     print("  비거래일 Flag               OK")
 
 
+def _check_padded_symbol_is_normalised():
+    """통합시세 shcode 는 `' U005930  '` 로 온다 (실측 2026-08-12).
+
+    `.strip()` 만 하면 `U005930` 이 남아 Instrument Master 조회가 전부 빗나가고,
+    수신은 되는데 **전건이 UNMAPPED_SYMBOL 로 격리**된다. 격리 자체는 조용하지
+    않지만, 원인이 종목코드라는 것은 payload 를 열어봐야 안다.
+    """
+    for raw in (" U005930  ", "U005930", "005930", " 005930 "):
+        r = normalize("US3", {**S3, "shcode": raw, "exchname": "KRX"},
+                      received_at=_recv(), resolve_instrument=_resolver)
+        assert isinstance(r, MarketTick), f"{raw!r} 이 격리됐다: {r}"
+        assert r.instrument.provider_symbol == "005930", (raw, r.instrument)
+    # 숫자가 모자라면 여전히 격리된다 - 아무 값이나 통과시키지 않는다
+    bad = normalize("US3", {**S3, "shcode": "U12"}, received_at=_recv(),
+                    resolve_instrument=_resolver)
+    assert isinstance(bad, QuarantinedEvent), bad
+    print("  패딩 종목코드 정규화        OK")
+
+
 def _check_unified_carries_nxt_and_unified_depth():
     """통합시세(US3/UH1)가 **NXT 를 살려 오는가, 그리고 깊이가 통합인가.**
 
@@ -591,6 +616,7 @@ if __name__ == "__main__":
     _check_side_not_guessed()
     _check_quarantine()
     _check_non_trading_day_flag()
+    _check_padded_symbol_is_normalised()
     _check_unified_carries_nxt_and_unified_depth()
     _check_idempotent_source_event_id()
     print("Adapter 7개 영역 통과")

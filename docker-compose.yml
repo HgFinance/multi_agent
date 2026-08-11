@@ -203,6 +203,14 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       LS_ENV: ${LS_ENV:-PAPER}
+      # ▶ **시세는 주문과 다른 스위치를 쓴다** (재일님 결정 2026-08-12)
+      #   하나로 묶여 있을 때, 주문을 PAPER 로 두자 수집기가 모의 소켓에 붙어
+      #   프리마켓 한 시간 동안 체결이 0건이었다. 시세 구독은 주문 권한과
+      #   무관하다 - LIVE 키로 받아도 주문이 나가지 않는다.
+      #   기본값이 LIVE 인 이유: 모의 시세는 **진짜처럼 생긴 가짜**라 조용히
+      #   흘러가면 백테스트가 사실로 읽는다. 못 받는 것은 티가 나고 잘못 받는
+      #   것은 티가 안 난다.
+      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
