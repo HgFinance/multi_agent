@@ -40,22 +40,24 @@ install_one() {
   [ -f "$src/config.yaml" ] || { echo "  ✗ $dept: config.yaml 없음"; return 1; }
   docker inspect "$container" >/dev/null 2>&1 || { echo "  - $container: 안 떠 있음(건너뜀)"; return 0; }
 
-  local dest="/opt/data/profiles/$profile"
-  docker exec "$container" mkdir -p "$dest"
-  docker cp "$src/config.yaml" "$container:$dest/config.yaml"
-  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:$dest/SOUL.md"
+  # ▶ **활성 프로필은 /opt/data 루트다** (2026-08-11 실측)
+  #   컨테이너는 처음 뜰 때 /opt/data/config.yaml 에 **Hermes 기본 예제**(88KB)를
+  #   깔아 둔다. `profiles/<이름>/` 하위에 심으면 목록에는 뜨지만 활성 설정이 아니다.
+  #   부서 설정을 실제로 쓰게 하려면 루트를 갈아끼워야 한다.
+  docker cp "$src/config.yaml" "$container:/opt/data/config.yaml"
+  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:/opt/data/SOUL.md"
 
-  # ▶ **이 두 줄이 함정이다.** docker exec 는 root 로 만든다 - 안 고치면 에이전트가
-  #   자기 프로필 디렉터리에 못 써서 첫 실행에 죽는다.
-  docker exec "$container" chown -R hermes:hermes /opt/data/profiles
-  docker exec "$container" chmod 700 "$dest"
+  # ▶ docker cp 는 root 소유로 넣는다 - hermes 사용자가 못 읽으면 첫 실행에 죽는다
+  #   (`Permission denied: /opt/data/.../cron`). 이 줄이 함정이었다.
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "chown hermes:hermes /opt/data/config.yaml /opt/data/SOUL.md 2>/dev/null; true"
 
-  if docker exec "$container" hermes profile list 2>&1 | grep -q "$profile"; then
-    echo "  ✓ $profile"
-  else
-    echo "  ✗ $profile: 심었으나 인식 안 됨 - 프로필 이름이 compose 와 다른지 확인"
+  local got
+  got=$(docker exec "$container" head -2 /opt/data/config.yaml 2>&1 | tr -d '')
+  if echo "$got" | grep -q "Hermes Agent CLI Configuration"; then
+    echo "  ✗ $profile: 아직 Hermes 기본 설정이다 - 복사가 안 먹었다"
     return 1
   fi
+  echo "  ✓ $profile (활성 설정 교체됨)"
 }
 
 if [ "${1:-}" = "--all" ]; then
