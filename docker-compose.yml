@@ -695,6 +695,9 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_DASHBOARD_HOST: 0.0.0.0
+      # Dashboard Chat의 /api/pty WebSocket(TUI)이 rebuild 경로에서 TUI 디렉터리를
+      # 못 찾아 실패하는 upstream 이슈 대응 - 경로를 명시로 고정한다.
+      HERMES_TUI_DIR: /opt/hermes/ui-tui
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
     mem_limit: 512m
