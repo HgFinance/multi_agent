@@ -913,6 +913,10 @@
           "path": "/ui/ceo/ask/{root_task_id}"
         },
         {
+          "method": "POST",
+          "path": "/ui/ceo/ask/{root_task_id}/synthesize"
+        },
+        {
           "method": "GET",
           "path": "/ui/account/snapshot"
         }

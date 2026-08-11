@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 try:
     from . import fact_router, hermes_cli
@@ -94,6 +95,103 @@ def _direct_answer_text(direct: dict[str, object]) -> str:
     return str(fact)
 
 
+_ARTIFACT_ROOTS = tuple(
+    Path(p) for p in (
+        os.getenv("KANBAN_ATTACH_ROOT",
+                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "attachments")),
+        os.getenv("KANBAN_WORKSPACE_ROOT",
+                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "workspaces")),
+    ))
+
+# 종합 프롬프트에 실을 부서당 최대 글자. 넘치면 CEO 턴이 컨텍스트로 죽는다.
+_FINDING_CHARS = int(os.getenv("CEO_FINDING_CHARS", "3000"))
+
+
+def _artifact_text(task_id: str) -> str:
+    """그 카드에서 부서가 남긴 것. **`result` 만 보지 않는다.**
+
+    ▶ 완료 카드 21장이 전부 `result` 가 비어 있었고 산출물은 첨부나 작업공간
+      파일로만 있었다(2026-08-11 실측). `result` 만 읽으면 부서가 몇 분씩 일한
+      결과가 통째로 없는 것으로 보인다 - 실제로 그렇게 읽고 "부서가 아무것도
+      안 했다"고 판단했다.
+    """
+    parts: list[str] = []
+    for root in _ARTIFACT_ROOTS:
+        folder = root / task_id
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.rglob("*")):
+            if f.is_file() and f.suffix in {".md", ".txt", ".json"}:
+                try:
+                    parts.append(f.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+    return "\n\n".join(parts)
+
+
+def _child_findings(cards) -> list[dict[str, str]]:
+    """뿌리 아래 부서 카드가 실제로 남긴 것. 뿌리 카드는 뺀다."""
+    out: list[dict[str, str]] = []
+    for c in cards:
+        if getattr(c, "is_root", False):
+            continue
+        text = (_artifact_text(c.task_id) or c.result or c.summary or "").strip()
+        out.append({
+            "assignee": c.assignee or "(미배정)",
+            "title": c.title,
+            "outcome": str(c.outcome),
+            # **빈손을 빈손이라고 적는다.** 여기서 조용히 빼면 CEO 는 그 본부가
+            # 검토한 줄 알고 종합한다 - 안 한 것과 이상 없던 것이 섞인다.
+            "text": text[:_FINDING_CHARS] if text else "",
+        })
+    return out
+
+
+def _synthesis_prompt(query: str, findings: list[dict[str, str]]) -> str:
+    lines = [
+        "부서 검토가 끝났다. 아래는 각 본부가 **실제로 남긴 것**이다.",
+        "이것만 근거로 사용자 질문에 답하라.\n",
+        f"[사용자 질문]\n{query}\n",
+        "[본부별 산출]",
+    ]
+    for f in findings:
+        lines.append(f"\n── {f['assignee']} ({f['outcome']}) — {f['title']}")
+        lines.append(f["text"] if f["text"] else
+                     "  (산출 없음 - 이 본부는 검토 결과를 남기지 않았다. "
+                     "검토했다고 쓰지 마라.)")
+    lines.append(
+        "\n[규칙]\n"
+        "- 산출이 없는 본부를 '이상 없음'으로 읽지 마라. 안 한 것과 이상 없던 것은 다르다.\n"
+        "- 수치는 본부가 적은 값을 **그대로** 옮겨라. 반올림·환산·요약하지 마라.\n"
+        "- 근거가 모자라면 결론을 만들지 말고 **무엇이 없어서 못 정하는지** 적어라.\n"
+        "- 너는 주문 제출·리스크 승인·원장 수정·NAV 확정 권한이 없다.")
+    return "\n".join(lines)
+
+
+def synthesize_root(root_task_id: str, query: str, cards) -> dict[str, object]:
+    """자식 산출을 모아 **두 번째 CEO 턴**으로 종합한다.
+
+    ▶ 왜 두 번째 턴인가 (2026-08-11 실측)
+      CEO 는 카드를 만든 **같은 턴에** 답을 냈다. 자식이 아직 시작도 안 한
+      시점이라 읽을 것이 없었고, 그래서 답변 안의 "리스크 HIGH/BLOCKING" 같은
+      문장은 본부가 보고한 것이 아니라 CEO 가 혼자 쓴 것이었다. 본부 7곳이
+      각각 몇 분씩 일한 결과는 한 글자도 답에 들어가지 않았다.
+      카드를 만드는 턴과 종합하는 턴은 **다른 시점**이어야 한다.
+    """
+    findings = _child_findings(cards)
+    if not findings:
+        return {"answer": "", "grounded": False, "reason": "부서 카드가 없다"}
+    result = _run_ceo_turn(query=_synthesis_prompt(query, findings))
+    return {
+        "answer": result.get("answer", ""),
+        "session_id": result.get("session_id"),
+        # 한 본부라도 실제 산출이 있어야 "근거 있는 종합"이다
+        "grounded": any(f["text"] for f in findings),
+        "departments_with_output": [f["assignee"] for f in findings if f["text"]],
+        "departments_silent": [f["assignee"] for f in findings if not f["text"]],
+    }
+
+
 def _run_ceo_turn(query: str) -> dict[str, object]:
     """CEO 한 턴. transport 만 다르고 계약은 같다."""
     if CEO_TRANSPORT == "cli":
@@ -163,6 +261,19 @@ def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
             "  research-department / quant-backtest-department / trading-department /\n"
             "  risk-management / accounting-portfolio-department / qa-department /\n"
             "  hr-department\n\n"
+            # ▶ **산출을 남기라고 시켜야 남는다** (2026-08-11 실측). 완료 카드
+            #   21장 중 20장이 회수 가능한 산출이 하나도 없었다 - 본부가 몇 분씩
+            #   일하고 텍스트를 냈지만 어디에도 안 남아 종합에 못 쓰였다.
+            "Every child task body MUST end with this instruction, verbatim:\n"
+            "  '[산출 규칙] 검토 결과를 반드시 파일로 남겨라(예: findings.md).\n"
+            "   남기지 않으면 종합 단계에서 이 본부는 「산출 없음」으로 처리되고,\n"
+            "   네가 한 검토는 답변에 반영되지 않는다.\n"
+            "   수치는 출처와 함께 적고, 없는 값을 0 으로 채우지 마라.\n"
+            "   확인 못 한 것은 확인 못 했다고 적어라.'\n\n"
+            # 이 턴은 계획이다. 답은 본부가 끝난 뒤 두 번째 턴에서 만든다.
+            "This turn is PLANNING ONLY. Do not state conclusions about the "
+            "user's question yet - the departments have not run. Reply with the "
+            "plan and which departments you tasked.\n\n"
             f"Original user request:\n{req.query}"
         ),
     )
@@ -207,6 +318,49 @@ def ceo_query_progress(root_task_id: str) -> dict[str, object]:
         "authoritative": False,
         "source_of_record": "/ui/snapshot",
         **progress_of(cards),
+    }
+
+
+@router.post("/ask/{root_task_id}/synthesize", operation_id="ceo_query_synthesize")
+def ceo_query_synthesize(root_task_id: str, query: str = "") -> dict[str, object]:
+    """부서 검토가 끝난 뒤 **종합한 최종 답**. 이게 없으면 부서 일이 버려진다.
+
+    ▶ 왜 별도 호출인가
+      카드를 만드는 턴에는 자식이 아직 시작도 안 했다. 같은 턴에 답하면 그 답은
+      부서 산출이 아니라 CEO 의 추측이다(실측: 본부 7곳이 각각 몇 분씩 일한
+      결과가 답에 한 글자도 안 들어갔다).
+
+    ▶ 아직 안 끝났으면 **종합하지 않는다.** 진행 중인 본부를 빼고 종합하면
+      그 본부는 영영 '의견 없음'으로 굳는다.
+    """
+    try:
+        cards = cards_for_root(root_task_id)
+    except BoardUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not cards:
+        raise HTTPException(status_code=404, detail="ceo_root_task_not_found")
+
+    children = [c for c in cards if not c.is_root]
+    pending = [c for c in children if not c.is_terminal]
+    if pending:
+        return {
+            "schema_version": "ceo.query-synthesis.v1",
+            "root_task_id": root_task_id,
+            "ready": False,
+            "answer": "",
+            "pending": [{"task_id": c.task_id, "assignee": c.assignee,
+                         "outcome": str(c.outcome)} for c in pending],
+        }
+
+    root_query = query.strip() or next(
+        (c.title for c in cards if c.is_root), "")
+    out = synthesize_root(root_task_id, root_query, cards)
+    return {
+        "schema_version": "ceo.query-synthesis.v1",
+        "root_task_id": root_task_id,
+        "ready": True,
+        "authoritative": False,
+        **out,
     }
 
 
