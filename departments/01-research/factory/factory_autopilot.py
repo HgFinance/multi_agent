@@ -182,6 +182,37 @@ def _vocab_block() -> str:
             + sources)
 
 
+REJECT_PATH = Path.home() / ".factory_autopilot_rejections"
+REJECT_KEEP = 6      # 브리핑에 싣는 최근 반려 수 - 오래된 것까지 실으면 잡음이 된다
+
+
+def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
+    """반려를 다음 브리핑이 읽을 수 있게 남긴다. 실패해도 수확을 죽이지 않는다."""
+    path = path or REJECT_PATH
+    if not rejected:
+        return 0
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            for x in rejected:
+                one = f"{stamp}\t{x.title[:70]}\t{x.reason[:160]}"
+                fh.write(one.replace("\n", " ") + "\n")
+    except OSError as e:
+        print(f"      ⚠ 반려 기록 실패 - 다음 주기가 같은 실수를 반복할 수 있다: "
+              f"{e}", flush=True)
+        return 0
+    return len(rejected)
+
+
+def recent_rejections(*, keep: int = REJECT_KEEP, path: Path | None = None) -> list[str]:
+    """최근 반려 몇 건. 못 읽으면 빈 목록 - 없는 교훈을 지어내지 않는다."""
+    path = path or REJECT_PATH
+    try:
+        lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    except OSError:
+        return []
+    return lines[-keep:]
+
+
 def research_brief() -> str:
     """리서치본부가 다음 기획안을 낼 때 볼 사실. 결론은 없다.
 
@@ -213,6 +244,19 @@ def research_brief() -> str:
         out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
                    "LEAD_IDS 가 비면 접수 전에 반려된다.")
     out.append(_vocab_block())
+    # ▶ 지난 반려를 싣는다. 어휘를 나열하는 것만으로는 안 고쳐진다 - 8/11 에
+    #   기획자가 REGIME_ARTIFACT 를 지어내 반려됐는데, 그 사실이 다음 브리핑에
+    #   없어서 같은 코드로 또 냈다. 기각 사유가 돌아와야 파훼가 가능하다.
+    rej = recent_rejections()
+    if rej:
+        out.append("\n[지난 반려 - 같은 이유로 또 내지 마라]")
+        for line in rej:
+            parts = line.split("\t")
+            stamp, title, reason = (parts + ["", "", ""])[:3]
+            out.append(f"  - ({stamp}) {title}\n      반려 사유: {reason}")
+        out.append("  위 사유를 읽고 **그 원인을 제거한 기획안**을 내라. "
+                   "통제 어휘 밖의 값을 지어내지 말고, 필요한 개념이 어휘에 "
+                   "없으면 가장 가까운 코드를 쓰고 그 한계를 본문에 적어라.")
     return "\n".join(out)
 
 
@@ -417,6 +461,13 @@ def harvest(*, dry_run: bool = False) -> int:
                 # 왜 안 들어갔는지 **반드시 남긴다** - 조용히 0건이면 다음 주기가
                 # 같은 실수를 반복한다(실제로 published=0 을 며칠 몰랐다)
                 print(f"      반려: {x.title[:40]} <- {x.reason[:90]}", flush=True)
+            # ▶ 반려를 **다음 브리핑으로 되돌린다** (2026-08-11)
+            #   사람에게 보이는 것만으로는 루프가 안 닫힌다. 8/11 실측:
+            #   기획자가 어휘에 없는 COMPETING_CODES(REGIME_ARTIFACT)를 지어내
+            #   반려됐는데, 다음 주기 브리핑은 그 사실을 안 실어서 **같은 코드로
+            #   또 냈다.** 통제 어휘를 나열하는 것과 "네가 지난번 그것을 어겼다"고
+            #   말해주는 것은 다른 신호다.
+            record_rejections(r.rejected, stamp=stamp)
             if unknown:
                 print(f"      원장에 없는 리드: {unknown}", flush=True)
             # 발행이든 반려든 **판정이 났으면** 처리 완료다. 반려는 다시 태워도
@@ -510,8 +561,58 @@ def cycle(*, dry_run: bool = False) -> int:
     return fails
 
 
+def _check_rejection_feedback(tmp: Path) -> None:
+    """반려가 **다음 브리핑으로 돌아오는가.** 8/11 에 끊겨 있던 고리다.
+
+    통제 어휘를 나열하는 것과 "네가 지난번 그것을 어겼다"고 말하는 것은 다른
+    신호다. 전자만 있으면 기획자는 같은 코드를 또 지어낸다(실측).
+    """
+    from types import SimpleNamespace
+
+    path = tmp / "rejections.tsv"
+    assert recent_rejections(path=path) == [], "없는 파일에서 교훈을 지어냈다"
+
+    rej = [SimpleNamespace(title="다층 호가 불균형 이후 단기 가격 지속성 검증",
+                           reason="경쟁 설명 코드가 어휘 밖이다: REGIME_ARTIFACT")]
+    assert record_rejections(rej, stamp="20260811T09", path=path) == 1
+    assert record_rejections([], stamp="20260811T10", path=path) == 0, \
+        "반려가 없는데 기록했다"
+
+    got = recent_rejections(path=path)
+    assert len(got) == 1 and "REGIME_ARTIFACT" in got[0], got
+    assert "\n" not in got[0], "여러 줄이 섞이면 다음 읽기가 어긋난다"
+
+    # 최근 것만 싣는다 - 오래된 반려까지 다 실으면 브리핑이 잡음이 된다
+    for i in range(REJECT_KEEP + 3):
+        record_rejections([SimpleNamespace(title=f"t{i}", reason=f"r{i}")],
+                          stamp="x", path=path)
+    assert len(recent_rejections(path=path)) == REJECT_KEEP
+    assert recent_rejections(path=path)[-1].endswith(f"r{REJECT_KEEP + 2}")
+
+    # 기록 실패가 수확을 죽이면 안 된다 - 없는 디렉터리로 확인한다
+    assert record_rejections(rej, stamp="x", path=tmp / "없는곳" / "r.tsv") == 0
+    print("  반려 환류 고리            OK")
+
+
+def _selfcheck() -> int:
+    import tempfile
+
+    print(f"{MODULE_VERSION} 자체 점검 (카드·DB 없음)")
+    with tempfile.TemporaryDirectory() as d:
+        _check_rejection_feedback(Path(d))
+    v = _vocab_block()
+    assert "REGIME_ARTIFACT" not in v, "내가 지어낸 어휘가 아직 브리핑에 있다"
+    for token in ("EDGE_TYPE", "UNIVERSE_KEY", "COMPETING_CODES", "DATA_TABLES"):
+        assert token in v, f"통제 어휘에 {token} 이 빠졌다"
+    print("  통제 어휘 출처            OK")
+    print("자동 조종 2개 영역 통과. 실행은 --once / --loop")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="전략 공장 자동 조종")
+    ap.add_argument("--check", action="store_true",
+                    help="실행 없이 자체 점검만 한다")
     ap.add_argument("--once", action="store_true", help="한 주기만 돌고 끝낸다")
     ap.add_argument("--loop", action="store_true", help="주기마다 계속 돈다")
     ap.add_argument("--interval-min", type=int, default=240,
@@ -523,8 +624,11 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+    if a.check:
+        return _selfcheck()
+
     if not (a.once or a.loop):
-        ap.error("--once 또는 --loop 중 하나를 지정하라")
+        ap.error("--once / --loop / --check 중 하나를 지정하라")
 
     if a.once:
         return 1 if cycle(dry_run=a.dry_run) else 0

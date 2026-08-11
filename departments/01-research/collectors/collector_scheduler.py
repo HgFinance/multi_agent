@@ -65,12 +65,20 @@ class Job:
     every_minutes: int | None = None
     window: tuple[time, time] | None = None  # 주기형의 활동 창 (KST)
     daily_at: time | None = None             # 일일형의 실행 시각 (KST)
+    # ▶ Job 별 제한 시간. 기본 30분은 짧은 Job 을 지키는 값이라, 유니버스
+    #   전량처럼 본래 몇 시간 걸리는 Job 에 그대로 걸면 **정상 동작이
+    #   타임아웃으로 기록된다.** 예산은 Job 이 하는 일의 크기에서 나온다.
+    timeout_seconds: float | None = None
 
     def __post_init__(self):
         if (self.every_minutes is None) == (self.daily_at is None):
             raise ValueError(f"{self.name}: every_minutes 와 daily_at 중 하나만 지정한다")
         if self.every_minutes is not None and self.window is None:
             raise ValueError(f"{self.name}: 주기형은 활동 창이 필수다 - 무제한 폴링을 막는다")
+
+    @property
+    def timeout(self) -> float:
+        return self.timeout_seconds or JOB_TIMEOUT_SECONDS
 
 
 # 시각은 전부 KST. DART 정기공시가 주로 장 마감 후에 몰리므로 일일 Job 은 저녁에 둔다.
@@ -103,6 +111,27 @@ JOBS: tuple[Job, ...] = (
     Job("chart-daily",
         ("collectors/chart_backfill_collector.py", "--daily", "--recent-days", "7"),
         daily_at=time(15, 50)),
+    # ▶ 일봉 **전량** - 위 15:50 Job 은 인자에 --universe 가 없어서 뉴스
+    #   워치리스트 350종목만 받는다. 호가·체결은 2,595종목을 받는데 일봉이
+    #   350종목이면 **유니버스가 어긋난다** - 마이크로구조에서 찾은 것을
+    #   일봉으로 확인하려 해도 종목이 안 겹치고, 횡단면 전략은 표본 종목 수가
+    #   곧 검정력이다. 2026-08-11 실측: 그날 일봉이 350종목만 있고 3,573종목이
+    #   비어 있었다. 8/3~8/10 이 차 있던 것은 손으로 돌린 백필이었고, 사람이
+    #   기억해야 채워지는 것은 채워지지 않는다.
+    #
+    #   15:50 자리를 넓히지 않고 Job 을 따로 두는 이유: 초당 1회 제한이라
+    #   3,900종목이면 두 시간 가까이 걸린다. 스케줄러는 Job 을 **순차로**
+    #   돌리므로 15:50 에 두 시간짜리를 걸면 VKOSPI(16:05)·라벨 스냅샷(16:30)
+    #   같은 그날치 관측이 전부 뒤로 밀린다. 21:00 은 저녁 배치(document
+    #   -archive 20:00)가 끝난 뒤이고, 시간외단일가(~18:00)까지 반영된 확정
+    #   일봉을 받는 시각이다.
+    #
+    #   --recent-days 3: PK 가 멱등이라 겹쳐 받아도 안전하고, 하루 장애가 나도
+    #   다음 실행이 스스로 메운다. 3일이면 주말·연휴 하나를 건넌다.
+    Job("chart-daily-universe",
+        ("collectors/chart_backfill_collector.py",
+         "--daily", "--universe", "--recent-days", "3"),
+        daily_at=time(21, 0), timeout_seconds=3 * 60 * 60),
     # 일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다. 16:30:
     # VKOSPI(16:05) 뒤라 그날 시장 상태가 다 반영된 시점. 이 이력이 있어야
     # Packet 의 REGIME_FLIP·GEO_ESCALATION 주장을 채점할 수 있다.
@@ -213,12 +242,12 @@ def is_due(job: Job, state: JobState, now: datetime) -> bool:
     return (now - state.last_started) >= timedelta(minutes=job.every_minutes)
 
 
-def run_job(job: Job, *, timeout: float = JOB_TIMEOUT_SECONDS) -> tuple[int, str]:
+def run_job(job: Job, *, timeout: float | None = None) -> tuple[int, str]:
     """subprocess 로 한 번 실행. (종료 코드, 출력 꼬리)."""
     proc = subprocess.run(
         [sys.executable, *job.argv],
         check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout,
+        timeout=timeout if timeout is not None else job.timeout,
         cwd=str(Path(__file__).resolve().parent.parent),
     )
     tail = "\n".join((proc.stdout or "").strip().splitlines()[-6:])
@@ -276,6 +305,64 @@ def record_run(job_name: str, argv: tuple[str, ...], *, started, ended,
         return False
 
 
+def seed_states_from_history(states: dict[str, JobState], *, conn=None,
+                             today: date | None = None) -> int:
+    """재시작 뒤 **오늘 이미 끝낸 일일 Job 을 다시 돌리지 않게** 원장에서 복원한다.
+
+    ▶ 왜 필요한가 (2026-08-11)
+      JobState 는 메모리에만 있었다. 컨테이너를 한 번 올리면 그 시각 이전의
+      daily_at Job 이 **전부 다시 돈다** - is_due 가 `last_finished_date !=
+      오늘` 로 판정하는데, 갓 만든 상태는 None 이라 언제나 참이다.
+      저녁에 재시작하면 그날 일일 Job 열몇 개가 한꺼번에 재실행되고,
+      DART·GDELT·LS 를 다시 두드린다(GDELT 는 실제로 429 를 준다).
+      멱등이라 데이터는 안 깨지지만, **재시작이 비싸지면 고치는 것을 미루게
+      된다.** 배포를 겁내게 만드는 것 자체가 결함이다.
+
+      복원 실패는 수집을 죽이지 않는다 - 못 읽었으면 예전처럼 다 도는 것뿐이라
+      안전한 쪽으로 떨어진다. 다만 조용히 넘기지 않고 stderr 로 알린다.
+
+    OK/SKIP 만 '끝냈다'로 친다. 실패한 Job 은 재시작이 곧 재시도여야 한다.
+    """
+    today = today or datetime.now(KST).date()
+    # 주기형은 복원하지 않는다 - is_due 가 last_started 로 판정하고, 재시작
+    # 직후 한 번 더 도는 것이 오히려 맞다(10분 폴링은 겹쳐도 싸다).
+    daily = [j.name for j in JOBS if j.daily_at is not None and j.name in states]
+    if not daily:
+        return 0
+    try:
+        own = conn is None
+        if own:
+            import psycopg2
+            from source_registry import load_project_env
+
+            conn = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                    connect_timeout=10)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select job_name, max((ended_at at time zone 'Asia/Seoul')::date)
+                  from research.collector_runs
+                 where job_name = any(%s)
+                   and status in ('OK','SKIP')
+                   and ended_at >= now() - interval '48 hours'
+                 group by job_name
+                """,
+                (daily,))
+            rows = cur.fetchall()
+        if own:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 실행 이력 복원 실패 - 오늘 일일 Job 이 다시 돈다: "
+              f"{type(e).__name__}: {str(e)[:120]}", file=sys.stderr, flush=True)
+        return 0
+    seeded = 0
+    for name, last in rows:
+        if last == today and name in states:
+            states[name].last_finished_date = last
+            seeded += 1
+    return seeded
+
+
 def main() -> int:
     stop = threading.Event()
 
@@ -287,11 +374,14 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle)
 
     states: dict[str, JobState] = {j.name: JobState() for j in JOBS}
-    print(f"{SCHEDULER_VERSION}: Job {len(JOBS)}개", flush=True)
+    seeded = seed_states_from_history(states)
+    print(f"{SCHEDULER_VERSION}: Job {len(JOBS)}개"
+          f" (오늘 이미 끝난 일일 Job {seeded}개는 건너뛴다)", flush=True)
     for j in JOBS:
         when = (f"{j.every_minutes}분마다 {j.window[0]:%H:%M}~{j.window[1]:%H:%M}"
                 if j.every_minutes else f"매일 {j.daily_at:%H:%M}")
-        print(f"  {j.name:<18} {when}  <- {' '.join(j.argv)}", flush=True)
+        done = " [오늘 완료]" if states[j.name].last_finished_date else ""
+        print(f"  {j.name:<21} {when}{done}  <- {' '.join(j.argv)}", flush=True)
 
     while not stop.is_set():
         now = datetime.now(KST)
@@ -307,12 +397,12 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 st.consecutive_failures += 1
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: ⚠ TIMEOUT "
-                      f"({JOB_TIMEOUT_SECONDS / 60:.0f}분, 연속 {st.consecutive_failures})",
+                      f"({job.timeout / 60:.0f}분, 연속 {st.consecutive_failures})",
                       flush=True)
                 # 타임아웃도 기록한다 - 로그에만 남기면 재시작과 함께 사라진다
                 record_run(job.name, job.argv, started=st.last_started,
                            ended=datetime.now(KST), exit_code=TIMEOUT_EXIT,
-                           tail=f"{JOB_TIMEOUT_SECONDS/60:.0f}분 초과",
+                           tail=f"{job.timeout / 60:.0f}분 초과",
                            consecutive_failures=st.consecutive_failures)
                 continue
             st.runs += 1
@@ -390,10 +480,83 @@ def _check_due_logic():
     assert is_due(daily, st2, kst(18, 0))
     st2.last_finished_date = date(2026, 7, 31)
     assert not is_due(daily, st2, kst(23, 0)), "같은 날 두 번 돌았다"
-    # 재시작(상태 소실) 후에는 다시 due 다 - 멱등 적재라 안전하다는 전제를 명시
+    # 빈 상태는 다시 due 다. 이건 is_due 의 결함이 아니라 **상태를 안 준
+    # 쪽의 문제**라, 재시작 경로는 seed_states_from_history 로 메운다
+    # (아래 _check_seed_skips_finished_daily_jobs).
     st3 = JobState()
     assert is_due(daily, st3, kst(23, 0))
     print("  due 판정                 OK")
+
+
+class _FakeCursor:
+    def __init__(self, rows): self._rows = rows
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, _sql, _params=None): pass
+    def fetchall(self): return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows): self._rows = rows
+    def cursor(self): return _FakeCursor(self._rows)
+
+
+def _check_seed_skips_finished_daily_jobs():
+    """재시작이 **그날 이미 끝낸 일일 Job 을 다시 돌리지 않는가.**
+
+    이걸 안 하면 저녁 배포 한 번에 DART·GDELT·LS 를 하루치 더 두드린다.
+    멱등이라 데이터는 안 깨지지만, 재시작이 비싸지면 고치는 것을 미루게 된다.
+    """
+    today = date(2026, 8, 11)
+    yesterday = date(2026, 8, 10)
+    states = {j.name: JobState() for j in JOBS}
+    n = seed_states_from_history(
+        states,
+        conn=_FakeConn([("chart-daily", today),          # 오늘 끝냄 -> 건너뛴다
+                        ("macro", yesterday),            # 어제 것 -> 오늘은 돈다
+                        ("no-such-job", today)]),        # 사라진 Job -> 무시
+        today=today)
+    assert n == 1, f"복원 수가 틀리다: {n}"
+    assert states["chart-daily"].last_finished_date == today
+    assert states["macro"].last_finished_date is None
+
+    at_2130 = datetime(2026, 8, 11, 21, 30, tzinfo=KST)
+    by_name = {j.name: j for j in JOBS}
+    assert not is_due(by_name["chart-daily"], states["chart-daily"], at_2130), \
+        "오늘 끝낸 Job 이 재시작 뒤 또 돈다"
+    assert is_due(by_name["macro"], states["macro"], at_2130), \
+        "어제가 마지막인 Job 은 오늘 돌아야 한다"
+
+    # 주기형은 복원 대상이 아니다 - 재시작 직후 한 번 더 도는 것이 맞다
+    assert states["disclosure"].last_finished_date is None
+
+    # 원장을 못 읽어도 수집은 계속된다 (예전처럼 다 도는 쪽 = 안전한 실패)
+    class _Boom:
+        def cursor(self): raise RuntimeError("DB 없음")
+    assert seed_states_from_history({j.name: JobState() for j in JOBS},
+                                    conn=_Boom(), today=today) == 0
+    print("  재시작 중복 실행 차단    OK")
+
+
+def _check_job_timeout_budget():
+    """유니버스 전량처럼 오래 걸리는 Job 에 기본 30분을 걸면 **정상이 타임아웃으로 기록된다.**
+
+    초당 1회 제한 × 3,900종목 = 65분 이상이다. 예산은 Job 이 하는 일에서 나온다.
+    """
+    by_name = {j.name: j for j in JOBS}
+    assert by_name["disclosure"].timeout == JOB_TIMEOUT_SECONDS, "기본값이 안 붙는다"
+    uni = by_name["chart-daily-universe"]
+    assert "--universe" in uni.argv, "전량 Job 인데 --universe 가 없다"
+    assert uni.timeout >= 65 * 60, \
+        f"초당 1회 × 3,900종목을 못 담는 예산이다: {uni.timeout / 60:.0f}분"
+
+    # 순차 실행이라 긴 Job 은 다른 일일 Job 뒤에 와야 한다 - 그날치 관측
+    # (VKOSPI·라벨 스냅샷)이 밀리면 사후 소급이 안 된다.
+    later_than = [j.name for j in JOBS
+                  if j.daily_at is not None and j is not uni
+                  and j.daily_at > uni.daily_at]
+    assert not later_than, f"전량 Job 뒤에 일일 Job 이 남아 밀린다: {later_than}"
+    print("  Job 제한 시간 예산       OK")
 
 
 def _check_exit_codes():
@@ -436,7 +599,9 @@ if __name__ == "__main__":
         _check_exit_codes()
         _check_status_classification()
         _check_record_failure_is_contained()
-        print("스케줄러 5개 영역 통과. 상주 실행은 --serve")
+        _check_seed_skips_finished_daily_jobs()
+        _check_job_timeout_budget()
+        print("스케줄러 7개 영역 통과. 상주 실행은 --serve")
         raise SystemExit(0)
 
     if "--once" in sys.argv:
