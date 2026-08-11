@@ -584,8 +584,10 @@ select substr(h.title, 1, 60), replace(j.failure_reason, chr(10), ' ')
   join quant.hypotheses h using (hypothesis_id)
  where j.status = 'FAILED'
    and coalesce(j.failure_reason, '') <> ''
-   and j.finished_at >= now() - interval '24 hours'
- order by j.finished_at desc
+   -- 종결 시각 컬럼은 `updated_at` 이다(finished_at 은 없다). 상태가 FAILED 로
+   -- 바뀔 때 같이 갱신되므로 "언제 죽었나" 로 쓰기에 맞다.
+   and j.updated_at >= now() - interval '24 hours'
+ order by j.updated_at desc
  limit %s
 """
 
