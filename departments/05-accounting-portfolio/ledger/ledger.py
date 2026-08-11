@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -46,14 +46,21 @@ PAYABLE = "2000"         # 미지급금
 CAPITAL = "3000"         # 자본금
 REALIZED_PNL = "4000"    # 실현손익
 UNREALIZED_PNL = "4100"  # 평가손익
-FEE_EXPENSE = "5000"     # 수수료비용
+FEE_EXPENSE = "5000"     # 수수료비용 (거래 체결 비용 — TCA 가 쓰는 계정이다)
 TAX_EXPENSE = "5100"     # 세금비용
+# 보수 발생주의 (supabase/migrations/20260811000100_accounting_fee_accounts.sql).
+# 거래 수수료(5000)와 섞지 않는다 - 거래를 안 한 날에도 보수는 발생하고,
+# 그 둘을 합치면 집행 품질(TCA)과 운용 보수를 분리할 수 없다.
+FEE_PAYABLE = "2100"     # 미지급보수 (확정 전까지 남는 부채)
+MGMT_FEE_EXPENSE = "5200"        # 관리보수비용
+PERF_FEE_EXPENSE = "5300"        # 성과보수비용
 
 ACCOUNT_TYPES = {
     CASH: "asset", SECURITIES: "asset", RECEIVABLE: "asset",
-    PAYABLE: "liability", CAPITAL: "equity",
+    PAYABLE: "liability", FEE_PAYABLE: "liability", CAPITAL: "equity",
     REALIZED_PNL: "income", UNREALIZED_PNL: "income",
     FEE_EXPENSE: "expense", TAX_EXPENSE: "expense",
+    MGMT_FEE_EXPENSE: "expense", PERF_FEE_EXPENSE: "expense",
 }
 
 ZERO = Decimal(0)
@@ -72,6 +79,14 @@ def decimal_str(value: Decimal) -> str:
 
 class LedgerError(Exception):
     """원장 불변식 위반. 절대 조용히 넘어가지 않는다."""
+
+
+class PeriodClosedError(LedgerError):
+    """마감된 회계기간에 분개하려 한 경우. 따로 잡을 수 있게 나눠 둔다.
+
+    호출자가 구분해야 하는 실패다 - 분개가 틀린 것이 아니라 **날짜가 틀린 것**이고,
+    고치는 방법도 다르다(당기로 다시 낸다).
+    """
 
 
 @dataclass(frozen=True)
@@ -136,12 +151,28 @@ class Ledger:
     fund_id: UUID
     book_id: UUID
     journals: list[Journal] = field(default_factory=list)
+    # 공식 NAV가 승인된 마지막 회계일. 이 날짜 이하로는 분개할 수 없다.
+    # None이면 아직 한 번도 마감하지 않은 것이고, 그때는 전 기간이 열려 있다.
+    # 값은 `close/nav_close.py::closed_through`가 `accounting.nav_runs`에서 읽는다 -
+    # 여기서 정하지 않는다(마감은 승인의 결과이지 원장의 의견이 아니다).
+    closed_through: date | None = None
     _posted_sources: set[tuple[str, str]] = field(default_factory=set)
 
     # -- Posting ------------------------------------------------------------
 
     def post(self, journal: Journal) -> Journal:
-        """분개를 기록한다. 같은 원천 이벤트는 한 번만 반영된다."""
+        """분개를 기록한다. 같은 원천 이벤트는 한 번만 반영된다.
+
+        **마감된 회계기간에는 분개하지 않는다.** 공식 NAV가 승인된 날짜까지는
+        확정된 과거이고, 거기에 분개가 하나 더 들어가면 이미 보고한 NAV가 조용히
+        바뀐다. 정정은 당기(열린 기간)에 한다 - 그게 회계에서 소급 수정을 금지하는
+        이유이자 `reverse()`가 반대 분개를 당기로 미는 이유다.
+        """
+        if self.closed_through is not None and journal.accounting_date <= self.closed_through:
+            raise PeriodClosedError(
+                f"{journal.accounting_date}는 마감된 기간입니다 "
+                f"(공식 NAV 승인 {self.closed_through}까지). 정정은 당기 분개로 합니다"
+            )
         key = (journal.event_type, journal.source_event_id)
         if key in self._posted_sources:
             # 이미 반영된 체결. 재처리에서 흔히 발생하며 두 번 잡히면 잔고가 틀어진다.
@@ -188,12 +219,21 @@ class Ledger:
             )
             for l in original.lines
         ]
+        # 원본 기간이 마감됐으면 반대 분개는 **당기로 낸다.** 마감된 날짜에 되돌려
+        # 놓으면 이미 승인된 NAV가 바뀐다 - 정정을 당기에 인식하는 것이 회계의 답이고,
+        # 그래서 원본 회계일과 반대 분개 회계일이 다를 수 있다(그게 정상이다).
+        now = datetime.now(timezone.utc)
+        accounting_date = original.accounting_date
+        if self.closed_through is not None and accounting_date <= self.closed_through:
+            # 첫 열린 회계일로 민다. 오늘이 아니라 `마감일 + 1일`인 이유는 마감이
+            # 오늘까지일 수 있어서다 - 그때 오늘로 밀면 다시 막힌 날짜가 된다.
+            accounting_date = max(now.date(), self.closed_through + timedelta(days=1))
         rev = Journal(
             journal_id=uuid4(), fund_id=original.fund_id, book_id=original.book_id,
             event_type=f"{original.event_type}_reversal",
             source_event_id=f"{original.source_event_id}:rev",
-            effective_at=datetime.now(timezone.utc),
-            accounting_date=original.accounting_date,
+            effective_at=now,
+            accounting_date=accounting_date,
             lines=flipped, reversal_of=journal_id, reason=reason,
         )
         original.status = "reversed"
@@ -224,20 +264,34 @@ class Ledger:
     def post_fill(self, fill, side: Side, instrument_id: UUID,
                   position: Position, when: datetime | None = None,
                   *, trace_id: str = "",
-                  metadata: dict[str, Any] | None = None) -> Journal:
+                  metadata: dict[str, Any] | None = None,
+                  settlement_date: date | None = None) -> Journal:
         """체결 하나를 균형 잡힌 분개로 변환한다 (팀 가이드 DoD 5번).
 
         매수:  차) 유가증권 + 수수료비용   대) 현금
         매도:  차) 현금 + 수수료 + 세금 + (손실)   대) 유가증권(원가) + (이익)
 
+        `settlement_date`를 주면 **현금 자리에 미지급금/미수금이 들어간다.** 한국
+        주식은 T+2 결제라 체결일과 현금 이동일이 다르고, 둘을 한 분개로 뭉치면
+        원장의 현금이 "오늘 쓸 수 있는 돈"이 아니게 된다 - 그 값으로 주문을
+        사이징하면 아직 들어오지 않은 매도 대금까지 쓴다. 현금은 결제일에
+        `post_settlement()`가 옮긴다.
+
+        NAV는 어느 쪽이든 같다. `PortfolioSnapshot.nav`가 현금에 미수를 더하고
+        미지급을 빼기 때문이다 - 바뀌는 것은 NAV가 아니라 **가용 현금**이다.
+
         실현손익은 (체결가 - 평균원가) x 수량으로 계산하고, 수수료·세금은
         손익에 섞지 않고 별도 비용 계정으로 뺀다. 섞으면 나중에 TCA에서
-        집행 비용과 전략 알파를 분리할 수 없다.
+        집행 비용과 전략 알파를 분리할 수 없다. 수수료·세금도 체결일에 비용으로
+        인식하고 현금은 결제일에 나간다(발생주의).
         """
         when = when or fill.event_time
         notional = fill.quantity * fill.price
         source = fill.broker_fill_id or str(fill.fill_id)
         lines: list[JournalLine] = []
+        # 매수는 갚을 돈(미지급금), 매도는 받을 돈(미수금)이다.
+        settling = settlement_date is not None
+        cash_account = CASH if not settling else (PAYABLE if side is Side.BUY else RECEIVABLE)
 
         def add(account: str, *, debit: Decimal = ZERO, credit: Decimal = ZERO, **kw) -> None:
             # 금액 0인 라인은 만들지 않는다. 수수료·세금·실현손익이 0인 경우가 흔하고
@@ -250,7 +304,7 @@ class Ledger:
             add(SECURITIES, debit=notional, instrument_id=instrument_id,
                 quantity=fill.quantity, unit_price=fill.price)
             add(FEE_EXPENSE, debit=fill.fee)
-            add(CASH, credit=notional + fill.fee)
+            add(cash_account, credit=notional + fill.fee)
         else:
             if position.quantity < fill.quantity:
                 raise LedgerError(
@@ -259,7 +313,7 @@ class Ledger:
             cost = position.average_cost * fill.quantity
             realized = notional - cost
 
-            add(CASH, debit=notional - fill.fee - fill.tax)
+            add(cash_account, debit=notional - fill.fee - fill.tax)
             add(FEE_EXPENSE, debit=fill.fee)
             add(TAX_EXPENSE, debit=fill.tax)
             add(SECURITIES, credit=cost, instrument_id=instrument_id,
@@ -271,8 +325,38 @@ class Ledger:
                 debit=-realized if realized < 0 else ZERO,
                 instrument_id=instrument_id)
 
+        # **결제일은 분개에 저장하지 않는다.** accounting.journals 에 컬럼이 없고,
+        # 있어도 중복이다 - T+2 는 `accounting_date` 에서 그대로 유도된다
+        # (`treasury/settlement.py::settlement_date_for`). 저장하면 DB 에서 다시
+        # 읽은 분개만 그 값을 잃어 재기동 후 미결제분이 조용히 사라진다.
         return self.post(self._journal("fill", source, when, lines,
                                        trace_id=trace_id, metadata=metadata))
+
+    def post_settlement(self, journal: Journal, when: datetime) -> Journal:
+        """미지급금/미수금을 현금으로 옮긴다. 체결 분개는 손대지 않는다.
+
+        **결제일 판단은 여기서 하지 않는다** - 호출자(`treasury.settle_due`)가
+        도래분만 골라 넘긴다. 같은 체결을 두 번 결제하지도 않는다:
+        `source_event_id`가 `<원천>:settle` 하나뿐이라 `post()`의 멱등 검사가
+        두 번째를 걸러낸다.
+        """
+        lines: list[JournalLine] = []
+        for line in journal.lines:
+            if line.account_code == PAYABLE:
+                # 매수 결제: 차) 미지급금  대) 현금
+                lines.append(JournalLine(PAYABLE, debit=line.credit))
+                lines.append(JournalLine(CASH, credit=line.credit))
+            elif line.account_code == RECEIVABLE:
+                # 매도 결제: 차) 현금  대) 미수금
+                lines.append(JournalLine(CASH, debit=line.debit))
+                lines.append(JournalLine(RECEIVABLE, credit=line.debit))
+        if not lines:
+            raise LedgerError(f"미결제 잔액이 없는 분개입니다: {journal.journal_id}")
+        return self.post(self._journal(
+            "settlement", f"{journal.source_event_id}:settle", when, lines,
+            trace_id=journal.trace_id,
+            metadata={"settles_journal_id": str(journal.journal_id)},
+        ))
 
     # -- Projection ----------------------------------------------------------
 

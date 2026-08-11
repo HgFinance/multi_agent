@@ -42,12 +42,15 @@ from typing import Any
 from uuid import UUID
 
 _BASE = Path(__file__).resolve().parent
-for _sub in ("", "ledger", "portfolio", "reporting", "reconciliation"):
+for _sub in ("", "ledger", "portfolio", "reporting", "reconciliation", "close",
+             "treasury", "fees"):
     _p = str(_BASE / _sub) if _sub else str(_BASE)
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 import discord_reporter  # noqa: E402
+import fees  # noqa: E402
+import nav_close  # noqa: E402
 import mark_provider  # noqa: E402
 import scripts as close_pipeline  # noqa: E402
 from daily_report import ReportError, build_daily_report  # noqa: E402
@@ -176,14 +179,38 @@ def run_daily(repo: LedgerRepository, *, now: datetime, cfg: dict,
                         "오늘 회계일의 평가 스냅샷이 없습니다. 휴장이거나 시세·평가가 "
                         "막혀 NAV 가 보류된 상태입니다(원장 분개는 별개로 진행됩니다).")
 
+    ledger = repo.load(fund_id, book_id)
     out = close_pipeline.run_accounting_close(
-        ledger=repo.load(fund_id, book_id),
+        ledger=ledger,
         as_of=now,
         accounting_date=accounting_date,
         marks=_close_marks(repo, fund_id, book_id, now, cfg.get("mark_interval")),
         opening_snapshot=todays[0],
+        # 성과보수 고수위. **승인된 공식 NAV 최대값**이고 파이프라인은 DB를 모른다 -
+        # 저장소를 아는 여기가 읽어서 넘긴다(scripts.accrue_fees 주석 참고).
+        high_water_mark=fees.high_water_mark(repo, fund_id),
         chat=chat,
     )
+    # 마감 수치를 `accounting.nav_runs`에 Preliminary로 남기고 독립 검증을 함께
+    # 돌린다. **확정이 아니다** - 공식 승격은 외부 승인이 있어야 하고
+    # (`nav_close.approve_official`), 그 승인 행은 우리가 만들지 않는다.
+    # 실패해도 보고는 나간다 - 확정 절차가 막혔다고 마감 보고까지 끊으면 아무도
+    # 그 사실을 모른다. 검증 blocker는 로그로 남아 다음 조사 대상이 된다.
+    try:
+        closing = todays[-1]
+        nav_run_id = nav_close.record_run(
+            repo, closing, valuation_date=accounting_date, trace_id=fund_id)
+        check = nav_close.independent_check(
+            closing,
+            report=out.get("report"),
+            trial_balance_sum=sum(repo.load(fund_id, book_id).trial_balance().values(),
+                                  Decimal(0)),
+        )
+        _log(f"NAV Run {nav_run_id} check={'PASS' if check.passed else 'BLOCKED'} "
+             f"{'/'.join(check.blockers)}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"NAV Run 기록 불가 {accounting_date}: {type(exc).__name__}: {exc}")
+
     result = send(out)
     _log(f"일일 마감 {accounting_date} nav_status={out.get('nav_status')} "
          f"discord={result.get('ok')}")

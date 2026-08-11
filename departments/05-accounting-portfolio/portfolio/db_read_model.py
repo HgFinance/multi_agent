@@ -27,9 +27,12 @@ from uuid import UUID
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "ledger"))
+sys.path.insert(0, str(_HERE.parent / "treasury"))
 
-from ledger import decimal_str
+from ledger import PAYABLE, RECEIVABLE, decimal_str
 from repository import LedgerRepository
+from settlement import ladder_from_pending, settlement_date_for
+from ui_read_model import treasury_section
 
 MAX_ROWS = 50
 
@@ -82,7 +85,45 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
             "where book_id = %s", (book_id,))
         labels = {row[0]: {"symbol": row[1], "display_name": row[2]} for row in cur.fetchall()}
 
+        # 미결제 체결. `settlement.py::_unsettled`와 같은 규칙을 SQL로 옮긴 것이다 -
+        # 미수/미지급 라인이 있고 `<원천>:settle` 분개가 없으면 미결제.
+        # **결제일은 여기서 만들지 않는다.** accounting_date만 가져오고 T+2 계산은
+        # `settlement_date_for`가 한다(영업일·휴장일 규칙이 두 벌이 되면 안 된다).
+        cur.execute(
+            """
+            select j.accounting_date,
+                   coalesce(sum(case when a.account_code = %(recv)s
+                                     then l.debit - l.credit else 0 end), 0),
+                   coalesce(sum(case when a.account_code = %(pay)s
+                                     then l.credit - l.debit else 0 end), 0),
+                   count(distinct j.journal_id)
+              from accounting.journals j
+              join accounting.journal_lines l on l.journal_id = j.journal_id
+              join accounting.ledger_accounts a on a.account_id = l.account_id
+             where j.book_id = %(book)s
+               and j.event_type = 'fill'
+               and j.status <> 'REVERSED'
+               and a.account_code in (%(recv)s, %(pay)s)
+               and not exists (
+                     select 1 from accounting.journals s
+                      where s.book_id = j.book_id
+                        and s.event_type = 'settlement'
+                        and s.source_event_id = j.source_event_id || ':settle')
+             group by j.accounting_date
+             order by j.accounting_date
+            """,
+            {"book": book_id, "recv": RECEIVABLE, "pay": PAYABLE},
+        )
+        unsettled = [
+            (settlement_date_for(accounting_date),
+             Decimal(str(receivable)), Decimal(str(payable)),
+             {"source_event_id": f"{accounting_date.isoformat()} 체결 {count}건",
+              "journal_id": None})
+            for accounting_date, receivable, payable, count in cur.fetchall()
+        ]
+
     nav = Decimal(str(nav)) if nav is not None else Decimal(0)
+    book_cash = Decimal(str(next(iter(cash.values()), "0")))
     securities = sum((Decimal(p["market_value"]) for p in positions), Decimal(0))
     unrealized = sum((Decimal(p["unrealized_pnl"]) for p in positions), Decimal(0))
     total = sum(balances.values(), Decimal(0))
@@ -98,7 +139,11 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
             # 손익 계정은 대변이 이익이라 부호를 뒤집는다(portfolio.value_portfolio와 동일).
             "realized_pnl": _d(-balances.get("4000", Decimal(0))),
             "unrealized_pnl": _d(unrealized),
-            "fees": _d(balances.get("5000", Decimal(0))),
+            # 인메모리 경로(portfolio.value_portfolio)와 같은 정의 - 거래 수수료 +
+            # 관리보수 + 성과보수. 한쪽만 합치면 화면의 비용이 원천에 따라 달라진다.
+            "fees": _d(balances.get("5000", Decimal(0))
+                       + balances.get("5200", Decimal(0))
+                       + balances.get("5300", Decimal(0))),
             "taxes": _d(balances.get("5100", Decimal(0))),
             # WARN이면 미확정 봉으로 평가된 NAV다. 화면이 판단하도록 그대로 싣는다.
             "quality_status": quality,
@@ -120,6 +165,10 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
                 for p in positions[:MAX_ROWS]
             ],
         },
+        # 사다리 산술은 인메모리 경로와 같은 함수를 쓴다. 문자열 변환 규약도 같다.
+        "treasury": treasury_section(
+            ladder_from_pending(unsettled, cash=book_cash, as_of=as_of.date())
+        ),
         "ledger": {
             "journal_count": journal_count,
             "reversal_count": reversed_count,
@@ -183,6 +232,19 @@ if __name__ == "__main__":
     assert build_accounting_sections(repo, empty_book) is None, \
         "평가된 적 없는 장부에 NAV를 만들어 줬다"
 
-    print(f"ok - DB Read Model 7개 영역 점검 통과 "
+    # 8. 결제 사다리도 인메모리 경로와 같은 계약이다. 가용 현금은 두 구간에서
+    #    같은 값이어야 한다 - 화면이 현금을 두 군데서 다르게 말하면 안 된다
+    from ui_read_model import treasury_section as _mem_treasury  # noqa: E402
+
+    t = sections["treasury"]
+    assert set(t) == set(_mem_treasury({
+        "as_of": "2026-01-01", "available_cash": Decimal(0),
+        "projected_cash_end": Decimal(0), "buckets": [], "overdue": [],
+    })), t
+    assert t["available_cash"] == p["cash"], (t["available_cash"], p["cash"])
+    assert t["buckets"], "사다리가 비었다"
+    assert t["overdue_count"] == len(t["overdue"])
+
+    print(f"ok - DB Read Model 8개 영역 점검 통과 "
           f"(NAV {p['nav']} {p['currency']}, quality {p['quality_status']}, "
           f"보유 {len(p['positions'])}종목)")

@@ -117,7 +117,7 @@ export default function OpsPanel({ compact = false }: { compact?: boolean }) {
   const { snapshot, connection, error, lastUpdated, refresh } = useBffFeed();
   if (!snapshot) return <BackendEmptyState connection={connection} error={error} refresh={refresh} compact={compact} />;
 
-  const { portfolio, trading, ledger, mode, sources } = snapshot;
+  const { portfolio, trading, ledger, treasury, mode, sources } = snapshot;
   // 장부 구간의 출처. mode와 다른 축이라 따로 보여준다 — 같은 DEMO 배지 아래에서
   // Supabase 실장부와 번들 Fixture가 구분되지 않으면 어느 쪽인지 알 수 없다.
   const ledgerSource = sources?.portfolio;
@@ -179,6 +179,40 @@ export default function OpsPanel({ compact = false }: { compact?: boolean }) {
             </article>
           ))}
         </section>
+
+        {treasury && (
+          <section aria-label="결제 예정 현금">
+            <div className="section-heading">
+              <h3>결제 예정 현금 (T+2)</h3>
+              <span className="status-pill">가용 {won(treasury.available_cash)}</span>
+            </div>
+            <p className="dash-note">
+              위 <b>현금</b>은 결제가 끝난 돈입니다. 오늘 낸 주문의 대금은 결제일에 움직입니다.
+            </p>
+            <div className="result-table">
+              <div className="result-row header">
+                <span>결제일</span>
+                <span>받을 돈</span>
+                <span>줄 돈</span>
+                <span>예상 현금</span>
+              </div>
+              {treasury.buckets.map((bucket) => (
+                <div className="result-row" key={bucket.date}>
+                  <span>{bucket.date}</span>
+                  <span>{won(bucket.incoming)}</span>
+                  <span>{won(bucket.outgoing)}</span>
+                  <span>{won(bucket.projected_cash)}</span>
+                </div>
+              ))}
+            </div>
+            {treasury.overdue_count > 0 && (
+              <p className="dash-note">
+                ⚠️ 결제일이 지났는데 결제되지 않은 체결이 <b>{treasury.overdue_count}건</b>{" "}
+                있습니다. 오늘 칸에 합치지 않고 따로 표시합니다 — 브로커 결제 누락일 수 있습니다.
+              </p>
+            )}
+          </section>
+        )}
 
         <div className="two-col">
           <section>

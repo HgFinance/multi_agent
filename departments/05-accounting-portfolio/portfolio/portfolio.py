@@ -35,6 +35,9 @@ sys.path.insert(0, str(_HERE.parent / "ledger"))
 
 from ledger import (
     FEE_EXPENSE,
+    MGMT_FEE_EXPENSE,
+    PERF_FEE_EXPENSE,
+    FEE_PAYABLE,
     PAYABLE,
     REALIZED_PNL,
     RECEIVABLE,
@@ -226,10 +229,18 @@ def value_portfolio(
         as_of=as_of,
         cash=cash,
         receivable=tb.get(RECEIVABLE, ZERO),
-        payable=-tb.get(PAYABLE, ZERO),   # 부채는 대변 잔액이라 부호를 뒤집는다
+        # 부채는 대변 잔액이라 부호를 뒤집는다. **미지급보수(2100)도 여기 포함된다** -
+        # 발생한 보수는 아직 안 나갔어도 투자자 몫이 아니므로 NAV에서 빠져야 한다.
+        # 빼지 않으면 보수를 낼 때마다 NAV가 그만큼 계단식으로 떨어진다.
+        payable=-(tb.get(PAYABLE, ZERO) + tb.get(FEE_PAYABLE, ZERO)),
         # 손익 계정도 대변이 이익이다. 원장에서 가져오고 여기서 다시 계산하지 않는다.
         realized_pnl=-tb.get(REALIZED_PNL, ZERO),
-        fees=tb.get(FEE_EXPENSE, ZERO),
+        # **운용 보수까지 합친 총 비용이다.** NAV 항등식(변화 = 손익 - 비용)의 "비용"이
+        # 이 값이라, 관리·성과보수를 빼면 그만큼이 통째로 미설명 손익이 된다.
+        # 계정 단위 분리(거래 수수료 5000 / 관리 5200 / 성과 5300)는 원장에 그대로
+        # 남아 있고 TCA·귀속은 그쪽을 읽는다.
+        fees=(tb.get(FEE_EXPENSE, ZERO) + tb.get(MGMT_FEE_EXPENSE, ZERO)
+              + tb.get(PERF_FEE_EXPENSE, ZERO)),
         taxes=tb.get(TAX_EXPENSE, ZERO),
         positions=tuple(valued),
     )

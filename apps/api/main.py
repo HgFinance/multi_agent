@@ -661,9 +661,12 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
             # 평가된 적 없는 장부다. 0원 NAV를 지어내지 않고 그 사실을 알린다.
             raise HTTPException(404, f"book {book_id}의 확정 Snapshot이 없습니다")
         if sections is not None:
+            # 출처는 **실제로 갈아끼운 구간에만** 붙인다. 목록을 손으로 적어두면
+            # 뷰가 구간을 하나 더 내놓거나 덜 내놨을 때 화면이 Scripted Loop 값을
+            # supabase라고 읽는다.
             overrides = {**sections,
                          "book_id": str(chosen),
-                         "sources": {"portfolio": "supabase", "ledger": "supabase"}}
+                         "sources": {name: "supabase" for name in sections}}
 
     snapshot = build_ui_snapshot(
         oms=loop.oms,
@@ -797,11 +800,16 @@ if __name__ == "__main__":
     # 구간마다 출처가 반드시 있다. 트레이딩은 아직 Scripted Loop다(TRD-01 대기).
     # 회계 구간은 DB와 Canonical 장부가 있으면 supabase, 없으면 scripted-loop -
     # 어느 쪽이든 **화면이 출처를 모르는 상태로 나가지 않는다**는 게 계약이다.
-    assert set(snap["sources"]) == {"portfolio", "trading", "ledger"}, snap["sources"]
+    assert set(snap["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
+        snap["sources"]
     assert snap["sources"]["trading"] == "scripted-loop", snap["sources"]
     assert snap["sources"]["portfolio"] == snap["sources"]["ledger"], \
         f"회계 두 구간의 출처가 갈라졌다: {snap['sources']}"
     assert snap["sources"]["portfolio"] in ("supabase", "scripted-loop"), snap["sources"]
+    # 결제 사다리. **원장 현금과 가용 현금이 같은 값으로 나간다** - 화면이 현금을
+    # 두 군데서 다르게 말하면 어느 쪽으로 주문을 잡을지 알 수 없다.
+    assert snap["treasury"]["available_cash"] == snap["portfolio"]["cash"], snap["treasury"]
+    assert snap["treasury"]["buckets"], snap["treasury"]
 
     # 없는 book_id는 404다. 0원 NAV를 지어내지 않는다.
     # (DB가 없으면 book_id가 무시되므로 그때는 200이고, 그 경우도 출처는 전부 DEMO다)
@@ -820,7 +828,9 @@ if __name__ == "__main__":
     def _fake_sections(repo, book_id):
         reads.append(book_id)
         return {"portfolio": {"nav": "12345", "as_of": "2026-08-10T06:00:00+00:00"},
-                "ledger": {"balanced": True, "journal_count": 3}}
+                "ledger": {"balanced": True, "journal_count": 3},
+                "treasury": {"available_cash": "12345", "buckets": [],
+                             "overdue_count": 0, "overdue": []}}
 
     globals()["_repo"] = lambda: object()      # DB가 있는 척 - 뷰 호출은 위에서 가로챈다
     globals()["_default_book_id"] = lambda repo: _BOOK
@@ -833,6 +843,7 @@ if __name__ == "__main__":
         assert wired["book_id"] == str(_BOOK), wired["book_id"]
         assert wired["sources"]["portfolio"] == "supabase"
         assert wired["sources"]["ledger"] == "supabase"
+        assert wired["sources"]["treasury"] == "supabase"
         # 갈아끼우지 않은 구간의 출처는 그대로 남는다
         assert wired["sources"]["trading"] == "scripted-loop", wired["sources"]
         # mode는 여전히 DEMO다. 트레이딩이 Scripted Loop인 한 절반만 진짜다

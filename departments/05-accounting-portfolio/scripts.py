@@ -75,7 +75,8 @@ _BASE = Path(__file__).resolve().parent
 _REPO_ROOT = _BASE.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_actions"):
+for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_actions",
+             "treasury", "close"):
     _p = str(_BASE / _sub)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -83,7 +84,9 @@ for _sub in ("ledger", "portfolio", "reconciliation", "reporting", "corporate_ac
 from daily_report import DailyReport, ReportError, build_daily_report
 from langgraph.graph import END, StateGraph
 from langsmith import tracing_context
+import fees as fee_accrual
 from ledger import Ledger
+from statements import StatementError, build_statements
 from portfolio import (
     MarkPrice,
     PortfolioSnapshot,
@@ -116,6 +119,9 @@ class CloseState(TypedDict, total=False):
     carried_open_breaks: list        # 전일까지 미종결 Break (recon_repository.open_breaks)
     triage_corpus: list              # 과거 해소 사례 (break_triage.load_corpus) - 근거 검색용
     opening_snapshot: Any            # PortfolioSnapshot | None
+    # 성과보수 고수위. **승인된 공식 NAV 최대값**이며 호출자가 준다
+    # (close/fees.py::high_water_mark). 없으면 fees.performance_base 가 기준선이다.
+    high_water_mark: Any             # Decimal | None
     stored_projection: dict | None   # {"positions": {...}, "cash": Decimal} - DB Read Model
     strategy_of: dict | None
 
@@ -132,6 +138,8 @@ class CloseState(TypedDict, total=False):
     break_citations: dict            # 서술이 인용한 근거 id 검증 결과
     break_narrative: str | None      # ACC-02 LLM (서술만)
     projection_check: dict           # rebuild 재현성 + 저장본 대조 + 차대 균형
+    statements: dict | None          # 재무상태표·손익계산서 (reporting/statements.py)
+    fee_accrual: dict                # 관리·성과보수 발생 결과 (close/fees.py - 결정론)
     snapshot: dict | None            # 평가 결과 (금액은 문자열)
     # PortfolioSnapshot 원본. daily_report 가 dict 가 아니라 객체를 받는다.
     # **State 에 선언하지 않으면 LangGraph 가 조용히 버린다** - 선언 안 했더니 report 가
@@ -475,6 +483,39 @@ def _snapshot_dict(s: PortfolioSnapshot) -> dict:
             "position_count": len(s.positions)}
 
 
+def accrue_fees(state: CloseState) -> dict:
+    """관리·성과보수를 **평가 전에** 발생시킨다(마스터플랜 12.4 8번 -> 9번 순서).
+
+    **기초 NAV 기준으로 계산한다.** 당일 NAV로 계산하면 보수가 NAV를 줄이고 줄어든
+    NAV가 다시 보수를 바꾸는 순환이 생긴다. 기초 기준이면 순환이 없고, 오늘 수익에
+    대한 성과보수는 내일 발생분에 잡힌다.
+
+    ponytail: 고수위는 호출자가 준다(`high_water_mark`). 안 주면 0이고, 그때는
+              `fees.performance_base`가 기준선이다 - 여기서 DB를 읽지 않는 이유는
+              마감 파이프라인이 원장 외의 저장소를 모르게 두기 위해서다.
+              DB 경로는 `close/fees.py::high_water_mark(repo, fund_id)`다.
+    """
+    opening = state.get("opening_snapshot")
+    if opening is None:
+        return {"fee_accrual": {"skipped": ["기초 스냅샷 없음 - 보수 기준 NAV가 없다"],
+                                "journals": []}}
+    try:
+        result = fee_accrual.accrue(
+            state["ledger"],
+            nav=opening.nav,
+            accrual_date=state["accounting_date"],
+            when=state["as_of"],
+            high_water_mark=state.get("high_water_mark") or Decimal(0),
+        )
+    except Exception as exc:  # noqa: BLE001 - 보수를 못 쌓아도 마감은 계속한다
+        # 발생 실패가 마감을 멈추지 않는다. 대신 그 사실이 팩에 남고 NAV는 보수가
+        # 빠진 값이라는 것이 드러난다 - 조용히 넘어가면 NAV가 과대평가된다.
+        return {"fee_accrual": {"skipped": [f"발생 실패: {type(exc).__name__}: {exc}"],
+                                "journals": []},
+                "fallbacks": [_fallback("accrue_fees", exc)]}
+    return {"fee_accrual": result}
+
+
 def value(state: CloseState) -> dict:
     """value_portfolio 는 Mark 가 하나라도 없거나 낡으면 ValuationError 를 던진다.
     그때 NAV 를 만들지 않는다 - 일부만 평가한 NAV 는 틀린 NAV 다(portfolio.py docstring)."""
@@ -487,16 +528,35 @@ def value(state: CloseState) -> dict:
                 "fallbacks": [_fallback("value", exc)]}
 
     # F15 완료 조건 2: "Cash와 Position Value가 Portfolio NAV와 일치한다"
-    identity_ok = snap.nav == snap.cash + snap.securities_value
+    # **미수/미지급을 빼먹으면 안 된다.** T+2 결제라 체결일에는 현금이 아직 안 움직이고
+    # 그 금액이 미지급금에 서 있다(treasury/settlement.py). cash + securities 만 보면
+    # 정상 마감이 항등식 위반으로 보여 NAV_BLOCKED 로 떨어진다.
+    expected = snap.cash + snap.securities_value + snap.receivable - snap.payable
+    identity_ok = snap.nav == expected
     return {"snapshot": _snapshot_dict(snap), "_snapshot_obj": snap,
             "nav_status": NAV_PRELIMINARY if identity_ok else NAV_BLOCKED,
             "nav_identity": {"checked": True, "ok": identity_ok,
                              "nav": _d(snap.nav), "cash": _d(snap.cash),
                              "securities_value": _d(snap.securities_value),
-                             "difference": _d(snap.nav - snap.cash - snap.securities_value)}}
+                             "receivable": _d(snap.receivable),
+                             "payable": _d(snap.payable),
+                             "difference": _d(snap.nav - expected)}}
 
 
 # ── 노드 6: 일일 보고 (결정론) ─────────────────────────────────────────────
+def _statements(state: CloseState) -> dict:
+    """재무상태표·손익계산서. 시산표를 접은 것뿐이라 Mark가 없어도 나온다.
+
+    NAV가 보류된 날에도 이 표는 만들어진다 - 원가 기준이라 시세가 필요 없고,
+    "오늘 장부가 어떻게 생겼나"는 평가와 별개로 답할 수 있어야 한다.
+    """
+    try:
+        return {"statements": build_statements(
+            state["ledger"], as_of=state["accounting_date"])}
+    except (StatementError, Exception) as exc:  # noqa: BLE001 - 표 실패가 마감을 막지 않는다
+        return {"statements": None, "fallbacks": [_fallback("statements", exc)]}
+
+
 def daily_report_node(state: CloseState) -> dict:
     snap = state.get("_snapshot_obj")
     opening = state.get("opening_snapshot")
@@ -646,7 +706,9 @@ def build_pipeline(chat=None, uploader=None):
         ("reconcile", reconcile),
         ("narrate_breaks", lambda s: narrate_breaks(s, chat=chat)),
         ("verify_projection", verify_projection),
+        ("accrue_fees", accrue_fees),
         ("value", value),
+        ("statements", _statements),
         ("daily_report", daily_report_node),
         ("supervise", lambda s: supervise(s, chat=chat)),
         ("notion_report", lambda s: notion_report(s, uploader=uploader)),
@@ -656,8 +718,10 @@ def build_pipeline(chat=None, uploader=None):
     g.add_edge("validate_inputs", "reconcile")
     g.add_conditional_edges("reconcile", _route_after_reconcile)
     g.add_conditional_edges("narrate_breaks", _route_after_breaks)
-    g.add_edge("verify_projection", "value")
-    g.add_edge("value", "daily_report")
+    g.add_edge("verify_projection", "accrue_fees")
+    g.add_edge("accrue_fees", "value")
+    g.add_edge("value", "statements")
+    g.add_edge("statements", "daily_report")
     g.add_edge("daily_report", "supervise")
     g.add_edge("supervise", "notion_report")
     g.add_edge("notion_report", END)
@@ -686,6 +750,10 @@ def _assemble_out(state: CloseState) -> dict:
         "accounting_date": (state["accounting_date"].isoformat()
                             if isinstance(state.get("accounting_date"), date) else None),
         "recon": state.get("recon", {}),
+        # 보수 발생은 NAV를 바꾸는 사실이라 팩에 반드시 실린다. 빠지면 "왜 NAV가
+        # 어제보다 조금 낮지"를 마감 팩만 보고 못 푼다.
+        "fee_accrual": state.get("fee_accrual", {}),
+        "statements": state.get("statements"),
         "breaks": breaks,
         "material_break_count": len(materials),
         # Aging/Triage 는 결정론이다. 서술(break_narrative)과 나란히 두되 섞지 않는다.
@@ -721,6 +789,7 @@ def run_accounting_close(
     marks: dict | None = None,
     external: dict | None = None,
     opening_snapshot: PortfolioSnapshot | None = None,
+    high_water_mark: Decimal | None = None,
     stored_projection: dict | None = None,
     strategy_of: dict | None = None,
     carried_open_breaks: list | None = None,
@@ -745,6 +814,7 @@ def run_accounting_close(
     initial: dict = {"ledger": ledger, "as_of": as_of, "accounting_date": accounting_date,
                      "marks": marks or {}, "external": external or {},
                      "opening_snapshot": opening_snapshot,
+                     "high_water_mark": high_water_mark,
                      "stored_projection": stored_projection, "strategy_of": strategy_of,
                      "carried_open_breaks": carried_open_breaks or [],
                      "triage_corpus": triage_corpus or [],
@@ -936,7 +1006,10 @@ class _Fill:
 def _ledger_with_position() -> Ledger:
     """자본 1억 + 100주 매수. 엔진의 실제 API 로만 세운다 - 분개를 손으로 만들지 않는다."""
     led = Ledger(fund_id=_FUND, book_id=_BOOK)
-    led.post_capital(Decimal(100000000), _NOW, "cap_1")
+    # 자본 납입은 **기초 스냅샷보다 앞이다.** 뒤에 있으면 그 자본이 보고 구간의
+    # 유입으로 잡히는데 기초 NAV에는 이미 들어 있어서, 미설명 손익이 자본금만큼
+    # 벌어진 채 고정된다(-1억). 그러면 이 픽스처로는 항등식을 검사할 수 없다.
+    led.post_capital(Decimal(100000000), _NOW - timedelta(hours=2), "cap_1")
     led.post_fill(_Fill(Decimal(100), Decimal(70000), Decimal(1050),
                         Decimal(0), _NOW, "bf_1"),
                   Side.BUY, _AAA, Position(_AAA))
@@ -1110,7 +1183,7 @@ def _opening_snapshot():
     """자본만 있는 기초 스냅샷. 운영 경로에서는 그날 첫 스냅샷이 이 자리에 온다
     (close_scheduler.run_daily). Fixture 두 곳이 같은 3줄을 쓰고 있어 합쳤다."""
     opening_ledger = Ledger(fund_id=_FUND, book_id=_BOOK)
-    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=1), "cap_1")
+    opening_ledger.post_capital(Decimal(100000000), _NOW - timedelta(hours=2), "cap_1")
     return value_portfolio(opening_ledger, {}, _NOW - timedelta(hours=1))
 
 
@@ -1124,10 +1197,29 @@ def _check_daily_report_produced():
     assert out["report"] is not None, "기초 스냅샷을 줬는데 일일 보고가 없다"
     rep = out["report"]
     assert rep["is_official"] is False, "일일 보고가 공식으로 나왔다"
-    # 기초 NAV 1억 -> 기말 100,698,950 (미실현 70만 - 수수료 1,050)
-    assert rep["nav"]["close"] == "100698950", rep["nav"]
-    assert rep["nav"]["change"] == "698950", rep["nav"]
+    # 기초 NAV 1억 -> 기말 100,693,471
+    #   미실현 700,000 - 거래 수수료 1,050 - 관리보수 5,479
+    # 관리보수는 **기초 NAV 기준 일할**이다: 100,000,000 x 2% / 365 = 5,479.45 -> 5,479
+    assert rep["nav"]["close"] == "100693471", rep["nav"]
+    assert rep["nav"]["change"] == "693471", rep["nav"]
+    # 보수가 실제로 발생했고 그 금액이 NAV 차이를 설명한다 - 마감 팩에도 실린다
+    accrued = out["fee_accrual"]
+    assert accrued["management_fee"] == "5479", accrued
+    assert len(accrued["journals"]) == 1, accrued
+    assert Decimal(rep["nav"]["change"]) == (
+        Decimal("700000") - Decimal("1050") - Decimal(accrued["management_fee"])
+    ), (rep["nav"], accrued)
+    # 그리고 미설명 손익은 여전히 0이다 - 보수가 비용에 잡히지 않으면 여기서 깨진다
+    # 보수까지 비용에 잡히므로 잔차는 0이다. 이 값이 0이 아니면 어딘가의 비용이
+    # NAV에는 반영됐는데 손익 설명에는 안 잡힌 것이다.
+    assert rep["pnl"]["unexplained"] == "0", rep["pnl"]
     assert "일일 보고" in out["report_markdown"]
+    # 재무제표도 같은 마감에서 나온다. 순이익은 원장 기준(원가)이라 미실현을 뺀 값이고,
+    # 그게 NAV 변화와 다른 것이 정상이다 - 차이는 reconcile_to_nav 가 설명한다.
+    st = out["statements"]
+    assert st is not None and st["balance_sheet"]["balanced"] is True, st
+    assert st["is_official"] is False, "재무제표가 공식으로 나왔다"
+    assert st["income_statement"]["net_income"] == "-6529", st["income_statement"]
 
     # 기초 스냅샷이 없으면 보고를 지어내지 않는다
     without = _run(marks=_marks("77000"), chat=_stub())

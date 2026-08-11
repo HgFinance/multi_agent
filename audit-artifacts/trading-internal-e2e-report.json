@@ -1,0 +1,76 @@
+{
+  "schema_version": "trading.internal-e2e-report.v1",
+  "generated_at": "2026-08-11T02:47:00Z",
+  "mode": "paper_in_memory",
+  "live_orders_allowed": false,
+  "broker_credentials_used": false,
+  "overall_status": "PASS",
+  "qualification": "PAPER_TEST_VERIFIED_ONLY",
+  "aggregation": {
+    "rule": "FAIL dominates; otherwise NOT_IMPLEMENTED; otherwise PASS",
+    "reason": "All required Paper-scope checks passed, including actual worker-produced signal lineage through OrderIntent, explicit Risk REJECT blocking BrokerOrder creation, Risk/OMS, Paper Broker, Fill, and Ledger. Durable Postgres/Redis/restart runtime is explicitly outside this credential-free run."
+  },
+  "checks": [
+    {
+      "id": "core-paper-loop",
+      "status": "PASS",
+      "verification_status": "TEST_VERIFIED",
+      "command": "python -m unittest discover -s tests/e2e -v",
+      "evidence": "22 tests passed, including signal-to-NAV, explicit Risk REJECT blocking BrokerOrder creation, duplicate broker event handling, unknown broker reconciliation guard, overfill rejection, unpriced position blocking, fill-only position mutation, and ledger invariants.",
+      "scope_note": "In-memory Paper OMS/Broker/Ledger; Risk concentration fixture is intentionally permissive for wiring verification."
+    },
+    {
+      "id": "strategy-worker-selection",
+      "status": "PASS",
+      "verification_status": "TEST_VERIFIED",
+      "command": "python -m unittest tests.test_trading_alpha_strategy_workers -v",
+      "evidence": "13 tests passed, including invalid Bundle rejection before Worker creation, two-worker shared-stream attribution, deterministic selection, missing threshold rejection, risk provider failure, and IAM denial/forbidden scope."
+    },
+    {
+      "id": "selected-worker-to-ledger-trace",
+      "status": "PASS",
+      "verification_status": "TEST_VERIFIED",
+      "command": "python -m unittest tests.e2e.test_selected_strategy_trace -v",
+      "evidence": "1 isolated test passed. The test consumes the actual worker-produced signal from the selected report, preserves the production trace_id, bridges it to one OrderIntent, routes through Risk/OMS/Paper Broker, posts fills to Ledger, and asserts zero trial-balance residual.",
+      "artifact": "tests/e2e/test_selected_strategy_trace.py"
+    },
+    {
+      "id": "trading-api-testclient",
+      "status": "PASS",
+      "verification_status": "PAPER_IN_MEMORY_VERIFIED",
+      "command": "python C:/Users/dohy3/AppData/Local/Temp/trading_api_smoke.py",
+      "evidence": "TESTCLIENT_PASS; health and order-intent create/get succeeded with authoritative=false."
+    },
+    {
+      "id": "trading-api-uvicorn",
+      "status": "PASS",
+      "verification_status": "PAPER_IN_MEMORY_VERIFIED",
+      "command": "python C:/Users/dohy3/AppData/Local/Temp/trading_api_smoke.py",
+      "evidence": "UVICORN_HTTP_PASS; real HTTP health and order-intent create succeeded with authoritative=false."
+    },
+    {
+      "id": "compose-wiring",
+      "status": "PASS",
+      "verification_status": "CONTRACT_VERIFIED",
+      "command": "python -m unittest tests.contracts.test_department_compose_wiring -v",
+      "evidence": "4 compose wiring tests passed."
+    },
+    {
+      "id": "durable-db-redis-restart",
+      "status": "NOT_APPLICABLE",
+      "verification_status": "OUT_OF_SCOPE",
+      "evidence": "This run is explicitly Paper/in-memory and credential-free; no Postgres, Redis, relay, accounting consumer, or restart claim is made."
+    }
+  ],
+  "known_waivers": [
+    {
+      "id": "risk-concentration-denominator",
+      "status": "WAIVED_FOR_WIRING_ONLY",
+      "evidence": "The core Paper Loop fixture opens concentration limits to 100%; realistic concentration semantics remain unresolved and are not production Risk approval evidence."
+    }
+  ],
+  "runtime_boundary": {
+    "status": "PAPER_IN_MEMORY_VERIFIED",
+    "reason": "API TestClient and real uvicorn were verified in process-memory Paper mode with authoritative=false; durable Postgres/Redis/restart/relay/accounting persistence was not exercised."
+  }
+}

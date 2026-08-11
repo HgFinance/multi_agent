@@ -88,11 +88,36 @@ export type TradingSnapshot = {
     accounts: Record<string, Money>;
   };
   /**
-   * 구간마다 출처가 다를 수 있다 — 회계(portfolio·ledger)는 Supabase Canonical 뷰,
-   * 트레이딩은 아직 Scripted Loop다. `mode`(DEMO/PAPER/LIVE)와는 다른 축이라
-   * 한 배지로 합치지 않는다. 없으면 표시하지 않는다(지어내지 않는다).
+   * 결제(T+2) 사다리. `portfolio.cash`는 **결제가 끝난 현금**이고, 아직 안 끝난
+   * 매수 대금·매도 대금은 결제일 칸에 들어 있다. 두 값이 다른 것이 정상이다.
+   * 구버전 BFF는 이 구간을 안 보내므로 optional이다 — 없으면 그리지 않는다.
    */
-  sources?: Partial<Record<"portfolio" | "trading" | "ledger", string>>;
+  treasury?: {
+    as_of: string;
+    available_cash: Money;
+    projected_cash_end: Money;
+    buckets: {
+      date: string;
+      incoming: Money;
+      outgoing: Money;
+      net: Money;
+      projected_cash: Money;
+    }[];
+    /** 결제일이 지났는데 결제 분개가 없는 건수. 0이 아니면 조사 대상이다. */
+    overdue_count: number;
+    overdue: {
+      source_event_id: string;
+      settlement_date: string;
+      incoming: Money;
+      outgoing: Money;
+    }[];
+  };
+  /**
+   * 구간마다 출처가 다를 수 있다 — 회계(portfolio·ledger·treasury)는 Supabase
+   * Canonical 뷰, 트레이딩은 아직 Scripted Loop다. `mode`(DEMO/PAPER/LIVE)와는
+   * 다른 축이라 한 배지로 합치지 않는다. 없으면 표시하지 않는다(지어내지 않는다).
+   */
+  sources?: Partial<Record<"portfolio" | "trading" | "ledger" | "treasury", string>>;
   operations?: OperationsSnapshot;
 };
 
