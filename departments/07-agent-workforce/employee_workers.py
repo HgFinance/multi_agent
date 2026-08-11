@@ -221,6 +221,7 @@ WORKER_SPECS = (
             "department_context",
             "approved_tool_catalog",
             "boundary_constraints",
+            "trace_id",
         ),
         "workforce.profile-architecture-context.v1",
         3,
