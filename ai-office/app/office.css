@@ -550,3 +550,16 @@
   .live-counts { order: 10; }
   .world-viewport { height: 58vh; }
 }
+.hermes-kanban-embed { margin-top: 14px; overflow: hidden; }
+.hermes-kanban-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 18px; padding: 16px 18px; background: var(--surface-warm); }
+.hermes-kanban-toolbar h2 { margin: 3px 0 5px; font-size: 20px; }
+.hermes-kanban-toolbar p { margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.hermes-kanban-frame-wrap { min-height: 720px; background: #15110e; }
+.hermes-kanban-frame { display: block; width: 100%; height: 720px; border: 0; background: #15110e; }
+.hermes-kanban-note { margin: 0; padding: 9px 14px 12px; color: var(--ink-faint); font-size: 10px; line-height: 1.45; }
+.hermes-kanban-note code { margin-left: 4px; color: var(--pink-deep); overflow-wrap: anywhere; }
+.console-error { margin: 8px 0 0; color: #8b3128; font-size: 11px; line-height: 1.4; }
+@media (max-width: 760px) {
+  .hermes-kanban-toolbar { align-items: flex-start; flex-direction: column; }
+  .hermes-kanban-frame-wrap, .hermes-kanban-frame { min-height: 560px; height: 560px; }
+}

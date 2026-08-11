@@ -17,3 +17,12 @@ NOTION_BRIEFING_DB=
 # ── Discord ────────────────────────────────────────────
 # 보고를 받을 채널 → 채널 편집 → 연동 → 웹후크 → 새 웹후크 → URL 복사
 DISCORD_WEBHOOK_URL=
+
+# BFF and the official Hermes Kanban Dashboard used by the operator UI.
+NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001
+NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119
+
+# Local-only natural-language CEO input. Keep disabled in deployments until
+# the authenticated Hermes Tool Allowlist is configured.
+ENABLE_AGENT_ASK=true
+ENABLE_KANBAN_TASK_TRACKING=true
