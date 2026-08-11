@@ -220,7 +220,8 @@ docker exec hedgefund-kanban-dispatcher hermes kanban runs t_186cb00d --json
 
 `ceo-kanban-supervisor`는 gateway나 dispatcher가 아니다. Hermes `kanban watch`가
 내보내는 `completed`, `blocked`, `gave_up`, `crashed`, `timed_out`,
-`spawn_failed`, `reclaimed` terminal event를 읽고, `kanban show`의 parent/child
+`spawn_failed` terminal event를 읽고, `kanban show`의 parent/child
+projection을 다시 조회해 CEO supervisor action을 결정한다. `reclaimed`는 stale claim을 `ready`로 되돌리는 non-terminal event이므로 supervisor wake-up 대상이 아니다. 현재 Hermes CLI에는 `kanban watch --json` 또는 동등한 structured output 옵션이 없어서 사람이 읽는 text contract를 엄격히 검증하며, malformed line이나 watch의 예기치 않은 EOF/non-zero 종료는 supervisor process failure로 처리한다. 같은 parent의 동시 event는 parent lock과 root comment marker(`hgfinance.ceo-supervisor.wakeup.v1`)로 중복 실행을 막고, wake-up/replan 상한은 root comments와 supervisor child task에 기록되어 restart 후에도 유지된다.
 projection을 통해 CEO supervisor action을 결정한다. DB를 직접 읽거나 SQL로 상태를
 변경하지 않는다.
 

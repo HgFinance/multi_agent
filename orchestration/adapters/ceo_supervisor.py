@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
@@ -32,6 +33,10 @@ class HermesKanbanCommandError(RuntimeError):
     """Raised when the Hermes CLI cannot perform a supervisor operation."""
 
 
+class SupervisorWorkflowError(RuntimeError):
+    """A single workflow could not be evaluated; the daemon may continue."""
+
+
 class SupervisorAction(str, Enum):
     SYNTHESIZE = "SYNTHESIZE"
     CREATE_TASK = "CREATE_TASK"
@@ -49,9 +54,9 @@ TERMINAL_EVENT_KINDS = frozenset(
         "crashed",
         "timed_out",
         "spawn_failed",
-        "reclaimed",
     }
 )
+NON_TERMINAL_EVENT_KINDS = frozenset({"reclaimed", "claim_extended"})
 TERMINAL_STATUSES = frozenset(
     {
         "done",
@@ -72,6 +77,7 @@ PRIMARY_DEPARTMENTS = frozenset(
     {"research", "quant", "trading", "risk", "accounting"}
 )
 SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
+SUPERVISOR_WAKE_MARKER = "hgfinance.ceo-supervisor.wakeup.v1"
 
 
 def _text(value: Any) -> str:
@@ -161,7 +167,13 @@ class ChildTaskState:
 
     @property
     def is_supervisor(self) -> bool:
-        return SUPERVISOR_MARKER in self.body
+        # QA and replan tasks are supervisor-created work, but they remain
+        # workflow children. Only CEO-assigned control tasks are excluded
+        # from the analysis/QA dependency graph.
+        return (
+            self.profile == canonical_profile_for_department("ceo")
+            and SUPERVISOR_MARKER in self.body
+        )
 
     @property
     def is_qa(self) -> bool:
@@ -211,7 +223,10 @@ class SupervisorState:
         return tuple(child for child in self.children if child.is_supervisor)
 
     def has_action(self, action: SupervisorAction) -> bool:
-        return any(action.value in child.body for child in self.supervisor_children)
+        return any(
+            SUPERVISOR_MARKER in child.body and action.value in child.body
+            for child in self.children
+        )
 
 
 @dataclass(frozen=True)
@@ -541,6 +556,9 @@ class HermesKanbanClient:
     def unblock_task(self, task_id: str) -> None:
         self._run(("kanban", "unblock", task_id))
 
+    def comment_task(self, task_id: str, text: str) -> None:
+        self._run(("kanban", "comment", task_id, text, "--author", "ceo-supervisor"))
+
     def block_task(self, task_id: str, reason: str) -> None:
         self._run(("kanban", "block", task_id, reason, "--kind", "needs_input"))
 
@@ -600,51 +618,178 @@ class CeoSupervisorService:
         self._wakeups: dict[str, int] = {}
         self._replans: dict[str, int] = {}
         self._executed_actions: set[str] = set()
+        self._seen_events_lock = threading.Lock()
+        self._parent_locks: dict[str, threading.Lock] = {}
+        self._parent_locks_lock = threading.Lock()
+
+    def _parent_lock(self, parent_task_id: str) -> threading.Lock:
+        with self._parent_locks_lock:
+            return self._parent_locks.setdefault(parent_task_id, threading.Lock())
+
+    @staticmethod
+    def _wakeup_comments(root_payload: Mapping[str, Any]) -> dict[str, str]:
+        comments = root_payload.get("comments")
+        if not isinstance(comments, Sequence) or isinstance(comments, (str, bytes)):
+            return {}
+        entries: dict[str, str] = {}
+        for comment in comments:
+            if not isinstance(comment, Mapping):
+                continue
+            body = str(comment.get("body") or "")
+            if not body.startswith(SUPERVISOR_WAKE_MARKER):
+                continue
+            for field in body.split()[1:]:
+                if field.startswith("event="):
+                    entries[field[6:]] = body
+                    break
+        return entries
+
+    def _record_wakeup(
+        self,
+        *,
+        root_task_id: str,
+        event_id: str,
+        kind: str,
+        action: str,
+        existing: Mapping[str, str],
+        state: str,
+    ) -> None:
+        comment_task = getattr(self.client, "comment_task", None)
+        if not callable(comment_task):
+            return
+        comment_task(
+            root_task_id,
+            f"{SUPERVISOR_WAKE_MARKER} event={event_id} kind={kind} "
+            f"state={state} action={action}",
+        )
+
+    def _safe_abort(self, task_id: str, reason: str) -> None:
+        try:
+            self.client.block_task(task_id, reason)
+        except HermesKanbanCommandError as exc:
+            raise SupervisorWorkflowError(
+                f"workflow {task_id} canonical abort failed: {exc}"
+            ) from exc
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
-        if not task_id or kind not in TERMINAL_EVENT_KINDS and kind not in TERMINAL_STATUSES:
+        if not task_id or kind in NON_TERMINAL_EVENT_KINDS:
+            return None
+        if kind not in TERMINAL_EVENT_KINDS and kind not in TERMINAL_STATUSES:
             return None
         event_key = str(event.get("event_id") or f"{task_id}:{kind}")
-        if event_key in self._seen_events:
-            return None
-        self._seen_events.add(event_key)
-        root_id, payloads = self.client.workflow(task_id)
-        children = tuple(
-            ChildTaskState.from_hermes(payload)
-            for payload in payloads
-            if payload.get("assignee") is not None
-        )
-        wakeups = self._wakeups.get(root_id, 0) + 1
-        self._wakeups[root_id] = wakeups
-        state = SupervisorState(
-            parent_task_id=root_id,
-            children=children,
-            wakeups=wakeups,
-            replan_count=self._replans.get(root_id, 0),
-            max_retries=self.max_retries,
-            max_wakeups=self.max_wakeups,
-            qa_required=self._qa_required_from_event(event),
-        )
-        decision = self.decider(state)
-        if decision is None:
-            return None
-        action_key = ":".join(
-            (
-                root_id,
-                decision.action.value,
-                decision.target_task_id or decision.reason,
-                str(decision.retry_count),
+        with self._seen_events_lock:
+            if event_key in self._seen_events:
+                return None
+            self._seen_events.add(event_key)
+        try:
+            root_id, _ = self.client.workflow(task_id)
+            with self._parent_lock(root_id):
+                # Re-read after acquiring the workflow lock. A sibling event may
+                # have completed while this event was waiting for the lock.
+                root_id, payloads = self.client.workflow(task_id)
+                # The production Hermes client exposes ``show`` for durable
+                # wakeup comments. Keep the policy service compatible with small
+                # workflow-only fakes and adapters used by the supervisor tests.
+                show = getattr(self.client, "show", None)
+                root_payload = show(root_id) if callable(show) else {}
+                children = tuple(
+                    ChildTaskState.from_hermes(payload)
+                    for payload in payloads
+                    if payload.get("assignee") is not None
+                )
+                existing_wakeups = self._wakeup_comments(root_payload)
+                if event_key in existing_wakeups and "state=done" in existing_wakeups[event_key]:
+                    return None
+                wakeups = len(existing_wakeups) + (0 if event_key in existing_wakeups else 1)
+                durable_replans = sum(
+                    1
+                    for child in children
+                    if SUPERVISOR_MARKER in child.body
+                    and "action=CREATE_TASK" in child.body
+                )
+                state = SupervisorState(
+                    parent_task_id=root_id,
+                    children=children,
+                    wakeups=wakeups,
+                    replan_count=max(self._replans.get(root_id, 0), durable_replans),
+                    max_retries=self.max_retries,
+                    max_wakeups=self.max_wakeups,
+                    qa_required=self._qa_required_from_event(event),
+                )
+                decision = self.decider(state)
+                action = decision.action.value if decision is not None else "NONE"
+                if decision is not None and decision.action in {
+                    SupervisorAction.CREATE_TASK,
+                    SupervisorAction.REQUEST_USER_INPUT,
+                    SupervisorAction.SYNTHESIZE,
+                } and state.has_action(decision.action):
+                    # A durable supervisor child is the idempotency record for
+                    # actions that create work.  This also covers a daemon
+                    # restart after the Hermes CLI succeeded but before the
+                    # watch loop acknowledged the event.
+                    decision = None
+                    action = "NONE"
+                if event_key not in existing_wakeups:
+                    self._record_wakeup(
+                        root_task_id=root_id,
+                        event_id=event_key,
+                        kind=kind,
+                        action=action,
+                        existing=existing_wakeups,
+                        state="started",
+                )
+                if decision is None:
+                    self._record_wakeup(
+                        root_task_id=root_id,
+                        event_id=event_key,
+                        kind=kind,
+                        action=action,
+                        existing=existing_wakeups,
+                        state="done",
+                    )
+                    return None
+                action_key = ":".join(
+                    (
+                        root_id,
+                        decision.action.value,
+                        decision.target_task_id or decision.reason,
+                        str(decision.retry_count),
+                    )
+                )
+                if action_key in self._executed_actions:
+                    return None
+                self._executed_actions.add(action_key)
+                self._execute(decision, state)
+                if decision.action == SupervisorAction.CREATE_TASK:
+                    self._replans[root_id] = self._replans.get(root_id, 0) + 1
+                self._record_wakeup(
+                    root_task_id=root_id,
+                    event_id=event_key,
+                    kind=kind,
+                    action=action,
+                    existing=existing_wakeups,
+                    state="done",
+                )
+                return decision
+        except CanonicalProfileError as exc:
+            root_for_abort = locals().get("root_id", task_id)
+            self._safe_abort(str(root_for_abort), f"canonical profile validation: {exc}")
+            return SupervisorDecision(
+                SupervisorAction.BLOCK_ABORT,
+                str(root_for_abort),
+                reason="canonical_profile_validation",
             )
-        )
-        if action_key in self._executed_actions:
-            return None
-        self._executed_actions.add(action_key)
-        self._execute(decision, state)
-        if decision.action == SupervisorAction.CREATE_TASK:
-            self._replans[root_id] = self._replans.get(root_id, 0) + 1
-        return decision
+        except (SupervisorValidationError, HermesKanbanCommandError) as exc:
+            with self._seen_events_lock:
+                # A failed workflow operation is retryable on the next
+                # delivery.  Canonical failures are handled and blocked
+                # above, so they intentionally remain acknowledged.
+                self._seen_events.discard(event_key)
+            raise SupervisorWorkflowError(
+                f"workflow {task_id} evaluation failed: {exc}"
+            ) from exc
 
     def _qa_required_from_event(self, event: Mapping[str, Any]) -> bool:
         """Read an explicit CEO completion decision; default remains QA on."""
@@ -705,6 +850,7 @@ __all__ = [
     "HermesKanbanClient",
     "HermesKanbanCommandError",
     "PRIMARY_DEPARTMENTS",
+    "SupervisorWorkflowError",
     "SupervisorAction",
     "SupervisorDecision",
     "SupervisorState",
