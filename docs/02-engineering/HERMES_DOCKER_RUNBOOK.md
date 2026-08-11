@@ -333,7 +333,7 @@ docker exec hedgefund-qa-hermes hermes kanban stats | tail -1
 DATABASE_URL='' \
 ENABLE_USER_INTAKE=true \
 HERMES_EXEC_MODE=docker \
-HERMES_KANBAN_DB="$HOME/.hermes-shared-kanban/kanban.db" \
+KANBAN_ACCESS_MODE=docker \
   python -m uvicorn apps.api.main:app --port 8001
 ```
 
@@ -341,6 +341,29 @@ HERMES_KANBAN_DB="$HOME/.hermes-shared-kanban/kanban.db" \
   만들어 부서를 실제로 돌리므로 돈이 나간다. 기본은 닫혀 있다.
 - `HERMES_EXEC_MODE=docker` 는 컨테이너 안 Hermes 에 붙는 로컬 시험용이다.
   AWS 처럼 BFF 와 Hermes 가 같은 호스트면 지정하지 않는다(기본 `local`).
+
+### ⚠ 윈도우에서 `kanban.db` 를 호스트에서 열지 마라 (2026-08-11 실측)
+
+보드는 WAL 모드다. **윈도우 호스트에서 `mode=ro` 로 열기만 해도** bind mount 위에
+`-shm` 매핑이 생기고, 그때부터 **컨테이너 쪽 쓰기가 전부 `disk I/O error` 로
+죽는다.** 리서치 워커가 3분 12초짜리 조사를 마치고 보고서까지 쓰고도
+`kanban_complete` 를 못 해 카드가 `running` 에 영원히 남았다 — 화면에는 "작업 중"
+으로 보였다. 증상이 dispatcher 나 권한 문제처럼 보여서 원인과 멀었다.
+
+```bash
+KANBAN_ACCESS_MODE=docker   # BFF 는 컨테이너 안에서 조회한다(윈도우 필수)
+```
+
+이미 망가졌다면 — 호스트 쪽 읽기 프로세스를 **먼저 끄고** 나서:
+
+```bash
+rm ~/.hermes-shared-kanban/kanban.db-wal ~/.hermes-shared-kanban/kanban.db-shm
+#   "Device or resource busy" 가 나면 아직 누가 잡고 있는 것이다
+```
+
+같은 이유로 `docker exec` 로 kanban CLI 를 부를 때는 **반드시 `-u hermes`** 를
+붙인다. 기본이 root 라 WAL 이 root 소유로 생기고, 그러면 정작 에이전트(uid 1000)가
+자기 보드를 못 쓴다.
 
 ### 읽는 법 — 카드 결말은 보드 상태와 다르다
 
