@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import yaml
 from fastapi import HTTPException
@@ -38,6 +40,75 @@ class AgentAsk(BaseModel):
     """부서 Agent 질의 Body. 부서 이름이 없는 것이 이 계약의 핵심이다."""
 
     query: str = Field(min_length=1, max_length=2000)
+    request_id: str = Field(default_factory=lambda: uuid4().hex, min_length=8, max_length=128)
+
+
+def create_kanban_task(
+    *,
+    assignee: str,
+    title: str,
+    body: str,
+    idempotency_key: str,
+) -> dict[str, object] | None:
+    """Create a shared-board card through Hermes CLI when available.
+
+    The BFF never opens ``kanban.db`` directly. The Hermes CLI owns the board
+    path and applies the same profile/permission boundary as other Kanban
+    operations. When the CLI is not installed, the caller gets ``None`` and
+    the natural-language query can still use the normal Hermes path.
+    """
+
+    if os.getenv("ENABLE_KANBAN_TASK_TRACKING", "1").casefold() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+
+    command = [
+        os.environ.get("HERMES_BIN", "hermes"),
+        "kanban",
+        "create",
+        title,
+        "--body",
+        body,
+        "--assignee",
+        assignee,
+        "--idempotency-key",
+        idempotency_key,
+        "--created-by",
+        "ai-office-bff",
+        "--json",
+    ]
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault("HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban"))
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
+            check=False,
+            cwd=ROOT,
+            env=cli_environment,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    task_id = payload.get("id") or payload.get("task_id")
+    return {
+        "task_id": str(task_id) if task_id else None,
+        "status": str(payload.get("status", "TODO")),
+        "source": "hermes-kanban",
+    }
 
 
 def ask(*, department: str, config: str, query: str) -> dict:
