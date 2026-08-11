@@ -76,8 +76,14 @@ def _payload() -> dict[str, Any]:
         #   모양은 짐작하지 않고 QA본부 자체 테스트에서 그대로 가져왔다
         #   (departments/06-ai-qa-audit/tests/test_qa_employee_workers.py).
         "assessment": {"claim_checks": [{"result": "UNSUPPORTED"}]},
-        "model_risk": {"status": "TESTING"},
-        "internal_audit": {"status": "TESTING"},
+        # _governed_input_errors(qa_employee_workers.py:730) 가 요구하는 필드:
+        #   assessment -> decision 또는 비지 않은 claim_checks
+        #   model_risk / internal_audit -> decision
+        #   ops_assessment -> status,  permission -> result
+        # 부서 자체 테스트가 status 만으로 통과한 것은 엔진이 decision 을 채워
+        # 주는 경로를 타서다. 디스패처는 준 값을 그대로 쓰므로 decision 이 있어야 한다.
+        "model_risk": {"decision": "PASS", "status": "TESTING"},
+        "internal_audit": {"decision": "PASS", "status": "TESTING"},
         "ops_assessment": {"status": "HEALTHY"},
         "permission_check": {"result": "ALLOWED"},
         "incident": {"incident_id": "incident-test"},
