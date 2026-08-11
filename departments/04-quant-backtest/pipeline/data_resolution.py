@@ -41,10 +41,52 @@ MODULE_VERSION = "quant-data-resolution-v1"
 # 이름을 짐작하면 엉뚱한 테이블의 커버리지를 이 가설의 근거로 삼게 된다. 여기 없는
 # 원천은 짐작하지 않고 `UNMAPPED_SOURCE` 로 리서치에 돌려보낸다.
 #   (스키마, 테이블, 시각 컬럼, 구간 컬럼 or None)
-SOURCE_TABLES: dict[str, tuple[str, str, str, str | None]] = {
-    "market_bars": ("market", "market_bars", "bucket_time", "interval_code"),
-    "market_ticks": ("market", "market_ticks", "observed_at", None),
-    "market_quotes": ("market", "market_quotes", "observed_at", None),
+# 원천 한 줄 = (DB, 스키마, 테이블, 시각 컬럼, 구간 컬럼, 종목 컬럼)
+#
+# ▶ **DB 를 명시한다** (2026-08-12)
+#   예전엔 전부 시장 DB(TimescaleDB) 라고 가정하고 `market_conn` 하나로 쟀다.
+#   그래서 뉴스·공시·재무처럼 메타 DB(Supabase `research` 스키마)에 있는 원천은
+#   **아예 사상 대상이 될 수 없었다** - 13만 건짜리 공시 원장이 있는데 백테스트
+#   에서는 존재하지 않는 것과 같았다. 어느 DB 인지가 원천의 속성이므로 여기 적는다.
+#
+# ▶ 종목 컬럼도 명시한다
+#   시장 테이블은 `instrument_id` 지만 문서·재무는 연결 테이블을 통해 붙는다.
+#   None 이면 종목 수를 세지 않는다 - **0 으로 채우지 않는다.** 못 센 것과
+#   0 종목은 다르고, 섞이면 커버리지 판정이 오염된다.
+DB_MARKET, DB_META = "market", "meta"
+
+SOURCE_TABLES: dict[str, tuple[str, str, str, str, str | None, str | None]] = {
+    # ── 시장 평면 (TimescaleDB) ──
+    "market_bars":   (DB_MARKET, "market", "market_bars", "bucket_time",
+                      "interval_code", "instrument_id"),
+    "market_ticks":  (DB_MARKET, "market", "market_ticks", "observed_at",
+                      None, "instrument_id"),
+    "market_quotes": (DB_MARKET, "market", "market_quotes", "observed_at",
+                      None, "instrument_id"),
+    # 틱 파생 1분봉(연속집계). ls_chart 1M 은 350종목에서 멈춰 있으므로 분봉이
+    # 필요하면 이쪽이다 - 우리 틱에서 나오므로 종목 수가 호가·체결과 같다.
+    "bars_1m":       (DB_MARKET, "market", "bars_1m", "bucket_time",
+                      None, "instrument_id"),
+    # 호가·체결을 일별로 접은 피처. **백테스트가 읽는 것은 원시가 아니라 이것이다**
+    # (원시는 압축 후에도 220GB 라 파티션으로 굳힐 수 없다). 스프레드·호가불균형·
+    # 주문흐름불균형·체결강도·실현변동성이 종목·일자 단위로 들어 있다.
+    "microstructure_features": (DB_MARKET, "market", "microstructure_features",
+                                "event_time", None, "instrument_id"),
+    "derivative_snapshots": (DB_MARKET, "market", "derivative_snapshots",
+                             "observed_at", None, None),
+    "market_breadth": (DB_MARKET, "market", "market_breadth", "observed_at",
+                       None, None),
+    # ── 리서치 평면 (Supabase) ──
+    #   공시·뉴스 원문과 그 종목 연결, 재무 사실, 거시 관측. 이벤트 스터디와
+    #   펀더멘털 결합 전략의 재료다.
+    "documents":     (DB_META, "research", "documents", "published_at",
+                      None, None),
+    "document_instruments": (DB_META, "research", "document_instruments",
+                             "created_at", None, "instrument_id"),
+    "financial_facts": (DB_META, "research", "financial_facts", "as_known_at",
+                        None, "instrument_id"),
+    "macro_observations": (DB_META, "research", "macro_observations",
+                           "observed_at", None, None),
 }
 
 # 판정. ok 는 RESOLVED 하나뿐이다 - 나머지는 전부 "돌리면 안 된다".
@@ -138,23 +180,34 @@ def _interval_of(source_version: str) -> str | None:
 
 
 # ── 실측 ───────────────────────────────────────────────────────────────────
-def measure_source(market_conn, table: str, interval: str | None) -> SourceCoverage | None:
-    """로컬 시장 DB 에서 커버리지를 잰다. 모르는 테이블이면 None(짐작하지 않는다)."""
+def measure_source(market_conn, table: str, interval: str | None,
+                   *, meta_conn=None) -> SourceCoverage | None:
+    """그 원천이 사는 DB 에서 커버리지를 잰다. 모르는 테이블이면 None.
+
+    `meta_conn` 은 리서치 평면(공시·재무) 원천에만 필요하다. 안 주면 그 원천은
+    **못 잰 것으로 남는다**(None) - 시장 연결로 대신 재면 없는 테이블을 조회해
+    예외가 나거나, 더 나쁘게는 이름이 같은 다른 테이블을 잰다.
+    """
     spec = SOURCE_TABLES.get(table)
     if spec is None:
         return None
-    schema, tbl, tcol, icol = spec
+    db, schema, tbl, tcol, icol, symcol = spec
+
+    conn = market_conn if db == DB_MARKET else meta_conn
+    if conn is None:
+        return None      # 못 잰 것이다. 0 으로 채우지 않는다.
 
     # 식별자는 우리 화이트리스트에서만 오고, 값(interval)만 파라미터로 넘긴다.
     where, params = "", []
     if interval and icol:
         where, params = f" where {icol} = %s", [interval]
+    sym_expr = f"count(distinct {symcol})" if symcol else "0"
     sql = (
         f"select count(*), min({tcol})::date, max({tcol})::date,"
-        f" count(distinct {tcol}::date), count(distinct instrument_id)"
+        f" count(distinct {tcol}::date), {sym_expr}"
         f" from {schema}.{tbl}{where}"
     )
-    cur = market_conn.cursor()
+    cur = conn.cursor()
     cur.execute(sql, params)
     rows, first, last, days, syms = cur.fetchone()
     return SourceCoverage(
@@ -228,7 +281,8 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
         for tbl, sv in sources.items():
             if tables and tbl not in tables:
                 continue          # 이 요구가 안 쓴 재료까지 볼 필요는 없다
-            cov = measure_source(market_conn, tbl, _interval_of(sv))
+            cov = measure_source(market_conn, tbl, _interval_of(sv),
+                                 meta_conn=meta_conn)
             if cov is None:
                 unmapped.append(tbl)
                 continue
