@@ -299,6 +299,73 @@ Provider 약관을 `MODEL-04`에서 검증하기 전 기본 Runtime이나 팀 �
 
 ---
 
+## 5-2. 사용자 입구 — 질문 하나를 끝까지 돌리기 (2026-08-11 로컬 실측)
+
+사용자가 `ai-office` 에서 묻는 것부터 답이 돌아오기까지의 경로다. **부서를 직접
+부르는 `/{부서}/agent/ask` 와 다른 물건이다** — 여기선 어느 본부가 맡을지 CEO 가
+정한다.
+
+```
+사용자 → POST /ui/ask → CEO Hermes 세션 → kanban 카드 N장
+                                          → dispatcher 가 부서마다 spawn
+                                          → 카드가 전부 끝나면
+        GET /ui/ask/{ticket} ← CEO 가 --resume 으로 같은 세션에서 종합
+```
+
+### 전제: dispatcher 가 떠 있어야 한다
+
+```bash
+docker compose up -d kanban-dispatcher   # 이게 없으면 카드가 ready 로 앉아 있다
+docker exec hedgefund-qa-hermes hermes kanban stats | tail -1
+#   Oldest ready task age: 0s   ← 이 숫자가 곧 dispatcher 가 멈춰 있던 시간이다
+```
+
+8개 부서 컨테이너는 카드를 **띄우지 못한다**. dispatcher 가 worker 를
+`$HERMES_HOME/profiles/<assignee>` 에서 찾는데 부서 컨테이너는 `/opt/data` 자체가
+그 부서 프로필이라 `profiles/` 하위가 없기 때문이다(compose 주석 참고). 그래서
+8개 profiles/ 를 전부 보는 `kanban-dispatcher` 하나가 전담한다. compose 의
+`HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"` 는 **Hermes 가 읽지 않는 값이라 무효**
+이지만, 위 이유로 결과는 어차피 같다.
+
+### BFF 기동
+
+```bash
+DATABASE_URL='' \
+ENABLE_USER_INTAKE=true \
+HERMES_EXEC_MODE=docker \
+HERMES_KANBAN_DB="$HOME/.hermes-shared-kanban/kanban.db" \
+  python -m uvicorn apps.api.main:app --port 8001
+```
+
+- `ENABLE_USER_INTAKE` 는 부서 ask 스위치와 **따로** 둔다. 이 경로는 CEO 가 카드를
+  만들어 부서를 실제로 돌리므로 돈이 나간다. 기본은 닫혀 있다.
+- `HERMES_EXEC_MODE=docker` 는 컨테이너 안 Hermes 에 붙는 로컬 시험용이다.
+  AWS 처럼 BFF 와 Hermes 가 같은 호스트면 지정하지 않는다(기본 `local`).
+
+### 읽는 법 — 카드 결말은 보드 상태와 다르다
+
+| 결말 | 뜻 |
+|---|---|
+| `ANSWERED` | 결과 본문이 있다 |
+| `NO_ANSWER` | **`done` 이지만 결과가 비었다.** 성공이 아니다 |
+| `BLOCKED` | 자료·입력이 없어 부서가 멈췄다 |
+| `FAILED` | 크래시·타임아웃·연속 실패 |
+| `STALE` | `ready` 인데 아무도 안 집어갔다 → dispatcher 를 본다 |
+
+`NO_ANSWER` 는 실제로 나온다. 회계본부가 "공식 NAV 가 없어 수익률을 산출할 수
+없습니다"를 **완료**로 기록했다 — 부서는 정직하게 실패했지만 보드에는 `done` 으로
+남는다. 화면이 `done` 만 보면 그게 성공으로 보인다.
+
+### 알아 둘 것
+
+- CEO 의 라우팅·종합 턴은 도구를 여러 번 부른다. 부서 Profile 의
+  `agent.timeout_seconds`(CEO 는 30초)로는 매번 잘린다 — 입구는 300초를 따로 쓴다.
+- **잘린 CEO 턴은 "아무 일도 없었음"이 아니다.** 30초에서 끊긴 턴이 이미 카드
+  4장을 만들었고 부서들이 그걸 실행했다. 세션 id 는 프로세스가 죽으며 유실돼
+  티켓으로 추적할 수 없다 — 보드를 직접 확인해야 한다.
+
+---
+
 ## 6. Hermes가 하는 일과 하지 않는 일
 
 | | 담당 |
