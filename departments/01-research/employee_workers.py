@@ -59,10 +59,10 @@ except ModuleNotFoundError:
 # ▶ trigger 가 always 인 워커는 market-context 하나다. 스카우트·회의론자·기획자는
 #   소집형이다 - 상시 켜두면 큐만 쌓이고 편집장이 읽지 못한다.
 WORKER_SPECS = (
-    WorkerSpec("methodology-scout-academic", "Academic methodology scout for papers and preprints", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
-    WorkerSpec("methodology-scout-practitioner", "Practitioner methodology scout for investor letters and desk notes", ("research.web.search", "research.web.open", "research.web.verify"), "scout_cycle", ("scout_cycle", "methodology_leads")),
+    
+    
     WorkerSpec("competing-explanation-worker", "Competing explanation and falsification analyst", ("research.outcomes.read", "research.evidence.search"), "proposal_draft", ("proposal_draft",)),
-    WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", ("research.evidence.search", "research.news.read", "research.market_snapshot.read"), "holding_question", ("holding_question", "portfolio_state", "news")),
+    
 )
 
 

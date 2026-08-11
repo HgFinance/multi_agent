@@ -207,7 +207,7 @@ def test_profile_worker_registry_counts_and_models() -> None:
     # 이미 커버리지를 실측하므로 폐지했다(서술이 코드 판정과 경쟁하면 안 된다).
     # 퀀트는 접수·설계가 실험당 1회라 병렬성이 없고 교훈 사상은 lessons_from() 이
     # 이미 결정론으로 한다 - 환류가 에이전트 가용성에 묶이면 안 된다.
-    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 4, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
+    expected_counts = {"00-ceo-office": 1, "07-agent-workforce": 1, "01-research": 1, "02-trading": 0, "03-risk": 1, "04-quant-backtest": 2, "05-accounting-portfolio": 1, "06-ai-qa-audit": 2}
     for _, directory in DEPARTMENTS:
         config = yaml.safe_load(_read_profile(directory))
         workers = config["workers"]
@@ -389,7 +389,7 @@ def test_final_worker_shape_has_no_duplicate_roles() -> None:
         # 2026-08-11: 4명 전부 소집형이다. 상시였던 market-context 를 폐지하면서
         # 상시가 0 이 됐다 - 스카우트·회의론자를 상시로 켜두면 편집장이 읽지 못하는
         # 리드만 쌓인다.
-        "research": (4, 0, 4),
+        "research": (1, 0, 1),
         # 고정 LLM 직원은 없고 전략별 결정론 Worker를 요청 단위로 생성한다.
         "trading": (0, 0, 0),
         # 2026-08-06: Risk의 계산·검사는 risk-runner로 이동해 LLM 1명만 남겼다.
