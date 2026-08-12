@@ -535,7 +535,14 @@ class Workflow:
 
     @property
     def qa_verdict(self) -> str | None:
-        """QA Task의 종료 상태에서 결정론적으로 뽑는다. 문장 해석은 하지 않는다."""
+        """QA Task의 종료 상태에서 결정론적으로 뽑는다. 문장 해석은 하지 않는다.
+
+        라벨 포맷(`verdict: PASS` 같은 콜론 표기)이 없으면 None을 반환한다.
+        "라벨이 없으니까 무조건 PASS로 간주"는 위험하다 — QA가 조건부(CONDITIONAL)
+        또는 불명확한 판정을 내렸을 수도 있는데, 정규식이 한국어 조사("verdict는",
+        "verdict가" 등) 변형을 못 잡으면 그 QA 판정을 "깨끗하게 통과"로 둔갑시킨다.
+        이건 개발 원칙 9("실패 시 확대가 아니라 진입 차단")의 정반대 방향이다.
+        """
 
         if not self.qa_nodes:
             return None
@@ -546,7 +553,7 @@ class Workflow:
             return "FAIL"
         if not node.done:
             return None
-        return _labelled_token(node.summary, _VERDICT_RE, _VERDICT_VALUES) or "PASS"
+        return _labelled_token(node.summary, _VERDICT_RE, _VERDICT_VALUES)
 
     @property
     def decision(self) -> str | None:

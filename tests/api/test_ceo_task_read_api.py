@@ -204,6 +204,7 @@ class WorkflowReadModelTest(unittest.TestCase):
         )
 
         self.assertEqual(workflow.status, "completed")
+        # qa_summary에 "verdict: PASS" 라벨이 명시되면 그대로 PASS
         self.assertEqual(workflow.qa_verdict, "PASS")
         self.assertEqual(workflow.decision, "HOLD")
         self.assertIsNone(workflow.block_reason)
@@ -243,8 +244,9 @@ class WorkflowReadModelTest(unittest.TestCase):
         )
 
         self.assertIsNone(workflow.decision)
-        # QA가 라벨 없이 완료되면 완료 사실 자체가 PASS다.
-        self.assertEqual(workflow.qa_verdict, "PASS")
+        # QA가 라벨 없이 완료되어도 정규식이 못 잡으면 None(판정 불명확).
+        # "완료했으니까 자동으로 PASS"는 위험(개발원칙9 - 진입차단).
+        self.assertIsNone(workflow.qa_verdict)
 
     def test_qa_required_is_false_only_when_synthesis_ran_without_qa(self) -> None:
         with_qa = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
@@ -608,6 +610,31 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(
             set(body["departments"]), {"research", "risk", "qa"}
         )
+
+    def test_qa_verdict_requires_explicit_label_not_completed_status(self) -> None:
+        """QA가 완료되었어도 'verdict: VALUE' 라벨 형식 없으면 None.
+
+        2026-08-12 AWS 실측: QA 자유 서술에 "verdict는 CONDITIONAL입니다"처럼
+        한국어 조사가 붙으면 정규식('verdict[:=]')이 못 잡는다. "완료했으니
+        PASS"로 낙관하면 QA의 조건부/불명확 판정을 깨끗한 통과로 둔갑시킨다.
+        """
+
+        board = _board(risk_status="done", qa_status="done")
+        board[QA_ID]["latest_summary"] = (
+            "NVIDIA 독립 QA를 완료했습니다. ... verdict는 CONDITIONAL입니다."
+        )
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertIsNone(workflow.qa_verdict)
+
+    def test_qa_verdict_accepts_explicit_label_only(self) -> None:
+        """'verdict: VALUE' 또는 'qa_verdict: VALUE' 명시 형식만 인정."""
+
+        board = _board(risk_status="done", qa_status="done")
+        board[QA_ID]["latest_summary"] = "... verdict: PASS"
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+        self.assertEqual(workflow.qa_verdict, "PASS")
 
     def test_result_reports_qa_block_reason(self) -> None:
         board = _board(risk_status="done", qa_status="blocked")
