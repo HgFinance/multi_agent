@@ -54,6 +54,12 @@ _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
 )
+# 저장소 루트. 아래 import 사슬이 `orchestration.contracts.mas`(qa_mandate_workers)
+# 와 `apps.observability`를 쓰므로 **여기서** 넣어야 한다. 예전에는 415행에서 넣었는데
+# 그 사슬을 처음 타는 import 는 99행이라 316줄 늦었다. risk-api 와 같은 고장으로,
+# 컨테이너에서 `uvicorn` 콘솔 스크립트로 뜨면 audit-api·qa-worker 가 둘 다
+# `ModuleNotFoundError: orchestration` 크래시 루프였다 - 2026-08-12 실측.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _configured_evidence_corpus() -> Path:
@@ -67,7 +73,7 @@ def _configured_evidence_corpus() -> Path:
     )
 
 
-for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
+for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT):
     sys.path.insert(0, str(_p))
 from corpus_registry import inspect_policy_corpus
 from evidence_qa_engine import (
@@ -1077,6 +1083,39 @@ def evidence_check(body: ComplianceCheckRequest):
         corpus_dir=corpus_dir,
         persona="evidence-qa-agent",
     )
+
+
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). risk-api 와 같은 규약 - `/health` 는
+# 프로세스 생존만 보고 외부를 만지지 않으며, 저장소 판단은 `/health/ready` 가 한다.
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. **저장소가 죽어도 200 이다.** 외부 호출을 하지 않는다."""
+    return {
+        "status": "ok",
+        "service": "qa-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(_DATABASE_URL),
+        "runtime": _QA_RUNTIME or "default",
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. audit 저장소가 붙어 있어야 ready 다."""
+    if not _DATABASE_URL:
+        return {"status": "degraded", "service": "qa-api", "canonical_db": "NOT_CONFIGURED"}
+    if _audit_repository is None:
+        # DSN 은 있는데 저장소가 없다 = TEST 런타임으로 뜬 것이다. 숨기지 않는다.
+        return {
+            "status": "degraded",
+            "service": "qa-api",
+            "canonical_db": "DISABLED_BY_RUNTIME",
+            "runtime": _QA_RUNTIME or "default",
+        }
+    return {"status": "ready", "service": "qa-api", "canonical_db": "READY"}
 
 
 @app.get("/qa/v1/observability/runtime")

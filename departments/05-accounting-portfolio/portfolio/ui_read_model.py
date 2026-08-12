@@ -30,8 +30,10 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent / "treasury"))
 
 from portfolio import PortfolioSnapshot
+from settlement import build_ladder
 
 SCHEMA_VERSION = 1
 
@@ -133,6 +135,39 @@ def _ledger(ledger) -> dict:
     }
 
 
+def _treasury(ledger, as_of: datetime) -> dict:
+    """결제(T+2) 사다리. **원장 현금과 가용 현금이 다르다는 사실을 화면에 싣는다.**"""
+    return treasury_section(build_ladder(ledger, as_of.date()))
+
+
+def treasury_section(ladder: dict) -> dict:
+    """사다리를 화면 계약(금액은 문자열)으로 옮긴다.
+
+    수치는 `treasury/settlement.py`가 만들고 여기서는 옮기기만 한다. DB에서 집계해
+    오는 `db_read_model`도 이 함수를 쓴다 - 모양이 갈라지면 화면이 원천에 따라
+    다르게 동작한다.
+    """
+    return {
+        "as_of": ladder["as_of"],
+        "available_cash": _d(ladder["available_cash"]),
+        "projected_cash_end": _d(ladder["projected_cash_end"]),
+        "buckets": [
+            {"date": b["date"], "incoming": _d(b["incoming"]),
+             "outgoing": _d(b["outgoing"]), "net": _d(b["net"]),
+             "projected_cash": _d(b["projected_cash"])}
+            for b in ladder["buckets"]
+        ],
+        # 결제일이 지났는데 결제 분개가 없는 것. 개수만 싣고 전문은 싣지 않는다.
+        "overdue_count": len(ladder["overdue"]),
+        "overdue": [
+            {"source_event_id": o["source_event_id"],
+             "settlement_date": o["settlement_date"],
+             "incoming": _d(o["incoming"]), "outgoing": _d(o["outgoing"])}
+            for o in ladder["overdue"][:MAX_ROWS]
+        ],
+    }
+
+
 def build_ui_snapshot(
     *,
     oms,
@@ -166,8 +201,9 @@ def build_ui_snapshot(
         "portfolio": _portfolio(snapshot),
         "trading": _trading(oms),
         "ledger": _ledger(ledger),
+        "treasury": _treasury(ledger, server_time or datetime.now(timezone.utc)),
         "sources": {"portfolio": "scripted-loop", "trading": "scripted-loop",
-                    "ledger": "scripted-loop"},
+                    "ledger": "scripted-loop", "treasury": "scripted-loop"},
     }
     if overrides:
         # 먼저 합치고 나중에 덮는다. 순서를 바꾸면 update가 sources를 통째로
@@ -233,10 +269,22 @@ if __name__ == "__main__":
     swapped = build_ui_snapshot(
         oms=loop.oms, ledger=loop.ledger, snapshot=final,
         overrides={"portfolio": {"nav": "1"}, "sources": {"portfolio": "supabase"}})
-    assert set(swapped["sources"]) == {"portfolio", "trading", "ledger"}, swapped["sources"]
+    assert set(swapped["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
+        swapped["sources"]
     assert swapped["sources"]["portfolio"] == "supabase"
     assert swapped["sources"]["trading"] == "scripted-loop", "안 바꾼 구간의 출처가 사라졌다"
     assert swapped["portfolio"]["nav"] == "1", "override가 반영되지 않았다"
+
+    # 8. 결제 사다리 - 원장 현금과 사다리의 가용 현금은 같은 값이다.
+    #    다르면 화면이 현금을 두 군데서 다르게 말하게 된다.
+    treasury = doc["treasury"]
+    assert treasury["available_cash"] == doc["portfolio"]["cash"], treasury
+    assert treasury["buckets"], "사다리가 비었다"
+    assert treasury["overdue_count"] == len(treasury["overdue"])
+    # 마지막 칸의 예상 현금 = 가용 현금 + 사다리 안 순증감
+    net = sum(Decimal(b["net"]) for b in treasury["buckets"])
+    assert Decimal(treasury["buckets"][-1]["projected_cash"]) == \
+        Decimal(treasury["available_cash"]) + net, treasury
 
     # 7. 알 수 없는 mode는 거부한다
     try:
@@ -251,4 +299,4 @@ if __name__ == "__main__":
         out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"wrote {out.relative_to(ROOT)}")
 
-    print("ok - UI Read Model 7개 영역 점검 통과 (구간별 출처 유지 포함)")
+    print("ok - UI Read Model 8개 영역 점검 통과 (구간별 출처 유지, 결제 사다리 포함)")

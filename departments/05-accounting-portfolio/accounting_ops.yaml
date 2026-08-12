@@ -47,6 +47,13 @@ break_triage:
       - id: cause:statement_lag
         cause: 브로커 명세서가 아직 해당 체결을 반영하지 않았다(T+0 지연)
         check: 다음 명세서 배치에서 재대사
+    quantity_mismatch:
+      - id: cause:partial_fill_not_merged
+        cause: 브로커가 부분체결을 한 줄로 합산했거나 우리가 합산 전 라인을 그대로 적었다
+        check: 같은 broker_fill_id 의 체결 라인을 전부 모아 합계 수량으로 재비교
+      - id: cause:cancel_after_fill
+        cause: 체결 후 정정·취소가 반영돼 브로커 수량만 줄었다
+        check: 해당 주문의 정정/취소 이력과 최종 체결 수량 대조
     price_mismatch:
       - id: cause:average_vs_line_price
         cause: 브로커가 평균단가로, 내부가 라인별 체결가로 기록했다
@@ -93,6 +100,36 @@ break_triage:
 # 마스터플랜 19.12 "Agent 는 예외 조사와 설명을 담당한다" 의 조사 대상이다.
 # SOUL #6 의 Signal/Sizing/Timing/Execution/Cost/Regime 은 **기대 대비 실현** 갭의
 # 분류이고 여기 항등식 잔차와 다른 것이다 - 섞지 않는다.
+fees:
+  # ⚠ **전부 Mandate 미확정이다.** 실제 보수율·확정 주기·Hurdle 은 Fund Mandate 가
+  #    정하는 계약 조건이고 우리가 정하는 값이 아니다. 여기 있는 것은 계산 경로를
+  #    돌려보기 위한 자리표시자이며, Mandate 가 확정되면 그 값으로 갈아끼운다.
+  #    (마스터플랜 27장 미확정 목록 - hermes/config.yaml 99행에도 같은 표시가 있다)
+  enabled: true
+  # 관리보수. 연율 bps 를 일할 계산한다. 200bps = 2%/년.
+  management_fee_bps: 200
+  # 일할 분모. 365 고정(Actual/365). 회계기간이 아니라 실제 경과일이라 윤년도 365다.
+  day_count: 365
+  # 성과보수율. 고수위(High-Water Mark) 초과분에만 매긴다.
+  performance_fee_rate: 0.20
+  # 성과보수 기준 자본. HWM 이 아직 없을 때의 출발선이며 Mandate 의 최초 출자액이다.
+  # 0 이면 계산하지 않는다 - 기준이 없는데 성과를 재면 첫날 전액이 성과가 된다.
+  performance_base: 0
+  # 최소 발생액. 이보다 작은 일할 보수는 분개하지 않는다(0원 라인은 DB가 거부한다).
+  min_accrual: 1
+
+settlement:
+  # 체결일 + 이 영업일 수 = 결제일. KOSPI/KOSDAQ 현물은 T+2 다.
+  # 시장이 늘면 여기서 시장별로 나눈다 - 코드에 2를 박지 않는다.
+  days: 2
+  # 주말만 거른다. **거래소 휴장일 캘린더는 리서치본부(재일) 소관**이라 우리가
+  # 만들지 않는다. 캘린더가 생기기 전까지 공휴일은 아래 목록으로 주입한다 -
+  # 비워 두면 설날·추석 낀 결제일이 실제보다 앞선 날짜로 나온다(현금이 있다고
+  # 착각하는 방향이라 안전하지 않다. 알게 되는 즉시 채운다).
+  holidays: []
+  # 결제 예정 현금을 며칠 앞까지 사다리로 보여줄지. T+2 라 3일이면 전부 덮는다.
+  ladder_days: 3
+
 pnl_exception:
   # 잔차가 이 금액 이하면 조사 대상으로 올리지 않는다. 통화 최소단위 기준이며
   # 근거 없는 초기 가정치다 - 실제 마감 운영 데이터로 재보정한다.

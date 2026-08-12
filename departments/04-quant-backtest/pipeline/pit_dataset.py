@@ -50,6 +50,22 @@ BAR_SOURCE = "ls_chart"
 INTERVAL = "1D"
 DATA_ROOT = Path(__file__).resolve().parents[3] / "quant-data"
 
+
+def resolve_object_path(object_path: str, *, root: Path | None = None) -> Path:
+    """원장에 적힌 `object_path` 를 이 OS 의 실제 경로로 푼다.
+
+    ▶ 왜 필요한가 (2026-08-12 실측)
+      `object_path` 는 `str(path.relative_to(DATA_ROOT.parent))` 로 저장된다.
+      즉 **빌드한 OS 의 구분자가 그대로 원장에 박힌다.** v1·v2 는 윈도우에서
+      만들어져 `quant-data\\krx-basket-daily-v2` 로 들어가 있는데, 리눅스에서는
+      역슬래시가 파일명의 한 글자라 `parent / object_path` 가 존재하지 않는
+      경로가 된다 - 데이터는 멀쩡히 있는데 "파티션 없음"이 된다.
+
+      경로를 원장에서 고치지 않고 읽는 쪽에서 정규화한다. 원장 값은 그 빌드가
+      실제로 쓴 문자열이라 사실이고, 사실을 고치는 대신 해석을 OS 에 맞춘다.
+    """
+    return (root or DATA_ROOT.parent) / Path(str(object_path).replace("\\", "/"))
+
 # Dataset 행 스키마 - 컬럼 순서가 content_hash 의 일부다. 바꾸면 새 스키마다.
 # ▶ notional(거래대금) 추가 2026-08-04. **유동성 계층 슬리피지의 유일한
 #   재료**인데 SELECT·파티션 어디에도 없어서 전 종목이 시장 중앙값으로
@@ -279,7 +295,8 @@ def export_partitions(rows: list[dict], out_dir: Path) -> list[dict]:
         dates = [r["trade_date"] for r in chunk]
         parts.append({
             "partition_key": key,
-            "object_path": str(path.relative_to(DATA_ROOT.parent)),
+            # as_posix() - 구분자를 원장에 남기지 않는다(위 resolve_object_path 참고).
+            "object_path": path.relative_to(DATA_ROOT.parent).as_posix(),
             "row_count": len(chunk),
             "min_event_time": datetime.combine(min(dates), datetime.min.time(), tzinfo=KST),
             "max_event_time": datetime.combine(max(dates), datetime.min.time(), tzinfo=KST),
@@ -368,7 +385,7 @@ def build(name: str, version: str, start: date, end: date) -> int:
                  json.dumps([p["partition_key"] for p in parts]),
                  json.dumps(pit_policy, ensure_ascii=False),
                  json.dumps(quality, ensure_ascii=False, default=str),
-                 str(out_dir.relative_to(DATA_ROOT.parent)), chash, len(rows),
+                 out_dir.relative_to(DATA_ROOT.parent).as_posix(), chash, len(rows),
                  json.dumps(schema_def)))
             dataset_id = str(cur.fetchone()[0])
             for p in parts:
@@ -460,11 +477,11 @@ def _check_partition_roundtrip(tmp: Path):
     assert sum(p["row_count"] for p in parts) == 3
     # 파일 -> 행 복원 -> Partition 해시 재검증 (Runner 가 쓰는 무결성 경로)
     for p in parts:
-        loaded = load_partition(DATA_ROOT.parent / p["object_path"])
+        loaded = load_partition(resolve_object_path(p["object_path"]))
         assert content_hash(loaded) == p["content_hash"], p["partition_key"]
     # 전체 해시 = 복원 행 전체 해시
     all_loaded = [r for p in parts
-                  for r in load_partition(DATA_ROOT.parent / p["object_path"])]
+                  for r in load_partition(resolve_object_path(p["object_path"]))]
     assert content_hash(all_loaded) == content_hash(rows)
     print("  Partition 왕복·재검증    OK")
 

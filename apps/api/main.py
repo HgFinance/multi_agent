@@ -76,8 +76,10 @@ finally:
             sys.modules[_name] = _accounting_previous_modules[_name]
 from apps.api import hermes_boundary
 try:
+    from . import ceo
     from .ceo import router as ceo_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import ceo
     from ceo import router as ceo_router
 import trading
 from agent_status import agent_status_snapshot
@@ -87,6 +89,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+from account_snapshot import router as account_snapshot_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -104,16 +107,44 @@ from portfolio_schemas import (
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
+    from .qa import QA_API_URL
     from .qa import router as qa_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from qa import QA_API_URL
     from qa import router as qa_router
 try:
+    from .risk import RISK_API_URL
     from .risk import router as risk_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from risk import RISK_API_URL
     from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
-app = FastAPI(title="AI Office BFF", version="0.2.0")
+app = FastAPI(
+    title="AI Office BFF",
+    version="0.3.0",
+    description=(
+        "HgFinance Frontend용 BFF. Hermes 부서 Agent와 CEO Kanban 워크플로를"
+        " 프론트엔드가 쓸 수 있는 형태로 정규화한다.\n\n"
+        "**계약 두 개**\n\n"
+        "1. Agent 텍스트는 공식 수치가 아니다(`binding: false`). 공식 Position·PnL·"
+        "NAV는 `/ui/snapshot`에서만 나온다.\n"
+        "2. CEO 워크플로는 비동기다. `POST /ui/ceo/ask`는 202로 Task ID만 주고,"
+        " 진행은 `GET /ui/ceo/tasks/{task_id}` polling(2~5초), 결과는"
+        " `GET /ui/ceo/tasks/{task_id}/result`로 가져간다.\n\n"
+        "Swagger UI: `/docs` · ReDoc: `/redoc` · 스키마: `/openapi.json`"
+    ),
+    openapi_tags=[
+        {
+            "name": "ceo-office",
+            "description": (
+                "CEO Kanban 워크플로. ask -> 부서 실행 -> QA -> CEO 최종 종합.\n\n"
+                "`DELETE`는 의도적으로 없다 - 누가 언제 무엇을 요청했고 어느 부서가"
+                " 실패했는지는 감사 추적이므로 정리는 Archive로만 한다."
+            ),
+        },
+    ],
+)
 app.add_middleware(
     CORSMiddleware,
     # 로컬 개발 포트는 3000/3001/3002/3003처럼 바뀔 수 있다.
@@ -139,6 +170,9 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
 app.include_router(ceo_router)
+# 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
+# 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
+app.include_router(account_snapshot_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 
@@ -537,6 +571,11 @@ def health() -> dict:
         "status": "ok",
         "mode": "DEMO",
         "agent_ask_enabled": hermes_boundary.ENABLE_AGENT_ASK,
+        # 부서 Agent 호출이 어느 런타임으로 나가는지. BFF 가 컨테이너로 뜨면
+        # `hermes` 바이너리가 그 안에 없어 `docker exec` 로 나가야 한다 - 그 상태를
+        # 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.
+        # (`ceo_transport` 는 CEO 입구가 Task 기반으로 재설계되면서 사라졌다.)
+        "hermes_exec_mode": hermes_boundary.HERMES_EXEC_MODE,
         "departments": [
             "research-department",
             trading.DEPARTMENT,
@@ -555,6 +594,14 @@ def health_ready() -> dict[str, object]:
     dependencies = {
         "bff": {"status": "READY"},
         "governance": {"status": "READY" if GOVERNANCE_API_URL else "NOT_CONFIGURED"},
+        # ▶ risk·qa 를 여기 넣는 이유 (2026-08-12)
+        #   전에는 이 둘이 빠져 있어서 **부서 API 가 죽어 있어도 BFF 가 ready 라고
+        #   답했다.** 실제로 그날 risk 는 컨테이너가 아예 안 떠 있었고 qa 는
+        #   QA_API_URL 이 빈 문자열이라 항상 503 이었는데, 이 응답만 보면 정상이었다.
+        #   governance 와 같은 방식으로 **설정 유무**를 본다 - 여기서 실제 HTTP 를
+        #   찌르면 readiness 가 남의 서비스 지연에 묶인다(그건 각 부서 /health/ready 몫).
+        "risk": {"status": "READY" if RISK_API_URL else "NOT_CONFIGURED"},
+        "qa": {"status": "READY" if QA_API_URL else "NOT_CONFIGURED"},
         "supabase": {"status": "READY" if os.getenv("DATABASE_URL", "").strip() else "NOT_CONFIGURED"},
         "ollama": {
             "status": "READY"
@@ -661,9 +708,12 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
             # 평가된 적 없는 장부다. 0원 NAV를 지어내지 않고 그 사실을 알린다.
             raise HTTPException(404, f"book {book_id}의 확정 Snapshot이 없습니다")
         if sections is not None:
+            # 출처는 **실제로 갈아끼운 구간에만** 붙인다. 목록을 손으로 적어두면
+            # 뷰가 구간을 하나 더 내놓거나 덜 내놨을 때 화면이 Scripted Loop 값을
+            # supabase라고 읽는다.
             overrides = {**sections,
                          "book_id": str(chosen),
-                         "sources": {"portfolio": "supabase", "ledger": "supabase"}}
+                         "sources": {name: "supabase" for name in sections}}
 
     snapshot = build_ui_snapshot(
         oms=loop.oms,
@@ -797,11 +847,16 @@ if __name__ == "__main__":
     # 구간마다 출처가 반드시 있다. 트레이딩은 아직 Scripted Loop다(TRD-01 대기).
     # 회계 구간은 DB와 Canonical 장부가 있으면 supabase, 없으면 scripted-loop -
     # 어느 쪽이든 **화면이 출처를 모르는 상태로 나가지 않는다**는 게 계약이다.
-    assert set(snap["sources"]) == {"portfolio", "trading", "ledger"}, snap["sources"]
+    assert set(snap["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
+        snap["sources"]
     assert snap["sources"]["trading"] == "scripted-loop", snap["sources"]
     assert snap["sources"]["portfolio"] == snap["sources"]["ledger"], \
         f"회계 두 구간의 출처가 갈라졌다: {snap['sources']}"
     assert snap["sources"]["portfolio"] in ("supabase", "scripted-loop"), snap["sources"]
+    # 결제 사다리. **원장 현금과 가용 현금이 같은 값으로 나간다** - 화면이 현금을
+    # 두 군데서 다르게 말하면 어느 쪽으로 주문을 잡을지 알 수 없다.
+    assert snap["treasury"]["available_cash"] == snap["portfolio"]["cash"], snap["treasury"]
+    assert snap["treasury"]["buckets"], snap["treasury"]
 
     # 없는 book_id는 404다. 0원 NAV를 지어내지 않는다.
     # (DB가 없으면 book_id가 무시되므로 그때는 200이고, 그 경우도 출처는 전부 DEMO다)
@@ -820,7 +875,9 @@ if __name__ == "__main__":
     def _fake_sections(repo, book_id):
         reads.append(book_id)
         return {"portfolio": {"nav": "12345", "as_of": "2026-08-10T06:00:00+00:00"},
-                "ledger": {"balanced": True, "journal_count": 3}}
+                "ledger": {"balanced": True, "journal_count": 3},
+                "treasury": {"available_cash": "12345", "buckets": [],
+                             "overdue_count": 0, "overdue": []}}
 
     globals()["_repo"] = lambda: object()      # DB가 있는 척 - 뷰 호출은 위에서 가로챈다
     globals()["_default_book_id"] = lambda repo: _BOOK
@@ -833,6 +890,7 @@ if __name__ == "__main__":
         assert wired["book_id"] == str(_BOOK), wired["book_id"]
         assert wired["sources"]["portfolio"] == "supabase"
         assert wired["sources"]["ledger"] == "supabase"
+        assert wired["sources"]["treasury"] == "supabase"
         # 갈아끼우지 않은 구간의 출처는 그대로 남는다
         assert wired["sources"]["trading"] == "scripted-loop", wired["sources"]
         # mode는 여전히 DEMO다. 트레이딩이 Scripted Loop인 한 절반만 진짜다
@@ -953,6 +1011,14 @@ if __name__ == "__main__":
         "/ui/mandate-cases/{case_id}/timeline",
         "/ui/mandate-approvals",
         "/ui/mandate-approvals/{approval_id}/decide",
+        # 2026-08-12 CEO Kanban 워크플로 경로. ask/archive를 뺀 나머지는 읽기 전용이고,
+        # archive는 기록을 지우지 않는다(감사 추적 유지). DELETE는 만들지 않는다.
+        "/ui/ceo/ask",
+        "/ui/ceo/tasks",
+        "/ui/ceo/tasks/{task_id}",
+        "/ui/ceo/tasks/{task_id}/graph",
+        "/ui/ceo/tasks/{task_id}/result",
+        "/ui/ceo/tasks/{task_id}/archive",
     }, c.get("/openapi.json").json()["paths"].keys()
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다

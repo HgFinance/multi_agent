@@ -225,6 +225,19 @@ def reconcile_fills(
                 f"브로커 {hit.quantity}@{hit.price}. 사람 확인 필요.",
                 internal_ref=own.ref, external_ref=hit.ref,
             ))
+        elif own.quantity != hit.quantity:
+            # **Broker Fill ID로 짝지었을 때만 여기 온다.** 나머지 매칭(client_order_id,
+            # 속성)은 수량 일치를 조건에 넣으므로 수량이 다르면 애초에 짝이 안 된다.
+            # ID가 같은데 수량이 다르면 짝은 확실하고 우리 수량이 틀린 것이라 포지션이
+            # 그만큼 과대/과소 계상된다 - internal_only_fill과 같은 이유로 MATERIAL이다.
+            item.has_discrepancy = True
+            res.breaks.append(_break(
+                "quantity_mismatch", Severity.MATERIAL,
+                f"체결 수량 불일치: 내부 {own.quantity} vs 브로커 {hit.quantity} "
+                f"(broker_fill_id={own.broker_fill_id}). 포지션이 "
+                f"{own.quantity - hit.quantity}만큼 어긋납니다.",
+                internal_ref=own.ref, external_ref=hit.ref,
+            ))
         elif own.price != hit.price:
             item.has_discrepancy = True
             res.breaks.append(_break(

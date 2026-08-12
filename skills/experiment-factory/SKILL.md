@@ -72,9 +72,125 @@ illiquidity_premium
 
 코드는 **제안**이다. 승인은 결정론 검증(`validate_code` → `verify`)이 한다.
 
-### 4. 실행 — 손대지 않는다
+### 4. 실행 — 네가 돌린다, 다만 결정론 진입점으로만
 
-러너는 LLM 을 호출하지 않는다. 당신은 실행 결과를 읽을 뿐이다.
+러너는 LLM 을 호출하지 않는다. **숫자를 만드는 것은 언제나 코드다.** 그러나
+그 코드를 *돌리는 것*은 네 일이다. 예전에는 이 절이 "손대지 않는다 / 결과를
+읽을 뿐이다" 였는데, 그 결과 실험 워커가 못 집는 상황에서 **아무도 실행하지
+않는 구간**이 생겼다(2026-08-12 실측: 카드 3장이 11분씩 조사만 하고 전부
+`NOT_RUNNABLE` 로 끝났다. 실행면은 그 자리에 있었다).
+
+**실행면**
+
+```
+저장소   /app/departments/04-quant-backtest
+파이썬   quant-py     ← pandas·numpy·psycopg2 가 들어 있다
+         system python3 에는 없다. ModuleNotFoundError 가 나면 이걸 안 쓴 것이다
+```
+
+```bash
+cd /app/departments/04-quant-backtest
+quant-py pipeline/experiment_orchestrator.py --run --hypothesis <id>   # 실험 한 건
+quant-py pipeline/pit_dataset.py --build --name <n> --version <v> \
+         --from <YYYY-MM-DD> --to <YYYY-MM-DD>                         # 데이터셋
+quant-py pipeline/backtest_runner.py --run                             # 백테스트 단독
+quant-py pipeline/<모듈>.py                                            # 인자 없이 = 자체점검
+```
+
+**데이터를 먼저 본다 - 설계는 그다음이다**
+
+두 원장에 직접 붙을 수 있다. 프로필 `env:` 에 DSN 이 있으므로 코드에서 그대로 읽는다.
+
+```python
+import os, psycopg2
+mkt = psycopg2.connect(os.environ["TIMESCALE_DATABASE_URL"])   # 시세 (market.*)
+led = psycopg2.connect(os.environ["DATABASE_URL"])             # 업무 원장 (quant.*)
+```
+
+설계 전에 **네가 직접 재라.** 브리핑의 요약을 믿고 시작하지 마라 - 요약은 한
+주기 전 사실이고, 데이터는 매일 들어오고 리텐션으로 밀려난다.
+
+```sql
+-- 무엇이 얼마나 있는가 (실측 2026-08-12)
+select interval_code, count(*), count(distinct instrument_id),
+       min(bucket_time)::date, max(bucket_time)::date
+  from market.market_bars group by 1;
+--   1D  7,261,269행  3,924종목  2016-01-03 ~ 2026-08-10
+--   1M  3,756,660행    350종목  2026-04-02 ~ 2026-07-31   ← 종목이 좁다
+-- market_quotes 는 2026-08-09~08-12 **나흘치뿐**이다(리텐션). 호가·체결 기반
+-- 가설은 지금 표본으로 검정할 수 없다 - 그렇게 적고 반려해라. 억지로 돌리면
+-- 나흘로 낸 수치가 원장에 남는다.
+```
+
+**표본이 설계를 정한다.** 형성창을 정하기 전에 walk-forward 창이 몇 개 나오는지
+직접 세라 - 창이 3개 미만이면 강건성 판정이 성립하지 않는다.
+
+```python
+quant-py -c "
+from walk_forward import make_windows, WARMUP_TRADING_DAYS
+# dates = 데이터셋의 거래일 목록
+print(len(make_windows(dates, max(WARMUP_TRADING_DAYS, lookback+1))))"
+```
+
+**필요한 데이터셋이 없으면 만든다.** 매니페스트가 덮는 원천만 실험까지 가므로,
+없으면 반려로 끝내지 말고 빌드한다. 빌드는 `content_hash`·파티션·품질검사를
+같이 박으므로 반드시 이 진입점으로 한다.
+
+```bash
+quant-py pipeline/pit_dataset.py --build --name <이름> --version <버전> \
+         --from <YYYY-MM-DD> --to <YYYY-MM-DD>
+quant-py -c "..."   # quant.dataset_manifests 로 등재됐는지 확인
+```
+
+버전을 올릴 때는 **덮어쓰지 않는다.** v2 가 있으면 v3 를 만든다 - 같은 경로에
+덮으면 매니페스트 해시와 파일이 어긋나고, 그건 재현성이 깨진 것이다.
+
+**언제 직접 돌리나**
+
+- 카드가 실험을 요구하는데 큐에 작업이 없거나 워커가 못 집을 때
+- 데이터셋이 짧거나 없어서 막혔을 때 — 반려로 끝내지 말고 새 버전을 빌드한다
+- 어휘에 없는 edge 라면 템플릿을 쓰거나(3절) `NOT_IMPLEMENTED` 에 사유와 함께 등재한다
+
+**막혔다고 쓰기 전에 확인한다.** "실행면이 없다"고 적기 전에 위 경로를 실제로
+열어 봤는지 본다. **있는 것을 없다고 적으면 그 보고가 다음 사람을 더 멀리
+돌아가게 한다.** 진짜로 없으면 무엇이 없는지 정확히 적는다 — 그 구분이 이
+카드의 값이다.
+
+**실행면을 진화시킨다 - 러너도 고쳐도 된다**
+
+기성 템플릿과 러너로 답이 안 나오면 **고친다.** 시그널만이 아니라 백테스트
+러너·창 분할·비용 모델까지 대상이다. 공장이 발전하는 방식이 그것이다.
+
+안전한 이유는 이미 구조에 있다:
+
+```
+code_version() = RUNNER_VERSION + sha256(파일)      # 코드가 바뀌면 값이 바뀐다
+input_hash     = sha256({dataset, config, code, seed, cost})
+```
+
+러너를 고치면 `input_hash` 가 달라져 **새 실험**이 된다. 과거 결과는 그대로
+남고 새 버전은 새 행으로 쌓인다 - v1 부터 v200 까지 성과를 나란히 볼 수 있다.
+
+**다만 시도 카운터는 리셋되지 않는다.** `trial_family` 는
+`(edge_type, universe_key, label, baseline)` 로만 정해지고 **코드 버전이 안
+들어간다.** 그래서 러너를 고쳐 같은 개념을 다시 돌리면 그 계열의 N+1번째
+시도로 세어지고 DSR 이 그만큼 감가한다.
+
+> 결과가 나쁘다고 러너를 고쳐 다시 돌리는 것은 막히지 않는다. 대신 **세어진다.**
+> 20번 고쳐 돌려 나온 Sharpe 1.5 는 20번째 시도의 1.5 로 읽힌다. 그것이
+> 정직한 값이고, 그 값으로 통과하면 진짜 통과다.
+
+고쳤으면 **무엇을 왜 고쳤는지 카드에 적는다.** QA·감사가 그것을 읽는다.
+그리고 교훈은 메모리에 남긴다 - 원장은 무엇이 일어났는지를 담고, 메모리는
+네가 그것에 대해 무엇을 결론지었는지를 담는다. 다음 주기의 너는 둘 다 없으면
+같은 자리에서 다시 시작한다.
+
+**여전히 안 되는 것**
+
+- 결과를 본 뒤 config·시그널 코드를 고쳐 다시 돌리기 → 새 시도다(DSR 이 감가한다)
+- SQL 로 `quant.*` 에 직접 쓰기 → 사전등록 지문·`content_hash`·매니페스트가
+  진입점 안에서 박힌다. 밖에서 만든 숫자는 재현이 안 되므로 결과가 아니다
+- 실패한 실행을 지우고 다시 돌리기
 
 ### 5. 해석 — 숫자를 다시 만들지 않는다
 
@@ -121,7 +237,8 @@ illiquidity_premium
   같아져 생성자·검증자 분리가 조직 안에서 무너진다
 - Production 승격 — QA 재현 → Risk 수용력 → **사람의 최종 서명**이 필요하다
 - 실패 실험 삭제, 최고 결과만 보고, 관문 우회
-- 실행면(`pipeline/`)에 직접 커밋 — 검증을 통과한 스펙만 들어간다
+- 검증 없이 실행면에 밀어 넣는 것. **코드를 고치는 것 자체는 금지가 아니다** —
+  아래 "실행면을 진화시킨다" 참고
 
 ## 누수 의심
 

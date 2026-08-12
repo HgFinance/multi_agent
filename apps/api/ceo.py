@@ -1,4 +1,9 @@
-"""CEO Office query boundary for closed-loop Kanban workflows."""
+"""CEO Office query boundary and closed-loop Kanban workflow APIs.
+
+`/ui/ceo/ask` creates only the CEO root task.  The CEO Supervisor owns
+planning, department-task creation, QA, and final synthesis.  All read paths
+use the normalized Kanban reader; the BFF never opens Hermes' database.
+"""
 
 from __future__ import annotations
 
@@ -6,23 +11,78 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from . import hermes_boundary
+    from .ceo_kanban_read import (
+        KanbanTaskNotFound,
+        KanbanUnavailable,
+        Workflow,
+        archive_tasks,
+        extract_user_query,
+        list_ceo_roots,
+        load_workflow,
+    )
+    from .ceo_schemas import (
+        CeoPlanning,
+        CeoQueryAcceptedResponse,
+        GraphNode,
+        TaskArchiveResponse,
+        TaskGraphResponse,
+        TaskListItem,
+        TaskListResponse,
+        TaskProgress,
+        TaskResult,
+        TaskResultResponse,
+        TaskStatusResponse,
+        TaskWorkflow,
+    )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_boundary  # type: ignore[no-redef]
+    from ceo_kanban_read import (  # type: ignore[no-redef]
+        KanbanTaskNotFound,
+        KanbanUnavailable,
+        Workflow,
+        archive_tasks,
+        extract_user_query,
+        list_ceo_roots,
+        load_workflow,
+    )
+    from ceo_schemas import (  # type: ignore[no-redef]
+        CeoPlanning,
+        CeoQueryAcceptedResponse,
+        GraphNode,
+        TaskArchiveResponse,
+        TaskGraphResponse,
+        TaskListItem,
+        TaskListResponse,
+        TaskProgress,
+        TaskResult,
+        TaskResultResponse,
+        TaskStatusResponse,
+        TaskWorkflow,
+    )
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
     canonical_profile_for_department,
 )
-from orchestration.ceo_workflow_scope import build_root_body
+from orchestration.ceo_workflow_scope import build_root_body, infer_workflow_mode
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
+_TASK_ID_PATTERN = r"^t_[A-Za-z0-9]{4,64}$"
+_TASK_ID_PATH = Path(
+    description="Kanban Task ID. Root ID를 권장하지만 자식 ID도 Root로 해석한다.",
+    pattern=_TASK_ID_PATTERN,
+    examples=["t_c2f6fe62"],
+)
+_LIST_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_WORKERS", "4")))
+_LIST_GRAPH_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_GRAPH_WORKERS", "3")))
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
@@ -60,66 +120,66 @@ _PROFILE_ALIASES = {
         "회계",
         "포트폴리오",
     ),
-    "risk-management": ("risk-management", "risk management", "risk", "리스크"),
-    "hr-department": ("hr-department", "workforce", "human resources", "인사"),
+    "risk-management": ("risk-management", "risk", "리스크"),
+    "hr-department": ("hr-department", "hr", "인사", "워크포스"),
 }
 
 
-def _child_records(value: object) -> tuple[Mapping[str, object], ...]:
+def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
+    """Load a root workflow and translate CLI failures to HTTP errors."""
+
+    try:
+        return load_workflow(task_id, max_workers=max_workers)
+    except KanbanTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+
+
+def _child_records(value: object) -> list[Mapping[str, object]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return ()
-    return tuple(item for item in value if isinstance(item, Mapping))
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
 
 
-def _planning_profiles(task: Mapping[str, object]) -> tuple[tuple[str, ...], bool, bool]:
-    """Read selected profiles only from the current root's planner projection."""
+def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, bool]:
+    """Read planning only from the current root scope; never infer a fixed pipeline."""
+
     selected: list[str] = []
     qa_required = False
     synthesis_present = False
-    children = _child_records(task.get("children"))
-    for child in children:
-        assignee = str(child.get("assignee") or "").strip()
+    for child in _child_records(task.get("children")):
+        assignee = str(child.get("assignee") or child.get("profile") or "").strip()
         if assignee not in CANONICAL_PROFILES:
             continue
         body = str(child.get("body") or "").casefold()
-        role = re.search(r"(?:^|\n)workflow_role=(\w+)", body)
-        role_name = role.group(1) if role else ""
-        if assignee == "qa-department" or role_name == "qa":
+        role_match = re.search(r"(?:^|\n)workflow_role=(\w+)", body)
+        role = role_match.group(1) if role_match else ""
+        if assignee == "qa-department" and role == "qa":
             qa_required = True
-        if assignee == "ceo-agent" and role_name == "synthesis":
+        elif assignee == "ceo-agent" and role == "synthesis":
             synthesis_present = True
-        if (
-            assignee in _PRIMARY_PROFILE_ORDER
-            and role_name in {"", "primary"}
-            and assignee not in selected
-        ):
-            selected.append(assignee)
+        elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
+            if assignee not in selected:
+                selected.append(assignee)
 
-    # Some Hermes versions expose child IDs rather than child rows on ``show``.
-    # In that shape, latest_summary is the planner's durable projection.  It is
-    # used only when no child row supplied a department; no fixed pipeline is
-    # inferred here.
-    summary = str(task.get("latest_summary") or "")
-    if summary:
-        folded = summary.casefold()
-        if not selected:
-            for profile in _PRIMARY_PROFILE_ORDER:
-                if any(alias.casefold() in folded for alias in _PROFILE_ALIASES[profile]):
-                    selected.append(profile)
-        if not qa_required and re.search(r"\bqa\b|quality|검증|감사", folded):
-            qa_required = True
-        if not synthesis_present and re.search(r"synth|합성|최종 의견", folded):
-            synthesis_present = True
-
-    return tuple(selected), qa_required, synthesis_present
+    summary = str(task.get("latest_summary") or "").casefold()
+    if not selected and summary:
+        for profile in _PRIMARY_PROFILE_ORDER:
+            if any(alias.casefold() in summary for alias in _PROFILE_ALIASES[profile]):
+                selected.append(profile)
+    if not qa_required and re.search(r"\bqa\b|quality|검증|감사", summary):
+        qa_required = True
+    if not synthesis_present and re.search(r"synth|합성|최종 의견", summary):
+        synthesis_present = True
+    return selected, qa_required, synthesis_present
 
 
 def _scoped_planning_projection(
-    root: Mapping[str, object],
-    *,
-    timeout: float,
+    root: Mapping[str, object], *, timeout: float
 ) -> dict[str, object]:
-    """Add parentless primary tasks from the current root's scope marker."""
+    """Merge parentless primary tasks using the durable root scope marker."""
+
     root_id = str(root.get("id") or root.get("task_id") or "").strip()
     if not root_id:
         return dict(root)
@@ -130,14 +190,13 @@ def _scoped_planning_projection(
     scoped = [
         row
         for row in rows
-        if marker in str(row.get("body") or "").splitlines()
+        if isinstance(row, Mapping)
+        and marker in str(row.get("body") or "").splitlines()
     ]
     if not scoped:
         return dict(root)
-
-    existing = _child_records(root.get("children"))
     by_id: dict[str, Mapping[str, object]] = {}
-    for child in (*existing, *scoped):
+    for child in (*_child_records(root.get("children")), *scoped):
         child_id = str(child.get("id") or child.get("task_id") or "").strip()
         if child_id:
             by_id[child_id] = child
@@ -148,60 +207,43 @@ def _scoped_planning_projection(
 
 def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     selected, qa_required, synthesis_present = _planning_profiles(task)
-    summary = str(task.get("latest_summary") or "").strip() or None
-    planned = bool(selected or qa_required)
-    # The existing supervisor contract always ends a planned workflow with
-    # CEO synthesis, whether QA is required or explicitly skipped.
-    synthesis_present = synthesis_present or planned
-    actions = [
-        f"{_PROFILE_LABEL[profile]}에서 {_PROFILE_COPY[profile]}"
-        for profile in selected
-    ]
+    actions = [f"{_PROFILE_LABEL[p]}에서 {_PROFILE_COPY[p]}" for p in selected]
     if actions:
         answer = f"{'· '.join(actions)}하겠습니다."
     else:
-        answer = (
-            "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 "
-            "선택된 부서와 다음 단계를 표시하겠습니다."
-        )
+        answer = "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다."
     if qa_required:
         answer += " QA 검증을 거치겠습니다."
     if synthesis_present:
-        if qa_required:
-            answer += " 검증 후 CEO가 최종 합성하겠습니다."
-        else:
-            answer += " 분석 후 CEO가 최종 합성하겠습니다."
-
-    steps = [_PROFILE_LABEL[profile] for profile in selected]
+        answer += " CEO가 최종 종합합니다."
+    steps = [_PROFILE_LABEL[p] for p in selected]
     if qa_required:
         steps.append("QA")
     if synthesis_present:
-        steps.append("CEO final synthesis")
+        steps.append("CEO Synthesis")
+    planned = bool(selected or qa_required or synthesis_present)
     return {
         "status": "planned" if planned else "accepted",
-        "answer": answer,
         "planning": {
-            "selected_departments": list(selected),
+            "selected_departments": selected,
             "steps": steps,
             "qa_required": qa_required,
-            "summary": summary,
+            "summary": str(task.get("latest_summary") or "").strip() or None,
         },
+        "answer": answer,
     }
 
 
 def _accepted_fallback() -> dict[str, object]:
     return {
         "status": "accepted",
-        "answer": (
-            "CEO Kanban workflow accepted. Planning summary will appear when "
-            "available; final synthesis will be produced by the closed-loop supervisor."
-        ),
         "planning": {
             "selected_departments": [],
             "steps": [],
             "qa_required": False,
             "summary": None,
         },
+        "answer": "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다.",
     }
 
 
@@ -213,98 +255,267 @@ def _planning_read_timeout() -> float:
 
 
 def _wait_for_planning(task_id: str) -> dict[str, object]:
-    """Poll the existing root briefly without blocking on CEO inference."""
+    """Poll briefly for an already-created supervisor projection."""
+
     try:
         wait_seconds = max(0.0, float(os.getenv("CEO_PLANNING_WAIT_SECONDS", "4")))
     except ValueError:
         wait_seconds = 4.0
-    read_timeout = _planning_read_timeout()
     deadline = time.monotonic() + wait_seconds
+    read_timeout = _planning_read_timeout()
     while True:
         remaining = deadline - time.monotonic()
         if remaining < 0:
             return _accepted_fallback()
         payload = hermes_boundary.show_kanban_task(
-            task_id,
-            timeout=min(
-                max(0.1, remaining),
-                read_timeout,
-            ),
+            task_id, timeout=min(max(0.1, remaining), read_timeout)
         )
         if payload is None:
             return _accepted_fallback()
-        payload = _scoped_planning_projection(
-            payload,
-            timeout=min(max(0.1, remaining), read_timeout),
+        acknowledgement = _planning_acknowledgement(
+            _scoped_planning_projection(
+                payload, timeout=min(max(0.1, remaining), read_timeout)
+            )
         )
-        acknowledgement = _planning_acknowledgement(payload)
-        if acknowledgement["status"] == "planned":
-            return acknowledgement
-        if remaining <= 0:
+        if acknowledgement["status"] == "planned" or remaining <= 0:
             return acknowledgement
         time.sleep(min(0.2, remaining))
 
 
-def _response(task: Mapping[str, object], acknowledgement: Mapping[str, object]) -> dict[str, object]:
+def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object]) -> dict[str, object]:
     return {
         "schema_version": _PLANNING_SCHEMA_VERSION,
         "department": "ceo-agent",
         "binding": False,
-        "task_id": task.get("task_id") or task.get("id"),
+        "task_id": str(task.get("task_id") or task.get("id") or ""),
         "task": dict(task),
-        "status": acknowledgement["status"],
-        "answer": acknowledgement["answer"],
-        "planning": acknowledgement["planning"],
+        "status": planning["status"],
+        "answer": planning["answer"],
+        "planning": planning["planning"],
         "session_id": None,
     }
 
 
-@router.post("/ask", operation_id="ceo_query", status_code=202)
+@router.post(
+    "/ask",
+    operation_id="ceo_query",
+    status_code=202,
+    response_model=CeoQueryAcceptedResponse,
+    summary="CEO에게 새 분석을 요청한다",
+)
 def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
-    """Enqueue a CEO Kanban workflow without running a second CEO turn."""
+    """Create the CEO root task; supervisor execution remains asynchronous."""
 
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
-        body=build_root_body(req.query, req.request_id),
+        body=build_root_body(
+            req.query,
+            req.request_id,
+            workflow_mode=infer_workflow_mode(req.query),
+        ),
         idempotency_key=req.request_id,
     )
-
     if not task or not task.get("task_id"):
-        # The root task is the durable anchor for the closed-loop workflow.
-        # Never claim success when the Kanban graph was not created.
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
         )
-
     if not hermes_boundary.comment_root_scope(
         task_id=str(task["task_id"]), request_id=req.request_id
     ):
-        # Fail closed: a ready root without its concrete scope binding could
-        # be dispatched with no durable proof of which root owns its children.
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban scope를 기록하지 못했습니다. 재시도하세요.",
         )
+    return _accepted_response(task, _wait_for_planning(str(task["task_id"])))
 
-    return _response(task, _wait_for_planning(str(task["task_id"])))
 
+def _planning_status_payload(task_id: str) -> dict[str, object]:
+    """Compatibility projection used by the qa-department client/tests.
 
-@router.get("/tasks/{task_id}", operation_id="ceo_task_status")
-def ceo_task_status(task_id: str) -> dict[str, object]:
-    """Expose the current root/planning projection for frontend polling."""
-    task = hermes_boundary.show_kanban_task(task_id)
-    if not task:
+    The canonical read API remains the PR #224 workflow model.  This helper
+    only reads the root plus the explicit scope marker and never creates or
+    mutates a task.
+    """
+
+    raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
+    if not raw:
         raise HTTPException(status_code=404, detail="CEO Kanban task를 찾을 수 없습니다.")
-    task = _scoped_planning_projection(
-        task,
-        timeout=_planning_read_timeout(),
+    projection = _scoped_planning_projection(raw, timeout=_planning_read_timeout())
+    return _accepted_response(
+        {"task_id": str(projection.get("id") or task_id), **projection},
+        _planning_acknowledgement(projection),
     )
-    return _response(
-        {"task_id": task.get("id") or task_id, **task},
-        _planning_acknowledgement(task),
+
+
+def _status_payload(workflow: Workflow) -> dict[str, object]:
+    payload = TaskStatusResponse(
+        task_id=workflow.root_task_id,
+        root_task_id=workflow.root_task_id,
+        status=workflow.status,
+        assignee=workflow.root.profile,
+        query=workflow.query,
+        created_at=workflow.root.created_at,
+        completed_at=workflow.root.completed_at,
+        workflow=TaskWorkflow(
+            selected_departments=list(workflow.selected_departments),
+            qa_required=workflow.qa_required,
+        ),
+        progress=TaskProgress(
+            primary_total=len(workflow.primary_nodes),
+            primary_done=sum(1 for node in workflow.primary_nodes if node.done),
+            qa=workflow.qa_stage,
+            synthesis=workflow.synthesis_stage,
+        ),
     )
+    return payload.model_dump()
+
+
+@router.get("/tasks", operation_id="ceo_task_list", response_model=TaskListResponse)
+def ceo_task_list(
+    limit: int = Query(default=20, ge=1, le=100),
+    include_archived: bool = Query(default=False),
+) -> TaskListResponse:
+    try:
+        rows = list_ceo_roots(limit=limit, include_archived=include_archived)
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+    identified = [
+        (str(row.get("id") or row.get("task_id") or ""), str(row.get("body") or ""))
+        for row in rows
+    ]
+    identified = [(task_id, body) for task_id, body in identified if task_id]
+    if not identified:
+        return TaskListResponse(items=[])
+    with ThreadPoolExecutor(max_workers=_LIST_WORKERS) as pool:
+        workflows = list(
+            pool.map(
+                lambda item: _load(item[0], max_workers=_LIST_GRAPH_WORKERS),
+                identified,
+            )
+        )
+    return TaskListResponse(
+        items=[
+            TaskListItem(
+                task_id=workflow.root_task_id,
+                query=extract_user_query(body),
+                status=workflow.status,
+                created_at=workflow.root.created_at,
+                selected_departments=list(workflow.selected_departments),
+            )
+            for (task_id, body), workflow in zip(identified, workflows)
+        ]
+    )
+
+
+@router.get("/tasks/{task_id}", operation_id="ceo_task_status", response_model=TaskStatusResponse)
+def ceo_task_status(task_id: str = _TASK_ID_PATH) -> dict[str, object]:
+    """Return the canonical PR #224 status with an additive planning field."""
+
+    try:
+        workflow = _load(task_id)
+    except HTTPException as exc:
+        # Keep the qa-department direct-call contract as a read-only fallback
+        # for runtimes where the normalized reader is not installed yet.
+        if exc.status_code != 503:
+            raise
+        raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
+        if not raw:
+            raise
+        projection = _scoped_planning_projection(raw, timeout=_planning_read_timeout())
+        acknowledgement = _planning_acknowledgement(projection)
+        selected = acknowledgement["planning"]["selected_departments"]
+        raw_status = str(raw.get("status") or "queued").casefold()
+        status = {"ready": "queued", "todo": "queued", "done": "completed"}.get(
+            raw_status, raw_status
+        )
+        return {
+            "schema_version": "ceo.task-status.v1",
+            "task_id": str(raw.get("id") or raw.get("task_id") or task_id),
+            "root_task_id": str(raw.get("id") or raw.get("task_id") or task_id),
+            "status": status,
+            "assignee": str(raw.get("assignee") or "ceo-agent"),
+            "query": extract_user_query(str(raw.get("body") or "")),
+            "created_at": None,
+            "completed_at": None,
+            "workflow": {
+                "selected_departments": selected,
+                "qa_required": acknowledgement["planning"]["qa_required"],
+            },
+            "progress": {
+                "primary_total": len(selected),
+                "primary_done": 0,
+                "qa": "todo",
+                "synthesis": "todo",
+            },
+            "planning": acknowledgement["planning"],
+        }
+    payload = _status_payload(workflow)
+    try:
+        raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
+        if raw:
+            payload["planning"] = _planning_acknowledgement(
+                _scoped_planning_projection(raw, timeout=_planning_read_timeout())
+            )["planning"]
+    except (KanbanTaskNotFound, KanbanUnavailable):
+        pass
+    return payload
+
+
+@router.get("/tasks/{task_id}/graph", operation_id="ceo_task_graph", response_model=TaskGraphResponse)
+def ceo_task_graph(task_id: str = _TASK_ID_PATH) -> TaskGraphResponse:
+    workflow = _load(task_id)
+    return TaskGraphResponse(
+        root=workflow.root_task_id,
+        nodes=[
+            GraphNode(
+                id=node.task_id,
+                department=node.profile,
+                status=node.status,
+                role=node.role(root_task_id=workflow.root_task_id),
+                title=node.title,
+            )
+            for node in workflow.nodes
+        ],
+        edges=list(workflow.edges),
+    )
+
+
+@router.get("/tasks/{task_id}/result", response_model=TaskResultResponse)
+def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
+    workflow = _load(task_id)
+    synthesis = workflow.synthesis_node
+    terminal = workflow.status in {"completed", "blocked", "failed", "archived"}
+    result = None
+    if synthesis is not None and synthesis.done and synthesis.summary:
+        result = TaskResult(
+            summary=synthesis.summary,
+            decision=workflow.decision,
+            qa_verdict=workflow.qa_verdict,
+        )
+    return TaskResultResponse(
+        task_id=task_id,
+        status="completed" if terminal else "processing",
+        result=result,
+        departments=workflow.department_summaries,
+        qa_verdict=workflow.qa_verdict,
+        block_reason=workflow.block_reason,
+    )
+
+
+@router.post("/tasks/{task_id}/archive", response_model=TaskArchiveResponse)
+def ceo_task_archive(task_id: str = _TASK_ID_PATH) -> TaskArchiveResponse:
+    workflow = _load(task_id)
+    target_ids = [node.task_id for node in workflow.descendants]
+    target_ids.append(workflow.root_task_id)
+    try:
+        archive_tasks(target_ids)
+    except KanbanTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Archive에 실패했습니다: {exc}") from exc
+    return TaskArchiveResponse(task_id=task_id, archived_task_ids=target_ids)
 
 
 __all__ = ["router"]

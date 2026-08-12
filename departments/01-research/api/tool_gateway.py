@@ -73,7 +73,7 @@ ENDPOINT_SCOPES: dict[str, str] = {
 # /docs/oauth2-redirect 는 FastAPI 가 자동으로 다는 라우트다. 빼먹으면
 # scope_for 가 예외를 내 **강제 모드에서 500** 이 된다(2026-08-02 자체 점검이
 # 적발). 문서 표면은 통째로 열어두는 게 맞다.
-OPEN_PATHS = ("/health", "/docs", "/docs/oauth2-redirect",
+OPEN_PATHS = ("/health", "/health/ready", "/docs", "/docs/oauth2-redirect",
               "/openapi.json", "/redoc")
 
 

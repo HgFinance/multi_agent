@@ -1,3 +1,5 @@
+begin;
+
 -- 기획안 하나 = 가설 하나.
 --
 -- Gate 0 접수가 두 번 돌면 같은 기획안이 가설을 두 개 만든다. 그러면 같은
@@ -14,3 +16,5 @@ create unique index if not exists quant_hypotheses_proposal_id_uniq
 
 comment on index quant.quant_hypotheses_proposal_id_uniq is
   '기획안 하나는 가설 하나만 만든다 - 중복 접수가 시도 계수를 부풀리는 것을 막는다';
+
+commit;

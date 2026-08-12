@@ -69,11 +69,22 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_strategy_research_is_a_separate_chain(self) -> None:
         spec = load_workflow("strategy-research")
+        # 마지막 quant 단계(quant-outcome-feedback)가 이 흐름을 공장으로 만든다 -
+        # 종결 사유를 lesson_codes 로 적재해 리서치 Gate 0 이 다시 읽는다.
+        # 그게 없으면 일방통행이라 같은 실험을 다시 산다(2026-08-10 공장 개편).
         self.assertEqual(
             [step.department for step in spec.steps],
-            ["quant-backtest-department", "qa-department", "ceo-agent"],
+            [
+                "quant-backtest-department",
+                "qa-department",
+                "ceo-agent",
+                "quant-backtest-department",
+            ],
         )
         self.assertNotIn("trading-department", [step.department for step in spec.steps])
+        # 환류는 **맨 뒤**여야 한다. CEO 승격 판정 앞에 오면 아직 나오지도 않은
+        # 결론을 교훈으로 적재하게 된다.
+        self.assertEqual(spec.steps[-1].id, "quant-outcome-feedback")
 
     def test_dry_run_plans_every_boundary_without_claiming_execution(self) -> None:
         run = execute_workflow(load_workflow("investment-case"), mode="dry-run", run_id="test-run")

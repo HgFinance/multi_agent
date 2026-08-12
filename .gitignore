@@ -67,6 +67,10 @@ ai-office/*.log
 # EB 배포 번들 - scripts/package_eb_bundle.ps1 이 저장소 내용으로 매번 다시 만든다
 dist/
 
-# 로컬 전용 compose override - AWS 경로를 윈도우 경로로 갈아끼운다.
-# 커밋하면 팀원 AWS 배포가 로컬 경로를 보게 되므로 반드시 무시한다.
+# 로컬 전용 compose override - **커밋 금지**
+#   compose 가 이 파일을 자동으로 읽어 본체를 덮는다. 안에서 ${USERPROFILE} 로
+#   윈도우 홈을 가리키는데, 리눅스(EC2)에는 그 변수가 없어 **빈 값**으로 풀린다.
+#   그러면 /home/ubuntu/.hermes/profiles/<부서> 가 /.hermes-<부서> 로 바뀌어
+#   루트에 빈 디렉터리가 생기고, 부서 프로필이 하나도 안 올라간 껍데기가 된다.
+#   2026-08-12 병합에서 `git add -A` 로 한 번 딸려 들어갔다가 되돌렸다.
 docker-compose.override.yml

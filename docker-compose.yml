@@ -203,6 +203,14 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       LS_ENV: ${LS_ENV:-PAPER}
+      # ▶ **시세는 주문과 다른 스위치를 쓴다** (재일님 결정 2026-08-12)
+      #   하나로 묶여 있을 때, 주문을 PAPER 로 두자 수집기가 모의 소켓에 붙어
+      #   프리마켓 한 시간 동안 체결이 0건이었다. 시세 구독은 주문 권한과
+      #   무관하다 - LIVE 키로 받아도 주문이 나가지 않는다.
+      #   기본값이 LIVE 인 이유: 모의 시세는 **진짜처럼 생긴 가짜**라 조용히
+      #   흘러가면 백테스트가 사실로 읽는다. 못 받는 것은 티가 나고 잘못 받는
+      #   것은 티가 안 난다.
+      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -283,6 +291,23 @@ services:
     #   배포 없이 고치라고 만든 것이라 이미지에 굽으면 그 목적이 사라진다.
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
+      # ▶ **Parquet 아카이브는 호스트에 남아야 한다** (2026-08-12 실측)
+      #   `market_archive_exporter.ARCHIVE_ROOT` 는 `parents[3]/market-archive`
+      #   라는 상대 경로다. 호스트에서 돌리면 저장소 안에 쌓이지만, 이 컨테이너
+      #   에서 돌면 `/app/market-archive` 인데 **마운트가 없었다.** 그래서
+      #   호가·체결 아카이브 3.2GB(parquet 6개)가 컨테이너 쓰기 레이어에만
+      #   있었고, `docker compose up --force-recreate` 한 번이면 사라지는
+      #   상태였다. `archive_exports` 원장은 `verified=t` 라고 적혀 있었으므로
+      #   **원장만 보면 안전해 보였다.**
+      #
+      #   TimescaleDB 는 호가를 나흘, 체결을 6주만 들고 있다(청크 실측).
+      #   장기 표본은 전적으로 이 Parquet 이므로 마이크로구조 연구의 유일한
+      #   근거가 컨테이너 수명에 걸려 있었던 셈이다.
+      #
+      #   ⚠ 이미 컨테이너 안에만 있는 파일이 있다면 **먼저 `docker cp` 로 빼낸
+      #     다음** 이 마운트를 붙인다. 순서를 바꾸면 빈 호스트 디렉터리가
+      #     컨테이너 안 파일을 가려서 그대로 잃는다.
+      - ./market-archive:/app/market-archive
 
     mem_limit: 512m
     mem_reservation: 64m
@@ -760,7 +785,7 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
-    mem_limit: 512m
+    mem_limit: 1536m
     cpus: 0.5
     pids_limit: 128
 
@@ -795,7 +820,7 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+      ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
@@ -859,6 +884,159 @@ services:
     command: ["uvx", "--from", "mcp-youtube-transcript", "mcp-youtube-transcript",
               "--transport", "http", "--port", "8042"]
 
+  # ──────────────────────────────────────────────────────────────────────────
+  # 공장 상주 3종 (재일님 결정 2026-08-12)
+  #
+  # 셋 다 호스트 셸 프로세스였다. 세션이 끊기거나 Docker 를 재기동하면 **공장이
+  # 조용히 멈추고 아무도 안 알려줬다** - 실측으로 새벽 3시대에 죽은 것을 다섯
+  # 시간 뒤에 발견했다. `restart: unless-stopped` 가 그것을 없앤다.
+  #
+  # 셋이 같은 이미지를 쓴다(Dockerfile.factory). 저장소 코드가 같으므로 이미지를
+  # 나누면 배포마다 버전이 어긋난다.
+  #
+  # ▶ docker 소켓을 물리는 이유
+  #   칸반 보드는 Windows 바인드 마운트 위의 SQLite 다. 컨테이너 밖에서 그 파일을
+  #   직접 열면 `-shm` 매핑이 생겨 **부서 컨테이너의 보드 쓰기가 전부 죽는다**.
+  #   그래서 보드 접근은 `docker exec <부서 컨테이너>` 로만 한다. 데몬이 아니라
+  #   클라이언트만 이미지에 있다(docker-outside-of-docker).
+  # ──────────────────────────────────────────────────────────────────────────
+  factory-autopilot:
+    build:
+      context: .
+      dockerfile: Dockerfile.factory
+    image: hedgefund-factory:latest
+    container_name: hedgefund-factory-autopilot
+    restart: unless-stopped
+    command: ["python", "departments/01-research/factory/factory_autopilot.py",
+              "--loop", "--interval-min", "15"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      # 카드 생성·보드 조회를 돌릴 컨테이너. 부서에 매이지 않는 kanban 명령용이다.
+      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_ACCESS_MODE: docker
+      HERMES_EXEC_MODE: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 수확 멱등 표식·반려 이력이 재시작을 넘어 남아야 한다. 컨테이너가
+      # 지워지면 같은 카드를 다시 수확하고 같은 반려를 다시 싣는다.
+      - factory_state:/root
+      # ▶ 자동 조종이 하루 한 번 파티션을 다시 굳힌다(0.7단계). 이게 없으면
+      #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
+      #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
+      - ./quant-data:/app/quant-data
+
+  factory-experiment-worker:
+    image: hedgefund-factory:latest
+    container_name: hedgefund-experiment-worker
+    restart: unless-stopped
+    command: ["python", "departments/04-quant-backtest/pipeline/experiment_worker.py",
+              "--serve"]
+    depends_on:
+      factory-autopilot:
+        condition: service_started
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?}
+      # 백테스트가 커버리지를 **실제로 재려면** 이게 있어야 한다. 없으면
+      # NOT_RUNNABLE 로 막히는데, 로그만 보면 데이터가 모자란 것처럼 보인다.
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+    volumes:
+      # ▶ 파티션 실물 (2026-08-12). 매니페스트는 DB 에 있지만 **행 데이터는
+      #   파일**이다(pit_dataset.py 머리말: "행 데이터 = quant-data/…csv.gz").
+      #   backtest_runner 가 파티션마다 content_hash 를 재검증하므로 이게 없으면
+      #   게이트를 통과한 실험이 로드 단계에서 죽는다. 실험이 전부 NOT_RUNNABLE
+      #   이던 동안에는 로드까지 가지 못해 이 구멍이 드러나지 않았다.
+      #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` = /app/quant-data 다.
+      - ./quant-data:/app/quant-data
+
+  card-watchdog:
+    image: hedgefund-factory:latest
+    container_name: hedgefund-card-watchdog
+    restart: unless-stopped
+    command: ["python", "apps/api/card_watchdog.py", "--loop", "--interval-min", "3"]
+    depends_on:
+      factory-autopilot:
+        condition: service_started
+    environment:
+      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_ACCESS_MODE: docker
+      HERMES_EXEC_MODE: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # BFF (apps/api). 프런트(ai-office)가 붙는 유일한 관문이다.
+  # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고
+  # 아무도 왜인지 몰랐다. 공장 상주와 같은 이유로 컨테이너에 올린다.
+  ui-bff:
+    image: hedgefund-factory:latest
+    container_name: hedgefund-ui-bff
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "apps.api.main:app",
+              "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?}
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      # 부서 호출·카드 생성이 전부 docker exec 로 나간다.
+      HERMES_EXEC_MODE: docker
+      KANBAN_ACCESS_MODE: docker
+      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      # CEO 질의를 CLI 로 돌린다(API 키 없이). 2026-08-11 결정.
+      CEO_TRANSPORT: ${CEO_TRANSPORT:-cli}
+      ENABLE_CEO_CLI: ${ENABLE_CEO_CLI:-true}
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+      # ▶ 부서 API 주소. **컨테이너 DNS 이름**이어야 한다.
+      #   risk.py 의 기본값은 `http://127.0.0.1:8041`(호스트 포트 매핑)이라
+      #   컨테이너 안에서는 자기 자신을 가리켜 connection refused 가 된다.
+      #   qa.py·governance_client.py 의 기본값은 빈 문자열이라 각각 503 /
+      #   NOT_CONFIGURED 로 조용히 죽는다 - 2026-08-12 기동 시 실제로 셋 다
+      #   그 상태였다(/health/ready 가 governance NOT_CONFIGURED 로 보고).
+      #   부서 API 의 컨테이너 내부 포트는 전부 8000 이다(통합 계획 10.3절).
+      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
+      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
+      # ▶ 포트폴리오 파이프라인 Worker 런타임.
+      #   이 둘이 없으면 `_configured_worker_runtime()` 이 `deterministic_test`
+      #   로 떨어져 **부서 Worker 응답이 전부 TEST 고정문자열**이 된다. 컨테이너로
+      #   옮기면서 빠져 있었다. risk-api/audit-api 와 같은 host ollama 를 쓴다.
+      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
+      PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
+      # ▶ CEO 종합이 부서 산출물을 읽는 경로 (2026-08-12)
+      #   apps/api/ceo.py 의 `_artifact_text()` 는 완료 카드의 **첨부·작업공간
+      #   파일**을 읽는다. `result` 만 보면 부서가 몇 분씩 일한 결과가 통째로
+      #   비어 보이기 때문이다(그 파일 주석의 2026-08-11 실측).
+      #   그런데 이 컨테이너에 칸반이 안 물려 있어서 기본값
+      #   `~/.hermes-shared-kanban/...` 가 **존재하지 않는 경로**였고, 결국
+      #   모든 부서 카드의 산출물이 빈 문자열로 읽혔다. 호스트에는 첨부 35개·
+      #   작업공간 18개가 실제로 쌓여 있었다.
+      KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 읽기 전용이다 - BFF 는 산출물을 **읽기만** 한다. 카드 생성·전이는
+      # `docker exec` 로 hermes CLI 를 통해 나간다(KANBAN_ACCESS_MODE=docker).
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban:ro
+
 volumes:
   tsdb_data:
   portfolio_runtime_data:
+  factory_state:

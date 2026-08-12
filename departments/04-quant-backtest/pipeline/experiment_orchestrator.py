@@ -35,20 +35,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ORCH_VERSION = "quant-experiment-orchestrator-v1"
 
-# 구현된 전략 카탈로그 - 여기 없는 edge type 은 실험 불가가 사실이다.
-# 새 전략을 구현하면 한 줄 추가한다 (구현 없이 추가하는 것이 금지 사항).
+from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
+    NOT_IMPLEMENTED,
+    TEMPLATES,
+    resolve,
+    template_for_edge,
+)
+
+# 구현된 전략 카탈로그. **실체는 strategy_templates.TEMPLATES 이고 여기는 파생
+# 뷰다** - backtest_runner.STRATEGIES 가 이미 같은 방식으로 파생돼 있다.
+#
+# ▶ 왜 파생으로 바꿨나 (2026-08-12 실측)
+#   여기는 원래 `momentum`·`mean_reversion` 둘만 적힌 손글씨 표였다. 그런데
+#   실행면(TEMPLATES)에는 그때 이미 8개가 구현돼 있었다 - LOWVOL·RAMOM·LIQREV·
+#   BRK·TREND·ILLIQ 까지. 그래서 `low_volatility` 가설이 **구현이 있는데도**
+#   `'low_volatility' 전략 구현 (STRATEGY_CATALOG 등재 조건)` 으로 반려됐다.
+#   2026-08-11 이후 백테스트가 한 건도 안 돈 이유의 절반이 이것이다.
+#
+#   같은 부서 안에서 표가 둘로 갈리면 접수·판정·실행이 서로 다른 것을 본다
+#   (trial_family 이름공간 사고와 같은 계열). 손글씨 표를 지우고 실행면 하나만
+#   남긴다 - 전략을 구현하면 카탈로그는 저절로 따라온다.
 STRATEGY_CATALOG: dict[str, dict] = {
-    "momentum": {
-        "strategy_code": "MOM-20-SMOKE",
-        "impl": "pipeline/backtest_runner.py + walk_forward.py",
-        "note": "20일 모멘텀 상위 N 균등, 월초 리밸런스",
-    },
-    "mean_reversion": {
-        "strategy_code": "REV-5-SMOKE",
-        "impl": "pipeline/backtest_runner.py (STRATEGIES) + walk_forward 조각",
-        "note": "5일 낙폭 하위 N 균등, 5거래일 리밸런스 (2026-08-01 구현 - "
-                "QNT-01 첫 가설의 백로그를 이행)",
-    },
+    t.edge_type: {
+        "strategy_code": t.template_id,
+        "impl": "pipeline/strategy_templates.py (TEMPLATES) + backtest_runner.py",
+        "note": t.note,
+        "claimed_edge": t.claimed_edge,
+    }
+    for t in TEMPLATES.values()
 }
 # v2 부터 notional 을 담는다(유동성 계층 슬리피지 재료). v1 파티션 파일은
 # v2 빌드가 같은 경로에 덮어써 매니페스트와 해시가 어긋난다 - 해시 가드가
@@ -78,6 +92,59 @@ class OrchestratorReport:
 # 게이트 (순수 함수 - 자체점검 대상)
 # ---------------------------------------------------------------------------
 
+def base_config_for(edge: str, default_config: dict, rev_config: dict) -> dict:
+    """edge_type -> 백테스트 기본 config. 가설 파라미터는 bind() 가 이 위에 얹는다.
+
+    ▶ 왜 함수인가 (2026-08-12 실측)
+      여기는 `{"momentum": …, "mean_reversion": …}[edge]` 였다. 카탈로그를
+      TEMPLATES 파생으로 바꿔 `low_volatility` 가 게이트를 통과하자, 그 다음
+      줄에서 **`KeyError: 'low_volatility'`** 로 죽었다 - 같은 부서 안에
+      edge_type 으로 색인하는 표가 하나 더 있었던 것이다. 관문을 넓히면
+      **그 뒤의 모든 표가 같이 넓어져야 한다.**
+
+    ▶ 알려진 둘은 값을 그대로 둔다
+      config 는 `input_hash` 에 들어간다. momentum/mean_reversion 의 기본값을
+      지금 손보면 8월 4~10일 실험과 지문이 갈려 중복 판정이 어긋난다.
+      과거를 재현할 수 있어야 하므로 새 edge 만 템플릿에서 유도한다.
+    """
+    known = {"momentum": default_config, "mean_reversion": rev_config}.get(edge)
+    if known is not None:
+        return known
+
+    tpl = template_for_edge(edge)
+    if tpl is None:
+        why = NOT_IMPLEMENTED.get(edge)
+        raise RuntimeError(
+            f"'{edge}' 에 해당하는 시그널 템플릿이 없다"
+            + (f" - {why}" if why else f" (사용 가능: {sorted(STRATEGY_CATALOG)})"))
+
+    # 리밸런스는 여기서 정하지 않는다 - config_binding.REBALANCE_BY_HORIZON 이
+    # 가설의 horizon_days 로 덮는다. 여기 값은 horizon 이 없을 때의 바닥이다.
+    lookback = 20
+    return {
+        "strategy": f"{tpl.template_id}-{lookback}-SMOKE",
+        "lookback_days": lookback,
+        "top_n": 20,
+        "rebalance": "MONTH_FIRST_TRADING_DAY",
+        "initial_capital": 100_000_000.0,
+    }
+
+def dataset_of(hyp: dict) -> tuple[str, str]:
+    """가설이 쓸 (데이터셋 이름, 버전). **상수가 아니라 사상 결과에서 나온다.**
+
+    `orchestrate` 가 `data_resolution.resolve` 결과를 `required_data_products`
+    에 넣어 두므로 여기서는 그것을 읽기만 한다. 값이 없거나 모양이 이상하면
+    모듈 상수로 떨어진다 - **조용히 다른 데이터로 돌지 않기 위해서**다.
+    """
+    for d in (hyp.get("required_data_products") or []):
+        s = str(d)
+        if "/" in s:
+            name, _, ver = s.rpartition("/")
+            if name and ver:
+                return name, ver
+    return DATASET_NAME, DATASET_VERSION
+
+
 def feasibility(hypothesis: dict, existing_datasets: set,
                 catalog: dict | None = None) -> tuple[bool, list, list]:
     """(실행 가능?, 부족 목록, 백로그 제안). 판단이 아니라 존재 확인이다."""
@@ -99,7 +166,15 @@ def feasibility(hypothesis: dict, existing_datasets: set,
         missing.append("edge_type:(미지정)")
     elif edge not in catalog:
         missing.append(f"strategy_impl:{edge}")
-        backlog.append(f"'{edge}' 전략 구현 (STRATEGY_CATALOG 등재 조건)")
+        # 왜 없는지를 구분해 적는다. `NOT_IMPLEMENTED` 는 "요청은 있으나 실행면에
+        # 없다"를 사유와 함께 관리하는 표다 - 그 사유를 그대로 실어야 기획자가
+        # 같은 이름을 다시 내지 않는다. 표에도 없으면 어휘 자체가 틀린 것이라
+        # 쓸 수 있는 목록을 보여 준다(없는 이름을 지어낸 쪽을 고쳐야 한다).
+        why = NOT_IMPLEMENTED.get(edge)
+        backlog.append(
+            f"'{edge}' 미구현: {why}" if why
+            else f"'{edge}' 는 어휘에 없다 - 사용 가능: {sorted(catalog)}"
+        )
     return (not missing), missing, backlog
 
 
@@ -250,7 +325,17 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
       없으면 `NOT_VERIFIED` 로 막힌다 - 못 잰 것을 통과로 세지 않는다.
     """
     own_conn = conn is None
-    if own_conn:
+    # ▶ **두 연결은 따로 판단한다** (2026-08-12)
+    #   예전에는 시장 연결을 `if own_conn:` 안에서만 열었다. 그래서 메타 연결을
+    #   주입하는 쪽(experiment_worker)이 부르면 시장 연결이 **통째로 건너뛰어졌고**,
+    #   커버리지를 못 재 전건이 `NOT_RUNNABLE` 로 떨어졌다. 실측: 워커가 집은
+    #   실험 3건이 전부 "시장 DB 연결이 없어 커버리지를 재지 못했다"로 실패.
+    #
+    #   증상이 고약한 이유는 **막는 쪽이 옳게 동작했기 때문**이다 - 못 잰 것을
+    #   통과로 세지 않는다는 규칙은 제대로 지켜졌고, 그래서 로그만 보면 데이터가
+    #   모자란 것처럼 보인다. 실제로는 연결을 안 준 쪽이 문제였다.
+    own_market = market_conn is None
+    if own_conn or own_market:
         import psycopg2
 
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]
@@ -258,8 +343,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         from source_registry import load_project_env
 
         env = load_project_env()
-        conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
-        if market_conn is None and env.get("TIMESCALE_DATABASE_URL"):
+        if own_conn:
+            conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+        if own_market and env.get("TIMESCALE_DATABASE_URL"):
             market_conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"],
                                            connect_timeout=20)
     try:
@@ -381,9 +467,21 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   예산을 다 썼다고 다른 하나를 막으면 안 된다.
         #   반대로 파라미터만 바꾼 변형은 같은 Family 다 - 그게 우리가 세려는
         #   다중검정이다.
-        from trial_family import family_id, pressure as fam_pressure
+        from trial_family import family_ids_for, pressure as fam_pressure
 
-        fam = family_id(hyp)
+        # ▶ **접수(Gate 0)와 같은 함수로 계산한다**(2026-08-11 실측). 예전엔
+        #   family_id(hyp) 를 그대로 불러 label/baseline 이 빈 문자열로 해시됐고,
+        #   Gate 0 은 기본값을 넣어 해시했다. 같은 기획안이
+        #     접수 fam_42663e9f4b0f8233 / 실행 fam_65a4c7b6f4c75999
+        #   두 값을 가졌다 - 실험은 실행면 값으로 각인되는데 Gate 0 은 접수 값으로
+        #   세니 **count_family_trials 가 영원히 0** 이었고, 시도 예산·DSR 감가·
+        #   기각 교훈 대응이 전부 안 걸렸다.
+        # ▶ **동의어를 전부 세고, 찍는 값은 정본 하나** (2026-08-12)
+        #   계열 ID 를 만드는 길이 둘이라 같은 개념이 두 값을 가졌고,
+        #   그래서 시도 카운터가 1부터 다시 셌다(momentum/krx_all 이 7건
+        #   있는데 오늘 것이 시도1). 세는 쪽이 둘 다 인정하게 한다.
+        fams = family_ids_for(hyp)
+        fam = fams[0] if fams else ""
         cards: list[dict] = []
         try:
             # ▶ **기록된 배정을 읽는다**(다시 계산하지 않는다). Family 는
@@ -397,7 +495,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         except Exception:
             cards = []                   # 못 세면 0 - 없는 압력을 지어내지 않는다
         budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
-        report.trial_pressure = fam_pressure(fam, cards, budget=budget)
+        report.trial_pressure = fam_pressure(fams, cards, budget=budget)
         # ▶ **백테스트에 시도 횟수를 넘긴다.** 안 넘기면 DSR 이 trials=1
         #   로 계산돼 전혀 감가되지 않는다 - 20번 시도해 고른 Sharpe 를
         #   첫 시도와 같은 값으로 읽게 된다(계약만 있고 실행부가 안 따라간
@@ -536,10 +634,13 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                   "reasons": [f"관문 실행 실패: {type(e).__name__}"]}
         return report
     finally:
+        # **우리가 연 것만 닫는다.** 주입받은 연결을 닫으면 호출부의 다음 작업이
+        # 죽는다(워커는 한 연결로 여러 주문을 돈다). 여는 조건과 닫는 조건이
+        # 다르면 언젠가 한쪽이 새거나 남의 것을 닫는다 - 같은 깃발을 쓴다.
         if own_conn:
             conn.close()
-            if market_conn is not None:
-                market_conn.close()
+        if own_market and market_conn is not None:
+            market_conn.close()
 
 
 def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
@@ -574,7 +675,7 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     #   것과 실행한 것이 달라진다** - 관문이 형식만 남는다.
     from config_binding import bind
 
-    base = {"momentum": DEFAULT_CONFIG, "mean_reversion": REV_CONFIG}[edge]
+    base = base_config_for(edge, DEFAULT_CONFIG, REV_CONFIG)
     binding = bind(hyp, base)
     if not binding.ok:
         # 범위 밖 값을 잘라 쓰지 않는다 - 자르면 등록한 것과 실행한 것이
@@ -587,7 +688,19 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     # ▶ 시도 횟수를 넘긴다 - DSR 이 감가하려면 알아야 한다. **config 가 아니라
     #   인자로** 넘긴다(config 는 input_hash 에 들어가므로 넣으면 중복 가드가
     #   무력해진다).
-    bt = register_and_run(DATASET_NAME, DATASET_VERSION,
+    # ▶ **데이터셋은 가설이 정한다 - 상수가 아니다** (2026-08-12)
+    #   여기는 `DATASET_NAME, DATASET_VERSION = "krx-basket-daily", "v2"` 라는
+    #   모듈 상수를 썼다. 그런데 위(orchestrate)에서 `data_resolution.resolve`
+    #   가 **이미 사상 결과를 계산해 `hyp["required_data_products"]` 에 넣어
+    #   둔다.** 계산해 놓고 버리고 상수를 쓰고 있었다 - 그래서 v3 를 만들어도
+    #   실험은 영원히 v2 로 돌았다.
+    #
+    #   `resolve` 는 같은 이름이면 **최신 버전**을 고르므로, 상수를 걷어내는
+    #   것만으로 새 데이터셋이 저절로 쓰인다. 데이터셋 해시는 `input_hash` 에
+    #   들어가므로 v2/v3 는 서로 다른 실험이 된다 - 과거 결과는 그대로 남는다.
+    ds_name, ds_ver = dataset_of(hyp)
+    print(f"  데이터셋 {ds_name}/{ds_ver} (가설 요구에서 사상)", flush=True)
+    bt = register_and_run(ds_name, ds_ver,
                           config=config, hypothesis_id=hypothesis_id,
                           trials=int(hyp.get("_trials") or 1))
     if bt.get("duplicate"):
@@ -599,12 +712,30 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     # 강건성: 같은 config 로 창별 재실행 (walk_forward 조각 재사용)
     conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
     try:
-        _, _, _, rows = load_dataset(conn, DATASET_NAME, DATASET_VERSION)
+        _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
         #   성적에 섞인다.
-        windows = make_windows(market.dates, WARMUP_TRADING_DAYS,
+        # ▶ **웜업은 전략이 선언한 최소 히스토리를 따른다** (2026-08-12)
+        #   여기는 `WARMUP_TRADING_DAYS`(=30, 주석에 "lookback 20 + 여유 10")를
+        #   그대로 썼다. 20일 모멘텀에 맞춘 상수인데 **모든 전략에 같이 걸렸다.**
+        #   126일 형성창 전략도 30일치 히스토리만 받으니 시그널이 계산되지 않고,
+        #   창은 만들어져도 산출이 비어 `강건성을 재지 못했다` 로 끝났다
+        #   (`667f0a45` 의 교훈이 그것이다).
+        #
+        #   각 템플릿은 `min_history(params)` 로 자기 요구를 이미 선언하고 있고
+        #   자체점검(`min_history 정직`)까지 있다. 읽지 않을 이유가 없다.
+        #   상수는 **바닥**으로만 남긴다 - 선언값이 더 짧아도 최소는 지킨다.
+        warmup = WARMUP_TRADING_DAYS
+        _tpl = resolve(str(config.get("strategy") or ""))
+        if _tpl is not None:
+            try:
+                warmup = max(warmup, int(_tpl.min_history(dict(config))))
+            except Exception:  # noqa: BLE001 - 못 읽으면 바닥을 쓴다(지어내지 않는다)
+                pass
+        print(f"  웜업 {warmup}일 (전략 {config.get('strategy')} 선언 기준)", flush=True)
+        windows = make_windows(market.dates, warmup,
                                embargo_days=int(config.get("lookback_days") or 0))
         wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
               for w in windows]
@@ -819,6 +950,23 @@ def _check_orchestrate_paths():
     cur4 = _FakeCursor(None, [])
     assert orchestrate("none", conn=_FakeConn(cur4), market_conn=_FakeMarket()).verdict == "NO_HYPOTHESIS"
     print("  오케스트레이션 경로       OK")
+    _check_dataset_comes_from_hypothesis()
+    print("  데이터셋=사상 결과       OK")
+
+
+def _check_dataset_comes_from_hypothesis():
+    """**데이터셋은 사상 결과에서 온다 - 상수가 아니다.** (2026-08-12)
+
+    `resolve` 가 계산해 둔 값을 버리고 모듈 상수를 쓰고 있었다. 그래서 v3 를
+    만들어도 실험은 영원히 v2 로 돌았다. `resolve` 는 같은 이름이면 최신 버전을
+    고르므로, 사상 결과를 읽기만 하면 새 데이터셋이 저절로 쓰인다.
+    """
+    assert dataset_of({"required_data_products": ["krx-basket-daily/v3"]})         == ("krx-basket-daily", "v3")
+    # 이름에 슬래시가 여럿이어도 마지막이 버전이다
+    assert dataset_of({"required_data_products": ["a/b/v9"]}) == ("a/b", "v9")
+    # 사상 결과가 없거나 모양이 이상하면 **조용히 다른 데이터로 돌지 않는다**
+    assert dataset_of({}) == (DATASET_NAME, DATASET_VERSION)
+    assert dataset_of({"required_data_products": ["market_bars"]})         == (DATASET_NAME, DATASET_VERSION)
 
 
 if __name__ == "__main__":
@@ -837,4 +985,4 @@ if __name__ == "__main__":
     _check_feasibility_gate()
     _check_status_mapping()
     _check_orchestrate_paths()
-    print("오케스트레이터 3개 영역 통과. 실행은 --run [--hypothesis <id>]")
+    print("오케스트레이터 4개 영역 통과. 실행은 --run [--hypothesis <id>]")

@@ -22,16 +22,23 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 
 | 부서 | 전체 | 항상 실행 | 조건부 | 현재 통합 판정 |
 |---|---:|---:|---:|---|
-| CEO | 1 | 1 | 0 | `executive-briefing-worker` 유지 |
+| CEO | 1 (+결정론 1) | 1 | 0 | **2026-08-11 `ceo-runner` 신설** — `executive-briefing-worker`는 유지, head가 짊어지던 결정론 부기(부서 판정 집계·미완료 단계 조회)만 러너로 내림 |
 | HR | 1 | 0 | 1 | `profile-architecture-worker`만 실행; Job Profile/Eval Set 제안 전용 |
-| Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
+| Research | 2 | 0 | 2 | **2026-08-11 축소** — `competing-explanation-worker`(proposal_draft)·`holdings-analyst-worker`(holding_question) 둘만 남고 전부 소집형. 상시였던 market-context 를 폐지해 상시가 0 이 됐다 — 스카우트·회의론자를 상시로 켜두면 편집장이 읽지 못하는 리드만 쌓인다 |
 | Trading | 0 (+결정론 1, +임시 전략 Worker) | 0 | 0 | **2026-08-10 Bull/Bear 제거** — 고정 LLM 0명, 전략 Bundle당 임시 결정론 Worker |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
-| Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
+| Quant / Backtest | 2 | 0 | 2 | **2026-08-10~11 축소** — `result-interpretation-worker`(experiment_card)·`strategy-author-worker`(strategy_authoring) 둘만 남고 전부 소집형. 상시였던 proposal-intake 를 본부장이 흡수했다 — 카드도 없는데 해석 워커를 돌릴 이유가 없다 |
 | Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 4개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)다. Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker **10개**(2026-08-10~11 Research 6→2·Quant 7→2 축소 전 19개, 2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 5개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)다.
+
+> ⚠ 2026-08-12 정정: 위 표가 오래 Research 6·Quant 7(합 19)로 남아 있었다. 그 축소는
+> 코드·부서 `hermes/config.yaml`·`tests/test_worker_architecture.py` 에는 반영됐는데
+> **이 문서에만 전파되지 않았고**, `CLAUDE.md` 가 그 19를 그대로 물려받았다.
+> 편제 수를 바꿀 때 **표·이 문단·테스트·CLAUDE.md 네 곳을 같이** 고친다.
+> 대조 근거는 `test_final_worker_shape_has_no_duplicate_roles`(부서 프로필의
+> `workers` 를 읽어 (전체, 상시, 조건부)를 검사한다). Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 
@@ -39,7 +46,13 @@ LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Tradi
 
 ## 부서별 역할과 병합 판정
 
-- **CEO**: `executive-briefing-worker` — 각 부서 보고서와 차단 사유를 종합해 최종 Case Summary를 작성한다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 없다.
+- **CEO**: `executive-briefing-worker` (LLM) + `ceo-runner` (결정론, LLM 없음). 서술 종합은 그대로 Worker가 하고, 러너는 **새 판정을 만들지 않고** Risk/QA 결정론 엔진이 이미 확정한 판정(`risk_decision.verdict`·`expires_at`, `qa_assessment.decision`)을 blocker로 옮기고 안 온 단계를 `missing_inputs`로 적는다. 주문·Risk 승인·원장 수정·NAV 확정 권한은 둘 다 없다.
+
+  2026-08-11 신설. CEO는 앞선 네 부서의 정리를 한 번도 거치지 않은 유일한 부서였고, 그 결과가 `executive-orchestrator` 페르소나 한 문단에 Mandate 해석 + 6본부 라우팅 + 4개 위원회 소집 + Chief-of-Staff 8개 업무가 전부 들어 있던 상태였다. **다른 부서와 달리 LLM 직원을 줄인 것이 아니다**(1명 그대로) — head가 짊어지던 부기 중 결정론인 것만 내렸다. Mandate 해석·라우팅·예산 배분은 같은 입력에 다른 출력이 나오는 것이 산출물이므로 head에 남고, 위원회 소집·정족수·veto는 이미 결정론(`src/committee/`)이라 head는 API 호출만 한다.
+
+  **`missing_inputs`가 이 러너의 핵심이다.** workflow상 CEO 임무인 "각 결과를 통합해 사용자 설명과 **미완료 상태**를 보고"(`investment-case.yaml:84`)에서 뒷부분은 판단이 아니라 조회이며, `back_office_runner()`의 `missing_blocks`("없는 것을 없다고 적는다")와 같은 원칙이다. 다만 **미완료는 escalate 사유가 아니다** — CEO는 4개 workflow에 등장하고 흐름마다 도달한 단계가 다르므로, 안 온 단계를 전부 올리면 그 신호가 곧 의미를 잃는다. `escalate`는 Risk/QA가 실제로 막았을 때만 True다.
+
+  **남은 배관 공백**: `RiskDecision.expires_at`은 계약에 있지만 CEO로 오는 봉투에는 실려 있지 않다(`departments/03-risk/scripts.py`가 만드는 assessment dict에 그 필드가 없다). 러너는 이때 "기한 안"이라고 말하지 않고 `expiry_checked: false`로 적으며, blocker로도 올리지 않는다. 실제 만료 검사를 켜려면 리스크본부가 봉투에 그 필드를 실어야 한다 — CEO Office가 대신 만들지 않는다.
 - **HR**: `profile-architecture-worker` — 채용·개선 요구와 경계 증거를 읽어 Job Profile 및 Golden/Adversarial Eval Set을 제안한다. 제안은 항상 non-binding이며, Eval 실행은 QA, 승인과 활성화는 CEO/결정론 게이트, Identity·권한 생성은 Platform/IAM 소유다. 나머지 HR 역할은 결정론 모듈 또는 소비자 부재로 Worker를 두지 않는다.
   - **(A) 결정론 코드가 이미 그 판정을 소유함** — 일은 그대로 일어나고 수행 주체만 바뀐다. 계획·평가·Lifecycle·SoD가 서로 다른 상태 전이라는 2026-08-03 판단 자체는 맞지만, **그 상태 전이를 소유한 것은 Worker LLM이 아니라 결정론 모듈이다.** `selection-performance` → `scorecard/quality.py`의 `aggregate_quality()`(Snapshot이 없으면 0이 아니라 `None`을 돌려 "결함 없음"과 "집계할 데이터 없음"을 구분)와 `cost.py`의 `assess_budget()`, Eval 원본은 QA 소유 `audit.eval_runs`. `lifecycle-coordination` → `lifecycle/access.py`의 `approve_request()`·`provision()`·`revoke()`·`find_expired()`(다섯 개가 전부 거부 규칙이라 프롬프트 부탁이 예외로 바뀐다). `workforce-governance` → `improvements/workflow.py`의 `transition()`과 `roster/activation_evidence.py`(문자열이 비었는지가 아니라 그 ID가 DB에 실재하는지 조회해 판정 — LLM이 원리적으로 못 하는 검사다).
   - **(B) 산출물의 소비자가 없음** — 일 자체가 불필요하다. `workforce-planning`의 인력 상황 서술은 소비자가 없다(Notion 리포트는 `_render_report_md()` 결정론 템플릿, Scorecard는 `build_department_scorecard()`의 구조화 JSON, 대시보드는 그 수치를 그대로 렌더링). 남는 소비자인 Hermes 부서장도 LLM이라 구조화 JSON을 그대로 읽으면 되며, LLM이 LLM에게 주려고 요약하면 정보가 줄기만 한다.
@@ -108,6 +121,14 @@ LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Tradi
    HR의 결정론 모듈은 그렇지 않다 — `approve_request()`는 특정 `AccessRequest` 객체를, `transition()`은 특정 Candidate와 승인 근거를, `aggregate_quality()`는 Quality Snapshot 목록을 요구하는데 셋 다 dispatch payload(`case_request`)에 없다. **입력이 없으므로 러너를 만들어도 계산할 것이 없고, 빈 값을 봉투에 담으면 "직원이 있다"는 착시만 남는다.**
 
 "어느 단계인지 보고 필요한 것만 골라 오라"는 방식은 채택하지 않는다. 그 선택을 LLM에게 시키는 순간 결정론화로 없앤 환각 경로가 다시 열린다.
+
+#### CEO는 왜 러너를 두는가 (2026-08-11)
+
+CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부서장이 4개 workflow에 등장하고 `input_contract`가 넷이다 — `accounting_snapshot`(investment-case), `strategy_qa_assessment`(strategy-research), `permission_review`(workforce-management), `revision_qa_assessment`(agent-evolution). [CEO_RUNNER_SPEC.md](CEO_RUNNER_SPEC.md) §2가 investment-case 하나만 보고 "역할이 하나라 봉투 모양이 고정"이라고 적은 것은 정확하지 않다.
+
+**그런데도 러너가 성립하는 이유는 기준의 취지가 봉투의 *개수*가 아니라 봉투를 *만들 수 있는가*이기 때문이다.** HR이 막힌 진짜 지점은 기준 2였다 — `approve_request()`는 특정 `AccessRequest` 객체를, `transition()`은 특정 Candidate를 요구하는데 셋 다 dispatch payload에 없어서, 러너를 만들어도 계산할 것이 없었다. CEO는 다르다. 네 흐름 전부 `paper_pipeline._store()`가 **계약 이름을 키로** 산출물을 `context["artifacts"]`에 쌓고, 그 dict가 CEO dispatch payload 안에 그대로 들어온다(investment-case는 `artifacts`, 나머지 셋은 `workflow_context.artifacts`). 이름이 같으므로 러너는 어느 흐름인지 **묻지 않고** 같은 6개 이름을 조회하면 된다.
+
+흐름마다 도달한 단계가 다르다는 사실은 러너를 막는 근거가 아니라 **러너의 산출물 그 자체**다. 안 온 단계는 `missing_inputs`로 나오고, 그것이 workflow가 CEO에게 시킨 "미완료 상태 보고"다. 그래서 미완료는 escalate로 올리지 않는다 — 정상적으로 다른 흐름을 타서 안 온 것과 와야 하는데 안 온 것을 러너가 구분하려 들면, 그 판단이 곧 "어느 단계인지 보고 골라 오라"가 되어 위 문단이 금지한 자리로 돌아간다. 그 구분은 봉투를 받은 부서장이 한다.
 
 #### 러너를 만들 때 반드시 함께 넣는 안전장치
 

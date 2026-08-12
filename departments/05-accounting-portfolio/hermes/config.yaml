@@ -180,13 +180,13 @@ head_runtime:
   moderator_cannot: [invent_causes, restate_figures, confirm_nav, set_is_official,
                      change_break_severity, clear_escalation]
   #
-  # ⚠ 백로그 — 2라운드 재질의는 **아직 구현 없다.** 설계는 이렇다:
-  #   1라운드 원인 가설 -> 결정론 게이트(check_aging / unexplained_pnl / Mark 부재)와
-  #   대조 -> **모순일 때만** 2라운드로 초점을 좁혀 재질의.
-  # 지금 `supervise()` 는 1라운드 서술만 한다. 트레이딩의 `scripts.supervise_round2`
-  # 가 참고 구현이다. 구현 전까지 `narrow_round2_focus` 를 권한 목록에 넣지 않는다 —
-  # config 가 코드보다 앞서면 그게 "계획을 구현 현황으로 착각"하는 것이다.
-  round2_requery: not_implemented
+  # 2026-08-11: **2라운드 재질의는 폐기했다**(백로그에서 내린다). 참고 구현이던
+  # 트레이딩 `scripts.supervise_round2` 는 Bull/Bear 고정 직원과 함께 사라졌고
+  # (전략별 임시 결정론 Worker + 결정론 선발로 대체), 회계에는 애초에 상대역이
+  # 없었다. 1라운드 가설을 되받아칠 압력은 이미 결정론 코드다 — `check_aging()`,
+  # `unexplained_pnl`, Mark 부재 시 NAV 거부. 서술 한 번을 더 시키는 것은 그
+  # 게이트가 이미 내린 판정을 LLM 문장으로 한 번 더 감싸는 계층일 뿐이다.
+  round2_requery: dropped
 
 staff_registry:
   head_count: 1

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from apps.api import ceo
+from apps.api import ceo, hermes_boundary
 from apps.api.ceo_hermes_client import ask_ceo
 
 
@@ -50,6 +52,37 @@ class CeoHermesApiClientTest(unittest.TestCase):
         )
         self.assertEqual(result["answer"], "CEO answer")
         self.assertEqual(result["session_id"], "session-1")
+
+
+class CreateKanbanTaskCliContractTest(unittest.TestCase):
+    """`hermes kanban create` only accepts `--initial-status {blocked,running}`.
+
+    A root task has no parent, so leaving the flag off is what actually
+    produces `status: ready` (verified against the real Hermes CLI). Passing
+    `--initial-status ready` is a usage error the CLI rejects outright, which
+    silently became a 503 here because ``create_kanban_task`` swallows every
+    subprocess failure into ``None``.
+    """
+
+    def test_create_command_never_passes_an_invalid_initial_status(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["hermes"],
+            returncode=0,
+            stdout=json.dumps({"id": "t_root1", "status": "ready"}),
+            stderr="",
+        )
+        with patch.object(hermes_boundary.subprocess, "run", return_value=completed) as run:
+            task = hermes_boundary.create_kanban_task(
+                assignee="ceo-agent",
+                title="title",
+                body="body",
+                idempotency_key="idem-1",
+            )
+
+        self.assertEqual(task, {"task_id": "t_root1", "status": "ready", "source": "hermes-kanban"})
+        command = run.call_args.args[0]
+        self.assertNotIn("--initial-status", command)
+        self.assertNotIn("ready", command)
 
 
 class CeoRootTaskBoundaryTest(unittest.TestCase):

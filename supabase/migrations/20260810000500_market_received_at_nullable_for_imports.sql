@@ -1,3 +1,5 @@
+begin;
+
 -- 이관 구간에서 "수신 시각을 재지 않았다" 를 표현할 수 있게 한다.
 --
 -- received_at 이 NOT NULL 이라 외부 이관 행을 넣을 수 없었다. 그런데 저쪽 원본에는
@@ -30,3 +32,5 @@ alter table market.market_quotes
 comment on constraint market_ticks_received_at_required_when_measured
   on market.market_ticks is
   '우리가 수집한 행은 수신 시각이 반드시 있다. 이관 행만 NULL 허용 - 원본에 없는 값을 지어내지 않기 위해';
+
+commit;

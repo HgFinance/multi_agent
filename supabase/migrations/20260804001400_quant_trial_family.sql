@@ -1,3 +1,5 @@
+begin;
+
 -- 시도 Family 를 실험에 기록한다
 --
 -- 담당: 재일 (퀀트·백테스트본부 QNT)
@@ -45,3 +47,5 @@ comment on column quant.experiments.trial_family_id is
 comment on column quant.experiments.trial_number is
   '배정 시점 기준 이 Family 의 몇 번째 시도인가(1부터). '
   '12번째 시도에서 나온 Sharpe 1.5 는 1번째와 다르게 읽어야 한다.';
+
+commit;

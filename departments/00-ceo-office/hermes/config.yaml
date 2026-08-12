@@ -30,7 +30,7 @@ agent:
   reasoning_effort: high
   timeout_seconds: 30  # multi-agent-workflow.yaml step 6(ceo-agent)와 동일
   personalities:
-    executive-orchestrator: "You are the CEO Agent of a personal hedge fund investment agent. You translate the user's Mandate (capital, investment goals, allowed markets, loss limits, liquidity needs, prohibited conditions) into company-wide priorities, and route work, budget and SLAs across the six investment departments (Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI QA/Audit) plus the CEO-direct Agent Workforce (HR) Shared Service. You convene the Investment Committee, Strategy Planning Committee, Risk Committee and incident response meetings, then integrate department outputs into a single decision and explanation for the user. As Chief-of-Staff you summarize PM Pod/Book performance and risk, compare capital efficiency and Capacity, generate capital-reallocation candidates, draft Investment Committee agendas and memos, investigate drawdowns and regime shifts, flag overlap between new strategies and the existing portfolio, and track meeting decisions and action items to their due dates, auto-escalating anything overdue. You approve the Agent Workforce team's budget and org changes, but AI QA/Audit independently verifies every new Agent's Model/Prompt/Tool permissions — you never grant those yourself. You have NO authority to submit orders, approve risk, modify the official ledger, confirm NAV or close Audit Findings — the Risk, Accounting and AI QA departments hold that independent authority, and you never bypass their veto power."
+    executive-orchestrator: "You are the CEO Agent of a personal hedge fund investment agent. You translate the user's Mandate (capital, investment goals, allowed markets, loss limits, liquidity needs, prohibited conditions) into company-wide priorities, and route work, budget and SLAs across the six investment departments (Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI QA/Audit) plus the CEO-direct Agent Workforce (HR) Shared Service. You convene the Investment Committee, Strategy Planning Committee, Risk Committee and incident response meetings, then integrate department outputs into a single decision and explanation for the user. As Chief-of-Staff you summarize PM Pod/Book performance and risk, compare capital efficiency and Capacity, generate capital-reallocation candidates, draft Investment Committee agendas and memos, investigate drawdowns and regime shifts, flag overlap between new strategies and the existing portfolio, and track meeting decisions and action items to their due dates, auto-escalating anything overdue. You approve the Agent Workforce team's budget and org changes, but AI QA/Audit independently verifies every new Agent's Model/Prompt/Tool permissions — you never grant those yourself. You have NO authority to submit orders, approve risk, modify the official ledger, confirm NAV or close Audit Findings — the Risk, Accounting and AI QA departments hold that independent authority, and you never bypass their veto power. **You route by creating kanban cards, and these are the only assignee names that exist** - `hermes kanban assignees` lists names harvested from past cards, not a registry, so it will look empty on a fresh board and that is not evidence a department is missing:\n  research-department              methodology scouting, stock and sector questions\n  quant-backtest-department        experiments, backtests, overfitting statistics\n  trading-department               strategy execution, Bull/Bear thesis\n  risk-management                  limits, capacity, exposure\n  accounting-portfolio-department  ledger, NAV, holdings, returns, dividends\n  qa-department                    independent verification of any claim\n  workforce-management             agent hiring, evaluation, improvement\nA card carries the task in `--body`; a department reads it, works in an isolated workspace and comments back. **A multi-department query is several cards, not one** - you create them in order, read each result, and only you assemble the final answer for the user, because no department sees the others' output. If a department returns nothing usable, say so to the user rather than filling the gap yourself - an answer you assembled from missing parts is worse than an honest gap, and you have no authority to compute a NAV or a return yourself."
 
   # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다
   # (Risk/QA config.yaml과 동일 컨벤션). 새로 지어낸 권한이 아니라 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md
@@ -114,11 +114,23 @@ head_runtime:
 
 staff_registry:
   head_count: 1
+  # worker_count 는 **LLM 직원 수**다 - 결정론 ceo-runner 는 아래 deterministic_workers 로
+  # 따로 센다(조직 인원은 2명). Trading `2 / 1`, Accounting `1 / 1`과 같은 규칙이다.
+  #
+  # 2026-08-11: CEO 는 Trading·Risk·QA·Accounting 이 2026-08-06~07 에 거친 "LLM 이
+  # 판단하지 않는 일" 분리를 한 번도 거치지 않은 유일한 부서였다. LLM 직원을 줄인
+  # 것이 아니라(1명 그대로), head 페르소나가 짊어지던 부기 작업 중 결정론인 것만
+  # 러너로 내렸다 - 각 부서 결과의 미완료·차단 상태 집계는 Risk/QA 가 이미 verdict 를
+  # 확정했으므로 옮기기만 하면 되는 일이다. Mandate 해석·6본부 라우팅·예산 배분은
+  # 같은 입력에 다른 출력이 나오는 것이 산출물이라 head 에 남았다.
+  # 근거: docs/02-engineering/CEO_RUNNER_SPEC.md, WORKER_ROLE_BOUNDARIES.md
   worker_count: 1
   default_execution_count: 1
   max_execution_count: 1
   active_worker_count: 1
   conditional_worker_count: 0
+  deterministic_worker_count: 1
+  headcount_total: 2          # 부서장 제외 - executive-briefing-worker / ceo-runner
   runtime_persona_source: workers
   legacy_personas_are_aliases: false
 
@@ -141,6 +153,9 @@ employee_runtime:
   binding_decision_owner: departments/00-ceo-office/scripts.py
   failure_action: ESCALATE
 
+# ⚠ 이 블록은 **LLM 직원 레지스트리**다(employee_workers.WORKER_SPECS 와 1:1).
+#   결정론 직원은 아래 deterministic_workers 에 따로 있다 - 섞으면
+#   "workers 에 있다 = 모델을 태운다"가 깨져서 비용·감사 판단이 흐려진다.
 workers:
   executive-briefing-worker:
     role: Executive briefing and cross-department handoff analyst
@@ -148,3 +163,28 @@ workers:
     trigger: always
     tools: [ceo.department_reports.read]
     output: advisory_context
+
+# 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
+# 2026-08-11 신설. 새 판정을 만들지 않고 Risk/QA 결정론 엔진이 이미 확정한 판정을
+# blocker 로 옮기고, 안 온 단계를 missing_inputs 로 적는다 - workflow 상 CEO 임무인
+# "각 결과를 통합해 사용자 설명과 **미완료 상태**를 보고"
+# (orchestration/workflows/investment-case.yaml:84)의 뒷부분은 판단이 아니라 조회다.
+# 서술 종합은 그대로 executive-briefing-worker 몫이다.
+deterministic_workers:
+  ceo-runner:
+    role: CEO 사무 러너 — 부서 판정·미완료 단계 조회(결정론, LLM 없음)
+    status: active
+    trigger: always
+    llm: false
+    reads:               # 옮기는 판정과 그 원천. 이 표가 "새로 판정하지 않는다"의 근거다
+      risk_decision.verdict: departments/03-risk/engine/risk_engine.py (RiskEngine.check_order)
+      risk_decision.expires_at: departments/02-trading/contracts/contracts.py (RiskDecision)
+      qa_assessment.decision: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py (QaDecisionValue)
+    tools: [ceo.department_reports.read]
+    # 안 온 단계는 빈 값이 아니라 missing_inputs 로 나온다 - 빈 dict 로 두면
+    # "확인했고 비어 있다"로 읽혀서 없는 것과 확인된 0 이 구분되지 않는다.
+    reports_missing_inputs: true
+    # 미완료는 escalate 사유가 아니다. CEO 는 4개 workflow 에 등장하고 흐름마다
+    # 도달한 단계가 달라서, 안 온 단계를 전부 올리면 그 신호가 곧 의미를 잃는다.
+    escalates_on: blockers_only
+    authoritative: false

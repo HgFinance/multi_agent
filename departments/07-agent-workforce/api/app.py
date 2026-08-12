@@ -98,7 +98,11 @@ from hiring_request import (
     InMemoryHiringRequestRepository,
 )
 from hiring_request import transition as hiring_transition
-from observability import INVESTMENT_DEPARTMENT_STAGE, check_idle_agents
+from observability import (
+    INVESTMENT_DEPARTMENT_STAGE,
+    WorkerRegistryUnavailable,
+    check_idle_agents,
+)
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
     AgentNotFoundError,
@@ -475,6 +479,36 @@ def _access_assignment_dict(a: AccessAssignment) -> dict:
 
 
 app = FastAPI(title="Workforce Domain API", version="v1")
+
+
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). governance-api 와 같은 규약 -
+# `/health` 는 프로세스 생존만, 저장소 판단은 `/health/ready` 가 한다.
+# 이 서비스도 DATABASE_URL 이 없으면 InMemory 로 후퇴하므로 그 사실을 ready 가 드러낸다.
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. 저장소가 죽어도 200 이다."""
+    return {
+        "status": "ok",
+        "service": "workforce-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(os.environ.get("DATABASE_URL", "").strip()),
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. Roster·Access 원장이 durable 저장소인지 드러낸다."""
+    durable = type(_access_repo).__name__.startswith("Postgres")
+    return {
+        "status": "ready" if durable else "degraded",
+        "service": "workforce-api",
+        "access_store": "postgres" if durable else "in-memory",
+        "authoritative": durable,
+    }
+
 
 if os.environ.get("DATABASE_URL") and PostgresAccessRepository is not None:
     _access_repo = PostgresAccessRepository.connect(os.environ["DATABASE_URL"])
@@ -1100,11 +1134,20 @@ def list_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
-    reports = check_idle_agents(
-        departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
-        lookback_hours=lookback_hours,
-        idle_threshold_hours=idle_threshold_hours,
-    )
+    try:
+        reports = check_idle_agents(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+            lookback_hours=lookback_hours,
+            idle_threshold_hours=idle_threshold_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        # 배포 이미지에 다른 본부 Worker registry 가 없다. 빈 목록(=유휴 없음)으로
+        # 위장하지 않고 503 으로 알린다 - "관측했더니 깨끗하다"와 "관측을 못 했다"는
+        # 다른 사실이고, HR 주간 계획이 뒤엣것을 앞엣것으로 읽으면 안 된다.
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
     return {"idle_agents": [r.as_dict() for r in reports]}
 
 
