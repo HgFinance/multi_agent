@@ -908,6 +908,14 @@ services:
       # 백테스트가 커버리지를 **실제로 재려면** 이게 있어야 한다. 없으면
       # NOT_RUNNABLE 로 막히는데, 로그만 보면 데이터가 모자란 것처럼 보인다.
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+    volumes:
+      # ▶ 파티션 실물 (2026-08-12). 매니페스트는 DB 에 있지만 **행 데이터는
+      #   파일**이다(pit_dataset.py 머리말: "행 데이터 = quant-data/…csv.gz").
+      #   backtest_runner 가 파티션마다 content_hash 를 재검증하므로 이게 없으면
+      #   게이트를 통과한 실험이 로드 단계에서 죽는다. 실험이 전부 NOT_RUNNABLE
+      #   이던 동안에는 로드까지 가지 못해 이 구멍이 드러나지 않았다.
+      #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` = /app/quant-data 다.
+      - ./quant-data:/app/quant-data
 
   card-watchdog:
     image: hedgefund-factory:latest

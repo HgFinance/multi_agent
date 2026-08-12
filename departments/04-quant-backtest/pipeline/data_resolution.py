@@ -77,16 +77,23 @@ SOURCE_TABLES: dict[str, tuple[str, str, str, str, str | None, str | None]] = {
     "market_breadth": (DB_MARKET, "market", "market_breadth", "observed_at",
                        None, None),
     # ── 리서치 평면 (Supabase) ──
-    #   공시·뉴스 원문과 그 종목 연결, 재무 사실, 거시 관측. 이벤트 스터디와
-    #   펀더멘털 결합 전략의 재료다.
-    "documents":     (DB_META, "research", "documents", "published_at",
-                      None, None),
-    "document_instruments": (DB_META, "research", "document_instruments",
-                             "created_at", None, "instrument_id"),
+    #
+    # ▶ **여기 적는 것은 계속 채워질 원천만이다** (2026-08-12)
+    #   원천을 사상 가능하게 만들면 브리핑이 그것을 광고하고, 기획자는 그걸 쓰는
+    #   기획안을 낸다. 갱신이 멈춘 테이블을 남겨 두면 접수·Gate 0 을 통과한 뒤
+    #   **실험 단계에서 죽는다** - `low_volatility` 로 이미 한 번 겪은 경로다.
+    #
+    #   내린 것과 그 이유(QUALITATIVE_FACTOR_SPEC.md, 다른 세션 결정):
+    #     documents / document_instruments — 원문을 적재하지 않기로 했다.
+    #       DART 를 MCP 로 그때그때 조회해 **점수만** 남긴다.
+    #     macro_observations — macro Job 이 내려갔다. 거시는 정성 점수 팩터의
+    #       재료가 되고 원계열은 더 안 쌓인다.
+    #
+    #   남긴 것:
+    #     financial_facts — 펀더멘털 **정량** 점수의 입력이고 소급 재현이 된다
+    #       (같은 문서 §2.1). 정성 전환 대상이 아니다.
     "financial_facts": (DB_META, "research", "financial_facts", "as_known_at",
                         None, "instrument_id"),
-    "macro_observations": (DB_META, "research", "macro_observations",
-                           "observed_at", None, None),
 }
 
 # 판정. ok 는 RESOLVED 하나뿐이다 - 나머지는 전부 "돌리면 안 된다".
@@ -246,26 +253,39 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
         else:
             unmapped.append(d)
 
-    # 원천 이름으로 온 것: source_versions 가 그 원천을 덮는 매니페스트를 찾는다.
+    # 원천 이름으로 온 것: 그 원천을 덮는 매니페스트를 찾는다.
+    #
+    # ▶ **한 매니페스트가 전부를 덮을 필요는 없다** (2026-08-12 실측)
+    #   예전엔 `want <= set(s.keys())` 로 **하나가 모든 원천을 덮을 때만** 통과
+    #   시켰다. 그래서 일봉과 마이크로구조가 각각 등재돼 있는데도
+    #   `{market_bars, microstructure_features}` 요구가 `UNMAPPED_SOURCE` 로
+    #   떨어졌다 - 둘 다 있는데 "사상할 데이터셋이 없다" 고 말한 것이다.
+    #   여러 원천을 조합하는 기획안(가격 + 유동성)이 전부 그렇게 막혔다.
+    #
+    #   원천마다 덮는 매니페스트를 고르고 합집합을 쓴다. 사상 실패는 **어떤
+    #   매니페스트도 그 원천을 안 쓰는 경우**뿐이다.
+    #
+    #   ▷ 예전 코드에는 죽은 줄도 있었다: `want & covered - want` 는 집합
+    #     대수상 항상 공집합이다((A∩B)−A = ∅). 그래서 그 분기가 무엇을
+    #     잡으려 했든 아무것도 안 잡았고, 바로 아래 `if not unmapped` 가
+    #     **요구 전체**를 미사상으로 몰아 진짜 원인을 덮었다.
     if tables:
         want = set(tables)
-        cands = [(f"{n}/{v}", s) for n, v, s in index if want <= set(s.keys())]
-        if not cands:
-            covered = {t for _, _, s in index for t in s}
-            unmapped.extend(sorted(want - covered))
-            # 원천은 아는데 그걸 재료로 쓰는 매니페스트가 없는 경우도 사상 실패다.
-            unmapped.extend(sorted(want & covered - want))
-            if not unmapped:
-                unmapped.extend(sorted(want))
-        else:
-            # 같은 이름이면 최신 버전 하나만 쓴다 - 여러 버전을 동시에 돌리면
-            # 어느 스냅샷의 결과인지가 사라진다.
-            best: dict[str, tuple[str, dict]] = {}
-            for key, s in cands:
-                name, ver = key.rsplit("/", 1)
-                if name not in best or ver > best[name][0].rsplit("/", 1)[1]:
-                    best[name] = (key, s)
-            chosen.extend(best.values())
+        # 같은 이름이면 최신 버전 하나만 쓴다 - 여러 버전을 동시에 돌리면
+        # 어느 스냅샷의 결과인지가 사라진다.
+        best: dict[str, tuple[str, dict]] = {}
+        for tbl in sorted(want):
+            for n, v, s in index:
+                if tbl not in s:
+                    continue
+                if n not in best or v > best[n][0].rsplit("/", 1)[1]:
+                    best[n] = (f"{n}/{v}", s)
+        covered = {t for _, s in best.values() for t in s}
+        unmapped.extend(sorted(want - covered))
+        if not unmapped:
+            # 고른 것 중 **이 요구가 실제로 쓰는 원천을 가진 것**만 남긴다.
+            # 안 그러면 무관한 매니페스트의 커버리지까지 재게 된다.
+            chosen.extend(v for v in best.values() if set(v[1]) & want)
 
     if unmapped:
         return Resolution(UNMAPPED_SOURCE, unmapped=tuple(sorted(set(unmapped))),
@@ -330,7 +350,10 @@ def _selfcheck() -> int:
     meta = _Conn(META)
     fails = []
 
+    ran = [0]
+
     def check(label, cond):
+        ran[0] += 1
         if not cond:
             fails.append(label)
 
@@ -377,9 +400,30 @@ def _selfcheck() -> int:
     check("미등록 매니페스트", resolve(["nope/v9"], meta_conn=meta,
                                        market_conn=FULL).verdict == UNMAPPED_SOURCE)
 
+    # ⑨ **여러 원천이 서로 다른 매니페스트에 있어도 조합된다** (2026-08-12)
+    #    예전엔 하나가 전부를 덮을 때만 통과시켜, 일봉과 마이크로구조가 각각
+    #    등재돼 있는데도 둘을 같이 요구하면 "사상할 데이터셋이 없다" 였다.
+    #    가격 + 유동성처럼 축을 섞는 기획안이 전부 그렇게 막힌다.
+    META2 = [*META,
+             ("krx-microstructure-daily", "v1",
+              {"microstructure_features": "ms-daily-v1"})]
+    meta2 = _Conn(META2)
+    r = resolve({"tables": ["market_bars", "microstructure_features"],
+                 "min_history_days": 30}, meta_conn=meta2, market_conn=FULL)
+    check("여러 매니페스트 조합", r.ok and set(r.datasets) == {
+        "krx-basket-daily/v2", "krx-microstructure-daily/v1"})
+    # 하나라도 못 덮으면 **그것만** 미사상으로 보고한다 - 요구 전체를 몰지 않는다
+    r = resolve({"tables": ["market_bars", "market_quotes"]},
+                meta_conn=_Conn(META2), market_conn=FULL)
+    check("일부만 미사상", r.verdict == UNMAPPED_SOURCE
+          and r.unmapped == ("market_quotes",))
+
     for f in fails:
         print(f"  FAIL {f}")
-    print(f"data_resolution 자체 점검: {8 + 3 - len(fails)}/{8 + 3} 통과")
+    # ▶ 총계를 **실제로 센다**. 예전엔 `8 + 3` 하드코딩이라 검사를 늘려도 숫자가
+    #   그대로였다 - 2026-08-12 에 두 개를 더했는데 여전히 "11/11 통과" 가
+    #   찍혔다. 늘어난 줄 알고 넘어가면 새 검사가 도는지 아무도 모른다.
+    print(f"data_resolution 자체 점검: {ran[0] - len(fails)}/{ran[0]} 통과")
     return 1 if fails else 0
 
 

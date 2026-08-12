@@ -1,3 +1,5 @@
+begin;
+
 -- svc_quant - 퀀트 작업 컨테이너 전용 롤
 --
 -- ▶ 왜 필요한가 (2026-08-12)
@@ -62,3 +64,5 @@ begin
   end if;
 end
 $$;
+
+commit;

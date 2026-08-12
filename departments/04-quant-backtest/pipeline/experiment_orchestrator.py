@@ -38,6 +38,7 @@ ORCH_VERSION = "quant-experiment-orchestrator-v1"
 from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
     NOT_IMPLEMENTED,
     TEMPLATES,
+    template_for_edge,
 )
 
 # 구현된 전략 카탈로그. **실체는 strategy_templates.TEMPLATES 이고 여기는 파생
@@ -89,6 +90,43 @@ class OrchestratorReport:
 # ---------------------------------------------------------------------------
 # 게이트 (순수 함수 - 자체점검 대상)
 # ---------------------------------------------------------------------------
+
+def base_config_for(edge: str, default_config: dict, rev_config: dict) -> dict:
+    """edge_type -> 백테스트 기본 config. 가설 파라미터는 bind() 가 이 위에 얹는다.
+
+    ▶ 왜 함수인가 (2026-08-12 실측)
+      여기는 `{"momentum": …, "mean_reversion": …}[edge]` 였다. 카탈로그를
+      TEMPLATES 파생으로 바꿔 `low_volatility` 가 게이트를 통과하자, 그 다음
+      줄에서 **`KeyError: 'low_volatility'`** 로 죽었다 - 같은 부서 안에
+      edge_type 으로 색인하는 표가 하나 더 있었던 것이다. 관문을 넓히면
+      **그 뒤의 모든 표가 같이 넓어져야 한다.**
+
+    ▶ 알려진 둘은 값을 그대로 둔다
+      config 는 `input_hash` 에 들어간다. momentum/mean_reversion 의 기본값을
+      지금 손보면 8월 4~10일 실험과 지문이 갈려 중복 판정이 어긋난다.
+      과거를 재현할 수 있어야 하므로 새 edge 만 템플릿에서 유도한다.
+    """
+    known = {"momentum": default_config, "mean_reversion": rev_config}.get(edge)
+    if known is not None:
+        return known
+
+    tpl = template_for_edge(edge)
+    if tpl is None:
+        why = NOT_IMPLEMENTED.get(edge)
+        raise RuntimeError(
+            f"'{edge}' 에 해당하는 시그널 템플릿이 없다"
+            + (f" - {why}" if why else f" (사용 가능: {sorted(STRATEGY_CATALOG)})"))
+
+    # 리밸런스는 여기서 정하지 않는다 - config_binding.REBALANCE_BY_HORIZON 이
+    # 가설의 horizon_days 로 덮는다. 여기 값은 horizon 이 없을 때의 바닥이다.
+    lookback = 20
+    return {
+        "strategy": f"{tpl.template_id}-{lookback}-SMOKE",
+        "lookback_days": lookback,
+        "top_n": 20,
+        "rebalance": "MONTH_FIRST_TRADING_DAY",
+        "initial_capital": 100_000_000.0,
+    }
 
 def feasibility(hypothesis: dict, existing_datasets: set,
                 catalog: dict | None = None) -> tuple[bool, list, list]:
@@ -615,7 +653,7 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     #   것과 실행한 것이 달라진다** - 관문이 형식만 남는다.
     from config_binding import bind
 
-    base = {"momentum": DEFAULT_CONFIG, "mean_reversion": REV_CONFIG}[edge]
+    base = base_config_for(edge, DEFAULT_CONFIG, REV_CONFIG)
     binding = bind(hyp, base)
     if not binding.ok:
         # 범위 밖 값을 잘라 쓰지 않는다 - 자르면 등록한 것과 실행한 것이
