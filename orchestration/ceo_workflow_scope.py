@@ -19,6 +19,50 @@ CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 CEO_WORKFLOW_SCOPE_POLICY = "fresh"
 CEO_WORKFLOW_REUSE_POLICY = "disabled"
 
+# Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
+# `kanban show <root_task_id>`로 직접 읽는다.
+#
+# ## 왜 값을 실어 보내고 조회하게 하지 않나
+#
+# 부서 Hermes 컨테이너에는 `DATABASE_URL`이 없다(docker-compose.yml의
+# research-hermes/risk-hermes/ceo-hermes: 환경변수가 HERMES_* 와 MCP 키뿐).
+# 그건 실수가 아니라 규칙이다 - 부서는 DB를 직접 열지 않고 읽기 전용 API·MCP를
+# 거친다. 그런데 governance Mandate를 서빙하는 MCP·도구가 아직 없다
+# (`ceo-hermes`에는 `mcp_servers` 섹션 자체가 없고, CEO config.yaml의
+# `governance.mandate.read`는 허용 목록 선언이지 배선이 아니다).
+#
+# 그래서 참조(`mandate_version_id`)만 넘기면 부서가 풀 수 없다. 값을 함께 싣는다.
+#
+# ## 왜 CEO가 자식 body에 복사하게 하지 않나
+#
+# CEO의 LLM 턴이 `risk_bounds` 블록을 자식 4개에 정확히 복사해야 하는데, 요약·
+# 누락이 생기면 부서마다 다른 한도로 판단한다. 대신 root body 하나를 단일 원본으로
+# 두고 부서가 `kanban show`로 읽게 한다 - 부서 Profile에 이미 있는 도구다
+# (research SOUL.md: "Read the card back").
+#
+# ## 왜 스냅샷인가 (PIT, 개발 원칙 5)
+#
+# 이 블록은 생성 후 바뀌지 않는다. Task 실행 중 사용자가 Mandate를 조여도 이
+# 워크플로는 시작 시점 값으로 끝까지 판단한다 - 그래야 같은 Task 안에서 Research와
+# Risk가 같은 기준을 쓰고, 나중에 replay해도 같은 결과가 나온다. 조인 한도가
+# 무시되는 것은 아니다: CEO 산출물은 `binding: false`이고, 실제 한도 집행은 주문
+# 시점의 결정론적 Risk Engine이 **항상 현재 Mandate로** 한다(개발 원칙 4).
+CEO_MANDATE_SNAPSHOT_MARKER = "hgfinance.mandate-snapshot.v1"
+
+# 스냅샷에 싣는 한도 키. `policy.risk_bounds` 전체를 붓지 않는 이유는 부서가
+# 실제로 쓰는 값만 노출해 "이 워크플로가 무엇을 근거로 판단했나"를 좁히기
+# 위해서다. 키를 늘릴 때는 `CEO_MANDATE_SNAPSHOT_MARKER` 버전도 올린다.
+_SNAPSHOT_RISK_KEYS = (
+    "base_capital",
+    "currency",
+    "max_instrument_weight",
+    "max_sector_weight",
+    "max_gross_exposure",
+    "max_concurrent_positions",
+    "max_daily_loss",
+    "max_drawdown_pct",
+)
+
 _TASK_ID_RE = re.compile(r"\bt_[a-f0-9]{8,}\b")
 _REFERENCE_KEYS = frozenset(
     {
@@ -48,8 +92,82 @@ class WorkflowScopeReferences:
     task_ids: tuple[str, ...] = ()
 
 
-def build_root_body(query: str, request_id: str) -> str:
-    """Build a root body that is unambiguous before the root ID exists."""
+def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
+    """`GET .../mandates/.../current` 응답을 root body용 스냅샷 블록으로 만든다.
+
+    `mandate`가 `None`이거나 아직 활성 Version이 없으면(`current_version=0`) 빈
+    문자열을 준다 - **없는 한도를 지어내지 않는다.** 그 경우 부서는 Mandate 블록을
+    못 찾고, 그건 "이 사용자는 아직 Mandate가 없다"는 정확한 사실이다. 기본값을
+    채워 넣으면 사용자가 정하지 않은 한도가 판단 근거로 쓰인다(개발 원칙 9).
+
+    한 줄 `key=value` 형태로 쓰는 이유: 부서가 LLM으로 이 블록을 읽으므로 중첩
+    JSON보다 평평한 줄이 오독될 여지가 적고, `grep`·정규식으로도 뽑을 수 있다.
+    """
+
+    if not mandate:
+        return ""
+    version = mandate.get("current_version")
+    policy = mandate.get("policy")
+    if not version or not isinstance(policy, Mapping):
+        # Version이 없으면 정책도 없다. 껍데기만 있는 Mandate는 근거가 아니다.
+        return ""
+
+    lines = [
+        CEO_MANDATE_SNAPSHOT_MARKER,
+        "snapshot_policy=frozen_at_request_time",
+        f"mandate_id={mandate.get('mandate_id', '')}",
+        f"mandate_version={version}",
+        f"content_hash={mandate.get('content_hash', '')}",
+    ]
+    fund_id = mandate.get("fund_id")
+    if fund_id:
+        lines.append(f"fund_id={fund_id}")
+    objective = str(mandate.get("objective_text") or "").strip().replace("\n", " ")
+    if objective:
+        lines.append(f"objective_text={objective[:300]}")
+
+    risk_bounds = policy.get("risk_bounds")
+    if isinstance(risk_bounds, Mapping):
+        for key in _SNAPSHOT_RISK_KEYS:
+            value = risk_bounds.get(key)
+            if value is not None:
+                lines.append(f"risk.{key}={value}")
+
+    universe = policy.get("universe_policy")
+    if isinstance(universe, Mapping):
+        for key in (
+            "allowed_asset_classes",
+            "forbidden_asset_classes",
+            "preferred_sectors",
+            "excluded_sectors",
+        ):
+            value = universe.get(key)
+            if value:
+                lines.append(f"universe.{key}={json.dumps(value, ensure_ascii=False)}")
+
+    lines.append(
+        "These limits are the frozen basis for this workflow. Do not fetch a newer"
+        " Mandate; a mid-run change must not alter this workflow's basis."
+    )
+    lines.append(
+        "Advisory only - these values do not authorize an order. Order-time"
+        " enforcement is the deterministic Risk Engine's job."
+    )
+    return "\n".join(lines)
+
+
+def build_root_body(
+    query: str,
+    request_id: str,
+    *,
+    mandate: Mapping[str, Any] | None = None,
+) -> str:
+    """Build a root body that is unambiguous before the root ID exists.
+
+    `mandate`는 2026-08-12에 추가됐다(선택 인자 - 기존 호출부는 그대로 동작한다).
+    채워지면 `hgfinance.mandate-snapshot.v1` 블록이 함께 실려, 부서가
+    `kanban show <root_task_id>`로 사용자의 투자 한도를 읽을 수 있다.
+    """
 
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
@@ -63,10 +181,22 @@ def build_root_body(query: str, request_id: str) -> str:
         "Primary tasks must bind workflow_root_task_id to this task ID in their body;\n"
         "do not pass this root as a Hermes execution parent for primary tasks.\n"
         "Only task IDs carrying this workflow root marker may be used.\n"
-        "Do not reuse IDs from recent work, memory, or another root.\n\n"
-        "## User request\n"
+        "Do not reuse IDs from recent work, memory, or another root.\n"
+        # Mandate 블록은 scope 지시문 뒤, 사용자 질의 앞에 온다. `extract_user_query`가
+        # `## User request` 뒤만 잘라내므로 이 블록이 질의에 섞이지 않는다.
+        f"{_mandate_section(mandate)}"
+        "\n## User request\n"
         f"{query}"
     )
+
+
+def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
+    """스냅샷 블록을 root body에 끼울 형태로 감싼다. 없으면 빈 문자열."""
+
+    block = build_mandate_snapshot_block(mandate)
+    if not block:
+        return ""
+    return f"\n## Investor mandate (frozen snapshot)\n{block}\n"
 
 
 def build_root_comment(root_task_id: str, request_id: str) -> str:

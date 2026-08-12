@@ -22,6 +22,7 @@ try:
         load_workflow,
     )
     from .current_user import optional_current_user
+    from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoQueryAcceptedResponse,
         GraphNode,
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         load_workflow,
     )
     from current_user import optional_current_user  # type: ignore[no-redef]
+    from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoQueryAcceptedResponse,
         GraphNode,
@@ -71,6 +73,23 @@ from orchestration.ceo_workflow_scope import build_root_body
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
+
+
+class CeoAsk(hermes_boundary.AgentAsk):
+    """`/ui/ceo/ask` 전용 Body. `AgentAsk` + `fund_id`.
+
+    `fund_id`를 `AgentAsk`에 넣지 않은 이유: 그 모델은 부서 Agent 질의 6개가
+    함께 쓰는 계약이고, 거기에 CEO 전용 필드를 넣으면 트레이딩·회계 질의에도
+    쓰지 않는 필드가 노출된다.
+
+    **왜 서버가 user_id로 fund를 찾지 않고 화면이 보내나**: `governance.fund_memberships`
+    (user<->fund 연결 테이블)가 아직 비어 있어 `user_id -> fund_id` 역참조 경로가
+    없다. 프론트엔드가 계정을 하드코딩하는 단계이므로 `fund_id`도 그 쌍으로 함께
+    보내는 편이 조회 경로를 새로 만드는 것보다 단순하다. 진짜 로그인이 붙으면
+    그때 `fund_memberships`로 옮긴다.
+    """
+
+    fund_id: str | None = None
 
 # Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
 # 서버에서 먼저 모양을 고정한다. shell=False라 주입 경로는 아니지만, 형식이
@@ -113,7 +132,7 @@ def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
     ),
 )
 def ceo_query(
-    req: hermes_boundary.AgentAsk,
+    req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
 ) -> dict[str, object]:
     """Enqueue a CEO Kanban workflow without running a second CEO turn.
@@ -128,10 +147,14 @@ def ceo_query(
     판정 근거가 아니다).
     """
 
+    # Mandate 스냅샷. 못 읽으면 None이고 그때는 블록 없이 진행한다 - 이것 때문에
+    # 질의 접수가 실패하면 Mandate가 없는 사용자는 아무 질문도 못 한다.
+    mandate = fetch_current_mandate_by_fund(req.fund_id) if req.fund_id else None
+
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
-        body=build_root_body(req.query, req.request_id),
+        body=build_root_body(req.query, req.request_id, mandate=mandate),
         idempotency_key=req.request_id,
     )
 
