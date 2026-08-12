@@ -1,19 +1,16 @@
-"use client";
+import type { Metadata } from "next";
+import TopNav from "../components/TopNav";
+import DashboardView from "./DashboardView";
 
-import { BffProvider } from "../ops/bffClient";
-import { DashboardRouteView } from "../page";
+export const metadata: Metadata = {
+  title: "Dashboard - HgFinance",
+};
 
-/**
- * Dashboard는 초기 픽셀 오피스 hydration과 독립적으로 운영 상태를 열 수 있다.
- */
 export default function DashboardPage() {
   return (
-    <main className="page-shell">
-      <div className="wrap">
-        <BffProvider>
-          <DashboardRouteView />
-        </BffProvider>
-      </div>
-    </main>
+    <div className="bg-background text-on-background min-h-screen flex flex-col font-sans">
+      <TopNav current="dashboard" />
+      <DashboardView />
+    </div>
   );
 }

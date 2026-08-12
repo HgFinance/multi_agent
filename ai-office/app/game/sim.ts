@@ -217,7 +217,7 @@ export class Company {
   log: LogEntry[] = [];
   clockMinutes = 9 * 60;
   /** 재생 속도 — 시뮬레이션 전체(걷기·업무·대사)를 함께 배속한다. 실제 외부 작업 속도와는 무관 */
-  speed = 2;
+  speed = 1;
   turbo = false;
   paused = false;
   running = false;

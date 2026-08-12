@@ -47,7 +47,6 @@ services:
   # Portfolio advisory API and worker share only the durable queue volume.
   # The API never embeds a worker by default; the worker owns queue claims.
   portfolio-bff:
-    profiles: ["portfolio"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -77,7 +76,6 @@ services:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
 
   portfolio-worker:
-    profiles: ["portfolio"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
