@@ -224,7 +224,23 @@ def partition_quality(spec: DatasetSpec, chunk: list[dict]) -> str:
     return "PASS" if grades == {"PASS"} else "UNKNOWN"
 
 
-def build(key: str, *, start: date, end: date, dry_run: bool = False) -> int:
+def build(key: str, *, start: date, end: date, dry_run: bool = False,
+          stamp: bool = False) -> int:
+    """데이터셋 하나를 굳힌다.
+
+    ▶ `stamp` - **매니페스트 버전에 날짜를 박는다** (2026-08-12)
+      매일 자라는 데이터셋을 한 버전에 계속 덮으면 전체 `content_hash` 가
+      날마다 바뀐다. 그러면 **어제 실험이 가리키던 스냅샷이 사라진다** - 실험은
+      "어느 데이터로 돌았는가" 를 해시로 가리키는데 그 대상이 없어지므로
+      사전등록이 형식만 남는다.
+
+      `v1` -> `v1-20260812` 처럼 날짜를 박으면 그날의 스냅샷이 그대로 남고,
+      실험은 자기가 쓴 버전을 계속 가리킨다. 파일은 파티션 단위로 공유되므로
+      (증분 빌드) 디스크가 날마다 늘지 않는다 - 늘어나는 것은 매니페스트 행뿐이다.
+
+      `resolve()` 는 같은 이름이면 문자열이 큰 버전을 고르므로
+      `v1-20260813 > v1-20260812` 가 되어 최신 스냅샷이 자동으로 쓰인다.
+    """
     import psycopg2
     from source_registry import load_project_env
 
@@ -246,6 +262,10 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False) -> int:
             print("  원천이 비었다 - 굳히지 않는다", flush=True)
             return 1
 
+        # 파일은 **버전 스탬프와 무관하게** 같은 자리에 쌓인다 - 스냅샷이
+        # 달라도 파티션은 공유하므로 디스크가 날마다 늘지 않는다.
+        ver = (f"{spec.version}-{date.today():%Y%m%d}" if stamp
+               else spec.version)
         out_dir = DATA_ROOT / f"{spec.name}-{spec.version}"
         parts = write_partitions(spec, rows, out_dir)
         whole = content_hash(spec, rows)
@@ -270,9 +290,9 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False) -> int:
 
         with meta.cursor() as cur:
             cur.execute(_SQL_MANIFEST, (
-                spec.name, spec.version,
+                spec.name, ver,
                 json.dumps(spec.source_versions),
-                json.dumps({f"{spec.name}-rows": spec.version}),
+                json.dumps({f"{spec.name}-rows": ver}),
                 json.dumps({"count": len(parts),
                             "keys": [p["partition_key"] for p in parts]}),
                 json.dumps(spec.point_in_time),
@@ -418,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--from", dest="start", default="")
     ap.add_argument("--to", dest="end", default="")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stamp", action="store_true",
+                    help="매니페스트 버전에 날짜를 박는다(v1 -> v1-20260812). "
+                         "매일 자라는 데이터셋은 이걸 켜야 어제 실험이 "
+                         "가리키던 스냅샷이 남는다")
     a = ap.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -426,7 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         return _selfcheck()
     start = date.fromisoformat(a.start) if a.start else date(2016, 1, 1)
     end = date.fromisoformat(a.end) if a.end else date.today() + timedelta(days=1)
-    return build(a.build, start=start, end=end, dry_run=a.dry_run)
+    return build(a.build, start=start, end=end, dry_run=a.dry_run,
+                 stamp=a.stamp)
 
 
 if __name__ == "__main__":

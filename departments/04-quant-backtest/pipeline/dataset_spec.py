@@ -195,6 +195,13 @@ MICROSTRUCTURE_DAILY = DatasetSpec(
                 "observed_at 이 자리 채움이다(market.pit_provenance = NONE). "
                 "실시간 수집분만 PIT 가 성립한다."),
     },
+    # ▶ **하루 단위** (2026-08-12). 이 데이터셋은 매일 자란다.
+    #   월 단위였을 때는 하루를 덧붙이려고 그 달을 통째로 다시 썼고, 그때마다
+    #   파티션 해시가 바뀌어 어제 실험이 가리키던 데이터가 사라졌다.
+    #   하루 단위면 덧붙임이 곧 새 파일이라 **재작성이 0** 이다.
+    #   하루 2,500행이라 파일이 작고, 원시 아카이브
+    #   (`market-archive/<표>/<날짜>.parquet`)가 이미 같은 규칙을 쓴다.
+    partition_grain="day",
 )
 
 SPECS: dict[str, DatasetSpec] = {
@@ -257,11 +264,24 @@ def _check_roundtrip_is_hash_stable():
 
 def _check_partition_and_sort_are_deterministic():
     """같은 내용이면 같은 파티션·같은 순서. 순서가 흔들리면 해시가 흔들린다."""
+    import dataclasses
+
     s = MICROSTRUCTURE_DAILY
     r = {"instrument_id": "i-9", "trade_date": date(2026, 7, 3)}
-    assert s.partition_of(r) == "2026-07"
-    assert s.partition_of({**r, "trade_date": datetime(2026, 7, 3, 9, tzinfo=KST)}) == "2026-07"
+    # ▶ 이 명세는 **하루 단위**다(매일 자라므로). datetime 이 와도 같은 키다.
+    assert s.partition_of(r) == "2026-07-03"
+    assert s.partition_of({**r, "trade_date": datetime(2026, 7, 3, 9, tzinfo=KST)})         == "2026-07-03"
     assert s.sort_key(r) == ("i-9", "2026-07-03")
+
+    # ▶ 월 단위도 그대로 동작해야 한다 - 기존 데이터셋(krx-basket-daily)이
+    #   그 입도이고, 바꾸면 파티션 키가 달라져 사실상 새 데이터셋이 된다.
+    m = dataclasses.replace(s, partition_grain="month")
+    assert m.partition_of(r) == "2026-07"
+
+    # ▶ 열린 파티션은 입도를 따른다. 이 값보다 과거가 달라지면 **소급 변경**이라
+    #   빌더가 덮지 않고 보고한다.
+    assert len(s.open_partition) == 10 and s.open_partition.count("-") == 2
+    assert len(m.open_partition) == 7
     print("  파티션/정렬 결정론       OK")
 
 
