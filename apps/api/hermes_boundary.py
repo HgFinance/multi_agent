@@ -92,8 +92,6 @@ def create_kanban_task(
         request.idempotency_key,
         "--created-by",
         "ai-office-bff",
-        "--initial-status",
-        "ready",
         "--json",
     ]
     cli_environment = os.environ.copy()
