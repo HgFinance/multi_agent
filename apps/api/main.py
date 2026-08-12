@@ -113,7 +113,31 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
-app = FastAPI(title="AI Office BFF", version="0.2.0")
+app = FastAPI(
+    title="AI Office BFF",
+    version="0.3.0",
+    description=(
+        "HgFinance Frontend용 BFF. Hermes 부서 Agent와 CEO Kanban 워크플로를"
+        " 프론트엔드가 쓸 수 있는 형태로 정규화한다.\n\n"
+        "**계약 두 개**\n\n"
+        "1. Agent 텍스트는 공식 수치가 아니다(`binding: false`). 공식 Position·PnL·"
+        "NAV는 `/ui/snapshot`에서만 나온다.\n"
+        "2. CEO 워크플로는 비동기다. `POST /ui/ceo/ask`는 202로 Task ID만 주고,"
+        " 진행은 `GET /ui/ceo/tasks/{task_id}` polling(2~5초), 결과는"
+        " `GET /ui/ceo/tasks/{task_id}/result`로 가져간다.\n\n"
+        "Swagger UI: `/docs` · ReDoc: `/redoc` · 스키마: `/openapi.json`"
+    ),
+    openapi_tags=[
+        {
+            "name": "ceo-office",
+            "description": (
+                "CEO Kanban 워크플로. ask -> 부서 실행 -> QA -> CEO 최종 종합.\n\n"
+                "`DELETE`는 의도적으로 없다 - 누가 언제 무엇을 요청했고 어느 부서가"
+                " 실패했는지는 감사 추적이므로 정리는 Archive로만 한다."
+            ),
+        },
+    ],
+)
 app.add_middleware(
     CORSMiddleware,
     # 로컬 개발 포트는 3000/3001/3002/3003처럼 바뀔 수 있다.
@@ -964,6 +988,14 @@ if __name__ == "__main__":
         "/ui/mandate-cases/{case_id}/timeline",
         "/ui/mandate-approvals",
         "/ui/mandate-approvals/{approval_id}/decide",
+        # 2026-08-12 CEO Kanban 워크플로 경로. ask/archive를 뺀 나머지는 읽기 전용이고,
+        # archive는 기록을 지우지 않는다(감사 추적 유지). DELETE는 만들지 않는다.
+        "/ui/ceo/ask",
+        "/ui/ceo/tasks",
+        "/ui/ceo/tasks/{task_id}",
+        "/ui/ceo/tasks/{task_id}/graph",
+        "/ui/ceo/tasks/{task_id}/result",
+        "/ui/ceo/tasks/{task_id}/archive",
     }, c.get("/openapi.json").json()["paths"].keys()
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다
