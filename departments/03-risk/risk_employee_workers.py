@@ -55,7 +55,7 @@ from tools.legal_wiki_tool import (
     query_legal_wiki,
 )
 
-from departments.employee_worker_runtime import run_coroutine_sync
+from departments.employee_worker_runtime import WorkerSpec, run_coroutine_sync
 from departments.risk_qa_worker_profiles import (
     RISK_WORKER_TECH,
     WorkerTechProfile,
@@ -115,20 +115,15 @@ class WorkerState(TypedDict, total=False):
     trace_manifest: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class WorkerSpec:
-    worker_id: str
-    role: str
-    tools: tuple[str, ...]
-    trigger: str
-    output_contract: str = "risk.worker-context.v1"
-    profile_version: str = "risk-profile-v1"
-    max_attempts: int = 3
-    skill_ids: tuple[str, ...] = ()
-    tech_profile: WorkerTechProfile | None = None
-    # RISK_MANDATE_WORKER_FLOW.md §11 — 이 worker가 스스로 query_mode를 판단해야 하면 True.
-    # 구조화된 query_mode가 이미 입력에 있으면(§4 구조화 우선) LLM 라우팅은 건너뛴다.
-    route_query_mode: bool = False
+# ▶ WorkerSpec 은 공용 런타임 것을 쓴다 (2026-08-12).
+#   전에는 여기서 다시 정의했다. 필드가 공용과 갈리면서 오케스트레이터
+#   (orchestration/workflows/portfolio_recommendation.py)가 risk/qa 만 특례로
+#   처리해야 했고, 그 특례를 안 고치면 새 워커가 조용히 빠졌다.
+#   부서 고유 필드(profile_version·skill_ids·tech_profile·route_query_mode)는
+#   공용 스펙으로 올렸으므로 여기서 잃는 것은 없다.
+#   ⚠ output_contract 기본값이 공용은 "worker-context.v1" 이다. 리스크는
+#     "risk.worker-context.v1" 을 쓰므로 **spec 마다 명시**한다 - 기본값에
+#     기대면 조용히 바뀐다.
 
 
 _RISK_GUARDS = (
@@ -149,6 +144,8 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Point-in-time policy evidence analyst",
         ("risk.compliance.check",),
         "when_compliance_evidence_exists",
+        output_contract="risk.worker-context.v1",
+        profile_version="risk-profile-v1",
         tech_profile=tech_profile_for(RISK_WORKER_TECH, "compliance-policy-worker"),
         route_query_mode=True,
         skill_ids=_RISK_GUARDS
@@ -624,6 +621,20 @@ def _counterparty_tool(payload: dict[str, Any]) -> dict[str, Any]:
 # RiskEngine 결과의 counterparty_health CheckOutcome이 이미 낸다
 # (scripts.py의 counterparty_check()가 이미 LLM 없이 동작하는 것과 같은 원칙,
 # trading의 desk-runner와 같은 기준: 답이 하나로 정해지는 일에 LLM을 얹지 않는다).
+def worker_tools() -> dict[str, WorkerTool]:
+    """이 부서 Worker 의 도구 표. **부서가 소유한다.**
+
+    오케스트레이터(orchestration/workflows/portfolio_recommendation.py)는 예전에
+    `if stage == "risk": return {...}` 로 이 표를 자기 파일에 하드코딩하고 있었다.
+    그래서 리스크가 워커를 추가하면 오케스트레이터를 고치기 전까지 그 워커가
+    `tool_not_registered` 로 조용히 DEGRADED 됐다. 표를 부서로 되돌린다.
+
+    공용 `tools_for_specs()` 를 쓰지 않는 이유: 이 부서의 도구는 입력 필드를
+    읽어 주는 어댑터가 아니라 **실제 일을 하는 함수**다(PIT 필터·RAG·법령 조회).
+    """
+    return {"compliance-policy-worker": _compliance_tool}
+
+
 RUNNER_ID = "risk-runner"
 RUNNER_ROLE = "Risk desk runner — market/liquidity/counterparty gate 결과 조회(결정론, LLM 없음)"
 RUNNER_TOOLS = (

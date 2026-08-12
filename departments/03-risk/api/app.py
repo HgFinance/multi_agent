@@ -649,6 +649,49 @@ def rag_observability():
     }
 
 
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). 2026-08-12 이전에는 리스크·QA 에만 이 두
+# 경로가 없어서, compose healthcheck 가 부서마다 다른 도메인 경로를 찔렀고
+# BFF 는 리스크가 죽어도 그걸 알 방법이 없었다.
+#
+# 나누는 이유: `/health` 는 **프로세스 생존**만 본다. 여기서 DB 를 만지면 DB
+# 순단마다 오케스트레이터가 멀쩡한 인스턴스를 교체한다. 저장소 판단은
+# `/health/ready` 가 하고, 못 닿으면 503 이다(trading-api 와 같은 규약).
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. **저장소가 죽어도 200 이다.** 외부 호출을 하지 않는다."""
+    return {
+        "status": "ok",
+        "service": "risk-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(_canonical_database_url()),
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 설정된 저장소에 실제로 닿아 보고, 못 닿으면 503 이다."""
+    dsn_configured = bool(_canonical_database_url())
+    if not dsn_configured:
+        # DB 없이 도는 것은 이 서비스의 **정상 모드**가 아니다. 다만 계약·오프라인
+        # 테스트가 이 상태로 앱을 띄우므로 200 으로 두되 상태를 숨기지 않는다.
+        return {"status": "degraded", "service": "risk-api", "canonical_db": "NOT_CONFIGURED"}
+    try:
+        repository = _risk_decision_repository()
+    except RiskDecisionPersistenceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "canonical_db_unavailable", "message": str(exc)[:200]},
+        ) from exc
+    return {
+        "status": "ready",
+        "service": "risk-api",
+        "canonical_db": "READY" if repository is not None else "NOT_CONFIGURED",
+    }
+
+
 @app.get("/risk/v1/observability/runtime")
 def runtime_observability():
     return RISK_TELEMETRY.snapshot()

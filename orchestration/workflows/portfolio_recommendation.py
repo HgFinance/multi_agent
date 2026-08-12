@@ -332,21 +332,11 @@ def _deterministic_worker_llm(system: str, prompt: str) -> str:
     )
 
 
-def _risk_tools(module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
-    # core-risk-worker/derivatives-counterparty-worker는 risk-runner로 흡수됐고
-    # module.WORKER_SPECS에 더 없다 - 이 dict는 남은 LLM Worker만 다룬다.
-    return {
-        "compliance-policy-worker": module._compliance_tool,
-    }
-
-
-def _qa_tools(module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
-    # evidence-qa-worker/model-and-internal-audit-worker/ops-and-permission-worker는
-    # qa-runner로 흡수됐고 module.WORKER_SPECS에 더 없다.
-    return {
-        "hallucination-critic-worker": module._hallucination_tool,
-        "incident-postmortem-worker": module._incident_tool,
-    }
+# ▶ _risk_tools / _qa_tools 는 2026-08-12 에 제거했다.
+#   두 부서의 도구 표를 이 파일이 들고 있었던 탓에, 부서가 워커를 추가하면
+#   여기를 고치기 전까지 그 워커가 조용히 DEGRADED 됐다. 표는 부서가 소유한다
+#   (risk_employee_workers.worker_tools / qa_employee_workers.worker_tools).
+#   아래 _worker_tools() 가 그 훅을 부르고, 누락은 _assert_tools_cover_specs 가 잡는다.
 
 
 def _specs(stage: str) -> tuple[WorkerSpec, ...]:
@@ -805,11 +795,36 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
 
 
 def _worker_tools(stage: str, module: Any) -> Mapping[str, Callable[[dict[str, Any]], dict[str, Any]]]:
-    if stage == "risk":
-        return _risk_tools(module)
-    if stage == "qa":
-        return _qa_tools(module)
-    return tools_for_specs(tuple(module.WORKER_SPECS))
+    """부서 Worker 의 도구 표를 얻는다.
+
+    ▶ 2026-08-12 이전에는 여기서 `if stage == "risk"/"qa"` 로 두 부서의 표를
+      **하드코딩**하고 있었다. 그래서 그 부서가 워커를 추가하면 이 파일을 고치기
+      전까지 새 워커가 `tool_not_registered` 로 조용히 DEGRADED 됐다.
+      이제 부서가 `worker_tools()` 로 자기 표를 노출하고, 없으면 공용
+      어댑터(`tools_for_specs`)로 떨어진다. **오케스트레이터에 부서 이름이 없다.**
+    """
+    owned = getattr(module, "worker_tools", None)
+    tools = dict(owned()) if callable(owned) else dict(tools_for_specs(tuple(module.WORKER_SPECS)))
+    _assert_tools_cover_specs(stage, module, tools)
+    return tools
+
+
+def _assert_tools_cover_specs(stage: str, module: Any, tools: Mapping[str, Any]) -> None:
+    """등록된 Worker 마다 도구가 있는지 **기동 시점에** 대조한다.
+
+    없으면 그 워커는 실행 시 `tool_not_registered` 로 DEGRADED 되는데, 화면에는
+    "부서가 결과를 덜 냈다"로만 보여 고장인지 편제인지 구분이 안 된다.
+    `assert_query_router_ids_exist()` 가 라우팅 표에 대해 하는 일과 같다 -
+    편제가 바뀌면 여기서 걸려야 한다.
+    """
+    missing = sorted(
+        spec.worker_id for spec in module.WORKER_SPECS if spec.worker_id not in tools
+    )
+    if missing:
+        raise RuntimeError(
+            f"'{stage}' 부서의 WORKER_SPECS 에 있는데 도구가 없는 워커: {missing}. "
+            f"등록된 도구: {sorted(tools)}. 부서 모듈의 worker_tools() 를 같이 고칠 것."
+        )
 
 
 def _validate_worker_report(report: dict[str, Any]) -> dict[str, Any]:

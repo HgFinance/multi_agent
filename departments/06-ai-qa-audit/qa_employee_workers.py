@@ -49,7 +49,7 @@ from uuid import UUID, uuid4
 
 from langgraph.graph import END, StateGraph
 
-from departments.employee_worker_runtime import run_coroutine_sync
+from departments.employee_worker_runtime import WorkerSpec, run_coroutine_sync
 from departments.risk_qa_worker_profiles import (
     QA_WORKER_TECH,
     WorkerTechProfile,
@@ -109,16 +109,10 @@ class WorkerState(TypedDict, total=False):
     trace_manifest: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class WorkerSpec:
-    worker_id: str
-    role: str
-    tools: tuple[str, ...]
-    trigger: str
-    output_contract: str = "qa.worker-context.v1"
-    max_attempts: int = 3
-    skill_ids: tuple[str, ...] = ()
-    tech_profile: WorkerTechProfile | None = None
+# ▶ WorkerSpec 은 공용 런타임 것을 쓴다 (2026-08-12). risk 와 같은 이유 -
+#   부서마다 다시 정의하면 오케스트레이터가 부서별 특례를 들고 있어야 하고,
+#   그 특례를 안 고치면 새 워커가 조용히 빠진다.
+#   ⚠ output_contract 는 spec 마다 명시한다(공용 기본값은 "worker-context.v1").
 
 
 _QA_GUARDS = (
@@ -139,6 +133,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Hallucination and contradiction critic",
         ("qa.evidence.rag",),
         "when_unsupported_claim_exists",
+        output_contract="qa.worker-context.v1",
         tech_profile=tech_profile_for(QA_WORKER_TECH, "hallucination-critic-worker"),
         skill_ids=_QA_GUARDS
         + (
@@ -169,6 +164,7 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
         "Incident timeline and postmortem analyst",
         ("qa.incident.record",),
         "when_incident_exists",
+        output_contract="qa.worker-context.v1",
         tech_profile=tech_profile_for(QA_WORKER_TECH, "incident-postmortem-worker"),
         skill_ids=_QA_GUARDS
         + (
@@ -676,6 +672,20 @@ def _persist_incident_entries(
 # 정해지는 일이었다 - PASS/WARN/FAIL/ESCALATE·ALLOWED/DENIED를 결정론 엔진이 이미
 # 낸다(tool_permission_check.py 자체 docstring: "판정은 결정론적 코드가 하고
 # LLM은 결과를 설명만 한다"). risk의 risk-runner·trading의 desk-runner와 같은 기준.
+def worker_tools() -> dict[str, WorkerTool]:
+    """이 부서 Worker 의 도구 표. **부서가 소유한다.**
+
+    risk 와 같은 이유로 오케스트레이터에서 여기로 되돌렸다 - 하드코딩된 표를
+    안 고치면 새 워커가 `tool_not_registered` 로 조용히 DEGRADED 된다.
+    evidence-qa/model-audit/ops-permission 은 qa-runner 로 흡수돼
+    WORKER_SPECS 에 없으므로 이 표에도 없다.
+    """
+    return {
+        "hallucination-critic-worker": _hallucination_tool,
+        "incident-postmortem-worker": _incident_tool,
+    }
+
+
 RUNNER_ID = "qa-runner"
 RUNNER_ROLE = (
     "QA desk runner — evidence/model risk/internal audit/ops/permission 결과 조회"

@@ -39,7 +39,17 @@ class WorkerState(TypedDict, total=False):
 
 @dataclass(frozen=True)
 class WorkerSpec:
-    """Runtime contract for one employee LLM and its allowed context tools."""
+    """Runtime contract for one employee LLM and its allowed context tools.
+
+    ▶ 앞의 네 자리(worker_id, role, tools, trigger)는 **위치인자 순서를 바꾸지 않는다.**
+      부서들이 그 넷만 위치로 주고 나머지는 키워드로 준다.
+
+    ▶ 아래 네 필드는 Risk·QA 가 각자 정의하던 것을 여기로 올린 것이다(2026-08-12).
+      두 부서는 공용 런타임에서 `run_coroutine_sync` 만 가져다 쓰고 WorkerSpec 은
+      자기 파일에 다시 정의하고 있었다 - 필드가 갈리자 오케스트레이터가
+      `if stage == "risk"` 식 특례를 들고 있어야 했고, 부서가 워커를 추가하면
+      그 특례를 손으로 고치기 전까지 새 워커가 조용히 빠졌다. 계약을 하나로 만든다.
+    """
 
     worker_id: str
     role: str
@@ -49,6 +59,16 @@ class WorkerSpec:
     output_contract: str = "worker-context.v1"
     max_attempts: int = 3
     prompt_instructions: str = ""
+    # 부서 Profile 버전. Risk 가 worker-context 에 실어 보낸다.
+    profile_version: str = ""
+    # 이 Worker 가 통과해야 하는 Skill 계약 ID 목록(guard/rag/verify/audit 계열).
+    skill_ids: tuple[str, ...] = ()
+    # 부서별 기술 프로필. 타입을 Any 로 둔다 - 정의가
+    # departments/risk_qa_worker_profiles.py 에 있어 여기서 import 하면
+    # 공용 런타임이 특정 부서에 의존하게 된다.
+    tech_profile: Any = None
+    # 이 Worker 가 스스로 query_mode 를 판단해야 하는가(Risk 전용, §11).
+    route_query_mode: bool = False
 
 
 def model_name() -> str:
