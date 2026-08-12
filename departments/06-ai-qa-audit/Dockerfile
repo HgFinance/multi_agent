@@ -29,6 +29,10 @@ COPY departments/06-ai-qa-audit ./departments/06-ai-qa-audit
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability
 COPY apps/security ./apps/security
+# qa_mandate_workers.py 가 `orchestration.contracts.mas` 를 최상위에서 import 한다
+# (build_agent_task_result). risk-api 와 같은 이유 - 없으면 audit-api 와 qa-worker
+# 둘 다 크래시 루프다(2026-08-12 실측). 외부 의존은 pydantic 하나뿐이다.
+COPY orchestration ./orchestration
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

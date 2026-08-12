@@ -1,3 +1,5 @@
+begin;
+
 -- 관측 시각의 출처를 기록한다 - 측정한 것과 유도한 것을 섞지 않기 위해.
 --
 -- 우리 수집기는 event_time(거래소) / received_at(수신) / observed_at(관측)을 셋 다
@@ -46,3 +48,5 @@ select t.tbl, min(t.d), max(t.d), 'MEASURED', 'hedgefund-ls-realtime',
        ) t
  group by t.tbl
 on conflict (source_table, range_start, range_end) do nothing;
+
+commit;

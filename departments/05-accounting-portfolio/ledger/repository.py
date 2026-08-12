@@ -139,7 +139,8 @@ class LedgerRepository:
     @classmethod
     def connect(cls, dsn: str) -> LedgerRepository:
         _, _, ThreadedConnectionPool = _load_driver()
-        return cls(ThreadedConnectionPool(1, 4, dsn))
+        # minconn=0 - 유휴 커넥션을 잡지 않는다
+        return cls(ThreadedConnectionPool(0, 4, dsn))
 
     @classmethod
     def from_env(cls, *, required: bool | None = None) -> LedgerRepository | None:

@@ -76,8 +76,10 @@ finally:
             sys.modules[_name] = _accounting_previous_modules[_name]
 from apps.api import hermes_boundary
 try:
+    from . import ceo
     from .ceo import router as ceo_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import ceo
     from ceo import router as ceo_router
 import trading
 from agent_status import agent_status_snapshot
@@ -87,6 +89,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+from account_snapshot import router as account_snapshot_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -104,12 +107,16 @@ from portfolio_schemas import (
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
+    from .qa import QA_API_URL
     from .qa import router as qa_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from qa import QA_API_URL
     from qa import router as qa_router
 try:
+    from .risk import RISK_API_URL
     from .risk import router as risk_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from risk import RISK_API_URL
     from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
@@ -163,6 +170,9 @@ app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
 app.include_router(ceo_router)
+# 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
+# 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
+app.include_router(account_snapshot_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 
@@ -561,6 +571,11 @@ def health() -> dict:
         "status": "ok",
         "mode": "DEMO",
         "agent_ask_enabled": hermes_boundary.ENABLE_AGENT_ASK,
+        # 부서 Agent 호출이 어느 런타임으로 나가는지. BFF 가 컨테이너로 뜨면
+        # `hermes` 바이너리가 그 안에 없어 `docker exec` 로 나가야 한다 - 그 상태를
+        # 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.
+        # (`ceo_transport` 는 CEO 입구가 Task 기반으로 재설계되면서 사라졌다.)
+        "hermes_exec_mode": hermes_boundary.HERMES_EXEC_MODE,
         "departments": [
             "research-department",
             trading.DEPARTMENT,
@@ -579,6 +594,14 @@ def health_ready() -> dict[str, object]:
     dependencies = {
         "bff": {"status": "READY"},
         "governance": {"status": "READY" if GOVERNANCE_API_URL else "NOT_CONFIGURED"},
+        # ▶ risk·qa 를 여기 넣는 이유 (2026-08-12)
+        #   전에는 이 둘이 빠져 있어서 **부서 API 가 죽어 있어도 BFF 가 ready 라고
+        #   답했다.** 실제로 그날 risk 는 컨테이너가 아예 안 떠 있었고 qa 는
+        #   QA_API_URL 이 빈 문자열이라 항상 503 이었는데, 이 응답만 보면 정상이었다.
+        #   governance 와 같은 방식으로 **설정 유무**를 본다 - 여기서 실제 HTTP 를
+        #   찌르면 readiness 가 남의 서비스 지연에 묶인다(그건 각 부서 /health/ready 몫).
+        "risk": {"status": "READY" if RISK_API_URL else "NOT_CONFIGURED"},
+        "qa": {"status": "READY" if QA_API_URL else "NOT_CONFIGURED"},
         "supabase": {"status": "READY" if os.getenv("DATABASE_URL", "").strip() else "NOT_CONFIGURED"},
         "ollama": {
             "status": "READY"

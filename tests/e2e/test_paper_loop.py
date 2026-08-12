@@ -45,6 +45,7 @@ for _p in (
     sys.path.insert(0, str(_p))
 
 from contracts import (
+    ExecutionAuthority,
     BrokerOrderState,
     IntentState,
     MarketSnapshot,
@@ -159,6 +160,11 @@ class PaperLoopTest(unittest.TestCase):
         """실제 Risk Engine 판정. 우리는 입력만 주고 판단에는 관여하지 않는다."""
         return self.engine.check_order(intent, self._risk_context(**ctx_kwargs))
 
+    # 이 루프가 대변하는 것은 **승격된 전략의 자동 실행**이다. 사람은 전략
+    # 승격 때 한 번 서명했고, 스위치가 켜져 있는 동안 주문이 나간다
+    # (2026-08-11 실행 권한 관문). 건별 승인 경로는 ExecutionAuthority.USER 다.
+    STRATEGY_ID = "STRAT-PAPER-LOOP"
+
     def route(self, intent, **ctx_kwargs):
         """Intent를 심사 통과시키고 브로커에 전송한다."""
         decision = self.assess(intent, **ctx_kwargs).decision
@@ -166,6 +172,12 @@ class PaperLoopTest(unittest.TestCase):
         self.oms.request_risk_review(rec)
         self.oms.apply_risk_decision(rec, decision)
         order = self.oms.create_broker_order(rec, intent)
+        # Risk 승인은 "한도 안인가" 만 답한다. 자본을 걸어도 되는지는 별개다.
+        rec.authority = ExecutionAuthority.STRATEGY
+        rec.authority_ref = self.STRATEGY_ID
+        self.oms.strategy_switchboard.enable(
+            self.STRATEGY_ID, actor="user:paper-loop", reason="e2e 시험"
+        )
         self.oms.submit(order, rec)
         ev = self.broker.accept(order)
         self.assertEqual(ev.event_type, "ack")

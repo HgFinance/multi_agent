@@ -1,3 +1,5 @@
+begin;
+
 -- 회의론자가 **어떤 지시 아래** 서명했는지를 남긴다.
 --
 -- 2026-08-11 회고에서 드러난 구멍이다. 1·2회차에 회의론자가 기획안을 전부
@@ -14,3 +16,5 @@ alter table research.experiment_proposals
 
 comment on column research.experiment_proposals.skeptic_prompt_version is
   '회의론자가 어떤 지시 아래 서명했는가. 서명자만 남기면 프롬프트를 갈아가며 통과할 때까지 돌릴 수 있다';
+
+commit;

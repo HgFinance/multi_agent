@@ -94,7 +94,8 @@ class PostgresRosterRepository(RosterRepository):
     @classmethod
     def connect(cls, dsn: str) -> PostgresRosterRepository:
         ThreadedConnectionPool = _load_postgres_driver()
-        return cls(ThreadedConnectionPool(1, 4, dsn))
+        # minconn=0 - 유휴 커넥션을 잡지 않는다
+        return cls(ThreadedConnectionPool(0, 4, dsn))
 
     def close(self) -> None:
         self._pool.closeall()

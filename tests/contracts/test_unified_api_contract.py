@@ -54,6 +54,13 @@ print("__UNIFIED_OPENAPI__" + json.dumps(openapi.get("paths", {}), sort_keys=Tru
         cwd=ROOT / app["working_directory"],
         capture_output=True,
         text=True,
+        # 인코딩을 명시하지 않으면 Windows 에서 로케일 코덱(cp949)으로 디코드하다
+        # 앱이 뱉는 한글 경고에서 UnicodeDecodeError 가 나고, **리더 스레드가 죽어
+        # result.stderr 가 None 이 된다** - 그러면 아래 진단 메시지가
+        # `'NoneType' object has no attribute 'strip'` 로 바뀌어 진짜 원인을 가린다
+        # (2026-08-12 실측). 리눅스(UTF-8 로케일)에서는 드러나지 않는다.
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
         env={

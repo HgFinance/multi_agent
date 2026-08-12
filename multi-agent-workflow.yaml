@@ -62,8 +62,12 @@ portfolio_recommendation_cycle:
 
 strategy_research_cycle:
   manifest: orchestration/workflows/strategy-research.yaml
-  order: [quant-backtest, qa-release-review, ceo-promotion-review]
-  timeout_seconds: 180
+  # 마지막 quant-outcome-feedback 이 이 흐름을 **공장으로 만든다.** 종결 사유를
+  # lesson_codes 로 사상해 적재하지 않으면 리서치 Gate 0 이 그 교훈을 못 읽고
+  # 같은 실험을 다시 산다(2026-08-10 공장 개편). manifest 에는 sequence 4 로
+  # 들어가 있었는데 이 order 목록만 3단계로 남아 있었다 - 여기가 정본을 따라간다.
+  order: [quant-backtest, qa-release-review, ceo-promotion-review, quant-outcome-feedback]
+  timeout_seconds: 240
 
 workforce_management_cycle:
   manifest: orchestration/workflows/workforce-management.yaml

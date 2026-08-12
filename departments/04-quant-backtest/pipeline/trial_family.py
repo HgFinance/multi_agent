@@ -60,6 +60,17 @@ UNIVERSE_VOCAB = {
 # 새 Family 가 되어 다중검정을 못 센다.
 TUNED_FIELDS = ("lookback_days", "top_n", "rebalance", "holding_horizon")
 
+# ▶ **접수와 실행면이 같은 이름공간을 써야 한다** (2026-08-11 실측).
+#   Gate 0 은 label/baseline 이 비면 아래 기본값을 넣고 해시했고, 오케스트레이터는
+#   가설 dict 를 그대로 넣어 빈 문자열로 해시했다. 같은 기획안 하나가
+#     접수 fam_42663e9f4b0f8233  /  실행 fam_65a4c7b6f4c75999
+#   두 값을 가졌다. 실험은 실행면 값으로 각인되고 Gate 0 은 접수 값으로 세니
+#   **세는 계열과 각인되는 계열이 달라 계수가 영원히 0** 이었다 - 각인이
+#   안 된 게 아니라 서로 다른 장부를 본 것이다. 기본값을 여기 한 곳에 두고
+#   양쪽이 hypothesis_view() 를 함께 쓴다.
+DEFAULT_LABEL = "forward_return"
+DEFAULT_BASELINE = "equal_weight_buy_and_hold"
+
 
 def _norm_text(v) -> str:
     """유니버스 설명 같은 자유 서술을 정규화. 같은 뜻이 다른 Family 가 되면
@@ -100,6 +111,39 @@ def family_key(hyp: dict) -> dict:
     }
 
 
+def hypothesis_view(*, edge_type=None, universe_key=None, universe=None,
+                    label=None, baseline=None) -> dict:
+    """Family 계산 입력의 **정본**. 접수(Gate 0)와 실행면이 이 함수를 함께 쓴다.
+
+    양쪽이 각자 dict 를 만들면 기본값이 갈리고, 갈리면 같은 컨셉이 두 개의
+    Family 로 쪼개져 **한쪽이 세는 계열에 다른 쪽이 아무것도 각인하지 않는다.**
+    실제로 그렇게 됐다(모듈 상단 주석). 만드는 곳을 하나로 둔다.
+    """
+    return {
+        "expected_edge": {"type": edge_type,
+                          "universe_key": universe_key,
+                          "universe": universe},
+        "label": label or DEFAULT_LABEL,
+        "baseline": baseline or DEFAULT_BASELINE,
+    }
+
+
+def family_of_hypothesis_row(row: dict) -> str:
+    """DB 의 quant.hypotheses 행 -> Family. **접수와 같은 값이 나와야 한다.**
+
+    가설 표에는 label/baseline 컬럼이 없다(확인함) - 그래서 기본값을 쓰는데,
+    접수도 같은 기본값을 쓰므로 값이 일치한다. 이 함수를 안 거치고 행을
+    family_id() 에 그대로 넣으면 label/baseline 이 빈 문자열이 되어 어긋난다.
+    """
+    edge = row.get("expected_edge") or {}
+    return family_id(hypothesis_view(
+        edge_type=edge.get("type"),
+        universe_key=edge.get("universe_key"),
+        universe=edge.get("universe") or row.get("universe"),
+        label=row.get("label") or edge.get("label"),
+        baseline=row.get("baseline")))
+
+
 def family_id(hyp: dict) -> str:
     """Family 식별자. 같은 컨셉이면 파라미터가 달라도 같은 값이다.
 
@@ -127,13 +171,65 @@ def same_family(a: dict, b: dict) -> bool:
     return bool(fa) and fa == fb
 
 
-def pressure(family: str, cards: list[dict], *, budget: int) -> dict:
+def family_ids_for(hyp: dict) -> tuple[str, ...]:
+    """이 개념을 가리키는 **모든** Family ID. 첫 값이 지금의 정본이다.
+
+    ▶ 왜 여럿인가 (2026-08-12 실측)
+      계열 ID 를 만드는 길이 둘이다. `family_id(hyp)` 는 `family_key` 를 그대로
+      해시하고(label·baseline 이 빈 문자열), `family_of_hypothesis_row(row)` 는
+      `hypothesis_view` 로 기본값을 채운 뒤 해시한다. **같은 개념이 두 값을
+      갖는다:**
+
+        momentum/krx_all → fam_65a4c7b6c7… (원시)  ·  fam_42663e9f0f… (기본값 채움)
+
+      8월 4일 실험 7건은 앞의 값으로, 오늘 실험은 뒤의 값으로 찍혔다. 그래서
+      같은 개념인데 **시도 카운터가 1부터 다시 셌다.** 200번을 돌려도 매번
+      "첫 시도" 로 읽히면 DSR 이 감가하지 않고, 200번째의 Sharpe 1.5 를 첫
+      시도처럼 채택하게 된다 - 다중검정 방어가 통째로 무력해진다.
+
+      **원장을 고치지 않는다.** 저장된 값은 그 실험이 실제로 찍은 것이라
+      사실이고, 소급 수정하면 "시도 압력은 기록된 사실" 이라는 규칙이 깨진다.
+      대신 **세는 쪽이 둘 다 인정한다.** 나중에 키 정의가 또 바뀌어도 여기에
+      한 줄 늘리면 계보가 이어진다.
+    """
+    out: list[str] = []
+    for fn in (family_of_hypothesis_row, family_id):
+        try:
+            v = fn(hyp)
+        except Exception:      # noqa: BLE001 - 한 방식이 실패해도 나머지는 쓴다
+            continue
+        if v and v not in out:
+            out.append(v)
+    return tuple(out)
+
+
+def pressure(family, cards: list[dict], *, budget: int) -> dict:
     """이 Family 에서 몇 번째 시도인가. **순수 함수.**
 
     edge type 으로 세던 것을 Family 로 바꾼다 - 컨셉이 다른데 type 이 같으면
     남의 시도가 내 압력으로 잡히던 문제를 없앤다.
+
+    `family` 는 문자열 하나 또는 **동의어 묶음**이다(`family_ids_for`). 묶음이면
+    전부 같은 개념으로 세고, **찍는 값은 첫 번째(정본)** 다 - 세는 것은 넓게,
+    남기는 것은 하나로.
     """
-    if not family:
+    if not isinstance(family, str):
+        ids = tuple(x for x in (family or ()) if x)
+        canonical = ids[0] if ids else ""
+    else:
+        ids, canonical = ((family,) if family else ()), family
+    if canonical:
+        same = [c for c in cards if c.get("trial_family_id") in ids]
+        used = len(same)
+        return {
+            "trial_family_id": canonical,
+            "trials_used": used,
+            "trial_number": used + 1,
+            "trial_budget": budget,
+            "over_budget": used >= budget,
+            **({"counted_aliases": list(ids[1:])} if len(ids) > 1 else {}),
+        }
+    if not canonical:
         # ▶ **trial_number 를 빠뜨리지 않는다.** 호출부(DSR 감가)가 이 값을
         #   반드시 읽으므로 없으면 KeyError 로 실험 전체가 죽는다.
         #   1 은 "첫 시도" 가 아니라 **못 셌다**는 뜻이고, DSR 이 감가하지
@@ -143,15 +239,6 @@ def pressure(family: str, cards: list[dict], *, budget: int) -> dict:
                 "reason": "Family 를 정할 수 없다(edge type 또는 유니버스를 "
                           "통제 어휘로 못 사상) - 압력을 세지 않는다. "
                           "DSR 이 감가되지 않으므로 Sharpe 를 그대로 믿지 않는다"}
-    same = [c for c in cards if c.get("trial_family_id") == family]
-    used = len(same)
-    return {
-        "trial_family_id": family,
-        "trials_used": used,
-        "trial_number": used + 1,          # 이번이 몇 번째인가
-        "trial_budget": budget,
-        "over_budget": used >= budget,
-    }
 
 
 # ── 자체 점검 ────────────────────────────────────────────────────────────────
@@ -254,6 +341,50 @@ def _check_pressure_always_has_trial_number():
         assert isinstance(p.get("trial_number"), int) and p["trial_number"] >= 1, p
 
 
+def _check_intake_and_runtime_agree():
+    """**접수와 실행면이 같은 Family 를 내야 한다** (2026-08-11 실측 회귀).
+
+    이게 깨지면 조용히 망가진다: 실험은 실행면 Family 로 각인되고 Gate 0 은
+    접수 Family 로 세므로, 계수가 항상 0 이 되어 시도 예산·DSR 감가·기각 교훈
+    대응이 **전부 통과**한다. 아무 에러도 안 난다 - 그래서 여기서 잡는다.
+    """
+    # 접수: 기획안이 낸 통제 어휘 (label/baseline 은 기획안에 없다)
+    intake = hypothesis_view(edge_type="momentum", universe_key="krx_all")
+    # 실행면: 그 기획안으로 만든 가설 행 (튜닝값이 edge 에 함께 들어 있다)
+    row = {"expected_edge": {"type": "momentum", "universe_key": "krx_all",
+                             "horizon_days": 20, "top_n": 20}}
+    assert family_id(intake) == family_of_hypothesis_row(row), \
+        (family_id(intake), family_of_hypothesis_row(row))
+    assert family_id(intake).startswith("fam_")
+
+
+def _check_alias_keeps_the_lineage():
+    """**계열 ID 가 갈려도 시도 카운터가 1로 안 돌아간다.** (2026-08-12 실측)
+
+    momentum/krx_all 이 옛 방식으로 7건 찍혀 있는데 오늘 것이 새 방식으로
+    찍혀 `시도1` 이 됐다. 200번을 돌려도 매번 첫 시도로 읽히면 DSR 이
+    감가하지 않고, 200번째의 Sharpe 를 첫 시도처럼 채택하게 된다.
+    """
+    row = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
+    ids = family_ids_for(row)
+    assert len(ids) == 2, ids
+    new, old = ids[0], ids[1]
+    cards = [{"trial_family_id": old} for _ in range(7)]
+    assert pressure(new, cards, budget=5)["trial_number"] == 1   # 이게 버그였다
+    p = pressure(ids, cards, budget=5)
+    assert p["trial_number"] == 8 and p["trials_used"] == 7, p
+    assert p["over_budget"] is True, p
+    assert p["trial_family_id"] == new, p          # 찍는 값은 정본 하나
+    assert p["counted_aliases"] == [old], p
+
+
+def _check_row_without_view_would_have_drifted():
+    """정본을 안 거치면 어긋난다는 것 자체를 고정한다 - 왜 이 함수가 있는지의 근거."""
+    row = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
+    assert family_id(row) != family_of_hypothesis_row(row), \
+        "기본값이 사라졌다면 이 회귀 검사를 지워도 된다"
+
+
 def _check_tuned_fields_never_in_key():
     """**튜닝 값이 Family 재료에 없는지** 구조로 확인한다."""
     k = family_key({"expected_edge": dict(_A["expected_edge"]),
@@ -277,4 +408,7 @@ if __name__ == "__main__":
     _check_unknown_family_does_not_block();      print("  미상 Family 차단 안 함  OK")
     _check_pressure_always_has_trial_number();   print("  trial_number 항상 존재  OK")
     _check_tuned_fields_never_in_key();          print("  튜닝값 미포함(구조)     OK")
-    print("시도 Family 9개 영역 통과.")
+    _check_intake_and_runtime_agree();           print("  접수==실행면 Family     OK")
+    _check_row_without_view_would_have_drifted(); print("  정본 미경유는 어긋남    OK")
+    _check_alias_keeps_the_lineage();             print("  동의어 계열 합산        OK")
+    print("시도 Family 12개 영역 통과.")

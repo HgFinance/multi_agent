@@ -112,302 +112,1050 @@
     "research-evidence-api": {
       "status": "LEGACY_IMPLEMENTED",
       "operations": [
-        {"method": "GET", "path": "/health"},
-        {"method": "GET", "path": "/evidence/news"},
-        {"method": "GET", "path": "/evidence/disclosures"},
-        {"method": "GET", "path": "/evidence/financials"},
-        {"method": "GET", "path": "/evidence/search"},
-        {"method": "GET", "path": "/evidence/stories"},
-        {"method": "GET", "path": "/macro/observations"},
-        {"method": "GET", "path": "/methods/performance"},
-        {"method": "GET", "path": "/universe/restrictions"},
-        {"method": "GET", "path": "/calendar/sessions_since"}
+        {
+          "method": "GET",
+          "path": "/calendar/sessions_since"
+        },
+        {
+          "method": "GET",
+          "path": "/evidence/disclosures"
+        },
+        {
+          "method": "GET",
+          "path": "/evidence/financials"
+        },
+        {
+          "method": "GET",
+          "path": "/evidence/news"
+        },
+        {
+          "method": "GET",
+          "path": "/evidence/search"
+        },
+        {
+          "method": "GET",
+          "path": "/evidence/stories"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "GET",
+          "path": "/macro/observations"
+        },
+        {
+          "method": "GET",
+          "path": "/methods/performance"
+        },
+        {
+          "method": "GET",
+          "path": "/universe/restrictions"
+        }
       ]
     },
     "market-read-api": {
       "status": "LEGACY_IMPLEMENTED",
       "operations": [
-        {"method": "GET", "path": "/health"},
-        {"method": "GET", "path": "/snapshot/{symbol}"},
-        {"method": "GET", "path": "/bars/{symbol}"},
-        {"method": "GET", "path": "/breadth"},
-        {"method": "GET", "path": "/dq/windows"},
-        {"method": "GET", "path": "/dq/summary"},
-        {"method": "GET", "path": "/dq/bar_freshness"},
-        {"method": "GET", "path": "/regime/daily"},
-        {"method": "GET", "path": "/microstructure/{symbol}"}
+        {
+          "method": "GET",
+          "path": "/bars/{symbol}"
+        },
+        {
+          "method": "GET",
+          "path": "/breadth"
+        },
+        {
+          "method": "GET",
+          "path": "/dq/bar_freshness"
+        },
+        {
+          "method": "GET",
+          "path": "/dq/summary"
+        },
+        {
+          "method": "GET",
+          "path": "/dq/windows"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "GET",
+          "path": "/microstructure/{symbol}"
+        },
+        {
+          "method": "GET",
+          "path": "/regime/daily"
+        },
+        {
+          "method": "GET",
+          "path": "/snapshot/{symbol}"
+        }
       ]
     },
     "trading-api": {
       "status": "IMPLEMENTED_PAPER",
       "operations": [
-        {"method": "GET", "path": "/health"},
-        {"method": "GET", "path": "/health/ready"},
-        {"method": "POST", "path": "/investment-cases/{case_id}/paper-orders"},
-        {"method": "POST", "path": "/investment-cases/{case_id}/cancel"},
-        {"method": "GET", "path": "/trading/v1/market-rules/tick-size"},
-        {"method": "POST", "path": "/trading/v1/order-intents"},
-        {"method": "GET", "path": "/trading/v1/order-intents/{order_intent_id}"},
-        {"method": "POST", "path": "/trading/v1/order-intents/{order_intent_id}/risk-review"},
-        {"method": "POST", "path": "/trading/v1/order-intents/{order_intent_id}/risk-decision"},
-        {"method": "POST", "path": "/trading/v1/orders"},
-        {"method": "GET", "path": "/trading/v1/orders/{order_id}"},
-        {"method": "POST", "path": "/trading/v1/orders/{order_id}/submit"},
-        {"method": "POST", "path": "/trading/v1/orders/{order_id}/cancel"},
-        {"method": "POST", "path": "/trading/v1/orders/{order_id}/broker-events"},
-        {"method": "POST", "path": "/trading/v1/orders/{order_id}/unknown"},
-        {"method": "GET", "path": "/trading/v1/orders/{order_id}/events"}
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/paper-orders"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/market-rules/tick-size"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/order-intents"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/order-intents/{order_intent_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/order-intents/{order_intent_id}/risk-decision"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/order-intents/{order_intent_id}/risk-review"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/orders"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/orders/{order_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/orders/{order_id}/broker-events"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/orders/{order_id}/cancel"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/orders/{order_id}/events"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/orders/{order_id}/submit"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/orders/{order_id}/unknown"
+        }
       ]
     },
     "risk-api": {
       "status": "PRODUCTION_BLOCKED",
       "operations": [
-        {"method": "POST", "path": "/investment-cases/{case_id}/risk-check"},
-        {"method": "POST", "path": "/risk/v1/p1/external-snapshot"},
-        {"method": "POST", "path": "/risk/v1/p2/derivatives-check"},
-        {"method": "GET", "path": "/risk/v1/trading-state/{scope}"},
-        {"method": "GET", "path": "/risk/v1/trading-state/{scope}/record"},
-        {"method": "PUT", "path": "/risk/v1/trading-state/{scope}"},
-        {"method": "DELETE", "path": "/risk/v1/trading-state/{scope}"},
-        {"method": "POST", "path": "/risk/v1/compliance/check"},
-        {"method": "POST", "path": "/risk/v1/mandates/{mandate_id}/assess"},
-        {"method": "GET", "path": "/risk/v1/observability/rag"},
-        {"method": "GET", "path": "/risk/v1/observability/runtime"}
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/risk-check"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/compliance/check"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/mandates/{mandate_id}/assess"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/observability/rag"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/observability/runtime"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/p1/external-snapshot"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/p2/derivatives-check"
+        },
+        {
+          "method": "DELETE",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "PUT",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/trading-state/{scope}/record"
+        }
       ]
     },
     "qa-api": {
       "status": "PRODUCTION_BLOCKED",
       "operations": [
-        {"method": "POST", "path": "/investment-cases/{case_id}/qa-check"},
-        {"method": "POST", "path": "/qa/v1/model-risk/evaluate"},
-        {"method": "POST", "path": "/qa/v1/internal-audit/evaluate"},
-        {"method": "POST", "path": "/qa/v1/events/consume"},
-        {"method": "GET", "path": "/qa/v1/observability/rag"},
-        {"method": "GET", "path": "/qa/v1/observability/runtime"},
-        {"method": "POST", "path": "/qa/v1/ops/evaluate"},
-        {"method": "POST", "path": "/qa/v1/runs"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/complete"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/fail"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/timeout"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/cancel"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/tool-calls"},
-        {"method": "POST", "path": "/qa/v1/tool-calls/{tool_call_id}/allow"},
-        {"method": "POST", "path": "/qa/v1/tool-calls/{tool_call_id}/deny"},
-        {"method": "POST", "path": "/qa/v1/tool-calls/{tool_call_id}/complete"},
-        {"method": "POST", "path": "/qa/v1/tool-calls/{tool_call_id}/fail"},
-        {"method": "POST", "path": "/qa/v1/tool-permission/check"},
-        {"method": "POST", "path": "/qa/v1/runs/{agent_run_id}/tool-calls:checked"},
-        {"method": "GET", "path": "/qa/v1/tool-calls/unauthorized-count"},
-        {"method": "POST", "path": "/qa/v1/incidents/{incident_id}/events"},
-        {"method": "GET", "path": "/qa/v1/incidents/{incident_id}/timeline"},
-        {"method": "POST", "path": "/qa/v1/corrective-actions"},
-        {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/start"},
-        {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/submit-for-verification"},
-        {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"},
-        {"method": "POST", "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"},
-        {"method": "POST", "path": "/qa/v1/evidence/check"},
-        {"method": "GET", "path": "/qa/v1/evidence/corpus/status"},
-        {"method": "POST", "path": "/qa/v1/verifications/{verification_id}/assess"},
-        {"method": "POST", "path": "/qa/v1/eval-runs"},
-        {"method": "GET", "path": "/qa/v1/eval-runs/{eval_run_id}"},
-        {"method": "GET", "path": "/qa/v1/eval-runs/{eval_run_id}/results"}
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/qa-check"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/start"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/submit-for-verification"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/eval-runs"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/eval-runs/{eval_run_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/eval-runs/{eval_run_id}/results"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/events/consume"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/evidence/check"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/evidence/corpus/status"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/incidents/{incident_id}/events"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/incidents/{incident_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/internal-audit/evaluate"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/model-risk/evaluate"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/observability/rag"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/observability/runtime"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/ops/evaluate"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/complete"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/fail"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/timeout"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/tool-calls"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/tool-calls:checked"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/tool-calls/unauthorized-count"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/tool-calls/{tool_call_id}/allow"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/tool-calls/{tool_call_id}/complete"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/tool-calls/{tool_call_id}/deny"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/tool-calls/{tool_call_id}/fail"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/tool-permission/check"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/verifications/{verification_id}/assess"
+        }
       ]
     },
     "workforce-api": {
       "status": "IMPLEMENTED_TEST",
       "operations": [
-        {"method": "POST", "path": "/workforce/v1/access-requests"},
-        {"method": "POST", "path": "/workforce/v1/access-requests/{request_id}/approve"},
-        {"method": "POST", "path": "/workforce/v1/access-requests/{request_id}/provision"},
-        {"method": "POST", "path": "/workforce/v1/access-assignments/{assignment_id}/revoke"},
-        {"method": "GET", "path": "/workforce/v1/agents/{agent_id}/access"},
-        {"method": "GET", "path": "/workforce/v1/roster"},
-        {"method": "GET", "path": "/workforce/v1/agents/{agent_id}"},
-        {"method": "POST", "path": "/workforce/v1/agents/{agent_id}/profile-versions"},
-        {"method": "POST", "path": "/workforce/v1/agents/{agent_id}/status"},
-        {"method": "POST", "path": "/workforce/v1/improvements"},
-        {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}"},
-        {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/transitions"},
-        {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/events"},
-        {"method": "POST", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
-        {"method": "GET", "path": "/workforce/v1/improvements/{candidate_id}/scorecards"},
-        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/scorecard"},
-        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/scorecard"},
-        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
-        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/quality-snapshots"},
-        {"method": "POST", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
-        {"method": "GET", "path": "/workforce/v1/departments/{department_code}/workforce-plans"},
-        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/approve"},
-        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/activate"},
-        {"method": "POST", "path": "/workforce/v1/workforce-plans/{plan_id}/retire"},
-        {"method": "POST", "path": "/workforce/v1/budget-assessments"},
-        {"method": "GET", "path": "/workforce/v1/agents/{agent_id}/budget-assessment"}
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/access-assignments/{assignment_id}/revoke"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/access-requests"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/access-requests"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/access-requests/{request_id}/approve"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/access-requests/{request_id}/provision"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/access"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/budget-assessment"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/profile-versions"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/status"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/budget-assessments"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/idle-agents"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/scorecard"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/departments/{department_code}/scorecard"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/hiring-requests"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/hiring-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/hiring-requests/{request_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/hiring-requests/{request_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}/events"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements/{candidate_id}/transitions"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/roster"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/activate"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/approve"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/retire"
+        }
       ]
     },
     "governance-api": {
       "status": "IMPLEMENTED_TEST",
       "operations": [
-        {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions"},
-        {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"},
-        {"method": "GET", "path": "/governance/v1/mandates/{mandate_id}/current"},
-        {"method": "GET", "path": "/governance/v1/mandates/by-fund/{fund_id}/current"},
-        {"method": "POST", "path": "/governance/v1/mandate-assistant/suggest"},
-        {"method": "POST", "path": "/governance/v1/mandates/{mandate_id}/change-requests"},
-        {"method": "POST", "path": "/governance/v1/cases"},
-        {"method": "GET", "path": "/governance/v1/cases/{case_id}"},
-        {"method": "GET", "path": "/governance/v1/cases/{case_id}/timeline"},
-        {"method": "POST", "path": "/governance/v1/cases/{case_id}/transitions"},
-        {"method": "POST", "path": "/governance/v1/cases/{case_id}/advance"},
-        {"method": "POST", "path": "/governance/v1/approvals"},
-        {"method": "GET", "path": "/governance/v1/approvals"},
-        {"method": "GET", "path": "/governance/v1/approvals/{approval_id}"},
-        {"method": "POST", "path": "/governance/v1/approvals/{approval_id}/decide"},
-        {"method": "POST", "path": "/governance/v1/approvals/{approval_id}/revoke"},
-        {"method": "POST", "path": "/governance/v1/escalations"},
-        {"method": "GET", "path": "/governance/v1/escalations"},
-        {"method": "GET", "path": "/governance/v1/escalations/{escalation_id}"},
-        {"method": "POST", "path": "/governance/v1/escalations/{escalation_id}/transitions"},
-        {"method": "POST", "path": "/governance/v1/notifications"},
-        {"method": "POST", "path": "/governance/v1/committee/sessions"},
-        {"method": "GET", "path": "/governance/v1/committee/sessions/{session_id}"},
-        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/votes"},
-        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/close"},
-        {"method": "POST", "path": "/governance/v1/committee/sessions/{session_id}/cancel"},
-        {"method": "POST", "path": "/reporting/v1/reports"},
-        {"method": "GET", "path": "/reporting/v1/reports/{content_hash}"}
+        {
+          "method": "GET",
+          "path": "/governance/v1/approvals"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/approvals"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/approvals/{approval_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/approvals/{approval_id}/decide"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/approvals/{approval_id}/revoke"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/cases/{case_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases/{case_id}/advance"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/cases/{case_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases/{case_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/committee/sessions/{session_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/close"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/votes"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/escalations"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/escalations"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/escalations/{escalation_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/escalations/{escalation_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/mandate-assistant/suggest"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/mandates/{mandate_id}/change-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/mandates/{mandate_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/mandates/{mandate_id}/versions"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/notifications"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/reporting/v1/reports"
+        },
+        {
+          "method": "GET",
+          "path": "/reporting/v1/reports/{content_hash}"
+        }
       ]
     },
     "accounting-api": {
       "status": "IMPLEMENTED_PAPER",
       "operations": [
-        {"method": "GET", "path": "/health"},
-        {"method": "POST", "path": "/accounting/v1/ledgers"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/capital"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/fills"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/journals"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/positions"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/valuations"},
-        {"method": "POST", "path": "/accounting/v1/reconciliations/fills"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"},
-        {"method": "GET", "path": "/accounting/v1/ledgers/{ledger_id}/breaks"},
-        {"method": "POST", "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"}
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/breaks"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/capital"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/fills"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/journals"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/journals/{journal_id}/reverse"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/positions"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/statements"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/valuations"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/valuations"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/reconciliations/fills"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        }
       ]
     },
     "operator-bff": {
       "status": "IMPLEMENTED_TEST",
       "operations": [
-        {"method": "GET", "path": "/health"},
-        {"method": "GET", "path": "/health/ready"},
-        {"method": "GET", "path": "/ui/snapshot"},
-        {"method": "GET", "path": "/ui/integrations"},
-
-        {"method": "GET", "path": "/ui/portfolio-universes"},
-        {"method": "POST", "path": "/ui/portfolio-recommendations"},
-        {"method": "GET", "path": "/ui/portfolio-recommendations/{run_id}"},
-        {"method": "POST", "path": "/ui/portfolio-recommendations/{run_id}/approval"},
-        {"method": "POST", "path": "/ui/mandates/{mandate_id}/change-requests"},
-        {"method": "GET", "path": "/ui/mandates/{mandate_id}/current"},
-        {"method": "POST", "path": "/ui/risk/mandates/{mandate_id}/assess"},
-        {"method": "POST", "path": "/ui/qa/verifications/{verification_id}/assess"},
-        {"method": "POST", "path": "/ui/mandate-cases/{case_id}/advance"},
-        {"method": "GET", "path": "/ui/mandate-cases/{case_id}/timeline"},
-        {"method": "GET", "path": "/ui/mandate-approvals"},
-        {"method": "POST", "path": "/ui/mandate-approvals/{approval_id}/decide"},
-        {"method": "GET", "path": "/accounting/v1/portfolio-snapshot"},
-        {"method": "POST", "path": "/accounting/agent/ask"},
-        {"method": "POST", "path": "/trading/agent/ask"},
-
-        {"method": "POST", "path": "/research/agent/ask"},
-
-        {"method": "POST", "path": "/risk/agent/ask"},
-
-        {"method": "POST", "path": "/quant/agent/ask"},
-
-        {"method": "POST", "path": "/qa/agent/ask"},
-
-        {"method": "POST", "path": "/ui/ceo/ask"},
-
-        {"method": "GET", "path": "/ui/ceo/tasks"},
-
-        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}"},
-
-        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}/graph"},
-
-        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}/result"},
-
-        {"method": "POST", "path": "/ui/ceo/tasks/{task_id}/archive"},
-
-        {"method": "GET", "path": "/ui/research"},
-
-        {"method": "GET", "path": "/ui/strategy"},
-
-        {"method": "GET", "path": "/ui/risk"},
-
-        {"method": "GET", "path": "/ui/qa"},
-
-        {"method": "GET", "path": "/ui/risk-qa"},
-
-        {"method": "POST", "path": "/ui/commands/trading-state"},
-
-        {"method": "GET", "path": "/ui/commands/audit"}
+        {
+          "method": "POST",
+          "path": "/accounting/agent/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/portfolio-snapshot"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/research/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/agent/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/account/snapshot"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/ceo/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/ceo/tasks/{task_id}/archive"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}/graph"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}/result"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/commands/audit"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/commands/trading-state"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/integrations"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandate-approvals"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-approvals/{approval_id}/decide"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-cases/{case_id}/advance"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandate-cases/{case_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandates/{mandate_id}/change-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandates/{mandate_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/portfolio-recommendations"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/portfolio-recommendations/{run_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/portfolio-recommendations/{run_id}/approval"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/portfolio-universes"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/qa"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/qa/verifications/{verification_id}/assess"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/research"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/risk"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/risk-qa"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/risk/mandates/{mandate_id}/assess"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/snapshot"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/strategy"
+        }
       ]
     }
   },
   "excluded_routes": [
-    {"app_id": "risk-api", "method": "GET", "path": "/metrics", "reason": "include_in_schema=false"},
-    {"app_id": "qa-api", "method": "GET", "path": "/metrics", "reason": "include_in_schema=false"}
+    {
+      "app_id": "risk-api",
+      "method": "GET",
+      "path": "/metrics",
+      "reason": "include_in_schema=false"
+    },
+    {
+      "app_id": "qa-api",
+      "method": "GET",
+      "path": "/metrics",
+      "reason": "include_in_schema=false"
+    }
   ],
   "planned_routes": [
-    {"app_id": "msu-case-api", "status": "PLANNED", "source": "MINIMUM_SERVICE_UNIT_SPEC.md §11", "operations": [
-      {"method": "POST", "path": "/investment-cases"},
-      {"method": "GET", "path": "/investment-cases"},
-      {"method": "GET", "path": "/investment-cases/{case_id}"},
-      {"method": "GET", "path": "/investment-cases/{case_id}/timeline"},
-      {"method": "POST", "path": "/investment-cases/{case_id}/qualify"},
-      {"method": "POST", "path": "/investment-cases/{case_id}/approve"},
-      {"method": "POST", "path": "/investment-cases/{case_id}/reject"},
-      {"method": "POST", "path": "/investment-cases/{case_id}/evaluate"}
-    ]},
-    {"app_id": "research-workflow-api", "status": "PLANNED", "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §5", "operations": [
-      {"method": "POST", "path": "/investment-cases/{case_id}/research"},
-      {"method": "GET", "path": "/research/v1/jobs/{job_id}"},
-      {"method": "POST", "path": "/research/v1/jobs/{job_id}/cancel"},
-      {"method": "GET", "path": "/research/v1/packets/{packet_id}"},
-      {"method": "GET", "path": "/research/v1/cases/{case_id}/packets"}
-    ]},
-    {"app_id": "quant-api", "status": "PLANNED", "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §7", "operations": [
-      {"method": "GET", "path": "/health/live"},
-      {"method": "GET", "path": "/health/ready"},
-      {"method": "POST", "path": "/quant/v1/hypotheses"},
-      {"method": "GET", "path": "/quant/v1/hypotheses/{hypothesis_id}"},
-      {"method": "POST", "path": "/quant/v1/hypotheses/{hypothesis_id}/preregister"},
-      {"method": "POST", "path": "/quant/v1/dataset-builds"},
-      {"method": "GET", "path": "/quant/v1/dataset-builds/{job_id}"},
-      {"method": "GET", "path": "/quant/v1/datasets/{dataset_manifest_id}"},
-      {"method": "POST", "path": "/quant/v1/hypotheses/{hypothesis_id}/certify-dataset"},
-      {"method": "POST", "path": "/quant/v1/experiments"},
-      {"method": "GET", "path": "/quant/v1/experiments/{experiment_id}"},
-      {"method": "POST", "path": "/quant/v1/experiments/{experiment_id}/cancel"},
-      {"method": "GET", "path": "/quant/v1/experiment-cards/{experiment_id}"},
-      {"method": "POST", "path": "/quant/v1/experiments/{experiment_id}/submit-to-qa"},
-      {"method": "GET", "path": "/quant/v1/strategy-candidates/{candidate_id}"},
-      {"method": "POST", "path": "/investment-cases/{case_id}/strategy-match"}
-    ]},
-    {"app_id": "governance-api", "status": "PLANNED", "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §2.2-§2.3", "operations": [
-      {"method": "POST", "path": "/governance/v1/cases/{case_id}/decisions"},
-      {"method": "GET", "path": "/reporting/v1/reports/{report_id}"}
-    ]},
-    {"app_id": "workforce-api", "status": "PLANNED", "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §3.2-§3.4", "operations": [
-      {"method": "POST", "path": "/workforce/v1/hiring-requests"},
-      {"method": "GET", "path": "/workforce/v1/hiring-requests/{request_id}"},
-      {"method": "POST", "path": "/workforce/v1/hiring-requests/{request_id}/candidates"},
-      {"method": "GET", "path": "/workforce/v1/skill-gap"}
-    ]}
+    {
+      "app_id": "msu-case-api",
+      "status": "PLANNED",
+      "source": "MINIMUM_SERVICE_UNIT_SPEC.md §11",
+      "operations": [
+        {
+          "method": "POST",
+          "path": "/investment-cases"
+        },
+        {
+          "method": "GET",
+          "path": "/investment-cases"
+        },
+        {
+          "method": "GET",
+          "path": "/investment-cases/{case_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/investment-cases/{case_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/qualify"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/approve"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/reject"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/evaluate"
+        }
+      ]
+    },
+    {
+      "app_id": "research-workflow-api",
+      "status": "PLANNED",
+      "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §5",
+      "operations": [
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/research"
+        },
+        {
+          "method": "GET",
+          "path": "/research/v1/jobs/{job_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/research/v1/jobs/{job_id}/cancel"
+        },
+        {
+          "method": "GET",
+          "path": "/research/v1/packets/{packet_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/research/v1/cases/{case_id}/packets"
+        }
+      ]
+    },
+    {
+      "app_id": "quant-api",
+      "status": "PLANNED",
+      "source": "RESEARCH_QUANT_DOMAIN_API_SPEC.md §7",
+      "operations": [
+        {
+          "method": "GET",
+          "path": "/health/live"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/hypotheses"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/hypotheses/{hypothesis_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/hypotheses/{hypothesis_id}/preregister"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/dataset-builds"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/dataset-builds/{job_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/datasets/{dataset_manifest_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/hypotheses/{hypothesis_id}/certify-dataset"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/experiments"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/experiments/{experiment_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/experiments/{experiment_id}/cancel"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/experiment-cards/{experiment_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/v1/experiments/{experiment_id}/submit-to-qa"
+        },
+        {
+          "method": "GET",
+          "path": "/quant/v1/strategy-candidates/{candidate_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/investment-cases/{case_id}/strategy-match"
+        }
+      ]
+    },
+    {
+      "app_id": "governance-api",
+      "status": "PLANNED",
+      "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §2.2-§2.3",
+      "operations": [
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases/{case_id}/decisions"
+        },
+        {
+          "method": "GET",
+          "path": "/reporting/v1/reports/{report_id}"
+        }
+      ]
+    },
+    {
+      "app_id": "workforce-api",
+      "status": "PLANNED",
+      "source": "GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md §3.2-§3.4",
+      "operations": [
+        {
+          "method": "POST",
+          "path": "/workforce/v1/hiring-requests/{request_id}/candidates"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/skill-gap"
+        }
+      ]
+    }
   ]
 }

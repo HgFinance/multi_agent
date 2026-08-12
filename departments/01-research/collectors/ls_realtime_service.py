@@ -53,6 +53,8 @@ from ls_realtime_worker import (
     LsRealtimeWorker,
     MarketSink,
     make_trading_day_check,
+    market_env,
+    market_rest_client,
 )
 from news_watch_service import parse_watchlist_file
 from source_registry import SourceRegistry, load_project_env
@@ -253,7 +255,11 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
     env = load_project_env()
     SourceRegistry(env=env).require(SOURCE_ID)
-    mode = (env.get("LS_ENV") or "PAPER").upper()
+    # ▶ **시세는 `LS_MARKET_ENV`, 주문은 `LS_ENV`.** (재일님 결정 2026-08-12)
+    #   예전엔 하나였다. 주문을 PAPER 로 두려고 LS_ENV=PAPER 를 쓰면 시세까지
+    #   모의 서버로 붙어, 프리마켓 한 시간 동안 체결이 0건이었다(실측 8/12).
+    #   모의 시세는 진짜처럼 생긴 가짜라 조용히 흘러가면 백테스트가 사실로 읽는다.
+    mode = market_env(env)
     ws_base = env["LS_WS_BASE_URL_PAPER"] if mode == "PAPER" else env["LS_WS_BASE_URL"]
     ws_url = ws_base.rstrip("/") + WEBSOCKET_PATH
     dsn = (env.get("TIMESCALE_DATABASE_URL") or "").strip()
@@ -268,7 +274,9 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
     heartbeat_seconds = max(float(env.get("LS_HEARTBEAT_SECONDS") or 60), 5.0)
 
-    client = LsRestClient()
+    # 토큰도 같은 환경에서 받는다 - 모의 토큰으로 실전 소켓에 붙으면
+    # 접속은 되고 데이터만 안 온다(티가 안 나는 실패다).
+    client = market_rest_client(env)
     while not stop.is_set():
         remaining = (window.ends_at - datetime.now(KST)).total_seconds()
         if remaining <= 0:
@@ -350,8 +358,15 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
 async def main_async() -> int:
     env = load_project_env()
-    pre = float(env.get("LS_PRE_OPEN_MINUTES") or 35)
-    post = float(env.get("LS_POST_CLOSE_MINUTES") or 10)
+    # ▶ 창은 **NXT 기준**이다 (2026-08-11, 통합시세 이식)
+    #   예전 값(35/10 = 08:25~15:40)은 KRX 정규장만 보던 때의 것이다. 통합시세를
+    #   구독하면 NXT 가 같이 오는데, NXT(넥스트레이드)는 프리마켓 08:00, 애프터마켓
+    #   20:00 까지 돈다. 창을 안 넓히면 **구독은 해놓고 그 시간대를 안 받는다** -
+    #   저쪽 원천에 08시대 912,608행, 19시대 187,962행이 있는 이유가 이것이다.
+    #   60: 개장(09:00) - 60분 = 08:00 (NXT 프리마켓 시작)
+    #   275: 마감(15:30) + 275분 = 20:05 (NXT 애프터마켓 20:00 + 잔여 수신)
+    pre = float(env.get("LS_PRE_OPEN_MINUTES") or 60)
+    post = float(env.get("LS_POST_CLOSE_MINUTES") or 275)
     symbols = load_symbols(env)
 
     stop = asyncio.Event()
@@ -429,9 +444,14 @@ def _check_window():
 
 
 def _check_subscriptions():
+    # 통합시세(US3/UH1)라 코스피·코스닥이 **같은 TR** 을 쓴다. 거래소(KRX/NXT)는
+    # payload 의 exchname 으로 갈린다 - TR 을 거래소별로 나누면 NXT 가 빠진다
+    # (2026-08-11 실측: 하루 체결의 25%).
     subs = build_subscriptions([("005930", "KOSPI"), ("196170", "KOSDAQ")])
-    assert subs == [("S3_", "005930"), ("H1_", "005930"),
-                    ("K3_", "196170"), ("HA_", "196170")], subs
+    assert subs == [("US3", "005930"), ("UH1", "005930"),
+                    ("US3", "196170"), ("UH1", "196170")], subs
+    assert not ({t for t, _ in subs} & {"S3_", "H1_", "K3_", "HA_"}), \
+        "KRX 단독 TR 로 돌아갔다 - NXT 가 빠진다"
     try:
         build_subscriptions([("000001", "NYSE")])
         raise AssertionError("모르는 venue 가 통과했다")
@@ -467,6 +487,31 @@ def _check_symbols_precedence(tmp_path: Path):
     print("  Watchlist 로드           OK")
 
 
+def _check_market_env_is_separate_from_orders():
+    """**주문을 PAPER 로 둬도 시세는 실전이어야 한다.** (재일님 결정 2026-08-12)
+
+    하나의 LS_ENV 가 둘을 같이 정하던 때, LS_ENV=PAPER 로 두자 수집기가 모의
+    소켓(:29443)에 붙어 프리마켓 한 시간 동안 체결이 0건이었다. 모의 시세는
+    **진짜처럼 생긴 가짜**라 조용히 흘러가면 백테스트가 그걸 사실로 읽는다.
+    """
+    # 주문이 PAPER 여도 시세는 건드리지 않는다
+    assert market_env({"LS_ENV": "PAPER"}) == "LIVE"
+    # 안 적어도 실전이다 - 못 받는 것은 티가 나고 잘못 받는 것은 티가 안 난다
+    assert market_env({}) == "LIVE"
+    # 명시하면 그 값을 쓴다(모의 시세로 배선 시험을 할 수 있어야 한다)
+    assert market_env({"LS_MARKET_ENV": "paper"}) == "PAPER"
+    assert market_env({"LS_MARKET_ENV": "LIVE", "LS_ENV": "PAPER"}) == "LIVE"
+
+    # 소켓과 토큰이 **같은** 환경을 봐야 한다. 어긋나면 접속은 되고 데이터만
+    # 안 오는, 티가 안 나는 실패가 된다.
+    import inspect
+
+    src = inspect.getsource(run_capture)
+    assert "market_rest_client(env)" in src, "토큰이 주문 환경으로 발급된다"
+    assert "market_env(env)" in src, "소켓이 주문 환경을 본다"
+    print("  시세/주문 환경 분리        OK")
+
+
 def _check_heartbeat():
     """증분 계산과 stop 종료. 로그가 조용한 단절을 숨기지 않는지의 기반이다."""
     from types import SimpleNamespace
@@ -477,10 +522,17 @@ def _check_heartbeat():
         sinks = [SimpleNamespace(stats=stats)]
         lines: list[str] = []
 
+        # ▶ **잠들어서 기다리지 않는다** (2026-08-12)
+        #   예전엔 `sleep(0.05)` 로 "첫 심박이 지났겠지" 하고 통계를 올렸다.
+        #   기계가 바쁘면 첫 심박이 그 뒤에 찍혀 누적이 30/15 로 보인다 -
+        #   실제로 수집기·워커가 같이 도는 중에 깨졌다. **부하에서 깨지는
+        #   점검은 사람이 점검을 무시하게 만든다.** 사건을 기다린다.
         async def drive():
-            await asyncio.sleep(0.05)  # 첫 심박 후 통계 증가
+            while not lines:                       # 첫 심박이 찍힐 때까지
+                await asyncio.sleep(0)
             stats.written_ticks, stats.written_quotes, stats.messages = 30, 15, 60
-            await asyncio.sleep(0.04)
+            while len(lines) < 2:                  # 두 번째 심박이 찍힐 때까지
+                await asyncio.sleep(0)
             stop.set()
 
         await asyncio.gather(
@@ -509,7 +561,8 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as td:
             _check_symbols_precedence(Path(td))
         _check_heartbeat()
-        print("상주 시세 서비스 4개 영역 통과. 상주 실행은 인자 없이")
+        _check_market_env_is_separate_from_orders()
+        print("상주 시세 서비스 5개 영역 통과. 상주 실행은 인자 없이")
         raise SystemExit(0)
 
     raise SystemExit(asyncio.run(main_async()))

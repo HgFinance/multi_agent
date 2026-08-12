@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
-import { askCeo, type CeoQueryResult } from "../lib/ceoClient";
+import { askCeo, ceoProgress, type CardOutcome, type CeoQueryProgress, type CeoQueryResult } from "../lib/ceoClient";
 
 /**
  * 대표 Dashboard.
@@ -28,6 +28,19 @@ const RECENT_OUTPUTS = [
   { name: "브랜드 템플릿 세팅", team: "이미지 제작팀", status: "최종 완료" },
 ];
 
+/** 카드 결말별 표시. 보드의 status가 아니라 "답이 됐는가" 기준이다.
+ *  특히 NO_ANSWER는 보드에서 done으로 보이는 카드라 성공으로 읽으면 안 된다. */
+const OUTCOME_VIEW: Record<CardOutcome, { label: string; tone: string }> = {
+  QUEUED: { label: "대기", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
+  RUNNING: { label: "진행 중", tone: "border-primary/30 bg-secondary-container text-primary" },
+  ANSWERED: { label: "답변 완료", tone: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant" },
+  NO_ANSWER: { label: "결과 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
+  BLOCKED: { label: "막힘", tone: "border-error/40 bg-error-container text-on-error-container" },
+  FAILED: { label: "실패", tone: "border-error/40 bg-error-container text-on-error-container" },
+  STALE: { label: "정체", tone: "border-error/40 bg-error-container text-on-error-container" },
+  NO_ASSIGNEE: { label: "담당 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
+};
+
 function PanelBar({ icon, title, children }: { icon: string; title: string; children?: React.ReactNode }) {
   return (
     <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
@@ -50,6 +63,21 @@ export default function DashboardView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<CeoQueryResult | null>(null);
+  const [progress, setProgress] = useState<CeoQueryProgress | null>(null);
+
+  const rootTaskId = result?.task_id ?? null;
+
+  // 뿌리 카드가 생기면 종료될 때까지 본부별 진행을 따라간다. 처음엔 1초, 한 번
+  // 받은 뒤에는 5초 — 팀원이 main에 넣은 폴링 주기를 그대로 쓴다.
+  useEffect(() => {
+    if (!rootTaskId || progress?.all_terminal) return undefined;
+    const timer = window.setTimeout(() => {
+      ceoProgress(rootTaskId)
+        .then(setProgress)
+        .catch(() => undefined);
+    }, progress ? 5000 : 1000);
+    return () => window.clearTimeout(timer);
+  }, [rootTaskId, progress]);
 
   async function send(text: string) {
     const value = text.trim();
@@ -57,6 +85,7 @@ export default function DashboardView() {
     setDraft("");
     setError("");
     setBusy(true);
+    setProgress(null);
     try {
       setResult(await askCeo(value));
     } catch (cause) {
@@ -184,6 +213,43 @@ export default function DashboardView() {
                   <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">{result.answer}</p>
                   {/* 이 문장은 참고용이다. 수치를 여기서 뽑아 확정하지 않는다. */}
                   <p className="text-[10px] text-outline mt-2 m-0">비공식 · 확정 수치의 출처가 아닙니다</p>
+                </div>
+              ) : null}
+
+              {progress ? (
+                <div className="mt-3 border border-outline-variant rounded p-3" aria-live="polite">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-label-md font-label-md text-on-surface-variant uppercase">본부별 진행</span>
+                    <span className="text-xs font-data-mono text-on-surface-variant">
+                      {progress.finished}/{progress.total} 종료{progress.all_terminal ? "" : " · 확인 중"}
+                    </span>
+                  </div>
+                  <ul className="m-0 p-0 list-none flex flex-col gap-1.5">
+                    {progress.cards
+                      .filter((card) => !card.is_root)
+                      .map((card) => {
+                        const view = OUTCOME_VIEW[card.outcome];
+                        return (
+                          <li key={card.task_id} className="text-xs">
+                            <span className={`inline-block px-2 py-0.5 rounded-full border mr-2 ${view.tone}`}>{view.label}</span>
+                            <span className="text-on-surface">{card.department}</span>
+                            {card.summary ? (
+                              <span className="block text-on-surface-variant mt-0.5 ml-1">{card.summary}</span>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                  </ul>
+                  {progress.unusable.length > 0 ? (
+                    <p className="text-xs text-error mt-2 m-0">
+                      ⚠️ {progress.unusable.length}개 본부가 사용 가능한 결과를 내지 못했습니다.
+                    </p>
+                  ) : null}
+                  {progress.all_terminal && !progress.answer_grounded ? (
+                    <p className="text-xs text-error mt-1 m-0">
+                      ⚠️ 근거가 확인되지 않은 답변입니다. 그대로 결정에 쓰지 마세요.
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
 
