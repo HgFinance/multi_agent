@@ -56,8 +56,13 @@ def build_root_body(query: str, request_id: str) -> str:
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
-        "child_parent_required=current_root_task_id\n"
-        "Only task IDs in this root's Kanban descendants may be used.\n"
+        "root_task_role=scope_and_planning\n"
+        "primary_execution_parent=none\n"
+        "primary_scope_field=workflow_root_task_id\n"
+        "planning_terminal_state=done_after_child_creation\n"
+        "Primary tasks must bind workflow_root_task_id to this task ID in their body;\n"
+        "do not pass this root as a Hermes execution parent for primary tasks.\n"
+        "Only task IDs carrying this workflow root marker may be used.\n"
         "Do not reuse IDs from recent work, memory, or another root.\n\n"
         "## User request\n"
         f"{query}"
@@ -74,6 +79,34 @@ def build_root_comment(root_task_id: str, request_id: str) -> str:
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY} "
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}"
     )
+
+
+def build_scoped_task_body(
+    body: str,
+    root_task_id: str,
+    *,
+    role: str,
+    request_id: str | None = None,
+) -> str:
+    """Bind a task to a workflow without creating a dependency edge."""
+
+    root_task_id = str(root_task_id).strip()
+    if not root_task_id:
+        raise ValueError("root_task_id must not be empty")
+    role = str(role).strip().casefold()
+    if role not in {"primary", "qa", "synthesis", "control"}:
+        raise ValueError("workflow task role must be primary, qa, synthesis, or control")
+
+    metadata = [
+        CEO_WORKFLOW_SCOPE_MARKER,
+        f"workflow_root_task_id={root_task_id}",
+        f"workflow_role={role}",
+    ]
+    if request_id:
+        metadata.append(f"request_id={request_id}")
+    prefix = "\n".join(metadata)
+    body = str(body or "").strip()
+    return f"{prefix}\n\n{body}" if body else prefix
 
 
 def _ordered_unique(values: Sequence[str]) -> tuple[str, ...]:
@@ -182,6 +215,16 @@ def validate_workflow_scope(
             f"{root_task_id}: {sorted(outside)}"
         )
 
+    for payload in descendants:
+        task_refs = extract_scope_references(payload)
+        wrong_task_roots = set(task_refs.root_ids) - {root_task_id}
+        if wrong_task_roots:
+            task_id = payload.get("id") or payload.get("task_id") or "unknown"
+            raise WorkflowScopeViolation(
+                f"task {task_id} declares root IDs outside active root "
+                f"{root_task_id}: {sorted(wrong_task_roots)}"
+            )
+
     # A descendant discovered through root.children must not secretly point
     # at a different root.  QA and synthesis legitimately have multiple
     # parents, but every parent must still be inside this graph.
@@ -193,6 +236,12 @@ def validate_workflow_scope(
             raise WorkflowScopeViolation(
                 f"task {task_id} has parent IDs outside active root "
                 f"{root_task_id}: {sorted(outside_parents)}"
+            )
+        if extract_scope_references(payload).root_ids and root_task_id in parent_ids:
+            task_id = payload.get("id") or payload.get("task_id") or "unknown"
+            raise WorkflowScopeViolation(
+                f"scoped task {task_id} must not use workflow root "
+                f"{root_task_id} as an execution parent"
             )
 
 
