@@ -41,7 +41,7 @@ export default function OfficeControls({
           <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
             {COMPANY.titlePrefix} {COMPANY.titleAccent}
           </h1>
-          <p className="text-body-md font-body-md text-on-surface-variant mt-2 max-w-2xl">
+          <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-2xl">
             실제 LangGraph가 실행 중인 Worker만 부서 안에서 작업하고, 부서 간 handoff는 부서장끼리만 진행합니다.
           </p>
         </div>

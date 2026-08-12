@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  departmentStage,
   fetchOperations,
   readableRuntimeMessage,
+  readableRuntimeStatus,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
+import DepartmentInspector from "./DepartmentInspector";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
@@ -27,13 +30,29 @@ const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
   ERROR: { label: "오류", tone: "border-error/40 bg-error-container text-on-error-container" },
 };
 
-function DepartmentCard({ department }: { department: OperationsDepartment }) {
+function DepartmentCard({
+  department,
+  selected,
+  onSelect,
+}: {
+  department: OperationsDepartment;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const status = String(department.status).toUpperCase();
   const view = STATUS_VIEW[status] ?? { label: status, tone: "border-outline-variant bg-surface-container text-on-surface-variant" };
   const message = readableRuntimeMessage(department.status_reason);
 
   return (
-    <article className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3">
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      aria-controls="department-inspector"
+      className={`text-left bg-surface-container-lowest border rounded-lg p-4 flex flex-col gap-3 transition-colors hover:bg-surface-container ${
+        selected ? "border-primary ring-1 ring-primary" : "border-outline-variant"
+      }`}
+    >
       <div className="flex justify-between items-start gap-2">
         <div className="min-w-0">
           <span className="block text-label-md font-label-md text-on-surface-variant uppercase">{department.domain}</span>
@@ -64,7 +83,7 @@ function DepartmentCard({ department }: { department: OperationsDepartment }) {
         {department.executor ?? "LangGraph"} · {department.worker_model ?? "qwen3:1.7b"} ·{" "}
         {department.output_contract ?? "worker-context.v1"}
       </small>
-    </article>
+    </button>
   );
 }
 
@@ -72,6 +91,7 @@ export default function AgentLogsView() {
   const [data, setData] = useState<OperationsView | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -88,6 +108,12 @@ export default function AgentLogsView() {
   const registeredWorkers = departments.reduce((total, item) => total + item.worker_count, 0);
   const activeWorkers = departments.reduce((total, item) => total + item.active_worker_count, 0);
   const degraded = departments.filter((item) => ["DEGRADED", "BLOCKED", "ERROR"].includes(item.status)).length;
+
+  // 선택한 부서. 아직 안 눌렀으면 아무것도 펼치지 않는다.
+  const selected = useMemo(
+    () => departments.find((item) => item.department_code === selectedCode) ?? null,
+    [departments, selectedCode],
+  );
 
   const metrics = [
     { label: "부서", value: departments.length || 8 },
@@ -136,7 +162,16 @@ export default function AgentLogsView() {
       {departments.length > 0 ? (
         <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4" aria-label="8개 부서 목록">
           {departments.map((department) => (
-            <DepartmentCard key={department.department_code} department={department} />
+            <DepartmentCard
+              key={department.department_code}
+              department={department}
+              selected={department.department_code === selectedCode}
+              onSelect={() =>
+                setSelectedCode((current) =>
+                  current === department.department_code ? null : department.department_code,
+                )
+              }
+            />
           ))}
         </section>
       ) : (
@@ -153,6 +188,14 @@ export default function AgentLogsView() {
           {error ? <p className="text-xs text-error m-0 mt-2">⚠️ {error}</p> : null}
         </section>
       )}
+
+      {selected && data ? (
+        <DepartmentInspector department={selected} data={data} />
+      ) : departments.length > 0 ? (
+        <p className="text-body-sm font-body-sm text-on-surface-variant">
+          부서 카드를 누르면 직원 Registry와 실시간 상태가 아래에 펼쳐집니다.
+        </p>
+      ) : null}
 
       <p className="text-xs text-outline">
         실행 상태 Source: BFF <code>/ui/snapshot</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry

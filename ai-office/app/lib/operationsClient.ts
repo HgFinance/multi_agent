@@ -45,12 +45,83 @@ export type OperationsDepartment = {
   source_profile: string;
 };
 
+export type AgentStatusEvent = {
+  department_code: string;
+  worker_id: string | null;
+  agent_id: string;
+  status: RuntimeStatus;
+  role: string | null;
+  reason: string | null;
+};
+
+export type RuntimeWorker = {
+  worker_id: string;
+  department_code: string;
+  stage: string;
+  role: string;
+  status: string;
+  summary: string | null;
+};
+
+export type RuntimeMessage = {
+  id: string;
+  occurred_at: string;
+  kind: string;
+  department_code: string | null;
+  worker_id: string | null;
+  text: string;
+};
+
+export type LlmPerformanceMetric = {
+  worker_id: string;
+  role: string;
+  stage: string;
+  model_name: string;
+  status: string;
+  attempts: number;
+  latency_ms: number;
+  eval_score: number | null;
+};
+
 export type OperationsView = {
   observed_at: string;
   runtime_connected: boolean;
   departments: OperationsDepartment[];
   warnings: string[];
+  agentStatuses: AgentStatusEvent[];
+  activeWorkers: RuntimeWorker[];
+  messages: RuntimeMessage[];
+  metrics: LlmPerformanceMetric[];
 };
+
+/** LLM 성과 metric의 `stage`는 부서 domain과 이름이 몇 개 다르다. main 매핑 그대로. */
+export function departmentStage(department: OperationsDepartment): string {
+  return (
+    { governance: "ceo", workforce: "hr", accounting: "accounting" }[department.domain] ?? department.domain
+  );
+}
+
+const RUNTIME_STATUS_LABEL: Record<string, string> = {
+  CONNECTED: "연결됨",
+  STALE: "지연 수신",
+  UNKNOWN: "확인 중",
+  OFFLINE: "미연결",
+  IDLE: "대기",
+  REGISTERED: "등록됨",
+  QUEUED: "실행 대기",
+  RUNNING: "업무 중",
+  COMPLETED: "완료",
+  WAITING_APPROVAL: "승인 대기",
+  BLOCKED: "실행 차단",
+  DEGRADED: "안전 보류",
+  ERROR: "오류",
+  SKIPPED: "미호출",
+};
+
+export function readableRuntimeStatus(value: unknown): string {
+  const status = String(value ?? "UNKNOWN").toUpperCase().replace(/\s+/g, "_");
+  return RUNTIME_STATUS_LABEL[status] ?? status;
+}
 
 /** 서버가 그대로 뱉는 실패 사유를 사람이 읽을 문장으로 바꾼다.
  *  main `statusLabels.readableRuntimeMessage`를 그대로 옮겼다. */
@@ -91,7 +162,22 @@ export async function fetchOperations(): Promise<OperationsView> {
         : `HTTP ${response.status}`;
     throw new Error(detail);
   }
-  const operations = (body as { operations?: Partial<OperationsView> } | null)?.operations;
+  const operations = (
+    body as {
+      operations?: {
+        observed_at?: string;
+        runtime_connected?: boolean;
+        departments?: OperationsDepartment[];
+        warnings?: string[];
+        agent_statuses?: AgentStatusEvent[];
+        runtime?: {
+          active_workers?: RuntimeWorker[];
+          messages?: RuntimeMessage[];
+          performance_metrics?: LlmPerformanceMetric[];
+        };
+      };
+    } | null
+  )?.operations;
   if (!operations || !Array.isArray(operations.departments)) {
     throw new Error("BFF 응답에 부서 Registry가 없습니다.");
   }
@@ -100,5 +186,9 @@ export async function fetchOperations(): Promise<OperationsView> {
     runtime_connected: Boolean(operations.runtime_connected),
     departments: operations.departments,
     warnings: operations.warnings ?? [],
+    agentStatuses: operations.agent_statuses ?? [],
+    activeWorkers: operations.runtime?.active_workers ?? [],
+    messages: operations.runtime?.messages ?? [],
+    metrics: operations.runtime?.performance_metrics ?? [],
   };
 }
