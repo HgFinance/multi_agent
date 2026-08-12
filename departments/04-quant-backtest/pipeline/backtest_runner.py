@@ -41,7 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pit_dataset import DATA_ROOT, content_hash, load_partition
+from pit_dataset import DATA_ROOT, content_hash, load_partition, resolve_object_path
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
@@ -594,7 +594,8 @@ def load_dataset(conn, name: str, version: str):
 
     rows: list[dict] = []
     for key, path, phash in parts:
-        chunk = load_partition(DATA_ROOT.parent / path)
+        # 원장의 object_path 는 빌드한 OS 의 구분자를 그대로 갖고 있다 - 정규화한다.
+        chunk = load_partition(resolve_object_path(path))
         got = content_hash(chunk)
         if got != phash:
             raise RuntimeError(

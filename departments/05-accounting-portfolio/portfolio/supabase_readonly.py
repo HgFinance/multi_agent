@@ -525,7 +525,12 @@ class _AsyncpgFetcher:
             import asyncpg
         except ModuleNotFoundError as exc:
             raise SupabaseReadOnlyError("asyncpg is required for the async DB driver") from exc
-        connection = await asyncpg.connect(self.dsn, timeout=8)
+        # statement_cache_size=0 - Supabase 풀러의 transaction mode(6543) 에서는
+        # 커넥션이 트랜잭션마다 다른 서버 세션에 붙는다. asyncpg 는 기본으로
+        # prepared statement 를 캐시하는데, 그 캐시는 앞선 세션에만 존재하므로
+        # 두 번째 호출부터 `prepared statement "__asyncpg_stmt_x__" does not exist`
+        # 로 죽는다. psycopg2 는 prepared statement 를 안 써서 영향이 없다.
+        connection = await asyncpg.connect(self.dsn, timeout=8, statement_cache_size=0)
         try:
             async with connection.transaction(readonly=True):
                 asyncpg_query = re.sub(

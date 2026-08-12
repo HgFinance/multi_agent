@@ -54,6 +54,12 @@ _AUDIT_DIR = Path(__file__).resolve().parent.parent / "audit"
 _AGENTIC_RAG_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
 )
+# 저장소 루트. 아래 import 사슬이 `orchestration.contracts.mas`(qa_mandate_workers)
+# 와 `apps.observability`를 쓰므로 **여기서** 넣어야 한다. 예전에는 415행에서 넣었는데
+# 그 사슬을 처음 타는 import 는 99행이라 316줄 늦었다. risk-api 와 같은 고장으로,
+# 컨테이너에서 `uvicorn` 콘솔 스크립트로 뜨면 audit-api·qa-worker 가 둘 다
+# `ModuleNotFoundError: orchestration` 크래시 루프였다 - 2026-08-12 실측.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _configured_evidence_corpus() -> Path:
@@ -67,7 +73,7 @@ def _configured_evidence_corpus() -> Path:
     )
 
 
-for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR):
+for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT):
     sys.path.insert(0, str(_p))
 from corpus_registry import inspect_policy_corpus
 from evidence_qa_engine import (

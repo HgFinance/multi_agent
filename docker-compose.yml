@@ -954,6 +954,26 @@ services:
       ENABLE_CEO_CLI: ${ENABLE_CEO_CLI:-true}
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
+      # ▶ 부서 API 주소. **컨테이너 DNS 이름**이어야 한다.
+      #   risk.py 의 기본값은 `http://127.0.0.1:8041`(호스트 포트 매핑)이라
+      #   컨테이너 안에서는 자기 자신을 가리켜 connection refused 가 된다.
+      #   qa.py·governance_client.py 의 기본값은 빈 문자열이라 각각 503 /
+      #   NOT_CONFIGURED 로 조용히 죽는다 - 2026-08-12 기동 시 실제로 셋 다
+      #   그 상태였다(/health/ready 가 governance NOT_CONFIGURED 로 보고).
+      #   부서 API 의 컨테이너 내부 포트는 전부 8000 이다(통합 계획 10.3절).
+      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
+      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
+      # ▶ 포트폴리오 파이프라인 Worker 런타임.
+      #   이 둘이 없으면 `_configured_worker_runtime()` 이 `deterministic_test`
+      #   로 떨어져 **부서 Worker 응답이 전부 TEST 고정문자열**이 된다. 컨테이너로
+      #   옮기면서 빠져 있었다. risk-api/audit-api 와 같은 host ollama 를 쓴다.
+      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
+      PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 

@@ -98,7 +98,11 @@ from hiring_request import (
     InMemoryHiringRequestRepository,
 )
 from hiring_request import transition as hiring_transition
-from observability import INVESTMENT_DEPARTMENT_STAGE, check_idle_agents
+from observability import (
+    INVESTMENT_DEPARTMENT_STAGE,
+    WorkerRegistryUnavailable,
+    check_idle_agents,
+)
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
     AgentNotFoundError,
@@ -1100,11 +1104,20 @@ def list_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
-    reports = check_idle_agents(
-        departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
-        lookback_hours=lookback_hours,
-        idle_threshold_hours=idle_threshold_hours,
-    )
+    try:
+        reports = check_idle_agents(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+            lookback_hours=lookback_hours,
+            idle_threshold_hours=idle_threshold_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        # 배포 이미지에 다른 본부 Worker registry 가 없다. 빈 목록(=유휴 없음)으로
+        # 위장하지 않고 503 으로 알린다 - "관측했더니 깨끗하다"와 "관측을 못 했다"는
+        # 다른 사실이고, HR 주간 계획이 뒤엣것을 앞엣것으로 읽으면 안 된다.
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
     return {"idle_agents": [r.as_dict() for r in reports]}
 
 

@@ -184,6 +184,12 @@ def _vocab_block() -> str:
     #   접수·Gate 0 을 다 통과한 뒤 실험 단계에서 `'low_volatility' 전략 구현
     #   (STRATEGY_CATALOG 등재 조건)` 으로 죽었다. **못 돌 것을 권한 쪽이 문제다.**
     #
+    #   ▷ 그 뒤 원인이 하나 더 있었다(같은 날): STRATEGY_CATALOG 자체가 손글씨
+    #     표라 실행면(strategy_templates.TEMPLATES)에 8개가 구현된 뒤에도 2개만
+    #     적혀 있었다. 즉 `low_volatility` 는 **구현이 있는데 반려된** 것이다.
+    #     이제 STRATEGY_CATALOG 은 TEMPLATES 파생 뷰라 둘이 갈릴 수 없다.
+    #     여기서 읽는 값도 자동으로 따라오므로 이 브리핑은 그대로 둔다.
+    #
     #   마찬가지로 파라미터도 실행면(config_binding.EDGE_KEYS)이 읽는 것만 쓸 수
     #   있다. 밖의 키를 쓰면 "등록한 가설과 실행한 실험이 달라진다"며 거부되는데,
     #   기획자는 그 목록을 볼 길이 없었다(실측: signal_window_days 로 거부).

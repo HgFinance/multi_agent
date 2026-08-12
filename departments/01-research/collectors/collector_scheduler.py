@@ -149,8 +149,32 @@ JOBS: tuple[Job, ...] = (
     # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
         daily_at=time(16, 20)),
-    Job("macro", ("collectors/macro_collector.py", "--collect"),
-        daily_at=time(7, 30)),
+    # ▶ macro 는 내렸다 (2026-08-12, 재일님 결정 - "퀀트는 정량분석만, 정성분석은
+    #   점수 팩터로")
+    #
+    #   하던 일: FRED·ECOS·KOSIS 를 매일 07:30 에 research.macro_observations 로.
+    #
+    #   무엇이 대신하는가: 거시는 이제 **정성 점수 팩터**의 재료다. 에이전트가
+    #   MCP 로 조회해서 판정하고, 결정론 Python 이 점수로 환산해 적재한다
+    #   (docs/02-engineering/QUALITATIVE_FACTOR_SPEC.md). 원계열을 통째로
+    #   적재하지 않는다.
+    #   MCP 후보: FRED(stefanoamorelli/fred-mcp-server, HTTP 지원·AGPL 주의),
+    #             KOSIS(seolcoding/korean-stat-mcp, Python·MIT·HTTP).
+    #   ⚠ ECOS(한국은행)는 단독 MCP 가 없다 - 직접 만들거나 계열을 포기해야 한다.
+    #
+    #   ⚠ 소비처가 살아 있다. 테이블은 남고 **갱신만 멈춘다**:
+    #     - departments/04-quant-backtest/pipeline/data_resolution.py
+    #       (macro_observations 를 observed_at PIT 소스로 등록)
+    #     - departments/01-research/evidence/narrative_guard.py
+    #     - supabase/migrations/20260731000900_public_dashboard_views.sql
+    #     - departments/01-research/contracts/research_v2.py
+    #   재일님 결정은 "어느 정도 재현 가능하면 MCP 로 충분하다"이다. 그 판단대로
+    #   **원계열의 소급 재현은 포기**한다 - 점수 팩터는 forward-only 다.
+    #   research-data-steward(07:15) 가 리서치 평면 DQ 를 보므로 계열이 굳는 것은
+    #   거기서 드러나야 한다. 안 드러나면 그건 Steward 의 결함이다.
+    #
+    # Job("macro", ("collectors/macro_collector.py", "--collect"),
+    #     daily_at=time(7, 30)),
     # 시세 평면 심박·품질 감사 - 개장 전, 밤 배치가 다 끝난 뒤 (FAIL 이면 exit 1
     # 로 스케줄러 로그에 남는다 - 개장 전에 눈에 띄는 것이 목적)
     Job("data-steward", ("collectors/market_data_steward.py", "--audit"),
@@ -184,10 +208,34 @@ JOBS: tuple[Job, ...] = (
         daily_at=time(18, 50)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "1500"),
         daily_at=time(18, 30)),
-    # 공시 원문 Archive - 당일 공시 원본 ZIP 을 Private Storage 로 (2시간 유예가
-    # 있어 저녁 실행이 당일분 대부분을 잡고, 미준비분은 다음 날 자연 재시도)
-    Job("document-archive", ("collectors/opendart_document_collector.py", "--collect", "--limit", "600"),
-        daily_at=time(20, 0)),
+    # ▶ document-archive 는 내렸다 (2026-08-12, 재일님 결정)
+    #
+    #   하던 일: 당일 공시 원본 ZIP 을 Private Storage 로 적재하고 research.documents
+    #   본문을 채웠다. 저녁 20:00, 하루 600건.
+    #
+    #   왜 내리는가 - **용량이다.** 실측 DB 937MB 중
+    #     research.evidence_chunks  586MB (43,404행)  ← 원문에서 파생된 RAG 청크
+    #     research.documents         78MB (138,019행)
+    #   evidence_chunks 가 큰 이유는 문서 수가 아니라 1,536차원 임베딩 + HNSW
+    #   인덱스다(행당 ~14KB). **원문이 안 들어오면 청크도 안 생긴다** - 신규
+    #   유입을 끊는 지점이 여기 하나뿐이라 이 Job 이 대상이 됐다.
+    #
+    #   무엇이 대신하는가: DART MCP 의 `get_attachments`/`download_document` 를
+    #   에이전트가 **필요할 때만** 부른다. 전량 선적재 -> 요청시 조회로 바뀐다.
+    #   기준과 팩터 설계는 docs/02-engineering/QUALITATIVE_FACTOR_SPEC.md.
+    #
+    #   ⚠ 남아 있는 것 - 착각하지 말 것
+    #     - 이미 쌓인 evidence_chunks 586MB 는 그대로다. retention 으로 따로 정리한다.
+    #     - 공시 **목록**(`disclosure` Job)은 안 내린다. 10분 주기 장중 감지라
+    #       실시간성이 있고, QF-05(정정 빈도)의 재료이기도 하다.
+    #     - 재무·현금흐름도 안 내린다. F-Score 8/9 와 Altman Z 가 그 위에 있다.
+    #
+    #   되돌리려면: 아래 Job 을 되살리면 된다. 수집기 파일
+    #   (collectors/opendart_document_collector.py) 은 지우지 않았다 -
+    #   MCP 대체가 실측으로 검증되기 전까지 남겨 둔다.
+    #
+    # Job("document-archive", ("collectors/opendart_document_collector.py", "--collect", "--limit", "600"),
+    #     daily_at=time(20, 0)),
     # 개황이 빈 issuer 보강 (전량 보강은 완료 - 이후는 신규 필러 몫).
     # 300: 공시 백필 하루치가 신규 143 corp 를 만든 실측(2026-07-31) + 여유.
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
@@ -203,13 +251,21 @@ JOBS: tuple[Job, ...] = (
     # 확정되고 밤 배치가 시작되기 전.
     Job("packet-outcome", ("collectors/packet_outcome_scorer.py", "--score"),
         daily_at=time(18, 0)),
-    # 지정학 리스크 (GPR 일별 지수 + GDELT 테마 보도량·톤).
-    # 07:20 - Steward(07:10) 뒤, 개장 전. 밤사이 미국·중동 사건이 반영된
-    # 상태로 장을 연다. 일 단위 계열이고 진행 중인 날은 제외하므로 장중
-    # 재폴링은 이득이 없다(15분 해상도가 필요하면 timelinevolraw - 백로그).
-    Job("geopolitical", ("collectors/geopolitical_collector.py", "--collect",
-                         "--days", "120"),
-        daily_at=time(7, 20)),
+    # ▶ geopolitical 은 내렸다 (2026-08-12, 재일님 결정 - macro 와 같은 이유)
+    #
+    #   하던 일: GPR 일별 지수 + GDELT 테마 보도량·톤을 매일 07:20 에 적재.
+    #
+    #   무엇이 대신하는가: 지정학도 **정성 점수 팩터**로 간다. 원계열 120일치를
+    #   매일 다시 받아 쌓는 대신, 에이전트가 조회해 판정하고 점수만 남긴다.
+    #
+    #   ⚠ departments/01-research/agents/geopolitical_analyst.py (37KB) 가
+    #     이 테이블에 전적으로 의존한다. 계열이 굳으면 그 분석가의 출력도
+    #     굳는다 - 팩터 경로가 서기 전까지는 그 분석가를 "최신"으로 읽으면 안 된다.
+    #     config/geopolitical_themes.txt 의 테마 정의는 팩터 설계에 그대로 쓴다.
+    #
+    # Job("geopolitical", ("collectors/geopolitical_collector.py", "--collect",
+    #                      "--days", "120"),
+    #     daily_at=time(7, 20)),
     # Bluesky 미국 표적 계정 (기관 미디어 4곳 + 매크로 논객 2인, ~166건/일 실측).
     # 60분 주기면 계정당 피드 50건 버퍼가 최고 볼륨(Reuters ~57건/일)도 20시간
     # 이상 덮는다 - 놓칠 수 없는 구조. 창 06:00~23:50: 미 장중(KST 밤)은 다음날

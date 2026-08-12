@@ -35,20 +35,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ORCH_VERSION = "quant-experiment-orchestrator-v1"
 
-# 구현된 전략 카탈로그 - 여기 없는 edge type 은 실험 불가가 사실이다.
-# 새 전략을 구현하면 한 줄 추가한다 (구현 없이 추가하는 것이 금지 사항).
+from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
+    NOT_IMPLEMENTED,
+    TEMPLATES,
+)
+
+# 구현된 전략 카탈로그. **실체는 strategy_templates.TEMPLATES 이고 여기는 파생
+# 뷰다** - backtest_runner.STRATEGIES 가 이미 같은 방식으로 파생돼 있다.
+#
+# ▶ 왜 파생으로 바꿨나 (2026-08-12 실측)
+#   여기는 원래 `momentum`·`mean_reversion` 둘만 적힌 손글씨 표였다. 그런데
+#   실행면(TEMPLATES)에는 그때 이미 8개가 구현돼 있었다 - LOWVOL·RAMOM·LIQREV·
+#   BRK·TREND·ILLIQ 까지. 그래서 `low_volatility` 가설이 **구현이 있는데도**
+#   `'low_volatility' 전략 구현 (STRATEGY_CATALOG 등재 조건)` 으로 반려됐다.
+#   2026-08-11 이후 백테스트가 한 건도 안 돈 이유의 절반이 이것이다.
+#
+#   같은 부서 안에서 표가 둘로 갈리면 접수·판정·실행이 서로 다른 것을 본다
+#   (trial_family 이름공간 사고와 같은 계열). 손글씨 표를 지우고 실행면 하나만
+#   남긴다 - 전략을 구현하면 카탈로그는 저절로 따라온다.
 STRATEGY_CATALOG: dict[str, dict] = {
-    "momentum": {
-        "strategy_code": "MOM-20-SMOKE",
-        "impl": "pipeline/backtest_runner.py + walk_forward.py",
-        "note": "20일 모멘텀 상위 N 균등, 월초 리밸런스",
-    },
-    "mean_reversion": {
-        "strategy_code": "REV-5-SMOKE",
-        "impl": "pipeline/backtest_runner.py (STRATEGIES) + walk_forward 조각",
-        "note": "5일 낙폭 하위 N 균등, 5거래일 리밸런스 (2026-08-01 구현 - "
-                "QNT-01 첫 가설의 백로그를 이행)",
-    },
+    t.edge_type: {
+        "strategy_code": t.template_id,
+        "impl": "pipeline/strategy_templates.py (TEMPLATES) + backtest_runner.py",
+        "note": t.note,
+        "claimed_edge": t.claimed_edge,
+    }
+    for t in TEMPLATES.values()
 }
 # v2 부터 notional 을 담는다(유동성 계층 슬리피지 재료). v1 파티션 파일은
 # v2 빌드가 같은 경로에 덮어써 매니페스트와 해시가 어긋난다 - 해시 가드가
@@ -99,7 +111,15 @@ def feasibility(hypothesis: dict, existing_datasets: set,
         missing.append("edge_type:(미지정)")
     elif edge not in catalog:
         missing.append(f"strategy_impl:{edge}")
-        backlog.append(f"'{edge}' 전략 구현 (STRATEGY_CATALOG 등재 조건)")
+        # 왜 없는지를 구분해 적는다. `NOT_IMPLEMENTED` 는 "요청은 있으나 실행면에
+        # 없다"를 사유와 함께 관리하는 표다 - 그 사유를 그대로 실어야 기획자가
+        # 같은 이름을 다시 내지 않는다. 표에도 없으면 어휘 자체가 틀린 것이라
+        # 쓸 수 있는 목록을 보여 준다(없는 이름을 지어낸 쪽을 고쳐야 한다).
+        why = NOT_IMPLEMENTED.get(edge)
+        backlog.append(
+            f"'{edge}' 미구현: {why}" if why
+            else f"'{edge}' 는 어휘에 없다 - 사용 가능: {sorted(catalog)}"
+        )
     return (not missing), missing, backlog
 
 

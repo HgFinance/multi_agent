@@ -119,7 +119,10 @@ class PostgresOrderStore:
     @classmethod
     def connect(cls, dsn: str, adapter: str = "paper") -> PostgresOrderStore:
         _, _, ThreadedConnectionPool = _load_driver()
-        return cls(pool=ThreadedConnectionPool(1, 4, dsn), adapter=adapter)
+        # minconn=0 - 유휴 커넥션을 잡지 않는다. Supabase session mode 풀러가
+        # 클라이언트 15개로 제한돼 있어, 상주 서비스가 쓰지도 않는 커넥션을
+        # 붙잡고 있으면 다른 부서가 못 뜬다(2026-08-12 실측: 24개 중 20개가 idle).
+        return cls(pool=ThreadedConnectionPool(0, 4, dsn), adapter=adapter)
 
     @classmethod
     def from_env(cls, adapter: str = "paper") -> PostgresOrderStore | None:

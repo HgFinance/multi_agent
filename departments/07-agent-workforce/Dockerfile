@@ -35,6 +35,13 @@ COPY improvements ./improvements
 COPY scorecard ./scorecard
 COPY roster ./roster
 COPY workforce_events ./workforce_events
+# api/app.py 57~65행이 sys.path 에 넣는 디렉터리는 여섯 개다 - lifecycle/
+# improvements/scorecard/roster **+ planning + hiring**. 뒤의 둘이 빠져 있어서
+# `from hiring_request import ...` 가 죽고 workforce-api·improvement-worker 가
+# 둘 다 크래시 루프였다(2026-08-12 실측). sys.path 목록과 이 COPY 목록은
+# 같이 움직여야 한다.
+COPY planning ./planning
+COPY hiring ./hiring
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

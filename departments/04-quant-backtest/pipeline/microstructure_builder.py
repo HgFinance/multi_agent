@@ -105,6 +105,50 @@ select coalesce(q.instrument_id, t.instrument_id) instrument_id,
   from q full outer join t on t.instrument_id = q.instrument_id
 """
 
+# ── 외부 원천(Trading_bot)에서 바로 접기 ──────────────────────────────────
+#
+# ▶ 왜 원시를 안 옮기나 (재일님 지적 2026-08-12 "Parquet 이거 쓰면 안되나?")
+#   우리 원장의 호가는 29일 중 8일만 온전했다. 나머지 21일(약 3.9억 행)을
+#   이관하려니 대상 청크가 이미 압축돼 있어 33~44시간이 걸렸다.
+#
+#   그런데 **옮길 이유가 없다.** 저쪽 DB 에는 74거래일이 온전히 있고, 우리가
+#   필요한 것은 종목·일자 단위 피처(하루 2,500행)다. 집계를 저쪽에서 돌리고
+#   결과만 받으면 3.9억 행이 15만 행이 된다. 원시는 저쪽에 남고, 우리는
+#   백테스트가 실제로 읽는 계층만 갖는다.
+#
+# ▶ 저쪽 스키마는 이미 파생값을 갖고 있다
+#   quotes.spread(= ask1-bid1), quotes.bi(호가불균형), ticks.side/volume.
+#   같은 정의를 두 번 구현하지 않는다 - 우리 쪽 SQL 과 대응이 어긋나면
+#   같은 종목의 같은 날 값이 경로마다 달라진다.
+_SQL_BUILD_EXTERNAL = """
+with q as (
+    select symbol,
+           avg(case when (ask1 + bid1) > 0
+                    then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_bps,
+           avg(bi::float8) depth_imbalance,
+           count(*) n_quotes
+      from public.quotes
+     where ts >= %(lo)s and ts < %(hi)s
+     group by symbol
+), t as (
+    select symbol,
+           case when sum(volume) > 0
+                then sum(side * volume)::float8 / sum(volume) end ofi,
+           case when max(ts) > min(ts)
+                then count(*)::float8
+                     / (extract(epoch from max(ts) - min(ts)) / 60.0) end trade_intensity,
+           stddev_samp(ln(nullif(price, 0)::float8)) * sqrt(count(*)) realized_vol,
+           count(*) n_ticks
+      from public.ticks
+     where ts >= %(lo)s and ts < %(hi)s and price > 0
+     group by symbol
+)
+select coalesce(q.symbol, t.symbol) symbol,
+       q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
+       coalesce(t.n_ticks, 0), coalesce(q.n_quotes, 0)
+  from q full outer join t on t.symbol = q.symbol
+"""
+
 _SQL_INSERT = """
 insert into market.microstructure_features
   (event_time, observed_at, instrument_id, market, feature_set_version,
@@ -185,6 +229,54 @@ def build_day(market_conn, day: date, *, dry_run: bool = False) -> dict:
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
     market_conn.commit()
     return {"day": day, "rows": len(payload), **grades}
+
+
+def build_day_external(market_conn, src_conn, day: date, *,
+                       dry_run: bool = False) -> dict:
+    """저쪽 DB 에서 집계하고 **결과만** 우리 원장에 넣는다.
+
+    종목 매핑은 우리 쪽 `market.symbol_map` 이 정본이다. 못 찾은 종목은
+    **버리지 않고 센다** - 조용히 빠지면 유니버스가 왜 줄었는지 알 수 없다.
+    """
+    from psycopg2.extras import execute_values
+
+    lo, hi = session_bounds(day)
+    with src_conn.cursor() as cur:
+        cur.execute(_SQL_BUILD_EXTERNAL, {"lo": lo, "hi": hi})
+        rows = cur.fetchall()
+    if not rows:
+        return {"day": day, "rows": 0, "note": "저쪽 원천에 그날 행이 없다"}
+
+    with market_conn.cursor() as cur:
+        cur.execute("select symbol, instrument_id from market.symbol_map")
+        iid_of = dict(cur.fetchall())
+
+    bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
+    payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
+    for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes) in rows:
+        iid = iid_of.get(str(sym).strip())
+        if iid is None:
+            unmapped += 1
+            continue
+        g = quality_of(int(n_ticks), int(n_quotes))
+        grades[g] += 1
+        payload.append((
+            bucket,
+            # 이관 구간과 같은 규칙: 관측 시각이 원본에 없으므로 자리 채움이고,
+            # 그 사실은 market.pit_provenance 가 'NONE' 으로 못박는다.
+            bucket, iid, "KRX", FEATURE_SET_VERSION,
+            rvol, spread, di, ofi, intensity,
+            f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)},'
+            f' "origin": "external"}}',
+            g, bucket, input_hash(day, int(n_ticks), int(n_quotes))))
+
+    if dry_run:
+        return {"day": day, "rows": len(payload), "unmapped": unmapped,
+                **grades, "dry_run": True}
+    with market_conn.cursor() as cur:
+        execute_values(cur, _SQL_INSERT, payload, page_size=2000)
+    market_conn.commit()
+    return {"day": day, "rows": len(payload), "unmapped": unmapped, **grades}
 
 
 def pending_days(market_conn, *, since: date | None = None) -> list[date]:
@@ -275,8 +367,36 @@ def _check_intensity_uses_observed_span():
     print("  체결강도 관측폭 기준     OK")
 
 
+def _check_external_sql_matches_local_definitions():
+    """저쪽 집계가 **우리 것과 같은 것을 재는가.**
+
+    같은 종목의 같은 날 값이 경로마다 다르면 어느 쪽으로 만든 피처인지에 따라
+    백테스트 결과가 갈린다. 저쪽은 spread·bi 를 이미 갖고 있으므로 정의를 두
+    번 구현하지 않고 그것을 쓴다 - 대신 **같은 단위**여야 한다.
+    """
+    ext = " ".join(ln.split("--")[0] for ln in _SQL_BUILD_EXTERNAL.splitlines())
+    ext = " ".join(ext.split())
+    loc = " ".join(ln.split("--")[0] for ln in _SQL_BUILD.splitlines())
+    loc = " ".join(loc.split())
+
+    # 스프레드는 양쪽 다 bps(× 10000)다
+    assert "* 10000" in ext and "* 10000" in loc, "스프레드 단위가 갈렸다"
+    # OFI 는 양쪽 다 부호 있는 체결량 / 총 체결량이고, 분모 0 이면 NULL
+    for s in (ext, loc):
+        assert "sum(side * volume)" in s or "sum(side * quantity)" in s, s[:80]
+        assert "> 0 then" in s.replace("  ", " "), "분모 0 방어가 없다"
+    # 체결강도는 양쪽 다 관측 폭 기준
+    assert "max(ts) - min(ts)" in ext and "max(event_time) - min(event_time)" in loc
+    # 결측을 0 으로 채우지 않는 규칙도 같다
+    for expr in ("coalesce(q.spread_bps", "coalesce(t.ofi"):
+        assert expr not in ext, f"외부 경로가 결측을 채운다: {expr}"
+    assert "full outer join" in ext.lower(), "한쪽만 있는 종목이 사라진다"
+    print("  외부/내부 정의 일치      OK")
+
+
 def _selfcheck() -> int:
     print(f"{BUILDER_VERSION} 자체 점검 (DB 없음)")
+    _check_external_sql_matches_local_definitions()
     _check_quality_is_marked_not_dropped()
     _check_session_bounds_exclude_after_hours()
     _check_input_hash_tracks_inputs()
@@ -292,6 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--from", dest="since", default="")
+    # 저쪽(Trading_bot) DB 에서 집계한다. 우리 원장의 호가 구멍을 원시 이관
+    # 없이 메우는 경로다 - 3.9억 행 대신 15만 행만 움직인다.
+    ap.add_argument("--external-dsn", default="",
+                    help="Trading_bot ticks DB DSN. 주면 그쪽에서 집계한다")
+    ap.add_argument("--days", type=int, default=0,
+                    help="--external-dsn 과 함께: 최근 N 거래일만")
     a = ap.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -304,21 +430,42 @@ def main(argv: list[str] | None = None) -> int:
 
     env = load_project_env()
     conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=20)
+    src = psycopg2.connect(a.external_dsn, connect_timeout=20) if a.external_dsn else None
     try:
         since = date.fromisoformat(a.since) if a.since else None
-        days = pending_days(conn, since=since)
+        if src is not None:
+            # 저쪽이 가진 거래일을 기준으로 삼는다. 우리 원장의 청크를 기준으로
+            # 하면 호가가 빈 날이 "이미 있다" 로 잡혀 그대로 넘어간다.
+            with src.cursor() as cur:
+                cur.execute("select distinct ts::date from public.ticks order by 1")
+                days = [r[0] for r in cur.fetchall()]
+            if since:
+                days = [d for d in days if d >= since]
+            if a.days:
+                days = days[-a.days:]
+        else:
+            days = pending_days(conn, since=since)
         print(f"{BUILDER_VERSION}: 접을 날 {len(days)}건"
-              + (f" ({days[0]} ~ {days[-1]})" if days else ""), flush=True)
-        total = 0
+              + (f" ({days[0]} ~ {days[-1]})" if days else "")
+              + ("  [외부 원천]" if src is not None else ""), flush=True)
+        total, unmapped = 0, 0
         for i, d in enumerate(days, 1):
-            r = build_day(conn, d, dry_run=a.dry_run)
+            r = (build_day_external(conn, src, d, dry_run=a.dry_run)
+                 if src is not None else build_day(conn, d, dry_run=a.dry_run))
             total += r["rows"]
+            unmapped += r.get("unmapped", 0)
             print(f"  [{i}/{len(days)}] {d}: {r['rows']:,}종목 "
                   f"PASS {r.get('PASS', 0)} WARN {r.get('WARN', 0)} "
-                  f"FAIL {r.get('FAIL', 0)}", flush=True)
-        print(f"  완료: {total:,}행", flush=True)
+                  f"FAIL {r.get('FAIL', 0)}"
+                  + (f" 미매핑 {r['unmapped']}" if r.get("unmapped") else ""),
+                  flush=True)
+        # 미매핑을 총계로도 남긴다 - 하루씩 보면 작아 보여도 쌓이면 유니버스가 준다
+        print(f"  완료: {total:,}행"
+              + (f" / 종목 미매핑 누적 {unmapped:,}" if unmapped else ""), flush=True)
     finally:
         conn.close()
+        if src is not None:
+            src.close()
     return 0
 
 

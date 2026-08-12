@@ -34,6 +34,11 @@ COPY departments/02-trading/contracts ./departments/02-trading/contracts
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability
 COPY apps/security ./apps/security
+# risk_mandate_workers.py 가 `orchestration.contracts.mas` 를 최상위에서 import 한다
+# (build_agent_task_result). 이게 없으면 uvicorn 이 app 을 못 읽고 컨테이너가
+# 크래시 루프에 빠진다 - 2026-08-12 첫 기동에서 실제로 그랬다. mas.py 의 외부
+# 의존은 pydantic 하나뿐이라 이미지가 무거워지지 않는다.
+COPY orchestration ./orchestration
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

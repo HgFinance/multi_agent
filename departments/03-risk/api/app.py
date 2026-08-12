@@ -45,6 +45,13 @@ _CONTRACTS_DIR = (
 _AGENTIC_RAG_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
 )
+# 저장소 루트. 아래 import 사슬이 `orchestration.contracts.mas`(risk_mandate_workers)
+# 와 `apps.observability`를 쓰므로 **여기서** 넣어야 한다. 예전에는 317행에서 넣었는데,
+# 그 사슬을 처음 타는 import 는 98행이라 219줄 늦었다. 개발 셸에서는 저장소 루트가
+# 이미 sys.path 에 있어서 안 드러났고, 컨테이너에서 `uvicorn` 콘솔 스크립트로 뜨자
+# (sys.path[0] 이 /usr/local/bin) `ModuleNotFoundError: orchestration` 으로
+# 크래시 루프가 됐다 - 2026-08-12 실측.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _configured_policy_corpus() -> Path:
@@ -61,7 +68,7 @@ def _configured_policy_corpus() -> Path:
     )
 
 
-for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
+for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT):
     sys.path.insert(0, str(_p))
 
 from contracts import OrderIntent
