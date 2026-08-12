@@ -783,7 +783,7 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+      ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
