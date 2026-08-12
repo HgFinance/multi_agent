@@ -114,11 +114,7 @@
       "operations": [
         {
           "method": "GET",
-          "path": "/health"
-        },
-        {
-          "method": "GET",
-          "path": "/evidence/news"
+          "path": "/calendar/sessions_since"
         },
         {
           "method": "GET",
@@ -130,11 +126,23 @@
         },
         {
           "method": "GET",
+          "path": "/evidence/news"
+        },
+        {
+          "method": "GET",
           "path": "/evidence/search"
         },
         {
           "method": "GET",
           "path": "/evidence/stories"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
         },
         {
           "method": "GET",
@@ -147,24 +155,12 @@
         {
           "method": "GET",
           "path": "/universe/restrictions"
-        },
-        {
-          "method": "GET",
-          "path": "/calendar/sessions_since"
         }
       ]
     },
     "market-read-api": {
       "status": "LEGACY_IMPLEMENTED",
       "operations": [
-        {
-          "method": "GET",
-          "path": "/health"
-        },
-        {
-          "method": "GET",
-          "path": "/snapshot/{symbol}"
-        },
         {
           "method": "GET",
           "path": "/bars/{symbol}"
@@ -175,7 +171,7 @@
         },
         {
           "method": "GET",
-          "path": "/dq/windows"
+          "path": "/dq/bar_freshness"
         },
         {
           "method": "GET",
@@ -183,7 +179,19 @@
         },
         {
           "method": "GET",
-          "path": "/dq/bar_freshness"
+          "path": "/dq/windows"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "GET",
+          "path": "/microstructure/{symbol}"
         },
         {
           "method": "GET",
@@ -191,7 +199,7 @@
         },
         {
           "method": "GET",
-          "path": "/microstructure/{symbol}"
+          "path": "/snapshot/{symbol}"
         }
       ]
     },
@@ -268,32 +276,16 @@
       "status": "PRODUCTION_BLOCKED",
       "operations": [
         {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
           "method": "POST",
           "path": "/investment-cases/{case_id}/risk-check"
-        },
-        {
-          "method": "POST",
-          "path": "/risk/v1/p1/external-snapshot"
-        },
-        {
-          "method": "POST",
-          "path": "/risk/v1/p2/derivatives-check"
-        },
-        {
-          "method": "GET",
-          "path": "/risk/v1/trading-state/{scope}"
-        },
-        {
-          "method": "GET",
-          "path": "/risk/v1/trading-state/{scope}/record"
-        },
-        {
-          "method": "PUT",
-          "path": "/risk/v1/trading-state/{scope}"
-        },
-        {
-          "method": "DELETE",
-          "path": "/risk/v1/trading-state/{scope}"
         },
         {
           "method": "POST",
@@ -310,6 +302,30 @@
         {
           "method": "GET",
           "path": "/risk/v1/observability/runtime"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/p1/external-snapshot"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/p2/derivatives-check"
+        },
+        {
+          "method": "DELETE",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "PUT",
+          "path": "/risk/v1/trading-state/{scope}"
+        },
+        {
+          "method": "GET",
+          "path": "/risk/v1/trading-state/{scope}/record"
         }
       ]
     },
@@ -317,12 +333,68 @@
       "status": "PRODUCTION_BLOCKED",
       "operations": [
         {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
           "method": "POST",
           "path": "/investment-cases/{case_id}/qa-check"
         },
         {
           "method": "POST",
-          "path": "/qa/v1/model-risk/evaluate"
+          "path": "/qa/v1/corrective-actions"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/start"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/submit-for-verification"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/eval-runs"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/eval-runs/{eval_run_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/eval-runs/{eval_run_id}/results"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/events/consume"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/evidence/check"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/evidence/corpus/status"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/incidents/{incident_id}/events"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/incidents/{incident_id}/timeline"
         },
         {
           "method": "POST",
@@ -330,7 +402,7 @@
         },
         {
           "method": "POST",
-          "path": "/qa/v1/events/consume"
+          "path": "/qa/v1/model-risk/evaluate"
         },
         {
           "method": "GET",
@@ -350,6 +422,10 @@
         },
         {
           "method": "POST",
+          "path": "/qa/v1/runs/{agent_run_id}/cancel"
+        },
+        {
+          "method": "POST",
           "path": "/qa/v1/runs/{agent_run_id}/complete"
         },
         {
@@ -362,31 +438,7 @@
         },
         {
           "method": "POST",
-          "path": "/qa/v1/runs/{agent_run_id}/cancel"
-        },
-        {
-          "method": "POST",
           "path": "/qa/v1/runs/{agent_run_id}/tool-calls"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/tool-calls/{tool_call_id}/allow"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/tool-calls/{tool_call_id}/deny"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/tool-calls/{tool_call_id}/complete"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/tool-calls/{tool_call_id}/fail"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/tool-permission/check"
         },
         {
           "method": "POST",
@@ -398,61 +450,49 @@
         },
         {
           "method": "POST",
-          "path": "/qa/v1/incidents/{incident_id}/events"
-        },
-        {
-          "method": "GET",
-          "path": "/qa/v1/incidents/{incident_id}/timeline"
+          "path": "/qa/v1/tool-calls/{tool_call_id}/allow"
         },
         {
           "method": "POST",
-          "path": "/qa/v1/corrective-actions"
+          "path": "/qa/v1/tool-calls/{tool_call_id}/complete"
         },
         {
           "method": "POST",
-          "path": "/qa/v1/corrective-actions/{corrective_action_id}/start"
+          "path": "/qa/v1/tool-calls/{tool_call_id}/deny"
         },
         {
           "method": "POST",
-          "path": "/qa/v1/corrective-actions/{corrective_action_id}/submit-for-verification"
+          "path": "/qa/v1/tool-calls/{tool_call_id}/fail"
         },
         {
           "method": "POST",
-          "path": "/qa/v1/corrective-actions/{corrective_action_id}/verify-and-close"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/corrective-actions/{corrective_action_id}/cancel"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/evidence/check"
-        },
-        {
-          "method": "GET",
-          "path": "/qa/v1/evidence/corpus/status"
+          "path": "/qa/v1/tool-permission/check"
         },
         {
           "method": "POST",
           "path": "/qa/v1/verifications/{verification_id}/assess"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/eval-runs"
-        },
-        {
-          "method": "GET",
-          "path": "/qa/v1/eval-runs/{eval_run_id}"
-        },
-        {
-          "method": "GET",
-          "path": "/qa/v1/eval-runs/{eval_run_id}/results"
         }
       ]
     },
     "workforce-api": {
       "status": "IMPLEMENTED_TEST",
       "operations": [
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/access-assignments/{assignment_id}/revoke"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/access-requests"
+        },
         {
           "method": "POST",
           "path": "/workforce/v1/access-requests"
@@ -466,8 +506,8 @@
           "path": "/workforce/v1/access-requests/{request_id}/provision"
         },
         {
-          "method": "POST",
-          "path": "/workforce/v1/access-assignments/{assignment_id}/revoke"
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}"
         },
         {
           "method": "GET",
@@ -475,11 +515,7 @@
         },
         {
           "method": "GET",
-          "path": "/workforce/v1/roster"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/agents/{agent_id}"
+          "path": "/workforce/v1/agents/{agent_id}/budget-assessment"
         },
         {
           "method": "POST",
@@ -491,86 +527,42 @@
         },
         {
           "method": "POST",
-          "path": "/workforce/v1/improvements"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/improvements/{candidate_id}"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/improvements/{candidate_id}/transitions"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/improvements/{candidate_id}/events"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/departments/{department_code}/scorecard"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/departments/{department_code}/scorecard"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/workforce-plans/{plan_id}/approve"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/workforce-plans/{plan_id}/activate"
-        },
-        {
-          "method": "POST",
-          "path": "/workforce/v1/workforce-plans/{plan_id}/retire"
-        },
-        {
-          "method": "POST",
           "path": "/workforce/v1/budget-assessments"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/agents/{agent_id}/budget-assessment"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/access-requests"
         },
         {
           "method": "GET",
           "path": "/workforce/v1/departments/idle-agents"
         },
         {
+          "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
+        },
+        {
           "method": "POST",
-          "path": "/workforce/v1/hiring-requests"
+          "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
         },
         {
           "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/scorecard"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/departments/{department_code}/scorecard"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/departments/{department_code}/workforce-plans"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/hiring-requests"
+        },
+        {
+          "method": "POST",
           "path": "/workforce/v1/hiring-requests"
         },
         {
@@ -580,6 +572,46 @@
         {
           "method": "POST",
           "path": "/workforce/v1/hiring-requests/{request_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}/events"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements/{candidate_id}/scorecards"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/improvements/{candidate_id}/transitions"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/roster"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/activate"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/approve"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/workforce-plans/{plan_id}/retire"
         }
       ]
     },
@@ -587,55 +619,11 @@
       "status": "IMPLEMENTED_TEST",
       "operations": [
         {
-          "method": "POST",
-          "path": "/governance/v1/mandates/{mandate_id}/versions"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"
-        },
-        {
           "method": "GET",
-          "path": "/governance/v1/mandates/{mandate_id}/current"
-        },
-        {
-          "method": "GET",
-          "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/mandate-assistant/suggest"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/mandates/{mandate_id}/change-requests"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/cases"
-        },
-        {
-          "method": "GET",
-          "path": "/governance/v1/cases/{case_id}"
-        },
-        {
-          "method": "GET",
-          "path": "/governance/v1/cases/{case_id}/timeline"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/cases/{case_id}/transitions"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/cases/{case_id}/advance"
-        },
-        {
-          "method": "POST",
           "path": "/governance/v1/approvals"
         },
         {
-          "method": "GET",
+          "method": "POST",
           "path": "/governance/v1/approvals"
         },
         {
@@ -652,10 +640,50 @@
         },
         {
           "method": "POST",
-          "path": "/governance/v1/escalations"
+          "path": "/governance/v1/cases"
         },
         {
           "method": "GET",
+          "path": "/governance/v1/cases/{case_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases/{case_id}/advance"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/cases/{case_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/cases/{case_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/committee/sessions/{session_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/cancel"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/close"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/committee/sessions/{session_id}/votes"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/escalations"
+        },
+        {
+          "method": "POST",
           "path": "/governance/v1/escalations"
         },
         {
@@ -668,27 +696,39 @@
         },
         {
           "method": "POST",
-          "path": "/governance/v1/notifications"
-        },
-        {
-          "method": "POST",
-          "path": "/governance/v1/committee/sessions"
+          "path": "/governance/v1/mandate-assistant/suggest"
         },
         {
           "method": "GET",
-          "path": "/governance/v1/committee/sessions/{session_id}"
+          "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
         },
         {
           "method": "POST",
-          "path": "/governance/v1/committee/sessions/{session_id}/votes"
+          "path": "/governance/v1/mandates/{mandate_id}/change-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/mandates/{mandate_id}/current"
         },
         {
           "method": "POST",
-          "path": "/governance/v1/committee/sessions/{session_id}/close"
+          "path": "/governance/v1/mandates/{mandate_id}/versions"
         },
         {
           "method": "POST",
-          "path": "/governance/v1/committee/sessions/{session_id}/cancel"
+          "path": "/governance/v1/mandates/{mandate_id}/versions/{version}/activate"
+        },
+        {
+          "method": "POST",
+          "path": "/governance/v1/notifications"
+        },
+        {
+          "method": "GET",
+          "path": "/health"
+        },
+        {
+          "method": "GET",
+          "path": "/health/ready"
         },
         {
           "method": "POST",

@@ -480,6 +480,36 @@ def _access_assignment_dict(a: AccessAssignment) -> dict:
 
 app = FastAPI(title="Workforce Domain API", version="v1")
 
+
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). governance-api 와 같은 규약 -
+# `/health` 는 프로세스 생존만, 저장소 판단은 `/health/ready` 가 한다.
+# 이 서비스도 DATABASE_URL 이 없으면 InMemory 로 후퇴하므로 그 사실을 ready 가 드러낸다.
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. 저장소가 죽어도 200 이다."""
+    return {
+        "status": "ok",
+        "service": "workforce-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(os.environ.get("DATABASE_URL", "").strip()),
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. Roster·Access 원장이 durable 저장소인지 드러낸다."""
+    durable = type(_access_repo).__name__.startswith("Postgres")
+    return {
+        "status": "ready" if durable else "degraded",
+        "service": "workforce-api",
+        "access_store": "postgres" if durable else "in-memory",
+        "authoritative": durable,
+    }
+
+
 if os.environ.get("DATABASE_URL") and PostgresAccessRepository is not None:
     _access_repo = PostgresAccessRepository.connect(os.environ["DATABASE_URL"])
 else:

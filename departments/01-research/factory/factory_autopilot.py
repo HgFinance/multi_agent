@@ -335,7 +335,31 @@ def quant_brief() -> tuple[str, int]:
     out.append("실험은 experiment_orchestrator 가 돌린다 - 사전등록 지문이 "
                "박히고 창별 강건성·과적합 통계가 함께 나온다. 결과 수치를 보고 "
                "설정을 바꾸면 사전등록이 무의미해진다.")
+    out.append(_EXEC_SURFACE)
     return "\n".join(out), len(pending)
+
+
+# ▶ **실행면을 카드에 싣는다** (2026-08-12 실측)
+#   퀀트 카드 3장이 각각 11분씩 조사만 하고 전부 `NOT_RUNNABLE` 로 끝났다.
+#   사유는 "백테스트 실행면·결과 원장이 노출되지 않았다" 였는데, 실행면은
+#   그 자리에 있었다 - 에이전트가 자기 workspace 만 뒤졌다. 프로필 페르소나에
+#   같은 안내가 있었지만 4,400자 안에 묻혔고, 카드 본문이 훨씬 구체적이라
+#   그쪽을 따랐다. **읽히는 자리에 적어야 읽는다.**
+#
+#   시스템 python3 에는 pandas·psycopg2 가 없다. 에이전트가 그걸로 돌렸다가
+#   `ModuleNotFoundError: httpx` 를 받고 "환경이 없다"고 보고한 실측이 있다.
+_EXEC_SURFACE = """
+[실행면 - 있는 것을 없다고 적지 않는다]
+  저장소  /app/departments/04-quant-backtest
+  파이썬  quant-py   (pandas·numpy·psycopg2 포함. system python3 에는 없다)
+
+  cd /app/departments/04-quant-backtest
+  quant-py pipeline/experiment_orchestrator.py --run --hypothesis <id>
+  quant-py pipeline/pit_dataset.py --build --name <n> --version <v> --from <d> --to <d>
+  quant-py pipeline/<모듈>.py            # 인자 없이 = 자체점검
+
+  "실행면이 없다"고 쓰기 전에 위 경로를 실제로 열어 본다. 진짜로 없으면
+  무엇이 없는지 정확히 적는다 - 그 구분이 이 카드의 값이다."""
 
 
 # ── 카드 생성 ────────────────────────────────────────────────────────────────

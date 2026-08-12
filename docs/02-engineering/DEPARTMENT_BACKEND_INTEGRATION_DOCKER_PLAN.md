@@ -658,11 +658,35 @@ Hermes Memory 자체를 다른 본부 Container와 공유 Volume으로 연결하
 모든 Department API는 다음을 제공한다.
 
 ```text
-GET /health/live
-GET /health/ready
-GET /metrics
+GET /health          Liveness  — 프로세스 생존만. 외부(DB·Redis)를 만지지 않는다
+GET /health/ready    Readiness — 필요한 저장소·Event Plane 준비 상태. 못 닿으면 503
 GET /openapi.json
+GET /metrics         (선택) Prometheus. 관측 스택 결정 전까지 부서 재량
 ```
+
+> **2026-08-12 정정**: 원안은 `/health/live` 였으나 **어느 부서도 그 이름으로 만들지
+> 않았다.** 실제 구현은 전부 `/health`(liveness) + `/health/ready`(readiness)였다
+> (trading·accounting·operator-bff). 이름을 현실에 맞춘다 — 문서가 정본이라는 이유로
+> 아홉 개 앱을 다시 고치는 것은 값이 안 맞는다.
+
+같은 날 감사에서 **담당자별로 완전히 갈려 있던 것**을 통일했다.
+
+| 담당 | 통일 전 | 통일 후 |
+|---|---|---|
+| 도현 (trading·accounting) | `/health` + `/health/ready` | 그대로 (이것이 기준이 됐다) |
+| 재일 (research·market) | `/health` 만 | `/health/ready` 추가 |
+| 동규 (risk·qa) | **health 계열 전무**, `/metrics` 만 | `/health` + `/health/ready` 추가 |
+| 영주 (governance·workforce) | **전무** | `/health` + `/health/ready` 추가 |
+
+**남은 편차 2건** (숨기지 않고 기록한다):
+
+1. `research-api`·`market-api`의 `/health`는 **DB를 조회한다.** 이름은 liveness인데
+   하는 일은 readiness다. DB 순단이면 500이 나서 오케스트레이터가 멀쩡한 인스턴스를
+   교체할 수 있다. 지금은 이 경로를 부르는 소비자(`collector_health` 등)를 깨뜨리지
+   않으려고 의미를 바꾸지 않았다. 소비자 정리와 함께 별도로 고친다.
+2. `/metrics`는 `risk-api`·`qa-api`에만 있고 `include_in_schema=False`라 OpenAPI에
+   안 잡힌다. 나머지 부서에 Prometheus를 추가하는 것은 관측 스택 결정(§14)이
+   선행돼야 하므로 지금 하지 않는다.
 
 Command 요청은 다음 Header를 사용한다.
 

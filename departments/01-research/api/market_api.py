@@ -130,6 +130,32 @@ def _query(sql: str, params: tuple):
 
 @app.get("/health")
 def health() -> dict:
+    """Liveness. **DB 를 만지지 않는다.** 전 부서 공통 규격(통합계획 8.1).
+
+    ▶ 2026-08-12 에 의미를 바꿨다. 원래 이 경로는 아래 `/health/ready` 의 집계를
+      그대로 돌리고 있었는데, market_ticks·market_quotes 가 hypertable 로 커지면서
+      **90초에도 응답이 없었다**(실측). 즉 이 서비스에는 동작하는 health 경로가
+      하나도 없었고, compose 에 healthcheck 가 없어 아무도 몰랐다.
+
+      liveness 가 무거운 집계를 돌면 안 되는 이유가 이것이다 - 프로세스는 멀쩡한데
+      "죽었다"로 판정되고, 오케스트레이터가 멀쩡한 인스턴스를 계속 교체한다.
+      수치는 `/health/ready` 에 그대로 있다.
+    """
+    return {
+        "version": API_VERSION,
+        "read_only": True,
+        "status": "ok",
+        "service": "market-api",
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 시세 평면에 실제로 닿아 도메인별 적재 현황을 돌려준다.
+
+    ⚠ 대용량 hypertable 집계라 **느리다.** 오케스트레이터 healthcheck 는 이쪽이
+      아니라 `/health` 를 찔러야 한다. 이 경로는 사람이 상태를 확인할 때 쓴다.
+    """
     rows = _query("""
         select 'ticks' as domain, count(*) as rows,
                max(event_time) as last_event

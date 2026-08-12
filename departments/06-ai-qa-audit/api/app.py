@@ -1085,6 +1085,39 @@ def evidence_check(body: ComplianceCheckRequest):
     )
 
 
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). risk-api 와 같은 규약 - `/health` 는
+# 프로세스 생존만 보고 외부를 만지지 않으며, 저장소 판단은 `/health/ready` 가 한다.
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. **저장소가 죽어도 200 이다.** 외부 호출을 하지 않는다."""
+    return {
+        "status": "ok",
+        "service": "qa-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(_DATABASE_URL),
+        "runtime": _QA_RUNTIME or "default",
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. audit 저장소가 붙어 있어야 ready 다."""
+    if not _DATABASE_URL:
+        return {"status": "degraded", "service": "qa-api", "canonical_db": "NOT_CONFIGURED"}
+    if _audit_repository is None:
+        # DSN 은 있는데 저장소가 없다 = TEST 런타임으로 뜬 것이다. 숨기지 않는다.
+        return {
+            "status": "degraded",
+            "service": "qa-api",
+            "canonical_db": "DISABLED_BY_RUNTIME",
+            "runtime": _QA_RUNTIME or "default",
+        }
+    return {"status": "ready", "service": "qa-api", "canonical_db": "READY"}
+
+
 @app.get("/qa/v1/observability/runtime")
 def runtime_observability():
     return QA_TELEMETRY.snapshot()

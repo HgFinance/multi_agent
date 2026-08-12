@@ -166,6 +166,20 @@ except Exception as _e:
             f"확인할 것.") from _e
 
 
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 전 부서 공통 규격(통합계획 8.1)을 채운다.
+
+    ⚠ 이 서비스의 `/health` 는 **이미 DB 를 조회한다** - 이름은 liveness 인데 하는
+    일은 readiness 다. DB 순단이면 500 이 나서 오케스트레이터가 멀쩡한 인스턴스를
+    교체할 수 있다(trading-api 주석이 경고하는 바로 그 상황).
+    지금은 `/health` 를 부르는 소비자(collector_health 등)를 깨뜨리지 않으려고
+    의미를 바꾸지 않고 규격 경로만 더한다. `/health` 를 순수 liveness 로 바꾸는
+    것은 소비자 정리와 함께 따로 한다.
+    """
+    return health()
+
+
 @app.get("/health")
 def health() -> dict:
     rows = _query(
