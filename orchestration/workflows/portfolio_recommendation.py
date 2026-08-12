@@ -177,6 +177,30 @@ def _configured_worker_runtime() -> str:
     return "deterministic_test"
 
 
+# 자유 질의 -> **부서** 라우팅 표. `_QUERY_WORKER_TERMS`(질의 -> 워커)와 짝이다.
+# 모듈 상수인 이유: 아래 build_ceo_task_plan 안에 지역 변수로 두었더니
+# `assert_query_router_ids_exist()` 가 이 표를 못 봐서, **quant 가 통째로 빠진 것을
+# 아무도 못 잡았다**(2026-08-12 발견). 두 표는 한 곳에서 같이 검사돼야 한다.
+_QUERY_STAGE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "trading": ("주문", "매수", "매도", "체결", "리밸런싱", "거래"),
+    "accounting": ("세금", "수수료", "원장", "nav", "현금", "현금흐름", "대사", "회계"),
+    "research": ("종목", "주식", "etf", "뉴스", "시장", "수익", "유니버스", "업종", "국내", "글로벌"),
+    "risk": ("위험", "리스크", "손실", "변동", "헤지", "레버리지", "공매도", "보수적"),
+    "qa": ("검증", "근거", "신뢰", "감사", "오류", "검토", "출처"),
+    # ▶ quant 가 여기 없었다. `_QUERY_WORKER_TERMS` 에는 quant 워커 용어
+    #   ("전략"·"백테스트"·"과적합"·"레짐"…)가 있는데 이 표에 부서가 없어서
+    #   requested_departments 에 quant 가 안 들어갔고, `_selected_specs` 가
+    #   워커 라우터를 타기 전에 `()` 를 반환했다 - **그 용어들이 죽은 코드**였다.
+    #   실측: "이런 전략 어때?" -> ['research','risk','qa','ceo'].
+    #
+    #   용어는 좁게 잡는다. "결과"·"해석"·"최적화" 같은 일반어를 넣으면 거의 모든
+    #   질의가 백테스트를 끌고 와 응답성이 무너진다 - CATEGORY_DEPARTMENTS 주석이
+    #   MARKET_RESEARCH 에서 quant 를 뺀 이유가 그것이다. 백테스트·전략 작업을
+    #   명시적으로 가리키는 말만 둔다.
+    "quant": ("전략", "백테스트", "가설", "과적합", "레짐", "데이터셋", "피처"),
+}
+
+
 def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Create a bounded department plan from a free-form user request.
 
@@ -210,15 +234,8 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
 
     normalized = query.lower()
     stages: set[str] = set(category_departments or ("research", "risk", "qa", "ceo"))
-    keywords: dict[str, tuple[str, ...]] = {
-        "trading": ("주문", "매수", "매도", "체결", "리밸런싱", "거래"),
-        "accounting": ("세금", "수수료", "원장", "nav", "현금", "현금흐름", "대사", "회계"),
-        "research": ("종목", "주식", "etf", "뉴스", "시장", "수익", "유니버스", "업종", "국내", "글로벌"),
-        "risk": ("위험", "리스크", "손실", "변동", "헤지", "레버리지", "공매도", "보수적"),
-        "qa": ("검증", "근거", "신뢰", "감사", "오류", "검토", "출처"),
-    }
     matched_terms: dict[str, list[str]] = {}
-    for stage, terms in keywords.items():
+    for stage, terms in _QUERY_STAGE_KEYWORDS.items():
         hits = [term for term in terms if term in normalized]
         if hits:
             stages.add(stage)
@@ -311,6 +328,30 @@ def assert_query_router_ids_exist() -> None:
                 f"_QUERY_WORKER_FALLBACKS['{stage}'] 가 그 부서에 없는 워커를 "
                 f"가리킵니다: {unknown}. 등록된 워커: {sorted(registered.get(stage, ()))}"
             )
+
+    # ▶ 부서 라우터와 워커 라우터가 **같은 부서 집합**을 봐야 한다 (2026-08-12 추가)
+    #   워커 용어표(`_QUERY_WORKER_TERMS`)에 어떤 부서의 워커가 있는데, 부서 라우터
+    #   (`_QUERY_STAGE_KEYWORDS` + 기본 집합)가 그 부서를 절대 안 부르면 그 용어는
+    #   **닿지 않는다.** `_selected_specs` 가 requested_departments 로 먼저 걸러내기
+    #   때문이다. 실제로 quant 가 그 상태였고, 용어는 멀쩡히 있는데 죽어 있었다.
+    #   이름이 맞는지(위 두 검사)만 보면 이 구멍이 안 잡힌다.
+    _FREE_QUERY_BASE_STAGES = frozenset({"research", "risk", "qa", "ceo"})
+    routable = _FREE_QUERY_BASE_STAGES | set(_QUERY_STAGE_KEYWORDS)
+    stage_by_worker = {
+        worker_id: stage for stage, ids in registered.items() for worker_id in ids
+    }
+    unreachable: dict[str, list[str]] = {}
+    for worker_id in _QUERY_WORKER_TERMS:
+        stage = stage_by_worker.get(worker_id)
+        if stage is not None and stage not in routable:
+            unreachable.setdefault(stage, []).append(worker_id)
+    if unreachable:
+        raise RuntimeError(
+            "자유 질의 부서 라우터가 절대 부르지 않는 부서의 워커가 "
+            f"_QUERY_WORKER_TERMS 에 있습니다: { {k: sorted(v) for k, v in unreachable.items()} }. "
+            f"_QUERY_STAGE_KEYWORDS 에 그 부서를 추가하거나 용어를 지울 것 - "
+            f"지금 상태로는 그 용어가 라우팅에 닿지 않습니다."
+        )
 
 
 def _deterministic_worker_llm(system: str, prompt: str) -> str:

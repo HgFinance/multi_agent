@@ -276,6 +276,52 @@ def _event_payloads(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
+# ▶ 부서 산출물이 실제로 놓이는 자리 (2026-08-12)
+#   `apps/api/ceo.py` 가 같은 목록을 따로 들고 있었다. 그 파일은 "완료 카드 21장이
+#   전부 result 가 비어 있었고 산출물은 첨부·작업공간 파일로만 있었다"(2026-08-11
+#   실측)를 근거로 첨부까지 읽는데, **이 모듈의 판정(_classify)은 result 만 봤다.**
+#   그래서 같은 저장소가 "부서가 답을 냈는가"를 두 가지로 판정했다 - 실측에서
+#   리스크 심사 3,874자·QA 보고서 5,240자를 남긴 카드가 `NO_ANSWER` 로 집계됐다.
+#   목록을 여기로 모으고 ceo.py 가 이것을 쓴다.
+ARTIFACT_ROOTS: tuple[Path, ...] = tuple(
+    Path(p) for p in (
+        os.getenv("KANBAN_ATTACH_ROOT",
+                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "attachments")),
+        os.getenv("KANBAN_WORKSPACE_ROOT",
+                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "workspaces")),
+    )
+)
+_ARTIFACT_SUFFIXES = frozenset({".md", ".txt", ".json"})
+
+
+def artifact_text(task_id: str) -> str:
+    """그 카드에서 부서가 남긴 산출물 본문 전부."""
+    parts: list[str] = []
+    for root in ARTIFACT_ROOTS:
+        folder = root / task_id
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.rglob("*")):
+            if f.is_file() and f.suffix in _ARTIFACT_SUFFIXES:
+                try:
+                    parts.append(f.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+    return "\n\n".join(parts)
+
+
+def artifact_present(task_id: str) -> bool:
+    """산출물이 있기만 하면 True. 본문을 읽지 않는다 - 판정 경로가 빨라야 한다."""
+    for root in ARTIFACT_ROOTS:
+        folder = root / task_id
+        if not folder.is_dir():
+            continue
+        for f in folder.rglob("*"):
+            if f.is_file() and f.suffix in _ARTIFACT_SUFFIXES and f.stat().st_size > 0:
+                return True
+    return False
+
+
 def _classify(row: dict[str, Any], event: dict[str, Any], now: int) -> tuple[CardOutcome, str]:
     """카드 한 장의 결말과 한 줄 사유. 규칙 2·3이 여기 들어 있다."""
     status = (row["status"] or "").strip().lower()
@@ -292,9 +338,13 @@ def _classify(row: dict[str, Any], event: dict[str, Any], now: int) -> tuple[Car
         return "BLOCKED", f"{label}{summary}".strip() or "부서가 보류했습니다(사유 미기록)"
 
     if status == "done":
-        # 규칙 2 — 완료 != 답. result 본문이 비면 답을 못 낸 것이다.
+        # 규칙 2 — 완료 != 답. 다만 "답"이 `result` 에만 있는 것이 아니다.
+        # 부서는 첨부·작업공간 파일로 산출물을 남긴다(ARTIFACT_ROOTS 주석 참고).
+        # result 만 보면 실제로 몇 분씩 일한 카드가 NO_ANSWER 로 집계된다.
         if (row["result"] or "").strip():
             return "ANSWERED", summary
+        if artifact_present(row["id"]):
+            return "ANSWERED", summary or "결과 본문 대신 첨부·작업공간에 산출물이 있습니다"
         return "NO_ANSWER", summary or "완료로 기록됐지만 결과 본문이 비어 있습니다"
 
     if status == "running":

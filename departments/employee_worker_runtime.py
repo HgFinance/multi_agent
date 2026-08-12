@@ -194,7 +194,29 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
         return ({"worker_id": worker_id, "summary": "invalid_worker_schema", "confidence": 0.0, "evidence_refs": [], "escalate": True, "schema_valid": False}, False)
     refs = parsed.get("evidence_refs", [])
     confidence = parsed.get("confidence")
-    valid = isinstance(refs, list) and (confidence is None or isinstance(confidence, (int, float))) and isinstance(parsed.get("escalate", False), bool)
+    escalate = parsed.get("escalate", False)
+    # ▶ 여기 규칙은 orchestration/contracts/mas.py 의 WorkerContextOutput 과
+    #   **똑같아야 한다** (2026-08-12).
+    #
+    #   전에는 이 검사가 느슨해서(숫자면 통과, None 통과, 근거 없이 escalate=False 통과)
+    #   워커 그래프는 COMPLETED 를 내고 **부서 경계의 Pydantic 이 나중에 거부**했다.
+    #   결과가 둘이었다:
+    #     1. 재시도(max_attempts)가 아예 안 걸린다 - 여기서 valid 였으니 다시 물어볼
+    #        기회를 못 쓰고 그대로 확정한다.
+    #     2. 실패가 `worker_context_contract_invalid:ValidationError` 로만 보여
+    #        **어느 필드가 왜 틀렸는지 알 수 없다.**
+    #   실측(qwen3:1.7b)에서 confidence=90 이 여기를 통과하고 경계에서 죽었다.
+    valid = (
+        isinstance(refs, list)
+        and all(isinstance(item, str) for item in refs)
+        # confidence 는 0~1 실수다. None 도 허용하지 않는다(계약이 float 필수).
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and 0.0 <= float(confidence) <= 1.0
+        and isinstance(escalate, bool)
+        # 근거가 없으면 반드시 escalate 다(WorkerContextOutput.require_evidence_or_escalation).
+        and (bool(refs) or escalate)
+    )
     output = {
         "worker_id": worker_id,
         "summary": parsed["summary"][:4000],
@@ -216,12 +238,28 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
 
     def call_llm(state: WorkerState) -> dict[str, Any]:
         worker_llm = llm or default_worker_llm
+        # ▶ 필드의 **타입과 범위를 프롬프트에 명시한다** (2026-08-12).
+        #   전에는 "Return JSON with summary, confidence, evidence_refs, and escalate"
+        #   로만 적었다. 그러면 모델이 타입을 추측하고, 실측에서 **네 모델이 전부**
+        #   틀렸다: qwen3:1.7b/gemma3:12b/deepseek-r1:14b 는 confidence 를
+        #   "high"·"medium" 같은 낱말로, exaone3.5:7.8b 는 escalate 를 dict 로 냈다.
+        #   계약(WorkerContextOutput)은 confidence float 0~1, escalate bool 을
+        #   요구하므로 전부 DEGRADED 가 됐고, 원인이 모델 크기처럼 보였다.
+        #   크기 문제가 아니라 **지시 누락**이었다.
         system = (
             f"You are the {spec.role}. You are one employee Worker in a department. "
             "Use only the supplied tool evidence. Produce advisory context only. "
             "Never place orders, approve risk, change limits, post ledger entries, "
-            "change QA findings, grant permissions, or claim missing evidence. "
-            "Return JSON with summary, confidence, evidence_refs, and escalate."
+            "change QA findings, grant permissions, or claim missing evidence.\n"
+            "Return ONLY a JSON object with exactly these fields:\n"
+            '  "summary": string — one paragraph, no markdown\n'
+            '  "confidence": number between 0 and 1 (e.g. 0.75). '
+            "NOT a word like \"high\"/\"medium\"/\"low\", NOT a percentage like 90.\n"
+            '  "evidence_refs": array of strings identifying what you used '
+            '(e.g. ["mandate:max_symbol_weight"]). Use [] if you had none.\n'
+            '  "escalate": boolean true or false — NOT an object, NOT a string.\n'
+            "If evidence_refs is empty you MUST set escalate to true. "
+            "Do not wrap the JSON in code fences and do not add any other field."
         )
         if spec.prompt_instructions:
             system = f"{system}\nAdditional Worker contract: {spec.prompt_instructions}"

@@ -20,9 +20,11 @@ from apps.api.ceo_hermes_client import ask_ceo
 
 try:
     from kanban_board import BoardUnavailable, cards_for_root, progress_of
+    from kanban_board import artifact_text as kanban_artifact_text
     from kanban_status_bridge import KANBAN_STATUS_BRIDGE
 except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api.kanban_board import BoardUnavailable, cards_for_root, progress_of
+    from apps.api.kanban_board import artifact_text as kanban_artifact_text
     from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
 
 
@@ -95,38 +97,16 @@ def _direct_answer_text(direct: dict[str, object]) -> str:
     return str(fact)
 
 
-_ARTIFACT_ROOTS = tuple(
-    Path(p) for p in (
-        os.getenv("KANBAN_ATTACH_ROOT",
-                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "attachments")),
-        os.getenv("KANBAN_WORKSPACE_ROOT",
-                  str(Path.home() / ".hermes-shared-kanban" / "kanban" / "workspaces")),
-    ))
-
 # 종합 프롬프트에 실을 부서당 최대 글자. 넘치면 CEO 턴이 컨텍스트로 죽는다.
 _FINDING_CHARS = int(os.getenv("CEO_FINDING_CHARS", "3000"))
 
-
-def _artifact_text(task_id: str) -> str:
-    """그 카드에서 부서가 남긴 것. **`result` 만 보지 않는다.**
-
-    ▶ 완료 카드 21장이 전부 `result` 가 비어 있었고 산출물은 첨부나 작업공간
-      파일로만 있었다(2026-08-11 실측). `result` 만 읽으면 부서가 몇 분씩 일한
-      결과가 통째로 없는 것으로 보인다 - 실제로 그렇게 읽고 "부서가 아무것도
-      안 했다"고 판단했다.
-    """
-    parts: list[str] = []
-    for root in _ARTIFACT_ROOTS:
-        folder = root / task_id
-        if not folder.is_dir():
-            continue
-        for f in sorted(folder.rglob("*")):
-            if f.is_file() and f.suffix in {".md", ".txt", ".json"}:
-                try:
-                    parts.append(f.read_text(encoding="utf-8", errors="replace"))
-                except OSError:
-                    continue
-    return "\n\n".join(parts)
+# ▶ 산출물 읽기는 `kanban_board` 가 소유한다 (2026-08-12).
+#   전에는 이 파일이 `_ARTIFACT_ROOTS` + `_artifact_text` 를 따로 갖고 있었다.
+#   그래서 **여기는 첨부까지 읽는데 보드 판정(_classify)은 result 만 봐서**
+#   같은 카드가 한쪽에서는 답이고 다른 쪽에서는 NO_ANSWER 였다. 목록이 두 벌이면
+#   언젠가 한쪽만 고쳐진다 - `_artifact_text` 주석이 경고하던 그 상황을
+#   이 파일 자신이 만들고 있었다. 정의를 보드로 옮기고 여기서는 가져다 쓴다.
+_artifact_text = kanban_artifact_text
 
 
 def _child_findings(cards) -> list[dict[str, str]]:

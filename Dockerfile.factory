@@ -75,6 +75,15 @@ COPY departments/01-research/factory    ./departments/01-research/factory
 #   이 파일이 필요로 하는 것은 departments/employee_worker_runtime.py 하나뿐이다
 #   (아래에서 이미 복사한다) - agents/·evidence/ 는 안 딸려온다.
 COPY departments/01-research/employee_workers.py ./departments/01-research/employee_workers.py
+# 인사팀 워커(profile-architecture-worker). `orchestration/employee_dispatch.py` 의
+# EMPLOYEE_MODULE_BY_DEPARTMENT 가 8개 부서를 전부 가리키는데 이것만 이미지에
+# 없어서, hr 로 부르면 `employee_registry_file_missing:hr` 로 죽었다(2026-08-12).
+# ⚠ 이 파일을 넣는다고 워커가 도는 것은 아니다 - 지금은 이 워커를 부르는 런타임
+#   경로가 없다(workforce-api 는 run_employee_workers 를 부르지 않고, HR 프로필의
+#   runtime_personalities 로 부서장이 소집하는 구조다. 부서 config.yaml 83행이
+#   "실제 채용 사이클 종단 실행은 아직 검증 안 됨"으로 그 상태를 적어 두었다).
+#   여기서 없애는 것은 "코드엔 있는데 배포엔 없다"는 **불일치**뿐이다.
+COPY departments/07-agent-workforce/employee_workers.py ./departments/07-agent-workforce/employee_workers.py
 COPY departments/04-quant-backtest      ./departments/04-quant-backtest
 COPY apps/api                           ./apps/api
 # orchestration/canonical_profiles.py 가 정본 부서 이름표다 - kanban_board 가

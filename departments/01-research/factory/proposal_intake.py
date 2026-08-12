@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ from contracts.factory_contracts import (  # noqa: E402
     CompetingExplanation, DataRequirement, ExperimentProposalV1,
     MethodologyLeadV1, PriorCheck,
 )
-from lead_intake import parse_blocks  # noqa: E402
+from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v1"
@@ -110,6 +111,43 @@ def _trial_budget(v) -> int:
         f"분모라서 서술로 쓸 수 없다. 변형을 N 개 돌릴 계획이면 N 을 적어라")
 
 
+_CODE_TOKEN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _competing_codes(raw: str) -> tuple[list, str]:
+    """`COMPETING_CODES` 값에서 코드만 걷어낸다. 반환: (코드들, 걷어내지 못한 나머지).
+
+    ▶ 왜 필요한가 (2026-08-12 실측)
+      `parse_blocks` 는 **모르는 줄을 앞 필드에 이어붙인다.** 산문 필드에서는
+      그게 맞다 - 새 키로 잘못 잡으면 메커니즘 문장이 중간에서 끊긴다. 그런데
+      `COMPETING_CODES` 는 **닫힌 어휘**라 이 관대함이 독이 된다. 에이전트가
+      마지막 필드 뒤에 마무리 문장을 쓰자 그게 코드값에 흡수돼
+
+        `COST_UNACCOUNTED 제출 형식에 맞춘 모멘텀 실험 기획안 1건을 작성했다. …`
+
+      가 됐고, `경쟁 설명 코드가 어휘 밖이다` 로 반려됐다. **코드 자체는 어휘에
+      있었다.** 멀쩡한 기획안이 마무리 문장 한 줄 때문에 버려진 것이다.
+
+      그래서 코드 모양(`^[A-Z][A-Z0-9_]*$`)인 토큰만 코드로 보고 나머지는 산문으로
+      돌린다. 코드가 하나도 없으면 그때는 진짜 어휘 문제이므로 부르는 쪽이 막는다.
+    """
+    codes, rest = [], []
+    for chunk in _split(raw):
+        for tok in chunk.split():
+            up = tok.strip().upper()
+            if not _CODE_TOKEN.match(up):
+                rest.append(tok)
+                continue
+            try:
+                c = CompetingExplanation(up)
+            except ValueError:
+                rest.append(tok)      # 코드 모양인데 어휘 밖 - 이건 진짜 오류다
+                continue
+            if c not in codes:
+                codes.append(c)
+    return codes, " ".join(rest)[:120]
+
+
 def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
     """같은 리드로 같은 엣지·유니버스를 또 기획하면 같은 기획안이다."""
     blob = json.dumps([sorted(str(x) for x in lead_ids),
@@ -132,13 +170,10 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
     if verdict and verdict != SKEPTIC_PASS:
         raise ValueError(f"회의론자가 통과시키지 않았다({verdict}) - 발행하지 않는다")
 
-    codes = []
-    for c in _split(skeptic.get("COMPETING_CODES", "")):
-        try:
-            codes.append(CompetingExplanation(c.upper()))
-        except ValueError:
-            # 어휘 밖 코드는 조용히 버리지 않는다 - 게이트가 막을 수 있게 남긴다.
-            raise ValueError(f"경쟁 설명 코드가 어휘 밖이다: {c}") from None
+    codes, stray = _competing_codes(skeptic.get("COMPETING_CODES", ""))
+    if not codes:
+        # 어휘 밖 코드는 조용히 버리지 않는다 - 게이트가 막을 수 있게 남긴다.
+        raise ValueError(f"경쟁 설명 코드가 어휘 밖이다: {stray or '(비어 있음)'}")
 
     lead_ids = _split(planner["LEAD_IDS"])
     edge = planner["EDGE_TYPE"].strip().lower()
@@ -247,6 +282,19 @@ def load_leads(conn, lead_ids) -> dict:
         d = dict(zip(cols, row))
         if isinstance(d["refs"], str):
             d["refs"] = json.loads(d["refs"])
+        # ▶ **원장에 이미 계약을 넘는 값이 들어가 있다** (2026-08-12 실측)
+        #   `lead_intake.to_lead` 가 EXCERPT 없을 때 MECHANISM 으로 대체하는데
+        #   길이 규율이 없어 500자를 넘겼고, 그게 그대로 적재됐다. 그 뒤로 이
+        #   리드를 읽을 때마다 `MethodologyLeadV1` 검증이 터져 **수확 전체가
+        #   죽었다** - 20260812T00 카드가 매 주기 같은 자리에서 반복 실패했다.
+        #
+        #   적재 쪽은 고쳤지만(clip_excerpt) 이미 들어간 행은 남는다. 원장 값을
+        #   고쳐 쓰지 않고 **계약 경계에서 맞춘다** - 저장된 것은 그 수확이 실제로
+        #   쓴 문자열이라 사실이고, 잘렸다는 표식이 붙으므로 읽는 쪽이 원문
+        #   전체로 오해하지 않는다.
+        for ref in (d.get("refs") or []):
+            if isinstance(ref, dict) and ref.get("excerpt"):
+                ref["excerpt"] = clip_excerpt(ref["excerpt"])
         out[d["lead_id"]] = MethodologyLeadV1.model_validate(d)
     return out
 
@@ -475,5 +523,70 @@ def _cli(argv: list[str]) -> int:
     return 0
 
 
+def _check_trailing_prose_does_not_kill_codes():
+    """**마무리 문장 한 줄 때문에 멀쩡한 기획안을 버리지 않는다.** (2026-08-12 실측)
+
+    parse_blocks 가 형식 밖 줄을 앞 필드에 이어붙이므로 COMPETING_CODES 값에
+    산문이 흡수된다. 코드가 살아 있으면 살린다.
+    """
+    got, stray = _competing_codes(
+        "COST_UNACCOUNTED 제출 형식에 맞춘 모멘텀 실험 기획안 1건을 작성했다.")
+    assert got == [CompetingExplanation.COST_UNACCOUNTED], got
+    assert "제출" in stray, stray
+
+    # 여러 코드 + 쉼표도 그대로 산다. 중복은 한 번만.
+    got2, _ = _competing_codes("DATA_MINING, BETA_EXPOSURE, DATA_MINING")
+    assert got2 == [CompetingExplanation.DATA_MINING,
+                    CompetingExplanation.BETA_EXPOSURE], got2
+
+    # **코드가 하나도 없으면 살리지 않는다** - 그때는 진짜 어휘 문제다.
+    got3, stray3 = _competing_codes("REGIME_ARTIFACT 라고 생각한다")
+    assert got3 == [], got3
+    assert "REGIME_ARTIFACT" in stray3, stray3
+    got4, _ = _competing_codes("")
+    assert got4 == [], got4
+
+
+def _check_stored_long_excerpt_does_not_kill_harvest():
+    """**원장에 이미 들어간 긴 발췌가 수확을 죽이지 않는다.**
+
+    2026-08-12: `to_lead` 가 EXCERPT 없을 때 MECHANISM 으로 대체하면서 500자를
+    넘겼고 그대로 적재됐다. 그 뒤 `load_leads` 가 그 행을 읽을 때마다 계약 검증이
+    터져 **그 배치 전체**가 버려졌다 - 같은 카드가 매 주기 같은 자리에서 죽었다.
+    적재 쪽을 고쳐도 이미 들어간 행은 남으므로 읽는 경계에서도 맞춘다.
+    """
+    from contracts.factory_contracts import (  # noqa: PLC0415
+        MAX_EXCERPT_CHARS, lead_id_for)
+
+    ref = {"url": "https://example.org/p", "title": "t",
+           "accessed_at": "2026-08-11T04:46:29Z", "excerpt": "사" * 900}
+    d = {"case_id": "c1", "scout_lens": "ACADEMIC", "source_type": "PAPER",
+         "as_known_at": "2026-08-11T04:46:29Z", "refs": [ref],
+         "claimed_edge": "x", "stated_mechanism": "m", "inferred": False,
+         "market_context": "", "stated_failure_mode": "",
+         "independent_mentions": 1, "testability": "VAGUE", "status": "COMPLETE",
+         "model_version": "m1", "prompt_version": "p1"}
+
+    # 자르기 전에는 실제로 발췌 때문에 터진다 - 이 검사가 헛돌지 않게 확인한다
+    try:
+        MethodologyLeadV1.model_validate({**d, "lead_id": lead_id_for(d["refs"])})
+        raise AssertionError("긴 발췌가 그냥 통과했다 - 계약 상한이 사라졌나")
+    except Exception as e:  # noqa: BLE001
+        assert "excerpt" in str(e), str(e)[:120]
+
+    ref["excerpt"] = clip_excerpt(ref["excerpt"])
+    assert len(ref["excerpt"]) <= MAX_EXCERPT_CHARS
+    MethodologyLeadV1.model_validate({**d, "lead_id": lead_id_for(d["refs"])})
+
+
 if __name__ == "__main__":
+    if "--check" in sys.argv:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        print(f"{MODULE_VERSION} 자체 점검 (DB 없음)")
+        _check_stored_long_excerpt_does_not_kill_harvest()
+        print("  저장된 긴 발췌가 수확을 안 죽인다  OK")
+        _check_trailing_prose_does_not_kill_codes()
+        print("  코드 뒤 산문이 기획안을 안 죽인다  OK")
+        raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

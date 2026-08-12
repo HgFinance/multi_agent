@@ -426,11 +426,19 @@ def build_worker_graph(
         worker_llm = llm or default_worker_llm
         tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
         require_entries = spec.worker_id == "incident-postmortem-worker"
+        # 필드 타입을 명시한다 - risk 와 같은 이유(2026-08-12 실측).
         system = (
             f"You are the {spec.role}. You are an AI-QA employee, not Hermes supervisor. "
             "Use only supplied evidence. Never change a binding QA verdict, approve an order, "
-            "write a ledger, or close a finding. Return JSON with summary, confidence, "
-            "evidence_refs, and escalate."
+            "write a ledger, or close a finding.\n"
+            "Return ONLY a JSON object with exactly these fields:\n"
+            '  "summary": string — one paragraph, no markdown\n'
+            '  "confidence": number between 0 and 1 (e.g. 0.75). '
+            "NOT a word like \"high\"/\"medium\"/\"low\", NOT a percentage like 90.\n"
+            '  "evidence_refs": array of strings. Use [] if you had none.\n'
+            '  "escalate": boolean true or false — NOT an object, NOT a string.\n'
+            "If evidence_refs is empty you MUST set escalate to true. "
+            "Do not wrap the JSON in code fences."
         )
         if require_entries:
             system += (

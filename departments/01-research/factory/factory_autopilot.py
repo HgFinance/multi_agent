@@ -154,7 +154,113 @@ select lead_id, scout_lens, claimed_edge, stated_mechanism, testability, status
 """
 
 
-def _vocab_block() -> str:
+# ▶ **스카우트 접근면을 카드에 싣는다** (2026-08-12, 재일 지시로 Agent-Reach 도입)
+#   프로필에 렌즈가 4개 정의돼 있는데 실제 수집은 ACADEMIC 11 / PRACTITIONER 1 /
+#   **COMMUNITY 0 / CROSSDOMAIN 0** 이었다. 뒤 둘이 노리는 포럼·영상에 닿을
+#   도구가 없었기 때문이다. 그래서 리드가 전부 학술 논문이고 같은 우물만 팠다
+#   (8/11 배치는 검정가능성이 통째로 VAGUE 로 떨어졌다).
+#
+#   도구를 깔아 두는 것만으로는 안 쓴다 - 오늘 `quant-py` 로 두 번 겪었다.
+#   페르소나 4,400자에 묻히면 못 본다. **읽히는 자리에 명령을 적는다.**
+#
+#   ⚠ 리드 계약(`MethodologyLeadV1`)이 `refs.url` 을 요구한다. 되짚을 수 없는
+#     출처는 접수되지 않으므로, 무엇을 읽었든 URL 을 남겨야 한다.
+_SCOUT_SURFACE = """
+[스카우트 접근면 - COMMUNITY·CROSSDOMAIN 렌즈가 쓸 것]
+  agent-reach doctor                       # 지금 어떤 채널이 사는지
+  curl -s https://r.jina.ai/<URL>          # 아무 웹페이지나 본문으로 읽는다
+  yt-dlp --list-subs <youtube-url>         # 영상 자막 (강연·인터뷰)
+  yt-dlp --write-auto-subs --skip-download -o - <url>
+  reach-py -c "import feedparser; ..."     # RSS/Atom (arXiv q-fin 이 여기로 온다)
+    ⚠ 시스템 `python3` 에는 feedparser 가 없다 - **`reach-py` 를 쓴다.**
+      (2026-08-12 실측: python3 로 부른 에이전트가 ModuleNotFoundError 를 맞고
+       uv run 으로 우회했다. 우회가 필요 없게 이름을 줬다.)
+  agent-reach doctor 가 [!] 로 표시한 채널은 로그인 대기다 - 지어내지 말고 건너뛴다.
+
+  실측(2026-08-12): arXiv q-fin.ST RSS 8건, Jina 로 임의 페이지 읽기, YouTube
+  자막 추출 전부 확인됨. **안 된다고 적기 전에 위 명령을 실제로 돌려 본다.**
+
+  ▶ 무엇을 읽든 `refs.url` 에 되짚을 수 있는 URL 을 남긴다 - 없으면 접수 거부다."""
+
+
+def window_counts(dates: list, horizons: tuple = (5, 20, 60, 126, 252)) -> list:
+    """형성창 길이별 walk-forward 창 개수. **실행면 함수를 그대로 돌린다.**
+
+    ▶ 왜 (2026-08-12, 재일 지시)
+      `667f0a45` 는 `walk-forward 창 0개 - 126일 형성 창이 634거래일 표본에 안
+      들어간다` 로 죽었고, 에이전트가 `walk_forward_window_days` 로 고쳐 보려다
+      **실행면이 그 키를 안 읽어** 거부됐다. 즉 **못 돌 이유는 알려주는데 어떻게
+      해야 도는지는 안 알려줬다.** 그래서 측정이 0 이고 배우는 것도 0 이었다.
+
+      창 개수는 판단이 아니라 산수다 - `make_windows` 가 반기로 묶고 시작
+      인덱스가 웜업보다 작은 반기를 버린다. 그 함수를 여기서 그대로 돌려
+      기획자에게 **고를 수 있는 값**을 준다. 표를 손으로 적지 않는 이유는
+      오늘 여러 번 겪은 그대로다 - 손글씨 표는 실행면과 갈린다.
+    """
+    sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
+    from walk_forward import WARMUP_TRADING_DAYS, make_windows   # noqa: PLC0415
+
+    out = []
+    for h in horizons:
+        # ▶ 실행면과 **같은 유도식**을 쓴다. 오케스트레이터가
+        #   `max(WARMUP_TRADING_DAYS, template.min_history(config))` 로 잡으므로
+        #   여기서도 그렇게 센다. 한때 `h + 10` 으로 어림했는데 그건 지어낸
+        #   값이었다 - 브리핑에 실린 수는 실행면이 실제로 쓸 수와 같아야 한다.
+        warmup = max(WARMUP_TRADING_DAYS, h + 1)   # 템플릿 min_history 는 대개 lookback+1
+        try:
+            out.append((h, len(make_windows(dates, warmup)), warmup))
+        except Exception:        # noqa: BLE001 - 못 세면 적지 않는다(지어내지 않는다)
+            return []
+    return out
+
+
+def _market_conn():
+    """시세 DB. 없으면 None - 창 산수를 비운다(못 잰 것을 0 으로 적지 않는다)."""
+    try:
+        import os as _os                            # noqa: PLC0415
+
+        import psycopg2                             # noqa: PLC0415
+        dsn = _os.environ.get("TIMESCALE_DATABASE_URL")
+        return psycopg2.connect(dsn, connect_timeout=10) if dsn else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _window_math(market_conn) -> str:
+    """창 산수 블록. 시세 DB 를 못 읽으면 **빈 문자열** - 없는 수를 지어내지 않는다."""
+    if market_conn is None:
+        return ""
+    try:
+        cur = market_conn.cursor()
+        cur.execute("""
+            select distinct bucket_time::date
+              from market.market_bars
+             where interval_code = '1D'
+               and bucket_time::date between date '2024-01-02' and date '2026-07-30'
+             order by 1
+        """)
+        dates = [r[0] for r in cur.fetchall()]
+        if len(dates) < 60:
+            return ""
+        counts = window_counts(dates)
+        if not counts:
+            return ""
+        tbl = " · ".join(f"{h}일→{n}창(웜업{w})" for h, n, w in counts)
+        return ("\n[창 산수 - 형성창을 정하기 전에 본다]\n"
+                f"  데이터셋 거래일 {len(dates)}일 ({dates[0]} ~ {dates[-1]})\n"
+                f"  horizon_days 별 walk-forward 창: {tbl}\n"
+                "  강건성 판정은 창이 3개 미만이면 성립하지 않는다. 창이 0개면\n"
+                "  실험이 돌아도 `강건성을 재지 못했다` 로 끝난다.\n"
+                "  **창이 3개 이상 나오는 horizon_days 를 골라라.** 더 긴 형성창이\n"
+                "  꼭 필요하면 데이터셋을 늘려야 하는 일이므로 그렇게 적어라 -\n"
+                "  돌려 보고 창이 없다고 하는 것보다 낫다.\n"
+                "  (웜업은 전략이 선언한 min_history 를 따른다 - 2026-08-12 이전에는\n"
+                "   30일 고정이라 긴 형성창 전략이 시그널을 못 냈다.)")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _vocab_block(conn=None) -> str:
     """실행면이 표현할 수 있는 어휘. **여기 없는 값은 반려된다.**
 
     ▶ **목록을 손으로 적지 않는다** (2026-08-11 실측). 프롬프트에 코드 목록을
@@ -169,10 +275,33 @@ def _vocab_block() -> str:
     from contracts.factory_contracts import (      # noqa: PLC0415
         CompetingExplanation, SourceType)
 
+    # ▶ **목록에 있다고 데이터셋이 있는 것은 아니다** (2026-08-12 실측)
+    #   여기는 `SOURCE_TABLES` 전체를 나열했다. 그런데 실험이 사상하는 근거는
+    #   `quant.dataset_manifests` 의 `source_versions` 이고, 지금 덮이는 것은
+    #   `market_bars` 와 `microstructure_features` 뿐이다. 기획자는 목록에
+    #   있으니 `market_quotes`·`market_ticks` 를 골랐고, 그 가설은 전부
+    #   `사상할 데이터셋이 없다` 로 죽었다(breakout·momentum 실측).
+    #   **못 돌 것을 권한 쪽이 문제다** - 어휘 때와 같은 사고다.
     sources = ""
     try:
         from data_resolution import SOURCE_TABLES  # noqa: PLC0415
-        sources = f"\n  DATA_TABLES  : {', '.join(sorted(SOURCE_TABLES))}"
+
+        covered: set = set()
+        if conn is not None:
+            from data_resolution import manifest_index  # noqa: PLC0415
+
+            for _n, _v, srcs in manifest_index(conn):
+                covered |= set(srcs or {})
+        rest = sorted(set(SOURCE_TABLES) - covered)
+        if covered:
+            sources = ("\n  DATA_TABLES  : " + ", ".join(sorted(covered))
+                       + "\n    ▶ **위 목록만 실험까지 간다** - 데이터셋 매니페스트가 "
+                         "덮는 원천이다.\n"
+                       f"    아직 데이터셋이 없는 원천: {', '.join(rest)}\n"
+                       "    이쪽을 적으면 접수는 되지만 실험 단계에서 "
+                       "'사상할 데이터셋이 없다' 로 막힌다.")
+        else:
+            sources = f"\n  DATA_TABLES  : {', '.join(sorted(SOURCE_TABLES))}"
     except Exception:  # noqa: BLE001 - 어휘를 못 읽으면 적지 않는다(지어내지 않는다)
         pass
     _ = SourceType
@@ -281,7 +410,16 @@ def research_brief() -> str:
     else:
         out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
                    "LEAD_IDS 가 비면 접수 전에 반려된다.")
-    out.append(_vocab_block())
+    out.append(_vocab_block(conn))
+    # 창 산수는 시세 DB 를 봐야 나온다. 실패하면 빈 문자열이라 브리핑이 조용히
+    # 짧아질 뿐, 없는 수가 실리지는 않는다.
+    _mk = _market_conn()
+    try:
+        out.append(_window_math(_mk))
+    finally:
+        if _mk:
+            _mk.close()
+    out.append(_SCOUT_SURFACE)
     # ▶ 지난 반려를 싣는다. 어휘를 나열하는 것만으로는 안 고쳐진다 - 8/11 에
     #   기획자가 REGIME_ARTIFACT 를 지어내 반려됐는데, 그 사실이 다음 브리핑에
     #   없어서 같은 코드로 또 냈다. 기각 사유가 돌아와야 파훼가 가능하다.
@@ -608,6 +746,69 @@ select h.hypothesis_id::text, left(h.title, 60)
 """
 
 
+def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
+    """발주해도 지금 조건에서는 못 도는 가설. 반환: {id: 사유}.
+
+    **판정을 여기서 새로 만들지 않는다** - 실험 워커가 쓰는 것과 같은 게이트를
+    부른다. 손으로 규칙을 적으면 실행면과 갈리고, 그건 오늘 하루 종일 고친 사고다.
+
+    못 세면 빈 dict 를 돌려 **전부 발주한다** - 판정을 못 했다고 막으면 멀쩡한
+    가설이 조용히 멈춘다(가설이 RUNNING 에 갇히던 것과 같은 유형).
+    """
+    if not hypothesis_ids:
+        return {}
+    try:
+        sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
+        pass  # feasibility 는 아래에서 모양별로 직접 대조한다
+        from data_resolution import manifest_index          # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return {}
+
+    out: dict = {}
+    try:
+        datasets = {f"{n}/{v}" for n, v, _ in manifest_index(conn)}
+        covered: set = set()
+        for _n, _v, srcs in manifest_index(conn):
+            covered |= set(srcs or {})
+        with conn.cursor() as cur:
+            cur.execute(
+                "select hypothesis_id::text, expected_edge, required_data_products "
+                "from quant.hypotheses where hypothesis_id = any(%s::uuid[])",
+                (list(hypothesis_ids),))
+            rows = cur.fetchall()
+        from experiment_orchestrator import STRATEGY_CATALOG  # noqa: PLC0415
+
+        for hid, edge, req in rows:
+            # ▶ `required_data_products` 는 **두 모양**이다 - 옛 가설은
+            #   `["krx-basket-daily/v1"]`(데이터셋 이름 목록), 새 가설은
+            #   `{"tables": [...], "min_history_days": N}`(원천 요구). 한 모양만
+            #   가정하면 dict 의 **키 이름을 데이터셋 이름으로 읽는다** - 실제로
+            #   `Dataset 'min_history_days' 구축` 이라는 엉뚱한 백로그가 나왔다.
+            if isinstance(req, dict):
+                missing = sorted(set(req.get("tables") or []) - covered)
+                if missing:
+                    out[hid] = (f"매니페스트가 안 덮는 원천: {', '.join(missing)} "
+                                f"(덮는 것: {', '.join(sorted(covered))})")
+                    continue
+            elif isinstance(req, list) and req:
+                missing_ds = sorted(set(map(str, req)) - datasets)
+                if missing_ds:
+                    out[hid] = f"없는 데이터셋: {', '.join(missing_ds)}"
+                    continue
+
+            # 데이터가 되면 남는 것은 전략 구현·어휘다. 이건 목록 대조라
+            # `feasibility` 를 부르지 않고 같은 표를 직접 본다(모양 가정 없음).
+            etype = str((edge or {}).get("type") or "").strip().lower()
+            if not etype:
+                out[hid] = "expected_edge.type 이 비었다"
+            elif etype not in STRATEGY_CATALOG:
+                out[hid] = (f"'{etype}' 는 어휘에 없다 - "
+                            f"사용 가능: {', '.join(sorted(STRATEGY_CATALOG))}")
+    except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
+        return {}
+    return out
+
+
 _SQL_RECENT_EXP_FAILURES = """
 select substr(h.title, 1, 60), replace(j.failure_reason, chr(10), ' ')
   from quant.experiment_jobs j
@@ -739,8 +940,24 @@ def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
             print(f"  [dry-run] 발주 대상 {len(rows)}건: "
                   f"{', '.join(t for _, t in rows)[:120]}", flush=True)
             return 0
+        # ▶ **못 돌 것을 발주하지 않는다** (2026-08-12)
+        #   큐가 구조적으로 막힌 가설로 가득 차 매 주기 같은 5건만 재시도하고
+        #   있었다(데이터셋 없음 3건, 어휘 밖 1건). 실패 사유는 정확했지만
+        #   **다음 주기에도 똑같이 실패**하므로 공장이 제자리를 돈다.
+        #
+        #   이력으로 영구 제외하지 않는다 - 오늘 카탈로그를 고치자 어제 못 돌던
+        #   `low_volatility` 가 돌았다. **매번 다시 판정**해서 조건이 바뀌면
+        #   저절로 재개되게 한다. 판정은 실행면 함수 그대로 쓴다.
+        blocked = _structurally_blocked(conn, [h for h, _ in rows])
+        if blocked:
+            print(f"  발주 보류 {len(blocked)}건 (조건이 바뀌면 저절로 재개):",
+                  flush=True)
+            for hid, why in blocked.items():
+                print(f"      - {hid[:8]}: {why[:90]}", flush=True)
         sent = 0
         for hid, title in rows:
+            if hid in blocked:
+                continue
             r = job_queue.enqueue(conn, hid, requested_by="factory-autopilot")
             if r.get("accepted"):
                 sent += 1

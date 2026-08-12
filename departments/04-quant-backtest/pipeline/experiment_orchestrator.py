@@ -38,6 +38,7 @@ ORCH_VERSION = "quant-experiment-orchestrator-v1"
 from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
     NOT_IMPLEMENTED,
     TEMPLATES,
+    resolve,
     template_for_edge,
 )
 
@@ -683,7 +684,25 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
         #   성적에 섞인다.
-        windows = make_windows(market.dates, WARMUP_TRADING_DAYS,
+        # ▶ **웜업은 전략이 선언한 최소 히스토리를 따른다** (2026-08-12)
+        #   여기는 `WARMUP_TRADING_DAYS`(=30, 주석에 "lookback 20 + 여유 10")를
+        #   그대로 썼다. 20일 모멘텀에 맞춘 상수인데 **모든 전략에 같이 걸렸다.**
+        #   126일 형성창 전략도 30일치 히스토리만 받으니 시그널이 계산되지 않고,
+        #   창은 만들어져도 산출이 비어 `강건성을 재지 못했다` 로 끝났다
+        #   (`667f0a45` 의 교훈이 그것이다).
+        #
+        #   각 템플릿은 `min_history(params)` 로 자기 요구를 이미 선언하고 있고
+        #   자체점검(`min_history 정직`)까지 있다. 읽지 않을 이유가 없다.
+        #   상수는 **바닥**으로만 남긴다 - 선언값이 더 짧아도 최소는 지킨다.
+        warmup = WARMUP_TRADING_DAYS
+        _tpl = resolve(str(config.get("strategy") or ""))
+        if _tpl is not None:
+            try:
+                warmup = max(warmup, int(_tpl.min_history(dict(config))))
+            except Exception:  # noqa: BLE001 - 못 읽으면 바닥을 쓴다(지어내지 않는다)
+                pass
+        print(f"  웜업 {warmup}일 (전략 {config.get('strategy')} 선언 기준)", flush=True)
+        windows = make_windows(market.dates, warmup,
                                embargo_days=int(config.get("lookback_days") or 0))
         wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
               for w in windows]

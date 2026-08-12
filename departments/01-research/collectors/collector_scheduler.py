@@ -188,6 +188,22 @@ JOBS: tuple[Job, ...] = (
     # 06:50: 분봉 백필 등 밤 작업이 끝난 뒤, Steward(07:10)가 결과를 보기 전.
     Job("market-archive", ("collectors/market_archive_exporter.py", "--export"),
         daily_at=time(6, 50)),
+    # ▶ 보존 집행 - **아카이브 뒤에 둔다** (재일님 지시 2026-08-12:
+    #   "원시 db에서 하루 지나면 이전 parquet에 데이터 합치게")
+    #
+    #   retention_registry 는 2026-07-30 부터 있었는데 **집행하는 코드가
+    #   없었다.** 그래서 디스크가 찰 때마다 사람이 손으로 drop_chunks 를
+    #   돌렸고, 8/11 에는 "이 날이 Archive 됐나" 확인을 건너뛰어 호가가
+    #   구멍난 채로 지워졌다.
+    #
+    #   07:10 인 이유: 06:50 아카이브가 끝난 뒤여야 그날 것이 verified 로
+    #   올라와 있다. 순서가 뒤집히면 **아카이브 안 된 날을 지우려다 보류**만
+    #   쌓이고 디스크는 안 준다(집행기가 막긴 하지만, 매일 헛돈다).
+    #
+    #   스케줄러는 Job 을 순차로 도므로 06:50 이 길어져도 07:10 이 앞서지
+    #   않는다 - 시각이 아니라 순서가 보장한다.
+    Job("retention", ("collectors/retention_enforcer.py", "--enforce"),
+        daily_at=time(7, 10)),
     # ▶ 상한을 모수보다 크게 (2026-08-03 실측)
     #   corp_code 보유 발행사가 **1,315** 인데 재무 1200·CA 400 이었다.
     #   특히 CA 는 400 이라 매일 900개사가 통째로 빠졌다 - 상한이 모수보다
@@ -503,8 +519,15 @@ def _check_job_table():
         # --collect(수집) / --audit(Steward 감사) / --export(Archive) /
         # --score(Packet 사후 채점) 가 실행 동사다.
         assert {"--collect", "--audit", "--export", "--score",
-                "--daily", "--minute"} & set(j.argv), \
+                "--daily", "--minute", "--enforce"} & set(j.argv), \
             f"{j.name}: 실행 플래그가 없다 - 자체점검만 돈다"
+    # ▶ **아카이브가 보존 집행보다 앞서야 한다** (2026-08-12)
+    #   순서가 뒤집히면 그날 것이 아직 verified 가 아니라, 집행기가 전부
+    #   보류로 넘긴다. 막히긴 하지만 매일 헛돌고 디스크는 안 준다.
+    order = {j.name: i for i, j in enumerate(JOBS)}
+    if "retention" in order and "market-archive" in order:
+        assert order["market-archive"] < order["retention"], \
+            "보존 집행이 아카이브보다 먼저다 - 아카이브 안 된 날을 지우려 한다"
     try:
         Job("bad", ("x.py", "--collect"))
         raise AssertionError("every/daily 둘 다 없는 Job 이 통과했다")
@@ -566,21 +589,30 @@ def _check_seed_skips_finished_daily_jobs():
     today = date(2026, 8, 11)
     yesterday = date(2026, 8, 10)
     states = {j.name: JobState() for j in JOBS}
+    # ▶ **Job 이름을 박지 않는다** (2026-08-12)
+    #   예전엔 `macro` 를 표본으로 썼는데, 다른 세션이 그 Job 을 내리자 점검이
+    #   `KeyError` 로 죽었다. 편제가 바뀔 때마다 점검이 깨지면 사람이 점검을
+    #   고치는 대신 지운다. 조건(21:30 이전에 도는 일일 Job)에 맞는 것을 고른다.
+    at_2130 = datetime(2026, 8, 11, 21, 30, tzinfo=KST)
+    daily = [j for j in JOBS
+             if j.daily_at is not None and j.daily_at <= at_2130.timetz().replace(tzinfo=None)]
+    assert len(daily) >= 2, "일일 Job 이 둘은 있어야 이 점검이 성립한다"
+    done_job, stale_job = daily[0].name, daily[1].name
+
     n = seed_states_from_history(
         states,
-        conn=_FakeConn([("chart-daily", today),          # 오늘 끝냄 -> 건너뛴다
-                        ("macro", yesterday),            # 어제 것 -> 오늘은 돈다
-                        ("no-such-job", today)]),        # 사라진 Job -> 무시
+        conn=_FakeConn([(done_job, today),        # 오늘 끝냄 -> 건너뛴다
+                        (stale_job, yesterday),   # 어제 것 -> 오늘은 돈다
+                        ("no-such-job", today)]), # 사라진 Job -> 무시
         today=today)
     assert n == 1, f"복원 수가 틀리다: {n}"
-    assert states["chart-daily"].last_finished_date == today
-    assert states["macro"].last_finished_date is None
+    assert states[done_job].last_finished_date == today
+    assert states[stale_job].last_finished_date is None
 
-    at_2130 = datetime(2026, 8, 11, 21, 30, tzinfo=KST)
     by_name = {j.name: j for j in JOBS}
-    assert not is_due(by_name["chart-daily"], states["chart-daily"], at_2130), \
+    assert not is_due(by_name[done_job], states[done_job], at_2130), \
         "오늘 끝낸 Job 이 재시작 뒤 또 돈다"
-    assert is_due(by_name["macro"], states["macro"], at_2130), \
+    assert is_due(by_name[stale_job], states[stale_job], at_2130), \
         "어제가 마지막인 Job 은 오늘 돌아야 한다"
 
     # 주기형은 복원 대상이 아니다 - 재시작 직후 한 번 더 도는 것이 맞다

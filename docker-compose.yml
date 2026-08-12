@@ -988,10 +988,23 @@ services:
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
+      # ▶ CEO 종합이 부서 산출물을 읽는 경로 (2026-08-12)
+      #   apps/api/ceo.py 의 `_artifact_text()` 는 완료 카드의 **첨부·작업공간
+      #   파일**을 읽는다. `result` 만 보면 부서가 몇 분씩 일한 결과가 통째로
+      #   비어 보이기 때문이다(그 파일 주석의 2026-08-11 실측).
+      #   그런데 이 컨테이너에 칸반이 안 물려 있어서 기본값
+      #   `~/.hermes-shared-kanban/...` 가 **존재하지 않는 경로**였고, 결국
+      #   모든 부서 카드의 산출물이 빈 문자열로 읽혔다. 호스트에는 첨부 35개·
+      #   작업공간 18개가 실제로 쌓여 있었다.
+      KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # 읽기 전용이다 - BFF 는 산출물을 **읽기만** 한다. 카드 생성·전이는
+      # `docker exec` 로 hermes CLI 를 통해 나간다(KANBAN_ACCESS_MODE=docker).
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban:ro
 
 volumes:
   tsdb_data:

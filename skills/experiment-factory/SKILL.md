@@ -97,6 +97,54 @@ quant-py pipeline/backtest_runner.py --run                             # 백테�
 quant-py pipeline/<모듈>.py                                            # 인자 없이 = 자체점검
 ```
 
+**데이터를 먼저 본다 - 설계는 그다음이다**
+
+두 원장에 직접 붙을 수 있다. 프로필 `env:` 에 DSN 이 있으므로 코드에서 그대로 읽는다.
+
+```python
+import os, psycopg2
+mkt = psycopg2.connect(os.environ["TIMESCALE_DATABASE_URL"])   # 시세 (market.*)
+led = psycopg2.connect(os.environ["DATABASE_URL"])             # 업무 원장 (quant.*)
+```
+
+설계 전에 **네가 직접 재라.** 브리핑의 요약을 믿고 시작하지 마라 - 요약은 한
+주기 전 사실이고, 데이터는 매일 들어오고 리텐션으로 밀려난다.
+
+```sql
+-- 무엇이 얼마나 있는가 (실측 2026-08-12)
+select interval_code, count(*), count(distinct instrument_id),
+       min(bucket_time)::date, max(bucket_time)::date
+  from market.market_bars group by 1;
+--   1D  7,261,269행  3,924종목  2016-01-03 ~ 2026-08-10
+--   1M  3,756,660행    350종목  2026-04-02 ~ 2026-07-31   ← 종목이 좁다
+-- market_quotes 는 2026-08-09~08-12 **나흘치뿐**이다(리텐션). 호가·체결 기반
+-- 가설은 지금 표본으로 검정할 수 없다 - 그렇게 적고 반려해라. 억지로 돌리면
+-- 나흘로 낸 수치가 원장에 남는다.
+```
+
+**표본이 설계를 정한다.** 형성창을 정하기 전에 walk-forward 창이 몇 개 나오는지
+직접 세라 - 창이 3개 미만이면 강건성 판정이 성립하지 않는다.
+
+```python
+quant-py -c "
+from walk_forward import make_windows, WARMUP_TRADING_DAYS
+# dates = 데이터셋의 거래일 목록
+print(len(make_windows(dates, max(WARMUP_TRADING_DAYS, lookback+1))))"
+```
+
+**필요한 데이터셋이 없으면 만든다.** 매니페스트가 덮는 원천만 실험까지 가므로,
+없으면 반려로 끝내지 말고 빌드한다. 빌드는 `content_hash`·파티션·품질검사를
+같이 박으므로 반드시 이 진입점으로 한다.
+
+```bash
+quant-py pipeline/pit_dataset.py --build --name <이름> --version <버전> \
+         --from <YYYY-MM-DD> --to <YYYY-MM-DD>
+quant-py -c "..."   # quant.dataset_manifests 로 등재됐는지 확인
+```
+
+버전을 올릴 때는 **덮어쓰지 않는다.** v2 가 있으면 v3 를 만든다 - 같은 경로에
+덮으면 매니페스트 해시와 파일이 어긋나고, 그건 재현성이 깨진 것이다.
+
 **언제 직접 돌리나**
 
 - 카드가 실험을 요구하는데 큐에 작업이 없거나 워커가 못 집을 때

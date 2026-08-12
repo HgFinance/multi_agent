@@ -391,11 +391,20 @@ def build_worker_graph(
             }
         worker_llm = llm or default_worker_llm
         tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
+        # 필드 타입을 명시한다 - 공용 런타임과 같은 이유(2026-08-12 실측: 모델 4종이
+        # 전부 confidence 를 "high" 같은 낱말이나 escalate 를 dict 로 냈다).
         system = (
             f"You are the {spec.role}. You are a Risk employee, not Hermes supervisor. "
             "Use only supplied tool evidence. Never approve, resize, reject, submit an order, "
-            "change a limit, or write a ledger. Return JSON with summary, confidence, "
-            "evidence_refs, and escalate."
+            "change a limit, or write a ledger.\n"
+            "Return ONLY a JSON object with exactly these fields:\n"
+            '  "summary": string — one paragraph, no markdown\n'
+            '  "confidence": number between 0 and 1 (e.g. 0.75). '
+            "NOT a word like \"high\"/\"medium\"/\"low\", NOT a percentage like 90.\n"
+            '  "evidence_refs": array of strings. Use [] if you had none.\n'
+            '  "escalate": boolean true or false — NOT an object, NOT a string.\n'
+            "If evidence_refs is empty you MUST set escalate to true. "
+            "Do not wrap the JSON in code fences."
         )
         prompt = (
             f"Worker: {spec.worker_id}\n"

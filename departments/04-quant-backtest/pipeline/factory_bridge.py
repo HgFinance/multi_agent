@@ -158,6 +158,19 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"사용 가능: {sorted(UNIVERSE_VOCAB)}. 자유 서술은 같은 컨셉을 "
                  f"여러 Family 로 흩어 다중검정 가드를 무력화한다")
 
+    # ①-a SUGGESTED_PARAMS 어휘. 막지는 않되 **접수 시점에 말해 준다.**
+    #     실행면이 안 읽는 키는 `expected_edge` 에 얹히지 않고 버려지는데(아래
+    #     expected_edge_for), 그 사실을 여기서 안 알리면 리서치는 자기가 적은
+    #     파라미터가 반영된 줄 안다. `type` 을 여기 적어 관문 승인 어휘를
+    #     덮으려 한 실측도 있었다(3bb50969) - 그건 이제 무시되지만 조용히
+    #     무시하면 같은 실수를 반복한다.
+    _, _dropped_params = expected_edge_for(proposal)
+    if _dropped_params:
+        r.warnings.append(
+            f"SUGGESTED_PARAMS 의 {_dropped_params} 는 실행면이 읽지 않아 "
+            f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
+            f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
+
     # ①-b 원천 어휘. **접수는 실행 가능성의 약속**인데 여기서 안 보면 가설이
     #     등록된 뒤 실행 단계에서 죽는다(2026-08-10 실측: 기획자가 DATA_TABLES 에
     #     `derived_returns`·`cost_scenarios` 같은 **파생 산출물**을 적었다.
@@ -241,6 +254,44 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     return r
 
 
+def expected_edge_for(proposal: dict) -> tuple[dict, list]:
+    """기획안 -> `expected_edge`. 반환: (edge, 버려진 파라미터 키).
+
+    ▶ **관문이 승인한 값이 이겨야 한다** (2026-08-12 실측)
+      예전에는 이렇게 만들었다:
+
+        edge = {"type": …edge_type, "universe_key": …, **suggested_params}
+
+      전개가 **뒤에** 있어서 `suggested_params` 안의 `type` 이 Gate 0 이 검증하고
+      통과시킨 `edge_type` 을 덮었다. 실측(`3bb50969`):
+
+        기획안 edge_type        = mean_reversion        ← 관문 통과
+        기획안 suggested_params = {"type": "short_term_reversal", …}
+        가설  expected_edge     = {"type": "short_term_reversal", …}  ← 이게 남았다
+
+      **관문이 승인한 값과 원장에 남는 값이 달랐다.** 어휘 검사가 장식이 된다.
+      그래서 정체성 키(type·universe_key)를 **맨 뒤에** 둬서 덮이지 않게 한다.
+
+    ▶ 실행면이 안 읽는 키는 얹지 않는다
+      `config_binding.EDGE_KEYS` 밖의 키가 `expected_edge` 에 들어가면 실행
+      단계에서 "등록한 가설과 실행한 실험이 달라진다"며 **거부된다**. 실측:
+      `667f0a45` 가 `signal_window_days`·`walk_forward_window_days` 로 죽었고,
+      스톨 회수로 다시 발주해도 같은 자리에서 또 죽었다 - 가설이 만들어질 때
+      이미 실행 불가로 태어난 것이다. 접수는 실행 가능성의 약속이어야 한다.
+    """
+    from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
+
+    tunable = set(EDGE_KEYS) - {"type", "universe_key"}
+    params = proposal.get("suggested_params") or {}
+    kept = {k: v for k, v in params.items() if k in tunable}
+    dropped = sorted(k for k in params if k not in tunable)
+    # 정체성 키를 마지막에 - suggested_params 가 덮을 수 없다.
+    edge = {**kept,
+            "type": proposal.get("edge_type"),
+            "universe_key": proposal.get("universe_key")}
+    return edge, dropped
+
+
 def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
                       created_by: str = "factory-bridge") -> dict:
     """기획안 -> quant.hypotheses INSERT 페이로드.
@@ -248,9 +299,7 @@ def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
     사전등록 시점의 근거를 **복사해 둔다** - 기획안이 나중에 수정돼도 이 실험이
     무엇을 등록했는지는 변하면 안 된다(사전등록의 의미가 그것이다).
     """
-    edge = {"type": proposal.get("edge_type"),
-            "universe_key": proposal.get("universe_key"),
-            **{k: v for k, v in (proposal.get("suggested_params") or {}).items()}}
+    edge, _dropped = expected_edge_for(proposal)
     return {
         "title": f"[{proposal.get('edge_type')}] {proposal.get('universe_key')}",
         "rationale": proposal.get("economic_rationale") or "",
@@ -735,8 +784,37 @@ def _check_lineage_is_copied_not_referenced():
         assert row[k] == p[k if k != "proposal_id" else "proposal_id"], k
     assert row["competing_explanation_codes"] == ["BETA_EXPOSURE"]
     assert row["trial_family_id"] and row["trial_number"] == 1
-    # 튜닝 파라미터는 expected_edge 안으로 들어간다(Family 는 이걸 안 본다)
-    assert row["expected_edge"]["lookback_days"] == 20
+    # ▶ 튜닝 파라미터는 **실행면이 읽는 것만** expected_edge 로 들어간다.
+    #   예전 이 검사는 `lookback_days == 20` 을 기대했는데, 그 키는
+    #   config_binding.EDGE_KEYS 밖이라 실행 단계에서 거부된다 - 검사가
+    #   실행 불가로 태어나는 가설을 정상으로 규정하고 있었다(2026-08-12).
+    assert "lookback_days" not in row["expected_edge"], row["expected_edge"]
+    assert row["expected_edge"]["type"] == _prop()["edge_type"]
+
+
+def _check_gate_approved_edge_type_wins():
+    """**관문이 승인한 edge_type 을 suggested_params 가 덮을 수 없다.**
+
+    실측 3bb50969: 기획안 edge_type=mean_reversion 이 관문을 통과했는데
+    suggested_params 의 type=short_term_reversal 이 원장에 남았다. 승인한 값과
+    기록된 값이 다르면 어휘 검사가 장식이 된다.
+    """
+    p = dict(_prop())
+    p["suggested_params"] = {"type": "short_term_reversal",
+                             "universe_key": "몰래바꾸기",
+                             "horizon_days": 20, "top_n": 20,
+                             "signal_window_days": 60}
+    edge, dropped = expected_edge_for(p)
+    assert edge["type"] == p["edge_type"], edge
+    assert edge["universe_key"] == p["universe_key"], edge
+    # 실행면이 읽는 키는 살아남는다
+    assert edge["horizon_days"] == 20 and edge["top_n"] == 20, edge
+    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다
+    assert "signal_window_days" not in edge, edge
+    assert dropped == ["signal_window_days", "type", "universe_key"], dropped
+    # 접수 단계에서 경고로 뜬다 - 세 주기 뒤 실행면에서 처음 알면 늦다
+    g = gate0(p)
+    assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
 
 
 def _check_outcome_requires_reason():
@@ -941,6 +1019,7 @@ if __name__ == "__main__":
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
+    _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")

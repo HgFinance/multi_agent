@@ -24,14 +24,21 @@ Hermes는 직원 Context를 종합·에스컬레이션한다. 주문 제출, Ris
 |---|---:|---:|---:|---|
 | CEO | 1 (+결정론 1) | 1 | 0 | **2026-08-11 `ceo-runner` 신설** — `executive-briefing-worker`는 유지, head가 짊어지던 결정론 부기(부서 판정 집계·미완료 단계 조회)만 러너로 내림 |
 | HR | 1 | 0 | 1 | `profile-architecture-worker`만 실행; Job Profile/Eval Set 제안 전용 |
-| Research | 6 | 2 | 4 | 데이터·미시구조·기술·가치·뉴스/매크로·Evidence 유지 |
+| Research | 2 | 0 | 2 | **2026-08-11 축소** — `competing-explanation-worker`(proposal_draft)·`holdings-analyst-worker`(holding_question) 둘만 남고 전부 소집형. 상시였던 market-context 를 폐지해 상시가 0 이 됐다 — 스카우트·회의론자를 상시로 켜두면 편집장이 읽지 못하는 리드만 쌓인다 |
 | Trading | 0 (+결정론 1, +임시 전략 Worker) | 0 | 0 | **2026-08-10 Bull/Bear 제거** — 고정 LLM 0명, 전략 Bundle당 임시 결정론 Worker |
 | Risk | 1 (+결정론 1) | 0 | 1 | **2026-08-06 tool 강등** — `compliance-policy-worker`만 LLM, 나머지 2명은 `risk-runner`로 통합 |
-| Quant / Backtest | 7 | 2 | 5 | 가설·Dataset·Backtest·Release·ML·비용·Regime 유지 |
+| Quant / Backtest | 2 | 0 | 2 | **2026-08-10~11 축소** — `result-interpretation-worker`(experiment_card)·`strategy-author-worker`(strategy_authoring) 둘만 남고 전부 소집형. 상시였던 proposal-intake 를 본부장이 흡수했다 — 카드도 없는데 해석 워커를 돌릴 이유가 없다 |
 | Accounting / Portfolio | 1 (+결정론 1) | 1 | 0 | **2026-08-07 tool 강등** — `exception-investigation-worker`와 `back-office-runner`가 기존 8개 역할을 흡수·개명 |
 | QA | 2 (+결정론 1) | 0 | 2 | **2026-08-06 tool 강등** — Hallucination·Incident만 LLM, 나머지 3명은 `qa-runner`로 통합 |
 
-LLM Worker 19개(2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 5개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)다. Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
+LLM Worker **10개**(2026-08-10~11 Research 6→2·Quant 7→2 축소 전 19개, 2026-08-10 Trading Bull/Bear 제거 전 21개, 2026-08-06 Trading 강등 전 42개, Risk·QA 강등 전 38개, Accounting 강등 전 32개, HR 통합 전 25개)와 8개 Hermes Profile, 그리고 결정론 Worker 5개(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)다.
+
+> ⚠ 2026-08-12 정정: 위 표가 오래 Research 6·Quant 7(합 19)로 남아 있었다. 그 축소는
+> 코드·부서 `hermes/config.yaml`·`tests/test_worker_architecture.py` 에는 반영됐는데
+> **이 문서에만 전파되지 않았고**, `CLAUDE.md` 가 그 19를 그대로 물려받았다.
+> 편제 수를 바꿀 때 **표·이 문단·테스트·CLAUDE.md 네 곳을 같이** 고친다.
+> 대조 근거는 `test_final_worker_shape_has_no_duplicate_roles`(부서 프로필의
+> `workers` 를 읽어 (전체, 상시, 조건부)를 검사한다). Trading의 임시 전략 Worker는 요청 단위로 생겼다 사라지고 모델을 부르지 않으므로 어느 쪽 수에도 넣지 않는다. 조건부 Worker는 Registry에 존재하지만 해당 입력 신호가 없으면 호출하지 않는다.
 
 **표의 "전체"는 LLM Worker 수다.** 결정론 Worker는 모델을 부르지 않으므로 따로 센다 — 섞으면 "Registry에 있다 = 모델을 태운다"가 깨져서 비용·동시성 산정이 흐려진다.
 

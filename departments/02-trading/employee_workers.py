@@ -133,6 +133,15 @@ def create_temporary_worker(
     return TemporaryStrategyWorker(spec=spec, bundle=normalized, executor=executor)
 
 
+# 다른 네 부서(risk/qa/accounting/ceo)는 러너 메타를 이 세 상수로 노출한다.
+# 트레이딩만 없어서 러너 인벤토리를 이름으로 셀 때 이 부서가 `None` 으로 빠졌다
+# (2026-08-12 실측). 편제 문서가 "결정론 러너 5개"라고 적는 근거를 코드에서
+# 확인할 수 있어야 한다.
+RUNNER_ID = "desk-runner"
+RUNNER_ROLE = "Trading desk runner — 주문 권한 없는 결정론 경계(LLM 없음)"
+RUNNER_TOOLS: tuple[str, ...] = ()
+
+
 def desk_runner(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Preserve the deterministic desk boundary without any LLM employee."""
     return {
