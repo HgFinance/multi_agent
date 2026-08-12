@@ -27,7 +27,15 @@ import os
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime, time as _dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as _dtime
+
+try:
+    from .cache import canonical_url, normalized_record_hash
+    from .observability import current_metrics
+except ImportError:  # direct worker/module execution
+    from cache import canonical_url, normalized_record_hash  # type: ignore
+    from observability import current_metrics  # type: ignore
 
 BUNDLE_VERSION = "evidence-bundle-v1"
 KST = timezone(timedelta(hours=9))
@@ -45,6 +53,26 @@ PRICE_BARS_NEEDED = 21
 # 코드가 어기면 선언이 거짓이 된다.
 # 헤더가 없으면 Tool Gateway 가 익명으로 보고 강제 모드에서 403 이다.
 BUNDLE_PERSONA = "rag-librarian-evidence-curator"
+
+
+def _dedup_source_records(items: list[dict]) -> list[dict]:
+    """Keep one normalized record per canonical source within this task."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_url = item.get("canonical_url") or item.get("url")
+        identity = (
+            canonical_url(raw_url)
+            if raw_url
+            else str(item.get("document_id") or normalized_record_hash(item))
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(item)
+    return unique
 
 
 def _http_get(url: str, timeout: int = 30):
@@ -171,6 +199,9 @@ def fetch_price_context(symbol: str, *, market_api: str | None = None,
     except Exception:  # noqa: BLE001
         # 현재가를 못 구하면 **확정 종가를 그대로 쓴다.** 실패를 숨기지 않고
         # 사유를 남긴다 - 없는 값을 만들어 넣는 것보다 낡은 사실이 낫다.
+        metrics = current_metrics()
+        if metrics:
+            metrics.record_fallback()
         ctx["intraday_note"] = "장중이지만 현재가를 구하지 못해 직전 종가를 쓴다"
         return ctx
 
@@ -211,8 +242,12 @@ def assemble_bundle(symbol: str, *, now=None,
     r = (research_api or RESEARCH_API_DEFAULT).rstrip("/")
     bars = get(f"{m}/bars/{symbol}?interval=1D&limit=5")
     snap = get(f"{m}/snapshot/{symbol}")
-    news = get(f"{r}/evidence/news?symbol={symbol}&hours=24&limit=8")
-    disc = get(f"{r}/evidence/disclosures?symbol={symbol}&days=7&limit=5")
+    news = _dedup_source_records(
+        get(f"{r}/evidence/news?symbol={symbol}&hours=24&limit=8")
+    )
+    disc = _dedup_source_records(
+        get(f"{r}/evidence/disclosures?symbol={symbol}&days=7&limit=5")
+    )
     return {
         "daily_closes_recent": [(b["bucket_time"][:10], float(b["close"]))
                                 for b in bars],
@@ -232,13 +267,30 @@ def assemble_bundle(symbol: str, *, now=None,
                             "evidence_id": n.get("document_id"),
                             "title": n["title"],
                             "relation": n["relation_type"],
+                            "canonical_url": (
+                                canonical_url(n.get("canonical_url") or n.get("url"))
+                                if n.get("canonical_url") or n.get("url") else None
+                            ),
+                            "source_type": n.get("source_type") or "news",
+                            "content_hash": n.get("content_hash") or normalized_record_hash(n),
+                            "fetched_at": n.get("fetched_at"),
+                            "artifact_ref": n.get("artifact_ref") or n.get("document_id"),
                             # 저장 허가와 운영 근거 허가는 다른 질문이다
                             "production_authorized": bool(
                                 n.get("production_authorized", False))}
                            for i, n in enumerate(news)],
         "disclosures_7d": [{"ref": f"d{i + 1}",
                             "evidence_id": d_.get("document_id"),
-                            "title": d_["title"]}
+                            "title": d_["title"],
+                            "canonical_url": (
+                                canonical_url(d_.get("canonical_url") or d_.get("url"))
+                                if d_.get("canonical_url") or d_.get("url") else None
+                            ),
+                            "source_type": d_.get("source_type") or "disclosure",
+                            "content_hash": d_.get("content_hash") or normalized_record_hash(d_),
+                            "fetched_at": d_.get("fetched_at"),
+                            "artifact_ref": d_.get("artifact_ref") or d_.get("document_id"),
+                            }
                            for i, d_ in enumerate(disc)],
         "price_context": fetch_price_context(symbol, market_api=m, get=get,
                                             now=now),
@@ -312,6 +364,7 @@ def evidence_index(bundle: dict) -> dict[str, dict]:
     인용 가능한 것처럼 보여주면 하류가 빈 ID 를 근거로 삼는다.
     """
     idx: dict[str, dict] = {}
+    canonical_seen: dict[str, dict] = {}
     for kind, key in (("news", "news_headlines"), ("disclosure", "disclosures_7d")):
         for item in bundle.get(key) or []:
             if not isinstance(item, dict):
@@ -319,10 +372,22 @@ def evidence_index(bundle: dict) -> dict[str, dict]:
             ref, ev = item.get("ref"), item.get("evidence_id")
             if not ref or not ev:
                 continue
-            idx[ref] = {"evidence_id": str(ev), "kind": kind,
-                        "title": item.get("title"),
-                        "production_authorized": bool(
-                            item.get("production_authorized", kind == "disclosure"))}
+            hit = {"evidence_id": str(ev), "kind": kind,
+                   "title": item.get("title"),
+                   "production_authorized": bool(
+                       item.get("production_authorized", kind == "disclosure")),
+                   "canonical_url": (
+                       canonical_url(item.get("canonical_url") or item.get("url"))
+                       if item.get("canonical_url") or item.get("url") else None
+                   ),
+                   "content_hash": item.get("content_hash")}
+            identity = str(hit.get("canonical_url") or hit.get("content_hash") or ev)
+            prior = canonical_seen.get(identity)
+            if prior is not None:
+                idx[ref] = prior
+            else:
+                canonical_seen[identity] = hit
+                idx[ref] = hit
     return idx
 
 
@@ -604,12 +669,13 @@ def _check_bundle_contract():
               "disclosures_7d", "price_context", "as_of"):
         assert k in b, f"{k} 누락"
     assert len(b["daily_closes_recent"]) == 5
-    assert b["news_headlines"][0] == {
-        "ref": "n1", "evidence_id": "doc-news-1", "title": "급등 뉴스",
-        "relation": "direct", "production_authorized": False}, b["news_headlines"][0]
+    assert b["news_headlines"][0]["ref"] == "n1"
+    assert b["news_headlines"][0]["evidence_id"] == "doc-news-1"
+    assert b["news_headlines"][0]["content_hash"].startswith("sha256:")
     # 공시도 이제 인용할 ID 를 갖는다 (예전엔 제목 문자열뿐이었다)
-    assert b["disclosures_7d"][0] == {
-        "ref": "d1", "evidence_id": "doc-disc-1", "title": "공시 1"}
+    assert b["disclosures_7d"][0]["ref"] == "d1"
+    assert b["disclosures_7d"][0]["evidence_id"] == "doc-disc-1"
+    assert b["disclosures_7d"][0]["content_hash"].startswith("sha256:")
     assert b["price_context"]["change_1d_pct"] == 27.0
     assert b["price_context"]["direction_1d"] == "상승"
     print("  Bundle 계약 유지+확장    OK")
