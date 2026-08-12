@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
 import TopNav from "./components/TopNav";
+import OfficeControls from "./components/OfficeControls";
 import { Company, type Agent, type Snapshot } from "./game/sim";
 
 /**
@@ -165,22 +166,17 @@ export default function Home() {
     return () => cancelAnimationFrame(raf);
   }, [engine]);
 
-  // ponytail: 시작 버튼이 걷어낸 화면 구성에 있었다. 지금은 마운트 시 자동 출근시킨다.
-  // 시작·정지·배속을 다시 노출할 때 engine.start()/togglePause()/setSpeed()를 붙이면 된다.
-  useEffect(() => {
-    engine.start();
-  }, [engine]);
-
   const onSelect = useCallback((agent: Agent) => setSelectedId(agent.id), []);
   const selected = selectedId ? engine.agentById.get(selectedId) ?? null : null;
+  const onDuty = engine.agents.filter((agent) => agent.status !== "출근 전").length;
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <TopNav current="team-board" />
-      <main className="page-shell">
-        <div className="wrap">
-          <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
-        </div>
+    <div className="bg-background text-on-background min-h-screen flex flex-col font-sans">
+      <TopNav current="ai-office" />
+      <main className="w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop">
+        <OfficeControls engine={engine} snap={snap} onDuty={onDuty} onStart={() => engine.start()} />
+        {/* 픽셀 오피스 월드는 손대지 않는다. 자체 스타일(office.css)을 그대로 쓴다. */}
+        <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
       </main>
       {selected ? <ProfileModal agent={selected} onClose={() => setSelectedId(null)} /> : null}
     </div>

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { COMPANY } from "../../company.config";
 
 /**
  * 상단 네비게이션. DESIGN.md 토큰만 쓰고 색·간격을 직접 박지 않는다.
@@ -7,11 +8,11 @@ import Link from "next/link";
  * 연결 안 된 걸 연결된 것처럼 보이지 않게 하는 게 이 앱의 원칙이다.
  */
 
-export type NavKey = "dashboard" | "team-board" | "mandate" | "agent-logs";
+export type NavKey = "dashboard" | "ai-office" | "mandate" | "agent-logs";
 
 const ITEMS: { key: NavKey; label: string; href?: string }[] = [
   { key: "mandate", label: "Mandate Configuration", href: "/mandate" },
-  { key: "team-board", label: "Team Board", href: "/" },
+  { key: "ai-office", label: "AI Office", href: "/" },
   { key: "dashboard", label: "Dashboard" },
   { key: "agent-logs", label: "Agent Logs" },
 ];
@@ -25,7 +26,7 @@ export default function TopNav({ current }: { current: NavKey }) {
     <nav className="bg-surface-container-lowest border-b border-outline-variant flex items-center w-full px-margin-mobile md:px-margin-desktop h-16 shrink-0 z-50 font-sans">
       <div className="flex items-center gap-6">
         <div className="text-headline-md font-headline-md font-bold text-primary tracking-tight whitespace-nowrap">
-          Sentient Capital
+          {COMPANY.name}
         </div>
         <div className="hidden md:flex gap-4">
           {ITEMS.map((item) => {

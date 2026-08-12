@@ -42,8 +42,8 @@ const ASSET_CLASSES: { id: AssetClassId; icon: string; label: string }[] = [
 ];
 
 const APPROVAL_MODES: { id: ApprovalMode; icon: string; label: string; note: string }[] = [
-  { id: "auto", icon: "bolt", label: "자동 주문 실행", note: "조건 충족 시 주문이 자동으로 실행됩니다." },
-  { id: "manual", icon: "pan_tool", label: "수동 승인 필요", note: "모든 제안된 주문은 실행 전 관리자의 승인이 필요합니다." },
+  { id: "auto", icon: "bolt", label: "Auto-Order Execution", note: "조건 충족 시 주문이 자동으로 실행됩니다." },
+  { id: "manual", icon: "pan_tool", label: "Manual Approval Required", note: "모든 제안된 주문은 실행 전 관리자의 승인이 필요합니다." },
 ];
 
 const DEFAULT_DRAFT: MandateDraft = {
