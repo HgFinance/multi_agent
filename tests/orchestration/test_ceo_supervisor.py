@@ -19,7 +19,9 @@ from orchestration.adapters.ceo_supervisor import (
 from orchestration.ceo_workflow_scope import (
     build_root_body,
     build_scoped_task_body,
+    infer_workflow_mode,
     validate_workflow_scope,
+    workflow_mode_from_body,
     WorkflowScopeViolation,
 )
 
@@ -160,6 +162,50 @@ class SupervisorPolicyTest(unittest.TestCase):
                 }
             )
 
+    def test_analysis_synthesis_is_eligible_while_qa_runs(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState(
+                "root",
+                (
+                    child("r", "research-department", "done"),
+                    child("risk", "risk-management", "done"),
+                    child("qa", "qa-department", "running"),
+                ),
+            )
+        )
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, ("r", "risk"))
+        self.assertNotIn("qa", decision.parent_task_ids)
+
+    def test_binding_synthesis_keeps_qa_gate(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState(
+                "root",
+                (
+                    child("r", "research-department", "done"),
+                    child("qa", "qa-department", "running"),
+                ),
+                workflow_mode="binding",
+            )
+        )
+        self.assertIsNone(decision)
+
+    def test_analysis_qa_failure_does_not_block_response_synthesis(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState(
+                "root",
+                (
+                    child("r", "research-department", "done"),
+                    child("qa", "qa-department", "failed"),
+                ),
+            )
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, ("r",))
+
+
 
 class FakeClient:
     def __init__(self) -> None:
@@ -208,30 +254,49 @@ class FakeClient:
 
 
 class SupervisorWakeupTest(unittest.TestCase):
-    def test_terminal_child_wakes_then_qa_done_wakes_final_synthesis(self) -> None:
+    def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
         service = CeoSupervisorService(client)
-        first = service.handle_terminal_event({"event_id": "e1", "task_id": "r", "kind": "completed"})
+
+        first = service.handle_terminal_event(
+            {"event_id": "e1", "task_id": "r", "kind": "completed"}
+        )
+
         self.assertEqual(first.action, SupervisorAction.RUN_QA)
         self.assertEqual(client.created[0]["assignee"], "qa-department")
         self.assertEqual(client.created[0]["parent_task_ids"], ("r", "risk"))
-        self.assertIn("workflow_role=qa", client.created[0]["body"])
-
-        qa_payload = next(payload for payload in client.payloads if payload["id"] == "new-1")
-        qa_payload.update(id="qa", status="done", summary="qa passed")
-        second = service.handle_terminal_event({"event_id": "e2", "task_id": "qa", "kind": "completed"})
-        self.assertEqual(second.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(client.created[1]["assignee"], "ceo-agent")
-        self.assertEqual(client.created[1]["parent_task_ids"], ("qa",))
+        self.assertEqual(client.created[1]["parent_task_ids"], ("r", "risk"))
+        self.assertNotIn("qa", client.created[1]["parent_task_ids"])
+        self.assertIn("workflow_role=qa", client.created[0]["body"])
         self.assertIn("workflow_role=synthesis", client.created[1]["body"])
-
-        duplicate_after_restart = CeoSupervisorService(client).handle_terminal_event(
-            {"event_id": "e2", "task_id": "qa", "kind": "completed"}
-        )
-        self.assertIsNone(duplicate_after_restart)
         self.assertEqual(
-            sum(item["assignee"] == "ceo-agent" for item in client.created), 1
+            sum(item["assignee"] == "ceo-agent" for item in client.created),
+            1,
         )
+
+    def test_binding_synthesis_is_parented_by_completed_qa(self) -> None:
+        client = FakeClient()
+        client.root_body = build_root_body(
+            "Samsung order request", "req-binding", workflow_mode="binding"
+        )
+        client.payloads.append(
+            {
+                "id": "qa",
+                "assignee": "qa-department",
+                "status": "done",
+                "summary": "qa passed",
+            }
+        )
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "binding-qa-done", "task_id": "qa", "kind": "completed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(client.created[0]["parent_task_ids"], ("qa",))
+        self.assertIn("workflow_mode=binding", client.created[0]["body"])
 
     def test_root_body_declares_scope_only_planning_contract(self) -> None:
         body = build_root_body("Samsung", "req-1")
@@ -239,6 +304,35 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertIn("primary_execution_parent=none", body)
         self.assertIn("planning_terminal_state=done_after_child_creation", body)
         self.assertNotIn("child_parent_required=current_root_task_id", body)
+        self.assertIn("workflow_mode=analysis", body)
+
+    def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
+        self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
+        self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
+        self.assertEqual(
+            infer_workflow_mode("삼성전자 주문이나 집행은 하지 말고 분석만 해줘"),
+            "analysis",
+        )
+        self.assertEqual(workflow_mode_from_body(build_root_body("q", "r")), "analysis")
+        self.assertEqual(workflow_mode_from_body("hgfinance.ceo-workflow-scope.v1"), "binding")
+
+    def test_invalid_workflow_mode_aborts_only_current_workflow(self) -> None:
+        client = FakeClient()
+        client.root_body = (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "workflow_mode=unsupported\n"
+        )
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "invalid-mode", "task_id": "r", "kind": "completed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.BLOCK_ABORT)
+        self.assertEqual(client.blocked, ["root"])
+        self.assertTrue(
+            any("ceo-workflow-scope-error" in comment["body"] for comment in client.comments)
+        )
 
     def test_reclaimed_does_not_wake_supervisor(self) -> None:
         client = FakeClient()
@@ -288,8 +382,11 @@ class SupervisorWakeupTest(unittest.TestCase):
             decisions = list(executor.map(service.handle_terminal_event, events))
 
         self.assertEqual(sum(decision is not None for decision in decisions), 1)
-        self.assertEqual(len(client.created), 1)
-        self.assertEqual(client.created[0]["assignee"], "qa-department")
+        self.assertEqual(len(client.created), 2)
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department", "ceo-agent"],
+        )
 
     def test_duplicate_event_is_idempotent_across_service_restart(self) -> None:
         client = FakeClient()
@@ -300,7 +397,11 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         self.assertEqual(first.action, SupervisorAction.RUN_QA)
         self.assertIsNone(second)
-        self.assertEqual(len(client.created), 1)
+        self.assertEqual(len(client.created), 2)
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department", "ceo-agent"],
+        )
         self.assertEqual(
             sum("event=duplicate-1" in comment["body"] and "state=done" in comment["body"] for comment in client.comments),
             1,

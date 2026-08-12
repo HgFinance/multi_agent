@@ -18,6 +18,7 @@ from typing import Any
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 CEO_WORKFLOW_SCOPE_POLICY = "fresh"
 CEO_WORKFLOW_REUSE_POLICY = "disabled"
+WORKFLOW_MODES = frozenset({"analysis", "binding"})
 
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
@@ -156,24 +157,62 @@ def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def infer_workflow_mode(query: str) -> str:
+    """Classify high-risk intent; this never grants execution authority."""
+    text = str(query or "").casefold()
+    non_binding_phrases = (
+        "do not place", "don't place", "do not execute", "don't execute",
+        "실제 주문이나 집행은 하지", "주문이나 집행은 하지",
+        "주문하지 말", "집행하지 말", "실행하지 말",
+    )
+    if any(phrase in text for phrase in non_binding_phrases):
+        return "analysis"
+    binding_terms = (
+        "place order", "send order", "execute order", "broker", "buy ",
+        "sell ", "주문", "매수", "매도", "집행", "배분 변경", "리밸런싱",
+        "rebalance", "change nav", "nav 변경", "ledger post", "원장 반영",
+        "promote to production", "production promotion", "프로덕션 승격",
+        "deploy strategy", "전략 배포", "실제 거래", "실행해",
+    )
+    return "binding" if any(term in text for term in binding_terms) else "analysis"
+
+
+def workflow_mode_from_body(body: str) -> str:
+    """Read the explicit workflow mode, preserving the legacy gate."""
+    match = re.search(r"(?m)^workflow_mode=(\S+)\s*$", str(body or ""))
+    if not match:
+        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in str(body or "") else "analysis"
+    mode = match.group(1).casefold()
+    if mode not in WORKFLOW_MODES:
+        raise WorkflowScopeViolation(f"unknown workflow_mode: {mode}")
+    return mode
+
+
 def build_root_body(
     query: str,
     request_id: str,
     *,
+    workflow_mode: str = "analysis",
     mandate: Mapping[str, Any] | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
-    `mandate`는 2026-08-12에 추가됐다(선택 인자 - 기존 호출부는 그대로 동작한다).
-    채워지면 `hgfinance.mandate-snapshot.v1` 블록이 함께 실려, 부서가
+    `workflow_mode`는 고위험 의도(주문·집행)를 분류만 한다 - 실행 권한을 주지
+    않는다. `mandate`(2026-08-12 추가)가 채워지면
+    `hgfinance.mandate-snapshot.v1` 블록이 함께 실려, 부서가
     `kanban show <root_task_id>`로 사용자의 투자 한도를 읽을 수 있다.
+
+    둘 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
     """
 
+    if workflow_mode not in WORKFLOW_MODES:
+        raise ValueError("workflow_mode must be analysis or binding")
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
+        f"workflow_mode={workflow_mode}\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -217,6 +256,7 @@ def build_scoped_task_body(
     *,
     role: str,
     request_id: str | None = None,
+    workflow_mode: str = "analysis",
 ) -> str:
     """Bind a task to a workflow without creating a dependency edge."""
 
@@ -226,11 +266,14 @@ def build_scoped_task_body(
     role = str(role).strip().casefold()
     if role not in {"primary", "qa", "synthesis", "control"}:
         raise ValueError("workflow task role must be primary, qa, synthesis, or control")
+    if workflow_mode not in WORKFLOW_MODES:
+        raise ValueError("workflow_mode must be analysis or binding")
 
     metadata = [
         CEO_WORKFLOW_SCOPE_MARKER,
         f"workflow_root_task_id={root_task_id}",
         f"workflow_role={role}",
+        f"workflow_mode={workflow_mode}",
     ]
     if request_id:
         metadata.append(f"request_id={request_id}")
@@ -379,10 +422,13 @@ __all__ = [
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",
+    "WORKFLOW_MODES",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
     "build_root_body",
     "build_root_comment",
     "extract_scope_references",
+    "infer_workflow_mode",
     "validate_workflow_scope",
+    "workflow_mode_from_body",
 ]

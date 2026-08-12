@@ -185,6 +185,108 @@ def create_kanban_task(
     }
 
 
+def show_kanban_task(
+    task_id: str,
+    *,
+    timeout: float | None = None,
+) -> dict[str, object] | None:
+    """Read one Kanban task through Hermes' supported JSON CLI boundary.
+
+    This is intentionally read-only.  The BFF uses it to expose the planner's
+    already-created graph; it never starts a second CEO turn or accesses the
+    shared Kanban database directly.
+    """
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command = [
+        os.environ.get("HERMES_BIN", "hermes"),
+        "kanban",
+        "show",
+        task_id,
+        "--json",
+    ]
+    read_timeout = timeout
+    if read_timeout is None:
+        try:
+            read_timeout = float(os.getenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "2"))
+        except ValueError:
+            read_timeout = 2.0
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, read_timeout),
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    task = payload.get("task", payload)
+    if not isinstance(task, dict):
+        return None
+    normalized = dict(task)
+    normalized.setdefault("id", normalized.get("task_id") or task_id)
+    # Hermes puts graph/run projections beside ``task``.  Preserve only the
+    # supported fields needed by the presentation layer.
+    for key in ("latest_summary", "parents", "children", "comments", "events", "runs"):
+        if key in payload:
+            normalized[key] = payload[key]
+    return normalized
+
+
+def list_kanban_tasks(*, timeout: float | None = None) -> tuple[dict[str, object], ...] | None:
+    """Read the current Kanban task projection through Hermes' JSON CLI."""
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    try:
+        read_timeout = timeout
+        if read_timeout is None:
+            read_timeout = float(os.getenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "2"))
+    except ValueError:
+        read_timeout = 2.0
+    command = [os.environ.get("HERMES_BIN", "hermes"), "kanban", "list", "--json"]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, read_timeout),
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        return None
+    return tuple(dict(item) for item in payload)
+
+
 def comment_kanban_task(*, task_id: str, text: str) -> bool:
     """Write a durable Kanban comment through Hermes' supported CLI.
 
