@@ -211,6 +211,24 @@ export default function DashboardView() {
                     <code className="text-[10px] text-outline">{result.task?.task_id ?? "task 대기"}</code>
                   </div>
                   <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">{result.answer}</p>
+                  {/* v2(ceo.query-accepted.v2)에만 있다. v1 응답이면 통째로 없다. */}
+                  {result.planning ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {result.planning.selected_departments.map((dept) => (
+                        <span
+                          key={dept}
+                          className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container text-[11px] text-on-surface-variant"
+                        >
+                          {dept}
+                        </span>
+                      ))}
+                      {result.planning.qa_required ? (
+                        <span className="px-2 py-0.5 rounded-full border border-primary/30 bg-secondary-container text-[11px] text-primary">
+                          QA 필요
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {/* 이 문장은 참고용이다. 수치를 여기서 뽑아 확정하지 않는다. */}
                   <p className="text-[10px] text-outline mt-2 m-0">비공식 · 확정 수치의 출처가 아닙니다</p>
                 </div>
