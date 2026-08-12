@@ -28,7 +28,7 @@ export interface MandateDraft {
 const RISK_PROFILES: { id: RiskProfile; icon: string; label: string; note: string; tone: string }[] = [
   { id: "conservative", icon: "shield", label: "보수적", note: "원금 보존 최우선", tone: "text-primary" },
   { id: "neutral", icon: "balance", label: "중립적", note: "성장과 위험의 균형", tone: "text-secondary" },
-  { id: "aggressive", icon: "rocket_launch", label: "공격적", note: "높은 수익 추구 및 위험 감수", tone: "text-error" },
+  { id: "aggressive", icon: "rocket_launch", label: "공격적", note: "높은 수익 추구, 위험 감수", tone: "text-error" },
 ];
 
 const ASSET_CLASSES: { id: AssetClassId; icon: string; label: string }[] = [
@@ -179,7 +179,7 @@ export default function MandateConfig() {
           <div className="p-6 space-y-10 overflow-y-auto">
             {/* 1. 목표와 위험 성향 */}
             <section>
-              <SectionHeading index={1} title="Objectives & Risk Appetite" />
+              <SectionHeading index={1} title="목표 & 위험 성향" />
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 <div>
                   <label>
@@ -191,7 +191,7 @@ export default function MandateConfig() {
                       placeholder="Ex) 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어."
                     />
                   </label>
-                  <p className="text-xs text-on-surface-variant mt-2">Specific assets or time horizons will be clarified by the AI Assistant.</p>
+                  <p className="text-xs text-on-surface-variant mt-2">구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다.</p>
                 </div>
 
                 <div>
@@ -228,7 +228,7 @@ export default function MandateConfig() {
 
             {/* 2. 자본과 통화 */}
             <section>
-              <SectionHeading index={2} title="Capital & Currency" />
+              <SectionHeading index={2} title="자본 및 통화" />
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div>
                   <label>
@@ -268,7 +268,7 @@ export default function MandateConfig() {
 
             {/* 3. 비중과 익스포저 한도 */}
             <section>
-              <SectionHeading index={3} title="Weight Limits & Exposure" />
+              <SectionHeading index={3} title="비중, 익스포저 한도" />
               <div className="space-y-6">
                 <div>
                   <div className="flex justify-between mb-2">
@@ -294,7 +294,7 @@ export default function MandateConfig() {
                 </div>
                 <div>
                   <div className="flex justify-between mb-2">
-                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase">총 익스포저 한도</label>
+                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase">총 익스포저 한도 (실제로 손실을 볼 수 있는 최대 위험 금액)</label>
                     <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
                       {draft.grossExposurePct}%
                     </span>
@@ -319,7 +319,7 @@ export default function MandateConfig() {
 
             {/* 4. 자산 운용 정책 */}
             <section>
-              <SectionHeading index={4} title="자산 운용 정책" suffix="(허용 vs 금지)" />
+              <SectionHeading index={4} title="자산 운용 정책"/>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3">
                 {ASSET_CLASSES.map((asset) => {
                   const on = draft.allowedAssets[asset.id];
@@ -428,7 +428,7 @@ export default function MandateConfig() {
                 <span className="absolute bottom-0 right-0 w-3 h-3 bg-tertiary-fixed-dim border-2 border-surface rounded-full" aria-hidden="true" />
               </div>
               <div>
-                <div className="font-bold text-body-sm font-body-sm text-on-surface">Kim Seri</div>
+                <div className="font-bold text-body-sm font-body-sm text-on-surface">김세리</div>
                 <div className="text-[10px] text-on-surface-variant">Mandate Interview Worker</div>
               </div>
             </div>
@@ -441,7 +441,7 @@ export default function MandateConfig() {
                 key={`${message.from}-${index}`}
                 className={`flex flex-col gap-1 max-w-[85%] ${message.from === "agent" ? "items-start" : "items-end self-end"}`}
               >
-                <span className="text-[10px] text-secondary mx-1 font-medium">{message.from === "agent" ? "Kim Seri AI" : "대표님"}</span>
+                <span className="text-[10px] text-secondary mx-1 font-medium">{message.from === "agent" ? "김세리" : "대표님"}</span>
                 <div
                   className={`p-3 text-body-sm font-body-sm shadow-sm rounded-2xl ${
                     message.from === "agent"
