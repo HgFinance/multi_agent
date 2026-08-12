@@ -699,6 +699,10 @@
           "path": "/governance/v1/mandate-assistant/suggest"
         },
         {
+          "method": "POST",
+          "path": "/governance/v1/mandates"
+        },
+        {
           "method": "GET",
           "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
         },
@@ -818,6 +822,14 @@
         {
           "method": "GET",
           "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/portfolio/v1/investor-profiles"
+        },
+        {
+          "method": "GET",
+          "path": "/portfolio/v1/investor-profiles/current"
         }
       ]
     },
