@@ -51,6 +51,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CEO_PROFILE = canonical_profile_for_department("ceo")
 QA_PROFILE = canonical_profile_for_department("qa")
 
+# `canonical_profiles.py`는 쓰기 경로(신규 Task 생성)에서 별칭을 의도적으로
+# 거부한다 - 오타나 폐기 이름이 Hermes에 도달하기 전에 실패해야 하기 때문이다
+# (departments/00-ceo-office/hermes/SOUL.md: "Never write... legacy aliases
+# such as ai-qa-audit-department"). 이 Read Model은 그 규칙이 생기기 전(또는
+# 다른 파이프라인)에 만들어져 이미 공유 판에 있는 과거 Task까지 읽어야 하므로,
+# 쓰기 경로와 달리 알려진 폐기 별칭을 관대하게 인식한다 - 신규 생성을 허용하는
+# 게 아니라 이미 존재하는 데이터를 오분류하지 않기 위해서다.
+_LEGACY_QA_ALIASES = frozenset({"ai-qa-audit-department"})
+
 # `build_root_body`가 사용자 질의 앞에 붙이는 구분자. 이 표시가 있는 Task만
 # 화면에 노출할 CEO Root로 인정한다.
 _USER_REQUEST_HEADING = "## User request"
@@ -345,7 +354,7 @@ class WorkflowNode:
 
     @property
     def is_qa(self) -> bool:
-        return self.profile == QA_PROFILE
+        return self.profile == QA_PROFILE or self.profile in _LEGACY_QA_ALIASES
 
     @property
     def terminal(self) -> bool:
