@@ -291,6 +291,23 @@ services:
     #   배포 없이 고치라고 만든 것이라 이미지에 굽으면 그 목적이 사라진다.
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
+      # ▶ **Parquet 아카이브는 호스트에 남아야 한다** (2026-08-12 실측)
+      #   `market_archive_exporter.ARCHIVE_ROOT` 는 `parents[3]/market-archive`
+      #   라는 상대 경로다. 호스트에서 돌리면 저장소 안에 쌓이지만, 이 컨테이너
+      #   에서 돌면 `/app/market-archive` 인데 **마운트가 없었다.** 그래서
+      #   호가·체결 아카이브 3.2GB(parquet 6개)가 컨테이너 쓰기 레이어에만
+      #   있었고, `docker compose up --force-recreate` 한 번이면 사라지는
+      #   상태였다. `archive_exports` 원장은 `verified=t` 라고 적혀 있었으므로
+      #   **원장만 보면 안전해 보였다.**
+      #
+      #   TimescaleDB 는 호가를 나흘, 체결을 6주만 들고 있다(청크 실측).
+      #   장기 표본은 전적으로 이 Parquet 이므로 마이크로구조 연구의 유일한
+      #   근거가 컨테이너 수명에 걸려 있었던 셈이다.
+      #
+      #   ⚠ 이미 컨테이너 안에만 있는 파일이 있다면 **먼저 `docker cp` 로 빼낸
+      #     다음** 이 마운트를 붙인다. 순서를 바꾸면 빈 호스트 디렉터리가
+      #     컨테이너 안 파일을 가려서 그대로 잃는다.
+      - ./market-archive:/app/market-archive
 
     mem_limit: 512m
     mem_reservation: 64m

@@ -129,6 +129,22 @@ def base_config_for(edge: str, default_config: dict, rev_config: dict) -> dict:
         "initial_capital": 100_000_000.0,
     }
 
+def dataset_of(hyp: dict) -> tuple[str, str]:
+    """가설이 쓸 (데이터셋 이름, 버전). **상수가 아니라 사상 결과에서 나온다.**
+
+    `orchestrate` 가 `data_resolution.resolve` 결과를 `required_data_products`
+    에 넣어 두므로 여기서는 그것을 읽기만 한다. 값이 없거나 모양이 이상하면
+    모듈 상수로 떨어진다 - **조용히 다른 데이터로 돌지 않기 위해서**다.
+    """
+    for d in (hyp.get("required_data_products") or []):
+        s = str(d)
+        if "/" in s:
+            name, _, ver = s.rpartition("/")
+            if name and ver:
+                return name, ver
+    return DATASET_NAME, DATASET_VERSION
+
+
 def feasibility(hypothesis: dict, existing_datasets: set,
                 catalog: dict | None = None) -> tuple[bool, list, list]:
     """(실행 가능?, 부족 목록, 백로그 제안). 판단이 아니라 존재 확인이다."""
@@ -667,7 +683,19 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     # ▶ 시도 횟수를 넘긴다 - DSR 이 감가하려면 알아야 한다. **config 가 아니라
     #   인자로** 넘긴다(config 는 input_hash 에 들어가므로 넣으면 중복 가드가
     #   무력해진다).
-    bt = register_and_run(DATASET_NAME, DATASET_VERSION,
+    # ▶ **데이터셋은 가설이 정한다 - 상수가 아니다** (2026-08-12)
+    #   여기는 `DATASET_NAME, DATASET_VERSION = "krx-basket-daily", "v2"` 라는
+    #   모듈 상수를 썼다. 그런데 위(orchestrate)에서 `data_resolution.resolve`
+    #   가 **이미 사상 결과를 계산해 `hyp["required_data_products"]` 에 넣어
+    #   둔다.** 계산해 놓고 버리고 상수를 쓰고 있었다 - 그래서 v3 를 만들어도
+    #   실험은 영원히 v2 로 돌았다.
+    #
+    #   `resolve` 는 같은 이름이면 **최신 버전**을 고르므로, 상수를 걷어내는
+    #   것만으로 새 데이터셋이 저절로 쓰인다. 데이터셋 해시는 `input_hash` 에
+    #   들어가므로 v2/v3 는 서로 다른 실험이 된다 - 과거 결과는 그대로 남는다.
+    ds_name, ds_ver = dataset_of(hyp)
+    print(f"  데이터셋 {ds_name}/{ds_ver} (가설 요구에서 사상)", flush=True)
+    bt = register_and_run(ds_name, ds_ver,
                           config=config, hypothesis_id=hypothesis_id,
                           trials=int(hyp.get("_trials") or 1))
     if bt.get("duplicate"):
@@ -679,7 +707,7 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     # 강건성: 같은 config 로 창별 재실행 (walk_forward 조각 재사용)
     conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
     try:
-        _, _, _, rows = load_dataset(conn, DATASET_NAME, DATASET_VERSION)
+        _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
@@ -917,6 +945,23 @@ def _check_orchestrate_paths():
     cur4 = _FakeCursor(None, [])
     assert orchestrate("none", conn=_FakeConn(cur4), market_conn=_FakeMarket()).verdict == "NO_HYPOTHESIS"
     print("  오케스트레이션 경로       OK")
+    _check_dataset_comes_from_hypothesis()
+    print("  데이터셋=사상 결과       OK")
+
+
+def _check_dataset_comes_from_hypothesis():
+    """**데이터셋은 사상 결과에서 온다 - 상수가 아니다.** (2026-08-12)
+
+    `resolve` 가 계산해 둔 값을 버리고 모듈 상수를 쓰고 있었다. 그래서 v3 를
+    만들어도 실험은 영원히 v2 로 돌았다. `resolve` 는 같은 이름이면 최신 버전을
+    고르므로, 사상 결과를 읽기만 하면 새 데이터셋이 저절로 쓰인다.
+    """
+    assert dataset_of({"required_data_products": ["krx-basket-daily/v3"]})         == ("krx-basket-daily", "v3")
+    # 이름에 슬래시가 여럿이어도 마지막이 버전이다
+    assert dataset_of({"required_data_products": ["a/b/v9"]}) == ("a/b", "v9")
+    # 사상 결과가 없거나 모양이 이상하면 **조용히 다른 데이터로 돌지 않는다**
+    assert dataset_of({}) == (DATASET_NAME, DATASET_VERSION)
+    assert dataset_of({"required_data_products": ["market_bars"]})         == (DATASET_NAME, DATASET_VERSION)
 
 
 if __name__ == "__main__":
@@ -935,4 +980,4 @@ if __name__ == "__main__":
     _check_feasibility_gate()
     _check_status_mapping()
     _check_orchestrate_paths()
-    print("오케스트레이터 3개 영역 통과. 실행은 --run [--hypothesis <id>]")
+    print("오케스트레이터 4개 영역 통과. 실행은 --run [--hypothesis <id>]")

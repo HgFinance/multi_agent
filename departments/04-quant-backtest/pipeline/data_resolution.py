@@ -32,6 +32,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 
 MODULE_VERSION = "quant-data-resolution-v1"
@@ -427,5 +429,92 @@ def _selfcheck() -> int:
     return 1 if fails else 0
 
 
+_SQL_CATALOG = """
+select m.name, m.version,
+       coalesce(m.source_versions, '{}'::jsonb),
+       m.row_count,
+       (select count(*) from quant.universe_members u
+         where u.universe_version_id = m.universe_version_id),
+       coalesce(m.partitions, '[]'::jsonb),
+       coalesce(m.quality_summary, '{}'::jsonb),
+       m.as_of
+  from quant.dataset_manifests m
+ order by m.name, m.version
+"""
+
+
+def catalog(meta_conn) -> list[dict]:
+    """등재된 데이터셋 전부와 **고를 때 필요한 사실**. 원장에서만 읽는다.
+
+    ▶ 왜 필요한가 (2026-08-12)
+      데이터셋을 고르는 길이 없었다. 에이전트는 `dataset_manifests` 를 직접 SQL
+      로 뒤져야 했고, 그마저 "무엇을 덮는지"가 `source_versions` JSON 안에 있어
+      한눈에 안 보였다. 그래서 기획자가 매니페스트가 안 덮는 원천
+      (`market_quotes`)을 요구하는 가설을 계속 냈고 전부 실험 단계에서 죽었다.
+
+      **고르려면 보여야 한다.** 이름·덮는 원천·기간·행수·종목수를 한 줄로 준다.
+    """
+    cur = meta_conn.cursor()
+    cur.execute(_SQL_CATALOG)
+    out = []
+    for name, ver, srcs, rows, syms, parts, qual, as_of in cur.fetchall():
+        if isinstance(srcs, str):
+            srcs = json.loads(srcs or "{}")
+        if isinstance(parts, str):
+            parts = json.loads(parts or "[]")
+        # ▶ `partitions` 는 매니페스트마다 **모양이 다르다** - 목록이기도 하고
+        #   {파티션키: 메타} dict 이기도 하다. 한 모양만 가정하면 `KeyError: 0`
+        #   으로 조회면 전체가 죽는다(2026-08-12 실측). 오늘만 세 번째다.
+        #   모양이 셋이다: ①목록 ②{파티션키: 메타} ③{count, keys:[...]} 요약.
+        #   ③을 dict 로 뭉뚱그리면 기간이 `count ~ keys` 로 찍힌다(실측).
+        if isinstance(parts, dict):
+            parts = parts.get("keys") if isinstance(parts.get("keys"), list) \
+                else sorted(parts)
+        parts = [str(p) for p in (parts or [])]
+        if isinstance(qual, str):
+            qual = json.loads(qual or "{}")
+        checks = (qual or {}).get("checks") or {}
+        warns = sorted(k for k, v in checks.items()
+                       if isinstance(v, dict) and v.get("status") in ("WARN", "FAIL"))
+        out.append({
+            "dataset": f"{name}/{ver}",
+            "sources": sorted(srcs or {}),
+            "rows": int(rows or 0),
+            "symbols": int(syms or 0),
+            "span": (f"{parts[0]} ~ {parts[-1]}" if parts else "(파티션 없음)"),
+            "partitions": len(parts or []),
+            "warnings": warns,
+            "as_of": str(as_of)[:19],
+        })
+    return out
+
+
+def _print_catalog(rows: list[dict]) -> None:
+    if not rows:
+        print("등재된 데이터셋이 없다. `pit_dataset.py --build` 로 만든다.")
+        return
+    print(f"{'데이터셋':28} {'덮는 원천':26} {'기간':20} {'종목':>6} {'행수':>12}  경고")
+    for r in rows:
+        print(f"{r['dataset']:28} {','.join(r['sources'])[:26]:26} "
+              f"{r['span']:20} {r['symbols']:>6,} {r['rows']:>12,}  "
+              f"{','.join(r['warnings']) or '-'}")
+    print("\n▶ 실험은 **여기 있는 원천만** 쓸 수 있다. 없는 원천을 요구하면 "
+          "`사상할 데이터셋이 없다` 로 막힌다.")
+    print("▶ 필요한 것이 없으면 반려하지 말고 만든다: "
+          "`pit_dataset.py --build --name <이름> --version <새 버전>`")
+
+
 if __name__ == "__main__":
+    if "--list" in sys.argv:
+        import psycopg2                                # noqa: PLC0415
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                               / "01-research" / "collectors"))
+        from source_registry import load_project_env   # noqa: PLC0415
+
+        _c = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+        try:
+            _print_catalog(catalog(_c))
+        finally:
+            _c.close()
+        raise SystemExit(0)
     raise SystemExit(_selfcheck())

@@ -801,9 +801,24 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
             etype = str((edge or {}).get("type") or "").strip().lower()
             if not etype:
                 out[hid] = "expected_edge.type 이 비었다"
-            elif etype not in STRATEGY_CATALOG:
+                continue
+            if etype not in STRATEGY_CATALOG:
                 out[hid] = (f"'{etype}' 는 어휘에 없다 - "
                             f"사용 가능: {', '.join(sorted(STRATEGY_CATALOG))}")
+                continue
+            # ▶ 실행면이 안 읽는 파라미터도 **영원히 실패하는 부류**다 (2026-08-12)
+            #   `config_binding.bind` 가 EDGE_KEYS 밖의 키를 거부한다. 오늘
+            #   `expected_edge` 오염은 접수 단계에서 막았지만(관문 우회 차단),
+            #   **그 전에 등록된 가설**은 이미 오염된 채로 남아 매 주기 같은
+            #   자리에서 죽는다. 데이터·어휘만 보고 발주하면 이걸 못 거른다.
+            try:
+                from config_binding import EDGE_KEYS   # noqa: PLC0415
+                bad = sorted(k for k in (edge or {}) if k not in EDGE_KEYS)
+            except Exception:  # noqa: BLE001
+                bad = []
+            if bad:
+                out[hid] = (f"실행면이 안 읽는 파라미터: {', '.join(bad)} - "
+                            f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
     except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
         return {}
     return out
