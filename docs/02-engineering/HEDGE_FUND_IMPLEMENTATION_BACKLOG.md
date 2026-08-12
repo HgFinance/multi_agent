@@ -1,12 +1,47 @@
 # Personal Hedge Fund Agent - Core Feature Backlog
 
-> 문서 상태: Implementation Backlog v1.4
+> 문서 상태: Implementation Backlog v1.8
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: 단일 사용자, 한국 상장주식·ETF Multi-Strategy Paper Trading, Capability 기반 파생상품 확장  
 > 관련 계획: [HEDGE_FUND_CORE_PLAN.md](../01-product/HEDGE_FUND_CORE_PLAN.md)  
 > 확정 기술 스택: [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md)  
 > Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > 목표: 전 종목 실시간 감시부터 전략 판단, Risk 검증, Paper 주문, 성과 평가와 최소 조직 학습 Loop까지 구현한다.
+> 실제 실행 상태·2주 통합 보드와 팀별 Daily Scrum: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md)
+
+## 0. 2026-08-03 실행 기준 상태
+
+이 표는 기능 파일의 존재가 아니라 Feature 전체 완료 조건을 기준으로 한다. `부분`은 유효한 구현과
+Test가 있으나 End-to-End Acceptance를 아직 통과하지 못했다는 뜻이다.
+
+| Feature | 상태 | 현재 증거 | 남은 핵심 Gate |
+|---|---|---|---|
+| F01 Mandate | 부분 | 정책·Version·Lifecycle 자체 점검 | PostgreSQL Repository, 승인 Interrupt, Case 연결 |
+| F02 Universe | 부분 | 전 종목 2,596개와 거래정지·관리종목 제외 | Versioned Universe와 지수 구성 이력 |
+| F03 Market WebSocket | 실행 확인 | `ls-realtime` 실행, Tick 378만·Quote 420만 적재 | 부하·Gap·재시작 Acceptance |
+| F04 Event 정규화 | 부분 | Decimal·3시각·멱등 계약과 적재 | 공통 Event Registry와 Replay Test |
+| F05 Feature Engine | 부분 | Market API·Amihud·Roll·DQ Steward | 상시 Worker와 `microstructure_features` 영속화 |
+| F06 Event Priority Queue | 문서 | 우선순위 규칙만 존재 | 탐지 Worker, Redis Queue와 Backpressure |
+| F07 PIT RAG | 부분 | Evidence API·MCP·`as_known_at`·정정 재무 보존 | Artifact Lineage와 전 본부 QA 연결 |
+| F08 Investment Workflow | 부분 | Research MCP, Risk/QA LangGraph·Harness | Durable Case, Checkpoint와 본부 Handoff |
+| F09 Strategy Registry | 부분 | Quant Schema·Hypothesis·Experiment 기록 | Capability·승격·Rollback API |
+| F10 Backtest | 부분 | PIT·Backtest·Walk-Forward, Hypothesis 5·Experiment 6 | Worker Container와 재현 CI |
+| F11 Signal/Target | 부분 | OrderIntent·철학별 Preset | Research Packet과 Strategy Registry 연결 |
+| F12 Risk Engine | Test 확인 | P1 계산·Repository·Redis Event·Harness | Container와 실제 Risk Decision Row |
+| F13 Paper Broker | Test 확인 | 결정론적 Paper Broker 자체 점검 | 실제 OMS Worker와 비용·부분 체결 |
+| F14 OMS | Test 확인 | 상태 머신·멱등 Prototype | Event Store 복구와 Reconciliation |
+| F15 Portfolio/PnL | Test 확인 | Ledger·Position·Reconciliation Prototype | Canonical DB Journal·Snapshot과 공식 Read Model |
+| F16 Audit/Replay | 부분 | QA Decision 2·Incident 2·Corrective Action 1, Replay Harness | Agent/Tool/Run Log와 전사 `trace_id` |
+| F17 Operator Control | 부분 | Redis Trading State와 Fail-closed Test | Project Redis, Kill Switch E2E와 UI Command |
+| F18 AI Office | 부분 | Clean Build·Render Test 2/2, Risk·QA 계약 Panel | 공식 Snapshot/WebSocket/Auth, 취약점 Review |
+| F19 Hermes 자기 개선 | 부분 | Profile/Version 19개, Candidate·Access Lifecycle | DRAFT 13개 Review와 Eval·Shadow·Rollback Runner |
+
+현재 P0에서 먼저 닫아야 할 흐름은 F07→F11→F12→F13/F14→F15→F16이다. F03의 실행 기반은
+이미 있으므로 새 수집 Source를 늘리는 것보다 이 흐름의 Canonical DB와 Event 연결을 우선한다.
+
+2026-08-03~08-14 실행 순서는 `M0 CI·계약 복구 → M1 공통 Contract → M2 프로젝트 Redis와
+Risk·QA Runtime → M3 첫 Paper Case → M4 AI Office·Report Projection`이다. Feature Owner는 새 기능을
+시작하기 전에 [v2.2 통합 보드](../PROJECT_IMPLEMENTATION_STATUS.md#8-2주-통합-실행-보드)의 선행 Gate를 확인한다.
 
 ## 1. 우선순위
 
@@ -39,7 +74,7 @@ P0가 모두 동작하기 전 P2 기능을 구현하지 않는다.
 | F15 | Portfolio/PnL | Cash, Position과 성과 계산 (accounting-portfolio-department) |
 | F16 | Audit/Replay | 판단부터 체결까지 추적·재현 (qa-department) |
 | F17 | Operator Control | Entry Block, Pause와 Kill Switch (risk-management) |
-| F18 | AI Office Dashboard | 8개 조직의 실시간 업무·시장·전략·주문·위험 상태 조회와 통제 요청 (공통 — Frontend는 ai-office, 본부별 조회 API는 각 소유 본부) |
+| F18 | AI Office Dashboard | 8개 조직의 실시간 업무·시장·전략·주문·위험 상태 조회와 통제 요청 (도현님: 공통 Frontend Platform 기술 DRI, 영주님: Live Office Business Owner, 각 본부: 조회 계약) |
 | F19 | Governed Self-Improvement | Hermes의 개선 후보를 Eval·Shadow·승인 Version으로 배포 (ceo-agent + qa-department 승인, hr-department 운영) |
 
 ## 3. P0 기능 명세
@@ -401,8 +436,9 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 
 **현재 Baseline**
 
-- `ai-office/`의 Next.js·React·TypeScript Pixel Office와 Demo Simulation.
-- 12개 고정 부서, 고정 Room Layout과 Browser Memory는 실제 조직·업무 상태로 사용하지 않는다.
+- `ai-office/`의 Next.js·React·TypeScript Pixel Office는 CEO Office, 6개 본부와 Agent Workforce 등 8개 조직·2개 층으로 전환됐다.
+- Trading/Portfolio DEMO Snapshot Panel과 `apps/api/main.py`의 `/ui/snapshot` Read-only BFF가 있다.
+- 직원 이동·업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반이다. 운영 Backend 연결로 간주하지 않는다.
 
 **구현 기능**
 
@@ -425,6 +461,9 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 - Gap 또는 재연결 후 누락 상태를 추측하지 않고 Snapshot을 다시 읽는다.
 - 전 종목 Tick 원문 대신 1초 이상 집계 Feed Health와 상위 Event를 표시한다.
 - Agent 상태는 `OFFLINE`, `IDLE`, `QUEUED`, `RUNNING`, `WAITING_APPROVAL`, `BLOCKED`, `DEGRADED`, `ERROR`를 사용한다.
+- Hermes Kanban Task/Assignee 상태를 읽기 전용 Status Bridge로 `agent.status.v1`에 매핑한다.
+- Agent Status Projector가 Event를 멱등 소비해 Supabase Read Model을 갱신하고 Snapshot 복구 원천으로 사용한다.
+- Browser와 BFF는 Kanban SQLite를 직접 읽거나 수정하지 않는다.
 
 **Command 계약**
 
@@ -479,6 +518,7 @@ NORMAL -> ENTRY_BLOCKED -> REDUCE_ONLY -> HALTED
 | F29 | Borrow/Short Simulator | 공매도 가능 수량, 비용, Recall과 주문 규칙 Simulation |
 | F30 | Multi-leg Execution | Leg 관계, 부분 체결 복구와 Atomicity Policy |
 | F31 | Derivatives Capability | Contract, Margin, Greeks, Roll과 Exercise/Assignment |
+| F32 | X Social Insight Watchlist | 승인 유명 인사·공식 계정의 Post를 준실시간 수집하고 교차 검증된 Evidence로 연결 |
 
 ## 5. 최소 데이터 모델
 
@@ -557,6 +597,7 @@ execution.fill.v1
 portfolio.position_updated.v1
 portfolio.snapshot.v1
 risk.trading_state.v1
+agent.status.v1
 workforce.improvement_candidate_created.v1
 audit.improvement_evaluated.v1
 workforce.artifact_version_activated.v1

@@ -9,8 +9,9 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/portfolio-client.test.mjs tests/office-simulation.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "e2e": "playwright test",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
+    "@playwright/test": "^1.55.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

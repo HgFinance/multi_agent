@@ -87,10 +87,223 @@ export type TradingSnapshot = {
     balanced: boolean;
     accounts: Record<string, Money>;
   };
+  /**
+   * 결제(T+2) 사다리. `portfolio.cash`는 **결제가 끝난 현금**이고, 아직 안 끝난
+   * 매수 대금·매도 대금은 결제일 칸에 들어 있다. 두 값이 다른 것이 정상이다.
+   * 구버전 BFF는 이 구간을 안 보내므로 optional이다 — 없으면 그리지 않는다.
+   */
+  treasury?: {
+    as_of: string;
+    available_cash: Money;
+    projected_cash_end: Money;
+    buckets: {
+      date: string;
+      incoming: Money;
+      outgoing: Money;
+      net: Money;
+      projected_cash: Money;
+    }[];
+    /** 결제일이 지났는데 결제 분개가 없는 건수. 0이 아니면 조사 대상이다. */
+    overdue_count: number;
+    overdue: {
+      source_event_id: string;
+      settlement_date: string;
+      incoming: Money;
+      outgoing: Money;
+    }[];
+  };
+  /**
+   * 구간마다 출처가 다를 수 있다 — 회계(portfolio·ledger·treasury)는 Supabase
+   * Canonical 뷰, 트레이딩은 아직 Scripted Loop다. `mode`(DEMO/PAPER/LIVE)와는
+   * 다른 축이라 한 배지로 합치지 않는다. 없으면 표시하지 않는다(지어내지 않는다).
+   */
+  sources?: Partial<Record<"portfolio" | "trading" | "ledger" | "treasury", string>>;
+  operations?: OperationsSnapshot;
+};
+
+export type RuntimeStatus =
+  | "OFFLINE"
+  | "IDLE"
+  | "QUEUED"
+  | "RUNNING"
+  | "WAITING_APPROVAL"
+  | "BLOCKED"
+  | "DEGRADED"
+  | "ERROR";
+
+export type OperationsWorker = {
+  worker_id: string;
+  runtime_kind: "llm" | "deterministic";
+  status: string;
+  trigger: string | null;
+};
+
+export type OperationsDepartment = {
+  department_code: string;
+  name: string;
+  domain: string;
+  status: RuntimeStatus;
+  status_reason: string;
+  runtime_observed: boolean;
+  head_persona: string | null;
+  head_provider: string | null;
+  head_model: string | null;
+  executor: string | null;
+  worker_model: string | null;
+  output_contract: string | null;
+  failure_action: string | null;
+  worker_count: number;
+  llm_worker_count: number;
+  deterministic_worker_count: number;
+  active_worker_count: number;
+  conditional_worker_count: number;
+  active_workers?: string[];
+  current_stage?: string | null;
+  workers: OperationsWorker[];
+  source_profile: string;
+};
+
+export type OperationsCommunication = {
+  event_type: string;
+  status: "IMPLEMENTED" | "IMPLEMENTED_INTERNAL" | "PLANNED" | "LEGACY_ALIAS" | string;
+  layer: string;
+  producer: string;
+  consumers: string[];
+  case_binding: string | null;
+  source: string;
+  live: boolean;
+  transport: string;
+};
+
+export type OperationsSnapshot = {
+  schema_version: "operator-operations.v1";
+  observed_at: string;
+  sequence?: number;
+  agent_statuses?: Array<{
+    event_id: string;
+    event_type: "agent.status.v1";
+    schema_version: 1;
+    sequence: number;
+    department_code: string;
+    agent_id: string;
+    worker_id: string | null;
+    status: RuntimeStatus;
+    role: string | null;
+ reason: string | null;
+ metadata?: Record<string, unknown>;
+  }>;
+  agent_status_events?: Array<Record<string, unknown>>;
+  status: "DEGRADED" | "CONNECTED" | string;
+  runtime_connected: boolean;
+  event_bridge_connected: boolean;
+  message_count: number;
+  implemented_event_contracts: number;
+  planned_event_contracts: number;
+  departments: OperationsDepartment[];
+  communications: OperationsCommunication[];
+  runtime: OperationsRuntime;
+  warnings: string[];
+};
+
+export type OperationsRuntimeWorker = {
+  worker_id: string;
+  department_code: string;
+  stage: string;
+  role: string;
+  status: string;
+  summary: string | null;
+};
+
+export type LlmPerformanceMetric = {
+  schema_version: "llm.performance.v1" | string;
+  worker_id: string;
+  role: string;
+  stage: string;
+  model_name: string;
+  status: string;
+  attempts: number;
+  llm_calls: number;
+  retries: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  latency_ms: number;
+  eval_score: number | null;
+  error_count: number;
+  raw_payloads_sent: false;
+};
+
+export type OperationsRuntimeMessage = {
+  id: string;
+  occurred_at: string;
+  kind: string;
+  department_code: string | null;
+  worker_id: string | null;
+  text: string;
+};
+
+export type OperationsRuntimeHandoff = {
+  from_department: string;
+  to_department: string;
+  from_head: string;
+  to_head: string;
+  status: string;
+  title: string;
+  message: string;
+  occurred_at: string;
+  expires_at: number;
+};
+
+export type OperationsRuntime = {
+  status: RuntimeStatus | "COMPLETED";
+  run_id: string | null;
+  workflow: string | null;
+  phase: string | null;
+  departments: Record<
+    string,
+    { status: string; current_stage: string | null; active_worker_ids: string[]; kanban_task_id?: string | null }
+  >;
+  active_workers: OperationsRuntimeWorker[];
+  performance_metrics?: LlmPerformanceMetric[];
+  active_handoff: OperationsRuntimeHandoff | null;
+  observability?: {
+    langsmith?: {
+      status: string;
+      configured: boolean;
+      tracing_enabled: boolean;
+      endpoint: string | null;
+      project: string | null;
+    };
+  };
+  messages: OperationsRuntimeMessage[];
+  result: Record<string, unknown> | null;
+  approval: {
+    status: "PENDING" | "APPROVE" | "REJECT" | string;
+    binding: boolean;
+    approved_at: string | null;
+    comment: string | null;
+  } | null;
+  error: string | null;
 };
 
 /** 이 파일이 아는 Major Version. 다르면 적용하지 않는다 (계획 5.3). */
 export const SUPPORTED_SCHEMA_VERSION = 1;
+
+/** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 넘긴다. */
+const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
+export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
+/**
+ * Sequence는 단조 증가하는 canonical projection 버전이다.
+ * 알 수 없는 값은 최신 상태로 해석하지 않는다.
+ */
+export function isValidSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function getSnapshotSequence(snapshot: TradingSnapshot): number | null {
+  if (snapshot.operations === undefined) return 0;
+  const sequence = snapshot.operations.sequence;
+  return isValidSequence(sequence) ? sequence : null;
+}
 
 /**
  * Snapshot 형태 검증.
@@ -117,6 +330,24 @@ export function parseSnapshot(input: unknown): TradingSnapshot {
   for (const key of ["portfolio", "trading", "ledger"] as const) {
     if (typeof doc[key] !== "object" || doc[key] === null) {
       throw new Error(`Snapshot에 ${key}가 없습니다`);
+    }
+  }
+  if (doc.operations !== undefined) {
+    if (typeof doc.operations !== "object" || doc.operations === null) {
+      throw new Error("Snapshot의 operations가 객체가 아닙니다");
+    }
+    const operations = doc.operations as Record<string, unknown>;
+    if (operations.schema_version !== "operator-operations.v1") {
+      throw new Error(`지원하지 않는 operations schema_version ${String(operations.schema_version)}`);
+    }
+    if (!Array.isArray(operations.departments) || !Array.isArray(operations.communications)) {
+      throw new Error("Snapshot operations에 부서 또는 통신 목록이 없습니다");
+    }
+    if (typeof operations.runtime !== "object" || operations.runtime === null) {
+      throw new Error("Snapshot operations에 runtime projection이 없습니다");
+    }
+    if (operations.sequence !== undefined && !isValidSequence(operations.sequence)) {
+      throw new Error("Snapshot operations의 sequence가 유효하지 않습니다");
     }
   }
   return doc as unknown as TradingSnapshot;

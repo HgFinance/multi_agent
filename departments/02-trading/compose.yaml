@@ -1,0 +1,108 @@
+# Trading Department Compose Fragment (도현 소유).
+#
+# 근거: docs/02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 10절(Docker Compose
+#       구조 - "본부가 자기 Compose Fragment를 소유하도록 한다"), 6.3절(트레이딩본부 Container 목록),
+#       3.1절(Hermes는 Backend Image에 설치하지 않고 공식 Image를 별도 Container로 띄운다),
+#       docs/02-engineering/HERMES_DOCKER_RUNBOOK.md 4-2절(다른 본부를 추가하는 법)
+#
+# 루트 docker-compose.yml이 `include:`로 이 파일을 끌어온다. include된 파일도 루트 파일과
+# 하나의 병합된 모델을 공유하므로 redis 같은 공통 Platform Container를 서비스 이름으로
+# 참조할 수 있다(계획서 5절 - 공통 인프라는 루트가 소유한다).
+#
+# ▶ 계획서 6.3의 broker-adapter는 아직 없다 - 코드가 없다. 코드 없는 역할을 컨테이너부터
+#   만들지 않는다(departments/03-risk/Dockerfile 상단 주석과 같은 원칙).
+#   trading-api는 2026-08-03에 api/app.py가, trading-outbox-relay는 2026-08-10에
+#   oms/relay.py가 생기면서 추가했다.
+services:
+  # trading-api: OrderIntent 심사, Broker Order 상태 머신, Paper 체결의 조회·명령면.
+  # 계약은 docs/02-engineering/TRADING_DOMAIN_API_SPEC.md.
+  #
+  # ▶ DATABASE_URL을 주지 않는다. 빠뜨린 게 아니라 **아직 안 쓰기 때문**이다 -
+  #   OrderStore가 프로세스 메모리라 재시작하면 주문이 사라진다(설계서 4절).
+  #   execution.* 테이블은 Supabase에 이미 있고 행이 0이며, psycopg OrderStore는
+  #   팀장 확인 대기 항목이다. 그때 여기에 DATABASE_URL을 추가한다.
+  #   자격증명을 "언젠가 쓸 것"이라고 미리 주입하지 않는다 - 안 쓰는 자격이 퍼지는
+  #   것 자체가 위험이다(01-research의 research-mcp에서 LS 자격을 뺀 것과 같은 이유).
+  #
+  # ▶ 상태가 프로세스 메모리라 **복제하면 안 된다.** 지금 replica를 늘리면 주문이
+  #   컨테이너별로 갈라진다. DB store가 들어오기 전까지 단일 인스턴스로 둔다.
+  trading-api:
+    build:
+      context: .
+    container_name: hedgefund-trading-api
+    restart: unless-stopped
+    environment:
+      # Paper 주문도 accounting-api와 같은 Supabase execution.*를 보도록
+      # durable 모드를 기본값으로 켠다. 명시적으로 PAPER_DB=false를 주면
+      # 로컬 오프라인/테스트 모드를 선택할 수 있다.
+      PAPER_DB: ${PAPER_DB:-true}
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # trading-outbox-relay: execution.outbox의 PENDING을 Redis Stream으로 발행하고 SENT로
+  # 찍는다. **이 컨테이너가 없으면 회계 원장이 영원히 비어 있다** - 회계 소비자는
+  # status='SENT' 행만 읽고, SENT를 찍는 것은 outbox.drain() 하나뿐이다.
+  #
+  # ▶ trading-api와 **같은 Image에 command만 다르다**(계획서 3.1). 별도 Dockerfile을
+  #   만들지 않는다.
+  #
+  # ▶ 복제해도 안전하다. outbox.pending()이 `for update skip locked`로 집으므로 두
+  #   인스턴스가 같은 행을 잡지 않는다(trading-api/accounting-api와 다른 점이다 -
+  #   그쪽은 상태를 들고 있어서 복제하면 갈라진다). 지금 처리량에 필요가 없어 1개로 둔다.
+  #
+  # ▶ RELAY_MAX_ATTEMPTS를 outbox 기본값(5)보다 높게 준다. 5는 backoff 합이 ~75초라
+  #   Redis를 재기동하는 것만으로도 체결이 DLQ로 떨어지고, DLQ는 pending()이 다시
+  #   집지 않아 사람이 SQL로 꺼내야 한다. 12면 ~66분을 버틴다.
+  #
+  # ▶ DATABASE_URL은 trading-api와 같은 값이어야 한다. 다른 DB를 보면 relay가 빈
+  #   outbox를 폴링하며 조용히 아무것도 안 한다.
+  trading-outbox-relay:
+    build:
+      context: .
+    container_name: hedgefund-trading-outbox-relay
+    restart: unless-stopped
+    command: ["python", "oms/relay.py", "--serve"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
+      RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # ▶ 표준 Profile 경로는 ~/.hermes/profiles/trading-department다.
+  #   Windows에서는 ${USERPROFILE}로 같은 호스트 경로를 마운트한다.
+  #
+  # ▶ trading 전용 /opt/data를 사용해 세션·기억·자격이 다른 부서와 섞이지 않게 한다.
+  #   HERMES_HOME=/opt/data가 이미지 기본값이라 표준 Profile 디렉터리만 마운트하면 된다.
+  #
+  # ▶ Provider는 하드코딩하지 않는다 - /opt/data/config.yaml(provider:)과 auth.json이
+  #   결정한다(Trading은 Codex 배정, 2026-08-10 확정 매핑). Claude Code CLI 프록시로
+  #   전환하려면 이 서비스를 docker-compose.claude.yml에 override로 추가한다(해당 파일
+  #   상단 주석에 근거·자리표시자 이유가 있다).
+  trading-hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-trading-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    volumes:
+      - /home/ubuntu/.hermes/profiles/trading-department:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고
+    environment:
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s

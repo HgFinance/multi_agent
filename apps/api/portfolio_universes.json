@@ -1,0 +1,47 @@
+[
+  {
+    "universe_id": "KOREA_EQUITY_WATCHLIST",
+    "name": "국내 주식 Watchlist",
+    "description": "Supabase 기준정보와 PIT 시장 스냅샷에서 국내 주식 후보를 읽습니다. 연결 전에는 TEST fixture를 사용합니다.",
+    "status": "TEST",
+    "source": "reference.instruments + execution.market_snapshots",
+    "instruments": [
+      {
+        "symbol": "005930",
+        "exchange": "KRX",
+        "name": "삼성전자",
+        "asset_class": "KOREA_EQUITY",
+        "currency": "KRW",
+        "data_status": "TEST",
+        "evidence_refs": ["research:news_watchlist"]
+      },
+      {
+        "symbol": "000660",
+        "exchange": "KRX",
+        "name": "SK하이닉스",
+        "asset_class": "KOREA_EQUITY",
+        "currency": "KRW",
+        "data_status": "TEST",
+        "evidence_refs": ["research:news_watchlist"]
+      },
+      {
+        "symbol": "005380",
+        "exchange": "KRX",
+        "name": "현대차",
+        "asset_class": "KOREA_EQUITY",
+        "currency": "KRW",
+        "data_status": "TEST",
+        "evidence_refs": ["research:news_watchlist"]
+      },
+      {
+        "symbol": "035420",
+        "exchange": "KRX",
+        "name": "NAVER",
+        "asset_class": "KOREA_EQUITY",
+        "currency": "KRW",
+        "data_status": "TEST",
+        "evidence_refs": ["research:news_watchlist"]
+      }
+    ]
+  }
+]

@@ -1,0 +1,58 @@
+name: strategy-research
+version: strategy-research-v1
+kind: strategy-research
+description: 실시간 투자 Case와 분리된 Quant Backtest·승격 검토 흐름
+boundary_rules:
+  - Point-in-Time Dataset과 재현 가능한 Strategy Candidate만 다음 단계로 전달한다.
+  - Quant는 Production 승격을 수행하지 않는다.
+  - QA 독립 검증과 CEO 승인 전에는 Trading으로 Strategy Bundle을 전달하지 않는다.
+  - 실험 결과는 성공·기각을 가리지 않고 환류한다. 환류 적재가 실험 종결의 전제 조건이다.
+steps:
+  - id: quant-backtest
+    sequence: 1
+    department: quant-backtest-department
+    owner: quant
+    task: PIT Dataset·Backtest·Walk-forward로 Strategy Candidate 생성
+    input_contract: strategy_hypothesis
+    output_contract: strategy_candidate
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: NO_SUBMIT
+    forbidden_actions: [production_promotion, order_submission]
+  - id: qa-release-review
+    sequence: 2
+    department: qa-department
+    owner: qa
+    task: Strategy Candidate의 재현성·근거·Model Risk 독립 검증
+    input_contract: strategy_candidate
+    output_contract: strategy_qa_assessment
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: REJECT_PROMOTION
+    forbidden_actions: [production_promotion, order_submission]
+  - id: ceo-promotion-review
+    sequence: 3
+    department: ceo-agent
+    owner: ceo
+    task: QA와 Risk 검토 결과를 바탕으로 Shadow/Paper 승격 여부만 결정
+    input_contract: strategy_qa_assessment
+    output_contract: promotion_decision
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: REJECT_PROMOTION
+    forbidden_actions: [order_submission, risk_approval]
+  # 2026-08-10 (재일): 퀀트 소관 환류 단계. 이 흐름의 결과가 리서치 Gate 0 으로
+  # 돌아가지 않으면 같은 실험을 다시 사게 된다 - 공장이 아니라 일방통행이 된다.
+  # QA·CEO 단계는 손대지 않았고 sequence 도 그대로다(맨 뒤에 붙였다).
+  - id: quant-outcome-feedback
+    sequence: 4
+    department: quant-backtest-department
+    owner: quant
+    task: 종결 사유를 통제 어휘 lesson_codes로 사상해 ExperimentOutcomeV1 적재(리서치 Gate 0 재조회용)
+    input_contract: promotion_decision
+    output_contract: experiment_outcome
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    # 환류 적재가 실패하면 조용히 지나가지 않는다 - 그 교훈은 영영 Gate 0 에 닿지 않는다
+    failure_action: ESCALATE
+    forbidden_actions: [production_promotion, order_submission, outcome_deletion]

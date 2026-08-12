@@ -63,9 +63,20 @@ class RiskBounds(BaseModel):
     max_daily_loss: Decimal = Field(
         gt=0, le=1, description="일일 최대 손실 (base_capital 대비 비율)"
     )
+    max_drawdown_pct: Decimal = Field(
+        default=Decimal("0.10"),
+        gt=0,
+        le=1,
+        description="전체 최대 낙폭 상한 (base_capital 대비 비율)",
+    )
 
     @model_validator(mode="after")
-    def _check_weight_containment(self) -> "RiskBounds":
+    def _check_weight_containment(self) -> RiskBounds:
+        if self.max_daily_loss > self.max_drawdown_pct:
+            raise ValueError(
+                "max_daily_loss는 max_drawdown_pct보다 클 수 없다 "
+                f"({self.max_daily_loss} > {self.max_drawdown_pct})"
+            )
         # 상호 모순 1: 단일 종목 상한이 섹터 상한보다 크다.
         if self.max_instrument_weight > self.max_sector_weight:
             raise ValueError(
@@ -81,6 +92,8 @@ class RiskBounds(BaseModel):
         return self
 
 
+
+
 class UniversePolicy(BaseModel):
     """governance.mandate_versions.universe_policy 의 내부 계약."""
 
@@ -88,6 +101,22 @@ class UniversePolicy(BaseModel):
 
     allowed_markets: list[str] = Field(
         min_length=1, description="허용 시장 코드 (예: ['KRX'])"
+    )
+    allowed_asset_classes: list[str] = Field(
+        default_factory=list,
+        description="허용 자산군 코드. 비어 있으면 시장 유니버스 기본값을 따른다.",
+    )
+    forbidden_asset_classes: list[str] = Field(
+        default_factory=list,
+        description="금지 자산군 코드. 허용 목록보다 우선하는 차단 목록.",
+    )
+    preferred_sectors: list[str] = Field(
+        default_factory=list,
+        description="선호 섹터 코드. 후보 우선순위에만 사용하며 강제 매수 조건은 아니다.",
+    )
+    excluded_sectors: list[str] = Field(
+        default_factory=list,
+        description="제외 섹터 코드. Risk Engine이 신규 노출을 차단한다.",
     )
     trading_start: str = Field(
         pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="거래 시작 HH:MM (시장 로컬)"
@@ -97,7 +126,7 @@ class UniversePolicy(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _check_session(self) -> "UniversePolicy":
+    def _check_session(self) -> UniversePolicy:
         # 상호 모순 3: 거래 종료가 시작보다 빠르거나 같다.
         if self.trading_end <= self.trading_start:
             raise ValueError(
@@ -107,6 +136,24 @@ class UniversePolicy(BaseModel):
         # 상호 모순 4: 허용 시장 코드 중복.
         if len(set(self.allowed_markets)) != len(self.allowed_markets):
             raise ValueError("allowed_markets 에 중복 시장 코드가 있다")
+        return self
+
+
+    @model_validator(mode="after")
+    def _check_scope_lists(self) -> UniversePolicy:
+        lists = {
+            "allowed_asset_classes": self.allowed_asset_classes,
+            "forbidden_asset_classes": self.forbidden_asset_classes,
+            "preferred_sectors": self.preferred_sectors,
+            "excluded_sectors": self.excluded_sectors,
+        }
+        for name, values in lists.items():
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} 중복 값이 있다")
+        if set(self.allowed_asset_classes) & set(self.forbidden_asset_classes):
+            raise ValueError("허용 자산군과 금지 자산군이 겹친다")
+        if set(self.preferred_sectors) & set(self.excluded_sectors):
+            raise ValueError("선호 섹터와 제외 섹터가 겹친다")
         return self
 
 
@@ -146,7 +193,7 @@ class MandatePolicy(BaseModel):
     approval_rules: ApprovalRules
 
     @model_validator(mode="after")
-    def _check_asset_lists(self) -> "MandatePolicy":
+    def _check_asset_lists(self) -> MandatePolicy:
         allowed = set(self.allowed_assets)
         forbidden = set(self.forbidden_assets)
         # 상호 모순 5: 같은 자산이 허용이자 금지.
@@ -169,31 +216,31 @@ if __name__ == "__main__":
     from pydantic import ValidationError
 
     def _valid_risk(**over) -> dict:
-        base = dict(
-            base_capital="100000000",
-            currency="KRW",
-            max_instrument_weight="0.1",
-            max_sector_weight="0.3",
-            max_gross_exposure="1.0",
-            max_concurrent_positions=10,
-            max_daily_loss="0.03",
-        )
+        base = {
+            "base_capital": "100000000",
+            "currency": "KRW",
+            "max_instrument_weight": "0.1",
+            "max_sector_weight": "0.3",
+            "max_gross_exposure": "1.0",
+            "max_concurrent_positions": 10,
+            "max_daily_loss": "0.03",
+        }
         base.update(over)
         return base
 
     def _valid_universe(**over) -> dict:
-        base = dict(allowed_markets=["KRX"], trading_start="09:00", trading_end="15:30")
+        base = {"allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"}
         base.update(over)
         return base
 
     def _valid_policy(**over) -> dict:
-        base = dict(
-            allowed_assets=["A005930"],
-            forbidden_assets=["A000660"],
-            risk_bounds=_valid_risk(),
-            universe_policy=_valid_universe(),
-            approval_rules=dict(paper_order_mode="USER_APPROVAL"),
-        )
+        base = {
+            "allowed_assets": ["A005930"],
+            "forbidden_assets": ["A000660"],
+            "risk_bounds": _valid_risk(),
+            "universe_policy": _valid_universe(),
+            "approval_rules": {"paper_order_mode": "USER_APPROVAL"},
+        }
         base.update(over)
         return base
 

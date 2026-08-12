@@ -4,15 +4,37 @@
 # 실제 승인·축소·거부의 바인딩 집행과 한도 관리는 결정론적 Risk Engine이 담당 (5.3, 5.9절) — 에이전트는 원장을 직접 변경하지 않음
 # 참고: HEDGE_FUND_MASTER_PLAN.md 5.5 #3, 5.6, 8, 9.1, 11
 # 타임아웃 문제 해결: 로컬 데이터 우선 사용
+# 현재 역할 경계(2026-08-03): Policy RAG는 Risk의 compliance-policy-worker가 소유한다.
+# Research의 evidence-rag-worker와 QA의 Evidence/Hallucination Audit은 각각 연구 근거와 독립 감사 범위다.
+# PIKE-RAG/Light-RAG는 전사 적용 완료가 아닌 향후 평가·도입 후보이며, 현재 baseline은 skills/agentic-rag다.
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  default: gpt-5.6-luna
+  base_url: https://chatgpt.com/backend-api/codex
+
+# 부서장은 Hermes가 담당하며 Codex를 기본으로 사용하고 Claude Code를 승인된 대체 경로로 둔다.
+# 부서장 서술은 Worker Context를 종합·에스컬레이션할 뿐 결정론적 Risk Engine을 대체하지 않는다.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: risk-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  # 2026-08-06 tool 강등. LLM 직원은 compliance-policy-worker 하나뿐이고 나머지
+  # 둘은 결정론 risk-runner 하나로 합쳐졌다 — 아래 deterministic_workers 참고.
+  runtime_personalities: [compliance-policy-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60  # 개별 명령어 타임아웃
@@ -24,9 +46,24 @@ agent:
     pre-trade-risk-analyst: "You are the Pre-Trade Risk Analyst. You check every Order Intent against Mandate, Position, Exposure, Cash, Liquidity and order rules before it reaches the Risk Supervisor's aggregation. You check for stale input, duplicate intents and schema validity first, then call the Risk Engine (departments/03-risk/engine/risk_engine.py — RiskEngine.check_order), and you structure the failed rule and current-vs-limit values rather than just saying no. You propose a maximum allowed quantity when one exists. Your decision must be reproducible from the same Snapshot/Config version — never override a rule with natural-language judgment, and fail closed whenever the config or snapshot is stale."
     operational-counterparty-risk-agent: "You are the Operational and Counterparty Risk Analyst. You track how Broker, FCM, Vendor and settlement failures could become investment risk — aggregating cash/margin/unsettled exposure per counterparty and applying the allowed action for each failure type. When a Broker is in an Unknown state, you prioritize status confirmation and Reconciliation over sending new orders, and you trace vendor outages through to affected Positions and Strategies. You never assume an unconfirmed Broker state is Filled or Cancelled, and any cash/order mismatch becomes a joint case with the Accounting department."
 
+  # docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 2.2절 <domain>.<resource>.<verb> 표기를 따른다.
+  # 경로-Tool 매핑과 "누가 무엇을 호출하는지"는 RISK_QA_DOMAIN_API_SPEC.md 2.4절을 그대로 옮긴 것 —
+  # 새로 지어낸 권한이 아니다. departments/03-risk/api/app.py가 실제로 감싸는 엔드포인트만 대상.
+  tool_allowlist:
+    risk-supervisor: [case.read, case.delegate]  # 2.4절: "자체 API 호출 없음" — 하위 결과 종합·해석만
+    market-liquidity-risk-agent: [case.read, risk.trading_state.read]
+    derivatives-margin-risk-agent: [case.read]  # portfolio-api/Greeks 미연동 — 이 페르소나 전용 API 없음(위 not_started 참고)
+    compliance-policy-agent: [case.read, risk.compliance.check]
+    pre-trade-risk-analyst: [case.read, risk.case.check]
+    operational-counterparty-risk-agent: [case.read, risk.trading_state.record.read]
+  # 부서 전체 공통 금지 — Kill Switch 실행(PUT/DELETE trading-state)은 스펙 2.2 "LLM이 이 엔드포인트를
+  # 직접 호출하지 않는다" 원칙, 주문 제출/원장 기록은 트레이딩/회계본부 전속 권한이다.
+  forbidden_tools: [oms.submit, ledger.write, risk.trading_state.write, risk.trading_state.clear]
+
 # 검색-평가-생성-재검색 루프가 필요한 페르소나만 LangGraph 기반 Agentic RAG 적용 대상
 # baseline 구현: skills/agentic-rag/ (retrieve -> grade -> generate -> hallucination_check -> retry)
-# compliance-policy-agent부터 시작 — evidence-qa-agent/hallucination-critic(QA)까지 확장 완료
+# compliance-policy-agent부터 시작 — evidence-qa-agent(QA), hallucination-critic(QA)까지 확장 완료
+# (2026-08-02, departments/06-ai-qa-audit/hermes/config.yaml 참고)
 agentic_rag:
   framework: langgraph
   status: "compliance-policy-agent baseline 구현됨 (skills/agentic-rag/)"
@@ -42,10 +79,13 @@ rag_technique_assignment:
     technique: agentic_rag
     status: implemented
     note: "skills/agentic-rag/ baseline. corpus/compliance/ 문서 검색 -> grade -> generate -> hallucination_check"
-  # LightRAG(Entity-level + Summary-level dual retrieval)은 compliance-policy-agent의 차기 백엔드
-  # 후보 — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면
-  # nodes.py를 고치지 않고 교체 가능(CLAUDE.md skills/agentic-rag 절 참고). Mandate/Restricted List
-  # 버전 이력이 늘어나 단일 문서 검색으로 정확도가 떨어질 때 재검토한다. 지금은 근거 없음(백로그).
+    future_backend: "LightRAG(Entity-level + Summary-level dual retrieval) — retriever.py의 search() 인터페이스(DocumentChunk in, list[ScoredChunk] out)만 유지하면 nodes.py 무수정 교체 가능"
+    trigger: "Mandate/Restricted List/Policy Store 문서가 실 데이터로 교체돼 버전 이력이 늘어나고, 단일 임베딩 검색으로 recall이 부족해질 때. 지금은 근거 없음(백로그)."
+    # 2026-07-30: Evidence corpus(QA)와 달리 compliance corpus는 실 데이터가 돼도 GraphRAG 계열
+    # 트리거가 걸릴 만큼 안 커진다고 판단 — 한 펀드의 정책 문서는 성숙해도 수십~100건 안팎이고
+    # 구조가 버전 체인(Mandate v1 -> v2 -> ...)이지 엔티티 관계망(기업-경영진-딜)이 아니다. 재평가
+    # 시점은 문서 수 100건 초과 또는 문서 간 실제 상호 참조가 빈번해질 때 — 그 전까지 LightRAG 이상
+    # 단계(PIKE-RAG 계열, Neo4j, Hypergraph)는 이 페르소나에 배정하지 않는다.
   # Neo4j/Hypergraph는 Risk 쪽에 그래프 형태 스키마가 없어 배정하지 않는다(QA의 audit.artifact_lineage와
   # 다름) — 배정하려면 먼저 그래프 형 데이터(예: Position-Strategy-Signal 관계)가 있어야 한다.
 
@@ -53,11 +93,23 @@ rag_technique_assignment:
 # 끝난다 (팀 가이드 2절). risk-supervisor/pre-trade-risk-analyst는 이 엔진의 판정을 해석·
 # Escalation만 하고, Limit을 계산하거나 판정을 바꾸지 않는다.
 deterministic_services:
+  harness_manifest: departments/03-risk/harness/manifest.py
+  harness_preflight: departments/03-risk/harness/core.py
+  harness_runtime_check: departments/03-risk/harness/redis_check.py
+  harness_log_contract: departments/03-risk/harness/journal.py
+  harness_replay: "RunJournal.replay(run_id, executor)"
+  harness_review: "RunJournal.review(run_id)"
+  orchestrator: "Hermes department profile: risk-management"
+  employee_executor: "LangGraph employee node"
+  harness_retry_policy: "all_skills_max_retries=2; max_attempts=3; final_failure=REJECT+HALTED"
+  harness_fallback: "REJECT candidate + INCONCLUSIVE + HOLD + HALTED + trace_id + node + sanitized_error"
+  redis_timeout_env: "RISK_REDIS_TIMEOUT_SECONDS=2; timeout => HALTED (fail-closed)"
+  reject_fast_path: "deterministic counterparty/supervisor narrative; no non-binding LLM call"
   risk_engine: departments/03-risk/engine/risk_engine.py                 # P0 Pre-trade Gate — 10단계 순서 검사, APPROVE/RESIZE/REJECT
   trading_state_store: departments/03-risk/engine/trading_state_store.py # Redis 최신 Trading State — 장애 시 HALTED로 fail-closed
 
 implementation:
-  status: "Sprint K1 P0 Pre-trade Risk Gate + Redis Trading State 구현됨 (팀 가이드 4.1, 12절, DoD 4번 Redis 절반). Supabase 쪽(risk 스키마 실기록)·K2-K4는 미착수"
+  status: "Sprint K1 P0 완료. P1 결정론적 Exposure Snapshot·Instrument Mapping·Stress/VaR/Correlation 계산·P1 Entry Gate·Risk DB Repository/RLS baseline 구현. 실제 Portfolio/Market 자격증명, governed Fund/Book/Instrument/Stress Scenario, 운영 DB/RLS/E2E 활성화는 외부 조건 대기"
   done:
     - "10단계 순서 검사 (Data Freshness, Market 거래가능, Mandate, Restricted List, Notional, Buying Power/Oversell, Concentration Soft/Hard, Turnover/주문건수, Trading State/Loss/Drawdown, Counterparty Health)"
     - "Soft Limit은 RESIZE, Hard Limit은 REJECT — 실패는 항상 축소·차단 방향"
@@ -65,8 +117,9 @@ implementation:
     - "input_hash 기반 재현성 — 같은 Intent·Context·Policy Version이면 같은 판정"
     - "트레이딩본부 OMS.apply_risk_decision/submit과 End-to-End 파이프라인 검증"
     - "Redis 최신 Trading State (2026-07-30) — 실제 Redis Cloud에 연결해 scope별 현재 상태 Get/Set. Key 없음(=제한한 적 없음)은 ENABLED, Redis 장애는 예외 또는 HALTED로 fail-closed — ENABLED로 잘못 추정하지 않음. RiskEngine.check_order와 End-to-End 통합 검증(Redis의 ENTRY_BLOCKED가 실제 주문을 막음)"
+    - "Risk Domain API (2026-07-31) — departments/03-risk/api/app.py, RISK_QA_DOMAIN_API_SPEC.md 2절 그대로 FastAPI로 래핑(risk-check/trading-state/compliance-check). 새 판정 로직 없음, TestClient self-check 4개 시나리오 통과. tool_allowlist/forbidden_tools 위에 채움(같은 날)"
   in_progress: []
-  not_started:
+  implementation_notes:
     - "Sprint K0: Supabase risk 스키마 실기록(risk.risk_decisions/breaches/trading_states) — accounting.funds가 비어 있어 risk.policies부터 fund_id FK로 막힘(회계본부 영역, QA의 audit 스키마와 달리 risk 테이블 대부분이 fund_id NOT NULL). RLS는 의도적으로 보류(담당자 결정)"
     - "Sprint K2: Evidence QA (Claim/PIT/Unsupported Claim Block) — AI QA/감사본부 영역, departments/06-ai-qa-audit 참고"
     - "Sprint K3: Intraday Exposure Snapshot, Stress Scenario, Kill Switch Workflow(risk.kill_switch_events 이력 기록) — Redis 현재 상태는 됐지만 Supabase 이력은 위 Fund 의존으로 막힘"
@@ -80,6 +133,15 @@ implementation:
 # 3. evidence-qa-agent(QA쪽): 완전성 검증 실패 시 Flag가 아니라 자동 Block으로 격상 (3단 방어)
 # compliance-policy-agent 베이스라인이 안정화된 뒤 순서대로 반영 예정
 
+# 백로그 (2026-08-03, DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md 6.4절 대비 — 아직 미구현, 기록만)
+# 4. risk-projection-worker (Consumer 루프 포함) — market.snapshot.v1/portfolio.snapshot.v1/
+#    governance.mandate.changed.v1을 구독해 Risk Snapshot을 투영하는 Worker. 저장소 전체에서
+#    이 세 이벤트를 Redis Stream에 XADD하는 Publisher가 아직 없다(Trading/Accounting/CEO 쪽
+#    미구현 — 본부 경계 밖이라 리스크본부가 대신 만들 수 없다). risk_events/redis_event_bus.py는
+#    Risk→QA 결정 이벤트 Publisher만 있고 이 방향의 Consumer는 없다. P1RiskSnapshot(p1/analytics.py)은
+#    지금도 존재하지만 Pre-trade 요청 경로에서 evaluate_p1_gate로 동기 계산되며, 이 백로그가 말하는
+#    비동기 투영과는 다른 메커니즘이다. 업스트림 Publisher가 생긴 뒤 순서대로 반영
+
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.4, 2026-07-29)
 # market-liquidity-risk-agent는 RSK-02(Market/Exposure Risk, P0)와 RSK-03(Liquidity/Concentration/Stress, P1)을 합친 페르소나
 hiring_priority:
@@ -89,11 +151,111 @@ hiring_priority:
   compliance-policy-agent: {role_codes: ["RSK-04"], tier: "P0"}
   pre-trade-risk-analyst: {role_codes: ["RSK-01"], tier: "P0"}
   operational-counterparty-risk-agent: {role_codes: ["RSK-06"], tier: "P1"}
-  # 2026-07-29: RSK-01/RSK-06 채용 완료 — 리스크본부는 6/7 (RSK-05는 P2, 이미 존재)
+ # 2026-07-29 Profile 채용 기록은 감사·FK 호환용으로 보존한다. 현재 실행 직원은 아래 Worker Registry의 2명(compliance-policy-worker, risk-runner)이다.
 
 skills:
-  - hermes-agent
+  external_dirs:
+    - /opt/shared-skills
 
 usage:
   run: "risk-management chat -q 'Assess risk of AAPL long position'"
   collaborate: "risk-management chat -q 'Evaluate portfolio risk with 25% volatility, then check compliance against the current Mandate'"
+
+# 직원 실행 계층 v2. Hermes의 model은 부서장 전용이며 직원은 독립 LangGraph
+# Worker Graph에서 Ollama Qwen을 사용한다.
+staff_registry:
+  head_count: 1
+  # 2026-08-06: tool 강등으로 3 -> 1. worker_count 는 **LLM 직원 수**다 -
+  #   결정론 risk-runner 는 deterministic_worker_count 로 따로 센다(조직 인원은 2명).
+  #   강등 기준: 같은 입력에서 다른 출력이 나오는 것이 산출물인가, 결정론 모듈이
+  #   이미 그 답을 만들고 있지 않은가. 둘 다 아니면 에이전트가 아니라 함수다.
+  worker_count: 1
+  default_execution_count: 1
+  max_execution_count: 1
+  active_worker_count: 0
+  conditional_worker_count: 1
+  deterministic_worker_count: 1
+  headcount_total: 2          # 부서장 제외 - compliance-policy-worker / risk-runner
+  runtime_persona_source: workers
+  legacy_personas_are_aliases: true
+  runtime_personalities: [compliance-policy-worker]
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+
+employee_runtime:
+  executor: langgraph
+  topology: async_fan_out_fan_in_independent_graphs
+  worker_graph_module: departments/03-risk/risk_employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:1.7b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:1.7b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+    change_control: benchmark_then_hr_and_qa_approval
+  output_contract: risk.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: departments/03-risk/engine/risk_engine.py
+  failure_action: HOLD_ESCALATE
+
+# ⚠ 이 블록은 **LLM 직원 레지스트리**다(risk_employee_workers.WORKER_SPECS 와 1:1).
+#   결정론 직원은 아래 deterministic_workers 에 따로 있다 - 섞으면
+#   "workers 에 있다 = 모델을 태운다"가 깨져서 비용·감사 판단이 흐려진다.
+workers:
+  compliance-policy-worker:
+    role: Point-in-time policy evidence analyst
+    status: conditional
+    replaces: [compliance-policy-agent]
+    trigger: when_compliance_evidence_exists
+    tools: [risk.compliance.check]
+    output: advisory_context
+
+# 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
+# 2026-08-06 tool 강등으로 core-risk-worker(RiskEngine.check_order 서술)와
+# derivatives-counterparty-worker(counterparty_health CheckOutcome 서술)가 여기로
+# 합쳐졌다. 둘 다 답이 하나로 정해지는 일이었고, 그 답은 이미 RiskEngine이 만들고
+# 있었다 - 위에 qwen3:1.7b 를 얹는 것은 나온 verdict 를 다시 서술하는 계층일 뿐이고,
+# 그 과정에서 Risk 수치가 LLM 문장을 거치는 경로만 생긴다(CLAUDE.md 개발 원칙 4·9번).
+deterministic_workers:
+  risk-runner:
+    role: Risk desk runner — market/liquidity/counterparty gate 결과 조회(결정론, LLM 없음)
+    status: active
+    trigger: always
+    llm: false
+    absorbed:            # 강등된 직원과 그 답을 원래 만들던 모듈
+      core-risk-worker: departments/03-risk/engine/risk_engine.py (RiskEngine.check_order)
+      derivatives-counterparty-worker: departments/03-risk/engine/risk_engine.py (counterparty_health CheckOutcome)
+    tools: [risk.trading_state.read, risk.p1.snapshot, risk.case.check,
+            risk.trading_state.record.read]
+    # rag_router 정책표에 항목이 없다. 라우터는 *LLM 이 무엇을 볼 수 있나*를 제한하는
+    # 장치인데 이 직원은 서술을 만들지 않는다. 항목이 없으면
+    # rag_policy_for_worker() 가 ValueError 를 내는데 그게 옳은 fail-closed 다 -
+    # 나중에 누가 이 직원을 LLM 경로에 물리면 조용히 열리는 대신 즉시 죽는다.
+    rag_route: null
+
+validation_record:
+  recorded_at: "2026-08-03"
+  scope: "Risk·QA Redis 통합 수용 테스트"
+  acceptance_command: >-
+    cd /Users/baiohelseu/Desktop/Project/multi_agent && source ~/claude/bin/activate &&
+    python -m pytest departments/03-risk/tests/test_trading_state_store.py
+    departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q -rs
+  accepted_result: "Historical snapshot only: 11 passed, skipped 0 (2026-08-03). External Redis recheck on 2026-08-05: 11 passed, skipped 0; rollback DB/Event smoke READY; risk-api, audit-api, qa-worker healthchecks healthy. Full Research Packet Replay remains pending and is not RUNTIME_VERIFIED."
+  p1_status: "결정론적 계산·Entry Gate·Repository/RLS baseline 완료; 실제 Portfolio/Market·운영 DB/RLS/E2E는 외부 조건 대기"
+p2_status: "VaR·Stress·Black-Scholes Greeks 로컬 계산기/테스트 완료; 파생상품 Snapshot·Margin·Volatility Surface·Golden Fixture·Gate 연결 완료. 외부 Vol Surface/Margin 입력과 승인된 시나리오 ID가 없으면 Gate는 fail-closed"
+
+runtime_activation:
+  as_of: "2026-08-04"
+  p1_external_snapshot_api: "implemented_fail_closed"
+  instrument_mapping: "canonical reference.instrument_symbols required outside PAPER"
+  projection_worker: "implemented; Redis Streams -> risk.input_snapshots; DATABASE_URL and Redis publishers required"
+  p2_derivatives_api: "implemented; explicit margin_rates and vol_surface required"
+  persistence: "RISK_P1_PERSIST=true plus DATABASE_URL and RISK_STRESS_SCENARIO_IDS_JSON"
+  production_readiness: "external credentials, governed portfolio snapshot and migration apply remain deployment prerequisites"
+  current_status: "code_and_tests_ready_external_activation_pending"

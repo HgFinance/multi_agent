@@ -1,4 +1,4 @@
--- Supabase 운영 DB Seed (db reset 시 마이그레이션 이후 실행)
+-- Supabase local/Preview reset seed (Production에서는 실행하지 않는다)
 -- 소유 구획: 각 본부가 자기 도메인 seed 를 섹션으로 추가한다.
 -- 근거: docs/database/README.md 7절(적용), TEAM_YOUNGJU_CEO_HR_GUIDE.md 12(Y3)
 -- 멱등: 모든 insert 는 ON CONFLICT DO NOTHING (재적용 안전).
@@ -17,7 +17,7 @@ begin;
 -- 1) 부서
 insert into workforce.departments (department_code, name, mission)
 values (
-  'AGENT-WORKFORCE',
+  'hr-department',
   'Agent Workforce 인사팀',
   'CEO 직속 Shared Service. 6개 본부의 업무량·품질·비용·Skill Gap을 근거로 Agent 채용·평가·교육·이동·비활성화를 관리한다. 투자 본부가 아니다.'
 )
@@ -32,9 +32,12 @@ values
   ('ollama', 'local-quick', 'proposed',
    '{"tier":"quick","use":["classify","summarize","draft"],"note":"정확 Model ID는 ADR/Config"}'::jsonb,
    '{"class":"low"}'::jsonb, array['DEVELOPMENT','SHADOW','PRODUCTION']),
-  ('nous', 'poolside-laguna-s', '2.1-free',
-   '{"tier":"baseline","use":["dev"]}'::jsonb,
-   '{"class":"free"}'::jsonb, array['DEVELOPMENT'])
+  ('openai-codex', 'gpt-5.6-luna', 'profile-head',
+   '{"tier":"head","use":["orchestration","supervision"]}'::jsonb,
+   '{"class":"approved-profile"}'::jsonb, array['DEVELOPMENT','PAPER','PRODUCTION']),
+  ('ollama', 'qwen3:1.7b', 'worker-test',
+   '{"tier":"worker","use":["context","classification","summary"]}'::jsonb,
+   '{"class":"local-low-memory"}'::jsonb, array['DEVELOPMENT','PAPER'])
 on conflict (provider, model_name, model_version) do nothing;
 
 -- 3) 역할 템플릿 (HR-00~04) — AGENT_EMPLOYEE_PROFILES.md §5 기준
@@ -67,18 +70,22 @@ from (values
    '["iam_admin_direct","assign_self_as_approver"]',
    '{"metrics":["zero_unauthorized_activation","provisioning_lead_time","revocation_sla","zero_orphan_case","zero_dormant_identity"]}')
 ) as v(role_code, mission, required_skills, forbidden_actions, kpi)
-cross join (select department_id from workforce.departments where department_code = 'AGENT-WORKFORCE') d
+cross join (select department_id from workforce.departments where department_code = 'hr-department') d
 on conflict (role_code) do nothing;
 
--- 4) Agent Roster (P0 3명: HR-00, HR-01, HR-04) — CANDIDATE 상태
+-- 4) Agent Roster (P0 3명 + P1 2명) — CANDIDATE 상태
 insert into workforce.agent_profiles (employee_code, department_id, role_id, display_name, runtime, employment_status)
 select v.employee_code, d.department_id, r.role_id, v.display_name, 'HERMES', 'CANDIDATE'
 from (values
+  -- P0
   ('HR-00', 'HR-00', 'agent-workforce-supervisor'),
   ('HR-01', 'HR-01', 'workforce-planning-agent'),
-  ('HR-04', 'HR-04', 'lifecycle-coordinator')
+  ('HR-04', 'HR-04', 'lifecycle-coordinator'),
+  -- P1
+  ('HR-02', 'HR-02', 'profile-architect'),
+  ('HR-03', 'HR-03', 'selection-performance-agent')
 ) as v(employee_code, role_code, display_name)
-join workforce.departments d on d.department_code = 'AGENT-WORKFORCE'
+join workforce.departments d on d.department_code = 'hr-department'
 join workforce.role_templates r on r.role_code = v.role_code
 on conflict (employee_code) do nothing;
 
@@ -89,7 +96,7 @@ insert into workforce.agent_profile_versions
    artifact_hash, effective_from, status)
 select
   ap.agent_id, 1, m.model_id,
-  'departments/07-agent-workforce/hermes/config.yaml#' || ap.employee_code,
+  'departments/07-agent-workforce/hermes/config.yaml#' || ap.display_name,
   v.skill_manifest::jsonb, v.tool_allowlist::jsonb, v.data_scopes::jsonb, v.memory_ns,
   v.token_budget::jsonb, v.sla::jsonb, v.eval_req::jsonb, v.forbidden::jsonb,
   md5(ap.employee_code || ':v1'), now(), 'DRAFT'
@@ -123,10 +130,72 @@ from (values
    '{"per_case_tokens":40000,"daily_tokens":800000}',
    '{"provisioning_lead_time_hours":4}',
    '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
-   '["iam_admin_direct","assign_self_as_approver"]')
+   '["iam_admin_direct","assign_self_as_approver"]'),
+  -- HR-02 -> Deep(Bedrock). Profile/Prompt/Tool 설계가 산출물이라 판단 품질이 필요하다.
+  ('HR-02', 'bedrock', 'claude-deep',
+   '{"required":["HR-02","HR-03"]}',
+   '{"read":["role_templates","skills","tools","models","agent_profiles","agent_profile_versions"],"propose":["candidates","agent_profile_versions","improvement_candidates"]}',
+   '{"workforce":"read"}',
+   'workforce/hr-02',
+   '{"per_case_tokens":150000,"daily_tokens":1500000}',
+   '{"profile_draft_latency_hours":12}',
+   '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
+   '["change_eval_after_results","request_broad_tool_scope_for_convenience"]'),
+  -- HR-03 -> Deep(Bedrock). Eval 판정·Calibration 이 Critic 성격이라 강한 모델이 필요하다.
+  ('HR-03', 'bedrock', 'claude-deep',
+   '{"required":["HR-04","HR-05","QAA-04"]}',
+   '{"read":["candidates","selection_reviews","performance_reviews","capacity_snapshots","agent_profile_versions"],"propose":["selection_reviews","performance_reviews","improvement_candidates"]}',
+   '{"workforce":"read","audit":"read-via-api"}',
+   'workforce/hr-03',
+   '{"per_case_tokens":150000,"daily_tokens":1500000}',
+   '{"eval_turnaround_hours":24}',
+   '{"status":"PENDING_QA","owner":"qa-department","required_suites":["golden","adversarial"]}',
+   '["production_approve_on_own_eval","skip_qaa04_independent_gate"]')
 ) as v(employee_code, model_provider, model_name, skill_manifest, tool_allowlist, data_scopes, memory_ns, token_budget, sla, eval_req, forbidden)
 join workforce.agent_profiles ap on ap.employee_code = v.employee_code
 join workforce.models m on m.provider = v.model_provider and m.model_name = v.model_name
 on conflict (agent_id, version) do nothing;
+
+-- ===========================================================================
+-- [CEO Office] GOV-02 2단계 — 플레이스홀더 회원 1건
+-- 소유: 영주. 근거: supabase/migrations/20260729000200_governance_workforce.sql
+--   (governance.mandates.owner_user_id NOT NULL -> governance.user_profiles -> auth.users)
+--
+-- CEO Office 부서·Agent Roster 등재는 **의도적으로 하지 않는다**(2026-08-04 팀 결정).
+-- 전체 Prototype이 나올 때까지 각 부서 직원 변동이 계속 예상되므로 workforce.agent_profiles
+-- 등재는 뒤로 미루고, 그때까지는 departments/<n>/hermes/config.yaml이 Agent 정의의 기준이다.
+-- 그 결과로 감수하는 것: governance.approvals.actor_agent_id가 workforce.agent_profiles FK라
+-- 미등재 Agent의 결정은 그 칸을 채울 수 없다. 대신 결정 주체 부서를 conditions._decider에
+-- 기록한다(approval.py decide() 참고) — approvals에는 부서 칸 자체가 없어서 Roster 등재
+-- 여부와 무관하게 필요한 보완이다.
+-- ===========================================================================
+
+-- 플레이스홀더 회원 1건 — 회원가입 기능이 붙기 전까지의 임시 데이터
+--
+-- 왜 필요한가: governance.mandates.owner_user_id가 NOT NULL이면서 governance.user_profiles
+-- FK다. user_profiles는 다시 auth.users FK라 2단계 삽입이 필요하다. 회원이 0건이면
+-- Mandate를 만들 수 없다(GOV-01 작업 때 실제로 막혔던 지점).
+--
+-- 안전장치:
+--   - email은 RFC 2606이 예약한 `.invalid` TLD를 써서 절대 실제 주소가 될 수 없게 한다.
+--   - encrypted_password를 넣지 않아 이 계정으로는 로그인이 불가능하다.
+--   - display_name에 PLACEHOLDER를 박아 조회 결과만 봐도 임시 데이터임이 드러난다.
+--   - **자동 기본값으로 쓰지 않는다.** 승인자를 비워 보냈을 때 이 회원으로 조용히 채우면
+--     감사 기록에 '사람이 승인했다'고 남는데 실제로는 아무도 승인하지 않은 상태가 된다
+--     (approval.py decide() 주석과 같은 원칙). 호출자가 명시적으로 지정할 때만 쓴다.
+-- 제거 조건: 회원가입/인증 기능이 붙으면 이 두 행을 실제 사용자로 교체한다.
+insert into auth.users (id, aud, role, email)
+values (
+  '00000000-0000-4000-8000-00000000cec0',
+  'authenticated', 'authenticated', 'placeholder-ceo-owner@hedgefund.invalid'
+)
+on conflict (id) do nothing;
+
+insert into governance.user_profiles (user_id, display_name, timezone, status)
+values (
+  '00000000-0000-4000-8000-00000000cec0',
+  'PLACEHOLDER Fund Owner (회원가입 전 임시)', 'Asia/Seoul', 'ACTIVE'
+)
+on conflict (user_id) do nothing;
 
 commit;

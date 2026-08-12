@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">HgFinance 0 to 7 department pipeline architecture</title>
+  <desc id="desc">Hermes department heads coordinate independent LangGraph Ollama workers. The main investment case flows from Research to Trading to Risk to QA to Accounting and CEO. Quant and HR provide dashed support cycles.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#334155"/>
+    </marker>
+    <marker id="dash-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#64748b"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 30px Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px Arial, sans-serif; fill: #475569; }
+      .dept { font: 700 19px Arial, sans-serif; fill: #0f172a; }
+      .role { font: 600 14px Arial, sans-serif; fill: #334155; }
+      .body { font: 400 13px Arial, sans-serif; fill: #334155; }
+      .small { font: 400 12px Arial, sans-serif; fill: #475569; }
+      .handoff { font: 600 12px Arial, sans-serif; fill: #1d4ed8; }
+      .gate { font: 700 12px Arial, sans-serif; fill: #92400e; }
+      .legend { font: 400 12px Arial, sans-serif; fill: #334155; }
+      .main-line { stroke: #334155; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .support-line { stroke: #64748b; stroke-width: 2; stroke-dasharray: 8 7; fill: none; marker-end: url(#dash-arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="#ffffff"/>
+  <text x="50" y="48" class="title">HgFinance AI Office — 0–7 Department Pipeline</text>
+  <text x="50" y="76" class="subtitle">Department Head: Hermes + Codex/Claude Code  |  Employees: independent LangGraph Workers + Ollama qwen3:1.7b</text>
+
+  <rect x="1100" y="25" width="450" height="68" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <line x1="1120" y1="48" x2="1170" y2="48" class="main-line"/>
+  <text x="1185" y="52" class="legend">solid = main investment-case flow</text>
+  <line x1="1120" y1="73" x2="1170" y2="73" class="support-line"/>
+  <text x="1185" y="77" class="legend">dashed = governance / conditional cycle</text>
+
+  <!-- Start -->
+  <rect x="682" y="105" width="236" height="38" rx="19" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="800" y="130" text-anchor="middle" class="role">START / case_request</text>
+  <path d="M800 143 L800 160" class="main-line"/>
+
+  <!-- Main row: Research -> Trading -> Risk -> QA -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="160" width="300" height="205" rx="16" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+    <rect x="390" y="160" width="300" height="205" rx="16" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+    <rect x="740" y="160" width="300" height="205" rx="16" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+    <rect x="1090" y="160" width="300" height="205" rx="16" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+  </g>
+
+  <!-- Head and employee layers -->
+  <g>
+    <rect x="55" y="202" width="270" height="39" rx="8" fill="#e9d5ff"/>
+    <rect x="55" y="248" width="270" height="52" rx="8" fill="#ccfbf1"/>
+    <text x="60" y="190" class="dept">1 Research</text>
+    <text x="68" y="226" class="role">Head: Hermes + Codex/Claude</text>
+    <text x="68" y="269" class="role">Employees: LangGraph Workers</text><text x="68" y="288" class="small">role-based registry / evidence context</text>
+    <text x="60" y="326" class="small">Output: research_packet</text>
+
+    <rect x="405" y="202" width="270" height="39" rx="8" fill="#e9d5ff"/>
+    <rect x="405" y="248" width="270" height="52" rx="8" fill="#ccfbf1"/>
+    <text x="410" y="190" class="dept">2 Trading</text>
+    <text x="418" y="226" class="role">Head: Hermes + Codex/Claude</text>
+    <text x="418" y="269" class="role">Employees: LangGraph Workers</text><text x="418" y="288" class="small">OrderIntent + OMS/Fill adapter</text>
+    <text x="410" y="326" class="small">Output: order_intent</text>
+
+    <rect x="755" y="202" width="270" height="39" rx="8" fill="#e9d5ff"/>
+    <rect x="755" y="248" width="270" height="52" rx="8" fill="#ccfbf1"/>
+    <rect x="755" y="308" width="270" height="35" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="760" y="190" class="dept">3 Risk Management</text>
+    <text x="768" y="226" class="role">Head: Hermes + Codex/Claude</text>
+    <text x="768" y="269" class="role">Employees: 4 Workers</text><text x="768" y="288" class="small">2 always + 2 conditional</text>
+    <text x="768" y="331" class="gate">DETERMINISTIC RISK GATE (binding)</text>
+
+    <rect x="1105" y="202" width="270" height="39" rx="8" fill="#e9d5ff"/>
+    <rect x="1105" y="248" width="270" height="52" rx="8" fill="#ccfbf1"/>
+    <rect x="1105" y="308" width="270" height="35" rx="8" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="1110" y="190" class="dept">6 AI QA / Audit</text>
+    <text x="1118" y="226" class="role">Head: Hermes + Codex/Claude</text>
+    <text x="1118" y="269" class="role">Employees: 5 Workers</text><text x="1118" y="288" class="small">1 always + 4 conditional</text>
+    <text x="1118" y="331" class="gate">DETERMINISTIC EVIDENCE QA GATE</text>
+  </g>
+
+  <!-- Main handoffs -->
+  <path d="M340 260 L390 260" class="main-line"/><text x="365" y="248" text-anchor="middle" class="handoff">research_packet</text>
+  <path d="M690 260 L740 260" class="main-line"/><text x="715" y="248" text-anchor="middle" class="handoff">order_intent</text>
+  <path d="M1040 260 L1090 260" class="main-line"/><text x="1065" y="248" text-anchor="middle" class="handoff">risk_decision</text>
+
+  <!-- Lower row -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="505" width="300" height="175" rx="16" fill="#e0f2fe" stroke="#38bdf8" stroke-width="2"/>
+    <rect x="390" y="505" width="300" height="175" rx="16" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 5"/>
+    <rect x="740" y="505" width="300" height="175" rx="16" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+    <rect x="1090" y="505" width="300" height="175" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  </g>
+
+  <text x="55" y="535" class="dept">4 Quant / Backtest</text>
+  <rect x="55" y="548" width="270" height="35" rx="8" fill="#e9d5ff"/>
+  <text x="68" y="571" class="role">Head: Hermes + Codex/Claude</text>
+  <rect x="55" y="590" width="270" height="48" rx="8" fill="#ccfbf1"/>
+  <text x="68" y="614" class="role">Employees: LangGraph Workers</text><text x="68" y="632" class="small">strategy research / replay context</text>
+  <text x="55" y="660" class="small">strategy_research_cycle</text>
+
+  <text x="405" y="535" class="dept">7 HR / Agent Workforce</text>
+  <rect x="405" y="548" width="270" height="35" rx="8" fill="#e9d5ff"/>
+  <text x="418" y="571" class="role">Head: Hermes + Codex/Claude</text>
+  <rect x="405" y="590" width="270" height="48" rx="8" fill="#f1f5f9"/>
+  <text x="418" y="614" class="role">Worker lifecycle registry</text><text x="418" y="632" class="small">hire / evaluate / pause / retire</text>
+  <text x="405" y="660" class="small">shared governance service</text>
+
+  <text x="755" y="535" class="dept">5 Accounting / Portfolio</text>
+  <rect x="755" y="548" width="270" height="35" rx="8" fill="#e9d5ff"/>
+  <text x="768" y="571" class="role">Head: Hermes + Codex/Claude</text>
+  <rect x="755" y="590" width="270" height="48" rx="8" fill="#ccfbf1"/>
+  <text x="768" y="614" class="role">Employees: LangGraph Workers</text><text x="768" y="632" class="small">ledger / reconciliation context</text>
+  <text x="755" y="660" class="small">Output: accounting_snapshot</text>
+
+  <text x="1105" y="535" class="dept">0 CEO Office</text>
+  <rect x="1105" y="548" width="270" height="35" rx="8" fill="#e9d5ff"/>
+  <text x="1118" y="571" class="role">Head: Hermes + Codex/Claude</text>
+  <rect x="1105" y="590" width="270" height="48" rx="8" fill="#ccfbf1"/>
+  <text x="1118" y="614" class="role">Employees: LangGraph Workers</text><text x="1118" y="632" class="small">final case-summary context</text>
+  <text x="1105" y="660" class="small">Final CEO case summary; no order authority</text>
+
+  <!-- QA to accounting and CEO -->
+  <path d="M1240 365 C1240 420 900 420 900 505" class="main-line"/>
+  <text x="1080" y="408" text-anchor="middle" class="handoff">qa_assessment</text>
+  <path d="M1040 592 L1090 592" class="main-line"/><text x="1065" y="580" text-anchor="middle" class="handoff">accounting_snapshot</text>
+  <path d="M1240 680 L1240 720" class="main-line"/>
+  <rect x="1090" y="725" width="300" height="38" rx="19" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="1240" y="750" text-anchor="middle" class="role">END / ceo_case_summary</text>
+
+  <!-- Quant strategy cycle -->
+  <path d="M190 505 C190 430 540 430 540 365" class="support-line"/>
+  <text x="350" y="420" text-anchor="middle" class="handoff">strategy_bundle</text>
+  <path d="M325 590 C520 470 970 470 1105 320" class="support-line"/>
+  <text x="690" y="455" text-anchor="middle" class="small">quant evidence → Trading / QA</text>
+
+  <!-- HR governance loop -->
+  <path d="M540 505 C540 455 180 455 180 365" class="support-line"/>
+  <path d="M540 505 C540 455 890 455 890 365" class="support-line"/>
+  <path d="M675 590 C840 470 1200 470 1240 365" class="support-line"/>
+  <text x="520" y="485" text-anchor="middle" class="small">HR lifecycle: hire / evaluate / pause / retire / profile change</text>
+
+  <!-- Contract and safety notes -->
+  <rect x="40" y="790" width="1350" height="125" rx="14" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="65" y="820" class="role">Shared contracts</text>
+  <text x="65" y="845" class="body">case_request → research_packet → order_intent → risk_decision → qa_assessment → execution_result → accounting_snapshot → ceo_case_summary</text>
+  <text x="65" y="872" class="body">Every Worker emits non-binding worker-context.v1. Deterministic Risk / Evidence QA gates own binding safety decisions.</text>
+  <text x="65" y="897" class="body">Paper mode has no broker, OMS, ledger, or production side effects. Live mode requires separately approved adapters and credentials.</text>
+
+  <rect x="1420" y="790" width="130" height="125" rx="14" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="1435" y="820" class="gate">LEGEND</text>
+  <text x="1435" y="845" class="small">purple: Head</text>
+  <text x="1435" y="866" class="small">teal: Worker</text>
+  <text x="1435" y="887" class="small">amber: Gate</text>
+  <text x="1435" y="908" class="small">blue: Data</text>
+</svg>

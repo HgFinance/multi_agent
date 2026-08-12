@@ -19,6 +19,7 @@ Commander 배정과 종결은 audit.incidents/incident_events 워크플로우(K3
 
 자체 점검: python departments/06-ai-qa-audit/audit/ops_health_monitor.py
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -134,12 +135,21 @@ class OpsHealthMonitor:
             breaches.append(BreachKind.COST_OVER_BUDGET)
 
         if not breaches:
-            return OpsAssessment(scope=metrics.scope, status=OpsHealthStatus.HEALTHY, breaches=(), incident=None)
+            return OpsAssessment(
+                scope=metrics.scope,
+                status=OpsHealthStatus.HEALTHY,
+                breaches=(),
+                incident=None,
+            )
 
         if critical_breaches:
             status = OpsHealthStatus.CRITICAL
             # 서로 다른 종류의 Critical 신호가 동시에 뜨면 SEV1, 하나면 SEV2.
-            severity = IncidentSeverity.SEV1 if len(critical_breaches) >= 2 else IncidentSeverity.SEV2
+            severity = (
+                IncidentSeverity.SEV1
+                if len(critical_breaches) >= 2
+                else IncidentSeverity.SEV2
+            )
         else:
             status = OpsHealthStatus.DEGRADED
             severity = IncidentSeverity.SEV3
@@ -160,24 +170,41 @@ class OpsHealthMonitor:
             detected_at=metrics.window_end,
             trace_id=trace_id,
         )
-        return OpsAssessment(scope=metrics.scope, status=status, breaches=tuple(breaches), incident=incident)
+        return OpsAssessment(
+            scope=metrics.scope,
+            status=status,
+            breaches=tuple(breaches),
+            incident=incident,
+        )
 
 
 if __name__ == "__main__":
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(minutes=5)
 
-    def metrics(scope="research-department", requests=1000, errors=5,
-                p95=Decimal("800"), cost=Decimal("2.5")) -> AgentHealthMetrics:
+    def metrics(
+        scope="research-department",
+        requests=1000,
+        errors=5,
+        p95=Decimal(800),
+        cost=Decimal("2.5"),
+    ) -> AgentHealthMetrics:
         return AgentHealthMetrics(
-            scope=scope, window_start=window_start, window_end=now,
-            request_count=requests, error_count=errors, p95_latency_ms=p95, cost_usd=cost,
+            scope=scope,
+            window_start=window_start,
+            window_end=now,
+            request_count=requests,
+            error_count=errors,
+            p95_latency_ms=p95,
+            cost_usd=cost,
         )
 
     thresholds = OpsThresholds(
-        max_error_rate=Decimal("0.02"), critical_error_rate=Decimal("0.10"),
-        max_p95_latency_ms=Decimal("2000"), critical_p95_latency_ms=Decimal("5000"),
-        max_cost_usd_per_window=Decimal("10"),
+        max_error_rate=Decimal("0.02"),
+        critical_error_rate=Decimal("0.10"),
+        max_p95_latency_ms=Decimal(2000),
+        critical_p95_latency_ms=Decimal(5000),
+        max_cost_usd_per_window=Decimal(10),
     )
 
     monitor = OpsHealthMonitor()
@@ -200,25 +227,29 @@ if __name__ == "__main__":
     assert BreachKind.ERROR_RATE_CRITICAL in a3.breaches
 
     # 4. 지연 Soft 초과 -> DEGRADED
-    a4 = monitor.evaluate(metrics(p95=Decimal("2500")), thresholds)
+    a4 = monitor.evaluate(metrics(p95=Decimal(2500)), thresholds)
     assert a4.status is OpsHealthStatus.DEGRADED
     assert BreachKind.LATENCY_SOFT in a4.breaches
 
     # 5. 지연 Critical 초과 -> CRITICAL, SEV2
-    a5 = monitor.evaluate(metrics(p95=Decimal("6000")), thresholds)
+    a5 = monitor.evaluate(metrics(p95=Decimal(6000)), thresholds)
     assert a5.status is OpsHealthStatus.CRITICAL
     assert a5.incident.severity is IncidentSeverity.SEV2
     assert BreachKind.LATENCY_CRITICAL in a5.breaches
 
     # 6. 비용 초과 단독 -> DEGRADED (그 자체로 Critical 취급하지 않음)
-    a6 = monitor.evaluate(metrics(cost=Decimal("15")), thresholds)
+    a6 = monitor.evaluate(metrics(cost=Decimal(15)), thresholds)
     assert a6.status is OpsHealthStatus.DEGRADED
     assert BreachKind.COST_OVER_BUDGET in a6.breaches
 
     # 7. 에러율 + 지연이 동시에 Critical -> SEV1 (더 심각하게 격상)
-    a7 = monitor.evaluate(metrics(requests=1000, errors=150, p95=Decimal("6000")), thresholds)
+    a7 = monitor.evaluate(
+        metrics(requests=1000, errors=150, p95=Decimal(6000)), thresholds
+    )
     assert a7.status is OpsHealthStatus.CRITICAL
-    assert a7.incident.severity is IncidentSeverity.SEV1, "동시 Critical은 SEV1이어야 함"
+    assert a7.incident.severity is IncidentSeverity.SEV1, (
+        "동시 Critical은 SEV1이어야 함"
+    )
 
     # 8. 트래픽 0건 -> 에러율 0으로 보고 HEALTHY (오탐 방지)
     a8 = monitor.evaluate(metrics(requests=0, errors=0), thresholds)
@@ -227,7 +258,9 @@ if __name__ == "__main__":
     # 9. Incident Code는 scope와 시각 기반이라 같은 입력이면 재현 가능
     a9a = monitor.evaluate(metrics(requests=1000, errors=30), thresholds)
     a9b = monitor.evaluate(metrics(requests=1000, errors=30), thresholds)
-    assert a9a.incident.incident_code == a9b.incident.incident_code, "같은 scope·시각인데 코드가 다름"
+    assert a9a.incident.incident_code == a9b.incident.incident_code, (
+        "같은 scope·시각인데 코드가 다름"
+    )
     assert a9a.incident.severity == a9b.incident.severity
 
     print("ok - Agent Ops Health Monitor 9개 시나리오 점검 통과")

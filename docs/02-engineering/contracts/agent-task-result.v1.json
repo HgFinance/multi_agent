@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hgfinance.local/contracts/agent-task-result.v1.json",
+  "title": "HgFinance Agent Task Result v1",
+  "description": "Worker/Department Head가 CEO와 Kanban에 반환하는 비구속적 도메인 결과. 주문·한도·원장을 직접 변경하지 않는다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "task_id",
+    "department",
+    "worker",
+    "input_refs",
+    "evidence_refs",
+    "decision",
+    "confidence",
+    "escalate",
+    "model_version",
+    "adapter_version",
+    "trace_id",
+    "status",
+    "summary",
+    "output_refs",
+    "input_hash",
+    "output_hash",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "agent-task-result.v1"},
+    "case_id": {"$ref": "#/$defs/id"},
+    "task_id": {"$ref": "#/$defs/id"},
+    "department": {"$ref": "#/$defs/department"},
+    "worker": {"type": "string", "minLength": 1, "maxLength": 128},
+    "input_refs": {"$ref": "#/$defs/artifact_refs"},
+    "evidence_refs": {"$ref": "#/$defs/artifact_refs"},
+    "decision": {"type": "string", "minLength": 1, "maxLength": 64},
+    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    "escalate": {"type": "boolean"},
+    "model_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "adapter_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "trace_id": {"$ref": "#/$defs/id"},
+    "status": {
+      "type": "string",
+      "enum": ["COMPLETED", "DEGRADED", "HOLD", "ESCALATED", "REJECTED", "NOT_EXECUTED"]
+    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128},
+      "uniqueItems": true
+    },
+    "output_refs": {"$ref": "#/$defs/artifact_refs"},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "output_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "calculation_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "replay_manifest_ref": {"$ref": "#/$defs/id"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "department": {
+      "type": "string",
+      "enum": [
+        "ceo-agent",
+        "research-department",
+        "trading-department",
+        "risk-management",
+        "quant-backtest-department",
+        "accounting-portfolio-department",
+        "qa-department",
+        "hr-department"
+      ]
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "content_hash"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "id": {"$ref": "#/$defs/id"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "as_of": {"type": "string", "format": "date-time"},
+        "provenance_ref": {"$ref": "#/$defs/id"},
+        "acl_scope": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 128},
+          "uniqueItems": true
+        }
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact_ref"},
+      "uniqueItems": true
+    }
+  }
+}

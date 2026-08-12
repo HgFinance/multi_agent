@@ -1,12 +1,13 @@
 # Personal Hedge Fund Agent - Technology Stack Decisions
 
-> 문서 상태: Core Stack v1.4
+> 문서 상태: Core Stack v1.5
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: Core Paper Trading 구현  
 > 원칙: 사용자가 지정한 필수 도구를 유지하되 기능 중복과 Vendor Lock-in을 최소화한다.  
 > 관련 문서: [HEDGE_FUND_IMPLEMENTATION_BACKLOG.md](HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > 전사 데이터·부서별 Library 구현: [RESEARCH_DATA_SOURCES_AND_LIBRARIES.md](../03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > Frontend 구현 기준: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
+> 조건부 고도화 기술과 도입 Trigger: [WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md](../01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md#8-기술-스택-고도화-연구)
 
 ## 1. 확정 스택 요약
 
@@ -22,6 +23,10 @@
 | Docker | 필수 | 서비스별 Runtime 격리와 재현 가능한 개발 환경 |
 | Render | 보류 | 초기 Demo 배포 후보, 실시간 Worker 적합성 검증 전 미확정 |
 | Frontend | `ai-office` 기반 Next.js + React + TypeScript | Pixel Office와 운영 Dashboard를 결합한 Operator Control Plane |
+
+Supabase pgvector가 기본 RAG Vector Store다. Risk/QA의 정적 규정·정책 코퍼스에 한한
+Pinecone 예외는 [ADR-0006](adr/0006-pinecone-for-risk-qa-static-corpora.md)과 3.5절을
+따른다.
 
 ### 1.2 추가 확정 권장 도구
 
@@ -75,6 +80,7 @@
 | 트레이딩본부 | Decimal, Pydantic, Redis, Polars, NumPy, exchange-calendars | SciPy, CVXPY | Agent는 Order Intent까지만 생성 |
 | 리스크본부 | Decimal, Pydantic, NumPy, Polars, Hypothesis | SciPy, Statsmodels, CVXPY, QuantLib | Risk 수치와 Limit은 결정론적 Service |
 | 퀀트/백테스트본부 | Polars, NumPy, PyArrow, DuckDB, vectorbt, pytest | scikit-learn, Optuna, MLflow, Pandera | PIT Dataset과 Experiment Manifest 필수 |
+| 투자철학 모델 Factory | Pydantic, Dataset Manifest, Frozen Eval | Transformers, PEFT, TRL, Accelerate, vLLM, MLflow | P2 조건부. Prompt/RAG Baseline 실패와 QA 승인 후 Adapter Training |
 | 회계/포트폴리오본부 | Decimal, Pydantic, SQLAlchemy, Polars, PyArrow, Jinja2 | DuckDB, openpyxl | Ledger·Position·NAV는 Transaction Service 전용 |
 | AI QA/감사본부 | pytest, Hypothesis, structlog, 보안 Scanner | OpenTelemetry, Prometheus, Ragas, MLflow, Sentry | LLM Judge 단독 승인 금지 |
 
@@ -154,7 +160,7 @@ class ModelGateway:
 - `BedrockEmbeddingAdapter`: Production Embedding 후보
 - `OllamaEmbeddingAdapter`: 로컬 Embedding
 
-LangGraph Node에서는 직접 `boto3`나 Ollama URL을 호출하지 않고 Gateway를 주입한다.
+독립 LangGraph Worker Graph에서는 직접 `boto3`나 Ollama URL을 호출하지 않고 Gateway와 allow-listed tool을 주입한다.
 
 ### 3.2 Bedrock Claude
 
@@ -189,6 +195,29 @@ index_version
 
 위 값을 모든 Chunk에 저장하고 Model 변경 시 새 Index를 만들어 재색인한다.
 
+### 3.5 Vector Store 분리: pgvector vs Pinecone
+
+기본값은 Supabase pgvector다. [ADR-0006](adr/0006-pinecone-for-risk-qa-static-corpora.md)에
+따라 다음 예외만 Pinecone을 쓴다.
+
+| 데이터 | Vector Store | 이유 |
+|---|---|---|
+| Risk/QA 정적 규정·정책 코퍼스 (`compliance-policy-worker`, `hallucination-critic-worker`) | Pinecone | Order/Ledger와 SQL Join 불필요, Metadata Filter로 PIT 후보 축소, 트레이딩 hot path와 IOPS/CPU 격리 |
+| 그 외 모든 RAG Evidence (research·execution·accounting에 Join되는 Evidence 포함) | Supabase pgvector | 관계형 Join 필요, Source of Truth 단일화 |
+
+- `skills/agentic-rag/src/retriever.py`의 `search()` 인터페이스(`DocumentChunk` in,
+  `list[ScoredChunk]` out)는 두 Store 모두에서 동일하게 유지한다 — Adapter만 바뀐다.
+- Pinecone Index는 Risk/QA가 같은 Index를 쓰더라도 **Namespace를 부서별로 분리**한다
+  (`risk-compliance-policy`, `qa-hallucination-reference`) — 현재 Baseline이 이미
+  `corpus/compliance/`와 `corpus/evidence/`로 완전히 나눠져 있는 것과 같은 경계다.
+- Pinecone Index에도 3.4의 `embedding_model_id`/`embedding_dimension`/
+  `embedding_version`/`index_version`을 Metadata로 저장한다.
+- RAG 감사 Trail(`audit.rag_runs` 등)은 Vector Store 선택과 무관하게 항상 Supabase에
+  남는다. Pinecone은 검색 백엔드일 뿐 감사 Source of Truth가 아니다.
+- 최종 PIT 필터·인용 검증은 Vector Store와 무관하게 항상 결정론적 Python
+  (`skills/agentic-rag/src/nodes.py`)이 한다. Pinecone Metadata Filter는 후보를
+  좁히는 1차 단계일 뿐이다.
+
 ## 4. Supabase 사용 범위
 
 ### Supabase에 저장
@@ -199,7 +228,7 @@ index_version
 - Strategy, Backtest Run과 Promotion
 - Risk Decision, Order, Fill, Position과 Portfolio Snapshot
 - LangGraph Checkpoint 전용 Schema
-- RAG Document Metadata와 pgvector
+- RAG Document Metadata와 pgvector (Risk/QA 정적 코퍼스 예외는 3.5, ADR-0006 참고)
 - 사용자 Auth와 Dashboard 접근 권한
 - 문서, Parquet와 Model Artifact의 Storage Object Metadata
 
@@ -341,7 +370,7 @@ Vendor Market Data와 Broker SDK는 공급자 확정 후 Adapter Package로 추�
 
 ## 8. AI Office Frontend 결정
 
-현재 `ai-office/`의 Next.js·React·TypeScript Pixel Office를 Frontend Baseline으로 확정한다. 이는 조직 상태를 탐색하는 시각 Shell이며, 현재 12개 고정 부서와 Scripted Simulation을 그대로 금융 운영에 사용하는 결정은 아니다. 8개 조직 단위, 실제 Agent 상태와 FastAPI REST·WebSocket Adapter로 단계적으로 교체한다.
+현재 `ai-office/`의 Next.js·React·TypeScript Pixel Office를 Frontend Baseline으로 확정한다. 원본 12개 부서는 8개 조직·2개 층으로 전환됐고 Trading/Portfolio DEMO Snapshot과 `apps/api/main.py` BFF가 추가됐다. 다만 Scripted Simulation과 테스트 Paper Loop를 금융 운영 상태로 사용하지 않는다. 실제 Agent 상태는 Hermes Kanban Status Bridge의 `agent.status.v1`, Supabase Read Model과 FastAPI REST·WebSocket Adapter로 단계적으로 교체한다.
 
 ```text
 Next.js + TypeScript
@@ -357,6 +386,11 @@ Vitest + React Testing Library + Playwright
 현재 `vinext`, Vite, Cloudflare Worker와 Wrangler 구성은 Prototype Hosting Baseline으로만 유지한다. 전체 Cloud Provider, 금융 Backend Hosting과 Production Frontend Hosting은 별도 결정이며 Cloudflare D1·Drizzle을 금융 Source of Truth로 사용하지 않는다.
 
 실시간 연결은 `GET /ui/snapshot` 다음 FastAPI `/ws/operations` 순서다. WebSocket Event는 Sequence, Schema Version과 Server Time을 포함하고 Client는 Heartbeat, 재연결, Gap Recovery와 Staleness를 구현한다. 전 종목 Tick을 Pixel Office로 직접 전송하지 않고 Feed Health와 집계 Event를 제공한다.
+
+Hermes Kanban은 Agent 업무 상태 Source로 재사용한다. 같은 Runtime 경계의 읽기 전용 Bridge가
+Task·Assignee 변경을 `agent.status.v1`로 Redis Streams에 발행하고 Projector가 Supabase Agent Status
+Read Model을 갱신한다. Browser·BFF의 SQLite 직접 접근과 Task 수정은 금지한다. 공통 Frontend Platform
+기술 DRI는 도현님, Live Office Business Owner는 영주님, Risk·QA Reviewer는 동규님이다.
 
 ### Frontend 책임
 
@@ -437,7 +471,13 @@ Render 검증 실패 시 Cloud Provider 선정 전에는 단일 VM과 Docker Com
 - Trivy: Container/Image 취약점
 - pip-audit/Bandit: Python 의존성과 정적 보안 검사
 
-LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 전송 정책과 비용을 검토하기 전 필수 도구로 지정하지 않는다. 초기에는 OpenTelemetry와 자체 Agent Run Record를 기준으로 한다.
+LangSmith는 선택적 LangGraph 개발 추적 어댑터다. 기본 tracing은 비활성(`LANGSMITH_TRACING=false` 또는 `LANGCHAIN_TRACING_V2=false`)이며, 금융 데이터 마스킹·외부 전송 정책·비용·자격증명·네트워크를 확인한 실제 run만 연결 성공으로 기록한다. 현재 Source of Truth는 OpenTelemetry와 자체 Agent Run Record이고, 코드나 API Key가 있다는 사실만으로 LangSmith 연결 완료로 표시하지 않는다.
+
+**Langfuse (2026-08-10 신규 도입, 영주 결정)** — LangSmith와 이중 계측되는 두 번째 선택적 추적 어댑터다. 기본값은 비활성(`LANGFUSE_TRACING=false`).
+
+- **기존 스택으로 못 푸는 문제**: LangSmith는 이미 8개 부서 전부에 배선돼 있지만, HR(07-agent-workforce)이 6개 투자본부 Worker의 "최근 실행 시각"만 안전하게 조회할 방법이 없었다. LangSmith Trace 원문에는 Mandate·제한종목 질의응답 같은 Risk/Compliance 내용이 그대로 담겨 있어(.env.example 3-1절), HR이 그 클라이언트로 직접 조회하면 권한 밖 데이터에 노출될 위험이 있다. Langfuse를 별도로 붙여 HR 전용 조회 경로(`departments/07-agent-workforce/scorecard/observability.py`)를 LangSmith와 분리했다 — 같은 SDK를 공유하지 않으므로 HR의 접근 범위가 코드 구조상으로도 LangSmith 원본과 섞이지 않는다.
+- **HR이 읽는 것**: `orchestration/llm_observability.py`의 `publish_langfuse_metric()`이 `_metric_metadata()`로 redact된 필드(worker_id·stage·상태·지연시간 등)만 이벤트로 보내고, HR은 그 이벤트의 timestamp만 조회한다. input/output(원문)은 항상 비어 있다.
+- **제거 기준**: LangSmith 쪽에 부서별 접근 범위 제한(예: HR 전용 Project/API Key 분리)이 구현되면 Langfuse는 불필요해진다 — 그 시점에 이 어댑터를 제거하고 HR도 LangSmith 하나로 합친다.
 
 ## 12. Secret과 설정
 
@@ -509,3 +549,9 @@ LangSmith는 LangGraph 개발 추적에 유용하지만 금융 데이터 외부 
 ## 17. 최종 결정
 
 > Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase는 Transaction·Vector·Auth·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
+
+Kafka/Redpanda, Flink, ClickHouse, Feast, Neo4j, Ray와 Kubernetes는 현재 Core 확정 스택이 아니다.
+부하, Replay, Feature 일관성, Graph Query, 분산 연구 또는 배포 격리 문제가 실측되고 기존 스택이
+정의된 SLO를 충족하지 못할 때만 [전사 고도화 연구 로드맵](../01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)의
+Trigger와 ADR을 통과해 도입한다. Qlib와 RD-Agent-Quant는 Strategy Factory의 격리 Spike
+후보이며 Trading, Risk, OMS와 Ledger Runtime의 직접 Dependency로 넣지 않는다.

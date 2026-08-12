@@ -1,224 +1,84 @@
-# Multi-Agent Workflow Configuration
-# 5개의 분리된 흐름 — 섞지 않는다:
-#   1. workflow                — 실시간 신호 파이프라인 (research→trading→risk→qa→accounting→ceo)
-#   2. strategy_research_cycle — 전략 연구 주기 (quant-backtest→qa→ceo)
-#   3. workforce_management_cycle — 인사팀 신규 채용 주기 (hr→hr→qa→ceo→hr)
-#   4. agent_evolution_cycle   — 기존 Agent Profile 개선 주기 (hr→hr→qa→ceo→hr, 신규 채용과 동일한 게이트)
-#   5. event_routing           — 8.1절 동적 라우팅(Expert Pool 패턴), 이벤트 유형별 필요한 페르소나만 선택 호출
-# hr-department는 CEO 직속 Shared Service이며 제7의 투자 본부가 아니다.
-# 참고: HEDGE_FUND_MASTER_PLAN.md 4, 5.5, 5.8, 6.4, 7, 8, 8.1, 11.2, 11.3, 19.4(1829행)
-# 타임아웃 문제 해결: Tavily API 통합. 시장 데이터 소스는 아직 미확정(Hermes 엔지니어링 우선, market-api 연동은 이후 단계)
-#
-# retry/on_failure 원칙(harness 리뷰에서 도출, 2026-07-29): 모든 step은 실패 시 "통과한 것처럼" 다음 단계로
-# 넘어가지 않는다. 안전한 기본값(REJECT/HOLD/DENY/ESCALATE)으로 떨어지며, 자동으로 승인·승격·권한부여 방향으로
-# fallback하지 않는다 — skills/agentic-rag의 grounded:false 처리와 동일한 원칙.
+# Cross-department workflow registry.
+# Detailed contracts live under orchestration/workflows/.
+version: multi-agent-workflow-v2
+description: "HgFinance 5개 분리 Workflow와 동적 Event Routing registry"
+canonical_workflow_index: orchestration/workflows/index.yaml
+
+# 실행 계층 계약: 실제 Head 모델은 각 departments/<n>/hermes/config.yaml에서 선택한다.
+runtime_layers:
+  department_head:
+    runtime: hermes
+    model_choices: [openai-codex, anthropic-claude-code]
+    active_profile_models:
+      ceo-agent: openai-codex/gpt-5.6-luna
+      hr-department: openai-codex/gpt-5.6-luna
+      research-department: openai-codex/gpt-5.6-luna
+      trading-department: openai-codex/gpt-5.6-luna
+      risk-management: openai-codex/gpt-5.6-luna
+      quant-backtest-department: openai-codex/gpt-5.6-luna
+      accounting-portfolio-department: openai-codex/gpt-5.6-luna
+      qa-department: openai-codex/gpt-5.6-luna
+    alternative_provider: anthropic-claude-code
+    responsibility: department_synthesis_and_escalation
+  department_employee:
+    runtime: langgraph
+    provider: ollama
+    model: qwen3:1.7b
+    model_selection: fixed_until_model_eval_approved
+    discovery_command: ollama list
+    worker_counts:
+      ceo-agent: 1  # LLM Worker only; deterministic ceo-runner is separate
+      hr-department: 0   # 직원 LLM 계층 없음 - 부서장 + 결정론 함수
+      research-department: 6
+      trading-department: 2  # LLM Worker only; deterministic desk-runner is separate
+      risk-management: 4
+      quant-backtest-department: 7
+      accounting-portfolio-department: 1  # LLM Worker only; deterministic back-office-runner is separate
+      qa-department: 5
+    output: non_binding_worker_context
+    retry: {max_retries: 2, max_attempts: 3}
+  binding_gates:
+    risk: departments/03-risk/engine/risk_engine.py
+    qa: departments/06-ai-qa-audit/evidence/evidence_qa_engine.py
+  failure_action: fail_closed_hold_reject_escalate_rollback
 
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+  provider: openai-codex
+  name: "gpt-5.6-luna"
+  note: "Hermes Profile의 모델 설정은 각 departments/<n>/hermes/config.yaml을 따른다."
 
 workflow:
   name: "AI 트레이딩 신호 검증 및 집행 프로세스"
-  timeout_seconds: 420
-  news_source: "tavily"
-  news_script: "departments/01-research/collectors/news.py"
-  steps:
-    - step: 1
-      department: research-department
-      task: "Universe/Technical/Microstructure/News 등 관련 Analyst를 소집해 종목별 Research Packet(근거, 촉매, 무효화 조건) 생성. 실시간 가격·베타·변동성 데이터를 참조하고 departments/01-research/collectors/news.py로 관련 뉴스 및 공시자료를 확인"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "HOLD — Research Packet 생성 실패 시 트레이딩본부로 신호를 넘기지 않는다"
-    - step: 2
-      department: trading-department
-      task: "Research Packet을 기반으로 Bull/Bear 토론 후 Trader/PM Agent가 진입·청산·크기·무효화 조건을 갖춘 구조화된 거래 제안 작성. 리스크본부 승인 전에는 주문을 전송하지 않음"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "HOLD — Order Intent 생성 실패 시 리스크본부로 넘기지 않는다"
-    - step: 3
-      department: risk-management
-      task: "포지션 리스크 평가, 포트폴리오 노출도 분석, 변동성 영향 분석. 실시간 베타값과 변동성 데이터를 사용하여 리스크 계산. Tavily 뉴스 검색 결과를 참고하여 시장 심리 분석. approve/resize/reject 중 하나를 반환"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 2  # Risk는 Hot Path — 재시도로 지연을 키우지 않도록 다른 step보다 적게
-      on_failure: "REJECT — 평가 실패·타임아웃을 승인으로 취급하지 않는다 (11.2절: 데이터 단절·상태 불명 시 신규 주문 금지)"
-    - step: 4
-      department: qa-department
-      task: "AI 생성 신호의 환각 여부 검사, 논리적 일관성 평가, 사실적 정확성 검증. 리서치·트레이딩·리스크 각 단계의 근거와 Decision Trace를 독립적으로 검증"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "ESCALATE — 검증 실패를 통과로 취급하지 않는다. 이미 Risk가 승인한 주문 자체는 막지 않되 '미검증' 상태로 CEO에게 에스컬레이션한다"
-    - step: 5
-      department: accounting-portfolio-department
-      task: "승인된 주문의 체결·포지션·현금 반영, Reconciliation 및 PnL 계산. Accounting Engine의 공식 수치만 사용"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "BREAK — 이미 체결된 거래를 취소하지 않는다. 반영 실패는 Reconciliation Break로 기록하고 회계본부에 즉시 에스컬레이션한다"
-    - step: 6
-      department: ceo-agent
-      task: "리서치·트레이딩·리스크·QA·회계 결과를 통합한 최종 의사결정 및 사용자 설명"
-      timeout_seconds: 30
-      retry:
-        max_attempts: 2
-      on_failure: "ESCALATE_TO_USER — 통합 요약 실패를 조용히 누락하지 않는다. 미완료 상태 그대로 사용자에게 알린다"
+  manifest: orchestration/workflows/investment-case.yaml
+  order: [research, trading, risk, qa, oms-fill-gate, accounting, ceo]
+  timeout_seconds: 450
+
+portfolio_recommendation_cycle:
+  manifest: orchestration/workflows/portfolio-recommendation.yaml
+  order: [profile-suitability, research, trading, risk, qa, accounting, ceo]
+  timeout_seconds: 300
+  mode: test
+  external_writes: false
 
 strategy_research_cycle:
-  description: "실시간 신호 파이프라인과 분리된 전략 연구 주기. 검증된 Strategy Bundle만 트레이딩본부에 전달하며 실시간 운용 중 전략 코드를 직접 수정하지 않음"
+  manifest: orchestration/workflows/strategy-research.yaml
+  order: [quant-backtest, qa-release-review, ceo-promotion-review]
   timeout_seconds: 180
-  steps:
-    - step: 1
-      department: quant-backtest-department
-      task: "전략 가설·Feature·Dataset 생성, Point-in-Time Backtest, Walk-Forward 및 Champion/Challenger 비교. 검증된 불변 Strategy Bundle만 Shadow/Paper 배포 후보로 제출"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "NO_SUBMIT — Strategy Bundle을 제출하지 않는다. 다음 단계로 넘어가지 않는다"
-    - step: 2
-      department: qa-department
-      task: "전략 Release의 재현성, 데이터 누수·과적합 여부에 대한 독립 Model Risk 검증"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "REJECT_PROMOTION — 독립 검증 실패 시 승격 후보에서 제외한다"
-    - step: 3
-      department: ceo-agent
-      task: "리스크본부·QA 승인 결과를 반영해 Paper Champion 승격 여부 결정"
-      timeout_seconds: 30
-      retry:
-        max_attempts: 2
-      on_failure: "REJECT_PROMOTION — 결정 실패·모호 시 기본값은 미승격이다 (quant-backtest-department는 Production을 직접 승격할 권한이 없음, 5.5 #4)"
 
 workforce_management_cycle:
-  description: "실시간 신호 파이프라인·전략 연구 주기와 분리된 인사팀 주기. 인사팀은 후보를 설계·평가만 하며 권한 부여는 AI QA/감사본부 독립 검증과 CEO 예산·조직 승인을 거쳐야 하고, 실제 Identity/권한 생성은 Platform/IAM Service만 수행"
+  manifest: orchestration/workflows/workforce-management.yaml
+  order: [hr-profile, hr-candidate-eval, qa-permission-review, ceo-org-approval, hr-lifecycle]
   timeout_seconds: 300
-  steps:
-    - step: 1
-      department: hr-department
-      task: "6개 본부의 Queue·SLA·비용·Eval·Incident를 분석해 채용 우선순위 산정 후 Hiring Requisition에 대한 Job Profile(Mission, Skill, Tool, 금지 권한, Eval 기준) 설계"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "NO_REQUISITION — Job Profile 생성 실패 시 채용 절차를 진행하지 않는다"
-    - step: 2
-      department: hr-department
-      task: "Golden/Adversarial Eval과 Shadow 수습을 통해 후보를 평가"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "REJECT_CANDIDATE — 평가가 실패·미완료된 후보를 자동 통과시키지 않는다"
-    - step: 3
-      department: qa-department
-      task: "후보의 Model/Prompt/Tool 권한 요청을 독립 검증 — 인사팀은 자기 후보를 스스로 최종 승인할 수 없음"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "DENY_PERMISSION — 권한 검증 실패를 승인으로 취급하지 않는다. 미검증 상태로 권한을 부여하지 않는다"
-    - step: 4
-      department: ceo-agent
-      task: "예산과 조직 변경(신규 채용, 역할 변경, 비활성화)을 승인. 실제 Identity/권한 생성은 여기서 하지 않으며 Platform/IAM Service로 요청만 전달"
-      timeout_seconds: 30
-      retry:
-        max_attempts: 2
-      on_failure: "NO_APPROVAL — 예산·조직 변경을 진행하지 않는다"
-    - step: 5
-      department: hr-department
-      task: "승인된 Joiner/Mover/Leaver를 반영해 Queue 배정, Memory Namespace, 권한 요청을 Lifecycle Coordinator가 정리"
-      timeout_seconds: 30
-      retry:
-        max_attempts: 3
-      on_failure: "ESCALATE — 승인은 됐는데 정리가 안 된 채로 남기지 않는다. 운영 이슈로 즉시 에스컬레이션한다"
 
 agent_evolution_cycle:
-  description: >
-    workforce_management_cycle이 신규 채용을 다루는 것과 달리, 이 주기는 이미 활성화된 기존 페르소나를
-    실사용 데이터로 개선하는 흐름이다(harness 리뷰 2026-07-29, "하네스 진화 메커니즘" 대응).
-    "이미 배포됐다"는 이유로 신규 채용과 같은 QA 독립검증·CEO 승인 게이트를 건너뛰지 않는다 —
-    프롬프트 한 줄을 고치는 것도 Agent Profile Version을 올리는 변경이다(TEAM_YOUNGJU 4.2절 agent_profile_versions).
-  trigger: "주간 정기 실행, 또는 개별 Agent의 Finding 누적·Eval 점수 하락·비용 급증 시 Ad-hoc 실행"
+  manifest: orchestration/workflows/agent-evolution.yaml
+  order: [hr-improvement-signal, hr-profile-revision, qa-revision-review, ceo-revision-approval, hr-shadow-rollback]
   timeout_seconds: 300
-  steps:
-    - step: 1
-      department: hr-department
-      task: "Selection/Performance Agent가 본부별 Queue/SLA/Cost/Quality Scorecard, Eval 점수 추이, QA Finding 누적을 검토해 개선이 필요한 기존 Agent Profile을 식별"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "NO_CHANGE — 개선 후보 식별 실패 시 기존 Profile을 그대로 둔다. 검증 안 된 변경을 임의로 만들지 않는다"
-    - step: 2
-      department: hr-department
-      task: "Profile Architect가 식별된 문제(예: 반복되는 Finding 유형, 낮은 Eval 점수)에 대한 구체적 개정안을 설계 — Mission/Skill/Tool Allowlist/Forbidden Action 중 무엇을 바꾸는지 명시. 페르소나 프롬프트의 권한 경계 문장(CLAUDE.md '절대 깨면 안 되는 권한 분리')은 개정 대상에서 제외"
-      timeout_seconds: 90
-      retry:
-        max_attempts: 3
-      on_failure: "NO_CHANGE — 개정안 설계 실패 시 기존 Profile을 그대로 둔다"
-    - step: 3
-      department: qa-department
-      task: "개정안을 신규 채용과 동일한 Golden/Adversarial Eval로 기존 Champion Profile과 비교 검증. 신규 채용 심사보다 완화된 기준을 적용하지 않는다"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "REJECT_REVISION — 검증 실패·미완료 개정안은 배포하지 않는다"
-    - step: 4
-      department: ceo-agent
-      task: "검증된 개정안의 예산·조직 영향을 승인. Agent Profile Version을 올리는 변경이므로 워크포스 예산 승인 범위로 취급"
-      timeout_seconds: 30
-      retry:
-        max_attempts: 2
-      on_failure: "NO_APPROVAL — 승인 실패 시 이전 Version을 계속 사용한다"
-    - step: 5
-      department: hr-department
-      task: "승인된 개정을 Shadow 환경에서 먼저 수습시키고, 이전 Champion 대비 성과가 확인되면 정식 Version으로 전환. 문제 발생 시 이전 Version으로 즉시 Rollback"
-      timeout_seconds: 60
-      retry:
-        max_attempts: 3
-      on_failure: "ROLLBACK — Shadow 검증 실패 시 이전 Version을 유지한다. 실패한 개정을 Production에 올리지 않는다"
 
-# 8.1절 동적 라우팅(Expert Pool 패턴). 3개 고정 주기와 분리된 별도 흐름 — 6.4절 이벤트 탐지가 발화시키며,
-# 이벤트 유형에 맞는 페르소나만 선택 호출한다. call이 빈 배열이면 에이전트 라우팅 대상이 아니라
-# 결정론적 코드(Risk Engine, Kill Switch)가 즉시 처리한다는 뜻이다 — 이 경우도 LLM을 기다리지 않는다(5.9절).
 event_routing:
-  description: "이벤트 탐지(6.4절) 결과에 따라 필요한 페르소나만 동적으로 호출한다. 단순 저강도 이벤트는 Level 1/2(7.1, 7.2절)에서 종료하고 여기까지 오지 않는다"
-  rules:
-    - event: price_breakout
-      call: ["research-department.microstructure-analyst", "research-department.technical-analyst"]
-      note: "8.1절 '거래량 및 가격 돌파'. net_expected_edge가 낮으면 Level 2에서 종료(7.2절)하고 이 라우팅까지 오지 않는다"
-    - event: return_spike
-      call: ["research-department.technical-analyst"]
-    - event: relative_volume_spike
-      call: ["research-department.microstructure-analyst", "research-department.technical-analyst"]
-    - event: volatility_regime_change
-      call: ["research-department.sector-regime-analyst", "risk-management.market-liquidity-risk-agent"]
-    - event: spread_widening
-      call: ["research-department.microstructure-analyst", "risk-management.market-liquidity-risk-agent"]
-    - event: orderbook_imbalance
-      call: ["research-department.microstructure-analyst"]
-    - event: sector_decoupling
-      call: ["research-department.sector-regime-analyst", "risk-management.market-liquidity-risk-agent"]
-      note: "8.1절 '섹터 전체 급변'"
-    - event: correlation_breakdown
-      call: ["research-department.sector-regime-analyst", "risk-management.market-liquidity-risk-agent"]
-    - event: news_catalyst
-      call: ["research-department.news-sentiment-analyst", "trading-department.bull-researcher", "trading-department.bear-researcher", "qa-department.evidence-qa-agent"]
-      note: "8.1절 '뉴스 속보'"
-    - event: portfolio_risk_breach
-      call: ["research-department", "trading-department", "risk-management", "quant-backtest-department", "accounting-portfolio-department", "qa-department"]
-      deterministic_check: true
-      note: "8.1절 '보유 종목 급락' — 6개 본부 중요 Case로 취급하는 유일한 이벤트. 결정론적 Risk Check 동시 실행, LLM 판단 완료를 기다리지 않는다"
-    - event: loss_limit_approach
-      call: []
-      deterministic_check: true
-      note: "8.1절 '손실 한도 접근' — CEO/LLM 판단을 기다리지 않고 Risk Engine이 즉시 실행한다. 에이전트 라우팅 대상 아님"
-    - event: stale_market_data
-      call: []
-      action: "ENTRY_BLOCKED — 8.1절 '데이터 지연 및 단절'. 신규 주문 차단, 에이전트 호출 없이 결정론적으로 처리"
-    - event: feed_disconnected
-      call: []
-      action: "ENTRY_BLOCKED — stale_market_data와 동일하게 처리"
-  default: "call: [] — 위 규칙에 없는 단순 저강도 이벤트는 Level 1/2(7.1, 7.2절)에서 종료한다. 8.1절 '단순 저강도 가격 이동'"
+  manifest: orchestration/workflows/event-routing.yaml
+  order: dynamic
+  default_action: ENTRY_BLOCKED
 
 usage:
   single_department:
@@ -230,22 +90,19 @@ usage:
     accounting: "accounting-portfolio-department chat -q 'Reconcile fills and compute PnL'"
     ceo: "ceo-agent chat -q 'Summarize current portfolio decisions and open risks'"
     hr: "hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'"
-  multi_agent:
-    signal_pipeline: "research-department chat -q 'Build a Research Packet for [종목], then delegate to trading-department, risk-management, qa-department, accounting-portfolio-department and ceo-agent in sequence'"
-    strategy_cycle: "quant-backtest-department chat -q 'Backtest [전략 가설], then delegate release review to qa-department and promotion decision to ceo-agent'"
-    workforce_cycle: "hr-department chat -q 'Design a Job Profile for [채용 요청], then delegate permission verification to qa-department and budget/org approval to ceo-agent'"
-  news_search:
-    local: "python3 departments/01-research/collectors/news.py '[검색어]'"
-    tavily: "python3 departments/01-research/collectors/news.py '[검색어]'"
+  boundary_validation:
+    all: "python -m orchestration.workflows.runner --workflow investment-case --mode dry-run --json"
+    strategy: "python -m orchestration.workflows.runner --workflow strategy-research --mode dry-run --json"
+    paper_e2e: "python -m orchestration.workflows.runner --workflow investment-case --mode paper-e2e --symbol AAPL --quantity 100 --limit-price 200.00 --json"
 
 files:
-  ceo_agent: "departments/00-ceo-office/hermes/config.yaml"
-  hr_department: "departments/07-agent-workforce/hermes/config.yaml"
-  research_department: "departments/01-research/hermes/config.yaml"
-  trading_department: "departments/02-trading/hermes/config.yaml"
-  risk_management: "departments/03-risk/hermes/config.yaml"
-  quant_backtest_department: "departments/04-quant-backtest/hermes/config.yaml"
-  accounting_portfolio_department: "departments/05-accounting-portfolio/hermes/config.yaml"
-  qa_department: "departments/06-ai-qa-audit/hermes/config.yaml"
-  workflow: "multi-agent-workflow.yaml"
-  news_script: "departments/01-research/collectors/news.py"
+  workflow_index: orchestration/workflows/index.yaml
+  ceo_agent: departments/00-ceo-office/hermes/config.yaml
+  hr_department: departments/07-agent-workforce/hermes/config.yaml
+  research_department: departments/01-research/hermes/config.yaml
+  trading_department: departments/02-trading/hermes/config.yaml
+  risk_management: departments/03-risk/hermes/config.yaml
+  quant_backtest_department: departments/04-quant-backtest/hermes/config.yaml
+  accounting_portfolio_department: departments/05-accounting-portfolio/hermes/config.yaml
+  qa_department: departments/06-ai-qa-audit/hermes/config.yaml
+  news_script: departments/01-research/collectors/news.py

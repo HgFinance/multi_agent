@@ -33,16 +33,18 @@ from uuid import UUID
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "ledger"))
 
-from ledger import (  # noqa: E402
-    CASH,
+from ledger import (
+    FEE_EXPENSE,
+    MGMT_FEE_EXPENSE,
+    PERF_FEE_EXPENSE,
+    FEE_PAYABLE,
     PAYABLE,
     REALIZED_PNL,
     RECEIVABLE,
+    TAX_EXPENSE,
     ZERO,
-    FEE_EXPENSE,
     Ledger,
     Position,
-    TAX_EXPENSE,
 )
 
 # 시세가 이보다 낡으면 평가에 쓰지 않는다.
@@ -61,12 +63,22 @@ class MarkPrice:
 
     우리가 만들지 않는다. instrument_id와 as_of가 없으면 어느 시점 가격인지
     알 수 없어 Point-in-Time 재현이 깨진다.
+
+    **`is_final`의 기본값이 False인 것은 의도다.** market-api의 봉은 진행 중일 수
+    있고(`market.market_bars.is_final`), 미확정 봉을 종가로 쓰면 NAV가 조용히
+    틀린다. 2026-08-03에 리서치본부가 `is_final`을 모든 봉에 True로 박아두던
+    결함을 고쳤다(`3978ee1` "없는 확실성을 만들어내던 것"). 여기서 True를
+    기본값으로 두면 우리가 그 결함을 다시 만드는 셈이다 - 말 안 하면 미확정이다.
+
+    확정 여부는 NAV를 막지 않는다. 장중 평가는 원래 미확정 가격으로 한다.
+    대신 스냅샷의 `quality_status`가 PASS 대신 WARN이 되어 드러난다.
     """
 
     instrument_id: UUID
     price: Decimal
     as_of: datetime
     source: str = "market-api"
+    is_final: bool = False
 
     def __post_init__(self) -> None:
         if self.price <= 0:
@@ -83,6 +95,8 @@ class PositionValuation:
     average_cost: Decimal
     mark_price: Decimal
     mark_as_of: datetime
+    # 이 값이 스냅샷 전체의 quality_status를 정한다. MarkPrice.is_final 주석 참고.
+    mark_is_final: bool = False
 
     @property
     def cost_basis(self) -> Decimal:
@@ -127,6 +141,16 @@ class PortfolioSnapshot:
     def nav(self) -> Decimal:
         """순자산가치. 이 값이 F11의 주문 사이징 기준이 된다."""
         return self.cash + self.securities_value + self.receivable - self.payable
+
+    @property
+    def quality_status(self) -> str:
+        """`accounting.portfolio_snapshots.quality_status`에 그대로 들어간다.
+
+        보유 종목 중 하나라도 미확정 봉으로 평가됐으면 WARN이다. NAV를 막지는
+        않지만 "이 NAV는 확정 종가 기준이 아니다"를 수치와 함께 남긴다 - 공식
+        NAV Close는 PASS만 받아야 한다(그 승인 경로는 아직 없다).
+        """
+        return "PASS" if all(p.mark_is_final for p in self.positions) else "WARN"
 
     @property
     def gross_exposure(self) -> Decimal:
@@ -188,6 +212,7 @@ def value_portfolio(
                 average_cost=pos.average_cost,
                 mark_price=mark.price,
                 mark_as_of=mark.as_of,
+                mark_is_final=mark.is_final,
             )
         )
 
@@ -204,10 +229,18 @@ def value_portfolio(
         as_of=as_of,
         cash=cash,
         receivable=tb.get(RECEIVABLE, ZERO),
-        payable=-tb.get(PAYABLE, ZERO),   # 부채는 대변 잔액이라 부호를 뒤집는다
+        # 부채는 대변 잔액이라 부호를 뒤집는다. **미지급보수(2100)도 여기 포함된다** -
+        # 발생한 보수는 아직 안 나갔어도 투자자 몫이 아니므로 NAV에서 빠져야 한다.
+        # 빼지 않으면 보수를 낼 때마다 NAV가 그만큼 계단식으로 떨어진다.
+        payable=-(tb.get(PAYABLE, ZERO) + tb.get(FEE_PAYABLE, ZERO)),
         # 손익 계정도 대변이 이익이다. 원장에서 가져오고 여기서 다시 계산하지 않는다.
         realized_pnl=-tb.get(REALIZED_PNL, ZERO),
-        fees=tb.get(FEE_EXPENSE, ZERO),
+        # **운용 보수까지 합친 총 비용이다.** NAV 항등식(변화 = 손익 - 비용)의 "비용"이
+        # 이 값이라, 관리·성과보수를 빼면 그만큼이 통째로 미설명 손익이 된다.
+        # 계정 단위 분리(거래 수수료 5000 / 관리 5200 / 성과 5300)는 원장에 그대로
+        # 남아 있고 TCA·귀속은 그쪽을 읽는다.
+        fees=(tb.get(FEE_EXPENSE, ZERO) + tb.get(MGMT_FEE_EXPENSE, ZERO)
+              + tb.get(PERF_FEE_EXPENSE, ZERO)),
         taxes=tb.get(TAX_EXPENSE, ZERO),
         positions=tuple(valued),
     )
@@ -219,7 +252,7 @@ if __name__ == "__main__":
     from uuid import uuid4
 
     sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
-    from contracts import Side  # noqa: E402
+    from contracts import Side
 
     D = Decimal
     now = datetime.now(timezone.utc)

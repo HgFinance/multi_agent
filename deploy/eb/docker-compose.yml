@@ -1,0 +1,129 @@
+# AWS Elastic Beanstalk 배포용 Compose. **로컬 루트 docker-compose.yml과 다른 파일이다.**
+#
+# 담당: 도현 (트레이딩/회계·포트폴리오)
+# 근거: CLAUDE.local.md "우리가 만드는 것", 2026-08-10 배포 범위 결정(도현 파트만 +
+#       나머지 부서는 README.md 인계 체크리스트로 넘김)
+#
+# ▶ **루트 docker-compose.yml을 그대로 올리지 않는다.** 그 파일은 재일님 소유의 로컬
+#   개발 스택이고 `include:`로 8개 부서를 전부 끌어온다. 그 안의 Hermes 컨테이너 4개가
+#   `${USERPROFILE}` 볼륨과 `host.docker.internal:8787` 프록시를 요구해 Linux EC2에서
+#   뜨지 않는다. 이 파일은 도현 파트 서비스만 담는다.
+#
+# ▶ EB Docker 플랫폼(AL2023)은 **번들 루트의 `docker-compose.yml`** 을 실행한다.
+#   이 파일은 `scripts/package_eb_bundle.ps1`이 번들 루트로 옮겨 담는다 - 저장소 루트의
+#   그 이름은 이미 로컬 스택이 쓰고 있어 같은 자리에 둘 수 없다.
+#
+# ▶ **포트 80은 portfolio-bff 하나다.** EB nginx 프록시가 80으로 넘긴다. 부서 API는
+#   컨테이너 네트워크 안에서만 보인다 - 로컬 compose의 `127.0.0.1:` 바인딩과 같은 정책이며
+#   EB에서는 아예 publish 하지 않는 것으로 대신한다.
+#
+# ▶ **Hermes(부서 에이전트 질의)는 없다.** 구독 한도를 쓰려면 호스트에서 claude CLI
+#   프록시가 돌아야 하는데 EC2에는 그게 없다. `ENABLE_AGENT_ASK`를 켜지 않으므로
+#   `/{부서}/agent/ask`는 503으로 남는다 - 조용히 종량 과금으로 새는 것보다 낫다.
+#
+# 환경변수는 `eb setenv`로 준다(README.md 3절). DATABASE_URL이 비면 trading-api와
+# accounting-api가 fail closed 되고 ledger-consumer는 아예 뜨지 않는다 - 의도한 방향이다.
+
+services:
+  # ── 외부에 열리는 유일한 서비스 ────────────────────────────────────────────
+  portfolio-bff:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
+      PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-}
+      GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+    volumes:
+      - portfolio_runtime_data:/var/lib/portfolio
+    ports:
+      - "80:8000"
+    mem_limit: 512m
+
+  portfolio-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["python", "apps/api/portfolio_worker.py"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
+      PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
+      PORTFOLIO_WORKER_POLL_SECONDS: ${PORTFOLIO_WORKER_POLL_SECONDS:-0.5}
+    volumes:
+      - portfolio_runtime_data:/var/lib/portfolio
+    mem_limit: 512m
+
+  # ── 트레이딩본부 ───────────────────────────────────────────────────────────
+  # 로컬 compose와 같은 환경변수를 준다. 다른 것은 포트를 publish 하지 않는 것뿐이다.
+  trading-api:
+    build:
+      context: ./departments/02-trading
+    restart: unless-stopped
+    environment:
+      PAPER_DB: ${PAPER_DB:-true}
+      DATABASE_URL: ${DATABASE_URL:-}
+    mem_limit: 256m
+
+  # 이 컨테이너가 없으면 회계 원장이 영원히 비어 있다(oms/relay.py 상단 주석).
+  trading-outbox-relay:
+    build:
+      context: ./departments/02-trading
+    restart: unless-stopped
+    command: ["python", "oms/relay.py", "--serve"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
+      RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}
+    mem_limit: 256m
+
+  # ── 회계·포트폴리오본부 ────────────────────────────────────────────────────
+  accounting-api:
+    build:
+      context: .
+      dockerfile: departments/05-accounting-portfolio/Dockerfile
+    restart: unless-stopped
+    environment:
+      ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
+      DATABASE_URL: ${DATABASE_URL:-}
+    mem_limit: 256m
+
+  accounting-ledger-consumer:
+    build:
+      context: .
+      dockerfile: departments/05-accounting-portfolio/Dockerfile
+    restart: unless-stopped
+    command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      LEDGER_CONSUMER_POLL_SECONDS: ${LEDGER_CONSUMER_POLL_SECONDS:-1.0}
+    mem_limit: 256m
+
+  # ── 공통 인프라 ────────────────────────────────────────────────────────────
+  # ▶ 루트 compose의 redis를 참조할 수 없어(그 파일을 안 올린다) 여기 다시 선언한다.
+  #   **이 Redis는 이 EB 환경 전용이다.** 로컬 스택이나 다른 부서와 데이터를 공유하지
+  #   않는다. Outbox Relay의 발행 대상일 뿐이고 상태의 원천은 Supabase다 - 이 컨테이너를
+  #   날려도 재발행되지 않은 봉투는 outbox에 PENDING으로 남아 있다.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 256m
+
+volumes:
+  portfolio_runtime_data:

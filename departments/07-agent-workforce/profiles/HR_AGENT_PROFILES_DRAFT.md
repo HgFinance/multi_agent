@@ -31,6 +31,8 @@
 ## 2. Agent Profile 5명 (P0 우선)
 
 채용 순서: **P0(HR-00·01·04) 먼저 → P1(HR-02·03).**
+2026-07-31 기준 **5명 전원 `supabase/seed.sql`에 CANDIDATE/DRAFT 로 등록 완료.** 활성화(→ACTIVE)는
+QA Eval + CEO 승인이 남아 있다.
 
 | 필드 | HR-00 인사팀장 | HR-01 Workforce Planner | HR-04 Lifecycle Coordinator |
 |---|---|---|---|

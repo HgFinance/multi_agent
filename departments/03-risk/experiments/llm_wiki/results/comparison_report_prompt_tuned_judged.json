@@ -1,0 +1,921 @@
+[
+  {
+    "arm": "A_plain_rag",
+    "avg_f1": 0.0286,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.5333,
+    "avg_context_chars": 1813.3,
+    "avg_elapsed_ms": 4065.6,
+    "per_question": [
+      {
+        "id": "q01",
+        "query": "금융투자업자가 직무상 알게 된 미공개 정보를 자기 이익을 위해 이용해도 되는가?",
+        "prediction": "금융투자업자는 직무상 알게 된 미공개 정보를 자기 또는 제삼자의 이익을 위해 이용할 수 없으며, 이는 법률에 명시된 위반 사항입니다.",
+        "gold_answer": "안 된다. 제54조제1항에 따라 금융투자업자는 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용해서는 안 된다.",
+        "f1": 0.4286,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 7155.7,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q02",
+        "query": "임직원이 회사 소속 투자중개업자 계좌가 아닌 다른 명의로 자기 주식을 매매해도 되는가?",
+        "prediction": "The provided policy excerpts do not explicitly address whether employees can trade their own stocks under a name other than the company's brokerage account. Therefore, it is unclear if such actions would violate any regulations.",
+        "gold_answer": "안 된다. 제63조제1항제1호에 따라 임직원은 자기의 계산으로 금융투자상품을 매매할 때 반드시 자기의 명의로 매매해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174",
+          "law-283193-71"
+        ],
+        "elapsed_ms": 3878.4,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q03",
+        "query": "임직원이 자기 계산으로 산 금융투자상품의 매매명세를 얼마나 자주 통지해야 하는가?",
+        "prediction": "The provided policy excerpts do not specify the frequency with which employees must report their trading activities related to financial investment products purchased for their own account. Therefore, it is unclear whether there are specific requirements regarding the notification frequency.",
+        "gold_answer": "제63조제1항제3호에 따라 매매명세를 분기별로 소속 금융투자업자에게 통지해야 한다. 다만 투자권유자문인력, 조사분석인력, 투자운용인력은 월별로 통지해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174",
+          "admrul-2100000282072"
+        ],
+        "elapsed_ms": 4779.3,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q04",
+        "query": "조사분석자료 내용이 사실상 확정된 후 공표한지 24시간이 지나기 전에 그 대상 상품을 회사 계산으로 매매해도 되는가?",
+        "prediction": "The proposed action of trading a product before 24 hours after its public announcement may involve the use of undisclosed important information or job-related information, which is prohibited. However, the specific circumstances and details of the information and the timing of the trade are not provided, leading to ambiguity.",
+        "gold_answer": "안 된다. 제71조제2호에 따라 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 경과하기 전까지 그 대상 금융투자상품을 자기의 계산으로 매매하는 행위는 금지된 불건전 영업행위다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-173",
+          "law-283193-174",
+          "law-283193-54"
+        ],
+        "elapsed_ms": 4434.8,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      },
+      {
+        "id": "q05",
+        "query": "주권상장법인의 임원이 자사주를 매수한 후 3개월 만에 매도해 이익을 얻었다. 회사가 그 이익 반환을 청구할 수 있는가?",
+        "prediction": "The executive of a listed company sold shares for profit within 3 months of purchasing them, which falls under the provisions of Article 172 regarding the return of short-term trading profits. The company can claim the profit back as it was realized within the 6-month period specified in the law.",
+        "gold_answer": "청구할 수 있다. 제172조제1항에 따라 주권상장법인의 임원이 특정증권등을 매수한 후 6개월 이내에 매도하여 이익을 얻은 경우 법인은 그 단기매매차익의 반환을 청구할 수 있다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 800,
+        "pages_visited": [
+          "law-283193-172"
+        ],
+        "elapsed_ms": 3228.2,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q06",
+        "query": "주권상장법인의 임원이 된 사람은 특정증권등 소유상황을 며칠 이내에 보고해야 하는가?",
+        "prediction": "The policy excerpt specifies that executives of listed companies must report their ownership status of specific securities within 5 days of becoming an executive or if there is a change in ownership status. Therefore, the requirement for reporting is clear and does not indicate any breach of compliance.",
+        "gold_answer": "임원 또는 주요주주가 된 날부터 5일 이내에 특정증권등의 소유상황을 증권선물위원회와 거래소에 보고해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "no_breach",
+        "gold_verdict": "no_breach",
+        "verdict_match": true,
+        "context_chars": 800,
+        "pages_visited": [
+          "law-283193-173"
+        ],
+        "elapsed_ms": 3554.3,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q07",
+        "query": "상장법인의 미공개중요정보를 이용해 그 회사 주식을 매매하면 어느 조항 위반이며 처벌 수위는?",
+        "prediction": "The act of trading stocks of a listed company using undisclosed important information constitutes a violation of the prohibition against using undisclosed important information as stated in the relevant laws. Specifically, it breaches the provisions that prohibit financial investment businesses from using non-public information for personal or third-party gain without justifiable reasons.",
+        "gold_answer": "제174조제1항 미공개중요정보 이용행위 금지 위반이며, 제443조제1항에 따라 1년 이상의 유기징역 또는 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 2400,
+        "pages_visited": [
+          "law-283193-174",
+          "law-283193-54",
+          "law-283193-178"
+        ],
+        "elapsed_ms": 4205.8,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      },
+      {
+        "id": "q08",
+        "query": "타인과 사전에 짜고 같은 가격으로 서로 매수·매도를 주고받는 통정매매는 어느 조항 위반인가?",
+        "prediction": "The act of trading with prior agreement to buy and sell at the same price constitutes a violation of Article 176, which prohibits such coordinated trading activities that mislead others about the market conditions.",
+        "gold_answer": "제176조제1항 시세조종행위 등의 금지 위반이다. 자기가 매도(매수)하는 것과 같은 시기에 같은 가격으로 타인이 매수(매도)하기로 사전에 짠 후 매매하는 행위는 제176조제1항제1호·제2호에서 금지하는 통정매매다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "law-283193-176"
+        ],
+        "elapsed_ms": 3016.3,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q09",
+        "query": "허위 공시를 이용해 재산상 이익을 얻으려 하는 행위는 부정거래행위에 해당하는가?",
+        "prediction": "The act of obtaining financial benefits through false disclosures falls under the category of '부정거래행위' as defined in Article 178, specifically item 2, which prohibits using false information to gain monetary or other property benefits.",
+        "gold_answer": "해당한다. 제178조제1항제2호에 따라 중요사항에 관하여 거짓의 기재 또는 표시를 하거나 필요한 중요사항의 기재가 누락된 문서를 사용해 금전, 그 밖의 재산상의 이익을 얻고자 하는 행위는 부정거래행위로 금지된다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 3700.6,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q10",
+        "query": "제178조 부정거래행위를 위반하면 처벌 수위는 어떻게 되는가?",
+        "prediction": "The provided excerpts do not specify the penalties for violations of Article 178 regarding unfair trading practices. Therefore, it is unclear how violations are punished, leading to an ambiguous conclusion.",
+        "gold_answer": "제443조제1항제8호에 따라 제178조제1항 각 호의 행위를 한 자는 1년 이상의 유기징역 또는 그 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-178",
+          "prec-601495"
+        ],
+        "elapsed_ms": 3562.1,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q11",
+        "query": "부정거래행위로 얻은 이익이 60억원인 경우 가중처벌 기준은?",
+        "prediction": "The provided policy excerpts do not specify the criteria for aggravated punishment based on profits obtained from illegal trading activities, nor do they provide a clear guideline on how to assess the severity of such violations. Therefore, it is unclear how to determine the aggravated punishment standard for profits of 6 billion won from illegal trading activities.",
+        "gold_answer": "제443조제2항제1호에 따라 위반행위로 얻은 이익 또는 회피한 손실액이 50억원 이상인 경우 무기 또는 5년 이상의 징역으로 가중한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "prec-601495",
+          "law-283193-172"
+        ],
+        "elapsed_ms": 5524.1,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q12",
+        "query": "정보교류차단 관련 내부통제기준의 준수 여부를 점검하는 총괄·집행책임자는 누구인가?",
+        "prediction": "The provided excerpts do not specify who is responsible for overseeing compliance with internal control standards related to information exchange barriers. Therefore, it is unclear based on the available information.",
+        "gold_answer": "정보교류차단 관련 내부통제기준의 준수 여부를 수시로 점검하고 위반사항을 조사하는 업무를 전담하는 부서의 장(준법감시인을 포함한다)이 총괄ㆍ집행책임자다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-54",
+          "law-283193-174"
+        ],
+        "elapsed_ms": 3224.9,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q13",
+        "query": "대법원 2019도12887 판례는 어떤 쟁점을 다루는가?",
+        "prediction": "The question regarding the Supreme Court case 2019도12887 does not provide sufficient information to determine whether it involves violations of the Capital Markets Act or related regulations. The provided excerpts do not explicitly address the specifics of this case, leading to ambiguity.",
+        "gold_answer": "이 판례는 제178조 부정거래행위 규정의 취지와 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'의 의미 및 판단 기준, 그리고 이사회 결의 내용을 반영한 공시가 제178조제1항 위반에 해당하는지 판단하는 기준을 다룬다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "prec-601495",
+          "prec-601495"
+        ],
+        "elapsed_ms": 3076.2,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q14",
+        "query": "이사회 결의 내용을 그대로 반영한 공시라면 공시 자체가 거짓이 아니므로 항상 부정거래행위에서 자유로운가?",
+        "prediction": "The question raises the issue of whether a disclosure reflecting a board resolution can be considered free from fraudulent trading activities. While the policy states that a disclosure that accurately reflects the board's resolution may not be considered false, it does not explicitly clarify whether such a disclosure can still involve the use of 'fraudulent means, plans, or tricks' as per the law. This creates ambiguity regarding the compliance of the action with the regulations.",
+        "gold_answer": "아니다. 공시 내용 자체를 거짓으로 보기 어려운 경우라도, 그러한 공시가 이루어지도록 한 행위가 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'를 사용하는 행위에 해당할 수 있다는 것이 대법원 2019도12887 판례의 입장(한정 적극)이다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 3200,
+        "pages_visited": [
+          "prec-601495",
+          "law-283193-174",
+          "law-283193-178",
+          "law-283193-173"
+        ],
+        "elapsed_ms": 4163.5,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      },
+      {
+        "id": "q15",
+        "query": "가상자산 거래소의 신규 코인 상장 심사 기준은 무엇인가?",
+        "prediction": "The provided policy excerpts do not contain any information regarding the listing criteria for new coins on virtual asset exchanges. Therefore, it is unclear whether the actions of the trading department or employees violate any regulations related to this matter.",
+        "gold_answer": "이 코퍼스에는 가상자산 거래소 상장 심사 기준에 관한 근거 문서가 없다. 근거가 없으므로 판정을 내릴 수 없고 escalate 해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1600,
+        "pages_visited": [
+          "law-283193-174",
+          "law-283193-173"
+        ],
+        "elapsed_ms": 3479.4,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      }
+    ],
+    "avg_semantic_f1": 0.4833,
+    "semantic_accuracy": 0.3333
+  },
+  {
+    "arm": "B_llm_wiki_bm25",
+    "avg_f1": 0.1011,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.6,
+    "avg_context_chars": 1423.5,
+    "avg_elapsed_ms": 2642.3,
+    "per_question": [
+      {
+        "id": "q01",
+        "query": "금융투자업자가 직무상 알게 된 미공개 정보를 자기 이익을 위해 이용해도 되는가?",
+        "prediction": "금융투자업자가 직무상 알게 된 미공개 정보를 자기 이익을 위해 이용하는 것은 자본시장법 제174조에 명시된 미공개중요정보 이용행위 금지에 위반됩니다.",
+        "gold_answer": "안 된다. 제54조제1항에 따라 금융투자업자는 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용해서는 안 된다.",
+        "f1": 0.2927,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2162.1,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q02",
+        "query": "임직원이 회사 소속 투자중개업자 계좌가 아닌 다른 명의로 자기 주식을 매매해도 되는가?",
+        "prediction": "임직원은 자기의 명의로 금융투자상품을 매매해야 하며, 다른 명의로 매매하는 것은 위반에 해당합니다.",
+        "gold_answer": "안 된다. 제63조제1항제1호에 따라 임직원은 자기의 계산으로 금융투자상품을 매매할 때 반드시 자기의 명의로 매매해야 한다.",
+        "f1": 0.3704,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 1741.5,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q03",
+        "query": "임직원이 자기 계산으로 산 금융투자상품의 매매명세를 얼마나 자주 통지해야 하는가?",
+        "prediction": "The provided excerpts specify that employees must report their trading activities according to certain regulations, but they do not explicitly state the frequency of such notifications. Therefore, it is unclear how often employees are required to notify about their trading activities.",
+        "gold_answer": "제63조제1항제3호에 따라 매매명세를 분기별로 소속 금융투자업자에게 통지해야 한다. 다만 투자권유자문인력, 조사분석인력, 투자운용인력은 월별로 통지해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 4504.6,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q04",
+        "query": "조사분석자료 내용이 사실상 확정된 후 공표한지 24시간이 지나기 전에 그 대상 상품을 회사 계산으로 매매해도 되는가?",
+        "prediction": "The proposed action of trading a product before 24 hours after the analysis material is made public could violate the prohibition against using undisclosed important information and engaging in unfair trading practices. Specifically, it may fall under the provisions that prohibit trading based on undisclosed information that could significantly affect investor decisions, as well as actions that could disrupt fair trading order.",
+        "gold_answer": "안 된다. 제71조제2호에 따라 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 경과하기 전까지 그 대상 금융투자상품을 자기의 계산으로 매매하는 행위는 금지된 불건전 영업행위다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1420,
+        "pages_visited": [
+          "자본시장법_제71조_불건전영업행위의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 3845.7,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      },
+      {
+        "id": "q05",
+        "query": "주권상장법인의 임원이 자사주를 매수한 후 3개월 만에 매도해 이익을 얻었다. 회사가 그 이익 반환을 청구할 수 있는가?",
+        "prediction": "주권상장법인의 임원이 자사주를 매수한 후 3개월 만에 매도하여 이익을 얻은 경우, 자본시장법 제172조에 따라 내부자의 단기매매차익 반환이 적용될 수 있으며, 이는 미공개중요정보를 이용한 행위 또는 부정거래행위로 간주될 수 있습니다. 따라서 회사가 이익 반환을 청구할 수 있는 가능성이 존재합니다.",
+        "gold_answer": "청구할 수 있다. 제172조제1항에 따라 주권상장법인의 임원이 특정증권등을 매수한 후 6개월 이내에 매도하여 이익을 얻은 경우 법인은 그 단기매매차익의 반환을 청구할 수 있다.",
+        "f1": 0.4262,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1845,
+        "pages_visited": [
+          "자본시장법_제172조_내부자의단기매매차익반환",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 3039.3,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      },
+      {
+        "id": "q06",
+        "query": "주권상장법인의 임원이 된 사람은 특정증권등 소유상황을 며칠 이내에 보고해야 하는가?",
+        "prediction": "The provided excerpts do not specify the reporting timeline for executives of listed companies regarding their ownership of specific securities. Therefore, it is unclear whether there is a specific requirement for reporting within a certain number of days.",
+        "gold_answer": "임원 또는 주요주주가 된 날부터 5일 이내에 특정증권등의 소유상황을 증권선물위원회와 거래소에 보고해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 429,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2104.2,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q07",
+        "query": "상장법인의 미공개중요정보를 이용해 그 회사 주식을 매매하면 어느 조항 위반이며 처벌 수위는?",
+        "prediction": "상장법인의 미공개중요정보를 이용해 그 회사 주식을 매매하는 행위는 자본시장법 제174조에 명시된 미공개중요정보 이용행위 금지 조항을 위반합니다.",
+        "gold_answer": "제174조제1항 미공개중요정보 이용행위 금지 위반이며, 제443조제1항에 따라 1년 이상의 유기징역 또는 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.1538,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2496.2,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      },
+      {
+        "id": "q08",
+        "query": "타인과 사전에 짜고 같은 가격으로 서로 매수·매도를 주고받는 통정매매는 어느 조항 위반인가?",
+        "prediction": "타인과 사전에 짜고 같은 가격으로 서로 매수·매도를 주고받는 통정매매는 자본시장법 제176조에 명시된 시세조종행위에 해당합니다. 이는 매매가 성황을 이루고 있는 듯이 잘못 알게 하거나 타인에게 그릇된 판단을 하게 할 목적으로 이루어지는 행위로 간주됩니다.",
+        "gold_answer": "제176조제1항 시세조종행위 등의 금지 위반이다. 자기가 매도(매수)하는 것과 같은 시기에 같은 가격으로 타인이 매수(매도)하기로 사전에 짠 후 매매하는 행위는 제176조제1항제1호·제2호에서 금지하는 통정매매다.",
+        "f1": 0.1333,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 360,
+        "pages_visited": [
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2631.5,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      },
+      {
+        "id": "q09",
+        "query": "허위 공시를 이용해 재산상 이익을 얻으려 하는 행위는 부정거래행위에 해당하는가?",
+        "prediction": "허위 공시를 이용해 재산상 이익을 얻으려 하는 행위는 부정거래행위에 해당하며, 이는 자본시장법 제178조에 명시된 부정거래행위의 금지에 위반됩니다.",
+        "gold_answer": "해당한다. 제178조제1항제2호에 따라 중요사항에 관하여 거짓의 기재 또는 표시를 하거나 필요한 중요사항의 기재가 누락된 문서를 사용해 금전, 그 밖의 재산상의 이익을 얻고자 하는 행위는 부정거래행위로 금지된다.",
+        "f1": 0.1395,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2212.0,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q10",
+        "query": "제178조 부정거래행위를 위반하면 처벌 수위는 어떻게 되는가?",
+        "prediction": "The provided excerpts do not specify the penalties for violating Article 178 regarding unfair trading practices. Therefore, it is unclear how the penalties are structured, leading to an ambiguous conclusion.",
+        "gold_answer": "제443조제1항제8호에 따라 제178조제1항 각 호의 행위를 한 자는 1년 이상의 유기징역 또는 그 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2096.2,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q11",
+        "query": "부정거래행위로 얻은 이익이 60억원인 경우 가중처벌 기준은?",
+        "prediction": "The provided excerpts do not specify the penalties or criteria for increased punishment related to profits gained from illegal trading activities. Therefore, it is unclear how the 60억원 profit would be treated under the law.",
+        "gold_answer": "제443조제2항제1호에 따라 위반행위로 얻은 이익 또는 회피한 손실액이 50억원 이상인 경우 무기 또는 5년 이상의 징역으로 가중한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2072.8,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q12",
+        "query": "정보교류차단 관련 내부통제기준의 준수 여부를 점검하는 총괄·집행책임자는 누구인가?",
+        "prediction": "The provided excerpts do not specify who the overall execution responsibility person is for compliance with the internal control standards related to information exchange blocking. Therefore, it is unclear based on the given information.",
+        "gold_answer": "정보교류차단 관련 내부통제기준의 준수 여부를 수시로 점검하고 위반사항을 조사하는 업무를 전담하는 부서의 장(준법감시인을 포함한다)이 총괄ㆍ집행책임자다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 2564,
+        "pages_visited": [
+          "금융투자업규정_제4의6조_정보교류의차단",
+          "자본시장법_제54조_직무관련정보의이용금지",
+          "자본시장법_제443조_벌칙"
+        ],
+        "elapsed_ms": 2040.8,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q13",
+        "query": "대법원 2019도12887 판례는 어떤 쟁점을 다루는가?",
+        "prediction": "The question asks about a specific Supreme Court case (대법원 2019도12887) which is not directly addressed in the provided excerpts. The excerpts discuss regulations regarding employee trading and the prohibition of insider trading, but do not provide information on the specific case or its implications. Therefore, the context is insufficient to determine a clear verdict.",
+        "gold_answer": "이 판례는 제178조 부정거래행위 규정의 취지와 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'의 의미 및 판단 기준, 그리고 이사회 결의 내용을 반영한 공시가 제178조제1항 위반에 해당하는지 판단하는 기준을 다룬다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 3830.4,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q14",
+        "query": "이사회 결의 내용을 그대로 반영한 공시라면 공시 자체가 거짓이 아니므로 항상 부정거래행위에서 자유로운가?",
+        "prediction": "The excerpts indicate that even if a disclosure reflects the content of a board resolution and is not false in itself, the actions leading to that disclosure may still involve 'unlawful means, plans, or tricks' as defined in the law. Therefore, it is unclear whether the act of making such a disclosure is free from the definition of fraudulent trading.",
+        "gold_answer": "아니다. 공시 내용 자체를 거짓으로 보기 어려운 경우라도, 그러한 공시가 이루어지도록 한 행위가 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'를 사용하는 행위에 해당할 수 있다는 것이 대법원 2019도12887 판례의 입장(한정 적극)이다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 2026,
+        "pages_visited": [
+          "대법원_2019도12887_부정거래행위판단기준",
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제172조_내부자의단기매매차익반환"
+        ],
+        "elapsed_ms": 2610.7,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q15",
+        "query": "가상자산 거래소의 신규 코인 상장 심사 기준은 무엇인가?",
+        "prediction": "The provided excerpts do not specify the criteria for the listing of new coins on a virtual asset exchange. They focus on employee trading regulations and the prohibition of insider trading, which do not directly address the question about listing criteria.",
+        "gold_answer": "이 코퍼스에는 가상자산 거래소 상장 심사 기준에 관한 근거 문서가 없다. 근거가 없으므로 판정을 내릴 수 없고 escalate 해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1535,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지"
+        ],
+        "elapsed_ms": 2246.4,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      }
+    ],
+    "avg_semantic_f1": 0.4833,
+    "semantic_accuracy": 0.2667
+  },
+  {
+    "arm": "C_llm_wiki_grep_bm25",
+    "avg_f1": 0.1529,
+    "em_rate": 0.0,
+    "verdict_accuracy": 0.5333,
+    "avg_context_chars": 1489.5,
+    "avg_elapsed_ms": 2341.1,
+    "per_question": [
+      {
+        "id": "q01",
+        "query": "금융투자업자가 직무상 알게 된 미공개 정보를 자기 이익을 위해 이용해도 되는가?",
+        "prediction": "금융투자업자는 직무상 알게 된 미공개 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위해 이용할 수 없으며, 이는 자본시장법 제54조 및 제174조에 명시되어 있습니다. 따라서, 금융투자업자가 직무상 알게 된 미공개 정보를 자기 이익을 위해 이용하는 것은 법을 위반하는 행위입니다.",
+        "gold_answer": "안 된다. 제54조제1항에 따라 금융투자업자는 직무상 알게 된 외부에 공개되지 않은 정보를 정당한 사유 없이 자기 또는 제삼자의 이익을 위하여 이용해서는 안 된다.",
+        "f1": 0.3871,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1351,
+        "pages_visited": [
+          "자본시장법_제54조_직무관련정보의이용금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2645.4,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q02",
+        "query": "임직원이 회사 소속 투자중개업자 계좌가 아닌 다른 명의로 자기 주식을 매매해도 되는가?",
+        "prediction": "The provided excerpts do not explicitly address whether an employee can trade company shares under a name other than the company's designated brokerage account. The conduct could potentially relate to insider trading, market manipulation, or unfair trading practices, but the specific question of using a different name is not directly covered, leading to ambiguity.",
+        "gold_answer": "안 된다. 제63조제1항제1호에 따라 임직원은 자기의 계산으로 금융투자상품을 매매할 때 반드시 자기의 명의로 매매해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 2437.1,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q03",
+        "query": "임직원이 자기 계산으로 산 금융투자상품의 매매명세를 얼마나 자주 통지해야 하는가?",
+        "prediction": "The provided excerpts do not specify the frequency with which employees must report their trading activities. While they outline the requirements for trading and reporting, they do not clarify how often these reports should be made, leading to ambiguity.",
+        "gold_answer": "제63조제1항제3호에 따라 매매명세를 분기별로 소속 금융투자업자에게 통지해야 한다. 다만 투자권유자문인력, 조사분석인력, 투자운용인력은 월별로 통지해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1349,
+        "pages_visited": [
+          "자본시장법_제63조_임직원의금융투자상품매매",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2002.0,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q04",
+        "query": "조사분석자료 내용이 사실상 확정된 후 공표한지 24시간이 지나기 전에 그 대상 상품을 회사 계산으로 매매해도 되는가?",
+        "prediction": "The proposed action of trading a product before 24 hours after the analysis material is made public could violate the prohibition against using undisclosed important information and engaging in unfair trading practices as outlined in the relevant laws. Specifically, trading based on information that has not been publicly disclosed can be considered a breach of the regulations regarding the use of undisclosed important information.",
+        "gold_answer": "안 된다. 제71조제2호에 따라 조사분석자료의 내용이 사실상 확정된 때부터 공표 후 24시간이 경과하기 전까지 그 대상 금융투자상품을 자기의 계산으로 매매하는 행위는 금지된 불건전 영업행위다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1420,
+        "pages_visited": [
+          "자본시장법_제71조_불건전영업행위의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2397.1,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      },
+      {
+        "id": "q05",
+        "query": "주권상장법인의 임원이 자사주를 매수한 후 3개월 만에 매도해 이익을 얻었다. 회사가 그 이익 반환을 청구할 수 있는가?",
+        "prediction": "주권상장법인의 임원이 자사주를 매수한 후 3개월 만에 매도하여 이익을 얻은 경우, 이는 내부자의 단기매매차익 반환 규정에 위반될 수 있으며, 미공개중요정보를 이용한 거래로 간주될 수 있습니다. 따라서 회사가 이익 반환을 청구할 수 있는 가능성이 존재합니다.",
+        "gold_answer": "청구할 수 있다. 제172조제1항에 따라 주권상장법인의 임원이 특정증권등을 매수한 후 6개월 이내에 매도하여 이익을 얻은 경우 법인은 그 단기매매차익의 반환을 청구할 수 있다.",
+        "f1": 0.4211,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 3257.4,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      },
+      {
+        "id": "q06",
+        "query": "주권상장법인의 임원이 된 사람은 특정증권등 소유상황을 며칠 이내에 보고해야 하는가?",
+        "prediction": "주권상장법인의 임원은 임원 또는 주요주주가 된 날부터 5일 이내에 특정증권등의 소유상황을 보고해야 하며, 이는 법적으로 요구되는 의무입니다.",
+        "gold_answer": "임원 또는 주요주주가 된 날부터 5일 이내에 특정증권등의 소유상황을 증권선물위원회와 거래소에 보고해야 한다.",
+        "f1": 0.6667,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1339,
+        "pages_visited": [
+          "자본시장법_제173조_임원등의특정증권등소유상황보고",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2107.7,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q07",
+        "query": "상장법인의 미공개중요정보를 이용해 그 회사 주식을 매매하면 어느 조항 위반이며 처벌 수위는?",
+        "prediction": "상장법인의 미공개중요정보를 이용해 그 회사 주식을 매매하는 행위는 자본시장법 제174조에 명시된 미공개중요정보 이용행위 금지에 위반됩니다. 이로 인해 부정거래행위로 간주될 수 있으며, 관련된 처벌 조항인 제443조에 따라 처벌을 받을 수 있습니다.",
+        "gold_answer": "제174조제1항 미공개중요정보 이용행위 금지 위반이며, 제443조제1항에 따라 1년 이상의 유기징역 또는 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.1132,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 3373.5,
+        "semantic_f1": 0.9,
+        "semantic_correct": false
+      },
+      {
+        "id": "q08",
+        "query": "타인과 사전에 짜고 같은 가격으로 서로 매수·매도를 주고받는 통정매매는 어느 조항 위반인가?",
+        "prediction": "타인과 사전에 짜고 같은 가격으로 서로 매수·매도를 주고받는 통정매매는 자본시장법 제176조에 명시된 시세조종행위에 해당하며, 이는 타인에게 그릇된 판단을 하게 할 목적으로 행해지는 것으로 간주됩니다. 또한, 이러한 행위는 부정거래행위로도 분류될 수 있습니다.",
+        "gold_answer": "제176조제1항 시세조종행위 등의 금지 위반이다. 자기가 매도(매수)하는 것과 같은 시기에 같은 가격으로 타인이 매수(매도)하기로 사전에 짠 후 매매하는 행위는 제176조제1항제1호·제2호에서 금지하는 통정매매다.",
+        "f1": 0.1695,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 2563.5,
+        "semantic_f1": 0.75,
+        "semantic_correct": false
+      },
+      {
+        "id": "q09",
+        "query": "허위 공시를 이용해 재산상 이익을 얻으려 하는 행위는 부정거래행위에 해당하는가?",
+        "prediction": "허위 공시를 이용해 재산상 이익을 얻으려 하는 행위는 자본시장법 제178조에 명시된 '중요사항에 관하여 거짓의 기재 또는 표시를 하여 금전, 그 밖의 재산상의 이익을 얻고자 하는 행위'에 해당하므로 부정거래행위로 간주됩니다.",
+        "gold_answer": "해당한다. 제178조제1항제2호에 따라 중요사항에 관하여 거짓의 기재 또는 표시를 하거나 필요한 중요사항의 기재가 누락된 문서를 사용해 금전, 그 밖의 재산상의 이익을 얻고자 하는 행위는 부정거래행위로 금지된다.",
+        "f1": 0.5357,
+        "em": false,
+        "verdict": "breach",
+        "gold_verdict": "breach",
+        "verdict_match": true,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 2005.2,
+        "semantic_f1": 1.0,
+        "semantic_correct": true
+      },
+      {
+        "id": "q10",
+        "query": "제178조 부정거래행위를 위반하면 처벌 수위는 어떻게 되는가?",
+        "prediction": "The provided excerpts do not specify the penalties for violating Article 178 regarding fraudulent trading practices. Therefore, it is unclear what the specific consequences are for such violations.",
+        "gold_answer": "제443조제1항제8호에 따라 제178조제1항 각 호의 행위를 한 자는 1년 이상의 유기징역 또는 그 위반행위로 얻은 이익이나 회피한 손실액의 4배 이상 6배 이하에 상당하는 벌금에 처한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제178조_부정거래행위등의금지",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 1781.9,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q11",
+        "query": "부정거래행위로 얻은 이익이 60억원인 경우 가중처벌 기준은?",
+        "prediction": "The provided excerpts do not specify the penalties or criteria for increased punishment related to profits gained from fraudulent trading activities. Therefore, it is unclear how the 60억원 profit would be treated under the law.",
+        "gold_answer": "제443조제2항제1호에 따라 위반행위로 얻은 이익 또는 회피한 손실액이 50억원 이상인 경우 무기 또는 5년 이상의 징역으로 가중한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 1848.6,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q12",
+        "query": "정보교류차단 관련 내부통제기준의 준수 여부를 점검하는 총괄·집행책임자는 누구인가?",
+        "prediction": "The provided excerpts do not specify who the overall execution responsibility for compliance with internal control standards regarding information exchange blocking is. Therefore, it is unclear based on the given information.",
+        "gold_answer": "정보교류차단 관련 내부통제기준의 준수 여부를 수시로 점검하고 위반사항을 조사하는 업무를 전담하는 부서의 장(준법감시인을 포함한다)이 총괄ㆍ집행책임자다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "no_breach",
+        "verdict_match": false,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 1366.3,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q13",
+        "query": "대법원 2019도12887 판례는 어떤 쟁점을 다루는가?",
+        "prediction": "The question asks about the specific issues addressed in the Supreme Court case 2019도12887, but the provided excerpts do not explicitly detail the issues of that case. They discuss general principles regarding fraudulent trading, insider information, and market manipulation, but do not clarify how these principles apply to the specific case in question.",
+        "gold_answer": "이 판례는 제178조 부정거래행위 규정의 취지와 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'의 의미 및 판단 기준, 그리고 이사회 결의 내용을 반영한 공시가 제178조제1항 위반에 해당하는지 판단하는 기준을 다룬다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1403,
+        "pages_visited": [
+          "대법원_2019도12887_부정거래행위판단기준",
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지"
+        ],
+        "elapsed_ms": 2581.9,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q14",
+        "query": "이사회 결의 내용을 그대로 반영한 공시라면 공시 자체가 거짓이 아니므로 항상 부정거래행위에서 자유로운가?",
+        "prediction": "The question asks whether a disclosure reflecting a board resolution is always free from fraudulent trading activities. The provided excerpts do not explicitly address the relationship between board resolutions and fraudulent trading, leaving the interpretation open. Therefore, it is ambiguous whether such disclosures can be considered free from violations without further context.",
+        "gold_answer": "아니다. 공시 내용 자체를 거짓으로 보기 어려운 경우라도, 그러한 공시가 이루어지도록 한 행위가 제178조제1항제1호의 '부정한 수단, 계획 또는 기교'를 사용하는 행위에 해당할 수 있다는 것이 대법원 2019도12887 판례의 입장(한정 적극)이다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "breach",
+        "verdict_match": false,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 2842.0,
+        "semantic_f1": 0.0,
+        "semantic_correct": false
+      },
+      {
+        "id": "q15",
+        "query": "가상자산 거래소의 신규 코인 상장 심사 기준은 무엇인가?",
+        "prediction": "The provided excerpts do not contain specific information regarding the listing criteria for new coins on virtual asset exchanges. Therefore, it is unclear whether the actions related to the listing of new coins would violate any of the mentioned regulations regarding insider trading, market manipulation, or fraudulent trading practices.",
+        "gold_answer": "이 코퍼스에는 가상자산 거래소 상장 심사 기준에 관한 근거 문서가 없다. 근거가 없으므로 판정을 내릴 수 없고 escalate 해야 한다.",
+        "f1": 0.0,
+        "em": false,
+        "verdict": "ambiguous",
+        "gold_verdict": "ambiguous",
+        "verdict_match": true,
+        "context_chars": 1548,
+        "pages_visited": [
+          "자본시장법_제174조_미공개중요정보이용행위금지",
+          "자본시장법_제176조_시세조종행위등의금지",
+          "자본시장법_제178조_부정거래행위등의금지"
+        ],
+        "elapsed_ms": 1907.4,
+        "semantic_f1": 0.5,
+        "semantic_correct": false
+      }
+    ],
+    "avg_semantic_f1": 0.4267,
+    "semantic_accuracy": 0.2
+  }
+]

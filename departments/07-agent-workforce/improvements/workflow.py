@@ -12,6 +12,7 @@
   2. 승인(APPROVED)에는 독립 승인자 + QA Eval 근거가 있어야 한다.
   3. 모든 전이는 같은 candidate_id 로 Append-only Event 에 기록된다 (같은 ID 재현).
   4. 허용되지 않은 상태 전이와 종료 상태 재전이는 막는다 (조용한 덮어쓰기 금지).
+  5. 후보 작성자는 Promotion(DEPLOYED)이나 Rollback(ROLLED_BACK)을 단독 수행할 수 없다.
 
 자체 점검: python departments/07-agent-workforce/improvements/workflow.py
 """
@@ -32,7 +33,7 @@ ALLOWED_TRANSITIONS: dict[CandidateStatus, frozenset[CandidateStatus]] = {
         {CandidateStatus.EVALUATING, CandidateStatus.RETIRED}
     ),
     CandidateStatus.EVALUATING: frozenset(
-        {CandidateStatus.SHADOW, CandidateStatus.REJECTED, CandidateStatus.RETIRED}
+        {CandidateStatus.SHADOW, CandidateStatus.HOLD, CandidateStatus.REJECTED, CandidateStatus.RETIRED}
     ),
     CandidateStatus.SHADOW: frozenset(
         {CandidateStatus.PENDING_APPROVAL, CandidateStatus.REJECTED, CandidateStatus.RETIRED}
@@ -85,19 +86,65 @@ class Approval:
     reason: str
 
 
-class ImprovementWorkflow:
-    """개선 후보 상태 머신. Event Ledger 는 in-memory (후속 마이그레이션에서 DB로)."""
+class ImprovementRepository:
+    """Event Ledger 조회·저장 인터페이스. 실제 구현은 workforce.improvement_candidate_events에
+    반영한다(append-only - DB 트리거로도 강제된다). candidate 저장은 워크플로 밖에서
+    api/app.py가 직접 호출한다(여기 인터페이스는 sequence/event만 다룬다)."""
 
+    def next_sequence(self, candidate_id: str) -> int:
+        raise NotImplementedError
+
+    def append_event(self, event: CandidateEvent) -> None:
+        raise NotImplementedError
+
+    def events_for(self, candidate_id: str) -> list[CandidateEvent]:
+        raise NotImplementedError
+
+
+class InMemoryImprovementRepository(ImprovementRepository):
     def __init__(self) -> None:
         self._events: list[CandidateEvent] = []
+        # candidate 저장은 ImprovementRepository 인터페이스 밖(PostgresImprovementRepository와
+        # 대칭을 맞추려고 여기 추가) - api/app.py가 candidate CRUD에 쓴다.
+        self._candidates: dict[str, ImprovementCandidate] = {}
+        self._scorecards = []
 
-    # --- 조회 ---
+    def next_sequence(self, candidate_id: str) -> int:
+        return len(self.events_for(candidate_id)) + 1
+
+    def append_event(self, event: CandidateEvent) -> None:
+        self._events.append(event)
 
     def events_for(self, candidate_id: str) -> list[CandidateEvent]:
         return [e for e in self._events if e.candidate_id == candidate_id]
 
+    def get_candidate(self, candidate_id: str) -> ImprovementCandidate | None:
+        return self._candidates.get(candidate_id)
+
+    def save_candidate(self, candidate: ImprovementCandidate) -> None:
+        self._candidates[candidate.candidate_id] = candidate
+
+    def append_scorecard(self, scorecard) -> None:
+        self._scorecards.append(scorecard)
+
+    def scorecards_for(self, candidate_id: str):
+        return [s for s in self._scorecards if s.candidate_id == candidate_id]
+
+
+class ImprovementWorkflow:
+    """개선 후보 상태 머신. Event Ledger 저장소는 주입받는다(기본 in-memory,
+    api/app.py가 DATABASE_URL이 있으면 Postgres 구현을 주입한다)."""
+
+    def __init__(self, repo: ImprovementRepository | None = None) -> None:
+        self._repo = repo if repo is not None else InMemoryImprovementRepository()
+
+    # --- 조회 ---
+
+    def events_for(self, candidate_id: str) -> list[CandidateEvent]:
+        return self._repo.events_for(candidate_id)
+
     def _next_sequence(self, candidate_id: str) -> int:
-        return len(self.events_for(candidate_id)) + 1
+        return self._repo.next_sequence(candidate_id)
 
     # --- 전이 ---
 
@@ -139,6 +186,15 @@ class ImprovementWorkflow:
             actor = approval.approver
             reason = approval.reason
 
+        # Promotion/Rollback도 승인과 마찬가지로 후보 작성자가 단독 실행할 수 없다.
+        # 실제 Profile 배포/복귀 실행기는 QA/Platform 소유지만, HR 상태 전이 계층에서도
+        # 같은 불변식을 먼저 강제해 우회 경로를 만들지 않는다.
+        if to_status in {CandidateStatus.DEPLOYED, CandidateStatus.ROLLED_BACK}:
+            if actor == candidate.author:
+                raise SelfApprovalError(
+                    f"작성자({candidate.author})는 {to_status.value}를 단독 수행할 수 없다"
+                )
+
         event = CandidateEvent(
             candidate_id=candidate.candidate_id,
             sequence=self._next_sequence(candidate.candidate_id),
@@ -149,7 +205,7 @@ class ImprovementWorkflow:
             occurred_at=at,
             qa_eval_run_id=qa_eval_run_id,
         )
-        self._events.append(event)
+        self._repo.append_event(event)
 
         return candidate.model_copy(update={"status": to_status})
 
@@ -164,17 +220,17 @@ if __name__ == "__main__":
     from candidate import ImprovementCandidate
 
     def _candidate(**over) -> ImprovementCandidate:
-        base = dict(
-            candidate_id="ic-1",
-            author="qa-department-hermes",
-            target_type="PROFILE",
-            target_ref="agent-citation-checker",
-            target_current_version=3,
-            evidence_ids=["finding-101"],
-            expected_effect="인용 누락 오탐 감소",
-            risk_class="MEDIUM",
-            rollback_target_version=3,
-        )
+        base = {
+            "candidate_id": "ic-1",
+            "author": "qa-department-hermes",
+            "target_type": "PROFILE",
+            "target_ref": "agent-citation-checker",
+            "target_current_version": 3,
+            "evidence_ids": ["finding-101"],
+            "expected_effect": "인용 누락 오탐 감소",
+            "risk_class": "MEDIUM",
+            "rollback_target_version": 3,
+        }
         base.update(over)
         return ImprovementCandidate(**base)
 
@@ -234,7 +290,36 @@ if __name__ == "__main__":
     except IllegalTransition:
         pass
 
-    # 5) 롤백 경로: OBSERVING -> ROLLED_BACK.
+    # 5) Eval 실패는 기존 Profile을 유지하는 HOLD로 종료한다.
+    wf_hold = ImprovementWorkflow()
+    c_hold = _candidate(candidate_id="ic-hold")
+    c_hold = wf_hold.transition(c_hold, CandidateStatus.EVALUATING, actor="hr", reason="Eval 시작", at=now)
+    c_hold = wf_hold.transition(c_hold, CandidateStatus.HOLD, actor="qa-eval-consumer", reason="Eval 실패", at=now)
+    assert c_hold.status == CandidateStatus.HOLD
+    try:
+        wf_hold.transition(c_hold, CandidateStatus.EVALUATING, actor="hr", reason="재시도", at=now)
+        raise AssertionError("HOLD 종료 상태에서 전이됨")
+    except IllegalTransition:
+        pass
+
+    # 6) 작성자는 Promotion을 단독 수행할 수 없다.
+    wf_deploy = ImprovementWorkflow()
+    c_deploy = _candidate(candidate_id="ic-deploy")
+    for to, appr in [
+        (CandidateStatus.EVALUATING, None),
+        (CandidateStatus.SHADOW, None),
+        (CandidateStatus.PENDING_APPROVAL, None),
+        (CandidateStatus.APPROVED, Approval(approver="ceo", qa_eval_run_id="e8", reason="ok")),
+    ]:
+        c_deploy = wf_deploy.transition(c_deploy, to, actor="hr", reason="", at=now, approval=appr)
+    try:
+        wf_deploy.transition(c_deploy, CandidateStatus.DEPLOYED,
+                             actor=c_deploy.author, reason="자기 배포", at=now)
+        raise AssertionError("작성자의 Promotion이 통과함")
+    except SelfApprovalError:
+        pass
+
+    # 7) 롤백 경로: OBSERVING -> ROLLED_BACK. 작성자는 Rollback도 단독 수행할 수 없다.
     wf4 = ImprovementWorkflow()
     c4 = _candidate(candidate_id="ic-4")
     for to, appr in [
@@ -246,10 +331,11 @@ if __name__ == "__main__":
         (CandidateStatus.OBSERVING, None),
         (CandidateStatus.ROLLED_BACK, None),
     ]:
-        c4 = wf4.transition(c4, to, actor="hr", reason="", at=now, approval=appr)
+        actor = "independent-operator" if to in {CandidateStatus.DEPLOYED, CandidateStatus.ROLLED_BACK} else "hr"
+        c4 = wf4.transition(c4, to, actor=actor, reason="", at=now, approval=appr)
     assert c4.status == CandidateStatus.ROLLED_BACK
 
-    # 6) 종료 상태에서 추가 전이 불가.
+    # 8) 종료 상태에서 추가 전이 불가.
     try:
         wf4.transition(c4, CandidateStatus.OBSERVING, actor="hr", reason="", at=now)
         raise AssertionError("종료 상태에서 전이됨")

@@ -31,10 +31,14 @@ export type AgentStatus =
 export type Anim = "idle" | "walk" | "type" | "talk" | "sit";
 export type Facing = "up" | "down" | "left" | "right";
 
-const WALK_SPEED = 3.6; // tiles / sec
+const WALK_SPEED = 2; // tiles / sec — 재생 속도(기본 2x)·DEMO 4x가 곱해지므로 낮게 잡는다
+const REMOTE_SPEECH_SECONDS = 8;
+const REMOTE_COMPLETION_HOLD_SECONDS = 10;
+const REMOTE_WORK_START_MINUTES = 9 * 60;
+const REMOTE_WORK_END_MINUTES = 18 * 60;
 /**
  * 사내 시계는 '시뮬레이션 시간' 기준으로 흐른다 — 시뮬 1초 = 1.6분.
- * 배속을 올리면 시계도 같이 빨라지므로, 몇 배속으로 보든 하루는 07:00 → 약 17:00으로 끝난다.
+ * portfolio LangGraph run 중에는 09:00 → 18:00 근무시간으로 표시한다.
  */
 const SIM_MIN_PER_SEC = 1.6;
 /** ⏭ 건너뛰기(터보)일 때의 배속 */
@@ -96,6 +100,47 @@ export type ChatEntry = {
   text: string;
 };
 
+export type RuntimeOperations = {
+  status: string;
+  run_id: string | null;
+  workflow: string | null;
+  phase: string | null;
+  departments?: Record<string, { status: string; current_stage: string | null; active_worker_ids: string[] }>;
+  active_workers: Array<{
+    worker_id: string;
+    department_code: string;
+    stage: string;
+    role: string;
+    status: string;
+    summary: string | null;
+  }>;
+  /** Sanitized agent.status.v1 projection for department APIs without a portfolio run. */
+  agent_statuses?: Array<{
+    agent_id: string;
+    worker_id: string | null;
+    department_code: string;
+    status: string;
+    role: string | null;
+    reason: string | null;
+  }>;
+  active_handoff: {
+    from_department: string;
+    to_department: string;
+    title: string;
+    message: string;
+  } | null;
+  messages: Array<{
+    id: string;
+    occurred_at: string;
+    kind: string;
+    department_code: string | null;
+    worker_id: string | null;
+    text: string;
+  }>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+};
+
 type Slot = {
   gen: Generator<number | (() => boolean), void, void> | null;
   wait: number;
@@ -105,6 +150,7 @@ type Slot = {
 export type Snapshot = {
   clock: string;
   running: boolean;
+  progress: number;
   paused: boolean;
   speed: number;
   turbo: boolean;
@@ -127,7 +173,7 @@ export type Snapshot = {
 
 const PHASES = [
   "출근 대기",
-  "07:00 전사 출근",
+  "09:00 전사 출근",
   "시장조사",
   "브랜드 분석",
   "아이디어 10개",
@@ -169,7 +215,7 @@ export class Company {
   agentById = new Map<string, Agent>();
   deptStatus: Record<string, DeptStatus> = {};
   log: LogEntry[] = [];
-  clockMinutes = 7 * 60;
+  clockMinutes = 9 * 60;
   /** 재생 속도 — 시뮬레이션 전체(걷기·업무·대사)를 함께 배속한다. 실제 외부 작업 속도와는 무관 */
   speed = 2;
   turbo = false;
@@ -198,6 +244,18 @@ export class Company {
   private seatBook = new Map<string, Pt>();
   /** 시나리오 장면에 참여 중인 직원 — 자율 행동(커피·잡담)이 끼어들지 못하게 잠근다 */
   private locked = new Set<string>();
+  private remoteMessageIds = new Set<string>();
+  private remoteWorkerIds = new Set<string>();
+  private remoteHandoffKey: string | null = null;
+  private remoteHandoffAgentIds = new Set<string>();
+  private remoteRuntime = true;
+  private remoteRunId: string | null = null;
+  private remoteCompletionSeen = false;
+  private remoteCompletionHold = 0;
+  private remoteRunElapsed = 0;
+  private remoteProgress = 0;
+  private remotePhase = "";
+  private testMode = true;
 
   constructor() {
     this.reset();
@@ -208,7 +266,7 @@ export class Company {
     this.agentById.clear();
     this.log = [];
     this.logSeq = 0;
-    this.clockMinutes = 7 * 60;
+    this.clockMinutes = 9 * 60;
     this.running = false;
     this.paused = false;
     this.dayComplete = false;
@@ -221,6 +279,17 @@ export class Company {
     this.side = { gen: null, wait: 0, until: null };
     this.seatBook.clear();
     this.locked.clear();
+    this.remoteMessageIds.clear();
+    this.remoteWorkerIds.clear();
+    this.remoteHandoffKey = null;
+    this.remoteHandoffAgentIds.clear();
+    this.remoteRuntime = true;
+    this.remoteRunId = null;
+    this.remoteCompletionSeen = false;
+    this.remoteCompletionHold = 0;
+    this.remoteRunElapsed = 0;
+    this.remoteProgress = 0;
+    this.remotePhase = "";
     this.chat = [];
     this.focusMode = false;
     this.spotlight = null;
@@ -234,12 +303,14 @@ export class Company {
     for (const seed of STAFF) {
       const pool = seats.get(seed.deptId);
       const home = pool?.shift() ?? { x: ELEVATOR.x, y: ELEVATOR.y - 2 };
-      this.spawn(seed, home, { x: ELEVATOR.x, y: ELEVATOR.y });
+      // Keep the roster visible before the demo is started. Runtime mode can
+      // still move workers to their home desks when a real worker is observed.
+      this.spawn(seed, home, home);
     }
     this.spawn(CEO, CEO_SEAT, CEO_SEAT);
 
     const ceo = this.agentById.get("ceo")!;
-    ceo.status = "업무 중";
+    ceo.status = "대기";
     ceo.anim = "sit";
     ceo.facing = "down";
 
@@ -248,6 +319,246 @@ export class Company {
     }
     this.pushLog("👑", "대표실 준비 완료. 출근 버튼을 기다리는 중이에요.", "lav");
     this.pushChat("staff", "김세리", "대표님, 비서실장 김세리입니다. 궁금한 건 여기에 바로 물어보세요.");
+  }
+
+  setSimulationMode(enabled: boolean): void {
+    this.remoteRuntime = !enabled;
+    if (enabled) {
+      this.remoteRunId = null;
+      this.remoteProgress = 0;
+      this.remotePhase = "";
+      this.remoteWorkerIds.clear();
+      this.remoteMessageIds.clear();
+    }
+  }
+
+  /**
+   * Project the actual BFF LangGraph runtime into the pixel office.
+   * No runtime event means no simulated work, movement, or dialogue.
+   */
+  applyRuntime(runtime: RuntimeOperations | null, agentStatuses: RuntimeOperations["agent_statuses"] = []) {
+    this.remoteRuntime = true;
+    const running = runtime?.status === "QUEUED" || runtime?.status === "RUNNING";
+    const completed = Boolean(runtime?.result) && !running;
+    this.remotePhase = runtime?.phase ?? "";
+    const departmentRows = Object.values(runtime?.departments ?? {});
+    const completedDepartments = departmentRows.filter((department) =>
+      ["COMPLETED", "SKIPPED", "NOT_REQUESTED"].includes(department.status.toUpperCase()),
+    ).length;
+    const activeDepartments = departmentRows.filter((department) =>
+      ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(department.status.toUpperCase()),
+    ).length;
+    const hasActiveWorkers =
+      (runtime?.active_workers ?? []).length > 0 ||
+      agentStatuses.some((item) =>
+        ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(item.status),
+      );
+    this.remoteProgress = completed
+      ? 100
+      : running
+        ? Math.max(
+            hasActiveWorkers ? 1 : 0,
+            Math.min(
+              99,
+              Math.round(((completedDepartments + (activeDepartments ? 0.5 : 0)) / 6) * 100),
+            ),
+          )
+        : 0;
+    const runId = runtime?.run_id ?? null;
+    if (runId !== this.remoteRunId) {
+      this.remoteRunId = runId;
+      this.remoteWorkerIds.clear();
+      this.remoteHandoffKey = null;
+      this.remoteHandoffAgentIds.clear();
+      this.remoteCompletionSeen = false;
+      this.remoteCompletionHold = 0;
+      this.remoteRunElapsed = 0;
+    }
+    if (running) {
+      this.remoteCompletionSeen = false;
+      this.remoteCompletionHold = 0;
+    } else if (completed && !this.remoteCompletionSeen) {
+      this.remoteCompletionSeen = true;
+      this.remoteCompletionHold = REMOTE_COMPLETION_HOLD_SECONDS;
+    }
+    this.running = running;
+    // A recommendation result is not a simulated workday completion and must
+    // not trigger the legacy content-report publisher.
+    this.dayComplete = false;
+    const showingRemoteScripts = this.agents.some((agent) => agent.speechFor > 0);
+    this.phaseIndex = running ? 2 : completed ? (this.remoteCompletionHold > 0 || showingRemoteScripts ? 11 : 12) : 0;
+    if (running) {
+      this.clockMinutes = Math.min(REMOTE_WORK_END_MINUTES - 60, REMOTE_WORK_START_MINUTES + this.remoteRunElapsed * 60);
+    } else if (completed) {
+      this.clockMinutes = this.remoteCompletionHold > 0 ? REMOTE_WORK_END_MINUTES - 60 : REMOTE_WORK_END_MINUTES;
+    } else {
+      this.clockMinutes = REMOTE_WORK_START_MINUTES;
+    }
+    this.meetingTitle = runtime?.active_handoff?.title ?? null;
+    this.approvalPending = false;
+    this.approved = false;
+    this.briefingReady = false;
+
+    const departmentMap: Record<string, string> = {
+      "research-department": "research",
+      "trading-department": "strategy2",
+      "risk-management": "ops",
+      "quant-backtest-department": "strategy1",
+      "accounting-portfolio-department": "finance",
+      "qa-department": "qa",
+      "hr-department": "review",
+      "ceo-agent": "ceo",
+    };
+    const projectedWorkers = agentStatuses
+      .filter((item) => ["QUEUED", "RUNNING", "WAITING_APPROVAL"].includes(item.status))
+      .map((item) => ({
+        worker_id: item.worker_id ?? item.agent_id,
+        department_code: item.department_code,
+        stage: item.status,
+        role: item.role ?? item.worker_id ?? item.agent_id,
+        status: item.status,
+        summary: item.reason,
+      }));
+    const active = new Map(
+      [...(runtime?.active_workers ?? []), ...projectedWorkers].map((worker) => [worker.worker_id, worker]),
+    );
+    const headFor = (departmentCode: string) =>
+      this.agents.find((agent) => (agent.rank === "lead" || agent.rank === "ceo") && agent.deptId === departmentMap[departmentCode]);
+    const handoff = runtime?.active_handoff;
+    const handoffHeads = handoff
+      ? [headFor(handoff.from_department), headFor(handoff.to_department)].filter(Boolean) as Agent[]
+      : [];
+    const spoken = new Set(handoffHeads.map((agent) => agent.id));
+
+    for (const agent of this.agents) {
+      const worker = active.get(agent.role);
+      if (worker) {
+        if (!this.remoteWorkerIds.has(agent.id)) {
+          agent.path = [];
+          agent.pathIdx = 0;
+          agent.queue = [];
+          agent.current = null;
+          this.stand(agent);
+          this.enqueue(agent, { k: "walk", to: agent.home }, { k: "face", dir: "up" }, { k: "anim", a: "type" }, { k: "status", s: "업무 중" });
+          this.remoteWorkerIds.add(agent.id);
+        }
+        if (!agent.current && agent.queue.length === 0) agent.anim = "type";
+        agent.status = "업무 중";
+        agent.progress = 0.5;
+        agent.taskLabel = worker.role;
+        continue;
+      }
+      if (spoken.has(agent.id)) continue;
+      // Snapshot polling runs more often than the runtime event stream. Keep a
+      // worker's latest script visible until its display window expires instead
+      // of clearing it on every completed-runtime projection.
+      if (agent.speechFor > 0) {
+        agent.anim = "talk";
+        agent.status = "업무 중";
+        agent.taskLabel = "LangGraph 결과 기록";
+        continue;
+      }
+      if (agent.current || agent.queue.length) continue;
+      agent.anim = "sit";
+      agent.status = "대기";
+      agent.progress = 0;
+      agent.taskLabel = "LangGraph 실행 대기";
+      agent.speech = null;
+      agent.speechFor = 0;
+    }
+
+    const handoffKey = handoff ? `${runId}:${handoff.from_department}:${handoff.to_department}:${handoff.title}:${handoff.message}` : null;
+    if (!handoff && this.remoteHandoffAgentIds.size > 0) {
+      for (const agent of this.agents) {
+        if (!this.remoteHandoffAgentIds.has(agent.id)) continue;
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.sitAtDesk(agent);
+      }
+      this.remoteHandoffAgentIds.clear();
+    }
+    if (handoffKey !== this.remoteHandoffKey) {
+      const nextHandoffAgentIds = new Set(handoffHeads.map((agent) => agent.id));
+      for (const agent of this.agents) {
+        if (!this.remoteHandoffAgentIds.has(agent.id) || nextHandoffAgentIds.has(agent.id)) continue;
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.sitAtDesk(agent);
+      }
+      this.remoteHandoffKey = handoffKey;
+      this.remoteHandoffAgentIds = nextHandoffAgentIds;
+      handoffHeads.forEach((agent, index) => {
+        const seat = MEETING_SEATS[index % MEETING_SEATS.length];
+        agent.queue = [];
+        agent.current = null;
+        agent.path = [];
+        agent.pathIdx = 0;
+        this.enqueue(agent, { k: "status", s: "회의 중" }, { k: "walk", to: seat }, { k: "anim", a: "talk" });
+        agent.status = "회의 중";
+        agent.taskLabel = "부서장 간 handoff";
+        agent.speech = handoff?.message ?? null;
+        agent.speechKind = "talk";
+        agent.speechFor = REMOTE_SPEECH_SECONDS;
+      });
+    } else {
+      handoffHeads.forEach((agent) => {
+        agent.status = "회의 중";
+        agent.taskLabel = "부서장 간 handoff";
+        agent.speech = handoff?.message ?? null;
+        agent.speechKind = "talk";
+        agent.speechFor = REMOTE_SPEECH_SECONDS;
+        if (!agent.current && agent.queue.length === 0) agent.anim = "talk";
+      });
+    }
+
+    const runtimeDepartments = runtime ? Object.entries(departmentMap) : [];
+    for (const [departmentCode, departmentId] of runtimeDepartments) {
+      const department = runtime?.departments?.[departmentCode];
+      const hasDepartmentWorker = [...active.values()].some(
+        (worker) => worker.department_code === departmentCode,
+      );
+      const status = department?.status ?? (hasDepartmentWorker ? "RUNNING" : "IDLE");
+      this.deptStatus[departmentId] = status === "RUNNING" ? "진행 중" : status === "COMPLETED" ? "완료" : status === "BLOCKED" || status === "DEGRADED" ? "연동 대기" : "대기";
+    }
+
+    for (const message of runtime?.messages ?? []) {
+      if (this.remoteMessageIds.has(message.id)) continue;
+      this.remoteMessageIds.add(message.id);
+      const name = message.kind === "department_handoff" ? "부서장 handoff" : message.worker_id ?? message.department_code ?? "LangGraph";
+      const eventTime = this.runtimeClock(message.occurred_at);
+      this.pushChat("staff", name, message.text, eventTime);
+      this.pushLog(message.kind === "department_handoff" ? "🤝" : "🧠", message.text, message.kind === "run_error" ? "lav" : "mint", eventTime);
+      if (message.kind === "worker_summary" && message.worker_id) {
+        const speaker =
+          this.agents.find((agent) => agent.role === message.worker_id) ??
+          this.agents.find(
+            (agent) =>
+              agent.deptId === departmentMap[message.department_code ?? ""] &&
+              agent.rank !== "lead" &&
+              agent.rank !== "ceo" &&
+              agent.speechFor <= 0,
+          );
+        if (speaker) {
+          speaker.speech = message.text;
+          speaker.speechKind = "talk";
+          speaker.speechFor = REMOTE_SPEECH_SECONDS;
+          speaker.anim = "talk";
+        }
+      }
+    }
+  }
+
+  /** DEMO is the deterministic end-to-end test harness for the whole office. */
+  setTestMode(enabled: boolean): void {
+    this.testMode = enabled;
+  }
+
+  isSimulationMode(): boolean {
+    return !this.remoteRuntime;
   }
 
   private spawn(seed: StaffSeed, home: Pt, at: Pt) {
@@ -278,8 +589,8 @@ export class Company {
   }
 
   // ── 로그 ────────────────────────────────────────────────
-  pushLog(icon: string, text: string, tone = "pink") {
-    this.log.unshift({ id: this.logSeq++, time: this.clockText(), icon, text, tone });
+  pushLog(icon: string, text: string, tone = "pink", time = this.clockText()) {
+    this.log.unshift({ id: this.logSeq++, time, icon, text, tone });
     if (this.log.length > 60) this.log.pop();
   }
 
@@ -288,6 +599,11 @@ export class Company {
     const h = Math.floor(total / 60);
     const m = total % 60;
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+
+  private runtimeClock(value: string) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? this.clockText() : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   }
 
   // ── 액션 큐 ──────────────────────────────────────────────
@@ -346,15 +662,16 @@ export class Company {
   start() {
     if (this.running) return;
     this.reset();
+    this.remoteRuntime = false;
     this.running = true;
     this.main.gen = this.dayScript();
   }
 
   private *dayScript(): Generator<number | (() => boolean), void, void> {
-    // ① 07:00 출근
+    // ① 09:00 출근
     this.phaseIndex = 1;
     const workers = this.agents.filter((a) => a.rank !== "ceo");
-    this.pushLog("🚪", `07:00 자동 출근을 시작합니다. AI 직원 ${workers.length}명 입장!`, "yellow");
+    this.pushLog("🚪", `09:00 자동 출근을 시작합니다. AI 직원 ${workers.length}명 입장!`, "yellow");
     this.lock(workers);
     for (const agent of workers) {
       this.enqueue(
@@ -449,7 +766,9 @@ export class Company {
     yield 2.2;
     this.say(ceo, "확인해볼게요.", 2.4);
 
-    // 대표가 승인 버튼을 누를 때까지 대기
+    // DEMO 테스트 모드는 CEO 승인까지 포함한 전체 파이프라인을 자동으로 통과시킨다.
+    if (this.testMode) this.approved = true;
+    // 실환경 모드에서는 대표 승인 버튼을 누를 때까지 대기
     yield () => this.approved;
 
     this.approvalPending = false;
@@ -467,17 +786,32 @@ export class Company {
     yield this.allFree([...approvers, ceo]);
     this.unlock([...approvers, ceo]);
 
-    // ⑨ Bull·Bear 토론 -> 대본 작성
+    // ⑨ 대본 작성 (Bull·Bear 토론 연출은 2026-08-10 두 직원이 사라지면서 함께 제거)
     this.phaseIndex = 8;
-    yield* this.debate();
     yield* this.runDept("strategy2", "릴스·캐러셀 대본 집필", 7, "대본 2종 완성했어요. 결론까지 단정형으로 닫았어요.");
 
     this.phaseIndex = 9;
 
     // ⑪ 저장 + 성과 기록
     this.phaseIndex = 10;
-    this.startDept("ops", "Notion 결과물 저장·자동화 로그", 5);
-    this.startDept("review", "성과·학습점 기록", 5);
+    yield* this.runDept(
+      "finance",
+      "Position·Ledger·Reconciliation·NAV 점검",
+      5,
+      "공식 수치와 대사 상태를 확인했어요.",
+    );
+    yield* this.runDept(
+      "ops",
+      "Market·Pre-trade·Policy·Derivatives Risk 검토",
+      5,
+      "Risk Engine 기준으로 안전 조치를 정리했어요.",
+    );
+    yield* this.runDept(
+      "review",
+      "Worker 성과·학습점·Lifecycle 기록",
+      5,
+      "인사팀 검토와 Worker 상태 기록을 완료했어요.",
+    );
     yield () => this.deptStatus.ops === "완료" && this.deptStatus.review === "완료";
     this.pushLog("📦", "Notion 결과물 창고에 오늘 산출물 2건 저장 완료", "mint");
 
@@ -519,16 +853,22 @@ export class Company {
   private startDept(deptId: string, label: string, dur: number) {
     this.deptStatus[deptId] = "진행 중";
     const crew = this.deptAgents(deptId);
+    const workDuration = this.testMode ? Math.min(1.25, dur * 0.25) : dur;
     this.lock(crew);
     this.pushLog(roomOf(deptId).icon, `${roomOf(deptId).name} 업무 시작 — ${label}`, "pink");
     crew.forEach((agent, i) => {
+      agent.progress = 0;
       this.enqueue(
         agent,
         { k: "wait", dur: i * 0.35 },
         { k: "walk", to: agent.home },
         { k: "face", dir: "up" },
         { k: "status", s: "업무 중" },
-        { k: "work", dur: dur + Math.random() * 1.5, label },
+          {
+            k: "work",
+            dur: workDuration + (this.testMode ? i * 0.08 : Math.random() * 1.5),
+            label,
+          },
         { k: "anim", a: "sit" },
         { k: "status", s: "대기" },
         { k: "fn", fn: () => this.finishDept(deptId) },
@@ -537,10 +877,19 @@ export class Company {
   }
 
   private finishDept(deptId: string) {
-    if (this.deptAgents(deptId).some((a) => a.status === "업무 중")) return;
+    const crew = this.deptAgents(deptId);
+    if (
+      crew.some(
+        (agent) =>
+          agent.progress < 1 ||
+          agent.queue.length > 0 ||
+          (agent.current !== null && agent.current.k !== "fn"),
+      )
+    )
+      return;
     if (this.deptStatus[deptId] === "완료") return;
     this.deptStatus[deptId] = "완료";
-    this.unlock(this.deptAgents(deptId));
+    this.unlock(crew);
     const lead = DEPT_LEAD[deptId];
     const agent = lead ? this.agentById.get(lead.id) : null;
     if (agent) this.say(agent, "완료했어요!", 2.4);
@@ -597,57 +946,6 @@ export class Company {
   }
 
   /** 부서 간 전달 — 직접 걸어가서 말하고 돌아온다 */
-  /** Bull·Bear 리서처가 마주 보고 티격태격한다.
-   *
-   * 서로 헐뜯는 게 아니라 같은 팀이라 말이 편하다 — 근거는 리서치본부 것만 쓰고,
-   * 마지막엔 무효화 조건에 합의한다. TradingAgents의 Bull/Bear 토론 구조를
-   * 화면에서 보이게 만든 것이다.
-   */
-  private *debate() {
-    const bull = this.agents.find((agent) => agent.role === "Bull 리서처");
-    const bear = this.agents.find((agent) => agent.role === "Bear 리서처");
-    if (!bull || !bear) return;
-
-    const rounds: [Agent, string][] = [
-      [bull, "이건 진짜 간다니까? 거래량이 3배야."],
-      [bear, "또 시작이네. 그 거래량 어제 공시 때문이잖아."],
-      [bull, "공시가 이유면 더 좋은 거 아냐?"],
-      [bear, "일회성이면 다음 주에 빠져. 내기할래?"],
-      [bull, "콜. 대신 지면 커피 사기다."],
-      [bear, "좋아. 근데 무효화 조건은 같이 적자."],
-      [bull, "그건 인정. 네 지적이 늘 거기서 맞더라."],
-      [bear, "이번엔 나도 네 쪽이 맞았으면 좋겠어."],
-    ];
-
-    this.lock([bull, bear]);
-    this.stand(bull);
-    this.stand(bear);
-    // 서로 마주 보게 세운다
-    this.goto(bull, { x: bear.home.x - 1, y: bear.home.y + 1 }, "회의 중");
-    yield this.allFree([bull]);
-    bull.facing = "right";
-    bear.facing = "left";
-    this.pushLog("⚔️", "Bull·Bear 리서처 토론 시작 — 같은 근거로 반대 결론을 만든다", "yellow");
-
-    for (const [speaker, line] of rounds) {
-      speaker.anim = "talk";
-      this.say(speaker, line, 2.4);
-      yield 1.5;
-      speaker.anim = "idle";
-    }
-
-    this.pushChat(
-      "staff",
-      bear.name,
-      `${bull.name}님이랑 오늘도 한판 했습니다. 무효화 조건까지는 합의했어요.`,
-    );
-    this.pushLog("🤝", "토론 종료 — 상승·하락 논리와 무효화 조건이 함께 기록됨", "mint");
-    this.sitAtDesk(bull);
-    this.sitAtDesk(bear);
-    yield this.allFree([bull, bear]);
-    this.unlock([bull, bear]);
-  }
-
   private *deliver(fromId: string, toDeptId: string, line: string, reply: string) {
     const from = this.agentById.get(fromId)!;
     const toLead = this.agentById.get(DEPT_LEAD[toDeptId].id)!;
@@ -695,8 +993,8 @@ export class Company {
   }
 
   // ── 대표 지시창 ──────────────────────────────────────────
-  pushChat(from: "ceo" | "staff", name: string, text: string) {
-    this.chat.push({ id: this.logSeq++, time: this.clockText(), from, name, text });
+  pushChat(from: "ceo" | "staff", name: string, text: string, time = this.clockText()) {
+    this.chat.push({ id: this.logSeq++, time, from, name, text });
     if (this.chat.length > 60) this.chat.shift();
   }
 
@@ -704,6 +1002,10 @@ export class Company {
   command(raw: string) {
     const text = raw.trim();
     if (!text) return;
+    if (this.remoteRuntime) {
+      this.pushChat("staff", "AI Office", "실제 LangGraph 실행 이벤트만 표시합니다. 사용자 적합성 입력으로 분석을 시작하세요.");
+      return;
+    }
     this.pushChat("ceo", CEO.name, text);
     const q = text.toLowerCase();
 
@@ -1038,12 +1340,38 @@ export class Company {
   // ── 틱 ──────────────────────────────────────────────────
   tick(rawDt: number) {
     if (this.paused) return;
+    if (this.remoteRuntime) {
+      const dt = Math.min(rawDt, 0.05) * this.speed;
+      this.remoteCompletionHold = Math.max(0, this.remoteCompletionHold - dt);
+      if (this.running) this.remoteRunElapsed += dt;
+      for (const agent of this.agents) {
+        if (agent.speechFor > 0) agent.speechFor = Math.max(0, agent.speechFor - dt);
+        if (agent.speechFor === 0) agent.speech = null;
+      }
+      // Remote mode never creates work, but it must still advance existing
+      // runtime-driven walk actions. Polling a snapshot must not pause or reset
+      // the movement between two events.
+      this.occupancy.clear();
+      for (const agent of this.agents) {
+        this.occupancy.add(Math.round(agent.y) * COLS + Math.round(agent.x));
+      }
+      for (const agent of this.agents) {
+        const remoteBusy = agent.status === "업무 중" || agent.status === "회의 중" || agent.status === "보고 중";
+        if (agent.current || agent.queue.length || !remoteBusy) this.stepAgent(agent, dt);
+      }
+      return;
+    }
     // 터보(건너뛰기)는 대표 결정이 필요한 지점이나 업무 종료에서 자동 해제된다
     if (this.turbo && (this.approvalPending || this.dayComplete || !this.running)) this.turbo = false;
 
     const raw = Math.min(rawDt, 0.05);
-    const dt = raw * (this.turbo ? TURBO_SPEED : this.speed);
-    if (this.running) this.clockMinutes += dt * SIM_MIN_PER_SEC;
+    const dt = raw * (this.turbo ? TURBO_SPEED : this.speed) * (this.testMode ? 4 : 1);
+    if (this.running) {
+      this.clockMinutes = Math.min(
+        REMOTE_WORK_END_MINUTES,
+        this.clockMinutes + dt * SIM_MIN_PER_SEC,
+      );
+    }
 
     this.occupancy.clear();
     for (const agent of this.agents) {
@@ -1253,12 +1581,19 @@ export class Company {
     return {
       clock: this.clockText(),
       running: this.running,
+      progress: this.remoteRuntime
+        ? this.remoteProgress
+        : Math.round((this.phaseIndex / (PHASES.length - 1)) * 100),
       paused: this.paused,
       speed: this.speed,
       turbo: this.turbo,
       dayComplete: this.dayComplete,
       phase:
-        this.phaseIndex === 7 && this.approved ? "승인 완료 · 자리 복귀" : PHASES[this.phaseIndex] ?? "",
+        this.remoteRuntime && this.remotePhase
+          ? this.remotePhase
+          : this.phaseIndex === 7 && this.approved
+            ? "승인 완료 · 자리 복귀"
+            : PHASES[this.phaseIndex] ?? "",
       phaseIndex: this.phaseIndex,
       approvalPending: this.approvalPending,
       approved: this.approved,

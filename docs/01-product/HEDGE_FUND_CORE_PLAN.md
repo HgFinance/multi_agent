@@ -154,7 +154,7 @@ Research 또는 QA 업무 완료
 
 ### 4.3 필수 화면
 
-현재 `ai-office/`의 Pixel Office를 Core 운영 Frontend Baseline으로 사용한다. 첫 화면은 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀의 Queue·Agent·승인·Incident 상태를 보여주는 `Live Office`다. 현재 12개 고정 부서와 Scripted Simulation은 `DEMO` Mode로만 유지하고 실제 서비스 상태로 오인되지 않게 한다.
+현재 `ai-office/`의 Pixel Office를 Core 운영 Frontend Baseline으로 사용한다. 첫 화면은 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀의 Queue·Agent·승인·Incident 상태를 보여주는 `Live Office`다. 화면 조직은 8개 단위로 전환됐지만 Scripted Simulation과 테스트 Paper Loop Snapshot은 `DEMO` Mode로만 유지한다. 실제 Agent 상태는 Hermes Kanban의 Task·Assignee를 `agent.status.v1`과 Supabase Read Model로 투영한 값만 사용한다.
 
 Core는 다음 View를 구현한다.
 
@@ -238,6 +238,7 @@ flowchart LR
 - 변동성 확대
 - 보유 종목 손실·위험 임계치 접근
 - 승인 문서나 뉴스 Source의 신규 이벤트
+- P1에서는 승인된 X Watchlist의 중요 Post. 미검증 상태는 조사만 시작하고 주문 경로는 차단
 - 데이터 품질 또는 Feed 이상
 
 ## 7. 최소 Investment Agent

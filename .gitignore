@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+profile.json
 
 # Hermes Profile - 설치자(개인) 영역. 배포 대상에서 하드 제외.
 # 담당자 배포 영역(distribution.yaml, SOUL.md, config.yaml, skills/, cron/, mcp.json)은 커밋한다.
@@ -35,3 +36,33 @@ CLAUDE.local.md
 # Editors
 .vscode/
 .idea/
+
+# AI 코딩 도구 로컬 상태 (headroom wrap claude / graphify / Serena MCP)
+.claude/settings.local.json
+.claude/.headroom_wrap_marker.json
+.serena/
+graphify-out/
+.gjc/
+
+# TypeScript 증분 빌드 캐시. tsc를 돌릴 때마다 diff가 나서 커밋 노이즈가 된다.
+ai-office/tsconfig.tsbuildinfo
+
+# Quant dataset exports (Manifest 는 DB, 원본은 TSDB 에서 재유도 가능)
+quant-data/
+
+# 백필 재개 런타임 로그 (수집기 산출물 아님)
+minute_backfill_resume.*
+
+# Raw Market Data Parquet Archive (TSDB 에서 재유도 가능, 등록은 market.archive_exports)
+market-archive/
+rag_index_batch.*
+
+# 학습 계층 실행 기록 - 머신별 상태다
+departments/01-research/var/
+
+# 실행 산출물 - 매 실행마다 쌓인다. 리포트는 Notion·DB 에 남으므로 git 은 코드만 본다
+departments/01-research/reports/
+ai-office/*.log
+
+# EB 배포 번들 - scripts/package_eb_bundle.ps1 이 저장소 내용으로 매번 다시 만든다
+dist/

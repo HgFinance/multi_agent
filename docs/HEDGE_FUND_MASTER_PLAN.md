@@ -1,6 +1,14 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
-> 문서 상태: Production Plan v2.9
+> **Local Compose runtime baseline (2026-08-10)**: 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. Compose 병합 결과는 기본 서비스 26개이며 `portfolio`와 `dashboard` Profile을 모두 켜면 29개다. 이 서비스 수는 Hermes Head·Worker의 논리적 수와 별도 축이다. `docker compose config`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
+
+> **Current runtime override (2026-08-07)**: 현재 실행 계층은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)로 구성된 총 29명이다. 도현님 담당 부서는 Trading 3명(LLM 2 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 상세 역할 경계는 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
+
+> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, LLM 직원은 직원별 독립 LangGraph Worker Graph와 Ollama `qwen3:1.7b`를 사용한다. 결정론 runner는 별도 Python 실행 경로로 Trading·Risk·QA·Accounting의 계산·검증을 담당하며 LLM Registry와 구분한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
+
+> Risk는 2명(LLM 1 + `risk-runner`), AI QA/감사는 3명(LLM 2 + `qa-runner`)으로 운영하며 나머지 부서도 동일한 독립 Worker 계층으로 운영한다. 직원 모델 교체는 [Worker 모델 배치 기준](02-engineering/WORKER_MODEL_MATRIX.md)에 따라 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
+
+> 문서 상태: Production Plan v3.3
 > 문서 역할: `docs/` 전체의 최상위 기준 문서이며, 하위 문서는 본 계획의 범위와 통제 원칙을 구체화한다.  
 > 제품 정의: 사용자를 대신해 데이터로 검증 가능한 다양한 전략을 발굴·검증·배포·운용하는 개인형 Multi-Strategy Hedge Fund Investment Agent  
 > 구현 정의: 권한과 책임이 분리된 헤지펀드 조직을 모방하는 Multi-Agent Digital Twin과 결정론적 Control Plane  
@@ -9,17 +17,24 @@
 > 단기 구현 범위: [Personal Hedge Fund Agent Core Implementation Plan](01-product/HEDGE_FUND_CORE_PLAN.md)
 > Core 기능 Backlog: [Personal Hedge Fund Agent Core Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md)
 > Core 기술 스택: [Personal Hedge Fund Agent Technology Stack Decisions](02-engineering/TECH_STACK_DECISIONS.md)
+> 전사 고도화 Gate와 기술 도입 연구: [Personal Hedge Fund Agent 전사 고도화 연구 로드맵](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)
 > Agent 직원 프로필: [헤지펀드 디지털 직원 채용 및 Agent Profile 설계서](04-organization/AGENT_EMPLOYEE_PROFILES.md)
 > 저장소 조직 경계: [Department-Oriented Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)
 > 운영 Frontend 기준: [AI Office Frontend and Operator Control Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)
 > 전사 데이터·부서별 Library: [헤지펀드 전사 데이터 소스 및 부서별 라이브러리 설계서](03-data/RESEARCH_DATA_SOURCES_AND_LIBRARIES.md)
 > 팀별 구현 가이드: [재일](05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md) · [도현](05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md) · [동규](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) · [영주](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md)
+> 실행 현황·2주 통합 보드·본부 간 의존성·Daily Scrum: [실행 현황과 통합 계획 v2.2](PROJECT_IMPLEMENTATION_STATUS.md)
 > 
+
+현재 루트 Compose에는 Research 수집·조회·MCP·Hermes, TimescaleDB, Redis, Risk·QA API/Worker/Hermes, CEO·Trading·Accounting·Workforce API/Worker/Hermes가 선언돼 있다. 다만 Compose 선언은 Paper Investment의 전체 폐쇄 루프를 보증하지 않는다. Order→Risk→Fill→Journal→Position/NAV와 QA/Audit의 Canonical Row, API·DB 실입출력은 상태 문서의 `CONFIG_VERIFIED`·`TEST_VERIFIED`·`RUNTIME_VERIFIED`를 구분해 기록한다. 과거 날짜가 붙은 실행 수치와 감사 결과는 Historical snapshot으로만 해석한다. 현재 Compose의 서비스·Profile·포트·볼륨 기준은 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다.
+
 ## 1. 프로젝트 개요
 
 본 프로젝트는 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)를 에이전트 운영 계층으로 사용하고, [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)의 전문 분석가, Bull/Bear 토론, Trader, Risk, Portfolio Manager 구조를 투자 의사결정 패턴으로 참고한다.
 
 이 프로젝트의 제품 정체성은 **나만의 Hedge Fund Investment Agent**다. 사용자는 자본, 투자 목표, 허용 시장, 손실 한도, 유동성 요구와 금지 조건을 Mandate로 제공한다. 시스템은 사용자를 대신해 시장을 관찰하고, 전략을 발굴·검증·배포하며, 포트폴리오를 구성하고, 위험을 통제하고, 주문·체결·성과를 관리한다.
+
+현재 제품의 첫 사용자 가치와 TEST acceptance는 **사용자의 투자 성향(안전투자형·균형형·위험선호형), 투자 경험, 투자 기간, 손실 감내도와 유동성 요구를 바탕으로 적합한 포트폴리오 목록을 제공하는 것**이다. 이 추천은 주문이나 투자 승인과 분리된 advisory 결과이며, 적합 후보가 없을 때는 임의의 위험한 후보로 대체하지 않는다. 세부 계약은 [Portfolio Suitability Spec](01-product/PORTFOLIO_SUITABILITY_SPEC.md)을 따른다.
 
 다만 이 제품을 하나의 거대한 LLM이나 단일 Trader Agent로 구현하지 않는다. 외부에서는 CEO 에이전트가 대표하는 하나의 투자 에이전트처럼 행동하지만, 내부에서는 `리서치본부`, `트레이딩본부`, `리스크본부`, `퀀트/백테스트본부`, `회계/포트폴리오본부`, `AI QA/감사본부`가 권한과 책임을 나누는 Digital Twin으로 동작한다. 이 구조는 정보를 수집하는 기능, 전략과 주문을 만드는 기능, 이를 거부·제한하는 기능, 성과와 잔고를 확정하는 기능, AI 결과를 독립 검증하는 기능을 분리한다.
 
@@ -250,6 +265,8 @@ Hermes는 회사 운영 및 에이전트 오케스트레이션 계층을 담당�
 
 ### 5.2 Investment Committee Service
 
+> **현재/목표 구분**: 위 다이어그램은 전체 제품의 목표 논리 아키텍처다. 2026-08-10 현재 로컬 Compose에서 실제로 선언된 실행 경계는 수집기·`market-api`·`research-api`·`research-mcp`·TimescaleDB·Redis·Risk/QA API·Worker·Hermes와 CEO/Trading/Accounting/Workforce API·Worker·Hermes다. Streaming Scoring, Investment Committee, Production Broker, HA DB와 Cloud Model Gateway는 목표 또는 별도 Acceptance 대상이며 현재 Compose 서비스 수에 포함된 것으로 해석하지 않는다. 현재 서비스 목록은 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)를 따른다.
+
 TradingAgents의 역할 분리와 토론 구조를 참고한 금융 도메인 전용 상태 그래프다.
 
 - 전문 분석가 보고서 수집
@@ -292,6 +309,8 @@ Risk Engine과 OMS는 에이전트 런타임과 분리한다.
 Hermes는 연구 작업을 예약하고 여러 연구 에이전트를 병렬 실행하며, Strategy Registry의 상태 변화와 승인 절차를 조정한다. 실제 전략 실행기는 Registry에서 승인된 불변 Artifact만 읽는다.
 
 ### 5.5 실제 헤지펀드 Operating Model
+
+> **Current runtime clarification**: 아래 Operating Model의 `Specialist Agent` 또는 `LangGraph Node` 표현은 역할 개념을 뜻한다. 실제 구현 단위는 직원별 독립 LangGraph Worker Graph이며, 현재 수·모델·trigger·tool은 Worker Registry 문서를 우선한다.
 
 본부별 Agent/Service 경계, 권한과 직원 역할은 [AGENT_EMPLOYEE_PROFILES.md](04-organization/AGENT_EMPLOYEE_PROFILES.md)와 팀별 실행 가이드를 따른다.
 
@@ -634,6 +653,51 @@ OBSERVED
 
 설계의 기반이 되는 Hermes 공식 기능은 [Persistent Memory](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/memory.md), [Skills System](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md)과 [Tools Reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/tools-reference.md)를 따른다. 회사 차원의 Gate, Version, RLS, Audit와 승인 분리는 본 프로젝트가 그 위에 추가하는 금융 통제다.
 
+### 5.11 Research-Quant Evidence-to-Strategy Framework
+
+리서치본부와 퀀트/백테스트본부는 `직원 Agent가 자료를 가공하고 본부장 LLM이 긴 문장을
+요약하는 구조`에 머물지 않는다. 두 본부는 하나의 과학적 폐쇄 루프로 연결한다.
+
+```text
+Point-in-Time Evidence
+  -> 역할별 Retrieval과 Claim/Evidence Graph
+  -> Macro/Micro 독립 전망
+  -> 반론과 근거 누락 검증
+  -> ResearchPacketV2
+  -> 사전 등록 HypothesisSpecV2
+  -> 불변 Dataset과 결정론적 Experiment
+  -> 독립 Robustness Validation
+  -> ExperimentCard와 Strategy Candidate
+  -> Outcome Calibration
+  -> 검증된 Skill/Workflow Version
+```
+
+역할 경계는 다음처럼 확정한다.
+
+- **Hermes Supervisor**: 본부 Mandate, Case, Queue, Budget, SLA, 재시도, Escalation과 검증된
+  Memory/Skill을 관리한다. 수치 계산, Backtest Metric, Risk 승인과 자기 후보의 최종 승격은 하지 않는다.
+- **LangGraph**: 한 Research/Experiment Case의 상태 전이, 역할별 Branch/Fan-in, Checkpoint,
+  제한된 재검색과 부분 실패 복구를 담당한다.
+- **직원 Agent**: 역할별 Tool로 근거가 연결된 구조화 산출물을 만든다. 자유로운 Agent 간 대화보다
+  `AnalystFindingV1`, `ResearchPacketV2`, `HypothesisSpecV2` 계약으로 협업한다.
+- **결정론적 Service**: Point-in-Time 조회, 숫자 계산, Dataset, Backtest, 통계 검증, Hash와 Registry를 맡는다.
+
+현재 Research Pipeline의 마지막 Packet 합성은 Hermes Profile의 Supervisor Persona를 읽은 LLM
+호출이며, 실제 Hermes Queue·Memory·Retry Runtime이 합성을 지휘하는 상태는 아니다. Quant도
+Dataset·Backtest·Walk-Forward Script와 Hermes Profile이 존재하지만 하나의 상태 Graph/Worker로
+통합되지 않았다. 문서에서는 이 현재 상태와 목표 상태를 혼동하지 않는다.
+
+Research에는 Nexus의 Contextualization과 Macro/Micro 이중 전망, MimirRAG/FinSAgent의 금융
+문서·Corpus-aware Retrieval, STORM의 관점 발견을 적용한다. Quant에는 TimeSeriesScientist의
+Curator/Planner/Forecaster/Reporter 역할 분리, 사전 등록, Trial Ledger, Purged Walk-Forward,
+CPCV, Deflated Sharpe Ratio와 PBO를 단계적으로 도입한다. 실패 결과는 역할·Horizon·Regime별로
+채점하고, Held-out Eval과 QA 승인을 통과한 개선 후보만 Hermes Skill이나 Workflow Version으로
+승격한다.
+
+상세 문제 분석, 계약, 상태 머신, 기술 스택과 `RQF-0`~`RQF-5` 구현 순서는
+[Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+단일 구현 기준으로 사용한다.
+
 ## 6. 실시간 처리 파이프라인
 
 ### 6.1 데이터 수신
@@ -784,7 +848,19 @@ priority =
 
 ## 8. 멀티 에이전트 조직
 
-아래 표는 확정된 `CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부`를 실행 Agent 수준으로 분해한 것이다. 인사팀은 투자 본부가 아닌 Shared Service이며, 위원회는 별도 상설 본부가 아니라 여러 본부의 Agent가 동일한 Case와 Evidence를 검토하는 승인 Workflow다.
+아래 표는 확정된 `CEO 에이전트 + CEO 직속 Agent Workforce 인사팀 + 6개 본부`를 논리적 역할 수준으로 분해한 것이다. 인사팀은 투자 본부가 아닌 Shared Service이며, 위원회는 별도 상설 본부가 아니라 여러 본부의 Agent가 동일한 Case와 Evidence를 검토하는 승인 Workflow다. 현재 실행 Worker는 아래의 논리적 역할을 그대로 1명씩 실행한다는 뜻이 아니며, 최신 실행 구성은 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)와 각 Profile을 따른다.
+
+#### 도현님 담당 부서의 현재 실행 Worker
+
+| 부서 | 현재 Worker | 실행 방식 | 역할 |
+|---|---|---|---|
+| Trading | `bull-thesis-worker` | LLM, 항상 실행 | Research Packet에 포함된 근거만 사용해 상승 논리·촉매·기대수익 가설을 독립적으로 작성 |
+| Trading | `bear-thesis-worker` | LLM, 항상 실행 | 같은 Packet의 근거만 사용해 반증·하락 위험·논리 취약점을 독립적으로 작성 |
+| Trading | `desk-runner` | 결정론, 항상 실행 | OrderIntent 정규화, 계약 상태 전이, 실행 가능성·비용·파생 Certification을 계산·조회. 주문 Submit 권한 없음 |
+| Accounting/Portfolio | `exception-investigation-worker` | LLM, 항상 실행 | Reconciliation Break, 미설명 PnL, 마감 준비 상태의 원인 후보를 근거와 함께 조사. 공식 수치·NAV 확정 권한 없음 |
+| Accounting/Portfolio | `back-office-runner` | 결정론, 항상 실행 | Position·Cash·PnL·Report·Valuation·Corporate Action·Fee/Tax 조회와 Projection을 결정론 모듈에서 수행. LLM을 호출하지 않음 |
+
+Trading의 기존 Trader/PM·Execution·Venue Cost·Derivatives 역할과 Accounting의 기존 도메인별 역할은 현재 별도 직원이 아니라 `desk-runner` 또는 `back-office-runner`/`exception-investigation-worker`가 흡수한 감사용 Alias다.
 
 | 조직 | 에이전트 | 주요 책임 | 기본 실행 시점 |
 |---|---|---|---|
@@ -800,8 +876,9 @@ priority =
 | 1. 리서치본부 | Microstructure Analyst | 호가, 체결, 스프레드와 유동성 분석 | 미시구조 이벤트 |
 | 1. 리서치본부 | Technical Analyst | 추세, 돌파, 거래량과 변동성 분석 | 가격 이벤트 |
 | 1. 리서치본부 | Fundamental Analyst | 재무, 밸류에이션과 실적 분석 | 저빈도/캐시 |
-| 1. 리서치본부 | News/Sentiment Analyst | 뉴스, 공시, 촉매, 내러티브와 심리 분석 | 문서 이벤트 |
+| 1. 리서치본부 | News/Sentiment Analyst | 뉴스, 공시, 승인된 X Watchlist, 촉매, 내러티브와 심리 분석 | 문서·소셜 이벤트 |
 | 1. 리서치본부 | Sector/Regime Analyst | 동종 종목, 섹터, 매크로와 시장 국면 분석 | 섹터/국면 이벤트 |
+| 1. 리서치본부 | RAG Librarian/Web Evidence Curator | 내부 RAG, 통제된 웹검색, 원출처·인용·시점·사용권 검증 | Evidence Gap |
 | 2. 트레이딩본부 | Trading Supervisor | Research와 Strategy Signal을 거래 Case로 통합 | 주문 후보 |
 | 2. 트레이딩본부 | Bull Researcher | 상승 논거, 촉매와 기대수익 주장 | 심층 분석 |
 | 2. 트레이딩본부 | Bear Researcher | 반증, 하락 위험과 논리 취약점 제시 | 심층 분석 |
@@ -825,12 +902,26 @@ priority =
 | 6. AI QA/감사본부 | Internal Audit Agent | 권한 분리, Override, 원장 변경과 Finding 추적 | 상시/정기 |
 | 6. AI QA/감사본부 | Agent Ops Monitor | Agent, Feed, Queue, Model Server의 오류·지연·비용 감시 | 항상 |
 
+웹검색 MCP는 초기에는 별도 상시 직원 신설 없이 기존 `RES-08 RAG Librarian/Evidence Curator`에
+`web-evidence-research` Skill로 배정한다. RES-08만 SearXNG Search MCP와 제한된 Read-only
+Playwright MCP를 사용하며 Fundamental, News/Sentiment, Sector/Macro와 Geopolitical Analyst는
+`WebSearchRequest`만 제출한다. Research Supervisor는 검색을 직접 수행하지 않고 Case 우선순위와
+위임을 관리한다. Technical, Microstructure, Universe와 Data Steward는 기존 Market/Data API만 사용한다.
+
+웹검색 Queue의 반복 SLO 위반, RES-08의 Citation·Index 업무 지연, 전문 언어·정책 Source Coverage
+공백 또는 발견·검증 분리 필요성이 두 평가 주기 이상 확인될 때만 조건부 `RES-10 Web Intelligence
+Researcher` 채용을 검토한다. 신설 시 RES-10은 후보 URL 발견만, RES-08은
+`VERIFIED_EVIDENCE` 승격만 맡아 자기 검색 결과의 자기 승인을 금지한다. 상세 권한과 Trigger는
+[Agent Employee Profiles](04-organization/AGENT_EMPLOYEE_PROFILES.md)와
+[Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를 따른다.
+
 ### 8.1 동적 라우팅
 
 | 이벤트 | 호출 조합 |
 |---|---|
 | 거래량 및 가격 돌파 | 리서치본부의 Microstructure + Technical |
 | 뉴스 속보 | 리서치본부 News + 트레이딩본부 Bull/Bear + Evidence QA |
+| 승인 X 계정의 중요 Post | 리서치본부 News + Evidence QA, 교차 검증 후 필요 시 Bull/Bear |
 | 섹터 전체 급변 | 리서치본부 Sector/Regime + 리스크본부 Market Risk |
 | 보유 종목 급락 | 6개 본부 중요 Case + 결정론적 Risk Check |
 | 손실 한도 접근 | CEO/LLM 판단을 기다리지 않고 Risk Engine 즉시 실행 |
@@ -858,6 +949,7 @@ SymbolState
 - 투자 논리의 무효화 조건 발생
 - 목표가 또는 손절 수준 접근
 - 새로운 고중요도 뉴스
+- 승인 X Watchlist의 중요 Post가 공시·뉴스·시장 데이터로 교차 확인됨
 - 시장 국면 전환
 - 포트폴리오 위험 변화
 - 기존 결정 만료
@@ -873,7 +965,7 @@ RAG를 하나의 벡터 저장소로 취급하지 않고 다음 계층으로 분
 | 계층 | 데이터 | 조회 방식 |
 |---|---|---|
 | Fact Store | 가격, 특징, 재무, 포지션, 주문, PnL | SQL/시계열 조회 |
-| Document RAG | 공시, 뉴스, 실적 발표, 리서치, 매크로 문서 | Hybrid Search |
+| Document RAG | 공시, 뉴스, 실적 발표, 리서치, 매크로 문서, 승인된 공개 Social Evidence | Hybrid Search |
 | Decision Memory | 과거 논거, 판단, 주문, 결과, 회고 | 메타데이터 + 의미 검색 |
 | Policy Store | 투자 정책, 위험 한도, 운영 절차 | 버전 고정 조회 |
 
@@ -901,6 +993,7 @@ embedding_version
 - 분석 시각 이후에 관측된 문서는 조회할 수 없다.
 - 수정된 재무 및 경제 데이터는 당시 공개 버전을 보존한다.
 - 뉴스의 게시 시각과 시스템 최초 관측 시각을 함께 저장한다.
+- X Post는 Post ID·작성자 ID·수정/삭제 상태를 보존하고, 삭제된 본문은 RAG와 Cache에서도 제거한다.
 - 백테스트와 Replay는 동일한 시간 필터를 사용한다.
 - 데이터 공급자 장애로 나중에 수집한 문서를 과거 분석에 삽입하지 않는다.
 
@@ -910,7 +1003,8 @@ embedding_version
 2. 키워드 검색과 Vector Search를 결합한다.
 3. 최신성, 출처 신뢰도 및 이벤트 관련성으로 재정렬한다.
 4. 중복 기사를 제거한다.
-5. 문서 ID와 인용 가능한 근거를 에이전트에 전달한다.
+5. Social Evidence는 의견·주장·인용을 구분하고 공시·뉴스·시장 데이터의 교차 검증 상태를 확인한다.
+6. 문서 ID와 인용 가능한 근거를 에이전트에 전달한다.
 
 ### 9.5 Decision Memory
 
@@ -1097,16 +1191,18 @@ Paper 환경은 Version이 있는 Borrow Availability와 Borrow Fee Scenario를 
 | Hot State | Redis | Managed Redis 호환 Cluster |
 | 관계형 DB | Supabase PostgreSQL | Multi-AZ/Zone HA PostgreSQL 또는 검증된 Supabase 운영 구성 |
 | Vector Search | pgvector | Managed pgvector 또는 Hybrid Search Engine |
-| 시계열 | 별도 TimescaleDB, 리서치·퀀트 직접 접근 | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
+| 시계열 | 별도 TimescaleDB. Collector·Research·Quant가 적재/직접 조회하고 그 외 본부는 `market-api` 사용 | Object Storage 기반 Lakehouse, ClickHouse는 Benchmark 후 검토 |
 | Object Storage | Supabase private Storage | Versioning/Object Lock 지원 Object Storage |
 | 에이전트 상태 | 명시적 State Graph | 체크포인트 저장 |
 | 관측성 | OpenTelemetry + Prometheus + Grafana | Cloud-neutral Telemetry + 선택 Cloud의 Managed Monitoring |
 | 배포 | Docker Compose | Managed Container Platform, Kubernetes는 필요성 입증 후 검토 |
-| Secret/Key | 개발용 Secret Store | Managed Secret + KMS/HSM 검토 |
+| Secret/Key | 로컬 `.env`에서 서비스별 필요한 값만 주입 | Managed Secret + KMS/HSM 검토 |
 | Infrastructure | 수동 개발 환경 | 공급자별 Landing Zone + Terraform |
 | Delivery | 기본 CI | Workload Identity/OIDC + Registry + 서명 Artifact 승격 |
 
 초기에는 서비스 수를 과도하게 늘리지 않는다. 프로세스 경계가 필요한 실시간 수신, 에이전트 Worker, Risk/OMS를 우선 분리한다.
+
+현재 로컬 구현은 이 원칙을 루트 Compose로 구체화한다. `docker-compose.yml`은 `timescaledb`, Research 수집기·조회 API·MCP, `redis`, Risk·QA API/Worker, 8개 부서 계층의 선언된 Hermes와 CEO·Trading·Accounting·Workforce API/Worker를 병합한다. 기본 기동은 26개 서비스이고 `portfolio`·`dashboard` Profile을 모두 활성화하면 29개다. 이는 로컬 Integration Runtime의 현재 선언이며, 아래 Production 선택(Managed Container, HA DB, Object Storage)은 별도 전환 Gate를 통과해야 한다. 상세 목록과 포트는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다.
 
 ### 13.2 Hot Path와 Cold Path
 
@@ -1190,6 +1286,8 @@ RPO/RTO는 목표값이며 실제 Broker, Cloud, 데이터 공급자 계약과 �
 Capacity 증설보다 먼저 Load Shedding 우선순위를 정의한다. Position/Risk/Order 데이터가 리서치와 비보유 종목 분석보다 항상 우선한다.
 
 ### 13.7 Cloud Platform 선정과 AWS 후보안
+
+> **Runtime baseline alignment (2026-08-10)**: Production Advisory의 기준 토폴로지는 [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)의 AWS Pilot(`g6.xlarge`, Ubuntu 24.04, L4 GPU, EBS) 설계를 따른다. 이는 현재 로컬 Compose를 AWS에서 실행 중이라는 뜻이 아니라 전환 설계의 기준선이다. Production Cloud Provider의 최종 계약·Landing Zone·Managed Service 선택은 별도 승인 전까지 미확정이며, AWS·Azure·GCP·On-premise/Hybrid를 보안·비용·복구 기준으로 비교한다.
 
 현재 Cloud Provider는 확정하지 않는다. Production의 논리 경계와 계약을 먼저 확정하고 AWS, Azure, GCP 및 필요 시 On-premise/Hybrid를 동일한 기준으로 평가한다. 공급자 선정 전 애플리케이션은 Event Bus, Object Storage, Container Runtime, Secret Store, Model Provider와 Observability를 Adapter 및 OpenTelemetry 같은 개방형 계약 뒤에 둔다.
 
@@ -1375,7 +1473,7 @@ multi_agent/
 
 ### 15.2 AI Office와 대시보드 화면
 
-현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 이를 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀을 한눈에 보는 **조직 관제·탐색 화면**으로 발전시킨다. 현재 12개 고정 방과 Scripted Simulation은 프로젝트 조직이나 실시간 업무 상태의 기준이 아니며, 8개 조직과 Backend Event를 사용하는 데이터 기반 구조로 교체한다.
+현재 저장소의 `ai-office/`는 Next.js·React·TypeScript 기반 Pixel Office Prototype이다. 원본 12개 부서는 CEO Office, 6개 투자 본부와 Agent Workforce 인사팀 등 8개 조직·2개 층으로 전환됐고 Trading/Portfolio DEMO Snapshot도 연결됐다. 다만 Scripted Simulation과 테스트 Paper Loop가 아직 업무·Snapshot의 원천이므로 실시간 운영 화면으로 간주하지 않는다. 이를 8개 조직의 실제 Agent·Domain Event를 사용하는 **조직 관제·탐색 화면**으로 발전시킨다.
 
 첫 화면의 Live Office에서 Agent, 본부, Queue, Approval과 Incident를 보고, 다음 업무용 View로 이동한다.
 
@@ -1390,7 +1488,7 @@ multi_agent/
 - `Agent Workforce`: 본부별 Work Queue, SLA, Agent 상태, Skill Gap, 비용과 자기 개선 이력
 - `Derivatives`: Futures Curve, Roll Calendar, Option Chain, IV Surface, Greeks와 Multi-leg Leg Risk
 
-Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 캐릭터의 움직임은 공식 Agent Runtime Event의 Projection이고, Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
+Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들지 않는다. Agent 업무 상태는 Hermes Kanban의 Task·Assignee 상태와 Runtime Heartbeat를 읽기 전용 Bridge가 `agent.status.v1`로 변환하고, Projector가 만든 Supabase Read Model과 Event에서만 생성한다. Agent 캐릭터의 움직임은 이 공식 상태의 Projection이다. Position·PnL·Risk·주문 상태는 Supabase, OMS, Ledger와 Risk Engine의 Read Model만 표시한다. 고빈도 Tick은 Browser로 전량 전달하지 않고 Feed Health와 1초 이상 집계 값을 제공한다.
 
 ### 15.2.1 실시간 Frontend 계약
 
@@ -1400,8 +1498,11 @@ Pixel Office는 상태를 이해하기 쉽게 표현하지만 상태를 만들�
 4. Client는 Heartbeat, 지수형 재연결, Sequence Gap과 Staleness를 감지한다.
 5. 누락 Event는 추측하지 않고 Snapshot을 다시 읽어 복구한다.
 6. `DEMO`, `PAPER`, `LIVE`는 Backend Session으로 분리하고 모든 화면에 현재 Mode를 표시한다.
+7. Browser와 BFF는 Hermes Kanban SQLite를 직접 읽거나 Task를 수정하지 않는다.
 
 Frontend는 Supabase Service Role, Broker와 LS Credential을 갖지 않으며 Risk 계산, OMS 전이와 Ledger Posting을 수행하지 않는다. 승인, Pause와 Kill Switch는 FastAPI Command로만 요청하고 사용자 Identity, 사유, 영향 Preview, 멱등 키, 예상 Version과 Audit Event를 남긴다. 상세 UX, 상태 계약과 구현 순서는 [AI Office Frontend Plan](02-engineering/AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
+
+Live Office Business Owner는 영주님, 공통 Frontend Platform의 기술 DRI와 Kanban Status Bridge 구현 Owner는 도현님, Risk·QA Contract Reviewer는 동규님이다. 이 소유권과 상태 매핑 결정은 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
 
 ### 15.3 Alerting과 On-call
 
@@ -1628,6 +1729,7 @@ Strategy Factory는 수집된 시장, 뉴스, 공시, 특징, 주문 및 성과 
 | Alpha Researcher | 시장 이상현상과 가설 발굴 | Hypothesis Spec |
 | Data Scientist | Dataset, Feature, Label 설계 | Dataset Manifest |
 | Quant Researcher | 통계 검증과 모델 개발 | Experiment Run |
+| Investment Doctrine & Model Engineer | 투자 원칙 계약, 조건부 Fine-tuned Reviewer와 Model Card | Doctrine Model Candidate |
 | Market Microstructure Researcher | 체결 가능성과 비용 모델 검증 | Execution Assumption |
 | Bear/Red Team Researcher | 누수, 과적합, 논리 취약점 공격 | Validation Report |
 | Model Risk Manager | 독립 검증과 위험 등급 부여 | Model Risk Decision |
@@ -1657,6 +1759,16 @@ flowchart LR
     O --> M
     M --> D
 ```
+
+이 폐쇄 루프의 앞단은 `ResearchPacketV2`의 Claim과 Evidence를 가설의 출처로 보존하고, 뒷단은
+실험 결과를 Research Query, Calibration과 검증된 Hermes Skill 후보로 되돌린다. Research와 Quant의
+세부 Graph는 [Research-Quant Evidence-to-Strategy Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md)를
+따른다.
+
+투자자 Persona는 인물의 문체와 정체성을 모방하지 않고 `InvestmentDoctrine`으로 변환한다. 조건부
+`QNT-08`이 Prompt/RAG Baseline보다 개선 필요성이 입증된 경우에만 Fine-tuned Model Candidate를
+만들며, 자세한 계약과 독립 평가 기준은
+[Investment Doctrine Model Factory](02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md)를 따른다.
 
 ### 18.4 전략 가설 계약
 
@@ -1688,6 +1800,9 @@ owner: alpha_research_agent
 ```
 
 가설에는 경제적 근거, 대상 Universe, 판단 빈도, 보유 기간, 필요한 데이터, 비용 가정 및 폐기 조건이 반드시 포함되어야 한다.
+가설은 추가로 `research_packet_ids`, `claim_ids`, `competing_explanation`, `baseline`,
+`trial_family_id`, `trial_budget`과 `preregistered_splits`를 가진다. Backtest 결과를 본 뒤 Feature,
+Label, Split, 비용 또는 폐기 기준을 바꾸면 같은 가설을 덮어쓰지 않고 새 Version을 만든다.
 
 ### 18.5 Dataset Factory
 
@@ -1742,6 +1857,10 @@ Credit, Convertible, Private Market, Real Estate, Digital Asset와 OTC 전략은
 - Survivorship Bias 방지
 - Purged Walk-Forward Validation
 - Label 구간이 겹치는 샘플의 Embargo
+- Trial Family별 전체 실험 수와 선택 과정을 남기는 Trial Ledger
+- 연구 단계의 경로 안정성을 확인하는 CPCV
+- 다중 실험 선택 편향과 비정규 수익률을 보정하는 Deflated Sharpe Ratio
+- 선택된 최적 후보의 과적합 가능성을 측정하는 PBO
 - 최종 Holdout은 승격 심사 전까지 비공개
 - 종목, 기간, 섹터 및 시장 국면별 결과 분해
 - Bootstrap Confidence Interval
@@ -3062,6 +3181,12 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 
 ## 22. 52주 개발 및 Production 전환 로드맵
 
+아래 주차는 목표 기능을 이해하기 위한 계획 기준이며 자동 출시 일자가 아니다. 실제 환경 승격은
+[전사 고도화 연구 로드맵](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md)의 `Canonical Truth`,
+`Integrated Paper Case`, `Measured Paper Fund`, `Scientific Strategy Factory`,
+`Self-Improving Organization`, `Limited Live` Gate를 순서대로 통과해야 한다. 앞 Gate의 증거가
+부족하면 일정이 지났더라도 다음 단계로 승격하지 않는다.
+
 ### Phase 0: 설계 확정 - 1주
 
 - 초기 시장은 한국 주식, 가격·체결·호가 공급자는 LS증권 Open API로 확정
@@ -3601,6 +3726,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 에이전트 프롬프트보다 데이터와 Risk/OMS를 먼저 안정화해야 한다.
 
 ## 27. 다음 의사결정 항목
+
+현재 기준으로 로컬 개발·통합 Runtime은 `docker-compose.yml`과 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)로 고정되어 있다. Production Advisory는 [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)의 AWS Pilot을 기준으로 검토하지만, Cloud 계정·Managed DB·GPU/Model Gateway·Broker/Market Data 운영 계약은 아직 별도 의사결정 항목이다.
 
 아래 항목 중 가격 Data Plane은 확정됐으며, 나머지는 구현 또는 Production 전환 전에 결정한다.
 

@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -117,7 +118,7 @@ class Base(BaseModel):
 # 브로커가 정하는 값이 아니라 거래소 규칙이라 계약 계층에 둔다.
 # Intent를 만들 때(F11)와 Paper 체결(F13) 양쪽이 같은 표를 봐야 한다.
 
-LOT_SIZE = Decimal("1")  # 국내 주식은 1주 단위
+LOT_SIZE = Decimal(1)  # 국내 주식은 1주 단위
 
 
 def tick_size(price: Decimal) -> Decimal:
@@ -128,18 +129,18 @@ def tick_size(price: Decimal) -> Decimal:
     """
     p = int(price)
     if p < 2_000:
-        return Decimal("1")
+        return Decimal(1)
     if p < 5_000:
-        return Decimal("5")
+        return Decimal(5)
     if p < 20_000:
-        return Decimal("10")
+        return Decimal(10)
     if p < 50_000:
-        return Decimal("50")
+        return Decimal(50)
     if p < 200_000:
-        return Decimal("100")
+        return Decimal(100)
     if p < 500_000:
-        return Decimal("500")
-    return Decimal("1000")
+        return Decimal(500)
+    return Decimal(1000)
 
 
 def is_valid_tick(price: Decimal) -> bool:
@@ -326,6 +327,19 @@ class StrategySignal(Base):
         return self.stage == env and env in ("paper", "live") and when < self.valid_until
 
 
+# 전사 Envelope 계약. docs/02-engineering/contracts/event-envelope.v1.json 의 const 값이며
+# SCHEMA_VERSION(우리 Artifact 스키마 버전)과 **다른 축**이다 - 봉투 버전과 내용물 버전을
+# 하나로 뭉치면 한쪽만 올릴 수 없다(UNIFIED_DOMAIN_API_SPEC 6.1 "분리한다").
+ENVELOPE_SCHEMA_VERSION = "event-envelope-v1"
+
+# trace_id 가 UUID 가 아닐 때 결정론적으로 UUID 를 만든다. 정본 스키마가 uuid format 을
+# 요구하는데 우리 내부 trace_id 는 문자열이라(예: "trading-debate-pipeline-v1:abc") 버리면
+# 관통성이 끊긴다 - 같은 문자열이면 항상 같은 UUID 가 나오게 파생한다.
+_TRACE_NS = UUID("6f6c9b4e-0f5a-5a2e-9c3b-7d1e2f3a4b5c")
+
+_SHA256_REF = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
 class EventEnvelope(Base):
     """본부 간 전달 이벤트의 공통 봉투 (팀 가이드 6.2, 6.3, 8.1).
 
@@ -333,10 +347,21 @@ class EventEnvelope(Base):
     뒤바뀌어 도착할 수 있어 하나로 뭉치면 재현이 불가능해진다.
 
     Payload에 전체 Statement나 보고서를 넣지 않는다. object_path와 hash만 넣는다.
+
+    **정본은 docs/02-engineering/contracts/event-envelope.v1.json 이다.**
+    이 모델은 우리 내부 표현이고 `to_canonical()` 이 정본 모양으로 옮긴다. 정본이
+    `additionalProperties: false` 라 내부 전용 필드(payload, received_at, processed_at)는
+    직렬화에서 빠진다 - 내부 표현을 줄이지 않고 경계에서만 맞추는 쪽을 택했다.
     """
 
     event_id: UUID = Field(default_factory=uuid4)
-    event_type: str = Field(pattern=r"^[a-z_]+\.[a-z_]+\.v\d+$")
+    # 정본과 같은 패턴. 기존 패턴은 2개 구간만 허용하고 숫자를 못 넣었다.
+    event_type: str = Field(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+\.v\d+$")
+    schema_version: str = ENVELOPE_SCHEMA_VERSION
+    # 누가 냈는지. 정본 required 필드이며 소비자가 DLQ 원인을 추적할 때 첫 단서다.
+    producer: str = Field(default="trading-oms", min_length=1)
+    # Case 종속 Event 에서 required. 우리 쪽 trade_case_id 를 그대로 싣는다.
+    case_id: UUID | None = None
     event_time: datetime
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     processed_at: datetime | None = None
@@ -345,8 +370,17 @@ class EventEnvelope(Base):
     payload: dict[str, Any] = Field(default_factory=dict)
     object_path: str | None = None
     content_hash: str | None = None
+    # payload_ref 삼종. 저장된 Artifact 를 가리킬 때만 채운다.
+    artifact_type: str | None = None
+    artifact_id: UUID | None = None
+    artifact_schema: str | None = None
 
     _MAX_PAYLOAD_BYTES = 16 * 1024
+
+    @property
+    def occurred_at(self) -> datetime:
+        """정본의 `occurred_at`. 우리 `event_time` 과 같은 값이다 - 두 번 저장하지 않는다."""
+        return self.event_time
 
     @model_validator(mode="after")
     def _check(self):
@@ -358,7 +392,51 @@ class EventEnvelope(Base):
             )
         if self.object_path and not self.content_hash:
             raise ValueError("object_path에는 content_hash가 함께 있어야 합니다")
+        if self.schema_version != ENVELOPE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version은 {ENVELOPE_SCHEMA_VERSION}여야 합니다: {self.schema_version}")
+        # payload_ref 는 넷이 전부 있거나 전부 없어야 한다. 반쪽 참조는 추적 불가능하다.
+        refs = (self.artifact_type, self.artifact_id, self.artifact_schema, self.content_hash)
+        if any(refs) and not all(refs):
+            missing = [n for n, v in zip(
+                ("artifact_type", "artifact_id", "artifact_schema", "content_hash"), refs) if not v]
+            if self.artifact_type or self.artifact_id or self.artifact_schema:
+                raise ValueError(f"payload_ref에 빠진 필드가 있습니다: {missing}")
+        if all(refs) and not _SHA256_REF.match(str(self.content_hash)):
+            raise ValueError(
+                f"payload_ref.content_hash는 'sha256:<64hex>' 형식이어야 합니다: {self.content_hash}")
         return self
+
+    def canonical_trace_id(self) -> str:
+        """정본이 요구하는 UUID 형태 trace_id. 이미 UUID면 그대로, 아니면 결정론 파생."""
+        try:
+            return str(UUID(self.trace_id))
+        except (ValueError, AttributeError, TypeError):
+            return str(uuid5(_TRACE_NS, self.trace_id))
+
+    def to_canonical(self) -> dict[str, Any]:
+        """`event-envelope.v1.json` 모양으로 옮긴다.
+
+        정본이 `additionalProperties: false` 라 내부 전용 필드를 실을 수 없다.
+        payload 본문은 애초에 경계 밖으로 내보내지 않는 것이 규약이므로(6.1) 손실이 아니다.
+        """
+        payload_ref = None
+        if self.artifact_type and self.artifact_id and self.artifact_schema:
+            payload_ref = {"artifact_type": self.artifact_type,
+                           "artifact_id": str(self.artifact_id),
+                           "artifact_schema": self.artifact_schema,
+                           "content_hash": self.content_hash}
+        return {
+            "event_id": str(self.event_id),
+            "event_type": self.event_type,
+            "schema_version": self.schema_version,
+            "case_id": str(self.case_id) if self.case_id else None,
+            "trace_id": self.canonical_trace_id(),
+            "producer": self.producer,
+            "occurred_at": self.occurred_at.isoformat(),
+            "idempotency_key": self.idempotency_key,
+            "payload_ref": payload_ref,
+        }
 
 
 # 허용 상태 전이. 최종 강제 지점은 Supabase의
@@ -457,35 +535,35 @@ if __name__ == "__main__":
     snap = MarketSnapshot(
         market_snapshot_id="snap_01",
         as_of=now,
-        bid=Decimal("70000"),
-        ask=Decimal("70100"),
+        bid=Decimal(70000),
+        ask=Decimal(70100),
     )
 
     def intent(**over) -> OrderIntent:
-        kw = dict(
-            trade_case_id=ids["case"],
-            fund_id=ids["fund"],
-            book_id=ids["book"],
-            strategy_id=ids["strategy"],
-            instrument_id=ids["instrument"],
-            side=Side.BUY,
-            order_type=OrderType.LIMIT,
-            quantity=Decimal("100"),
-            limit_price=Decimal("70000"),
-            valid_until=now + timedelta(hours=1),
-            snapshot=snap,
-            idempotency_key="idem_0001",
-            created_by="trader-pm-agent",
-            trace_id="trace_01",
-            created_at=now,
-        )
+        kw = {
+            "trade_case_id": ids["case"],
+            "fund_id": ids["fund"],
+            "book_id": ids["book"],
+            "strategy_id": ids["strategy"],
+            "instrument_id": ids["instrument"],
+            "side": Side.BUY,
+            "order_type": OrderType.LIMIT,
+            "quantity": Decimal(100),
+            "limit_price": Decimal(70000),
+            "valid_until": now + timedelta(hours=1),
+            "snapshot": snap,
+            "idempotency_key": "idem_0001",
+            "created_by": "trader-pm-agent",
+            "trace_id": "trace_01",
+            "created_at": now,
+        }
         kw.update(over)
         return OrderIntent(**kw)
 
     def rejects(fn, why: str):
         try:
             fn()
-        except (ValueError, Exception) as e:  # pydantic ValidationError 포함
+        except (ValueError, Exception) as e:  # pydantic ValidationError 포함  # noqa: BLE001 - intentional fallback boundary
             assert e is not None
             return
         raise AssertionError(f"통과하면 안 되는 입력: {why}")
@@ -496,8 +574,8 @@ if __name__ == "__main__":
     assert ok.evidence_hash() == intent(trace_id="다른trace").evidence_hash(), "trace는 지문에 영향 없어야"
 
     # 2. 신뢰 경계 검증 - LLM이 만들 법한 잘못된 값들
-    rejects(lambda: intent(quantity=Decimal("0")), "수량 0")
-    rejects(lambda: intent(quantity=Decimal("-5")), "음수 수량")
+    rejects(lambda: intent(quantity=Decimal(0)), "수량 0")
+    rejects(lambda: intent(quantity=Decimal(-5)), "음수 수량")
     rejects(lambda: intent(limit_price=None), "LIMIT인데 가격 없음")
     rejects(lambda: intent(order_type=OrderType.MARKET), "MARKET인데 가격 있음")
     rejects(lambda: intent(valid_until=now - timedelta(minutes=1)), "이미 만료")
@@ -505,19 +583,19 @@ if __name__ == "__main__":
     rejects(lambda: OrderIntent(**{**ok.model_dump(), "hallucinated": 1}), "모르는 필드")
 
     # 3. 데이터 품질 게이트 - stale 시세로는 주문 후보를 못 만든다
-    stale = MarketSnapshot(market_snapshot_id="s2", as_of=now, bid=Decimal("1"),
-                           ask=Decimal("2"), quality=SnapshotQuality.STALE)
+    stale = MarketSnapshot(market_snapshot_id="s2", as_of=now, bid=Decimal(1),
+                           ask=Decimal(2), quality=SnapshotQuality.STALE)
     rejects(lambda: intent(snapshot=stale), "stale 시세")
     rejects(
         lambda: MarketSnapshot(market_snapshot_id="s3", as_of=now,
-                               bid=Decimal("100"), ask=Decimal("90")),
+                               bid=Decimal(100), ask=Decimal(90)),
         "역전 호가",
     )
 
     # 4. Risk Decision
     approve = RiskDecision(
         order_intent_id=ok.order_intent_id, verdict=RiskVerdict.APPROVE,
-        approved_quantity=Decimal("100"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(100), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert approve.authorizes(ok, now)
@@ -525,24 +603,24 @@ if __name__ == "__main__":
 
     resized = RiskDecision(
         order_intent_id=ok.order_intent_id, verdict=RiskVerdict.RESIZE,
-        approved_quantity=Decimal("40"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(40), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert not resized.authorizes(ok, now), "축소 승인인데 원래 수량이 통과됨"
     assert resized.authorizes(
-        intent(order_intent_id=ok.order_intent_id, quantity=Decimal("40")), now
+        intent(order_intent_id=ok.order_intent_id, quantity=Decimal(40)), now
     ), "축소된 수량으로 다시 낸 주문이 거부됨"
 
     other = RiskDecision(
         order_intent_id=uuid4(), verdict=RiskVerdict.APPROVE,
-        approved_quantity=Decimal("100"), expires_at=now + timedelta(minutes=5),
+        approved_quantity=Decimal(100), expires_at=now + timedelta(minutes=5),
         decided_by="risk-supervisor", decided_at=now,
     )
     assert not other.authorizes(ok, now), "다른 주문의 승인이 재사용됨"
 
     rejects(
         lambda: RiskDecision(order_intent_id=ok.order_intent_id, verdict=RiskVerdict.REJECT,
-                             approved_quantity=Decimal("100"),
+                             approved_quantity=Decimal(100),
                              expires_at=now + timedelta(minutes=5), decided_by="r", reason="x"),
         "reject인데 승인 수량 존재",
     )
@@ -564,6 +642,82 @@ if __name__ == "__main__":
     rejects(lambda: EventEnvelope(event_type="a.b.v1", event_time=now, trace_id="t",
                                   idempotency_key="idem_0001",
                                   object_path="s3://x"), "object_path에 hash 없음")
+
+    # 5-1. **정본 event-envelope.v1.json 을 실제로 만족하는가** (P0-1 관통 필드).
+    #      스키마 파일을 직접 읽어 대조한다 - 필드 목록을 여기 베껴두면 정본이 바뀌어도 모른다.
+    #      ponytail: jsonschema 미설치라 이 스키마가 쓰는 키워드만 본다(required /
+    #      additionalProperties / const / pattern / format:uuid). 전면 검증은
+    #      tests/contracts/test_unified_api_contract.py 가 이미 한다.
+    from pathlib import Path as _Path
+
+    _ROOT = _Path(__file__).resolve().parents[3]
+    _schema = json.loads(
+        (_ROOT / "docs/02-engineering/contracts/event-envelope.v1.json").read_text(
+            encoding="utf-8"))
+
+    def validate_json_schema(instance: dict, schema: dict, path: str = "$") -> None:
+        props = schema.get("properties") or {}
+        for key in schema.get("required", []):
+            assert instance.get(key) is not None, f"{path}: 필수 필드 누락 {key}"
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(instance) - set(props))
+            assert not extra, f"{path}: 정본에 없는 필드 {extra}"
+        for key, value in instance.items():
+            spec = props.get(key) or {}
+            if value is None:
+                continue
+            if "const" in spec:
+                assert value == spec["const"], f"{path}.{key}: const 불일치 {value}"
+            if spec.get("pattern"):
+                assert re.match(spec["pattern"], str(value)), f"{path}.{key}: 패턴 위반 {value}"
+            if spec.get("format") == "uuid":
+                UUID(str(value))          # 파싱 실패하면 예외로 드러난다
+            if spec.get("format") == "date-time":
+                datetime.fromisoformat(str(value))
+            if isinstance(value, dict) and "anyOf" in spec:
+                nested = next(o for o in spec["anyOf"] if o.get("type") == "object")
+                validate_json_schema(value, nested, f"{path}.{key}")
+
+    case = uuid4()
+    full = EventEnvelope(
+        event_type="execution.order_state_changed.v1", event_time=now,
+        trace_id="trading-debate-pipeline-v1:abc123", idempotency_key="idem_full_0001",
+        case_id=case, producer="trading-oms",
+        artifact_type="ORDER_EVENT", artifact_id=uuid4(),
+        artifact_schema=SCHEMA_VERSION, content_hash="sha256:" + "a" * 64)
+    canonical = full.to_canonical()
+    validate_json_schema(canonical, _schema)          # 여기서 깨지면 정본과 어긋난 것이다
+    assert canonical["schema_version"] == "event-envelope-v1"
+    assert canonical["case_id"] == str(case) and canonical["producer"] == "trading-oms"
+    assert canonical["occurred_at"] == now.isoformat()
+    assert set(canonical["payload_ref"]) == {"artifact_type", "artifact_id",
+                                             "artifact_schema", "content_hash"}
+    # 내부 전용 필드는 경계 밖으로 안 나간다 (정본이 additionalProperties: false 다)
+    for internal in ("payload", "received_at", "processed_at", "object_path", "event_time"):
+        assert internal not in canonical, f"{internal} 이 정본 봉투에 실렸다"
+
+    # trace_id 가 UUID 가 아니어도 관통성이 끊기지 않는다 - 결정론적으로 파생한다
+    assert full.canonical_trace_id() == EventEnvelope(
+        event_type="a.b.v1", event_time=now, trace_id="trading-debate-pipeline-v1:abc123",
+        idempotency_key="idem_0002").canonical_trace_id(), "같은 trace 가 다른 UUID 가 됐다"
+    assert full.canonical_trace_id() != EventEnvelope(
+        event_type="a.b.v1", event_time=now, trace_id="다른trace",
+        idempotency_key="idem_0003").canonical_trace_id()
+
+    # payload_ref 는 넷이 전부이거나 전부 없어야 한다. 반쪽 참조는 추적 불가능하다
+    rejects(lambda: EventEnvelope(event_type="a.b.v1", event_time=now, trace_id="t",
+                                  idempotency_key="idem_0001",
+                                  artifact_type="ORDER_EVENT"), "반쪽 payload_ref")
+    rejects(lambda: EventEnvelope(
+        event_type="a.b.v1", event_time=now, trace_id="t", idempotency_key="idem_0001",
+        artifact_type="X", artifact_id=uuid4(), artifact_schema="s",
+        content_hash="notasha"), "content_hash 형식 위반")
+    rejects(lambda: EventEnvelope(event_type="a.b.v1", event_time=now, trace_id="t",
+                                  idempotency_key="idem_0001",
+                                  schema_version="event-envelope-v9"), "봉투 버전 위반")
+    # payload_ref 가 없어도 정본을 만족한다 (nullable)
+    validate_json_schema(env.to_canonical(), _schema)
+    assert env.to_canonical()["payload_ref"] is None
 
     # 6. Intent 상태 머신 - Risk 우회 경로가 막혀 있는가
     assert can_transition(_I.APPROVED, _I.READY_TO_SUBMIT)

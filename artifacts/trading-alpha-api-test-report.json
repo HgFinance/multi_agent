@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "kind": "algorithm-boundary-test-report",
+  "surface": "python-package",
+  "commands": [
+    "python departments/02-trading/employee_workers.py",
+    "python departments/02-trading/scripts.py",
+    "python -m unittest tests.test_trading_alpha_strategy_workers -v",
+    "python -m py_compile departments/02-trading/employee_workers.py departments/02-trading/scripts.py tests/test_trading_alpha_strategy_workers.py",
+    "python departments/02-trading/contracts/contracts.py",
+    "python departments/02-trading/oms/oms.py",
+    "python departments/02-trading/broker/paper_broker.py",
+    "python -m unittest discover -s tests/schema -p test_*.py -v",
+    "python -m pytest tests/e2e/test_full_portfolio_pipeline_async.py -q",
+    "python -m pytest tests/test_worker_architecture.py::test_profile_worker_registry_counts_and_models tests/test_worker_architecture.py::test_profile_worker_metadata_matches_runtime_specs tests/test_worker_architecture.py::test_final_worker_shape_has_no_duplicate_roles -q"
+  ],
+  "results": {
+    "focusedTests": "13 passed",
+    "schemaTests": "16 passed",
+    "fullPipelineTests": "5 passed",
+    "tradingRegistryContracts": "3 passed",
+    "moduleSelfChecks": "passed",
+    "syntaxChecks": "passed",
+    "yamlProfile": "parsed and contract assertions passed"
+  },
+  "invariants": [
+    "invalid bundle creates no worker",
+    "one immutable non-LLM worker per accepted strategy version",
+    "same Paper event stream reaches each worker",
+    "shared account retains per-strategy fill and metric attribution",
+    "missing Risk thresholds reject selection",
+    "exactly one selected strategy has live_order_submission_allowed=false",
+    "duplicate strategy version is rejected"
+    ,"Risk provider failures and string approvals reject safely"
+    ,"first-event trading costs count toward drawdown"
+    ,"worker lifecycle transitions are explicit and authoritative within the run"
+  ]
+}

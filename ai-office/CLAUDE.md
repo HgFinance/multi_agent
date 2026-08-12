@@ -1,84 +1,65 @@
-# AI 오피스 — 작업 지침 (AI 코딩 도구용)
+# AI Office 작업 지침
 
-이 프로젝트는 **AI 직원들이 돌아다니는 픽셀 사무실 시뮬레이션**입니다.
-사용자는 대부분 개발을 모르는 크리에이터입니다. 전문용어 말고 쉬운 말로 안내하세요.
+`ai-office/`는 HgFinance 헤지펀드 운영 상태를 보여주는 픽셀 오피스 Projection이다. 금융 원장·Broker credential·Risk 한도·Hermes 내부 상태를 브라우저가 소유하지 않는다. 안내 문구는 쉬운 한국어로 작성한다.
 
----
+## 조직 구조
 
-## 사용자가 "실행해줘" 라고 하면
+`company.config.ts`의 `DEPARTMENTS`와 `app/game/world.ts`가 기준. 8개 부서 ID(SNS 데모의 `brand`/`reels`/`carousel`/`partner`는 되살리지 않음):
 
-아래를 순서대로 하고, 각 단계를 한 줄로만 보고하세요.
-
-1. **Node.js 확인** — `node -v`
-   - 없거나 22 미만이면: 설치가 필요하다고 알리고 https://nodejs.org 의 LTS 설치를 안내하세요.
-     (직접 설치를 시도해도 되지만, 실패하면 사용자에게 링크를 주고 멈추세요.)
-2. **의존성 설치** — `npm install`
-   - 30초쯤 걸리고 폴더가 750MB로 커집니다. 미리 알려주세요. 정상입니다.
-3. **서버 실행** — `npm run dev` (백그라운드로)
-   - 다른 포트를 원하면 `npx vinext dev --port <번호>`
-4. **브라우저 열기** — http://localhost:3000
-5. 마지막에 이렇게 안내하세요:
-   > 화면 위쪽 **"오늘 업무 시작하기"** 를 누르면 직원들이 출근합니다.
-   > 직원을 클릭하면 프로필이 열려요.
-   > 이 창을 닫으면 서버도 꺼집니다. 다시 보려면 `npm run dev`.
-
----
-
-## 사용자가 "내 것처럼 만들어줘" 라고 하면
-
-**`company.config.ts` 이 파일 하나만 고치세요. 다른 파일은 절대 건드리지 마세요.**
-
-사용자의 직업·이름·브랜드에 맞춰 아래를 바꿉니다:
-
-| 항목 | 위치 |
+| ID | 본부 |
 |---|---|
-| 회사 이름, 로고 글자, 화면 제목 | `COMPANY` |
-| 대표(사용자 본인) 이름·성격 | `CEO_PROFILE` |
-| 부서 12개의 이름·아이콘·하는 일 | `DEPARTMENTS` |
-| 직원 이름·직책·색·혼잣말 | `STAFF_LIST` |
+| `research` | Research |
+| `strategy1` | Quant/Backtest |
+| `strategy2` | Trading |
+| `ops` | Risk |
+| `finance` | Accounting/Portfolio |
+| `qa` | AI QA/Audit |
+| `review` | Agent Workforce/HR |
+| `secretary` | CEO Office |
 
-### 🚨 절대 어기면 안 되는 규칙 3가지
+부서 추가·ID 변경 시 `company.config.ts`, `world.ts`, `staff.ts`, runtime department mapping, 테스트를 함께 갱신한다.
 
-1. **부서 `id`를 바꾸지 마세요.**
-   `research` `brand` `strategy1` `qa` `strategy2` `reels`
-   `carousel` `partner` `finance` `review` `ops` `secretary`
-   → 시뮬레이션 엔진(`app/game/sim.ts`)이 이 id를 26곳에서 직접 참조합니다.
-   바꾸면 캐릭터가 길을 잃고 화면이 깨집니다.
-   **바꿔도 되는 건 `name` · `icon` · `short` · `task` · `report` 입니다.**
+## 화면
 
-2. **부서는 정확히 12개를 유지하세요.**
-   사무실 배치가 4열 3행 = 12칸 고정입니다.
-   안 쓸 부서는 지우지 말고 **이름만 바꿔서** 쓰세요.
+- `라이브 오피스`: 포트폴리오 입력, BFF runtime에 연결된 직원 이동·업무·부서장 handoff, CEO Console·추천 승인.
+- `대시보드`: CEO task routing Kanban, 조직 요약, 연동 상태·운영 지표(포트폴리오 입력창·라이브 오피스 결과창 복제 금지).
+- `DEMO`/`PAPER`/`LIVE`는 BFF snapshot 값을 그대로 표시 — 임의로 LIVE처럼 승격하지 않는다.
 
-3. **`app/game/` 안의 파일을 고치지 마세요.**
-   `sim.ts` `world.ts` `staff.ts` `OfficeWorld.tsx` `pathfinding.ts` 는 엔진입니다.
-   커스터마이징으로 이 파일들을 건드릴 이유가 없습니다.
+## 상태·runtime 경계
 
-### 지켜야 할 것
+- 직원 상태 Source of Truth: Hermes Kanban → `agent.status.v1` → BFF Agent Status Projector → `/ui/snapshot`/`/ws/operations`.
+- runtime event가 없으면 직원은 `OFFLINE`/`IDLE`로만 표시 — 로컬 스크립트로 LangGraph 실행을 가장하지 않는다.
+- 포트폴리오 추천은 사용자 승인 대기 자문일 뿐, `APPROVE`도 주문·Risk 승인·원장 변경을 하지 않는다.
+- 부서 간 handoff는 부서장 Projection만 — 직원끼리 부서 간 이동을 만들지 않는다.
 
-- 직원 수는 자유입니다. 단 **한 팀에 `rank: "lead"` 는 정확히 1명**.
-- `colors`는 `[머리색, 옷색, 포인트색]` 이며, 기존 파스텔 톤을 유지하세요.
-  (기존 값들에서 고르면 안전합니다)
-- `thoughts`는 그 직원의 성격이 드러나는 혼잣말 2~3개. 사용자 업종의 현실적인 고민을 담으세요.
-- 고친 뒤 `npx tsc --noEmit` 으로 타입 오류가 없는지 확인하세요.
-  (`db/index.ts` · `worker/index.ts` 의 Cloudflare 타입 오류 3개는 원래 있는 것이니 무시)
-- 서버가 떠 있으면 저장 즉시 화면에 반영됩니다.
+## Frontend/BFF 실행
 
----
+저장소 루트에서 실행(프론트 폴더 안엔 `.venv` 없음):
 
-## 연동(Notion·Discord)에 대해
+```bash
+# 터미널 1 — Read-only FastAPI BFF
+DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
+# 터미널 2 — AI Office
+NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm --prefix ai-office run dev -- --port 3002
+```
 
-**기본값은 "연동 없음"이고, 그 상태로 완전히 정상 작동합니다.**
-화면에 "미설정"으로 뜨는 건 오류가 아닙니다. 연결 안 된 걸 연결됐다고 표시하지 않는 게 이 앱의 원칙입니다.
+8001을 이미 쓰고 있으면 BFF를 중복 실행하지 말고 기존 프로세스를 쓴다.
 
-사용자가 실제 연동을 원할 때만 `.dev.vars.example` 를 복사해 `.dev.vars` 를 만들고 값을 채우게 안내하세요.
+## 안전 규칙
 
-🔒 **`.dev.vars` 는 비밀번호와 같습니다.** 절대 그 내용을 화면에 출력하거나, 커밋하거나, 압축파일에 넣지 마세요.
-사용자가 이 폴더를 남에게 공유하려 하면 `.dev.vars` 를 반드시 빼라고 경고하세요.
+- `.dev.vars`, `.env*`, `auth.json`, Supabase Service Role, Broker/LS credential을 읽거나 출력하거나 커밋하지 않는다.
+- 브라우저에서 Supabase Service Role, Broker API, Hermes 내부 DB를 직접 호출하지 않는다.
+- Agent 텍스트에서 Position/PnL/NAV/Risk 판정을 추출해 확정하지 않는다.
+- Command는 `idempotency_key`, `expected_version`, 권한·정책 검증, Audit Event 없이 추가하지 않는다. CEO·프론트는 주문 제출·원장 Posting·NAV 확정 권한이 없다.
+- 실패·heartbeat 없음·sequence gap은 성공으로 표시하지 않고 `STALE`/`DEGRADED`/`BLOCKED`/`ERROR` 중 실제 상태로 보여준다.
 
----
+## 작업 전후 확인
 
-## 만들어진 배경
+```bash
+npm --prefix ai-office run lint
+npm --prefix ai-office test
+DATABASE_URL='' .venv/bin/python -m unittest discover -s tests/api -p 'test_*.py' -v
+DATABASE_URL='' PYTHONPATH=. .venv/bin/pytest -q tests/e2e tests/contracts/test_unified_api_contract.py backend/tests
+```
 
-HgFinance 헤지펀드 Digital Twin의 관제 화면이다.
-기준 문서는 docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md 다.
+UI 수정 시 라이브/대시보드 탭, BFF offline, mode 3종, task 상태 5종, 영업시간(09:00~18:00) 표시를 함께 확인한다. `company.config.ts` 조직·직원 Projection 수정 시 실제 부서 Profile·Worker Registry 구현 여부를 확인하고, 미구현 Worker를 실행 중으로 보여주지 않는다.

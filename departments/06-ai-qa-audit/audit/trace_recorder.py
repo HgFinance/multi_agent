@@ -18,13 +18,18 @@ ToolResultRecord 스텁으로 대신하고 있는데, 여기서 실제로 기록
 
 자체 점검: python departments/06-ai-qa-audit/audit/trace_recorder.py
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from repository import PostgresAuditRepository
 
 
 class AgentRunStatus(StrEnum):
@@ -38,7 +43,12 @@ class AgentRunStatus(StrEnum):
 
 
 TERMINAL_RUN_STATES = frozenset(
-    {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.TIMED_OUT, AgentRunStatus.CANCELLED}
+    {
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.TIMED_OUT,
+        AgentRunStatus.CANCELLED,
+    }
 )
 
 
@@ -54,7 +64,12 @@ class ToolCallStatus(StrEnum):
 
 
 TERMINAL_TOOL_CALL_STATES = frozenset(
-    {ToolCallStatus.DENIED, ToolCallStatus.COMPLETED, ToolCallStatus.FAILED, ToolCallStatus.TIMED_OUT}
+    {
+        ToolCallStatus.DENIED,
+        ToolCallStatus.COMPLETED,
+        ToolCallStatus.FAILED,
+        ToolCallStatus.TIMED_OUT,
+    }
 )
 
 
@@ -116,10 +131,13 @@ class TraceRecorder:
     """결정론적 Trace 기록소. svc_audit_collector가 이 모양대로 Supabase에 적재한다
     (지금은 인메모리 - DB 배선은 Sprint K0)."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: PostgresAuditRepository | None = None) -> None:
         self.runs: dict[UUID, AgentRunRecord] = {}
         self.tool_calls: dict[UUID, ToolCallRecord] = {}
         self._by_profile_input: dict[tuple[UUID, str], UUID] = {}
+        # repository가 있으면 audit.agent_runs/tool_calls에 write-through 한다(repository.py 참고).
+        # 인메모리는 그대로 불변식 검사의 근거로 남는다 - RedisTradingStateStore와 같은 구도.
+        self._repository = repository
 
     # -- Agent Run -------------------------------------------------------------
 
@@ -146,12 +164,20 @@ class TraceRecorder:
                 return existing
 
         run = AgentRunRecord(
-            agent_run_id=uuid4(), trace_id=trace_id, agent_id=agent_id,
-            profile_version_id=profile_version_id, input_hash=input_hash,
-            started_at=started_at or _now(), case_id=case_id, fund_id=fund_id, model_id=model_id,
+            agent_run_id=uuid4(),
+            trace_id=trace_id,
+            agent_id=agent_id,
+            profile_version_id=profile_version_id,
+            input_hash=input_hash,
+            started_at=started_at or _now(),
+            case_id=case_id,
+            fund_id=fund_id,
+            model_id=model_id,
         )
         self.runs[run.agent_run_id] = run
         self._by_profile_input[key] = run.agent_run_id
+        if self._repository is not None:
+            self._repository.insert_run(run)
         return run
 
     def complete_run(
@@ -172,27 +198,37 @@ class TraceRecorder:
         run.token_usage = token_usage or {}
         run.cost = cost or {}
         run.trace_uri = trace_uri
+        self._sync_run_terminal(run)
         return run
 
-    def fail_run(self, agent_run_id: UUID, error_code: str, *, ended_at: datetime | None = None) -> AgentRunRecord:
+    def fail_run(
+        self, agent_run_id: UUID, error_code: str, *, ended_at: datetime | None = None
+    ) -> AgentRunRecord:
         run = self._require_run(agent_run_id)
         run.status = AgentRunStatus.FAILED
         run.error_code = error_code
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
-    def timeout_run(self, agent_run_id: UUID, *, ended_at: datetime | None = None) -> AgentRunRecord:
+    def timeout_run(
+        self, agent_run_id: UUID, *, ended_at: datetime | None = None
+    ) -> AgentRunRecord:
         # 응답이 없으면 UNKNOWN이지 FAILED로 추정하지 않는 OMS 원칙과 같다 - TIMED_OUT은
         # 별도 상태로 남긴다.
         run = self._require_run(agent_run_id)
         run.status = AgentRunStatus.TIMED_OUT
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
-    def cancel_run(self, agent_run_id: UUID, *, ended_at: datetime | None = None) -> AgentRunRecord:
+    def cancel_run(
+        self, agent_run_id: UUID, *, ended_at: datetime | None = None
+    ) -> AgentRunRecord:
         run = self._require_run(agent_run_id)
         run.status = AgentRunStatus.CANCELLED
         run.ended_at = ended_at or _now()
+        self._sync_run_terminal(run)
         return run
 
     # -- Tool Call ---------------------------------------------------------------
@@ -213,47 +249,81 @@ class TraceRecorder:
                 f"종료된 Run({run.status.value})에는 Tool Call을 추가로 붙일 수 없습니다"
             )
         call = ToolCallRecord(
-            tool_call_id=uuid4(), agent_run_id=agent_run_id, trace_id=run.trace_id,
-            tool_name=tool_name, scope=scope, input_hash=input_hash,
-            occurred_at=occurred_at or _now(), policy_version=policy_version,
+            tool_call_id=uuid4(),
+            agent_run_id=agent_run_id,
+            trace_id=run.trace_id,
+            tool_name=tool_name,
+            scope=scope,
+            input_hash=input_hash,
+            occurred_at=occurred_at or _now(),
+            policy_version=policy_version,
         )
         self.tool_calls[call.tool_call_id] = call
         return call
 
     def allow_tool_call(self, tool_call_id: UUID) -> ToolCallRecord:
-        return self._transition_tool_call(tool_call_id, ToolCallStatus.ALLOWED, {ToolCallStatus.REQUESTED})
+        return self._transition_tool_call(
+            tool_call_id, ToolCallStatus.ALLOWED, {ToolCallStatus.REQUESTED}
+        )
 
     def deny_tool_call(self, tool_call_id: UUID, reason: str) -> ToolCallRecord:
         call = self._transition_tool_call(
-            tool_call_id, ToolCallStatus.DENIED, {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
+            tool_call_id,
+            ToolCallStatus.DENIED,
+            {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
         )
         call.error_code = reason
         call.completed_at = _now()
+        self._sync_tool_call_terminal(call)
         return call
 
     def complete_tool_call(
-        self, tool_call_id: UUID, output_hash: str, *, completed_at: datetime | None = None,
+        self,
+        tool_call_id: UUID,
+        output_hash: str,
+        *,
+        completed_at: datetime | None = None,
     ) -> ToolCallRecord:
         call = self._transition_tool_call(
-            tool_call_id, ToolCallStatus.COMPLETED, {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
+            tool_call_id,
+            ToolCallStatus.COMPLETED,
+            {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
         )
         call.output_hash = output_hash
         call.completed_at = completed_at or _now()
         call.latency_ms = _latency_ms(call.occurred_at, call.completed_at)
+        self._sync_tool_call_terminal(call)
         return call
 
     def fail_tool_call(
-        self, tool_call_id: UUID, error_code: str, *, completed_at: datetime | None = None,
+        self,
+        tool_call_id: UUID,
+        error_code: str,
+        *,
+        completed_at: datetime | None = None,
     ) -> ToolCallRecord:
         call = self._transition_tool_call(
-            tool_call_id, ToolCallStatus.FAILED, {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
+            tool_call_id,
+            ToolCallStatus.FAILED,
+            {ToolCallStatus.REQUESTED, ToolCallStatus.ALLOWED},
         )
         call.error_code = error_code
         call.completed_at = completed_at or _now()
         call.latency_ms = _latency_ms(call.occurred_at, call.completed_at)
+        self._sync_tool_call_terminal(call)
         return call
 
     # -- 내부 ------------------------------------------------------------------
+
+    def _sync_run_terminal(self, run: AgentRunRecord) -> None:
+        if self._repository is not None:
+            self._repository.update_run_terminal(run)
+
+    def _sync_tool_call_terminal(self, call: ToolCallRecord) -> None:
+        # audit.tool_calls는 append-only(DB 트리거) - REQUESTED/ALLOWED 중간 상태는 쓰지 않고
+        # 종결 상태(DENIED/COMPLETED/FAILED)에 도달했을 때 최종 스냅샷 1행만 insert한다.
+        if self._repository is not None:
+            self._repository.insert_tool_call_terminal(call)
 
     def _require_run(self, agent_run_id: UUID) -> AgentRunRecord:
         run = self.runs.get(agent_run_id)
@@ -265,7 +335,8 @@ class TraceRecorder:
         # Run을 종료하는데 REQUESTED/ALLOWED로 미해결 상태인 Tool Call이 남아 있으면
         # 안 된다 - 상태 불명을 성공으로 추정하지 않는다(팀 가이드 4.1 #9와 같은 fail-closed 원칙).
         open_calls = [
-            c for c in self.tool_calls.values()
+            c
+            for c in self.tool_calls.values()
             if c.agent_run_id == run.agent_run_id and not c.is_terminal
         ]
         if open_calls:
@@ -274,7 +345,10 @@ class TraceRecorder:
             )
 
     def _transition_tool_call(
-        self, tool_call_id: UUID, to_status: ToolCallStatus, allowed_from: set[ToolCallStatus],
+        self,
+        tool_call_id: UUID,
+        to_status: ToolCallStatus,
+        allowed_from: set[ToolCallStatus],
     ) -> ToolCallRecord:
         call = self.tool_calls.get(tool_call_id)
         if call is None:
@@ -288,7 +362,8 @@ class TraceRecorder:
 
 
 def as_tool_result_output_values(
-    tool_calls: list[ToolCallRecord], numeric_outputs: dict[UUID, dict[str, Decimal]],
+    tool_calls: list[ToolCallRecord],
+    numeric_outputs: dict[UUID, dict[str, Decimal]],
 ) -> dict[str, Decimal]:
     """완료된 Tool Call들을 evidence_qa_engine.ToolResultRecord.output_values 모양으로
     합친다. numeric_outputs는 output_hash 뒤에 실제로 숨어있는 구조화 값의 스텁이다
@@ -325,24 +400,37 @@ if __name__ == "__main__":
     # 1. 정상 흐름: Run 시작 -> Tool Call 요청 -> 완료 -> Run 완료
     run = recorder.start_run(trace, agent, profile, "hash_1", started_at=now)
     assert run.status is AgentRunStatus.RUNNING
-    call = recorder.record_tool_call(run.agent_run_id, "market-api", {"symbol": "AAPL"}, "call_hash_1",
-                                     occurred_at=now)
+    call = recorder.record_tool_call(
+        run.agent_run_id,
+        "market-api",
+        {"symbol": "AAPL"},
+        "call_hash_1",
+        occurred_at=now,
+    )
     assert call.status is ToolCallStatus.REQUESTED
     recorder.allow_tool_call(call.tool_call_id)
     completed_call = recorder.complete_tool_call(
-        call.tool_call_id, "out_hash_1", completed_at=now + timedelta(milliseconds=120),
+        call.tool_call_id,
+        "out_hash_1",
+        completed_at=now + timedelta(milliseconds=120),
     )
     assert completed_call.status is ToolCallStatus.COMPLETED
     assert completed_call.latency_ms == 120
-    finished = recorder.complete_run(run.agent_run_id, ended_at=now + timedelta(seconds=1))
+    finished = recorder.complete_run(
+        run.agent_run_id, ended_at=now + timedelta(seconds=1)
+    )
     assert finished.status is AgentRunStatus.COMPLETED
 
     # 2. Tool Call 거부(DENIED)도 기록되고, 그 상태로 Run은 정상 완료될 수 있다
     run2 = recorder.start_run(trace, agent, profile, "hash_2", started_at=now)
-    call2 = recorder.record_tool_call(run2.agent_run_id, "broker-adapter", {}, "call_hash_2", occurred_at=now)
+    call2 = recorder.record_tool_call(
+        run2.agent_run_id, "broker-adapter", {}, "call_hash_2", occurred_at=now
+    )
     denied = recorder.deny_tool_call(call2.tool_call_id, "out_of_allowlist")
     assert denied.status is ToolCallStatus.DENIED
-    recorder.complete_run(run2.agent_run_id)  # DENIED는 종결 상태라 Run 완료를 막지 않는다
+    recorder.complete_run(
+        run2.agent_run_id
+    )  # DENIED는 종결 상태라 Run 완료를 막지 않는다
 
     # 3. 같은 (profile_version_id, input_hash)로 RUNNING 중에 다시 start_run -> 같은 Run 재사용 (멱등)
     run3a = recorder.start_run(trace, agent, profile, "hash_3", started_at=now)
@@ -351,19 +439,33 @@ if __name__ == "__main__":
     assert len([r for r in recorder.runs.values() if r.input_hash == "hash_3"]) == 1
 
     # 4. 종료된 Run에는 Tool Call을 못 붙인다
-    raises(lambda: recorder.record_tool_call(run.agent_run_id, "x", {}, "h"), "완료된 Run에 Tool Call 추가")
+    raises(
+        lambda: recorder.record_tool_call(run.agent_run_id, "x", {}, "h"),
+        "완료된 Run에 Tool Call 추가",
+    )
 
     # 5. Tool Call이 미해결 상태(REQUESTED)로 남아 있으면 Run을 완료 처리할 수 없다
     run5 = recorder.start_run(trace, agent, profile, "hash_5", started_at=now)
-    recorder.record_tool_call(run5.agent_run_id, "market-api", {}, "call_hash_5", occurred_at=now)
-    raises(lambda: recorder.complete_run(run5.agent_run_id), "미해결 Tool Call이 있는데 Run 완료")
+    recorder.record_tool_call(
+        run5.agent_run_id, "market-api", {}, "call_hash_5", occurred_at=now
+    )
+    raises(
+        lambda: recorder.complete_run(run5.agent_run_id),
+        "미해결 Tool Call이 있는데 Run 완료",
+    )
 
     # 6. 존재하지 않는 Run/Tool Call ID -> 에러
     raises(lambda: recorder.complete_run(uuid4()), "존재하지 않는 Run 완료 시도")
-    raises(lambda: recorder.complete_tool_call(uuid4(), "h"), "존재하지 않는 Tool Call 완료 시도")
+    raises(
+        lambda: recorder.complete_tool_call(uuid4(), "h"),
+        "존재하지 않는 Tool Call 완료 시도",
+    )
 
     # 7. 이미 종결된 Tool Call은 다시 전이할 수 없다 (DENIED -> COMPLETED 금지)
-    raises(lambda: recorder.complete_tool_call(call2.tool_call_id, "h"), "DENIED에서 COMPLETED로 재전이")
+    raises(
+        lambda: recorder.complete_tool_call(call2.tool_call_id, "h"),
+        "DENIED에서 COMPLETED로 재전이",
+    )
 
     # 8. fail_run / timeout_run이 각각 올바른 상태와 error_code를 남긴다
     run8 = recorder.start_run(trace, agent, profile, "hash_8", started_at=now)
@@ -372,18 +474,27 @@ if __name__ == "__main__":
 
     run9 = recorder.start_run(trace, agent, profile, "hash_9", started_at=now)
     timed_out = recorder.timeout_run(run9.agent_run_id)
-    assert timed_out.status is AgentRunStatus.TIMED_OUT, "응답 없음을 FAILED로 추정하면 안 됨"
+    assert timed_out.status is AgentRunStatus.TIMED_OUT, (
+        "응답 없음을 FAILED로 추정하면 안 됨"
+    )
 
     # 9. as_tool_result_output_values - 완료된 Tool Call만 합쳐지고 DENIED/미완료는 제외
     run10 = recorder.start_run(trace, agent, profile, "hash_10", started_at=now)
-    call10a = recorder.record_tool_call(run10.agent_run_id, "portfolio-api", {}, "h10a", occurred_at=now)
+    call10a = recorder.record_tool_call(
+        run10.agent_run_id, "portfolio-api", {}, "h10a", occurred_at=now
+    )
     recorder.complete_tool_call(call10a.tool_call_id, "out10a")
-    call10b = recorder.record_tool_call(run10.agent_run_id, "portfolio-api", {}, "h10b", occurred_at=now)
+    call10b = recorder.record_tool_call(
+        run10.agent_run_id, "portfolio-api", {}, "h10b", occurred_at=now
+    )
     recorder.deny_tool_call(call10b.tool_call_id, "denied")
     merged = as_tool_result_output_values(
         [call10a, call10b],
-        {call10a.tool_call_id: {"AAPL": Decimal("100")}, call10b.tool_call_id: {"MSFT": Decimal("999")}},
+        {
+            call10a.tool_call_id: {"AAPL": Decimal(100)},
+            call10b.tool_call_id: {"MSFT": Decimal(999)},
+        },
     )
-    assert merged == {"AAPL": Decimal("100")}, "DENIED Tool Call 값이 섞이면 안 됨"
+    assert merged == {"AAPL": Decimal(100)}, "DENIED Tool Call 값이 섞이면 안 됨"
 
     print("ok - Agent/Tool Trace Recorder 9개 시나리오 점검 통과")

@@ -26,17 +26,27 @@ Schema/필수 Field 위반(팀 가이드 7.1 #1)은 여기서 생성 시점에 �
 
 자체 점검: python departments/06-ai-qa-audit/evidence/evidence_qa_engine.py
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 CHECKER_VERSION = "qa-evidence-p0-v1"
 GATE_NAME = "research_trading_artifact"
@@ -266,11 +276,17 @@ class QaAssessment:
 
 def _claim_hash_payload(claim: Claim) -> dict:
     return {
-        "claim_index": claim.claim_index, "text": claim.text, "kind": claim.kind.value,
+        "claim_index": claim.claim_index,
+        "text": claim.text,
+        "kind": claim.kind.value,
         "subject": claim.subject,
-        "numeric_value": str(claim.numeric_value) if claim.numeric_value is not None else None,
-        "unit": claim.unit, "evidence_ids": sorted(str(e) for e in claim.evidence_ids),
-        "acknowledges_uncertainty": claim.acknowledges_uncertainty, "tool_source": claim.tool_source,
+        "numeric_value": str(claim.numeric_value)
+        if claim.numeric_value is not None
+        else None,
+        "unit": claim.unit,
+        "evidence_ids": sorted(str(e) for e in claim.evidence_ids),
+        "acknowledges_uncertainty": claim.acknowledges_uncertainty,
+        "tool_source": claim.tool_source,
     }
 
 
@@ -283,12 +299,19 @@ def _evidence_hash_payload(store: EvidenceStore, evidence_ids: set[UUID]) -> lis
         if chunk is None:
             payload.append({"evidence_id": str(eid), "found": False})
             continue
-        payload.append({
-            "evidence_id": str(eid), "found": True, "granted": access.granted,
-            "published_at": chunk.published_at.isoformat(), "observed_at": chunk.observed_at.isoformat(),
-            "numeric_value": str(chunk.numeric_value) if chunk.numeric_value is not None else None,
-            "unit": chunk.unit,
-        })
+        payload.append(
+            {
+                "evidence_id": str(eid),
+                "found": True,
+                "granted": access.granted,
+                "published_at": chunk.published_at.isoformat(),
+                "observed_at": chunk.observed_at.isoformat(),
+                "numeric_value": str(chunk.numeric_value)
+                if chunk.numeric_value is not None
+                else None,
+                "unit": chunk.unit,
+            }
+        )
     return payload
 
 
@@ -301,7 +324,10 @@ def _context_hash(artifact: Artifact, ctx: QaContext) -> str:
         "artifact_type": artifact.artifact_type,
         "claims": [_claim_hash_payload(c) for c in artifact.claims],
         "tool_results": [
-            {"tool_name": t.tool_name, "output_values": {k: str(v) for k, v in t.output_values.items()}}
+            {
+                "tool_name": t.tool_name,
+                "output_values": {k: str(v) for k, v in t.output_values.items()},
+            }
             for t in artifact.tool_results
         ],
         "evidence": _evidence_hash_payload(ctx.evidence_store, all_evidence_ids),
@@ -332,19 +358,35 @@ class EvidenceQaEngine:
         reason_codes: list[CheckFailureReason] = []
         findings: list[FindingDraft] = []
 
-        for claim in artifact.claims:
-            result, reason, failure = self._check_claim(claim, artifact, ctx)
-            claim_checks.append(ClaimCheck(
-                claim_check_id=uuid4(),
-                artifact_version_id=artifact.artifact_version_id,
-                claim_index=claim.claim_index,
-                claim=claim.text,
-                evidence_chunk_ids=claim.evidence_ids,
-                result=result,
-                reason=reason,
-                checker_version=ctx.checker_version,
-                checked_at=ctx.decision_time,
-            ))
+        max_workers = min(
+            max(1, int(os.environ.get("QA_CLAIM_CHECK_WORKERS", "4"))),
+            len(artifact.claims),
+        )
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="qa-claim"
+        ) as pool:
+            evaluated = list(
+                pool.map(
+                    lambda claim: (claim, self._check_claim(claim, artifact, ctx)),
+                    artifact.claims,
+                )
+            )
+
+        # executor.map preserves input order, so IDs and aggregate decisions remain reproducible.
+        for claim, (result, reason, failure) in evaluated:
+            claim_checks.append(
+                ClaimCheck(
+                    claim_check_id=uuid4(),
+                    artifact_version_id=artifact.artifact_version_id,
+                    claim_index=claim.claim_index,
+                    claim=claim.text,
+                    evidence_chunk_ids=claim.evidence_ids,
+                    result=result,
+                    reason=reason,
+                    checker_version=ctx.checker_version,
+                    checked_at=ctx.decision_time,
+                )
+            )
             if failure is not None:
                 reason_codes.append(failure)
 
@@ -352,20 +394,23 @@ class EvidenceQaEngine:
             # 원 작성 본부가 이 Finding을 스스로 닫을 수 없다(팀 가이드 1절 "QA Finding을
             # 작성자가 직접 종료" 금지).
             if result in (ClaimCheckResult.UNSUPPORTED, ClaimCheckResult.CONTRADICTED):
-                findings.append(FindingDraft(
-                    finding_id=uuid4(),
-                    fund_id=artifact.fund_id,
-                    finding_type=(
-                        "unsupported_claim" if result is ClaimCheckResult.UNSUPPORTED
-                        else "contradicted_claim"
-                    ),
-                    severity=FindingSeverity.HIGH,
-                    artifact_version_id=artifact.artifact_version_id,
-                    description=f"Claim #{claim.claim_index} ({artifact.artifact_type}): {reason}",
-                    opened_by=self.service_identity,
-                    trace_id=artifact.trace_id,
-                    created_at=ctx.decision_time,
-                ))
+                findings.append(
+                    FindingDraft(
+                        finding_id=uuid4(),
+                        fund_id=artifact.fund_id,
+                        finding_type=(
+                            "unsupported_claim"
+                            if result is ClaimCheckResult.UNSUPPORTED
+                            else "contradicted_claim"
+                        ),
+                        severity=FindingSeverity.HIGH,
+                        artifact_version_id=artifact.artifact_version_id,
+                        description=f"Claim #{claim.claim_index} ({artifact.artifact_type}): {reason}",
+                        opened_by=self.service_identity,
+                        trace_id=artifact.trace_id,
+                        created_at=ctx.decision_time,
+                    )
+                )
 
         return QaAssessment(
             qa_decision_id=qa_decision_id,
@@ -385,14 +430,20 @@ class EvidenceQaEngine:
     @staticmethod
     def _aggregate(claim_checks: list[ClaimCheck]) -> QaDecisionValue:
         results = [c.result for c in claim_checks]
-        if any(r in (ClaimCheckResult.UNSUPPORTED, ClaimCheckResult.CONTRADICTED) for r in results):
+        if any(
+            r in (ClaimCheckResult.UNSUPPORTED, ClaimCheckResult.CONTRADICTED)
+            for r in results
+        ):
             return QaDecisionValue.FAIL
         if any(r is ClaimCheckResult.PARTIAL for r in results):
             return QaDecisionValue.WARN
         return QaDecisionValue.PASS
 
     def _check_claim(
-        self, claim: Claim, artifact: Artifact, ctx: QaContext,
+        self,
+        claim: Claim,
+        artifact: Artifact,
+        ctx: QaContext,
     ) -> tuple[ClaimCheckResult, str, CheckFailureReason | None]:
         # 1. JSON Schema와 필수 Field - 빈 텍스트/주체 없는 Fact는 Claim 생성 시점에
         # 이미 Pydantic이 막았다(QaBase 트러스트 경계). 여기서부터는 통과한 Claim만 본다.
@@ -401,10 +452,15 @@ class EvidenceQaEngine:
         if not claim.evidence_ids:
             if claim.kind is ClaimKind.FACT:
                 return (
-                    ClaimCheckResult.UNSUPPORTED, "사실 주장인데 인용 근거가 없습니다",
+                    ClaimCheckResult.UNSUPPORTED,
+                    "사실 주장인데 인용 근거가 없습니다",
                     CheckFailureReason.FACT_WITHOUT_EVIDENCE,
                 )
-            return ClaimCheckResult.NOT_APPLICABLE, f"{claim.kind.value} - 근거 인용 대상 아님", None
+            return (
+                ClaimCheckResult.NOT_APPLICABLE,
+                f"{claim.kind.value} - 근거 인용 대상 아님",
+                None,
+            )
 
         # 2. Evidence ID 존재와 접근 권한 + 3. published_at/observed_at <= decision_time.
         # 근거 일부가 무효해도 남은 근거로 주장이 성립하면 PARTIAL로 남기고, 전부
@@ -414,32 +470,49 @@ class EvidenceQaEngine:
         for evidence_id in claim.evidence_ids:
             chunk, access = ctx.evidence_store.lookup(evidence_id)
             if chunk is None:
-                problems.append((f"근거 {evidence_id}를 찾을 수 없음", CheckFailureReason.EVIDENCE_NOT_FOUND))
+                problems.append(
+                    (
+                        f"근거 {evidence_id}를 찾을 수 없음",
+                        CheckFailureReason.EVIDENCE_NOT_FOUND,
+                    )
+                )
                 continue
             if not access.granted:
-                problems.append((
-                    f"근거 {evidence_id} 접근 권한 없음 ({access.reason})",
-                    CheckFailureReason.EVIDENCE_ACCESS_DENIED,
-                ))
+                problems.append(
+                    (
+                        f"근거 {evidence_id} 접근 권한 없음 ({access.reason})",
+                        CheckFailureReason.EVIDENCE_ACCESS_DENIED,
+                    )
+                )
                 continue
-            if chunk.published_at > ctx.decision_time or chunk.observed_at > ctx.decision_time:
-                problems.append((
-                    f"근거 {evidence_id}가 판단 시점({ctx.decision_time.isoformat()}) 이후 데이터",
-                    CheckFailureReason.EVIDENCE_NOT_YET_VALID,
-                ))
+            if (
+                chunk.published_at > ctx.decision_time
+                or chunk.observed_at > ctx.decision_time
+            ):
+                problems.append(
+                    (
+                        f"근거 {evidence_id}가 판단 시점({ctx.decision_time.isoformat()}) 이후 데이터",
+                        CheckFailureReason.EVIDENCE_NOT_YET_VALID,
+                    )
+                )
                 continue
             valid_chunks.append(chunk)
 
         if not valid_chunks:
             first_detail, first_reason = problems[0]
-            return ClaimCheckResult.UNSUPPORTED, f"인용 근거가 전부 무효합니다: {first_detail}", first_reason
+            return (
+                ClaimCheckResult.UNSUPPORTED,
+                f"인용 근거가 전부 무효합니다: {first_detail}",
+                first_reason,
+            )
 
         # 4. Claim의 숫자·단위·주체와 Citation 일치 (유효한 근거만 대상).
         if claim.numeric_value is not None:
             matched = any(
                 chunk.numeric_value is not None
                 and chunk.unit == claim.unit
-                and abs(chunk.numeric_value - claim.numeric_value) <= abs(claim.numeric_value) * NUMERIC_TOLERANCE
+                and abs(chunk.numeric_value - claim.numeric_value)
+                <= abs(claim.numeric_value) * NUMERIC_TOLERANCE
                 for chunk in valid_chunks
             )
             if not matched:
@@ -454,7 +527,10 @@ class EvidenceQaEngine:
         if len(numeric_chunks) >= 2:
             values = [c.numeric_value for c in numeric_chunks]
             spread = max(values) - min(values)
-            if spread > max(values) * CONTRADICTION_TOLERANCE and not claim.acknowledges_uncertainty:
+            if (
+                spread > max(values) * CONTRADICTION_TOLERANCE
+                and not claim.acknowledges_uncertainty
+            ):
                 return (
                     ClaimCheckResult.CONTRADICTED,
                     "인용 근거끼리 값이 상충하는데 불확실성 표시가 없습니다",
@@ -462,9 +538,14 @@ class EvidenceQaEngine:
                 )
 
         # 7. Tool 결과와 Agent 요약의 변형 여부.
-        if claim.tool_source is not None and claim.numeric_value is not None and claim.subject is not None:
+        if (
+            claim.tool_source is not None
+            and claim.numeric_value is not None
+            and claim.subject is not None
+        ):
             tool_record = next(
-                (t for t in artifact.tool_results if t.tool_name == claim.tool_source), None,
+                (t for t in artifact.tool_results if t.tool_name == claim.tool_source),
+                None,
             )
             if tool_record is not None and claim.subject in tool_record.output_values:
                 actual = tool_record.output_values[claim.subject]
@@ -490,19 +571,29 @@ if __name__ == "__main__":
     artifact_id = uuid4()
 
     def evidence(
-        source="research-api", published_offset=timedelta(hours=-1), observed_offset=timedelta(hours=-1),
-        numeric_value=None, unit=None, excerpt="근거 원문",
+        source="research-api",
+        published_offset=timedelta(hours=-1),
+        observed_offset=timedelta(hours=-1),
+        numeric_value=None,
+        unit=None,
+        excerpt="근거 원문",
     ) -> EvidenceChunk:
         return EvidenceChunk(
-            evidence_id=uuid4(), source=source,
-            published_at=now + published_offset, observed_at=now + observed_offset,
-            excerpt=excerpt, numeric_value=numeric_value, unit=unit,
+            evidence_id=uuid4(),
+            source=source,
+            published_at=now + published_offset,
+            observed_at=now + observed_offset,
+            excerpt=excerpt,
+            numeric_value=numeric_value,
+            unit=unit,
         )
 
     def store_with(*chunks: EvidenceChunk, denied: set | None = None) -> EvidenceStore:
         denied = denied or set()
         access = {
-            c.evidence_id: EvidenceAccess(granted=c.evidence_id not in denied, reason="권한 없음")
+            c.evidence_id: EvidenceAccess(
+                granted=c.evidence_id not in denied, reason="권한 없음"
+            )
             for c in chunks
         }
         return EvidenceStore(chunks={c.evidence_id: c for c in chunks}, access=access)
@@ -510,34 +601,56 @@ if __name__ == "__main__":
     def ctx_with(store: EvidenceStore) -> QaContext:
         return QaContext(evidence_store=store, decision_time=now)
 
-    def artifact_with(*claims: Claim, tool_results: tuple[ToolResultRecord, ...] = ()) -> Artifact:
+    def artifact_with(
+        *claims: Claim, tool_results: tuple[ToolResultRecord, ...] = ()
+    ) -> Artifact:
         return Artifact(
-            artifact_version_id=artifact_id, artifact_type="research_packet",
-            producer="research-supervisor", fund_id=fund, trace_id=trace,
-            claims=claims, tool_results=tool_results,
+            artifact_version_id=artifact_id,
+            artifact_type="research_packet",
+            producer="research-supervisor",
+            fund_id=fund,
+            trace_id=trace,
+            claims=claims,
+            tool_results=tool_results,
         )
 
     engine = EvidenceQaEngine()
 
-    def result_is(assessment: QaAssessment, idx: int, expected: ClaimCheckResult, why: str):
+    def result_is(
+        assessment: QaAssessment, idx: int, expected: ClaimCheckResult, why: str
+    ):
         actual = assessment.claim_checks[idx].result
         assert actual is expected, f"{why}: {actual} (기대: {expected})"
 
     def decision_is(assessment: QaAssessment, expected: QaDecisionValue, why: str):
-        assert assessment.decision is expected, f"{why}: {assessment.decision} (기대: {expected})"
+        assert assessment.decision is expected, (
+            f"{why}: {assessment.decision} (기대: {expected})"
+        )
 
     # 1. Fact + 일치하는 근거 1건 -> SUPPORTED, 전체 PASS
-    ev1 = evidence(numeric_value=Decimal("70000"), unit="KRW")
-    a1 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
-                             evidence_ids=(ev1.evidence_id,)))
+    ev1 = evidence(numeric_value=Decimal(70000), unit="KRW")
+    a1 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 70000원",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(70000),
+            unit="KRW",
+            evidence_ids=(ev1.evidence_id,),
+        )
+    )
     r1 = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     result_is(r1, 0, ClaimCheckResult.SUPPORTED, "정상 Fact")
     decision_is(r1, QaDecisionValue.PASS, "정상 Fact 단독")
     assert not r1.findings, "정상 Claim인데 Finding이 열림"
 
     # 2. Fact + 근거 없음 -> UNSUPPORTED, FAIL, Finding 1건
-    a2 = artifact_with(Claim(claim_index=0, text="AAPL은 반등한다", kind=ClaimKind.FACT, subject="AAPL"))
+    a2 = artifact_with(
+        Claim(
+            claim_index=0, text="AAPL은 반등한다", kind=ClaimKind.FACT, subject="AAPL"
+        )
+    )
     r2 = engine.check_artifact(a2, ctx_with(EvidenceStore()))
     result_is(r2, 0, ClaimCheckResult.UNSUPPORTED, "근거 없는 Fact")
     decision_is(r2, QaDecisionValue.FAIL, "근거 없는 Fact")
@@ -545,67 +658,125 @@ if __name__ == "__main__":
     assert len(r2.findings) == 1 and r2.findings[0].severity is FindingSeverity.HIGH
 
     # 3. Inference + 근거 없음 -> NOT_APPLICABLE (근거 강제 안 함), PASS
-    a3 = artifact_with(Claim(claim_index=0, text="다음 주 반등 가능성이 있다", kind=ClaimKind.INFERENCE))
+    a3 = artifact_with(
+        Claim(
+            claim_index=0, text="다음 주 반등 가능성이 있다", kind=ClaimKind.INFERENCE
+        )
+    )
     r3 = engine.check_artifact(a3, ctx_with(EvidenceStore()))
     result_is(r3, 0, ClaimCheckResult.NOT_APPLICABLE, "Inference는 근거 강제 안 함")
     decision_is(r3, QaDecisionValue.PASS, "Inference 단독")
 
     # 4. 존재하지 않는 Evidence ID -> UNSUPPORTED
-    a4 = artifact_with(Claim(claim_index=0, text="매출이 늘었다", kind=ClaimKind.FACT, subject="매출",
-                             evidence_ids=(uuid4(),)))
+    a4 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="매출이 늘었다",
+            kind=ClaimKind.FACT,
+            subject="매출",
+            evidence_ids=(uuid4(),),
+        )
+    )
     r4 = engine.check_artifact(a4, ctx_with(EvidenceStore()))
     result_is(r4, 0, ClaimCheckResult.UNSUPPORTED, "존재하지 않는 근거")
     assert CheckFailureReason.EVIDENCE_NOT_FOUND in r4.reason_codes
 
     # 5. 접근 권한 없는 Evidence -> UNSUPPORTED
     ev5 = evidence()
-    a5 = artifact_with(Claim(claim_index=0, text="내부 보고서에 따르면", kind=ClaimKind.FACT,
-                             subject="내부", evidence_ids=(ev5.evidence_id,)))
+    a5 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="내부 보고서에 따르면",
+            kind=ClaimKind.FACT,
+            subject="내부",
+            evidence_ids=(ev5.evidence_id,),
+        )
+    )
     r5 = engine.check_artifact(a5, ctx_with(store_with(ev5, denied={ev5.evidence_id})))
     result_is(r5, 0, ClaimCheckResult.UNSUPPORTED, "접근 권한 없는 근거")
     assert CheckFailureReason.EVIDENCE_ACCESS_DENIED in r5.reason_codes
 
     # 6. 판단 시점 이후에 발행된 근거 (PIT 위반) -> UNSUPPORTED
-    ev6 = evidence(published_offset=timedelta(hours=2), observed_offset=timedelta(hours=2))
-    a6 = artifact_with(Claim(claim_index=0, text="내일 발표 예정", kind=ClaimKind.FACT,
-                             subject="발표", evidence_ids=(ev6.evidence_id,)))
+    ev6 = evidence(
+        published_offset=timedelta(hours=2), observed_offset=timedelta(hours=2)
+    )
+    a6 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="내일 발표 예정",
+            kind=ClaimKind.FACT,
+            subject="발표",
+            evidence_ids=(ev6.evidence_id,),
+        )
+    )
     r6 = engine.check_artifact(a6, ctx_with(store_with(ev6)))
     result_is(r6, 0, ClaimCheckResult.UNSUPPORTED, "미래 근거(PIT 위반)")
     assert CheckFailureReason.EVIDENCE_NOT_YET_VALID in r6.reason_codes
 
     # 7. 숫자 불일치 -> UNSUPPORTED
-    ev7 = evidence(numeric_value=Decimal("50000"), unit="KRW")
-    a7 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                             subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
-                             evidence_ids=(ev7.evidence_id,)))
+    ev7 = evidence(numeric_value=Decimal(50000), unit="KRW")
+    a7 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 70000원",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(70000),
+            unit="KRW",
+            evidence_ids=(ev7.evidence_id,),
+        )
+    )
     r7 = engine.check_artifact(a7, ctx_with(store_with(ev7)))
     result_is(r7, 0, ClaimCheckResult.UNSUPPORTED, "숫자 불일치")
     assert CheckFailureReason.NUMERIC_CITATION_MISMATCH in r7.reason_codes
 
     # 8. 상충하는 두 근거, 불확실성 표시 없음 -> CONTRADICTED, Finding
-    ev8a = evidence(source="A", numeric_value=Decimal("70000"), unit="KRW")
-    ev8b = evidence(source="B", numeric_value=Decimal("50000"), unit="KRW")
-    a8 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 약 6만원대", kind=ClaimKind.FACT,
-                             subject="AAPL", evidence_ids=(ev8a.evidence_id, ev8b.evidence_id)))
+    ev8a = evidence(source="A", numeric_value=Decimal(70000), unit="KRW")
+    ev8b = evidence(source="B", numeric_value=Decimal(50000), unit="KRW")
+    a8 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 약 6만원대",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            evidence_ids=(ev8a.evidence_id, ev8b.evidence_id),
+        )
+    )
     r8 = engine.check_artifact(a8, ctx_with(store_with(ev8a, ev8b)))
     result_is(r8, 0, ClaimCheckResult.CONTRADICTED, "상충 근거 미표시")
     assert CheckFailureReason.UNACKNOWLEDGED_CONTRADICTION in r8.reason_codes
     decision_is(r8, QaDecisionValue.FAIL, "상충 Claim 포함")
 
     # 9. 같은 상충 근거인데 acknowledges_uncertainty=True -> 통과 (SUPPORTED)
-    a9 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 출처마다 다르게 보고됨", kind=ClaimKind.FACT,
-                             subject="AAPL", evidence_ids=(ev8a.evidence_id, ev8b.evidence_id),
-                             acknowledges_uncertainty=True))
+    a9 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 출처마다 다르게 보고됨",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            evidence_ids=(ev8a.evidence_id, ev8b.evidence_id),
+            acknowledges_uncertainty=True,
+        )
+    )
     r9 = engine.check_artifact(a9, ctx_with(store_with(ev8a, ev8b)))
     result_is(r9, 0, ClaimCheckResult.SUPPORTED, "상충이어도 불확실성 표시하면 통과")
 
     # 10. Tool 실제 결과와 Agent 요약이 다름 -> CONTRADICTED
-    ev10 = evidence(numeric_value=Decimal("100"), unit="주")
-    tool10 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("60")})
+    ev10 = evidence(numeric_value=Decimal(100), unit="주")
+    tool10 = ToolResultRecord(
+        tool_name="portfolio-api", output_values={"AAPL": Decimal(60)}
+    )
     a10 = artifact_with(
-        Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
-              tool_source="portfolio-api"),
+        Claim(
+            claim_index=0,
+            text="AAPL 보유량은 100주",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(100),
+            unit="주",
+            evidence_ids=(ev10.evidence_id,),
+            tool_source="portfolio-api",
+        ),
         tool_results=(tool10,),
     )
     r10 = engine.check_artifact(a10, ctx_with(store_with(ev10)))
@@ -613,33 +784,62 @@ if __name__ == "__main__":
     assert CheckFailureReason.TOOL_SUMMARY_DEVIATION in r10.reason_codes
 
     # 11. Tool 실제 결과와 요약이 일치 -> SUPPORTED
-    tool11 = ToolResultRecord(tool_name="portfolio-api", output_values={"AAPL": Decimal("100")})
+    tool11 = ToolResultRecord(
+        tool_name="portfolio-api", output_values={"AAPL": Decimal(100)}
+    )
     a11 = artifact_with(
-        Claim(claim_index=0, text="AAPL 보유량은 100주", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("100"), unit="주", evidence_ids=(ev10.evidence_id,),
-              tool_source="portfolio-api"),
+        Claim(
+            claim_index=0,
+            text="AAPL 보유량은 100주",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(100),
+            unit="주",
+            evidence_ids=(ev10.evidence_id,),
+            tool_source="portfolio-api",
+        ),
         tool_results=(tool11,),
     )
     r11 = engine.check_artifact(a11, ctx_with(store_with(ev10)))
     result_is(r11, 0, ClaimCheckResult.SUPPORTED, "Tool 결과와 요약 일치")
 
     # 12. 근거 2건 중 1건은 존재하지 않고 1건은 유효+일치 -> PARTIAL (완전 실패 아님)
-    ev12 = evidence(numeric_value=Decimal("70000"), unit="KRW")
-    a12 = artifact_with(Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT,
-                              subject="AAPL", numeric_value=Decimal("70000"), unit="KRW",
-                              evidence_ids=(uuid4(), ev12.evidence_id)))
+    ev12 = evidence(numeric_value=Decimal(70000), unit="KRW")
+    a12 = artifact_with(
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 70000원",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(70000),
+            unit="KRW",
+            evidence_ids=(uuid4(), ev12.evidence_id),
+        )
+    )
     r12 = engine.check_artifact(a12, ctx_with(store_with(ev12)))
     result_is(r12, 0, ClaimCheckResult.PARTIAL, "일부 근거 무효, 나머지로 성립")
     assert CheckFailureReason.PARTIAL_EVIDENCE_SET in r12.reason_codes
     decision_is(r12, QaDecisionValue.WARN, "PARTIAL Claim 포함 - WARN이지 FAIL 아님")
 
     # 13. 여러 Claim 중 1개만 실패해도 전체 FAIL, Finding은 실패한 것만 생성
-    ev13 = evidence(numeric_value=Decimal("70000"), unit="KRW")
+    ev13 = evidence(numeric_value=Decimal(70000), unit="KRW")
     a13 = artifact_with(
-        Claim(claim_index=0, text="AAPL 종가는 70000원", kind=ClaimKind.FACT, subject="AAPL",
-              numeric_value=Decimal("70000"), unit="KRW", evidence_ids=(ev13.evidence_id,)),
+        Claim(
+            claim_index=0,
+            text="AAPL 종가는 70000원",
+            kind=ClaimKind.FACT,
+            subject="AAPL",
+            numeric_value=Decimal(70000),
+            unit="KRW",
+            evidence_ids=(ev13.evidence_id,),
+        ),
         Claim(claim_index=1, text="MSFT는 반등 여력이 있다", kind=ClaimKind.INFERENCE),
-        Claim(claim_index=2, text="삼성전자 실적이 개선됐다", kind=ClaimKind.FACT, subject="삼성전자"),  # 근거 없음
+        Claim(
+            claim_index=2,
+            text="삼성전자 실적이 개선됐다",
+            kind=ClaimKind.FACT,
+            subject="삼성전자",
+        ),  # 근거 없음
     )
     r13 = engine.check_artifact(a13, ctx_with(store_with(ev13)))
     decision_is(r13, QaDecisionValue.FAIL, "3개 중 1개 실패")
@@ -671,8 +871,12 @@ if __name__ == "__main__":
     r17a = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     r17b = engine.check_artifact(a1, ctx_with(store_with(ev1)))
     assert r17a.decision is r17b.decision
-    assert [c.result for c in r17a.claim_checks] == [c.result for c in r17b.claim_checks]
-    assert r17a.input_hash == r17b.input_hash, "같은 Artifact·Context인데 input_hash가 다름"
+    assert [c.result for c in r17a.claim_checks] == [
+        c.result for c in r17b.claim_checks
+    ]
+    assert r17a.input_hash == r17b.input_hash, (
+        "같은 Artifact·Context인데 input_hash가 다름"
+    )
     assert r17a.calculation_version == CHECKER_VERSION
 
     # 18. 다른 Artifact(다른 Claim 내용)면 input_hash도 달라야 한다

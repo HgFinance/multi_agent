@@ -125,30 +125,31 @@ if __name__ == "__main__":
     )
 
     def _policy(**over) -> MandatePolicy:
-        risk = dict(
-            base_capital="100000000",
-            currency="KRW",
-            max_instrument_weight="0.1",
-            max_sector_weight="0.3",
-            max_gross_exposure="1.0",
-            max_concurrent_positions=10,
-            max_daily_loss="0.03",
-        )
+        risk = {
+            "base_capital": "100000000",
+            "currency": "KRW",
+            "max_instrument_weight": "0.1",
+            "max_sector_weight": "0.3",
+            "max_gross_exposure": "1.0",
+            "max_concurrent_positions": 10,
+            "max_daily_loss": "0.03",
+        }
         risk.update(over.pop("risk", {}))
         return MandatePolicy(
             allowed_assets=["A005930"],
             forbidden_assets=[],
             risk_bounds=risk,
-            universe_policy=dict(
-                allowed_markets=["KRX"], trading_start="09:00", trading_end="15:30"
-            ),
-            approval_rules=dict(paper_order_mode="USER_APPROVAL"),
+            universe_policy={
+                "allowed_markets": ["KRX"], "trading_start": "09:00", "trading_end": "15:30"
+            },
+            approval_rules={"paper_order_mode": "USER_APPROVAL"},
         )
 
     def _obj() -> dict:
         return {"style": "growth"}
 
     repo = InMemoryMandateVersionRepository()
+    repo.set_fund_base_currency("m1", "KRW")  # accounting.funds.base_currency (결정 4-A)
     vsvc = MandateVersionService(repo)
     asvc = MandateActivationService(repo)
 

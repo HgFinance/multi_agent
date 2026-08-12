@@ -24,10 +24,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 
-from contracts import LOT_SIZE as QTY_UNIT  # noqa: E402
-from contracts import OrderType, Side, is_valid_tick, tick_size  # noqa: E402
+from contracts import LOT_SIZE as QTY_UNIT
+from contracts import OrderType, Side, is_valid_tick, tick_size
 
-WON = Decimal("1")
+WON = Decimal(1)
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class PaperBroker:
               쌓이면 그 분포로 교정한다. Paper 단계 검증에는 충분하다.
     """
 
-    def __init__(self, fee_bps: Decimal = Decimal("1.5"), sell_tax_bps: Decimal = Decimal("15"),
+    def __init__(self, fee_bps: Decimal = Decimal("1.5"), sell_tax_bps: Decimal = Decimal(15),
                  max_participation: Decimal = Decimal("0.05")) -> None:
         # 기본값은 departments/02-trading/contracts/philosophies.yaml의 market 블록과 같은 값이다.
         self.fee_bps = fee_bps
@@ -187,20 +187,20 @@ if __name__ == "__main__":
     )
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "oms"))
-    from oms import OMS  # noqa: E402
+    from oms import OMS
 
     now = datetime.now(timezone.utc)
 
     # 1. 호가 단위 테이블
-    assert tick_size(D("1500")) == D("1")
-    assert tick_size(D("70000")) == D("100")
-    assert tick_size(D("300000")) == D("500")
-    assert is_valid_tick(D("70100")) and not is_valid_tick(D("70050"))
+    assert tick_size(D(1500)) == D(1)
+    assert tick_size(D(70000)) == D(100)
+    assert tick_size(D(300000)) == D(500)
+    assert is_valid_tick(D(70100)) and not is_valid_tick(D(70050))
 
     broker = PaperBroker()
 
     def build(qty="100", price="70000", side=Side.BUY, key="idem_p001"):
-        snap = MarketSnapshot(market_snapshot_id="s", as_of=now, bid=D("69900"), ask=D("70000"))
+        snap = MarketSnapshot(market_snapshot_id="s", as_of=now, bid=D(69900), ask=D(70000))
         intent = OrderIntent(
             trade_case_id=uuid4(), fund_id=uuid4(), book_id=uuid4(), strategy_id=uuid4(),
             instrument_id=uuid4(), side=side, order_type=OrderType.LIMIT,
@@ -233,41 +233,41 @@ if __name__ == "__main__":
     oms.on_broker_event(order, "ack", ev.broker_event_id, now, ev.payload)
 
     # 가격 미도달이면 체결되지 않는다 (ask 70100 > limit 70000)
-    assert broker.try_fill(order, Quote(D("70000"), D("70100"), D("1000"), D("1000"))) is None
+    assert broker.try_fill(order, Quote(D(70000), D(70100), D(1000), D(1000))) is None
     assert order.filled_quantity == 0, "가격 미도달인데 체결됐다"
 
     # 가격 도달 - 참여율 5%, 잔량 1000 -> 50주만 체결
-    fill = broker.try_fill(order, Quote(D("69900"), D("70000"), D("1000"), D("1000")))
+    fill = broker.try_fill(order, Quote(D(69900), D(70000), D(1000), D(1000)))
     assert fill is not None and fill.payload["quantity"] == "50", fill
     oms.on_broker_event(order, "fill", fill.broker_event_id, now, fill.payload)
-    assert order.state is BrokerOrderState.PARTIALLY_FILLED and order.filled_quantity == D("50")
+    assert order.state is BrokerOrderState.PARTIALLY_FILLED and order.filled_quantity == D(50)
 
     # 잔량 전부 체결
-    fill2 = broker.try_fill(order, Quote(D("69900"), D("70000"), D("5000"), D("5000")))
+    fill2 = broker.try_fill(order, Quote(D(69900), D(70000), D(5000), D(5000)))
     assert fill2.payload["quantity"] == "50", "잔량 초과 체결 시도"
     oms.on_broker_event(order, "fill", fill2.broker_event_id, now, fill2.payload)
     assert order.state is BrokerOrderState.FILLED
-    assert broker.try_fill(order, Quote(D("69900"), D("70000"), D("5000"), D("5000"))) is None
+    assert broker.try_fill(order, Quote(D(69900), D(70000), D(5000), D(5000))) is None
 
     # 4. 매수에는 거래세가 없고 매도에는 있다
     buy_fee = D(fill.payload["fee"])
-    assert buy_fee == (D("50") * D("70000") * D("1.5") / 10000).quantize(WON)
+    assert buy_fee == (D(50) * D(70000) * D("1.5") / 10000).quantize(WON)
     assert D(fill.payload["tax"]) == 0, "매수에 거래세가 붙었다"
 
     oms_s, order_s, _ = build(side=Side.SELL, price="69900", key="idem_p003")
     ev = broker.accept(order_s)
     oms_s.on_broker_event(order_s, "ack", ev.broker_event_id, now, ev.payload)
-    sell = broker.try_fill(order_s, Quote(D("69900"), D("70000"), D("2000"), D("2000")))
+    sell = broker.try_fill(order_s, Quote(D(69900), D(70000), D(2000), D(2000)))
     assert D(sell.payload["tax"]) > 0, "매도에 거래세가 없다"
-    assert D(sell.payload["price"]) == D("69900"), "매도가 ask에 체결됐다"
+    assert D(sell.payload["price"]) == D(69900), "매도가 ask에 체결됐다"
 
     # 5. 취소는 CANCEL_PENDING을 거친다. 브로커 확인 전에는 취소가 아니다
     oms_c, order_c, _ = build(key="idem_p004")
     ev = broker.accept(order_c)
     oms_c.on_broker_event(order_c, "ack", ev.broker_event_id, now, ev.payload)
-    part = broker.try_fill(order_c, Quote(D("69900"), D("70000"), D("400"), D("400")))
+    part = broker.try_fill(order_c, Quote(D(69900), D(70000), D(400), D(400)))
     oms_c.on_broker_event(order_c, "fill", part.broker_event_id, now, part.payload)
-    assert order_c.filled_quantity == D("20")
+    assert order_c.filled_quantity == D(20)
 
     oms_c.request_cancel(order_c, "장 마감 임박")
     assert order_c.state is BrokerOrderState.CANCEL_PENDING, "요청만으로 취소가 확정됐다"
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     assert cxl is not None and cxl.payload["leaves"] == "80"
     oms_c.on_broker_event(order_c, "cancel", cxl.broker_event_id, now, cxl.payload)
     assert order_c.state is BrokerOrderState.CANCELLED
-    assert order_c.filled_quantity == D("20"), "취소가 체결분을 지웠다"
+    assert order_c.filled_quantity == D(20), "취소가 체결분을 지웠다"
 
     # 6. 잔량 없는 주문은 브로커가 취소해 줄 것이 없다
     #    여기서 cancel 이벤트를 만들면 체결된 주문이 취소로 덮인다.
@@ -289,20 +289,20 @@ if __name__ == "__main__":
     exp = broker.expire(order_e, now + timedelta(hours=6))
     assert exp is not None and exp.payload["leaves"] == "100"
     oms_e.on_broker_event(order_e, "expire", exp.broker_event_id, now + timedelta(hours=6), exp.payload)
-    assert order_e.state is BrokerOrderState.EXPIRED and order_e.filled_quantity == D("0")
+    assert order_e.state is BrokerOrderState.EXPIRED and order_e.filled_quantity == D(0)
 
     # 8. 부분체결 주문은 EXPIRED로 갈 수 없다. 잔량 소멸도 취소 경로로 확정한다
     #    체결이 있는 주문을 EXPIRED로 덮으면 그 체결의 귀속이 사라진다.
     oms_p, order_p, _ = build(key="idem_p006")
     ev = broker.accept(order_p)
     oms_p.on_broker_event(order_p, "ack", ev.broker_event_id, now, ev.payload)
-    part = broker.try_fill(order_p, Quote(D("69900"), D("70000"), D("600"), D("600")))
+    part = broker.try_fill(order_p, Quote(D(69900), D(70000), D(600), D(600)))
     oms_p.on_broker_event(order_p, "fill", part.broker_event_id, now, part.payload)
     assert order_p.state is BrokerOrderState.PARTIALLY_FILLED
     assert broker.expire(order_p) is None, "부분체결 주문에 만료 이벤트가 생성됐다"
     oms_p.request_cancel(order_p, "장 마감 - 잔량 취소")
     cxl = broker.cancel(order_p)
     oms_p.on_broker_event(order_p, "cancel", cxl.broker_event_id, now, cxl.payload)
-    assert order_p.state is BrokerOrderState.CANCELLED and order_p.filled_quantity == D("30")
+    assert order_p.state is BrokerOrderState.CANCELLED and order_p.filled_quantity == D(30)
 
     print("ok - Paper Broker 8개 영역 점검 통과")

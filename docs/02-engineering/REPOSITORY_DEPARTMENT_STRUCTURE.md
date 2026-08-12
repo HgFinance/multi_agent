@@ -1,5 +1,7 @@
 # Department-Oriented Repository Structure
 
+직원 실행 계층과 부서 간 핸드오프는 [DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
+
 > 문서 상태: Confirmed Target Structure v1.2
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 적용 범위: CEO Office, CEO 직속 Agent Workforce 인사팀, 6개 투자 본부와 공통 Platform
@@ -8,6 +10,8 @@
 > 단계 4(DB Prototype 통합)와 단계 5(구조 Gate)는 아직 진행 전이다.
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
 > Frontend 경계: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
+> Backend·Event·Docker 연결 경계: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)
+> 본부별 Ollama Model 경계: [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 
 ## 1. 이 구조가 필요한 이유
 
@@ -58,7 +62,8 @@
 | `timescaledb/migrations/` | 고빈도 시장 시계열 DB Migration 기준 | Canonical |
 | `tests/schema/` | DB 정적 계약과 Runtime Smoke Test | 사용 중 |
 | `docs/06-integrations/ls-openapi/` | LS증권 공개 API 계약 참조 | 사용 중 |
-| `ai-office/` | Next.js·React·TypeScript Pixel Office와 Scripted Simulation | Frontend Prototype |
+| `ai-office/` | 8개 조직·2개 층 Pixel Office, Trading/Portfolio DEMO Panel과 Scripted Simulation | Frontend Prototype |
+| `apps/api/main.py` | 테스트 Paper Loop 기반 `/ui/snapshot`과 기본 차단된 `/agent/ask` | Read-only DEMO BFF Prototype |
 
 구 경로 `orchestration/hermes/`, `trading/`, `execution/`, `accounting/`, `fetch_news.py`는 임시 CLI 호환
 Wrapper와 함께 완전히 삭제됐다(2026-07-30, 예정보다 빠름). 위 `departments/<n>/` 경로만 존재한다.
@@ -167,12 +172,19 @@ multi_agent/
 │   ├── replay/
 │   └── e2e/
 ├── infrastructure/
+│   └── compose/
+│       ├── core.yaml
+│       ├── observability.yaml
+│       └── local-llm.yaml
+├── compose.yaml
 ├── scripts/
 ├── docs/
 └── references/
 ```
 
 `supabase/`와 `timescaledb/`는 CLI와 Migration Tool의 표준 경로를 유지한다. Schema의 논리적 소유자는 본부별로 나누되 Migration 파일을 본부 폴더로 복제하지 않는다.
+
+각 `departments/<department>/`는 목표적으로 `Dockerfile`과 `compose.yaml`을 소유한다. 루트 `compose.yaml`은 Docker Compose `include`로 본부별 Fragment를 조립하며 API, Worker와 Hermes를 하나의 Process에 합치지 않는다. 현재 루트 `docker-compose.yml`의 Research Collector는 [Backend 연결 계획 Phase B1](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md#phase-b1-compose-modularization)에서 동작 검증을 유지한 채 이동한다.
 
 ## 5. 본부 폴더 표준
 
@@ -182,6 +194,7 @@ multi_agent/
 |---|---|---|
 | `README.md` | Mission, Owner, 입력·출력 계약, 실행법, 테스트와 Handoff | Secret, 개인 환경값 |
 | `hermes/` | Git으로 관리하는 `config.yaml`, `SOUL.md` | `auth.json`, `.env`, Memory, Session, Runtime DB |
+| `Modelfile` | Local Model의 Base Model과 최소 역할 요약 | Agent 권한, Secret, Runtime Memory, 미승인 투자자 Persona |
 | `src/` 또는 Domain 하위 폴더 | 해당 본부가 독점 소유하는 결정론적 Service | 다른 본부 DB 직접 접근 코드 |
 | `tests/` | 본부 Unit·Contract Test와 Failure Fixture | 외부 실거래 Credential |
 | `config/`가 필요한 경우 | Version 관리 가능한 비밀이 아닌 정책·Preset | API Key, Broker Token |
@@ -198,7 +211,7 @@ multi_agent/
 | `supabase/migrations/` | Schema 소유 본부 | DB Owner + Risk/QA, 회계 관련 시 회계본부 | 단일 순서, RLS, Rollback 계획 |
 | `timescaledb/migrations/` | 리서치본부 | 퀀트본부 + AI QA | Point-in-Time, Dedup, Retention |
 | `integrations/ls-openapi/` | 리서치본부 | 트레이딩·리스크 소비 계약 검토 | Raw 이벤트와 Canonical Event 분리 |
-| `apps/` | 공통 Frontend·서비스 운영 Owner | 모든 Command·Read Model 소유 본부 | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
+| `apps/` | 도현님(공통 Frontend Platform 기술 DRI), 영주님(Live Office Business Owner) | 모든 Command·Read Model 소유 본부, 동규님 Risk·QA | UI는 Risk·OMS·Ledger 규칙을 구현하지 않음 |
 | `infrastructure/` | Platform Owner | Security + 서비스 Owner | Secret과 Service Identity 분리 |
 
 한 명이 두 본부를 담당해도 두 본부 폴더와 승인 역할을 합치지 않는다. 도현님이 트레이딩과 회계를 담당해도 주문 생성과 공식 원장 확정은 별도 PR Review와 Service Identity를 사용한다. 동규님이 리스크와 QA를 담당해도 Risk Decision과 Audit Finding의 승인 권한을 하나로 합치지 않는다.
@@ -368,8 +381,8 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 | `agent_evolution_cycle`과 Hermes 조직 학습 | 부분 정합, 비 MD | Profile 개선 Prototype은 존재하나 Improvement Registry, Skill Write Gate, 독립 Eval Runner와 Scorecard 연결 필요 |
 | Bedrock/Ollama 목표와 현재 Nous Profile | 상태 구분 필요 | 현재 Profile은 개발 Runtime, Bedrock/Ollama는 목표 Model Gateway임을 문서에 명시 |
 | LS Open API 문서 | 정합 | REST·WebSocket 42개 API 묶음과 365개 TR 참조가 문서 지도에 연결됨 |
-| `ai-office`와 8개 조직 | 불일치 | 현재 12개 고정 Creator 부서는 Demo Baseline으로 분류하고 8개 조직·실시간 Backend Projection으로의 이전 기준을 확정 |
-| `ai-office`와 금융 Source of Truth | 미연결 | Browser Simulation을 공식 상태로 사용하지 않고 FastAPI Snapshot·WebSocket, Supabase·OMS·Ledger·Risk Read Model을 사용하도록 경계 확정 |
+| `ai-office`와 8개 조직 | 부분 정합 | 8개 조직·2개 층 전환 완료, Backend 조직 Registry 기반 배치는 미완료 |
+| `ai-office`와 금융 Source of Truth | 부분 연결 | DEMO BFF·Trading/Portfolio Fixture는 존재하나 Supabase Auth, 공식 Snapshot·WebSocket와 Kanban Status Bridge는 미완료 |
 
 ## 13. 완료 기준
 

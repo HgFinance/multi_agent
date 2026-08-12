@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SUPABASE_MIGRATIONS = ROOT / "supabase" / "migrations"
 TIMESCALE_MIGRATIONS = ROOT / "timescaledb" / "migrations"
@@ -17,7 +16,7 @@ def read_sql_files(directory: Path) -> list[tuple[Path, str]]:
 def created_tables(sql: str) -> set[tuple[str, str]]:
     return set(
         re.findall(
-            r"(?im)^create\s+table\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
+            r"(?im)^create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
             sql,
         )
     )
@@ -31,34 +30,171 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         cls.tables = created_tables(cls.sql)
 
     def test_migration_sequence_is_complete(self) -> None:
-        self.assertEqual(
-            [path.name for path, _ in self.files],
-            [
+        expected = [
                 "20260729000100_foundation_reference.sql",
                 "20260729000200_governance_workforce.sql",
                 "20260729000300_research_quant_strategy.sql",
                 "20260729000400_execution_risk_accounting.sql",
                 "20260729000500_audit_api_security.sql",
                 "20260730000600_workforce_improvement_candidates.sql",
-            ],
-        )
+                "20260731000700_workforce_access_lifecycle.sql",
+                "20260731000701_news_ingest_latency.sql",
+                "20260731000800_workforce_plan_quality_probation.sql",
+                "20260731000801_news_recency_weight.sql",
+                "20260731000900_public_dashboard_views.sql",
+                "20260731001000_qa_decisions_reproducibility.sql",
+                "20260731001100_dash_news_published_date.sql",
+                "20260801001200_evidence_chunk_embedding_1024.sql",
+                "20260801001300_research_pipeline_runs.sql",
+                "20260802001400_research_packet_outcomes.sql",
+                "20260802001500_research_collector_runs.sql",
+                "20260802001600_risk_qa_runtime_registration.sql",
+                "20260802001700_evidence_embedding_1024_match.sql",
+                "20260802001800_risk_qa_p1_rls.sql",
+                "20260802001900_research_daily_labels.sql",
+                "20260802002000_research_symbol_restrictions.sql",
+                "20260802002100_risk_qa_run_log_replay.sql",
+                # 리서치 (재일, 2026-08-02~03)
+                "20260802002200_research_as_known_at.sql",
+                "20260803002300_research_claim_forecast.sql",
+                "20260803002400_research_document_revisions.sql",
+                "20260803002500_research_production_authorized.sql",
+                "20260804000100_align_current_runtime_models.sql",
+                # CEO Office / 인사팀 (영주, 2026-08-04)
+                "20260804000200_governance_case_status.sql",
+                "20260804000300_unify_department_code.sql",
+                "20260804000400_risk_qa_runtime_activation.sql",
+                "20260804000500_api_accounting_read_views.sql",
+                "20260804001000_quant_hypothesis_inconclusive.sql",
+                "20260804001100_order_events_broker_id_unique.sql",
+                "20260804001200_risk_qa_production_read_paths.sql",
+                # CEO Office (영주, 2026-08-05) - P0-2 GOV-02 Replay가 실 DB로 잡은 버그 수정
+                "20260805000100_notifications_dedup_key_per_channel.sql",
+                # 위 마이그레이션의 ADD CONSTRAINT가 재실행에 안전하지 않아 병합 후
+                # Supabase 자동 적용이 "already exists"로 실패한 것을 고치는 후속 마이그레이션
+                "20260805000200_notifications_dedup_key_constraint_idempotent.sql",
+                # 000200 병합 후에도 재발 - 진짜 원인은 supabase_migrations.schema_migrations
+                # 이력 누락이었다(수동 수복 완료). 방어적 재확인 + 사고 기록
+                "20260805000300_notifications_dedup_key_history_repair_note.sql",
+                # HR-03 P1-1: Eval HOLD 종료와 후보별 관찰 Scorecard
+                "20260806000100_workforce_improvement_hold_and_scorecards.sql",
+                # HR-04 P1-2: quality_snapshots에 누락됐던 recorded_by 추가
+                "20260806000200_workforce_quality_snapshot_recorded_by.sql",
+                # 도현 2026-08-06: Transactional Outbox + consumer idempotency (P0-2, PLAT-03)
+                # ⚠ 원래 20260806000100 이었으나 머지에서 HR-03 과 **버전이 겹쳤다.**
+                # Supabase 는 앞 14자리를 version 으로 쓰므로 중복이면 하나가 "이미 적용됨"
+                # 으로 조용히 건너뛴다. 아직 main 에 없던 이쪽을 000300 으로 옮겼다.
+                "20260806000300_execution_outbox.sql",
+                "20260809000100_qa_eval_results_append_only.sql",
+                # HR: hiring_request.py가 requested_by/decided_by/decided_at/decision_reason으로
+                # 요청자-승인자 분리(마스터플랜 4.3절 자기승인 금지)를 강제하려 추가
+                "20260810000100_workforce_hiring_requests_requester_decision.sql",
+                # 회계: 보수 발생주의 계정 3개(2100/5200/5300). 거래 수수료(5000)와
+                # 섞으면 TCA가 집행 비용과 운용 보수를 분리하지 못한다
+                "20260811000100_accounting_fee_accounts.sql",
+        ]
+        self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
                 self.assertRegex(sql.rstrip().lower(), r"commit;$")
 
+    def test_migration_versions_are_unique(self) -> None:
+        """버전 접두사(타임스탬프)가 겹치면 Supabase 가 적용을 꼬아 Preview 가
+        깨진다 - 2026-07-31 실측: 같은 날 두 사람이 각각 000700/000800 을 잡아
+        'access_requests already exists' 로 전 커밋이 실패했다. 파일 이름이
+        달라도 접두사가 같으면 같은 버전이다."""
+        versions = [path.name.split("_", 1)[0] for path, _ in self.files]
+        dup = {v for v in versions if versions.count(v) > 1}
+        self.assertFalse(
+            dup,
+            f"마이그레이션 버전 접두사 중복: {sorted(dup)} - 새 파일을 만들기 전에 "
+            f"`ls supabase/migrations | tail` 로 마지막 번호를 확인할 것",
+        )
+
+    def test_order_event_constraint_migration_is_idempotent(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260804001100_order_events_broker_id_unique.sql"
+        ).lower()
+        self.assertIn(
+            "drop constraint if exists order_events_broker_event_unique",
+            migration,
+        )
+
+    def test_notifications_dedup_key_constraint_migration_is_idempotent(self) -> None:
+        """2026-08-05 실측: ADD CONSTRAINT만 있고 DROP CONSTRAINT IF EXISTS가 없는
+        마이그레이션을 개발 DB에 먼저 수동 적용한 뒤 그대로 커밋했더니, 병합 후
+        Supabase 자동 마이그레이션 적용기가 재실행하면서 "already exists"로 실패했다
+        (order_events_broker_id_unique.sql과 같은 종류의 실수 - 위 테스트와 같은
+        이유로 재발 방지)."""
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260805000200_notifications_dedup_key_constraint_idempotent.sql"
+        ).lower()
+        self.assertIn(
+            "drop constraint if exists notifications_dedup_key_channel_unique",
+            migration,
+        )
+
+    def test_improvement_hold_constraint_migration_is_idempotent(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260806000100_workforce_improvement_hold_and_scorecards.sql"
+        ).lower()
+        self.assertIn("drop constraint if exists improvement_candidates_status_check", migration)
+        self.assertIn("drop trigger if exists improvement_candidate_scorecards_append_only", migration)
+        self.assertIn("'hold'", migration)
+
+    def test_qa_eval_migration_hardening_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260809000100_qa_eval_results_append_only.sql"
+        ).lower()
+
+        # Existing eval_runs rows must be repaired and explicitly validated
+        # before identity NOT NULL/CHECK constraints are installed.
+        self.assertIn("update audit.eval_runs", migration)
+        self.assertIn("nullif(btrim(candidate_id), '')", migration)
+        self.assertIn("nullif(btrim(candidate_profile_version), '')", migration)
+        self.assertIn("raise exception using", migration)
+        self.assertIn("alter column candidate_id set not null", migration)
+        self.assertIn("alter column candidate_profile_version set not null", migration)
+
+        self.assertIn("eval_runs_environment_check", migration)
+        self.assertIn("check (environment in ('shadow', 'mock'))", migration)
+        self.assertIn("alter column environment set not null", migration)
+
+        for table in ("eval_runs", "eval_results", "eval_comparisons"):
+            self.assertIn(f"alter table audit.{table} enable row level security", migration)
+        self.assertIn("validate_eval_run_transition", migration)
+        self.assertIn("eval_runs_lifecycle_guard", migration)
+        self.assertIn("on delete restrict", migration)
+        self.assertIn("eval_results_append_only", migration)
+        self.assertIn("eval_comparisons_append_only", migration)
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 18,
-            "audit": 19,
-            "execution": 12,
+            "audit": 22,
+            # +1 (QA, 2026-08-09): eval_comparisons stores immutable Champion
+            # comparison evidence across API/process restarts.
+            # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
+            # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
+            "execution": 14,
             "governance": 20,
             "quant": 12,
             "reference": 9,
-            "research": 14,
-            "risk": 16,
+            # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
+            # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
+            # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
+            "research": 23,
+            "risk": 19,
             "strategy": 9,
-            "workforce": 18,
+            "workforce": 25,
         }
         actual_counts = {
             schema: sum(1 for table_schema, _ in self.tables if table_schema == schema)
@@ -89,6 +225,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             ("accounting", "nav_runs"),
             ("audit", "traces"),
             ("audit", "agent_runs"),
+            ("audit", "run_log_events"),
+            ("risk", "run_log_events"),
             ("workforce", "agent_profile_versions"),
         }
         self.assertTrue(required.issubset(self.tables), required - self.tables)
@@ -141,6 +279,11 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "risk_status",
             "strategy_registry",
             "agent_registry",
+            # 회계·포트폴리오 읽기 뷰 (20260804000500). `/ui/snapshot`의 회계 구간 원천이다.
+            "portfolio_snapshot_latest",
+            "position_holdings",
+            "ledger_balances",
+            "open_breaks",
         }
         actual_views = set(
             re.findall(

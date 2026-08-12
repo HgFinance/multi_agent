@@ -1,0 +1,65 @@
+name: workforce-management
+version: workforce-management-v1
+kind: shared-service
+description: CEO 직속 HR의 신규 Agent 채용·권한 요청 흐름
+boundary_rules:
+  - HR은 Job Profile과 평가를 만들지만 실제 Identity·권한을 부여하지 않는다.
+  - QA 독립 검증과 CEO 예산·조직 승인이 없으면 권한 요청을 승인하지 않는다.
+  - Platform/IAM만 실제 Identity와 Tool Permission을 생성·회수한다.
+steps:
+  - id: hr-profile
+    sequence: 1
+    department: hr-department
+    owner: hr
+    task: Queue·SLA·비용·Eval·Incident 기반 Job Profile 설계
+    input_contract: hiring_request
+    output_contract: job_profile
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: NO_REQUISITION
+    forbidden_actions: [permission_grant, identity_creation]
+  - id: hr-candidate-eval
+    sequence: 2
+    department: hr-department
+    owner: hr
+    task: Golden/Adversarial Eval과 Shadow 평가
+    input_contract: job_profile
+    output_contract: candidate_evaluation
+    timeout_seconds: 90
+    retry: {max_attempts: 3}
+    failure_action: REJECT_CANDIDATE
+    forbidden_actions: [permission_grant, identity_creation]
+  - id: qa-permission-review
+    sequence: 3
+    department: qa-department
+    owner: qa
+    task: Model·Prompt·Tool 권한 요청 독립 검증
+    input_contract: candidate_evaluation
+    output_contract: permission_review
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: DENY_PERMISSION
+    forbidden_actions: [permission_grant, identity_creation]
+  - id: ceo-org-approval
+    sequence: 4
+    department: ceo-agent
+    owner: ceo
+    task: 예산·조직 변경 승인 여부 결정
+    input_contract: permission_review
+    output_contract: org_approval
+    timeout_seconds: 30
+    retry: {max_attempts: 2}
+    failure_action: NO_APPROVAL
+    forbidden_actions: [permission_grant, identity_creation]
+  - id: hr-lifecycle
+    sequence: 5
+    department: hr-department
+    owner: hr
+    task: 승인된 변경을 Platform/IAM 요청과 Memory Namespace에 반영
+    input_contract: org_approval
+    output_contract: lifecycle_request
+    timeout_seconds: 30
+    retry: {max_attempts: 3}
+    failure_action: ESCALATE
+    forbidden_actions: [direct_identity_creation]
+

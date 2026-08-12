@@ -5,14 +5,31 @@
 # 참고: docs/HEDGE_FUND_MASTER_PLAN.md 5.5 #5, 8, 12.3, 12.4
 #       docs/05-teams/TEAM_DOHYUN_TRADING_ACCOUNTING_GUIDE.md (v1.2) 4.4, 4.5, 8.2
 
+# 2026-08-03 팀 합의대로 Sonnet 을 쓴다. 경로 선택 근거와 선행 조건은
+# departments/02-trading/hermes/config.yaml 같은 절 주석에 전부 적었다.
+# 요약: 호스트 프록시(scripts/claude_code_proxy.py)를 거쳐 claude -p 로 부르면
+# **구독 플랜 한도**가 적용된다. api.anthropic.com 직접 호출은 서드파티로 잡혀
+# extra usage 에서 차감되고, Nous 경로는 계정 크레딧이 없어 404 다.
+#
+# ⚠ 선행 조건: 호스트에서 프록시 기동 + .env 의 CLAUDE_CODE_OAUTH_TOKEN.
+# 무료 모델로 되돌리려면 이 블록만 poolside/laguna-s-2.1:free 로 바꾼다.
+# Current Head runtime (2026-08-03): openai-codex/gpt-5.6-luna.
+# The legacy Sonnet/Nous pricing notes above are historical fallback context only.
 model:
-  provider: nous
-  default: poolside/laguna-s-2.1:free
+ provider: openai-codex
+ default: gpt-5.6-luna
+ base_url: https://chatgpt.com/backend-api/codex
 
 env:
   OPENAI_API_KEY: ${OPENAI_API_KEY}  # loaded from .env, not hardcoded
 
 agent:
+  head_persona: portfolio-control-supervisor
+  runtime_personalities_source: workers
+  legacy_personalities_are_aliases: true
+  # 2026-08-07 tool 강등으로 8 -> 1. 결정론 back-office-runner 는
+  # 아래 deterministic_workers 로 따로 센다(조직 인원은 2명).
+  runtime_personalities: [exception-investigation-worker]
   max_turns: 100
   reasoning_effort: medium
   timeout_seconds: 60
@@ -27,37 +44,58 @@ agent:
     corporate-actions-valuation-agent: "You are the Corporate Actions and Valuation Analyst. You reflect dividends, splits, mergers, rights, futures rolls and option Exercise/Assignment accurately in Position and Valuation. You verify event terms and the record date, distinguish mandatory from elective events, and generate a Posting/Position conversion proposal, keeping derivative expiry and Assignment separated into expected versus confirmed states. You never post a final entry from an incomplete notice, and any elective exercise requires an approval workflow."
 
 skills:
-  - hermes-agent
+  external_dirs:
+    - /opt/shared-skills
 
 # 결정론적 서비스. 회계 수치는 LLM 문장이 아니라 이 모듈들에서만 나온다
 # (팀 가이드 2장 원칙 5, 마스터플랜 5.9).
 deterministic_services:
   ledger: departments/05-accounting-portfolio/ledger/ledger.py                  # 체결 -> 분개, projection, reversal
   reconciliation: departments/05-accounting-portfolio/reconciliation/reconciliation.py  # OMS/Fill/Ledger 대사와 Break
+  corporate_actions: departments/05-accounting-portfolio/corporate_actions/corporate_actions.py  # F25 배당·분할·종목변경
+  daily_report: departments/05-accounting-portfolio/reporting/daily_report.py   # F23 전략별 PnL/Drawdown/비용/오류
+  # 2026-08-05 추가. 셋 다 판정이 아니라 근거·분류·계측이며 회계 수치를 만들지 않는다.
+  # Break 생성과 Severity 는 여전히 reconciliation.py 만 한다.
+  break_triage: departments/05-accounting-portfolio/reconciliation/break_triage.py   # 원인 후보·과거 사례·Aging/SLA
+  query_router: departments/05-accounting-portfolio/query_router.py                  # 질의 Level 분류(L0 은 모델 호출 없음)
+  close_memory: departments/05-accounting-portfolio/nav_close_memory.py              # 마감 Layered Memory(비공식)
+  ops_tuning: departments/05-accounting-portfolio/accounting_ops.yaml                # 위 셋의 튜닝값
   schema: db/002_accounting.sql
   seed: db/004_seed.sql                         # 계정과목, 초기 Fund/Book, 자본 납입
 
 config:
   base_currency: KRW
   fund: "Paper Fund I"
+  # 마감 평가에 쓸 Mark 신선도 한도(_max_staleness). **종가 봉 기준이라 넓다** -
+  # `/bars` 의 bucket_time 은 봉의 *시작* 시각이라 15:40 마감 시점과 하루 가까이
+  # 벌어진다. 30분으로 두면 종가가 전부 stale 로 걸려 NAV 가 영구 보류된다.
+  # 장중 평가(ledger/consumer.py)는 이 값을 안 쓴다 - 거기는 portfolio.py 의
+  # DEFAULT_MAX_STALENESS(5분)이고, 두 경로의 기준이 다른 것이 의도다.
+  mark_max_staleness_minutes: 1440
   # Mandate가 자본과 한도의 기준이다. 원장과 어긋나면 원장이 사실이다.
   mandate: skills/agentic-rag/corpus/compliance/mandate.md
   chart_of_accounts: "최소 세트 9개 - 계정은 테이블 row라 추가 시 스키마 변경 없음"
 
 implementation:
-  status: "D2 구현됨. D3(Valuation/PnL/NAV)는 market-api 종가 대기"
+  status: "D2 구현됨. D3(Valuation/PnL/NAV)는 계산 구현됐고 Mark 공급원(market-api 종가) 대기"
   done:
     - "이중분개 원장 - 체결 -> 분개 규칙, 차대 균형 강제(지연 제약 트리거)"
     - "Posted Journal 수정 금지, Reversal 정정"
     - "같은 체결 이벤트 중복 반영 방지"
     - "Position/Cash Projection과 분개로부터의 재구축"
     - "OMS/Fill/Ledger 대사, Break 생성과 Severity 분류"
+    - "F25 Corporate Action - 배당·분할·종목변경 분개. Announcement 거부, 선택형 승인 게이트"
+    - "F23 Daily Report - PnL/Drawdown/비용/오류, NAV 항등식 검산과 미설명 손익 노출"
+    - "D3 Valuation/PnL/NAV 계산 - portfolio.py. 보유 종목에 신선한 Mark 가 하나라도
+       없으면 부분 NAV 를 만들지 않고 거부한다. is_official 은 항상 False"
+    - "Domain API - departments/05-accounting-portfolio/api/app.py. 도메인 모듈을 감싸기만
+       하고 판정 로직 없음. PUT/PATCH/DELETE 부재로 Posted Journal 수정 금지를 집행"
   in_progress:
     - "Long/Short Position 분리, Borrow/Financing Cost 계정 (팀 가이드 v1.2 1.1)"
     - "strategy_allocations.governance_allocation_id - CEO 승인 결정과 회계 적용 분리 추적"
     - "Alembic 이전 (스택 확정: Supabase PostgreSQL)"
   not_started:
-    - "Valuation / PnL / NAV (D3) - market-api 종가와 데이터 품질 필요"
+    - "D3 Mark 공급원 연결 - market-api 종가. 계산은 있고 입력이 없다"
     - "Performance Attribution"
     - "관리보수·성과보수·High-Water Mark - Mandate 미확정 항목"
 
@@ -65,10 +103,17 @@ implementation:
 # 1. projection과 분개 재계산의 일일 자동 대조. 지금은 rebuild()를 불러야 확인된다.
 #    어긋난 채로 하루가 지나면 NAV가 틀린 값으로 확정된다.
 # 2. Break Aging과 SLA. Break가 열린 뒤 방치되는 것을 탐지하는 장치가 없다.
-# 3. Corporate Action(배당·분할) 분개 규칙. Announcement가 아니라 Effective Event로
-#    Posting해야 하는데 규칙이 아직 없다.
+# 3. (2026-07-31 해소) Corporate Action 분개 규칙 -> corporate_actions.py로 구현됨.
+#    남은 것: 계정 4200(배당수익) 신설. 지금은 배당을 실현손익(4000)에 넣어서
+#    매매손익과 배당이 한 계정에 섞이고 성과기여도 분해가 안 된다. DB 담당 델타.
+#    단주 현금지급, 유상증자·합병 비율 배정도 아직 없다.
 # 4. Material Break 발생 시 리스크본부·QA로의 실제 이벤트 발행.
 #    지금은 escalates 플래그만 세우고 전달 경로가 없다.
+# 5. Daily Report의 전략별 분해가 호출자가 주는 매핑에 의존한다(daily_report.py).
+#    분개에 전략 차원이 없어서인데, supabase의 accounting.journals도 fund/book까지다.
+#    journal_lines.strategy_version_id 추가 또는 fill -> order_intent 조인이 근본 해결.
+# 6. Drawdown이 넘겨받은 스냅샷 구간 안에서만 계산된다. 여러 날에 걸친 Drawdown은
+#    스냅샷 저장소가 생겨야 한다 - 함수는 그대로 두고 더 긴 시계열만 넣으면 된다.
 
 # 채용 우선순위 매핑 (docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 14.2-14.3, 2026-07-29)
 hiring_priority:
@@ -80,8 +125,174 @@ hiring_priority:
   pnl-performance-attribution-agent: {role_codes: ["ACC-03"], tier: "P0"}
   investor-reporting-agent: {role_codes: ["ACC-07"], tier: "P1"}
   corporate-actions-valuation-agent: {role_codes: ["ACC-06"], tier: "P2"}
-  # 2026-07-29: 회계/포트폴리오본부 8/8 전원 존재
+  # Historical snapshot (2026-07-29): legacy 회계/포트폴리오 8개 논리 역할 존재.
+  # Current runtime (2026-08-07): LLM 1명 + deterministic back-office-runner 1명.
 
 usage:
   run: "accounting-portfolio-department chat -q 'Reconcile today''s fills and compute preliminary NAV'"
   collaborate: "accounting-portfolio-department chat -q 'Reconcile positions, then report PnL attribution to ceo-agent'"
+
+# ── 도구 허용목록 (2026-08-03) ────────────────────────────────────────────────
+# 근거와 기준은 departments/02-trading/hermes/config.yaml 같은 절 주석과 동일하다.
+# 요약: platform_toolsets 는 tool_allowlist 와 달리 **Hermes 가 실제로 강제하는**
+# 허용목록이다. Portal 로그인이 free tool pool 로 켜둔 셸·파일·코드실행·컴퓨터
+# 제어·웹검색을 전부 뺀다.
+#
+# 회계본부에 특히 중요한 이유: 이 부서의 산출물은 원장과 NAV다. Agent 에게 셸과
+# 파일 쓰기가 있으면 ledger.py 의 Posted Journal 을 직접 건드릴 경로가 열린다 -
+# "Posted Journal 은 수정하지 않는다, Reversal 을 추가한다"(CLAUDE.local.md 원칙 6)가
+# 프롬프트 문장으로만 남고 실행 경로로는 뚫려 있는 상태가 된다.
+platform_toolsets:
+  cli: [clarify, cronjob, delegation, kanban, memory, session_search, skills, todo]
+
+# ⚠ 아래 목록이 없으면 위 허용목록이 조용히 새어나간다 - 이유는
+#   departments/02-trading/hermes/config.yaml 같은 절 주석 참고.
+#   요약: Hermes 는 known_builtin_toolsets 에 없는 toolset 을 새 것으로 보고 자동
+#   활성화하고, sync push 는 이 파일을 통째로 덮는다. 둘이 겹치면 push 할 때마다
+#   허용목록에 없는 도구가 되살아난다.
+known_builtin_toolsets:
+  cli: [bfl, browser, clarify, code_execution, computer_use, context_engine, cronjob,
+        delegation, discord, discord_admin, file, homeassistant, image_gen, memory,
+        session_search, skills, spotify, stt, terminal, todo, tts, video, video_gen,
+        vision, web, x_search, yuanbao]
+known_plugin_toolsets:
+ cli: [spotify]
+
+# Employee runtime v2: every listed employee is an independent LangGraph
+# Worker.  Official ledger/NAV state remains deterministic and permissioned.
+head_runtime:
+  runtime: hermes
+  role: department_head
+  provider_choices: [openai-codex, anthropic-claude-code]
+  active_provider: openai-codex
+  active_model: gpt-5.6-luna
+  model_source: model
+  responsibility: synthesize_worker_context_and_escalate
+  binding_decision: false
+  # 2026-08-07: 부서장 감독. **토론이 아니다** — 상대역이 없다(회계의 반대편 압력은
+  # 결정론 코드다, 아래 staff_registry 주석). 권한은 트레이딩과 같은 안전 방향 한정.
+  review_moderator: true
+  moderator_persona: portfolio-control-supervisor
+  moderator_entrypoint: departments/05-accounting-portfolio/scripts.py::supervise
+  # 아래는 `supervise()` 가 **실제로 하는 것**이다. 프롬프트가 수치 재작성을 금지하고,
+  # 실패하면 `_deterministic_close_note()` 로 떨어져 확정 수치를 지우지 않는다.
+  moderator_can: [close_round, raise_escalation, write_closing_note]
+  moderator_cannot: [invent_causes, restate_figures, confirm_nav, set_is_official,
+                     change_break_severity, clear_escalation]
+  #
+  # 2026-08-11: **2라운드 재질의는 폐기했다**(백로그에서 내린다). 참고 구현이던
+  # 트레이딩 `scripts.supervise_round2` 는 Bull/Bear 고정 직원과 함께 사라졌고
+  # (전략별 임시 결정론 Worker + 결정론 선발로 대체), 회계에는 애초에 상대역이
+  # 없었다. 1라운드 가설을 되받아칠 압력은 이미 결정론 코드다 — `check_aging()`,
+  # `unexplained_pnl`, Mark 부재 시 NAV 거부. 서술 한 번을 더 시키는 것은 그
+  # 게이트가 이미 내린 판정을 LLM 문장으로 한 번 더 감싸는 계층일 뿐이다.
+  round2_requery: dropped
+
+staff_registry:
+  head_count: 1
+  # 2026-08-07: tool 강등으로 8 -> 1. worker_count 는 **LLM 직원 수**다 -
+  #   결정론 back-office-runner 는 deterministic_workers 로 따로 센다(조직 인원 2명).
+  #
+  # 강등 근거는 부서 헌장이다. 마스터플랜 19.12 "공식 숫자는 Accounting Engine 이
+  # 계산하며 **Agent 는 예외 조사와 설명을 담당한다**", 19.16 "Agent 가 수치를
+  # 계산하거나 수정하지 않는다", SOUL "only figures the Accounting Engine has confirmed".
+  # 기존 8명은 portfolio/treasury/pnl/reporting/valuation/fee-tax 라는 **도메인** 축으로
+  # 나뉘어 있었는데, 그 이름의 뜻은 "그 도메인의 *수치* 를 보는 분석가"다. 수치는
+  # 헌장상 처음부터 에이전트 것이 아니므로 **없는 권한을 축으로 직원을 나눈 것**이었다.
+  # 헌장이 쓰는 축은 예외 종류이고, 조사가 필요한 예외는 둘 다 같은 모양이다:
+  #   19.11 거래 사실이 안 맞는다(Break)     -> reconciliation/break_triage.py
+  #   19.12 수치가 설명이 안 된다(항등식 잔차) -> accounting_ops.yaml pnl_exception
+  # 방법이 같으므로(원인 후보 -> 근거 대조 -> 인용 검증 -> fail-closed) 직원 하나가
+  # 근거 provider 셋을 물고 처리한다.
+  #
+  # Bull/Bear 같은 대립쌍은 두지 않는다. 트레이딩이 쪼갠 이유는 "논지가 틀렸다"고
+  # 말해 줄 결정론 모듈이 없어서였다(ADR-0005). 회계엔 있다 — check_aging() 이 Break 을
+  # 조용히 늙지 못하게 하고, unexplained_pnl 이 잔차를 0 으로 반올림하지 않고,
+  # portfolio.py 가 Mark 없으면 NAV 를 거부한다. 반대편 압력이 이미 코드다.
+  worker_count: 1
+  default_execution_count: 1
+  max_execution_count: 1
+  active_worker_count: 1
+  conditional_worker_count: 0
+  deterministic_worker_count: 1
+  headcount_total: 2          # 부서장 제외 - 조사관 / back-office-runner
+  runtime_personality_source: workers
+  legacy_personas_are_aliases: true
+  runtime_personalities: [exception-investigation-worker]
+  legacy_personas:
+    source: agent.personalities
+    runtime: compatibility_only
+    excluded_from_worker_count: true
+  # 개명 전 id. 조사 축(예외)이 아니라 도메인 축으로 붙어 있던 이름이라 바꿨다.
+  # employee_workers.LEGACY_ALIASES 와 1:1 이며 감사 추적용으로만 남는다.
+  renamed_workers:
+    ledger-reconciliation-worker: exception-investigation-worker
+    nav-close-worker: exception-investigation-worker
+    pnl-attribution-worker: exception-investigation-worker
+
+employee_runtime:
+  executor: langgraph
+  topology: async_fan_out_fan_in_independent_graphs
+  worker_graph_module: departments/05-accounting-portfolio/employee_workers.py
+  provider: ollama
+  model_env: OLLAMA_CHAT_MODEL
+  model_default: qwen3:1.7b
+  base_url_env: OLLAMA_BASE_URL
+  model_selection:
+    active_model: qwen3:1.7b
+    candidate_source: ollama list
+    selection_policy: fixed_until_worker_benchmark_approved
+    matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
+  output_contract: accounting.worker-context.v1
+  max_retries: 2
+  max_attempts: 3
+  binding_decision_owner: accounting-portfolio-department-head
+  failure_action: HOLD
+
+# ⚠ 이 블록은 **LLM 직원 레지스트리**다(employee_workers.WORKER_SPECS 와 1:1).
+#   결정론 직원은 아래 deterministic_workers 에 따로 있다 - 섞으면
+#   "workers 에 있다 = 모델을 태운다"가 깨져서 비용·감사 판단이 흐려진다.
+workers:
+  # 헌장 19.12 "Agent 는 예외 조사와 설명을 담당한다"를 그대로 직원 정의로 쓴다.
+  # 도메인이 아니라 **예외**가 이 직원의 축이다 - 19.11 Break 과 19.12 항등식 잔차는
+  # 조사 방법이 같아서(원인 후보 -> 근거 대조 -> 인용 검증) 한 직원이 맡는다.
+  # 근거 provider 3종은 employee_workers._PROVIDERS 가 정본이다.
+  # 색인 밖 id 를 인용하면 evidence_refs 검증에서 잡혀 escalate 된다.
+  exception-investigation-worker:
+    role: Accounting exception investigator — reconciliation Breaks, unexplained PnL and close readiness
+    status: active
+    trigger: always
+    tools: [accounting.ledger.read, accounting.reconciliation.read, accounting.nav_close.read]
+    grounded_by:
+      - departments/05-accounting-portfolio/reconciliation/break_triage.py   # 19.11 Break 원인·Aging
+      - departments/05-accounting-portfolio/accounting_ops.yaml              # 19.12 pnl_exception 후보
+      - departments/05-accounting-portfolio/nav_close_memory.py              # 마감 기억(비공식 보조)
+    # 기억이 무엇을 말하든, 잔차가 얼마든 is_official 은 false 를 유지한다.
+    can_confirm_official: false
+
+# 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
+# 2026-08-07 tool 강등으로 조건부 4명 + 상시 1명이 여기로 합쳐졌다. 다섯 다 헌장상
+# 에이전트 것이 아닌 *수치* 를 축으로 정의돼 있었고, 그 수치는 이미 결정론 모듈이
+# 확정하고 있었다 - 위에 qwen3:1.7b 를 얹는 것은 확정된 수치를 한국어로 다시 쓰는
+# 계층일 뿐이고, 그 과정에서 회계 수치가 LLM 문장을 거치는 경로만 생긴다
+# (CLAUDE.local.md 원칙 5, 마스터플랜 19.16).
+deterministic_workers:
+  back-office-runner:
+    role: Back-office runner — 결정론 잡무(포지션·자금·손익·보고·평가·수수료 조회)
+    status: active
+    trigger: always
+    llm: false
+    absorbed:            # 강등된 직원과 그 답을 원래 만들던 모듈
+      portfolio-control-worker: departments/05-accounting-portfolio/ledger/ledger.py (rebuild) + portfolio/portfolio.py (value_portfolio)
+      treasury-liquidity-worker: 미구현 - Treasury 모듈 없음(마스터플랜 19.13)
+      investor-reporting-worker: departments/05-accounting-portfolio/reporting/daily_report.py (F23)
+      valuation-corporate-actions-worker: departments/05-accounting-portfolio/corporate_actions/corporate_actions.py (F25)
+      fee-accrual-tax-worker: 미구현 - 발생주의 Fee/Tax 도메인 not_started
+    tools: [accounting.portfolio_snapshot.read, accounting.nav_close.read,
+            accounting.treasury.read, accounting.pnl.read, accounting.reporting.read,
+            accounting.valuation.read, accounting.corporate_actions.read,
+            accounting.fees_tax.read]
+    # 미구현 도메인은 빈 값이 아니라 missing_blocks 로 나온다 - 빈 dict 로 두면
+    # "확인했고 비어 있다"로 읽혀서 없는 것과 확인된 0 이 구분되지 않는다.
+    reports_missing_blocks: true
+    can_confirm_official: false
