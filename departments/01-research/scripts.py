@@ -38,13 +38,16 @@ sys.path.insert(0, str(_BASE))  # evidence 패키지 - 임포트 실행에서도
 sys.path.insert(0, str(_BASE / "collectors"))
 sys.path.insert(0, str(_BASE / "agents"))
 
+from evidence.cache import EvidenceCache, activate_cache
 from evidence.forecast import (
     falsification_note,
     probability_for_claim,
 )
+from evidence.handoff import build_evidence_handoff
 from evidence.highlights import pick_highlights
 from evidence.highlights import render_line as render_highlights
 from evidence.llm_client import chat as llm_chat
+from evidence.observability import ResearchRunMetrics, activate_metrics, current_metrics
 from langgraph.graph import END, StateGraph
 
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
@@ -227,8 +230,14 @@ def assemble_evidence(state: ResearchState) -> dict:
     # 수집·등락률 계산은 전부 모듈이 한다 - 노드는 배선만 (계약: 기존 키 유지)
     from evidence.bundle import assemble_bundle
 
-    ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
-                         research_api=RESEARCH_API, get=_get)
+    metrics = current_metrics()
+    if metrics is None:
+        ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
+                             research_api=RESEARCH_API, get=_get)
+    else:
+        with metrics.span("evidence_collection"):
+            ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
+                                 research_api=RESEARCH_API, get=_get)
     # RES-08 사서의 공시 원문 발췌(결정론 - 종목 링크 확인 문서의 머리 청크만).
     # 사서 조회 실패는 Packet 전체를 죽일 일이 아니다 - 미확인으로 명시한다.
     try:
@@ -1499,9 +1508,14 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
                  # (analyst_calibration)가 통째로 비어 선순환이 끊긴다.
                  # date_check 를 함께 남긴다 - 리포트에만 찍고 DB 에 없으면
                  # "그때 시점 가드가 뭐라고 했나" 를 사후에 물을 수 없다.
-                 json.dumps({"analyst_verdicts": analyst_verdicts or {},
-                             "date_check": dc},
-                            ensure_ascii=False)))
+                 json.dumps({
+                     "analyst_verdicts": analyst_verdicts or {},
+                     "date_check": dc,
+                     "observability": (packet or {}).get("_observability"),
+                     "evidence_handoff": (packet or {}).get("_evidence_handoff"),
+                     "case_id": (packet or {}).get("_case_id"),
+                     "task_id": (packet or {}).get("_task_id"),
+                 }, ensure_ascii=False)))
             run_id = str(cur.fetchone()[0])
         conn.commit()
         if own:
@@ -1600,26 +1614,69 @@ def fetch_method_performance(used_keys: list[str], *,
     return note
 
 
-def run_research_department(symbol: str) -> dict:
+def run_research_department(
+    symbol: str,
+    *,
+    case_id: str | None = None,
+    task_id: str | None = None,
+    queued_at: datetime | None = None,
+    claimed_at: datetime | None = None,
+) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
     import uuid
 
     trace_id = str(uuid.uuid4())
     started = datetime.now(timezone.utc)
+    metrics = ResearchRunMetrics(trace_id=trace_id)
+    if queued_at is not None:
+        metrics.mark("queued_at", queued_at)
+    if claimed_at is not None:
+        metrics.mark("claimed_at", claimed_at)
+    metrics.mark("research_started_at", started)
+    evidence_cache = EvidenceCache(metrics=metrics)
     try:
-        out = build_pipeline().invoke({"symbol": symbol})
+        with activate_metrics(metrics), activate_cache(evidence_cache):
+            out = build_pipeline().invoke({"symbol": symbol})
     except Exception as e:
+        error = f"{type(e).__name__}: {e}"[:200]
+        metrics.finish()
+        failure_packet = {
+            "_case_id": case_id,
+            "_task_id": task_id,
+            "_observability": metrics.as_dict(status="FAILED", error=error),
+        }
         _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
                              ended=datetime.now(timezone.utc), status="FAILED",
-                             halt_reason=f"{type(e).__name__}: {e}"[:200])
+                             packet=failure_packet, halt_reason=error)
         raise
     ended = datetime.now(timezone.utc)
     if out.get("halted"):
+        metrics.finish()
+        halted_observability = metrics.as_dict(status="HALTED")
+        halted_handoff = build_evidence_handoff(
+            out.get("evidence") or {},
+            cache_metadata=evidence_cache.metadata(),
+            trace_id=trace_id,
+        )
         _record_pipeline_run(symbol=symbol, trace_id=trace_id, started=started,
                              ended=ended, status="HALTED",
-                             halt_reason=str(out["halted"])[:200])
-        return {"symbol": symbol, "verdict": "HALTED", "reason": out["halted"],
-                "trace_id": trace_id}
+                             halt_reason=str(out["halted"])[:200],
+                             packet={
+                                 "_case_id": case_id,
+                                 "_task_id": task_id,
+                                 "_observability": halted_observability,
+                                 "_evidence_handoff": halted_handoff,
+                             })
+        return {
+            "symbol": symbol,
+            "verdict": "HALTED",
+            "reason": out["halted"],
+            "trace_id": trace_id,
+            "case_id": case_id,
+            "task_id": task_id,
+            "_observability": halted_observability,
+            "_evidence_handoff": halted_handoff,
+        }
     packet = out["packet"]
     packet["trace_id"] = trace_id
     # 증거 컷오프. 진입 시각을 그대로 쓴다 - 분석가 일부가 아직 as_of 를 안 받아
@@ -1683,8 +1740,19 @@ def run_research_department(symbol: str) -> dict:
         out, run_id=trace_id, symbol=symbol, at=started.isoformat()))
     # 선순환 3단: 이번에 쓴 방법들의 **과거 성적**을 붙인다. 리포트가 스스로
     # "이 신호는 최근 성적이 나쁘다" 고 말하면 그것만으로 판단의 질이 오른다.
-    packet["_method_performance"] = fetch_method_performance(
-        sorted({c["method_key"] for c in claims if c.get("method_key")}))
+    with activate_metrics(metrics), activate_cache(evidence_cache):
+        packet["_method_performance"] = fetch_method_performance(
+            sorted({c["method_key"] for c in claims if c.get("method_key")}))
+    metrics.finish()
+    packet["_case_id"] = case_id
+    packet["_task_id"] = task_id
+    packet["_observability"] = metrics.as_dict(status="COMPLETED")
+    packet["_evidence_handoff"] = build_evidence_handoff(
+        out.get("evidence") or {},
+        cache_metadata=evidence_cache.metadata(),
+        trace_id=trace_id,
+        as_of=packet.get("as_known_at"),
+    )
     return packet
 
 

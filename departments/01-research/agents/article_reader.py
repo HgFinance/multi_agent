@@ -30,6 +30,13 @@ import urllib.request
 import urllib.robotparser
 from dataclasses import dataclass, field
 
+try:
+    from ..evidence.cache import current_cache
+    from ..evidence.observability import current_metrics
+except ImportError:  # direct module execution from the Research profile
+    from evidence.cache import current_cache  # type: ignore
+    from evidence.observability import current_metrics  # type: ignore
+
 READER_VERSION = "research-article-reader-v1"
 
 # 우리가 누군지 밝힌다 - 숨는 봇은 차단만 부른다
@@ -98,6 +105,9 @@ def extract_text(html_doc: str, *, max_chars: int = MAX_BODY_CHARS) -> str:
     try:
         p.feed(html_doc)
     except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
+        metrics = current_metrics()
+        if metrics:
+            metrics.record_fallback()
         pass  # 깨진 HTML 은 그때까지 모은 문단으로 간다
     return "\n".join(p.paragraphs)[:max_chars]
 
@@ -127,6 +137,14 @@ class ArticleReader:
 
     def read(self, url: str) -> str | None:
         """기사 하나를 읽어 평문을 돌려준다. 못 읽으면 None - 지어내지 않는다."""
+        metrics = current_metrics()
+        if metrics:
+            metrics.record_tool_call()
+        active_cache = current_cache()
+        if active_cache is not None:
+            cached = active_cache.get(url, "article_html")
+            if cached is not None:
+                return extract_text(cached.value)
         if self.stats.fetched >= self._max_reads:
             self.stats.skipped_budget += 1
             return None
@@ -147,7 +165,12 @@ class ArticleReader:
         self._last_hit[domain] = self._clock()
 
         try:
-            doc = self._fetch(url)
+            if metrics:
+                metrics.record_network_fetch()
+                with metrics.span("evidence_collection"):
+                    doc = self._fetch(url)
+            else:
+                doc = self._fetch(url)
         except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             self.stats.failed += 1
             key = type(e).__name__
@@ -160,6 +183,8 @@ class ArticleReader:
             self.stats.fail_reasons["NO_BODY"] = self.stats.fail_reasons.get("NO_BODY", 0) + 1
             return None
         self.stats.fetched += 1
+        if active_cache is not None:
+            active_cache.put(url, "article_html", doc)
         return text
 
     # -- 실제 IO ------------------------------------------------------------

@@ -26,6 +26,13 @@ import sys
 import urllib.error
 import urllib.request
 
+try:
+    from .cache import EvidenceCache, current_cache
+    from .observability import current_metrics
+except ImportError:  # direct Hermes/worker module execution
+    from cache import EvidenceCache, current_cache  # type: ignore
+    from observability import current_metrics  # type: ignore
+
 CLIENT_VERSION = "research-api-client-v1"
 PERSONA_HEADER = "X-Agent-Persona"
 
@@ -42,12 +49,33 @@ def build_headers(persona: str) -> dict[str, str]:
     return {PERSONA_HEADER: p}
 
 
-def get_json(url: str, *, persona: str, timeout: int = 25, opener=None):
+def get_json(
+    url: str,
+    *,
+    persona: str,
+    timeout: int = 25,
+    opener=None,
+    source_type: str = "api_json",
+    cache: EvidenceCache | None = None,
+):
     """조회면 GET. 403 은 ApiForbidden 으로 올린다(빈 결과로 바꾸지 않는다)."""
+    metrics = current_metrics()
+    if metrics:
+        metrics.record_tool_call()
+    active_cache = cache or current_cache()
+    if active_cache is not None:
+        cached = active_cache.get(url, source_type)
+        if cached is not None:
+            return cached.value
     req = urllib.request.Request(url, headers=build_headers(persona))
+    if metrics:
+        metrics.record_network_fetch()
     try:
         with (opener or urllib.request.urlopen)(req, timeout=timeout) as r:
-            return json.loads(r.read())
+            value = json.loads(r.read())
+            if active_cache is not None:
+                active_cache.put(url, source_type, value)
+            return value
     except urllib.error.HTTPError as e:
         if e.code == 403:
             body = ""
