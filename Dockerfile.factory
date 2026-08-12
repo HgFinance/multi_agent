@@ -38,9 +38,17 @@ RUN set -eux; \
     apt-get purge -y curl; apt-get autoremove -y; rm -rf /var/lib/apt/lists/*; \
     docker --version
 
+# fastapi/uvicorn/httpx 는 BFF(apps/api/main.py)용이다. 같은 이미지를 쓰는
+# 이유는 BFF 도 칸반을 `docker exec` 로 만지기 때문이다 - 소켓과 코드가 이미
+# 여기 있다.
 RUN pip install --no-cache-dir \
       psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 \
-      numpy==2.3.2 pandas==2.3.1 pyarrow==25.0.0
+      numpy==2.3.2 pandas==2.3.1 pyarrow==25.0.0 \
+      fastapi==0.116.1 "uvicorn[standard]==0.35.0" httpx==0.28.1
+
+# langgraph: BFF 의 포트폴리오 추천 워크플로(orchestration/workflows)가 쓴다.
+# 무거워서 레이어를 나눈다 - 공장 상주 셋은 이걸 안 쓰지만 같은 이미지다.
+RUN pip install --no-cache-dir langgraph==0.6.7
 
 WORKDIR /app
 
@@ -55,6 +63,20 @@ COPY apps/api                           ./apps/api
 # orchestration/canonical_profiles.py 가 정본 부서 이름표다 - kanban_board 가
 # "없는 본부에 배정된 카드"를 판정할 때 읽는다. 없으면 감시자가 뜨지 못한다.
 COPY orchestration                      ./orchestration
+# BFF 가 sys.path 에 직접 넣는 경로들(apps/api/main.py 55~59행). 회계 원장·
+# 포트폴리오 모듈을 형제 모듈처럼 임포트하므로 구조를 그대로 둬야 한다.
+COPY departments/05-accounting-portfolio ./departments/05-accounting-portfolio
+COPY departments/02-trading             ./departments/02-trading
+COPY departments/03-risk                ./departments/03-risk
+COPY departments/06-ai-qa-audit         ./departments/06-ai-qa-audit
+COPY departments/00-ceo-office          ./departments/00-ceo-office
+COPY tests/e2e                          ./tests/e2e
+# departments/ 바로 아래의 모듈들. employee_worker_runtime 은 포트폴리오
+# 워크플로가 `departments.employee_worker_runtime` 로 임포트한다 - 부서 폴더만
+# 복사하면 패키지는 생기는데 이 파일들이 없어 임포트가 죽는다.
+COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
+COPY departments/notion_markdown.py         ./departments/notion_markdown.py
+COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
 

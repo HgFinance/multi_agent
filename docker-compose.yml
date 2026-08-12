@@ -925,6 +925,38 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # BFF (apps/api). 프런트(ai-office)가 붙는 유일한 관문이다.
+  # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고
+  # 아무도 왜인지 몰랐다. 공장 상주와 같은 이유로 컨테이너에 올린다.
+  ui-bff:
+    image: hedgefund-factory:latest
+    container_name: hedgefund-ui-bff
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "apps.api.main:app",
+              "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?}
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      # 부서 호출·카드 생성이 전부 docker exec 로 나간다.
+      HERMES_EXEC_MODE: docker
+      KANBAN_ACCESS_MODE: docker
+      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
+      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      # CEO 질의를 CLI 로 돌린다(API 키 없이). 2026-08-11 결정.
+      CEO_TRANSPORT: ${CEO_TRANSPORT:-cli}
+      ENABLE_CEO_CLI: ${ENABLE_CEO_CLI:-true}
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
 volumes:
   tsdb_data:
   portfolio_runtime_data:
