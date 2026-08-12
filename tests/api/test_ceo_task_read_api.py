@@ -279,6 +279,177 @@ class WorkflowReadModelTest(unittest.TestCase):
         self.assertEqual(workflow.root.created_at, "2026-08-12T01:25:45Z")
 
 
+class CeoSupervisorUserInputReadModelTest(unittest.TestCase):
+    """2026-08-12 AWS 실측(t_b5126836): CEO Planner가 부서를 못 골랐을 때.
+
+    `orchestration/adapters/ceo_supervisor.py`의 `decide_supervisor`가
+    `no_analysis_children`으로 만드는 REQUEST_USER_INPUT Task. 이 Task는
+    root 하나에만 매달린(parents == {root}) ceo-agent Task라는 점에서
+    Synthesis(부모가 root 밖에도 있음)와 위상이 다르다.
+    """
+
+    ROOT = "t_b5126836"
+    USER_INPUT = "t_87d56aad"
+
+    def _board(self) -> dict[str, dict[str, Any]]:
+        return {
+            self.ROOT: _task(
+                self.ROOT,
+                assignee="ceo-agent",
+                status="done",
+                title="사용자 질의: test",
+                body=build_root_body("test", "req-2"),
+                children=(self.USER_INPUT,),
+            ),
+            self.USER_INPUT: _task(
+                self.USER_INPUT,
+                assignee="ceo-agent",
+                status="done",
+                title="CEO planner produced no executable child task",
+                body=f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT no_analysis_children",
+                parents=(self.ROOT,),
+            ),
+        }
+
+    def test_role_is_user_input_not_primary(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertEqual(
+            workflow.by_id[self.USER_INPUT].role(root_task_id=workflow.root_task_id),
+            "user_input",
+        )
+        self.assertEqual(workflow.primary_nodes, ())
+        self.assertEqual(workflow.selected_departments, ())
+
+    def test_result_has_no_departments_and_no_synthesis(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertIsNone(workflow.synthesis_node)
+        self.assertEqual(workflow.department_summaries, {})
+
+
+class CeoAdHocDecompositionReadModelTest(unittest.TestCase):
+    """2026-08-12 AWS 실측 워크플로(t_19d55864)를 그대로 픽스처화한 회귀 테스트.
+
+    CEO 자신의 LLM 턴이 부서 선택과 동시에 QA·Synthesis Task까지 한 번에
+    만들어둔 실제 사례. 이 Task들 body에는 `orchestration/adapters/
+    ceo_supervisor.py` 데몬이 붙이는 `SUPERVISOR_MARKER`가 없다 - 데몬은 CEO
+    턴이 부서를 못 고르거나 재시도가 필요할 때만 개입하기 때문이다. 마커
+    문자열이 아니라 그래프 구조(parents)로 역할을 판정해야 하는 근거가 이
+    실측 데이터다.
+    """
+
+    ROOT = "t_19d55864"
+    RESEARCH = "t_dcda69e2"
+    RISK = "t_c6041d55"
+    QA = "t_2a126814"
+    SYNTHESIS = "t_5c286252"
+
+    def _board(self) -> dict[str, dict[str, Any]]:
+        return {
+            self.ROOT: _task(
+                self.ROOT,
+                assignee="ceo-agent",
+                status="done",
+                title="사용자 질의: 엔비디아 최신 사업 리스크만 분석해줘.",
+                body=build_root_body("엔비디아 최신 사업 리스크만 분석해줘.", "req-1"),
+                children=(self.RESEARCH, self.RISK),
+                completed_at=_CREATED_AT + 786,
+            ),
+            self.RESEARCH: _task(
+                self.RESEARCH,
+                assignee="research-department",
+                status="done",
+                title="NVIDIA 최신 사업 리스크 조사",
+                body="NVIDIA 최신 사업 리스크 조사 task...",
+                parents=(self.ROOT,),
+                children=(self.QA,),
+                latest_summary="research 요약",
+            ),
+            self.RISK: _task(
+                self.RISK,
+                assignee="risk-management",
+                status="done",
+                title="NVIDIA 리스크 관점 검토",
+                body="NVIDIA 리스크 관점 검토 task...",
+                parents=(self.ROOT,),
+                children=(self.QA,),
+                latest_summary="risk 요약",
+            ),
+            self.QA: _task(
+                self.QA,
+                assignee="qa-department",
+                status="done",
+                title="NVIDIA 리스크 분석 독립 QA",
+                # 실측 그대로: SUPERVISOR_MARKER 없이 CEO가 직접 지시문을 작성.
+                body="독립 QA task. 부모 Research task와 Risk task가 terminal 상태가 "
+                "된 뒤 두 산출물을 검토하라. verdict는 PASS/CONDITIONAL/FAIL 중 하나로.",
+                parents=(self.RISK, self.RESEARCH),
+                children=(self.SYNTHESIS,),
+                latest_summary="verdict: PASS",
+            ),
+            self.SYNTHESIS: _task(
+                self.SYNTHESIS,
+                assignee="ceo-agent",
+                status="done",
+                title="CEO NVIDIA 최신 사업 리스크 최종 합성",
+                # 실측 그대로: SUPERVISOR_MARKER 없음.
+                body="CEO follow-up/synthesis task for user request "
+                "'엔비디아 최신 사업 리스크만 분석해줘.' ... decision: DEFER",
+                parents=(self.QA, self.RISK, self.RESEARCH),
+                latest_summary="엔비디아 최신 사업 리스크 종합 결과. decision: DEFER",
+            ),
+        }
+
+    def test_synthesis_is_found_without_supervisor_marker(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertIsNotNone(workflow.synthesis_node)
+        self.assertEqual(workflow.synthesis_node.task_id, self.SYNTHESIS)
+        self.assertEqual(
+            workflow.synthesis_node.role(root_task_id=workflow.root_task_id),
+            "synthesis",
+        )
+
+    def test_qa_is_found_without_supervisor_marker(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertEqual([node.task_id for node in workflow.qa_nodes], [self.QA])
+
+    def test_ceo_synthesis_task_is_excluded_from_selected_departments(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertEqual(
+            workflow.selected_departments,
+            ("research-department", "risk-management"),
+        )
+        self.assertNotIn("ceo-agent", workflow.selected_departments)
+
+    def test_progress_counts_only_real_departments(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertEqual(len(workflow.primary_nodes), 2)
+
+    def test_result_resolves_decision_and_summary(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+
+        self.assertEqual(workflow.status, "completed")
+        self.assertEqual(workflow.decision, "DEFER")
+        self.assertIn("종합 결과", workflow.synthesis_node.summary)
+
+    def test_graph_role_matches_topology_not_body_text(self) -> None:
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
+        roles = {
+            node.task_id: node.role(root_task_id=workflow.root_task_id)
+            for node in workflow.nodes
+        }
+        self.assertEqual(roles[self.ROOT], "root")
+        self.assertEqual(roles[self.RESEARCH], "primary")
+        self.assertEqual(roles[self.RISK], "primary")
+        self.assertEqual(roles[self.QA], "qa")
+        self.assertEqual(roles[self.SYNTHESIS], "synthesis")
+
+
 class CeoRootFilterTest(unittest.TestCase):
     def test_only_user_originated_roots_are_listed(self) -> None:
         rows = [

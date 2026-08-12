@@ -61,7 +61,6 @@ ROLE_PRIMARY = "primary"
 ROLE_QA = "qa"
 ROLE_SYNTHESIS = "synthesis"
 ROLE_USER_INPUT = "user_input"
-ROLE_SUPERVISOR = "supervisor"
 
 # 워크플로 단위 상태. Kanban Task 하나의 status가 아니라 Root 그래프 전체의 상태다.
 STATUS_QUEUED = "queued"
@@ -345,10 +344,6 @@ class WorkflowNode:
             return self.profile
 
     @property
-    def is_supervisor(self) -> bool:
-        return self.profile == CEO_PROFILE and SUPERVISOR_MARKER in self.body
-
-    @property
     def is_qa(self) -> bool:
         return self.profile == QA_PROFILE
 
@@ -369,16 +364,30 @@ class WorkflowNode:
         return self.status in FAILURE_OUTCOMES or self.run_outcome in FAILURE_OUTCOMES
 
     def role(self, *, root_task_id: str) -> str:
+        """`SUPERVISOR_MARKER` 문자열이 아니라 그래프 구조로 판정한다.
+
+        실측(2026-08-12, 실 CEO Kanban 워크플로): CEO 자신의 LLM 턴이 부서
+        선택과 동시에 QA·Synthesis Task까지 한 번에 만들어두는 경우, 그 Task들
+        body에는 `orchestration/adapters/ceo_supervisor.py`(별도 Fallback 데몬)
+        가 붙이는 `SUPERVISOR_MARKER`가 없다 - 데몬은 CEO 턴이 부서를 못 고르거나
+        (REQUEST_USER_INPUT) 재시도가 필요할 때만 개입한다. 마커 유무로 분류하면
+        데몬 미개입 워크플로에서 Synthesis를 못 찾아 `/result`가 영원히 null이
+        된다.
+
+        CEO는 자기 자신에게 분석 업무를 배정하지 않는다 - `ceo-agent`가
+        assignee인 root 이하 Task는 항상 제어/산출 Task다. `parents`가 root
+        하나뿐이면 대기용 제어 Task(REQUEST_USER_INPUT류), root 밖의 Task에도
+        의존하면 그 하위 결과를 모아 쓰는 Synthesis다.
+        """
+
         if self.task_id == root_task_id:
             return ROLE_ROOT
         if self.is_qa:
             return ROLE_QA
-        if self.is_supervisor:
-            if "action=SYNTHESIZE" in self.body:
+        if self.profile == CEO_PROFILE:
+            if set(self.parents) - {root_task_id}:
                 return ROLE_SYNTHESIS
-            if "action=REQUEST_USER_INPUT" in self.body:
-                return ROLE_USER_INPUT
-            return ROLE_SUPERVISOR
+            return ROLE_USER_INPUT
         return ROLE_PRIMARY
 
 
@@ -403,12 +412,12 @@ class Workflow:
 
     @property
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
-        """실제 분석을 수행하는 부서 Task. Supervisor 제어 Task와 QA는 뺀다."""
+        """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
         return tuple(
             node
             for node in self.descendants
-            if not node.is_supervisor and not node.is_qa
+            if node.role(root_task_id=self.root_task_id) == ROLE_PRIMARY
         )
 
     @property
@@ -652,7 +661,6 @@ __all__ = [
     "ROLE_PRIMARY",
     "ROLE_QA",
     "ROLE_ROOT",
-    "ROLE_SUPERVISOR",
     "ROLE_SYNTHESIS",
     "ROLE_USER_INPUT",
     "STATUS_ARCHIVED",

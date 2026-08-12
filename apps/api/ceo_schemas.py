@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 WorkflowStatus = Literal["queued", "running", "blocked", "failed", "completed", "archived"]
 StageStatus = Literal["todo", "running", "done", "blocked", "failed"]
-NodeRole = Literal["root", "primary", "qa", "synthesis", "user_input", "supervisor"]
+NodeRole = Literal["root", "primary", "qa", "synthesis", "user_input"]
 
 
 class TaskWorkflow(BaseModel):
