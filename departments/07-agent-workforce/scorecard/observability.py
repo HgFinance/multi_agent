@@ -52,8 +52,34 @@ try:
     from orchestration.llm_observability import langfuse_worker_event_name
 except ModuleNotFoundError:  # direct department-local execution
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from orchestration.employee_dispatch import load_worker_specs
-    from orchestration.llm_observability import langfuse_worker_event_name
+    try:
+        from orchestration.employee_dispatch import load_worker_specs
+        from orchestration.llm_observability import langfuse_worker_event_name
+    except ModuleNotFoundError as _exc:
+        # ▶ 배포된 workforce-api 이미지에는 다른 본부 코드가 없다 (계획서 11.1
+        #   "해당 본부와 공통 Contract만 Copy"). 이 유휴 판정만 전 본부의
+        #   WORKER_SPECS 를 **파이썬 모듈로** 읽어서 경계를 넘는다.
+        #
+        #   여기서 죽으면 app.py 101행 import 가 실패해 **HR API 전체가**
+        #   크래시 루프에 빠진다 - 2026-08-12 실측. 기능 하나 때문에 본부
+        #   백엔드를 통째로 못 뜨게 하지 않는다. 레지스트리를 못 읽는 것은
+        #   불변식 2 그대로 "쉬고 있다"가 아니라 **"우리가 모른다"**다.
+        #
+        #   ⚠ 근본 해결은 이 자리가 아니다. HR 이 남의 본부 registry 를
+        #     import 로 읽을지, Versioned API 로 읽을지가 미결이다(계획서 3.2).
+        load_worker_specs = None  # type: ignore[assignment]
+        _WORKER_REGISTRY_IMPORT_ERROR: str | None = f"{type(_exc).__name__}:{_exc}"
+
+        def langfuse_worker_event_name(stage: str, worker_id: str) -> str:  # type: ignore[misc]
+            return f"worker.{stage}.{worker_id}"
+    else:
+        _WORKER_REGISTRY_IMPORT_ERROR = None
+else:
+    _WORKER_REGISTRY_IMPORT_ERROR = None
+
+
+class WorkerRegistryUnavailable(RuntimeError):
+    """부서 Worker registry 를 이 런타임에서 읽을 수 없다(유휴 판정 불가)."""
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -176,6 +202,12 @@ def check_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise ValueError("idle_threshold_hours 는 양수여야 한다")
+    if load_worker_specs is None:
+        # 워커 목록 자체를 못 얻으므로 "전원 UNAVAILABLE" 조차 만들 수 없다.
+        # 빈 목록으로 돌려주면 "유휴 워커 없음"으로 **오독**되므로 명시적으로 알린다.
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
+        )
 
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
@@ -264,8 +296,20 @@ if __name__ == "__main__":
             return self._fixed.get(event_name)
 
     now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
-    active_name = langfuse_worker_event_name(stage="research", worker_id="research-data-worker")
-    idle_name = langfuse_worker_event_name(stage="research", worker_id="microstructure-worker")
+
+    # ▶ 워커 id 를 박아두지 않는다 (2026-08-11 실측). `research-data-worker` 등
+    #   개편 전 이름이 박혀 있어 판정 로직은 멀쩡한데 자체 점검이 KeyError 로
+    #   죽었다 - 이름 변경이 회귀처럼 보이면 진짜 회귀를 못 알아본다.
+    class _NoneReader(LangfuseTraceReader):
+        def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+            return None
+
+    _known = sorted(r.worker_id for r in
+                    check_idle_agents(reader=_NoneReader(), departments=("research",), now=now))
+    assert len(_known) >= 2, f"리서치 워커가 2명 미만이라 이 점검이 성립하지 않는다: {_known}"
+    active_worker, idle_worker = _known[0], _known[1]
+    active_name = langfuse_worker_event_name(stage="research", worker_id=active_worker)
+    idle_name = langfuse_worker_event_name(stage="research", worker_id=idle_worker)
     reader = _FakeReader(
         {
             active_name: now - timedelta(hours=1),
@@ -279,10 +323,11 @@ if __name__ == "__main__":
         now=now,
     )
     by_id = {r.worker_id: r for r in reports}
-    assert by_id["research-data-worker"].status is IdleStatus.ACTIVE, by_id["research-data-worker"]
-    assert by_id["microstructure-worker"].status is IdleStatus.IDLE, by_id["microstructure-worker"]
-    unobserved = [r for r in reports if r.worker_id not in ("research-data-worker", "microstructure-worker")]
-    assert unobserved and all(r.status is IdleStatus.UNOBSERVED for r in unobserved), unobserved
+    assert by_id[active_worker].status is IdleStatus.ACTIVE, by_id[active_worker]
+    assert by_id[idle_worker].status is IdleStatus.IDLE, by_id[idle_worker]
+    unobserved = [r for r in reports if r.worker_id not in (active_worker, idle_worker)]
+    # 워커가 딱 2명이면 나머지가 없다 - 없는 것을 있다고 요구하지 않는다
+    assert all(r.status is IdleStatus.UNOBSERVED for r in unobserved), unobserved
     print(f"  ACTIVE/IDLE/UNOBSERVED 판정 - OK ({len(reports)}개 Worker)")
 
     # reader=None 이고 자격증명도 없으면 전원 UNAVAILABLE - "쉬고 있다"로 오판하지 않는다.

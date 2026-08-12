@@ -45,6 +45,13 @@ _CONTRACTS_DIR = (
 _AGENTIC_RAG_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "skills" / "agentic-rag"
 )
+# 저장소 루트. 아래 import 사슬이 `orchestration.contracts.mas`(risk_mandate_workers)
+# 와 `apps.observability`를 쓰므로 **여기서** 넣어야 한다. 예전에는 317행에서 넣었는데,
+# 그 사슬을 처음 타는 import 는 98행이라 219줄 늦었다. 개발 셸에서는 저장소 루트가
+# 이미 sys.path 에 있어서 안 드러났고, 컨테이너에서 `uvicorn` 콘솔 스크립트로 뜨자
+# (sys.path[0] 이 /usr/local/bin) `ModuleNotFoundError: orchestration` 으로
+# 크래시 루프가 됐다 - 2026-08-12 실측.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _configured_policy_corpus() -> Path:
@@ -61,7 +68,7 @@ def _configured_policy_corpus() -> Path:
     )
 
 
-for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR):
+for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT):
     sys.path.insert(0, str(_p))
 
 from contracts import OrderIntent
@@ -639,6 +646,49 @@ def rag_observability():
             node: latency_summary(node)
             for node in ("retrieve", "grade", "generate", "hallucination_check")
         }
+    }
+
+
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). 2026-08-12 이전에는 리스크·QA 에만 이 두
+# 경로가 없어서, compose healthcheck 가 부서마다 다른 도메인 경로를 찔렀고
+# BFF 는 리스크가 죽어도 그걸 알 방법이 없었다.
+#
+# 나누는 이유: `/health` 는 **프로세스 생존**만 본다. 여기서 DB 를 만지면 DB
+# 순단마다 오케스트레이터가 멀쩡한 인스턴스를 교체한다. 저장소 판단은
+# `/health/ready` 가 하고, 못 닿으면 503 이다(trading-api 와 같은 규약).
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. **저장소가 죽어도 200 이다.** 외부 호출을 하지 않는다."""
+    return {
+        "status": "ok",
+        "service": "risk-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(_canonical_database_url()),
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 설정된 저장소에 실제로 닿아 보고, 못 닿으면 503 이다."""
+    dsn_configured = bool(_canonical_database_url())
+    if not dsn_configured:
+        # DB 없이 도는 것은 이 서비스의 **정상 모드**가 아니다. 다만 계약·오프라인
+        # 테스트가 이 상태로 앱을 띄우므로 200 으로 두되 상태를 숨기지 않는다.
+        return {"status": "degraded", "service": "risk-api", "canonical_db": "NOT_CONFIGURED"}
+    try:
+        repository = _risk_decision_repository()
+    except RiskDecisionPersistenceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "canonical_db_unavailable", "message": str(exc)[:200]},
+        ) from exc
+    return {
+        "status": "ready",
+        "service": "risk-api",
+        "canonical_db": "READY" if repository is not None else "NOT_CONFIGURED",
     }
 
 

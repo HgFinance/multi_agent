@@ -46,7 +46,8 @@ class PostgresPlanRepository:
     @classmethod
     def connect(cls, dsn: str) -> PostgresPlanRepository:
         ThreadedConnectionPool = _load_postgres_driver()
-        return cls(ThreadedConnectionPool(1, 4, dsn))
+        # minconn=0 - 유휴 커넥션을 잡지 않는다
+        return cls(ThreadedConnectionPool(0, 4, dsn))
 
     def close(self) -> None:
         self._pool.closeall()
@@ -159,7 +160,8 @@ class PostgresPlanApprovalEvidenceRepository(PlanApprovalEvidenceRepository):
     @classmethod
     def connect(cls, dsn: str) -> PostgresPlanApprovalEvidenceRepository:
         ThreadedConnectionPool = _load_postgres_driver()
-        return cls(ThreadedConnectionPool(1, 4, dsn))
+        # minconn=0 - 유휴 커넥션을 잡지 않는다
+        return cls(ThreadedConnectionPool(0, 4, dsn))
 
     def close(self) -> None:
         self._pool.closeall()

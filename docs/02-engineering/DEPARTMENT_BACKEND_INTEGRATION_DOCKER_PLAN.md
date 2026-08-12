@@ -223,6 +223,8 @@ flowchart LR
 | `otel-collector` | Trace·Metric·Log 수집 | `observability`, `full` | 관리망만 |
 | `prometheus` | Metric 저장 | `observability`, `full` | 관리망만 |
 | `grafana` | 운영 Dashboard | `observability`, `full` | 관리자 Auth 필요 |
+| `research-mcp` | 리서치 도구면(HTTP MCP). Hermes가 서비스 이름으로 부른다 | 기본 Core | 공개 금지 |
+| `*-mcp` (외부 데이터) | DART·FRED·KOSIS 등 **요청시 조회면**. §6.2.1의 선적재 대체 | `research-skills` | 공개 금지 |
 | `ollama` | 로컬 추론 | `local-llm` | 공개 금지 |
 | `ollama-model-init` | 8개 `Modelfile`의 모델 별칭 생성·Version 확인 | `local-llm`, `tools` | One-shot |
 | `migration-runner` | Supabase·Timescale Migration 검증·적용 | `tools` | One-shot |
@@ -284,17 +286,42 @@ DB 권한:
 | Container | 책임 |
 |---|---|
 | `market-stream-worker` | LS WebSocket 수신, Normalize, Sequence·Stale 검사 |
-| `research-batch-worker` | DART, 거시, 뉴스, Reference와 Corporate Action 수집 |
+| `research-batch-worker` | 시세·공시목록·재무·Reference·Corporate Action 수집 |
 | `market-api` | Snapshot, Bar, Microstructure, Breadth, DQ Read API |
 | `research-api` | Research Packet, Document, Evidence, Point-in-Time Query |
 | `research-hermes` | 조사 계획, Evidence 요약, Research Packet 초안 |
+| `*-mcp` (조회면) | 공시원문·거시·지정학을 **요청 시 조회**. 선적재하지 않는다 |
 
 현재 `ls-realtime`, `news-watcher`, `batch-collectors`, `research-api`를 유지하며 목표 이름으로 단계적으로 이동한다.
+
+#### 6.2.1 선적재 → 요청시 조회 전환 (2026-08-12, 재일님 결정)
+
+역할 분담을 **퀀트는 정량분석만, 정성분석은 점수 팩터로** 확정하면서, 정성 재료의
+수집 방식을 바꿨다. 기준은 *"실시간 적재가 필요 없고 MCP가 대체할 수 있는가"*다.
+
+| 데이터 | 이전 | 이후 | 근거 |
+|---|---|---|---|
+| 공시 원문·첨부 | `document-archive` Job이 매일 ZIP 적재 | **MCP 요청시 조회** | 원문이 안 들어오면 `evidence_chunks`(586MB, DB의 63%)도 안 늘어난다 |
+| 거시 (FRED·ECOS·KOSIS) | `macro` Job 매일 07:30 | **MCP 조회 → 점수 팩터** | 원계열 대신 점수만 적재 |
+| 지정학 (GPR·GDELT) | `geopolitical` Job 매일 07:20 | **MCP 조회 → 점수 팩터** | 120일 창을 매일 다시 쌓지 않는다 |
+| 공시 **목록** | `disclosure` Job 10분 주기 | **그대로 유지** | 장중 감지라 실시간성이 있다 |
+| 재무·현금흐름 | `financial`·`cashflow` Job | **그대로 유지** | F-Score 8/9·Altman Z(정량 축)가 그 위에 있다 |
+
+전환 후 리서치본부가 **선적재하는 범위**는 시세·공시목록·재무·Reference·CA로 좁아진다.
+정성 재료는 적재하지 않고 **점수와 인용 좌표만** 남긴다 —
+상세 기준은 [정성 팩터 명세](QUALITATIVE_FACTOR_SPEC.md).
+
+**받아들인 대가**: 거시·지정학 원계열은 **소급 재현을 포기한다.** 점수 팩터는
+forward-only이며, 기존 테이블은 남되 갱신이 멈춘다. 그 사실이 조용히 묻히지 않도록
+`research-data-steward`(07:15 리서치 평면 DQ)가 계열 정체를 드러내야 한다.
+
+**미결**: ECOS(한국은행)는 단독 MCP가 없다. 직접 만들거나 그 계열을 포기해야 한다.
 
 입력:
 
 - LS Open API REST·WebSocket
-- OpenDART, KRX, 거시·뉴스·승인된 Search Discovery Source
+- OpenDART(공시목록·재무), KRX, Reference
+- **MCP 조회면**: 공시원문·첨부, 거시, 지정학 (선적재 대상 아님)
 - `governance.mandate.changed.v1`
 - `reference.corporate_action.v1`
 
@@ -305,6 +332,7 @@ DB 권한:
 - `market.data_quality.v1`
 - `research.document.v1`
 - `research.packet.v1`
+- `research.qualitative_score.v1` (신규, 점수 팩터 — 계약은 QUALITATIVE_FACTOR_SPEC §6)
 
 DB 권한:
 
@@ -630,11 +658,35 @@ Hermes Memory 자체를 다른 본부 Container와 공유 Volume으로 연결하
 모든 Department API는 다음을 제공한다.
 
 ```text
-GET /health/live
-GET /health/ready
-GET /metrics
+GET /health          Liveness  — 프로세스 생존만. 외부(DB·Redis)를 만지지 않는다
+GET /health/ready    Readiness — 필요한 저장소·Event Plane 준비 상태. 못 닿으면 503
 GET /openapi.json
+GET /metrics         (선택) Prometheus. 관측 스택 결정 전까지 부서 재량
 ```
+
+> **2026-08-12 정정**: 원안은 `/health/live` 였으나 **어느 부서도 그 이름으로 만들지
+> 않았다.** 실제 구현은 전부 `/health`(liveness) + `/health/ready`(readiness)였다
+> (trading·accounting·operator-bff). 이름을 현실에 맞춘다 — 문서가 정본이라는 이유로
+> 아홉 개 앱을 다시 고치는 것은 값이 안 맞는다.
+
+같은 날 감사에서 **담당자별로 완전히 갈려 있던 것**을 통일했다.
+
+| 담당 | 통일 전 | 통일 후 |
+|---|---|---|
+| 도현 (trading·accounting) | `/health` + `/health/ready` | 그대로 (이것이 기준이 됐다) |
+| 재일 (research·market) | `/health` 만 | `/health/ready` 추가 |
+| 동규 (risk·qa) | **health 계열 전무**, `/metrics` 만 | `/health` + `/health/ready` 추가 |
+| 영주 (governance·workforce) | **전무** | `/health` + `/health/ready` 추가 |
+
+**남은 편차 2건** (숨기지 않고 기록한다):
+
+1. `research-api`·`market-api`의 `/health`는 **DB를 조회한다.** 이름은 liveness인데
+   하는 일은 readiness다. DB 순단이면 500이 나서 오케스트레이터가 멀쩡한 인스턴스를
+   교체할 수 있다. 지금은 이 경로를 부르는 소비자(`collector_health` 등)를 깨뜨리지
+   않으려고 의미를 바꾸지 않았다. 소비자 정리와 함께 별도로 고친다.
+2. `/metrics`는 `risk-api`·`qa-api`에만 있고 `include_in_schema=False`라 OpenAPI에
+   안 잡힌다. 나머지 부서에 Prometheus를 추가하는 것은 관측 스택 결정(§14)이
+   선행돼야 하므로 지금 하지 않는다.
 
 Command 요청은 다음 Header를 사용한다.
 
@@ -700,6 +752,33 @@ If-Match: <expected-version>
 | `hf:agent-status` | Kanban·Heartbeat Projection | 운영 Retention |
 
 Redis Stream 보존은 Canonical DB와 Audit Vault 보존 정책을 대체하지 않는다.
+
+### 8.4 MCP 조회면 계약
+
+§6.2.1로 외부 데이터 일부가 선적재에서 **요청시 조회**로 바뀌면서 MCP가 정식 통신
+방식이 됐다. 다음을 지킨다.
+
+**전송은 HTTP다.** Hermes 프로필의 `mcp_servers`는 `url: http://<서비스>:<포트>/mcp`
+형식만 받는다(`departments/*/hermes/config.yaml`). stdio 전용 MCP는 그대로 붙일 수 없고,
+쓰려면 HTTP를 노출하는 컨테이너로 감싸야 한다.
+
+**검증 전에는 `enabled: false`다.** 선례는 `paper-search-mcp`다 — 컨테이너를 띄우고
+`hermes -p <부서> mcp test <이름>`으로 계약을 확인한 뒤에야 프로필에서 켠다. 검증 안 된
+서버가 기존 스택 기동을 깨뜨리지 않게 하려는 것이다. 새 MCP는 `profiles:`로 격리해
+기본 `docker compose up`에서 뜨지 않게 한다.
+
+**해석 프레임은 가져다 쓰지 않는다.** 외부 MCP가 제공하는 자체 분석 도구
+(스코어·시그널·요약 프레임)는 **채점에 쓰지 않는다.** `evidence/methods.py`의
+*"인용 없는 방법은 등재하지 않는다"* 규율 때문이다. MCP에서는 **원천 데이터만**
+가져오고 해석은 우리가 인용과 함께 만든다.
+
+**라이선스를 확인한다.** AGPL 계열은 네트워크 서비스 제공 시 소스 공개 의무가 걸릴 수
+있다. 도입 전 라이선스를 기록한다.
+
+**호출 예산을 명시한다.** 외부 API는 일 한도가 있다(예: OpenDART 무료 20,000/일).
+선적재를 요청시 조회로 바꾸면 호출이 질의 수에 비례하므로, 팩터별 배치 주기를
+[정성 팩터 명세](QUALITATIVE_FACTOR_SPEC.md) §7에 적고 지킨다. 조회 실패는 점수 0이
+아니라 `UNKNOWN`이다.
 
 ## 9. Database와 Credential 경계
 

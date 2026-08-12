@@ -41,7 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pit_dataset import DATA_ROOT, content_hash, load_partition
+from pit_dataset import DATA_ROOT, content_hash, load_partition, resolve_object_path
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
@@ -592,9 +592,39 @@ def load_dataset(conn, name: str, version: str):
             """, (dataset_id,))
         parts = cur.fetchall()
 
+    # ▶ 명세가 있는 데이터셋은 **그 명세의 리더·해시**를 쓴다 (2026-08-12)
+    #   `load_partition`/`content_hash` 는 일봉 스키마(open/high/low/close)에
+    #   묶여 있어, 마이크로구조처럼 열이 다른 데이터셋에는 못 쓴다. 이걸 안
+    #   가르면 매니페스트는 등재되는데 로드에서 죽는다 - 실제로 그 상태를
+    #   만들어 놓고 "사상됐다" 고 보고했다.
+    #
+    #   일봉은 예전 경로 그대로 간다. 이미 해시 검증을 통과하며 도는 것을
+    #   형식을 바꾸자고 다시 만들 이유가 없다.
+    try:
+        from dataset_spec import SPECS                    # noqa: PLC0415
+        from spec_dataset_builder import (                # noqa: PLC0415
+            content_hash as spec_hash, read_partition)
+        spec = SPECS.get(f"{name}/{version}")
+    except ImportError:
+        spec = None
+    if spec is not None:
+        rows_s: list[dict] = []
+        for key, path, phash in parts:
+            chunk = read_partition(spec, resolve_object_path(path))
+            got = spec_hash(spec, chunk)
+            if got != phash:
+                raise RuntimeError(
+                    f"Partition {key} 해시 불일치 - 파일 변조/유실 "
+                    f"(manifest {phash[:12]}… vs 파일 {got[:12]}…)")
+            rows_s.extend(chunk)
+        if spec_hash(spec, rows_s) != chash or len(rows_s) != row_count:
+            raise RuntimeError("Dataset 전체 해시/행수 불일치 - 재생성할 것")
+        return str(dataset_id), str(universe_id), chash, rows_s
+
     rows: list[dict] = []
     for key, path, phash in parts:
-        chunk = load_partition(DATA_ROOT.parent / path)
+        # 원장의 object_path 는 빌드한 OS 의 구분자를 그대로 갖고 있다 - 정규화한다.
+        chunk = load_partition(resolve_object_path(path))
         got = content_hash(chunk)
         if got != phash:
             raise RuntimeError(

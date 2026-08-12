@@ -225,7 +225,13 @@ WORKER_SPECS = (
         ),
         "workforce.profile-architecture-context.v1",
         3,
+        # 필드 타입 명시 - 공용 런타임과 같은 이유(2026-08-12 실측: 모델 4종이 전부
+        # confidence 를 낱말로, 일부는 escalate 를 dict 로 냈다).
         "Return one JSON object with summary, confidence, evidence_refs, escalate, and proposal. "
+        "confidence must be a number between 0 and 1 (e.g. 0.75) - NOT a word like "
+        '"high"/"medium"/"low" and NOT a percentage like 90. escalate must be boolean '
+        "true or false - NOT an object. evidence_refs must be an array of strings; if it "
+        "is empty you MUST set escalate to true. "
         "proposal must contain exactly: status=PROPOSED, request_id, trace_id, mission, "
         "required_skills, approved_tool_candidates, forbidden_authorities, data_boundaries, "
         "eval_cases, evidence_refs. Each eval case must have case_key, case_type (GOLDEN or "

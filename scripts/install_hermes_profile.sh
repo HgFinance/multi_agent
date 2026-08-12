@@ -40,22 +40,69 @@ install_one() {
   [ -f "$src/config.yaml" ] || { echo "  ✗ $dept: config.yaml 없음"; return 1; }
   docker inspect "$container" >/dev/null 2>&1 || { echo "  - $container: 안 떠 있음(건너뜀)"; return 0; }
 
-  local dest="/opt/data/profiles/$profile"
-  docker exec "$container" mkdir -p "$dest"
-  docker cp "$src/config.yaml" "$container:$dest/config.yaml"
-  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:$dest/SOUL.md"
-
-  # ▶ **이 두 줄이 함정이다.** docker exec 는 root 로 만든다 - 안 고치면 에이전트가
-  #   자기 프로필 디렉터리에 못 써서 첫 실행에 죽는다.
-  docker exec "$container" chown -R hermes:hermes /opt/data/profiles
-  docker exec "$container" chmod 700 "$dest"
-
-  if docker exec "$container" hermes profile list 2>&1 | grep -q "$profile"; then
-    echo "  ✓ $profile"
+  # ▶ **활성 프로필은 /opt/data 루트다** (2026-08-11 실측)
+  #   컨테이너는 처음 뜰 때 /opt/data/config.yaml 에 **Hermes 기본 예제**(88KB)를
+  #   깔아 둔다. `profiles/<이름>/` 하위에 심으면 목록에는 뜨지만 활성 설정이 아니다.
+  #   부서 설정을 실제로 쓰게 하려면 루트를 갈아끼워야 한다.
+  # ▶ **${VAR} 를 .env 값으로 치환해서 넣는다** (2026-08-11 실측)
+  #   저장소 config 의 MCP 토큰은 `Bearer ${MCP_RESEARCH_API_KEY}` 라는 참조다.
+  #   그대로 심으면 헤르메스가 그 문자열을 그대로 보내 **HTTP 401** 이 난다.
+  #   실제로 서브에이전트가 여기서 막혔고, 지어내지 않고 blocked 로 멈춘 것은
+  #   옳은 동작이었다 - 고쳐야 할 것은 토큰 주입 쪽이다.
+  #   재설치 때마다 손으로 넣으면 언젠가 또 잊으므로 절차에 넣는다.
+  local tmp; tmp="$(mktemp)"
+  if [ -f "$ROOT/.env" ]; then
+    PYTHONIOENCODING=utf-8 python - "$src/config.yaml" "$ROOT/.env" "$tmp" <<'PYEOF'
+import os, re, sys
+cfg, envf = sys.argv[1], sys.argv[2]
+env = {}
+for line in open(envf, encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if line and not line.startswith("#") and "=" in line:
+        k, v = line.split("=", 1); env[k] = v.strip()
+text = open(cfg, encoding="utf-8").read()
+# ${VAR} 와 ${VAR:-기본} 둘 다. 값이 없으면 **원문을 남긴다** - 빈 문자열로
+# 바꾸면 "인증 없음" 이 "인증 성공" 처럼 조용히 통과한다.
+def sub(m):
+    key = m.group(1)
+    return env.get(key, m.group(0))
+out = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)(?::-[^}]*)?\}", sub, text)
+# ▶ **stdout 으로 흘리면 호스트 인코딩(cp949)을 타서 UTF-8 이 깨진다.**
+#   실제로 config.yaml 이 깨져 헤르메스가 기본 설정으로 폴백했고, 그 결과가
+#   401·"Model parameter is required" 로 나타나 원인을 찾는 데 시간이 걸렸다.
+#   파일로 직접 쓴다.
+open(sys.argv[3], "w", encoding="utf-8", newline="").write(out)
+PYEOF
   else
-    echo "  ✗ $profile: 심었으나 인식 안 됨 - 프로필 이름이 compose 와 다른지 확인"
+    cp "$src/config.yaml" "$tmp"
+  fi
+  docker cp "$tmp" "$container:/opt/data/config.yaml"
+
+  # ▶ **루트 교체만으로는 kanban spawn 이 안 된다** (2026-08-11 실측)
+  #   활성 설정은 /opt/data 루트지만, `kanban dispatch` 는 카드의 assignee 를
+  #   **프로필 이름**으로 찾는다. profiles/<이름>/ 이 없으면
+  #   "non-spawnable assignee — terminal lane" 으로 조용히 건너뛴다.
+  #   둘 다 있어야 한다: 루트는 이 컨테이너가 무엇인지, profiles/ 는 남이 이
+  #   부서를 지목할 수 있는 이름표다.
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "mkdir -p /opt/data/profiles/$profile"
+  docker cp "$tmp" "$container:/opt/data/profiles/$profile/config.yaml"
+  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:/opt/data/profiles/$profile/SOUL.md"
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "chown -R hermes:hermes /opt/data/profiles; chmod 700 /opt/data/profiles/$profile"
+  rm -f "$tmp"
+  [ -f "$src/SOUL.md" ] && docker cp "$src/SOUL.md" "$container:/opt/data/SOUL.md"
+
+  # ▶ docker cp 는 root 소유로 넣는다 - hermes 사용자가 못 읽으면 첫 실행에 죽는다
+  #   (`Permission denied: /opt/data/.../cron`). 이 줄이 함정이었다.
+  MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "chown hermes:hermes /opt/data/config.yaml /opt/data/SOUL.md 2>/dev/null; true"
+
+  local got
+  got=$(docker exec "$container" head -2 /opt/data/config.yaml 2>&1 | tr -d '
+')
+  if echo "$got" | grep -q "Hermes Agent CLI Configuration"; then
+    echo "  ✗ $profile: 아직 Hermes 기본 설정이다 - 복사가 안 먹었다"
     return 1
   fi
+  echo "  ✓ $profile (활성 설정 교체됨)"
 }
 
 if [ "${1:-}" = "--all" ]; then

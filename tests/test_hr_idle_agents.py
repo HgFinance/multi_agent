@@ -30,6 +30,25 @@ from orchestration.llm_observability import langfuse_worker_event_name  # noqa: 
 _NOW = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
 
 
+class _EmptyReader(LangfuseTraceReader):
+    def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+        return None
+
+
+def a_worker_of(department: str) -> str:
+    """그 부서에 **실제로 등록된** 워커 id 하나.
+
+    ▶ 워커 id 를 테스트에 박아두지 않는다 (2026-08-11 실측).
+      `research-data-worker`·`strategy-hypothesis-worker` 를 박아뒀는데 그 사이
+      워커가 개편돼(`holdings-analyst-worker` 등) 세 테스트가 KeyError 로 죽었다.
+      판정 로직은 멀쩡했고 이름만 낡은 것인데, 그 실패가 스위트에 섞여 **진짜
+      회귀와 구분되지 않았다.** 이름은 레지스트리에서 받아온다.
+    """
+    reports = check_idle_agents(reader=_EmptyReader(), departments=(department,), now=_NOW)
+    assert reports, f"{department} 에 등록된 워커가 없다 - 이 테스트가 무의미해진다"
+    return sorted(r.worker_id for r in reports)[0]
+
+
 class _FixedReader(LangfuseTraceReader):
     def __init__(self, fixed: dict[str, datetime]) -> None:
         self._fixed = fixed
@@ -57,20 +76,22 @@ def test_worker_covers_all_six_investment_departments() -> None:
 
 
 def test_recent_trace_is_active() -> None:
-    name = langfuse_worker_event_name(stage="research", worker_id="research-data-worker")
+    worker_id = a_worker_of("research")
+    name = langfuse_worker_event_name(stage="research", worker_id=worker_id)
     reader = _FixedReader({name: _NOW - timedelta(hours=1)})
     reports = check_idle_agents(reader=reader, departments=("research",), idle_threshold_hours=4.0, now=_NOW)
     by_id = {r.worker_id: r for r in reports}
-    assert by_id["research-data-worker"].status is IdleStatus.ACTIVE
-    assert by_id["research-data-worker"].idle_hours == pytest.approx(1.0)
+    assert by_id[worker_id].status is IdleStatus.ACTIVE
+    assert by_id[worker_id].idle_hours == pytest.approx(1.0)
 
 
 def test_stale_trace_is_idle_not_unobserved() -> None:
-    name = langfuse_worker_event_name(stage="research", worker_id="research-data-worker")
+    worker_id = a_worker_of("research")
+    name = langfuse_worker_event_name(stage="research", worker_id=worker_id)
     reader = _FixedReader({name: _NOW - timedelta(hours=48)})
     reports = check_idle_agents(reader=reader, departments=("research",), idle_threshold_hours=4.0, now=_NOW)
     by_id = {r.worker_id: r for r in reports}
-    assert by_id["research-data-worker"].status is IdleStatus.IDLE
+    assert by_id[worker_id].status is IdleStatus.IDLE
 
 
 def test_never_seen_worker_is_unobserved_not_idle() -> None:
@@ -139,7 +160,7 @@ def test_department_stage_mapping_disambiguates_dispatch_key_from_event_name() -
     """quant-backtest(dispatch 키) 워커가 quant(event stage) 이름으로 조회돼야 한다 -
     두 이름 공간이 같다고 착각하면 이 부서가 매 조회에서 조용히 0건이 된다."""
 
-    worker_id = "strategy-hypothesis-worker"
+    worker_id = a_worker_of("quant-backtest")
     correct_name = langfuse_worker_event_name(stage="quant", worker_id=worker_id)
     wrong_name = langfuse_worker_event_name(stage="quant-backtest", worker_id=worker_id)
     assert correct_name != wrong_name

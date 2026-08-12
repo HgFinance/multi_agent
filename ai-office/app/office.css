@@ -785,6 +785,47 @@
   font-weight: 900;
 }
 
+/* 본부별 카드 진행·실패. 색은 장식이 아니라 상태다: 답한 것 / 답을 못 낸 것 /
+   실패한 것이 한눈에 갈려야 "완료 5건"처럼 실패를 성공에 섞어 세지 않는다.
+   아래 Kanban 임베드(보드 원본)에서는 이 구분이 안 보인다. */
+.ceo-progress { margin-top: 10px; display: grid; gap: 8px; }
+
+.ceo-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--pink-deep);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ceo-progress-heading small { color: var(--ink-faint); font-weight: 700; }
+
+.ceo-progress-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.ceo-progress-cards > li {
+  padding: 8px 10px;
+  border: 1.5px solid var(--ink);
+  border-left-width: 5px;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ceo-progress-cards > li[data-tone="ok"] { border-left-color: var(--mint, #3aa981); }
+.ceo-progress-cards > li[data-tone="warn"] { border-left-color: var(--yellow, #d8a11a); }
+.ceo-progress-cards > li[data-tone="bad"] { border-left-color: var(--pink-deep); }
+.ceo-progress-cards > li[data-tone="wait"] { border-left-color: var(--ink-faint); }
+
+.ceo-progress-reason {
+  margin-top: 4px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .ceo-command-result-heading code {
   max-width: 52%;
   overflow: hidden;

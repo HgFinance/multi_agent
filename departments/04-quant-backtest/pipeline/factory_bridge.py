@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 from data_resolution import SOURCE_TABLES
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
-from trial_family import UNIVERSE_VOCAB, family_id, pressure
+from trial_family import UNIVERSE_VOCAB, family_id, hypothesis_view, pressure
 
 MODULE_VERSION = "quant-factory-bridge-v1"
 
@@ -78,28 +78,38 @@ class Gate0Result:
     trial_family_id: str = ""
     trial_number: int = 1
     trials_used: int = 0
+    # 막지는 않지만 사람이 봐야 하는 것. 경고를 거부로 올리면 게이트가
+    # "의심스러우면 차단"이 되고, 그건 신규 가설을 영영 못 사게 만든다.
+    warnings: list[str] = field(default_factory=list)
 
     def reject(self, code: str, why: str) -> None:
         self.ok = False
         self.codes.append(code)
         self.reasons.append(why)
 
+    def warn(self, why: str) -> None:
+        self.warnings.append(why)
+
     def as_dict(self) -> dict:
         return {"ok": self.ok, "codes": list(self.codes),
                 "reasons": list(self.reasons),
                 "trial_family_id": self.trial_family_id,
                 "trial_number": self.trial_number,
-                "trials_used": self.trials_used}
+                "trials_used": self.trials_used,
+                "warnings": list(self.warnings)}
 
 
 def _hyp_view(proposal: dict) -> dict:
-    """기획안 -> trial_family 가 읽는 모양. Family 키는 튜닝값을 안 본다."""
-    return {
-        "expected_edge": {"type": proposal.get("edge_type"),
-                          "universe_key": proposal.get("universe_key")},
-        "label": proposal.get("label") or "forward_return",
-        "baseline": proposal.get("baseline") or "equal_weight_buy_and_hold",
-    }
+    """기획안 -> trial_family 가 읽는 모양. Family 키는 튜닝값을 안 본다.
+
+    ▶ 기본값을 **여기서 정하지 않는다**(2026-08-11). 예전엔 label/baseline 기본값이
+      이 함수에 박혀 있었고 실행면은 그 값을 몰라서, 같은 기획안이 접수와 실행에서
+      서로 다른 Family 를 받았다 - 세는 장부와 각인하는 장부가 갈렸다.
+    """
+    return hypothesis_view(edge_type=proposal.get("edge_type"),
+                           universe_key=proposal.get("universe_key"),
+                           label=proposal.get("label"),
+                           baseline=proposal.get("baseline"))
 
 
 def _horizon_of(proposal: dict) -> int:
@@ -147,6 +157,19 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"universe_key={universe!r} 가 통제 어휘 밖이다 - "
                  f"사용 가능: {sorted(UNIVERSE_VOCAB)}. 자유 서술은 같은 컨셉을 "
                  f"여러 Family 로 흩어 다중검정 가드를 무력화한다")
+
+    # ①-a SUGGESTED_PARAMS 어휘. 막지는 않되 **접수 시점에 말해 준다.**
+    #     실행면이 안 읽는 키는 `expected_edge` 에 얹히지 않고 버려지는데(아래
+    #     expected_edge_for), 그 사실을 여기서 안 알리면 리서치는 자기가 적은
+    #     파라미터가 반영된 줄 안다. `type` 을 여기 적어 관문 승인 어휘를
+    #     덮으려 한 실측도 있었다(3bb50969) - 그건 이제 무시되지만 조용히
+    #     무시하면 같은 실수를 반복한다.
+    _, _dropped_params = expected_edge_for(proposal)
+    if _dropped_params:
+        r.warnings.append(
+            f"SUGGESTED_PARAMS 의 {_dropped_params} 는 실행면이 읽지 않아 "
+            f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
+            f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
 
     # ①-b 원천 어휘. **접수는 실행 가능성의 약속**인데 여기서 안 보면 가설이
     #     등록된 뒤 실행 단계에서 죽는다(2026-08-10 실측: 기획자가 DATA_TABLES 에
@@ -201,6 +224,14 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"증액은 CEO 결정이 필요하다")
 
     # ③ 기각 이력 대응. **회사가 이미 산 실험을 다시 사지 않는다.**
+    #
+    # ▶ 전제: "이미 샀어야" 이 규칙이 성립한다 (2026-08-11 재설계)
+    #   환류의 목적은 **같은 실험을 두 번 사지 않는 것**이다. 그런데 이 검사가
+    #   `trials_used` 를 보지 않아서, **이 계열에서 한 번도 실행된 적이 없는데도**
+    #   교훈이 있다는 이유로 막았다(실측: `기존 실행 0, 환류 1` 인데
+    #   DUPLICATE_UNADDRESSED). 그건 중복 방지가 아니라 **신규 차단**이고,
+    #   아직 아무도 해보지 않은 가설이 영영 실험되지 못하는 교착이 된다.
+    #   가설은 실험해서 경험을 쌓아야 하고, 막는 것은 그 경험이 생긴 뒤다.
     needed: set[str] = set()
     for o in past:
         if str(o.get("decision")) in REJECTING:
@@ -208,10 +239,57 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     prior = proposal.get("prior_check") or {}
     answered = set((prior.get("lessons_addressed") or {}).keys())
     missing = sorted(needed - answered)
-    if missing:
+    if missing and r.trials_used > 0:
         r.reject("DUPLICATE_UNADDRESSED",
-                 f"같은 계열의 기각 교훈에 대응이 없다: {missing}")
+                 f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
+                 f"그 교훈에 대응이 없다: {missing}")
+    elif missing:
+        # 실행 0인데 기각 교훈이 있다 = 원장이 어긋났다는 신호다(다른 계열의
+        # 결과가 섞였거나 정리가 덜 됐다). **막지 않고 알린다** - 여기서 막으면
+        # 데이터 불일치가 곧 신규 실험 금지가 된다.
+        r.warn(
+            f"이 계열의 실행 기록은 0인데 기각 교훈이 있다: {missing}. "
+            "원장 정합성을 확인하되, 아직 실행된 적이 없으므로 접수는 막지 않는다."
+        )
     return r
+
+
+def expected_edge_for(proposal: dict) -> tuple[dict, list]:
+    """기획안 -> `expected_edge`. 반환: (edge, 버려진 파라미터 키).
+
+    ▶ **관문이 승인한 값이 이겨야 한다** (2026-08-12 실측)
+      예전에는 이렇게 만들었다:
+
+        edge = {"type": …edge_type, "universe_key": …, **suggested_params}
+
+      전개가 **뒤에** 있어서 `suggested_params` 안의 `type` 이 Gate 0 이 검증하고
+      통과시킨 `edge_type` 을 덮었다. 실측(`3bb50969`):
+
+        기획안 edge_type        = mean_reversion        ← 관문 통과
+        기획안 suggested_params = {"type": "short_term_reversal", …}
+        가설  expected_edge     = {"type": "short_term_reversal", …}  ← 이게 남았다
+
+      **관문이 승인한 값과 원장에 남는 값이 달랐다.** 어휘 검사가 장식이 된다.
+      그래서 정체성 키(type·universe_key)를 **맨 뒤에** 둬서 덮이지 않게 한다.
+
+    ▶ 실행면이 안 읽는 키는 얹지 않는다
+      `config_binding.EDGE_KEYS` 밖의 키가 `expected_edge` 에 들어가면 실행
+      단계에서 "등록한 가설과 실행한 실험이 달라진다"며 **거부된다**. 실측:
+      `667f0a45` 가 `signal_window_days`·`walk_forward_window_days` 로 죽었고,
+      스톨 회수로 다시 발주해도 같은 자리에서 또 죽었다 - 가설이 만들어질 때
+      이미 실행 불가로 태어난 것이다. 접수는 실행 가능성의 약속이어야 한다.
+    """
+    from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
+
+    tunable = set(EDGE_KEYS) - {"type", "universe_key"}
+    params = proposal.get("suggested_params") or {}
+    kept = {k: v for k, v in params.items() if k in tunable}
+    dropped = sorted(k for k in params if k not in tunable)
+    # 정체성 키를 마지막에 - suggested_params 가 덮을 수 없다.
+    edge = {**kept,
+            "type": proposal.get("edge_type"),
+            "universe_key": proposal.get("universe_key")}
+    return edge, dropped
 
 
 def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
@@ -221,9 +299,7 @@ def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
     사전등록 시점의 근거를 **복사해 둔다** - 기획안이 나중에 수정돼도 이 실험이
     무엇을 등록했는지는 변하면 안 된다(사전등록의 의미가 그것이다).
     """
-    edge = {"type": proposal.get("edge_type"),
-            "universe_key": proposal.get("universe_key"),
-            **{k: v for k, v in (proposal.get("suggested_params") or {}).items()}}
+    edge, _dropped = expected_edge_for(proposal)
     return {
         "title": f"[{proposal.get('edge_type')}] {proposal.get('universe_key')}",
         "rationale": proposal.get("economic_rationale") or "",
@@ -397,6 +473,189 @@ def fetch_family_outcomes(conn, trial_family_id: str) -> list[dict]:
                 for d, lc in cur.fetchall()]
 
 
+_SQL_ALREADY_PROMOTED = (
+    "select proposal_id from quant.hypotheses "
+    " where proposal_id = any(%s) and proposal_id is not null")
+
+_SQL_INSERT_HYPOTHESIS = """
+insert into quant.hypotheses
+  (title, rationale, expected_edge, falsification_criteria,
+   required_data_products, status, created_by, trace_id,
+   proposal_id, lead_ids, research_packet_ids, claim_ids,
+   economic_rationale, counterparty, competing_explanation,
+   competing_explanation_codes, skeptic_sign, source_reported_effect)
+values (%s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+returning hypothesis_id
+"""
+
+
+@dataclass(frozen=True)
+class Promotion:
+    """기획안 하나의 Gate 0 결과. 거부도 결과다 - 조용히 사라지지 않는다."""
+
+    proposal_id: str
+    accepted: bool
+    hypothesis_id: str = ""
+    gate: dict = field(default_factory=dict)
+
+    @property
+    def why(self) -> str:
+        g = self.gate
+        return "; ".join(g.get("reasons") or []) or ",".join(g.get("codes") or [])
+
+
+def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridge",
+                      dry_run: bool = False) -> list[Promotion]:
+    """PUBLISHED 기획안을 Gate 0 에 태워 **가설로 승격한다.**
+
+    ▶ 왜 이 함수가 필요했나 (2026-08-12)
+      `gate0` 을 부르는 곳이 E2E 하네스(factory_e2e.py)뿐이었다. 즉 **기획안이
+      가설이 되는 운영 경로가 없었다.** 리서치 에이전트가 기획안을 내고 접수까지
+      통과해도 `quant.hypotheses` 는 그대로였고, 그래서 공장 자동 조종의 퀀트
+      브리핑은 언제나 "실험 대기 가설 0건"이었다. 테스트에서만 도는 루프였다.
+
+    ▶ 왜 결정론이 여기서 도는가
+      Gate 0 은 판단이 아니라 **검사**다(어휘 대조·다중검정 예산·계열 압력).
+      에이전트에게 맡기면 같은 기획안이 부를 때마다 다른 판정을 받는다.
+      마스터플랜의 "결정론이 사실을 모으고 에이전트는 판단만" 이 그 뜻이다.
+
+    ▶ 멱등
+      이미 승격된 proposal_id 는 건너뛴다. 두 번 태우면 같은 기획안이 계열
+      예산을 두 번 먹고, 다중검정 방어가 스스로 무너진다.
+    """
+    proposals = fetch_published_proposals(conn, limit=limit)
+    if not proposals:
+        return []
+    ids = [p["proposal_id"] for p in proposals]
+    with conn.cursor() as cur:
+        cur.execute(_SQL_ALREADY_PROMOTED, (ids,))
+        done = {r[0] for r in cur.fetchall()}
+
+    out: list[Promotion] = []
+    for p in proposals:
+        if p["proposal_id"] in done:
+            continue
+        # 계열 예산·과거 교훈은 **원장에서 읽는다.** 인자로 받으면 호출부마다
+        # 다른 수를 넘겨 같은 기획안이 다른 판정을 받는다.
+        probe = gate0(p, trials_used=0, past_outcomes=[])
+        fam = probe.trial_family_id
+        gate = gate0(p, trials_used=count_family_trials(conn, fam),
+                     past_outcomes=fetch_family_outcomes(conn, fam))
+        if not gate.ok or dry_run:
+            out.append(Promotion(p["proposal_id"], gate.ok, gate=gate.as_dict()))
+            continue
+        row = to_hypothesis_row(p, gate, created_by=created_by)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_INSERT_HYPOTHESIS, (
+                row["title"], row["rationale"], json.dumps(row["expected_edge"]),
+                json.dumps(row["falsification_criteria"]),
+                json.dumps(row["required_data_products"]), row["created_by"],
+                row["proposal_id"], row["lead_ids"], row["research_packet_ids"],
+                row["claim_ids"], row["economic_rationale"], row["counterparty"],
+                row["competing_explanation"], row["competing_explanation_codes"],
+                row["skeptic_sign"], json.dumps(row["source_reported_effect"])))
+            hid = str(cur.fetchone()[0])
+        conn.commit()
+        out.append(Promotion(p["proposal_id"], True, hypothesis_id=hid,
+                             gate=gate.as_dict()))
+    return out
+
+
+class _PromoConn:
+    """승격 검증용 가짜 연결. 실행된 SQL 을 순서대로 들고 있는다."""
+
+    def __init__(self, published, already=(), family_trials=0, outcomes=()):
+        self.published, self.already = published, list(already)
+        self.family_trials, self.outcomes = family_trials, list(outcomes)
+        self.inserted: list[tuple] = []
+        self.commits = 0
+
+    def cursor(self):
+        return _PromoCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+class _PromoCursor:
+    def __init__(self, conn):
+        self.c, self._rows = conn, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        s = " ".join(sql.split())
+        if "from research.experiment_proposals" in s:
+            self._rows = [tuple(p[k] for k in (
+                "proposal_id edge_type universe_key label baseline "
+                "economic_rationale counterparty competing_explanation "
+                "competing_explanation_codes skeptic_sign lead_ids "
+                "falsification_tests data_requirements suggested_params "
+                "trial_budget prior_check source_reported_effect "
+                "research_packet_ids claim_ids").split())
+                for p in self.c.published]
+        elif "select proposal_id from quant.hypotheses" in s:
+            self._rows = [(x,) for x in self.c.already]
+        elif "count(*) from quant.experiments" in s:
+            self._rows = [(self.c.family_trials,)]
+        elif "insert into quant.hypotheses" in s:
+            self.c.inserted.append(params)
+            self._rows = [("hyp-" + str(len(self.c.inserted)),)]
+        else:
+            self._rows = list(self.c.outcomes)
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+def _check_promotion_is_idempotent_and_records_rejection():
+    """기획안 -> 가설 승격이 **한 번만** 일어나고, 거부가 조용히 사라지지 않는가.
+
+    ▶ 이 경로가 없어서 공장이 안 돌았다 (2026-08-12)
+      gate0 을 부르는 곳이 E2E 하네스뿐이라 기획안이 가설이 되지 못했다.
+      접수는 통과하는데 quant.hypotheses 는 늘 비어 있었고, 퀀트 브리핑은
+      언제나 "실험 대기 가설 0건"이었다.
+
+    ▶ 두 번 태우면 다중검정 방어가 무너진다
+      같은 기획안이 계열 예산을 두 번 먹는다. 그래서 멱등이 성능이 아니라
+      **정합성** 문제다.
+    """
+    good = _prop(proposal_id="prop_ok")
+    conn = _PromoConn([good])
+    got = promote_published(conn, limit=5)
+    assert len(got) == 1 and got[0].accepted, got
+    assert len(conn.inserted) == 1 and conn.commits == 1
+    # 계보가 실제로 실렸는가 - 참조가 아니라 복사여야 사전등록이 성립한다
+    assert "prop_ok" in conn.inserted[0], conn.inserted[0]
+
+    # 이미 승격된 것은 다시 안 태운다
+    again = _PromoConn([good], already=["prop_ok"])
+    assert promote_published(again, limit=5) == []
+    assert again.inserted == [] and again.commits == 0
+
+    # 거부는 **결과로 남는다** - ok=False 가 목록에 들어오고 INSERT 는 없다
+    bad = _prop(proposal_id="prop_bad", edge_type="없는_엣지_유형")
+    rej = _PromoConn([bad])
+    res = promote_published(rej, limit=5)
+    assert len(res) == 1 and not res[0].accepted, res
+    assert rej.inserted == [], "거부된 기획안이 가설이 됐다"
+    assert res[0].why, "거부 사유가 비었다 - 리서치가 대응할 수 없다"
+
+    # dry_run 은 판정만 하고 쓰지 않는다
+    dry = _PromoConn([good])
+    assert promote_published(dry, limit=5, dry_run=True)[0].accepted
+    assert dry.inserted == [] and dry.commits == 0
+    print("  기획안->가설 승격 멱등   OK")
+
+
 def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str:
     """**환류 적재와 상태 전이를 한 트랜잭션으로 묶는다.**
 
@@ -480,11 +739,26 @@ def _check_trial_count_comes_from_executions_not_outcomes():
 
 
 def _check_unaddressed_lessons_block():
-    """**회사가 이미 산 실험을 다시 사지 않는다.**"""
+    """**회사가 이미 산 실험을 다시 사지 않는다.** 단, 산 적이 있어야 한다."""
     past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE", "COST_SENSITIVE"]}]
-    g = gate0(_prop(), past_outcomes=past)
+    g = gate0(_prop(), trials_used=1, past_outcomes=past)
     assert not g.ok and "DUPLICATE_UNADDRESSED" in g.codes
     assert "BEAR_FRAGILE" in g.reasons[-1] and "COST_SENSITIVE" in g.reasons[-1]
+
+
+def _check_never_run_family_is_not_blocked_by_lessons():
+    """**실행 0인 계열은 교훈이 있어도 막지 않는다** (2026-08-11 재설계).
+
+    환류의 목적은 같은 실험을 두 번 사지 않는 것이다. 한 번도 실행되지 않은
+    계열을 막으면 그건 중복 방지가 아니라 신규 차단이고, 아직 아무도 해보지
+    않은 가설이 영영 실험되지 못하는 교착이 된다. 실측에서 실제로 그렇게 막혔다.
+    """
+    past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE"]}]
+    g = gate0(_prop(), trials_used=0, past_outcomes=past)
+    assert g.ok, g.as_dict()
+    assert "DUPLICATE_UNADDRESSED" not in g.codes, g.as_dict()
+    # 조용히 통과시키지는 않는다 - 원장이 어긋났다는 신호이므로 경고로 남긴다.
+    assert g.warnings and "실행 기록은 0" in g.warnings[-1], g.as_dict()
 
 
 def _check_addressed_lessons_pass():
@@ -510,8 +784,37 @@ def _check_lineage_is_copied_not_referenced():
         assert row[k] == p[k if k != "proposal_id" else "proposal_id"], k
     assert row["competing_explanation_codes"] == ["BETA_EXPOSURE"]
     assert row["trial_family_id"] and row["trial_number"] == 1
-    # 튜닝 파라미터는 expected_edge 안으로 들어간다(Family 는 이걸 안 본다)
-    assert row["expected_edge"]["lookback_days"] == 20
+    # ▶ 튜닝 파라미터는 **실행면이 읽는 것만** expected_edge 로 들어간다.
+    #   예전 이 검사는 `lookback_days == 20` 을 기대했는데, 그 키는
+    #   config_binding.EDGE_KEYS 밖이라 실행 단계에서 거부된다 - 검사가
+    #   실행 불가로 태어나는 가설을 정상으로 규정하고 있었다(2026-08-12).
+    assert "lookback_days" not in row["expected_edge"], row["expected_edge"]
+    assert row["expected_edge"]["type"] == _prop()["edge_type"]
+
+
+def _check_gate_approved_edge_type_wins():
+    """**관문이 승인한 edge_type 을 suggested_params 가 덮을 수 없다.**
+
+    실측 3bb50969: 기획안 edge_type=mean_reversion 이 관문을 통과했는데
+    suggested_params 의 type=short_term_reversal 이 원장에 남았다. 승인한 값과
+    기록된 값이 다르면 어휘 검사가 장식이 된다.
+    """
+    p = dict(_prop())
+    p["suggested_params"] = {"type": "short_term_reversal",
+                             "universe_key": "몰래바꾸기",
+                             "horizon_days": 20, "top_n": 20,
+                             "signal_window_days": 60}
+    edge, dropped = expected_edge_for(p)
+    assert edge["type"] == p["edge_type"], edge
+    assert edge["universe_key"] == p["universe_key"], edge
+    # 실행면이 읽는 키는 살아남는다
+    assert edge["horizon_days"] == 20 and edge["top_n"] == 20, edge
+    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다
+    assert "signal_window_days" not in edge, edge
+    assert dropped == ["signal_window_days", "type", "universe_key"], dropped
+    # 접수 단계에서 경고로 뜬다 - 세 주기 뒤 실행면에서 처음 알면 늦다
+    g = gate0(p)
+    assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
 
 
 def _check_outcome_requires_reason():
@@ -712,9 +1015,11 @@ if __name__ == "__main__":
     _check_trial_count_comes_from_executions_not_outcomes()
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
+    _check_never_run_family_is_not_blocked_by_lessons(); print("  실행 0 계열은 안 막음    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
+    _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
@@ -722,4 +1027,5 @@ if __name__ == "__main__":
     _check_lessons_mapping_is_deterministic_baseline()
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
+    _check_promotion_is_idempotent_and_records_rejection()
     print("공장 다리 14개 영역 통과. 루프가 닫혔다.")

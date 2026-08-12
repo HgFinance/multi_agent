@@ -67,7 +67,16 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260804000500_api_accounting_read_views.sql",
                 "20260804001000_quant_hypothesis_inconclusive.sql",
                 "20260804001100_order_events_broker_id_unique.sql",
+                # ⚠ 아래 001150·001250 은 원래 001100·001200 으로 **버전이 겹쳤다**
+                # (2026-08-12 감사에서 4쌍 발견). 위 000300 사례와 같은 처리 -
+                # supabase_migrations 이력에 기록된 쪽(order_events / risk_qa)을 남기고
+                # 퀀트 쪽을 빈 슬롯으로 옮겼다. 둘 다 `if not exists` 가드가 있어
+                # 기존 DB 에서 재실행돼도 안전한 것을 확인한 뒤 옮겼다.
+                "20260804001150_quant_preregistration.sql",
                 "20260804001200_risk_qa_production_read_paths.sql",
+                "20260804001250_quant_status_changed_at.sql",
+                "20260804001300_quant_experiment_jobs.sql",
+                "20260804001400_quant_trial_family.sql",
                 # CEO Office (영주, 2026-08-05) - P0-2 GOV-02 Replay가 실 DB로 잡은 버그 수정
                 "20260805000100_notifications_dedup_key_per_channel.sql",
                 # 위 마이그레이션의 ADD CONSTRAINT가 재실행에 안전하지 않아 병합 후
@@ -89,9 +98,18 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # HR: hiring_request.py가 requested_by/decided_by/decided_at/decision_reason으로
                 # 요청자-승인자 분리(마스터플랜 4.3절 자기승인 금지)를 강제하려 추가
                 "20260810000100_workforce_hiring_requests_requester_decision.sql",
+                # 리서치 전략 공장. 원래 20260810000100 으로 인사팀 것과 겹쳤다 - 000150 으로 옮김
+                "20260810000150_research_strategy_factory.sql",
+                "20260810000200_quant_hypothesis_lineage.sql",
+                "20260810000300_quant_one_hypothesis_per_proposal.sql",
+                "20260810000400_market_pit_provenance.sql",
+                "20260810000500_market_received_at_nullable_for_imports.sql",
                 # 회계: 보수 발생주의 계정 3개(2100/5200/5300). 거래 수수료(5000)와
                 # 섞으면 TCA가 집행 비용과 운용 보수를 분리하지 못한다
                 "20260811000100_accounting_fee_accounts.sql",
+                # 제안 프롬프트 버전. 위 회계 것과 겹쳤다 - 000150 으로 옮김
+                "20260811000150_proposal_prompt_versions.sql",
+                "20260812000100_quant_service_role.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -186,12 +204,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
             "execution": 14,
             "governance": 20,
-            "quant": 12,
+            # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
+            "quant": 13,
             "reference": 9,
             # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
-            "research": 23,
+            "research": 26,
             "risk": 19,
             "strategy": 9,
             "workforce": 25,

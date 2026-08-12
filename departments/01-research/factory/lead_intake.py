@@ -38,7 +38,32 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from contracts.factory_contracts import lead_id_for  # noqa: E402
+from contracts.factory_contracts import (  # noqa: E402
+    MAX_EXCERPT_CHARS,
+    lead_id_for,
+)
+
+# 잘렸다는 사실을 발췌 안에 남긴다. 조용히 자르면 읽는 쪽이 원문 전체로 안다.
+_TRUNC_MARK = "…(발췌 상한 초과로 잘림)"
+
+
+def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
+    """발췌를 계약 상한 안으로 줄인다. **상한은 계약에서 읽는다.**
+
+    ▶ 왜 필요한가 (2026-08-12 실측)
+      `EXCERPT` 가 없으면 `MECHANISM` 으로 대체하는데(아래 to_lead), 기제 서술에는
+      길이 규율이 없어 500자를 넘긴다. 그러면 `MethodologyLeadV1` 검증이 터지고
+      **수확 전체가 죽는다** - 한 리드가 길어서 그 배치의 나머지가 다 버려졌다.
+      게다가 성공해야만 처리 표식이 남으므로 같은 카드를 매 주기 다시 수확하다
+      똑같이 실패했다(20260812T00 이 계속 반복됐다).
+
+      상한을 여기 다시 적지 않는다 - 계약과 갈리면 오늘 퀀트에서 겪은 것과 같은
+      "표가 둘" 사고가 된다.
+    """
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
 MODULE_VERSION = "research-lead-intake-v1"
 
@@ -150,7 +175,8 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
 
     now = as_known_at or datetime.now(timezone.utc)
     url, title = block["URL"].strip(), block["TITLE"].strip()
-    excerpt = (block.get("EXCERPT") or block.get("MECHANISM") or "").strip()
+    # MECHANISM 대체분은 길이 규율이 없다 - 계약 상한으로 자른다(clip_excerpt 참고).
+    excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
     ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
            "excerpt": excerpt}
 
@@ -398,5 +424,35 @@ def _cli(argv: list[str]) -> int:
     return 0
 
 
+def _check_excerpt_fits_contract():
+    """**한 리드가 길어서 배치 전체가 죽지 않는다.** 상한은 계약에서 읽는다."""
+    long_mech = "가" * (MAX_EXCERPT_CHARS + 400)
+    got = clip_excerpt(long_mech)
+    assert len(got) <= MAX_EXCERPT_CHARS, len(got)
+    assert got.endswith(_TRUNC_MARK), got[-30:]
+    # 짧은 것은 손대지 않는다 - 멀쩡한 발췌에 표식이 붙으면 원문을 의심하게 된다
+    assert clip_excerpt("짧은 발췌") == "짧은 발췌"
+    assert clip_excerpt("") == ""
+
+
+def _check_truncated_lead_passes_validation():
+    """계약 검증을 실제로 통과하는지 본다 - 길이만 맞추고 끝내지 않는다."""
+    from contracts.factory_contracts import MethodologyLeadV1  # noqa: PLC0415
+
+    block = {"URL": "https://example.org/p", "TITLE": "t",
+             "MECHANISM": "나" * (MAX_EXCERPT_CHARS + 900)}
+    lead = to_lead(block, lens="ACADEMIC", source_type="PAPER", case_id="c1",
+                   model_version="m1", prompt_version="p1")
+    MethodologyLeadV1.model_validate(lead)      # 여기서 터지면 수확이 또 죽는다
+
+
 if __name__ == "__main__":
+    if "--check" in sys.argv:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        print("lead-intake 자체 점검 (DB 없음)")
+        _check_excerpt_fits_contract();          print("  발췌 상한·표식        OK")
+        _check_truncated_lead_passes_validation(); print("  잘린 리드가 계약 통과  OK")
+        print("리드 접수 2개 영역 통과.")
+        raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

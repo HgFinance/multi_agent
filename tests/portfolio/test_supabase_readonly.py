@@ -267,15 +267,22 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
     )
     assert result["pipeline_events"]
     assert result["pipeline_event_count"] == len(result["pipeline_events"])
-    # 2026-08-06: risk 는 core-risk-worker/derivatives-counterparty-worker 를 risk-runner
-    # (결정론)로 흡수해 3 -> 1, qa 는 evidence-qa-worker/model-and-internal-audit-worker/
-    # ops-and-permission-worker 를 qa-runner 로 흡수해 5 -> 2. risk-runner/qa-runner는
-    # WORKER_SPECS 밖이라 이 LLM SKIPPED_SAFE 집계에는 안 잡힌다.
-    for stage, expected_skipped in (("research", 6), ("risk", 1), ("qa", 2), ("ceo", 1)):
+    # ▶ **인원수를 박아두지 않는다** (2026-08-11 실측). 이 검사가 지키려는 것은
+    #   "자료가 없으면 LLM 워커가 **한 명도 안 돌고** 전원 SKIPPED_SAFE 로 떨어진다"
+    #   이지 특정 인원수가 아니다. 그런데 6/1/2/1 을 박아둬서 워커를 개편할 때마다
+    #   깨졌고(research 6 -> 2), 그 실패가 **fail-closed 회귀와 구분되지 않았다.**
+    #   등록부에서 세면 개편은 통과하고 진짜 회귀만 잡힌다.
+    #   risk-runner/qa-runner 같은 결정론 러너는 WORKER_SPECS 밖이라 안 잡힌다.
+    from orchestration.workflows.portfolio_recommendation import registered_worker_ids
+
+    registered = registered_worker_ids()
+    for stage in ("research", "risk", "qa", "ceo"):
         report = result["department_reports"][stage]
+        expected_skipped = len(registered.get(stage, ()))
+        assert expected_skipped > 0, f"{stage} 에 등록된 LLM 워커가 없다 - 검사가 무의미"
         assert report["executed"] == 0
         assert report["completed"] == 0
-        assert report["skipped_safe"] == expected_skipped
+        assert report["skipped_safe"] == expected_skipped, (stage, report)
         assert report["failed_count"] == 0
         assert report["skip_reason"] == "LIVE_DATA_NOT_READY"
 

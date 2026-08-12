@@ -673,7 +673,13 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertTrue(all(item["expected_return"] is None for item in result["instrument_recommendations"]))
         self.assertFalse(any("TEST async" in message["text"] for message in runtime["messages"]))
         self.assertEqual(runtime["departments"]["trading-department"]["status"], "SKIPPED")
-        self.assertEqual(runtime["departments"]["research-department"]["last_message"], "research 부서가 2개 Worker 결과를 취합했습니다.")
+        # 2026-08-11: 2 -> 1. 리서치 자유 질의를 받는 자리는 holdings-analyst-worker
+        # 하나뿐이다. 예전 기대값 2는 research-data-worker/evidence-rag-worker 시절
+        # 것인데 그 둘은 편제에서 사라진 지 오래고, 라우팅 표에 죽은 이름만 남아
+        # 실제로는 **0개**가 나오고 있었다(이 숫자가 0이 아닌지만 보고 있었으면
+        # 아무도 몰랐을 상태다). 나머지 한 명 competing-explanation-worker 는
+        # 기획안을 검증하는 공장 쪽 자리라 사용자 질의에 켜지지 않는 것이 맞다.
+        self.assertEqual(runtime["departments"]["research-department"]["last_message"], "research 부서가 1개 Worker 결과를 취합했습니다.")
         # 2026-08-10: quant가 requested_departments에 있는데 STAGE_DEPARTMENT(portfolio_runtime.py)
         # 가 이를 모르면 department=None 가드에 걸려 Kanban·Operator UI에서 조용히 사라진다
         # (한 번 실제로 발생했던 결함 - orchestration/workflows/portfolio_recommendation.py의

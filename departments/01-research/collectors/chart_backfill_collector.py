@@ -61,12 +61,12 @@ class Bar:
     value: int
 
 
-def parse_daily(row: dict) -> Bar:
+def parse_daily(row: dict) -> Bar | None:
     d = datetime.strptime(str(row["date"]), "%Y%m%d").replace(tzinfo=KST)
     return _bar(d, "1D", row)
 
 
-def parse_minute(row: dict, *, ncnt: int = 1) -> Bar:
+def parse_minute(row: dict, *, ncnt: int = 1) -> Bar | None:
     # time 은 봉의 끝이다. bucket_time 은 관례상 시작으로 둔다 - 09:01:00 끝의
     # 1분봉 bucket 은 09:00:00. (bars_1m 연속집계의 time_bucket 과 같은 기준)
     end = datetime.strptime(  # noqa: DTZ007 - exchange-local timestamp receives KST below
@@ -76,7 +76,34 @@ def parse_minute(row: dict, *, ncnt: int = 1) -> Bar:
     return _bar(start, "1M" if ncnt == 1 else f"{ncnt}M", row)
 
 
-def _bar(bucket: datetime, code: str, row: dict) -> Bar:
+def is_no_trade(row: dict) -> bool:
+    """그날 **한 건도 체결되지 않았는가** (거래정지·무거래 종목).
+
+    ▶ 실측 2026-08-11
+      LS 는 무거래일에 `open=high=low=0, close=기준가, jdiff_vol=0` 을 준다.
+      시가·고저가 자체가 없으니 0 으로 채워 보내고, close 자리에는 기준가를
+      넣는 것이다. 이건 이상한 데이터가 아니라 **봉이 없다는 뜻**이다.
+
+      예전 코드는 이 행에서 `OHLC 정합 위반` 을 올려 실행 전체를 죽였다.
+      워치리스트 350종목(유동성 상위)에서는 한 번도 안 나오다가, 전체
+      3,924종목으로 넓힌 첫날 1,111번째 종목에서 터졌다. 유니버스를 넓히면
+      **꼬리가 규칙이 된다** - 관리종목·거래정지가 정상적으로 섞여 들어온다.
+
+    ▶ 왜 close 로 봉을 만들지 않나
+      close(기준가)를 OHLC 네 칸에 복사하면 거래량 0짜리 평평한 봉이 생긴다.
+      그건 관측이 아니라 우리가 만든 숫자다. 백테스트는 그 가격에 체결이
+      가능했다고 읽을 것이고, 실제로는 살 수도 팔 수도 없던 날이다.
+      **없는 것은 없는 대로 둔다.**
+    """
+    if int(row.get("jdiff_vol") or 0) != 0:
+        return False
+    o, h, l = (int(row[k]) for k in ("open", "high", "low"))
+    return o == 0 and h == 0 and l == 0
+
+
+def _bar(bucket: datetime, code: str, row: dict) -> Bar | None:
+    if is_no_trade(row):
+        return None                       # 봉이 없다 - 지어내지 않는다
     o, h, l, c = (int(row[k]) for k in ("open", "high", "low", "close"))
     if not (h >= max(o, c, l) and l <= min(o, c, h)):
         raise ValueError(f"OHLC 정합 위반: {row}")
@@ -87,12 +114,18 @@ def _bar(bucket: datetime, code: str, row: dict) -> Bar:
 
 
 def fetch_bars(client, symbol: str, *, daily: bool, sdate: str, edate: str,
-               ncnt: int = 1, max_pages: int = 200) -> list[Bar]:
-    """연속조회로 봉을 모은다. 과거 방향 페이징이며 실패는 예외로 올린다."""
+               ncnt: int = 1, max_pages: int = 200,
+               no_trade: list | None = None) -> list[Bar]:
+    """연속조회로 봉을 모은다. 과거 방향 페이징이며 실패는 예외로 올린다.
+
+    no_trade: 넘기면 무거래일 수가 [0] 에 누적된다. **세는 이유** - 조용히
+    건너뛰면 "이 종목은 원래 봉이 적다" 와 "우리가 못 받았다" 가 구분되지 않는다.
+    """
     tr = "t8410" if daily else "t8412"
     cts_date, cts_time, tr_cont, key = "", "", "N", ""
     out: list[Bar] = []
     seen: set = set()
+    no_trade = no_trade if no_trade is not None else [0]
     for _page in range(max_pages):
         blk = {"shcode": symbol, "qrycnt": PAGE_MAX, "sdate": sdate, "edate": edate,
                "cts_date": cts_date, "comp_yn": "N"}
@@ -109,6 +142,13 @@ def fetch_bars(client, symbol: str, *, daily: bool, sdate: str, edate: str,
         added = 0
         for r in rows:
             b = parse_daily(r) if daily else parse_minute(r, ncnt=ncnt)
+            if b is None:
+                # 무거래일 - 봉이 없다. **페이징은 계속돼야 한다**: added 를
+                # 올리지 않으면 무거래가 한 페이지를 채운 종목에서 루프가
+                # 끊겨 그 앞 과거를 통째로 못 받는다. 그래서 따로 센다.
+                no_trade[0] += 1
+                added += 1
+                continue
             if b.bucket_time in seen:
                 continue
             seen.add(b.bucket_time)
@@ -268,12 +308,18 @@ def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int |
     kind = "일봉" if daily else f"{ncnt}분봉"
     print(f"  {kind} {len(pairs)}종목, {sdate}~{edate} (초당 1회 - 예상 {len(pairs)}초+)")
     total_new = total_dup = 0
+    no_trade = [0]
+    silent: list[str] = []
     oldest: datetime | None = None
     try:
         for i, (sym, iid) in enumerate(pairs, 1):
-            bars = fetch_bars(client, sym, daily=daily, sdate=sdate, edate=edate, ncnt=ncnt)
+            bars = fetch_bars(client, sym, daily=daily, sdate=sdate, edate=edate,
+                              ncnt=ncnt, no_trade=no_trade)
             if not bars:
-                print(f"    {sym}: 0행 - 확인 필요")
+                # 유니버스 전량이면 거래정지·무거래 종목이 정상적으로 섞인다.
+                # 종목마다 한 줄씩 찍으면 3,900줄이 되어 진짜 이상을 덮으므로
+                # 모아 두고 끝에 요약한다.
+                silent.append(sym)
                 continue
             new, dup = write_bars(t, iid, bars, source_version="t8410" if daily else "t8412")
             total_new += new
@@ -285,7 +331,12 @@ def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int |
                       f"(최고 소급 {oldest:%Y-%m-%d})")
     finally:
         t.close()
-    print(f"  완료: 신규 {total_new:,} / 중복(멱등) {total_dup:,} / 최고 소급 {oldest}")
+    print(f"  완료: 신규 {total_new:,} / 중복(멱등) {total_dup:,} / "
+          f"무거래 건너뜀 {no_trade[0]:,} / 봉 0인 종목 {len(silent):,} / "
+          f"최고 소급 {oldest}")
+    if silent:
+        print(f"    봉 0: {', '.join(silent[:12])}"
+              f"{' 외 ' + str(len(silent) - 12) + '종목' if len(silent) > 12 else ''}")
     return 0
 
 
@@ -342,6 +393,64 @@ def _check_parse():
         except ValueError:
             pass
     print("  봉 파싱/정합             OK")
+
+
+def _check_no_trade_day_is_skipped_not_fatal():
+    """**무거래일이 실행 전체를 죽이면 안 된다** (2026-08-11 실측 재현).
+
+    전량 유니버스 첫 실행이 1,111번째 종목에서 이 행 하나로 죽었다:
+      {'date':'20260811','open':0,'high':0,'low':0,'close':103,'jdiff_vol':0}
+    LS 는 무거래일에 시고저를 0 으로 주고 close 자리에 기준가를 넣는다.
+    이상한 데이터가 아니라 **봉이 없다**는 뜻이다.
+    """
+    dead = {"date": "20260811", "open": 0, "high": 0, "low": 0, "close": 103,
+            "jdiff_vol": 0, "value": 0, "sign": "3"}
+    assert is_no_trade(dead)
+    assert parse_daily(dead) is None, "무거래일이 봉을 만들었다"
+
+    # close(기준가)를 OHLC 에 복사한 평평한 봉을 만들면 안 된다 - 살 수도 팔 수도
+    # 없던 날에 체결 가능한 가격이 생긴다. None 이라는 것 자체가 계약이다.
+    assert parse_minute(dict(dead, time="090100")) is None
+
+    # 거래가 있는데 가격이 0 이면 그건 여전히 오류다 - 무거래로 위장되면 안 된다
+    traded_but_zero = dict(dead, jdiff_vol=10)
+    assert not is_no_trade(traded_but_zero)
+    try:
+        parse_daily(traded_but_zero)
+        raise AssertionError("거래량이 있는데 0원 봉이 통과했다")
+    except ValueError:
+        pass
+
+    # 거래량 0 이어도 가격이 정상이면 봉이다(정지 해제일 시가만 있는 경우 등)
+    flat = {"date": "20260811", "open": 100, "high": 100, "low": 100,
+            "close": 100, "jdiff_vol": 0, "value": 0}
+    assert not is_no_trade(flat)
+    assert parse_daily(flat) is not None
+
+    # 무거래가 페이지를 채워도 **페이징이 끊기면 안 된다** - 끊기면 그 앞
+    # 과거를 통째로 못 받는다(added 를 안 올리면 조용히 그렇게 된다)
+    pages = [
+        {"t8410OutBlock": {"cts_date": "20260701"},
+         "t8410OutBlock1": [dict(dead, date="20260811"), dict(dead, date="20260810")]},
+        {"t8410OutBlock": {"cts_date": ""},
+         "t8410OutBlock1": [{"date": "20260709", "open": 1, "high": 2, "low": 1,
+                             "close": 2, "jdiff_vol": 1, "value": 1}]},
+    ]
+    calls = {"n": 0}
+
+    class _C:
+        def call_tr(self, **kw):
+            i = calls["n"]
+            calls["n"] += 1
+            return pages[i], {"tr_cont": "Y" if i == 0 else "N", "tr_cont_key": "k"}
+
+    nt = [0]
+    bars = fetch_bars(_C(), "000000", daily=True, sdate="20260701",
+                      edate="20260811", no_trade=nt)
+    assert nt[0] == 2, f"무거래를 안 셌다: {nt[0]}"
+    assert len(bars) == 1 and calls["n"] == 2, \
+        f"무거래 페이지에서 페이징이 끊겼다: bars={len(bars)} pages={calls['n']}"
+    print("  무거래일 건너뛰기        OK")
 
 
 def _check_fetch_pagination():
@@ -417,5 +526,6 @@ if __name__ == "__main__":
     _check_is_final_is_computed()
     print("  is_final 결정론 판정     OK")
     _check_parse()
+    _check_no_trade_day_is_skipped_not_fatal()
     _check_fetch_pagination()
-    print("차트 백필 3개 영역 통과. 실행은 --daily / --minute")
+    print("차트 백필 4개 영역 통과. 실행은 --daily / --minute")

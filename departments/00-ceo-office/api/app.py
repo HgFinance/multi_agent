@@ -565,6 +565,41 @@ class AssembleReportRequest(BaseModel):
 
 app = FastAPI(title="CEO Office Domain API", version="v1")
 
+
+# ── Health 계약 ───────────────────────────────────────────────────────────────
+# 전 부서 공통 규격이다(통합계획 8.1). `/health` 는 프로세스 생존만 보고 외부를
+# 만지지 않는다 - 여기서 DB 를 만지면 순단마다 오케스트레이터가 멀쩡한 인스턴스를
+# 교체한다. 저장소 판단은 `/health/ready` 가 한다(trading/risk 와 같은 규약).
+#
+# ⚠ 이 서비스는 DATABASE_URL 이 없으면 **InMemory 저장소로 조용히 후퇴**한다.
+#   그 상태를 200 "ok" 로만 보고하면 "승인 원장이 메모리에 있다"는 사실이 묻힌다.
+#   그래서 ready 가 저장소 종류를 그대로 드러낸다.
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness. 저장소가 죽어도 200 이다."""
+    return {
+        "status": "ok",
+        "service": "governance-api",
+        "api_version": "v1",
+        "canonical_db_configured": bool(os.environ.get("DATABASE_URL", "").strip()),
+    }
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness. 승인·Mandate 원장이 durable 저장소인지 드러낸다."""
+    durable = type(_mandate_repo).__name__.startswith("Postgres")
+    return {
+        "status": "ready" if durable else "degraded",
+        "service": "governance-api",
+        "mandate_store": "postgres" if durable else "in-memory",
+        # in-memory 는 프로세스가 죽으면 사라진다. 운영 원장이 아니다.
+        "authoritative": durable,
+    }
+
+
 _mandate_repo: object
 if os.environ.get("DATABASE_URL") and PostgresMandateVersionRepository is not None:
     _mandate_repo = PostgresMandateVersionRepository.connect(os.environ["DATABASE_URL"])

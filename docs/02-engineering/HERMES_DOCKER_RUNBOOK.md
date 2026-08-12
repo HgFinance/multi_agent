@@ -406,6 +406,108 @@ Provider 약관을 `MODEL-04`에서 검증하기 전 기본 Runtime이나 팀 �
 
 ---
 
+## 5-2. 사용자 입구 — 질문 하나를 끝까지 돌리기 (2026-08-11 로컬 실측)
+
+4-1-b 절이 `POST /ui/ceo/ask`(질문 → 뿌리 카드 + CEO 답변)를 정한다. 이 절은 그
+**뒤**를 적는다: 뿌리에 매달린 본부 카드가 실제로 도는지, 그리고 그 진행·실패가
+사용자에게 어떻게 보이는지.
+
+```
+사용자 → POST /ui/ceo/ask       → 뿌리 카드 생성 → CEO 가 자식 카드 N장
+                                                   → dispatcher 가 부서마다 spawn
+        GET /ui/ceo/ask/{뿌리}  ← 카드별 결말(아래 표)
+```
+
+상관키는 **뿌리 카드**다. Hermes 세션 id 가 아니다 — CEO 프로세스가 끊기면
+세션 id 는 사라지지만 뿌리 카드는 보드에 남는다(실측: 30초에 잘린 CEO 턴이 카드
+4장을 만들어 놓고 죽었는데, 세션 id 를 못 읽어 어느 카드가 그 질문 것인지 알
+방법이 없었다).
+
+### 전제: dispatcher 가 떠 있어야 한다 (4-1절)
+
+```bash
+docker compose up -d kanban-dispatcher   # 이게 없으면 카드가 ready 로 앉아 있다
+docker exec -u hermes hedgefund-qa-hermes hermes kanban stats | tail -1
+#   Oldest ready task age: 0s   ← 이 숫자가 곧 dispatcher 가 멈춰 있던 시간이다
+```
+
+로컬(윈도우)은 `~/.hermes` 한 덩어리가 아니라 부서마다 `~/.hermes-<부서>` 로
+흩어져 있어서, `docker-compose.override.yml` 이 그것들을 `profiles/<이름>` 자리에
+각각 물린다. **경로만 다르고 구조는 4-1절과 같다.**
+
+### CEO 를 CLI 로 부르는 로컬 경로
+
+4-1-b 의 기본 경로는 `ceo-hermes` 의 OpenAI 호환 엔드포인트(`HERMES_CEO_API_URL`)
+다. 그 엔드포인트는 `hermes serve` 인증 설정이 선행 조건이라(4-2절) 로컬에는 아직
+없다. 그동안은 컨테이너 안 CLI 로 같은 턴을 돌린다.
+
+```bash
+DATABASE_URL='' \
+CEO_TRANSPORT=cli ENABLE_CEO_CLI=true \
+HERMES_EXEC_MODE=docker \
+KANBAN_ACCESS_MODE=docker \
+  python -m uvicorn apps.api.main:app --port 8001
+```
+
+- **조용히 넘어가지 않는다.** URL 이 없다고 알아서 CLI 로 떨어지지 않는다 —
+  그러면 배포에서 URL 을 빠뜨렸을 때 "그래도 돌아가네"가 되어 경계가 무너진다.
+- `CEO_TURN_TIMEOUT_SECONDS`(기본 300)는 Profile 의 `agent.timeout_seconds`(30초)와
+  **일부러 다르다.** 30초는 한 번 묻고 한 번 답하는 조회 기준이고, 카드를 만들며
+  도구를 여러 번 부르는 CEO 턴은 실측 90~180초가 걸렸다.
+
+### ⚠ 윈도우에서 `kanban.db` 를 호스트에서 열지 마라 (2026-08-11 실측)
+
+보드는 WAL 모드다. **윈도우 호스트에서 `mode=ro` 로 열기만 해도** bind mount 위에
+`-shm` 매핑이 생기고, 그때부터 **컨테이너 쪽 쓰기가 전부 `disk I/O error` 로
+죽는다.** 리서치 워커가 3분 12초짜리 조사를 마치고 보고서까지 쓰고도
+`kanban_complete` 를 못 해 카드가 `running` 에 영원히 남았다 — 화면에는 "작업 중"
+으로 보였다. 증상이 dispatcher 나 권한 문제처럼 보여서 원인과 멀었다.
+
+```bash
+KANBAN_ACCESS_MODE=docker   # BFF 는 컨테이너 안에서 조회한다(윈도우 필수)
+```
+
+이미 망가졌다면 — 호스트 쪽 읽기 프로세스를 **먼저 끄고** 나서:
+
+```bash
+rm ~/.hermes-shared-kanban/kanban.db-wal ~/.hermes-shared-kanban/kanban.db-shm
+#   "Device or resource busy" 가 나면 아직 누가 잡고 있는 것이다
+```
+
+같은 이유로 `docker exec` 로 kanban CLI 를 부를 때는 **반드시 `-u hermes`** 를
+붙인다. 기본이 root 라 WAL 이 root 소유로 생기고, 그러면 정작 에이전트(uid 1000)가
+자기 보드를 못 쓴다.
+
+### 읽는 법 — 카드 결말은 보드 상태와 다르다
+
+| 결말 | 뜻 |
+|---|---|
+| `ANSWERED` | 결과 본문이 있다 |
+| `NO_ANSWER` | **`done` 이지만 결과가 비었다.** 성공이 아니다 |
+| `BLOCKED` | 자료·입력이 없어 부서가 멈췄다 |
+| `FAILED` | 크래시·타임아웃·연속 실패 |
+| `STALE` | `ready` 인데 아무도 안 집어갔다 → dispatcher 를 본다 |
+| `NO_ASSIGNEE` | 없는 본부 이름이라 **영원히 안 돈다.** 기다릴 이유가 없다 |
+
+`NO_ANSWER` 는 실제로 나온다. 회계본부가 "공식 NAV 가 없어 수익률을 산출할 수
+없습니다"를 **완료**로 기록했다 — 부서는 정직하게 실패했지만 보드에는 `done` 으로
+남는다. **Kanban 대시보드 임베드는 이 구분을 못 한다** — 임베드는 보드 원본이고,
+`GET /ui/ceo/ask/{뿌리}` 는 같은 카드를 "답이 됐는가" 기준으로 다시 판정한 것이다.
+둘은 서로를 대체하지 않는다.
+
+`NO_ASSIGNEE` 도 실제로 나왔다. CEO 가 `--assignee accounting-portfolio` 로 카드를
+만들었는데 정식 이름은 `accounting-portfolio-department` 였다. **보드는 없는 이름도
+받아 준다** — 카드는 만들어지고, 그러고는 아무도 집어가지 못한다. 이름표의 정본은
+[`orchestration/canonical_profiles.py`](../../orchestration/canonical_profiles.py)다.
+
+### 알아 둘 것
+
+- **잘린 CEO 턴은 "아무 일도 없었음"이 아니다.** 30초에서 끊긴 턴이 이미 카드
+  4장을 만들었고 부서들이 그걸 실행했다. 뿌리 카드를 **먼저** 만드는 4-1-b 의
+  순서가 이걸 막는다 — 뿌리는 보드에 남으므로 나중에라도 추적할 수 있다.
+
+---
+
 ## 6. Hermes가 하는 일과 하지 않는 일
 
 | | 담당 |
