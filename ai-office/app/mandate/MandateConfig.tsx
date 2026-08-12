@@ -1,6 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ConnectionBadge from "../components/ConnectionBadge";
+import { useBffHealth, type HealthState } from "../lib/useBffHealth";
+
+/** 배지에 쓸 표기. 상태별로 문구가 달라야 초록/빨강이 장식이 아니게 된다. */
+const HEALTH_LABEL: Record<HealthState, string> = {
+  checking: "CONNECTING",
+  online: "CONNECTED",
+  degraded: "DEGRADED",
+  offline: "DISCONNECTED",
+};
 
 /**
  * 운용 지침 설정 화면.
@@ -99,6 +109,7 @@ export default function MandateConfig() {
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const health = useBffHealth();
 
   const patch = useCallback(<K extends keyof MandateDraft>(key: K, value: MandateDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -170,10 +181,7 @@ export default function MandateConfig() {
                 거버넌스 버전은 제출 후 생성돼요.
               </p>
             </div>
-            <div className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0">
-              <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim animate-pulse" aria-hidden="true" />
-              CONNECTING
-            </div>
+            <ConnectionBadge state={health.state} label={HEALTH_LABEL[health.state]} title={health.detail} />
           </header>
 
           <div className="flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
@@ -427,14 +435,20 @@ export default function MandateConfig() {
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-tertiary text-on-tertiary flex items-center justify-center font-bold relative shrink-0">
                 AI
-                <span className="absolute bottom-0 right-0 w-3 h-3 bg-tertiary-fixed-dim border-2 border-surface rounded-full" aria-hidden="true" />
+                {/* 이 인터뷰는 브라우저 안에서만 도는 스크립트다. 서버 연결이 아니라서 초록 점을 주지 않는다. */}
+                <span className="absolute bottom-0 right-0 w-3 h-3 bg-outline-variant border-2 border-surface rounded-full" aria-hidden="true" />
               </div>
               <div>
                 <div className="font-bold text-body-sm font-body-sm text-on-surface">김세리</div>
                 <div className="text-[10px] text-on-surface-variant">Mandate Interview Worker</div>
               </div>
             </div>
-            <span className="text-[10px] font-bold border border-outline px-2 py-0.5 rounded text-secondary uppercase">Online</span>
+            <span
+              className="text-[10px] font-bold border border-outline px-2 py-0.5 rounded text-secondary uppercase"
+              title="이 인터뷰는 브라우저 안에서만 동작합니다. 서버에 연결된 Worker가 아닙니다."
+            >
+              Local
+            </span>
           </div>
 
           <div className="flex-1 min-h-60 p-4 overflow-y-auto flex flex-col gap-4 bg-background" aria-live="polite" aria-label="Mandate 인터뷰 대화">

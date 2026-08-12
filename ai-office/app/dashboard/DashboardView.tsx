@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { ConnectionDot } from "../components/ConnectionBadge";
+import { useBffHealth } from "../lib/useBffHealth";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
@@ -64,6 +66,7 @@ export default function DashboardView() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<CeoQueryResult | null>(null);
   const [progress, setProgress] = useState<CeoQueryProgress | null>(null);
+  const health = useBffHealth();
 
   const rootTaskId = result?.task_id ?? null;
 
@@ -127,8 +130,8 @@ export default function DashboardView() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
           <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm">
             <PanelBar icon="terminal" title="CEO Control Room">
-              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
+              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant" title={health.detail}>
+                <ConnectionDot state={health.state} />
                 Hermes endpoint
               </span>
             </PanelBar>
@@ -269,9 +272,13 @@ export default function DashboardView() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span className="bg-primary text-on-primary px-2 py-1 rounded text-label-md font-label-md">SOURCE OF TRUTH</span>
-                  <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                    <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-                    Hermes
+                  {/* 보드는 다른 오리진이라 브라우저에서 확인할 수 없다. 초록도 빨강도 거짓이라 회색으로 둔다. */}
+                  <span
+                    className="flex items-center gap-1.5 text-xs text-on-surface-variant"
+                    title="Hermes 보드는 다른 오리진이라 이 화면에서 연결 여부를 확인할 수 없습니다. 새 창으로 열어 확인하세요."
+                  >
+                    <ConnectionDot state="unknown" />
+                    Hermes · 확인 불가
                   </span>
                 </div>
                 <h2 className="text-headline-md font-headline-md text-primary">공용 Task Graph / Kanban</h2>
