@@ -56,7 +56,7 @@ function PixelEmployee({ hair, shirt, accent }: { hair: string; shirt: string; a
 export default function Home() {
   const [engine] = useState(() => new Company());
   const [snap, setSnap] = useState<Snapshot>(() => engine.snapshot());
-  const [view, setView] = useState<View>("live");
+  const [view, setView] = useState<View>("dashboard");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [briefing, setBriefing] = useState(false);
@@ -200,23 +200,30 @@ export default function Home() {
             <b>{COMPANY.name}</b>
           </div>
           <div className="nav-tabs">
-            <button className={view === "live" ? "active" : ""} onClick={() => setView("live")}>
-              🎮 라이브 오피스
-            </button>
             <button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>
-              📊 대시보드
+              Dashboard
             </button>
             <button
-              className={`todo-tab ${todo ? "urgent" : ""}`}
+              className={`${view === "live" ? "active" : ""} ${todo ? "todo-tab urgent" : ""}`}
               onClick={() => {
                 setView("live");
-                window.setTimeout(
-                  () => document.getElementById("ceo-approval")?.scrollIntoView({ behavior: "smooth", block: "center" }),
-                  60,
-                );
+                if (todo) {
+                  window.setTimeout(
+                    () =>
+                      document.getElementById("ceo-approval")?.scrollIntoView({ behavior: "smooth", block: "center" }),
+                    60,
+                  );
+                }
               }}
             >
-              📋 대표 할 일 <i>{todo}</i>
+              Team Board {todo ? <i>{todo}</i> : null}
+            </button>
+            {/* 화면이 아직 없다. 연결 안 된 걸 연결된 것처럼 보이지 않게 disabled로 둔다. */}
+            <button disabled title="준비 중">
+              Mandate Configuration
+            </button>
+            <button disabled title="준비 중">
+              Agent Logs
             </button>
           </div>
         </nav>

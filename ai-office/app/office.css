@@ -531,7 +531,7 @@
 .profile-progress { display: block; overflow: hidden; margin-top: 8px; height: 8px; border: 2px solid var(--ink); border-radius: 99px; }
 .profile-progress i { display: block; height: 100%; background: var(--pink); }
 .employee-profile h2 small { font-size: 13px; font-weight: 700; color: var(--ink-faint); }
-.todo-tab.urgent { background: var(--pink-deep); color: #fff; animation: blinkDot 1.1s steps(2) infinite; }
+.todo-tab.urgent i { animation: blinkDot 1.1s steps(2) infinite; }
 .dash-note { margin-top: 14px; text-align: center; font-size: 12px; color: var(--ink-soft); }
 .flow-row.past { opacity: .55; }
 

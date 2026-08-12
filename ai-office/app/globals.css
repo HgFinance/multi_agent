@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@600;900&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&family=Inter:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@600;900&display=swap");
 @import "tailwindcss";
 
 :root {
@@ -18,6 +18,11 @@
   /* 페이지 바탕 전용. --pink-bg는 팀 아이콘·탭·진행바에도 쓰여서 건드리지 않는다. */
   --page-bg: #ece7e0;
   --page-dot: #d3c9bc;
+
+  /* DESIGN.md(Sentient Capital) 토큰. 지금은 최상단 바만 쓴다. */
+  --sc-navy: #002d72;      /* primary-container = 문서가 말하는 Professional Navy */
+  --sc-muted: #747782;     /* outline */
+  --sc-line: #e2e8f0;      /* Level 1 경계선 */
 }
 
 * { box-sizing: border-box; }
@@ -227,67 +232,76 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
 .toast { position: fixed; z-index: 30; left: 50%; bottom: 24px; transform: translate(-50%, 70px); padding: 10px 18px; border-radius: 999px; background: var(--ink); color: white; font-size: 12px; font-weight: 900; opacity: 0; transition: .25s; pointer-events: none; }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }
 
-/* Pink pixel office */
+/* 최상단 바 — DESIGN.md 기준. 아래쪽 화면들은 아직 옛 팔레트다. */
 .app-nav {
   position: sticky;
   z-index: 10;
-  top: 8px;
+  top: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 58px;
-  margin-bottom: 16px;
-  padding: 8px 10px;
-  border: 2px solid var(--ink);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, .94);
-  box-shadow: 4px 4px 0 rgba(46, 33, 25, .14);
+  gap: 40px;
+  min-height: 64px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--sc-line);
+  background: rgba(255, 255, 255, .92);
   backdrop-filter: blur(8px);
 }
-.brand-chip { display: flex; align-items: center; gap: 8px; min-width: 0; padding-right: 8px; }
+.brand-chip { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-chip > span {
   display: grid;
-  width: 35px;
-  height: 35px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
   place-items: center;
-  border: 2px solid var(--ink);
-  border-radius: 8px;
-  background: var(--pink);
-  color: white;
-  box-shadow: 2px 2px 0 rgba(46, 33, 25, .22);
-  font: 900 17px "Archivo", sans-serif;
+  border-radius: .25rem;
+  background: var(--sc-navy);
+  color: #fff;
+  font: 700 14px "Inter", sans-serif;
 }
-.brand-chip b { overflow: hidden; font: 900 11px "Archivo", sans-serif; letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
-.nav-tabs { display: flex; gap: 7px; }
+.brand-chip b {
+  overflow: hidden;
+  color: var(--sc-navy);
+  font: 700 20px/28px "Inter", "Noto Sans KR", sans-serif;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-tabs { display: flex; gap: 4px; }
 .nav-tabs button {
   position: relative;
-  min-height: 40px;
-  padding: 7px 12px;
-  border: 1.5px solid var(--ink);
-  border-radius: 9px;
-  background: white;
-  box-shadow: 2px 2px 0 rgba(46, 33, 25, .16);
-  color: var(--ink);
-  font-size: 11px;
-  font-weight: 900;
+  min-height: 64px;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: var(--sc-muted);
+  font: 600 15px/1 "Inter", "Noto Sans KR", sans-serif;
+  white-space: nowrap;
   cursor: pointer;
 }
-.nav-tabs button:active { transform: translate(2px, 2px); box-shadow: none; }
-.nav-tabs button.active { background: var(--yellow); }
-.nav-tabs .todo-tab { background: var(--pink-bg); }
+.nav-tabs button:hover:not(:disabled) { color: var(--sc-navy); }
+.nav-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.nav-tabs button.active { color: var(--sc-navy); font-weight: 700; }
+.nav-tabs button.active::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  bottom: -1px;
+  left: 12px;
+  height: 3px;
+  background: var(--sc-navy);
+}
 .todo-tab i {
   display: inline-grid;
   min-width: 18px;
   height: 18px;
-  margin-left: 4px;
+  margin-left: 6px;
+  padding-inline: 5px;
   place-items: center;
-  border: 1px solid var(--ink);
   border-radius: 999px;
-  background: var(--pink-deep);
-  color: white;
-  font: normal 900 9px "Archivo", sans-serif;
+  background: var(--sc-navy);
+  color: #fff;
+  font: normal 700 11px "Inter", sans-serif;
+  vertical-align: 1px;
 }
 
 .office-hero {
@@ -602,11 +616,12 @@ footer a { color: var(--pink-deep); font-weight: 900; text-decoration: none; }
   .result-row > span:nth-child(2) { grid-row: 2; color: var(--ink-soft); }
   .result-row > .status-pill { justify-self: end; }
   .result-row > a { grid-row: 2; justify-self: end; }
-  .app-nav { position: static; display: grid; padding: 8px; }
-  .brand-chip { justify-content: center; }
-  .nav-tabs { display: grid; grid-template-columns: 1fr 1fr; }
-  .nav-tabs button { padding-inline: 7px; }
-  .nav-tabs .todo-tab { grid-column: 1 / -1; }
+  /* 좁은 화면에선 탭이 4개라 가로 스크롤로 흘린다. */
+  .app-nav { gap: 12px; min-height: 56px; }
+  .brand-chip b { font-size: 16px; }
+  .nav-tabs { overflow-x: auto; scrollbar-width: none; }
+  .nav-tabs::-webkit-scrollbar { display: none; }
+  .nav-tabs button { min-height: 56px; padding-inline: 8px; font-size: 13px; }
   .office-hero { padding: 18px 16px; }
   .office-hero-actions { grid-template-columns: 1fr; }
   .office-shell { padding: 8px; }
