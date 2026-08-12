@@ -204,6 +204,7 @@ from service import (
     CurrencyMismatchError,
     FundNotFoundError,
     InMemoryMandateVersionRepository,
+    MandateAlreadyExistsError,
     MandateVersionService,
 )
 
@@ -925,6 +926,20 @@ def _on_fund_not_found(request, exc: FundNotFoundError):
     })
 
 
+@app.exception_handler(MandateAlreadyExistsError)
+def _on_mandate_already_exists(request, exc: MandateAlreadyExistsError):
+    """`unique (fund_id, name)` 충돌. 409 + 기존 mandate_id.
+
+    200으로 기존 Mandate를 돌려주지 않는다 - 호출자가 "새로 만들었다"와 "이미
+    있었다"를 구분해야 한다(온보딩 버튼 중복 클릭과 이름 충돌은 서버가 구분할 수
+    없다). `detail.mandate_id`를 실어 재조회 없이 이어갈 수 있게 한다.
+    """
+    return JSONResponse(status_code=409, content={
+        "error_code": "MANDATE_ALREADY_EXISTS", "message": str(exc),
+        "detail": {"mandate_id": exc.mandate_id}, "trace_id": None,
+    })
+
+
 @app.exception_handler(ValueError)
 def _on_value_error(request, exc: ValueError):
     return JSONResponse(status_code=400, content={
@@ -975,6 +990,69 @@ def _on_review_approval_missing(request, exc: ReviewApprovalMissingError):
 
 
 # --- 2.1 Mandate ----------------------------------------------------------------
+
+
+class CreateMandateRequest(BaseModel):
+    """`governance.mandates` 부모 행 생성 요청.
+
+    Version(정책)은 여기서 만들지 않는다 - `POST .../versions`가 그 몫이다.
+    껍데기와 정책을 한 호출로 묶으면 정책 검증 실패 때 부모 행만 남는다.
+    """
+
+    fund_id: str = Field(min_length=1, max_length=128)
+    owner_user_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/governance/v1/mandates", status_code=201)
+def create_mandate(body: CreateMandateRequest):
+    """온보딩 최초 Mandate를 만든다. 2026-08-12 신설.
+
+    그 전까지 `governance.mandates` INSERT는 `change_workflow.py` 자체 점검 코드
+    안에만 있어서 **최초 Mandate를 만들 API 경로가 없었다** — Version을 제안하는
+    모든 경로가 `mandate_id`를 path로 받으므로 첫 사용자는 시작할 수 없었다.
+
+    반환 상태는 `DRAFT`/`current_version=0`이다(DDL 기본값). 정책이 아직 없으니
+    그게 정확한 상태이고, 여기서 `ACTIVE`로 만들면 정책 없는 Mandate가 활성으로
+    보인다.
+    """
+
+    creator = getattr(_mandate_repo, "create_mandate", None)
+    if not callable(creator):  # pragma: no cover - Postgres Repository에는 있다
+        raise HTTPException(status_code=503, detail="mandate_create_unavailable")
+    try:
+        mandate_id = creator(
+            fund_id=body.fund_id,
+            owner_user_id=body.owner_user_id,
+            name=body.name,
+        )
+    except NotImplementedError as exc:
+        # In-Memory Repository는 이 경로를 구현하지 않는다. 조용히 메모리에 만들면
+        # 재기동 때 사라지고 사용자는 온보딩을 다시 해야 한다(개발 원칙 9).
+        raise HTTPException(status_code=503, detail="mandate_create_unavailable") from exc
+
+    _publish_governance_event(
+        event_type="governance.mandate.changed.v1",
+        trace_id=str(uuid.uuid4()),
+        payload={
+            # mandate_id를 fund_id 자리에 쓰지 않는다 - 이 Event는 실제 fund_id를
+            # 알고 있다(propose_version의 주석 참고: 거기선 몰라서 mandate_id를 썼다).
+            "fund_id": body.fund_id,
+            "scope_key": f"mandate:{mandate_id}",
+            "action": "CREATED",
+            "mandate_id": mandate_id,
+            "owner_user_id": body.owner_user_id,
+            "name": body.name,
+        },
+    )
+    return {
+        "mandate_id": mandate_id,
+        "fund_id": body.fund_id,
+        "owner_user_id": body.owner_user_id,
+        "name": body.name,
+        "status": "DRAFT",
+        "current_version": 0,
+    }
 
 
 @app.post("/governance/v1/mandates/{mandate_id}/versions")

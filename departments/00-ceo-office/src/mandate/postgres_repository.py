@@ -40,7 +40,13 @@ from enum import Enum
 from functools import lru_cache
 from typing import Any
 
-from service import MandateDecisionRow, MandateVersionRepository, MandateVersionRow
+from service import (
+    FundNotFoundError,
+    MandateAlreadyExistsError,
+    MandateDecisionRow,
+    MandateVersionRepository,
+    MandateVersionRow,
+)
 
 
 class MandatePersistenceError(RuntimeError):
@@ -206,6 +212,78 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
             return [str(row[0]) for row in rows]
         finally:
             self._pool.putconn(conn)
+
+    def create_mandate(self, *, fund_id: str, owner_user_id: str, name: str) -> str:
+        """`governance.mandates` 부모 행 하나. 2026-08-12 신설.
+
+        그 전까지 이 INSERT 는 `change_workflow.py` 자체 점검 코드 안에만 있어서
+        최초 Mandate 를 만들 API 경로가 없었다(온보딩 첫 사용자가 시작할 수 없었다).
+
+        `status`/`current_version` 을 명시하지 않는다 - DDL 기본값이 `'DRAFT'`/`0`
+        이고, 그게 "Version 이 아직 없다" 는 정확한 상태다. 여기서 `ACTIVE` 로
+        만들면 정책 없는 Mandate 가 활성으로 보인다.
+
+        `fund_id`·`owner_user_id` 의 존재 검증을 따로 하지 않는다 - FK
+        (`accounting.funds`, `governance.user_profiles`)가 이미 잡고, 조회 후 INSERT
+        사이에 행이 사라지는 틈도 FK 에는 없다. 애플리케이션에서 미리 확인하면
+        그 틈이 생기고 검사도 두 곳으로 갈라진다.
+        """
+        # 예외 타입만 필요하다. _load_postgres_driver() 는 Json/Pool 을 주므로
+        # 여기서는 psycopg2 자체를 지역 import 한다 - Pool 이 이미 살아 있는
+        # 시점이라 드라이버 부재는 발생할 수 없다.
+        import psycopg2
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into governance.mandates (fund_id, owner_user_id, name) "
+                    "values (%s, %s, %s) returning mandate_id",
+                    (fund_id, owner_user_id, name),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if row is None:  # pragma: no cover - returning 이 있어 도달 불가
+                raise MandatePersistenceError("Mandate 생성 결과가 비었습니다")
+            return str(row[0])
+        except psycopg2.errors.UniqueViolation as exc:
+            # unique (fund_id, name). 기존 것을 조용히 돌려주지 않고 id 만 알려준다 -
+            # "새로 만들었다" 와 "이미 있었다" 를 호출자가 구분해야 한다.
+            conn.rollback()
+            existing = self._mandate_id_by_fund_name(conn, fund_id, name)
+            raise MandateAlreadyExistsError(
+                f"fund_id={fund_id} 에 name={name!r} Mandate 가 이미 있습니다",
+                mandate_id=existing,
+            ) from exc
+        except psycopg2.errors.ForeignKeyViolation as exc:
+            conn.rollback()
+            # 어느 FK 인지까지 지어내지 않는다 - 메시지에 제약 이름이 들어 있다.
+            raise FundNotFoundError(
+                f"fund_id 또는 owner_user_id 가 존재하지 않습니다: {exc}"
+            ) from exc
+        except psycopg2.Error as exc:
+            conn.rollback()
+            raise MandatePersistenceError(f"Mandate 생성 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    @staticmethod
+    def _mandate_id_by_fund_name(conn: Any, fund_id: str, name: str) -> str | None:
+        """중복 충돌 때 기존 mandate_id 를 찾는다. 실패해도 None 으로 삼킨다 -
+        이 조회가 깨져서 원래 에러(중복)를 가리면 안 된다."""
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select mandate_id from governance.mandates "
+                    "where fund_id = %s and name = %s",
+                    (fund_id, name),
+                )
+                found = cur.fetchone()
+            conn.commit()
+            return str(found[0]) if found else None
+        except Exception:  # pragma: no cover - 보조 조회
+            conn.rollback()
+            return None
 
     def get(self, mandate_id: str, version: int) -> MandateVersionRow | None:
         """USER_INPUT_API_SPEC.md 2.1 - GET .../current 가 전체 policy 를 돌려주는 데 쓴다.
