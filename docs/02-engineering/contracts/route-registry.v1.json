@@ -926,6 +926,30 @@
         },
         {
           "method": "POST",
+          "path": "/ui/mandates"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandates/by-fund/{fund_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandates/{mandate_id}/versions"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-assistant/suggest"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/investor-profiles"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/investor-profiles/current"
+        },
+        {
+          "method": "POST",
           "path": "/ui/portfolio-recommendations"
         },
         {

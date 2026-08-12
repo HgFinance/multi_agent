@@ -21,6 +21,7 @@ try:
         list_ceo_roots,
         load_workflow,
     )
+    from .current_user import optional_current_user
     from .ceo_schemas import (
         CeoQueryAcceptedResponse,
         GraphNode,
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         list_ceo_roots,
         load_workflow,
     )
+    from current_user import optional_current_user  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoQueryAcceptedResponse,
         GraphNode,
@@ -62,7 +64,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from orchestration.canonical_profiles import canonical_profile_for_department
 from orchestration.ceo_workflow_scope import build_root_body
@@ -110,8 +112,21 @@ def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
         " polling 후 `/result`로 가져간다."
     ),
 )
-def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
-    """Enqueue a CEO Kanban workflow without running a second CEO turn."""
+def ceo_query(
+    req: hermes_boundary.AgentAsk,
+    owner_id: str | None = Depends(optional_current_user),
+) -> dict[str, object]:
+    """Enqueue a CEO Kanban workflow without running a second CEO turn.
+
+    `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
+    **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
+    물었는지도 그 사람의 Mandate가 무엇인지도 알 수 없었다.
+
+    지금은 요청자를 받아 감사 추적에만 쓴다. Mandate 스냅샷을 root body에 싣는
+    작업은 별도이며, 그것이 붙기 전까지 이 값은 "누구의 질의였나"를 기록하는
+    용도다 - 값이 판정에 쓰이지는 않는다(USER_INPUT_SPEC 5: 자연어·요청자 맥락은
+    판정 근거가 아니다).
+    """
 
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
