@@ -77,7 +77,6 @@ services:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
 
   portfolio-worker:
-    profiles: ["portfolio"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
