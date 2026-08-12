@@ -320,6 +320,13 @@ def main(argv: list[str]) -> int:
     only = argv[argv.index("--date") + 1] if "--date" in argv else None
     if only:
         days = [d for d in days if d == only]
+    # ▶ --from: 보존 정책으로 **일부러 지운 과거**를 되받지 않기 위해 필요하다.
+    #   2026-08-11 에 디스크가 차서 5/17~6/30(30거래일)을 drop_chunks 로 지웠다.
+    #   그 뒤 구멍을 메우려고 이관기를 돌리면 지운 것을 그대로 다시 받아
+    #   디스크가 또 찬다 - 삭제가 무효가 되는 것을 코드가 막아야 한다.
+    since = argv[argv.index("--from") + 1] if "--from" in argv else None
+    if since:
+        days = [d for d in days if d >= since]
 
     # ▶ 삭제를 먼저 한다. 목록을 먼저 세면 방금 지운 날이 "이미 이관" 으로 남아
     #   할 일이 비어 버린다(2026-08-10 실측: 지우기만 하고 아무것도 안 가져왔다).
@@ -341,7 +348,18 @@ def main(argv: list[str]) -> int:
     #
     #   범위를 좁히려면 --date 와 같이 쓴다. --redo 만 주면 전 구간을 다시
     #   훑으므로 실수로 몇 시간을 태우기 쉽다.
-    done = set() if "--redo" in argv else done_days("market_ticks")
+    # ▶ **두 테이블이 다 있어야 완료다** (2026-08-12 실측)
+    #   예전엔 `done_days("market_ticks")` 하나만 봤다. 체결이 들어가면 그날을
+    #   완료로 쳤으므로, **호가 적재가 실패해도 아무도 몰랐다.** 결과: 7/09,
+    #   7/13, 7/20, 7/27, 8/03, 8/10 은 호가가 정상일의 1/20 만 들어왔고
+    #   7/14~7/17, 7/21~7/24, 7/28~7/31, 8/04~8/07 은 아예 비었는데 전부
+    #   "73/73 완료" 로 보고됐다.
+    #
+    #   그 위에서 만든 마이크로구조 피처는 29일 중 28일이 호가 없이(체결만으로)
+    #   계산돼 스프레드·호가불균형이 통째로 NULL 이었다. **행 0 을 정상 0 으로
+    #   위장하면 그 위층 전부가 조용히 반쪽이 된다.**
+    done = (set() if "--redo" in argv
+            else done_days("market_ticks") & done_days("market_quotes"))
     todo = [d for d in days if d not in done]
     if "--redo" in argv and not only:
         print("  ⚠ --redo 를 --date 없이 줬다 - 전 구간을 다시 훑는다"
