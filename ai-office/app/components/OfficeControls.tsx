@@ -32,15 +32,16 @@ export default function OfficeControls({
 
   return (
     <>
-      <header className="flex justify-between items-start gap-gutter flex-wrap mb-gutter">
-        <div className="min-w-0">
+      {/* 우측 레일이 붙으면 좌측이 좁아진다. 텍스트가 줄어들게 두고 시계는 안 밀리게 한다. */}
+      <header className="flex justify-between items-start gap-gutter mb-gutter">
+        <div className="flex-1 min-w-0">
           <p className="text-label-md font-label-md text-secondary uppercase">
             AI Office · Workers · LangGraph Projection
           </p>
           <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
             {COMPANY.titlePrefix} {COMPANY.titleAccent}
           </h1>
-          <p className="text-body-md font-body-md text-on-surface-variant mt-2 max-w-3xl">
+          <p className="text-body-md font-body-md text-on-surface-variant mt-2 max-w-2xl">
             실제 LangGraph가 실행 중인 Worker만 부서 안에서 작업하고, 부서 간 handoff는 부서장끼리만 진행합니다.
           </p>
         </div>
@@ -63,7 +64,7 @@ export default function OfficeControls({
             disabled={snap.running}
             className="px-6 py-3 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors disabled:opacity-45 disabled:hover:bg-primary"
           >
-            {snap.running ? "Simulation Running…" : "Start Office Simulation"}
+            {snap.running ? "Simulation Running…" : "Office Simulation 시작"}
           </button>
 
           <button
