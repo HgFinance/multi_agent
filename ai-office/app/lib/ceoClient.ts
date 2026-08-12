@@ -13,13 +13,28 @@
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
 
+/** v2(PR #226)는 `status`와 `planning`을 더한다. 배포 순서를 강제하지 않으려고
+ *  둘 다 받는다 — BFF가 먼저 올라가든 프런트가 먼저 올라가든 안 깨진다. */
+export const ACCEPTED_QUERY_VERSIONS = ["ceo.query-accepted.v1", "ceo.query-accepted.v2"] as const;
+
+export type CeoQueryPlanning = {
+  selected_departments: string[];
+  steps: string[];
+  qa_required: boolean;
+  summary: string | null;
+};
+
 export type CeoQueryResult = {
-  schema_version: "ceo.query-accepted.v1";
+  schema_version: (typeof ACCEPTED_QUERY_VERSIONS)[number];
   department: "ceo-agent";
   binding: false;
   task_id: string;
   answer: string;
   session_id: string | null;
+  /** v2 전용. v1 응답에는 없다. */
+  status?: "planned" | "accepted";
+  /** v2 전용. 어느 본부가 선택됐고 QA가 필요한지. */
+  planning?: CeoQueryPlanning;
   task: {
     task_id: string | null;
     status: string;
@@ -90,8 +105,11 @@ export async function askCeo(query: string, requestId?: string): Promise<CeoQuer
     throw new Error("CEO Hermes 응답 계약이 올바르지 않습니다.");
   }
   const result = body as Partial<CeoQueryResult>;
-  if (result.schema_version !== "ceo.query-accepted.v1" || typeof result.answer !== "string" || typeof result.task_id !== "string") {
-    throw new Error("CEO Hermes 응답 계약이 올바르지 않습니다.");
+  const known = ACCEPTED_QUERY_VERSIONS.includes(result.schema_version as (typeof ACCEPTED_QUERY_VERSIONS)[number]);
+  if (!known || typeof result.answer !== "string" || typeof result.task_id !== "string") {
+    throw new Error(
+      `CEO Hermes 응답 계약이 올바르지 않습니다. (받은 schema_version: ${String(result.schema_version)})`,
+    );
   }
   return result as CeoQueryResult;
 }
