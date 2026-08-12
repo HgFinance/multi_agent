@@ -45,6 +45,15 @@ class TaskProgress(BaseModel):
     synthesis: StageStatus = Field(description="CEO 최종 종합 단계 상태")
 
 
+class CeoPlanning(BaseModel):
+    """Optional planning projection for the legacy qa-department BFF client."""
+
+    selected_departments: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    qa_required: bool = False
+    summary: str | None = None
+
+
 class TaskStatusResponse(BaseModel):
     """GET /ui/ceo/tasks/{task_id}"""
 
@@ -64,6 +73,7 @@ class TaskStatusResponse(BaseModel):
     completed_at: str | None = Field(default=None, description="ISO 8601 UTC")
     workflow: TaskWorkflow
     progress: TaskProgress
+    planning: CeoPlanning | None = None
 
 
 class GraphNode(BaseModel):
@@ -165,16 +175,23 @@ class CeoQueryAcceptedTask(BaseModel):
 class CeoQueryAcceptedResponse(BaseModel):
     """POST /ui/ceo/ask"""
 
-    schema_version: Literal["ceo.query-accepted.v1"] = "ceo.query-accepted.v1"
+    # v1 remains the default wire contract; v2 is additive during the merge
+    # transition and carries the optional planning projection.
+    schema_version: Literal["ceo.query-accepted.v1", "ceo.query-accepted.v2"] = (
+        "ceo.query-accepted.v1"
+    )
     department: Literal["ceo-agent"] = "ceo-agent"
     binding: Literal[False] = False
     task_id: str
     task: CeoQueryAcceptedTask
     answer: str
     session_id: str | None = None
+    status: Literal["accepted", "planned"] | None = None
+    planning: CeoPlanning | None = None
 
 
 __all__ = [
+    "CeoPlanning",
     "CeoQueryAcceptedResponse",
     "CeoQueryAcceptedTask",
     "GraphNode",

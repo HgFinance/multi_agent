@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,11 @@ from evidence.handoff import (  # noqa: E402
     reusable_evidence_refs,
 )
 from evidence.llm_client import chat  # noqa: E402
-from evidence.observability import ResearchRunMetrics, activate_metrics  # noqa: E402
+from evidence.observability import (  # noqa: E402
+    ResearchRunMetrics,
+    activate_metrics,
+    redacted_span,
+)
 
 
 class _Response:
@@ -41,6 +46,103 @@ class _Response:
 
 
 class Phase0LatencyHygieneTest(unittest.TestCase):
+    def test_langsmith_root_and_child_spans_are_redacted(self) -> None:
+        records: list[dict[str, object]] = []
+
+        class FakeRun:
+            def __init__(self, metadata: dict[str, object]) -> None:
+                self.metadata = dict(metadata)
+
+            def end(self, *, error: str | None = None) -> None:
+                return None
+
+        class FakeTrace:
+            def __init__(self, name: str, kwargs: dict[str, object]) -> None:
+                self.run = FakeRun(kwargs["metadata"])
+                records.append(
+                    {
+                        "name": name,
+                        "inputs": kwargs["inputs"],
+                        "metadata": kwargs["metadata"],
+                        "client": kwargs["client"],
+                    }
+                )
+
+            def __enter__(self) -> FakeRun:
+                return self.run
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+        fake_client = object()
+
+        def fake_trace(name: str, **kwargs: object) -> FakeTrace:
+            return FakeTrace(name, kwargs)
+
+        with patch.dict(
+            os.environ,
+            {
+                "LANGCHAIN_TRACING_V2": "true",
+                "LANGSMITH_TRACING": "true",
+                "LANGSMITH_API_KEY": "configured-but-not-recorded",
+                "LANGSMITH_PROJECT": "First",
+            },
+        ), patch("evidence.observability._langsmith_client", return_value=fake_client), patch(
+            "langsmith.trace", side_effect=fake_trace
+        ):
+            with redacted_span(
+                "research.department",
+                metadata={"department": "research", "task_id": "t-root"},
+            ):
+                with redacted_span(
+                    "research.llm.call",
+                    run_type="llm",
+                    metadata={
+                        "model": "qwen3:14b",
+                        "prompt": "do not send",
+                        "output": "do not send",
+                        "api_key": "do not send",
+                    },
+                ):
+                    pass
+
+        self.assertEqual(
+            [record["name"] for record in records],
+            ["research.department", "research.llm.call"],
+        )
+        for record in records:
+            self.assertEqual(record["inputs"], {})
+            metadata = record["metadata"]
+            self.assertNotIn("prompt", metadata)
+            self.assertNotIn("output", metadata)
+            self.assertNotIn("api_key", metadata)
+            self.assertIs(record["client"], fake_client)
+
+    def test_langsmith_failure_is_fail_open(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LANGCHAIN_TRACING_V2": "true",
+                "LANGSMITH_TRACING": "true",
+                "LANGSMITH_API_KEY": "configured-but-not-recorded",
+            },
+        ), patch(
+            "evidence.observability._langsmith_client",
+            side_effect=RuntimeError("client unavailable"),
+        ):
+            with redacted_span("research.department") as span:
+                self.assertIsNone(span)
+                self.assertEqual(2 + 2, 4)
+
+    def test_tracing_disabled_preserves_workflow_body(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"LANGCHAIN_TRACING_V2": "false", "LANGSMITH_TRACING": "false"},
+        ):
+            with redacted_span("research.department") as span:
+                self.assertIsNone(span)
+                self.assertEqual("unchanged", "unchanged")
+
     def test_same_api_url_fetches_once_and_hits_task_cache(self) -> None:
         calls: list[str] = []
         metrics = ResearchRunMetrics(trace_id="trace-cache")
