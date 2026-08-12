@@ -121,6 +121,24 @@ export default function DashboardView() {
                 자연어로 질문하면 CEO Hermes가 업무를 만들고, 결과는 Kanban에서 추적됩니다.
               </p>
 
+              {/* 자주 쓰는 질의를 먼저 둔다. 아래 입력창은 그 밖의 상세 요청용이다. */}
+              <div className="mb-6">
+                <span className="block text-label-md font-label-md text-on-surface-variant mb-2">빠른 질문</span>
+                <div className="flex flex-col items-stretch gap-2">
+                  {QUICK_QUESTIONS.map((question) => (
+                    <button
+                      key={question}
+                      type="button"
+                      onClick={() => void send(question)}
+                      disabled={busy}
+                      className="px-3 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant hover:bg-surface-container hover:border-primary transition-colors disabled:opacity-40 text-left"
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <label className="block">
                 <span className="block text-label-md font-label-md text-primary mb-2">대표님 질의</span>
                 <textarea
@@ -169,22 +187,6 @@ export default function DashboardView() {
                 </div>
               ) : null}
 
-              <div className="mt-6">
-                <span className="block text-label-md font-label-md text-on-surface-variant mb-2">빠른 질문</span>
-                <div className="flex flex-col items-start gap-2">
-                  {QUICK_QUESTIONS.map((question) => (
-                    <button
-                      key={question}
-                      type="button"
-                      onClick={() => void send(question)}
-                      disabled={busy}
-                      className="px-3 py-1.5 rounded border border-outline-variant bg-surface-container-lowest text-xs text-on-surface-variant hover:bg-surface-container transition-colors disabled:opacity-40 text-left"
-                    >
-                      {question}
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
           </section>
 

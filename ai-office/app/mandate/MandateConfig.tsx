@@ -28,7 +28,7 @@ export interface MandateDraft {
 const RISK_PROFILES: { id: RiskProfile; icon: string; label: string; note: string; tone: string }[] = [
   { id: "conservative", icon: "shield", label: "보수적", note: "원금 보존 최우선", tone: "text-primary" },
   { id: "neutral", icon: "balance", label: "중립적", note: "성장과 위험의 균형", tone: "text-secondary" },
-  { id: "aggressive", icon: "rocket_launch", label: "공격적", note: "높은 수익 추구, 위험 감수", tone: "text-error" },
+  { id: "aggressive", icon: "rocket_launch", label: "공격적", note: "높은 수익 추구\n위험 감수", tone: "text-error" },
 ];
 
 const ASSET_CLASSES: { id: AssetClassId; icon: string; label: string }[] = [
@@ -166,8 +166,8 @@ export default function MandateConfig() {
               </div>
               <h1 className="text-headline-lg font-headline-lg text-on-surface font-bold tracking-tight">운용 지침 설정</h1>
               <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-2xl">
-                기본 운용 파라미터를 확인하고 저장하세요. 복합적이거나 세밀한 조건은 AI 어시스턴트와의 대화를 통해 정교화됩니다. 최종
-                거버넌스 버전은 제출 후 생성됩니다.
+                기본 운용 파라미터를 확인하고 저장하세요. 복합적이거나 세밀한 조건은 AI 어시스턴트와의 대화를 통해 정교화되며, 최종
+                거버넌스 버전은 제출 후 생성돼요.
               </p>
             </div>
             <div className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0">
