@@ -188,7 +188,7 @@ export default function MandateConfig() {
                       value={draft.objective}
                       onChange={(event) => patch("objective", event.target.value)}
                       className="w-full h-32 p-4 bg-surface rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-md font-body-md resize-none shadow-inner"
-                      placeholder="E.g., Prioritize long-term capital preservation with steady yield generation while minimizing downside risk..."
+                      placeholder="Ex) 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어."
                     />
                   </label>
                   <p className="text-xs text-on-surface-variant mt-2">Specific assets or time horizons will be clarified by the AI Assistant.</p>

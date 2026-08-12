@@ -16,9 +16,6 @@ const QUICK_ORDERS = [
   { label: "현황 보고", command: "현황 보고해줘" },
   { label: "회의 소집", command: "전 부서 회의 소집" },
   { label: "왜 늦어져?", command: "왜 늦어지고 있어?" },
-  { label: "지금 브리핑", command: "지금 브리핑 올라와" },
-  { label: "집중 모드", command: "집중 모드" },
-  { label: "속도 올려", command: "속도 좀 올려줘" },
 ];
 
 const DEPT_DOT: Record<DeptStatus, string> = {
@@ -64,6 +61,10 @@ export default function RightRail({
   selectedId: string | null;
   onSelect: (agent: Agent) => void;
 }) {
+  // 레일에 lg:overflow-y-auto 를 둔 것은 안전장치다. 세 패널 높이 합이 고정
+  // 높이를 넘으면 레일이 뷰포트 밖으로 흘러 페이지 스크롤로도 닿을 수 없게
+  // 되는데, 그때 레일이 스스로 스크롤한다. 평소엔 staff.roster가 안에서
+  // 스크롤하므로 쓰이지 않는다.
   const [draft, setDraft] = useState("");
   const chatRef = useRef<HTMLDivElement>(null);
   const chatCount = snap.chat.length;
@@ -81,7 +82,7 @@ export default function RightRail({
   }
 
   return (
-    <aside className="w-full lg:w-[390px] shrink-0 flex flex-col gap-4 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:min-h-0">
+    <aside className="w-full lg:w-[390px] shrink-0 flex flex-col gap-4 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:min-h-0 lg:overflow-y-auto">
       {/* ── ceo.console ─────────────────────────────────── */}
       <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col shrink-0">
         <PanelBar tone="primary" icon="desktop_windows" title="ceo.console">
@@ -109,13 +110,13 @@ export default function RightRail({
           ))}
         </div>
 
-        <div className="px-4 pb-3 flex flex-wrap gap-2 shrink-0">
+        <div className="px-4 pb-3 flex flex-wrap gap-1.5 shrink-0">
           {QUICK_ORDERS.map((item) => (
             <button
               key={item.label}
               type="button"
               onClick={() => send(item.command)}
-              className="px-3 py-1.5 rounded-full border border-outline-variant bg-surface-container-low text-body-sm font-body-sm text-on-surface-variant hover:bg-surface-container transition-colors"
+              className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container-low text-[11px] leading-4 text-on-surface-variant hover:bg-surface-container transition-colors"
             >
               {item.label}
             </button>
@@ -170,7 +171,7 @@ export default function RightRail({
       </section>
 
       {/* ── staff.roster — 남은 높이를 다 먹고 그 안에서 스크롤한다 ── */}
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col flex-1 min-h-60">
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col flex-1 min-h-40">
         <PanelBar tone="secondary" icon="groups" title="staff.roster">
           <span className="material-symbols-outlined text-[16px]">search</span>
         </PanelBar>

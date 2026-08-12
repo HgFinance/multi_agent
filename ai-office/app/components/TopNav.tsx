@@ -17,7 +17,7 @@ const ITEMS: { key: NavKey; label: string; href?: string }[] = [
   { key: "agent-logs", label: "Agent Logs" },
 ];
 
-const BASE = "text-label-md font-label-md px-3 py-2 transition-colors duration-200";
+const BASE = "text-body-md px-3 py-2 transition-colors duration-200";
 const IDLE = "text-secondary font-medium rounded hover:bg-surface-container";
 const ACTIVE = "text-primary font-bold border-b-2 border-primary rounded-t";
 

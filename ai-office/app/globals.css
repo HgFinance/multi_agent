@@ -138,23 +138,29 @@
   --page-dot: #d3c9bc;
 }
 
-* { box-sizing: border-box; }
-html { min-width: 320px; background: var(--page-bg); }
-body {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
-  background-color: var(--page-bg);
-  background-image: radial-gradient(var(--page-dot) 1.2px, transparent 1.2px);
-  background-size: 22px 22px;
-  color: var(--ink);
-  font-family: "Noto Sans KR", sans-serif;
+/* 반드시 @layer base 안에 둔다.
+   레이어 밖 규칙은 특정도와 무관하게 @layer utilities(Tailwind)를 이긴다 —
+   `button { font: inherit }`가 레이어 밖에 있으면 모든 버튼에서 text-*
+   유틸리티가 통째로 무시된다. 실제로 nav 버튼만 16px로 튀는 버그가 있었다. */
+@layer base {
+  * { box-sizing: border-box; }
+  html { min-width: 320px; background: var(--page-bg); }
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+    background-color: var(--page-bg);
+    background-image: radial-gradient(var(--page-dot) 1.2px, transparent 1.2px);
+    background-size: 22px 22px;
+    color: var(--ink);
+    font-family: "Noto Sans KR", sans-serif;
+  }
+  button, input, select, textarea { font: inherit; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid rgba(107, 63, 34, .55); outline-offset: 3px; }
+  a { color: inherit; }
+  ::selection { background: var(--pink); color: white; }
 }
-button, input, select, textarea { font: inherit; }
-button, a { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid rgba(107, 63, 34, .55); outline-offset: 3px; }
-a { color: inherit; }
-::selection { background: var(--pink); color: white; }
 
 .page-shell { padding: 20px 14px 56px; }
 .wrap { width: min(1240px, 100%); margin-inline: auto; }
