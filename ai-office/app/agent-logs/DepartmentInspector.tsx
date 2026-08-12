@@ -115,7 +115,11 @@ export default function DepartmentInspector({
         <div className="min-w-0">
           <span className="block text-label-md font-label-md text-on-surface-variant uppercase">Selected Department</span>
           <h2 className="text-headline-md font-headline-md text-primary mt-1">{department.name}</h2>
-          <code className="text-xs text-outline">{code}</code>
+          <code className="block text-xs text-outline">{code}</code>
+          <p className="text-xs text-outline m-0 mt-1">
+            {department.executor ?? "LangGraph"} · {department.worker_model ?? "qwen3:1.7b"} ·{" "}
+            {department.output_contract ?? "worker-context.v1"}
+          </p>
         </div>
         <span className={`shrink-0 px-3 py-1 rounded-full border text-xs font-medium ${tone(department.status)}`}>
           {readableRuntimeStatus(department.status)}

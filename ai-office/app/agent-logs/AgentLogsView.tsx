@@ -78,11 +78,7 @@ function DepartmentCard({
 
       <p className="text-body-sm font-body-sm text-on-surface-variant m-0">{message.summary}</p>
       {message.action ? <p className="text-xs text-outline m-0">{message.action}</p> : null}
-
-      <small className="text-xs text-outline">
-        {department.executor ?? "LangGraph"} · {department.worker_model ?? "qwen3:1.7b"} ·{" "}
-        {department.output_contract ?? "worker-context.v1"}
-      </small>
+      {/* executor·model·contract 줄은 카드에서 빼고 선택 상세(DepartmentInspector)로 옮겼다. */}
     </button>
   );
 }
@@ -133,8 +129,7 @@ export default function AgentLogsView() {
             전체 부서 실행 현황
           </h1>
           <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-3xl">
-            Risk·QA 전용 화면이 아니라 CEO Office, HR, Research, Trading, Risk, Quant/Backtest, Accounting/Portfolio, AI
-            QA/Audit의 전체 Registry와 현재 runtime 상태를 한 번만 표시합니다.
+            HgFinance 전체 부서의 Registry와 현재 runtime 상태를 표시합니다.
           </p>
         </div>
         <span
