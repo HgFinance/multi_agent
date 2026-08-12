@@ -394,6 +394,8 @@ class WorkflowNode:
         if self.is_qa:
             return ROLE_QA
         if self.profile == CEO_PROFILE:
+            # Analysis-mode synthesis consumes primary outputs directly; QA is
+            # an independent governance branch and is not its parent.
             if set(self.parents) - {root_task_id}:
                 return ROLE_SYNTHESIS
             return ROLE_USER_INPUT

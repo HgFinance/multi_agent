@@ -28,6 +28,7 @@ from orchestration.ceo_workflow_scope import (
     build_scoped_task_body,
     extract_scope_references,
     validate_workflow_scope,
+    workflow_mode_from_body,
 )
 
 
@@ -211,6 +212,7 @@ class SupervisorState:
     max_retries: int = 2
     max_wakeups: int = 8
     qa_required: bool = True
+    workflow_mode: str = "analysis"
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -329,7 +331,11 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         )
 
     for child in state.children:
-        if child.is_supervisor or not child.terminal:
+        if (
+            child.is_supervisor
+            or (child.is_qa and state.workflow_mode == "analysis")
+            or not child.terminal
+        ):
             continue
         if child.blocked:
             return _blocked_decision(state, child)
@@ -351,6 +357,65 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
+    primary_ids = tuple(child.task_id for child in state.analysis_children if child.done)
+
+    if state.workflow_mode == "analysis":
+        if state.qa_required and not state.qa_children:
+            return SupervisorDecision(
+                SupervisorAction.RUN_QA,
+                state.parent_task_id,
+                assignee=canonical_profile_for_department("qa"),
+                title="QA audit completed primary analysis",
+                body=(
+                    f"{SUPERVISOR_MARKER} action=RUN_QA\n"
+                    "workflow_plane=governance\n"
+                    "evaluation_sink=audit.eval_runs\n"
+                    "feedback_consumer=hr-department\n"
+                    "store_reasoning_trace=false\n"
+                    + json.dumps(
+                        [{
+                            "task_id": child.task_id,
+                            "department": child.department,
+                            "actor_type": "department_head",
+                            "summary": child.summary,
+                            "error": child.error,
+                            "block_reason": child.block_reason,
+                        } for child in state.analysis_children],
+                        ensure_ascii=False,
+                    )
+                ),
+                parent_task_ids=primary_ids,
+                reason="primary_analysis_terminal_parallel_audit",
+            )
+        if not state.has_action(SupervisorAction.SYNTHESIZE):
+            return SupervisorDecision(
+                SupervisorAction.SYNTHESIZE,
+                state.parent_task_id,
+                assignee=canonical_profile_for_department("ceo"),
+                title="CEO final synthesis",
+                body=(
+                    f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
+                    "workflow_plane=response\n"
+                    "governance_plane=async_qa\n"
+                    "Synthesize completed primary department work; QA may still be running.\n"
+                    + json.dumps(
+                        [{
+                            "task_id": child.task_id,
+                            "profile": child.profile,
+                            "status": child.status,
+                            "summary": child.summary,
+                            "error": child.error,
+                            "block_reason": child.block_reason,
+                        } for child in state.analysis_children],
+                        ensure_ascii=False,
+                    )
+                ),
+                parent_task_ids=primary_ids,
+                reason="primary_analysis_terminal_response_synthesis",
+            )
+        return None
+
+    # Binding/high-risk workflows retain the existing fail-closed QA path.
     if state.qa_required:
         if not state.qa_children:
             parent_ids = tuple(child.task_id for child in state.analysis_children)
@@ -403,7 +468,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if state.has_action(SupervisorAction.SYNTHESIZE):
         return None
-    parent_ids = tuple(
+    qa_ids = tuple(
         child.task_id for child in state.qa_children if child.done
     )
     return SupervisorDecision(
@@ -413,7 +478,8 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         title="CEO final synthesis",
         body=(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
-            "Synthesize the completed dynamic department work and QA result.\n"
+            "workflow_plane=response\nworkflow_mode=binding\n"
+            "Synthesize only after existing QA/Risk/approval gate.\n"
             + json.dumps(
                 [
                     {
@@ -429,8 +495,8 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 ensure_ascii=False,
             )
         ),
-        parent_task_ids=parent_ids,
-        reason="qa_completed_final_synthesis",
+        parent_task_ids=qa_ids,
+        reason="binding_qa_completed_final_synthesis",
     )
 
 
@@ -779,6 +845,7 @@ class CeoSupervisorService:
                         root_payload=root_payload,
                         descendants=payloads,
                     )
+                    workflow_mode = workflow_mode_from_body(root_body)
                 except WorkflowScopeViolation as exc:
                     reason = f"workflow_scope_validation: {exc}"
                     comment_task = getattr(self.client, "comment_task", None)
@@ -817,13 +884,11 @@ class CeoSupervisorService:
                     max_retries=self.max_retries,
                     max_wakeups=self.max_wakeups,
                     qa_required=self._qa_required_from_event(event),
+                    workflow_mode=workflow_mode,
                 )
                 decision = self.decider(state)
                 action = decision.action.value if decision is not None else "NONE"
-                if decision is not None and decision.action in {
-                    SupervisorAction.REQUEST_USER_INPUT,
-                    SupervisorAction.SYNTHESIZE,
-                } and state.has_action(decision.action):
+                if decision is not None and state.has_action(decision.action):
                     # A durable supervisor child is the idempotency record for
                     # actions that create work.  This also covers a daemon
                     # restart after the Hermes CLI succeeded but before the
@@ -866,6 +931,29 @@ class CeoSupervisorService:
                         return None
                     self._executed_actions.add(action_key)
                 self._execute(decision, state)
+                if (
+                    decision.action == SupervisorAction.RUN_QA
+                    and state.workflow_mode == "analysis"
+                ):
+                    _, refreshed_payloads = self.client.workflow(root_id)
+                    refreshed_state = SupervisorState(
+                        parent_task_id=root_id,
+                        children=tuple(
+                            ChildTaskState.from_hermes(payload)
+                            for payload in refreshed_payloads
+                            if payload.get("assignee") is not None
+                        ),
+                        wakeups=state.wakeups,
+                        replan_count=state.replan_count,
+                        max_retries=self.max_retries,
+                        max_wakeups=self.max_wakeups,
+                        qa_required=state.qa_required,
+                        workflow_mode=state.workflow_mode,
+                    )
+                    synthesis = self.decider(refreshed_state)
+                    if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
+                        self._execute(synthesis, refreshed_state)
+                        action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
                 self._record_wakeup(
@@ -943,6 +1031,7 @@ class CeoSupervisorService:
                     decision.body or f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT",
                     state.parent_task_id,
                     role="control",
+                    workflow_mode=state.workflow_mode,
                 ),
                 assignee=decision.assignee or canonical_profile_for_department("ceo"),
                 parent_task_ids=decision.parent_task_ids,
@@ -966,10 +1055,14 @@ class CeoSupervisorService:
                         f"got {sorted(requested_parent_ids)}"
                     )
             elif decision.action == SupervisorAction.SYNTHESIZE:
-                expected = {child.task_id for child in state.qa_children if child.done}
+                expected = (
+                    {child.task_id for child in state.analysis_children if child.done}
+                    if state.workflow_mode == "analysis"
+                    else {child.task_id for child in state.qa_children if child.done}
+                )
                 if requested_parent_ids != expected:
                     raise SupervisorValidationError(
-                        "SYNTHESIZE dependencies must be completed QA children: "
+                        "SYNTHESIZE dependencies do not match workflow mode: "
                         f"expected {sorted(expected)}, "
                         f"got {sorted(requested_parent_ids)}"
                     )
@@ -984,6 +1077,7 @@ class CeoSupervisorService:
                     decision.body,
                     state.parent_task_id,
                     role=role,
+                    workflow_mode=state.workflow_mode,
                 ),
                 assignee=decision.assignee,
                 parent_task_ids=decision.parent_task_ids,
