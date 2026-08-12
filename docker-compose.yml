@@ -355,6 +355,10 @@ services:
       # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
       # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       # Tool Gateway 강제 모드. 기본은 관측(위반을 헤더·로그로만 드러냄) -
       # 기존 호출자(분석가 코드)가 아직 X-Agent-Persona 를 안 붙이므로 강제부터
       # 켜면 파이프라인이 통째로 멈춘다. 호출자를 다 고친 뒤 true 로 올린다.
@@ -404,6 +408,10 @@ services:
       # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
       # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
@@ -491,6 +499,10 @@ services:
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
       # MCP 서버 자체 인증이라 그대로 둔다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

@@ -21,17 +21,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:
-    from .cache import EvidenceCache, current_cache
-    from .observability import current_metrics
+    from .cache import EvidenceCache, canonical_url, current_cache
+    from .observability import current_metrics, redacted_span, update_span_metadata
 except ImportError:  # direct Hermes/worker module execution
-    from cache import EvidenceCache, current_cache  # type: ignore
-    from observability import current_metrics  # type: ignore
+    from cache import EvidenceCache, canonical_url, current_cache  # type: ignore
+    from observability import current_metrics, redacted_span, update_span_metadata  # type: ignore
 
 CLIENT_VERSION = "research-api-client-v1"
 PERSONA_HEADER = "X-Agent-Persona"
@@ -70,22 +72,50 @@ def get_json(
     req = urllib.request.Request(url, headers=build_headers(persona))
     if metrics:
         metrics.record_network_fetch()
-    try:
-        with (opener or urllib.request.urlopen)(req, timeout=timeout) as r:
-            value = json.loads(r.read())
-            if active_cache is not None:
-                active_cache.put(url, source_type, value)
-            return value
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", "replace")[:200]
-            except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
-                pass
-            raise ApiForbidden(
-                f"{persona} 가 {url} 을 호출할 권한이 없다(게이트웨이 403). {body}")
-        raise
+    parsed = urllib.parse.urlsplit(str(url))
+    url_hash = hashlib.sha256(canonical_url(url).encode("utf-8")).hexdigest()[:16]
+    with redacted_span(
+        "research.network.fetch",
+        run_type="tool",
+        metadata={
+            "source_type": source_type,
+            "cache_hit": False,
+            "host": parsed.netloc.lower(),
+            "url_hash": url_hash,
+            "retry_count": 0,
+            "error": False,
+            "status": "started",
+        },
+        tags=("network",),
+    ) as span:
+        try:
+            with (opener or urllib.request.urlopen)(req, timeout=timeout) as r:
+                status = getattr(r, "status", None)
+                value = json.loads(r.read())
+            if span is not None:
+                update_span_metadata(
+                    span,
+                    {"status": str(status) if status is not None else "success"},
+                )
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "replace")[:200]
+                except Exception:  # noqa: BLE001, S110 - intentional fallback boundary
+                    pass
+                raise ApiForbidden(
+                    f"{persona} 가 {url} 을 호출할 권한이 없다(게이트웨이 403). {body}"
+                ) from e
+            raise
+        except Exception:
+            if span is not None:
+                update_span_metadata(span, {"status": "error"})
+            raise
+
+    if active_cache is not None:
+        active_cache.put(url, source_type, value)
+    return value
 
 
 def getter_for(persona: str):

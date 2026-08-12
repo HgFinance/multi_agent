@@ -9,11 +9,191 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
+
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_SENSITIVE_METADATA_PARTS = (
+    "prompt",
+    "completion",
+    "output",
+    "input",
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "authorization",
+    "api_key",
+)
+_SAFE_METADATA_KEYS = {
+    "workflow_root_task_id",
+    "task_id",
+    "run_id",
+    "department",
+    "environment",
+    "trace_id",
+    "model",
+    "duration_ms",
+    "retry_count",
+    "cache_hit",
+    "source_type",
+    "host",
+    "url_hash",
+    "status",
+    "error",
+    "phase",
+    "content_hash",
+    "duplicate",
+    "span_kind",
+    "total_duration_ms",
+    "dispatch_wait_ms",
+    "evidence_collection_duration_ms",
+    "llm_duration_ms",
+    "tool_call_count",
+    "network_fetch_count",
+    "cache_hit_count",
+    "fallback_count",
+    "unique_evidence_count",
+    "duplicate_evidence_avoided_count",
+    "queued_at",
+    "claimed_at",
+    "research_started_at",
+    "evidence_started_at",
+    "evidence_finished_at",
+    "generation_started_at",
+    "generation_finished_at",
+    "completed_at",
+}
+
+
+def langsmith_enabled() -> bool:
+    """Return whether Research may emit best-effort LangSmith spans."""
+
+    enabled = os.getenv("LANGCHAIN_TRACING_V2", os.getenv("LANGSMITH_TRACING", ""))
+    return enabled.strip().lower() in _TRUE_VALUES and bool(
+        os.getenv("LANGSMITH_API_KEY", "").strip()
+    )
+
+
+def _safe_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Allow only bounded, non-sensitive tracing metadata."""
+
+    safe: dict[str, Any] = {}
+    for key, value in (metadata or {}).items():
+        normalized_key = str(key).lower()
+        if normalized_key not in _SAFE_METADATA_KEYS:
+            continue
+        if any(part in normalized_key for part in _SENSITIVE_METADATA_PARTS):
+            continue
+        if value is None or isinstance(value, (str, int, float, bool)):
+            safe[normalized_key] = value
+    return safe
+
+
+@lru_cache(maxsize=1)
+def _langsmith_client():
+    """Create the optional client lazily; missing SDK/config is fail-open."""
+
+    from langsmith import Client
+
+    return Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
+
+
+def _update_span_metadata(run: Any, metadata: dict[str, Any]) -> None:
+    if run is None:
+        return
+    try:
+        current = getattr(run, "metadata", None)
+        if isinstance(current, dict):
+            current.update(_safe_metadata(metadata))
+    except Exception:  # noqa: BLE001 - tracing must never affect Research
+        return
+
+
+def update_span_metadata(run: Any, metadata: dict[str, Any]) -> None:
+    """Best-effort public metadata update for a currently open span."""
+
+    _update_span_metadata(run, metadata)
+
+
+@contextlib.contextmanager
+def redacted_span(
+    name: str,
+    *,
+    run_type: str = "chain",
+    metadata: dict[str, Any] | None = None,
+    tags: tuple[str, ...] = (),
+) -> Iterator[Any]:
+    """Emit a no-payload LangSmith span without changing workflow semantics.
+
+    The span is created manually around the context manager so failures while
+    starting or finishing LangSmith cannot swallow or replace a Research
+    exception. Only empty inputs/outputs and an allowlisted metadata subset are
+    sent. Error metadata contains the exception type, never its message.
+    """
+
+    started = time.perf_counter()
+    if not langsmith_enabled():
+        yield None
+        return
+
+    try:
+        from langsmith import trace
+
+        trace_context = trace(
+            name,
+            run_type=run_type,
+            inputs={},
+            project_name=os.getenv("LANGSMITH_PROJECT", "").strip() or None,
+            tags=("hgfinance", "research", "redacted", *tags),
+            metadata=_safe_metadata(metadata),
+            client=_langsmith_client(),
+            enabled=True,
+        )
+        run = trace_context.__enter__()
+    except Exception:  # noqa: BLE001 - optional observability is fail-open
+        yield None
+        return
+
+    try:
+        yield run
+    except BaseException as exc:
+        _update_span_metadata(
+            run,
+            {
+                "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                "status": "error",
+                "error": type(exc).__name__,
+            },
+        )
+        try:
+            run.end(error=type(exc).__name__)
+            # We already converted the error to a type-only value. Avoid the
+            # trace helper serializing the original exception/inputs again.
+            trace_context._end_on_exit = False
+            run.patch()
+            trace_context.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001 - tracing must remain fail-open
+            pass
+        raise
+    else:
+        _update_span_metadata(
+            run,
+            {
+                "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                "status": "success",
+            },
+        )
+        try:
+            trace_context.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001 - tracing must remain fail-open
+            pass
 
 
 def _now() -> datetime:
@@ -175,4 +355,11 @@ def activate_metrics(metrics: ResearchRunMetrics) -> Iterator[ResearchRunMetrics
         _CURRENT_METRICS.reset(token)
 
 
-__all__ = ["ResearchRunMetrics", "activate_metrics", "current_metrics"]
+__all__ = [
+    "ResearchRunMetrics",
+    "activate_metrics",
+    "current_metrics",
+    "langsmith_enabled",
+    "redacted_span",
+    "update_span_metadata",
+]
