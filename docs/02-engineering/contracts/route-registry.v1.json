@@ -331,6 +331,18 @@
 
         {"method": "POST", "path": "/qa/agent/ask"},
 
+        {"method": "POST", "path": "/ui/ceo/ask"},
+
+        {"method": "GET", "path": "/ui/ceo/tasks"},
+
+        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}"},
+
+        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}/graph"},
+
+        {"method": "GET", "path": "/ui/ceo/tasks/{task_id}/result"},
+
+        {"method": "POST", "path": "/ui/ceo/tasks/{task_id}/archive"},
+
         {"method": "GET", "path": "/ui/research"},
 
         {"method": "GET", "path": "/ui/strategy"},
