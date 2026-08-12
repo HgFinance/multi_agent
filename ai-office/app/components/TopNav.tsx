@@ -14,7 +14,7 @@ const ITEMS: { key: NavKey; label: string; href?: string }[] = [
   { key: "mandate", label: "Mandate Configuration", href: "/mandate" },
   { key: "ai-office", label: "AI Office", href: "/" },
   { key: "dashboard", label: "Dashboard", href: "/dashboard" },
-  { key: "agent-logs", label: "Agent Logs" },
+  { key: "agent-logs", label: "Agent Logs", href: "/agent-logs" },
 ];
 
 const BASE = "text-body-md px-3 py-2 transition-colors duration-200";
