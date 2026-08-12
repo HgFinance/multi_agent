@@ -74,7 +74,7 @@ finally:
         sys.modules.pop(_name, None)
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
-import hermes_cli
+from apps.api import hermes_boundary
 try:
     from . import ceo
     from .ceo import router as ceo_router
@@ -120,7 +120,31 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from risk import router as risk_router
 from ui_read_model import build_ui_snapshot
 
-app = FastAPI(title="AI Office BFF", version="0.2.0")
+app = FastAPI(
+    title="AI Office BFF",
+    version="0.3.0",
+    description=(
+        "HgFinance Frontend용 BFF. Hermes 부서 Agent와 CEO Kanban 워크플로를"
+        " 프론트엔드가 쓸 수 있는 형태로 정규화한다.\n\n"
+        "**계약 두 개**\n\n"
+        "1. Agent 텍스트는 공식 수치가 아니다(`binding: false`). 공식 Position·PnL·"
+        "NAV는 `/ui/snapshot`에서만 나온다.\n"
+        "2. CEO 워크플로는 비동기다. `POST /ui/ceo/ask`는 202로 Task ID만 주고,"
+        " 진행은 `GET /ui/ceo/tasks/{task_id}` polling(2~5초), 결과는"
+        " `GET /ui/ceo/tasks/{task_id}/result`로 가져간다.\n\n"
+        "Swagger UI: `/docs` · ReDoc: `/redoc` · 스키마: `/openapi.json`"
+    ),
+    openapi_tags=[
+        {
+            "name": "ceo-office",
+            "description": (
+                "CEO Kanban 워크플로. ask -> 부서 실행 -> QA -> CEO 최종 종합.\n\n"
+                "`DELETE`는 의도적으로 없다 - 누가 언제 무엇을 요청했고 어느 부서가"
+                " 실패했는지는 감사 추적이므로 정리는 Archive로만 한다."
+            ),
+        },
+    ],
+)
 app.add_middleware(
     CORSMiddleware,
     # 로컬 개발 포트는 3000/3001/3002/3003처럼 바뀔 수 있다.
@@ -546,11 +570,12 @@ def health() -> dict:
     return {
         "status": "ok",
         "mode": "DEMO",
-        "agent_ask_enabled": hermes_cli.ENABLE_AGENT_ASK,
-        # CEO 입구가 어느 런타임에 붙어 있는지. 로컬 시험(cli/docker)과
-        # AWS(api/local)를 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.
-        "ceo_transport": ceo.CEO_TRANSPORT,
-        "hermes_exec_mode": hermes_cli.HERMES_EXEC_MODE,
+        "agent_ask_enabled": hermes_boundary.ENABLE_AGENT_ASK,
+        # 부서 Agent 호출이 어느 런타임으로 나가는지. BFF 가 컨테이너로 뜨면
+        # `hermes` 바이너리가 그 안에 없어 `docker exec` 로 나가야 한다 - 그 상태를
+        # 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.
+        # (`ceo_transport` 는 CEO 입구가 Task 기반으로 재설계되면서 사라졌다.)
+        "hermes_exec_mode": hermes_boundary.HERMES_EXEC_MODE,
         "departments": [
             "research-department",
             trading.DEPARTMENT,
@@ -919,10 +944,10 @@ if __name__ == "__main__":
 
     # 게이트를 열면 L0는 모델을 부르지 않고 결정론 원천으로 돌려보낸다(비용 0).
     import accounting as _accounting_router
-    import hermes_cli as _hermes_cli
+    from apps.api import hermes_boundary as _hermes_boundary
 
-    _saved_flag = _hermes_cli.ENABLE_AGENT_ASK
-    _hermes_cli.ENABLE_AGENT_ASK = True
+    _saved_flag = _hermes_boundary.ENABLE_AGENT_ASK
+    _hermes_boundary.ENABLE_AGENT_ASK = True
     try:
         cheap = c.post("/accounting/agent/ask", json={"query": "현재 NAV와 현금 잔고"})
         assert cheap.status_code == 200, cheap.text
@@ -935,14 +960,14 @@ if __name__ == "__main__":
 
         # 마감·감사 질의는 등급이 올라가고 실제로 Hermes를 부른다(여기선 스텁으로 확인)
         _called: list = []
-        _orig_ask = _accounting_router.hermes_cli.ask
+        _orig_ask = _accounting_router.hermes_boundary.ask
 
         def _fake_ask(*, department, config, query):
             _called.append(query)
             return {"department": department, "answer": "stub", "session_id": "s1",
                     "authoritative": False, "source_of_record": "/ui/snapshot"}
 
-        _accounting_router.hermes_cli.ask = _fake_ask
+        _accounting_router.hermes_boundary.ask = _fake_ask
         try:
             heavy = c.post("/accounting/agent/ask",
                            json={"query": "마감 확정해도 되는지 감사 근거와 함께 설명"}).json()
@@ -950,9 +975,9 @@ if __name__ == "__main__":
             assert heavy["routing"]["calls_model"] is True and len(_called) == 1
             assert heavy["authoritative"] is False, "라우팅이 공식 수치 계약을 깼다"
         finally:
-            _accounting_router.hermes_cli.ask = _orig_ask
+            _accounting_router.hermes_boundary.ask = _orig_ask
     finally:
-        _hermes_cli.ENABLE_AGENT_ASK = _saved_flag
+        _hermes_boundary.ENABLE_AGENT_ASK = _saved_flag
     # 빈 질의는 스키마에서 걸린다
     assert c.post("/accounting/agent/ask", json={"query": ""}).status_code == 422
     # 부서를 Body로 지정할 방법이 없다. 다른 본부 경로는 존재하지 않는다
@@ -986,6 +1011,14 @@ if __name__ == "__main__":
         "/ui/mandate-cases/{case_id}/timeline",
         "/ui/mandate-approvals",
         "/ui/mandate-approvals/{approval_id}/decide",
+        # 2026-08-12 CEO Kanban 워크플로 경로. ask/archive를 뺀 나머지는 읽기 전용이고,
+        # archive는 기록을 지우지 않는다(감사 추적 유지). DELETE는 만들지 않는다.
+        "/ui/ceo/ask",
+        "/ui/ceo/tasks",
+        "/ui/ceo/tasks/{task_id}",
+        "/ui/ceo/tasks/{task_id}/graph",
+        "/ui/ceo/tasks/{task_id}/result",
+        "/ui/ceo/tasks/{task_id}/archive",
     }, c.get("/openapi.json").json()["paths"].keys()
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다
@@ -1005,10 +1038,10 @@ if __name__ == "__main__":
     assert c.get("/accounting/v1/portfolio-snapshot",
                  params={"fund_id": "not-a-uuid"}).status_code == 422
 
-    assert hermes_cli.timeout_of(accounting.CONFIG) == 60
+    assert hermes_boundary.timeout_of(accounting.CONFIG) == 60
 
     # session_id는 stderr에서 뽑는다. 없으면 None이지 빈 문자열이 아니다
-    assert hermes_cli.session_id_of("\nsession_id: abc123\n") == "abc123"
-    assert hermes_cli.session_id_of("") is None
+    assert hermes_boundary.session_id_of("\nsession_id: abc123\n") == "abc123"
+    assert hermes_boundary.session_id_of("") is None
 
     print("ok - BFF 8개 영역 점검 통과 (회계 구간 Supabase 배선 + TTL 캐시 포함)")

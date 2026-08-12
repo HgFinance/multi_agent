@@ -160,7 +160,11 @@ def _run(argv: list[str], *, timeout: int = 60) -> tuple[int, str]:
 
 def apply_release(rel: Release, *, dry_run: bool = False) -> bool:
     """죽은 카드를 산출 없음으로 닫는다. 실패는 조용히 넘기지 않는다."""
-    from apps.api.hermes_cli import argv_for  # noqa: PLC0415 - 선택적 의존
+    # `hermes_cli` 는 2026-08-12 병합에서 `hermes_boundary` 로 이름이 바뀌었다
+    # (원격 rename). 이 import 는 충돌 파일이 아니라 조용히 남아 있었다 -
+    # 지연 import 라 모듈 로드 시점에는 안 터지고 **죽은 카드를 닫으려는 순간**
+    # ImportError 가 났을 자리다.
+    from apps.api.hermes_boundary import argv_for  # noqa: PLC0415 - 선택적 의존
 
     if dry_run:
         print(f"  [dry-run] {rel.dead.task_id} ({rel.dead.assignee}) "

@@ -23,6 +23,12 @@ from orchestration.canonical_profiles import (
     department_for_canonical_profile,
     validate_canonical_profile,
 )
+from orchestration.ceo_workflow_scope import (
+    WorkflowScopeViolation,
+    build_scoped_task_body,
+    extract_scope_references,
+    validate_workflow_scope,
+)
 
 
 class SupervisorValidationError(ValueError):
@@ -259,7 +265,7 @@ def _blocked_decision(
                 f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT\n"
                 f"Blocked task: {child.task_id}\nReason: {child.block_reason or child.error}"
             ),
-            parent_task_ids=(state.parent_task_id,),
+            parent_task_ids=(),
             reason="blocked_needs_user_input",
         )
     if child.retry_count < state.max_retries and child.block_kind in {"transient", "retryable"}:
@@ -291,7 +297,7 @@ def _blocked_decision(
                 f"Original task: {child.task_id}\n"
                 f"Blocked reason: {child.block_reason or child.error or 'unspecified'}"
             ),
-            parent_task_ids=(state.parent_task_id,),
+            parent_task_ids=(),
             reason="blocked_replan",
         )
     return SupervisorDecision(
@@ -318,7 +324,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             assignee=canonical_profile_for_department("ceo"),
             title="CEO planner produced no executable child task",
             body=f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT no_analysis_children",
-            parent_task_ids=(state.parent_task_id,),
+            parent_task_ids=(),
             reason="no_analysis_children",
         )
 
@@ -398,7 +404,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     if state.has_action(SupervisorAction.SYNTHESIZE):
         return None
     parent_ids = tuple(
-        child.task_id for child in state.analysis_children + state.qa_children if child.done
+        child.task_id for child in state.qa_children if child.done
     )
     return SupervisorDecision(
         SupervisorAction.SYNTHESIZE,
@@ -583,8 +589,32 @@ class HermesKanbanClient:
     def block_task(self, task_id: str, reason: str) -> None:
         self._run(("kanban", "block", task_id, reason, "--kind", "needs_input"))
 
+    def list_tasks(self) -> tuple[dict[str, Any], ...]:
+        """List current-board tasks through the supported Hermes JSON API."""
+
+        try:
+            payload = json.loads(self._run(("kanban", "list", "--json")))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise HermesKanbanCommandError(
+                "hermes kanban list returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise HermesKanbanCommandError(
+                "hermes kanban list returned a non-task array"
+            )
+        return tuple(dict(item) for item in payload)
+
     def workflow(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
-        """Collect ancestors and descendants through Hermes ``show`` only."""
+        """Collect one workflow using execution edges or the durable scope marker.
+
+        Current CEO primary tasks deliberately have no parent edge to the
+        planning root: Hermes treats ``--parent`` as a blocking dependency.
+        Those tasks carry ``workflow_root_task_id`` in their body and are
+        discovered through ``kanban list --json``. Parent-linked workflows from
+        before this contract remain supported through the ancestry fallback.
+        """
 
         cache: dict[str, dict[str, Any]] = {}
 
@@ -592,6 +622,23 @@ class HermesKanbanClient:
             if current_id not in cache:
                 cache[current_id] = self.show(current_id)
             return cache[current_id]
+
+        scoped_root_ids = extract_scope_references(fetch(task_id)).root_ids
+        if scoped_root_ids:
+            root_id = scoped_root_ids[0]
+            fetch(root_id)
+            scoped_ids = {root_id}
+            for row in self.list_tasks():
+                row_id = str(row.get("id") or row.get("task_id") or "")
+                if not row_id:
+                    continue
+                if root_id in extract_scope_references(row).root_ids:
+                    scoped_ids.add(row_id)
+            for scoped_id in scoped_ids:
+                fetch(scoped_id)
+            return root_id, tuple(
+                payload for current_id, payload in cache.items() if current_id != root_id
+            )
 
         root_id = task_id
         visited: set[str] = set()
@@ -699,6 +746,7 @@ class CeoSupervisorService:
             return None
         if kind not in TERMINAL_EVENT_KINDS and kind not in TERMINAL_STATUSES:
             return None
+
         event_key = str(event.get("event_id") or f"{task_id}:{kind}")
         with self._seen_events_lock:
             if event_key in self._seen_events:
@@ -715,6 +763,37 @@ class CeoSupervisorService:
                 # workflow-only fakes and adapters used by the supervisor tests.
                 show = getattr(self.client, "show", None)
                 root_payload = show(root_id) if callable(show) else {}
+                # The root is a planning/scope task in the current contract. Its
+                # terminal transition means planning finished, not that the
+                # workflow is ready for synthesis. Primary child events are the
+                # wake-up boundary.
+                root_body = str(root_payload.get("body") or "")
+                if root_id == task_id and kind in {"done", "completed"} and (
+                    "root_task_role=scope_and_planning" in root_body
+                    and "planning_terminal_state=done_after_child_creation" in root_body
+                ):
+                    return None
+                try:
+                    validate_workflow_scope(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        descendants=payloads,
+                    )
+                except WorkflowScopeViolation as exc:
+                    reason = f"workflow_scope_validation: {exc}"
+                    comment_task = getattr(self.client, "comment_task", None)
+                    if callable(comment_task):
+                        comment_task(
+                            root_id,
+                            f"hgfinance.ceo-workflow-scope-error.v1 "
+                            f"event={event_key} reason={reason}",
+                        )
+                    self._safe_abort(root_id, reason)
+                    return SupervisorDecision(
+                        SupervisorAction.BLOCK_ABORT,
+                        root_id,
+                        reason="workflow_scope_validation",
+                    )
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
                     for payload in payloads
@@ -759,7 +838,7 @@ class CeoSupervisorService:
                         action=action,
                         existing=existing_wakeups,
                         state="started",
-                )
+                    )
                 if decision is None:
                     self._record_wakeup(
                         root_task_id=root_id,
@@ -782,9 +861,10 @@ class CeoSupervisorService:
                         ),
                     )
                 )
-                if action_key in self._executed_actions:
-                    return None
-                self._executed_actions.add(action_key)
+                with self._seen_events_lock:
+                    if action_key in self._executed_actions:
+                        return None
+                    self._executed_actions.add(action_key)
                 self._execute(decision, state)
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
@@ -831,9 +911,26 @@ class CeoSupervisorService:
         raise SupervisorValidationError("qa_required must be a boolean")
 
     def _execute(self, decision: SupervisorDecision, state: SupervisorState) -> None:
+        allowed_parent_ids = {state.parent_task_id} | {
+            child.task_id for child in state.children
+        }
+        requested_parent_ids = set(decision.parent_task_ids)
+        outside_parent_ids = requested_parent_ids - allowed_parent_ids
+        if outside_parent_ids:
+            raise SupervisorValidationError(
+                "supervisor action references task IDs outside current root: "
+                f"{sorted(outside_parent_ids)}"
+            )
+
         if decision.action == SupervisorAction.RETRY_TASK:
             if not decision.target_task_id:
                 raise SupervisorValidationError("RETRY_TASK has no target")
+            if decision.target_task_id not in {
+                child.task_id for child in state.children
+            }:
+                raise SupervisorValidationError(
+                    "RETRY_TASK target is outside current root workflow"
+                )
             self.client.unblock_task(decision.target_task_id)
             return
         if decision.action == SupervisorAction.BLOCK_ABORT:
@@ -842,9 +939,13 @@ class CeoSupervisorService:
         if decision.action == SupervisorAction.REQUEST_USER_INPUT:
             self.client.create_task(
                 title=decision.title or "CEO requires user input",
-                body=decision.body or f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT",
+                body=build_scoped_task_body(
+                    decision.body or f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT",
+                    state.parent_task_id,
+                    role="control",
+                ),
                 assignee=decision.assignee or canonical_profile_for_department("ceo"),
-                parent_task_ids=decision.parent_task_ids or (state.parent_task_id,),
+                parent_task_ids=decision.parent_task_ids,
                 idempotency_key=f"{state.parent_task_id}:supervisor:user-input",
                 initial_status="blocked",
             )
@@ -856,11 +957,36 @@ class CeoSupervisorService:
         }:
             if not decision.assignee or not decision.title or not decision.body:
                 raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
+            if decision.action == SupervisorAction.RUN_QA:
+                expected = {child.task_id for child in state.analysis_children}
+                if requested_parent_ids != expected:
+                    raise SupervisorValidationError(
+                        "RUN_QA dependencies must be the current root's "
+                        f"primary children: expected {sorted(expected)}, "
+                        f"got {sorted(requested_parent_ids)}"
+                    )
+            elif decision.action == SupervisorAction.SYNTHESIZE:
+                expected = {child.task_id for child in state.qa_children if child.done}
+                if requested_parent_ids != expected:
+                    raise SupervisorValidationError(
+                        "SYNTHESIZE dependencies must be completed QA children: "
+                        f"expected {sorted(expected)}, "
+                        f"got {sorted(requested_parent_ids)}"
+                    )
+            role = {
+                SupervisorAction.CREATE_TASK: "primary",
+                SupervisorAction.RUN_QA: "qa",
+                SupervisorAction.SYNTHESIZE: "synthesis",
+            }[decision.action]
             self.client.create_task(
                 title=decision.title,
-                body=decision.body,
+                body=build_scoped_task_body(
+                    decision.body,
+                    state.parent_task_id,
+                    role=role,
+                ),
                 assignee=decision.assignee,
-                parent_task_ids=decision.parent_task_ids or (state.parent_task_id,),
+                parent_task_ids=decision.parent_task_ids,
                 idempotency_key=(
                     f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
                     + (

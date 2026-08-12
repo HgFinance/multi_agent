@@ -1,0 +1,237 @@
+# 로컬(Windows) 전용 override - 공유 docker-compose.yml 은 건드리지 않는다.
+#
+# ▶ 왜 필요한가 (2026-08-11 실측)
+#   docker-compose.yml 의 헤르메스 프로필 마운트가 `/home/ubuntu/.hermes/profiles/<부서>`
+#   로 잡혀 있다. 팀원들이 쓰는 **AWS(EC2) 호스트 경로**다. 윈도우 Docker Desktop 에서
+#   그 경로를 바인드하면 빈 디렉터리가 만들어지고, 그래서 컨테이너는 뜨는데
+#   `/opt/data/profiles/` 가 없어 `default` 프로필만 남는다 - 부서 페르소나·편제·
+#   MCP·스킬이 하나도 안 올라간 **껍데기**가 된다.
+#
+#   compose 본체를 고치면 팀원 AWS 배포가 깨진다. override 는 compose 가 자동으로
+#   읽고 로컬에서만 적용되므로 양쪽이 충돌하지 않는다.
+#
+# ▶ 쓰는 법
+#   docker compose up -d <서비스>        # override 가 자동 적용된다
+#   그다음 부서마다 인증이 따로 필요하다(로컬 프로필은 비어 있으므로):
+#     docker exec -it hedgefund-<부서>-hermes hermes auth add anthropic
+#
+# ▶ 공용 kanban
+#   compose 본체가 `/home/ubuntu/.hermes/shared-kanban:/opt/kanban` 을 8개 본부에
+#   **공유**로 물린다 - CEO 중심 동적 Task Graph 의 판이다. profiles/<부서> 와는
+#   분리돼 있어 서로의 auth/config/memory 는 못 본다. 이 볼륨이 빠지면 부서마다
+#   다른 판을 보게 되어 라우팅이 성립하지 않는다.
+#
+# ▶ 주의
+#   이 파일은 로컬 전용이다. 커밋하지 않는다(.gitignore 확인).
+#   호스트 디렉터리는 없으면 Docker 가 만든다 - 부서마다 **따로** 둬서
+#   한 부서의 인증·프로필이 다른 부서를 덮지 않게 한다.
+services:
+  ceo-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  trading-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-trading-department:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  risk-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-risk-management:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  accounting-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-accounting-portfolio-department:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  qa-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-qa-department:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  workforce-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-workforce-management:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  # 리서치·퀀트는 이미 로컬 경로로 돌고 있다(이번 세션에 인증까지 끝냈다).
+  # 여기에 다시 적어 두는 이유는 compose 본체가 AWS 경로라, override 없이
+  # 재생성하면 **인증이 통째로 날아가기 때문**이다.
+  research-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-research-department:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  # ▶ 여기에 작업면을 두지 않는다. 이 컨테이너는 `gateway run`(메시징·크론)만
+  #   돌고, 카드를 처리하는 에이전트는 kanban-dispatcher 안에서 뜬다
+  #   (2026-08-12 실측: ps 에 hermes gateway 뿐). 2026-08-12 에 여기에 파이썬과
+  #   저장소를 붙였다가 되돌렸다 - 에이전트가 없는 곳에 도구를 둔 것이었다.
+  quant-hermes:
+    # 1GiB 에서 동시 에이전트가 OOM(signal 9)으로 죽었다 - CEO 가
+    # 12장을 뿌리면 같은 컨테이너에서 여럿 떠서 공장 카드까지 같이
+    # 막혔다. 부서당 상한을 올린다.
+    mem_limit: 3g
+    volumes:
+      - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban
+
+  # ▶ 중앙 dispatcher — 경로만 로컬로 갈아끼운다
+  #   서비스 정의(`init: true` + `kanban daemon`)는 compose 본체가 정본이다.
+  #   여기서 바꾸는 것은 마운트뿐이다. 안 띄우면 CEO 가 만든 카드가 `ready` 로
+  #   영원히 앉아 있는다(2026-08-11 실측: QA 카드가 promote 된 뒤 20분간 아무도
+  #   집어가지 않았다).
+  #
+  #   AWS 는 `~/.hermes` 하나 아래 `profiles/<부서>/` 8개가 있어 한 줄로 끝나지만,
+  #   로컬은 부서마다 `~/.hermes-<부서>` 로 흩어져 있다. 그래서 dispatcher 홈을
+  #   따로 두고 부서 디렉터리를 `profiles/<이름>` 자리에 각각 물린다 - **경로만
+  #   다르고 구조는 본체와 같다.** spawn 된 worker 의 HERMES_HOME 이 그 부서의
+  #   실제 디렉터리가 되므로 auth.json·memory·session 이 제 부서에 쌓인다.
+  #
+  #   ⚠ `init: true` 를 지우지 말 것. 지우면 s6 `02-reconcile-profiles` 가
+  #     `profiles/*` 마다 gateway 를 하나씩 띄워 **한 컨테이너에서 9개가 돈다**
+  #     (실측). compose 본체 주석이 이미 경고하는 그대로다.
+  #
+  #   ⚠ tick 간격은 **env 로 못 바꾼다.** `kanban.dispatch_interval_seconds` 는
+  #     config.yaml 에서만 읽는다(`grep HERMES_KANBAN /opt/hermes/hermes_cli/*.py`
+  #     로 확인). 여기서는 본체가 `--interval` 을 명령줄로 주므로 그게 이긴다.
+  kanban-dispatcher:
+    # ▶ 에이전트 런타임 이미지 (2026-08-12). 베이스는 그대로
+    #   nousresearch/hermes-agent 이고 퀀트 작업용 파이썬 venv 만 얹었다.
+    #   근거·경계는 Dockerfile.agent-runtime 머리말.
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-runtime
+    image: hedgefund-agent-runtime:latest
+    # ▶ 로컬 이미지(2026-08-01 빌드)에서는 `init: true` 만으로는 못 뜬다.
+    #   entrypoint 인 `/init`(s6-overlay-suexec)이 **PID 1이 아니면 즉시 죽는다**
+    #   (`fatal: can only run as pid 1` → 재시작 루프). docker init 이 PID 1 을
+    #   가져가 버리기 때문이다. 그래서 s6 를 아예 건너뛰고 hermes 를 직접 실행한다.
+    #   목적은 본체와 같다 - **`02-reconcile-profiles` 를 안 돌리는 것**. 그게 돌면
+    #   `profiles/*` 마다 gateway 가 하나씩 떠서 한 컨테이너에서 9개가 돈다(실측).
+    #   AWS 이미지에서 `init: true` 로 되면 본체 설정 그대로 두면 된다.
+    entrypoint: ["/opt/hermes/.venv/bin/hermes"]
+    # ▶ `--max 3` - 한 tick 에 띄우는 에이전트 수 상한 (2026-08-12)
+    #   본체에는 상한이 없어 실측에서 **한 번에 7개**가 떴다(02:35·02:37).
+    #   한 프로세스가 ~250MiB 이므로 7개면 1.75GiB 가 한꺼번에 붙고, 그 순간
+    #   사용자 질의 카드가 들어오면 같은 8GiB 를 두고 경쟁한다. 2026-08-11 의
+    #   OOM 도 이 모양이었다(부서 컨테이너가 아니라 여기서 죽었다).
+    #
+    #   ⚠ 이것은 **동시 실행 수가 아니라 tick 당 신규 spawn 수**다. 60초마다
+    #   3개씩 뜨고 에이전트가 10분을 돌면 누적은 여전히 커진다. 즉 완화이지
+    #   격리가 아니다 - 진짜 격리는 서비스/공장 판을 나누고 dispatcher 를 둘로
+    #   두는 것이다(`--board`). 그때 이 값은 공장 쪽만 낮추면 된다.
+    command: ["kanban", "daemon", "--force", "--interval", "60", "--max", "3",
+              "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+    user: "1000:1000"
+    # ▶ **에이전트는 여기서 돈다.** 부서 컨테이너가 아니다 (2026-08-11 실측)
+    #   dispatcher 는 카드를 부서 컨테이너로 넘기지 않고, 자기 안에서
+    #   `hermes -p <부서> ... chat -q work kanban task <id>` 를 직접 띄운다
+    #   (프로필 8개를 전부 마운트하는 이유가 이것이다). 그래서 CEO 팬아웃이
+    #   9~12장이면 **이 컨테이너 하나에** 에이전트가 그만큼 뜬다.
+    #
+    #   한 프로세스가 ~250MiB 다. 1GiB 상한에서는 4개째에 94% 가 되고
+    #   커널이 signal 9 로 죽인다. 죽은 카드는 blocked 로 가고, 그 카드를
+    #   부모로 둔 하위 카드는 **영원히 todo 에 앉는다** - CEO 종합이
+    #   ready 가 안 되던 진짜 이유가 이것이었다.
+    #
+    #   부서 컨테이너(위 mem_limit 3g)는 이 경로에 안 쓰인다 - 늘려도
+    #   145MiB 에서 놀고 있었다. 상한은 **실제로 프로세스가 뜨는 곳**에
+    #   걸어야 한다. 8g = 12장 팬아웃(≈3GiB) + 공장 카드 + 여유.
+    mem_limit: 8g
+    volumes:
+      - ${USERPROFILE}/.hermes-dispatcher:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/data/shared-kanban
+      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data/profiles/ceo-agent
+      - ${USERPROFILE}/.hermes-research-department:/opt/data/profiles/research-department
+      - ${USERPROFILE}/.hermes-trading-department:/opt/data/profiles/trading-department
+      - ${USERPROFILE}/.hermes-risk-management:/opt/data/profiles/risk-management
+      - ${USERPROFILE}/.hermes-quant-backtest-department:/opt/data/profiles/quant-backtest-department
+      - ${USERPROFILE}/.hermes-accounting-portfolio-department:/opt/data/profiles/accounting-portfolio-department
+      - ${USERPROFILE}/.hermes-qa-department:/opt/data/profiles/qa-department
+      # 인사팀은 프로필 이름(hr-department)과 로컬 디렉터리 이름이 어긋난다.
+      - ${USERPROFILE}/.hermes-workforce-management:/opt/data/profiles/hr-department
+      # ▶ 퀀트 작업면 (2026-08-12). **에이전트가 뜨는 곳이 여기라서 여기 있다** -
+      #   부서 컨테이너에 붙였다가 되돌렸다(Dockerfile.agent-runtime 머리말).
+      #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` 라 저장소 루트가
+      #   /app 이어야 경로가 맞는다.
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
+      # 읽기 전용이 아니다 - 빌드가 파티션을 여기에 쓴다.
+      - ./quant-data:/app/quant-data
+    environment:
+      # 시세 DB. 자격이 아니라 로컬 인프라 주소다 - 부서를 안 가린다.
+      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
+      # ⚠ 업무 원장 DSN 은 **여기 두지 않는다.** 여기 두면 8개 본부 에이전트가
+      #   전부 갖게 된다. 퀀트 프로필의 `env:` 에만 둬서 퀀트 카드에서만 뜬다
+      #   (departments/04-quant-backtest/hermes/config.yaml).
+      #
+      # ▶ HOME 이 `/` 였다 (2026-08-12 실측: uid 1000 인데 HOME=/). uid 1000 은
+      #   거기 못 쓰므로 홈에 설정을 두는 도구가 전부 실패한다 - mcporter 가
+      #   `/.mcporter` 생성 시도로 죽었고, `agent-reach doctor` 는 yt-dlp 설정을
+      #   홈에서만 찾아 `/etc/yt-dlp.conf` 를 넣어도 미설정으로 봤다.
+      #
+      #   `/opt/data` 로 내린다 - 이미 HERMES_HOME 이 가리키는 **같은 디렉터리**라
+      #   새 자리를 만드는 게 아니고, 마운트된 볼륨이라 컨테이너를 다시 만들어도
+      #   설정이 남는다.
+      HOME: /opt/data
+
+  # ▶ CEO 종결 감시자 — dispatcher 와 **같은 고장을 같은 방법으로** 피한다
+  #   2026-08-12 첫 기동에서 `s6-overlay-suexec: fatal: can only run as pid 1`
+  #   재시작 루프였다. 위 dispatcher 가 이미 겪고 고친 그 고장인데, 이 서비스에는
+  #   override 항목이 아예 없어서 수정이 전파되지 않았다.
+  #
+  #   dispatcher 는 entrypoint 를 hermes 바이너리로 바꿔 s6 를 건너뛴다. 이쪽은
+  #   본체 command 가 `python3 scripts/run_ceo_supervisor.py` 라 entrypoint 를
+  #   **비우는 것**이 맞다 - 그러면 command 가 그대로 PID 1 이 된다.
+  #   이미지의 `python3` 는 곧 `/opt/hermes/.venv/bin/python3`(3.13)이고,
+  #   run_ceo_supervisor.py 와 orchestration/adapters/ceo_supervisor.py 는
+  #   표준 라이브러리 + orchestration.canonical_profiles 만 쓰므로 그대로 돈다.
+  #
+  #   마운트는 dispatcher 와 같은 이유로 로컬 경로다 - 본체의 `/home/ubuntu/.hermes`
+  #   는 AWS 경로라 Windows 에서는 빈 디렉터리가 만들어지고 공유 칸반을 못 본다.
+  ceo-kanban-supervisor:
+    entrypoint: []
+    user: "1000:1000"
+    volumes:
+      - ${USERPROFILE}/.hermes-ceo-supervisor:/opt/data
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/data/shared-kanban
+      - ${USERPROFILE}/.hermes-ceo-agent:/opt/data/profiles/ceo-agent
+      - .:/opt/hgfinance:ro
+
+  # ▶ BFF 도 공유 칸반을 **읽어야** 한다 - 경로만 로컬로 갈아끼운다.
+  #   본체는 `/home/ubuntu/.hermes/shared-kanban`(AWS)라 Windows 에서는 빈
+  #   디렉터리가 생기고, 그러면 CEO 종합이 부서 산출물을 하나도 못 읽는다
+  #   (본체 ui-bff 의 KANBAN_ATTACH_ROOT 주석 참고).
+  ui-bff:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${USERPROFILE}/.hermes-shared-kanban:/opt/kanban:ro

@@ -1,378 +1,324 @@
-"""CEO Office query boundary for the operator UI."""
+"""CEO Office query boundary for closed-loop Kanban workflows.
+
+`/ui/ceo/ask`가 Root Task를 만들고, 나머지 경로는 그 Root 그래프를 읽는다.
+읽기 경로는 전부 `ceo_kanban_read`를 통과한다 - BFF는 `kanban.db`를 직접 열지
+않고, Task 생성·QA 판정·Synthesis는 CEO Supervisor 컨테이너가 소유한다.
+
+의도적으로 만들지 않은 것: `DELETE /ui/ceo/tasks/{task_id}`. 누가 언제 무엇을
+요청했고 어느 부서가 실패했는지는 감사 추적이며, 정리는 Archive로만 한다.
+"""
 
 from __future__ import annotations
 
-import os
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-
 try:
-    from . import fact_router, hermes_cli
+    from . import hermes_boundary
+    from .ceo_kanban_read import (
+        KanbanTaskNotFound,
+        KanbanUnavailable,
+        Workflow,
+        archive_tasks,
+        extract_user_query,
+        list_ceo_roots,
+        load_workflow,
+    )
+    from .ceo_schemas import (
+        CeoQueryAcceptedResponse,
+        GraphNode,
+        TaskArchiveResponse,
+        TaskGraphResponse,
+        TaskListItem,
+        TaskListResponse,
+        TaskProgress,
+        TaskResult,
+        TaskResultResponse,
+        TaskStatusResponse,
+        TaskWorkflow,
+    )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-    import fact_router  # type: ignore[no-redef]
-    import hermes_cli  # type: ignore[no-redef]
+    import hermes_boundary  # type: ignore[no-redef]
+    from ceo_kanban_read import (  # type: ignore[no-redef]
+        KanbanTaskNotFound,
+        KanbanUnavailable,
+        Workflow,
+        archive_tasks,
+        extract_user_query,
+        list_ceo_roots,
+        load_workflow,
+    )
+    from ceo_schemas import (  # type: ignore[no-redef]
+        CeoQueryAcceptedResponse,
+        GraphNode,
+        TaskArchiveResponse,
+        TaskGraphResponse,
+        TaskListItem,
+        TaskListResponse,
+        TaskProgress,
+        TaskResult,
+        TaskResultResponse,
+        TaskStatusResponse,
+        TaskWorkflow,
+    )
 
-from fastapi import APIRouter, HTTPException
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from orchestration.canonical_profiles import canonical_profile_for_department
-
-from apps.api.ceo_hermes_client import ask_ceo
-
-try:
-    from kanban_board import BoardUnavailable, cards_for_root, progress_of
-    from kanban_board import artifact_text as kanban_artifact_text
-    from kanban_status_bridge import KANBAN_STATUS_BRIDGE
-except ModuleNotFoundError:  # pragma: no cover - package import path
-    from apps.api.kanban_board import BoardUnavailable, cards_for_root, progress_of
-    from apps.api.kanban_board import artifact_text as kanban_artifact_text
-    from apps.api.kanban_status_bridge import KANBAN_STATUS_BRIDGE
+from orchestration.ceo_workflow_scope import build_root_body
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
-# ▶ CEO 턴 timeout 을 Profile 값(30초)에서 떼어낸다 (2026-08-11 실측)
-#   `agent.timeout_seconds` 는 **한 번 묻고 한 번 답하는** 조회 기준이다. 이 경로의
-#   CEO 턴은 카드를 만들며 kanban 도구를 여러 번 부르는 다른 작업이라 90~180초가
-#   걸렸고, 30초로는 통째로 잘렸다. 더 나쁜 것은 **잘려도 카드는 이미 만들어져
-#   있었다는 것**이다 - 부서 4곳이 실제로 돌았는데 사용자에게는 실패로 보였다.
-#   저장소의 부서 설정(영주님 소유)을 건드리지 않으려고 여기서 따로 준다.
-CEO_TURN_TIMEOUT_SECONDS = int(os.getenv("CEO_TURN_TIMEOUT_SECONDS", "300"))
+# Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
+# 서버에서 먼저 모양을 고정한다. shell=False라 주입 경로는 아니지만, 형식이
+# 틀린 값을 CLI까지 보내 404를 만들 이유가 없다.
+_TASK_ID_PATTERN = r"^t_[A-Za-z0-9]{4,64}$"
 
-# ▶ CEO 를 어떻게 부를 것인가
-#   `api`(기본) - `ceo-hermes` 의 OpenAI 호환 엔드포인트. AWS 배포 경로다.
-#   `cli`        - 컨테이너 안 `hermes chat`. `hermes serve` 인증 설정이 선행
-#                  조건이라 로컬에서는 아직 그 엔드포인트가 없어서 쓰는 길이다
-#                  (HERMES_DOCKER_RUNBOOK 4-2절).
-#   **조용히 넘어가지 않는다.** URL 이 없다고 알아서 CLI 로 떨어지면, 배포에서
-#   URL 을 빠뜨렸을 때 "그래도 돌아가네"가 되어 경계가 무너진다. 스위치가 명시적일 때만 바꾼다.
-CEO_TRANSPORT = os.getenv("CEO_TRANSPORT", "api").strip().lower()
-CEO_CONFIG = "departments/00-ceo-office/hermes/config.yaml"
-ENABLE_CEO_CLI = os.getenv("ENABLE_CEO_CLI", "false").strip().lower() in {
-    "1", "true", "yes", "on",
-}
+# 목록 경로의 동시 CLI 프로세스 상한은 두 값의 곱이다. Root 20건을 읽어도
+# 컨테이너에 뜨는 hermes 프로세스가 12개를 넘지 않게 잡았다.
+_LIST_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_WORKERS", "4")))
+_LIST_GRAPH_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_GRAPH_WORKERS", "3")))
+
+_TASK_ID_PATH = Path(
+    description="Kanban Task ID. Root ID를 권장하지만 자식 ID도 Root로 해석한다.",
+    pattern=_TASK_ID_PATTERN,
+    examples=["t_c2f6fe62"],
+)
 
 
-def _won(value: object) -> str:
-    """원 단위 문자열을 사람이 읽는 형태로. **값을 바꾸지 않는다** - 자리수만 넣는다."""
-    text = str(value or "").strip()
-    if not text:
-        return "(값 없음)"
+def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
+    """Root 그래프를 읽는다. CLI 실패를 화면이 읽을 수 있는 오류로 옮긴다."""
+
     try:
-        return f"{int(Decimal(text)):,}원"
-    except (InvalidOperation, ValueError):
-        return text
+        return load_workflow(task_id, max_workers=max_workers)
+    except KanbanTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
 
 
-def _direct_answer_text(direct: dict[str, object]) -> str:
-    """직행 조회 결과를 한국어 한 문단으로. **LLM 을 쓰지 않는다.**
+@router.post(
+    "/ask",
+    operation_id="ceo_query",
+    status_code=202,
+    response_model=CeoQueryAcceptedResponse,
+    summary="CEO에게 새 분석을 요청한다",
+    description=(
+        "Root Kanban Task만 만들고 즉시 202로 돌려준다. 부서 선택·QA·최종 종합은"
+        " CEO Supervisor가 비동기로 진행하므로, 결과는 `/ui/ceo/tasks/{task_id}`"
+        " polling 후 `/result`로 가져간다."
+    ),
+)
+def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
+    """Enqueue a CEO Kanban workflow without running a second CEO turn."""
 
-    여기서 요약 모델을 부르면 0.5초짜리가 다시 몇십 초가 되고, 무엇보다
-    숫자가 한 번 더 옮겨 적힌다 - 그 지점에서 값이 틀어지는 것을 실측했다.
-    """
-    if direct.get("unavailable"):
-        return (
-            f"조회하지 못했습니다 — {direct.get('reason')}\n"
-            "본부에 맡기지 않았습니다. 같은 자료가 없어 결과가 같기 때문입니다."
-        )
-    fact = direct.get("fact") or {}
-    assert isinstance(fact, dict)
-    kind = fact.get("kind")
-    observed = fact.get("observed_at", "")
-    if kind == "broker_account":
-        return (
-            f"브로커 계좌 기준입니다({fact.get('environment', '')}).\n"
-            f"- 평가금액 {_won(fact.get('equity'))}\n"
-            f"- 현금 {_won(fact.get('cash'))} · 주문가능 {_won(fact.get('buying_power'))}\n"
-            f"- 보유 종목 {fact.get('position_count')}개\n"
-            f"- 조회시각 {observed}\n"
-            "공식 NAV 가 아니라 브로커 조회값입니다. 원장 확정치와 다를 수 있고, "
-            "차이 자체는 회계본부가 대사로 확인합니다."
-        )
-    if kind == "market_quote":
-        return (
-            f"{fact.get('symbol')} 현재가 {_won(fact.get('price'))} "
-            f"(조회시각 {observed}).\n"
-            "시세 조회값이며 매수·매도 권고가 아닙니다."
-        )
-    return str(fact)
-
-
-# 종합 프롬프트에 실을 부서당 최대 글자. 넘치면 CEO 턴이 컨텍스트로 죽는다.
-_FINDING_CHARS = int(os.getenv("CEO_FINDING_CHARS", "3000"))
-
-# ▶ 산출물 읽기는 `kanban_board` 가 소유한다 (2026-08-12).
-#   전에는 이 파일이 `_ARTIFACT_ROOTS` + `_artifact_text` 를 따로 갖고 있었다.
-#   그래서 **여기는 첨부까지 읽는데 보드 판정(_classify)은 result 만 봐서**
-#   같은 카드가 한쪽에서는 답이고 다른 쪽에서는 NO_ANSWER 였다. 목록이 두 벌이면
-#   언젠가 한쪽만 고쳐진다 - `_artifact_text` 주석이 경고하던 그 상황을
-#   이 파일 자신이 만들고 있었다. 정의를 보드로 옮기고 여기서는 가져다 쓴다.
-_artifact_text = kanban_artifact_text
-
-
-def _child_findings(cards) -> list[dict[str, str]]:
-    """뿌리 아래 부서 카드가 실제로 남긴 것. 뿌리 카드는 뺀다."""
-    out: list[dict[str, str]] = []
-    for c in cards:
-        if getattr(c, "is_root", False):
-            continue
-        text = (_artifact_text(c.task_id) or c.result or c.summary or "").strip()
-        out.append({
-            "assignee": c.assignee or "(미배정)",
-            "title": c.title,
-            "outcome": str(c.outcome),
-            # **빈손을 빈손이라고 적는다.** 여기서 조용히 빼면 CEO 는 그 본부가
-            # 검토한 줄 알고 종합한다 - 안 한 것과 이상 없던 것이 섞인다.
-            "text": text[:_FINDING_CHARS] if text else "",
-        })
-    return out
-
-
-def _synthesis_prompt(query: str, findings: list[dict[str, str]]) -> str:
-    lines = [
-        "부서 검토가 끝났다. 아래는 각 본부가 **실제로 남긴 것**이다.",
-        "이것만 근거로 사용자 질문에 답하라.\n",
-        f"[사용자 질문]\n{query}\n",
-        "[본부별 산출]",
-    ]
-    for f in findings:
-        lines.append(f"\n── {f['assignee']} ({f['outcome']}) — {f['title']}")
-        lines.append(f["text"] if f["text"] else
-                     "  (산출 없음 - 이 본부는 검토 결과를 남기지 않았다. "
-                     "검토했다고 쓰지 마라.)")
-    lines.append(
-        "\n[규칙]\n"
-        "- 산출이 없는 본부를 '이상 없음'으로 읽지 마라. 안 한 것과 이상 없던 것은 다르다.\n"
-        "- 수치는 본부가 적은 값을 **그대로** 옮겨라. 반올림·환산·요약하지 마라.\n"
-        "- 근거가 모자라면 결론을 만들지 말고 **무엇이 없어서 못 정하는지** 적어라.\n"
-        "- 너는 주문 제출·리스크 승인·원장 수정·NAV 확정 권한이 없다.")
-    return "\n".join(lines)
-
-
-def synthesize_root(root_task_id: str, query: str, cards) -> dict[str, object]:
-    """자식 산출을 모아 **두 번째 CEO 턴**으로 종합한다.
-
-    ▶ 왜 두 번째 턴인가 (2026-08-11 실측)
-      CEO 는 카드를 만든 **같은 턴에** 답을 냈다. 자식이 아직 시작도 안 한
-      시점이라 읽을 것이 없었고, 그래서 답변 안의 "리스크 HIGH/BLOCKING" 같은
-      문장은 본부가 보고한 것이 아니라 CEO 가 혼자 쓴 것이었다. 본부 7곳이
-      각각 몇 분씩 일한 결과는 한 글자도 답에 들어가지 않았다.
-      카드를 만드는 턴과 종합하는 턴은 **다른 시점**이어야 한다.
-    """
-    findings = _child_findings(cards)
-    if not findings:
-        return {"answer": "", "grounded": False, "reason": "부서 카드가 없다"}
-    result = _run_ceo_turn(query=_synthesis_prompt(query, findings))
-    return {
-        "answer": result.get("answer", ""),
-        "session_id": result.get("session_id"),
-        # 한 본부라도 실제 산출이 있어야 "근거 있는 종합"이다
-        "grounded": any(f["text"] for f in findings),
-        "departments_with_output": [f["assignee"] for f in findings if f["text"]],
-        "departments_silent": [f["assignee"] for f in findings if not f["text"]],
-    }
-
-
-def _run_ceo_turn(query: str) -> dict[str, object]:
-    """CEO 한 턴. transport 만 다르고 계약은 같다."""
-    if CEO_TRANSPORT == "cli":
-        return hermes_cli.ask(
-            department=canonical_profile_for_department("ceo"),
-            config=CEO_CONFIG,
-            query=query,
-            timeout=CEO_TURN_TIMEOUT_SECONDS,
-            enabled=ENABLE_CEO_CLI,
-        )
-    return ask_ceo(query=query, timeout=CEO_TURN_TIMEOUT_SECONDS)
-
-# Hermes 프로필 이름 -> 운영 Read Model 의 department_code.
-# 둘이 어긋나는 이름이 생기면 화면에서 그 본부가 통째로 사라지므로 표로 둔다.
-PROFILE_TO_DEPARTMENT_CODE: dict[str, str] = {}
-
-
-@router.post("/ask", operation_id="ceo_query")
-def ceo_query(req: hermes_cli.AgentAsk) -> dict[str, object]:
-    """Send a non-binding natural-language query to the CEO Hermes Head.
-
-    ▶ 사실 조회는 여기서 끝난다 (2026-08-11)
-      "내 계좌 잔고" 같은 질문은 CEO 를 거치지 않는다. 실측에서 그 한 마디가
-      CEO 라우팅 90~180초 + 부서 5곳(각 3~6분) + 종합을 태우고 5/5 "산출 불가"로
-      끝났다. 같은 입력에 같은 답이 나오는 질문에 LLM 7번을 쓸 이유가 없다.
-      분류는 결정론이고(`fact_router.classify`), **애매하면 에이전트 경로로 간다.**
-    """
-    direct = fact_router.answer(req.query)
-    if direct is not None:
-        # 카드를 만들지 않는다 - 부서가 할 일이 없는 질문이다.
-        return {
-            "schema_version": "ceo.query-result.v1",
-            "department": "ceo-agent",
-            "binding": False,
-            "task": None,
-            "answer": _direct_answer_text(direct),
-            "session_id": None,
-            # 화면이 수치를 여기서 가져가게 하려고 원본을 같이 싣는다.
-            # 에이전트 문장에서 숫자를 옮겨 적지 않는다(로컬 모델이 5억을
-            # "500만 원"으로 옮겨 쓴 것을 실측했다).
-            "direct": direct,
-        }
-
-    task = hermes_cli.create_kanban_task(
+    task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
-        body=req.query,
+        body=build_root_body(req.query, req.request_id),
         idempotency_key=req.request_id,
     )
+
     if not task or not task.get("task_id"):
         # The root task is the durable anchor for the closed-loop workflow.
-        # Never call the CEO after this boundary failed: otherwise the user
-        # receives an answer with no Kanban graph to supervise.
+        # Never claim success when the Kanban graph was not created.
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
         )
 
-    result = _run_ceo_turn(
-        query=(
-            "Closed-loop Kanban context: the durable CEO root task is "
-            f"{task['task_id']}. Use this task as the parent for every "
-            "dynamic child task and keep the workflow closed-loop.\n\n"
-            # 이름을 줄여 쓰면 카드는 만들어지지만 아무도 집어가지 못한다
-            # (2026-08-11 실측: `accounting-portfolio` 로 만든 카드가 그렇게 됐다).
-            "Use these exact assignee names, verbatim:\n"
-            "  research-department / quant-backtest-department / trading-department /\n"
-            "  risk-management / accounting-portfolio-department / qa-department /\n"
-            "  hr-department\n\n"
-            # ▶ **산출을 남기라고 시켜야 남는다** (2026-08-11 실측). 완료 카드
-            #   21장 중 20장이 회수 가능한 산출이 하나도 없었다 - 본부가 몇 분씩
-            #   일하고 텍스트를 냈지만 어디에도 안 남아 종합에 못 쓰였다.
-            "Every child task body MUST end with this instruction, verbatim:\n"
-            "  '[산출 규칙] 검토 결과를 반드시 파일로 남겨라(예: findings.md).\n"
-            "   남기지 않으면 종합 단계에서 이 본부는 「산출 없음」으로 처리되고,\n"
-            "   네가 한 검토는 답변에 반영되지 않는다.\n"
-            "   수치는 출처와 함께 적고, 없는 값을 0 으로 채우지 마라.\n"
-            "   확인 못 한 것은 확인 못 했다고 적어라.'\n\n"
-            # 이 턴은 계획이다. 답은 본부가 끝난 뒤 두 번째 턴에서 만든다.
-            "This turn is PLANNING ONLY. Do not state conclusions about the "
-            "user's question yet - the departments have not run. Reply with the "
-            "plan and which departments you tasked.\n\n"
-            f"Original user request:\n{req.query}"
-        ),
-    )
+    if not hermes_boundary.comment_root_scope(
+        task_id=str(task["task_id"]), request_id=req.request_id
+    ):
+        # Fail closed: a ready root without its concrete scope binding could
+        # be dispatched with no durable proof of which root owns its children.
+        raise HTTPException(
+            status_code=503,
+            detail="CEO root Kanban scope를 기록하지 못했습니다. 재시도하세요.",
+        )
+
     return {
-        "schema_version": "ceo.query-result.v1",
+        "schema_version": "ceo.query-accepted.v1",
         "department": "ceo-agent",
         "binding": False,
+        "task_id": task["task_id"],
         "task": task,
-        "answer": result["answer"],
-        "session_id": result.get("session_id"),
+        "answer": "CEO Kanban workflow accepted. Final synthesis will be produced by the closed-loop supervisor.",
+        "session_id": None,
     }
 
 
-@router.get("/ask/{root_task_id}", operation_id="ceo_query_progress")
-def ceo_query_progress(root_task_id: str) -> dict[str, object]:
-    """뿌리 카드에 매달린 본부 카드들의 진행·실패. 화면은 이걸 폴링한다.
-
-    ▶ 왜 Kanban 대시보드 임베드로 충분하지 않은가
-      임베드는 **보드 원본**을 보여준다. 거기서 회계 카드는 `done` 이었지만
-      결과 본문이 비어 있었다 - "NAV 데이터가 없어 산출할 수 없습니다"를 완료로
-      기록한 것이다. 원본만 보면 그건 성공으로 읽힌다. 이 경로는 같은 카드를
-      "답이 됐는가" 기준으로 다시 판정해서 준다(`kanban_board` 의 fail-closed 규칙).
-    """
+@router.get(
+    "/tasks",
+    operation_id="ceo_task_list",
+    response_model=TaskListResponse,
+    summary="최근 CEO 요청 목록",
+    description=(
+        "사용자가 `/ui/ceo/ask`로 만든 Root만 최신순으로 준다. Supervisor가 만든"
+        " QA·Synthesis 제어 Task와 Archive된 작업은 빠진다."
+    ),
+)
+def ceo_task_list(
+    limit: int = Query(default=20, ge=1, le=100, description="최대 항목 수"),
+    include_archived: bool = Query(default=False, description="Archive된 작업 포함 여부"),
+) -> TaskListResponse:
     try:
-        cards = cards_for_root(root_task_id)
-    except BoardUnavailable as exc:
-        # 못 읽은 것을 "카드 없음"으로 바꾸지 않는다. 빈 목록을 주면 화면이
-        # "아무 일도 없었음"으로 읽는다.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not cards:
-        raise HTTPException(status_code=404, detail="ceo_root_task_not_found")
+        rows = list_ceo_roots(limit=limit, include_archived=include_archived)
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
 
-    _publish_status(cards)
-    return {
-        "schema_version": "ceo.query-progress.v1",
-        "root_task_id": root_task_id,
-        # **본부가** 실제로 답을 준 게 하나라도 있는가. 뿌리 카드는 세지 않는다 -
-        # CEO 가 자기 카드에 뭘 적었다고 본부 근거가 생기는 것은 아니다.
-        "answer_grounded": any(
-            c.outcome == "ANSWERED" and not c.is_root for c in cards
+    # 목록 Row에는 그래프(parents/children)가 없다. 상태와 부서 구성은 Root마다
+    # 그래프를 읽어야 나온다. Root 간에는 병렬로, 대신 그래프 내부 병렬도는
+    # 낮춰서 전체 동시 CLI 프로세스 수가 곱으로 늘지 않게 한다.
+    identified = [
+        (str(row.get("id") or row.get("task_id") or ""), str(row.get("body") or ""))
+        for row in rows
+    ]
+    identified = [(task_id, body) for task_id, body in identified if task_id]
+    if not identified:
+        return TaskListResponse(items=[])
+
+    with ThreadPoolExecutor(max_workers=_LIST_WORKERS) as pool:
+        workflows = list(
+            pool.map(
+                lambda task_id: _load(task_id, max_workers=_LIST_GRAPH_WORKERS),
+                [task_id for task_id, _ in identified],
+            )
+        )
+
+    return TaskListResponse(
+        items=[
+            TaskListItem(
+                task_id=task_id,
+                query=extract_user_query(body),
+                status=workflow.status,
+                created_at=workflow.root.created_at,
+                selected_departments=list(workflow.selected_departments),
+            )
+            for (task_id, body), workflow in zip(identified, workflows)
+        ]
+    )
+
+
+@router.get(
+    "/tasks/{task_id}",
+    operation_id="ceo_task_status",
+    response_model=TaskStatusResponse,
+    summary="Task 진행 상태 조회",
+    description="프론트엔드가 2~5초 주기로 polling하는 경로다.",
+    responses={404: {"description": "판에 없는 Task"}},
+)
+def ceo_task_status(task_id: str = _TASK_ID_PATH) -> TaskStatusResponse:
+    workflow = _load(task_id)
+    return TaskStatusResponse(
+        task_id=task_id,
+        root_task_id=workflow.root_task_id,
+        status=workflow.status,
+        assignee=workflow.root.profile,
+        query=workflow.query,
+        created_at=workflow.root.created_at,
+        completed_at=workflow.root.completed_at,
+        workflow=TaskWorkflow(
+            selected_departments=list(workflow.selected_departments),
+            qa_required=workflow.qa_required,
         ),
-        "authoritative": False,
-        "source_of_record": "/ui/snapshot",
-        **progress_of(cards),
-    }
+        progress=TaskProgress(
+            primary_total=len(workflow.primary_nodes),
+            primary_done=sum(1 for node in workflow.primary_nodes if node.done),
+            qa=workflow.qa_stage,
+            synthesis=workflow.synthesis_stage,
+        ),
+    )
 
 
-@router.post("/ask/{root_task_id}/synthesize", operation_id="ceo_query_synthesize")
-def ceo_query_synthesize(root_task_id: str, query: str = "") -> dict[str, object]:
-    """부서 검토가 끝난 뒤 **종합한 최종 답**. 이게 없으면 부서 일이 버려진다.
+@router.get(
+    "/tasks/{task_id}/graph",
+    operation_id="ceo_task_graph",
+    response_model=TaskGraphResponse,
+    summary="Workflow Graph 조회",
+    description=(
+        "CEO -> 부서 -> QA -> Synthesis 의존 그래프. `role`로 노드를 구분해서"
+        " 화면 레이아웃을 만들 수 있다."
+    ),
+    responses={404: {"description": "판에 없는 Task"}},
+)
+def ceo_task_graph(task_id: str = _TASK_ID_PATH) -> TaskGraphResponse:
+    workflow = _load(task_id)
+    return TaskGraphResponse(
+        root=workflow.root_task_id,
+        nodes=[
+            GraphNode(
+                id=node.task_id,
+                department=node.profile,
+                status=node.status,
+                role=node.role(root_task_id=workflow.root_task_id),
+                title=node.title,
+            )
+            for node in workflow.nodes
+        ],
+        edges=list(workflow.edges),
+    )
 
-    ▶ 왜 별도 호출인가
-      카드를 만드는 턴에는 자식이 아직 시작도 안 했다. 같은 턴에 답하면 그 답은
-      부서 산출이 아니라 CEO 의 추측이다(실측: 본부 7곳이 각각 몇 분씩 일한
-      결과가 답에 한 글자도 안 들어갔다).
 
-    ▶ 아직 안 끝났으면 **종합하지 않는다.** 진행 중인 본부를 빼고 종합하면
-      그 본부는 영영 '의견 없음'으로 굳는다.
-    """
+@router.get(
+    "/tasks/{task_id}/result",
+    operation_id="ceo_task_result",
+    response_model=TaskResultResponse,
+    summary="최종 결과 조회",
+    description=(
+        "Synthesis Task의 요약을 정규화해서 준다. 진행 중이면 `result`는 null이다."
+        " CEO 산출물은 `binding: false` - 주문·리스크 승인·원장 확정 근거가 아니다."
+    ),
+    responses={404: {"description": "판에 없는 Task"}},
+)
+def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
+    workflow = _load(task_id)
+    synthesis = workflow.synthesis_node
+    terminal = workflow.status in {"completed", "blocked", "failed", "archived"}
+
+    result: TaskResult | None = None
+    if synthesis is not None and synthesis.done and synthesis.summary:
+        result = TaskResult(
+            summary=synthesis.summary,
+            decision=workflow.decision,
+            qa_verdict=workflow.qa_verdict,
+        )
+
+    return TaskResultResponse(
+        task_id=task_id,
+        status="completed" if terminal else "processing",
+        result=result,
+        departments=workflow.department_summaries,
+        qa_verdict=workflow.qa_verdict,
+        block_reason=workflow.block_reason,
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/archive",
+    operation_id="ceo_task_archive",
+    response_model=TaskArchiveResponse,
+    summary="Task Archive",
+    description=(
+        "Root와 하위 Task 전체를 Archive한다. Kanban 기록과 감사 추적은 그대로"
+        " 남고, 기본 목록과 Dispatcher 실행 대상에서만 빠진다. 자식을 남기면"
+        " Dispatcher가 계속 실행하므로 그래프 전체를 함께 처리한다."
+    ),
+    responses={404: {"description": "판에 없는 Task"}},
+)
+def ceo_task_archive(task_id: str = _TASK_ID_PATH) -> TaskArchiveResponse:
+    workflow = _load(task_id)
+    # 자식부터 Archive한다. Root를 먼저 닫아도 자식은 ready로 남는다.
+    target_ids = [node.task_id for node in workflow.descendants if node.task_id]
+    target_ids.append(workflow.root_task_id)
     try:
-        cards = cards_for_root(root_task_id)
-    except BoardUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not cards:
-        raise HTTPException(status_code=404, detail="ceo_root_task_not_found")
-
-    children = [c for c in cards if not c.is_root]
-    pending = [c for c in children if not c.is_terminal]
-    if pending:
-        return {
-            "schema_version": "ceo.query-synthesis.v1",
-            "root_task_id": root_task_id,
-            "ready": False,
-            "answer": "",
-            "pending": [{"task_id": c.task_id, "assignee": c.assignee,
-                         "outcome": str(c.outcome)} for c in pending],
-        }
-
-    root_query = query.strip() or next(
-        (c.title for c in cards if c.is_root), "")
-    out = synthesize_root(root_task_id, root_query, cards)
-    return {
-        "schema_version": "ceo.query-synthesis.v1",
-        "root_task_id": root_task_id,
-        "ready": True,
-        "authoritative": False,
-        **out,
-    }
+        archive_tasks(target_ids)
+    except KanbanTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
+    except KanbanUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Archive에 실패했습니다: {exc}") from exc
+    return TaskArchiveResponse(task_id=task_id, archived_task_ids=target_ids)
 
 
-def _publish_status(cards) -> None:
-    """카드 상태를 `agent.status.v1` 로 흘려 오피스 화면에도 보이게 한다.
-
-    `kanban_status_bridge` 가 기다리던 입력이 이것이다 - 그 모듈은 정제된 이벤트를
-    받도록 이미 설계돼 있었고 아무도 먹여 주지 않고 있었다. best-effort 다:
-    여기서 실패해도 사용자 답변 경로를 막지 않는다.
-    """
-    outcome_to_kanban = {
-        "QUEUED": "todo", "RUNNING": "running", "ANSWERED": "done",
-        # 답을 못 낸 완료를 `done`(=IDLE)으로 흘리면 화면에서 성공으로 보인다.
-        # 오피스 화면에서도 눈에 걸리도록 DEGRADED 로 올린다.
-        "NO_ANSWER": "degraded", "BLOCKED": "blocked",
-        "FAILED": "error", "STALE": "degraded", "NO_ASSIGNEE": "error",
-    }
-    for card in cards:
-        try:
-            KANBAN_STATUS_BRIDGE.publish_task_event({
-                # 카드 결말이 바뀔 때만 새 이벤트가 되도록 결말을 키에 넣는다.
-                "event_id": f"{card.task_id}:{card.outcome}",
-                "status": outcome_to_kanban.get(card.outcome, "running"),
-                "department_code": PROFILE_TO_DEPARTMENT_CODE.get(
-                    card.assignee, card.assignee
-                ),
-                "agent_id": card.assignee,
-                "task_id": card.task_id,
-                "reason": card.summary or card.title,
-            })
-        except Exception:  # noqa: BLE001 - 알림은 답변 경로를 막지 않는다
-            continue
-
-
-__all__ = ["router", "CEO_TURN_TIMEOUT_SECONDS"]
+__all__ = ["router"]

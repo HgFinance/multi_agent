@@ -467,7 +467,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   예산을 다 썼다고 다른 하나를 막으면 안 된다.
         #   반대로 파라미터만 바꾼 변형은 같은 Family 다 - 그게 우리가 세려는
         #   다중검정이다.
-        from trial_family import family_of_hypothesis_row, pressure as fam_pressure
+        from trial_family import family_ids_for, pressure as fam_pressure
 
         # ▶ **접수(Gate 0)와 같은 함수로 계산한다**(2026-08-11 실측). 예전엔
         #   family_id(hyp) 를 그대로 불러 label/baseline 이 빈 문자열로 해시됐고,
@@ -476,7 +476,12 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   두 값을 가졌다 - 실험은 실행면 값으로 각인되는데 Gate 0 은 접수 값으로
         #   세니 **count_family_trials 가 영원히 0** 이었고, 시도 예산·DSR 감가·
         #   기각 교훈 대응이 전부 안 걸렸다.
-        fam = family_of_hypothesis_row(hyp)
+        # ▶ **동의어를 전부 세고, 찍는 값은 정본 하나** (2026-08-12)
+        #   계열 ID 를 만드는 길이 둘이라 같은 개념이 두 값을 가졌고,
+        #   그래서 시도 카운터가 1부터 다시 셌다(momentum/krx_all 이 7건
+        #   있는데 오늘 것이 시도1). 세는 쪽이 둘 다 인정하게 한다.
+        fams = family_ids_for(hyp)
+        fam = fams[0] if fams else ""
         cards: list[dict] = []
         try:
             # ▶ **기록된 배정을 읽는다**(다시 계산하지 않는다). Family 는
@@ -490,7 +495,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         except Exception:
             cards = []                   # 못 세면 0 - 없는 압력을 지어내지 않는다
         budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
-        report.trial_pressure = fam_pressure(fam, cards, budget=budget)
+        report.trial_pressure = fam_pressure(fams, cards, budget=budget)
         # ▶ **백테스트에 시도 횟수를 넘긴다.** 안 넘기면 DSR 이 trials=1
         #   로 계산돼 전혀 감가되지 않는다 - 20번 시도해 고른 Sharpe 를
         #   첫 시도와 같은 값으로 읽게 된다(계약만 있고 실행부가 안 따라간

@@ -66,7 +66,3 @@ ai-office/*.log
 
 # EB 배포 번들 - scripts/package_eb_bundle.ps1 이 저장소 내용으로 매번 다시 만든다
 dist/
-
-# 로컬 전용 compose override - AWS 경로를 윈도우 경로로 갈아끼운다.
-# 커밋하면 팀원 AWS 배포가 로컬 경로를 보게 되므로 반드시 무시한다.
-docker-compose.override.yml

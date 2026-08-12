@@ -15,6 +15,7 @@ from orchestration.adapters.ceo_task_planner import (
     _parse_plan,
     build_task_plan,
 )
+from orchestration.skill_contract import CanonicalSkillError
 
 VALID_DEPARTMENTS = ("research", "trading", "risk", "qa", "accounting", "ceo")
 
@@ -55,6 +56,7 @@ class ParsePlanTest(unittest.TestCase):
                 "requested_departments": ["qa", "research"],
                 "rewritten_query": "AAPL 포트폴리오 점검",
                 "rationale": "리서치 후 QA 검증이 필요합니다.",
+                "required_skills": ["financial-portfolio-assessment"],
             }
         )
         decision = _parse_plan(stdout, VALID_DEPARTMENTS)
@@ -62,6 +64,7 @@ class ParsePlanTest(unittest.TestCase):
         # LLM 이 ceo 를 빼도 파싱 단계에서 되살아난다(ceo_task_planner.py 34~39행).
         self.assertEqual(decision["requested_departments"], ["research", "qa", "ceo"])
         self.assertEqual(decision["rationale"], "리서치 후 QA 검증이 필요합니다.")
+        self.assertEqual(decision["required_skills"], ["financial-portfolio-assessment"])
 
     def test_out_of_allowlist_department_is_rejected(self) -> None:
         stdout = json.dumps(
@@ -69,6 +72,30 @@ class ParsePlanTest(unittest.TestCase):
                 "requested_departments": ["research", "not-a-real-department"],
                 "rewritten_query": "q",
                 "rationale": "r",
+            }
+        )
+        with self.assertRaises(ValueError):
+            _parse_plan(stdout, VALID_DEPARTMENTS)
+
+    def test_unknown_required_skill_is_rejected_before_child_creation(self) -> None:
+        stdout = json.dumps(
+            {
+                "requested_departments": ["research"],
+                "rewritten_query": "q",
+                "rationale": "r",
+                "required_skills": ["unknown-skill"],
+            }
+        )
+        with self.assertRaises(ValueError):
+            _parse_plan(stdout, VALID_DEPARTMENTS)
+
+    def test_required_skill_owner_must_be_selected(self) -> None:
+        stdout = json.dumps(
+            {
+                "requested_departments": ["quant"],
+                "rewritten_query": "q",
+                "rationale": "r",
+                "required_skills": ["methodology-scout"],
             }
         )
         with self.assertRaises(ValueError):
@@ -201,6 +228,17 @@ class BuildTaskPlanTest(unittest.TestCase):
             )
         self.assertEqual(plan["mode"], "deterministic")
         self.assertIn("ceo_planner_unexpected", plan["planner_fallback_reason"])
+
+    def test_unresolvable_skill_is_not_silently_dropped_by_fallback(self) -> None:
+        _FakePlanner.error = CanonicalSkillError("unknown skill")
+        with mock.patch.dict(os.environ, {"PORTFOLIO_CEO_TASK_PLANNER_MODE": "llm"}):
+            with self.assertRaises(CanonicalSkillError):
+                build_task_plan(
+                    {"query": "AAPL portfolio assessment"},
+                    deterministic_fallback=_fallback,
+                    valid_departments=VALID_DEPARTMENTS,
+                    planner_cls=_FakePlanner,
+                )
 
     def test_missing_mandate_policy_is_passed_through_as_none(self) -> None:
         _FakePlanner.result = {

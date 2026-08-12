@@ -216,11 +216,11 @@
         },
         {
           "method": "POST",
-          "path": "/investment-cases/{case_id}/paper-orders"
+          "path": "/investment-cases/{case_id}/cancel"
         },
         {
           "method": "POST",
-          "path": "/investment-cases/{case_id}/cancel"
+          "path": "/investment-cases/{case_id}/paper-orders"
         },
         {
           "method": "GET",
@@ -236,11 +236,11 @@
         },
         {
           "method": "POST",
-          "path": "/trading/v1/order-intents/{order_intent_id}/risk-review"
+          "path": "/trading/v1/order-intents/{order_intent_id}/risk-decision"
         },
         {
           "method": "POST",
-          "path": "/trading/v1/order-intents/{order_intent_id}/risk-decision"
+          "path": "/trading/v1/order-intents/{order_intent_id}/risk-review"
         },
         {
           "method": "POST",
@@ -252,23 +252,23 @@
         },
         {
           "method": "POST",
-          "path": "/trading/v1/orders/{order_id}/submit"
+          "path": "/trading/v1/orders/{order_id}/broker-events"
         },
         {
           "method": "POST",
           "path": "/trading/v1/orders/{order_id}/cancel"
         },
         {
+          "method": "GET",
+          "path": "/trading/v1/orders/{order_id}/events"
+        },
+        {
           "method": "POST",
-          "path": "/trading/v1/orders/{order_id}/broker-events"
+          "path": "/trading/v1/orders/{order_id}/submit"
         },
         {
           "method": "POST",
           "path": "/trading/v1/orders/{order_id}/unknown"
-        },
-        {
-          "method": "GET",
-          "path": "/trading/v1/orders/{order_id}/events"
         }
       ]
     },
@@ -744,10 +744,6 @@
       "status": "IMPLEMENTED_PAPER",
       "operations": [
         {
-          "method": "GET",
-          "path": "/health"
-        },
-        {
           "method": "POST",
           "path": "/accounting/v1/ledgers"
         },
@@ -756,16 +752,24 @@
           "path": "/accounting/v1/ledgers/{ledger_id}"
         },
         {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/breaks"
+        },
+        {
           "method": "POST",
           "path": "/accounting/v1/ledgers/{ledger_id}/capital"
         },
         {
           "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/fills"
+          "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"
         },
         {
           "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/corporate-actions"
+          "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/fills"
         },
         {
           "method": "GET",
@@ -777,18 +781,30 @@
         },
         {
           "method": "GET",
-          "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"
-        },
-        {
-          "method": "GET",
           "path": "/accounting/v1/ledgers/{ledger_id}/positions"
         },
         {
           "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/valuations"
+          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"
+        },
+        {
+          "method": "POST",
+          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"
         },
         {
           "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/statements"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/trial-balance"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/valuations"
+        },
+        {
+          "method": "POST",
           "path": "/accounting/v1/ledgers/{ledger_id}/valuations"
         },
         {
@@ -796,24 +812,8 @@
           "path": "/accounting/v1/reconciliations/fills"
         },
         {
-          "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/positions"
-        },
-        {
-          "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/reconciliations/cash"
-        },
-        {
           "method": "GET",
-          "path": "/accounting/v1/ledgers/{ledger_id}/breaks"
-        },
-        {
-          "method": "POST",
-          "path": "/accounting/v1/ledgers/{ledger_id}/daily-reports"
-        },
-        {
-          "method": "GET",
-          "path": "/accounting/v1/ledgers/{ledger_id}/statements"
+          "path": "/health"
         },
         {
           "method": "GET",
@@ -825,6 +825,14 @@
       "status": "IMPLEMENTED_TEST",
       "operations": [
         {
+          "method": "POST",
+          "path": "/accounting/agent/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/accounting/v1/portfolio-snapshot"
+        },
+        {
           "method": "GET",
           "path": "/health"
         },
@@ -833,8 +841,60 @@
           "path": "/health/ready"
         },
         {
+          "method": "POST",
+          "path": "/qa/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/quant/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/research/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/agent/ask"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/agent/ask"
+        },
+        {
           "method": "GET",
-          "path": "/ui/snapshot"
+          "path": "/ui/account/snapshot"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/ceo/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/ceo/tasks/{task_id}/archive"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}/graph"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/tasks/{task_id}/result"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/commands/audit"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/commands/trading-state"
         },
         {
           "method": "GET",
@@ -842,7 +902,27 @@
         },
         {
           "method": "GET",
-          "path": "/ui/portfolio-universes"
+          "path": "/ui/mandate-approvals"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-approvals/{approval_id}/decide"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-cases/{case_id}/advance"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandate-cases/{case_id}/timeline"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandates/{mandate_id}/change-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandates/{mandate_id}/current"
         },
         {
           "method": "POST",
@@ -857,64 +937,16 @@
           "path": "/ui/portfolio-recommendations/{run_id}/approval"
         },
         {
-          "method": "POST",
-          "path": "/ui/mandates/{mandate_id}/change-requests"
+          "method": "GET",
+          "path": "/ui/portfolio-universes"
         },
         {
           "method": "GET",
-          "path": "/ui/mandates/{mandate_id}/current"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/risk/mandates/{mandate_id}/assess"
+          "path": "/ui/qa"
         },
         {
           "method": "POST",
           "path": "/ui/qa/verifications/{verification_id}/assess"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/mandate-cases/{case_id}/advance"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/mandate-cases/{case_id}/timeline"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/mandate-approvals"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/mandate-approvals/{approval_id}/decide"
-        },
-        {
-          "method": "GET",
-          "path": "/accounting/v1/portfolio-snapshot"
-        },
-        {
-          "method": "POST",
-          "path": "/accounting/agent/ask"
-        },
-        {
-          "method": "POST",
-          "path": "/trading/agent/ask"
-        },
-        {
-          "method": "POST",
-          "path": "/research/agent/ask"
-        },
-        {
-          "method": "POST",
-          "path": "/risk/agent/ask"
-        },
-        {
-          "method": "POST",
-          "path": "/quant/agent/ask"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/agent/ask"
         },
         {
           "method": "GET",
@@ -922,15 +954,7 @@
         },
         {
           "method": "GET",
-          "path": "/ui/strategy"
-        },
-        {
-          "method": "GET",
           "path": "/ui/risk"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/qa"
         },
         {
           "method": "GET",
@@ -938,27 +962,15 @@
         },
         {
           "method": "POST",
-          "path": "/ui/commands/trading-state"
+          "path": "/ui/risk/mandates/{mandate_id}/assess"
         },
         {
           "method": "GET",
-          "path": "/ui/commands/audit"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/ceo/ask"
+          "path": "/ui/snapshot"
         },
         {
           "method": "GET",
-          "path": "/ui/ceo/ask/{root_task_id}"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/ceo/ask/{root_task_id}/synthesize"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/account/snapshot"
+          "path": "/ui/strategy"
         }
       ]
     }

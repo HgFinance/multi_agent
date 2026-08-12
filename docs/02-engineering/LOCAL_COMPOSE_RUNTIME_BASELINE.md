@@ -83,7 +83,7 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 - `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
 - `GET /ws/operations`: `agent.status.v1`·sequence 기반 운영 Event
-- `POST /ui/ceo/ask`: 기존 `ceo-hermes` API Server로 자연어 질의를 전달하고, BFF의 공식 Hermes CLI로 공유 Kanban root Task를 생성
+- `POST /ui/ceo/ask`: BFF의 공식 Hermes CLI로 공유 Kanban root Task를 생성하고 `202 Accepted`와 `task_id`를 즉시 반환한다. CEO 실행은 standalone dispatcher가 한 번만 수행한다.
 - `POST /ui/portfolio-recommendations`: 비구속 포트폴리오 추천 실행
 - `GET /health`, `GET /health/ready`: BFF와 의존성 상태
 
@@ -100,7 +100,7 @@ NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119 \
 npm --prefix ai-office run dev -- --port 3002
 ```
 
-AI Office의 메인 대표 지시창은 `POST /ui/ceo/ask`를 사용한다. Hermes CLI가 설치되어 있고 `ENABLE_AGENT_ASK=true`일 때 CEO Head 응답을 표시한다. `ENABLE_KANBAN_TASK_TRACKING=true`이면 BFF가 Hermes CLI를 통해 `/home/ubuntu/.hermes/shared-kanban` 보드에 사용자 질의 Task를 기록한다.
+AI Office의 메인 대표 지시창은 `POST /ui/ceo/ask`를 사용한다. Hermes CLI가 설치되어 있고 `ENABLE_AGENT_ASK=true`일 때 CEO Kanban workflow를 enqueue하고 `task_id`를 표시한다. `ENABLE_KANBAN_TASK_TRACKING=true`이면 BFF가 Hermes CLI를 통해 `/home/ubuntu/.hermes/shared-kanban` 보드에 사용자 질의 Task를 기록한다. CEO Head의 실제 실행과 최종 synthesis는 dispatcher와 closed-loop supervisor가 담당한다.
 
 Dashboard 화면은 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`에 있는 Hermes 공식 Dashboard를 그대로 표시한다. Dashboard Profile과 자체 인증이 준비되지 않은 경우 AI Office는 연결 안내를 표시하며 자체 가짜 Kanban으로 대체하지 않는다.
 

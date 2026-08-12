@@ -30,7 +30,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-import hermes_cli
+try:
+    from . import hermes_boundary
+except ImportError:
+    import hermes_boundary
 import psycopg2
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
@@ -50,7 +53,7 @@ router = APIRouter(prefix="/accounting", tags=["accounting-portfolio"])
 
 
 @router.post("/agent/ask")
-def agent_ask(req: hermes_cli.AgentAsk) -> dict:
+def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
     """회계·포트폴리오본부 Agent 질의.
 
     돌아오는 것은 텍스트뿐이다. Position·PnL·NAV는 여기서 읽지 않는다 -
@@ -62,7 +65,7 @@ def agent_ask(req: hermes_cli.AgentAsk) -> dict:
     # **게이트가 라우팅보다 먼저다.** L0 이 모델을 안 부른다고 해서 비활성 엔드포인트가
     # 일부만 열리면, 최적화가 조용히 보안 경계를 깎은 것이 된다. 라우팅은 게이트 안쪽의
     # 비용 최적화일 뿐이다.
-    if not hermes_cli.ENABLE_AGENT_ASK:
+    if not hermes_boundary.ENABLE_AGENT_ASK:
         raise HTTPException(
             503,
             "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",
@@ -82,7 +85,7 @@ def agent_ask(req: hermes_cli.AgentAsk) -> dict:
             "routing": routing.as_dict(),
             "routing_note": routing_note(routing),
         }
-    result = hermes_cli.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
+    result = hermes_boundary.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
     return {**result, "routing": routing.as_dict(), "routing_note": routing_note(routing)}
 
 

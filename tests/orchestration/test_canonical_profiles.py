@@ -8,7 +8,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from apps.api import hermes_cli
+from apps.api import hermes_boundary
 from apps.api import kanban_tracker
 from orchestration.canonical_profiles import (
     CanonicalKanbanTaskRequest,
@@ -43,9 +43,9 @@ class CanonicalProfileTest(unittest.TestCase):
 
 class HermesCreateBoundaryTest(unittest.TestCase):
     def test_raw_assignee_never_reaches_subprocess(self) -> None:
-        with mock.patch.object(hermes_cli.subprocess, "run") as run:
+        with mock.patch.object(hermes_boundary.subprocess, "run") as run:
             with self.assertRaises(CanonicalProfileError):
-                hermes_cli.create_kanban_task(
+                hermes_boundary.create_kanban_task(
                     assignee="risk-department",
                     title="risk",
                     body="body",
@@ -61,9 +61,9 @@ class HermesCreateBoundaryTest(unittest.TestCase):
             stderr="",
         )
         with mock.patch.dict(os.environ, {"ENABLE_KANBAN_TASK_TRACKING": "true"}), mock.patch.object(
-            hermes_cli.subprocess, "run", return_value=completed
+            hermes_boundary.subprocess, "run", return_value=completed
         ) as run:
-            result = hermes_cli.create_kanban_task(
+            result = hermes_boundary.create_kanban_task(
                 assignee="risk-management",
                 title="risk",
                 body="body",

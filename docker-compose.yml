@@ -504,6 +504,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -528,6 +529,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -676,6 +678,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -695,6 +698,7 @@ services:
     command: ["gateway", "run"]
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -773,7 +777,7 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
-    mem_limit: 512m
+    mem_limit: 1536m
     cpus: 0.5
     pids_limit: 128
 
@@ -808,9 +812,10 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["kanban", "daemon", "--force", "--interval", "60", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+      ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
+      - ./skills/finance:/opt/shared-skills/finance:ro
     environment:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000

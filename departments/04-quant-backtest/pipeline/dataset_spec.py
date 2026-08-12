@@ -87,6 +87,24 @@ class DatasetSpec:
     source_versions: dict[str, str]
     # PIT 정책. 이관·유도 구간은 여기서 사실대로 선언한다.
     point_in_time: dict[str, Any]
+    # 파티션 입도: "month" | "day". **기본은 month** - 기존 데이터셋의 파티션
+    # 키와 해시를 그대로 두기 위해서다(바꾸면 사실상 새 데이터셋이 된다).
+    #
+    # ▶ 왜 day 가 필요한가 (2026-08-12)
+    #   빌더는 읽은 구간의 파티션을 **조건 없이 다시 쓴다.** 월 단위면 하루를
+    #   덧붙이려고 그 달 전체를 다시 쓰고, 그때마다 파티션 해시가 바뀐다.
+    #   매일 쌓이는 데이터셋에서는 세 가지가 같이 나빠진다:
+    #     ① 비용이 날마다 커진다(하루 늘리자고 한 달을 다시 쓴다)
+    #     ② **재현성이 매일 깨진다** - 어제 실험이 가리키던 해시가 사라진다
+    #     ③ 과거가 조용히 바뀐다(원천이 늦게 채워지면 지난 날이 다시 접힌다)
+    #   ②가 특히 나쁘다. 사전등록이 가리키는 대상이 매일 달라지면 사전등록의
+    #   의미가 없어진다.
+    #
+    #   Parquet 은 푸터(스키마·통계)가 끝에 있어 **덧붙이기가 안 된다.** 그래서
+    #   "닫힌 단위는 다시 쓰지 않는다"가 유일하게 싼 해법이고, 단위를 하루로
+    #   잡으면 덧붙임이 곧 새 파일이라 재작성이 0 이 된다. 원시 아카이브
+    #   (`market-archive/<표>/<날짜>.parquet`)가 이미 같은 규칙을 쓴다.
+    partition_grain: str = "month"
 
     def row_line(self, row: dict) -> str:
         """해시의 근거가 되는 한 줄. **열 순서가 계약이다.**"""
@@ -100,7 +118,18 @@ class DatasetSpec:
     def partition_of(self, row: dict) -> str:
         d = row[self.partition_column]
         d = d.date() if isinstance(d, datetime) else d
-        return f"{d:%Y-%m}"
+        return f"{d:%Y-%m-%d}" if self.partition_grain == "day" else f"{d:%Y-%m}"
+
+    @property
+    def open_partition(self) -> str:
+        """지금 시각 기준으로 **아직 안 닫힌** 파티션 키. 이것만 다시 쓴다.
+
+        하루 단위면 오늘, 달 단위면 이번 달이다. 이보다 과거인 파티션이 달라졌다면
+        그건 덧붙임이 아니라 **소급 변경**이므로 덮지 않고 보고한다.
+        """
+        now = datetime.now(KST)
+        return (f"{now:%Y-%m-%d}" if self.partition_grain == "day"
+                else f"{now:%Y-%m}")
 
 
 def _d(v):

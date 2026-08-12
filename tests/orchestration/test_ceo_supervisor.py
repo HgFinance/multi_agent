@@ -16,6 +16,12 @@ from orchestration.adapters.ceo_supervisor import (
     decide_supervisor,
     parse_supervisor_output,
 )
+from orchestration.ceo_workflow_scope import (
+    build_root_body,
+    build_scoped_task_body,
+    validate_workflow_scope,
+    WorkflowScopeViolation,
+)
 
 
 def child(
@@ -55,6 +61,17 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.RUN_QA)
         self.assertEqual(decision.assignee, "qa-department")
         self.assertEqual(decision.parent_task_ids, ("r", "risk"))
+
+    def test_replan_is_scope_bound_without_root_execution_dependency(self) -> None:
+        client = FakeClient()
+        client.payloads[0].update(status="blocked", block_reason="source unavailable")
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "replan-1", "task_id": "r", "kind": "blocked"}
+        )
+        self.assertEqual(decision.action, SupervisorAction.CREATE_TASK)
+        self.assertEqual(client.created[0]["parent_task_ids"], ())
+        self.assertIn("workflow_root_task_id=root", client.created[0]["body"])
+        self.assertIn("workflow_role=primary", client.created[0]["body"])
 
     def test_blocked_transient_can_retry_and_other_blocked_can_replan(self) -> None:
         retry = decide_supervisor(
@@ -154,12 +171,16 @@ class FakeClient:
         self.unblocked: list[str] = []
         self.blocked: list[str] = []
         self.comments: list[dict[str, str]] = []
+        self.root_body = ""
 
     def workflow(self, task_id: str):
         return "root", tuple(self.payloads)
 
     def show(self, task_id: str):
-        return {"id": task_id, "comments": list(self.comments)}
+        payload = {"id": task_id, "comments": list(self.comments)}
+        if task_id == "root":
+            payload["body"] = self.root_body
+        return payload
 
     def create_task(self, **kwargs):
         self.created.append(kwargs)
@@ -193,13 +214,16 @@ class SupervisorWakeupTest(unittest.TestCase):
         first = service.handle_terminal_event({"event_id": "e1", "task_id": "r", "kind": "completed"})
         self.assertEqual(first.action, SupervisorAction.RUN_QA)
         self.assertEqual(client.created[0]["assignee"], "qa-department")
+        self.assertEqual(client.created[0]["parent_task_ids"], ("r", "risk"))
+        self.assertIn("workflow_role=qa", client.created[0]["body"])
 
         qa_payload = next(payload for payload in client.payloads if payload["id"] == "new-1")
         qa_payload.update(id="qa", status="done", summary="qa passed")
         second = service.handle_terminal_event({"event_id": "e2", "task_id": "qa", "kind": "completed"})
         self.assertEqual(second.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(client.created[1]["assignee"], "ceo-agent")
-        self.assertEqual(client.created[1]["parent_task_ids"], ("r", "risk", "qa"))
+        self.assertEqual(client.created[1]["parent_task_ids"], ("qa",))
+        self.assertIn("workflow_role=synthesis", client.created[1]["body"])
 
         duplicate_after_restart = CeoSupervisorService(client).handle_terminal_event(
             {"event_id": "e2", "task_id": "qa", "kind": "completed"}
@@ -208,6 +232,13 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             sum(item["assignee"] == "ceo-agent" for item in client.created), 1
         )
+
+    def test_root_body_declares_scope_only_planning_contract(self) -> None:
+        body = build_root_body("Samsung", "req-1")
+        self.assertIn("root_task_role=scope_and_planning", body)
+        self.assertIn("primary_execution_parent=none", body)
+        self.assertIn("planning_terminal_state=done_after_child_creation", body)
+        self.assertNotIn("child_parent_required=current_root_task_id", body)
 
     def test_reclaimed_does_not_wake_supervisor(self) -> None:
         client = FakeClient()
@@ -220,6 +251,18 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
         self.assertEqual(client.created, [])
         self.assertEqual(client.comments, [])
+
+    def test_planning_root_terminal_event_does_not_wake_supervisor(self) -> None:
+        client = FakeClient()
+        client.root_body = build_root_body("Samsung", "req-1")
+        service = CeoSupervisorService(client)
+
+        self.assertIsNone(
+            service.handle_terminal_event(
+                {"event_id": "root-done", "task_id": "root", "kind": "completed"}
+            )
+        )
+        self.assertEqual(client.created, [])
 
     def test_one_terminal_child_does_not_synthesize_before_sibling(self) -> None:
         client = FakeClient()
@@ -352,6 +395,107 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         with self.assertRaises(HermesKanbanCommandError):
             HermesKanbanClient(runner=runner).show("r")
+
+    def test_scope_marker_discovers_parentless_primary_tasks(self) -> None:
+        import json
+        import subprocess
+
+        root = "t_aaaaaaaa"
+        research = "t_bbbbbbbb"
+        risk = "t_cccccccc"
+        qa = "t_dddddddd"
+        synthesis = "t_eeeeeeee"
+        old_research = "t_ffffffff"
+        payloads = {
+            root: {
+                "id": root,
+                "assignee": "ceo-agent",
+                "status": "done",
+                "body": build_root_body("Samsung", "req-1"),
+                "parents": [],
+                "children": [],
+            },
+            research: {
+                "id": research,
+                "assignee": "research-department",
+                "status": "done",
+                "body": build_scoped_task_body("research", root, role="primary"),
+                "parents": [],
+                "children": [],
+            },
+            risk: {
+                "id": risk,
+                "assignee": "risk-management",
+                "status": "done",
+                "body": build_scoped_task_body("risk", root, role="primary"),
+                "parents": [],
+                "children": [],
+            },
+            qa: {
+                "id": qa,
+                "assignee": "qa-department",
+                "status": "ready",
+                "body": build_scoped_task_body("qa", root, role="qa"),
+                "parents": [research, risk],
+                "children": [],
+            },
+            synthesis: {
+                "id": synthesis,
+                "assignee": "ceo-agent",
+                "status": "todo",
+                "body": build_scoped_task_body("synthesis", root, role="synthesis"),
+                "parents": [qa],
+                "children": [],
+            },
+            old_research: {
+                "id": old_research,
+                "assignee": "research-department",
+                "status": "done",
+                "body": build_scoped_task_body(
+                    "old workflow", "t_11111111", role="primary"
+                ),
+                "parents": [],
+                "children": [],
+            },
+        }
+
+        def runner(args, **kwargs):
+            command = list(args)
+            if command[1:3] == ["kanban", "list"]:
+                stdout = json.dumps(list(payloads.values()))
+            else:
+                task_id = command[3]
+                stdout = json.dumps({"task": payloads[task_id]})
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        client = HermesKanbanClient(runner=runner)
+        discovered_root, children = client.workflow(research)
+        self.assertEqual(discovered_root, root)
+        self.assertEqual(
+            {task["id"] for task in children}, {research, risk, qa, synthesis}
+        )
+        self.assertNotIn(old_research, {task["id"] for task in children})
+        self.assertEqual(payloads[research]["parents"], [])
+        self.assertEqual(payloads[risk]["parents"], [])
+        self.assertEqual(payloads[qa]["parents"], [research, risk])
+        self.assertEqual(payloads[synthesis]["parents"], [qa])
+
+    def test_primary_scope_task_cannot_depend_on_scope_root(self) -> None:
+        root = "t_aaaaaaaa"
+        primary = build_scoped_task_body("research", root, role="primary")
+        with self.assertRaises(WorkflowScopeViolation):
+            validate_workflow_scope(
+                root_task_id=root,
+                root_payload={"id": root, "body": build_root_body("q", "req")},
+                descendants=[
+                    {
+                        "id": "t_bbbbbbbb",
+                        "assignee": "research-department",
+                        "body": primary,
+                        "parents": [root],
+                    }
+                ],
+            )
 
 
 if __name__ == "__main__":

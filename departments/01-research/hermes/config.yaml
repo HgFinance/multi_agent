@@ -226,8 +226,8 @@ worker_model_tier_proposal:
   - holdings-analyst-worker
   daily_head_token_cap: 300000
 skills:
-- hermes-agent
-- methodology-scout
+  external_dirs:
+    - /opt/shared-skills
 usage:
   run: research-department chat -q 'Scout methodology for a cross-sectional momentum crash hedge and draft an experiment proposal'
   collaborate: research-department chat -q 'Check the rejection history for this trial family, then hand the proposal to quant-backtest-department'

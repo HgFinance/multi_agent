@@ -11,7 +11,10 @@ Prompt가 아니라 "경로가 없음"으로 지켜져야 한다.
 """
 from __future__ import annotations
 
-import hermes_cli
+try:
+    from . import hermes_boundary
+except ImportError:
+    import hermes_boundary
 from fastapi import APIRouter
 
 DEPARTMENT = "trading-department"   # Hermes Profile 이름
@@ -21,6 +24,6 @@ router = APIRouter(prefix="/trading", tags=["trading"])
 
 
 @router.post("/agent/ask")
-def agent_ask(req: hermes_cli.AgentAsk) -> dict:
+def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
     """트레이딩본부 Agent 질의. 텍스트만 돌려주고 주문 경로는 없다."""
-    return hermes_cli.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
+    return hermes_boundary.ask(department=DEPARTMENT, config=CONFIG, query=req.query)

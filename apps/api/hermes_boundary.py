@@ -32,14 +32,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 try:
     from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
-except ImportError:  # pragma: no cover - `python apps/api/hermes_cli.py` 직접 실행
+    from orchestration.ceo_workflow_scope import build_root_comment
+except ImportError:  # pragma: no cover - `python apps/api/hermes_boundary.py` 직접 실행
     # 스크립트로 직접 돌리면 sys.path[0] 이 apps/api 라 저장소 루트가 안 보인다.
-    # (원래 있던 `from ..orchestration...` 대안은 이 파일이 패키지 안이 아니라
-    #  어떤 경로로도 성립하지 않았다 - 자체 점검을 돌리려면 이쪽이 필요하다.)
+    # (`from ..orchestration...` 는 이 파일이 패키지 안이 아니라 어떤 경로로도
+    #  성립하지 않는다 - 자체 점검을 돌리려면 sys.path 를 넣는 쪽이 필요하다.)
     import sys
 
     sys.path.insert(0, str(ROOT))
     from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+    from orchestration.ceo_workflow_scope import build_root_comment
 
 # Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
 # 권한과 Tool Allowlist가 붙기 전에는 명시적인 로컬 개발 Opt-in 없이는 열지 않는다.
@@ -181,6 +183,52 @@ def create_kanban_task(
         "status": str(payload.get("status", "TODO")),
         "source": "hermes-kanban",
     }
+
+
+def comment_kanban_task(*, task_id: str, text: str) -> bool:
+    """Write a durable Kanban comment through Hermes' supported CLI.
+
+    The BFF only uses this for the concrete CEO root scope marker.  It never
+    opens a gateway or writes the shared database directly.
+    """
+
+    if not task_id or not text.strip():
+        return False
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command = [
+        os.environ.get("HERMES_BIN", "hermes"),
+        "kanban",
+        "comment",
+        task_id,
+        text,
+        "--author",
+        "ai-office-bff",
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def comment_root_scope(*, task_id: str, request_id: str) -> bool:
+    """Bind a created root ID before its ready task can be dispatched."""
+
+    return comment_kanban_task(
+        task_id=task_id,
+        text=build_root_comment(task_id, request_id),
+    )
 
 
 def ask(
@@ -351,4 +399,4 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
 
     assert session_id_of("session_id: 20260811_x\n") == "20260811_x"
     assert session_id_of("아무것도 없음") is None
-    print("hermes_cli 자체 점검 통과")
+    print("hermes_boundary 자체 점검 통과")

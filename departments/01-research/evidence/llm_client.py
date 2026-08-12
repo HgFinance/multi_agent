@@ -26,7 +26,13 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.request
+
+try:
+    from .observability import current_metrics
+except ImportError:  # direct module execution from the Research profile
+    from observability import current_metrics  # type: ignore
 
 MODULE_VERSION = "research-llm-client-v1"
 
@@ -62,9 +68,20 @@ def chat(system: str, user: str, *, base: str, model: str, timeout: float,
         headers={"Content-Type": "application/json",
                  "Authorization": "Bearer ollama"},
         data=json.dumps(payload).encode())
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        out = json.loads(r.read())
-    return out["choices"][0]["message"]["content"]
+    metrics = current_metrics()
+    started = time.perf_counter()
+    if metrics:
+        metrics.record_tool_call()
+        if metrics.generation_started_at is None:
+            metrics.mark("generation_started_at")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.loads(r.read())
+        return out["choices"][0]["message"]["content"]
+    finally:
+        if metrics:
+            metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
+            metrics.mark("generation_finished_at")
 
 
 def chat_structured(system: str, user: str, *, base: str, model: str,
@@ -85,8 +102,19 @@ def chat_structured(system: str, user: str, *, base: str, model: str,
             "options": {"temperature": temperature},
             "format": schema,
         }).encode())
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())["message"]["content"]
+    metrics = current_metrics()
+    started = time.perf_counter()
+    if metrics:
+        metrics.record_tool_call()
+        if metrics.generation_started_at is None:
+            metrics.mark("generation_started_at")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())["message"]["content"]
+    finally:
+        if metrics:
+            metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
+            metrics.mark("generation_finished_at")
 
 
 def extract_json(text: str) -> str:
@@ -116,6 +144,10 @@ def narrate(system: str, prompt: str, model_cls, call,
 
     last_err = None
     for attempt in range(attempts):
+        if attempt:
+            metrics = current_metrics()
+            if metrics:
+                metrics.record_retry()
         user = prompt if attempt == 0 else (
             prompt + f"\n\nYour previous output failed validation: {last_err}. "
                      f"Return ONLY valid JSON for the schema.")

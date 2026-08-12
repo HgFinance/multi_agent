@@ -171,13 +171,65 @@ def same_family(a: dict, b: dict) -> bool:
     return bool(fa) and fa == fb
 
 
-def pressure(family: str, cards: list[dict], *, budget: int) -> dict:
+def family_ids_for(hyp: dict) -> tuple[str, ...]:
+    """이 개념을 가리키는 **모든** Family ID. 첫 값이 지금의 정본이다.
+
+    ▶ 왜 여럿인가 (2026-08-12 실측)
+      계열 ID 를 만드는 길이 둘이다. `family_id(hyp)` 는 `family_key` 를 그대로
+      해시하고(label·baseline 이 빈 문자열), `family_of_hypothesis_row(row)` 는
+      `hypothesis_view` 로 기본값을 채운 뒤 해시한다. **같은 개념이 두 값을
+      갖는다:**
+
+        momentum/krx_all → fam_65a4c7b6c7… (원시)  ·  fam_42663e9f0f… (기본값 채움)
+
+      8월 4일 실험 7건은 앞의 값으로, 오늘 실험은 뒤의 값으로 찍혔다. 그래서
+      같은 개념인데 **시도 카운터가 1부터 다시 셌다.** 200번을 돌려도 매번
+      "첫 시도" 로 읽히면 DSR 이 감가하지 않고, 200번째의 Sharpe 1.5 를 첫
+      시도처럼 채택하게 된다 - 다중검정 방어가 통째로 무력해진다.
+
+      **원장을 고치지 않는다.** 저장된 값은 그 실험이 실제로 찍은 것이라
+      사실이고, 소급 수정하면 "시도 압력은 기록된 사실" 이라는 규칙이 깨진다.
+      대신 **세는 쪽이 둘 다 인정한다.** 나중에 키 정의가 또 바뀌어도 여기에
+      한 줄 늘리면 계보가 이어진다.
+    """
+    out: list[str] = []
+    for fn in (family_of_hypothesis_row, family_id):
+        try:
+            v = fn(hyp)
+        except Exception:      # noqa: BLE001 - 한 방식이 실패해도 나머지는 쓴다
+            continue
+        if v and v not in out:
+            out.append(v)
+    return tuple(out)
+
+
+def pressure(family, cards: list[dict], *, budget: int) -> dict:
     """이 Family 에서 몇 번째 시도인가. **순수 함수.**
 
     edge type 으로 세던 것을 Family 로 바꾼다 - 컨셉이 다른데 type 이 같으면
     남의 시도가 내 압력으로 잡히던 문제를 없앤다.
+
+    `family` 는 문자열 하나 또는 **동의어 묶음**이다(`family_ids_for`). 묶음이면
+    전부 같은 개념으로 세고, **찍는 값은 첫 번째(정본)** 다 - 세는 것은 넓게,
+    남기는 것은 하나로.
     """
-    if not family:
+    if not isinstance(family, str):
+        ids = tuple(x for x in (family or ()) if x)
+        canonical = ids[0] if ids else ""
+    else:
+        ids, canonical = ((family,) if family else ()), family
+    if canonical:
+        same = [c for c in cards if c.get("trial_family_id") in ids]
+        used = len(same)
+        return {
+            "trial_family_id": canonical,
+            "trials_used": used,
+            "trial_number": used + 1,
+            "trial_budget": budget,
+            "over_budget": used >= budget,
+            **({"counted_aliases": list(ids[1:])} if len(ids) > 1 else {}),
+        }
+    if not canonical:
         # ▶ **trial_number 를 빠뜨리지 않는다.** 호출부(DSR 감가)가 이 값을
         #   반드시 읽으므로 없으면 KeyError 로 실험 전체가 죽는다.
         #   1 은 "첫 시도" 가 아니라 **못 셌다**는 뜻이고, DSR 이 감가하지
@@ -187,15 +239,6 @@ def pressure(family: str, cards: list[dict], *, budget: int) -> dict:
                 "reason": "Family 를 정할 수 없다(edge type 또는 유니버스를 "
                           "통제 어휘로 못 사상) - 압력을 세지 않는다. "
                           "DSR 이 감가되지 않으므로 Sharpe 를 그대로 믿지 않는다"}
-    same = [c for c in cards if c.get("trial_family_id") == family]
-    used = len(same)
-    return {
-        "trial_family_id": family,
-        "trials_used": used,
-        "trial_number": used + 1,          # 이번이 몇 번째인가
-        "trial_budget": budget,
-        "over_budget": used >= budget,
-    }
 
 
 # ── 자체 점검 ────────────────────────────────────────────────────────────────
@@ -315,6 +358,26 @@ def _check_intake_and_runtime_agree():
     assert family_id(intake).startswith("fam_")
 
 
+def _check_alias_keeps_the_lineage():
+    """**계열 ID 가 갈려도 시도 카운터가 1로 안 돌아간다.** (2026-08-12 실측)
+
+    momentum/krx_all 이 옛 방식으로 7건 찍혀 있는데 오늘 것이 새 방식으로
+    찍혀 `시도1` 이 됐다. 200번을 돌려도 매번 첫 시도로 읽히면 DSR 이
+    감가하지 않고, 200번째의 Sharpe 를 첫 시도처럼 채택하게 된다.
+    """
+    row = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
+    ids = family_ids_for(row)
+    assert len(ids) == 2, ids
+    new, old = ids[0], ids[1]
+    cards = [{"trial_family_id": old} for _ in range(7)]
+    assert pressure(new, cards, budget=5)["trial_number"] == 1   # 이게 버그였다
+    p = pressure(ids, cards, budget=5)
+    assert p["trial_number"] == 8 and p["trials_used"] == 7, p
+    assert p["over_budget"] is True, p
+    assert p["trial_family_id"] == new, p          # 찍는 값은 정본 하나
+    assert p["counted_aliases"] == [old], p
+
+
 def _check_row_without_view_would_have_drifted():
     """정본을 안 거치면 어긋난다는 것 자체를 고정한다 - 왜 이 함수가 있는지의 근거."""
     row = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
@@ -347,4 +410,5 @@ if __name__ == "__main__":
     _check_tuned_fields_never_in_key();          print("  튜닝값 미포함(구조)     OK")
     _check_intake_and_runtime_agree();           print("  접수==실행면 Family     OK")
     _check_row_without_view_would_have_drifted(); print("  정본 미경유는 어긋남    OK")
-    print("시도 Family 11개 영역 통과.")
+    _check_alias_keeps_the_lineage();             print("  동의어 계열 합산        OK")
+    print("시도 Family 12개 영역 통과.")

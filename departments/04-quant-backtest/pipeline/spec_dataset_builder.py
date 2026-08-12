@@ -86,13 +86,41 @@ def write_partitions(spec: DatasetSpec, rows: list[dict], out_dir: Path) -> list
     for r in rows:
         by_part.setdefault(spec.partition_of(r), []).append(r)
 
-    parts = []
+    parts, skipped, drifted = [], [], []
     for key in sorted(by_part):
         chunk = sorted(by_part[key], key=spec.sort_key)
+        chash = content_hash(spec, chunk)
+        path = out_dir / f"{key}.parquet"
+
+        # ▶ **닫힌 파티션은 다시 쓰지 않는다** (2026-08-12)
+        #   예전에는 읽은 구간의 파티션을 조건 없이 전부 다시 썼다. 하루를
+        #   덧붙이려고 그 달을 통째로 다시 쓰고, 그때마다 해시가 바뀌어
+        #   **어제 실험이 가리키던 데이터가 사라졌다.** 사전등록이 가리키는
+        #   대상이 매일 달라지면 사전등록이 형식만 남는다.
+        #
+        #   같은 내용이면 건너뛰고, 다르면 두 갈래로 나눈다:
+        #     - 열린 파티션(오늘/이번 달) → 덧붙임이므로 다시 쓴다
+        #     - 닫힌 파티션 → **소급 변경**이다. 덮지 않고 보고한다.
+        #       원천이 늦게 채워지는 일은 실제로 있고, 그때 조용히 덮으면
+        #       과거 결과가 재현되지 않는데 아무도 모른다.
+        if path.exists():
+            try:
+                old = read_partition(spec, path)
+                same = content_hash(spec, sorted(old, key=spec.sort_key)) == chash
+            except Exception:      # noqa: BLE001 - 못 읽으면 다시 쓴다
+                same = False
+            if same:
+                skipped.append(key)
+                parts.append(_part_meta(spec, key, path, chunk, chash))
+                continue
+            if key != spec.open_partition:
+                drifted.append(key)
+                parts.append(_part_meta(spec, key, path, chunk, chash))
+                continue
+
         cells = {c: [spec.canon.get(c, lambda v: "" if v is None else str(v))(r.get(c))
                      for r in chunk]
                  for c in spec.columns}
-        path = out_dir / f"{key}.parquet"
         pq.write_table(
             pa.Table.from_pydict(cells,
                                  schema=pa.schema([(c, pa.string())
@@ -109,7 +137,35 @@ def write_partitions(spec: DatasetSpec, rows: list[dict], out_dir: Path) -> list
             "content_hash": content_hash(spec, chunk),
             "quality_status": partition_quality(spec, chunk),
         })
+    if skipped:
+        print(f"  파티션 건너뜀 {len(skipped)}개 (내용 동일): "
+              f"{', '.join(skipped[:6])}{' …' if len(skipped) > 6 else ''}",
+              flush=True)
+    if drifted:
+        # **조용히 넘어가지 않는다.** 닫힌 파티션이 달라졌다는 것은 과거가
+        # 바뀌었다는 뜻이고, 그건 사람이 새 버전으로 다시 굳힐지 정할 일이다.
+        print(f"  ⚠ 닫힌 파티션이 원천과 다르다 {len(drifted)}개 - **덮지 않았다**: "
+              f"{', '.join(drifted)}\n"
+              f"    원천이 늦게 채워졌을 수 있다. 과거를 바꾸려면 새 버전으로 "
+              f"다시 굳혀라 - 같은 버전을 덮으면 그 버전으로 돌린 실험이 "
+              f"재현되지 않는다.", flush=True)
     return parts
+
+
+def _part_meta(spec: DatasetSpec, key: str, path: Path,
+               chunk: list[dict], chash: str) -> dict:
+    """파일을 안 쓴 파티션의 메타. 쓴 것과 같은 모양이어야 매니페스트가 일관된다."""
+    dates = [r[spec.partition_column] for r in chunk]
+    dates = [d.date() if isinstance(d, datetime) else d for d in dates]
+    return {
+        "partition_key": key,
+        "object_path": path.relative_to(DATA_ROOT.parent).as_posix(),
+        "row_count": len(chunk),
+        "min_event_time": datetime.combine(min(dates), datetime.min.time(), tzinfo=KST),
+        "max_event_time": datetime.combine(max(dates), datetime.min.time(), tzinfo=KST),
+        "content_hash": chash,
+        "quality_status": partition_quality(spec, chunk),
+    }
 
 
 def read_partition(spec: DatasetSpec, path: Path) -> list[dict]:
@@ -286,6 +342,8 @@ def _check_build_verifies_roundtrip_before_registering():
     assert i_read < i_manifest, "왕복 검증이 등재 뒤에 온다"
     assert "왕복 해시 불일치" in src
     print("  등재 전 왕복 검증        OK")
+    if _check_closed_partition_is_not_rewritten() != "SKIPPED":
+        print("  닫힌 파티션 불변         OK")
 
 
 def _check_quality_is_computed_not_assumed():
@@ -300,13 +358,57 @@ def _check_quality_is_computed_not_assumed():
     print("  파티션 등급 계산         OK")
 
 
+
+def _check_closed_partition_is_not_rewritten():
+    """**닫힌 파티션은 다시 안 쓰고, 달라지면 덮지 않고 보고한다.** (2026-08-12)
+
+    예전에는 읽은 구간을 조건 없이 전부 다시 썼다. 하루를 덧붙이려고 그 달을
+    통째로 다시 쓰고 해시가 바뀌어, 어제 실험이 가리키던 데이터가 사라졌다.
+    """
+    import tempfile
+    from dataset_spec import SPECS
+
+    try:
+        import pyarrow  # noqa: F401  (파일을 실제로 써 봐야 하는 검사다)
+    except ModuleNotFoundError:
+        # **통과로 세지 않는다.** 못 돌린 검사를 OK 로 찍으면 다음 사람이
+        # 검증됐다고 믿는다 - 이 저장소가 반복해 막아 온 그 사고다.
+        print("  닫힌 파티션 불변         건너뜀 (pyarrow 없음 - 컨테이너에서 확인)")
+        return "SKIPPED"
+
+    spec = SPECS["krx-microstructure-daily/v1"]
+    # 서로 다른 두 날 - 하나는 닫힌 파티션, 하나는 오늘(열린 파티션)이 된다
+    rows = [{"instrument_id": f"i-{i}", "trade_date": date(2026, 8, 11),
+             "spread_bps": 1.5 + i, "depth_imbalance": None,
+             "order_flow_imbalance": 0.0, "trade_intensity": 10.0,
+             "realized_volatility": None, "quality_status": "PASS",
+             "observed_at": datetime(2026, 8, 11, tzinfo=KST)} for i in range(3)]
+    # ▶ 임시 디렉터리를 **DATA_ROOT 아래**에 만든다. `object_path` 가
+    #   `relative_to(DATA_ROOT.parent)` 라 저장소 밖이면 계산이 안 된다.
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=DATA_ROOT) as td:
+        out = Path(td)
+        first = write_partitions(spec, rows, out)
+        assert first, "첫 빌드가 파티션을 안 만들었다"
+        stamps = {p["partition_key"]: (out / f"{p['partition_key']}.parquet").stat().st_mtime_ns
+                  for p in first}
+
+        # 같은 입력으로 다시 - **파일이 안 바뀌어야 한다**
+        again = write_partitions(spec, rows, out)
+        for p in again:
+            f = out / f"{p['partition_key']}.parquet"
+            assert f.stat().st_mtime_ns == stamps[p["partition_key"]],                 f"{p['partition_key']} 를 다시 썼다 - 증분이 아니다"
+        # 해시도 그대로여야 어제 실험이 가리키던 대상이 남는다
+        assert [p["content_hash"] for p in again] ==                [p["content_hash"] for p in first]
+
+
 def _selfcheck() -> int:
     print(f"{BUILDER_VERSION} 자체 점검 (DB 없음)")
     _check_quality_is_computed_not_assumed()
     _check_hash_is_format_independent()
     _check_empty_is_not_built()
     _check_build_verifies_roundtrip_before_registering()
-    print("명세 빌더 3개 영역 통과. 실행은 --build <이름/버전>")
+    print("명세 빌더 4개 영역 통과. 실행은 --build <이름/버전>")
     return 0
 
 
