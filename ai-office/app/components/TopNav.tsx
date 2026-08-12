@@ -1,0 +1,78 @@
+import Link from "next/link";
+
+/**
+ * 상단 네비게이션. DESIGN.md 토큰만 쓰고 색·간격을 직접 박지 않는다.
+ *
+ * 아직 화면이 없는 항목은 링크가 아니라 disabled 버튼으로 둔다.
+ * 연결 안 된 걸 연결된 것처럼 보이지 않게 하는 게 이 앱의 원칙이다.
+ */
+
+export type NavKey = "dashboard" | "team-board" | "mandate" | "agent-logs";
+
+const ITEMS: { key: NavKey; label: string; href?: string }[] = [
+  { key: "dashboard", label: "Dashboard" },
+  { key: "team-board", label: "Team Board", href: "/" },
+  { key: "mandate", label: "Mandate Configuration", href: "/mandate" },
+  { key: "agent-logs", label: "Agent Logs" },
+];
+
+const BASE = "text-label-md font-label-md px-3 py-2 transition-colors duration-200";
+const IDLE = "text-secondary font-medium rounded hover:bg-surface-container";
+const ACTIVE = "text-primary font-bold border-b-2 border-primary rounded-t";
+
+export default function TopNav({ current }: { current: NavKey }) {
+  return (
+    <nav className="bg-surface-container-lowest border-b border-outline-variant flex justify-between items-center w-full px-margin-mobile md:px-margin-desktop h-16 shrink-0 z-50 font-sans">
+      <div className="flex items-center gap-6">
+        <div className="text-headline-md font-headline-md font-bold text-primary tracking-tight whitespace-nowrap">
+          Sentient Capital
+        </div>
+        <div className="hidden md:flex gap-4">
+          {ITEMS.map((item) => {
+            const cls = `${BASE} ${item.key === current ? ACTIVE : IDLE}`;
+            if (!item.href) {
+              return (
+                <button key={item.key} type="button" disabled title="준비 중" className={`${cls} opacity-45 cursor-not-allowed`}>
+                  {item.label}
+                </button>
+              );
+            }
+            return (
+              <Link
+                key={item.key}
+                href={item.href}
+                aria-current={item.key === current ? "page" : undefined}
+                className={cls}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          aria-label="알림"
+          className="p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors"
+        >
+          <span className="material-symbols-outlined" aria-hidden="true">notifications</span>
+        </button>
+        <button
+          type="button"
+          aria-label="설정"
+          className="p-2 text-on-surface-variant hover:bg-surface-container rounded-full transition-colors"
+        >
+          <span className="material-symbols-outlined" aria-hidden="true">settings</span>
+        </button>
+        <div
+          className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-sm shrink-0"
+          title="Chief Investment Officer"
+        >
+          CO
+        </div>
+      </div>
+    </nav>
+  );
+}

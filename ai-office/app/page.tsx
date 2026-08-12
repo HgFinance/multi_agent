@@ -3,6 +3,7 @@
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
+import TopNav from "./components/TopNav";
 import { Company, type Agent, type Snapshot } from "./game/sim";
 
 /**
@@ -174,11 +175,14 @@ export default function Home() {
   const selected = selectedId ? engine.agentById.get(selectedId) ?? null : null;
 
   return (
-    <main className="page-shell">
-      <div className="wrap">
-        <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
-      </div>
+    <div className="min-h-screen flex flex-col">
+      <TopNav current="team-board" />
+      <main className="page-shell">
+        <div className="wrap">
+          <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
+        </div>
+      </main>
       {selected ? <ProfileModal agent={selected} onClose={() => setSelectedId(null)} /> : null}
-    </main>
+    </div>
   );
 }
