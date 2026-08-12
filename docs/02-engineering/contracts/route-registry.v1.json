@@ -699,6 +699,10 @@
           "path": "/governance/v1/mandate-assistant/suggest"
         },
         {
+          "method": "POST",
+          "path": "/governance/v1/mandates"
+        },
+        {
           "method": "GET",
           "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
         },
@@ -818,6 +822,14 @@
         {
           "method": "GET",
           "path": "/health/ready"
+        },
+        {
+          "method": "POST",
+          "path": "/portfolio/v1/investor-profiles"
+        },
+        {
+          "method": "GET",
+          "path": "/portfolio/v1/investor-profiles/current"
         }
       ]
     },
@@ -923,6 +935,30 @@
         {
           "method": "GET",
           "path": "/ui/mandates/{mandate_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandates"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/mandates/by-fund/{fund_id}/current"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandates/{mandate_id}/versions"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/mandate-assistant/suggest"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/investor-profiles"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/investor-profiles/current"
         },
         {
           "method": "POST",

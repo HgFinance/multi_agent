@@ -297,6 +297,25 @@ class MandateVersionRepository:
         """
         raise NotImplementedError
 
+    def create_mandate(self, *, fund_id: str, owner_user_id: str, name: str) -> str:
+        """`governance.mandates` 부모 행을 만들고 mandate_id 를 준다.
+
+        2026-08-12 신설. 그 전까지 이 INSERT 는 `change_workflow.py` 의 자체 점검
+        코드 안에만 있어서 **최초 Mandate 를 만들 API 경로가 없었다** - Version 을
+        제안하는 모든 경로(`propose_version`, `change-requests`)가 mandate_id 를
+        인자로 받으므로, 온보딩 첫 사용자는 어디서도 시작할 수 없었다.
+
+        Version 을 여기서 만들지 않는다. Mandate 는 껍데기(fund·owner·name)이고
+        정책은 Version 이 갖는다 - 둘을 한 호출로 묶으면 정책 검증 실패 때
+        부모 행만 남거나, 롤백 범위가 두 테이블에 걸친다. 껍데기를 먼저 만들고
+        Version 은 기존 경로로 제안하게 두는 편이 실패 지점이 분명하다.
+
+        이미 같은 (fund_id, name) 이 있으면 `MandateAlreadyExistsError` 를 올린다
+        (`unique (fund_id, name)`). 조용히 기존 것을 돌려주지 않는다 - 호출자가
+        "새로 만들었다"와 "이미 있었다"를 구분할 수 있어야 한다.
+        """
+        raise NotImplementedError
+
     def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
         """fund_id -> mandate_id 목록. governance.mandates.unique(fund_id, name)이라
         한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있다 - 호출자가 개수로 판단한다
@@ -411,6 +430,22 @@ class FundNotFoundError(ValueError):
 
     확인 불가 시 저장을 막는다 — 개발 원칙 9(위험한 기능은 실패 시 확대가 아니라 차단).
     """
+
+
+class MandateAlreadyExistsError(ValueError):
+    """같은 (fund_id, name) Mandate 가 이미 있다 (`unique (fund_id, name)`).
+
+    기존 Mandate 를 조용히 돌려주지 않는 이유: 온보딩에서 이 호출이 두 번 오는
+    경우는 (a) 사용자가 버튼을 두 번 눌렀다 (b) 다른 사용자가 같은 이름을 썼다
+    둘 다 가능하고, 서버는 둘을 구분할 수 없다. "이미 있다 + 그 id" 를 알려주고
+    무엇을 할지는 호출자가 정하게 한다.
+
+    `mandate_id` 를 함께 실어 호출자가 재조회 없이 이어갈 수 있게 한다.
+    """
+
+    def __init__(self, message: str, *, mandate_id: str | None = None) -> None:
+        super().__init__(message)
+        self.mandate_id = mandate_id
 
 
 class MandateVersionService:

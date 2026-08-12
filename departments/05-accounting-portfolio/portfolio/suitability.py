@@ -226,6 +226,21 @@ def _risk_band(score: int) -> PortfolioRiskBand:
     }[score]
 
 
+def effective_risk_band(profile: InvestorProfile) -> PortfolioRiskBand:
+    """`min(mindset, experience)`를 등급으로 노출한다. 계산은 여기 하나뿐이다.
+
+    `POST /portfolio/v1/investor-profiles`가 응답에 이 값을 담는 이유는
+    USER_INPUT_API_SPEC.md 2.3이 **"화면이 재계산하지 않는다"**로 못박았기
+    때문이다. 화면이 같은 매핑을 따로 들고 있으면 한쪽만 바뀌었을 때
+    사용자가 보는 등급과 추천에 쓰인 등급이 갈라진다.
+
+    `recommend_portfolios()`가 쓰는 `_risk_band()`를 그대로 재사용한다 -
+    표를 복제하지 않는 것이 이 함수의 존재 이유다.
+    """
+
+    return _risk_band(profile.effective_risk_score)
+
+
 def _fit_score(profile: InvestorProfile, candidate: PortfolioCandidate) -> int:
     score = 70
     if _RISK_SCORE[candidate.risk_band] == profile.effective_risk_score:
@@ -339,5 +354,6 @@ __all__ = [
     "PortfolioRiskBand",
     "SuitabilityResult",
     "SuitabilityStatus",
+    "effective_risk_band",
     "recommend_portfolios",
 ]

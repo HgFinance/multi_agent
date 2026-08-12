@@ -110,6 +110,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 제안 프롬프트 버전. 위 회계 것과 겹쳤다 - 000150 으로 옮김
                 "20260811000150_proposal_prompt_versions.sql",
                 "20260812000100_quant_service_role.sql",
+                "20260812000200_accounting_investor_profiles.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
         for path, sql in self.files:
@@ -196,7 +197,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("eval_comparisons_append_only", migration)
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
-            "accounting": 18,
+            "accounting": 19,
             "audit": 22,
             # +1 (QA, 2026-08-09): eval_comparisons stores immutable Champion
             # comparison evidence across API/process restarts.

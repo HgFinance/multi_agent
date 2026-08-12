@@ -327,6 +327,15 @@ approval_rules.*, base_capital, currency
 
 ## 6. 선행·미해결
 
+> **2026-08-12 갱신** — §1.5, §2.3, §6.1 #2가 구현됐다.
+>
+> - **§1.5 `accounting.investor_profiles`** ✅ — `supabase/migrations/20260812000200_accounting_investor_profiles.sql`(이 문서 DDL 그대로) + `departments/05-accounting-portfolio/portfolio/investor_profile_repository.py`. version 할당은 `insert ... select max+1` 한 문장이라 조회·삽입 사이 경합이 없고, 겹치면 `unique(user_id, fund_id, version)`이 잡는다.
+> - **§2.3 `/portfolio/v1/investor-profiles`** ✅ — `departments/05-accounting-portfolio/api/app.py`(accounting-api와 같은 앱). §6.2 미확정 5번("portfolio-api를 어느 App으로 띄울지")은 **새 서비스를 만들지 않고 accounting-api에 실는 것**으로 정리했다 — §2.3이 이 Route를 회계/포트폴리오본부에 배정했고 그 본부 API가 이미 있다. `effective_risk_band`는 `suitability.effective_risk_band()`(신설 공개 함수)가 `_risk_band()` 표를 재사용한다.
+> - **§6.1 #2 BFF 프록시** ✅ — `by-fund`·`mandate-assistant`·`investor-profiles`(2개)에 더해 **Mandate 부모 행 생성**(`POST /ui/mandates`)과 `versions`까지 6개를 뚫었다. Registry 등재 완료, `app.openapi()`와 일치 확인.
+> - **새로 발견해 메운 공백**: `governance.mandates` INSERT가 `change_workflow.py` 자체 점검 코드 안에만 있어 **최초 Mandate를 만들 API가 없었다** — Version 제안 경로는 전부 `mandate_id`를 path로 받으므로 온보딩 첫 사용자는 시작할 수 없었다. `POST /governance/v1/mandates` 신설(DRAFT/v0 반환, `unique(fund_id,name)` 충돌은 409 + 기존 id).
+> - **§3.2 프리셋 9칸** — 수치는 여전히 동규님 확정 대기다. 구조와 검증만 `ai-office/app/lib/mandatePresets.ts`에 `PROVISIONAL`로 표시해 두었다(제약 검증 함수 포함). 잠정값은 스펙에 이미 있는 `min(mindset, experience)` 규칙에서만 끌어내 새 위험 판단을 만들지 않았고, **그 결과 9칸이 3등급으로 수렴한다** — 경험·성향이 `min()` 말고 다른 방식으로도 한도에 영향을 줘야 하는지가 동규님께 드리는 질문이다.
+> - **요청자 판정** — `apps/api/current_user.py`로 모았다. `X-User-Id`는 인증이 아니며(서명·만료 없음) 공개 배포 전 교체 대상이다.
+
 ### 6.1 반드시 선행돼야 하는 것
 
 1. ~~**§2.1 응답 확장**~~ — ✅ 완료(2026-08-06). 남은 건 프론트가 이 값을 실제로 써서 localStorage 우회를 걷어내는 작업(도현).
