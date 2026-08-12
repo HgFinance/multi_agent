@@ -661,6 +661,61 @@ def _feed_back_experiment_failures(conn, *, limit: int = 6) -> int:
     return len(fresh)
 
 
+_DATASET_MARK = Path.home() / ".factory_autopilot_dataset_day"
+_MS_DATASET = "krx-microstructure-daily/v1"
+
+
+def _refresh_datasets(*, dry_run: bool = False) -> int:
+    """하루 한 번: 새 날을 피처로 접고 **데이터셋 파티션을 다시 굳힌다.**
+
+    ▶ 왜 자동이어야 하나 (2026-08-12)
+      마이크로구조 데이터셋은 손으로 한 번 만들었다. 그대로 두면 **오늘부터
+      바로 낡는다** - 수집기는 매일 쌓는데 백테스트가 보는 스냅샷은 어제 것이다.
+      그리고 낡았다는 사실이 아무 데도 안 드러난다(매니페스트는 여전히
+      "있다" 고 말한다).
+
+    ▶ 왜 주기마다가 아니라 하루 한 번인가
+      자동 조종은 15분마다 돈다. 파티션을 그때마다 다시 굳히면 하루 96번
+      같은 파일을 쓴다. 일별 피처는 하루 한 번이면 충분하고, 그 이상은
+      디스크와 해시 재계산만 태운다.
+
+    ▶ 실패해도 공장은 돈다
+      데이터셋 갱신이 막혀도 가설·실험 주기는 이어져야 한다. 대신 조용히
+      넘기지 않는다 - 사유를 찍고 다음 날 다시 시도한다(표식을 안 남긴다).
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        if _DATASET_MARK.read_text(encoding="utf-8").strip() == today:
+            return 0
+    except OSError:
+        pass
+
+    quant = _ROOT / "departments" / "04-quant-backtest"
+    steps = (
+        ([sys.executable, "pipeline/microstructure_builder.py", "--build"]
+         + (["--dry-run"] if dry_run else []), "피처 접기"),
+        ([sys.executable, "pipeline/spec_dataset_builder.py", "--build", _MS_DATASET]
+         + (["--dry-run"] if dry_run else []), "파티션 굳히기"),
+    )
+    for argv, label in steps:
+        r = subprocess.run(argv, cwd=str(quant), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=3600)
+        tail = "\n".join((r.stdout or "").strip().splitlines()[-3:])
+        if r.returncode != 0:
+            print(f"  !! 데이터셋 {label} 실패(exit={r.returncode}):\n{tail}\n"
+                  f"     {(r.stderr or '').strip()[-200:]}", flush=True)
+            return 1
+        print(f"  데이터셋 {label}:\n{tail}", flush=True)
+
+    if not dry_run:
+        try:
+            _DATASET_MARK.write_text(today, encoding="utf-8")
+        except OSError as e:
+            # 표식을 못 남기면 다음 주기에 한 번 더 돈다 - 멱등이라 안전하다
+            print(f"      ⚠ 데이터셋 표식 기록 실패: {e}", flush=True)
+    return 0
+
+
 def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     """PROPOSED 가설을 실험 큐에 넣는다. 반환: 실패 수(0=정상).
 
@@ -743,6 +798,16 @@ def cycle(*, dry_run: bool = False) -> int:
         fails += _dispatch_experiments(dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 발주 실패: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
+        fails += 1
+
+    # ── 0.7 데이터셋 갱신(하루 한 번). 새 날을 피처로 접고 파티션을 다시 굳힌다.
+    #      **발주 뒤에 둔다** - 실험이 먼저 나가야 하고, 데이터셋 갱신이 오래
+    #      걸려도 그 주기의 가설·실험이 밀리지 않는다.
+    try:
+        fails += _refresh_datasets(dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 데이터셋 갱신 실패: {type(exc).__name__}: {str(exc)[:180]}",
+              flush=True)
         fails += 1
 
     # ── 리서치: 다음 기획안 ──
@@ -852,8 +917,32 @@ def _selfcheck() -> int:
     for token in ("EDGE_TYPE", "UNIVERSE_KEY", "COMPETING_CODES", "DATA_TABLES"):
         assert token in v, f"통제 어휘에 {token} 이 빠졌다"
     print("  통제 어휘 출처            OK")
-    print("자동 조종 2개 영역 통과. 실행은 --once / --loop")
+    _check_dataset_refresh_is_daily_and_ordered()
+    print("자동 조종 3개 영역 통과. 실행은 --once / --loop")
     return 0
+
+
+def _check_dataset_refresh_is_daily_and_ordered():
+    """데이터셋 갱신이 **하루 한 번**이고 **발주 뒤**인가.
+
+    자동 조종은 15분마다 돈다. 파티션을 그때마다 굳히면 하루 96번 같은 파일을
+    쓴다. 그리고 갱신이 발주보다 앞서면, 오래 걸리는 굳히기 때문에 그 주기의
+    실험이 통째로 밀린다.
+    """
+    import inspect
+
+    src = inspect.getsource(_refresh_datasets)
+    assert "_DATASET_MARK.read_text" in src and "return 0" in src, \
+        "하루 한 번 가드가 없다"
+    # 실패하면 표식을 남기지 않아야 다음 날 다시 시도한다
+    i_fail = src.index("데이터셋 {label} 실패")
+    i_mark = src.index("_DATASET_MARK.write_text")
+    assert i_fail < i_mark, "실패해도 표식을 남긴다 - 그러면 하루를 통째로 건너뛴다"
+
+    cyc = inspect.getsource(cycle)
+    assert cyc.index("_dispatch_experiments") < cyc.index("_refresh_datasets"), \
+        "데이터셋 갱신이 발주보다 앞선다 - 그 주기의 실험이 밀린다"
+    print("  데이터셋 갱신 주기·순서   OK")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -50,6 +50,15 @@ RUN pip install --no-cache-dir \
 # 무거워서 레이어를 나눈다 - 공장 상주 셋은 이걸 안 쓰지만 같은 이미지다.
 RUN pip install --no-cache-dir langgraph==0.6.7
 
+# ▶ openai: 부서 Worker 가 로컬 Ollama 의 **OpenAI 호환 엔드포인트**를 부를 때 쓴다
+#   (departments/employee_worker_runtime.py 의 default_worker_llm).
+#   이게 없으면 PORTFOLIO_WORKER_RUNTIME=ollama 로 두어도 모든 Worker 가
+#   `ModuleNotFoundError: No module named 'openai'` 로 **0.0초 만에** 실패하고,
+#   부서는 DEGRADED, 파이프라인은 HOLD 로 떨어진다 - 2026-08-12 실측.
+#   Ollama 를 안 쓰는 것처럼 보이는 게 아니라 "LLM 이 응답을 안 준다"로 보여
+#   원인을 모델 쪽에서 찾게 된다. 버전은 risk/audit 이미지와 같은 핀을 쓴다.
+RUN pip install --no-cache-dir openai==2.35.1
+
 WORKDIR /app
 
 # 저장소 경로 구조를 그대로 유지한다 - 모듈들이 Path(__file__) 상대로
@@ -58,6 +67,14 @@ COPY departments/01-research/collectors ./departments/01-research/collectors
 COPY departments/01-research/contracts  ./departments/01-research/contracts
 COPY departments/01-research/repository ./departments/01-research/repository
 COPY departments/01-research/factory    ./departments/01-research/factory
+# ▶ 이 한 줄이 없어서 **포트폴리오 파이프라인이 통째로 죽었다** (2026-08-12 실측).
+#   orchestration/workflows/portfolio_recommendation.py 의 _MODULE_PATHS 가 부서
+#   7개의 employee_workers 를 **파일 경로로** 로드하는데, 리서치 것만 이미지에
+#   없어서 첫 단계(research_fanout)에서 FileNotFoundError 로 끝났다.
+#   부서 폴더를 통째로 복사하지 않고 하위 디렉터리만 골라 담는 구조라 이렇게 빠진다.
+#   이 파일이 필요로 하는 것은 departments/employee_worker_runtime.py 하나뿐이다
+#   (아래에서 이미 복사한다) - agents/·evidence/ 는 안 딸려온다.
+COPY departments/01-research/employee_workers.py ./departments/01-research/employee_workers.py
 COPY departments/04-quant-backtest      ./departments/04-quant-backtest
 COPY apps/api                           ./apps/api
 # orchestration/canonical_profiles.py 가 정본 부서 이름표다 - kanban_board 가

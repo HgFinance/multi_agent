@@ -895,6 +895,10 @@ services:
       # 수확 멱등 표식·반려 이력이 재시작을 넘어 남아야 한다. 컨테이너가
       # 지워지면 같은 카드를 다시 수확하고 같은 반려를 다시 싣는다.
       - factory_state:/root
+      # ▶ 자동 조종이 하루 한 번 파티션을 다시 굳힌다(0.7단계). 이게 없으면
+      #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
+      #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
+      - ./quant-data:/app/quant-data
 
   factory-experiment-worker:
     image: hedgefund-factory:latest
