@@ -51,6 +51,15 @@ ROOT = Path(__file__).resolve().parents[2]
 CEO_PROFILE = canonical_profile_for_department("ceo")
 QA_PROFILE = canonical_profile_for_department("qa")
 
+# `canonical_profiles.py`는 쓰기 경로(신규 Task 생성)에서 별칭을 의도적으로
+# 거부한다 - 오타나 폐기 이름이 Hermes에 도달하기 전에 실패해야 하기 때문이다
+# (departments/00-ceo-office/hermes/SOUL.md: "Never write... legacy aliases
+# such as ai-qa-audit-department"). 이 Read Model은 그 규칙이 생기기 전(또는
+# 다른 파이프라인)에 만들어져 이미 공유 판에 있는 과거 Task까지 읽어야 하므로,
+# 쓰기 경로와 달리 알려진 폐기 별칭을 관대하게 인식한다 - 신규 생성을 허용하는
+# 게 아니라 이미 존재하는 데이터를 오분류하지 않기 위해서다.
+_LEGACY_QA_ALIASES = frozenset({"ai-qa-audit-department"})
+
 # `build_root_body`가 사용자 질의 앞에 붙이는 구분자. 이 표시가 있는 Task만
 # 화면에 노출할 CEO Root로 인정한다.
 _USER_REQUEST_HEADING = "## User request"
@@ -61,7 +70,6 @@ ROLE_PRIMARY = "primary"
 ROLE_QA = "qa"
 ROLE_SYNTHESIS = "synthesis"
 ROLE_USER_INPUT = "user_input"
-ROLE_SUPERVISOR = "supervisor"
 
 # 워크플로 단위 상태. Kanban Task 하나의 status가 아니라 Root 그래프 전체의 상태다.
 STATUS_QUEUED = "queued"
@@ -345,12 +353,8 @@ class WorkflowNode:
             return self.profile
 
     @property
-    def is_supervisor(self) -> bool:
-        return self.profile == CEO_PROFILE and SUPERVISOR_MARKER in self.body
-
-    @property
     def is_qa(self) -> bool:
-        return self.profile == QA_PROFILE
+        return self.profile == QA_PROFILE or self.profile in _LEGACY_QA_ALIASES
 
     @property
     def terminal(self) -> bool:
@@ -369,16 +373,30 @@ class WorkflowNode:
         return self.status in FAILURE_OUTCOMES or self.run_outcome in FAILURE_OUTCOMES
 
     def role(self, *, root_task_id: str) -> str:
+        """`SUPERVISOR_MARKER` 문자열이 아니라 그래프 구조로 판정한다.
+
+        실측(2026-08-12, 실 CEO Kanban 워크플로): CEO 자신의 LLM 턴이 부서
+        선택과 동시에 QA·Synthesis Task까지 한 번에 만들어두는 경우, 그 Task들
+        body에는 `orchestration/adapters/ceo_supervisor.py`(별도 Fallback 데몬)
+        가 붙이는 `SUPERVISOR_MARKER`가 없다 - 데몬은 CEO 턴이 부서를 못 고르거나
+        (REQUEST_USER_INPUT) 재시도가 필요할 때만 개입한다. 마커 유무로 분류하면
+        데몬 미개입 워크플로에서 Synthesis를 못 찾아 `/result`가 영원히 null이
+        된다.
+
+        CEO는 자기 자신에게 분석 업무를 배정하지 않는다 - `ceo-agent`가
+        assignee인 root 이하 Task는 항상 제어/산출 Task다. `parents`가 root
+        하나뿐이면 대기용 제어 Task(REQUEST_USER_INPUT류), root 밖의 Task에도
+        의존하면 그 하위 결과를 모아 쓰는 Synthesis다.
+        """
+
         if self.task_id == root_task_id:
             return ROLE_ROOT
         if self.is_qa:
             return ROLE_QA
-        if self.is_supervisor:
-            if "action=SYNTHESIZE" in self.body:
+        if self.profile == CEO_PROFILE:
+            if set(self.parents) - {root_task_id}:
                 return ROLE_SYNTHESIS
-            if "action=REQUEST_USER_INPUT" in self.body:
-                return ROLE_USER_INPUT
-            return ROLE_SUPERVISOR
+            return ROLE_USER_INPUT
         return ROLE_PRIMARY
 
 
@@ -403,12 +421,12 @@ class Workflow:
 
     @property
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
-        """실제 분석을 수행하는 부서 Task. Supervisor 제어 Task와 QA는 뺀다."""
+        """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
         return tuple(
             node
             for node in self.descendants
-            if not node.is_supervisor and not node.is_qa
+            if node.role(root_task_id=self.root_task_id) == ROLE_PRIMARY
         )
 
     @property
@@ -652,7 +670,6 @@ __all__ = [
     "ROLE_PRIMARY",
     "ROLE_QA",
     "ROLE_ROOT",
-    "ROLE_SUPERVISOR",
     "ROLE_SYNTHESIS",
     "ROLE_USER_INPUT",
     "STATUS_ARCHIVED",
