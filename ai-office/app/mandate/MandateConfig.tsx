@@ -166,7 +166,7 @@ export default function MandateConfig() {
               </div>
               <h1 className="text-headline-lg font-headline-lg text-on-surface font-bold tracking-tight">운용 지침 설정</h1>
               <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-2xl">
-                기본 운용 파라미터를 확인하고 저장하세요. 복합적이거나 세밀한 조건은 AI 어시스턴트와의 대화를 통해 정교화되며, 최종
+                기본 운용 파라미터를 확인하고 저장하세요.<br />복합적이거나 세밀한 조건은 AI 어시스턴트와의 대화를 통해 정교화되며, 최종
                 거버넌스 버전은 제출 후 생성돼요.
               </p>
             </div>
@@ -188,7 +188,7 @@ export default function MandateConfig() {
                       value={draft.objective}
                       onChange={(event) => patch("objective", event.target.value)}
                       className="w-full h-32 p-4 bg-surface rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-md font-body-md resize-none shadow-inner"
-                      placeholder="Ex) 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어."
+                      placeholder="예: 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어."
                     />
                   </label>
                   <p className="text-xs text-on-surface-variant mt-2">구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다.</p>
@@ -468,7 +468,7 @@ export default function MandateConfig() {
                   }
                 }}
                 aria-label="AI 어시스턴트 답변"
-                placeholder="자연어로 답변을 입력하세요..."
+                placeholder="답변을 입력하세요..."
                 className="flex-1 min-w-0 bg-surface-container-lowest border border-outline-variant rounded-lg p-2 text-body-sm font-body-sm resize-none h-[44px] focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none"
               />
               <button

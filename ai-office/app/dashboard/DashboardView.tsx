@@ -81,7 +81,7 @@ export default function DashboardView() {
         {/* ── 요약 헤더 ─────────────────────────────────── */}
         <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-6 flex justify-between items-start gap-gutter flex-wrap">
           <div className="min-w-0">
-            <p className="text-label-md font-label-md text-on-surface-variant uppercase">Today</p>
+            <p className="text-label-md font-label-md text-on-surface-variant uppercase">Today Overview</p>
             <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
               오늘 회사가 어떻게 움직이는지 <span className="bg-secondary-container px-2">한눈에</span> 보여드려요
             </h1>

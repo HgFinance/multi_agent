@@ -150,6 +150,8 @@ export default function RightRail({
       {/* ── live.feed ───────────────────────────────────── */}
       <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col shrink-0">
         <PanelBar tone="secondary" icon="bolt" title="live.feed">
+          <span className="material-symbols-outlined text-[16px]">minimize</span>
+          <span className="material-symbols-outlined text-[16px]">crop_square</span>
           <span className="material-symbols-outlined text-[16px]">close</span>
         </PanelBar>
         {snap.meetingTitle ? (
@@ -173,7 +175,9 @@ export default function RightRail({
       {/* ── staff.roster — 남은 높이를 다 먹고 그 안에서 스크롤한다 ── */}
       <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col flex-1 min-h-40">
         <PanelBar tone="secondary" icon="groups" title="staff.roster">
-          <span className="material-symbols-outlined text-[16px]">search</span>
+          <span className="material-symbols-outlined text-[16px]">minimize</span>
+          <span className="material-symbols-outlined text-[16px]">crop_square</span>
+          <span className="material-symbols-outlined text-[16px]">close</span>
         </PanelBar>
         {/* min-h-0 이 없으면 flex 자식이 안 줄어들어 스크롤이 안 생긴다 */}
         <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4" aria-label="직원 명단">
