@@ -153,9 +153,9 @@ export default function MandateConfig() {
   return (
     <div className="flex flex-1 overflow-hidden font-sans">
       <main className="flex-1 flex flex-col md:flex-row gap-gutter p-margin-mobile md:p-margin-desktop overflow-y-auto max-w-app mx-auto w-full">
-        {/* ── 좌: 설정 폼 ─────────────────────────────────── */}
-        <div className="flex-1 min-w-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
-          <header className="border-b border-outline-variant p-6 bg-surface-bright flex justify-between items-start gap-4">
+        {/* ── 좌: 헤더(카드 밖, 바탕에 그대로) + 설정 폼 카드 ── */}
+        <div className="flex-1 min-w-0 flex flex-col gap-gutter min-h-0">
+          <header className="flex justify-between items-start gap-4 shrink-0">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-label-md font-label-md text-secondary mb-2 uppercase flex-wrap">
                 <span>User Input</span>
@@ -176,6 +176,7 @@ export default function MandateConfig() {
             </div>
           </header>
 
+          <div className="flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
           <div className="p-6 space-y-10 overflow-y-auto">
             {/* 1. 목표와 위험 성향 */}
             <section>
@@ -406,6 +407,7 @@ export default function MandateConfig() {
               <p role="status" className="w-full text-xs text-on-surface-variant">{notice}</p>
             ) : null}
           </footer>
+          </div>
         </div>
 
         {/* ── 우: AI 어시스턴트 ────────────────────────────── */}

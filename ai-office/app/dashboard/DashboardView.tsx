@@ -78,8 +78,8 @@ export default function DashboardView() {
   return (
     <>
       <main className="flex-1 w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col gap-gutter">
-        {/* ── 요약 헤더 ─────────────────────────────────── */}
-        <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-6 flex justify-between items-start gap-gutter flex-wrap">
+        {/* ── 요약 헤더 — 카드에 올리지 않고 바탕에 그대로 둔다 ── */}
+        <section className="flex justify-between items-start gap-gutter flex-wrap">
           <div className="min-w-0">
             <p className="text-label-md font-label-md text-on-surface-variant uppercase">Today Overview</p>
             <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
