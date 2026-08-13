@@ -52,11 +52,6 @@ COPY scripts.py ./scripts.py
 # 공유하므로 여기 둔다(계획서 3.1 "같은 본부는 하나의 Code Image").
 RUN pip install --no-cache-dir langgraph==0.6.7
 
-# KRX 밸류에이션 축 (2026-08-13 재일 결정 "쓸만한 MCP 싹다") - PER/PBR/배당·
-# 시총·외국인 한도소진률. pandas 를 끌고 오지만(+~100MB) 상대가치 비교가
-# 한 번의 도구 호출이 되는 값을 한다. 소비자는 ls-mcp 의 krx_* 도구.
-RUN pip install --no-cache-dir pykrx==1.2.8
-
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "collectors/news_watch_service.py"]

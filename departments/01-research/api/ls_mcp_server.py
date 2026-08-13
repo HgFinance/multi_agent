@@ -57,7 +57,8 @@ def _catalog() -> dict:
 
 # 큐레이션 표 - TR 코드 -> 실행 도구 이름. 카탈로그 검색 결과에 같이 실린다.
 CURATED = {"t1717": "investor_flow", "t1927": "short_selling",
-           "t1602": "market_investor_flow_intraday"}
+           "t1602": "market_investor_flow_intraday",
+           "t3320": "stock_fundamental"}
 
 # LS 투자자 코드 체계 (t1717 tjjXXXX·t1602 sv_XX 공통 - 문서 필드표 실측)
 TJJ_CODES = {
@@ -242,98 +243,35 @@ def market_investor_flow_intraday(upcode: str = "001", count: int = 30) -> dict:
     return out
 
 
-# ── KRX 밸류에이션 (pykrx) ──────────────────────────────────────────────────
-KRX_DAILY_CAP = int(os.environ.get("MCP_KRX_DAILY_CAP", "500"))
+def stock_fundamental(corp: str) -> dict:
+    """종목 밸류에이션·수익성 요약 (LS t3320, FnGuide 데이터) - 무료.
 
-
-def _krx_creds_guard() -> None:
-    """pykrx 1.2.x 는 KRX 정보데이터시스템 로그인(무료 계정)을 요구한다.
-
-    없으면 pykrx 가 pandas IndexError 로 어지럽게 죽는다(실측 2026-08-13) -
-    먼저 걸러 정직한 안내를 준다. data.krx.co.kr 무료 가입 후 .env 에
-    KRX_ID/KRX_PW 를 넣으면 산다.
+    PER/PBR/EPS/BPS/ROE/ROA/EV·EBITDA + 당기예상(t_per/t_eps) + 외인비율·시총.
+    KRX 정보데이터시스템이 유료화(2025-12)된 뒤 남은 무료 정식 경로다
+    (재일 확인 2026-08-13 - pykrx 는 유료 회원 벽에 막혀 폐기).
+    확정 결산 기준이라 이익 급변 구간에서는 t_per(예상)와 같이 읽어라.
     """
-    if not (os.environ.get("KRX_ID", "").strip()
-            and os.environ.get("KRX_PW", "").strip()):
-        raise RuntimeError(
-            "KRX_ID/KRX_PW 가 없다 - pykrx(KRX 통계)는 data.krx.co.kr 무료 "
-            "로그인이 필요하다. .env 에 계정을 넣기 전까지 이 도구는 못 쓴다. "
-            "PER/PBR 개별 검증은 dart_financials + 시세로 대신할 것.")
-
-
-def _krx_day() -> str:
-    from pykrx.stock import get_nearest_business_day_in_a_week
-    return get_nearest_business_day_in_a_week()
-
-
-def _df_records(df, index_name: str, limit: int) -> list[dict]:
-    df = df.reset_index().rename(columns={df.index.name or "index": index_name})
-    return json.loads(df.head(limit).to_json(orient="records", force_ascii=False))
-
-
-def krx_fundamental(corp: str = "", date: str = "", limit: int = 50) -> dict:
-    """KRX 밸류에이션 - PER/PBR/EPS/BPS/배당수익률(DIV). 상대가치 비교의 재료.
-
-    corp 지정 시 그 종목, 비우면 **전 시장 횡단면**(비교·스크리닝용, limit 행).
-    ⚠ KRX 웹 기반 참고치 - 재무 반영이 늦다(연보고서 검토기간 후). 정밀
-    검증은 dart_financials 원값으로.
-    """
-    from pykrx.stock import get_market_fundamental
-    _krx_creds_guard()
-    _krx_creds_guard()
-    _krx_creds_guard()
-    from external_sources import spend as _sp
-    _sp("krx", KRX_DAILY_CAP)
-    day = (date or _krx_day()).replace("-", "")
-    if corp.strip():
-        resolved = _shcode_of(corp)
-        df = get_market_fundamental(day, day, resolved["stock_code"])
-        items = _df_records(df, "date", 5)
-        out = {"mode": "single", "corp": resolved, "date": day, "items": items}
-    else:
-        df = get_market_fundamental(day, market="ALL")
-        n = max(1, min(int(limit), 3000))
-        items = _df_records(df.sort_values("PER"), "ticker", n)
-        out = {"mode": "cross_section", "date": day, "count": len(items),
-               "sorted_by": "PER asc", "items": items}
-    out["note"] = "KRX 참고치 - 백테스트·사후 채점 인용 금지"
-    out["citation"] = _snapshot("krx_fundamental",
-                               {"corp": corp, "date": date, "limit": limit}, out)
-    return out
-
-
-def krx_marketcap(corp: str, date: str = "") -> dict:
-    """종목 시가총액·거래대금·상장주식수·외국인보유주식수 (KRX 참고치)."""
-    from pykrx.stock import get_market_cap
-    from external_sources import spend as _sp
-    _sp("krx", KRX_DAILY_CAP)
     resolved = _shcode_of(corp)
-    day = (date or _krx_day()).replace("-", "")
-    df = get_market_cap(day, day, resolved["stock_code"])
-    out = {"corp": resolved, "date": day,
-           "items": _df_records(df, "date", 5),
-           "note": "KRX 참고치"}
-    out["citation"] = _snapshot("krx_marketcap", {"corp": corp, "date": date}, out)
-    return out
-
-
-def krx_foreign_ownership(corp: str, days: int = 10) -> dict:
-    """종목 외국인 보유(스톡) 추이 - 한도소진률·보유수량. LS investor_flow 의
-    플로우(순매수)와 상호보완: 플로우가 쌓인 결과가 이 스톡이다."""
-    from pykrx.stock import get_exhaustion_rates_of_foreign_investment
-    from external_sources import spend as _sp
-    _sp("krx", KRX_DAILY_CAP)
-    days = max(1, min(int(days), 60))
-    resolved = _shcode_of(corp)
-    end = date_cls.today()
-    start = end - timedelta(days=days * 2 + 5)
-    df = get_exhaustion_rates_of_foreign_investment(
-        start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), resolved["stock_code"])
-    out = {"corp": resolved, "count": min(len(df), days),
-           "items": _df_records(df.tail(days), "date", days),
-           "note": "KRX 참고치 - 한도소진률(%)·보유수량(주)"}
-    out["citation"] = _snapshot("krx_foreign_ownership",
-                                {"corp": corp, "days": days}, out)
+    spend("ls", LS_DAILY_CAP)
+    body = _client().call_tr(
+        path="/stock/investinfo", tr_cd="t3320",
+        in_block={"t3320InBlock": {"gicode": resolved["stock_code"]}},
+        rate_limit_per_sec=1.0)
+    ob = body.get("t3320OutBlock") or {}
+    ob1 = body.get("t3320OutBlock1") or {}
+    out = {"corp": resolved, "결산년월": ob1.get("gsym"),
+           "PER": ob1.get("per"), "PBR": ob1.get("pbr"),
+           "EPS": ob1.get("eps"), "BPS": ob1.get("bps"),
+           "ROE": ob1.get("roe"), "ROA": ob1.get("roa"),
+           "EV_EBITDA": ob1.get("evebitda"), "PEG": ob1.get("peg"),
+           "예상PER": ob1.get("t_per"), "예상EPS": ob1.get("t_eps"),
+           "외국인비율_pct": ob.get("foreignratio"),
+           "시가총액_억원": ob.get("sigavalue"),
+           "업종": ob.get("upgubunnm"), "시장": ob.get("marketnm"),
+           "tr": "t3320", "queried_at": datetime.now().isoformat(),
+           "note": "FnGuide 확정결산 기준 - 백테스트·사후 채점 인용 금지. "
+                   "업종 상대비교는 종목별로 이 도구를 반복 호출(초당 1건)."}
+    out["citation"] = _snapshot("stock_fundamental", {"corp": corp}, out)
     return out
 
 
@@ -374,20 +312,14 @@ def build_server(host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="시장 전체(코스피 001/코스닥 301)의 장중 시간대별 투자자 순매수. "
                     "종목 단위가 아니다 - 종목은 investor_flow.")(market_investor_flow_intraday)
     server.tool(
+        name="stock_fundamental",
+        description="종목 밸류에이션 요약(FnGuide): PER/PBR/EPS/BPS/ROE/ROA/"
+                    "EV·EBITDA/예상PER + 외인비율·시총. 업종 상대비교는 종목별 "
+                    "반복 호출. 무료(LS).")(stock_fundamental)
+    server.tool(
         name="ls_tr_spec",
         description="TR 하나의 전체 명세(요청·응답 필드 한글 설명). 큐레이션 없는 "
                     "TR 을 이해하거나 응답 컬럼 뜻을 확인할 때.")(ls_tr_spec)
-    server.tool(
-        name="krx_fundamental",
-        description="KRX 밸류에이션 PER/PBR/EPS/BPS/배당수익률. corp 비우면 전 시장 "
-                    "횡단면(상대가치 비교·스크리닝). KRX 참고치 - 정밀 검증은 dart_financials.")(krx_fundamental)
-    server.tool(
-        name="krx_marketcap",
-        description="종목 시가총액·상장주식수·외국인보유주식수 (KRX 참고치).")(krx_marketcap)
-    server.tool(
-        name="krx_foreign_ownership",
-        description="외국인 보유 스톡 추이(한도소진률%·보유수량) - investor_flow(플로우)와 "
-                    "상호보완.")(krx_foreign_ownership)
     server.tool(
         name="ls_budget",
         description="오늘 외부 조회 예산 사용량. 소진되면 호출이 거부된다.")(ls_budget)

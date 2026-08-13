@@ -615,9 +615,6 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
-      # pykrx(밸류에이션) - KRX 정보데이터시스템 무료 로그인 필요 (1.2.x 정책)
-      KRX_ID: ${KRX_ID:-}
-      KRX_PW: ${KRX_PW:-}
       MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
       MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
     volumes:
