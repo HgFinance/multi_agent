@@ -303,6 +303,20 @@ def news_search(query: str, display: int = 10, sort: str = "date") -> dict:
 
 
 # ── 등록 ────────────────────────────────────────────────────────────────────
+def record_citations(citations: list, note: str = "") -> dict:
+    """답변에 **실제로 인용한** 조회의 citation 해시를 표시한다 (cache-on-cite v2).
+
+    모든 호출은 이미 스냅샷된다 - 이 도구는 그중 어느 것이 최종 답변의 근거가
+    됐는지를 append-only 로 남겨, QA 가 '읽은 것'과 '인용한 것'을 구분해
+    재검증할 수 있게 한다. 답변을 마치기 직전에 한 번 호출하라.
+    """
+    marks = [str(c).strip() for c in (citations or []) if str(c).strip()]
+    rec = {"marked": len(marks), "citations": marks, "note": note[:500]}
+    rec["citation"] = _snapshot("citation_mark", {"note": note[:200]},
+                                {"type": "citation_mark", "hashes": marks})
+    return rec
+
+
 def register_external_tools(server) -> None:
     """mcp_server.build_server() 가 부른다. 여기 도구는 전부 읽기 전용이다."""
     server.tool(
@@ -329,6 +343,10 @@ def register_external_tools(server) -> None:
     server.tool(
         name="external_budget",
         description="오늘 외부 조회 예산 사용량(DART·네이버). 소진되면 호출이 거부된다.")(budget_state)
+    server.tool(
+        name="record_citations",
+        description="답변에 실제로 인용한 조회의 citation 해시 목록을 표시한다. "
+                    "답변을 마치기 직전 한 번 호출 - QA 재검증의 근거가 된다.")(record_citations)
 
 
 # ── 자체 점검 (네트워크 없음) ───────────────────────────────────────────────

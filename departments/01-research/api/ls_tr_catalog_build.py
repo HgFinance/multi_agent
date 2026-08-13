@@ -70,7 +70,7 @@ def parse_doc(path: Path) -> list[dict]:
                 "protocol": protocol, "path": api_path,
                 "rate_per_sec": (None if rate in ("-", "") else rate),
                 "doc": str(path.relative_to(DOCS.parents[1])).replace("\\", "/"),
-                "in_params": [], "out_fields": 0,
+                "in_params": [], "out_params": [], "out_fields": 0,
             }
             rate_by_anchor[m.group("anchor")] = rate
 
@@ -98,6 +98,12 @@ def parse_doc(path: Path) -> list[dict]:
                 "type": fm.group("type"), "len": fm.group("len"),
                 "required": fm.group("req") == "Y"})
         elif block == "out":
+            # 응답 필드 명세도 통째로 남긴다 - "명세 모르면 찾아서 정리해서 참고"
+            # (재일 지시 2026-08-13). 큐레이션 도구가 sv_08 같은 코드 컬럼을
+            # 사람이 읽을 이름으로 바꿀 유일한 근거가 이 표다.
+            trs[current]["out_params"].append({
+                "name": fm.group("name"), "desc": fm.group("desc"),
+                "type": fm.group("type")})
             trs[current]["out_fields"] += 1
     return list(trs.values())
 

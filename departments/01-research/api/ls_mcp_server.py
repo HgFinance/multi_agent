@@ -56,7 +56,16 @@ def _catalog() -> dict:
 
 
 # 큐레이션 표 - TR 코드 -> 실행 도구 이름. 카탈로그 검색 결과에 같이 실린다.
-CURATED = {"t1717": "investor_flow"}
+CURATED = {"t1717": "investor_flow", "t1927": "short_selling",
+           "t1602": "market_investor_flow_intraday"}
+
+# LS 투자자 코드 체계 (t1717 tjjXXXX·t1602 sv_XX 공통 - 문서 필드표 실측)
+TJJ_CODES = {
+    "00": "사모펀드", "01": "증권", "02": "보험", "03": "투신", "04": "은행",
+    "05": "종금", "06": "기금", "07": "기타법인", "08": "개인",
+    "09": "등록외국인", "10": "미등록외국인", "11": "국가외",
+    "16": "외인계", "17": "외국인", "18": "기관계",
+}
 
 
 def _shcode_of(query: str) -> dict:
@@ -155,6 +164,84 @@ def investor_flow(corp: str, days: int = 10) -> dict:
     return out
 
 
+def ls_tr_spec(tr_code: str) -> dict:
+    """TR 하나의 전체 명세 - 요청·응답 필드의 한글 설명까지 (문서 정제분).
+
+    큐레이션 도구가 없는 TR 을 이해하거나, 응답 컬럼의 뜻을 확인할 때 쓴다.
+    ⚠ 실측 주의 2건: 응답 블록·필드 이름이 문서와 다를 수 있다
+    (t1717 은 OutBlock 이 곧 배열, t1602 는 svolume_XX 가 실제로는 sv_XX).
+    """
+    code = tr_code.strip().lower()
+    for e in _catalog()["trs"]:
+        if e["tr_code"].lower() == code:
+            out = {**e, "executable_tool": CURATED.get(e["tr_code"])}
+            out["citation"] = _snapshot("ls_tr_spec", {"tr_code": tr_code}, {
+                "tr_code": e["tr_code"], "fields": e["out_fields"]})
+            return out
+    raise RuntimeError(f"카탈로그에 없는 TR: {tr_code} - ls_tr_catalog 로 검색할 것")
+
+
+def short_selling(corp: str, days: int = 10) -> dict:
+    """종목 공매도 일별추이 (LS t1927) - 수량·대금·거래비중·평균단가·누적."""
+    days = max(1, min(int(days), 60))
+    resolved = _shcode_of(corp)
+    spend("ls", LS_DAILY_CAP)
+    end = date.today()
+    start = end - timedelta(days=days * 2 + 5)
+    body = _client().call_tr(
+        path="/stock/etc", tr_cd="t1927",
+        in_block={"t1927InBlock": {
+            "shcode": resolved["stock_code"], "date": " ",
+            "sdate": start.strftime("%Y%m%d"), "edate": end.strftime("%Y%m%d")}},
+        rate_limit_per_sec=1.0)
+    rows = body.get("t1927OutBlock1") or []
+    items = [{"date": r.get("date"), "close": r.get("price"),
+              "change_pct": r.get("diff"), "volume": r.get("volume"),
+              "공매도수량": r.get("gm_vo"), "공매도대금": r.get("gm_va"),
+              "공매도비중_pct": r.get("gm_per"), "평균공매도단가": r.get("gm_avg"),
+              "누적공매도수량": r.get("gm_vo_sum"),
+              "업틱룰적용수량": r.get("gm_vo1")} for r in rows[:days]]
+    out = {"corp": resolved, "count": len(items), "items": items, "tr": "t1927",
+           "queried_at": datetime.now().isoformat(),
+           "note": "지금 시점 조회값 - 백테스트·사후 채점 인용 금지"}
+    out["citation"] = _snapshot("short_selling", {"corp": corp, "days": days}, out)
+    return out
+
+
+def market_investor_flow_intraday(upcode: str = "001", count: int = 30) -> dict:
+    """시장 전체의 장중 시간대별 투자자 순매수 (LS t1602). 종목 단위가 아니다.
+
+    upcode: 업종코드 - 001 코스피종합, 301 코스닥종합 (LS 업종 관례).
+    ⚠ 실측 전제(2026-08-13): market='1'·gubun1='1'(수량) 조합으로 관측 확인.
+      응답 필드는 문서(svolume_XX)와 달리 sv_XX 로 온다. 값은 순매수 수량 계열.
+    """
+    n = max(1, min(int(count), 120))
+    spend("ls", LS_DAILY_CAP)
+    body = _client().call_tr(
+        path="/stock/investor", tr_cd="t1602",
+        in_block={"t1602InBlock": {
+            "market": "1", "upcode": upcode, "gubun1": "1", "gubun2": "1",
+            "cts_time": " ", "cts_idx": 0, "cnt": n, "gubun3": " ",
+            "exchgubun": "0"}},
+        rate_limit_per_sec=1.0)
+    rows = body.get("t1602OutBlock1") or []
+    items = []
+    for r in rows[:n]:
+        item = {"time": r.get("time")}
+        for code, label in TJJ_CODES.items():
+            v = r.get(f"sv_{code}")
+            if v is not None:
+                item[label] = v
+        items.append(item)
+    out = {"upcode": upcode, "unit": "순매수(수량 계열, gubun1=1 실측 전제)",
+           "count": len(items), "items": items, "tr": "t1602",
+           "queried_at": datetime.now().isoformat(),
+           "note": "지금 시점 조회값 - 백테스트·사후 채점 인용 금지"}
+    out["citation"] = _snapshot(
+        "market_investor_flow_intraday", {"upcode": upcode, "count": count}, out)
+    return out
+
+
 def ls_budget() -> dict:
     from external_sources import budget_state
     return budget_state()
@@ -183,6 +270,18 @@ def build_server(host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         name="investor_flow",
         description="종목 수급 - 일자별 개인/기관/외인 순매수량(주). 기업명 또는 "
                     "6자리 코드. 지금 시점 조회값이므로 과거 재현 인용 금지.")(investor_flow)
+    server.tool(
+        name="short_selling",
+        description="종목 공매도 일별추이 - 수량·대금·거래비중(%)·평균단가·누적. "
+                    "기업명 또는 6자리 코드.")(short_selling)
+    server.tool(
+        name="market_investor_flow_intraday",
+        description="시장 전체(코스피 001/코스닥 301)의 장중 시간대별 투자자 순매수. "
+                    "종목 단위가 아니다 - 종목은 investor_flow.")(market_investor_flow_intraday)
+    server.tool(
+        name="ls_tr_spec",
+        description="TR 하나의 전체 명세(요청·응답 필드 한글 설명). 큐레이션 없는 "
+                    "TR 을 이해하거나 응답 컬럼 뜻을 확인할 때.")(ls_tr_spec)
     server.tool(
         name="ls_budget",
         description="오늘 외부 조회 예산 사용량. 소진되면 호출이 거부된다.")(ls_budget)
