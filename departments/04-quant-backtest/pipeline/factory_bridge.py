@@ -240,6 +240,33 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     except Exception:  # noqa: BLE001 - 고지 실패가 접수를 막으면 안 된다
         pass
 
+    # ①-d-0 파라미터 범위 (2026-08-13 실측 prop_86e535d7)
+    #   max_drawdown_stop=+0.35(부호 반대)가 접수를 통과했다 - 범위 검사가
+    #   실행(바인딩)에만 있어서, 가설이 **실행 불가로 태어나** 발주-사망-회수를
+    #   반복할 뻔했다(667f0a45 와 같은 사고 유형). 자르거나 부호를 대신 고치지
+    #   않는다 - 그러면 등록한 가설과 실행한 실험이 달라진다. 반려하고 알린다.
+    try:
+        from config_binding import LIMITS      # noqa: PLC0415 (실행면이 정본)
+
+        for k, v in (proposal.get("suggested_params") or {}).items():
+            target = "lookback_days" if k == "horizon_days" else k
+            lo, hi = LIMITS.get(target, (None, None))
+            if lo is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue                # 비수치는 바인딩이 사유를 만든다
+            if not (lo <= fv <= hi):
+                r.reject("PARAM_OUT_OF_RANGE",
+                         f"suggested_params.{k}={v} 는 실행 범위({lo}~{hi}) 밖이다"
+                         + (". max_drawdown_stop 은 음수다(-0.35 = 고점 대비 "
+                            "-35% 에서 전량 현금)"
+                            if k == "max_drawdown_stop" and fv > 0 else "")
+                         + ". 자르지 않고 반려한다 - 값을 고쳐 다시 내라")
+    except ImportError:                 # 검사 불능 != 접수 차단. 다만 조용히
+        r.warn("config_binding 을 읽지 못해 파라미터 범위를 접수에서 못 봤다")
+
     # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
     #   walk-forward 에서야 창 0개로 드러났다(2026-08-11 실측). 실험 한 번을
@@ -464,17 +491,28 @@ def build_outcome(*, experiment_id: str, hypothesis_id: str, trial_family_id: st
 # ---------------------------------------------------------------------------
 
 _SQL_PUBLISHED = """
-    select proposal_id, edge_type, universe_key, label, baseline,
-           economic_rationale, counterparty, competing_explanation,
-           competing_explanation_codes, skeptic_sign, lead_ids,
-           falsification_tests, data_requirements, suggested_params,
-           trial_budget, prior_check, source_reported_effect,
-           research_packet_ids, claim_ids
-      from research.experiment_proposals
-     where status = 'PUBLISHED'
-     order by as_known_at
+    select p.proposal_id, p.edge_type, p.universe_key, p.label, p.baseline,
+           p.economic_rationale, p.counterparty, p.competing_explanation,
+           p.competing_explanation_codes, p.skeptic_sign, p.lead_ids,
+           p.falsification_tests, p.data_requirements, p.suggested_params,
+           p.trial_budget, p.prior_check, p.source_reported_effect,
+           p.research_packet_ids, p.claim_ids
+      from research.experiment_proposals p
+     where p.status = 'PUBLISHED'
+       and not exists (select 1 from quant.hypotheses h
+                        where h.proposal_id = p.proposal_id)
+     order by p.as_known_at
      limit %s
 """
+# ▶ 이미 승격된 기획안을 창에서 빼는 not exists 가 생명선이다 (2026-08-13
+#   실측, 카드 t_7cd9bd5f). 승격돼도 status 는 영원히 PUBLISHED 로 남는데
+#   창은 "가장 오래된 limit 건" 이라, 오래된 승격분 18건 + 영구 게이트거부
+#   2건이 창을 다 채운 시점부터 새 기획안은 fetch 자체가 안 됐다(PUBLISHED
+#   23건 중 21~23위 3건이 어떤 주기에도 승격·거부 판정을 받지 못했다).
+#   리서치가 아무리 발행해도 공장에 신규 가설 공급이 0 이 되는 조용한 정지다.
+#   게이트거부분은 quant.hypotheses 에 없어 창에 남는다 - 종결 상태 각인
+#   (PROMOTED/GATE_REJECTED 등)은 원장 상태 어휘라 별도 합의 사항(카드의
+#   B안). 거부가 20건 쌓이면 같은 병이 재발하므로 그때는 B안이 필요하다.
 
 _SQL_FAMILY_OUTCOMES = """
     select decision, lesson_codes
@@ -720,14 +758,21 @@ class _PromoCursor:
     def execute(self, sql, params=None):
         s = " ".join(sql.split())
         if "from research.experiment_proposals" in s:
-            self._rows = [tuple(p[k] for k in (
+            # SQL 문면을 따라간다 - not exists 를 지우면 가짜도 예전(승격분이
+            # 창을 차지하는) 동작으로 돌아가 아래 굶주림 자체 점검이 죽는다.
+            already = set(self.c.already) if "not exists" in s else set()
+            rows = [tuple(p[k] for k in (
                 "proposal_id edge_type universe_key label baseline "
                 "economic_rationale counterparty competing_explanation "
                 "competing_explanation_codes skeptic_sign lead_ids "
                 "falsification_tests data_requirements suggested_params "
                 "trial_budget prior_check source_reported_effect "
                 "research_packet_ids claim_ids").split())
-                for p in self.c.published]
+                for p in self.c.published
+                if p["proposal_id"] not in already]
+            if params:
+                rows = rows[: int(params[0])]
+            self._rows = rows
         elif "select proposal_id from quant.hypotheses" in s:
             self._rows = [(x,) for x in self.c.already]
         elif "count(*) from quant.experiments" in s:
@@ -743,6 +788,28 @@ class _PromoCursor:
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
+
+
+def _check_fetch_window_excludes_promoted():
+    """승격분이 창을 차지하면 새 기획안이 영영 못 들어온다 (t_7cd9bd5f).
+
+    status 는 승격 후에도 PUBLISHED 로 남으므로, 창(가장 오래된 limit 건)에서
+    승격분을 빼는 것은 SQL 의 not exists 몫이다. 이게 빠지면 오래된 승격분이
+    창을 다 채운 시점부터 promote_published 는 매 주기 0건으로 끝나고,
+    리서치 발행 -> 퀀트 승격 공급이 조용히 0 이 된다(실측: PUBLISHED 23건 중
+    미소진 3건이 21~23위라 어떤 주기에도 판정을 받지 못했다).
+    """
+    s = " ".join(_SQL_PUBLISHED.lower().split())
+    assert "not exists" in s and "quant.hypotheses" in s, \
+        "_SQL_PUBLISHED 가 이미 승격된 기획안을 창에서 빼지 않는다"
+    # 창 2칸에 승격분 2 + 신규 1(가장 최신). 예전 SQL 은 승격분 2건만 fetch 해
+    # 신규가 창 밖에서 굶었다. 지금은 승격분이 창에서 빠져 신규가 판정받는다.
+    old = [_prop(proposal_id=f"prop_old_{i}") for i in range(2)]
+    new = _prop(proposal_id="prop_new")
+    conn = _PromoConn(old + [new], already=["prop_old_0", "prop_old_1"])
+    got = promote_published(conn, limit=2)
+    assert [g.proposal_id for g in got] == ["prop_new"], got
+    assert got[0].accepted and len(conn.inserted) == 1, got
 
 
 def _check_promotion_is_idempotent_and_records_rejection():
@@ -1131,6 +1198,27 @@ def _check_mapping_loss_is_stamped():
     assert not any("top_n 미지정" in w for w in g3.warnings), g3.warnings
 
 
+def _check_out_of_range_param_rejected_at_intake():
+    """**실행 불가로 태어나는 가설을 접수가 막는다** (2026-08-13 실측).
+
+    prop_86e535d7 이 max_drawdown_stop=+0.35(부호 반대)로 접수를 통과했다 -
+    바인딩에서야 죽을 값이다. 접수는 실행 가능성의 약속이다. 단 horizon_days
+    는 lookback_days 자리(2~250)의 한도를 본다 - 입력 이름의 한도를 보면
+    6개월 모멘텀(126일) 같은 정상 사양이 막힌다(2026-08-10 교훈 재확인).
+    """
+    p = _prop()
+    p["suggested_params"] = {"top_n": 20, "max_drawdown_stop": 0.35}
+    g = gate0(p)
+    assert not g.ok and "PARAM_OUT_OF_RANGE" in g.codes, g.as_dict()
+    assert "음수다" in "; ".join(g.reasons), g.reasons
+    # 정상 사양은 통과한다 - 특히 horizon_days=126 (자리 기준 한도)
+    p2 = _prop()
+    p2["suggested_params"] = {"horizon_days": 126, "top_n": 200,
+                              "max_drawdown_stop": -0.35}
+    g2 = gate0(p2)
+    assert g2.ok and "PARAM_OUT_OF_RANGE" not in g2.codes, g2.as_dict()
+
+
 def _check_outcome_requires_reason():
     """사유 없는 기각은 환류가 성립하지 않는다."""
     for d in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED"):
@@ -1342,6 +1430,8 @@ if __name__ == "__main__":
     _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
     _check_identity_hint_in_vocab_is_rejected(); print("  정체성 힌트 반려         OK")
     _check_mapping_loss_is_stamped();           print("  번역 손실 각인           OK")
+    _check_out_of_range_param_rejected_at_intake()
+    print("  범위 밖 파라미터 접수 반려 OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
@@ -1350,4 +1440,6 @@ if __name__ == "__main__":
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 19개 영역 통과. 루프가 닫혔다.")
+    _check_fetch_window_excludes_promoted()
+    print("  승격분은 창에서 빠진다   OK")
+    print("공장 다리 21개 영역 통과. 루프가 닫혔다.")
