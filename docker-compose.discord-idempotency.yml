@@ -1,0 +1,47 @@
+# Optional defense-in-depth override.
+#
+# The default Docker-only production path intentionally uses the upstream
+# Hermes image from docker-compose.yml.  Apply this file only when a
+# single-owner deployment still demonstrates duplicate delivery after the
+# gateway canary, and keep the same file in every subsequent compose command.
+services:
+  ceo-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  workforce-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  research-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  quant-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  accounting-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  trading-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  risk-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
+  qa-hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
