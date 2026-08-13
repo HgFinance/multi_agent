@@ -4,7 +4,7 @@
 > 교차 검증 통과: 워커 10명 = CLAUDE.md 편제표와 1:1 일치, 러너 5개 = `RUNNER_ID` 상수 5곳 실측, 컨테이너 전수 일치.
 > 각 절의 근거는 `파일:행`으로 남겼다. 이 문서는 **스냅샷**이며 정본은 코드다.
 >
-> ⚠ **로컬 실행 스택은 origin/main 을 아직 안 따라갔다.** 지금 떠 있는 36개는 옛 구성이다 — `origin/main` 기준으로는 기본 기동이 **37개**(portfolio-bff·portfolio-worker 편입)이고, hermes 이미지·진입점이 다르다(§1 참조). `git pull` 후 재기동해야 아래 [main] 표기가 로컬에도 적용된다.
+> ✅ **로컬 스택 따라잡기 완료 (2026-08-13).** origin/main 병합(`d20bfa1`) 후 재기동 — **38/38 실행**(기본 37 + 고아 quant-api), 진입점 8001 은 portfolio-bff 로 인계됐다. 단 hermes 8개는 Dockerfile 미커밋으로 옛 이미지에 핀(§7-9) — [main] 표기 중 Discord 게이트웨이만 로컬 미적용.
 
 ---
 
@@ -305,8 +305,9 @@
 | 5 | CEO 페르소나의 부서 목록에 `workforce-management` — 유효명은 `hr-department` | 아직 안 터진 지뢰 |
 | 6 | 퀀트 공장 워커 3명(접수·설계·교훈) `pending_hr` 미구현 — 결정론 코드가 대행 중 | 편제 결정 필요 |
 | 7 | `ceo-kanban-supervisor` `canonical abort failed: exited 1` 반복 | [main] `55b956b`(parentless task projection 수정)이 관련 가능성 — 새 코드 반영 후 재관측 필요 |
-| 8 | **[main] 로컬 실행 스택이 origin/main 보다 60커밋 뒤** — hermes 이미지·진입점(8001)·mirror·다계정이 로컬에 없음 | `git pull` + 재빌드·재기동 필요 |
-| 9 | **[main] 호스트 8001 이중 배선 주의** — origin/main 은 portfolio-bff 가 8001 을 갖고 ui-bff 는 게시 제거. 로컬은 반대(ui-bff 가 8001). pull 직후 옛 ui-bff 컨테이너가 남아 있으면 포트 충돌 | 재기동 시 `--remove-orphans` 권장 |
+| 8 | ~~로컬 실행 스택 60커밋 지연~~ | ✅ **2026-08-13 해소** — origin/main 병합(`d20bfa1`) + 재기동, 38/38 실행. 8001 은 portfolio-bff 로 인계 완료 |
+| 9 | **`Dockerfile.hermes-discord` 가 저장소에 없다** — compose 는 hermes 8개를 이 파일로 빌드하려 하고, 이미지(`hgfinance/hermes-discord`)는 pull access denied. **팀원이 Dockerfile 커밋 또는 레지스트리 접근을 공유해야 한다.** 로컬은 `.env` 의 `HERMES_GATEWAY_IMAGE=nousresearch/hermes-agent:latest` 핀으로 임시 우회 중 — Discord 게이트웨이 기능은 로컬에서 아직 안 돈다 | 팀 공유 대기 |
+| 10 | 팀원 소유 테스트 실패 2건 — `test_unavailable_aws_only_sources…`(하드코딩 목록), `test_task_status_route_reads_planning_projection`(origin/main 단독 재현) | 소유자 수리 대기 |
 
 ---
 
