@@ -192,10 +192,12 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
-  # OpenBB 도구 200+ (2026-08-13). discovery 로 필요한 카테고리만 활성화.
+  # OpenBB 도구 200+ - ⚠ 2026-08-13 비활성: OpenBB 의 get_prompt/list_resources
+  # 등 도구명이 Hermes 생성 유틸리티와 충돌, 에이전트 spawn 크래시 실측(x2).
+  # 백로그: 이름 prefix 설정 또는 Hermes 측 회피 확인 후 재활성.
   openbb:
     url: http://openbb-mcp:8039/mcp
-    enabled: true
+    enabled: false
   # 2026-08-13 가동 시도 -> 의존성 부패로 기동 실패 (youtube: mcp 라이브러리
   # FastMCP import 깨짐, paper: 재시작 루프). 죽은 서버를 켜두면 에이전트마다
   # 연결 대기가 생기므로 끈다. 백로그: uvx 버전 고정 후 재시도.
