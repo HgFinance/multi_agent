@@ -104,6 +104,36 @@ function SectionHeading({ index, title, suffix }: { index: number; title: string
   );
 }
 
+/**
+ * 제목 옆 ⓘ 아이콘. 마우스오버·키보드 포커스 둘 다에서 뜬다(`group-hover`
+ * 만 쓰면 마우스로만 접근 가능해진다 - 아이콘에 `tabIndex`를 주고
+ * `group-focus-within`도 같이 걸어 탭 이동으로도 확인할 수 있게 했다).
+ *
+ * 기존 드롭다운(TopNav 계정 전환)과 같은 카드 스타일
+ * (surface-container-lowest/border-outline-variant/shadow-sm)을 그대로 쓴다 -
+ * 이 앱에 팝오버 컴포넌트가 따로 없어서 이미 검증된 조합을 재사용했다.
+ */
+function InfoTooltip({ text }: { text: string }) {
+  return (
+    <span className="relative inline-flex group">
+      <span
+        tabIndex={0}
+        role="note"
+        aria-label={text}
+        className="material-symbols-outlined text-[14px] text-outline cursor-help outline-none focus-visible:ring-1 focus-visible:ring-primary rounded-full"
+      >
+        info
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block group-focus-within:block w-64 p-2.5 text-[11px] font-normal normal-case leading-relaxed text-on-surface bg-surface-container-lowest border border-outline-variant rounded-lg shadow-sm z-10"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: string }) {
   return (
     <span className="block text-label-md font-label-md text-secondary mb-2 uppercase">
@@ -320,11 +350,11 @@ export default function MandateConfig() {
               <SectionHeading index={3} title="비중, 익스포저 한도" />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6">
                 <div>
-                  <div className="flex justify-between items-start mb-2 gap-2">
-                    <div className="min-w-0">
-                      <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase block">한 종목 최대 투자 비율</label>
-                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">특정 주식 하나에 최대로 투자할 수 있는 자산 비율입니다.</p>
-                    </div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      한 종목 최대 투자 비율
+                      <InfoTooltip text="특정 주식 하나에 최대로 투자할 수 있는 자산 비율입니다." />
+                    </label>
                     <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxSingleWeightPct}%
                     </span>
@@ -345,11 +375,11 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between items-start mb-2 gap-2">
-                    <div className="min-w-0">
-                      <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase block">최대 위험 노출액</label>
-                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">원금과 대출 등을 합쳐 실제로 잃을 수 있는 총금액입니다.</p>
-                    </div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      최대 위험 노출액
+                      <InfoTooltip text="레버리지를 포함해 실제로 보유할 수 있는 포지션의 상한입니다. 100%는 원금만큼만, 300%는 대출을 더해 원금의 3배까지 보유한다는 뜻이며, 레버리지 특성상 100%를 넘는 값도 설정할 수 있습니다." />
+                    </label>
                     <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.grossExposurePct}%
                     </span>
@@ -370,11 +400,11 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between items-start mb-2 gap-2">
-                    <div className="min-w-0">
-                      <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase block">전체 최대 손실 한도</label>
-                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">투자를 진행하며 최대로 허용할 수 있는 총 손실액입니다.</p>
-                    </div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      전체 최대 손실 한도
+                      <InfoTooltip text="포지션 크기와 관계없이, 원금 대비 감내 가능한 최대 손실 비율입니다. 손실 한도이므로 100%를 넘는 값은 설정할 수 없습니다." />
+                    </label>
                     <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxDrawdownPct}%
                     </span>
@@ -400,11 +430,11 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between items-start mb-2 gap-2">
-                    <div className="min-w-0">
-                      <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase block">일일 최대 손실 한도</label>
-                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">하루 동안 발생할 수 있는 손실의 최대 제한 금액입니다.</p>
-                    </div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      일일 최대 손실 한도
+                      <InfoTooltip text="하루 동안 발생할 수 있는 손실의 최대 제한 금액입니다." />
+                    </label>
                     <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxDailyLossPct}%
                     </span>
