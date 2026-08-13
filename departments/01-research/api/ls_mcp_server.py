@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
 
 _BASE = Path(__file__).resolve().parents[1]
@@ -137,7 +137,7 @@ def investor_flow(corp: str, days: int = 10) -> dict:
     days = max(1, min(int(days), 60))
     resolved = _shcode_of(corp)
     spend("ls", LS_DAILY_CAP)
-    end = date.today()
+    end = date_cls.today()
     start = end - timedelta(days=days * 2 + 5)   # 휴장 감안한 달력 여유
     body = _client().call_tr(
         path="/stock/frgr-itt", tr_cd="t1717",
@@ -186,7 +186,7 @@ def short_selling(corp: str, days: int = 10) -> dict:
     days = max(1, min(int(days), 60))
     resolved = _shcode_of(corp)
     spend("ls", LS_DAILY_CAP)
-    end = date.today()
+    end = date_cls.today()
     start = end - timedelta(days=days * 2 + 5)
     body = _client().call_tr(
         path="/stock/etc", tr_cd="t1927",
@@ -242,6 +242,101 @@ def market_investor_flow_intraday(upcode: str = "001", count: int = 30) -> dict:
     return out
 
 
+# ── KRX 밸류에이션 (pykrx) ──────────────────────────────────────────────────
+KRX_DAILY_CAP = int(os.environ.get("MCP_KRX_DAILY_CAP", "500"))
+
+
+def _krx_creds_guard() -> None:
+    """pykrx 1.2.x 는 KRX 정보데이터시스템 로그인(무료 계정)을 요구한다.
+
+    없으면 pykrx 가 pandas IndexError 로 어지럽게 죽는다(실측 2026-08-13) -
+    먼저 걸러 정직한 안내를 준다. data.krx.co.kr 무료 가입 후 .env 에
+    KRX_ID/KRX_PW 를 넣으면 산다.
+    """
+    if not (os.environ.get("KRX_ID", "").strip()
+            and os.environ.get("KRX_PW", "").strip()):
+        raise RuntimeError(
+            "KRX_ID/KRX_PW 가 없다 - pykrx(KRX 통계)는 data.krx.co.kr 무료 "
+            "로그인이 필요하다. .env 에 계정을 넣기 전까지 이 도구는 못 쓴다. "
+            "PER/PBR 개별 검증은 dart_financials + 시세로 대신할 것.")
+
+
+def _krx_day() -> str:
+    from pykrx.stock import get_nearest_business_day_in_a_week
+    return get_nearest_business_day_in_a_week()
+
+
+def _df_records(df, index_name: str, limit: int) -> list[dict]:
+    df = df.reset_index().rename(columns={df.index.name or "index": index_name})
+    return json.loads(df.head(limit).to_json(orient="records", force_ascii=False))
+
+
+def krx_fundamental(corp: str = "", date: str = "", limit: int = 50) -> dict:
+    """KRX 밸류에이션 - PER/PBR/EPS/BPS/배당수익률(DIV). 상대가치 비교의 재료.
+
+    corp 지정 시 그 종목, 비우면 **전 시장 횡단면**(비교·스크리닝용, limit 행).
+    ⚠ KRX 웹 기반 참고치 - 재무 반영이 늦다(연보고서 검토기간 후). 정밀
+    검증은 dart_financials 원값으로.
+    """
+    from pykrx.stock import get_market_fundamental
+    _krx_creds_guard()
+    _krx_creds_guard()
+    _krx_creds_guard()
+    from external_sources import spend as _sp
+    _sp("krx", KRX_DAILY_CAP)
+    day = (date or _krx_day()).replace("-", "")
+    if corp.strip():
+        resolved = _shcode_of(corp)
+        df = get_market_fundamental(day, day, resolved["stock_code"])
+        items = _df_records(df, "date", 5)
+        out = {"mode": "single", "corp": resolved, "date": day, "items": items}
+    else:
+        df = get_market_fundamental(day, market="ALL")
+        n = max(1, min(int(limit), 3000))
+        items = _df_records(df.sort_values("PER"), "ticker", n)
+        out = {"mode": "cross_section", "date": day, "count": len(items),
+               "sorted_by": "PER asc", "items": items}
+    out["note"] = "KRX 참고치 - 백테스트·사후 채점 인용 금지"
+    out["citation"] = _snapshot("krx_fundamental",
+                               {"corp": corp, "date": date, "limit": limit}, out)
+    return out
+
+
+def krx_marketcap(corp: str, date: str = "") -> dict:
+    """종목 시가총액·거래대금·상장주식수·외국인보유주식수 (KRX 참고치)."""
+    from pykrx.stock import get_market_cap
+    from external_sources import spend as _sp
+    _sp("krx", KRX_DAILY_CAP)
+    resolved = _shcode_of(corp)
+    day = (date or _krx_day()).replace("-", "")
+    df = get_market_cap(day, day, resolved["stock_code"])
+    out = {"corp": resolved, "date": day,
+           "items": _df_records(df, "date", 5),
+           "note": "KRX 참고치"}
+    out["citation"] = _snapshot("krx_marketcap", {"corp": corp, "date": date}, out)
+    return out
+
+
+def krx_foreign_ownership(corp: str, days: int = 10) -> dict:
+    """종목 외국인 보유(스톡) 추이 - 한도소진률·보유수량. LS investor_flow 의
+    플로우(순매수)와 상호보완: 플로우가 쌓인 결과가 이 스톡이다."""
+    from pykrx.stock import get_exhaustion_rates_of_foreign_investment
+    from external_sources import spend as _sp
+    _sp("krx", KRX_DAILY_CAP)
+    days = max(1, min(int(days), 60))
+    resolved = _shcode_of(corp)
+    end = date_cls.today()
+    start = end - timedelta(days=days * 2 + 5)
+    df = get_exhaustion_rates_of_foreign_investment(
+        start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), resolved["stock_code"])
+    out = {"corp": resolved, "count": min(len(df), days),
+           "items": _df_records(df.tail(days), "date", days),
+           "note": "KRX 참고치 - 한도소진률(%)·보유수량(주)"}
+    out["citation"] = _snapshot("krx_foreign_ownership",
+                                {"corp": corp, "days": days}, out)
+    return out
+
+
 def ls_budget() -> dict:
     from external_sources import budget_state
     return budget_state()
@@ -282,6 +377,17 @@ def build_server(host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         name="ls_tr_spec",
         description="TR 하나의 전체 명세(요청·응답 필드 한글 설명). 큐레이션 없는 "
                     "TR 을 이해하거나 응답 컬럼 뜻을 확인할 때.")(ls_tr_spec)
+    server.tool(
+        name="krx_fundamental",
+        description="KRX 밸류에이션 PER/PBR/EPS/BPS/배당수익률. corp 비우면 전 시장 "
+                    "횡단면(상대가치 비교·스크리닝). KRX 참고치 - 정밀 검증은 dart_financials.")(krx_fundamental)
+    server.tool(
+        name="krx_marketcap",
+        description="종목 시가총액·상장주식수·외국인보유주식수 (KRX 참고치).")(krx_marketcap)
+    server.tool(
+        name="krx_foreign_ownership",
+        description="외국인 보유 스톡 추이(한도소진률%·보유수량) - investor_flow(플로우)와 "
+                    "상호보완.")(krx_foreign_ownership)
     server.tool(
         name="ls_budget",
         description="오늘 외부 조회 예산 사용량. 소진되면 호출이 거부된다.")(ls_budget)

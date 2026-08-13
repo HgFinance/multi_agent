@@ -215,6 +215,41 @@ def sec_concept(ticker: str, concept: str = "Revenues",
     return out
 
 
+ARXIV_DAILY_CAP = int(os.environ.get("MCP_ARXIV_DAILY_CAP", "500"))
+
+
+def arxiv_search(query: str, category: str = "", max_results: int = 8) -> dict:
+    """arXiv 논문 검색 (무키 공식 API) - 방법론 스카우트 축.
+
+    category 예: q-fin.ST, q-fin.PM, cs.LG. 결과의 pdf/abs URL 은
+    read_url 로 이어 읽을 수 있다(초록 페이지 권장).
+    """
+    import xml.etree.ElementTree as ET
+    spend("arxiv", ARXIV_DAILY_CAP)
+    n = max(1, min(int(max_results), 25))
+    terms = f"all:{query}"
+    if category.strip():
+        terms = f"cat:{category.strip()}+AND+({terms})"
+    q = (f"http://export.arxiv.org/api/query?search_query={urllib.parse.quote(terms, safe=':+()')}"
+         f"&start=0&max_results={n}&sortBy=submittedDate&sortOrder=descending")
+    xml = _get(q, timeout=20).decode("utf-8")
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    items = []
+    for e in ET.fromstring(xml).findall("a:entry", ns):
+        items.append({
+            "title": " ".join((e.findtext("a:title", "", ns) or "").split()),
+            "published": e.findtext("a:published", "", ns)[:10],
+            "authors": [a.findtext("a:name", "", ns)
+                        for a in e.findall("a:author", ns)][:5],
+            "abs_url": e.findtext("a:id", "", ns),
+            "summary": " ".join((e.findtext("a:summary", "", ns) or "").split())[:400]})
+    out = {"query": query, "category": category, "count": len(items),
+           "items": items, "queried_at": datetime.now().isoformat()}
+    out["citation"] = _snapshot("arxiv_search", {
+        "query": query, "category": category}, out)
+    return out
+
+
 def register_global_tools(server) -> None:
     """mcp_server.build_server() 가 부른다. 전부 읽기 전용."""
     server.tool(
@@ -232,6 +267,10 @@ def register_global_tools(server) -> None:
         name="sec_filings",
         description="미국 기업 최근 공시(10-K·10-Q·8-K·4 등) 목록 + 문서 URL. "
                     "본문은 read_url 로 열람. 엔비디아·마이크론 등 밸류체인 문맥용.")(sec_filings)
+    server.tool(
+        name="arxiv_search",
+        description="arXiv 논문 검색(최신순) - 방법론 스카우트용. category 예: "
+                    "q-fin.ST, q-fin.PM. 초록은 abs_url 을 read_url 로.")(arxiv_search)
     server.tool(
         name="sec_concept",
         description="미국 기업 XBRL 재무 개념 시계열(us-gaap) - 공시 원값. "

@@ -1,7 +1,15 @@
+# ▶ 부서장 모델 (2026-08-13, 재일 지시로 claude-fable-5 전환)
+#   경로: hermes -> ANTHROPIC_BASE_URL(host.docker.internal:8787, 호스트 프록시
+#   scripts/claude_code_proxy.py) -> claude -p -> 플랜 한도. API 키 직결은
+#   종량 과금으로 새므로 금지(2026-08-03 실측, docker-compose.claude.yml 참고).
+#   전환 전 값: openai-codex / gpt-5.6-luna (복귀는 이 두 줄 원복 + 오버레이 제거)
+#   ⚠ base_url 은 **/anthropic 으로 끝나야 한다** - hermes 의
+#   _anthropic_base_url_override_ok 가 그 접미만 인정하고, 아니면 조용히
+#   api.anthropic.com 직행으로 폴백해 400(서드파티)이 난다(2026-08-13 실측).
 model:
-  provider: openai-codex
-  default: gpt-5.6-luna
-  base_url: https://chatgpt.com/backend-api/codex
+  provider: anthropic
+  default: claude-fable-5
+  base_url: http://host.docker.internal:8787/anthropic
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
 agent:
@@ -183,6 +191,10 @@ mcp_servers:
     url: http://ls-mcp:8038/mcp
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
+  # OpenBB 도구 200+ (2026-08-13). discovery 로 필요한 카테고리만 활성화.
+  openbb:
+    url: http://openbb-mcp:8039/mcp
     enabled: true
   # 2026-08-13 가동 시도 -> 의존성 부패로 기동 실패 (youtube: mcp 라이브러리
   # FastMCP import 깨짐, paper: 재시작 루프). 죽은 서버를 켜두면 에이전트마다

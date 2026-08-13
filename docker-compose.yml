@@ -528,6 +528,7 @@ services:
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
       MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
@@ -563,6 +564,26 @@ services:
   # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
   # 지시가 아니라 capability 절단이다 - 서버가 제거를 검증 못 하면 기동을 거부한다.
   # 포트는 호스트에 게시하지 않는다(research-liaison-mcp:8037, compose 안 전용).
+  # ▶ OpenBB Platform MCP (2026-08-13, 재일 결정 "쓸만한 MCP 싹다") - 기성 채용.
+  #   대형 OSS 공식 확장(도구 200+, 옵션체인·ETF·채권·매크로). 무료 프로바이더
+  #   (yfinance 등)만 쓰므로 우리 키가 서드파티 코드를 통과하지 않는다.
+  #   도구 과부하는 자체 --tool-discovery 가 푼다. 호스트 미게시(내부 8039).
+  openbb-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.openbb-mcp
+    container_name: hedgefund-openbb-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 15s
+
   # ▶ LS 증권 OpenAPI MCP (2026-08-13, 재일 결정 "TR 목록을 정제해서 질문에 답하게")
   #   research-mcp 와 **다른 컨테이너**인 이유: 2026-08-02 결정(LS 자격은 퍼뜨리지
   #   않는다)을 유지한다 - 키는 여기에만 있고 에이전트는 도구만 받는다.
@@ -594,6 +615,9 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      # pykrx(밸류에이션) - KRX 정보데이터시스템 무료 로그인 필요 (1.2.x 정책)
+      KRX_ID: ${KRX_ID:-}
+      KRX_PW: ${KRX_PW:-}
       MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
       MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
     volumes:
@@ -630,6 +654,7 @@ services:
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
       MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}

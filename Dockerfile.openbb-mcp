@@ -1,0 +1,11 @@
+# OpenBB Platform MCP - 기성 채용 (2026-08-13 재일 결정 "쓸만한 MCP 싹다").
+#
+# ▶ 왜 기성인가: 개인 저장소가 아니라 대형 OSS(OpenBB)의 공식 MCP 확장이고,
+#   무료 프로바이더(yfinance·FRED) 기준 우리 키가 코드를 통과하지 않는다.
+#   도구 200+ 의 선택 과부하는 자체 discovery(--tool-discovery)가 푼다 -
+#   우리 LS 카탈로그 2층과 같은 철학을 그쪽이 이미 구현했다.
+# ▶ 버전 고정: openbb-mcp-server==1.4.1 (2026-08-13 pip index 실측 최신).
+FROM python:3.12-slim
+RUN pip install --no-cache-dir openbb-mcp-server==1.4.1
+# streamable-http, 포트는 compose 에서 8039 로 - 호스트 미게시(내부 전용)
+CMD ["openbb-mcp", "--host", "0.0.0.0", "--port", "8039",      "--transport", "streamable-http", "--tool-discovery"]

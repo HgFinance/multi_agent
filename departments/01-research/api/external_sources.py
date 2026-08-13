@@ -402,6 +402,40 @@ def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
     return out
 
 
+TAVILY_DAILY_CAP = int(os.environ.get("MCP_TAVILY_DAILY_CAP", "30"))
+
+
+def tavily_search(query: str, max_results: int = 5, days: int = 0) -> dict:
+    """범용 웹 검색 (Tavily) - 네이버 뉴스 밖 전체 웹. CRAG 폴백 축.
+
+    ⚠ 무료 한도가 월 1,000 크레딧이라 일일 상한이 빡빡하다(기본 30) -
+    네이버·DART 로 안 되는 것만 여기로. 본문은 read_url 로 이어 읽는다.
+    """
+    key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY 가 없다 - compose environment 확인")
+    spend("tavily", TAVILY_DAILY_CAP)
+    payload = {"api_key": key, "query": query,
+               "max_results": max(1, min(int(max_results), 10)),
+               "search_depth": "basic", "include_answer": False}
+    if int(days) > 0:
+        payload["days"] = int(days)
+        payload["topic"] = "news"
+    req = urllib.request.Request(
+        "https://api.tavily.com/search",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        body = json.loads(r.read().decode("utf-8"))
+    items = [{"title": it.get("title"), "url": it.get("url"),
+              "snippet": (it.get("content") or "")[:400],
+              "score": it.get("score")} for it in body.get("results", [])]
+    out = {"query": query, "count": len(items), "items": items,
+           "queried_at": datetime.now(KST).isoformat()}
+    out["citation"] = _snapshot("tavily_search", {"query": query, "days": days}, out)
+    return out
+
+
 def record_citations(citations: list, note: str = "") -> dict:
     """답변에 **실제로 인용한** 조회의 citation 해시를 표시한다 (cache-on-cite v2).
 
@@ -446,6 +480,10 @@ def register_external_tools(server) -> None:
         name="record_citations",
         description="답변에 실제로 인용한 조회의 citation 해시 목록을 표시한다. "
                     "답변을 마치기 직전 한 번 호출 - QA 재검증의 근거가 된다.")(record_citations)
+    server.tool(
+        name="tavily_search",
+        description="범용 웹 검색(전체 웹) - 네이버·DART 로 안 될 때의 폴백. "
+                    "일일 상한이 빡빡하니(무료 월 1k) 아껴 쓸 것. 본문은 read_url.")(tavily_search)
     server.tool(
         name="read_url",
         description="웹 페이지 본문을 텍스트로 읽는다 - news_search 의 link, "
