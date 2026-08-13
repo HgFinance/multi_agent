@@ -165,58 +165,6 @@ def fred_series(series_id: str, start: str = "", end: str = "",
     return out
 
 
-KOSIS_DAILY_CAP = int(os.environ.get("MCP_KOSIS_DAILY_CAP", "1000"))
-
-
-def kosis_series(org_id: str, tbl_id: str, cycle: str = "M",
-                 start: str = "", end: str = "", c1: str = "",
-                 item_filter: str = "") -> dict:
-    """KOSIS 통계 조회 (소비자물가 등). org_id:tbl_id 는 KOSIS 통계표 좌표.
-
-    실측 규격(macro_collector.fetch_kosis 와 동일): itmId/objL1 은 ALL 로 받고
-    클라이언트에서 거른다 - 개별 코드 지정은 err 21. c1 은 분류코드(C1) 필터,
-    item_filter 는 항목명(ITM_NM) 부분일치 필터.
-    ⚠ KOSIS 는 vintage 를 주지 않는다 - 지금 조회한 최신값이다.
-    예: 소비자물가 총지수 = org_id 101, tbl_id DT_1J22042, c1 '0'.
-    """
-    spend("kosis", KOSIS_DAILY_CAP)
-    key = os.environ.get("KOSIS_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError("KOSIS_API_KEY 가 없다 - compose environment 확인")
-    cyc = cycle.strip().upper()
-    if cyc not in ("A", "Q", "M", "D"):
-        raise RuntimeError(f"cycle 은 A|Q|M|D 중 하나다: {cycle}")
-    today = date.today()
-    fmt = {"A": "%Y", "Q": "%Y", "M": "%Y%m", "D": "%Y%m%d"}[cyc]
-    q = urllib.parse.urlencode({
-        "method": "getList", "apiKey": key, "itmId": "ALL", "objL1": "ALL",
-        "format": "json", "jsonVD": "Y", "prdSe": cyc,
-        "startPrdDe": start or (today.replace(year=today.year - 2)).strftime(fmt),
-        "endPrdDe": end or today.strftime(fmt),
-        "orgId": org_id, "tblId": tbl_id})
-    body = json.loads(_get(
-        f"https://kosis.kr/openapi/Param/statisticsParameterData.do?{q}",
-        timeout=25).decode("utf-8"))
-    if isinstance(body, dict):
-        raise RuntimeError(f"KOSIS {tbl_id}: {body.get('errMsg', body)}")
-    rows = body
-    if c1:
-        rows = [r for r in rows if str(r.get("C1", "")).strip() == c1.strip()]
-    if item_filter:
-        rows = [r for r in rows if item_filter in (r.get("ITM_NM") or "")]
-    items = [{"period": r.get("PRD_DE"), "value": r.get("DT"),
-              "item": r.get("ITM_NM"), "c1": r.get("C1"),
-              "c1_name": r.get("C1_NM"), "unit": r.get("UNIT_NM"),
-              "last_changed": r.get("LST_CHN_DE")} for r in rows][:500]
-    out = {"org_id": org_id, "tbl_id": tbl_id, "cycle": cyc,
-           "count": len(items), "items": items,
-           "vintage": "none - 지금 조회한 최신값", "queried_at": datetime.now().isoformat()}
-    out["citation"] = _snapshot("kosis_series", {
-        "org_id": org_id, "tbl_id": tbl_id, "cycle": cyc,
-        "c1": c1, "item_filter": item_filter}, out)
-    return out
-
-
 def register_macro_tools(server) -> None:
     """mcp_server.build_server() 가 부른다. 전부 읽기 전용."""
     server.tool(
@@ -236,11 +184,6 @@ def register_macro_tools(server) -> None:
     server.tool(
         name="fred_series",
         description="FRED 관측값 조회(질의 응대용 최신값).")(fred_series)
-    server.tool(
-        name="kosis_series",
-        description="KOSIS 국가통계 조회(소비자물가 101/DT_1J22042 등). "
-                    "org_id·tbl_id 좌표 필요 - 모르면 KOSIS 사이트에서 확인. "
-                    "⚠ 지금 시점 최신값 - 과거 재현 인용 금지.")(kosis_series)
 
 
 if __name__ == "__main__":
