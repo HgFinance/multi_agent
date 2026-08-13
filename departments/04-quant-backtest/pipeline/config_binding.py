@@ -46,17 +46,51 @@ MODULE_VERSION = "quant-config-binding-v1"
 # 실행면이 실제로 읽는 expected_edge 키. **여기 없는 키는 무시가 아니라 거부다.**
 # 기획안이 논문 용어(formation_window_days 등)로 쓰면 조용히 기본값으로 떨어지고,
 # 그러면 등록한 가설과 실행한 실험이 달라진다.
+# These are preregistration/context fields, not tunable execution parameters.
+# They must remain in the hypothesis contract, but rejecting them as unknown
+# makes a valid hypothesis impossible to execute. `universe` is accepted as the
+# legacy contract spelling and is mapped to the execution key below.
+NON_EXECUTION_KEYS = frozenset({"observation_refs", "universe"})
+
 EDGE_KEYS = frozenset({
     "type",            # edge_type - 어느 시그널 템플릿인가
     "universe_key",    # 유니버스
     "horizon_days",    # 보유/형성 창 -> lookback_days
     "top_n",           # 상위 N 종목
+    # ── 위험관리 (2026-08-12 개방) ──────────────────────────────────────────
+    # ▶ 왜 열었나
+    #   momentum 이 초과 +157.51%p · IR 1.26 · DSR 0.976 을 내고도 낙폭
+    #   -50.52% 로 관문(-35%)을 못 넘었다. 그때 실행면에 낙폭을 줄일 손잡이가
+    #   **하나도 없었다** - 완전투자 동일가중 말고는 표현할 수가 없었다.
+    #   그래서 리서치는 계속 새 엣지를 설계했고, 새 엣지도 같은 자리에서 죽었다.
+    #
+    #   **값은 우리가 정하지 않는다.** 무엇을 얼마로 걸지는 기획안이 정하고
+    #   실험이 검증한다. 여기서는 범위만 지킨다.
+    "vol_target_annual",    # 목표 연변동성 (0.15 = 15%)
+    "max_drawdown_stop",    # 고점 대비 이 낙폭이면 전량 현금 (-0.25 = -25%)
+    "max_exposure",         # 익스포저 상한 (1.0 = 완전투자)
+    "vol_lookback_days",    # 변동성 추정 창
 })
+
+# 실수로 읽는 키. 나머지는 정수다 - `_take` 가 정수만 받으므로 갈라야 한다.
+FLOAT_KEYS = frozenset({"vol_target_annual", "max_drawdown_stop", "max_exposure"})
 
 LIMITS = {
     "lookback_days": (2, 250),      # 1일은 신호가 아니고, 250일 초과는 표본 부족
     "top_n": (5, 100),              # 5 미만은 분산이 안 되고, 100 초과는 지수다
     "holding_horizon": (1, 120),
+    # ▶ **레버리지를 열지 않는다.** 상한이 1.0 이다.
+    #   개발원칙 9: "위험한 기능은 실패 시 거래 확대가 아니라 Entry 차단
+    #   방향으로 동작한다." 익스포저 상한을 1.0 넘게 허용하면 변동성이 낮게
+    #   추정된 구간에서 자동으로 레버리지가 걸린다 - 그건 관문이 보는 낙폭을
+    #   줄이는 게 아니라 늘리는 길이다.
+    "max_exposure": (0.1, 1.0),
+    # 2% 미만 목표변동성은 사실상 현금이고, 100% 초과는 타게팅이 무의미하다
+    "vol_target_annual": (0.02, 1.0),
+    # 음수만 받는다. -0.02 보다 얕으면 노이즈에 계속 끊기고, -0.9 보다 깊으면
+    # 정지가 아니라 장식이다.
+    "max_drawdown_stop": (-0.90, -0.02),
+    "vol_lookback_days": (20, 250),
 }
 
 REBALANCE_BY_HORIZON = {
@@ -128,9 +162,33 @@ def bind(hyp: dict, base_config: dict) -> Binding:
         cfg[target] = v
         b.from_hypothesis.append(f"{target}={v}")
 
+    def _take_risk(name: str) -> None:
+        """위험관리 손잡이. **없으면 안 넣는다** - 기본은 꺼짐이고, 꺼짐은
+        `None` 이 아니라 **키가 없는 상태**여야 러너가 예전 경로로 간다."""
+        value = edge.get(name)
+        if value is None:
+            return
+        try:
+            v = float(value) if name in FLOAT_KEYS else int(value)
+        except (TypeError, ValueError):
+            b.rejected.append(f"{name}={value!r} 를 수로 읽을 수 없다")
+            return
+        lo, hi = LIMITS.get(name, (None, None))
+        if lo is not None and not (lo <= v <= hi):
+            # 자르지 않는다 - 자르면 등록한 것과 실행한 것이 달라진다
+            b.rejected.append(
+                f"{name}={v} 가 허용 범위 [{lo}, {hi}] 밖이다 - 자르지 않고 거부한다"
+                + (" (레버리지는 열려 있지 않다)" if name == "max_exposure" else ""))
+            return
+        cfg[name] = v
+        b.from_hypothesis.append(f"{name}={v}")
+
     horizon = edge.get("horizon_days") or hyp.get("holding_horizon")
     _take("holding_horizon", horizon, "lookback_days")
     _take("top_n", edge.get("top_n") or hyp.get("top_n"), "top_n")
+    for _rk in ("vol_target_annual", "max_drawdown_stop", "max_exposure",
+                "vol_lookback_days"):
+        _take_risk(_rk)
 
     # ▶ **읽지 않은 파라미터를 조용히 버리지 않는다** (2026-08-10 실측)
     #   기획안이 `formation_window_days=42` 를 적었는데 바인더는 `horizon_days`
@@ -138,7 +196,15 @@ def bind(hyp: dict, base_config: dict) -> Binding:
     #   실제로 돈 실험이 다르고**, 그 성적은 이 가설의 증거가 아니다. 이번에는
     #   input_hash 가 같아 중복 가드에 걸려 드러났을 뿐, 기본값이 달랐다면
     #   조용히 엉뚱한 실험이 근거로 남았다.
-    unknown = sorted(k for k in edge if k not in EDGE_KEYS)
+    # Preserve observation references for preregistration, while binding the
+    # legacy universe spelling to the actual runner parameter.
+    if edge.get("universe_key") is None and edge.get("universe") is not None:
+        value = edge.get("universe")
+        if isinstance(value, str) and value.strip():
+            cfg["universe_key"] = value.strip()
+            b.from_hypothesis.append(f"universe_key={value.strip()}")
+
+    unknown = sorted(k for k in edge if k not in EDGE_KEYS and k not in NON_EXECUTION_KEYS)
     if unknown:
         b.rejected.append(
             f"실행면이 읽지 않는 파라미터가 있다: {unknown} - 무시하고 돌리면 "
@@ -268,6 +334,58 @@ def _check_base_config_not_mutated():
     assert _BASE == before, _BASE
 
 
+def _check_risk_knobs_bind_and_bound():
+    """**위험관리 손잡이가 실제로 config 에 닿는다.** (2026-08-12)
+
+    손잡이를 러너에 만들어도 바인더가 `실행면이 읽지 않는 파라미터` 로 거부하면
+    에이전트는 영영 못 쓴다 - 오늘 하루 이 모양을 열두 번 봤다.
+    """
+    base = {"strategy": "MOM", "lookback_days": 20, "top_n": 20}
+    b = bind({"expected_edge": {"type": "momentum", "horizon_days": 126,
+                                "max_drawdown_stop": -0.25,
+                                "vol_target_annual": 0.15,
+                                "vol_lookback_days": 60}}, base)
+    assert not b.rejected, b.rejected
+    assert b.config["max_drawdown_stop"] == -0.25, b.config
+    assert b.config["vol_target_annual"] == 0.15, b.config
+    assert b.config["vol_lookback_days"] == 60, b.config
+
+    # ▶ **안 준 손잡이는 키 자체가 없어야 한다.** `None` 을 넣어 두면 러너가
+    #   "켜졌는데 값이 없다" 로 읽을 수 있다.
+    b2 = bind({"expected_edge": {"type": "momentum"}}, base)
+    for k in ("vol_target_annual", "max_drawdown_stop", "max_exposure"):
+        assert k not in b2.config, f"{k} 를 안 줬는데 config 에 들어갔다"
+
+    # ▶ **레버리지는 안 열린다.** 개발원칙 9.
+    b3 = bind({"expected_edge": {"type": "momentum", "max_exposure": 2.0}}, base)
+    assert b3.rejected, "max_exposure=2.0 이 통과했다 - 레버리지가 열렸다"
+    assert any("레버리지" in r for r in b3.rejected), b3.rejected
+
+    # 낙폭 정지는 음수만. 양수는 뜻이 없다
+    b4 = bind({"expected_edge": {"type": "momentum", "max_drawdown_stop": 0.25}},
+              base)
+    assert b4.rejected, "양수 낙폭 정지가 통과했다"
+
+    # 자르지 않는다 - 범위 밖은 거부
+    b5 = bind({"expected_edge": {"type": "momentum", "vol_target_annual": 5.0}},
+              base)
+    assert b5.rejected and "5.0" in b5.rejected[0], b5.rejected
+    print("  위험관리 손잡이 바인딩   OK")
+
+
+def _check_runner_and_binder_agree_on_risk_keys():
+    """**두 곳이 같은 손잡이 이름을 써야 한다.** 다르면 조용히 무시된다."""
+    import sys as _s  # noqa: PLC0415
+    from pathlib import Path as _P  # noqa: PLC0415
+    _s.path.insert(0, str(_P(__file__).resolve().parent))
+    from backtest_runner import RISK_KEYS  # noqa: PLC0415
+
+    missing = sorted(set(RISK_KEYS) - EDGE_KEYS)
+    assert not missing, (f"러너는 읽는데 바인더가 거부하는 손잡이: {missing} - "
+                         f"에이전트가 쓰려고 하면 파라미터 거부로 죽는다")
+    print("  러너<->바인더 손잡이 일치 OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -281,4 +399,6 @@ if __name__ == "__main__":
     _check_missing_uses_default_and_says_so();   print("  기본값 출처 표시        OK")
     _check_non_numeric_is_rejected();            print("  비수치 거부             OK")
     _check_base_config_not_mutated();            print("  원본 불변               OK")
-    print("config 바인딩 8개 영역 통과.")
+    _check_risk_knobs_bind_and_bound()
+    _check_runner_and_binder_agree_on_risk_keys()
+    print("config 바인딩 10개 영역 통과.")

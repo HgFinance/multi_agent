@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -240,9 +241,30 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     answered = set((prior.get("lessons_addressed") or {}).keys())
     missing = sorted(needed - answered)
     if missing and r.trials_used > 0:
-        r.reject("DUPLICATE_UNADDRESSED",
-                 f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
-                 f"그 교훈에 대응이 없다: {missing}")
+        # ▶ **"대응이 없다" 가 사실이 아닐 수 있다** (2026-08-13 실측)
+        #   `prop_5682` 는 교훈 5개를 이름으로 짚어 대응을 적었다 - 다만 카드가
+        #   `ECONOMIC_RATIONALE 에 적어라` 라고 시켜서 거기 적었고, 계약은
+        #   `LESSONS_ADDRESSED:` 만 읽는다. 그런데 반려문은 "대응이 없다" 였다.
+        #   **거짓 사유는 고칠 수 없는 사유다** - 기획자는 자기가 적은 것을
+        #   보면서 무엇이 문제인지 알 수 없다. 카드 문구는 고쳤고, 여기서는
+        #   본문에 답이 있는 경우를 가려내 **어디로 옮기라고** 말해 준다.
+        body = " ".join(str(proposal.get(k) or "") for k in
+                        ("economic_rationale", "counterparty",
+                         "competing_explanation"))
+        in_body = sorted(c for c in missing if c in body)
+        if in_body:
+            r.reject("LESSONS_IN_WRONG_FIELD",
+                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다. "
+                     f"대응을 **본문에는 적었는데**({in_body}) 계약이 읽는 칸은 "
+                     f"`LESSONS_ADDRESSED:` 다 - 같은 내용을 "
+                     f"`교훈코드=무엇을 다르게 하는가` 형식으로 그 칸에 옮겨라. "
+                     f"본문은 그대로 두면 된다"
+                     + (f". 본문에도 없는 것: {sorted(set(missing) - set(in_body))}"
+                        if set(missing) - set(in_body) else ""))
+        else:
+            r.reject("DUPLICATE_UNADDRESSED",
+                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
+                     f"그 교훈에 대응이 없다: {missing}")
     elif missing:
         # 실행 0인데 기각 교훈이 있다 = 원장이 어긋났다는 신호다(다른 계열의
         # 결과가 섞였거나 정리가 덜 됐다). **막지 않고 알린다** - 여기서 막으면
@@ -414,6 +436,24 @@ def count_family_trials(conn, trial_family_id: str) -> int:
         return int(cur.fetchone()[0])
 
 
+def _checkable_regime_evidence(values) -> list:
+    """Keep only regime observations with an auditable label and span/count."""
+    out = []
+    for value in values or ():
+        if isinstance(value, dict):
+            label = value.get("regime_label") or value.get("label") or value.get("regime")
+            window = value.get("window") or value.get("window_label") or value.get("period")
+            count = value.get("count") or value.get("window_count") or value.get("observations")
+            if label and (window or count is not None):
+                out.append(value)
+            continue
+        text = str(value)
+        if re.search(r"(?:regime|국면)\s*[:=]\s*[^,; ]+", text, re.I) and \
+           re.search(r"(?:window|기간|count|개수)\s*[:=]\s*[^,; ]+", text, re.I):
+            out.append(text)
+    return out
+
+
 def lessons_from(*, failed_criteria=(), regime_concerns=(),
                  fragility: str = "", oos_summary=None) -> list[str]:
     """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
@@ -433,8 +473,6 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         out.append("COST_SENSITIVE")
     if any("drawdown" in x for x in f):
         out.append("BEAR_FRAGILE")
-    if str(fragility).upper() == "FRAGILE":
-        out.append("SINGLE_REGIME_ONLY")
     # ▶ **관문을 못 거쳐도 지표가 말하는 것은 남긴다** (2026-08-10 실측)
     #   walk-forward 창이 0개라 종결했더니 교훈이 UNDERPOWERED_DATA 하나였다.
     #   그런데 그 실험은 기준선에 58.83%p 뒤졌다 - 표본이 모자란 것과 별개로
@@ -451,10 +489,15 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         # 사양을 못 받친다** 는 뜻이고, 리서치가 다음 기획에서 창을 줄이거나
         # 더 긴 이력을 요구해야 할 신호다.
         out.append("UNDERPOWERED_DATA")
-    joined = " ".join(str(c) for c in regime_concerns)
+    all_regimes = list(regime_concerns or ())
+    checked_regimes = _checkable_regime_evidence(all_regimes)
+    joined = " ".join(str(c) for c in all_regimes)
     if "하락장" in joined:
         out.append("BEAR_FRAGILE")
-    if "가로질러" in joined or "국면이 1개" in joined:
+    checked_joined = " ".join(str(c) for c in checked_regimes)
+    if "가로질러" in checked_joined or "국면이 1개" in checked_joined or any(
+            isinstance(c, dict) and (c.get("count") == 1 or c.get("window_count") == 1)
+            for c in checked_regimes):
         out.append("SINGLE_REGIME_ONLY")
     seen, uniq = set(), []          # 순서 보존 중복 제거 - 대조가 지저분해진다
     for c in out:
@@ -761,6 +804,39 @@ def _check_never_run_family_is_not_blocked_by_lessons():
     assert g.warnings and "실행 기록은 0" in g.warnings[-1], g.as_dict()
 
 
+def _check_answer_in_wrong_field_says_where_to_move_it():
+    """**거짓 사유는 고칠 수 없는 사유다.** (2026-08-13 실측)
+
+    `prop_5682` 는 교훈 5개를 이름으로 짚어 대응을 적었다. 다만 카드가
+    `ECONOMIC_RATIONALE 에 적어라` 라고 시켜서 거기 적었고, 계약은
+    `LESSONS_ADDRESSED:` 만 읽는다. 반려문은 **"그 교훈에 대응이 없다"** 였다 -
+    사실이 아니다. 기획자는 자기가 적은 것을 보면서 무엇이 문제인지 알 수
+    없었고, 그래서 다음 기획안에서 같은 자리에 또 적었다.
+    """
+    past = [{"decision": "REJECT",
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_DSR"]}]
+    body = ("기존 시도는 하락 국면에서 손실이 확대됐다. BEAR_FRAGILE 에는 "
+            "고점 대비 -25% 손실 정지를 사전 고정하고, OVERFIT_DSR 에는 "
+            "사전 지정 파라미터 한 조합만 쓴다.")
+    g = gate0(_prop(economic_rationale=body), trials_used=1, past_outcomes=past)
+    assert not g.ok, "본문에만 있으면 통과하면 안 된다(계약이 무력해진다)"
+    assert "LESSONS_IN_WRONG_FIELD" in g.codes, g.as_dict()
+    why = " ".join(g.reasons)
+    assert "LESSONS_ADDRESSED" in why, why          # 어디로 옮길지 말해 준다
+    assert "대응이 없다" not in why, "사실이 아닌 사유가 아직 나간다"
+
+    # 본문에도 없으면 예전 사유가 그대로 맞다 - 없는 답을 있다고 하지 않는다
+    g2 = gate0(_prop(economic_rationale="그냥 될 것 같다"),
+               trials_used=1, past_outcomes=past)
+    assert "DUPLICATE_UNADDRESSED" in g2.codes, g2.as_dict()
+
+    # 일부만 본문에 있으면 나머지를 이름으로 짚어 준다
+    g3 = gate0(_prop(economic_rationale="BEAR_FRAGILE 에는 손실 정지를 건다"),
+               trials_used=1, past_outcomes=past)
+    assert "LESSONS_IN_WRONG_FIELD" in g3.codes
+    assert "OVERFIT_DSR" in " ".join(g3.reasons), g3.as_dict()
+
+
 def _check_addressed_lessons_pass():
     past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE"]}]
     g = gate0(_prop(prior_check={"lessons_addressed": {"BEAR_FRAGILE": "표본 확대"}}),
@@ -892,7 +968,10 @@ def _check_lessons_mapping_is_deterministic_baseline():
     assert lessons_from(failed_criteria=["pbo", "min_deflated_sharpe"]) == [
         "OVERFIT_PBO", "OVERFIT_DSR"]
     b = lessons_from(failed_criteria=["max_turnover"], fragility="FRAGILE")
-    assert "COST_SENSITIVE" in b and "SINGLE_REGIME_ONLY" in b, b
+    assert "COST_SENSITIVE" in b and "SINGLE_REGIME_ONLY" not in b, b
+    assert "SINGLE_REGIME_ONLY" in lessons_from(regime_concerns=[
+        {"regime_label": "TEST", "window": "2024-01/2024-06", "count": 1}])
+    assert "SINGLE_REGIME_ONLY" not in lessons_from(regime_concerns=["국면이 1개"])
     assert lessons_from(regime_concerns=["하락장 평균 수익률 -32.1%"]) == ["BEAR_FRAGILE"]
     # 같은 교훈이 두 경로로 나와도 한 번만 (대조가 지저분해진다)
     assert lessons_from(failed_criteria=["max_drawdown_pct"],
@@ -1015,7 +1094,8 @@ if __name__ == "__main__":
     _check_trial_count_comes_from_executions_not_outcomes()
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
-    _check_never_run_family_is_not_blocked_by_lessons(); print("  실행 0 계열은 안 막음    OK")
+    _check_never_run_family_is_not_blocked_by_lessons()
+    _check_answer_in_wrong_field_says_where_to_move_it(); print("  실행 0 계열은 안 막음    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
@@ -1028,4 +1108,4 @@ if __name__ == "__main__":
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 14개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 15개 영역 통과. 루프가 닫혔다.")

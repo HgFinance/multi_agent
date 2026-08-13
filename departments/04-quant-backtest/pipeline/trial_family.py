@@ -97,6 +97,35 @@ def universe_key(text) -> str:
     return ""
 
 
+# ── 테마 층 ──────────────────────────────────────────────────────────────────
+# ▶ **계열 위의 조회 층이지 정체성이 아니다** (2026-08-13, 문헌 3건 수렴)
+#   TreeBH(테마→계열→시도 트리 검정), GBH(테마별 REJECT/시도 = π₀ 추정으로
+#   문턱 가중), Bühlmann 신뢰도(시도 1회 계열도 테마 평균으로 수축해 순위
+#   가능) - 셋 다 이 한 층을 연료로 쓴다. 분류는 KRX 148개 이상현상 복제
+#   연구(JDQS 2020)의 군집을 따른다: 가치 69% 생존 vs 수익성 5% - 테마가
+#   사전확률의 축이 되는 시장이다.
+#
+#   **family_id 해시에 절대 넣지 않는다.** 2dGBH 의 실측 경고: 테마를 잘못
+#   자르면 검정력 붕괴 + 위양성 폭발이다. 테마가 정체성에 들어가면 오분류
+#   교정이 곧 계열 갈라짐(다중검정 분모 오염)이 된다. 조회 층이면 교정이
+#   공짜다.
+THEMES = {
+    "momentum": "추세",
+    "risk_adjusted_momentum": "추세",
+    "trend_following": "추세",
+    "breakout": "추세",
+    "mean_reversion": "반전",
+    "low_volatility": "저위험",
+    "illiquidity_premium": "거래마찰",
+    "liquidity_shock_reversal": "거래마찰",
+}
+
+
+def theme_of(edge_type: str) -> str:
+    """edge_type -> 테마. **모르는 유형은 '미분류'** - 지어내지 않는다."""
+    return THEMES.get(str(edge_type or "").strip().lower(), "미분류")
+
+
 def family_key(hyp: dict) -> dict:
     """가설 -> Family 를 정하는 재료. **튜닝 값·자유 서술은 안 들어간다.**"""
     edge = hyp.get("expected_edge") or {}

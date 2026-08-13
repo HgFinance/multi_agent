@@ -376,10 +376,14 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
 
     @server.tool(
         name="factory_submit_proposal",
-        description="기획안을 발행 게이트에 제출한다. 기획자 산출과 **독립 회의론자** "
-                    "산출을 함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. "
-                    "근거 리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
-                    "차단 사유를 받으면 그 사유에 답해 다시 제출하라.")
+        description="기획안을 발행 게이트에 제출한다. **이 호출이 곧 납품이다** - "
+                    "카드 텍스트·요약은 납품으로 세지 않는다. `planner_run` 에 "
+                    "지금 작업 중인 칸반 카드 ID(t_ 로 시작)를 넣으면 납품이 그 "
+                    "카드 몫으로 대조된다. 기획자 산출과 **독립 회의론자** 산출을 "
+                    "함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. 근거 "
+                    "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
+                    "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
+                    "카드 안에서 다시 제출하라.")
     def factory_submit_proposal(planner_text: str, skeptic_text: str,
                                 planner_run: str, skeptic_run: str,
                                 planner_prompt: str = "",
@@ -395,10 +399,28 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                       for i in PI._split(b.get("LEAD_IDS", ""))}
             leads = PI.load_leads(conn, sorted(wanted))
             missing = sorted(wanted - set(leads))
+            # ▶ **계열 이력을 넘긴다** (2026-08-13). 호스트 수확 경로와 같은
+            #   버그가 여기에도 있었다 - 인자가 빠져 모든 기획안이 "이 계열은
+            #   처음" 으로 접수됐고, 승격 관문만 진짜 이력을 봐서 뒤늦게
+            #   영구 반려했다. 에이전트가 실제로 쓰는 경로가 이쪽이므로
+            #   여기가 안 맞으면 고쳐도 안 고쳐진 것과 같다.
+            # ▶ **납품을 카드 몫으로 각인한다** (2026-08-13, 납품=도구 호출 계약)
+            #   planner_run 에 칸반 카드 ID(t_...)가 오면 case_id 에 그대로
+            #   찍는다. 수확기 `_mcp_deliveries` 가 이 각인으로 "이 카드가
+            #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
+            #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
+            _pr = str(planner_run or "").strip()
             r = PI.intake(planner_text, skeptic_text,
-                          case_id=f"plan-{_dt.now(_tz.utc):%Y%m%d}",
+                          case_id=(f"card-{_pr[:40]}" if _pr.startswith("t_")
+                                   else f"plan-{_dt.now(_tz.utc):%Y%m%d}"),
                           planner_run=planner_run, skeptic_run=skeptic_run,
-                          leads=leads)
+                          leads=leads,
+                          outcomes_for=lambda b: PI.load_past_outcomes(
+                              conn,
+                              (b.get("EDGE_TYPE") or "").strip().lower(),
+                              (b.get("UNIVERSE_KEY") or "").strip().lower(),
+                              label=(b.get("LABEL") or "").strip(),
+                              baseline=(b.get("BASELINE") or "").strip()))
             for prop, _g in r.proposals:
                 setattr(prop, "_planner_prompt", planner_prompt)
                 setattr(prop, "_skeptic_prompt", skeptic_prompt)
