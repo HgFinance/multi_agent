@@ -64,6 +64,8 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_HOME: /opt/data
+      HERMES_PROFILE: ceo-agent
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # Reuse this existing CEO gateway as the authenticated internal API
