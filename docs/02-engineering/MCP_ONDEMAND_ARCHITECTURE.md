@@ -49,11 +49,22 @@
 
 공급망 리스크: 주력 2종이 **개인 유지보수 npm 패키지** — API 키가 서드파티 코드를 통과한다. **버전 고정 + 포크 보관 + 의존성 감사**가 도입 조건.
 
-## 4. 수집기 26종 처분표 — 전수 대조 결과
+## 4. 수집기 처분표
 
-**폐기 0 · MCP 전환 2(이미 집행) · 캐시온리드 1 · 유지 23.**
+> **⚠ 최종 결정이 조사 권고를 덮었다 (재일, 2026-08-13 저녁).**
+> *"MCP 쓰면 그동안 수집해서 DB 적재하려고 만들었던 수집기는 정리해야지. 미시구조·호가·체결·가격데이터 수집하는 수집기 빼고 정리해야 MCP 도입 의의가 살지."*
+> 조사(§4 원안)는 PIT·정정 revision·사후 채점 근거로 폐기 0 을 권고했으나, 소유자가 트레이드오프를 인지한 상태에서 **시세·가격축만 적재 유지**로 확정했다. 그 결과:
+>
+> | 처분 | 대상 |
+> |---|---|
+> | ✂ **내림 (08-13 집행)** | disclosure · financial · cashflow · company-profile · packet-outcome · bluesky-watch (스케줄러 주석) + **news-watcher · ls-news 컨테이너** (profiles 게이트) |
+> | 유지 (시세·가격축) | ls-realtime · breadth · derivatives · chart-daily ×2 · vkospi · style-index(지수 가격) · market-archive · retention |
+> | 유지 (운영·판단흔적) | universe-restrictions(거래 안전) · label-snapshot(소급 불가) · calendar-observed · steward ×2 · capability-audit |
+> | 유지 (타부서 협의 전) | **corporate-action** — 회계 원장 CA 처리(도현 소유)가 소비자라 일방 정리 불가. 협의 후 결정 |
+>
+> 같이 수용된 결과: QF-R/QF-F 팩터 설계의 적재 전제는 팩터 구현 시 재검토 · 공시/재무의 observed_at PIT 신규 생성 중단 · Packet 채점 축 동면 · `/evidence/*` 신규 유입 중단(기존 데이터는 유지, 삭제는 별도 결정). 되돌리기: 전부 주석/profiles 게이트라 한 줄 복구다.
 
-"더 내릴 수 있는 게 없다"가 조사의 결론이다. 남은 수집기는 전부 다음 중 하나가 적재 위에서만 성립하기 때문:
+**(원안 기록 — 폐기 0 권고의 근거)** 남은 수집기는 전부 다음 중 하나가 적재 위에서만 성립하기 때문:
 
 - **observed_at PIT**: DART `rcept_dt`는 날짜뿐(시각 없음) — "09:00 판단이 15:00 공시를 미리 봤는지"는 적재 시점 기록으로만 구분된다. 직조회는 소급 생성 불가
 - **정정 revision PIT**: "그 시점에 알 수 있었던 최신 개정본" 재현 — 직조회는 항상 최신본만 본다
