@@ -41,6 +41,9 @@ CANONICAL_SKILLS = frozenset(
         "hermes-multi-agent-pipelines",
         "methodology-scout",
         "skill-authoring",
+        # 2026-08-13: 카탈로그 우선 탐색 - "없다" 선언 전 정보원 4층 검색 규율.
+        # KRX 유료 결제를 막은 실측(t3320 발견)이 탄생 계기.
+        "source-catalog-first",
         "wiring-audit",
     }
 )
@@ -75,6 +78,9 @@ SKILL_OWNER_BY_NAME = MappingProxyType(
         "methodology-scout": frozenset({"research-department"}),
         "skill-authoring": frozenset(
             {"quant-backtest-department", "research-department"}
+        ),
+        "source-catalog-first": frozenset(
+            {"research-department", "quant-backtest-department", "qa-department"}
         ),
         "wiring-audit": frozenset(
             {"quant-backtest-department", "research-department", "qa-department"}
