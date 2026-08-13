@@ -933,11 +933,13 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             from research.experiment_outcomes
             order by created_at desc limit %s""", (n,))
 
-    # 외부 정보원(DART·네이버) 질의 도구 - 정성 데이터의 MCP 검색 통합
+    # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
     # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
     # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
     from external_sources import register_external_tools
+    from external_macro import register_macro_tools
     register_external_tools(server)
+    register_macro_tools(server)
 
     if liaison:
         _restrict_to_liaison(server)

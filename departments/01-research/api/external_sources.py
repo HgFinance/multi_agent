@@ -64,31 +64,40 @@ DART_DAILY_CAP = int(os.environ.get("MCP_DART_DAILY_CAP", "2000"))
 NAVER_DAILY_CAP = int(os.environ.get("MCP_NAVER_DAILY_CAP", "5000"))
 
 _budget_lock = Lock()
-_budget: dict = {"day": None, "dart": 0, "naver": 0}
+_budget: dict = {"day": None}          # source 별 카운터는 동적 생성
+_caps: dict = {}                       # source -> cap (등록된 정보원 목록 겸용)
 
 
 class BudgetExhausted(RuntimeError):
     pass
 
 
-def _spend(source: str, cap: int) -> None:
+def spend(source: str, cap: int) -> None:
+    """정보원 하나의 일일 호출을 1 소비한다. 다른 모듈(macro·ls)도 이걸 쓴다."""
     with _budget_lock:
+        _caps[source] = cap
         today = date.today().isoformat()
-        if _budget["day"] != today:
-            _budget.update({"day": today, "dart": 0, "naver": 0})
-        if _budget[source] >= cap:
+        if _budget.get("day") != today:
+            _budget.clear()
+            _budget["day"] = today
+        used = _budget.get(source, 0)
+        if used >= cap:
             raise BudgetExhausted(
                 f"{source} 에이전트 일일 예산({cap}) 소진 - 오늘은 더 호출할 수 "
                 f"없다. 내일 리셋되며, 급하면 운영자가 MCP_{source.upper()}"
                 f"_DAILY_CAP 을 올려야 한다. 답을 지어내지 말 것.")
-        _budget[source] += 1
+        _budget[source] = used + 1
+
+
+_spend = spend  # 내부 호출 하위 호환
 
 
 def budget_state() -> dict:
     with _budget_lock:
-        return {"day": _budget["day"],
-                "dart": {"used": _budget["dart"], "cap": DART_DAILY_CAP},
-                "naver": {"used": _budget["naver"], "cap": NAVER_DAILY_CAP}}
+        srcs = sorted(set(_caps) | {"dart", "naver"})
+        caps = {"dart": DART_DAILY_CAP, "naver": NAVER_DAILY_CAP, **_caps}
+        return {"day": _budget.get("day"),
+                **{s: {"used": _budget.get(s, 0), "cap": caps[s]} for s in srcs}}
 
 
 # ── 스냅샷 (cache-on-cite v1) ───────────────────────────────────────────────
@@ -329,11 +338,15 @@ if __name__ == "__main__":
     # 예산이 캡에서 실제로 거부하나
     _budget.update({"day": date.today().isoformat(), "dart": DART_DAILY_CAP})
     try:
-        _spend("dart", DART_DAILY_CAP)
+        spend("dart", DART_DAILY_CAP)
         raise AssertionError("예산 소진인데 통과했다")
     except BudgetExhausted:
         print("  예산 거부                OK")
     _budget.update({"dart": 0, "naver": 0})
+    # 동적 정보원도 같은 계층을 타나 (macro·ls 가 쓴다)
+    spend("ecos", 5)
+    assert budget_state()["ecos"]["used"] == 1
+    print("  동적 정보원 예산          OK")
     # 하이라이트 태그 벗기기
     assert _plain("<b>삼성전자</b> &quot;발표&quot;") == '삼성전자 "발표"'
     print("  평문 변환                OK")

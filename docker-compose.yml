@@ -520,8 +520,12 @@ services:
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
       MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
+      MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
       MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
       # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
       #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
@@ -553,6 +557,47 @@ services:
   # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
   # 지시가 아니라 capability 절단이다 - 서버가 제거를 검증 못 하면 기동을 거부한다.
   # 포트는 호스트에 게시하지 않는다(research-liaison-mcp:8037, compose 안 전용).
+  # ▶ LS 증권 OpenAPI MCP (2026-08-13, 재일 결정 "TR 목록을 정제해서 질문에 답하게")
+  #   research-mcp 와 **다른 컨테이너**인 이유: 2026-08-02 결정(LS 자격은 퍼뜨리지
+  #   않는다)을 유지한다 - 키는 여기에만 있고 에이전트는 도구만 받는다.
+  #   도구 2층: ls_tr_catalog(정제 색인 365 TR 검색) + 큐레이션 실행(수급 t1717 부터).
+  #   포트는 호스트에 게시하지 않는다(ls-mcp:8038, compose 안 전용).
+  ls-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-ls-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    working_dir: /app/departments/01-research
+    command: ["python", "api/ls_mcp_server.py", "--serve"]
+    environment:
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      # LS 자격 - 수집기(batch-collectors)와 같은 목록·같은 격리 지위.
+      # 조회는 LS_MARKET_ENV(기본 LIVE) - 모의 서버는 수급 TR 에 빈 값을 준다.
+      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
+      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      - ./departments/01-research/reports:/app/departments/01-research/reports
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 15s
+
   research-liaison-mcp:
     build:
       context: departments/01-research
@@ -577,8 +622,12 @@ services:
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
       MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
+      MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
       MCP_CITE_LOG_DIR: /tmp/mcp_citations
     extra_hosts:
       - "host.docker.internal:host-gateway"

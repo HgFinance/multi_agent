@@ -177,6 +177,13 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+  # LS 증권 조회면 (2026-08-13) - TR 카탈로그 검색 + 수급 큐레이션.
+  # 키는 ls-mcp 컨테이너에만 있다(2026-08-02 자격 격리 결정 유지).
+  ls-securities:
+    url: http://ls-mcp:8038/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
   paper-search:
     url: http://paper-search-mcp:8041/mcp
     enabled: false
