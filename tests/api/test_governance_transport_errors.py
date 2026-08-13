@@ -44,7 +44,7 @@ class GovernanceTransportErrorTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(governance_client, "GOVERNANCE_API_URL", "http://governance-api:8000"),
             patch.object(governance_client.httpx, "AsyncClient", _ConnectFailingAsyncClient),
-            self.assertLogs("governance_client", level="WARNING") as logs,
+            self.assertLogs("uvicorn.error", level="WARNING") as logs,
         ):
             with self.assertRaises(GovernanceTransportError) as raised:
                 await governance_request(
