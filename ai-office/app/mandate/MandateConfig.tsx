@@ -1,13 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MandateSubmissionError, submitMandateDraft } from "../lib/mandateClient";
 
 /**
  * 운용 지침 설정 화면.
  *
- * 이 화면은 초안을 만들 뿐 주문·원장·한도를 확정하지 않는다. 제출은 Risk/QA
- * Gate로 넘기는 행위이고, 그 경로(FastAPI BFF)는 아직 연결돼 있지 않다.
- * 그래서 하단에 연결 대기 상태를 그대로 띄우고, 임시 저장은 브라우저 안에서만 한다.
+ * 제출("지침 제출 및 검토")은 `../lib/mandateClient.ts`를 거쳐
+ * `POST /ui/mandates`(최초 1회, 없을 때만) + `POST /ui/mandates/{id}/change-requests`
+ * (항상)로 BFF에 전달된다. 이 화면 자체가 주문·원장·한도를 확정하지 않는다 -
+ * Risk/QA 검토(LOOSEN)나 즉시 적용(TIGHTEN/NEUTRAL) 여부는 서버가 정한다.
+ *
+ * "임시 저장"은 여전히 브라우저(localStorage)에만 남는다 - 완성 전 초안까지
+ * Mandate Version으로 만들면 `content_hash` 중복·승인 흐름이 매번 발동한다
+ * (USER_INPUT_API_SPEC §2.4와 같은 이유).
  */
 
 export type RiskProfile = "conservative" | "neutral" | "aggressive";
@@ -21,6 +27,14 @@ export interface MandateDraft {
   currency: string;
   maxSingleWeightPct: number;
   grossExposurePct: number;
+  /**
+   * 2026-08-12 추가. `governance.mandate_versions.risk_bounds.max_drawdown_pct`의
+   * 필수값이라, 슬라이더가 없으면 제출 자체가 서버에서 422로 거부된다
+   * (USER_INPUT_SPEC.md §2 6번 "전체 최대 손실" — 프리셋이 아니라 직접 선택 항목).
+   */
+  maxDrawdownPct: number;
+  /** 위와 같은 이유. §2 7번 "일일 최대 손실". `<= maxDrawdownPct`여야 한다. */
+  maxDailyLossPct: number;
   allowedAssets: Record<AssetClassId, boolean>;
   approvalMode: ApprovalMode;
 }
@@ -51,8 +65,15 @@ const DEFAULT_DRAFT: MandateDraft = {
   riskProfile: "conservative",
   baseCapital: 100_000_000,
   currency: "USD",
-  maxSingleWeightPct: 30,
+  // 2026-08-12: 기본 성향(conservative)의 프리셋 상한(max_sector_weight=25%)보다
+  // 낮아야 한다(mandatePresets.ts LOW 등급) - 그래야 값을 하나도 안 건드리고
+  // 바로 제출해도 `max_instrument_weight <= max_sector_weight` 제약을 지킨다.
+  maxSingleWeightPct: 20,
   grossExposurePct: 200,
+  // USER_INPUT_API_SPEC.md 예시값과 같은 기본선(20%/3%). risk_bounds 계약상
+  // maxDailyLossPct는 항상 maxDrawdownPct 이하여야 한다(§3.2 신규 제약).
+  maxDrawdownPct: 20,
+  maxDailyLossPct: 3,
   // 기본은 현물 Long-only. 레버리지·파생·가상자산은 정책 계층에서 꺼둔 상태로 시작한다.
   allowedAssets: { equity: true, etf: true, leverage: false, futures: false, options: false, derivatives: false, crypto: false },
   approvalMode: "manual",
@@ -98,6 +119,7 @@ export default function MandateConfig() {
   const [reply, setReply] = useState("");
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const patch = useCallback(<K extends keyof MandateDraft>(key: K, value: MandateDraft[K]) => {
@@ -110,7 +132,8 @@ export default function MandateConfig() {
 
   useEffect(() => {
     if (!notice) return undefined;
-    const timer = window.setTimeout(() => setNotice(""), 4000);
+    // Case id·검토 상태처럼 읽는 데 시간이 걸리는 문구가 생겨 4초에서 늘렸다.
+    const timer = window.setTimeout(() => setNotice(""), 8000);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
@@ -146,8 +169,33 @@ export default function MandateConfig() {
     setNotice("브라우저에 임시 저장했습니다. 서버(BFF)에는 아직 전송되지 않았습니다.");
   }
 
-  function submit() {
-    setNotice("제출은 Risk/QA Gate를 거쳐야 합니다. BFF(FastAPI 8001)가 연결되면 활성화됩니다.");
+  async function submit() {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      // USER_INPUT_SPEC.md §5: objective_text는 DB not null이라 사용자가
+      // 아무것도 안 쓰면 선택 결과에서 자동 생성한다. 자연어는 판정에 쓰지
+      // 않는다 - 저장·맥락 전달용일 뿐이다.
+      const fallbackObjective = `${RISK_PROFILES.find((p) => p.id === draft.riskProfile)?.label ?? "균형"} 성향 · 지침`;
+      const objectiveText = draft.objective.trim() || fallbackObjective;
+
+      const result = await submitMandateDraft(draft, objectiveText);
+      setNotice(
+        result.stage === "FAST_APPLIED"
+          ? `v${result.version}로 즉시 적용됐습니다.`
+          : result.stage === "AWAITING_REVIEW"
+            ? `v${result.version} 제안이 Risk/QA 검토 대기로 넘어갔습니다(Case ${result.caseId ?? "-"}).`
+            : `제출됐습니다: ${result.stage}`,
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof MandateSubmissionError
+          ? error.message
+          : "지침 제출 중 알 수 없는 오류가 발생했습니다.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -315,6 +363,54 @@ export default function MandateConfig() {
                     <span>500%</span>
                   </div>
                 </div>
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase">전체 최대 손실</label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                      {draft.maxDrawdownPct}%
+                    </span>
+                  </div>
+                  <input
+                    id="max-drawdown"
+                    type="range"
+                    min={5}
+                    max={50}
+                    value={draft.maxDrawdownPct}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      patch("maxDrawdownPct", next);
+                      // daily <= drawdown 제약. 슬라이더 두 개가 서로 어긋나게 두지 않는다.
+                      if (draft.maxDailyLossPct > next) patch("maxDailyLossPct", next);
+                    }}
+                    className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
+                    <span>5%</span>
+                    <span>25%</span>
+                    <span>50%</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-2">
+                    <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase">일일 최대 손실</label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                      {draft.maxDailyLossPct}%
+                    </span>
+                  </div>
+                  <input
+                    id="max-daily-loss"
+                    type="range"
+                    min={1}
+                    max={draft.maxDrawdownPct}
+                    value={draft.maxDailyLossPct}
+                    onChange={(event) => patch("maxDailyLossPct", Number(event.target.value))}
+                    className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
+                    <span>1%</span>
+                    <span>전체 최대 손실({draft.maxDrawdownPct}%) 이하</span>
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -383,9 +479,9 @@ export default function MandateConfig() {
           </div>
 
           <footer className="border-t border-outline-variant p-4 bg-surface-bright flex justify-between items-center gap-4 flex-wrap mt-auto">
-            <div className="text-xs text-error flex items-center gap-1 font-medium">
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">warning</span>
-              BFF connection pending. Save route via FastAPI BFF 8001.
+            <div className="text-xs text-on-surface-variant flex items-center gap-1 font-medium">
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">info</span>
+              제출은 Risk/QA Gate를 거칩니다. 완화(LOOSEN) 변경은 검토 승인 후 적용됩니다.
             </div>
             <div className="flex gap-3">
               <button
@@ -398,9 +494,10 @@ export default function MandateConfig() {
               <button
                 type="button"
                 onClick={submit}
-                className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm"
+                disabled={submitting}
+                className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                지침 제출 및 검토
+                {submitting ? "제출 중..." : "지침 제출 및 검토"}
               </button>
             </div>
             {notice ? (
