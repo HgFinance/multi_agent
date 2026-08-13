@@ -527,7 +527,10 @@ services:
   #   전용 컨테이너 하나가 전담한다(8개 profiles/ 전체를 보는 유일한 컨테이너) - 이 8개는
   #   여전히 kanban_show/list/comment/complete 같은 조회·자기보고 tool만 쓴다.
   research-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-research-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -538,6 +541,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: research-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
@@ -556,7 +560,10 @@ services:
     stop_grace_period: 20s
 
   quant-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-quant-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -567,6 +574,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: quant-backtest-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
@@ -701,7 +709,10 @@ services:
   # 하지 않는다 - /opt/data/config.yaml(provider:)과 auth.json이 결정한다(Risk/QA 둘 다
   # Codex 배정, 2026-08-10 확정 매핑).
   risk-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -712,6 +723,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: risk-management
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
@@ -721,7 +733,10 @@ services:
     stop_grace_period: 20s
 
   qa-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-qa-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -732,6 +747,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: qa-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
