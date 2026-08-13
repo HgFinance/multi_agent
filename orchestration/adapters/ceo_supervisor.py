@@ -250,6 +250,9 @@ class SupervisorState:
     max_wakeups: int = 8
     qa_required: bool = True
     workflow_mode: str = "analysis"
+    # The root mandate is the single source of truth.  This flag only controls
+    # whether supervisor-created children receive a reference to that snapshot.
+    has_mandate: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -1048,9 +1051,31 @@ class CeoSupervisorService:
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
                 ):
-                    synthesis = _analysis_synthesis_decision(state)
+                    # QA creation can race with another terminal event. Re-read
+                    # the scoped workflow before creating the fast-path response
+                    # task so a synthesis created by the sibling event is
+                    # observed and not duplicated. This refresh must not turn
+                    # QA into a prerequisite: the decision still inspects only
+                    # primary analysis children.
+                    _, refreshed_payloads = self.client.workflow(root_id)
+                    refreshed_state = SupervisorState(
+                        parent_task_id=root_id,
+                        children=tuple(
+                            ChildTaskState.from_hermes(payload)
+                            for payload in refreshed_payloads
+                            if payload.get("assignee") is not None
+                        ),
+                        wakeups=state.wakeups,
+                        replan_count=state.replan_count,
+                        max_retries=self.max_retries,
+                        max_wakeups=self.max_wakeups,
+                        qa_required=state.qa_required,
+                        workflow_mode=state.workflow_mode,
+                        has_mandate=state.has_mandate,
+                    )
+                    synthesis = _analysis_synthesis_decision(refreshed_state)
                     if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
-                        self._execute(synthesis, state)
+                        self._execute(synthesis, refreshed_state)
                         action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1

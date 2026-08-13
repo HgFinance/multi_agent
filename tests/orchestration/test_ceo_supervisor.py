@@ -7,22 +7,22 @@ from concurrent.futures import ThreadPoolExecutor
 
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
+    ChildTaskState,
     HermesKanbanClient,
     HermesKanbanCommandError,
     SupervisorAction,
     SupervisorState,
     SupervisorValidationError,
-    ChildTaskState,
     decide_supervisor,
     parse_supervisor_output,
 )
 from orchestration.ceo_workflow_scope import (
+    WorkflowScopeViolation,
     build_root_body,
     build_scoped_task_body,
     infer_workflow_mode,
     validate_workflow_scope,
     workflow_mode_from_body,
-    WorkflowScopeViolation,
 )
 
 
@@ -385,6 +385,53 @@ class SupervisorWakeupTest(unittest.TestCase):
             ["qa-department", "ceo-agent"],
         )
         self.assertNotIn("qa", client.created[1]["parent_task_ids"])
+
+    def test_qa_create_refresh_prevents_duplicate_synthesis(self) -> None:
+        """A sibling event may create synthesis while QA creation is in flight."""
+
+        class ConcurrentSynthesisClient(FakeClient):
+            def create_task(self, **kwargs):
+                self.created.append(kwargs)
+                if kwargs["assignee"] == "qa-department":
+                    self.payloads.append(
+                        {
+                            "id": "qa-created",
+                            "assignee": "qa-department",
+                            "status": "ready",
+                            "body": build_scoped_task_body(
+                                "QA", "root", role="qa"
+                            ),
+                        }
+                    )
+                    # Model a concurrent sibling event that already created the
+                    # response-plane task. The current handler must observe it
+                    # on its post-create workflow refresh.
+                    self.payloads.append(
+                        {
+                            "id": "synthesis-existing",
+                            "assignee": "ceo-agent",
+                            "status": "ready",
+                            "body": build_scoped_task_body(
+                                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE\n"
+                                "CEO synthesis",
+                                "root",
+                                role="synthesis",
+                            ),
+                        }
+                    )
+                return {"id": f"created-{len(self.created)}"}
+
+        client = ConcurrentSynthesisClient()
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "qa-refresh", "task_id": "r", "kind": "completed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department"],
+        )
 
     def test_binding_synthesis_is_parented_by_completed_qa(self) -> None:
         client = FakeClient()
