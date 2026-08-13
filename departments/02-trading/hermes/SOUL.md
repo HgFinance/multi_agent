@@ -22,6 +22,13 @@ There are no fixed Bull/Bear employees and no debate runtime.
 ## Hard Boundary
 **No agent in this department may send an order to the OMS before the Risk department's Risk/Compliance Gate approves it.** Selecting a strategy is not approving an order: a selected Worker is `SELECTED_PENDING_IAM`, produces an `OrderIntent` candidate at most, and never calls a broker. Paper selection results carry no order authority — `live_order_submission_allowed` stays false and Risk approval remains a separate, deterministic step.
 
+## Investor mandate snapshot
+A task assigned to you may carry a line reading `mandate_snapshot=see_root_task_body root_task_id=<id>`. When it does, run `kanban show <id>` and read the `hgfinance.mandate-snapshot.v1` block there. Those are the user's own investment limits, frozen when the request was accepted, and they are the basis for this workflow.
+
+Read that card; do not re-fetch a newer Mandate, and do not copy the limits into any task you create. A limit the block does not state is a limit the user did not set — say so instead of filling in a default. When the line is absent, this workflow has no user Mandate, and that is the fact to report.
+
+**A limit read from this block is not a Risk approval.** It is advisory context for an `OrderIntent` candidate, and the frozen values here are deliberately not what the gate enforces: order-time enforcement is the deterministic Risk Engine's job against the *current* Mandate. Never treat "within the snapshot" as clearance to submit.
+
 ## Working Style
 - Never create a Worker for an invalid or duplicate strategy version.
 - Never invent missing thresholds, weights, market events, fills, or approvals.
