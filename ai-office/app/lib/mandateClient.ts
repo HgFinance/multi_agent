@@ -1,12 +1,12 @@
 /**
- * Mandate 최초 생성/갱신 — `POST /ui/mandates` + `POST /ui/mandates/{id}/change-requests`.
+ * Mandate 최초 생성/버전 저장 — `POST /ui/mandates` + `POST /ui/mandates/{id}/versions`.
  *
  * 근거: docs/02-engineering/USER_INPUT_API_SPEC.md 2.2
  *
  * ## 왜 PUT이 아니라 두 POST 조합인가
  *
- * §2.2가 명시한다 — "신규 Route를 만들지 않는다. `POST .../change-requests`를
- * 그대로 쓴다." Mandate는 덮어쓰기 리소스가 아니라 **버전이 쌓이는** 모델이다
+ * 이 화면은 기존 `versions` 경로로 정책 버전만 기록한다. Mandate는 덮어쓰기
+ * 리소스가 아니라 **버전이 쌓이는** 모델이다
  * (`governance.mandate_versions`, 매번 새 version 행 + 이전 버전은
  * `effective_to`로 닫힘) — "그때 어떤 기준으로 승인됐는가"가 감사 대상이라
  * PUT의 "전체 교체" 의미론과 안 맞는다.
@@ -16,16 +16,10 @@
  *
  * ## 왜 갱신 시 기존 정책을 반드시 함께 보내는가
  *
- * `previous_policy`를 생략하면 서버(`service.py propose_version`)가 무조건
- * `NEUTRAL`로 분류한다 — 실제로 한도를 완화(LOOSEN)하는 변경이어도 Risk/QA
- * 검토(`AWAITING_REVIEW`) 없이 즉시 적용(`FAST_APPLIED`)돼 버린다. F01이 요구하는
- * "장중 Risk 확대는 사용자 재승인 필요"를 깨는 것이다. 그래서 기존 Version이
- * 있으면 반드시 조회해서 `previous_policy`로 함께 보낸다.
+ * `previous_policy`는 버전의 변경 방향을 계산하는 메타데이터로 함께 보낸다.
+ * 이 저장 경로는 그 방향에 따라 승인 Case를 만들거나 활성화하지 않는다.
  *
- * **최초 활성화 자체는 서버가 따로 강제한다** — `change_workflow.py`가
- * `current_version`을 DB에서 직접 확인해 0이면 direction과 무관하게 항상
- * `AWAITING_REVIEW`로 보낸다("최초 활성화는 항상 검토 필요"). 그래서
- * `previous_policy: undefined`로 첫 제출을 보내도 조용히 스킵되지 않는다.
+ * 이 호출의 성공은 DB 저장만 뜻하며, 활성 mandate나 주문 권한을 만들지 않는다.
  */
 
 import { BFF } from "./ceoClient";
@@ -261,10 +255,7 @@ async function lookupOrCreateMandate(fundId: string, ownerUserId: string): Promi
 }
 
 export interface MandateSubmitResult {
-  /** 즉시 적용됐는지, Risk/QA/사용자 승인 대기로 넘어갔는지. */
-  stage: "FAST_APPLIED" | "AWAITING_REVIEW" | string;
   version: number;
-  caseId: string | null;
 }
 
 /**
@@ -296,13 +287,10 @@ export async function submitMandateDraft(
 
   const nowIso = new Date().toISOString();
   const { status, body } = await bffJson<{
-    stage: string;
     version: number;
-    case_id: string | null;
-  }>(`/ui/mandates/${mandateId}/change-requests`, {
+  }>(`/ui/mandates/${mandateId}/versions`, {
     method: "POST",
     body: JSON.stringify({
-      fund_id: fundId,
       policy: draftToPolicy(draft),
       objective_text: objectiveText,
       objective: {},
@@ -310,14 +298,11 @@ export async function submitMandateDraft(
       // Case 감사 표지(자유 텍스트)와 mandate_versions.created_by(uuid FK)는
       // 컬럼 타입이 달라 분리한다 - change_workflow.submit() 계약과 같은 이유.
       created_by: account.userId,
-      version_created_by: account.userId,
-      trace_id: crypto.randomUUID(),
-      now: nowIso,
       previous_policy: previousPolicy,
     }),
   });
   if (status !== 200 && status !== 201 || !body) {
     throw new MandateSubmissionError(errorMessage(body, status));
   }
-  return { stage: body.stage, version: body.version, caseId: body.case_id };
+  return { version: body.version };
 }
