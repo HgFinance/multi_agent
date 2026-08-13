@@ -148,7 +148,7 @@ app = FastAPI(
         {
             "name": "ceo-office",
             "description": (
-                "CEO Kanban 워크플로. ask -> 부서 실행 -> QA -> CEO 최종 종합.\n\n"
+                "CEO Kanban 워크플로. ask -> 선택 부서 실행 -> CEO 종합 + 비동기 QA 평가.\n\n"
                 "`DELETE`는 의도적으로 없다 - 누가 언제 무엇을 요청했고 어느 부서가"
                 " 실패했는지는 감사 추적이므로 정리는 Archive로만 한다."
             ),

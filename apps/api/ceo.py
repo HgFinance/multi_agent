@@ -7,6 +7,7 @@ use the normalized Kanban reader; the BFF never opens Hermes' database.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -173,7 +174,50 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     selected: list[str] = []
     qa_required = False
     synthesis_present = False
-    for child in _child_records(task.get("children")):
+    children = _child_records(task.get("children"))
+    metadata = task.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            metadata = {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    for key in ("task_run_metadata", "run_metadata"):
+        extra = task.get(key)
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except (TypeError, ValueError):
+                extra = {}
+        if isinstance(extra, Mapping):
+            metadata = {**metadata, **extra}
+    task_run = task.get("task_run")
+    if isinstance(task_run, Mapping):
+        task_run_metadata = task_run.get("metadata", task_run)
+        if isinstance(task_run_metadata, Mapping):
+            metadata = {**metadata, **task_run_metadata}
+    workflow_metadata = metadata.get("workflow_metadata")
+    if isinstance(workflow_metadata, Mapping):
+        metadata = {**metadata, **workflow_metadata}
+    runs = task.get("runs")
+    if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes, bytearray)):
+        for run in runs:
+            if not isinstance(run, Mapping):
+                continue
+            run_metadata = run.get("metadata")
+            if isinstance(run_metadata, str):
+                try:
+                    run_metadata = json.loads(run_metadata)
+                except (TypeError, ValueError):
+                    run_metadata = {}
+            if isinstance(run_metadata, Mapping):
+                metadata = {**metadata, **run_metadata}
+                nested = run_metadata.get("workflow_metadata")
+                if isinstance(nested, Mapping):
+                    metadata = {**metadata, **nested}
+
+    for child in children:
         assignee = str(child.get("assignee") or child.get("profile") or "").strip()
         if assignee not in CANONICAL_PROFILES:
             continue
@@ -188,6 +232,25 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
             if assignee not in selected:
                 selected.append(assignee)
 
+    declared_departments = metadata.get("selected_departments")
+    if isinstance(declared_departments, str):
+        try:
+            declared_departments = json.loads(declared_departments)
+        except (TypeError, ValueError):
+            declared_departments = ()
+    if isinstance(declared_departments, Sequence) and not isinstance(
+        declared_departments, (str, bytes, bytearray)
+    ):
+        for profile in declared_departments:
+            profile = str(profile).strip()
+            if profile in _PRIMARY_PROFILE_ORDER and profile not in selected:
+                selected.append(profile)
+    declared_qa = metadata.get("qa_required")
+    if isinstance(declared_qa, str):
+        declared_qa = declared_qa.strip().casefold() == "true"
+    if isinstance(declared_qa, bool):
+        qa_required = qa_required or declared_qa
+
     summary = str(task.get("latest_summary") or "").casefold()
     if not selected and summary:
         for profile in _PRIMARY_PROFILE_ORDER:
@@ -198,6 +261,27 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     if not synthesis_present and re.search(r"synth|합성|최종 의견", summary):
         synthesis_present = True
     return selected, qa_required, synthesis_present
+
+
+def _planning_summary(
+    task: Mapping[str, object],
+    selected: Sequence[str],
+    qa_required: bool,
+) -> str | None:
+    """Return user-facing planning prose consistent with the workflow lane."""
+    existing = str(task.get("latest_summary") or "").strip() or None
+    body = str(task.get("body") or "").casefold()
+    binding = bool(re.search(r"(?:^|\n)workflow_mode=binding(?:\n|$)", body))
+    if not binding and qa_required:
+        labels = [_PROFILE_LABEL[profile] for profile in selected if profile in _PROFILE_LABEL]
+        if labels:
+            subject = "와 ".join(labels)
+            return (
+                f"{subject} 결과가 준비되면 CEO가 최종 종합을 진행하고, "
+                "QA는 별도의 비동기 evaluation lane에서 독립 검증합니다."
+            )
+        return "CEO 최종 종합과 QA 독립 검증을 별도의 비동기 evaluation lane으로 진행합니다."
+    return existing
 
 
 def _scoped_planning_projection(
@@ -238,7 +322,7 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     else:
         answer = "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다."
     if qa_required:
-        answer += " QA 검증을 거치겠습니다."
+        answer += " CEO 종합과 별도의 비동기 QA 평가를 진행합니다."
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]
@@ -253,7 +337,7 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
             "selected_departments": selected,
             "steps": steps,
             "qa_required": qa_required,
-            "summary": str(task.get("latest_summary") or "").strip() or None,
+            "summary": _planning_summary(task, selected, qa_required),
         },
         "answer": answer,
     }
