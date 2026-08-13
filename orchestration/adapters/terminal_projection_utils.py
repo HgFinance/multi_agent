@@ -15,6 +15,11 @@ from typing import Any
 _ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
 _ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
 _ACTION_RE = re.compile(r"(?m)^(?:action|workflow_action)=(\S+)\s*$")
+_SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
+_SUPERVISOR_LINE_RE = re.compile(
+    rf"^{re.escape(_SUPERVISOR_MARKER)}(?:\s+(?P<fields>.*))?$"
+)
+_METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+$")
 _MODE_RE = re.compile(r"(?m)^workflow_mode=(\S+)\s*$")
 _FORBIDDEN_KEYS = {
     "chain_of_thought",
@@ -59,7 +64,32 @@ def workflow_role(task: Mapping[str, Any]) -> str | None:
     return match.group(1).strip().casefold() if match else None
 
 
+def _supervisor_marker_fields(task: Mapping[str, Any]) -> dict[str, str] | None:
+    """Parse the exact durable supervisor marker, if present."""
+
+    for raw_line in task_body(task).splitlines():
+        match = _SUPERVISOR_LINE_RE.fullmatch(raw_line.strip())
+        if match is None:
+            continue
+        fields_text = match.group("fields") or ""
+        if not fields_text:
+            # A bare supervisor marker is malformed; fail closed.
+            return {}
+        tokens = fields_text.split()
+        if not all(_METADATA_FIELD_RE.fullmatch(token) for token in tokens):
+            return {}
+        return {
+            key: value
+            for key, value in (token.split("=", 1) for token in tokens)
+        }
+    return None
+
+
 def action(task: Mapping[str, Any]) -> str | None:
+    marker_fields = _supervisor_marker_fields(task)
+    if marker_fields is not None:
+        value = marker_fields.get("action") or marker_fields.get("workflow_action")
+        return value.strip().upper() if value else None
     match = _ACTION_RE.search(task_body(task))
     return match.group(1).strip().upper() if match else None
 

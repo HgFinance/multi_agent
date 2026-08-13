@@ -64,6 +64,49 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(decision.assignee, "qa-department")
         self.assertEqual(decision.parent_task_ids, ("r", "risk"))
 
+    def test_primary_results_ready_creates_async_qa_and_fast_synthesis(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "research",
+                    "research-department",
+                    "done",
+                    body="workflow_role=primary",
+                ),
+                child(
+                    "accounting",
+                    "accounting-portfolio-department",
+                    "done",
+                    body="workflow_role=primary",
+                ),
+            ),
+        )
+
+        first = decide_supervisor(state)
+        self.assertIsNotNone(first)
+        self.assertEqual(first.action, SupervisorAction.RUN_QA)
+        self.assertEqual(first.reason, "primary_results_ready_async_audit")
+
+        with_qa = SupervisorState(
+            "root",
+            state.children
+            + (
+                child(
+                    "qa",
+                    "qa-department",
+                    "running",
+                    body="workflow_role=qa",
+                ),
+            ),
+        )
+        second = decide_supervisor(with_qa)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(second.reason, "primary_results_ready_fast_path")
+        self.assertEqual(second.parent_task_ids, ("research", "accounting"))
+        self.assertNotIn("qa", second.parent_task_ids)
+
     def test_replan_is_scope_bound_without_root_execution_dependency(self) -> None:
         client = FakeClient()
         client.payloads[0].update(status="blocked", block_reason="source unavailable")
@@ -205,6 +248,49 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("r",))
 
+    def test_analysis_qa_terminal_outcomes_do_not_enter_fast_path_failure(self) -> None:
+        for qa_status in ("blocked", "crashed", "timed_out", "gave_up", "failed"):
+            with self.subTest(qa_status=qa_status):
+                decision = decide_supervisor(
+                    SupervisorState(
+                        "root",
+                        (
+                            child("r", "research-department", "done"),
+                            child("qa", "qa-department", qa_status),
+                        ),
+                    )
+                )
+                self.assertIsNotNone(decision)
+                self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+                self.assertEqual(decision.parent_task_ids, ("r",))
+
+    def test_explicit_roles_prevent_control_or_qa_from_becoming_analysis(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "primary",
+                    "accounting-portfolio-department",
+                    "done",
+                    body="workflow_role=primary",
+                ),
+                child(
+                    "qa",
+                    "qa-department",
+                    "running",
+                    body="workflow_role=qa",
+                ),
+                child(
+                    "synthesis",
+                    "ceo-agent",
+                    "todo",
+                    body="workflow_role=synthesis",
+                ),
+            ),
+        )
+        self.assertEqual([c.task_id for c in state.analysis_children], ["primary"])
+        self.assertEqual([c.task_id for c in state.qa_children], ["qa"])
+
 
 
 class FakeClient:
@@ -274,6 +360,31 @@ class SupervisorWakeupTest(unittest.TestCase):
             sum(item["assignee"] == "ceo-agent" for item in client.created),
             1,
         )
+
+    def test_synthesis_does_not_wait_for_qa_visibility_after_qa_create(self) -> None:
+        class StaleWorkflowClient(FakeClient):
+            def create_task(self, **kwargs):
+                self.created.append(kwargs)
+                self.comments.append(
+                    {"task_id": "root", "body": "created supervisor task"}
+                )
+                return f"new-{len(self.created)}"
+
+        client = StaleWorkflowClient()
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {
+                "event_id": "qa-create-visible-late",
+                "task_id": "r",
+                "kind": "completed",
+            }
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department", "ceo-agent"],
+        )
+        self.assertNotIn("qa", client.created[1]["parent_task_ids"])
 
     def test_binding_synthesis_is_parented_by_completed_qa(self) -> None:
         client = FakeClient()

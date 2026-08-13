@@ -64,6 +64,7 @@ services:
       HERMES_BIN: /usr/local/bin/hermes
       HERMES_HOME: /opt/hermes-cli
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
@@ -590,6 +591,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: research-department
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
       # provider: 와 auth.json이 실제 Provider를 결정한다(docker-compose.claude.yml 참고).
@@ -626,6 +628,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: quant-backtest-department
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
@@ -798,6 +801,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: risk-management
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
@@ -825,6 +829,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: qa-department
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
@@ -901,6 +906,7 @@ services:
       # 8개 부서 컨테이너가 실제로 쓰는 보드(~/.hermes/shared-kanban/kanban.db, 위
       # research-hermes 주석 참고)와 다른 파일이라 이걸 명시로 맞춰야 같은 보드를 본다.
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
     ports:
       - "127.0.0.1:9119:9119"   # 팀원 접근은 Tailscale 사설망 - 포트포워딩 금지
     mem_limit: 1536m
@@ -952,6 +958,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
     mem_reservation: 192m
@@ -981,6 +988,7 @@ services:
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
+      HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
       NOTION_TOKEN: ${NOTION_TOKEN:-}

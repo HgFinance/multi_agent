@@ -225,7 +225,7 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertTrue(response["planning"]["qa_required"])
         self.assertIn("Research", response["answer"])
         self.assertIn("Risk", response["answer"])
-        self.assertIn("QA", response["answer"])
+        self.assertNotIn("QA", response["answer"])
         self.assertNotIn("Quant", response["answer"])
 
     def test_planning_without_qa_does_not_claim_qa(self) -> None:

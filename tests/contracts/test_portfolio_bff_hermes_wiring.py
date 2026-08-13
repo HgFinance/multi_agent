@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -28,6 +27,7 @@ def test_portfolio_bff_uses_cli_for_kanban_and_remote_ceo_api() -> None:
     assert "HERMES_BIN: /usr/local/bin/hermes" in bff
     assert "HERMES_HOME: /opt/hermes-cli" in bff
     assert "HERMES_KANBAN_HOME: /opt/kanban" in bff
+    assert "HERMES_KANBAN_DB: /opt/kanban/kanban.db" in bff
     assert "HERMES_CEO_API_URL: http://ceo-hermes:8642/v1" in bff
     assert "/home/ubuntu/.hermes/shared-kanban:/opt/kanban" in bff
     assert "/home/ubuntu/.hermes:/opt/data" not in bff
