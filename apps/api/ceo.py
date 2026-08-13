@@ -618,6 +618,19 @@ def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
             decision=workflow.decision,
             qa_verdict=workflow.qa_verdict,
         )
+    elif not workflow.descendants and workflow.root.done and workflow.root.summary:
+        # CEO가 부서에 위임하지 않고 root Task 안에서 직접 답한 경우(동적 라우팅 -
+        # 이벤트에 맞는 페르소나가 없으면 CEO 혼자 처리한다). synthesis_node가
+        # 없다는 이유로 결과를 계속 비워두면, 실제로 완료된 답이 있는데도 화면에
+        # 영원히 안 뜬다 - 2026-08-13 "지금 막혀 있는 업무와 이유를 알려줘"에서
+        # 실사용 중 확인. `not descendants`로 좁힌 이유: 부서가 있는데 아직
+        # synthesis만 안 끝난 진행 중 상태(root의 "접수했다" 문구)를 답으로
+        # 잘못 노출하면 안 된다 - 자식이 하나도 없을 때만 root가 곧 답이다.
+        result = TaskResult(
+            summary=workflow.root.summary,
+            decision=workflow.decision,
+            qa_verdict=workflow.qa_verdict,
+        )
     return TaskResultResponse(
         task_id=task_id,
         status="completed" if terminal else "processing",
