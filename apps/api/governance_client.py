@@ -21,7 +21,9 @@ from fastapi import HTTPException
 GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "").rstrip("/")
 GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
 GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
-_LOGGER = logging.getLogger(__name__)
+# Uvicorn configures a handler for this logger, while arbitrary module loggers
+# are not emitted by the production container's default logging setup.
+_LOGGER = logging.getLogger("uvicorn.error")
 
 
 class GovernanceProxyError(HTTPException):
