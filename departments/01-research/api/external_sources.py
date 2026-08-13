@@ -402,42 +402,6 @@ def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
     return out
 
 
-# ── 네이버 DataLab 검색 트렌드 ──────────────────────────────────────────────
-def datalab_trend(keywords: list, start: str, end: str,
-                  time_unit: str = "date") -> dict:
-    """네이버 검색 트렌드 (DataLab). 종목명 검색량 추이 = 리테일 관심도 프록시.
-
-    keywords 최대 5개(각각이 한 그룹), start/end 는 YYYY-MM-DD,
-    time_unit=date|week|month. 값은 기간 내 최대치=100 인 상대지수다 -
-    절대 검색량이 아니므로 서로 다른 조회끼리 수치 비교 금지.
-    """
-    cid = os.environ.get("NAVER_CLIENT_ID", "").strip()
-    sec = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
-    if not (cid and sec):
-        raise RuntimeError("NAVER_CLIENT_ID/SECRET 가 없다")
-    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()][:5]
-    if not kws:
-        raise RuntimeError("keywords 가 비었다")
-    spend("naver", NAVER_DAILY_CAP)
-    payload = json.dumps({
-        "startDate": start, "endDate": end,
-        "timeUnit": time_unit if time_unit in ("date", "week", "month") else "date",
-        "keywordGroups": [{"groupName": k, "keywords": [k]} for k in kws],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://openapi.naver.com/v1/datalab/search", data=payload,
-        headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": sec,
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        body = json.loads(r.read().decode("utf-8"))
-    out = {"period": f"{start} ~ {end}", "unit": "상대지수(기간 내 최대=100)",
-           "results": body.get("results", []),
-           "queried_at": datetime.now(KST).isoformat()}
-    out["citation"] = _snapshot("datalab_trend", {
-        "keywords": kws, "start": start, "end": end}, out)
-    return out
-
-
 def record_citations(citations: list, note: str = "") -> dict:
     """답변에 **실제로 인용한** 조회의 citation 해시를 표시한다 (cache-on-cite v2).
 
@@ -487,10 +451,6 @@ def register_external_tools(server) -> None:
         description="웹 페이지 본문을 텍스트로 읽는다 - news_search 의 link, "
                     "dart 의 viewer_url 을 깊이 읽을 때. 길면 start 로 이어 읽기. "
                     "내부/사설 주소는 차단된다.")(read_url)
-    server.tool(
-        name="datalab_trend",
-        description="네이버 검색 트렌드(리테일 관심도 프록시). 키워드 최대 5개, "
-                    "상대지수(기간 내 최대=100) - 조회 간 수치 비교 금지.")(datalab_trend)
 
 
 # ── 자체 점검 (네트워크 없음) ───────────────────────────────────────────────
