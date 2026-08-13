@@ -58,7 +58,8 @@ def _catalog() -> dict:
 # 큐레이션 표 - TR 코드 -> 실행 도구 이름. 카탈로그 검색 결과에 같이 실린다.
 CURATED = {"t1717": "investor_flow", "t1927": "short_selling",
            "t1602": "market_investor_flow_intraday",
-           "t3320": "stock_fundamental"}
+           "t3320": "stock_fundamental",
+           "t1637": "program_trade_trend"}
 
 # LS 투자자 코드 체계 (t1717 tjjXXXX·t1602 sv_XX 공통 - 문서 필드표 실측)
 TJJ_CODES = {
@@ -209,6 +210,53 @@ def short_selling(corp: str, days: int = 10) -> dict:
     return out
 
 
+def program_trade_trend(corp: str, days: int = 10) -> dict:
+    """종목별 프로그램매매 일자별 추이 (LS t1637 종목별프로그램매매추이).
+
+    카드 t_cc435a46(2026-08-14) 큐레이션 요청분 - 스킬 검증 E2E 가 "카탈로그에
+    있으나 미큐레이션"으로 정확히 보고했던 그 TR 이다. 함정 3건 전부 실측 반영:
+      · 금액모드(gubun1=1)의 svolume, 수량모드(gubun1=0)의 svalue 는 주필드와
+        불일치하는 보조값 - 각 모드의 주필드만 쓰고 두 호출을 일자로 합친다.
+      · 금액 필드 단위는 '천원' (매도수량×평균단가 교차검증으로 확정).
+      · cts_idx 는 Number 로 보낸다 (문자열이면 IGW40011).
+    """
+    days = max(1, min(int(days), 20))
+    resolved = _shcode_of(corp)
+    today = date_cls.today().strftime("%Y%m%d")
+
+    def _one(gubun1: str) -> dict:
+        spend("ls", LS_DAILY_CAP)
+        body = _client().call_tr(
+            path="/stock/program", tr_cd="t1637",
+            in_block={"t1637InBlock": {
+                "gubun1": gubun1, "gubun2": "1", "shcode": resolved["stock_code"],
+                "date": today, "time": "000000", "cts_idx": 0, "exchgubun": "0"}},
+            rate_limit_per_sec=1.0)
+        rows = body.get("t1637OutBlock1") or body.get("t1637OutBlock") or []
+        return {r.get("date"): r for r in (rows if isinstance(rows, list) else [rows])}
+
+    by_vol, by_val = _one("0"), _one("1")   # 수량 -> 금액, 초당 1회는 클라이언트가 지킴
+    items = []
+    for d in sorted(set(by_vol) | set(by_val), reverse=True)[:days]:
+        v, m = by_vol.get(d, {}), by_val.get(d, {})
+        base = m or v
+        items.append({
+            "date": d, "close": base.get("price"), "change_pct": base.get("diff"),
+            "volume": base.get("volume"),
+            "P매도금액_천원": m.get("offervalue"), "P매수금액_천원": m.get("stksvalue"),
+            "P순매수금액_천원": m.get("svalue"),
+            "P매도수량": v.get("offervolume"), "P매수수량": v.get("stksvolume"),
+            "P순매수수량": v.get("svolume")})
+    out = {"corp": resolved, "units": {"금액": "천원", "수량": "주"},
+           "count": len(items), "items": items, "tr": "t1637",
+           "queried_at": datetime.now().isoformat(),
+           "note": "프로그램매매(차익·비차익 바스켓)는 투자주체별 수급(t1717)과 "
+                   "다른 축이다 - 섞지 말 것. 지금 시점 조회값 - 백테스트·사후 "
+                   "채점 인용 금지"}
+    out["citation"] = _snapshot("program_trade_trend", {"corp": corp, "days": days}, out)
+    return out
+
+
 def market_investor_flow_intraday(upcode: str = "001", count: int = 30) -> dict:
     """시장 전체의 장중 시간대별 투자자 순매수 (LS t1602). 종목 단위가 아니다.
 
@@ -308,6 +356,11 @@ def build_server(host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="종목 공매도 일별추이 - 수량·대금·거래비중(%)·평균단가·누적. "
                     "기업명 또는 6자리 코드.")(short_selling)
     server.tool(
+        name="program_trade_trend",
+        description="종목별 프로그램매매 일자별 추이(매도/매수/순매수, 금액 천원+"
+                    "수량 주). 투자주체별 수급(investor_flow)과 다른 축. 기업명 "
+                    "또는 6자리 코드.")(program_trade_trend)
+    server.tool(
         name="market_investor_flow_intraday",
         description="시장 전체(코스피 001/코스닥 301)의 장중 시간대별 투자자 순매수. "
                     "종목 단위가 아니다 - 종목은 investor_flow.")(market_investor_flow_intraday)
@@ -365,6 +418,9 @@ if __name__ == "__main__":
     assert r["count"] > 0, "카탈로그 검색이 비었다"
     assert any(i["tr_code"] == "t1717" and i["executable_tool"] == "investor_flow"
                for i in ls_tr_catalog("외인기관")["items"]), "t1717 큐레이션 연결 실패"
+    assert any(i["tr_code"] == "t1637" and i["executable_tool"] == "program_trade_trend"
+               for i in ls_tr_catalog("프로그램매매추이", limit=30)["items"]), \
+        "t1637 큐레이션 연결 실패"
     print(f"  카탈로그 {cat['tr_count']}개 로드, '투자자' 검색 {r['count']}건  OK")
     assert _T1717_COLS["tjj0016_vol"] == "외인계"
     print("  t1717 컬럼 사상          OK")
