@@ -6,4 +6,4 @@
 # Hermes의 기본 entrypoint, 명령, profile mount는 compose에서 그대로 유지한다.
 FROM nousresearch/hermes-agent:latest
 
-RUN python3 -m pip install --no-cache-dir psycopg2-binary==2.9.12
+RUN uv pip install --system --no-cache psycopg2-binary==2.9.12
