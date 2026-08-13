@@ -172,7 +172,8 @@ class CeoWorkflowProjectionRegressionTest(unittest.TestCase):
             ["research-department", "risk-management"],
         )
         self.assertTrue(acknowledgement["planning"]["qa_required"])
-        self.assertIn("비동기", acknowledgement["planning"]["summary"])
+        self.assertIn("준비되는 대로", acknowledgement["planning"]["summary"])
+        self.assertNotIn("QA", acknowledgement["planning"]["summary"])
         self.assertNotIn("독립 QA를 거친 뒤", acknowledgement["planning"]["summary"])
 
     def test_parentless_primary_resolves_to_marker_root(self) -> None:

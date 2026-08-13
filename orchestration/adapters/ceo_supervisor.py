@@ -13,10 +13,15 @@ import logging
 import os
 import subprocess
 import threading
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
+from orchestration.adapters.terminal_projection_utils import action as terminal_action
+from orchestration.adapters.terminal_projection_utils import (
+    workflow_role as terminal_workflow_role,
+)
 from orchestration.canonical_profiles import (
     CanonicalKanbanTaskRequest,
     CanonicalProfileError,
@@ -134,9 +139,11 @@ class ChildTaskState:
     body: str = ""
 
     @classmethod
-    def from_hermes(cls, payload: Mapping[str, Any]) -> "ChildTaskState":
+    def from_hermes(cls, payload: Mapping[str, Any]) -> ChildTaskState:
         task_id = str(payload.get("id") or payload.get("task_id") or "")
-        profile = validate_canonical_profile(str(payload.get("assignee") or ""))
+        profile = validate_canonical_profile(
+            str(payload.get("assignee") or payload.get("profile") or "")
+        )
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
         summary = _text(payload.get("summary") or latest or payload.get("result"))
@@ -177,18 +184,45 @@ class ChildTaskState:
         return department_for_canonical_profile(self.profile)
 
     @property
+    def workflow_role(self) -> str:
+        """Return the durable workflow role marker, when present."""
+
+        for line in self.body.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip().casefold() == "workflow_role":
+                return value.strip().casefold()
+        return ""
+
+    @property
     def is_supervisor(self) -> bool:
         # QA and replan tasks are supervisor-created work, but they remain
         # workflow children. Only CEO-assigned control tasks are excluded
         # from the analysis/QA dependency graph.
-        return (
+        return self.workflow_role in {"control", "synthesis"} or (
             self.profile == canonical_profile_for_department("ceo")
             and SUPERVISOR_MARKER in self.body
         )
 
     @property
     def is_qa(self) -> bool:
-        return self.profile == canonical_profile_for_department("qa")
+        return self.workflow_role == "qa" or (
+            not self.workflow_role
+            and self.profile == canonical_profile_for_department("qa")
+        )
+
+    @property
+    def is_analysis(self) -> bool:
+        """Whether this task is a current workflow's primary analysis child."""
+
+        if self.is_supervisor or self.is_qa:
+            return False
+        if self.workflow_role:
+            return self.workflow_role == "primary"
+        # Compatibility for older scoped tasks without an explicit role.
+        return self.profile in {
+            canonical_profile_for_department(name)
+            for name in ("research", "quant", "trading", "accounting", "risk", "hr")
+        }
 
     @property
     def terminal(self) -> bool:
@@ -223,11 +257,7 @@ class SupervisorState:
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
-        return tuple(
-            child
-            for child in self.children
-            if not child.is_supervisor and not child.is_qa
-        )
+        return tuple(child for child in self.children if child.is_analysis)
 
     @property
     def qa_children(self) -> tuple[ChildTaskState, ...]:
@@ -317,6 +347,53 @@ def _blocked_decision(
     )
 
 
+def _analysis_synthesis_decision(
+    state: SupervisorState,
+) -> SupervisorDecision | None:
+    """Build synthesis from primary state without consulting QA state."""
+
+    if state.workflow_mode != "analysis" or state.has_action(SupervisorAction.SYNTHESIZE):
+        return None
+    if not state.analysis_children or any(
+        not child.terminal for child in state.analysis_children
+    ):
+        return None
+
+    primary_ids = tuple(
+        child.task_id for child in state.analysis_children if child.done
+    )
+    if not primary_ids:
+        return None
+    return SupervisorDecision(
+        SupervisorAction.SYNTHESIZE,
+        state.parent_task_id,
+        assignee=canonical_profile_for_department("ceo"),
+        title="CEO final synthesis",
+        body=(
+            f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
+            "workflow_plane=response\n"
+            "governance_plane=async_qa\n"
+            "Synthesize completed primary department work; QA may still be running.\n"
+            + json.dumps(
+                [
+                    {
+                        "task_id": child.task_id,
+                        "profile": child.profile,
+                        "status": child.status,
+                        "summary": child.summary,
+                        "error": child.error,
+                        "block_reason": child.block_reason,
+                    }
+                    for child in state.analysis_children
+                ],
+                ensure_ascii=False,
+            )
+        ),
+        parent_task_ids=primary_ids,
+        reason="primary_results_ready_fast_path",
+    )
+
+
 def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     """Choose one bounded action, or ``None`` while another child is running."""
 
@@ -392,36 +469,12 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     )
                 ),
                 parent_task_ids=primary_ids,
-                reason="primary_analysis_terminal_parallel_audit",
+                reason="primary_results_ready_async_audit",
             )
-        if not state.has_action(SupervisorAction.SYNTHESIZE):
-            return SupervisorDecision(
-                SupervisorAction.SYNTHESIZE,
-                state.parent_task_id,
-                assignee=canonical_profile_for_department("ceo"),
-                title="CEO final synthesis",
-                body=(
-                    f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
-                    "workflow_plane=response\n"
-                    "governance_plane=async_qa\n"
-                    "Synthesize completed primary department work; QA may still be running.\n"
-                    + json.dumps(
-                        [{
-                            "task_id": child.task_id,
-                            "profile": child.profile,
-                            "status": child.status,
-                            "summary": child.summary,
-                            "error": child.error,
-                            "block_reason": child.block_reason,
-                        } for child in state.analysis_children],
-                        ensure_ascii=False,
-                    )
-                ),
-                parent_task_ids=primary_ids,
-                reason="primary_analysis_terminal_response_synthesis",
-            )
+        synthesis = _analysis_synthesis_decision(state)
+        if synthesis is not None:
+            return synthesis
         return None
-
     # Binding/high-risk workflows retain the existing fail-closed QA path.
     if state.qa_required:
         if not state.qa_children:
@@ -838,19 +891,13 @@ class CeoSupervisorService:
         if task is None:
             return
         body = str(task.get("body") or "")
-        role = next(
-            (
-                line.split("=", 1)[1].strip().casefold()
-                for line in body.splitlines()
-                if line.startswith("workflow_role=")
-            ),
-            "",
-        )
+        role = terminal_workflow_role(task) or ""
+        task_action = terminal_action(task) or terminal_action({"body": body})
         projection = (
             self.synthesis_projection
-            if role == "synthesis" and "action=SYNTHESIZE" in body
+            if role == "synthesis" and task_action == "SYNTHESIZE"
             else self.qa_projection
-            if role == "qa" and "action=RUN_QA" in body
+            if role == "qa" and task_action == "RUN_QA"
             else None
         )
         if projection is None:
@@ -862,7 +909,7 @@ class CeoSupervisorService:
                 workflow_tasks=task_payloads,
                 event=event,
             )
-        except Exception as exc:  # noqa: BLE001 - observer is non-binding
+        except Exception as exc:
             logger.exception(
                 "terminal projection observer failed",
                 extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
@@ -1006,28 +1053,9 @@ class CeoSupervisorService:
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
                 ):
-                    _, refreshed_payloads = self.client.workflow(root_id)
-                    refreshed_state = SupervisorState(
-                        parent_task_id=root_id,
-                        children=tuple(
-                            ChildTaskState.from_hermes(payload)
-                            for payload in refreshed_payloads
-                            if payload.get("assignee") is not None
-                        ),
-                        wakeups=state.wakeups,
-                        replan_count=state.replan_count,
-                        max_retries=self.max_retries,
-                        max_wakeups=self.max_wakeups,
-                        qa_required=state.qa_required,
-                        workflow_mode=state.workflow_mode,
-                        # 자식을 다시 읽어 만든 state지만 root의 성질은 그대로다.
-                        # 여기서 빠뜨리면 같은 워크플로 안에서 QA 자식에만 Mandate
-                        # 참조가 붙고 Synthesis 자식에는 안 붙는다.
-                        has_mandate=state.has_mandate,
-                    )
-                    synthesis = self.decider(refreshed_state)
+                    synthesis = _analysis_synthesis_decision(state)
                     if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
-                        self._execute(synthesis, refreshed_state)
+                        self._execute(synthesis, state)
                         action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1

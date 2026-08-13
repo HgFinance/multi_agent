@@ -277,10 +277,10 @@ def _planning_summary(
         if labels:
             subject = "와 ".join(labels)
             return (
-                f"{subject} 결과가 준비되면 CEO가 최종 종합을 진행하고, "
-                "QA는 별도의 비동기 evaluation lane에서 독립 검증합니다."
+                f"관련 부서({subject})의 근거 기반 분석 결과가 준비되는 대로 "
+                "CEO가 종합 분석을 전달하겠습니다."
             )
-        return "CEO 최종 종합과 QA 독립 검증을 별도의 비동기 evaluation lane으로 진행합니다."
+        return "관련 부서의 근거 기반 분석 결과가 준비되는 대로 CEO가 종합 분석을 전달하겠습니다."
     return existing
 
 
@@ -321,8 +321,6 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
         answer = f"{'· '.join(actions)}하겠습니다."
     else:
         answer = "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다."
-    if qa_required:
-        answer += " CEO 종합과 별도의 비동기 QA 평가를 진행합니다."
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]

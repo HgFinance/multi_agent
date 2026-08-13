@@ -82,6 +82,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_PROFILE: ceo-agent
       HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # Reuse this existing CEO gateway as the authenticated internal API
       # runtime. No second CEO gateway is started in portfolio-bff.

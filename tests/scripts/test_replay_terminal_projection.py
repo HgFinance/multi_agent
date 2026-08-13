@@ -25,7 +25,7 @@ def _body(role: str, action: str) -> str:
             "hgfinance.ceo-workflow-scope.v1",
             f"workflow_root_task_id={ROOT}",
             f"workflow_role={role}",
-            f"action={action}",
+            f"hgfinance.ceo-supervisor.v1 action={action}",
         )
     )
 
@@ -280,6 +280,56 @@ class ReplayTerminalProjectionTests(unittest.TestCase):
                 notion_transport=FakeNotionTransport(),
                 env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "db"},
             )
+
+
+    def test_production_action_marker_is_exact_and_not_substring_matching(self) -> None:
+        from orchestration.adapters.terminal_projection_utils import action
+
+        self.assertEqual(
+            action({"body": "hgfinance.ceo-supervisor.v1 action=RUN_QA"}),
+            "RUN_QA",
+        )
+        for body in (
+            "please do action=RUN_QA someday",
+            "RUN_QA",
+            "foo hgfinance.ceo-supervisor.v1 action=RUN_QA garbage",
+            "hgfinance.ceo-supervisor.v1 maybe action=RUN_QA",
+        ):
+            self.assertIsNone(action({"body": body}))
+
+    def test_rejects_role_action_and_root_mismatches(self) -> None:
+        from scripts.replay_terminal_projection import _validate_projection_type
+
+        with self.assertRaises(ReplayValidationError):
+            _validate_projection_type(
+                "qa",
+                {"body": _body("primary", "RUN_QA"), "assignee": "qa-department"},
+            )
+        with self.assertRaises(ReplayValidationError):
+            _validate_projection_type(
+                "qa",
+                {
+                    "body": "\n".join(
+                        (
+                            f"workflow_root_task_id={ROOT}",
+                            "workflow_role=qa",
+                        )
+                    ),
+                    "assignee": "qa-department",
+                },
+            )
+
+    def test_kanban_db_option_is_forwarded_to_hermes_environment(self) -> None:
+        from scripts.replay_terminal_projection import _effective_environment
+
+        environment = _effective_environment(
+            {"HERMES_KANBAN_DB": "/wrong/default.db"},
+            "/opt/data/shared-kanban/kanban.db",
+        )
+        self.assertEqual(
+            environment["HERMES_KANBAN_DB"],
+            "/opt/data/shared-kanban/kanban.db",
+        )
 
 
 if __name__ == "__main__":

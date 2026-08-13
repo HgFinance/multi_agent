@@ -33,7 +33,7 @@ def _task(
         f"workflow_role={role}",
     ]
     if action:
-        marker.append(f"action={action}")
+        marker.append(f"hgfinance.ceo-supervisor.v1 action={action}")
     return {
         "id": task_id,
         "assignee": assignee,
@@ -111,7 +111,6 @@ class TerminalProjectionWiringTests(unittest.TestCase):
         root = {"id": ROOT, "body": build_root_body("q", "req-1"), "status": "done"}
         primary = _task(RESEARCH, "primary", assignee="research-department")
         synthesis = _task(SYNTHESIS, "synthesis", action="SYNTHESIZE", assignee="ceo-agent")
-        synthesis["body"] = "hgfinance.ceo-supervisor.v1\n" + synthesis["body"]
         client = FakeSupervisorClient(root, [primary, synthesis])
         projection = FakeSupervisorProjection()
         service = CeoSupervisorService(client, synthesis_projection=projection)
@@ -238,6 +237,24 @@ class TerminalProjectionTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(repository.records, {})
+
+    def test_qa_projection_failure_does_not_block_fast_synthesis(self) -> None:
+        class FailingQaProjection:
+            def project(self, **kwargs: Any) -> None:
+                raise RuntimeError("audit persistence unavailable")
+
+        client = FakeSupervisorClient(
+            self.root,
+            [self.primary[0], self.primary[1], self.qa],
+        )
+        service = CeoSupervisorService(client, qa_projection=FailingQaProjection())
+
+        decision = service.handle_terminal_event(
+            {"event_id": "qa-persistence-failure", "task_id": QA, "kind": "completed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action.value, "SYNTHESIZE")
 
 
 if __name__ == "__main__":

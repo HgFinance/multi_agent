@@ -40,6 +40,18 @@ class ReplayValidationError(ValueError):
     """Replay 대상이 durable projection 계약과 맞지 않는다."""
 
 
+def _effective_environment(
+    env: Mapping[str, str] | None = None,
+    kanban_db: str | None = None,
+) -> dict[str, str]:
+    """Build the subprocess environment without opening the Kanban DB here."""
+
+    effective = dict(env or os.environ)
+    if kanban_db:
+        effective["HERMES_KANBAN_DB"] = kanban_db
+    return effective
+
+
 def _latest_task_run_id(task: Mapping[str, Any]) -> str | None:
     """출력용 task_run 식별자를 읽되, 새 run을 만들지는 않는다."""
 
@@ -166,6 +178,7 @@ def replay_terminal_projection(
     qa_repository: Any | None = None,
     notion_transport: Any | None = None,
     env: Mapping[str, str] | None = None,
+    kanban_db: str | None = None,
 ) -> dict[str, Any]:
     """Read one existing workflow and invoke exactly one projection adapter."""
 
@@ -174,7 +187,8 @@ def replay_terminal_projection(
     if not root_task_id or not task_id_value:
         raise ReplayValidationError("root_task_id and task_id are required")
 
-    replay_client = client or HermesKanbanClient(environment=env or os.environ)
+    effective_env = _effective_environment(env, kanban_db)
+    replay_client = client or HermesKanbanClient(environment=effective_env)
     _root, task, workflow_tasks = _workflow_payloads(
         replay_client,
         root_task_id=root_task_id,
@@ -187,7 +201,7 @@ def replay_terminal_projection(
         projection = QaAuditProjection(
             repository=qa_repository or (_DryRunAuditRepository() if dry_run else None),
             kanban_client=None if dry_run else replay_client,
-            env=env,
+            env=effective_env,
         )
         projection_result = projection.project(
             root_task_id=root_task_id,
@@ -202,7 +216,7 @@ def replay_terminal_projection(
     else:
         projection = CeoNotionProjection(
             env=(
-                env
+                effective_env
                 or os.environ
                 if not dry_run
                 else {"NOTION_TOKEN": "dry-run", "NOTION_CEO_DB": "dry-run"}
@@ -247,6 +261,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--type", dest="projection_type", choices=("qa", "notion"), required=True)
     parser.add_argument("--root-task-id", required=True)
     parser.add_argument("--task-id", required=True)
+    parser.add_argument(
+        "--kanban-db",
+        help="Pin HERMES_KANBAN_DB for the read-only Hermes Kanban client.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -259,6 +277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             root_task_id=args.root_task_id,
             task_id_value=args.task_id,
             dry_run=args.dry_run,
+            kanban_db=args.kanban_db,
         )
     except (ReplayValidationError, HermesKanbanCommandError) as exc:
         print(json.dumps({"status": "rejected", "error": str(exc)}, ensure_ascii=False))
