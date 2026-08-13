@@ -72,6 +72,23 @@ services:
       # InvestorProfile 프록시(/ui/investor-profiles)가 부르는 accounting-api.
       # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
       PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
+      # CEO Web/Discord mirror uses the existing Redis service. Keep the
+      # durable request/event store on the canonical production BFF.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
+      UI_MIRROR_DEDUPE_WAIT_SECONDS: ${UI_MIRROR_DEDUPE_WAIT_SECONDS:-3}
+      UI_MIRROR_SSE_SECONDS: ${UI_MIRROR_SSE_SECONDS:-25}
+      # These are the internal read/proxy endpoints used by apps.api.main.
+      # The production portfolio BFF stays on the pinned Hermes CLI/local
+      # boundary above; it does not inherit ui-bff's Docker-exec transport.
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
+      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
+      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
@@ -979,6 +996,10 @@ services:
   # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고
   # 아무도 왜인지 몰랐다. 공장 상주와 같은 이유로 컨테이너에 올린다.
   ui-bff:
+    # Legacy duplicate of apps.api.main:app. The canonical production ingress
+    # is portfolio-bff above; keep this profile only for explicit rollback or
+    # comparison and never enable it in the default Compose stack.
+    profiles: ["legacy-ui-bff"]
     image: hedgefund-factory:latest
     container_name: hedgefund-ui-bff
     restart: unless-stopped
@@ -987,10 +1008,15 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
-    ports:
-      - "8001:8001"
     environment:
       DATABASE_URL: ${DATABASE_URL:?}
+      # Web/Discord CEO 미러링은 기존 Compose Redis를 request/event dedup 저장소로 사용한다.
+      # [local/test] Redis가 없으면 테스트에서 InMemoryMirrorStore를 명시적으로 주입한다.
+      # [production] AWS에서는 이 값을 비우지 않는다. 저장소 장애 시 CEO 요청을 503으로 차단한다.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}

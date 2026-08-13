@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hgfinance.local/contracts/ui-ceo-mirror-event.v1.json",
+  "title": "HgFinance UI CEO Mirror Event v1",
+  "description": "Web와 Discord가 공유하는 CEO 실행/evaluation timeline 이벤트. CoT와 secret은 저장하지 않는다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "request_id",
+    "source",
+    "source_message_id",
+    "actor_id",
+    "actor_type",
+    "lane",
+    "event_type",
+    "status",
+    "summary",
+    "payload",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "ui.ceo-mirror-event.v1" },
+    "event_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "request_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "task_id": { "type": ["string", "null"], "maxLength": 128 },
+    "parent_task_id": { "type": ["string", "null"], "maxLength": 128 },
+    "source": { "enum": ["web", "discord"] },
+    "source_message_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "actor_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "actor_type": { "enum": ["user", "bot", "agent", "system"] },
+    "lane": { "enum": ["execution", "evaluation"] },
+    "event_type": {
+      "enum": [
+        "USER_MESSAGE",
+        "CEO_PLAN_CREATED",
+        "TASK_CREATED",
+        "TASK_ASSIGNED",
+        "TASK_STARTED",
+        "TASK_PROGRESS",
+        "TOOL_STARTED",
+        "TOOL_COMPLETED",
+        "TASK_COMPLETED",
+        "TASK_FAILED",
+        "RETRY_STARTED",
+        "CEO_SYNTHESIS_STARTED",
+        "CEO_FINAL",
+        "QA_STARTED",
+        "QA_RESULT",
+        "HR_EVALUATION",
+        "IMPROVEMENT_CANDIDATE",
+        "REGRESSION_RESULT",
+        "PROMOTION_RESULT"
+      ]
+    },
+    "status": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "summary": { "type": "string", "maxLength": 4000 },
+    "payload": { "type": "object" },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}
