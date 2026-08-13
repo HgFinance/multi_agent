@@ -869,6 +869,22 @@
           "path": "/ui/ceo/ask"
         },
         {
+          "method": "POST",
+          "path": "/ui/ceo/ingress"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/events"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/events/stream"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/ceo/events"
+        },
+        {
           "method": "GET",
           "path": "/ui/ceo/tasks"
         },

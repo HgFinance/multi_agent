@@ -75,13 +75,15 @@ finally:
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
 from apps.api import hermes_boundary
+
 try:
-    from . import ceo
     from .ceo import router as ceo_router
+    from .ceo_mirror_api import router as ceo_mirror_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-    import ceo
     from ceo import router as ceo_router
+    from ceo_mirror_api import router as ceo_mirror_router
 import trading
+from account_snapshot import router as account_snapshot_router
 from agent_status import agent_status_snapshot
 from command_service import (
     COMMAND_SERVICE,
@@ -89,12 +91,13 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
-from account_snapshot import router as account_snapshot_router
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
     GOVERNANCE_API_URL,
     GovernanceProxyError,
+)
+from governance_client import (
     governance_request as _governance_request,
 )
 from operations_read_model import build_operations_snapshot
@@ -169,6 +172,10 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+# Register the mirror adapter first so the existing `/ui/ceo/ask` path is
+# protected by canonical request deduplication. `ceo_router` remains mounted
+# for direct module compatibility and all PR #224 read routes.
+app.include_router(ceo_mirror_router)
 app.include_router(ceo_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
 # 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
@@ -944,6 +951,7 @@ if __name__ == "__main__":
 
     # 게이트를 열면 L0는 모델을 부르지 않고 결정론 원천으로 돌려보낸다(비용 0).
     import accounting as _accounting_router
+
     from apps.api import hermes_boundary as _hermes_boundary
 
     _saved_flag = _hermes_boundary.ENABLE_AGENT_ASK

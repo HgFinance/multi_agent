@@ -985,6 +985,13 @@ services:
       - "8001:8001"
     environment:
       DATABASE_URL: ${DATABASE_URL:?}
+      # Web/Discord CEO 미러링은 기존 Compose Redis를 request/event dedup 저장소로 사용한다.
+      # [local/test] Redis가 없으면 테스트에서 InMemoryMirrorStore를 명시적으로 주입한다.
+      # [production] AWS에서는 이 값을 비우지 않는다. 저장소 장애 시 CEO 요청을 503으로 차단한다.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
