@@ -35,6 +35,11 @@ services:
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     container_name: hedgefund-accounting-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       # 기본은 durable Paper DB다. 인메모리는 ACCOUNTING_MODE=OFFLINE을
       # 명시한 로컬 테스트에서만 선택한다.
@@ -68,6 +73,11 @@ services:
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     container_name: hedgefund-accounting-ledger-consumer
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
@@ -100,6 +110,11 @@ services:
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     container_name: hedgefund-accounting-close-scheduler
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/close_scheduler.py", "--serve"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
@@ -121,7 +136,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-accounting-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/accounting-portfolio-department:/opt/data
       - ../../skills/finance:/opt/shared-skills/finance:ro

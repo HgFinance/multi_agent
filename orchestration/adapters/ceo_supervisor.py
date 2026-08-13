@@ -9,6 +9,7 @@ and chooses the next structured action.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -30,6 +31,8 @@ from orchestration.ceo_workflow_scope import (
     validate_workflow_scope,
     workflow_mode_from_body,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SupervisorValidationError(ValueError):
@@ -742,12 +745,17 @@ class CeoSupervisorService:
         max_wakeups: int = 8,
         qa_required: bool = True,
         decider: Callable[[SupervisorState], SupervisorDecision | None] = decide_supervisor,
+        synthesis_projection: Any | None = None,
+        qa_projection: Any | None = None,
     ) -> None:
         self.client = client
         self.max_retries = max_retries
         self.max_wakeups = max_wakeups
         self.qa_required = qa_required
         self.decider = decider
+        # Terminal projections observe outcomes; they never participate in policy.
+        self.synthesis_projection = synthesis_projection
+        self.qa_projection = qa_projection
         self._seen_events: set[str] = set()
         self._wakeups: dict[str, int] = {}
         self._replans: dict[str, int] = {}
@@ -805,6 +813,57 @@ class CeoSupervisorService:
                 f"workflow {task_id} canonical abort failed: {exc}"
             ) from exc
 
+    def _project_terminal_task(
+        self,
+        *,
+        root_task_id: str,
+        task_id: str,
+        task_payloads: Sequence[Mapping[str, Any]],
+        event: Mapping[str, Any],
+    ) -> None:
+        """Run a terminal observer without changing the supervisor decision."""
+
+        task = next(
+            (
+                payload
+                for payload in task_payloads
+                if str(payload.get("id") or payload.get("task_id") or "") == task_id
+            ),
+            None,
+        )
+        if task is None:
+            return
+        body = str(task.get("body") or "")
+        role = next(
+            (
+                line.split("=", 1)[1].strip().casefold()
+                for line in body.splitlines()
+                if line.startswith("workflow_role=")
+            ),
+            "",
+        )
+        projection = (
+            self.synthesis_projection
+            if role == "synthesis" and "action=SYNTHESIZE" in body
+            else self.qa_projection
+            if role == "qa" and "action=RUN_QA" in body
+            else None
+        )
+        if projection is None:
+            return
+        try:
+            projection.project(
+                root_task_id=root_task_id,
+                task=task,
+                workflow_tasks=task_payloads,
+                event=event,
+            )
+        except Exception as exc:  # noqa: BLE001 - observer is non-binding
+            logger.exception(
+                "terminal projection observer failed",
+                extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
+            )
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
@@ -861,6 +920,13 @@ class CeoSupervisorService:
                         root_id,
                         reason="workflow_scope_validation",
                     )
+                self._project_terminal_task(
+                    root_task_id=root_id,
+                    task_id=task_id,
+                    task_payloads=(root_payload, *payloads),
+                    event=event,
+                )
+
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
                     for payload in payloads

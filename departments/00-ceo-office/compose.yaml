@@ -15,6 +15,11 @@ services:
       dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-governance-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
     ports:
@@ -33,6 +38,11 @@ services:
       dockerfile: departments/00-ceo-office/Dockerfile
     container_name: hedgefund-notification-worker
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "governance_events/worker.py"]
     working_dir: /app/departments/00-ceo-office
     depends_on:
@@ -56,7 +66,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-ceo-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/ceo-agent:/opt/data
       - ../../skills/finance:/opt/shared-skills/finance:ro

@@ -32,7 +32,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 from uuid import UUID
@@ -681,6 +684,63 @@ class PostgresAuditRepository:
                     if cur.fetchone() is not None:
                         raise EvalPersistenceConflict("conflicting eval result key")
                     raise EvalPersistenceConflict("eval result insert conflict")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def insert_kanban_qa_findings(self, record: Any) -> None:
+        """Persist QA findings emitted by a Kanban terminal projection.
+
+        ``artifact_version_id`` is intentionally NULL when the Hermes QA task
+        did not evaluate a persisted artifact. The existing audit.findings
+        table supports that shape; no projection-specific table is introduced.
+        """
+
+        findings = self._eval_value(record, "findings", [])
+        if not isinstance(findings, (list, tuple)):
+            return
+        trace_id = self._eval_uuid(self._eval_value(record, "trace_id"), "trace_id")
+        projection_key = str(self._eval_value(record, "projection_key"))
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                for index, finding in enumerate(findings):
+                    item = finding if isinstance(finding, dict) else {"description": str(finding)}
+                    finding_id = uuid.uuid5(
+                        uuid.UUID("b8a25c03-2d9d-5f4e-b542-9dcb36db3e91"),
+                        f"{projection_key}:finding:{index}:{json.dumps(item, sort_keys=True, default=str)}",
+                    )
+                    severity = str(
+                        item.get("severity") or self._eval_value(record, "highest_severity", "LOW")
+                    ).upper()
+                    if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+                        severity = "LOW"
+                    description = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                    cur.execute(
+                        """
+                        insert into audit.findings (
+                            finding_id, fund_id, finding_type, severity,
+                            artifact_version_id, description, owner, status,
+                            opened_by, trace_id, created_at
+                        ) values (%s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                        on conflict (finding_id) do nothing
+                        """,
+                        (
+                            finding_id,
+                            None,
+                            "kanban-qa",
+                            severity,
+                            None,
+                            description,
+                            "qa-department",
+                            "qa-department",
+                            trace_id,
+                            self._eval_value(record, "completed_at") or datetime.now(timezone.utc),
+                        ),
+                    )
             conn.commit()
         except Exception:
             conn.rollback()

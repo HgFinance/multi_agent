@@ -24,6 +24,8 @@ from orchestration.adapters.ceo_supervisor import (
     HermesKanbanClient,
     SupervisorWorkflowError,
 )
+from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
+from orchestration.adapters.qa_audit_projection import QaAuditProjection
 
 
 WATCH_LINE = re.compile(
@@ -145,6 +147,8 @@ def main() -> int:
         client,
         max_retries=args.max_retries,
         max_wakeups=args.max_wakeups,
+        synthesis_projection=CeoNotionProjection(kanban_client=client),
+        qa_projection=QaAuditProjection(kanban_client=client),
     )
     try:
         for event in watch_events(

@@ -1,0 +1,197 @@
+"""Shared, loss-averse helpers for terminal task projections.
+
+이 모듈은 Hermes task의 durable marker와 최신 run metadata만 읽는다.
+사용자에게 공개되는 projection에는 reasoning/chain-of-thought를 넣지 않는다.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any
+
+_ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
+_ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
+_ACTION_RE = re.compile(r"(?m)^(?:action|workflow_action)=(\S+)\s*$")
+_MODE_RE = re.compile(r"(?m)^workflow_mode=(\S+)\s*$")
+_FORBIDDEN_KEYS = {
+    "chain_of_thought",
+    "cot",
+    "hidden_reasoning",
+    "reasoning",
+    "thought",
+    "thoughts",
+    "scratchpad",
+}
+
+
+def as_mapping(value: Any) -> dict[str, Any]:
+    """Decode the JSON-shaped metadata returned by different Hermes versions."""
+
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return dict(decoded) if isinstance(decoded, Mapping) else {}
+    return {}
+
+
+def task_id(task: Mapping[str, Any]) -> str:
+    return str(task.get("id") or task.get("task_id") or "")
+
+
+def task_body(task: Mapping[str, Any]) -> str:
+    return str(task.get("body") or "")
+
+
+def workflow_root(task: Mapping[str, Any]) -> str | None:
+    match = _ROOT_RE.search(task_body(task))
+    return match.group(1).strip() if match else None
+
+
+def workflow_role(task: Mapping[str, Any]) -> str | None:
+    match = _ROLE_RE.search(task_body(task))
+    return match.group(1).strip().casefold() if match else None
+
+
+def action(task: Mapping[str, Any]) -> str | None:
+    match = _ACTION_RE.search(task_body(task))
+    return match.group(1).strip().upper() if match else None
+
+
+def workflow_mode(task: Mapping[str, Any]) -> str | None:
+    match = _MODE_RE.search(task_body(task))
+    return match.group(1).strip().casefold() if match else None
+
+
+def merged_run_metadata(task: Mapping[str, Any]) -> dict[str, Any]:
+    """Prefer durable task-run metadata over ingress-only fields."""
+
+    merged: dict[str, Any] = {}
+    for key in ("metadata", "task_run_metadata", "run_metadata"):
+        merged.update(as_mapping(task.get(key)))
+    task_run = task.get("task_run")
+    if isinstance(task_run, Mapping):
+        merged.update(as_mapping(task_run.get("metadata", task_run)))
+    merged.update(as_mapping(merged.get("workflow_metadata")))
+    runs = task.get("runs")
+    if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes, bytearray)):
+        for run in runs:
+            if isinstance(run, Mapping):
+                run_metadata = as_mapping(run.get("metadata"))
+                merged.update(run_metadata)
+                merged.update(as_mapping(run_metadata.get("workflow_metadata")))
+    return merged
+
+
+def terminal_success(task: Mapping[str, Any]) -> bool:
+    status = str(task.get("status") or "").casefold()
+    outcome = str(task.get("outcome") or "").casefold()
+    runs = task.get("runs")
+    if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes, bytearray)):
+        for run in runs:
+            if isinstance(run, Mapping):
+                candidate = str(run.get("outcome") or run.get("status") or "").casefold()
+                if candidate:
+                    outcome = candidate
+    return status in {"done", "completed"} and outcome not in {
+        "failed",
+        "gave_up",
+        "crashed",
+        "timed_out",
+        "spawn_failed",
+    }
+
+
+def text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        for key in ("summary", "result", "final_answer", "message"):
+            if value.get(key):
+                return str(value[key])
+    return str(value)
+
+
+def summary(task: Mapping[str, Any], metadata: Mapping[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    for key in (
+        "final_answer",
+        "synthesis_summary",
+        "final_summary",
+        "summary",
+        "result",
+    ):
+        if metadata.get(key):
+            return text_value(metadata[key])
+    for key in ("latest_summary", "summary", "result"):
+        if task.get(key):
+            return text_value(task[key])
+    return ""
+
+
+def ids_from(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return (value,) if value else ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            item = item.get("id") or item.get("task_id")
+        if item:
+            result.append(str(item))
+    return tuple(dict.fromkeys(result))
+
+
+def safe_json(value: Any) -> Any:
+    """Remove hidden reasoning recursively while retaining audit evidence."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): safe_json(item)
+            for key, item in value.items()
+            if str(key).casefold() not in _FORBIDDEN_KEYS
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [safe_json(item) for item in value]
+    return value
+
+
+def iso_timestamp(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        moment = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(value)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+__all__ = [
+    "action",
+    "as_mapping",
+    "ids_from",
+    "iso_timestamp",
+    "merged_run_metadata",
+    "safe_json",
+    "summary",
+    "task_id",
+    "terminal_success",
+    "workflow_mode",
+    "workflow_role",
+    "workflow_root",
+]

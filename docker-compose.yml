@@ -52,6 +52,11 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: hedgefund-portfolio-bff
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       PYTHONPATH: /app:/app/apps/api
       ENABLE_AGENT_ASK: "true"
@@ -105,6 +110,11 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: hedgefund-portfolio-worker
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "apps/api/portfolio_worker.py"]
     environment:
       PYTHONPATH: /app:/app/apps/api
@@ -119,6 +129,11 @@ services:
     image: timescale/timescaledb-ha:pg17
     container_name: hedgefund-timescaledb
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     environment:
       POSTGRES_DB: market
@@ -165,6 +180,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-news-watcher
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     # ▶ env_file 로 .env 전체를 넣지 않는다 - LS·OpenAI 등 이 컨테이너가 쓸 일
     #   없는 Credential 까지 흘러든다. 필요한 것만 명시 주입한다.
@@ -213,6 +233,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-ls-realtime
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "collectors/ls_realtime_service.py"]
 
     depends_on:
@@ -269,6 +294,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-batch-collectors
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     # --serve 가 필수다(2026-08-02). 인자가 없으면 자체 점검만 하고 끝난다 -
     # "python <파일> = 자체 점검"이라는 저장소 관례를 이 파일만 어겨서,
     # 전 모듈 점검 루프가 돌 때마다 상주 스케줄러가 조용히 떴다(4회).
@@ -348,6 +378,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-ls-news
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "collectors/ls_news_collector.py", "--run"]
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
@@ -371,6 +406,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-market-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     working_dir: /app/departments/01-research/api
     command: ["uvicorn", "market_api:app", "--host", "0.0.0.0", "--port", "8036"]
     depends_on:
@@ -393,6 +433,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-research-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     working_dir: /app/departments/01-research/api
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8035"]
 
@@ -448,6 +493,11 @@ services:
       context: departments/01-research
     container_name: hedgefund-research-mcp
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     working_dir: /app/departments/01-research
     command: ["python", "api/mcp_server.py", "--serve"]
     environment:
@@ -531,7 +581,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-research-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
@@ -562,7 +616,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-quant-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
@@ -592,6 +650,11 @@ services:
     image: redis:7-alpine
     container_name: hedgefund-redis
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -609,6 +672,11 @@ services:
       dockerfile: departments/03-risk/Dockerfile
     container_name: hedgefund-risk-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       redis:
         condition: service_healthy
@@ -644,6 +712,11 @@ services:
       dockerfile: departments/06-ai-qa-audit/Dockerfile
     container_name: hedgefund-audit-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       redis:
         condition: service_healthy
@@ -681,6 +754,11 @@ services:
       dockerfile: departments/06-ai-qa-audit/Dockerfile
     container_name: hedgefund-qa-worker
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "qa_events/worker.py"]
     working_dir: /app/departments/06-ai-qa-audit
     depends_on:
@@ -709,7 +787,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
@@ -731,7 +813,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-qa-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
@@ -780,6 +866,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-hermes-dashboard
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     profiles: ["dashboard"]
     command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
     # 대시보드는 4명 팀원이 함께 쓰는 **공용 운영/관리 콘솔**이다(2026-08-10) - CEO가
@@ -843,6 +934,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Hermes image의 공식 wrapped-runtime 경로를 사용한다. `init: true`가
     # 없으면 entrypoint가 PID 1이 되어 s6 `/init`와
     # `02-reconcile-profiles`가 모든 profiles/* gateway를 다시 시작한다.
@@ -881,6 +977,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-ceo-kanban-supervisor
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     init: true
     command: ["python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py", "--interval", "1"]
     volumes:
@@ -893,6 +994,10 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      RISK_QA_DATABASE_URL: ${RISK_QA_DATABASE_URL:-}
     mem_limit: 512m
     mem_reservation: 128m
     cpus: 0.5
@@ -912,6 +1017,11 @@ services:
     container_name: hedgefund-paper-search-mcp
     profiles: ["research-skills"]
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["uvx", "paper-search-mcp", "--transport", "http", "--port", "8041"]
     environment:
       # Unpaywall 만 연락처 이메일을 요구한다(키가 아니다). 없으면 그 소스만 빠진다.
@@ -922,6 +1032,11 @@ services:
     container_name: hedgefund-youtube-transcript-mcp
     profiles: ["research-skills"]
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["uvx", "--from", "mcp-youtube-transcript", "mcp-youtube-transcript",
               "--transport", "http", "--port", "8042"]
 
@@ -948,6 +1063,11 @@ services:
     image: hedgefund-factory:latest
     container_name: hedgefund-factory-autopilot
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "departments/01-research/factory/factory_autopilot.py",
               "--loop", "--interval-min", "15"]
     depends_on:
@@ -975,6 +1095,11 @@ services:
     image: hedgefund-factory:latest
     container_name: hedgefund-experiment-worker
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "departments/04-quant-backtest/pipeline/experiment_worker.py",
               "--serve"]
     depends_on:
@@ -1000,6 +1125,11 @@ services:
     image: hedgefund-factory:latest
     container_name: hedgefund-card-watchdog
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "apps/api/card_watchdog.py", "--loop", "--interval-min", "3"]
     depends_on:
       factory-autopilot:
@@ -1023,6 +1153,11 @@ services:
     image: hedgefund-factory:latest
     container_name: hedgefund-ui-bff
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "-m", "uvicorn", "apps.api.main:app",
               "--host", "0.0.0.0", "--port", "8001"]
     depends_on:
