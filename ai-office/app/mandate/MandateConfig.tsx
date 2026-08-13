@@ -546,7 +546,15 @@ export default function MandateConfig() {
             <span className="text-[10px] font-bold border border-outline px-2 py-0.5 rounded text-secondary uppercase">Online</span>
           </div>
 
-          <div className="flex-1 min-h-60 p-4 overflow-y-auto flex flex-col gap-4 bg-background" aria-live="polite" aria-label="Mandate 인터뷰 대화">
+          {/*
+            2026-08-13: `flex-1`만으로는 안 잡힌다 - 부모(`main`)가 페이지
+            전체를 overflow-y-auto로 스크롤하고, 이 카드는 md:flex-row 안에서
+            높이가 콘텐츠만큼 자라는 구조라 이 요소를 제약하는 상위 높이가
+            없었다. 그래서 대화가 길어질수록 채팅창 자체가 페이지처럼
+            무한히 길어졌다. max-h를 직접 박아 상위 flex 체인과 무관하게
+            항상 이 안에서만 스크롤되게 한다.
+          */}
+          <div className="flex-1 min-h-60 max-h-[28rem] p-4 overflow-y-auto flex flex-col gap-4 bg-background" aria-live="polite" aria-label="Mandate 인터뷰 대화">
             {messages.map((message, index) => (
               <div
                 key={`${message.from}-${index}`}
