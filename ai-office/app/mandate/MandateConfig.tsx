@@ -520,7 +520,14 @@ export default function MandateConfig() {
         </div>
 
         {/* ── 우: AI 어시스턴트 ────────────────────────────── */}
-        <div className="w-full md:w-[380px] shrink-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+        {/*
+          2026-08-13: 채팅 내부(max-h-[28rem])를 잡아도 이 카드 자체엔 상한이
+          없어서, 헤더+상태바+채팅+입력창을 합친 실제 높이만큼은 여전히 자란다.
+          이 카드를 감싸는 상위(main)가 페이지 전체 스크롤이라 카드가 길어지면
+          왼쪽 폼 패널과 높이가 어긋나 보인다. max-h를 여기도 박아 카드 전체
+          높이를 고정하고, 내부 채팅 영역만 스크롤되게 한다.
+        */}
+        <div className="w-full md:w-[380px] shrink-0 max-h-[42rem] bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
           <header className="bg-primary text-on-primary p-4 flex justify-between items-center">
             <div className="flex items-center gap-2">
               <span className="material-symbols-outlined text-[20px]" aria-hidden="true">robot_2</span>
