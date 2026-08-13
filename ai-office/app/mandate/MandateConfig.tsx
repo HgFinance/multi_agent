@@ -318,11 +318,14 @@ export default function MandateConfig() {
             {/* 3. 비중과 익스포저 한도 */}
             <section>
               <SectionHeading index={3} title="비중, 익스포저 한도" />
-              <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6">
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase">단일 종목 최대 비중</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-start mb-2 gap-2">
+                    <div className="min-w-0">
+                      <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase block">한 종목 최대 투자 비율</label>
+                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">특정 주식 하나에 최대로 투자할 수 있는 자산 비율입니다.</p>
+                    </div>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxSingleWeightPct}%
                     </span>
                   </div>
@@ -342,9 +345,12 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase">총 익스포저 한도 (실제로 손실을 볼 수 있는 최대 위험 금액)</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-start mb-2 gap-2">
+                    <div className="min-w-0">
+                      <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase block">최대 위험 노출액</label>
+                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">원금과 대출 등을 합쳐 실제로 잃을 수 있는 총금액입니다.</p>
+                    </div>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.grossExposurePct}%
                     </span>
                   </div>
@@ -364,9 +370,12 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase">전체 최대 손실</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-start mb-2 gap-2">
+                    <div className="min-w-0">
+                      <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase block">전체 최대 손실 한도</label>
+                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">투자를 진행하며 최대로 허용할 수 있는 총 손실액입니다.</p>
+                    </div>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxDrawdownPct}%
                     </span>
                   </div>
@@ -391,9 +400,12 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase">일일 최대 손실</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-start mb-2 gap-2">
+                    <div className="min-w-0">
+                      <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase block">일일 최대 손실 한도</label>
+                      <p className="text-[11px] font-normal text-outline normal-case mt-0.5">하루 동안 발생할 수 있는 손실의 최대 제한 금액입니다.</p>
+                    </div>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxDailyLossPct}%
                     </span>
                   </div>
