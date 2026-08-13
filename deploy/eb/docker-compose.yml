@@ -31,6 +31,11 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       PYTHONPATH: /app:/app/apps/api
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
@@ -50,6 +55,11 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "apps/api/portfolio_worker.py"]
     environment:
       PYTHONPATH: /app:/app/apps/api
@@ -67,6 +77,11 @@ services:
     build:
       context: ./departments/02-trading
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       PAPER_DB: ${PAPER_DB:-true}
       DATABASE_URL: ${DATABASE_URL:-}
@@ -77,6 +92,11 @@ services:
     build:
       context: ./departments/02-trading
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "oms/relay.py", "--serve"]
     depends_on:
       redis:
@@ -94,6 +114,11 @@ services:
       context: .
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
       DATABASE_URL: ${DATABASE_URL:-}
@@ -104,6 +129,11 @@ services:
       context: .
       dockerfile: departments/05-accounting-portfolio/Dockerfile
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
@@ -118,6 +148,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

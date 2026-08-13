@@ -5,6 +5,7 @@ import unittest
 
 
 ROOT = Path(__file__).parents[2]
+
 GATEWAY_SERVICES = {
     "ceo-hermes": ROOT / "departments/00-ceo-office/compose.yaml",
     "research-hermes": ROOT / "docker-compose.yml",
@@ -29,13 +30,13 @@ EXPECTED_GATEWAY_PROFILES = {
 
 
 def _service_block(source: str, service_name: str) -> str:
-    """Extract one top-level Compose service without requiring a YAML merge."""
+    """Extract one top-level Compose service without requiring YAML merge."""
 
     lines = source.splitlines()
     start = lines.index(f"  {service_name}:")
     block: list[str] = []
     for line in lines[start:]:
-        if block and line.startswith("  ") and not line.startswith("    "):
+        if line.startswith("  ") and not line.startswith("    ") and line != lines[start]:
             break
         block.append(line)
     return "\n".join(block)
@@ -45,9 +46,8 @@ class DiscordGatewayWiringTests(unittest.TestCase):
     def test_all_eight_gateway_definitions_use_upstream_image_by_default(self) -> None:
         profiles: set[str] = set()
         for service, path in GATEWAY_SERVICES.items():
-            source = path.read_text(encoding="utf-8")
+            block = _service_block(path.read_text(encoding="utf-8"), service)
             profile = EXPECTED_GATEWAY_PROFILES[service]
-            block = _service_block(source, service)
             self.assertIn("image: nousresearch/hermes-agent:latest", block, service)
             self.assertNotIn("HERMES_GATEWAY_IMAGE", block, service)
             self.assertNotIn("Dockerfile.hermes-discord", block, service)
@@ -64,7 +64,7 @@ class DiscordGatewayWiringTests(unittest.TestCase):
             self.assertIn("Dockerfile.hermes-discord", block, service)
             self.assertIn("HERMES_GATEWAY_IMAGE", block, service)
 
-    def test_each_gateway_has_one_docker_owned_profile_runtime(self) -> None:
+    def test_each_gateway_uses_one_docker_owned_profile_runtime(self) -> None:
         sources = {
             path: path.read_text(encoding="utf-8")
             for path in set(GATEWAY_SERVICES.values())
@@ -72,12 +72,27 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         for service, path in GATEWAY_SERVICES.items():
             profile = EXPECTED_GATEWAY_PROFILES[service]
             block = _service_block(sources[path], service)
-            self.assertIn('command: ["gateway", "run"]', block, service)
+
+            # The upstream image's s6 lifecycle owns gateway-default. An
+            # explicit Compose gateway command would create a second gateway.
+            self.assertNotIn("command:", block, service)
             self.assertIn("restart: unless-stopped", block, service)
             self.assertIn("HERMES_HOME: /opt/data", block, service)
             self.assertIn(f"/.hermes/profiles/{profile}:/opt/data", block, service)
             self.assertIn("/.hermes/shared-kanban:/opt/kanban", block, service)
             self.assertNotRegex(block, r"\bsystemctl\b|\bsystemd\b", service)
+
+    def test_default_gateway_services_use_upstream_s6_lifecycle(self) -> None:
+        for service, path in GATEWAY_SERVICES.items():
+            block = _service_block(path.read_text(encoding="utf-8"), service)
+            self.assertNotIn('command: ["gateway", "run"]', block, service)
+
+        runbook = (
+            ROOT / "docs/02-engineering/HERMES_DISCORD_DOCKER_ONLY_MIGRATION.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("gateway-default", runbook)
+        self.assertIn("gateway_state.json", runbook)
+        self.assertIn("HERMES_GATEWAY_BOOTSTRAP_STATE", runbook)
 
     def test_compose_definitions_do_not_start_host_gateways(self) -> None:
         compose_paths = set(GATEWAY_SERVICES.values()) | {

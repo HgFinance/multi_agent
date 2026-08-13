@@ -12,6 +12,11 @@ services:
       context: .
     container_name: hedgefund-workforce-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
     ports:
@@ -30,6 +35,11 @@ services:
       context: .
     container_name: hedgefund-improvement-worker
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "workforce_events/worker.py"]
     working_dir: /app/departments/07-agent-workforce
     depends_on:
@@ -52,7 +62,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-workforce-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/hr-department:/opt/data
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고

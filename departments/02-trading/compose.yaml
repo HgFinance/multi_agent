@@ -31,6 +31,11 @@ services:
       context: .
     container_name: hedgefund-trading-api
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       # Paper 주문도 accounting-api와 같은 Supabase execution.*를 보도록
       # durable 모드를 기본값으로 켠다. 명시적으로 PAPER_DB=false를 주면
@@ -65,6 +70,11 @@ services:
       context: .
     container_name: hedgefund-trading-outbox-relay
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["python", "oms/relay.py", "--serve"]
     depends_on:
       redis:
@@ -92,7 +102,11 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-trading-hermes
     restart: unless-stopped
-    command: ["gateway", "run"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/trading-department:/opt/data
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban   # 공용 Kanban board, root docker-compose.yml research-hermes 주석 참고
