@@ -8,9 +8,9 @@ import { sliderDefaultsFor } from "../lib/mandatePresets";
  * 운용 지침 설정 화면.
  *
  * 제출("지침 제출 및 검토")은 `../lib/mandateClient.ts`를 거쳐
- * `POST /ui/mandates`(최초 1회, 없을 때만) + `POST /ui/mandates/{id}/change-requests`
- * (항상)로 BFF에 전달된다. 이 화면 자체가 주문·원장·한도를 확정하지 않는다 -
- * Risk/QA 검토(LOOSEN)나 즉시 적용(TIGHTEN/NEUTRAL) 여부는 서버가 정한다.
+ * `POST /ui/mandates`(최초 1회, 없을 때만) + `POST /ui/mandates/{id}/versions`
+ * (항상)로 BFF에 전달된다. 이 화면은 정책 version을 저장할 뿐, 주문·원장·한도나
+ * Risk/QA 승인 흐름을 시작하지 않는다.
  *
  * "임시 저장"은 여전히 브라우저(localStorage)에만 남는다 - 완성 전 초안까지
  * Mandate Version으로 만들면 `content_hash` 중복·승인 흐름이 매번 발동한다
@@ -240,13 +240,7 @@ export default function MandateConfig() {
       const objectiveText = draft.objective.trim() || fallbackObjective;
 
       const result = await submitMandateDraft(draft, objectiveText);
-      setNotice(
-        result.stage === "FAST_APPLIED"
-          ? `v${result.version}로 즉시 적용됐습니다.`
-          : result.stage === "AWAITING_REVIEW"
-            ? `v${result.version} 제안이 Risk/QA 검토 대기로 넘어갔습니다(Case ${result.caseId ?? "-"}).`
-            : `제출됐습니다: ${result.stage}`,
-      );
+      setNotice(`v${result.version}이 DB에 저장됐습니다. 아직 활성 운용 지침은 아닙니다.`);
     } catch (error) {
       setNotice(
         error instanceof MandateSubmissionError
@@ -553,7 +547,7 @@ export default function MandateConfig() {
           <footer className="border-t border-outline-variant p-4 bg-surface-bright flex justify-between items-center gap-4 flex-wrap mt-auto">
             <div className="text-xs text-on-surface-variant flex items-center gap-1 font-medium">
               <span className="material-symbols-outlined text-[16px]" aria-hidden="true">info</span>
-              제출은 Risk/QA Gate를 거칩니다. 완화(LOOSEN) 변경은 검토 승인 후 적용됩니다.
+              제출하면 새 지침 version만 저장됩니다. 활성화·주문·원장 변경은 수행하지 않습니다.
             </div>
             <div className="flex gap-3">
               <button
@@ -569,7 +563,7 @@ export default function MandateConfig() {
                 disabled={submitting}
                 className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {submitting ? "제출 중..." : "지침 제출 및 검토"}
+                {submitting ? "저장 중..." : "지침 저장"}
               </button>
             </div>
             {notice ? (
