@@ -70,7 +70,18 @@ import financial_statements  # noqa: E402
 from daily_report import ReportError, build_daily_report
 from fill_consumer import project
 from ledger import Journal, Ledger, LedgerError, Position, decimal_str
+from investor_profile_repository import (
+    InvestorProfilePersistenceError,
+    InvestorProfileRepository,
+)
 from portfolio import MarkPrice, PortfolioSnapshot, ValuationError, value_portfolio
+from suitability import (
+    ExperienceLevel,
+    InvestmentMindset,
+    InvestorProfile,
+    LiquidityNeed,
+    effective_risk_band,
+)
 from recon_repository import ReconRun, open_breaks, save_reconciliation
 from repository import (
     LedgerConflictError,
@@ -142,6 +153,15 @@ def _on_store_error(request, exc: LedgerPersistenceError):
     기록된 것처럼 돌려주면 그 뒤의 모든 잔고가 틀어진다."""
     return JSONResponse(status_code=503,
                         content=_envelope("ACCOUNTING_STORE_UNAVAILABLE", str(exc)))
+
+
+@app.exception_handler(InvestorProfilePersistenceError)
+def _on_investor_profile_store_error(request, exc: InvestorProfilePersistenceError):
+    """InvestorProfile 저장 실패도 503이다 - 500으로 두면 호출자가 재시도해도 되는
+    상황인지 알 수 없다. `InvestorProfileConflictError`(version 경합)도 이 핸들러가
+    받는다: 하위 클래스이고, 호출자 대응이 같은 '잠시 후 재시도'이기 때문이다."""
+    return JSONResponse(status_code=503,
+                        content=_envelope("INVESTOR_PROFILE_STORE_UNAVAILABLE", str(exc)))
 
 
 @app.exception_handler(LedgerConflictError)
@@ -786,6 +806,157 @@ def create_daily_report(ledger_id: UUID, body: DailyReportIn) -> dict:
         strategy_of=body.strategy_of,
     )
     return {**report.to_dict(), **_provenance()}
+
+
+# ── InvestorProfile (USER_INPUT_API_SPEC.md 2.3) ──────────────────────────────
+# 온보딩 계층 1(USER_INPUT_SPEC.md 2절)의 성향·경험·기간·유동성을 저장한다.
+# **이 테이블이 없던 동안** `POST /ui/portfolio-recommendations`가 매 요청 body로
+# mindset/experience를 받아왔다 - 저장된 값을 읽는 게 아니라 매번 다시 받는
+# 구조였고 "최초 1회 입력 후 재사용"이 불가능했다. 이 경로가 그 재사용의 근거다.
+#
+# **여기서 성향을 추론하지 않는다.** LLM이 mindset/experience를 정하는 것은
+# `suitability.py` 계약과 USER_INPUT_SPEC 4.1이 영구 금지한 항목이다 - 이 Route는
+# 화면이 사용자에게 직접 받은 값만 저장한다.
+
+
+class InvestorProfileIn(BaseModel):
+    """API_SPEC 2.3 Request. `suitability.InvestorProfile`의 저장 대상 필드만."""
+
+    model_config = {"extra": "forbid"}
+
+    user_id: str = Field(min_length=1, max_length=128)
+    fund_id: str = Field(min_length=1, max_length=128)
+    mindset: InvestmentMindset
+    experience: ExperienceLevel
+    investment_horizon_years: int = Field(ge=1, le=100)
+    # 0~1 분수다(0.15 = 15%). `_pct` 접미사인데 분수인 것은 기존 계약
+    # (apps/api/main.py PortfolioRecommendationRequest)과 맞춘 것이다.
+    max_drawdown_pct: Decimal = Field(gt=0, le=Decimal(1))
+    liquidity_need: LiquidityNeed = LiquidityNeed.MEDIUM
+    as_of: datetime
+
+
+def _investor_profile_repo() -> InvestorProfileRepository:
+    """저장소가 없으면 503. **인메모리로 후퇴하지 않는다.**
+
+    프로필은 "최초 1회 입력하고 계속 쓰는" 값이라 메모리에 저장하면 재기동 때
+    조용히 사라지고 사용자는 온보딩을 다시 해야 한다. 저장이 안 되면 안 된다고
+    말하는 편이 낫다(개발 원칙 9).
+    """
+
+    repo = InvestorProfileRepository.from_env()
+    if repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail=_envelope(
+                "INVESTOR_PROFILE_STORE_UNAVAILABLE",
+                "DATABASE_URL이 없어 InvestorProfile을 저장·조회할 수 없습니다.",
+            ),
+        )
+    return repo
+
+
+def _effective_risk(profile: InvestorProfileIn) -> tuple[str, str]:
+    """`suitability.py`의 `min(mindset, experience)`를 그대로 노출한다.
+
+    API_SPEC 2.3: **화면이 재계산하지 않는다.** 등급 매핑을 여기서 다시 쓰지 않고
+    `effective_risk_band()`를 부르는 이유가 그것이다.
+    """
+
+    normalized = InvestorProfile(
+        user_id=profile.user_id,
+        mindset=profile.mindset,
+        experience=profile.experience,
+        investment_horizon_years=profile.investment_horizon_years,
+        max_drawdown_pct=profile.max_drawdown_pct,
+        liquidity_need=profile.liquidity_need,
+        as_of=profile.as_of,
+    )
+    band = effective_risk_band(normalized)
+    if profile.experience.value != profile.mindset.value and str(band) != str(
+        _band_of_mindset(profile.mindset)
+    ):
+        reason = (
+            f"경험({profile.experience.value})이 성향({profile.mindset.value})보다 "
+            "낮아 상한이 됩니다"
+        )
+    else:
+        reason = f"성향({profile.mindset.value})과 경험({profile.experience.value}) 기준입니다"
+    return str(band), reason
+
+
+def _band_of_mindset(mindset: InvestmentMindset) -> str:
+    """성향만 봤을 때의 등급. `_effective_risk`의 사유 문장 판정에만 쓴다."""
+
+    return {
+        InvestmentMindset.SAFETY_FIRST: "LOW",
+        InvestmentMindset.BALANCED: "MEDIUM",
+        InvestmentMindset.RISK_SEEKING: "HIGH",
+    }[mindset]
+
+
+@app.post("/portfolio/v1/investor-profiles", status_code=201)
+def create_investor_profile(body: InvestorProfileIn) -> dict:
+    """항상 새 `version`으로 저장한다(API_SPEC 2.3).
+
+    **수정(PUT/PATCH)이 없다.** "그때 어떤 성향으로 추천했는가"가 감사 대상이라
+    과거 버전이 덮이면 과거 추천의 근거가 사라진다(개발 원칙 5). Mandate와 달리
+    Risk/QA 승인 절차는 없다 - advisory 입력이다.
+    """
+
+    repo = _investor_profile_repo()
+    band, reason = _effective_risk(body)
+    try:
+        saved = repo.save(
+            user_id=body.user_id,
+            fund_id=body.fund_id,
+            mindset=body.mindset.value,
+            experience=body.experience.value,
+            investment_horizon_years=body.investment_horizon_years,
+            max_drawdown_pct=str(body.max_drawdown_pct),
+            liquidity_need=body.liquidity_need.value,
+            as_of=body.as_of.isoformat(),
+            created_by=body.user_id,
+        )
+    finally:
+        repo.close()
+    return {
+        "investor_profile_id": saved["investor_profile_id"],
+        "version": saved["version"],
+        "effective_risk_band": band,
+        "effective_risk_reason": reason,
+        **_provenance(),
+    }
+
+
+@app.get("/portfolio/v1/investor-profiles/current")
+def get_current_investor_profile(user_id: str, fund_id: str) -> dict:
+    """가장 높은 version 하나. 없으면 404 - 빈 프로필을 지어내지 않는다."""
+
+    repo = _investor_profile_repo()
+    try:
+        row = repo.current(user_id=user_id, fund_id=fund_id)
+    finally:
+        repo.close()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=_envelope(
+                "INVESTOR_PROFILE_NOT_FOUND",
+                f"user_id={user_id} fund_id={fund_id}에 저장된 InvestorProfile이 없습니다.",
+            ),
+        )
+    band, reason = _effective_risk(InvestorProfileIn(**{
+        "user_id": row["user_id"],
+        "fund_id": row["fund_id"],
+        "mindset": row["mindset"],
+        "experience": row["experience"],
+        "investment_horizon_years": row["investment_horizon_years"],
+        "max_drawdown_pct": Decimal(row["max_drawdown_pct"]),
+        "liquidity_need": row["liquidity_need"],
+        "as_of": row["as_of"],
+    }))
+    return {**row, "effective_risk_band": band, "effective_risk_reason": reason, **_provenance()}
 
 
 @app.get("/health")

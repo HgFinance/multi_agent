@@ -77,6 +77,51 @@ async def governance_request(
     return payload
 
 
+def fetch_current_mandate_by_fund(fund_id: str) -> dict[str, Any] | None:
+    """Fund 하나의 현재 Mandate를 **동기로** 읽는다. 실패는 `None`이다.
+
+    동기인 이유: 호출부(`/ui/ceo/ask`)가 `hermes kanban create` 같은 블로킹
+    subprocess를 쓰는 동기 라우트다. FastAPI는 동기 라우트를 threadpool에서
+    돌리므로 그 안에서 동기 HTTP를 쓰는 편이 맞고, 라우트를 async로 바꾸면
+    subprocess 호출이 이벤트 루프를 막는다.
+
+    **예외를 올리지 않는다.** Mandate 스냅샷은 CEO 워크플로의 참고 맥락이고
+    (`binding: false`), 이것 때문에 질의 접수 자체가 실패하면 사용자는 Mandate가
+    없다는 이유로 아무 질문도 못 한다. 못 읽으면 스냅샷 없이 진행하고, 부서는
+    "Mandate 블록이 없다"는 정확한 사실을 보게 된다 - 기본 한도를 지어내는 것보다
+    안전하다(개발 원칙 9).
+
+    409(한 Fund에 Mandate 2개 이상)도 `None`이다. 모호할 때 임의로 하나를 고르면
+    사용자가 정하지 않은 한도가 판단 근거로 쓰인다.
+    """
+
+    if not GOVERNANCE_API_URL or not fund_id:
+        return None
+    headers = (
+        {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
+        if GOVERNANCE_API_AUTH_TOKEN
+        else None
+    )
+    try:
+        with httpx.Client(
+            base_url=GOVERNANCE_API_URL,
+            timeout=GOVERNANCE_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = client.get(
+                f"/governance/v1/mandates/by-fund/{fund_id}/current",
+                headers=headers,
+            )
+    except httpx.HTTPError:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 async def fetch_mandate_policy_content(mandate_id: str) -> dict[str, Any] | None:
     """Best-effort server-side Mandate content lookup for the CEO planner.
 

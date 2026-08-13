@@ -24,6 +24,8 @@ try:
         list_ceo_roots,
         load_workflow,
     )
+    from .current_user import optional_current_user
+    from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoPlanning,
         CeoQueryAcceptedResponse,
@@ -49,6 +51,8 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         list_ceo_roots,
         load_workflow,
     )
+    from current_user import optional_current_user  # type: ignore[no-redef]
+    from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
         CeoQueryAcceptedResponse,
@@ -64,7 +68,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         TaskWorkflow,
     )
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
@@ -75,6 +79,27 @@ from orchestration.ceo_workflow_scope import build_root_body, infer_workflow_mod
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 
+
+class CeoAsk(hermes_boundary.AgentAsk):
+    """`/ui/ceo/ask` 전용 Body. `AgentAsk` + `fund_id`.
+
+    `fund_id`를 `AgentAsk`에 넣지 않은 이유: 그 모델은 부서 Agent 질의 6개가
+    함께 쓰는 계약이고, 거기에 CEO 전용 필드를 넣으면 트레이딩·회계 질의에도
+    쓰지 않는 필드가 노출된다.
+
+    **왜 서버가 user_id로 fund를 찾지 않고 화면이 보내나**: `governance.fund_memberships`
+    (user<->fund 연결 테이블)가 아직 비어 있어 `user_id -> fund_id` 역참조 경로가
+    없다. 프론트엔드가 계정을 하드코딩하는 단계이므로 `fund_id`도 그 쌍으로 함께
+    보내는 편이 조회 경로를 새로 만드는 것보다 단순하다. 진짜 로그인이 붙으면
+    그때 `fund_memberships`로 옮긴다.
+    """
+
+    fund_id: str | None = None
+
+
+# Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
+# 서버에서 먼저 모양을 고정한다. shell=False라 주입 경로는 아니지만, 형식이
+# 틀린 값을 CLI까지 보내 404를 만들 이유가 없다.
 _TASK_ID_PATTERN = r"^t_[A-Za-z0-9]{4,64}$"
 _TASK_ID_PATH = Path(
     description="Kanban Task ID. Root ID를 권장하지만 자식 ID도 Root로 해석한다.",
@@ -303,8 +328,24 @@ def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object
     response_model=CeoQueryAcceptedResponse,
     summary="CEO에게 새 분석을 요청한다",
 )
-def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
-    """Create the CEO root task; supervisor execution remains asynchronous."""
+def ceo_query(
+    req: CeoAsk,
+    owner_id: str | None = Depends(optional_current_user),
+) -> dict[str, object]:
+    """Create the CEO root task; supervisor execution remains asynchronous.
+
+    `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
+    **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
+    물었는지도 그 사람의 Mandate가 무엇인지도 알 수 없었다.
+    """
+
+    # Mandate 스냅샷. 못 읽으면 None이고 그때는 블록 없이 진행한다 - 이것 때문에
+    # 질의 접수가 실패하면 Mandate가 없는 사용자는 아무 질문도 못 한다.
+    # `getattr`로 읽는 이유: 이 라우트는 `CeoAsk`를 받지만, 부서 질의와 같은
+    # `AgentAsk`를 직접 넘기는 호출부(테스트·내부 유틸)가 남아 있을 수 있고 그쪽엔
+    # `fund_id`가 없다. 속성 부재로 500을 내는 대신 "Mandate 없음"으로 떨어진다.
+    fund_id = getattr(req, "fund_id", None)
+    mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
@@ -313,6 +354,7 @@ def ceo_query(req: hermes_boundary.AgentAsk) -> dict[str, object]:
             req.query,
             req.request_id,
             workflow_mode=infer_workflow_mode(req.query),
+            mandate=mandate,
         ),
         idempotency_key=req.request_id,
     )

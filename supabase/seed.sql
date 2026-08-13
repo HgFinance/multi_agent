@@ -198,4 +198,34 @@ values (
 )
 on conflict (user_id) do nothing;
 
+-- 플레이스홀더 회원 2건 추가 (2026-08-12) — 프론트엔드 계정 전환 테스트용
+--
+-- 왜 3명인가: 온보딩·Mandate·적합성 프로필이 전부 `user_id` 기준으로 갈라지는데
+-- 회원이 1명이면 "다른 사용자에게는 안 보인다"를 검증할 수 없다. 프론트엔드는
+-- 이 3개 UUID를 하드코딩해 계정 전환 버튼으로 `X-User-Id`를 바꿔 보낸다.
+--
+-- **이건 인증이 아니다.** `X-User-Id`는 서명이 없어 누구나 아무 UUID나 보낼 수
+-- 있다(apps/api/current_user.py 머리말). 폐쇄망 팀 테스트 전제이며, 공개 배포
+-- 전에 실제 인증으로 교체해야 한다.
+--
+-- 위 1건과 같은 안전장치를 그대로 적용한다: `.invalid` TLD(RFC 2606),
+-- 비밀번호 없음(로그인 불가), display_name에 PLACEHOLDER 표시.
+-- UUID는 `...cec1`/`...cec2`로 기존 `...cec0` 다음 번호를 이어 붙여, 조회 결과에서
+-- 세 계정이 한 묶음임이 드러나게 한다.
+insert into auth.users (id, aud, role, email)
+values
+  ('00000000-0000-4000-8000-00000000cec1',
+   'authenticated', 'authenticated', 'placeholder-user-2@hedgefund.invalid'),
+  ('00000000-0000-4000-8000-00000000cec2',
+   'authenticated', 'authenticated', 'placeholder-user-3@hedgefund.invalid')
+on conflict (id) do nothing;
+
+insert into governance.user_profiles (user_id, display_name, timezone, status)
+values
+  ('00000000-0000-4000-8000-00000000cec1',
+   'PLACEHOLDER User 2 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE'),
+  ('00000000-0000-4000-8000-00000000cec2',
+   'PLACEHOLDER User 3 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE')
+on conflict (user_id) do nothing;
+
 commit;
