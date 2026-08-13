@@ -73,6 +73,47 @@ FRAGILITY_RULES = {
 }
 
 
+def _edge_for_execution(edge) -> dict:
+    """`expected_edge` -> **실행면이 읽는 키만.**
+
+    `config_binding.EDGE_KEYS` 밖의 키가 하나라도 있으면 발주 게이트가 그
+    가설을 영구 보류한다("실행면이 읽지 않는 파라미터"). 설명을 여기 넣으면
+    그 가설은 영원히 안 돈다 - `rationale` 이 설명란이다.
+
+    **떨어뜨린 키는 조용히 버리지 않는다** - 무엇을 뺐는지 남긴다.
+    """
+    src = dict(edge or {})
+    if not src.get("type"):
+        src["type"] = "none"            # 강건성 검증은 엣지를 주장하지 않는다
+    try:
+        from config_binding import EDGE_KEYS  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - 못 읽으면 그대로 둔다(막지 않는다)
+        return src
+    kept = {k: v for k, v in src.items() if k in EDGE_KEYS}
+    dropped = sorted(k for k in src if k not in EDGE_KEYS)
+    if dropped:
+        print(f"  ⚠ expected_edge 에서 실행면이 안 읽는 키를 뺐다: "
+              f"{', '.join(dropped)} (설명은 rationale 에 있다)", flush=True)
+    return kept
+
+
+def _fragility_criteria() -> list[str]:
+    """취약성 규칙 -> **반증 기준 문장 목록.**
+
+    `falsification_criteria` 는 jsonb 배열이다. dict 를 넣으면 읽는 쪽이
+    순회할 때 키가 나와 `['note', 'fragility_rules']` 같은 것이 기준으로
+    남는다(2026-08-12 실측). 규칙 상수에서 문장을 만들면 임계를 바꿔도
+    기준이 따라오고, 두 곳이 갈리지 않는다.
+    """
+    r = FRAGILITY_RULES
+    return [
+        f"창별 수익 부호가 일관되지 않음 - 양(+)인 창 비율이 "
+        f"{r['min_positive_window_ratio']:.0%} 미만이면 기각",
+        f"어느 한 창의 MDD 가 {r['max_worst_window_mdd']:.0%} 를 넘으면 기각",
+        f"창간 Sharpe 표준편차가 {r['max_sharpe_std']} 를 넘으면 기각",
+    ]
+
+
 def wf_code_version() -> str:
     """이 파일 + backtest_runner 해시 - 창 결과는 시뮬레이터 코드에도 의존한다."""
     here = Path(__file__).resolve()
@@ -357,10 +398,24 @@ def register_and_validate(name: str, version: str, *,
                  "규칙으로 요약해 QNT-03 스모크 결과가 특정 구간의 우연인지 "
                  "가려낸다. 판정으로 hypotheses.status 를 바꾸지 않는다(승인 "
                  "권한은 CEO·Risk·QA 체인)."),
-                 json.dumps(edge or {"type": "none",
-                                     "note": "robustness check - edge 주장 없음"}),
-                 json.dumps({"fragility_rules": FRAGILITY_RULES,
-                             "note": "규칙 위반 플래그가 하나라도 있으면 FRAGILE"}),
+                 # ▶ **실행면이 읽는 키만 넣는다** (2026-08-12 파이프라인 실측)
+                 #   기본값에 `note` 가 있었고, 호출부가 `universe` 를 실어
+                 #   보내기도 했다. 둘 다 `config_binding.EDGE_KEYS` 밖이라
+                 #   **그 가설은 영원히 발주가 막힌다** - 실제로 QNT-04 가설
+                 #   7건이 TESTING 에 8일째 앉아 있었고, 병목 인구조사 1순위
+                 #   (56 가설·일)의 정체가 이것이었다.
+                 #
+                 #   설명은 `rationale`(바로 위 인자)에 이미 다 들어간다.
+                 #   expected_edge 는 **실행 계약**이지 설명란이 아니다.
+                 json.dumps(_edge_for_execution(edge)),
+                 # ▶ **반증 기준은 목록이다. dict 를 넣으면 키가 기준이 된다.**
+                 #   (2026-08-12 실측) 여기가 dict 라서 원장에 반증 기준이
+                 #   `['note', 'fragility_rules']` 로 저장돼 있었다 - 읽는
+                 #   쪽이 순회하면 값이 아니라 키가 나온다. TESTING 에 8일째
+                 #   앉아 있던 5건이 전부 이 모양이었고, 자기반증 실행기가
+                 #   `unclassified` 로 표시해 드러났다.
+                 #   **규칙에서 문장을 만든다** - 상수를 바꾸면 기준도 따라간다.
+                 json.dumps(_fragility_criteria()),
                  json.dumps([f"{name}/{version}"]), WF_VERSION, trace))
             hyp_id = str(cur.fetchone()[0])
 
@@ -662,6 +717,42 @@ def _check_window_metrics_determinism():
     print("  창 지표(결정성·기준선)  OK")
 
 
+def _check_edge_only_carries_executable_keys():
+    """**expected_edge 는 실행 계약이지 설명란이 아니다.** (2026-08-12 실측)
+
+    기본값에 `note` 가 있었고 호출부가 `universe` 를 실었다. 둘 다
+    `EDGE_KEYS` 밖이라 그 가설은 **영원히 발주가 막힌다** - QNT-04 가설 7건이
+    TESTING 에 8일째 앉아 있었고 병목 인구조사 1순위가 그것이었다.
+    """
+    from config_binding import EDGE_KEYS  # noqa: PLC0415
+
+    # 사고 원문: 기본값에 note 가 있었다
+    got = _edge_for_execution(None)
+    assert "note" not in got, got
+    assert got.get("type") == "none", got
+    assert set(got) <= set(EDGE_KEYS), got
+
+    # 사고 원문: 호출부가 universe(오타·비어휘)를 실었다
+    got2 = _edge_for_execution({"type": "momentum", "universe": "krx",
+                                "note": "설명", "horizon_days": 20})
+    assert set(got2) == {"type", "horizon_days"}, got2
+    assert got2["horizon_days"] == 20, "읽는 키까지 버렸다"
+
+    # 정상 입력은 그대로 통과한다 - 오탐이 있으면 멀쩡한 가설이 깎인다
+    ok = {"type": "momentum", "universe_key": "krx_all", "top_n": 20}
+    assert _edge_for_execution(ok) == ok, _edge_for_execution(ok)
+
+    # 삽입부가 실제로 이 함수를 쓰는지 본다 - 안 쓰면 검사가 장식이다
+    import ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and "register" in n.name)
+    body = ast.get_source_segment(src, fn) or ""
+    assert "_edge_for_execution(edge)" in body, \
+        "삽입부가 거르지 않는다 - 막힌 가설이 다시 생긴다"
+    print("  edge 는 실행 계약만       OK")
+
+
 def _check_fragility_rules():
     good = [(f"W{i}", {"total_return": 0.05, "sharpe_rf0": 1.0, "max_drawdown": -0.05})
             for i in range(5)]
@@ -739,6 +830,7 @@ if __name__ == "__main__":
     _check_slice_no_future()
     _check_no_lookahead_through_window()
     _check_window_metrics_determinism()
+    _check_edge_only_carries_executable_keys()
     _check_fragility_rules()
     _check_input_hash()
-    print("Walk-Forward 7개 영역 통과. 실행은 --run")
+    print("Walk-Forward 8개 영역 통과. 실행은 --run")

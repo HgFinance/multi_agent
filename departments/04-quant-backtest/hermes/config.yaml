@@ -68,6 +68,27 @@ agent:
   - quant.outcome.write
   - quant.release_gate.override
   - quant.execution_surface.write
+# ▶ **퀀트에도 리서치 MCP 를 물린다** (2026-08-12 실측)
+#   퀀트 프로필에는 `mcp_servers` 가 아예 없었다. 그래서 퀀트 카드가
+#   `필수 factory_brief 도구가 이 세션에 노출되지 않았다` 로 차단됐고,
+#   에이전트는 셸로 파이썬을 직접 돌리려다 import 단계에서 죽었다.
+#
+#   퀀트가 이 도구들을 쓸 이유가 있다:
+#     factory_brief     지난 실험이 왜 끝났는지 - 판정을 쓰려면 봐야 한다
+#     factory_outcomes  계열별 결말 - 같은 실수를 반복하지 않으려면 봐야 한다
+#   `factory_submit_leads`·`factory_submit_proposal` 은 리서치 소관이다.
+#   **가설 생성은 퀀트가 하지 않는다** - 도구가 보인다고 쓰라는 뜻이 아니다.
+#
+#   ⚠ 시세는 MCP 가 아니라 HTTP 다. `http://market-api:8036/bars/<종목>` 등이
+#     인증 없이 열려 있다(스킬 "시세는 HTTP 로도 물어본다" 참고). MCP 가 없다고
+#     데이터를 못 보는 게 아니다.
+mcp_servers:
+  research:
+    url: http://research-mcp:8037/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
+
 hiring_priority:
   quant-backtest-supervisor:
     role_codes:

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,9 +35,25 @@ MODULE_VERSION = "quant-job-queue-v1"
 # 백테스트가 실측 3~5분이므로 30분이면 정상 실행을 뺏지 않는다.
 LEASE_TIMEOUT_MIN = 30
 
-# 한 번에 집어가는 작업 수. 1 로 둔다 - 워커가 죽으면 잡고 있던 것이
-# 전부 회수 대기가 되므로 많이 쥘수록 지연이 커진다.
-BATCH = 1
+# 한 번에 집어가는 작업 수. 기본 1 - 워커가 죽으면 잡고 있던 것이 전부 회수
+# 대기가 되므로 많이 쥘수록 지연이 커진다.
+#
+# ▶ **상수로 박지 않는다** (2026-08-12, 재일 지시)
+#   병렬도는 상황에 따라 다르다. 백테스트가 v2 에서 2.5초, v3 에서 110초였다
+#   (33배 데이터에 44배 시간). 큐에 32건이 밀려 있으면 직렬로 한 시간이고,
+#   4병렬이면 15분이다. 그 판단은 **큐를 보는 쪽**이 해야지 코드에 박을 값이
+#   아니다 - 박아 두면 상황이 바뀌어도 안 바뀌고, 그게 오늘 하루 종일 고친
+#   유형이다.
+#
+#   그래서 환경변수로 연다. 퀀트 에이전트가 큐 적체를 보고 판단해서 올린다
+#   (스킬 "병목이면 병렬도를 올린다" 참고).
+#
+# ▶ 올려도 안전한 이유
+#   `lease` 가 `for update skip locked` 를 쓰므로 여러 워커·여러 배치가 같은
+#   작업을 집지 않는다. 집는 순간 `attempts` 가 오르므로 무한 재시도도 막힌다.
+#   그리고 `register_and_run` 이 `input_hash` 로 중복 실험을 거부하므로,
+#   설령 같은 가설이 두 번 돌아도 원장에 두 번 남지 않는다.
+BATCH = max(1, int(os.getenv("QUANT_EXPERIMENT_BATCH", "1")))
 
 
 @dataclass(frozen=True)
@@ -84,13 +101,98 @@ def reclaim_decision(job: Job, *, now: datetime) -> dict:
                       f"(시도 {job.attempts}/{job.max_attempts})"}
 
 
-def enqueue(conn, hypothesis_id: str, *, requested_by: str) -> dict:
+# 같은 가설이 **같은 사유로** 이만큼 죽었으면 다시 넣지 않는다.
+# 병목 인구조사의 CHURN_ATTEMPTS 와 같은 값이다 - 큐가 발행을 멈추는 바로 그
+# 지점에서 인구조사가 그것을 병목으로 집어 올려야 신호가 끊기지 않는다.
+REPEAT_BLOCK = int(os.getenv("FACTORY_REPEAT_BLOCK", "3"))
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """되풀이 실패로 막힌 주문. **연령을 같이 들고 다닌다.**
+
+    DLQ 운영 원칙이 네 가지인데(진단 맥락 보존 · 종착지로 두고 자동 재투입
+    금지 · 연령과 부피 감시 · 결함을 고친 뒤 의도적 재생), 우리는 셋째를
+    안 하고 있었다. "며칠째 막혀 있나" 를 세지 않으면 8일짜리가 조용히 생긴다.
+    """
+
+    reason: str
+    count: int
+    days: int = 0
+
+    def __iter__(self):          # 옛 호출부가 (사유, 횟수) 로 풀던 것을 지킨다
+        return iter((self.reason, self.count))
+
+
+def repeat_block(cur, hypothesis_id: str) -> Blocked | None:
+    """같은 사유로 되풀이해 죽은 주문. 있으면 (사유, 횟수), 없으면 None.
+
+    ▶ 왜 사유를 안 가리나 (2026-08-12 실측)
+      가설 `3bb50969` 하나에 **4시간 동안 job 25개**가 발행됐다. 전부 같은
+      사유(`'short_term_reversal' 는 어휘에 없다`)로 죽었다. `on conflict` 는
+      QUEUED/LEASED 만 덮으므로 FAILED 가 되는 순간 같은 주문이 다시 들어간다.
+
+      "구조적 실패만 막자"고 사유를 분류하려 했지만 그건 틀린 길이다 -
+      `NOT_RUNNABLE` 안에 어휘 부재(영구)와 시장 DB 연결 없음(일시)이 같이
+      있다. 대신 **같은 사유가 N번 되풀이됐는가**만 본다. 일시적 실패는
+      사유가 바뀌거나 언젠가 성공하므로 여기 안 걸린다. 사유를 몰라도 맞다.
+
+      막는 것으로 끝내지 않는다 - 반환값이 사유를 그대로 실어 보내므로
+      부르는 쪽이 "무엇이 없어서 못 도는지"를 안다.
+    """
+    cur.execute(
+        """select coalesce(failure_reason, ''), count(*),
+                  extract(day from now() - min(updated_at))::int
+             from quant.experiment_jobs
+            where hypothesis_id = %s::uuid and status = 'FAILED'
+              and failure_reason is not null and failure_reason <> ''
+            group by 1 order by 2 desc limit 1""", (hypothesis_id,))
+    row = cur.fetchone()
+    if row and int(row[1]) >= REPEAT_BLOCK:
+        return Blocked(str(row[0]), int(row[1]), int(row[2] or 0))
+    return None
+
+
+def enqueue(conn, hypothesis_id: str, *, requested_by: str,
+            replay: str = "") -> dict:
     """주문 접수. **같은 가설의 활성 주문은 하나뿐이다.**
 
     중복 제출을 막지 않으면 같은 백테스트가 동시에 돌아 결과가 둘이 되고,
     어느 것이 진짜인지 모르게 된다(DB 부분 유니크 인덱스가 강제한다).
+
+    되풀이해 죽은 주문도 다시 받지 않는다(`repeat_block`). 유니크 인덱스는
+    QUEUED/LEASED 만 덮어서 FAILED 뒤에는 아무것도 막지 않았다.
+
+    ▶ `replay` - **결함을 고친 뒤 의도적으로 재생하는 길** (2026-08-12)
+      차단만 있고 푸는 길이 없으면, 실행면을 고쳐도 막힌 가설은 영원히 막혀
+      있다. 그렇다고 자동으로 풀면 안 된다 - DLQ 운영 원칙이 "자동 재투입
+      금지, 결함을 고친 뒤 통제된 배치로 재생" 이다. 자동 재개는 고쳤는지
+      확인하지 않고 같은 자리에서 또 죽는다.
+
+      그래서 **명시적 재생만** 연다. 부르는 쪽이 무엇을 고쳤는지 문자열로
+      적어야 하고, 그것이 `requested_by` 에 남아 감사된다. 사유 없는 재생은
+      거부한다 - 사유 없이 풀면 그냥 자동 재투입과 같다.
     """
     with conn.cursor() as cur:
+        blocked = repeat_block(cur, hypothesis_id)
+        if blocked and not replay:
+            conn.rollback()
+            aged = f" {blocked.days}일째" if blocked.days else ""
+            return {"accepted": False, "blocked": True,
+                    "failure_reason": blocked.reason, "attempts": blocked.count,
+                    "days": blocked.days,
+                    "reason": (f"같은 사유로 {blocked.count}회 죽은 주문이다"
+                               f"{aged} - 같은 것을 다시 넣어도 같은 자리에서 "
+                               f"죽는다. **실행면을 고친 뒤 무엇을 고쳤는지 "
+                               f"적고 재생(replay)해라**: "
+                               f"{blocked.reason[:150]}")}
+        if replay and not str(replay).strip():
+            conn.rollback()
+            return {"accepted": False,
+                    "reason": "재생에는 무엇을 고쳤는지가 필요하다 - 사유 없는 "
+                              "재생은 자동 재투입과 같아서 같은 자리에서 또 죽는다"}
+        if replay:
+            requested_by = f"{requested_by} replay:{str(replay)[:120]}"
         cur.execute(
             """
             insert into quant.experiment_jobs (hypothesis_id, requested_by)
@@ -255,15 +357,112 @@ def _check_finish_requires_reason():
         raise AssertionError("사유 없는 실패가 통과했다")
 
 
+def _check_repeat_block_stops_reissue():
+    """**같은 사유로 3번 죽었으면 4번째 주문을 안 받는다.** (2026-08-12 실측)
+
+    가설 3bb50969 하나에 4시간 동안 job 25개가 발행됐다. 전부 같은 사유였다.
+    유니크 인덱스는 QUEUED/LEASED 만 덮어 FAILED 뒤를 안 막았다.
+    """
+    class _Cur:
+        def __init__(self, rows):
+            self.rows, self.inserted, self.by = rows, False, None
+
+        def execute(self, sql, *a):
+            if "insert" in sql.lower():
+                self.inserted = True
+                self.by = a[0][1] if a and len(a[0]) > 1 else None
+            self._sql = sql
+
+        def fetchone(self):
+            if "group by" in self._sql:
+                return self.rows
+            return ("job-1", "QUEUED") if self.inserted else None
+
+        def __enter__(self):  return self
+        def __exit__(self, *a):  return False
+
+    class _Conn:
+        def __init__(self, cur):  self._c = cur
+        def cursor(self):  return self._c
+        def commit(self):  pass
+        def rollback(self):  pass
+
+    HID = "3bb50969-0000-0000-0000-000000000000"
+    cur = _Cur(("'short_term_reversal' 는 어휘에 없다", 25, 8))
+    r = enqueue(_Conn(cur), HID, requested_by="t")
+    assert r["accepted"] is False and r.get("blocked") is True, r
+    assert not cur.inserted, "막았다면서 insert 를 했다"
+    # 사유를 실어 보내야 부르는 쪽이 무엇을 고쳐야 하는지 안다
+    assert "short_term_reversal" in r["reason"], r["reason"]
+    # 연령을 세지 않으면 8일짜리가 조용히 생긴다
+    assert r["days"] == 8 and "8일째" in r["reason"], r
+
+    # 2회는 아직 막지 않는다 - 일시적 실패를 영구 차단으로 몰면 안 된다
+    cur2 = _Cur(("일시적인 무언가", REPEAT_BLOCK - 1, 0))
+    assert repeat_block(cur2, "x") is None, "임계 미만인데 막았다"
+    # 사유가 없는 실패는 세지 않는다(무엇이 되풀이됐는지 모른다)
+    cur3 = _Cur(None)
+    assert repeat_block(cur3, "x") is None
+
+
+def _check_replay_is_deliberate_not_automatic():
+    """**고친 뒤 재생하는 길은 있되, 자동 재투입은 없다.** (2026-08-12)
+
+    차단만 있고 푸는 길이 없으면 실행면을 고쳐도 막힌 가설이 영원히 막혀
+    있다. 그렇다고 자동으로 풀면 고쳤는지 확인하지 않고 같은 자리에서 또
+    죽는다 - DLQ 운영 원칙이 "자동 재투입 금지, 결함을 고친 뒤 의도적 재생".
+    그래서 **무엇을 고쳤는지 적어야만** 열린다.
+    """
+    class _Cur:
+        def __init__(self):
+            self.inserted, self.by = False, None
+
+        def execute(self, sql, *a):
+            if "insert" in sql.lower():
+                self.inserted = True
+                self.by = a[0][1]
+            self._sql = sql
+
+        def fetchone(self):
+            if "group by" in self._sql:
+                return ("'x' 는 어휘에 없다", 25, 8)
+            return ("job-2", "QUEUED") if self.inserted else None
+
+        def __enter__(self):  return self
+        def __exit__(self, *a):  return False
+
+    class _Conn:
+        def __init__(self, cur):  self._c = cur
+        def cursor(self):  return self._c
+        def commit(self):  pass
+        def rollback(self):  pass
+
+    HID = "3bb50969-0000-0000-0000-000000000000"
+    cur = _Cur()
+    r = enqueue(_Conn(cur), HID, requested_by="quant",
+                replay="short_term_reversal 템플릿을 추가했다")
+    assert r["accepted"] is True, r
+    # 무엇을 고쳐서 풀었는지가 원장에 남아야 감사된다
+    assert "replay:" in cur.by and "템플릿을 추가" in cur.by, cur.by
+
+    # 빈 사유로는 못 푼다 - 그건 그냥 자동 재투입이다
+    cur2 = _Cur()
+    r2 = enqueue(_Conn(cur2), HID, requested_by="quant", replay="   ")
+    assert r2["accepted"] is False and not cur2.inserted, r2
+    assert "무엇을 고쳤는지" in r2["reason"], r2["reason"]
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     print(f"{MODULE_VERSION} 자체 점검 (DB 없음)")
+    _check_repeat_block_stops_reissue();     print("  되풀이 실패 재발행 차단  OK")
+    _check_replay_is_deliberate_not_automatic(); print("  고친 뒤 의도적 재생만   OK")
     _check_fresh_lease_is_kept();            print("  정상 실행 유지          OK")
     _check_expired_lease_requeues();         print("  만료 -> 재대기          OK")
     _check_exhausted_fails_not_loops();      print("  소진 -> 실패(무한X)     OK")
     _check_missing_lease_time_is_not_expired(); print("  시각 미상 != 만료      OK")
     _check_only_leased_expires();            print("  LEASED 만 만료          OK")
     _check_finish_requires_reason();         print("  실패엔 사유 필수        OK")
-    print("작업 큐 6개 영역 통과.")
+    print("작업 큐 8개 영역 통과.")

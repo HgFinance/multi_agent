@@ -158,6 +158,64 @@ values %s
 on conflict do nothing
 """
 
+# ▶ **한 날은 한 출처만 쓴다** (2026-08-12 실측 사고)
+#   `on conflict do nothing` 은 **먼저 넣은 쪽이 이긴다.** 품질이 아니라 실행
+#   순서가 승자를 정한다. 그래서 이런 일이 생겼다:
+#
+#     로컬 빌드가 먼저 돌았다 → 그때 우리 호가는 21일이 구멍이라 스프레드가
+#     통째로 NULL 이었다 → 나중에 외부 빌드를 돌렸는데 이미 있는 종목은 안
+#     덮였다 → **그 21일은 종목 2,490개가 스프레드 없고 35~39개만 있다.**
+#
+#   한 날 안에서 종목마다 품질이 다르면 횡단면 전략이 "스프레드가 있는 39개"
+#   만 고른다. **표본이 조용히 바뀌는데 아무도 모른다** - 이게 최악이다.
+#
+#   그래서 적재 전에 그날의 기존 출처를 보고, 다르면 **거부하거나 명시적으로
+#   교체**한다. 조용히 섞이는 경로를 없앤다.
+_SQL_DAY_ORIGINS = """
+select distinct coalesce(values->>'origin', 'local')
+  from market.microstructure_features
+ where feature_set_version = %s
+   and event_time >= %s and event_time < %s
+"""
+
+# 판정을 사람이 읽는 문장으로. **조용히 건너뛰지 않는다** - 왜 0행인지
+# 로그에 남아야 다음 사람이 원인을 찾는다.
+_GATE_NOTE = {
+    "skip": "같은 출처가 이미 있다 - 건너뜀",
+    "blocked": "**다른 출처가 이미 있다 - 섞지 않는다.** 교체하려면 --replace",
+}
+
+_SQL_DELETE_DAY = """
+delete from market.microstructure_features
+ where feature_set_version = %s
+   and event_time >= %s and event_time < %s
+"""
+
+
+def day_origin_guard(conn, day: date, origin: str, *, replace: bool = False) -> str:
+    """그날 이미 있는 출처와 지금 넣으려는 출처를 대조한다.
+
+    반환: 'insert'(넣어도 됨) | 'skip'(같은 출처가 이미 있음) | 'blocked'
+    `replace=True` 면 다른 출처가 있을 때 **그날을 통째로 지우고** 넣는다 -
+    부분 덮어쓰기는 하지 않는다. 섞인 상태를 만드는 것이 문제였으므로,
+    교체는 날 단위로만 허용한다.
+    """
+    bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
+    nxt = bucket + timedelta(days=1)
+    with conn.cursor() as cur:
+        cur.execute(_SQL_DAY_ORIGINS, (FEATURE_SET_VERSION, bucket, nxt))
+        have = {r[0] for r in cur.fetchall()}
+    if not have:
+        return "insert"
+    if have == {origin}:
+        return "skip"
+    if not replace:
+        return "blocked"
+    with conn.cursor() as cur:
+        cur.execute(_SQL_DELETE_DAY, (FEATURE_SET_VERSION, bucket, nxt))
+    conn.commit()
+    return "insert"
+
 # 이미 접은 날은 다시 접지 않는다. 같은 날을 두 번 넣으면 데이터셋 해시가
 # 실행마다 달라져 재현이 깨진다.
 _SQL_DONE_DAYS = """
@@ -199,7 +257,8 @@ def session_bounds(day: date) -> tuple[str, str]:
             f"{day.isoformat()} {SESSION_END}+09")
 
 
-def build_day(market_conn, day: date, *, dry_run: bool = False) -> dict:
+def build_day(market_conn, day: date, *, dry_run: bool = False,
+              replace: bool = False) -> dict:
     """하루를 접어 적재한다. 반환: 요약."""
     from psycopg2.extras import execute_values
 
@@ -225,6 +284,9 @@ def build_day(market_conn, day: date, *, dry_run: bool = False) -> dict:
 
     if dry_run:
         return {"day": day, "rows": len(payload), **grades, "dry_run": True}
+    gate = day_origin_guard(market_conn, day, "local", replace=replace)
+    if gate != "insert":
+        return {"day": day, "rows": 0, **grades, "note": _GATE_NOTE[gate]}
     with market_conn.cursor() as cur:
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
     market_conn.commit()
@@ -232,7 +294,8 @@ def build_day(market_conn, day: date, *, dry_run: bool = False) -> dict:
 
 
 def build_day_external(market_conn, src_conn, day: date, *,
-                       dry_run: bool = False) -> dict:
+                       dry_run: bool = False,
+                       replace: bool = False) -> dict:
     """저쪽 DB 에서 집계하고 **결과만** 우리 원장에 넣는다.
 
     종목 매핑은 우리 쪽 `market.symbol_map` 이 정본이다. 못 찾은 종목은
@@ -273,6 +336,10 @@ def build_day_external(market_conn, src_conn, day: date, *,
     if dry_run:
         return {"day": day, "rows": len(payload), "unmapped": unmapped,
                 **grades, "dry_run": True}
+    gate = day_origin_guard(market_conn, day, "external", replace=replace)
+    if gate != "insert":
+        return {"day": day, "rows": 0, "unmapped": unmapped, **grades,
+                "note": _GATE_NOTE[gate]}
     with market_conn.cursor() as cur:
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
     market_conn.commit()
@@ -394,8 +461,89 @@ def _check_external_sql_matches_local_definitions():
     print("  외부/내부 정의 일치      OK")
 
 
+class _GuardCur:
+    def __init__(self, have):
+        self.have, self._rows, self.deleted = have, [], 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        s = " ".join(sql.split())
+        if s.startswith("delete"):
+            self.deleted += 1
+            self.have = set()
+            self._rows = []
+        else:
+            self._rows = [(o,) for o in self.have]
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _GuardConn:
+    def __init__(self, have):
+        self.cur = _GuardCur(set(have))
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        pass
+
+
+def _check_one_day_one_origin():
+    """**한 날은 한 출처만.** 이 규칙이 없어서 21일이 섞였다 (2026-08-12).
+
+    `on conflict do nothing` 은 먼저 넣은 쪽이 이긴다 - 품질이 아니라 실행
+    순서가 승자를 정한다. 로컬 빌드가 먼저 돌아 스프레드가 통째로 NULL 인
+    행을 심었고, 나중 외부 빌드가 그것을 못 덮어 **한 날 안에서 종목마다
+    품질이 달라졌다.** 횡단면 전략은 그 차이를 표본 선택으로 읽는다.
+    """
+    d = date(2026, 8, 11)
+    # 비어 있으면 넣는다
+    assert day_origin_guard(_GuardConn(set()), d, "local") == "insert"
+    # 같은 출처면 건너뛴다(재실행이 멱등)
+    assert day_origin_guard(_GuardConn({"local"}), d, "local") == "skip"
+    # **다른 출처면 막는다** - 이게 핵심이다
+    assert day_origin_guard(_GuardConn({"external"}), d, "local") == "blocked"
+    assert day_origin_guard(_GuardConn({"local"}), d, "external") == "blocked"
+    # 이미 섞인 날도 막는다
+    assert day_origin_guard(_GuardConn({"local", "external"}), d, "local") == "blocked"
+
+    # --replace 는 **그날을 통째로 지우고** 넣는다. 부분 덮어쓰기는 없다 -
+    # 부분 덮어쓰기가 곧 섞인 상태를 만든다.
+    conn = _GuardConn({"external"})
+    assert day_origin_guard(conn, d, "local", replace=True) == "insert"
+    assert conn.cur.deleted == 1, "교체인데 그날을 안 지웠다"
+
+    # 막힌 이유가 사람이 읽는 문장으로 남아야 한다 - 조용한 0행은 원인을 숨긴다
+    assert "섞지 않는다" in _GATE_NOTE["blocked"]
+    assert "--replace" in _GATE_NOTE["blocked"]
+    print("  한 날 한 출처            OK")
+
+
+def _check_build_paths_go_through_guard():
+    """두 빌드 경로가 **둘 다** 가드를 지나는가. 한쪽만 지나면 그쪽으로 샌다."""
+    import inspect
+
+    for fn, origin in ((build_day, '"local"'), (build_day_external, '"external"')):
+        src = inspect.getsource(fn)
+        assert "day_origin_guard(" in src, f"{fn.__name__} 이 가드를 안 지난다"
+        assert origin in src, f"{fn.__name__} 이 출처를 안 밝힌다"
+        # 가드가 INSERT 보다 앞서야 한다
+        assert src.index("day_origin_guard") < src.index("_SQL_INSERT"), \
+            f"{fn.__name__}: 가드가 적재 뒤에 온다"
+    print("  두 경로 모두 가드 통과   OK")
+
+
 def _selfcheck() -> int:
     print(f"{BUILDER_VERSION} 자체 점검 (DB 없음)")
+    _check_one_day_one_origin()
+    _check_build_paths_go_through_guard()
     _check_external_sql_matches_local_definitions()
     _check_quality_is_marked_not_dropped()
     _check_session_bounds_exclude_after_hours()
@@ -411,6 +559,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="호가·체결 -> 일별 마이크로구조 피처")
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    # 다른 출처가 이미 있는 날을 **통째로 지우고** 다시 넣는다. 부분
+    # 덮어쓰기는 없다 - 섞인 상태를 만드는 것이 애초의 사고였다.
+    ap.add_argument("--replace", action="store_true",
+                    help="다른 출처가 있으면 그날을 지우고 교체한다")
     ap.add_argument("--from", dest="since", default="")
     # 저쪽(Trading_bot) DB 에서 집계한다. 우리 원장의 호가 구멍을 원시 이관
     # 없이 메우는 경로다 - 3.9억 행 대신 15만 행만 움직인다.
@@ -450,14 +602,17 @@ def main(argv: list[str] | None = None) -> int:
               + ("  [외부 원천]" if src is not None else ""), flush=True)
         total, unmapped = 0, 0
         for i, d in enumerate(days, 1):
-            r = (build_day_external(conn, src, d, dry_run=a.dry_run)
-                 if src is not None else build_day(conn, d, dry_run=a.dry_run))
+            r = (build_day_external(conn, src, d, dry_run=a.dry_run,
+                                    replace=a.replace)
+                 if src is not None
+                 else build_day(conn, d, dry_run=a.dry_run, replace=a.replace))
             total += r["rows"]
             unmapped += r.get("unmapped", 0)
             print(f"  [{i}/{len(days)}] {d}: {r['rows']:,}종목 "
                   f"PASS {r.get('PASS', 0)} WARN {r.get('WARN', 0)} "
                   f"FAIL {r.get('FAIL', 0)}"
-                  + (f" 미매핑 {r['unmapped']}" if r.get("unmapped") else ""),
+                  + (f" 미매핑 {r['unmapped']}" if r.get("unmapped") else "")
+                  + (f"  {r['note']}" if r.get("note") else ""),
                   flush=True)
         # 미매핑을 총계로도 남긴다 - 하루씩 보면 작아 보여도 쌓이면 유니버스가 준다
         print(f"  완료: {total:,}행"

@@ -51,6 +51,16 @@ PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
                 "FALSIFICATION_TESTS", "DATA_TABLES", "MIN_HISTORY_DAYS",
                 "SUGGESTED_PARAMS", "SOURCE_REPORTED_EFFECT", "TRIAL_BUDGET",
+                # ▶ **여기 없으면 앞 필드가 오염된다** (2026-08-13 실측)
+                #   `LESSONS_ADDRESSED` 가 이 목록에 빠져 있었다. `build()` 는
+                #   `planner.get("LESSONS_ADDRESSED")` 로 읽는데 `parse_blocks`
+                #   가 그 키를 만들지 않으니, 에이전트가 서식대로 쓰면 값이
+                #   **앞 필드에 이어붙어** `trial_budget 이 숫자가 아니다:
+                #   '5 LESSONS_ADDRESSED: BASELINE_NOT_BEATEN=…'` 로 죽었다.
+                #   오늘 카드 문구를 "LESSONS_ADDRESSED 칸에 적어라" 로 고친
+                #   순간 이 함정이 켜졌다 - 서식과 파서가 갈리면 고칠수록
+                #   나빠진다. `_check_format_fields_are_parsed` 가 고정한다.
+                "LESSONS_ADDRESSED",
                 # 자기서명 경로에서 기획자가 직접 쓰는 반대 가설. 어휘에 없으면
                 # parse_blocks 가 새 키로 안 잡고 **앞 필드 값에 이어붙여** 버린다
                 # - 그러면 그 앞 필드의 뜻까지 바뀐다.
@@ -82,6 +92,40 @@ def _split(v: str) -> tuple[str, ...]:
     """쉼표·세미콜론으로 나눈다. 빈 칸은 버린다."""
     parts = [x.strip() for x in str(v or "").replace(";", ",").split(",")]
     return tuple(p for p in parts if p)
+
+
+def _lessons_addressed(v: str) -> dict:
+    """`CODE=이번엔 무엇을 다르게` 목록 -> dict.
+
+    ▶ 왜 필요한가 (2026-08-12 실측)
+      Gate 0 는 "이 계열에서 이미 기각됐다 - 그 교훈에 대응이 없다" 로 재제안을
+      막는다. 옳은 규칙인데, **기획자 서식에 대응을 적을 칸이 없었다.**
+      에이전트는 대응을 했다 - ECONOMIC_RATIONALE 산문에:
+
+        "이전 SINGLE_REGIME_ONLY 실패에 대응해 특정 국면 필터를 사용하지
+         않고 krx_all 전체 기간을 포함하며…"
+
+      게이트는 구조화된 필드를 보는데 그 필드가 서식에 없었으므로 못 읽었다.
+      결과: **기각된 계열은 영원히 다시 제안할 수 없었다** - 배분자가 "찾은
+      것을 밀어붙여라" 라고 말해도 접수에서 막혔다.
+
+      쉼표로 나누되 값 안의 쉼표는 살린다 - "국면 필터를 빼고, 전 기간을 쓴다"
+      같은 문장이 잘리면 대응이 반토막 난다.
+    """
+    out: dict[str, str] = {}
+    text = str(v or "").strip()
+    if not text:
+        return out
+    # `CODE=` 가 나오는 자리에서만 자른다(값 안의 쉼표는 안 자른다)
+    parts = re.split(r",\s*(?=[A-Z][A-Z0-9_]{2,}\s*=)", text)
+    for p in parts:
+        if "=" not in p:
+            continue
+        code, _, how = p.partition("=")
+        code, how = code.strip().upper(), how.strip()
+        if code and how:
+            out[code] = how
+    return out
 
 
 def _maybe_json(v: str) -> dict:
@@ -156,8 +200,34 @@ def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
     return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
+    """원장 이력 + 에이전트 대응 -> PriorCheck.
+
+    **사실은 우리가 채우고 대응은 에이전트가 쓴다.** 둘을 섞으면 안 된다 -
+    우리가 대응까지 지어내면 Gate 0 의 견제가 형식만 남는다.
+    """
+    rows = list(past_outcomes or [])
+    rejecting = {"REJECT", "GATE_HOLD", "KILL"}
+    codes: list[str] = []
+    fam = ""
+    for r in rows:
+        if str(r.get("decision", "")).upper() in rejecting:
+            for c in (r.get("lesson_codes") or []):
+                if str(c) not in codes:
+                    codes.append(str(c))
+        fam = fam or str(r.get("trial_family_id") or "")
+    # ▶ **에이전트가 쓴 것을 거르지 않는다.** 계약은 형식(통제 어휘·빈 대응
+    #   금지)만 보고, "맞는 교훈에 대응했나" 는 Gate 0 이 본다. 여기서
+    #   미리 걸러 내면 대응 맵이 비어 계약이 엉뚱한 사유로 죽는다(실측).
+    #   층마다 볼 것을 정해 두고 겹치지 않는다.
+    return PriorCheck(trial_family_id=fam, trials_used=len(rows),
+                      past_outcomes=tuple(codes),
+                      lessons_addressed=_lessons_addressed(lessons_text))
+
+
 def build(planner: dict, skeptic: dict, *, case_id: str,
           planner_run: str, skeptic_run: str,
+          past_outcomes: list | None = None,
           as_known_at: datetime | None = None) -> ExperimentProposalV1:
     """두 에이전트 산출을 기획안 하나로 조립한다. 계약이 나머지를 검증한다."""
     if not skeptic_run.strip():
@@ -204,7 +274,13 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
                                           min_history_days=min_days),
         suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
         trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
-        prior_check=PriorCheck(),
+        # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
+        #   몇 번 돌았는지·무엇으로 기각됐는지는 사실이라 우리가 채운다.
+        #   그것에 어떻게 대응할지는 판단이라 에이전트가 쓴다. 예전엔 둘 다
+        #   비워 두어 Gate 0 의 "교훈에 대응이 없다" 검사가 **발동할 수도,
+        #   통과할 수도 없는** 상태였다.
+        prior_check=_prior_check(past_outcomes,
+                                 planner.get("LESSONS_ADDRESSED", "")),
         source_reported_effect=_maybe_json(
             planner.get("SOURCE_REPORTED_EFFECT", "")),
     )
@@ -213,19 +289,35 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
 def intake(planner_text: str, skeptic_text: str, *, case_id: str,
            planner_run: str, skeptic_run: str,
            leads: dict | None = None, past_outcomes: list | None = None,
+           outcomes_for=None,
            as_known_at: datetime | None = None) -> Intake:
-    """기획자·회의론자 산출을 짝지어 조립하고 발행 게이트에 태운다."""
-    out = Intake()
-    skeptics = {(b.get("TITLE") or "").strip(): b
-                for b in parse_blocks(skeptic_text, SKEPTIC_KEYS)}
+    """기획자·회의론자 산출을 짝지어 조립하고 발행 게이트에 태운다.
 
-    for p in parse_blocks(planner_text, PLANNER_KEYS):
+    ▶ `outcomes_for(block) -> list` - **기획안마다 자기 계열 이력을 읽는다**
+      (2026-08-13). `past_outcomes` 하나를 모든 기획안에 똑같이 쓰면, 한 카드에
+      좌표가 다른 기획안이 둘 있을 때 남의 계열 이력으로 판정하게 된다.
+      그리고 실제로는 그것조차 안 넘어오고 있었다 - `harvest` 가 인자를
+      빼먹어서 **모든 기획안이 "이 계열은 처음"으로 접수됐다.** 그 결과
+      접수 계약("기각 이력이 있는데 대응이 비면 거부")이 한 번도 발동하지
+      않았고, 승격 관문이 뒤늦게 같은 것을 잡아 영구 반려로 만들었다.
+    """
+    out = Intake()
+    _sk_blocks = parse_blocks(skeptic_text, SKEPTIC_KEYS)
+    skeptics = {(b.get("TITLE") or "").strip(): b for b in _sk_blocks}
+    _pl_blocks = parse_blocks(planner_text, PLANNER_KEYS)
+    # 짝짓기의 "모호하지 않음" 은 **접수 가능한 기획안** 사이에서 따진다.
+    # 필수 항목이 빠져 어차피 반려될 블록을 경쟁자로 세면, 멀쩡한 1:1 이
+    # 1:2 로 보여 짝짓기가 실패한다(자체점검이 잡았다).
+    _pl_valid = [b for b in _pl_blocks
+                 if not [k for k in PLANNER_REQUIRED if not (b.get(k) or "").strip()]]
+
+    for p in _pl_blocks:
         title = (p.get("TITLE") or "(제목 없음)").strip()
         missing = [k for k in PLANNER_REQUIRED if not (p.get(k) or "").strip()]
         if missing:
             out.rejected.append(Rejected(title, f"필수 항목 없음: {','.join(missing)}"))
             continue
-        s = skeptics.get(title)
+        s = _pair_skeptic(title, skeptics, _pl_valid, _sk_blocks)
         if s is None and (p.get("COMPETING_EXPLANATION") or "").strip():
             # ▶ **자기서명 경로** (2026-08-11, 재일 결정).
             #   독립 회의론자를 별도 실행으로 두면 주기가 두 배가 되고, 그 카드가
@@ -244,18 +336,43 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
                  "VERDICT": SKEPTIC_PASS}
             skeptic_run = f"{planner_run}#self"
         if s is None:
-            # 경쟁 설명조차 없으면 반대편을 한 번도 생각하지 않은 것이다.
-            out.rejected.append(
-                Rejected(title, "회의론자 검토도 COMPETING_EXPLANATION 도 없다 - "
-                                "반대 가설을 사전에 적지 않은 기획안은 접수하지 않는다"))
+            # ▶ **왜 짝이 안 맞았는지 말해 준다** (2026-08-13 실측)
+            #   에이전트가 MCP 로 12번 넘게 제출했고 매번 이 사유로 거부됐다.
+            #   그런데 사유가 "없다" 뿐이라 **무엇이 없는지 알 수 없었다** -
+            #   회의론자 텍스트는 냈는데 제목이 안 맞아 짝짓기가 실패한 것을
+            #   모른 채 본문만 다시 써서 5번을 더 시도했다(t_f64fb6ce).
+            #   양쪽 제목을 그대로 실어야 한 번에 고친다.
+            seen = sorted(k for k in skeptics if k)
+            out.rejected.append(Rejected(
+                title,
+                ("회의론자 검토도 COMPETING_EXPLANATION 도 없다 - 반대 가설을 "
+                 "사전에 적지 않은 기획안은 접수하지 않는다")
+                if not seen else
+                (f"회의론자 블록은 {len(seen)}개 왔는데 이 기획안과 **제목이 "
+                 f"맞지 않는다.** 기획자 제목={title!r} · 회의론자 제목={seen}. "
+                 f"제목을 똑같이 맞추거나, 기획자 블록에 "
+                 f"COMPETING_EXPLANATION 을 직접 적어라(자기서명 경로)")))
             continue
+        # 이 기획안 **자기 계열**의 이력. 못 읽으면 조용히 0 으로 넘기지 않는다 -
+        # 미측정과 "이력 없음" 을 섞는 순간 계약이 무력해진다(그게 이 사고였다).
+        past = past_outcomes
+        if outcomes_for is not None:
+            try:
+                past = outcomes_for(p)
+            except Exception as e:      # noqa: BLE001
+                out.rejected.append(Rejected(
+                    title, f"계열 이력을 못 읽었다 - 지난 기각에 대응했는지 "
+                           f"판정할 수 없으므로 접수하지 않는다: "
+                           f"{type(e).__name__}: {str(e)[:120]}"))
+                continue
         try:
             prop = build(p, s, case_id=case_id, planner_run=planner_run,
-                         skeptic_run=skeptic_run, as_known_at=as_known_at)
+                         skeptic_run=skeptic_run, as_known_at=as_known_at,
+                         past_outcomes=past)
         except Exception as e:          # 계약 위반·독립성 위반 모두 여기로
             out.rejected.append(Rejected(title, str(e)))
             continue
-        gate = evaluate(prop, leads=leads or {}, past_outcomes=past_outcomes or [])
+        gate = evaluate(prop, leads=leads or {}, past_outcomes=past or [])
         out.proposals.append((prop, gate))
     return out
 
@@ -299,16 +416,115 @@ def load_leads(conn, lead_ids) -> dict:
     return out
 
 
-def load_past_outcomes(conn, edge_type: str, universe_key: str) -> list[dict]:
-    """같은 계열의 지난 판정. 기각 교훈에 대응이 없으면 게이트가 막는다."""
-    cur = conn.cursor()
-    cur.execute("""
-        select decision, lesson_codes, trial_family_id
-          from research.experiment_outcomes
-         where coalesce(edge_type,'') = %s and coalesce(universe_key,'') = %s
-    """, (edge_type, universe_key))
-    return [{"decision": r[0], "lesson_codes": list(r[1] or []),
-             "trial_family_id": r[2]} for r in cur.fetchall()]
+def _norm_title(s: str) -> str:
+    """제목 비교용 정규화. 공백·대소문자·양끝 구두점만 없앤다."""
+    t = re.sub(r"\s+", " ", str(s or "")).strip().casefold()
+    return t.strip("\"'`“”‘’.,:;!?()[]{}<>-–— ")
+
+
+def _pair_skeptic(title: str, skeptics: dict, planners: list, sk_blocks: list):
+    """기획안에 맞는 회의론자 블록을 찾는다. 못 찾으면 None.
+
+    ▶ **자유 텍스트 제목으로 조인하고 있었다** (2026-08-13 실측)
+      에이전트가 MCP 로 기획안을 제출할 때마다 `회의론자 검토가 없다` 로
+      거부됐다 - 4회, 5회, 3회. 원장에 이렇게 남아 있었다:
+
+        "planner/skeptic 텍스트와 별도 run 식별자를 제공했지만 게이트가
+         독립 회의론자 산출을 인식하지 않아 발행 0건"
+
+      원인은 `skeptics.get(title)` 이 **정확 일치**만 보는 것이다. 회의론자가
+      제목을 한 글자라도 다르게 쓰면(마침표·따옴표·띄어쓰기) 짝이 깨지고,
+      그러면 대비책이 **기획자 블록에** COMPETING_EXPLANATION 을 요구한다.
+      그런데 경쟁 설명을 쓰는 것은 원래 회의론자의 일이라 거기 있었다.
+      **에이전트는 옳게 했고 조인이 깨진 것이다.**
+
+      멀티에이전트 핸드오프를 자유 텍스트 키로 잇지 말라는 것이 문헌의
+      권고다 - 타입 계약을 쓸 수 없는 자리에서는 최소한 **정규화하고,
+      모호하지 않을 때는 위치로 잇는다.**
+
+    순서: ① 정확 일치 ② 정규화 일치 ③ 양쪽 1건씩이면 그것끼리(모호하지 않다)
+    """
+    s = skeptics.get(title)
+    if s is not None:
+        return s
+    want = _norm_title(title)
+    for k, v in skeptics.items():
+        if _norm_title(k) == want and want:
+            return v
+    # 기획안도 회의론도 하나뿐이면 짝은 그것뿐이다 - 제목이 달라도 모호하지 않다.
+    # 여럿일 때는 하지 않는다. 잘못 짝지으면 **남의 반대 가설로 통과**시킨다.
+    if len(planners) == 1 and len(sk_blocks) == 1:
+        return sk_blocks[0]
+    return None
+
+
+def load_past_outcomes(conn, edge_type: str, universe_key: str,
+                       *, label: str = "", baseline: str = "") -> list[dict]:
+    """같은 계열의 지난 판정. **승격 관문과 같은 경로로 센다.**
+
+    ▶ 여기가 `발주 0건` 의 실제 지점이었다 (2026-08-13 실측)
+      두 가지가 겹쳐 있었다.
+
+      ① 이 함수가 `research.experiment_outcomes.edge_type` 을 조회했는데
+         **그 컬럼이 없다.** 부르면 무조건 예외다.
+      ② 그런데 애초에 **아무도 부르지 않았다.** `factory_autopilot.harvest`
+         가 `intake(..., leads=leads)` 만 넘기고 `past_outcomes` 를 안 줘서
+         기본값 `[]` 로 들어갔다.
+
+      그래서 기획안 `prior_check` 가 전부 `trials_used=0 · past_outcomes=[] ·
+      trial_family_id=""` 였다. 접수 계약은 "기각 이력이 있는데 대응이 비면
+      거부" 인데 이력이 0이니 통과시킨다. 그리고 **승격 관문은 진짜 계열
+      이력을 보고** "이미 2회 실행하고 기각됐다 - 그 교훈에 대응이 없다" 며
+      막는다. 기획자는 접수에서 "이 계열은 처음" 이라고 듣고 그대로 했는데
+      승격에서 그 이유로 벌을 받았다. 오늘 11:23 에 위험관리 손잡이를 처음
+      쓴 기획안(`prop_5682`)도 여기서 죽었다.
+
+      못 읽으면 **예외를 그대로 올린다.** 조용히 `[]` 를 돌려주는 것이
+      이 사고의 형태였다 - 미측정과 0을 섞으면 계약이 무력해진다.
+
+    ▶ **계열 해시를 여기서 다시 계산하지 않는다** (2026-08-13, 배포하고 알았다)
+      처음엔 `trial_family.family_ids_for` 로 계열 ID 를 만들어 조회했다.
+      그런데 이 함수는 **두 컨테이너에서 돈다** - 호스트 수확기(퀀트 파이프라인이
+      있음)와 MCP 도구 면(리서치만 있음). MCP 쪽에서 `ModuleNotFoundError:
+      No module named 'trial_family'` 로 죽었고, fail-closed 설계라 그게
+      **기획안을 반려시켰다** - 고치기 전보다 나빠진 것이다.
+
+      해시 로직을 양쪽에 복제하는 것은 답이 아니다. 그건 "같은 판단을 두
+      곳에서" 를 다시 만드는 일이고, 오늘 그 사고를 이미 한 번 고쳤다.
+      대신 **원장에 이미 찍힌 것을 좌표로 조회한다** - 판정은 가설을 통해
+      좌표에 매달려 있으므로 해시가 필요 없다.
+
+      이 조회는 계열(edge·universe·label·baseline)보다 **넓다**(edge·universe).
+      의도한 것이다 - 접수는 "무엇에 답해야 하는지" 를 넓게 보여 주고, 좁은
+      계열 판정은 승격 관문이 한다. 덜 알려 주는 쪽이 더 나쁘다.
+
+    ▶ **조인 대신 작은 조회 둘로 나눈다** (2026-08-13, 세 번째 시도에서)
+      `quant.hypotheses.hypothesis_id` 는 uuid 이고 `experiment_outcomes` 쪽은
+      text 다. 양쪽을 캐스팅해 조인했더니 `QueryCanceled: statement timeout`
+      이 났다 - 표가 47행·14행인데도. 양변 캐스팅은 인덱스를 못 쓰게 하고,
+      이 원장은 세션풀이 얇아(컨테이너 23개가 15슬롯을 문다) 조금만 무거워도
+      끊긴다. 작은 조회 둘이 조인 하나보다 안전하다.
+    """
+    edge = str(edge_type or "").strip().lower()
+    uni = str(universe_key or "").strip().lower()
+    with conn.cursor() as cur:
+        cur.execute("""
+            select hypothesis_id::text from quant.hypotheses
+             where lower(coalesce(expected_edge->>'type','')) = %s
+               and lower(coalesce(expected_edge->>'universe_key',
+                                  expected_edge->>'universe','')) = %s
+        """, (edge, uni))
+        hyp_ids = [r[0] for r in cur.fetchall()]
+        if not hyp_ids:
+            return []
+        cur.execute("""
+            select decision, lesson_codes, trial_family_id
+              from research.experiment_outcomes
+             where hypothesis_id = any(%s)
+             order by decided_at desc
+        """, (hyp_ids,))
+        return [{"decision": r[0], "lesson_codes": list(r[1] or []),
+                 "trial_family_id": r[2]} for r in cur.fetchall()]
 
 
 _SQL_INSERT = """
@@ -450,10 +666,70 @@ def _selfcheck() -> int:
           proposal_id_for(["a", "b"], "MOMENTUM", "krx_all")
           == proposal_id_for(["b", "a"], "momentum", "krx_all"))
 
+    # ▶ **접수가 계열 이력을 읽는다** (2026-08-13 실측 사고)
+    #   `harvest` 가 `past_outcomes` 를 안 넘겨서 모든 기획안이 "이 계열은
+    #   처음" 으로 접수됐고, 승격 관문만 진짜 이력을 봐서 영구 반려했다.
+    #   기획자는 접수에서 들은 대로 했는데 승격에서 그 이유로 죽었다.
+    seen = []
+
+    def _rejected_family(block):
+        seen.append(block)
+        return [{"decision": "REJECTED", "lesson_codes": ["OVERFIT_DSR"]}]
+
+    r6 = intake(planner, _SKEPTIC, case_id="c-6", planner_run="run-plan",
+                skeptic_run="run-skeptic", leads=leads,
+                outcomes_for=_rejected_family)
+    check("접수가 기획안마다 계열 이력을 읽는다", bool(seen))
+    # 좌표가 그대로 넘어가야 남의 계열 이력을 읽는 일이 없다
+    check("좌표가 조회에 전달된다",
+          any((b.get("EDGE_TYPE") or "").strip() == "mean_reversion"
+              and (b.get("UNIVERSE_KEY") or "").strip() == "krx_all"
+              for b in seen))
+    # 기각 이력이 있는데 대응이 없으면 **접수에서** 걸려야 한다(승격까지 가면
+    # 늦다 - 그때는 기획자가 이미 다른 일을 하고 있고 카드도 닫혀 있다)
+    check("기각 이력 + 무대응은 접수를 통과하지 못한다",
+          bool(r6.rejected) or not any(g.ok for _, g in r6.proposals))
+
+    # 이력을 못 읽으면 0 으로 넘기지 않는다 - 미측정과 "없음" 을 섞지 않는다
+    def _boom(_b):
+        raise RuntimeError("계열 조회 실패")
+
+    r7 = intake(planner, _SKEPTIC, case_id="c-7", planner_run="run-plan",
+                skeptic_run="run-skeptic", leads=leads, outcomes_for=_boom)
+    check("이력을 못 읽으면 접수하지 않는다",
+          not r7.proposals and any("못 읽었다" in x.reason for x in r7.rejected))
+
+    # ▶ **제목이 조금 달라도 짝이 맞는다** (2026-08-13 실측 사고)
+    #   에이전트가 MCP 로 12번 넘게 제출했고 매번 `회의론자 검토가 없다` 로
+    #   거부됐다. 회의론자 텍스트는 냈는데 제목이 정확히 안 맞아 조인이
+    #   깨진 것이었고, 사유가 "없다" 뿐이라 원인을 알 수 없었다.
+    sk_dot = _SKEPTIC.replace("TITLE: 복권형 수익 회피",
+                              'TITLE: "복권형 수익 회피".')
+    r8 = intake(planner, sk_dot, case_id="c-8", planner_run="run-plan",
+                skeptic_run="run-skeptic", leads=leads)
+    check("제목 구두점·따옴표 차이로 안 깨진다", len(r8.proposals) == 1)
+    check("정규화로 붙어도 독립 서명은 유지",
+          bool(r8.proposals) and r8.proposals[0][0].skeptic_sign == "run-skeptic")
+
+    # 하나:하나면 제목이 아주 달라도 모호하지 않다
+    sk_other = _SKEPTIC.replace("TITLE: 복권형 수익 회피", "TITLE: 전혀 다른 제목")
+    r9 = intake(planner, sk_other, case_id="c-9", planner_run="run-plan",
+                skeptic_run="run-skeptic", leads=leads)
+    check("1:1 이면 제목이 달라도 짝짓는다", len(r9.proposals) == 1)
+
+    # **여럿일 때는 위치로 잇지 않는다** - 남의 반대 가설로 통과시키면 안 된다
+    two_sk = sk_other + "\n" + _SKEPTIC.replace("TITLE: 복권형 수익 회피",
+                                                "TITLE: 또 다른 제목")
+    r10 = intake(planner, two_sk, case_id="c-10", planner_run="run-plan",
+                 skeptic_run="run-skeptic", leads=leads)
+    check("모호하면 짝짓지 않는다", not r10.proposals)
+    check("반려문이 양쪽 제목을 보여 준다",
+          any("회의론자 제목" in x.reason for x in r10.rejected))
+
     for f in fails:
         if f:
             print(f"  FAIL {f}")
-    total = 12
+    total = 22
     print(f"proposal_intake 자체 점검: {total - len([x for x in fails if x])}/{total} 통과")
     return 1 if [x for x in fails if x] else 0
 
@@ -579,6 +855,80 @@ def _check_stored_long_excerpt_does_not_kill_harvest():
     MethodologyLeadV1.model_validate({**d, "lead_id": lead_id_for(d["refs"])})
 
 
+def _check_agent_can_answer_the_gate():
+    """**게이트가 요구하는 대응을 에이전트가 적을 수 있어야 한다.** (2026-08-12)
+
+    Gate 0 는 "이 계열에서 이미 기각됐다 - 그 교훈에 대응이 없다" 로 막았는데,
+    기획자 서식에 대응을 적을 칸이 없었다. 에이전트는 산문에 적었고 게이트는
+    구조화된 필드를 봤다. 결과: **기각된 계열은 영원히 재제안 불가** -
+    배분자가 "찾은 것을 밀어붙여라" 해도 접수에서 죽었다.
+    """
+    # ① 서식에 칸이 있어야 한다
+    import factory_autopilot as fa  # noqa: PLC0415
+
+    assert "LESSONS_ADDRESSED:" in fa.PLANNER_FORMAT, \
+        "기획자 서식에 대응을 적을 칸이 없다 - 게이트가 답할 수 없는 것을 묻는다"
+
+    # ①-b **서식이 말하는 칸은 파서도 알아야 한다** (2026-08-13 실측)
+    #   이 검사가 없어서 `LESSONS_ADDRESSED` 가 서식에는 있고 `PLANNER_KEYS`
+    #   에는 없는 상태로 남아 있었다. `parse_blocks` 는 모르는 키를 **앞 필드에
+    #   이어붙이므로**, 에이전트가 서식대로 쓰면 `TRIAL_BUDGET` 이 오염돼
+    #   `trial_budget 이 숫자가 아니다: '5 LESSONS_ADDRESSED: …'` 로 죽는다.
+    #   즉 **서식을 고칠수록 나빠지는** 상태였다. 한 칸을 놓치면 그 앞 칸까지
+    #   같이 잃으므로 개별이 아니라 전수로 본다.
+    fmt_fields = set(re.findall(r"^([A-Z][A-Z0-9_]{2,}):", fa.PLANNER_FORMAT,
+                                re.M))
+    unknown = sorted(f for f in fmt_fields if f not in PLANNER_KEYS)
+    assert not unknown, (
+        f"서식이 말하는 칸을 파서가 모른다: {unknown} - `parse_blocks` 가 "
+        f"모르는 키를 앞 필드에 이어붙여 그 필드까지 망친다. "
+        f"PLANNER_KEYS 에 넣어라")
+    assert fmt_fields, "서식에서 칸을 하나도 못 찾았다 - 이 검사가 헛돈다"
+
+    # ②-a 파서가 실제로 그 칸을 독립 필드로 잡는가(앞 필드가 안 망가지는가)
+    _blk = parse_blocks(
+        "TITLE: t\nTRIAL_BUDGET: 5\n"
+        "LESSONS_ADDRESSED: BEAR_FRAGILE=낙폭 정지를 건다\n", PLANNER_KEYS)
+    assert _blk and _blk[0].get("TRIAL_BUDGET", "").strip() == "5", \
+        f"앞 필드가 오염됐다: {_blk}"
+    assert "BEAR_FRAGILE" in _blk[0].get("LESSONS_ADDRESSED", ""), _blk
+
+    # ② 그 칸을 파싱해야 한다. 값 안의 쉼표가 대응을 반토막 내면 안 된다
+    got = _lessons_addressed(
+        "SINGLE_REGIME_ONLY=국면 필터를 빼고, 전 기간을 쓴다, "
+        "BEAR_FRAGILE=낙폭 정지를 -0.28 로 건다")
+    assert set(got) == {"SINGLE_REGIME_ONLY", "BEAR_FRAGILE"}, got
+    assert got["SINGLE_REGIME_ONLY"] == "국면 필터를 빼고, 전 기간을 쓴다", got
+    assert _lessons_addressed("") == {} and _lessons_addressed("아무말") == {}
+
+    # ③ 이력은 원장에서 오고 대응은 에이전트에게서 온다
+    past = [{"decision": "REJECT", "lesson_codes": ["SINGLE_REGIME_ONLY"],
+             "trial_family_id": "fam_x"}]
+    pc = _prior_check(past, "SINGLE_REGIME_ONLY=국면 필터를 뺀다")
+    assert pc.trials_used == 1 and pc.past_outcomes == ("SINGLE_REGIME_ONLY",)
+    assert pc.lessons_addressed == {"SINGLE_REGIME_ONLY": "국면 필터를 뺀다"}
+    assert pc.trial_family_id == "fam_x"
+
+    # ④ **에이전트가 쓴 것을 접수기가 거르지 않는다.** 층마다 볼 것이 다르다 -
+    #    계약은 형식(어휘·빈 대응), Gate 0 은 실질(맞는 교훈인가). 여기서
+    #    미리 걸렀더니 대응 맵이 비어 계약이 엉뚱한 사유로 죽었다(실측).
+    pc2 = _prior_check(past, "OVERFIT_PBO=PBO 를 재려고 변형을 4개 낸다")
+    assert pc2.lessons_addressed == {"OVERFIT_PBO": "PBO 를 재려고 변형을 4개 낸다"}
+
+    # ⑤ 이력이 없으면 계약은 대응을 요구하지 않는다
+    pc3 = _prior_check([], "")
+    assert pc3.past_outcomes == () and pc3.trials_used == 0
+
+    # ⑥ 대응이 비면 계약이 거부해야 한다 - 견제가 살아 있는지 확인
+    try:
+        PriorCheck(trial_family_id="f", trials_used=1,
+                   past_outcomes=("SINGLE_REGIME_ONLY",), lessons_addressed={})
+        raise AssertionError("기각 이력이 있는데 대응 없이 통과했다")
+    except Exception as e:  # noqa: BLE001 - pydantic 은 ValidationError 로 감싼다
+        assert "대응" in str(e), e
+    print("  에이전트가 게이트에 답할 수 있다  OK")
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         if hasattr(sys.stdout, "reconfigure"):
@@ -588,5 +938,6 @@ if __name__ == "__main__":
         print("  저장된 긴 발췌가 수확을 안 죽인다  OK")
         _check_trailing_prose_does_not_kill_codes()
         print("  코드 뒤 산문이 기획안을 안 죽인다  OK")
+        _check_agent_can_answer_the_gate()
         raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

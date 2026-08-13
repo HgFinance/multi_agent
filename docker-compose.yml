@@ -853,6 +853,17 @@ services:
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
+      # ▶ **에이전트는 여기서 뜬다 - 저장소가 보여야 한다** (2026-08-12 실측)
+      #   이 두 줄이 override 에만 있어서 로컬에서만 보이고 AWS 에서는 안 보였다.
+      #   그러면 같은 카드가 환경에 따라 다른 판정을 낸다 - 실제로 에이전트가
+      #   `source_registry.py: ABSENT` 로 `BLOCKED` 를 냈고 리스크 게이트가 그걸
+      #   받아 `NOT_RUNNABLE` 을 냈다. 파일은 있었다.
+      #
+      #   `/app/repo` 는 **읽기 전용**(진단·탐색), `/app/departments/04-quant-backtest`
+      #   는 쓰기(퀀트가 고쳐도 되는 코드). 역할이 다르므로 경로도 다르다.
+      - .:/app/repo:ro
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
+      - ./quant-data:/app/quant-data
     environment:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000

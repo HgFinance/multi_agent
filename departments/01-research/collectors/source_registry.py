@@ -42,6 +42,33 @@ REGISTRY_VERSION = "research-source-registry-v1"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _pg_keepalives(dsn: str) -> str:
+    """Postgres DSN 에 TCP keepalive 를 심는다. **URI 가 아니면 건드리지 않는다.**
+
+    ▶ 왜 (2026-08-13 실측 + Supabase 공식 discussion #23272)
+      풀러 경유 연결에서 `SSL connection has been closed unexpectedly` 가 하루
+      2회 났다. 원인의 정석: 유휴 연결을 풀러/NAT 가 끊은 뒤 **죽은 소켓을
+      재사용**해서다. 장수 컨테이너(수확기·dispatcher)는 카드가 없을 때 유휴가
+      길어 가장 잘 물린다. 처방도 정석이 있다 - keepalive 로 소켓 생사를
+      드라이버가 알게 하는 것.
+
+      **여기 한 곳에 심는 이유**: 연결을 여는 자리가 컨테이너 23개에 흩어져
+      있다. 컨테이너마다 제각각 설정하면 "수확기가 네 곳만 읽는" 류의 경계
+      결함이 연결 설정에서 또 난다. 모두가 이 로더를 거치므로 여기가 정본이다.
+
+      이미 keepalives 가 적혀 있으면 존중한다(운영자가 손으로 튜닝한 값을
+      덮으면 안 된다).
+    """
+    if not dsn or not dsn.startswith(("postgres://", "postgresql://")):
+        return dsn
+    if "keepalives" in dsn:
+        return dsn
+    sep = "&" if "?" in dsn else "?"
+    return (dsn + sep
+            + "keepalives=1&keepalives_idle=30"
+            + "&keepalives_interval=10&keepalives_count=3")
+
+
 def load_project_env(repo_root: Path | None = None) -> dict[str, str]:
     """저장소 .env 와 프로세스 환경변수를 합친다. 환경변수가 우선이다.
 
@@ -75,6 +102,10 @@ def load_project_env(repo_root: Path | None = None) -> dict[str, str]:
     for k, v in os.environ.items():
         if v.strip():
             merged[k] = v
+    # 모든 소비자가 이 로더를 거치므로 keepalive 는 여기가 정본이다.
+    for key in ("DATABASE_URL", "TIMESCALE_DATABASE_URL"):
+        if merged.get(key):
+            merged[key] = _pg_keepalives(merged[key])
     return merged
 
 
