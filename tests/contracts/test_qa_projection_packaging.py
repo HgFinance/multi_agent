@@ -61,7 +61,12 @@ def test_ceo_supervisor_image_contains_postgres_driver_at_build_time() -> None:
     )[0]
 
     assert "FROM nousresearch/hermes-agent:latest" in dockerfile
+    assert 'ENV PATH="/opt/hermes/.venv/bin:${PATH}"' in dockerfile
+    assert "--python /opt/hermes/.venv/bin/python3" in dockerfile
+    assert "--system" not in dockerfile
+    assert "test -x /opt/hermes/.venv/bin/python3" in dockerfile
     assert "psycopg2-binary==2.9.12" in dockerfile
     assert "dockerfile: Dockerfile.ceo-supervisor" in service
     assert "image: hedgefund-ceo-supervisor:latest" in service
+    assert 'command: ["python3", "/opt/hgfinance/scripts/run_ceo_supervisor.py"' in service
     assert "pip install" not in service
