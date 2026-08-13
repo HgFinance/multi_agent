@@ -664,6 +664,78 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(body["block_reason"], "인용 근거 부족")
         self.assertIsNone(body["result"])
 
+    def test_result_falls_back_to_root_summary_when_ceo_answers_directly(self) -> None:
+        """2026-08-13 AWS 실측(t_51190ad2): CEO가 부서에 위임하지 않고 root Task
+        안에서 직접 답한 경우("지금 막혀 있는 업무와 이유를 알려줘").
+
+        `synthesis_node`가 없다는 이유로 `result`를 계속 `null`로 두면, 실제로는
+        Task가 진짜 요약을 달고 완료됐는데도 화면에 답이 영원히 안 뜬다.
+        """
+
+        solo_root = "t_51190ad2"
+        board = {
+            solo_root: _task(
+                solo_root,
+                assignee="ceo-agent",
+                status="done",
+                body=build_root_body("지금 막혀 있는 업무와 이유를 알려줘", "req-solo"),
+                title="사용자 질의: 지금 막혀 있는 업무와 이유를 알려줘",
+                latest_summary=(
+                    "현재 Kanban을 읽기 전용으로 점검해 차단·대기 업무와 원인을 분류했다."
+                ),
+                completed_at=_CREATED_AT + 41,
+            ),
+        }
+        workflow = load_workflow(solo_root, fetch=_fetch_from(board))
+        self.assertIsNone(workflow.synthesis_node)
+        self.assertEqual(workflow.descendants, ())
+
+        with patch.object(ceo, "load_workflow", return_value=workflow):
+            response = self.client.get(f"/ui/ceo/tasks/{solo_root}/result")
+
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertIsNotNone(body["result"])
+        self.assertEqual(
+            body["result"]["summary"],
+            "현재 Kanban을 읽기 전용으로 점검해 차단·대기 업무와 원인을 분류했다.",
+        )
+
+    def test_result_does_not_fall_back_while_departments_are_still_working(self) -> None:
+        """자식이 있는 워크플로는 root 자체가 done이어도(planning 종료) 이 경로를
+        타지 않는다 - root의 "접수했다"류 planning 문구가 최종 답으로 잘못
+        노출되면 안 된다. root가 `done`인데 자식(research)은 아직 `running`인
+        상태를 명시적으로 만든다(root는 계획 즉시 done - `ceo_workflow_scope.py`
+        `planning_terminal_state=done_after_child_creation`).
+        """
+
+        board = {
+            ROOT_ID: _task(
+                ROOT_ID,
+                assignee="ceo-agent",
+                status="done",
+                body=build_root_body("엔비디아 최신 사업 리스크만 분석해줘.", "req-1"),
+                title="사용자 질의: 엔비디아 최신 사업 리스크만 분석해줘.",
+                children=(RESEARCH_ID,),
+                latest_summary="리서치 부서에 배정했습니다.",
+                completed_at=_CREATED_AT + 5,
+            ),
+            RESEARCH_ID: _task(
+                RESEARCH_ID,
+                assignee="research-department",
+                status="running",
+                parents=(ROOT_ID,),
+            ),
+        }
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+        self.assertIsNone(workflow.synthesis_node)
+        self.assertNotEqual(workflow.descendants, ())
+
+        with patch.object(ceo, "load_workflow", return_value=workflow):
+            response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}/result")
+
+        self.assertIsNone(response.json()["result"])
+
     def test_archive_covers_the_whole_graph_children_first(self) -> None:
         workflow = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
         with patch.object(ceo, "load_workflow", return_value=workflow):
