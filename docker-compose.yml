@@ -68,6 +68,7 @@ services:
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
       # compose 에 있으므로 서비스 이름을 기본값으로 준다.
       GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
+      GOVERNANCE_API_TIMEOUT_SECONDS: ${GOVERNANCE_API_TIMEOUT_SECONDS:-30}
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
       # InvestorProfile 프록시(/ui/investor-profiles)가 부르는 accounting-api.
       # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
