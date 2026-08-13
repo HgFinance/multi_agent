@@ -70,8 +70,15 @@ services:
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
-      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-}
+      # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
+      # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
+      # compose 에 있으므로 서비스 이름을 기본값으로 준다.
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
+      GOVERNANCE_API_TIMEOUT_SECONDS: ${GOVERNANCE_API_TIMEOUT_SECONDS:-30}
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
+      # InvestorProfile 프록시(/ui/investor-profiles)가 부르는 accounting-api.
+      # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
+      PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
       # CEO Web/Discord mirror uses the existing Redis service. Keep the
       # durable request/event store on the canonical production BFF.
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -953,6 +960,17 @@ services:
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro
+      # ▶ **에이전트는 여기서 뜬다 - 저장소가 보여야 한다** (2026-08-12 실측)
+      #   이 두 줄이 override 에만 있어서 로컬에서만 보이고 AWS 에서는 안 보였다.
+      #   그러면 같은 카드가 환경에 따라 다른 판정을 낸다 - 실제로 에이전트가
+      #   `source_registry.py: ABSENT` 로 `BLOCKED` 를 냈고 리스크 게이트가 그걸
+      #   받아 `NOT_RUNNABLE` 을 냈다. 파일은 있었다.
+      #
+      #   `/app/repo` 는 **읽기 전용**(진단·탐색), `/app/departments/04-quant-backtest`
+      #   는 쓰기(퀀트가 고쳐도 되는 코드). 역할이 다르므로 경로도 다르다.
+      - .:/app/repo:ro
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
+      - ./quant-data:/app/quant-data
     environment:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000

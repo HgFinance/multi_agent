@@ -70,6 +70,11 @@ class ReleaseDecision:
     failed: list = field(default_factory=list)
     reasons: list = field(default_factory=list)
     next_owner: str = ""
+    # ▶ **못 잰 것과 못 넘은 것을 가른다.** 둘 다 차단이지만 뜻이 다르다 -
+    #   "낙폭이 기준을 넘었다" 는 설계를 고치라는 말이고, "PBO 를 안 쟀다" 는
+    #   재라는 말이다. 섞으면 환류가 "과적합됐다" 는 없는 사실을 만든다
+    #   (2026-08-12: momentum 이 PBO 미측정으로 OVERFIT_PBO 교훈을 받았다).
+    unmeasured: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -77,6 +82,7 @@ class ReleaseDecision:
             "passed": list(self.passed),
             "failed": list(self.failed),
             "reasons": list(self.reasons),
+            "unmeasured": list(self.unmeasured),
             "next_owner": self.next_owner,
             # ▶ 오해를 막는 문장을 판정에 같이 싣는다. 이 dict 만 보고
             #   "통과했으니 올려도 된다" 로 읽히면 안 된다.
@@ -92,6 +98,93 @@ def _num(v):
         return None
 
 
+# ── 저장된 지표 이름 -> 관문 어휘 ──────────────────────────────────────────
+# ▶ 왜 여기 있나 (2026-08-12 실측 - 이걸로 관문이 눈을 감고 있었다)
+#   관문은 `max_drawdown_pct`(퍼센트) 와 `turnover` 를 찾는데 러너가 적는 이름은
+#   `max_drawdown`(비율) 과 `turnover_total` 이다. **셋 다 안 맞았다.**
+#   결과: MDD 와 회전율이 영구 "미확인" 이라 어떤 실험도 통과할 수 없었다.
+#   보정한다고 넣어 둔 `mdd_pct` 도 존재하지 않는 이름이라 None 을 덮어썼다.
+#
+#   기준을 소유한 쪽이 어휘도 소유한다. 읽는 곳마다 각자 이름을 맞추면
+#   한 곳을 고쳐도 다른 곳이 계속 눈을 감는다(실제로 두 곳이 그랬다).
+#
+#   (저장이름, 배수) - 배수는 단위 변환이다. 비율 -0.5052 를 그대로 -35.0 과
+#   비교하면 **항상 통과**한다. 이름만 고치고 단위를 두면 조항이 조용히 꺼진다.
+STORED_ALIASES: dict[str, tuple[str, float]] = {
+    "max_drawdown_pct": ("max_drawdown", 100.0),   # 비율 -> 퍼센트
+    "turnover": ("turnover_total", 1.0),
+}
+
+# 전기간 성적이 담기는 split. 창별 행과 섞으면 정렬 없는 dict 축약이
+# **아무 창이나** 집어 간다 - 실제로 그랬다.
+FULL_PERIOD_SPLIT = "TEST"
+# 창을 가리키지 않는 차원 값. `SUMMARY` 는 전체 요약이라는 뜻이다.
+_NOT_A_WINDOW = ("", "SUMMARY")
+# 계열 전체를 보는 통계. 전기간 split 이 아니라 WALK_FORWARD 에 적재된다 -
+# "이 창의 성적" 이 아니라 "이 계열에서 고르는 행위가 신뢰되는가" 이기 때문이다.
+_FAMILY_STATS = frozenset({"pbo", "pbo_n_variants", "pbo_n_splits",
+                           "pbo_n_windows"})
+
+
+def _window_of(dims) -> str:
+    """행의 창 이름. 없으면 빈 문자열(=전체 구간 행)."""
+    if isinstance(dims, dict):
+        return str(dims.get("window") or "")
+    if isinstance(dims, str) and dims.strip().startswith("{"):
+        try:
+            import json  # noqa: PLC0415
+
+            return str((json.loads(dims) or {}).get("window") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
+def metrics_from_rows(rows) -> dict:
+    """`(metric, value, split[, dimensions])` 행들 -> 관문이 읽는 지표 dict.
+
+    **창별 행만 뺀다. split 으로 가르지 않는다.**
+
+    ▶ 왜 split 이 기준이 아닌가 (2026-08-12, 이 함수의 첫 판이 틀렸다)
+      전기간 성적은 `split=TEST` 인데, **PBO 는 `split=WALK_FORWARD` 에
+      적재된다** - 창별 성적이 아니라 계열 전체를 보는 통계라서 그렇다.
+      `TEST` 만 읽게 짰더니 PBO 가 통째로 안 보였다. 관문은 미확인을 통과로
+      치지 않으므로(옳다) 어떤 실험도 영원히 못 넘을 뻔했다.
+
+      가르는 기준은 **창을 가리키는 행인가**이다. 창별 행은 `dimensions.window`
+      를 갖고, 전체 구간·계열 통계는 안 갖는다. 환류 적재부가 이미 같은
+      기준을 쓰고 있었다(`coalesce(dimensions->>'window','') in ('','SUMMARY')`).
+    """
+    full: dict[str, float] = {}
+    for r in rows or ():
+        if not isinstance(r, (list, tuple)) or len(r) < 2:
+            continue
+        name, value = r[0], _num(r[1])
+        if value is None:
+            continue
+        dims = r[3] if len(r) > 3 else None
+        if _window_of(dims) not in _NOT_A_WINDOW:
+            continue                     # 창별 행 - 전기간 기준과 비교하지 않는다
+        # 차원이 안 실려 온 옛 호출은 split 으로 보수적으로 가른다
+        if len(r) <= 3:
+            split = str(r[2]) if len(r) > 2 and r[2] is not None else FULL_PERIOD_SPLIT
+            if split != FULL_PERIOD_SPLIT and str(name) not in _FAMILY_STATS:
+                continue
+        full[str(name)] = value
+
+    out = dict(full)
+    for want, (stored, scale) in STORED_ALIASES.items():
+        # 정본 이름이 이미 있으면 건드리지 않는다 - 별칭은 보조다
+        if want not in out and stored in full:
+            out[want] = full[stored] * scale
+    return out
+
+
+SQL_GATE_METRICS = """select metric, value, split, dimensions
+                        from quant.experiment_metrics
+                       where experiment_id = %s"""
+
+
 def evaluate(metrics: dict, *, fragility: str,
              trial_pressure: dict | None = None) -> ReleaseDecision:
     """지표 -> 릴리스 판정. **순수 함수, 결정론.**
@@ -101,10 +194,12 @@ def evaluate(metrics: dict, *, fragility: str,
     passed: list[str] = []
     failed: list[str] = []
     reasons: list[str] = []
+    unmeasured: list[str] = []
 
     def _check(name: str, value, ok: bool, msg: str) -> None:
         if value is None:
             failed.append(name)
+            unmeasured.append(name)
             # ▶ **미확인을 통과로 위장하지 않는다.** 벤치마크가 없으면 초과를
             #   못 재는 것이지 초과가 있는 게 아니다.
             reasons.append(f"{name}: 미확인 - 판정할 수 없다")
@@ -179,6 +274,7 @@ def evaluate(metrics: dict, *, fragility: str,
     return ReleaseDecision(
         decision="SUBMIT_TO_QA" if ok else "HOLD",
         passed=sorted(passed), failed=sorted(failed), reasons=reasons,
+        unmeasured=sorted(unmeasured),
         next_owner="AI QA/감사본부 + Risk (독립 검증) -> CEO (승격 승인)"
         if ok else "퀀트본부 (기준 미달 - 재설계 또는 폐기)")
 
@@ -320,6 +416,82 @@ def _check_gate_cannot_promote():
                 assert "psycopg2" not in (m or ""),                     "DB 연결이 생겼다 - 관문은 판정만 하고 상태를 쓰지 않는다"
 
 
+def _check_stored_names_reach_the_gate():
+    """**2026-08-12 사고 원문을 픽스처로 넣는다.**
+
+    실험 75a6d09e(momentum) 가 실제로 남긴 행이다. 초과 +157.51%p, IR 1.26,
+    DSR 0.976 - 수치 조항을 다 통과하는데 MDD 와 회전율이 "미확인" 이라
+    탈락했다. 이름이 안 맞아서였다. 그 행을 그대로 넣어 다시 나면 실패한다.
+    """
+    rows = [
+        ("excess_return_pct", 157.51, "TEST"),
+        ("information_ratio", 1.2552, "TEST"),
+        ("deflated_sharpe", 0.9762, "TEST"),
+        ("bootstrap_ci_low", -0.0029, "TEST"),
+        ("max_drawdown", -0.5052, "TEST"),        # 비율. 관문은 퍼센트를 본다
+        ("turnover_total", 114.8667, "TEST"),
+        # 창별 행 - 섞이면 안 된다. 아래 -0.0709 가 전기간 낙폭으로 읽히면
+        # -50.5% 짜리 전략이 -7% 로 통과한다.
+        ("max_drawdown", -0.2544, "WALK_FORWARD"),
+        ("max_drawdown", -0.0709, "WALK_FORWARD"),
+    ]
+    m = metrics_from_rows(rows)
+
+    mdd = m.get("max_drawdown_pct")
+    assert mdd is not None and abs(mdd - (-50.52)) < 1e-6, (
+        f"전기간 낙폭이 퍼센트로 안 온다: {mdd}")
+    assert m.get("turnover") == 114.8667, m.get("turnover")
+
+    # ▶ 미확인이 아니라 **판정**이 나와야 한다.
+    d = evaluate(m, fragility="ROBUST")
+    assert "max_drawdown: 미확인 - 판정할 수 없다" not in d.reasons, d.reasons
+    assert "turnover: 미확인 - 판정할 수 없다" not in d.reasons, d.reasons
+    assert "max_drawdown" in d.failed, "MDD -50.52% 가 -35% 기준을 통과했다"
+    assert "turnover" in d.passed, d.failed
+
+    # ▶ **단위를 안 고치면 조항이 꺼진다** - 배수를 1.0 으로 되돌리면 통과한다.
+    #   이름만 맞추고 끝냈으면 -0.5052 >= -35.0 으로 늘 통과했을 것이다.
+    assert -0.5052 >= CRITERIA["max_drawdown_pct"], "단위 함정이 사라졌다"
+
+
+def _check_full_period_only():
+    """창별 행밖에 없으면 **미확인**이다. 창 성적으로 전기간을 대신하지 않는다."""
+    m = metrics_from_rows([
+        ("max_drawdown", -0.07, "WALK_FORWARD", {"window": "2025H1"})])
+    assert "max_drawdown_pct" not in m, m
+    d = evaluate(m, fragility="ROBUST")
+    assert "max_drawdown" in d.failed
+    assert any("미확인" in r for r in d.reasons), d.reasons
+
+
+def _check_family_stats_are_not_split_filtered():
+    """**PBO 는 WALK_FORWARD 에 적재된다.** split 으로 가르면 통째로 사라진다.
+
+    (2026-08-12: 이 함수의 첫 판이 `TEST` 만 읽어 PBO 를 못 봤다. 관문은
+    미확인을 통과로 안 치므로 어떤 실험도 영원히 못 넘을 뻔했다.)
+    """
+    m = metrics_from_rows([
+        ("excess_return_pct", 157.51, "TEST", {}),
+        ("pbo", 0.30, "WALK_FORWARD", {}),                 # 계열 통계 - 창이 없다
+        ("pbo_n_windows", 5.0, "WALK_FORWARD", {"stat": "pbo"}),
+        ("max_drawdown", -0.20, "WALK_FORWARD", {"window": "2025H1"}),  # 창별
+    ])
+    assert m.get("pbo") == 0.30, f"PBO 가 split 필터에 걸려 사라졌다: {m}"
+    assert m.get("pbo_n_windows") == 5.0, m
+    # 창별 낙폭은 여전히 안 들어온다 - 그건 전기간 기준과 비교할 값이 아니다
+    assert "max_drawdown_pct" not in m, m
+    assert "max_drawdown" not in m, m
+    d = evaluate(m, fragility="ROBUST")
+    assert "pbo" in d.passed, (d.failed, d.reasons)
+    assert "pbo" not in d.unmeasured, d.unmeasured
+
+    # dimensions 가 문자열(JSON)로 와도 같아야 한다 - 드라이버마다 다르다
+    m2 = metrics_from_rows([("pbo", 0.30, "WALK_FORWARD", '{"stat": "pbo"}'),
+                            ("sharpe", 1.0, "WALK_FORWARD", '{"window": "2025H1"}')])
+    assert m2.get("pbo") == 0.30, m2
+    assert "sharpe" not in m2, m2
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -333,4 +505,9 @@ if __name__ == "__main__":
     _check_trial_pressure_blocks();  print("  다중검정 차단           OK")
     _check_negative_excess_blocks(); print("  음수 초과 차단          OK")
     _check_gate_cannot_promote();    print("  승격 경로 부재          OK")
-    print("릴리스 관문 8개 영역 통과.")
+    _check_stored_names_reach_the_gate()
+    print("  저장이름->관문 어휘     OK")
+    _check_full_period_only();       print("  창 성적으로 전기간 대체 안함  OK")
+    _check_family_stats_are_not_split_filtered()
+    print("  계열 통계(PBO) 도달       OK")
+    print("릴리스 관문 11개 영역 통과.")

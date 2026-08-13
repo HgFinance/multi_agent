@@ -29,6 +29,9 @@ CANONICAL_PROFILES = frozenset(
 CANONICAL_SKILLS = frozenset(
     {
         "agentic-rag",
+        # 2026-08-13 공장 능동화 3종: 병목을 만난 부서가 스스로 진단·구축·기록한다.
+        # 소유는 공장 개선 카드가 걸리는 부서(research/quant, wiring-audit 은 QA 포함).
+        "dataset-engineering",
         "equity-quant-assessment",
         "experiment-factory",
         "financial-equity-research",
@@ -37,6 +40,8 @@ CANONICAL_SKILLS = frozenset(
         "financial-risk-research",
         "hermes-multi-agent-pipelines",
         "methodology-scout",
+        "skill-authoring",
+        "wiring-audit",
     }
 )
 
@@ -57,6 +62,9 @@ SHARED_PORTFOLIO_SKILL_PROFILES = frozenset(
 SKILL_OWNER_BY_NAME = MappingProxyType(
     {
         "agentic-rag": frozenset({"risk-management", "qa-department"}),
+        "dataset-engineering": frozenset(
+            {"quant-backtest-department", "research-department"}
+        ),
         "equity-quant-assessment": frozenset({"quant-backtest-department"}),
         "experiment-factory": frozenset({"quant-backtest-department"}),
         "financial-equity-research": frozenset({"research-department"}),
@@ -65,6 +73,12 @@ SKILL_OWNER_BY_NAME = MappingProxyType(
         "financial-risk-research": frozenset({"risk-management"}),
         "hermes-multi-agent-pipelines": frozenset({"ceo-agent"}),
         "methodology-scout": frozenset({"research-department"}),
+        "skill-authoring": frozenset(
+            {"quant-backtest-department", "research-department"}
+        ),
+        "wiring-audit": frozenset(
+            {"quant-backtest-department", "research-department", "qa-department"}
+        ),
     }
 )
 

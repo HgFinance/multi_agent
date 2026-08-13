@@ -286,13 +286,37 @@ class BacktestResult:
 
 
 def _apply_costs(side: str, notional: float,
-                 slip_bps: float | None = None) -> float:
-    # 종목별 슬리피지를 받으면 그것을 쓴다. 안 주면 시장 중앙값(옛 동작 유지)
+                 slip_bps: float | None = None, mult: float = 1.0) -> float:
+    """체결 비용. `mult` 는 **반증용 스트레스 배수**다.
+
+    ▶ 왜 배수를 config 로 받나 (2026-08-12)
+      에이전트가 쓴 반증 시험 49건 중 **10건이 "비용 차감 후 초과수익 소멸"**
+      이었다. `COST_UNACCOUNTED` 는 가장 흔한 경쟁 설명 코드이기도 하다.
+      그런데 비용 모델이 모듈 상수라 그 시험을 돌릴 방법이 없었다 -
+      **에이전트가 설계한 반증을 아무도 집행하지 않았다.**
+
+      전역을 바꾸면 병렬 실행이 서로를 오염시킨다. config 로 받아 실행마다
+      독립시킨다. **기본 1.0 이라 안 켜면 예전과 한 비트도 안 다르다.**
+
+    ▶ `EDGE_KEYS` 에는 넣지 않는다 - 이건 반증 도구지 가설 파라미터가 아니다.
+      기획안이 비용을 낮춰 성적을 좋게 만드는 길을 열면 안 된다.
+    """
     bps = COST_MODEL["commission_bps"] + (
         COST_MODEL["slippage_bps"] if slip_bps is None else float(slip_bps))
     if side == "SELL":
         bps += COST_MODEL["sell_tax_bps"]
-    return notional * bps / 1e4
+    return notional * bps / 1e4 * float(mult)
+
+
+def cost_multiplier(config: dict) -> float:
+    """config -> 비용 배수. 없으면 1.0(꺼짐)."""
+    v = (config or {}).get("cost_stress")
+    try:
+        m = float(v) if v is not None else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+    # 비용을 **낮추는** 방향은 막는다 - 반증 도구로 성적을 꾸미면 안 된다
+    return m if m >= 1.0 else 1.0
 
 
 
@@ -330,7 +354,7 @@ def buy_and_hold_equity(market: Market, config: dict) -> list[tuple[date, float]
     for s_ in names:
         px = day0[s_]
         # 비용을 먼저 떼고 남은 돈으로 산다(전략과 같은 방식)
-        fee = _apply_costs("BUY", per)
+        fee = _apply_costs("BUY", per, mult=cost_multiplier(config))
         q = max((per - fee) / px, 0.0)
         shares[s_] = q
         spent += q * px + fee
@@ -400,6 +424,73 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
     return out
 
 
+# ── 위험관리 손잡이 ────────────────────────────────────────────────────────
+# ▶ 왜 이게 있어야 하나 (2026-08-12 실측)
+#   momentum 이 초과 +157.51%p · IR 1.26 · DSR 0.976 을 냈다. 다중검정을
+#   감안해도 우연이 아닌 성적이다. 그런데 **전기간 낙폭이 -50.52%** 라
+#   릴리스 관문(-35% 허용)을 못 넘었다.
+#
+#   이때 손잡이가 `strategy/lookback_days/top_n/rebalance/initial_capital`
+#   다섯 개뿐이었다. **완전투자 동일가중 롱온리 말고는 표현할 수가 없었다** -
+#   에이전트가 "낙폭을 줄여 보자" 고 판단해도 돌릴 방법이 없는 상태였다.
+#   그래서 새 엣지만 계속 설계했고, 새 엣지도 같은 자리에서 같이 죽었다.
+#
+#   **기본값은 전부 꺼짐이다.** 안 켜면 이전과 완전히 같은 결과가 나온다 -
+#   기존 실험의 input_hash 가 흔들리면 사전등록이 무너진다.
+#
+#   값은 우리가 정하지 않는다. 에이전트가 config 로 준다.
+RISK_KEYS = ("vol_target_annual", "max_drawdown_stop", "vol_lookback_days",
+             "max_exposure")
+_VOL_MIN_OBS = 20              # 이보다 짧은 표본으로 변동성을 추정하지 않는다
+
+
+def risk_enabled(config: dict) -> bool:
+    """위험관리 손잡이가 하나라도 켜져 있나. **꺼져 있으면 예전 그대로다.**"""
+    return any(config.get(k) is not None for k in RISK_KEYS
+               if k != "vol_lookback_days")
+
+
+def risk_exposure(config: dict, equity: list) -> tuple[float, str]:
+    """오늘의 목표 익스포저. `1.0` = 완전투자, `0.0` = 전량 현금.
+
+    **어제까지의 자기 자산곡선만 본다** - `equity` 는 오늘 평가 전이므로
+    구조적으로 PIT 다. 미래를 보고 위험을 줄이면 그건 위험관리가 아니다.
+    """
+    vt = config.get("vol_target_annual")
+    dd_stop = config.get("max_drawdown_stop")
+    cap_raw = config.get("max_exposure")
+    cap = float(cap_raw) if cap_raw is not None else 1.0
+    if vt is None and dd_stop is None and cap_raw is None:
+        return 1.0, ""                       # 손잡이 꺼짐 - 예전 그대로
+
+    vals = [v for _, v in equity]
+    if len(vals) < 2:
+        return min(1.0, cap), "이력없음"
+
+    # ① 낙폭 정지. **고점 대비**로 본다 - 시작가 대비로 재면 오래 번 전략이
+    #    영원히 안 멈춘다. 리밸런스일에만 평가된다(그 사이엔 안 판다).
+    if dd_stop is not None:
+        peak = max(vals)
+        if peak > 0 and (vals[-1] / peak - 1.0) <= float(dd_stop):
+            return 0.0, "낙폭정지"
+
+    # ② 변동성 타게팅. 실현변동성이 목표보다 크면 그만큼 줄인다.
+    exposure = cap
+    if vt is not None:
+        lb = int(config.get("vol_lookback_days") or 60)
+        w = vals[-(lb + 1):]
+        rets = [w[k] / w[k - 1] - 1.0 for k in range(1, len(w)) if w[k - 1] > 0]
+        if len(rets) < _VOL_MIN_OBS:
+            # **표본이 모자라면 추정하지 않는다** - 짧은 표본의 변동성으로
+            # 레버리지를 정하면 초반에 과대 노출된다. 상한만 지킨다.
+            return min(1.0, cap), "표본부족"
+        mu = sum(rets) / len(rets)
+        var = sum((r - mu) ** 2 for r in rets) / (len(rets) - 1)
+        rv = math.sqrt(var) * math.sqrt(252)
+        exposure = min(cap, float(vt) / rv) if rv > 1e-9 else cap
+    return max(0.0, exposure), ""
+
+
 def run_backtest(market: Market, config: dict, *,
                  trials: int = 1) -> BacktestResult:
     _lookback = int(config["lookback_days"])
@@ -413,6 +504,11 @@ def run_backtest(market: Market, config: dict, *,
     fills: list[Fill] = []
     equity: list[tuple[date, float]] = []
     notes: list[str] = []
+    exposures: list[float] = []              # 리밸런스일별 목표 익스포저
+    risk_notes: list[str] = []
+    _risk_on = risk_enabled(config)
+    # 벤치마크도 **같은 배수**를 쓴다 - 전략만 비용을 물면 비교가 거짓이다
+    _cost_mult = cost_multiplier(config)
     rebal_days = rebalance_days(market.dates, config)
     # 웜업 무거래 계약 (walk-forward 창 독립성) - 이 날짜 전에는 리밸런스 금지
     ntb = config.get("no_trade_before")
@@ -431,7 +527,16 @@ def run_backtest(market: Market, config: dict, *,
                 tradable = [s for s in ranked if (d, s) in market.opens]
                 port_value = cash + sum(
                     q * last_close.get(s, 0.0) for s, q in shares.items())
-                target_value = (port_value / len(tradable)) if tradable else 0.0
+                # ▶ 위험관리. 기본 1.0 이라 손잡이를 안 켜면 예전과 동일하다.
+                #   `equity` 는 오늘 평가 전이므로 어제까지만 담겨 있다(PIT).
+                exposure = 1.0
+                if _risk_on:
+                    exposure, _why = risk_exposure(config, equity)
+                    exposures.append(exposure)
+                    if _why and _why not in risk_notes:
+                        risk_notes.append(_why)
+                target_value = ((port_value * exposure / len(tradable))
+                                if tradable else 0.0)
 
                 # 매도 먼저 (현금 확보) - 대상에서 빠졌거나 초과 보유분
                 for s in list(shares):
@@ -444,7 +549,7 @@ def run_backtest(market: Market, config: dict, *,
                         sb = slippage_bps_for(s, adv=adv.get(s))
                         exec_px = px * (1 - sb / 1e4)
                         notional = diff * exec_px
-                        fee = _apply_costs("SELL", notional, sb)
+                        fee = _apply_costs("SELL", notional, sb, _cost_mult)
                         pnl = _fifo_sell(lots.setdefault(s, deque()), diff, exec_px) - fee
                         cash += notional - fee
                         shares[s] -= diff
@@ -461,7 +566,7 @@ def run_backtest(market: Market, config: dict, *,
                     diff = want - shares.get(s, 0.0)
                     if diff * px > 1.0:
                         notional = diff * exec_px
-                        fee = _apply_costs("BUY", notional, sb)
+                        fee = _apply_costs("BUY", notional, sb, _cost_mult)
                         if notional + fee > cash:
                             diff = max((cash - fee) / exec_px, 0.0)
                             notional = diff * exec_px
@@ -485,6 +590,14 @@ def run_backtest(market: Market, config: dict, *,
         notes.append(f"기말에 시세 없는 보유 {len(held_wo_price)}종목 - 직전 종가 평가")
 
     metrics = compute_metrics(equity, fills, capital, traded_notional)
+    # ▶ 위험관리를 **켰을 때만** 지표를 붙인다. 안 켰는데 `avg_exposure=1.0`
+    #   을 적으면 "위험관리를 했는데 1.0 이었다" 로 읽힌다 - 안 한 것과 다르다.
+    if exposures:
+        metrics["avg_exposure"] = round(sum(exposures) / len(exposures), 4)
+        metrics["min_exposure"] = round(min(exposures), 4)
+        metrics["days_de_risked"] = sum(1 for e in exposures if e < 0.999)
+        if risk_notes:
+            notes.append("위험관리: " + ", ".join(risk_notes))
     # ▶ 벤치마크 대비를 **항상** 붙인다. 절대수익만 보면 시장이 오른 것을
     #   전략의 실력으로 착각한다.
     # ── 과적합 통계 (계약 quant_v2 가 요구하는 필드) ────────────────────────
@@ -557,6 +670,26 @@ def compute_metrics(equity: list[tuple[date, float]], fills: list[Fill],
     sells = [f for f in fills if f.side == "SELL" and f.realized_pnl is not None]
     wins = sum(1 for f in sells if f.realized_pnl > 0)
     total_fees = sum(f.fees for f in fills)
+    # ▶ **손익이 몇 종목에서 나왔나** (2026-08-12 개방)
+    #   `low_volatility` 가 10년에서 초과 +855.92%p 를 냈는데, 상위 3종목이
+    #   실현손익의 63%, 한 종목의 한 체결이 34% 였다. 원인은 액면분할 미조정
+    #   이었다(×10.0000·×5.0000 같은 정확한 정수배가 원천에 남아 있다).
+    #
+    #   **저변동성 선택은 이 결함에 구조적으로 노출된다** - 정체 가격 종목이
+    #   측정 변동성이 낮아 계속 뽑히고, 그 종목이 바로 분할 점프를 갖는다.
+    #   빈도는 0.002% 인데 성과의 34% 를 만들었다 - 빈도로는 안 보인다.
+    #
+    #   판정하지 않고 **재기만 한다.** 임계는 관문이 정할 일이고, 집중이
+    #   반드시 결함인 것도 아니다(진짜 소수 종목 전략이 있다). 다만 이 수를
+    #   안 남기면 아무도 못 본다.
+    _by_sym: dict[str, float] = {}
+    for f in sells:
+        _by_sym[f.instrument_id] = (_by_sym.get(f.instrument_id, 0.0)
+                                    + float(f.realized_pnl))
+    _pos = sorted((v for v in _by_sym.values() if v > 0), reverse=True)
+    _gross = sum(_pos)
+    top1 = round(_pos[0] / _gross, 4) if _gross > 0 and _pos else None
+    top3 = round(sum(_pos[:3]) / _gross, 4) if _gross > 0 and _pos else None
     return {
         "total_return": round(total, 6), "cagr": round(cagr, 6),
         "ann_vol": round(ann_vol, 6), "sharpe_rf0": round(sharpe, 4),
@@ -566,6 +699,10 @@ def compute_metrics(equity: list[tuple[date, float]], fills: list[Fill],
         "sell_win_rate": round(wins / len(sells), 4) if sells else None,
         "total_fees": round(total_fees, 2),
         "final_equity": round(values[-1], 2),
+        # 못 재면 키를 안 넣는다 - 0 으로 채우면 "집중이 없었다" 로 읽힌다
+        **({"pnl_top1_share": top1} if top1 is not None else {}),
+        **({"pnl_top3_share": top3} if top3 is not None else {}),
+        "n_pnl_symbols": len(_by_sym) or None,
     }
 
 
@@ -601,12 +738,26 @@ def load_dataset(conn, name: str, version: str):
     #   일봉은 예전 경로 그대로 간다. 이미 해시 검증을 통과하며 도는 것을
     #   형식을 바꾸자고 다시 만들 이유가 없다.
     try:
-        from dataset_spec import SPECS                    # noqa: PLC0415
+        from dataset_spec import spec_for                 # noqa: PLC0415
         from spec_dataset_builder import (                # noqa: PLC0415
             content_hash as spec_hash, read_partition)
-        spec = SPECS.get(f"{name}/{version}")
+        # ▶ **스탬프를 아는 조회를 쓴다** - `SPECS.get` 은 `v1-20260812` 를 못
+        #   찾고, 못 찾으면 아래 일봉 gzip 경로로 조용히 떨어진다(2026-08-12
+        #   실측: `BadGzipFile: Not a gzipped file (b'PA')`).
+        spec = spec_for(name, version)
     except ImportError:
         spec = None
+
+    # ▶ **형식이 안 맞으면 다른 리더로 흘리지 않는다.** 명세를 못 찾았는데
+    #   파일이 Parquet 이면 그건 "일봉이다" 가 아니라 "조회가 빗나갔다" 이다.
+    #   조용히 다음 리더로 떨어지면 사고 원인이 형식 오류로 위장된다.
+    if spec is None and parts:
+        _first = str(parts[0][1] or "")
+        if _first.endswith(".parquet"):
+            raise RuntimeError(
+                f"{name}/{version} 은 Parquet 인데 명세 등록부에 없다 - "
+                f"dataset_spec.SPECS 에 등재하거나 버전을 확인하라 "
+                f"(일봉 gzip 리더로 읽으면 BadGzipFile 로 죽는다)")
     if spec is not None:
         rows_s: list[dict] = []
         for key, path, phash in parts:
@@ -639,6 +790,23 @@ def load_dataset(conn, name: str, version: str):
 # ---------------------------------------------------------------------------
 # 등록 (hypothesis -> experiment -> run -> trades/metrics)
 # ---------------------------------------------------------------------------
+
+# 좀비 판정 최소 나이(분). 한 실험의 전체 오케스트레이션이 수 분이므로 10분이면
+# 살아 있는 실행을 뺏지 않는다 - 다음 재발주는 15분 주기라 첫 재시도에서 걸린다.
+ZOMBIE_RECLAIM_MIN = 10.0
+
+
+def zombie_experiment(status: str, ended: bool, n_runs: int,
+                      n_outcomes: int, age_min: float) -> bool:
+    """미완(좀비) 실험인가 - **판정이 있으면 절대 아니다.** (순수 함수)
+
+    좀비 서명: RUNNING · 종료 없음 · backtest_runs 0 · 판정 0 · 10분 경과.
+    FAILED 는 좀비가 아니다 - 그건 실패라는 **기록**이고, 기록은 보호한다.
+    """
+    return (str(status) == "RUNNING" and not ended
+            and int(n_runs) == 0 and int(n_outcomes) == 0
+            and float(age_min) >= ZOMBIE_RECLAIM_MIN)
+
 
 def register_and_run(name: str, version: str, *, seed: int = 0,
                      config: dict | None = None,
@@ -703,15 +871,51 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
             got = cur.fetchone()
             if got is None:
                 conn.rollback()
-                print(f"같은 input_hash 의 실험이 이미 있다({ihash[:16]}…) - "
-                      f"재실행은 같은 결과라 등록하지 않는다 (재현성 계약)", flush=True)
+                # ▶ **좀비와 판정을 가른다** (2026-08-13 실측, 무인 발주 1호)
+                #   백테스트가 다 돈 뒤 결과 INSERT 가 일시적 읽기전용
+                #   (서버 복구 창)에 걸려 죽었다. experiments 행은 RUNNING 인
+                #   채 남았고 backtest_runs 도 판정도 없다. input_hash 유니크
+                #   때문에 재시도는 전부 "중복 실험" 이 된다 - **인프라 깜빡임
+                #   한 번이 그 지문의 실험을 영구 봉인하는 구조**였다.
+                #
+                #   중복 가드의 목적은 "판정을 다시 사지 않는 것"(재판정은 결과
+                #   조작 여지)이다. 판정이 **없는** 미완 실험을 되살리는 것은
+                #   재판정이 아니라 완주다. 그래서 좀비 서명(RUNNING · 종료
+                #   없음 · run 기록 0 · 판정 0 · 10분 경과)일 때만 같은
+                #   experiment_id 를 이어서 돌린다 - 새 행을 만들지 않으므로
+                #   사전등록 정체성(input_hash = 실험 하나)은 그대로다.
                 cur2 = conn.cursor()
-                cur2.execute("select experiment_id from quant.experiments "
-                             "where input_hash=%s", (ihash,))
+                cur2.execute("""
+                    select e.experiment_id::text, e.status,
+                           e.ended_at is null,
+                           extract(epoch from (now()-e.started_at))/60,
+                           (select count(*) from quant.backtest_runs r
+                             where r.experiment_id = e.experiment_id),
+                           (select count(*) from research.experiment_outcomes o
+                             where o.experiment_id = e.experiment_id::text)
+                      from quant.experiments e where e.input_hash=%s""",
+                             (ihash,))
                 prev = cur2.fetchone()
-                return {"status": 0, "duplicate": True, "input_hash": ihash,
-                        "experiment_id": str(prev[0]) if prev else None}
-            exp_id = str(got[0])
+                if prev and zombie_experiment(prev[1], not prev[2],
+                                              int(prev[4]), int(prev[5]),
+                                              float(prev[3] or 0)):
+                    exp_id = prev[0]
+                    print(f"미완 실험 회수({exp_id[:8]}…): RUNNING 인 채 "
+                          f"{float(prev[3]):.0f}분 - run 기록 0 · 판정 0 이므로 "
+                          f"재판정이 아니라 **완주**다. 같은 experiment_id 로 "
+                          f"이어서 돈다", flush=True)
+                    cur2.execute("update quant.experiments set started_at=now(),"
+                                 " trace_id=%s where experiment_id=%s::uuid",
+                                 (trace, exp_id))
+                    conn.commit()
+                else:
+                    print(f"같은 input_hash 의 실험이 이미 있다({ihash[:16]}…) - "
+                          f"재실행은 같은 결과라 등록하지 않는다 (재현성 계약)",
+                          flush=True)
+                    return {"status": 0, "duplicate": True, "input_hash": ihash,
+                            "experiment_id": str(prev[0]) if prev else None}
+            else:
+                exp_id = str(got[0])
         conn.commit()
 
         market = Market.from_rows(rows)
@@ -935,6 +1139,117 @@ def _check_cash_never_negative():
     print("  현금 제약(축소 매수)     OK")
 
 
+def _crash_market(n: int = 400):
+    """오르다 크게 빠지고 회복하는 시장. **낙폭 제어가 의미를 갖는 모양이다.**"""
+    px, series = 100.0, []
+    for i in range(n):
+        if i < n * 0.5:
+            px *= 1.004                      # 상승장
+        elif i < n * 0.65:
+            px *= 0.975                      # 급락 (약 -45%)
+        else:
+            px *= 1.003                      # 회복
+        series.append(round(px, 4))
+    # 두 종목이 같은 모양이면 순위가 무의미하다 - 약간 어긋나게 둔다
+    other = [round(v * (1 + 0.02 * ((i % 11) - 5) / 100), 4)
+             for i, v in enumerate(series)]
+    return _mk_market({"AAA": series, "BBB": other})
+
+
+def _check_pnl_concentration_is_measured():
+    """**손익이 몇 종목에서 나왔는지 잰다.** (2026-08-12 사고 원문)
+
+    `low_volatility` 가 10년 초과 +855.92%p 를 냈는데 한 종목의 한 체결이
+    34% 였다 - 원천의 액면분할 미조정(×10.0000)을 먹은 것이었다. 그 수치가
+    지표에 없어서 관문도 사람도 볼 수가 없었다.
+    """
+    from datetime import date as _d
+
+    def _f(sym, pnl):
+        return Fill(_d(2026, 1, 5), sym, "SELL", 1.0, 100.0, 0.0, pnl)
+
+    eq = [(_d(2026, 1, 5), 100.0), (_d(2026, 1, 6), 110.0)]
+    # 한 종목이 이익의 대부분을 만든 경우
+    m = compute_metrics(eq, [_f("A", 900.0), _f("B", 50.0), _f("C", 50.0)],
+                        100.0, 10.0)
+    assert abs(m["pnl_top1_share"] - 0.9) < 1e-9, m["pnl_top1_share"]
+    assert abs(m["pnl_top3_share"] - 1.0) < 1e-9, m["pnl_top3_share"]
+    assert m["n_pnl_symbols"] == 3, m
+
+    # 고르게 난 경우 - 같은 총이익이어도 집중도가 다르다
+    m2 = compute_metrics(eq, [_f(s, 100.0) for s in "ABCDEFGHIJ"], 100.0, 10.0)
+    assert m2["pnl_top1_share"] < 0.15, m2["pnl_top1_share"]
+
+    # ▶ **못 재면 키를 안 넣는다.** 0 으로 채우면 "집중이 없었다" 로 읽힌다
+    m3 = compute_metrics(eq, [], 100.0, 0.0)
+    assert "pnl_top1_share" not in m3, m3
+    # 손실만 난 경우도 분모가 없다 - 억지로 만들지 않는다
+    m4 = compute_metrics(eq, [_f("A", -10.0)], 100.0, 1.0)
+    assert "pnl_top1_share" not in m4, m4
+    print("  손익 집중도 측정         OK")
+
+
+def _check_risk_knobs_off_change_nothing():
+    """**손잡이를 안 켜면 한 비트도 안 바뀐다.** (사전등록 무결성)
+
+    러너에 손잡이를 더하면서 기존 실험 결과가 흔들리면 `input_hash` 가 걸어 둔
+    사전등록이 무너진다. 안 켠 경우는 예전 경로 그대로여야 한다.
+    """
+    m = _crash_market()
+    base = run_backtest(m, dict(DEFAULT_CONFIG, top_n=2))
+    same = run_backtest(m, dict(DEFAULT_CONFIG, top_n=2,
+                                vol_target_annual=None, max_drawdown_stop=None,
+                                max_exposure=None))
+    assert base.metrics == same.metrics, "손잡이를 껐는데 결과가 달라졌다"
+    # 안 켰으면 위험관리 지표를 **적지 않는다** - 1.0 을 적으면 한 것처럼 읽힌다
+    assert "avg_exposure" not in base.metrics, base.metrics.keys()
+    assert not risk_enabled(dict(DEFAULT_CONFIG))
+    assert risk_enabled(dict(DEFAULT_CONFIG, max_drawdown_stop=-0.2))
+    # vol_lookback_days 만으로는 켜지지 않는다 (그건 보조 손잡이다)
+    assert not risk_enabled(dict(DEFAULT_CONFIG, vol_lookback_days=40))
+    print("  손잡이 꺼짐=이전과 동일  OK")
+
+
+def _check_drawdown_stop_actually_cuts_drawdown():
+    """**켜면 실제로 낙폭이 준다.** 손잡이가 이름만 있으면 없는 것과 같다."""
+    m = _crash_market()
+    cfg = dict(DEFAULT_CONFIG, top_n=2)
+    base = run_backtest(m, cfg)
+    stopped = run_backtest(m, dict(cfg, max_drawdown_stop=-0.15))
+
+    b_mdd = base.metrics["max_drawdown"]
+    s_mdd = stopped.metrics["max_drawdown"]
+    assert b_mdd < -0.25, f"시장이 충분히 안 빠졌다 - 검사가 의미 없다: {b_mdd}"
+    assert s_mdd > b_mdd, f"낙폭 정지를 켰는데 낙폭이 안 줄었다: {b_mdd} -> {s_mdd}"
+    # 실제로 위험을 줄인 날이 있어야 한다 - 지표가 그것을 증언한다
+    assert stopped.metrics["min_exposure"] == 0.0, stopped.metrics
+    assert stopped.metrics["days_de_risked"] >= 1, stopped.metrics
+    print(f"  낙폭정지 효과 확인       OK ({b_mdd:.1%} -> {s_mdd:.1%})")
+
+
+def _check_risk_is_pit():
+    """**미래를 보고 위험을 줄이지 않는다.**
+
+    폭락 뒤 구간을 잘라내도 그 이전 판단이 같아야 한다 - 뒤를 봤다면 달라진다.
+    """
+    full = _crash_market(400)
+    cut = _crash_market(400)
+    cut_dates = set(cut.dates[:230])         # 폭락 직후까지만
+    cut.dates = [d for d in cut.dates if d in cut_dates]
+
+    cfg = dict(DEFAULT_CONFIG, top_n=2, max_drawdown_stop=-0.15,
+               vol_target_annual=0.15)
+    a = run_backtest(full, cfg)
+    b = run_backtest(cut, cfg)
+    # 겹치는 구간의 자산곡선이 같아야 한다
+    n = len(b.equity)
+    assert n > 60, n
+    for (d1, v1), (d2, v2) in zip(a.equity[:n], b.equity):
+        assert d1 == d2 and abs(v1 - v2) < 1e-6, (
+            f"뒤를 보고 판단이 바뀌었다: {d1} {v1} vs {v2}")
+    print("  위험관리도 PIT          OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -954,10 +1269,31 @@ if __name__ == "__main__":
             config=REV_CONFIG if "--strategy-rev5" in a else None)
         raise SystemExit(int(_r.get("status", 1)))
 
+    def _check_zombie_reclaim_never_touches_verdicts():
+        """**좀비 회수가 판정을 절대 건드리지 않는다.** (2026-08-13 실측)
+
+        무인 발주 1호가 백테스트를 다 돌고 결과 쓰기에서 일시 읽기전용에
+        죽어 RUNNING 좀비가 됐다. input_hash 유니크라 재시도가 전부 "중복
+        실험" - 인프라 깜빡임 한 번이 그 지문을 영구 봉인하는 구조였다.
+        회수는 판정 없는 미완에만 열린다 - 기록·판정은 종류 불문 보호.
+        """
+        assert zombie_experiment("RUNNING", False, 0, 0, 11.0)   # 그 사고 그대로
+        assert not zombie_experiment("RUNNING", False, 0, 0, 3.0)   # 살아있는 실행
+        assert not zombie_experiment("RUNNING", False, 1, 0, 99.0)  # run 기록 있음
+        assert not zombie_experiment("RUNNING", False, 0, 1, 99.0)  # **판정 있음**
+        assert not zombie_experiment("COMPLETED", True, 1, 1, 99.0)
+        assert not zombie_experiment("FAILED", True, 1, 0, 99.0)    # 실패도 기록이다
+        print("  좀비 회수 != 재판정      OK")
+
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
+    _check_zombie_reclaim_never_touches_verdicts()
     _check_no_lookahead()
     _check_fifo_and_costs()
     _check_metrics_and_determinism()
     _check_cash_never_negative()
     _check_strategy_catalog()
-    print("Backtest Runner 5개 영역 통과. 실행은 --run")
+    _check_risk_knobs_off_change_nothing()
+    _check_drawdown_stop_actually_cuts_drawdown()
+    _check_risk_is_pit()
+    _check_pnl_concentration_is_measured()
+    print("Backtest Runner 10개 영역 통과. 실행은 --run")

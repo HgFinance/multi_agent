@@ -7,6 +7,7 @@
  */
 
 import { BFF } from "./ceoClient";
+import { withAccountHeaders } from "./currentAccount";
 
 export type RuntimeStatus =
   | "OFFLINE"
@@ -149,7 +150,7 @@ export async function fetchOperations(): Promise<OperationsView> {
   try {
     response = await fetch(`${BFF}/ui/snapshot`, {
       cache: "no-store",
-      headers: { Accept: "application/json" },
+      headers: withAccountHeaders({ Accept: "application/json" }),
     });
   } catch {
     throw new Error(`BFF(${BFF})에 연결하지 못했습니다. 저장소 루트에서 FastAPI BFF를 8001 포트로 실행하세요.`);

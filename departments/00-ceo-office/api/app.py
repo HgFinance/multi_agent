@@ -1057,6 +1057,29 @@ def create_mandate(body: CreateMandateRequest):
 
 @app.post("/governance/v1/mandates/{mandate_id}/versions")
 def propose_version(mandate_id: str, body: ProposeVersionRequest):
+    """Version을 만들고 그 자리에서 활성화까지 한다 - Risk/QA Case 없음.
+
+    2026-08-13(F01 방향 A): 이 저장 경로는 `change_workflow.py`의 HITL Case
+    승인을 거치지 않는다. 대신 화면에서 사용자가 직접 '지침 저장'을 눌러
+    이 요청을 보냈다는 사실 자체를 사용자 승인으로 본다 - `lifecycle.py`의
+    `activate()`가 요구하는 `UserApproval`을 매 호출마다 합성해서 넘긴다.
+
+    `created_by`가 필수인 이유: 이게 곧 `mandate_decisions.approved_by`가 된다.
+    없이 활성화하면 "누가 승인했는가"가 없는 감사 기록이 생긴다(개발 원칙 9 -
+    위험한 기능은 실패 시 확대가 아니라 차단 방향. 여기서는 활성화를 막는 게
+    안전 방향이다).
+
+    `activate()`는 `is_initial`이든 `direction=LOOSEN`이든 승인이 있으면 항상
+    활성화한다(`lifecycle.py` 참고) - 그래서 이 경로는 매 제출을 예외 없이
+    최신 활성 Version으로 만든다. `change_workflow.py`의 Risk/QA 검토 경로는
+    그대로 남아 있고, 이 Route가 대체하지 않는다.
+    """
+    if not body.created_by:
+        raise HTTPException(
+            status_code=422,
+            detail="created_by is required - it becomes the approver of record when this save activates the version",
+        )
+
     if body.fund_base_currency and isinstance(_mandate_repo, InMemoryMandateVersionRepository):
         _mandate_repo.set_fund_base_currency(mandate_id, body.fund_base_currency)
 
@@ -1085,10 +1108,38 @@ def propose_version(mandate_id: str, body: ProposeVersionRequest):
             "content_hash": result.row.content_hash,
         },
     )
+
+    activation: ActivationResult = activation_service.activate(
+        mandate_id=mandate_id,
+        version=result.row.version,
+        direction=result.direction,
+        at=body.effective_from,
+        approval=UserApproval(
+            approved_by=body.created_by,
+            trace_id=str(uuid.uuid4()),
+            reason="지침 저장 제출 - Risk/QA Case 없이 사용자 본인 제출을 승인으로 간주",
+        ),
+    )
+    if activation.activated:
+        _publish_governance_event(
+            event_type="governance.mandate.changed.v1",
+            trace_id=activation.decision.trace_id if activation.decision else str(uuid.uuid4()),
+            payload={
+                "fund_id": mandate_id,
+                "scope_key": f"mandate:{mandate_id}",
+                "action": "ACTIVATED",
+                "mandate_id": mandate_id,
+                "version": result.row.version,
+                "direction": result.direction.value,
+                "decided_by": activation.decision.approved_by if activation.decision else None,
+            },
+        )
+
     return {
         "mandate_id": mandate_id, "version": result.row.version,
         "direction": result.direction.value, "requires_user_reapproval": result.requires_user_reapproval,
         "content_hash": result.row.content_hash,
+        "activated": activation.activated,
     }
 
 
@@ -1840,40 +1891,69 @@ if __name__ == "__main__":
     # 1. 통화 seed 없이 제안 -> 404 FUND_NOT_FOUND (fail-closed).
     r1 = client.post("/governance/v1/mandates/m1/versions", json={
         "policy": _policy(), "objective_text": "장기 성장", "objective": {"style": "growth"},
-        "effective_from": now,
+        "effective_from": now, "created_by": "selfcheck-user",
     })
     assert r1.status_code == 404 and r1.json()["error_code"] == "FUND_NOT_FOUND", r1.text
 
-    # 2. fund_base_currency seed 후 제안 -> 200, v1, NEUTRAL(최초라 previous 없음).
-    r2 = client.post("/governance/v1/mandates/m1/versions", json={
+    # 1b. created_by 없이 제안 -> 422. 이게 곧 활성화 승인자가 되므로 없으면
+    #     "누가 승인했는가"가 빈 감사 기록이 생긴다(개발 원칙 9, 차단 방향).
+    r1b = client.post("/governance/v1/mandates/m1/versions", json={
         "policy": _policy(), "objective_text": "장기 성장", "objective": {"style": "growth"},
         "effective_from": now, "fund_base_currency": "KRW",
     })
+    assert r1b.status_code == 422, r1b.text
+
+    # 2. fund_base_currency seed 후 제안 -> 200, v1, NEUTRAL(최초라 previous 없음).
+    #    2026-08-13(F01 방향 A)부터 이 저장 경로는 Risk/QA Case 없이 그 자리에서 즉시
+    #    활성화한다 - "저장 버튼을 눌렀다"는 사실 자체를 사용자 승인으로 본다.
+    r2 = client.post("/governance/v1/mandates/m1/versions", json={
+        "policy": _policy(), "objective_text": "장기 성장", "objective": {"style": "growth"},
+        "effective_from": now, "fund_base_currency": "KRW", "created_by": "selfcheck-user",
+    })
     assert r2.status_code == 200, r2.text
     assert r2.json()["version"] == 1 and r2.json()["direction"] == "NEUTRAL"
+    assert r2.json()["activated"] is True, "저장 즉시 활성화되지 않았다(F01 방향 A 회귀)"
 
-    # 3. 최초 활성화는 승인 없이 차단.
-    r3 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
-        "direction": "NEUTRAL", "at": now,
+    # 3. 별도 활성화 Gate(POST .../versions/{version}/activate)는 그대로 살아 있다 -
+    #    change_workflow.py의 HITL Case 경로가 여전히 이걸 쓴다(Version 서비스를 직접
+    #    부르지 HTTP 저장 경로를 거치지 않는다). 그 경로를 흉내 내려면 여기서도
+    #    mandate_service.propose_version()을 직접 불러야 한다 - HTTP `/versions`는
+    #    이제 항상 자동 활성화하므로 "승인 없인 안 열린다"를 더는 재현하지 못한다.
+    direct = mandate_service.propose_version(
+        mandate_id="m1", policy=MandatePolicy(**_policy(risk={"max_gross_exposure": "2.0"})),
+        objective_text="장기 성장(확대)", objective={"style": "growth"},
+        effective_from=datetime.fromisoformat(now),
+        previous_policy=MandatePolicy(**_policy()),
+    )
+    assert direct.row.version == 2 and direct.direction.value == "LOOSEN"
+
+    # v1의 effective_to는 v2 활성화 시각이 된다 - v1.effective_from(now)보다 뒤여야
+    # 하므로(DDL·set_effective_to 둘 다 강제) 여기서만 뒤 시각을 쓴다.
+    later = "2026-08-02T00:00:01+00:00"
+    r3 = client.post("/governance/v1/mandates/m1/versions/2/activate", json={
+        "direction": "LOOSEN", "at": later,
     })
     assert r3.status_code == 200 and r3.json()["activated"] is False, r3.text
 
     # 4. 승인 주면 활성화 + get_mandate_current로 반영 확인(2026-08-06부터 policy 포함).
-    r4 = client.post("/governance/v1/mandates/m1/versions/1/activate", json={
-        "direction": "NEUTRAL", "at": now, "approval": {"approved_by": "u1", "trace_id": "t1"},
+    r4 = client.post("/governance/v1/mandates/m1/versions/2/activate", json={
+        "direction": "LOOSEN", "at": later, "approval": {"approved_by": "u1", "trace_id": "t1"},
     })
     assert r4.status_code == 200 and r4.json()["activated"] is True, r4.text
     r5 = client.get("/governance/v1/mandates/m1/current")
     body5 = r5.json()
     assert body5["mandate_id"] == "m1"
     assert body5["case_id"] is None
-    assert body5["current_version"] == 1
-    assert body5["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m1", 1)
-    assert body5["policy_hash"] == _mandate_repo.get_mandate_content_hash("m1", 1)
+    # v1은 저장 즉시 자동 활성화됐고(2번), v2는 방금 수동 승인으로 활성화됐다(4번) -
+    # v2가 최신이므로 current_version은 2다.
+    assert body5["current_version"] == 2
+    assert body5["mandate_version_id"] == _mandate_repo.get_mandate_version_id("m1", 2)
+    assert body5["policy_hash"] == _mandate_repo.get_mandate_content_hash("m1", 2)
     assert body5["status"] == "ACTIVE"
     assert body5["content_hash"] == body5["policy_hash"]
     assert body5["policy"]["risk_bounds"]["max_instrument_weight"] == "0.1"
-    assert body5["objective_text"] == "장기 성장"
+    assert body5["policy"]["risk_bounds"]["max_gross_exposure"] == "2.0"
+    assert body5["objective_text"] == "장기 성장(확대)"
     assert body5["policy"]["universe_policy"]["allowed_markets"] == ["KRX"]
     assert isinstance(body5["content_hash"], str) and len(body5["content_hash"]) == 64
 

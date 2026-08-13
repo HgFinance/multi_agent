@@ -11,6 +11,7 @@ Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Of
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -20,6 +21,9 @@ from fastapi import HTTPException
 GOVERNANCE_API_URL = os.getenv("GOVERNANCE_API_URL", "").rstrip("/")
 GOVERNANCE_API_AUTH_TOKEN = os.getenv("GOVERNANCE_API_AUTH_TOKEN", "").strip()
 GOVERNANCE_API_TIMEOUT_SECONDS = float(os.getenv("GOVERNANCE_API_TIMEOUT_SECONDS", "8"))
+# Uvicorn configures a handler for this logger, while arbitrary module loggers
+# are not emitted by the production container's default logging setup.
+_LOGGER = logging.getLogger("uvicorn.error")
 
 
 class GovernanceProxyError(HTTPException):
@@ -38,6 +42,87 @@ class GovernanceProxyError(HTTPException):
         self.payload = payload
 
 
+class GovernanceTransportError(HTTPException):
+    """Safe browser response for a BFF-to-Governance transport failure.
+
+    The original httpx exception stays in the BFF log only.  Browser clients
+    need an actionable, stable error code, but must not receive internal
+    service addresses or low-level network diagnostics.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        error_code: str,
+        message: str,
+        reason: str,
+        trace_id: str | None,
+    ) -> None:
+        payload = {
+            "error_code": error_code,
+            "message": message,
+            "detail": {"reason": reason},
+            "trace_id": trace_id,
+        }
+        super().__init__(status_code=status_code, detail=payload)
+        self.payload = payload
+
+
+def _request_trace_id(body: dict[str, object] | None) -> str | None:
+    """Return an existing client trace id without inventing a second one."""
+
+    if not body:
+        return None
+    trace_id = body.get("trace_id")
+    return trace_id.strip() if isinstance(trace_id, str) and trace_id.strip() else None
+
+
+def _transport_error(
+    *,
+    method: str,
+    path: str,
+    reason: str,
+    exc: httpx.RequestError | None,
+    trace_id: str | None,
+) -> GovernanceTransportError:
+    """Log the diagnostic detail and expose only a safe response payload."""
+
+    if reason == "timeout":
+        status_code = 504
+        error_code = "GOVERNANCE_API_TIMEOUT"
+        message = "거버넌스 서비스 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
+    elif reason == "connect_error":
+        status_code = 503
+        error_code = "GOVERNANCE_API_CONNECT_FAILED"
+        message = "거버넌스 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    elif reason == "not_configured":
+        status_code = 503
+        error_code = "GOVERNANCE_API_NOT_CONFIGURED"
+        message = "거버넌스 서비스 연결 설정이 준비되지 않았습니다. 관리자에게 문의해 주세요."
+    else:
+        status_code = 503
+        error_code = "GOVERNANCE_API_TRANSPORT_ERROR"
+        message = "거버넌스 서비스와 통신 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
+    _LOGGER.warning(
+        "governance transport failure method=%s path=%s reason=%s trace_id=%s exception_type=%s",
+        method,
+        path,
+        reason,
+        trace_id,
+        type(exc).__name__ if exc is not None else None,
+        exc_info=exc is not None,
+    )
+    return GovernanceTransportError(
+        status_code=status_code,
+        error_code=error_code,
+        message=message,
+        reason=reason,
+        trace_id=trace_id,
+    )
+
+
 async def governance_request(
     method: str,
     path: str,
@@ -45,8 +130,15 @@ async def governance_request(
     params: dict[str, str] | None = None,
     body: dict[str, object] | None = None,
 ) -> object:
+    trace_id = _request_trace_id(body)
     if not GOVERNANCE_API_URL:
-        raise HTTPException(status_code=503, detail="governance_api_unavailable")
+        raise _transport_error(
+            method=method,
+            path=path,
+            reason="not_configured",
+            exc=None,
+            trace_id=trace_id,
+        )
     headers = (
         {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
         if GOVERNANCE_API_AUTH_TOKEN
@@ -64,8 +156,30 @@ async def governance_request(
                 json=body,
                 headers=headers,
             )
+    except httpx.TimeoutException as exc:
+        raise _transport_error(
+            method=method,
+            path=path,
+            reason="timeout",
+            exc=exc,
+            trace_id=trace_id,
+        ) from exc
+    except httpx.ConnectError as exc:
+        raise _transport_error(
+            method=method,
+            path=path,
+            reason="connect_error",
+            exc=exc,
+            trace_id=trace_id,
+        ) from exc
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail="governance_api_unavailable") from exc
+        raise _transport_error(
+            method=method,
+            path=path,
+            reason="transport_error",
+            exc=exc,
+            trace_id=trace_id,
+        ) from exc
 
     payload: object
     try:

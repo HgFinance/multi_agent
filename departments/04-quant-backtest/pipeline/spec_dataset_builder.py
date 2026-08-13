@@ -188,7 +188,17 @@ insert into quant.dataset_manifests
    row_count, schema_definition)
 values (%s,%s, now(), %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
         %s, %s, %s, %s::jsonb)
-on conflict (content_hash) do update set quality_summary = excluded.quality_summary
+-- ▶ **레이아웃도 갱신한다** (2026-08-12)
+--   예전에는 `quality_summary` 만 갱신했다. 그런데 같은 내용을 **다른 파티션
+--   입도**로 다시 굳히면(월→일) 내용 해시는 같고 레이아웃만 바뀐다. 그때
+--   `partitions` 가 옛 월별 키로 남아 매니페스트와 `dataset_partitions` 표가
+--   서로 다른 말을 했다(실측: 매니페스트는 월 4개, 표는 63행).
+on conflict (content_hash) do update set
+  quality_summary = excluded.quality_summary,
+  partitions      = excluded.partitions,
+  row_count       = excluded.row_count,
+  object_path     = excluded.object_path,
+  version         = excluded.version
 returning dataset_id
 """
 
@@ -303,6 +313,14 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
                 whole, len(rows),
                 json.dumps({"columns": list(spec.columns)})))
             dsid = cur.fetchone()[0]
+            # ▶ **옛 파티션 행을 지우고 다시 넣는다** (2026-08-12)
+            #   입도가 바뀌면 옛 키(월)와 새 키(일)가 **함께 남는다.** 실측에서
+            #   59+4=63행이 됐고, `load_dataset` 은 이 표를 읽으므로 같은 데이터를
+            #   두 번 로드해 전체 해시 불일치로 죽는다. 등재된 레이아웃은
+            #   **이번 빌드가 만든 것 하나**여야 한다.
+            cur.execute("delete from quant.dataset_partitions "
+                        "where dataset_id = %s and partition_key <> all(%s)",
+                        (dsid, [p["partition_key"] for p in parts]))
             for p in parts:
                 cur.execute(_SQL_PART, (
                     dsid, p["partition_key"], p["object_path"], p["row_count"],

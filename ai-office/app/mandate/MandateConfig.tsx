@@ -1,13 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MINDSET_BY_RISK_PROFILE, MandateSubmissionError, submitMandateDraft } from "../lib/mandateClient";
+import { sliderDefaultsFor } from "../lib/mandatePresets";
 
 /**
  * 운용 지침 설정 화면.
  *
- * 이 화면은 초안을 만들 뿐 주문·원장·한도를 확정하지 않는다. 제출은 Risk/QA
- * Gate로 넘기는 행위이고, 그 경로(FastAPI BFF)는 아직 연결돼 있지 않다.
- * 그래서 하단에 연결 대기 상태를 그대로 띄우고, 임시 저장은 브라우저 안에서만 한다.
+ * 제출("지침 제출 및 검토")은 `../lib/mandateClient.ts`를 거쳐
+ * `POST /ui/mandates`(최초 1회, 없을 때만) + `POST /ui/mandates/{id}/versions`
+ * (항상)로 BFF에 전달된다. 이 화면은 정책 version을 저장할 뿐, 주문·원장·한도나
+ * Risk/QA 승인 흐름을 시작하지 않는다.
+ *
+ * "임시 저장"은 여전히 브라우저(localStorage)에만 남는다 - 완성 전 초안까지
+ * Mandate Version으로 만들면 `content_hash` 중복·승인 흐름이 매번 발동한다
+ * (USER_INPUT_API_SPEC §2.4와 같은 이유).
  */
 
 export type RiskProfile = "conservative" | "neutral" | "aggressive";
@@ -21,6 +28,14 @@ export interface MandateDraft {
   currency: string;
   maxSingleWeightPct: number;
   grossExposurePct: number;
+  /**
+   * 2026-08-12 추가. `governance.mandate_versions.risk_bounds.max_drawdown_pct`의
+   * 필수값이라, 슬라이더가 없으면 제출 자체가 서버에서 422로 거부된다
+   * (USER_INPUT_SPEC.md §2 6번 "전체 최대 손실" — 프리셋이 아니라 직접 선택 항목).
+   */
+  maxDrawdownPct: number;
+  /** 위와 같은 이유. §2 7번 "일일 최대 손실". `<= maxDrawdownPct`여야 한다. */
+  maxDailyLossPct: number;
   allowedAssets: Record<AssetClassId, boolean>;
   approvalMode: ApprovalMode;
 }
@@ -46,13 +61,22 @@ const APPROVAL_MODES: { id: ApprovalMode; icon: string; label: string; note: str
   { id: "manual", icon: "pan_tool", label: "Manual Approval Required", note: "모든 제안된 주문은 실행 전 관리자의 승인이 필요합니다." },
 ];
 
+// 초기 화면도 "conservative를 골랐을 때"와 같은 값이어야 한다 - 페이지를 막
+// 열었을 때 보이는 슬라이더가 이미 선택된 성향(conservative)의 기본값과
+// 다르면, 이 작업이 고치려는 "성향 선택 시 기본값이 바뀐다"는 기대와 첫
+// 화면부터 어긋난다. `sliderDefaultsFor`를 그대로 불러서 값을 중복해서
+// 적지 않는다.
+const INITIAL_SLIDER_DEFAULTS = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE.conservative, "INTERMEDIATE");
+
 const DEFAULT_DRAFT: MandateDraft = {
   objective: "",
   riskProfile: "conservative",
   baseCapital: 100_000_000,
   currency: "USD",
-  maxSingleWeightPct: 30,
-  grossExposurePct: 200,
+  maxSingleWeightPct: INITIAL_SLIDER_DEFAULTS.maxSingleWeightPct,
+  grossExposurePct: INITIAL_SLIDER_DEFAULTS.grossExposurePct,
+  maxDrawdownPct: INITIAL_SLIDER_DEFAULTS.maxDrawdownPct,
+  maxDailyLossPct: INITIAL_SLIDER_DEFAULTS.maxDailyLossPct,
   // 기본은 현물 Long-only. 레버리지·파생·가상자산은 정책 계층에서 꺼둔 상태로 시작한다.
   allowedAssets: { equity: true, etf: true, leverage: false, futures: false, options: false, derivatives: false, crypto: false },
   approvalMode: "manual",
@@ -83,6 +107,36 @@ function SectionHeading({ index, title, suffix }: { index: number; title: string
   );
 }
 
+/**
+ * 제목 옆 ⓘ 아이콘. 마우스오버·키보드 포커스 둘 다에서 뜬다(`group-hover`
+ * 만 쓰면 마우스로만 접근 가능해진다 - 아이콘에 `tabIndex`를 주고
+ * `group-focus-within`도 같이 걸어 탭 이동으로도 확인할 수 있게 했다).
+ *
+ * 기존 드롭다운(TopNav 계정 전환)과 같은 카드 스타일
+ * (surface-container-lowest/border-outline-variant/shadow-sm)을 그대로 쓴다 -
+ * 이 앱에 팝오버 컴포넌트가 따로 없어서 이미 검증된 조합을 재사용했다.
+ */
+function InfoTooltip({ text }: { text: string }) {
+  return (
+    <span className="relative inline-flex group">
+      <span
+        tabIndex={0}
+        role="note"
+        aria-label={text}
+        className="material-symbols-outlined text-[14px] text-outline cursor-help outline-none focus-visible:ring-1 focus-visible:ring-primary rounded-full"
+      >
+        info
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block group-focus-within:block w-64 p-2.5 text-[11px] font-normal normal-case leading-relaxed text-on-surface bg-surface-container-lowest border border-outline-variant rounded-lg shadow-sm z-10"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: string }) {
   return (
     <span className="block text-label-md font-label-md text-secondary mb-2 uppercase">
@@ -98,10 +152,38 @@ export default function MandateConfig() {
   const [reply, setReply] = useState("");
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const patch = useCallback(<K extends keyof MandateDraft>(key: K, value: MandateDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  /**
+   * 위험 성향을 고르면 슬라이더 4개가 그 등급의 잠정 기본값으로 바뀐다.
+   * `riskProfile`과 슬라이더 값을 `setDraft` 한 번으로 같이 갱신하는 이유:
+   * 따로따로 `patch`를 두 번 부르면 그 사이 렌더에서 잠깐 "성향은 바뀌었는데
+   * 슬라이더는 옛값"인 상태가 생긴다.
+   *
+   * `sliderDefaultsFor`가 등급을 낼 때 이 화면이 안 묻는 투자 경험을
+   * `mandateClient.ts`와 같은 자리표시자(INTERMEDIATE)로 고정한다 - 그래야
+   * 여기서 보여주는 기본값과 실제 제출 시 서버로 가는 숨김 필드가 같은
+   * 등급을 가리킨다(다르면 전에 겪은 슬라이더-프리셋 어긋남과 같은 문제가
+   * 다시 생긴다).
+   *
+   * 이건 **제안 기본값일 뿐**이다 - 고른 뒤에도 슬라이더는 그대로 움직일 수
+   * 있고, 실제 제출값은 그 시점의 슬라이더 값이다.
+   */
+  const selectRiskProfile = useCallback((profile: RiskProfile) => {
+    const defaults = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE[profile], "INTERMEDIATE");
+    setDraft((current) => ({
+      ...current,
+      riskProfile: profile,
+      maxSingleWeightPct: defaults.maxSingleWeightPct,
+      grossExposurePct: defaults.grossExposurePct,
+      maxDrawdownPct: defaults.maxDrawdownPct,
+      maxDailyLossPct: defaults.maxDailyLossPct,
+    }));
   }, []);
 
   useEffect(() => {
@@ -110,7 +192,8 @@ export default function MandateConfig() {
 
   useEffect(() => {
     if (!notice) return undefined;
-    const timer = window.setTimeout(() => setNotice(""), 4000);
+    // Case id·검토 상태처럼 읽는 데 시간이 걸리는 문구가 생겨 4초에서 늘렸다.
+    const timer = window.setTimeout(() => setNotice(""), 8000);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
@@ -146,8 +229,27 @@ export default function MandateConfig() {
     setNotice("브라우저에 임시 저장했습니다. 서버(BFF)에는 아직 전송되지 않았습니다.");
   }
 
-  function submit() {
-    setNotice("제출은 Risk/QA Gate를 거쳐야 합니다. BFF(FastAPI 8001)가 연결되면 활성화됩니다.");
+  async function submit() {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      // USER_INPUT_SPEC.md §5: objective_text는 DB not null이라 사용자가
+      // 아무것도 안 쓰면 선택 결과에서 자동 생성한다. 자연어는 판정에 쓰지
+      // 않는다 - 저장·맥락 전달용일 뿐이다.
+      const fallbackObjective = `${RISK_PROFILES.find((p) => p.id === draft.riskProfile)?.label ?? "균형"} 성향 · 지침`;
+      const objectiveText = draft.objective.trim() || fallbackObjective;
+
+      const result = await submitMandateDraft(draft, objectiveText);
+      setNotice(`v${result.version}이 DB에 저장됐습니다.`);
+    } catch (error) {
+      setNotice(
+        error instanceof MandateSubmissionError
+          ? error.message
+          : "지침 제출 중 알 수 없는 오류가 발생했습니다.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -206,7 +308,7 @@ export default function MandateConfig() {
                           type="button"
                           role="radio"
                           aria-checked={on}
-                          onClick={() => patch("riskProfile", item.id)}
+                          onClick={() => selectRiskProfile(item.id)}
                           className={`h-full border rounded-lg p-4 flex flex-col items-center justify-center text-center transition-colors ${
                             on ? "border-primary bg-secondary-container shadow-sm" : "border-outline-variant hover:bg-surface-container"
                           }`}
@@ -270,11 +372,14 @@ export default function MandateConfig() {
             {/* 3. 비중과 익스포저 한도 */}
             <section>
               <SectionHeading index={3} title="비중, 익스포저 한도" />
-              <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6">
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase">단일 종목 최대 비중</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-weight" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      한 종목 최대 투자 비율
+                      <InfoTooltip text="특정 주식 하나에 최대로 투자할 수 있는 자산 비율입니다." />
+                    </label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.maxSingleWeightPct}%
                     </span>
                   </div>
@@ -294,9 +399,12 @@ export default function MandateConfig() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between mb-2">
-                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase">총 익스포저 한도 (실제로 손실을 볼 수 있는 최대 위험 금액)</label>
-                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded">
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="gross-exposure" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      최대 위험 노출액
+                      <InfoTooltip text="레버리지를 포함해 실제로 보유할 수 있는 포지션의 상한입니다. 100%는 원금만큼만, 300%는 대출을 더해 원금의 3배까지 보유한다는 뜻이며, 레버리지 특성상 100%를 넘는 값도 설정할 수 있습니다." />
+                    </label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
                       {draft.grossExposurePct}%
                     </span>
                   </div>
@@ -304,15 +412,69 @@ export default function MandateConfig() {
                     id="gross-exposure"
                     type="range"
                     min={100}
-                    max={500}
+                    max={300}
                     value={draft.grossExposurePct}
                     onChange={(event) => patch("grossExposurePct", Number(event.target.value))}
                     className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
                   />
                   <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
                     <span>100%</span>
+                    <span>200%</span>
                     <span>300%</span>
-                    <span>500%</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-drawdown" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      전체 최대 손실 한도
+                      <InfoTooltip text="포지션 크기와 관계없이, 원금 대비 감내 가능한 최대 손실 비율입니다. 손실 한도이므로 100%를 넘는 값은 설정할 수 없습니다." />
+                    </label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
+                      {draft.maxDrawdownPct}%
+                    </span>
+                  </div>
+                  <input
+                    id="max-drawdown"
+                    type="range"
+                    min={5}
+                    max={50}
+                    value={draft.maxDrawdownPct}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      patch("maxDrawdownPct", next);
+                      // daily <= drawdown 제약. 슬라이더 두 개가 서로 어긋나게 두지 않는다.
+                      if (draft.maxDailyLossPct > next) patch("maxDailyLossPct", next);
+                    }}
+                    className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
+                    <span>5%</span>
+                    <span>25%</span>
+                    <span>50%</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-2 gap-2">
+                    <label htmlFor="max-daily-loss" className="text-label-md font-label-md text-secondary uppercase flex items-center gap-1">
+                      일일 최대 손실 한도
+                      <InfoTooltip text="하루 동안 발생할 수 있는 손실의 최대 제한 금액입니다." />
+                    </label>
+                    <span className="text-data-mono font-data-mono font-bold bg-surface-container-high px-2 py-0.5 rounded shrink-0">
+                      {draft.maxDailyLossPct}%
+                    </span>
+                  </div>
+                  <input
+                    id="max-daily-loss"
+                    type="range"
+                    min={1}
+                    max={draft.maxDrawdownPct}
+                    value={draft.maxDailyLossPct}
+                    onChange={(event) => patch("maxDailyLossPct", Number(event.target.value))}
+                    className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
+                  />
+                  <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
+                    <span>1%</span>
+                    <span>전체 최대 손실({draft.maxDrawdownPct}%) 이하</span>
                   </div>
                 </div>
               </div>
@@ -383,9 +545,9 @@ export default function MandateConfig() {
           </div>
 
           <footer className="border-t border-outline-variant p-4 bg-surface-bright flex justify-between items-center gap-4 flex-wrap mt-auto">
-            <div className="text-xs text-error flex items-center gap-1 font-medium">
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">warning</span>
-              BFF connection pending. Save route via FastAPI BFF 8001.
+            <div className="text-xs text-on-surface-variant flex items-center gap-1 font-medium">
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">info</span>
+              제출하면 새 지침 version만 저장됩니다. 활성화·주문·원장 변경은 수행하지 않습니다.
             </div>
             <div className="flex gap-3">
               <button
@@ -398,9 +560,10 @@ export default function MandateConfig() {
               <button
                 type="button"
                 onClick={submit}
-                className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm"
+                disabled={submitting}
+                className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                지침 제출 및 검토
+                {submitting ? "저장 중..." : "지침 저장"}
               </button>
             </div>
             {notice ? (
@@ -411,7 +574,14 @@ export default function MandateConfig() {
         </div>
 
         {/* ── 우: AI 어시스턴트 ────────────────────────────── */}
-        <div className="w-full md:w-[380px] shrink-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+        {/*
+          2026-08-13: 채팅 내부(max-h-[28rem])를 잡아도 이 카드 자체엔 상한이
+          없어서, 헤더+상태바+채팅+입력창을 합친 실제 높이만큼은 여전히 자란다.
+          이 카드를 감싸는 상위(main)가 페이지 전체 스크롤이라 카드가 길어지면
+          왼쪽 폼 패널과 높이가 어긋나 보인다. max-h를 여기도 박아 카드 전체
+          높이를 고정하고, 내부 채팅 영역만 스크롤되게 한다.
+        */}
+        <div className="w-full md:w-[380px] shrink-0 max-h-[42rem] bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
           <header className="bg-primary text-on-primary p-4 flex justify-between items-center">
             <div className="flex items-center gap-2">
               <span className="material-symbols-outlined text-[20px]" aria-hidden="true">robot_2</span>
@@ -437,7 +607,15 @@ export default function MandateConfig() {
             <span className="text-[10px] font-bold border border-outline px-2 py-0.5 rounded text-secondary uppercase">Online</span>
           </div>
 
-          <div className="flex-1 min-h-60 p-4 overflow-y-auto flex flex-col gap-4 bg-background" aria-live="polite" aria-label="Mandate 인터뷰 대화">
+          {/*
+            2026-08-13: `flex-1`만으로는 안 잡힌다 - 부모(`main`)가 페이지
+            전체를 overflow-y-auto로 스크롤하고, 이 카드는 md:flex-row 안에서
+            높이가 콘텐츠만큼 자라는 구조라 이 요소를 제약하는 상위 높이가
+            없었다. 그래서 대화가 길어질수록 채팅창 자체가 페이지처럼
+            무한히 길어졌다. max-h를 직접 박아 상위 flex 체인과 무관하게
+            항상 이 안에서만 스크롤되게 한다.
+          */}
+          <div className="flex-1 min-h-60 max-h-[28rem] p-4 overflow-y-auto flex flex-col gap-4 bg-background" aria-live="polite" aria-label="Mandate 인터뷰 대화">
             {messages.map((message, index) => (
               <div
                 key={`${message.from}-${index}`}

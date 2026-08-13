@@ -32,6 +32,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Research's shared source_registry lives in the canonical /app/repo mirror in
+# production; the old parents[2]/01-research path only works in a different
+# checkout layout. Keep both layouts deterministic so the execution surface can
+# actually reach the source contract before attempting the experiment.
+for _research_collectors in (
+    Path("/app/repo/departments/01-research/collectors"),
+    Path(__file__).resolve().parents[2] / "01-research" / "collectors",
+):
+    if _research_collectors.is_dir():
+        sys.path.insert(0, str(_research_collectors))
 
 ORCH_VERSION = "quant-experiment-orchestrator-v1"
 
@@ -86,6 +96,7 @@ class OrchestratorReport:
     # 2026-08-10: 리서치 환류. **비어 있으면 루프가 안 닫힌 것**이다 -
     # 종결됐는데 이 값이 없으면 그 교훈은 다음 기획안에 닿지 못한다.
     feedback: dict = field(default_factory=dict)
+    regime_evidence: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +261,69 @@ _OOS_KEYS = ("excess_return_pct", "information_ratio", "max_drawdown_pct",
              "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high")
 
 
+def _gate_note(decision, metrics: dict) -> str:
+    """관문 판정 -> 다음 기획안이 읽을 한 줄. **거리를 적는다.**
+
+    ▶ 왜 "REJECTED" 만으로는 부족한가 (2026-08-12)
+      momentum 이 초과 +157.51%p · IR 1.26 · DSR 0.976 을 내고 기각됐다.
+      환류에 남은 건 `fragility_fragile` 뿐이라, 리서치는 **엣지가 없었다**고
+      읽고 다른 엣지를 설계했다. 실제로는 엣지가 있었고 낙폭이 문제였다.
+      "6개 통과, MDD 하나 남음" 과 "기각" 은 다음 설계를 완전히 다르게 만든다.
+    """
+    from release_gate import CRITERIA
+
+    passed = list(getattr(decision, "passed", ()) or ())
+    failed = list(getattr(decision, "failed", ()) or ())
+    total = len(passed) + len(failed)
+    if not total:
+        return ""
+
+    # 조항별 거리. 미확인은 거리가 아니라 **측정 부재**로 적는다 - 둘을 섞으면
+    # "조금 모자랐다" 와 "재보지도 않았다" 가 같은 문장이 된다.
+    gaps: list[str] = []
+    _spec = (
+        ("excess_return", "excess_return_pct", "min_excess_return_pct", "%p", 1),
+        ("information_ratio", "information_ratio", "min_information_ratio", "", 1),
+        ("max_drawdown", "max_drawdown_pct", "max_drawdown_pct", "%", -1),
+        ("turnover", "turnover", "max_turnover", "x", -1),
+        ("deflated_sharpe", "deflated_sharpe", "min_deflated_sharpe", "", 1),
+        ("pbo", "pbo", "max_pbo", "", -1),
+    )
+    for name, mkey, ckey, unit, sign in _spec:
+        if name not in failed:
+            continue
+        v = metrics.get(mkey)
+        if v is None:
+            # ▶ **못 재는 이유가 곧 다음 할 일이다.** PBO 는 계열에 변형이
+            #   둘 이상이어야 정의된다("IS 1등이 OOS 에서도 1등인가" 이므로
+            #   고를 것이 하나면 물음 자체가 성립하지 않는다). 같은 계열의
+            #   두 번째 변형을 돌리면 그때 잰다 - 위험관리를 붙인 변형이
+            #   낙폭과 PBO 를 **한 번에** 푼다.
+            gaps.append("pbo 미측정 (계열 변형 1개 - 같은 계열 두 번째 변형이 "
+                        "돌면 잰다)" if name == "pbo" else f"{name} 미측정")
+            continue
+        lim = CRITERIA[ckey]
+        gaps.append(f"{name} {v:.2f}{unit} (기준 {lim}{unit}, "
+                    f"{abs(v - lim):.2f}{unit} 모자람)")
+    for name in ("fragility", "bootstrap_ci", "trial_pressure"):
+        if name in failed:
+            if name == "bootstrap_ci":
+                lo = metrics.get("bootstrap_ci_low")
+                gaps.append(f"bootstrap_ci 하한 {lo}" if lo is not None
+                            else "bootstrap_ci 미측정")
+            else:
+                gaps.append(name)
+
+    head = f"관문 {len(passed)}/{total} 통과"
+    if not failed:
+        return head + " - 남은 조항 없음"
+    return f"{head}. 남은 조항: " + "; ".join(gaps[:6])
+
+
 def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
                             experiment_id, failed_criteria=None,
                             lesson_codes=None, fragility: str = "",
+                            gate_failed=None, regime_evidence=None,
                             notes: str = "") -> None:
     """상태 전이를 **환류와 함께** 커밋한다.
 
@@ -276,6 +347,18 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
         # (metric, value) 2-튜플이 아닌 행은 지표 행이 아니다 - 조용히 건너뛴다
         found = {r[0]: float(r[1]) for r in (cur.fetchall() or [])
                  if isinstance(r, (list, tuple)) and len(r) == 2}
+        # ▶ 저장 이름과 관문 어휘를 여기서도 맞춘다 (2026-08-12).
+        #   `max_drawdown_pct` 는 저장된 적이 없는 이름이라 **환류 요약에서
+        #   낙폭이 통째로 빠져 있었다** - 관문과 똑같은 결함이 두 번째 자리에
+        #   있었다. 사상표는 관문이 소유하고 여기는 빌려 쓴다.
+        try:
+            from release_gate import STORED_ALIASES
+
+            for want, (stored, scale) in STORED_ALIASES.items():
+                if want not in found and stored in found:
+                    found[want] = found[stored] * scale
+        except Exception:  # noqa: BLE001  - 관문을 못 불러도 환류는 적재한다
+            pass
         oos = {k: found[k] for k in _OOS_KEYS if k in found}
         # 카드와 이름을 맞춘다 - 두 곳이 다른 이름을 쓰면 대조가 안 된다
         for src, dst in (("bootstrap_ci_low", "ci_low"),
@@ -286,9 +369,17 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
     failed = list(failed_criteria or [])
     if not failed and new_status == "REJECTED" and fragility:
         failed = [f"fragility_{str(fragility).lower()}"]
+    # ▶ 관문이 막은 조항을 **합친다**(덮지 않는다). `lessons_from` 은 이미
+    #   조항 이름을 교훈 어휘로 사상한다 - drawdown->BEAR_FRAGILE,
+    #   turnover->COST_SENSITIVE. 설계는 처음부터 이걸 기대하고 있었는데
+    #   관문이 안 돌아서 재료가 온 적이 없었다.
+    for g in (gate_failed or ()):
+        if g not in failed:
+            failed.append(str(g))
     lessons = list(lesson_codes or []) or lessons_from(
         failed_criteria=failed,
-        regime_concerns=report.notes if hasattr(report, "notes") else (),
+        regime_concerns=regime_evidence if regime_evidence is not None else
+                        getattr(report, "regime_evidence", ()),
         fragility=fragility)
     decision = _STATUS_TO_DECISION.get(new_status, "GATE_HOLD")
 
@@ -506,6 +597,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
         chain = run_chain or _default_chain
         result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
+        report.regime_evidence = list(result.get("regime_evidence") or ())
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
         # ▶ 이 실험의 Family 배정을 남긴다. **한쪽만 쓰지 않는다** - Family 가
@@ -595,43 +687,79 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                           report.trial_pressure)
         # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
         #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
+        # ▶ QNT-07 릴리스 관문. **환류보다 먼저 돌린다** - 판정을 환류에 실어야
+        #   다음 기획안이 "어느 조항에서 몇 만큼 모자랐는지" 를 읽는다.
+        #   **승격이 아니라 제출 판정이다** - Production 은 CEO·Risk·QA 몫이다.
+        #
+        # ▶ 왜 REJECTED 에도 돌리나 (2026-08-12)
+        #   예전엔 SUPPORTED 일 때만 돌렸다. 그런데 SUPPORTED 가 한 번도 없어서
+        #   관문 336줄이 **한 번도 실행된 적이 없었다.** 그 사이 momentum 은
+        #   초과 +157.51%p · IR 1.26 · DSR 0.976 을 내고도 "REJECTED" 한 줄만
+        #   남겼다 - 어느 조항이 막았는지 아무도 몰랐고, 리서치는 같은 자리에서
+        #   죽을 새 엣지를 계속 설계했다. 관문은 순수 함수다. 늘 돌려서
+        #   **거리를 알려주는 편이 옳다.** 제출은 여전히 SUPPORTED 만 한다.
+        gate_failed: list[str] = []
+        gate_note = ""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from release_gate import SQL_GATE_METRICS, metrics_from_rows
+            from release_gate import evaluate as gate_evaluate
+
+            cur.execute(SQL_GATE_METRICS, (result.get("experiment_id"),))
+            # 이름·단위·split 사상은 **관문이 소유한다** - 읽는 곳마다 각자
+            # 맞추면 한 곳을 고쳐도 다른 곳이 계속 눈을 감는다(실제로 그랬다).
+            metrics = metrics_from_rows(cur.fetchall())
+            d = gate_evaluate(metrics, fragility=result.get("fragility", ""),
+                              trial_pressure=report.trial_pressure)
+            report.release = d.as_dict()
+            # ▶ **못 잰 조항은 교훈 재료가 아니다.** `lessons_from` 은 조항
+            #   이름만 보고 사상하므로, PBO 미측정이 그대로 들어가면 환류에
+            #   "과적합됐다(OVERFIT_PBO)" 는 **없는 사실**이 적힌다. 차단은
+            #   그대로 하되(관문 판정은 HOLD), 교훈은 잰 것으로만 만든다.
+            _unmeasured = set(d.unmeasured or ())
+            gate_failed = [str(x) for x in (d.failed or []) if x not in _unmeasured]
+            gate_note = _gate_note(d, metrics)
+            # ▶ **자기반증 결과를 환류에 같이 싣는다.** 관문은 우리가 정한
+            #   기준이고 반증은 그 가설이 스스로 건 조건이다 - 후자를 견딘
+            #   것이 훨씬 강한 증거이므로 다음 기획안이 반드시 봐야 한다.
+            try:
+                import falsification as _fx  # noqa: PLC0415
+
+                _fr = [_fx.TestResult(**r) for r in (result.get("falsification") or [])]
+                _n = _fx.note(_fr)
+                if _n:
+                    gate_note = (gate_note + " || " + _n) if gate_note else _n
+                report.release["falsification"] = _fx.summarize(_fr)
+            except Exception:  # noqa: BLE001 - 못 실으면 안 싣는다
+                pass
+        except Exception as e:  # noqa: BLE001
+            # 관문 실패를 통과로 위장하지 않는다 - HOLD 가 안전한 기본값이다
+            report.release = {"decision": "HOLD",
+                              "reasons": [f"관문 실행 실패: {type(e).__name__}: {e}"]}
+
+        # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
+        #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
         _finalize_with_feedback(
             conn, report=report, hid=hid, new_status=new_status,
             experiment_id=result.get("experiment_id"),
-            fragility=result.get("fragility", ""))
+            fragility=result.get("fragility", ""),
+            gate_failed=gate_failed, regime_evidence=report.regime_evidence,
+            notes=gate_note)
         report.transitions.append(f"RUNNING->{new_status}")
 
-        # ▶ QNT-07 릴리스 관문. SUPPORTED 까지 온 것만 본다.
-        #   **승격이 아니라 제출 판정이다** - Production 은 CEO·Risk·QA 몫이다.
-        if new_status == "SUPPORTED":
+        # ▶ 관문 다음 칸. **승격이 아니라 요청이다** - 좋은 백테스트가 바로
+        #   운영 전략이 되지 않게 Shadow 부터 밟는다. 여기만 SUPPORTED 전용이다.
+        if new_status == "SUPPORTED" and report.release.get("decision"):
             try:
-                sys.path.insert(0, str(Path(__file__).resolve().parent))
-                from release_gate import evaluate as gate_evaluate
-
-                cur.execute(
-                    """select metric, value from quant.experiment_metrics
-                       where experiment_id = %s""",
-                    (result.get("experiment_id"),))
-                metrics = {m: float(v) for m, v in cur.fetchall()}
-                # walk_forward 가 쓰는 이름과 맞춘다
-                metrics.setdefault("max_drawdown_pct", metrics.get("mdd_pct"))
-                d = gate_evaluate(metrics, fragility=result["fragility"],
-                                  trial_pressure=report.trial_pressure)
-                report.release = d.as_dict()
-
-                # ▶ 관문 다음 칸. **승격이 아니라 요청이다** - 좋은 백테스트가
-                #   바로 운영 전략이 되지 않게 Shadow 부터 밟는다.
                 from strategy_lifecycle import evaluate_promotion
 
                 lc = evaluate_promotion(
                     str(hyp.get("title") or hid)[:40],
                     current_state="RESEARCH",
-                    gate_decision=d.decision)
+                    gate_decision=str(report.release.get("decision")))
                 report.lifecycle = lc.as_dict()
             except Exception as e:  # noqa: BLE001
-                # 관문 실패를 통과로 위장하지 않는다 - HOLD 가 안전한 기본값이다
-                report.release = {"decision": "HOLD",
-                                  "reasons": [f"관문 실행 실패: {type(e).__name__}"]}
+                report.lifecycle = {"error": f"생명주기 판정 실패: {type(e).__name__}"}
         return report
     finally:
         # **우리가 연 것만 닫는다.** 주입받은 연결을 닫으면 호출부의 다음 작업이
@@ -655,8 +783,10 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         DEFAULT_CONFIG,
         REV_CONFIG,
         Market,
+        buy_and_hold_equity,
         load_dataset,
         register_and_run,
+        run_backtest,
     )
     from source_registry import load_project_env
     from walk_forward import (
@@ -757,8 +887,94 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     finally:
         conn.close()
 
+    # ▶ **신호 자체를 잰다** (2026-08-12) - 포트폴리오와 분리해서.
+    #   백테스트는 신호 품질과 구성 방식을 섞는다. IC 는 전 종목 횡단면으로
+    #   신호만 본다. 실측: breakout 이 IC +0.0372(t +2.36, 적중 60.2%)로
+    #   신호는 살아 있는데 백테스트 초과는 -168.77%p 였다 - **구성이 죽였다.**
+    #   그리고 `low_volatility` 는 백테스트 초과 +855.92%p 인데 IC t -7.09 다
+    #   (액면분할 미조정 한 종목이 만든 수익 - 순위상관은 안 속았다).
+    #   2~8초면 끝나므로 매 실험에 붙인다.
+    try:
+        import signal_ic as _ic  # noqa: PLC0415
+
+        _res = _ic.summarize(_ic.ic_series(
+            market, dict(config), horizon=int(config.get("lookback_days") or 20)))
+        if _res.mean_ic is not None:
+            print(f"  신호 {_ic.render(_res)}", flush=True)
+            # ▶ **자기 연결로 쓴다** (2026-08-13 실측). 여기서 `conn` 을 재사용
+            #   했더니 앞 구간(강건성)이 이미 닫은 연결이라 매 실험
+            #   `InterfaceError: connection already closed` 로 죽었다 - IC 는
+            #   로그에만 찍히고 원장에는 0건이었다. **측정은 되는데 저장이
+            #   죽어 있으면 그 측정은 없는 것과 같다** - IC 사전검정을 탐색층
+            #   관문으로 승격할지 판정하는 자격 검사(IC↔판정 순위상관)가
+            #   짝 0건으로 영영 미측정에 머문다. 짧은 단문 트랜잭션이라
+            #   세션풀 부담도 없다.
+            _c2 = psycopg2.connect(load_project_env()["DATABASE_URL"],
+                                   connect_timeout=20)
+            try:
+                with _c2.cursor() as cur:
+                    for name, val in (("signal_ic", _res.mean_ic),
+                                      ("signal_ic_t", _res.t_stat),
+                                      ("signal_ic_hit_rate", _res.hit_rate),
+                                      ("signal_ic_periods", _res.periods),
+                                      ("signal_ic_breadth", _res.median_breadth)):
+                        if val is None:
+                            continue        # 못 잰 것은 안 적는다
+                        cur.execute("""
+                            insert into quant.experiment_metrics
+                              (experiment_id, split, metric, value, dimensions,
+                               cost_model_version)
+                            values (%s, 'TEST', %s, %s, '{}'::jsonb, %s)
+                            on conflict do nothing""",
+                            (bt["experiment_id"], name, float(val), "krx-cost-v1"))
+                _c2.commit()
+            finally:
+                _c2.close()
+    except Exception as e:  # noqa: BLE001 - IC 를 못 재도 실험은 종결한다
+        print(f"  ⚠ 신호 IC 실패: {type(e).__name__}: {str(e)[:110]}", flush=True)
+
+    # ▶ **가설이 스스로 건 반증 시험을 돌린다** (2026-08-12)
+    #   계약은 "반증 없는 가설은 미완성" 이라며 강제하는데, 정작 그 반증을
+    #   아무도 돌리지 않았다 - 기획안 10건에 49개가 저장만 돼 있었다.
+    #   고정 관문을 넘은 것보다 **자기가 건 조건을 견딘 것**이 강한 증거다.
+    #
+    #   비용 스트레스는 **실험으로 등록하지 않는다.** 반증 검사가 시도 수를
+    #   올리면 DSR 이 깎여, 검증을 열심히 할수록 통과가 어려워진다.
+    falsif: list = []
+    try:
+        import falsification as _fx  # noqa: PLC0415
+
+        tests = list(hyp.get("falsification_criteria") or [])
+        need_cost = any(_fx.classify(t)[0] == "cost_stress" for t in tests)
+        cost_metrics = None
+        if need_cost:
+            stressed = run_backtest(market, dict(config,
+                                                 cost_stress=_fx.COST_STRESS_MULT))
+            bench = buy_and_hold_equity(market, dict(
+                config, cost_stress=_fx.COST_STRESS_MULT))
+            b0, b1 = bench[0][1], bench[-1][1]
+            e0, e1 = stressed.equity[0][1], stressed.equity[-1][1]
+            cost_metrics = {"excess_return_pct": round(
+                (e1 / e0 - 1.0) * 100.0 - (b1 / b0 - 1.0) * 100.0, 4)}
+            print(f"  비용 {_fx.COST_STRESS_MULT:g}배 스트레스: 초과수익 "
+                  f"{cost_metrics['excess_return_pct']:+.2f}%p", flush=True)
+        def _col(key):
+            return [m[key] for _, m in wm if isinstance(m.get(key), (int, float))]
+
+        falsif = _fx.run(tests, bt.get("metrics") or {},
+                         window_metrics=_col("total_return"),
+                         window_mdds=_col("max_drawdown"),
+                         window_sharpes=_col("sharpe_rf0"),
+                         cost_stress_metrics=cost_metrics)
+        if falsif:
+            print("  " + _fx.note(falsif), flush=True)
+    except Exception as e:  # noqa: BLE001 - 반증을 못 돌려도 실험은 종결한다
+        print(f"  ⚠ 자기반증 실행 실패: {type(e).__name__}: {str(e)[:110]}",
+              flush=True)
+
     return {"experiment_id": bt["experiment_id"], "fragility": verdict,
             "fragility_flags": flags, "windows": len(wm),
+            "falsification": [r.as_dict() for r in falsif],
             "backtest_metrics": bt.get("metrics")}
 
 
@@ -969,6 +1185,117 @@ def _check_dataset_comes_from_hypothesis():
     assert dataset_of({"required_data_products": ["market_bars"]})         == (DATASET_NAME, DATASET_VERSION)
 
 
+def _check_gate_note_carries_the_distance():
+    """**기각에도 거리를 적는다.** (2026-08-12 사고 원문)
+
+    실험 75a6d09e(momentum) 는 초과 +157.51%p · IR 1.26 · DSR 0.976 을 내고
+    기각됐는데 환류엔 `fragility_fragile` 한 줄만 남았다. 리서치는 그걸
+    "엣지가 없다" 로 읽고 다른 엣지를 설계했다 - 실제로 막은 건 낙폭이었다.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from release_gate import evaluate as gate_evaluate
+    from release_gate import metrics_from_rows
+
+    rows = [
+        ("excess_return_pct", 157.51, "TEST"),
+        ("information_ratio", 1.2552, "TEST"),
+        ("deflated_sharpe", 0.9762, "TEST"),
+        ("bootstrap_ci_low", -0.0029, "TEST"),
+        ("max_drawdown", -0.5052, "TEST"),
+        ("turnover_total", 114.8667, "TEST"),
+        ("max_drawdown", -0.0709, "WALK_FORWARD"),
+    ]
+    m = metrics_from_rows(rows)
+    note = _gate_note(gate_evaluate(m, fragility="FRAGILE"), m)
+
+    # ▶ **막은 조항이 이름과 거리로 나와야 한다.** "기각" 만으로는 다음 설계가
+    #   무엇을 바꿔야 하는지 알 수 없다.
+    assert "max_drawdown -50.52%" in note, note
+    assert "15.52% 모자람" in note, note
+    assert "fragility" in note, note
+    # 통과한 조항 수가 보여야 "거의 다 됐다" 를 읽는다
+    assert "관문 " in note and "/" in note, note
+    # 미측정을 거리로 위장하지 않는다
+    m2 = dict(m); m2.pop("deflated_sharpe")
+    note2 = _gate_note(gate_evaluate(m2, fragility="ROBUST"), m2)
+    assert "deflated_sharpe 미측정" in note2, note2
+
+    # ▶ **못 잰 것이 교훈이 되면 없는 사실이 원장에 남는다.** momentum 은 PBO 를
+    #   재지 않았는데 환류에 OVERFIT_PBO(과적합됐다)가 적혔다.
+    from factory_bridge import lessons_from
+
+    d = gate_evaluate(m, fragility="FRAGILE")
+    assert "pbo" in d.unmeasured, d.unmeasured
+    assert "pbo" in d.failed, "미측정이 차단을 못 하면 관문이 눈을 감는다"
+    kept = [x for x in d.failed if x not in set(d.unmeasured)]
+    assert "OVERFIT_PBO" not in lessons_from(failed_criteria=kept,
+                                             fragility="FRAGILE"), "안 잰 것을 과적합으로 적었다"
+    assert "BEAR_FRAGILE" in lessons_from(failed_criteria=kept,
+                                          fragility="FRAGILE"), "실제로 넘은 낙폭이 교훈에서 빠졌다"
+
+
+def _check_signal_ic_is_recorded():
+    """**신호 IC 를 매 실험에 남긴다.** (2026-08-12 실측)
+
+    격자가 `alive` 를 판정할 때 IC 를 우선한다 - 백테스트는 데이터 결함에
+    속고 순위상관은 안 속기 때문이다(`low_volatility` 초과 +855.92%p 인데
+    IC t -7.09). IC 를 안 남기면 격자가 초과수익으로 떨어져 그 칸을
+    "살아있음" 으로 오판한다. 실제로 그렇게 나왔다.
+    """
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    chain = next(n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.FunctionDef) and n.name == "_default_chain")
+    body = ast.get_source_segment(src, chain) or ""
+    assert "signal_ic" in body and "_ic.summarize" in body, \
+        "판정 사슬이 신호 IC 를 안 잰다"
+    for name in ("signal_ic_t", "signal_ic_hit_rate", "signal_ic_breadth"):
+        assert f'"{name}"' in body, f"{name} 을 안 남긴다 - 격자가 못 읽는다"
+    # **자기 연결로 써야 한다** (2026-08-13 실측). 앞 구간이 닫은 conn 을
+    # 재사용해 매 실험 InterfaceError 로 죽었고, IC 는 로그에만 남고 원장은
+    # 0건이었다 - 측정되는데 저장이 죽으면 자격 검사가 영영 미측정이다.
+    assert "_c2 = psycopg2.connect" in body,         "IC 기록이 공유 conn 을 재사용한다 - 닫힌 연결이면 매번 죽는다"
+    # **격자가 읽는 이름과 같아야 한다** - 다르면 조용히 안 보인다(오늘 12번)
+    import grid  # noqa: PLC0415
+    assert "signal_ic_t" in grid._SQL, "격자가 읽는 지표 이름과 갈렸다"
+    # IC 가 실패해도 실험은 종결돼야 한다 - 부수 검사가 본 검사를 죽이면 안 된다
+    assert "IC 실패" in body and "except Exception" in body
+    print("  신호 IC 적재             OK")
+
+
+def _check_self_falsification_is_wired():
+    """**가설이 스스로 건 반증을 실제로 돌린다.** (2026-08-12)
+
+    계약은 "반증 없는 가설은 미완성" 이라며 강제하는데 아무도 돌리지 않았다 -
+    기획안 10건에 49개가 저장만 돼 있었다. 만들어 놓고 안 부르는 것은
+    오늘만 세 번째다(관문 336줄, 정의만 된 검사, 이것).
+    """
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    chain = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                 and n.name == "_default_chain")
+    body = ast.get_source_segment(src, chain) or ""
+    assert "falsification" in body and "_fx.run(" in body, \
+        "판정 사슬이 자기반증을 안 돌린다 - 계약이 강제한 것을 무시한다"
+    assert "cost_stress" in body, "비용 스트레스를 안 건다 - 가장 많이 요청된 반증이다"
+    # **반증 재실행이 실험으로 등록되면 안 된다** - 시도 수가 올라 DSR 이 깎인다
+    idx = body.index("_fx.run(")
+    seg = body[max(0, idx - 1400):idx]
+    assert "register_and_run" not in seg, \
+        "비용 스트레스가 실험으로 등록된다 - 검증할수록 DSR 이 깎인다"
+
+    # 반증 요약이 환류 문장에 실려야 다음 기획안이 읽는다
+    orch = ast.get_source_segment(src, next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+        and n.name == "orchestrate")) or ""
+    assert "_fx.note(" in orch and "gate_note" in orch, \
+        "자기반증 결과가 환류에 안 실린다"
+    print("  자기반증이 사슬에 걸림   OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -985,4 +1312,11 @@ if __name__ == "__main__":
     _check_feasibility_gate()
     _check_status_mapping()
     _check_orchestrate_paths()
-    print("오케스트레이터 4개 영역 통과. 실행은 --run [--hypothesis <id>]")
+    # 정의만 해 두고 부르지 않던 검사 - 안 부르는 검사는 검사가 아니다
+    _check_dataset_comes_from_hypothesis()
+    print("  데이터셋 상수 아님       OK")
+    _check_gate_note_carries_the_distance()
+    print("  기각에도 관문 거리 적재   OK")
+    _check_self_falsification_is_wired()
+    _check_signal_ic_is_recorded()
+    print("오케스트레이터 8개 영역 통과. 실행은 --run [--hypothesis <id>]")

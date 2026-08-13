@@ -51,17 +51,17 @@ bff_main.RUNTIME._dispatch.__func__.__globals__["EMBEDDED_WORKER_ENABLED"] = Tru
 
 class PortfolioRecommendationBffTest(unittest.TestCase):
     @patch("apps.api.main._governance_request", new_callable=AsyncMock)
-    def test_mandate_change_is_proxied_without_browser_domain_access(self, request: AsyncMock) -> None:
-        request.return_value = {"stage": "AWAITING_REVIEW", "mandate_id": "m1"}
+    def test_mandate_version_is_proxied_without_browser_domain_access(self, request: AsyncMock) -> None:
+        request.return_value = {"version": 1, "mandate_id": "m1"}
         response = TestClient(app).post(
-            "/ui/mandates/m1/change-requests",
+            "/ui/mandates/m1/versions",
             json={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
         )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["stage"], "AWAITING_REVIEW")
+        self.assertEqual(response.json()["version"], 1)
         request.assert_awaited_once_with(
             "POST",
-            "/governance/v1/mandates/m1/change-requests",
+            "/governance/v1/mandates/m1/versions",
             body={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
         )
 

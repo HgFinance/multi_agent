@@ -33,6 +33,7 @@ from orchestration.ceo_workflow_scope import (
     WorkflowScopeViolation,
     build_scoped_task_body,
     extract_scope_references,
+    mandate_snapshot_present,
     validate_workflow_scope,
     workflow_mode_from_body,
 )
@@ -250,6 +251,9 @@ class SupervisorState:
     max_wakeups: int = 8
     qa_required: bool = True
     workflow_mode: str = "analysis"
+    # root body에 Mandate 스냅샷이 실렸는지. 자식 body에 참조 지시문을 넣을지
+    # 결정하는 데만 쓰고, 한도 값 자체는 여기로 옮기지 않는다 - 단일 원본은 root다.
+    has_mandate: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -998,6 +1002,7 @@ class CeoSupervisorService:
                     max_wakeups=self.max_wakeups,
                     qa_required=self._qa_required_from_event(event),
                     workflow_mode=workflow_mode,
+                    has_mandate=mandate_snapshot_present(root_body),
                 )
                 decision = self.decider(state)
                 action = decision.action.value if decision is not None else "NONE"
@@ -1130,6 +1135,7 @@ class CeoSupervisorService:
                     state.parent_task_id,
                     role="control",
                     workflow_mode=state.workflow_mode,
+                    has_mandate=state.has_mandate,
                 ),
                 assignee=decision.assignee or canonical_profile_for_department("ceo"),
                 parent_task_ids=decision.parent_task_ids,
@@ -1176,6 +1182,7 @@ class CeoSupervisorService:
                     state.parent_task_id,
                     role=role,
                     workflow_mode=state.workflow_mode,
+                    has_mandate=state.has_mandate,
                 ),
                 assignee=decision.assignee,
                 parent_task_ids=decision.parent_task_ids,

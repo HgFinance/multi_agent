@@ -291,20 +291,65 @@ JOBS: tuple[Job, ...] = (
 )
 
 
+# ▶ **실패한 일일 Job 은 그날 안에 다시 띄운다** (2026-08-11 실측)
+#   예전에는 성패와 무관하게 `last_finished_date` 를 오늘로 찍었다. 그래서 일일
+#   Job 은 실패해도 '오늘 완료' 가 되어 그날 다시 뜨지 않았다 - 한 번 미끄러지면
+#   그날 데이터에 **구멍이 영구히** 남는다. 실측: TimescaleDB 재시작 중
+#   `the database system is starting up` 으로 21:00 chart-daily-universe 가 죽었고,
+#   유니버스 일봉이 3,924종목에서 350종목(관심종목 전용 Job 몫)으로 남았다.
+#   로그에는 재시도처럼 네 번 찍혔지만 그건 재시도가 아니라 **스케줄러가 네 번
+#   재시작한 것**이었다 - 재시작에 기대는 복구는 복구가 아니다.
+#
+#   무한 재시도는 외부 API 를 두드리므로 간격을 늘려 가며 센다. 시도를 다 쓰면
+#   내일로 미루되 **'완료' 로 찍지는 않는다** - 대장에 미완으로 남아야 이력
+#   복원(seed_states_from_history)이 이 Job 을 건너뛰지 않는다.
+RETRY_BACKOFF_MINUTES = (10, 30, 60, 120)
+
+
 @dataclass
 class JobState:
     last_started: datetime | None = None
-    last_finished_date: date | None = None  # 일일형 중복 방지
+    last_finished_date: date | None = None  # 일일형 중복 방지 (OK/SKIP 만)
     consecutive_failures: int = 0
     runs: int = 0
     skips: int = 0
+    retry_after: datetime | None = None     # 실패 후 이 시각까지는 다시 안 뜬다
+    attempts_date: date | None = None       # 재시도 계수는 날마다 초기화한다
+    attempts_today: int = 0
+
+
+def retry_at(job: Job, attempts_today: int, now: datetime) -> datetime:
+    """실패한 일일 Job 을 언제 다시 띄울지."""
+    if attempts_today <= len(RETRY_BACKOFF_MINUTES):
+        return now + timedelta(minutes=RETRY_BACKOFF_MINUTES[attempts_today - 1])
+    return datetime.combine(now.date() + timedelta(days=1), job.daily_at, tzinfo=KST)
+
+
+def schedule_retry(job: Job, state: JobState, now: datetime) -> str:
+    """실패한 Job 의 다음 시도 시각을 정한다. 로그에 붙일 문구를 돌려준다.
+
+    주기형은 손대지 않는다 - 원래 주기가 곧 재시도다.
+    """
+    if job.daily_at is None:
+        return ""
+    if state.attempts_date != now.date():
+        state.attempts_date, state.attempts_today = now.date(), 0
+    state.attempts_today += 1
+    state.retry_after = retry_at(job, state.attempts_today, now)
+    # 소진 여부는 **시도 횟수로** 판정한다 - 날짜로 보면 자정을 넘긴 backoff 를
+    # 소진으로 착각한다(늦은 Job 의 마지막 backoff 는 다음 날로 넘어간다).
+    if state.attempts_today > len(RETRY_BACKOFF_MINUTES):
+        return " - 오늘 시도 소진, 내일 다시(완료로 찍지 않는다)"
+    return f" - {state.retry_after:%m-%d %H:%M} 재시도"
 
 
 def is_due(job: Job, state: JobState, now: datetime) -> bool:
     if job.daily_at is not None:
         if now.timetz().replace(tzinfo=None) < job.daily_at:
             return False
-        return state.last_finished_date != now.date()
+        if state.last_finished_date == now.date():
+            return False
+        return state.retry_after is None or now >= state.retry_after
     lo, hi = job.window
     t = now.timetz().replace(tzinfo=None)
     if not (lo <= t <= hi):
@@ -468,9 +513,10 @@ def main() -> int:
                 code, tail = run_job(job)
             except subprocess.TimeoutExpired:
                 st.consecutive_failures += 1
+                nxt = schedule_retry(job, st, datetime.now(KST))
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: ⚠ TIMEOUT "
-                      f"({job.timeout / 60:.0f}분, 연속 {st.consecutive_failures})",
-                      flush=True)
+                      f"({job.timeout / 60:.0f}분, 연속 {st.consecutive_failures})"
+                      f"{nxt}", flush=True)
                 # 타임아웃도 기록한다 - 로그에만 남기면 재시작과 함께 사라진다
                 record_run(job.name, job.argv, started=st.last_started,
                            ended=datetime.now(KST), exit_code=TIMEOUT_EXIT,
@@ -478,22 +524,28 @@ def main() -> int:
                            consecutive_failures=st.consecutive_failures)
                 continue
             st.runs += 1
-            st.last_finished_date = datetime.now(KST).date()
+            # ▶ '끝냈다' 는 **OK/SKIP 일 때만** 찍는다. 실패한 일일 Job 을 완료로
+            #   찍으면 그날 다시 뜨지 않아 구멍이 남는다(위 RETRY_BACKOFF_MINUTES).
             # 상태 갱신 뒤 기록해야 consecutive_failures 가 맞다 - 아래 분기에서
             # 0 으로 초기화되거나 증가한 값을 그대로 남긴다.
             if code == 0:
                 st.consecutive_failures = 0
+                st.last_finished_date = datetime.now(KST).date()
+                st.retry_after = None
                 last = tail.splitlines()[-1] if tail else ""
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: OK  {last}", flush=True)
             elif code == EXIT_SKIP:
                 st.consecutive_failures = 0
+                st.last_finished_date = datetime.now(KST).date()
+                st.retry_after = None
                 st.skips += 1
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: SKIP (수집기 판단)", flush=True)
             else:
                 st.consecutive_failures += 1
                 mark = " ⚠" if st.consecutive_failures >= FAILURE_ALERT_THRESHOLD else ""
+                nxt = schedule_retry(job, st, datetime.now(KST))
                 print(f"[{datetime.now(KST):%H:%M}] {job.name}: 실패 exit={code} "
-                      f"(연속 {st.consecutive_failures}){mark}\n{tail}", flush=True)
+                      f"(연속 {st.consecutive_failures}){mark}{nxt}\n{tail}", flush=True)
             record_run(job.name, job.argv, started=st.last_started,
                        ended=datetime.now(KST), exit_code=code, tail=tail,
                        consecutive_failures=st.consecutive_failures)
@@ -565,6 +617,57 @@ def _check_due_logic():
     st3 = JobState()
     assert is_due(daily, st3, kst(23, 0))
     print("  due 판정                 OK")
+
+
+def _check_failed_daily_job_retries_same_day():
+    """**실패한 일일 Job 이 그날 안에 다시 뜨는가.**
+
+    2026-08-11 에 이게 없어서 유니버스 일봉이 하루 통째로 비었다. TimescaleDB
+    재시작 중 21:00 Job 이 죽었는데 성패와 무관하게 '오늘 완료' 로 찍혀 그날 다시
+    뜨지 않았다. 로그의 네 번은 재시도가 아니라 스케줄러 재시작이었다.
+    """
+    kst = lambda h, m=0: datetime(2026, 8, 11, h, m, tzinfo=KST)
+    daily = Job("d", ("x.py", "--collect"), daily_at=time(9, 0))
+    st = JobState()
+    assert is_due(daily, st, kst(9, 0))
+
+    schedule_retry(daily, st, kst(9, 0))
+    assert st.last_finished_date is None, "실패를 '완료'로 찍었다 - 구멍이 영구히 남는다"
+    assert not is_due(daily, st, kst(9, 5)), "backoff 없이 즉시 다시 떴다 - API 를 두드린다"
+    assert is_due(daily, st, kst(9, 10)), "10분 뒤 재시도가 안 뜬다"
+
+    # 간격은 넓어진다 - 실패가 이어져도 10분마다 두드리지 않는다
+    schedule_retry(daily, st, kst(9, 10))
+    assert not is_due(daily, st, kst(9, 30))
+    assert is_due(daily, st, kst(9, 40))
+
+    for h, m in ((9, 40), (10, 40)):
+        schedule_retry(daily, st, kst(h, m))
+    tail = schedule_retry(daily, st, kst(12, 40))       # 5회째 - 소진
+    assert "소진" in tail, tail
+    assert st.last_finished_date is None, "시도 소진을 '완료'로 위장했다"
+    assert not is_due(daily, st, kst(23, 59)), "소진 후에도 계속 떴다"
+    assert st.retry_after.date() == date(2026, 8, 12)
+
+    # 계수는 날마다 초기화된다 - 어제 소진했다고 오늘까지 막히면 안 된다
+    schedule_retry(daily, st, datetime(2026, 8, 12, 9, 0, tzinfo=KST))
+    assert st.attempts_today == 1, "재시도 계수가 날을 넘겨 누적됐다"
+
+    # 주기형은 손대지 않는다 - 원래 주기가 곧 재시도다
+    periodic = Job("p", ("x.py",), every_minutes=10, window=(time(9, 0), time(15, 0)))
+    stp = JobState()
+    assert schedule_retry(periodic, stp, kst(9, 0)) == "" and stp.retry_after is None
+
+    # 실행 경로가 실제로 그렇게 돼 있는가 - 위 판정을 통과해도 main 이 예전처럼
+    # 무조건 완료로 찍으면 아무것도 고쳐지지 않는다
+    import inspect
+
+    src = inspect.getsource(main)
+    assert src.count("st.last_finished_date = datetime.now(KST).date()") == 2, \
+        "완료 표시가 OK/SKIP 두 분기 밖에서도 일어난다"
+    assert src.count("schedule_retry(job, st") == 2, \
+        "실패·타임아웃 두 경로가 모두 재시도를 잡지는 않는다"
+    print("  일일 Job 실패 재시도     OK")
 
 
 class _FakeCursor:
@@ -682,14 +785,18 @@ if __name__ == "__main__":
 
     if "--check" in sys.argv:
         print(f"{SCHEDULER_VERSION} 자체 점검 (실행 없음)")
-        _check_job_table()
-        _check_due_logic()
-        _check_exit_codes()
-        _check_status_classification()
-        _check_record_failure_is_contained()
-        _check_seed_skips_finished_daily_jobs()
-        _check_job_timeout_budget()
-        print("스케줄러 7개 영역 통과. 상주 실행은 --serve")
+        # 총계는 손으로 적지 말고 센다 - 적으면 검사를 늘려도 숫자가 안 는다.
+        checks = (_check_job_table,
+                  _check_due_logic,
+                  _check_exit_codes,
+                  _check_status_classification,
+                  _check_record_failure_is_contained,
+                  _check_seed_skips_finished_daily_jobs,
+                  _check_job_timeout_budget,
+                  _check_failed_daily_job_retries_same_day)
+        for c in checks:
+            c()
+        print(f"스케줄러 {len(checks)}개 영역 통과. 상주 실행은 --serve")
         raise SystemExit(0)
 
     if "--once" in sys.argv:

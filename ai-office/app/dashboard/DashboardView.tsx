@@ -68,14 +68,15 @@ export default function DashboardView() {
   const rootTaskId = result?.task_id ?? null;
 
   // 뿌리 카드가 생기면 종료될 때까지 본부별 진행을 따라간다. 처음엔 1초, 한 번
-  // 받은 뒤에는 5초 — 팀원이 main에 넣은 폴링 주기를 그대로 쓴다.
+  // 받은 뒤에는 15초 — Task 하나 완료까지 수십 초~분 단위라 그보다 촘촘히
+  // 돌 필요가 없다(2026-08-13, 5초에서 늘림).
   useEffect(() => {
     if (!rootTaskId || progress?.all_terminal) return undefined;
     const timer = window.setTimeout(() => {
       ceoProgress(rootTaskId)
         .then(setProgress)
         .catch(() => undefined);
-    }, progress ? 5000 : 1000);
+    }, progress ? 15000 : 1000);
     return () => window.clearTimeout(timer);
   }, [rootTaskId, progress]);
 
@@ -231,6 +232,20 @@ export default function DashboardView() {
                   ) : null}
                   {/* 이 문장은 참고용이다. 수치를 여기서 뽑아 확정하지 않는다. */}
                   <p className="text-[10px] text-outline mt-2 m-0">비공식 · 확정 수치의 출처가 아닙니다</p>
+                </div>
+              ) : null}
+
+              {progress?.final_answer ? (
+                <div className="mt-3 border-2 border-primary/40 rounded p-3 bg-secondary-container/30" aria-live="polite">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span className="text-label-md font-label-md text-primary uppercase">CEO 최종 답변</span>
+                    {!progress.answer_grounded ? (
+                      <span className="text-[10px] text-error">⚠️ 근거 미확인</span>
+                    ) : null}
+                  </div>
+                  <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">
+                    {progress.final_answer}
+                  </p>
                 </div>
               ) : null}
 
