@@ -574,6 +574,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-research-hermes
     restart: unless-stopped
+    command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
       options:
@@ -609,6 +610,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-quant-hermes
     restart: unless-stopped
+    command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
       options:
@@ -780,6 +782,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
+    command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
       options:
@@ -806,6 +809,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-qa-hermes
     restart: unless-stopped
+    command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
       options:

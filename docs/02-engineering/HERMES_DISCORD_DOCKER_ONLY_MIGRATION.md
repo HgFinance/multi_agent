@@ -15,7 +15,7 @@ AWS에서 Discord Gateway 소유권을 Host systemd에서 Docker Compose로 단�
 | risk-management | risk-hermes | hermes-gateway-risk-management |
 | qa-department | qa-hermes | hermes-gateway-qa-department |
 
-기본 Compose의 8개 Gateway는 모두 upstream nousresearch/hermes-agent:latest image-only 서비스다. Compose에는 command: ["gateway", "run"]을 지정하지 않는다. pinned Hermes image의 /opt/hermes/docker/entrypoint-dispatch.sh가 PID 1에서 s6 /init을 실행하고, main-wrapper.sh의 인자 없는 경로는 hermes를 실행한다.
+기본 Compose의 8개 Gateway는 모두 upstream `nousresearch/hermes-agent:latest` image-only 서비스다. Compose는 `command: ["sleep", "infinity"]`를 사용해 s6 main program을 유지하며, `command: ["gateway", "run"]`은 지정하지 않는다. pinned Hermes image의 `/opt/hermes/docker/entrypoint-dispatch.sh`가 PID 1에서 s6 `/init`을 실행하고, Discord Gateway는 s6가 관리한다. 인자를 생략하면 main-wrapper가 `hermes`를 실행한 뒤 종료할 수 있으므로 no-args Compose는 사용하지 않는다.
 
 따라서 Gateway lifecycle은 다음 하나뿐이다.
 
@@ -26,6 +26,7 @@ container
   -> 02-reconcile-profiles
   -> gateway-default s6 slot
   -> hermes gateway run --replace
+  -> main program: sleep infinity
 ```
 
 필수 invariant:

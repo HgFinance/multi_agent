@@ -3,8 +3,8 @@
 # dangling images. Never touches volumes (`-a`/`--volumes` intentionally
 # omitted) since those hold TimescaleDB/Postgres data.
 #
-# Cron (daily at 03:00, root crontab):
-#   0 3 * * * /path/to/repo/scripts/ec2_docker_prune.sh >> /var/log/docker-prune.log 2>&1
+# Cron (daily at 03:00 KST; EC2 host clock is UTC, so schedule at 18:00 UTC):
+#   0 18 * * * /home/ubuntu/hgfinance/scripts/ec2_docker_prune.sh >> /home/ubuntu/docker-prune.log 2>&1
 set -euo pipefail
 
 date
