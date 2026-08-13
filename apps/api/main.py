@@ -103,6 +103,7 @@ from portfolio_profile_client import (
 from governance_client import (
     GOVERNANCE_API_URL,
     GovernanceProxyError,
+    GovernanceTransportError,
 )
 from governance_client import (
     governance_request as _governance_request,
@@ -219,6 +220,12 @@ PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING
 
 @app.exception_handler(GovernanceProxyError)
 async def _on_governance_proxy_error(request: Request, exc: GovernanceProxyError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+@app.exception_handler(GovernanceTransportError)
+async def _on_governance_transport_error(request: Request, exc: GovernanceTransportError) -> JSONResponse:
+    """Return a safe, structured BFF transport failure to browser clients."""
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
 
