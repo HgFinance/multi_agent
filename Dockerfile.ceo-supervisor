@@ -1,0 +1,9 @@
+# CEO Kanban supervisor용 Hermes 실행 이미지.
+#
+# supervisor는 순정 Hermes 이미지에서 직접 python3를 실행하므로,
+# QA terminal projection이 사용하는 동기 PostgreSQL driver를 이미지 빌드
+# 단계에 포함한다. 컨테이너 시작 시 pip install을 수행하지 않는다.
+# Hermes의 기본 entrypoint, 명령, profile mount는 compose에서 그대로 유지한다.
+FROM nousresearch/hermes-agent:latest
+
+RUN python3 -m pip install --no-cache-dir psycopg2-binary==2.9.12
