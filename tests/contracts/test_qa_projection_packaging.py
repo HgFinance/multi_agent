@@ -36,7 +36,8 @@ def test_postgres_driver_is_lazy_and_matches_repository_contract() -> None:
     source = REPOSITORY.read_text(encoding="utf-8")
 
     assert "def _load_postgres_driver" in source
-    assert "import psycopg2" in source
+    assert "from psycopg2.extras import" in source
+    assert "from psycopg2.pool import" in source
     assert "psycopg2.pool" in source
     assert "psycopg2.extras" in source
     assert "psycopg2" not in subprocess.run(
