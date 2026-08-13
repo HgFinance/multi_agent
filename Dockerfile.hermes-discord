@@ -1,0 +1,14 @@
+ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent:latest
+FROM ${HERMES_BASE_IMAGE}
+
+# The gateway image owns the Discord adapter hook.  Dispatcher, supervisor,
+# BFF, and the standalone Hermes runtime keep their existing images.
+ENV PYTHONPATH="/opt/hgfinance:${PYTHONPATH}"
+
+COPY orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
+COPY orchestration/discord_idempotency.py /opt/hgfinance/orchestration/discord_idempotency.py
+COPY deploy/hermes-discord/gateway_patch.py /opt/hgfinance/gateway_patch.py
+COPY deploy/hermes-discord/install_patch.py /tmp/install_hermes_discord_patch.py
+
+RUN python3 /tmp/install_hermes_discord_patch.py \
+    && rm -f /tmp/install_hermes_discord_patch.py

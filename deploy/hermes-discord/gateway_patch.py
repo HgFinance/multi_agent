@@ -1,0 +1,342 @@
+"""Runtime shim installed into the Hermes Discord gateway image.
+
+The shim is intentionally limited to message admission and final Discord
+publication.  It does not change Discord permissions, mention rules,
+history backfill policy, or the Hermes session/worker implementation.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from orchestration.discord_idempotency import (
+    ClaimResult,
+    DiscordIdempotencyStore,
+    IdempotencyStoreUnavailable,
+    canonical_discord_dedup_key,
+    safe_json_log_fields,
+)
+
+logger = logging.getLogger(__name__)
+_INSTALL_MARKER = "_hgfinance_discord_idempotency_installed"
+
+
+def _profile_name() -> str:
+    return (
+        os.getenv("HERMES_PROFILE")
+        or os.getenv("HERMES_PROFILE_NAME")
+        or os.getenv("HERMES_ACTIVE_PROFILE")
+        or "unknown"
+    )
+
+
+def _message_context(message: Any) -> dict[str, str | None]:
+    channel = getattr(message, "channel", None)
+    guild = getattr(message, "guild", None)
+    channel_id = str(getattr(channel, "id", "") or "unknown")
+    parent_id = getattr(channel, "parent_id", None)
+    thread_id = channel_id if parent_id else None
+    return {
+        "guild_id": str(getattr(guild, "id", "") or "dm"),
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+    }
+
+
+def _log_event(
+    adapter: Any,
+    *,
+    message_id: str,
+    context: dict[str, str | None],
+    dedup_key: str,
+    handler: str,
+    dedup_hit: bool = False,
+    hermes_invocation_started: bool = False,
+    discord_publish_started: bool = False,
+    discord_publish_completed: bool = False,
+) -> None:
+    fields = {
+        "profile": _profile_name(),
+        "pid": os.getpid(),
+        "discord_message_id": message_id,
+        "guild_id": context.get("guild_id"),
+        "channel_id": context.get("channel_id"),
+        "thread_id": context.get("thread_id"),
+        "request_id": f"discord:{message_id}",
+        "dedup_key": dedup_key,
+        "handler": handler,
+        "dedup_hit": dedup_hit,
+        "hermes_invocation_started": hermes_invocation_started,
+        "discord_publish_started": discord_publish_started,
+        "discord_publish_completed": discord_publish_completed,
+    }
+    logger.info("discord_gateway_event %s", safe_json_log_fields(**fields))
+
+
+def _store(adapter: Any) -> DiscordIdempotencyStore:
+    store = getattr(adapter, "_hgfinance_idempotency", None)
+    if store is None:
+        store = DiscordIdempotencyStore(Path(os.getenv("HERMES_HOME", "/opt/data")))
+        adapter._hgfinance_idempotency = store
+    return store
+
+
+def _claim_inbound(adapter: Any, message: Any, *, handler: str) -> tuple[str, dict[str, str | None], ClaimResult]:
+    message_id = str(getattr(message, "id", "") or "")
+    if not message_id:
+        raise IdempotencyStoreUnavailable("Discord message has no message_id")
+    context = _message_context(message)
+    dedup_key = canonical_discord_dedup_key(
+        context["guild_id"], context["channel_id"], message_id
+    )
+    result = _store(adapter).claim_inbound(
+        dedup_key=dedup_key,
+        message_id=message_id,
+        guild_id=str(context["guild_id"]),
+        channel_id=str(context["channel_id"]),
+        thread_id=context["thread_id"],
+        profile=_profile_name(),
+        handler=handler,
+    )
+    return dedup_key, context, result
+
+
+def _wrap_init(cls: type[Any]) -> None:
+    original = cls.__init__
+
+    @functools.wraps(original)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> None:
+        original(self, *args, **kwargs)
+        _store(self)
+
+    cls.__init__ = wrapped
+
+
+def _wrap_admission(cls: type[Any]) -> None:
+    original = cls._discord_message_admission
+
+    @functools.wraps(original)
+    def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> tuple[bool, bool]:
+        message_id = str(getattr(message, "id", "") or "")
+        context = _message_context(message)
+        dedup_key = canonical_discord_dedup_key(
+            context["guild_id"], context["channel_id"], message_id
+        )
+        if bool(kwargs.get("claim", False)) and message_id and self._dedup.contains(message_id):
+            _log_event(
+                self,
+                message_id=message_id,
+                context=context,
+                dedup_key=dedup_key,
+                handler="live",
+                dedup_hit=True,
+            )
+            return False, False
+        admitted, role_authorized = original(self, message, *args, **kwargs)
+        if not admitted:
+            return admitted, role_authorized
+
+        claim = bool(kwargs.get("claim", False))
+        handler = "live" if claim else "history_backfill"
+        try:
+            dedup_key, context, result = _claim_inbound(self, message, handler=handler)
+        except IdempotencyStoreUnavailable as exc:
+            # A failed closed ledger is safer than invoking Hermes without an
+            # idempotency claim.  Do not change permission/mention policy.
+            if message_id:
+                self._dedup.discard(message_id)
+            logger.error("discord_gateway_event idempotency_unavailable error_type=%s", type(exc).__name__)
+            return False, False
+
+        if not result.admitted:
+            _log_event(
+                self,
+                message_id=message_id,
+                context=context,
+                dedup_key=dedup_key,
+                handler=handler,
+                dedup_hit=True,
+            )
+            return False, False
+
+        _store(self).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+        _log_event(
+            self,
+            message_id=message_id,
+            context=context,
+            dedup_key=dedup_key,
+            handler=handler,
+            hermes_invocation_started=True,
+        )
+        return admitted, role_authorized
+
+    cls._discord_message_admission = wrapped
+
+
+def _event_key(adapter: Any, event: Any) -> str | None:
+    message = getattr(event, "raw_message", None)
+    message_id = str(getattr(message, "id", "") or getattr(event, "message_id", "") or "")
+    if not message_id:
+        return None
+    return _store(adapter).inbound_key_for_message(message_id, _profile_name())
+
+
+def _wrap_handle_message(cls: type[Any]) -> None:
+    if not hasattr(cls, "_handle_message"):
+        return
+    original = cls._handle_message
+
+    @functools.wraps(original)
+    async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> bool:
+        try:
+            result = await original(self, message, *args, **kwargs)
+        except Exception:
+            message_id = str(getattr(message, "id", "") or "")
+            key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
+            if key:
+                _store(self).mark_inbound(key, "FAILED", _profile_name())
+            raise
+        if not result:
+            message_id = str(getattr(message, "id", "") or "")
+            key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
+            if key:
+                _store(self).mark_inbound(key, "FAILED", _profile_name())
+        return result
+
+    cls._handle_message = wrapped
+
+
+def _wrap_processing_complete(cls: type[Any]) -> None:
+    if not hasattr(cls, "on_processing_complete"):
+        return
+    original = cls.on_processing_complete
+
+    @functools.wraps(original)
+    async def wrapped(self: Any, event: Any, outcome: Any) -> None:
+        key = _event_key(self, event)
+        try:
+            await original(self, event, outcome)
+        finally:
+            if key:
+                state = "COMPLETED" if getattr(outcome, "name", str(outcome)) == "SUCCESS" else "FAILED"
+                _store(self).mark_inbound(key, state, _profile_name())
+
+    cls.on_processing_complete = wrapped
+
+
+def _response_anchor(metadata: Any, reply_to: Any) -> str | None:
+    if reply_to:
+        return str(reply_to)
+    if isinstance(metadata, dict):
+        for field in ("discord_message_id", "request_id"):
+            value = metadata.get(field)
+            if value:
+                return str(value)
+    return None
+
+
+def _send_result(success: bool, *, message_id: str | None = None, error: str | None = None) -> Any:
+    from gateway.platforms.base import SendResult
+
+    return SendResult(
+        success=success,
+        message_id=message_id,
+        error=error,
+        raw_response={"dedup_hit": True} if message_id or error is None else None,
+    )
+
+
+def _wrap_send(cls: type[Any]) -> None:
+    original = cls.send
+
+    @functools.wraps(original)
+    async def wrapped(
+        self: Any,
+        chat_id: str,
+        content: str,
+        reply_to: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        final_delivery = bool(isinstance(metadata, dict) and metadata.get("notify"))
+        anchor = _response_anchor(metadata, reply_to) if final_delivery else None
+        if not anchor:
+            return await original(self, chat_id, content, reply_to, metadata)
+
+        store = _store(self)
+        inbound_key = store.inbound_key_for_message(anchor, _profile_name())
+        dedup_key = inbound_key or canonical_discord_dedup_key("unknown", chat_id, anchor)
+        response_key = f"{dedup_key}:final"
+        context = store.inbound_context(inbound_key, _profile_name()) if inbound_key else {
+            "guild_id": "unknown",
+            "channel_id": str(chat_id),
+            "thread_id": str(metadata.get("thread_id")) if isinstance(metadata, dict) and metadata.get("thread_id") else None,
+        }
+        try:
+            claim = store.claim_outbound(
+                response_key=response_key,
+                dedup_key=dedup_key,
+                profile=_profile_name(),
+            )
+        except IdempotencyStoreUnavailable as exc:
+            logger.error("discord_gateway_event idempotency_unavailable error_type=%s", type(exc).__name__)
+            return _send_result(False, error="Discord outbound idempotency ledger unavailable")
+
+        if not claim.admitted:
+            _log_event(
+                self,
+                message_id=anchor,
+                context=context,
+                dedup_key=dedup_key,
+                handler="outbound",
+                dedup_hit=True,
+            )
+            return _send_result(True, message_id=claim.response_message_id)
+
+        _log_event(
+            self,
+            message_id=anchor,
+            context=context,
+            dedup_key=dedup_key,
+            handler="outbound",
+            discord_publish_started=True,
+        )
+        try:
+            result = await original(self, chat_id, content, reply_to, metadata)
+            store.mark_outbound(
+                response_key,
+                "COMPLETED" if bool(getattr(result, "success", False)) else "FAILED",
+                _profile_name(),
+                str(getattr(result, "message_id", "") or "") or None,
+            )
+            _log_event(
+                self,
+                message_id=anchor,
+                context=context,
+                dedup_key=dedup_key,
+                handler="outbound",
+                discord_publish_completed=bool(getattr(result, "success", False)),
+            )
+            return result
+        except Exception:
+            store.mark_outbound(response_key, "FAILED", _profile_name())
+            raise
+
+    cls.send = wrapped
+
+
+def install(cls: type[Any]) -> None:
+    """Install the shim exactly once when Hermes imports DiscordAdapter."""
+
+    if getattr(cls, _INSTALL_MARKER, False):
+        return
+    _wrap_init(cls)
+    _wrap_admission(cls)
+    _wrap_handle_message(cls)
+    _wrap_processing_complete(cls)
+    _wrap_send(cls)
+    setattr(cls, _INSTALL_MARKER, True)
+    logger.info("HgFinance Discord durable idempotency enabled")
