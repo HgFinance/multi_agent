@@ -19,12 +19,10 @@ for subdir in ("contracts", "oms", "broker", "multileg", "capability"):
     path = str(TRADING / subdir)
     if path not in sys.path:
         sys.path.insert(0, path)
- 
- 
+
+
 
 from contracts import StrategySignal
-
-
 _worker_spec = importlib.util.spec_from_file_location(
     "trading_alpha_worker_contracts",
     ROOT / "tests" / "test_trading_alpha_strategy_workers.py",

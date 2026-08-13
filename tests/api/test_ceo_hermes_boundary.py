@@ -87,7 +87,7 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
 
 class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:
-        request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-1")
+        request = ceo.CeoAsk(query="q", request_id="request-1")
         with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=None):
             with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
                 with self.assertRaises(HTTPException) as raised:
@@ -96,11 +96,14 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         ask.assert_not_called()
 
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_root_task_is_enqueued_without_direct_ceo_call(self) -> None:
-        request = ceo.hermes_boundary.AgentAsk(query="q", request_id="request-2")
+        request = ceo.CeoAsk(query="q", request_id="request-2")
         task = {"task_id": "t_root", "status": "ready"}
         with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
-            with patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True) as comment:
+            with patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True) as comment, patch.object(
+                ceo.hermes_boundary, "show_kanban_task", return_value=None
+            ):
                 with patch("apps.api.ceo_hermes_client.ask_ceo") as ask:
                     response = ceo.ceo_query(request)
 
@@ -109,8 +112,198 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         ask.assert_not_called()
         self.assertEqual(response["task"], task)
         self.assertEqual(response["task_id"], "t_root")
-        self.assertEqual(response["schema_version"], "ceo.query-accepted.v1")
+        self.assertEqual(response["schema_version"], "ceo.query-accepted.v2")
+        self.assertEqual(response["status"], "accepted")
         self.assertIsNone(response["session_id"])
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_mandate_snapshot_is_frozen_into_the_root_body(self) -> None:
+        """`fund_id`가 오면 Mandate 한도가 root body에 박힌다.
+
+        부서 Hermes 컨테이너에는 `DATABASE_URL`도 governance MCP도 없어서
+        `mandate_version_id`만 넘기면 풀 수 없다 - 값을 함께 실어야 한다.
+        """
+
+        request = ceo.CeoAsk(query="q", request_id="request-3", fund_id="fund-1")
+        mandate = {
+            "mandate_id": "m-1",
+            "current_version": 2,
+            "content_hash": "sha256:abc",
+            "policy": {"risk_bounds": {"max_drawdown_pct": "0.15", "currency": "KRW"}},
+        }
+        task = {"task_id": "t_root", "status": "ready"}
+        with patch.object(ceo, "fetch_current_mandate_by_fund", return_value=mandate) as fetch:
+            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
+                with patch.object(
+                    ceo.hermes_boundary, "comment_root_scope", return_value=True
+                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
+                    ceo.ceo_query(request)
+
+        fetch.assert_called_once_with("fund-1")
+        body = create.call_args.kwargs["body"]
+        self.assertIn("hgfinance.mandate-snapshot.v1", body)
+        self.assertIn("mandate_version=2", body)
+        self.assertIn("risk.max_drawdown_pct=0.15", body)
+        # 질의는 여전히 마지막 절에 있어야 한다 - 스냅샷이 질의에 섞이면
+        # `extract_user_query`가 한도 문자열을 사용자 질문으로 읽는다.
+        self.assertTrue(body.rstrip().endswith("q"))
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_no_fund_id_means_no_mandate_lookup_and_no_block(self) -> None:
+        """`fund_id`가 없으면 조회 자체를 하지 않는다. 기본 한도를 지어내지 않는다."""
+
+        request = ceo.CeoAsk(query="q", request_id="request-4")
+        task = {"task_id": "t_root", "status": "ready"}
+        with patch.object(ceo, "fetch_current_mandate_by_fund") as fetch:
+            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
+                with patch.object(
+                    ceo.hermes_boundary, "comment_root_scope", return_value=True
+                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
+                    ceo.ceo_query(request)
+
+        fetch.assert_not_called()
+        self.assertNotIn("mandate-snapshot", create.call_args.kwargs["body"])
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_mandate_lookup_failure_does_not_block_the_query(self) -> None:
+        """Mandate를 못 읽어도 질의는 접수된다.
+
+        여기서 실패시키면 Mandate가 없는 사용자는 아무 질문도 못 한다. CEO 산출물은
+        `binding: false`라 스냅샷 부재가 잘못된 주문으로 이어지지 않는다.
+        """
+
+        request = ceo.CeoAsk(query="q", request_id="request-5", fund_id="fund-1")
+        task = {"task_id": "t_root", "status": "ready"}
+        with patch.object(ceo, "fetch_current_mandate_by_fund", return_value=None):
+            with patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create:
+                with patch.object(
+                    ceo.hermes_boundary, "comment_root_scope", return_value=True
+                ), patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None):
+                    response = ceo.ceo_query(request)
+
+        self.assertEqual(response["task_id"], "t_root")
+        self.assertNotIn("mandate-snapshot", create.call_args.kwargs["body"])
+
+    def test_planned_response_uses_only_current_root_departments(self) -> None:
+        request = ceo.CeoAsk(query="q", request_id="request-3")
+        root = {
+            "id": "t_root",
+            "status": "running",
+            "children": [
+                {
+                    "id": "t_research",
+                    "assignee": "research-department",
+                    "body": "workflow_role=primary",
+                },
+                {
+                    "id": "t_risk",
+                    "assignee": "risk-management",
+                    "body": "workflow_role=primary",
+                },
+                {
+                    "id": "t_qa",
+                    "assignee": "qa-department",
+                    "body": "workflow_role=qa",
+                },
+            ],
+            "latest_summary": "Research와 Risk를 분석한 뒤 QA 검증을 진행합니다.",
+        }
+        with patch.object(
+            ceo.hermes_boundary,
+            "create_kanban_task",
+            return_value={"task_id": "t_root", "status": "ready"},
+        ), patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True), patch.object(
+            ceo.hermes_boundary, "show_kanban_task", return_value=root
+        ):
+            response = ceo.ceo_query(request)
+
+        self.assertEqual(response["status"], "planned")
+        self.assertEqual(
+            response["planning"]["selected_departments"],
+            ["research-department", "risk-management"],
+        )
+        self.assertTrue(response["planning"]["qa_required"])
+        self.assertIn("Research", response["answer"])
+        self.assertIn("Risk", response["answer"])
+        self.assertIn("QA", response["answer"])
+        self.assertNotIn("Quant", response["answer"])
+
+    def test_planning_without_qa_does_not_claim_qa(self) -> None:
+        root = {
+            "id": "t_root",
+            "children": [
+                {"assignee": "research-department", "body": "workflow_role=primary"},
+                {"assignee": "risk-management", "body": "workflow_role=primary"},
+            ],
+        }
+        acknowledgement = ceo._planning_acknowledgement(root)
+        self.assertFalse(acknowledgement["planning"]["qa_required"])
+        self.assertNotIn("QA", acknowledgement["answer"])
+
+    def test_planning_projection_uses_current_root_scope_only(self) -> None:
+        root = {"id": "t_root", "children": []}
+        rows = (
+            {
+                "id": "t_old",
+                "assignee": "quant-backtest-department",
+                "body": "workflow_root_task_id=t_old_root\nworkflow_role=primary",
+            },
+            {
+                "id": "t_research",
+                "assignee": "research-department",
+                "body": "workflow_root_task_id=t_root\nworkflow_role=primary",
+            },
+            {
+                "id": "t_risk",
+                "assignee": "risk-management",
+                "body": "workflow_root_task_id=t_root\nworkflow_role=primary",
+            },
+            {
+                "id": "t_qa",
+                "assignee": "qa-department",
+                "body": "workflow_root_task_id=t_root\nworkflow_role=qa",
+            },
+        )
+        with patch.object(ceo.hermes_boundary, "list_kanban_tasks", return_value=rows):
+            projection = ceo._scoped_planning_projection(root, timeout=0.1)
+        acknowledgement = ceo._planning_acknowledgement(projection)
+        self.assertEqual(
+            acknowledgement["planning"]["selected_departments"],
+            ["research-department", "risk-management"],
+        )
+        self.assertTrue(acknowledgement["planning"]["qa_required"])
+        self.assertNotIn("Quant", acknowledgement["answer"])
+
+    def test_task_status_route_reads_planning_projection(self) -> None:
+        root = {
+            "id": "t_root",
+            "status": "running",
+            "children": [
+                {"assignee": "quant-backtest-department", "body": "workflow_role=primary"}
+            ],
+        }
+        with patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root):
+            response = ceo.ceo_task_status("t_root")
+        self.assertEqual(response["task_id"], "t_root")
+        self.assertEqual(
+            response["planning"]["selected_departments"],
+            ["quant-backtest-department"],
+        )
+
+    @patch.dict(
+        "os.environ",
+        {"CEO_PLANNING_WAIT_SECONDS": "0.01", "CEO_PLANNING_READ_TIMEOUT_SECONDS": "0.1"},
+        clear=False,
+    )
+    def test_planning_timeout_returns_accepted_fallback(self) -> None:
+        with patch.object(
+            ceo.hermes_boundary,
+            "show_kanban_task",
+            return_value={"id": "t_root", "children": []},
+        ):
+            response = ceo._wait_for_planning("t_root")
+        self.assertEqual(response["status"], "accepted")
+        self.assertEqual(response["planning"]["selected_departments"], [])
 
     def test_route_returns_accepted_status(self) -> None:
         route = next(route for route in ceo.router.routes if route.path == "/ui/ceo/ask")

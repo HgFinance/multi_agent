@@ -47,7 +47,6 @@ services:
   # Portfolio advisory API and worker share only the durable queue volume.
   # The API never embeds a worker by default; the worker owns queue claims.
   portfolio-bff:
-    profiles: ["portfolio"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -65,8 +64,31 @@ services:
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
-      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-}
+      # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
+      # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
+      # compose 에 있으므로 서비스 이름을 기본값으로 준다.
+      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
+      # InvestorProfile 프록시(/ui/investor-profiles)가 부르는 accounting-api.
+      # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
+      PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
+      # CEO Web/Discord mirror uses the existing Redis service. Keep the
+      # durable request/event store on the canonical production BFF.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
+      UI_MIRROR_DEDUPE_WAIT_SECONDS: ${UI_MIRROR_DEDUPE_WAIT_SECONDS:-3}
+      UI_MIRROR_SSE_SECONDS: ${UI_MIRROR_SSE_SECONDS:-25}
+      # These are the internal read/proxy endpoints used by apps.api.main.
+      # The production portfolio BFF stays on the pinned Hermes CLI/local
+      # boundary above; it does not inherit ui-bff's Docker-exec transport.
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
+      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
+      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
@@ -77,7 +99,6 @@ services:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
 
   portfolio-worker:
-    profiles: ["portfolio"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -380,6 +401,10 @@ services:
       # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
       # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       # Tool Gateway 강제 모드. 기본은 관측(위반을 헤더·로그로만 드러냄) -
       # 기존 호출자(분석가 코드)가 아직 X-Agent-Persona 를 안 붙이므로 강제부터
       # 켜면 파이프라인이 통째로 멈춘다. 호출자를 다 고친 뒤 true 로 올린다.
@@ -429,6 +454,10 @@ services:
       # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
       # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
@@ -498,7 +527,10 @@ services:
   #   전용 컨테이너 하나가 전담한다(8개 profiles/ 전체를 보는 유일한 컨테이너) - 이 8개는
   #   여전히 kanban_show/list/comment/complete 같은 조회·자기보고 tool만 쓴다.
   research-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-research-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -509,6 +541,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: research-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       # LLM Provider(Codex/Claude)는 하드코딩하지 않는다 - /opt/data/config.yaml의
@@ -516,6 +549,10 @@ services:
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
       # MCP 서버 자체 인증이라 그대로 둔다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -523,7 +560,10 @@ services:
     stop_grace_period: 20s
 
   quant-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-quant-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -534,6 +574,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: quant-backtest-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
@@ -668,7 +709,10 @@ services:
   # 하지 않는다 - /opt/data/config.yaml(provider:)과 auth.json이 결정한다(Risk/QA 둘 다
   # Codex 배정, 2026-08-10 확정 매핑).
   risk-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-risk-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -679,6 +723,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: risk-management
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
@@ -688,7 +733,10 @@ services:
     stop_grace_period: 20s
 
   qa-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: ${HERMES_GATEWAY_IMAGE:-hgfinance/hermes-discord:discord-idempotency-v1}
     container_name: hedgefund-qa-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -699,6 +747,7 @@ services:
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
+      HERMES_PROFILE: qa-department
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
     mem_limit: 1g
@@ -974,6 +1023,10 @@ services:
   # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고
   # 아무도 왜인지 몰랐다. 공장 상주와 같은 이유로 컨테이너에 올린다.
   ui-bff:
+    # Legacy duplicate of apps.api.main:app. The canonical production ingress
+    # is portfolio-bff above; keep this profile only for explicit rollback or
+    # comparison and never enable it in the default Compose stack.
+    profiles: ["legacy-ui-bff"]
     image: hedgefund-factory:latest
     container_name: hedgefund-ui-bff
     restart: unless-stopped
@@ -982,10 +1035,15 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
-    ports:
-      - "8001:8001"
     environment:
       DATABASE_URL: ${DATABASE_URL:?}
+      # Web/Discord CEO 미러링은 기존 Compose Redis를 request/event dedup 저장소로 사용한다.
+      # [local/test] Redis가 없으면 테스트에서 InMemoryMirrorStore를 명시적으로 주입한다.
+      # [production] AWS에서는 이 값을 비우지 않는다. 저장소 장애 시 CEO 요청을 503으로 차단한다.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}

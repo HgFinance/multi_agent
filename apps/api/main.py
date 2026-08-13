@@ -37,6 +37,7 @@ from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import (
+    Depends,
     FastAPI,
     Header,
     HTTPException,
@@ -75,13 +76,15 @@ finally:
         if _accounting_previous_modules[_name] is not None:
             sys.modules[_name] = _accounting_previous_modules[_name]
 from apps.api import hermes_boundary
+
 try:
-    from . import ceo
     from .ceo import router as ceo_router
+    from .ceo_mirror_api import router as ceo_mirror_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-    import ceo
     from ceo import router as ceo_router
+    from ceo_mirror_api import router as ceo_mirror_router
 import trading
+from account_snapshot import router as account_snapshot_router
 from agent_status import agent_status_snapshot
 from command_service import (
     COMMAND_SERVICE,
@@ -90,11 +93,18 @@ from command_service import (
     TradingStateCommand,
 )
 from account_snapshot import router as account_snapshot_router
+from current_user import current_user, require_owner
 from department_agents import router as department_agent_router
 from domain_read_models import build_domain_read_model
+from portfolio_profile_client import (
+    PortfolioProxyError,
+    portfolio_request as _portfolio_request,
+)
 from governance_client import (
     GOVERNANCE_API_URL,
     GovernanceProxyError,
+)
+from governance_client import (
     governance_request as _governance_request,
 )
 from operations_read_model import build_operations_snapshot
@@ -138,7 +148,7 @@ app = FastAPI(
         {
             "name": "ceo-office",
             "description": (
-                "CEO Kanban 워크플로. ask -> 부서 실행 -> QA -> CEO 최종 종합.\n\n"
+                "CEO Kanban 워크플로. ask -> 선택 부서 실행 -> CEO 종합 + 비동기 QA 평가.\n\n"
                 "`DELETE`는 의도적으로 없다 - 누가 언제 무엇을 요청했고 어느 부서가"
                 " 실패했는지는 감사 추적이므로 정리는 Archive로만 한다."
             ),
@@ -169,6 +179,10 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
+# Register the mirror adapter first so the existing `/ui/ceo/ask` path is
+# protected by canonical request deduplication. `ceo_router` remains mounted
+# for direct module compatibility and all PR #224 read routes.
+app.include_router(ceo_mirror_router)
 app.include_router(ceo_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
 # 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
@@ -205,6 +219,12 @@ PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING
 
 @app.exception_handler(GovernanceProxyError)
 async def _on_governance_proxy_error(request: Request, exc: GovernanceProxyError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+@app.exception_handler(PortfolioProxyError)
+async def _on_portfolio_proxy_error(request: Request, exc: PortfolioProxyError) -> JSONResponse:
+    """accounting-api 오류 본문을 접지 않고 그대로 넘긴다(governance와 같은 이유)."""
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
 
@@ -261,10 +281,17 @@ async def _verify_portfolio_governance_binding(request: PortfolioRecommendationR
 
 
 def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None = None) -> None:
-    if PORTFOLIO_AUTH_REQUIRED and not owner_id:
-        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
-    if owner_id and expected_user_id and owner_id != expected_user_id:
-        raise HTTPException(status_code=403, detail="portfolio_recommendation_forbidden")
+    """소유권 판정을 `current_user.require_owner`에 위임한다.
+
+    판정을 라우트마다 흩어놓지 않는 이유는 `apps/api/current_user.py` 머리말에
+    적어뒀다 - 요약하면 `X-User-Id`는 인증이 아니고, 진짜 인증으로 교체할 때
+    고칠 지점이 한 곳이어야 한다. 이 래퍼는 기존 호출부(3곳)를 그대로 두기 위해
+    남긴 얇은 껍데기다.
+    """
+
+    # 플래그를 명시적으로 넘긴다 - 이 모듈 상수는 테스트가 patch하는 지점이라
+    # `require_owner`가 환경변수만 읽으면 그 patch가 무력화된다.
+    require_owner(owner_id, expected_user_id, required=PORTFOLIO_AUTH_REQUIRED)
 
 
 @app.post("/ui/mandates/{mandate_id}/change-requests")
@@ -285,6 +312,91 @@ async def ui_advance_mandate_case(case_id: str, body: dict[str, object]) -> obje
 @app.get("/ui/mandate-cases/{case_id}/timeline")
 async def ui_get_mandate_case_timeline(case_id: str) -> object:
     return await _governance_request("GET", f"/governance/v1/cases/{case_id}/timeline")
+
+
+# ── 온보딩 경로 (USER_INPUT_API_SPEC.md 6.1 #2) ────────────────────────────────
+# governance-api·accounting-api에 구현은 있었지만 BFF에 안 뚫려 있어서 프론트가
+# 호출할 수 없던 5개다(AI_OFFICE_FRONTEND_PLAN §6: Browser는 Domain API를 직접
+# 부르지 않는다). 여기서 하는 일은 전달뿐이고 정책 검증·version 할당·
+# effective_risk_band 계산은 전부 상류 도메인이 소유한다.
+
+
+@app.post("/ui/mandates", status_code=201)
+async def ui_create_mandate(body: dict[str, object]) -> object:
+    """Mandate 부모 행 생성. 온보딩의 시작점이다(2026-08-12 신설).
+
+    그 전까지 `governance.mandates` INSERT 경로가 API로 없어서 첫 사용자는
+    Mandate를 만들 수 없었다 - Version 제안 경로는 전부 `mandate_id`를 받는다.
+    """
+
+    return await _governance_request("POST", "/governance/v1/mandates", body=body)
+
+
+@app.get("/ui/mandates/by-fund/{fund_id}/current")
+async def ui_get_current_mandate_by_fund(fund_id: str) -> object:
+    """Fund 하나의 현재 Mandate. 화면이 `mandate_id`를 손으로 받지 않게 한다.
+
+    상류가 모호하면(한 Fund에 Mandate 2개 이상) 409를 그대로 통과시킨다 -
+    임의로 하나를 고르지 않는다(USER_INPUT_API_SPEC 2.1).
+    """
+
+    return await _governance_request(
+        "GET", f"/governance/v1/mandates/by-fund/{fund_id}/current"
+    )
+
+
+@app.post("/ui/mandates/{mandate_id}/versions")
+async def ui_propose_mandate_version(mandate_id: str, body: dict[str, object]) -> object:
+    """정책 Version 제안. 저장은 여기가 아니라 활성화 단계에서 확정된다."""
+
+    return await _governance_request(
+        "POST", f"/governance/v1/mandates/{mandate_id}/versions", body=body
+    )
+
+
+@app.post("/ui/mandate-assistant/suggest")
+async def ui_mandate_assistant_suggest(body: dict[str, object]) -> object:
+    """온보딩 챗봇 제안. **Stateless이며 아무것도 저장하지 않는다.**
+
+    응답의 `requires_user_confirmation`은 항상 `true`다(USER_INPUT_API_SPEC 2.4
+    불변식 1) - 이 경로만으로 확정되는 값은 없고, 저장은 §2.2(`versions`)·
+    §2.3(`investor-profiles`) 경로로만 일어난다. allow-list 밖 필드는
+    `dropped_fields`에 남고 조용히 사라지지 않는다.
+    """
+
+    return await _governance_request(
+        "POST", "/governance/v1/mandate-assistant/suggest", body=body
+    )
+
+
+@app.post("/ui/investor-profiles", status_code=201)
+async def ui_create_investor_profile(
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    """적합성 프로필 저장(항상 새 version). 성향·경험은 화면이 받은 값 그대로다.
+
+    요청자와 바디의 `user_id`가 다르면 403이다 - 남의 프로필을 쓰지 못하게 한다.
+    """
+
+    require_owner(owner_id, str(body.get("user_id") or ""), required=PORTFOLIO_AUTH_REQUIRED)
+    return await _portfolio_request("POST", "/portfolio/v1/investor-profiles", body=body)
+
+
+@app.get("/ui/investor-profiles/current")
+async def ui_get_current_investor_profile(
+    user_id: str,
+    fund_id: str,
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    """현재 version 하나. 없으면 상류 404를 그대로 통과시킨다."""
+
+    require_owner(owner_id, user_id, required=PORTFOLIO_AUTH_REQUIRED)
+    return await _portfolio_request(
+        "GET",
+        "/portfolio/v1/investor-profiles/current",
+        params={"user_id": user_id, "fund_id": fund_id},
+    )
 
 
 @app.get("/ui/mandate-approvals")
@@ -944,6 +1056,7 @@ if __name__ == "__main__":
 
     # 게이트를 열면 L0는 모델을 부르지 않고 결정론 원천으로 돌려보낸다(비용 0).
     import accounting as _accounting_router
+
     from apps.api import hermes_boundary as _hermes_boundary
 
     _saved_flag = _hermes_boundary.ENABLE_AGENT_ASK
@@ -1005,6 +1118,15 @@ if __name__ == "__main__":
         "/ui/portfolio-recommendations/{run_id}",
         "/ui/portfolio-recommendations/{run_id}/approval",
         "/ui/mandates/{mandate_id}/change-requests",
+        # 2026-08-12 온보딩 경로(USER_INPUT_API_SPEC 6.1 #2). Mandate 생성·Version
+        # 제안·챗봇 제안·적합성 프로필. 챗봇(`mandate-assistant/suggest`)은 Stateless라
+        # 아무것도 저장하지 않고, 나머지는 정책 검증을 상류 도메인이 소유한다.
+        "/ui/mandates",
+        "/ui/mandates/by-fund/{fund_id}/current",
+        "/ui/mandates/{mandate_id}/versions",
+        "/ui/mandate-assistant/suggest",
+        "/ui/investor-profiles",
+        "/ui/investor-profiles/current",
         "/ui/mandates/{mandate_id}/current",
         "/ui/risk/mandates/{mandate_id}/assess",
         "/ui/mandate-cases/{case_id}/advance",

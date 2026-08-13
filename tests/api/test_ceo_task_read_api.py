@@ -470,6 +470,20 @@ class CeoAdHocDecompositionReadModelTest(unittest.TestCase):
             "synthesis",
         )
 
+    def test_analysis_synthesis_with_primary_parents_is_not_user_input(self) -> None:
+        board = self._board()
+        board[self.SYNTHESIS]["parents"] = (self.RESEARCH, self.RISK)
+        workflow = load_workflow(self.ROOT, fetch=_fetch_from(board))
+
+        self.assertEqual(
+            workflow.synthesis_node.role(root_task_id=workflow.root_task_id),
+            "synthesis",
+        )
+        self.assertEqual(
+            workflow.synthesis_node.parents,
+            (self.RESEARCH, self.RISK),
+        )
+
     def test_qa_is_found_without_supervisor_marker(self) -> None:
         workflow = load_workflow(self.ROOT, fetch=_fetch_from(self._board()))
 

@@ -1,0 +1,591 @@
+"""Shared Web/Discord CEO ingress and event-mirror contracts.
+
+This module deliberately does not import the CEO router or Hermes.  It owns
+only the canonical request/event envelope and the deduplication boundary so
+that Web, Discord, and future adapters cannot accidentally create separate
+CEO executions for one user message.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Literal, Protocol
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, model_validator
+
+MirrorSource = Literal["web", "discord"]
+MirrorActorType = Literal["user", "bot", "agent", "system"]
+MirrorLane = Literal["execution", "evaluation"]
+
+MIRROR_EVENT_TYPES = frozenset(
+    {
+        "USER_MESSAGE",
+        "CEO_PLAN_CREATED",
+        "TASK_CREATED",
+        "TASK_ASSIGNED",
+        "TASK_STARTED",
+        "TASK_PROGRESS",
+        "TOOL_STARTED",
+        "TOOL_COMPLETED",
+        "TASK_COMPLETED",
+        "TASK_FAILED",
+        "RETRY_STARTED",
+        "CEO_SYNTHESIS_STARTED",
+        "CEO_FINAL",
+        "QA_STARTED",
+        "QA_RESULT",
+        "HR_EVALUATION",
+        "IMPROVEMENT_CANDIDATE",
+        "REGRESSION_RESULT",
+        "PROMOTION_RESULT",
+    }
+)
+
+
+class CanonicalIngress(BaseModel):
+    """One user-originated request shared by Web and Discord adapters."""
+
+    query: str = Field(min_length=1, max_length=2000)
+    request_id: str = Field(
+        default_factory=lambda: uuid4().hex, min_length=8, max_length=128
+    )
+    source: MirrorSource
+    source_message_id: str | None = Field(default=None, max_length=512)
+    actor_id: str = Field(default="anonymous", min_length=1, max_length=256)
+    actor_type: MirrorActorType = "user"
+    mirrored: bool = False
+
+    @model_validator(mode="after")
+    def default_source_message_id(self) -> CanonicalIngress:
+        if not self.source_message_id:
+            self.source_message_id = self.request_id
+        return self
+
+
+class MirrorEvent(BaseModel):
+    """Browser/Discord-safe event. Hidden chain-of-thought is not a field."""
+
+    schema_version: Literal["ui.ceo-mirror-event.v1"] = "ui.ceo-mirror-event.v1"
+    event_id: str = Field(min_length=8, max_length=128)
+    request_id: str = Field(min_length=8, max_length=128)
+    task_id: str | None = Field(default=None, max_length=128)
+    parent_task_id: str | None = Field(default=None, max_length=128)
+    source: MirrorSource
+    source_message_id: str = Field(min_length=1, max_length=512)
+    actor_id: str = Field(min_length=1, max_length=256)
+    actor_type: MirrorActorType
+    lane: MirrorLane
+    event_type: str = Field(min_length=1, max_length=64)
+    status: str = Field(min_length=1, max_length=64)
+    summary: str = Field(default="", max_length=4000)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    @model_validator(mode="after")
+    def validate_event_type(self) -> MirrorEvent:
+        if self.event_type not in MIRROR_EVENT_TYPES:
+            raise ValueError(f"unsupported mirror event_type: {self.event_type}")
+        return self
+
+
+class MirrorEventListResponse(BaseModel):
+    schema_version: Literal["ui.ceo-mirror-events.v1"] = "ui.ceo-mirror-events.v1"
+    request_id: str
+    events: list[MirrorEvent]
+    next_cursor: str | None = None
+
+
+class MirrorIngressResponse(BaseModel):
+    schema_version: Literal["ui.ceo-mirror-ingress.v1"] = "ui.ceo-mirror-ingress.v1"
+    accepted: bool
+    duplicate: bool = False
+    ignored: bool = False
+    reason: str | None = None
+    request_id: str
+    source: MirrorSource
+    task_id: str | None = None
+    execution_count: int = 0
+    ceo: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class MirrorRequestRecord:
+    request: CanonicalIngress
+    response: dict[str, Any] | None = None
+
+
+class MirrorStore(Protocol):
+    """Small store interface; Redis is production, memory is test fallback."""
+
+    def claim_request(
+        self, request: CanonicalIngress
+    ) -> tuple[MirrorRequestRecord, bool]: ...
+
+    def get_request(self, request_id: str) -> MirrorRequestRecord | None: ...
+
+    def save_response(self, request_id: str, response: dict[str, Any]) -> None: ...
+
+    def publish_event(self, event: MirrorEvent) -> bool: ...
+
+    def read_events(
+        self, request_id: str, after: str | None = None
+    ) -> list[MirrorEvent]: ...
+
+
+class MirrorRequestConflict(ValueError):
+    """A source message or request id is bound to a different request."""
+
+
+class MirrorStoreUnavailable(RuntimeError):
+    """The durable deduplication store cannot safely claim a request."""
+
+
+class InMemoryMirrorStore:
+    """Deterministic store used by tests and as a safe local fallback."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._requests: dict[str, MirrorRequestRecord] = {}
+        self._source_index: dict[str, str] = {}
+        self._events: dict[str, MirrorEvent] = {}
+        self._event_order: list[str] = []
+
+    @staticmethod
+    def _source_key(request: CanonicalIngress) -> str:
+        return f"{request.source}:{request.source_message_id}"
+
+    def claim_request(
+        self, request: CanonicalIngress
+    ) -> tuple[MirrorRequestRecord, bool]:
+        with self._lock:
+            source_key = self._source_key(request)
+            existing_request_id = self._source_index.get(source_key)
+            if existing_request_id and existing_request_id != request.request_id:
+                raise MirrorRequestConflict(
+                    "source_message_id is already bound to another request_id"
+                )
+            existing = self._requests.get(request.request_id)
+            if existing is not None:
+                if (
+                    existing.request.query != request.query
+                    or existing.request.source != request.source
+                ):
+                    raise MirrorRequestConflict(
+                        "request_id is already bound to a different canonical request"
+                    )
+                return existing, False
+            record = MirrorRequestRecord(request=request)
+            self._requests[request.request_id] = record
+            self._source_index[source_key] = request.request_id
+            return record, True
+
+    def get_request(self, request_id: str) -> MirrorRequestRecord | None:
+        with self._lock:
+            return self._requests.get(request_id)
+
+    def save_response(self, request_id: str, response: dict[str, Any]) -> None:
+        with self._lock:
+            record = self._requests.get(request_id)
+            if record is None:
+                return
+            self._requests[request_id] = MirrorRequestRecord(
+                record.request, dict(response)
+            )
+
+    def publish_event(self, event: MirrorEvent) -> bool:
+        with self._lock:
+            if event.event_id in self._events:
+                return False
+            self._events[event.event_id] = event
+            self._event_order.append(event.event_id)
+            return True
+
+    def read_events(
+        self, request_id: str, after: str | None = None
+    ) -> list[MirrorEvent]:
+        with self._lock:
+            events = [
+                self._events[event_id]
+                for event_id in self._event_order
+                if self._events[event_id].request_id == request_id
+            ]
+        if after:
+            for index, event in enumerate(events):
+                if event.event_id == after:
+                    return events[index + 1 :]
+        return events
+
+
+class RedisMirrorStore:
+    """Redis-backed request/event store using the existing compose Redis."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        stream: str = "hf:ui-ceo-mirror:v1",
+        ttl_seconds: int = 604800,
+    ) -> None:
+        import redis
+
+        self.client = redis.Redis.from_url(url, decode_responses=True)
+        self.stream = stream
+        self.ttl_seconds = ttl_seconds
+        self.request_prefix = "hf:ui-ceo-mirror:request:"
+        self.source_prefix = "hf:ui-ceo-mirror:source:"
+        self.event_prefix = "hf:ui-ceo-mirror:event:"
+
+    @staticmethod
+    def _source_key(request: CanonicalIngress) -> str:
+        return f"{request.source}:{request.source_message_id}"
+
+    def claim_request(
+        self, request: CanonicalIngress
+    ) -> tuple[MirrorRequestRecord, bool]:
+        source_key = self._source_key(request)
+        existing_source = self.client.get(self.source_prefix + source_key)
+        if existing_source and existing_source != request.request_id:
+            raise MirrorRequestConflict(
+                "source_message_id is already bound to another request_id"
+            )
+        request_key = self.request_prefix + request.request_id
+        existing = self.client.get(request_key)
+        if existing:
+            payload = json.loads(existing)
+            return MirrorRequestRecord(
+                request=CanonicalIngress.model_validate(payload["request"]),
+                response=payload.get("response"),
+            ), False
+        payload = {"request": request.model_dump(mode="json"), "response": None}
+        inserted = bool(
+            self.client.set(
+                request_key, json.dumps(payload), nx=True, ex=self.ttl_seconds
+            )
+        )
+        if not inserted:
+            existing = self.client.get(request_key)
+            if not existing:
+                raise RuntimeError("request deduplication record disappeared")
+            stored = json.loads(existing)
+            stored_request = CanonicalIngress.model_validate(stored["request"])
+            if (
+                stored_request.query != request.query
+                or stored_request.source != request.source
+            ):
+                raise MirrorRequestConflict(
+                    "request_id is already bound to a different canonical request"
+                )
+            return MirrorRequestRecord(
+                request=stored_request,
+                response=stored.get("response"),
+            ), False
+        self.client.set(
+            self.source_prefix + source_key,
+            request.request_id,
+            nx=True,
+            ex=self.ttl_seconds,
+        )
+        return MirrorRequestRecord(request=request), True
+
+    def get_request(self, request_id: str) -> MirrorRequestRecord | None:
+        raw = self.client.get(self.request_prefix + request_id)
+        if not raw:
+            return None
+        payload = json.loads(raw)
+        return MirrorRequestRecord(
+            request=CanonicalIngress.model_validate(payload["request"]),
+            response=payload.get("response"),
+        )
+
+    def save_response(self, request_id: str, response: dict[str, Any]) -> None:
+        key = self.request_prefix + request_id
+        raw = self.client.get(key)
+        if not raw:
+            return
+        payload = json.loads(raw)
+        payload["response"] = response
+        self.client.set(key, json.dumps(payload), ex=self.ttl_seconds)
+
+    def publish_event(self, event: MirrorEvent) -> bool:
+        key = self.event_prefix + event.event_id
+        payload = event.model_dump(mode="json")
+        inserted = bool(
+            self.client.set(key, json.dumps(payload), nx=True, ex=self.ttl_seconds)
+        )
+        if not inserted:
+            return False
+        self.client.xadd(
+            self.stream,
+            {
+                "event_id": event.event_id,
+                "request_id": event.request_id,
+                "payload": json.dumps(payload),
+            },
+            maxlen=10000,
+            approximate=True,
+        )
+        return True
+
+    def read_events(
+        self, request_id: str, after: str | None = None
+    ) -> list[MirrorEvent]:
+        values: list[MirrorEvent] = []
+        for _stream_id, fields in self.client.xrange(self.stream, min="-", max="+"):
+            payload = fields.get("payload")
+            if not payload:
+                continue
+            event = MirrorEvent.model_validate(json.loads(payload))
+            if event.request_id == request_id:
+                values.append(event)
+        if after:
+            for index, event in enumerate(values):
+                if event.event_id == after:
+                    return values[index + 1 :]
+        return values
+
+
+class LockedRedisMirrorStore(RedisMirrorStore):
+    """Serialize request claims across BFF workers using the existing Redis."""
+
+    def claim_request(
+        self, request: CanonicalIngress
+    ) -> tuple[MirrorRequestRecord, bool]:
+        with self.client.lock(
+            "hf:ui-ceo-mirror:claim-lock",
+            timeout=10,
+            blocking_timeout=10,
+        ):
+            return super().claim_request(request)
+
+
+class ResilientMirrorStore:
+    """Prefer Redis in AWS, but keep the BFF alive when Redis is unavailable."""
+
+    def __init__(
+        self, primary: MirrorStore, fallback: InMemoryMirrorStore | None = None
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def _call(self, method: str, *args: Any) -> Any:
+        try:
+            return getattr(self.primary, method)(*args)
+        except MirrorRequestConflict:
+            raise
+        except Exception:  # noqa: BLE001 - BFF must not turn Redis outage into a CEO retry storm.
+            if self.fallback is not None:
+                return getattr(self.fallback, method)(*args)
+            raise MirrorStoreUnavailable(
+                f"mirror store unavailable during {method}"
+            ) from None
+
+    def claim_request(
+        self, request: CanonicalIngress
+    ) -> tuple[MirrorRequestRecord, bool]:
+        return self._call("claim_request", request)
+
+    def get_request(self, request_id: str) -> MirrorRequestRecord | None:
+        return self._call("get_request", request_id)
+
+    def save_response(self, request_id: str, response: dict[str, Any]) -> None:
+        self._call("save_response", request_id, response)
+
+    def publish_event(self, event: MirrorEvent) -> bool:
+        return bool(self._call("publish_event", event))
+
+    def read_events(
+        self, request_id: str, after: str | None = None
+    ) -> list[MirrorEvent]:
+        return self._call("read_events", request_id, after)
+
+
+def build_default_mirror_store() -> ResilientMirrorStore:
+    url = os.getenv("UI_MIRROR_REDIS_URL") or os.getenv("REDIS_URL")
+    if url:
+        try:
+            return ResilientMirrorStore(
+                LockedRedisMirrorStore(
+                    url,
+                    stream=os.getenv("UI_MIRROR_STREAM", "hf:ui-ceo-mirror:v1"),
+                    ttl_seconds=max(
+                        60, int(os.getenv("UI_MIRROR_DEDUPE_TTL_SECONDS", "604800"))
+                    ),
+                ),
+                fallback=None,
+            )
+        except (TypeError, ValueError):
+            # Invalid local configuration is treated as an unavailable mirror,
+            # while the CEO Kanban boundary remains usable.
+            return ResilientMirrorStore(InMemoryMirrorStore())
+        except Exception:  # noqa: BLE001 - import/config failure falls back to local memory.
+            return ResilientMirrorStore(InMemoryMirrorStore())
+    return ResilientMirrorStore(InMemoryMirrorStore())
+
+
+def stable_event_id(*parts: object) -> str:
+    digest = hashlib.sha256(
+        "|".join(str(part) for part in parts).encode("utf-8")
+    ).hexdigest()
+    return f"evt-{digest[:40]}"
+
+
+def publish_mirror_event(
+    store: MirrorStore,
+    *,
+    request: CanonicalIngress,
+    event_type: str,
+    status: str,
+    actor_id: str,
+    actor_type: MirrorActorType,
+    lane: MirrorLane,
+    task_id: str | None = None,
+    parent_task_id: str | None = None,
+    summary: str = "",
+    payload: dict[str, Any] | None = None,
+    event_id: str | None = None,
+) -> MirrorEvent:
+    event = MirrorEvent(
+        event_id=event_id or f"evt-{uuid4().hex}",
+        request_id=request.request_id,
+        task_id=task_id,
+        parent_task_id=parent_task_id,
+        source=request.source,
+        source_message_id=str(request.source_message_id),
+        actor_id=actor_id,
+        actor_type=actor_type,
+        lane=lane,
+        event_type=event_type,
+        status=status,
+        summary=summary[:4000],
+        payload=payload or {},
+    )
+    store.publish_event(event)
+    return event
+
+
+@dataclass(frozen=True)
+class MirrorExecution:
+    accepted: bool
+    duplicate: bool
+    ignored: bool
+    reason: str | None
+    response: dict[str, Any] | None
+
+
+def execute_once(
+    request: CanonicalIngress,
+    *,
+    store: MirrorStore,
+    execute: Callable[[], dict[str, Any]],
+) -> MirrorExecution:
+    """Claim once, execute once, and persist the accepted response."""
+
+    if request.actor_type == "bot" or request.mirrored:
+        return MirrorExecution(False, False, True, "bot_mirror_ignored", None)
+
+    record, created = store.claim_request(request)
+    if not created and record.response is not None:
+        return MirrorExecution(
+            True, True, False, "request_already_executed", record.response
+        )
+
+    if not created:
+        # Another BFF worker claimed the request. Never run the CEO a second
+        # time; wait briefly for the first worker to persist its accepted
+        # response, then let the caller poll by request_id if it is still
+        # running. This is intentionally bounded so a dead worker cannot hold
+        # an HTTP request forever.
+        deadline = time.monotonic() + max(
+            0.1, float(os.getenv("UI_MIRROR_DEDUPE_WAIT_SECONDS", "3"))
+        )
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            record = store.get_request(request.request_id)
+            if record is not None and record.response is not None:
+                return MirrorExecution(
+                    True, True, False, "request_already_executed", record.response
+                )
+        return MirrorExecution(True, True, False, "request_in_progress", None)
+
+    if created:
+        publish_mirror_event(
+            store,
+            request=request,
+            event_type="USER_MESSAGE",
+            status="accepted",
+            actor_id=request.actor_id,
+            actor_type="user",
+            lane="execution",
+            summary=request.query,
+            payload={"source": request.source},
+            event_id=stable_event_id(
+                "user-message",
+                request.request_id,
+                request.source,
+                request.source_message_id,
+            ),
+        )
+
+    response = execute()
+    store.save_response(request.request_id, response)
+    task_id = str(response.get("task_id") or "") or None
+    if created and task_id:
+        publish_mirror_event(
+            store,
+            request=request,
+            event_type="CEO_PLAN_CREATED",
+            status="accepted",
+            actor_id="ceo-agent",
+            actor_type="agent",
+            lane="execution",
+            task_id=task_id,
+            summary="CEO root Kanban workflow가 생성되었습니다.",
+            payload={
+                "workflow_scope": "root_task",
+                "planning": response.get("planning"),
+            },
+            event_id=stable_event_id("ceo-plan", request.request_id, task_id),
+        )
+        publish_mirror_event(
+            store,
+            request=request,
+            event_type="TASK_CREATED",
+            status="queued",
+            actor_id="ceo-agent",
+            actor_type="agent",
+            lane="execution",
+            task_id=task_id,
+            summary="CEO root task가 Kanban에 등록되었습니다.",
+            payload={"department_id": "ceo-agent", "role": "root"},
+            event_id=stable_event_id("task-created", request.request_id, task_id),
+        )
+    return MirrorExecution(True, not created, False, None, response)
+
+
+__all__ = [
+    "MIRROR_EVENT_TYPES",
+    "CanonicalIngress",
+    "InMemoryMirrorStore",
+    "MirrorEvent",
+    "MirrorEventListResponse",
+    "MirrorIngressResponse",
+    "MirrorRequestConflict",
+    "MirrorRequestRecord",
+    "MirrorStore",
+    "MirrorStoreUnavailable",
+    "ResilientMirrorStore",
+    "build_default_mirror_store",
+    "execute_once",
+    "publish_mirror_event",
+    "stable_event_id",
+]

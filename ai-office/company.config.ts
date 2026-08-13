@@ -180,9 +180,9 @@ export const STAFF_LIST: StaffEntry[] = [
   staff("research", "member", "하워드 막스", "news-macro-worker", 5),
   staff("research", "member", "한소이", "evidence-rag-worker", 6),
 
-  staff("strategy1", "lead", "김재일", "Hermes Head · Quant/Backtest", 1, "김퀀트"),
-  staff("strategy1", "member", "박민성", "strategy-hypothesis-worker", 2),
-  staff("strategy1", "member", "신라온", "dataset-feature-worker", 3),
+  staff("strategy1", "lead", "박민성", "Hermes Head · Quant/Backtest", 1, "김퀀트"),
+  staff("strategy1", "member", "이현서", "strategy-hypothesis-worker", 2),
+  staff("strategy1", "member", "장정훈", "dataset-feature-worker", 3),
   staff("strategy1", "member", "방시혁", "backtest-optimization-worker", 4),
   staff("strategy1", "member", "진하율", "strategy-release-worker", 5),
   staff("strategy1", "member", "최윤슬", "ml-quant-worker", 6),

@@ -47,7 +47,12 @@ from evidence.handoff import build_evidence_handoff
 from evidence.highlights import pick_highlights
 from evidence.highlights import render_line as render_highlights
 from evidence.llm_client import chat as llm_chat
-from evidence.observability import ResearchRunMetrics, activate_metrics, current_metrics
+from evidence.observability import (
+    ResearchRunMetrics,
+    activate_metrics,
+    current_metrics,
+    redacted_span,
+)
 from langgraph.graph import END, StateGraph
 
 PIPELINE_VERSION = "research-department-pipeline-v2"  # v2: 분석가 3인 통합 + 수치 가드
@@ -231,13 +236,18 @@ def assemble_evidence(state: ResearchState) -> dict:
     from evidence.bundle import assemble_bundle
 
     metrics = current_metrics()
-    if metrics is None:
-        ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
-                             research_api=RESEARCH_API, get=_get)
-    else:
-        with metrics.span("evidence_collection"):
+    with redacted_span(
+        "research.evidence.collection",
+        metadata={"phase": "evidence_collection", "status": "started"},
+        tags=("evidence",),
+    ):
+        if metrics is None:
             ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
                                  research_api=RESEARCH_API, get=_get)
+        else:
+            with metrics.span("evidence_collection"):
+                ev = assemble_bundle(state["symbol"], market_api=MARKET_API,
+                                     research_api=RESEARCH_API, get=_get)
     # RES-08 사서의 공시 원문 발췌(결정론 - 종목 링크 확인 문서의 머리 청크만).
     # 사서 조회 실패는 Packet 전체를 죽일 일이 아니다 - 미확인으로 명시한다.
     try:
@@ -1263,7 +1273,15 @@ def build_pipeline():
     g.add_node("analyze_regime", analyze_regime)
     g.add_node("analyze_geopolitical", analyze_geopolitical)
     g.add_node("analyze_microstructure", analyze_microstructure)
-    g.add_node("draft_packet", draft_packet)
+    def synthesis_node(state: ResearchState) -> dict:
+        with redacted_span(
+            "research.synthesis",
+            metadata={"phase": "final_synthesis", "status": "started"},
+            tags=("synthesis",),
+        ):
+            return draft_packet(state)
+
+    g.add_node("draft_packet", synthesis_node)
     g.add_node("challenge_packet", challenge_packet)
     g.add_node("interpret", interpret)
     g.add_node("bump_revision", bump_revision)
@@ -1619,13 +1637,100 @@ def run_research_department(
     *,
     case_id: str | None = None,
     task_id: str | None = None,
+    workflow_root_task_id: str | None = None,
+    run_id: str | None = None,
     queued_at: datetime | None = None,
     claimed_at: datetime | None = None,
+) -> dict:
+    """Run Research under one redacted root span for the complete lifecycle."""
+
+    import uuid
+
+    trace_id = str(uuid.uuid4())
+    workflow_root_task_id = workflow_root_task_id or case_id or os.getenv(
+        "WORKFLOW_ROOT_TASK_ID", os.getenv("KANBAN_ROOT_TASK_ID", "")
+    ) or None
+    task_id = task_id or os.getenv("HERMES_TASK_ID", os.getenv("KANBAN_TASK_ID", "")) or None
+    run_id = run_id or os.getenv("HERMES_RUN_ID", os.getenv("KANBAN_RUN_ID", "")) or None
+    with redacted_span(
+        "research.department",
+        metadata={
+            "workflow_root_task_id": workflow_root_task_id,
+            "task_id": task_id,
+            "run_id": run_id or trace_id,
+            "department": "research",
+            "environment": os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "unknown")),
+            "trace_id": trace_id,
+        },
+        tags=("department", "root"),
+    ) as root_span:
+        result = _run_research_department(
+            symbol,
+            case_id=case_id,
+            task_id=task_id,
+            workflow_root_task_id=workflow_root_task_id,
+            run_id=run_id,
+            queued_at=queued_at,
+            claimed_at=claimed_at,
+            _trace_id=trace_id,
+        )
+        if root_span is not None:
+            observability = result.get("_observability") if isinstance(result, dict) else None
+            if isinstance(observability, dict):
+                from evidence.observability import update_span_metadata
+
+                update_span_metadata(
+                    root_span,
+                    {
+                        key: observability.get(key)
+                        for key in (
+                            "status",
+                            "total_duration_ms",
+                            "dispatch_wait_ms",
+                            "evidence_collection_duration_ms",
+                            "llm_duration_ms",
+                            "tool_call_count",
+                            "network_fetch_count",
+                            "cache_hit_count",
+                            "retry_count",
+                            "fallback_count",
+                            "unique_evidence_count",
+                            "duplicate_evidence_avoided_count",
+                            "queued_at",
+                            "claimed_at",
+                            "research_started_at",
+                            "evidence_started_at",
+                            "evidence_finished_at",
+                            "generation_started_at",
+                            "generation_finished_at",
+                            "completed_at",
+                        )
+                        if key in observability
+                    },
+                )
+        return result
+
+
+def _run_research_department(
+    symbol: str,
+    *,
+    case_id: str | None = None,
+    task_id: str | None = None,
+    workflow_root_task_id: str | None = None,
+    run_id: str | None = None,
+    queued_at: datetime | None = None,
+    claimed_at: datetime | None = None,
+    _trace_id: str | None = None,
 ) -> dict:
     """본부 단독 실행 - QA 부서의 run_qa_department 와 같은 외부 인터페이스."""
     import uuid
 
-    trace_id = str(uuid.uuid4())
+    trace_id = _trace_id or str(uuid.uuid4())
+    workflow_root_task_id = workflow_root_task_id or case_id or os.getenv(
+        "WORKFLOW_ROOT_TASK_ID", os.getenv("KANBAN_ROOT_TASK_ID", "")
+    ) or None
+    task_id = task_id or os.getenv("HERMES_TASK_ID", os.getenv("KANBAN_TASK_ID", "")) or None
+    run_id = run_id or os.getenv("HERMES_RUN_ID", os.getenv("KANBAN_RUN_ID", "")) or None
     started = datetime.now(timezone.utc)
     metrics = ResearchRunMetrics(trace_id=trace_id)
     if queued_at is not None:

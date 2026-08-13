@@ -29,7 +29,7 @@ import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -123,6 +123,26 @@ QA_BLOCKED_VERDICT = "FAIL_BLOCKED_FOR_DECISION"
 _MAX_NODES = int(os.getenv("CEO_KANBAN_MAX_NODES", "200"))
 _MAX_PARENT_HOPS = 32
 _FETCH_WORKERS = max(1, int(os.getenv("CEO_KANBAN_FETCH_WORKERS", "8")))
+_WORKFLOW_ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
+_WORKFLOW_ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
+_WORKFLOW_METADATA_KEYS = (
+    "primary_tasks",
+    "primary_task_ids",
+    "analysis_task_ids",
+    "qa_task",
+    "qa_task_id",
+    "qa_dependency_ids",
+    "synthesis_tasks",
+    "synthesis_task_ids",
+)
+_PRIMARY_PROFILE_ORDER = (
+    "research-department",
+    "quant-backtest-department",
+    "trading-department",
+    "accounting-portfolio-department",
+    "risk-management",
+    "hr-department",
+)
 
 
 class KanbanUnavailable(RuntimeError):
@@ -238,6 +258,11 @@ def _text(value: Any) -> str:
 def _ids(value: Any) -> tuple[str, ...]:
     """`parents`/`children`은 실측상 ID 문자열 배열이지만 객체 배열도 견딘다."""
 
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return (value,) if value.strip() else ()
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return ()
     collected: list[str] = []
@@ -249,6 +274,58 @@ def _ids(value: Any) -> tuple[str, ...]:
             if task_id:
                 collected.append(str(task_id))
     return tuple(collected)
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return dict(decoded) if isinstance(decoded, Mapping) else {}
+    return {}
+
+
+def _run_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the newest durable task-run metadata, not ingress prose."""
+    merged: dict[str, Any] = {}
+    for key in ("metadata", "task_run_metadata", "run_metadata"):
+        merged.update(_mapping(payload.get(key)))
+    task_run = payload.get("task_run")
+    if isinstance(task_run, Mapping):
+        merged.update(_mapping(task_run.get("metadata", task_run)))
+    nested = _mapping(merged.get("workflow_metadata"))
+    merged.update(nested)
+    runs = payload.get("runs")
+    if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes, bytearray)):
+        return merged
+    for run in runs:
+        if isinstance(run, Mapping):
+            run_metadata = _mapping(run.get("metadata"))
+            merged.update(run_metadata)
+            merged.update(_mapping(run_metadata.get("workflow_metadata")))
+    return merged
+
+
+def _workflow_root_id(payload: Mapping[str, Any]) -> str | None:
+    body = _text(payload.get("body"))
+    match = _WORKFLOW_ROOT_RE.search(body)
+    return match.group(1).strip() if match else None
+
+
+def _workflow_role(payload: Mapping[str, Any]) -> str | None:
+    body = _text(payload.get("body"))
+    match = _WORKFLOW_ROLE_RE.search(body)
+    return match.group(1).strip().casefold() if match else None
+
+
+def _metadata_task_ids(metadata: Mapping[str, Any]) -> tuple[str, ...]:
+    ids: list[str] = []
+    for key in _WORKFLOW_METADATA_KEYS:
+        ids.extend(_ids(metadata.get(key)))
+    return tuple(dict.fromkeys(ids))
 
 
 def _epoch_to_iso(value: Any) -> str | None:
@@ -354,7 +431,11 @@ class WorkflowNode:
 
     @property
     def is_qa(self) -> bool:
-        return self.profile == QA_PROFILE or self.profile in _LEGACY_QA_ALIASES
+        return (
+            self.profile == QA_PROFILE
+            or self.profile in _LEGACY_QA_ALIASES
+            or _workflow_role({"body": self.body}) == ROLE_QA
+        )
 
     @property
     def terminal(self) -> bool:
@@ -391,9 +472,14 @@ class WorkflowNode:
 
         if self.task_id == root_task_id:
             return ROLE_ROOT
+        declared_role = _workflow_role({"body": self.body})
+        if declared_role in {ROLE_PRIMARY, ROLE_QA, ROLE_SYNTHESIS}:
+            return declared_role
         if self.is_qa:
             return ROLE_QA
         if self.profile == CEO_PROFILE:
+            # Analysis-mode synthesis consumes primary outputs directly; QA is
+            # an independent governance branch and is not its parent.
             if set(self.parents) - {root_task_id}:
                 return ROLE_SYNTHESIS
             return ROLE_USER_INPUT
@@ -406,6 +492,7 @@ class Workflow:
 
     root_task_id: str
     nodes: tuple[WorkflowNode, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def root(self) -> WorkflowNode:
@@ -462,6 +549,17 @@ class Workflow:
         for node in self.primary_nodes:
             if node.profile and node.profile not in seen:
                 seen.append(node.profile)
+        declared: Any = self.metadata.get("selected_departments")
+        if isinstance(declared, str):
+            try:
+                declared = json.loads(declared)
+            except (TypeError, ValueError):
+                declared = ()
+        if isinstance(declared, Sequence) and not isinstance(declared, (str, bytes)):
+            for profile in declared:
+                profile = str(profile).strip()
+                if profile in _PRIMARY_PROFILE_ORDER and profile not in seen:
+                    seen.append(profile)
         return tuple(seen)
 
     @property
@@ -473,6 +571,11 @@ class Workflow:
         도달하지 않았을 뿐이므로 기본값을 유지한다.
         """
 
+        declared: Any = self.metadata.get("qa_required")
+        if isinstance(declared, str):
+            declared = declared.strip().casefold() == "true"
+        if isinstance(declared, bool):
+            return declared or bool(self.qa_nodes)
         if self.qa_nodes:
             return True
         return self.synthesis_node is None
@@ -612,7 +715,12 @@ def resolve_root_id(task_id: str, *, fetch: Fetch = show_task) -> str:
         if current in visited:
             break
         visited.add(current)
-        parents = _ids(fetch(current).get("parents"))
+        current_payload = fetch(current)
+        declared_root = _workflow_root_id(current_payload)
+        if declared_root:
+            fetch(declared_root)
+            return declared_root
+        parents = _ids(current_payload.get("parents"))
         if not parents:
             return current
         current = parents[0]
@@ -632,7 +740,22 @@ def load_workflow(
 
     root_id = resolve_root_id(task_id, fetch=fetch)
     payloads: dict[str, dict[str, Any]] = {root_id: fetch(root_id)}
+    root_metadata = _run_metadata(payloads[root_id])
     frontier = list(_ids(payloads[root_id].get("children")))
+    frontier.extend(_metadata_task_ids(root_metadata))
+
+    # Primary/QA/synthesis tasks may intentionally have no Hermes parent edge.
+    # The durable workflow marker is the membership source for those tasks.
+    try:
+        listed = list_tasks(include_archived=True)
+    except (KanbanTaskNotFound, KanbanUnavailable):
+        listed = []
+    for row in listed:
+        if _workflow_root_id(row) != root_id:
+            continue
+        row_id = str(row.get("id") or row.get("task_id") or "").strip()
+        if row_id:
+            frontier.append(row_id)
 
     with ThreadPoolExecutor(max_workers=max_workers or _FETCH_WORKERS) as pool:
         while frontier and len(payloads) < _MAX_NODES:
@@ -652,7 +775,11 @@ def load_workflow(
         for node_id, payload in payloads.items()
         if node_id != root_id
     )
-    return Workflow(root_task_id=root_id, nodes=tuple(nodes))
+    return Workflow(
+        root_task_id=root_id,
+        nodes=tuple(nodes),
+        metadata=_run_metadata(payloads[root_id]),
+    )
 
 
 def list_ceo_roots(*, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:

@@ -27,12 +27,13 @@ from __future__ import annotations
 import json
 import sys
 import time
+import os
 import urllib.request
 
 try:
-    from .observability import current_metrics
+    from .observability import current_metrics, redacted_span, update_span_metadata
 except ImportError:  # direct module execution from the Research profile
-    from observability import current_metrics  # type: ignore
+    from observability import current_metrics, redacted_span, update_span_metadata  # type: ignore
 
 MODULE_VERSION = "research-llm-client-v1"
 
@@ -74,14 +75,24 @@ def chat(system: str, user: str, *, base: str, model: str, timeout: float,
         metrics.record_tool_call()
         if metrics.generation_started_at is None:
             metrics.mark("generation_started_at")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            out = json.loads(r.read())
-        return out["choices"][0]["message"]["content"]
-    finally:
-        if metrics:
-            metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
-            metrics.mark("generation_finished_at")
+    with redacted_span(
+        "research.llm.call",
+        run_type="llm",
+        metadata={"model": model, "retry_count": 0, "error": False, "status": "started"},
+        tags=("llm", "chat_completions"),
+    ) as span:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                out = json.loads(r.read())
+                return out["choices"][0]["message"]["content"]
+        except Exception:
+            if span is not None:
+                update_span_metadata(span, {"status": "error"})
+            raise
+        finally:
+            if metrics:
+                metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
+                metrics.mark("generation_finished_at")
 
 
 def chat_structured(system: str, user: str, *, base: str, model: str,
@@ -108,13 +119,23 @@ def chat_structured(system: str, user: str, *, base: str, model: str,
         metrics.record_tool_call()
         if metrics.generation_started_at is None:
             metrics.mark("generation_started_at")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())["message"]["content"]
-    finally:
-        if metrics:
-            metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
-            metrics.mark("generation_finished_at")
+    with redacted_span(
+        "research.llm.call",
+        run_type="llm",
+        metadata={"model": model, "retry_count": 0, "error": False, "status": "started"},
+        tags=("llm", "structured"),
+    ) as span:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())["message"]["content"]
+        except Exception:
+            if span is not None:
+                update_span_metadata(span, {"status": "error"})
+            raise
+        finally:
+            if metrics:
+                metrics.llm_duration_ms += max(0, int((time.perf_counter() - started) * 1000))
+                metrics.mark("generation_finished_at")
 
 
 def extract_json(text: str) -> str:
@@ -151,9 +172,25 @@ def narrate(system: str, prompt: str, model_cls, call,
         user = prompt if attempt == 0 else (
             prompt + f"\n\nYour previous output failed validation: {last_err}. "
                      f"Return ONLY valid JSON for the schema.")
-        text = call(system, user)
         try:
-            return model_cls.model_validate_json(extract_json(text))
+            with redacted_span(
+                "research.llm.narrate",
+                run_type="llm",
+                metadata={
+                    "model": os.getenv("RESEARCH_SUPERVISOR_MODEL", "unknown"),
+                    "retry_count": attempt,
+                    "error": False,
+                    "status": "started",
+                },
+                tags=("llm", "narrate"),
+            ) as span:
+                try:
+                    text = call(system, user)
+                    return model_cls.model_validate_json(extract_json(text))
+                except Exception:
+                    if span is not None:
+                        update_span_metadata(span, {"status": "error"})
+                    raise
         except (ValidationError, ValueError) as e:
             last_err = str(e)[:_ERR_CLIP]
     raise RuntimeError(
