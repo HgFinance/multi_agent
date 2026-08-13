@@ -172,6 +172,33 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
             f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
 
+    # ①-a-2 정체성 키를 파라미터 칸에 적으면 **반려한다** (2026-08-13)
+    #   가설-실행 정합성 감사 실측: MAX 가설이 suggested_params 에
+    #   {"type": "low_max"} 까지 명시했는데 그 키는 조용히 버려지고
+    #   edge_type=low_volatility 로 실행됐다 - 에이전트의 가설은 검증된 적
+    #   없이 LOWVOL 성적표를 받았다. 힌트가 **실행 가능한 어휘**인데 전용
+    #   필드와 다르면, 조용한 무시는 곧 다른 가설을 검증하는 것이므로 멈춘다.
+    #   어휘 밖 힌트는 노이즈일 수 있어 기존 ①-a 경고로만 알린다.
+    sp = proposal.get("suggested_params") or {}
+    for f, vocab, approved, dest in (("type", EDGE_VOCAB, edge, "EDGE_TYPE"),
+                                     ("universe_key", UNIVERSE_VOCAB, universe,
+                                      "UNIVERSE_KEY")):
+        hint = str(sp.get(f) or "").strip().lower()
+        if hint and hint in vocab and hint != approved:
+            r.reject("IDENTITY_IN_PARAMS",
+                     f"SUGGESTED_PARAMS 의 {f}={hint!r} 는 실행 가능한 어휘인데 "
+                     f"전용 필드는 {approved!r} 다 - 지금 접수하면 {approved!r} 로 "
+                     f"실행돼 네 가설({hint!r})은 검증되지 않는다. "
+                     f"{dest} 필드로 옮겨라")
+
+    # ①-a-3 top_n 미지정은 특별히 짚는다 - 실행 관례(기본 20)가 조용히 채우는데,
+    #   IR 구조 진단(2026-08-13 실측)에서 top-20 초집중이 TC 0.114(신호 89%
+    #   소실)·TE 연 34.6% 의 주범이었다. 관례가 성적을 결정하는데 그 관례는
+    #   누구의 가설도 아니다. 막지 않고 정하라고 말한다.
+    if "top_n" not in sp:
+        r.warn("top_n 미지정 - 실행 관례(기본 20)로 돈다. 집중도가 성적을 크게 "
+               "바꾼다(실측 TC: top20 0.114 vs top200 0.316) - 가설이 직접 정하라")
+
     # ①-b 원천 어휘. **접수는 실행 가능성의 약속**인데 여기서 안 보면 가설이
     #     등록된 뒤 실행 단계에서 죽는다(2026-08-10 실측: 기획자가 DATA_TABLES 에
     #     `derived_returns`·`cost_scenarios` 같은 **파생 산출물**을 적었다.
@@ -331,6 +358,43 @@ def expected_edge_for(proposal: dict) -> tuple[dict, list]:
     return edge, dropped
 
 
+def mapping_loss_of(proposal: dict) -> dict:
+    """가설→실행 번역에서 무엇이 떨어지는지 **접수 시점에 계산해 각인한다.**
+
+    ▶ 왜 (2026-08-13 가설-실행 정합성 감사)
+      실험이 돈 가설 41개가 서로 다른 config 19개로 접혔다. SMA20 매도 4건이
+      전부 REV-5(반대 방향)로, MAX 가설이 LOWVOL 로 실행됐는데 **원장 어디에도
+      번역에서 무엇이 사라졌는지 남지 않았다.** 판정은 남은 것만 보고 "이 가설은
+      기각"이라 적었다 - 검증된 적 없는 가설에 성적표가 붙은 것이다. 경고는
+      접수 응답과 함께 흘러가지만 각인은 판정·회고 때도 남아 있다.
+
+    반환(전부 기계 계산, 빈 dict = 무손실):
+      dropped_keys   - 실행면이 안 읽어 버려진 파라미터 키
+      defaulted_keys - 가설이 안 정해 실행 관례가 채울 손잡이
+      identity_hints - 파라미터 칸에 적힌 정체성 값 중 전용 필드와 다른 것
+    """
+    from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
+
+    tunable = set(EDGE_KEYS) - {"type", "universe_key"}
+    params = proposal.get("suggested_params") or {}
+    edge, dropped = expected_edge_for(proposal)
+    defaulted = sorted(k for k in tunable if edge.get(k) is None)
+    hints = {}
+    for f, approved in (("type", proposal.get("edge_type")),
+                        ("universe_key", proposal.get("universe_key"))):
+        hv = str(params.get(f) or "").strip().lower()
+        if hv and hv != str(approved or "").strip().lower():
+            hints[f] = hv
+    loss: dict = {}
+    if dropped:
+        loss["dropped_keys"] = dropped
+    if defaulted:
+        loss["defaulted_keys"] = defaulted
+    if hints:
+        loss["identity_hints"] = hints
+    return loss
+
+
 def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
                       created_by: str = "factory-bridge") -> dict:
     """기획안 -> quant.hypotheses INSERT 페이로드.
@@ -361,6 +425,8 @@ def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
         "source_reported_effect": proposal.get("source_reported_effect") or {},
         "trial_family_id": gate.trial_family_id,
         "trial_number": gate.trial_number,
+        # 번역 손실 각인 - 판정·회고가 "무엇이 검증됐고 무엇이 관례였나"를 본다
+        "mapping_loss": mapping_loss_of(proposal),
     }
 
 
@@ -544,9 +610,10 @@ insert into quant.hypotheses
    required_data_products, status, created_by, trace_id,
    proposal_id, lead_ids, research_packet_ids, claim_ids,
    economic_rationale, counterparty, competing_explanation,
-   competing_explanation_codes, skeptic_sign, source_reported_effect)
+   competing_explanation_codes, skeptic_sign, source_reported_effect,
+   mapping_loss)
 values (%s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
-        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 returning hypothesis_id
 """
 
@@ -615,7 +682,8 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
                 row["proposal_id"], row["lead_ids"], row["research_packet_ids"],
                 row["claim_ids"], row["economic_rationale"], row["counterparty"],
                 row["competing_explanation"], row["competing_explanation_codes"],
-                row["skeptic_sign"], json.dumps(row["source_reported_effect"])))
+                row["skeptic_sign"], json.dumps(row["source_reported_effect"]),
+                json.dumps(row["mapping_loss"])))
             hid = str(cur.fetchone()[0])
         conn.commit()
         out.append(Promotion(p["proposal_id"], True, hypothesis_id=hid,
@@ -1021,6 +1089,48 @@ def _check_gate_approved_edge_type_wins():
     assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
 
 
+def _check_identity_hint_in_vocab_is_rejected():
+    """**실행 가능한 어휘를 파라미터 칸에 적으면 반려한다** - 각인의 짝.
+
+    실측(가설-실행 정합성 감사): MAX 가설이 suggested_params 에
+    {"type": "low_max"} 까지 명시했는데 조용히 버려지고 LOWVOL 로 실행됐다.
+    low_max 가 어휘에 없던 때는 어쩔 수 없었지만 이제 있다 - 있는데도 조용히
+    다른 것을 돌리면 그건 무시가 아니라 **다른 가설의 검증**이다.
+    """
+    p = _prop(edge_type="low_volatility")
+    p["suggested_params"] = {"type": "low_max", "top_n": 20}
+    g = gate0(p)
+    assert not g.ok and "IDENTITY_IN_PARAMS" in g.codes, g.as_dict()
+    assert "EDGE_TYPE 필드로 옮겨라" in "; ".join(g.reasons), g.reasons
+    # 어휘 밖 힌트는 반려하지 않는다(노이즈일 수 있다) - 기존 ①-a 경고가 잡는다
+    p2 = _prop()
+    p2["suggested_params"] = {"type": "sma_cross_sell", "top_n": 20}
+    g2 = gate0(p2)
+    assert g2.ok and "IDENTITY_IN_PARAMS" not in g2.codes, g2.as_dict()
+    assert any("SUGGESTED_PARAMS" in w for w in g2.warnings), g2.warnings
+
+
+def _check_mapping_loss_is_stamped():
+    """번역 손실이 **원장에 각인**되는가 - 경고는 흘러가고 각인은 남는다."""
+    p = _prop()  # lookback_days 는 버려지고, top_n 등은 관례로 채워진다
+    loss = mapping_loss_of(p)
+    assert loss["dropped_keys"] == ["lookback_days"], loss
+    assert "top_n" in loss["defaulted_keys"], loss
+    assert "identity_hints" not in loss, loss
+    row = to_hypothesis_row(p, gate0(p))
+    assert row["mapping_loss"] == loss, row["mapping_loss"]
+    # INSERT 가 각인 컬럼을 실제로 나른다 - 계산만 하고 안 실으면 각인이 아니다
+    assert "mapping_loss" in _SQL_INSERT_HYPOTHESIS, _SQL_INSERT_HYPOTHESIS
+    # top_n 관례가 성적을 결정한 실측(TC 0.114) - 접수 경고로도 짚는다
+    g = gate0(p)
+    assert any("top_n 미지정" in w for w in g.warnings), g.warnings
+    # top_n 을 정하면 그 경고는 사라진다 - 경고가 상수면 아무도 안 읽는다
+    p3 = _prop()
+    p3["suggested_params"] = {"top_n": 200}
+    g3 = gate0(p3)
+    assert not any("top_n 미지정" in w for w in g3.warnings), g3.warnings
+
+
 def _check_outcome_requires_reason():
     """사유 없는 기각은 환류가 성립하지 않는다."""
     for d in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED"):
@@ -1230,6 +1340,8 @@ if __name__ == "__main__":
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
     _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
+    _check_identity_hint_in_vocab_is_rejected(); print("  정체성 힌트 반려         OK")
+    _check_mapping_loss_is_stamped();           print("  번역 손실 각인           OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
@@ -1238,4 +1350,4 @@ if __name__ == "__main__":
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 17개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 19개 영역 통과. 루프가 닫혔다.")

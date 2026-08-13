@@ -168,7 +168,13 @@ def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
             "result": None, "model_plane": None, "error": None,
         }
         if len(_WORKER_JOBS) > MAX_JOBS_KEPT:
-            for k in list(_WORKER_JOBS)[:-MAX_JOBS_KEPT]:
+            # RUNNING 은 퇴거하지 않는다 - 몇 분짜리 실행 도중에 자리가
+            # 사라지면 GPU 를 태운 결과가 어디에도 안 남는다(2026-08-13 리뷰).
+            # RUNNING 만으로 상한을 넘는 폭주는 그대로 남긴다 - 곧 끝나고,
+            # 다음 등록 때 완료분부터 치워진다.
+            evictable = [k for k, v in _WORKER_JOBS.items()
+                         if v.get("status") != "RUNNING"]
+            for k in evictable[:len(_WORKER_JOBS) - MAX_JOBS_KEPT]:
                 _WORKER_JOBS.pop(k, None)
     return job_id
 
@@ -179,6 +185,9 @@ def finish_worker_job(job_id: str, *, result: dict | None,
     with _WORKER_JOBS_LOCK:
         j = _WORKER_JOBS.get(job_id)
         if j is None:
+            # 자리가 사라진 완료 - 결과를 조용히 버리지 않고 로그에 남긴다
+            print(f"⚠ worker job {job_id} 의 자리가 사라져 결과를 버린다 "
+                  f"(error={error!r})", file=sys.stderr)
             return {}
         # degraded=True 여도 작업 자체는 끝났다 - FAILED 는 registry 실행이
         # 예외로 죽은 경우만이다. degraded 는 결과 안에 그대로 보인다.
@@ -311,19 +320,24 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
     #   통해 모델을 부른다. AWS 에서는 vLLM Qwen2.5-14B FP8, DEV 에서는
     #   기존 Ollama 로 자동 해석된다. Worker 산출은 언제나 비구속
     #   worker-context 다 - 주문·판정·원장에 닿지 않는다.
-    def _worker_modules():
-        """repo 루트를 sys.path 에 얹고 (gateway, employee_workers) 를 준다.
+    def _gateway_module():
+        """repo 루트를 sys.path 에 얹고 gateway 모듈만 준다 (경량, stdlib).
 
-        컨테이너에서 repo 루트는 /app 이다. employee_worker_runtime.py 와
-        worker_model_gateway.py, orchestration/ 은 이미지에 없고
-        docker-compose.model.yml 이 마운트한다 - 없으면 ImportError 가
-        그대로 job 실패로 남는다(조용한 성공 위장 금지).
+        컨테이너에서 repo 루트는 /app 이다. worker_model_gateway.py 등은
+        이미지에 없고 docker-compose.model.yml 이 마운트한다 - 없으면
+        ImportError 가 그대로 실패로 남는다(조용한 성공 위장 금지).
         """
         repo_root = _BASE.parent.parent
         for p in (str(repo_root), str(_BASE.parent)):
             if p not in sys.path:
                 sys.path.insert(0, p)
         import worker_model_gateway as gateway  # departments/ 에서 온다
+        return gateway
+
+    def _worker_modules():
+        """(gateway, employee_workers). 후자는 langgraph 를 끌어와 무겁다 -
+        health 처럼 gateway 만 필요한 자리는 _gateway_module 을 쓴다."""
+        gateway = _gateway_module()
         import employee_workers                 # _BASE 에서 온다
         return gateway, employee_workers
 
@@ -350,10 +364,33 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         def _run():
             try:
                 gateway, employee_workers = _worker_modules()
-                llm, binding = gateway.llm_for_worker()
-                result = employee_workers.run_employee_workers(payload, llm=llm)
+                # ▶ 워커별로 binding 을 해석한다 (2026-08-13 리뷰 반영).
+                #   단일 llm 을 공유하면 registry 의 worker→adapter 해석이
+                #   전달되지 않아 LoRA 승격이 조용한 no-op 이 된다.
+                worker_bindings: dict[str, dict] = {}
+
+                def llm_factory(worker_id: str):
+                    llm, binding = gateway.llm_for_worker(worker_id)
+                    worker_bindings[worker_id] = binding.as_metadata()
+                    return llm
+
+                result = employee_workers.run_employee_workers(
+                    payload, llm_factory=llm_factory)
+                default_binding = gateway.resolve()
+                # runtime 블록의 provider/model 은 공용 런타임이 Ollama 를
+                # 하드코딩한 값이다 - 실제 사용한 게이트웨이 좌표로 바로잡는다.
+                # 안 그러면 본부장이 '이 분석은 ollama qwen3:1.7b' 라는 틀린
+                # 계보를 그대로 인용한다.
+                runtime = dict(result.get("runtime") or {})
+                runtime["provider"] = default_binding.provider
+                runtime["model"] = default_binding.model
+                runtime["model_source"] = "worker_model_gateway"
+                result["runtime"] = runtime
                 finish_worker_job(job_id, result=result,
-                                  model_plane=binding.as_metadata(),
+                                  model_plane={
+                                      "default": default_binding.as_metadata(),
+                                      "workers": worker_bindings,
+                                  },
                                   error=None, now=datetime.now(KST))
             except Exception as e:  # noqa: BLE001 - 실패를 실패로 남긴다
                 finish_worker_job(job_id, result=None, model_plane=None,
@@ -381,32 +418,50 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
     @server.tool(
         name="worker_model_health",
         description="Worker 모델 서빙 상태를 확인한다 - 어떤 게이트웨이 좌표로 "
-                    "해석되는지와 모델 서버가 실제로 응답하는지. Worker 실행이 "
-                    "계속 실패하면 먼저 이걸 본다.")
-    def worker_model_health() -> dict:
-        import urllib.error
-        import urllib.request as _rq
+                    "해석되는지, 모델 서버가 실제로 응답하는지, registry 에 켜진 "
+                    "adapter 가 실제 서빙 목록에 있는지. Worker 실행이 계속 "
+                    "실패하면 먼저 이걸 본다.")
+    async def worker_model_health() -> dict:
+        # async + to_thread: sync 도구는 이벤트 루프에서 그대로 돌아, vLLM 이
+        # 멎어 있으면 urlopen(timeout=10) 동안 서버의 모든 MCP 세션이 함께
+        # 멎는다(2026-08-13 리뷰). 진단 도구가 서버를 세우면 안 된다.
+        import asyncio
 
-        try:
-            gateway, _ = _worker_modules()
-            binding = gateway.resolve()
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "stage": "resolve",
-                    "error": f"{type(e).__name__}: {e}"}
-        meta = binding.as_metadata()
-        req = _rq.Request(binding.base_url + "/models",
-                          headers={"Authorization": f"Bearer {binding.api_key}"})
-        try:
-            with _rq.urlopen(req, timeout=10) as r:
-                import json as _json
-                served = [m.get("id") for m in _json.loads(r.read()).get("data", [])]
-        except Exception as e:  # noqa: BLE001 - 죽었으면 죽었다고 말한다
-            return {"ok": False, "stage": "server", "binding": meta,
-                    "error": f"{type(e).__name__}: {e}"}
-        return {"ok": binding.model in served, "binding": meta,
-                "served_models": served,
-                "note": None if binding.model in served else
-                        f"서버는 살아 있는데 '{binding.model}' 이 서빙 목록에 없다"}
+        def _probe() -> dict:
+            import urllib.request as _rq
+
+            try:
+                gateway = _gateway_module()   # 경량 - langgraph 를 안 끌어온다
+                binding = gateway.resolve()
+                enabled = gateway.enabled_adapters()
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "stage": "resolve",
+                        "error": f"{type(e).__name__}: {e}"}
+            meta = binding.as_metadata()
+            req = _rq.Request(binding.base_url + "/models",
+                              headers={"Authorization": f"Bearer {binding.api_key}"})
+            try:
+                with _rq.urlopen(req, timeout=10) as r:
+                    import json as _json
+                    served = [m.get("id")
+                              for m in _json.loads(r.read()).get("data", [])]
+            except Exception as e:  # noqa: BLE001 - 죽었으면 죽었다고 말한다
+                return {"ok": False, "stage": "server", "binding": meta,
+                        "error": f"{type(e).__name__}: {e}"}
+            # registry 에 켜진 adapter 가 서빙 목록에 없으면 그 워커 호출은
+            # 실패한다 - 불일치를 여기서 표면화한다
+            missing = {w: a for w, a in enabled.items() if a not in served}
+            notes = []
+            if binding.model not in served:
+                notes.append(f"서버는 살아 있는데 '{binding.model}' 이 서빙 목록에 없다")
+            for w, a in missing.items():
+                notes.append(f"registry 는 {w}→{a} 를 켰는데 서버에 그 adapter 가 없다")
+            return {"ok": binding.model in served and not missing,
+                    "binding": meta, "served_models": served,
+                    "registry_enabled_adapters": enabled,
+                    "note": "; ".join(notes) or None}
+
+        return await asyncio.to_thread(_probe)
 
     @server.tool(
         name="list_recent_packets",

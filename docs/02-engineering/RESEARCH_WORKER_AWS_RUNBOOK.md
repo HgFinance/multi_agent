@@ -31,9 +31,20 @@ nvidia-smi                       # 드라이버가 보여야 한다
 docker info 2>/dev/null | grep -i nvidia   # nvidia container runtime 확인
 ```
 
-- `nvidia-smi` 가 없으면: GPU 인스턴스가 아니다. Control Plane EC2 가 CPU 면
-  Model Plane 은 g6 계열로 이전/리사이즈 후 진행한다.
-- 드라이버는 있는데 docker 에 nvidia 가 없으면 nvidia-container-toolkit 설치:
+진단을 가른다 - 순서대로:
+
+1. **인스턴스 타입이 g6 계열이 아니면**: GPU 인스턴스가 아니다. Model Plane 은
+   g6 계열로 이전/리사이즈 후 진행한다.
+2. **g6 인데 `nvidia-smi` 가 없으면**: 인스턴스는 맞고 **드라이버가 없는 것**이다.
+   순정 Ubuntu 24.04 AMI 는 NVIDIA 드라이버가 사전 설치돼 있지 않다:
+
+```bash
+sudo apt-get update && sudo apt-get install -y ubuntu-drivers-common
+sudo ubuntu-drivers install --gpgpu     # 또는: sudo apt-get install -y nvidia-driver-570-server
+sudo reboot   # 재부팅 후 nvidia-smi 재확인
+```
+
+3. **드라이버는 있는데 docker 에 nvidia 가 없으면** nvidia-container-toolkit 설치:
 
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -122,8 +133,12 @@ docker logs --tail 5 hedgefund-research-mcp   # "research-mcp-v1: 0.0.0.0:8037/m
 ```
 
 ⚠ 이후 research-mcp / vllm 을 만질 때는 **항상 두 -f 를 함께** 쓴다.
-오버레이 없이 `docker compose up -d research-mcp` 를 돌리면 모델 env 가
-빠진 채 재생성돼 Worker 가 Ollama 기본값(없는 호스트)으로 떨어진다.
+오버레이 없이 `docker compose up -d research-mcp` 를 돌리면 모델 env 와
+런타임 파일 마운트가 빠진 채 재생성돼, 이후 모든 run_research_workers job 이
+`ModuleNotFoundError: No module named 'worker_model_gateway'` 로 FAILED 가 된다
+(§7 첫 행). 매번 -f 두 개가 번거로우면 `.env` 에
+`COMPOSE_FILE=docker-compose.yml:docker-compose.model.yml` 을 넣어도 된다
+(단, 이 EC2 의 다른 작업자와 합의 후).
 
 ## 5. Worker 직접 스모크 (Hermes 우회 - 러너·게이트웨이·vLLM 검증)
 
@@ -132,10 +147,18 @@ docker exec -i hedgefund-research-mcp python - <<'PY'
 import sys
 sys.path.insert(0, "/app"); sys.path.insert(0, "/app/departments")
 import worker_model_gateway as gw, employee_workers
-llm, b = gw.llm_for_worker()
-print("binding:", b.as_metadata())
+
+# 프로덕션(run_research_workers)과 같은 경로 - 워커별 binding 해석
+bindings = {}
+def llm_factory(worker_id):
+    llm, b = gw.llm_for_worker(worker_id)
+    bindings[worker_id] = b.as_metadata()
+    return llm
+
 r = employee_workers.run_employee_workers(
-    {"holding_question": "이 워커 배선이 동작하는지 한 단락으로 확인 응답하라"}, llm=llm)
+    {"holding_question": "이 워커 배선이 동작하는지 한 단락으로 확인 응답하라"},
+    llm_factory=llm_factory)
+print("bindings:", bindings)
 print("executed:", r["executed"], "degraded:", r["degraded"])
 print(r["workers"][0]["output"])
 PY
@@ -168,7 +191,7 @@ docker exec -u hermes -i hedgefund-research-hermes hermes chat -Q \
 
 | 증상 | 원인/조치 |
 |---|---|
-| job FAILED `ImportError: worker_model_gateway` | 오버레이 없이 research-mcp 를 올렸다 → §4 명령으로 재기동 |
+| job FAILED `ModuleNotFoundError: No module named 'worker_model_gateway'` | 오버레이 없이 research-mcp 를 올렸다(마운트 누락) → §4 명령으로 재기동 |
 | job FAILED `URLError`/`timeout` | vLLM 다운 또는 로딩 중 → `worker_model_health`, `docker logs hedgefund-vllm` |
 | `worker_model_health` ok:false, served_models 에 이름 없음 | `--served-model-name` 과 `WORKER_MODEL_NAME` 불일치 → .env 확인 |
 | worker DEGRADED `worker_output_schema_invalid` | 모델이 계약(JSON) 이탈 → 재시도 3회 후 fail-closed. 반복되면 모델·프롬프트 문제, WORKER_MODEL_MATRIX 절차로 벤치마크 |

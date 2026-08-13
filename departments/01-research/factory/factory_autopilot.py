@@ -491,7 +491,19 @@ def _vocab_block(conn=None) -> str:
                   "      max_exposure       익스포저 상한 (1.0 = 완전투자, 상한이 1.0)\n"
                   "      vol_lookback_days  변동성 추정 창 (기본 60)\n"
                   "    안 적으면 꺼진 채로 돈다(예전과 동일). **값은 네가 정한다** -\n"
-                  "    무엇을 얼마로 걸지가 이 실험의 가설이다.")
+                  "    무엇을 얼마로 걸지가 이 실험의 가설이다.\n"
+                  "  ▶ 집중도(top_n) 구조 진단 (2026-08-13 실측 - 기존 실험 로그\n"
+                  "    재계산이지 새 실험이 아니다. 시도예산·DSR 관문은 그대로다)\n"
+                  "      지금까지 전 실험이 관례 기본값 top-20 으로 돌았고, 그\n"
+                  "      초집중이 TC 0.114(신호의 89%가 비중에 전달되지 않음)와\n"
+                  "      TE 연 34.6% 의 주범이었다 - IR 미달의 범인은 신호가\n"
+                  "      아니라 구조였다. N=200 동일가중은 TC 0.316(2.8배)이고\n"
+                  "      top_n 상한은 300 까지 열려 있다. 순위(신호비례)가중은\n"
+                  "      같은 N 에서 동일가중보다 일관 열위 - 폭이 결정한다.\n"
+                  "      MAX 신호 IC -0.108(t -8.4, 페니주 필터 무영향, 반쪽\n"
+                  "      분할 모두 유의) - KRX 문헌(KCI·JDQS)의 '알파는 숏다리,\n"
+                  "      롱온리는 빼기(고MAX 배제)+광폭 보유' 와 같은 방향이다.\n"
+                  "      top_n 을 관례에 맡기지 말고 가설이 직접 정하라.")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2298,6 +2310,9 @@ def _selfcheck() -> int:
     assert "REGIME_ARTIFACT" not in v, "내가 지어낸 어휘가 아직 브리핑에 있다"
     for token in ("EDGE_TYPE", "UNIVERSE_KEY", "COMPETING_CODES", "DATA_TABLES"):
         assert token in v, f"통제 어휘에 {token} 이 빠졌다"
+    # IR 구조 진단이 브리핑에 실려 있는가 - 진단이 원장·보고서에만 남으면
+    # 기획자는 다음 주기에도 관례 top-20 으로 낸다(2026-08-13)
+    assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()

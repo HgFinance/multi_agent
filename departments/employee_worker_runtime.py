@@ -24,6 +24,11 @@ from langgraph.graph import END, StateGraph
 from orchestration.llm_observability import record_llm_call
 
 WorkerLLM = Callable[[str, str], str]
+# worker_id -> WorkerLLM. 부서별 LoRA adapter 처럼 **워커마다 모델 좌표가
+# 다를 수 있는** 주입 경로다(2026-08-13). 단일 llm 인자는 워커 정체를 모른 채
+# 공유되므로 Worker Model Gateway 의 worker_id→adapter 해석이 전달될 수 없었다
+# - registry 에 adapter 를 켜도 조용한 no-op 이 되는 결함이 리뷰에서 잡혔다.
+WorkerLLMFactory = Callable[[str], WorkerLLM]
 WorkerTool = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
@@ -310,12 +315,25 @@ def should_run(spec: WorkerSpec, payload: Mapping[str, Any]) -> bool:
     return value not in (None, "", [], {})
 
 
+def _resolve_worker_llm(spec: WorkerSpec, llm: WorkerLLM | None,
+                        llm_factory: WorkerLLMFactory | None) -> WorkerLLM | None:
+    """워커 하나가 쓸 LLM 을 확정한다. factory 가 있으면 factory 가 이긴다.
+
+    factory 실패는 여기서 삼키지 않는다 - 호출부의 fail-closed 경로
+    (DEGRADED + error)로 그대로 올라가야 한다.
+    """
+    if llm_factory is not None:
+        return llm_factory(spec.worker_id)
+    return llm
+
+
 def _run_worker_registry_sequential(
     specs: tuple[WorkerSpec, ...],
     payload: Mapping[str, Any],
     *,
     tools: Mapping[str, WorkerTool],
     llm: WorkerLLM | None = None,
+    llm_factory: WorkerLLMFactory | None = None,
 ) -> dict[str, Any]:
     """Run eligible independent employee graphs and return non-binding context."""
 
@@ -330,7 +348,12 @@ def _run_worker_registry_sequential(
         if tool is None:
             reports.append({"worker_id": spec.worker_id, "status": "DEGRADED", "error": "tool_not_registered", "tools": list(spec.tools), "output_contract": spec.output_contract, "input_hash": input_hash})
             continue
-        state = build_independent_worker_graph(spec, tool, llm).invoke({"worker_id": spec.worker_id, "input": dict(payload)})
+        try:
+            worker_llm = _resolve_worker_llm(spec, llm, llm_factory)
+        except Exception as exc:  # noqa: BLE001 - 모델 좌표 해석 실패는 fail-closed
+            reports.append({"worker_id": spec.worker_id, "role": spec.role, "tools": list(spec.tools), "status": "DEGRADED", "attempts": 0, "output": {}, "error": f"llm_factory:{type(exc).__name__}", "output_contract": spec.output_contract, "input_hash": input_hash})
+            continue
+        state = build_independent_worker_graph(spec, tool, worker_llm).invoke({"worker_id": spec.worker_id, "input": dict(payload)})
         reports.append({
             "worker_id": spec.worker_id,
             "role": spec.role,
@@ -361,11 +384,13 @@ def run_worker_registry(
     *,
     tools: Mapping[str, WorkerTool],
     llm: WorkerLLM | None = None,
+    llm_factory: WorkerLLMFactory | None = None,
 ) -> dict[str, Any]:
     """Synchronous compatibility boundary for async fan-out/fan-in execution."""
 
     return run_coroutine_sync(
-        run_worker_registry_async(specs, payload, tools=tools, llm=llm)
+        run_worker_registry_async(specs, payload, tools=tools, llm=llm,
+                                  llm_factory=llm_factory)
     )
 
 
@@ -375,6 +400,7 @@ async def run_worker_registry_async(
     *,
     tools: Mapping[str, WorkerTool],
     llm: WorkerLLM | None = None,
+    llm_factory: WorkerLLMFactory | None = None,
 ) -> dict[str, Any]:
     """Run Worker graphs with LangGraph async fan-out/fan-in.
 
@@ -399,7 +425,8 @@ async def run_worker_registry_async(
                 "input_hash": input_hash,
             }
         try:
-            app = build_independent_worker_graph(spec, tool, llm)
+            app = build_independent_worker_graph(
+                spec, tool, _resolve_worker_llm(spec, llm, llm_factory))
             state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
             return {
                 "worker_id": spec.worker_id,

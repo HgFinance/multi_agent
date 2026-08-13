@@ -112,7 +112,11 @@ def load_registry(path: str | os.PathLike | None) -> dict:
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+    # ValueError 로 넓게 잡는다 - JSONDecodeError 뿐 아니라 UnicodeDecodeError
+    # (Windows 편집기가 CP949 로 저장한 경우, 실측 리뷰에서 재현)도 여기 속한다.
+    # registry 하나 때문에 워커 면 전체가 죽는 것보다 base model 로 도는 쪽이
+    # 안전하다는 계약을 예외 타입 하나가 뚫으면 안 된다.
+    except (OSError, ValueError) as e:
         import sys
         print(f"⚠ worker model registry 를 읽지 못했다({p}): "
               f"{type(e).__name__}: {e} - 전원 base model 로 동작한다",
@@ -132,11 +136,28 @@ def _adapter_for(registry: Mapping, worker_id: str | None) -> tuple[str | None, 
     """
     if not worker_id:
         return None, "none"
-    entry = (registry.get("workers") or {}).get(worker_id) or {}
+    workers = registry.get("workers")
+    entry = workers.get(worker_id) if isinstance(workers, Mapping) else None
+    if not isinstance(entry, Mapping):
+        # 항목이 dict 가 아니면(손편집 실수) adapter 없음으로 degrade 한다
+        return None, "none"
     adapter_id = entry.get("adapter_id")
     if adapter_id and entry.get("status") == "enabled":
         return str(adapter_id), str(entry.get("adapter_version") or "unknown")
     return None, "none"
+
+
+def _float_env(raw: str | None, default: float) -> float:
+    """timeout 류 env 를 관대하게 읽는다 - 오타가 워커 면 전체를 죽이면 안 된다."""
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        import sys
+        print(f"⚠ 숫자가 아닌 timeout 값 {raw!r} - 기본값 {default} 을 쓴다",
+              file=sys.stderr)
+        return default
 
 
 def resolve(worker_id: str | None = None, *,
@@ -161,8 +182,8 @@ def resolve(worker_id: str | None = None, *,
             adapter_id=adapter_id,
             adapter_version=adapter_version,
             api_key=(e.get("WORKER_MODEL_API_KEY") or "vllm").strip() or "vllm",
-            timeout_seconds=float(e.get("WORKER_MODEL_TIMEOUT_SECONDS")
-                                  or DEFAULT_VLLM_TIMEOUT),
+            timeout_seconds=_float_env(e.get("WORKER_MODEL_TIMEOUT_SECONDS"),
+                                       DEFAULT_VLLM_TIMEOUT),
         )
 
     # DEV/TEST fallback - 기존 Ollama 경로와 같은 기본값.
@@ -175,8 +196,8 @@ def resolve(worker_id: str | None = None, *,
         adapter_id=adapter_id,
         adapter_version=adapter_version,
         api_key=(e.get("OLLAMA_API_KEY") or "ollama").strip() or "ollama",
-        timeout_seconds=float(e.get("OLLAMA_TIMEOUT_SECONDS")
-                              or DEFAULT_OLLAMA_TIMEOUT),
+        timeout_seconds=_float_env(e.get("OLLAMA_TIMEOUT_SECONDS"),
+                                   DEFAULT_OLLAMA_TIMEOUT),
     )
 
 
@@ -245,6 +266,26 @@ def llm_for_worker(worker_id: str | None = None, *,
     return worker_llm(binding), binding
 
 
+def enabled_adapters(*, env: Mapping[str, str] | None = None,
+                     registry_path: str | None = None) -> dict[str, str]:
+    """registry 에 enabled 로 켜진 worker→adapter_id 맵 (진단용).
+
+    health 검사가 이걸 서빙 목록과 대조한다 - registry 는 켰는데 vLLM 에
+    adapter 가 없으면 그 불일치가 여기서 표면화된다.
+    """
+    e = os.environ if env is None else env
+    reg = load_registry(registry_path or e.get("WORKER_MODEL_REGISTRY_PATH") or "")
+    out: dict[str, str] = {}
+    workers = reg.get("workers")
+    if not isinstance(workers, Mapping):
+        return out
+    for worker_id in workers:
+        adapter_id, _ = _adapter_for(reg, str(worker_id))
+        if adapter_id:
+            out[str(worker_id)] = adapter_id
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 - 네트워크 없음
 # ---------------------------------------------------------------------------
@@ -308,6 +349,31 @@ def _check_registry(tmp: Path):
     bad = tmp / "bad.json"
     bad.write_text("{not-json", encoding="utf-8")
     assert load_registry(str(bad)) == {}
+
+    # CP949 로 저장된 파일(UnicodeDecodeError)도 degrade 다 - Windows 편집기
+    # 실수 하나가 워커 면 전체를 죽이면 안 된다 (2026-08-13 리뷰 재현)
+    cp949 = tmp / "cp949.json"
+    cp949.write_bytes('{"_comment": "한국어 주석"}'.encode("cp949"))
+    assert load_registry(str(cp949)) == {}
+    b = resolve("w", env={**env, "WORKER_MODEL_REGISTRY_PATH": str(cp949)})
+    assert b.model == DEFAULT_VLLM_MODEL
+
+    # workers 항목이 dict 가 아니어도(손편집 실수) 예외가 아니라 degrade 다
+    malformed = tmp / "malformed.json"
+    malformed.write_text(json.dumps({"workers": {"w1": "research-lora"}}),
+                         encoding="utf-8")
+    b = resolve("w1", env=env, registry_path=str(malformed))
+    assert b.model == DEFAULT_VLLM_MODEL and b.adapter_id is None
+    assert enabled_adapters(env=env, registry_path=str(malformed)) == {}
+
+    # timeout 오타는 기본값으로 산다
+    b = resolve(env={"WORKER_MODEL_BASE_URL": "http://vllm:8000",
+                     "WORKER_MODEL_TIMEOUT_SECONDS": "12O"})
+    assert b.timeout_seconds == 120.0
+
+    # enabled_adapters 는 enabled 만 나열한다
+    got = enabled_adapters(env=env, registry_path=str(reg))
+    assert got == {"with-adapter": "research-lora"}, got
     print("  registry 해석            OK")
 
 

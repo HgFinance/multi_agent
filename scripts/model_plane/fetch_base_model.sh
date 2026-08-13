@@ -36,6 +36,10 @@ docker run --rm \
   "$VLLM_IMAGE" \
   -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$MODEL_REPO', local_dir='/models/$DIRNAME')"
 
+# 컨테이너(root)가 쓴 트리를 호스트 사용자 소유로 되돌린다 - 안 하면 이후
+# aws s3 sync 갱신·정리가 Permission denied 로 실패한다
+sudo chown -R "$(id -u):$(id -g)" "$DEST_ROOT"
+
 python3 "$SCRIPT_DIR/model_manifest.py" --model-dir "$DEST" --write
 
 cat <<EOF

@@ -42,6 +42,7 @@ from typing import Any
 try:
     from departments.employee_worker_runtime import (
         WorkerLLM,
+        WorkerLLMFactory,
         WorkerSpec,
         run_worker_registry,
         tools_for_specs,
@@ -49,6 +50,7 @@ try:
 except ModuleNotFoundError:
     from employee_worker_runtime import (
         WorkerLLM,
+        WorkerLLMFactory,
         WorkerSpec,
         run_worker_registry,
         tools_for_specs,
@@ -71,5 +73,13 @@ WORKER_SPECS = (
 )
 
 
-def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = None) -> dict[str, Any]:
-    return run_worker_registry(WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS), llm=llm)
+def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = None,
+                         llm_factory: WorkerLLMFactory | None = None) -> dict[str, Any]:
+    """llm_factory 가 있으면 워커별로 모델 좌표를 해석한다(부서 LoRA 경로).
+
+    단일 llm 은 워커 정체를 모른 채 공유되므로 Worker Model Gateway 의
+    worker_id→adapter 해석이 전달되지 않는다 - MCP 경로는 factory 를 쓴다.
+    """
+    return run_worker_registry(WORKER_SPECS, payload,
+                               tools=tools_for_specs(WORKER_SPECS),
+                               llm=llm, llm_factory=llm_factory)

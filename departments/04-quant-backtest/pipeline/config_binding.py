@@ -77,7 +77,14 @@ FLOAT_KEYS = frozenset({"vol_target_annual", "max_drawdown_stop", "max_exposure"
 
 LIMITS = {
     "lookback_days": (2, 250),      # 1일은 신호가 아니고, 250일 초과는 표본 부족
-    "top_n": (5, 100),              # 5 미만은 분산이 안 되고, 100 초과는 지수다
+    # ▶ top_n 상한 개방 (5,100)→(5,300) (2026-08-13). IR 구조 진단 실측:
+    #   top-20/3,924 초집중이 TC 0.114(신호 89% 소실)·TE 연 34.6% 의 주범이고
+    #   N=200 동일가중은 TC 0.316(2.8배)다. KCI(KRX 32년, 알파는 숏다리 →
+    #   롱온리는 빼기+광폭 보유)·DeMiguel(1/N)도 같은 방향이다. 300 초과는
+    #   3,924 종목의 8%를 넘어 지수 복제에 가까워지므로 여전히 막는다.
+    #   **값은 우리가 정하지 않는다** - 얼마로 걸지는 기획안이 정한다.
+    "top_n": (5, 300),              # 5 미만은 분산이 안 된다
+
     "holding_horizon": (1, 120),
     # ▶ **레버리지를 열지 않는다.** 상한이 1.0 이다.
     #   개발원칙 9: "위험한 기능은 실패 시 거래 확대가 아니라 Entry 차단
@@ -276,6 +283,14 @@ def _check_out_of_range_is_rejected_not_clamped():
 
     b2 = bind({"expected_edge": {"horizon_days": 5}, "top_n": 3}, _BASE)
     assert not b2.ok and "top_n" in b2.rejected[0], b2
+    # ▶ 광폭 보유 개방(2026-08-13): 200 은 실행 가능해야 하고(진단 실측 TC
+    #   2.8배), 400 은 여전히 거부돼야 한다 - 개방이 무제한이 되면 지수를
+    #   '전략'으로 등록하는 길이 열린다.
+    b3 = bind({"expected_edge": {"horizon_days": 5, "top_n": 200}}, _BASE)
+    assert b3.ok, b3.rejected
+    assert b3.config["top_n"] == 200, b3.config
+    b4 = bind({"expected_edge": {"horizon_days": 5, "top_n": 400}}, _BASE)
+    assert not b4.ok and "top_n" in b4.rejected[0], b4
 
 
 def _check_missing_uses_default_and_says_so():
