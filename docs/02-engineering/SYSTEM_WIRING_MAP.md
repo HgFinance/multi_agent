@@ -306,7 +306,7 @@
 | 6 | 퀀트 공장 워커 3명(접수·설계·교훈) `pending_hr` 미구현 — 결정론 코드가 대행 중 | 편제 결정 필요 |
 | 7 | `ceo-kanban-supervisor` `canonical abort failed: exited 1` 반복 | [main] `55b956b`(parentless task projection 수정)이 관련 가능성 — 새 코드 반영 후 재관측 필요 |
 | 8 | ~~로컬 실행 스택 60커밋 지연~~ | ✅ **2026-08-13 해소** — origin/main 병합(`d20bfa1`) + 재기동, 38/38 실행. 8001 은 portfolio-bff 로 인계 완료 |
-| 9 | **`Dockerfile.hermes-discord` 가 저장소에 없다** — compose 는 hermes 8개를 이 파일로 빌드하려 하고, 이미지(`hgfinance/hermes-discord`)는 pull access denied. **팀원이 Dockerfile 커밋 또는 레지스트리 접근을 공유해야 한다.** 로컬은 `.env` 의 `HERMES_GATEWAY_IMAGE=nousresearch/hermes-agent:latest` 핀으로 임시 우회 중 — Discord 게이트웨이 기능은 로컬에서 아직 안 돈다 | 팀 공유 대기 |
+| 9 | **`Dockerfile.hermes-discord` 가 저장소에 없다** — GitHub 는 AWS 기준이라 EC2 호스트에는 이미지가 이미 있을 가능성이 높다(그래서 AWS 에서는 돌아간다). 다만 새로 clone 하는 환경(로컬·EC2 교체)은 재현 불가 — 재현성 관점에서 Dockerfile 커밋이 필요하다. 로컬은 `.env` 의 `HERMES_GATEWAY_IMAGE=nousresearch/hermes-agent:latest` 핀으로 우회 중(Discord 게이트웨이 기능만 로컬 미가동) | 재현성 확보 필요 |
 | 10 | 팀원 소유 테스트 실패 2건 — `test_unavailable_aws_only_sources…`(하드코딩 목록), `test_task_status_route_reads_planning_projection`(origin/main 단독 재현) | 소유자 수리 대기 |
 
 ---
