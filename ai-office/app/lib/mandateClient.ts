@@ -41,8 +41,14 @@ import {
 import { currentFundId, readStoredAccount, withAccountHeaders } from "./currentAccount";
 import type { AssetClassId, MandateDraft, RiskProfile } from "../mandate/MandateConfig";
 
-/** `RiskProfile`(화면 3지선다) -> `Mindset`(서버 계약). 1:1이라 추론이 아니다. */
-const MINDSET_BY_RISK_PROFILE: Record<RiskProfile, Mindset> = {
+/**
+ * `RiskProfile`(화면 3지선다) -> `Mindset`(서버 계약). 1:1이라 추론이 아니다.
+ *
+ * `export`인 이유: `MandateConfig.tsx`가 성향 선택 시 슬라이더 기본값을 채울 때도
+ * 같은 매핑이 필요하다. 여기서 하나만 두지 않고 화면에 또 하나를 두면, 나중에
+ * 성향 3개 중 하나가 바뀔 때 한쪽만 고쳐질 위험이 있다.
+ */
+export const MINDSET_BY_RISK_PROFILE: Record<RiskProfile, Mindset> = {
   conservative: "SAFETY_FIRST",
   neutral: "BALANCED",
   aggressive: "RISK_SEEKING",

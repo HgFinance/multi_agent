@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MandateSubmissionError, submitMandateDraft } from "../lib/mandateClient";
+import { MINDSET_BY_RISK_PROFILE, MandateSubmissionError, submitMandateDraft } from "../lib/mandateClient";
+import { sliderDefaultsFor } from "../lib/mandatePresets";
 
 /**
  * 운용 지침 설정 화면.
@@ -60,20 +61,22 @@ const APPROVAL_MODES: { id: ApprovalMode; icon: string; label: string; note: str
   { id: "manual", icon: "pan_tool", label: "Manual Approval Required", note: "모든 제안된 주문은 실행 전 관리자의 승인이 필요합니다." },
 ];
 
+// 초기 화면도 "conservative를 골랐을 때"와 같은 값이어야 한다 - 페이지를 막
+// 열었을 때 보이는 슬라이더가 이미 선택된 성향(conservative)의 기본값과
+// 다르면, 이 작업이 고치려는 "성향 선택 시 기본값이 바뀐다"는 기대와 첫
+// 화면부터 어긋난다. `sliderDefaultsFor`를 그대로 불러서 값을 중복해서
+// 적지 않는다.
+const INITIAL_SLIDER_DEFAULTS = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE.conservative, "INTERMEDIATE");
+
 const DEFAULT_DRAFT: MandateDraft = {
   objective: "",
   riskProfile: "conservative",
   baseCapital: 100_000_000,
   currency: "USD",
-  // 2026-08-12: 기본 성향(conservative)의 프리셋 상한(max_sector_weight=25%)보다
-  // 낮아야 한다(mandatePresets.ts LOW 등급) - 그래야 값을 하나도 안 건드리고
-  // 바로 제출해도 `max_instrument_weight <= max_sector_weight` 제약을 지킨다.
-  maxSingleWeightPct: 20,
-  grossExposurePct: 200,
-  // USER_INPUT_API_SPEC.md 예시값과 같은 기본선(20%/3%). risk_bounds 계약상
-  // maxDailyLossPct는 항상 maxDrawdownPct 이하여야 한다(§3.2 신규 제약).
-  maxDrawdownPct: 20,
-  maxDailyLossPct: 3,
+  maxSingleWeightPct: INITIAL_SLIDER_DEFAULTS.maxSingleWeightPct,
+  grossExposurePct: INITIAL_SLIDER_DEFAULTS.grossExposurePct,
+  maxDrawdownPct: INITIAL_SLIDER_DEFAULTS.maxDrawdownPct,
+  maxDailyLossPct: INITIAL_SLIDER_DEFAULTS.maxDailyLossPct,
   // 기본은 현물 Long-only. 레버리지·파생·가상자산은 정책 계층에서 꺼둔 상태로 시작한다.
   allowedAssets: { equity: true, etf: true, leverage: false, futures: false, options: false, derivatives: false, crypto: false },
   approvalMode: "manual",
@@ -154,6 +157,33 @@ export default function MandateConfig() {
 
   const patch = useCallback(<K extends keyof MandateDraft>(key: K, value: MandateDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  /**
+   * 위험 성향을 고르면 슬라이더 4개가 그 등급의 잠정 기본값으로 바뀐다.
+   * `riskProfile`과 슬라이더 값을 `setDraft` 한 번으로 같이 갱신하는 이유:
+   * 따로따로 `patch`를 두 번 부르면 그 사이 렌더에서 잠깐 "성향은 바뀌었는데
+   * 슬라이더는 옛값"인 상태가 생긴다.
+   *
+   * `sliderDefaultsFor`가 등급을 낼 때 이 화면이 안 묻는 투자 경험을
+   * `mandateClient.ts`와 같은 자리표시자(INTERMEDIATE)로 고정한다 - 그래야
+   * 여기서 보여주는 기본값과 실제 제출 시 서버로 가는 숨김 필드가 같은
+   * 등급을 가리킨다(다르면 전에 겪은 슬라이더-프리셋 어긋남과 같은 문제가
+   * 다시 생긴다).
+   *
+   * 이건 **제안 기본값일 뿐**이다 - 고른 뒤에도 슬라이더는 그대로 움직일 수
+   * 있고, 실제 제출값은 그 시점의 슬라이더 값이다.
+   */
+  const selectRiskProfile = useCallback((profile: RiskProfile) => {
+    const defaults = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE[profile], "INTERMEDIATE");
+    setDraft((current) => ({
+      ...current,
+      riskProfile: profile,
+      maxSingleWeightPct: defaults.maxSingleWeightPct,
+      grossExposurePct: defaults.grossExposurePct,
+      maxDrawdownPct: defaults.maxDrawdownPct,
+      maxDailyLossPct: defaults.maxDailyLossPct,
+    }));
   }, []);
 
   useEffect(() => {
@@ -284,7 +314,7 @@ export default function MandateConfig() {
                           type="button"
                           role="radio"
                           aria-checked={on}
-                          onClick={() => patch("riskProfile", item.id)}
+                          onClick={() => selectRiskProfile(item.id)}
                           className={`h-full border rounded-lg p-4 flex flex-col items-center justify-center text-center transition-colors ${
                             on ? "border-primary bg-secondary-container shadow-sm" : "border-outline-variant hover:bg-surface-container"
                           }`}
