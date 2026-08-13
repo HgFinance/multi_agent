@@ -938,8 +938,10 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
     # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
     from external_sources import register_external_tools
     from external_macro import register_macro_tools
+    from external_global import register_global_tools
     register_external_tools(server)
     register_macro_tools(server)
+    register_global_tools(server)
 
     if liaison:
         _restrict_to_liaison(server)

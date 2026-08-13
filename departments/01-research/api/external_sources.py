@@ -45,6 +45,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 
@@ -303,6 +304,140 @@ def news_search(query: str, display: int = 10, sort: str = "date") -> dict:
 
 
 # ── 등록 ────────────────────────────────────────────────────────────────────
+# ── 웹 본문 읽기 ────────────────────────────────────────────────────────────
+WEB_DAILY_CAP = int(os.environ.get("MCP_WEB_DAILY_CAP", "2000"))
+_READ_MAX_BYTES = 3 * 1024 * 1024
+
+
+class _TextExtract(HTMLParser):
+    """script/style 을 버리고 본문 텍스트와 <title> 만 모은다 (stdlib 전용)."""
+    _SKIP = {"script", "style", "noscript", "svg", "iframe"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.title = ""
+        self._skip_depth = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in ("p", "br", "div", "li", "h1", "h2", "h3", "tr", "article"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth:
+            self._skip_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+        elif not self._skip_depth:
+            self.parts.append(data)
+
+
+def _assert_public_host(url: str) -> None:
+    """사설·내부 IP 로 가는 fetch 를 막는다.
+
+    공식 fetch MCP 의 보안 경고가 근거다 - 우리 compose 망에서는 에이전트가
+    accounting-api:8000 같은 내부 면을 열 수 있게 되므로, 해석된 모든 주소가
+    공인(global)일 때만 허용한다. 차단은 오류로 정직하게 알린다.
+    """
+    import ipaddress
+    import socket
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise RuntimeError(f"http(s) 만 허용한다: {parts.scheme}")
+    host = parts.hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        raise RuntimeError(f"호스트 해석 실패: {host} ({e})") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global:
+            raise RuntimeError(
+                f"내부/사설 주소({ip})로의 fetch 는 차단된다 - 내부 API 는 "
+                f"전용 도구를 쓸 것")
+
+
+def read_url(url: str, max_chars: int = 8000, start: int = 0) -> dict:
+    """웹 페이지 본문을 텍스트로 읽는다 - 뉴스 link·공시 viewer_url 열람용.
+
+    news_search 는 제목·요약만 주므로, 깊이 읽어야 할 때 이 도구로 본문을
+    가져온다. 길면 start 로 이어 읽는다. 추출 실패·차단 사이트는 실패로
+    돌려준다 - 본문을 지어내지 말 것.
+    """
+    _assert_public_host(url)
+    spend("web", WEB_DAILY_CAP)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; hgfinance-research/1.0)",
+        "Accept-Language": "ko, en"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        final = r.geturl()
+        if final != url:
+            _assert_public_host(final)   # 리다이렉트 후 재검사
+        raw = r.read(_READ_MAX_BYTES)
+    try:
+        html = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        html = raw.decode("euc-kr", errors="replace")
+    p = _TextExtract()
+    p.feed(html)
+    text = re.sub(r"[ \t ]+", " ", "".join(p.parts))
+    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
+    n = max(500, min(int(max_chars), 20000))
+    s = max(0, int(start))
+    out = {"url": url, "final_url": final, "title": p.title.strip(),
+           "total_chars": len(text), "start": s,
+           "text": text[s:s + n],
+           "truncated": len(text) > s + n,
+           "fetched_at": datetime.now(KST).isoformat()}
+    out["citation"] = _snapshot("read_url", {"url": url, "start": s}, out)
+    return out
+
+
+# ── 네이버 DataLab 검색 트렌드 ──────────────────────────────────────────────
+def datalab_trend(keywords: list, start: str, end: str,
+                  time_unit: str = "date") -> dict:
+    """네이버 검색 트렌드 (DataLab). 종목명 검색량 추이 = 리테일 관심도 프록시.
+
+    keywords 최대 5개(각각이 한 그룹), start/end 는 YYYY-MM-DD,
+    time_unit=date|week|month. 값은 기간 내 최대치=100 인 상대지수다 -
+    절대 검색량이 아니므로 서로 다른 조회끼리 수치 비교 금지.
+    """
+    cid = os.environ.get("NAVER_CLIENT_ID", "").strip()
+    sec = os.environ.get("NAVER_CLIENT_SECRET", "").strip()
+    if not (cid and sec):
+        raise RuntimeError("NAVER_CLIENT_ID/SECRET 가 없다")
+    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()][:5]
+    if not kws:
+        raise RuntimeError("keywords 가 비었다")
+    spend("naver", NAVER_DAILY_CAP)
+    payload = json.dumps({
+        "startDate": start, "endDate": end,
+        "timeUnit": time_unit if time_unit in ("date", "week", "month") else "date",
+        "keywordGroups": [{"groupName": k, "keywords": [k]} for k in kws],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://openapi.naver.com/v1/datalab/search", data=payload,
+        headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": sec,
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        body = json.loads(r.read().decode("utf-8"))
+    out = {"period": f"{start} ~ {end}", "unit": "상대지수(기간 내 최대=100)",
+           "results": body.get("results", []),
+           "queried_at": datetime.now(KST).isoformat()}
+    out["citation"] = _snapshot("datalab_trend", {
+        "keywords": kws, "start": start, "end": end}, out)
+    return out
+
+
 def record_citations(citations: list, note: str = "") -> dict:
     """답변에 **실제로 인용한** 조회의 citation 해시를 표시한다 (cache-on-cite v2).
 
@@ -347,6 +482,15 @@ def register_external_tools(server) -> None:
         name="record_citations",
         description="답변에 실제로 인용한 조회의 citation 해시 목록을 표시한다. "
                     "답변을 마치기 직전 한 번 호출 - QA 재검증의 근거가 된다.")(record_citations)
+    server.tool(
+        name="read_url",
+        description="웹 페이지 본문을 텍스트로 읽는다 - news_search 의 link, "
+                    "dart 의 viewer_url 을 깊이 읽을 때. 길면 start 로 이어 읽기. "
+                    "내부/사설 주소는 차단된다.")(read_url)
+    server.tool(
+        name="datalab_trend",
+        description="네이버 검색 트렌드(리테일 관심도 프록시). 키워드 최대 5개, "
+                    "상대지수(기간 내 최대=100) - 조회 간 수치 비교 금지.")(datalab_trend)
 
 
 # ── 자체 점검 (네트워크 없음) ───────────────────────────────────────────────

@@ -184,6 +184,9 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+  # 2026-08-13 가동 시도 -> 의존성 부패로 기동 실패 (youtube: mcp 라이브러리
+  # FastMCP import 깨짐, paper: 재시작 루프). 죽은 서버를 켜두면 에이전트마다
+  # 연결 대기가 생기므로 끈다. 백로그: uvx 버전 고정 후 재시도.
   paper-search:
     url: http://paper-search-mcp:8041/mcp
     enabled: false
