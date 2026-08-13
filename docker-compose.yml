@@ -960,7 +960,10 @@ services:
     stop_grace_period: 20s
 
   ceo-kanban-supervisor:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.ceo-supervisor
+    image: hedgefund-ceo-supervisor:latest
     container_name: hedgefund-ceo-kanban-supervisor
     restart: unless-stopped
     logging:
