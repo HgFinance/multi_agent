@@ -53,6 +53,11 @@ _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
 MAX_JOBS_KEPT = 50
 
+# 직원 Worker(LangGraph) 실행 작업 - Packet 작업과 저장소를 분리한다.
+# 모양이 다르다(Packet 은 subprocess tail 파싱, Worker 는 registry 결과 dict).
+_WORKER_JOBS: dict[str, dict] = {}
+_WORKER_JOBS_LOCK = threading.Lock()
+
 
 def _db():
     import psycopg2
@@ -153,6 +158,60 @@ def finish_job(job_id: str, *, exit_code: int, tail: str, now: datetime) -> dict
         return dict(j)
 
 
+def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    with _WORKER_JOBS_LOCK:
+        _WORKER_JOBS[job_id] = {
+            "job_id": job_id, "kind": "employee_workers",
+            "payload_fields": payload_fields, "status": "RUNNING",
+            "started_at": now.isoformat(), "ended_at": None,
+            "result": None, "model_plane": None, "error": None,
+        }
+        if len(_WORKER_JOBS) > MAX_JOBS_KEPT:
+            for k in list(_WORKER_JOBS)[:-MAX_JOBS_KEPT]:
+                _WORKER_JOBS.pop(k, None)
+    return job_id
+
+
+def finish_worker_job(job_id: str, *, result: dict | None,
+                      model_plane: dict | None, error: str | None,
+                      now: datetime) -> dict:
+    with _WORKER_JOBS_LOCK:
+        j = _WORKER_JOBS.get(job_id)
+        if j is None:
+            return {}
+        # degraded=True 여도 작업 자체는 끝났다 - FAILED 는 registry 실행이
+        # 예외로 죽은 경우만이다. degraded 는 결과 안에 그대로 보인다.
+        j["status"] = "FAILED" if error else "COMPLETED"
+        j["ended_at"] = now.isoformat()
+        j["result"] = result
+        j["model_plane"] = model_plane
+        j["error"] = error
+        return dict(j)
+
+
+def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
+                         portfolio_state: str = "", news: str = "") -> dict:
+    """Worker 트리거 payload. 빈 인자는 싣지 않는다.
+
+    employee_worker_runtime.should_run 은 trigger 필드가 비어 있지 않을 때만
+    Worker 를 돌린다 - 빈 문자열을 실으면 '트리거됐는데 근거가 빈' 워커가
+    생겨 DEGRADED 로 보인다. 트리거가 하나도 없으면 ValueError 다 -
+    아무도 안 도는 실행을 RUNNING 으로 위장하지 않는다.
+    """
+    payload = {k: v for k, v in {
+        "holding_question": holding_question.strip(),
+        "proposal_draft": proposal_draft.strip(),
+        "portfolio_state": portfolio_state.strip(),
+        "news": news.strip(),
+    }.items() if v}
+    if not ({"holding_question", "proposal_draft"} & set(payload)):
+        raise ValueError(
+            "holding_question 또는 proposal_draft 중 하나는 있어야 한다 - "
+            "리서치 Worker 2인의 트리거가 그 둘뿐이다")
+    return payload
+
+
 def summarize_health(rows: list[dict]) -> dict:
     """collector_health 행 -> 한 눈에 보는 상태. SKIP 은 고장이 아니다."""
     bad = [r for r in rows if (r.get("bad_24h") or 0) > 0]
@@ -243,6 +302,111 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             return {"error": "그런 job_id 가 없다(서버 재시작 시 메모리가 비워진다). "
                              "완료된 Packet 은 list_recent_packets 로 찾는다"}
         return dict(j)
+
+    # ── 직원 Worker 실행 (LangGraph runner) ──────────────────────────────
+    # ▶ 지금까지 run_employee_workers 를 부르는 손은 파이썬 오케스트레이터
+    #   (paper_pipeline, portfolio_recommendation)뿐이었다 - 본부장(Hermes)이
+    #   자기 부서 Worker 를 돌릴 간선이 없었다. 이 도구가 그 간선이다.
+    # ▶ Worker 는 Worker Model Gateway(departments/worker_model_gateway.py)를
+    #   통해 모델을 부른다. AWS 에서는 vLLM Qwen2.5-14B FP8, DEV 에서는
+    #   기존 Ollama 로 자동 해석된다. Worker 산출은 언제나 비구속
+    #   worker-context 다 - 주문·판정·원장에 닿지 않는다.
+    def _worker_modules():
+        """repo 루트를 sys.path 에 얹고 (gateway, employee_workers) 를 준다.
+
+        컨테이너에서 repo 루트는 /app 이다. employee_worker_runtime.py 와
+        worker_model_gateway.py, orchestration/ 은 이미지에 없고
+        docker-compose.model.yml 이 마운트한다 - 없으면 ImportError 가
+        그대로 job 실패로 남는다(조용한 성공 위장 금지).
+        """
+        repo_root = _BASE.parent.parent
+        for p in (str(repo_root), str(_BASE.parent)):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        import worker_model_gateway as gateway  # departments/ 에서 온다
+        import employee_workers                 # _BASE 에서 온다
+        return gateway, employee_workers
+
+    @server.tool(
+        name="run_research_workers",
+        description="리서치 직원 Worker(LangGraph 2인)를 실행한다. "
+                    "holding_question 을 주면 holdings-analyst-worker, "
+                    "proposal_draft 를 주면 competing-explanation-worker 가 돈다 "
+                    "(둘 다 주면 둘 다 돈다). portfolio_state·news 는 "
+                    "holdings-analyst 의 보조 근거다. 모델 추론이 수십 초 "
+                    "걸리므로 job_id 만 즉시 돌려준다 - get_worker_job 으로 "
+                    "결과(worker-context, 비구속)를 조회한다. Worker 산출은 "
+                    "요약하지 말고 summary·confidence·evidence_refs·escalate "
+                    "를 그대로 인용하라.")
+    def run_research_workers(holding_question: str = "", proposal_draft: str = "",
+                             portfolio_state: str = "", news: str = "") -> dict:
+        try:
+            payload = build_worker_payload(holding_question, proposal_draft,
+                                           portfolio_state, news)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        job_id = register_worker_job(sorted(payload), now=datetime.now(KST))
+
+        def _run():
+            try:
+                gateway, employee_workers = _worker_modules()
+                llm, binding = gateway.llm_for_worker()
+                result = employee_workers.run_employee_workers(payload, llm=llm)
+                finish_worker_job(job_id, result=result,
+                                  model_plane=binding.as_metadata(),
+                                  error=None, now=datetime.now(KST))
+            except Exception as e:  # noqa: BLE001 - 실패를 실패로 남긴다
+                finish_worker_job(job_id, result=None, model_plane=None,
+                                  error=f"{type(e).__name__}: {e}",
+                                  now=datetime.now(KST))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"job_id": job_id, "status": "RUNNING",
+                "payload_fields": sorted(payload),
+                "note": "get_worker_job(job_id) 으로 결과를 조회한다"}
+
+    @server.tool(
+        name="get_worker_job",
+        description="run_research_workers 가 만든 작업의 상태·결과를 조회한다. "
+                    "COMPLETED 여도 result.degraded 가 true 면 일부 Worker 가 "
+                    "실패한 것이다 - 그 사실을 숨기지 말고 그대로 보고하라.")
+    def get_worker_job(job_id: str) -> dict:
+        with _WORKER_JOBS_LOCK:
+            j = _WORKER_JOBS.get(str(job_id).strip())
+        if j is None:
+            return {"error": "그런 job_id 가 없다(서버 재시작 시 메모리가 "
+                             "비워진다). run_research_workers 로 다시 시작하라"}
+        return dict(j)
+
+    @server.tool(
+        name="worker_model_health",
+        description="Worker 모델 서빙 상태를 확인한다 - 어떤 게이트웨이 좌표로 "
+                    "해석되는지와 모델 서버가 실제로 응답하는지. Worker 실행이 "
+                    "계속 실패하면 먼저 이걸 본다.")
+    def worker_model_health() -> dict:
+        import urllib.error
+        import urllib.request as _rq
+
+        try:
+            gateway, _ = _worker_modules()
+            binding = gateway.resolve()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "stage": "resolve",
+                    "error": f"{type(e).__name__}: {e}"}
+        meta = binding.as_metadata()
+        req = _rq.Request(binding.base_url + "/models",
+                          headers={"Authorization": f"Bearer {binding.api_key}"})
+        try:
+            with _rq.urlopen(req, timeout=10) as r:
+                import json as _json
+                served = [m.get("id") for m in _json.loads(r.read()).get("data", [])]
+        except Exception as e:  # noqa: BLE001 - 죽었으면 죽었다고 말한다
+            return {"ok": False, "stage": "server", "binding": meta,
+                    "error": f"{type(e).__name__}: {e}"}
+        return {"ok": binding.model in served, "binding": meta,
+                "served_models": served,
+                "note": None if binding.model in served else
+                        f"서버는 살아 있는데 '{binding.model}' 이 서빙 목록에 없다"}
 
     @server.tool(
         name="list_recent_packets",
@@ -383,11 +547,15 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                     "함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. 근거 "
                     "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
                     "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
-                    "카드 안에서 다시 제출하라.")
+                    "카드 안에서 다시 제출하라. `llm_model_id` 와 "
+                    "`llm_training_cutoff`(YYYY-MM-DD, 네 지식 컷오프)를 함께 "
+                    "넣어라 - 백테스트 성적을 컷오프 이전/이후로 가르는 데 쓴다.")
     def factory_submit_proposal(planner_text: str, skeptic_text: str,
                                 planner_run: str, skeptic_run: str,
                                 planner_prompt: str = "",
-                                skeptic_prompt: str = "") -> dict:
+                                skeptic_prompt: str = "",
+                                llm_model_id: str = "",
+                                llm_training_cutoff: str = "") -> dict:
         _factory_path()
         import proposal_intake as PI
 
@@ -428,6 +596,24 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             new = dup = 0
             if pub:
                 new, dup = PI.persist(conn, pub)
+                # ▶ **LLM 시점 스탬프** (2026-08-13, 관문 9조항의 계측 기초)
+                #   Sarkar-Vafa 실증: 익명화해도 LLM 은 재식별한다 - 방어선은
+                #   시간 분할이고, 그 전제가 "가설을 쓴 모델의 지식 컷오프가
+                #   원장에 각인돼 있는 것" 이다. 스탬프가 있어야 나중에 성적을
+                #   컷오프 이전(참고치)/이후(판정치)로 가를 수 있다. 값이 없으면
+                #   NULL 로 남는다 - 지어내지 않는다.
+                if llm_model_id.strip() or llm_training_cutoff.strip():
+                    with conn.cursor() as _cu:
+                        _cu.execute(
+                            "update research.experiment_proposals set"
+                            "  llm_model_id = coalesce(nullif(%s,''), llm_model_id),"
+                            "  llm_training_cutoff = coalesce(nullif(%s,'')::date,"
+                            "                                 llm_training_cutoff)"
+                            " where proposal_id = any(%s)",
+                            (llm_model_id.strip()[:120],
+                             llm_training_cutoff.strip()[:10],
+                             [p.proposal_id for p in pub]))
+                    conn.commit()
             return {
                 "ok": bool(pub), "published": new, "already_present": dup,
                 "unknown_lead_ids": missing,
@@ -488,6 +674,48 @@ def _check_job_lifecycle():
     print("  작업 수명주기            OK")
 
 
+def _check_worker_payload():
+    p = build_worker_payload(holding_question="  삼성전자 실적?  ",
+                             news="", portfolio_state="보유 10주")
+    assert p == {"holding_question": "삼성전자 실적?", "portfolio_state": "보유 10주"}, p
+    p = build_worker_payload(proposal_draft="draft-x")
+    assert p == {"proposal_draft": "draft-x"}
+    p = build_worker_payload(holding_question="q", proposal_draft="d")
+    assert set(p) == {"holding_question", "proposal_draft"}
+    # 트리거 없이 보조 필드만 주면 거부한다 - 아무도 안 도는 실행을
+    # RUNNING 으로 위장하지 않는다
+    for kwargs in ({}, {"news": "n"}, {"portfolio_state": "s"},
+                   {"holding_question": "   "}):
+        try:
+            build_worker_payload(**kwargs)
+            raise AssertionError(f"트리거 없는 payload 가 통과했다: {kwargs}")
+        except ValueError:
+            pass
+    print("  Worker payload 계약      OK")
+
+
+def _check_worker_job_lifecycle():
+    now = datetime(2026, 8, 13, 10, tzinfo=KST)
+    jid = register_worker_job(["holding_question"], now=now)
+    with _WORKER_JOBS_LOCK:
+        assert _WORKER_JOBS[jid]["status"] == "RUNNING"
+        assert _WORKER_JOBS[jid]["payload_fields"] == ["holding_question"]
+    done = finish_worker_job(
+        jid, result={"executed": ["holdings-analyst-worker"], "degraded": False},
+        model_plane={"provider": "vllm-openai", "model_version": "m"},
+        error=None, now=now)
+    assert done["status"] == "COMPLETED" and done["result"]["degraded"] is False
+    assert done["model_plane"]["provider"] == "vllm-openai"
+
+    jid2 = register_worker_job(["proposal_draft"], now=now)
+    fail = finish_worker_job(jid2, result=None, model_plane=None,
+                             error="ImportError: worker_model_gateway", now=now)
+    assert fail["status"] == "FAILED" and "ImportError" in fail["error"]
+    assert finish_worker_job("없는아이디", result=None, model_plane=None,
+                             error=None, now=now) == {}
+    print("  Worker 작업 수명주기     OK")
+
+
 def _check_health_summary():
     rows = [
         {"job_name": "vkospi", "runs_24h": 2, "ok_24h": 0, "skip_24h": 2,
@@ -531,6 +759,11 @@ def _check_tool_surface():
 
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert "run_research_packet" in names and "collector_health" in names, names
+    # 직원 Worker 실행 간선(2026-08-13) - 이 셋이 빠지면 본부장은 다시
+    # '워커를 못 부르는 껍데기'다
+    for required in ("run_research_workers", "get_worker_job",
+                     "worker_model_health"):
+        assert required in names, f"{required} 도구가 등록되지 않았다: {names}"
     forbidden = {"submit_order", "oms_submit", "write_ledger", "risk_decision",
                  "promote_strategy"}
     assert not (names & forbidden), f"권한 밖 도구가 노출됐다: {names & forbidden}"
@@ -565,6 +798,8 @@ if __name__ == "__main__":
     _check_symbol_guard()
     _check_bearer_auth()
     _check_job_lifecycle()
+    _check_worker_payload()
+    _check_worker_job_lifecycle()
     _check_health_summary()
     _check_tool_surface()
-    print("리서치 MCP 5개 영역 통과. 서버는 --serve")
+    print("리서치 MCP 7개 영역 통과. 서버는 --serve")

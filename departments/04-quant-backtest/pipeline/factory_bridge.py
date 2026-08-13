@@ -196,6 +196,23 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  + (why if why else f"사용 가능: {sorted(STRUCTURE_VOCAB)}")
                  + ". 표현 못 하는 구조를 빼고 돌리면 등록한 가설과 다른 실험이 된다")
 
+    # ①-c-2 반증 실행가능성 고지 (2026-08-13 실측)
+    #   에이전트는 beta 통제·섹터 통제·MAX 스프레드 같은 진짜 반증을 설계하는데
+    #   실행면의 반증 모듈은 6종(비용·창 부호·베이스라인 등)만 돌린다. 그 사실을
+    #   접수 때 안 알리면 에이전트는 자기 반증이 전부 걸린 줄 알고, 판정은
+    #   "반증 통과" 로 오독된다. **막지 않고 알린다** - 못 도는 반증을 썼다고
+    #   기획이 나쁜 게 아니고, 실행면이 자라야 할 방향의 수요 신호다.
+    try:
+        from falsification import classify as _fals_classify  # noqa: PLC0415
+
+        _tests = [str(t) for t in (proposal.get("falsification_tests") or [])]
+        _dead = [t[:60] for t in _tests if not _fals_classify(t)[1]]
+        if _dead:
+            r.warn(f"반증 {len(_tests)}개 중 {len(_dead)}개는 실행면이 못 돌린다"
+                   f"(미실행으로 남고 통과로 세지 않는다): {_dead}")
+    except Exception:  # noqa: BLE001 - 고지 실패가 접수를 막으면 안 된다
+        pass
+
     # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
     #   walk-forward 에서야 창 0개로 드러났다(2026-08-11 실측). 실험 한 번을
@@ -404,11 +421,12 @@ _SQL_INSERT_OUTCOME = """
     insert into research.experiment_outcomes
       (outcome_id, experiment_id, hypothesis_id, trial_family_id, trial_number,
        decision, decided_at, proposal_id, failed_criteria, oos_summary,
-       regime_concerns, lesson_codes, notes)
+       regime_concerns, lesson_codes, notes, root_cause, corrective_action)
     values (%(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
             %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
             %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
-            %(regime_concerns)s, %(lesson_codes)s, %(notes)s)
+            %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
+            %(root_cause)s, %(corrective_action)s)
     on conflict (outcome_id) do nothing
 """
 
@@ -699,15 +717,81 @@ def _check_promotion_is_idempotent_and_records_rejection():
     print("  기획안->가설 승격 멱등   OK")
 
 
+# ── FRACAS 사상표 ────────────────────────────────────────────────────────────
+# ▶ **REJECT 는 시정조치 없이 닫히지 않는다** (2026-08-13, MIL-STD-2155 폐루프)
+#   교훈 코드는 NTSB 권고와 같은 지위였다 - 읽는 쪽이 무시해도 아무 일도 안
+#   일어난다(실측: 권고의 35%가 10년 방치). 행동을 바꾸는 것은 시정조치의
+#   **지정**이고, 그 조치가 재발을 실제로 막았는지 검증(verification_state)될
+#   때까지 루프는 열려 있다. 여기 사상은 결정론 기본값이다 - 에이전트가 더
+#   나은 조치를 지정할 수 있지만, 없어도 루프는 돈다(환류가 에이전트 가용성에
+#   묶이면 안 된다는 lessons_from 과 같은 원칙).
+FRACAS = {
+    # 교훈 코드: (근본원인 분류, 기본 시정조치)
+    "BASELINE_NOT_BEATEN": (
+        "가설_논리",
+        "브리핑 세칙: 같은 테마 재도전은 IR 개선 경로(비용·회전율·국면 방어 중 "
+        "무엇으로 벤치마크를 일관되게 이길지)를 LESSONS_ADDRESSED 에 명시"),
+    "SINGLE_REGIME_ONLY": (
+        "표본_설계",
+        "접수 세칙: 표본이 국면 1개면 판정 불가 - 장기 데이터셋(v3+)으로만 발주"),
+    "BEAR_FRAGILE": (
+        "가설_논리",
+        "기획 세칙: 하락 국면 방어 장치(낙폭 정지·노출 축소)를 사전 고정하고 "
+        "그 효과를 반증 기준에 포함"),
+    "OVERFIT_DSR": (
+        "표본_설계",
+        "배분 세칙: 이 계열의 남은 시도는 탐색층(부분샘플·IC)에서 거른 1개 "
+        "변형에만 사용 - DSR 감가는 시도를 되돌릴 수 없다"),
+    "COST_SENSITIVE": (
+        "가설_논리",
+        "기획 세칙: 회전율 상한(200x)을 설계 제약으로 명시 - 보유기간을 늘리거나 "
+        "리밸런스를 줄인 변형만 접수"),
+    "UNDERPOWERED": (
+        "표본_설계",
+        "접수 세칙: 창 산수(walk-forward >= 4창)를 만족하는 형성창만 접수"),
+    "UNDERPOWERED_DATA": (
+        "표본_설계",
+        "접수 세칙: 더 긴 이력 데이터셋으로만 재발주"),
+    "DATA_ARTIFACT": (
+        "데이터_결함",
+        "데이터 세칙: 해당 원천의 결함(미조정 분할 등)을 빌드에서 다루기 전까지 "
+        "그 구간 발주 금지"),
+}
+FRACAS_DEFAULT = ("순수_무알파",
+                  "환류 세칙: 이 계열 재도전은 새 메커니즘 근거(신규 리드) 필수")
+
+
+def fracas_of(lesson_codes) -> tuple[str, str]:
+    """교훈 코드 -> (근본원인, 시정조치). 첫 번째로 사상되는 코드가 대표다.
+
+    코드가 없거나 전부 모르는 코드면 기본값 - **비워 두지 않는다.** 빈 칸은
+    NTSB 권고의 운명(방치)을 그대로 밟는다.
+    """
+    for c in (lesson_codes or []):
+        if str(c) in FRACAS:
+            return FRACAS[str(c)]
+    return FRACAS_DEFAULT
+
+
 def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str:
     """**환류 적재와 상태 전이를 한 트랜잭션으로 묶는다.**
 
     "적재가 종결의 전제 조건" 을 주석으로만 적어 두면 언젠가 지켜지지 않는다.
     여기서 환류 INSERT 가 실패하면 상태 UPDATE 도 롤백된다 - 조용히 종결되고
     교훈만 사라지는 경로가 구조적으로 없어진다.
+
+    FRACAS: 기각 계열 판정에는 근본원인·시정조치가 자동 지정된다(위 사상표).
+    호출부가 명시하면 그것이 이긴다 - 결정론 기본값은 바닥이지 천장이 아니다.
     """
     payload = dict(outcome)
     payload["oos_summary"] = json.dumps(payload.get("oos_summary") or {})
+    if str(payload.get("decision", "")).upper() in REJECTING:
+        rc, ca = fracas_of(payload.get("lesson_codes"))
+        payload.setdefault("root_cause", rc)
+        payload.setdefault("corrective_action", ca)
+    else:
+        payload.setdefault("root_cause", None)
+        payload.setdefault("corrective_action", None)
     # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
     cur = conn.cursor()
     cur.execute(_SQL_INSERT_OUTCOME, payload)
@@ -835,6 +919,50 @@ def _check_answer_in_wrong_field_says_where_to_move_it():
                trials_used=1, past_outcomes=past)
     assert "LESSONS_IN_WRONG_FIELD" in g3.codes
     assert "OVERFIT_DSR" in " ".join(g3.reasons), g3.as_dict()
+
+
+def _check_unrunnable_falsification_is_disclosed():
+    """**못 돌리는 반증은 접수 때 말해 준다.** (2026-08-13 실측)
+
+    에이전트는 beta 통제·스프레드 검정 같은 진짜 반증을 설계하는데 실행면은
+    6종만 돌린다. 침묵하면 판정이 "반증 통과" 로 오독된다. 막지는 않는다 -
+    못 도는 반증은 실행면이 자라야 할 방향의 수요 신호다.
+    """
+    # 픽스처 주의(첫 작성 때 내가 틀렸다): "하락장 초과수익 < 0" 은 어느
+    # 패턴에도 안 걸리는 미분류다 - 미분류도 "못 돌린다" 로 세는 것이 맞다.
+    g = gate0(_prop(falsification_tests=[
+        "거래비용 차감 후 초과수익이 소멸하면 기각",   # 실행 가능(cost_stress)
+        "베타 중립화 후 효과 소멸 여부",               # 실행 불가
+    ]))
+    assert g.ok, "고지가 접수를 막았다 - 경고여야 한다"
+    joined = " ".join(g.warnings)
+    assert "못 돌린다" in joined and "베타" in joined, g.warnings
+    # 전부 실행 가능하면 이 경고는 없어야 한다(늑대 없는 경보 금지)
+    g2 = gate0(_prop(falsification_tests=[
+        "거래비용 차감 후 초과수익이 소멸하면 기각",
+        "walk-forward 창의 절반 이상에서 부호가 반전되면 기각",
+    ]))
+    assert "못 돌린다" not in " ".join(g2.warnings), g2.warnings
+
+
+def _check_reject_never_closes_without_corrective_action():
+    """**REJECT 는 시정조치 없이 닫히지 않는다.** (FRACAS, 2026-08-13)
+
+    교훈 코드만 남기는 것은 NTSB 권고와 같다 - 35%가 10년 방치됐다.
+    사상표에 없는 코드도 기본값을 받는다(빈 칸 금지). 채택(PROMOTED)에는
+    시정조치를 지어내지 않는다.
+    """
+    rc, ca = fracas_of(["BASELINE_NOT_BEATEN", "BEAR_FRAGILE"])
+    assert rc == "가설_논리" and "LESSONS_ADDRESSED" in ca
+    rc2, ca2 = fracas_of(["듣도못한코드"])
+    assert rc2 == "순수_무알파" and ca2, "모르는 코드가 빈 칸을 만들었다"
+    assert fracas_of([]) == FRACAS_DEFAULT
+    assert fracas_of(None) == FRACAS_DEFAULT
+    # 어휘 정합: lessons_from 이 낼 수 있는 코드는 전부 사상표에 있어야 한다
+    known = {"BASELINE_NOT_BEATEN", "SINGLE_REGIME_ONLY", "BEAR_FRAGILE",
+             "OVERFIT_DSR", "COST_SENSITIVE", "UNDERPOWERED",
+             "UNDERPOWERED_DATA", "DATA_ARTIFACT"}
+    assert known <= set(FRACAS), f"사상표 구멍: {known - set(FRACAS)}"
 
 
 def _check_addressed_lessons_pass():
@@ -1095,7 +1223,9 @@ if __name__ == "__main__":
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
     _check_never_run_family_is_not_blocked_by_lessons()
-    _check_answer_in_wrong_field_says_where_to_move_it(); print("  실행 0 계열은 안 막음    OK")
+    _check_answer_in_wrong_field_says_where_to_move_it()
+    _check_reject_never_closes_without_corrective_action()
+    _check_unrunnable_falsification_is_disclosed(); print("  실행 0 계열은 안 막음    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
@@ -1108,4 +1238,4 @@ if __name__ == "__main__":
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 15개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 17개 영역 통과. 루프가 닫혔다.")

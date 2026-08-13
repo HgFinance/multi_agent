@@ -116,6 +116,8 @@ THEMES = {
     "breakout": "추세",
     "mean_reversion": "반전",
     "low_volatility": "저위험",
+    "low_max": "저위험",       # MAX 효과(복권 회피)는 저위험 이상현상 군집
+                               # (Bali-Cakici-Whitelaw) - 저변동과 형제 테마
     "illiquidity_premium": "거래마찰",
     "liquidity_shock_reversal": "거래마찰",
 }
@@ -277,6 +279,30 @@ _A = {"expected_edge": {"type": "mean_reversion",
                         "horizon_days": 5, "top_n": 20}}
 
 
+def _check_theme_is_a_lens_not_identity():
+    """**테마는 계열 해시에 못 들어간다.** (2dGBH: 오분류 시 검정력 붕괴)
+
+    테마가 정체성이면 분류 교정이 곧 계열 갈라짐(다중검정 분모 오염)이다.
+    조회 층이면 교정이 공짜다. 그리고 어휘 전체에 테마가 있어야 파레토·
+    π₀ 집계가 구멍 없이 돈다 - 단 모르는 유형은 '미분류'로 정직하게.
+    """
+    from strategy_templates import EDGE_VOCAB as _EV
+
+    for e in _EV:
+        assert theme_of(e) != "미분류", f"어휘 {e} 에 테마가 없다"
+    assert theme_of("듣도못한유형") == "미분류"
+    assert theme_of(None) == "미분류"
+    # 해시 불변: 테마 사전이 통째로 바뀌어도 family_id 는 같아야 한다
+    h = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
+    before = family_id(h)
+    saved = dict(THEMES)
+    try:
+        THEMES.clear()
+        assert family_id(h) == before, "테마가 계열 해시에 스며들었다"
+    finally:
+        THEMES.update(saved)
+
+
 def _check_tuning_does_not_change_family():
     """**파라미터를 바꿔도 같은 Family 여야 한다.**
 
@@ -433,6 +459,7 @@ if __name__ == "__main__":
     _check_synonyms_are_one_family();            print("  동의어 -> 한 Family     OK")
     _check_unmappable_universe_makes_no_family(); print("  미사상 -> Family 안 만듦 OK")
     _check_no_edge_type_makes_no_family();       print("  빈 Family 안 만듦       OK")
+    _check_theme_is_a_lens_not_identity();       print("  테마 = 조회층(정체성 아님) OK")
     _check_pressure_counts_family_only();        print("  Family 단위 계수        OK")
     _check_unknown_family_does_not_block();      print("  미상 Family 차단 안 함  OK")
     _check_pressure_always_has_trial_number();   print("  trial_number 항상 존재  OK")
@@ -440,4 +467,4 @@ if __name__ == "__main__":
     _check_intake_and_runtime_agree();           print("  접수==실행면 Family     OK")
     _check_row_without_view_would_have_drifted(); print("  정본 미경유는 어긋남    OK")
     _check_alias_keeps_the_lineage();             print("  동의어 계열 합산        OK")
-    print("시도 Family 12개 영역 통과.")
+    print("시도 Family 13개 영역 통과.")

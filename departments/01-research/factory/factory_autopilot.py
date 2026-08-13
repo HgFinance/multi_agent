@@ -529,6 +529,55 @@ def _progress_line(conn) -> str:
         return ""
 
 
+def _pareto_line(conn) -> str:
+    """**결함 파레토 + 테마별 π₀.** 못 재면 빈 문자열 - 지어내지 않는다.
+
+    ▶ 왜 (2026-08-13, 수율 램프 문헌)
+      반도체 수율 학습의 핵심 관행이 결함 파레토 상설 게시다 - 최빈 결함부터
+      공정을 고친다. 우리 결함 = FRACAS 근본원인. 그리고 테마별 REJECT/시도
+      비율은 GBH 의 π₀ 추정치다 - 버려지던 판정들이 다음 탐색의 사전확률이
+      된다. KRX 복제 연구가 예언한 그림(수익성류 5% 생존)과 우리 실측이
+      맞는지도 여기서 드러난다.
+    """
+    try:
+        sys.path.insert(0, "/app/departments/04-quant-backtest/pipeline")
+        from trial_family import theme_of          # noqa: PLC0415
+
+        out = []
+        with conn.cursor() as cur:
+            cur.execute("""select root_cause, count(*)
+                             from research.experiment_outcomes
+                            where root_cause is not null
+                            group by 1 order by 2 desc""")
+            pareto = cur.fetchall()
+            if pareto:
+                out.append("\n[결함 파레토 - 최빈 결함부터 고친다 (수율 램프 관행)]")
+                total = sum(n for _, n in pareto)
+                for rc, n in pareto:
+                    out.append(f"  {rc:<10} {n}건 ({100*n//total}%)")
+                out.append("  ▶ 1위 결함을 없애는 개선이 같은 노력의 다른 어떤 "
+                           "개선보다 크다 - 카드를 고를 때 이 표를 먼저 봐라.")
+            cur.execute("""
+                select coalesce(h.expected_edge->>'type',''), o.decision
+                  from research.experiment_outcomes o
+                  join quant.hypotheses h
+                    on h.hypothesis_id::text = o.hypothesis_id""")
+            agg: dict = {}
+            for edge, dec in cur.fetchall():
+                t = theme_of(edge)
+                a = agg.setdefault(t, [0, 0])
+                a[0] += 1
+                if str(dec).upper() in ("REJECT", "GATE_HOLD", "KILLED"):
+                    a[1] += 1
+            if agg:
+                out.append("[테마별 성적 - 기각율이 낮은 테마가 사전확률이 높다]")
+                for t, (n, rej) in sorted(agg.items(), key=lambda kv: kv[1][1]/max(kv[1][0],1)):
+                    out.append(f"  {t:<6} 시도 {n} · 기각 {rej} ({100*rej//max(n,1)}%)")
+        return "\n".join(out)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _soundness_line(conn) -> str:
     """**공장이 지금 나아갈 수 있는 상태인가.** 판정 한 줄.
 
@@ -673,6 +722,7 @@ def _compose_research_brief(conn, brief, leads) -> str:
     #   건전=지금 갈 수 있나, 전진=실제로 나아갔나. 건전한데 제자리인 공장이
     #   가능하고 그게 제일 위험하다(아무 경보도 안 울린다).
     out.append(_progress_line(conn))
+    out.append(_pareto_line(conn))
     # ▶ **재료 부족을 맨 앞에 둔다.** 리드가 마르면 기획안을 내는 것 자체가
     #   낭비다 - 이미 기각된 계열을 다시 내게 된다(2026-08-12 실측으로
     #   그렇게 공장이 멈췄다). 무엇을 낼지 고르기 전에 낼 재료가 있는지부터.
