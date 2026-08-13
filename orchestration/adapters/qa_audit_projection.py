@@ -107,7 +107,14 @@ class _DefaultAuditRepository:
         # The canonical eval tables require an EvalSet FK and a QUEUED -> RUNNING
         # -> COMPLETED lifecycle. The deterministic identities make replay safe.
         existing = self.repo.get_eval_run(record.eval_run_id)
-        if existing is not None:
+        existing_status = str(
+            getattr(existing, "status", None)
+            if existing is not None
+            else existing.get("status")
+            if isinstance(existing, Mapping)
+            else ""
+        ).upper()
+        if existing is not None and existing_status == "COMPLETED":
             insert_findings = getattr(self.repo, "insert_kanban_qa_findings", None)
             if callable(insert_findings):
                 insert_findings(record)
@@ -147,8 +154,10 @@ class _DefaultAuditRepository:
             "ended_at": None,
             "created_at": created,
         }
-        self.repo.insert_eval_run(run)
-        self.repo.transition_eval_run(record.eval_run_id, "RUNNING")
+        if existing is None:
+            self.repo.insert_eval_run(run)
+        if existing_status != "RUNNING":
+            self.repo.transition_eval_run(record.eval_run_id, "RUNNING")
         result = {
             "eval_result_id": _uuid(f"{record.projection_key}:result"),
             "eval_run_id": record.eval_run_id,

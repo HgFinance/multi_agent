@@ -136,6 +136,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-accounting-hermes
     restart: unless-stopped
+    command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
       options:

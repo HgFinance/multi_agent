@@ -73,9 +73,9 @@ class DiscordGatewayWiringTests(unittest.TestCase):
             profile = EXPECTED_GATEWAY_PROFILES[service]
             block = _service_block(sources[path], service)
 
-            # The upstream image's s6 lifecycle owns gateway-default. An
-            # explicit Compose gateway command would create a second gateway.
-            self.assertNotIn("command:", block, service)
+            # Keep the container's main program alive while the upstream s6
+            # gateway-default slot owns the only Discord gateway process.
+            self.assertIn('command: ["sleep", "infinity"]', block, service)
             self.assertIn("restart: unless-stopped", block, service)
             self.assertIn("HERMES_HOME: /opt/data", block, service)
             self.assertIn(f"/.hermes/profiles/{profile}:/opt/data", block, service)
@@ -86,6 +86,7 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         for service, path in GATEWAY_SERVICES.items():
             block = _service_block(path.read_text(encoding="utf-8"), service)
             self.assertNotIn('command: ["gateway", "run"]', block, service)
+            self.assertIn('command: ["sleep", "infinity"]', block, service)
 
         runbook = (
             ROOT / "docs/02-engineering/HERMES_DISCORD_DOCKER_ONLY_MIGRATION.md"
