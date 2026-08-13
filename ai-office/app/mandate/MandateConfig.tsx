@@ -358,15 +358,15 @@ export default function MandateConfig() {
                     id="gross-exposure"
                     type="range"
                     min={100}
-                    max={500}
+                    max={300}
                     value={draft.grossExposurePct}
                     onChange={(event) => patch("grossExposurePct", Number(event.target.value))}
                     className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
                   />
                   <div className="flex justify-between text-[10px] text-outline mt-1 font-data-mono">
                     <span>100%</span>
+                    <span>200%</span>
                     <span>300%</span>
-                    <span>500%</span>
                   </div>
                 </div>
                 <div>
