@@ -9,6 +9,8 @@
  * 응답을 읽을 수 있다.
  */
 
+import { currentFundId, withAccountHeaders } from "./currentAccount";
+
 /** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 주입한다. */
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
@@ -124,7 +126,9 @@ function explainError(body: unknown, status: number): string {
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${BFF}${path}`, {
     cache: "no-store",
-    headers: { Accept: "application/json" },
+    // 헤더는 `withAccountHeaders`만 만든다 - 호출부마다 붙이면 한 곳을
+    // 빠뜨렸을 때 그 경로만 다른 사용자로 나간다.
+    headers: withAccountHeaders({ Accept: "application/json" }),
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(explainError(body, response.status));
@@ -140,14 +144,18 @@ export async function askCeo(
     response = await fetch(`${BFF}/ui/ceo/ask`, {
       method: "POST",
       cache: "no-store",
-      headers: {
+      headers: withAccountHeaders({
         "Content-Type": "application/json",
         Accept: "application/json",
         ...(requestId ? { "X-Request-Id": requestId } : {}),
-      },
+      }),
       body: JSON.stringify({
         query,
         request_id: requestId ?? crypto.randomUUID(),
+        // 서버에 `user_id -> fund_id` 역참조 경로가 없어(fund_memberships가
+        // 비어 있다) 화면이 쌍으로 보낸다. 없으면 생략 - BFF가 Mandate
+        // 스냅샷 없이 진행하고 없는 한도를 지어내지 않는다.
+        ...(currentFundId() ? { fund_id: currentFundId() } : {}),
       }),
     });
   } catch {
