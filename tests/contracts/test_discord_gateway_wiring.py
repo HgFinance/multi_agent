@@ -42,7 +42,7 @@ def _service_block(source: str, service_name: str) -> str:
 
 
 class DiscordGatewayWiringTests(unittest.TestCase):
-    def test_all_eight_gateway_definitions_use_patchable_image(self) -> None:
+    def test_all_eight_gateway_definitions_use_upstream_image_by_default(self) -> None:
         profiles: set[str] = set()
         for service, path in GATEWAY_SERVICES.items():
             source = path.read_text(encoding="utf-8")
@@ -98,14 +98,16 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         for section in (
             "## A. PRECHECK",
             "## B. BACKUP",
-            "## C. BUILD / RECREATE 준비",
-            "## D. CEO CANARY",
-            "## E. CEO Discord / Kanban canary",
-            "## F. 나머지 7개 전환",
-            "## G. Host systemd disable",
-            "## H. SINGLE OWNER 검증",
-            "## I. EC2 reboot acceptance",
-            "## J. Rollback",
+            "## C. PULL / IMAGE WIRING",
+            "## D. CEO Host Gateway stop",
+            "## E. Docker CEO recreate 및 identity 확인",
+            "## F. CEO canary + Kanban 검증",
+            "## G. 나머지 7개 Gateway 전환",
+            "## H. Host systemd 8개 disable",
+            "## I. Single-owner 검증",
+            "## J. EC2 reboot",
+            "## K. Reboot acceptance",
+            "## L. Rollback",
         ):
             self.assertIn(section, runbook)
         self.assertIn("systemctl --user stop hermes-gateway-ceo-agent", runbook)
