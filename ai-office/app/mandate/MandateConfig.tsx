@@ -240,7 +240,7 @@ export default function MandateConfig() {
       const objectiveText = draft.objective.trim() || fallbackObjective;
 
       const result = await submitMandateDraft(draft, objectiveText);
-      setNotice(`v${result.version}이 DB에 저장됐습니다. 아직 활성 운용 지침은 아닙니다.`);
+      setNotice(`v${result.version}이 DB에 저장됐습니다.`);
     } catch (error) {
       setNotice(
         error instanceof MandateSubmissionError
