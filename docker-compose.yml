@@ -513,6 +513,16 @@ services:
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # ▶ 외부 정보원 질의 도구 (external_sources.py, 2026-08-13 재일 결정)
+      #   DART 는 수집기와 **같은 키**를 나눠 쓴다 - 에이전트 몫 일일 상한이
+      #   수집기 예산(공시 10분 폴링·저녁 재무 배치)을 지킨다.
+      #   스냅샷(cache-on-cite)은 reports 마운트에 남아 재빌드에도 산다.
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
+      MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
       # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
       #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
       #   LS 키가 필요했다. 이제 universe_restriction_collector(수집기)가 제한
@@ -533,6 +543,54 @@ services:
     mem_limit: 1g
     cpus: 2.0
     pids_limit: 256
+    stop_grace_period: 30s
+
+  # ── research-liaison-mcp: 리서치 응대 창구(도서관) 도구 면 (2026-08-13) ──
+  # 같은 이미지·같은 코드가 RESEARCH_MCP_SURFACE=liaison 으로 뜬다 - 파이프라인
+  # 생성·factory 쓰기 도구(run_research_packet·factory_submit_*)가 **등록에서
+  # 빠진** 조회 전용 면이다(도서관/연구소 분리). 사용자 질의 파생 카드를 받는
+  # research-liaison·quant-liaison 프로필만 이 서버를 물고, 부서 본체 프로필은
+  # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
+  # 지시가 아니라 capability 절단이다 - 서버가 제거를 검증 못 하면 기동을 거부한다.
+  # 포트는 호스트에 게시하지 않는다(research-liaison-mcp:8037, compose 안 전용).
+  research-liaison-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-research-liaison-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    working_dir: /app/departments/01-research
+    command: ["python", "api/mcp_server.py", "--serve"]
+    environment:
+      RESEARCH_MCP_SURFACE: liaison
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # 외부 정보원 도구는 읽기 전용이라 창구에도 남는다(external_sources.py).
+      # 창구의 reports 는 읽기 전용 마운트라 스냅샷은 컨테이너 로컬로 - v2 과제.
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
+      MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_CITE_LOG_DIR: /tmp/mcp_citations
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
+      # 창구는 산출물(Packet 리포트)을 **읽기 전용**으로만 본다 - 도서관은
+      # 카탈로그를 읽지, 만들지 않는다
+      - ./departments/01-research/reports:/app/departments/01-research/reports:ro
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
     stop_grace_period: 30s
 
   # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)

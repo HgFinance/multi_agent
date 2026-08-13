@@ -158,14 +158,16 @@ def finish_job(job_id: str, *, exit_code: int, tail: str, now: datetime) -> dict
         return dict(j)
 
 
-def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
+def register_worker_job(payload_fields: list[str], *, now: datetime,
+                        symbol: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     with _WORKER_JOBS_LOCK:
         _WORKER_JOBS[job_id] = {
             "job_id": job_id, "kind": "employee_workers",
-            "payload_fields": payload_fields, "status": "RUNNING",
+            "payload_fields": payload_fields, "symbol": symbol or None,
+            "status": "RUNNING",
             "started_at": now.isoformat(), "ended_at": None,
-            "result": None, "model_plane": None, "error": None,
+            "result": None, "model_plane": None, "evidence": None, "error": None,
         }
         if len(_WORKER_JOBS) > MAX_JOBS_KEPT:
             # RUNNING 은 퇴거하지 않는다 - 몇 분짜리 실행 도중에 자리가
@@ -181,7 +183,7 @@ def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
 
 def finish_worker_job(job_id: str, *, result: dict | None,
                       model_plane: dict | None, error: str | None,
-                      now: datetime) -> dict:
+                      now: datetime, evidence: dict | None = None) -> dict:
     with _WORKER_JOBS_LOCK:
         j = _WORKER_JOBS.get(job_id)
         if j is None:
@@ -195,6 +197,7 @@ def finish_worker_job(job_id: str, *, result: dict | None,
         j["ended_at"] = now.isoformat()
         j["result"] = result
         j["model_plane"] = model_plane
+        j["evidence"] = evidence
         j["error"] = error
         return dict(j)
 
@@ -219,6 +222,167 @@ def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
             "holding_question 또는 proposal_draft 중 하나는 있어야 한다 - "
             "리서치 Worker 2인의 트리거가 그 둘뿐이다")
     return payload
+
+
+# ── Evidence First (FINAL_RUNTIME_ARCHITECTURE §11) ─────────────────────────
+# Runner 는 Worker 를 부르기 전에 Tool/Evidence 부터 모은다 - Worker 가 근거
+# 없이 추론하지 않게 하기 위해서다. 소스(뉴스·공시·가격)별로 **독립 시도**하고
+# 실패는 status 로 정직하게 남긴다. evidence/bundle.assemble_bundle 을 안 쓰는
+# 이유: 그건 첫 실패를 전체 실패로 전파하는 파이프라인 계약이라, market-api
+# (TSDB)가 비어 있는 환경에서 Supabase 뉴스·공시까지 같이 죽는다.
+
+HOLDINGS_EVIDENCE_PERSONA = "holdings-analyst-worker"
+
+
+def _evidence_getter():
+    """읽기면 호출자. X-Agent-Persona 를 워커 명의로 싣는다.
+
+    research-api 가 TOOL_GATEWAY_ENFORCE=true 로 돌면 persona 없는 요청은
+    403 이다 - holdings-analyst-worker 는 news/disclosures/snapshot/bars
+    스코프를 전부 가진 persona 다(hermes/config.yaml tool_allowlist).
+    """
+    from evidence.api_client import get_json
+
+    def get(url: str):
+        return get_json(url, persona=HOLDINGS_EVIDENCE_PERSONA, timeout=10)
+
+    return get
+
+
+def gather_holdings_evidence(symbol: str, *, get=None) -> dict:
+    """보유 질문용 근거를 부서 읽기면에서 모은다. 소스별 독립·정직 보고.
+
+    뉴스는 48시간(주말을 넘겨도 최근 흐름이 잡히게), 공시는 7일. 값이 비면
+    빈 대로 싣는다 - "없다" 는 사실이고, 지어내는 것보다 낫다.
+    """
+    research = (os.environ.get("RESEARCH_API_URL")
+                or "http://127.0.0.1:8035").rstrip("/")
+    if get is None:
+        get = _evidence_getter()
+    sources: dict[str, dict] = {}
+    out: dict = {"symbol": symbol, "sources": sources}
+
+    try:
+        news = get(f"{research}/evidence/news?symbol={symbol}&hours=48&limit=10")
+        # ref('n1'..)는 짧아서 LLM 이 정확히 인용한다. evidence_id(document_id)
+        # 는 코드가 대조할 진짜 좌표다(evidence/bundle.py 의 계약과 동형).
+        out["news_headlines"] = [
+            {"ref": f"n{i + 1}", "evidence_id": n.get("document_id"),
+             "title": n.get("title"), "relation": n.get("relation_type"),
+             "url": n.get("url"), "published_at": str(n.get("published_at") or ""),
+             "observed_at": str(n.get("observed_at") or "")}
+            for i, n in enumerate(news)]
+        sources["news"] = {"status": "OK", "count": len(news)}
+    except Exception as e:  # noqa: BLE001 - 소스 하나의 실패가 전체를 못 죽인다
+        sources["news"] = {"status": "FAILED",
+                           "reason": f"{type(e).__name__}: {e}"}
+
+    try:
+        disc = get(f"{research}/evidence/disclosures?symbol={symbol}&days=7&limit=5")
+        out["disclosures_7d"] = [
+            {"ref": f"d{i + 1}", "evidence_id": d.get("document_id"),
+             "title": d.get("title"), "url": d.get("url"),
+             "published_at": str(d.get("published_at") or ""),
+             "observed_at": str(d.get("observed_at") or "")}
+            for i, d in enumerate(disc)]
+        sources["disclosures"] = {"status": "OK", "count": len(disc)}
+    except Exception as e:  # noqa: BLE001
+        sources["disclosures"] = {"status": "FAILED",
+                                  "reason": f"{type(e).__name__}: {e}"}
+
+    try:
+        from evidence import bundle as evidence_bundle
+        # fetch_price_context 는 실패를 스스로 UNAVAILABLE 로 기술한다 -
+        # TSDB 가 빈 환경에서도 뉴스·공시와 독립적으로 동작한다.
+        ctx = evidence_bundle.fetch_price_context(symbol, get=get)
+        out["price_context"] = ctx
+        sources["price_context"] = {"status": ctx.get("status", "UNKNOWN")}
+    except Exception as e:  # noqa: BLE001
+        sources["price_context"] = {"status": "FAILED",
+                                    "reason": f"{type(e).__name__}: {e}"}
+    return out
+
+
+# Worker 프롬프트 예산. employee_worker_runtime._compact 가 tool_output 직렬화를
+# **문자 단위 raw[:8000]** 으로 자른다 - 넘치면 JSON 이 중간에서 끊겨 '수집은
+# OK 인데 수치는 없는' 오정보가 된다(2026-08-13 리뷰 실측: 뉴스 10건+공시 5건+
+# price_context ≈ 5,400~7,000자, 본부장이 3KB 텍스트를 얹으면 절벽을 넘는다).
+# 어댑터 래핑(worker_id·tools 키) 오버헤드 몫을 빼고 7,200자를 상한으로 잡아
+# **항목 단위로** 덜어낸다 - 덜어낸 사실은 evidence_truncated 로 남긴다.
+_EVIDENCE_CHAR_BUDGET = 7200
+_USER_TEXT_CAP = 1000
+
+
+def _clip_text(value, limit: int = _USER_TEXT_CAP):
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "…(잘림)"
+
+
+def merge_holdings_evidence(payload: dict, evidence: dict) -> dict:
+    """수집한 근거를 Worker input_fields(news·portfolio_state)에 접어 넣는다.
+
+    holdings-analyst-worker 의 tool 어댑터는 payload 투영이라, 여기 안 실린
+    근거는 Worker 에게 영원히 안 보인다. 사용자가 준 텍스트는 user_note/
+    user_state 로 보존한다(단 1,000자 캡) - 덮어쓰면 질문에 실어준 맥락이
+    사라지고, 캡이 없으면 본부장이 실은 긴 텍스트가 가격 블록을 통째로
+    밀어낸다. 전체 직렬화가 예산을 넘으면 오래된 뉴스·공시부터 항목 단위로
+    덜어내고 그 사실을 evidence_truncated 에 남긴다.
+    """
+    import json
+
+    p = dict(payload)
+    # closes(일봉 21개 리스트)는 요약 통계(last_close·수익률)와 중복인 원자료라
+    # 프롬프트에서 뺀다 - 수치 근거는 price_context 의 요약 필드가 이미 든다.
+    ctx = evidence.get("price_context")
+    if isinstance(ctx, dict) and "closes" in ctx:
+        ctx = {k: v for k, v in ctx.items() if k != "closes"}
+    news_block = {
+        "user_note": _clip_text(p["news"]) if p.get("news") else None,
+        "headlines": list(evidence.get("news_headlines") or []),
+        "disclosures_7d": list(evidence.get("disclosures_7d") or []),
+        "source_status": evidence.get("sources"),
+    }
+    p["news"] = {k: v for k, v in news_block.items() if v}
+    state_block = {
+        "user_state": (_clip_text(p["portfolio_state"])
+                       if p.get("portfolio_state") else None),
+        "price_context": ctx,
+    }
+    merged_state = {k: v for k, v in state_block.items() if v}
+    if merged_state:
+        p["portfolio_state"] = merged_state
+
+    def _size(d: dict) -> int:
+        # _compact 와 같은 직렬화 규칙으로 잰다(ensure_ascii=False, sort_keys)
+        return len(json.dumps(d, ensure_ascii=False, sort_keys=True, default=str))
+
+    news_dict = p.get("news") if isinstance(p.get("news"), dict) else None
+    dropped = 0
+    while news_dict and _size(p) > _EVIDENCE_CHAR_BUDGET:
+        if news_dict.get("headlines"):
+            news_dict["headlines"].pop()       # 뒤(오래된 것)부터 통째로
+        elif news_dict.get("disclosures_7d"):
+            news_dict["disclosures_7d"].pop()
+        else:
+            break
+        dropped += 1
+    if dropped:
+        news_dict["evidence_truncated"] = {
+            "dropped_items": dropped,
+            "reason": f"Worker 프롬프트 예산({_EVIDENCE_CHAR_BUDGET}자) 초과",
+        }
+    # 항목을 다 덜어냈는데도 넘으면(사용자 텍스트가 지배하는 경우) 텍스트를
+    # 단계적으로 더 죈다 - 예산 보장을 _compact 의 문자 절단에 맡기지 않는다.
+    if _size(p) > _EVIDENCE_CHAR_BUDGET:
+        if news_dict and news_dict.get("user_note"):
+            news_dict["user_note"] = _clip_text(news_dict["user_note"], 300)
+        ps = p.get("portfolio_state")
+        if isinstance(ps, dict) and ps.get("user_state"):
+            ps["user_state"] = _clip_text(ps["user_state"], 300)
+    for key in ("holding_question", "proposal_draft"):
+        if _size(p) > _EVIDENCE_CHAR_BUDGET and isinstance(p.get(key), str):
+            p[key] = _clip_text(p[key], 3000)
+    return p
 
 
 def summarize_health(rows: list[dict]) -> dict:
@@ -256,7 +420,49 @@ def _server_class():
         return FastMCP, "fastmcp"
 
 
-def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
+# ── 응대 창구(도서관) 면에서 빼는 도구 (2026-08-13, 도서관/연구소 분리) ────
+# **프롬프트로 금지하는 게 아니라 등록에서 뺀다** - OWASP LLM06(Excessive
+# Agency)의 도구 최소화, capability 원칙(건네지 않은 권한은 우회 불가).
+# 창구는 조회·설명 전용이고, 상태를 바꾸거나 파이프라인을 낳는 손은
+# 실험대(부서 본체) 프로필에만 있다.
+#   run_research_packet     - 30분짜리 분석 파이프라인 생성(쓰기·고비용)
+#   factory_submit_leads    - 공장 리드 적재(쓰기)
+#   factory_submit_proposal - 공장 기획안 발행(쓰기) = 질의→공장 순환의 입구
+LIAISON_EXCLUDED_TOOLS = frozenset({
+    "run_research_packet", "factory_submit_leads", "factory_submit_proposal"})
+
+
+def _restrict_to_liaison(server) -> None:
+    """등록된 도구에서 쓰기 면을 **제거**한다. 검증 불능이면 기동 거부(fail-closed).
+
+    지우는 API 가 SDK 판마다 달라 두 경로를 시도하고, 마지막에 list_tools 로
+    실제 표면을 재확인한다 - "지웠다고 믿었는데 남아 있는" 것이 최악의 상태라
+    재확인이 최종 판정이다.
+    """
+    import asyncio
+
+    for name in sorted(LIAISON_EXCLUDED_TOOLS):
+        remove = getattr(server, "remove_tool", None)
+        if callable(remove):
+            try:
+                remove(name)
+                continue
+            except Exception:  # noqa: BLE001 - 아래 경로와 재확인이 받는다
+                pass
+        tm = getattr(server, "_tool_manager", None)
+        tools = getattr(tm, "_tools", None)
+        if isinstance(tools, dict):
+            tools.pop(name, None)
+    names = {t.name for t in asyncio.run(server.list_tools())}
+    leaked = names & LIAISON_EXCLUDED_TOOLS
+    if leaked:
+        raise RuntimeError(
+            f"liaison 면에서 쓰기 도구를 제거하지 못했다: {sorted(leaked)} - "
+            f"창구가 공장 쓰기 손을 가진 채 뜨는 것은 금지다(기동 거부)")
+
+
+def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
+                 surface: str = "full"):
     cls, flavor = _server_class()
     kwargs = {"instructions": None}
     # 신판만 title 을 받는다 - 옛판에 넘기면 TypeError 다
@@ -265,14 +471,22 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
     else:
         kwargs.update(host=host, port=port)      # 1.x 는 생성 시 settings 로 받는다
 
+    liaison = str(surface).strip().lower() == "liaison"
+    instructions = (
+        "리서치본부 응대 창구(도서관)다. 조회·설명 전용 - 실험을 만들거나 "
+        "공장에 무엇도 제출하지 않으며, 그 도구 자체가 이 면에 없다. 사용자 "
+        "질의에는 조회 도구의 결과만으로 답하고, 새 분석·실험·수집이 필요한 "
+        "요청은 즉석 수행 대신 '연구소 격상 필요'를 명시해 접수 사실만 답한다. "
+        "도구 결과는 결정론 산출물이므로 그대로 인용하고, 수치를 다시 계산하거나 "
+        "지어내지 않는다.") if liaison else (
+        "리서치본부(RES)의 도구 면이다. 시세·Evidence 조회와 Research Packet "
+        "생성만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
+        "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
+        "인용하고, 수치를 다시 계산하거나 지어내지 않는다.")
     server = cls(
-        name="research-department",
+        name="research-liaison" if liaison else "research-department",
         **{k: v for k, v in kwargs.items() if k != "instructions"},
-        instructions=(
-            "리서치본부(RES)의 도구 면이다. 시세·Evidence 조회와 Research Packet "
-            "생성만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
-            "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
-            "인용하고, 수치를 다시 계산하거나 지어내지 않는다."),
+        instructions=instructions,
     )
 
     @server.tool(
@@ -346,24 +560,46 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="리서치 직원 Worker(LangGraph 2인)를 실행한다. "
                     "holding_question 을 주면 holdings-analyst-worker, "
                     "proposal_draft 를 주면 competing-explanation-worker 가 돈다 "
-                    "(둘 다 주면 둘 다 돈다). portfolio_state·news 는 "
-                    "holdings-analyst 의 보조 근거다. 모델 추론이 수십 초 "
-                    "걸리므로 job_id 만 즉시 돌려준다 - get_worker_job 으로 "
-                    "결과(worker-context, 비구속)를 조회한다. Worker 산출은 "
-                    "요약하지 말고 summary·confidence·evidence_refs·escalate "
-                    "를 그대로 인용하라.")
+                    "(둘 다 주면 둘 다 돈다). **보유 질문이 특정 종목에 관한 "
+                    "것이면 symbol(6자리 종목코드)을 반드시 함께 줘라** - 러너가 "
+                    "Worker 호출 전에 부서 읽기면(research-api·market-api)에서 "
+                    "최근 뉴스·공시·가격 근거를 모아 Worker 에게 준다(Evidence "
+                    "First). symbol 없이 주는 portfolio_state·news 텍스트는 "
+                    "보조 근거로만 실린다. 모델 추론이 수십 초 걸리므로 job_id "
+                    "만 즉시 돌려준다 - get_worker_job 으로 결과(worker-context, "
+                    "비구속)를 조회한다. Worker 산출은 요약하지 말고 summary·"
+                    "confidence·evidence_refs·escalate 를 그대로 인용하고, "
+                    "job 의 evidence.sources 에 FAILED 가 있으면 그 사실도 "
+                    "함께 보고하라.")
     def run_research_workers(holding_question: str = "", proposal_draft: str = "",
-                             portfolio_state: str = "", news: str = "") -> dict:
+                             portfolio_state: str = "", news: str = "",
+                             symbol: str = "") -> dict:
         try:
             payload = build_worker_payload(holding_question, proposal_draft,
                                            portfolio_state, news)
+            sym = normalize_symbol(symbol) if str(symbol or "").strip() else ""
         except ValueError as e:
             return {"ok": False, "error": str(e)}
-        job_id = register_worker_job(sorted(payload), now=datetime.now(KST))
+        job_id = register_worker_job(sorted(payload), now=datetime.now(KST),
+                                     symbol=sym)
 
         def _run():
+            # try 밖에서 초기화한다 - 근거를 모은 뒤 Worker 단계에서 죽어도
+            # FAILED job 에 evidence 요약이 남아야 진단이 된다.
+            evidence_summary = None
             try:
                 gateway, employee_workers = _worker_modules()
+                # Evidence First (§11) - Worker 를 부르기 전에 근거부터 모은다.
+                # 실패해도 job 을 죽이지 않는다 - 소스별 상태가 evidence 에
+                # 그대로 남고, Worker 는 모인 만큼의 근거로 판단한다.
+                if sym and "holding_question" in payload:
+                    evidence = gather_holdings_evidence(sym)
+                    payload_with_evidence = merge_holdings_evidence(
+                        payload, evidence)
+                    evidence_summary = {"symbol": sym,
+                                        "sources": evidence.get("sources")}
+                else:
+                    payload_with_evidence = payload
                 # ▶ 워커별로 binding 을 해석한다 (2026-08-13 리뷰 반영).
                 #   단일 llm 을 공유하면 registry 의 worker→adapter 해석이
                 #   전달되지 않아 LoRA 승격이 조용한 no-op 이 된다.
@@ -375,7 +611,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                     return llm
 
                 result = employee_workers.run_employee_workers(
-                    payload, llm_factory=llm_factory)
+                    payload_with_evidence, llm_factory=llm_factory)
                 default_binding = gateway.resolve()
                 # runtime 블록의 provider/model 은 공용 런타임이 Ollama 를
                 # 하드코딩한 값이다 - 실제 사용한 게이트웨이 좌표로 바로잡는다.
@@ -391,15 +627,19 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                                       "default": default_binding.as_metadata(),
                                       "workers": worker_bindings,
                                   },
-                                  error=None, now=datetime.now(KST))
+                                  error=None, now=datetime.now(KST),
+                                  evidence=evidence_summary)
             except Exception as e:  # noqa: BLE001 - 실패를 실패로 남긴다
                 finish_worker_job(job_id, result=None, model_plane=None,
                                   error=f"{type(e).__name__}: {e}",
-                                  now=datetime.now(KST))
+                                  now=datetime.now(KST),
+                                  evidence=evidence_summary)
 
         threading.Thread(target=_run, daemon=True).start()
         return {"job_id": job_id, "status": "RUNNING",
                 "payload_fields": sorted(payload),
+                "symbol": sym or None,
+                "evidence_first": bool(sym and "holding_question" in payload),
                 "note": "get_worker_job(job_id) 으로 결과를 조회한다"}
 
     @server.tool(
@@ -693,6 +933,14 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             from research.experiment_outcomes
             order by created_at desc limit %s""", (n,))
 
+    # 외부 정보원(DART·네이버) 질의 도구 - 정성 데이터의 MCP 검색 통합
+    # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
+    # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
+    from external_sources import register_external_tools
+    register_external_tools(server)
+
+    if liaison:
+        _restrict_to_liaison(server)
     return server
 
 
@@ -771,6 +1019,87 @@ def _check_worker_job_lifecycle():
     print("  Worker 작업 수명주기     OK")
 
 
+def _check_holdings_evidence():
+    """Evidence First - 소스별 독립 시도·정직 보고·payload 병합 계약."""
+    def fake_get(url: str):
+        if "/evidence/news" in url:
+            return [{"document_id": "doc-1", "title": "제목",
+                     "relation_type": "direct", "url": "http://u",
+                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}]
+        if "/evidence/disclosures" in url:
+            raise RuntimeError("research-api down")
+        raise ValueError("tsdb empty")          # /bars → price_context 경로
+
+    ev = gather_holdings_evidence("005930", get=fake_get)
+    assert ev["symbol"] == "005930"
+    assert ev["sources"]["news"] == {"status": "OK", "count": 1}
+    assert ev["news_headlines"][0]["ref"] == "n1"
+    assert ev["news_headlines"][0]["evidence_id"] == "doc-1"
+    # 한 소스의 실패가 다른 소스를 못 죽인다 - 사유는 그대로 남는다
+    assert ev["sources"]["disclosures"]["status"] == "FAILED"
+    assert "research-api down" in ev["sources"]["disclosures"]["reason"]
+    # price_context 는 자기 기술 UNAVAILABLE (fetch_price_context 내장 규율)
+    assert ev["sources"]["price_context"]["status"] == "UNAVAILABLE", ev["sources"]
+
+    merged = merge_holdings_evidence(
+        {"holding_question": "q", "news": "사용자 메모", "portfolio_state": "10주"},
+        ev)
+    assert merged["holding_question"] == "q", "질문은 그대로 남는다"
+    assert merged["news"]["user_note"] == "사용자 메모", "사용자 텍스트를 보존한다"
+    assert merged["news"]["headlines"][0]["ref"] == "n1"
+    assert merged["news"]["source_status"]["disclosures"]["status"] == "FAILED"
+    assert merged["portfolio_state"]["user_state"] == "10주"
+    # price_context 는 UNAVAILABLE 상태 그대로 실린다 - 실패를 숨기지 않는다
+    assert merged["portfolio_state"]["price_context"]["status"] == "UNAVAILABLE"
+
+    # 근거가 하나도 없으면 news 는 상태 보고만 남는다(빈 성공으로 위장 금지)
+    def all_down(url: str):
+        raise RuntimeError("down")
+
+    ev2 = gather_holdings_evidence("005930", get=all_down)
+    merged2 = merge_holdings_evidence({"holding_question": "q"}, ev2)
+    assert set(merged2["news"]) == {"source_status"}, merged2["news"]
+
+    # ── 프롬프트 예산 경계 (2026-08-13 리뷰) ──
+    # _compact 는 문자 단위 raw[:8000] 절단이라, 예산을 넘기면 JSON 이 중간에서
+    # 끊겨 '수집 OK 인데 수치 없음' 오정보가 된다. 최대 픽스처로 항목 단위
+    # 절단이 예산을 지키는지 잰다.
+    import json as _json
+
+    def big_get(url: str):
+        if "/evidence/news" in url:
+            return [{"document_id": f"doc-{i}", "title": "제" * 80,
+                     "relation_type": "direct", "url": "http://u/" + "x" * 150,
+                     "published_at": "2026-08-13T09:00:00+09:00",
+                     "observed_at": "2026-08-13T09:00:00+09:00"}
+                    for i in range(10)]
+        if "/evidence/disclosures" in url:
+            return [{"document_id": f"d-{i}", "title": "공" * 80,
+                     "url": "http://d/" + "y" * 150,
+                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}
+                    for i in range(5)]
+        return [{"bucket_time": f"2026-08-{i:02d}T00:00:00", "close": 70000.0 + i}
+                for i in range(1, 22)]          # /bars → closes 21개
+
+    ev3 = gather_holdings_evidence("005930", get=big_get)
+    merged3 = merge_holdings_evidence(
+        {"holding_question": "질문" * 100, "news": "뉴스요약" * 800,
+         "portfolio_state": "상태" * 800}, ev3)
+    size = len(_json.dumps(merged3, ensure_ascii=False, sort_keys=True, default=str))
+    assert size <= _EVIDENCE_CHAR_BUDGET, f"예산 초과: {size}자"
+    assert merged3["news"]["evidence_truncated"]["dropped_items"] >= 1
+    # 사용자 텍스트 캡 - 본부장이 실은 긴 텍스트가 가격 블록을 밀어내지 않는다
+    assert len(merged3["news"]["user_note"]) <= _USER_TEXT_CAP + 8
+    assert len(merged3["portfolio_state"]["user_state"]) <= _USER_TEXT_CAP + 8
+    # closes 원자료는 프롬프트에서 빠지고 요약 수치는 남는다
+    assert "closes" not in merged3["portfolio_state"]["price_context"]
+    assert "last_close" in merged3["portfolio_state"]["price_context"], \
+        merged3["portfolio_state"]["price_context"]
+    # 작은 픽스처는 절단 없이 그대로 - 예산 로직이 과절단하지 않는다
+    assert "evidence_truncated" not in merged["news"]
+    print("  Evidence First 계약     OK (예산 경계 포함)")
+
+
 def _check_health_summary():
     rows = [
         {"job_name": "vkospi", "runs_24h": 2, "ok_24h": 0, "skip_24h": 2,
@@ -825,6 +1154,29 @@ def _check_tool_surface():
     print(f"  도구 면·권한 경계        OK ({len(names)}개)")
 
 
+def _check_liaison_surface():
+    """**창구 면에는 쓰기 손이 없어야 한다** (2026-08-13, 도서관/연구소 분리).
+
+    질의→공장 무한루프의 유일한 코드 수준 입구가 factory_submit_* 이다.
+    창구가 그 도구를 가진 채 뜨면 SOUL.md 의 산문 금지는 장식이 된다 -
+    프롬프트가 아니라 등록 제거(capability 절단)로 막고, 여기서 고정한다.
+    """
+    import asyncio
+
+    srv = build_server(surface="liaison")
+    names = {t.name for t in asyncio.run(srv.list_tools())}
+    leaked = names & LIAISON_EXCLUDED_TOOLS
+    assert not leaked, f"창구 면에 쓰기 도구가 남았다: {sorted(leaked)}"
+    # 창구의 존재 이유인 조회 도구는 살아 있어야 한다 - 다 지우면 그건
+    # 분리가 아니라 불구다. 보유 질의 응답 간선(run_research_workers)도 창구
+    # 몫이다(비구속 worker-context, 원장에 닿지 않는다).
+    for required in ("factory_brief", "factory_outcomes", "list_recent_packets",
+                     "collector_health", "run_research_workers",
+                     "get_worker_job"):
+        assert required in names, f"창구 면에서 {required} 가 사라졌다: {names}"
+    print(f"  창구 면 capability 절단  OK ({len(names)}개, 쓰기 0개)")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -833,16 +1185,21 @@ if __name__ == "__main__":
         import uvicorn
 
         token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
-        srv = build_server(host="0.0.0.0", port=DEFAULT_PORT)
+        # 같은 이미지가 두 면으로 뜬다(도서관/연구소 분리, 2026-08-13):
+        #   full    - 부서 본체(실험대). 공장 쓰기 도구 포함.
+        #   liaison - 응대 창구(도서관). 쓰기 도구가 등록에서 빠진다.
+        surface = os.environ.get("RESEARCH_MCP_SURFACE", "full").strip().lower()
+        srv = build_server(host="0.0.0.0", port=DEFAULT_PORT, surface=surface)
         s = getattr(srv, "settings", None)
         if s is not None:
             s.host, s.port = "0.0.0.0", DEFAULT_PORT
+        face = "창구(liaison·읽기 전용)" if surface == "liaison" else "본체(full)"
         if token:
-            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp (Bearer 인증 켜짐)",
-                  flush=True)
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp [{face}] "
+                  f"(Bearer 인증 켜짐)", flush=True)
         else:
             # 잊은 것과 일부러 연 것을 구분되게 남긴다 - 조용한 무인증 금지
-            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp "
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp [{face}] "
                   f"⚠ MCP_RESEARCH_API_KEY 미설정 - 인증 없이 연다. compose "
                   f"네트워크 밖으로 노출하지 말 것", flush=True)
         uvicorn.run(build_app(srv, token=token or None),
@@ -855,6 +1212,8 @@ if __name__ == "__main__":
     _check_job_lifecycle()
     _check_worker_payload()
     _check_worker_job_lifecycle()
+    _check_holdings_evidence()
     _check_health_summary()
     _check_tool_surface()
-    print("리서치 MCP 7개 영역 통과. 서버는 --serve")
+    _check_liaison_surface()
+    print("리서치 MCP 9개 영역 통과. 서버는 --serve")
