@@ -79,7 +79,9 @@ class ExpectedEdge(BaseModel):
     #   항상 기본값 20 을 쓰고, 그러면 "상위 몇 종목" 이 전략의 핵심인데
     #   가설이 그것을 못 정하는 셈이다. 범위는 config_binding.LIMITS 와 같다 -
     #   어긋나면 여기서 통과한 값이 바인딩에서 거부된다.
-    top_n: int | None = Field(default=None, ge=5, le=100,
+    #   (2026-08-13 상한 100→300: LIMITS 개방과 동기화. 여기만 좁게 남으면
+    #   접수·바인딩을 넓혀도 에이전트 출력이 이 계약에서 먼저 잘린다)
+    top_n: int | None = Field(default=None, ge=5, le=300,
                               description="상위 몇 종목을 담는가")
 
     @field_validator("type", "universe", mode="before")
@@ -220,9 +222,11 @@ Binding rules for this task:
   "breadth_rotation", "volatility".
 - expected_edge.horizon_days: positive integer holding horizon.
 - expected_edge.universe: short description of the target universe.
-- expected_edge.top_n: how many names to hold (5-100). This is a core strategy
+- expected_edge.top_n: how many names to hold (5-300). This is a core strategy
   parameter - concentration changes the result more than most signals. Pick it
-  from the rationale, not from habit.
+  from the rationale, not from habit. (Measured 2026-08-13: the top-20
+  convention was the main IR killer - transfer coefficient 0.114 vs 0.316 at
+  N=200. Wide, screened portfolios are a legitimate design, not an index.)
 - falsification_criteria: Korean, at least 2 items, each MEASURABLE (explicit
   metric, threshold and window). A hypothesis without failure modes is
   incomplete and will be rejected.

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -171,6 +172,33 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
             f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
 
+    # ①-a-2 정체성 키를 파라미터 칸에 적으면 **반려한다** (2026-08-13)
+    #   가설-실행 정합성 감사 실측: MAX 가설이 suggested_params 에
+    #   {"type": "low_max"} 까지 명시했는데 그 키는 조용히 버려지고
+    #   edge_type=low_volatility 로 실행됐다 - 에이전트의 가설은 검증된 적
+    #   없이 LOWVOL 성적표를 받았다. 힌트가 **실행 가능한 어휘**인데 전용
+    #   필드와 다르면, 조용한 무시는 곧 다른 가설을 검증하는 것이므로 멈춘다.
+    #   어휘 밖 힌트는 노이즈일 수 있어 기존 ①-a 경고로만 알린다.
+    sp = proposal.get("suggested_params") or {}
+    for f, vocab, approved, dest in (("type", EDGE_VOCAB, edge, "EDGE_TYPE"),
+                                     ("universe_key", UNIVERSE_VOCAB, universe,
+                                      "UNIVERSE_KEY")):
+        hint = str(sp.get(f) or "").strip().lower()
+        if hint and hint in vocab and hint != approved:
+            r.reject("IDENTITY_IN_PARAMS",
+                     f"SUGGESTED_PARAMS 의 {f}={hint!r} 는 실행 가능한 어휘인데 "
+                     f"전용 필드는 {approved!r} 다 - 지금 접수하면 {approved!r} 로 "
+                     f"실행돼 네 가설({hint!r})은 검증되지 않는다. "
+                     f"{dest} 필드로 옮겨라")
+
+    # ①-a-3 top_n 미지정은 특별히 짚는다 - 실행 관례(기본 20)가 조용히 채우는데,
+    #   IR 구조 진단(2026-08-13 실측)에서 top-20 초집중이 TC 0.114(신호 89%
+    #   소실)·TE 연 34.6% 의 주범이었다. 관례가 성적을 결정하는데 그 관례는
+    #   누구의 가설도 아니다. 막지 않고 정하라고 말한다.
+    if "top_n" not in sp:
+        r.warn("top_n 미지정 - 실행 관례(기본 20)로 돈다. 집중도가 성적을 크게 "
+               "바꾼다(실측 TC: top20 0.114 vs top200 0.316) - 가설이 직접 정하라")
+
     # ①-b 원천 어휘. **접수는 실행 가능성의 약속**인데 여기서 안 보면 가설이
     #     등록된 뒤 실행 단계에서 죽는다(2026-08-10 실측: 기획자가 DATA_TABLES 에
     #     `derived_returns`·`cost_scenarios` 같은 **파생 산출물**을 적었다.
@@ -194,6 +222,23 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                  f"strategy_structure={structure!r} 를 실행면이 표현할 수 없다 - "
                  + (why if why else f"사용 가능: {sorted(STRUCTURE_VOCAB)}")
                  + ". 표현 못 하는 구조를 빼고 돌리면 등록한 가설과 다른 실험이 된다")
+
+    # ①-c-2 반증 실행가능성 고지 (2026-08-13 실측)
+    #   에이전트는 beta 통제·섹터 통제·MAX 스프레드 같은 진짜 반증을 설계하는데
+    #   실행면의 반증 모듈은 6종(비용·창 부호·베이스라인 등)만 돌린다. 그 사실을
+    #   접수 때 안 알리면 에이전트는 자기 반증이 전부 걸린 줄 알고, 판정은
+    #   "반증 통과" 로 오독된다. **막지 않고 알린다** - 못 도는 반증을 썼다고
+    #   기획이 나쁜 게 아니고, 실행면이 자라야 할 방향의 수요 신호다.
+    try:
+        from falsification import classify as _fals_classify  # noqa: PLC0415
+
+        _tests = [str(t) for t in (proposal.get("falsification_tests") or [])]
+        _dead = [t[:60] for t in _tests if not _fals_classify(t)[1]]
+        if _dead:
+            r.warn(f"반증 {len(_tests)}개 중 {len(_dead)}개는 실행면이 못 돌린다"
+                   f"(미실행으로 남고 통과로 세지 않는다): {_dead}")
+    except Exception:  # noqa: BLE001 - 고지 실패가 접수를 막으면 안 된다
+        pass
 
     # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
@@ -240,9 +285,30 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     answered = set((prior.get("lessons_addressed") or {}).keys())
     missing = sorted(needed - answered)
     if missing and r.trials_used > 0:
-        r.reject("DUPLICATE_UNADDRESSED",
-                 f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
-                 f"그 교훈에 대응이 없다: {missing}")
+        # ▶ **"대응이 없다" 가 사실이 아닐 수 있다** (2026-08-13 실측)
+        #   `prop_5682` 는 교훈 5개를 이름으로 짚어 대응을 적었다 - 다만 카드가
+        #   `ECONOMIC_RATIONALE 에 적어라` 라고 시켜서 거기 적었고, 계약은
+        #   `LESSONS_ADDRESSED:` 만 읽는다. 그런데 반려문은 "대응이 없다" 였다.
+        #   **거짓 사유는 고칠 수 없는 사유다** - 기획자는 자기가 적은 것을
+        #   보면서 무엇이 문제인지 알 수 없다. 카드 문구는 고쳤고, 여기서는
+        #   본문에 답이 있는 경우를 가려내 **어디로 옮기라고** 말해 준다.
+        body = " ".join(str(proposal.get(k) or "") for k in
+                        ("economic_rationale", "counterparty",
+                         "competing_explanation"))
+        in_body = sorted(c for c in missing if c in body)
+        if in_body:
+            r.reject("LESSONS_IN_WRONG_FIELD",
+                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다. "
+                     f"대응을 **본문에는 적었는데**({in_body}) 계약이 읽는 칸은 "
+                     f"`LESSONS_ADDRESSED:` 다 - 같은 내용을 "
+                     f"`교훈코드=무엇을 다르게 하는가` 형식으로 그 칸에 옮겨라. "
+                     f"본문은 그대로 두면 된다"
+                     + (f". 본문에도 없는 것: {sorted(set(missing) - set(in_body))}"
+                        if set(missing) - set(in_body) else ""))
+        else:
+            r.reject("DUPLICATE_UNADDRESSED",
+                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
+                     f"그 교훈에 대응이 없다: {missing}")
     elif missing:
         # 실행 0인데 기각 교훈이 있다 = 원장이 어긋났다는 신호다(다른 계열의
         # 결과가 섞였거나 정리가 덜 됐다). **막지 않고 알린다** - 여기서 막으면
@@ -292,6 +358,43 @@ def expected_edge_for(proposal: dict) -> tuple[dict, list]:
     return edge, dropped
 
 
+def mapping_loss_of(proposal: dict) -> dict:
+    """가설→실행 번역에서 무엇이 떨어지는지 **접수 시점에 계산해 각인한다.**
+
+    ▶ 왜 (2026-08-13 가설-실행 정합성 감사)
+      실험이 돈 가설 41개가 서로 다른 config 19개로 접혔다. SMA20 매도 4건이
+      전부 REV-5(반대 방향)로, MAX 가설이 LOWVOL 로 실행됐는데 **원장 어디에도
+      번역에서 무엇이 사라졌는지 남지 않았다.** 판정은 남은 것만 보고 "이 가설은
+      기각"이라 적었다 - 검증된 적 없는 가설에 성적표가 붙은 것이다. 경고는
+      접수 응답과 함께 흘러가지만 각인은 판정·회고 때도 남아 있다.
+
+    반환(전부 기계 계산, 빈 dict = 무손실):
+      dropped_keys   - 실행면이 안 읽어 버려진 파라미터 키
+      defaulted_keys - 가설이 안 정해 실행 관례가 채울 손잡이
+      identity_hints - 파라미터 칸에 적힌 정체성 값 중 전용 필드와 다른 것
+    """
+    from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
+
+    tunable = set(EDGE_KEYS) - {"type", "universe_key"}
+    params = proposal.get("suggested_params") or {}
+    edge, dropped = expected_edge_for(proposal)
+    defaulted = sorted(k for k in tunable if edge.get(k) is None)
+    hints = {}
+    for f, approved in (("type", proposal.get("edge_type")),
+                        ("universe_key", proposal.get("universe_key"))):
+        hv = str(params.get(f) or "").strip().lower()
+        if hv and hv != str(approved or "").strip().lower():
+            hints[f] = hv
+    loss: dict = {}
+    if dropped:
+        loss["dropped_keys"] = dropped
+    if defaulted:
+        loss["defaulted_keys"] = defaulted
+    if hints:
+        loss["identity_hints"] = hints
+    return loss
+
+
 def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
                       created_by: str = "factory-bridge") -> dict:
     """기획안 -> quant.hypotheses INSERT 페이로드.
@@ -322,6 +425,8 @@ def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
         "source_reported_effect": proposal.get("source_reported_effect") or {},
         "trial_family_id": gate.trial_family_id,
         "trial_number": gate.trial_number,
+        # 번역 손실 각인 - 판정·회고가 "무엇이 검증됐고 무엇이 관례였나"를 본다
+        "mapping_loss": mapping_loss_of(proposal),
     }
 
 
@@ -382,11 +487,12 @@ _SQL_INSERT_OUTCOME = """
     insert into research.experiment_outcomes
       (outcome_id, experiment_id, hypothesis_id, trial_family_id, trial_number,
        decision, decided_at, proposal_id, failed_criteria, oos_summary,
-       regime_concerns, lesson_codes, notes)
+       regime_concerns, lesson_codes, notes, root_cause, corrective_action)
     values (%(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
             %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
             %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
-            %(regime_concerns)s, %(lesson_codes)s, %(notes)s)
+            %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
+            %(root_cause)s, %(corrective_action)s)
     on conflict (outcome_id) do nothing
 """
 
@@ -414,6 +520,24 @@ def count_family_trials(conn, trial_family_id: str) -> int:
         return int(cur.fetchone()[0])
 
 
+def _checkable_regime_evidence(values) -> list:
+    """Keep only regime observations with an auditable label and span/count."""
+    out = []
+    for value in values or ():
+        if isinstance(value, dict):
+            label = value.get("regime_label") or value.get("label") or value.get("regime")
+            window = value.get("window") or value.get("window_label") or value.get("period")
+            count = value.get("count") or value.get("window_count") or value.get("observations")
+            if label and (window or count is not None):
+                out.append(value)
+            continue
+        text = str(value)
+        if re.search(r"(?:regime|국면)\s*[:=]\s*[^,; ]+", text, re.I) and \
+           re.search(r"(?:window|기간|count|개수)\s*[:=]\s*[^,; ]+", text, re.I):
+            out.append(text)
+    return out
+
+
 def lessons_from(*, failed_criteria=(), regime_concerns=(),
                  fragility: str = "", oos_summary=None) -> list[str]:
     """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
@@ -433,8 +557,6 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         out.append("COST_SENSITIVE")
     if any("drawdown" in x for x in f):
         out.append("BEAR_FRAGILE")
-    if str(fragility).upper() == "FRAGILE":
-        out.append("SINGLE_REGIME_ONLY")
     # ▶ **관문을 못 거쳐도 지표가 말하는 것은 남긴다** (2026-08-10 실측)
     #   walk-forward 창이 0개라 종결했더니 교훈이 UNDERPOWERED_DATA 하나였다.
     #   그런데 그 실험은 기준선에 58.83%p 뒤졌다 - 표본이 모자란 것과 별개로
@@ -451,10 +573,15 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         # 사양을 못 받친다** 는 뜻이고, 리서치가 다음 기획에서 창을 줄이거나
         # 더 긴 이력을 요구해야 할 신호다.
         out.append("UNDERPOWERED_DATA")
-    joined = " ".join(str(c) for c in regime_concerns)
+    all_regimes = list(regime_concerns or ())
+    checked_regimes = _checkable_regime_evidence(all_regimes)
+    joined = " ".join(str(c) for c in all_regimes)
     if "하락장" in joined:
         out.append("BEAR_FRAGILE")
-    if "가로질러" in joined or "국면이 1개" in joined:
+    checked_joined = " ".join(str(c) for c in checked_regimes)
+    if "가로질러" in checked_joined or "국면이 1개" in checked_joined or any(
+            isinstance(c, dict) and (c.get("count") == 1 or c.get("window_count") == 1)
+            for c in checked_regimes):
         out.append("SINGLE_REGIME_ONLY")
     seen, uniq = set(), []          # 순서 보존 중복 제거 - 대조가 지저분해진다
     for c in out:
@@ -483,9 +610,10 @@ insert into quant.hypotheses
    required_data_products, status, created_by, trace_id,
    proposal_id, lead_ids, research_packet_ids, claim_ids,
    economic_rationale, counterparty, competing_explanation,
-   competing_explanation_codes, skeptic_sign, source_reported_effect)
+   competing_explanation_codes, skeptic_sign, source_reported_effect,
+   mapping_loss)
 values (%s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
-        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 returning hypothesis_id
 """
 
@@ -554,7 +682,8 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
                 row["proposal_id"], row["lead_ids"], row["research_packet_ids"],
                 row["claim_ids"], row["economic_rationale"], row["counterparty"],
                 row["competing_explanation"], row["competing_explanation_codes"],
-                row["skeptic_sign"], json.dumps(row["source_reported_effect"])))
+                row["skeptic_sign"], json.dumps(row["source_reported_effect"]),
+                json.dumps(row["mapping_loss"])))
             hid = str(cur.fetchone()[0])
         conn.commit()
         out.append(Promotion(p["proposal_id"], True, hypothesis_id=hid,
@@ -656,15 +785,81 @@ def _check_promotion_is_idempotent_and_records_rejection():
     print("  기획안->가설 승격 멱등   OK")
 
 
+# ── FRACAS 사상표 ────────────────────────────────────────────────────────────
+# ▶ **REJECT 는 시정조치 없이 닫히지 않는다** (2026-08-13, MIL-STD-2155 폐루프)
+#   교훈 코드는 NTSB 권고와 같은 지위였다 - 읽는 쪽이 무시해도 아무 일도 안
+#   일어난다(실측: 권고의 35%가 10년 방치). 행동을 바꾸는 것은 시정조치의
+#   **지정**이고, 그 조치가 재발을 실제로 막았는지 검증(verification_state)될
+#   때까지 루프는 열려 있다. 여기 사상은 결정론 기본값이다 - 에이전트가 더
+#   나은 조치를 지정할 수 있지만, 없어도 루프는 돈다(환류가 에이전트 가용성에
+#   묶이면 안 된다는 lessons_from 과 같은 원칙).
+FRACAS = {
+    # 교훈 코드: (근본원인 분류, 기본 시정조치)
+    "BASELINE_NOT_BEATEN": (
+        "가설_논리",
+        "브리핑 세칙: 같은 테마 재도전은 IR 개선 경로(비용·회전율·국면 방어 중 "
+        "무엇으로 벤치마크를 일관되게 이길지)를 LESSONS_ADDRESSED 에 명시"),
+    "SINGLE_REGIME_ONLY": (
+        "표본_설계",
+        "접수 세칙: 표본이 국면 1개면 판정 불가 - 장기 데이터셋(v3+)으로만 발주"),
+    "BEAR_FRAGILE": (
+        "가설_논리",
+        "기획 세칙: 하락 국면 방어 장치(낙폭 정지·노출 축소)를 사전 고정하고 "
+        "그 효과를 반증 기준에 포함"),
+    "OVERFIT_DSR": (
+        "표본_설계",
+        "배분 세칙: 이 계열의 남은 시도는 탐색층(부분샘플·IC)에서 거른 1개 "
+        "변형에만 사용 - DSR 감가는 시도를 되돌릴 수 없다"),
+    "COST_SENSITIVE": (
+        "가설_논리",
+        "기획 세칙: 회전율 상한(200x)을 설계 제약으로 명시 - 보유기간을 늘리거나 "
+        "리밸런스를 줄인 변형만 접수"),
+    "UNDERPOWERED": (
+        "표본_설계",
+        "접수 세칙: 창 산수(walk-forward >= 4창)를 만족하는 형성창만 접수"),
+    "UNDERPOWERED_DATA": (
+        "표본_설계",
+        "접수 세칙: 더 긴 이력 데이터셋으로만 재발주"),
+    "DATA_ARTIFACT": (
+        "데이터_결함",
+        "데이터 세칙: 해당 원천의 결함(미조정 분할 등)을 빌드에서 다루기 전까지 "
+        "그 구간 발주 금지"),
+}
+FRACAS_DEFAULT = ("순수_무알파",
+                  "환류 세칙: 이 계열 재도전은 새 메커니즘 근거(신규 리드) 필수")
+
+
+def fracas_of(lesson_codes) -> tuple[str, str]:
+    """교훈 코드 -> (근본원인, 시정조치). 첫 번째로 사상되는 코드가 대표다.
+
+    코드가 없거나 전부 모르는 코드면 기본값 - **비워 두지 않는다.** 빈 칸은
+    NTSB 권고의 운명(방치)을 그대로 밟는다.
+    """
+    for c in (lesson_codes or []):
+        if str(c) in FRACAS:
+            return FRACAS[str(c)]
+    return FRACAS_DEFAULT
+
+
 def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str:
     """**환류 적재와 상태 전이를 한 트랜잭션으로 묶는다.**
 
     "적재가 종결의 전제 조건" 을 주석으로만 적어 두면 언젠가 지켜지지 않는다.
     여기서 환류 INSERT 가 실패하면 상태 UPDATE 도 롤백된다 - 조용히 종결되고
     교훈만 사라지는 경로가 구조적으로 없어진다.
+
+    FRACAS: 기각 계열 판정에는 근본원인·시정조치가 자동 지정된다(위 사상표).
+    호출부가 명시하면 그것이 이긴다 - 결정론 기본값은 바닥이지 천장이 아니다.
     """
     payload = dict(outcome)
     payload["oos_summary"] = json.dumps(payload.get("oos_summary") or {})
+    if str(payload.get("decision", "")).upper() in REJECTING:
+        rc, ca = fracas_of(payload.get("lesson_codes"))
+        payload.setdefault("root_cause", rc)
+        payload.setdefault("corrective_action", ca)
+    else:
+        payload.setdefault("root_cause", None)
+        payload.setdefault("corrective_action", None)
     # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
     cur = conn.cursor()
     cur.execute(_SQL_INSERT_OUTCOME, payload)
@@ -761,6 +956,83 @@ def _check_never_run_family_is_not_blocked_by_lessons():
     assert g.warnings and "실행 기록은 0" in g.warnings[-1], g.as_dict()
 
 
+def _check_answer_in_wrong_field_says_where_to_move_it():
+    """**거짓 사유는 고칠 수 없는 사유다.** (2026-08-13 실측)
+
+    `prop_5682` 는 교훈 5개를 이름으로 짚어 대응을 적었다. 다만 카드가
+    `ECONOMIC_RATIONALE 에 적어라` 라고 시켜서 거기 적었고, 계약은
+    `LESSONS_ADDRESSED:` 만 읽는다. 반려문은 **"그 교훈에 대응이 없다"** 였다 -
+    사실이 아니다. 기획자는 자기가 적은 것을 보면서 무엇이 문제인지 알 수
+    없었고, 그래서 다음 기획안에서 같은 자리에 또 적었다.
+    """
+    past = [{"decision": "REJECT",
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_DSR"]}]
+    body = ("기존 시도는 하락 국면에서 손실이 확대됐다. BEAR_FRAGILE 에는 "
+            "고점 대비 -25% 손실 정지를 사전 고정하고, OVERFIT_DSR 에는 "
+            "사전 지정 파라미터 한 조합만 쓴다.")
+    g = gate0(_prop(economic_rationale=body), trials_used=1, past_outcomes=past)
+    assert not g.ok, "본문에만 있으면 통과하면 안 된다(계약이 무력해진다)"
+    assert "LESSONS_IN_WRONG_FIELD" in g.codes, g.as_dict()
+    why = " ".join(g.reasons)
+    assert "LESSONS_ADDRESSED" in why, why          # 어디로 옮길지 말해 준다
+    assert "대응이 없다" not in why, "사실이 아닌 사유가 아직 나간다"
+
+    # 본문에도 없으면 예전 사유가 그대로 맞다 - 없는 답을 있다고 하지 않는다
+    g2 = gate0(_prop(economic_rationale="그냥 될 것 같다"),
+               trials_used=1, past_outcomes=past)
+    assert "DUPLICATE_UNADDRESSED" in g2.codes, g2.as_dict()
+
+    # 일부만 본문에 있으면 나머지를 이름으로 짚어 준다
+    g3 = gate0(_prop(economic_rationale="BEAR_FRAGILE 에는 손실 정지를 건다"),
+               trials_used=1, past_outcomes=past)
+    assert "LESSONS_IN_WRONG_FIELD" in g3.codes
+    assert "OVERFIT_DSR" in " ".join(g3.reasons), g3.as_dict()
+
+
+def _check_unrunnable_falsification_is_disclosed():
+    """**못 돌리는 반증은 접수 때 말해 준다.** (2026-08-13 실측)
+
+    에이전트는 beta 통제·스프레드 검정 같은 진짜 반증을 설계하는데 실행면은
+    6종만 돌린다. 침묵하면 판정이 "반증 통과" 로 오독된다. 막지는 않는다 -
+    못 도는 반증은 실행면이 자라야 할 방향의 수요 신호다.
+    """
+    # 픽스처 주의(첫 작성 때 내가 틀렸다): "하락장 초과수익 < 0" 은 어느
+    # 패턴에도 안 걸리는 미분류다 - 미분류도 "못 돌린다" 로 세는 것이 맞다.
+    g = gate0(_prop(falsification_tests=[
+        "거래비용 차감 후 초과수익이 소멸하면 기각",   # 실행 가능(cost_stress)
+        "베타 중립화 후 효과 소멸 여부",               # 실행 불가
+    ]))
+    assert g.ok, "고지가 접수를 막았다 - 경고여야 한다"
+    joined = " ".join(g.warnings)
+    assert "못 돌린다" in joined and "베타" in joined, g.warnings
+    # 전부 실행 가능하면 이 경고는 없어야 한다(늑대 없는 경보 금지)
+    g2 = gate0(_prop(falsification_tests=[
+        "거래비용 차감 후 초과수익이 소멸하면 기각",
+        "walk-forward 창의 절반 이상에서 부호가 반전되면 기각",
+    ]))
+    assert "못 돌린다" not in " ".join(g2.warnings), g2.warnings
+
+
+def _check_reject_never_closes_without_corrective_action():
+    """**REJECT 는 시정조치 없이 닫히지 않는다.** (FRACAS, 2026-08-13)
+
+    교훈 코드만 남기는 것은 NTSB 권고와 같다 - 35%가 10년 방치됐다.
+    사상표에 없는 코드도 기본값을 받는다(빈 칸 금지). 채택(PROMOTED)에는
+    시정조치를 지어내지 않는다.
+    """
+    rc, ca = fracas_of(["BASELINE_NOT_BEATEN", "BEAR_FRAGILE"])
+    assert rc == "가설_논리" and "LESSONS_ADDRESSED" in ca
+    rc2, ca2 = fracas_of(["듣도못한코드"])
+    assert rc2 == "순수_무알파" and ca2, "모르는 코드가 빈 칸을 만들었다"
+    assert fracas_of([]) == FRACAS_DEFAULT
+    assert fracas_of(None) == FRACAS_DEFAULT
+    # 어휘 정합: lessons_from 이 낼 수 있는 코드는 전부 사상표에 있어야 한다
+    known = {"BASELINE_NOT_BEATEN", "SINGLE_REGIME_ONLY", "BEAR_FRAGILE",
+             "OVERFIT_DSR", "COST_SENSITIVE", "UNDERPOWERED",
+             "UNDERPOWERED_DATA", "DATA_ARTIFACT"}
+    assert known <= set(FRACAS), f"사상표 구멍: {known - set(FRACAS)}"
+
+
 def _check_addressed_lessons_pass():
     past = [{"decision": "REJECT", "lesson_codes": ["BEAR_FRAGILE"]}]
     g = gate0(_prop(prior_check={"lessons_addressed": {"BEAR_FRAGILE": "표본 확대"}}),
@@ -815,6 +1087,48 @@ def _check_gate_approved_edge_type_wins():
     # 접수 단계에서 경고로 뜬다 - 세 주기 뒤 실행면에서 처음 알면 늦다
     g = gate0(p)
     assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
+
+
+def _check_identity_hint_in_vocab_is_rejected():
+    """**실행 가능한 어휘를 파라미터 칸에 적으면 반려한다** - 각인의 짝.
+
+    실측(가설-실행 정합성 감사): MAX 가설이 suggested_params 에
+    {"type": "low_max"} 까지 명시했는데 조용히 버려지고 LOWVOL 로 실행됐다.
+    low_max 가 어휘에 없던 때는 어쩔 수 없었지만 이제 있다 - 있는데도 조용히
+    다른 것을 돌리면 그건 무시가 아니라 **다른 가설의 검증**이다.
+    """
+    p = _prop(edge_type="low_volatility")
+    p["suggested_params"] = {"type": "low_max", "top_n": 20}
+    g = gate0(p)
+    assert not g.ok and "IDENTITY_IN_PARAMS" in g.codes, g.as_dict()
+    assert "EDGE_TYPE 필드로 옮겨라" in "; ".join(g.reasons), g.reasons
+    # 어휘 밖 힌트는 반려하지 않는다(노이즈일 수 있다) - 기존 ①-a 경고가 잡는다
+    p2 = _prop()
+    p2["suggested_params"] = {"type": "sma_cross_sell", "top_n": 20}
+    g2 = gate0(p2)
+    assert g2.ok and "IDENTITY_IN_PARAMS" not in g2.codes, g2.as_dict()
+    assert any("SUGGESTED_PARAMS" in w for w in g2.warnings), g2.warnings
+
+
+def _check_mapping_loss_is_stamped():
+    """번역 손실이 **원장에 각인**되는가 - 경고는 흘러가고 각인은 남는다."""
+    p = _prop()  # lookback_days 는 버려지고, top_n 등은 관례로 채워진다
+    loss = mapping_loss_of(p)
+    assert loss["dropped_keys"] == ["lookback_days"], loss
+    assert "top_n" in loss["defaulted_keys"], loss
+    assert "identity_hints" not in loss, loss
+    row = to_hypothesis_row(p, gate0(p))
+    assert row["mapping_loss"] == loss, row["mapping_loss"]
+    # INSERT 가 각인 컬럼을 실제로 나른다 - 계산만 하고 안 실으면 각인이 아니다
+    assert "mapping_loss" in _SQL_INSERT_HYPOTHESIS, _SQL_INSERT_HYPOTHESIS
+    # top_n 관례가 성적을 결정한 실측(TC 0.114) - 접수 경고로도 짚는다
+    g = gate0(p)
+    assert any("top_n 미지정" in w for w in g.warnings), g.warnings
+    # top_n 을 정하면 그 경고는 사라진다 - 경고가 상수면 아무도 안 읽는다
+    p3 = _prop()
+    p3["suggested_params"] = {"top_n": 200}
+    g3 = gate0(p3)
+    assert not any("top_n 미지정" in w for w in g3.warnings), g3.warnings
 
 
 def _check_outcome_requires_reason():
@@ -892,7 +1206,10 @@ def _check_lessons_mapping_is_deterministic_baseline():
     assert lessons_from(failed_criteria=["pbo", "min_deflated_sharpe"]) == [
         "OVERFIT_PBO", "OVERFIT_DSR"]
     b = lessons_from(failed_criteria=["max_turnover"], fragility="FRAGILE")
-    assert "COST_SENSITIVE" in b and "SINGLE_REGIME_ONLY" in b, b
+    assert "COST_SENSITIVE" in b and "SINGLE_REGIME_ONLY" not in b, b
+    assert "SINGLE_REGIME_ONLY" in lessons_from(regime_concerns=[
+        {"regime_label": "TEST", "window": "2024-01/2024-06", "count": 1}])
+    assert "SINGLE_REGIME_ONLY" not in lessons_from(regime_concerns=["국면이 1개"])
     assert lessons_from(regime_concerns=["하락장 평균 수익률 -32.1%"]) == ["BEAR_FRAGILE"]
     # 같은 교훈이 두 경로로 나와도 한 번만 (대조가 지저분해진다)
     assert lessons_from(failed_criteria=["max_drawdown_pct"],
@@ -1015,11 +1332,16 @@ if __name__ == "__main__":
     _check_trial_count_comes_from_executions_not_outcomes()
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
-    _check_never_run_family_is_not_blocked_by_lessons(); print("  실행 0 계열은 안 막음    OK")
+    _check_never_run_family_is_not_blocked_by_lessons()
+    _check_answer_in_wrong_field_says_where_to_move_it()
+    _check_reject_never_closes_without_corrective_action()
+    _check_unrunnable_falsification_is_disclosed(); print("  실행 0 계열은 안 막음    OK")
     _check_addressed_lessons_pass();            print("  대응하면 재도전 허용     OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_lineage_is_copied_not_referenced();  print("  계보 복사(참조 아님)     OK")
     _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
+    _check_identity_hint_in_vocab_is_rejected(); print("  정체성 힌트 반려         OK")
+    _check_mapping_loss_is_stamped();           print("  번역 손실 각인           OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
@@ -1028,4 +1350,4 @@ if __name__ == "__main__":
     print("  교훈 사상(에이전트 무관)  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 14개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 19개 영역 통과. 루프가 닫혔다.")

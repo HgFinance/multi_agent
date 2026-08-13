@@ -6,7 +6,8 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [quant, backtest, preregistration, overfitting, factory]
-    related_skills: [methodology-scout]
+    related_skills: [methodology-scout, wiring-audit, dataset-engineering,
+                     skill-authoring]
 ---
 
 # Experiment Factory: 기획안 → 카드 → 환류
@@ -97,6 +98,17 @@ quant-py pipeline/backtest_runner.py --run                             # 백테�
 quant-py pipeline/<모듈>.py                                            # 인자 없이 = 자체점검
 ```
 
+**카드를 열면 먼저 내 능력을 훑는다 (한 줄)**
+
+```bash
+sh "$(find /opt/data -name capabilities.sh | head -1)"
+```
+
+실행면·경로·마운트·DSN·HTTP 창구·스킬이 한 화면에 나온다. **"없다"·"못 한다"
+를 적으려면 이 목록을 먼저 봐라** - 2026-08-12 에 세 번, 있는 것을 없다고 하고
+카드를 닫았다(`source_registry ABSENT`, `시세 조회 도구 없음`,
+`ModuleNotFoundError`). 셋 다 있었고, 한 번 훑으면 끝날 일이었다.
+
 **데이터를 먼저 본다 - 설계는 그다음이다**
 
 두 원장에 직접 붙을 수 있다. 프로필 `env:` 에 DSN 이 있으므로 코드에서 그대로 읽는다.
@@ -122,6 +134,27 @@ select interval_code, count(*), count(distinct instrument_id),
 -- 나흘로 낸 수치가 원장에 남는다.
 ```
 
+**시세는 HTTP 로도 물어본다 - MCP 가 없어도 된다**
+
+`market-api` 가 같은 네트워크에 떠 있다. DSN·SQL 없이 바로 읽는다.
+
+```bash
+curl -s "http://market-api:8036/bars/005930?limit=120"      # 일봉
+curl -s "http://market-api:8036/microstructure/005930"      # 오늘 체결·호가 요약
+curl -s "http://market-api:8036/snapshot/005930"            # 현재 스냅샷
+curl -s "http://market-api:8036/breadth"                    # 시장 폭
+curl -s "http://market-api:8036/regime/daily"               # 국면
+curl -s "http://market-api:8036/dq/summary"                 # 데이터 품질
+curl -s "http://market-api:8036/dq/bar_freshness"           # 봉 신선도
+```
+
+실측(2026-08-12): `/bars/005930` 이 일봉을, `/microstructure/005930` 이 그날
+체결 660,983건·호가 29,022건 요약을 돌려줬다. **퀀트 프로필에 `mcp_servers` 가
+없다고 해서 도구가 없는 게 아니다** - 이 창구는 인증 없이 열려 있다.
+
+`/bars` 는 **최신순**으로 온다. `closes[-1]` 을 최신으로 쓰면 120봉 조회에서
+가장 오래된 종가를 집는다(실측 사고). 정렬을 확인하고 써라.
+
 **표본이 설계를 정한다.** 형성창을 정하기 전에 walk-forward 창이 몇 개 나오는지
 직접 세라 - 창이 3개 미만이면 강건성 판정이 성립하지 않는다.
 
@@ -135,6 +168,12 @@ print(len(make_windows(dates, max(WARMUP_TRADING_DAYS, lookback+1))))"
 **필요한 데이터셋이 없으면 만든다.** 매니페스트가 덮는 원천만 실험까지 가므로,
 없으면 반려로 끝내지 말고 빌드한다. 빌드는 `content_hash`·파티션·품질검사를
 같이 박으므로 반드시 이 진입점으로 한다.
+
+> **데이터가 있는데 안 쓰이거나, 써 보니 안 될 때는 `dataset-engineering` 을
+> 먼저 열어라.** 여덟 층을 실제로 열어 보는 `probe_dataset.py` 가 있다.
+> `BadGzipFile` 로 죽은 실험이 알고 보니 파일은 멀쩡하고 148,931행이 정상이었던
+> 일이 있다 — 막힌 층은 여섯 번째였고 고칠 곳이 완전히 달랐다.
+> 뚫었으면 `skill-authoring` 으로 남겨라. 안 남기면 다음 주기에 또 판다.
 
 ```bash
 quant-py pipeline/pit_dataset.py --build --name <이름> --version <버전> \
@@ -185,12 +224,99 @@ input_hash     = sha256({dataset, config, code, seed, cost})
 네가 그것에 대해 무엇을 결론지었는지를 담는다. 다음 주기의 너는 둘 다 없으면
 같은 자리에서 다시 시작한다.
 
+**병목은 네가 푼다 - 보고하고 멈추지 않는다**
+
+이 부서에서 "느리다·막혔다" 는 보고 대상이 아니라 **네 작업**이다. 무엇이
+느린지 재고, 원인을 짚고, 손잡이가 있으면 돌려라. 손잡이가 없으면 만들어라.
+
+판단은 재고 하라 - 카드 본문에 큐 적체와 한 건당 소요가 실린다.
+
+```
+큐: 대기 28건 / 실행 1건 · 최근 한 건 평균 110초 · 직렬이면 약 51분
+```
+
+| 병목 | 손잡이 |
+|---|---|
+| 큐가 밀린다 | `QUANT_EXPERIMENT_BATCH` 를 올려 병렬로 집는다 |
+| 표본이 얇아 판정이 안 선다 | `pit_dataset.py --build` 로 넓은 버전을 만든다 |
+| 창이 안 나온다 | `horizon_days` 를 창이 3개 이상 나오는 값으로 |
+| 기성 템플릿으로 안 된다 | 시그널을 쓴다(`strategy_spec.from_code`) |
+| 러너가 못 한다 | 러너를 고친다 - 다음 시도로 세어질 뿐이다 |
+| 데이터가 어디 있는지 모른다 | `data_resolution.py --list` 로 카탈로그를 본다 |
+
+병렬도를 올려도 안전한 이유는 구조에 있다: `lease` 가 `for update skip locked`
+라 같은 작업을 둘이 못 집고, `input_hash` 가 중복 실험을 거부한다. **올린 값과
+그 근거를 카드에 적어라** - 다음 사람이 왜 그 값인지 알아야 되돌리거나 더 올린다.
+
+> 오늘(2026-08-12) 고친 것 중 열두 건이 "손잡이는 있는데 아무도 안 돌린" 것이었다.
+> 카탈로그가 2종만 적혀 있었고, 스킬이 실행을 금지했고, 도구가 PATH 밖에 있었다.
+> **막혔다고 적기 전에 손잡이를 찾아라.** 없으면 그때 없다고 적어라 - 그 구분이
+> 이 카드의 값이다.
+
+**"없다" 는 결론을 내기 전에 `wiring-audit` 을 돌린다**
+
+`값이 None 이다` · `지표가 부족하다` · `실행면이 없다` · `데이터셋이 없다` -
+이 문장들이 나오려 하면 그 전에 배관을 훑어라. 위 열두 건 중 여섯 건이 정확히
+그 문장이었고 **여섯 건 다 실제로는 있었다.**
+
+```bash
+SCAN=$(find /opt/data -path "*wiring-audit/scripts/scan_wiring.py" | head -1)
+python "$SCAN" /app/repo/departments/04-quant-backtest
+```
+
+`key_mismatch`(넣는 키 ≠ 읽는 키)와 `bounded_digit_regex`(수치를 잘라 읽음)가
+신호가 세다. 스캔은 **후보만 낸다** - 그 경로를 실제로 불러 확인한 뒤 판정해라.
+
 **여전히 안 되는 것**
 
 - 결과를 본 뒤 config·시그널 코드를 고쳐 다시 돌리기 → 새 시도다(DSR 이 감가한다)
 - SQL 로 `quant.*` 에 직접 쓰기 → 사전등록 지문·`content_hash`·매니페스트가
   진입점 안에서 박힌다. 밖에서 만든 숫자는 재현이 안 되므로 결과가 아니다
 - 실패한 실행을 지우고 다시 돌리기
+
+### 4-b. 알파가 있는데 낙폭에서 죽었다면 — 엣지를 바꾸지 말고 위험을 관리해라
+
+**2026-08-12 실측.** momentum 이 이 성적을 냈다.
+
+```
+초과수익 +157.51%p   IR 1.26   Sharpe 1.28   DSR 0.976
+낙폭 -50.52%  (관문 허용 -35%)   →  REJECTED
+```
+
+DSR 0.976 은 **시도 횟수를 감안해도 우연이 아니라는 뜻**이다(기준 0.95). 알파는
+있었다. 죽은 자리는 위험관리였다. 그런데 그때 실행면에는 손잡이가 다섯 개
+(`strategy`/`lookback_days`/`top_n`/`rebalance`/`initial_capital`)뿐이라
+**완전투자 동일가중 롱온리 말고는 표현할 수가 없었다.** 그래서 리서치는 계속
+새 엣지를 설계했고, 새 엣지도 위험관리가 없기는 마찬가지라 같은 자리에서 죽었다.
+
+지금은 손잡이가 있다. `SUGGESTED_PARAMS`(=`expected_edge`)에 넣는다:
+
+| 키 | 뜻 | 범위 |
+|---|---|---|
+| `max_drawdown_stop` | 고점 대비 이 낙폭이면 전량 현금 | −0.90 ~ −0.02 |
+| `vol_target_annual` | 목표 연변동성. 실현이 크면 그만큼 노출을 줄인다 | 0.02 ~ 1.0 |
+| `max_exposure` | 익스포저 상한 | 0.1 ~ **1.0** |
+| `vol_lookback_days` | 변동성 추정 창 | 20 ~ 250 |
+
+**안 적으면 꺼진 채로 돈다** — 예전 결과와 비트 단위로 같다(사전등록 무결성).
+**레버리지는 열려 있지 않다**(`max_exposure` 상한 1.0). 개발원칙 9: 위험한
+기능은 실패 시 거래 확대가 아니라 Entry 차단 방향으로 동작한다.
+
+읽는 법:
+
+- 관문 판정은 이제 **기각에도 적재된다.** 환류 `notes` 에
+  `관문 4/8 통과. 남은 조항: max_drawdown -50.52% (기준 -35.0%, 15.52% 모자람)…`
+  형태로 남는다. **"몇 개 통과했고 무엇이 얼마나 모자랐나"** 를 먼저 봐라
+- 통과한 조항이 절반을 넘는 계열은 브리핑의 `[관문에 근접한 계열]` 에 뜬다.
+  **거기 있는 것은 새 엣지보다 먼저다** — 찾은 알파를 버리고 새로 찾는 것보다
+  붙이는 쪽이 훨씬 싸다
+- **`미측정` 은 실패가 아니다.** `pbo 미측정` 은 "과적합됐다"가 아니라 "안 쟀다"이다.
+  차단은 되지만 교훈으로 적히지 않는다 — 재는 것이 답이다
+- 같은 계열 재시도는 trial 수를 올리고 **DSR 이 그만큼 조여진다.** 값을 여러 번
+  던져 고르면 그 최고치는 실력과 운을 못 가린다. 근거를 갖고 한 번에 골라라
+
+`risk_exposure()` 는 자기 자산곡선만 본다(구조적 PIT). 낙폭 정지는 리밸런스일에만
+평가된다 — 월 리밸런스면 월 단위로 끊긴다는 뜻이다. 그것이 가설의 일부다.
 
 ### 5. 해석 — 숫자를 다시 만들지 않는다
 

@@ -97,6 +97,37 @@ def universe_key(text) -> str:
     return ""
 
 
+# ── 테마 층 ──────────────────────────────────────────────────────────────────
+# ▶ **계열 위의 조회 층이지 정체성이 아니다** (2026-08-13, 문헌 3건 수렴)
+#   TreeBH(테마→계열→시도 트리 검정), GBH(테마별 REJECT/시도 = π₀ 추정으로
+#   문턱 가중), Bühlmann 신뢰도(시도 1회 계열도 테마 평균으로 수축해 순위
+#   가능) - 셋 다 이 한 층을 연료로 쓴다. 분류는 KRX 148개 이상현상 복제
+#   연구(JDQS 2020)의 군집을 따른다: 가치 69% 생존 vs 수익성 5% - 테마가
+#   사전확률의 축이 되는 시장이다.
+#
+#   **family_id 해시에 절대 넣지 않는다.** 2dGBH 의 실측 경고: 테마를 잘못
+#   자르면 검정력 붕괴 + 위양성 폭발이다. 테마가 정체성에 들어가면 오분류
+#   교정이 곧 계열 갈라짐(다중검정 분모 오염)이 된다. 조회 층이면 교정이
+#   공짜다.
+THEMES = {
+    "momentum": "추세",
+    "risk_adjusted_momentum": "추세",
+    "trend_following": "추세",
+    "breakout": "추세",
+    "mean_reversion": "반전",
+    "low_volatility": "저위험",
+    "low_max": "저위험",       # MAX 효과(복권 회피)는 저위험 이상현상 군집
+                               # (Bali-Cakici-Whitelaw) - 저변동과 형제 테마
+    "illiquidity_premium": "거래마찰",
+    "liquidity_shock_reversal": "거래마찰",
+}
+
+
+def theme_of(edge_type: str) -> str:
+    """edge_type -> 테마. **모르는 유형은 '미분류'** - 지어내지 않는다."""
+    return THEMES.get(str(edge_type or "").strip().lower(), "미분류")
+
+
 def family_key(hyp: dict) -> dict:
     """가설 -> Family 를 정하는 재료. **튜닝 값·자유 서술은 안 들어간다.**"""
     edge = hyp.get("expected_edge") or {}
@@ -246,6 +277,30 @@ def pressure(family, cards: list[dict], *, budget: int) -> dict:
 _A = {"expected_edge": {"type": "mean_reversion",
                         "universe": "SMA20 위 상위 50% 종목",
                         "horizon_days": 5, "top_n": 20}}
+
+
+def _check_theme_is_a_lens_not_identity():
+    """**테마는 계열 해시에 못 들어간다.** (2dGBH: 오분류 시 검정력 붕괴)
+
+    테마가 정체성이면 분류 교정이 곧 계열 갈라짐(다중검정 분모 오염)이다.
+    조회 층이면 교정이 공짜다. 그리고 어휘 전체에 테마가 있어야 파레토·
+    π₀ 집계가 구멍 없이 돈다 - 단 모르는 유형은 '미분류'로 정직하게.
+    """
+    from strategy_templates import EDGE_VOCAB as _EV
+
+    for e in _EV:
+        assert theme_of(e) != "미분류", f"어휘 {e} 에 테마가 없다"
+    assert theme_of("듣도못한유형") == "미분류"
+    assert theme_of(None) == "미분류"
+    # 해시 불변: 테마 사전이 통째로 바뀌어도 family_id 는 같아야 한다
+    h = {"expected_edge": {"type": "momentum", "universe_key": "krx_all"}}
+    before = family_id(h)
+    saved = dict(THEMES)
+    try:
+        THEMES.clear()
+        assert family_id(h) == before, "테마가 계열 해시에 스며들었다"
+    finally:
+        THEMES.update(saved)
 
 
 def _check_tuning_does_not_change_family():
@@ -404,6 +459,7 @@ if __name__ == "__main__":
     _check_synonyms_are_one_family();            print("  동의어 -> 한 Family     OK")
     _check_unmappable_universe_makes_no_family(); print("  미사상 -> Family 안 만듦 OK")
     _check_no_edge_type_makes_no_family();       print("  빈 Family 안 만듦       OK")
+    _check_theme_is_a_lens_not_identity();       print("  테마 = 조회층(정체성 아님) OK")
     _check_pressure_counts_family_only();        print("  Family 단위 계수        OK")
     _check_unknown_family_does_not_block();      print("  미상 Family 차단 안 함  OK")
     _check_pressure_always_has_trial_number();   print("  trial_number 항상 존재  OK")
@@ -411,4 +467,4 @@ if __name__ == "__main__":
     _check_intake_and_runtime_agree();           print("  접수==실행면 Family     OK")
     _check_row_without_view_would_have_drifted(); print("  정본 미경유는 어긋남    OK")
     _check_alias_keeps_the_lineage();             print("  동의어 계열 합산        OK")
-    print("시도 Family 12개 영역 통과.")
+    print("시도 Family 13개 영역 통과.")

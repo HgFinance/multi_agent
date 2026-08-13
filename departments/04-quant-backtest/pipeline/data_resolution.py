@@ -98,6 +98,25 @@ SOURCE_TABLES: dict[str, tuple[str, str, str, str, str | None, str | None]] = {
                         None, "instrument_id"),
 }
 
+# ── 유도 관계 ──────────────────────────────────────────────────────────────
+# ▶ **원시를 요구했는데 접은 것만 있을 때** (2026-08-12, 재일 지시)
+#   리서치는 논문 용어대로 `market_quotes`·`market_ticks` 를 요구한다. 그런데
+#   원시는 압축 후에도 하루 2.5GB 라 파티션으로 굳힐 수 없고, 백테스트가 실제로
+#   읽는 것은 **종목·일자로 접은** `microstructure_features` 다. 그 안에
+#   `spread_bps`·`depth_imbalance`·`order_flow_imbalance` 가 들어 있으니
+#   호가 불균형·주문흐름 가설은 이것으로 검정된다.
+#
+#   그래서 원시 요구를 유도본으로 **대체할 수 있다고 본다.** 다만 조용히
+#   바꾸지 않는다 - 대체했다는 사실이 `Resolution.notes` 로 나가고 실험 기록에
+#   남는다. 원시 틱으로 검정했다고 착각하면 결론의 강도를 잘못 읽는다.
+#
+#   ⚠ 여기 적는 것은 **정말로 그 원천에서 유도된 것만**이다. 비슷해 보인다고
+#     넣으면 "없는 것을 있다고" 하는 것이고, 그건 이 저장소가 반복해 막아 온
+#     실패다.
+DERIVED_FROM: dict[str, tuple[str, ...]] = {
+    "microstructure_features": ("market_quotes", "market_ticks"),
+}
+
 # 판정. ok 는 RESOLVED 하나뿐이다 - 나머지는 전부 "돌리면 안 된다".
 RESOLVED = "RESOLVED"
 UNMAPPED_SOURCE = "UNMAPPED_SOURCE"          # 사상할 매니페스트가 없다
@@ -249,6 +268,7 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
     # 이미 실행면 이름으로 온 것: 사상은 건너뛰되 검증은 한다.
     chosen: list[tuple[str, dict]] = []
     unmapped: list[str] = []
+    substituted: list[str] = []
     for d in direct:
         if d in known:
             chosen.append((d, known[d][2]))
@@ -283,11 +303,31 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
                 if n not in best or v > best[n][0].rsplit("/", 1)[1]:
                     best[n] = (f"{n}/{v}", s)
         covered = {t for _, s in best.values() for t in s}
+        # 유도본으로 대체 가능한 원시 요구를 건져낸다. **대체 사실을 남긴다.**
+        still = want - covered
+        for raw in sorted(still):
+            for derived, sources in DERIVED_FROM.items():
+                if raw not in sources:
+                    continue
+                for n, v, srcs in index:
+                    if derived not in srcs:
+                        continue
+                    if n not in best or v > best[n][0].rsplit("/", 1)[1]:
+                        best[n] = (f"{n}/{v}", srcs)
+                    # **원시 이름**을 덮인 것으로 표시한다. 유도본 이름을
+                    # 넣으면 `want` 에 없는 값이라 미사상이 그대로 남는다.
+                    covered = covered | {raw}
+                    substituted.append(
+                        f"{raw} -> {derived} (유도본으로 대체. 원시가 아니라 "
+                        f"종목·일자로 접은 값이다 - 결론을 원시 틱 검정으로 읽지 마라)")
+                    break
         unmapped.extend(sorted(want - covered))
         if not unmapped:
             # 고른 것 중 **이 요구가 실제로 쓰는 원천을 가진 것**만 남긴다.
             # 안 그러면 무관한 매니페스트의 커버리지까지 재게 된다.
-            chosen.extend(v for v in best.values() if set(v[1]) & want)
+            # 유도본은 원시 이름과 안 겹치므로 `& want` 로 걸러지면 빠진다.
+            keep = set(want) | {d for d in DERIVED_FROM}
+            chosen.extend(v for v in best.values() if set(v[1]) & keep)
 
     if unmapped:
         return Resolution(UNMAPPED_SOURCE, unmapped=tuple(sorted(set(unmapped))),
@@ -324,6 +364,9 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
         return Resolution(INSUFFICIENT_HISTORY, coverage=coverage,
                           notes=tuple(short))
 
+    # **대체를 맨 앞에 싣는다.** 읽는 쪽이 커버리지 숫자만 보고 원시로 검정한
+    # 줄 알면 결론의 강도를 잘못 읽는다.
+    notes.extend(substituted)
     for tbl, cov in sorted(coverage.items()):
         notes.append(f"{tbl}: {cov.rows:,}행 {cov.first_day}~{cov.last_day} "
                      f"{cov.history_days}일 {cov.symbols}종목")
@@ -433,8 +476,15 @@ _SQL_CATALOG = """
 select m.name, m.version,
        coalesce(m.source_versions, '{}'::jsonb),
        m.row_count,
-       (select count(*) from quant.universe_members u
-         where u.universe_version_id = m.universe_version_id),
+       -- ▶ **유니버스 미연결과 0종목을 가른다** (2026-08-12)
+       --   서브쿼리는 행이 없어도 0 을 준다. `universe_version_id` 가 아예
+       --   NULL 인 데이터셋(마이크로구조가 그렇다)까지 `0종목` 으로 찍혀
+       --   "종목이 하나도 없는 데이터셋" 처럼 보였다 - 148,931행짜리인데도.
+       --   미측정과 0 은 다르다. 안 걸린 것은 NULL 로 내보낸다.
+       case when m.universe_version_id is null then null
+            else (select count(*) from quant.universe_members u
+                   where u.universe_version_id = m.universe_version_id)
+       end,
        coalesce(m.partitions, '[]'::jsonb),
        coalesce(m.quality_summary, '{}'::jsonb),
        m.as_of
@@ -480,7 +530,8 @@ def catalog(meta_conn) -> list[dict]:
             "dataset": f"{name}/{ver}",
             "sources": sorted(srcs or {}),
             "rows": int(rows or 0),
-            "symbols": int(syms or 0),
+            # None = 유니버스가 안 걸렸다(못 셌다). 0 = 걸렸는데 비었다.
+            "symbols": None if syms is None else int(syms),
             "span": (f"{parts[0]} ~ {parts[-1]}" if parts else "(파티션 없음)"),
             "partitions": len(parts or []),
             "warnings": warns,
@@ -495,8 +546,10 @@ def _print_catalog(rows: list[dict]) -> None:
         return
     print(f"{'데이터셋':28} {'덮는 원천':26} {'기간':20} {'종목':>6} {'행수':>12}  경고")
     for r in rows:
+        # 못 센 것을 0 으로 찍지 않는다 - `유니버스없음` 이 사실이다
+        syms = f"{r['symbols']:,}" if r["symbols"] is not None else "유니버스없음"
         print(f"{r['dataset']:28} {','.join(r['sources'])[:26]:26} "
-              f"{r['span']:20} {r['symbols']:>6,} {r['rows']:>12,}  "
+              f"{r['span']:20} {syms:>12} {r['rows']:>12,}  "
               f"{','.join(r['warnings']) or '-'}")
     print("\n▶ 실험은 **여기 있는 원천만** 쓸 수 있다. 없는 원천을 요구하면 "
           "`사상할 데이터셋이 없다` 로 막힌다.")

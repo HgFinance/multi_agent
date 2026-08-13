@@ -68,7 +68,11 @@ const PROVISIONAL_BY_RISK_SCORE: Record<1 | 2 | 3, MandatePreset> = {
   1: {
     max_instrument_weight: "0.10",
     max_sector_weight: "0.25",
-    max_gross_exposure: "0.80",
+    // 2026-08-13: 0.80(레버리지 없이도 원금의 80%만 투자)이었는데, 화면
+    // 슬라이더(MandateConfig.tsx 최대 위험 노출액)의 최소값이 100%로 좁혀지면서
+    // 이 값이 슬라이더가 표현할 수 없는 범위가 됐다. 가장 보수적인 등급의
+    // "레버리지 없음" 기본값은 1.00(원금만큼만 투자)이 의미상으로도 더 맞다.
+    max_gross_exposure: "1.00",
     max_concurrent_positions: 5,
   },
   // MEDIUM
@@ -123,6 +127,52 @@ export function presetFor(mindset: Mindset, experience: Experience): MandatePres
  */
 export function provisionalRiskScore(mindset: Mindset, experience: Experience): 1 | 2 | 3 {
   return Math.min(MINDSET_SCORE[mindset], EXPERIENCE_SCORE[experience]) as 1 | 2 | 3;
+}
+
+/**
+ * 성향 선택 시 화면 슬라이더 4개에 채울 초기값.
+ *
+ * **`MandatePreset`과 다른 개념이다** — `MandatePreset`은 USER_INPUT_SPEC 3.1이
+ * 정의한 "사용자에게 안 묻고 숨기는 2개 필드"(max_sector_weight,
+ * max_concurrent_positions)용이고, `max_instrument_weight`/`max_gross_exposure`는
+ * 거기서도 실제 제출 시(`mandateClient.ts`) 항상 화면 슬라이더 값으로
+ * 덮어써진다 — 스펙상 이 둘은 "직접 선택" 항목이다(§2 5·... 항목류와 같은 층).
+ * `max_drawdown_pct`/`max_daily_loss`도 §2 6·7번으로 직접 선택 항목이라
+ * `MandatePreset`에는 아예 없다.
+ *
+ * 그런데도 성향을 고르면 이 4개 슬라이더가 그럴듯한 시작값으로 바뀌길
+ * 원한다면(요구사항: "선택하면 프론트에 보이는 기본값이 바뀌게"), 그 시작값도
+ * 등급별로 어딘가에 정의돼 있어야 한다 — 그래서 별도 테이블을 둔다. 사용자는
+ * 이후 슬라이더를 자유롭게 더 움직일 수 있고, 최종 제출값은 여전히 그 슬라이더
+ * 값이다(§3.3 "은닉은 화면의 표현일 뿐 전송 생략이 아니다"와 같은 원칙 —
+ * 여기서는 "제안 기본값일 뿐 강제가 아니다").
+ *
+ * **등급 산출은 `provisionalRiskScore()`를 그대로 재사용한다.** 이 화면엔
+ * 투자 경험을 따로 묻는 문항이 없어 `PLACEHOLDER_EXPERIENCE`(INTERMEDIATE)로
+ * 고정하는데(`mandateClient.ts`), 여기서 독자적으로 등급을 다시 계산하면 화면
+ * 기본값과 실제 제출 시 숨김 필드(§3.1 2개)가 서로 다른 등급을 가리킬 수
+ * 있다 - 슬라이더-프리셋 어긋남으로 422가 났던 사고(2026-08-12)와 같은
+ * 종류의 문제라 반드시 같은 함수로 등급을 낸다.
+ *
+ * **PROVISIONAL** — `PROVISIONAL_BY_RISK_SCORE`와 마찬가지로 동규님 확정
+ * 전이다. `auditSliderDefaults()`가 9칸 전부 결정론 제약을 지키는지 검증한다.
+ */
+export interface SliderDefaults {
+  maxSingleWeightPct: number;
+  grossExposurePct: number;
+  maxDrawdownPct: number;
+  maxDailyLossPct: number;
+}
+
+const SLIDER_DEFAULTS_BY_RISK_SCORE: Record<1 | 2 | 3, SliderDefaults> = {
+  1: { maxSingleWeightPct: 10, grossExposurePct: 100, maxDrawdownPct: 15, maxDailyLossPct: 2 },
+  2: { maxSingleWeightPct: 15, grossExposurePct: 150, maxDrawdownPct: 20, maxDailyLossPct: 3 },
+  3: { maxSingleWeightPct: 25, grossExposurePct: 250, maxDrawdownPct: 35, maxDailyLossPct: 5 },
+};
+
+export function sliderDefaultsFor(mindset: Mindset, experience: Experience): SliderDefaults {
+  const score = provisionalRiskScore(mindset, experience);
+  return { ...SLIDER_DEFAULTS_BY_RISK_SCORE[score] };
 }
 
 export interface PolicyConstraintViolation {
@@ -212,6 +262,46 @@ export function auditProvisionalPresets(): {
     for (const experience of experiences) {
       const violations = findConstraintViolations({
         preset: presetFor(mindset, experience),
+      });
+      if (violations.length > 0) failures.push({ mindset, experience, violations });
+    }
+  }
+  return failures;
+}
+
+/**
+ * `SLIDER_DEFAULTS_BY_RISK_SCORE`가 결정론 제약을 지키는지 확인한다.
+ *
+ * `max_instrument_weight`/`max_gross_exposure`는 슬라이더 기본값에서,
+ * `max_sector_weight`/`max_concurrent_positions`는 `MandatePreset`에서 가져와
+ * 하나로 합친 뒤 검증한다 - 실제 제출 시에도 정확히 이렇게 섞이기 때문이다
+ * (`mandateClient.ts` `effectiveLimits()`와 같은 조합).
+ */
+export function auditSliderDefaults(): {
+  mindset: Mindset;
+  experience: Experience;
+  violations: PolicyConstraintViolation[];
+}[] {
+  const mindsets: Mindset[] = ["SAFETY_FIRST", "BALANCED", "RISK_SEEKING"];
+  const experiences: Experience[] = ["BEGINNER", "INTERMEDIATE", "EXPERIENCED"];
+  const failures: {
+    mindset: Mindset;
+    experience: Experience;
+    violations: PolicyConstraintViolation[];
+  }[] = [];
+  for (const mindset of mindsets) {
+    for (const experience of experiences) {
+      const defaults = sliderDefaultsFor(mindset, experience);
+      const preset = presetFor(mindset, experience);
+      const violations = findConstraintViolations({
+        preset: {
+          max_instrument_weight: (defaults.maxSingleWeightPct / 100).toFixed(4),
+          max_sector_weight: preset.max_sector_weight,
+          max_gross_exposure: (defaults.grossExposurePct / 100).toFixed(4),
+          max_concurrent_positions: preset.max_concurrent_positions,
+        },
+        maxDailyLoss: (defaults.maxDailyLossPct / 100).toFixed(4),
+        maxDrawdownPct: (defaults.maxDrawdownPct / 100).toFixed(4),
       });
       if (violations.length > 0) failures.push({ mindset, experience, violations });
     }

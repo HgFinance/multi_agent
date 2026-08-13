@@ -203,6 +203,29 @@ def _sig_volatility(v: PITView, params: dict) -> dict:
     return out
 
 
+def _sig_max_daily_return(v: PITView, params: dict) -> dict:
+    """MAX - 창 안의 **최대 일일수익률** (Bali-Cakici-Whitelaw 2011 의 신호).
+
+    ▶ 실행면 확장 1호 (2026-08-13, 에이전트 수요 실측)
+      리서치 에이전트가 복권선호(lottery-preference) 가설을 내며 파라미터에
+      `"type": "low_max"` 를 직접 적었는데 실행면이 이 신호를 몰라 실현변동성
+      (LOWVOL)으로 깎여 실행됐다 - **MAX 와 실현변동성은 다른 신호라 그
+      판정은 MAX 가설의 판정이 아니었다.** 재료는 처음부터 있었다:
+      `daily_returns` 에서 max 한 줄이다. 어휘는 TEMPLATES 에서 파생되므로
+      이 등록으로 Gate 0 이 열린다.
+
+      창을 다 못 채우면 제외한다 - 3일치의 max 를 "한 달 MAX" 라 부르면
+      다른 지표가 된다(_sig_volatility 와 같은 원칙).
+    """
+    lb = _p(params, "lookback_days", 21)
+    out = {}
+    for s in v.symbols:
+        r = v.daily_returns(s, lb)
+        if len(r) >= lb:
+            out[s] = max(r)
+    return out
+
+
 def _sig_risk_adjusted_return(v: PITView, params: dict) -> dict:
     """수익률 / 변동성. 변동성이 0 이면 제외한다 - 나눗셈을 방어값으로
     가리면 '변동 없는 종목'이 무한대 점수로 1등이 된다."""
@@ -310,6 +333,14 @@ TEMPLATES: dict[str, Template] = {
                  lambda p: _p(p, "adv_window", 60),
                  "비유동성에 프리미엄이 붙는다",
                  "평균 거래대금 하위 균등"),
+        # 실행면 확장 1호 (2026-08-13): 에이전트가 요청한 신호를 원형 그대로.
+        # BOTTOM = 저MAX 매수(복권형 회피 가설). 역방향이면 IC 검정이 부호와
+        # 함께 말해 준다 - 고MAX 쪽 재도전은 새 사전등록으로.
+        Template("LOWMAX", "low_max", "BOTTOM", _sig_max_daily_return,
+                 lambda p: _p(p, "lookback_days", 21) + 1,
+                 "복권형 수익(높은 MAX)을 좇는 수요가 그 종목을 과대평가한다"
+                 " - 저MAX 가 이후 수익에서 앞선다",
+                 "창 내 최대 일일수익률 하위 균등"),
     )
 }
 

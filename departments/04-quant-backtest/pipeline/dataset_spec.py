@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -208,6 +209,33 @@ SPECS: dict[str, DatasetSpec] = {
     f"{MICROSTRUCTURE_DAILY.name}/{MICROSTRUCTURE_DAILY.version}": MICROSTRUCTURE_DAILY,
 }
 
+# 버전 스탬프. 빌더의 `--stamp` 가 `v1` 을 `v1-20260812` 로 찍는다.
+_STAMPED = re.compile(r"^(?P<base>.+?)-\d{8}$")
+
+
+def spec_for(name: str, version: str) -> "DatasetSpec | None":
+    """`name/version` -> 명세. **스탬프를 벗겨서도 찾는다.**
+
+    ▶ 왜 (2026-08-12 실측)
+      `--stamp` 로 스냅샷 버전을 찍자 `SPECS.get("…/v1-20260812")` 가 빗나갔다.
+      명세를 못 찾은 로더는 **일봉 gzip 경로로 조용히 떨어져** Parquet 파일을
+      gzip 으로 열었고 `BadGzipFile: Not a gzipped file (b'PA')` 로 죽었다
+      (`PA` 는 Parquet 매직 `PAR1` 의 앞 두 글자다).
+
+      스탬프는 같은 명세의 다른 스냅샷이지 다른 명세가 아니다. 내용 해시가
+      버전 문자열을 안 쓰므로(`content_hash` 는 sort_key·row_line 만 본다)
+      기준 버전 명세로 읽어도 해시는 그대로 맞는다.
+
+      **조회 규칙은 등록부가 소유한다** - 부르는 쪽마다 각자 벗기면 한 곳을
+      고쳐도 다른 곳이 계속 gzip 으로 떨어진다.
+    """
+    key = f"{name}/{version}"
+    s = SPECS.get(key)
+    if s is not None:
+        return s
+    m = _STAMPED.match(str(version or ""))
+    return SPECS.get(f"{name}/{m.group('base')}") if m else None
+
 
 # ── 자체 점검 (DB 없음) ───────────────────────────────────────────────────
 def _check_canon_matches_pit_dataset():
@@ -300,6 +328,32 @@ def _check_spec_columns_match_sql():
     print("  SQL/열 명세 일치         OK")
 
 
+def _check_stamped_version_still_finds_the_spec():
+    """**스탬프 찍힌 버전도 같은 명세를 찾아야 한다.** (2026-08-12 사고 원문)
+
+    `--stamp` 로 `v1` -> `v1-20260812` 를 찍자 조회가 빗나갔고, 로더는 명세를
+    못 찾자 일봉 gzip 경로로 조용히 떨어져 Parquet 를 gzip 으로 열었다:
+    `BadGzipFile: Not a gzipped file (b'PA')`. 실험이 그 자리에서 죽었다.
+    """
+    n = MICROSTRUCTURE_DAILY.name
+    assert spec_for(n, "v1") is MICROSTRUCTURE_DAILY
+    assert spec_for(n, "v1-20260812") is MICROSTRUCTURE_DAILY, "스탬프 조회 실패"
+    # **아무 접미사나 벗기지 않는다** - 8자리 날짜만이다. v2 는 다른 명세다.
+    assert spec_for(n, "v2") is None
+    assert spec_for(n, "v1-2026081") is None, "8자리가 아닌 것을 스탬프로 봤다"
+    assert spec_for(n, "v1-abc") is None
+    # 이름이 다르면 못 찾는다 - 스탬프를 벗겼다고 남의 명세로 읽으면 안 된다
+    assert spec_for("krx-basket-daily", "v1-20260812") is None
+    # 내용 해시가 버전 문자열을 안 써야 이 대체가 안전하다
+    import inspect  # noqa: PLC0415
+
+    from spec_dataset_builder import content_hash  # noqa: PLC0415
+    src = inspect.getsource(content_hash)
+    assert ".version" not in src, ("content_hash 가 버전을 쓴다 - 스탬프 조회가 "
+                                   "해시 불일치를 만든다")
+    print("  스탬프 버전도 명세 찾음  OK")
+
+
 def _selfcheck() -> int:
     print(f"{SPEC_VERSION} 자체 점검 (DB 없음)")
     _check_canon_matches_pit_dataset()
@@ -307,7 +361,8 @@ def _selfcheck() -> int:
     _check_roundtrip_is_hash_stable()
     _check_partition_and_sort_are_deterministic()
     _check_spec_columns_match_sql()
-    print("데이터셋 명세 5개 영역 통과.")
+    _check_stamped_version_still_finds_the_spec()
+    print("데이터셋 명세 6개 영역 통과.")
     return 0
 
 
