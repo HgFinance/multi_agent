@@ -79,6 +79,15 @@ export type CeoQueryProgress = {
   finished: number;
   all_terminal: boolean;
   answer_grounded: boolean;
+  /**
+   * Synthesis 노드가 끝났을 때의 최종 답변. `/result`의 `result.summary`를
+   * 그대로 옮긴 것 - `cards`에도 같은 텍스트가 root 카드에 실리지만, 호출부가
+   * "root 카드를 찾아서 summary를 읽어라"를 각자 구현하면 root 카드를 목록에서
+   * 거르는 화면(현재 DashboardView)에서 이 텍스트 자체가 통째로 안 보이게 되는
+   * 사고가 난다 - 실제로 그랬다(2026-08-13). 최종 답변은 카드 목록과 별개로
+   * 최상위 필드로 명시한다.
+   */
+  final_answer: string | null;
   unusable: CeoQueryCard[];
   stalled: CeoQueryCard[];
   cards: CeoQueryCard[];
@@ -276,6 +285,7 @@ export async function ceoProgress(
         : status.status === "completed",
     answer_grounded:
       Boolean(result.result?.summary) && result.qa_verdict !== "FAIL",
+    final_answer: result.result?.summary ?? null,
     unusable,
     stalled,
     cards,
