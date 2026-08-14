@@ -119,8 +119,8 @@ def _token_from_env(env: Mapping[str, str], profile: str) -> str | None:
             key, separator, value = line.partition("=")
             if separator and key.strip() == "DISCORD_BOT_TOKEN":
                 return value.strip().strip('"').strip("'") or None
-    except OSError:
-        return None
+        except OSError:
+            continue
     return None
 
 
@@ -174,7 +174,7 @@ class DiscordFinalDelivery:
             correlation.channel_id or "",
             message_id or "",
         )
-        if not correlation.channel_id or not message_id:
+        if not message_id:
             logger.warning(
                 "discord-final-delivery root=%s status=missing_context",
                 root_task_id,
@@ -182,15 +182,22 @@ class DiscordFinalDelivery:
             return "missing_context"
 
         inbound_key = store.inbound_key_for_message(message_id, profile)
+        context: Mapping[str, str | None] = {}
         if inbound_key:
             context = store.inbound_context(inbound_key, profile)
-            guild_id = correlation.guild_id or context.get("guild_id") or "unknown"
-            channel_id = correlation.channel_id or context.get("channel_id")
-            dedup_key = inbound_key
-        else:
-            guild_id = correlation.guild_id or "unknown"
-            channel_id = correlation.channel_id
-            dedup_key = canonical_discord_dedup_key(guild_id, channel_id, message_id)
+        guild_id = correlation.guild_id or context.get("guild_id") or "unknown"
+        channel_id = correlation.channel_id or context.get("channel_id")
+        if not channel_id:
+            logger.warning(
+                "discord-final-delivery root=%s status=missing_context",
+                root_task_id,
+            )
+            return "missing_context"
+        dedup_key = (
+            inbound_key
+            if inbound_key
+            else canonical_discord_dedup_key(guild_id, channel_id, message_id)
+        )
         if not channel_id:
             logger.warning(
                 "discord-final-delivery root=%s status=missing_context",

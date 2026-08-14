@@ -125,6 +125,10 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(client.created[0]["parent_task_ids"], ())
         self.assertIn("workflow_root_task_id=root", client.created[0]["body"])
         self.assertIn("workflow_role=primary", client.created[0]["body"])
+        self.assertEqual(
+            client.created[0]["idempotency_key"],
+            primary_idempotency_key("root", "research-department"),
+        )
 
     def test_blocked_transient_can_retry_and_other_blocked_can_replan(self) -> None:
         retry = decide_supervisor(
