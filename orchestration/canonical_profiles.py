@@ -51,6 +51,30 @@ CANONICAL_PROFILES: Final[frozenset[str]] = frozenset(
     CANONICAL_PROFILE_BY_DEPARTMENT.values()
 ) | frozenset(LIAISON_PROFILE_BY_DEPARTMENT.values())
 
+# ▶ 실제로 카드에 찍혀 본 적 있는 **틀린 이름들** (2026-08-14 실측)
+#   전부 "부서 디렉터리 이름"이나 "컨테이너 이름"을 프로필 이름으로 착각한 것이다.
+#   Hermes 는 생성 시점에 assignee 를 검증하지 않으므로 이런 카드는 만들어지고,
+#   디스패처가 매 tick "non-spawnable" 로 건너뛰기만 한다 - 즉 **조용히 영원히
+#   안 돈다.** 실제로 22 장이 이틀간 정체했고(ai-qa-audit 17·risk-department 5),
+#   독립 QA·리스크 게이트가 그동안 한 번도 실행되지 않았다.
+#   여기에 적어두면 최소한 우리 코드 경로와 감사 스크립트가 잡아낸다.
+LEGACY_PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "ai-qa-audit": "qa-department",
+        "ai-qa-audit-department": "qa-department",
+        "risk-department": "risk-management",
+        # 컨테이너 이름(hedgefund-workforce-hermes)에서 온 착각. 런타임에 3 줄짜리
+        # 껍데기 프로필 디렉터리까지 생겨 있었다(모델·env·mcp 없음).
+        "workforce-management": "hr-department",
+        "ceo": "ceo-agent",
+        "ceo-office": "ceo-agent",
+        "research": "research-department",
+        "quant": "quant-backtest-department",
+        "trading": "trading-department",
+        "accounting": "accounting-portfolio-department",
+    }
+)
+
 _DEPARTMENT_BY_CANONICAL_PROFILE: Final[Mapping[str, str]] = MappingProxyType(
     {
         **{
@@ -142,6 +166,7 @@ __all__ = [
     "CANONICAL_PROFILES",
     "CanonicalKanbanTaskRequest",
     "CanonicalProfileError",
+    "LEGACY_PROFILE_ALIASES",
     "USER_QUERY_PRIORITY",
     "canonical_profile_for_department",
     "department_for_canonical_profile",
