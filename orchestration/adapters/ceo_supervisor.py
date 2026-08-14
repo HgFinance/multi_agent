@@ -319,6 +319,9 @@ class SupervisorState:
     # Durable planner selection.  An empty tuple preserves compatibility for
     # legacy roots whose body predates the machine-readable field.
     selected_primary_profiles: tuple[str, ...] = ()
+    # 이 루트가 **사람이 발원한 질의**인가 (origin=user-query 도장, RFC 3834 동형).
+    # 공장 자동 생성 카드는 CEO 워크플로가 아니다 - 사용자에게 물어볼 것이 없다.
+    root_is_user_query: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -501,6 +504,18 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 len(state.selected_primary_profiles),
                 0,
                 ",".join(state.missing_primary_profiles),
+            )
+            return None
+        # 사람이 발원한 질의일 때만 사용자에게 되묻는다. 공장 자동 생성 카드
+        # (공장 주기·공장 개선 등)는 자식 없이 혼자 끝나는 게 정상인데, 그것까지
+        # 워크플로로 보고 REQUEST_USER_INPUT 카드를 찍어내면 **아무도 답할 수 없는
+        # 카드**가 쌓인다 - CEO 에이전트가 "무엇을 물어야 하는지 지시에 없다"며
+        # blocked 로 보내고, 그게 43 장 쌓여 있었다(2026-08-14 실측, 전부 같은 제목
+        # "CEO planner produced no executable child task").
+        if not state.root_is_user_query:
+            logger.info(
+                "no-analysis-children on non-user root=%s - skipping user-input card",
+                state.parent_task_id,
             )
             return None
         return SupervisorDecision(
@@ -1138,6 +1153,7 @@ class CeoSupervisorService:
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_primary_profiles_from_body(root_body),
+                    root_is_user_query="origin=user-query" in root_body,
                 )
                 decision = self.decider(state)
                 if state.analysis_children and not state.missing_primary_profiles:

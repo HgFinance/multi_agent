@@ -58,6 +58,29 @@ def child(
     )
 
 
+class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
+    """자식 없는 루트에 '사용자에게 물어보라' 카드를 찍는 조건을 고정한다.
+
+    회귀 근거(2026-08-14 실측): 공장 자동 생성 카드(공장 주기·공장 개선)는 자식
+    없이 혼자 끝나는 게 정상인데 supervisor 가 그것까지 워크플로로 보고
+    REQUEST_USER_INPUT 카드를 만들었다. CEO 에이전트는 "무엇을 물어야 하는지
+    지시에 없다"며 blocked 로 보냈고, 같은 제목의 카드가 43 장 쌓였다.
+    """
+
+    def test_factory_root_does_not_get_user_input_card(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState("root", (), root_is_user_query=False)
+        )
+        self.assertIsNone(decision)
+
+    def test_user_query_root_still_asks(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState("root", (), root_is_user_query=True)
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.REQUEST_USER_INPUT)
+
+
 class UserQueryPriorityTest(unittest.TestCase):
     """사람이 기다리는 카드가 공장 카드보다 대기열 앞에 서는지 고정한다.
 
