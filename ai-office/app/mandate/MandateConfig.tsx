@@ -34,8 +34,8 @@ import {
  * 좌측은 정책 폼, 우측은 그 폼을 채우는 인터뷰 콘솔이다.
  *
  * "지침 저장"은 `../lib/mandateClient.ts`를 거쳐 `POST /ui/mandates`(최초 1회,
- * 없을 때만) + `POST /ui/mandates/{id}/versions`(항상) + `POST /ui/investor-profiles`
- * 로 BFF에 전달된다. 이 화면은 정책 version과 적합성 프로필을 저장할 뿐,
+ * 없을 때만) + `PUT /ui/mandates/{id}`(현재 metadata 교체) + `POST /ui/investor-profiles`
+ * 로 BFF에 전달된다. 이 화면은 현재 Mandate metadata와 적합성 프로필을 저장할 뿐,
  * 주문·원장·한도나 Risk/QA 승인 흐름을 시작하지 않는다.
  *
  * "임시 저장"은 브라우저(localStorage)에만 남는다 - 완성 전 초안까지 Mandate
@@ -81,7 +81,7 @@ export interface MandateDraft {
   maxSingleWeightPct: number;
   grossExposurePct: number;
   /**
-   * 2026-08-12 추가. `governance.mandate_versions.risk_bounds.max_drawdown_pct`의
+   * 2026-08-12 추가. `governance.mandates.metadata.policy.risk_bounds.max_drawdown_pct`의
    * 필수값이라, 슬라이더가 없으면 제출 자체가 서버에서 422로 거부된다
    * (USER_INPUT_SPEC.md §2 6번 "전체 최대 손실" — 프리셋이 아니라 직접 선택 항목).
    */
@@ -316,14 +316,14 @@ function MandateConfigForm({ userId }: { userId: string }) {
         return;
       }
       let next = DEFAULT_DRAFT;
-      let loadedVersion = 0;
+      let hasStoredMandate = false;
 
       try {
         const stored = await loadMandateForFund(account.fundId);
         if (cancelled) return;
         if (stored?.policy) {
           next = policyToDraft(next, stored.policy, stored.objectiveText);
-          loadedVersion = stored.version;
+          hasStoredMandate = true;
         }
       } catch (cause) {
         if (!cancelled) {
@@ -385,10 +385,10 @@ function MandateConfigForm({ userId }: { userId: string }) {
       }
 
       setDraft(next);
-      if (loadedVersion > 0) {
+      if (hasStoredMandate) {
         setStep(INTERVIEW.length);
         setMessages([
-          { from: "agent", text: `저장된 지침 v${loadedVersion}을 불러왔습니다. 좌측에서 바로 수정하실 수 있어요.` },
+          { from: "agent", text: "저장된 지침을 불러왔습니다. 좌측에서 바로 수정하실 수 있어요." },
           // 지침은 있는데 적합성 프로필이 없는 상태가 실제로 생긴다(프로필 저장
           // 경로가 지침보다 늦게 붙었다). 그때 위험 성향·투자 경험만 기본값으로
           // 보이는데, 말해주지 않으면 "일부만 안 불러와진다"로만 보인다.
@@ -593,8 +593,8 @@ function MandateConfigForm({ userId }: { userId: string }) {
       // 저장됐으면 둘 다 됐다고 말하지 않는다.
       setNotice(
         result.profileError
-          ? `지침 v${result.version}은 DB에 저장됐습니다. 다만 적합성 프로필은 저장되지 않았습니다 - ${result.profileError}`
-          : `지침 v${result.version}과 적합성 프로필이 DB에 저장됐습니다.`,
+          ? `지침은 DB에 저장됐습니다. 다만 적합성 프로필은 저장되지 않았습니다 - ${result.profileError}`
+          : "지침과 적합성 프로필이 DB에 저장됐습니다.",
       );
     } catch (error) {
       setNotice(
@@ -970,7 +970,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
           <footer className="border-t border-outline-variant p-4 bg-surface-bright flex justify-between items-center gap-4 flex-wrap mt-auto">
             <div className="text-xs text-on-surface-variant flex items-center gap-1 font-medium">
               <span className="material-symbols-outlined text-[16px]" aria-hidden="true">info</span>
-              저장하면 새 지침 version과 적합성 프로필만 기록됩니다. 활성화·주문·원장 변경은 수행하지 않습니다.
+              저장하면 현재 지침 metadata와 적합성 프로필을 덮어씁니다. 주문·원장 변경은 수행하지 않습니다.
             </div>
             <div className="flex gap-3">
               <button
