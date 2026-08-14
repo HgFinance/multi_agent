@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/office-simulation.test.mjs",
+    "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/office-simulation.test.mjs tests/mandate-interview.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
