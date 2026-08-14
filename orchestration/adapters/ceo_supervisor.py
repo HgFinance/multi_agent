@@ -18,9 +18,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from orchestration.adapters.terminal_projection_utils import action as terminal_action
+from orchestration.adapters.terminal_projection_utils import (
+    action as terminal_action,
+)
+from orchestration.adapters.terminal_projection_utils import (
+    is_background_research,
+)
 from orchestration.adapters.terminal_projection_utils import (
     workflow_role as terminal_workflow_role,
+)
+from orchestration.adapters.terminal_projection_utils import (
+    workflow_root as terminal_workflow_root,
 )
 from orchestration.canonical_profiles import (
     CanonicalKanbanTaskRequest,
@@ -137,13 +145,12 @@ class ChildTaskState:
     outcome: str = ""
     retry_count: int = 0
     body: str = ""
+    workflow_root_task_id: str = ""
 
     @classmethod
     def from_hermes(cls, payload: Mapping[str, Any]) -> ChildTaskState:
         task_id = str(payload.get("id") or payload.get("task_id") or "")
-        profile = validate_canonical_profile(
-            str(payload.get("assignee") or payload.get("profile") or "")
-        )
+        raw_profile = str(payload.get("assignee") or payload.get("profile") or "")
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
         summary = _text(payload.get("summary") or latest or payload.get("result"))
@@ -156,6 +163,15 @@ class ChildTaskState:
         block_kind = str(payload.get("block_kind") or payload.get("kind") or "").casefold()
         outcome = str(payload.get("outcome") or "").casefold()
         body = _text(payload.get("body"))
+        workflow_root_task_id = terminal_workflow_root(payload) or ""
+        # Background research is outside the CEO task plane.  Its profile may
+        # be a future dedicated runtime identity, so do not force it through
+        # the request-scoped canonical department allowlist before excluding it.
+        profile = (
+            raw_profile
+            if is_background_research({"body": body})
+            else validate_canonical_profile(raw_profile)
+        )
         runs = payload.get("runs")
         retry_count = 0
         if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes)):
@@ -177,10 +193,13 @@ class ChildTaskState:
             outcome=outcome,
             retry_count=retry_count,
             body=body,
+            workflow_root_task_id=workflow_root_task_id,
         )
 
     @property
     def department(self) -> str:
+        if self.is_background_research:
+            return self.profile
         return department_for_canonical_profile(self.profile)
 
     @property
@@ -198,6 +217,8 @@ class ChildTaskState:
         # QA and replan tasks are supervisor-created work, but they remain
         # workflow children. Only CEO-assigned control tasks are excluded
         # from the analysis/QA dependency graph.
+        if self.is_background_research:
+            return False
         return self.workflow_role in {"control", "synthesis"} or (
             self.profile == canonical_profile_for_department("ceo")
             and SUPERVISOR_MARKER in self.body
@@ -214,15 +235,19 @@ class ChildTaskState:
     def is_analysis(self) -> bool:
         """Whether this task is a current workflow's primary analysis child."""
 
-        if self.is_supervisor or self.is_qa:
+        if self.is_background_research or self.is_supervisor or self.is_qa:
             return False
-        if self.workflow_role:
-            return self.workflow_role == "primary"
-        # Compatibility for older scoped tasks without an explicit role.
-        return self.profile in {
-            canonical_profile_for_department(name)
-            for name in ("research", "quant", "trading", "accounting", "risk", "hr")
-        }
+        return self.workflow_role == "primary"
+
+    @property
+    def is_background_research(self) -> bool:
+        return is_background_research({"body": self.body})
+
+    def is_in_workflow(self, root_task_id: str) -> bool:
+        declared_root = self.workflow_root_task_id or terminal_workflow_root(
+            {"body": self.body}
+        )
+        return declared_root == root_task_id
 
     @property
     def terminal(self) -> bool:
@@ -257,11 +282,21 @@ class SupervisorState:
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
-        return tuple(child for child in self.children if child.is_analysis)
+        return tuple(
+            child
+            for child in self.children
+            if child.is_in_workflow(self.parent_task_id) and child.is_analysis
+        )
 
     @property
     def qa_children(self) -> tuple[ChildTaskState, ...]:
-        return tuple(child for child in self.children if child.is_qa and not child.is_supervisor)
+        return tuple(
+            child
+            for child in self.children
+            if child.is_in_workflow(self.parent_task_id)
+            and child.is_qa
+            and not child.is_supervisor
+        )
 
     @property
     def supervisor_children(self) -> tuple[ChildTaskState, ...]:
@@ -269,7 +304,9 @@ class SupervisorState:
 
     def has_action(self, action: SupervisorAction) -> bool:
         return any(
-            SUPERVISOR_MARKER in child.body and action.value in child.body
+            child.is_in_workflow(self.parent_task_id)
+            and SUPERVISOR_MARKER in child.body
+            and action.value in child.body
             for child in self.children
         )
 
@@ -416,6 +453,9 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     for child in state.children:
         if (
+            child.is_background_research
+            or not child.is_in_workflow(state.parent_task_id)
+            or
             child.is_supervisor
             or (child.is_qa and state.workflow_mode == "analysis")
             or not child.terminal
@@ -598,9 +638,12 @@ def parse_supervisor_output(payload: str | Mapping[str, Any]) -> SupervisorDecis
     parent_ids = payload.get("parent_task_ids", ())
     if not isinstance(parent_ids, Sequence) or isinstance(parent_ids, (str, bytes)):
         raise SupervisorValidationError("parent_task_ids must be an array")
-    if action in {SupervisorAction.CREATE_TASK, SupervisorAction.RUN_QA, SupervisorAction.SYNTHESIZE}:
-        if not assignee or not payload.get("title") or not payload.get("body"):
-            raise SupervisorValidationError(f"{action.value} requires canonical assignee, title, and body")
+    if action in {
+        SupervisorAction.CREATE_TASK,
+        SupervisorAction.RUN_QA,
+        SupervisorAction.SYNTHESIZE,
+    } and (not assignee or not payload.get("title") or not payload.get("body")):
+        raise SupervisorValidationError(f"{action.value} requires canonical assignee, title, and body")
     if action == SupervisorAction.RETRY_TASK and not payload.get("target_task_id"):
         raise SupervisorValidationError("RETRY_TASK requires target_task_id")
     return SupervisorDecision(
@@ -1220,17 +1263,17 @@ class CeoSupervisorService:
 
 
 __all__ = [
-    "ChildTaskState",
-    "CeoSupervisorService",
     "FAILURE_OUTCOMES",
+    "PRIMARY_DEPARTMENTS",
+    "CeoSupervisorService",
+    "ChildTaskState",
     "HermesKanbanClient",
     "HermesKanbanCommandError",
-    "PRIMARY_DEPARTMENTS",
-    "SupervisorWorkflowError",
     "SupervisorAction",
     "SupervisorDecision",
     "SupervisorState",
     "SupervisorValidationError",
+    "SupervisorWorkflowError",
     "decide_supervisor",
     "parse_supervisor_output",
 ]

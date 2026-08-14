@@ -20,7 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
+from orchestration.adapters.ceo_notion_projection import (
+    CeoNotionProjection,
+    NotionProjectionError,
+)
 from orchestration.adapters.ceo_supervisor import (
     HermesKanbanClient,
     HermesKanbanCommandError,
@@ -252,6 +255,8 @@ def replay_terminal_projection(
         "projection": projection_result,
     }
     if projection_result.get("status") not in success_statuses:
+        if projection_type == "notion":
+            return result
         raise ReplayValidationError(json.dumps(result, ensure_ascii=False, default=str))
     return result
 
@@ -279,11 +284,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             kanban_db=args.kanban_db,
         )
+    except NotionProjectionError as exc:
+        print(
+            json.dumps(
+                {
+                    "type": "notion",
+                    "projection": {
+                        "status": "failed",
+                        "retryable": exc.status is None or exc.status >= 500 or exc.status == 429,
+                        "error": str(exc),
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
     except (ReplayValidationError, HermesKanbanCommandError) as exc:
         print(json.dumps({"status": "rejected", "error": str(exc)}, ensure_ascii=False))
         return 2
     print(json.dumps(result, ensure_ascii=False, default=str))
-    return 0
+    return 1 if result.get("projection", {}).get("status") == "failed" else 0
 
 
 if __name__ == "__main__":

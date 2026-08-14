@@ -12,6 +12,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from orchestration.ceo_workflow_scope import (
+    BACKGROUND_RESEARCH_ROLE,
+    CONTINUOUS_RESEARCH_MARKER,
+    CONTINUOUS_RESEARCH_PLANE,
+)
+
 _ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
 _ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
 _ACTION_RE = re.compile(r"(?m)^(?:action|workflow_action)=(\S+)\s*$")
@@ -21,6 +27,7 @@ _SUPERVISOR_LINE_RE = re.compile(
 )
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+$")
 _MODE_RE = re.compile(r"(?m)^workflow_mode=(\S+)\s*$")
+_PLANE_RE = re.compile(r"(?m)^workflow_plane=(\S+)\s*$")
 _FORBIDDEN_KEYS = {
     "chain_of_thought",
     "cot",
@@ -97,6 +104,39 @@ def action(task: Mapping[str, Any]) -> str | None:
 def workflow_mode(task: Mapping[str, Any]) -> str | None:
     match = _MODE_RE.search(task_body(task))
     return match.group(1).strip().casefold() if match else None
+
+
+def workflow_plane(task: Mapping[str, Any]) -> str | None:
+    match = _PLANE_RE.search(task_body(task))
+    return match.group(1).strip().casefold() if match else None
+
+
+def is_background_research(task: Mapping[str, Any]) -> bool:
+    """Return whether a task belongs to the independent research plane.
+
+    Continuous research deliberately has no request-workflow dependency.  The
+    marker is checked before assignee/profile validation so a future
+    research-intelligence profile cannot leak into a CEO workflow projection.
+    """
+
+    body = task_body(task)
+    return (
+        CONTINUOUS_RESEARCH_MARKER in body
+        or workflow_plane(task) == CONTINUOUS_RESEARCH_PLANE
+        or workflow_role(task) == BACKGROUND_RESEARCH_ROLE
+    )
+
+
+def is_request_scoped_role(
+    task: Mapping[str, Any], root_task_id: str, role: str
+) -> bool:
+    """Match only a current-root task with the requested workflow role."""
+
+    return (
+        not is_background_research(task)
+        and workflow_root(task) == root_task_id
+        and workflow_role(task) == role.casefold()
+    )
 
 
 def merged_run_metadata(task: Mapping[str, Any]) -> dict[str, Any]:
@@ -212,9 +252,14 @@ def iso_timestamp(value: Any) -> str | None:
 
 
 __all__ = [
+    "BACKGROUND_RESEARCH_ROLE",
+    "CONTINUOUS_RESEARCH_MARKER",
+    "CONTINUOUS_RESEARCH_PLANE",
     "action",
     "as_mapping",
     "ids_from",
+    "is_background_research",
+    "is_request_scoped_role",
     "iso_timestamp",
     "merged_run_metadata",
     "safe_json",
@@ -222,6 +267,7 @@ __all__ = [
     "task_id",
     "terminal_success",
     "workflow_mode",
+    "workflow_plane",
     "workflow_role",
     "workflow_root",
 ]

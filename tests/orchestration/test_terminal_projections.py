@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
+from orchestration.adapters.ceo_notion_projection import (
+    CeoNotionProjection,
+    NotionProjectionError,
+)
 from orchestration.adapters.ceo_supervisor import CeoSupervisorService
 from orchestration.adapters.qa_audit_projection import QaAuditProjection
 from orchestration.ceo_workflow_scope import build_root_body
@@ -46,22 +49,84 @@ def _task(
     }
 
 
+def _background_task(task_id: str = "t_background") -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "assignee": "research-department",
+        "status": "done",
+        "body": (
+            "hgfinance.continuous-research.v1\n"
+            "workflow_plane=continuous_research\n"
+            "workflow_role=background_research"
+        ),
+        "latest_summary": "background intelligence",
+    }
+
+
+def _foreign_primary_task(task_id: str = "t_foreign") -> dict[str, Any]:
+    return {
+        "id": task_id,
+        "assignee": "research-department",
+        "status": "done",
+        "body": "workflow_root_task_id=t_other\nworkflow_role=primary",
+        "latest_summary": "foreign request",
+    }
+
+
 class FakeNotionTransport:
     def __init__(self) -> None:
         self.pages: list[dict[str, Any]] = []
         self.fail = False
 
+    def database_schema(self, _database_id: str) -> dict[str, Any]:
+        return {
+            "properties": {
+                "제목": {"type": "title", "title": {}},
+                "projection_key": {"type": "rich_text", "rich_text": {}},
+            }
+        }
+
     def query_projection(self, database_id: str, projection_key: str) -> list[dict[str, Any]]:
         if self.fail:
-            raise RuntimeError("notion unavailable")
+            raise NotionProjectionError("notion unavailable", status=503)
         return [page for page in self.pages if page["projection_key"] == projection_key]
 
     def create_page(self, database_id: str, properties: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any]:
         if self.fail:
-            raise RuntimeError("notion unavailable")
+            raise NotionProjectionError("notion unavailable", status=503)
         key = properties["projection_key"]["rich_text"][0]["text"]["content"]
         self.pages.append({"id": f"page-{len(self.pages) + 1}", "projection_key": key, "properties": properties, "children": children})
         return self.pages[-1]
+
+
+class ProductionReportNotionTransport:
+    """실제 CEO report DB의 13개 property schema fixture."""
+
+    def __init__(self) -> None:
+        self.pages: list[dict[str, Any]] = []
+
+    def database_schema(self, _database_id: str) -> dict[str, Any]:
+        names = (
+            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
+            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
+            "다음 우선순위",
+        )
+        properties: dict[str, Any] = {
+            "브리핑명": {"type": "title", "title": {}},
+            "기준일": {"type": "date", "date": {}},
+            "상태": {"type": "select", "select": {"options": [{"name": "완료"}]}},
+            "구분": {"type": "select", "select": {"options": [{"name": "CEO"}]}},
+        }
+        for name in names[4:9]:
+            properties[name] = {"type": "number", "number": {}}
+        for name in names[9:]:
+            properties[name] = {"type": "rich_text", "rich_text": {}}
+        return {"properties": properties}
+
+    def create_page(self, _database_id: str, properties: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any]:
+        page = {"id": f"page-{len(self.pages) + 1}", "properties": properties, "children": children}
+        self.pages.append(page)
+        return page
 
 
 class FakeAuditRepository:
@@ -196,6 +261,27 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertTrue(result["retryable"])
         self.assertEqual(self.synthesis["status"], "done")
 
+    def test_production_ceo_report_schema_maps_properties_and_marker(self) -> None:
+        transport = ProductionReportNotionTransport()
+        client = type("Kanban", (), {"comments": [], "comment_task": lambda self, task_id, text: self.comments.append((task_id, text))})()
+        projection = CeoNotionProjection(
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
+            transport=transport,
+            kanban_client=client,
+        )
+        result = projection.project(root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow)
+        self.assertEqual(result["status"], "created")
+        properties = transport.pages[0]["properties"]
+        self.assertEqual(set(properties), {
+            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
+            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
+            "다음 우선순위",
+        })
+        self.assertEqual(properties["상태"]["select"]["name"], "완료")
+        self.assertEqual(properties["구분"]["select"]["name"], "CEO")
+        self.assertEqual(properties["전체 업무"]["number"], len(self.workflow))
+        self.assertIn("projection_key=ceo-synthesis:t_root:t_synthesis", client.comments[0][1])
+
     def test_primary_and_qa_done_do_not_create_notion_page(self) -> None:
         transport = FakeNotionTransport()
         projection = CeoNotionProjection(
@@ -237,6 +323,31 @@ class TerminalProjectionTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(repository.records, {})
+
+    def test_qa_projection_excludes_background_and_foreign_primary_tasks(self) -> None:
+        background = _background_task()
+        foreign = _foreign_primary_task()
+        repository = FakeAuditRepository()
+        workflow = [
+            self.root,
+            *self.primary,
+            background,
+            foreign,
+            *[_background_task(f"t_background_{i}") for i in range(100)],
+            self.qa,
+        ]
+
+        result = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT,
+            task=self.qa,
+            workflow_tasks=workflow,
+        )
+
+        self.assertEqual(result["status"], "persisted")
+        record = next(iter(repository.records.values()))
+        self.assertEqual(record.evaluated_primary_task_ids, (RESEARCH, RISK))
+        self.assertNotIn(background["id"], record.evaluated_primary_task_ids)
+        self.assertNotIn(foreign["id"], record.evaluated_primary_task_ids)
 
     def test_qa_projection_failure_does_not_block_fast_synthesis(self) -> None:
         class FailingQaProjection:

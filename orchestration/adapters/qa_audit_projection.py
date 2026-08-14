@@ -15,16 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from orchestration.adapters.terminal_projection_utils import (
-    action,
     ids_from,
+    is_request_scoped_role,
     iso_timestamp,
     merged_run_metadata,
     safe_json,
     summary,
     task_id,
     terminal_success,
-    workflow_role,
-    workflow_root,
 )
 
 logger = logging.getLogger(__name__)
@@ -198,12 +196,22 @@ class QaAuditProjection:
         workflow_tasks: Sequence[Mapping[str, Any]],
     ) -> QaAuditProjectionRecord:
         metadata = merged_run_metadata(task)
-        primary = tuple(
+        scoped_primary = tuple(
             task_id(item)
             for item in workflow_tasks
-            if workflow_root(item) == root_task_id and workflow_role(item) == "primary"
+            if is_request_scoped_role(item, root_task_id, "primary")
         )
-        primary = ids_from(metadata.get("evaluated_primary_task_ids")) or ids_from(metadata.get("primary_task_ids")) or primary
+        declared_primary = ids_from(metadata.get("evaluated_primary_task_ids")) or ids_from(
+            metadata.get("primary_task_ids")
+        )
+        # The task graph is authoritative.  Never trust a worker-provided
+        # primary_task_ids list to widen the current request scope.
+        if declared_primary and any(item not in scoped_primary for item in declared_primary):
+            logger.warning(
+                "qa_audit_foreign_primary_ids_ignored",
+                extra={"root_task_id": root_task_id},
+            )
+        primary = scoped_primary
         original = _verdict(metadata, task)
         qa_task_id = task_id(task)
         evidence = safe_json(
@@ -259,7 +267,7 @@ class QaAuditProjection:
         workflow_tasks: Sequence[Mapping[str, Any]],
         event: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not (workflow_role(task) == "qa" or action(task) == "RUN_QA"):
+        if not is_request_scoped_role(task, root_task_id, "qa"):
             return {"status": "skipped"}
         if not terminal_success(task):
             return {"status": "skipped"}
