@@ -1,23 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
-import {
-  askCeo,
-  buildCeoProgress,
-  ceoWorkflowResult,
-  ceoWorkflowStatus,
-  listCeoTasks,
-  TERMINAL_WORKFLOW_STATUSES,
-  type CardOutcome,
-  type CeoQueryPlanning,
-  type CeoWorkflowStatusAndGraph,
-  type TaskResultResponse,
-} from "../lib/ceoClient";
-import { readStoredAccountId, subscribeToAccountChange } from "../lib/currentAccount";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
+import { CeoControlRoomChat } from "./CeoControlRoomChat";
+import { PanelBar } from "./PanelBar";
 
 /**
  * 대표 Dashboard.
@@ -42,69 +31,11 @@ function usePageHost(): string {
   );
 }
 
-/** `RightRail.tsx`의 `QUICK_ORDERS`와 라벨·명령을 그대로 맞춘다(스타일 참고 지침). */
-const QUICK_QUESTIONS = [
-  { label: "현황 보고", command: "현황 보고해줘" },
-  { label: "회의 소집", command: "전 부서 회의 소집" },
-  { label: "왜 늦어져?", command: "왜 늦어지고 있어?" },
-];
-
 /** 결과물 창고 표본. 실제 산출물 저장소가 붙기 전까지의 예시 행이다. */
 const RECENT_OUTPUTS = [
   { name: "이번 주 콘텐츠 캘린더 정리", team: "기획 1팀", status: "최종 완료" },
   { name: "브랜드 템플릿 세팅", team: "이미지 제작팀", status: "최종 완료" },
 ];
-
-/** 채팅창의 안내 말풍선. 기존 "무엇을 확인할까요?" 아래 안내 문구를 재활용한다. */
-const INITIAL_AI_MESSAGE: ChatMessage = {
-  id: "ai-intro",
-  role: "ai",
-  text: "자연어로 질문하면 CEO Hermes가 업무를 만들고, 결과는 Kanban에서 추적됩니다.",
-};
-
-/** 워크플로 단계 상태 -> 이력 말풍선에 보여줄 한국어. */
-const WORKFLOW_STATUS_LABEL: Record<string, string> = {
-  queued: "대기 중",
-  running: "진행 중",
-  blocked: "막힘",
-  failed: "실패",
-  completed: "완료",
-  archived: "보관됨",
-};
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "ai";
-  text: string;
-  /** 이 메시지가 만든/가리키는 root task. 진행 중 폴링 결과를 여기에 붙인다. */
-  taskId?: string | null;
-  planning?: CeoQueryPlanning | null;
-};
-
-/** 카드 결말별 표시. 보드의 status가 아니라 "답이 됐는가" 기준이다.
- *  특히 NO_ANSWER는 보드에서 done으로 보이는 카드라 성공으로 읽으면 안 된다. */
-const OUTCOME_VIEW: Record<CardOutcome, { label: string; tone: string }> = {
-  QUEUED: { label: "대기", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-  RUNNING: { label: "진행 중", tone: "border-primary/30 bg-secondary-container text-primary" },
-  ANSWERED: { label: "답변 완료", tone: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant" },
-  NO_ANSWER: { label: "결과 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
-  BLOCKED: { label: "막힘", tone: "border-error/40 bg-error-container text-on-error-container" },
-  FAILED: { label: "실패", tone: "border-error/40 bg-error-container text-on-error-container" },
-  STALE: { label: "정체", tone: "border-error/40 bg-error-container text-on-error-container" },
-  NO_ASSIGNEE: { label: "담당 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
-};
-
-function PanelBar({ icon, title, children }: { icon: string; title: string; children?: React.ReactNode }) {
-  return (
-    <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
-      <span className="flex items-center gap-2 text-label-md font-label-md text-on-surface-variant">
-        <span className="material-symbols-outlined text-[16px]" aria-hidden="true">{icon}</span>
-        {title}
-      </span>
-      {children}
-    </div>
-  );
-}
 
 export default function DashboardView() {
   // ponytail: 라우트가 달라 AI Office의 엔진과 상태를 공유하지 않는다. 지금은
@@ -112,14 +43,6 @@ export default function DashboardView() {
   // 가로지르는 store가 먼저 필요하다.
   const stats = useMemo(() => new Company().snapshot().stats, []);
 
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_AI_MESSAGE]);
-  const [accountId, setAccountId] = useState<string>(() => readStoredAccountId());
-  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [statusGraph, setStatusGraph] = useState<CeoWorkflowStatusAndGraph | null>(null);
-  const [result, setResult] = useState<TaskResultResponse | null>(null);
   const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">("loading");
 
   const pageHost = usePageHost();
@@ -127,134 +50,11 @@ export default function DashboardView() {
   // 주소 자체가 잘못된 경우와 못 불러온 경우를 같은 안내로 묶는다.
   const kanbanFailed = !kanbanUrl || kanbanState === "error";
 
-  const chatRef = useRef<HTMLDivElement>(null);
-  const chatCount = messages.length;
-  useEffect(() => {
-    const el = chatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chatCount]);
-
-  // 계정 전환 이벤트를 듣는다 — 같은 탭의 다른 컴포넌트가 바꾼 계정과 다른 탭
-  // 양쪽 모두. 계정이 바뀌면 아래 효과가 그 계정의 과거 이력을 다시 불러온다.
-  useEffect(() => subscribeToAccountChange(() => setAccountId(readStoredAccountId())), []);
-
-  // 계정별 이력. 최초 진입과 계정 전환 둘 다 이 효과를 탄다. 진행 중인 대화는
-  // 계정이 바뀌면 그 계정의 것이 아니므로 초기화한다.
-  //
-  // 리셋·조회를 마이크로태스크(`Promise.resolve().then`) 콜백 안에서 하는 이유:
-  // effect 본문에서 setState를 곧바로 부르면 커밋 중 다시 렌더가 겹쳐 캐스케이드가
-  // 생긴다(react-hooks/set-state-in-effect) - 이 파일의 기존 `kanbanState` 효과가
-  // `setTimeout` 콜백 안에서 `setKanbanState`를 부르는 것과 같은 이유·같은 패턴이다.
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(async () => {
-      if (cancelled) return;
-      setActiveTaskId(null);
-      setStatusGraph(null);
-      setResult(null);
-      setError("");
-      const historyMessages: ChatMessage[] = [];
-      try {
-        const list = await listCeoTasks(accountId);
-        if (cancelled) return;
-        const items = [...list.items].reverse(); // 서버는 최신순 — 채팅은 오래된 것부터.
-        for (const item of items) {
-          historyMessages.push({
-            id: `u-${item.task_id}`,
-            role: "user",
-            text: item.query ?? "(질문 내용 없음)",
-          });
-          let aiText = `상태: ${WORKFLOW_STATUS_LABEL[item.status] ?? item.status}`;
-          if (TERMINAL_WORKFLOW_STATUSES.has(item.status)) {
-            try {
-              const taskResult = await ceoWorkflowResult(item.task_id);
-              if (taskResult.result?.summary) aiText = taskResult.result.summary;
-            } catch {
-              // 결과 조회 실패는 상태 텍스트로 대체한다 - 이력 자체를 숨기지 않는다.
-            }
-          }
-          if (cancelled) return;
-          historyMessages.push({
-            id: `a-${item.task_id}`,
-            role: "ai",
-            text: aiText,
-            taskId: item.task_id,
-          });
-        }
-      } catch (cause) {
-        if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : String(cause));
-        }
-      }
-      if (!cancelled) {
-        setMessages([INITIAL_AI_MESSAGE, ...historyMessages]);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [accountId]);
-
-  // 본부별 진행 — 10초 간격. 처음엔 1초로 빠르게 한 번 확인한다.
-  const progress = useMemo(
-    () => (statusGraph ? buildCeoProgress(statusGraph, result) : null),
-    [statusGraph, result],
-  );
-  useEffect(() => {
-    if (!activeTaskId || progress?.all_terminal) return undefined;
-    const timer = window.setTimeout(() => {
-      ceoWorkflowStatus(activeTaskId)
-        .then(setStatusGraph)
-        .catch(() => undefined);
-    }, statusGraph ? 10000 : 1000);
-    return () => window.clearTimeout(timer);
-  }, [activeTaskId, statusGraph, progress?.all_terminal]);
-
-  // 최종 답변 — 15초 간격. Synthesis가 끝나 summary가 오면 멈춘다.
-  useEffect(() => {
-    if (!activeTaskId || result?.result?.summary) return undefined;
-    const timer = window.setTimeout(() => {
-      ceoWorkflowResult(activeTaskId)
-        .then(setResult)
-        .catch(() => undefined);
-    }, result ? 15000 : 1000);
-    return () => window.clearTimeout(timer);
-  }, [activeTaskId, result]);
-
   useEffect(() => {
     if (!kanbanUrl || kanbanState !== "loading") return undefined;
     const timer = window.setTimeout(() => setKanbanState("error"), 8000);
     return () => window.clearTimeout(timer);
   }, [kanbanState, kanbanUrl]);
-
-  async function send(text: string) {
-    const value = text.trim();
-    if (!value || busy) return;
-    setDraft("");
-    setError("");
-    setBusy(true);
-    setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: value }]);
-    try {
-      const response = await askCeo(value);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `a-${response.task_id}-${Date.now()}`,
-          role: "ai",
-          text: response.answer,
-          taskId: response.task_id,
-          planning: response.planning ?? null,
-        },
-      ]);
-      setActiveTaskId(response.task_id);
-      setStatusGraph(null);
-      setResult(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const metrics = [
     { label: "LangGraph Worker", value: STAFF.length, cap: "WORKERS", lead: true },
@@ -285,170 +85,7 @@ export default function DashboardView() {
 
         {/* ── CEO Control Room / Hermes Kanban ──────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
-          <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
-            <PanelBar icon="terminal" title="CEO Control Room">
-              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-                Hermes endpoint
-              </span>
-            </PanelBar>
-
-            <div
-              ref={chatRef}
-              className="p-4 flex flex-col gap-3 overflow-y-auto max-h-[480px]"
-              aria-live="polite"
-              aria-label="CEO 질의 대화"
-            >
-              {messages.map((message) => (
-                <div key={message.id} className="flex flex-col gap-2">
-                  <div
-                    className={`rounded-lg border p-3 max-w-[92%] ${
-                      message.role === "user"
-                        ? "self-end bg-secondary-container border-secondary-container"
-                        : "self-start bg-surface-container-low border-outline-variant"
-                    }`}
-                  >
-                    <div className="font-bold text-body-sm font-body-sm text-primary mb-1">
-                      {message.role === "user" ? "대표님" : "CEO Hermes"}
-                    </div>
-                    <p className="text-body-sm font-body-sm text-on-surface m-0 whitespace-pre-line">
-                      {message.text}
-                    </p>
-                    {message.planning ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {message.planning.selected_departments.map((dept) => (
-                          <span
-                            key={dept}
-                            className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container text-[11px] text-on-surface-variant"
-                          >
-                            {dept}
-                          </span>
-                        ))}
-                        {message.planning.qa_required ? (
-                          <span className="px-2 py-0.5 rounded-full border border-primary/30 bg-secondary-container text-[11px] text-primary">
-                            QA 필요
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {message.taskId ? (
-                      <code className="block text-right text-[10px] text-outline mt-1">{message.taskId}</code>
-                    ) : null}
-                  </div>
-
-                  {/* 진행 중인 대화의 AI 말풍선 아래에만 실시간 진행·최종 답변을 붙인다. */}
-                  {message.role === "ai" && message.taskId && message.taskId === activeTaskId ? (
-                    <>
-                      {progress?.final_answer ? (
-                        <div
-                          className="self-start max-w-[92%] border-2 border-primary/40 rounded p-3 bg-secondary-container/30"
-                          aria-live="polite"
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="text-label-md font-label-md text-primary uppercase">CEO 최종 답변</span>
-                            {!progress.answer_grounded ? (
-                              <span className="text-[10px] text-error">⚠️ 근거 미확인</span>
-                            ) : null}
-                          </div>
-                          <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">
-                            {progress.final_answer}
-                          </p>
-                        </div>
-                      ) : null}
-
-                      {progress ? (
-                        <div className="self-start max-w-[92%] border border-outline-variant rounded p-3" aria-live="polite">
-                          <div className="flex items-center justify-between gap-2 mb-2">
-                            <span className="text-label-md font-label-md text-on-surface-variant uppercase">본부별 진행</span>
-                            <span className="text-xs font-data-mono text-on-surface-variant">
-                              {progress.finished}/{progress.total} 종료{progress.all_terminal ? "" : " · 확인 중"}
-                            </span>
-                          </div>
-                          <ul className="m-0 p-0 list-none flex flex-col gap-1.5">
-                            {progress.cards
-                              .filter((card) => !card.is_root)
-                              .map((card) => {
-                                const view = OUTCOME_VIEW[card.outcome];
-                                return (
-                                  <li key={card.task_id} className="text-xs">
-                                    <span className={`inline-block px-2 py-0.5 rounded-full border mr-2 ${view.tone}`}>{view.label}</span>
-                                    <span className="text-on-surface">{card.department}</span>
-                                    {card.summary ? (
-                                      <span className="block text-on-surface-variant mt-0.5 ml-1">{card.summary}</span>
-                                    ) : null}
-                                  </li>
-                                );
-                              })}
-                          </ul>
-                          {progress.unusable.length > 0 ? (
-                            <p className="text-xs text-error mt-2 m-0">
-                              ⚠️ {progress.unusable.length}개 본부가 사용 가능한 결과를 내지 못했습니다.
-                            </p>
-                          ) : null}
-                          {progress.all_terminal && !progress.answer_grounded ? (
-                            <p className="text-xs text-error mt-1 m-0">
-                              ⚠️ 근거가 확인되지 않은 답변입니다. 그대로 결정에 쓰지 마세요.
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </>
-                  ) : null}
-                </div>
-              ))}
-
-              {error ? (
-                <p role="alert" className="self-start max-w-[92%] text-xs text-error border border-error-container bg-error-container rounded p-2">
-                  ⚠️ {error}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="px-4 pb-3 flex flex-wrap gap-1.5 shrink-0 border-t border-outline-variant pt-3">
-              {QUICK_QUESTIONS.map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => void send(item.command)}
-                  disabled={busy}
-                  className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container-low text-[11px] leading-4 text-on-surface-variant hover:bg-surface-container transition-colors disabled:opacity-40"
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="px-4 pb-4">
-              <label className="block">
-                <textarea
-                  value={draft}
-                  maxLength={2000}
-                  rows={3}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                      event.preventDefault();
-                      void send(draft);
-                    }
-                  }}
-                  placeholder="예: 오늘 리스크가 큰 업무만 먼저 브리핑해줘"
-                  className="w-full p-3 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-sm font-body-sm resize-none"
-                />
-              </label>
-
-              <div className="flex justify-between items-center gap-3 mt-2">
-                <span className="text-xs text-outline">{draft.length}/2000 · 조회와 자문만 수행합니다</span>
-                <button
-                  type="button"
-                  onClick={() => void send(draft)}
-                  disabled={busy || !draft.trim()}
-                  className="px-4 py-2 bg-surface-container-high border border-outline-variant text-primary rounded font-bold text-label-md font-label-md hover:bg-surface-container-highest transition-colors disabled:opacity-40 shrink-0"
-                >
-                  {busy ? "전달 중…" : "CEO에게 전달"}
-                </button>
-              </div>
-            </div>
-          </section>
+          <CeoControlRoomChat />
 
           <section className="lg:col-span-2 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
             <PanelBar icon="dashboard" title="Hermes Kanban Dashboard">
