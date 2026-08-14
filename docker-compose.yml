@@ -1075,6 +1075,27 @@ services:
   #   모두 접근 가능하다. 그래서 ports:를 절대 열지 않는다(외부/호스트에서 직접 접근할
   #   이유가 없다). security_opt(no-new-privileges) 등 추가 하드닝은 E2E 성공 후
   #   최소 변경 원칙에 따라 별도로 검토한다.
+  #
+  # ▶ 레인 예산 - 공장이 슬롯을 독점해 사용자 질의가 굶는 것을 막는다 (2026-08-14)
+  #   dispatcher 의 HERMES_HOME config.yaml 에 아래를 둔다(런타임 설정이라 저장소에는
+  #   값이 아니라 근거만 남긴다):
+  #       kanban:
+  #         max_in_progress: 3              # 보드 전체 동시 실행
+  #         max_in_progress_per_profile: 1  # 한 부서가 슬롯을 다 먹지 못하게
+  #   실측 근거: 공장 카드가 running 3 개를 전부 물어 CEO 질의 카드가 6 분 넘게
+  #   ready 에 앉았다. 초과분은 skipped_per_profile_capped 로 분류돼 보인다.
+  #
+  #   ⚠ **`hermes kanban daemon` 으로 돌리면 이 설정이 조용히 무시된다.**
+  #     run_daemon 은 dispatch_once 에 max_spawn/failure_limit 만 넘기고 상한 두 개를
+  #     전달하지 않는다(kanban_db.py 실측). 같은 순간 통제 시험에서 daemon 경로는
+  #     4 장(3 장이 동일 프로필)을 띄웠고 dispatch 경로는 0 장이었다.
+  #     이 서비스의 기본값(게이트웨이 내장 dispatcher, kanban_watchers.py)과
+  #     일회성 `hermes kanban dispatch` 는 둘 다 설정을 읽으므로 문제없다 -
+  #     deprecated 된 standalone daemon 으로 바꿀 때만 주의하면 된다.
+  #
+  #   최종 형태는 보드 분리다: 공장 전용 board + 전용 dispatcher 컨테이너
+  #   (`hermes kanban --board <slug>`; 보드마다 DB·workspace·dispatcher 루프가 독립).
+  #   그때 이 상한은 공장 쪽만 낮추면 된다.
   kanban-dispatcher:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
