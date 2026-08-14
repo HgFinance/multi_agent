@@ -120,6 +120,8 @@ THEMES = {
                                # (Bali-Cakici-Whitelaw) - 저변동과 형제 테마
     "illiquidity_premium": "거래마찰",
     "liquidity_shock_reversal": "거래마찰",
+    "price_delay": "거래마찰",  # Hou-Moskowitz: 지연 프리미엄은 인지·거래 마찰의
+                               # 대가 - 비유동성과 같은 군집 (카드 t_2334a259)
 }
 
 

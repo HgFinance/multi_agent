@@ -390,14 +390,18 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
 
     # 일별 초과수익의 변동성으로 정보비율. 날짜를 맞춰 곱셈오차를 막는다
     bmap = dict(bench_equity)
-    diffs = []
+    diffs, rs, rb = [], [], []
     prev_s = prev_b = None
     for d, sv in strategy_equity:
         bv = bmap.get(d)
         if bv is None or not sv or not bv:
             continue
         if prev_s and prev_b:
-            diffs.append((sv / prev_s - 1.0) - (bv / prev_b - 1.0))
+            r_s = sv / prev_s - 1.0
+            r_b = bv / prev_b - 1.0
+            diffs.append(r_s - r_b)
+            rs.append(r_s)
+            rb.append(r_b)
         prev_s, prev_b = sv, bv
 
     ir = None
@@ -421,6 +425,49 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
     }
     if ir is not None:
         out["information_ratio"] = ir       # 표본 부족이면 키를 아예 안 넣는다
+
+    # ── 위험조정 비교 계측 (2026-08-14, 2층 관문 결재 1단계) ──────────────
+    # ▶ 왜 여기인가: 전략·벤치마크 **일별 수익이 날짜 정렬된 채로 함께 있는
+    #   유일한 지점**이다. 벤치마크 곡선은 이 함수를 나가면 버려지고(관문은
+    #   DB 스칼라만 재조회한다), 원장에 수익률 시계열 테이블이 없다.
+    # ▶ 왜 필요한가 (실측): vol 타게팅 15% 전략을 ~30% vol 완전투자 벤치마크와
+    #   **명목 초과**로 비교해 −90~−103%p 가 나왔다. 위험을 줄일수록 관문이
+    #   처벌하는 구조이고, 문헌은 이를 leverage bias 라 부른다. 정석은 M²
+    #   (벤치마크 vol 로 스케일 후 비교)·회귀 alpha·appraisal ratio 다.
+    # ▶ **판정은 바꾸지 않는다.** release_gate.evaluate 는 이름 지정된 8개
+    #   키만 읽으므로 여기 무엇을 더해도 passed/failed 는 불변이다. 이 값들은
+    #   관문 재설계 결재를 위한 근거이지 그 자체로 합격선이 아니다.
+    # ▶ 못 재면 키를 안 만든다(0 을 채우지 않는다). rf=0 가정은 이 저장소의
+    #   sharpe_rf0 관례와 같다.
+    if len(rs) > 20:
+        n = len(rs)
+        ann = 252 ** 0.5
+        m_s, m_b = sum(rs) / n, sum(rb) / n
+        sd_s = (sum((x - m_s) ** 2 for x in rs) / (n - 1)) ** 0.5
+        sd_b = (sum((x - m_b) ** 2 for x in rb) / (n - 1)) ** 0.5
+        if sd_s > 0:
+            out["strategy_ann_vol_pct"] = round(sd_s * ann * 100.0, 2)
+        if sd_b > 0:
+            out["benchmark_ann_vol_pct"] = round(sd_b * ann * 100.0, 2)
+        if sd_s > 0 and sd_b > 0:
+            # M²: 전략을 벤치마크와 같은 변동성으로 스케일한 뒤의 초과(연율 %p).
+            #   레버리지로 위험을 맞춘 뒤 비교하는 것이 위험조정 비교의 정의다.
+            m2 = ((m_s / sd_s) * sd_b - m_b) * 252.0 * 100.0
+            out["m2_excess_ann_pct"] = round(m2, 2)
+            cov = sum((rs[i] - m_s) * (rb[i] - m_b) for i in range(n)) / (n - 1)
+            out["corr_vs_benchmark"] = round(cov / (sd_s * sd_b), 4)
+            beta = cov / (sd_b ** 2)
+            out["beta_vs_benchmark"] = round(beta, 4)
+            alpha_d = m_s - beta * m_b
+            out["alpha_ann_pct"] = round(alpha_d * 252.0 * 100.0, 2)
+            resid = [rs[i] - beta * rb[i] for i in range(n)]
+            m_r = sum(resid) / n
+            sd_r = (sum((x - m_r) ** 2 for x in resid) / (n - 1)) ** 0.5
+            if sd_r > 0:
+                out["residual_ann_vol_pct"] = round(sd_r * ann * 100.0, 2)
+                # appraisal ratio = 연율 alpha / 연율 잔차위험. vol 관리 전략
+                # 평가의 표준 지표(Moreira-Muir 가 성과를 이것으로 보고한다).
+                out["appraisal_ratio"] = round(alpha_d * 252.0 / (sd_r * ann), 4)
     return out
 
 
@@ -800,11 +847,24 @@ def zombie_experiment(status: str, ended: bool, n_runs: int,
                       n_outcomes: int, age_min: float) -> bool:
     """미완(좀비) 실험인가 - **판정이 있으면 절대 아니다.** (순수 함수)
 
-    좀비 서명: RUNNING · 종료 없음 · backtest_runs 0 · 판정 0 · 10분 경과.
+    좀비 서명 두 가지:
+      RUNNING · 종료 없음 · backtest_runs 0 · 판정 0 · 10분 경과
+      CANCELLED · backtest_runs 0 · 판정 0 (나이 무관)
     FAILED 는 좀비가 아니다 - 그건 실패라는 **기록**이고, 기록은 보호한다.
+
+    ▶ CANCELLED 조항 (2026-08-13 실측, 추적 감시가 잡음)
+      워커 스톨 회수가 버려진 RUNNING 행을 CANCELLED 로 닫게 되자, 같은 코드
+      지문의 재발주가 중복 가드에서 "중복 실험 - 기존 판정을 수동 확인" 으로
+      죽었다. 그 행에는 판정이 없다 - **거짓 사유**였고, 그 지문의 실험이
+      영구 봉인되는 구조였다. 정보 0 인 CANCELLED 는 회수(같은 experiment_id
+      로 완주) 대상이다. 나이 조건이 필요 없는 이유: 이미 명시적으로 닫힌
+      행이라 살아 있는 실행을 뺏을 가능성이 없다.
     """
+    if int(n_runs) != 0 or int(n_outcomes) != 0:
+        return False
+    if str(status) == "CANCELLED":
+        return True
     return (str(status) == "RUNNING" and not ended
-            and int(n_runs) == 0 and int(n_outcomes) == 0
             and float(age_min) >= ZOMBIE_RECLAIM_MIN)
 
 
@@ -900,11 +960,15 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                                               int(prev[4]), int(prev[5]),
                                               float(prev[3] or 0)):
                     exp_id = prev[0]
-                    print(f"미완 실험 회수({exp_id[:8]}…): RUNNING 인 채 "
+                    print(f"미완 실험 회수({exp_id[:8]}…): {prev[1]} 인 채 "
                           f"{float(prev[3]):.0f}분 - run 기록 0 · 판정 0 이므로 "
                           f"재판정이 아니라 **완주**다. 같은 experiment_id 로 "
                           f"이어서 돈다", flush=True)
-                    cur2.execute("update quant.experiments set started_at=now(),"
+                    # status·ended_at 도 되돌린다 - CANCELLED 좀비를 회수할 때
+                    # started_at 만 갱신하면 ended_at < started_at 이 되어
+                    # experiments_check 제약이 터진다(2026-08-13).
+                    cur2.execute("update quant.experiments set status='RUNNING',"
+                                 " ended_at=null, started_at=now(),"
                                  " trace_id=%s where experiment_id=%s::uuid",
                                  (trace, exp_id))
                     conn.commit()
@@ -1080,6 +1144,41 @@ def _check_fifo_and_costs():
     assert slippage_bps_for("A", None, adv=None) == COST_MODEL["slippage_bps"]
     assert slippage_bps_for("A", None, adv=0) == COST_MODEL["slippage_bps"]
     print("  FIFO 손익·비용 산식      OK")
+
+
+def _check_risk_adjusted_metrics_are_numeric_and_honest():
+    """**위험조정 계측이 수치만 담고, 못 재면 키를 안 만든다** (2026-08-14).
+
+    metrics 는 numeric 컬럼에 그대로 적재되므로 문자열·불리언·NaN 이 하나라도
+    섞이면 insert 가 DatatypeMismatch 로 죽어 실험이 종결되지 못한다(이 파일이
+    같은 사고를 두 번 기록하고 있다). 그리고 vol 이 0 이면 M² 는 정의되지
+    않는데, 그때 0 을 채우면 관문·환류가 "쟀는데 0" 으로 읽는다.
+    """
+    from datetime import timedelta
+
+    d0 = date(2025, 1, 1)
+    days = [d0 + timedelta(days=i) for i in range(120)]
+    # 전략: 저변동 완만 상승 / 벤치마크: 고변동 큰 상승 (실측 구도 그대로)
+    se = [(d, 100.0 * (1.0 + 0.0004 * i + 0.001 * ((i % 5) - 2)))
+          for i, d in enumerate(days)]
+    be = [(d, 100.0 * (1.0 + 0.0009 * i + 0.004 * ((i % 7) - 3)))
+          for i, d in enumerate(days)]
+    out = excess_metrics(se, be)
+    for k in ("m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+              "strategy_ann_vol_pct", "benchmark_ann_vol_pct",
+              "beta_vs_benchmark", "corr_vs_benchmark"):
+        assert k in out, f"{k} 가 안 나왔다: {sorted(out)}"
+    for k, v in out.items():
+        assert isinstance(v, (int, float)) and v == v, f"{k}={v!r} 는 수치가 아니다"
+    # 벤치마크가 완전 평탄(vol 0)이면 M²·beta 는 정의 불가 - 키가 없어야 한다
+    flat = [(d, 100.0) for d in days]
+    out2 = excess_metrics(se, flat)
+    for k in ("m2_excess_ann_pct", "beta_vs_benchmark", "appraisal_ratio"):
+        assert k not in out2, f"vol 0 인데 {k} 를 지어냈다: {out2.get(k)}"
+    # 표본이 짧으면 위험조정 계측을 아예 안 낸다(21일 미만)
+    short = excess_metrics(se[:10], be[:10])
+    assert "m2_excess_ann_pct" not in short, short
+    print("  위험조정 계측 정직        OK")
 
 
 def _check_metrics_and_determinism():
@@ -1283,12 +1382,18 @@ if __name__ == "__main__":
         assert not zombie_experiment("RUNNING", False, 0, 1, 99.0)  # **판정 있음**
         assert not zombie_experiment("COMPLETED", True, 1, 1, 99.0)
         assert not zombie_experiment("FAILED", True, 1, 0, 99.0)    # 실패도 기록이다
+        # ▶ 스톨 회수가 닫은 CANCELLED (2026-08-13 실측: 재발주가 "중복 실험 -
+        #   기존 판정을 수동 확인" 이라는 **거짓 사유**로 죽었다. 판정이 없는데)
+        assert zombie_experiment("CANCELLED", True, 0, 0, 0.0)      # 나이 무관 회수
+        assert not zombie_experiment("CANCELLED", True, 1, 0, 99.0)  # run 기록 보호
+        assert not zombie_experiment("CANCELLED", True, 0, 1, 99.0)  # 판정 불가침
         print("  좀비 회수 != 재판정      OK")
 
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
     _check_zombie_reclaim_never_touches_verdicts()
     _check_no_lookahead()
     _check_fifo_and_costs()
+    _check_risk_adjusted_metrics_are_numeric_and_honest()
     _check_metrics_and_determinism()
     _check_cash_never_negative()
     _check_strategy_catalog()

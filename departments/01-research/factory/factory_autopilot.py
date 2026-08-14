@@ -55,7 +55,7 @@ MODULE_VERSION = "factory-autopilot-v1"
 
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
-KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
+KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-kanban-dispatcher")
 
 RESEARCH_ASSIGNEE = "research-department"
 QUANT_ASSIGNEE = "quant-backtest-department"
@@ -739,6 +739,9 @@ def _compose_research_brief(conn, brief, leads) -> str:
     #   낭비다 - 이미 기각된 계열을 다시 내게 된다(2026-08-12 실측으로
     #   그렇게 공장이 멈췄다). 무엇을 낼지 고르기 전에 낼 재료가 있는지부터.
     out.append(_lead_health(conn))
+    # ▶ 재료 부족 바로 뒤에 설계 공백을 둔다 - "리드가 말랐다" 다음 줄에
+    #   "그래도 후보는 있다(격자)" 가 와야 기획이 멈추지 않는다.
+    out.append(_design_gap_line(conn))
     # 근접 계열을 어휘 바로 뒤에 둔다 - 손잡이 목록을 읽은 직후에 "어디에
     # 쓸지" 가 나와야 한다. 멀리 떨어뜨리면 둘을 잇지 못한다.
     out.append(_near_miss(conn))
@@ -878,8 +881,12 @@ def _lead_health(conn) -> str:
       아예 없었다.** 페르소나는 "스카우트를 파견하라" 고 하는데 카드는
       "기획안을 내라" 만 요구했다.
 
-      우리가 스카우트를 강제하지 않는다 - **사실을 보여주고 판단은 에이전트가**
-      한다. 재료가 있는데 억지로 스카우트하면 그것도 낭비다.
+      (2026-08-13 갱신) **사실 표시만으로는 안 됐다.** 이 경고가 다섯 주기
+      연속 브리핑에 실렸는데도 기획 카드 안에서 스카우트는 반려 대응·기획에
+      항상 밀렸다(138초 턴 실측). March(1991)가 보인 착취 쏠림이 그대로다 -
+      그래서 cycle 이 이 함수가 경고를 내면 **임무가 리드 수집 하나뿐인
+      스카우트 전용 카드**를 따로 건다(임무 분리). 여기는 여전히 사실만 적고,
+      재료가 넉넉하면 카드도 안 나간다 - 억지 스카우트는 여전히 낭비다.
     """
     try:
         with conn.cursor() as cur:
@@ -918,6 +925,88 @@ def _lead_health(conn) -> str:
         "    렌즈를 순서대로 돌리고 **어느 렌즈가 말랐는지 말해라** - 빈 것도 사실이다.",
         "  ▶ 재검증 가능한 URL 을 반드시 들고 와라. 다시 열 수 없는 리드는 접수에서 막힌다.",
     ])
+
+
+# top_n 대역. 실행 한도(5~300)를 셋으로 가른다 - 현행 관례(5-50), 중간, 광폭.
+TOPN_BANDS = (("5-50", 5, 50), ("51-150", 51, 150), ("151-300", 151, 300))
+
+
+def _design_gap_line(conn) -> str:
+    """**설계 공간의 빈 니치 - 기계가 센 사실.** 격자가 곧 후보 공급원이다.
+
+    ▶ 왜 (2026-08-13 실측 + 문헌, idea-starvation-sweep 검증 5/5)
+      스카우트 유입이 이틀 멈추자 기획이 부채 청소만 반복했고, 서술형 진단
+      (TC 0.114 vs 0.316)은 다섯 주기 연속 무시됐다 - 신규 기획 prop_56f65361
+      이 진단을 읽고도 top_n=20 을 또 썼다. 자율 실험실 문헌의 공통 구조가
+      처방이다: 후보는 유한 목록이 아니라 **파라미터 공간**이고(ChemOS 는
+      옵티마이저가 다음 점을 미리 채워 큐가 마르지 않는다), 미시도 셀은
+      불확실성이 커서 획득 점수가 자동으로 붙으며(GP-UCB 의 σ 항), 실험 49건이
+      top_n 5-50 한 열에 몰린 것은 MAP-Elites 가 말하는 한 니치 과밀이다.
+      기계는 빈 칸을 세고 **살 가치(경제 논리·반증)는 에이전트가 정한다** -
+      여기는 조회층이고, 접수·예산·DSR 관문은 그대로다.
+    """
+    try:
+        from strategy_templates import EDGE_VOCAB      # noqa: PLC0415 (실행면 정본)
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select coalesce(h.expected_edge->>'type',''),
+                       coalesce((e.config->>'top_n')::int, 0)
+                  from quant.experiments e
+                  left join quant.hypotheses h
+                         on h.hypothesis_id = e.hypothesis_id""")
+            tried: set = set()
+            for et, tn in cur.fetchall():
+                band = next((b for b, lo, hi in TOPN_BANDS
+                             if lo <= int(tn or 0) <= hi), TOPN_BANDS[0][0])
+                tried.add((str(et), band))
+        edges = sorted(EDGE_VOCAB)
+    except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
+        return ""
+    empty = [(e, b) for e in edges for b, _, _ in TOPN_BANDS
+             if (e, b) not in tried]
+    if not empty:
+        return ""
+    # 광폭 대역 먼저 - IR 구조 진단(실측 TC: top20 0.114 vs top200 0.316)이
+    # 격자의 그 열을 가리킨다. 순서는 후보 순위이지 명령이 아니다.
+    order = {"151-300": 0, "51-150": 1, "5-50": 2}
+    empty.sort(key=lambda x: (order[x[1]], x[0]))
+    bands_tried = {b for _, b in tried}
+    crowd = (" · 지금까지의 실험은 **전부 top_n 5-50 한 대역**이었다"
+             if bands_tried <= {"5-50"} else "")
+    # ▶ **어휘에만 있고 실험 0건인 항목은 자산이 아니라 부채다** (2026-08-14)
+    #   문헌(대규모 실험 조직 실측): 아이디어의 3분의 1 미만만 목표 지표를
+    #   실제로 움직이고, 전문가의 사전 판단은 신뢰할 수 없다. 어휘에 등재된
+    #   것은 "돌 수 있다는 약속" 일 뿐이고 그 약속은 한 번도 검증된 적이 없다 -
+    #   접수는 실행 가능성의 약속인데 그 약속이 미검증이면 다음 주기가 그
+    #   위에 기획을 쌓는다. 싸고 작게 먼저 한 번 돌리는 것이 정석이다.
+    never = sorted({e for e in edges if not any(k[0] == e for k in tried)})
+    debt = []
+    if never:
+        debt = [
+            f"  ▶ **미검증 부채**: 어휘에 있는데 실험이 0건인 유형 "
+            f"{len(never)}개 - {', '.join(never[:6])}",
+            "    등재는 '돌 수 있다'는 약속이고 그 약속은 아직 검증된 적이 "
+            "없다. 새 계열을 열기 전에 이 중 하나를 **작게 한 번** 돌려 "
+            "약속을 사실로 바꾸는 편이 싸다.",
+        ]
+
+    lines = [
+        "",
+        f"[설계 공간의 빈 니치 - 기계가 센 사실] "
+        f"{len(edges) * len(TOPN_BANDS)}칸(edge×top_n 대역) 중 "
+        f"빈 칸 {len(empty)}개{crowd}",
+        *debt,
+        "  우선 후보 (광폭 대역 우선 - 실측 TC: top20 0.114 vs top200 0.316):",
+    ]
+    for e, b in empty[:6]:
+        lines.append(f"    · {e} × top_n {b}")
+    lines += [
+        "  ▶ 빈 칸은 사실이고 **살 가치는 네가 정한다** - 경제 논리(누가 반대편에",
+        "    서는가)·반증 없이 칸만 채우는 기획은 접수에서 반려된다. 리드가",
+        "    말랐어도 이 격자가 후보 공급원이다 - 후보는 목록이 아니라 공간이다.",
+    ]
+    return "\n".join(lines)
 
 
 def _unrunnable_falsifications(conn, *, keep: int = 4) -> str:
@@ -1146,7 +1235,7 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
-    argv = ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER,
+    argv = ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
             "hermes", "kanban", "create", title,
             "--assignee", assignee,
             "--idempotency-key", key,
@@ -1183,7 +1272,7 @@ def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
         "finally: c.close()\n")
     import json as _json
     r = subprocess.run(
-        ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER,
+        ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
          "python3", "-c", code, sql, _json.dumps(list(params))],
         capture_output=True, text=True, encoding="utf-8", timeout=120)
     if r.returncode != 0:
@@ -1898,6 +1987,47 @@ def cycle(*, dry_run: bool = False) -> int:
               flush=True)
         fails += 1
 
+    # ── 리서치: 스카우트 전용 카드 (재료가 마르면, 임무 분리로) ──
+    #   ▶ 사실 표시만으로는 안 됐다 (2026-08-13 실측 + idea-starvation-sweep
+    #     검증 5/5). _lead_health 경고가 다섯 주기 연속 브리핑에 실렸는데도
+    #     기획 카드 안에서 스카우트는 반려 대응·기획에 항상 밀렸다(138초 턴).
+    #     March(1991): 방치된 학습 시스템은 착취로 쏠리는 게 기본 경로.
+    #     3M/구글 실측: 탐색 시간은 선언이 아니라 **예약**이어야 지켜진다.
+    #     ChemOS: 프로듀서(후보 생성)와 컨슈머(실행)는 분리된 프로세스다.
+    #     그래서 재료가 마르면 임무가 리드 수집 하나뿐인 카드를 따로 건다 -
+    #     수집 강제가 아니다. 마른 렌즈는 "말랐다" 보고도 유효한 산출이다.
+    #   멱등키는 6시간 버킷 - 15분 주기마다 새 카드를 내면 그게 또 스팸이다.
+    try:
+        _sc = _conn()
+        try:
+            starving = _lead_health(_sc)
+        finally:
+            _sc.close()
+        if starving:
+            _now = datetime.now(timezone.utc)
+            _create_card(
+                title=f"공장 스카우트 소집: 리드 수집 {stamp}",
+                body=("이 카드의 임무는 **리드 수집·납품 하나뿐이다** - 기획안을 "
+                      "쓰지 마라(기획은 기획 카드 몫이다).\n"
+                      + starving + "\n" + _SCOUT_SURFACE + "\n\n"
+                      "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSSDOMAIN)를 "
+                      "순서대로 돌리고, 수집분은 `factory_submit_leads` **도구 "
+                      "호출**로만 납품한다 - 카드 텍스트는 납품이 아니다. "
+                      "렌즈별 수집 수와 마른 렌즈를 요약에 남겨라 - 빈 것도 "
+                      "사실이다.\n"
+                      "[질 기준] STATED_MECHANISM 없는 블록은 접수가 반려한다. "
+                      "TESTABILITY 에는 측정지표·임계·창을 적어라 - 통째로 "
+                      "VAGUE 로 온 배치(8/11 실측)는 기획이 쓸 수 없었다. "
+                      "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
+                      "CROSSDOMAIN 우물을 우선하라."),
+                assignee="research-department",
+                key=f"factory-scout-{_now:%Y%m%d}T{_now.hour // 6}",
+                dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
+              flush=True)
+        fails += 1
+
     # ── 리서치: 다음 기획안 ──
     try:
         rb = research_brief()
@@ -1913,8 +2043,15 @@ def cycle(*, dry_run: bool = False) -> int:
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
         #   둘 다 쓰게 하면 그 규칙을 형식만 만족시키게 된다.
+        # ▶ 기획 카드는 **30분 버킷** (2026-08-13). 실행 사슬은 6분(승격→발주→
+        #   실험→판정)인데 기획 공급이 시간 버킷 멱등키로 **1카드/시간**에 묶여
+        #   있었다 - 공급이 상한이면 주기를 아무리 돌려도 새 가설이 안 는다.
+        #   문헌: Tail at Scale(하위 큐를 얕게), Cooper(유입은 상시 스트림).
+        #   비용 상한은 기획 카드 2장/시간이다.
+        _pnow = datetime.now(timezone.utc)
+        pstamp = f"{_pnow:%Y%m%dT%H}{'a' if _pnow.minute < 30 else 'b'}"
         _create_card(
-            title=f"공장 주기 [기획자]: 다음 실험 기획안 {stamp}",
+            title=f"공장 주기 [기획자]: 다음 실험 기획안 {pstamp}",
             body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n"
                   + DELIVERY_RULES + "\n"
                   "[규칙]\n"
@@ -1934,6 +2071,15 @@ def cycle(*, dry_run: bool = False) -> int:
                   "  메커니즘 설명은 ECONOMIC_RATIONALE 에 그대로 쓰되, "
                   "**대응 자체는 반드시 위 칸에도 적어라** - 계약은 그 칸만 "
                   "읽으므로 본문에만 있으면 '대응 없음' 으로 막힌다.\n"
+                  # ▶ 다중 블록 제출 (2026-08-13). 접수 파서(parse_blocks)는
+                  #   원래 여러 블록을 읽는다 - 카드당 1건은 관례였지 계약이
+                  #   아니었다. 공급 병목(실행 6분 vs 공급 1건/시간)의 나머지
+                  #   반쪽을 여기서 연다. 단 같은 계열 변형 남발은 시도 예산을
+                  #   태우므로 서로 다른 계열로 제한한다.
+                  "- 재료(미사용 리드·빈 니치)가 충분하면 **서로 다른 계열 "
+                  "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
+                  "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
+                  "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
                   "- 예산이 소진된 계열은 제안하지 마라.\n"
                   "- 쓸 수 있는 리드 목록에 없는 id 를 대지 마라 - 원장에서 다시 "
                   "읽어 대조하므로 막힌다.\n"
@@ -1947,7 +2093,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            key=f"factory-planner-{stamp}", dry_run=dry_run)
+            key=f"factory-planner-{pstamp}", dry_run=dry_run)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -2314,6 +2460,7 @@ def _selfcheck() -> int:
     # 기획자는 다음 주기에도 관례 top-20 으로 낸다(2026-08-13)
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
+    _check_design_gaps_and_scout_card()
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()
     _check_brief_blocks_run_before_close()
@@ -2602,6 +2749,62 @@ def _check_lead_health_is_surfaced():
         and n.name == "_compose_research_brief")) or ""
     assert "_lead_health(conn)" in body, "브리핑이 재료 부족을 안 싣는다"
     print("  재료 부족을 카드가 말함   OK")
+
+
+def _check_design_gaps_and_scout_card():
+    """**빈 니치는 기계가 세고, 재료가 마르면 전용 카드가 나간다.** (2026-08-13)
+
+    실측: 서술형 진단은 다섯 주기 연속 무시됐고(신규 기획이 top_n=20 재사용),
+    스카우트는 기획 카드 안에서 항상 밀렸다. 문헌(ChemOS 프로듀서 분리·
+    MAP-Elites 니치 격자·March 착취 쏠림·3M 예약 시간)이 처방한 두 장치를
+    여기 고정한다 - 격자 후보 공급원과 임무 분리 카드.
+    """
+    class _Grid:
+        def __init__(self, rows): self._rows = rows
+
+        def cursor(self):
+            rows = self._rows
+
+            class _C:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def execute(self_, *a, **k): return None
+                def fetchall(self_): return rows
+            return _C()
+
+    line = _design_gap_line(_Grid([("momentum", 20), ("low_volatility", 20)]))
+    assert "빈 니치" in line and "× top_n 151-300" in line, line
+    # 실험이 한 대역에 몰린 사실이 그대로 실린다
+    assert "전부 top_n 5-50 한 대역" in line, line
+    # 광폭 대역이 먼저 온다 - 상위 6후보가 전부 151-300 이므로 관례 대역(5-50)
+    # 셀은 후보 목록에 나타나지 않아야 한다(순위는 결정론이다)
+    assert "× top_n 5-50" not in line, line
+    # 살 가치 판단은 에이전트 몫임을 명시한다 - 기계는 명령하지 않는다
+    assert "살 가치는 네가 정한다" in line, line
+    # 미검증 부채: 어휘에 있는데 실험 0건인 유형이 이름으로 뜬다 (2026-08-14)
+    assert "미검증 부채" in line, line
+    assert "low_max" in line or "illiquidity_premium" in line, line
+
+    class _Boom2:
+        def cursor(self): raise RuntimeError("표 없음")
+    assert _design_gap_line(_Boom2()) == "", "못 셌는데 공백을 지어냈다"
+
+    import ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    body = ast.get_source_segment(src, next(
+        n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+        and n.name == "_compose_research_brief")) or ""
+    assert "_design_gap_line(conn)" in body, "브리핑이 설계 공백을 안 싣는다"
+    cyc = ast.get_source_segment(src, next(
+        n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+        and n.name == "cycle")) or ""
+    assert "factory-scout-" in cyc and "_lead_health" in cyc, \
+        "재료가 말라도 스카우트 전용 카드가 안 나간다"
+    # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
+    # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
+    assert "factory-planner-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
+    print("  설계 공백·스카우트 소집   OK")
 
 
 def _check_dataset_refresh_is_daily_and_ordered():

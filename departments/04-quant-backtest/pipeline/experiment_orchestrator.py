@@ -257,8 +257,36 @@ _STATUS_TO_DECISION = {
 }
 
 # 환류 oos_summary 로 옮길 지표. **없는 것은 넣지 않는다**(미측정과 0 을 구분).
-_OOS_KEYS = ("excess_return_pct", "information_ratio", "max_drawdown_pct",
-             "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high")
+#
+# ▶ **화이트리스트가 계측을 잘라 왔다** (2026-08-14 배선 조사)
+#   랭크-IC(signal_ic*)와 회전율(turnover_total)은 이미 quant.experiment_metrics
+#   에 적재되고 환류 SQL 도 그 행을 읽어 오는데, 이 튜플에 이름이 없어서
+#   **outcomes 에 한 번도 실린 적이 없었다.** 측정은 되는데 원장에 안 남으면
+#   다음 기획안은 그 사실을 못 본다 - "측정되는데 저장이 죽으면 그 측정은
+#   없는 것" 과 같은 사고다.
+#
+# ▶ 여기 이름을 더해도 **판정은 바뀌지 않는다**: release_gate.evaluate 는
+#   이름 지정된 8개 키만 검사하고, 이 튜플은 환류(기록) 전용이다. 다만
+#   factory_bridge.lessons_from 이 excess_return_pct·information_ratio 두
+#   이름을 읽으므로 신규 키는 반드시 새 이름을 쓴다.
+#
+# ▶ 두 적재 경로가 이 한 튜플을 공유한다(orphan_finalizer 가 import) -
+#   정상 종결과 고아 완주가 같은 계측을 남긴다.
+_OOS_KEYS = (
+    # 관문이 보는 지표 (기존)
+    "excess_return_pct", "information_ratio", "max_drawdown_pct",
+    "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high",
+    # 위험조정 비교 계측 (2026-08-14) - 명목 초과가 vol 차이에 오염되는 것을
+    # 원장이 스스로 보이게 한다(leverage bias). backtest_runner.excess_metrics.
+    "m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+    "strategy_ann_vol_pct", "benchmark_ann_vol_pct",
+    "beta_vs_benchmark", "corr_vs_benchmark", "residual_ann_vol_pct",
+    # 부품 채점표 (2026-08-14) - 단일 신호를 부품으로 채점할 때 쓰는 축.
+    # 전부 이미 적재돼 있던 값이다(새 계산 없음).
+    "turnover_total", "turnover",
+    "signal_ic", "signal_ic_t", "signal_ic_hit_rate", "signal_ic_periods",
+    "signal_ic_breadth", "pnl_top1_share", "pnl_top3_share",
+)
 
 
 def _gate_note(decision, metrics: dict) -> str:
@@ -314,10 +342,32 @@ def _gate_note(decision, metrics: dict) -> str:
             else:
                 gaps.append(name)
 
+    # ▶ 계측 꼬리 (2026-08-14). **판정에 관여하지 않는다** - 다음 기획안이
+    #   "명목 초과가 나빴는데 위험조정으로는 어땠나" 를 볼 수 있게 하는 사실
+    #   줄이다. vol 타게팅을 단 실험이 명목 초과 −100%p 로 죽는 동안 M² 는
+    #   전혀 다른 이야기를 할 수 있고, 그 차이가 곧 관문 재설계의 근거다.
+    extra = []
+    for label, key, unit, digits in (
+            ("M²", "m2_excess_ann_pct", "%p", 1),
+            ("α", "alpha_ann_pct", "%p", 1),
+            ("AR", "appraisal_ratio", "", 2),
+            ("전략vol", "strategy_ann_vol_pct", "%", 0),
+            ("벤치vol", "benchmark_ann_vol_pct", "%", 0),
+            ("IC t", "signal_ic_t", "", 2),
+            ("회전", "turnover_total", "x", 1)):
+        v = metrics.get(key)
+        if v is None:
+            continue
+        try:
+            extra.append(f"{label} {float(v):.{digits}f}{unit}")
+        except (TypeError, ValueError):
+            continue
+    tail = (" || 계측: " + " · ".join(extra)) if extra else ""
+
     head = f"관문 {len(passed)}/{total} 통과"
     if not failed:
-        return head + " - 남은 조항 없음"
-    return f"{head}. 남은 조항: " + "; ".join(gaps[:6])
+        return head + " - 남은 조항 없음" + tail
+    return f"{head}. 남은 조항: " + "; ".join(gaps[:6]) + tail
 
 
 def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
@@ -596,7 +646,21 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
 
         chain = run_chain or _default_chain
-        result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
+        try:
+            result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
+        except Exception:
+            # ▶ 실패한 체인이 가설을 RUNNING 에 가두지 않는다 (2026-08-13 실측)
+            #   퀀트 카드가 CLI 로 orchestrate 를 직접 부르는 경로는 작업 큐가
+            #   없어서, 체인이 죽으면 실패가 어디에도 안 남고 가설만 RUNNING 에
+            #   갇혔다 - e2379857 이 job 0건·실험 행 0건·"사유 기록 없음" 으로
+            #   하루 3회 스톨 회수됐다. 30분 스톨 대기는 회수가 아니라 낭비다:
+            #   실패 즉시 PROPOSED 로 되돌리고 예외는 그대로 올린다(작업 큐
+            #   경로에서는 호출부가 failure_reason 을 기록한다).
+            cur.execute("update quant.hypotheses set status='PROPOSED', "
+                        "status_changed_at=now() where hypothesis_id=%s "
+                        "and status='RUNNING'", (hid,))
+            conn.commit()
+            raise
         report.regime_evidence = list(result.get("regime_evidence") or ())
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
@@ -1010,11 +1074,13 @@ class _FakeCursor:
         self._row = hypothesis_row
         self._datasets = datasets
         self.updates: list = []
+        self.update_sqls: list = []   # 어떤 문장이었는지도 본다(복귀 검사용)
 
     def execute(self, sql, params=()):
         self._last = (sql, params)
         if "update quant.hypotheses" in sql:
             self.updates.append(params)
+            self.update_sqls.append(" ".join(str(sql).split()))
             # ▶ 지문을 기억한다. 실제 DB 는 UPDATE 한 값을 되읽을 수 있으므로
             #   가짜도 그래야 사전등록 대조가 진짜 경로를 검사한다 - 안 그러면
             #   늘 "위반" 이 나와 검사가 가드를 잘못 고발한다.
@@ -1168,6 +1234,73 @@ def _check_orchestrate_paths():
     print("  오케스트레이션 경로       OK")
     _check_dataset_comes_from_hypothesis()
     print("  데이터셋=사상 결과       OK")
+    _check_chain_failure_releases_hypothesis()
+    print("  실패 체인 즉시 복귀       OK")
+    _check_metrics_are_recorded_without_changing_verdict()
+    print("  계측 확장·판정 불변       OK")
+
+
+def _check_metrics_are_recorded_without_changing_verdict():
+    """**계측을 늘려도 판정은 그대로다** (2026-08-14, 2층 관문 결재 1단계).
+
+    랭크-IC·회전율은 이미 원장에 있었는데 _OOS_KEYS 화이트리스트에서 잘려
+    outcomes 에 한 번도 안 실렸다. 위험조정 계측(M²·alpha·appraisal)도 같은
+    경로로 싣는다. 두 가지를 함께 고정한다 - (a) 새 지표가 환류에 실린다,
+    (b) 관문 판정 함수는 이 지표들을 보지 않는다(합격선 변경 아님).
+    """
+    from release_gate import CRITERIA, evaluate
+
+    need = {"m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+            "turnover_total", "signal_ic", "signal_ic_t"}
+    assert need <= set(_OOS_KEYS), sorted(need - set(_OOS_KEYS))
+    # 판정 부산물(교훈)이 읽는 두 이름과 겹치지 않아야 '판정 불변' 이 성립한다
+    assert "excess_return_pct" in _OOS_KEYS and "information_ratio" in _OOS_KEYS
+
+    # 같은 지표 dict 에 신규 계측을 넣어도 evaluate 결과가 동일한가
+    base = {"excess_return_pct": 130.3, "information_ratio": 0.17,
+            "max_drawdown_pct": -21.3, "turnover": 12.0,
+            "deflated_sharpe": 0.9968, "bootstrap_ci_low": 0.78,
+            "bootstrap_ci_high": 1.41}
+    rich = dict(base, m2_excess_ann_pct=-4.2, alpha_ann_pct=3.1,
+                appraisal_ratio=0.22, signal_ic=0.035, signal_ic_t=3.16,
+                strategy_ann_vol_pct=15.0, benchmark_ann_vol_pct=31.0)
+    a = evaluate(base, fragility="ROBUST")
+    b = evaluate(rich, fragility="ROBUST")
+    assert (sorted(a.passed), sorted(a.failed)) == (sorted(b.passed), sorted(b.failed)), \
+        f"계측 추가가 판정을 바꿨다: {a.failed} vs {b.failed}"
+    assert CRITERIA["min_information_ratio"] == 0.5, "관문 임계가 바뀌었다"
+
+    # 판정 리포트 꼬리에 계측이 실린다 - 원장에 남아야 다음 기획안이 본다
+    note = _gate_note(a, rich)
+    assert "계측:" in note and "M²" in note and "AR" in note, note
+    # 못 잰 지표는 적지 않는다(0 으로 채우지 않는다)
+    assert "IC t" not in _gate_note(a, base), _gate_note(a, base)
+
+
+def _check_chain_failure_releases_hypothesis():
+    """**실패한 체인이 가설을 RUNNING 에 가두지 않는다** (2026-08-13 실측).
+
+    퀀트 카드의 CLI 직접 호출 경로는 작업 큐가 없어서, 체인이 죽으면 실패가
+    어디에도 안 남고 가설만 RUNNING 에 갇혔다 - e2379857 이 job 0건·실험 행
+    0건·"사유 기록 없음" 으로 하루 3회 스톨 회수(회당 30분 낭비). 실패 즉시
+    PROPOSED 복귀 + 예외 재전파(삼키면 호출부가 실패를 모른다)를 고정한다.
+    """
+    row = ("h-9", "모멘텀 가설", {"type": "momentum"},
+           ["krx-basket-daily/v1"], "PROPOSED")
+    cur = _FakeCursor(row, ["krx-basket-daily/v1"])
+
+    def boom(h, hid):
+        raise RuntimeError("체인 폭발")
+
+    try:
+        orchestrate("h-9", conn=_FakeConn(cur), market_conn=_FakeMarket(),
+                    run_chain=boom)
+        raise AssertionError("예외가 삼켜졌다 - 호출부가 실패를 알 수 없다")
+    except RuntimeError as e:
+        assert "체인 폭발" in str(e), e
+    joined = " ".join(cur.update_sqls)
+    assert "status='PROPOSED'" in joined, \
+        f"실패 후 PROPOSED 복귀가 없다 - RUNNING 감금 재발: {cur.update_sqls}"
 
 
 def _check_dataset_comes_from_hypothesis():

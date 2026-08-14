@@ -51,6 +51,10 @@ CENSUS_VERSION = "factory-bottleneck-census-v1"
 STALE_DAYS = float(os.getenv("FACTORY_STALE_DAYS", "2"))
 # 이 횟수 이상 같은 서명으로 실패하면 재시도로는 안 풀리는 종류다.
 CHURN_ATTEMPTS = int(os.getenv("FACTORY_CHURN_ATTEMPTS", "3"))
+# 되풀이 실패를 **현재 진행형**으로 보는 창(일). 이보다 오래된 이력만 있으면
+# 차단기가 이미 잡은 것이므로 병목으로 세지 않는다(2026-08-14 실측: 이틀 전
+# 끝난 42회 실패가 매 주기 브리핑을 차지하고 있었다).
+CHURN_FRESH_DAYS = float(os.getenv("FACTORY_CHURN_FRESH_DAYS", "1.0"))
 # 데이터를 모아 두고 이만큼 안 쓰면 수집이 헛돈 것이다.
 IDLE_DATASET_DAYS = float(os.getenv("FACTORY_IDLE_DATASET_DAYS", "1"))
 
@@ -106,30 +110,58 @@ def _conn():
 # 각 함수는 **못 세면 빈 목록**을 돌려준다. 지어내지 않는다.
 
 def _job_churn(cur) -> list[Bottleneck]:
-    """같은 서명으로 되풀이 실패하는 작업. 재시도로는 안 풀리는 종류다."""
+    """같은 서명으로 되풀이 실패하는 작업. 재시도로는 안 풀리는 종류다.
+
+    ▶ **죽은 병목을 세지 않는다** (2026-08-14 실측)
+      차단기(job_queue.REPEAT_BLOCK=3)가 이미 발주를 막고 있는데도 인구조사가
+      **누적 이력**을 계속 세어 "같은 사유로 42회 실패" 를 매 주기 병목으로
+      올렸다. 마지막 실패는 이틀 전(08-12 13:28)이고 그 뒤로 한 건도 없었다 -
+      이미 고쳐진 문제가 브리핑을 차지하고 개선 카드를 태우는 동안 진짜 신규
+      병목은 38건 속에 묻힌다. 문헌(품질관리·SRE)이 같은 것을 경고한다:
+      **거짓 신호 이력이 쌓인 경보는 사람이 무시하게 된다.**
+
+      그래서 시효를 본다 - 최근 창(CHURN_FRESH_DAYS) 안에 **다시 일어난** 것만
+      병목이고, 옛것은 세지 않는다. 다만 조용히 지우지도 않는다: 창 밖 이력은
+      증거 문장에 "최근 N일은 잠잠(차단기 작동 중)" 으로 남겨, 고친 사실이
+      기록에서 사라지지 않게 한다.
+    """
     try:
         cur.execute("""
-            select coalesce(failure_reason,''), hypothesis_id::text, attempts
+            select coalesce(failure_reason,''), hypothesis_id::text, attempts,
+                   extract(epoch from (now() - coalesce(updated_at, created_at)))/86400.0
               from quant.experiment_jobs
              where status = 'FAILED' and failure_reason is not null""")
         rows = cur.fetchall()
     except Exception:  # noqa: BLE001
         return []
     groups: dict[str, dict] = {}
-    for reason, hid, attempts in rows:
+    for reason, hid, attempts, age_days in rows:
         g = groups.setdefault(signature(reason),
-                              {"attempts": 0, "hyps": set(), "raw": reason})
-        g["attempts"] += int(attempts or 1)
+                              {"attempts": 0, "hyps": set(), "raw": reason,
+                               "fresh": 0, "min_age": None})
+        n = int(attempts or 1)
+        g["attempts"] += n
         g["hyps"].add(hid)
+        age = float(age_days or 0.0)
+        if age <= CHURN_FRESH_DAYS:
+            g["fresh"] += n
+        g["min_age"] = age if g["min_age"] is None else min(g["min_age"], age)
     out = []
     for sig, g in groups.items():
         if g["attempts"] < CHURN_ATTEMPTS:
             continue
+        if g["fresh"] < CHURN_ATTEMPTS:
+            # 최근 창에서 임계 미만 = 차단기가 잡고 있다. 병목이 아니다.
+            continue
+        quiet = ""
+        if g["min_age"] is not None and g["min_age"] > 1.0:
+            quiet = f" (마지막 실패 {g['min_age']:.1f}일 전)"
         out.append(Bottleneck(
             kind="작업 되풀이 실패", key=f"job:{sig}",
-            cost=float(g["attempts"]), unit="시도",
-            evidence=(f"같은 사유로 {g['attempts']}회 실패 / 가설 {len(g['hyps'])}건. "
-                      f"원문: {str(g['raw'])[:120]}"),
+            cost=float(g["fresh"]), unit="시도",
+            evidence=(f"최근 {CHURN_FRESH_DAYS}일에 같은 사유로 {g['fresh']}회 "
+                      f"실패(누적 {g['attempts']}회) / 가설 {len(g['hyps'])}건"
+                      f"{quiet}. 원문: {str(g['raw'])[:110]}"),
             owner="quant-backtest-department",
             hint="wiring-audit 로 층을 가른 뒤, 계약 문제면 리서치에 재등록을 요청한다",
             ids=sorted(g["hyps"])[:8]))
@@ -527,11 +559,22 @@ def _capability_blocks(cur) -> list[Bottleneck]:
         groups.setdefault((str(who), str(kind)), []).append(
             (str(tid), str(title), int(rec or 0)))
 
+    # ▶ **막힘 사유를 두 갈래로 가른다** (2026-08-14, AWS Agentic AI Lens)
+    #   문헌은 역량 부족(다른 에이전트·부서로 재라우팅할 문제)과 사람
+    #   에스컬레이션(신뢰도·위험·재시도 예산 소진)을 **별도 트리거**로 두고,
+    #   섞는 것을 안티패턴으로 규정한다. 우리는 14건을 `능력 밖 신고` 한
+    #   덩어리로 묶어 놓아서 "누가 받아야 하나" 가 매번 사람 판단이었다.
+    #   여기서는 이름만 가른다 - 자동 재라우팅은 별도 결정이다.
+    _ROUTE = {"capability": "역량 부족(재라우팅 후보)",
+              "needs_input": "입력 대기(사람 확인 필요)",
+              "transient": "일시 실패(재시도 대상)"}
+
     out = []
     for (who, kind), g in groups.items():
         rec = sum(x[2] for x in g)
+        lane = _ROUTE.get(kind, f"기타({kind})")
         out.append(Bottleneck(
-            kind="능력 밖 신고", key=f"cap:{who}:{kind}",
+            kind=f"막힘: {lane}", key=f"cap:{who}:{kind}",
             cost=float(len(g)), unit="건",
             evidence=(f"{who} 가 카드 {len(g)}건을 `{kind}` 로 막았다 - 실패가 "
                       f"아니라 **못 하겠다는 신고**다"
@@ -674,6 +717,35 @@ def _check_signature_groups_the_accident():
     assert signature(a) != signature(e)
     assert signature("") == "(사유 없음)"
     print("  실패 서명 군집           OK")
+
+
+def _check_fixed_bottleneck_is_not_reported_again():
+    """**차단기가 잡은 옛 실패를 병목으로 다시 올리지 않는다** (2026-08-14 실측).
+
+    REPEAT_BLOCK=3 이 발주를 막은 뒤 이틀간 한 건도 안 죽었는데, 인구조사가
+    누적 42회를 계속 세어 매 주기 브리핑을 차지했다. 거짓 신호가 쌓인 경보는
+    사람도 에이전트도 무시하게 된다 - 그러면 진짜 신규 병목이 묻힌다.
+    """
+    class _Cur:
+        def __init__(self, rows): self._rows = rows
+        def execute(self, *a, **k): pass
+        def fetchall(self): return self._rows
+
+    reason = "verdict=NOT_RUNNABLE; backlog=사상할 데이터셋이 없다"
+    # ① 옛 실패만 있는 경우(마지막 실패 2일 전) - 병목이 아니다
+    old = [(reason, f"h{i}", 7, 2.0 + i * 0.1) for i in range(6)]
+    assert _job_churn(_Cur(old)) == [], "고쳐진 옛 실패를 다시 병목으로 올렸다"
+
+    # ② 지금도 죽고 있으면 병목이다
+    fresh = [(reason, f"h{i}", 7, 0.1) for i in range(6)]
+    got = _job_churn(_Cur(fresh))
+    assert got and got[0].kind == "작업 되풀이 실패", got
+    assert "최근" in got[0].evidence and "누적" in got[0].evidence, got[0].evidence
+
+    # ③ 옛것과 새것이 섞이면: 최근 창 기준으로 임계를 넘어야만 올린다
+    mixed = [(reason, "h0", 40, 3.0), (reason, "h1", 1, 0.2)]
+    assert _job_churn(_Cur(mixed)) == [], "누적 40회에 최근 1회인데 병목으로 올렸다"
+    print("  고쳐진 병목 재보고 금지  OK")
 
 
 def _check_counts_only_what_is_observed():
@@ -898,6 +970,7 @@ def _selfcheck() -> int:
     print(f"{CENSUS_VERSION} 자체 점검 (DB 없음)")
     _check_market_quality_needs_no_ledger()
     _check_signature_groups_the_accident()
+    _check_fixed_bottleneck_is_not_reported_again()
     _check_counts_only_what_is_observed()
     _check_card_is_empty_when_clean()
     _check_new_kind_needs_no_code()
@@ -905,7 +978,7 @@ def _selfcheck() -> int:
     _check_card_shows_distinct_kinds()
     _check_soundness_routes_to_who_can_fix()
     _check_capability_report_is_heard()
-    print("병목 인구조사 9개 영역 통과.")
+    print("병목 인구조사 10개 영역 통과.")
     return 0
 
 

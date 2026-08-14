@@ -70,10 +70,25 @@ EDGE_KEYS = frozenset({
     "max_drawdown_stop",    # 고점 대비 이 낙폭이면 전량 현금 (-0.25 = -25%)
     "max_exposure",         # 익스포저 상한 (1.0 = 완전투자)
     "vol_lookback_days",    # 변동성 추정 창
+    # ── 체결 가능 유니버스 (2026-08-14 개방) ────────────────────────────────
+    # ▶ 왜 열었나 (실측)
+    #   비유동성 프리미엄 신호가 뽑은 종목의 **일평균 거래대금 중앙값이 0원**,
+    #   60일 창의 무거래일이 평균 57.2일이었다. 그 위에서 나온 IR 0.17 은
+    #   백테스트에서만 존재하는 수익이다 - 1억을 넣으면 종목당 5백만원인데
+    #   그 종목의 하루 거래대금이 사실상 0 이라 체결이 성립하지 않는다.
+    #   문헌(McLean-Pontiff)도 같은 것을 경고한다: 공개 후 잔존 알파는
+    #   차익거래가 어려운(=우리도 못 사는) 저유동성 구간에 몰린다.
+    #
+    #   **기본값은 꺼짐(0)이다.** 어느 유니버스로 재는지는 사전등록 대상이라
+    #   여기서 임의로 켜면 과거 실험과 비교가 불가능해진다.
+    "min_adv_krw",          # 창 평균 거래대금 하한(원). 예: 1e8 = 1억
+    "min_trading_days",     # 창 안 최소 거래일수. 예: 40 (60일 중)
+    "liquidity_window",     # 유동성 판정 창(거래일). 기본 60
 })
 
 # 실수로 읽는 키. 나머지는 정수다 - `_take` 가 정수만 받으므로 갈라야 한다.
-FLOAT_KEYS = frozenset({"vol_target_annual", "max_drawdown_stop", "max_exposure"})
+FLOAT_KEYS = frozenset({"vol_target_annual", "max_drawdown_stop", "max_exposure",
+                        "min_adv_krw"})
 
 LIMITS = {
     "lookback_days": (2, 250),      # 1일은 신호가 아니고, 250일 초과는 표본 부족
@@ -86,6 +101,11 @@ LIMITS = {
     "top_n": (5, 300),              # 5 미만은 분산이 안 된다
 
     "holding_horizon": (1, 120),
+    # 체결 가능 유니버스 (2026-08-14). 0 = 필터 없음(현행). 상한은 유니버스를
+    # 통째로 비우지 않게 막는다 - 일평균 100억은 대형주 수십 종목만 남는다.
+    "min_adv_krw": (0.0, 1e10),
+    "min_trading_days": (0, 250),
+    "liquidity_window": (5, 250),
     # ▶ **레버리지를 열지 않는다.** 상한이 1.0 이다.
     #   개발원칙 9: "위험한 기능은 실패 시 거래 확대가 아니라 Entry 차단
     #   방향으로 동작한다." 익스포저 상한을 1.0 넘게 허용하면 변동성이 낮게
@@ -194,7 +214,10 @@ def bind(hyp: dict, base_config: dict) -> Binding:
     _take("holding_horizon", horizon, "lookback_days")
     _take("top_n", edge.get("top_n") or hyp.get("top_n"), "top_n")
     for _rk in ("vol_target_annual", "max_drawdown_stop", "max_exposure",
-                "vol_lookback_days"):
+                "vol_lookback_days",
+                # 체결 가능 유니버스 (2026-08-14). 위험 손잡이와 같은 계약:
+                # 없으면 키를 안 넣고, 그러면 실행면이 예전 경로로 간다.
+                "min_adv_krw", "min_trading_days", "liquidity_window"):
         _take_risk(_rk)
 
     # ▶ **읽지 않은 파라미터를 조용히 버리지 않는다** (2026-08-10 실측)

@@ -62,10 +62,16 @@ CLI_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_TIMEOUT", "300"))
 
 # 모델 별칭 - 헤르메스가 보내는 이름을 CLI 가 아는 이름으로.
 # CLI 는 sonnet/opus/haiku 별칭을 받는다(정확한 날짜 ID 는 버전마다 갈린다).
+# ▶ Claude 5 세대 (2026-08-13, 부서장 fable 전환 실측): 별칭표에 없는 ID 는
+#   DEFAULT_ALIAS(sonnet)로 강등된다 - claude-fable-5 요청이 조용히 sonnet
+#   으로 돌았다(프록시 로그로 발견). 5세대는 **전체 ID 그대로** CLI 에 넘긴다
+#   (CLI 는 전체 모델 ID 도 받는다).
 MODEL_ALIASES = {
     "claude-sonnet-4-5": "sonnet", "claude-sonnet-4-5-20250929": "sonnet",
     "claude-opus-4-5": "opus", "claude-haiku-4-5": "haiku",
     "sonnet": "sonnet", "opus": "opus", "haiku": "haiku",
+    "claude-fable-5": "claude-fable-5", "fable": "claude-fable-5",
+    "claude-opus-5": "claude-opus-5", "claude-sonnet-5": "claude-sonnet-5",
 }
 DEFAULT_ALIAS = "sonnet"
 
@@ -289,6 +295,14 @@ class Handler(BaseHTTPRequestHandler):
         #                         api.anthropic.com 으로 직행한다**(프로필 키·
         #                         환경변수 둘 다 무시). 그래서 custom 경로가
         #                         실제로 쓰이는 길이다.
+        # ▶ /anthropic 접두 (2026-08-13 정정): 지금 이미지의 hermes 는
+        #   `_anthropic_base_url_override_ok` 가 **경로가 /anthropic 으로 끝나는
+        #   오버라이드만** 인정하고, 아니면 조용히 api.anthropic.com 직행으로
+        #   폴백한다(부서장 fable 전환 때 400 으로 실측). 그 관례로 들어오는
+        #   요청의 접두를 벗겨 같은 핸들러로 받는다 -
+        #   base_url=http://host.docker.internal:8787/anthropic 이 정본이다.
+        if path.startswith("/anthropic/") or path == "/anthropic":
+            path = path[len("/anthropic"):] or "/"
         openai_style = path.endswith("/v1/chat/completions")
         if not (openai_style or path.endswith("/v1/messages")):
             self._json(404, {"type": "error",
@@ -470,7 +484,13 @@ def _check_openai_shape():
 def _check_model_alias():
     assert MODEL_ALIASES["claude-sonnet-4-5"] == "sonnet"
     assert MODEL_ALIASES.get("모르는모델", DEFAULT_ALIAS) == "sonnet"
-    assert set(MODEL_ALIASES.values()) <= {"sonnet", "opus", "haiku"}
+    # ▶ 5세대는 강등 금지 (2026-08-13 실측: claude-fable-5 가 조용히 sonnet
+    #   으로 돌았다). 부서장 전환의 전제라 여기서 고정한다.
+    assert MODEL_ALIASES["claude-fable-5"] == "claude-fable-5"
+    assert MODEL_ALIASES["fable"] == "claude-fable-5"
+    assert set(MODEL_ALIASES.values()) <= {
+        "sonnet", "opus", "haiku",
+        "claude-fable-5", "claude-opus-5", "claude-sonnet-5"}
     print("  모델 별칭                OK")
 
 

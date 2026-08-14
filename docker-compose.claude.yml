@@ -26,6 +26,18 @@
 # ▶ extra_hosts: Docker Desktop(Mac)은 host.docker.internal을 자동 제공하지만 AWS의 리눅스
 #   엔진은 아니다 - 매핑을 명시해야 프록시가 붙는다.
 services:
+  # ▶ kanban-dispatcher (2026-08-13 추가, 재일 지시로 리서치·퀀트 부서장
+  #   claude-fable-5 전환). 이 오버레이가 쓰일 때(2026-08-10) spawn 주체는
+  #   부서 게이트웨이였지만, 지금은 중앙 dispatcher 가 카드 에이전트를 전부
+  #   spawn 한다 - 게이트웨이에만 환경을 주면 공장 카드는 여전히 자격 없이
+  #   뜨다 죽는다. 같은 프록시 경로(플랜 한도)를 dispatcher 에도 준다.
+  kanban-dispatcher:
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-proxy-placeholder-not-a-credential}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://host.docker.internal:8787}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   research-hermes:
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-proxy-placeholder-not-a-credential}

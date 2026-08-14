@@ -33,15 +33,36 @@ CANONICAL_PROFILE_BY_DEPARTMENT: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
+# 응대 창구(도서관 층) 프로필 (2026-08-13, 도서관/연구소 분리).
+# 부서 본체와 같은 부서에 속하지만 **별도 assignee** 다 - dispatcher 의 유일한
+# 라우팅 손잡이가 assignee→프로필이라서, 창구를 별도 프로필로 두는 것이 곧
+# 큐·워커풀 분리다(Borg prod/non-prod 이식). 조회성 사용자 질의 자식 카드만
+# 여기로 배정하고, 공장·실험 카드는 부서 본체로 간다. 창구 프로필의 도구 면은
+# research-liaison-mcp(읽기 전용, 쓰기 도구 미등록)뿐이다.
+LIAISON_PROFILE_BY_DEPARTMENT: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "research": "research-liaison",
+        "quant": "quant-liaison",
+    }
+)
+
 CANONICAL_PROFILES: Final[frozenset[str]] = frozenset(
     CANONICAL_PROFILE_BY_DEPARTMENT.values()
-)
+) | frozenset(LIAISON_PROFILE_BY_DEPARTMENT.values())
 
 _DEPARTMENT_BY_CANONICAL_PROFILE: Final[Mapping[str, str]] = MappingProxyType(
     {
-        profile: department
-        for department, profile in CANONICAL_PROFILE_BY_DEPARTMENT.items()
-        if department not in {"portfolio", "audit", "workforce"}
+        **{
+            profile: department
+            for department, profile in CANONICAL_PROFILE_BY_DEPARTMENT.items()
+            if department not in {"portfolio", "audit", "workforce"}
+        },
+        # 창구 응답도 그 부서의 답이다 - 부서 요약(department_summaries)에
+        # 본체 응답과 같은 부서 코드로 잡힌다.
+        **{
+            profile: department
+            for department, profile in LIAISON_PROFILE_BY_DEPARTMENT.items()
+        },
     }
 )
 
@@ -102,6 +123,7 @@ class CanonicalKanbanTaskRequest:
 
 __all__ = [
     "CANONICAL_PROFILE_BY_DEPARTMENT",
+    "LIAISON_PROFILE_BY_DEPARTMENT",
     "CANONICAL_PROFILES",
     "CanonicalKanbanTaskRequest",
     "CanonicalProfileError",

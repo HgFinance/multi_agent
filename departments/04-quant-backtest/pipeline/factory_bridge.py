@@ -521,16 +521,26 @@ _SQL_FAMILY_OUTCOMES = """
      order by decided_at desc
 """
 
+# ▶ **한 실험에는 판정 하나** (2026-08-14 실측). outcome_id 는
+#   (experiment_id, decision) 해시라 멱등이 **판정별로만** 작동했다 - 같은
+#   실험에 REJECT 와 GATE_HOLD 가 나란히 앉는 것을 막지 못한다(e820053a 실측:
+#   고아 소탕기와 정규 판정 사슬이 경합). 판정이 둘이면 "이 실험은 어떻게
+#   끝났나" 에 답이 두 개이고, 교훈 집계·파레토·시도 계수가 전부 이중으로 센다.
+#   먼저 온 판정이 정본이다 - 나중 것은 조용히 버리지 않고 호출부가 알도록
+#   0행 반환으로 드러낸다(아래 finalize 가 그 사실을 로그로 남긴다).
 _SQL_INSERT_OUTCOME = """
     insert into research.experiment_outcomes
       (outcome_id, experiment_id, hypothesis_id, trial_family_id, trial_number,
        decision, decided_at, proposal_id, failed_criteria, oos_summary,
        regime_concerns, lesson_codes, notes, root_cause, corrective_action)
-    values (%(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
-            %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
-            %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
-            %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
-            %(root_cause)s, %(corrective_action)s)
+    select %(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
+           %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
+           %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
+           %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
+           %(root_cause)s, %(corrective_action)s
+     where not exists (
+             select 1 from research.experiment_outcomes o
+              where o.experiment_id = %(experiment_id)s)
     on conflict (outcome_id) do nothing
 """
 
@@ -930,6 +940,13 @@ def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str
     # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
     cur = conn.cursor()
     cur.execute(_SQL_INSERT_OUTCOME, payload)
+    # 0행이면 이 실험에 이미 판정이 있다 - 먼저 온 것이 정본이므로 덮지 않되,
+    # **조용히 넘어가지도 않는다**(두 경로가 경합했다는 사실 자체가 신호다).
+    if getattr(cur, "rowcount", 1) == 0:
+        print(f"  판정 중복 회피: {payload.get('experiment_id')} 는 이미 판정이 "
+              f"있어 {payload.get('decision')} 를 적재하지 않았다(먼저 온 판정이 "
+              f"정본). 두 경로가 같은 실험을 판정하려 한 것이므로 배선을 본다.",
+              flush=True)
     cur.execute(
         "update quant.hypotheses set status = %s, status_changed_at = now() "
         "where hypothesis_id = %s", (new_status, hypothesis_id))
@@ -1254,6 +1271,13 @@ def _check_outcome_id_is_idempotent():
     c = build_outcome(experiment_id="e1", hypothesis_id="h1", trial_family_id="f",
                       trial_number=1, decision="REVISE")
     assert c["outcome_id"] != a["outcome_id"]
+    # ▶ **한 실험에 판정 하나** (2026-08-14 실측 e820053a: REJECT·GATE_HOLD 공존).
+    #   outcome_id 멱등은 판정별로만 작동하므로 SQL 이 실험 단위로 막아야 한다 -
+    #   판정이 둘이면 교훈 집계·파레토·시도 계수가 이중으로 센다.
+    sql = " ".join(_SQL_INSERT_OUTCOME.split())
+    assert "not exists" in sql and "o.experiment_id = %(experiment_id)s" in sql, sql
+    assert "insert into research.experiment_outcomes" in sql and " select " in sql, \
+        "values 절이면 실험 단위 가드가 안 걸린다"
 
 
 def _check_finalize_is_atomic():
