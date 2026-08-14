@@ -1,0 +1,13 @@
+ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent:latest
+FROM ${HERMES_BASE_IMAGE}
+
+# CEO의 native kanban_create를 build-time에 HgFinance의 scoped primary
+# idempotency 경계로 감싼다. runtime pip install이나 DB migration은 하지 않는다.
+ENV PYTHONPATH="/opt/hgfinance:${PYTHONPATH}"
+
+COPY orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
+COPY orchestration/primary_task_idempotency.py /opt/hgfinance/orchestration/primary_task_idempotency.py
+COPY deploy/ceo-kanban/install_primary_idempotency.py /tmp/install_primary_idempotency.py
+
+RUN python3 /tmp/install_primary_idempotency.py \
+    && rm -f /tmp/install_primary_idempotency.py
