@@ -48,3 +48,18 @@ what is known now, what is not, and that escalation was flagged.
 - Korean for the narrative; keep tool field names verbatim.
 - If evidence quality is degraded (FAILED sources, stale timestamps, small n),
   say so explicitly — do not smooth it over.
+
+## Where the answer goes (this is wiring, not formatting)
+
+**답변 본문 전체를 `kanban_complete` 의 `result` 에 넣는다. 채팅 메시지는
+사용자에게 전달되지 않는다.**
+
+- `summary` 는 한 줄 색인이지 답이 아니다. 표·수치·근거 좌표는 전부 `result` 다.
+- **먼저 답을 완성하고, 그 다음에 `kanban_complete` 를 부른다.** 순서를 바꾸면
+  이미 끝났다고 표시된 카드 뒤에 답을 쓰게 되고 그 답은 버려진다.
+- 실측 2026-08-14 (t_79e42ca4): 외국인 순매수 상위 10 종목 표를 만들고
+  investor_flow 로 10 종목을 전부 검증까지 해놓고, `kanban_complete` 를 요약
+  한 줄로 먼저 불러서 사용자 API 응답이 `result: null` 로 나갔다. 2 분 46 초와
+  도구 41 회가 통째로 버려졌다.
+- 답을 못 만들었으면 `result` 에 **왜 못 만들었는지**를 쓴다(빈 채로 done 하지
+  않는다). 막혔으면 `kanban_block` 이다 - done 과 blocked 를 섞지 않는다.
