@@ -30,7 +30,6 @@ try:
     from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -57,7 +56,6 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -416,18 +414,33 @@ def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object
     }
 
 
-@router.post(
-    "/ask",
-    operation_id="ceo_query",
-    status_code=202,
-    response_model=CeoQueryAcceptedResponse,
-    summary="CEO에게 새 분석을 요청한다",
-)
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
+
+    **이 함수는 `POST /ui/ceo/ask`의 유일한 구현이지만, 여기서는 route로
+    등록하지 않는다.** `apps.api.ceo_mirror_api.mirror_ask`가 이 함수를 그대로
+    감싸(dedup + Web/Discord 공용 event journal) 그 경로의 유일한 소유자로
+    등록한다.
+
+    ## 왜 여기서 `@router.post("/ask", ...)`를 안 붙이나
+
+    예전에는 이 모듈도 같은 경로에 `@router.post("/ask", ...)`를 붙였고, 실제
+    서비스에서는 `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 그 라우트를
+    항상 그림자로 덮었다(FastAPI는 같은 (path, method) 조합이 여러 라우터에
+    있으면 등록 순서가 먼저인 쪽이 이긴다). 그 결과 실제 요청은 항상 mirror의
+    자체 파싱 경로를 탔는데, mirror가 이 함수의 파라미터를 그대로 재사용하지
+    않고 `fund_id` 없는 별도 모델을 새로 만들어 넘겨서, Mandate 스냅샷이
+    항상 유실되는 사고가 났다(2026-08-14 AWS 실측) - 코드는 여기 있는데
+    실행되는 코드는 따로 있었던 것이다.
+
+    같은 경로를 두 라우터가 나눠 갖고 등록 순서로 승부하는 구조 자체가
+    위험하므로, 이제는 이 함수 하나만 존재하고 mirror가 그 함수를 감싸는
+    형태로 되돌린다 - "두 번째 구현"이 아예 존재할 수 없게 한다.
+    `tests/api/test_main_routes.py`가 실제 앱에 같은 (path, method) 조합이
+    두 번 이상 등록되면 실패하도록 고정한다.
 
     `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
     **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
