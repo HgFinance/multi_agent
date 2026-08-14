@@ -300,15 +300,14 @@ def comment_kanban_task(*, task_id: str, text: str) -> bool:
     cli_environment.setdefault(
         "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
     )
-    command = [
-        os.environ.get("HERMES_BIN", "hermes"),
-        "kanban",
-        "comment",
-        task_id,
-        text,
-        "--author",
-        "ai-office-bff",
-    ]
+    # `argv_for` 를 거쳐야 HERMES_EXEC_MODE=docker 가 지켜진다. 2026-08-14 실측:
+    # 여기서만 로컬 바이너리를 직접 불러 컨테이너(hermes 미설치)에서 항상 실패했고,
+    # /ui/ceo/ask 가 루트 카드를 만든 뒤 503 을 던져 **고아 루트만 쌓였다**
+    # (카드 생성은 argv_for 를 쓰므로 성공, 스코프 코멘트만 실패 = 입구가 반만 동작).
+    command = argv_for(
+        None,
+        ["kanban", "comment", task_id, text, "--author", "ai-office-bff"],
+    )
     try:
         proc = subprocess.run(
             command,
