@@ -79,7 +79,7 @@ from orchestration.canonical_profiles import (
 from orchestration.ceo_workflow_scope import (
     build_root_body,
     infer_workflow_mode,
-    selected_primary_profiles_from_body,
+    selected_primary_profiles_from_task,
 )
 
 
@@ -181,7 +181,7 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     qa_required = False
     synthesis_present = False
     children = _child_records(task.get("children"))
-    declared_primary = selected_primary_profiles_from_body(str(task.get("body") or ""))
+    declared_primary = selected_primary_profiles_from_task(task)
     if declared_primary:
         selected.extend(declared_primary)
     metadata = task.get("metadata")

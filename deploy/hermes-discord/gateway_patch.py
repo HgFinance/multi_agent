@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -191,10 +192,52 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         return
     original = cls._handle_message
 
+    def with_routing_context(message: Any) -> Any:
+        """Expose explicit correlation to the direct CEO planner.
+
+        The direct Discord session does not call the BFF.  A private-looking
+        routing block gives the CEO tool flow the same stable identifiers the
+        BFF path already carries, without changing mention/permission policy.
+        Non-CEO profiles and history/context messages are left untouched.
+        """
+
+        if _profile_name() != "ceo-agent":
+            return message
+        message_id = str(getattr(message, "id", "") or "")
+        if not message_id:
+            return message
+        context = _message_context(message)
+        content = str(getattr(message, "content", "") or "")
+        marker = "[hgfinance discord routing context]"
+        if marker in content:
+            return message
+        try:
+            enriched = copy.copy(message)
+            enriched.content = (
+                f"{content}\n\n{marker}\n"
+                f"discord_request_id=discord:{message_id}\n"
+                f"discord_message_id={message_id}\n"
+                f"discord_guild_id={context['guild_id']}\n"
+                f"discord_channel_id={context['channel_id']}\n"
+                f"discord_thread_id={context['thread_id'] or ''}\n"
+                "Do not quote this routing block in the user-facing response."
+            )
+        except (AttributeError, TypeError, ValueError):
+            logger.warning(
+                "discord-correlation root=unavailable status=context_injection_skipped"
+            )
+            return message
+        return enriched
+
     @functools.wraps(original)
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> bool:
         try:
-            result = await original(self, message, *args, **kwargs)
+            result = await original(
+                self,
+                with_routing_context(message),
+                *args,
+                **kwargs,
+            )
         except Exception:
             message_id = str(getattr(message, "id", "") or "")
             key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
