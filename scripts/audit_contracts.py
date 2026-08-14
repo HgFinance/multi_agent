@@ -146,13 +146,25 @@ def audit_runtime(f: Findings) -> None:
         f.fail("runtime", "dispatcher 프로세스 환경에 ANTHROPIC_API_KEY 가 없다 - "
                           "spawn 된 에이전트가 첫 호출에서 즉사한다")
 
-    # 공유 스킬을 쓰려면 프로필마다 external_dirs 가 있어야 한다.
+    # 프로필 config 가 **파싱되는가**. 깨지면 hermes 는 조용히 기본 설정으로
+    # 후퇴하고 모델·프로바이더·폴백 체인이 전부 무시된다 - 카드는 계속 돌지만
+    # 엉뚱한 설정으로 돈다(2026-08-14 실측: external_dirs 를 넣다가 옛 리스트
+    # 항목이 남아 매핑과 시퀀스가 섞여 6개 프로필이 동시에 깨졌다).
     for profile in sorted(CANONICAL_PROFILES):
         if profile not in runtime_profiles:
             continue
-        cfg = _docker(DISPATCHER, ["sh", "-c",
-                                   f"grep -c external_dirs /opt/data/profiles/{profile}/config.yaml"])
-        if cfg.strip() in {"", "0"}:
+        path = f"/opt/data/profiles/{profile}/config.yaml"
+        probe = (
+            "import yaml; "
+            "d = yaml.safe_load(open(%r, encoding='utf-8')); "
+            "print('OK' if isinstance(d, dict) else 'NOTDICT'); "
+            "print('EXT' if (d.get('skills') or {}).get('external_dirs') else 'NOEXT')"
+        ) % path
+        ok = _docker(DISPATCHER, ["python3", "-c", probe])
+        if "OK" not in ok:
+            f.fail("runtime", f"{profile}: config.yaml 이 파싱되지 않는다 - hermes 가 "
+                              "기본 설정으로 조용히 후퇴한다(모델·프로바이더 무시)")
+        elif "NOEXT" in ok:
             f.fail("runtime", f"{profile}: skills.external_dirs 없음 - "
                               "--skill 카드가 'Unknown skill(s)' 로 죽는다")
 
