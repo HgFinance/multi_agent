@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -102,23 +102,17 @@ def _message_id_from_request_id(request_id: str | None) -> str | None:
     return None
 
 
-def _profile_home(env: Mapping[str, str], profile: str) -> Path:
-    home = Path(env.get("HERMES_HOME", "/opt/data"))
-    profile_home = home / "profiles" / profile
-    return profile_home if profile_home.is_dir() else home
-
-
 def _token_from_env(env: Mapping[str, str], profile: str) -> str | None:
     token = env.get("DISCORD_BOT_TOKEN")
     if token:
         return token.strip()
     home = Path(env.get("HERMES_HOME", "/opt/data"))
     for env_path in (home / ".env", home / "profiles" / profile / ".env"):
-    try:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            key, separator, value = line.partition("=")
-            if separator and key.strip() == "DISCORD_BOT_TOKEN":
-                return value.strip().strip('"').strip("'") or None
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key.strip() == "DISCORD_BOT_TOKEN":
+                    return value.strip().strip('"').strip("'") or None
         except OSError:
             continue
     return None
@@ -198,13 +192,6 @@ class DiscordFinalDelivery:
             if inbound_key
             else canonical_discord_dedup_key(guild_id, channel_id, message_id)
         )
-        if not channel_id:
-            logger.warning(
-                "discord-final-delivery root=%s status=missing_context",
-                root_task_id,
-            )
-            return "missing_context"
-
         response_key = f"{dedup_key}:final"
         try:
             claim = store.claim_outbound(
@@ -227,7 +214,7 @@ class DiscordFinalDelivery:
             )
             return "deduped"
 
-        token = _token_from_env(self.environment)
+        token = _token_from_env(self.environment, profile)
         if not token:
             store.mark_outbound(response_key, "FAILED", profile)
             logger.error(
