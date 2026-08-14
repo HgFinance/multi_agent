@@ -108,6 +108,31 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(result, "missing_context")
             self.assertEqual(sent, [])
 
+    def test_message_id_reuses_existing_inbound_channel_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_inbound(directory)
+            sent: list[dict[str, object]] = []
+
+            def sender(
+                channel: str,
+                payload: str,
+                _headers: dict[str, str],
+            ) -> dict[str, object]:
+                sent.append({"channel": channel, "payload": json.loads(payload)})
+                return {"id": "response-message"}
+
+            result = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+            ).deliver(
+                root_task_id="root",
+                synthesis_task={"body": "discord_message_id=message"},
+                content="CEO final answer",
+                store=store,
+            )
+            self.assertEqual(result, "sent")
+            self.assertEqual(sent[0]["channel"], "channel")
+
 
 if __name__ == "__main__":
     unittest.main()

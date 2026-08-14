@@ -1086,15 +1086,23 @@ class CeoSupervisorService:
                 )
                 delivery_task = dict(task)
                 delivery_task["root_task"] = root_payload
+                delivery_environment = getattr(self.client, "environment", os.environ)
+                hermes_home = delivery_environment.get("HERMES_HOME", "/opt/data")
+                ceo_profile_home = os.path.join(
+                    hermes_home,
+                    "profiles",
+                    canonical_profile_for_department("ceo"),
+                )
+                delivery_home = (
+                    ceo_profile_home
+                    if os.path.isdir(ceo_profile_home)
+                    else hermes_home
+                )
                 self.discord_delivery.deliver(
                     root_task_id=root_task_id,
                     synthesis_task=delivery_task,
                     content=content,
-                    store=DiscordIdempotencyStore(
-                        self.client.environment.get("HERMES_HOME", "/opt/data")
-                        if hasattr(self.client, "environment")
-                        else os.environ.get("HERMES_HOME", "/opt/data")
-                    ),
+                    store=DiscordIdempotencyStore(delivery_home),
                     profile=canonical_profile_for_department("ceo"),
                 )
 
