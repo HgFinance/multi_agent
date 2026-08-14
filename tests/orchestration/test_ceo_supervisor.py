@@ -575,6 +575,43 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertNotIn("qa", decision.parent_task_ids)
 
+    def test_analysis_synthesis_includes_terminal_blocked_primary(self) -> None:
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        body = "workflow_root_task_id=root\nworkflow_role=primary"
+        children = tuple(
+            child(
+                profile.split("-")[0],
+                profile,
+                "blocked" if profile == "accounting-portfolio-department" else "done",
+                body=body,
+                block_reason=(
+                    "financial statement unavailable"
+                    if profile == "accounting-portfolio-department"
+                    else ""
+                ),
+            )
+            for profile in selected
+        )
+
+        decision = decide_supervisor(
+            SupervisorState(
+                "root",
+                children,
+                qa_required=False,
+                selected_primary_profiles=selected,
+            )
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, tuple(item.task_id for item in children))
+        self.assertIn("financial statement unavailable", decision.body)
+
     def test_four_selected_primary_parents_exclude_unmarked_duplicates(self) -> None:
         selected = (
             "research-department",
@@ -767,6 +804,63 @@ class FakeClient:
 
 
 class SupervisorWakeupTest(unittest.TestCase):
+    def test_startup_reconciliation_recovers_direct_root_and_blocked_primary(self) -> None:
+        class ExistingRootClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                selected = (
+                    "research-department",
+                    "quant-backtest-department",
+                    "risk-management",
+                    "accounting-portfolio-department",
+                )
+                self.root_body = (
+                    "hgfinance.ceo-workflow-scope.v1\n"
+                    "workflow_role=planning\n"
+                    "producer=ceo-hermes-direct\n"
+                    "request_class=non-binding advisory analysis\n"
+                    "selected_primary_profiles="
+                    + ",".join(selected)
+                )
+                self.payloads = [
+                    {
+                        "id": f"{profile}-task",
+                        "assignee": profile,
+                        "status": "blocked" if profile.endswith("portfolio-department") else "done",
+                        "summary": profile,
+                        "block_reason": "data gap"
+                        if profile.endswith("portfolio-department")
+                        else "",
+                        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+                    }
+                    for profile in selected
+                ]
+
+            def list_tasks(self):
+                return ({"id": "root", "status": "done", "body": self.root_body},)
+
+            def show(self, task_id: str):
+                payload = super().show(task_id)
+                if task_id == "root":
+                    payload.update(status="done", body=self.root_body)
+                return payload
+
+        client = ExistingRootClient()
+        decisions = CeoSupervisorService(client).reconcile_existing_workflows()
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].action, SupervisorAction.RUN_QA)
+        self.assertEqual([item["assignee"] for item in client.created], ["qa-department", "ceo-agent"])
+        self.assertEqual(
+            set(client.created[1]["parent_task_ids"]),
+            {
+                "research-department-task",
+                "quant-backtest-department-task",
+                "risk-management-task",
+                "accounting-portfolio-department-task",
+            },
+        )
+
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
         service = CeoSupervisorService(client)
@@ -943,6 +1037,15 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
         self.assertEqual(workflow_mode_from_body(build_root_body("q", "r")), "analysis")
         self.assertEqual(workflow_mode_from_body("hgfinance.ceo-workflow-scope.v1"), "binding")
+
+    def test_direct_non_binding_root_without_workflow_mode_is_analysis(self) -> None:
+        body = (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "workflow_role=planning\n"
+            "request_class=non-binding advisory analysis\n"
+            "selected_primary_profiles=research-department"
+        )
+        self.assertEqual(workflow_mode_from_body(body), "analysis")
 
     def test_invalid_workflow_mode_aborts_only_current_workflow(self) -> None:
         client = FakeClient()

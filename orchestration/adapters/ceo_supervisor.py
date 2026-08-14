@@ -40,6 +40,7 @@ from orchestration.canonical_profiles import (
 from orchestration.discord_delivery import DiscordFinalDelivery
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
+    CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
     build_scoped_task_body,
     extract_scope_references,
@@ -471,7 +472,7 @@ def _analysis_synthesis_decision(
         return None
 
     primary_ids = tuple(
-        child.task_id for child in state.analysis_children if child.done
+        child.task_id for child in state.analysis_children if child.terminal
     )
     if not primary_ids:
         return None
@@ -484,7 +485,8 @@ def _analysis_synthesis_decision(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\n"
             "governance_plane=async_qa\n"
-            "Synthesize completed primary department work. QA runs independently "
+            "Synthesize available primary department work, including terminal "
+            "blocked results. QA runs independently "
             "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
@@ -565,6 +567,11 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         if not child.terminal:
             continue
         if child.blocked:
+            if state.workflow_mode == "analysis" and state.selected_primary_profiles:
+                # A blocked selected primary is terminal for ordinary analysis.
+                # Preserve its block_reason in the synthesis payload instead of
+                # waiting forever or turning an advisory workflow into a gate.
+                continue
             return _blocked_decision(state, child)
         if child.failed:
             if child.retry_count < state.max_retries:
@@ -584,7 +591,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
-    primary_ids = tuple(child.task_id for child in state.analysis_children if child.done)
+    primary_ids = tuple(child.task_id for child in state.analysis_children if child.terminal)
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
@@ -1148,6 +1155,76 @@ class CeoSupervisorService:
                     profile=canonical_profile_for_department("ceo"),
                 )
 
+    def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
+        """Reconcile terminal roots whose watch event was missed.
+
+        The supervisor is normally event-driven, but a restart cannot replay
+        terminal events that happened before ``kanban watch`` subscribed. A
+        narrow startup reconciliation covers only completed planning roots
+        with a durable primary selection and at least one terminal primary.
+        It reuses ``handle_terminal_event`` so the normal scope validation,
+        idempotency comments, and action guards remain authoritative.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+        if not callable(list_tasks) or not callable(show):
+            return ()
+
+        roots: dict[str, Mapping[str, Any]] = {}
+        for row in list_tasks():
+            task_id = str(row.get("id") or row.get("task_id") or "")
+            body = str(row.get("body") or "")
+            role = terminal_workflow_role(row) or ""
+            if (
+                not task_id
+                or CEO_WORKFLOW_SCOPE_MARKER not in body
+                or role not in {"planning", "scope_and_planning"}
+            ):
+                continue
+            roots[task_id] = row
+
+        decisions: list[SupervisorDecision] = []
+        for root_id in sorted(roots):
+            root_payload = show(root_id)
+            root_status = str(root_payload.get("status") or "").casefold()
+            if root_status not in {"done", "completed", "archived"}:
+                continue
+            if not selected_primary_profiles_from_task(root_payload):
+                continue
+
+            _, payloads = self.client.workflow(root_id)
+            children = tuple(
+                ChildTaskState.from_hermes(payload)
+                for payload in payloads
+                if payload.get("assignee") is not None
+            )
+            terminal_primary = tuple(
+                child
+                for child in children
+                if child.is_in_workflow(root_id)
+                and child.is_analysis
+                and child.terminal
+            )
+            if not terminal_primary:
+                continue
+
+            wake_child = next(
+                (child for child in terminal_primary if child.done),
+                terminal_primary[0],
+            )
+            event = {
+                "event_id": (
+                    f"reconcile:{root_id}:{wake_child.task_id}:{wake_child.status}"
+                ),
+                "task_id": wake_child.task_id,
+                "kind": "blocked" if wake_child.blocked else "completed",
+            }
+            decision = self.handle_terminal_event(event)
+            if decision is not None:
+                decisions.append(decision)
+        return tuple(decisions)
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
@@ -1481,7 +1558,11 @@ class CeoSupervisorService:
                     )
             elif decision.action == SupervisorAction.SYNTHESIZE:
                 expected = (
-                    {child.task_id for child in state.analysis_children if child.done}
+                    {
+                        child.task_id
+                        for child in state.analysis_children
+                        if child.terminal
+                    }
                     if state.workflow_mode == "analysis"
                     else {child.task_id for child in state.qa_children if child.done}
                 )

@@ -397,9 +397,19 @@ def infer_workflow_mode(query: str) -> str:
 
 def workflow_mode_from_body(body: str) -> str:
     """Read the explicit workflow mode, preserving the legacy gate."""
-    match = re.search(r"(?m)^workflow_mode=(\S+)\s*$", str(body or ""))
+    text = str(body or "")
+    match = re.search(r"(?m)^workflow_mode=(\S+)\s*$", text)
     if not match:
-        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in str(body or "") else "analysis"
+        # Direct Discord producers may predate ``workflow_mode=`` while still
+        # declaring the request class.  An explicit non-binding/advisory
+        # request must not fall into the legacy binding fallback merely
+        # because it carries the workflow scope marker.
+        request_class = re.search(r"(?mi)^request_class=(.+?)\s*$", text)
+        if request_class:
+            request_class_text = request_class.group(1).casefold()
+            if "non-binding" in request_class_text or "advisory" in request_class_text:
+                return "analysis"
+        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in text else "analysis"
     mode = match.group(1).casefold()
     if mode not in WORKFLOW_MODES:
         raise WorkflowScopeViolation(f"unknown workflow_mode: {mode}")

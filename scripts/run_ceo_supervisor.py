@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
     HermesKanbanClient,
+    HermesKanbanCommandError,
     SupervisorWorkflowError,
 )
 from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
@@ -155,6 +156,17 @@ def main() -> int:
         discord_delivery=DiscordFinalDelivery(environment=environment),
     )
     try:
+        try:
+            for decision in service.reconcile_existing_workflows():
+                print(
+                    f"ceo-supervisor reconcile action={decision.action.value} "
+                    f"parent={decision.parent_task_id} reason={decision.reason}",
+                    flush=True,
+                )
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            # Reconciliation is a recovery aid; a transient read/projection
+            # failure must not prevent the normal watch loop from starting.
+            print(f"ceo-supervisor reconcile-error={exc}", file=sys.stderr, flush=True)
         for event in watch_events(
             executable=client.executable,
             interval=args.interval,
