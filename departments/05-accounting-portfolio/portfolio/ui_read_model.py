@@ -60,6 +60,20 @@ def _portfolio(snapshot: PortfolioSnapshot) -> dict:
         "unrealized_pnl": _d(snapshot.unrealized_pnl),
         "fees": _d(snapshot.fees),
         "taxes": _d(snapshot.taxes),
+        "allocation": [
+            {
+                "key": "cash",
+                "label": "현금",
+                "value": _d(snapshot.cash),
+                "weight": _d(snapshot.cash / nav) if nav > 0 else None,
+            },
+            {
+                "key": "securities",
+                "label": "유가증권",
+                "value": _d(snapshot.securities_value),
+                "weight": _d(snapshot.securities_value / nav) if nav > 0 else None,
+            },
+        ],
         "positions": [
             {
                 "instrument_id": str(p.instrument_id),
@@ -242,6 +256,7 @@ if __name__ == "__main__":
     # 2. 금액은 전부 문자열이다. JSON number로 나가면 Decimal이 깨진다
     raw = json.dumps(doc, ensure_ascii=False)
     assert isinstance(doc["portfolio"]["nav"], str)
+    assert {item["key"] for item in doc["portfolio"]["allocation"]} == {"cash", "securities"}
     for pos in doc["portfolio"]["positions"]:
         for field in ("quantity", "average_cost", "mark_price", "market_value"):
             assert isinstance(pos[field], str), f"{field}가 문자열이 아니다"

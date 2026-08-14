@@ -245,6 +245,22 @@ class LedgerRepository:
             rows = cur.fetchall()
         return (rows[0][0], rows[0][1]) if len(rows) == 1 else None
 
+    def book_for_fund(self, fund_id: UUID) -> UUID | None:
+        """Resolve one active Book for a selected Fund, failing closed on ambiguity."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                select book_id
+                  from accounting.books
+                 where fund_id = %s and status = 'ACTIVE'
+                 order by book_id
+                 limit 2
+                """,
+                (fund_id,),
+            )
+            rows = cur.fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
     def fund_of_book(self, book_id: UUID) -> UUID | None:
         """book_id 하나로 Fund가 정해진다. 그래서 ledger_id == book_id로 쓴다."""
         with self.cursor() as cur:

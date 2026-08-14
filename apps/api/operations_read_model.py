@@ -116,7 +116,7 @@ def _department_rows() -> list[dict[str, Any]]:
             {
                 **item,
                 "status": "OFFLINE",
-                "status_reason": "Kanban Status Bridge와 runtime heartbeat가 BFF에 연결되지 않았습니다.",
+                "status_reason": "실시간 agent.status.v1 또는 portfolio runtime event가 없어 Registry 기준으로 표시합니다.",
                 "runtime_observed": False,
                 "head_persona": agent.get("head_persona"),
                 "head_provider": model.get("provider"),

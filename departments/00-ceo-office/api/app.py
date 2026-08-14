@@ -1236,17 +1236,29 @@ def get_mandate_current(mandate_id: str):
     "/governance/v1/mandates/by-fund/{fund_id}/current",
     dependencies=[Depends(_require_internal_auth)],
 )
-def get_mandate_current_by_fund(fund_id: str):
+def get_mandate_current_by_fund(
+    fund_id: str,
+    owner_user_id: str | None = None,
+):
     """Resolve a Fund to exactly one Mandate without choosing arbitrarily.
 
     ``mandate_ids_for_fund`` is supplied by the canonical repository.  The
     explicit 503 fallback keeps older prototype repositories fail-closed
     instead of silently returning a stale or guessed Mandate.
     """
-    lookup = getattr(_mandate_repo, "mandate_ids_for_fund", None)
+    lookup_name = (
+        "mandate_ids_for_fund_owner"
+        if owner_user_id
+        else "mandate_ids_for_fund"
+    )
+    lookup = getattr(_mandate_repo, lookup_name, None)
     if not callable(lookup):
         raise HTTPException(status_code=503, detail="mandate_fund_lookup_unavailable")
-    mandate_ids = lookup(fund_id)
+    mandate_ids = (
+        lookup(fund_id, owner_user_id)
+        if owner_user_id
+        else lookup(fund_id)
+    )
     if not mandate_ids:
         raise HTTPException(
             status_code=404,
@@ -1963,6 +1975,17 @@ if __name__ == "__main__":
     _mandate_repo.set_fund_id("m1", "f1")
     r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
     assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    _mandate_repo.set_owner_user_id("m1", "u1")
+    r5_owner = client.get(
+        "/governance/v1/mandates/by-fund/f1/current",
+        params={"owner_user_id": "u1"},
+    )
+    assert r5_owner.status_code == 200 and r5_owner.json()["mandate_id"] == "m1", r5_owner.text
+    r5_other_owner = client.get(
+        "/governance/v1/mandates/by-fund/f1/current",
+        params={"owner_user_id": "u2"},
+    )
+    assert r5_other_owner.status_code == 404, r5_other_owner.text
     r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
     assert r5d.status_code == 404, r5d.text
     _mandate_repo.set_fund_id("m1b", "f1")

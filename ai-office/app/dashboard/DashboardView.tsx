@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
+import PortfolioSnapshotPanel from "../components/PortfolioSnapshotPanel";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
 import { CeoControlRoomChat } from "./CeoControlRoomChat";
 import { PanelBar } from "./PanelBar";
@@ -173,6 +174,8 @@ export default function DashboardView() {
 
           </section>
         </div>
+
+        <PortfolioSnapshotPanel />
 
         {/* ── 오늘 업무 요약 ────────────────────────────── */}
         <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4" aria-label="오늘 업무 요약">

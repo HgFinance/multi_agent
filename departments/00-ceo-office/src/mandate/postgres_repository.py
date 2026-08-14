@@ -339,6 +339,27 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def mandate_ids_for_fund_owner(
+        self, fund_id: str, owner_user_id: str
+    ) -> list[str]:
+        """Return Mandates scoped to the selected Fund and Mandate owner."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select mandate_id
+                      from governance.mandates
+                     where fund_id = %s and owner_user_id = %s
+                    """,
+                    (fund_id, owner_user_id),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [str(row[0]) for row in rows]
+        finally:
+            self._pool.putconn(conn)
+
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 
     def insert(self, row: MandateVersionRow) -> None:
