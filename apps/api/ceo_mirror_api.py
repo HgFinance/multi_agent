@@ -23,8 +23,8 @@ try:
         publish_mirror_event,
         stable_event_id,
     )
+    from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
-    from .hermes_boundary import AgentAsk
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -39,8 +39,8 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         publish_mirror_event,
         stable_event_id,
     )
+    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
-    from hermes_boundary import AgentAsk  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -55,7 +55,13 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     except ImportError:  # pragma: no cover
         import ceo  # type: ignore[no-redef]
 
-    return ceo.ceo_query(AgentAsk(query=request.query, request_id=request.request_id))
+    return ceo.ceo_query(
+        CeoAsk(
+            query=request.query,
+            request_id=request.request_id,
+            fund_id=request.fund_id,
+        )
+    )
 
 
 def _execute(request: CanonicalIngress):
@@ -153,7 +159,7 @@ def _publish_workflow_projection(request_id: str) -> None:
     response_model=CeoQueryAcceptedResponse,
 )
 def mirror_ask(
-    request: AgentAsk,
+    request: CeoAsk,
     x_source_message_id: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -166,6 +172,7 @@ def mirror_ask(
         source_message_id=x_source_message_id or request.request_id,
         actor_id=x_actor_id or "web-user",
         actor_type="user",
+        fund_id=request.fund_id,
     )
     execution = _execute(canonical)
     if execution.response is None:

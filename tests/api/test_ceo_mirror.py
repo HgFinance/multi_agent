@@ -175,6 +175,57 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(events[3].event_type, "CEO_FINAL")
         self.assertEqual(events[4].event_type, "QA_RESULT")
 
+    def test_mirror_ask_forwards_fund_id_to_ceo_query(self) -> None:
+        """`/ui/ceo/ask`가 실제로 처리되는 곳은 여기다 - `ceo_router`가 아니라
+        `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 같은 경로를 가로챈다.
+
+        `mirror_ask`가 `fund_id` 없는 `AgentAsk`로 요청을 받아 새 `AgentAsk`를
+        만들어 `ceo.ceo_query`에 넘기면, 프론트가 `fund_id`를 정확히 보내도
+        Mandate 조회가 항상 스킵된다 - 2026-08-14 AWS에서 실측된 회귀다.
+        """
+
+        from apps.api.ceo import CeoAsk
+
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(req: CeoAsk) -> dict[str, object]:
+            captured.append(req)
+            return {"task_id": "t_mandate", "status": "accepted"}
+
+        with patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query):
+            response = ceo_mirror_api.mirror_ask(
+                CeoAsk(
+                    query="mandate 인식 확인",
+                    request_id="request-fund-1",
+                    fund_id="fund-abc",
+                ),
+                x_source_message_id=None,
+                x_actor_id=None,
+            )
+
+        self.assertEqual(response["task_id"], "t_mandate")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].fund_id, "fund-abc")
+
+    def test_mirror_ask_without_fund_id_still_works(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(req: CeoAsk) -> dict[str, object]:
+            captured.append(req)
+            return {"task_id": "t_no_fund", "status": "accepted"}
+
+        with patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query):
+            response = ceo_mirror_api.mirror_ask(
+                CeoAsk(query="fund 없는 질의", request_id="request-no-fund-1"),
+                x_source_message_id=None,
+                x_actor_id=None,
+            )
+
+        self.assertEqual(response["task_id"], "t_no_fund")
+        self.assertIsNone(captured[0].fund_id)
+
     def test_web_and_discord_views_read_the_same_ceo_final(self) -> None:
         request = CanonicalIngress(
             query="shared result",
