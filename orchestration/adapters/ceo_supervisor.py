@@ -133,6 +133,34 @@ def _ids(values: Any) -> tuple[str, ...]:
     return tuple(task_id for item in values if (task_id := _child_id(item)))
 
 
+def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]:
+    """Hand a finished child to QA/synthesis **with its answer body**.
+
+    요약만 넘기면 뒤 단계가 원문을 못 본다 - QA 는 인용을 검증할 대상이 없고
+    (본 적 없는 문장을 통과시키게 된다), 종합은 표·수치를 다시 만들 수 없어
+    사용자 응답이 요약 한 줄로 쪼그라든다. 실측 2026-08-14 t_79e42ca4.
+
+    본문이 비어 있으면 그 사실을 명시한다 - 없는 것을 요약으로 때우면
+    "답이 있었는데 사라진 것"과 "애초에 못 만든 것"이 구분되지 않는다.
+    """
+
+    payload: dict[str, Any] = {
+        "task_id": child.task_id,
+        "summary": child.summary,
+        "result": child.result,
+        "error": child.error,
+        "block_reason": child.block_reason,
+    }
+    if child.terminal and not child.result.strip():
+        payload["answer_body_missing"] = True
+        payload["answer_body_missing_note"] = (
+            "이 부서 카드는 result(답변 본문) 없이 종료됐다. 요약만으로 본문을 "
+            "복원하지 말고, 근거가 없는 수치·목록은 만들지 마라."
+        )
+    payload.update(extra)
+    return payload
+
+
 @dataclass(frozen=True)
 class ChildTaskState:
     """Relevant, read-only task projection used by the supervisor."""
@@ -141,6 +169,10 @@ class ChildTaskState:
     profile: str
     status: str
     summary: str = ""
+    # 부서가 낸 **답변 본문**. summary 와 따로 든다 - 실측 2026-08-14: 창구가
+    # 외국인 순매수 상위 10 표를 만들어 놓고 kanban_complete 에는 요약 한 줄만
+    # 넣어, QA 도 종합도 표를 못 보고 사용자 응답이 result:null 로 나갔다.
+    result: str = ""
     error: str = ""
     block_reason: str = ""
     block_kind: str = ""
@@ -156,6 +188,7 @@ class ChildTaskState:
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
         summary = _text(payload.get("summary") or latest or payload.get("result"))
+        result = _text(payload.get("result"))
         error = _text(payload.get("error") or payload.get("last_error"))
         block_reason = _text(
             payload.get("block_reason")
@@ -189,6 +222,7 @@ class ChildTaskState:
             profile=profile,
             status=status,
             summary=summary,
+            result=result,
             error=error,
             block_reason=block_reason,
             block_kind=block_kind,
@@ -436,14 +470,9 @@ def _analysis_synthesis_decision(
             "Synthesize completed primary department work; QA may still be running.\n"
             + json.dumps(
                 [
-                    {
-                        "task_id": child.task_id,
-                        "profile": child.profile,
-                        "status": child.status,
-                        "summary": child.summary,
-                        "error": child.error,
-                        "block_reason": child.block_reason,
-                    }
+                    child_handoff_payload(
+                        child, profile=child.profile, status=child.status
+                    )
                     for child in state.analysis_children
                 ],
                 ensure_ascii=False,
@@ -550,14 +579,14 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     "feedback_consumer=hr-department\n"
                     "store_reasoning_trace=false\n"
                     + json.dumps(
-                        [{
-                            "task_id": child.task_id,
-                            "department": child.department,
-                            "actor_type": "department_head",
-                            "summary": child.summary,
-                            "error": child.error,
-                            "block_reason": child.block_reason,
-                        } for child in state.analysis_children],
+                        [
+                            child_handoff_payload(
+                                child,
+                                department=child.department,
+                                actor_type="department_head",
+                            )
+                            for child in state.analysis_children
+                        ],
                         ensure_ascii=False,
                     )
                 ),
@@ -583,7 +612,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     " reject unsupported claims, and report blocked findings.\n"
                     + json.dumps(
                         [
-                            {"task_id": child.task_id, "summary": child.summary}
+                            child_handoff_payload(child)
                             for child in state.analysis_children
                         ],
                         ensure_ascii=False,

@@ -38,6 +38,7 @@ def child(
     block_reason: str = "",
     retry_count: int = 0,
     summary: str = "summary",
+    result: str = "",
 ) -> ChildTaskState:
     if "workflow_root_task_id=" not in body:
         body = f"workflow_root_task_id=root\n{body}" if body else "workflow_root_task_id=root"
@@ -53,7 +54,41 @@ def child(
         block_reason=block_reason,
         retry_count=retry_count,
         summary=summary,
+        result=result,
     )
+
+
+class AnswerBodyHandoffTest(unittest.TestCase):
+    """부서가 만든 답변 본문이 QA·종합까지 살아서 가는지 고정한다.
+
+    회귀 근거(2026-08-14 실측): 창구가 외국인 순매수 상위 10 표를 만들었는데
+    QA·종합 카드에 summary 한 줄만 실려 사용자 응답이 result:null 로 나갔다.
+    """
+
+    ANSWER = "| 1 | SK하이닉스 | 000660 | 649,842주 |"
+
+    def _bodies_for(self, **child_kwargs: str) -> list[str]:
+        bodies = []
+        for role_body in ("workflow_role=primary", ""):
+            state = SupervisorState(
+                "root",
+                (child("r", "research-department", "done", body=role_body,
+                       **child_kwargs),),
+            )
+            decision = decide_supervisor(state)
+            self.assertIsNotNone(decision)
+            bodies.append(decision.body or "")
+        return bodies
+
+    def test_answer_body_reaches_downstream_cards(self) -> None:
+        for body in self._bodies_for(result=self.ANSWER):
+            self.assertIn("SK하이닉스", body)
+            self.assertNotIn("answer_body_missing", body)
+
+    def test_missing_answer_body_is_flagged_not_papered_over(self) -> None:
+        # 요약만 있고 본문이 없으면 그 사실이 그대로 보여야 한다.
+        for body in self._bodies_for(result=""):
+            self.assertIn("answer_body_missing", body)
 
 
 class SupervisorPolicyTest(unittest.TestCase):
