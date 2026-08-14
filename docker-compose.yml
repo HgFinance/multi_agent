@@ -725,7 +725,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -762,7 +767,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -935,7 +945,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -963,7 +978,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -1121,7 +1141,12 @@ services:
     user: "1000:1000"
     volumes:
       - /home/ubuntu/.hermes:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       # ▶ **에이전트는 여기서 뜬다 - 저장소가 보여야 한다** (2026-08-12 실측)
       #   이 두 줄이 override 에만 있어서 로컬에서만 보이고 AWS 에서는 안 보였다.
       #   그러면 같은 카드가 환경에 따라 다른 판정을 낸다 - 실제로 에이전트가
