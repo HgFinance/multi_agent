@@ -32,7 +32,7 @@ export default function OfficeControls({
 
   return (
     <>
-      {/* 우측 레일이 붙으면 좌측이 좁아진다. 텍스트가 줄어들게 두고 시계는 안 밀리게 한다. */}
+      {/* 상단 전체 폭을 쓴다. 화면이 좁아지면 텍스트가 줄어들게 두고 시계는 안 밀리게 한다. */}
       <header className="flex justify-between items-start gap-gutter mb-gutter">
         <div className="flex-1 min-w-0">
           <p className="text-label-md font-label-md text-secondary uppercase">
