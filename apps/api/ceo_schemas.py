@@ -146,6 +146,8 @@ class TaskListItem(BaseModel):
     status: WorkflowStatus
     created_at: str | None = None
     selected_departments: list[str] = Field(default_factory=list)
+    # root body의 `requested_by=` 줄. 옛 Root는 이 줄이 없어 None("계정 불명")이다.
+    owner_id: str | None = None
 
 
 class TaskListResponse(BaseModel):

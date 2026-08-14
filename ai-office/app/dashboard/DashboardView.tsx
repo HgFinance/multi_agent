@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
-import { askCeo, ceoProgress, type CardOutcome, type CeoQueryProgress, type CeoQueryResult } from "../lib/ceoClient";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
+import { CeoControlRoomChat } from "./CeoControlRoomChat";
+import { PanelBar } from "./PanelBar";
 
 /**
  * 대표 Dashboard.
@@ -30,42 +31,11 @@ function usePageHost(): string {
   );
 }
 
-const QUICK_QUESTIONS = [
-  "오늘 전체 업무 현황을 요약해줘",
-  "지금 막혀 있는 업무와 이유를 알려줘",
-  "리서치팀의 최신 진행 상황을 브리핑해줘",
-];
-
 /** 결과물 창고 표본. 실제 산출물 저장소가 붙기 전까지의 예시 행이다. */
 const RECENT_OUTPUTS = [
   { name: "이번 주 콘텐츠 캘린더 정리", team: "기획 1팀", status: "최종 완료" },
   { name: "브랜드 템플릿 세팅", team: "이미지 제작팀", status: "최종 완료" },
 ];
-
-/** 카드 결말별 표시. 보드의 status가 아니라 "답이 됐는가" 기준이다.
- *  특히 NO_ANSWER는 보드에서 done으로 보이는 카드라 성공으로 읽으면 안 된다. */
-const OUTCOME_VIEW: Record<CardOutcome, { label: string; tone: string }> = {
-  QUEUED: { label: "대기", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-  RUNNING: { label: "진행 중", tone: "border-primary/30 bg-secondary-container text-primary" },
-  ANSWERED: { label: "답변 완료", tone: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant" },
-  NO_ANSWER: { label: "결과 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
-  BLOCKED: { label: "막힘", tone: "border-error/40 bg-error-container text-on-error-container" },
-  FAILED: { label: "실패", tone: "border-error/40 bg-error-container text-on-error-container" },
-  STALE: { label: "정체", tone: "border-error/40 bg-error-container text-on-error-container" },
-  NO_ASSIGNEE: { label: "담당 없음", tone: "border-error/40 bg-error-container text-on-error-container" },
-};
-
-function PanelBar({ icon, title, children }: { icon: string; title: string; children?: React.ReactNode }) {
-  return (
-    <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
-      <span className="flex items-center gap-2 text-label-md font-label-md text-on-surface-variant">
-        <span className="material-symbols-outlined text-[16px]" aria-hidden="true">{icon}</span>
-        {title}
-      </span>
-      {children}
-    </div>
-  );
-}
 
 export default function DashboardView() {
   // ponytail: 라우트가 달라 AI Office의 엔진과 상태를 공유하지 않는다. 지금은
@@ -73,11 +43,6 @@ export default function DashboardView() {
   // 가로지르는 store가 먼저 필요하다.
   const stats = useMemo(() => new Company().snapshot().stats, []);
 
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [result, setResult] = useState<CeoQueryResult | null>(null);
-  const [progress, setProgress] = useState<CeoQueryProgress | null>(null);
   const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">("loading");
 
   const pageHost = usePageHost();
@@ -85,42 +50,11 @@ export default function DashboardView() {
   // 주소 자체가 잘못된 경우와 못 불러온 경우를 같은 안내로 묶는다.
   const kanbanFailed = !kanbanUrl || kanbanState === "error";
 
-  const rootTaskId = result?.task_id ?? null;
-
-  // 뿌리 카드가 생기면 종료될 때까지 본부별 진행을 따라간다. 처음엔 1초, 한 번
-  // 받은 뒤에는 15초 — Task 하나 완료까지 수십 초~분 단위라 그보다 촘촘히
-  // 돌 필요가 없다(2026-08-13, 5초에서 늘림).
-  useEffect(() => {
-    if (!rootTaskId || progress?.all_terminal) return undefined;
-    const timer = window.setTimeout(() => {
-      ceoProgress(rootTaskId)
-        .then(setProgress)
-        .catch(() => undefined);
-    }, progress ? 15000 : 1000);
-    return () => window.clearTimeout(timer);
-  }, [rootTaskId, progress]);
   useEffect(() => {
     if (!kanbanUrl || kanbanState !== "loading") return undefined;
     const timer = window.setTimeout(() => setKanbanState("error"), 8000);
     return () => window.clearTimeout(timer);
   }, [kanbanState, kanbanUrl]);
-
-  async function send(text: string) {
-    const value = text.trim();
-    if (!value || busy) return;
-    setDraft("");
-    setError("");
-    setBusy(true);
-    setProgress(null);
-    try {
-      setResult(await askCeo(value));
-    } catch (cause) {
-      setResult(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const metrics = [
     { label: "LangGraph Worker", value: STAFF.length, cap: "WORKERS", lead: true },
@@ -151,168 +85,7 @@ export default function DashboardView() {
 
         {/* ── CEO Control Room / Hermes Kanban ──────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
-          <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm">
-            <PanelBar icon="terminal" title="CEO Control Room">
-              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-                Hermes endpoint
-              </span>
-            </PanelBar>
-
-            <div className="p-6">
-              <div className="flex justify-between items-center gap-2 mb-4">
-                <span className="text-label-md font-label-md text-on-surface-variant uppercase">Ask The Office</span>
-                <span className="text-xs bg-surface-container px-2 py-1 rounded border border-outline-variant text-on-surface-variant shrink-0">
-                  ⌘ /Ctrl ↵ 전송
-                </span>
-              </div>
-
-              <h2 className="text-headline-md font-headline-md text-primary mb-2">
-                무엇을
-                <br />
-                확인할까요?
-              </h2>
-              <p className="text-body-sm font-body-sm text-on-surface-variant mb-6">
-                자연어로 질문하면 CEO Hermes가 업무를 만들고, 결과는 Kanban에서 추적됩니다.
-              </p>
-
-              {/* 자주 쓰는 질의를 먼저 둔다. 아래 입력창은 그 밖의 상세 요청용이다. */}
-              <div className="mb-6">
-                <span className="block text-label-md font-label-md text-on-surface-variant mb-2">빠른 질문</span>
-                <div className="flex flex-col items-stretch gap-2">
-                  {QUICK_QUESTIONS.map((question) => (
-                    <button
-                      key={question}
-                      type="button"
-                      onClick={() => void send(question)}
-                      disabled={busy}
-                      className="px-3 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant hover:bg-surface-container hover:border-primary transition-colors disabled:opacity-40 text-left"
-                    >
-                      {question}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <label className="block">
-                <span className="block text-label-md font-label-md text-primary mb-2">대표님 질의</span>
-                <textarea
-                  value={draft}
-                  maxLength={2000}
-                  rows={4}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                      event.preventDefault();
-                      void send(draft);
-                    }
-                  }}
-                  placeholder="예: 오늘 리스크가 큰 업무만 먼저 브리핑해줘"
-                  className="w-full p-3 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-sm font-body-sm resize-none"
-                />
-              </label>
-
-              <div className="flex justify-between items-center gap-3 mt-2">
-                <span className="text-xs text-outline">{draft.length}/2000 · 조회와 자문만 수행합니다</span>
-                <button
-                  type="button"
-                  onClick={() => void send(draft)}
-                  disabled={busy || !draft.trim()}
-                  className="px-4 py-2 bg-surface-container-high border border-outline-variant text-primary rounded font-bold text-label-md font-label-md hover:bg-surface-container-highest transition-colors disabled:opacity-40 shrink-0"
-                >
-                  {busy ? "전달 중…" : "CEO에게 전달"}
-                </button>
-              </div>
-
-              {error ? (
-                <p role="alert" className="mt-3 text-xs text-error border border-error-container bg-error-container rounded p-2">
-                  ⚠️ {error}
-                </p>
-              ) : null}
-
-              {result ? (
-                <div className="mt-3 border border-outline-variant rounded p-3 bg-surface" aria-live="polite">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-label-md font-label-md text-on-surface-variant uppercase">CEO Hermes 답변</span>
-                    <code className="text-[10px] text-outline">{result.task?.task_id ?? "task 대기"}</code>
-                  </div>
-                  <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">{result.answer}</p>
-                  {/* v2(ceo.query-accepted.v2)에만 있다. v1 응답이면 통째로 없다. */}
-                  {result.planning ? (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {result.planning.selected_departments.map((dept) => (
-                        <span
-                          key={dept}
-                          className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container text-[11px] text-on-surface-variant"
-                        >
-                          {dept}
-                        </span>
-                      ))}
-                      {result.planning.qa_required ? (
-                        <span className="px-2 py-0.5 rounded-full border border-primary/30 bg-secondary-container text-[11px] text-primary">
-                          QA 필요
-                        </span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {/* 이 문장은 참고용이다. 수치를 여기서 뽑아 확정하지 않는다. */}
-                  <p className="text-[10px] text-outline mt-2 m-0">비공식 · 확정 수치의 출처가 아닙니다</p>
-                </div>
-              ) : null}
-
-              {progress?.final_answer ? (
-                <div className="mt-3 border-2 border-primary/40 rounded p-3 bg-secondary-container/30" aria-live="polite">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-label-md font-label-md text-primary uppercase">CEO 최종 답변</span>
-                    {!progress.answer_grounded ? (
-                      <span className="text-[10px] text-error">⚠️ 근거 미확인</span>
-                    ) : null}
-                  </div>
-                  <p className="text-body-sm font-body-sm text-on-surface whitespace-pre-line m-0">
-                    {progress.final_answer}
-                  </p>
-                </div>
-              ) : null}
-
-              {progress ? (
-                <div className="mt-3 border border-outline-variant rounded p-3" aria-live="polite">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="text-label-md font-label-md text-on-surface-variant uppercase">본부별 진행</span>
-                    <span className="text-xs font-data-mono text-on-surface-variant">
-                      {progress.finished}/{progress.total} 종료{progress.all_terminal ? "" : " · 확인 중"}
-                    </span>
-                  </div>
-                  <ul className="m-0 p-0 list-none flex flex-col gap-1.5">
-                    {progress.cards
-                      .filter((card) => !card.is_root)
-                      .map((card) => {
-                        const view = OUTCOME_VIEW[card.outcome];
-                        return (
-                          <li key={card.task_id} className="text-xs">
-                            <span className={`inline-block px-2 py-0.5 rounded-full border mr-2 ${view.tone}`}>{view.label}</span>
-                            <span className="text-on-surface">{card.department}</span>
-                            {card.summary ? (
-                              <span className="block text-on-surface-variant mt-0.5 ml-1">{card.summary}</span>
-                            ) : null}
-                          </li>
-                        );
-                      })}
-                  </ul>
-                  {progress.unusable.length > 0 ? (
-                    <p className="text-xs text-error mt-2 m-0">
-                      ⚠️ {progress.unusable.length}개 본부가 사용 가능한 결과를 내지 못했습니다.
-                    </p>
-                  ) : null}
-                  {progress.all_terminal && !progress.answer_grounded ? (
-                    <p className="text-xs text-error mt-1 m-0">
-                      ⚠️ 근거가 확인되지 않은 답변입니다. 그대로 결정에 쓰지 마세요.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-
-            </div>
-          </section>
+          <CeoControlRoomChat />
 
           <section className="lg:col-span-2 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
             <PanelBar icon="dashboard" title="Hermes Kanban Dashboard">

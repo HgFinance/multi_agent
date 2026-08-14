@@ -77,6 +77,7 @@ from orchestration.canonical_profiles import (
 from orchestration.ceo_workflow_scope import (
     build_root_body,
     infer_workflow_mode,
+    requested_by_from_body,
     selected_primary_profiles_from_task,
 )
 
@@ -475,6 +476,7 @@ def ceo_query(
             req.request_id,
             workflow_mode=infer_workflow_mode(req.query),
             mandate=mandate,
+            requested_by=owner_id,
         ),
         idempotency_key=req.request_id,
     )
@@ -544,9 +546,21 @@ def _status_payload(workflow: Workflow) -> dict[str, object]:
 def ceo_task_list(
     limit: int = Query(default=20, ge=1, le=100),
     include_archived: bool = Query(default=False),
+    owner_id: str | None = Query(default=None),
 ) -> TaskListResponse:
+    """계정별 이력 조회. `owner_id`는 반드시 서버가 걸러서 내려준다.
+
+    `X-User-Id`는 인증이 아니지만, 그렇다고 프론트가 전체 목록을 받아 클라이언트
+    에서 골라내면 다른 계정의 질문·답변 텍스트가 네트워크 응답에 그대로 실려
+    나간다 - 계정 간 대화가 새는 것과 같다(2026-08-14). 그래서 필터는
+    `list_ceo_roots(owner_id=...)`가 Root Body만 보고 조회 단계에서 처리한다.
+    """
+
+    normalized_owner_id = owner_id.strip() if owner_id and owner_id.strip() else None
     try:
-        rows = list_ceo_roots(limit=limit, include_archived=include_archived)
+        rows = list_ceo_roots(
+            limit=limit, include_archived=include_archived, owner_id=normalized_owner_id
+        )
     except KanbanUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
     identified = [
@@ -571,6 +585,7 @@ def ceo_task_list(
                 status=workflow.status,
                 created_at=workflow.root.created_at,
                 selected_departments=list(workflow.selected_departments),
+                owner_id=requested_by_from_body(body),
             )
             for (task_id, body), workflow in zip(identified, workflows)
         ]

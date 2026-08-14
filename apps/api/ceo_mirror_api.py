@@ -47,6 +47,9 @@ router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
 MIRROR_STORE: MirrorStore = build_default_mirror_store()
 
 
+_ANONYMOUS_ACTOR_IDS = frozenset({"anonymous", "web-user"})
+
+
 def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     # Lazy import avoids making apps.api.ceo import the mirror adapter and
     # keeps the existing CEO module's public contract unchanged.
@@ -55,12 +58,21 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     except ImportError:  # pragma: no cover
         import ceo  # type: ignore[no-redef]
 
+    # `actor_id`는 `mirror_ask`가 `X-User-Id`를 우선으로 채운다. 헤더가 없어
+    # 익명 fallback("web-user"/"anonymous")으로 채워진 경우에는 "이 root는 요청자를
+    # 모른다"를 정확히 유지하기 위해 `owner_id`를 넘기지 않는다(개발 원칙 9).
+    owner_id = (
+        request.actor_id
+        if request.actor_type == "user" and request.actor_id not in _ANONYMOUS_ACTOR_IDS
+        else None
+    )
     return ceo.ceo_query(
         CeoAsk(
             query=request.query,
             request_id=request.request_id,
             fund_id=request.fund_id,
-        )
+        ),
+        owner_id=owner_id,
     )
 
 
@@ -162,6 +174,7 @@ def mirror_ask(
     request: CeoAsk,
     x_source_message_id: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> dict[str, Any]:
     """`POST /ui/ceo/ask`의 유일한 등록 지점 - `ceo.py`는 이 경로를 스스로 등록하지
     않는다(`ceo.ceo_query`는 순수 함수로 남는다).
@@ -173,6 +186,13 @@ def mirror_ask(
     독자적으로 들고 있다가 조용히 갈라지는 상태가 구조적으로 불가능하다.
     dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
     (`_publish_workflow_projection`)이 이 함수를 감싸는 layer다.
+
+    `X-User-Id`(2026-08-14 추가)는 `fund_id`와 같은 이유로 여기서 빠져 있었다 -
+    이 핸들러가 헤더를 받지 않으면 그 값이 실제로 요청을 실행하는 `_ceo_query`
+    (그리고 `ceo.ceo_query`의 root body)까지 절대 도달할 수 없다. `actor_id`를
+    그대로 재사용하는 이유는 dedup 키(`source`+`source_message_id`)가
+    `actor_id`를 쓰지 않아 안전하기 때문이다 - `ceo_mirror.py`의
+    `InMemoryMirrorStore._source_key`/`RedisMirrorStore._source_key` 참고.
     """
 
     canonical = CanonicalIngress(
@@ -180,7 +200,7 @@ def mirror_ask(
         request_id=request.request_id,
         source="web",
         source_message_id=x_source_message_id or request.request_id,
-        actor_id=x_actor_id or "web-user",
+        actor_id=x_user_id or x_actor_id or "web-user",
         actor_type="user",
         fund_id=request.fund_id,
     )

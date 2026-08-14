@@ -412,6 +412,7 @@ def build_root_body(
     *,
     workflow_mode: str = "analysis",
     mandate: Mapping[str, Any] | None = None,
+    requested_by: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -420,17 +421,24 @@ def build_root_body(
     `hgfinance.mandate-snapshot.v1` 블록이 함께 실려, 부서가
     `kanban show <root_task_id>`로 사용자의 투자 한도를 읽을 수 있다.
 
-    둘 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
+    `requested_by`(2026-08-14 추가)는 `X-User-Id`로 식별된 요청자다. 채워지면
+    `requested_by=<id>` 한 줄이 실려 `GET /ui/ceo/tasks?owner_id=`가 계정별
+    이력을 서버에서 걸러낼 수 있다. 없으면 줄 자체를 넣지 않는다 - "요청자
+    불명"을 임의 기본값으로 채우지 않는다(개발 원칙 9).
+
+    셋 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
     """
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
+    requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
+        f"{requested_by_line}"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"
@@ -459,6 +467,20 @@ def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
     if not block:
         return ""
     return f"\n## Investor mandate (frozen snapshot)\n{block}\n"
+
+
+_REQUESTED_BY_RE = re.compile(r"(?m)^requested_by=(\S+)\s*$")
+
+
+def requested_by_from_body(body: str) -> str | None:
+    """root body의 `requested_by=` 줄을 읽는다. 없으면 `None`("계정 불명").
+
+    과거에 만들어진 root task는 이 줄이 없을 수 있다 - 그런 task는 특정 계정
+    이력에 넣지 않는다(개발 원칙 9, `build_root_body`의 `requested_by` 인자와 짝).
+    """
+
+    match = _REQUESTED_BY_RE.search(str(body or ""))
+    return match.group(1).strip() if match else None
 
 
 def build_root_comment(root_task_id: str, request_id: str) -> str:
@@ -671,6 +693,7 @@ __all__ = [
     "infer_workflow_mode",
     "mandate_snapshot_present",
     "primary_idempotency_key",
+    "requested_by_from_body",
     "selected_primary_profiles_from_body",
     "selected_primary_profiles_from_task",
     "validate_workflow_scope",
