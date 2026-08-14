@@ -6,6 +6,7 @@ import {
   INTERVIEW,
   applyChoice,
   applySuggestions,
+  capitalUnitFor,
   draftToInvestorProfile,
   draftToPolicy,
   nextStep,
@@ -77,7 +78,7 @@ test("인터뷰 대본을 순서대로 적용하면 draft가 완성된다", () =
   draft = pick(draft, 2, "숙련");
   draft = applyChoice(draft, INTERVIEW[3].parse("10년"));
   draft = pick(draft, 4, "낮음 (당분간 없음)");
-  draft = applyChoice(draft, INTERVIEW[5].parse("50,000,000원"));
+  draft = applyChoice(draft, INTERVIEW[5].parse("5,000만원"));
   draft = pick(draft, 6, "관리자 승인 필요");
 
   assert.equal(draft.riskProfile, "aggressive");
@@ -106,7 +107,25 @@ test("숫자가 없거나 범위를 벗어난 답은 거절한다", () => {
   assert.equal(INTERVIEW[3].parse("0"), null, "0년은 InvestorProfileIn ge=1 위반");
   assert.equal(INTERVIEW[3].parse("200"), null, "100년 초과는 le=100 위반");
   assert.deepEqual(INTERVIEW[3].parse("10년"), { investmentHorizonYears: 10 });
-  assert.deepEqual(INTERVIEW[5].parse("100,000,000"), { baseCapital: 100_000_000 });
+  assert.equal(INTERVIEW[5].parse("만원만"), null, "숫자가 없으면 되물어야 한다");
+  assert.equal(INTERVIEW[5].parse("0"), null);
+});
+
+test("기본 자산은 만원 단위로 받아 원 단위로 저장한다", () => {
+  // 서버 `risk_bounds.base_capital`은 원 단위 계약이다. 화면 단위가 바뀌어도
+  // 전송값은 원이어야 한다 - 여기가 어긋나면 1만 배 금액이 저장된다.
+  assert.deepEqual(INTERVIEW[5].parse("10000"), { baseCapital: 100_000_000 });
+  assert.deepEqual(INTERVIEW[5].parse("5,000만원"), { baseCapital: 50_000_000 });
+
+  const draft = applyChoice(DEFAULT_DRAFT, INTERVIEW[5].parse("10000"));
+  assert.equal(draftToPolicy(draft).risk_bounds.base_capital, "100000000");
+});
+
+test("만원 단위는 KRW일 때만 쓴다", () => {
+  // USD인데 "만원"이라고 적혀 있으면 1만 배 오입력이 난다.
+  assert.deepEqual(capitalUnitFor("KRW"), { multiplier: 10_000, label: "만원" });
+  assert.deepEqual(capitalUnitFor("USD"), { multiplier: 1, label: "USD" });
+  assert.equal(DEFAULT_DRAFT.baseCapital / capitalUnitFor("KRW").multiplier, 10_000, "기본 1억원 = 10,000만원");
 });
 
 test("LLM은 위험 필드를 건드릴 수 없다 (allow-list 신뢰 경계)", () => {
