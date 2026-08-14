@@ -40,9 +40,20 @@ from functools import lru_cache
 from typing import Any
 from uuid import UUID
 
-from evidence_qa_engine import QaAssessment
-from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
-from trace_recorder import AgentRunRecord, ToolCallRecord
+try:
+    # `audit.repository` is imported as a package by the supervisor.  Keep the
+    # package-qualified evidence import so the repository root is not required
+    # to be added to sys.path by every caller.
+    from evidence.evidence_qa_engine import QaAssessment
+except ImportError:  # pragma: no cover - legacy script/test entry point
+    from evidence_qa_engine import QaAssessment
+
+try:
+    from .incident_timeline import CorrectiveActionRecord, IncidentEventRecord
+    from .trace_recorder import AgentRunRecord, ToolCallRecord
+except (ImportError, ValueError):  # pragma: no cover - legacy flat imports
+    from incident_timeline import CorrectiveActionRecord, IncidentEventRecord
+    from trace_recorder import AgentRunRecord, ToolCallRecord
 
 
 class QaDecisionPersistenceError(RuntimeError):

@@ -8,6 +8,7 @@ use the normalized Kanban reader; the BFF never opens Hermes' database.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -29,7 +30,6 @@ try:
     from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -56,7 +56,6 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -75,10 +74,15 @@ from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
     canonical_profile_for_department,
 )
-from orchestration.ceo_workflow_scope import build_root_body, infer_workflow_mode
+from orchestration.ceo_workflow_scope import (
+    build_root_body,
+    infer_workflow_mode,
+    selected_primary_profiles_from_body,
+)
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
+logger = logging.getLogger(__name__)
 
 
 class CeoAsk(hermes_boundary.AgentAsk):
@@ -175,6 +179,9 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     qa_required = False
     synthesis_present = False
     children = _child_records(task.get("children"))
+    declared_primary = selected_primary_profiles_from_body(str(task.get("body") or ""))
+    if declared_primary:
+        selected.extend(declared_primary)
     metadata = task.get("metadata")
     if isinstance(metadata, str):
         try:
@@ -229,7 +236,7 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
         elif assignee == "ceo-agent" and role == "synthesis":
             synthesis_present = True
         elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
-            if assignee not in selected:
+            if assignee not in selected and not declared_primary:
                 selected.append(assignee)
 
     declared_departments = metadata.get("selected_departments")
@@ -243,7 +250,11 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     ):
         for profile in declared_departments:
             profile = str(profile).strip()
-            if profile in _PRIMARY_PROFILE_ORDER and profile not in selected:
+            if (
+                not declared_primary
+                and profile in _PRIMARY_PROFILE_ORDER
+                and profile not in selected
+            ):
                 selected.append(profile)
     declared_qa = metadata.get("qa_required")
     if isinstance(declared_qa, str):
@@ -272,15 +283,15 @@ def _planning_summary(
     existing = str(task.get("latest_summary") or "").strip() or None
     body = str(task.get("body") or "").casefold()
     binding = bool(re.search(r"(?:^|\n)workflow_mode=binding(?:\n|$)", body))
-    if not binding and qa_required:
+    if not binding:
         labels = [_PROFILE_LABEL[profile] for profile in selected if profile in _PROFILE_LABEL]
         if labels:
             subject = "와 ".join(labels)
             return (
-                f"{subject} 결과가 준비되면 CEO가 최종 종합을 진행하고, "
-                "QA는 별도의 비동기 evaluation lane에서 독립 검증합니다."
+                f"관련 부서({subject})의 근거 기반 분석 결과가 준비되는 대로 "
+                "CEO가 종합 분석을 전달하겠습니다."
             )
-        return "CEO 최종 종합과 QA 독립 검증을 별도의 비동기 evaluation lane으로 진행합니다."
+        return "관련 부서의 근거 기반 분석 결과가 준비되는 대로 CEO가 종합 분석을 전달하겠습니다."
     return existing
 
 
@@ -321,8 +332,6 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
         answer = f"{'· '.join(actions)}하겠습니다."
     else:
         answer = "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다."
-    if qa_required:
-        answer += " CEO 종합과 별도의 비동기 QA 평가를 진행합니다."
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]
@@ -405,18 +414,33 @@ def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object
     }
 
 
-@router.post(
-    "/ask",
-    operation_id="ceo_query",
-    status_code=202,
-    response_model=CeoQueryAcceptedResponse,
-    summary="CEO에게 새 분석을 요청한다",
-)
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
+
+    **이 함수는 `POST /ui/ceo/ask`의 유일한 구현이지만, 여기서는 route로
+    등록하지 않는다.** `apps.api.ceo_mirror_api.mirror_ask`가 이 함수를 그대로
+    감싸(dedup + Web/Discord 공용 event journal) 그 경로의 유일한 소유자로
+    등록한다.
+
+    ## 왜 여기서 `@router.post("/ask", ...)`를 안 붙이나
+
+    예전에는 이 모듈도 같은 경로에 `@router.post("/ask", ...)`를 붙였고, 실제
+    서비스에서는 `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 그 라우트를
+    항상 그림자로 덮었다(FastAPI는 같은 (path, method) 조합이 여러 라우터에
+    있으면 등록 순서가 먼저인 쪽이 이긴다). 그 결과 실제 요청은 항상 mirror의
+    자체 파싱 경로를 탔는데, mirror가 이 함수의 파라미터를 그대로 재사용하지
+    않고 `fund_id` 없는 별도 모델을 새로 만들어 넘겨서, Mandate 스냅샷이
+    항상 유실되는 사고가 났다(2026-08-14 AWS 실측) - 코드는 여기 있는데
+    실행되는 코드는 따로 있었던 것이다.
+
+    같은 경로를 두 라우터가 나눠 갖고 등록 순서로 승부하는 구조 자체가
+    위험하므로, 이제는 이 함수 하나만 존재하고 mirror가 그 함수를 감싸는
+    형태로 되돌린다 - "두 번째 구현"이 아예 존재할 수 없게 한다.
+    `tests/api/test_main_routes.py`가 실제 앱에 같은 (path, method) 조합이
+    두 번 이상 등록되면 실패하도록 고정한다.
 
     `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
     **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
@@ -447,6 +471,12 @@ def ceo_query(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
         )
+    logger.info(
+        "ceo-planning root=%s request_id=%s producer=portfolio-bff",
+        task["task_id"],
+        req.request_id,
+    )
+
     if not hermes_boundary.comment_root_scope(
         task_id=str(task["task_id"]), request_id=req.request_id
     ):
@@ -617,6 +647,19 @@ def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
     if synthesis is not None and synthesis.done and synthesis.summary:
         result = TaskResult(
             summary=synthesis.summary,
+            decision=workflow.decision,
+            qa_verdict=workflow.qa_verdict,
+        )
+    elif not workflow.descendants and workflow.root.done and workflow.root.summary:
+        # CEO가 부서에 위임하지 않고 root Task 안에서 직접 답한 경우(동적 라우팅 -
+        # 이벤트에 맞는 페르소나가 없으면 CEO 혼자 처리한다). synthesis_node가
+        # 없다는 이유로 결과를 계속 비워두면, 실제로 완료된 답이 있는데도 화면에
+        # 영원히 안 뜬다 - 2026-08-13 "지금 막혀 있는 업무와 이유를 알려줘"에서
+        # 실사용 중 확인. `not descendants`로 좁힌 이유: 부서가 있는데 아직
+        # synthesis만 안 끝난 진행 중 상태(root의 "접수했다" 문구)를 답으로
+        # 잘못 노출하면 안 된다 - 자식이 하나도 없을 때만 root가 곧 답이다.
+        result = TaskResult(
+            summary=workflow.root.summary,
             decision=workflow.decision,
             qa_verdict=workflow.qa_verdict,
         )

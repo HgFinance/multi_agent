@@ -225,7 +225,7 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertTrue(response["planning"]["qa_required"])
         self.assertIn("Research", response["answer"])
         self.assertIn("Risk", response["answer"])
-        self.assertIn("QA", response["answer"])
+        self.assertNotIn("QA", response["answer"])
         self.assertNotIn("Quant", response["answer"])
 
     def test_planning_without_qa_does_not_claim_qa(self) -> None:
@@ -306,8 +306,22 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertEqual(response["planning"]["selected_departments"], [])
 
     def test_route_returns_accepted_status(self) -> None:
-        route = next(route for route in ceo.router.routes if route.path == "/ui/ceo/ask")
+        """`POST /ui/ceo/ask`는 이제 `ceo.router`가 아니라 `ceo_mirror_api.router`가
+        유일하게 등록한다 - `ceo.ceo_query`는 순수 함수라 자체 route가 없다
+        (`tests/api/test_main_routes.py`가 이 단일 소유 상태를 앱 전체 기준으로 고정).
+        """
+        from apps.api import ceo_mirror_api
+
+        route = next(
+            route
+            for route in ceo_mirror_api.router.routes
+            if route.path == "/ui/ceo/ask"
+        )
         self.assertEqual(route.status_code, 202)
+        self.assertFalse(
+            any(route.path == "/ui/ceo/ask" for route in ceo.router.routes),
+            "ceo.router가 /ask를 다시 등록하면 mirror와 경로가 또 겹친다",
+        )
 
 
 if __name__ == "__main__":

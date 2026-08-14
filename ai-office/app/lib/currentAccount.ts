@@ -30,8 +30,9 @@ export interface TestAccount {
   /** 드롭다운에 보이는 이름. DB의 `display_name`을 짧게 줄인 것이다. */
   label: string;
   /**
-   * 이 사용자의 Fund. `null`이면 Mandate가 없는 계정이다 — 그 상태에서 화면이
-   * 어떻게 보이는지가 검증 대상이라 일부러 비워 둔다.
+   * 이 사용자의 Fund. 세 계정 모두 `accounting.funds`에 실제 행이 있다(2026-08-13
+   * 추가) - `null`을 남겨두는 계정은 이제 없다. 서버에 `user_id -> fund_id`
+   * 역참조가 없다는 사실은 그대로라 여전히 화면이 짝을 들고 다닌다.
    */
   fundId: string | null;
   /**
@@ -52,20 +53,22 @@ export const TEST_ACCOUNTS: readonly TestAccount[] = [
   {
     userId: "00000000-0000-4000-8000-00000000cec0",
     label: "Fund Owner",
-    // TEST-CEO-MANDATE (KRW). 이 계정만 Mandate를 갖고 있다.
+    // TEST-CEO-MANDATE (KRW). 유일하게 활성 Mandate(v11, ACTIVE)를 가진 계정.
     fundId: "b13f5cd1-5df0-4025-92cf-9be03b1a0296",
     colorClass: "bg-primary",
   },
   {
     userId: "00000000-0000-4000-8000-00000000cec1",
     label: "User 2",
-    fundId: null,
+    // TEST-USER2-MANDATE (KRW). Fund는 있고 Mandate는 아직 제출 전(DRAFT).
+    fundId: "50a3c28c-6cee-4bcf-ab07-fa97093dca8e",
     colorClass: "bg-tertiary-container",
   },
   {
     userId: "00000000-0000-4000-8000-00000000cec2",
     label: "User 3",
-    fundId: null,
+    // TEST-USER3-MANDATE (KRW). Fund는 있고 Mandate는 아직 제출 전(DRAFT).
+    fundId: "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
     colorClass: "bg-secondary",
   },
 ] as const;

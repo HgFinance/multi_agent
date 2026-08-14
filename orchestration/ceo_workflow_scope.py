@@ -14,11 +14,105 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 CEO_WORKFLOW_SCOPE_POLICY = "fresh"
 CEO_WORKFLOW_REUSE_POLICY = "disabled"
+CONTINUOUS_RESEARCH_MARKER = "hgfinance.continuous-research.v1"
+CONTINUOUS_RESEARCH_PLANE = "continuous_research"
+BACKGROUND_RESEARCH_ROLE = "background_research"
+PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
+
+# These aliases make the CEO planner's durable selection machine-readable.
+# They do not choose departments; the planner remains the source of truth.
+_PRIMARY_PROFILE_ALIASES = {
+    "research-department": ("research-department", "research", "리서치", "연구"),
+    "quant-backtest-department": (
+        "quant-backtest-department", "quant", "backtest", "퀀트"
+    ),
+    "trading-department": ("trading-department", "trading", "트레이딩"),
+    "accounting-portfolio-department": (
+        "accounting-portfolio-department",
+        "accounting",
+        "portfolio",
+        "accounting/portfolio",
+        "회계",
+        "포트폴리오",
+    ),
+    "risk-management": ("risk-management", "risk management", "risk", "리스크관리"),
+    "hr-department": ("hr-department", "workforce", "hr", "인사"),
+}
+
+
+def primary_idempotency_key(root_task_id: str, profile: str) -> str:
+    """Stable create key for one request-scoped primary profile."""
+
+    root = str(root_task_id).strip()
+    canonical = str(profile).strip()
+    if not root or not canonical:
+        raise ValueError("root_task_id and profile are required")
+    return f"{root}:primary:{canonical}"
+
+
+def _selection_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return ()
+        if raw.startswith(("[", "{", '"')):
+            try:
+                return _selection_values(json.loads(raw))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        return tuple(
+            part.strip()
+            for part in re.split(r"[,;|]|\s+and\s+|\s+및\s+", raw)
+            if part.strip()
+        )
+    if isinstance(value, Mapping):
+        return tuple(str(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def selected_primary_profiles_from_body(body: str) -> tuple[str, ...]:
+    """Read the planner-selected primary set from a root body.
+
+    New CEO sessions should emit ``selected_primary_profiles=...``.  The
+    legacy prose form is accepted only to diagnose already-created roots; it
+    never authorizes reuse of a task from another root.
+    """
+
+    text = str(body or "")
+    values: tuple[str, ...] = ()
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().casefold() in {
+            PRIMARY_SELECTION_FIELD,
+            "selected_departments",
+        }:
+            values = _selection_values(value)
+            break
+    if not values:
+        match = re.search(
+            r"(?is)dynamic\s+departments\s+selected\s*:\s*(.+?)(?:\n\s*primary|\n\s*advisory|$)",
+            text,
+        )
+        if match:
+            values = _selection_values(match.group(1).replace("\n", " "))
+
+    selected: list[str] = []
+    for value in values:
+        normalized = value.strip().strip(" .,:;()[]{}").casefold()
+        for profile, aliases in _PRIMARY_PROFILE_ALIASES.items():
+            if normalized == profile or normalized in {
+                alias.casefold() for alias in aliases
+            }:
+                if profile not in selected:
+                    selected.append(profile)
+                break
+    return tuple(selected)
 
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
@@ -157,6 +251,42 @@ def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def mandate_snapshot_present(body: str) -> bool:
+    """root body에 Mandate 스냅샷 블록이 실렸는지.
+
+    `build_mandate_snapshot_block`은 Mandate가 없거나 활성 Version이 없으면 빈
+    문자열을 주므로, 마커의 존재가 곧 "이 워크플로에 사용자 한도가 있다"는 뜻이다.
+    """
+
+    return CEO_MANDATE_SNAPSHOT_MARKER in str(body or "")
+
+
+def build_mandate_reference_line(root_task_id: str) -> str:
+    """자식 Task body에 넣을 Mandate 참조 지시문.
+
+    ## 왜 자식 body에 한도 값을 복사하지 않나
+
+    복사본이 늘어나면 요약·누락으로 부서마다 다른 한도를 쓰게 된다. root body
+    하나가 단일 원본이고, 자식은 그 위치만 가리킨다 - `kanban show`는 부서
+    Profile에 이미 있는 도구다.
+
+    ## 왜 Mandate가 없을 때는 이 줄을 아예 넣지 않나
+
+    "root를 봐라"라고 해놓고 아무것도 없으면 부서 LLM은 헛읽고, 최악의 경우
+    없는 한도를 추론해 채운다. 줄이 없으면 "이 워크플로에는 사용자 한도가 없다"가
+    되고, 그게 정확한 사실이다(개발 원칙 9).
+    """
+
+    return (
+        f"mandate_snapshot=see_root_task_body root_task_id={root_task_id}\n"
+        f"Read `kanban show {root_task_id}` and use the "
+        f"`{CEO_MANDATE_SNAPSHOT_MARKER}` block as this workflow's investor limits.\n"
+        "Do not copy those limits into new tasks, do not fetch a newer Mandate,"
+        " and do not substitute defaults for any limit the block does not state.\n"
+        "Advisory only - these limits do not authorize an order."
+    )
+
+
 def infer_workflow_mode(query: str) -> str:
     """Classify high-risk intent; this never grants execution authority."""
     text = str(query or "").casefold()
@@ -213,6 +343,9 @@ def build_root_body(
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
+        "response_plane=primary_results_ready\n"
+        "governance_plane=async_qa\n"
+        "qa_is_not_synthesis_prerequisite=true\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -257,8 +390,15 @@ def build_scoped_task_body(
     role: str,
     request_id: str | None = None,
     workflow_mode: str = "analysis",
+    has_mandate: bool = False,
 ) -> str:
-    """Bind a task to a workflow without creating a dependency edge."""
+    """Bind a task to a workflow without creating a dependency edge.
+
+    `has_mandate`(2026-08-13 추가)가 참이면 Mandate 참조 지시문이 함께 실린다.
+    호출부는 root body에 `mandate_snapshot_present()`를 물어 넘긴다 - 자식 body를
+    만드는 쪽이 root를 이미 읽고 있으므로 추가 조회가 없다. 기본값이 `False`라
+    기존 호출부는 그대로 동작한다.
+    """
 
     root_task_id = str(root_task_id).strip()
     if not root_task_id:
@@ -277,6 +417,8 @@ def build_scoped_task_body(
     ]
     if request_id:
         metadata.append(f"request_id={request_id}")
+    if has_mandate:
+        metadata.append(build_mandate_reference_line(root_task_id))
     prefix = "\n".join(metadata)
     body = str(body or "").strip()
     return f"{prefix}\n\n{body}" if body else prefix
@@ -419,16 +561,27 @@ def validate_workflow_scope(
 
 
 __all__ = [
+    "BACKGROUND_RESEARCH_ROLE",
+    "CEO_MANDATE_SNAPSHOT_MARKER",
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",
+    "CONTINUOUS_RESEARCH_MARKER",
+    "CONTINUOUS_RESEARCH_PLANE",
+    "PRIMARY_SELECTION_FIELD",
     "WORKFLOW_MODES",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
+    "build_mandate_reference_line",
+    "build_mandate_snapshot_block",
     "build_root_body",
     "build_root_comment",
+    "build_scoped_task_body",
     "extract_scope_references",
     "infer_workflow_mode",
+    "mandate_snapshot_present",
+    "primary_idempotency_key",
+    "selected_primary_profiles_from_body",
     "validate_workflow_scope",
     "workflow_mode_from_body",
 ]

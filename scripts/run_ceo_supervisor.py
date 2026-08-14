@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import logging
 import os
 import re
 import signal
@@ -135,6 +136,7 @@ def main() -> int:
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--max-wakeups", type=int, default=8)
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     def shutdown_handler(signum: int, _frame: Any) -> None:
         raise GracefulShutdown(f"signal {signum}")

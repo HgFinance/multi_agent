@@ -180,9 +180,14 @@ app.add_middleware(
 app.include_router(accounting.router)
 app.include_router(trading.router)
 app.include_router(department_agent_router)
-# Register the mirror adapter first so the existing `/ui/ceo/ask` path is
-# protected by canonical request deduplication. `ceo_router` remains mounted
-# for direct module compatibility and all PR #224 read routes.
+# `ceo_mirror_router`는 `POST /ui/ceo/ask`의 유일한 소유자다(dedup + Web/Discord
+# 공용 event journal). `ceo.py`는 이제 그 경로를 스스로 등록하지 않고 순수 함수
+# `ceo_query`만 제공한다 - mirror가 그 함수를 그대로 감싸므로 두 라우터가 같은
+# 경로를 나눠 갖고 등록 순서로 승부하는 상태 자체가 존재하지 않는다(2026-08-14
+# 사고: 그 상태에서 mirror가 파라미터를 독자적으로 재구성하다 fund_id가 유실돼
+# Mandate 스냅샷이 항상 빠졌다). `ceo_router`는 PR #224 read route(`/tasks/*`)만
+# 계속 제공한다. `tests/api/test_main_routes.py`가 이 앱에 같은 (path, method)
+# 조합이 중복 등록되면 실패하도록 고정한다.
 app.include_router(ceo_mirror_router)
 app.include_router(ceo_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을

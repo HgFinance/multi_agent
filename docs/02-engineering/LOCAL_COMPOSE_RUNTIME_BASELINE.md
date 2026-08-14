@@ -89,6 +89,8 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 `/ui/ceo/ask`는 주문·Risk 승인·Ledger Posting을 수행하지 않는다. Agent 응답은 금융 수치의 Source of Truth가 아니며, 수치는 `/ui/snapshot`과 각 Domain API가 소유한다.
 
+요청에 `fund_id`가 실리면 BFF가 governance-api에서 현재 Mandate를 읽어 root Task body에 `hgfinance.mandate-snapshot.v1` 블록으로 **한 번만** 박는다. 자식 Task는 한도 값을 복사받지 않고 `mandate_snapshot=see_root_task_body root_task_id=<id>` 한 줄만 받아 `kanban show`로 root를 읽는다 — 부서 Hermes 컨테이너에는 `DATABASE_URL`도 governance MCP도 없어서 참조만으론 풀 수 없고, 값을 자식마다 복사하면 요약·누락으로 부서별 한도가 갈라지기 때문이다. 이 스냅샷은 생성 후 불변이다(PIT, 개발 원칙 5). 실행 중 사용자가 한도를 바꿔도 이 워크플로는 시작 시점 값으로 끝나며, 실제 집행은 주문 시점의 결정론적 Risk Engine이 **현재** Mandate로 한다(개발 원칙 4). Mandate가 없으면 블록도 지시문 줄도 아예 붙지 않는다 — 기본 한도를 지어내지 않는다(개발 원칙 9).
+
 ## 4. AI Office 연결
 
 호스트 개발 실행:
