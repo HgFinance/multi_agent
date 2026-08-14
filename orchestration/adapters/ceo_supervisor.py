@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from orchestration.answer_contract import grade_answer
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
@@ -40,6 +41,7 @@ from orchestration.canonical_profiles import (
 )
 from orchestration.ceo_workflow_scope import (
     WorkflowScopeViolation,
+    is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
     mandate_snapshot_present,
@@ -152,12 +154,17 @@ def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]
         "error": child.error,
         "block_reason": child.block_reason,
     }
-    if child.terminal and not child.result.strip():
-        payload["answer_body_missing"] = True
-        payload["answer_body_missing_note"] = (
-            "이 부서 카드는 result(답변 본문) 없이 종료됐다. 요약만으로 본문을 "
-            "복원하지 말고, 근거가 없는 수치·목록은 만들지 마라."
-        )
+    if child.terminal:
+        # 답변 품질 등급을 함께 싣는다 - 차단이 아니라 신호다(answer_contract).
+        # QA 는 "무엇을 의심해야 하는지" 를 알고 시작해야 검증이 성립한다.
+        grade = grade_answer(child.result, summary=child.summary)
+        payload.update(grade.as_payload())
+        if not grade.has_body:
+            payload["answer_body_missing"] = True
+            payload["answer_body_missing_note"] = (
+                "이 부서 카드는 result(답변 본문) 없이 종료됐다. 요약만으로 본문을 "
+                "복원하지 말고, 근거가 없는 수치·목록은 만들지 마라."
+            )
     payload.update(extra)
     return payload
 
@@ -822,7 +829,7 @@ class HermesKanbanClient:
         # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
         # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
         # 자식이 공장 뒤에 서면 사용자 지연은 그대로다(2026-08-14 실측).
-        priority = USER_QUERY_PRIORITY if "origin=user-query" in body else 0
+        priority = USER_QUERY_PRIORITY if is_user_query_body(body) else 0
         request = CanonicalKanbanTaskRequest(
             assignee, title, body, idempotency_key, priority=priority
         )
@@ -1153,7 +1160,7 @@ class CeoSupervisorService:
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_primary_profiles_from_body(root_body),
-                    root_is_user_query="origin=user-query" in root_body,
+                    root_is_user_query=is_user_query_body(root_body),
                 )
                 decision = self.decider(state)
                 if state.analysis_children and not state.missing_primary_profiles:

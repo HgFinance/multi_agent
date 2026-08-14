@@ -120,7 +120,16 @@ class AnswerBodyHandoffTest(unittest.TestCase):
     QA·종합 카드에 summary 한 줄만 실려 사용자 응답이 result:null 로 나갔다.
     """
 
-    ANSWER = "| 1 | SK하이닉스 | 000660 | 649,842주 |"
+    # 실제 창구 답변의 형태 - 표 + 근거 좌표 + 기준일 + 한계 명시.
+    # answer_contract 가 보는 네 항목이 전부 들어 있어야 gaps 가 비어야 한다.
+    ANSWER = "\n".join(
+        (
+            "2026-08-13 기준 외국인 순매수 상위",
+            "| 1 | SK하이닉스 | 000660 | 649,842주 |",
+            "근거: investor_flow TR=t1717 citation=150ae2d8b8c1849e",
+            "2026-08-14 는 장중 미집계라 제외했다.",
+        )
+    )
 
     def _bodies_for(self, **child_kwargs: str) -> list[str]:
         bodies = []
@@ -139,6 +148,20 @@ class AnswerBodyHandoffTest(unittest.TestCase):
         for body in self._bodies_for(result=self.ANSWER):
             self.assertIn("SK하이닉스", body)
             self.assertNotIn("answer_body_missing", body)
+
+    def test_complete_answer_is_graded_trustworthy(self) -> None:
+        # 본문·근거·기준일·한계가 모두 있으면 QA 가 의심할 항목이 없어야 한다.
+        for body in self._bodies_for(result=self.ANSWER):
+            self.assertIn('"answer_trustworthy": true', body)
+            self.assertNotIn("answer_gaps", body)
+
+    def test_answer_without_evidence_is_flagged_for_qa(self) -> None:
+        # 본문은 있는데 근거가 없는 답이 조용히 통과하는 것이 가장 위험하다.
+        bare = "삼성전자 외국인 순매수는 649,842주로 집계됐습니다. 상위 종목입니다."
+        for body in self._bodies_for(result=bare):
+            self.assertIn('"answer_usable": true', body)
+            self.assertIn('"answer_trustworthy": false', body)
+            self.assertIn("근거 좌표 없음", body)
 
     def test_missing_answer_body_is_flagged_not_papered_over(self) -> None:
         # 요약만 있고 본문이 없으면 그 사실이 그대로 보여야 한다.
