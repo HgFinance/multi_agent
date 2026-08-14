@@ -197,6 +197,99 @@ def summarize(findings: list[Finding]) -> dict:
             "findings": findings}
 
 
+
+# ── 카드로 내보내기 ──────────────────────────────────────────────────────────
+#
+# ▶ 자율 복구 고리의 마지막 한 칸 (2026-08-14)
+#   진단은 만들었는데 **아무도 안 읽으면 없는 것과 같다.** 자동 조종이
+#   주기마다 카드를 거니, 진단 결과를 그 입력 모양으로 내보내면 고리가 닫힌다:
+#
+#     진단(BLOCKS) -> 카드 발행 -> 에이전트가 MCP 로 원천 획득
+#       -> 정제소 재실행 -> 관문 통과 -> 실험 재개
+#
+# ▶ BLOCKS 만 카드가 된다
+#   DEGRADES 까지 걸면 매 주기 같은 카드가 쌓여 아무도 안 본다. 등급을 셋으로
+#   줄인 이유와 같다 - **카드는 "지금 이걸 안 하면 결과가 증거가 아니다" 일
+#   때만 나간다.**
+#
+# ▶ 열쇠(key)는 결함마다 고정이다
+#   같은 결함이 매 주기 새 카드를 만들면 큐가 막힌다. 열쇠를 결함 이름으로
+#   두면 자동 조종의 멱등 처리가 중복을 접는다.
+
+# 어느 부서가 이 결함을 고칠 수 있는가. **데이터 획득은 리서치(수집기 소유),
+# 실행면 구조는 퀀트.** 엉뚱한 부서에 걸면 카드가 되돌아온다.
+_OWNER = {
+    "자본변동 조정계수": "research-department",
+    "유니버스 생존편향": "research-department",
+    "피처 레지스트리": "quant-backtest-department",
+    "계약 채택": "quant-backtest-department",
+    "단위 선언": "quant-backtest-department",
+    "온·오프라인 정합": "quant-backtest-department",
+}
+_DEFAULT_OWNER = "quant-backtest-department"
+
+
+def as_cards(findings: list) -> list[dict]:
+    """BLOCKS 결함 -> 자동 조종이 걸 수 있는 카드 명세.
+
+    `factory_autopilot._create_card(title=, body=, assignee=, key=)` 에 그대로
+    넣을 수 있는 모양이다. **수용 기준을 본문에 적는다** - 무엇이 되면 닫히는지
+    안 적으면 카드가 영원히 열려 있다.
+    """
+    out = []
+    for f in findings:
+        if f.verdict != BLOCKS:
+            continue
+        out.append({
+            "key": f"readiness:{f.name}",
+            "assignee": _OWNER.get(f.name, _DEFAULT_OWNER),
+            "title": f"[데이터 준비도] {f.name}",
+            "body": "\n\n".join([
+                "공장 자기 진단이 이 결함을 **BLOCKS** 로 판정했다.",
+                f"근거: {f.evidence}",
+                f"이대로 두면 막히는 것: {f.blocks}",
+                f"처방: {f.action}",
+                "수용 기준: `data_readiness.py --run` 에서 이 항목이 OK 로 "
+                "바뀌면 닫는다. **값을 지어내서 통과시키지 말 것** - "
+                "원천에서 받아 채워야 한다.",
+            ]),
+        })
+    return out
+
+
+def _check_only_blocks_become_cards():
+    """**DEGRADES 까지 걸면 매 주기 같은 카드가 쌓인다.**"""
+    fs = [judge_corporate_actions(rows=205, with_ratio=0, with_ex_date=0),
+          judge_unit_declaration(declared=False),
+          judge_unit_declaration(declared=True)]
+    cards = as_cards(fs)
+    assert len(cards) == 1, [c["title"] for c in cards]
+    assert "자본변동" in cards[0]["title"], cards[0]
+
+
+def _check_card_key_is_stable_per_defect():
+    """같은 결함이 매 주기 새 카드를 만들면 큐가 막힌다."""
+    a = as_cards([judge_corporate_actions(rows=205, with_ratio=0, with_ex_date=0)])
+    b = as_cards([judge_corporate_actions(rows=999, with_ratio=0, with_ex_date=0)])
+    assert a[0]["key"] == b[0]["key"], (a[0]["key"], b[0]["key"])
+
+
+def _check_card_goes_to_the_department_that_can_fix_it():
+    """데이터 획득은 리서치, 실행면 구조는 퀀트 - 엉뚱하면 되돌아온다."""
+    ca = as_cards([judge_corporate_actions(rows=1, with_ratio=0,
+                                           with_ex_date=0)])[0]
+    assert ca["assignee"] == "research-department", ca["assignee"]
+    fr = as_cards([judge_feature_registry(specs=1, snapshots=0,
+                                          hardcoded=11)])[0]
+    assert fr["assignee"] == "quant-backtest-department", fr["assignee"]
+
+
+def _check_card_carries_acceptance_criteria():
+    """무엇이 되면 닫히는지 안 적으면 카드가 영원히 열려 있다."""
+    c = as_cards([judge_feature_registry(specs=1, snapshots=0, hardcoded=11)])[0]
+    assert "수용 기준" in c["body"] and "지어내서" in c["body"], c["body"]
+
+
 # ── 측정 (DB) ────────────────────────────────────────────────────────────────
 
 
@@ -381,4 +474,10 @@ if __name__ == "__main__":
     _check_no_middle_grade_exists();          print("  중간 등급 없음          OK")
     _check_ok_findings_carry_no_prescription()
     print("  정상엔 처방 안 붙임     OK")
-    print("데이터 준비도 진단 8개 영역 통과.")
+    _check_only_blocks_become_cards();        print("  BLOCKS 만 카드가 됨      OK")
+    _check_card_key_is_stable_per_defect();   print("  카드 열쇠는 결함마다 고정 OK")
+    _check_card_goes_to_the_department_that_can_fix_it()
+    print("  고칠 수 있는 부서로 감   OK")
+    _check_card_carries_acceptance_criteria()
+    print("  수용 기준을 싣는다      OK")
+    print("데이터 준비도 진단 12개 영역 통과.")
