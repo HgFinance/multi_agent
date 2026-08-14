@@ -93,7 +93,7 @@ export type CeoQueryProgress = {
   cards: CeoQueryCard[];
 };
 
-type TaskStatusResponse = {
+export type TaskStatusResponse = {
   task_id: string;
   root_task_id: string;
   status: string;
@@ -105,7 +105,7 @@ type TaskStatusResponse = {
   };
 };
 
-type TaskGraphResponse = {
+export type TaskGraphResponse = {
   root: string;
   nodes: Array<{
     id: string;
@@ -117,13 +117,37 @@ type TaskGraphResponse = {
   edges: Array<[string, string]>;
 };
 
-type TaskResultResponse = {
+export type TaskResultResponse = {
   status: "processing" | "completed";
   result: { summary: string } | null;
   departments: Record<string, string>;
   qa_verdict: string | null;
   block_reason: string | null;
 };
+
+/** 계정별 이력 한 건. `GET /ui/ceo/tasks`의 한 항목. */
+export type CeoTaskListItem = {
+  task_id: string;
+  query: string | null;
+  status: "queued" | "running" | "blocked" | "failed" | "completed" | "archived";
+  created_at: string | null;
+  selected_departments: string[];
+  /** root body의 `requested_by=` 값. 옛 Root는 없어 `null`("계정 불명"). */
+  owner_id: string | null;
+};
+
+export type CeoTaskListResponse = {
+  schema_version: "ceo.task-list.v1";
+  items: CeoTaskListItem[];
+};
+
+/** 워크플로 단계가 더는 안 바뀌는 상태. 이력 표시·폴링 중단 판정에 함께 쓴다. */
+export const TERMINAL_WORKFLOW_STATUSES = new Set([
+  "completed",
+  "archived",
+  "failed",
+  "blocked",
+]);
 
 function explainError(body: unknown, status: number): string {
   if (typeof body === "object" && body !== null && "detail" in body) {
@@ -215,28 +239,71 @@ function outcomeFor(
   return node.department ? "STALE" : "NO_ASSIGNEE";
 }
 
+/** `GET /ui/ceo/tasks?owner_id=`. 서버가 이미 그 계정 소유 Root만 걸러 준다. */
+export async function listCeoTasks(ownerId: string): Promise<CeoTaskListResponse> {
+  return getJson<CeoTaskListResponse>(
+    `/ui/ceo/tasks?owner_id=${encodeURIComponent(ownerId)}`,
+  );
+}
+
+export type CeoWorkflowStatusAndGraph = {
+  status: TaskStatusResponse;
+  graph: TaskGraphResponse;
+};
+
+/**
+ * 본부별 진행 조회 절반 - `/tasks/{id}` + `/tasks/{id}/graph`만 부른다.
+ *
+ * 최종 답변(`/result`)과 폴링 간격이 다르므로(본부 진행 10초, 최종 답변 15초)
+ * 이 둘을 하나로 묶으면 더 잦은 쪽 주기에 맞춰 둘 다 돌게 된다. 호출부가
+ * 독립된 두 타이머로 이 함수와 {@link ceoWorkflowResult}를 각자 돌린다.
+ */
+export async function ceoWorkflowStatus(
+  rootTaskId: string,
+): Promise<CeoWorkflowStatusAndGraph> {
+  const encoded = encodeURIComponent(rootTaskId);
+  const [status, graph] = await Promise.all([
+    getJson<TaskStatusResponse>(`/ui/ceo/tasks/${encoded}`),
+    getJson<TaskGraphResponse>(`/ui/ceo/tasks/${encoded}/graph`),
+  ]);
+  return { status, graph };
+}
+
+/** 본부별 진행 조회 나머지 절반 - `/tasks/{id}/result`만 부른다. */
+export async function ceoWorkflowResult(
+  rootTaskId: string,
+): Promise<TaskResultResponse> {
+  return getJson<TaskResultResponse>(
+    `/ui/ceo/tasks/${encodeURIComponent(rootTaskId)}/result`,
+  );
+}
+
+const _EMPTY_RESULT: TaskResultResponse = {
+  status: "processing",
+  result: null,
+  departments: {},
+  qa_verdict: null,
+  block_reason: null,
+};
+
 /**
  * PR #224의 graph/result API를 정규화한다.
  *
- * `/ui/ceo/ask` 응답은 root task 생성의 accepted contract이고, 진행 조회는
- * `/tasks/{id}`, `/graph`, `/result`의 읽기 전용 API를 사용한다. Root는 scope
- * marker일 뿐이므로 진행 수치와 unusable/stalled 집계에서 제외한다.
+ * `status`+`graph`(10초 주기)와 `result`(15초 주기, 아직 안 왔으면 `null`)를
+ * 호출부가 각자 폴링해 합친다 - 이 함수 자체는 네트워크를 부르지 않는다.
+ * Root는 scope marker일 뿐이므로 진행 수치와 unusable/stalled 집계에서 제외한다.
  */
-export async function ceoProgress(
-  rootTaskId: string,
-): Promise<CeoQueryProgress> {
-  const encoded = encodeURIComponent(rootTaskId);
-  const [status, graph, result] = await Promise.all([
-    getJson<TaskStatusResponse>(`/ui/ceo/tasks/${encoded}`),
-    getJson<TaskGraphResponse>(`/ui/ceo/tasks/${encoded}/graph`),
-    getJson<TaskResultResponse>(`/ui/ceo/tasks/${encoded}/result`),
-  ]);
+export function buildCeoProgress(
+  { status, graph }: CeoWorkflowStatusAndGraph,
+  result: TaskResultResponse | null,
+): CeoQueryProgress {
+  const effectiveResult = result ?? _EMPTY_RESULT;
 
   const summaryFor = (node: TaskGraphResponse["nodes"][number]): string => {
-    if (node.id === graph.root && result.result?.summary) {
-      return result.result.summary;
+    if (node.id === graph.root && effectiveResult.result?.summary) {
+      return effectiveResult.result.summary;
     }
-    return result.departments[node.department] ?? "";
+    return effectiveResult.departments[node.department] ?? "";
   };
 
   const cards = graph.nodes.map((node) => {
@@ -284,8 +351,8 @@ export async function ceoProgress(
         ? workerCards.every((card) => terminal.has(card.outcome))
         : status.status === "completed",
     answer_grounded:
-      Boolean(result.result?.summary) && result.qa_verdict !== "FAIL",
-    final_answer: result.result?.summary ?? null,
+      Boolean(effectiveResult.result?.summary) && effectiveResult.qa_verdict !== "FAIL",
+    final_answer: effectiveResult.result?.summary ?? null,
     unusable,
     stalled,
     cards,
