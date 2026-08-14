@@ -59,10 +59,14 @@ DEFAULT_PORT = int(os.environ.get("CLAUDE_PROXY_PORT", "8787"))
 # 겹쳐 어느 쪽이 죽었는지 알 수 없게 된다).
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_PROXY_CONCURRENCY", "2"))
 CLI_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_TIMEOUT", "300"))
-# 슬롯이 빌 때까지 기다려 주는 상한. 한 호출이 30~36초이므로 그 몇 배를 기다리면
-# 대부분의 경합은 흡수된다. CLI_TIMEOUT 보다 짧게 두어 "대기 중 클라이언트가 먼저
-# 죽는" 상황을 만들지 않는다.
-ACQUIRE_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_ACQUIRE_TIMEOUT", "120"))
+# 슬롯이 빌 때까지 기다려 주는 상한.
+# ▶ 2026-08-14 실측 정정: 처음엔 "한 호출 30초"로 보고 120초를 줬는데, 그건 짧은
+#   프롬프트였다. 실제 공장 호출 35건의 **중앙값이 408초(6.8분), 최대 1,060초**다
+#   (`claude -p` 가 단발 완성이 아니라 도구를 쓰는 에이전트 루프이기 때문).
+#   슬롯 3개가 그 길이로 물려 있으면 120초 대기로는 못 기다려 429 가 났다(13건).
+#   CLI_TIMEOUT(1200초)보다는 짧게 둬서 "대기하다 클라이언트가 먼저 죽는" 상황은
+#   여전히 만들지 않는다.
+ACQUIRE_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_ACQUIRE_TIMEOUT", "600"))
 
 # 모델 별칭 - 헤르메스가 보내는 이름을 CLI 가 아는 이름으로.
 # CLI 는 sonnet/opus/haiku 별칭을 받는다(정확한 날짜 ID 는 버전마다 갈린다).
