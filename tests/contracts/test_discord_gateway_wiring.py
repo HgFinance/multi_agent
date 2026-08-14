@@ -155,6 +155,9 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         hook = (ROOT / "deploy/hermes-discord/install_patch.py").read_text(encoding="utf-8")
         self.assertIn("gateway_patch.py", dockerfile)
         self.assertIn("refusing an unpatched gateway image", hook)
+        ceo_dockerfile = (ROOT / "Dockerfile.ceo-hermes").read_text(encoding="utf-8")
+        self.assertIn("gateway_patch.py", ceo_dockerfile)
+        self.assertIn("install_hermes_discord_patch.py", ceo_dockerfile)
 
 
 if __name__ == "__main__":

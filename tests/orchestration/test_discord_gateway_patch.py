@@ -65,6 +65,7 @@ class DiscordGatewayPatchTests(unittest.TestCase):
 
         class Message:
             id = "message-1"
+            session_id = "session-1"
             channel = Channel()
             guild = Guild()
 
@@ -78,6 +79,13 @@ class DiscordGatewayPatchTests(unittest.TestCase):
             self.assertEqual(adapter._discord_message_admission(Message(), claim=True), (True, False))
             self.assertEqual(adapter._discord_message_admission(Message(), claim=True), (False, False))
             self.assertEqual(adapter.calls, 1)
+            key = gateway_patch.canonical_discord_dedup_key("guild", "channel", "message-1")
+            self.assertEqual(
+                gateway_patch._store(adapter).inbound_context(key, "qa-department")[
+                    "session_id"
+                ],
+                "session-1",
+            )
 
     def test_final_publish_wrapper_calls_original_send_once(self) -> None:
         class Result:
