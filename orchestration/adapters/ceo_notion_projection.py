@@ -26,6 +26,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_role,
     workflow_root,
 )
+from orchestration.ceo_workflow_scope import selected_primary_profiles_from_body
 
 logger = logging.getLogger(__name__)
 PROJECTION_MARKER = "hgfinance.ceo-notion-projection.v1"
@@ -310,10 +311,15 @@ class CeoNotionProjection:
         original_query = ""
         if "## User request" in root_body:
             original_query = root_body.split("## User request", 1)[1].strip()
+        selected_profiles = selected_primary_profiles_from_body(root_body)
         primary = [
             item
             for item in workflow_tasks
             if is_request_scoped_role(item, root_task_id, "primary")
+            and (
+                not selected_profiles
+                or str(item.get("assignee") or "") in selected_profiles
+            )
         ]
         qa = [
             item
@@ -327,10 +333,7 @@ class CeoNotionProjection:
                 if item.get("assignee")
             )
         )
-        declared_departments = metadata.get("selected_departments")
-        if declared_departments:
-            departments = list(ids_from(declared_departments))
-        primary_ids = list(ids_from(metadata.get("primary_task_ids"))) or [task_id(item) for item in primary]
+        primary_ids = [task_id(item) for item in primary]
         qa_ids = list(ids_from(metadata.get("qa_task_ids"))) or [task_id(item) for item in qa]
         return {
             "root_task_id": root_task_id,

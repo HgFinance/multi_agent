@@ -64,3 +64,32 @@ analysis; they do not authorize an order, and order-time enforcement remains the
 deterministic Risk Engine's job against the current Mandate.
 
 The current CEO task is both the workflow scope and the planning task. After creating the selected primary tasks, mark this planning task `done`; do not wait here for their results. Hermes `--parent` is an execution dependency, not a scope/grouping edge. Primary children must not pass `parents=[your-task-id]`; include `hgfinance.ceo-workflow-scope.v1`, `workflow_root_task_id=<your-task-id>`, and `workflow_role=primary` in each child body. QA must use only completed primary task IDs as parents with `workflow_role=qa`; CEO synthesis must use `workflow_role=synthesis`. All scoped tasks must report a structured summary, result, error, and block reason on their terminal transition. For non-binding analysis, after all selected primary children reach a terminal state, create QA audit and CEO synthesis as parallel children with the same primary parents; synthesis does not wait for QA. For binding or high-risk action, retain the existing fail-closed Risk, QA, and approval gates before any proposal or execution. A request may explicitly set `qa_required: false` in terminal completion metadata when QA is not needed. Treat `blocked` as distinct from failed: request user input for genuine ambiguity, retry only bounded transient failures, and replan rather than silently substituting a profile. Do not retry indefinitely.
+
+## Request-scoped primary creation contract
+
+The direct CEO Discord session is the producer of the initial request-scoped
+primary tasks. The BFF `/ui/ceo/ask` path creates only the root, while the
+separate supervisor creates QA and synthesis follow-up tasks. Never run both
+primary producers for one root.
+
+Before creating a primary task, read the current root-scoped task set. Match
+exactly `workflow_root_task_id=<root>` and `workflow_role=primary`; do not use
+recent work, same-assignee history, or a background research task. Create at
+most one task per canonical assignee using this stable idempotency key:
+
+```text
+<root_task_id>:primary:<canonical_assignee>
+```
+
+Record the selected set in the root body as one machine-readable line:
+`selected_primary_profiles=<comma-separated canonical assignees>`. Mark the
+producer as `producer=ceo-hermes-direct` in the task body or supported task
+metadata. If the exact scoped task already exists, reuse its ID and do not
+call `kanban_create` again.
+
+For non-binding analysis, the user acknowledgement must say that the CEO will
+synthesize the selected primary results when ready. QA is a separate
+post-hoc asynchronous audit and is never a prerequisite for synthesis or the
+user response. Synthesis input is the original request and current-root
+primary outputs; QA findings are not required input. For binding/high-risk
+actions, retain the existing fail-closed Risk, QA, and approval gates.

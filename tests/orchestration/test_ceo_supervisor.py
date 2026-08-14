@@ -21,6 +21,8 @@ from orchestration.ceo_workflow_scope import (
     build_root_body,
     build_scoped_task_body,
     infer_workflow_mode,
+    primary_idempotency_key,
+    selected_primary_profiles_from_body,
     validate_workflow_scope,
     workflow_mode_from_body,
 )
@@ -296,6 +298,87 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual([c.task_id for c in state.analysis_children], ["primary"])
         self.assertEqual([c.task_id for c in state.qa_children], ["qa"])
 
+    def test_root_selection_is_machine_readable_and_legacy_prose_is_supported(self) -> None:
+        self.assertEqual(
+            selected_primary_profiles_from_body(
+                "selected_primary_profiles=research-department,risk-management"
+            ),
+            ("research-department", "risk-management"),
+        )
+        self.assertEqual(
+            selected_primary_profiles_from_body(
+                "Dynamic departments selected:\n"
+                "Research, Risk Management, and Accounting/Portfolio."
+            ),
+            (
+                "research-department",
+                "risk-management",
+                "accounting-portfolio-department",
+            ),
+        )
+
+    def test_selected_primary_set_excludes_foreign_and_background_tasks(self) -> None:
+        selected = (
+            "research-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        scoped = "workflow_root_task_id=root\nworkflow_role=primary"
+        background = (
+            "workflow_root_task_id=root\n"
+            "workflow_plane=continuous_research\n"
+            "workflow_role=background_research"
+        )
+        state = SupervisorState(
+            "root",
+            (
+                child("research", "research-department", "done", body=scoped),
+                child("risk", "risk-management", "done", body=scoped),
+                child("accounting", "accounting-portfolio-department", "done", body=scoped),
+                child(
+                    "foreign",
+                    "research-department",
+                    "done",
+                    body="workflow_root_task_id=other-root\nworkflow_role=primary",
+                ),
+                child("background", "continuous-research", "done", body=background),
+            ),
+            selected_primary_profiles=selected,
+        )
+        decision = decide_supervisor(state)
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.parent_task_ids, ("research", "risk", "accounting"))
+
+    def test_duplicate_primary_set_is_not_hidden_by_readiness_selector(self) -> None:
+        selected = (
+            "research-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        body = "workflow_root_task_id=root\nworkflow_role=primary"
+        children = tuple(
+            child(f"{profile}-{suffix}", profile, "done", body=body)
+            for suffix in ("a", "b")
+            for profile in selected
+        )
+        state = SupervisorState("root", children, selected_primary_profiles=selected)
+        self.assertEqual(state.duplicate_primary_profiles, selected)
+        self.assertIsNone(decide_supervisor(state))
+
+    def test_selected_set_waits_without_request_user_input_when_children_are_late(self) -> None:
+        state = SupervisorState(
+            "root",
+            (),
+            selected_primary_profiles=("research-department",),
+        )
+        self.assertIsNone(decide_supervisor(state))
+
+    def test_primary_idempotency_key_is_stable(self) -> None:
+        self.assertEqual(
+            primary_idempotency_key("root", "research-department"),
+            "root:primary:research-department",
+        )
+
     def test_continuous_research_is_excluded_even_with_research_profile(self) -> None:
         background_tasks = tuple(
             child(
@@ -563,6 +646,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertIn("planning_terminal_state=done_after_child_creation", body)
         self.assertNotIn("child_parent_required=current_root_task_id", body)
         self.assertIn("workflow_mode=analysis", body)
+        self.assertIn("response_plane=primary_results_ready", body)
+        self.assertIn("governance_plane=async_qa", body)
+        self.assertIn("qa_is_not_synthesis_prerequisite=true", body)
+        self.assertNotIn("QA then synthesis", body)
 
     def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")

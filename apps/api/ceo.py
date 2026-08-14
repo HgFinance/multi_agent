@@ -8,6 +8,7 @@ use the normalized Kanban reader; the BFF never opens Hermes' database.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -75,10 +76,15 @@ from orchestration.canonical_profiles import (
     CANONICAL_PROFILES,
     canonical_profile_for_department,
 )
-from orchestration.ceo_workflow_scope import build_root_body, infer_workflow_mode
+from orchestration.ceo_workflow_scope import (
+    build_root_body,
+    infer_workflow_mode,
+    selected_primary_profiles_from_body,
+)
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
+logger = logging.getLogger(__name__)
 
 
 class CeoAsk(hermes_boundary.AgentAsk):
@@ -175,6 +181,9 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     qa_required = False
     synthesis_present = False
     children = _child_records(task.get("children"))
+    declared_primary = selected_primary_profiles_from_body(str(task.get("body") or ""))
+    if declared_primary:
+        selected.extend(declared_primary)
     metadata = task.get("metadata")
     if isinstance(metadata, str):
         try:
@@ -229,7 +238,7 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
         elif assignee == "ceo-agent" and role == "synthesis":
             synthesis_present = True
         elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
-            if assignee not in selected:
+            if assignee not in selected and not declared_primary:
                 selected.append(assignee)
 
     declared_departments = metadata.get("selected_departments")
@@ -243,7 +252,11 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     ):
         for profile in declared_departments:
             profile = str(profile).strip()
-            if profile in _PRIMARY_PROFILE_ORDER and profile not in selected:
+            if (
+                not declared_primary
+                and profile in _PRIMARY_PROFILE_ORDER
+                and profile not in selected
+            ):
                 selected.append(profile)
     declared_qa = metadata.get("qa_required")
     if isinstance(declared_qa, str):
@@ -272,7 +285,7 @@ def _planning_summary(
     existing = str(task.get("latest_summary") or "").strip() or None
     body = str(task.get("body") or "").casefold()
     binding = bool(re.search(r"(?:^|\n)workflow_mode=binding(?:\n|$)", body))
-    if not binding and qa_required:
+    if not binding:
         labels = [_PROFILE_LABEL[profile] for profile in selected if profile in _PROFILE_LABEL]
         if labels:
             subject = "와 ".join(labels)
@@ -445,6 +458,12 @@ def ceo_query(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
         )
+    logger.info(
+        "ceo-planning root=%s request_id=%s producer=portfolio-bff",
+        task["task_id"],
+        req.request_id,
+    )
+
     if not hermes_boundary.comment_root_scope(
         task_id=str(task["task_id"]), request_id=req.request_id
     ):
