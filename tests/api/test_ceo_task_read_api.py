@@ -545,6 +545,40 @@ class CeoRootFilterTest(unittest.TestCase):
 
         self.assertEqual(len(roots), 2)
 
+    def test_owner_id_filters_to_that_account_only(self) -> None:
+        """계정별 이력은 서버가 거른다. 다른 계정의 질의 텍스트는 응답에 실리지 않는다."""
+
+        rows = [
+            {"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")},
+            {"id": "t_theirs", "body": build_root_body("남의 질의", "req-b", requested_by="user-b")},
+        ]
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            roots = ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a")
+
+        self.assertEqual([row["id"] for row in roots], ["t_mine"])
+
+    def test_legacy_roots_without_requested_by_belong_to_no_account(self) -> None:
+        """`requested_by`가 없는 과거 Root는 "계정 불명"이라 어떤 계정 이력에도 안 넣는다."""
+
+        rows = [{"id": "t_legacy", "body": build_root_body("옛 질의", "req-old")}]
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            self.assertEqual(ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a"), [])
+            # 필터를 안 걸면 그대로 보인다 - 데이터를 숨기는 게 아니라 귀속만 안 한다.
+            self.assertEqual(len(ceo_kanban_read.list_ceo_roots(limit=20)), 1)
+
+    def test_owner_filter_runs_before_the_limit_cutoff(self) -> None:
+        """다른 계정 Root가 `limit` 자리를 차지해 진짜 대상이 잘려나가면 안 된다."""
+
+        rows = [
+            {"id": f"t_other{index}", "body": build_root_body("남", f"req-o{index}", requested_by="user-b")}
+            for index in range(5)
+        ]
+        rows.append({"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")})
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            roots = ceo_kanban_read.list_ceo_roots(limit=2, owner_id="user-a")
+
+        self.assertEqual([row["id"] for row in roots], ["t_mine"])
+
 
 def _client() -> TestClient:
     app = FastAPI()

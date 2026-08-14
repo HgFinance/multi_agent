@@ -155,7 +155,7 @@ class CeoWorkflowProjectionRegressionTest(unittest.TestCase):
             patch.object(ceo, "list_ceo_roots", return_value=[board[ROOT]]),
         ):
             graph = ceo.ceo_task_graph(ROOT)
-            task_list = ceo.ceo_task_list(limit=20, include_archived=False)
+            task_list = ceo.ceo_task_list(limit=20, include_archived=False, owner_id=None)
         self.assertEqual({node.id for node in graph.nodes}, {ROOT, RESEARCH, RISK, QA, SYNTHESIS})
         self.assertEqual(task_list.items[0].selected_departments, ["research-department", "risk-management"])
 

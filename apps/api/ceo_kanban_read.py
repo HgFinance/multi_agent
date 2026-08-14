@@ -46,6 +46,7 @@ from orchestration.canonical_profiles import (
 )
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
+    requested_by_from_body,
     selected_primary_profiles_from_task,
 )
 
@@ -789,14 +790,24 @@ def load_workflow(
     )
 
 
-def list_ceo_roots(*, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:
-    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다."""
+def list_ceo_roots(
+    *, limit: int, include_archived: bool = False, owner_id: str | None = None
+) -> list[dict[str, Any]]:
+    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다.
+
+    `owner_id`가 주어지면 `requested_by=` 줄이 그 값과 일치하는 Root만 남긴다
+    (`limit` 컷오프 전에 걸러야 다른 계정 Root가 자리를 차지해 진짜 대상이
+    잘려나가지 않는다). `requested_by`가 없는 과거 Root는 "계정 불명"으로
+    보고 어떤 `owner_id` 필터에도 포함하지 않는다.
+    """
 
     rows = list_tasks(assignee=CEO_PROFILE, include_archived=include_archived)
     roots: list[dict[str, Any]] = []
     for row in rows:
         body = _text(row.get("body"))
         if not is_ceo_root_body(body):
+            continue
+        if owner_id is not None and requested_by_from_body(body) != owner_id:
             continue
         roots.append(row)
         if len(roots) >= limit:

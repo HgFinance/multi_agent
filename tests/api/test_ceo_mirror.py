@@ -188,7 +188,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk) -> dict[str, object]:
+        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_mandate", "status": "accepted"}
 
@@ -201,6 +201,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 ),
                 x_source_message_id=None,
                 x_actor_id=None,
+                x_user_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_mandate")
@@ -212,7 +213,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk) -> dict[str, object]:
+        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_no_fund", "status": "accepted"}
 
@@ -221,10 +222,58 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="fund 없는 질의", request_id="request-no-fund-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
+                x_user_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_no_fund")
         self.assertIsNone(captured[0].fund_id)
+
+    def test_mirror_ask_forwards_x_user_id_as_owner_id(self) -> None:
+        """`X-User-Id`도 `fund_id`와 같은 이유로 유실되던 값이다.
+
+        `mirror_ask`가 헤더를 받지 않으면 그 값은 실제로 요청을 실행하는
+        `ceo.ceo_query`(그리고 root body의 `requested_by=`)까지 도달할 수 없고,
+        계정별 이력 조회가 애초에 불가능해진다.
+        """
+
+        from apps.api.ceo import CeoAsk
+
+        captured: list[str | None] = []
+
+        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+            captured.append(owner_id)
+            return {"task_id": "t_owner", "status": "accepted"}
+
+        with patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query):
+            ceo_mirror_api.mirror_ask(
+                CeoAsk(query="계정 이력 확인", request_id="request-owner-1"),
+                x_source_message_id=None,
+                x_actor_id=None,
+                x_user_id="user-a",
+            )
+
+        self.assertEqual(captured, ["user-a"])
+
+    def test_missing_x_user_id_stays_unknown_rather_than_defaulting(self) -> None:
+        """헤더가 없으면 익명 fallback을 계정으로 둔갑시키지 않는다(개발 원칙 9)."""
+
+        from apps.api.ceo import CeoAsk
+
+        captured: list[str | None] = []
+
+        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+            captured.append(owner_id)
+            return {"task_id": "t_anon", "status": "accepted"}
+
+        with patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query):
+            ceo_mirror_api.mirror_ask(
+                CeoAsk(query="익명 질의", request_id="request-anon-1"),
+                x_source_message_id=None,
+                x_actor_id=None,
+                x_user_id=None,
+            )
+
+        self.assertEqual(captured, [None])
 
     def test_web_and_discord_views_read_the_same_ceo_final(self) -> None:
         request = CanonicalIngress(
