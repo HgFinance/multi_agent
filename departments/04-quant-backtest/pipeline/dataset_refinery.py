@@ -182,8 +182,21 @@ def cut_at_unadjusted_gap(rows: list[dict]) -> tuple[list[dict], str]:
 
 def winsorize_extreme(rows: list[dict], *, pct: float = 0.005
                       ) -> tuple[list[dict], str]:
-    """극단 수익률 절단. **행을 버리지 않고 값만 조인다.**"""
-    return list(rows), f"극단값 {pct:.3%} 절단(값 조정, 행 유지)"
+    """극단 수익률 절단 - **아직 구현 안 됐다. 조용히 넘기지 않는다.**
+
+    ▶ 왜 통과시키지 않는가 (2026-08-14)
+      처음에 이 함수를 `return list(rows), "극단값 절단"` 으로 두었다. 즉
+      **아무것도 안 하면서 했다고 보고**했다. 계약이 `WINSORIZE_EXTREME` 를
+      선언하면 보고서에는 절단했다고 적히고 판은 안 바뀐다 - 원장이 거짓을
+      말하는 상태이고, 이 저장소가 하루 종일 고쳐온 그 실패 방식이다.
+
+      절단 기준(분위? 표준편차 몇 배? 종목별? 전체?)은 **판단**이라 여기서
+      임의로 정할 수 없다. 정해지기 전까지는 선언 자체를 막는다.
+    """
+    raise NotImplementedError(
+        "WINSORIZE_EXTREME 은 아직 구현되지 않았다 - 절단 기준(분위/배수, "
+        "종목별/전체)이 판단 사항이라 정해지기 전에는 쓸 수 없다. "
+        "계약에서 빼거나, 기준을 정하고 여기를 구현해라")
 
 
 def _num(v):
@@ -514,6 +527,23 @@ def _check_hash_is_order_independent_but_value_sensitive():
     assert _panel_hash(a) != _panel_hash(c)
 
 
+def _check_unimplemented_step_fails_loudly():
+    """**안 한 것을 했다고 보고하면 원장이 거짓이 된다** (2026-08-14).
+
+    `winsorize_extreme` 을 "행 그대로 돌려주고 절단했다고 적기" 로 두었다가
+    고쳤다. 계약이 선언했는데 실제로는 아무 일도 안 일어나는 상태가 가장
+    나쁘다 - 안 된 것보다 **안 된 줄 모르는 것**이 나쁘다.
+    """
+    try:
+        refine(_rows(("A", "2020-01-02", 100.0, 10)),
+               _c(cleaning=("DROP_MISSING", "CUT_AT_UNADJUSTED_GAP",
+                            "WINSORIZE_EXTREME")))
+    except NotImplementedError as e:
+        assert "판단" in str(e), e
+    else:
+        raise AssertionError("구현 안 된 단계가 조용히 통과했다")
+
+
 def _check_empty_input_does_not_crash():
     """빈 입력은 오류가 아니라 빈 판이다 - 다만 승인은 아니다."""
     out, rep = refine([], _c())
@@ -542,5 +572,7 @@ if __name__ == "__main__":
     _check_future_observation_is_caught(); print("  미래 관측 탐지           OK")
     _check_hash_is_order_independent_but_value_sensitive()
     print("  판 해시(순서 무관)      OK")
+    _check_unimplemented_step_fails_loudly()
+    print("  미구현은 큰소리로 실패   OK")
     _check_empty_input_does_not_crash();  print("  빈 입력 안전             OK")
-    print("데이터셋 정제소 11개 영역 통과.")
+    print("데이터셋 정제소 12개 영역 통과.")
