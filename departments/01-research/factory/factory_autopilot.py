@@ -951,15 +951,19 @@ def _design_gap_line(conn) -> str:
         with conn.cursor() as cur:
             cur.execute("""
                 select coalesce(h.expected_edge->>'type',''),
-                       coalesce((e.config->>'top_n')::int, 0)
+                       coalesce((e.config->>'top_n')::int, 0),
+                       upper(coalesce(e.config->>'portfolio_construction',
+                                      'TOP_N'))
                   from quant.experiments e
                   left join quant.hypotheses h
                          on h.hypothesis_id = e.hypothesis_id""")
             tried: set = set()
-            for et, tn in cur.fetchall():
+            builds: dict = {}
+            for et, tn, pc in cur.fetchall():
                 band = next((b for b, lo, hi in TOPN_BANDS
                              if lo <= int(tn or 0) <= hi), TOPN_BANDS[0][0])
                 tried.add((str(et), band))
+                builds[str(pc)] = builds.get(str(pc), 0) + 1
         edges = sorted(EDGE_VOCAB)
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
         return ""
@@ -991,11 +995,35 @@ def _design_gap_line(conn) -> str:
             "약속을 사실로 바꾸는 편이 싸다.",
         ]
 
+    # ▶ **구성 방식 축** (2026-08-14 분위 곡선 실측)
+    #   격자는 "무엇을 사는가(edge)" 와 "몇 개를 사는가(top_n)" 만 셌다. 그런데
+    #   실측이 가른 것은 **어떻게 담는가** 였다 - signal_composite 를 체결가능
+    #   유니버스(1,689종목) 10분위로 갈라 보니 롱온리 초과(Q10-평균)가
+    #   +0.06%p/월인데 숏다리 몫(평균-Q1)은 +1.00%p/월이었다. 상위를 고르는
+    #   구성으로는 못 먹는 신호이고, top_n 을 어떻게 흔들어도 곡선은 그대로다.
+    #   `BASELINE_NOT_BEATEN` 이 계열 14개에서 되풀이된 것도 같은 벽이다.
+    #   실행면에 하위 배제를 열었으므로(portfolio_construction=EXCLUDE_BOTTOM),
+    #   그 열이 실제로 비었는지 세어서 사실로 알린다 - 명령이 아니라 빈 칸이다.
+    build_gap: list = []
+    if not builds.get("EXCLUDE_BOTTOM"):
+        _tot = sum(builds.values()) or 0
+        build_gap = [
+            f"  ▶ **구성 방식 축이 통째로 비었다**: 실험 {_tot}건이 전부 "
+            f"상위 N개를 사는 구성(TOP_N)이고, 하위 배제는 0건이다.",
+            "    실측(signal_composite 분위 곡선, 체결가능 1,689종목·비용 전): "
+            "롱온리 초과(Q10-평균) +0.06%p/월 vs 숏다리 몫(평균-Q1) +1.00%p/월 - "
+            "알파가 상위가 아니라 하위에 있다.",
+            "    실행면 손잡이: portfolio_construction=EXCLUDE_BOTTOM · "
+            "exclude_bottom_pct(1~90). 하위 q% 를 빼고 나머지 전체를 동일가중으로 "
+            "든다(top_n 은 이때 관여하지 않는다).",
+        ]
+
     lines = [
         "",
         f"[설계 공간의 빈 니치 - 기계가 센 사실] "
         f"{len(edges) * len(TOPN_BANDS)}칸(edge×top_n 대역) 중 "
         f"빈 칸 {len(empty)}개{crowd}",
+        *build_gap,
         *debt,
         "  우선 후보 (광폭 대역 우선 - 실측 TC: top20 0.114 vs top200 0.316):",
     ]
@@ -1706,13 +1734,22 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
             #   `expected_edge` 오염은 접수 단계에서 막았지만(관문 우회 차단),
             #   **그 전에 등록된 가설**은 이미 오염된 채로 남아 매 주기 같은
             #   자리에서 죽는다. 데이터·어휘만 보고 발주하면 이걸 못 거른다.
+            #   ▶ 판정은 실행면에 묻는다 (2026-08-14). `EDGE_KEYS` 만 보고 여기서
+            #     직접 세면 실행면보다 엄격해진다 - 사전등록용 키
+            #     (`observation_refs`/`universe`)는 `bind` 가 받아 주는데 관문이
+            #     막아, 실험을 한 번도 못 돌고 폐기된 가설이 4건 나왔다.
+            #   ▶ **값의 범위·부호도 같이 본다** (2026-08-14 실측). 이름만 보고
+            #     발주했더니 `a266a02d` 가 `max_drawdown_stop=0.35`(낙폭 정지는
+            #     음수여야 한다)로 **3회** 발주-실행-거부를 반복했다. 값 검사는
+            #     이름 검사보다 늦게 알 이유가 없다 - 등록된 값은 이미 다 있다.
+            #     `rejection_reasons` 가 미지 키와 범위 위반을 **둘 다** 돌려준다.
             try:
-                from config_binding import EDGE_KEYS   # noqa: PLC0415
-                bad = sorted(k for k in (edge or {}) if k not in EDGE_KEYS)
+                from config_binding import rejection_reasons   # noqa: PLC0415
+                bad = rejection_reasons({"expected_edge": edge})
             except Exception:  # noqa: BLE001
                 bad = []
             if bad:
-                out[hid] = (f"실행면이 안 읽는 파라미터: {', '.join(bad)} - "
+                out[hid] = (f"실행면이 거부한다: {'; '.join(bad)[:240]} - "
                             f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
     except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
         return {}
@@ -2772,8 +2809,20 @@ def _check_design_gaps_and_scout_card():
                 def fetchall(self_): return rows
             return _C()
 
-    line = _design_gap_line(_Grid([("momentum", 20), ("low_volatility", 20)]))
+    line = _design_gap_line(_Grid([("momentum", 20, "TOP_N"),
+                                   ("low_volatility", 20, "TOP_N")]))
     assert "빈 니치" in line and "× top_n 151-300" in line, line
+    # ▶ 구성 방식 축 (2026-08-14 분위 곡선 실측). 전부 상위 N개를 사는 구성이면
+    #   그 사실과 실행면 손잡이 이름이 함께 떠야 한다 - 격자가 "몇 개를 사는가"
+    #   만 세고 "어떻게 담는가" 를 안 세면 그 열은 영원히 비어 있다.
+    assert "구성 방식 축이 통째로 비었다" in line, line
+    assert "EXCLUDE_BOTTOM" in line and "exclude_bottom_pct" in line, line
+    assert "+1.00%p" in line, "왜 그 축을 봐야 하는지 근거 수치가 빠졌다"
+    # 하위 배제 실험이 하나라도 있으면 그 줄은 사라진다 - **없는 공백을 지어내지
+    #   않는다.** 사실이 아닌 재촉은 다음 주기에 무시당하는 서술이 된다.
+    line_done = _design_gap_line(_Grid([("momentum", 20, "TOP_N"),
+                                        ("low_max", 200, "EXCLUDE_BOTTOM")]))
+    assert "구성 방식 축이 통째로 비었다" not in line_done, line_done
     # 실험이 한 대역에 몰린 사실이 그대로 실린다
     assert "전부 top_n 5-50 한 대역" in line, line
     # 광폭 대역이 먼저 온다 - 상위 6후보가 전부 151-300 이므로 관례 대역(5-50)

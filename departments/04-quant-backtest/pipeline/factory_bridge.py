@@ -586,6 +586,35 @@ def _checkable_regime_evidence(values) -> list:
     return out
 
 
+def _check_no_trade_does_not_teach_performance_lessons():
+    """**한 주도 안 샀으면 이기고 지고가 없다** (2026-08-14 실측).
+
+    유니버스가 비어 거래 0 인 실험의 초과가 -82.86%p 로 찍혔고, 그대로면
+    환류에 BASELINE_NOT_BEATEN 이 실린다 - 다음 기획안은 그것을 읽고
+    "기준선을 이기도록" 사양을 고친다. 고칠 것은 사양이 아니라 유니버스다.
+    """
+    empty = lessons_from(oos_summary={
+        "turnover_total": 0.0, "total_return": 0.0,
+        "excess_return_pct": -82.86, "max_drawdown": 0.0})
+    assert "UNDERPOWERED_DATA" in empty, empty
+    assert "BASELINE_NOT_BEATEN" not in empty, \
+        f"거래 0 인데 기준선을 못 이겼다고 가르친다: {empty}"
+    assert "BEAR_FRAGILE" not in empty, empty
+
+    # 진짜로 돌아서 진 실험은 그대로 배운다 - 놓아주기가 아니다.
+    real = lessons_from(oos_summary={
+        "turnover_total": 4.2, "total_return": -0.12,
+        "excess_return_pct": -18.4, "max_drawdown": -0.42})
+    assert "BASELINE_NOT_BEATEN" in real, real
+    assert "BEAR_FRAGILE" in real, real
+    assert "UNDERPOWERED_DATA" not in real, real
+
+    # 회전율을 못 잰 옛 실험은 예전과 똑같이 판단한다(무더기 무효화 방지)
+    legacy = lessons_from(oos_summary={"excess_return_pct": -18.4})
+    assert "BASELINE_NOT_BEATEN" in legacy, legacy
+    assert "UNDERPOWERED_DATA" not in legacy, legacy
+
+
 def lessons_from(*, failed_criteria=(), regime_concerns=(),
                  fragility: str = "", oos_summary=None) -> list[str]:
     """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
@@ -611,10 +640,26 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
     #   **이미 아는 사실**이고, 안 남기면 다음 기획안이 같은 사양을 또 낸다.
     #   failed_criteria 는 릴리스 관문이 만드는데, 관문에 도달 못 하면 비어 있다.
     oos = {k: v for k, v in (oos_summary or {}).items() if v is not None}
-    if oos.get("excess_return_pct", 0) < 0 or oos.get("information_ratio", 0) < 0:
-        out.append("BASELINE_NOT_BEATEN")
-    if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
-        out.append("BEAR_FRAGILE")
+    # ▶ **거래가 0이면 성과 교훈을 만들지 않는다** (2026-08-14 실측)
+    #   min_adv_krw 단위 사고로 유니버스가 비었을 때 지표가 전부 0 이 되고
+    #   초과만 -82.86%p 로 찍혔다. 그대로 두면 "기준선을 못 이겼다
+    #   (BASELINE_NOT_BEATEN)" 가 환류에 실리는데, 그건 **없는 사실**이다 -
+    #   한 주도 안 샀으니 이기고 지고가 없다. 다음 기획안이 이 교훈을 읽고
+    #   엉뚱한 방향으로 사양을 고친다. 표본이 사양을 못 받쳤다고만 남긴다.
+    _turnover = oos.get("turnover_total")
+    _no_trade = False
+    if _turnover is not None:
+        try:
+            _no_trade = float(_turnover) == 0.0
+        except (TypeError, ValueError):
+            _no_trade = False
+    if _no_trade:
+        out.append("UNDERPOWERED_DATA")
+    else:
+        if oos.get("excess_return_pct", 0) < 0 or oos.get("information_ratio", 0) < 0:
+            out.append("BASELINE_NOT_BEATEN")
+        if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
+            out.append("BEAR_FRAGILE")
 
     if str(fragility).upper() == "INSUFFICIENT":
         # 창이 0개라 강건성을 재지 못했다. "전략이 나쁘다" 가 아니라 **표본이
@@ -1462,6 +1507,8 @@ if __name__ == "__main__":
     _check_finalize_is_atomic();                print("  환류+전이 원자성         OK")
     _check_lessons_mapping_is_deterministic_baseline()
     print("  교훈 사상(에이전트 무관)  OK")
+    _check_no_trade_does_not_teach_performance_lessons()
+    print("  거래 0 -> 성과 교훈 없음  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
     _check_fetch_window_excludes_promoted()

@@ -86,11 +86,16 @@ def _edge_for_execution(edge) -> dict:
     if not src.get("type"):
         src["type"] = "none"            # 강건성 검증은 엣지를 주장하지 않는다
     try:
-        from config_binding import EDGE_KEYS  # noqa: PLC0415
+        from config_binding import unknown_edge_keys  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - 못 읽으면 그대로 둔다(막지 않는다)
         return src
-    kept = {k: v for k, v in src.items() if k in EDGE_KEYS}
-    dropped = sorted(k for k in src if k not in EDGE_KEYS)
+    # ▶ **실행면이 거부할 것만 뺀다** (2026-08-14). `EDGE_KEYS` 만 보고 빼면
+    #   사전등록 키까지 떨어지는데, `universe` 는 `bind` 가 `universe_key` 로
+    #   사상하는 **구 계약 철자**다. 그걸 빼면 강건성 검증이 부모와 **다른
+    #   유니버스**에서 돌고, 그 성적은 그 가설의 증거가 아니다.
+    #   실측으로 `universe` 만 가진 가설이 있다(ced2d8f9·d28d18b6).
+    dropped = unknown_edge_keys(src)
+    kept = {k: v for k, v in src.items() if k not in set(dropped)}
     if dropped:
         print(f"  ⚠ expected_edge 에서 실행면이 안 읽는 키를 뺐다: "
               f"{', '.join(dropped)} (설명은 rationale 에 있다)", flush=True)
@@ -195,8 +200,21 @@ def slice_market(market: Market, w: WFWindow) -> Market:
     kset = set(keep)
     opens = {k: v for k, v in market.opens.items() if k[0] in kset}
     closes = {k: v for k, v in market.closes.items() if k[0] in kset}
+    # ▶ **거래대금도 같이 자른다** (2026-08-14 실측)
+    #   여기서 `notionals` 를 안 넘기고 있었다. `Market` 의 기본값이 빈 dict 라
+    #   창 안에서는 거래대금이 **통째로 사라졌고**, 그 결과:
+    #     · 유동성 필터가 `min_trading_days` 를 못 채워 전 종목을 버린다
+    #       (실측 b71f1db0: 21개 창 전부 total_return/MDD/Sharpe = 0)
+    #     · 그 0 들이 `positive_window_ratio = 0` 을 만들어 강건성이 **항상**
+    #       SIGN_INCONSISTENT -> FRAGILE -> REJECTED 로 굳는다
+    #     · `illiquidity_premium` 신호와 비용 모델의 유동성 계층도 거래대금을
+    #       읽으므로, 필터를 켜기 전부터 창 안 성적이 조용히 오염돼 있었다
+    #   전체 기간 백테스트(TEST)는 회전 223배로 멀쩡히 거래하는데 창 안만 0 인
+    #   비대칭이 단서였다 - 창을 자를 때 열 하나를 빠뜨린 것이 원인이다.
+    notionals = {k: v for k, v in market.notionals.items() if k[0] in kset}
     symbols = sorted({s for (_, s) in closes})
-    return Market(dates=keep, opens=opens, closes=closes, symbols=symbols)
+    return Market(dates=keep, opens=opens, closes=closes, symbols=symbols,
+                  notionals=notionals)
 
 
 def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
@@ -602,6 +620,13 @@ def _synth_market(start: date, end: date, series: dict) -> Market:
             rows.append({"instrument_id": s, "trade_date": d,
                          "open": px, "high": px, "low": px, "close": px,
                          "volume": 1000,
+                         # ▶ **거래대금을 실물처럼 싣는다** (2026-08-14)
+                         #   이 픽스처에 `notional` 이 없어서 슬라이스가 그 열을
+                         #   통째로 잃어도 검사가 통과했다(실측: 창 21개 전부
+                         #   지표 0). 실물 단위는 백만원이고 중앙값이 269 이므로
+                         #   그 근방 값을 쓴다 - 픽스처가 실물과 다르면 검사는
+                         #   늘 통과하고 현장만 죽는다.
+                         "notional": 300.0,
                          "observed_at": datetime(2026, 7, 31, tzinfo=timezone.utc)})
     return Market.from_rows(rows)
 
@@ -639,6 +664,18 @@ def _check_slice_no_future():
     warm = [d for d in sub.dates if d < w.test_start]
     assert len(warm) == WARMUP_TRADING_DAYS and max(warm) < w.test_start
     assert sub.dates[-1] == w.test_end
+    # ▶ **창 안에서도 거래대금이 살아 있어야 한다** (2026-08-14 실측)
+    #   이 열을 안 넘기고 있었다. 그러면 유동성 필터가 min_trading_days 를 못
+    #   채워 전 종목을 버리고, 창 지표가 전부 0 이 되어 강건성이 **항상**
+    #   FRAGILE 로 굳는다(실측 b71f1db0: 21창 63행 전부 0). 비용 모델의 유동성
+    #   계층과 illiquidity_premium 신호도 같은 열을 읽는다.
+    assert sub.notionals, \
+        "슬라이스가 거래대금을 통째로 잃었다 - 유동성 필터·비용 계층·ILLIQ 신호가 다 죽는다"
+    assert all(w.warmup_start <= k[0] <= w.test_end for k in sub.notionals), \
+        "notionals 에 창 밖 미래"
+    assert set(sub.notionals) == {k for k in m.notionals
+                                  if w.warmup_start <= k[0] <= w.test_end}, \
+        "거래대금이 일부만 넘어왔다 - 조용히 빠진 종목·날짜가 있다"
     print("  슬라이스(창 밖 미래 차단) OK")
 
 
@@ -649,8 +686,15 @@ def _check_no_lookahead_through_window():
     (w,) = [x for x in ws if x.label == "2025H2"]
     series = {
         "UP": lambda i, d: 100.0 * (1.002 ** i),                          # 꾸준한 상승
-        "SPIKE_T0": lambda i, d: 300.0 if d >= w.test_start else 100.0,   # 시험창 당일 급등
-        "SPIKE_MID": lambda i, d: 300.0 if d >= date(2025, 7, 15) else 100.0,
+        "SPIKE_T0": lambda i, d: 240.0 if d >= w.test_start else 100.0,   # 시험창 당일 급등
+        # ▶ 배수를 ×3.0 -> ×2.4 로 바꿨다 (2026-08-14)
+        #   `strategy_templates._adjustment_break` 가 **하루 만의 정수배 점프**를
+        #   미조정 액면분할로 보고 그 이전 이력을 버린다. 한국은 상한가 30% 라
+        #   하루에 ×2 는 제도적으로 불가능하므로 그 판정이 옳고, 정확히 ×3.00
+        #   인 이 픽스처가 실물에 없는 경로였다(실물이라면 여러 날에 걸친다).
+        #   이 검사의 의도는 "웜업 경계가 시험창 안 정보를 막지 않는다" 이지
+        #   정수배 급등을 사는 것이 아니므로, 방어선에 걸리지 않는 배수로 둔다.
+        "SPIKE_MID": lambda i, d: 240.0 if d >= date(2025, 7, 15) else 100.0,
         "FLAT": lambda i, d: 100.0,
     }
     sub = slice_market(_synth_market(start, end, series), w)
@@ -732,10 +776,17 @@ def _check_edge_only_carries_executable_keys():
     assert got.get("type") == "none", got
     assert set(got) <= set(EDGE_KEYS), got
 
-    # 사고 원문: 호출부가 universe(오타·비어휘)를 실었다
+    # 사고 원문: 호출부가 설명(note)을 실어 발주가 영구 보류됐다
     got2 = _edge_for_execution({"type": "momentum", "universe": "krx",
                                 "note": "설명", "horizon_days": 20})
-    assert set(got2) == {"type", "horizon_days"}, got2
+    # ▶ **`universe` 는 남는다** (2026-08-14 계약 변경 반영).
+    #   `bind` 가 `universe_key` 로 사상하는 구 철자라 실행면이 거부하지 않고,
+    #   빼면 강건성 검증이 부모와 다른 유니버스에서 돌아 그 성적이 그 가설의
+    #   증거가 아니게 된다(위 `_edge_for_execution` 주석의 근거).
+    #   구현은 그렇게 바뀌었는데 이 기대값만 옛 계약에 남아 저장소가 자체점검
+    #   실패 상태로 있었다 - 실행면이 진짜 거부하는 것만 빠지는지로 고정한다.
+    assert set(got2) == {"type", "universe", "horizon_days"}, got2
+    assert "note" not in got2, "설명을 실으면 발주가 영구 보류된다"
     assert got2["horizon_days"] == 20, "읽는 키까지 버렸다"
 
     # 정상 입력은 그대로 통과한다 - 오탐이 있으면 멀쩡한 가설이 깎인다

@@ -231,7 +231,21 @@ def lease(conn, *, worker: str, batch: int = BATCH) -> list[dict]:
             with picked as (
               select job_id from quant.experiment_jobs
                where status = 'QUEUED'
-               order by created_at
+               -- ▶ **놓아준 주문은 잠시 쉰다** (2026-08-14 실측)
+               --   놓아주기만 넣었더니 같은 주문을 15초마다 집었다 놓기를
+               --   반복했다(로그 120회). 기다리는 조건(가설 회수)은 분 단위로
+               --   바뀌므로 초 단위 재시도는 순수한 낭비다. 신규 주문은
+               --   `failure_reason` 이 비어 있어 **즉시** 집히므로 발주가
+               --   늦어지지 않는다 - 쉬는 것은 놓아준/회수된 주문뿐이다.
+               and (failure_reason is null
+                    or updated_at < now() - interval '2 minutes')
+               -- ▶ **가장 오래 안 건드린 것부터** (2026-08-14)
+               --   `created_at` 만 보면 방금 놓아준(release) 주문이 계속 맨
+               --   앞을 차지한다. BATCH 기본이 1 이라 그 한 자리를 물고 있는
+               --   동안 **돌 수 있는 다른 주문이 굶는다.** updated_at 을 앞에
+               --   두면 놓아준 것은 뒤로 가고, 신규 주문은 updated_at =
+               --   created_at 이므로 선착순이 그대로 유지된다.
+               order by updated_at, created_at
                limit %s
                for update skip locked
             )
@@ -263,6 +277,38 @@ def finish(conn, job_id: str, *, ok: bool, experiment_id: str | None = None,
                 where job_id=%s::uuid""",
             ("DONE" if ok else "FAILED", experiment_id,
              None if ok else reason[:500], job_id))
+    conn.commit()
+
+
+def release(conn, job_id: str, *, reason: str) -> None:
+    """**지금은 못 도는 주문을 놓아준다 - 시도 횟수는 태우지 않는다.**
+
+    ▶ 왜 필요한가 (2026-08-14 실측)
+      `orchestrate` 가 `BAD_TRANSITION`(가설이 아직 RUNNING)을 돌려줄 때
+      `finish(ok=False)` 로 종결하고 있었다. 그런데 그건 주문의 잘못이 아니라
+      **타이밍**이다 - 앞 시도가 남긴 RUNNING 을 회수(10분 정체 기준)가 곧
+      PROPOSED 로 되돌리면 그대로 돌 주문이다.
+
+      실측: 24시간 실패 13건 중 7건이 BAD_TRANSITION 이었고, 전부
+      `attempts=2/2` 였다. 두 번의 시도가 모두 회수보다 먼저 일어나 **재시도
+      예산만 태우고 영구 FAILED 로 굳은 것이다.** 그 뒤 회수가 가설을
+      PROPOSED 로 되돌려 재발주되고, 같은 자리에서 또 죽는 고리가 돈다.
+
+      그래서 실패가 아니라 놓아주기로 돌린다. `lease` 가 올린 시도 횟수를
+      되돌려 예산을 보존하고, 사유는 남겨 무엇을 기다리는지 보이게 한다
+      (사유 없는 되돌리기는 조용한 재시도와 같다).
+    """
+    if not reason:
+        raise ValueError("놓아주기에도 사유가 필요하다 - 무엇을 기다리는지 "
+                         "안 남기면 조용한 무한 재시도와 구별되지 않는다")
+    with conn.cursor() as cur:
+        cur.execute(
+            """update quant.experiment_jobs
+                  set status='QUEUED', failure_reason=%s, updated_at=now(),
+                      leased_at=null, leased_by=null,
+                      attempts=greatest(attempts - 1, 0)
+                where job_id=%s::uuid and status='LEASED'""",
+            (reason[:500], job_id))
     conn.commit()
 
 
@@ -355,6 +401,81 @@ def _check_finish_requires_reason():
         assert "사유" in str(e), e
     else:
         raise AssertionError("사유 없는 실패가 통과했다")
+
+
+def _check_release_keeps_the_attempt_budget():
+    """**놓아주기는 시도 예산을 태우지 않는다** (2026-08-14 실측).
+
+    타이밍(가설이 아직 RUNNING)으로 못 돈 주문을 `finish(ok=False)` 로
+    종결하고 있었다 - 24시간 실패 7건이 전부 attempts=2/2 로 굳었다.
+    놓아줄 때 `lease` 가 올린 시도를 되돌리지 않으면 실패로 태우는 것과
+    똑같아진다. SQL 이 실제로 예산을 되돌리는지 여기서 고정한다.
+    """
+    seen = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen["sql"], seen["params"] = " ".join(sql.split()), params
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _C:
+        def cursor(self):
+            return _Cur()
+        def commit(self):
+            seen["committed"] = True
+
+    release(_C(), "j1", reason="verdict=BAD_TRANSITION; 가설이 아직 RUNNING")
+    assert "status='QUEUED'" in seen["sql"], seen["sql"]
+    assert "attempts=greatest(attempts - 1, 0)" in seen["sql"], seen["sql"]
+    assert "status='LEASED'" in seen["sql"], "집지 않은 주문을 되돌리면 안 된다"
+    assert seen["params"][0].startswith("verdict=BAD_TRANSITION"), seen["params"]
+    assert seen.get("committed"), "놓아주고 커밋하지 않으면 다음 순회가 못 본다"
+
+    # 사유 없는 놓아주기는 조용한 무한 재시도와 구별되지 않는다.
+    class _Boom:
+        def cursor(self):
+            raise AssertionError("사유 검사 전에 DB 를 건드리면 안 된다")
+
+    try:
+        release(_Boom(), "j1", reason="")
+    except ValueError as e:
+        assert "사유" in str(e), e
+    else:
+        raise AssertionError("사유 없는 놓아주기가 통과했다")
+
+
+def _check_lease_does_not_starve_behind_a_released_job():
+    """**놓아준 주문이 큐 앞자리를 물고 있으면 안 된다** (2026-08-14).
+
+    BATCH 기본이 1 이다. `order by created_at` 만이면 방금 놓아준(=가장 오래된)
+    주문이 매 순회 그 한 자리를 다시 차지해, 돌 수 있는 다른 주문이 굶는다.
+    """
+    seen = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen["sql"] = " ".join(sql.split())
+        def fetchall(self):
+            return []
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _C:
+        def cursor(self):
+            return _Cur()
+        def commit(self):
+            pass
+
+    lease(_C(), worker="w:1")
+    assert "order by updated_at, created_at" in seen["sql"], seen["sql"]
+    # 놓아준 주문은 쉬게 하되, **신규 주문은 즉시** 집어야 발주가 안 늦는다.
+    assert "failure_reason is null" in seen["sql"], seen["sql"]
+    assert "interval '2 minutes'" in seen["sql"], seen["sql"]
 
 
 def _check_repeat_block_stops_reissue():
@@ -465,4 +586,7 @@ if __name__ == "__main__":
     _check_missing_lease_time_is_not_expired(); print("  시각 미상 != 만료      OK")
     _check_only_leased_expires();            print("  LEASED 만 만료          OK")
     _check_finish_requires_reason();         print("  실패엔 사유 필수        OK")
-    print("작업 큐 8개 영역 통과.")
+    _check_release_keeps_the_attempt_budget(); print("  놓아주기=예산 보존      OK")
+    _check_lease_does_not_starve_behind_a_released_job()
+    print("  놓아준 주문에 안 굶음   OK")
+    print("작업 큐 10개 영역 통과.")

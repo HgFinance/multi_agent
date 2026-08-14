@@ -335,9 +335,13 @@ def register_variant(conn, move: Move) -> tuple[str, str]:
         #   여기서 나쁜 키를 떼어 내지 않는다 - 그건 가설을 바꾸는 일이고
         #   우리 권한이 아니다. **부모를 고치는 것이 답이고, 그건 리서치 몫**
         #   이다(브리핑의 [막혀 있는 가설] 이 이미 그렇게 말한다).
+        #   ▶ 판정은 실행면에 묻는다 (2026-08-14). 여기서 `EDGE_KEYS` 만 보고
+        #     직접 세면 **실행면보다 엄격해진다** - `observation_refs`/`universe`
+        #     는 `bind` 가 받아 주는데 여기서 막았고, 그렇게 실험 없이 폐기된
+        #     가설이 4건이다.
         try:
-            from config_binding import EDGE_KEYS  # noqa: PLC0415
-            bad = sorted(k for k in (edge or {}) if k not in EDGE_KEYS)
+            from config_binding import unknown_edge_keys  # noqa: PLC0415
+            bad = unknown_edge_keys(edge)
         except Exception:  # noqa: BLE001 - 못 읽으면 막지 않는다
             bad = []
         if bad:
@@ -619,21 +623,49 @@ def _check_variant_inherits_provenance():
     assert "11111111" in p[1], "부모 혈통이 근거에 안 남았다"
 
     # ▶ **못 도는 부모의 변형은 만들지 않는다** (2026-08-12 파이프라인 실측)
-    #   `774f3b75` 가 `observation_refs, universe` 로 막혀 있는데 그 변형
-    #   `deb25128` 이 만들어져 태어날 때부터 막혔다. 실측 2건.
-    broken = list(parent)
-    broken[3] = {"type": "momentum", "observation_refs": ["x"], "universe": "krx"}
-    cur2 = _Cur()
-    cur2.fetchone = lambda: tuple(broken)          # noqa: ARG005
+    #   막힌 부모의 변형은 `expected_edge` 를 그대로 물려받으므로 태어날 때부터
+    #   막힌다. 실측 2건.
+    #
+    #   ▶ 2026-08-14 정정: 이 검사는 오래 `observation_refs, universe` 를 "못 도는
+    #     부모" 의 예로 썼다. **틀린 전제였다** - 그 둘은 사전등록 계약 필드라
+    #     실행면(`config_binding.bind`)이 받아 준다. 관문만 엄격했던 것이고,
+    #     그래서 실험을 한 번도 못 돌고 폐기된 가설이 4건 나왔다. 판정을
+    #     `unknown_edge_keys()` 로 옮기면서 사례도 **진짜 못 도는 것**으로 바꾼다.
+    from config_binding import unknown_edge_keys  # noqa: PLC0415
 
-    class _C2:
-        def cursor(self): return cur2
-        def commit(self): pass
+    def _conn_for(edge: dict):
+        """부모의 `expected_edge` 만 바꾼 가짜 연결.
 
-    hid2, why2 = register_variant(_C2(), mv)
+        `fetchone` 을 통째로 덮으면 **중복 검사까지 부모를 돌려줘** 엉뚱한
+        사유("이미 있다")로 막힌다. 분기는 그대로 두고 부모만 갈아 끼운다.
+        """
+        p = list(parent)
+        p[3] = edge
+        cur_ = _Cur()
+        cur_.fetchone = lambda: (tuple(p) if "order by e.trial_number" in cur_._sql
+                                 else ("new-hyp-id",) if "insert into" in cur_._sql
+                                 else None)
+        class _C:                                  # noqa: E306
+            def cursor(self): return cur_
+            def commit(self): pass
+        return _C(), cur_
+
+    _c2, cur2 = _conn_for({"type": "momentum", "signal_window_days": 20})
+    hid2, why2 = register_variant(_c2, mv)
     assert hid2 == "" and "실행면이 안 읽는" in why2, why2
-    assert "observation_refs" in why2 and "universe" in why2, why2
+    assert "signal_window_days" in why2, why2
     assert cur2.inserted is None, "막힌 부모인데 변형을 등록했다"
+
+    # ▶ **사전등록 키만 가진 부모는 막지 않는다** (2026-08-14).
+    #   막았기 때문에 4건이 실험 없이 죽었다. 실행면이 받아 주는 것을 배분자가
+    #   막으면, 그 차이만큼은 검증이 아니라 소실이다.
+    prereg = {"type": "momentum", "observation_refs": ["x"], "universe": "krx"}
+    assert unknown_edge_keys(prereg) == [], \
+        "사전등록 키를 미지 파라미터로 세고 있다 - 실행면은 받아 준다"
+    _c3, cur3 = _conn_for(prereg)
+    hid3, why3 = register_variant(_c3, mv)
+    assert hid3 == "new-hyp-id", (hid3, why3)
+    assert cur3.inserted is not None, "실행면이 받아 줄 부모인데 변형을 안 만들었다"
     print("  변형이 근거를 물려받음   OK")
 
 

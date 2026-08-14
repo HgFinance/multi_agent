@@ -144,10 +144,54 @@ REV_CONFIG = {
 }
 
 
+# 실험 결과를 정하는 모듈들. **한 파일만 세면 지문이 거짓말을 한다.**
+#   backtest_runner   - 체결·비용·회계
+#   strategy_templates - 시그널과 PIT 뷰(유동성 필터 포함). 전략 카탈로그의 실체
+#   pit_dataset        - 파티션 적재 경로
+#   overfit_stats      - 부트스트랩·DSR (run_backtest 안에서 부른다)
+_CODE_FILES = ("backtest_runner.py", "strategy_templates.py",
+               "pit_dataset.py", "overfit_stats.py")
+
+
+def _code_digest(parts) -> str:
+    """(이름, 내용) 목록 -> 지문. 이름도 섞는다 - 파일이 바뀌든 갈리든 달라진다."""
+    h = hashlib.sha256()
+    for name, blob in parts:
+        h.update(name.encode())
+        h.update(b"\0")
+        h.update(blob)
+        h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
 def code_version() -> str:
-    """이 파일 자신의 해시 - 코드가 바뀌면 실험이 달라진다는 사실을 강제한다."""
-    src = Path(__file__).read_bytes()
-    return f"{RUNNER_VERSION}+{hashlib.sha256(src).hexdigest()[:12]}"
+    """결과를 정하는 코드의 해시 - 코드가 바뀌면 실험이 달라진다는 사실을 강제한다.
+
+    ▶ 한 파일만 세면 지문이 거짓말을 한다 (2026-08-14 실측)
+      예전에는 `Path(__file__)` 하나만 해시했다. 그런데 시그널과 PIT 뷰는
+      `strategy_templates` 에 있다 - 이 러너가 거기서 import 하고, 전략
+      카탈로그도 거기서 파생된다. 즉 **결과를 가장 크게 정하는 파일이 지문
+      밖에** 있었다.
+
+      그래서 두 방향으로 깨졌다:
+        · 거래대금 단위 버그(백만원 vs 원)를 `strategy_templates` 에서 고쳤는데
+          지문이 그대로라, 유니버스가 비어 **체결 0** 으로 끝난 실험
+          `9354f7fd` 가 그 지문을 계속 쥐고 있었다. 고친 코드로 다시 돌리려던
+          주문 2건이 "중복 실험" 으로 죽었다 - **버그가 자기 자리를 봉인했다.**
+        · 반대로 **같은 지문의 두 실험이 다른 결과를 낼 수 있다.** "같은 입력 =
+          같은 해시 = 같은 결과" 라는 재현성 계약이 그만큼 거짓이었다.
+
+      지문이 넓어지므로 **과거 지문은 더 이상 새 실행을 막지 않는다.** 그건
+      의도한 것이다 - 그 결과들은 실제로 다른 코드가 낸 것이다. 과거 행은
+      자기 code_version 을 그대로 달고 원장에 남는다.
+    """
+    here = Path(__file__).resolve().parent
+    parts = []
+    for name in _CODE_FILES:
+        p = here / name
+        # 없는 파일도 결정적으로 센다 - 빠졌다는 사실 자체가 지문의 일부다
+        parts.append((name, p.read_bytes() if p.exists() else b"<missing>"))
+    return f"{RUNNER_VERSION}+{_code_digest(parts)}"
 
 
 def input_hash(dataset_hash: str, config: dict, code_ver: str, seed: int) -> str:
@@ -256,9 +300,59 @@ def select_targets(market: Market, i: int, config: dict) -> list[str]:
                            params=config)
     if not scores:
         return []
-    # 동점 시 순서는 market.symbols(정렬됨) 순서를 따른다 - 결정론 유지
-    return sorted(scores, key=scores.get,
-                  reverse=tpl.rank == "TOP")[:int(config["top_n"])]
+    # 동점 시 순서는 market.symbols(정렬됨) 순서를 따른다 - 결정론 유지.
+    # `rank` 를 반영했으므로 이 목록은 **언제나 좋은 것부터**다.
+    ranked = sorted(scores, key=scores.get, reverse=tpl.rank == "TOP")
+    return _construct(ranked, config)
+
+
+# ── 포트폴리오 구성 방식 ────────────────────────────────────────────────────
+#
+# ▶ 왜 방식을 열었나 (2026-08-14 분위 곡선 실측)
+#   `signal_composite` 를 체결가능 유니버스(ADV 1억, 1,689종목)에서 10분위로
+#   갈라 재보니 알파가 **상위가 아니라 하위**에 있었다:
+#     Q1 -0.72 · Q4 +1.00 · Q7 +0.79 · Q10 +0.35 (%/월, 비용 전)
+#     롱온리 초과(Q10-평균) +0.06%p  vs  숏다리 몫(평균-Q1) +1.00%p
+#   상위 분위가 평균과 구별되지 않으므로 **상위를 고르는 구성으로는 못 먹는다** -
+#   top_n 이나 보유기간을 흔들어도 곡선 모양은 그대로다.
+#
+#   그런데 우리 어휘에는 "상위 N개를 산다" 밖에 없었다. 그래서 공장은 같은 벽에
+#   반복해 부딪혔다 - 병목 센서스 실측으로 `BASELINE_NOT_BEATEN` 이 **계열
+#   14개**에서 되풀이됐다("개별 설계 문제가 아니다"). 벽을 넘을 수단 자체가
+#   없으면 가설을 아무리 더 만들어도 결과는 같다.
+#
+# ▶ 왜 섞지 않고 배타로 두나
+#   `top_n=20` 은 DEFAULT_CONFIG 에 늘 있어서 "명시했는지" 를 구분할 수 없다.
+#   두 손잡이를 동시에 허용하면 어떤 구성을 잰 실험인지 사후에 알 수 없고,
+#   사전등록도 모호해진다. 방식을 **한 단어로 선언**하게 한다.
+CONSTRUCTIONS = ("TOP_N", "EXCLUDE_BOTTOM")
+
+
+def _construct(ranked: list[str], config: dict) -> list[str]:
+    """좋은 것부터 정렬된 목록 -> 실제 보유 종목.
+
+    `EXCLUDE_BOTTOM` 은 하위 `exclude_bottom_pct`% 를 빼고 **나머지 전체**를
+    동일가중으로 든다. 상위를 고르는 것이 아니라 나쁜 것을 피하는 구성이라,
+    숏 다리를 못 쓰는 롱온리에서 하위 분위의 음(-)수익을 회피하는 몫만 취한다.
+    """
+    mode = str(config.get("portfolio_construction") or "TOP_N").upper()
+    if mode == "TOP_N":
+        return ranked[:int(config["top_n"])]
+    if mode == "EXCLUDE_BOTTOM":
+        q = float(config.get("exclude_bottom_pct", 10.0))
+        if not 0.0 < q < 100.0:
+            raise ValueError(
+                f"exclude_bottom_pct 는 0 초과 100 미만이어야 한다: {q!r}")
+        keep = int(len(ranked) * (1.0 - q / 100.0))
+        # 한 종목도 안 남으면 그건 구성이 아니라 사고다 - 빈 포트폴리오는
+        # 거래 0 이 되고, 그것을 성과로 판정하면 가설이 억울하게 죽는다.
+        if keep < 1:
+            raise ValueError(
+                f"하위 {q}% 를 빼니 남는 종목이 없다(후보 {len(ranked)}개) - "
+                f"유니버스나 비율을 고친다")
+        return ranked[:keep]
+    raise ValueError(
+        f"모르는 구성 방식: {mode!r} - 사용 가능: {list(CONSTRUCTIONS)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1349,6 +1443,51 @@ def _check_risk_is_pit():
     print("  위험관리도 PIT          OK")
 
 
+def _check_fingerprint_covers_every_module_that_moves_results():
+    """**지문은 결과를 정하는 코드 전부를 세야 한다** (2026-08-14 실측).
+
+    예전에는 이 파일 하나만 해시했다. 시그널과 PIT 뷰는 `strategy_templates`
+    에 있는데도 지문 밖이었고, 그래서 거래대금 단위 버그를 고쳐도 지문이 안
+    바뀌었다 - 체결 0 으로 끝난 `9354f7fd` 가 그 지문을 계속 쥐어 재실행
+    주문 2건이 "중복 실험" 으로 죽었다.
+
+    여기서 고정하는 것 두 가지:
+      ① 어느 부분이 바뀌어도 지문이 바뀐다(내용도, 파일 이름도).
+      ② **같은 디렉터리에서 top-level import 하는 모듈은 전부 지문에 든다.**
+         새 모듈을 얹으면서 `_CODE_FILES` 를 안 고치면 여기서 걸린다 -
+         "다음 사람이 기억한다" 에 기대지 않는다.
+    """
+    import re as _re
+
+    base = [("a.py", b"one"), ("b.py", b"two")]
+    d0 = _code_digest(base)
+    assert d0 == _code_digest(list(base)), "같은 입력인데 지문이 흔들린다"
+    assert d0 != _code_digest([("a.py", b"one!"), ("b.py", b"two")]), \
+        "내용이 바뀌었는데 지문이 그대로다"
+    assert d0 != _code_digest([("z.py", b"one"), ("b.py", b"two")]), \
+        "파일 이름이 바뀌었는데 지문이 그대로다"
+    # 구분자가 없으면 ('ab','') 와 ('a','b') 가 같은 지문이 된다
+    assert _code_digest([("a.py", b"xy")]) != _code_digest([("a.pyx", b"y")]), \
+        "이름과 내용의 경계가 없다 - 다른 조합이 같은 지문이 된다"
+
+    here = Path(__file__).resolve().parent
+    src = Path(__file__).read_text(encoding="utf-8")
+    # top-level(들여쓰기 없는) import 만 본다 - 함수 안 지연 import 는 선택적
+    # 경로라 여기서 강제하지 않는다(overfit_stats 처럼 필요하면 손으로 넣는다).
+    imported = set()
+    for m in _re.finditer(r"^(?:from|import)\s+([A-Za-z_][\w]*)", src, _re.M):
+        mod = m.group(1)
+        if (here / f"{mod}.py").exists():
+            imported.add(f"{mod}.py")
+    missing = sorted(imported - set(_CODE_FILES))
+    assert not missing, (
+        f"이 러너가 쓰는데 지문이 안 세는 모듈: {missing} - "
+        f"_CODE_FILES 에 넣어라. 안 넣으면 그 파일을 고쳐도 지문이 안 바뀌어 "
+        f"고친 실험이 '중복' 으로 막히고, 같은 지문이 다른 결과를 낸다")
+    print("  지문이 결과 모듈 전부를 셈 OK "
+          f"({len(_CODE_FILES)}개: {', '.join(_CODE_FILES)})")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -1389,6 +1528,56 @@ if __name__ == "__main__":
         assert not zombie_experiment("CANCELLED", True, 0, 1, 99.0)  # 판정 불가침
         print("  좀비 회수 != 재판정      OK")
 
+    def _check_construction_modes():
+        """**하위 배제 구성이 실제로 하위를 뺀다** (2026-08-14 분위 곡선 처방).
+
+        기본(TOP_N)은 한 톨도 바뀌지 않아야 한다 - 새 손잡이가 기존 실험의
+        재현을 깨면 과거 결과와 비교가 불가능해진다.
+        """
+        ranked = [f"S{i:02d}" for i in range(100)]      # 좋은 것부터
+
+        # 기본은 예전 그대로
+        assert _construct(ranked, {"top_n": 20}) == ranked[:20]
+        assert _construct(ranked, {"top_n": 20,
+                                   "portfolio_construction": "TOP_N"}) == ranked[:20]
+
+        # 하위 배제: 남는 것은 상위 쪽이고, top_n 은 관여하지 않는다
+        cfg = {"top_n": 20, "portfolio_construction": "EXCLUDE_BOTTOM",
+               "exclude_bottom_pct": 10.0}
+        kept = _construct(ranked, cfg)
+        assert len(kept) == 90, len(kept)
+        assert kept[0] == "S00" and kept[-1] == "S89", (kept[0], kept[-1])
+        assert "S99" not in kept, "하위가 안 빠졌다"
+        # 소문자로 선언해도 같은 구성이어야 한다(기획안이 자유 텍스트로 준다)
+        assert _construct(ranked, dict(cfg, portfolio_construction="exclude_bottom")) == kept
+
+        # 범위 밖은 거부한다 - 조용히 기본값으로 흘리면 무엇을 잰지 모른다
+        for bad in (0.0, 100.0, -5.0, 150.0):
+            try:
+                _construct(ranked, dict(cfg, exclude_bottom_pct=bad))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"exclude_bottom_pct={bad} 가 통과했다")
+
+        # 다 빼서 빈 포트폴리오가 되면 사고다 - 거래 0 은 판정할 수 없다
+        try:
+            _construct(["A", "B"], {"portfolio_construction": "EXCLUDE_BOTTOM",
+                                    "exclude_bottom_pct": 90.0})
+        except ValueError as e:
+            assert "남는 종목이 없다" in str(e), e
+        else:
+            raise AssertionError("빈 포트폴리오가 통과했다")
+
+        # 모르는 방식을 기본값으로 흘리지 않는다
+        try:
+            _construct(ranked, {"top_n": 20, "portfolio_construction": "MAGIC"})
+        except ValueError as e:
+            assert "모르는 구성 방식" in str(e), e
+        else:
+            raise AssertionError("모르는 구성 방식이 통과했다")
+        print("  구성 방식(빼기 포함)     OK")
+
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
     _check_zombie_reclaim_never_touches_verdicts()
     _check_no_lookahead()
@@ -1401,4 +1590,6 @@ if __name__ == "__main__":
     _check_drawdown_stop_actually_cuts_drawdown()
     _check_risk_is_pit()
     _check_pnl_concentration_is_measured()
-    print("Backtest Runner 10개 영역 통과. 실행은 --run")
+    _check_construction_modes()
+    _check_fingerprint_covers_every_module_that_moves_results()
+    print("Backtest Runner 12개 영역 통과. 실행은 --run")

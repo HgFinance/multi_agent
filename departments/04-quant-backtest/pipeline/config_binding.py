@@ -57,6 +57,19 @@ EDGE_KEYS = frozenset({
     "universe_key",    # 유니버스
     "horizon_days",    # 보유/형성 창 -> lookback_days
     "top_n",           # 상위 N 종목
+    # ── 구성 방식 (2026-08-14 개방) ────────────────────────────────────────
+    # ▶ 왜 열었나 - 위 top_n 주석이 인용한 KCI 예측("알파는 숏다리 →
+    #   롱온리는 빼기+광폭 보유")을 우리 데이터로 확인했다. signal_composite
+    #   분위 곡선(체결가능 1,689종목, 비용 전): 롱온리 초과(Q10-평균)
+    #   **+0.06%p/월** 인데 숏다리 몫(평균-Q1)은 **+1.00%p/월** 이다.
+    #   상위 분위가 평균과 구별되지 않으니 top_n 을 어떻게 흔들어도 안 된다.
+    #
+    #   그때 top_n 상한만 300 으로 열고 **"빼기" 는 구현하지 않았다.** 그래서
+    #   어휘에 "상위 N개를 산다" 밖에 없었고, 병목 센서스 실측으로
+    #   `BASELINE_NOT_BEATEN` 이 계열 14개에서 되풀이됐다. 수단이 없으면
+    #   가설을 더 만들어도 같은 벽이다.
+    "portfolio_construction",   # TOP_N(기본) | EXCLUDE_BOTTOM
+    "exclude_bottom_pct",       # EXCLUDE_BOTTOM 일 때 하위 몇 %를 빼는가
     # ── 위험관리 (2026-08-12 개방) ──────────────────────────────────────────
     # ▶ 왜 열었나
     #   momentum 이 초과 +157.51%p · IR 1.26 · DSR 0.976 을 내고도 낙폭
@@ -88,7 +101,7 @@ EDGE_KEYS = frozenset({
 
 # 실수로 읽는 키. 나머지는 정수다 - `_take` 가 정수만 받으므로 갈라야 한다.
 FLOAT_KEYS = frozenset({"vol_target_annual", "max_drawdown_stop", "max_exposure",
-                        "min_adv_krw"})
+                        "min_adv_krw", "exclude_bottom_pct"})
 
 LIMITS = {
     "lookback_days": (2, 250),      # 1일은 신호가 아니고, 250일 초과는 표본 부족
@@ -99,6 +112,9 @@ LIMITS = {
     #   3,924 종목의 8%를 넘어 지수 복제에 가까워지므로 여전히 막는다.
     #   **값은 우리가 정하지 않는다** - 얼마로 걸지는 기획안이 정한다.
     "top_n": (5, 300),              # 5 미만은 분산이 안 된다
+    # 하위 배제 비율. 90% 를 넘게 빼면 그건 "빼기" 가 아니라 상위 소수 집중이라
+    # top_n 구성과 같아진다 - 그럴 거면 TOP_N 으로 선언해야 실험이 정직하다.
+    "exclude_bottom_pct": (1.0, 90.0),
 
     "holding_horizon": (1, 120),
     # 체결 가능 유니버스 (2026-08-14). 0 = 필터 없음(현행). 상한은 유니버스를
@@ -157,6 +173,53 @@ def _rebalance_for(horizon: int) -> str:
     if horizon <= 10:
         return "EVERY_5_TRADING_DAYS"
     return "MONTH_FIRST_TRADING_DAY"
+
+
+def unknown_edge_keys(edge: dict | None) -> list[str]:
+    """`bind` 가 거부할 `expected_edge` 키. **이 판정의 정본은 여기 하나다.**
+
+    ▶ 왜 함수로 빼는가 (2026-08-14 실측)
+      같은 판정을 세 곳이 각자 적고 있었다. 실행면(`bind`)은
+      `EDGE_KEYS | NON_EXECUTION_KEYS` 를 받는데, 발주 관문
+      (`factory_autopilot._blocked_reasons`)과 배분자(`allocator`)는
+      `EDGE_KEYS` 만 봤다. 그래서 **실행면이 받아 줄 가설을 관문이 막았다.**
+
+      실측 피해: `observation_refs`/`universe` 만 갖고 있어 실행면은 통과할
+      가설 13건이 관문에 막혔고, 그중 4건(049d07c1·c2d4c707·7c1c1116·
+      774f3b75)은 **실험을 한 번도 못 돌고 폐기**됐다. 관문이 실행면보다
+      엄격하면 그 차이만큼은 검증이 아니라 소실이다.
+
+      표를 넓힐 때 세 곳을 같이 고치라는 규칙은 지켜지지 않는다(edge_type
+      표 셋이 하나씩 순서대로 터진 전례가 있다). 판정을 여기 하나로 두면
+      넓히는 순간 세 곳이 같이 넓어진다 - 규칙이 아니라 구조로 막는다.
+    """
+    return sorted(k for k in (edge or {})
+                  if k not in EDGE_KEYS and k not in NON_EXECUTION_KEYS)
+
+
+def rejection_reasons(hyp: dict) -> list[str]:
+    """실행면이 이 가설을 거부할 이유. **관문이 발주 전에 묻는 창구.**
+
+    ▶ 왜 필요한가 (2026-08-14 실측)
+      관문은 이름(`unknown_edge_keys`)만 봤고 **값의 범위·부호는 안 봤다.**
+      그래서 `a266a02d` 가 `max_drawdown_stop=0.35`(양수 - 낙폭 정지는 음수여야
+      한다)로 등록된 뒤, 발주 -> 실행 -> 거부를 **3회** 반복했다. 매번 워커가
+      집어 가서 같은 자리에서 죽었고, 그 사이 돌 수 있는 주문이 밀렸다.
+
+      값 검사는 이름 검사보다 늦게 알 이유가 없다. 등록된 값은 이미 다 있다.
+
+    ▶ 판정을 다시 적지 않는다
+      범위표(`LIMITS`)를 관문에서 다시 훑으면 `EDGE_KEYS` 때와 똑같이 갈라진다.
+      대신 **실행면을 그대로 부른다** - `bind` 의 거부 목록은 base config 와
+      무관하게 `expected_edge` 값만으로 정해지므로(범위 위반과 미지 키는 전부
+      `b.rejected` 조기 반환 앞에서 결정된다) 빈 base 로 물어도 답이 같다.
+
+    못 재면 빈 목록을 돌려준다 - 판정을 못 한다고 막으면 정상 가설이 굶는다.
+    """
+    try:
+        return list(bind(hyp, {}).rejected)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def bind(hyp: dict, base_config: dict) -> Binding:
@@ -234,7 +297,7 @@ def bind(hyp: dict, base_config: dict) -> Binding:
             cfg["universe_key"] = value.strip()
             b.from_hypothesis.append(f"universe_key={value.strip()}")
 
-    unknown = sorted(k for k in edge if k not in EDGE_KEYS and k not in NON_EXECUTION_KEYS)
+    unknown = unknown_edge_keys(edge)
     if unknown:
         b.rejected.append(
             f"실행면이 읽지 않는 파라미터가 있다: {unknown} - 무시하고 돌리면 "
@@ -424,6 +487,91 @@ def _check_runner_and_binder_agree_on_risk_keys():
     print("  러너<->바인더 손잡이 일치 OK")
 
 
+def _check_preregistration_keys_are_not_unknown():
+    """**사전등록용 키는 거부 대상이 아니다** (2026-08-14 실측).
+
+    `observation_refs`/`universe` 는 실행 손잡이가 아니라 계약 필드라
+    `bind` 가 받아 준다. 이걸 거부로 세면 정상 가설이 실행 불가가 된다 -
+    관문이 실제로 그렇게 세고 있었고, 실험을 한 번도 못 돌고 폐기된 가설이
+    4건이었다(049d07c1·c2d4c707·7c1c1116·774f3b75).
+    """
+    for k in NON_EXECUTION_KEYS:
+        assert unknown_edge_keys({"type": "momentum", k: "x"}) == [], (
+            f"사전등록 키 {k!r} 가 거부로 세어졌다 - 관문이 이걸 보면 "
+            f"실행면이 받아 줄 가설을 막는다")
+
+    # 모르는 이름은 여전히 거부한다 - 넓힌 것이 아니라 맞춘 것이다
+    assert unknown_edge_keys({"formation_window_days": 42}) == \
+        ["formation_window_days"], "모르는 이름까지 통과시키면 안 된다"
+    print("  사전등록 키 != 미지 파라미터 OK")
+
+
+def _check_gate_sees_range_violations_too():
+    """**관문이 이름만 보면 값으로 죽는다** (2026-08-14 실측).
+
+    `a266a02d` 가 `max_drawdown_stop=0.35`(양수) 로 등록됐다. 이름은 정상이라
+    관문을 통과했고, 실행면이 범위 [-0.9, -0.02] 로 거부해 **3회** 발주-실행-
+    거부를 반복했다. 관문이 물어야 할 것은 "읽을 수 있는 이름인가" 가 아니라
+    "실행면이 이걸 돌리는가" 다.
+
+    함께 고정하는 것: **관문의 답이 실행면의 답과 같아야 한다.** 다르면 또
+    갈라진다 - 그래서 `rejection_reasons` 는 `bind` 를 그대로 부른다.
+    """
+    hyp = {"expected_edge": {"type": "momentum", "max_drawdown_stop": 0.35}}
+    why = rejection_reasons(hyp)
+    assert why and "0.35" in why[0], f"부호가 뒤집힌 값을 관문이 통과시킨다: {why}"
+
+    # 실행면이 실제로 거부하는 것과 같은 답이어야 한다
+    assert why == bind(hyp, {"strategy": "X"}).rejected, \
+        "관문과 실행면의 답이 다르다 - 판정이 또 갈라졌다"
+
+    # 미지 이름도 같은 창구로 잡힌다(관문이 두 번 묻지 않게)
+    assert rejection_reasons({"expected_edge": {"type": "momentum",
+                                                "signal_window_days": 20}}), \
+        "미지 파라미터를 이 창구가 못 잡으면 관문이 검사를 둘로 나눠야 한다"
+
+    # 정상 가설은 통과한다 - 못 재면 막는 쪽으로 기울면 정상이 굶는다
+    assert rejection_reasons({"expected_edge": {
+        "type": "momentum", "horizon_days": 20, "top_n": 200,
+        "max_drawdown_stop": -0.25, "observation_refs": ["x"]}}) == []
+    print("  관문이 값 범위도 본다      OK")
+
+
+def _check_gate_asks_the_execution_surface():
+    """**관문이 판정을 직접 적으면 안 된다** (2026-08-14 실측).
+
+    발주 관문과 배분자가 `k not in EDGE_KEYS` 를 각자 적고 있었다.
+    `NON_EXECUTION_KEYS` 를 실행면에만 더하자 **관문이 실행면보다 엄격해졌고**,
+    그 차이가 곧바로 소실로 나타났다(위 4건). 표를 넓힐 때 세 곳을 같이
+    고치라는 규칙은 지켜지지 않으므로, 손으로 센 흔적이 남아 있는지를 본다.
+
+    파일이 없으면(컨테이너로 pipeline 만 복사된 경우) 검사를 건너뛴다 -
+    없는 파일을 실패로 치면 실행면 자체 점검이 배포에서 못 돈다.
+    """
+    from pathlib import Path as _P  # noqa: PLC0415
+
+    here = _P(__file__).resolve().parent
+    # parents[1] = departments/ (pipeline -> 04-quant-backtest -> departments)
+    gates = [here / "allocator.py",
+             # 버리는 쪽도 같은 판정이다 - 여기서 갈리면 **조용히** 유니버스가
+             # 바뀐다(막히는 것보다 나쁘다: 결과가 나오는데 다른 실험이다).
+             here / "walk_forward.py",
+             here.parents[1] / "01-research" / "factory" / "factory_autopilot.py"]
+    checked = 0
+    for g in gates:
+        if not g.exists():
+            continue
+        checked += 1
+        src = g.read_text(encoding="utf-8")
+        # 주석에서 이 규칙을 설명하는 것은 괜찮다 - 코드로 세는 것만 막는다
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "not in EDGE_KEYS" not in code, (
+            f"{g.name} 이 미지 파라미터를 직접 세고 있다 - "
+            f"`unknown_edge_keys()` 에 물어야 관문과 실행면이 갈라지지 않는다")
+    print(f"  관문이 실행면에 묻는다({checked}곳) OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -439,4 +587,7 @@ if __name__ == "__main__":
     _check_base_config_not_mutated();            print("  원본 불변               OK")
     _check_risk_knobs_bind_and_bound()
     _check_runner_and_binder_agree_on_risk_keys()
-    print("config 바인딩 10개 영역 통과.")
+    _check_preregistration_keys_are_not_unknown()
+    _check_gate_sees_range_violations_too()
+    _check_gate_asks_the_execution_surface()
+    print("config 바인딩 13개 영역 통과.")

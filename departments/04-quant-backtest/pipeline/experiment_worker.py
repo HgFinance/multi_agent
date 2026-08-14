@@ -58,10 +58,34 @@ def _conn():
                             connect_timeout=20)
 
 
+# 가설이 여기 오면 이 주문은 다시 돌 이유가 없다. 회수(`RUNNING` 만 되돌림)도
+# 발주(`PROPOSED` 만 집음)도 건드리지 않는 상태들이다. **재실험이 필요하면
+# 리서치가 새 가설을 내는 것이 계약이다** - 워커가 종결을 되돌리지 않는다.
+TERMINAL_HYPOTHESIS_STATUSES = frozenset({
+    "REJECTED", "SUPPORTED", "INCONCLUSIVE", "ARCHIVED", "PROMOTED",
+})
+
+
+def hypothesis_is_terminal(conn, hypothesis_id: str) -> bool:
+    """가설이 종결 상태인가. 못 읽으면 **종결로 보지 않는다**(지어내지 않는다).
+
+    판단을 못 했다고 주문을 닫으면 멀쩡한 것을 죽인다. 반대로 놓아주기는
+    반복될 뿐이라 회복 가능하므로, 불확실할 때는 놓아주기 쪽으로 기운다.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select status from quant.hypotheses "
+                        "where hypothesis_id = %s::uuid", (hypothesis_id,))
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - 못 물으면 종결로 몰지 않는다
+        return False
+    return bool(row) and str(row[0] or "").upper() in TERMINAL_HYPOTHESIS_STATUSES
+
+
 def run_one(conn, job: dict) -> dict:
     """작업 하나. **예외가 나도 반드시 종결한다.**"""
     from experiment_orchestrator import orchestrate
-    from job_queue import finish
+    from job_queue import finish, release
 
     jid, hid = job["job_id"], job["hypothesis_id"]
     try:
@@ -74,6 +98,29 @@ def run_one(conn, job: dict) -> dict:
         #   성공으로 치면 결과 없는 주문이 DONE 으로 쌓인다.
         reason = (f"verdict={rep.verdict}; "
                   f"backlog={'; '.join(rep.backlog)[:200] or '-'}")
+        # ▶ **타이밍은 실패가 아니다** (2026-08-14 실측)
+        #   가설이 아직 RUNNING 이라 전이가 거부된 것은 이 주문의 흠이 아니다 -
+        #   회수가 10분 정체 기준으로 PROPOSED 로 되돌리면 그대로 돌 주문이다.
+        #   실측 24시간 실패 13건 중 7건이 이것이었고 전부 attempts=2/2 로
+        #   재시도 예산을 태운 채 영구 FAILED 였다. 놓아주고 다음 순회에 맡긴다.
+        if rep.verdict == "BAD_TRANSITION":
+            # ▶ **종결된 가설의 주문은 놓아주지 않는다** (2026-08-14 실측)
+            #   놓아주기는 "회수가 곧 PROPOSED 로 풀어 줄 것" 이라는 전제 위에
+            #   선다. 그런데 회수는 `status='RUNNING'` 만 되돌리고 발주는
+            #   `PROPOSED` 만 집으므로, 가설이 INCONCLUSIVE·REJECTED 로 **종결**
+            #   되면 그 전제가 깨진다 - 주문은 QUEUED 로 남아 집힐 때마다 같은
+            #   BAD_TRANSITION 을 내고 영원히 놓아주기를 반복한다.
+            #   실측: `805a81b5`·`17bd0213` 두 건이 INCONCLUSIVE 인 채 큐에
+            #   앉아 그 고리를 돌고 있었다("INCONCLUSIVE -> PREREGISTERED").
+            #   종결된 가설의 주문은 **할 일이 없다.** 사유를 남기고 닫는다.
+            if hypothesis_is_terminal(conn, hid):
+                done_reason = (f"{reason} | 가설이 이미 종결 상태다 - 회수도 "
+                               f"발주도 이 주문을 되살리지 않으므로 닫는다")
+                finish(conn, jid, ok=False, reason=done_reason)
+                return {"job_id": jid, "result": "FAILED",
+                        "reason": done_reason}
+            release(conn, jid, reason=reason)
+            return {"job_id": jid, "result": "RELEASED", "reason": reason}
         finish(conn, jid, ok=False, reason=reason)
         return {"job_id": jid, "result": "FAILED", "reason": reason}
     except Exception as e:  # noqa: BLE001
@@ -111,7 +158,7 @@ _STALL_SQL = """
     select h.hypothesis_id::text, h.status, h.status_changed_at,
            (select count(*) from quant.experiment_jobs j
              where j.hypothesis_id = h.hypothesis_id
-               and j.status in ('QUEUED', 'LEASED')) as open_jobs,
+               and j.status = 'LEASED') as leased_jobs,
            (select j.failure_reason from quant.experiment_jobs j
              where j.hypothesis_id = h.hypothesis_id and j.status = 'FAILED'
              order by j.updated_at desc limit 1) as last_failure
@@ -127,8 +174,22 @@ def stalled_hypotheses(rows: list[dict], *, now: datetime,
     for r in rows:
         if r.get("status") != "RUNNING":
             continue
-        # 아직 큐에 살아 있는 작업이 있으면 도는 중이다 - 뺏지 않는다.
-        if r.get("open_jobs"):
+        # **집혀 있는(LEASED) 작업이 있으면 도는 중이다 - 뺏지 않는다.**
+        #
+        # ▶ 큐에 있는(QUEUED) 것까지 세면 안 된다 (2026-08-14 실측)
+        #   원래는 `QUEUED, LEASED` 를 같이 셌다. 그런데 같은 날 들어온
+        #   놓아주기(`job_queue.release`)가 BAD_TRANSITION 주문을 FAILED 가
+        #   아니라 **QUEUED 로 되돌린다.** 그 순간 두 장치가 서로를 기다렸다:
+        #     · 놓아주기는 "회수가 곧 가설을 PROPOSED 로 돌려줄 것" 이라 기다리고
+        #     · 회수는 "큐에 작업이 살아 있으니 도는 중" 이라 안 건드린다
+        #   실측 교착: 주문 3건이 각각 36·16·14회 놓아주기를 반복했고, 그
+        #   가설들은 RUNNING 에 92·89·76분 갇혀 있었다. 둘 다 "기다리는 중"
+        #   이라 로그는 조용했다.
+        #
+        #   **QUEUED 는 도는 중이 아니라 기다리는 중이다.** 그리고 가설이
+        #   RUNNING 인 한 그 대기는 영원하다 - 집혀도 같은 BAD_TRANSITION 이다.
+        #   집힌 것만 세면 30분 lease 만료가 이미 경계를 지켜 준다.
+        if r.get("leased_jobs"):
             continue
         changed = r.get("status_changed_at")
         if changed is None:
@@ -226,6 +287,67 @@ def sweep_orphans(conn) -> dict | None:
         return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+# ── 정상 종료 시 집은 주문 반납 ──────────────────────────────────────────────
+#
+# ▶ 왜 필요한가 (2026-08-14 실측)
+#   워커를 재기동하면 그때 집혀 있던 주문이 lease 만료(30분)까지 묶여 있다가
+#   `reclaim_decision` 에서 **영구 FAILED** 로 닫힌다. 사유는 "워커 무응답으로
+#   회수 - 시도 2/2 소진. 실행이 반복해 죽는다는 뜻" 인데, 그 해석은 **워커가
+#   그 주문 때문에 죽었을 때** 맞는 말이다. 배포하려고 사람이 재기동한 것은
+#   그 주문의 흠이 아니다.
+#
+#   실측: 오늘 두 건이 그렇게 죽었다 - 04:48 `04839e7e`, 05:26 `7df0ddd6`.
+#   둘 다 재기동 시각과 정확히 겹친다. 하루에 배포를 여러 번 하는 동안
+#   **배포마다 한 건씩** 영구 실패가 쌓이는 구조였다.
+#
+# ▶ 크래시와 구분한다
+#   여기서 반납하는 것은 SIGTERM/SIGINT(정상 종료)뿐이다. 진짜로 죽은 워커는
+#   신호를 못 받으므로 기존 lease 만료 경로가 그대로 처리한다 - 무한 재시도를
+#   막는 그 보호는 남는다.
+_HELD: dict = {"jobs": []}
+
+
+def release_held_jobs(job_ids, *, connect, release_fn, reason: str) -> int:
+    """집고 있던 주문을 반납한다. **도는 트랜잭션을 건드리지 않는다.**
+
+    백테스트 도중에 신호가 오면 순회용 연결은 트랜잭션 한복판일 수 있다.
+    거기에 끼어들어 쓰면 그 트랜잭션이 무엇을 남길지 알 수 없으므로, 반납은
+    **새 연결**로 한다(`connect`). 이미 끝난 주문은 `release` 가
+    `status='LEASED'` 조건으로 걸러 내므로 그냥 넘어간다.
+    """
+    ids = [j for j in (job_ids or []) if j]
+    if not ids:
+        return 0
+    conn = connect()
+    try:
+        for jid in ids:
+            release_fn(conn, jid, reason=reason)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - 닫기 실패가 반납을 무르게 하지 않는다
+            pass
+    return len(ids)
+
+
+def _on_shutdown(signum, _frame):  # pragma: no cover - 신호 경로
+    from job_queue import release  # noqa: PLC0415
+
+    held = list(_HELD.get("jobs") or [])
+    try:
+        n = release_held_jobs(
+            held, connect=_conn, release_fn=release,
+            reason=f"워커 정상 종료(signal {signum})로 반납 - 배포·재기동은 "
+                   f"이 주문의 흠이 아니다. 시도 예산을 태우지 않는다")
+        print(f"{WORKER_VERSION} 종료 - 집고 있던 주문 {n}건 반납", flush=True)
+    except Exception as e:  # noqa: BLE001 - 반납 실패해도 종료는 한다
+        print(f"⚠ 종료 반납 실패(다음 lease 만료가 처리한다): "
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 def tick(conn, *, worker: str) -> dict:
     """한 순회. 가설 회수 -> 작업 회수 -> 고아 소탕 -> 집기 -> 실행."""
     from job_queue import lease, reclaim
@@ -234,18 +356,61 @@ def tick(conn, *, worker: str) -> dict:
     rec = reclaim(conn)
     orph = sweep_orphans(conn)
     jobs = lease(conn, worker=worker)
-    results = [run_one(conn, j) for j in jobs]
+    # 집는 순간부터 반납 대상이다 - 실행 중에 신호가 와도 놓아줄 수 있어야 한다
+    _HELD["jobs"] = [str(j["job_id"]) for j in jobs]
+    try:
+        results = [run_one(conn, j) for j in jobs]
+    finally:
+        _HELD["jobs"] = []
     return {"hypotheses": hyp, "reclaimed": rec, "orphans": orph,
             "picked": len(jobs), "results": results}
 
 
+def connection_is_usable(conn) -> bool:
+    """**쓰기 전에 살아 있는지 묻는다** (2026-08-14 실측).
+
+    `DATABASE_URL` 은 Supabase transaction pooler(6543)다. 백테스트가 도는 수
+    분 동안 이 연결은 idle 이라 풀러가 끊어 버리고, 다음 순회가
+    `InterfaceError: connection already closed` 로 통째로 실패했다 - 그 순회가
+    집어 둔 작업은 30분 리스 만료까지 묶인다.
+
+    끊긴 것은 사고가 아니라 **풀러의 정상 동작**이다. 그러니 예외로 받아
+    순회를 죽이지 말고, 순회 시작에 한 번 물어 조용히 다시 잡는다.
+    `select 1` 한 번이면 되고, 15초 주기에서 이 비용은 무시할 만하다.
+    """
+    if conn is None or getattr(conn, "closed", 1):
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select 1")
+        conn.rollback()
+        return True
+    except Exception:  # noqa: BLE001 - 못 물으면 죽은 것으로 본다
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001, S110 - 이미 죽은 연결
+            pass
+        return False
+
+
 def serve() -> None:
+    import signal  # noqa: PLC0415
+
     worker = worker_name()
     print(f"{WORKER_VERSION} 시작 - {worker}", flush=True)
+    # ▶ 배포 재기동이 주문을 태우지 않게 한다. docker 는 SIGTERM 을 먼저 보내고
+    #   유예(기본 10초) 뒤 SIGKILL 한다 - 반납은 새 연결 한 번이라 그 안에 끝난다.
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _on_shutdown)
+        except (ValueError, OSError):  # noqa: PERF203 - 메인 스레드가 아니면 건너뛴다
+            pass
     conn = _conn()
     try:
         while True:
             try:
+                if not connection_is_usable(conn):
+                    conn = _conn()
                 r = tick(conn, worker=worker)
                 # 되돌린 것은 항상 드러낸다 - 조용히 되돌리면 같은 실험을
                 # 새 것으로 착각한다.
@@ -313,6 +478,7 @@ def _check_failure_always_finishes(monkey=None):
     import types
     mod = types.ModuleType("job_queue")
     mod.finish = fake_finish
+    mod.release = _never_release
     orch = types.ModuleType("experiment_orchestrator")
     orch.orchestrate = boom
     sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
@@ -327,6 +493,199 @@ def _check_failure_always_finishes(monkey=None):
         sys.modules.pop("experiment_orchestrator", None)
 
 
+def _never_release(conn, job_id, *, reason):
+    """놓아주기가 일어나면 안 되는 경로에 꽂는 스텁.
+
+    놓아주기는 시도 예산을 되돌리므로, 정말 못 도는 주문에까지 쓰면 그 주문이
+    큐에서 영원히 돈다. 어느 경로가 종결이고 어느 경로가 대기인지 검사가
+    구분하게 만든다.
+    """
+    raise AssertionError(f"이 경로는 놓아주기가 아니라 종결이어야 한다: {reason}")
+
+
+def _check_terminal_hypothesis_job_is_closed_not_parked():
+    """**종결된 가설의 주문은 닫는다** (2026-08-14 실측).
+
+    놓아주기는 "회수가 곧 PROPOSED 로 풀어 준다" 는 전제 위에 선다. 가설이
+    INCONCLUSIVE·REJECTED 로 종결되면 회수(RUNNING 만)도 발주(PROPOSED 만)도
+    그 주문을 건드리지 않으므로 전제가 깨지고, 집힐 때마다 같은
+    BAD_TRANSITION 을 내며 영원히 돈다(실측 2건: 805a81b5·17bd0213).
+    """
+    import types
+
+    import experiment_worker as W
+
+    class _StatusConn:
+        def __init__(self, status):
+            self._status = status
+
+        def cursor(self):
+            status = self._status
+
+            class _C:
+                def __enter__(self_):
+                    return self_
+                def __exit__(self_, *a):
+                    return False
+                def execute(self_, *a, **k):
+                    return None
+                def fetchone(self_):
+                    return (status,)
+            return _C()
+
+    calls = []
+    mod = types.ModuleType("job_queue")
+    mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
+        calls.append(("finish", ok, reason))
+    mod.release = lambda conn, jid, *, reason: calls.append(("release", reason))
+
+    class _Rep:
+        experiment_refs = None
+        backlog = ["INCONCLUSIVE -> PREREGISTERED 는 계약 순서를 건너뛴다"]
+        verdict = "BAD_TRANSITION"
+
+    orch = types.ModuleType("experiment_orchestrator")
+    orch.orchestrate = lambda hid, conn=None: _Rep()
+    sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+    try:
+        # 종결 상태 -> 닫는다
+        for st in ("INCONCLUSIVE", "REJECTED", "ARCHIVED"):
+            calls.clear()
+            r = W.run_one(_StatusConn(st), {"job_id": "j1", "hypothesis_id": "h1"})
+            assert r["result"] == "FAILED", (st, r)
+            assert [c[0] for c in calls] == ["finish"], (st, calls)
+            assert "종결" in (calls[0][2] or ""), (st, calls)
+
+        # 아직 도는 상태 -> 놓아준다(예산 보존)
+        calls.clear()
+        r2 = W.run_one(_StatusConn("RUNNING"), {"job_id": "j2",
+                                                "hypothesis_id": "h1"})
+        assert r2["result"] == "RELEASED", r2
+        assert [c[0] for c in calls] == ["release"], calls
+    finally:
+        sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
+
+    # 상태를 못 물으면 **종결로 몰지 않는다** - 판단 못 한 것으로 주문을 죽이면
+    # 멀쩡한 것을 잃는다. 놓아주기는 반복될 뿐이라 회복 가능하다.
+    class _Boom:
+        def cursor(self):
+            raise RuntimeError("연결이 끊겼다")
+    assert W.hypothesis_is_terminal(_Boom(), "h1") is False
+
+    class _Missing:
+        def cursor(self):
+            class _C:
+                def __enter__(self_):
+                    return self_
+                def __exit__(self_, *a):
+                    return False
+                def execute(self_, *a, **k):
+                    return None
+                def fetchone(self_):
+                    return None
+            return _C()
+    assert W.hypothesis_is_terminal(_Missing(), "h1") is False
+
+
+def _check_dead_connection_is_reconnected_not_fatal():
+    """**끊긴 연결이 순회를 죽이지 않는다** (2026-08-14 실측).
+
+    풀러가 idle 연결을 끊는 것은 정상 동작인데, 그것을 예외로 받아 순회가
+    통째로 실패했다(`InterfaceError: connection already closed`). 그 순회가
+    집어 둔 작업은 30분 리스 만료까지 묶인다 - 큐가 그만큼 멈춘다.
+    """
+    assert not connection_is_usable(None)
+
+    class _Closed:
+        closed = 1
+    assert not connection_is_usable(_Closed())
+
+    closed_calls = []
+
+    class _Broken:
+        closed = 0
+        def cursor(self):
+            raise RuntimeError("서버가 연결을 끊었다")
+        def close(self):
+            closed_calls.append(True)
+    assert not connection_is_usable(_Broken())
+    assert closed_calls, "죽은 연결을 닫지 않으면 소켓이 샌다"
+
+    class _Live:
+        closed = 0
+        rolled = []
+        def cursor(self):
+            class _C:
+                def __enter__(self_):
+                    return self_
+                def __exit__(self_, *a):
+                    return False
+                def execute(self_, *a, **k):
+                    return None
+            return _C()
+        def rollback(self):
+            _Live.rolled.append(True)
+    assert connection_is_usable(_Live())
+    assert _Live.rolled, "확인 쿼리의 트랜잭션을 안 닫으면 idle in transaction 이 쌓인다"
+
+    # 순회가 시작 전에 실제로 묻는지 - 물어보지 않으면 이 함수는 장식이다.
+    import ast
+    import pathlib
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    body = ast.get_source_segment(src, next(
+        n for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.name == "serve")) or ""
+    assert "connection_is_usable(conn)" in body, "순회가 연결 생존을 안 묻는다"
+
+
+def _check_bad_transition_is_released_not_failed():
+    """**타이밍을 영구 실패로 굳히지 않는다** (2026-08-14 실측).
+
+    가설이 아직 RUNNING 이라 전이가 거부된 것은 회수가 곧 풀어줄 상태다.
+    그런데 `finish(ok=False)` 로 종결하고 있었고, 24시간 실패 13건 중 7건이
+    이것이었다 - 전부 attempts=2/2 로 재시도 예산을 태운 채 굳었다.
+
+    함께 고정하는 것: **놓아주기가 모든 실패를 삼키면 안 된다.** 못 도는
+    주문(NOT_RUNNABLE 등)은 여전히 종결돼야 큐에서 영원히 돌지 않는다.
+    """
+    import types
+
+    import experiment_worker as W
+
+    calls = []
+    mod = types.ModuleType("job_queue")
+    mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
+        calls.append(("finish", ok, reason))
+    mod.release = lambda conn, jid, *, reason: calls.append(("release", reason))
+
+    class _Rep:
+        experiment_refs = None
+        backlog = ["RUNNING -> PREREGISTERED 는 계약 순서를 건너뛴다"]
+        verdict = "BAD_TRANSITION"
+
+    orch = types.ModuleType("experiment_orchestrator")
+    orch.orchestrate = lambda hid, conn=None: _Rep()
+    sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+    try:
+        r = W.run_one(_FakeConn(), {"job_id": "j1", "hypothesis_id": "h1"})
+        assert r["result"] == "RELEASED", r
+        assert [c[0] for c in calls] == ["release"], calls
+        assert "BAD_TRANSITION" in calls[0][1], calls
+
+        calls.clear()
+        _Rep.verdict = "NOT_RUNNABLE"
+        r2 = W.run_one(_FakeConn(), {"job_id": "j2", "hypothesis_id": "h1"})
+        assert r2["result"] == "FAILED", r2
+        assert [c[0] for c in calls] == ["finish"], \
+            f"못 도는 주문까지 놓아주면 큐에서 영원히 돈다: {calls}"
+        assert calls[0][1] is False, calls
+    finally:
+        _Rep.verdict = "BAD_TRANSITION"
+        sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
+
+
 def _check_ran_but_no_experiment_is_failure():
     """**"돌긴 돌았다" 를 성공으로 치지 않는다** - 결과 없는 DONE 이 쌓인다."""
     import types
@@ -337,6 +696,7 @@ def _check_ran_but_no_experiment_is_failure():
     mod = types.ModuleType("job_queue")
     mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
         calls.append({"ok": ok, "reason": reason})
+    mod.release = _never_release
     orch = types.ModuleType("experiment_orchestrator")
 
     class _Rep:
@@ -356,7 +716,7 @@ def _check_ran_but_no_experiment_is_failure():
 
 
 def _hyp(**kw) -> dict:
-    d = {"hypothesis_id": "h1", "status": "RUNNING", "open_jobs": 0,
+    d = {"hypothesis_id": "h1", "status": "RUNNING", "leased_jobs": 0,
          "status_changed_at": datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc),
          "last_failure": "KeyError: 'low_volatility'"}
     d.update(kw)
@@ -364,9 +724,82 @@ def _hyp(**kw) -> dict:
 
 
 def _check_running_job_is_not_stolen():
-    """큐에 살아 있는 작업이 있으면 도는 중이다 - 뺏으면 같은 실험이 둘이 된다."""
+    """집혀 있는 작업이 있으면 도는 중이다 - 뺏으면 같은 실험이 둘이 된다."""
     now = datetime(2026, 8, 12, 5, 0, tzinfo=timezone.utc)
-    assert stalled_hypotheses([_hyp(open_jobs=1)], now=now) == []
+    assert stalled_hypotheses([_hyp(leased_jobs=1)], now=now) == []
+
+
+def _check_shutdown_returns_the_job_instead_of_burning_it():
+    """**배포 재기동은 그 주문의 흠이 아니다** (2026-08-14 실측).
+
+    재기동 때 집혀 있던 주문은 lease 만료까지 묶였다가 `reclaim_decision` 이
+    "시도 2/2 소진 - 실행이 반복해 죽는다" 로 **영구 FAILED** 처리했다.
+    오늘 두 건이 그렇게 죽었고(04:48 `04839e7e`, 05:26 `7df0ddd6`) 둘 다
+    재기동 시각과 겹친다 - 배포할 때마다 한 건씩 태우는 구조였다.
+
+    여기서 고정하는 것:
+      ① 집고 있던 주문을 **전부** 반납한다.
+      ② 반납은 **새 연결**로 한다 - 백테스트 도중이면 순회용 연결은
+         트랜잭션 한복판이라 거기 끼어들면 무엇이 남을지 알 수 없다.
+      ③ 반납 뒤 연결을 닫는다 - 종료 경로가 연결을 흘리면 풀이 마른다.
+    """
+    calls, opened, closed = [], [], []
+
+    class _C:
+        def close(self):
+            closed.append(1)
+
+    def _connect():
+        c = _C()
+        opened.append(c)
+        return c
+
+    def _release(conn, jid, *, reason):
+        assert isinstance(conn, _C), "순회용 연결로 반납하면 안 된다 - 새 연결이어야 한다"
+        calls.append((jid, reason))
+
+    n = release_held_jobs(["j1", "j2"], connect=_connect,
+                          release_fn=_release, reason="정상 종료 반납")
+    assert n == 2 and [c[0] for c in calls] == ["j1", "j2"], (n, calls)
+    assert len(opened) == 1, ("연결은 한 번만 연다", opened)
+    assert len(closed) == 1, ("반납 뒤 연결을 안 닫았다", closed)
+
+    # 집은 것이 없으면 연결도 열지 않는다 - 매 종료마다 풀을 건드릴 이유가 없다
+    opened.clear()
+    assert release_held_jobs([], connect=_connect, release_fn=_release,
+                             reason="x") == 0
+    assert not opened, "반납할 것이 없는데 연결을 열었다"
+
+    # 반납이 실패해도 연결은 닫는다(다음 lease 만료가 처리하게 두고 빠진다)
+    def _boom(conn, jid, *, reason):
+        raise RuntimeError("반납 실패")
+
+    closed.clear()
+    try:
+        release_held_jobs(["j9"], connect=_connect, release_fn=_boom, reason="x")
+    except RuntimeError:
+        pass
+    assert len(closed) == 1, "반납이 터지면 연결이 샌다"
+
+
+def _check_parked_job_does_not_block_reclaim():
+    """**기다리는 주문이 회수를 막으면 교착이다** (2026-08-14 실측).
+
+    놓아주기(`job_queue.release`)는 BAD_TRANSITION 주문을 FAILED 가 아니라
+    QUEUED 로 되돌린다 - "회수가 곧 가설을 PROPOSED 로 풀어 줄 것" 이라는
+    전제다. 그런데 회수가 `QUEUED` 도 "도는 중" 으로 세면 **그 전제를 자기가
+    깬다.** 실측으로 주문 3건이 36·16·14회 놓아주기를 반복했고 가설은
+    RUNNING 에 92·89·76분 갇혔다.
+
+    여기서 고정하는 것: **QUEUED 는 회수를 막지 않는다.** 집힌 것만 막는다.
+    """
+    now = datetime(2026, 8, 12, 5, 0, tzinfo=timezone.utc)
+    got = stalled_hypotheses([_hyp(leased_jobs=0)], now=now)
+    assert len(got) == 1, ("놓아준 주문이 큐에 있다고 회수를 건너뛰면 "
+                           "가설이 RUNNING 에서 못 나온다", got)
+
+    # 집혀 있으면 여전히 안 뺏는다 - 교착을 푼다고 도는 실험을 죽이면 안 된다
+    assert stalled_hypotheses([_hyp(leased_jobs=1)], now=now) == []
 
 
 def _check_fresh_running_is_kept():
@@ -408,7 +841,7 @@ class _ReclaimConn:
 
         class _Cur:
             description = [(k,) for k in
-                           ("hypothesis_id", "status", "open_jobs",
+                           ("hypothesis_id", "status", "leased_jobs",
                             "status_changed_at", "last_failure")]
             rowcount = 3
 
@@ -486,4 +919,14 @@ if __name__ == "__main__":
     print("  회수가 좀비 실험도 닫음  OK")
     _check_orphan_sweep_is_throttled_and_isolated()
     print("  고아 소탕 격리+주기      OK")
-    print("실험 워커 9개 영역 통과. 상주 실행은 --serve")
+    _check_bad_transition_is_released_not_failed()
+    print("  타이밍은 놓아주기        OK")
+    _check_parked_job_does_not_block_reclaim()
+    print("  기다리는 주문 != 도는 중  OK")
+    _check_dead_connection_is_reconnected_not_fatal()
+    print("  끊긴 연결은 다시 잡는다   OK")
+    _check_shutdown_returns_the_job_instead_of_burning_it()
+    print("  정상 종료는 주문을 반납   OK")
+    _check_terminal_hypothesis_job_is_closed_not_parked()
+    print("  종결 가설 주문은 닫는다   OK")
+    print("실험 워커 14개 영역 통과. 상주 실행은 --serve")

@@ -208,6 +208,47 @@ def feasibility(hypothesis: dict, existing_datasets: set,
 #   실제로 오늘 INCONCLUSIVE 를 코드에만 넣었다가 DB 제약에 없어 예산 초과가
 #   나는 순간 죽을 뻔했다(마이그레이션 20260804001000 으로 메웠다).
 #   **다음 작업에서 세 갈래를 하나로 합친다.**
+def experiment_did_not_trade(metrics: dict | None) -> bool:
+    """**한 주도 못 샀으면 전략을 잰 것이 아니다** (2026-08-14 실측).
+
+    ▶ 무엇이 있었나
+      `min_adv_krw` 단위가 어긋나(원 vs 백만원) 체결가능 유니버스가 통째로
+      비었다. 백테스트는 죽지 않고 완주했고 지표는 전부 0 - total_return 0,
+      turnover_total 0, MDD 0 - 인데 벤치마크만 올라 초과가 -82.86%p 로
+      찍혔다. 관문은 이것을 **REJECT** 로 판정했다. 즉 "실험이 성립하지
+      않았다" 를 "전략이 나쁘다" 로 기록한 것이다.
+
+      단위는 고쳤지만 **같은 증상은 다른 원인으로도 온다** - 데이터 결측,
+      필터 과다, 신호가 한 종목도 못 고른 경우. 그때마다 가설이 억울하게
+      기각되고, 그 기각은 계열 예산(trial pressure)까지 태운다.
+
+    ▶ 판정 불가는 판정 결과다
+      `fragility_summary` 가 창 0개를 INSUFFICIENT 로 돌려주는 것과 같은
+      원칙이다. 여기서도 기각이 아니라 INCONCLUSIVE 로 보내고
+      UNDERPOWERED_DATA 를 리서치에 돌려준다.
+
+    ▶ 못 잰 것과 0 을 구분한다
+      `turnover_total` 이 아예 없으면(구버전 지표) 판단하지 않는다 -
+      없는 것을 사고로 몰면 옛 실험이 무더기로 무효가 된다.
+    """
+    m = metrics or {}
+    turnover = m.get("turnover_total")
+    if turnover is None:
+        return False
+    try:
+        if float(turnover) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    ret = m.get("total_return")
+    if ret is None:
+        return True
+    try:
+        return float(ret) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def robustness_to_status(fragility_verdict: str,
                          pressure: dict | None = None) -> str:
     """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐.
@@ -747,8 +788,18 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             report.transitions.append("RUNNING->REJECTED (사전등록 위반)")
             return report
 
-        new_status = robustness_to_status(result["fragility"],
-                                          report.trial_pressure)
+        # ▶ **실험이 성립했는지 먼저 본다** - 거래가 0이면 강건성을 논할
+        #   대상 자체가 없다. 기각으로 밀면 데이터·필터 사고가 가설의 죄로
+        #   기록되고 계열 예산까지 탄다(2026-08-14 실측, 위 함수 참조).
+        no_trade = experiment_did_not_trade(result.get("backtest_metrics"))
+        if no_trade:
+            new_status = "INCONCLUSIVE"
+            report.backlog.append(
+                "거래 0건 - 체결가능 유니버스가 비었거나 신호가 한 종목도 "
+                "고르지 못했다. 판정이 아니라 판정 불가로 종결한다")
+        else:
+            new_status = robustness_to_status(result["fragility"],
+                                              report.trial_pressure)
         # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
         #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
         # ▶ QNT-07 릴리스 관문. **환류보다 먼저 돌린다** - 판정을 환류에 실어야
@@ -931,11 +982,22 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         print(f"  웜업 {warmup}일 (전략 {config.get('strategy')} 선언 기준)", flush=True)
         windows = make_windows(market.dates, warmup,
                                embargo_days=int(config.get("lookback_days") or 0))
-        wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
-              for w in windows]
-        _summary, flags, verdict = fragility_summary(wm)
-        with conn.cursor() as cur:
-            for label, metrics in wm:
+        # ▶ **창마다 바로 적재한다** (2026-08-14 실측)
+        #   예전엔 창 21개를 전부 계산한 **뒤에** 한 번에 저장했다. 이 구간은
+        #   백테스트가 끝난 뒤에도 13분을 더 도는데, 그 사이 워커가 재시작되면
+        #   진행분이 **통째로** 사라진다 - 실측으로 최근 한 시간에 워커가 4번
+        #   기동했고(다른 세션의 `docker restart`), 그때마다 창 지표가 0행으로
+        #   남았다. 실험은 COMPLETED 인데 강건성 근거만 없는 상태가 그것이다.
+        #
+        #   창 하나는 그 자체로 완결된 사실이므로 계산 즉시 커밋한다. 중단돼도
+        #   센 만큼은 남고, 짧은 트랜잭션이라 풀러가 idle 로 끊을 일도 준다.
+        #   요약(fragility)은 전 창이 모여야 의미가 있으므로 그대로 마지막에
+        #   한 번 쓴다 - 부분 요약은 판정을 오도한다.
+        wm = []
+        for w in windows:
+            metrics = run_window(slice_market(market, w), w, dict(config))
+            wm.append((w.label, metrics))
+            with conn.cursor() as cur:
                 for k in ("total_return", "sharpe_rf0", "max_drawdown"):
                     if isinstance(metrics.get(k), (int, float)):
                         cur.execute("""
@@ -945,8 +1007,31 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                             values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
                             on conflict do nothing
                         """, (bt["experiment_id"], k, metrics[k],
-                              json.dumps({"window": label, "chain": ORCH_VERSION}),
+                              json.dumps({"window": w.label, "chain": ORCH_VERSION}),
                               "krx-cost-v1"))
+            conn.commit()
+        summary, flags, verdict = fragility_summary(wm)
+        with conn.cursor() as cur:
+            # ▶ **판정 근거도 같이 남긴다** (2026-08-14 실측)
+            #   이 자리에서 요약을 `_summary` 로 버리고 있었다. 그래서 창별
+            #   수익·MDD 는 314행 남는데 `positive_window_ratio`·
+            #   `worst_window_mdd` 는 이 체인으로 돈 실험 22건 전부 **0행**
+            #   이었다 - 환류에는 `fragility` 가 실패 조항으로 찍히는데
+            #   **왜 취약한지는 원장 어디에도 없는** 상태다.
+            #   근거 없는 판정은 재현도 반박도 못 하고, 임계를 논의하려면
+            #   먼저 분포가 있어야 한다. flags 는 숫자가 아니므로
+            #   dimensions 에 실어 어느 조항이 걸렸는지까지 남긴다.
+            dims = json.dumps({"chain": ORCH_VERSION, "verdict": verdict,
+                               "flags": flags})
+            for k, v in summary.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    cur.execute("""
+                        insert into quant.experiment_metrics
+                          (experiment_id, split, metric, value,
+                           dimensions, cost_model_version)
+                        values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
+                        on conflict do nothing
+                    """, (bt["experiment_id"], k, float(v), dims, "krx-cost-v1"))
         conn.commit()
     finally:
         conn.close()
@@ -1238,6 +1323,107 @@ def _check_orchestrate_paths():
     print("  실패 체인 즉시 복귀       OK")
     _check_metrics_are_recorded_without_changing_verdict()
     print("  계측 확장·판정 불변       OK")
+    _check_fragility_summary_is_recordable()
+    print("  강건성 근거 원장 적재     OK")
+    _check_no_trade_is_not_a_rejection()
+    print("  거래 0 = 판정 불가        OK")
+    _check_windows_are_persisted_incrementally()
+    print("  창마다 적재(중단 견딤)    OK")
+
+
+def _check_windows_are_persisted_incrementally():
+    """**창마다 적재한다 - 중단돼도 센 만큼은 남는다** (2026-08-14 실측).
+
+    이 구간은 백테스트가 끝난 뒤에도 13분을 더 돈다. 창 21개를 전부 계산한
+    뒤에 한 번에 저장하면 그 사이 워커가 재시작될 때 **통째로** 사라진다 -
+    실측으로 한 시간에 워커가 4번 기동했고(다른 세션의 재시작), 그때마다
+    실험은 COMPLETED 인데 창 지표만 0행인 상태가 남았다. 그 0행이
+    `positive_window_ratio` 를 못 만들어 강건성 판정 근거가 통째로 비었다.
+
+    요약(fragility)은 전 창이 모여야 의미가 있으므로 마지막에 한 번 쓴다 -
+    부분 요약은 판정을 오도하므로 여기서 함께 고정한다.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_default_chain")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "for w in windows:" in body, "창 루프가 사라졌다"
+    assert "wm = [(w.label, run_window(" not in body, \
+        "창을 전부 계산한 뒤 저장하는 형태로 돌아갔다 - 중단되면 통째로 잃는다"
+    head = body.index("for w in windows:")
+    tail = body.index("fragility_summary(wm)")
+    assert head < tail, "요약이 창 루프보다 먼저 온다"
+    assert "conn.commit()" in body[head:tail], \
+        "창 루프 안에서 커밋하지 않는다 - 중단되면 진행분이 사라진다"
+    # 요약은 루프 **밖**에서 한 번만 - 창마다 요약을 쓰면 부분 판정이 남는다
+    assert body.count("fragility_summary(wm)") == 1, "요약을 여러 번 쓴다"
+
+
+def _check_no_trade_is_not_a_rejection():
+    """**실험이 성립 안 한 것을 가설의 죄로 적지 않는다** (2026-08-14 실측).
+
+    유니버스가 비어 한 주도 못 산 실험 2건이 REJECT 로 굳었다(지표 전부 0,
+    초과 -82.86%p). 원인이던 단위는 고쳤지만 같은 증상은 결측·필터·신호
+    미선택으로도 온다 - 그때마다 기각되면 계열 예산까지 탄다.
+    """
+    # 실측 그대로: 거래도 수익도 0
+    assert experiment_did_not_trade(
+        {"turnover_total": 0.0, "total_return": 0.0, "max_drawdown": 0.0})
+    # 회전율만 0 이고 수익이 있으면 그건 다른 사고다 - 여기서 삼키지 않는다
+    assert not experiment_did_not_trade(
+        {"turnover_total": 0.0, "total_return": 0.12})
+    # 정상 실험은 건드리지 않는다
+    assert not experiment_did_not_trade(
+        {"turnover_total": 3.4, "total_return": -0.08})
+    # ▶ **못 잰 것과 0 을 구분한다.** 구버전 실험엔 회전율이 없다 -
+    #   없는 것을 사고로 몰면 옛 실험이 무더기로 무효가 된다.
+    assert not experiment_did_not_trade({"total_return": 0.0})
+    assert not experiment_did_not_trade({})
+    assert not experiment_did_not_trade(None)
+    # 숫자가 아닌 값에 죽지 않는다(지어내지도 않는다)
+    assert not experiment_did_not_trade({"turnover_total": "n/a"})
+
+
+def _check_fragility_summary_is_recordable():
+    """**판정 근거가 원장에 남을 모양인가** (2026-08-14 실측).
+
+    이 체인은 `fragility_summary` 를 부르고 요약을 `_summary` 로 버렸다.
+    그 결과 창별 수익·MDD 는 314행 쌓이는데 관문이 실제로 보는 세 지표
+    (`positive_window_ratio`·`worst_window_mdd`·`sharpe_std`)는 **0행**이었고,
+    환류에는 `fragility` 실패만 찍혔다 - 왜 취약한지는 아무 데도 없었다.
+
+    그래서 여기서 고정하는 것은 저장 SQL 이 아니라 **저장 가능성**이다:
+    관문이 읽는 키가 요약에 숫자로 들어 있어야 insert 루프가 집는다. 키
+    이름이 바뀌거나 문자열로 바뀌면 이 검사가 먼저 깨진다.
+    """
+    from walk_forward import FRAGILITY_RULES, fragility_summary  # noqa: PLC0415
+
+    wm = [(lbl, {"total_return": r, "sharpe_rf0": s, "max_drawdown": m,
+                 "test_days": 120})
+          for lbl, r, s, m in [("2024H1", 0.10, 1.0, -0.10),
+                               ("2024H2", -0.05, -0.5, -0.30),
+                               ("2025H1", 0.20, 1.5, -0.08),
+                               ("2025H2", 0.03, 0.2, -0.15)]]
+    stats, flags, verdict = fragility_summary(wm)
+    numeric = {k for k, v in stats.items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    for key in ("n_windows", "positive_window_ratio", "worst_window_mdd",
+                "sharpe_std"):
+        assert key in numeric, f"관문이 읽는 {key} 가 숫자로 안 남는다: {stats}"
+    # 위 픽스처는 한 창이 MDD -30% 로 임계(-25%)를 넘는다 - 플래그가 서야
+    # 하고, 그 이유가 flags 로 나와야 dimensions 에 실린다.
+    assert verdict == "FRAGILE", (verdict, flags)
+    assert "DEEP_WINDOW_MDD" in flags, flags
+    assert FRAGILITY_RULES["max_worst_window_mdd"] == -0.25, \
+        "임계를 바꿨다면 근거와 CEO 결재를 함께 남긴다"
+    # 판정 불가는 판정 결과다 - 창이 없어도 죽지 않고, 요약도 숫자로 남는다.
+    empty_stats, empty_flags, empty_verdict = fragility_summary([])
+    assert empty_verdict == "INSUFFICIENT", empty_verdict
+    assert empty_flags == ["NO_WINDOWS"], empty_flags
+    assert isinstance(empty_stats.get("n_windows"), int), empty_stats
 
 
 def _check_metrics_are_recorded_without_changing_verdict():

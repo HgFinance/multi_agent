@@ -50,6 +50,27 @@ class MarketLike(Protocol):
     notionals: dict
 
 
+# ── 거래대금 단위 ───────────────────────────────────────────────────────────
+#
+# ▶ **데이터셋 `notional` 은 원이 아니라 백만원이다** (2026-08-14 실측)
+#   krx-basket-daily/v3 2026-08 파티션 첫 행: close 1,525 × volume 150,555 =
+#   2.296억원인데 저장된 `notional` 은 **227**이다. 세 행을 검산해도 비율이
+#   모두 ≈1e6 이었다. 비용 모델도 같은 단위를 쓴다 -
+#   `backtest_runner.LIQUIDITY_TIERS` 의 최저 계층 상한이 3,000 인데, 이것이
+#   30억원이라야 "얇은 종목일수록 비싸다" 는 계층 설계가 성립한다.
+#
+#   그런데 `min_adv_krw` 만 이름대로 **원 단위**로 받아 그대로 비교하고 있었다.
+#   1억(=1e8)을 백만원 단위 값(중앙값 269)과 겨루니 **전 종목이 탈락**했고,
+#   유니버스가 0 이 됐다 - 분위 곡선 측정에서 "체결가능 ADV 1억: 표본 부족(0)"
+#   으로 드러났다. 실험 config 에는 이미 `min_adv_krw=100000000.0` 이 실려
+#   돌고 있었으므로, 그 실험들은 빈 유니버스를 본 셈이다.
+#
+#   자체점검이 이것을 못 잡은 이유도 같다 - **픽스처가 원 단위(5e8)였다.**
+#   실물과 다른 단위로 검사하면 검사는 통과하고 현장만 죽는다. 아래 검사의
+#   픽스처는 실제 데이터와 같은 백만원 단위로 맞췄다.
+NOTIONAL_UNIT_KRW = 1_000_000
+
+
 # ── 미조정 액면분할·병합 방어선 ─────────────────────────────────────────────
 # 정수배 판정 기준. ×2 미만은 진짜 급등과 구별할 수 없으므로 건드리지 않고,
 # 배수에서 벗어난 정도가 이 허용치를 넘으면 조정 이벤트로 보지 않는다.
@@ -136,7 +157,9 @@ class PITView:
                 # 평균은 **관측된 창 전체**로 나눈다 - 거래일만으로 나누면
                 # 한 달에 하루 거래되는 종목이 유동성 상위로 올라온다.
                 denom = len(vals) or 1
-                if sum(traded) / denom < self._min_adv:
+                # 데이터는 백만원 단위, 파라미터는 원 단위다(NOTIONAL_UNIT_KRW).
+                # 환산 없이 비교하면 1e6 배 차이로 전 종목이 탈락한다.
+                if sum(traded) / denom < self._min_adv / NOTIONAL_UNIT_KRW:
                     continue
             out.append(s)
         return out
@@ -1000,10 +1023,12 @@ def _check_liquidity_filter_removes_untradable_names():
     for i, d in enumerate(m.dates):
         for s in m.symbols:
             m.closes[(d, s)] = 1000.0 + i
-        m.notionals[(d, "LIQUID")] = 5e8            # 매일 5억
+        # ▶ 값은 **백만원 단위**다 - 실물 데이터와 같은 단위여야 한다.
+        #   원 단위(5e8)로 두었더니 필터가 1e6 배 어긋난 것을 못 잡았다.
+        m.notionals[(d, "LIQUID")] = 500.0          # 매일 5억원
         # GHOST: 60일 중 2일만 거래(실측 유령 종목 구도)
-        m.notionals[(d, "GHOST")] = 3e6 if i % 30 == 0 else 0.0
-        m.notionals[(d, "THIN")] = 2e7              # 매일 2천만
+        m.notionals[(d, "GHOST")] = 3.0 if i % 30 == 0 else 0.0   # 3백만원
+        m.notionals[(d, "THIN")] = 20.0             # 매일 2천만원
 
     # 필터 꺼짐(기본) - 예전과 동일하게 전 종목이 보인다
     assert PITView(m, m.dates[-1]).universe_size == 3
@@ -1027,6 +1052,21 @@ def _check_liquidity_filter_removes_untradable_names():
     sig = signal_scores(m, m.dates[-1], template=TEMPLATES["ILLIQ"],
                         params={"adv_window": 60, "min_adv_krw": 1e8})
     assert set(sig) <= {"LIQUID"}, sig
+
+    # ▶ **비용 모델과 같은 단위인가** (2026-08-14)
+    #   필터와 비용이 다른 단위를 쓰면 한쪽은 유령 종목을 거르고 다른 쪽은
+    #   그 종목에 대형주 슬리피지를 매긴다. 최저 유동성 계층 상한(3,000)이
+    #   30억원이라는 해석을 여기서 못박는다 - 둘 중 하나만 바뀌면 깨진다.
+    from backtest_runner import LIQUIDITY_TIERS  # noqa: PLC0415
+
+    assert 3_000_000_000 / NOTIONAL_UNIT_KRW == LIQUIDITY_TIERS[0][0], \
+        "유동성 필터와 비용 계층의 거래대금 단위가 어긋났다"
+
+    # 필터를 켠 유니버스가 통째로 비면 그건 필터가 아니라 사고다. 실측:
+    # 단위 환산 없이 1억을 비교해 전 종목이 사라졌고 실험은 빈 유니버스를 봤다.
+    assert PITView(m, m.dates[-1], min_adv_krw=1e8,
+                   liquidity_window=60).universe_size > 0, \
+        "체결가능 유니버스가 0 이다 - 단위가 어긋났을 때 나오는 증상이다"
     print("  체결 가능 유니버스 필터   OK")
 
 
