@@ -31,7 +31,10 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parents[2]
 
 try:
-    from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+    from orchestration.canonical_profiles import (
+        USER_QUERY_PRIORITY,
+        CanonicalKanbanTaskRequest,
+    )
     from orchestration.ceo_workflow_scope import build_root_comment
 except ImportError:  # pragma: no cover - `python apps/api/hermes_boundary.py` 직접 실행
     # 스크립트로 직접 돌리면 sys.path[0] 이 apps/api 라 저장소 루트가 안 보인다.
@@ -40,7 +43,10 @@ except ImportError:  # pragma: no cover - `python apps/api/hermes_boundary.py` �
     import sys
 
     sys.path.insert(0, str(ROOT))
-    from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+    from orchestration.canonical_profiles import (
+        USER_QUERY_PRIORITY,
+        CanonicalKanbanTaskRequest,
+    )
     from orchestration.ceo_workflow_scope import build_root_comment
 
 # Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
@@ -113,6 +119,7 @@ def create_kanban_task(
     title: str,
     body: str,
     idempotency_key: str,
+    priority: int = USER_QUERY_PRIORITY,
 ) -> dict[str, object] | None:
     """Create a shared-board card through Hermes CLI when available.
 
@@ -127,6 +134,7 @@ def create_kanban_task(
         title=title,
         body=body,
         idempotency_key=idempotency_key,
+        priority=priority,
     )
     if os.getenv("ENABLE_KANBAN_TASK_TRACKING", "1").casefold() not in {
         "1",
@@ -150,6 +158,11 @@ def create_kanban_task(
         request.idempotency_key,
         "--created-by",
         "ai-office-bff",
+        # 사람이 기다리는 카드를 공장 주기 뒤에 세우지 않는다. Hermes ready 큐가
+        # priority DESC 정렬이라 이 한 값이 대기열 순서를 바꾼다(2026-08-14 실측:
+        # ready 23 장 뒤에서 사용자 질의가 6 분 대기).
+        "--priority",
+        str(request.priority),
         "--json",
     ])
     cli_environment = os.environ.copy()

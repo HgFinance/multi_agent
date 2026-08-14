@@ -31,6 +31,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
 from orchestration.canonical_profiles import (
+    USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
     CanonicalProfileError,
     canonical_profile_for_department,
@@ -803,7 +804,13 @@ class HermesKanbanClient:
         idempotency_key: str,
         initial_status: str | None = None,
     ) -> dict[str, Any]:
-        request = CanonicalKanbanTaskRequest(assignee, title, body, idempotency_key)
+        # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
+        # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
+        # 자식이 공장 뒤에 서면 사용자 지연은 그대로다(2026-08-14 실측).
+        priority = USER_QUERY_PRIORITY if "origin=user-query" in body else 0
+        request = CanonicalKanbanTaskRequest(
+            assignee, title, body, idempotency_key, priority=priority
+        )
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
         for parent_task_id in parent_task_ids:
@@ -814,6 +821,8 @@ class HermesKanbanClient:
                 request.idempotency_key,
                 "--created-by",
                 "ceo-supervisor",
+                "--priority",
+                str(request.priority),
                 "--json",
             )
         )

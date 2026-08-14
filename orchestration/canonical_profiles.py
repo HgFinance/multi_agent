@@ -8,6 +8,7 @@ unknown aliases: a typo or legacy name must fail before a task reaches Hermes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Mapping
@@ -102,6 +103,13 @@ def department_for_canonical_profile(profile: str) -> str:
     return _DEPARTMENT_BY_CANONICAL_PROFILE[profile]
 
 
+# 사용자 질의 계열 카드의 대기열 우선순위. 공장이 만드는 카드는 0 이므로 이
+# 값이면 사람이 기다리는 카드가 항상 앞선다. Hermes ready 큐가
+# `ORDER BY priority DESC, created_at ASC` 라 이 한 값이 순서를 바꾼다.
+# env 로 낮출 수 있게 둔 것은 공장 처리량을 우선하려는 운영 판단을 위해서다.
+USER_QUERY_PRIORITY = int(os.getenv("KANBAN_USER_QUERY_PRIORITY", "100"))
+
+
 @dataclass(frozen=True)
 class CanonicalKanbanTaskRequest:
     """Typed create boundary used before invoking ``hermes kanban create``."""
@@ -110,6 +118,11 @@ class CanonicalKanbanTaskRequest:
     title: str
     body: str
     idempotency_key: str
+    # 대기열 순서. Hermes 의 ready 큐가 `ORDER BY priority DESC, created_at ASC`
+    # 라서(kanban_db.dispatch_once) 사람이 기다리는 카드는 공장 카드보다 먼저
+    # 나가야 한다. 실측 2026-08-14: 공장 카드가 슬롯을 물고 ready 23 장이 쌓인
+    # 사이 사용자 질의가 6 분 넘게 대기했다. 기본 0 = 기존 동작 그대로.
+    priority: int = 0
 
     def __post_init__(self) -> None:
         validate_canonical_profile(self.assignee)
@@ -119,6 +132,8 @@ class CanonicalKanbanTaskRequest:
             raise ValueError("Kanban task body must not be empty")
         if not self.idempotency_key.strip():
             raise ValueError("Kanban task idempotency_key must not be empty")
+        if not isinstance(self.priority, int) or isinstance(self.priority, bool):
+            raise ValueError("Kanban task priority must be an int")
 
 
 __all__ = [
@@ -127,6 +142,7 @@ __all__ = [
     "CANONICAL_PROFILES",
     "CanonicalKanbanTaskRequest",
     "CanonicalProfileError",
+    "USER_QUERY_PRIORITY",
     "canonical_profile_for_department",
     "department_for_canonical_profile",
     "validate_canonical_profile",

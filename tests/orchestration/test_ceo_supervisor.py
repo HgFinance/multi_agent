@@ -58,6 +58,38 @@ def child(
     )
 
 
+class UserQueryPriorityTest(unittest.TestCase):
+    """사람이 기다리는 카드가 공장 카드보다 대기열 앞에 서는지 고정한다.
+
+    근거(2026-08-14 실측): Hermes ready 큐가 priority DESC 정렬인데 우리는
+    아무 카드에도 우선순위를 안 줘서, 공장이 슬롯을 물고 ready 23 장이 쌓인
+    사이 사용자 질의가 6 분 넘게 대기했다.
+    """
+
+    def test_user_query_body_gets_priority_over_factory_default(self) -> None:
+        from orchestration.canonical_profiles import (
+            USER_QUERY_PRIORITY,
+            CanonicalKanbanTaskRequest,
+        )
+
+        self.assertGreater(USER_QUERY_PRIORITY, 0)
+        factory = CanonicalKanbanTaskRequest(
+            "research-department", "공장 주기", "body", "k1"
+        )
+        self.assertEqual(factory.priority, 0)
+        query = CanonicalKanbanTaskRequest(
+            "research-liaison", "질의", "origin=user-query\nbody", "k2",
+            priority=USER_QUERY_PRIORITY,
+        )
+        self.assertGreater(query.priority, factory.priority)
+
+    def test_priority_must_be_int(self) -> None:
+        from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+
+        with self.assertRaises(ValueError):
+            CanonicalKanbanTaskRequest("qa-department", "t", "b", "k", priority="9")
+
+
 class AnswerBodyHandoffTest(unittest.TestCase):
     """부서가 만든 답변 본문이 QA·종합까지 살아서 가는지 고정한다.
 
