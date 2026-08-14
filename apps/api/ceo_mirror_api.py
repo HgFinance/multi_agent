@@ -23,8 +23,8 @@ try:
         publish_mirror_event,
         stable_event_id,
     )
+    from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
-    from .hermes_boundary import AgentAsk
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -39,8 +39,8 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         publish_mirror_event,
         stable_event_id,
     )
+    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
-    from hermes_boundary import AgentAsk  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -55,7 +55,13 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     except ImportError:  # pragma: no cover
         import ceo  # type: ignore[no-redef]
 
-    return ceo.ceo_query(AgentAsk(query=request.query, request_id=request.request_id))
+    return ceo.ceo_query(
+        CeoAsk(
+            query=request.query,
+            request_id=request.request_id,
+            fund_id=request.fund_id,
+        )
+    )
 
 
 def _execute(request: CanonicalIngress):
@@ -153,11 +159,21 @@ def _publish_workflow_projection(request_id: str) -> None:
     response_model=CeoQueryAcceptedResponse,
 )
 def mirror_ask(
-    request: AgentAsk,
+    request: CeoAsk,
     x_source_message_id: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Existing Web contract, wrapped with source/request deduplication."""
+    """`POST /ui/ceo/ask`의 유일한 등록 지점 - `ceo.py`는 이 경로를 스스로 등록하지
+    않는다(`ceo.ceo_query`는 순수 함수로 남는다).
+
+    이 핸들러는 `ceo.CeoAsk`를 그대로 요청 모델로 쓴다 - 새 필드가 추가돼도
+    자동으로 따라가고, 별도의 `fund_id` 없는 모델로 다시 조립할 여지가 없다.
+    `_ceo_query`가 실제로 `ceo.ceo_query`를 부를 때도 같은 `CeoAsk`를 그대로
+    새로 만들어 넘기므로(값만 옮겨 담는다), 두 모듈이 서로 다른 요청 스키마를
+    독자적으로 들고 있다가 조용히 갈라지는 상태가 구조적으로 불가능하다.
+    dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
+    (`_publish_workflow_projection`)이 이 함수를 감싸는 layer다.
+    """
 
     canonical = CanonicalIngress(
         query=request.query,
@@ -166,6 +182,7 @@ def mirror_ask(
         source_message_id=x_source_message_id or request.request_id,
         actor_id=x_actor_id or "web-user",
         actor_type="user",
+        fund_id=request.fund_id,
     )
     execution = _execute(canonical)
     if execution.response is None:
