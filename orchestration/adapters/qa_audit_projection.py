@@ -24,6 +24,7 @@ from orchestration.adapters.terminal_projection_utils import (
     task_id,
     terminal_success,
 )
+from orchestration.ceo_workflow_scope import selected_primary_profiles_from_body
 
 logger = logging.getLogger(__name__)
 PROJECTION_MARKER = "hgfinance.qa-audit-projection.v1"
@@ -196,10 +197,25 @@ class QaAuditProjection:
         workflow_tasks: Sequence[Mapping[str, Any]],
     ) -> QaAuditProjectionRecord:
         metadata = merged_run_metadata(task)
+        root_task = next(
+            (item for item in workflow_tasks if task_id(item) == root_task_id),
+            {},
+        )
+        selected_profiles = selected_primary_profiles_from_body(
+            str(root_task.get("body") or "")
+        )
         scoped_primary = tuple(
             task_id(item)
             for item in workflow_tasks
             if is_request_scoped_role(item, root_task_id, "primary")
+            and (not selected_profiles or str(item.get("assignee") or "") in selected_profiles)
+            and terminal_success(item)
+        )
+        logger.info(
+            "qa-primary-selector root=%s selected=%d accepted=%d",
+            root_task_id,
+            len(selected_profiles),
+            len(scoped_primary),
         )
         declared_primary = ids_from(metadata.get("evaluated_primary_task_ids")) or ids_from(
             metadata.get("primary_task_ids")

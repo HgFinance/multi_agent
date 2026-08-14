@@ -349,6 +349,50 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertNotIn(background["id"], record.evaluated_primary_task_ids)
         self.assertNotIn(foreign["id"], record.evaluated_primary_task_ids)
 
+    def test_qa_projection_uses_root_selected_primary_profiles(self) -> None:
+        selected_root = dict(self.root)
+        selected_root["body"] = (
+            f'{self.root["body"]}\n'
+            "selected_primary_profiles=research-department,risk-management"
+        )
+        accounting = _task(
+            "t_accounting",
+            "primary",
+            assignee="accounting-portfolio-department",
+        )
+        repository = FakeAuditRepository()
+        result = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT,
+            task=self.qa,
+            workflow_tasks=[selected_root, *self.primary, accounting, self.qa],
+        )
+        self.assertEqual(result["status"], "persisted")
+        record = next(iter(repository.records.values()))
+        self.assertEqual(record.evaluated_primary_task_ids, (RESEARCH, RISK))
+        self.assertNotIn("t_accounting", record.evaluated_primary_task_ids)
+
+    def test_qa_projection_excludes_selected_primary_until_terminal(self) -> None:
+        running = _task(
+            "t_running",
+            "primary",
+            assignee="research-department",
+            status="running",
+        )
+        selected_root = dict(self.root)
+        selected_root["body"] = (
+            f'{self.root["body"]}\n'
+            "selected_primary_profiles=research-department,risk-management"
+        )
+        repository = FakeAuditRepository()
+        result = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT,
+            task=self.qa,
+            workflow_tasks=[selected_root, running, self.primary[1], self.qa],
+        )
+        self.assertEqual(result["status"], "persisted")
+        record = next(iter(repository.records.values()))
+        self.assertEqual(record.evaluated_primary_task_ids, (RISK,))
+
     def test_qa_projection_failure_does_not_block_fast_synthesis(self) -> None:
         class FailingQaProjection:
             def project(self, **kwargs: Any) -> None:

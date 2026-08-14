@@ -44,7 +44,10 @@ from orchestration.canonical_profiles import (
     canonical_profile_for_department,
     department_for_canonical_profile,
 )
-from orchestration.ceo_workflow_scope import CEO_WORKFLOW_SCOPE_MARKER
+from orchestration.ceo_workflow_scope import (
+    CEO_WORKFLOW_SCOPE_MARKER,
+    selected_primary_profiles_from_body,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -510,10 +513,12 @@ class Workflow:
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
         """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
+        selected = set(selected_primary_profiles_from_body(self.root.body))
         return tuple(
             node
             for node in self.descendants
             if node.role(root_task_id=self.root_task_id) == ROLE_PRIMARY
+            and (not selected or node.profile in selected)
         )
 
     @property
