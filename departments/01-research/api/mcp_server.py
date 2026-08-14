@@ -933,6 +933,71 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             from research.experiment_outcomes
             order by created_at desc limit %s""", (n,))
 
+    # ── Library 조회 면 (2026-08-14) ────────────────────────────────────────
+    # ▶ 왜 필요했나 (코드 실측)
+    #   공장은 원장에 계속 쌓는데 **읽을 면이 없었다** - factory 테이블 위
+    #   view 0건, BFF/UI 참조 0건, 창구는 `factory_outcomes`(최근 N건 덤프)
+    #   하나뿐. 그래서 "저변동 계열은 어디까지 갔나" 같은 질문에 답할 수
+    #   없었고, 사용자 질의가 Library 를 먼저 읽는 구조가 성립하지 않았다.
+    #
+    # ▶ 전부 읽기 전용이라 창구(liaison) 면에도 그대로 열린다. 계산은
+    #   뷰(research.v_*)가 하고 여기서는 꺼내기만 한다 - 도구가 자기 산수를
+    #   하면 원장과 다른 두 번째 진실이 생긴다.
+
+    @server.tool(
+        name="library_signal_shelf",
+        description="신호 서가 - 엣지 유형별로 몇 번 시험했고 최고 IR·IC t·DSR 이 "
+                    "얼마였나. **부품(단일 신호)의 천장을 한눈에 본다.** "
+                    "IC t 의 부호를 반드시 함께 읽어라: 음수인데 절대값이 크면 "
+                    "신호가 없는 게 아니라 방향이 반대라는 뜻이다.")
+    def library_signal_shelf() -> list[dict]:
+        return _rows("""
+            select edge_type, experiments, rejects, best_ir, best_ic_t,
+                   best_dsr, worst_mdd, last_decided, top_n_tried
+              from research.v_signal_shelf
+             order by coalesce(best_ic_t, -99) desc, coalesce(best_ir, -99) desc""")
+
+    @server.tool(
+        name="library_families",
+        description="계열 현황 - 같은 아이디어를 몇 번 시도했고 마지막 판정이 "
+                    "무엇이며 어떤 교훈이 쌓였나. 새 기획 전에 읽으면 이미 산 "
+                    "실험을 다시 사지 않는다.")
+    def library_families(limit: int = 15) -> list[dict]:
+        n = max(1, min(int(limit), 60))
+        return _rows("""
+            select trial_family_id, outcomes, rejects, holds, advanced,
+                   last_decision, last_root_cause, last_lessons,
+                   coalesce(last_note,'') as last_note, all_lessons,
+                   first_decided, last_decided
+              from research.v_trial_family_status
+             where trial_family_id <> ''
+             order by last_decided desc nulls last limit %s""", (n,))
+
+    @server.tool(
+        name="library_scorecard",
+        description="실험 성적표 - 관문 지표(IR·초과·DSR·MDD)에 더해 위험조정 "
+                    "계측(M²·alpha·appraisal·전략vol/벤치vol)과 부품 채점표"
+                    "(IC·IC t·회전율)를 한 행으로 준다. `edge_type` 을 주면 그 "
+                    "유형만. **명목 초과가 나쁜데 M² 가 다르면 그것은 신호의 "
+                    "실패가 아니라 위험 수준 차이다.**")
+    def library_scorecard(edge_type: str = "", limit: int = 20) -> list[dict]:
+        n = max(1, min(int(limit), 60))
+        et = str(edge_type or "").strip().lower()
+        cond = "and edge_type = %s" if et else ""
+        params = ((et, n) if et else (n,))
+        return _rows(f"""
+            select experiment_id, edge_type, top_n, decision, decided_at,
+                   excess_return_pct, information_ratio, max_drawdown_pct,
+                   deflated_sharpe, pbo,
+                   m2_excess_ann_pct, alpha_ann_pct, appraisal_ratio,
+                   strategy_ann_vol_pct, benchmark_ann_vol_pct,
+                   signal_ic, signal_ic_t, turnover_total,
+                   lesson_codes, root_cause, coalesce(notes,'') as notes,
+                   mapping_loss, coalesce(llm_model_id,'') as llm_model_id
+              from research.v_experiment_scorecard
+             where 1=1 {cond}
+             order by decided_at desc limit %s""", params)
+
     # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
     # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
     # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
@@ -1176,7 +1241,12 @@ def _check_liaison_surface():
     # 몫이다(비구속 worker-context, 원장에 닿지 않는다).
     for required in ("factory_brief", "factory_outcomes", "list_recent_packets",
                      "collector_health", "run_research_workers",
-                     "get_worker_job"):
+                     "get_worker_job",
+                     # Library 조회 면 (2026-08-14) - 질의가 공장에 일을 시키지
+                     # 않고 **먼저 읽는** 대상이다. 창구에 없으면 그 구조가
+                     # 성립하지 않는다.
+                     "library_signal_shelf", "library_families",
+                     "library_scorecard"):
         assert required in names, f"창구 면에서 {required} 가 사라졌다: {names}"
     print(f"  창구 면 capability 절단  OK ({len(names)}개, 쓰기 0개)")
 

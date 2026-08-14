@@ -143,6 +143,20 @@ def stalled_hypotheses(rows: list[dict], *, now: datetime,
     return out
 
 
+_SQL_CANCEL_ZOMBIES = """
+    update quant.experiments e
+       set status = 'CANCELLED', ended_at = now()
+     where e.hypothesis_id = %s::uuid
+       and e.status = 'RUNNING'
+       and e.ended_at is null
+       and e.started_at < now() - interval '10 minutes'
+       and not exists (select 1 from quant.backtest_runs r
+                        where r.experiment_id = e.experiment_id)
+       and not exists (select 1 from research.experiment_outcomes o
+                        where o.experiment_id = e.experiment_id::text)
+"""
+
+
 def reclaim_hypotheses(conn, *, now: datetime | None = None) -> dict:
     """RUNNING 에 갇힌 가설을 PROPOSED 로 되돌린다. 발주가 다시 집게 하려는 것."""
     now = now or datetime.now(timezone.utc)
@@ -163,19 +177,65 @@ def reclaim_hypotheses(conn, *, now: datetime | None = None) -> dict:
                 "update quant.hypotheses set status='PROPOSED', "
                 "status_changed_at=now() where hypothesis_id=%s::uuid "
                 "and status='RUNNING'", (v["hypothesis_id"],))
+            # ▶ 버려진 실험 행을 **같은 트랜잭션에서 닫는다** (2026-08-13 실측)
+            #   가설만 되돌리면 재발주가 새 실험 행을 만들고 옛 RUNNING 행은
+            #   아무도 안 닫는다 - 좀비 11건이 쌓였고(같은 가설에 3건까지),
+            #   count_family_trials 가 이 행들을 시도로 세서 계열 예산을 정보 0
+            #   으로 소모했다. 좀비 술어(backtest_runner.zombie_experiment 와
+            #   동일: run 0·판정 0·종료 없음·10분 경과)만 닫는다 - **판정이 붙은
+            #   행은 불가침**이고, FAILED 가 아니라 CANCELLED 다(실행이 실패한
+            #   게 아니라 실행되기 전에 버려진 것이다).
+            cur.execute(_SQL_CANCEL_ZOMBIES, (v["hypothesis_id"],))
+            v["cancelled_experiments"] = cur.rowcount
     conn.commit()
     return {"checked": len(rows), "requeued": len(victims), "items": victims}
 
 
+# ── 고아 실험 소탕 ───────────────────────────────────────────────────────────
+#
+# ▶ 왜 필요한가 (2026-08-14, 병목 카드 t_0c6f76a9)
+#   실행부는 COMPLETED 를 자기 트랜잭션으로 커밋하고 판정·환류는 그 뒤에
+#   붙는다. 그 사이에서 죽으면 실험은 COMPLETED 인 채 환류 0건으로 남고,
+#   중복 가드가 재실행마저 막아 **어떤 경로도 다시 판정하지 않는다** -
+#   21건이 그렇게 쌓였고 TESTING 정체 7건의 원인이었다. 회수(reclaim)가
+#   가설을 되살리듯, 여기는 판정을 완주시킨다(orphan_finalizer 참고).
+
+# 소탕 주기. 매 순회(15초)마다 anti-join 을 두드리는 것은 과하다 - 고아는
+# 사고 잔여물이라 시간 단위로 충분하다. 워커 시작 직후 한 번은 바로 돈다.
+ORPHAN_SWEEP_SEC = 900
+_last_orphan_sweep: float | None = None
+
+
+def sweep_orphans(conn) -> dict | None:
+    """판정 없는 COMPLETED 실험을 완주시킨다. 실패해도 순회는 산다."""
+    global _last_orphan_sweep
+    now = time.monotonic()
+    if _last_orphan_sweep is not None and \
+            now - _last_orphan_sweep < ORPHAN_SWEEP_SEC:
+        return None
+    _last_orphan_sweep = now
+    try:
+        from orphan_finalizer import finalize_orphans
+
+        return finalize_orphans(conn)
+    except Exception as e:  # noqa: BLE001 - 소탕 실패가 큐를 멈추면 안 된다
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
 def tick(conn, *, worker: str) -> dict:
-    """한 순회. 가설 회수 -> 작업 회수 -> 집기 -> 실행."""
+    """한 순회. 가설 회수 -> 작업 회수 -> 고아 소탕 -> 집기 -> 실행."""
     from job_queue import lease, reclaim
 
     hyp = reclaim_hypotheses(conn)
     rec = reclaim(conn)
+    orph = sweep_orphans(conn)
     jobs = lease(conn, worker=worker)
     results = [run_one(conn, j) for j in jobs]
-    return {"hypotheses": hyp, "reclaimed": rec,
+    return {"hypotheses": hyp, "reclaimed": rec, "orphans": orph,
             "picked": len(jobs), "results": results}
 
 
@@ -192,7 +252,15 @@ def serve() -> None:
                 for v in r["hypotheses"]["items"]:
                     print(f"  회수 가설 {v['hypothesis_id'][:8]} "
                           f"RUNNING {v['stalled_min']}분 -> PROPOSED "
+                          f"| 좀비 실험 {v.get('cancelled_experiments', 0)}건 닫음 "
                           f"| 마지막 실패: {v['last_failure'][:90]}", flush=True)
+                o = r.get("orphans") or {}
+                if o.get("finalized") or o.get("failed") or o.get("error"):
+                    # 완주한 것은 항상 드러낸다 - 조용한 환류는 검증 불가다
+                    print(f"  고아 완주: 검사 {o.get('checked', 0)}건 "
+                          f"완주 {len(o.get('finalized') or [])}건 "
+                          f"실패 {len(o.get('failed') or [])}건 "
+                          f"{o.get('error') or ''}".rstrip(), flush=True)
                 if r["picked"]:
                     for x in r["results"]:
                         print(f"  {x['result']:6} {x['job_id'][:8]} "
@@ -326,6 +394,78 @@ def _check_only_running_is_touched():
         assert stalled_hypotheses([_hyp(status=s)], now=now) == [], s
 
 
+class _ReclaimConn:
+    """회수 검증용 가짜 연결 - 실행된 SQL 을 순서대로 들고 있는다."""
+
+    def __init__(self, rows):
+        self.rows, self.executed, self.commits = rows, [], 0
+
+    def commit(self):
+        self.commits += 1
+
+    def cursor(self):
+        conn = self
+
+        class _Cur:
+            description = [(k,) for k in
+                           ("hypothesis_id", "status", "open_jobs",
+                            "status_changed_at", "last_failure")]
+            rowcount = 3
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, params=None):
+                conn.executed.append(" ".join(sql.split()))
+
+            def fetchall(self):
+                keys = [d[0] for d in self.description]
+                return [tuple(r[k] for k in keys) for r in conn.rows]
+
+        return _Cur()
+
+
+def _check_reclaim_closes_abandoned_experiments():
+    """**가설을 되돌릴 때 버려진 실험 행도 닫는다** (2026-08-13 실측).
+
+    가설만 PROPOSED 로 되돌리면 재발주가 새 실험 행을 만들고 옛 RUNNING 행은
+    영원히 산 척한다 - 좀비 11건 실측(같은 가설에 3건까지). 닫되 **좀비 술어**
+    (run 0·판정 0·종료 없음·10분 경과)로만 닫고, 판정 붙은 행은 불가침이다.
+    """
+    now = datetime(2026, 8, 12, 5, 0, tzinfo=timezone.utc)
+    conn = _ReclaimConn([_hyp()])
+    r = reclaim_hypotheses(conn, now=now)
+    assert r["requeued"] == 1, r
+    # 닫은 개수가 조용히 사라지지 않는다
+    assert r["items"][0]["cancelled_experiments"] == 3, r["items"]
+    joined = " || ".join(conn.executed)
+    assert "set status='PROPOSED'" in joined, joined
+    # 좀비 술어의 네 조항이 전부 SQL 에 있어야 한다 - 하나라도 빠지면
+    # 정상 실험이나 판정 붙은 행을 닫는 사고가 된다
+    z = next(s for s in conn.executed if "CANCELLED" in s)
+    for guard in ("e.status = 'RUNNING'", "e.ended_at is null",
+                  "interval '10 minutes'",
+                  "not exists (select 1 from quant.backtest_runs",
+                  "not exists (select 1 from research.experiment_outcomes"):
+        assert guard in z, (guard, z)
+    assert conn.commits == 1
+
+
+def _check_orphan_sweep_is_throttled_and_isolated():
+    """소탕은 주기로 돌고, 죽어도 순회를 못 죽인다 - 오류는 삼키되 드러낸다."""
+    import experiment_worker as W
+
+    W._last_orphan_sweep = None
+    conn = _FakeConn()                 # cursor() 가 없어 소탕 내부에서 터진다
+    r = W.sweep_orphans(conn)
+    assert r is not None and "error" in r, r
+    assert conn.rolled >= 1, conn.rolled       # 실패가 트랜잭션을 안 남긴다
+    assert W.sweep_orphans(conn) is None       # 방금 돌았다 - 주기 전엔 안 돈다
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -342,4 +482,8 @@ if __name__ == "__main__":
     _check_fresh_running_is_kept();         print("  갓 RUNNING 은 유지       OK")
     _check_stalled_is_requeued_with_reason(); print("  스톨 회수 + 사유 표기   OK")
     _check_only_running_is_touched();       print("  종결 상태는 불가침       OK")
-    print("실험 워커 7개 영역 통과. 상주 실행은 --serve")
+    _check_reclaim_closes_abandoned_experiments()
+    print("  회수가 좀비 실험도 닫음  OK")
+    _check_orphan_sweep_is_throttled_and_isolated()
+    print("  고아 소탕 격리+주기      OK")
+    print("실험 워커 9개 영역 통과. 상주 실행은 --serve")

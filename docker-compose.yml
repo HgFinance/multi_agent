@@ -1086,6 +1086,12 @@ services:
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
       ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+    # ▶ uid 1000 고정 (2026-08-14 장애 실측). 이미지 기본 사용자(uid 10000)로
+    #   돌면 데몬이 기동 시 /opt/data 를 10000·700 으로 재소유해 버려서,
+    #   uid 1000 인 부서 게이트웨이·CLI 경유 카드 생성이 전부
+    #   PermissionError 로 죽었다(21:13Z 공장 전면 장애, chown 복구 후 21:53Z
+    #   재발로 자기-재소유 확인). 전 컨테이너의 HERMES_UID=1000 과 정합시킨다.
+    user: "1000:1000"
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - ./skills/finance:/opt/shared-skills/finance:ro

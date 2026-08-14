@@ -59,7 +59,10 @@ _PATTERNS = (
     ("window_count", re.compile(r"(walk[- ]?forward|창).{0,12}\d+\s*개\s*미만")),
     ("beats_baseline", re.compile(
         r"(baseline|기준선|벤치마크).{0,20}(대비|보다).{0,20}"
-        r"(초과수익\s*없|높지\s*않|이하)")),
+        r"(초과수익\s*없|높지\s*않|이하)"
+        r"|(fails?\s+to\s+exceed|does\s+not\s+exceed|not\s+exceed).{0,50}"
+        r"(baseline|benchmark|equal[_ ]weight|buy[_ ]and[_ ]hold)"
+        r"|(초과수익|excess\s+return).{0,30}(below|under|less\s+than|이하|없)")),
     # 창별 최악 낙폭·창간 Sharpe 산포는 `fragility_summary` 가 이미 재는 값이다
     ("window_mdd", re.compile(r"창.{0,10}(MDD|낙폭)")),
     ("window_sharpe_std", re.compile(r"창간?\s*Sharpe.{0,10}(표준편차|산포|std)")),

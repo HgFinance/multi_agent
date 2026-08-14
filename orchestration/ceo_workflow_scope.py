@@ -213,6 +213,10 @@ def build_root_body(
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
+        # RFC 3834 동형(2026-08-13): 사람이 발원한 카드에만 이 도장이 찍힌다.
+        # 공장 자동 생성물은 origin=factory 를 찍는다 - 자동 생성물이 질의
+        # 응답 경로를 다시 부르는 순환은 이 도장의 대조로 끊는다.
+        "origin=user-query\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -274,6 +278,10 @@ def build_scoped_task_body(
         f"workflow_root_task_id={root_task_id}",
         f"workflow_role={role}",
         f"workflow_mode={workflow_mode}",
+        # 질의 파생 카드 전체에 발원 도장이 전파된다(RFC 3834 동형, 2026-08-13).
+        # 창구(liaison)는 이 도장 없는 자동 생성물(origin=factory·공장 접두어)
+        # 을 MISROUTED 로 되돌린다 - 순환의 가장 싼 절단점이 수신 거부다.
+        "origin=user-query",
     ]
     if request_id:
         metadata.append(f"request_id={request_id}")

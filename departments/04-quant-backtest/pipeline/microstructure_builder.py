@@ -100,7 +100,15 @@ with q as (
 select coalesce(q.instrument_id, t.instrument_id) instrument_id,
        q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
        coalesce(t.n_ticks, 0) n_ticks, coalesce(q.n_quotes, 0) n_quotes,
-       greatest(coalesce(q.obs_q, %(lo)s), coalesce(t.obs_t, %(lo)s)) observed_at,
+       -- ▶ 관측시각의 논리적 하한 (2026-08-13 실측): 실시간 수집분에서 원천의
+       --   event_time 이 observed_at 보다 ~2초 앞서는 시계 스큐가 있었고,
+       --   그대로 접으면 watermark > observed_at 이 되어 적재 제약
+       --   (input_watermark <= observed_at)이 매 주기 터졌다. 관측은 입력의
+       --   최신 사건보다 앞설 수 없다 - 네 시각의 최댓값이 관측시각이다.
+       --   (워터마크를 깎는 반대 방향은 입력 신선도를 지어내는 것이라 금지.
+       --   원천 시계 스큐 자체는 수집기 몫의 결함으로 따로 남긴다)
+       greatest(coalesce(q.obs_q, %(lo)s), coalesce(t.obs_t, %(lo)s),
+                coalesce(q.evt_q, %(lo)s), coalesce(t.evt_t, %(lo)s)) observed_at,
        greatest(coalesce(q.evt_q, %(lo)s), coalesce(t.evt_t, %(lo)s)) watermark
   from q full outer join t on t.instrument_id = q.instrument_id
 """
