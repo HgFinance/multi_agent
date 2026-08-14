@@ -13,6 +13,7 @@ import {
   digitsOf,
   loadInvestorProfile,
   loadMandateForFund,
+  mergeLocalDraft,
   nextStep,
   policyToDraft,
   requestMandateSuggestion,
@@ -124,22 +125,22 @@ function storageKeyFor(userId: string): string {
 }
 
 /**
- * 임시 저장해둔 초안. 없거나 읽을 수 없으면 `null`.
+ * 임시 저장해둔 초안을 **DB에서 불러온 값 위에** 얹는다. 없으면 `null`.
  *
- * `DEFAULT_DRAFT`를 바탕에 깔고 저장된 값을 덮는 이유: 필드가 추가된 뒤에
- * 저장된 옛 초안에는 그 키가 없어서, 그대로 쓰면 `undefined`가 폼에 들어간다
- * (실제로 `experience`가 그렇게 추가됐다).
+ * `base`가 `DEFAULT_DRAFT`가 아니라 서버 저장본이어야 하는 이유(2026-08-14 수정):
+ * 임시 초안에 없는 키를 공장 기본값으로 채우면, 서버에는 멀쩡히 있는 위험 성향·
+ * 투자 경험이 "보수적/초보"로 덮여 **일부 항목만 안 불러와지는 것처럼 보인다.**
+ * 특히 이 필드들이 나중에 추가돼서, 그 전에 저장된 초안에는 키 자체가 없다.
+ *
+ * `null`/`undefined`도 덮지 않는다 - "아직 답 안 함"이 서버에 저장된 답을 지우면
+ * 안 된다. 임시 초안은 **사용자가 고친 것만** 이기는 것이지, 안 고친 항목까지
+ * 되돌리는 게 아니다.
  */
-function readLocalDraft(userId: string): MandateDraft | null {
+function readLocalDraft(userId: string, base: MandateDraft): MandateDraft | null {
   try {
     const raw = window.localStorage.getItem(storageKeyFor(userId));
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<MandateDraft>;
-    return {
-      ...DEFAULT_DRAFT,
-      ...parsed,
-      allowedAssets: { ...DEFAULT_DRAFT.allowedAssets, ...(parsed.allowedAssets ?? {}) },
-    };
+    return mergeLocalDraft(base, JSON.parse(raw) as Partial<MandateDraft>);
   } catch {
     return null;
   }
@@ -330,8 +331,9 @@ function MandateConfigForm({ userId }: { userId: string }) {
         return;
       }
 
-      // 성향·경험·기간·유동성은 정책이 아니라 적합성 프로필에 있다. 없으면(404)
-      // 조용히 넘어간다 - 프로필을 아직 안 만든 사용자다.
+      // 성향·경험·기간·유동성은 정책(`MandatePolicy`)에 없다. 적합성 프로필에서
+      // 따로 채운다 - 없으면(404) 아직 프로필을 안 만든 사용자다.
+      let profileMissing = false;
       try {
         const profile = await loadInvestorProfile(account.userId, account.fundId);
         if (cancelled) return;
@@ -344,15 +346,24 @@ function MandateConfigForm({ userId }: { userId: string }) {
             liquidityNeed: profile.liquidityNeed,
           };
           setRiskBand(profile.effectiveRiskReason || profile.effectiveRiskBand);
+        } else {
+          profileMissing = true;
         }
-      } catch {
-        // 적합성 조회 실패가 정책 표시를 막을 이유는 없다.
+      } catch (cause) {
+        if (cancelled) return;
+        // 조용히 넘기지 않는다. 이걸 삼키면 위험 성향·투자 경험만 기본값으로
+        // 남고 사용자는 "일부만 안 불러와진다"고만 느낀다 - 원인을 볼 방법이 없다.
+        setNotice(
+          `위험 성향·투자 경험을 불러오지 못해 기본값으로 표시합니다: ${
+            cause instanceof Error ? cause.message : "적합성 프로필 조회 실패"
+          }`,
+        );
       }
       if (cancelled) return;
 
-      // 저장하지 않은 임시 초안이 있으면 그게 더 최신이다(사용자가 저장본을 본
-      // 뒤에 눌렀으므로). 어느 쪽을 보고 있는지 반드시 알린다.
-      const local = readLocalDraft(account.userId);
+      // 저장하지 않은 임시 초안은 **서버 저장본 위에** 얹는다(그쪽 주석 참고).
+      // 사용자가 고친 항목만 이기고, 안 고친 항목은 서버 값이 남는다.
+      const local = readLocalDraft(account.userId, next);
       if (local) {
         setDraft(local);
         // 인터뷰 단계를 저장하지 않으므로(이어하기 기능이 아니다) 폼은 열어둔다.
@@ -377,6 +388,15 @@ function MandateConfigForm({ userId }: { userId: string }) {
         setStep(INTERVIEW.length);
         setMessages([
           { from: "agent", text: `저장된 지침 v${loadedVersion}을 불러왔습니다. 좌측에서 바로 수정하실 수 있어요.` },
+          // 지침은 있는데 적합성 프로필이 없는 상태가 실제로 생긴다(프로필 저장
+          // 경로가 지침보다 늦게 붙었다). 그때 위험 성향·투자 경험만 기본값으로
+          // 보이는데, 말해주지 않으면 "일부만 안 불러와진다"로만 보인다.
+          ...(profileMissing
+            ? [{
+                from: "agent" as const,
+                text: "다만 위험 성향·투자 경험은 아직 저장된 적이 없어 기본값으로 표시했습니다. 좌측에서 고른 뒤 저장하면 다음부터 그대로 불러옵니다.",
+              }]
+            : []),
         ]);
       }
     }

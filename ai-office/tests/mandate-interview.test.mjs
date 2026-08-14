@@ -9,6 +9,7 @@ import {
   capitalUnitFor,
   draftToInvestorProfile,
   draftToPolicy,
+  mergeLocalDraft,
   nextStep,
   policyToDraft,
   validateDraft,
@@ -90,16 +91,20 @@ test("인터뷰 대본을 순서대로 적용하면 draft가 완성된다", () =
   assert.deepEqual(validateDraft(draft), []);
 
   // 완성된 draft는 적합성 프로필로도 저장 가능해야 한다.
-  const profile = draftToInvestorProfile(draft, "user-1", "fund-1");
+  const asOf = "2026-08-14T03:00:00.000Z";
+  const profile = draftToInvestorProfile(draft, "user-1", "fund-1", asOf);
   assert.equal(profile.mindset, "RISK_SEEKING");
   assert.equal(profile.experience, "EXPERIENCED");
   assert.equal(profile.investment_horizon_years, 10);
   assert.equal(profile.liquidity_need, "LOW");
   assert.equal(profile.max_drawdown_pct, "0.3500");
+  // `as_of`는 필수이고 타임존이 없으면 서버가 422로 거절한다(2026-08-14 실측).
+  assert.equal(profile.as_of, asOf);
+  assert.match(String(profile.as_of), /Z$|[+-]\d{2}:\d{2}$/, "타임존 없는 as_of는 거절당한다");
 });
 
 test("기간·유동성이 비면 적합성 프로필을 지어내지 않는다", () => {
-  assert.equal(draftToInvestorProfile(DEFAULT_DRAFT, "user-1", "fund-1"), null);
+  assert.equal(draftToInvestorProfile(DEFAULT_DRAFT, "user-1", "fund-1", "2026-08-14T03:00:00.000Z"), null);
 });
 
 test("숫자가 없거나 범위를 벗어난 답은 거절한다", () => {
@@ -187,6 +192,46 @@ test("저장된 정책을 불러오면 폼이 그대로 복원된다 (계정 전
   assert.equal(restored.maxDailyLossPct, saved.maxDailyLossPct);
   assert.deepEqual(restored.allowedAssets, saved.allowedAssets);
   assert.equal(restored.approvalMode, saved.approvalMode);
+});
+
+test("임시 초안은 서버 저장본을 지우지 않는다 (일부 항목 미복원 회귀)", () => {
+  // 서버에서 불러온 상태: 공격적 + 숙련 + 기간 10년.
+  const fromServer = {
+    ...applyChoice({ ...DEFAULT_DRAFT, experience: "EXPERIENCED" }, { riskProfile: "aggressive" }),
+    investmentHorizonYears: 10,
+    liquidityNeed: "LOW",
+    objective: "성장주 중심",
+  };
+  // 위험 성향·경험 필드가 생기기 전에 저장된 옛 임시 초안 - 그 키가 아예 없다.
+  const oldLocal = { objective: "수정 중인 목표", baseCapital: 50_000_000 };
+
+  const merged = mergeLocalDraft(fromServer, oldLocal);
+
+  // 사용자가 고친 것만 이긴다.
+  assert.equal(merged.objective, "수정 중인 목표");
+  assert.equal(merged.baseCapital, 50_000_000);
+  // 초안에 없던 항목이 공장 기본값("보수적"/"초보")으로 덮이면 안 된다.
+  assert.equal(merged.riskProfile, "aggressive", "위험 성향이 기본값으로 덮였다");
+  assert.equal(merged.experience, "EXPERIENCED", "투자 경험이 기본값으로 덮였다");
+  assert.equal(merged.investmentHorizonYears, 10);
+  assert.equal(merged.liquidityNeed, "LOW");
+  assert.equal(merged.grossExposurePct, fromServer.grossExposurePct);
+});
+
+test("초안의 null은 서버에 저장된 답을 지우지 않는다", () => {
+  const fromServer = { ...DEFAULT_DRAFT, investmentHorizonYears: 10, liquidityNeed: "LOW" };
+  // 인터뷰 도중(미응답 상태)에 임시 저장한 초안.
+  const merged = mergeLocalDraft(fromServer, { investmentHorizonYears: null, liquidityNeed: null });
+  assert.equal(merged.investmentHorizonYears, 10);
+  assert.equal(merged.liquidityNeed, "LOW");
+});
+
+test("자산군은 서버 값 위에 초안이 겹쳐진다", () => {
+  const fromServer = { ...DEFAULT_DRAFT, allowedAssets: { ...DEFAULT_DRAFT.allowedAssets, leverage: true } };
+  const merged = mergeLocalDraft(fromServer, { allowedAssets: { crypto: true } });
+  assert.equal(merged.allowedAssets.leverage, true, "서버가 켠 항목이 사라졌다");
+  assert.equal(merged.allowedAssets.crypto, true);
+  assert.equal(merged.allowedAssets.equity, true);
 });
 
 test("기본 draft는 정책 제약을 위반하지 않는다", () => {

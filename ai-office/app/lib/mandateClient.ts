@@ -285,6 +285,31 @@ export function policyToDraft(
 }
 
 /**
+ * 임시 저장 초안을 **서버 저장본 위에** 얹는다.
+ *
+ * `base`가 `DEFAULT_DRAFT`가 아니라 서버 저장본이어야 하는 이유(2026-08-14):
+ * 초안에 없는 키를 공장 기본값으로 채우면, 서버에는 멀쩡히 있는 위험 성향·투자
+ * 경험이 "보수적/초보"로 덮여 **일부 항목만 안 불러와지는 것처럼 보인다.**
+ * 이 필드들은 나중에 추가돼서 그 전에 저장된 초안에는 키 자체가 없다.
+ *
+ * `null`/`undefined`는 덮지 않는다 - "아직 답 안 함"이 서버에 저장된 답을 지우면
+ * 안 된다. 임시 초안은 **사용자가 고친 것만** 이긴다.
+ */
+export function mergeLocalDraft(base: MandateDraft, parsed: Partial<MandateDraft>): MandateDraft {
+  // `allowedAssets`는 통째로 덮으면 서버가 켠 자산군이 사라지므로 따로 병합한다.
+  const edited = Object.fromEntries(
+    Object.entries(parsed).filter(
+      ([key, value]) => value !== null && value !== undefined && key !== "allowedAssets",
+    ),
+  ) as Partial<MandateDraft>;
+  return {
+    ...base,
+    ...edited,
+    allowedAssets: { ...base.allowedAssets, ...(parsed.allowedAssets ?? {}) },
+  };
+}
+
+/**
  * 선택 하나를 draft에 적용한다.
  *
  * 성향·경험 중 **어느 쪽이 바뀌든** `min()` 등급이 바뀔 수 있으므로 둘을 한
@@ -673,6 +698,7 @@ export function draftToInvestorProfile(
   draft: MandateDraft,
   userId: string,
   fundId: string,
+  asOf: string,
 ): Record<string, unknown> | null {
   if (draft.investmentHorizonYears === null || draft.liquidityNeed === null) return null;
   return {
@@ -683,6 +709,11 @@ export function draftToInvestorProfile(
     investment_horizon_years: draft.investmentHorizonYears,
     max_drawdown_pct: (draft.maxDrawdownPct / 100).toFixed(4),
     liquidity_need: draft.liquidityNeed,
+    // 필수 필드이고 **타임존이 없으면 서버가 거절한다**(`suitability.py`
+    // `validate_as_of`). `toISOString()`은 항상 Z가 붙는다.
+    // 정책 version의 `effective_from`과 같은 시각을 쓴다 - 저장 한 번이
+    // 두 시각으로 갈라지면 나중에 어느 프로필이 어느 version 것인지 못 맞춘다.
+    as_of: asOf,
   };
 }
 
@@ -753,7 +784,7 @@ export async function submitMandateDraft(
     throw new MandateSubmissionError(errorMessage(body, status));
   }
 
-  return { version: body.version, profileError: await saveInvestorProfile(draft, fundId) };
+  return { version: body.version, profileError: await saveInvestorProfile(draft, fundId, nowIso) };
 }
 
 /**
@@ -761,9 +792,13 @@ export async function submitMandateDraft(
  * 뒤라, 여기서 예외를 던지면 호출부가 "저장 실패"로만 보고해 사용자가 이미
  * 저장된 지침을 다시 저장하려 든다. 사유 문자열을 돌려 사실대로 알린다.
  */
-async function saveInvestorProfile(draft: MandateDraft, fundId: string): Promise<string | undefined> {
+async function saveInvestorProfile(
+  draft: MandateDraft,
+  fundId: string,
+  asOf: string,
+): Promise<string | undefined> {
   const account = readStoredAccount();
-  const profile = draftToInvestorProfile(draft, account.userId, fundId);
+  const profile = draftToInvestorProfile(draft, account.userId, fundId, asOf);
   if (!profile) return "투자 기간·유동성 응답이 없어 적합성 프로필은 저장하지 않았습니다.";
 
   try {
