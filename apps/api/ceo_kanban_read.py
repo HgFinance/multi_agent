@@ -46,7 +46,7 @@ from orchestration.canonical_profiles import (
 )
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
-    selected_primary_profiles_from_body,
+    selected_primary_profiles_from_task,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -496,6 +496,7 @@ class Workflow:
     root_task_id: str
     nodes: tuple[WorkflowNode, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    root_payload: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def root(self) -> WorkflowNode:
@@ -513,7 +514,7 @@ class Workflow:
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
         """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
-        selected = set(selected_primary_profiles_from_body(self.root.body))
+        selected = set(selected_primary_profiles_from_task(self.root_payload))
         return tuple(
             node
             for node in self.descendants
@@ -784,6 +785,7 @@ def load_workflow(
         root_task_id=root_id,
         nodes=tuple(nodes),
         metadata=_run_metadata(payloads[root_id]),
+        root_payload=payloads[root_id],
     )
 
 

@@ -27,6 +27,7 @@ from orchestration.adapters.ceo_supervisor import (
 )
 from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
 from orchestration.adapters.qa_audit_projection import QaAuditProjection
+from orchestration.discord_delivery import DiscordFinalDelivery
 
 
 WATCH_LINE = re.compile(
@@ -151,6 +152,7 @@ def main() -> int:
         max_wakeups=args.max_wakeups,
         synthesis_projection=CeoNotionProjection(kanban_client=client),
         qa_projection=QaAuditProjection(kanban_client=client),
+        discord_delivery=DiscordFinalDelivery(environment=environment),
     )
     try:
         for event in watch_events(

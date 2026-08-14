@@ -114,6 +114,94 @@ def selected_primary_profiles_from_body(body: str) -> tuple[str, ...]:
                 break
     return tuple(selected)
 
+
+def selected_primary_profiles_from_task(
+    task: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Resolve the planner's primary set from one root task projection.
+
+    New producers must persist the selection in the root body (or structured
+    root metadata).  Comments are a compatibility fallback for the direct
+    Hermes producer that existed before the machine-readable field was added.
+    The fallback is deliberately root-local; it never searches other tasks or
+    infers a department from recency.
+    """
+
+    if not isinstance(task, Mapping):
+        return ()
+
+    body = str(task.get("body") or "")
+
+    # Prefer the new machine-readable root field. The older direct-Hermes
+    # producer wrote a prose ``Dynamic departments selected: ...`` sentence;
+    # that sentence must not override a precise root comment or run metadata.
+    for line in body.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().casefold() in {
+            PRIMARY_SELECTION_FIELD,
+            "selected_departments",
+        }:
+            explicit_selection = _selection_values(value)
+            if explicit_selection:
+                return explicit_selection
+
+    def from_metadata(value: Any) -> tuple[str, ...]:
+        if isinstance(value, Mapping):
+            for key in (
+                PRIMARY_SELECTION_FIELD,
+                "selected_departments",
+                "selected_primary",
+            ):
+                if key in value:
+                    parsed = _selection_values(value[key])
+                    if parsed:
+                        return parsed
+            for key in (
+                "metadata",
+                "workflow_metadata",
+                "run_metadata",
+                "task_run_metadata",
+                "task_run",
+            ):
+                if key in value:
+                    parsed = from_metadata(value[key])
+                    if parsed:
+                        return parsed
+            return ()
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for item in value:
+                parsed = from_metadata(item)
+                if parsed:
+                    return parsed
+        return ()
+
+    metadata_selection = from_metadata(task.get("metadata"))
+    if metadata_selection:
+        return metadata_selection
+    for key in ("task_run_metadata", "run_metadata", "task_run", "runs"):
+        metadata_selection = from_metadata(task.get(key))
+        if metadata_selection:
+            return metadata_selection
+
+    # Legacy direct-Discord producer: selected_primary_profiles was written
+    # as a root comment. Read only comments attached to this root. This is
+    # intentionally before the old prose fallback below.
+    comments = task.get("comments")
+    if isinstance(comments, Sequence) and not isinstance(comments, (str, bytes)):
+        for comment in comments:
+            comment_body = (
+                comment.get("body")
+                if isinstance(comment, Mapping)
+                else comment
+            )
+            parsed = selected_primary_profiles_from_body(str(comment_body or ""))
+            if parsed:
+                return parsed
+
+    # Compatibility only for roots whose producer persisted the selection
+    # solely in the old prose sentence.
+    return selected_primary_profiles_from_body(body)
+
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
 #
@@ -346,6 +434,8 @@ def build_root_body(
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"
+        "analysis_response_rule=primary_results_ready_allows_immediate_ceo_synthesis\n"
+        "qa_rule=async_post_hoc_audit_not_user_response_prerequisite\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -582,6 +672,7 @@ __all__ = [
     "mandate_snapshot_present",
     "primary_idempotency_key",
     "selected_primary_profiles_from_body",
+    "selected_primary_profiles_from_task",
     "validate_workflow_scope",
     "workflow_mode_from_body",
 ]

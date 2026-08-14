@@ -26,7 +26,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_role,
     workflow_root,
 )
-from orchestration.ceo_workflow_scope import selected_primary_profiles_from_body
+from orchestration.ceo_workflow_scope import selected_primary_profiles_from_task
 
 logger = logging.getLogger(__name__)
 PROJECTION_MARKER = "hgfinance.ceo-notion-projection.v1"
@@ -311,7 +311,7 @@ class CeoNotionProjection:
         original_query = ""
         if "## User request" in root_body:
             original_query = root_body.split("## User request", 1)[1].strip()
-        selected_profiles = selected_primary_profiles_from_body(root_body)
+        selected_profiles = selected_primary_profiles_from_task(root_task)
         primary = [
             item
             for item in workflow_tasks
