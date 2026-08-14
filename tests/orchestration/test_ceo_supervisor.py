@@ -37,6 +37,11 @@ def child(
     retry_count: int = 0,
     summary: str = "summary",
 ) -> ChildTaskState:
+    if "workflow_root_task_id=" not in body:
+        body = f"workflow_root_task_id=root\n{body}" if body else "workflow_root_task_id=root"
+    if "workflow_role=" not in body:
+        role = "qa" if profile == "qa-department" else "primary"
+        body = f"{body}\nworkflow_role={role}"
     return ChildTaskState(
         task_id=task_id,
         profile=profile,
@@ -291,13 +296,107 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual([c.task_id for c in state.analysis_children], ["primary"])
         self.assertEqual([c.task_id for c in state.qa_children], ["qa"])
 
+    def test_continuous_research_is_excluded_even_with_research_profile(self) -> None:
+        background_tasks = tuple(
+            child(
+                f"background-{index}",
+                "research-department",
+                "done",
+                body=(
+                    "workflow_root_task_id=root\n"
+                    "workflow_plane=continuous_research\n"
+                    "workflow_role=background_research\n"
+                    "hgfinance.continuous-research.v1"
+                ),
+            )
+            for index in range(100)
+        )
+        state = SupervisorState(
+            "root",
+            (
+                child("request-research", "research-department", "done"),
+                child(
+                    "foreign-primary",
+                    "research-department",
+                    "done",
+                    body="workflow_root_task_id=old-root\nworkflow_role=primary",
+                ),
+                *background_tasks,
+            ),
+        )
+
+        self.assertEqual(
+            [item.task_id for item in state.analysis_children], ["request-research"]
+        )
+        decision = decide_supervisor(state)
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.parent_task_ids, ("request-research",))
+
+        fast_path = decide_supervisor(
+            SupervisorState(
+                "root",
+                state.children
+                + (child("qa", "qa-department", "running", body="workflow_role=qa"),),
+            )
+        )
+        self.assertEqual(fast_path.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(fast_path.parent_task_ids, ("request-research",))
+
+    def test_background_research_can_use_unregistered_future_profile(self) -> None:
+        task = ChildTaskState.from_hermes(
+            {
+                "id": "background",
+                "assignee": "research-intelligence",
+                "status": "done",
+                "body": (
+                    "workflow_plane=continuous_research\n"
+                    "workflow_role=background_research"
+                ),
+            }
+        )
+        self.assertTrue(task.is_background_research)
+        self.assertFalse(task.is_analysis)
+
+    def test_background_research_failure_does_not_enter_fast_loop(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child("request-research", "research-department", "done"),
+                child(
+                    "continuous-failure",
+                    "research-intelligence",
+                    "crashed",
+                    body=(
+                        "workflow_plane=continuous_research\n"
+                        "workflow_role=background_research"
+                    ),
+                ),
+            ),
+        )
+
+        decision = decide_supervisor(state)
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.parent_task_ids, ("request-research",))
+
 
 
 class FakeClient:
     def __init__(self) -> None:
         self.payloads = [
-            {"id": "r", "assignee": "research-department", "status": "done", "summary": "research"},
-            {"id": "risk", "assignee": "risk-management", "status": "done", "summary": "risk"},
+            {
+                "id": "r",
+                "assignee": "research-department",
+                "status": "done",
+                "summary": "research",
+                "body": "workflow_root_task_id=root\nworkflow_role=primary",
+            },
+            {
+                "id": "risk",
+                "assignee": "risk-management",
+                "status": "done",
+                "summary": "risk",
+                "body": "workflow_root_task_id=root\nworkflow_role=primary",
+            },
         ]
         self.created: list[dict[str, object]] = []
         self.unblocked: list[str] = []
@@ -444,6 +543,7 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "assignee": "qa-department",
                 "status": "done",
                 "summary": "qa passed",
+                "body": "workflow_root_task_id=root\nworkflow_role=qa",
             }
         )
 

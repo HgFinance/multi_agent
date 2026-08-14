@@ -116,6 +116,14 @@ class FakeNotionTransport:
     def __init__(self) -> None:
         self.pages: list[dict[str, Any]] = []
 
+    def database_schema(self, _database_id: str) -> dict[str, Any]:
+        return {
+            "properties": {
+                "제목": {"type": "title", "title": {}},
+                "projection_key": {"type": "rich_text", "rich_text": {}},
+            }
+        }
+
     def query_projection(self, _database_id: str, projection_key: str) -> Sequence[Mapping[str, Any]]:
         return [page for page in self.pages if page["projection_key"] == projection_key]
 
@@ -134,6 +142,24 @@ class FakeNotionTransport:
 class LegacyNotionTransport(FakeNotionTransport):
     """Simulate the production DB without a projection_key property."""
 
+    def database_schema(self, _database_id: str) -> dict[str, Any]:
+        names = (
+            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
+            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
+            "다음 우선순위",
+        )
+        properties: dict[str, Any] = {
+            "브리핑명": {"type": "title", "title": {}},
+            "기준일": {"type": "date", "date": {}},
+            "상태": {"type": "select", "select": {"options": [{"name": "완료"}]}},
+            "구분": {"type": "select", "select": {"options": [{"name": "CEO"}]}},
+        }
+        for name in names[4:9]:
+            properties[name] = {"type": "number", "number": {}}
+        for name in names[9:]:
+            properties[name] = {"type": "rich_text", "rich_text": {}}
+        return {"properties": properties}
+
     def query_projection(
         self, _database_id: str, _projection_key: str
     ) -> Sequence[Mapping[str, Any]]:
@@ -145,10 +171,20 @@ class LegacyNotionTransport(FakeNotionTransport):
         properties: Mapping[str, Any],
         _children: Sequence[Mapping[str, Any]],
     ) -> Mapping[str, Any]:
-        title = properties.get("제목") or properties.get("title")
-        page = {"id": f"page-{len(self.pages) + 1}", "title": title}
+        title = properties.get("브리핑명") or properties.get("제목") or properties.get("title")
+        page = {"id": f"page-{len(self.pages) + 1}", "title": title, "properties": properties}
         self.pages.append(page)
         return page
+
+
+class FailingNotionTransport(FakeNotionTransport):
+    def create_page(
+        self,
+        _database_id: str,
+        _properties: Mapping[str, Any],
+        _children: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        raise NotionProjectionError("validation error", status=400)
 
 
 class ReplayTerminalProjectionTests(unittest.TestCase):
@@ -247,6 +283,22 @@ class ReplayTerminalProjectionTests(unittest.TestCase):
         self.assertEqual(second["projection"]["status"], "duplicate")
         self.assertEqual(len(transport.pages), 1)
         self.assertEqual(len(client.write_calls), 1)
+
+    def test_notion_validation_failure_is_structured_and_not_retried(self) -> None:
+        client = FakeKanban()
+        transport = FailingNotionTransport()
+        result = replay_terminal_projection(
+            projection_type="notion",
+            root_task_id=ROOT,
+            task_id_value=SYNTHESIS,
+            client=client,
+            notion_transport=transport,
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "db"},
+        )
+        self.assertEqual(result["projection"]["status"], "failed")
+        self.assertFalse(result["projection"]["retryable"])
+        self.assertEqual(len(transport.pages), 0)
+        self.assertEqual(client.write_calls, [])
 
     def test_rejects_non_terminal_wrong_root_and_wrong_type(self) -> None:
         client = FakeKanban()

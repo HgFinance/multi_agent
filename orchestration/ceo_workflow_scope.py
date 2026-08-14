@@ -14,10 +14,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 CEO_WORKFLOW_SCOPE_POLICY = "fresh"
 CEO_WORKFLOW_REUSE_POLICY = "disabled"
+CONTINUOUS_RESEARCH_MARKER = "hgfinance.continuous-research.v1"
+CONTINUOUS_RESEARCH_PLANE = "continuous_research"
+BACKGROUND_RESEARCH_ROLE = "background_research"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
 
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
@@ -464,10 +466,13 @@ def validate_workflow_scope(
 
 
 __all__ = [
+    "BACKGROUND_RESEARCH_ROLE",
     "CEO_MANDATE_SNAPSHOT_MARKER",
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",
+    "CONTINUOUS_RESEARCH_MARKER",
+    "CONTINUOUS_RESEARCH_PLANE",
     "WORKFLOW_MODES",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
