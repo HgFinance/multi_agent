@@ -337,10 +337,22 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]
-    if qa_required:
-        steps.append("QA")
-    if synthesis_present:
-        steps.append("CEO Synthesis")
+    binding = bool(
+        re.search(
+            r"(?:^|\n)workflow_mode=binding(?:\n|$)",
+            str(task.get("body") or "").casefold(),
+        )
+    )
+    if binding:
+        if qa_required:
+            steps.append("QA (blocking gate)")
+        if synthesis_present:
+            steps.append("CEO Synthesis")
+    else:
+        if synthesis_present:
+            steps.append("CEO Synthesis")
+        if qa_required:
+            steps.append("QA (async evaluation)")
     planned = bool(selected or qa_required or synthesis_present)
     return {
         "status": "planned" if planned else "accepted",

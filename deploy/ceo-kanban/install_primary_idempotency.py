@@ -34,6 +34,7 @@ def _install(source: str) -> str:
         "# hgfinance-primary-idempotency-v1\n"
         "from orchestration.primary_task_idempotency import (\n"
         "    find_existing_scoped_primary,\n"
+        "    requires_scoped_primary_contract,\n"
         "    scoped_primary_create_lock,\n"
         "    scoped_primary_identity,\n"
         ")\n"
@@ -59,6 +60,10 @@ def _install(source: str) -> str:
     replacement = (
         "            _primary_identity = scoped_primary_identity(body, assignee)\n"
         "            if _primary_identity is None:\n"
+        "                if requires_scoped_primary_contract(body, assignee):\n"
+        "                    raise ValueError(\n"
+        "                        'CEO primary task requires workflow_root_task_id and workflow_role=primary'\n"
+        "                    )\n"
         f"{indented_create_block}\n"
         "            else:\n"
         "                with scoped_primary_create_lock():\n"

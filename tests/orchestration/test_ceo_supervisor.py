@@ -114,6 +114,9 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(second.reason, "primary_results_ready_fast_path")
         self.assertEqual(second.parent_task_ids, ("research", "accounting"))
         self.assertNotIn("qa", second.parent_task_ids)
+        self.assertIn("QA runs independently", second.body)
+        self.assertIn("not a synthesis prerequisite", second.body)
+        self.assertNotIn("after QA", second.body.casefold())
 
     def test_replan_is_scope_bound_without_root_execution_dependency(self) -> None:
         client = FakeClient()
@@ -122,13 +125,8 @@ class SupervisorPolicyTest(unittest.TestCase):
             {"event_id": "replan-1", "task_id": "r", "kind": "blocked"}
         )
         self.assertEqual(decision.action, SupervisorAction.CREATE_TASK)
-        self.assertEqual(client.created[0]["parent_task_ids"], ())
-        self.assertIn("workflow_root_task_id=root", client.created[0]["body"])
-        self.assertIn("workflow_role=primary", client.created[0]["body"])
-        self.assertEqual(
-            client.created[0]["idempotency_key"],
-            primary_idempotency_key("root", "research-department"),
-        )
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.unblocked, ["r"])
 
     def test_blocked_transient_can_retry_and_other_blocked_can_replan(self) -> None:
         retry = decide_supervisor(
@@ -438,7 +436,67 @@ class SupervisorPolicyTest(unittest.TestCase):
         )
         state = SupervisorState("root", children, selected_primary_profiles=selected)
         self.assertEqual(state.duplicate_primary_profiles, selected)
+        self.assertEqual(state.ready_count, 0)
+        self.assertFalse(state.primary_ready)
+        with self.assertLogs("orchestration.adapters.ceo_supervisor", level="WARNING") as logs:
+            self.assertIsNone(decide_supervisor(state))
+        self.assertTrue(
+            any("primary-duplicate-detected" in message for message in logs.output)
+        )
+        self.assertFalse(any("primary-ready" in message for message in logs.output))
+
+    def test_readiness_is_unique_profile_count_and_never_exceeds_selected(self) -> None:
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        state = SupervisorState(
+            "root",
+            tuple(
+                child(f"{profile}-1", profile, "done", body="workflow_role=primary")
+                for profile in selected
+            ),
+            selected_primary_profiles=selected,
+        )
+        self.assertEqual(state.ready_count, 4)
+        self.assertLessEqual(state.ready_count, len(selected))
+        self.assertTrue(state.primary_ready)
+
+    def test_failed_primary_retry_is_not_ready_until_same_task_recovers(self) -> None:
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        children = (
+            child("research", "research-department", "running", body="workflow_role=primary"),
+            child("quant", "quant-backtest-department", "done", body="workflow_role=primary"),
+            child("risk", "risk-management", "done", body="workflow_role=primary"),
+            child("accounting", "accounting-portfolio-department", "done", body="workflow_role=primary"),
+        )
+        state = SupervisorState("root", children, selected_primary_profiles=selected)
+        self.assertEqual(state.ready_count, 3)
+        self.assertFalse(state.primary_ready)
         self.assertIsNone(decide_supervisor(state))
+
+    def test_failed_primary_retries_same_task_without_creating_duplicate(self) -> None:
+        client = FakeClient()
+        client.payloads[0].update(
+            status="failed",
+            runs=[{"outcome": "failed"}],
+        )
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "same-primary-retry", "task_id": "r", "kind": "crashed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.RETRY_TASK)
+        self.assertEqual(client.unblocked, ["r"])
+        self.assertEqual(client.created, [])
 
     def test_analysis_synthesis_waits_for_every_selected_primary(self) -> None:
         selected = (
