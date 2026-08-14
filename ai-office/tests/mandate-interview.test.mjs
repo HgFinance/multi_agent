@@ -90,16 +90,20 @@ test("인터뷰 대본을 순서대로 적용하면 draft가 완성된다", () =
   assert.deepEqual(validateDraft(draft), []);
 
   // 완성된 draft는 적합성 프로필로도 저장 가능해야 한다.
-  const profile = draftToInvestorProfile(draft, "user-1", "fund-1");
+  const asOf = "2026-08-14T03:00:00.000Z";
+  const profile = draftToInvestorProfile(draft, "user-1", "fund-1", asOf);
   assert.equal(profile.mindset, "RISK_SEEKING");
   assert.equal(profile.experience, "EXPERIENCED");
   assert.equal(profile.investment_horizon_years, 10);
   assert.equal(profile.liquidity_need, "LOW");
   assert.equal(profile.max_drawdown_pct, "0.3500");
+  // `as_of`는 필수이고 타임존이 없으면 서버가 422로 거절한다(2026-08-14 실측).
+  assert.equal(profile.as_of, asOf);
+  assert.match(String(profile.as_of), /Z$|[+-]\d{2}:\d{2}$/, "타임존 없는 as_of는 거절당한다");
 });
 
 test("기간·유동성이 비면 적합성 프로필을 지어내지 않는다", () => {
-  assert.equal(draftToInvestorProfile(DEFAULT_DRAFT, "user-1", "fund-1"), null);
+  assert.equal(draftToInvestorProfile(DEFAULT_DRAFT, "user-1", "fund-1", "2026-08-14T03:00:00.000Z"), null);
 });
 
 test("숫자가 없거나 범위를 벗어난 답은 거절한다", () => {

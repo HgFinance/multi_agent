@@ -673,6 +673,7 @@ export function draftToInvestorProfile(
   draft: MandateDraft,
   userId: string,
   fundId: string,
+  asOf: string,
 ): Record<string, unknown> | null {
   if (draft.investmentHorizonYears === null || draft.liquidityNeed === null) return null;
   return {
@@ -683,6 +684,11 @@ export function draftToInvestorProfile(
     investment_horizon_years: draft.investmentHorizonYears,
     max_drawdown_pct: (draft.maxDrawdownPct / 100).toFixed(4),
     liquidity_need: draft.liquidityNeed,
+    // 필수 필드이고 **타임존이 없으면 서버가 거절한다**(`suitability.py`
+    // `validate_as_of`). `toISOString()`은 항상 Z가 붙는다.
+    // 정책 version의 `effective_from`과 같은 시각을 쓴다 - 저장 한 번이
+    // 두 시각으로 갈라지면 나중에 어느 프로필이 어느 version 것인지 못 맞춘다.
+    as_of: asOf,
   };
 }
 
@@ -753,7 +759,7 @@ export async function submitMandateDraft(
     throw new MandateSubmissionError(errorMessage(body, status));
   }
 
-  return { version: body.version, profileError: await saveInvestorProfile(draft, fundId) };
+  return { version: body.version, profileError: await saveInvestorProfile(draft, fundId, nowIso) };
 }
 
 /**
@@ -761,9 +767,13 @@ export async function submitMandateDraft(
  * 뒤라, 여기서 예외를 던지면 호출부가 "저장 실패"로만 보고해 사용자가 이미
  * 저장된 지침을 다시 저장하려 든다. 사유 문자열을 돌려 사실대로 알린다.
  */
-async function saveInvestorProfile(draft: MandateDraft, fundId: string): Promise<string | undefined> {
+async function saveInvestorProfile(
+  draft: MandateDraft,
+  fundId: string,
+  asOf: string,
+): Promise<string | undefined> {
   const account = readStoredAccount();
-  const profile = draftToInvestorProfile(draft, account.userId, fundId);
+  const profile = draftToInvestorProfile(draft, account.userId, fundId, asOf);
   if (!profile) return "투자 기간·유동성 응답이 없어 적합성 프로필은 저장하지 않았습니다.";
 
   try {
