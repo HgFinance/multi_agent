@@ -247,7 +247,7 @@ export function CeoControlRoomChat() {
 
       <div
         ref={chatRef}
-        className="p-4 flex flex-col gap-3 overflow-y-auto max-h-[480px]"
+        className="p-4 flex flex-col gap-3 overflow-y-auto min-h-[320px] max-h-[480px]"
         aria-live="polite"
         aria-label="CEO 질의 대화"
       >
