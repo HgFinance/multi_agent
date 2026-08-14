@@ -9,6 +9,8 @@ import {
   MandateSubmissionError,
   applyChoice,
   applySuggestions,
+  capitalUnitFor,
+  digitsOf,
   loadInvestorProfile,
   loadMandateForFund,
   nextStep,
@@ -385,7 +387,19 @@ function MandateConfigForm({ userId }: { userId: string }) {
     };
   }, [userId]);
 
-  const capitalDisplay = useMemo(() => draft.baseCapital.toLocaleString("en-US"), [draft.baseCapital]);
+  /**
+   * 기본 자산 입력 단위. KRW면 만원이다(`capitalUnitFor`).
+   *
+   * 저장값이 단위로 딱 나눠떨어지지 않으면(다른 경로가 넣은 금액) 입력칸은
+   * 반올림해 보여준다. 그래도 실제 저장값은 사용자가 이 칸을 **직접 고치기
+   * 전까지** 그대로다 - 그래서 정확한 원 금액을 항상 아래에 같이 적는다.
+   * 금액 필드에서 화면 표시와 저장값이 소리 없이 달라지면 안 된다.
+   */
+  const capitalUnit = useMemo(() => capitalUnitFor(draft.currency), [draft.currency]);
+  const capitalDisplay = useMemo(
+    () => Math.round(draft.baseCapital / capitalUnit.multiplier).toLocaleString("en-US"),
+    [draft.baseCapital, capitalUnit.multiplier],
+  );
 
   /**
    * 투자 경험이 성향을 끌어내렸는지. `EXPERIENCED`는 `min()`에서 항상 성향 쪽이
@@ -401,8 +415,9 @@ function MandateConfigForm({ userId }: { userId: string }) {
   }, [draft.riskProfile, draft.experience]);
 
   function onCapitalChange(raw: string) {
-    const digits = raw.replace(/[^\d]/g, "");
-    patch("baseCapital", digits ? Number(digits) : 0);
+    // 입력은 단위(만원) 기준, 저장은 원 기준. 정수 곱이라 소수 오차가 없다.
+    const units = digitsOf(raw);
+    patch("baseCapital", units === null ? 0 : units * capitalUnit.multiplier);
   }
 
   function toggleAsset(id: AssetClassId) {
@@ -678,16 +693,32 @@ function MandateConfigForm({ userId }: { userId: string }) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div>
                   <label>
-                    <span className="block text-label-md font-label-md text-secondary mb-1 uppercase">기본 자산</span>
+                    <span className="block text-label-md font-label-md text-secondary mb-1 uppercase">
+                      기본 자산 <span className="normal-case font-normal text-on-surface-variant">({capitalUnit.label} 단위)</span>
+                    </span>
                     <span className="text-[10px] text-outline block mb-2 font-mono">risk_bounds.base_capital</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={capitalDisplay}
-                      onChange={(event) => onCapitalChange(event.target.value)}
-                      className="w-full p-3 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-data-mono font-data-mono font-bold tracking-wider"
-                    />
+                    <span className="relative block">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={capitalDisplay}
+                        onChange={(event) => onCapitalChange(event.target.value)}
+                        aria-describedby="capital-exact"
+                        className="w-full p-3 pr-14 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-data-mono font-data-mono font-bold tracking-wider"
+                      />
+                      <span className="absolute right-3 top-3.5 text-body-sm font-body-sm text-on-surface-variant pointer-events-none">
+                        {capitalUnit.label}
+                      </span>
+                    </span>
                   </label>
+                  {/*
+                    실제로 저장되는 금액을 그대로 적는다. 입력 단위와 저장 단위가
+                    다른 칸에서 이걸 안 보여주면 1만 배 오입력을 저장 전에 알아챌
+                    방법이 없다.
+                  */}
+                  <p id="capital-exact" className="text-xs text-on-surface-variant mt-2 font-data-mono">
+                    = {draft.baseCapital.toLocaleString("en-US")} {draft.currency}
+                  </p>
                 </div>
                 <div>
                   <label>

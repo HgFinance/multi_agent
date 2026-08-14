@@ -330,6 +330,20 @@ export function digitsOf(text: string): number | null {
   return digits ? Number(digits) : null;
 }
 
+export const MAN_WON = 10_000;
+
+/**
+ * 기본 자산 입력 단위. **저장되는 `risk_bounds.base_capital`은 언제나 원(통화
+ * 최소 단위) 그대로다** - 여기서 바꾸는 건 화면이 받고 보여주는 단위뿐이다.
+ *
+ * KRW일 때만 만원이다. 통화를 USD로 바꿔놓고도 "만원"이라고 적혀 있으면 1만 배
+ * 오입력이 나는데, 그게 금액 필드에서 가장 비싼 실수다. 통화 선택이 KRW 하나로
+ * 고정되면 이 분기는 지워도 된다.
+ */
+export function capitalUnitFor(currency: string): { multiplier: number; label: string } {
+  return currency === "KRW" ? { multiplier: MAN_WON, label: "만원" } : { multiplier: 1, label: currency };
+}
+
 /**
  * 인터뷰 대본. **구조화 값은 전부 사용자의 명시적 선택에서 나온다.**
  *
@@ -384,11 +398,14 @@ export const INTERVIEW: InterviewStep[] = [
     ],
   },
   {
-    prompt: "운용할 기본 자산은 얼마인가요? (원)",
-    retry: "숫자로 입력해 주세요. 예: 100,000,000",
+    // 이 단계에 오는 시점의 통화는 항상 기본값 KRW다 - 통화는 인터뷰가 묻지
+    // 않고, 저장본을 불러온 경우엔 인터뷰 자체를 건너뛴다. 그래서 여기서는
+    // `capitalUnitFor`를 보지 않고 만원으로 고정해도 어긋나지 않는다.
+    prompt: "운용할 기본 자산은 얼마인가요? (만원 단위로 입력해 주세요)",
+    retry: "만원 단위 숫자로 입력해 주세요. 예: 10000 (= 1억원)",
     parse: (text) => {
-      const capital = digitsOf(text);
-      return capital !== null && capital > 0 ? { baseCapital: capital } : null;
+      const manWon = digitsOf(text);
+      return manWon !== null && manWon > 0 ? { baseCapital: manWon * MAN_WON } : null;
     },
   },
   {
