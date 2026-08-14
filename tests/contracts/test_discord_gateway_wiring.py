@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
 
@@ -43,12 +42,20 @@ def _service_block(source: str, service_name: str) -> str:
 
 
 class DiscordGatewayWiringTests(unittest.TestCase):
-    def test_all_eight_gateway_definitions_use_upstream_image_by_default(self) -> None:
+    def test_gateway_definitions_use_expected_image_by_default(self) -> None:
         profiles: set[str] = set()
         for service, path in GATEWAY_SERVICES.items():
             block = _service_block(path.read_text(encoding="utf-8"), service)
             profile = EXPECTED_GATEWAY_PROFILES[service]
-            self.assertIn("image: nousresearch/hermes-agent:latest", block, service)
+            if service == "ceo-hermes":
+                self.assertIn("dockerfile: Dockerfile.ceo-hermes", block, service)
+                self.assertIn(
+                    "image: hedgefund-ceo-hermes:primary-idempotency-v1",
+                    block,
+                    service,
+                )
+            else:
+                self.assertIn("image: nousresearch/hermes-agent:latest", block, service)
             self.assertNotIn("HERMES_GATEWAY_IMAGE", block, service)
             self.assertNotIn("Dockerfile.hermes-discord", block, service)
             self.assertIn(f"HERMES_PROFILE: {profile}", block, service)
@@ -136,7 +143,8 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         dispatcher_block = source[source.index("kanban-dispatcher:") : source.index("ceo-kanban-supervisor:")]
         supervisor_block = source[source.index("ceo-kanban-supervisor:") : source.index("paper-search-mcp:")]
         self.assertIn("image: nousresearch/hermes-agent:latest", dispatcher_block)
-        self.assertIn("image: nousresearch/hermes-agent:latest", supervisor_block)
+        self.assertIn("image: hedgefund-ceo-supervisor:latest", supervisor_block)
+        self.assertIn("dockerfile: Dockerfile.ceo-supervisor", supervisor_block)
         self.assertNotIn("HERMES_GATEWAY_IMAGE", dispatcher_block)
         self.assertNotIn("HERMES_GATEWAY_IMAGE", supervisor_block)
         self.assertNotIn('command: ["gateway", "run"]', dispatcher_block)
