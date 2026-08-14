@@ -1,3 +1,5 @@
+begin;
+
 -- FRACAS 폐루프 + LLM 시점 스탬프 (2026-08-13, 전부 additive·nullable)
 --
 -- ① FRACAS (미 해군 MIL-STD-2155 폐루프를 환류에 이식):
@@ -22,3 +24,5 @@ comment on column research.experiment_outcomes.verification_state is
 alter table research.experiment_proposals
   add column if not exists llm_model_id text,
   add column if not exists llm_training_cutoff date;
+
+commit;

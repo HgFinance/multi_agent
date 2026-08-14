@@ -1,3 +1,5 @@
+begin;
+
 -- Library Layer 조회 면 (2026-08-14)
 --
 -- ▶ 왜 필요한가 (코드 실측)
@@ -114,3 +116,5 @@ select s.edge_type,
 comment on view research.v_signal_shelf is
   '신호 서가 - 엣지별로 몇 번 시험했고 최고 IR·IC·DSR 이 얼마였나. '
   '부품(단일 신호)의 천장을 한눈에 본다.';
+
+commit;

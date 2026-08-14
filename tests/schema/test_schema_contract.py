@@ -111,8 +111,30 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260811000150_proposal_prompt_versions.sql",
                 "20260812000100_quant_service_role.sql",
                 "20260812000200_accounting_investor_profiles.sql",
+                # FRACAS 폐루프(REJECT 는 근본원인·시정조치·검증창 없이 안 닫힌다)
+                # + 가설을 쓴 모델·지식 컷오프 각인. 전부 additive·nullable.
+                "20260813040000_fracas_and_llm_stamp.sql",
+                # 가설→실행 번역에서 무엇이 사라졌는지 원장에 각인. 실측: 실험이
+                # 돈 가설 41건이 config 19개로 접혔는데 어디에도 안 남아 있었다
+                "20260813070000_hypotheses_mapping_loss.sql",
+                # Library 조회 면(뷰 3종). 공장은 적재만 하고 읽을 면이 없었다
+                "20260814090000_library_read_views.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
+
+    def test_migrations_are_transactional(self) -> None:
+        """마이그레이션은 통째로 적용되거나 통째로 안 된다.
+
+        ▶ 왜 별도 시험인가 (2026-08-14 실측)
+          이 검사는 원래 `test_migration_sequence_is_complete` 꼬리에 붙어
+          있었다. 그런데 목록 대조가 **먼저** 터지면 거기서 시험이 끝나
+          트랜잭션 검사는 아예 안 돈다. 실제로 새 마이그레이션 3개가 목록에
+          없었고, 그 셋이 동시에 `begin;`/`commit;` 도 빠져 있었는데 **한쪽이
+          다른 쪽을 가려서** 안 보였다(56개 중 그 셋만 안 감싸져 있었다).
+
+          관문이 둘이면 따로 세운다 - 하나가 터졌다고 나머지를 못 보면
+          그 나머지는 있으나 마나다.
+        """
         for path, sql in self.files:
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
