@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -34,6 +35,99 @@ class DiscordIdempotencyTests(unittest.TestCase):
     def test_same_message_id_is_claimed_once(self) -> None:
         self.assertTrue(self._claim("m-1"))
         self.assertFalse(self._claim("m-1"))
+
+    def test_session_correlation_round_trips_in_existing_inbound_ledger(self) -> None:
+        key = canonical_discord_dedup_key("guild", "channel", "m-session")
+        result = self.store.claim_inbound(
+            dedup_key=key,
+            message_id="m-session",
+            guild_id="guild",
+            channel_id="channel",
+            thread_id="thread",
+            profile="ceo-agent",
+            handler="live",
+            session_id="session-1",
+        )
+
+        self.assertTrue(result.admitted)
+        self.assertEqual(
+            self.store.inbound_key_for_session("session-1", "ceo-agent"),
+            key,
+        )
+        self.assertEqual(
+            self.store.inbound_context(key, "ceo-agent"),
+            {
+                "guild_id": "guild",
+                "channel_id": "channel",
+                "thread_id": "thread",
+                "message_id": "m-session",
+                "session_id": "session-1",
+            },
+        )
+
+    def test_session_lookup_is_profile_local_and_exact(self) -> None:
+        key = canonical_discord_dedup_key("guild", "channel", "m-session-2")
+        self.store.claim_inbound(
+            dedup_key=key,
+            message_id="m-session-2",
+            guild_id="guild",
+            channel_id="channel",
+            thread_id=None,
+            profile="ceo-agent",
+            handler="live",
+            session_id="session-2",
+        )
+
+        self.assertIsNone(
+            self.store.inbound_key_for_session("session-2", "qa-department")
+        )
+        self.assertIsNone(
+            self.store.inbound_key_for_session("session-2-other", "ceo-agent")
+        )
+
+    def test_existing_ledger_is_migrated_in_place_for_session_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            gateway = home / "gateway"
+            gateway.mkdir()
+            path = gateway / "discord_message_recovery.db"
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE discord_idempotency_inbound (
+                        dedup_key TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        guild_id TEXT,
+                        channel_id TEXT,
+                        thread_id TEXT,
+                        profile TEXT NOT NULL,
+                        handler TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 1,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (profile, dedup_key)
+                    )
+                    """
+                )
+
+            store = DiscordIdempotencyStore(home)
+            key = canonical_discord_dedup_key("guild", "channel", "m-migrated")
+            self.assertTrue(
+                store.claim_inbound(
+                    dedup_key=key,
+                    message_id="m-migrated",
+                    guild_id="guild",
+                    channel_id="channel",
+                    thread_id=None,
+                    profile="ceo-agent",
+                    handler="live",
+                    session_id="session-migrated",
+                ).admitted
+            )
+            self.assertEqual(
+                store.inbound_key_for_session("session-migrated", "ceo-agent"),
+                key,
+            )
 
     def test_history_backfill_and_live_delivery_share_claim(self) -> None:
         key = canonical_discord_dedup_key("guild", "channel", "m-backfill")

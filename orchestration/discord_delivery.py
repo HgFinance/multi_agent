@@ -92,6 +92,26 @@ def correlation_from_task(task: Mapping[str, Any]) -> DiscordCorrelation:
     return DiscordCorrelation(**values)
 
 
+def _correlation_from_synthesis(
+    synthesis_task: Mapping[str, Any],
+    root_task: Mapping[str, Any] | None,
+) -> DiscordCorrelation:
+    """Prefer synthesis-local fields, then the supervisor's exact root."""
+
+    synthesis = correlation_from_task(synthesis_task)
+    if root_task is None:
+        return synthesis
+    root = correlation_from_task(root_task)
+    return DiscordCorrelation(
+        request_id=synthesis.request_id or root.request_id,
+        message_id=synthesis.message_id or root.message_id,
+        guild_id=synthesis.guild_id or root.guild_id,
+        channel_id=synthesis.channel_id or root.channel_id,
+        thread_id=synthesis.thread_id or root.thread_id,
+        session_id=synthesis.session_id or root.session_id,
+    )
+
+
 def _message_id_from_request_id(request_id: str | None) -> str | None:
     if not request_id:
         return None
@@ -154,12 +174,20 @@ class DiscordFinalDelivery:
         *,
         root_task_id: str,
         synthesis_task: Mapping[str, Any],
+        root_task: Mapping[str, Any] | None = None,
         content: str,
         store: DiscordIdempotencyStore,
         profile: str = "ceo-agent",
     ) -> str:
-        correlation = correlation_from_task(synthesis_task)
-        message_id = correlation.message_id or _message_id_from_request_id(correlation.request_id)
+        correlation = _correlation_from_synthesis(synthesis_task, root_task)
+        explicit_message_id = (
+            correlation.message_id
+            or _message_id_from_request_id(correlation.request_id)
+        )
+        message_id = explicit_message_id
+        inbound_key: str | None = None
+        context: Mapping[str, str | None] = {}
+        correlation_source = "explicit" if explicit_message_id else "missing"
         logger.info(
             "discord-correlation root=%s request_id=%s session_id=%s channel_id=%s message_id=%s",
             root_task_id,
@@ -168,17 +196,36 @@ class DiscordFinalDelivery:
             correlation.channel_id or "",
             message_id or "",
         )
+        if not message_id and correlation.session_id:
+            inbound_key = store.inbound_key_for_session(
+                correlation.session_id, profile
+            )
+            if inbound_key:
+                context = store.inbound_context(inbound_key, profile)
+                message_id = str(context.get("message_id") or "") or None
+                correlation_source = "session_ledger"
+
+        if message_id:
+            # Explicit correlation wins. The message ledger is only an exact
+            # enrichment lookup, never a recent/global-message fallback.
+            message_inbound_key = store.inbound_key_for_message(message_id, profile)
+            if message_inbound_key:
+                inbound_key = message_inbound_key
+                context = store.inbound_context(inbound_key, profile)
+                if correlation_source == "missing":
+                    correlation_source = "message_ledger"
+
         if not message_id:
+            logger.warning(
+                "discord-correlation root=%s source=missing session_id=%s",
+                root_task_id,
+                correlation.session_id or "",
+            )
             logger.warning(
                 "discord-final-delivery root=%s status=missing_context",
                 root_task_id,
             )
             return "missing_context"
-
-        inbound_key = store.inbound_key_for_message(message_id, profile)
-        context: Mapping[str, str | None] = {}
-        if inbound_key:
-            context = store.inbound_context(inbound_key, profile)
         guild_id = correlation.guild_id or context.get("guild_id") or "unknown"
         channel_id = correlation.channel_id or context.get("channel_id")
         if not channel_id:
@@ -187,6 +234,14 @@ class DiscordFinalDelivery:
                 root_task_id,
             )
             return "missing_context"
+        logger.info(
+            "discord-correlation root=%s source=%s session_id=%s message_id=%s channel_id=%s",
+            root_task_id,
+            correlation_source,
+            correlation.session_id or context.get("session_id") or "",
+            message_id,
+            channel_id,
+        )
         dedup_key = (
             inbound_key
             if inbound_key

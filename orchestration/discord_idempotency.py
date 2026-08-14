@@ -98,6 +98,7 @@ class DiscordIdempotencyStore:
                 guild_id TEXT,
                 channel_id TEXT,
                 thread_id TEXT,
+                session_id TEXT,
                 profile TEXT NOT NULL,
                 handler TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -107,6 +108,20 @@ class DiscordIdempotencyStore:
             )
             """
         )
+        # Existing production ledgers predate session correlation.  Migrate
+        # the existing table in place; the inbound/outbound ledger remains the
+        # single source of Discord recovery state.
+        inbound_columns = {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(discord_idempotency_inbound)"
+            ).fetchall()
+        }
+        if "session_id" not in inbound_columns:
+            conn.execute(
+                "ALTER TABLE discord_idempotency_inbound ADD COLUMN session_id TEXT"
+            )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS discord_idempotency_outbound (
@@ -124,6 +139,10 @@ class DiscordIdempotencyStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_message "
             "ON discord_idempotency_inbound(message_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_session "
+            "ON discord_idempotency_inbound(profile, session_id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_updated "
@@ -202,6 +221,7 @@ class DiscordIdempotencyStore:
         thread_id: str | None,
         profile: str,
         handler: str,
+        session_id: str | None = None,
     ) -> ClaimResult:
         """Atomically admit one inbound message, fail-closed on ledger errors."""
 
@@ -230,13 +250,15 @@ class DiscordIdempotencyStore:
                     return ClaimResult(admitted=False, dedup_hit=True, state=state)
                 conn.execute(
                     "UPDATE discord_idempotency_inbound SET message_id=?, guild_id=?, "
-                    "channel_id=?, thread_id=?, profile=?, handler=?, state='RECEIVED', "
-                "attempts=attempts+1, updated_at=? WHERE profile=? AND dedup_key=?",
+                    "channel_id=?, thread_id=?, session_id=?, profile=?, handler=?, "
+                    "state='RECEIVED', "
+                    "attempts=attempts+1, updated_at=? WHERE profile=? AND dedup_key=?",
                     (
                         message_id,
                         guild_id,
                         channel_id,
                         thread_id,
+                        session_id,
                         profile,
                         handler,
                         now,
@@ -248,14 +270,16 @@ class DiscordIdempotencyStore:
 
             conn.execute(
                 "INSERT INTO discord_idempotency_inbound "
-                "(dedup_key, message_id, guild_id, channel_id, thread_id, profile, "
-                "handler, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'RECEIVED', ?)",
+                "(dedup_key, message_id, guild_id, channel_id, thread_id, session_id, "
+                "profile, handler, state, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RECEIVED', ?)",
                 (
                     dedup_key,
                     message_id,
                     guild_id,
                     channel_id,
                     thread_id,
+                    session_id,
                     profile,
                     handler,
                     now,
@@ -293,10 +317,45 @@ class DiscordIdempotencyStore:
 
         return self._run(operation)
 
+    def inbound_key_for_session(self, session_id: str, profile: str) -> str | None:
+        """Resolve only an exact profile-local Hermes session correlation."""
+
+        if not session_id:
+            return None
+
+        def operation(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT dedup_key FROM discord_idempotency_inbound "
+                "WHERE profile=? AND session_id=? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (profile, session_id),
+            ).fetchone()
+            return str(row[0]) if row else None
+
+        return self._run(operation)
+
+    def bind_inbound_session(
+        self, message_id: str, session_id: str, profile: str
+    ) -> None:
+        """Attach a session to an already-claimed exact inbound message."""
+
+        if not message_id or not session_id:
+            return
+        now = self._now()
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE discord_idempotency_inbound SET session_id=?, updated_at=? "
+                "WHERE profile=? AND message_id=?",
+                (session_id, now, profile, message_id),
+            )
+
+        self._run(operation)
+
     def inbound_context(self, dedup_key: str, profile: str) -> dict[str, str | None]:
         def operation(conn: sqlite3.Connection) -> dict[str, str | None]:
             row = conn.execute(
-                "SELECT guild_id, channel_id, thread_id, message_id "
+                "SELECT guild_id, channel_id, thread_id, message_id, session_id "
                 "FROM discord_idempotency_inbound WHERE profile=? AND dedup_key=?",
                 (profile, dedup_key),
             ).fetchone()
@@ -307,6 +366,7 @@ class DiscordIdempotencyStore:
                 "channel_id": row[1],
                 "thread_id": row[2],
                 "message_id": row[3],
+                "session_id": row[4],
             }
 
         return self._run(operation)

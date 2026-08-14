@@ -12,6 +12,7 @@ import logging
 import os
 import copy
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from orchestration.discord_idempotency import (
@@ -35,7 +36,31 @@ def _profile_name() -> str:
     )
 
 
-def _message_context(message: Any) -> dict[str, str | None]:
+def _session_id(adapter: Any, message: Any) -> str | None:
+    """Read an explicitly exposed Hermes session identifier, if available."""
+
+    owners = (
+        message,
+        getattr(message, "metadata", None),
+        getattr(message, "context", None),
+        adapter,
+        getattr(adapter, "session", None),
+    )
+    for owner in owners:
+        for key in ("session_id", "sessionId"):
+            value = (
+                owner.get(key)
+                if isinstance(owner, Mapping)
+                else getattr(owner, key, None)
+            )
+            if value:
+                return str(value)
+    return None
+
+
+def _message_context(
+    message: Any, adapter: Any | None = None
+) -> dict[str, str | None]:
     channel = getattr(message, "channel", None)
     guild = getattr(message, "guild", None)
     channel_id = str(getattr(channel, "id", "") or "unknown")
@@ -45,6 +70,7 @@ def _message_context(message: Any) -> dict[str, str | None]:
         "guild_id": str(getattr(guild, "id", "") or "dm"),
         "channel_id": channel_id,
         "thread_id": thread_id,
+        "session_id": _session_id(adapter, message),
     }
 
 
@@ -68,6 +94,7 @@ def _log_event(
         "guild_id": context.get("guild_id"),
         "channel_id": context.get("channel_id"),
         "thread_id": context.get("thread_id"),
+        "session_id": context.get("session_id"),
         "request_id": f"discord:{message_id}",
         "dedup_key": dedup_key,
         "handler": handler,
@@ -91,7 +118,7 @@ def _claim_inbound(adapter: Any, message: Any, *, handler: str) -> tuple[str, di
     message_id = str(getattr(message, "id", "") or "")
     if not message_id:
         raise IdempotencyStoreUnavailable("Discord message has no message_id")
-    context = _message_context(message)
+    context = _message_context(message, adapter)
     dedup_key = canonical_discord_dedup_key(
         context["guild_id"], context["channel_id"], message_id
     )
@@ -103,6 +130,7 @@ def _claim_inbound(adapter: Any, message: Any, *, handler: str) -> tuple[str, di
         thread_id=context["thread_id"],
         profile=_profile_name(),
         handler=handler,
+        session_id=context["session_id"],
     )
     return dedup_key, context, result
 
@@ -124,7 +152,7 @@ def _wrap_admission(cls: type[Any]) -> None:
     @functools.wraps(original)
     def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> tuple[bool, bool]:
         message_id = str(getattr(message, "id", "") or "")
-        context = _message_context(message)
+        context = _message_context(message, self)
         dedup_key = canonical_discord_dedup_key(
             context["guild_id"], context["channel_id"], message_id
         )
@@ -206,7 +234,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
             return message
-        context = _message_context(message)
+        context = _message_context(message, self)
         content = str(getattr(message, "content", "") or "")
         marker = "[hgfinance discord routing context]"
         if marker in content:
@@ -220,6 +248,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
                 f"discord_guild_id={context['guild_id']}\n"
                 f"discord_channel_id={context['channel_id']}\n"
                 f"discord_thread_id={context['thread_id'] or ''}\n"
+                f"discord_session_id={context['session_id'] or ''}\n"
                 "Do not quote this routing block in the user-facing response."
             )
         except (AttributeError, TypeError, ValueError):
@@ -238,6 +267,16 @@ def _wrap_handle_message(cls: type[Any]) -> None:
                 *args,
                 **kwargs,
             )
+            resolved_session_id = _session_id(self, result) or _session_id(
+                self, message
+            )
+            if resolved_session_id:
+                _store(self).bind_inbound_session(
+                    str(getattr(message, "id", "") or ""),
+                    resolved_session_id,
+                    _profile_name(),
+                )
+            return result
         except Exception:
             message_id = str(getattr(message, "id", "") or "")
             key = _store(self).inbound_key_for_message(message_id, _profile_name()) if message_id else None
