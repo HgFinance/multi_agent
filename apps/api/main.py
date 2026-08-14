@@ -95,6 +95,7 @@ from command_service import (
 from account_snapshot import router as account_snapshot_router
 from current_user import current_user, require_owner
 from department_agents import router as department_agent_router
+from discord_read import router as discord_read_router
 from domain_read_models import build_domain_read_model
 from portfolio_profile_client import (
     PortfolioProxyError,
@@ -193,6 +194,9 @@ app.include_router(ceo_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
 # 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
 app.include_router(account_snapshot_router)
+# Discord 대화 원문 읽기. 봇 토큰이 브라우저에 내려가면 발송 권한까지 같이
+# 나가므로 토큰은 이 프로세스에만 둔다.
+app.include_router(discord_read_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 
@@ -342,6 +346,15 @@ async def ui_create_mandate(body: dict[str, object]) -> object:
     """
 
     return await _governance_request("POST", "/governance/v1/mandates", body=body)
+
+
+@app.put("/ui/mandates/{mandate_id}")
+async def ui_replace_mandate(mandate_id: str, body: dict[str, object]) -> object:
+    """Replace the current Mandate metadata; no version row is created."""
+
+    return await _governance_request(
+        "PUT", f"/governance/v1/mandates/{mandate_id}", body=body
+    )
 
 
 @app.get("/ui/mandates/by-fund/{fund_id}/current")
@@ -1148,10 +1161,12 @@ if __name__ == "__main__":
         "/ui/portfolio-recommendations/{run_id}",
         "/ui/portfolio-recommendations/{run_id}/approval",
         "/ui/mandates/{mandate_id}/change-requests",
-        # 2026-08-12 온보딩 경로(USER_INPUT_API_SPEC 6.1 #2). Mandate 생성·Version
-        # 제안·챗봇 제안·적합성 프로필. 챗봇(`mandate-assistant/suggest`)은 Stateless라
+        # 2026-08-12~14 온보딩 경로(USER_INPUT_API_SPEC 6.1 #2). Mandate 생성·현재
+        # metadata 교체·레거시 Version 제안·챗봇 제안·적합성 프로필. 챗봇
+        # (`mandate-assistant/suggest`)은 Stateless라
         # 아무것도 저장하지 않고, 나머지는 정책 검증을 상류 도메인이 소유한다.
         "/ui/mandates",
+        "/ui/mandates/{mandate_id}",
         "/ui/mandates/by-fund/{fund_id}/current",
         "/ui/mandates/{mandate_id}/versions",
         "/ui/mandate-assistant/suggest",

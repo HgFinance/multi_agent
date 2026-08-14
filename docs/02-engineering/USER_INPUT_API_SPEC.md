@@ -75,9 +75,20 @@ max_daily_loss ≤ max_drawdown_pct
 
 > `preferred_sectors`를 방향 판정에서 제외하는 이유: 이것은 **허용 범위를 넓히는 값이 아니라 우선순위 힌트**다. 제약을 푸는 것이 아니므로 위험 확대가 아니다.
 
-### 1.4 DB — `governance.mandate_versions`
+### 1.4 DB — `governance.mandate_versions` (레거시 승인 워크플로)
 
-**마이그레이션 없음.** `universe_policy`·`risk_bounds`가 jsonb라 컬럼 변경이 필요 없다. 내부 계약만 §1.1~1.2로 확장한다.
+기존 승인·변경 워크플로는 이 테이블을 계속 사용한다. 다만 사용자 온보딩 화면의 현재 지침 저장은 이 테이블에 새 Version을 추가하지 않는다.
+
+### 1.4.1 DB — `governance.mandates.metadata` (현재 사용자 지침)
+
+사용자 화면에서 저장하는 현재 Mandate는 부모 행의 JSONB 하나를 교체한다.
+
+```sql
+alter table governance.mandates
+  add column if not exists metadata jsonb not null default '{}'::jsonb;
+```
+
+`PUT /governance/v1/mandates/{mandate_id}`가 `metadata`를 통째로 덮어쓰며, 저장할 때 `mandate_versions` 행을 만들거나 Version을 증가시키지 않는다. 기존 `mandate_versions` 행은 승인·Case 외래키와 감사 근거를 보존하기 위해 삭제하지 않고 레거시로 남긴다. 마이그레이션 시 기존 Mandate의 `current_version`이 가리키는 정책을 `metadata`로 한 번만 backfill한다.
 
 ### 1.5 DB — `accounting.investor_profiles` 신설 (**G-2**)
 
@@ -110,11 +121,11 @@ create table accounting.investor_profiles (
 
 ## 2. Route 변경
 
-### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 응답 확장 (**✅ 구현 완료, 2026-08-06**)
+### 2.1 `GET /governance/v1/mandates/{mandate_id}/current` — 현재 지침 조회 (**✅ 구현 완료, 2026-08-14**)
 
 > **정정(2026-08-06)**: 이전 버전은 "화면이 기존 값을 채울 수 없다"고 적었으나, 실제로는 `ai-office/app/ops/PortfolioInterviewPanel.tsx`가 **localStorage**(`readSavedMandatePolicy()`)에 직전 제출값을 저장해두고 그걸로 우회하고 있었다. 화면 자체는 동작했다 — 다만 이 우회는 같은 브라우저·같은 세션에서만 유효하고, 다른 기기·새 브라우저·다른 사용자가 같은 Mandate를 열면 초기값을 못 채웠다. 이 절의 목적은 "막힌 것을 뚫는다"가 아니라 **"클라이언트 로컬 상태에 의존하는 우회를 서버 조회로 대체한다"**였다.
 >
-> **구현 완료**: `departments/00-ceo-office/api/app.py`의 `get_mandate_current()`가 `policy`/`objective_text`/`objective`/`content_hash`/`effective_from`/`effective_to`를 포함하도록 확장됐다. Version이 아직 없으면(`current_version=0`) 기존과 동일하게 최소 필드만 반환한다. `MandateVersionRepository`에 `get(mandate_id, version)`을 신설해 `InMemoryMandateVersionRepository`·`PostgresMandateVersionRepository` 양쪽에 구현했다(Postgres는 jsonb 컬럼이 psycopg2로 dict/list 자동 변환됨을 실 DB로 확인).
+> **구현 완료**: `departments/00-ceo-office/api/app.py`의 `get_mandate_current()`는 현재 `metadata`가 있으면 그 안의 `policy`/`objective_text`/`objective`/`content_hash`를 반환한다. 이 화면 저장 경로의 `current_version`은 호환성을 위해 `0`이며 `mandate_version_id`는 없다. `metadata`가 비어 있는 레거시 Mandate만 기존 Version 조회로 fallback한다.
 >
 > **`by-fund` 조회도 별도 Route로 구현했다**: `GET /governance/v1/mandates/by-fund/{fund_id}/current`. `governance.mandates`가 `unique(fund_id, name)`이라 한 Fund에 이름이 다른 Mandate가 여러 개 있을 수 있어, `MandateVersionRepository.mandate_ids_for_fund(fund_id)`가 목록을 그대로 돌려주고 app.py가 0개=404, 1개=단일 조회, 2개 이상=409(모호, 임의 선택 안 함)로 판단한다. Route Registry에 등재 완료, `app.openapi()`와 정확히 일치 확인.
 >
@@ -157,9 +168,24 @@ create table accounting.investor_profiles (
 
 > **정정(2026-08-06)**: 이 조회를 신설하는 이유는 "화면이 `mandate_id`를 몰라서"가 아니다. 실제로는 `PortfolioInterviewPanel.tsx`의 "고급 설정"에서 **사용자가 Mandate ID를 손으로 입력**하고 있다(필수 텍스트 필드). `fund_id` 조회가 생기면 이 수동 입력 필드를 없애고 Fund 선택만으로 화면이 알아서 현재 Mandate를 찾게 할 수 있다.
 
+### 2.1.1 `PUT /governance/v1/mandates/{mandate_id}` — 현재 지침 교체 (**✅ 구현 완료, 2026-08-14**)
+
+사용자 저장 버튼이 호출하는 경로다. 요청의 정책·목표를 `governance.mandates.metadata`에 한 번에 저장하며, 같은 Mandate를 다시 저장하면 기존 metadata 전체가 새 값으로 교체된다.
+
+```json
+{
+  "policy": { "allowed_assets": [], "forbidden_assets": [], "risk_bounds": {}, "universe_policy": {}, "approval_rules": {} },
+  "objective_text": "장기 성장",
+  "objective": {},
+  "created_by": "user-uuid"
+}
+```
+
+응답은 `{ "mandate_id": "uuid", "status": "ACTIVE", "metadata": {}, "updated_at": "..." }`이며, 이 경로에서는 `mandate_versions`에 행을 추가하지 않는다.
+
 ### 2.2 온보딩 제출 — 기존 Route 재사용
 
-**신규 Route를 만들지 않는다.** `POST /governance/v1/mandates/{mandate_id}/change-requests`를 그대로 쓴다. 프리셋은 화면이 적용하므로(**H**) 서버는 완전한 `MandatePolicy`를 받는다.
+기존 승인·변경 워크플로는 `POST /governance/v1/mandates/{mandate_id}/change-requests`를 그대로 쓴다. 사용자 온보딩 화면의 현재 지침 저장은 §2.1.1의 PUT 경로를 사용하며, 승인 Version을 생성하지 않는다.
 
 화면이 전송 전 채워야 하는 것:
 
@@ -327,11 +353,11 @@ approval_rules.*, base_capital, currency
 
 ## 6. 선행·미해결
 
-> **2026-08-12 갱신** — §1.5, §2.3, §6.1 #2가 구현됐다.
+> **2026-08-14 갱신** — 현재 Mandate metadata 교체 저장과 BFF PUT 프록시가 구현됐다. 기존 승인 Version 워크플로는 레거시 경로로 유지한다.
 >
 > - **§1.5 `accounting.investor_profiles`** ✅ — `supabase/migrations/20260812000200_accounting_investor_profiles.sql`(이 문서 DDL 그대로) + `departments/05-accounting-portfolio/portfolio/investor_profile_repository.py`. version 할당은 `insert ... select max+1` 한 문장이라 조회·삽입 사이 경합이 없고, 겹치면 `unique(user_id, fund_id, version)`이 잡는다.
 > - **§2.3 `/portfolio/v1/investor-profiles`** ✅ — `departments/05-accounting-portfolio/api/app.py`(accounting-api와 같은 앱). §6.2 미확정 5번("portfolio-api를 어느 App으로 띄울지")은 **새 서비스를 만들지 않고 accounting-api에 실는 것**으로 정리했다 — §2.3이 이 Route를 회계/포트폴리오본부에 배정했고 그 본부 API가 이미 있다. `effective_risk_band`는 `suitability.effective_risk_band()`(신설 공개 함수)가 `_risk_band()` 표를 재사용한다.
-> - **§6.1 #2 BFF 프록시** ✅ — `by-fund`·`mandate-assistant`·`investor-profiles`(2개)에 더해 **Mandate 부모 행 생성**(`POST /ui/mandates`)과 `versions`까지 6개를 뚫었다. Registry 등재 완료, `app.openapi()`와 일치 확인.
+> - **§6.1 #2 BFF 프록시** ✅ — `by-fund`·`mandate-assistant`·`investor-profiles`(2개)에 더해 **Mandate 부모 행 생성**(`POST /ui/mandates`)과 현재 metadata 교체(`PUT /ui/mandates/{id}`)까지 연결했다. 기존 `versions` 프록시는 레거시 승인 워크플로 호환용이다. Registry 등재 완료.
 > - **새로 발견해 메운 공백**: `governance.mandates` INSERT가 `change_workflow.py` 자체 점검 코드 안에만 있어 **최초 Mandate를 만들 API가 없었다** — Version 제안 경로는 전부 `mandate_id`를 path로 받으므로 온보딩 첫 사용자는 시작할 수 없었다. `POST /governance/v1/mandates` 신설(DRAFT/v0 반환, `unique(fund_id,name)` 충돌은 409 + 기존 id).
 > - **§3.2 프리셋 9칸** — 수치는 여전히 동규님 확정 대기다. 구조와 검증만 `ai-office/app/lib/mandatePresets.ts`에 `PROVISIONAL`로 표시해 두었다(제약 검증 함수 포함). 잠정값은 스펙에 이미 있는 `min(mindset, experience)` 규칙에서만 끌어내 새 위험 판단을 만들지 않았고, **그 결과 9칸이 3등급으로 수렴한다** — 경험·성향이 `min()` 말고 다른 방식으로도 한도에 영향을 줘야 하는지가 동규님께 드리는 질문이다.
 > - **요청자 판정** — `apps/api/current_user.py`로 모았다. `X-User-Id`는 인증이 아니며(서명·만료 없음) 공개 배포 전 교체 대상이다.
@@ -340,7 +366,7 @@ approval_rules.*, base_capital, currency
 
 1. ~~**§2.1 응답 확장**~~ — ✅ 완료(2026-08-06). 남은 건 프론트가 이 값을 실제로 써서 localStorage 우회를 걷어내는 작업(도현).
 1a. ~~**§2.4 챗봇 제안 API**~~ — ✅ 완료(2026-08-06), 3개 필드만. `anthropic` 패키지는 `requirements.txt`에 있으나 현재 개발 환경에 설치돼 있지 않다(자체 점검이 이 경우도 커버 — LLM 실패 시 500 대신 빈 제안으로 감싸는 경로가 바로 이 상태로 검증됐다). 배포 전 `pip install anthropic` 확인 필요.
-2. **portfolio Router 신설 + by-fund 프록시** — `apps/api/main.py`에 **governance Router는 이미 등록돼 있다**(`/ui/mandates/{id}/change-requests`, `/ui/mandates/{id}/current`, `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline`, `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` 6개, `_governance_request()`가 governance-api로 프록시). 신규 `by-fund/{fund_id}/current`(§2.1)는 아직 이 프록시 목록에 없다 — governance-api 자체는 구현됐지만 BFF를 안 거치면 Frontend가 직접 호출할 수 없다(AI_OFFICE_FRONTEND_PLAN §6). §2.3 `investor-profiles` Route를 실을 portfolio Router도 여전히 없다.
+2. ~~**portfolio Router 신설 + by-fund 프록시**~~ — ✅ 완료. `apps/api/main.py`에 `by-fund`, 현재 metadata PUT, investor profile 경로가 등록돼 있다.
 3. **KRX 업종 코드 수집** — §2.5가 이것 없이는 동작하지 않는다.
 
 ### 6.2 미확정
