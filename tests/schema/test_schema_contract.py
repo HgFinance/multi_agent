@@ -102,8 +102,14 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260810000150_research_strategy_factory.sql",
                 "20260810000200_quant_hypothesis_lineage.sql",
                 "20260810000300_quant_one_hypothesis_per_proposal.sql",
-                "20260810000400_market_pit_provenance.sql",
-                "20260810000500_market_received_at_nullable_for_imports.sql",
+                # ▶ 시세 마이그레이션 2건은 여기 있으면 안 됐다 (2026-08-14)
+                #   `market` 스키마는 **TimescaleDB** 에 있고 Supabase 에는 없다.
+                #   그런데 `20260810000400_market_pit_provenance` /
+                #   `..000500_market_received_at_nullable` 이 이 목록에 있어서,
+                #   `supabase db push` 를 돌리면 없는 스키마에 DDL 을 날려 거기서
+                #   멈춘다. CLAUDE.md 규약대로(운영 DB=supabase/, 시계열=
+                #   timescaledb/) `timescaledb/migrations/002·003` 으로 옮겼다.
+                #   둘 다 TimescaleDB 에는 이미 적용돼 있다(실측 확인).
                 # 회계: 보수 발생주의 계정 3개(2100/5200/5300). 거래 수수료(5000)와
                 # 섞으면 TCA가 집행 비용과 운용 보수를 분리하지 못한다
                 "20260811000100_accounting_fee_accounts.sql",
@@ -374,6 +380,10 @@ class TimescaleSchemaContractTest(unittest.TestCase):
             ("market", "ingestion_watermarks"),
             ("market", "archive_exports"),
             ("market", "retention_registry"),
+            # PIT 출처 각인 (002, 2026-08-14 에 supabase/migrations 에서 옮겨 옴).
+            # `market` 스키마는 TimescaleDB 에만 있으므로 이 마이그레이션이
+            # Supabase 목록에 있으면 `db push` 가 없는 스키마에서 멈춘다.
+            ("market", "pit_provenance"),
         }
         self.assertEqual(self.tables, required)
 
