@@ -1140,6 +1140,15 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # ▶ 에이전트는 이 컨테이너 **안에서** 뜨므로 자격도 여기 있어야 한다
+      #   (2026-08-14 실측). 프로필 config 의 `env:` 에 ANTHROPIC_API_KEY 가 적혀
+      #   있어도 hermes 는 그것으로 자격을 만들지 않는다 - 프로세스 환경변수를 본다.
+      #   이 줄이 없으면 spawn 된 에이전트가 첫 호출에서 "No Anthropic credentials
+      #   found" 로 즉사하고, 카드는 "worker exited cleanly without calling
+      #   kanban_complete" 로 blocked 에 굳는다 - 원인이 카드 오류에 안 드러나는
+      #   유형이라 컨테이너 재생성 후 한참 헤맸다.
+      #   값 자체는 프록시가 무시한다(과금 경로는 base_url 의 호스트 프록시다).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

@@ -59,6 +59,10 @@ DEFAULT_PORT = int(os.environ.get("CLAUDE_PROXY_PORT", "8787"))
 # 겹쳐 어느 쪽이 죽었는지 알 수 없게 된다).
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_PROXY_CONCURRENCY", "2"))
 CLI_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_TIMEOUT", "300"))
+# 슬롯이 빌 때까지 기다려 주는 상한. 한 호출이 30~36초이므로 그 몇 배를 기다리면
+# 대부분의 경합은 흡수된다. CLI_TIMEOUT 보다 짧게 두어 "대기 중 클라이언트가 먼저
+# 죽는" 상황을 만들지 않는다.
+ACQUIRE_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_ACQUIRE_TIMEOUT", "120"))
 
 # 모델 별칭 - 헤르메스가 보내는 이름을 CLI 가 아는 이름으로.
 # CLI 는 sonnet/opus/haiku 별칭을 받는다(정확한 날짜 ID 는 버전마다 갈린다).
@@ -388,15 +392,32 @@ class Handler(BaseHTTPRequestHandler):
                                        "message": "빈 프롬프트"}})
             return
 
-        # 대기시키지 않고 거절한다 - 대기하면 헤르메스 타임아웃과 겹쳐
-        # 어느 쪽이 죽었는지 알 수 없게 된다
-        if not _sem.acquire(blocking=False):
+        # ▶ 즉시 거절이 아니라 **유한 대기** 후 거절한다 (2026-08-14 정정)
+        #   원래는 "대기하면 헤르메스 타임아웃과 겹쳐 어느 쪽이 죽었는지 모른다"는
+        #   이유로 즉시 429 였다. 그런데 실측에서 그 즉시성이 카드를 죽이고 있었다:
+        #     · 한 호출은 30~36초 걸린다(단발, turns=1 실측).
+        #     · 헤르메스는 429 를 받으면 3회만 재시도하고 총 대기가 ~15초다.
+        #     → 슬롯이 비는 데 30초 걸리는데 15초만 기다리므로, 경합이 조금만
+        #       있어도 카드가 crash 2회로 blocked 에 굳는다. 실제로 blocked 183 장
+        #       중 상당수가 이 경로였고 429 는 04:25 에도 재발했다.
+        #   그래서 클라이언트 타임아웃보다 충분히 짧은 유한 대기로 흡수한다.
+        #   대기해도 못 얻으면 그때 429 - "누가 죽었는지 모른다"는 문제는
+        #   대기 시간을 로그로 남겨 해소한다.
+        wait_started = time.time()
+        if not _sem.acquire(timeout=ACQUIRE_TIMEOUT):
             _stats["rejected"] += 1
+            print(f"  [{time.strftime('%H:%M:%S')}] 슬롯 대기 {ACQUIRE_TIMEOUT:.0f}초 "
+                  f"초과 - 429 (상한 {MAX_CONCURRENT})", file=sys.stderr, flush=True)
             self._json(429, {"type": "error",
                              "error": {"type": "rate_limit_error",
                                        "message": f"동시 실행 상한 {MAX_CONCURRENT} "
-                                                  f"- 잠시 뒤 재시도"}})
+                                                  f"- {ACQUIRE_TIMEOUT:.0f}초 대기 후에도 "
+                                                  f"슬롯 없음"}})
             return
+        waited = time.time() - wait_started
+        if waited > 1.0:
+            _stats["waited_total_s"] = _stats.get("waited_total_s", 0.0) + waited
+            _stats["waited_calls"] = _stats.get("waited_calls", 0) + 1
         t0 = time.time()
         try:
             text, meta = call_cli(prompt, alias, cli=cli)
