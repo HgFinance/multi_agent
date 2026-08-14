@@ -30,8 +30,8 @@ class TaskWorkflow(BaseModel):
     )
     qa_required: bool = Field(
         description=(
-            "QA 단계 필요 여부. QA Task가 생기면 확정 true. Synthesis까지 갔는데 "
-            "QA Task가 없으면 false. 그 전에는 Supervisor 기본값 true."
+            "QA 평가 경로 필요 여부. ordinary analysis에서는 CEO Synthesis와 병렬인 "
+            "async evaluation lane이며, binding/high-risk workflow에서만 blocking gate일 수 있다."
         )
     )
 

@@ -17,6 +17,15 @@ from typing import Any
 
 SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 PRIMARY_ROLE = "primary"
+CANONICAL_PRIMARY_ASSIGNEES = frozenset(
+    {
+        "research-department",
+        "quant-backtest-department",
+        "trading-department",
+        "accounting-portfolio-department",
+        "risk-management",
+    }
+)
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -46,6 +55,16 @@ def scoped_primary_identity(body: Any, assignee: Any) -> tuple[str, str] | None:
     if not root_task_id or not canonical_assignee:
         return None
     return root_task_id, canonical_assignee
+
+
+def requires_scoped_primary_contract(body: Any, assignee: Any) -> bool:
+    """Whether a CEO create must carry the scoped-primary contract."""
+
+    canonical_assignee = str(assignee or "").strip().casefold()
+    return (
+        canonical_assignee in CANONICAL_PRIMARY_ASSIGNEES
+        and scoped_primary_identity(body, canonical_assignee) is None
+    )
 
 
 def find_existing_scoped_primary(
@@ -108,9 +127,11 @@ def scoped_primary_create_lock() -> Iterator[None]:
 
 
 __all__ = [
+    "CANONICAL_PRIMARY_ASSIGNEES",
     "PRIMARY_ROLE",
     "SCOPE_MARKER",
     "find_existing_scoped_primary",
+    "requires_scoped_primary_contract",
     "scoped_primary_create_lock",
     "scoped_primary_identity",
 ]

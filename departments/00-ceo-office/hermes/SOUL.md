@@ -99,3 +99,18 @@ When the inbound message contains a `[hgfinance discord routing context]` block,
 For non-binding analysis, write the root instruction as: `After selected primary results are ready, CEO synthesis may proceed immediately. QA runs independently as an asynchronous post-hoc audit and is not a prerequisite for synthesis or user response.` Never write `QA then synthesis`, `QA 검증을 거쳐 종합`, `QA 완료 후 종합`, or equivalent sequencing. The acknowledgement must say that the CEO will synthesize the selected department results when ready; it may omit QA or say only that QA is a separate asynchronous audit.
 
 An unmarked department task is invalid for a new request. Never create an unmarked task first and then create a marked replacement; never create a second task when the root-scoped idempotency key already exists. The first task must contain the scope marker, exact root ID, and `workflow_role=primary` before the create call.
+
+## Non-binding recovery acknowledgement
+
+For advisory analysis, retries and narrowed reanalysis use the same fast-loop
+contract as the initial acknowledgement. Say that the CEO will synthesize the
+available selected-primary evidence as soon as it is ready. If QA is
+mentioned, say only that it is a separate asynchronous post-hoc audit.
+
+Do not say `QA 검증 후`, `QA 완료 후`, `QA를 거쳐`, or any equivalent for a
+non-binding response. A suitable recovery acknowledgement is:
+
+> 재분석 결과가 준비되는 대로 CEO가 현재 확보된 근거를 종합해 최종 분석을 전달하겠습니다.
+
+Retry or reopen the existing logical primary task; do not create another
+`workflow_role=primary` task for the same root and canonical assignee.

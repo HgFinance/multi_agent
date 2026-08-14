@@ -4,6 +4,7 @@ import importlib.util
 
 from orchestration.primary_task_idempotency import (
     find_existing_scoped_primary,
+    requires_scoped_primary_contract,
     scoped_primary_identity,
 )
 
@@ -90,6 +91,14 @@ def test_scoped_identity_requires_canonical_marker_and_primary_role() -> None:
     assert scoped_primary_identity(body("root", role="qa"), "research-department") is None
 
 
+def test_ceo_primary_create_requires_scope_marker() -> None:
+    assert requires_scoped_primary_contract("plain task", "research-department")
+    assert not requires_scoped_primary_contract(
+        body("root"), "research-department"
+    )
+    assert not requires_scoped_primary_contract("plain task", "qa-department")
+
+
 def test_installer_patches_native_kanban_create_once() -> None:
     module_path = "deploy/ceo-kanban/install_primary_idempotency.py"
     spec = importlib.util.spec_from_file_location("primary_patch", module_path)
@@ -117,4 +126,5 @@ def _handle_create(args, **kw):
     second = module._install(first)
     assert first == second
     assert "scoped_primary_create_lock" in first
+    assert "requires_scoped_primary_contract" in first
     assert first.count("new_tid = kb.create_task(") == 2

@@ -307,6 +307,47 @@ class SupervisorState:
         return tuple(profile for profile in self.selected_primary_profiles if profile not in present)
 
     @property
+    def primary_by_profile(self) -> dict[str, ChildTaskState]:
+        """Return one canonical primary per selected profile when valid."""
+
+        if self.duplicate_primary_profiles:
+            return {}
+        candidates = self.analysis_children
+        profiles = self.selected_primary_profiles or tuple(
+            dict.fromkeys(child.profile for child in candidates)
+        )
+        return {
+            profile: next(child for child in candidates if child.profile == profile)
+            for profile in profiles
+            if any(child.profile == profile for child in candidates)
+        }
+
+    @property
+    def ready_profiles(self) -> tuple[str, ...]:
+        """Unique selected profiles whose canonical primary is terminal."""
+
+        if self.duplicate_primary_profiles:
+            return ()
+        return tuple(
+            profile
+            for profile, child in self.primary_by_profile.items()
+            if child.terminal
+        )
+
+    @property
+    def ready_count(self) -> int:
+        return len(self.ready_profiles)
+
+    @property
+    def primary_ready(self) -> bool:
+        selected_count = len(self.selected_primary_profiles) or len(
+            self.primary_by_profile
+        )
+        return bool(selected_count) and not self.missing_primary_profiles and not (
+            self.duplicate_primary_profiles
+        ) and self.ready_count == selected_count
+
+    @property
     def duplicate_primary_profiles(self) -> tuple[str, ...]:
         counts: dict[str, int] = {}
         for child in self.analysis_children:
@@ -426,9 +467,7 @@ def _analysis_synthesis_decision(
             ",".join(state.duplicate_primary_profiles),
         )
         return None
-    if not state.analysis_children or any(
-        not child.terminal for child in state.analysis_children
-    ):
+    if not state.primary_ready:
         return None
 
     primary_ids = tuple(
@@ -445,7 +484,8 @@ def _analysis_synthesis_decision(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\n"
             "governance_plane=async_qa\n"
-            "Synthesize completed primary department work; QA may still be running.\n"
+            "Synthesize completed primary department work. QA runs independently "
+            "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
                     {
@@ -478,7 +518,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     if not state.analysis_children:
         if state.selected_primary_profiles:
             logger.info(
-                "primary-ready root=%s selected=%d ready=%d missing=%s",
+                "primary-profile-state root=%s selected=%d ready=%d missing=%s",
                 state.parent_task_id,
                 len(state.selected_primary_profiles),
                 0,
@@ -497,18 +537,20 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if state.missing_primary_profiles:
         logger.info(
-            "primary-ready root=%s selected=%d ready=%d missing=%s",
+            "primary-profile-state root=%s selected=%d ready=%d missing=%s",
             state.parent_task_id,
             len(state.selected_primary_profiles),
-            sum(child.terminal for child in state.analysis_children),
+            state.ready_count,
             ",".join(state.missing_primary_profiles),
         )
         return None
 
     if state.duplicate_primary_profiles:
         logger.warning(
-            "primary-duplicate-detected root=%s profiles=%s",
+            "primary-duplicate-detected primary-integrity root=%s selected=%d "
+            "duplicate_profiles=%s ready=false",
             state.parent_task_id,
+            len(state.selected_primary_profiles),
             ",".join(state.duplicate_primary_profiles),
         )
         # Do not hide an already-created duplicate by selecting the newest or
@@ -1226,12 +1268,20 @@ class CeoSupervisorService:
                     )
                 ):
                     decision = self.decider(replace(state, wakeups=wakeups))
-                if state.analysis_children and not state.missing_primary_profiles:
+                if state.primary_ready:
                     logger.info(
                         "primary-ready root=%s selected=%d ready=%d",
                         root_id,
-                        len(state.selected_primary_profiles) or len({child.profile for child in state.analysis_children}),
-                        sum(child.terminal for child in state.analysis_children),
+                        len(state.selected_primary_profiles) or len(state.primary_by_profile),
+                        state.ready_count,
+                    )
+                elif state.duplicate_primary_profiles:
+                    logger.warning(
+                        "primary-duplicate-detected primary-integrity root=%s "
+                        "selected=%d duplicate_profiles=%s ready=false",
+                        root_id,
+                        len(state.selected_primary_profiles),
+                        ",".join(state.duplicate_primary_profiles),
                     )
                 action = decision.action.value if decision is not None else "NONE"
                 if decision is not None and state.has_action(decision.action):
@@ -1446,6 +1496,34 @@ class CeoSupervisorService:
                 SupervisorAction.RUN_QA: "qa",
                 SupervisorAction.SYNTHESIZE: "synthesis",
             }[decision.action]
+            if role == "primary":
+                existing = tuple(
+                    child
+                    for child in state.analysis_children
+                    if child.profile == decision.assignee
+                )
+                if len(existing) > 1:
+                    logger.error(
+                        "primary-integrity root=%s profile=%s duplicate_count=%d create_suppressed=true",
+                        state.parent_task_id,
+                        decision.assignee,
+                        len(existing),
+                    )
+                    return
+                if existing:
+                    # Replan must reuse the logical primary identity. The
+                    # supported Hermes boundary exposes unblock as the
+                    # bounded retry/reopen operation; never create a second
+                    # canonical task for the same root/profile.
+                    self.client.unblock_task(existing[0].task_id)
+                    logger.info(
+                        "retry-primary root=%s profile=%s task=%s attempt=%d",
+                        state.parent_task_id,
+                        decision.assignee,
+                        existing[0].task_id,
+                        state.replan_count + 1,
+                    )
+                    return
             idempotency_key = (
                 primary_idempotency_key(state.parent_task_id, decision.assignee)
                 if role == "primary"
