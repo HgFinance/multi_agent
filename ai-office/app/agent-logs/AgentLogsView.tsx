@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchOperations,
   readableRuntimeMessage,
+  subscribeOperationsStream,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
@@ -14,7 +15,7 @@ import DepartmentInspector from "./DepartmentInspector";
  *
  * 데이터·판정은 main의 `ops/RiskQaPanel.tsx` 로직 그대로이고, 겉모습만
  * 우리 디자인 토큰으로 옮겼다. 부서 수·Worker 수의 출처는 각 Hermes Profile의
- * Worker Registry이고 실행 상태는 BFF `/ui/snapshot` 이다 — 화면에서 합치지 않는다.
+ * Worker Registry이고 실행 상태는 BFF `/ui/snapshot`과 `/ws/operations`에서 받는다.
  */
 
 const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
@@ -88,15 +89,33 @@ export default function AgentLogsView() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<"connecting" | "connected" | "degraded">("connecting");
+  const [lastHeartbeat, setLastHeartbeat] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    fetchOperations()
-      .then((next) => alive && setData(next))
-      .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => alive && setLoading(false));
+    const refresh = () => {
+      fetchOperations()
+        .then((next) => alive && setData(next))
+        .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
+        .finally(() => alive && setLoading(false));
+    };
+
+    refresh();
+    const unsubscribe = subscribeOperationsStream({
+      onOpen: () => alive && setStreamState("connected"),
+      onSnapshotRequired: refresh,
+      onStatus: refresh,
+      onHeartbeat: (observedAt) => {
+        if (!alive) return;
+        setLastHeartbeat(observedAt || new Date().toISOString());
+        setStreamState("connected");
+      },
+      onError: () => alive && setStreamState("degraded"),
+    });
     return () => {
       alive = false;
+      unsubscribe();
     };
   }, []);
 
@@ -141,6 +160,15 @@ export default function AgentLogsView() {
         >
           {data?.runtime_connected ? "RUNTIME CONNECTED" : "DEGRADED"}
         </span>
+          <span
+            className={`shrink-0 px-3 py-1 rounded-full border text-label-md font-label-md ${
+              streamState === "connected"
+                ? "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant"
+                : "border-outline text-on-surface-variant"
+            }`}
+          >
+            {streamState === "connected" ? "KANBAN BRIDGE CONNECTED" : streamState === "connecting" ? "CONNECTING" : "BRIDGE DEGRADED"}
+          </span>
       </section>
 
       <section className="flex flex-wrap gap-2" aria-label="전체 부서 요약">
@@ -152,6 +180,14 @@ export default function AgentLogsView() {
             {metric.label} <b className="font-data-mono text-on-surface">{metric.value}</b>
           </span>
         ))}
+      </section>
+      <section className="flex flex-wrap gap-2" aria-label="Kanban 연결 상태">
+        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
+          Kanban status bridge <b className="font-data-mono text-on-surface">{streamState === "connected" ? "연결됨" : "확인 중"}</b>
+        </span>
+        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
+          heartbeat <b className="font-data-mono text-on-surface">{lastHeartbeat ? new Date(lastHeartbeat).toLocaleTimeString("ko-KR") : "대기 중"}</b>
+        </span>
       </section>
 
       {departments.length > 0 ? (
@@ -193,7 +229,7 @@ export default function AgentLogsView() {
       ) : null}
 
       <p className="text-xs text-outline">
-        실행 상태 Source: BFF <code>/ui/snapshot</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
+        Kanban status bridge + heartbeat Source: BFF <code>/ui/snapshot</code> + <code>/ws/operations</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
       </p>
     </main>
   );

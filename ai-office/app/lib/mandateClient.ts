@@ -285,6 +285,31 @@ export function policyToDraft(
 }
 
 /**
+ * 임시 저장 초안을 **서버 저장본 위에** 얹는다.
+ *
+ * `base`가 `DEFAULT_DRAFT`가 아니라 서버 저장본이어야 하는 이유(2026-08-14):
+ * 초안에 없는 키를 공장 기본값으로 채우면, 서버에는 멀쩡히 있는 위험 성향·투자
+ * 경험이 "보수적/초보"로 덮여 **일부 항목만 안 불러와지는 것처럼 보인다.**
+ * 이 필드들은 나중에 추가돼서 그 전에 저장된 초안에는 키 자체가 없다.
+ *
+ * `null`/`undefined`는 덮지 않는다 - "아직 답 안 함"이 서버에 저장된 답을 지우면
+ * 안 된다. 임시 초안은 **사용자가 고친 것만** 이긴다.
+ */
+export function mergeLocalDraft(base: MandateDraft, parsed: Partial<MandateDraft>): MandateDraft {
+  // `allowedAssets`는 통째로 덮으면 서버가 켠 자산군이 사라지므로 따로 병합한다.
+  const edited = Object.fromEntries(
+    Object.entries(parsed).filter(
+      ([key, value]) => value !== null && value !== undefined && key !== "allowedAssets",
+    ),
+  ) as Partial<MandateDraft>;
+  return {
+    ...base,
+    ...edited,
+    allowedAssets: { ...base.allowedAssets, ...(parsed.allowedAssets ?? {}) },
+  };
+}
+
+/**
  * 선택 하나를 draft에 적용한다.
  *
  * 성향·경험 중 **어느 쪽이 바뀌든** `min()` 등급이 바뀔 수 있으므로 둘을 한

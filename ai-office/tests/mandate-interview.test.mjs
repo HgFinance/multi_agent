@@ -9,6 +9,7 @@ import {
   capitalUnitFor,
   draftToInvestorProfile,
   draftToPolicy,
+  mergeLocalDraft,
   nextStep,
   policyToDraft,
   validateDraft,
@@ -191,6 +192,46 @@ test("저장된 정책을 불러오면 폼이 그대로 복원된다 (계정 전
   assert.equal(restored.maxDailyLossPct, saved.maxDailyLossPct);
   assert.deepEqual(restored.allowedAssets, saved.allowedAssets);
   assert.equal(restored.approvalMode, saved.approvalMode);
+});
+
+test("임시 초안은 서버 저장본을 지우지 않는다 (일부 항목 미복원 회귀)", () => {
+  // 서버에서 불러온 상태: 공격적 + 숙련 + 기간 10년.
+  const fromServer = {
+    ...applyChoice({ ...DEFAULT_DRAFT, experience: "EXPERIENCED" }, { riskProfile: "aggressive" }),
+    investmentHorizonYears: 10,
+    liquidityNeed: "LOW",
+    objective: "성장주 중심",
+  };
+  // 위험 성향·경험 필드가 생기기 전에 저장된 옛 임시 초안 - 그 키가 아예 없다.
+  const oldLocal = { objective: "수정 중인 목표", baseCapital: 50_000_000 };
+
+  const merged = mergeLocalDraft(fromServer, oldLocal);
+
+  // 사용자가 고친 것만 이긴다.
+  assert.equal(merged.objective, "수정 중인 목표");
+  assert.equal(merged.baseCapital, 50_000_000);
+  // 초안에 없던 항목이 공장 기본값("보수적"/"초보")으로 덮이면 안 된다.
+  assert.equal(merged.riskProfile, "aggressive", "위험 성향이 기본값으로 덮였다");
+  assert.equal(merged.experience, "EXPERIENCED", "투자 경험이 기본값으로 덮였다");
+  assert.equal(merged.investmentHorizonYears, 10);
+  assert.equal(merged.liquidityNeed, "LOW");
+  assert.equal(merged.grossExposurePct, fromServer.grossExposurePct);
+});
+
+test("초안의 null은 서버에 저장된 답을 지우지 않는다", () => {
+  const fromServer = { ...DEFAULT_DRAFT, investmentHorizonYears: 10, liquidityNeed: "LOW" };
+  // 인터뷰 도중(미응답 상태)에 임시 저장한 초안.
+  const merged = mergeLocalDraft(fromServer, { investmentHorizonYears: null, liquidityNeed: null });
+  assert.equal(merged.investmentHorizonYears, 10);
+  assert.equal(merged.liquidityNeed, "LOW");
+});
+
+test("자산군은 서버 값 위에 초안이 겹쳐진다", () => {
+  const fromServer = { ...DEFAULT_DRAFT, allowedAssets: { ...DEFAULT_DRAFT.allowedAssets, leverage: true } };
+  const merged = mergeLocalDraft(fromServer, { allowedAssets: { crypto: true } });
+  assert.equal(merged.allowedAssets.leverage, true, "서버가 켠 항목이 사라졌다");
+  assert.equal(merged.allowedAssets.crypto, true);
+  assert.equal(merged.allowedAssets.equity, true);
 });
 
 test("기본 draft는 정책 제약을 위반하지 않는다", () => {
