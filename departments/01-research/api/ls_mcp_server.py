@@ -131,6 +131,27 @@ _T1717_COLS = {
 }
 
 
+def _num(v):
+    """LS 응답 값 -> float. 숫자가 아니면 None (0 으로 접지 않는다)."""
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _unaggregated(values, volume) -> bool:
+    """거래는 있는데 투자자 컬럼이 전부 0 인가 = 아직 집계 전인가.
+
+    실측 2026-08-14 장중: t1717 이 거래량 4,513,420 주인 당일 행에 개인·기관계·
+    외인계를 모두 0 으로 준다(같은 시각 t1637 은 정상 수치). '순매수 0'과
+    '아직 집계 안 됨'은 다른 상태다 - 0 을 그대로 주면 에이전트가 중립 수급으로
+    읽는다. 투자자 15종이 4.5백만주 거래일에 동시에 정확히 0 일 수는 없다.
+    """
+    nums = [n for n in values if n is not None]
+    vol = _num(volume)
+    return bool(nums) and (vol or 0) > 0 and all(n == 0 for n in nums)
+
+
 def investor_flow(corp: str, days: int = 10) -> dict:
     """종목 수급 - 일자별 투자자 유형별 순매수량 (LS t1717 외인기관종목별동향).
 
@@ -153,15 +174,27 @@ def investor_flow(corp: str, days: int = 10) -> dict:
     rows = body.get("t1717OutBlock1") or body.get("t1717OutBlock") or []
     if isinstance(rows, dict):
         rows = [rows]
-    items = []
+    items, unaggregated = [], []
     for r in rows[:days]:
         item = {"date": r.get("date"), "close": r.get("close"),
                 "change_pct": r.get("diff"), "volume": r.get("volume")}
-        item.update({label: r.get(col) for col, label in _T1717_COLS.items()})
+        cols = {label: r.get(col) for col, label in _T1717_COLS.items()}
+        if _unaggregated(( _num(v) for v in cols.values()), r.get("volume")):
+            # 키를 빼고 사유를 남긴다 - 없는 것을 0 으로 위장하지 않는다.
+            item["집계상태"] = "장중_미집계 - 이 날짜의 투자자별 수급은 아직 없다"
+            unaggregated.append(r.get("date"))
+        else:
+            item.update(cols)
         items.append(item)
     out = {"corp": resolved, "unit": "순매수량(주)", "count": len(items),
            "items": items, "tr": "t1717", "queried_at": datetime.now().isoformat(),
            "note": "지금 시점 조회값 - 백테스트·사후 채점 인용 금지"}
+    if unaggregated:
+        out["unavailable"] = {
+            "dates": unaggregated,
+            "reason": "장중이라 투자자별 집계 전(t1717 이 0 을 준다) - '순매수 0' 이 "
+                      "아니다. 장중 수급이 필요하면 program_trade_trend(t1637) 또는 "
+                      "market_investor_flow_intraday(t1602) 를 쓸 것."}
     out["citation"] = _snapshot("investor_flow", {"corp": corp, "days": days}, out)
     return out
 
@@ -424,4 +457,10 @@ if __name__ == "__main__":
     print(f"  카탈로그 {cat['tr_count']}개 로드, '투자자' 검색 {r['count']}건  OK")
     assert _T1717_COLS["tjj0016_vol"] == "외인계"
     print("  t1717 컬럼 사상          OK")
+    # 장중 미집계 판별 - 거짓 0 을 수급 0 으로 내보내지 않는다 (실측 2026-08-14)
+    assert _unaggregated([0.0] * 15, 4513420) is True, "장중 0 행을 못 잡는다"
+    assert _unaggregated([0.0, -401379.0], 35530867) is False, "정상 행을 미집계로 몬다"
+    assert _unaggregated([0.0] * 15, 0) is False, "거래 없는 날은 미집계가 아니다"
+    assert _unaggregated([None, None], 100) is False, "값이 없는 것은 판별 대상 아님"
+    print("  장중 미집계 판별         OK")
     print("자체 점검 통과")
