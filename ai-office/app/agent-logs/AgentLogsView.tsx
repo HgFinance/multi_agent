@@ -2,10 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  departmentStage,
   fetchOperations,
   readableRuntimeMessage,
-  readableRuntimeStatus,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
@@ -29,6 +27,8 @@ const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
   BLOCKED: { label: "실행 차단", tone: "border-error/40 bg-error-container text-on-error-container" },
   ERROR: { label: "오류", tone: "border-error/40 bg-error-container text-on-error-container" },
 };
+
+const EMPTY_DEPARTMENTS: OperationsDepartment[] = [];
 
 function DepartmentCard({
   department,
@@ -100,7 +100,7 @@ export default function AgentLogsView() {
     };
   }, []);
 
-  const departments = data?.departments ?? [];
+  const departments = data?.departments ?? EMPTY_DEPARTMENTS;
   const registeredWorkers = departments.reduce((total, item) => total + item.worker_count, 0);
   const activeWorkers = departments.reduce((total, item) => total + item.active_worker_count, 0);
   const degraded = departments.filter((item) => ["DEGRADED", "BLOCKED", "ERROR"].includes(item.status)).length;

@@ -9,12 +9,32 @@ import { askCeo, ceoProgress, type CardOutcome, type CeoQueryProgress, type CeoQ
 /**
  * 대표 Dashboard.
  *
- * Kanban 패널은 빈 상태만 그린다 — 보드 임베드는 동규님 담당이라 여기서
- * 만들지 않는다. 삭제 전 구현(HermesKanbanEmbed)은 커밋 49bc724에 남아 있다.
+ * Hermes Kanban은 별도 인증 세션을 사용하는 외부 화면이다. Dashboard는
+ * 보드 자체의 API나 인증을 소유하지 않고, Hermes가 제공하는 화면을 임베드한다.
  */
 
-/** Hermes Kanban 보드 주소. 임베드를 붙일 때 이 값을 같이 쓴다. */
-const KANBAN_URL = process.env.NEXT_PUBLIC_HERMES_KANBAN_URL?.trim() || "http://127.0.0.1:9119";
+/** Hermes Kanban 보드 주소. 로컬 기본값은 Hermes Dashboard 포트다. */
+const KANBAN_BASE_URL =
+  process.env.NEXT_PUBLIC_HERMES_KANBAN_URL?.trim() ||
+  process.env.NEXT_PUBLIC_HERMES_DASHBOARD_URL?.trim() ||
+  "http://127.0.0.1:9119";
+
+function resolveKanbanUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      return null;
+    }
+    const pathname = url.pathname.replace(/\/+$/, "");
+    if (pathname && pathname !== "/kanban") return null;
+    url.pathname = "/kanban";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+const KANBAN_URL = resolveKanbanUrl(KANBAN_BASE_URL);
 
 const QUICK_QUESTIONS = [
   "오늘 전체 업무 현황을 요약해줘",
@@ -64,6 +84,9 @@ export default function DashboardView() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<CeoQueryResult | null>(null);
   const [progress, setProgress] = useState<CeoQueryProgress | null>(null);
+  const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">(
+    KANBAN_URL ? "loading" : "error",
+  );
 
   const rootTaskId = result?.task_id ?? null;
 
@@ -79,6 +102,11 @@ export default function DashboardView() {
     }, progress ? 15000 : 1000);
     return () => window.clearTimeout(timer);
   }, [rootTaskId, progress]);
+  useEffect(() => {
+    if (!KANBAN_URL || kanbanState !== "loading") return undefined;
+    const timer = window.setTimeout(() => setKanbanState("error"), 8000);
+    return () => window.clearTimeout(timer);
+  }, [kanbanState]);
 
   async function send(text: string) {
     const value = text.trim();
@@ -312,25 +340,44 @@ export default function DashboardView() {
                   사용자 질의와 부서별 업무 배정은 이 보드의 상태를 기준으로 확인합니다.
                 </p>
               </div>
-              <a
-                href={KANBAN_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="px-4 py-2 border border-outline-variant bg-surface-container-lowest rounded font-bold text-label-md font-label-md text-primary hover:bg-surface-container transition-colors inline-flex items-center gap-1 shrink-0"
-              >
-                보드 새 창으로 열기
-                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">open_in_new</span>
-              </a>
+              {KANBAN_URL ? (
+                <a
+                  href={KANBAN_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-4 py-2 border border-outline-variant bg-surface-container-lowest rounded font-bold text-label-md font-label-md text-primary hover:bg-surface-container transition-colors inline-flex items-center gap-1 shrink-0"
+                >
+                  보드 새 창으로 열기
+                  <span className="material-symbols-outlined text-[16px]" aria-hidden="true">open_in_new</span>
+                </a>
+              ) : null}
+            </div>
+            <div className="mx-6 mb-6 flex-1 min-h-80 bg-surface-container-low border border-outline-variant rounded relative overflow-auto">
+              {KANBAN_URL ? (
+                <iframe
+                  title="Hermes Kanban 화면"
+                  src={KANBAN_URL}
+                  onLoad={() => setKanbanState("ready")}
+                  onError={() => setKanbanState("error")}
+                  className="w-full h-[560px] border-0 bg-white"
+                />
+              ) : null}
+              <div className="absolute top-3 right-3 rounded border border-outline-variant bg-surface-container-lowest/95 px-2 py-1 text-xs text-on-surface-variant">
+                {kanbanState === "loading" ? "보드 불러오는 중…" : kanbanState === "ready" ? "Hermes 보드 연결됨" : "보드를 불러오지 못함"}
+              </div>
+              {kanbanState === "error" ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-container-low p-6 text-center">
+                  <span className="material-symbols-outlined text-[40px] text-outline-variant" aria-hidden="true">account_tree</span>
+                  <p className="text-body-sm font-body-sm text-on-surface-variant m-0 max-w-lg">
+                    {KANBAN_URL
+                      ? "Hermes 보드를 불러오지 못했습니다. 새 창으로 열어 인증 상태와 Hermes 실행 여부를 확인하세요."
+                      : "Hermes Kanban 주소 설정이 올바르지 않습니다. 관리자 설정을 확인하세요."}
+                  </p>
+                  {KANBAN_URL ? <code className="text-xs text-outline bg-surface-container px-2 py-1 rounded">{new URL(KANBAN_URL).origin}/kanban</code> : null}
+                </div>
+              ) : null}
             </div>
 
-            {/* 보드 임베드는 동규님 담당. 여기서는 빈 상태만 그린다. */}
-            <div className="mx-6 mb-6 flex-1 min-h-80 bg-surface-container-low border border-outline-variant rounded flex flex-col items-center justify-center gap-3 p-6 text-center">
-              <span className="material-symbols-outlined text-[40px] text-outline-variant" aria-hidden="true">account_tree</span>
-              <p className="text-body-sm font-body-sm text-on-surface-variant m-0 max-w-lg">
-                Dashboard Profile 인증이 필요합니다. 보드가 보이지 않으면 새 창으로 열어 Hermes 인증 상태를 확인하세요.
-              </p>
-              <code className="text-xs text-outline bg-surface-container px-2 py-1 rounded">{KANBAN_URL}</code>
-            </div>
           </section>
         </div>
 
