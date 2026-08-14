@@ -196,21 +196,71 @@ def parse_cli_json(raw: str) -> tuple[str, dict]:
     raise RuntimeError(f"CLI 응답에서 본문을 못 찾았다 - 키: {sorted(d)[:12]}")
 
 
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """CLI 프로세스 **트리 전체**를 죽인다.
+
+    ▶ 왜 트리인가 (2026-08-14 실측, 프록시 영구 정지 사고)
+      `cli` 는 `claude.CMD` 래퍼다. `Popen.kill()` 은 그 래퍼(cmd.exe)만 죽이고
+      실제 일을 하는 손자 `claude.exe` 는 살아남는다. 그 손자가 stdout/stderr
+      파이프를 그대로 물고 있어서 EOF 가 영원히 안 오고, 뒤이은 파이프 읽기가
+      무한정 막힌다. 그 스레드는 세마포어를 든 채 멈추므로 슬롯이 반납되지
+      않는다 - 그런 호출이 3 번 쌓이면 프록시가 통째로 죽는다(성공 15 에서
+      정지, 오류·거부만 증가, in-flight 프로세스가 타임아웃 300 초를 훌쩍 넘겨
+      15 분째 생존).
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=20, check=False)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    # 파이프를 닫아 준다. 손자가 아직 붙어 있어도 우리 쪽 fd 는 놓아야 한다.
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except Exception:
+            pass
+
+
 def call_cli(prompt: str, alias: str, *, cli: str) -> tuple[str, dict]:
     """claude -p 한 번. 프롬프트는 **stdin 으로** 넣는다.
 
     argv 로 넘기면 Windows 명령줄 길이 상한(~32KB)에 걸린다 - Packet 총괄
     프롬프트는 그보다 쉽게 커진다(분석가 6인 readout 이 들어간다).
+
+    ▶ `subprocess.run(timeout=...)` 을 쓰지 않는다. 그 구현은 타임아웃 뒤
+      자식을 죽이고 **다시 파이프를 읽어** 종료를 기다리는데, 손자가 살아서
+      파이프를 물고 있으면 그 대기가 안 끝난다(`_kill_tree` 주석 참조).
+      타임아웃이 있는데도 슬롯이 영영 반납되지 않는 원인이었다.
     """
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [cli, "-p", "--model", alias, "--output-format", "json"],
-        check=False, input=prompt, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=CLI_TIMEOUT,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
+    try:
+        stdout, stderr = proc.communicate(prompt, timeout=CLI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # 트리를 죽이고 **즉시** 올린다. 여기서 파이프를 더 읽으면 그 순간
+        # 다시 무한 대기가 된다 - 그게 이 사고의 정확한 재현 경로다.
+        _kill_tree(proc)
+        raise
+    except BaseException:
+        _kill_tree(proc)
+        raise
     if proc.returncode != 0:
         raise RuntimeError(
-            f"CLI exit={proc.returncode}: {(proc.stderr or proc.stdout)[:300]}")
-    return parse_cli_json(proc.stdout)
+            f"CLI exit={proc.returncode}: {(stderr or stdout)[:300]}")
+    return parse_cli_json(stdout)
 
 
 class Handler(BaseHTTPRequestHandler):
