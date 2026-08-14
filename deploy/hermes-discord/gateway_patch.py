@@ -60,6 +60,7 @@ def _log_event(
     discord_publish_completed: bool = False,
 ) -> None:
     fields = {
+        "producer": "hermes-discord-gateway",
         "profile": _profile_name(),
         "pid": os.getpid(),
         "discord_message_id": message_id,

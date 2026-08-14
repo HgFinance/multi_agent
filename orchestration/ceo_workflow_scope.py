@@ -20,7 +20,99 @@ CEO_WORKFLOW_REUSE_POLICY = "disabled"
 CONTINUOUS_RESEARCH_MARKER = "hgfinance.continuous-research.v1"
 CONTINUOUS_RESEARCH_PLANE = "continuous_research"
 BACKGROUND_RESEARCH_ROLE = "background_research"
+PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
+
+# These aliases make the CEO planner's durable selection machine-readable.
+# They do not choose departments; the planner remains the source of truth.
+_PRIMARY_PROFILE_ALIASES = {
+    "research-department": ("research-department", "research", "리서치", "연구"),
+    "quant-backtest-department": (
+        "quant-backtest-department", "quant", "backtest", "퀀트"
+    ),
+    "trading-department": ("trading-department", "trading", "트레이딩"),
+    "accounting-portfolio-department": (
+        "accounting-portfolio-department",
+        "accounting",
+        "portfolio",
+        "accounting/portfolio",
+        "회계",
+        "포트폴리오",
+    ),
+    "risk-management": ("risk-management", "risk management", "risk", "리스크관리"),
+    "hr-department": ("hr-department", "workforce", "hr", "인사"),
+}
+
+
+def primary_idempotency_key(root_task_id: str, profile: str) -> str:
+    """Stable create key for one request-scoped primary profile."""
+
+    root = str(root_task_id).strip()
+    canonical = str(profile).strip()
+    if not root or not canonical:
+        raise ValueError("root_task_id and profile are required")
+    return f"{root}:primary:{canonical}"
+
+
+def _selection_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return ()
+        if raw.startswith(("[", "{", '"')):
+            try:
+                return _selection_values(json.loads(raw))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        return tuple(
+            part.strip()
+            for part in re.split(r"[,;|]|\s+and\s+|\s+및\s+", raw)
+            if part.strip()
+        )
+    if isinstance(value, Mapping):
+        return tuple(str(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def selected_primary_profiles_from_body(body: str) -> tuple[str, ...]:
+    """Read the planner-selected primary set from a root body.
+
+    New CEO sessions should emit ``selected_primary_profiles=...``.  The
+    legacy prose form is accepted only to diagnose already-created roots; it
+    never authorizes reuse of a task from another root.
+    """
+
+    text = str(body or "")
+    values: tuple[str, ...] = ()
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().casefold() in {
+            PRIMARY_SELECTION_FIELD,
+            "selected_departments",
+        }:
+            values = _selection_values(value)
+            break
+    if not values:
+        match = re.search(
+            r"(?is)dynamic\s+departments\s+selected\s*:\s*(.+?)(?:\n\s*primary|\n\s*advisory|$)",
+            text,
+        )
+        if match:
+            values = _selection_values(match.group(1).replace("\n", " "))
+
+    selected: list[str] = []
+    for value in values:
+        normalized = value.strip().strip(" .,:;()[]{}").casefold()
+        for profile, aliases in _PRIMARY_PROFILE_ALIASES.items():
+            if normalized == profile or normalized in {
+                alias.casefold() for alias in aliases
+            }:
+                if profile not in selected:
+                    selected.append(profile)
+                break
+    return tuple(selected)
 
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
@@ -251,6 +343,9 @@ def build_root_body(
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
+        "response_plane=primary_results_ready\n"
+        "governance_plane=async_qa\n"
+        "qa_is_not_synthesis_prerequisite=true\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -473,6 +568,7 @@ __all__ = [
     "CEO_WORKFLOW_SCOPE_POLICY",
     "CONTINUOUS_RESEARCH_MARKER",
     "CONTINUOUS_RESEARCH_PLANE",
+    "PRIMARY_SELECTION_FIELD",
     "WORKFLOW_MODES",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
@@ -484,6 +580,8 @@ __all__ = [
     "extract_scope_references",
     "infer_workflow_mode",
     "mandate_snapshot_present",
+    "primary_idempotency_key",
+    "selected_primary_profiles_from_body",
     "validate_workflow_scope",
     "workflow_mode_from_body",
 ]

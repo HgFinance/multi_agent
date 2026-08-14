@@ -42,6 +42,8 @@ from orchestration.ceo_workflow_scope import (
     build_scoped_task_body,
     extract_scope_references,
     mandate_snapshot_present,
+    primary_idempotency_key,
+    selected_primary_profiles_from_body,
     validate_workflow_scope,
     workflow_mode_from_body,
 )
@@ -279,14 +281,35 @@ class SupervisorState:
     # The root mandate is the single source of truth.  This flag only controls
     # whether supervisor-created children receive a reference to that snapshot.
     has_mandate: bool = False
+    # Durable planner selection.  An empty tuple preserves compatibility for
+    # legacy roots whose body predates the machine-readable field.
+    selected_primary_profiles: tuple[str, ...] = ()
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
-        return tuple(
+        candidates = tuple(
             child
             for child in self.children
             if child.is_in_workflow(self.parent_task_id) and child.is_analysis
         )
+        if not self.selected_primary_profiles:
+            return candidates
+        selected = set(self.selected_primary_profiles)
+        return tuple(child for child in candidates if child.profile in selected)
+
+    @property
+    def missing_primary_profiles(self) -> tuple[str, ...]:
+        if not self.selected_primary_profiles:
+            return ()
+        present = {child.profile for child in self.analysis_children}
+        return tuple(profile for profile in self.selected_primary_profiles if profile not in present)
+
+    @property
+    def duplicate_primary_profiles(self) -> tuple[str, ...]:
+        counts: dict[str, int] = {}
+        for child in self.analysis_children:
+            counts[child.profile] = counts.get(child.profile, 0) + 1
+        return tuple(profile for profile in self.selected_primary_profiles or counts if counts.get(profile, 0) > 1)
 
     @property
     def qa_children(self) -> tuple[ChildTaskState, ...]:
@@ -441,6 +464,15 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             reason="supervisor_wakeup_limit_reached",
         )
     if not state.analysis_children:
+        if state.selected_primary_profiles:
+            logger.info(
+                "primary-ready root=%s selected=%d ready=%d missing=%s",
+                state.parent_task_id,
+                len(state.selected_primary_profiles),
+                0,
+                ",".join(state.missing_primary_profiles),
+            )
+            return None
         return SupervisorDecision(
             SupervisorAction.REQUEST_USER_INPUT,
             state.parent_task_id,
@@ -450,6 +482,27 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             parent_task_ids=(),
             reason="no_analysis_children",
         )
+
+    if state.missing_primary_profiles:
+        logger.info(
+            "primary-ready root=%s selected=%d ready=%d missing=%s",
+            state.parent_task_id,
+            len(state.selected_primary_profiles),
+            sum(child.terminal for child in state.analysis_children),
+            ",".join(state.missing_primary_profiles),
+        )
+        return None
+
+    if state.duplicate_primary_profiles:
+        logger.warning(
+            "primary-duplicate-detected root=%s profiles=%s",
+            state.parent_task_id,
+            ",".join(state.duplicate_primary_profiles),
+        )
+        # Do not hide an already-created duplicate by selecting the newest or
+        # fastest task.  A fresh workflow is prevented from reaching this
+        # state by the stable create key in the CEO producer contract.
+        return None
 
     for child in state.children:
         if (
@@ -1046,8 +1099,16 @@ class CeoSupervisorService:
                     qa_required=self._qa_required_from_event(event),
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
+                    selected_primary_profiles=selected_primary_profiles_from_body(root_body),
                 )
                 decision = self.decider(state)
+                if state.analysis_children and not state.missing_primary_profiles:
+                    logger.info(
+                        "primary-ready root=%s selected=%d ready=%d",
+                        root_id,
+                        len(state.selected_primary_profiles) or len({child.profile for child in state.analysis_children}),
+                        sum(child.terminal for child in state.analysis_children),
+                    )
                 action = decision.action.value if decision is not None else "NONE"
                 if decision is not None and state.has_action(decision.action):
                     # A durable supervisor child is the idempotency record for
@@ -1240,7 +1301,17 @@ class CeoSupervisorService:
                 SupervisorAction.RUN_QA: "qa",
                 SupervisorAction.SYNTHESIZE: "synthesis",
             }[decision.action]
-            self.client.create_task(
+            idempotency_key = (
+                primary_idempotency_key(state.parent_task_id, decision.assignee)
+                if role == "primary"
+                else f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
+                + (
+                    f":replan-{state.replan_count}"
+                    if decision.action == SupervisorAction.CREATE_TASK
+                    else ""
+                )
+            )
+            created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
                     decision.body,
@@ -1251,15 +1322,16 @@ class CeoSupervisorService:
                 ),
                 assignee=decision.assignee,
                 parent_task_ids=decision.parent_task_ids,
-                idempotency_key=(
-                    f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
-                    + (
-                        f":replan-{state.replan_count}"
-                        if decision.action == SupervisorAction.CREATE_TASK
-                        else ""
-                    )
-                ),
+                idempotency_key=idempotency_key,
             )
+            if role == "primary":
+                logger.info(
+                    "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",
+                    state.parent_task_id,
+                    decision.assignee,
+                    idempotency_key,
+                    bool(created),
+                )
 
 
 __all__ = [
