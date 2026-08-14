@@ -119,6 +119,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260813070000_hypotheses_mapping_loss.sql",
                 # Library 조회 면(뷰 3종). 공장은 적재만 하고 읽을 면이 없었다
                 "20260814090000_library_read_views.sql",
+                # 서가가 낙폭을 최악값으로만 요약해 "관문을 넘은 적 있다" 를
+                # 감췄다. best_mdd·risk_controlled_runs 를 덧붙인다(select 전용)
+                "20260814100000_shelf_risk_control_visibility.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
