@@ -139,6 +139,20 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
             # 손익 계정은 대변이 이익이라 부호를 뒤집는다(portfolio.value_portfolio와 동일).
             "realized_pnl": _d(-balances.get("4000", Decimal(0))),
             "unrealized_pnl": _d(unrealized),
+            "allocation": [
+                {
+                    "key": "cash",
+                    "label": "현금",
+                    "value": _d(book_cash),
+                    "weight": _d(book_cash / nav) if nav > 0 else None,
+                },
+                {
+                    "key": "securities",
+                    "label": "유가증권",
+                    "value": _d(securities),
+                    "weight": _d(securities / nav) if nav > 0 else None,
+                },
+            ],
             # 인메모리 경로(portfolio.value_portfolio)와 같은 정의 - 거래 수수료 +
             # 관리보수 + 성과보수. 한쪽만 합치면 화면의 비용이 원천에 따라 달라진다.
             "fees": _d(balances.get("5000", Decimal(0))

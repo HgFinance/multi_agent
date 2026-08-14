@@ -87,6 +87,7 @@ export type LlmPerformanceMetric = {
 export type OperationsView = {
   observed_at: string;
   runtime_connected: boolean;
+  eventBridgeConnected: boolean;
   departments: OperationsDepartment[];
   warnings: string[];
   agentStatuses: AgentStatusEvent[];
@@ -168,6 +169,7 @@ export async function fetchOperations(): Promise<OperationsView> {
       operations?: {
         observed_at?: string;
         runtime_connected?: boolean;
+        event_bridge_connected?: boolean;
         departments?: OperationsDepartment[];
         warnings?: string[];
         agent_statuses?: AgentStatusEvent[];
@@ -185,6 +187,7 @@ export async function fetchOperations(): Promise<OperationsView> {
   return {
     observed_at: operations.observed_at ?? "",
     runtime_connected: Boolean(operations.runtime_connected),
+    eventBridgeConnected: Boolean(operations.event_bridge_connected),
     departments: operations.departments,
     warnings: operations.warnings ?? [],
     agentStatuses: operations.agent_statuses ?? [],
@@ -197,14 +200,14 @@ export type OperationsStreamHandlers = {
   onOpen?: () => void;
   onSnapshotRequired?: () => void;
   onStatus?: (event: AgentStatusEvent) => void;
-  onHeartbeat?: (observedAt: string) => void;
+  onKeepalive?: (observedAt: string) => void;
   onError?: () => void;
 };
 
 /**
- * Subscribe to the BFF Kanban status bridge. The REST snapshot remains the
+ * Subscribe to the BFF operations event stream. The REST snapshot remains the
  * source for the complete Registry; the stream only signals fresh status and
- * heartbeat data.
+ * BFF keepalive data. It is not a direct Hermes Kanban watcher.
  */
 export function subscribeOperationsStream(handlers: OperationsStreamHandlers): () => void {
   if (typeof window === "undefined" || typeof WebSocket === "undefined") return () => {};
@@ -237,7 +240,7 @@ export function subscribeOperationsStream(handlers: OperationsStreamHandlers): (
         if (event.event_type === "operations.snapshot_required.v1") {
           handlers.onSnapshotRequired?.();
         } else if (event.event_type === "operations.heartbeat.v1") {
-          handlers.onHeartbeat?.(String(event.observed_at ?? ""));
+          handlers.onKeepalive?.(String(event.observed_at ?? ""));
         } else if (event.event_type === "agent.status.v1" && event.agent_id && event.department_code) {
           handlers.onStatus?.({
             agent_id: event.agent_id,

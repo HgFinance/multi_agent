@@ -324,6 +324,12 @@ class MandateVersionRepository:
         raise NotImplementedError
 
 
+    def mandate_ids_for_fund_owner(
+        self, fund_id: str, owner_user_id: str
+    ) -> list[str]:
+        raise NotImplementedError
+
+
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
         self._rows: list[MandateVersionRow] = []
@@ -331,6 +337,7 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
         self._mandate_state: dict[str, tuple[int, str]] = {}
         self._fund_currency: dict[str, str] = {}
         self._fund_of: dict[str, str] = {}
+        self._owner_of: dict[str, str] = {}
 
     def set_fund_base_currency(self, mandate_id: str, currency: str) -> None:
         """테스트·개발용 seed. 실 구현에서는 accounting.funds 를 조회한다."""
@@ -343,8 +350,20 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
         """테스트·개발용 seed. 실 구현에서는 governance.mandates.fund_id 를 조회한다."""
         self._fund_of[mandate_id] = fund_id
 
+    def set_owner_user_id(self, mandate_id: str, owner_user_id: str) -> None:
+        self._owner_of[mandate_id] = owner_user_id
+
     def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
         return [mid for mid, fid in self._fund_of.items() if fid == fund_id]
+
+    def mandate_ids_for_fund_owner(
+        self, fund_id: str, owner_user_id: str
+    ) -> list[str]:
+        return [
+            mid
+            for mid, fid in self._fund_of.items()
+            if fid == fund_id and self._owner_of.get(mid) == owner_user_id
+        ]
 
     def latest_version(self, mandate_id: str) -> int:
         versions = [r.version for r in self._rows if r.mandate_id == mandate_id]

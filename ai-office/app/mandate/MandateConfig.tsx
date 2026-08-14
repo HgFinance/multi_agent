@@ -242,6 +242,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
   /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
   const [riskBand, setRiskBand] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const resetDialogRef = useRef<HTMLDialogElement>(null);
 
   /**
    * 어느 계정으로 보고 있는지. `TopNav`가 같은 탭에서 계정을 바꾸면
@@ -546,6 +547,28 @@ function MandateConfigForm({ userId }: { userId: string }) {
       // Safari 사생활 보호 모드 등에서 던진다. 저장을 못 하는 것이 화면을 멈출 이유는 아니다.
       setNotice("이 브라우저가 임시 저장을 허용하지 않습니다. [지침 저장]으로 DB에 저장하세요.");
     }
+  }
+
+  /**
+   * 폼·콘솔을 첫 방문 상태로 되돌린다. 상위의 `key` 리마운트를 쓰지 않는 이유:
+   * 리마운트하면 hydrate가 다시 돌아 DB 저장본을 불러오고 인터뷰를 건너뛴다 -
+   * 그건 초기화가 아니라 새로고침이다.
+   *
+   * localStorage 초안도 지운다. 남겨두면 다음 방문에 방금 지운 값이 복원된다.
+   * **DB에 저장된 지침·프로필은 건드리지 않는다** - 이 화면에 삭제 권한이 없다.
+   */
+  function resetAll() {
+    try {
+      window.localStorage.removeItem(storageKeyFor(userId));
+    } catch {
+      /* 저장소를 막아둔 브라우저. 지울 것도 없으니 그대로 진행한다. */
+    }
+    setDraft(DEFAULT_DRAFT);
+    setMessages(OPENING);
+    setStep(0);
+    setReply("");
+    setRiskBand("");
+    setNotice("설정을 초기화했습니다. DB에 저장된 지침은 그대로입니다.");
   }
 
   async function submit() {
@@ -952,6 +975,14 @@ function MandateConfigForm({ userId }: { userId: string }) {
             <div className="flex gap-3">
               <button
                 type="button"
+                onClick={() => resetDialogRef.current?.showModal()}
+                disabled={busy || submitting}
+                className="px-6 py-2 border border-outline text-on-surface-variant rounded font-bold text-body-sm hover:bg-surface-container-high transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                초기화
+              </button>
+              <button
+                type="button"
                 onClick={saveDraft}
                 className="px-6 py-2 border border-primary text-primary rounded font-bold text-body-sm hover:bg-surface-container-high transition-colors"
               >
@@ -983,6 +1014,41 @@ function MandateConfigForm({ userId }: { userId: string }) {
             {notice ? (
               <p role="status" className="w-full text-xs text-on-surface-variant">{notice}</p>
             ) : null}
+
+            {/*
+              확인 팝업. `showModal()`이 화면 중앙 배치·backdrop·Escape 닫기·포커스
+              트랩을 브라우저에서 주므로 모달 상태나 컴포넌트를 따로 두지 않는다.
+              `m-auto`는 필수 - Tailwind v4 preflight가 모든 요소의 margin을 0으로
+              만들어서 `<dialog>`의 기본 중앙 정렬(margin:auto)이 지워진다.
+              `method="dialog"`라 두 버튼 다 눌리면 알아서 닫힌다.
+            */}
+            <dialog
+              ref={resetDialogRef}
+              aria-labelledby="reset-dialog-title"
+              className="m-auto w-[min(24rem,90vw)] p-6 rounded-lg bg-surface-container-lowest text-on-surface border border-outline-variant shadow-sm backdrop:bg-black/40"
+            >
+              <h2 id="reset-dialog-title" className="text-body-md font-body-md font-bold flex items-center gap-2 text-error">
+                <span className="material-symbols-outlined text-[20px]" aria-hidden="true">warning</span>
+                설정을 초기화할까요?
+              </h2>
+              <p className="text-body-sm font-body-sm text-on-surface-variant mt-3 leading-relaxed">
+                좌측 폼이 기본값으로 돌아가고, 우측 대화도 처음부터 다시 시작합니다.
+                이 브라우저의 임시 저장 초안도 지워집니다. 되돌릴 수 없습니다.
+                <br />
+                DB에 저장된 지침과 적합성 프로필은 지워지지 않습니다.
+              </p>
+              <form method="dialog" className="flex justify-end gap-2 mt-5">
+                <button className="px-4 py-2 border border-outline-variant rounded font-bold text-body-sm hover:bg-surface-container-high transition-colors">
+                  취소
+                </button>
+                <button
+                  onClick={resetAll}
+                  className="px-4 py-2 bg-error text-on-error rounded font-bold text-body-sm hover:opacity-90 transition-opacity"
+                >
+                  Yes
+                </button>
+              </form>
+            </dialog>
           </footer>
           </div>
         </div>
