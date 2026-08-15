@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -176,12 +177,35 @@ _SQL_LEADS = """
 select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.testability, l.status,
        exists (select 1 from research.experiment_proposals p
-                where l.lead_id = any(p.lead_ids)) as used
+                where l.lead_id = any(p.lead_ids)) as used,
+       coalesce(l.ast_contract->>'ast_readiness', 'LEGACY') as ast_readiness,
+       coalesce(l.ast_contract->'observables', '[]'::jsonb) as observables,
+       l.ast_contract->'candidate_signal_expr' as candidate_signal_expr
   from research.methodology_leads l
- where l.status in ('COMPLETE', 'PARTIAL')
- order by used asc, (l.status = 'COMPLETE') desc, l.created_at desc
- limit %s
+ where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
+   and l.ast_contract->>'ast_readiness' = 'AST_READY'
+order by used asc, l.created_at desc
+limit %s
 """
+
+
+def _ast_scout_contract() -> str:
+    """Expose the executable search space to scouts from the runtime grammar itself."""
+    sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
+    from alpha_ast import ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES  # noqa: PLC0415
+    return "\n".join([
+        "[AST-ready literature contract]",
+        "  Every submitted lead must declare READINESS as exactly one of:",
+        "  - AST_READY: include exact OBSERVABLES and a valid CANDIDATE_SIGNAL_EXPR JSON AST.",
+        "  - DATA_BLOCKED: include MISSING_DATA; preserve it for acquisition, do not proxy it.",
+        "  - SEMANTIC_MISMATCH: include MAPPING_LOSS; do not substitute a different factor.",
+        f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
+        f"  Supported operators ({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
+        f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
+        "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
+        "  mechanism/TESTABLE_WITH must explain those fields economically.",
+        "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
+    ])
 
 
 # ▶ **스카우트 접근면을 카드에 싣는다** (2026-08-12, 재일 지시로 Agent-Reach 도입)
@@ -717,12 +741,20 @@ def _compose_research_brief(conn, brief, leads) -> str:
         for row in leads:
             lid, lens, edge, mech, test, status = row[:6]
             used = bool(row[6]) if len(row) > 6 else False
+            readiness = str(row[7]) if len(row) > 7 else "LEGACY"
+            observables = row[8] if len(row) > 8 else []
+            candidate = row[9] if len(row) > 9 else None
             # **쓴 것과 안 쓴 것을 눈에 보이게 가른다.** 안 가르면 이미
             # 기각된 계열을 다시 내게 된다(2026-08-12 실측으로 공장이 멈췄다)
             tag = "이미 씀" if used else "**미사용**"
-            out.append(f"  - {lid}  [{lens}/{status}] {tag} {str(edge)[:62]}")
+            out.append(f"  - {lid}  [{lens}/{status}/{readiness}] {tag} {str(edge)[:62]}")
             if mech:
                 out.append(f"      메커니즘: {str(mech)[:110]}")
+            if observables:
+                out.append(f"      관측변수: {observables}")
+            if candidate:
+                out.append("      후보 signal_expr: " + json.dumps(
+                    candidate, ensure_ascii=False, separators=(",", ":")))
     else:
         out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
                    "LEAD_IDS 가 비면 접수 전에 반려된다.")
@@ -2301,14 +2333,16 @@ def cycle(*, dry_run: bool = False) -> int:
                 body=("이 카드의 임무는 **리드 수집·납품 하나뿐이다** - 기획안을 "
                       "쓰지 마라(기획은 기획 카드 몫이다).\n"
                       + starving + "\n" + _SCOUT_SURFACE + "\n\n"
+                      + _ast_scout_contract() + "\n\n"
                       "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSSDOMAIN)를 "
                       "순서대로 돌리고, 수집분은 `factory_submit_leads` **도구 "
                       "호출**로만 납품한다 - 카드 텍스트는 납품이 아니다. "
                       "렌즈별 수집 수와 마른 렌즈를 요약에 남겨라 - 빈 것도 "
                       "사실이다.\n"
                       "[질 기준] STATED_MECHANISM 없는 블록은 접수가 반려한다. "
-                      "TESTABILITY 에는 측정지표·임계·창을 적어라 - 통째로 "
-                      "VAGUE 로 온 배치(8/11 실측)는 기획이 쓸 수 없었다. "
+                      "READINESS별 필수 칸을 채우고 AST_READY의 TESTABLE_WITH에는 "
+                      "정확한 필드명·연산·창을 적어라. DATA_BLOCKED나 "
+                      "SEMANTIC_MISMATCH를 AST_READY로 꾸미지 마라. "
                       "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
                       "CROSSDOMAIN 우물을 우선하라."),
                 assignee="research-department",
@@ -3291,7 +3325,11 @@ def _check_unused_leads_come_first():
     기각됐다" 로 거부해 발주가 0건이 됐다. 그때 안 쓴 리드 4건이 목록
     아래에 묻혀 있었다.
     """
-    assert "order by used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
+    assert "used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
+    assert "ast_readiness" in _SQL_LEADS, "AST-ready 리드를 우선하지 않는다"
+    contract = _ast_scout_contract()
+    assert "AST_READY" in contract and "CANDIDATE_SIGNAL_EXPR" in contract
+    assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다

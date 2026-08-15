@@ -133,6 +133,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 데이터셋 거래대금·거래량 단위를 매니페스트가 직접 선언한다.
                 # 실행면의 단위 가정과 어긋나면 백테스트 전에 중단할 수 있다.
                 "20260814110000_dataset_manifest_units.sql",
+                "20260815100000_methodology_lead_ast_contract.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

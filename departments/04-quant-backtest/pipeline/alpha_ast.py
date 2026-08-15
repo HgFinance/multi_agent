@@ -50,6 +50,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
+from pathlib import Path
 
 MODULE_VERSION = "quant-alpha-ast-v1"
 
@@ -103,6 +105,21 @@ ALL_OPS = SOURCE_OPS + UNARY_OPS + BINARY_OPS
 MIN_WINDOW, MAX_WINDOW = 1, 250
 # 복잡도 상한 (AlphaAgent 의 구조 제약). 깊고 큰 트리는 과적합으로 간다.
 MAX_DEPTH, MAX_NODES = 6, 40
+
+# Research intake runs in a smaller image.  Fail closed if its shared grammar surface
+# ever drifts from this evaluator's executable catalog.
+_CONTRACTS = (Path(__file__).resolve().parents[3] / "departments" /
+              "01-research" / "contracts")
+sys.path.insert(0, str(_CONTRACTS))
+from alpha_ast_surface import (  # noqa: E402
+    ALL_OPS as CONTRACT_ALL_OPS,
+    FIELDS as CONTRACT_FIELDS,
+    MAX_DEPTH as CONTRACT_MAX_DEPTH,
+    MAX_NODES as CONTRACT_MAX_NODES,
+)
+if (FIELDS, ALL_OPS, MAX_DEPTH, MAX_NODES) != (
+        CONTRACT_FIELDS, CONTRACT_ALL_OPS, CONTRACT_MAX_DEPTH, CONTRACT_MAX_NODES):
+    raise RuntimeError("research/quant alpha AST surface drift")
 
 
 class AlphaExprError(ValueError):

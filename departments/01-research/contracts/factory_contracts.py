@@ -211,6 +211,7 @@ class MethodologyLeadV1(_Base):
     source_type: SourceType
     as_known_at: datetime
     refs: tuple[SourceRef, ...]
+    ast_contract: dict = Field(default_factory=dict)
     claimed_edge: str                 # 소스가 주장하는 엣지 (스카우트의 해석이 아니다)
     stated_mechanism: str = ""        # 왜 지속되는가에 대한 소스의 설명
     inferred: bool = False            # 메커니즘이 인용이 아니라 추론이면 True
