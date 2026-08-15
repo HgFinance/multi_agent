@@ -133,7 +133,15 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
         if not alignment["ok"]:
             raise ValueError(f"SEMANTIC_MISMATCH: {alignment['note']}")
-    elif readiness == DATA_BLOCKED and not missing_data:
+        # The source identity (lead_id) and formula identity are different things.
+        # Persist both so independent papers supporting the same executable formula
+        # can be consolidated instead of masquerading as novel experiments.
+        ast_fingerprint = ast.fingerprint(candidate)
+        ast_shape_fingerprint = ast.shape_fingerprint(candidate)
+    else:
+        ast_fingerprint = ""
+        ast_shape_fingerprint = ""
+    if readiness == DATA_BLOCKED and not missing_data:
         raise ValueError("DATA_BLOCKED requires MISSING_DATA")
     elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
         raise ValueError("SEMANTIC_MISMATCH requires MAPPING_LOSS")
@@ -141,6 +149,8 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
     return {"ast_readiness": readiness, "observables": observables,
             "candidate_signal_expr": candidate, "missing_data": missing_data,
             "mapping_loss": mapping_loss,
+            "ast_fingerprint": ast_fingerprint,
+            "ast_shape_fingerprint": ast_shape_fingerprint,
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
                                    else "UNRESOLVED"),
             "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY"}
