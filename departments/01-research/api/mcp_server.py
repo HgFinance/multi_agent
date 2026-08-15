@@ -59,11 +59,33 @@ _WORKER_JOBS: dict[str, dict] = {}
 _WORKER_JOBS_LOCK = threading.Lock()
 
 
+def _writer_connection(dsn: str, *, connector=None):
+    """Open a connection whose transactions are explicitly READ WRITE.
+
+    ``DATABASE_URL`` points at Supabase's transaction pooler (port 6543).  A
+    read-only service can leave ``default_transaction_read_only=on`` on a
+    pooled server connection, which may then be handed to this write-capable
+    MCP surface.  Transaction characteristics belong on the client
+    connection, not in a session-level ``SET`` that can leak back into the
+    pool.
+    """
+    if connector is None:
+        import psycopg2
+
+        connector = psycopg2.connect
+    conn = connector(dsn, connect_timeout=15)
+    try:
+        conn.set_session(readonly=False)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def _db():
-    import psycopg2
     from source_registry import load_project_env
 
-    return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=15)
+    return _writer_connection(load_project_env()["DATABASE_URL"])
 
 
 def _rows(sql: str, params: tuple = ()) -> list[dict]:
@@ -1206,6 +1228,44 @@ def _check_bearer_auth():
     print("  Bearer 인증 판정         OK")
 
 
+def _check_writer_connection_mode():
+    """A pooled read-only server session must be overridden for MCP writes."""
+    class _Conn:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.readonly = None
+            self.closed = False
+
+        def set_session(self, *, readonly):
+            if self.fail:
+                raise RuntimeError("cannot set transaction mode")
+            self.readonly = readonly
+
+        def close(self):
+            self.closed = True
+
+    made = []
+
+    def _connect(dsn, *, connect_timeout):
+        made.append((dsn, connect_timeout, _Conn()))
+        return made[-1][2]
+
+    conn = _writer_connection("postgresql://example/test", connector=_connect)
+    assert made[0][:2] == ("postgresql://example/test", 15)
+    assert conn.readonly is False, "write MCP did not force READ WRITE transactions"
+
+    failed = _Conn(fail=True)
+    try:
+        _writer_connection("postgresql://example/test",
+                           connector=lambda *a, **k: failed)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("set_session failure was hidden")
+    assert failed.closed, "failed pooled connection was not closed"
+    print("  write DB transaction mode       OK")
+
+
 def _check_tool_surface():
     """권한 경계 - 주문·원장·리스크 도구가 노출되지 않았는가."""
     try:
@@ -1288,6 +1348,7 @@ if __name__ == "__main__":
     print(f"{MCP_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_symbol_guard()
     _check_bearer_auth()
+    _check_writer_connection_mode()
     _check_job_lifecycle()
     _check_worker_payload()
     _check_worker_job_lifecycle()
@@ -1295,4 +1356,4 @@ if __name__ == "__main__":
     _check_health_summary()
     _check_tool_surface()
     _check_liaison_surface()
-    print("리서치 MCP 9개 영역 통과. 서버는 --serve")
+    print("리서치 MCP 10개 영역 통과. 서버는 --serve")
