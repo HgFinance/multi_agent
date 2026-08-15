@@ -206,7 +206,7 @@ Graph 의미를 하드웨어 제약에 맞춰 직렬로 고정하지 않는다. 
 | 1. Scout Cycle | Research Hermes(편집장) | 어느 광맥을 팔지 정하고 렌즈별 스카우트를 소집. 주기·예산·SLA를 `ResearchCaseV2`로 고정 | 필수 Mandate 누락 시 `BLOCKED` |
 | 2. Cutoff Lock | PIT Service | `as_known_at`과 `event_time/available_time/observed_at` 규칙 고정 | Cutoff 미지원 Source는 제외 또는 Case 중단 |
 | 3. Lens Fan-out | Scout Workers (RES-11~14) | 학술·실무·커뮤니티·타분야 렌즈가 **서로의 결과를 보지 않고** 병렬 수집 | 소스 접근 실패는 리드 미생산으로 기록 — 기억으로 지어내지 않는다 |
-| 4. Lead Validation | 결정론적 Validator | 출처 존재(URL·시각·발췌), 인용 일치, 중복 리드 접기, 기존 `MethodologyLeadV1` 대조 | 출처 없는 리드는 폐기, 최대 2회 재검색 |
+| 4. Lead Validation | 결정론적 Validator | 출처 존재(URL·시각·발췌), 인용 일치, 중복 리드 접기, 공개 기준 AST와 파생 후보 AST 분리, 기존 `MethodologyLeadV1` 대조 | 출처 없는 리드는 폐기. 직접복제는 대조군으로만 보존하고 알파 후보에서는 제외 |
 | 5. Prior-art Check | 결정론적 Gate | 같은 trial family의 `ExperimentOutcomeV1` 기각 이력과 `lesson_codes` 조회 | 대응 없는 재도전은 `DUPLICATE_UNADDRESSED` 반려 |
 | 6. Feasibility | Market Context Worker (RES-17) | 유니버스 실재 여부, 히스토리 길이, 유동성, DQ 공백 — **실행 가능성 재료**(방향 예측 아님) | 커버리지 공백은 공백으로 보고, 우회하지 않는다 |
 | 7. Planning | Experiment Planner (RES-16) | 통제 어휘(edge type·universe·label·baseline) 사상, 데이터 요구, 파라미터 범위, 반증 검사 | 어휘 미사상은 `UNMAPPED_VOCAB` — 자유 서술 금지 |
@@ -353,6 +353,14 @@ stated_mechanism: 왜 지속되는가에 대한 소스의 설명
 inferred: false                      # 추론이면 true - 인용과 추론을 섞지 않는다
 market_context: 소스가 실제로 다룬 시장과 기간
 stated_failure_mode: 저자가 밝힌 무너지는 조건
+ast_contract:
+  derivation_mode: MECHANISM_MUTATION       # DIRECT_REPLICATION은 대조군 전용
+  source_baseline_expr: {...}               # 공개 방법의 가장 충실한 실행형 기준선
+  candidate_signal_expr: {...}              # 우리가 파생한 별도 후보
+  derivation_transforms: [MECHANISM_INTERACTION]
+  novelty_rationale: 공개 OFI에 유동성 비용 상태를 결합하는 경제적 이유
+  candidate_vs_source_similarity: 0.57      # 결정론적 AST 구조 유사도
+  alpha_candidate_eligible: true
 independent_mentions: 1              # community 렌즈에서 특히 중요
 testability: RULE_EXPRESSIBLE        # RULE_EXPRESSIBLE | VAGUE | UNUSABLE
 status: COMPLETE                     # COMPLETE | PARTIAL | UNUSABLE | BLOCKED

@@ -16,8 +16,15 @@ from factory_contracts import MethodologyLeadV1  # noqa: E402
 
 
 def _lead(block: dict) -> dict:
+    block = {
+        "DERIVATION_MODE": "CROSS_DOMAIN_TRANSFER",
+        "DERIVATION_TRANSFORMS": ["MARKET_STRUCTURE_TRANSFER"],
+        "NOVELTY_RATIONALE": (
+            "Transfer a non-financial event-response structure to Korean microstructure."),
+        **block,
+    }
     return lead_intake.to_lead(
-        block, lens="ACADEMIC", source_type="PAPER", case_id="case-test",
+        block, lens="CROSS_DOMAIN", source_type="PAPER", case_id="case-test",
         model_version="test-model", prompt_version="ast-ready-v2")
 
 
@@ -41,7 +48,87 @@ def test_ast_ready_persists_validated_microstructure_expression():
     assert lead["ast_contract"]["candidate_signal_expr"]["arg"]["n"] == 5
     assert len(lead["ast_contract"]["ast_fingerprint"]) == 16
     assert len(lead["ast_contract"]["ast_shape_fingerprint"]) == 16
+    assert lead["ast_contract"]["alpha_candidate_eligible"] is True
     assert MethodologyLeadV1.model_validate(lead).refs[0].url == lead["refs"][0]["url"]
+
+
+def test_direct_public_replication_is_kept_as_control_not_alpha_candidate():
+    baseline = {"op": "ts_mean", "field": "order_flow_imbalance", "n": 5}
+    lead = _lead({
+        "TITLE": "Published OFI baseline", "URL": "https://example.test/control",
+        "MECHANISM": "order_flow_imbalance measures urgent liquidity pressure",
+        "TESTABLE_WITH": "five-day order_flow_imbalance baseline",
+        "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+        "CANDIDATE_SIGNAL_EXPR": baseline,
+        "DERIVATION_MODE": "DIRECT_REPLICATION",
+        "SOURCE_BASELINE_EXPR": baseline,
+        "DERIVATION_TRANSFORMS": [],
+        "NOVELTY_RATIONALE": "",
+    })
+
+    contract = lead["ast_contract"]
+    assert contract["novelty_classification"] == "PUBLIC_BASELINE_CONTROL"
+    assert contract["alpha_candidate_eligible"] is False
+    assert contract["candidate_vs_source_similarity"] == 1.0
+
+
+def test_public_formula_window_tuning_is_not_a_mechanism_mutation():
+    with pytest.raises(ValueError, match="tunable parameters"):
+        _lead({
+            "TITLE": "Window-tuned OFI", "URL": "https://example.test/tuned",
+            "MECHANISM": "order_flow_imbalance measures urgent liquidity pressure",
+            "TESTABLE_WITH": "ten-day order_flow_imbalance",
+            "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+            "SOURCE_BASELINE_EXPR": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 5},
+            "CANDIDATE_SIGNAL_EXPR": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 10},
+            "DERIVATION_MODE": "MECHANISM_MUTATION",
+            "DERIVATION_TRANSFORMS": ["CLOCK_CHANGE"],
+            "NOVELTY_RATIONALE": "Use a slower clock.",
+        })
+
+
+def test_public_mechanism_interaction_is_eligible_when_ast_shape_changes():
+    lead = _lead({
+        "TITLE": "Spread-conditioned OFI", "URL": "https://example.test/derived",
+        "MECHANISM": (
+            "order_flow_imbalance pressure is informative when spread_bps shows costly liquidity"),
+        "TESTABLE_WITH": "subtract spread_bps rank from order_flow_imbalance rank",
+        "READINESS": "AST_READY",
+        "OBSERVABLES": ["order_flow_imbalance", "spread_bps"],
+        "SOURCE_BASELINE_EXPR": {
+            "op": "rank", "arg": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}},
+        "CANDIDATE_SIGNAL_EXPR": {"op": "sub", "args": [
+            {"op": "rank", "arg": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}},
+            {"op": "rank", "arg": {
+                "op": "ts_mean", "field": "spread_bps", "n": 5}},
+        ]},
+        "DERIVATION_MODE": "MECHANISM_MUTATION",
+        "DERIVATION_TRANSFORMS": ["MECHANISM_INTERACTION"],
+        "NOVELTY_RATIONALE": "Use spread to separate costly informed pressure from noise.",
+    })
+
+    assert lead["ast_contract"]["alpha_candidate_eligible"] is True
+    assert 0 < lead["ast_contract"]["candidate_vs_source_similarity"] < 1
+
+
+def test_cross_domain_transfer_cannot_launder_an_academic_replication():
+    with pytest.raises(ValueError, match="only valid.*CROSS_DOMAIN"):
+        lead_intake.to_lead({
+            "TITLE": "Academic relabel", "URL": "https://example.test/laundered",
+            "MECHANISM": "order_flow_imbalance measures liquidity pressure",
+            "TESTABLE_WITH": "one-day order_flow_imbalance",
+            "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+            "CANDIDATE_SIGNAL_EXPR": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 1},
+            "DERIVATION_MODE": "CROSS_DOMAIN_TRANSFER",
+            "DERIVATION_TRANSFORMS": ["MARKET_STRUCTURE_TRANSFER"],
+            "NOVELTY_RATIONALE": "Relabel an academic source as cross-domain.",
+        }, lens="ACADEMIC", source_type="PAPER", case_id="case-test",
+            model_version="test-model", prompt_version="ast-ready-v2")
 
 
 def test_ast_identity_distinguishes_exact_formula_from_tuning_shape():

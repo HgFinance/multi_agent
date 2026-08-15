@@ -137,6 +137,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 판정 환류가 가설에 남은 proposal 계보를 자동 상속하고,
                 # 과거 빈 행도 같은 결정론 조인으로 복구한다.
                 "20260815110000_outcome_proposal_lineage.sql",
+                # 공개 문헌 AST를 대조군으로 보존하고, 별도 메커니즘 파생 후보만
+                # 실험 기획에 노출한다. 기존 리드는 안전하게 직접복제로 분류한다.
+                "20260815120000_literature_derivation_policy.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

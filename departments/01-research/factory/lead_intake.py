@@ -72,11 +72,14 @@ MODULE_VERSION = "research-lead-intake-v2"
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
 OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
-            "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS")
+            "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
+            "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
+            "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE")
 _FIELD_RE = re.compile(
     r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
     r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
-    r"MISSING_DATA|MAPPING_LOSS)\s*:\s*(.*)$")
+    r"MISSING_DATA|MAPPING_LOSS|DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
+    r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE)\s*:\s*(.*)$")
 
 AST_READY = "AST_READY"
 DATA_BLOCKED = "DATA_BLOCKED"
@@ -88,6 +91,12 @@ def _alpha_ast():
     """Load the container-neutral grammar shared with quant execution."""
     import alpha_ast_surface  # noqa: PLC0415
     return alpha_ast_surface
+
+
+def _literature_derivation():
+    """Load the deterministic public-baseline novelty policy."""
+    import literature_derivation  # noqa: PLC0415
+    return literature_derivation
 
 
 def _as_text(value) -> str:
@@ -138,9 +147,40 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         # can be consolidated instead of masquerading as novel experiments.
         ast_fingerprint = ast.fingerprint(candidate)
         ast_shape_fingerprint = ast.shape_fingerprint(candidate)
+        raw_baseline = block.get("SOURCE_BASELINE_EXPR")
+        if raw_baseline not in (None, "") and not isinstance(raw_baseline, dict):
+            try:
+                raw_baseline = json.loads(_as_text(raw_baseline))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid SOURCE_BASELINE_EXPR: {exc}") from exc
+        raw_transforms = block.get("DERIVATION_TRANSFORMS") or ()
+        if isinstance(raw_transforms, str) and raw_transforms.strip().startswith("["):
+            try:
+                raw_transforms = json.loads(raw_transforms)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid DERIVATION_TRANSFORMS: {exc}") from exc
+        derivation = _literature_derivation().assess(
+            candidate=candidate,
+            mode=block.get("DERIVATION_MODE"),
+            source_baseline=raw_baseline,
+            transforms=raw_transforms,
+            novelty_rationale=block.get("NOVELTY_RATIONALE") or "",
+        )
     else:
         ast_fingerprint = ""
         ast_shape_fingerprint = ""
+        derivation = {
+            "novelty_policy_version": "",
+            "derivation_mode": "",
+            "derivation_transforms": [],
+            "novelty_rationale": "",
+            "source_baseline_expr": None,
+            "source_baseline_fingerprint": "",
+            "source_baseline_shape_fingerprint": "",
+            "candidate_vs_source_similarity": None,
+            "alpha_candidate_eligible": False,
+            "novelty_classification": "NON_EXECUTABLE_LEAD",
+        }
     if readiness == DATA_BLOCKED and not missing_data:
         raise ValueError("DATA_BLOCKED requires MISSING_DATA")
     elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
@@ -153,7 +193,8 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "ast_shape_fingerprint": ast_shape_fingerprint,
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
                                    else "UNRESOLVED"),
-            "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY"}
+            "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
+            **derivation}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"
@@ -255,6 +296,9 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
 
     now = as_known_at or datetime.now(timezone.utc)
     url, title = block["URL"].strip(), block["TITLE"].strip()
+    lens_value = str(lens).strip().upper().replace("-", "_")
+    if lens_value == "CROSSDOMAIN":
+        lens_value = "CROSS_DOMAIN"
     # MECHANISM 대체분은 길이 규율이 없다 - 계약 상한으로 자른다(clip_excerpt 참고).
     excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
     mech = (block.get("MECHANISM") or "").strip()
@@ -264,6 +308,10 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
 
     # 우리 데이터로 어떻게 재현하는지 못 적었으면 규칙으로 못 옮긴다.
     readiness = _readiness_metadata(block, mech)
+    if (readiness.get("derivation_mode") == "CROSS_DOMAIN_TRANSFER"
+            and lens_value != "CROSS_DOMAIN"):
+        raise ValueError(
+            "CROSS_DOMAIN_TRANSFER is only valid for the isolated CROSS_DOMAIN scout lens")
     ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
            "excerpt": excerpt}
 
@@ -281,7 +329,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
     return {
         "lead_id": lead_id_for([ref]),
         "case_id": case_id,
-        "scout_lens": lens,
+        "scout_lens": lens_value,
         "source_type": source_type,
         "as_known_at": now,
         "refs": [ref],
@@ -375,6 +423,10 @@ TESTABLE_WITH: Rank the negative five-day mean of order_flow_imbalance.
 READINESS: AST_READY
 OBSERVABLES: order_flow_imbalance
 CANDIDATE_SIGNAL_EXPR: {"op":"neg","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":5}}
+DERIVATION_MODE: MECHANISM_MUTATION
+SOURCE_BASELINE_EXPR: {"op":"ts_mean","field":"order_flow_imbalance","n":5}
+DERIVATION_TRANSFORMS: FAILURE_MODE_INVERSION
+NOVELTY_RATIONALE: Test the reversal implied by liquidity absorption, not the published pressure direction.
 
 TITLE: Missing mechanism
 URL: https://example.com/backtest
@@ -454,6 +506,11 @@ def _selfcheck() -> int:
                      "MECHANISM": "order flow imbalance predicts reversal",
                      "TESTABLE_WITH": "lagged order_flow_imbalance",
                      "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+                     "DERIVATION_MODE": "MECHANISM_MUTATION",
+                     "SOURCE_BASELINE_EXPR": {
+                         "op": "ts_mean", "field": "order_flow_imbalance", "n": 5},
+                     "DERIVATION_TRANSFORMS": ["FAILURE_MODE_INVERSION"],
+                     "NOVELTY_RATIONALE": "Test reversal rather than pressure continuation.",
                      "CANDIDATE_SIGNAL_EXPR": {"op": "neg", "arg": {
                          "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}}}],
                    ensure_ascii=False)

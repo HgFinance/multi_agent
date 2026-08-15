@@ -30,6 +30,7 @@ class AstMemory:
     field_counts: dict[str, int]
     untested_micro_fields: tuple[str, ...]
     formula_history: tuple[dict, ...]
+    public_baseline_controls: tuple[dict, ...]
     unused_novel_leads: tuple[dict, ...]
     unused_recycled_leads: tuple[dict, ...]
 
@@ -100,8 +101,28 @@ def build(experiments: list[dict], leads: list[dict]) -> AstMemory:
     tested = set(by_fp)
     tested_exprs = [row["expr"] for row in parsed_experiments]
     lead_groups: dict[str, dict] = {}
+    baseline_groups: dict[str, dict] = {}
     for row in leads:
         if row.get("used"):
+            continue
+        eligible = row.get("alpha_candidate_eligible", True)
+        if eligible is False:
+            raw_baseline = row.get("source_baseline_expr") or row.get("signal_expr")
+            try:
+                baseline = ast.parse(raw_baseline)
+            except (TypeError, ValueError):
+                continue
+            baseline_fp = ast.fingerprint(baseline)
+            group = baseline_groups.setdefault(baseline_fp, {
+                "fingerprint": baseline_fp,
+                "shape_fingerprint": ast.shape_fingerprint(baseline),
+                "expr": baseline,
+                "lead_ids": [],
+                "titles": [],
+                "fields": sorted(ast.fields_of(baseline)),
+            })
+            group["lead_ids"].append(str(row.get("lead_id") or ""))
+            group["titles"].append(str(row.get("title") or "")[:80])
             continue
         try:
             expr = ast.parse(row.get("signal_expr"))
@@ -135,6 +156,8 @@ def build(experiments: list[dict], leads: list[dict]) -> AstMemory:
         field_counts=dict(fields),
         untested_micro_fields=untested,
         formula_history=tuple(history),
+        public_baseline_controls=tuple(
+            group for _, group in sorted(baseline_groups.items())),
         unused_novel_leads=novel,
         unused_recycled_leads=recycled,
     )
@@ -173,6 +196,14 @@ def render(memory: AstMemory, *, max_history: int = 5) -> str:
             lines.append(
                 f"    {row['fingerprint']} negative_trials={row['negative_trials']} "
                 f"교훈={row['lesson_codes']}")
+    if memory.public_baseline_controls:
+        lines.append("  [공개 기준선 대조군 - 그대로 재제안 금지, 파생 출발점]")
+        for row in memory.public_baseline_controls[:5]:
+            lines.append(
+                f"    {row['fingerprint']} leads={row['lead_ids']} fields={row['fields']}")
+        lines.append(
+            "  ▶ 창·상수만 바꾸지 말고 상태 조건, 메커니즘 상호작용, 실패모드 "
+            "역전 또는 타분야 이전으로 별도 AST shape를 만든다.")
     if memory.unused_novel_leads:
         lines.append("  [미사용·exact 미실험 리드 - 먼저 검토]")
         for row in memory.unused_novel_leads[:5]:
@@ -215,9 +246,12 @@ def _selftest() -> None:
         {"lead_id": "l1", "signal_expr": ofi5, "used": False},
         {"lead_id": "l2", "signal_expr": ofi1, "used": False},
         {"lead_id": "l3", "signal_expr": spread, "used": True},
+        {"lead_id": "l4", "signal_expr": spread, "used": False,
+         "alpha_candidate_eligible": False, "source_baseline_expr": spread},
     ])
     assert (m.experiments, m.unique_formulas, m.duplicate_trials) == (2, 1, 1)
     assert len(m.unused_novel_leads) == 1 and len(m.unused_recycled_leads) == 1
+    assert len(m.public_baseline_controls) == 1
     assert m.unused_novel_leads[0]["nearest_tested_similarity"] == 1.0
     assert "depth_imbalance" in m.untested_micro_fields
     assert "exact 중복 시도 1건" in render(m)

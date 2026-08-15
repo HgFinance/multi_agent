@@ -180,11 +180,16 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
                 where l.lead_id = any(p.lead_ids)) as used,
        coalesce(l.ast_contract->>'ast_readiness', 'LEGACY') as ast_readiness,
        coalesce(l.ast_contract->'observables', '[]'::jsonb) as observables,
-       l.ast_contract->'candidate_signal_expr' as candidate_signal_expr
+       l.ast_contract->'candidate_signal_expr' as candidate_signal_expr,
+       coalesce(l.ast_contract->>'derivation_mode', 'UNCLASSIFIED') as derivation_mode,
+       coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb) as derivation_transforms,
+       l.ast_contract->>'candidate_vs_source_similarity' as source_similarity,
+       coalesce(l.ast_contract->>'novelty_rationale', '') as novelty_rationale
   from research.methodology_leads l
  where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+   and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
 order by used asc, l.created_at desc
 limit %s
 """
@@ -202,6 +207,19 @@ def _ast_scout_contract() -> str:
         "  - AST_READY: include exact OBSERVABLES and a valid CANDIDATE_SIGNAL_EXPR JSON AST.",
         "  - DATA_BLOCKED: include MISSING_DATA; preserve it for acquisition, do not proxy it.",
         "  - SEMANTIC_MISMATCH: include MAPPING_LOSS; do not substitute a different factor.",
+        "  PUBLICATION IS A BASELINE, NOT AN ALPHA CANDIDATE. Every AST_READY lead also",
+        "  declares one deterministic derivation mode:",
+        "  - DIRECT_REPLICATION: SOURCE_BASELINE_EXPR equals CANDIDATE_SIGNAL_EXPR. It is",
+        "    retained as a control but cannot be published as a new alpha candidate.",
+        "  - MECHANISM_MUTATION: include SOURCE_BASELINE_EXPR, DERIVATION_TRANSFORMS and",
+        "    NOVELTY_RATIONALE. Exact reuse and window/constant-only tuning are rejected.",
+        "  - CROSS_DOMAIN_TRANSFER: include MARKET_STRUCTURE_TRANSFER in",
+        "    DERIVATION_TRANSFORMS and explain the mapping in NOVELTY_RATIONALE.",
+        "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
+        "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
+        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE.",
+        "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
+        "  this grammar. Do not call a changed window, threshold, or title a new mechanism.",
         f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
         f"  Supported operators ({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
         f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
@@ -787,14 +805,23 @@ def _ast_experience_block(conn) -> str:
                 select l.lead_id, l.claimed_edge,
                        l.ast_contract->'candidate_signal_expr',
                        exists (select 1 from research.experiment_proposals p
-                                where l.lead_id = any(p.lead_ids)) as used
+                                where l.lead_id = any(p.lead_ids)) as used,
+                       coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                                false) as alpha_candidate_eligible,
+                       l.ast_contract->>'derivation_mode' as derivation_mode,
+                       coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb),
+                       l.ast_contract->'source_baseline_expr'
                   from research.methodology_leads l
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
                    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                  order by l.created_at desc""")
             leads = [{"lead_id": row[0], "title": row[1],
-                      "signal_expr": row[2], "used": bool(row[3])}
+                      "signal_expr": row[2], "used": bool(row[3]),
+                      "alpha_candidate_eligible": bool(row[4]),
+                      "derivation_mode": row[5],
+                      "derivation_transforms": row[6] or [],
+                      "source_baseline_expr": row[7]}
                      for row in cur.fetchall()]
         return AX.render(AX.build(experiments, leads))
     except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
@@ -812,6 +839,10 @@ def _compose_research_brief(conn, brief, leads) -> str:
             readiness = str(row[7]) if len(row) > 7 else "LEGACY"
             observables = row[8] if len(row) > 8 else []
             candidate = row[9] if len(row) > 9 else None
+            derivation_mode = str(row[10]) if len(row) > 10 else "UNCLASSIFIED"
+            transforms = row[11] if len(row) > 11 else []
+            source_similarity = row[12] if len(row) > 12 else None
+            novelty_rationale = str(row[13]) if len(row) > 13 else ""
             # **쓴 것과 안 쓴 것을 눈에 보이게 가른다.** 안 가르면 이미
             # 기각된 계열을 다시 내게 된다(2026-08-12 실측으로 공장이 멈췄다)
             tag = "이미 씀" if used else "**미사용**"
@@ -823,6 +854,11 @@ def _compose_research_brief(conn, brief, leads) -> str:
             if candidate:
                 out.append("      후보 signal_expr: " + json.dumps(
                     candidate, ensure_ascii=False, separators=(",", ":")))
+            out.append(
+                f"      문헌 파생: {derivation_mode} transforms={transforms} "
+                f"source_similarity={source_similarity or 'n/a'}")
+            if novelty_rationale:
+                out.append(f"      신규성 근거: {novelty_rationale[:140]}")
     else:
         out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
                    "LEAD_IDS 가 비면 접수 전에 반려된다.")
@@ -1006,8 +1042,10 @@ def _lead_health(conn) -> str:
                        count(*) filter (
                          where status = 'COMPLETE'
                            and testability = 'RULE_EXPRESSIBLE'
-                           and ast_contract->>'ast_readiness' = 'AST_READY'
-                           and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                            and ast_contract->>'ast_readiness' = 'AST_READY'
+                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
+                                         false)
                            and not exists (
                              select 1 from research.experiment_proposals p
                               where methodology_leads.lead_id = any(p.lead_ids))
@@ -1016,8 +1054,10 @@ def _lead_health(conn) -> str:
                          now() - max(created_at) filter (
                            where status = 'COMPLETE'
                              and testability = 'RULE_EXPRESSIBLE'
-                             and ast_contract->>'ast_readiness' = 'AST_READY'
-                             and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                              and ast_contract->>'ast_readiness' = 'AST_READY'
+                              and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                              and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
+                                           false)
                          )
                        ))/86400.0 as newest_usable_age_days
                   from research.methodology_leads""")
@@ -2426,7 +2466,7 @@ def cycle(*, dry_run: bool = False) -> int:
                       "쓰지 마라(기획은 기획 카드 몫이다).\n"
                       + starving + "\n" + ast_memory + "\n" + _SCOUT_SURFACE + "\n\n"
                       + _ast_scout_contract() + "\n\n"
-                      "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSSDOMAIN)를 "
+                      "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSS_DOMAIN)를 "
                       "순서대로 돌리고, 수집분은 `factory_submit_leads` **도구 "
                       "호출**로만 납품한다 - 카드 텍스트는 납품이 아니다. "
                       "렌즈별 수집 수와 마른 렌즈를 요약에 남겨라 - 빈 것도 "
@@ -2435,6 +2475,9 @@ def cycle(*, dry_run: bool = False) -> int:
                   "READINESS별 필수 칸을 채우고 AST_READY의 TESTABLE_WITH에는 "
                   "정확한 필드명·연산·창을 적어라. DATA_BLOCKED나 "
                   "SEMANTIC_MISMATCH를 AST_READY로 꾸미지 마라. "
+                  "공개 수식은 DIRECT_REPLICATION 대조군으로 따로 남기고, 알파 후보는 "
+                  "MECHANISM_MUTATION 또는 CROSS_DOMAIN_TRANSFER로 파생하라. 창·상수만 "
+                  "바꾼 식은 신규성이 없어서 접수에서 거부된다. "
                   "소스 자체에 데이터셋·한국 표본·OOS 결과가 없다는 이유만으로 "
                   "DATA_BLOCKED라 하지 마라 - 위 지원 필드는 우리 PIT 일별 집계에 "
                   "이미 있다. `daily cross-sectional order flow imbalance`, "
@@ -2442,7 +2485,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "옮겨도 같은 메커니즘인 문헌**을 먼저 찾아라. 반대로 초·틱·큐 "
                   "위치·취소 수명이 핵심이면 정직하게 차단하라. "
                   "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
-                  "CROSSDOMAIN 우물을 우선하라."),
+                  "CROSS_DOMAIN 우물을 우선하라."),
                 assignee="research-department",
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
@@ -3431,6 +3474,10 @@ def _check_unused_leads_come_first():
     contract = _ast_scout_contract()
     assert "AST_READY" in contract and "CANDIDATE_SIGNAL_EXPR" in contract
     assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
+    assert "DIRECT_REPLICATION" in contract and "MECHANISM_MUTATION" in contract
+    assert "SOURCE_BASELINE_EXPR" in contract and "window/constant-only" in contract
+    assert "alpha_candidate_eligible" in _SQL_LEADS, \
+        "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
     assert "MICROSTRUCTURE IS PRIMARY" in contract
     assert "DAILY AGGREGATE" in contract and "source does" in contract
     assert "NOT need to ship a reusable dataset" in contract

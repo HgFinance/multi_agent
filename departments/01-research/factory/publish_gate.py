@@ -111,6 +111,12 @@ def check_leads(proposal: ExperimentProposalV1,
             out.append(
                 f"리드 {lid} 는 미시구조 우선 계약으로 검증되지 않았다 - "
                 "짧은 호가·체결 표본을 일봉 대리변수로 바꾸지 않는다")
+        if (lead.ast_contract or {}).get("alpha_candidate_eligible") is not True:
+            mode = (lead.ast_contract or {}).get("derivation_mode") or "UNCLASSIFIED"
+            out.append(
+                f"리드 {lid} 는 공개 방법론 대조군이다(derivation_mode={mode}) - "
+                "직접 복제나 창 조정은 알파 후보로 발행하지 않고, 메커니즘을 "
+                "변형한 별도 AST 리드가 필요하다")
         if not lead.refs:
             out.append(f"리드 {lid} 에 출처가 없다")
     return out
@@ -231,7 +237,9 @@ def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
         as_known_at=datetime(2026, 8, 10, tzinfo=timezone.utc), refs=refs,
         ast_contract={"ast_readiness": "AST_READY",
                       "primary_data_plane": "MICROSTRUCTURE",
-                      "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY"},
+                      "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
+                      "derivation_mode": "MECHANISM_MUTATION",
+                      "alpha_candidate_eligible": True},
         claimed_edge="모멘텀 붕괴는 변동성으로 예측된다", testability=testability)
 
 
@@ -288,6 +296,20 @@ def _check_unusable_lead_is_blocked():
     p, _ = _mk_proposal(lead_ids=(lead.lead_id,))
     r = evaluate(p, leads={lead.lead_id: lead})
     assert not r.ok and any("testability=UNUSABLE" in b for b in r.blockers), r.as_dict()
+
+
+def _check_public_baseline_control_is_blocked():
+    """공개식을 그대로 재현한 것은 기준선이지 신규 알파 후보가 아니다."""
+    lead = _mk_lead()
+    lead = lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "derivation_mode": "DIRECT_REPLICATION",
+        "alpha_candidate_eligible": False,
+    }})
+    p, _ = _mk_proposal(lead_ids=(lead.lead_id,))
+    r = evaluate(p, leads={lead.lead_id: lead})
+    assert not r.ok
+    assert any("공개 방법론 대조군" in b for b in r.blockers), r.as_dict()
 
 
 def _check_daily_only_signal_is_blocked():
@@ -380,6 +402,7 @@ if __name__ == "__main__":
     _check_performance_only_rationale_is_blocked(); print("  성과 서술만 = 거부      OK")
     _check_missing_lead_is_blocked();           print("  끊어진 리드 참조 거부    OK")
     _check_unusable_lead_is_blocked();          print("  UNUSABLE 리드 거부       OK")
+    _check_public_baseline_control_is_blocked(); print("  공개식 대조군 발행 차단  OK")
     _check_daily_only_signal_is_blocked();      print("  일봉 단독 신호 거부      OK")
     _check_unaddressed_rejection_is_blocked();  print("  기각 교훈 미대응 거부    OK")
     _check_addressed_rejection_passes();        print("  대응하면 재도전 허용     OK")
