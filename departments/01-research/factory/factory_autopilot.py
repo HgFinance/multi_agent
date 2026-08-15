@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -742,6 +743,9 @@ def _compose_research_brief(conn, brief, leads) -> str:
     # ▶ 재료 부족 바로 뒤에 설계 공백을 둔다 - "리드가 말랐다" 다음 줄에
     #   "그래도 후보는 있다(격자)" 가 와야 기획이 멈추지 않는다.
     out.append(_design_gap_line(conn))
+    # 표현 수단은 격자 바로 뒤에 둔다 - "어디가 비었나" 다음에
+    # "그것을 어떻게 적나" 가 와야 둘을 잇는다.
+    out.append(_alpha_expr_line(conn))
     # 근접 계열을 어휘 바로 뒤에 둔다 - 손잡이 목록을 읽은 직후에 "어디에
     # 쓸지" 가 나와야 한다. 멀리 떨어뜨리면 둘을 잇지 못한다.
     out.append(_near_miss(conn))
@@ -931,6 +935,143 @@ def _lead_health(conn) -> str:
 TOPN_BANDS = (("5-50", 5, 50), ("51-150", 51, 150), ("151-300", 151, 300))
 
 
+def _alpha_expr_line(conn) -> str:
+    """**표현 수단 안내 - 수식(AST)으로 알파를 적을 수 있다.**
+
+    ▶ 왜 브리핑에 싣나 (2026-08-14)
+      실행면에 AST 를 열었지만 **기획자가 그 표현이 있는 줄 모르면 안 쓴다.**
+      실측이 그것을 보여준다 - 제안 42건의 데이터 요구가 전부 `market_bars`
+      였고 가격 밖 근거는 2건(4.8%)이었다. 어휘가 아니라 **표현 수단이 상상의
+      경계**였고, 그 경계는 알려주는 것으로 넓어진다(top_n 광폭 진단이 실험
+      0건 -> 31건으로 바뀐 것이 같은 경로다).
+
+      리서치 프로필(다른 부서 소유)을 건드리지 않고 여기서 전달한다.
+    """
+    try:
+        from alpha_ast import ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES  # noqa: PLC0415
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select count(*) from quant.experiments
+                 where config ? 'signal_expr'""")
+            used = int(cur.fetchone()[0] or 0)
+            cur.execute("select count(*) from quant.experiments")
+            total = int(cur.fetchone()[0] or 0)
+            # ▶ **미시구조 표본 길이를 기계가 센다** (2026-08-14)
+            #   서술로 적어 두면 무시된다(실측: 서술형 진단이 5주기 연속
+            #   무시됐고, 기계가 센 격자는 실험 31건으로 채택됐다). 그래서
+            #   커버리지를 원장에서 직접 세어 **숫자로** 준다.
+            cur.execute("""
+                select count(distinct p.partition_key),
+                       min(p.min_event_time)::date, max(p.max_event_time)::date
+                  from quant.dataset_manifests m
+                  join quant.dataset_partitions p on p.dataset_id = m.dataset_id
+                 where m.name = 'krx-microstructure-daily'""")
+            mcov = cur.fetchone() or (0, None, None)
+    except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
+        return ""
+    micro_lines = []
+    if mcov and int(mcov[0] or 0) > 0:
+        micro_lines = [
+            f"  ▶ **미시구조 표본은 {int(mcov[0])}거래일이다**"
+            f"({mcov[1]}~{mcov[2]}). 일봉 2016~ 이 아니다.",
+            "    미시구조 필드를 쓰면 실행면이 표본을 이 구간으로 자른다 - "
+            "형성·보유 창을",
+            "    이 안에서 잡아야 walk-forward 창이 나온다.",
+            "  ▶ **일별 집계 OFI 는 이미 격자로 재 봤다 - 회전을 조절해도 안 "
+            "산다**(2026-08-14,",
+            "    58거래일 표본, 원장 밖 진단이라 시도 예산은 안 먹었다):",
+            "      매일/top200  초과 -5.29%p · 회전 33.3x · 수수료 5.69%",
+            "      5일/top200   초과 -9.83%p · 회전 11.4x · 수수료 1.89%",
+            "      5일/top50    초과 -9.66%p   ·  5일/top20  초과 -9.65%p",
+            "    수수료를 3.8%p 줄였는데 성적은 4.5%p 더 나빠졌다 - **비용으로 "
+            "아낀 것보다",
+            "    신호를 잃은 것이 크다.** OFI 는 짧은 지평 신호라 며칠을 들면 "
+            "죽는다. top_n 을",
+            "    200->20 으로 줄여도 초과가 안 변하는 것(-9.83/-9.66/-9.65)은 "
+            "상위 분위가",
+            "    평균과 구별되지 않는다는 뜻이고, IC +0.012(t 0.79)와 같은 "
+            "이야기다.",
+            "    ▶ 그러니 **같은 `order_flow_imbalance` 를 사양만 바꿔 다시 "
+            "내지 마라.**",
+            "      진단: 하루를 **평균 하나로 접은 것**이 병목이었다. "
+            "`sum(side*qty)/sum(qty)` 는",
+            "      오전에 팔고 오후에 산 종목을 중립으로 찍어 정보를 상쇄한다.",
+            "",
+            "  ▶ **그래서 일중 구간 필드를 새로 열었다**(2026-08-14, 데이터셋 v3). "
+            "일별 한 행",
+            "    그대로라 실행면 규약은 안 바뀐다 - 하루를 뭉개지 않을 뿐이다:",
+            "      ofi_close          14:50~15:30 주문흐름불균형. **체결이 t+1 "
+            "시가라 시점이 맞다**",
+            "      ofi_open           09:00~09:30. 밤사이 정보의 반영",
+            "      ofi_intraday_std   4구간 OFI 의 표준편차. 한 방향인 날 vs "
+            "오락가락한 날",
+            "      close_vs_vwap      종가/VWAP - 1. 하루 내내 매수 압력이 "
+            "있었으면 양수",
+            "      spread_close_ratio 마감 스프레드 / 개장 스프레드. 유동성의 "
+            "일중 변화",
+            "    서로 다른 것을 잰다 - 상관 일간vs마감 0.349 · 일간vs개장 0.457 · "
+            "마감vs개장 0.145.",
+            "",
+            "  ▶ **다만 IC 를 재 봤더니 일중 구간화가 예측력을 못 높였다** "
+            "(61거래일 · 58창,",
+            "    t 일 신호 -> t+1 시가 매수 -> t+2 시가 매도, 횡단면 Spearman):",
+            "      order_flow_imbalance  IC +0.0243  t **2.64**   <- 기존 것이 "
+            "가장 강하다",
+            "      ofi_open              IC +0.0199  t 2.07",
+            "      ofi_intraday_std      IC +0.0289  t 1.58",
+            "      close_vs_vwap         IC -0.0102  t -0.67",
+            "      ofi_close             IC +0.0017  t **0.23**   <- 분산은 "
+            "1.82배인데 예측력 0",
+            "      spread_close_ratio    IC -0.0001  t -0.03",
+            "    **분산이 크다 != 예측력이 있다.** 종목 간에 잘 갈리는 것과 "
+            "그 구분이 수익과",
+            "    상관있는 것은 다른 이야기다.",
+            "    ▷ 표본을 11일로 줄여 재면 close_vs_vwap 이 t -2.24 로 보였다가 "
+            "58일에서 -0.67 로",
+            "      사라졌다. **6개를 동시에 재면 |t|>2 하나쯤은 우연히 나온다** - "
+            "짧은 표본의",
+            "      단일 지표를 근거로 사양을 고르지 마라.",
+            "    ▷ 그래도 재료로는 쓸 수 있다. 위 필드를 **결합**하는 수식은 "
+            "아직 아무도 안 냈다",
+            "      (단독 IC 가 낮은 필드가 조합에서 살아나는 일은 흔하다).",
+            "  ▶ 회전을 직접 정하려면 `suggested_params.rebalance` 를 적는다"
+            "(EVERY_TRADING_DAY /",
+            "    EVERY_5_TRADING_DAYS / MONTH_FIRST_TRADING_DAY). 안 적으면 "
+            "horizon 에서 유도되고",
+            "    horizon<=3 은 매일이 된다. **horizon 을 늘리는 것과 다르다** - "
+            "그건 신호 자체를",
+            "    바꿔 다른 실험이 되고, 이건 같은 신호를 덜 자주 거래하는 것이다.",
+        ]
+    return "\n".join([
+        "",
+        f"[알파를 **수식으로** 적을 수 있다 - 지금까지 {used}/{total} 건이 썼다]",
+        "  완성된 신호 이름을 고르는 대신 `suggested_params.signal_expr` 에 수식",
+        "  트리를 적으면 그것이 신호가 된다. 두 피처를 결합하거나 방향을 뒤집는",
+        "  가설은 이 방법으로만 표현된다 - 이름 목록에는 그런 칸이 없다.",
+        "  예: 호가 매수압력이 크면서 스프레드가 좁은 종목",
+        '    {"op":"sub","args":['
+        '{"op":"rank","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":3}},',
+        '                       '
+        '{"op":"rank","arg":{"op":"ts_mean","field":"spread_bps","n":10}}]}',
+        f"  연산자({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
+        f"  필드({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
+        f"  제약: 깊이<={MAX_DEPTH} · 노드<={MAX_NODES} · 창 1~250."
+        "  **큰 값을 산다**(방향을 뒤집으려면 neg 를 쓴다).",
+        "  ▶ 값이 없는 종목은 점수를 안 낸다(0 으로 안 채운다). 미시구조 필드를",
+        "    쓰면 그 데이터셋이 자동으로 실린다 - 따로 적지 않아도 된다.",
+        "  ▶ 수식은 **접수에서 검증**된다. 모르는 연산자·필드·범위 밖 창은",
+        "    SIGNAL_EXPR_INVALID 로 반려되니 위 목록 안에서 쓴다.",
+        "  ▶ **경제 논리에 그 필드 이야기를 써라.** 수식이 읽는 필드가",
+        "    economic_rationale·counterparty 어디에도 안 나오면",
+        "    HYPOTHESIS_FACTOR_MISMATCH 로 반려된다. 실험은 수식대로 돌지만",
+        "    판정은 논리 이름으로 원장에 남아서, 둘이 다르면 그 결과는 무엇의",
+        "    증거도 아니게 된다 - 위 예시라면 논리에 '매수 압력' 과 '스프레드'",
+        "    가 왜 들어가는지 적으면 된다(표현은 자유, 영어도 된다).",
+        *micro_lines,
+    ])
+
+
 def _design_gap_line(conn) -> str:
     """**설계 공간의 빈 니치 - 기계가 센 사실.** 격자가 곧 후보 공급원이다.
 
@@ -953,17 +1094,21 @@ def _design_gap_line(conn) -> str:
                 select coalesce(h.expected_edge->>'type',''),
                        coalesce((e.config->>'top_n')::int, 0),
                        upper(coalesce(e.config->>'portfolio_construction',
-                                      'TOP_N'))
+                                      'TOP_N')),
+                       (e.config ? 'trend_filter_days')
                   from quant.experiments e
                   left join quant.hypotheses h
                          on h.hypothesis_id = e.hypothesis_id""")
             tried: set = set()
             builds: dict = {}
-            for et, tn, pc in cur.fetchall():
+            trend_used = 0
+            for et, tn, pc, tf in cur.fetchall():
                 band = next((b for b, lo, hi in TOPN_BANDS
                              if lo <= int(tn or 0) <= hi), TOPN_BANDS[0][0])
                 tried.add((str(et), band))
                 builds[str(pc)] = builds.get(str(pc), 0) + 1
+                if tf:
+                    trend_used += 1
         edges = sorted(EDGE_VOCAB)
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
         return ""
@@ -1018,12 +1163,33 @@ def _design_gap_line(conn) -> str:
             "든다(top_n 은 이때 관여하지 않는다).",
         ]
 
+    # ▶ **위험 수단 축** (2026-08-14 조사)
+    #   원장 실측이 양쪽으로 막혀 있다 - 손잡이를 끄면 momentum 이 IR 1.255·
+    #   초과 +157.5%p 인데 낙폭 -50.5% 로 강건성에 걸리고, 변동성 타게팅을
+    #   켜면 낙폭은 잡히는데 IR 이 -0.45 로 무너진다. 관문은 정당하다(업계
+    #   OOS 승률 임계 60%·Millennium 낙폭 -5% 자본 반감 대비 우리 -25% 는
+    #   오히려 관대) - 그러니 **수단이 모자란 것**이다. 문헌은 이동평균 등
+    #   타이밍 요소가 장기 하락장 노출 축소에 효과적이고 변동성 타게팅과 달리
+    #   강세장 참여를 덜 희생한다고 본다. 실행면에 그 손잡이를 열었다.
+    trend_gap: list = []
+    if not trend_used:
+        trend_gap = [
+            f"  ▶ **위험 수단 축이 비었다**: 시장 추세 필터를 쓴 실험 0건 "
+            f"(전체 {sum(builds.values())}건).",
+            "    지금 손잡이는 변동성 타게팅·낙폭 정지 둘뿐인데, 실측상 둘 다 "
+            "낙폭을 잡는 대신 IR 을 무너뜨린다(1.255 → -0.45).",
+            "    실행면 손잡이: trend_filter_days(20~250) · "
+            "trend_filter_exposure(0~0.9). 시장 수익률 중앙값이 음(-)인 구간에만 "
+            "노출을 줄인다 - 강세장에는 관여하지 않는다.",
+        ]
+
     lines = [
         "",
         f"[설계 공간의 빈 니치 - 기계가 센 사실] "
         f"{len(edges) * len(TOPN_BANDS)}칸(edge×top_n 대역) 중 "
         f"빈 칸 {len(empty)}개{crowd}",
         *build_gap,
+        *trend_gap,
         *debt,
         "  우선 후보 (광폭 대역 우선 - 실측 TC: top20 0.114 vs top200 0.316):",
     ]
@@ -1285,6 +1451,85 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
     print(f"  {assignee} <- {title}")
     print(f"      {out.splitlines()[0][:120] if out else '(응답 없음)'}")
     return out
+
+
+def _scope_key(items) -> str:
+    """개선 카드의 **범위 지문.** 같은 병목 묶음이면 같은 지문이다.
+
+    ▶ 왜 stamp 를 키에서 뺐나 (2026-08-14 보드 실측)
+      키가 `factory-bottleneck-{owner}-{stamp}` 였다. stamp 가 매 주기 바뀌니
+      idempotency 가 **주기를 넘는 순간 무력화**된다 - 같은 주기에 두 번 도는
+      것만 막고, 주기를 넘는 중복은 하나도 못 막았다. 그 결과 같은 개선 카드가
+      이틀에 **96장** 나갔고, 앞 카드가 `blocked` 로 서 있는 동안에도 새 카드가
+      나갔다. 에이전트는 못 하겠다고 말했고 공장은 매 시간 같은 질문을 다시
+      걸었다(`_create_card` 는 "중복 카드는 같은 실험을 두 번 사는 것" 이라고
+      스스로 적어 놓고 키에 stamp 를 넣어 그 성질을 무력화했다).
+
+      지문은 **병목 목록**에서 뽑는다. 병목이 그대로면 지문도 그대로여서 앞
+      카드가 살아 있는 한 새 카드가 안 나가고, 하나라도 없애면 지문이 달라져
+      새 카드가 나간다. "없애면 저절로 사라진다" 는 성질을 그대로 쓴다.
+    """
+    keys = sorted({str(getattr(b, "key", "")) for b in items})
+    return hashlib.sha1("|".join(keys).encode("utf-8")).hexdigest()[:10]
+
+
+def _kind_scope_key(items) -> str:
+    """개선 카드의 **억제 지문.** 같은 종류 묶음이면 같은 지문이다.
+
+    ▶ 왜 `_scope_key` 로는 안 되나 (2026-08-14 보드 실측)
+      범위 지문을 키에 넣은 지 **48분 만에** 퀀트 카드가 또 나갔다.
+
+        10:12  t_8699a48f  ...-71f357a631-20260814T10   병목 13건
+        11:00  t_0759eb9f  ...-4240f506a0-20260814T10   병목 14건
+
+      두 장의 **종류 집합은 완전히 같다.** 갈린 것은 그 안의 개체뿐이다 -
+      `job:BAD_TRANSITION…` -> `job:OSError Errno 12…`,
+      `sound:max_drawdown_stop:…` -> `sound:order_flow_imbalance:…:고아`.
+
+      `_scope_key` 는 `Bottleneck.key` 를 해시하는데, census 가 만드는 key 는
+      **개체 수준**이다(`job:{sig}`, `sound:{clause}:{level}`, `gate:{crit}`,
+      `lesson:{code}`). 그중 `job:{sig}` 는 실패 순위표를 따라가고 순위표는
+      매 주기 바뀐다. 그러니 지문도 매 주기 새 값이 되고, 억제는 **구조적으로
+      절대 못 건다.** 96장을 만든 고리가 형태만 바꿔 남아 있었던 것이다.
+
+      `kind` 는 census 의 **고정 어휘**(11종)라 개체가 갈려도 안 흔들린다.
+      억제는 이쪽으로 건다. `_scope_key` 는 키에 그대로 남겨 **개체가 언제
+      갈렸는지**를 눈으로 볼 수 있게 둔다(추적용, 억제용이 아니다).
+
+      **반대 방향도 지킨다:** 종류가 하나라도 늘거나 줄면 지문이 달라져 새
+      카드가 나간다. 억제가 새 병목을 삼키면 "겉만 덮은 것" 이 조용해지는데,
+      그건 개선 카드가 금지한 바로 그 실패다.
+    """
+    kinds = sorted({str(getattr(b, "kind", "") or getattr(b, "key", ""))
+                    for b in items})
+    return hashlib.sha1("|".join(kinds).encode("utf-8")).hexdigest()[:10]
+
+
+def _unresolved_card(owner: str, scope: str) -> str | None:
+    """같은 범위의 **아직 안 끝난** 카드. 없으면 None.
+
+    끝난 카드(done/failed)는 억제 근거가 못 된다 - 병목이 그대로면 다시
+    걸어야 한다. 억제가 지나치면 **겉만 덮은 것이 조용해진다**, 그건 개선
+    카드가 금지한 바로 그 실패다.
+
+    보드를 못 읽으면 **걸어 준다**(fail-open). 조회 실패로 개선 카드를 통째로
+    잃는 쪽이, 중복 한 장보다 나쁘다.
+    """
+    prefix = f"factory-bottleneck-{owner}-{scope}-"
+    try:
+        rows = _board_rows(
+            "select id, status, idempotency_key from tasks "
+            "where idempotency_key like ? "
+            "  and status in ('ready','running','blocked')", (prefix + "%",))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  보드 조회 실패 - 중복 억제 생략({type(exc).__name__}): "
+              f"카드는 그대로 건다", flush=True)
+        return None
+    for row in rows:
+        tid = row[0]
+        status = row[1] if len(row) > 1 else "?"
+        return f"{tid}({status})"
+    return None
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
@@ -1749,11 +1994,21 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
             except Exception:  # noqa: BLE001
                 bad = []
             if bad:
-                out[hid] = (f"실행면이 거부한다: {'; '.join(bad)[:240]} - "
-                            f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
+                out[hid] = _execution_rejection_line(bad)
     except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
         return {}
     return out
+
+
+def _execution_rejection_line(bad) -> str:
+    """실행면 거부 목록 -> 카드에 실리는 한 줄. **점검이 부를 수 있게 뺐다.**
+
+    안에 박아 두면 점검이 같은 문자열을 **다시 적어야** 하고, 그러면 포장이
+    바뀔 때 점검만 초록인 채로 남는다 - 이 카드가 잡은 결함이 정확히 그
+    모양이었다(픽스처가 아무도 발신하지 않는 문장이었다).
+    """
+    return (f"실행면이 거부한다: {'; '.join(bad)[:240]} - "
+            f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
 
 
 _SQL_RECENT_EXP_FAILURES = """
@@ -2216,7 +2471,7 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
 
     assignees = {"research-department": RESEARCH_ASSIGNEE,
                  "quant-backtest-department": QUANT_ASSIGNEE}
-    made = 0
+    made = held = 0
     for owner, group in sorted(by_owner.items(),
                                key=lambda kv: -sum(b.cost for b in kv[1])):
         who = assignees.get(owner)
@@ -2224,6 +2479,20 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
             continue
         body = bottleneck_census.card_body(group, top=3)
         if not body:
+            continue
+        # ▶ **같은 범위의 카드가 아직 살아 있으면 또 걸지 않는다** (2026-08-14)
+        #   앞 카드가 ready/running/blocked 인데 새 카드를 걸면, 부서는 같은
+        #   질문을 두 번 받고 공장은 답을 한 번도 안 듣는다. 실측 96장.
+        # 억제는 **종류 지문**으로 건다. 개체 지문(`_scope_key`)은 매 주기
+        # 갈리므로 억제 기준이 못 된다 - 실측 48분 만에 재발행됐다.
+        kscope = _kind_scope_key(group)
+        scope = _scope_key(group)
+        alive = _unresolved_card(owner, kscope)
+        if alive:
+            print(f"  {owner}: 같은 종류 묶음의 카드가 아직 안 끝났다 {alive} - "
+                  f"새 카드를 안 건다(종류 {kscope}/개체 {scope}). 종류가 "
+                  f"없어지면 지문이 바뀌어 저절로 다시 걸린다", flush=True)
+            held += 1
             continue
         _create_card(
             title=f"공장 개선: 관측된 병목 {len(group)}건 ({stamp})",
@@ -2252,10 +2521,13 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
                   "바꾸는지 **먼저** 적고, 자체 점검을 같이 내라.\n"
                   "- 뚫었으면 `skill-authoring` 으로 스킬에 남겨라. 남기지 않으면 "
                   "다음 주기의 네가 같은 자리를 다시 판다."),
-            assignee=who, key=f"factory-bottleneck-{owner}-{stamp}",
+            assignee=who,
+            key=f"factory-bottleneck-{owner}-{kscope}-{scope}-{stamp}",
             dry_run=dry_run)
         made += 1
-    print(f"  병목: {len(items)}건 관측 -> 개선 카드 {made}건", flush=True)
+    print(f"  병목: {len(items)}건 관측 -> 개선 카드 {made}건"
+          + (f" (같은 범위로 아직 안 끝난 카드 {held}건은 다시 안 걺)"
+             if held else ""), flush=True)
     return 0
 
 
@@ -2449,6 +2721,99 @@ def _check_soundness_verdict_is_measured_not_assumed():
     print("  건전성은 재서만 말함      OK")
 
 
+def _check_execution_rejections_are_attributable():
+    """**실행면이 내는 거부 사유는 전부 귀속돼야 한다.** (2026-08-14, 카드 t_ad5f27e1 #2)
+
+    ▶ 무엇이 뚫려 있었나
+      건전성 census 가 `[불명 수준] 실행면이 거부한다: ...` 를 매 주기 실었다.
+      층을 갈라 보니 판정자가 나쁜 게 아니라 **발신자와 판정자가 서로 다른
+      문장을 쓰고 있었다.** `config_binding.bind` 의 거부 갈래 10개를 실제로
+      굴려 `attribution.attribute` 에 먹였더니 **20개 표면 전부가 `불명`**
+      이었다 - 값 범위·부호, 형변환, 통제 어휘, 짝, 알파 수식, 미지 키,
+      미구현 엣지. 즉 실행면이 거부한 가설은 **아무 데로도 라우팅되지 않았다.**
+
+    ▶ 왜 아무도 몰랐나 - **자체점검이 지어낸 문장으로 초록이었다**
+      `soundness`·`bottleneck_census`·여기 `_check_soundness_verdict...` 셋 다
+      픽스처가 "실행면이 안 읽는 파라미터: universe" 였는데, 발신자는 그
+      문장을 **한 번도 낸 적이 없다**(실제로는 "실행면이 **읽지 않는**
+      파라미터가 있다: [...]"). 선언과 실재가 갈린 전형이다.
+
+    ▶ 그래서 이 점검은 문장을 적지 않는다
+      `config_binding.bind` 를 **실제로 불러** 거부 사유를 받아 내고, 그것을
+      진짜 포장(`_execution_rejection_line`)에 넣어 판정자에 먹인다. 규칙만
+      고치면 다음에 실행면이 갈래를 하나 더 얻을 때 또 뚫린다 - 그래서
+      **갈래 수까지 센다.**
+    """
+    import re as _re  # noqa: PLC0415
+
+    from config_binding import rejection_reasons  # noqa: PLC0415
+    import attribution as _attr  # noqa: PLC0415
+
+    # 각 입력이 `bind` 안의 서로 다른 거부 갈래를 하나씩 때린다.
+    cases = [
+        ("범위/부호(실측 a266a02d)",
+         {"type": "low_max", "max_drawdown_stop": 0.35}),
+        ("범위 - 레버리지", {"type": "low_max", "max_exposure": 99.0}),
+        ("정수 형변환", {"type": "momentum", "top_n": "스물"}),
+        ("수 형변환", {"type": "low_max", "vol_target_annual": "높게"}),
+        ("통제 어휘 밖",
+         {"type": "momentum", "portfolio_construction": "등가중"}),
+        ("알파 수식", {"type": "momentum", "signal_expr": "close +* 3"}),
+        ("짝 - 비율만", {"type": "momentum", "exclude_bottom_pct": 10}),
+        ("짝 - 구성만",
+         {"type": "momentum", "portfolio_construction": "EXCLUDE_BOTTOM"}),
+        ("미지 파라미터",
+         {"type": "momentum", "formation_window_days": 42}),
+        # 마지막 갈래는 표면이 둘이다 - 같은 append 가 갈린다.
+        ("엣지 미구현", {"type": "pairs_trading"}),
+        ("엣지 어휘 없음", {"type": "짜장면_전략"}),
+    ]
+
+    unknown, silent = [], []
+    for label, edge in cases:
+        bad = rejection_reasons({"expected_edge": edge})
+        if not bad:
+            # 실행면이 더는 거부하지 않으면 이 입력은 낡은 것이다. 조용히
+            # 넘기면 점검이 **아무것도 안 재면서 초록**이 된다.
+            silent.append(label)
+            continue
+        for surface, text in (("발신자 원문", bad[0]),
+                              ("포장 후", _execution_rejection_line(bad))):
+            if _attr.attribute(text).level == _attr.UNKNOWN:
+                unknown.append(f"{label}/{surface}: {text[:70]}")
+
+    assert not silent, (
+        f"실행면이 더는 거부하지 않는 입력이 있다: {silent} - 점검 입력을 "
+        f"갱신해라. 안 고치면 아무것도 안 재면서 초록이다")
+    assert not unknown, (
+        "실행면 거부 사유가 `불명` 이다 - 그 가설은 아무 데로도 라우팅되지 "
+        f"않는다. `attribution._RULES` 에 규칙을 남겨라: {unknown}")
+
+    # ▶ **갈래 수를 센다.** 규칙만 맞춰 두면 실행면이 거부 갈래를 하나 더
+    #   얻는 순간 그것만 조용히 `불명` 이 된다 - 이 카드의 발단이 그것이다.
+    _cb = Path(_ROOT / "departments" / "04-quant-backtest" / "pipeline"
+               / "config_binding.py").read_text(encoding="utf-8")
+    branches = len(_re.findall(r"b\.rejected\.append\(", _cb))
+    assert len(cases) >= branches, (
+        f"`config_binding` 의 거부 갈래는 {branches}개인데 점검은 "
+        f"{len(cases)}개만 때린다 - 새 갈래가 생겼다. 사례를 더하고, "
+        f"`attribution._RULES` 에 그 갈래의 규칙이 있는지 확인해라")
+
+    # 미구현 엣지는 **구현** 이어야 한다 - 리서치로 보내면 되돌아온다
+    _imp = rejection_reasons({"expected_edge": {"type": "pairs_trading"}})
+    assert _attr.attribute(_imp[0]).level == _attr.IMPLEMENTATION
+    # 값·형·어휘·짝은 **가설** 이다 - 러너가 자르면 등록 != 실행이 된다
+    _hyp = rejection_reasons(
+        {"expected_edge": {"type": "low_max", "max_drawdown_stop": 0.35}})
+    assert _attr.attribute(_hyp[0]).level == _attr.HYPOTHESIS
+    assert _attr.attribute(_hyp[0]).owner == "research-department"
+    # `어휘에 없다` 변형은 템플릿 추가 지시를 그대로 받아야 한다(순서 고정)
+    _voc = rejection_reasons({"expected_edge": {"type": "짜장면_전략"}})
+    assert "TEMPLATES" in _attr.attribute(_voc[0]).action, \
+        "미구현 규칙이 `어휘에 없다` 의 더 나은 지시를 가로챘다 - 순서를 봐라"
+    print("  실행면 거부가 전부 갈림   OK")
+
+
 def _check_orphan_blocked_gets_a_different_instruction():
     """**고칠 주체가 없는 가설에 "다시 등록해라"고 말하지 않는다.** (2026-08-12)
 
@@ -2483,6 +2848,200 @@ def _check_orphan_blocked_gets_a_different_instruction():
     print("  고아 가설은 다른 지시      OK")
 
 
+def _check_unresolved_bottleneck_card_is_not_reminted():
+    """**앞 카드가 안 끝났으면 같은 개선 카드를 또 걸지 않는다.** (2026-08-14)
+
+    보드 실측: `공장 개선: 관측된 병목 N건` 이 이틀에 **96장** 나갔다. 키가
+    `factory-bottleneck-{owner}-{stamp}` 라 stamp 가 매 주기 바뀌었고, 그래서
+    idempotency 가 주기를 넘는 순간 아무것도 못 막았다. 앞 카드가 `blocked`
+    (`block_kind=capability`)로 서 있는 동안에도 다음 카드가 나갔다 - 에이전트는
+    못 하겠다고 말했고 공장은 매 시간 같은 질문을 다시 걸었다.
+
+    양쪽을 다 지킨다: 안 끝난 카드가 있으면 안 걸고, 끝났으면 다시 건다.
+    """
+    import bottleneck_census as bc                     # noqa: PLC0415
+
+    group = [bc.Bottleneck(
+        kind="막힘: 역량 부족(재라우팅 후보)",
+        key="cap:research-department:capability", cost=7.0, unit="건",
+        evidence="카드 7건을 막았다", owner="research-department",
+        hint="적어라", ids=["t_f7c959c7"])]
+    scope = _scope_key(group)
+    assert scope and scope != _scope_key(
+        [bc.Bottleneck(kind="k", key="gate:fragility", cost=1.0, unit="건",
+                       evidence="", owner="research-department", hint="")]), \
+        "다른 병목 묶음이 같은 범위 지문을 받는다 - 억제가 새 병목을 삼킨다"
+
+    made: list[str] = []
+    saved_create = globals()["_create_card"]
+    saved_rows = globals()["_board_rows"]
+    saved_census = bc.census
+    try:
+        globals()["_create_card"] = lambda **kw: (made.append(kw["key"]),
+                                                  "t_new")[1]
+        bc.census = lambda conn=None: list(group)
+
+        # ① 같은 범위의 카드가 아직 살아 있다 -> 안 건다
+        globals()["_board_rows"] = lambda sql, params=(): [
+            ("t_813944f2", "blocked",
+             f"factory-bottleneck-research-department-{scope}-20260813T05")]
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert not made, f"안 끝난 카드가 있는데 또 걸었다: {made}"
+
+        # ② 앞 카드가 끝났다 -> 병목이 남았으면 다시 건다(겉만 덮은 것이
+        #    조용해지면 안 된다)
+        globals()["_board_rows"] = lambda sql, params=(): []
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert len(made) == 1, f"병목이 남았는데 카드를 안 걸었다: {made}"
+        assert scope in made[0], f"키에 범위 지문이 없다: {made[0]}"
+
+        # ③ 보드를 못 읽으면 **걸어 준다** - 조회 실패로 개선을 통째로 잃지 않는다
+        made.clear()
+
+        def _boom(sql, params=()):
+            raise RuntimeError("보드 조회 실패")
+
+        globals()["_board_rows"] = _boom
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert len(made) == 1, "보드를 못 읽었다고 개선 카드를 잃었다"
+    finally:
+        globals()["_create_card"] = saved_create
+        globals()["_board_rows"] = saved_rows
+        bc.census = saved_census
+    print("  안 끝난 개선 카드 재발행 없음 OK")
+
+
+def _check_briefed_example_actually_passes_intake():
+    """**브리핑이 주는 예시는 접수를 통과해야 한다** (2026-08-14).
+
+    안내와 관문이 어긋나면 최악이다 - 기획자는 시킨 대로 썼는데 반려되고,
+    그 반려 사유는 안내를 준 쪽이 아니라 자기 아이디어를 탓하게 만든다.
+    그래서 브리핑 본문에 박힌 수식 예시를 **꺼내서 진짜 Gate 0 에 태운다.**
+    """
+    import json as _json
+    import re as _re
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _p = (_Path(__file__).resolve().parents[3]
+          / "04-quant-backtest" / "pipeline")
+    if str(_p) not in _sys.path:
+        _sys.path.insert(0, str(_p))
+    try:
+        from factory_bridge import gate0  # noqa: PLC0415
+    except ImportError:
+        return                              # 실행면이 없으면 볼 것이 없다
+
+    # **브리핑을 실제로 생성해서** 예시를 꺼낸다. 여기에 손으로 옮겨 적으면
+    # 브리핑 쪽이 바뀌어도 이 검사는 옛 예시를 계속 통과시킨다.
+    from datetime import date as _date
+    body = _alpha_expr_line(_RowsConn([(0,), (0,),
+                                       (58, _date(2026, 5, 18), _date(2026, 8, 14))]))
+    assert body, "수식 안내가 브리핑에서 사라졌다"
+    # **표본 길이를 숫자로 준다.** 서술만 하면 무시된다(실측: 서술형 진단
+    # 5주기 연속 무시, 기계가 센 격자는 실험 31건으로 채택).
+    assert "58거래일" in body, f"미시구조 표본 길이가 브리핑에 없다: {body[-400:]}"
+
+    i = body.index('{"op"')
+    depth, j = 0, i
+    for j in range(i, len(body)):            # 균형 중괄호까지 잘라낸다
+        depth += (body[j] == "{") - (body[j] == "}")
+        if depth == 0:
+            break
+    expr = _json.loads(_re.sub(r"\s+", " ", body[i:j + 1]))
+    assert expr["op"] == "sub", expr         # 예시가 바뀌면 여기서 먼저 깨진다
+
+    g = gate0({"edge_type": "momentum", "universe_key": "krx_all",
+               # 브리핑이 시키는 대로 쓴 논리 - 필드 이야기가 들어 있다
+               "economic_rationale": "호가 매수 압력이 크면서 스프레드가 좁은 "
+                                     "종목이 이후 초과수익을 낸다",
+               "counterparty": "유동성을 급히 요구하는 청산 매매",
+               "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5,
+               "suggested_params": {"horizon_days": 2, "signal_expr": expr}})
+    assert g.ok, f"브리핑 예시가 접수에서 반려된다: {g.as_dict()}"
+
+    # 정합 요구를 브리핑이 실제로 말하는가 - 말 안 하면 걸린 사람이 이유를 모른다
+    assert "HYPOTHESIS_FACTOR_MISMATCH" in body, "정합 반려 사유가 안내에 없다"
+
+    # ▶ **시킬 수 없는 것을 시키지 않는다** (2026-08-14).
+    #   브리핑이 "회전을 줄여라" 라고 쓰던 시점에 `rebalance` 는 horizon 에서
+    #   자동 유도만 됐다 - 손잡이가 없었다. 안내가 가리키는 손잡이가 실제로
+    #   접수를 통과해 **실행 계약까지 살아 가는지** 여기서 고정한다.
+    from factory_bridge import expected_edge_for  # noqa: PLC0415
+    assert "rebalance" in body, "회전을 줄이는 손잡이 이름이 안내에 없다"
+    prop = {"edge_type": "momentum", "universe_key": "krx_all",
+            "economic_rationale": "호가 매수 압력이 크면 이후 오른다",
+            "counterparty": "청산 매매", "falsification_tests": ["IC t<2"],
+            "trial_budget": 5,
+            "suggested_params": {"horizon_days": 2, "signal_expr": expr,
+                                 "rebalance": "EVERY_5_TRADING_DAYS"}}
+    g2 = gate0(prop)
+    assert g2.ok, f"안내대로 쓴 rebalance 가 접수에서 막힌다: {g2.as_dict()}"
+    edge, dropped = expected_edge_for(prop)
+    assert edge.get("rebalance") == "EVERY_5_TRADING_DAYS", (edge, dropped)
+
+
+def _check_kind_scope_survives_instance_churn():
+    """**개체가 갈려도 종류가 같으면 같은 카드다.** (2026-08-14 t_2bbfa8d3)
+
+    보드 실측: 범위 지문을 붙인 지 48분 만에 같은 종류 묶음의 퀀트 카드가 또
+    나갔다(`71f357a631` -> `4240f506a0`). 실패 서명 하나가 갈린 것이 전부였다.
+
+    이 검사의 board 대역은 **`like ?` 접두사를 실제로 따진다.** 억제를 거는
+    것이 바로 그 접두사이므로, 대역이 그것을 지우면 검사가 지문이 갈리는 것을
+    영영 못 본다(앞 주기 검사가 그랬다).
+    """
+    import bottleneck_census as bc                     # noqa: PLC0415
+
+    owner = "quant-backtest-department"
+
+    def _b(kind, key):
+        return bc.Bottleneck(kind=kind, key=key, cost=1.0, unit="건",
+                             evidence="세었다", owner=owner, hint="열어라")
+
+    common = [_b("리드 사장", "lead:idle"),
+              _b("시세 미관측", "market:zero_volume")]
+    a = common + [_b("작업 되풀이 실패", "job:BAD_TRANSITION")]
+    b = common + [_b("작업 되풀이 실패", "job:OSError Errno 12")]
+    c = b + [_b("관문 상습 조항", "gate:fragility")]
+
+    alive = ("ready", "running", "blocked")
+
+    def _cycle(group, board, stamp):
+        made = []
+        saved = (globals()["_create_card"], globals()["_board_rows"], bc.census)
+
+        def _rows(sql, params=()):
+            assert "like" in sql.lower(), f"접두사 조회가 아니다: {sql}"
+            prefix = str(params[0]).rstrip("%")
+            return [r for r in board
+                    if r[2].startswith(prefix) and r[1] in alive]
+
+        try:
+            globals()["_create_card"] = lambda **kw: (made.append(kw["key"]),
+                                                      "t_new")[1]
+            globals()["_board_rows"] = _rows
+            bc.census = lambda conn=None: list(group)
+            _issue_bottleneck_cards(stamp=stamp, dry_run=False)
+        finally:
+            (globals()["_create_card"], globals()["_board_rows"],
+             bc.census) = saved
+        return made
+
+    first = _cycle(a, [], "20260814T10")
+    assert len(first) == 1, f"첫 카드가 안 나갔다: {first}"
+    board = [("t_8699a48f", "ready", first[0])]
+
+    assert not _cycle(b, board, "20260814T11"), \
+        "개체가 갈렸다는 이유로 같은 종류의 카드를 또 걸었다 - 실측 48분 재발행"
+    assert len(_cycle(c, board, "20260814T11")) == 1, \
+        "새 종류가 생겼는데 카드를 안 걸었다 - 억제가 새 병목을 삼킨다"
+    assert len(_cycle(a, [("t_8699a48f", "done", first[0])],
+                      "20260814T11")) == 1, \
+        "끝난 카드가 억제 근거가 됐다 - 겉만 덮은 것이 조용해진다"
+    print("  종류 지문이 개체 churn 견딤 OK")
+
+
 def _selfcheck() -> int:
     import tempfile
 
@@ -2507,12 +3066,16 @@ def _selfcheck() -> int:
     _check_unused_leads_come_first()
     _check_factory_enacts_its_own_top_move()
     _check_orphan_blocked_gets_a_different_instruction()
+    _check_execution_rejections_are_attributable()
     _check_soundness_verdict_is_measured_not_assumed()
     _check_progress_is_measured_not_assumed()
     _check_lost_output_is_not_called_empty()
     _check_delivery_is_the_tool_call_not_text()
     _check_improvement_cards_carry_acceptance()
-    print("자동 조종 16개 영역 통과. 실행은 --once / --loop")
+    _check_unresolved_bottleneck_card_is_not_reminted()
+    _check_kind_scope_survives_instance_churn()
+    _check_briefed_example_actually_passes_intake()
+    print("자동 조종 20개 영역 통과. 실행은 --once / --loop")
     return 0
 
 
@@ -2523,11 +3086,16 @@ class _RowsConn:
 
     def cursor(self):
         rows = self._rows
+        pos = [0]
         class _C:
             def __enter__(self_): return self_
             def __exit__(self_, *a): return False
             def execute(self_, *a, **k): return None
             def fetchall(self_): return rows
+            def fetchone(self_):        # 넘겨준 순서대로 하나씩 - 여러 번 묻는
+                i = pos[0]              # 조회(count 두 번 등)를 흉내 낸다
+                pos[0] = i + 1
+                return rows[i] if i < len(rows) else None
         return _C()
 
 
@@ -2809,8 +3377,8 @@ def _check_design_gaps_and_scout_card():
                 def fetchall(self_): return rows
             return _C()
 
-    line = _design_gap_line(_Grid([("momentum", 20, "TOP_N"),
-                                   ("low_volatility", 20, "TOP_N")]))
+    line = _design_gap_line(_Grid([("momentum", 20, "TOP_N", False),
+                                   ("low_volatility", 20, "TOP_N", False)]))
     assert "빈 니치" in line and "× top_n 151-300" in line, line
     # ▶ 구성 방식 축 (2026-08-14 분위 곡선 실측). 전부 상위 N개를 사는 구성이면
     #   그 사실과 실행면 손잡이 이름이 함께 떠야 한다 - 격자가 "몇 개를 사는가"
@@ -2820,9 +3388,17 @@ def _check_design_gaps_and_scout_card():
     assert "+1.00%p" in line, "왜 그 축을 봐야 하는지 근거 수치가 빠졌다"
     # 하위 배제 실험이 하나라도 있으면 그 줄은 사라진다 - **없는 공백을 지어내지
     #   않는다.** 사실이 아닌 재촉은 다음 주기에 무시당하는 서술이 된다.
-    line_done = _design_gap_line(_Grid([("momentum", 20, "TOP_N"),
-                                        ("low_max", 200, "EXCLUDE_BOTTOM")]))
+    line_done = _design_gap_line(_Grid([("momentum", 20, "TOP_N", False),
+                                        ("low_max", 200, "EXCLUDE_BOTTOM", False)]))
     assert "구성 방식 축이 통째로 비었다" not in line_done, line_done
+
+    # ▶ 위험 수단 축 (2026-08-14). 관문이 정당한데도 양쪽으로 막히는 실측을
+    #   근거와 함께 싣고, 실제로 쓴 실험이 생기면 조용해져야 한다 -
+    #   **없는 공백을 지어내지 않는다.**
+    assert "위험 수단 축이 비었다" in line, line
+    assert "trend_filter_days" in line and "1.255" in line, line
+    line_trend = _design_gap_line(_Grid([("momentum", 20, "TOP_N", True)]))
+    assert "위험 수단 축이 비었다" not in line_trend, line_trend
     # 실험이 한 대역에 몰린 사실이 그대로 실린다
     assert "전부 top_n 5-50 한 대역" in line, line
     # 광폭 대역이 먼저 온다 - 상위 6후보가 전부 151-300 이므로 관례 대역(5-50)
