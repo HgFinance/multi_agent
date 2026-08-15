@@ -123,6 +123,12 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         fields = sorted(ast.fields_of(candidate))
         if observables != fields:
             raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
+        micro_fields = sorted(set(fields) & set(ast.MICRO_FIELDS))
+        if not micro_fields:
+            raise ValueError(
+                "MICROSTRUCTURE_PRIMARY_REQUIRED: AST_READY must use at least one "
+                "quote/trade microstructure field; daily close/notional/returns are "
+                "auxiliary execution, benchmark, and regime inputs only")
         alignment = ast.check_alignment(
             candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
         if not alignment["ok"]:
@@ -134,7 +140,10 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
 
     return {"ast_readiness": readiness, "observables": observables,
             "candidate_signal_expr": candidate, "missing_data": missing_data,
-            "mapping_loss": mapping_loss}
+            "mapping_loss": mapping_loss,
+            "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
+                                   else "UNRESOLVED"),
+            "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY"}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"
@@ -350,12 +359,12 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
 # ── 자체 점검 ──────────────────────────────────────────────────────────────
 _SAMPLE = """TITLE: Short-Term Reversal as Returns to Liquidity Provision
 URL: https://www.nber.org/system/files/working_papers/w17653/w17653.pdf
-MECHANISM: Lagged returns reverse because liquidity providers are compensated.
+MECHANISM: Order flow imbalance reveals urgent liquidity demand that liquidity providers absorb.
 COUNTERPARTY: Urgent liquidity demanders.
-TESTABLE_WITH: Rank the negative five-day mean of returns.
+TESTABLE_WITH: Rank the negative five-day mean of order_flow_imbalance.
 READINESS: AST_READY
-OBSERVABLES: returns
-CANDIDATE_SIGNAL_EXPR: {"op":"neg","arg":{"op":"ts_mean","field":"returns","n":5}}
+OBSERVABLES: order_flow_imbalance
+CANDIDATE_SIGNAL_EXPR: {"op":"neg","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":5}}
 
 TITLE: Missing mechanism
 URL: https://example.com/backtest
@@ -432,10 +441,11 @@ def _selfcheck() -> int:
 
     # JSON 입력도 받는다
     j = json.dumps([{"TITLE": "J", "URL": "http://x/2",
-                     "MECHANISM": "returns reversal", "TESTABLE_WITH": "lagged returns",
-                     "READINESS": "AST_READY", "OBSERVABLES": ["returns"],
+                     "MECHANISM": "order flow imbalance predicts reversal",
+                     "TESTABLE_WITH": "lagged order_flow_imbalance",
+                     "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
                      "CANDIDATE_SIGNAL_EXPR": {"op": "neg", "arg": {
-                         "op": "ts_mean", "field": "returns", "n": 5}}}],
+                         "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}}}],
                    ensure_ascii=False)
     rj = intake(j, lens="ACADEMIC", source_type="PAPER", case_id="c",
                 model_version="m", prompt_version="p",
@@ -549,10 +559,12 @@ def _check_excerpt_fits_contract():
 
 def _check_truncated_lead_passes_validation():
     """계약 검증을 실제로 통과하는지 본다 - 길이만 맞추고 끝내지 않는다."""
-    from contracts.factory_contracts import MethodologyLeadV1  # noqa: PLC0415
+    from factory_contracts import MethodologyLeadV1  # noqa: PLC0415
 
     block = {"URL": "https://example.org/p", "TITLE": "t",
-             "MECHANISM": "나" * (MAX_EXCERPT_CHARS + 900)}
+             "MECHANISM": "나" * (MAX_EXCERPT_CHARS + 900),
+             "READINESS": "DATA_BLOCKED",
+             "MISSING_DATA": "point-in-time quote/trade feature"}
     lead = to_lead(block, lens="ACADEMIC", source_type="PAPER", case_id="c1",
                    model_version="m1", prompt_version="p1")
     MethodologyLeadV1.model_validate(lead)      # 여기서 터지면 수확이 또 죽는다

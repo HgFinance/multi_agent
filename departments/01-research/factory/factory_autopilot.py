@@ -97,9 +97,9 @@ UNIVERSE_KEY: (아래 통제 어휘 중 하나)
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
-DATA_TABLES: (필요한 원천 테이블. 파생지표는 실행면이 계산하므로 적지 마라)
-MIN_HISTORY_DAYS: (정수)
-SUGGESTED_PARAMS: {"horizon_days": 20, "top_n": 20}
+DATA_TABLES: market_bars, microstructure_features
+MIN_HISTORY_DAYS: (현재 미시구조 표본 안의 정수. 짧다고 일봉으로 대체하지 마라)
+SUGGESTED_PARAMS: {"horizon_days": 2, "top_n": 20, "signal_expr": {미시구조 필드를 포함한 AST}}
 SOURCE_REPORTED_EFFECT: {"sharpe": null}
 TRIAL_BUDGET: 5
 COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가 - 구체적으로)
@@ -184,6 +184,7 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
   from research.methodology_leads l
  where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
+   and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
 order by used asc, l.created_at desc
 limit %s
 """
@@ -192,7 +193,9 @@ limit %s
 def _ast_scout_contract() -> str:
     """Expose the executable search space to scouts from the runtime grammar itself."""
     sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
-    from alpha_ast import ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES  # noqa: PLC0415
+    from alpha_ast import (  # noqa: PLC0415
+        ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES, MICRO_FIELDS,
+    )
     return "\n".join([
         "[AST-ready literature contract]",
         "  Every submitted lead must declare READINESS as exactly one of:",
@@ -204,6 +207,11 @@ def _ast_scout_contract() -> str:
         f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
         "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
         "  mechanism/TESTABLE_WITH must explain those fields economically.",
+        "  MICROSTRUCTURE IS PRIMARY: every AST_READY expression must use at least one",
+        f"  quote/trade field: {', '.join(sorted(MICRO_FIELDS))}",
+        "  close/notional/returns may only accompany microstructure as execution, benchmark,",
+        "  or regime auxiliaries. Short microstructure history is accepted and must not be",
+        "  replaced with a daily proxy; report the resulting uncertainty honestly.",
         "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
     ])
 
@@ -3327,9 +3335,13 @@ def _check_unused_leads_come_first():
     """
     assert "used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
     assert "ast_readiness" in _SQL_LEADS, "AST-ready 리드를 우선하지 않는다"
+    assert "primary_data_plane' = 'MICROSTRUCTURE" in _SQL_LEADS, \
+        "일봉형 과거 리드를 새 기획에 다시 노출한다"
     contract = _ast_scout_contract()
     assert "AST_READY" in contract and "CANDIDATE_SIGNAL_EXPR" in contract
     assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
+    assert "MICROSTRUCTURE IS PRIMARY" in contract
+    assert "must not be" in contract and "daily proxy" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다

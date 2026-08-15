@@ -804,6 +804,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "메커니즘 없는 블록을 반려하고, 중복을 접어서 적재한다. "
                     "AST_READY에는 OBSERVABLES와 CANDIDATE_SIGNAL_EXPR, DATA_BLOCKED에는 "
                     "MISSING_DATA, SEMANTIC_MISMATCH에는 MAPPING_LOSS가 필수다. "
+                    "AST_READY 수식은 반드시 호가·체결 미시구조 필드를 하나 이상 "
+                    "사용해야 한다. 짧은 미시구조 표본을 returns/close 일봉 대리식으로 "
+                    "바꾸지 말고, 일봉은 실행가격·벤치마크·레짐 보조로만 사용한다. "
                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
     def factory_submit_leads(text: str, lens: str = "ACADEMIC",
                              source_type: str = "PAPER",

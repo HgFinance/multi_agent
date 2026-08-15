@@ -568,16 +568,16 @@ def persist(conn, proposals) -> tuple[int, int]:
 
 
 # ── 자체 점검 ──────────────────────────────────────────────────────────────
-_PLANNER = """TITLE: 복권형 수익 회피
+_PLANNER = """TITLE: 주문흐름 불균형 반전
 LEAD_IDS: lead_aaa
-ECONOMIC_RATIONALE: 복권형 payoff 선호로 극단 상승 종목이 과대평가되고,
-그 대가로 다음 달 수익이 낮다.
-COUNTERPARTY: 분산이 덜 된 개인이 복권형 종목에 프리미엄을 지불한다.
-EDGE_TYPE: mean_reversion
+ECONOMIC_RATIONALE: 긴급 매수 주문의 불균형을 유동성 공급자가 흡수한 뒤 가격 압력이 되돌아온다.
+COUNTERPARTY: 즉시 체결을 위해 스프레드와 가격충격을 지불하는 긴급 주문자.
+EDGE_TYPE: liquidity_shock_reversal
 UNIVERSE_KEY: krx_all
 FALSIFICATION_TESTS: 국면 분해, 비용 민감도
-DATA_TABLES: market_bars
-MIN_HISTORY_DAYS: 400
+DATA_TABLES: market_bars, microstructure_features
+MIN_HISTORY_DAYS: 58
+SUGGESTED_PARAMS: {"horizon_days":2,"top_n":20,"signal_expr":{"op":"neg","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":3}}}
 SOURCE_REPORTED_EFFECT: {"monthly_alpha_pct": -1.0, "market": "US"}
 
 TITLE: 필수 항목 빠진 기획
@@ -585,7 +585,7 @@ LEAD_IDS: lead_bbb
 ECONOMIC_RATIONALE: 뭔가 된다
 """
 
-_SKEPTIC = """TITLE: 복권형 수익 회피
+_SKEPTIC = """TITLE: 주문흐름 불균형 반전
 COMPETING_EXPLANATION: 소형·저유동성 종목에 몰려 유동성 프리미엄일 수 있다.
 COMPETING_CODES: LIQUIDITY_PREMIUM, DATA_MINING
 VERDICT: PROCEED
@@ -618,8 +618,9 @@ def _selfcheck() -> int:
     check("경쟁 설명 코드 2개", len(prop.competing_explanation_codes) == 2)
     check("회의론자 서명", prop.skeptic_sign == "run-skeptic")
     # 계약이 tables 를 튜플로 정규화한다(불변 - 발행 뒤 바뀌면 안 된다).
-    check("데이터 요구", tuple(prop.data_requirements.tables) == ("market_bars",)
-          and prop.data_requirements.min_history_days == 400)
+    check("데이터 요구", tuple(prop.data_requirements.tables) ==
+          ("market_bars", "microstructure_features")
+          and prop.data_requirements.min_history_days == 58)
     check("소스 수치 분리 보관",
           prop.source_reported_effect.get("monthly_alpha_pct") == -1.0)
 
@@ -684,7 +685,7 @@ def _selfcheck() -> int:
     check("접수가 기획안마다 계열 이력을 읽는다", bool(seen))
     # 좌표가 그대로 넘어가야 남의 계열 이력을 읽는 일이 없다
     check("좌표가 조회에 전달된다",
-          any((b.get("EDGE_TYPE") or "").strip() == "mean_reversion"
+          any((b.get("EDGE_TYPE") or "").strip() == "liquidity_shock_reversal"
               and (b.get("UNIVERSE_KEY") or "").strip() == "krx_all"
               for b in seen))
     # 기각 이력이 있는데 대응이 없으면 **접수에서** 걸려야 한다(승격까지 가면
@@ -714,13 +715,13 @@ def _selfcheck() -> int:
           bool(r8.proposals) and r8.proposals[0][0].skeptic_sign == "run-skeptic")
 
     # 하나:하나면 제목이 아주 달라도 모호하지 않다
-    sk_other = _SKEPTIC.replace("TITLE: 복권형 수익 회피", "TITLE: 전혀 다른 제목")
+    sk_other = _SKEPTIC.replace("TITLE: 주문흐름 불균형 반전", "TITLE: 전혀 다른 제목")
     r9 = intake(planner, sk_other, case_id="c-9", planner_run="run-plan",
                 skeptic_run="run-skeptic", leads=leads)
     check("1:1 이면 제목이 달라도 짝짓는다", len(r9.proposals) == 1)
 
     # **여럿일 때는 위치로 잇지 않는다** - 남의 반대 가설로 통과시키면 안 된다
-    two_sk = sk_other + "\n" + _SKEPTIC.replace("TITLE: 복권형 수익 회피",
+    two_sk = sk_other + "\n" + _SKEPTIC.replace("TITLE: 주문흐름 불균형 반전",
                                                 "TITLE: 또 다른 제목")
     r10 = intake(planner, two_sk, case_id="c-10", planner_run="run-plan",
                  skeptic_run="run-skeptic", leads=leads)
