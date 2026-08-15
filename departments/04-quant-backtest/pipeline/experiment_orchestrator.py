@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import gc
 import json
 import sys
 from dataclasses import dataclass, field
@@ -208,6 +209,84 @@ def feasibility(hypothesis: dict, existing_datasets: set,
 #   실제로 오늘 INCONCLUSIVE 를 코드에만 넣었다가 DB 제약에 없어 예산 초과가
 #   나는 순간 죽을 뻔했다(마이그레이션 20260804001000 으로 메웠다).
 #   **다음 작업에서 세 갈래를 하나로 합친다.**
+def walk_forward_efficiency(window_metrics: list, full_sharpe) -> float | None:
+    """**성적이 전 구간에 고르게 있었나, 한쪽에 몰렸나** (2026-08-14 조사).
+
+    ▶ 무엇을 재나
+      업계 관례의 Walk-Forward Efficiency 는 `OOS Sharpe / IS Sharpe` 이고
+      0.5~0.7 이 현실적 목표, 1.0 초과는 오히려 의심 신호다. 그런데 우리는
+      창마다 파라미터를 **최적화하지 않고** 고정값으로 돌리므로 그대로는 못
+      쓴다. 같은 질문에 답하는 우리 판은 이것이다:
+
+          창별 Sharpe 평균 / 전기간 Sharpe
+
+      전기간이 좋은데 창별 평균이 나쁘면 그 성적은 **특정 구간에 몰린 것**
+      이고, 둘이 비슷하면 구간을 가로질러 살아 있다는 뜻이다.
+
+    ▶ 왜 관문이 아니라 계측인가
+      지금 강건성은 `positive_window_ratio` 하나로 FRAGILE 만 찍고 **왜**
+      취약한지는 말하지 못한다(실측: 전체 판정의 87%가 fragility). 임계를
+      바꾸는 것은 합격선 변경이라 사전등록·결재 사안이고, 여기서는 다음
+      기획이 방향을 잡도록 **이유를 재서 환류에 실을 뿐**이다.
+
+    ▶ 못 재면 안 적는다
+      전기간 Sharpe 가 0 근처면 비율이 폭발한다 - 그건 진단이 아니라 잡음이다.
+      분모가 작으면 `None` 을 돌려주고 원장에 키를 만들지 않는다.
+    """
+    try:
+        denom = float(full_sharpe)
+    except (TypeError, ValueError):
+        return None
+    if not (abs(denom) >= 0.1):
+        return None
+    vals = [m.get("sharpe_rf0") for _, m in (window_metrics or [])]
+    nums = [float(v) for v in vals if isinstance(v, (int, float))]
+    if len(nums) < 2:
+        return None
+    return round((sum(nums) / len(nums)) / denom, 4)
+
+
+def experiment_did_not_trade(metrics: dict | None) -> bool:
+    """**한 주도 못 샀으면 전략을 잰 것이 아니다** (2026-08-14 실측).
+
+    ▶ 무엇이 있었나
+      `min_adv_krw` 단위가 어긋나(원 vs 백만원) 체결가능 유니버스가 통째로
+      비었다. 백테스트는 죽지 않고 완주했고 지표는 전부 0 - total_return 0,
+      turnover_total 0, MDD 0 - 인데 벤치마크만 올라 초과가 -82.86%p 로
+      찍혔다. 관문은 이것을 **REJECT** 로 판정했다. 즉 "실험이 성립하지
+      않았다" 를 "전략이 나쁘다" 로 기록한 것이다.
+
+      단위는 고쳤지만 **같은 증상은 다른 원인으로도 온다** - 데이터 결측,
+      필터 과다, 신호가 한 종목도 못 고른 경우. 그때마다 가설이 억울하게
+      기각되고, 그 기각은 계열 예산(trial pressure)까지 태운다.
+
+    ▶ 판정 불가는 판정 결과다
+      `fragility_summary` 가 창 0개를 INSUFFICIENT 로 돌려주는 것과 같은
+      원칙이다. 여기서도 기각이 아니라 INCONCLUSIVE 로 보내고
+      UNDERPOWERED_DATA 를 리서치에 돌려준다.
+
+    ▶ 못 잰 것과 0 을 구분한다
+      `turnover_total` 이 아예 없으면(구버전 지표) 판단하지 않는다 -
+      없는 것을 사고로 몰면 옛 실험이 무더기로 무효가 된다.
+    """
+    m = metrics or {}
+    turnover = m.get("turnover_total")
+    if turnover is None:
+        return False
+    try:
+        if float(turnover) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    ret = m.get("total_return")
+    if ret is None:
+        return True
+    try:
+        return float(ret) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def robustness_to_status(fragility_verdict: str,
                          pressure: dict | None = None) -> str:
     """강건성 판정 -> 가설 상태. SUPPORTED 도 승격이 아니라 후보 자격일 뿐.
@@ -257,8 +336,42 @@ _STATUS_TO_DECISION = {
 }
 
 # 환류 oos_summary 로 옮길 지표. **없는 것은 넣지 않는다**(미측정과 0 을 구분).
-_OOS_KEYS = ("excess_return_pct", "information_ratio", "max_drawdown_pct",
-             "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high")
+#
+# ▶ **화이트리스트가 계측을 잘라 왔다** (2026-08-14 배선 조사)
+#   랭크-IC(signal_ic*)와 회전율(turnover_total)은 이미 quant.experiment_metrics
+#   에 적재되고 환류 SQL 도 그 행을 읽어 오는데, 이 튜플에 이름이 없어서
+#   **outcomes 에 한 번도 실린 적이 없었다.** 측정은 되는데 원장에 안 남으면
+#   다음 기획안은 그 사실을 못 본다 - "측정되는데 저장이 죽으면 그 측정은
+#   없는 것" 과 같은 사고다.
+#
+# ▶ 여기 이름을 더해도 **판정은 바뀌지 않는다**: release_gate.evaluate 는
+#   이름 지정된 8개 키만 검사하고, 이 튜플은 환류(기록) 전용이다. 다만
+#   factory_bridge.lessons_from 이 excess_return_pct·information_ratio 두
+#   이름을 읽으므로 신규 키는 반드시 새 이름을 쓴다.
+#
+# ▶ 두 적재 경로가 이 한 튜플을 공유한다(orphan_finalizer 가 import) -
+#   정상 종결과 고아 완주가 같은 계측을 남긴다.
+_OOS_KEYS = (
+    # 관문이 보는 지표 (기존)
+    "excess_return_pct", "information_ratio", "max_drawdown_pct",
+    "deflated_sharpe", "pbo", "bootstrap_ci_low", "bootstrap_ci_high",
+    # 위험조정 비교 계측 (2026-08-14) - 명목 초과가 vol 차이에 오염되는 것을
+    # 원장이 스스로 보이게 한다(leverage bias). backtest_runner.excess_metrics.
+    "m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+    "strategy_ann_vol_pct", "benchmark_ann_vol_pct",
+    "beta_vs_benchmark", "corr_vs_benchmark", "residual_ann_vol_pct",
+    # 부품 채점표 (2026-08-14) - 단일 신호를 부품으로 채점할 때 쓰는 축.
+    # 전부 이미 적재돼 있던 값이다(새 계산 없음).
+    "turnover_total", "turnover",
+    "signal_ic", "signal_ic_t", "signal_ic_hit_rate", "signal_ic_periods",
+    "signal_ic_breadth", "pnl_top1_share", "pnl_top3_share",
+    # 강건성 **이유** (2026-08-14) - 전체 판정의 87%가 fragility 인데 왜
+    # 취약한지는 원장이 말하지 못했다. 아래 넷은 판정 재료가 아니라 진단이다.
+    #   walk_forward_efficiency: 창별 Sharpe 평균 / 전기간 Sharpe (0.5~0.7 정상)
+    #   positive_window_ratio·worst_window_mdd·sharpe_std: 관문이 실제로 보는 값
+    "walk_forward_efficiency", "positive_window_ratio",
+    "worst_window_mdd", "sharpe_std",
+)
 
 
 def _gate_note(decision, metrics: dict) -> str:
@@ -314,10 +427,32 @@ def _gate_note(decision, metrics: dict) -> str:
             else:
                 gaps.append(name)
 
+    # ▶ 계측 꼬리 (2026-08-14). **판정에 관여하지 않는다** - 다음 기획안이
+    #   "명목 초과가 나빴는데 위험조정으로는 어땠나" 를 볼 수 있게 하는 사실
+    #   줄이다. vol 타게팅을 단 실험이 명목 초과 −100%p 로 죽는 동안 M² 는
+    #   전혀 다른 이야기를 할 수 있고, 그 차이가 곧 관문 재설계의 근거다.
+    extra = []
+    for label, key, unit, digits in (
+            ("M²", "m2_excess_ann_pct", "%p", 1),
+            ("α", "alpha_ann_pct", "%p", 1),
+            ("AR", "appraisal_ratio", "", 2),
+            ("전략vol", "strategy_ann_vol_pct", "%", 0),
+            ("벤치vol", "benchmark_ann_vol_pct", "%", 0),
+            ("IC t", "signal_ic_t", "", 2),
+            ("회전", "turnover_total", "x", 1)):
+        v = metrics.get(key)
+        if v is None:
+            continue
+        try:
+            extra.append(f"{label} {float(v):.{digits}f}{unit}")
+        except (TypeError, ValueError):
+            continue
+    tail = (" || 계측: " + " · ".join(extra)) if extra else ""
+
     head = f"관문 {len(passed)}/{total} 통과"
     if not failed:
-        return head + " - 남은 조항 없음"
-    return f"{head}. 남은 조항: " + "; ".join(gaps[:6])
+        return head + " - 남은 조항 없음" + tail
+    return f"{head}. 남은 조항: " + "; ".join(gaps[:6]) + tail
 
 
 def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
@@ -596,7 +731,21 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
 
         chain = run_chain or _default_chain
-        result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
+        try:
+            result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
+        except Exception:
+            # ▶ 실패한 체인이 가설을 RUNNING 에 가두지 않는다 (2026-08-13 실측)
+            #   퀀트 카드가 CLI 로 orchestrate 를 직접 부르는 경로는 작업 큐가
+            #   없어서, 체인이 죽으면 실패가 어디에도 안 남고 가설만 RUNNING 에
+            #   갇혔다 - e2379857 이 job 0건·실험 행 0건·"사유 기록 없음" 으로
+            #   하루 3회 스톨 회수됐다. 30분 스톨 대기는 회수가 아니라 낭비다:
+            #   실패 즉시 PROPOSED 로 되돌리고 예외는 그대로 올린다(작업 큐
+            #   경로에서는 호출부가 failure_reason 을 기록한다).
+            cur.execute("update quant.hypotheses set status='PROPOSED', "
+                        "status_changed_at=now() where hypothesis_id=%s "
+                        "and status='RUNNING'", (hid,))
+            conn.commit()
+            raise
         report.regime_evidence = list(result.get("regime_evidence") or ())
         report.experiment_refs = {k: result[k] for k in ("experiment_id", "fragility")
                                   if k in result}
@@ -683,8 +832,18 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             report.transitions.append("RUNNING->REJECTED (사전등록 위반)")
             return report
 
-        new_status = robustness_to_status(result["fragility"],
-                                          report.trial_pressure)
+        # ▶ **실험이 성립했는지 먼저 본다** - 거래가 0이면 강건성을 논할
+        #   대상 자체가 없다. 기각으로 밀면 데이터·필터 사고가 가설의 죄로
+        #   기록되고 계열 예산까지 탄다(2026-08-14 실측, 위 함수 참조).
+        no_trade = experiment_did_not_trade(result.get("backtest_metrics"))
+        if no_trade:
+            new_status = "INCONCLUSIVE"
+            report.backlog.append(
+                "거래 0건 - 체결가능 유니버스가 비었거나 신호가 한 종목도 "
+                "고르지 못했다. 판정이 아니라 판정 불가로 종결한다")
+        else:
+            new_status = robustness_to_status(result["fragility"],
+                                              report.trial_pressure)
         # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
         #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
         # ▶ QNT-07 릴리스 관문. **환류보다 먼저 돌린다** - 판정을 환류에 실어야
@@ -815,6 +974,12 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
 
     print(f"  config 바인딩: 가설 {binding.from_hypothesis or '-'} / "
           f"기본값 {binding.from_default or '-'}", flush=True)
+    # ▶ **받았지만 안 읽은 값은 실행 로그에도 남긴다** (2026-08-14, t_e9534028).
+    #   `walk_forward_window_days` 처럼 사전등록에만 남고 실험은 기본 창으로
+    #   도는 값이 있다. 거부가 아니라 조용한 무시라서, 여기서 안 찍으면
+    #   "등록한 가설과 실행한 실험이 다르다" 가 로그에 흔적을 안 남긴다.
+    if binding.ignored:
+        print(f"  ! 실행면이 안 읽은 값: {binding.ignored}", flush=True)
     # ▶ 시도 횟수를 넘긴다 - DSR 이 감가하려면 알아야 한다. **config 가 아니라
     #   인자로** 넘긴다(config 는 input_hash 에 들어가므로 넣으면 중복 가드가
     #   무력해진다).
@@ -844,6 +1009,28 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     try:
         _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
+        # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
+        #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와 `Market`
+        #   이 동시에 살아 있으면 같은 데이터를 두 벌 든다. 미시구조까지
+        #   더 실으면 그 자리에서 `OSError: Cannot allocate memory` 로
+        #   죽는다 - 실제로 OFI 첫 실험이 그렇게 실패했다. 위 두 줄 이후
+        #   `rows` 를 읽는 곳이 없으므로 즉시 놓는다.
+        del rows
+        gc.collect()
+        # ▶ **신호가 요구하면 미시구조를 붙인다** (2026-08-14)
+        #   호가·체결은 일봉과 다른 데이터셋이라 따로 실어야 한다. 요구는
+        #   가설이 아니라 **템플릿**이 선언하므로(`needs_micro`) 빠뜨릴 자리가
+        #   없다. 요구가 없으면 아무것도 안 하고 예전 경로 그대로다.
+        try:
+            from backtest_runner import attach_micro_if_needed  # noqa: PLC0415
+
+            _mn = attach_micro_if_needed(market, config, conn)
+            if _mn:
+                print(f"  미시구조 적재 {_mn:,}건 (호가·체결 일별 집계)",
+                      flush=True)
+        except Exception as e:  # noqa: BLE001 - 못 붙여도 실험은 돈다(신호가 빈다)
+            print(f"  ⚠ 미시구조 적재 실패: {type(e).__name__}: {str(e)[:110]}",
+                  flush=True)
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
         #   성적에 섞인다.
@@ -867,11 +1054,22 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         print(f"  웜업 {warmup}일 (전략 {config.get('strategy')} 선언 기준)", flush=True)
         windows = make_windows(market.dates, warmup,
                                embargo_days=int(config.get("lookback_days") or 0))
-        wm = [(w.label, run_window(slice_market(market, w), w, dict(config)))
-              for w in windows]
-        _summary, flags, verdict = fragility_summary(wm)
-        with conn.cursor() as cur:
-            for label, metrics in wm:
+        # ▶ **창마다 바로 적재한다** (2026-08-14 실측)
+        #   예전엔 창 21개를 전부 계산한 **뒤에** 한 번에 저장했다. 이 구간은
+        #   백테스트가 끝난 뒤에도 13분을 더 도는데, 그 사이 워커가 재시작되면
+        #   진행분이 **통째로** 사라진다 - 실측으로 최근 한 시간에 워커가 4번
+        #   기동했고(다른 세션의 `docker restart`), 그때마다 창 지표가 0행으로
+        #   남았다. 실험은 COMPLETED 인데 강건성 근거만 없는 상태가 그것이다.
+        #
+        #   창 하나는 그 자체로 완결된 사실이므로 계산 즉시 커밋한다. 중단돼도
+        #   센 만큼은 남고, 짧은 트랜잭션이라 풀러가 idle 로 끊을 일도 준다.
+        #   요약(fragility)은 전 창이 모여야 의미가 있으므로 그대로 마지막에
+        #   한 번 쓴다 - 부분 요약은 판정을 오도한다.
+        wm = []
+        for w in windows:
+            metrics = run_window(slice_market(market, w), w, dict(config))
+            wm.append((w.label, metrics))
+            with conn.cursor() as cur:
                 for k in ("total_return", "sharpe_rf0", "max_drawdown"):
                     if isinstance(metrics.get(k), (int, float)):
                         cur.execute("""
@@ -881,8 +1079,41 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                             values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
                             on conflict do nothing
                         """, (bt["experiment_id"], k, metrics[k],
-                              json.dumps({"window": label, "chain": ORCH_VERSION}),
+                              json.dumps({"window": w.label, "chain": ORCH_VERSION}),
                               "krx-cost-v1"))
+            conn.commit()
+        summary, flags, verdict = fragility_summary(wm)
+        # ▶ **왜 취약한지를 같이 잰다** (2026-08-14). 판정(verdict)은 위에서
+        #   이미 끝났고 여기서 바뀌지 않는다 - 합격선을 건드리지 않고 이유만
+        #   원장에 남긴다. 실측으로 전체 판정의 87%가 fragility 인데, 그중
+        #   무엇이 구간 편중이고 무엇이 진짜 불안정인지 지금은 구분이 없다.
+        _wfe = walk_forward_efficiency(wm, (bt.get("metrics") or {}).get("sharpe_rf0"))
+        if _wfe is not None:
+            summary = dict(summary, walk_forward_efficiency=_wfe)
+            print(f"  창 효율(WFE) {_wfe:+.3f} "
+                  f"(창별 Sharpe 평균 / 전기간 Sharpe · 0.5~0.7 이 정상대)",
+                  flush=True)
+        with conn.cursor() as cur:
+            # ▶ **판정 근거도 같이 남긴다** (2026-08-14 실측)
+            #   이 자리에서 요약을 `_summary` 로 버리고 있었다. 그래서 창별
+            #   수익·MDD 는 314행 남는데 `positive_window_ratio`·
+            #   `worst_window_mdd` 는 이 체인으로 돈 실험 22건 전부 **0행**
+            #   이었다 - 환류에는 `fragility` 가 실패 조항으로 찍히는데
+            #   **왜 취약한지는 원장 어디에도 없는** 상태다.
+            #   근거 없는 판정은 재현도 반박도 못 하고, 임계를 논의하려면
+            #   먼저 분포가 있어야 한다. flags 는 숫자가 아니므로
+            #   dimensions 에 실어 어느 조항이 걸렸는지까지 남긴다.
+            dims = json.dumps({"chain": ORCH_VERSION, "verdict": verdict,
+                               "flags": flags})
+            for k, v in summary.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    cur.execute("""
+                        insert into quant.experiment_metrics
+                          (experiment_id, split, metric, value,
+                           dimensions, cost_model_version)
+                        values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
+                        on conflict do nothing
+                    """, (bt["experiment_id"], k, float(v), dims, "krx-cost-v1"))
         conn.commit()
     finally:
         conn.close()
@@ -1010,11 +1241,13 @@ class _FakeCursor:
         self._row = hypothesis_row
         self._datasets = datasets
         self.updates: list = []
+        self.update_sqls: list = []   # 어떤 문장이었는지도 본다(복귀 검사용)
 
     def execute(self, sql, params=()):
         self._last = (sql, params)
         if "update quant.hypotheses" in sql:
             self.updates.append(params)
+            self.update_sqls.append(" ".join(str(sql).split()))
             # ▶ 지문을 기억한다. 실제 DB 는 UPDATE 한 값을 되읽을 수 있으므로
             #   가짜도 그래야 사전등록 대조가 진짜 경로를 검사한다 - 안 그러면
             #   늘 "위반" 이 나와 검사가 가드를 잘못 고발한다.
@@ -1168,6 +1401,207 @@ def _check_orchestrate_paths():
     print("  오케스트레이션 경로       OK")
     _check_dataset_comes_from_hypothesis()
     print("  데이터셋=사상 결과       OK")
+    _check_chain_failure_releases_hypothesis()
+    print("  실패 체인 즉시 복귀       OK")
+    _check_metrics_are_recorded_without_changing_verdict()
+    print("  계측 확장·판정 불변       OK")
+    _check_fragility_summary_is_recordable()
+    print("  강건성 근거 원장 적재     OK")
+    _check_no_trade_is_not_a_rejection()
+    print("  거래 0 = 판정 불가        OK")
+    _check_windows_are_persisted_incrementally()
+    print("  창마다 적재(중단 견딤)    OK")
+    _check_wfe_measures_without_changing_the_gate()
+    print("  창 효율 계측(판정 불변)   OK")
+
+
+def _check_wfe_measures_without_changing_the_gate():
+    """**이유를 재되 합격선은 건드리지 않는다** (2026-08-14 조사).
+
+    업계는 WFE(0.5~0.7 정상대)와 파라미터 안정성으로 "왜 무너졌나" 를 가르는데
+    우리는 `positive_window_ratio` 하나로 FRAGILE 만 찍었다(전체 판정의 87%).
+    임계 변경은 사전등록·결재 사안이므로 여기서는 **계측만** 늘린다.
+    """
+    wm = [("2024H1", {"sharpe_rf0": 0.4}), ("2024H2", {"sharpe_rf0": 0.6}),
+          ("2025H1", {"sharpe_rf0": 0.5})]
+    # 창 평균 0.5 / 전기간 1.0 = 0.5 (정상대 하단)
+    assert walk_forward_efficiency(wm, 1.0) == 0.5
+    # 전기간이 좋은데 창별이 나쁘면 낮게 나온다 = 구간 편중
+    assert walk_forward_efficiency(wm, 2.5) == 0.2
+
+    # ▶ **못 재면 안 적는다.** 분모가 0 근처면 비율이 폭발한다 - 진단이 아니라
+    #   잡음이고, 그 잡음이 환류에 실리면 다음 기획이 엉뚱한 곳을 고친다.
+    for bad in (0.0, 0.05, -0.09, None, "n/a"):
+        assert walk_forward_efficiency(wm, bad) is None, bad
+    # 창이 한 개뿐이면 평균이 그 자신이라 아무것도 말하지 않는다
+    assert walk_forward_efficiency([("2024H1", {"sharpe_rf0": 0.4})], 1.0) is None
+    assert walk_forward_efficiency([], 1.0) is None
+    # 숫자가 아닌 창 값에 죽지 않는다(지어내지도 않는다)
+    assert walk_forward_efficiency(
+        [("a", {"sharpe_rf0": None}), ("b", {"sharpe_rf0": "x"})], 1.0) is None
+
+    # 관문은 이 값을 보지 않는다 - 계측이 합격선을 흔들면 사전등록이 무너진다
+    from walk_forward import FRAGILITY_RULES
+    assert "walk_forward_efficiency" not in FRAGILITY_RULES, FRAGILITY_RULES
+    assert "walk_forward_efficiency" in _OOS_KEYS, "환류에 안 실리면 아무도 못 본다"
+
+
+def _check_windows_are_persisted_incrementally():
+    """**창마다 적재한다 - 중단돼도 센 만큼은 남는다** (2026-08-14 실측).
+
+    이 구간은 백테스트가 끝난 뒤에도 13분을 더 돈다. 창 21개를 전부 계산한
+    뒤에 한 번에 저장하면 그 사이 워커가 재시작될 때 **통째로** 사라진다 -
+    실측으로 한 시간에 워커가 4번 기동했고(다른 세션의 재시작), 그때마다
+    실험은 COMPLETED 인데 창 지표만 0행인 상태가 남았다. 그 0행이
+    `positive_window_ratio` 를 못 만들어 강건성 판정 근거가 통째로 비었다.
+
+    요약(fragility)은 전 창이 모여야 의미가 있으므로 마지막에 한 번 쓴다 -
+    부분 요약은 판정을 오도하므로 여기서 함께 고정한다.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_default_chain")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "for w in windows:" in body, "창 루프가 사라졌다"
+    assert "wm = [(w.label, run_window(" not in body, \
+        "창을 전부 계산한 뒤 저장하는 형태로 돌아갔다 - 중단되면 통째로 잃는다"
+    head = body.index("for w in windows:")
+    tail = body.index("fragility_summary(wm)")
+    assert head < tail, "요약이 창 루프보다 먼저 온다"
+    assert "conn.commit()" in body[head:tail], \
+        "창 루프 안에서 커밋하지 않는다 - 중단되면 진행분이 사라진다"
+    # 요약은 루프 **밖**에서 한 번만 - 창마다 요약을 쓰면 부분 판정이 남는다
+    assert body.count("fragility_summary(wm)") == 1, "요약을 여러 번 쓴다"
+
+
+def _check_no_trade_is_not_a_rejection():
+    """**실험이 성립 안 한 것을 가설의 죄로 적지 않는다** (2026-08-14 실측).
+
+    유니버스가 비어 한 주도 못 산 실험 2건이 REJECT 로 굳었다(지표 전부 0,
+    초과 -82.86%p). 원인이던 단위는 고쳤지만 같은 증상은 결측·필터·신호
+    미선택으로도 온다 - 그때마다 기각되면 계열 예산까지 탄다.
+    """
+    # 실측 그대로: 거래도 수익도 0
+    assert experiment_did_not_trade(
+        {"turnover_total": 0.0, "total_return": 0.0, "max_drawdown": 0.0})
+    # 회전율만 0 이고 수익이 있으면 그건 다른 사고다 - 여기서 삼키지 않는다
+    assert not experiment_did_not_trade(
+        {"turnover_total": 0.0, "total_return": 0.12})
+    # 정상 실험은 건드리지 않는다
+    assert not experiment_did_not_trade(
+        {"turnover_total": 3.4, "total_return": -0.08})
+    # ▶ **못 잰 것과 0 을 구분한다.** 구버전 실험엔 회전율이 없다 -
+    #   없는 것을 사고로 몰면 옛 실험이 무더기로 무효가 된다.
+    assert not experiment_did_not_trade({"total_return": 0.0})
+    assert not experiment_did_not_trade({})
+    assert not experiment_did_not_trade(None)
+    # 숫자가 아닌 값에 죽지 않는다(지어내지도 않는다)
+    assert not experiment_did_not_trade({"turnover_total": "n/a"})
+
+
+def _check_fragility_summary_is_recordable():
+    """**판정 근거가 원장에 남을 모양인가** (2026-08-14 실측).
+
+    이 체인은 `fragility_summary` 를 부르고 요약을 `_summary` 로 버렸다.
+    그 결과 창별 수익·MDD 는 314행 쌓이는데 관문이 실제로 보는 세 지표
+    (`positive_window_ratio`·`worst_window_mdd`·`sharpe_std`)는 **0행**이었고,
+    환류에는 `fragility` 실패만 찍혔다 - 왜 취약한지는 아무 데도 없었다.
+
+    그래서 여기서 고정하는 것은 저장 SQL 이 아니라 **저장 가능성**이다:
+    관문이 읽는 키가 요약에 숫자로 들어 있어야 insert 루프가 집는다. 키
+    이름이 바뀌거나 문자열로 바뀌면 이 검사가 먼저 깨진다.
+    """
+    from walk_forward import FRAGILITY_RULES, fragility_summary  # noqa: PLC0415
+
+    wm = [(lbl, {"total_return": r, "sharpe_rf0": s, "max_drawdown": m,
+                 "test_days": 120})
+          for lbl, r, s, m in [("2024H1", 0.10, 1.0, -0.10),
+                               ("2024H2", -0.05, -0.5, -0.30),
+                               ("2025H1", 0.20, 1.5, -0.08),
+                               ("2025H2", 0.03, 0.2, -0.15)]]
+    stats, flags, verdict = fragility_summary(wm)
+    numeric = {k for k, v in stats.items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    for key in ("n_windows", "positive_window_ratio", "worst_window_mdd",
+                "sharpe_std"):
+        assert key in numeric, f"관문이 읽는 {key} 가 숫자로 안 남는다: {stats}"
+    # 위 픽스처는 한 창이 MDD -30% 로 임계(-25%)를 넘는다 - 플래그가 서야
+    # 하고, 그 이유가 flags 로 나와야 dimensions 에 실린다.
+    assert verdict == "FRAGILE", (verdict, flags)
+    assert "DEEP_WINDOW_MDD" in flags, flags
+    assert FRAGILITY_RULES["max_worst_window_mdd"] == -0.25, \
+        "임계를 바꿨다면 근거와 CEO 결재를 함께 남긴다"
+    # 판정 불가는 판정 결과다 - 창이 없어도 죽지 않고, 요약도 숫자로 남는다.
+    empty_stats, empty_flags, empty_verdict = fragility_summary([])
+    assert empty_verdict == "INSUFFICIENT", empty_verdict
+    assert empty_flags == ["NO_WINDOWS"], empty_flags
+    assert isinstance(empty_stats.get("n_windows"), int), empty_stats
+
+
+def _check_metrics_are_recorded_without_changing_verdict():
+    """**계측을 늘려도 판정은 그대로다** (2026-08-14, 2층 관문 결재 1단계).
+
+    랭크-IC·회전율은 이미 원장에 있었는데 _OOS_KEYS 화이트리스트에서 잘려
+    outcomes 에 한 번도 안 실렸다. 위험조정 계측(M²·alpha·appraisal)도 같은
+    경로로 싣는다. 두 가지를 함께 고정한다 - (a) 새 지표가 환류에 실린다,
+    (b) 관문 판정 함수는 이 지표들을 보지 않는다(합격선 변경 아님).
+    """
+    from release_gate import CRITERIA, evaluate
+
+    need = {"m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+            "turnover_total", "signal_ic", "signal_ic_t"}
+    assert need <= set(_OOS_KEYS), sorted(need - set(_OOS_KEYS))
+    # 판정 부산물(교훈)이 읽는 두 이름과 겹치지 않아야 '판정 불변' 이 성립한다
+    assert "excess_return_pct" in _OOS_KEYS and "information_ratio" in _OOS_KEYS
+
+    # 같은 지표 dict 에 신규 계측을 넣어도 evaluate 결과가 동일한가
+    base = {"excess_return_pct": 130.3, "information_ratio": 0.17,
+            "max_drawdown_pct": -21.3, "turnover": 12.0,
+            "deflated_sharpe": 0.9968, "bootstrap_ci_low": 0.78,
+            "bootstrap_ci_high": 1.41}
+    rich = dict(base, m2_excess_ann_pct=-4.2, alpha_ann_pct=3.1,
+                appraisal_ratio=0.22, signal_ic=0.035, signal_ic_t=3.16,
+                strategy_ann_vol_pct=15.0, benchmark_ann_vol_pct=31.0)
+    a = evaluate(base, fragility="ROBUST")
+    b = evaluate(rich, fragility="ROBUST")
+    assert (sorted(a.passed), sorted(a.failed)) == (sorted(b.passed), sorted(b.failed)), \
+        f"계측 추가가 판정을 바꿨다: {a.failed} vs {b.failed}"
+    assert CRITERIA["min_information_ratio"] == 0.5, "관문 임계가 바뀌었다"
+
+    # 판정 리포트 꼬리에 계측이 실린다 - 원장에 남아야 다음 기획안이 본다
+    note = _gate_note(a, rich)
+    assert "계측:" in note and "M²" in note and "AR" in note, note
+    # 못 잰 지표는 적지 않는다(0 으로 채우지 않는다)
+    assert "IC t" not in _gate_note(a, base), _gate_note(a, base)
+
+
+def _check_chain_failure_releases_hypothesis():
+    """**실패한 체인이 가설을 RUNNING 에 가두지 않는다** (2026-08-13 실측).
+
+    퀀트 카드의 CLI 직접 호출 경로는 작업 큐가 없어서, 체인이 죽으면 실패가
+    어디에도 안 남고 가설만 RUNNING 에 갇혔다 - e2379857 이 job 0건·실험 행
+    0건·"사유 기록 없음" 으로 하루 3회 스톨 회수(회당 30분 낭비). 실패 즉시
+    PROPOSED 복귀 + 예외 재전파(삼키면 호출부가 실패를 모른다)를 고정한다.
+    """
+    row = ("h-9", "모멘텀 가설", {"type": "momentum"},
+           ["krx-basket-daily/v1"], "PROPOSED")
+    cur = _FakeCursor(row, ["krx-basket-daily/v1"])
+
+    def boom(h, hid):
+        raise RuntimeError("체인 폭발")
+
+    try:
+        orchestrate("h-9", conn=_FakeConn(cur), market_conn=_FakeMarket(),
+                    run_chain=boom)
+        raise AssertionError("예외가 삼켜졌다 - 호출부가 실패를 알 수 없다")
+    except RuntimeError as e:
+        assert "체인 폭발" in str(e), e
+    joined = " ".join(cur.update_sqls)
+    assert "status='PROPOSED'" in joined, \
+        f"실패 후 PROPOSED 복귀가 없다 - RUNNING 감금 재발: {cur.update_sqls}"
 
 
 def _check_dataset_comes_from_hypothesis():

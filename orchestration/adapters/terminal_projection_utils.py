@@ -18,16 +18,36 @@ from orchestration.ceo_workflow_scope import (
     CONTINUOUS_RESEARCH_PLANE,
 )
 
-_ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
-_ROLE_RE = re.compile(r"(?m)^workflow_role=(\S+)\s*$")
+# 패턴은 ceo_workflow_scope.read_marker 가 소유한다 - 여기서 다시 적지 않는다
+# (2026-08-14: 같은 마커를 5곳에서 4가지 패턴으로 읽고 있었다).
+from orchestration.ceo_workflow_scope import read_marker
+
+
+class _Match:
+    """read_marker 결과를 기존 `match.group(1)` 호출부와 맞춰 주는 얇은 껍데기."""
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def group(self, _index: int = 1) -> str:
+        return self._value
+
+
+def _search(body: object, key: str):
+    value = read_marker(str(body or ""), key)
+    return _Match(value) if value else None
+
+
+_ROOT_KEY = "workflow_root_task_id"
+_ROLE_KEY = "workflow_role"
 _ACTION_RE = re.compile(r"(?m)^(?:action|workflow_action)=(\S+)\s*$")
 _SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
 _SUPERVISOR_LINE_RE = re.compile(
     rf"^{re.escape(_SUPERVISOR_MARKER)}(?:\s+(?P<fields>.*))?$"
 )
 _METADATA_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+$")
-_MODE_RE = re.compile(r"(?m)^workflow_mode=(\S+)\s*$")
-_PLANE_RE = re.compile(r"(?m)^workflow_plane=(\S+)\s*$")
+_MODE_KEY = "workflow_mode"
+_PLANE_KEY = "workflow_plane"
 _FORBIDDEN_KEYS = {
     "chain_of_thought",
     "cot",
@@ -62,12 +82,12 @@ def task_body(task: Mapping[str, Any]) -> str:
 
 
 def workflow_root(task: Mapping[str, Any]) -> str | None:
-    match = _ROOT_RE.search(task_body(task))
+    match = _search(task_body(task), _ROOT_KEY)
     return match.group(1).strip() if match else None
 
 
 def workflow_role(task: Mapping[str, Any]) -> str | None:
-    match = _ROLE_RE.search(task_body(task))
+    match = _search(task_body(task), _ROLE_KEY)
     return match.group(1).strip().casefold() if match else None
 
 
@@ -102,12 +122,12 @@ def action(task: Mapping[str, Any]) -> str | None:
 
 
 def workflow_mode(task: Mapping[str, Any]) -> str | None:
-    match = _MODE_RE.search(task_body(task))
+    match = _search(task_body(task), _MODE_KEY)
     return match.group(1).strip().casefold() if match else None
 
 
 def workflow_plane(task: Mapping[str, Any]) -> str | None:
-    match = _PLANE_RE.search(task_body(task))
+    match = _search(task_body(task), _PLANE_KEY)
     return match.group(1).strip().casefold() if match else None
 
 

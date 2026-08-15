@@ -30,12 +30,14 @@
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
 import sys
 import uuid
 from collections import deque
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +51,7 @@ KST = timezone(timedelta(hours=9))
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
 from strategy_templates import (          # noqa: E402  (같은 디렉터리 모듈)
     TEMPLATES,
+    pit_view_for,
     resolve,
     signal_scores,
 )
@@ -144,10 +147,54 @@ REV_CONFIG = {
 }
 
 
+# 실험 결과를 정하는 모듈들. **한 파일만 세면 지문이 거짓말을 한다.**
+#   backtest_runner   - 체결·비용·회계
+#   strategy_templates - 시그널과 PIT 뷰(유동성 필터 포함). 전략 카탈로그의 실체
+#   pit_dataset        - 파티션 적재 경로
+#   overfit_stats      - 부트스트랩·DSR (run_backtest 안에서 부른다)
+_CODE_FILES = ("backtest_runner.py", "strategy_templates.py",
+               "pit_dataset.py", "overfit_stats.py")
+
+
+def _code_digest(parts) -> str:
+    """(이름, 내용) 목록 -> 지문. 이름도 섞는다 - 파일이 바뀌든 갈리든 달라진다."""
+    h = hashlib.sha256()
+    for name, blob in parts:
+        h.update(name.encode())
+        h.update(b"\0")
+        h.update(blob)
+        h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
 def code_version() -> str:
-    """이 파일 자신의 해시 - 코드가 바뀌면 실험이 달라진다는 사실을 강제한다."""
-    src = Path(__file__).read_bytes()
-    return f"{RUNNER_VERSION}+{hashlib.sha256(src).hexdigest()[:12]}"
+    """결과를 정하는 코드의 해시 - 코드가 바뀌면 실험이 달라진다는 사실을 강제한다.
+
+    ▶ 한 파일만 세면 지문이 거짓말을 한다 (2026-08-14 실측)
+      예전에는 `Path(__file__)` 하나만 해시했다. 그런데 시그널과 PIT 뷰는
+      `strategy_templates` 에 있다 - 이 러너가 거기서 import 하고, 전략
+      카탈로그도 거기서 파생된다. 즉 **결과를 가장 크게 정하는 파일이 지문
+      밖에** 있었다.
+
+      그래서 두 방향으로 깨졌다:
+        · 거래대금 단위 버그(백만원 vs 원)를 `strategy_templates` 에서 고쳤는데
+          지문이 그대로라, 유니버스가 비어 **체결 0** 으로 끝난 실험
+          `9354f7fd` 가 그 지문을 계속 쥐고 있었다. 고친 코드로 다시 돌리려던
+          주문 2건이 "중복 실험" 으로 죽었다 - **버그가 자기 자리를 봉인했다.**
+        · 반대로 **같은 지문의 두 실험이 다른 결과를 낼 수 있다.** "같은 입력 =
+          같은 해시 = 같은 결과" 라는 재현성 계약이 그만큼 거짓이었다.
+
+      지문이 넓어지므로 **과거 지문은 더 이상 새 실행을 막지 않는다.** 그건
+      의도한 것이다 - 그 결과들은 실제로 다른 코드가 낸 것이다. 과거 행은
+      자기 code_version 을 그대로 달고 원장에 남는다.
+    """
+    here = Path(__file__).resolve().parent
+    parts = []
+    for name in _CODE_FILES:
+        p = here / name
+        # 없는 파일도 결정적으로 센다 - 빠졌다는 사실 자체가 지문의 일부다
+        parts.append((name, p.read_bytes() if p.exists() else b"<missing>"))
+    return f"{RUNNER_VERSION}+{_code_digest(parts)}"
 
 
 def input_hash(dataset_hash: str, config: dict, code_ver: str, seed: int) -> str:
@@ -168,6 +215,17 @@ class Market:
     closes: dict[tuple[date, str], float]
     symbols: list[str]
     notionals: dict[tuple[date, str], float] = field(default_factory=dict)
+    # ▶ **미시구조 일별 집계** (2026-08-14). (날짜, 종목) -> 피처 dict.
+    #   `krx-microstructure-daily` 가 제공하는 spread_bps·depth_imbalance·
+    #   order_flow_imbalance·trade_intensity·realized_volatility 를 담는다.
+    #   **비어 있는 것이 정상**이다 - 그 데이터셋을 요구하지 않은 실험은 이
+    #   필드가 빈 채로 돌고, 예전과 완전히 같은 결과를 낸다.
+    #
+    #   ⚠ 필드를 늘렸으면 `walk_forward.slice_market` 도 같이 늘려야 한다.
+    #     `notionals` 를 안 넘겨 창 21개가 전부 0 이 된 사고가 오늘 있었다
+    #     (실험은 COMPLETED 인데 강건성 근거만 백지). 그쪽 자체점검이 이
+    #     필드도 함께 검사한다.
+    micro: dict[tuple[date, str], dict] = field(default_factory=dict)
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> Market:
@@ -183,6 +241,28 @@ class Market:
                 notionals[(r["trade_date"], iid)] = float(nv)
         return cls(dates=dates, opens=opens, closes=closes,
                    symbols=sorted(symbols), notionals=notionals)
+
+    def micro_until(self, until: date, feature: str,
+                    window: int = 1) -> dict[str, float]:
+        """until **까지의** 미시구조 피처 평균. 미래를 보지 않는다.
+
+        `window=1` 이면 그날 값 하나다. 호가·체결은 일별로도 잡음이 크므로
+        창을 주면 평균한다 - 그 판단은 신호가 한다(기본은 평균 안 함).
+        """
+        idx = [d for d in self.dates if d <= until][-window:]
+        out: dict[str, float] = {}
+        for s_ in self.symbols:
+            vals = []
+            for d in idx:
+                m = self.micro.get((d, s_))
+                if m is None:
+                    continue
+                v = m.get(feature)
+                if isinstance(v, (int, float)):
+                    vals.append(float(v))
+            if vals:
+                out[s_] = sum(vals) / len(vals)
+        return out
 
     def adv_until(self, until: date, window: int = 20) -> dict[str, float]:
         """until **까지의** 평균 거래대금. 미래 거래대금을 보지 않는다.
@@ -224,6 +304,14 @@ def month_first_trading_days(dates: list[date]) -> set[date]:
     return out
 
 
+# 러너가 아는 리밸런스 정책. **`config_binding.REBALANCE_BY_HORIZON` 과 같은
+# 집합이어야 한다** - 바인더가 만드는 값을 러너가 모르면 그 가설은 실행 단계에서
+# 죽는다(2026-08-14 실측: horizon_days=2 -> `EVERY_TRADING_DAY` 로 사상됐는데
+# 러너 어휘에 없어 `ValueError` 로 실험이 통째로 실패했다). 자체점검이 대조한다.
+REBALANCE_POLICIES = ("MONTH_FIRST_TRADING_DAY", "EVERY_5_TRADING_DAYS",
+                      "EVERY_TRADING_DAY")
+
+
 def rebalance_days(dates: list[date], config: dict) -> set[date]:
     """리밸런스 일자 집합 - 정책 문자열이 모르는 값이면 거부한다."""
     policy = config.get("rebalance", "MONTH_FIRST_TRADING_DAY")
@@ -231,7 +319,15 @@ def rebalance_days(dates: list[date], config: dict) -> set[date]:
         return month_first_trading_days(dates)
     if policy == "EVERY_5_TRADING_DAYS":
         return set(dates[::5])
-    raise ValueError(f"알 수 없는 rebalance 정책: {policy!r}")
+    if policy == "EVERY_TRADING_DAY":
+        # ▶ 매일 리밸런스. 단기 지평(<=3일) 가설이 여기로 온다 - 미시구조처럼
+        #   신호 수명이 며칠인 전략은 월초 리밸런스로는 그 지평을 검증할 수
+        #   없다. 회전율이 커지는 것은 **사실이고 비용 모델이 그대로 문다** -
+        #   회전을 숨기지 않고 성적에 반영시키는 것이 맞다.
+        return set(dates)
+    raise ValueError(
+        f"알 수 없는 rebalance 정책: {policy!r} - 사용 가능: "
+        f"{list(REBALANCE_POLICIES)}")
 
 
 def select_targets(market: Market, i: int, config: dict) -> list[str]:
@@ -246,6 +342,26 @@ def select_targets(market: Market, i: int, config: dict) -> list[str]:
       실행이 거부**됐다(= 파라미터가 기본값과 같을 때만 실험이 돌았다).
       `resolve()` 가 접두로 템플릿을 찾아 이 구멍을 막는다.
     """
+    # ▶ **알파 수식(AST)이 있으면 그것이 신호다** (2026-08-14)
+    #   완성된 템플릿 14종은 그대로 두고 **병행**으로 연다 - 기존 실험의
+    #   재현이 깨지지 않는다. 수식이 있는 실험만 이 경로로 간다.
+    #
+    #   AST 에는 TOP/BOTTOM 이 없다. **항상 큰 값이 좋다**로 해석한다 -
+    #   방향을 뒤집고 싶으면 수식이 `neg` 를 쓰면 되고, 그러면 방향까지
+    #   지문에 들어가 "무엇을 시험했는지" 가 트리 하나로 완결된다.
+    expr = config.get("signal_expr")
+    if expr:
+        from alpha_ast import evaluate as _eval_expr  # noqa: PLC0415
+        from alpha_ast import parse as _parse_expr
+
+        _scores = _eval_expr(_parse_expr(expr),
+                             pit_view_for(market, market.dates[i - 1], config))
+        if not _scores:
+            return []
+        # 동점 순서는 종목 코드로 고정 - 결정론을 유지한다
+        _ranked = sorted(_scores, key=lambda s: (-_scores[s], s))
+        return _construct(_ranked, config)
+
     strat = config["strategy"]
     tpl = resolve(strat)
     if tpl is None:
@@ -256,9 +372,59 @@ def select_targets(market: Market, i: int, config: dict) -> list[str]:
                            params=config)
     if not scores:
         return []
-    # 동점 시 순서는 market.symbols(정렬됨) 순서를 따른다 - 결정론 유지
-    return sorted(scores, key=scores.get,
-                  reverse=tpl.rank == "TOP")[:int(config["top_n"])]
+    # 동점 시 순서는 market.symbols(정렬됨) 순서를 따른다 - 결정론 유지.
+    # `rank` 를 반영했으므로 이 목록은 **언제나 좋은 것부터**다.
+    ranked = sorted(scores, key=scores.get, reverse=tpl.rank == "TOP")
+    return _construct(ranked, config)
+
+
+# ── 포트폴리오 구성 방식 ────────────────────────────────────────────────────
+#
+# ▶ 왜 방식을 열었나 (2026-08-14 분위 곡선 실측)
+#   `signal_composite` 를 체결가능 유니버스(ADV 1억, 1,689종목)에서 10분위로
+#   갈라 재보니 알파가 **상위가 아니라 하위**에 있었다:
+#     Q1 -0.72 · Q4 +1.00 · Q7 +0.79 · Q10 +0.35 (%/월, 비용 전)
+#     롱온리 초과(Q10-평균) +0.06%p  vs  숏다리 몫(평균-Q1) +1.00%p
+#   상위 분위가 평균과 구별되지 않으므로 **상위를 고르는 구성으로는 못 먹는다** -
+#   top_n 이나 보유기간을 흔들어도 곡선 모양은 그대로다.
+#
+#   그런데 우리 어휘에는 "상위 N개를 산다" 밖에 없었다. 그래서 공장은 같은 벽에
+#   반복해 부딪혔다 - 병목 센서스 실측으로 `BASELINE_NOT_BEATEN` 이 **계열
+#   14개**에서 되풀이됐다("개별 설계 문제가 아니다"). 벽을 넘을 수단 자체가
+#   없으면 가설을 아무리 더 만들어도 결과는 같다.
+#
+# ▶ 왜 섞지 않고 배타로 두나
+#   `top_n=20` 은 DEFAULT_CONFIG 에 늘 있어서 "명시했는지" 를 구분할 수 없다.
+#   두 손잡이를 동시에 허용하면 어떤 구성을 잰 실험인지 사후에 알 수 없고,
+#   사전등록도 모호해진다. 방식을 **한 단어로 선언**하게 한다.
+CONSTRUCTIONS = ("TOP_N", "EXCLUDE_BOTTOM")
+
+
+def _construct(ranked: list[str], config: dict) -> list[str]:
+    """좋은 것부터 정렬된 목록 -> 실제 보유 종목.
+
+    `EXCLUDE_BOTTOM` 은 하위 `exclude_bottom_pct`% 를 빼고 **나머지 전체**를
+    동일가중으로 든다. 상위를 고르는 것이 아니라 나쁜 것을 피하는 구성이라,
+    숏 다리를 못 쓰는 롱온리에서 하위 분위의 음(-)수익을 회피하는 몫만 취한다.
+    """
+    mode = str(config.get("portfolio_construction") or "TOP_N").upper()
+    if mode == "TOP_N":
+        return ranked[:int(config["top_n"])]
+    if mode == "EXCLUDE_BOTTOM":
+        q = float(config.get("exclude_bottom_pct", 10.0))
+        if not 0.0 < q < 100.0:
+            raise ValueError(
+                f"exclude_bottom_pct 는 0 초과 100 미만이어야 한다: {q!r}")
+        keep = int(len(ranked) * (1.0 - q / 100.0))
+        # 한 종목도 안 남으면 그건 구성이 아니라 사고다 - 빈 포트폴리오는
+        # 거래 0 이 되고, 그것을 성과로 판정하면 가설이 억울하게 죽는다.
+        if keep < 1:
+            raise ValueError(
+                f"하위 {q}% 를 빼니 남는 종목이 없다(후보 {len(ranked)}개) - "
+                f"유니버스나 비율을 고친다")
+        return ranked[:keep]
+    raise ValueError(
+        f"모르는 구성 방식: {mode!r} - 사용 가능: {list(CONSTRUCTIONS)}")
 
 
 # ---------------------------------------------------------------------------
@@ -390,14 +556,18 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
 
     # 일별 초과수익의 변동성으로 정보비율. 날짜를 맞춰 곱셈오차를 막는다
     bmap = dict(bench_equity)
-    diffs = []
+    diffs, rs, rb = [], [], []
     prev_s = prev_b = None
     for d, sv in strategy_equity:
         bv = bmap.get(d)
         if bv is None or not sv or not bv:
             continue
         if prev_s and prev_b:
-            diffs.append((sv / prev_s - 1.0) - (bv / prev_b - 1.0))
+            r_s = sv / prev_s - 1.0
+            r_b = bv / prev_b - 1.0
+            diffs.append(r_s - r_b)
+            rs.append(r_s)
+            rb.append(r_b)
         prev_s, prev_b = sv, bv
 
     ir = None
@@ -421,6 +591,49 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
     }
     if ir is not None:
         out["information_ratio"] = ir       # 표본 부족이면 키를 아예 안 넣는다
+
+    # ── 위험조정 비교 계측 (2026-08-14, 2층 관문 결재 1단계) ──────────────
+    # ▶ 왜 여기인가: 전략·벤치마크 **일별 수익이 날짜 정렬된 채로 함께 있는
+    #   유일한 지점**이다. 벤치마크 곡선은 이 함수를 나가면 버려지고(관문은
+    #   DB 스칼라만 재조회한다), 원장에 수익률 시계열 테이블이 없다.
+    # ▶ 왜 필요한가 (실측): vol 타게팅 15% 전략을 ~30% vol 완전투자 벤치마크와
+    #   **명목 초과**로 비교해 −90~−103%p 가 나왔다. 위험을 줄일수록 관문이
+    #   처벌하는 구조이고, 문헌은 이를 leverage bias 라 부른다. 정석은 M²
+    #   (벤치마크 vol 로 스케일 후 비교)·회귀 alpha·appraisal ratio 다.
+    # ▶ **판정은 바꾸지 않는다.** release_gate.evaluate 는 이름 지정된 8개
+    #   키만 읽으므로 여기 무엇을 더해도 passed/failed 는 불변이다. 이 값들은
+    #   관문 재설계 결재를 위한 근거이지 그 자체로 합격선이 아니다.
+    # ▶ 못 재면 키를 안 만든다(0 을 채우지 않는다). rf=0 가정은 이 저장소의
+    #   sharpe_rf0 관례와 같다.
+    if len(rs) > 20:
+        n = len(rs)
+        ann = 252 ** 0.5
+        m_s, m_b = sum(rs) / n, sum(rb) / n
+        sd_s = (sum((x - m_s) ** 2 for x in rs) / (n - 1)) ** 0.5
+        sd_b = (sum((x - m_b) ** 2 for x in rb) / (n - 1)) ** 0.5
+        if sd_s > 0:
+            out["strategy_ann_vol_pct"] = round(sd_s * ann * 100.0, 2)
+        if sd_b > 0:
+            out["benchmark_ann_vol_pct"] = round(sd_b * ann * 100.0, 2)
+        if sd_s > 0 and sd_b > 0:
+            # M²: 전략을 벤치마크와 같은 변동성으로 스케일한 뒤의 초과(연율 %p).
+            #   레버리지로 위험을 맞춘 뒤 비교하는 것이 위험조정 비교의 정의다.
+            m2 = ((m_s / sd_s) * sd_b - m_b) * 252.0 * 100.0
+            out["m2_excess_ann_pct"] = round(m2, 2)
+            cov = sum((rs[i] - m_s) * (rb[i] - m_b) for i in range(n)) / (n - 1)
+            out["corr_vs_benchmark"] = round(cov / (sd_s * sd_b), 4)
+            beta = cov / (sd_b ** 2)
+            out["beta_vs_benchmark"] = round(beta, 4)
+            alpha_d = m_s - beta * m_b
+            out["alpha_ann_pct"] = round(alpha_d * 252.0 * 100.0, 2)
+            resid = [rs[i] - beta * rb[i] for i in range(n)]
+            m_r = sum(resid) / n
+            sd_r = (sum((x - m_r) ** 2 for x in resid) / (n - 1)) ** 0.5
+            if sd_r > 0:
+                out["residual_ann_vol_pct"] = round(sd_r * ann * 100.0, 2)
+                # appraisal ratio = 연율 alpha / 연율 잔차위험. vol 관리 전략
+                # 평가의 표준 지표(Moreira-Muir 가 성과를 이것으로 보고한다).
+                out["appraisal_ratio"] = round(alpha_d * 252.0 / (sd_r * ann), 4)
     return out
 
 
@@ -440,28 +653,85 @@ def excess_metrics(strategy_equity: list[tuple[date, float]],
 #
 #   값은 우리가 정하지 않는다. 에이전트가 config 로 준다.
 RISK_KEYS = ("vol_target_annual", "max_drawdown_stop", "vol_lookback_days",
-             "max_exposure")
+             "max_exposure", "trend_filter_days", "trend_filter_exposure")
 _VOL_MIN_OBS = 20              # 이보다 짧은 표본으로 변동성을 추정하지 않는다
+# 추세 판정에 필요한 최소 종목 수. 이보다 적으면 시장을 대표하지 못한다.
+_TREND_MIN_NAMES = 30
 
 
 def risk_enabled(config: dict) -> bool:
     """위험관리 손잡이가 하나라도 켜져 있나. **꺼져 있으면 예전 그대로다.**"""
     return any(config.get(k) is not None for k in RISK_KEYS
-               if k != "vol_lookback_days")
+               if k not in ("vol_lookback_days", "trend_filter_exposure"))
 
 
-def risk_exposure(config: dict, equity: list) -> tuple[float, str]:
+# ── 시장 추세 필터 ──────────────────────────────────────────────────────────
+#
+# ▶ 왜 이 수단이 필요한가 (2026-08-14 조사)
+#   원장 실측: 손잡이를 끄면 momentum 이 IR 1.255·초과 +157.5%p 를 내지만
+#   낙폭 -50.5% 로 강건성 관문에 걸리고, 손잡이(변동성 타게팅)를 켜면 낙폭은
+#   잡히는데 IR 이 -0.45 로 무너진다. **양쪽 다 막힌다.**
+#
+#   문헌이 빠진 수단을 지목한다 - 이동평균 같은 타이밍 요소는 "장기 하락장에서
+#   노출을 줄이는 데 매우 효과적" 이고, 변동성 타게팅과 달리 **강세장 참여를
+#   덜 희생**한다(변동성 타게팅은 추세가 강할 때 오히려 디레버리지한다).
+#   우리 어휘에는 그 수단이 없었다.
+#
+# ▶ 왜 지수가 아니라 수익률 중앙값인가
+#   단일 지수를 만들려면 구성·가중·리밸런스 규칙을 또 정해야 하고, 종목이
+#   드나들 때 평균 종가는 왜곡된다. 유니버스의 `days` 일 수익률 **중앙값**은
+#   그 왜곡이 없고 "시장이 오르는 중인가" 에 직접 답한다. 이동평균 위/아래
+#   판정과 같은 것을 재면서 구성 규칙을 하나 덜 만든다.
+#
+# ▶ PIT
+#   호출부가 `t-1` 까지의 날짜를 넘긴다. 오늘 수익률을 보고 오늘 노출을
+#   정하면 그건 위험관리가 아니라 미래 정보다.
+
+
+def market_trend_up(market: Market, until: date, days: int) -> bool | None:
+    """유니버스의 `days` 일 수익률 중앙값이 양(+)인가.
+
+    반환 `None` = **판정하지 않음**(표본 부족). 못 잰 것을 "하락" 으로 몰면
+    이력이 짧은 구간에서 전략이 통째로 현금이 된다 - 그건 필터가 아니라 사고다.
+    """
+    if days <= 0:
+        return None
+    rets = market.momentum(until, days)
+    vals = [v for v in rets.values() if v is not None]
+    if len(vals) < _TREND_MIN_NAMES:
+        return None
+    vals.sort()
+    n = len(vals)
+    med = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+    return med > 0.0
+
+
+def risk_exposure(config: dict, equity: list,
+                  market_up: bool | None = None) -> tuple[float, str]:
     """오늘의 목표 익스포저. `1.0` = 완전투자, `0.0` = 전량 현금.
 
     **어제까지의 자기 자산곡선만 본다** - `equity` 는 오늘 평가 전이므로
     구조적으로 PIT 다. 미래를 보고 위험을 줄이면 그건 위험관리가 아니다.
+
+    `market_up` 은 호출부가 `t-1` 까지로 판정한 시장 추세다(`None` = 미판정).
     """
     vt = config.get("vol_target_annual")
     dd_stop = config.get("max_drawdown_stop")
     cap_raw = config.get("max_exposure")
+    trend_days = config.get("trend_filter_days")
     cap = float(cap_raw) if cap_raw is not None else 1.0
-    if vt is None and dd_stop is None and cap_raw is None:
+    if vt is None and dd_stop is None and cap_raw is None and trend_days is None:
         return 1.0, ""                       # 손잡이 꺼짐 - 예전 그대로
+
+    # ▶ **추세 필터를 먼저 본다.** 시장이 내려가는 구간에서는 자기 곡선이
+    #   아직 안 꺾였어도 노출을 줄인다 - 낙폭 정지(자기 곡선)는 이미 맞은
+    #   뒤에 반응하고, 이것은 그 전에 반응하라는 수단이다.
+    #   미판정(None)이면 **적용하지 않는다** - 못 잰 것을 하락으로 몰지 않는다.
+    if trend_days is not None and market_up is False:
+        raw = config.get("trend_filter_exposure")
+        # 기본은 전량 현금. 값은 우리가 정하지 않는다 - 기획안이 준다.
+        te = 0.0 if raw is None else float(raw)
+        return max(0.0, min(te, cap)), "추세이탈"
 
     vals = [v for _, v in equity]
     if len(vals) < 2:
@@ -531,7 +801,15 @@ def run_backtest(market: Market, config: dict, *,
                 #   `equity` 는 오늘 평가 전이므로 어제까지만 담겨 있다(PIT).
                 exposure = 1.0
                 if _risk_on:
-                    exposure, _why = risk_exposure(config, equity)
+                    # 시장 추세는 **t-1 까지**로 판정한다(PIT). 손잡이를 안
+                    # 켰으면 계산하지 않는다 - 켠 실험만 비용을 문다.
+                    _mkt_up = None
+                    _tfd = config.get("trend_filter_days")
+                    if _tfd is not None:
+                        _mkt_up = market_trend_up(market, market.dates[i - 1],
+                                                  int(_tfd))
+                    exposure, _why = risk_exposure(config, equity,
+                                                   market_up=_mkt_up)
                     exposures.append(exposure)
                     if _why and _why not in risk_notes:
                         risk_notes.append(_why)
@@ -710,17 +988,244 @@ def compute_metrics(equity: list[tuple[date, float]], fills: list[Fill],
 # Dataset 로드 + 무결성 재검증
 # ---------------------------------------------------------------------------
 
+# ── 미시구조 적재 ───────────────────────────────────────────────────────────
+#
+# ▶ 왜 별도 적재인가 (2026-08-14)
+#   호가·체결은 일봉과 **다른 데이터셋**이다(`krx-microstructure-daily`).
+#   실험은 dataset_id 하나를 쓰므로, 일봉을 본체로 두고 미시구조는 **보조로
+#   덧붙인다.** 커버리지도 다르다 - 일봉은 2016~, 미시구조는 2026-05-18~
+#   (61 거래일 · 2,489종목). 창이 짧아 백테스트 관문은 어렵지만 횡단면
+#   2,489 × 61기간이면 **신호 IC 는 잰다.**
+#
+# ▶ 왜 신호가 요구를 선언하나
+#   가설이 `micro_dataset=...` 같은 키를 따로 적게 하면 그 키를 빠뜨린 가설은
+#   조용히 미시구조 없이 돈다(오늘 `trend_filter_days` 가 그렇게 무시된 사고가
+#   있었다). 대신 **템플릿이 `needs_micro` 로 선언**하면 신호를 고르는 순간
+#   요구가 따라온다 - 빠뜨릴 자리가 없다.
+#
+# ▶ 품질 상태는 지우지 않는다
+#   `quality_status`(PASS/WARN)를 값과 함께 담는다. 여기서 WARN 을 버리면
+#   "못 잰 것" 과 "재긴 쟀는데 표본이 얇은 것" 이 같아진다 - 거르는 판단은
+#   신호가 하고, 적재는 사실을 그대로 남긴다.
+MICRO_FEATURES = ("spread_bps", "depth_imbalance", "order_flow_imbalance",
+                  "trade_intensity", "realized_volatility",
+                  # 거래대금·체결수량 (2026-08-14, 데이터셋 v2). `traded_value`
+                  # 단위는 백만원 - 일봉 `notional` 과 같은 눈금이다.
+                  "traded_value", "traded_volume",
+                  # 일중 구간 피처 (2026-08-14, 데이터셋 v3). 여전히 일별 한
+                  # 행이라 실행면 규약은 그대로다 - 하루를 평균으로 뭉개지
+                  # 않을 뿐이다.
+                  "ofi_close", "ofi_open", "ofi_intraday_std",
+                  "close_vs_vwap", "spread_close_ratio")
+
+MICRO_DATASET = ("krx-microstructure-daily", "v3")
+
+
+def attach_micro(market: Market, rows: list[dict]) -> int:
+    """미시구조 일별 집계를 `Market.micro` 에 붙인다. 반환: 실린 (날짜,종목) 수."""
+    n = 0
+    for r in rows:
+        d = r.get("trade_date")
+        iid = str(r.get("instrument_id") or "")
+        if not d or not iid:
+            continue
+        vals: dict = {}
+        for k in MICRO_FEATURES:
+            v = r.get(k)
+            if v in (None, "", "None"):
+                continue
+            try:
+                vals[k] = float(v)
+            except (TypeError, ValueError):
+                continue          # 숫자가 아니면 안 담는다(지어내지 않는다)
+        if not vals:
+            continue
+        qs = r.get("quality_status")
+        if qs not in (None, "", "None"):
+            vals["quality_status"] = str(qs)
+        market.micro[(d, iid)] = vals
+        n += 1
+    return n
+
+
+def attach_micro_if_needed(market: Market, config: dict, conn) -> int:
+    """전략이 미시구조를 요구하면 붙인다. 요구가 없으면 **아무것도 안 한다**.
+
+    반환: 실린 (날짜,종목) 수. 0 이면 요구가 없었거나 데이터가 없었다는 뜻이라
+    호출부가 로그로 구분해 준다 - 조용히 비면 신호가 전 종목 미산출로 죽는데
+    그 이유가 안 보인다.
+    """
+    from strategy_templates import resolve  # noqa: PLC0415
+
+    # ▶ 수식(AST)이면 **트리가 자기 요구를 말한다** - 가설이 따로 안 적어도
+    #   미시구조 필드를 읽으면 자동으로 실린다(alpha_ast.needs_micro).
+    expr = config.get("signal_expr")
+    if expr:
+        from alpha_ast import needs_micro as _expr_needs_micro  # noqa: PLC0415
+        from alpha_ast import parse as _parse_expr
+
+        if not _expr_needs_micro(_parse_expr(expr)):
+            return 0
+    else:
+        tpl = resolve(str(config.get("strategy") or ""))
+        if tpl is None or not getattr(tpl, "needs_micro", False):
+            return 0
+    name, ver = MICRO_DATASET
+    *_rest, mrows = load_dataset(conn, name, ver)
+    n = attach_micro(market, mrows)
+    # ▶ **붙인 즉시 표본을 그 커버리지로 자른다** - 아래 함수 주석 참조.
+    #   붙이기와 자르기를 갈라 두면 한쪽만 부르는 자리가 생긴다(오늘 EDGE_KEYS
+    #   를 넣고 `_take_risk` 목록을 빠뜨려 손잡이가 조용히 무시된 사고가 있었다).
+    dropped, lo, hi = clip_to_micro_coverage(market)
+    if dropped:
+        print(f"  표본을 미시구조 커버리지로 잘랐다: {lo}~{hi} "
+              f"({len(market.dates):,}일 유지 / {dropped:,}일 제외)", flush=True)
+    return n
+
+
+def clip_to_micro_coverage(market: Market) -> tuple[int, date | None, date | None]:
+    """`Market` 을 미시구조가 실제로 있는 기간으로 **제자리 축소**한다.
+
+    ▶ 왜 (2026-08-14 실측, 첫 수식형 알파 `332fdec9`)
+      일봉은 2016-01-03~2026-08-09(2,599거래일)인데 미시구조는
+      2026-05-17~08-13(61거래일)뿐이다. 그런데 실험은 전 기간을 돌았다.
+      미시구조가 없는 97.7% 구간에서는 수식이 값을 못 내 거래가 없었고,
+      **그 현금 구간이 그대로 성적에 들어갔다.**
+
+        초과 -102.39%p · Sharpe -0.3185 · IR -0.4839
+        walk-forward 20창 중 18창(2016H2~2025H2)이 전부 정확히 0
+
+      -102%p 는 신호가 나쁘다는 증거가 아니라 **벤치마크가 10년간 +82.86%
+      오르는 동안 우리가 현금이었다**는 뜻이다. 신호에 대한 정보가 0인데
+      숫자는 참혹해서, 이대로면 환류가 "미시구조는 안 된다" 를 가르친다.
+
+      거래 0 을 성과로 세지 않는 규율은 이미 있었지만(`experiment_did_not_trade`,
+      `lessons_from` 의 UNDERPOWERED_DATA) **전체 단위**라 통과했다 - 실험
+      전체로는 12,835건 체결했기 때문이다. 진짜 문제는 표본 기간이었다.
+
+    ▶ 왜 여기서 자르나
+      벤치마크는 `buy_and_hold_equity(market, config)` 로 **같은 Market** 에서
+      나온다. 그래서 Market 을 자르면 전략과 벤치마크가 같은 구간을 보게 되고
+      초과·IR·낙폭이 전부 같은 기간의 것이 된다. 밖에서 따로 자르면 둘이
+      어긋난다.
+
+      표본이 61거래일로 줄면 walk-forward 도 `_short_sample_windows()` 규격
+      (SHORT_SAMPLE_MAX_DAYS=120)으로 떨어진다 - 반기 창 20개를 만들어 18개가
+      0 이 되는 일이 구조적으로 사라진다.
+
+    반환: (제외한 거래일 수, 커버리지 시작, 끝)
+    """
+    if not market.micro:
+        return 0, None, None
+    days = {d for (d, _s) in market.micro}
+    lo, hi = min(days), max(days)
+    keep = [d for d in market.dates if lo <= d <= hi]
+    dropped = len(market.dates) - len(keep)
+    if not dropped:
+        return 0, lo, hi
+    if not keep:                    # 겹치는 날이 없다 - 자르면 표본이 사라진다
+        return 0, lo, hi            # 그대로 두고 상위가 거래 0 으로 판정하게 한다
+    ks = set(keep)
+    market.dates = keep
+    # ▶ 필드를 손으로 세지 않는다. `Market` 에 필드가 늘 때 여기를 같이 안
+    #   고치면 옛 구간이 남아 신호가 미래를 본다(walk_forward.slice_market 이
+    #   `notionals` 를 빠뜨려 창 21개가 백지가 된 사고가 오늘 있었다).
+    for f in dataclasses.fields(market):
+        v = getattr(market, f.name)
+        if isinstance(v, dict) and v and isinstance(next(iter(v)), tuple):
+            setattr(market, f.name, {k: x for k, x in v.items() if k[0] in ks})
+    return dropped, lo, hi
+
+
+# ── 단위 선언 대조 ──────────────────────────────────────────────────────────
+#
+# ▶ 왜 필요한가 (2026-08-14 실측 사고)
+#   `krx-basket-daily/v3` 의 `notional` 은 **백만원 단위**인데 매니페스트의
+#   `schema_definition` 에는 열 이름만 있고 단위가 없었다. 실행면은 코드에
+#   박힌 상수(`strategy_templates.NOTIONAL_UNIT_KRW`)로 그것을 가정한다.
+#   가정과 실물이 어긋나자 체결가능 유니버스가 **0종목**이 됐고, 자체점검
+#   12개가 전부 통과하는 채로 실험 6건이 빈 유니버스를 돌았다.
+#
+# ▶ 왜 환산이 아니라 대조인가
+#   로더에서 원 단위로 환산하면 비용 모델(`LIQUIDITY_TIERS` 임계 3,000 =
+#   30억원)까지 연쇄로 바꿔야 하고, 그 연쇄가 바로 오늘 사고를 낸 자리다.
+#   지금 필요한 것은 "조용히 배수가 틀어지는 것" 을 막는 일이므로, **선언과
+#   가정을 대조해 어긋나면 멈춘다.** 환산 통일은 별도 작업으로 남긴다.
+#
+# ▶ 선언이 없으면 막지 않는다(아직)
+#   기존 매니페스트 4건에 단위가 없다. 여기서 바로 막으면 공장이 선다.
+#   경고를 남겨 채우게 하고, 채워진 뒤에는 어긋남을 확실히 잡는다 -
+#   **"없음" 과 "틀림" 을 같은 등급으로 두지 않는다.**
+UNIT_FACTOR_KRW = {
+    "KRW": 1,
+    "KRW_THOUSAND": 1_000,
+    "KRW_MILLION": 1_000_000,
+    "KRW_BILLION": 1_000_000_000,
+}
+
+
+def assert_declared_units(name: str, version: str,
+                          schema_def: dict | None,
+                          notional_unit: str | None = None) -> str | None:
+    """매니페스트가 선언한 거래대금 단위가 실행면 가정과 같은가.
+
+    ▶ **전용 컬럼이 정본이다.** `quant.dataset_manifests.notional_unit` 이
+      선언 여부를 스키마로 강제하고(준비도 진단이 그 컬럼 존재로 판정한다),
+      `schema_definition.units` 는 검산 근거 같은 서술을 담는 보조다.
+      컬럼이 비어 있으면 jsonb 로 물러난다 - 옛 매니페스트 호환.
+
+    반환: 선언된 단위 문자열(없으면 None). 어긋나면 `RuntimeError`.
+    """
+    from strategy_templates import NOTIONAL_UNIT_KRW  # noqa: PLC0415
+
+    units = ((schema_def or {}).get("units") or {})
+    declared = notional_unit or units.get("notional")
+    if not declared:
+        # ▶ **없는 열의 단위는 묻지 않는다** (2026-08-14).
+        #   미시구조 데이터셋은 스프레드·불균형·체결강도만 담고 거래대금 열이
+        #   아예 없는데도 이 경고가 매번 떴다. 소음은 그냥 시끄러운 게 아니라
+        #   **진짜 경고를 가린다** - 같은 실행 로그에서 표본이 2,599일이라는
+        #   훨씬 중대한 사실이 이 줄들 사이에 묻혀 있었다.
+        cols = [str(c).lower() for c in ((schema_def or {}).get("columns") or [])]
+        if cols and not any("notional" in c or "value" in c or "amount" in c
+                            for c in cols):
+            return None
+        print(f"  ⚠ {name}/{version} 매니페스트에 거래대금 단위 선언이 없다 - "
+              f"실행면은 1 단위 = {NOTIONAL_UNIT_KRW:,}원으로 가정하고 진행한다 "
+              f"(schema_definition.units.notional 을 채우면 대조한다)", flush=True)
+        return None
+    key = str(declared).strip().upper()
+    factor = UNIT_FACTOR_KRW.get(key)
+    if factor is None:
+        raise RuntimeError(
+            f"{name}/{version} 이 모르는 거래대금 단위를 선언했다: {declared!r} - "
+            f"사용 가능: {sorted(UNIT_FACTOR_KRW)}. 모르는 단위를 추측해서 "
+            f"쓰면 그 순간 모든 유동성 판정이 틀어진다")
+    if factor != NOTIONAL_UNIT_KRW:
+        raise RuntimeError(
+            f"{name}/{version} 의 거래대금 단위가 실행면 가정과 다르다: "
+            f"매니페스트 {key}(={factor:,}원) vs 실행면 {NOTIONAL_UNIT_KRW:,}원. "
+            f"1e{len(str(factor // NOTIONAL_UNIT_KRW or 1)) - 1}배 어긋난 채 돌면 "
+            f"유동성 필터가 전 종목을 버리거나 전부 통과시킨다(2026-08-14 실측: "
+            f"유니버스 0종목). 데이터나 상수 중 하나를 고친 뒤 다시 돌린다")
+    return key
+
+
 def load_dataset(conn, name: str, version: str):
     with conn.cursor() as cur:
         cur.execute(
             """
-            select dataset_id, universe_version_id, content_hash, row_count
+            select dataset_id, universe_version_id, content_hash, row_count,
+                   schema_definition, notional_unit
             from quant.dataset_manifests where name = %s and version = %s
             """, (name, version))
         row = cur.fetchone()
         if row is None:
             raise RuntimeError(f"Manifest 없음: {name}/{version} - 먼저 --build")
-        dataset_id, universe_id, chash, row_count = row
+        dataset_id, universe_id, chash, row_count, schema_def, notional_unit = row
+        # 로더 경계에서 단위를 대조한다 - 아래 함수의 주석에 근거가 있다.
+        # 파티션을 읽기 **전에** 막는다: 어긋난 단위로는 읽어도 쓸 수 없다.
+        assert_declared_units(name, version, schema_def, notional_unit)
         cur.execute(
             """
             select partition_key, object_path, content_hash
@@ -800,11 +1305,24 @@ def zombie_experiment(status: str, ended: bool, n_runs: int,
                       n_outcomes: int, age_min: float) -> bool:
     """미완(좀비) 실험인가 - **판정이 있으면 절대 아니다.** (순수 함수)
 
-    좀비 서명: RUNNING · 종료 없음 · backtest_runs 0 · 판정 0 · 10분 경과.
+    좀비 서명 두 가지:
+      RUNNING · 종료 없음 · backtest_runs 0 · 판정 0 · 10분 경과
+      CANCELLED · backtest_runs 0 · 판정 0 (나이 무관)
     FAILED 는 좀비가 아니다 - 그건 실패라는 **기록**이고, 기록은 보호한다.
+
+    ▶ CANCELLED 조항 (2026-08-13 실측, 추적 감시가 잡음)
+      워커 스톨 회수가 버려진 RUNNING 행을 CANCELLED 로 닫게 되자, 같은 코드
+      지문의 재발주가 중복 가드에서 "중복 실험 - 기존 판정을 수동 확인" 으로
+      죽었다. 그 행에는 판정이 없다 - **거짓 사유**였고, 그 지문의 실험이
+      영구 봉인되는 구조였다. 정보 0 인 CANCELLED 는 회수(같은 experiment_id
+      로 완주) 대상이다. 나이 조건이 필요 없는 이유: 이미 명시적으로 닫힌
+      행이라 살아 있는 실행을 뺏을 가능성이 없다.
     """
+    if int(n_runs) != 0 or int(n_outcomes) != 0:
+        return False
+    if str(status) == "CANCELLED":
+        return True
     return (str(status) == "RUNNING" and not ended
-            and int(n_runs) == 0 and int(n_outcomes) == 0
             and float(age_min) >= ZOMBIE_RECLAIM_MIN)
 
 
@@ -900,11 +1418,15 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                                               int(prev[4]), int(prev[5]),
                                               float(prev[3] or 0)):
                     exp_id = prev[0]
-                    print(f"미완 실험 회수({exp_id[:8]}…): RUNNING 인 채 "
+                    print(f"미완 실험 회수({exp_id[:8]}…): {prev[1]} 인 채 "
                           f"{float(prev[3]):.0f}분 - run 기록 0 · 판정 0 이므로 "
                           f"재판정이 아니라 **완주**다. 같은 experiment_id 로 "
                           f"이어서 돈다", flush=True)
-                    cur2.execute("update quant.experiments set started_at=now(),"
+                    # status·ended_at 도 되돌린다 - CANCELLED 좀비를 회수할 때
+                    # started_at 만 갱신하면 ended_at < started_at 이 되어
+                    # experiments_check 제약이 터진다(2026-08-13).
+                    cur2.execute("update quant.experiments set status='RUNNING',"
+                                 " ended_at=null, started_at=now(),"
                                  " trace_id=%s where experiment_id=%s::uuid",
                                  (trace, exp_id))
                     conn.commit()
@@ -919,6 +1441,20 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
         conn.commit()
 
         market = Market.from_rows(rows)
+        # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
+        #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와 `Market`
+        #   이 동시에 살아 있으면 같은 데이터를 두 벌 든다. 미시구조까지
+        #   더 실으면 그 자리에서 `OSError: Cannot allocate memory` 로
+        #   죽는다 - 실제로 OFI 첫 실험이 그렇게 실패했다. 위 두 줄 이후
+        #   `rows` 를 읽는 곳이 없으므로 즉시 놓는다.
+        del rows
+        gc.collect()
+        # ▶ 신호가 요구하면 미시구조를 붙인다(2026-08-14). 요구가 없으면
+        #   아무 일도 일어나지 않아 예전 실험의 재현이 그대로다.
+        _micro_n = attach_micro_if_needed(market, config, conn)
+        if _micro_n:
+            print(f"  미시구조 적재 {_micro_n:,}건 (호가·체결 일별 집계)",
+                  flush=True)
         run_row_id = None
         try:
             result = run_backtest(market, config, trials=trials)
@@ -1080,6 +1616,41 @@ def _check_fifo_and_costs():
     assert slippage_bps_for("A", None, adv=None) == COST_MODEL["slippage_bps"]
     assert slippage_bps_for("A", None, adv=0) == COST_MODEL["slippage_bps"]
     print("  FIFO 손익·비용 산식      OK")
+
+
+def _check_risk_adjusted_metrics_are_numeric_and_honest():
+    """**위험조정 계측이 수치만 담고, 못 재면 키를 안 만든다** (2026-08-14).
+
+    metrics 는 numeric 컬럼에 그대로 적재되므로 문자열·불리언·NaN 이 하나라도
+    섞이면 insert 가 DatatypeMismatch 로 죽어 실험이 종결되지 못한다(이 파일이
+    같은 사고를 두 번 기록하고 있다). 그리고 vol 이 0 이면 M² 는 정의되지
+    않는데, 그때 0 을 채우면 관문·환류가 "쟀는데 0" 으로 읽는다.
+    """
+    from datetime import timedelta
+
+    d0 = date(2025, 1, 1)
+    days = [d0 + timedelta(days=i) for i in range(120)]
+    # 전략: 저변동 완만 상승 / 벤치마크: 고변동 큰 상승 (실측 구도 그대로)
+    se = [(d, 100.0 * (1.0 + 0.0004 * i + 0.001 * ((i % 5) - 2)))
+          for i, d in enumerate(days)]
+    be = [(d, 100.0 * (1.0 + 0.0009 * i + 0.004 * ((i % 7) - 3)))
+          for i, d in enumerate(days)]
+    out = excess_metrics(se, be)
+    for k in ("m2_excess_ann_pct", "alpha_ann_pct", "appraisal_ratio",
+              "strategy_ann_vol_pct", "benchmark_ann_vol_pct",
+              "beta_vs_benchmark", "corr_vs_benchmark"):
+        assert k in out, f"{k} 가 안 나왔다: {sorted(out)}"
+    for k, v in out.items():
+        assert isinstance(v, (int, float)) and v == v, f"{k}={v!r} 는 수치가 아니다"
+    # 벤치마크가 완전 평탄(vol 0)이면 M²·beta 는 정의 불가 - 키가 없어야 한다
+    flat = [(d, 100.0) for d in days]
+    out2 = excess_metrics(se, flat)
+    for k in ("m2_excess_ann_pct", "beta_vs_benchmark", "appraisal_ratio"):
+        assert k not in out2, f"vol 0 인데 {k} 를 지어냈다: {out2.get(k)}"
+    # 표본이 짧으면 위험조정 계측을 아예 안 낸다(21일 미만)
+    short = excess_metrics(se[:10], be[:10])
+    assert "m2_excess_ann_pct" not in short, short
+    print("  위험조정 계측 정직        OK")
 
 
 def _check_metrics_and_determinism():
@@ -1250,6 +1821,51 @@ def _check_risk_is_pit():
     print("  위험관리도 PIT          OK")
 
 
+def _check_fingerprint_covers_every_module_that_moves_results():
+    """**지문은 결과를 정하는 코드 전부를 세야 한다** (2026-08-14 실측).
+
+    예전에는 이 파일 하나만 해시했다. 시그널과 PIT 뷰는 `strategy_templates`
+    에 있는데도 지문 밖이었고, 그래서 거래대금 단위 버그를 고쳐도 지문이 안
+    바뀌었다 - 체결 0 으로 끝난 `9354f7fd` 가 그 지문을 계속 쥐어 재실행
+    주문 2건이 "중복 실험" 으로 죽었다.
+
+    여기서 고정하는 것 두 가지:
+      ① 어느 부분이 바뀌어도 지문이 바뀐다(내용도, 파일 이름도).
+      ② **같은 디렉터리에서 top-level import 하는 모듈은 전부 지문에 든다.**
+         새 모듈을 얹으면서 `_CODE_FILES` 를 안 고치면 여기서 걸린다 -
+         "다음 사람이 기억한다" 에 기대지 않는다.
+    """
+    import re as _re
+
+    base = [("a.py", b"one"), ("b.py", b"two")]
+    d0 = _code_digest(base)
+    assert d0 == _code_digest(list(base)), "같은 입력인데 지문이 흔들린다"
+    assert d0 != _code_digest([("a.py", b"one!"), ("b.py", b"two")]), \
+        "내용이 바뀌었는데 지문이 그대로다"
+    assert d0 != _code_digest([("z.py", b"one"), ("b.py", b"two")]), \
+        "파일 이름이 바뀌었는데 지문이 그대로다"
+    # 구분자가 없으면 ('ab','') 와 ('a','b') 가 같은 지문이 된다
+    assert _code_digest([("a.py", b"xy")]) != _code_digest([("a.pyx", b"y")]), \
+        "이름과 내용의 경계가 없다 - 다른 조합이 같은 지문이 된다"
+
+    here = Path(__file__).resolve().parent
+    src = Path(__file__).read_text(encoding="utf-8")
+    # top-level(들여쓰기 없는) import 만 본다 - 함수 안 지연 import 는 선택적
+    # 경로라 여기서 강제하지 않는다(overfit_stats 처럼 필요하면 손으로 넣는다).
+    imported = set()
+    for m in _re.finditer(r"^(?:from|import)\s+([A-Za-z_][\w]*)", src, _re.M):
+        mod = m.group(1)
+        if (here / f"{mod}.py").exists():
+            imported.add(f"{mod}.py")
+    missing = sorted(imported - set(_CODE_FILES))
+    assert not missing, (
+        f"이 러너가 쓰는데 지문이 안 세는 모듈: {missing} - "
+        f"_CODE_FILES 에 넣어라. 안 넣으면 그 파일을 고쳐도 지문이 안 바뀌어 "
+        f"고친 실험이 '중복' 으로 막히고, 같은 지문이 다른 결과를 낸다")
+    print("  지문이 결과 모듈 전부를 셈 OK "
+          f"({len(_CODE_FILES)}개: {', '.join(_CODE_FILES)})")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -1283,12 +1899,402 @@ if __name__ == "__main__":
         assert not zombie_experiment("RUNNING", False, 0, 1, 99.0)  # **판정 있음**
         assert not zombie_experiment("COMPLETED", True, 1, 1, 99.0)
         assert not zombie_experiment("FAILED", True, 1, 0, 99.0)    # 실패도 기록이다
+        # ▶ 스톨 회수가 닫은 CANCELLED (2026-08-13 실측: 재발주가 "중복 실험 -
+        #   기존 판정을 수동 확인" 이라는 **거짓 사유**로 죽었다. 판정이 없는데)
+        assert zombie_experiment("CANCELLED", True, 0, 0, 0.0)      # 나이 무관 회수
+        assert not zombie_experiment("CANCELLED", True, 1, 0, 99.0)  # run 기록 보호
+        assert not zombie_experiment("CANCELLED", True, 0, 1, 99.0)  # 판정 불가침
         print("  좀비 회수 != 재판정      OK")
+
+    def _check_rebalance_vocab_matches_binder():
+        """**바인더가 만드는 정책을 러너가 다 알아야 한다** (2026-08-14 실측).
+
+        `horizon_days=2` 가 `EVERY_TRADING_DAY` 로 사상됐는데 러너 어휘에 없어
+        실험이 `ValueError` 로 통째로 실패했다. 두 표가 갈리면 그 조합의 가설은
+        접수·바인딩을 다 통과하고 **실행 단계에서만** 죽는다 - 가장 늦게 발각되는
+        자리다. 여기서 집합을 대조해 늘릴 때 같이 늘어나게 한다.
+        """
+        from config_binding import REBALANCE_BY_HORIZON, _rebalance_for
+
+        made = set(REBALANCE_BY_HORIZON.values())
+        # 바인더는 표에 없는 지평도 규칙으로 사상한다 - 경계값을 훑어 실제 산출을 모은다
+        for h in (1, 2, 3, 4, 5, 6, 10, 11, 20, 21, 60, 120):
+            made.add(_rebalance_for(h))
+        unknown = sorted(made - set(REBALANCE_POLICIES))
+        assert not unknown, (
+            f"바인더가 만드는데 러너가 모르는 리밸런스 정책: {unknown} - "
+            f"그 지평의 가설은 실행 단계에서만 죽는다")
+        # 실제로 동작하는지 - 이름만 맞고 산출이 비면 거래가 0 이 된다
+        days = [date(2026, 1, d) for d in range(1, 21)]
+        assert len(rebalance_days(days, {"rebalance": "EVERY_TRADING_DAY"})) == 20
+        assert len(rebalance_days(days, {"rebalance": "EVERY_5_TRADING_DAYS"})) == 4
+        try:
+            rebalance_days(days, {"rebalance": "NOPE"})
+        except ValueError as e:
+            assert "사용 가능" in str(e), e
+        else:
+            raise AssertionError("모르는 정책이 통과했다")
+        print("  리밸런스 어휘 일치       OK")
+
+    def _check_ast_signal_path():
+        """**수식(AST)이 신호가 되고, 기존 경로는 그대로다** (2026-08-14).
+
+        표현을 열어도 옛 실험이 흔들리면 안 된다 - 그래서 `signal_expr` 가
+        있는 실험만 새 경로로 가고, 없으면 예전 코드가 한 줄도 안 바뀐 채 돈다.
+        """
+        from alpha_ast import parse as _pe
+
+        d0 = date(2026, 1, 5)
+        days = [d0 + timedelta(days=k) for k in range(40)]
+        closes, opens = {}, {}
+        for j, s in enumerate(("A", "B", "C")):
+            for k, d in enumerate(days):
+                closes[(d, s)] = 100.0 + j * 10 + k * (j + 1)   # 기울기가 다르다
+                opens[(d, s)] = closes[(d, s)]
+        m = Market(dates=days, opens=opens, closes=closes, symbols=["A", "B", "C"])
+
+        # ① 수식 경로 - 20일 수익률 상위를 산다(기울기 큰 C 가 위)
+        cfg = {"strategy": "MOM-20-20", "top_n": 2, "lookback_days": 20,
+               "signal_expr": _pe({"op": "ts_return", "field": "close", "n": 21})}
+        got = select_targets(m, len(days) - 1, cfg)
+        assert got == ["C", "B"], got
+
+        # ② `neg` 로 방향을 뒤집으면 순서가 뒤집힌다 - 방향이 수식 안에 있다
+        cfg_neg = dict(cfg, signal_expr=_pe(
+            {"op": "neg", "arg": {"op": "ts_return", "field": "close", "n": 21}}))
+        assert select_targets(m, len(days) - 1, cfg_neg) == ["A", "B"], \
+            select_targets(m, len(days) - 1, cfg_neg)
+
+        # ③ 수식이 없으면 **예전 경로** - 템플릿이 신호를 만든다
+        plain = {"strategy": "MOM-20-20", "top_n": 2, "lookback_days": 20}
+        assert select_targets(m, len(days) - 1, plain) == ["C", "B"]
+
+        # ④ 결정론 - 같은 입력이면 같은 선택
+        assert select_targets(m, len(days) - 1, cfg) == got
+
+        # ⑤ 미시구조 요구를 트리가 말한다 - 가설이 안 적어도 실린다
+        class _Boom:
+            def cursor(self):
+                raise AssertionError("요구하지 않았는데 데이터셋을 읽었다")
+        assert attach_micro_if_needed(m, cfg, _Boom()) == 0     # 가격만 읽는 수식
+        micro_cfg = dict(cfg, signal_expr=_pe(
+            {"op": "ts_mean", "field": "order_flow_imbalance", "n": 3}))
+        try:
+            attach_micro_if_needed(m, micro_cfg, _Boom())
+        except AssertionError as e:
+            assert "요구하지 않았는데" in str(e)      # 읽으려 했다 = 요구를 인식했다
+        else:
+            raise AssertionError("미시구조 수식인데 데이터셋을 안 읽었다")
+        print("  AST 신호 경로(병행)      OK")
+
+    def _check_micro_attach():
+        """**미시구조는 요구한 신호에만 붙고, 없는 값은 지어내지 않는다** (2026-08-14).
+
+        호가·체결은 일봉과 다른 데이터셋이고 커버리지도 짧다(2026-05-18~).
+        요구하지 않은 실험에 붙으면 그 실험의 재현이 깨지고, 없는 구간을 0 으로
+        채우면 "호가가 없었다" 가 "불균형이 중립이었다" 로 둔갑한다.
+        """
+        from strategy_templates import TEMPLATES
+
+        d0 = date(2026, 6, 1)
+        m = Market(dates=[d0], opens={}, closes={(d0, "A"): 100.0},
+                   symbols=["A"])
+        rows = [
+            {"trade_date": d0, "instrument_id": "A", "spread_bps": 12.5,
+             "order_flow_imbalance": 0.31, "quality_status": "PASS"},
+            # 숫자가 아닌 값·빈 값은 담지 않는다(지어내지 않는다)
+            {"trade_date": d0, "instrument_id": "B", "spread_bps": "n/a",
+             "order_flow_imbalance": None},
+            # 키가 없으면 행 자체를 버린다 - 정체 없는 값은 붙일 자리가 없다
+            {"instrument_id": "C", "spread_bps": 3.0},
+        ]
+        n = attach_micro(m, rows)
+        assert n == 1, (n, m.micro)
+        got = m.micro[(d0, "A")]
+        assert got["order_flow_imbalance"] == 0.31 and got["spread_bps"] == 12.5
+        assert got["quality_status"] == "PASS", "품질 상태를 버리면 WARN 을 못 가린다"
+        assert ("B" not in [k[1] for k in m.micro]), "숫자가 아닌 값을 담았다"
+
+        # 요구하지 않은 전략에는 **붙지 않는다** - conn 을 건드리면 그 자체로 실패
+        class _Boom:
+            def cursor(self):
+                raise AssertionError("요구하지 않았는데 데이터셋을 읽었다")
+        assert attach_micro_if_needed(m, {"strategy": "MOM-20-20"}, _Boom()) == 0
+        # 템플릿이 요구를 선언한다 - 어휘에 미시구조 신호가 실제로 있는지 고정
+        need = [t.edge_type for t in TEMPLATES.values()
+                if getattr(t, "needs_micro", False)]
+        assert "order_flow_imbalance" in need, need
+        assert "signal_composite" in need, need
+        try:
+            attach_micro_if_needed(m, {"strategy": "COMBO"}, _Boom())
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("COMBO did not request the microstructure dataset")
+        print("  미시구조 적재(요구한 것만) OK")
+
+    def _check_combo_short_sample_is_inconclusive():
+        """The current 61-day micro sample must not manufacture a WF verdict."""
+        from strategy_templates import resolve
+        from walk_forward import make_windows
+
+        combo = resolve("COMBO")
+        assert combo is not None
+        warmup = combo.min_history(dict(DEFAULT_CONFIG, strategy="COMBO"))
+        assert warmup == 60, warmup
+        days = [date(2026, 5, 18) + timedelta(days=i) for i in range(61)]
+        assert make_windows(days, warmup, embargo_days=20) == [], \
+            "61 days with a 60-day warmup cannot support walk-forward evidence"
+        print("  COMBO 61-day sample -> insufficient OK")
+
+    def _check_sample_is_clipped_to_micro_coverage():
+        """**미시구조를 읽으면 표본도 그 기간이어야 한다** (2026-08-14 실측).
+
+        첫 수식형 알파 `332fdec9` 가 일봉 2,599거래일 전 구간을 돌았다.
+        미시구조는 61거래일뿐이라 나머지 97.7% 는 신호가 없어 현금이었고,
+        그 구간이 성적에 그대로 들어갔다 - 초과 -102.39%p, walk-forward
+        20창 중 18창이 정확히 0. 신호에 대한 정보는 0 인데 숫자만 참혹해서,
+        이대로면 환류가 "미시구조는 안 된다" 를 가르친다.
+        """
+        days = [date(2026, 1, 5) + timedelta(days=k) for k in range(40)]
+        m = Market(dates=list(days), symbols=["A"],
+                   opens={(d, "A"): 100.0 for d in days},
+                   closes={(d, "A"): 100.0 for d in days},
+                   notionals={(d, "A"): 300.0 for d in days})
+        # 미시구조는 끝의 5일만 있다
+        cov = days[-5:]
+        m.micro = {(d, "A"): {"spread_bps": 10.0} for d in cov}
+
+        dropped, lo, hi = clip_to_micro_coverage(m)
+        assert (lo, hi) == (cov[0], cov[-1]), (lo, hi)
+        assert dropped == 35 and m.dates == cov, (dropped, len(m.dates))
+        # **모든 격자 필드가 같이 잘린다.** 하나라도 남으면 그 구간의 값을
+        # 신호가 보게 되고, 그것은 표본 밖을 보는 것이다.
+        for f in dataclasses.fields(m):
+            v = getattr(m, f.name)
+            if isinstance(v, dict) and v:
+                stale = [k for k in v if k[0] not in set(cov)]
+                assert not stale, (f.name, stale[:3])
+
+        # 미시구조를 안 쓰면 **아무것도 안 한다** - 기존 실험의 재현이 그대로다
+        m2 = Market(dates=list(days), symbols=["A"], opens={}, closes={})
+        assert clip_to_micro_coverage(m2) == (0, None, None)
+        assert m2.dates == days
+
+        # 겹치는 날이 하나도 없으면 자르지 않는다 - 표본을 0 으로 만드는 대신
+        # 상위가 "거래 0" 으로 판정하게 둔다(빈 표본은 오류 메시지가 안 나온다)
+        m3 = Market(dates=list(days), symbols=["A"], opens={}, closes={})
+        m3.micro = {(date(2020, 1, 6), "A"): {"spread_bps": 1.0}}
+        assert clip_to_micro_coverage(m3)[0] == 0 and m3.dates == days
+
+        # 자른 표본은 짧은 표본 규격으로 떨어진다 - 반기 창 20개를 만들어
+        # 18개가 0 이 되는 일이 구조적으로 사라진다
+        from walk_forward import SHORT_SAMPLE_MAX_DAYS
+        assert len(cov) <= SHORT_SAMPLE_MAX_DAYS, (len(cov), SHORT_SAMPLE_MAX_DAYS)
+        print("  표본=미시구조 커버리지   OK")
+
+    def _check_trend_filter():
+        """**시장이 내려갈 때만 줄이고, 못 재면 건드리지 않는다** (2026-08-14).
+
+        원장 실측이 양쪽으로 막혀 있었다 - 손잡이를 끄면 IR 1.255/낙폭 -50.5%
+        로 강건성 탈락, 변동성 타게팅을 켜면 낙폭은 잡히고 IR 이 -0.45 로
+        무너진다. 이 필터는 그 사이를 노리는 **세 번째 수단**이라, 기존 두
+        손잡이의 동작을 바꾸지 않는 것이 전제다.
+        """
+        eq = [(date(2024, 1, 1) + timedelta(days=k), 100.0 + k)
+              for k in range(30)]
+
+        # ① 꺼져 있으면 예전 그대로 - 새 손잡이가 기존 재현을 깨면 안 된다
+        assert risk_exposure({}, eq) == (1.0, "")
+        assert risk_exposure({}, eq, market_up=False) == (1.0, "")
+
+        cfg = {"trend_filter_days": 200}
+        # ② 하락 판정이면 줄인다. 기본은 전량 현금.
+        exp, why = risk_exposure(cfg, eq, market_up=False)
+        assert (exp, why) == (0.0, "추세이탈"), (exp, why)
+        # ③ 상승이면 이 필터는 관여하지 않는다
+        assert risk_exposure(cfg, eq, market_up=True)[0] == 1.0
+        # ④ **미판정이면 적용하지 않는다** - 못 잰 것을 하락으로 몰면 이력이
+        #    짧은 구간에서 전략이 통째로 현금이 된다(필터가 아니라 사고다)
+        assert risk_exposure(cfg, eq, market_up=None)[0] == 1.0
+        # ⑤ 부분 노출도 표현된다 - 값은 기획안이 정한다
+        assert risk_exposure(dict(cfg, trend_filter_exposure=0.3),
+                             eq, market_up=False)[0] == 0.3
+        # ⑥ 상한(max_exposure)을 넘지 못한다
+        assert risk_exposure(dict(cfg, trend_filter_exposure=0.8,
+                                  max_exposure=0.5), eq, market_up=False)[0] == 0.5
+
+        # ⑦ 추세 판정: 표본이 모자라면 None(지어내지 않는다)
+        d0 = date(2024, 1, 2)
+        days = [d0 + timedelta(days=k) for k in range(300)]
+        few = Market(dates=days, opens={}, closes={
+            (d, f"S{j}"): 100.0 + i for i, d in enumerate(days) for j in range(5)},
+            symbols=[f"S{j}" for j in range(5)])
+        assert market_trend_up(few, days[-1], 200) is None, "5종목으로 시장을 판정했다"
+        # 오르는 시장 / 내리는 시장
+        up = Market(dates=days, opens={}, closes={
+            (d, f"S{j}"): 100.0 + i for i, d in enumerate(days)
+            for j in range(60)}, symbols=[f"S{j}" for j in range(60)])
+        down = Market(dates=days, opens={}, closes={
+            (d, f"S{j}"): 400.0 - i for i, d in enumerate(days)
+            for j in range(60)}, symbols=[f"S{j}" for j in range(60)])
+        assert market_trend_up(up, days[-1], 200) is True
+        assert market_trend_up(down, days[-1], 200) is False
+        assert market_trend_up(up, days[-1], 0) is None, "창 0을 판정으로 쓰면 안 된다"
+
+        # ⑧ 호출부가 **t-1** 로 판정하는지 - 오늘을 보면 그건 미래 정보다
+        import ast
+        import pathlib
+        src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        body = ast.get_source_segment(src, next(
+            n for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name == "run_backtest")) or ""
+        assert "market_trend_up(market, market.dates[i - 1]" in body, \
+            "추세 판정이 t-1 이 아니다 - 오늘 수익률로 오늘 노출을 정하면 누출이다"
+        print("  추세 필터(세 번째 수단)  OK")
+
+    def _check_declared_units_are_compared():
+        """**선언한 단위와 실행면 가정이 어긋나면 멈춘다** (2026-08-14 실측).
+
+        매니페스트에 단위가 없어 실행면 상수가 유일한 근거였고, 그 가정이
+        실물(백만원)과 어긋나자 체결가능 유니버스가 0종목이 됐다. 자체점검
+        12개가 전부 통과한 채로 실험 6건이 빈 유니버스를 돌았다.
+
+        "없음" 과 "틀림" 을 가른다 - 미선언은 경고로 지나가고(기존 매니페스트
+        4건이 그 상태다), 선언이 어긋나면 확실히 막는다.
+        """
+        from strategy_templates import NOTIONAL_UNIT_KRW
+
+        # 맞는 선언은 그대로 통과하고 그 값을 돌려준다
+        ok = {"columns": ["notional"], "units": {"notional": "KRW_MILLION"}}
+        assert NOTIONAL_UNIT_KRW == 1_000_000, NOTIONAL_UNIT_KRW
+        assert assert_declared_units("d", "v3", ok) == "KRW_MILLION"
+        # 소문자·공백도 같은 선언이다 - 표기 차이로 막으면 아무도 안 채운다
+        assert assert_declared_units(
+            "d", "v3", {"units": {"notional": " krw_million "}}) == "KRW_MILLION"
+
+        # 어긋난 선언은 막는다 - 이것이 오늘 사고를 미리 잡았을 자리다
+        for bad_unit in ("KRW", "KRW_THOUSAND", "KRW_BILLION"):
+            try:
+                assert_declared_units("d", "v3", {"units": {"notional": bad_unit}})
+            except RuntimeError as e:
+                assert "실행면 가정과 다르다" in str(e), e
+            else:
+                raise AssertionError(f"{bad_unit} 어긋남이 통과했다")
+
+        # 모르는 단위를 추측해서 쓰지 않는다
+        try:
+            assert_declared_units("d", "v3", {"units": {"notional": "USD"}})
+        except RuntimeError as e:
+            assert "모르는 거래대금 단위" in str(e), e
+        else:
+            raise AssertionError("모르는 단위가 통과했다")
+
+        # 미선언은 막지 않는다(아직) - 여기서 막으면 기존 4건이 전부 선다
+        assert assert_declared_units("d", "v3", None) is None
+        assert assert_declared_units("d", "v3", {"columns": ["notional"]}) is None
+        assert assert_declared_units("d", "v3", {"units": {}}) is None
+
+        # ▶ **없는 열의 단위는 묻지 않는다** (2026-08-14). 미시구조는 스프레드·
+        #   불균형만 담는데 매 실행마다 거래대금 경고가 떴다. 소음은 그냥
+        #   시끄러운 게 아니라 **진짜 경고를 가린다** - 같은 로그에서 표본이
+        #   2,599일이라는 훨씬 중대한 사실이 그 줄들 사이에 묻혀 있었다.
+        import io as _io
+        import contextlib as _cl
+        micro_schema = {"columns": ["instrument_id", "trade_date", "spread_bps",
+                                    "depth_imbalance", "order_flow_imbalance"]}
+        _buf = _io.StringIO()
+        with _cl.redirect_stdout(_buf):
+            assert assert_declared_units("m", "v1", micro_schema) is None
+        assert _buf.getvalue() == "", f"없는 열에 경고를 냈다: {_buf.getvalue()}"
+        # 거래대금을 담는 데이터셋에는 **여전히** 경고한다 - 위 완화가 진짜
+        # 미선언을 덮으면 안 된다
+        _buf2 = _io.StringIO()
+        with _cl.redirect_stdout(_buf2):
+            assert_declared_units("d", "v3", {"columns": ["close", "notional"]})
+        assert "거래대금 단위 선언이 없다" in _buf2.getvalue(), _buf2.getvalue()
+        # 열 목록 자체가 없으면 모르는 것이니 묻는다(침묵이 기본값이 되면 안 된다)
+        _buf3 = _io.StringIO()
+        with _cl.redirect_stdout(_buf3):
+            assert_declared_units("d", "v3", {"units": {}})
+        assert "거래대금 단위 선언이 없다" in _buf3.getvalue(), _buf3.getvalue()
+
+        # ▶ **전용 컬럼이 정본이다.** 준비도 진단이 컬럼 존재로 판정하므로,
+        #   컬럼 값이 오면 그것을 먼저 본다. jsonb 는 옛 매니페스트 폴백.
+        assert assert_declared_units("d", "v3", None, "KRW_MILLION") == "KRW_MILLION"
+        try:
+            assert_declared_units("d", "v3", ok, "KRW")   # 컬럼이 이기는지
+        except RuntimeError as e:
+            assert "실행면 가정과 다르다" in str(e), e
+        else:
+            raise AssertionError("jsonb 가 컬럼을 덮었다 - 정본이 흔들린다")
+
+        # 로더가 실제로 이 대조를 부르는지 - 안 부르면 이 함수는 장식이다
+        import ast
+        import pathlib
+        src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        body = ast.get_source_segment(src, next(
+            n for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name == "load_dataset")) or ""
+        assert "assert_declared_units(" in body, "로더가 단위를 대조하지 않는다"
+        assert "notional_unit" in body, "로더가 단위 컬럼을 안 읽는다"
+        print("  단위 선언 대조           OK")
+
+    def _check_construction_modes():
+        """**하위 배제 구성이 실제로 하위를 뺀다** (2026-08-14 분위 곡선 처방).
+
+        기본(TOP_N)은 한 톨도 바뀌지 않아야 한다 - 새 손잡이가 기존 실험의
+        재현을 깨면 과거 결과와 비교가 불가능해진다.
+        """
+        ranked = [f"S{i:02d}" for i in range(100)]      # 좋은 것부터
+
+        # 기본은 예전 그대로
+        assert _construct(ranked, {"top_n": 20}) == ranked[:20]
+        assert _construct(ranked, {"top_n": 20,
+                                   "portfolio_construction": "TOP_N"}) == ranked[:20]
+
+        # 하위 배제: 남는 것은 상위 쪽이고, top_n 은 관여하지 않는다
+        cfg = {"top_n": 20, "portfolio_construction": "EXCLUDE_BOTTOM",
+               "exclude_bottom_pct": 10.0}
+        kept = _construct(ranked, cfg)
+        assert len(kept) == 90, len(kept)
+        assert kept[0] == "S00" and kept[-1] == "S89", (kept[0], kept[-1])
+        assert "S99" not in kept, "하위가 안 빠졌다"
+        # 소문자로 선언해도 같은 구성이어야 한다(기획안이 자유 텍스트로 준다)
+        assert _construct(ranked, dict(cfg, portfolio_construction="exclude_bottom")) == kept
+
+        # 범위 밖은 거부한다 - 조용히 기본값으로 흘리면 무엇을 잰지 모른다
+        for bad in (0.0, 100.0, -5.0, 150.0):
+            try:
+                _construct(ranked, dict(cfg, exclude_bottom_pct=bad))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"exclude_bottom_pct={bad} 가 통과했다")
+
+        # 다 빼서 빈 포트폴리오가 되면 사고다 - 거래 0 은 판정할 수 없다
+        try:
+            _construct(["A", "B"], {"portfolio_construction": "EXCLUDE_BOTTOM",
+                                    "exclude_bottom_pct": 90.0})
+        except ValueError as e:
+            assert "남는 종목이 없다" in str(e), e
+        else:
+            raise AssertionError("빈 포트폴리오가 통과했다")
+
+        # 모르는 방식을 기본값으로 흘리지 않는다
+        try:
+            _construct(ranked, {"top_n": 20, "portfolio_construction": "MAGIC"})
+        except ValueError as e:
+            assert "모르는 구성 방식" in str(e), e
+        else:
+            raise AssertionError("모르는 구성 방식이 통과했다")
+        print("  구성 방식(빼기 포함)     OK")
 
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
     _check_zombie_reclaim_never_touches_verdicts()
     _check_no_lookahead()
     _check_fifo_and_costs()
+    _check_risk_adjusted_metrics_are_numeric_and_honest()
     _check_metrics_and_determinism()
     _check_cash_never_negative()
     _check_strategy_catalog()
@@ -1296,4 +2302,13 @@ if __name__ == "__main__":
     _check_drawdown_stop_actually_cuts_drawdown()
     _check_risk_is_pit()
     _check_pnl_concentration_is_measured()
-    print("Backtest Runner 10개 영역 통과. 실행은 --run")
+    _check_construction_modes()
+    _check_fingerprint_covers_every_module_that_moves_results()
+    _check_declared_units_are_compared()
+    _check_trend_filter()
+    _check_rebalance_vocab_matches_binder()
+    _check_ast_signal_path()
+    _check_micro_attach()
+    _check_combo_short_sample_is_inconclusive()
+    _check_sample_is_clipped_to_micro_coverage()
+    print("Backtest Runner 19개 영역 통과. 실행은 --run")

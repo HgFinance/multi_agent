@@ -71,7 +71,8 @@ def fetch(spec: DatasetSpec, conn, start: date, end: date) -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def write_partitions(spec: DatasetSpec, rows: list[dict], out_dir: Path) -> list[dict]:
+def write_partitions(spec: DatasetSpec, rows: list[dict],
+                     out_dir: Path) -> tuple[list[dict], list[str]]:
     """월별 Parquet 으로 내보내고 파티션 메타를 돌려준다.
 
     **문자열로 굳힌다.** `row_line` 이 만든 것과 같은 표현을 파일에 넣어야,
@@ -104,18 +105,30 @@ def write_partitions(spec: DatasetSpec, rows: list[dict], out_dir: Path) -> list
         #       원천이 늦게 채워지는 일은 실제로 있고, 그때 조용히 덮으면
         #       과거 결과가 재현되지 않는데 아무도 모른다.
         if path.exists():
+            old_sorted, ohash = None, ""
             try:
-                old = read_partition(spec, path)
-                same = content_hash(spec, sorted(old, key=spec.sort_key)) == chash
-            except Exception:      # noqa: BLE001 - 못 읽으면 다시 쓴다
+                old_sorted = sorted(read_partition(spec, path), key=spec.sort_key)
+                ohash = content_hash(spec, old_sorted)
+                same = ohash == chash
+            except Exception:      # noqa: BLE001 - 못 읽으면 아래에서 가른다
                 same = False
             if same:
                 skipped.append(key)
                 parts.append(_part_meta(spec, key, path, chunk, chash))
                 continue
             if key != spec.open_partition:
+                if old_sorted is None:
+                    # 닫힌 파티션인데 파일을 못 읽는다 = 실재가 깨졌다. 소급
+                    # 재작성도, 깨진 파일을 새 해시로 위장하는 것도 금지다.
+                    raise SystemExit(
+                        f"닫힌 파티션 {key} 파일을 읽을 수 없다 - 새 버전으로 "
+                        f"다시 굳혀라(같은 버전 소급 재작성 금지)")
                 drifted.append(key)
-                parts.append(_part_meta(spec, key, path, chunk, chash))
+                # ▶ 메타는 **파일의 실재**를 싣는다 (2026-08-13 실측). 파일은 옛
+                #   것을 지키면서 메타에 새(원천) 해시를 실었더니 파일↔메타가
+                #   어긋나 왕복 검증이 매 주기 터졌다 - 굳힌 데이터셋의 정체는
+                #   원천이 아니라 파일이다. 안 덮었으면 메타도 옛것이다.
+                parts.append(_part_meta(spec, key, path, old_sorted, ohash))
                 continue
 
         cells = {c: [spec.canon.get(c, lambda v: "" if v is None else str(v))(r.get(c))
@@ -149,7 +162,7 @@ def write_partitions(spec: DatasetSpec, rows: list[dict], out_dir: Path) -> list
               f"    원천이 늦게 채워졌을 수 있다. 과거를 바꾸려면 새 버전으로 "
               f"다시 굳혀라 - 같은 버전을 덮으면 그 버전으로 돌린 실험이 "
               f"재현되지 않는다.", flush=True)
-    return parts
+    return parts, drifted
 
 
 def _part_meta(spec: DatasetSpec, key: str, path: Path,
@@ -185,20 +198,34 @@ _SQL_MANIFEST = """
 insert into quant.dataset_manifests
   (name, version, as_of, source_versions, feature_spec_versions, partitions,
    point_in_time_policy, quality_summary, object_path, content_hash,
-   row_count, schema_definition)
+   row_count, schema_definition, notional_unit)
 values (%s,%s, now(), %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
-        %s, %s, %s, %s::jsonb)
+        %s, %s, %s, %s::jsonb, %s)
 -- ▶ **레이아웃도 갱신한다** (2026-08-12)
 --   예전에는 `quality_summary` 만 갱신했다. 그런데 같은 내용을 **다른 파티션
 --   입도**로 다시 굳히면(월→일) 내용 해시는 같고 레이아웃만 바뀐다. 그때
 --   `partitions` 가 옛 월별 키로 남아 매니페스트와 `dataset_partitions` 표가
 --   서로 다른 말을 했다(실측: 매니페스트는 월 4개, 표는 63행).
-on conflict (content_hash) do update set
+-- ▶ **충돌 기준은 (name, version) 이다** (2026-08-14 실측)
+--   예전 기준은 `content_hash` 였는데, 데이터셋이 매일 자라면 전체 해시가
+--   날마다 바뀐다 - 그러면 이 절이 안 걸리고 `dataset_manifests_name_version_key`
+--   유니크 위반으로 **파티션 굳히기가 매 주기 죽는다**(오늘 새 날 8/13 이
+--   접히자마자 재현). 같은 이름·버전은 같은 데이터셋의 자란 모습이므로
+--   그 행을 갱신하는 것이 맞고, content_hash 도 함께 갱신해야 원장이
+--   파일 실재와 일치한다(어제 고친 '메타는 파일 실재' 와 같은 원칙).
+--   ▷ 그래도 과거 스냅샷을 얼리고 싶으면 `--stamp` 로 버전에 날짜를 박는다
+--     (v1 -> v1-20260814). 그때는 새 행이 되므로 이 절이 관여하지 않는다.
+on conflict (name, version) do update set
+  as_of           = excluded.as_of,
   quality_summary = excluded.quality_summary,
   partitions      = excluded.partitions,
   row_count       = excluded.row_count,
   object_path     = excluded.object_path,
-  version         = excluded.version
+  content_hash    = excluded.content_hash,
+  source_versions = excluded.source_versions,
+  -- 단위 선언도 갱신한다. 명세가 정본이므로 여기 남은 옛 값이 이기면
+  -- 로더 대조가 명세와 어긋난 채로 통과한다.
+  notional_unit   = excluded.notional_unit
 returning dataset_id
 """
 
@@ -277,9 +304,7 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
         ver = (f"{spec.version}-{date.today():%Y%m%d}" if stamp
                else spec.version)
         out_dir = DATA_ROOT / f"{spec.name}-{spec.version}"
-        parts = write_partitions(spec, rows, out_dir)
-        whole = content_hash(spec, rows)
-        print(f"  파티션 {len(parts)}개 / 전체 해시 {whole[:12]}…", flush=True)
+        parts, drifted = write_partitions(spec, rows, out_dir)
 
         # **쓰자마자 다시 읽어 검증한다.** 빌드 직후에만 통과하고 재검증에서
         # 깨지는 결함이 가장 잡기 어렵다 - 여기서 잡는다.
@@ -290,9 +315,20 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
                 raise SystemExit(f"파티션 {p['partition_key']} 왕복 해시 불일치 - "
                                  "정규화와 복원이 짝이 아니다")
             back.extend(got)
-        if content_hash(spec, back) != whole or len(back) != len(rows):
+        # ▶ 등재 해시·행수는 **파일 실재**로 계산한다 (2026-08-13). 드리프트가
+        #   있으면 파일(안 덮은 옛 파티션)과 원천이 다른 게 정상이고, 실험이
+        #   읽는 것은 파일이다 - 원천 해시로 등재하면 load_dataset 이 "전체
+        #   해시 불일치" 로 죽는다. 드리프트가 없을 때만 원천=파일 동일성이
+        #   왕복 검증의 일부다.
+        whole = content_hash(spec, back)
+        if not drifted and (content_hash(spec, rows) != whole
+                            or len(back) != len(rows)):
             raise SystemExit("전체 왕복 불일치 - 굳히지 않는다")
-        print(f"  왕복 검증 OK ({len(back):,}행)", flush=True)
+        if drifted:
+            print(f"  ⚠ 드리프트 {len(drifted)}개 - 등재는 파일 실재 기준 "
+                  f"(원천 {len(rows):,}행 vs 파일 {len(back):,}행)", flush=True)
+        print(f"  파티션 {len(parts)}개 / 전체 해시 {whole[:12]}… "
+              f"/ 왕복 검증 OK ({len(back):,}행)", flush=True)
 
         if dry_run:
             print("  [dry-run] 원장에 등재하지 않았다", flush=True)
@@ -306,12 +342,15 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
                 json.dumps({"count": len(parts),
                             "keys": [p["partition_key"] for p in parts]}),
                 json.dumps(spec.point_in_time),
-                json.dumps({"rows": len(rows), "partitions": len(parts),
+                json.dumps({"rows": len(back), "partitions": len(parts),
                             "status": "PASS"}),
                 (DATA_ROOT / f"{spec.name}-{spec.version}").relative_to(
                     DATA_ROOT.parent).as_posix(),
-                whole, len(rows),
-                json.dumps({"columns": list(spec.columns)})))
+                whole, len(back),
+                json.dumps({"columns": list(spec.columns)}),
+                # 명세가 선언한 거래대금 단위. 로더가 이 값과 실행면 가정을
+                # 대조한다 - 없으면 대조가 있는데 대조할 것이 없는 상태다.
+                spec.notional_unit))
             dsid = cur.fetchone()[0]
             # ▶ **옛 파티션 행을 지우고 다시 넣는다** (2026-08-12)
             #   입도가 바뀌면 옛 키(월)와 새 키(일)가 **함께 남는다.** 실측에서
@@ -379,6 +418,30 @@ def _check_build_verifies_roundtrip_before_registering():
     i_manifest = src.index("_SQL_MANIFEST")
     assert i_read < i_manifest, "왕복 검증이 등재 뒤에 온다"
     assert "왕복 해시 불일치" in src
+    # ▶ 매니페스트 upsert 는 **(name, version)** 충돌을 처리해야 한다
+    #   (2026-08-14 실측): content_hash 기준이면 데이터셋이 자라 해시가 바뀌는
+    #   날 유니크 위반으로 굳히기가 통째로 죽는다. 매일 자라는 데이터셋에서
+    #   이 절은 상시 경로다.
+    m = " ".join(_SQL_MANIFEST.split())
+    assert "on conflict (name, version) do update" in m, m
+    assert "content_hash    = excluded.content_hash" in _SQL_MANIFEST, \
+        "해시를 안 갱신하면 원장이 파일 실재와 어긋난다"
+    # ▶ **명세가 선언한 거래대금 단위가 매니페스트까지 간다** (2026-08-14).
+    #   실행면은 로더 경계에서 이 값을 대조하는데(`assert_declared_units`),
+    #   spec 경로에는 심는 자리가 없어 매번 "선언이 없다" 로 지나갔다 -
+    #   대조가 있는데 대조할 것이 없는 상태였다.
+    assert "notional_unit" in _SQL_MANIFEST, "단위 선언을 매니페스트에 안 심는다"
+    assert "notional_unit   = excluded.notional_unit" in _SQL_MANIFEST, \
+        "재빌드 때 옛 단위가 남으면 명세와 어긋난 채 대조를 통과한다"
+    assert "spec.notional_unit" in src, "심는 값이 명세에서 안 온다"
+    # 실행면 가정과 같은 눈금이어야 한다 - 여기서 갈리면 유동성 필터가
+    # 1e6 배 어긋난 채 돌아 유니버스가 0 이 된다(2026-08-14 실측)
+    from strategy_templates import NOTIONAL_UNIT_KRW
+    v2 = SPECS.get("krx-microstructure-daily/v2")
+    if v2 is not None and v2.notional_unit:
+        from backtest_runner import UNIT_FACTOR_KRW
+        assert UNIT_FACTOR_KRW[v2.notional_unit] == NOTIONAL_UNIT_KRW, \
+            (v2.notional_unit, NOTIONAL_UNIT_KRW)
     print("  등재 전 왕복 검증        OK")
     if _check_closed_partition_is_not_rewritten() != "SKIPPED":
         print("  닫힌 파티션 불변         OK")
@@ -426,18 +489,31 @@ def _check_closed_partition_is_not_rewritten():
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=DATA_ROOT) as td:
         out = Path(td)
-        first = write_partitions(spec, rows, out)
+        first, drift0 = write_partitions(spec, rows, out)
         assert first, "첫 빌드가 파티션을 안 만들었다"
+        assert drift0 == [], drift0
         stamps = {p["partition_key"]: (out / f"{p['partition_key']}.parquet").stat().st_mtime_ns
                   for p in first}
 
         # 같은 입력으로 다시 - **파일이 안 바뀌어야 한다**
-        again = write_partitions(spec, rows, out)
+        again, drift1 = write_partitions(spec, rows, out)
+        assert drift1 == [], drift1
         for p in again:
             f = out / f"{p['partition_key']}.parquet"
             assert f.stat().st_mtime_ns == stamps[p["partition_key"]],                 f"{p['partition_key']} 를 다시 썼다 - 증분이 아니다"
         # 해시도 그대로여야 어제 실험이 가리키던 대상이 남는다
         assert [p["content_hash"] for p in again] ==                [p["content_hash"] for p in first]
+
+        # ▶ 드리프트 픽스처 (2026-08-13 실측): 닫힌 파티션의 원천이 바뀌어도
+        #   메타는 **파일의 실재**를 실어야 한다. 예전에는 새(원천) 해시를
+        #   실어서 파일↔메타가 어긋났고 왕복 검증이 매 주기 터졌다.
+        changed = [dict(r, spread_bps=99.9) for r in rows]
+        third, drift2 = write_partitions(spec, changed, out)
+        assert drift2, "닫힌 파티션 소급 변경이 드리프트로 안 잡혔다"
+        for p in third:
+            if p["partition_key"] in drift2:
+                got = read_partition(spec, out / f"{p['partition_key']}.parquet")
+                assert content_hash(spec, got) == p["content_hash"],                     "드리프트 파티션의 메타가 파일 실재가 아니다 - 왕복이 또 터진다"
 
 
 def _selfcheck() -> int:

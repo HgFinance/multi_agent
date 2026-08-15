@@ -51,6 +51,10 @@ CENSUS_VERSION = "factory-bottleneck-census-v1"
 STALE_DAYS = float(os.getenv("FACTORY_STALE_DAYS", "2"))
 # 이 횟수 이상 같은 서명으로 실패하면 재시도로는 안 풀리는 종류다.
 CHURN_ATTEMPTS = int(os.getenv("FACTORY_CHURN_ATTEMPTS", "3"))
+# 되풀이 실패를 **현재 진행형**으로 보는 창(일). 이보다 오래된 이력만 있으면
+# 차단기가 이미 잡은 것이므로 병목으로 세지 않는다(2026-08-14 실측: 이틀 전
+# 끝난 42회 실패가 매 주기 브리핑을 차지하고 있었다).
+CHURN_FRESH_DAYS = float(os.getenv("FACTORY_CHURN_FRESH_DAYS", "1.0"))
 # 데이터를 모아 두고 이만큼 안 쓰면 수집이 헛돈 것이다.
 IDLE_DATASET_DAYS = float(os.getenv("FACTORY_IDLE_DATASET_DAYS", "1"))
 
@@ -106,30 +110,58 @@ def _conn():
 # 각 함수는 **못 세면 빈 목록**을 돌려준다. 지어내지 않는다.
 
 def _job_churn(cur) -> list[Bottleneck]:
-    """같은 서명으로 되풀이 실패하는 작업. 재시도로는 안 풀리는 종류다."""
+    """같은 서명으로 되풀이 실패하는 작업. 재시도로는 안 풀리는 종류다.
+
+    ▶ **죽은 병목을 세지 않는다** (2026-08-14 실측)
+      차단기(job_queue.REPEAT_BLOCK=3)가 이미 발주를 막고 있는데도 인구조사가
+      **누적 이력**을 계속 세어 "같은 사유로 42회 실패" 를 매 주기 병목으로
+      올렸다. 마지막 실패는 이틀 전(08-12 13:28)이고 그 뒤로 한 건도 없었다 -
+      이미 고쳐진 문제가 브리핑을 차지하고 개선 카드를 태우는 동안 진짜 신규
+      병목은 38건 속에 묻힌다. 문헌(품질관리·SRE)이 같은 것을 경고한다:
+      **거짓 신호 이력이 쌓인 경보는 사람이 무시하게 된다.**
+
+      그래서 시효를 본다 - 최근 창(CHURN_FRESH_DAYS) 안에 **다시 일어난** 것만
+      병목이고, 옛것은 세지 않는다. 다만 조용히 지우지도 않는다: 창 밖 이력은
+      증거 문장에 "최근 N일은 잠잠(차단기 작동 중)" 으로 남겨, 고친 사실이
+      기록에서 사라지지 않게 한다.
+    """
     try:
         cur.execute("""
-            select coalesce(failure_reason,''), hypothesis_id::text, attempts
+            select coalesce(failure_reason,''), hypothesis_id::text, attempts,
+                   extract(epoch from (now() - coalesce(updated_at, created_at)))/86400.0
               from quant.experiment_jobs
              where status = 'FAILED' and failure_reason is not null""")
         rows = cur.fetchall()
     except Exception:  # noqa: BLE001
         return []
     groups: dict[str, dict] = {}
-    for reason, hid, attempts in rows:
+    for reason, hid, attempts, age_days in rows:
         g = groups.setdefault(signature(reason),
-                              {"attempts": 0, "hyps": set(), "raw": reason})
-        g["attempts"] += int(attempts or 1)
+                              {"attempts": 0, "hyps": set(), "raw": reason,
+                               "fresh": 0, "min_age": None})
+        n = int(attempts or 1)
+        g["attempts"] += n
         g["hyps"].add(hid)
+        age = float(age_days or 0.0)
+        if age <= CHURN_FRESH_DAYS:
+            g["fresh"] += n
+        g["min_age"] = age if g["min_age"] is None else min(g["min_age"], age)
     out = []
     for sig, g in groups.items():
         if g["attempts"] < CHURN_ATTEMPTS:
             continue
+        if g["fresh"] < CHURN_ATTEMPTS:
+            # 최근 창에서 임계 미만 = 차단기가 잡고 있다. 병목이 아니다.
+            continue
+        quiet = ""
+        if g["min_age"] is not None and g["min_age"] > 1.0:
+            quiet = f" (마지막 실패 {g['min_age']:.1f}일 전)"
         out.append(Bottleneck(
             kind="작업 되풀이 실패", key=f"job:{sig}",
-            cost=float(g["attempts"]), unit="시도",
-            evidence=(f"같은 사유로 {g['attempts']}회 실패 / 가설 {len(g['hyps'])}건. "
-                      f"원문: {str(g['raw'])[:120]}"),
+            cost=float(g["fresh"]), unit="시도",
+            evidence=(f"최근 {CHURN_FRESH_DAYS}일에 같은 사유로 {g['fresh']}회 "
+                      f"실패(누적 {g['attempts']}회) / 가설 {len(g['hyps'])}건"
+                      f"{quiet}. 원문: {str(g['raw'])[:110]}"),
             owner="quant-backtest-department",
             hint="wiring-audit 로 층을 가른 뒤, 계약 문제면 리서치에 재등록을 요청한다",
             ids=sorted(g["hyps"])[:8]))
@@ -494,6 +526,64 @@ def _soundness(cur) -> list[Bottleneck]:
     return out
 
 
+# 아직 아무 말도 못 들었을 때 - 무엇이 없는지 **묻는다**
+_HINT_UNHEARD = (
+    "**네가 못 한다고 신고한 것이다.** 무엇이 없어서 못 하는지 한 줄로 적어라 - "
+    "도구인지, 권한인지, 실행면에 자리가 없는지. 만들 수 있는 것이면 "
+    "만들어라(스킬은 `skill-authoring`, 실행면은 experiment-factory §4 가 "
+    "허용한다). 만들 수 없는 것이면 그 사실이 남아야 다음 주기가 같은 카드를 "
+    "또 안 건다")
+
+# ▶ 답이 이미 와 있을 때는 **다시 묻지 않는다** (2026-08-14)
+#   같은 질문을 매 주기 되묻는 것이 96장을 만든 고리의 절반이다. 답이 있으면
+#   할 일은 "적어라" 가 아니라 "그 답이 요구하는 것을 처리해라" 다.
+_HINT_HEARD = (
+    "**답은 이미 나와 있다** - 위 인용이 그 답이다. 같은 질문을 다시 걸지 말고 "
+    "그 답이 요구하는 것을 처리해라: 권한이면 사람에게 올리고(CEO/IAM), "
+    "도구면 만들어라(`skill-authoring`), 실행면 자리면 experiment-factory §4 가 "
+    "허용한다. 이 줄이 다음 주기에도 그대로면 아무도 그 답을 처리하지 않은 "
+    "것이지 에이전트가 말을 안 한 것이 아니다")
+
+
+# ▶ **첫 막힘은 되풀이가 아니다** (2026-08-14, 커널 원문으로 확인)
+#   `hermes_cli/kanban_db.py::block_task` 는
+#       same_cause = prev_kind == kind
+#       recurrences = prev_recurrences + 1 if same_cause else 1
+#   로 센다. 최초 막힘은 prev=0 이므로 **처음 막힌 카드도 1** 이다. 즉 1 은
+#   "막혔다" 는 기준선이지 "되풀이됐다" 가 아니다.
+#
+#   그대로 더하면 `재발 N회` 가 **카드 수와 같은 수**가 된다. 실측(2026-08-14
+#   보드): 막힌 적 있는 카드 75장 전부 `block_recurrences=1`, `blocked` 이벤트가
+#   2회 이상인 카드 0장. 그런데 카드에는 `카드 7건 ... (재발 7회)` 로 찍혔다 -
+#   되풀이는 0회였다. 없는 무게를 만들면 그 무게가 우선순위 행세를 한다.
+#   (이 모듈이 `echo` 에 대해 이미 정한 원칙 - "되풀이는 진짜 되풀이일 때만
+#   말한다" - 을 같은 줄의 `재발` 에는 안 걸고 있었다.)
+def _real_recurrences(raw) -> int:
+    """되풀이 **횟수**. 기준선 1 을 빼고 남은 것만 되풀이다."""
+    try:
+        return max(0, int(raw or 0) - 1)
+    except (TypeError, ValueError):   # 모양이 다르면 없는 것으로 본다
+        return 0
+
+
+def _block_reason(payload) -> str:
+    """막힘 사유 **원문**. 못 읽으면 빈 문자열 - 지어내지 않는다.
+
+    보드는 사유를 `tasks` 가 아니라 `task_events.payload` 의 JSON 에 넣는다
+    (`block_reason` 칸은 존재하지 않는다).
+    """
+    if not payload:
+        return ""
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", "replace")
+    if isinstance(payload, dict):
+        return str(payload.get("reason") or "").strip()
+    try:
+        return str((json.loads(payload) or {}).get("reason") or "").strip()
+    except Exception:  # noqa: BLE001 - 모양이 다르면 안 적는다
+        return ""
+
+
 def _capability_blocks(cur) -> list[Bottleneck]:
     """**에이전트가 스스로 "이건 내 능력 밖" 이라고 신고한 카드.**
 
@@ -513,38 +603,92 @@ def _capability_blocks(cur) -> list[Bottleneck]:
     """
     try:
         import factory_autopilot as fa             # noqa: PLC0415 (순환 회피)
+        # ▶ **신고 원문까지 같이 읽는다** (2026-08-14)
+        #   `tasks` 에는 `block_reason` 칸이 아예 없다. 사유는 전부
+        #   `task_events.payload` 의 `{"reason": ...}` 에 들어간다. 여기를 안
+        #   읽으면 "무엇이 없어서 못 했는지" 는 DB 에 남아 있는데도 아무도 못
+        #   본다 - 실제로 열두 번 적어 낸 답이 열두 번 다 버려졌다.
         rows = fa._board_rows(
-            "select id, assignee, title, coalesce(block_kind,''), "
-            "coalesce(block_recurrences,0) from tasks "
-            "where status='blocked' and coalesce(block_kind,'') <> ''")
+            "select t.id, t.assignee, t.title, coalesce(t.block_kind,''), "
+            "coalesce(t.block_recurrences,0), "
+            "coalesce((select e.payload from task_events e "
+            "           where e.task_id = t.id and e.kind = 'blocked' "
+            "           order by e.id desc limit 1), ''), "
+            "t.status "
+            # ▶ **`triage` 를 빼면 진짜 되풀이가 통째로 안 보인다** (2026-08-14)
+            #   커널은 같은 사유로 다시 막히면 `block_recurrences` 를 올리고,
+            #   `BLOCK_RECURRENCE_LIMIT`(=2)에 닿는 순간 카드를 `blocked` 가
+            #   아니라 **`triage`** 로 보낸다(unblock<->re-block 고리 차단).
+            #   그래서 `blocked` 만 보는 술어에서는 되풀이가 **구조적으로**
+            #   한 건도 잡히지 않는다 - 이 계수기가 "제일 강한 신호" 라고
+            #   적어 둔 바로 그 신고가 술어 밖에 서 있었다.
+            "from tasks t "
+            "where t.status in ('blocked','triage') "
+            "  and coalesce(t.block_kind,'') <> ''")
     except Exception:  # noqa: BLE001 - 보드를 못 읽으면 안 적는다
         return []
     if not rows:
         return []
 
     groups: dict[tuple, list] = {}
-    for tid, who, title, kind, rec in rows:
+    for row in rows:
+        # 신고 원문·상태 칸은 나중에 붙였다. 옛 5칸·6칸 행도 그대로 받는다.
+        tid, who, title, kind, rec = row[:5]
+        payload = row[5] if len(row) > 5 else ""
+        status = str(row[6]) if len(row) > 6 else "blocked"
         groups.setdefault((str(who), str(kind)), []).append(
-            (str(tid), str(title), int(rec or 0)))
+            (str(tid), str(title), _real_recurrences(rec),
+             _block_reason(payload), status))
+
+    # ▶ **막힘 사유를 두 갈래로 가른다** (2026-08-14, AWS Agentic AI Lens)
+    #   문헌은 역량 부족(다른 에이전트·부서로 재라우팅할 문제)과 사람
+    #   에스컬레이션(신뢰도·위험·재시도 예산 소진)을 **별도 트리거**로 두고,
+    #   섞는 것을 안티패턴으로 규정한다. 우리는 14건을 `능력 밖 신고` 한
+    #   덩어리로 묶어 놓아서 "누가 받아야 하나" 가 매번 사람 판단이었다.
+    #   여기서는 이름만 가른다 - 자동 재라우팅은 별도 결정이다.
+    _ROUTE = {"capability": "역량 부족(재라우팅 후보)",
+              "needs_input": "입력 대기(사람 확인 필요)",
+              "transient": "일시 실패(재시도 대상)"}
 
     out = []
     for (who, kind), g in groups.items():
+        # 기준선을 뺀 **진짜** 되풀이만 더한다(_real_recurrences 참고).
         rec = sum(x[2] for x in g)
+        n_triage = sum(1 for x in g if x[4] == "triage")
+        lane = _ROUTE.get(kind, f"기타({kind})")
+        # ▶ **되풀이되는 신고는 한 목소리다** (2026-08-14)
+        #   같은 사유가 여러 번 오면 개별 카드의 사고가 아니라 구조적 수요다.
+        #   서명으로 묶어 제일 많이 나온 것을 **원문 그대로** 싣는다. 요약하면
+        #   그 문장이 요구하는 것(권한인지 도구인지)이 뭉개진다.
+        said: dict[str, list[str]] = {}
+        for _tid, _title, _rec, reason, _status in g:
+            if reason:
+                said.setdefault(signature(reason), []).append(reason)
+        loudest = max(said.values(), key=len) if said else []
+        echo = ""
+        if len(loudest) > 1:
+            # 되풀이는 **진짜 되풀이일 때만** 말한다. 1건에 "1번 되풀이" 라고
+            # 적으면 없는 무게가 생기고, 그 무게가 우선순위 행세를 한다.
+            echo = (f". **이미 같은 답을 {len(loudest)}번 냈다**: "
+                    f"“{loudest[0][:200]}”")
+        elif loudest:
+            echo = f". 신고 원문: “{loudest[0][:200]}”"
+        if len(said) > 1:
+            echo += f" (서로 다른 사유 {len(said)}가지)"
         out.append(Bottleneck(
-            kind="능력 밖 신고", key=f"cap:{who}:{kind}",
+            kind=f"막힘: {lane}", key=f"cap:{who}:{kind}",
             cost=float(len(g)), unit="건",
             evidence=(f"{who} 가 카드 {len(g)}건을 `{kind}` 로 막았다 - 실패가 "
                       f"아니라 **못 하겠다는 신고**다"
+                      # 되풀이 0회면 아무 말도 안 한다. 기준선을 세어 붙이면
+                      # 카드 수가 `재발` 이라는 이름으로 한 번 더 나온다.
                       + (f" (재발 {rec}회)" if rec else "")
+                      + (f" · 그중 {n_triage}건은 루프 차단기가 사람 분류로 "
+                         f"올렸다(triage)" if n_triage else "")
+                      + echo
                       + f". 예: {g[0][1][:60]}"),
             owner=who,
-            hint=("**네가 못 한다고 신고한 것이다.** 무엇이 없어서 못 하는지 "
-                  "한 줄로 적어라 - 도구인지, 권한인지, 실행면에 자리가 "
-                  "없는지. 만들 수 있는 것이면 만들어라(스킬은 "
-                  "`skill-authoring`, 실행면은 experiment-factory §4 가 "
-                  "허용한다). 만들 수 없는 것이면 그 사실이 남아야 다음 "
-                  "주기가 같은 카드를 또 안 건다 - 지금은 신고가 아무 데도 "
-                  "안 남고 매 주기 같은 카드가 다시 걸린다"),
+            hint=(_HINT_HEARD if loudest else _HINT_UNHEARD),
             ids=[x[0] for x in g][:5]))
     return out
 
@@ -676,6 +820,35 @@ def _check_signature_groups_the_accident():
     print("  실패 서명 군집           OK")
 
 
+def _check_fixed_bottleneck_is_not_reported_again():
+    """**차단기가 잡은 옛 실패를 병목으로 다시 올리지 않는다** (2026-08-14 실측).
+
+    REPEAT_BLOCK=3 이 발주를 막은 뒤 이틀간 한 건도 안 죽었는데, 인구조사가
+    누적 42회를 계속 세어 매 주기 브리핑을 차지했다. 거짓 신호가 쌓인 경보는
+    사람도 에이전트도 무시하게 된다 - 그러면 진짜 신규 병목이 묻힌다.
+    """
+    class _Cur:
+        def __init__(self, rows): self._rows = rows
+        def execute(self, *a, **k): pass
+        def fetchall(self): return self._rows
+
+    reason = "verdict=NOT_RUNNABLE; backlog=사상할 데이터셋이 없다"
+    # ① 옛 실패만 있는 경우(마지막 실패 2일 전) - 병목이 아니다
+    old = [(reason, f"h{i}", 7, 2.0 + i * 0.1) for i in range(6)]
+    assert _job_churn(_Cur(old)) == [], "고쳐진 옛 실패를 다시 병목으로 올렸다"
+
+    # ② 지금도 죽고 있으면 병목이다
+    fresh = [(reason, f"h{i}", 7, 0.1) for i in range(6)]
+    got = _job_churn(_Cur(fresh))
+    assert got and got[0].kind == "작업 되풀이 실패", got
+    assert "최근" in got[0].evidence and "누적" in got[0].evidence, got[0].evidence
+
+    # ③ 옛것과 새것이 섞이면: 최근 창 기준으로 임계를 넘어야만 올린다
+    mixed = [(reason, "h0", 40, 3.0), (reason, "h1", 1, 0.2)]
+    assert _job_churn(_Cur(mixed)) == [], "누적 40회에 최근 1회인데 병목으로 올렸다"
+    print("  고쳐진 병목 재보고 금지  OK")
+
+
 def _check_counts_only_what_is_observed():
     """**못 세면 안 적는다.** 계수기는 실패해도 빈 목록이지 추정이 아니다."""
     class _Boom:
@@ -700,14 +873,23 @@ def _check_card_is_empty_when_clean():
 
 
 def _check_new_kind_needs_no_code():
-    """**모르는 종류도 잡힌다.** 병목 종류를 미리 열거하지 않는다는 증거."""
+    """**모르는 종류도 잡힌다.** 병목 종류를 미리 열거하지 않는다는 증거.
+
+    ▶ 이 가짜 커서는 2026-08-14 에 **낡아서 검사를 통째로 죽이고 있었다.**
+      시효 창(CHURN_FRESH_DAYS)을 넣으면서 `_job_churn` 의 질의에 나이 칸이
+      하나 늘었는데 여기 3칸이 그대로 남아 `ValueError: expected 4, got 3` 으로
+      터졌다. 그 결과 이 검사 **뒤에 오는 다섯 개가 한 번도 안 돌았다** -
+      하필 그중 하나가 "능력 밖 신고를 듣는가" 였다. 판정자가 죽으면 판정이
+      없는 것과 같으므로, 칸을 늘릴 때 가짜 커서도 같이 늘린다.
+    """
     class _Cur:
         def execute(self, sql, *a):
             self._sql = sql
         def fetchall(self):
             if "experiment_jobs" in self._sql:
-                return [("듣도 보도 못한 새 사고: code 42 at /x/y.py", "h1", 5),
-                        ("듣도 보도 못한 새 사고: code 77 at /a/b.py", "h2", 4)]
+                # (사유, 가설, 시도, 며칠 전) - 시효 창 안이라 '최근' 으로 센다
+                return [("듣도 보도 못한 새 사고: code 42 at /x/y.py", "h1", 5, 0.2),
+                        ("듣도 보도 못한 새 사고: code 77 at /a/b.py", "h2", 4, 0.3)]
             return []
     got = _job_churn(_Cur())
     assert len(got) == 1, got
@@ -877,7 +1059,10 @@ def _check_capability_report_is_heard():
         assert got[0].owner == "quant-backtest-department"
         # 실패로 읽으면 안 된다. 신고다.
         assert "신고" in got[0].evidence, got[0].evidence
-        assert "재발 2회" in got[0].evidence
+        # 기준선 1 을 뺀 **진짜** 되풀이만 센다: 2 -> 1회, 0 -> 0회.
+        # (예전엔 원본 값을 그대로 더해 `재발 2회` 라고 적었는데, 그 합은
+        #  `blocked` 술어 아래서 언제나 카드 수와 같다 - _real_recurrences 참고)
+        assert "재발 1회" in got[0].evidence, got[0].evidence
         assert "무엇이 없어서" in got[0].hint
 
         # 보드를 못 읽으면 지어내지 않는다
@@ -894,18 +1079,163 @@ def _check_capability_report_is_heard():
     print("  능력 밖 신고를 듣는다     OK")
 
 
+def _check_report_text_survives_to_the_next_card():
+    """**신고 원문이 다음 주기 카드까지 간다.** (2026-08-14 보드 실측)
+
+    사유는 `tasks` 가 아니라 `task_events.payload` 에 있다(`block_reason` 칸은
+    없다). 여기를 안 읽으면 "무엇이 없어서 못 하는지 적어라" 만 매 주기
+    되풀이되고, 이미 열두 번 적어 낸 답은 열두 번 다 버려진다 - 실제로
+    그랬다. 되풀이 횟수까지 세야 일회성 투정과 구조적 수요가 갈린다.
+    """
+    import factory_autopilot as fa                  # noqa: PLC0415
+
+    reason = ("이 프로필은 해당 read-only 저장소를 수정할 수 없으므로, "
+              "현재는 검증 가능한 진단 산출물까지만 완료했습니다.")
+    payload = json.dumps({"reason": reason, "kind": "capability",
+                          "recurrences": 1}, ensure_ascii=False)
+    saved = fa._board_rows
+    try:
+        fa._board_rows = lambda sql, params=(): [
+            (t, "research-department", "공장 개선", "capability", 1, payload)
+            for t in ("t_a", "t_b", "t_c")]
+        got = _capability_blocks(None)
+        assert len(got) == 1, got
+        assert "read-only" in got[0].evidence, \
+            f"신고 원문이 카드에 안 실린다: {got[0].evidence}"
+        assert "3번" in got[0].evidence, \
+            f"같은 답이 몇 번 나왔는지 안 센다: {got[0].evidence}"
+        assert "답은 이미 나와 있다" in got[0].hint, \
+            "답을 받아 놓고 같은 질문을 또 한다"
+
+        # 한 번뿐인 신고에 "1번 되풀이" 라고 적지 않는다 - 없는 무게를 만든다
+        fa._board_rows = lambda sql, params=(): [
+            ("t_a", "research-department", "공장 개선", "capability", 1, payload)]
+        one = _capability_blocks(None)[0]
+        assert "신고 원문" in one.evidence and "1번" not in one.evidence, \
+            f"1건인데 되풀이라고 적었다: {one.evidence}"
+
+        # 사유를 못 읽어도 죽지 않고, 예전처럼 **묻는다**
+        fa._board_rows = lambda sql, params=(): [
+            ("t_a", "research-department", "공장 개선", "capability", 1)]
+        got = _capability_blocks(None)
+        assert len(got) == 1 and "한 줄로 적어라" in got[0].hint, got
+    finally:
+        fa._board_rows = saved
+    print("  신고 원문이 다음 카드까지 OK")
+
+
+def _check_recurrence_is_not_the_card_count():
+    """**없는 되풀이를 만들어 내지 않는다** (2026-08-14 보드·커널 실측).
+
+    커널(`hermes_cli/kanban_db.py::block_task`)은 첫 막힘에도
+    `block_recurrences = 1` 을 박고, `BLOCK_RECURRENCE_LIMIT = 2` 에 닿으면
+    카드를 `blocked` 가 아니라 `triage` 로 보낸다. 두 사실이 겹치면
+    `status='blocked'` 만 보는 술어에서 이 칸은 **언제나 1** 이다 - 그것을
+    더한 `재발 N회` 는 카드 수를 더 무서운 이름으로 다시 적은 것이고,
+    실측 보드에서 `카드 7건 ... (재발 7회)` 로 찍혔다(되풀이 실제 0회).
+
+    그리고 정작 진짜 되풀이는 `triage` 에 있어 **한 건도 안 보였다.**
+    """
+    # 진짜 sqlite 로 판다 - SQL 을 무시하는 스텁은 여기서 재려는 술어
+    # (`status in (...)`) 자체를 지워 검사를 무력화한다.
+    import sqlite3                                   # noqa: PLC0415
+
+    import factory_autopilot as fa                   # noqa: PLC0415
+
+    def _board(rows, events):
+        c = sqlite3.connect(":memory:")
+        c.execute("create table tasks (id text primary key, assignee text, "
+                  "title text, status text, block_kind text, "
+                  "block_recurrences int)")
+        c.execute("create table task_events (id integer primary key "
+                  "autoincrement, task_id text, kind text, payload text)")
+        c.executemany("insert into tasks values (?,?,?,?,?,?)", rows)
+        c.executemany("insert into task_events (task_id, kind, payload) "
+                      "values (?,?,?)", events)
+        return lambda sql, params=(): [tuple(r) for r in
+                                       c.execute(sql, list(params)).fetchall()]
+
+    def _ev(tid, reason, rec=1):
+        return (tid, "blocked", json.dumps(
+            {"reason": reason, "kind": "capability", "recurrences": rec},
+            ensure_ascii=False))
+
+    # 서명이 다른 사유를 쓴다 - 같은 서명으로 묶이면 문장이 `신고 원문` 이
+    # 아니라 `이미 같은 답을 N번 냈다` 가 되어 재려는 것이 흐려진다.
+    _REASONS = ("원장 리드 발췌가 상한을 넘어 검증에서 거절된다",
+                "제출 API 가 독립 회의론자 산출을 인식하지 않는다",
+                "필수 역량 점검 실행이 승인 거부로 막혔다")
+    saved = fa._board_rows
+    try:
+        # ① 세 건이 각각 한 번씩 막혔다 - 되풀이는 0회다
+        fa._board_rows = _board(
+            [(f"t_a{i}", "research-department", f"카드 {i}", "blocked",
+              "capability", 1) for i in range(3)],
+            [_ev(f"t_a{i}", _REASONS[i]) for i in range(3)])
+        got = _capability_blocks(None)
+        assert len(got) == 1 and got[0].cost == 3.0, got
+        assert "재발" not in got[0].evidence, \
+            f"되풀이 0회인데 재발이라고 적었다: {got[0].evidence}"
+        # 앞 주기의 보호 장치가 살아 있어야 한다
+        assert "신고 원문" in got[0].evidence, got[0].evidence
+        assert got[0].hint == _HINT_HEARD, "답을 받아 놓고 또 묻는다"
+
+        # ② 진짜 되풀이는 triage 로 간다 - 그것이 보여야 한다
+        fa._board_rows = _board(
+            [("t_b0", "research-department", "되풀이된 신고", "triage",
+              "capability", 2),
+             ("t_b1", "research-department", "한 번 신고", "blocked",
+              "capability", 1)],
+            [_ev("t_b0", "같은 실행면 결함으로 두 번째 막힌다", rec=2),
+             _ev("t_b1", "다른 사유로 한 번 막혔다")])
+        got = _capability_blocks(None)
+        assert len(got) == 1 and got[0].cost == 2.0, \
+            f"루프 차단기가 사람에게 올린 신고가 안 보인다: {got}"
+        assert "재발 1회" in got[0].evidence, got[0].evidence
+        assert "triage" in got[0].evidence, got[0].evidence
+    finally:
+        fa._board_rows = saved
+    print("  없는 재발을 안 만든다     OK")
+
+
+_CHECKS = (_check_market_quality_needs_no_ledger,
+           _check_signature_groups_the_accident,
+           _check_fixed_bottleneck_is_not_reported_again,
+           _check_counts_only_what_is_observed,
+           _check_card_is_empty_when_clean,
+           _check_new_kind_needs_no_code,
+           _check_idle_leads_reach_the_builder,
+           _check_card_shows_distinct_kinds,
+           _check_soundness_routes_to_who_can_fix,
+           _check_capability_report_is_heard,
+           _check_report_text_survives_to_the_next_card,
+           _check_recurrence_is_not_the_card_count)
+
+
 def _selfcheck() -> int:
+    """**하나가 죽어도 나머지를 다 돈다.**
+
+    ▶ 왜 바꿨나 (2026-08-14 실측)
+      예전엔 검사를 줄줄이 부르기만 해서, 여섯 번째가 낡은 가짜 커서로 터지자
+      **뒤의 다섯 개가 통째로 안 돌았다.** 그중 하나가 하필 "능력 밖 신고를
+      듣는가" 였다 - 신고를 안 듣는 결함을 지키라고 만든 검사가, 다른 검사의
+      고장 때문에 몇 주기 동안 침묵했다. 판정자가 조용히 죽는 것이 판정이
+      틀리는 것보다 나쁘다. 이제는 전부 돌리고 실패를 **모아서** 보고한다.
+    """
     print(f"{CENSUS_VERSION} 자체 점검 (DB 없음)")
-    _check_market_quality_needs_no_ledger()
-    _check_signature_groups_the_accident()
-    _check_counts_only_what_is_observed()
-    _check_card_is_empty_when_clean()
-    _check_new_kind_needs_no_code()
-    _check_idle_leads_reach_the_builder()
-    _check_card_shows_distinct_kinds()
-    _check_soundness_routes_to_who_can_fix()
-    _check_capability_report_is_heard()
-    print("병목 인구조사 9개 영역 통과.")
+    bad = []
+    for fn in _CHECKS:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - 죽지 말고 세고 넘어간다
+            bad.append(fn.__name__)
+            print(f"  !! {fn.__name__}: {type(exc).__name__}: "
+                  f"{str(exc)[:200]}")
+    if bad:
+        print(f"병목 인구조사 {len(bad)}/{len(_CHECKS)} 영역 빨강: "
+              f"{', '.join(bad)}")
+        return 1
+    print(f"병목 인구조사 {len(_CHECKS)}개 영역 통과.")
     return 0
 
 

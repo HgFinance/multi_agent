@@ -71,13 +71,16 @@ def test_full_pipeline_uses_async_langgraph_fanout_and_fanin():
     assert result["qa_gate"]["decision"] == "WARN"
 
     expected_counts = {
-        "research": 6,
+        # Research workers are conditional: without a holdings question or an
+        # experiment proposal, the department must not invent work.
+        "research": 0,
         # 2026-08-06: Risk는 LLM 1명(compliance-policy-worker)과
         # 결정론 risk-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
         "risk": 1,
         # Trading has no fixed LLM workers; strategy-bound workers are dynamic and deterministic.
         "trading": 0,
-        "quant": 2,
+        # Quant workers require an experiment card or an authoring request.
+        "quant": 0,
         # 2026-08-06: QA는 LLM 2명(hallucination/incident)과 결정론
         # qa-runner 1명으로 축소했다. 이 파이프라인 count는 LLM만 센다.
         "qa": 2,
@@ -197,7 +200,7 @@ def test_failed_research_contract_cannot_surface_as_no_action(monkeypatch):
     monkeypatch.setattr(portfolio_pipeline, "_invoke_worker", invalid_research_worker)
     result = asyncio.run(
         run_portfolio_recommendation_pipeline_async(
-            _profile(),
+            _profile(query="보유 종목을 검토해줘"),
             [_candidate("balanced-core")],
         )
     )

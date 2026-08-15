@@ -102,8 +102,14 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260810000150_research_strategy_factory.sql",
                 "20260810000200_quant_hypothesis_lineage.sql",
                 "20260810000300_quant_one_hypothesis_per_proposal.sql",
-                "20260810000400_market_pit_provenance.sql",
-                "20260810000500_market_received_at_nullable_for_imports.sql",
+                # ▶ 시세 마이그레이션 2건은 여기 있으면 안 됐다 (2026-08-14)
+                #   `market` 스키마는 **TimescaleDB** 에 있고 Supabase 에는 없다.
+                #   그런데 `20260810000400_market_pit_provenance` /
+                #   `..000500_market_received_at_nullable` 이 이 목록에 있어서,
+                #   `supabase db push` 를 돌리면 없는 스키마에 DDL 을 날려 거기서
+                #   멈춘다. CLAUDE.md 규약대로(운영 DB=supabase/, 시계열=
+                #   timescaledb/) `timescaledb/migrations/002·003` 으로 옮겼다.
+                #   둘 다 TimescaleDB 에는 이미 적용돼 있다(실측 확인).
                 # 회계: 보수 발생주의 계정 3개(2100/5200/5300). 거래 수수료(5000)와
                 # 섞으면 TCA가 집행 비용과 운용 보수를 분리하지 못한다
                 "20260811000100_accounting_fee_accounts.sql",
@@ -111,8 +117,38 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260811000150_proposal_prompt_versions.sql",
                 "20260812000100_quant_service_role.sql",
                 "20260812000200_accounting_investor_profiles.sql",
+                # FRACAS 폐루프(REJECT 는 근본원인·시정조치·검증창 없이 안 닫힌다)
+                # + 가설을 쓴 모델·지식 컷오프 각인. 전부 additive·nullable.
+                "20260813040000_fracas_and_llm_stamp.sql",
+                # 가설→실행 번역에서 무엇이 사라졌는지 원장에 각인. 실측: 실험이
+                # 돈 가설 41건이 config 19개로 접혔는데 어디에도 안 남아 있었다
+                "20260813070000_hypotheses_mapping_loss.sql",
+                # CEO mandate 현재 설정에 요청 메타데이터를 보존한다.
+                "20260814000100_mandate_current_metadata.sql",
+                # Library 조회 면(뷰 3종). 공장은 적재만 하고 읽을 면이 없었다
+                "20260814090000_library_read_views.sql",
+                # 서가가 낙폭을 최악값으로만 요약해 "관문을 넘은 적 있다" 를
+                # 감췄다. best_mdd·risk_controlled_runs 를 덧붙인다(select 전용)
+                "20260814100000_shelf_risk_control_visibility.sql",
+                # 데이터셋 거래대금·거래량 단위를 매니페스트가 직접 선언한다.
+                # 실행면의 단위 가정과 어긋나면 백테스트 전에 중단할 수 있다.
+                "20260814110000_dataset_manifest_units.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
+
+    def test_migrations_are_transactional(self) -> None:
+        """마이그레이션은 통째로 적용되거나 통째로 안 된다.
+
+        ▶ 왜 별도 시험인가 (2026-08-14 실측)
+          이 검사는 원래 `test_migration_sequence_is_complete` 꼬리에 붙어
+          있었다. 그런데 목록 대조가 **먼저** 터지면 거기서 시험이 끝나
+          트랜잭션 검사는 아예 안 돈다. 실제로 새 마이그레이션 3개가 목록에
+          없었고, 그 셋이 동시에 `begin;`/`commit;` 도 빠져 있었는데 **한쪽이
+          다른 쪽을 가려서** 안 보였다(56개 중 그 셋만 안 감싸져 있었다).
+
+          관문이 둘이면 따로 세운다 - 하나가 터졌다고 나머지를 못 보면
+          그 나머지는 있으나 마나다.
+        """
         for path, sql in self.files:
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
@@ -349,6 +385,10 @@ class TimescaleSchemaContractTest(unittest.TestCase):
             ("market", "ingestion_watermarks"),
             ("market", "archive_exports"),
             ("market", "retention_registry"),
+            # PIT 출처 각인 (002, 2026-08-14 에 supabase/migrations 에서 옮겨 옴).
+            # `market` 스키마는 TimescaleDB 에만 있으므로 이 마이그레이션이
+            # Supabase 목록에 있으면 `db push` 가 없는 스키마에서 멈춘다.
+            ("market", "pit_provenance"),
         }
         self.assertEqual(self.tables, required)
 
@@ -379,6 +419,24 @@ class TimescaleSchemaContractTest(unittest.TestCase):
     def test_timescale_has_no_cross_database_foreign_keys(self) -> None:
         self.assertNotRegex(self.sql.lower(), r"references\s+(reference|governance|strategy|accounting)\.")
         self.assertIn("instrument_id uuid not null", self.sql)
+
+    def test_compression_jobs_have_a_finite_runtime(self) -> None:
+        migration = next(
+            content
+            for path, content in self.files
+            if path.name == "006_compression_policy_runtime.sql"
+        ).lower()
+        self.assertIn("public.alter_job", migration)
+        self.assertIn("max_runtime => interval '20 minutes'", migration)
+        for hypertable in (
+            "market_ticks",
+            "market_quotes",
+            "market_bars",
+            "microstructure_features",
+            "derivative_snapshots",
+        ):
+            with self.subTest(hypertable=hypertable):
+                self.assertIn(f"'{hypertable}'", migration)
 
 
 if __name__ == "__main__":

@@ -246,19 +246,137 @@ select h.hypothesis_id::text, h.title, h.rationale, h.expected_edge,
        h.falsification_criteria, h.required_data_products,
        h.proposal_id, h.lead_ids, h.research_packet_ids, h.claim_ids,
        h.economic_rationale, h.counterparty, h.competing_explanation,
-       h.competing_explanation_codes, h.skeptic_sign, h.source_reported_effect
+       h.competing_explanation_codes, h.skeptic_sign, h.source_reported_effect,
+       h.material_fingerprint
   from quant.experiments e
   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
  where e.trial_family_id = %s
  order by e.trial_number desc limit 1
 """
 
+# ▶ **종결한 쌍둥이도 보여야 한다** (2026-08-14 실측, 카드 t_1c873601)
+#   예전 조건은 `status in ('PROPOSED','PREREGISTERED','RUNNING','TESTING')`
+#   이었다. 즉 **쌍둥이가 종결되는 순간 이 가드가 눈을 감는다.** 그래서 기각될
+#   때마다 같은 제목이 다시 발주되는 고리가 돌았다 - 원장 실측 4/4:
+#
+#     e2379857 ARCHIVED 08-13 18:43  ->  462f378c 발주 08-14 04:50
+#     462f378c REJECTED 08-14 07:43  ->  330797df 발주 08-14 07:50  (7분)
+#     330797df REJECTED 08-14 07:58  ->  63b39bda 발주 08-14 08:06  (8분)
+#     63b39bda REJECTED 08-14 08:39  ->  00b2a722 발주 08-14 08:52  (13분)
+#
+#   제목은 `부모 제목 + 데이터셋` 이라 결정론이다. 같은 제목을 다시 내는 것은
+#   **글자 그대로 같은 수를 다시 두는 것**이고, 답은 이미 원장에 있다.
+#
+#   ▶ 다만 **산 적이 없는 쌍둥이는 막지 않는다.** `factory_bridge` 가 같은 전제를
+#     이미 적어 뒀다("이미 샀어야 이 규칙이 성립한다"). 실험 한 번 못 붙고 취소된
+#     변형까지 영구히 막으면 인프라 장애가 곧 그 수의 영구 소실이 된다. 그래서
+#     **살아 있거나 · 한 번이라도 값을 낸** 쌍둥이만 막는다.
+#
+#   ▶ **실험 행 수가 아니라 측정 수를 센다** (2026-08-14 검토, t_1c873601).
+#     행만 세면 CANCELLED/FAILED 로 값 하나 못 낸 실험이 "이미 샀다" 로 잡혀
+#     바로 위 전제가 무너진다. 실측: `deb25128` 은 실험 2건이 전부 CANCELLED
+#     이고 지표 0행, `e2379857` 도 실험 1건 CANCELLED·지표 0행이다 - 둘 다
+#     인프라 장애로 죽은 것이지 답을 산 것이 아니다. 그래서 **지표나 판정이
+#     하나라도 붙은** 실험만 센다.
 _SQL_VARIANT_EXISTS = """
-select hypothesis_id::text from quant.hypotheses
- where created_by = %s and title = %s
-   and status in ('PROPOSED','PREREGISTERED','RUNNING','TESTING')
+select h.hypothesis_id::text, h.status,
+       (select count(*) from quant.experiments e
+         where e.hypothesis_id = h.hypothesis_id
+           and (exists (select 1 from quant.experiment_metrics x
+                         where x.experiment_id = e.experiment_id)
+             or exists (select 1 from research.experiment_outcomes o
+                         where o.experiment_id = e.experiment_id::text))) n_measured
+  from quant.hypotheses h
+ where h.created_by = %s and h.title = %s
+ order by (h.status in ('PROPOSED','PREREGISTERED','RUNNING','TESTING')) desc,
+          h.created_at desc
  limit 1
 """
+
+# 살아 있는 쌍둥이로 보는 상태. 여기 없으면 종결이다.
+LIVE_STATES = ("PROPOSED", "PREREGISTERED", "RUNNING", "TESTING")
+
+# 기각으로 보는 판정. `factory_bridge.REJECTING` 과 **같은 목록이어야 한다** -
+# 어긋나면 접수는 막는데 발주는 안 막거나 그 반대가 된다. 자체 점검이 대조한다.
+SETTLING_DECISIONS = ("REJECT", "GATE_HOLD", "KILLED", "DEMOTED")
+
+# ▶ **회사가 이미 산 답을 다시 사지 않는다** - 계열이 아니라 **지문**으로 묻는다.
+#   (2026-08-14 실측, 카드 t_1c873601)
+#
+#   지문 7b360cc6… 은 REJECT 판정을 2026-08-13 17:21 에 받았다. 그 뒤로도 배분자가
+#   네 번(04:50 / 07:50 / 08:06 / 08:52) 같은 것을 다시 발주했고, 앞의 셋은 전부
+#   **똑같은 교훈 집합**으로 다시 기각됐다:
+#     {OVERFIT_DSR, BASELINE_NOT_BEATEN, COST_SENSITIVE, BEAR_FRAGILE}
+#   원장 전체로는 배분자 발주 15건 중 13건이 **이미 기각된 지문**의 재발주다.
+#
+#   ▶ **왜 trial_family_id 로 물으면 안 되나** - 계열이 쪼개진다. 같은 지문 하나가
+#     세 개의 trial_family_id 에 흩어져 있었고, `trial_family_id is null` 인 실험이
+#     39건이다. 계열로 물으면 그 39건은 아예 안 보인다.
+#
+#   ▶ **판정 조인은 텍스트 캐스트가 필요하다.** `research.experiment_outcomes.
+#     experiment_id` 는 TEXT, `quant.experiments.experiment_id` 는 UUID 다. 캐스트를
+#     빼면 등호 조인이 **조용히 0행**을 돌려준다 - 가드가 있는데 아무것도 안 막는,
+#     가장 나쁜 실패다.
+#
+#   ▶ **지문만으로 물으면 과차단이다 - 데이터셋까지 키에 넣는다**
+#     (2026-08-14 검토, t_1c873601). `material_fingerprint` 는 데이터셋을 안
+#     담는다: 실측으로 지문 `7b360cc6` 하나가 `krx-basket-daily/v1` 과 `/v3`
+#     양쪽에 걸쳐 있다. 그래서 지문만 보면 **"같은 질문을 더 넓은 표본으로
+#     다시 재는 것"** 까지 "같은 답을 또 사는 것" 으로 세어 버린다. 그런데
+#     표본 확대는 배분자에게 허용된 **유일한** 자동 수다(`register_variant`
+#     가 `표본 확대` 외의 수를 전부 거절한다).
+#
+#     원장 실측으로 그 대가가 얼마인지 재 봤다: 지문만으로 막으면 배분자
+#     발주 15건 중 13건이 막히고 그중 4건(`e63930f1` `8bca3d9d` `023c5914`
+#     `462f378c`)은 **새 데이터셋의 첫 확대**다. 그리고 원장에 있는 지문 23개가
+#     **전부** 기각 판정을 하나 이상 갖고 있다 - 즉 지문만 키로 잡으면 배분자는
+#     오늘 이후 어떤 계열에서도 다시는 발주하지 못한다. 그건 재발주 차단이
+#     아니라 배분자 정지다.
+#
+#     같은 지문 · **같은 데이터셋**이라야 같은 측정이다. `462f378c` 가 그 경계다:
+#     v1/v2 에서 기각된 뒤의 v3 첫 실측(지표 48행)은 새 측정이 맞고, 그 뒤의
+#     `330797df` `63b39bda` `00b2a722` 는 같은 v3 를 다시 사는 것이다.
+#
+#   ▶ **무효로 표시된 판정은 근거가 아니다** (2026-08-14 실측)
+#     `verification_state` 에 `VOID_...` 를 찍어 판정을 무효화해 놓고도, 그
+#     상태를 **읽는 코드가 저장소 어디에도 없었다.** 원장에는 VOID_NO_TRADE 가
+#     2건 있는데 여기 조회는 그것까지 "이미 기각됐다" 로 세고 있었다 - 무효화가
+#     장식이었던 셈이다.
+#
+#     무효 판정은 측정 자체가 성립하지 않은 것이다(거래 0, 표본이 데이터
+#     커버리지와 어긋남 등). 그런 판정으로 재도전을 막으면 **아직 한 번도
+#     제대로 재지 않은 질문이 영구히 봉인된다.** 오늘 첫 수식형 알파
+#     `332fdec9` 가 정확히 그 자리에 있었다 - 미시구조 61거래일짜리 신호를
+#     2,599거래일 표본에 태워 초과 -102%p 가 나왔고, 그 판정이 남으면 같은
+#     지문은 다시 발주되지 않는다.
+_SQL_SETTLED_BY_FINGERPRINT = """
+select o.decision, o.lesson_codes, left(h.hypothesis_id::text, 8)
+  from quant.hypotheses h
+  join quant.experiments e on e.hypothesis_id = h.hypothesis_id
+  join research.experiment_outcomes o
+    on o.experiment_id = e.experiment_id::text
+  left join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+ where h.material_fingerprint = %s
+   and o.decision = any(%s)
+   and coalesce(o.verification_state, '') not like 'VOID%%'
+   and coalesce(m.name || '/' || m.version, '') = %s
+ order by o.decided_at desc
+"""
+
+
+def settled_verdicts(cur, fingerprint: str, dataset: str) -> list[tuple]:
+    """이 지문이 **이 데이터셋에서** 이미 받은 기각 판정. 없으면 빈 목록.
+
+    지문이 없으면(사전등록 전 부모) 묻지 않는다 - 모르는 것을 기각으로 세면
+    아직 아무도 안 해 본 수까지 막힌다. 데이터셋이 비었을 때도 같다: 무엇을
+    다시 재는지 모르면서 "이미 샀다" 고 말할 수는 없다.
+    """
+    if not fingerprint or not dataset:
+        return []
+    cur.execute(_SQL_SETTLED_BY_FINGERPRINT,
+                (fingerprint, list(SETTLING_DECISIONS), dataset))
+    return list(cur.fetchall() or ())
+
 
 _SQL_INSERT_VARIANT = """
 insert into quant.hypotheses
@@ -324,7 +442,26 @@ def register_variant(conn, move: Move) -> tuple[str, str]:
         if not row:
             return "", "부모 가설을 못 찾았다"
         (pid, title, rationale, edge, falsify, _req, proposal, leads,
-         packets, claims, econ, cp, comp, comp_codes, sign, src) = row
+         packets, claims, econ, cp, comp, comp_codes, sign, src,
+         parent_fp) = row
+
+        # ▶ **이미 기각된 측정은 다시 사지 않는다** (카드 t_1c873601)
+        #   변형은 부모의 실질 필드를 그대로 물려받으므로 사전등록 지문이
+        #   부모와 같다. 다만 지문은 **데이터셋을 안 담는다** - 같은 지문이
+        #   `krx-basket-daily/v1` 과 `/v3` 양쪽에 걸쳐 있는 것이 실측이다.
+        #   그래서 `지문 + 데이터셋` 으로 묻는다: 그 짝이 이미 기각 판정을
+        #   받았을 때에만 회사가 이미 산 답이다. 지문만으로 막으면 표본
+        #   확대라는 배분자의 유일한 수가 전 계열에서 영구히 사라진다.
+        settled = settled_verdicts(cur, parent_fp, move.dataset)
+        if settled:
+            lessons = sorted({str(c) for _d, codes, _h in settled
+                              for c in (codes or [])})
+            whos = ", ".join(sorted({str(h) for _d, _c, h in settled}))
+            return "", (f"이 지문({str(parent_fp)[:8]})은 {move.dataset} 에서 "
+                        f"이미 {settled[0][0]} 판정을 받았다({whos}) - "
+                        f"교훈 {lessons or ['(기록 없음)']} 에 대응하지 않은 채 "
+                        f"다시 돌리면 같은 답을 또 사는 것이다. 대응은 "
+                        f"기획안의 LESSONS_ADDRESSED 로 리서치가 낸다")
 
         # ▶ **못 도는 부모의 변형은 못 돈다** (2026-08-12 파이프라인 실측)
         #   `774f3b75` 가 `observation_refs, universe` 로 발주 게이트에 막혀
@@ -335,9 +472,13 @@ def register_variant(conn, move: Move) -> tuple[str, str]:
         #   여기서 나쁜 키를 떼어 내지 않는다 - 그건 가설을 바꾸는 일이고
         #   우리 권한이 아니다. **부모를 고치는 것이 답이고, 그건 리서치 몫**
         #   이다(브리핑의 [막혀 있는 가설] 이 이미 그렇게 말한다).
+        #   ▶ 판정은 실행면에 묻는다 (2026-08-14). 여기서 `EDGE_KEYS` 만 보고
+        #     직접 세면 **실행면보다 엄격해진다** - `observation_refs`/`universe`
+        #     는 `bind` 가 받아 주는데 여기서 막았고, 그렇게 실험 없이 폐기된
+        #     가설이 4건이다.
         try:
-            from config_binding import EDGE_KEYS  # noqa: PLC0415
-            bad = sorted(k for k in (edge or {}) if k not in EDGE_KEYS)
+            from config_binding import unknown_edge_keys  # noqa: PLC0415
+            bad = unknown_edge_keys(edge)
         except Exception:  # noqa: BLE001 - 못 읽으면 막지 않는다
             bad = []
         if bad:
@@ -357,8 +498,18 @@ def register_variant(conn, move: Move) -> tuple[str, str]:
         base = str(title).split(" · 표본확대 ")[0]
         new_title = f"{base[:44]} · 표본확대 {move.dataset}"
         cur.execute(_SQL_VARIANT_EXISTS, (CREATED_BY, new_title))
-        if cur.fetchone():
-            return "", "같은 변형이 이미 대기 중이다"
+        twin = cur.fetchone()
+        if twin:
+            twin_id, twin_status, twin_exp = twin[0], str(twin[1]), int(twin[2] or 0)
+            if twin_status in LIVE_STATES:
+                return "", "같은 변형이 이미 대기 중이다"
+            if twin_exp > 0:
+                # **종결한 쌍둥이가 실험까지 붙었다** = 이 수는 이미 샀다.
+                # 예전에는 여기서 눈을 감아 같은 제목이 네 번 다시 발주됐다.
+                return "", (f"같은 변형을 이미 돌렸다({str(twin_id)[:8]}, "
+                            f"{twin_status}, 실험 {twin_exp}건) - 결과는 원장에 "
+                            f"있다. 다시 돌리는 것은 같은 답을 또 사는 것이다")
+            # 실험이 한 번도 안 붙은 종결분은 **산 적이 없다** - 막지 않는다.
 
         note = (f"[배분자 자동 등록] 부모 {pid[:8]} 의 표본 확대 변형이다. "
                 f"엣지·파라미터를 바꾸지 않고 데이터셋만 {move.dataset} 로 넓힌다. "
@@ -553,29 +704,58 @@ def _check_only_deterministic_moves_are_auto_registered():
     print("  결정론적 수만 자동등록   OK")
 
 
+# 가짜 부모 행과 가짜 커서. **자체 점검 여러 개가 함께 쓴다** - 한 곳에 둔다.
+# 마지막 칸이 `material_fingerprint` 다(2026-08-14, 카드 t_1c873601에서 추가).
+_PARENT_ROW = ("11111111-2222-3333-4444-555555555555", "[momentum] krx_all",
+               "부모 근거 본문", {"type": "momentum"}, ["기준A"],
+               ["krx-basket-daily/v2"], "prop_1", ["lead_1"], ["pkt_1"],
+               ["claim_1"], "경제적 근거", "상대방", "경쟁 설명", ["CODE_A"],
+               "sign", "0.4", "fp_parent_clean")
+
+
+class _Cur:
+    """가짜 커서. `settled` 는 지문 판정 조회가, `twin` 은 동일 제목 조회가
+    돌려줄 행이다. 둘 다 비면 **깨끗한 신규 발주** 경로가 된다.
+
+    `settled` 항목은 `(판정, 교훈, 가설8, 데이터셋[, 검증상태])` 이다. 뒤 두
+    칸은 **모듈이 실제로 보낸 SQL 로 거른다** - 여기서 답을 강제하지 않고
+    Postgres 가 할 일만 흉내 내야, 거르는 코드와 안 거르는 코드가 이 검사에서
+    갈린다(강제하면 둘 다 녹색이 된다)."""
+
+    def __init__(self, settled=(), twin=None):
+        self.inserted = None
+        self._settled, self._twin = list(settled), twin
+        self._sql, self._p = "", None
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, sql, params=None):
+        self._sql, self._p = sql, params
+        if "insert into quant.hypotheses" in sql:
+            self.inserted = params
+    def fetchall(self):
+        if "experiment_outcomes" not in self._sql:
+            return []
+        rows = self._settled
+        if "m.name" in self._sql:          # 모듈이 데이터셋으로 걸렀다
+            want = (self._p or ("", "", ""))[-1]
+            rows = [r for r in rows if len(r) < 4 or r[3] == want]
+        if "verification_state" in self._sql:   # 모듈이 무효 판정을 걸렀다
+            rows = [r for r in rows
+                    if len(r) < 5 or not str(r[4] or "").startswith("VOID")]
+        return [tuple(r[:3]) for r in rows]
+    def fetchone(self):
+        if "order by e.trial_number" in self._sql:
+            return _PARENT_ROW
+        if "insert into" in self._sql:
+            return ("new-hyp-id",)
+        if "h.created_by = %s and h.title = %s" in self._sql:
+            return self._twin                   # 쌍둥이 없음이면 None
+        return None
+
+
 def _check_variant_inherits_provenance():
     """**변형은 부모의 근거를 물려받는다.** 근거 없는 가설을 새로 만들지 않는다."""
-    parent = ("11111111-2222-3333-4444-555555555555", "[momentum] krx_all",
-              "부모 근거 본문", {"type": "momentum"}, ["기준A"],
-              ["krx-basket-daily/v2"], "prop_1", ["lead_1"], ["pkt_1"],
-              ["claim_1"], "경제적 근거", "상대방", "경쟁 설명", ["CODE_A"],
-              "sign", "0.4")
-
-    class _Cur:
-        def __init__(self): self.inserted = None
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def execute(self, sql, params=None):
-            self._sql, self._p = sql, params
-            if "insert into quant.hypotheses" in sql:
-                self.inserted = params
-        def fetchone(self):
-            if "order by e.trial_number" in self._sql:
-                return parent
-            if "insert into" in self._sql:
-                return ("new-hyp-id",)
-            return None                         # 중복 없음
-
+    parent = _PARENT_ROW
     cur = _Cur()
 
     class _Conn:
@@ -619,22 +799,201 @@ def _check_variant_inherits_provenance():
     assert "11111111" in p[1], "부모 혈통이 근거에 안 남았다"
 
     # ▶ **못 도는 부모의 변형은 만들지 않는다** (2026-08-12 파이프라인 실측)
-    #   `774f3b75` 가 `observation_refs, universe` 로 막혀 있는데 그 변형
-    #   `deb25128` 이 만들어져 태어날 때부터 막혔다. 실측 2건.
-    broken = list(parent)
-    broken[3] = {"type": "momentum", "observation_refs": ["x"], "universe": "krx"}
-    cur2 = _Cur()
-    cur2.fetchone = lambda: tuple(broken)          # noqa: ARG005
+    #   막힌 부모의 변형은 `expected_edge` 를 그대로 물려받으므로 태어날 때부터
+    #   막힌다. 실측 2건.
+    #
+    #   ▶ 2026-08-14 정정: 이 검사는 오래 `observation_refs, universe` 를 "못 도는
+    #     부모" 의 예로 썼다. **틀린 전제였다** - 그 둘은 사전등록 계약 필드라
+    #     실행면(`config_binding.bind`)이 받아 준다. 관문만 엄격했던 것이고,
+    #     그래서 실험을 한 번도 못 돌고 폐기된 가설이 4건 나왔다. 판정을
+    #     `unknown_edge_keys()` 로 옮기면서 사례도 **진짜 못 도는 것**으로 바꾼다.
+    from config_binding import unknown_edge_keys  # noqa: PLC0415
 
-    class _C2:
+    def _conn_for(edge: dict):
+        """부모의 `expected_edge` 만 바꾼 가짜 연결.
+
+        `fetchone` 을 통째로 덮으면 **중복 검사까지 부모를 돌려줘** 엉뚱한
+        사유("이미 있다")로 막힌다. 분기는 그대로 두고 부모만 갈아 끼운다.
+        """
+        p = list(parent)
+        p[3] = edge
+        cur_ = _Cur()
+        cur_.fetchone = lambda: (tuple(p) if "order by e.trial_number" in cur_._sql
+                                 else ("new-hyp-id",) if "insert into" in cur_._sql
+                                 else None)
+        class _C:                                  # noqa: E306
+            def cursor(self): return cur_
+            def commit(self): pass
+        return _C(), cur_
+
+    # ▶ **2026-08-14 정정 (카드 t_1c873601): 예시 키가 또 낡았다.**
+    #   `signal_window_days` 는 그 사이 `EDGE_KEYS` 에 들어와 실행면이 받아 준다.
+    #   그래서 이 검사가 조용히 빨간불이 됐고, **뒤따르는 검사가 아예 안 돌았다**
+    #   (자체 점검이 여기서 죽으니 배분자 전체가 무검증 상태였다). 예시를
+    #   고정값으로 박는 대신 **지금 정말 모르는 키를 골라 쓰고**, 고른 키가 실제로
+    #   미지인지 먼저 확인한다 - 어휘가 또 늘어도 이 검사는 안 낡는다.
+    unknown = next((k for k in ("실행면이_모르는_손잡이", "unknown_knob_v0",
+                                "walk_forward_window_days", "signal_window_days")
+                    if unknown_edge_keys({"type": "momentum", k: 1}) == [k]), "")
+    assert unknown, "실행면이 모르는 키를 하나도 못 찾았다 - 이 검사가 무의미해졌다"
+    _c2, cur2 = _conn_for({"type": "momentum", unknown: 20})
+    hid2, why2 = register_variant(_c2, mv)
+    assert hid2 == "" and "실행면이 안 읽는" in why2, why2
+    assert unknown in why2, why2
+    assert cur2.inserted is None, "막힌 부모인데 변형을 등록했다"
+
+    # ▶ **사전등록 키만 가진 부모는 막지 않는다** (2026-08-14).
+    #   막았기 때문에 4건이 실험 없이 죽었다. 실행면이 받아 주는 것을 배분자가
+    #   막으면, 그 차이만큼은 검증이 아니라 소실이다.
+    prereg = {"type": "momentum", "observation_refs": ["x"], "universe": "krx"}
+    assert unknown_edge_keys(prereg) == [], \
+        "사전등록 키를 미지 파라미터로 세고 있다 - 실행면은 받아 준다"
+    _c3, cur3 = _conn_for(prereg)
+    hid3, why3 = register_variant(_c3, mv)
+    assert hid3 == "new-hyp-id", (hid3, why3)
+    assert cur3.inserted is not None, "실행면이 받아 줄 부모인데 변형을 안 만들었다"
+    print("  변형이 근거를 물려받음   OK")
+
+
+def _check_settled_fingerprint_is_not_rebought():
+    """**이미 기각된 지문을 다시 발주하지 않는다** (2026-08-14 실측, t_1c873601).
+
+    지문 7b360cc6… 은 08-13 17:21 에 REJECT 를 받았는데 배분자가 그 뒤로 네 번
+    같은 것을 다시 발주했고, 앞의 셋은 전부 똑같은 교훈 집합으로 다시 기각됐다.
+    원장 전체로는 배분자 발주 15건 중 13건이 이미 기각된 지문의 재발주다.
+    이 검사가 깨지면 그 고리가 그대로 돌아온다.
+    """
+    settled = [("REJECT", ["OVERFIT_DSR", "BASELINE_NOT_BEATEN",
+                           "COST_SENSITIVE", "BEAR_FRAGILE"], "27841915",
+                "krx-basket-daily/v3")]
+    cur = _Cur(settled=settled)
+
+    class _Conn:
+        def cursor(self): return cur
+        def commit(self): pass
+
+    mv = Move(family_id="fam_2e407aad", kind="표본 확대",
+              dataset="krx-basket-daily/v3", score=3.0, why="표본만 넓힌다")
+    hid, why = register_variant(_Conn(), mv)
+    assert hid == "", f"이미 기각된 지문인데 발주했다: {why}"
+    assert "이미" in why and "판정" in why, why
+    # **무엇에 대응해야 하는지 말해 준다** - 사유가 교훈을 안 들면 못 고친다
+    for code in ("OVERFIT_DSR", "BASELINE_NOT_BEATEN"):
+        assert code in why, (code, why)
+    assert cur.inserted is None, "막았다면서 INSERT 했다"
+
+    # ▶ **판정이 없으면 막지 않는다** - 모르는 것을 기각으로 세면 아직 아무도
+    #   안 해 본 수까지 영구히 막힌다.
+    cur2 = _Cur(settled=[])
+
+    class _Conn2:
         def cursor(self): return cur2
         def commit(self): pass
 
-    hid2, why2 = register_variant(_C2(), mv)
-    assert hid2 == "" and "실행면이 안 읽는" in why2, why2
-    assert "observation_refs" in why2 and "universe" in why2, why2
-    assert cur2.inserted is None, "막힌 부모인데 변형을 등록했다"
-    print("  변형이 근거를 물려받음   OK")
+    hid2, why2 = register_variant(_Conn2(), mv)
+    assert hid2 == "new-hyp-id", (hid2, why2)
+
+    # ▶ **다른 데이터셋의 기각은 이 수를 막지 않는다** (2026-08-14 검토).
+    #   지문은 데이터셋을 안 담는다 - 실측으로 지문 7b360cc6 이 v1 과 v3 에
+    #   걸쳐 있다. 지문만으로 막으면 **새 데이터셋의 첫 확대**까지 죽고(실측
+    #   4건: e63930f1 8bca3d9d 023c5914 462f378c), 원장의 지문 23개가 전부
+    #   기각 판정을 갖고 있으므로 배분자의 유일한 수가 전 계열에서 사라진다.
+    #   이 단언이 그 과차단을 고정한다 - 지우면 배분자가 정지한다.
+    cur3 = _Cur(settled=[("REJECT", ["OVERFIT_DSR"], "27841915",
+                          "krx-basket-daily/v2")])
+
+    class _Conn3:
+        def cursor(self): return cur3
+        def commit(self): pass
+
+    hid3, why3 = register_variant(_Conn3(), mv)
+    assert hid3 == "new-hyp-id", \
+        f"v2 에서 기각됐다는 이유로 v3 첫 확대를 막았다 - 과차단이다: {why3}"
+    assert cur3.inserted is not None, "막지 않았다면서 등록도 안 했다"
+
+    # ▶ **무효로 표시된 판정은 재도전을 막지 못한다** (2026-08-14 실측).
+    #   `verification_state` 에 VOID_... 를 찍어 판정을 무효화해 놓고도 그
+    #   상태를 읽는 코드가 저장소 어디에도 없었다 - 원장의 VOID_NO_TRADE 2건이
+    #   여전히 "이미 기각됐다" 로 세어지고 있었다. 무효 판정은 측정 자체가
+    #   성립하지 않은 것이라, 그것으로 막으면 **한 번도 제대로 재지 않은 질문이
+    #   영구히 봉인된다.**
+    cur4 = _Cur(settled=[("REJECT", ["BASELINE_NOT_BEATEN"], "27841915",
+                          "krx-basket-daily/v3", "VOID_SAMPLE_MISMATCH")])
+
+    class _Conn4:
+        def cursor(self): return cur4
+        def commit(self): pass
+
+    hid4, why4 = register_variant(_Conn4(), mv)
+    assert hid4 == "new-hyp-id", \
+        f"무효로 표시된 판정이 재도전을 막았다 - 무효화가 장식이 된다: {why4}"
+
+    # 무효가 아닌 판정은 **여전히** 막는다 - 위 완화가 가드를 뚫으면 안 된다
+    cur5 = _Cur(settled=[("REJECT", ["BASELINE_NOT_BEATEN"], "27841915",
+                          "krx-basket-daily/v3", "OPEN")])
+
+    class _Conn5:
+        def cursor(self): return cur5
+        def commit(self): pass
+
+    assert register_variant(_Conn5(), mv)[0] == "", "살아 있는 기각을 통과시켰다"
+
+    # ▶ **판정 어휘가 접수면과 같아야 한다.** 어긋나면 접수는 막는데 발주는
+    #   안 막거나 그 반대가 된다.
+    try:
+        from factory_bridge import REJECTING  # noqa: PLC0415
+
+        assert set(SETTLING_DECISIONS) == set(REJECTING), \
+            (sorted(SETTLING_DECISIONS), sorted(REJECTING))
+    except ImportError:
+        pass
+    print("  기각된 지문 재발주 차단   OK")
+
+
+def _check_terminal_twin_still_blocks():
+    """**쌍둥이가 종결돼도 가드가 눈을 감으면 안 된다** (2026-08-14 실측).
+
+    예전 조건은 살아 있는 상태만 봤다. 그래서 기각되는 순간 같은 제목이 다시
+    발주됐다 - 실측 4/4, 종결 7~13분 뒤마다 재발주됐다.
+    """
+    class _Conn:
+        def __init__(self, cur): self._c = cur
+        def cursor(self): return self._c
+        def commit(self): pass
+
+    mv = Move(family_id="fam_x", kind="표본 확대",
+              dataset="krx-basket-daily/v3", score=3.0, why="표본만 넓힌다")
+
+    # ① 종결 + 실험이 붙은 쌍둥이 = 이미 산 수다. 막는다.
+    for status in ("REJECTED", "ARCHIVED"):
+        cur = _Cur(twin=("462f378c-e7fc-4abc-ae9f-bbcc995ce567", status, 1))
+        hid, why = register_variant(_Conn(cur), mv)
+        assert hid == "", f"{status} 쌍둥이인데 재발주했다: {why}"
+        assert "이미 돌렸다" in why and status in why, why
+        assert cur.inserted is None
+
+    # ② 살아 있는 쌍둥이 - 예전부터 막던 경로가 그대로여야 한다
+    cur = _Cur(twin=("aaaaaaaa-0000-0000-0000-000000000000", "RUNNING", 0))
+    hid, why = register_variant(_Conn(cur), mv)
+    assert hid == "" and "대기 중" in why, why
+
+    # ③ **산 적이 없는 종결분은 막지 않는다** - 인프라 장애가 그 수의 영구
+    #    소실이 되면 안 된다. 실험 0건이면 답을 산 적이 없다.
+    cur = _Cur(twin=("bbbbbbbb-0000-0000-0000-000000000000", "CANCELLED", 0))
+    hid, why = register_variant(_Conn(cur), mv)
+    assert hid == "new-hyp-id", (hid, why)
+
+    # ④ **실험 행은 있는데 값이 하나도 안 나온 종결분도 산 적이 없다**
+    #    (2026-08-14 검토). 실측: deb25128 은 실험 2건이 전부 CANCELLED 이고
+    #    지표 0행, e2379857 도 같다. 조회가 세는 것이 행이면 이 둘이 "이미
+    #    샀다" 로 잡혀 위 ③ 의 전제가 무너진다 - 그래서 **측정**을 센다.
+    assert "experiment_metrics" in _SQL_VARIANT_EXISTS, \
+        "쌍둥이 조회가 실험 행만 센다 - 값 못 낸 실험이 '이미 샀다' 로 잡힌다"
+    cur = _Cur(twin=("deb25128-0000-0000-0000-000000000000", "ARCHIVED", 0))
+    hid, why = register_variant(_Conn(cur), mv)
+    assert hid == "new-hyp-id", \
+        f"지표 0행짜리 취소 실험을 '이미 샀다' 로 셌다 - 과차단이다: {why}"
+    print("  종결 쌍둥이도 재발주 차단 OK")
 
 
 def _selfcheck() -> int:
@@ -647,7 +1006,9 @@ def _selfcheck() -> int:
     _check_nothing_is_invented()
     _check_only_deterministic_moves_are_auto_registered()
     _check_variant_inherits_provenance()
-    print("배분자 8개 영역 통과.")
+    _check_settled_fingerprint_is_not_rebought()
+    _check_terminal_twin_still_blocks()
+    print("배분자 10개 영역 통과.")
     return 0
 
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from orchestration.answer_contract import grade_answer
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
@@ -31,6 +32,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
 from orchestration.canonical_profiles import (
+    USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
     CanonicalProfileError,
     canonical_profile_for_department,
@@ -42,6 +44,7 @@ from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
+    is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
     mandate_snapshot_present,
@@ -136,6 +139,39 @@ def _ids(values: Any) -> tuple[str, ...]:
     return tuple(task_id for item in values if (task_id := _child_id(item)))
 
 
+def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]:
+    """Hand a finished child to QA/synthesis **with its answer body**.
+
+    요약만 넘기면 뒤 단계가 원문을 못 본다 - QA 는 인용을 검증할 대상이 없고
+    (본 적 없는 문장을 통과시키게 된다), 종합은 표·수치를 다시 만들 수 없어
+    사용자 응답이 요약 한 줄로 쪼그라든다. 실측 2026-08-14 t_79e42ca4.
+
+    본문이 비어 있으면 그 사실을 명시한다 - 없는 것을 요약으로 때우면
+    "답이 있었는데 사라진 것"과 "애초에 못 만든 것"이 구분되지 않는다.
+    """
+
+    payload: dict[str, Any] = {
+        "task_id": child.task_id,
+        "summary": child.summary,
+        "result": child.result,
+        "error": child.error,
+        "block_reason": child.block_reason,
+    }
+    if child.terminal:
+        # 답변 품질 등급을 함께 싣는다 - 차단이 아니라 신호다(answer_contract).
+        # QA 는 "무엇을 의심해야 하는지" 를 알고 시작해야 검증이 성립한다.
+        grade = grade_answer(child.result, summary=child.summary)
+        payload.update(grade.as_payload())
+        if not grade.has_body:
+            payload["answer_body_missing"] = True
+            payload["answer_body_missing_note"] = (
+                "이 부서 카드는 result(답변 본문) 없이 종료됐다. 요약만으로 본문을 "
+                "복원하지 말고, 근거가 없는 수치·목록은 만들지 마라."
+            )
+    payload.update(extra)
+    return payload
+
+
 @dataclass(frozen=True)
 class ChildTaskState:
     """Relevant, read-only task projection used by the supervisor."""
@@ -144,6 +180,10 @@ class ChildTaskState:
     profile: str
     status: str
     summary: str = ""
+    # 부서가 낸 **답변 본문**. summary 와 따로 든다 - 실측 2026-08-14: 창구가
+    # 외국인 순매수 상위 10 표를 만들어 놓고 kanban_complete 에는 요약 한 줄만
+    # 넣어, QA 도 종합도 표를 못 보고 사용자 응답이 result:null 로 나갔다.
+    result: str = ""
     error: str = ""
     block_reason: str = ""
     block_kind: str = ""
@@ -159,6 +199,7 @@ class ChildTaskState:
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
         summary = _text(payload.get("summary") or latest or payload.get("result"))
+        result = _text(payload.get("result"))
         error = _text(payload.get("error") or payload.get("last_error"))
         block_reason = _text(
             payload.get("block_reason")
@@ -192,6 +233,7 @@ class ChildTaskState:
             profile=profile,
             status=status,
             summary=summary,
+            result=result,
             error=error,
             block_reason=block_reason,
             block_kind=block_kind,
@@ -287,6 +329,9 @@ class SupervisorState:
     # Durable planner selection.  An empty tuple preserves compatibility for
     # legacy roots whose body predates the machine-readable field.
     selected_primary_profiles: tuple[str, ...] = ()
+    # 이 루트가 **사람이 발원한 질의**인가 (origin=user-query 도장, RFC 3834 동형).
+    # 공장 자동 생성 카드는 CEO 워크플로가 아니다 - 사용자에게 물어볼 것이 없다.
+    root_is_user_query: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -490,14 +535,9 @@ def _analysis_synthesis_decision(
             "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
-                    {
-                        "task_id": child.task_id,
-                        "profile": child.profile,
-                        "status": child.status,
-                        "summary": child.summary,
-                        "error": child.error,
-                        "block_reason": child.block_reason,
-                    }
+                    child_handoff_payload(
+                        child, profile=child.profile, status=child.status
+                    )
                     for child in state.analysis_children
                 ],
                 ensure_ascii=False,
@@ -525,6 +565,18 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 len(state.selected_primary_profiles),
                 0,
                 ",".join(state.missing_primary_profiles),
+            )
+            return None
+        # 사람이 발원한 질의일 때만 사용자에게 되묻는다. 공장 자동 생성 카드
+        # (공장 주기·공장 개선 등)는 자식 없이 혼자 끝나는 게 정상인데, 그것까지
+        # 워크플로로 보고 REQUEST_USER_INPUT 카드를 찍어내면 **아무도 답할 수 없는
+        # 카드**가 쌓인다 - CEO 에이전트가 "무엇을 물어야 하는지 지시에 없다"며
+        # blocked 로 보내고, 그게 43 장 쌓여 있었다(2026-08-14 실측, 전부 같은 제목
+        # "CEO planner produced no executable child task").
+        if not state.root_is_user_query:
+            logger.info(
+                "no-analysis-children on non-user root=%s - skipping user-input card",
+                state.parent_task_id,
             )
             return None
         return SupervisorDecision(
@@ -607,14 +659,14 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     "feedback_consumer=hr-department\n"
                     "store_reasoning_trace=false\n"
                     + json.dumps(
-                        [{
-                            "task_id": child.task_id,
-                            "department": child.department,
-                            "actor_type": "department_head",
-                            "summary": child.summary,
-                            "error": child.error,
-                            "block_reason": child.block_reason,
-                        } for child in state.analysis_children],
+                        [
+                            child_handoff_payload(
+                                child,
+                                department=child.department,
+                                actor_type="department_head",
+                            )
+                            for child in state.analysis_children
+                        ],
                         ensure_ascii=False,
                     )
                 ),
@@ -640,7 +692,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     " reject unsupported claims, and report blocked findings.\n"
                     + json.dumps(
                         [
-                            {"task_id": child.task_id, "summary": child.summary}
+                            child_handoff_payload(child)
                             for child in state.analysis_children
                         ],
                         ensure_ascii=False,
@@ -831,7 +883,13 @@ class HermesKanbanClient:
         idempotency_key: str,
         initial_status: str | None = None,
     ) -> dict[str, Any]:
-        request = CanonicalKanbanTaskRequest(assignee, title, body, idempotency_key)
+        # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
+        # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
+        # 자식이 공장 뒤에 서면 사용자 지연은 그대로다(2026-08-14 실측).
+        priority = USER_QUERY_PRIORITY if is_user_query_body(body) else 0
+        request = CanonicalKanbanTaskRequest(
+            assignee, title, body, idempotency_key, priority=priority
+        )
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
         for parent_task_id in parent_task_ids:
@@ -842,6 +900,8 @@ class HermesKanbanClient:
                 request.idempotency_key,
                 "--created-by",
                 "ceo-supervisor",
+                "--priority",
+                str(request.priority),
                 "--json",
             )
         )
@@ -1336,6 +1396,7 @@ class CeoSupervisorService:
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_primary_profiles_from_task(root_payload),
+                    root_is_user_query=is_user_query_body(root_body),
                 )
                 decision = self.decider(state)
                 if (
@@ -1609,8 +1670,12 @@ class CeoSupervisorService:
                 primary_idempotency_key(state.parent_task_id, decision.assignee)
                 if role == "primary"
                 else f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
-            
-        )
+                + (
+                    f":replan-{state.replan_count}"
+                    if decision.action == SupervisorAction.CREATE_TASK
+                    else ""
+                )
+            )
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
@@ -1624,20 +1689,20 @@ class CeoSupervisorService:
                 parent_task_ids=decision.parent_task_ids,
                 idempotency_key=idempotency_key,
             )
-        if role == "primary":
-            logger.info(
-                "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",
-                state.parent_task_id,
-                decision.assignee,
-                idempotency_key,
-                bool(created),
-            )
-        elif role == "synthesis":
-            logger.info(
-                "synthesis-create root=%s parents=%d",
-                state.parent_task_id,
-                len(decision.parent_task_ids),
-            )
+            if role == "primary":
+                logger.info(
+                    "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",
+                    state.parent_task_id,
+                    decision.assignee,
+                    idempotency_key,
+                    bool(created),
+                )
+            elif role == "synthesis":
+                logger.info(
+                    "synthesis-create root=%s parents=%d",
+                    state.parent_task_id,
+                    len(decision.parent_task_ids),
+                )
 
 
 __all__ = [

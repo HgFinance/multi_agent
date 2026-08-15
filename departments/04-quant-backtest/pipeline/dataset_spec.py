@@ -106,6 +106,13 @@ class DatasetSpec:
     #   잡으면 덧붙임이 곧 새 파일이라 재작성이 0 이 된다. 원시 아카이브
     #   (`market-archive/<표>/<날짜>.parquet`)가 이미 같은 규칙을 쓴다.
     partition_grain: str = "month"
+    # ▶ **거래대금 단위를 명세가 선언한다** (2026-08-14)
+    #   실행면은 `1 단위 = 1,000,000원`(KRW_MILLION)을 가정하고, 로더 경계에서
+    #   매니페스트 선언과 대조한다(`assert_declared_units`). 그런데 spec 경로로
+    #   만든 매니페스트에는 그 선언을 심는 자리가 없어 매번 "선언이 없다" 로
+    #   지나갔다 - 대조가 있는데 대조할 것이 없는 상태다.
+    #   거래대금 열이 없는 데이터셋은 None 그대로 둔다(없는 열은 안 묻는다).
+    notional_unit: str | None = None
 
     def row_line(self, row: dict) -> str:
         """해시의 근거가 되는 한 줄. **열 순서가 계약이다.**"""
@@ -205,8 +212,158 @@ MICROSTRUCTURE_DAILY = DatasetSpec(
     partition_grain="day",
 )
 
+# ── 마이크로구조 일별 피처 v2 - 거래대금·체결수량 추가 ──────────────────────
+#
+# ▶ 왜 (2026-08-14, 재일님 지적 "거래대금 있었던거 같은데")
+#   `market.market_ticks` 는 price·quantity·cumulative_value 를 다 갖고 있다
+#   (실측: 하루 체결 1,335만건 · 2,489종목 · 거래대금 41.96조). 그런데 집계는
+#   `sum(quantity)` 를 **계산해 놓고 출력에 안 실었고** 거래대금은 아예 만들지
+#   않았다. 그래서 미시구조 표본에서는 유동성 필터가 쓸 값이 없었고, "거래대금
+#   급증" 같은 신호를 표현할 칸도 없었다.
+#
+# ▶ **v1 을 고치지 않고 v2 를 만든다.** v1 로 돈 실험(`332fdec9`)의 재현이
+#   살아야 한다 - 같은 이름·같은 버전인데 내용이 달라지면 그 실험의 input_hash
+#   가 가리키던 데이터가 사라진다. 원천 쪽도 `ms-daily-v2` 로 따로 적재한다.
+#
+# ▶ 단위는 **백만원**(일봉 `notional` 과 같은 눈금). 매니페스트가
+#   `notional_unit='KRW_MILLION'` 을 선언하고 로더가 대조한다 - 원 단위로 담으면
+#   유동성 필터가 1e6 배 어긋난 채 돌아 유니버스가 0 이 된다(2026-08-14 실측).
+MICROSTRUCTURE_DAILY_V2 = DatasetSpec(
+    name="krx-microstructure-daily",
+    version="v2",
+    db="market",
+    fetch_sql="""
+        select instrument_id::text,
+               (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               spread_bps, depth_imbalance, order_flow_imbalance,
+               trade_intensity, realized_volatility,
+               traded_value, traded_volume,
+               quality_status, observed_at
+          from market.microstructure_features
+         where feature_set_version = %(fsv)s
+           and event_time >= %(start)s and event_time < %(end)s
+    """,
+    columns=("instrument_id", "trade_date", "spread_bps", "depth_imbalance",
+             "order_flow_imbalance", "trade_intensity", "realized_volatility",
+             "traded_value", "traded_volume", "quality_status", "observed_at"),
+    key_columns=("instrument_id", "trade_date"),
+    partition_column="trade_date",
+    canon={
+        "trade_date": lambda v: v.isoformat() if isinstance(v, date) else str(v),
+        "spread_bps": canon_number,
+        "depth_imbalance": canon_number,
+        "order_flow_imbalance": canon_number,
+        "trade_intensity": canon_number,
+        "realized_volatility": canon_number,
+        "traded_value": canon_number,
+        "traded_volume": canon_number,
+        "observed_at": canon_time,
+    },
+    restore={
+        "trade_date": _date,
+        "spread_bps": _f, "depth_imbalance": _f, "order_flow_imbalance": _f,
+        "trade_intensity": _f, "realized_volatility": _f,
+        "traded_value": _f, "traded_volume": _f,
+        "observed_at": _dt,
+    },
+    source_versions={"microstructure_features": "ms-daily-v2"},
+    point_in_time={
+        "kind": "MIXED",
+        "why": ("이관 구간(2026-05-18~08-11)은 원본에 관측 시각이 없어 "
+                "observed_at 이 자리 채움이다(market.pit_provenance = NONE). "
+                "실시간 수집분만 PIT 가 성립한다."),
+    },
+    partition_grain="day",
+    # 거래대금은 **백만원**으로 접는다 - 일봉 `notional` 과 같은 눈금이라야
+    # 같은 유동성 문턱을 쓸 수 있다. 빌더가 이 값을 매니페스트에 심고
+    # 로더가 실행면 가정과 대조한다.
+    notional_unit="KRW_MILLION",
+)
+
+# ── 마이크로구조 일별 피처 v3 - 일중 구간 피처 추가 ────────────────────────
+#
+# ▶ 왜 (2026-08-14, 재일님 "호가 체결만 있으면 가공하면 다 만들 수 있지 않음?")
+#   맞다. 원천은 이미 다 있었다(체결 11.29억건, 호가 10단계) - 문제는 **접는
+#   방식**이었다. v1/v2 의 OFI 는 `sum(side*qty)/sum(qty)` 로 하루 전체를 하나로
+#   평균한다. 오전에 팔고 오후에 산 종목은 중립으로 찍혀 정보가 상쇄된다.
+#
+#   2026-08-13 하루로 재 봤다(체결 30건 이상 2,420종목):
+#     마감 30분 OFI 표준편차 0.4424  vs  하루 전체 0.2538   (1.74배)
+#     둘의 상관 0.3713  <- 서로 다른 것을 잰다. 새 정보가 있다.
+#   일별 OFI 첫 실험이 IC +0.012(t 0.79)로 죽은 것이 이 압축 때문이다.
+#
+# ▶ **실행면은 한 줄도 안 바뀐다.** 여전히 (종목, 일자) 한 행이라 `Market.micro`
+#   도 walk-forward 도 체결 규약(t-1 시그널 / t 시가)도 그대로다. 일중에
+#   *거래*하는 것은 엔진을 갈아야 하는 별개 작업이고 여기 포함되지 않는다.
+MICROSTRUCTURE_DAILY_V3 = DatasetSpec(
+    name="krx-microstructure-daily",
+    version="v3",
+    db="market",
+    fetch_sql="""
+        select instrument_id::text,
+               (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               spread_bps, depth_imbalance, order_flow_imbalance,
+               trade_intensity, realized_volatility,
+               traded_value, traded_volume,
+               ofi_close, ofi_open, ofi_intraday_std,
+               close_vs_vwap, spread_close_ratio,
+               quality_status, observed_at
+          from market.microstructure_features
+         where feature_set_version = %(fsv)s
+           and event_time >= %(start)s and event_time < %(end)s
+    """,
+    columns=("instrument_id", "trade_date", "spread_bps", "depth_imbalance",
+             "order_flow_imbalance", "trade_intensity", "realized_volatility",
+             "traded_value", "traded_volume",
+             "ofi_close", "ofi_open", "ofi_intraday_std",
+             "close_vs_vwap", "spread_close_ratio",
+             "quality_status", "observed_at"),
+    key_columns=("instrument_id", "trade_date"),
+    partition_column="trade_date",
+    canon={
+        "trade_date": lambda v: v.isoformat() if isinstance(v, date) else str(v),
+        "spread_bps": canon_number,
+        "depth_imbalance": canon_number,
+        "order_flow_imbalance": canon_number,
+        "trade_intensity": canon_number,
+        "realized_volatility": canon_number,
+        "traded_value": canon_number,
+        "traded_volume": canon_number,
+        "ofi_close": canon_number,
+        "ofi_open": canon_number,
+        "ofi_intraday_std": canon_number,
+        "close_vs_vwap": canon_number,
+        "spread_close_ratio": canon_number,
+        "observed_at": canon_time,
+    },
+    restore={
+        "trade_date": _date,
+        "spread_bps": _f, "depth_imbalance": _f, "order_flow_imbalance": _f,
+        "trade_intensity": _f, "realized_volatility": _f,
+        "traded_value": _f, "traded_volume": _f,
+        "ofi_close": _f, "ofi_open": _f, "ofi_intraday_std": _f,
+        "close_vs_vwap": _f, "spread_close_ratio": _f,
+        "observed_at": _dt,
+    },
+    source_versions={"microstructure_features": "ms-daily-v3"},
+    point_in_time={
+        "kind": "MIXED",
+        "why": ("이관 구간(2026-05-18~08-11)은 원본에 관측 시각이 없어 "
+                "observed_at 이 자리 채움이다(market.pit_provenance = NONE). "
+                "실시간 수집분만 PIT 가 성립한다. 일중 구간 피처는 그날 정규장이 "
+                "끝난 뒤에야 확정되므로, 체결이 t+1 시가인 우리 규약과 시점이 "
+                "맞는다 - 같은 날 종가로 거래하는 전략에는 쓸 수 없다."),
+    },
+    partition_grain="day",
+    notional_unit="KRW_MILLION",
+)
+
 SPECS: dict[str, DatasetSpec] = {
     f"{MICROSTRUCTURE_DAILY.name}/{MICROSTRUCTURE_DAILY.version}": MICROSTRUCTURE_DAILY,
+    f"{MICROSTRUCTURE_DAILY_V2.name}/{MICROSTRUCTURE_DAILY_V2.version}":
+        MICROSTRUCTURE_DAILY_V2,
+    f"{MICROSTRUCTURE_DAILY_V3.name}/{MICROSTRUCTURE_DAILY_V3.version}":
+        MICROSTRUCTURE_DAILY_V3,
 }
 
 # 버전 스탬프. 빌더의 `--stamp` 가 `v1` 을 `v1-20260812` 로 찍는다.
@@ -338,8 +495,24 @@ def _check_stamped_version_still_finds_the_spec():
     n = MICROSTRUCTURE_DAILY.name
     assert spec_for(n, "v1") is MICROSTRUCTURE_DAILY
     assert spec_for(n, "v1-20260812") is MICROSTRUCTURE_DAILY, "스탬프 조회 실패"
-    # **아무 접미사나 벗기지 않는다** - 8자리 날짜만이다. v2 는 다른 명세다.
-    assert spec_for(n, "v2") is None
+    # **아무 접미사나 벗기지 않는다** - 8자리 날짜만이다. 버전이 다르면 다른
+    # 명세이고, 섞이면 v1 로 돈 실험이 v2 열을 읽거나 그 반대가 된다.
+    assert spec_for(n, "v2") is MICROSTRUCTURE_DAILY_V2
+    assert spec_for(n, "v2") is not MICROSTRUCTURE_DAILY
+    assert spec_for(n, "v2-20260814") is MICROSTRUCTURE_DAILY_V2, "v2 스탬프 실패"
+    assert spec_for(n, "v3") is MICROSTRUCTURE_DAILY_V3
+    assert spec_for(n, "v9") is None, "없는 버전을 아무 명세로나 읽었다"
+    # **판본은 쌓인다. 옛 판본의 열은 안 늘어난다** - 늘면 그 재현이 깨진다.
+    assert "traded_value" in MICROSTRUCTURE_DAILY_V2.columns
+    assert "traded_value" not in MICROSTRUCTURE_DAILY.columns
+    for f in ("ofi_close", "ofi_open", "ofi_intraday_std", "close_vs_vwap",
+              "spread_close_ratio"):
+        assert f in MICROSTRUCTURE_DAILY_V3.columns, f
+        assert f not in MICROSTRUCTURE_DAILY_V2.columns, (f, "v2 가 오염됐다")
+        assert f not in MICROSTRUCTURE_DAILY.columns, (f, "v1 이 오염됐다")
+    # 각 판본은 자기 원천 판본만 읽는다 - 섞이면 열이 빈 채로 굳는다
+    assert MICROSTRUCTURE_DAILY_V3.source_versions == {
+        "microstructure_features": "ms-daily-v3"}, MICROSTRUCTURE_DAILY_V3.source_versions
     assert spec_for(n, "v1-2026081") is None, "8자리가 아닌 것을 스탬프로 봤다"
     assert spec_for(n, "v1-abc") is None
     # 이름이 다르면 못 찾는다 - 스탬프를 벗겼다고 남의 명세로 읽으면 안 된다

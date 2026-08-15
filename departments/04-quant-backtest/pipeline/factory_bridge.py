@@ -114,16 +114,27 @@ def _hyp_view(proposal: dict) -> dict:
 
 
 def _horizon_of(proposal: dict) -> int:
-    """기획안이 쓰겠다는 형성·보유 창(거래일). 못 읽으면 0(검사 생략)."""
+    """기획안이 쓰겠다는 창 중 **가장 긴 것**(거래일). 읽을 수 없으면 0(검사 생략).
+
+    ▶ 왜 첫 키가 아니라 최댓값인가 (2026-08-14, 카드 t_e9534028)
+      형성창과 보유창이 갈린 뒤로 기획안은 두 값을 같이 적는다. 아래 ①-d 는
+      "이 창이 표본에 들어가는가" 를 묻는 검사인데, 형성 250일·보유 5일짜리
+      기획안을 **보유창으로만 재면** 창이 넉넉하다고 통과시킨 뒤 walk-forward
+      에서 창 0개로 죽는다 - 이 검사가 막으라고 있는 바로 그 사고다.
+      긴 쪽으로 재면 통과하던 것이 막힐 수는 있어도 그 반대는 없다(개발원칙 9).
+    """
     sp = proposal.get("suggested_params") or {}
-    for k in ("horizon_days", "holding_horizon", "lookback_days"):
+    longest = 0
+    for k in ("signal_window_days", "horizon_days", "holding_horizon",
+              "lookback_days"):
         v = sp.get(k)
-        if v is not None:
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return 0
-    return 0
+        if v is None:
+            continue
+        try:
+            longest = max(longest, int(v))
+        except (TypeError, ValueError):
+            return 0            # 비수치는 바인딩이 사유를 만든다
+    return longest
 
 
 def gate0(proposal: dict, *, trials_used: int = 0,
@@ -167,9 +178,16 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #     무시하면 같은 실수를 반복한다.
     _, _dropped_params = expected_edge_for(proposal)
     if _dropped_params:
+        # ▶ 쓸 수 있는 키를 **손으로 적지 않는다** (2026-08-14, 카드 t_e9534028).
+        #   여기 "horizon_days·top_n" 이 박혀 있었는데 그 사이 실행면은 위험
+        #   손잡이·유동성·구성방식·형성창까지 열렸다. 안내문이 실행면보다 좁으면
+        #   리서치는 쓸 수 있는 손잡이를 안 쓴다 - 표를 넓혀도 안 쓰이면 안 넓힌
+        #   것과 같다. `EDGE_KEYS` 를 그대로 읽어 자동으로 따라오게 한다.
+        from config_binding import EDGE_KEYS as _EDGE_KEYS   # noqa: PLC0415
+        _usable = sorted(set(_EDGE_KEYS) - {"type", "universe_key"})
         r.warnings.append(
             f"SUGGESTED_PARAMS 의 {_dropped_params} 는 실행면이 읽지 않아 "
-            f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
+            f"등록에서 빠진다 - 쓸 수 있는 키: {_usable}. "
             f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
 
     # ①-a-2 정체성 키를 파라미터 칸에 적으면 **반려한다** (2026-08-13)
@@ -239,6 +257,92 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                    f"(미실행으로 남고 통과로 세지 않는다): {_dead}")
     except Exception:  # noqa: BLE001 - 고지 실패가 접수를 막으면 안 된다
         pass
+
+    # ①-d-0 파라미터 범위 (2026-08-13 실측 prop_86e535d7)
+    #   max_drawdown_stop=+0.35(부호 반대)가 접수를 통과했다 - 범위 검사가
+    #   실행(바인딩)에만 있어서, 가설이 **실행 불가로 태어나** 발주-사망-회수를
+    #   반복할 뻔했다(667f0a45 와 같은 사고 유형). 자르거나 부호를 대신 고치지
+    #   않는다 - 그러면 등록한 가설과 실행한 실험이 달라진다. 반려하고 알린다.
+    try:
+        from config_binding import LIMITS      # noqa: PLC0415 (실행면이 정본)
+
+        for k, v in (proposal.get("suggested_params") or {}).items():
+            # 형성창·보유창 둘 다 lookback_days 자리의 한도를 받는다
+            # (2026-08-14: signal_window_days 개방, 카드 t_e9534028)
+            target = ("lookback_days"
+                      if k in ("horizon_days", "signal_window_days") else k)
+            lo, hi = LIMITS.get(target, (None, None))
+            if lo is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue                # 비수치는 바인딩이 사유를 만든다
+            if not (lo <= fv <= hi):
+                r.reject("PARAM_OUT_OF_RANGE",
+                         f"suggested_params.{k}={v} 는 실행 범위({lo}~{hi}) 밖이다"
+                         + (". max_drawdown_stop 은 음수다(-0.35 = 고점 대비 "
+                            "-35% 에서 전량 현금)"
+                            if k == "max_drawdown_stop" and fv > 0 else "")
+                         + ". 자르지 않고 반려한다 - 값을 고쳐 다시 내라")
+    except ImportError:                 # 검사 불능 != 접수 차단. 다만 조용히
+        r.warn("config_binding 을 읽지 못해 파라미터 범위를 접수에서 못 봤다")
+
+    # ①-c2 **알파 수식(AST)은 접수에서 검증한다** (2026-08-14)
+    #   수식은 실행면이 신호로 삼는 것이라, 성립하지 않으면 그 기획안은
+    #   실험을 만들어 놓고 중간에 죽는다. 접수는 실행 가능성의 약속이므로
+    #   여기서 판정한다 - 연산자·필드·창·복잡도까지 `alpha_ast.parse` 가 본다.
+    _expr = (proposal.get("suggested_params") or {}).get("signal_expr")
+    if _expr is not None:
+        try:
+            from alpha_ast import check_alignment as _ca  # noqa: PLC0415
+            from alpha_ast import needs_micro as _nm
+            from alpha_ast import fields_of as _fo
+            from alpha_ast import parse as _pe
+
+            _parsed = _pe(_expr)
+            # 무엇을 읽는 수식인지 접수 기록에 남긴다 - 나중에 "이 알파가
+            # 어떤 데이터로 나왔나" 를 묻는 자리가 여기다.
+            r.warn(f"알파 수식 접수: 필드 {sorted(_fo(_parsed))}"
+                   f"{' · 미시구조 필요' if _nm(_parsed) else ''}")
+            if _nm(_parsed):
+                # ▶ **표본이 짧아진다는 사실을 접수에서 말한다** (2026-08-14)
+                #   미시구조는 일봉(2016~)보다 훨씬 짧다. 실행면이 표본을 그
+                #   커버리지로 자르므로(clip_to_micro_coverage), 형성·보유 창을
+                #   길게 잡으면 창이 몇 개 안 나온다. 첫 수식형 알파가 이 사실을
+                #   모른 채 10년 표본으로 돌아 초과 -102%p 를 냈다.
+                r.warn("미시구조 수식은 표본이 그 데이터 커버리지로 잘린다"
+                       "(일봉 2016~ 이 아니라 호가·체결이 있는 기간만). "
+                       "형성·보유 창을 짧게 잡아야 창이 나온다")
+
+            # ①-c3 **가설과 수식이 같은 이야기인가** (2026-08-14)
+            #   수식은 실행면이 그대로 쓰지만, 결과를 해석하는 것은 논리다.
+            #   둘이 다른 이야기면 실험이 무엇을 검증했는지 아무도 모른다 -
+            #   성적이 좋아도 그 논리의 증거가 아니고, 나빠도 그 논리의 반증이
+            #   아니다. 원장에는 "매수 압력 가설 REJECT" 로 남는데 실제로는
+            #   종가만 봤을 수 있다.
+            #
+            #   **결정론으로만 본다.** LLM 자기검증은 문헌상 성능을 떨어뜨리고
+            #   (self-critique 성능 붕괴), 자기선호 편향이 -38%~+90% 다 -
+            #   리서치가 자기 수식을 채점하면 통과율만 오른다. 그래서 기계가
+            #   확실히 아는 것만 본다: 읽는 필드가 논리에 등장하는가.
+            _align = _ca(_parsed, " ".join(str(proposal.get(k) or "") for k in
+                                           ("economic_rationale", "counterparty",
+                                            "hypothesis", "title")))
+            if not _align["ok"]:
+                r.reject("HYPOTHESIS_FACTOR_MISMATCH",
+                         f"{_align['note']}. 실험은 수식대로 돌지만 판정은 "
+                         f"논리 이름으로 원장에 남는다 - 둘이 다르면 그 결과는 "
+                         f"무엇의 증거도 아니다. 수식을 논리에 맞추거나, "
+                         f"논리를 수식이 실제로 재는 것으로 다시 써라")
+            elif _align["unmentioned"]:
+                r.warn(f"수식 정합 경고: {_align['note']}")
+        except ImportError:
+            r.warn("alpha_ast 를 읽지 못해 수식을 접수에서 못 봤다")
+        except Exception as _e:  # noqa: BLE001 - 사유를 그대로 싣는다
+            r.reject("SIGNAL_EXPR_INVALID",
+                     f"알파 수식이 성립하지 않는다: {_e}. 실행면이 신호로 삼는 "
+                     f"것이라 이대로 접수하면 실험이 중간에 죽는다 - 고쳐서 다시 내라")
 
     # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
@@ -344,6 +448,11 @@ def expected_edge_for(proposal: dict) -> tuple[dict, list]:
       `667f0a45` 가 `signal_window_days`·`walk_forward_window_days` 로 죽었고,
       스톨 회수로 다시 발주해도 같은 자리에서 또 죽었다 - 가설이 만들어질 때
       이미 실행 불가로 태어난 것이다. 접수는 실행 가능성의 약속이어야 한다.
+
+      **후속(2026-08-14, 카드 t_e9534028)**: 그 두 키의 처분이 갈렸다.
+      `signal_window_days` 는 형성창으로 **실행면에 열렸고**(EDGE_KEYS),
+      `walk_forward_window_days` 는 창 분할 = 사전등록 정책이라 실행 손잡이가
+      되지 않았다(NON_EXECUTION_KEYS). 그래서 여기서 떨어지는 것은 후자뿐이다.
     """
     from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
 
@@ -464,17 +573,28 @@ def build_outcome(*, experiment_id: str, hypothesis_id: str, trial_family_id: st
 # ---------------------------------------------------------------------------
 
 _SQL_PUBLISHED = """
-    select proposal_id, edge_type, universe_key, label, baseline,
-           economic_rationale, counterparty, competing_explanation,
-           competing_explanation_codes, skeptic_sign, lead_ids,
-           falsification_tests, data_requirements, suggested_params,
-           trial_budget, prior_check, source_reported_effect,
-           research_packet_ids, claim_ids
-      from research.experiment_proposals
-     where status = 'PUBLISHED'
-     order by as_known_at
+    select p.proposal_id, p.edge_type, p.universe_key, p.label, p.baseline,
+           p.economic_rationale, p.counterparty, p.competing_explanation,
+           p.competing_explanation_codes, p.skeptic_sign, p.lead_ids,
+           p.falsification_tests, p.data_requirements, p.suggested_params,
+           p.trial_budget, p.prior_check, p.source_reported_effect,
+           p.research_packet_ids, p.claim_ids
+      from research.experiment_proposals p
+     where p.status = 'PUBLISHED'
+       and not exists (select 1 from quant.hypotheses h
+                        where h.proposal_id = p.proposal_id)
+     order by p.as_known_at
      limit %s
 """
+# ▶ 이미 승격된 기획안을 창에서 빼는 not exists 가 생명선이다 (2026-08-13
+#   실측, 카드 t_7cd9bd5f). 승격돼도 status 는 영원히 PUBLISHED 로 남는데
+#   창은 "가장 오래된 limit 건" 이라, 오래된 승격분 18건 + 영구 게이트거부
+#   2건이 창을 다 채운 시점부터 새 기획안은 fetch 자체가 안 됐다(PUBLISHED
+#   23건 중 21~23위 3건이 어떤 주기에도 승격·거부 판정을 받지 못했다).
+#   리서치가 아무리 발행해도 공장에 신규 가설 공급이 0 이 되는 조용한 정지다.
+#   게이트거부분은 quant.hypotheses 에 없어 창에 남는다 - 종결 상태 각인
+#   (PROMOTED/GATE_REJECTED 등)은 원장 상태 어휘라 별도 합의 사항(카드의
+#   B안). 거부가 20건 쌓이면 같은 병이 재발하므로 그때는 B안이 필요하다.
 
 _SQL_FAMILY_OUTCOMES = """
     select decision, lesson_codes
@@ -483,16 +603,26 @@ _SQL_FAMILY_OUTCOMES = """
      order by decided_at desc
 """
 
+# ▶ **한 실험에는 판정 하나** (2026-08-14 실측). outcome_id 는
+#   (experiment_id, decision) 해시라 멱등이 **판정별로만** 작동했다 - 같은
+#   실험에 REJECT 와 GATE_HOLD 가 나란히 앉는 것을 막지 못한다(e820053a 실측:
+#   고아 소탕기와 정규 판정 사슬이 경합). 판정이 둘이면 "이 실험은 어떻게
+#   끝났나" 에 답이 두 개이고, 교훈 집계·파레토·시도 계수가 전부 이중으로 센다.
+#   먼저 온 판정이 정본이다 - 나중 것은 조용히 버리지 않고 호출부가 알도록
+#   0행 반환으로 드러낸다(아래 finalize 가 그 사실을 로그로 남긴다).
 _SQL_INSERT_OUTCOME = """
     insert into research.experiment_outcomes
       (outcome_id, experiment_id, hypothesis_id, trial_family_id, trial_number,
        decision, decided_at, proposal_id, failed_criteria, oos_summary,
        regime_concerns, lesson_codes, notes, root_cause, corrective_action)
-    values (%(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
-            %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
-            %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
-            %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
-            %(root_cause)s, %(corrective_action)s)
+    select %(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
+           %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
+           %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
+           %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
+           %(root_cause)s, %(corrective_action)s
+     where not exists (
+             select 1 from research.experiment_outcomes o
+              where o.experiment_id = %(experiment_id)s)
     on conflict (outcome_id) do nothing
 """
 
@@ -538,6 +668,134 @@ def _checkable_regime_evidence(values) -> list:
     return out
 
 
+def _check_signal_expr_is_gated_at_intake():
+    """**수식은 접수에서 판정한다** (2026-08-14).
+
+    실행면이 신호로 삼는 것이라, 성립하지 않는 수식을 접수하면 그 기획안은
+    실험을 만들어 놓고 중간에 죽는다 - 원장에 반쪽짜리 흔적이 남는다.
+    접수는 실행 가능성의 약속이어야 한다.
+    """
+    # 논리는 수식이 실제로 읽는 것을 말해야 한다(아래 ①-c3 정합 검사) - 예전
+    # 이 픽스처는 "x"/"y" 였고, 그래서 새 검사가 붙었는데도 이 점검은 통과했다.
+    base = {"edge_type": "momentum", "universe_key": "krx_all",
+            "economic_rationale": "호가 매수 압력이 크고 스프레드가 좁은 종목이 "
+                                  "이후 초과수익을 낸다",
+            "counterparty": "유동성을 급히 요구하는 청산 매매",
+            "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5}
+
+    ok_expr = {"op": "sub", "args": [
+        {"op": "rank", "arg": {"op": "ts_mean",
+                               "field": "order_flow_imbalance", "n": 3}},
+        {"op": "rank", "arg": {"op": "ts_mean", "field": "spread_bps", "n": 10}}]}
+    g = gate0(dict(base, suggested_params={"horizon_days": 2, "top_n": 200,
+                                           "signal_expr": ok_expr}))
+    assert g.ok, g.as_dict()          # codes 만 보면 다른 코드로 막힌 걸 놓친다
+    assert "SIGNAL_EXPR_INVALID" not in g.codes, g.as_dict()
+    # 무엇을 읽는지 접수 기록에 남는다
+    assert any("알파 수식 접수" in str(w) for w in (g.warnings or [])), g.as_dict()
+    assert any("미시구조" in str(w) for w in (g.warnings or [])), g.as_dict()
+
+    # 모르는 연산자·필드·범위 밖 창은 **접수에서** 막힌다
+    for bad in ({"op": "magic", "field": "close", "n": 5},
+                {"op": "ts_mean", "field": "pe_ratio", "n": 5},
+                {"op": "ts_mean", "field": "close", "n": 9999}):
+        gb = gate0(dict(base, suggested_params={"horizon_days": 2,
+                                                "signal_expr": bad}))
+        assert not gb.ok and "SIGNAL_EXPR_INVALID" in gb.codes, (bad, gb.as_dict())
+
+    # 수식이 없는 기획안은 예전 그대로 - 새 검사가 기존 접수를 막지 않는다
+    g2 = gate0(dict(base, suggested_params={"horizon_days": 20, "top_n": 20}))
+    assert "SIGNAL_EXPR_INVALID" not in g2.codes, g2.as_dict()
+
+    # 접수된 수식이 가설까지 그대로 간다 - 중간에 떨어지면 실행면이 못 본다
+    edge, dropped = expected_edge_for(
+        dict(base, suggested_params={"horizon_days": 2, "signal_expr": ok_expr}))
+    assert "signal_expr" in edge, (edge, dropped)
+
+
+def _check_hypothesis_and_factor_tell_the_same_story():
+    """**논리와 수식이 다른 이야기면 접수에서 되돌린다** (2026-08-14).
+
+    수식은 실행면이 그대로 쓰지만, 결과를 해석하는 것은 논리다. 둘이 다르면
+    원장에는 "매수 압력 가설 REJECT" 로 남는데 실제로 잰 것은 종가일 수 있다 -
+    그 판정은 무엇의 증거도 아니고, 다음 기획안이 그 교훈을 읽고 엉뚱한 곳을
+    고친다.
+
+    **결정론으로만 본다.** LLM 자기검증은 문헌상 성능을 떨어뜨리고 자기선호
+    편향이 -38%~+90% 라, 리서치가 자기 수식을 채점하면 통과율만 오른다.
+    """
+    ofi = {"op": "ts_mean", "field": "order_flow_imbalance", "n": 3}
+    base = {"edge_type": "momentum", "universe_key": "krx_all",
+            "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5,
+            "suggested_params": {"horizon_days": 2, "signal_expr": ofi}}
+
+    def _g(rationale, counterparty="유동성 수요자"):
+        return gate0(dict(base, economic_rationale=rationale,
+                          counterparty=counterparty))
+
+    # ① 같은 이야기면 통과한다
+    assert _g("호가 매수 압력이 이후 수익을 예측한다").ok
+
+    # ② 다른 이야기는 **막는다** - 이것이 이 검사의 존재 이유다
+    bad = _g("저PBR 종목이 장기적으로 초과수익을 낸다", "가치를 무시하는 투자자")
+    assert not bad.ok and "HYPOTHESIS_FACTOR_MISMATCH" in bad.codes, bad.as_dict()
+    # 사유에 무엇이 어긋났는지 남는다 - 고칠 수 없는 반려는 소음이다
+    assert any("order_flow_imbalance" in str(x) for x in (bad.reasons or [])), \
+        bad.as_dict()
+
+    # ③ 빈 논리로 수식만 던지는 것도 막는다
+    assert not _g("", "").ok
+
+    # ④ **표현 차이로 죽이지 않는다** - 좁은 어휘는 멀쩡한 가설을 막는다.
+    #    영어 논리, 그리고 필드 일부만 언급한 경우는 통과(경고)여야 한다.
+    assert _g("order flow imbalance predicts short-term returns").ok
+    two = {"op": "sub", "args": [
+        {"op": "rank", "arg": ofi},
+        {"op": "rank", "arg": {"op": "ts_mean", "field": "spread_bps", "n": 10}}]}
+    part = gate0(dict(base, economic_rationale="매수 압력이 크면 이후 오른다",
+                      counterparty="청산 매매",
+                      suggested_params={"horizon_days": 2, "signal_expr": two}))
+    assert part.ok, part.as_dict()
+    assert any("정합 경고" in str(w) for w in (part.warnings or [])), part.as_dict()
+
+    # ⑤ 수식 없는 기존 기획안은 이 검사를 통과할 필요가 없다 - 새 검사가
+    #    옛 접수 경로를 막으면 공장이 선다
+    assert gate0({"edge_type": "momentum", "universe_key": "krx_all",
+                  "economic_rationale": "장기 추세는 이어진다",
+                  "counterparty": "과소반응 투자자",
+                  "falsification_tests": ["IC t<2"], "trial_budget": 5,
+                  "suggested_params": {"horizon_days": 20, "top_n": 20}}).ok
+
+
+def _check_no_trade_does_not_teach_performance_lessons():
+    """**한 주도 안 샀으면 이기고 지고가 없다** (2026-08-14 실측).
+
+    유니버스가 비어 거래 0 인 실험의 초과가 -82.86%p 로 찍혔고, 그대로면
+    환류에 BASELINE_NOT_BEATEN 이 실린다 - 다음 기획안은 그것을 읽고
+    "기준선을 이기도록" 사양을 고친다. 고칠 것은 사양이 아니라 유니버스다.
+    """
+    empty = lessons_from(oos_summary={
+        "turnover_total": 0.0, "total_return": 0.0,
+        "excess_return_pct": -82.86, "max_drawdown": 0.0})
+    assert "UNDERPOWERED_DATA" in empty, empty
+    assert "BASELINE_NOT_BEATEN" not in empty, \
+        f"거래 0 인데 기준선을 못 이겼다고 가르친다: {empty}"
+    assert "BEAR_FRAGILE" not in empty, empty
+
+    # 진짜로 돌아서 진 실험은 그대로 배운다 - 놓아주기가 아니다.
+    real = lessons_from(oos_summary={
+        "turnover_total": 4.2, "total_return": -0.12,
+        "excess_return_pct": -18.4, "max_drawdown": -0.42})
+    assert "BASELINE_NOT_BEATEN" in real, real
+    assert "BEAR_FRAGILE" in real, real
+    assert "UNDERPOWERED_DATA" not in real, real
+
+    # 회전율을 못 잰 옛 실험은 예전과 똑같이 판단한다(무더기 무효화 방지)
+    legacy = lessons_from(oos_summary={"excess_return_pct": -18.4})
+    assert "BASELINE_NOT_BEATEN" in legacy, legacy
+    assert "UNDERPOWERED_DATA" not in legacy, legacy
+
+
 def lessons_from(*, failed_criteria=(), regime_concerns=(),
                  fragility: str = "", oos_summary=None) -> list[str]:
     """판정 재료 -> 통제 어휘 교훈. **결정론 기본값이다.**
@@ -563,10 +821,26 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
     #   **이미 아는 사실**이고, 안 남기면 다음 기획안이 같은 사양을 또 낸다.
     #   failed_criteria 는 릴리스 관문이 만드는데, 관문에 도달 못 하면 비어 있다.
     oos = {k: v for k, v in (oos_summary or {}).items() if v is not None}
-    if oos.get("excess_return_pct", 0) < 0 or oos.get("information_ratio", 0) < 0:
-        out.append("BASELINE_NOT_BEATEN")
-    if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
-        out.append("BEAR_FRAGILE")
+    # ▶ **거래가 0이면 성과 교훈을 만들지 않는다** (2026-08-14 실측)
+    #   min_adv_krw 단위 사고로 유니버스가 비었을 때 지표가 전부 0 이 되고
+    #   초과만 -82.86%p 로 찍혔다. 그대로 두면 "기준선을 못 이겼다
+    #   (BASELINE_NOT_BEATEN)" 가 환류에 실리는데, 그건 **없는 사실**이다 -
+    #   한 주도 안 샀으니 이기고 지고가 없다. 다음 기획안이 이 교훈을 읽고
+    #   엉뚱한 방향으로 사양을 고친다. 표본이 사양을 못 받쳤다고만 남긴다.
+    _turnover = oos.get("turnover_total")
+    _no_trade = False
+    if _turnover is not None:
+        try:
+            _no_trade = float(_turnover) == 0.0
+        except (TypeError, ValueError):
+            _no_trade = False
+    if _no_trade:
+        out.append("UNDERPOWERED_DATA")
+    else:
+        if oos.get("excess_return_pct", 0) < 0 or oos.get("information_ratio", 0) < 0:
+            out.append("BASELINE_NOT_BEATEN")
+        if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
+            out.append("BEAR_FRAGILE")
 
     if str(fragility).upper() == "INSUFFICIENT":
         # 창이 0개라 강건성을 재지 못했다. "전략이 나쁘다" 가 아니라 **표본이
@@ -720,14 +994,21 @@ class _PromoCursor:
     def execute(self, sql, params=None):
         s = " ".join(sql.split())
         if "from research.experiment_proposals" in s:
-            self._rows = [tuple(p[k] for k in (
+            # SQL 문면을 따라간다 - not exists 를 지우면 가짜도 예전(승격분이
+            # 창을 차지하는) 동작으로 돌아가 아래 굶주림 자체 점검이 죽는다.
+            already = set(self.c.already) if "not exists" in s else set()
+            rows = [tuple(p[k] for k in (
                 "proposal_id edge_type universe_key label baseline "
                 "economic_rationale counterparty competing_explanation "
                 "competing_explanation_codes skeptic_sign lead_ids "
                 "falsification_tests data_requirements suggested_params "
                 "trial_budget prior_check source_reported_effect "
                 "research_packet_ids claim_ids").split())
-                for p in self.c.published]
+                for p in self.c.published
+                if p["proposal_id"] not in already]
+            if params:
+                rows = rows[: int(params[0])]
+            self._rows = rows
         elif "select proposal_id from quant.hypotheses" in s:
             self._rows = [(x,) for x in self.c.already]
         elif "count(*) from quant.experiments" in s:
@@ -743,6 +1024,28 @@ class _PromoCursor:
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
+
+
+def _check_fetch_window_excludes_promoted():
+    """승격분이 창을 차지하면 새 기획안이 영영 못 들어온다 (t_7cd9bd5f).
+
+    status 는 승격 후에도 PUBLISHED 로 남으므로, 창(가장 오래된 limit 건)에서
+    승격분을 빼는 것은 SQL 의 not exists 몫이다. 이게 빠지면 오래된 승격분이
+    창을 다 채운 시점부터 promote_published 는 매 주기 0건으로 끝나고,
+    리서치 발행 -> 퀀트 승격 공급이 조용히 0 이 된다(실측: PUBLISHED 23건 중
+    미소진 3건이 21~23위라 어떤 주기에도 판정을 받지 못했다).
+    """
+    s = " ".join(_SQL_PUBLISHED.lower().split())
+    assert "not exists" in s and "quant.hypotheses" in s, \
+        "_SQL_PUBLISHED 가 이미 승격된 기획안을 창에서 빼지 않는다"
+    # 창 2칸에 승격분 2 + 신규 1(가장 최신). 예전 SQL 은 승격분 2건만 fetch 해
+    # 신규가 창 밖에서 굶었다. 지금은 승격분이 창에서 빠져 신규가 판정받는다.
+    old = [_prop(proposal_id=f"prop_old_{i}") for i in range(2)]
+    new = _prop(proposal_id="prop_new")
+    conn = _PromoConn(old + [new], already=["prop_old_0", "prop_old_1"])
+    got = promote_published(conn, limit=2)
+    assert [g.proposal_id for g in got] == ["prop_new"], got
+    assert got[0].accepted and len(conn.inserted) == 1, got
 
 
 def _check_promotion_is_idempotent_and_records_rejection():
@@ -863,6 +1166,13 @@ def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str
     # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
     cur = conn.cursor()
     cur.execute(_SQL_INSERT_OUTCOME, payload)
+    # 0행이면 이 실험에 이미 판정이 있다 - 먼저 온 것이 정본이므로 덮지 않되,
+    # **조용히 넘어가지도 않는다**(두 경로가 경합했다는 사실 자체가 신호다).
+    if getattr(cur, "rowcount", 1) == 0:
+        print(f"  판정 중복 회피: {payload.get('experiment_id')} 는 이미 판정이 "
+              f"있어 {payload.get('decision')} 를 적재하지 않았다(먼저 온 판정이 "
+              f"정본). 두 경로가 같은 실험을 판정하려 한 것이므로 배선을 본다.",
+              flush=True)
     cur.execute(
         "update quant.hypotheses set status = %s, status_changed_at = now() "
         "where hypothesis_id = %s", (new_status, hypothesis_id))
@@ -1075,15 +1385,20 @@ def _check_gate_approved_edge_type_wins():
     p["suggested_params"] = {"type": "short_term_reversal",
                              "universe_key": "몰래바꾸기",
                              "horizon_days": 20, "top_n": 20,
-                             "signal_window_days": 60}
+                             "signal_window_days": 60,
+                             "walk_forward_window_days": 252}
     edge, dropped = expected_edge_for(p)
     assert edge["type"] == p["edge_type"], edge
     assert edge["universe_key"] == p["universe_key"], edge
-    # 실행면이 읽는 키는 살아남는다
+    # 실행면이 읽는 키는 살아남는다. **`signal_window_days` 는 2026-08-14 에
+    # 형성창으로 열렸다**(카드 t_e9534028) - 이제 "안 읽는 키" 의 예시가 아니다.
     assert edge["horizon_days"] == 20 and edge["top_n"] == 20, edge
-    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다
-    assert "signal_window_days" not in edge, edge
-    assert dropped == ["signal_window_days", "type", "universe_key"], dropped
+    assert edge["signal_window_days"] == 60, edge
+    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다. 창 분할 사양
+    # (`walk_forward_window_days`)이 그 자리다 - 실행 손잡이가 아니라
+    # 사전등록 정책이라 접수에서 떨어뜨리고 알린다.
+    assert "walk_forward_window_days" not in edge, edge
+    assert dropped == ["type", "universe_key", "walk_forward_window_days"], dropped
     # 접수 단계에서 경고로 뜬다 - 세 주기 뒤 실행면에서 처음 알면 늦다
     g = gate0(p)
     assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
@@ -1131,6 +1446,27 @@ def _check_mapping_loss_is_stamped():
     assert not any("top_n 미지정" in w for w in g3.warnings), g3.warnings
 
 
+def _check_out_of_range_param_rejected_at_intake():
+    """**실행 불가로 태어나는 가설을 접수가 막는다** (2026-08-13 실측).
+
+    prop_86e535d7 이 max_drawdown_stop=+0.35(부호 반대)로 접수를 통과했다 -
+    바인딩에서야 죽을 값이다. 접수는 실행 가능성의 약속이다. 단 horizon_days
+    는 lookback_days 자리(2~250)의 한도를 본다 - 입력 이름의 한도를 보면
+    6개월 모멘텀(126일) 같은 정상 사양이 막힌다(2026-08-10 교훈 재확인).
+    """
+    p = _prop()
+    p["suggested_params"] = {"top_n": 20, "max_drawdown_stop": 0.35}
+    g = gate0(p)
+    assert not g.ok and "PARAM_OUT_OF_RANGE" in g.codes, g.as_dict()
+    assert "음수다" in "; ".join(g.reasons), g.reasons
+    # 정상 사양은 통과한다 - 특히 horizon_days=126 (자리 기준 한도)
+    p2 = _prop()
+    p2["suggested_params"] = {"horizon_days": 126, "top_n": 200,
+                              "max_drawdown_stop": -0.35}
+    g2 = gate0(p2)
+    assert g2.ok and "PARAM_OUT_OF_RANGE" not in g2.codes, g2.as_dict()
+
+
 def _check_outcome_requires_reason():
     """사유 없는 기각은 환류가 성립하지 않는다."""
     for d in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED"):
@@ -1166,6 +1502,13 @@ def _check_outcome_id_is_idempotent():
     c = build_outcome(experiment_id="e1", hypothesis_id="h1", trial_family_id="f",
                       trial_number=1, decision="REVISE")
     assert c["outcome_id"] != a["outcome_id"]
+    # ▶ **한 실험에 판정 하나** (2026-08-14 실측 e820053a: REJECT·GATE_HOLD 공존).
+    #   outcome_id 멱등은 판정별로만 작동하므로 SQL 이 실험 단위로 막아야 한다 -
+    #   판정이 둘이면 교훈 집계·파레토·시도 계수가 이중으로 센다.
+    sql = " ".join(_SQL_INSERT_OUTCOME.split())
+    assert "not exists" in sql and "o.experiment_id = %(experiment_id)s" in sql, sql
+    assert "insert into research.experiment_outcomes" in sql and " select " in sql, \
+        "values 절이면 실험 단위 가드가 안 걸린다"
 
 
 def _check_finalize_is_atomic():
@@ -1342,12 +1685,22 @@ if __name__ == "__main__":
     _check_gate_approved_edge_type_wins();      print("  관문 승인값이 이긴다     OK")
     _check_identity_hint_in_vocab_is_rejected(); print("  정체성 힌트 반려         OK")
     _check_mapping_loss_is_stamped();           print("  번역 손실 각인           OK")
+    _check_out_of_range_param_rejected_at_intake()
+    print("  범위 밖 파라미터 접수 반려 OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
     _check_finalize_is_atomic();                print("  환류+전이 원자성         OK")
     _check_lessons_mapping_is_deterministic_baseline()
     print("  교훈 사상(에이전트 무관)  OK")
+    _check_signal_expr_is_gated_at_intake()
+    print("  수식은 접수에서 판정      OK")
+    _check_hypothesis_and_factor_tell_the_same_story()
+    print("  논리<->수식 정합(결정론)  OK")
+    _check_no_trade_does_not_teach_performance_lessons()
+    print("  거래 0 -> 성과 교훈 없음  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
-    print("공장 다리 19개 영역 통과. 루프가 닫혔다.")
+    _check_fetch_window_excludes_promoted()
+    print("  승격분은 창에서 빠진다   OK")
+    print("공장 다리 23개 영역 통과. 루프가 닫혔다.")

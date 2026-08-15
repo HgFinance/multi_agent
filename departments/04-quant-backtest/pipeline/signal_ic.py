@@ -143,7 +143,7 @@ def ic_series(market, config: dict, *, horizon: int,
       **줄어든 그 수가 진짜 수**다. 중첩을 쓰려면 HAC 보정이 필요한데,
       그건 없는 정밀도를 만드는 쪽이라 안 쓴다.
     """
-    from strategy_templates import PITView, resolve
+    from strategy_templates import PITView, pit_view_for, resolve
 
     tpl = resolve(str(config.get("strategy") or ""))
     if tpl is None:
@@ -162,7 +162,7 @@ def ic_series(market, config: dict, *, horizon: int,
             continue                    # 앞을 못 보면 그 기간은 없는 것이다
         fwd = dates[i + horizon]
         try:
-            scores = tpl.signal(PITView(market, d), dict(config))
+            scores = tpl.signal(pit_view_for(market, d, dict(config)), dict(config))
         except Exception:  # noqa: BLE001 - 한 기간이 죽어도 나머지는 잰다
             continue
         xs, ys = [], []
@@ -355,7 +355,7 @@ def _check_pit_is_structural():
     """
     from datetime import date as _d
 
-    from strategy_templates import PITView, resolve
+    from strategy_templates import PITView, pit_view_for, resolve
     base = {f"S{s}": [100.0 + s + i * 0.1 for i in range(40)] for s in range(40)}
     m1 = _mk(base)
     future = {k: v[:] for k, v in base.items()}

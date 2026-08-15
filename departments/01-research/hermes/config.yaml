@@ -1,7 +1,10 @@
+# ▶ 부서장 기본 모델 (2026-08-15 Claude Code 한도 소진으로 Codex 복귀)
+#   정본 계약대로 openai-codex/gpt-5.6-luna 를 기본으로 사용한다.
+#   Claude Code는 한도가 복구되고 승인됐을 때만 docker-compose.claude.yml
+#   오버레이로 사용하는 대체 경로이며 저장소 기본값으로 두지 않는다.
 model:
   provider: openai-codex
   default: gpt-5.6-luna
-  base_url: https://chatgpt.com/backend-api/codex
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
 agent:
@@ -177,6 +180,22 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+  # LS 증권 조회면 (2026-08-13) - TR 카탈로그 검색 + 수급 큐레이션.
+  # 키는 ls-mcp 컨테이너에만 있다(2026-08-02 자격 격리 결정 유지).
+  ls-securities:
+    url: http://ls-mcp:8038/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
+  # OpenBB 도구 200+ - ⚠ 2026-08-13 비활성: OpenBB 의 get_prompt/list_resources
+  # 등 도구명이 Hermes 생성 유틸리티와 충돌, 에이전트 spawn 크래시 실측(x2).
+  # 백로그: 이름 prefix 설정 또는 Hermes 측 회피 확인 후 재활성.
+  openbb:
+    url: http://openbb-mcp:8039/mcp
+    enabled: false
+  # 2026-08-13 가동 시도 -> 의존성 부패로 기동 실패 (youtube: mcp 라이브러리
+  # FastMCP import 깨짐, paper: 재시작 루프). 죽은 서버를 켜두면 에이전트마다
+  # 연결 대기가 생기므로 끈다. 백로그: uvx 버전 고정 후 재시도.
   paper-search:
     url: http://paper-search-mcp:8041/mcp
     enabled: false
