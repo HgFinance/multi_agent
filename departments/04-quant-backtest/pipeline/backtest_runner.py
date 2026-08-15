@@ -1529,21 +1529,40 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                  json.dumps(summary, ensure_ascii=False), code_ver, ihash, status))
             run_row_id = str(cur.fetchone()[0])
 
-            for f in result.fills:
-                cur.execute(
-                    """
-                    insert into quant.backtest_trades
-                      (backtest_run_id, instrument_id, opened_at, side, quantity,
-                       open_price, fees, realized_pnl, signal_ref)
-                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-                    """,
+            # AST portfolios can produce hundreds of thousands of fills.  One
+            # network round-trip per fill made result persistence slower than
+            # the backtest itself against the remote Supabase database.
+            # execute_values keeps the same transaction and row contract while
+            # reducing that to bounded batches.
+            if result.fills:
+                from psycopg2.extras import execute_values
+
+                signal_ref = json.dumps({
+                    "strategy": config["strategy"],
+                    "signal_date": "t-1 close",
+                    "exec": "t open",
+                })
+                trade_rows = [
                     (run_row_id, f.instrument_id,
                      datetime.combine(f.trade_date, datetime.min.time(), tzinfo=KST),
                      f.side, round(f.quantity, 6), round(f.price, 4),
                      round(f.fees, 4),
                      None if f.realized_pnl is None else round(f.realized_pnl, 4),
-                     json.dumps({"strategy": config["strategy"],
-                                 "signal_date": "t-1 close", "exec": "t open"})))
+                     signal_ref)
+                    for f in result.fills
+                ]
+                execute_values(
+                    cur,
+                    """
+                    insert into quant.backtest_trades
+                      (backtest_run_id, instrument_id, opened_at, side, quantity,
+                       open_price, fees, realized_pnl, signal_ref)
+                    values %s
+                    """,
+                    trade_rows,
+                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                    page_size=1000,
+                )
             for k, v in result.metrics.items():
                 if isinstance(v, (int, float)) and v is not None:
                     cur.execute(
@@ -2318,6 +2337,19 @@ if __name__ == "__main__":
         print("  구성 방식(빼기 포함)     OK")
 
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
+    def _check_trade_persistence_is_batched():
+        """Remote result storage must not issue one SQL round-trip per fill."""
+        import ast
+        import pathlib
+
+        src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        body = ast.get_source_segment(src, next(
+            n for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.FunctionDef) and n.name == "register_and_run")) or ""
+        assert "execute_values(" in body
+        assert "page_size=1000" in body
+        print("  trade result batch storage    OK")
+
     _check_zombie_reclaim_never_touches_verdicts()
     _check_no_lookahead()
     _check_fifo_and_costs()
@@ -2330,6 +2362,7 @@ if __name__ == "__main__":
     _check_risk_is_pit()
     _check_pnl_concentration_is_measured()
     _check_construction_modes()
+    _check_trade_persistence_is_batched()
     _check_fingerprint_covers_every_module_that_moves_results()
     _check_declared_units_are_compared()
     _check_trend_filter()
