@@ -141,6 +141,27 @@ def base_config_for(edge: str, default_config: dict, rev_config: dict) -> dict:
         "initial_capital": 100_000_000.0,
     }
 
+
+def signal_horizon(config: dict) -> int:
+    """IC forward horizon: 사전등록 지평을 형성창보다 우선한다.
+
+    `lookback_days` is the feature formation window.  Short-lived microstructure
+    hypotheses can carry their forecast horizon separately; when both keys are
+    present, using the lookback silently tests a different claim and can leave too
+    few non-overlapping observations to measure.
+    """
+    for key in ("horizon_days", "holding_horizon", "lookback_days"):
+        raw = config.get(key)
+        if raw is None:
+            continue
+        try:
+            horizon = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if horizon >= 1:
+            return horizon
+    return 20
+
 def dataset_of(hyp: dict) -> tuple[str, str]:
     """가설이 쓸 (데이터셋 이름, 버전). **상수가 아니라 사상 결과에서 나온다.**
 
@@ -1149,45 +1170,59 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     #   백테스트는 신호 품질과 구성 방식을 섞는다. IC 는 전 종목 횡단면으로
     #   신호만 본다. 실측: breakout 이 IC +0.0372(t +2.36, 적중 60.2%)로
     #   신호는 살아 있는데 백테스트 초과는 -168.77%p 였다 - **구성이 죽였다.**
-    #   그리고 `low_volatility` 는 백테스트 초과 +855.92%p 인데 IC t -7.09 다
-    #   (액면분할 미조정 한 종목이 만든 수익 - 순위상관은 안 속았다).
+    #   `low_volatility` 의 백테스트 초과 +855.92%p 는 액면분할 미조정 한
+    #   종목이 만든 수익이었다. IC 만으로 집중 사고를 잡을 수는 없으므로
+    #   pnl 집중도 관문과 함께 본다. v2 는 템플릿 TOP/BOTTOM 방향도
+    #   '큰 값이 좋다'로 정규화한다.
     #   2~8초면 끝나므로 매 실험에 붙인다.
     try:
         import signal_ic as _ic  # noqa: PLC0415
 
+        _ic_horizon = signal_horizon(config)
         _res = _ic.summarize(_ic.ic_series(
-            market, dict(config), horizon=int(config.get("lookback_days") or 20)))
+            market, dict(config), horizon=_ic_horizon))
         if _res.mean_ic is not None:
             print(f"  신호 {_ic.render(_res)}", flush=True)
-            # ▶ **자기 연결로 쓴다** (2026-08-13 실측). 여기서 `conn` 을 재사용
-            #   했더니 앞 구간(강건성)이 이미 닫은 연결이라 매 실험
-            #   `InterfaceError: connection already closed` 로 죽었다 - IC 는
-            #   로그에만 찍히고 원장에는 0건이었다. **측정은 되는데 저장이
-            #   죽어 있으면 그 측정은 없는 것과 같다** - IC 사전검정을 탐색층
-            #   관문으로 승격할지 판정하는 자격 검사(IC↔판정 순위상관)가
-            #   짝 0건으로 영영 미측정에 머문다. 짧은 단문 트랜잭션이라
-            #   세션풀 부담도 없다.
-            _c2 = connect_writer(load_project_env()["DATABASE_URL"],
-                                 connect_timeout=20)
-            try:
-                with _c2.cursor() as cur:
-                    for name, val in (("signal_ic", _res.mean_ic),
-                                      ("signal_ic_t", _res.t_stat),
-                                      ("signal_ic_hit_rate", _res.hit_rate),
-                                      ("signal_ic_periods", _res.periods),
-                                      ("signal_ic_breadth", _res.median_breadth)):
-                        if val is None:
-                            continue        # 못 잰 것은 안 적는다
-                        cur.execute("""
-                            insert into quant.experiment_metrics
-                              (experiment_id, split, metric, value, dimensions,
-                               cost_model_version)
-                            values (%s, 'TEST', %s, %s, '{}'::jsonb, %s)
-                            on conflict do nothing""",
-                            (bt["experiment_id"], name, float(val), "krx-cost-v1"))
-                _c2.commit()
-            finally:
-                _c2.close()
+        else:
+            print(f"  신호 {_ic.render(_res)}", flush=True)
+        # ▶ **자기 연결로 쓴다** (2026-08-13 실측). 여기서 `conn` 을 재사용
+        #   했더니 앞 구간(강건성)이 이미 닫은 연결이라 매 실험
+        #   `InterfaceError: connection already closed` 로 죽었다 - IC 는
+        #   로그에만 찍히고 원장에는 0건이었다. **측정은 되는데 저장이
+        #   죽어 있으면 그 측정은 없는 것과 같다** - IC 사전검정을 탐색층
+        #   관문으로 승격할지 판정하는 자격 검사(IC↔판정 순위상관)가
+        #   짝 0건으로 영영 미측정에 머문다. 짧은 단문 트랜잭션이라
+        #   세션풀 부담도 없다.
+        #
+        #   평균 IC 를 못 낸 경우에도 기간·breadth 는 남긴다. 그래야 공장이
+        #   "알파 0" 과 "표본 부족" 을 구분해 다음 실험 지평을 고칠 수 있다.
+        _ic_dims = json.dumps({
+            "signal_ic_version": _ic.IC_VERSION,
+            "horizon_days": _ic_horizon,
+            "signal_source": "AST" if config.get("signal_expr") else "TEMPLATE",
+        })
+        _c2 = connect_writer(load_project_env()["DATABASE_URL"],
+                             connect_timeout=20)
+        try:
+            with _c2.cursor() as cur:
+                for name, val in (("signal_ic", _res.mean_ic),
+                                  ("signal_ic_t", _res.t_stat),
+                                  ("signal_ic_hit_rate", _res.hit_rate),
+                                  ("signal_ic_periods", _res.periods),
+                                  ("signal_ic_breadth", _res.median_breadth)):
+                    if val is None:
+                        continue        # 못 잰 값 자체는 안 적는다
+                    cur.execute("""
+                        insert into quant.experiment_metrics
+                          (experiment_id, split, metric, value, dimensions,
+                           cost_model_version)
+                        values (%s, 'TEST', %s, %s, %s::jsonb, %s)
+                        on conflict do nothing""",
+                        (bt["experiment_id"], name, float(val), _ic_dims,
+                         "krx-cost-v1"))
+            _c2.commit()
+        finally:
+            _c2.close()
     except Exception as e:  # noqa: BLE001 - IC 를 못 재도 실험은 종결한다
         print(f"  ⚠ 신호 IC 실패: {type(e).__name__}: {str(e)[:110]}", flush=True)
 
@@ -1698,10 +1733,10 @@ def _check_gate_note_carries_the_distance():
 def _check_signal_ic_is_recorded():
     """**신호 IC 를 매 실험에 남긴다.** (2026-08-12 실측)
 
-    격자가 `alive` 를 판정할 때 IC 를 우선한다 - 백테스트는 데이터 결함에
-    속고 순위상관은 안 속기 때문이다(`low_volatility` 초과 +855.92%p 인데
-    IC t -7.09). IC 를 안 남기면 격자가 초과수익으로 떨어져 그 칸을
-    "살아있음" 으로 오판한다. 실제로 그렇게 나왔다.
+    격자가 `alive` 를 판정할 때 IC 를 우선한다 - 백테스트의 포트폴리오 구성과
+    신호의 횡단면 예측력을 분리해야 하기 때문이다. 단 IC 는 집중도·데이터
+    결함을 대신 잡는 지표가 아니므로 pnl 집중도 관문과 함께 본다. IC 를 안
+    남기면 격자가 초과수익으로 떨어져 그 칸을 "살아있음" 으로 오판한다.
     """
     import ast
 
@@ -1717,6 +1752,13 @@ def _check_signal_ic_is_recorded():
     # 재사용해 매 실험 InterfaceError 로 죽었고, IC 는 로그에만 남고 원장은
     # 0건이었다 - 측정되는데 저장이 죽으면 자격 검사가 영영 미측정이다.
     assert "_c2 = connect_writer" in body,           "IC 기록이 공유 conn 을 재사용한다 - 닫힌 연결이면 매번 죽는다"
+    assert "_ic_horizon = signal_horizon(config)" in body, \
+        "IC 가 사전등록 horizon 대신 형성창을 예측기간으로 쓴다"
+    assert '"signal_ic_version": _ic.IC_VERSION' in body, \
+        "IC 계산 버전이 원장에 없어 과거의 잘못된 값과 구분할 수 없다"
+    assert signal_horizon({"horizon_days": 2, "lookback_days": 20}) == 2
+    assert signal_horizon({"holding_horizon": 5, "lookback_days": 20}) == 5
+    assert signal_horizon({"lookback_days": 20}) == 20
     # **격자가 읽는 이름과 같아야 한다** - 다르면 조용히 안 보인다(오늘 12번)
     import grid  # noqa: PLC0415
     assert "signal_ic_t" in grid._SQL, "격자가 읽는 지표 이름과 갈렸다"

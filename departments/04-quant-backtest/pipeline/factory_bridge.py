@@ -305,6 +305,14 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             # 어떤 데이터로 나왔나" 를 묻는 자리가 여기다.
             r.warn(f"알파 수식 접수: 필드 {sorted(_fo(_parsed))}"
                    f"{' · 미시구조 필요' if _nm(_parsed) else ''}")
+            if "order_flow_imbalance" in _fo(_parsed):
+                # The persisted name predates the AST.  Its implementation is
+                # signed trade quantity / total quantity; it is not quote-event
+                # OFI and does not measure order-sign persistence.  Disclose the
+                # semantic loss before a literature claim is attached to it.
+                r.warn("order_flow_imbalance 는 호가 신규·취소 기반 OFI가 아니라 "
+                       "체결 방향×수량 / 총체결량인 legacy 필드다. Cont식 호가 OFI나 "
+                       "주문분할 지속성 가설의 직접 검정으로 해석하지 않는다")
             if _nm(_parsed):
                 # ▶ **표본이 짧아진다는 사실을 접수에서 말한다** (2026-08-14)
                 #   미시구조는 일봉(2016~)보다 훨씬 짧다. 실행면이 표본을 그
@@ -694,6 +702,8 @@ def _check_signal_expr_is_gated_at_intake():
     # 무엇을 읽는지 접수 기록에 남는다
     assert any("알파 수식 접수" in str(w) for w in (g.warnings or [])), g.as_dict()
     assert any("미시구조" in str(w) for w in (g.warnings or [])), g.as_dict()
+    assert any("호가 신규·취소 기반 OFI가 아니라" in str(w)
+               for w in (g.warnings or [])), g.as_dict()
 
     # 모르는 연산자·필드·범위 밖 창은 **접수에서** 막힌다
     for bad in ({"op": "magic", "field": "close", "n": 5},

@@ -42,7 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-IC_VERSION = "quant-signal-ic-v1"
+IC_VERSION = "quant-signal-ic-v2"
 
 # ▶ 신규 팩터 유의 문턱. 관행 2.0 이 아니라 3.0 이다 - 같은 데이터를 업계
 #   전체가 파고 있어 2.0 은 다중검정을 감안하면 너무 느슨하다는 것이
@@ -72,9 +72,9 @@ class ICResult:
         """**단측이다.** 신호가 주장한 방향으로 예측력이 있나.
 
         ▶ 첫 판이 `abs(t)` 를 썼다 (2026-08-12 실측이 잡음)
-          `low_volatility` 가 t = -7.09 인데 "통과" 로 찍혔다. 양방향 검정으로는
-          맞지만 **"이 신호를 쓸 수 있나" 의 답으로는 틀렸다** - 신호가 반대로
-          간다는 뜻이다. 뒤집으면 쓸 수 있지만 그건 **다른 가설**이고,
+          방향을 정규화한 신호의 음의 t 를 "통과" 로 찍으면 **"이 신호를 쓸
+          수 있나" 의 답으로는 틀렸다** - 신호가 반대로 간다는 뜻이다.
+          뒤집으면 쓸 수 있지만 그건 **다른 가설**이고,
           결과를 보고 방향을 뒤집는 것은 사전등록 위반이다.
         """
         return self.t_stat is not None and self.t_stat >= MIN_T_STAT
@@ -143,11 +143,22 @@ def ic_series(market, config: dict, *, horizon: int,
       **줄어든 그 수가 진짜 수**다. 중첩을 쓰려면 HAC 보정이 필요한데,
       그건 없는 정밀도를 만드는 쪽이라 안 쓴다.
     """
-    from strategy_templates import PITView, pit_view_for, resolve
+    from strategy_templates import pit_view_for, resolve
 
-    tpl = resolve(str(config.get("strategy") or ""))
-    if tpl is None:
-        return []
+    # The portfolio backtester gives an explicit AST precedence over the legacy
+    # template.  IC must measure the *same signal*, otherwise an AST experiment
+    # quietly receives MOM/REV's IC and the factory learns from the wrong formula.
+    expr = config.get("signal_expr")
+    parsed_expr = None
+    tpl = None
+    if expr:
+        from alpha_ast import parse as _parse_expr  # noqa: PLC0415
+
+        parsed_expr = _parse_expr(expr)
+    else:
+        tpl = resolve(str(config.get("strategy") or ""))
+        if tpl is None:
+            return []
     dates = list(market.dates)
     idx = {d: i for i, d in enumerate(dates)}
     if sample_dates is not None:
@@ -162,7 +173,21 @@ def ic_series(market, config: dict, *, horizon: int,
             continue                    # 앞을 못 보면 그 기간은 없는 것이다
         fwd = dates[i + horizon]
         try:
-            scores = tpl.signal(pit_view_for(market, d, dict(config)), dict(config))
+            view = pit_view_for(market, d, dict(config))
+            if parsed_expr is not None:
+                from alpha_ast import evaluate as _eval_expr  # noqa: PLC0415
+
+                scores = _eval_expr(parsed_expr, view)
+            else:
+                scores = tpl.signal(view, dict(config))
+                # Template scores are raw features.  For BOTTOM templates (for
+                # example low volatility), smaller raw values are the bullish
+                # signal.  IC uses one convention -- larger means better -- so
+                # orient them exactly as select_targets does before correlation.
+                if tpl.rank == "BOTTOM":
+                    scores = {sym: -float(value)
+                              for sym, value in (scores or {}).items()
+                              if value is not None}
         except Exception:  # noqa: BLE001 - 한 기간이 죽어도 나머지는 잰다
             continue
         xs, ys = [], []
@@ -372,6 +397,51 @@ def _check_pit_is_structural():
     print("  PIT 가 구조로 지켜짐      OK")
 
 
+def _check_ast_ic_measures_the_ast():
+    """AST 실험의 IC 는 기본 템플릿이 아니라 후보 수식을 재야 한다."""
+    # 종목별 추세가 강하므로 MOM 은 양의 IC 다. 같은 가격 입력을 neg 로 뒤집은
+    # AST 는 음의 IC 여야 한다. 두 값이 같은 방향이면 IC 경로가 AST 를 무시한 것.
+    prices = {}
+    for s in range(40):
+        drift = (s + 1) / 40 * 0.004
+        px, ser = 100.0, []
+        for _ in range(60):
+            px *= 1.0 + drift
+            ser.append(px)
+        prices[f"S{s:03d}"] = ser
+    market = _mk(prices)
+    base = {"strategy": "MOM", "lookback_days": 10, "top_n": 10}
+    mom = summarize(ic_series(market, base, horizon=2, min_names=30))
+    ast = dict(base, signal_expr={
+        "op": "neg",
+        "arg": {"op": "ts_return", "field": "close", "n": 10},
+    })
+    inverted = summarize(ic_series(market, ast, horizon=2, min_names=30))
+    assert mom.mean_ic is not None and mom.mean_ic > 0.9, mom
+    assert inverted.mean_ic is not None and inverted.mean_ic < -0.9, inverted
+    print("  AST IC 가 후보 수식을 측정  OK")
+
+
+def _check_bottom_signal_is_oriented():
+    """BOTTOM 템플릿도 '큰 IC = 좋은 방향'이라는 한 계약을 지킨다."""
+    # 변동성이 낮은 종목일수록 다음 수익률이 높도록 만든다. LOWVOL 의 원시
+    # 점수(변동성)는 낮을수록 좋으므로 방향을 안 뒤집으면 음의 IC 가 나온다.
+    prices = {}
+    for s in range(40):
+        amp = 0.0002 + s * 0.00008
+        drift = 0.004 - s * 0.00008
+        px, ser = 100.0, []
+        for i in range(90):
+            px *= 1.0 + drift + (amp if i % 2 else -amp)
+            ser.append(px)
+        prices[f"S{s:03d}"] = ser
+    market = _mk(prices)
+    cfg = {"strategy": "LOWVOL", "lookback_days": 20, "top_n": 10}
+    result = summarize(ic_series(market, cfg, horizon=2, min_names=30))
+    assert result.mean_ic is not None and result.mean_ic > 0.8, result
+    print("  BOTTOM 신호 방향 정규화    OK")
+
+
 def _check_unmeasured_is_not_zero():
     """**못 잰 것을 0으로 적지 않는다.** 기간이 모자라면 판정 자체를 안 한다."""
     r = summarize([])
@@ -390,10 +460,10 @@ def _check_unmeasured_is_not_zero():
 def _check_inverted_is_not_pass():
     """**역방향 신호를 통과로 찍지 않는다.** (2026-08-12 실측 원문)
 
-    `low_volatility` 가 v3 에서 IC -0.1103 · t -7.09 였는데 첫 판이 `abs(t)`
-    를 써서 "통과" 로 찍었다. 신호가 **반대로 간다**는 뜻인데 통과라고 하면
-    다음 사람이 그대로 쓴다. 뒤집으면 신호일 수 있지만 그건 다른 가설이고,
-    결과를 보고 방향을 바꾸는 것은 사전등록 위반이다.
+    방향이 이미 '큰 값이 좋다'로 정규화된 신호가 t=-7.09 라면 첫 판의
+    `abs(t)` 는 그것을 "통과" 로 찍었다. 신호가 **반대로 간다**는 뜻인데
+    통과라고 하면 다음 사람이 그대로 쓴다. 뒤집으면 신호일 수 있지만 그건
+    다른 가설이고, 결과를 보고 방향을 바꾸는 것은 사전등록 위반이다.
     """
     inv = ICResult(periods=128, mean_ic=-0.1103, std_ic=0.1857,
                    t_stat=-7.09, ic_ir=-0.594, hit_rate=0.242,
@@ -439,8 +509,10 @@ def _selfcheck() -> int:
     _check_ic_detects_a_real_signal()
     _check_ic_rejects_noise()
     _check_pit_is_structural()
+    _check_ast_ic_measures_the_ast()
+    _check_bottom_signal_is_oriented()
     _check_unmeasured_is_not_zero()
-    print("신호 IC 7개 영역 통과.")
+    print("신호 IC 9개 영역 통과.")
     return 0
 
 

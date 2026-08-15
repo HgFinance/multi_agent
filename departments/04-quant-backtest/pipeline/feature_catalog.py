@@ -26,7 +26,7 @@
   2.0 을 쓰면 순수한 잡음에서도 통과가 나온다.
 
   그리고 **부호를 본다.** |t| 로 재면 역방향 신호가 "통과" 로 찍힌다
-  (실측으로 `low_volatility` 가 t=-7.09 인데 통과로 나왔다). 역방향은
+  (실측으로 방향 정규화 전 음의 t 가 통과로 나왔다). 역방향은
   역방향이라고 적는다 - 그것도 정보다.
 
 ▶ PIT 를 같이 싣는다
@@ -359,7 +359,7 @@ def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
 def _check_reverse_signal_is_not_a_pass():
     """**역방향을 통과로 찍지 않는다.** |t| 로 재면 뒤집힌 신호가 합격한다.
 
-    실측: `low_volatility` 가 t=-7.09 인데 통과로 나왔다. 역방향은 역방향으로
+    실측: 방향 정규화 전 음의 t 가 통과로 나왔다. 역방향은 역방향으로
     적어야 전략가가 부호를 뒤집어 쓸 수 있다 - 그것도 정보다.
     """
     good = FeatureQuality("x", 5, t_stat=4.2, periods=12, avg_names=100)
