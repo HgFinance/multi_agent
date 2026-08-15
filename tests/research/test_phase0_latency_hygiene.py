@@ -10,23 +10,35 @@ from pathlib import Path
 from unittest.mock import patch
 
 RESEARCH_ROOT = Path(__file__).resolve().parents[2] / "departments" / "01-research"
-if str(RESEARCH_ROOT) not in sys.path:
-    sys.path.insert(0, str(RESEARCH_ROOT))
+_research_path = str(RESEARCH_ROOT)
 
-from agents.article_reader import ArticleReader  # noqa: E402
-from evidence.api_client import get_json  # noqa: E402
-from evidence.bundle import _dedup_source_records, evidence_index  # noqa: E402
-from evidence.cache import EvidenceCache, activate_cache, canonical_url  # noqa: E402
-from evidence.handoff import (  # noqa: E402
-    build_evidence_handoff,
-    reusable_evidence_refs,
-)
-from evidence.llm_client import chat  # noqa: E402
-from evidence.observability import (  # noqa: E402
-    ResearchRunMetrics,
-    activate_metrics,
-    redacted_span,
-)
+# The Research tree intentionally has a top-level ``evidence`` package and a
+# ``scripts.py`` module. Keep its import path temporary: leaving it at
+# sys.path[0] makes later collection resolve the repository's ``scripts``
+# package as Research's scripts.py. Also evict a previously imported external
+# package named ``evidence`` so collection order cannot select the wrong one.
+for _name in tuple(sys.modules):
+    if _name == "evidence" or _name.startswith("evidence."):
+        sys.modules.pop(_name, None)
+sys.path.insert(0, _research_path)
+try:
+    from agents.article_reader import ArticleReader  # noqa: E402
+    from evidence.api_client import get_json  # noqa: E402
+    from evidence.bundle import _dedup_source_records, evidence_index  # noqa: E402
+    from evidence.cache import EvidenceCache, activate_cache, canonical_url  # noqa: E402
+    from evidence.handoff import (  # noqa: E402
+        build_evidence_handoff,
+        reusable_evidence_refs,
+    )
+    from evidence.llm_client import chat  # noqa: E402
+    from evidence.observability import (  # noqa: E402
+        ResearchRunMetrics,
+        activate_metrics,
+        redacted_span,
+    )
+finally:
+    if sys.path and sys.path[0] == _research_path:
+        sys.path.pop(0)
 
 
 class _Response:

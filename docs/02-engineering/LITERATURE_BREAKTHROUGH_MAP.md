@@ -447,7 +447,7 @@ NAV 엔진은 이미 fail-closed(신선한 마크 없으면 `ValuationError`)인
 | [12-Factor III·X](https://12factor.net/dev-prod-parity) | 구성-코드 분리, 배포당 단일 값, tools gap 경고 |
 | [OWASP Secrets Management](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html) | env는 전 프로세스 노출·로그 유출 — 시크릿은 관리 저장소, 중복 금지 |
 | [Docker Compose healthcheck/depends_on/restart](https://docs.docker.com/reference/compose-file/services/) | `condition: service_healthy` + `restart: true` — 준비 안 된 의존 대상에의 크래시 루프 방지 표준 |
-| [PgBouncer 공식 문서](https://www.pgbouncer.org/features.html) | transaction 풀링 = 트랜잭션 동안만 서버 연결 점유("연결당 2kB") — N 클라이언트 × M 슬롯 > 서버 한도의 정본 해법. 주의: 세션 기능(구버전 prepared statements, advisory lock, LISTEN/NOTIFY) 파손 | 
+| [PgBouncer 공식 문서](https://www.pgbouncer.org/features.html) | transaction 풀링 = 트랜잭션 동안만 서버 연결 점유("연결당 2kB") — N 클라이언트 × M 슬롯 > 서버 한도의 정본 해법. 주의: 세션 기능(구버전 prepared statements, advisory lock, LISTEN/NOTIFY) 파손 |
 
 보충: 23컨테이너 × ThreadedConnectionPool(0,4) = 잠재 92 vs Supabase 세션풀 15 — "네트워크 오류처럼 보이는 조회 실패"의 원인. 해법: PgBouncer transaction 모드(`default_pool_size ≤ 15`) 일원화 또는 Supabase 관리형 등가물인 **Supavisor transaction 포트(6543)** 활용 — 현재 `.env`의 6543 pooler가 이미 트랜잭션 모드이므로 저트래픽 20개 서비스의 per-컨테이너 maxconn 0/1 캡과 병행하면 재작성 없이 해소.
 

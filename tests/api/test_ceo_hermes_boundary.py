@@ -282,7 +282,22 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
                 {"assignee": "quant-backtest-department", "body": "workflow_role=primary"}
             ],
         }
-        with patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root):
+        workflow = MagicMock()
+        workflow.root_task_id = "t_root"
+        workflow.status = "running"
+        workflow.root.profile = "ceo-agent"
+        workflow.root.created_at = None
+        workflow.root.completed_at = None
+        workflow.query = None
+        workflow.selected_departments = ("quant-backtest-department",)
+        workflow.qa_required = True
+        workflow.primary_nodes = (MagicMock(done=False),)
+        workflow.qa_stage = "todo"
+        workflow.synthesis_stage = "todo"
+        with (
+            patch.object(ceo, "_load", return_value=workflow),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root),
+        ):
             response = ceo.ceo_task_status("t_root")
         self.assertEqual(response["task_id"], "t_root")
         self.assertEqual(

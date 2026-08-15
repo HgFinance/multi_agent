@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+import sys
 import unittest
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from orchestration.adapters.ceo_notion_projection import NotionProjectionError
-from scripts.replay_terminal_projection import (
-    ReplayValidationError,
-    replay_terminal_projection,
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_replay_spec = importlib.util.spec_from_file_location(
+    "repository_replay_terminal_projection",
+    _REPO_ROOT / "scripts" / "replay_terminal_projection.py",
 )
+assert _replay_spec is not None and _replay_spec.loader is not None
+_replay_module = importlib.util.module_from_spec(_replay_spec)
+sys.modules[_replay_spec.name] = _replay_module
+_replay_spec.loader.exec_module(_replay_module)
+
+ReplayValidationError = _replay_module.ReplayValidationError
+replay_terminal_projection = _replay_module.replay_terminal_projection
 
 ROOT = "t_root"
 QA = "t_qa"
@@ -350,7 +362,7 @@ class ReplayTerminalProjectionTests(unittest.TestCase):
             self.assertIsNone(action({"body": body}))
 
     def test_rejects_role_action_and_root_mismatches(self) -> None:
-        from scripts.replay_terminal_projection import _validate_projection_type
+        _validate_projection_type = _replay_module._validate_projection_type
 
         with self.assertRaises(ReplayValidationError):
             _validate_projection_type(
@@ -372,7 +384,7 @@ class ReplayTerminalProjectionTests(unittest.TestCase):
             )
 
     def test_kanban_db_option_is_forwarded_to_hermes_environment(self) -> None:
-        from scripts.replay_terminal_projection import _effective_environment
+        _effective_environment = _replay_module._effective_environment
 
         environment = _effective_environment(
             {"HERMES_KANBAN_DB": "/wrong/default.db"},

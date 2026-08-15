@@ -1,8 +1,8 @@
 # Claude용 AWS 부서별 이관 실행계획
 
-상태: 실행 지시안  
-기준일: 2026-08-13  
-대상 저장소: `HgFinance/multi_agent`  
+상태: 실행 지시안
+기준일: 2026-08-13
+대상 저장소: `HgFinance/multi_agent`
 목표: 로컬에서 검증한 Pipeline 배선을 AWS Pilot에 보존하면서, 8개 부서를 한 번에 하나씩 독립 PR로 이관한다.
 
 ## 1. 이번 작업의 결론

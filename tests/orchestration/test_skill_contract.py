@@ -9,6 +9,7 @@ import yaml
 
 from orchestration.skill_contract import (
     AMBIGUOUS_CUSTOM_SKILLS,
+    PENDING_SOURCE_SKILLS,
     CanonicalSkillError,
     SKILL_OWNER_BY_NAME,
     resolve_canonical_skill,
@@ -99,15 +100,21 @@ class SharedSkillContractTest(unittest.TestCase):
             self.assertNotIn("ceo-agent", SKILL_OWNER_BY_NAME[skill])
 
     def test_unavailable_aws_only_sources_are_not_faked_in_repo(self) -> None:
-        for skill in (
-            "financial-research-memos",
-            "financial-equity-research",
-            "equity-quant-assessment",
-            "financial-risk-research",
-        ):
+        self.assertEqual(
+            PENDING_SOURCE_SKILLS,
+            {"financial-research-memos", "financial-risk-research"},
+        )
+        for skill in PENDING_SOURCE_SKILLS:
             with self.subTest(skill=skill):
                 with self.assertRaises(CanonicalSkillError):
                     resolve_canonical_skill(skill, root=ROOT / "skills")
+
+        for skill in ("financial-equity-research", "equity-quant-assessment"):
+            with self.subTest(skill=skill):
+                self.assertEqual(
+                    resolve_canonical_skill(skill, root=ROOT / "skills").parent.name,
+                    skill,
+                )
 
     def test_ambiguous_skill_is_not_assigned_by_contract(self) -> None:
         self.assertIn("hermes-agent-integration", AMBIGUOUS_CUSTOM_SKILLS)
