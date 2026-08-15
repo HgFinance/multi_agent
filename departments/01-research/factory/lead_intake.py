@@ -20,15 +20,18 @@
   발굴한 것인지 나중에 구분할 수 없다. 비어 있으면 적재를 거부한다 - 계보를 잃은
   리드는 재현할 수 없고, 재현할 수 없는 입력으로 만든 전략은 검증된 것이 아니다.
 
-▶ 중복은 접는다
+▶ 중복은 접되, 해석은 덮지 않는다
   24시간 상주에서 같은 논문을 매일 새 리드로 만들면 `independent_mentions` 가
-  의미를 잃고 예산 계산이 망가진다. `lead_id_for()` 가 url+title 로 접는다.
+  의미를 잃고 예산 계산이 망가진다. 같은 url+title·같은 AST 계약은
+  `lead_id_for()` 로 접는다. 다만 데이터면 확장 뒤 같은 문헌에서 새 메커니즘
+  변형이 나오면 원 리드를 바꾸지 않고 결정론적 revision ID 로 별도 보존한다.
 
 자체 점검: python departments/01-research/factory/lead_intake.py
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -250,7 +253,15 @@ def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
             if key == "TITLE" and cur:
                 blocks.append(cur)
                 cur = {}
-            cur[key] = val
+            if key in cur:
+                # Preserve repeated fields instead of silently keeping only the
+                # last one. This matters for structured list/map fields such as
+                # LESSONS_ADDRESSED: an agent may emit one line per lesson.
+                # Scalar/JSON repetition now fails closed downstream instead of
+                # quietly changing the registered hypothesis to the last value.
+                cur[key] = ", ".join(x for x in (cur[key], val) if x)
+            else:
+                cur[key] = val
         elif key and raw.strip() and cur:
             # 이어지는 줄. 값을 자르면 메커니즘 문장이 잘려 뜻이 바뀐다.
             cur[key] = (cur[key] + " " + raw.strip()).strip()
@@ -389,11 +400,47 @@ values (%(lead_id)s, %(case_id)s, %(scout_lens)s, %(source_type)s,
         %(model_version)s, %(prompt_version)s)
 on conflict (lead_id) do update set
   -- 같은 소스를 다시 주웠다. 새 리드가 아니라 **언급이 하나 는 것**이다.
-  independent_mentions = research.methodology_leads.independent_mentions + 1,
-  ast_contract = excluded.ast_contract,
-  as_known_at = excluded.as_known_at
+  -- 최초 수집의 PIT 의미와 그 리드를 이미 인용한 proposal 계보는 불변이다.
+  -- 뒤의 Scout가 같은 문헌을 다른 렌즈로 해석했다고 ast_contract/as_known_at을
+  -- 덮으면 과거 실험의 입력 의미까지 소급해 바뀐다. persist가 다른 계약은
+  -- revision ID로 먼저 분기하므로 여기 도달한 행은 같은 해석의 재언급이다.
+  independent_mentions = research.methodology_leads.independent_mentions + 1
 returning (xmax = 0) as inserted
 """
+
+_SQL_LOCK_SOURCE = "select pg_advisory_xact_lock(hashtextextended(%s, 0))"
+_SQL_EXISTING_CONTRACT = """
+select ast_contract
+  from research.methodology_leads
+ where lead_id = %s
+"""
+
+
+def _canonical_contract(contract: dict | str | None) -> str:
+    if isinstance(contract, str):
+        try:
+            contract = json.loads(contract)
+        except ValueError:
+            contract = {"_invalid_legacy_contract": contract}
+    return json.dumps(contract or {}, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def revision_lead_id(source_lead_id: str, ast_contract: dict) -> str:
+    """같은 출처의 다른 해석을 불변 별도 리드로 식별한다."""
+    digest = hashlib.sha256(
+        _canonical_contract(ast_contract).encode("utf-8")).hexdigest()[:12]
+    return f"{source_lead_id}_r{digest}"
+
+
+def routed_lead_id(source_lead_id: str, existing_contract: dict | str | None,
+                   candidate_contract: dict) -> str:
+    """최초/동일 해석은 source ID, 다른 해석만 revision ID 로 보낸다."""
+    if existing_contract is None:
+        return source_lead_id
+    if _canonical_contract(existing_contract) == _canonical_contract(candidate_contract):
+        return source_lead_id
+    return revision_lead_id(source_lead_id, candidate_contract)
 
 
 def persist(conn, leads: list[dict]) -> tuple[int, int]:
@@ -402,6 +449,17 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
     new = dup = 0
     for lead in leads:
         payload = dict(lead)
+        source_lead_id = str(payload["lead_id"])
+        # 없는 행까지 SELECT FOR UPDATE 로 잠글 수 없으므로 출처 해시 advisory
+        # lock을 잡는다. 두 Scout가 동시에 처음 본 같은 문헌을 서로 다른 AST로
+        # 해석해도 한쪽 계약이 단순 upsert에 먹혀 사라지지 않는다.
+        cur.execute(_SQL_LOCK_SOURCE, (source_lead_id,))
+        cur.fetchone()
+        cur.execute(_SQL_EXISTING_CONTRACT, (source_lead_id,))
+        existing = cur.fetchone()
+        payload["lead_id"] = routed_lead_id(
+            source_lead_id, existing[0] if existing else None,
+            lead["ast_contract"])
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)
         payload["ast_contract"] = json.dumps(lead["ast_contract"], ensure_ascii=False)
         cur.execute(_SQL_UPSERT, payload)
@@ -500,6 +558,19 @@ def _selfcheck() -> int:
                 lens="COMMUNITY", source_type="BLOG", case_id="c2",
                 model_version="m1", prompt_version="p1")
     check("같은 소스 = 같은 ID", a["lead_id"] == b["lead_id"])
+    upsert_sql = " ".join(_SQL_UPSERT.lower().split())
+    check("중복은 PIT·AST 계보 불변",
+          "ast_contract = excluded" not in upsert_sql
+          and "as_known_at = excluded" not in upsert_sql)
+    base = "lead_0123456789abcdef"
+    old = {"ast_readiness": "DATA_BLOCKED", "missing_data": "queue events"}
+    new = {"ast_readiness": "AST_READY", "candidate_signal_expr": {"field": "ofi"}}
+    check("같은 해석은 원 리드로 접힘",
+          routed_lead_id(base, old, dict(reversed(list(old.items())))) == base)
+    revised = routed_lead_id(base, old, new)
+    check("새 해석은 불변 revision",
+          revised.startswith(base + "_r")
+          and revised == revision_lead_id(base, new))
 
     # JSON 입력도 받는다
     j = json.dumps([{"TITLE": "J", "URL": "http://x/2",
@@ -553,7 +624,7 @@ def _selfcheck() -> int:
 
     for f in fails:
         print(f"  FAIL {f}")
-    total = 20
+    total = 23
     print(f"lead_intake 자체 점검: {total - len(fails)}/{total} 통과")
     return 1 if fails else 0
 

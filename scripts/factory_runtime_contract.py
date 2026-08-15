@@ -48,6 +48,8 @@ REQUIRED_AST_FIELDS = frozenset(
         "depth_imbalance_l10",
         "depth_imbalance_slope",
         "size_weighted_ofi",
+        "book_depth_notional_l1",
+        "book_depth_notional_l10",
     }
 )
 

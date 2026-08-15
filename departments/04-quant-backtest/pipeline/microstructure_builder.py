@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "01-research" / "collectors"))
 
-BUILDER_VERSION = "quant-microstructure-builder-v2"
+BUILDER_VERSION = "quant-microstructure-builder-v3"
 # ▶ 판본 (2026-08-14). **옛 판본 행은 안 건드린다** - 그 판본으로 돈 실험의
 #   재현이 살아야 한다.
 #     v1 = 스프레드·잔량불균형·OFI·체결강도·실현변동성 (하루 하나로 평균)
@@ -54,9 +54,10 @@ BUILDER_VERSION = "quant-microstructure-builder-v2"
 #     v3 = + 일중 구간 피처(마감/개장 OFI · 구간 분산 · 종가/VWAP · 스프레드 수축)
 #     v4 = + L1/L10 호가 공간축 · 깊이 기울기 · 체결크기 가중 OFI
 #          + 외부 side 코드(1=매수, 5=매도)를 ofi_contrib(±volume)로 정상화
+#     v5 = + L1/L10 절대 호가 수용력(가격×잔량, 백만원)
 #   v3 의 근거: 하루 평균이 정보를 상쇄해 지운다. 2026-08-13 실측으로 마감 30분
 #   OFI 표준편차가 하루 전체의 1.74배(0.4424 vs 0.2538)이고 둘의 상관은 0.3713 이다.
-FEATURE_SET_VERSION = "ms-daily-v4"
+FEATURE_SET_VERSION = "ms-daily-v5"
 KST = timezone(timedelta(hours=9))
 
 # 정규장만 접는다. 시간외·프리마켓은 체결 규칙이 달라 같은 통계에 섞으면
@@ -89,6 +90,38 @@ with q as (
                     then (bid_sizes[1] - ask_sizes[1])::float8
                          / (bid_sizes[1] + ask_sizes[1]) end) depth_imbalance_l1,
            avg(depth_imbalance) depth_imbalance_l10,
+           avg(case when cardinality(bid_prices) >= 1
+                          and cardinality(ask_prices) >= 1
+                          and cardinality(bid_sizes) >= 1
+                          and cardinality(ask_sizes) >= 1
+                    then (bid_prices[1] * bid_sizes[1]
+                          + ask_prices[1] * ask_sizes[1])::float8 / 1e6 end)
+             book_depth_notional_l1,
+           avg(case when cardinality(bid_prices) >= 1
+                          and cardinality(ask_prices) >= 1
+                          and cardinality(bid_sizes) >= 1
+                          and cardinality(ask_sizes) >= 1
+                    then (coalesce(bid_prices[1]*bid_sizes[1],0)
+               + coalesce(bid_prices[2]*bid_sizes[2],0)
+               + coalesce(bid_prices[3]*bid_sizes[3],0)
+               + coalesce(bid_prices[4]*bid_sizes[4],0)
+               + coalesce(bid_prices[5]*bid_sizes[5],0)
+               + coalesce(bid_prices[6]*bid_sizes[6],0)
+               + coalesce(bid_prices[7]*bid_sizes[7],0)
+               + coalesce(bid_prices[8]*bid_sizes[8],0)
+               + coalesce(bid_prices[9]*bid_sizes[9],0)
+               + coalesce(bid_prices[10]*bid_sizes[10],0)
+               + coalesce(ask_prices[1]*ask_sizes[1],0)
+               + coalesce(ask_prices[2]*ask_sizes[2],0)
+               + coalesce(ask_prices[3]*ask_sizes[3],0)
+               + coalesce(ask_prices[4]*ask_sizes[4],0)
+               + coalesce(ask_prices[5]*ask_sizes[5],0)
+               + coalesce(ask_prices[6]*ask_sizes[6],0)
+               + coalesce(ask_prices[7]*ask_sizes[7],0)
+               + coalesce(ask_prices[8]*ask_sizes[8],0)
+               + coalesce(ask_prices[9]*ask_sizes[9],0)
+               + coalesce(ask_prices[10]*ask_sizes[10],0))::float8 / 1e6 end)
+             book_depth_notional_l10,
            count(*) n_quotes,
            -- ▶ **유동성의 일중 변화** (2026-08-14). 하루 평균 스프레드 하나로는
            --   "개장에 벌어졌다 마감에 좁혀진 종목" 과 "종일 넓은 종목" 이
@@ -180,6 +213,7 @@ select coalesce(q.instrument_id, t.instrument_id) instrument_id,
        q.depth_imbalance_l1, q.depth_imbalance_l10,
        q.depth_imbalance_l1 - q.depth_imbalance_l10 depth_imbalance_slope,
        t.size_weighted_ofi,
+       q.book_depth_notional_l1, q.book_depth_notional_l10,
        -- ▶ 관측시각의 논리적 하한 (2026-08-13 실측): 실시간 수집분에서 원천의
        --   event_time 이 observed_at 보다 ~2초 앞서는 시계 스큐가 있었고,
        --   그대로 접으면 watermark > observed_at 이 되어 적재 제약
@@ -227,6 +261,30 @@ with q as (
                   bid_vol8+bid_vol9+bid_vol10+ask_vol1+ask_vol2+ask_vol3+ask_vol4+
                   ask_vol5+ask_vol6+ask_vol7+ask_vol8+ask_vol9+ask_vol10)
                end) depth_imbalance_l10,
+           avg((bid1::numeric * bid_vol1 + ask1::numeric * ask_vol1)::float8
+               / 1e6) book_depth_notional_l1,
+           avg(case when bid1 is not null and ask1 is not null
+                    then (coalesce(bid1::numeric*bid_vol1,0)
+               + coalesce(bid2::numeric*bid_vol2,0)
+               + coalesce(bid3::numeric*bid_vol3,0)
+               + coalesce(bid4::numeric*bid_vol4,0)
+               + coalesce(bid5::numeric*bid_vol5,0)
+               + coalesce(bid6::numeric*bid_vol6,0)
+               + coalesce(bid7::numeric*bid_vol7,0)
+               + coalesce(bid8::numeric*bid_vol8,0)
+               + coalesce(bid9::numeric*bid_vol9,0)
+               + coalesce(bid10::numeric*bid_vol10,0)
+               + coalesce(ask1::numeric*ask_vol1,0)
+               + coalesce(ask2::numeric*ask_vol2,0)
+               + coalesce(ask3::numeric*ask_vol3,0)
+               + coalesce(ask4::numeric*ask_vol4,0)
+               + coalesce(ask5::numeric*ask_vol5,0)
+               + coalesce(ask6::numeric*ask_vol6,0)
+               + coalesce(ask7::numeric*ask_vol7,0)
+               + coalesce(ask8::numeric*ask_vol8,0)
+               + coalesce(ask9::numeric*ask_vol9,0)
+               + coalesce(ask10::numeric*ask_vol10,0))::float8 / 1e6 end)
+             book_depth_notional_l10,
            count(*) n_quotes,
            avg(case when (ask1 + bid1) > 0 and ts >= %(t_close)s
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_close,
@@ -289,7 +347,8 @@ select coalesce(q.symbol, t.symbol) symbol,
           spread_close_ratio,
        q.depth_imbalance_l1, q.depth_imbalance_l10,
        q.depth_imbalance_l1 - q.depth_imbalance_l10 depth_imbalance_slope,
-       t.size_weighted_ofi
+       t.size_weighted_ofi,
+       q.book_depth_notional_l1, q.book_depth_notional_l10
   from q full outer join t on t.symbol = q.symbol
 """
 
@@ -315,6 +374,7 @@ insert into market.microstructure_features
    ofi_close, ofi_open, ofi_intraday_std, close_vs_vwap, spread_close_ratio,
    depth_imbalance_l1, depth_imbalance_l10, depth_imbalance_slope,
    size_weighted_ofi,
+   book_depth_notional_l1, book_depth_notional_l10,
    values, quality_status, input_watermark, input_hash)
 values %s
 on conflict do nothing
@@ -423,6 +483,16 @@ def assert_v4_bounds(**features) -> None:
                 f"{FEATURE_SET_VERSION} {name}={number} outside [{low}, {high}]")
 
 
+def assert_v5_capacity(**features) -> None:
+    """Absolute displayed depth is missing or non-negative, never signed."""
+    for name, value in features.items():
+        if value is None:
+            continue
+        number = float(value)
+        if number < 0:
+            raise ValueError(f"{FEATURE_SET_VERSION} {name}={number} is negative")
+
+
 def missing_sources(rows) -> list[str]:
     """그날 **원천 하나가 통째로 빈** 경우를 이름으로 돌려준다.
 
@@ -516,11 +586,14 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
          n_ticks, n_quotes, tvalue, tvolume,
          ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
          depth_l1, depth_l10, depth_slope, size_ofi,
+         book_depth_l1, book_depth_l10,
          observed_at, watermark) in rows:
         assert_v4_bounds(
             order_flow_imbalance=ofi, ofi_close=ofi_c, ofi_open=ofi_o,
             depth_imbalance_l1=depth_l1, depth_imbalance_l10=depth_l10,
             depth_imbalance_slope=depth_slope, size_weighted_ofi=size_ofi)
+        assert_v5_capacity(book_depth_notional_l1=book_depth_l1,
+                           book_depth_notional_l10=book_depth_l10)
         g = quality_of(int(n_ticks), int(n_quotes))
         grades[g] += 1
         payload.append((
@@ -528,6 +601,7 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
             rvol, spread, di, ofi, intensity, tvalue, tvolume,
             ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
             depth_l1, depth_l10, depth_slope, size_ofi,
+            book_depth_l1, book_depth_l10,
             # values 에 표본 수를 남긴다 - 어떤 행이 얇은지 나중에 판단할 수 있어야 한다
             f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)}{miss_tag}}}',
             g, watermark, input_hash(day, int(n_ticks), int(n_quotes))))
@@ -661,11 +735,14 @@ def build_day_external(market_conn, src_conn, day: date, *,
     payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
     for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
          tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
-         depth_l1, depth_l10, depth_slope, size_ofi) in rows:
+         depth_l1, depth_l10, depth_slope, size_ofi,
+         book_depth_l1, book_depth_l10) in rows:
         assert_v4_bounds(
             order_flow_imbalance=ofi, ofi_close=ofi_c, ofi_open=ofi_o,
             depth_imbalance_l1=depth_l1, depth_imbalance_l10=depth_l10,
             depth_imbalance_slope=depth_slope, size_weighted_ofi=size_ofi)
+        assert_v5_capacity(book_depth_notional_l1=book_depth_l1,
+                           book_depth_notional_l10=book_depth_l10)
         iid = iid_of.get(str(sym).strip())
         if iid is None:
             unmapped += 1
@@ -680,6 +757,7 @@ def build_day_external(market_conn, src_conn, day: date, *,
             rvol, spread, di, ofi, intensity, tvalue, tvolume,
             ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
             depth_l1, depth_l10, depth_slope, size_ofi,
+            book_depth_l1, book_depth_l10,
             f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)},'
             f' "origin": "external"{miss_tag}}}',
             g, bucket, input_hash(day, int(n_ticks), int(n_quotes))))
@@ -711,6 +789,28 @@ def pending_days(market_conn, *, since: date | None = None) -> list[date]:
         done = {r[0] for r in cur.fetchall()}
     out = [d for d in src if d not in done and d.isoweekday() <= 5]
     return [d for d in out if since is None or d >= since]
+
+
+def official_trading_days(meta_conn, start: date, end: date) -> set[date]:
+    """Latest versioned KRX regular-session calendar, fail-closed when absent."""
+    with meta_conn.cursor() as cur:
+        cur.execute("""
+            select s.trade_date
+              from reference.market_sessions s
+              join reference.market_calendar_versions v using (calendar_version_id)
+             where s.market='KRX' and s.session_type='REGULAR'
+               and s.is_trading_day and s.trade_date between %s and %s
+               and v.version=(select max(version)
+                                from reference.market_calendar_versions
+                               where market='KRX')
+             order by s.trade_date
+        """, (start, end))
+        days = {r[0] for r in cur.fetchall()}
+    if not days:
+        raise RuntimeError(
+            f"KRX 공식 거래일 캘린더가 비었다: {start}~{end}; "
+            "평일 추측으로 미시구조 날짜를 만들지 않는다")
+    return days
 
 
 # ── 자체 점검 (DB 없음) ────────────────────────────────────────────────────
@@ -967,6 +1067,24 @@ def _check_v4_bounds_fail_closed():
     print("  v4 값 범위 fail-closed    OK")
 
 
+def _check_v5_depth_capacity_is_explicit():
+    for sql in (_SQL_BUILD, _SQL_BUILD_EXTERNAL):
+        assert "book_depth_notional_l1" in sql
+        assert "book_depth_notional_l10" in sql
+        assert "/ 1e6" in sql, "절대 깊이 단위가 백만원이 아니다"
+    assert "bid_prices[1] * bid_sizes[1]" in _SQL_BUILD
+    assert "bid_vol10" in _SQL_BUILD_EXTERNAL and "ask_vol10" in _SQL_BUILD_EXTERNAL
+    assert_v5_capacity(book_depth_notional_l1=0,
+                       book_depth_notional_l10=100.0)
+    try:
+        assert_v5_capacity(book_depth_notional_l1=-0.01)
+    except ValueError as exc:
+        assert "book_depth_notional_l1" in str(exc) and "negative" in str(exc)
+    else:
+        raise AssertionError("음의 절대 호가 수용력을 적재 허용했다")
+    print("  v5 절대 호가 수용력      OK")
+
+
 def _check_whole_day_source_loss_is_not_a_row_grade():
     """**하루 전체가 빈 것과 한 종목이 얇은 것은 다른 사실이다** (2026-08-14 실측).
 
@@ -1033,9 +1151,10 @@ def _selfcheck() -> int:
     _check_fdw_path_is_the_same_aggregation()
     _check_v4_depth_and_size_axes_are_explicit()
     _check_v4_bounds_fail_closed()
+    _check_v5_depth_capacity_is_explicit()
     _check_whole_day_source_loss_is_not_a_row_grade()
     _check_partial_universe_loss_is_reported()
-    print("마이크로구조 빌더 14개 영역 통과. 실행은 --build")
+    print("마이크로구조 빌더 15개 영역 통과. 실행은 --build")
     return 0
 
 
@@ -1072,13 +1191,25 @@ def main(argv: list[str] | None = None) -> int:
     from source_registry import load_project_env
 
     env = load_project_env()
-    conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=20)
-    src = psycopg2.connect(a.external_dsn, connect_timeout=20) if a.external_dsn else None
+    conn = meta = src = None
     try:
+        conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=20)
+        meta = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+        src = (psycopg2.connect(a.external_dsn, connect_timeout=20)
+               if a.external_dsn else None)
         since = date.fromisoformat(a.since) if a.since else None
         through = date.fromisoformat(a.through) if a.through else None
         if since and through and since > through:
             raise SystemExit("--from 은 --through 보다 늦을 수 없다")
+        # postgres_fdw가 이 복합 집계를 pushdown하지 않는 것을 2026-08-16
+        # 실측했다: 원격에서 `FETCH 50000 FROM c1`로 원시 호가를 계속 보내며
+        # 하루도 수분이 걸리고, 호출 컨테이너 종료 뒤 백엔드가 남았다. 진단용
+        # 하루는 허용하되 다일 백필은 원천 DB에서 집계하는 --external-dsn만 쓴다.
+        one_explicit_day = bool(since and through and since == through)
+        if a.fdw and not (one_explicit_day or a.days == 1):
+            raise SystemExit(
+                "--fdw 복합 집계는 원시행을 전송하므로 한 번에 하루만 허용한다. "
+                "다일 백필은 --external-dsn 으로 원천 DB에서 집계하라")
         external = src is not None or a.fdw
         if external:
             # 저쪽이 가진 거래일을 기준으로 삼는다. 우리 원장의 청크를 기준으로
@@ -1092,7 +1223,13 @@ def main(argv: list[str] | None = None) -> int:
             #   우리 테이블 조회라 즉시 끝나고, 그 날들이 곧 저쪽 원천의 날이다.
             if src is not None:
                 with src.cursor() as cur:
-                    cur.execute("select distinct ts::date from public.ticks order by 1")
+                    # ts는 timestamptz다. 연결의 기본 UTC에서 ts::date를 쓰면
+                    # KST 다음 날 새벽의 시험/장외 이벤트가 전날로 분류된다
+                    # (실측: 공식 거래일 2026-06-09가 목록에는 있었지만 KST
+                    # 정규장 행은 0). 집계 session_bounds와 같은 KST 날짜로 센다.
+                    cur.execute("""
+                        select distinct (ts at time zone 'Asia/Seoul')::date
+                          from public.ticks order by 1""")
                     days = [r[0] for r in cur.fetchall()]
             else:
                 with conn.cursor() as cur:
@@ -1101,14 +1238,29 @@ def main(argv: list[str] | None = None) -> int:
                           from market.microstructure_features
                          order by 1""")
                     days = [r[0] for r in cur.fetchall()]
+            # 외부 수집 DB에는 일요일 연결 시험/잔존 이벤트가 실제로 있었다
+            # (2026-05-31~08-09 11일). 거래소 세션이 아닌 날짜를 일별 피처로
+            # 만들면 walk-forward 달력이 조용히 늘어나므로 평일만 허용한다.
+            days = [d for d in days if d.isoweekday() <= 5]
             if since:
                 days = [d for d in days if d >= since]
             if through:
                 days = [d for d in days if d <= through]
             if a.days:
                 days = days[-a.days:]
+            # 원천 집계는 하루 수천만 행을 읽는다. 같은 v5 날짜가 이미 있으면
+            # `day_origin_guard`까지 전부 계산한 뒤 skip하지 말고 쿼리 전에 뺀다.
+            # --replace와 --dry-run은 의도적으로 재계산하는 경로라 제외한다.
+            if not a.replace and not a.dry_run:
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_DONE_DAYS, (FEATURE_SET_VERSION,))
+                    done = {r[0] for r in cur.fetchall()}
+                days = [d for d in days if d not in done]
         else:
             days = pending_days(conn, since=since)
+        if days:
+            calendar = official_trading_days(meta, min(days), max(days))
+            days = [d for d in days if d in calendar]
         print(f"{BUILDER_VERSION}: 접을 날 {len(days)}건"
               + (f" ({days[0]} ~ {days[-1]})" if days else "")
               + ("  [외부 원천 - FDW]" if a.fdw and src is None else
@@ -1136,7 +1288,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  완료: {total:,}행"
               + (f" / 종목 미매핑 누적 {unmapped:,}" if unmapped else ""), flush=True)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        if meta is not None:
+            meta.close()
         if src is not None:
             src.close()
     return 0

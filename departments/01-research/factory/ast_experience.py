@@ -33,6 +33,7 @@ class AstMemory:
     public_baseline_controls: tuple[dict, ...]
     unused_novel_leads: tuple[dict, ...]
     unused_recycled_leads: tuple[dict, ...]
+    diverse_frontier: tuple[dict, ...]
 
 
 def _metric(summary: dict, key: str) -> float | None:
@@ -41,6 +42,95 @@ def _metric(summary: dict, key: str) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def _surface(expr: dict) -> tuple[set[str], set[tuple[str, int]], int]:
+    """Return operators, field-specific clocks and deterministic complexity."""
+    operators: set[str] = set()
+    clocks: set[tuple[str, int]] = set()
+
+    def walk(node: dict) -> None:
+        op = node.get("op")
+        if op:
+            operators.add(op)
+        if op == "ts_corr":
+            clocks.add((f"{node['field_a']}~{node['field_b']}", int(node["n"])))
+        elif op in ast.SOURCE_OPS:
+            clocks.add((str(node["field"]), int(node["n"])))
+        if "arg" in node:
+            walk(node["arg"])
+        for child in node.get("args", ()):
+            walk(child)
+
+    walk(expr)
+    return operators, clocks, ast.count_nodes(expr)
+
+
+def _diverse_frontier(groups: list[dict], tested_exprs: list[dict],
+                      *, limit: int = 5) -> tuple[dict, ...]:
+    """Greedy quality-diversity frontier over already admissible AST leads.
+
+    This is a search policy, not a forecast.  Contract-complete, alpha-eligible
+    leads are rewarded for distance from the tested/selected library and for
+    adding fields, field-specific clocks, or operators.  Excess complexity is
+    charged so novelty cannot be bought with gratuitous syntax.
+    """
+    remaining = [dict(group) for group in groups]
+    selected: list[dict] = []
+    reference_exprs = list(tested_exprs)
+    covered_fields = {field for expr in tested_exprs for field in ast.fields_of(expr)}
+    covered_ops: set[str] = set()
+    covered_clocks: set[tuple[str, int]] = set()
+    for expr in tested_exprs:
+        operators, clocks, _nodes = _surface(expr)
+        covered_ops |= operators
+        covered_clocks |= clocks
+
+    while remaining and len(selected) < limit:
+        ranked = []
+        for group in remaining:
+            expr = group["expr"]
+            operators, clocks, nodes = _surface(expr)
+            similarity = max(
+                (ast.structural_similarity(expr, prior) for prior in reference_exprs),
+                default=0.0,
+            )
+            field_gain = sorted(set(group["fields"]) - covered_fields)
+            clock_gain = sorted(clocks - covered_clocks)
+            operator_gain = sorted(operators - covered_ops)
+            complexity_penalty = max(0, nodes - 8) / max(1, ast.MAX_NODES - 8)
+            score = (
+                0.55 * (1.0 - similarity)
+                + 0.25 * min(1.0, len(field_gain) / 2.0)
+                + 0.12 * bool(clock_gain)
+                + 0.08 * bool(operator_gain)
+                - 0.10 * complexity_penalty
+            )
+            enriched = dict(group)
+            enriched.update({
+                "frontier_score": round(score, 6),
+                "nearest_library_similarity": round(similarity, 6),
+                "coverage_gain_fields": field_gain,
+                "coverage_gain_clocks": [f"{field}@{window}"
+                                         for field, window in clock_gain],
+                "coverage_gain_operators": operator_gain,
+                "operators": sorted(operators),
+                "clocks": [f"{field}@{window}" for field, window in sorted(clocks)],
+                "complexity_nodes": nodes,
+            })
+            ranked.append(enriched)
+        # Stable fingerprint tie-break makes the same ledger yield the same frontier.
+        chosen = sorted(ranked, key=lambda row: (
+            -row["frontier_score"], row["complexity_nodes"], row["fingerprint"]))[0]
+        selected.append(chosen)
+        remaining = [row for row in remaining
+                     if row["fingerprint"] != chosen["fingerprint"]]
+        reference_exprs.append(chosen["expr"])
+        covered_fields |= set(chosen["fields"])
+        chosen_ops, chosen_clocks, _nodes = _surface(chosen["expr"])
+        covered_ops |= chosen_ops
+        covered_clocks |= chosen_clocks
+    return tuple(selected)
 
 
 def build(experiments: list[dict], leads: list[dict]) -> AstMemory:
@@ -146,6 +236,7 @@ def build(experiments: list[dict], leads: list[dict]) -> AstMemory:
 
     novel = tuple(group for fp, group in sorted(lead_groups.items()) if fp not in tested)
     recycled = tuple(group for fp, group in sorted(lead_groups.items()) if fp in tested)
+    diverse_frontier = _diverse_frontier(list(novel), tested_exprs)
     shapes = {row["shape_fingerprint"] for row in parsed_experiments}
     untested = tuple(field for field in ast.MICRO_FIELDS if not fields[field])
     return AstMemory(
@@ -160,6 +251,7 @@ def build(experiments: list[dict], leads: list[dict]) -> AstMemory:
             group for _, group in sorted(baseline_groups.items())),
         unused_novel_leads=novel,
         unused_recycled_leads=recycled,
+        diverse_frontier=diverse_frontier,
     )
 
 
@@ -204,12 +296,19 @@ def render(memory: AstMemory, *, max_history: int = 5) -> str:
         lines.append(
             "  ▶ 창·상수만 바꾸지 말고 상태 조건, 메커니즘 상호작용, 실패모드 "
             "역전 또는 타분야 이전으로 별도 AST shape를 만든다.")
-    if memory.unused_novel_leads:
-        lines.append("  [미사용·exact 미실험 리드 - 먼저 검토]")
-        for row in memory.unused_novel_leads[:5]:
+    if memory.diverse_frontier:
+        lines.append("  [quality-diversity frontier - 후보 집단의 상호보완 순서]")
+        lines.append(
+            "    점수는 실현 알파가 아니라 탐색 우선순위다: 구조 거리·새 필드·새 "
+            "시간창·새 연산을 보상하고 불필요한 복잡도를 감점한다.")
+        for row in memory.diverse_frontier:
             lines.append(
-                f"    {row['fingerprint']} leads={row['lead_ids']} fields={row['fields']} "
-                f"최근접 구조유사도={row['nearest_tested_similarity']:.2f}")
+                f"    score={row['frontier_score']:+.3f} {row['fingerprint']} "
+                f"leads={row['lead_ids']} fields={row['fields']} "
+                f"gain_fields={row['coverage_gain_fields']} "
+                f"gain_clocks={row['coverage_gain_clocks']} "
+                f"gain_ops={row['coverage_gain_operators']} nodes={row['complexity_nodes']} "
+                f"library_similarity={row['nearest_library_similarity']:.2f}")
     if memory.unused_recycled_leads:
         lines.append("  [미사용 리드지만 수식은 이미 실험됨 - 독립 근거로 합치고 재실험 금지]")
         for row in memory.unused_recycled_leads[:5]:

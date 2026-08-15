@@ -244,34 +244,36 @@ def planner_task_id(planner_run: str) -> str | None:
     return match.group(1) if match else None
 
 
-def skeptic_job_error(skeptic_run: str, planner_text: str) -> str:
-    """Validate that a separate completed critic worker produced the review.
+def verified_skeptic_reviews(skeptic_run: str,
+                             planner_text: str) -> tuple[list[dict], str]:
+    """Return typed reviews from the causally bound independent Worker job.
 
     A caller-provided label is not a signature.  The worker job is created and
     retained by this MCP process, so the proposal boundary can verify the
     actual execution, its trigger input, and its structured output before
-    allowing the id to enter the ledger as ``skeptic_sign``.
+    allowing the id to enter the ledger as ``skeptic_sign``.  The returned
+    artifact, rather than agent-transcribed prose, is the canonical hand-off.
     """
     job_id = str(skeptic_run or "").strip()
     if not job_id:
-        return "skeptic_run is required and must be a run_research_workers job_id"
+        return [], "skeptic_run is required and must be a run_research_workers job_id"
     with _WORKER_JOBS_LOCK:
         job = _WORKER_JOBS.get(job_id)
         if job is not None:
             job = dict(job)
     if job is None:
-        return "skeptic_run does not identify a worker job in this MCP process"
+        return [], "skeptic_run does not identify a worker job in this MCP process"
     if job.get("status") != "COMPLETED":
-        return f"skeptic worker is not completed: {job.get('status')}"
+        return [], f"skeptic worker is not completed: {job.get('status')}"
     if "proposal_draft" not in (job.get("payload_fields") or []):
-        return "skeptic worker did not review a proposal_draft"
+        return [], "skeptic worker did not review a proposal_draft"
     if job.get("proposal_draft_sha256") != _text_digest(planner_text):
-        return "skeptic worker reviewed a different proposal_draft"
+        return [], "skeptic worker reviewed a different proposal_draft"
     result = job.get("result") or {}
     if result.get("degraded"):
-        return "skeptic worker completed in degraded mode"
+        return [], "skeptic worker completed in degraded mode"
     if "competing-explanation-worker" not in (result.get("executed") or []):
-        return "competing-explanation-worker did not complete"
+        return [], "competing-explanation-worker did not complete"
     report = next(
         (item for item in (result.get("workers") or [])
          if item.get("worker_id") == "competing-explanation-worker"),
@@ -281,8 +283,56 @@ def skeptic_job_error(skeptic_run: str, planner_text: str) -> str:
     if ((report or {}).get("status") != "COMPLETED"
             or output.get("schema_valid") is not True
             or not str(output.get("summary") or "").strip()):
-        return "skeptic worker output is missing or schema-invalid"
-    return ""
+        return [], "skeptic worker output is missing or schema-invalid"
+    reviews = output.get("skeptic_reviews")
+    if not isinstance(reviews, list) or not reviews:
+        return [], "skeptic worker typed artifact skeptic_reviews is missing"
+    required = ("title", "competing_explanation", "competing_codes",
+                "verdict", "falsification_test")
+    if any(not isinstance(review, dict)
+           or any(review.get(field) in (None, "", []) for field in required)
+           for review in reviews):
+        return [], "skeptic worker typed artifact is incomplete"
+    planner_titles = [match.group(1).strip() for match in re.finditer(
+        r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(planner_text or ""))
+        if match.group(1).strip()]
+    if not planner_titles:
+        return [], "proposal_draft has no TITLE for skeptic review pairing"
+    if len(planner_titles) == 1 and len(reviews) == 1:
+        # TITLE is an identifier, not analytical content.  Small local models
+        # sometimes paraphrase it even when the review body is valid.  With a
+        # one-to-one causal input the only safe mapping is unambiguous, so use
+        # the source title.  Never guess positionally when there are many.
+        normalized = [dict(reviews[0])]
+        normalized[0]["title"] = planner_titles[0]
+        return normalized, ""
+    review_titles = [str(review.get("title") or "").strip() for review in reviews]
+    if len(review_titles) != len(planner_titles) or sorted(review_titles) != sorted(planner_titles):
+        return [], "skeptic review TITLE set does not exactly match proposal_draft"
+    return reviews, ""
+
+
+def skeptic_job_error(skeptic_run: str, planner_text: str) -> str:
+    """Compatibility wrapper used by diagnostics and older callers."""
+    _reviews, error = verified_skeptic_reviews(skeptic_run, planner_text)
+    return error
+
+
+def render_skeptic_reviews(reviews: list[dict]) -> str:
+    """Deterministically bridge typed Worker output to proposal-intake blocks."""
+    blocks = []
+    for review in reviews:
+        one_line = lambda value: " ".join(str(value).split())  # noqa: E731
+        explanation = one_line(review["competing_explanation"])
+        falsification = one_line(review["falsification_test"])
+        codes = ", ".join(one_line(code) for code in review["competing_codes"])
+        blocks.append("\n".join([
+            f"TITLE: {one_line(review['title'])}",
+            f"COMPETING_EXPLANATION: {explanation} FALSIFICATION_TEST: {falsification}",
+            f"COMPETING_CODES: {codes}",
+            f"VERDICT: {one_line(review['verdict']).upper()}",
+        ]))
+    return "\n\n".join(blocks)
 
 
 def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
@@ -933,9 +983,10 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "지금 작업 중인 칸반 카드 ID(t_ 로 시작)를 넣으면 납품이 그 "
                     "카드 몫으로 대조된다. 먼저 run_research_workers에 "
                     "proposal_draft를 주고 get_worker_job에서 COMPLETED·비-degraded "
-                    "결과를 확인하라. competing-explanation-worker의 산출을 "
-                    "skeptic_text에 옮기고, 반환된 실제 job_id를 skeptic_run에 "
-                    "넣어야 한다. 자기 서명이나 임의 실행명은 거부된다. 근거 "
+                    "결과를 확인하라. 반환된 실제 job_id를 skeptic_run에 넣으면 "
+                    "typed skeptic_reviews를 이 도구가 직접 접수 형식으로 변환한다. "
+                    "skeptic_text는 구버전 호출 호환용이며 판정 근거로 쓰지 않는다. "
+                    "자기 서명이나 임의 실행명은 거부된다. 근거 "
                     "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
                     "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
                     "카드 안에서 다시 제출하라. `llm_model_id` 와 "
@@ -960,7 +1011,8 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "why": "planner_run must start with the current kanban task id (t_...)"
                 }],
             }
-        critic_error = skeptic_job_error(skeptic_run, planner_text)
+        skeptic_reviews, critic_error = verified_skeptic_reviews(
+            skeptic_run, planner_text)
         if critic_error:
             return {
                 "ok": False, "published": 0, "already_present": 0,
@@ -985,7 +1037,8 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             #   찍는다. 수확기 `_mcp_deliveries` 가 이 각인으로 "이 카드가
             #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
             #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
-            r = PI.intake(planner_text, skeptic_text,
+            canonical_skeptic_text = render_skeptic_reviews(skeptic_reviews)
+            r = PI.intake(planner_text, canonical_skeptic_text,
                           case_id=f"card-{task_id}",
                           planner_run=planner_run, skeptic_run=skeptic_run,
                           leads=leads,
@@ -1181,6 +1234,7 @@ def _check_worker_payload():
 
 def _check_worker_job_lifecycle():
     now = datetime(2026, 8, 13, 10, tzinfo=KST)
+    draft = "TITLE: Liquidity pressure reversal"
     jid = register_worker_job(["holding_question"], now=now)
     with _WORKER_JOBS_LOCK:
         assert _WORKER_JOBS[jid]["status"] == "RUNNING"
@@ -1196,11 +1250,11 @@ def _check_worker_job_lifecycle():
     fail = finish_worker_job(jid2, result=None, model_plane=None,
                              error="ImportError: worker_model_gateway", now=now)
     assert fail["status"] == "FAILED" and "ImportError" in fail["error"]
-    assert skeptic_job_error(jid2, "draft-x"), \
+    assert skeptic_job_error(jid2, draft), \
         "failed critic was accepted as a signature"
 
     jid3 = register_worker_job(["proposal_draft"], now=now,
-                               proposal_draft="draft-x")
+                               proposal_draft=draft)
     critic = {
         "executed": ["competing-explanation-worker"],
         "degraded": False,
@@ -1213,15 +1267,34 @@ def _check_worker_job_lifecycle():
                 "evidence_refs": [],
                 "escalate": False,
                 "schema_valid": True,
+                "skeptic_reviews": [{
+                    "title": "Paraphrased liquidity review",
+                    "competing_explanation": "The return may be a liquidity premium.",
+                    "competing_codes": ["LIQUIDITY_PREMIUM"],
+                    "verdict": "PROCEED",
+                    "falsification_test": "Neutralize spread and depth buckets.",
+                }],
             },
         }],
     }
     finish_worker_job(jid3, result=critic, model_plane={"provider": "test"},
                       error=None, now=now)
-    assert skeptic_job_error(jid3, "draft-x") == ""
-    assert "different proposal_draft" in skeptic_job_error(jid3, "draft-y")
-    assert skeptic_job_error("invented-label", "draft-x"), \
+    assert skeptic_job_error(jid3, draft) == ""
+    reviews, error = verified_skeptic_reviews(jid3, draft)
+    rendered = render_skeptic_reviews(reviews)
+    assert not error and "TITLE: Liquidity pressure reversal" in rendered
+    assert "COMPETING_CODES: LIQUIDITY_PREMIUM" in rendered
+    assert "FALSIFICATION_TEST: Neutralize spread and depth buckets." in rendered
+    assert "different proposal_draft" in skeptic_job_error(
+        jid3, "TITLE: Different proposal")
+    assert skeptic_job_error("invented-label", draft), \
         "unverifiable label was accepted"
+    many = "TITLE: First proposal\nTITLE: Second proposal"
+    jid4 = register_worker_job(["proposal_draft"], now=now, proposal_draft=many)
+    finish_worker_job(jid4, result=critic, model_plane={"provider": "test"},
+                      error=None, now=now)
+    assert "TITLE set" in skeptic_job_error(jid4, many), \
+        "ambiguous multi-proposal review was paired positionally"
     assert planner_task_id("t_59e3616a-planner-20260815-10a") == "t_59e3616a"
     assert planner_task_id("planner-20260815") is None
     assert finish_worker_job("없는아이디", result=None, model_plane=None,

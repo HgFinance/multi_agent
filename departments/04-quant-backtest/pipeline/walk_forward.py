@@ -188,12 +188,16 @@ def _short_sample_windows(dates: list[date], warmup_days: int,
     `SHORT_MIN_TEST_DAYS` 미만이면 만들지 않는다 - 억지로 쪼개면 각 창의
     성적이 잡음이라 부호 일관성이 우연에 지배된다.
     """
-    usable = dates[warmup_days:]
     emb = max(0, int(embargo_days))
-    if len(usable) < SHORT_MIN_TEST_DAYS:
+    usable = dates[warmup_days:]
+    # SHORT_MIN_TEST_DAYS is the evidence left *after* embargo.  Allocating
+    # ten calendar observations and then removing a two-day embargo used to
+    # create eight-day windows that the fragility judge correctly discarded.
+    min_segment_days = SHORT_MIN_TEST_DAYS + emb
+    if len(usable) < min_segment_days:
         return []
     # 표본이 허락하는 창 수. 창 길이가 최소를 밑돌지 않게 위에서 깎는다.
-    n_win = min(SHORT_TARGET_WINDOWS, len(usable) // SHORT_MIN_TEST_DAYS)
+    n_win = min(SHORT_TARGET_WINDOWS, len(usable) // min_segment_days)
     if n_win < 1:
         return []
     size = len(usable) // n_win
@@ -201,11 +205,11 @@ def _short_sample_windows(dates: list[date], warmup_days: int,
     for k in range(n_win):
         seg = usable[k * size: (k + 1) * size] if k < n_win - 1 \
             else usable[k * size:]          # 마지막 창이 나머지를 흡수한다
-        if len(seg) < SHORT_MIN_TEST_DAYS:
-            continue
-        if emb >= len(seg):
+        if len(seg) < min_segment_days:
             continue
         eff = seg[emb:]
+        if len(eff) < SHORT_MIN_TEST_DAYS:
+            continue
         i0 = dates.index(seg[0])
         out.append(WFWindow(
             label=f"W{k + 1:02d}-{seg[0].isoformat()}",

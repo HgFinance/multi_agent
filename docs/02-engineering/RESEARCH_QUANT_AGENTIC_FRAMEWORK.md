@@ -5,7 +5,7 @@
 > 상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 구현 담당: [TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md](../05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md)
 > 리서치 산출물 상세: [RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md](RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md)
-> 개정: 2026-08-10 전략 공장 재편 (재일). 이전 판은 리서치를 종목 분석 조직으로,
+> 개정: 2026-08-16 전략 공장 실행 계약 보강 (재일). 이전 판은 리서치를 종목 분석 조직으로,
 > 가설 발굴을 퀀트 소속으로 두었다. 그 구조는 **프레임워크 자체가 투자판단을 내리는**
 > 형태이며, 아래 1절의 이유로 검증이 성립하지 않는다.
 
@@ -372,6 +372,40 @@ tool_versions: [research-web-mcp@...]
 `testability: UNUSABLE`은 실패가 아니라 정상 산출이다. 규칙으로 서술할 수 없는 주장을
 억지로 다듬어 넘기면 그 비용은 실험 예산에서 나간다.
 
+AST_READY 리드는 최신순 한 줄 큐로만 소비하지 않는다. 원장의 기실험 AST와 아직 안 쓴
+리드 전체를 놓고 구조 유사도, 새 미시구조 필드, 필드별 시간창, 연산자, 노드 복잡도를
+결정론적으로 계산해 **quality-diversity frontier**를 만든다. 이 점수는 예상 수익이나
+알파 품질이 아니라 탐색 순서다. 이미 검정된 OFI 식의 창만 바꾼 후보보다 아직 보지 않은
+호가 깊이·상태·시계열 구조를 우선하되, 새로운 척하려고 노드만 늘린 식은 감점한다. 최종
+품질 판정은 이 frontier가 아니라 PIT walk-forward·비용·다중검정 관문이 소유한다.
+
+같은 URL·제목과 **같은 AST 계약**이 다시 수집되면 `independent_mentions`만 증가한다.
+뒤의 Scout가 같은 문헌을 다른 렌즈로 해석했다고 최초 `as_known_at`이나
+`ast_contract`를 덮지 않는다. 그 값을 바꾸면 이미 해당 리드를 인용한 Proposal과 실험의
+입력 의미가 소급 변경된다. 계약이 실제로 다르면 source lead ID에 정규화된 AST 계약의
+해시를 붙인 결정론적 revision lead를 별도 행으로 보존한다. 같은 revision의 재수집은 다시
+그 행으로 접힌다. 따라서 공개 원문의 출처 중복은 억제하면서, 데이터면 확장 뒤 생긴 새로운
+메커니즘 변형은 잃지 않는다.
+
+미시구조 실행면 v5는 방향과 용량을 분리한다. v4의 `depth_imbalance_l1/l10`은
+매수·매도 어느 쪽이 우세한지 나타내지만 호가장이 얼마나 두꺼운지는 잃는다. v5의
+`book_depth_notional_l1/l10`은 각 호가의 가격×잔량을 백만원으로 합쳐 양방향 절대
+흡수 용량을 보존한다. 따라서 공개 OFI를 그대로 복제하는 대신 `OFI / depth capacity`,
+상태 조건, L1/L10 용량 괴리 같은 메커니즘 변형을 AST로 사전등록할 수 있다. 이 값
+단독은 방향 알파가 아니며, 반드시 주문흐름과의 상호작용·반대편·비용 반증을 적는다.
+Gate 0의 가용 거래일도 이름 전체를 합산하지 않고 AST 필드가 요구하는 불변 버전
+(`v3`/`v4`/`v5`)의 파티션만 센다. 예를 들어 v3가 60일 있어도 v5 매니페스트가 없으면
+절대 깊이 수식은 데이터가 있는 것으로 통과하지 않는다.
+
+다만 v5의 일봉 `OFI / 하루 평균 depth`를 문헌의 호가 충격식으로 부르지 않는다.
+공개 OFI·queue-imbalance 결과는 동기화된 짧은 시간/사건 구간의 주문흐름·깊이와
+지극히 짧은 가격 지평을 연결한다. 현재 일봉 요약면은 종가 압력·일중 불균형
+지속성 가설의 탐색 보조면이지, 그 식의 재현면이 아니다. 다음 실행면은
+`market_ticks`+10레벨 `market_quotes`를 같은 as-of 시간으로 맞춘 1분/5분
+이벤트 구간, 지연 라벨, 호가 재구성 비용을 따로 매니페스트하는
+**intraday microstructure lane**으로 열어야 한다. 일봉 워크포워드와 세션 내 초단기
+예측을 한 성적표로 섞지 않는다.
+
 ### 6.4 `ExperimentProposalV1`
 
 리서치본부의 정본 산출물이다. 종목 견해가 아니라 **퀀트가 사전 등록할 수 있는 실험**이다.
@@ -398,7 +432,7 @@ falsification_tests:                 # >=1 필수
   - 하락장 초과수익이 0 미만이면 기각
 data_requirements:
   tables: [market_bars]
-  min_history_days: 750
+  min_history_days: 20              # 전체 표본 수가 아니라 실제 계산 워밍업
 suggested_params: {lookback_days: [10, 20, 40], top_n: [10, 20]}   # 튜닝 파라미터 - Family 를 가르지 않는다
 trial_budget: 5
 
@@ -415,6 +449,30 @@ lineage:
   model_versions: {}
   prompt_versions: {}
 ```
+
+독립 회의론자 Worker의 공통 봉투는 계속 `research.worker-context.v1`이다. 다만 그 안의
+`skeptic_reviews`는 자유 요약이 아니라 Pydantic으로 검증된 typed artifact이며, 각 항목은
+`title`, `competing_explanation`, `competing_codes`, `verdict`, `falsification_test`를 모두
+가져야 한다. Worker Runtime은 입력 `TITLE` 수와 검토 수까지 대조하고, 단일 건의 제목
+표현만 원문 식별자로 정규화한다. 다중 건의 제목 집합이 다르면 위치로 추측하지 않고
+`DEGRADED`로 닫는다. `factory_submit_proposal`은 호출자가 다시 쓴 `skeptic_text`를 신뢰하지
+않고, 인과적으로 결합된 완료 job의 typed artifact를 결정론적으로 접수 블록으로 변환한다.
+
+Worker Gateway는 이 계약을 프롬프트로만 부탁하지 않는다. Ollama/vLLM의 OpenAI 호환
+`response_format=json_schema`에 같은 Pydantic 유도 스키마를 전달하고, Runtime이 다시
+검증한다. 디코더 제약은 문법적 후보 공간을 줄이고 Runtime 검증은 제목 집합·근거 봉투 같은
+업무 불변식을 지킨다. 둘 중 하나만으로는 충분하지 않다.
+
+`min_history_days`는 **현재 데이터 커버리지**가 아니라 수식과 켜진 위험관리 장치가 첫
+평가일 전에 요구하는 워밍업이다. 현재 미시구조 커버리지가 61일이라고 61을 적으면 평가
+구간은 0일이 된다. Gate 0는 원장의 실제 커버리지와 `max(AST n, vol_lookback_days,
+trend_filter_days, min_history_days)`를 대조하고, 짧은 표본에서는 실행기와 같은 10일
+무겹침 창 산수로 최소 4창이 안 나오면 `UNDERPOWERED_DESIGN`으로 실험 전에 반려한다.
+2일 가설은 통제된 `EVERY_2_TRADING_DAYS` 실행 정책으로 사상하며 자유 형식
+`EVERY_N`은 열지 않는다. 120일 미만 표본은 실행기와 판정기가 모두 10일 최소창을
+사용해 탐색용 부호 일관성·취약성 피드백을 보존한다. 다만 최종 승격의 DSR·bootstrap
+표본 기준은 낮추지 않으므로, 짧은 데이터에서 나온 후보는 유망해도 증거가 쌓일 때까지
+`INCONCLUSIVE/GATE_HOLD`에 머문다.
 
 `universe_key`를 통제 어휘로 묶는 이유는 형식주의가 아니다. LLM의 자유 서술은 같은 뜻을
 매번 다르게 쓰고("KRX 전체 시장" vs "KRX 시장 전 종목"), 그러면 같은 아이디어가 서로 다른
@@ -874,6 +932,8 @@ LangGraph와 Hermes가 모두 Orchestrator처럼 보일 수 있지만 계층이 
 ### 운영
 
 - Case 재시작 복구율과 중복 실행 0건
+- 실행 가능한 미사용 리드가 0이면 Planner를 보류하고 Scout를 먼저 완주시키는
+  producer-before-consumer 준수율과 재료 보충 후 첫 Planner까지의 지연
 - Branch Timeout과 부분 완료율
 - LLM Token·GPU 시간과 Case당 비용
 - 개선 Skill의 Held-out Delta와 Rollback 빈도
@@ -893,6 +953,18 @@ LangGraph와 Hermes가 모두 Orchestrator처럼 보일 수 있지만 계층이 
 | [Agentic Time Series Forecasting](https://arxiv.org/abs/2602.01776) | Forecast를 Perception, Planning, Action, Reflection, Memory Workflow로 재정의 | 전체 설계 원칙 채택 |
 | [FinCon](https://arxiv.org/abs/2407.06567) | Manager-Analyst 계층과 관련 역할에 제한한 위험 회고 | 조직 Feedback에 제한 채택 |
 | [MLAgentBench](https://arxiv.org/abs/2310.03302) | 자율 ML Agent의 장기 계획과 실험 신뢰성 한계 | 결정론적 Gate의 근거 |
+| [AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) | 생성-평가-진화 루프와 다양한 후보 집단 | AST quality-diversity 탐색 순서 채택 |
+| [AlphaAgent](https://arxiv.org/abs/2502.16789) | 알파 탐색을 역할 분리된 다중 에이전트 최적화로 구성 | 생성자·비평자·실행기 분리 참고 |
+| [FactorMiner](https://arxiv.org/abs/2602.14670) | 기존 요인의 조합·변형과 반복 평가 | 공개식 직접 복제보다 메커니즘 변형 우선 |
+| [AlphaForge](https://ojs.aaai.org/index.php/AAAI/article/view/33365) | 수식형 알파의 다양성·효율적 생성 | AST 표현과 중복 거리 설계 참고 |
+| [AlphaGen](https://doi.org/10.1145/3580305.3599831) | 수식 생성 공간을 강화학습으로 탐색 | 무제한 RL 전 결정론적 AST 공간의 비교 기준 |
+| [Order Flow Imbalance](https://arxiv.org/abs/1011.6402) | 호가 사건 기반 OFI와 단기 가격 충격 | 체결 대용 OFI와 진짜 호가 OFI의 의미 분리 |
+| [Multi-level OFI](https://arxiv.org/abs/1907.06230) | 복수 호가 레벨의 정보와 통합 OFI | L1/L10·깊이 기울기 AST 필드 확장 |
+| [Queue Imbalance](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2702117) | 최우선 호가 큐 불균형의 단기 예측력 | 큐 상태·조건부 지평 후보의 근거 |
+| [Cross-impact of OFI](https://arxiv.org/abs/2112.13213) | 개별·시장 OFI의 동기적 가격 영향 분리 | 초단기 시간 동기화와 시장 잔차화 근거 |
+| [High-Frequency Return Predictability](https://www.nber.org/papers/w30366) | 고빈도 예측력의 짧은 감쇠와 데이터 총합의 정보 손실 | 일봉·일중 평가면 분리 |
+| [vLLM Structured Outputs](https://docs.vllm.ai/en/latest/features/structured_outputs/) | JSON Schema 기반 제약 디코딩 | Worker typed artifact의 생성 단계 제약 |
+| [Ollama Structured Outputs](https://ollama.com/blog/structured-outputs) | Pydantic/JSON Schema 및 OpenAI 호환 형식 | 로컬 Hermes Gateway 계약 강제 |
 | [The Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551) | 다중 실험 선택 편향과 비정규 수익률 보정 | P1 검증 채택 |
 | [Backtest Overfitting 비교 연구](https://www.sciencedirect.com/science/article/pii/S0950705124011110) | Holdout, Walk-Forward, CSCV/CPCV 계열 비교 | P1 검증 설계 참고 |
 | [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/use-graph-api) | Branch, `Send` Map-Reduce와 상태 Graph | P0 구현 기반 |
@@ -917,6 +989,8 @@ Nexus 한국어 번역과 프로젝트식 설명은
    환류하고, 그 적재를 종결의 전제 조건으로 삼는다.
 8. Hermes의 자기 개선은 후보 생성까지만 자동화하고 검증된 Version만 활성화한다.
 9. 막는 것은 기계가 즉시, 여는 것은 사람이 서명한 뒤 — 승격의 마지막 서명은 사람이다.
+10. 실행 가능한 연구 재료가 비면 소비자(Planner)를 돌리지 않고 생산자(Scout)를 먼저
+    완주한다 — 안내 문구가 아니라 스케줄링 의존성으로 강제한다.
 
 이 구조가 완성되면 리서치본부는 종목 리포트를 쓰는 조직이 아니라 **시험할 가치가 있는
 가설을 공급하는 조직**, 퀀트/백테스트본부는 수익률이 높은 그래프를 고르는 조직이 아니라

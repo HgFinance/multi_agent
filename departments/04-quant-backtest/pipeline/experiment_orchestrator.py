@@ -991,10 +991,13 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         buy_and_hold_equity,
         load_dataset,
         register_and_run,
+        required_warmup_days,
         run_backtest,
     )
     from source_registry import load_project_env
     from walk_forward import (
+        SHORT_MIN_TEST_DAYS,
+        SHORT_SAMPLE_MAX_DAYS,
         WARMUP_TRADING_DAYS,
         fragility_summary,
         make_windows,
@@ -1089,19 +1092,14 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         #   창은 만들어져도 산출이 비어 `강건성을 재지 못했다` 로 끝났다
         #   (`667f0a45` 의 교훈이 그것이다).
         #
-        #   각 템플릿은 `min_history(params)` 로 자기 요구를 이미 선언하고 있고
-        #   자체점검(`min_history 정직`)까지 있다. 읽지 않을 이유가 없다.
-        #   상수는 **바닥**으로만 남긴다 - 선언값이 더 짧아도 최소는 지킨다.
-        warmup = WARMUP_TRADING_DAYS
-        _tpl = resolve(str(config.get("strategy") or ""))
-        if _tpl is not None:
-            try:
-                warmup = max(warmup, int(_tpl.min_history(dict(config))))
-            except Exception:  # noqa: BLE001 - 못 읽으면 바닥을 쓴다(지어내지 않는다)
-                pass
-        print(f"  웜업 {warmup}일 (전략 {config.get('strategy')} 선언 기준)", flush=True)
+        #   템플릿뿐 아니라 AST와 켜진 위험관리 창도 실제 이력을 요구한다.
+        #   이 계산은 러너의 단일 함수가 소유한다. 특히 짧은 미시구조 표본에는
+        #   가격전략용 30일 관례를 강제로 붙이지 않고 수식의 실제 요구량을 쓴다.
+        warmup = required_warmup_days(
+            config, legacy_floor=WARMUP_TRADING_DAYS)
+        print(f"  웜업 {warmup}일 (신호·AST·위험관리 선언 기준)", flush=True)
         windows = make_windows(market.dates, warmup,
-                               embargo_days=int(config.get("lookback_days") or 0))
+                               embargo_days=signal_horizon(config))
         # ▶ **창마다 바로 적재한다** (2026-08-14 실측)
         #   예전엔 창 21개를 전부 계산한 **뒤에** 한 번에 저장했다. 이 구간은
         #   백테스트가 끝난 뒤에도 13분을 더 도는데, 그 사이 워커가 재시작되면
@@ -1130,7 +1128,14 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                               json.dumps({"window": w.label, "chain": ORCH_VERSION}),
                               "krx-cost-v1"))
             conn.commit()
-        summary, flags, verdict = fragility_summary(wm)
+        # Short-sample windows are deliberately 10+ days.  Applying the legacy
+        # 40-day half-year filter to them discards every window and makes the
+        # adaptive construction self-contradictory.  This only enables the
+        # fragility diagnostic; DSR/bootstrap/release thresholds stay intact.
+        _judge_days = (SHORT_MIN_TEST_DAYS
+                       if len(market.dates) < SHORT_SAMPLE_MAX_DAYS else None)
+        summary, flags, verdict = fragility_summary(
+            wm, **({"min_test_days": _judge_days} if _judge_days else {}))
         # ▶ **왜 취약한지를 같이 잰다** (2026-08-14). 판정(verdict)은 위에서
         #   이미 끝났고 여기서 바뀌지 않는다 - 합격선을 건드리지 않고 이유만
         #   원장에 남긴다. 실측으로 전체 판정의 87%가 fragility 인데, 그중
@@ -1531,12 +1536,12 @@ def _check_windows_are_persisted_incrementally():
     assert "wm = [(w.label, run_window(" not in body, \
         "창을 전부 계산한 뒤 저장하는 형태로 돌아갔다 - 중단되면 통째로 잃는다"
     head = body.index("for w in windows:")
-    tail = body.index("fragility_summary(wm)")
+    tail = body.index("fragility_summary(")
     assert head < tail, "요약이 창 루프보다 먼저 온다"
     assert "conn.commit()" in body[head:tail], \
         "창 루프 안에서 커밋하지 않는다 - 중단되면 진행분이 사라진다"
     # 요약은 루프 **밖**에서 한 번만 - 창마다 요약을 쓰면 부분 판정이 남는다
-    assert body.count("fragility_summary(wm)") == 1, "요약을 여러 번 쓴다"
+    assert body.count("fragility_summary(") == 1, "요약을 여러 번 쓴다"
 
 
 def _check_no_trade_is_not_a_rejection():
@@ -1601,6 +1606,14 @@ def _check_fragility_summary_is_recordable():
     assert empty_verdict == "INSUFFICIENT", empty_verdict
     assert empty_flags == ["NO_WINDOWS"], empty_flags
     assert isinstance(empty_stats.get("n_windows"), int), empty_stats
+    # 짧은 미시구조 창은 10일 자로 만들었으므로 같은 자로 판정한다. 최종
+    # 승격의 DSR/부트스트랩 관문을 낮추는 것이 아니라 탐색 피드백을 보존한다.
+    short = [(f"W{i:02d}", {"total_return": 0.01, "sharpe_rf0": 0.2,
+                              "max_drawdown": -0.05, "test_days": 10})
+             for i in range(1, 5)]
+    short_stats, _, short_verdict = fragility_summary(short, min_test_days=10)
+    assert short_stats["n_windows"] == 4 and short_verdict != "INSUFFICIENT", \
+        (short_stats, short_verdict)
 
 
 def _check_metrics_are_recorded_without_changing_verdict():
@@ -1822,4 +1835,4 @@ if __name__ == "__main__":
     print("  기각에도 관문 거리 적재   OK")
     _check_self_falsification_is_wired()
     _check_signal_ic_is_recorded()
-    print("오케스트레이터 8개 영역 통과. 실행은 --run [--hypothesis <id>]")
+    print("오케스트레이터 15개 영역 통과. 실행은 --run [--hypothesis <id>]")

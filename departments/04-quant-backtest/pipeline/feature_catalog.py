@@ -71,6 +71,10 @@ MICRO_FEATURES = (
      "최우선호가와 깊은 호가의 방향 차이는 호가장 공간 구조의 취약성을 나타낸다"),
     ("size_weighted_ofi", +1,
      "큰 체결이 주도한 방향은 작은 체결 수만 많은 흐름보다 정보성이 높다는 가설"),
+    ("book_depth_notional_l1", 0,
+     "최우선호가의 가격×잔량 합계는 즉시 주문충격을 흡수할 유동성 수용력이다"),
+    ("book_depth_notional_l10", 0,
+     "10단계 가격×잔량 합계는 표면 아래까지 포함한 전체 호가 수용력이다"),
     ("spread_bps", -1,
      "스프레드가 넓으면 거래비용이 크고, 비용을 넘는 초과수익이 남기 어렵다"),
     ("trade_intensity", 0,
@@ -337,7 +341,7 @@ def _pit_of(conn, cur, days) -> str:
 
 
 def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES,
-            feature_set_version: str = "ms-daily-v4") -> Catalog:
+            feature_set_version: str = "ms-daily-v5") -> Catalog:
     """원장에 대고 피처를 하나씩 검정한다."""
     cat = Catalog(horizon=horizon, feature_set_version=feature_set_version)
     cur = conn.cursor()
@@ -500,7 +504,7 @@ def _cli(argv) -> int:
 
     h = int(argv[argv.index("--horizon") + 1]) if "--horizon" in argv else 5
     fsv = (argv[argv.index("--feature-set-version") + 1]
-           if "--feature-set-version" in argv else "ms-daily-v4")
+           if "--feature-set-version" in argv else "ms-daily-v5")
     conn = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"],
                             connect_timeout=30)
     try:

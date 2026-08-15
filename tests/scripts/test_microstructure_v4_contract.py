@@ -162,7 +162,7 @@ def test_partial_universe_source_loss_is_not_hidden_as_row_warns() -> None:
 
 def test_feature_catalog_never_mixes_feature_set_versions() -> None:
     assert "feature_set_version = %s" in feature_catalog._SQL_FEATURE
-    assert "ms-daily-v4" in feature_catalog.measure.__kwdefaults__.values()
+    assert "ms-daily-v5" in feature_catalog.measure.__kwdefaults__.values()
     summary = feature_catalog.Catalog(
         horizon=2, feature_set_version="ms-daily-v4",
         features=[feature_catalog.FeatureQuality("x", 2)],
