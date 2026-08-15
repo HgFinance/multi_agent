@@ -414,7 +414,11 @@ def bind(hyp: dict, base_config: dict) -> Binding:
     #   `signal_window_days` 를 주면 **그것이 형성창**이고 `horizon_days` 는
     #   보유·리밸런스 전용이 된다. 안 주면 예전 그대로 `horizon_days` 가 둘 다
     #   겸한다 - 기존 실험의 config(=input_hash)를 흔들지 않기 위해서다.
-    horizon = edge.get("horizon_days") or hyp.get("holding_horizon")
+    # Invalid false-y values (for example 0) must reach validation instead of
+    # silently falling through to a different field/default.
+    horizon = (edge.get("horizon_days")
+               if edge.get("horizon_days") is not None
+               else hyp.get("holding_horizon"))
     signal_window = edge.get("signal_window_days")
     if signal_window is not None:
         _take("signal_window_days", signal_window, "lookback_days")
@@ -422,7 +426,14 @@ def bind(hyp: dict, base_config: dict) -> Binding:
         # 한도는 예전과 같은 자리(lookback_days) 기준으로 본다 - 여기서 자리를
         # holding_horizon(1~120)으로 바꾸면 6개월 보유 같은 정상 사양이 갑자기
         # 거부된다(2026-08-10 실측과 같은 사고).
+        before = len(b.rejected)
         _take("horizon_days", horizon, "lookback_days", write=False)
+        # Formation and forecast horizon are separate axes.  Keeping only the
+        # strategy-name suffix is not enough: downstream signal IC reads the
+        # structured config and otherwise falls back to lookback_days.
+        if horizon is not None and len(b.rejected) == before:
+            cfg["horizon_days"] = int(horizon)
+            b.from_hypothesis.append(f"horizon_days={int(horizon)}")
     else:
         _take("holding_horizon", horizon, "lookback_days")
     _take("top_n", edge.get("top_n") or hyp.get("top_n"), "top_n")
@@ -1013,16 +1024,19 @@ def _check_formation_and_holding_windows_are_separate():
 
     # 형성창은 signal_window_days 가, 보유 주기는 horizon_days 가 정한다
     assert b.config["lookback_days"] == 60, b.config
+    assert b.config["horizon_days"] == 20, b.config
     assert b.config["rebalance"] == "MONTH_FIRST_TRADING_DAY", b.config
 
     # 한쪽을 밀어도 다른 쪽이 안 따라온다 - 이게 "분리" 의 정의다
     h5 = bind({"expected_edge": dict(edge, horizon_days=5)}, _BASE)
     assert h5.config["lookback_days"] == 60, "보유창이 형성창을 끌고 갔다"
+    assert h5.config["horizon_days"] == 5, h5.config
     assert h5.config["rebalance"] == "EVERY_5_TRADING_DAYS", h5.config
     assert h5.config["strategy"] != b.config["strategy"], \
         "보유 주기만 다른 두 실험이 로그에서 같은 이름을 받는다"
     s20 = bind({"expected_edge": dict(edge, signal_window_days=20)}, _BASE)
     assert s20.config["lookback_days"] == 20, s20.config
+    assert s20.config["horizon_days"] == 20, s20.config
     assert s20.config["rebalance"] == b.config["rebalance"], \
         "형성창이 보유 주기를 끌고 갔다"
 
@@ -1042,6 +1056,10 @@ def _check_formation_and_holding_windows_are_separate():
     bad2 = bind({"expected_edge": {"type": "momentum", "signal_window_days": 60,
                                    "horizon_days": "닷새"}}, _BASE)
     assert not bad2.ok and "정수로 읽을 수 없다" in bad2.rejected[0], bad2.rejected
+
+    zero = bind({"expected_edge": {"type": "momentum", "signal_window_days": 60,
+                                    "horizon_days": 0}}, _BASE)
+    assert not zero.ok, "0일 지평이 기본값으로 조용히 바뀌었다"
 
     # 창 분할 사양은 받되 **조용히 무시하지 않는다**
     assert any("walk_forward_window_days" in x for x in b.ignored), b.ignored

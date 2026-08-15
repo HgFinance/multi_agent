@@ -134,6 +134,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 실행면의 단위 가정과 어긋나면 백테스트 전에 중단할 수 있다.
                 "20260814110000_dataset_manifest_units.sql",
                 "20260815100000_methodology_lead_ast_contract.sql",
+                # 판정 환류가 가설에 남은 proposal 계보를 자동 상속하고,
+                # 과거 빈 행도 같은 결정론 조인으로 복구한다.
+                "20260815110000_outcome_proposal_lineage.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

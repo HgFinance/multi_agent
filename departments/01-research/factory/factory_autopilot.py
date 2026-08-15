@@ -205,13 +205,22 @@ def _ast_scout_contract() -> str:
         f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
         f"  Supported operators ({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
         f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
+        "  DATA REALITY: every supported quote/trade field above is already available as a",
+        "  point-in-time Korean-equity DAILY AGGREGATE. AST windows therefore mean trading",
+        "  days, not seconds or order-book events. The current microstructure history is short.",
+        "  AST_READY needs a cited mechanism that maps to those local fields; the source does",
+        "  NOT need to ship a reusable dataset, Korean observations, or its own OOS backtest.",
+        "  A foreign venue is an external-validity risk to record, not MISSING_DATA, when the",
+        "  mechanism and observable map exactly to a supported local field.",
+        "  Use DATA_BLOCKED only when the test truly needs unavailable granularity/fields",
+        "  (for example queue position, cancellations, order lifetime, or event-time seconds).",
         "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
         "  mechanism/TESTABLE_WITH must explain those fields economically.",
         "  MICROSTRUCTURE IS PRIMARY: every AST_READY expression must use at least one",
         f"  quote/trade field: {', '.join(sorted(MICRO_FIELDS))}",
         "  close/notional/returns may only accompany microstructure as execution, benchmark,",
         "  or regime auxiliaries. Short microstructure history is accepted and must not be",
-        "  replaced with a daily proxy; report the resulting uncertainty honestly.",
+        "  replaced with a price-only daily proxy; report the uncertainty honestly.",
         "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
     ])
 
@@ -934,17 +943,35 @@ def _lead_health(conn) -> str:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                select count(*),
+                select count(*) as total,
                        count(*) filter (
                          where not exists (
                            select 1 from research.experiment_proposals p
-                            where methodology_leads.lead_id = any(p.lead_ids))),
-                       extract(epoch from (now() - max(created_at)))/86400.0
+                            where methodology_leads.lead_id = any(p.lead_ids))
+                       ) as raw_unused,
+                       count(*) filter (
+                         where status = 'COMPLETE'
+                           and testability = 'RULE_EXPRESSIBLE'
+                           and ast_contract->>'ast_readiness' = 'AST_READY'
+                           and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                           and not exists (
+                             select 1 from research.experiment_proposals p
+                              where methodology_leads.lead_id = any(p.lead_ids))
+                       ) as usable_unused,
+                       extract(epoch from (
+                         now() - max(created_at) filter (
+                           where status = 'COMPLETE'
+                             and testability = 'RULE_EXPRESSIBLE'
+                             and ast_contract->>'ast_readiness' = 'AST_READY'
+                             and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                         )
+                       ))/86400.0 as newest_usable_age_days
                   from research.methodology_leads""")
-            total, unused, age = cur.fetchone()
+            total, raw_unused, unused, age = cur.fetchone()
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다
         return ""
-    total, unused = int(total or 0), int(unused or 0)
+    total = int(total or 0)
+    raw_unused, unused = int(raw_unused or 0), int(unused or 0)
     age = float(age or 0)
     if unused >= LEADS_LOW and age < LEADS_STALE_DAYS:
         return ""                      # 재료가 넉넉하면 말하지 않는다
@@ -957,7 +984,7 @@ def _lead_health(conn) -> str:
     return "\n".join([
         "",
         f"[재료 부족 - **기획 전에 스카우트가 먼저다**] 리드 {total}건 중 "
-        f"안 쓴 것 {unused}건",
+        f"원시 미사용 {raw_unused}건 · 실행가능 미사용 {unused}건",
         "  " + " · ".join(why),
         "  ▶ 이 상태로 기획안을 내면 **이미 기각된 계열을 다시 내게 된다.**",
         "    실측(2026-08-12): 그렇게 낸 기획안 2건이 Gate 0 에서 "
@@ -1679,8 +1706,16 @@ DELIVERY_RULES = (
     "자리에 전문 2,434자와 요약 123자가 번갈아 와서 본문을 잃은 실측이 있다.\n"
     "- 호출할 때 `planner_run` 에 **이 카드의 ID**(t_ 로 시작)를 그대로 넣어라. "
     "그래야 납품이 이 카드 몫으로 대조된다.\n"
+    "- 제출 전에 `run_research_workers(proposal_draft=<기획자 초안>)` 를 호출하고 "
+    "`get_worker_job` 으로 COMPLETED 를 확인하라. 결과의 "
+    "`competing-explanation-worker` 요약을 SKEPTIC 블록으로 옮기고, 반환된 "
+    "**실제 job_id를 바꾸지 말고 `skeptic_run` 에 넣어라.** FAILED·DEGRADED면 "
+    "제출하지 말고 차단 사유를 남겨라. 자기 서명(`#self`)이나 임의 실행명은 "
+    "접수 경계에서 거부된다.\n"
     "- 반려를 받으면 사유가 도구 결과로 즉시 돌아온다 - 그 사유에 답해 **같은 "
     "카드 안에서** 다시 제출하라.\n"
+    "- 작업 완료 명령을 찾으려고 `/opt/data` 전체를 재귀 검색하지 마라. 도구 "
+    "납품 뒤 최종 응답을 반환하면 작업 실행기가 카드를 종결한다.\n"
     "- 제출하지 못했으면 왜인지를 metadata 에 구조화해 남겨라 - **기권도 1급 "
     "산출물이다.** 조용한 미제출이 제일 나쁘다.\n")
 
@@ -1697,8 +1732,8 @@ def _mcp_deliveries(planner_id: str, conn=None) -> int:
       텍스트에서 원장으로 옮기면 그 채널의 불안정이 무의미해진다.**
 
     대조 두 겹: ① `case_id = 'card-<카드ID>'` 정확 대조(MCP 가 찍는다)
-              ② 카드 실행 시간창 안에 생긴 기획안(에이전트가 planner_run 을
-                 다르게 넣은 경우의 안전망)
+              ② `card-<카드ID>-...` 결정론적 레거시 접두 대조. 시간창은
+                 동시 카드의 인과관계를 증명하지 못하므로 사용하지 않는다.
 
     못 재면 0 을 돌려준다. 미측정!=0 원칙의 예외가 아니다 - 이 함수의 실패는
     **멱등한 텍스트 폴백으로 떨어질 뿐**이고(proposal_id 가 리드·엣지·유니버스
@@ -1708,24 +1743,16 @@ def _mcp_deliveries(planner_id: str, conn=None) -> int:
     try:
         if own:
             conn = _conn()
+        case_id = f"card-{planner_id}"
         with conn.cursor() as cur:
-            cur.execute("select count(*) from research.experiment_proposals"
-                        " where case_id = %s", (f"card-{planner_id}",))
-            exact = int(cur.fetchone()[0] or 0)
-        if exact:
-            return exact
-        rows = _board_rows(
-            "select min(started_at), max(ended_at) from task_runs"
-            " where task_id=? and status='done'", (planner_id,))
-        if not rows or not rows[0] or not rows[0][0]:
-            return 0
-        t0 = int(rows[0][0])
-        t1 = int(rows[0][1] or rows[0][0])
-        with conn.cursor() as cur:
+            # New submissions are exact.  The prefix is a deterministic legacy
+            # bridge for agents that appended a planner label.  Never use a time
+            # window: concurrent cards can publish in the same minute and
+            # temporal proximity is not causal provenance.
             cur.execute(
                 "select count(*) from research.experiment_proposals"
-                " where created_at between to_timestamp(%s) and to_timestamp(%s)",
-                (t0 - 60, t1 + 180))
+                " where case_id = %s or case_id like %s",
+                (case_id, case_id + "-%"))
             return int(cur.fetchone()[0] or 0)
     except Exception as exc:  # noqa: BLE001
         print(f"  (납품 대조 실패 - 텍스트 폴백으로 진행: "
@@ -2347,14 +2374,23 @@ def cycle(*, dry_run: bool = False) -> int:
                       "호출**로만 납품한다 - 카드 텍스트는 납품이 아니다. "
                       "렌즈별 수집 수와 마른 렌즈를 요약에 남겨라 - 빈 것도 "
                       "사실이다.\n"
-                      "[질 기준] STATED_MECHANISM 없는 블록은 접수가 반려한다. "
-                      "READINESS별 필수 칸을 채우고 AST_READY의 TESTABLE_WITH에는 "
-                      "정확한 필드명·연산·창을 적어라. DATA_BLOCKED나 "
-                      "SEMANTIC_MISMATCH를 AST_READY로 꾸미지 마라. "
-                      "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
-                      "CROSSDOMAIN 우물을 우선하라."),
+                  "[질 기준] STATED_MECHANISM 없는 블록은 접수가 반려한다. "
+                  "READINESS별 필수 칸을 채우고 AST_READY의 TESTABLE_WITH에는 "
+                  "정확한 필드명·연산·창을 적어라. DATA_BLOCKED나 "
+                  "SEMANTIC_MISMATCH를 AST_READY로 꾸미지 마라. "
+                  "소스 자체에 데이터셋·한국 표본·OOS 결과가 없다는 이유만으로 "
+                  "DATA_BLOCKED라 하지 마라 - 위 지원 필드는 우리 PIT 일별 집계에 "
+                  "이미 있다. `daily cross-sectional order flow imbalance`, "
+                  "`daily liquidity pressure next-day returns`처럼 **일별 집계로 "
+                  "옮겨도 같은 메커니즘인 문헌**을 먼저 찾아라. 반대로 초·틱·큐 "
+                  "위치·취소 수명이 핵심이면 정직하게 차단하라. "
+                  "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
+                  "CROSSDOMAIN 우물을 우선하라."),
                 assignee="research-department",
-                key=f"factory-scout-{_now:%Y%m%d}T{_now.hour // 6}",
+                # Refill at most once per UTC hour while the executable queue is
+                # dry.  The former six-hour bucket let several planner cycles
+                # consume the same exhausted leads before scouting could run.
+                key=f"factory-scout-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
@@ -2616,6 +2652,10 @@ def _check_delivery_is_the_tool_call_not_text():
     # 카드가 규약을 싣는다 - 에이전트가 어디에 뭘 넣어야 하는지
     assert "factory_submit_proposal" in DELIVERY_RULES
     assert "planner_run" in DELIVERY_RULES and "카드의 ID" in DELIVERY_RULES
+    assert "run_research_workers" in DELIVERY_RULES
+    assert "get_worker_job" in DELIVERY_RULES and "실제 job_id" in DELIVERY_RULES
+    assert "FAILED·DEGRADED" in DELIVERY_RULES and "#self" in DELIVERY_RULES
+    assert "/opt/data" in DELIVERY_RULES
     assert "기권도 1급" in DELIVERY_RULES
 
     # **모순 신호가 없어야 한다** (2026-08-13 실측 - 내가 만들 뻔했다).
@@ -2634,13 +2674,14 @@ def _check_delivery_is_the_tool_call_not_text():
         "옛 문구(카드에 KEY:value 로 내라)가 남아 납품 규약과 모순된다"
 
     class _Cur:
-        def __init__(self, exact, window):
-            self._e, self._w = exact, window
+        def __init__(self, exact):
+            self._e = exact
 
         def execute(self, sql, params=()):
-            self._last = "case_id" in sql
+            assert "case_id = %s or case_id like %s" in sql
+            assert params == ("card-t_x", "card-t_x-%")
         def fetchone(self):
-            return (self._e,) if self._last else (self._w,)
+            return (self._e,)
         def __enter__(self):  return self
         def __exit__(self, *a):  return False
 
@@ -2648,24 +2689,16 @@ def _check_delivery_is_the_tool_call_not_text():
         def __init__(self, cur):  self._c = cur
         def cursor(self):  return self._c
 
-    saved = globals()["_board_rows"]
-    try:
-        globals()["_board_rows"] = lambda sql, params=(): [(1000, 1100)]
-        # ① case_id 각인이 있으면 그것으로 끝 - 시간창은 안 본다
-        assert _mcp_deliveries("t_x", _Conn(_Cur(2, 99))) == 2
-        # ② 각인이 없으면 실행 시간창으로 안전망
-        assert _mcp_deliveries("t_x", _Conn(_Cur(0, 1))) == 1
-        # ③ 실행 기록이 없으면 0 - 시간창을 지어내지 않는다
-        globals()["_board_rows"] = lambda sql, params=(): [(None, None)]
-        assert _mcp_deliveries("t_x", _Conn(_Cur(0, 7))) == 0
+    # Exact and deterministic legacy-prefix lineage are accepted.  A temporal
+    # window is deliberately not consulted.
+    assert _mcp_deliveries("t_x", _Conn(_Cur(2))) == 2
+    assert _mcp_deliveries("t_x", _Conn(_Cur(0))) == 0
 
-        # ④ 못 재면 0 = 멱등한 텍스트 폴백으로 (이중 발행은 proposal_id 해시가 막는다)
-        class _Boom:
-            def cursor(self):
-                raise RuntimeError("원장 연결 실패")
-        assert _mcp_deliveries("t_x", _Boom()) == 0
-    finally:
-        globals()["_board_rows"] = saved
+    # 못 재면 0 = 멱등한 텍스트 폴백으로 (이중 발행은 proposal_id 해시가 막는다)
+    class _Boom:
+        def cursor(self):
+            raise RuntimeError("원장 연결 실패")
+    assert _mcp_deliveries("t_x", _Boom()) == 0
     print("  납품 = 도구 호출          OK")
 
 
@@ -3341,6 +3374,9 @@ def _check_unused_leads_come_first():
     assert "AST_READY" in contract and "CANDIDATE_SIGNAL_EXPR" in contract
     assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
     assert "MICROSTRUCTURE IS PRIMARY" in contract
+    assert "DAILY AGGREGATE" in contract and "source does" in contract
+    assert "NOT need to ship a reusable dataset" in contract
+    assert "external-validity risk" in contract and "queue position" in contract
     assert "must not be" in contract and "daily proxy" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
@@ -3375,19 +3411,25 @@ def _check_lead_health_is_surfaced():
                 def fetchone(self_): return row
             return _C()
 
-    # 실측 상태: 리드 12건 · 안 쓴 것 4건 · 최신 1.2일 전
+    # 실측 상태: 리드 12건 · 원시/실행가능 미사용 4건 · 최신 1.2일 전
     #   → 안 쓴 것이 기준(4) 이상이고 1.2일이면 아직 조용하다
-    assert _lead_health(_Rows((12, 4, 1.2))) == ""
+    assert _lead_health(_Rows((12, 4, 4, 1.2))) == ""
+
+    # PARTIAL 리드가 남아 있어도 실행가능한 COMPLETE/AST_READY 리드가 0이면
+    # 스카우트를 불러야 한다. 이것이 2026-08-15 운영 false-negative였다.
+    partial_only = _lead_health(_Rows((55, 7, 0, 0.1)))
+    assert "원시 미사용 7건" in partial_only, partial_only
+    assert "실행가능 미사용 0건" in partial_only, partial_only
 
     # 안 쓴 것이 줄면 말한다
-    low = _lead_health(_Rows((12, 1, 0.5)))
+    low = _lead_health(_Rows((12, 1, 1, 0.5)))
     assert "재료 부족" in low and "안 쓴 리드가 1건" in low, low
     assert "스카우트가 먼저" in low
     # **어떻게 훑는지**까지 알려줘야 한다 - 도구를 모르면 못 한다
     assert "agent-reach" in low and "r.jina.ai" in low, low
 
     # 오래되면 말한다
-    stale = _lead_health(_Rows((12, 9, 3.4)))
+    stale = _lead_health(_Rows((12, 9, 9, 3.4)))
     assert "3.4일 전" in stale, stale
 
     # 못 세면 안 적는다

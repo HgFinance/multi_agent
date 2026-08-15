@@ -288,6 +288,20 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     except ImportError:                 # 검사 불능 != 접수 차단. 다만 조용히
         r.warn("config_binding 을 읽지 못해 파라미터 범위를 접수에서 못 봤다")
 
+    # ①-d-1 숫자 범위만으로는 실행 가능성을 보장하지 못한다. 선택형 어휘와
+    # 손잡이 조합까지 실행면 자체에 묻는다. 2026-08-15 실측에서
+    # rebalance=EVERY_2_TRADING_DAYS가 Gate 0를 통과해 가설로 승격된 뒤 발주
+    # 관문에서 처음 거부됐다. 같은 bind()를 접수 시점에 부르면 "등록됐지만
+    # 영원히 실행되지 않는 가설"을 만들지 않는다.
+    try:
+        from config_binding import rejection_reasons as _binding_rejections
+
+        _edge, _ = expected_edge_for(proposal)
+        for _why in _binding_rejections({"expected_edge": _edge}):
+            r.reject("EXECUTION_BINDING_REJECTED", _why)
+    except ImportError:
+        r.warn("config_binding 을 읽지 못해 실행면 어휘·조합 검사를 못 했다")
+
     # ①-c2 **알파 수식(AST)은 접수에서 검증한다** (2026-08-14)
     #   수식은 실행면이 신호로 삼는 것이라, 성립하지 않으면 그 기획안은
     #   실험을 만들어 놓고 중간에 죽는다. 접수는 실행 가능성의 약속이므로
@@ -625,7 +639,11 @@ _SQL_INSERT_OUTCOME = """
        regime_concerns, lesson_codes, notes, root_cause, corrective_action)
     select %(outcome_id)s, %(experiment_id)s, %(hypothesis_id)s,
            %(trial_family_id)s, %(trial_number)s, %(decision)s, %(decided_at)s,
-           %(proposal_id)s, %(failed_criteria)s, %(oos_summary)s,
+           coalesce(nullif(%(proposal_id)s, ''),
+                    (select h.proposal_id
+                       from quant.hypotheses h
+                      where h.hypothesis_id::text = %(hypothesis_id)s), ''),
+           %(failed_criteria)s, %(oos_summary)s,
            %(regime_concerns)s, %(lesson_codes)s, %(notes)s,
            %(root_cause)s, %(corrective_action)s
      where not exists (
@@ -1476,6 +1494,16 @@ def _check_out_of_range_param_rejected_at_intake():
     g2 = gate0(p2)
     assert g2.ok and "PARAM_OUT_OF_RANGE" not in g2.codes, g2.as_dict()
 
+    # 선택형 값도 실행면과 같은 어휘로 접수에서 막힌다. 숫자 범위만 보면
+    # EVERY_2_TRADING_DAYS 같은 가설이 승격된 뒤 영구 PROPOSED로 남는다.
+    p3 = _prop()
+    p3["suggested_params"] = {
+        "horizon_days": 2, "top_n": 100,
+        "rebalance": "EVERY_2_TRADING_DAYS"}
+    g3 = gate0(p3)
+    assert "EXECUTION_BINDING_REJECTED" in g3.codes, g3.as_dict()
+    assert any("EVERY_2_TRADING_DAYS" in x for x in g3.reasons), g3.reasons
+
 
 def _check_outcome_requires_reason():
     """사유 없는 기각은 환류가 성립하지 않는다."""
@@ -1519,6 +1547,8 @@ def _check_outcome_id_is_idempotent():
     assert "not exists" in sql and "o.experiment_id = %(experiment_id)s" in sql, sql
     assert "insert into research.experiment_outcomes" in sql and " select " in sql, \
         "values 절이면 실험 단위 가드가 안 걸린다"
+    assert "select h.proposal_id" in sql and "nullif(%(proposal_id)s, '')" in sql, \
+        "환류가 가설의 proposal 계보를 자동으로 이어받지 않는다"
 
 
 def _check_finalize_is_atomic():

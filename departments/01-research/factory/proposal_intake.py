@@ -318,23 +318,6 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             out.rejected.append(Rejected(title, f"필수 항목 없음: {','.join(missing)}"))
             continue
         s = _pair_skeptic(title, skeptics, _pl_valid, _sk_blocks)
-        if s is None and (p.get("COMPETING_EXPLANATION") or "").strip():
-            # ▶ **자기서명 경로** (2026-08-11, 재일 결정).
-            #   독립 회의론자를 별도 실행으로 두면 주기가 두 배가 되고, 그 카드가
-            #   막히면 공장이 통째로 선다(실측). 그래서 기획자가 경쟁 설명을 직접
-            #   쓰는 경로를 연다 - 사전등록 시점에 반대 가설을 **적어두는 것**이
-            #   이 필드의 본래 목적이고, 그건 자기서명으로도 지켜진다.
-            #
-            #   **잃는 것은 숨기지 않는다.** 독립 서명이 막던 것은 사후
-            #   스토리텔링(결과를 보고 설명을 갖다 붙이기)이다. 자기서명은 그걸
-            #   못 막으므로 `skeptic_sign` 에 `#self` 를 박아 **원장에서 구분되게**
-            #   한다. 나중에 승격을 판정할 때 이 표식이 있는 기획안은 독립 검토를
-            #   거친 것과 같은 무게로 읽으면 안 된다.
-            s = {"TITLE": title,
-                 "COMPETING_EXPLANATION": p.get("COMPETING_EXPLANATION", ""),
-                 "COMPETING_CODES": p.get("COMPETING_CODES", ""),
-                 "VERDICT": SKEPTIC_PASS}
-            skeptic_run = f"{planner_run}#self"
         if s is None:
             # ▶ **왜 짝이 안 맞았는지 말해 준다** (2026-08-13 실측)
             #   에이전트가 MCP 로 12번 넘게 제출했고 매번 이 사유로 거부됐다.
@@ -350,8 +333,7 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
                 if not seen else
                 (f"회의론자 블록은 {len(seen)}개 왔는데 이 기획안과 **제목이 "
                  f"맞지 않는다.** 기획자 제목={title!r} · 회의론자 제목={seen}. "
-                 f"제목을 똑같이 맞추거나, 기획자 블록에 "
-                 f"COMPETING_EXPLANATION 을 직접 적어라(자기서명 경로)")))
+                 f"제목을 똑같이 맞추고 독립 worker 실행 ID를 제출하라")))
             continue
         # 이 기획안 **자기 계열**의 이력. 못 읽으면 조용히 0 으로 넘기지 않는다 -
         # 미측정과 "이력 없음" 을 섞는 순간 계약이 무력해진다(그게 이 사고였다).
@@ -642,10 +624,8 @@ def _selfcheck() -> int:
     check("반대 가설 없으면 반려",
           any("반대 가설" in x.reason for x in r4.rejected))
 
-    # ▶ 자기서명 경로 (2026-08-11). 회의론자 카드를 없앤 대신 기획자가
-    #   COMPETING_EXPLANATION 을 직접 쓰면 접수한다. **다만 서명에 `#self` 가
-    #   박혀 원장에서 독립 검토와 구분된다** - 승격 판정 때 같은 무게로 읽으면
-    #   안 되므로, 표식이 사라지면 이 점검이 죽는다.
+    # 자기서명은 독립 검토가 아니다. 기획자가 경쟁 설명을 직접 썼더라도
+    # 별도 회의론자 블록과 실행 ID가 없으면 접수하지 않는다.
     #   `_PLANNER` 는 블록이 둘이라(뒤엣것은 일부러 불완전) 끝에 덧붙이면 그
     #   불완전한 블록에 들어간다 - 첫 블록만 잘라 쓴다.
     _first = planner.split("TITLE:")[1]
@@ -654,9 +634,9 @@ def _selfcheck() -> int:
                      " 보상일 수 있다\nCOMPETING_CODES: DATA_MINING\n")
     r4b = intake(self_signed, "", case_id="c", planner_run="p", skeptic_run="s",
                  leads=leads)
-    check("자기서명 접수됨", bool(r4b.proposals))
-    check("자기서명 표식 남음",
-          bool(r4b.proposals) and r4b.proposals[0][0].skeptic_sign.endswith("#self"))
+    check("자기서명 접수 차단", not r4b.proposals)
+    check("독립 worker 요구를 설명",
+          any("독립 worker" in x.reason for x in r4b.rejected))
 
     # 근거 리드가 DB 에 없으면 게이트가 막는다
     r5 = intake(planner, _SKEPTIC, case_id="c", planner_run="p",
