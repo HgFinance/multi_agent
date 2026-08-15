@@ -163,6 +163,94 @@ def selected_primary_profiles_from_body(body: str) -> tuple[str, ...]:
                 break
     return tuple(selected)
 
+
+def selected_primary_profiles_from_task(
+    task: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Resolve the planner's primary set from one root task projection.
+
+    New producers must persist the selection in the root body (or structured
+    root metadata).  Comments are a compatibility fallback for the direct
+    Hermes producer that existed before the machine-readable field was added.
+    The fallback is deliberately root-local; it never searches other tasks or
+    infers a department from recency.
+    """
+
+    if not isinstance(task, Mapping):
+        return ()
+
+    body = str(task.get("body") or "")
+
+    # Prefer the new machine-readable root field. The older direct-Hermes
+    # producer wrote a prose ``Dynamic departments selected: ...`` sentence;
+    # that sentence must not override a precise root comment or run metadata.
+    for line in body.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().casefold() in {
+            PRIMARY_SELECTION_FIELD,
+            "selected_departments",
+        }:
+            explicit_selection = _selection_values(value)
+            if explicit_selection:
+                return explicit_selection
+
+    def from_metadata(value: Any) -> tuple[str, ...]:
+        if isinstance(value, Mapping):
+            for key in (
+                PRIMARY_SELECTION_FIELD,
+                "selected_departments",
+                "selected_primary",
+            ):
+                if key in value:
+                    parsed = _selection_values(value[key])
+                    if parsed:
+                        return parsed
+            for key in (
+                "metadata",
+                "workflow_metadata",
+                "run_metadata",
+                "task_run_metadata",
+                "task_run",
+            ):
+                if key in value:
+                    parsed = from_metadata(value[key])
+                    if parsed:
+                        return parsed
+            return ()
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for item in value:
+                parsed = from_metadata(item)
+                if parsed:
+                    return parsed
+        return ()
+
+    metadata_selection = from_metadata(task.get("metadata"))
+    if metadata_selection:
+        return metadata_selection
+    for key in ("task_run_metadata", "run_metadata", "task_run", "runs"):
+        metadata_selection = from_metadata(task.get(key))
+        if metadata_selection:
+            return metadata_selection
+
+    # Legacy direct-Discord producer: selected_primary_profiles was written
+    # as a root comment. Read only comments attached to this root. This is
+    # intentionally before the old prose fallback below.
+    comments = task.get("comments")
+    if isinstance(comments, Sequence) and not isinstance(comments, (str, bytes)):
+        for comment in comments:
+            comment_body = (
+                comment.get("body")
+                if isinstance(comment, Mapping)
+                else comment
+            )
+            parsed = selected_primary_profiles_from_body(str(comment_body or ""))
+            if parsed:
+                return parsed
+
+    # Compatibility only for roots whose producer persisted the selection
+    # solely in the old prose sentence.
+    return selected_primary_profiles_from_body(body)
+
 # Mandate 스냅샷 블록. root body에 **한 번만** 박히고, 부서는 이 body를
 # `kanban show <root_task_id>`로 직접 읽는다.
 #
@@ -358,9 +446,19 @@ def infer_workflow_mode(query: str) -> str:
 
 def workflow_mode_from_body(body: str) -> str:
     """Read the explicit workflow mode, preserving the legacy gate."""
-    raw = read_marker(body, "workflow_mode")
+    text = str(body or "")
+    raw = read_marker(text, "workflow_mode")
     if not raw:
-        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in str(body or "") else "analysis"
+        # Direct Discord producers may predate ``workflow_mode=`` while still
+        # declaring the request class.  An explicit non-binding/advisory
+        # request must not fall into the legacy binding fallback merely
+        # because it carries the workflow scope marker.
+        request_class = re.search(r"(?mi)^request_class=(.+?)\s*$", text)
+        if request_class:
+            request_class_text = request_class.group(1).casefold()
+            if "non-binding" in request_class_text or "advisory" in request_class_text:
+                return "analysis"
+        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in text else "analysis"
     mode = raw.casefold()
     if mode not in WORKFLOW_MODES:
         raise WorkflowScopeViolation(f"unknown workflow_mode: {mode}")
@@ -373,6 +471,7 @@ def build_root_body(
     *,
     workflow_mode: str = "analysis",
     mandate: Mapping[str, Any] | None = None,
+    requested_by: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -381,17 +480,24 @@ def build_root_body(
     `hgfinance.mandate-snapshot.v1` 블록이 함께 실려, 부서가
     `kanban show <root_task_id>`로 사용자의 투자 한도를 읽을 수 있다.
 
-    둘 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
+    `requested_by`(2026-08-14 추가)는 `X-User-Id`로 식별된 요청자다. 채워지면
+    `requested_by=<id>` 한 줄이 실려 `GET /ui/ceo/tasks?owner_id=`가 계정별
+    이력을 서버에서 걸러낼 수 있다. 없으면 줄 자체를 넣지 않는다 - "요청자
+    불명"을 임의 기본값으로 채우지 않는다(개발 원칙 9).
+
+    셋 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
     """
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
+    requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
         f"reuse_policy={CEO_WORKFLOW_REUSE_POLICY}\n"
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
+        f"{requested_by_line}"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"
@@ -399,6 +505,8 @@ def build_root_body(
         # 공장 자동 생성물은 origin=factory 를 찍는다 - 자동 생성물이 질의
         # 응답 경로를 다시 부르는 순환은 이 도장의 대조로 끊는다.
         "origin=user-query\n"
+        "analysis_response_rule=primary_results_ready_allows_immediate_ceo_synthesis\n"
+        "qa_rule=async_post_hoc_audit_not_user_response_prerequisite\n"
         "root_task_role=scope_and_planning\n"
         "primary_execution_parent=none\n"
         "primary_scope_field=workflow_root_task_id\n"
@@ -422,6 +530,20 @@ def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
     if not block:
         return ""
     return f"\n## Investor mandate (frozen snapshot)\n{block}\n"
+
+
+_REQUESTED_BY_RE = re.compile(r"(?m)^requested_by=(\S+)\s*$")
+
+
+def requested_by_from_body(body: str) -> str | None:
+    """root body의 `requested_by=` 줄을 읽는다. 없으면 `None`("계정 불명").
+
+    과거에 만들어진 root task는 이 줄이 없을 수 있다 - 그런 task는 특정 계정
+    이력에 넣지 않는다(개발 원칙 9, `build_root_body`의 `requested_by` 인자와 짝).
+    """
+
+    match = _REQUESTED_BY_RE.search(str(body or ""))
+    return match.group(1).strip() if match else None
 
 
 def build_root_comment(root_task_id: str, request_id: str) -> str:
@@ -643,7 +765,9 @@ __all__ = [
     "infer_workflow_mode",
     "mandate_snapshot_present",
     "primary_idempotency_key",
+    "requested_by_from_body",
     "selected_primary_profiles_from_body",
+    "selected_primary_profiles_from_task",
     "validate_workflow_scope",
     "workflow_mode_from_body",
 ]

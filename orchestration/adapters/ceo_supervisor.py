@@ -14,7 +14,7 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -39,14 +39,17 @@ from orchestration.canonical_profiles import (
     department_for_canonical_profile,
     validate_canonical_profile,
 )
+from orchestration.discord_delivery import DiscordFinalDelivery
+from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
+    CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
     is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
     mandate_snapshot_present,
     primary_idempotency_key,
-    selected_primary_profiles_from_body,
+    selected_primary_profiles_from_task,
     validate_workflow_scope,
     workflow_mode_from_body,
 )
@@ -350,6 +353,47 @@ class SupervisorState:
         return tuple(profile for profile in self.selected_primary_profiles if profile not in present)
 
     @property
+    def primary_by_profile(self) -> dict[str, ChildTaskState]:
+        """Return one canonical primary per selected profile when valid."""
+
+        if self.duplicate_primary_profiles:
+            return {}
+        candidates = self.analysis_children
+        profiles = self.selected_primary_profiles or tuple(
+            dict.fromkeys(child.profile for child in candidates)
+        )
+        return {
+            profile: next(child for child in candidates if child.profile == profile)
+            for profile in profiles
+            if any(child.profile == profile for child in candidates)
+        }
+
+    @property
+    def ready_profiles(self) -> tuple[str, ...]:
+        """Unique selected profiles whose canonical primary is terminal."""
+
+        if self.duplicate_primary_profiles:
+            return ()
+        return tuple(
+            profile
+            for profile, child in self.primary_by_profile.items()
+            if child.terminal
+        )
+
+    @property
+    def ready_count(self) -> int:
+        return len(self.ready_profiles)
+
+    @property
+    def primary_ready(self) -> bool:
+        selected_count = len(self.selected_primary_profiles) or len(
+            self.primary_by_profile
+        )
+        return bool(selected_count) and not self.missing_primary_profiles and not (
+            self.duplicate_primary_profiles
+        ) and self.ready_count == selected_count
+
+    @property
     def duplicate_primary_profiles(self) -> tuple[str, ...]:
         counts: dict[str, int] = {}
         for child in self.analysis_children:
@@ -459,13 +503,21 @@ def _analysis_synthesis_decision(
 
     if state.workflow_mode != "analysis" or state.has_action(SupervisorAction.SYNTHESIZE):
         return None
-    if not state.analysis_children or any(
-        not child.terminal for child in state.analysis_children
+    if state.selected_primary_profiles and (
+        state.missing_primary_profiles or state.duplicate_primary_profiles
     ):
+        logger.warning(
+            "synthesis-primary-set-incomplete root=%s missing=%s duplicates=%s",
+            state.parent_task_id,
+            ",".join(state.missing_primary_profiles),
+            ",".join(state.duplicate_primary_profiles),
+        )
+        return None
+    if not state.primary_ready:
         return None
 
     primary_ids = tuple(
-        child.task_id for child in state.analysis_children if child.done
+        child.task_id for child in state.analysis_children if child.terminal
     )
     if not primary_ids:
         return None
@@ -478,7 +530,9 @@ def _analysis_synthesis_decision(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\n"
             "governance_plane=async_qa\n"
-            "Synthesize completed primary department work; QA may still be running.\n"
+            "Synthesize available primary department work, including terminal "
+            "blocked results. QA runs independently "
+            "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
                     child_handoff_payload(
@@ -506,7 +560,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     if not state.analysis_children:
         if state.selected_primary_profiles:
             logger.info(
-                "primary-ready root=%s selected=%d ready=%d missing=%s",
+                "primary-profile-state root=%s selected=%d ready=%d missing=%s",
                 state.parent_task_id,
                 len(state.selected_primary_profiles),
                 0,
@@ -537,18 +591,20 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if state.missing_primary_profiles:
         logger.info(
-            "primary-ready root=%s selected=%d ready=%d missing=%s",
+            "primary-profile-state root=%s selected=%d ready=%d missing=%s",
             state.parent_task_id,
             len(state.selected_primary_profiles),
-            sum(child.terminal for child in state.analysis_children),
+            state.ready_count,
             ",".join(state.missing_primary_profiles),
         )
         return None
 
     if state.duplicate_primary_profiles:
         logger.warning(
-            "primary-duplicate-detected root=%s profiles=%s",
+            "primary-duplicate-detected primary-integrity root=%s selected=%d "
+            "duplicate_profiles=%s ready=false",
             state.parent_task_id,
+            len(state.selected_primary_profiles),
             ",".join(state.duplicate_primary_profiles),
         )
         # Do not hide an already-created duplicate by selecting the newest or
@@ -556,17 +612,18 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         # state by the stable create key in the CEO producer contract.
         return None
 
-    for child in state.children:
-        if (
-            child.is_background_research
-            or not child.is_in_workflow(state.parent_task_id)
-            or
-            child.is_supervisor
-            or (child.is_qa and state.workflow_mode == "analysis")
-            or not child.terminal
-        ):
+    policy_children = state.analysis_children
+    if state.workflow_mode == "binding":
+        policy_children = policy_children + state.qa_children
+    for child in policy_children:
+        if not child.terminal:
             continue
         if child.blocked:
+            if state.workflow_mode == "analysis" and state.selected_primary_profiles:
+                # A blocked selected primary is terminal for ordinary analysis.
+                # Preserve its block_reason in the synthesis payload instead of
+                # waiting forever or turning an advisory workflow into a gate.
+                continue
             return _blocked_decision(state, child)
         if child.failed:
             if child.retry_count < state.max_retries:
@@ -586,7 +643,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
-    primary_ids = tuple(child.task_id for child in state.analysis_children if child.done)
+    primary_ids = tuple(child.task_id for child in state.analysis_children if child.terminal)
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
@@ -960,6 +1017,7 @@ class CeoSupervisorService:
         decider: Callable[[SupervisorState], SupervisorDecision | None] = decide_supervisor,
         synthesis_projection: Any | None = None,
         qa_projection: Any | None = None,
+        discord_delivery: DiscordFinalDelivery | None = None,
     ) -> None:
         self.client = client
         self.max_retries = max_retries
@@ -969,6 +1027,7 @@ class CeoSupervisorService:
         # Terminal projections observe outcomes; they never participate in policy.
         self.synthesis_projection = synthesis_projection
         self.qa_projection = qa_projection
+        self.discord_delivery = discord_delivery
         self._seen_events: set[str] = set()
         self._wakeups: dict[str, int] = {}
         self._replans: dict[str, int] = {}
@@ -999,6 +1058,48 @@ class CeoSupervisorService:
                     break
         return entries
 
+    @staticmethod
+    def _wakeup_budget(comments: Mapping[str, str]) -> int:
+        """Count only safety-loop actions, not ordinary terminal events.
+
+        Older wakeup comments did not carry the budget flag.  They are treated
+        conservatively: retries, replans, user-input requests, and aborts count;
+        normal QA/synthesis phase transitions do not.
+        """
+
+        safety_actions = {
+            SupervisorAction.CREATE_TASK.value,
+            SupervisorAction.RETRY_TASK.value,
+            SupervisorAction.REQUEST_USER_INPUT.value,
+            SupervisorAction.BLOCK_ABORT.value,
+        }
+        total = 0
+        for body in comments.values():
+            if "budget_consumed=false" in body:
+                continue
+            if "budget_consumed=true" in body:
+                total += 1
+                continue
+            action = next(
+                (
+                    token.split("=", 1)[1]
+                    for token in body.split()
+                    if token.startswith("action=")
+                ),
+                "",
+            )
+            total += action in safety_actions
+        return total
+
+    @staticmethod
+    def _consumes_wakeup_budget(action: SupervisorAction | None) -> bool:
+        return action in {
+            SupervisorAction.CREATE_TASK,
+            SupervisorAction.RETRY_TASK,
+            SupervisorAction.REQUEST_USER_INPUT,
+            SupervisorAction.BLOCK_ABORT,
+        }
+
     def _record_wakeup(
         self,
         *,
@@ -1008,6 +1109,7 @@ class CeoSupervisorService:
         action: str,
         existing: Mapping[str, str],
         state: str,
+        budget_consumed: bool,
     ) -> None:
         comment_task = getattr(self.client, "comment_task", None)
         if not callable(comment_task):
@@ -1015,7 +1117,7 @@ class CeoSupervisorService:
         comment_task(
             root_task_id,
             f"{SUPERVISOR_WAKE_MARKER} event={event_id} kind={kind} "
-            f"state={state} action={action}",
+            f"state={state} action={action} budget_consumed={str(budget_consumed).lower()}",
         )
 
     def _safe_abort(self, task_id: str, reason: str) -> None:
@@ -1056,20 +1158,132 @@ class CeoSupervisorService:
             if role == "qa" and task_action == "RUN_QA"
             else None
         )
-        if projection is None:
-            return
-        try:
-            projection.project(
-                root_task_id=root_task_id,
-                task=task,
-                workflow_tasks=task_payloads,
-                event=event,
+        if projection is not None:
+            try:
+                projection.project(
+                    root_task_id=root_task_id,
+                    task=task,
+                    workflow_tasks=task_payloads,
+                    event=event,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "terminal projection observer failed",
+                    extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
+        )
+        if role == "synthesis" and task_action == "SYNTHESIZE":
+            logger.info(
+                "synthesis-complete root=%s task=%s",
+                root_task_id,
+                task_id,
             )
-        except Exception as exc:
-            logger.exception(
-                "terminal projection observer failed",
-                extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
+        if role == "synthesis" and task_action == "SYNTHESIZE" and self.discord_delivery:
+            content = _text(
+                task.get("latest_summary")
+                or task.get("summary")
+                or task.get("result")
             )
+            if content:
+                root_payload = next(
+                    (
+                        payload
+                        for payload in task_payloads
+                        if str(payload.get("id") or payload.get("task_id") or "")
+                        == root_task_id
+                    ),
+                    {},
+                )
+                delivery_task = dict(task)
+                delivery_task["root_task"] = root_payload
+                delivery_environment = getattr(self.client, "environment", os.environ)
+                hermes_home = delivery_environment.get("HERMES_HOME", "/opt/data")
+                ceo_profile_home = os.path.join(
+                    hermes_home,
+                    "profiles",
+                    canonical_profile_for_department("ceo"),
+                )
+                delivery_home = (
+                    ceo_profile_home
+                    if os.path.isdir(ceo_profile_home)
+                    else hermes_home
+                )
+                self.discord_delivery.deliver(
+                    root_task_id=root_task_id,
+                    synthesis_task=delivery_task,
+                    content=content,
+                    store=DiscordIdempotencyStore(delivery_home),
+                    profile=canonical_profile_for_department("ceo"),
+                )
+
+    def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
+        """Reconcile terminal roots whose watch event was missed.
+
+        The supervisor is normally event-driven, but a restart cannot replay
+        terminal events that happened before ``kanban watch`` subscribed. A
+        narrow startup reconciliation covers only completed planning roots
+        with a durable primary selection and at least one terminal primary.
+        It reuses ``handle_terminal_event`` so the normal scope validation,
+        idempotency comments, and action guards remain authoritative.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+        if not callable(list_tasks) or not callable(show):
+            return ()
+
+        roots: dict[str, Mapping[str, Any]] = {}
+        for row in list_tasks():
+            task_id = str(row.get("id") or row.get("task_id") or "")
+            body = str(row.get("body") or "")
+            role = terminal_workflow_role(row) or ""
+            if (
+                not task_id
+                or CEO_WORKFLOW_SCOPE_MARKER not in body
+                or role not in {"planning", "scope_and_planning"}
+            ):
+                continue
+            roots[task_id] = row
+
+        decisions: list[SupervisorDecision] = []
+        for root_id in sorted(roots):
+            root_payload = show(root_id)
+            root_status = str(root_payload.get("status") or "").casefold()
+            if root_status not in {"done", "completed", "archived"}:
+                continue
+            if not selected_primary_profiles_from_task(root_payload):
+                continue
+
+            _, payloads = self.client.workflow(root_id)
+            children = tuple(
+                ChildTaskState.from_hermes(payload)
+                for payload in payloads
+                if payload.get("assignee") is not None
+            )
+            terminal_primary = tuple(
+                child
+                for child in children
+                if child.is_in_workflow(root_id)
+                and child.is_analysis
+                and child.terminal
+            )
+            if not terminal_primary:
+                continue
+
+            wake_child = next(
+                (child for child in terminal_primary if child.done),
+                terminal_primary[0],
+            )
+            event = {
+                "event_id": (
+                    f"reconcile:{root_id}:{wake_child.task_id}:{wake_child.status}"
+                ),
+                "task_id": wake_child.task_id,
+                "kind": "blocked" if wake_child.blocked else "completed",
+            }
+            decision = self.handle_terminal_event(event)
+            if decision is not None:
+                decisions.append(decision)
+        return tuple(decisions)
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
@@ -1139,10 +1353,28 @@ class CeoSupervisorService:
                     for payload in payloads
                     if payload.get("assignee") is not None
                 )
+                unmarked_primary_ids = tuple(
+                    child.task_id
+                    for child in children
+                    if child.is_in_workflow(root_id)
+                    and not child.workflow_role
+                    and not child.is_background_research
+                    and child.profile
+                    in {
+                        canonical_profile_for_department(name)
+                        for name in PRIMARY_DEPARTMENTS
+                    }
+                )
+                if unmarked_primary_ids:
+                    logger.warning(
+                        "primary-unmarked-excluded root=%s task_ids=%s",
+                        root_id,
+                        ",".join(unmarked_primary_ids),
+                    )
                 existing_wakeups = self._wakeup_comments(root_payload)
                 if event_key in existing_wakeups and "state=done" in existing_wakeups[event_key]:
                     return None
-                wakeups = len(existing_wakeups) + (0 if event_key in existing_wakeups else 1)
+                wakeups = self._wakeup_budget(existing_wakeups)
                 durable_replans = sum(
                     1
                     for child in children
@@ -1152,23 +1384,42 @@ class CeoSupervisorService:
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
-                    wakeups=wakeups,
+                    # Evaluate ordinary workflow phase transitions without
+                    # spending the safety budget.  If the candidate action is
+                    # a retry/replan/abort, the bounded second evaluation
+                    # below applies the persisted budget.
+                    wakeups=0,
                     replan_count=max(self._replans.get(root_id, 0), durable_replans),
                     max_retries=self.max_retries,
                     max_wakeups=self.max_wakeups,
                     qa_required=self._qa_required_from_event(event),
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
-                    selected_primary_profiles=selected_primary_profiles_from_body(root_body),
+                    selected_primary_profiles=selected_primary_profiles_from_task(root_payload),
                     root_is_user_query=is_user_query_body(root_body),
                 )
                 decision = self.decider(state)
-                if state.analysis_children and not state.missing_primary_profiles:
+                if (
+                    wakeups >= self.max_wakeups
+                    and self._consumes_wakeup_budget(
+                        decision.action if decision is not None else None
+                    )
+                ):
+                    decision = self.decider(replace(state, wakeups=wakeups))
+                if state.primary_ready:
                     logger.info(
                         "primary-ready root=%s selected=%d ready=%d",
                         root_id,
-                        len(state.selected_primary_profiles) or len({child.profile for child in state.analysis_children}),
-                        sum(child.terminal for child in state.analysis_children),
+                        len(state.selected_primary_profiles) or len(state.primary_by_profile),
+                        state.ready_count,
+                    )
+                elif state.duplicate_primary_profiles:
+                    logger.warning(
+                        "primary-duplicate-detected primary-integrity root=%s "
+                        "selected=%d duplicate_profiles=%s ready=false",
+                        root_id,
+                        len(state.selected_primary_profiles),
+                        ",".join(state.duplicate_primary_profiles),
                     )
                 action = decision.action.value if decision is not None else "NONE"
                 if decision is not None and state.has_action(decision.action):
@@ -1178,6 +1429,9 @@ class CeoSupervisorService:
                     # watch loop acknowledged the event.
                     decision = None
                     action = "NONE"
+                budget_consumed = self._consumes_wakeup_budget(
+                    decision.action if decision is not None else None
+                )
                 if event_key not in existing_wakeups:
                     self._record_wakeup(
                         root_task_id=root_id,
@@ -1186,6 +1440,7 @@ class CeoSupervisorService:
                         action=action,
                         existing=existing_wakeups,
                         state="started",
+                        budget_consumed=budget_consumed,
                     )
                 if decision is None:
                     self._record_wakeup(
@@ -1195,6 +1450,14 @@ class CeoSupervisorService:
                         action=action,
                         existing=existing_wakeups,
                         state="done",
+                        budget_consumed=budget_consumed,
+                    )
+                    logger.info(
+                        "supervisor-wakeup root=%s event=%s action=%s budget_consumed=%s",
+                        root_id,
+                        event_key,
+                        action,
+                        str(budget_consumed).lower(),
                     )
                     return None
                 action_key = ":".join(
@@ -1232,13 +1495,14 @@ class CeoSupervisorService:
                             for payload in refreshed_payloads
                             if payload.get("assignee") is not None
                         ),
-                        wakeups=state.wakeups,
+                        wakeups=0,
                         replan_count=state.replan_count,
                         max_retries=self.max_retries,
                         max_wakeups=self.max_wakeups,
                         qa_required=state.qa_required,
                         workflow_mode=state.workflow_mode,
                         has_mandate=state.has_mandate,
+                        selected_primary_profiles=state.selected_primary_profiles,
                     )
                     synthesis = _analysis_synthesis_decision(refreshed_state)
                     if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
@@ -1253,6 +1517,14 @@ class CeoSupervisorService:
                     action=action,
                     existing=existing_wakeups,
                     state="done",
+                    budget_consumed=budget_consumed,
+                )
+                logger.info(
+                    "supervisor-wakeup root=%s event=%s action=%s budget_consumed=%s",
+                    root_id,
+                    event_key,
+                    action,
+                    str(budget_consumed).lower(),
                 )
                 return decision
         except CanonicalProfileError as exc:
@@ -1347,7 +1619,11 @@ class CeoSupervisorService:
                     )
             elif decision.action == SupervisorAction.SYNTHESIZE:
                 expected = (
-                    {child.task_id for child in state.analysis_children if child.done}
+                    {
+                        child.task_id
+                        for child in state.analysis_children
+                        if child.terminal
+                    }
                     if state.workflow_mode == "analysis"
                     else {child.task_id for child in state.qa_children if child.done}
                 )
@@ -1362,6 +1638,34 @@ class CeoSupervisorService:
                 SupervisorAction.RUN_QA: "qa",
                 SupervisorAction.SYNTHESIZE: "synthesis",
             }[decision.action]
+            if role == "primary":
+                existing = tuple(
+                    child
+                    for child in state.analysis_children
+                    if child.profile == decision.assignee
+                )
+                if len(existing) > 1:
+                    logger.error(
+                        "primary-integrity root=%s profile=%s duplicate_count=%d create_suppressed=true",
+                        state.parent_task_id,
+                        decision.assignee,
+                        len(existing),
+                    )
+                    return
+                if existing:
+                    # Replan must reuse the logical primary identity. The
+                    # supported Hermes boundary exposes unblock as the
+                    # bounded retry/reopen operation; never create a second
+                    # canonical task for the same root/profile.
+                    self.client.unblock_task(existing[0].task_id)
+                    logger.info(
+                        "retry-primary root=%s profile=%s task=%s attempt=%d",
+                        state.parent_task_id,
+                        decision.assignee,
+                        existing[0].task_id,
+                        state.replan_count + 1,
+                    )
+                    return
             idempotency_key = (
                 primary_idempotency_key(state.parent_task_id, decision.assignee)
                 if role == "primary"
@@ -1392,6 +1696,12 @@ class CeoSupervisorService:
                     decision.assignee,
                     idempotency_key,
                     bool(created),
+                )
+            elif role == "synthesis":
+                logger.info(
+                    "synthesis-create root=%s parents=%d",
+                    state.parent_task_id,
+                    len(decision.parent_task_ids),
                 )
 
 

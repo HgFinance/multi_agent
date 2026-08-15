@@ -76,7 +76,10 @@ def _production_board(*, qa_status: str = "done", synthesis_status: str = "runni
                 "qa_required": False,
                 "workflow_metadata": final_metadata,
             },
-            latest_summary="두 primary 결과가 terminal 상태가 되면 독립 QA를 거친 뒤 CEO 종합 단계로 넘긴다.",
+            latest_summary=(
+                "두 primary 결과가 준비되면 CEO가 즉시 종합하고, "
+                "독립 QA는 별도 비동기 evaluation 경로에서 실행한다."
+            ),
         ),
         RESEARCH: _payload(
             RESEARCH,
@@ -155,7 +158,7 @@ class CeoWorkflowProjectionRegressionTest(unittest.TestCase):
             patch.object(ceo, "list_ceo_roots", return_value=[board[ROOT]]),
         ):
             graph = ceo.ceo_task_graph(ROOT)
-            task_list = ceo.ceo_task_list(limit=20, include_archived=False)
+            task_list = ceo.ceo_task_list(limit=20, include_archived=False, owner_id=None)
         self.assertEqual({node.id for node in graph.nodes}, {ROOT, RESEARCH, RISK, QA, SYNTHESIS})
         self.assertEqual(task_list.items[0].selected_departments, ["research-department", "risk-management"])
 
@@ -175,6 +178,10 @@ class CeoWorkflowProjectionRegressionTest(unittest.TestCase):
         self.assertIn("준비되는 대로", acknowledgement["planning"]["summary"])
         self.assertNotIn("QA", acknowledgement["planning"]["summary"])
         self.assertNotIn("독립 QA를 거친 뒤", acknowledgement["planning"]["summary"])
+        self.assertEqual(
+            acknowledgement["planning"]["steps"][-2:],
+            ["CEO Synthesis", "QA (async evaluation)"],
+        )
 
     def test_parentless_primary_resolves_to_marker_root(self) -> None:
         board = _production_board()

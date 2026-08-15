@@ -46,7 +46,8 @@ from orchestration.canonical_profiles import (
 )
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
-    selected_primary_profiles_from_body,
+    requested_by_from_body,
+    selected_primary_profiles_from_task,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -496,6 +497,7 @@ class Workflow:
     root_task_id: str
     nodes: tuple[WorkflowNode, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    root_payload: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def root(self) -> WorkflowNode:
@@ -513,7 +515,7 @@ class Workflow:
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
         """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
-        selected = set(selected_primary_profiles_from_body(self.root.body))
+        selected = set(selected_primary_profiles_from_task(self.root_payload))
         return tuple(
             node
             for node in self.descendants
@@ -784,17 +786,28 @@ def load_workflow(
         root_task_id=root_id,
         nodes=tuple(nodes),
         metadata=_run_metadata(payloads[root_id]),
+        root_payload=payloads[root_id],
     )
 
 
-def list_ceo_roots(*, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:
-    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다."""
+def list_ceo_roots(
+    *, limit: int, include_archived: bool = False, owner_id: str | None = None
+) -> list[dict[str, Any]]:
+    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다.
+
+    `owner_id`가 주어지면 `requested_by=` 줄이 그 값과 일치하는 Root만 남긴다
+    (`limit` 컷오프 전에 걸러야 다른 계정 Root가 자리를 차지해 진짜 대상이
+    잘려나가지 않는다). `requested_by`가 없는 과거 Root는 "계정 불명"으로
+    보고 어떤 `owner_id` 필터에도 포함하지 않는다.
+    """
 
     rows = list_tasks(assignee=CEO_PROFILE, include_archived=include_archived)
     roots: list[dict[str, Any]] = []
     for row in rows:
         body = _text(row.get("body"))
         if not is_ceo_root_body(body):
+            continue
+        if owner_id is not None and requested_by_from_body(body) != owner_id:
             continue
         roots.append(row)
         if len(roots) >= limit:

@@ -206,6 +206,7 @@ from service import (
     InMemoryMandateVersionRepository,
     MandateAlreadyExistsError,
     MandateVersionService,
+    compute_content_hash,
 )
 
 try:
@@ -298,6 +299,16 @@ class ProposeVersionRequest(BaseModel):
         description="In-Memory Repository 데모용 seed - accounting-api 없이 통화 검증하려면 채운다. "
                     "Postgres Repository를 쓸 때는 무시하고 accounting.funds를 그대로 조회한다.",
     )
+
+
+class ReplaceMandateMetadataRequest(BaseModel):
+    """현재 사용자 Mandate 메타데이터를 한 행에 덮어쓴다."""
+
+    policy: MandatePolicy
+    objective_text: str = Field(min_length=1)
+    objective: dict = Field(default_factory=dict)
+    execution_rules: dict = Field(default_factory=dict)
+    created_by: str | None = None
 
 
 class SuggestRequestIn(BaseModel):
@@ -995,7 +1006,9 @@ def _on_review_approval_missing(request, exc: ReviewApprovalMissingError):
 class CreateMandateRequest(BaseModel):
     """`governance.mandates` 부모 행 생성 요청.
 
-    Version(정책)은 여기서 만들지 않는다 - `POST .../versions`가 그 몫이다.
+    정책 metadata는 여기서 만들지 않는다 - 생성 후 `PUT /mandates/{id}`로
+    부모 행에 덮어쓴다. 기존 승인·변경 워크플로의 `POST .../versions`는
+    레거시 경로로 유지한다.
     껍데기와 정책을 한 호출로 묶으면 정책 검증 실패 때 부모 행만 남는다.
     """
 
@@ -1052,6 +1065,45 @@ def create_mandate(body: CreateMandateRequest):
         "name": body.name,
         "status": "DRAFT",
         "current_version": 0,
+    }
+
+
+@app.put("/governance/v1/mandates/{mandate_id}")
+def replace_mandate_metadata(mandate_id: str, body: ReplaceMandateMetadataRequest):
+    """Replace the current Mandate metadata in place.
+
+    This is the user-input save path. It deliberately does not create a
+    mandate_versions row or run the version/activation workflow.
+    """
+    updater = getattr(_mandate_repo, "replace_mandate_metadata", None)
+    if not callable(updater):
+        raise HTTPException(status_code=503, detail="mandate_metadata_update_unavailable")
+
+    policy = body.policy.model_dump(mode="json")
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "objective_text": body.objective_text,
+        "objective": body.objective,
+        "policy": {
+            **policy,
+            "execution_rules": body.execution_rules,
+        },
+        "content_hash": compute_content_hash(body.policy),
+        "updated_by": body.created_by,
+        "updated_at": now.isoformat(),
+    }
+    try:
+        updater(mandate_id, metadata)
+    except MandatePersistenceError:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return {
+        "mandate_id": mandate_id,
+        "status": "ACTIVE",
+        "metadata": metadata,
+        "updated_at": metadata["updated_at"],
     }
 
 
@@ -1189,6 +1241,26 @@ def get_mandate_current(mandate_id: str):
     not expose ``get`` yet; in that case the canonical binding remains
     available and an ACTIVE mandate fails closed when its binding is absent.
     """
+    get_metadata = getattr(_mandate_repo, "get_mandate_metadata", None)
+    metadata = get_metadata(mandate_id) if callable(get_metadata) else None
+    if metadata:
+        policy = metadata.get("policy")
+        return {
+            "mandate_id": mandate_id,
+            "case_id": None,
+            "current_version": 0,
+            "mandate_version_id": None,
+            "policy_hash": metadata.get("content_hash"),
+            "status": "ACTIVE",
+            "effective_from": None,
+            "effective_to": None,
+            "content_hash": metadata.get("content_hash"),
+            "objective_text": metadata.get("objective_text", ""),
+            "objective": metadata.get("objective", {}),
+            "policy": policy,
+            "metadata": metadata,
+        }
+
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     if version <= 0:
         return {"mandate_id": mandate_id, "current_version": version, "status": status}
@@ -1236,17 +1308,29 @@ def get_mandate_current(mandate_id: str):
     "/governance/v1/mandates/by-fund/{fund_id}/current",
     dependencies=[Depends(_require_internal_auth)],
 )
-def get_mandate_current_by_fund(fund_id: str):
+def get_mandate_current_by_fund(
+    fund_id: str,
+    owner_user_id: str | None = None,
+):
     """Resolve a Fund to exactly one Mandate without choosing arbitrarily.
 
     ``mandate_ids_for_fund`` is supplied by the canonical repository.  The
     explicit 503 fallback keeps older prototype repositories fail-closed
     instead of silently returning a stale or guessed Mandate.
     """
-    lookup = getattr(_mandate_repo, "mandate_ids_for_fund", None)
+    lookup_name = (
+        "mandate_ids_for_fund_owner"
+        if owner_user_id
+        else "mandate_ids_for_fund"
+    )
+    lookup = getattr(_mandate_repo, lookup_name, None)
     if not callable(lookup):
         raise HTTPException(status_code=503, detail="mandate_fund_lookup_unavailable")
-    mandate_ids = lookup(fund_id)
+    mandate_ids = (
+        lookup(fund_id, owner_user_id)
+        if owner_user_id
+        else lookup(fund_id)
+    )
     if not mandate_ids:
         raise HTTPException(
             status_code=404,
@@ -1963,6 +2047,17 @@ if __name__ == "__main__":
     _mandate_repo.set_fund_id("m1", "f1")
     r5c = client.get("/governance/v1/mandates/by-fund/f1/current")
     assert r5c.status_code == 200 and r5c.json()["mandate_id"] == "m1", r5c.text
+    _mandate_repo.set_owner_user_id("m1", "u1")
+    r5_owner = client.get(
+        "/governance/v1/mandates/by-fund/f1/current",
+        params={"owner_user_id": "u1"},
+    )
+    assert r5_owner.status_code == 200 and r5_owner.json()["mandate_id"] == "m1", r5_owner.text
+    r5_other_owner = client.get(
+        "/governance/v1/mandates/by-fund/f1/current",
+        params={"owner_user_id": "u2"},
+    )
+    assert r5_other_owner.status_code == 404, r5_other_owner.text
     r5d = client.get("/governance/v1/mandates/by-fund/no-such-fund/current")
     assert r5d.status_code == 404, r5d.text
     _mandate_repo.set_fund_id("m1b", "f1")

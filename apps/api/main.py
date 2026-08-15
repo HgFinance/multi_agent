@@ -95,6 +95,7 @@ from command_service import (
 from account_snapshot import router as account_snapshot_router
 from current_user import current_user, require_owner
 from department_agents import router as department_agent_router
+from discord_read import router as discord_read_router
 from domain_read_models import build_domain_read_model
 from portfolio_profile_client import (
     PortfolioProxyError,
@@ -193,6 +194,9 @@ app.include_router(ceo_router)
 # 사실 조회는 에이전트를 거치지 않는다. "내 잔고"에 CEO 라우팅 + 부서 5곳을
 # 태우면 4분이 걸리고 답도 못 낸다(2026-08-11 실측) - 결정론 조회는 직행이다.
 app.include_router(account_snapshot_router)
+# Discord 대화 원문 읽기. 봇 토큰이 브라우저에 내려가면 발송 권한까지 같이
+# 나가므로 토큰은 이 프로세스에만 둔다.
+app.include_router(discord_read_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 
@@ -344,16 +348,31 @@ async def ui_create_mandate(body: dict[str, object]) -> object:
     return await _governance_request("POST", "/governance/v1/mandates", body=body)
 
 
+@app.put("/ui/mandates/{mandate_id}")
+async def ui_replace_mandate(mandate_id: str, body: dict[str, object]) -> object:
+    """Replace the current Mandate metadata; no version row is created."""
+
+    return await _governance_request(
+        "PUT", f"/governance/v1/mandates/{mandate_id}", body=body
+    )
+
+
 @app.get("/ui/mandates/by-fund/{fund_id}/current")
-async def ui_get_current_mandate_by_fund(fund_id: str) -> object:
+async def ui_get_current_mandate_by_fund(
+    fund_id: str,
+    owner_id: str | None = Depends(current_user),
+) -> object:
     """Fund 하나의 현재 Mandate. 화면이 `mandate_id`를 손으로 받지 않게 한다.
 
     상류가 모호하면(한 Fund에 Mandate 2개 이상) 409를 그대로 통과시킨다 -
     임의로 하나를 고르지 않는다(USER_INPUT_API_SPEC 2.1).
     """
 
+    params = {"owner_user_id": owner_id} if owner_id else None
     return await _governance_request(
-        "GET", f"/governance/v1/mandates/by-fund/{fund_id}/current"
+        "GET",
+        f"/governance/v1/mandates/by-fund/{fund_id}/current",
+        params=params,
     )
 
 
@@ -782,7 +801,10 @@ def _default_book_id(repo) -> UUID | None:
     return chosen[1] if chosen else None
 
 
-def _accounting_sections(book_id: UUID | None) -> tuple[UUID, dict | None] | None:
+def _accounting_sections(
+    book_id: UUID | None,
+    fund_id: UUID | None = None,
+) -> tuple[UUID, dict | None] | None:
     """(장부, 회계 구간). DB가 없거나 장부를 못 고르면 None - 호출자가 DEMO로 떨어진다.
 
     안쪽 `sections`가 None인 것은 다른 뜻이다 - **그 장부는 있는데 평가된 적이 없다.**
@@ -791,7 +813,13 @@ def _accounting_sections(book_id: UUID | None) -> tuple[UUID, dict | None] | Non
     repo = _repo()
     if repo is None:
         return None
-    resolved = book_id or _default_book_id(repo)
+    if book_id is not None:
+        resolved = book_id
+    elif fund_id is not None:
+        resolve_for_fund = getattr(repo, "book_for_fund", None)
+        resolved = resolve_for_fund(fund_id) if callable(resolve_for_fund) else None
+    else:
+        resolved = _default_book_id(repo)
     if resolved is None:
         return None
 
@@ -805,7 +833,10 @@ def _accounting_sections(book_id: UUID | None) -> tuple[UUID, dict | None] | Non
 
 
 @app.get("/ui/snapshot")
-def ui_snapshot(book_id: UUID | None = None) -> dict:
+def ui_snapshot(
+    book_id: UUID | None = None,
+    fund_id: UUID | None = None,
+) -> dict:
     """계획 5.2의 `GET /ui/snapshot`. 화면 State는 이 한 장에서 재구축된다.
 
     DB가 붙어 있으면 **회계 구간(portfolio·ledger)이 Canonical 표에서** 온다
@@ -825,7 +856,7 @@ def ui_snapshot(book_id: UUID | None = None) -> dict:
     """
     loop = _demo_state()
     overrides = None
-    resolved = _accounting_sections(book_id)
+    resolved = _accounting_sections(book_id, fund_id)
     if resolved is not None:
         chosen, sections = resolved
         if sections is None and book_id is not None:
@@ -1130,10 +1161,12 @@ if __name__ == "__main__":
         "/ui/portfolio-recommendations/{run_id}",
         "/ui/portfolio-recommendations/{run_id}/approval",
         "/ui/mandates/{mandate_id}/change-requests",
-        # 2026-08-12 온보딩 경로(USER_INPUT_API_SPEC 6.1 #2). Mandate 생성·Version
-        # 제안·챗봇 제안·적합성 프로필. 챗봇(`mandate-assistant/suggest`)은 Stateless라
+        # 2026-08-12~14 온보딩 경로(USER_INPUT_API_SPEC 6.1 #2). Mandate 생성·현재
+        # metadata 교체·레거시 Version 제안·챗봇 제안·적합성 프로필. 챗봇
+        # (`mandate-assistant/suggest`)은 Stateless라
         # 아무것도 저장하지 않고, 나머지는 정책 검증을 상류 도메인이 소유한다.
         "/ui/mandates",
+        "/ui/mandates/{mandate_id}",
         "/ui/mandates/by-fund/{fund_id}/current",
         "/ui/mandates/{mandate_id}/versions",
         "/ui/mandate-assistant/suggest",

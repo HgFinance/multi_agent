@@ -1,22 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import type { Agent, Company, DeptStatus, Snapshot } from "../game/sim";
 import { STAFF } from "../game/staff";
 import { DEPT_ROOMS } from "../game/world";
 
 /**
- * 우측 레일 — ceo.console / live.feed / staff.roster.
+ * 우측 레일 — live.feed / staff.roster.
  *
- * 셋 다 엔진 상태를 읽어 보여줄 뿐이고, 유일한 쓰기 경로는 engine.command()다.
- * 지시 해석·응답·로그 적재는 전부 엔진 안에 있던 것을 그대로 쓴다.
+ * 엔진 상태를 읽어 보여줄 뿐이다. ceo.console(채팅)은 별도 화면(대시보드의
+ * CEO Control Room)으로 옮겨갔으므로 여기서는 다루지 않는다.
  */
-
-const QUICK_ORDERS = [
-  { label: "현황 보고", command: "현황 보고해줘" },
-  { label: "회의 소집", command: "전 부서 회의 소집" },
-  { label: "왜 늦어져?", command: "왜 늦어지고 있어?" },
-];
 
 const DEPT_DOT: Record<DeptStatus, string> = {
   "완료": "bg-tertiary-fixed-dim border-tertiary-fixed-dim",
@@ -61,92 +54,12 @@ export default function RightRail({
   selectedId: string | null;
   onSelect: (agent: Agent) => void;
 }) {
-  // 레일에 lg:overflow-y-auto 를 둔 것은 안전장치다. 세 패널 높이 합이 고정
+  // 레일에 lg:overflow-y-auto 를 둔 것은 안전장치다. 두 패널 높이 합이 고정
   // 높이를 넘으면 레일이 뷰포트 밖으로 흘러 페이지 스크롤로도 닿을 수 없게
   // 되는데, 그때 레일이 스스로 스크롤한다. 평소엔 staff.roster가 안에서
   // 스크롤하므로 쓰이지 않는다.
-  const [draft, setDraft] = useState("");
-  const chatRef = useRef<HTMLDivElement>(null);
-  const chatCount = snap.chat.length;
-
-  useEffect(() => {
-    const el = chatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chatCount]);
-
-  function send(text: string) {
-    const value = text.trim();
-    if (!value) return;
-    engine.command(value);
-    setDraft("");
-  }
-
   return (
     <aside className="w-full lg:w-[390px] shrink-0 flex flex-col gap-4 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:min-h-0 lg:overflow-y-auto">
-      {/* ── ceo.console ─────────────────────────────────── */}
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col shrink-0">
-        <PanelBar tone="primary" icon="desktop_windows" title="ceo.console">
-          <span className="material-symbols-outlined text-[16px]">minimize</span>
-          <span className="material-symbols-outlined text-[16px]">crop_square</span>
-          <span className="material-symbols-outlined text-[16px]">close</span>
-        </PanelBar>
-
-        <div ref={chatRef} className="p-4 flex flex-col gap-3 overflow-y-auto max-h-64" aria-live="polite" aria-label="대표 지시창 대화">
-          {snap.chat.map((entry) => (
-            <div
-              key={entry.id}
-              className={`rounded-lg border p-3 max-w-[92%] ${
-                entry.from === "ceo"
-                  ? "self-end bg-secondary-container border-secondary-container"
-                  : "self-start bg-surface-container-low border-outline-variant"
-              }`}
-            >
-              <div className="font-bold text-body-sm font-body-sm text-primary mb-1">
-                {entry.from === "ceo" ? "대표님" : entry.name}
-              </div>
-              <p className="text-body-sm font-body-sm text-on-surface m-0 whitespace-pre-line">{entry.text}</p>
-              <div className="text-right text-[10px] text-outline mt-1 font-data-mono">{entry.time}</div>
-            </div>
-          ))}
-        </div>
-
-        <div className="px-4 pb-3 flex flex-wrap gap-1.5 shrink-0">
-          {QUICK_ORDERS.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              onClick={() => send(item.command)}
-              className="px-2 py-0.5 rounded-full border border-outline-variant bg-surface-container-low text-[11px] leading-4 text-on-surface-variant hover:bg-surface-container transition-colors"
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-
-        <form
-          className="border-t border-outline-variant p-3 flex gap-2 shrink-0"
-          onSubmit={(event) => {
-            event.preventDefault();
-            send(draft);
-          }}
-        >
-          <input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder="Instruct AI Office..."
-            aria-label="대표 지시 입력"
-            className="flex-1 min-w-0 border border-outline-variant rounded p-2.5 text-body-sm font-body-sm bg-surface-container-lowest focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={!draft.trim()}
-            className="px-5 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors disabled:opacity-40 shrink-0"
-          >
-            Send
-          </button>
-        </form>
-      </section>
-
       {/* ── live.feed ───────────────────────────────────── */}
       <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col shrink-0">
         <PanelBar tone="secondary" icon="bolt" title="live.feed">

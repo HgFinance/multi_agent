@@ -87,6 +87,7 @@ export type LlmPerformanceMetric = {
 export type OperationsView = {
   observed_at: string;
   runtime_connected: boolean;
+  eventBridgeConnected: boolean;
   departments: OperationsDepartment[];
   warnings: string[];
   agentStatuses: AgentStatusEvent[];
@@ -168,6 +169,7 @@ export async function fetchOperations(): Promise<OperationsView> {
       operations?: {
         observed_at?: string;
         runtime_connected?: boolean;
+        event_bridge_connected?: boolean;
         departments?: OperationsDepartment[];
         warnings?: string[];
         agent_statuses?: AgentStatusEvent[];
@@ -185,11 +187,89 @@ export async function fetchOperations(): Promise<OperationsView> {
   return {
     observed_at: operations.observed_at ?? "",
     runtime_connected: Boolean(operations.runtime_connected),
+    eventBridgeConnected: Boolean(operations.event_bridge_connected),
     departments: operations.departments,
     warnings: operations.warnings ?? [],
     agentStatuses: operations.agent_statuses ?? [],
     activeWorkers: operations.runtime?.active_workers ?? [],
     messages: operations.runtime?.messages ?? [],
     metrics: operations.runtime?.performance_metrics ?? [],
+  };
+}
+export type OperationsStreamHandlers = {
+  onOpen?: () => void;
+  onSnapshotRequired?: () => void;
+  onStatus?: (event: AgentStatusEvent) => void;
+  onKeepalive?: (observedAt: string) => void;
+  onError?: () => void;
+};
+
+/**
+ * Subscribe to the BFF operations event stream. The REST snapshot remains the
+ * source for the complete Registry; the stream only signals fresh status and
+ * BFF keepalive data. It is not a direct Hermes Kanban watcher.
+ */
+export function subscribeOperationsStream(handlers: OperationsStreamHandlers): () => void {
+  if (typeof window === "undefined" || typeof WebSocket === "undefined") return () => {};
+
+  const endpoint = new URL(BFF);
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
+  endpoint.pathname = "/ws/operations";
+  endpoint.search = "";
+
+  let closed = false;
+  let socket: WebSocket | null = null;
+  let reconnectTimer: number | null = null;
+
+  const connect = () => {
+    if (closed) return;
+    socket = new WebSocket(endpoint.toString());
+    socket.onopen = () => handlers.onOpen?.();
+    socket.onmessage = (message) => {
+      try {
+        const event = JSON.parse(String(message.data)) as {
+          event_type?: string;
+          observed_at?: string;
+          agent_id?: string;
+          department_code?: string;
+          worker_id?: string | null;
+          status?: RuntimeStatus;
+          role?: string | null;
+          reason?: string | null;
+        };
+        if (event.event_type === "operations.snapshot_required.v1") {
+          handlers.onSnapshotRequired?.();
+        } else if (event.event_type === "operations.heartbeat.v1") {
+          handlers.onKeepalive?.(String(event.observed_at ?? ""));
+        } else if (event.event_type === "agent.status.v1" && event.agent_id && event.department_code) {
+          handlers.onStatus?.({
+            agent_id: event.agent_id,
+            department_code: event.department_code,
+            worker_id: event.worker_id ?? null,
+            status: event.status ?? "OFFLINE",
+            role: event.role ?? null,
+            reason: event.reason ?? null,
+          });
+        }
+      } catch {
+        handlers.onError?.();
+      }
+    };
+    socket.onerror = () => handlers.onError?.();
+    socket.onclose = () => {
+      socket = null;
+      if (!closed) {
+        handlers.onError?.();
+        reconnectTimer = window.setTimeout(connect, 2000);
+      }
+    };
+  };
+
+  connect();
+  return () => {
+    closed = true;
+    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    socket?.close();
+    socket = null;
   };
 }

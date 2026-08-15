@@ -63,7 +63,10 @@ services:
   # 일치해야 한다 - 다른 부서(예: research-department)와 달리 CEO는 CLI 명령 이름과
   # 프로필 이름이 같다.
   ceo-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile.ceo-hermes
+    image: hedgefund-ceo-hermes:primary-idempotency-v1
     container_name: hedgefund-ceo-hermes
     restart: unless-stopped
     command: ["sleep", "infinity"]

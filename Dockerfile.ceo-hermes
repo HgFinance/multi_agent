@@ -1,8 +1,8 @@
 ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent:latest
 FROM ${HERMES_BASE_IMAGE}
 
-# The gateway image owns the Discord adapter hook.  Dispatcher, supervisor,
-# BFF, and the standalone Hermes runtime keep their existing images.
+# CEO의 native kanban_create를 build-time에 HgFinance의 scoped primary
+# idempotency 경계로 감싼다. runtime pip install이나 DB migration은 하지 않는다.
 ENV PYTHONPATH="/opt/hgfinance:${PYTHONPATH}"
 
 COPY orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
@@ -14,5 +14,4 @@ COPY deploy/ceo-kanban/install_primary_idempotency.py /tmp/install_primary_idemp
 
 RUN python3 /tmp/install_hermes_discord_patch.py \
     && python3 /tmp/install_primary_idempotency.py \
-    && rm -f /tmp/install_primary_idempotency.py \
-    && rm -f /tmp/install_hermes_discord_patch.py
+    && rm -f /tmp/install_hermes_discord_patch.py /tmp/install_primary_idempotency.py

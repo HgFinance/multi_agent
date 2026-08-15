@@ -123,6 +123,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 가설→실행 번역에서 무엇이 사라졌는지 원장에 각인. 실측: 실험이
                 # 돈 가설 41건이 config 19개로 접혔는데 어디에도 안 남아 있었다
                 "20260813070000_hypotheses_mapping_loss.sql",
+                # CEO mandate 현재 설정에 요청 메타데이터를 보존한다.
+                "20260814000100_mandate_current_metadata.sql",
                 # Library 조회 면(뷰 3종). 공장은 적재만 하고 읽을 면이 없었다
                 "20260814090000_library_read_views.sql",
                 # 서가가 낙폭을 최악값으로만 요약해 "관문을 넘은 적 있다" 를

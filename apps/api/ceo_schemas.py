@@ -30,8 +30,8 @@ class TaskWorkflow(BaseModel):
     )
     qa_required: bool = Field(
         description=(
-            "QA 단계 필요 여부. QA Task가 생기면 확정 true. Synthesis까지 갔는데 "
-            "QA Task가 없으면 false. 그 전에는 Supervisor 기본값 true."
+            "QA 평가 경로 필요 여부. ordinary analysis에서는 CEO Synthesis와 병렬인 "
+            "async evaluation lane이며, binding/high-risk workflow에서만 blocking gate일 수 있다."
         )
     )
 
@@ -146,6 +146,8 @@ class TaskListItem(BaseModel):
     status: WorkflowStatus
     created_at: str | None = None
     selected_departments: list[str] = Field(default_factory=list)
+    # root body의 `requested_by=` 줄. 옛 Root는 이 줄이 없어 None("계정 불명")이다.
+    owner_id: str | None = None
 
 
 class TaskListResponse(BaseModel):
