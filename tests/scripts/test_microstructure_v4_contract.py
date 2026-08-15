@@ -14,6 +14,9 @@ import feature_catalog  # noqa: E402
 import microstructure_builder  # noqa: E402
 import spec_dataset_builder  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "scripts"))
+import measure_micro_v4_ast_candidates as candidate_measure  # noqa: E402
+
 
 V4_FIELDS = {
     "depth_imbalance_l1",
@@ -153,3 +156,12 @@ def test_dataset_manifest_registration_uses_write_safe_connection() -> None:
     source = inspect.getsource(spec_dataset_builder.build)
     assert "connect_writer(env[\"DATABASE_URL\"]" in source
     assert "meta = psycopg2.connect" not in source
+
+
+def test_v4_candidate_diagnostic_only_uses_executable_ast_operators() -> None:
+    for expression in candidate_measure.CANDIDATES.values():
+        parsed = alpha_ast.parse(expression)
+        assert parsed == expression
+    ranks = candidate_measure.percentile_ranks({"a": 1.0, "b": 2.0, "c": 2.0})
+    assert ranks == {"a": 0.0, "b": 1.0, "c": 1.0}
+    assert "start" in inspect.signature(candidate_measure.measure).parameters
