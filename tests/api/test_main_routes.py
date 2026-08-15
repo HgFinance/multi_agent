@@ -21,14 +21,27 @@ from __future__ import annotations
 
 import unittest
 from collections import Counter
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 from apps.api.main import app
+
+
+def _iter_effective_routes(routes: Iterable[Any]) -> Iterator[Any]:
+    """Flatten FastAPI routes across eager and lazy include implementations."""
+
+    for route in routes:
+        included_router = getattr(route, "original_router", None)
+        if included_router is not None:
+            yield from _iter_effective_routes(included_router.routes)
+        else:
+            yield route
 
 
 class NoDuplicateRouteRegistrationTest(unittest.TestCase):
     def test_no_path_and_method_is_registered_twice(self) -> None:
         combos: list[tuple[str, str]] = []
-        for route in app.routes:
+        for route in _iter_effective_routes(app.routes):
             path = getattr(route, "path", None)
             methods = getattr(route, "methods", None)
             if not path or not methods:
@@ -50,7 +63,7 @@ class NoDuplicateRouteRegistrationTest(unittest.TestCase):
 
         owners = [
             route
-            for route in app.routes
+            for route in _iter_effective_routes(app.routes)
             if getattr(route, "path", None) == "/ui/ceo/ask"
             and "POST" in getattr(route, "methods", set())
         ]
