@@ -1,15 +1,10 @@
-# ▶ 부서장 모델 (2026-08-13, 재일 지시로 claude-opus-5 전환 (2026-08-14, fable 한도 소진))
-#   경로: hermes -> ANTHROPIC_BASE_URL(host.docker.internal:8787, 호스트 프록시
-#   scripts/claude_code_proxy.py) -> claude -p -> 플랜 한도. API 키 직결은
-#   종량 과금으로 새므로 금지(2026-08-03 실측, docker-compose.claude.yml 참고).
-#   전환 전 값: openai-codex / gpt-5.6-luna (복귀는 이 두 줄 원복 + 오버레이 제거)
-#   ⚠ base_url 은 **/anthropic 으로 끝나야 한다** - hermes 의
-#   _anthropic_base_url_override_ok 가 그 접미만 인정하고, 아니면 조용히
-#   api.anthropic.com 직행으로 폴백해 400(서드파티)이 난다(2026-08-13 실측).
+# ▶ 부서장 기본 모델 (2026-08-15 Claude Code 한도 소진으로 Codex 복귀)
+#   정본 계약대로 openai-codex/gpt-5.6-luna 를 기본으로 사용한다.
+#   Claude Code는 한도가 복구되고 승인됐을 때만 docker-compose.claude.yml
+#   오버레이로 사용하는 대체 경로이며 저장소 기본값으로 두지 않는다.
 model:
-  provider: anthropic
-  default: claude-opus-5
-  base_url: http://host.docker.internal:8787/anthropic
+  provider: openai-codex
+  default: gpt-5.6-luna
 env:
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
 agent:
