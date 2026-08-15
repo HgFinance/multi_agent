@@ -14,15 +14,6 @@ sys.path.insert(0, str(RESEARCH / "factory"))
 import lead_intake  # noqa: E402
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _restore_generic_contracts_namespace():
-    """This repository has several legacy top-level modules named ``contracts``."""
-    yield
-    for name in tuple(sys.modules):
-        if name == "contracts" or name.startswith("contracts."):
-            sys.modules.pop(name, None)
-
-
 def _lead(block: dict) -> dict:
     return lead_intake.to_lead(
         block, lens="ACADEMIC", source_type="PAPER", case_id="case-test",

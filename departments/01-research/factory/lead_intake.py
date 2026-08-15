@@ -36,9 +36,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_RESEARCH = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_RESEARCH / "contracts"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     MAX_EXCERPT_CHARS,
     lead_id_for,
 )
@@ -85,7 +86,7 @@ READINESS_VALUES = frozenset({AST_READY, DATA_BLOCKED, SEMANTIC_MISMATCH})
 
 def _alpha_ast():
     """Load the container-neutral grammar shared with quant execution."""
-    from contracts import alpha_ast_surface  # noqa: PLC0415
+    import alpha_ast_surface  # noqa: PLC0415
     return alpha_ast_surface
 
 
