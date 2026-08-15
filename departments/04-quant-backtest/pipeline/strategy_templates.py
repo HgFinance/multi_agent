@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Callable, Protocol
 
@@ -812,6 +812,11 @@ TEMPLATES: dict[str, Template] = {
     )
 }
 
+# COMBO evaluates every component template, including OFI. Keep that
+# transitive dependency on the template itself so the production runner loads
+# and clips to the v3 microstructure manifest before evaluating the signal.
+TEMPLATES["COMBO"] = replace(TEMPLATES["COMBO"], needs_micro=True)
+
 # Gate 0 통제 어휘. 리서치 기획안의 edge_type 은 여기 있어야 접수된다.
 EDGE_VOCAB: frozenset[str] = frozenset(t.edge_type for t in TEMPLATES.values())
 
@@ -1304,6 +1309,8 @@ def _check_composite_unifies_direction_and_is_deterministic():
     assert out == _sig_composite(PITView(m, m.dates[-1]), {}), "결합이 비결정적이다"
     # 재귀 금지: COMBO 가 자기 자신을 부품으로 세면 무한 재귀다
     assert "COMBO" in _COMPOSITE_IDS and TEMPLATES["COMBO"].edge_type == "signal_composite"
+    assert TEMPLATES["COMBO"].needs_micro, \
+        "COMBO must load v3 microstructure because OFI is one of its components"
     # 완제품도 어휘에 있어야 접수·발주가 된다
     assert "signal_composite" in EDGE_VOCAB, sorted(EDGE_VOCAB)
     # 준비 기간은 부품 중 최댓값 - 짧게 잡으면 일부 신호가 빠진 채 결합된다

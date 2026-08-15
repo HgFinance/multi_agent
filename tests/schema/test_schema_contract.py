@@ -420,6 +420,24 @@ class TimescaleSchemaContractTest(unittest.TestCase):
         self.assertNotRegex(self.sql.lower(), r"references\s+(reference|governance|strategy|accounting)\.")
         self.assertIn("instrument_id uuid not null", self.sql)
 
+    def test_compression_jobs_have_a_finite_runtime(self) -> None:
+        migration = next(
+            content
+            for path, content in self.files
+            if path.name == "006_compression_policy_runtime.sql"
+        ).lower()
+        self.assertIn("public.alter_job", migration)
+        self.assertIn("max_runtime => interval '20 minutes'", migration)
+        for hypertable in (
+            "market_ticks",
+            "market_quotes",
+            "market_bars",
+            "microstructure_features",
+            "derivative_snapshots",
+        ):
+            with self.subTest(hypertable=hypertable):
+                self.assertIn(f"'{hypertable}'", migration)
+
 
 if __name__ == "__main__":
     unittest.main()

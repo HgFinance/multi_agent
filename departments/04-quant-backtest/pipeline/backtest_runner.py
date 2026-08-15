@@ -2024,7 +2024,28 @@ if __name__ == "__main__":
         need = [t.edge_type for t in TEMPLATES.values()
                 if getattr(t, "needs_micro", False)]
         assert "order_flow_imbalance" in need, need
+        assert "signal_composite" in need, need
+        try:
+            attach_micro_if_needed(m, {"strategy": "COMBO"}, _Boom())
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("COMBO did not request the microstructure dataset")
         print("  미시구조 적재(요구한 것만) OK")
+
+    def _check_combo_short_sample_is_inconclusive():
+        """The current 61-day micro sample must not manufacture a WF verdict."""
+        from strategy_templates import resolve
+        from walk_forward import make_windows
+
+        combo = resolve("COMBO")
+        assert combo is not None
+        warmup = combo.min_history(dict(DEFAULT_CONFIG, strategy="COMBO"))
+        assert warmup == 60, warmup
+        days = [date(2026, 5, 18) + timedelta(days=i) for i in range(61)]
+        assert make_windows(days, warmup, embargo_days=20) == [], \
+            "61 days with a 60-day warmup cannot support walk-forward evidence"
+        print("  COMBO 61-day sample -> insufficient OK")
 
     def _check_sample_is_clipped_to_micro_coverage():
         """**미시구조를 읽으면 표본도 그 기간이어야 한다** (2026-08-14 실측).
@@ -2288,5 +2309,6 @@ if __name__ == "__main__":
     _check_rebalance_vocab_matches_binder()
     _check_ast_signal_path()
     _check_micro_attach()
+    _check_combo_short_sample_is_inconclusive()
     _check_sample_is_clipped_to_micro_coverage()
-    print("Backtest Runner 18개 영역 통과. 실행은 --run")
+    print("Backtest Runner 19개 영역 통과. 실행은 --run")
