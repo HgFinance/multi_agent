@@ -64,7 +64,13 @@ MODULE_VERSION = "quant-alpha-ast-v1"
 # 수식은 `needs_micro` 가 자동으로 켜진다(`fields_of` 참고) - 가설이 데이터
 # 요구를 따로 적을 필요가 없다.
 PRICE_FIELDS = ("close", "notional", "returns")
-MICRO_FIELDS = ("spread_bps", "depth_imbalance", "order_flow_imbalance",
+MICRO_FIELDS = ("spread_bps", "depth_imbalance",
+                # Legacy column name.  The value is signed *trade* volume /
+                # total trade volume, not Cont-Kukanov-Stoikov quote-event OFI
+                # (new/cancel/price changes at the best bid and ask).  Keep the
+                # name for dataset compatibility, but do not interpret it as
+                # full order-book OFI or order-sign persistence.
+                "order_flow_imbalance",
                 "trade_intensity", "realized_volatility",
                 # ▶ 체결 거래대금·수량 (2026-08-14 추가, 데이터셋 v2)
                 #   원천(`market.market_ticks`)에는 처음부터 있었는데 집계가
@@ -548,8 +554,8 @@ FIELD_CONCEPTS = {
                    "spread", "liquidity", "cost", "slippage", "bid", "ask"),
     "depth_imbalance": ("호가", "잔량", "깊이", "불균형", "매수", "매도", "수급",
                         "depth", "imbalance", "book", "quote"),
-    "order_flow_imbalance": ("주문", "호가", "압력", "매수", "매도", "주문흐름",
-                             "수급", "체결", "ofi", "order flow", "imbalance",
+    "order_flow_imbalance": ("체결", "체결흐름", "매수", "매도", "수급",
+                             "signed trade", "trade flow", "ofi", "imbalance",
                              "pressure", "flow"),
     "trade_intensity": ("체결", "거래빈도", "강도", "빈도", "활발", "intensity",
                         "trade", "frequency", "activity"),
