@@ -66,28 +66,160 @@ TERMINAL_HYPOTHESIS_STATUSES = frozenset({
 })
 
 
+# 회수(`reclaim_hypotheses`)가 PROPOSED 로 되돌리는 상태. **여기 있는 것만**
+# "기다리면 풀린다" 가 참이다 - `_STALL_SQL` 의 `where h.status = 'RUNNING'` 과
+# 같은 값이어야 하고, 어긋나면 놓아준 주문이 아무도 안 풀어 주는 상태를
+# 기다리며 큐에서 영원히 돈다.
+RESCUABLE_HYPOTHESIS_STATUSES = frozenset({"RUNNING"})
+
+
+def hypothesis_status(conn, hypothesis_id: str) -> str:
+    """가설의 현재 상태. **못 읽으면 빈 문자열**(지어내지 않는다)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select status from quant.hypotheses "
+                        "where hypothesis_id = %s::uuid", (hypothesis_id,))
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - 못 물으면 상태를 주장하지 않는다
+        return ""
+    return str(row[0] or "").upper() if row else ""
+
+
 def hypothesis_is_terminal(conn, hypothesis_id: str) -> bool:
     """가설이 종결 상태인가. 못 읽으면 **종결로 보지 않는다**(지어내지 않는다).
 
     판단을 못 했다고 주문을 닫으면 멀쩡한 것을 죽인다. 반대로 놓아주기는
     반복될 뿐이라 회복 가능하므로, 불확실할 때는 놓아주기 쪽으로 기운다.
     """
+    return hypothesis_status(conn, hypothesis_id) in TERMINAL_HYPOTHESIS_STATUSES
+
+
+def gate_for_status(status: str) -> dict:
+    """오케스트레이터를 부르기 **전에** 묻는다: 이 가설이 지금 전진할 수 있나.
+
+    ▶ 왜 앞에 두는가 (2026-08-14 실측, 카드 t_2a368463 항목 1)
+      `orchestrate` 는 데이터 사상·커버리지 실측·실행가능성·사전등록 지문까지
+      **다 만든 다음 마지막에** 전이 가능 여부를 본다(experiment_orchestrator
+      :668). 그래서 전진할 수 없는 가설 하나가 큐에 있으면, 그 앞의 작업이
+      전부 만들어졌다가 통째로 버려진다.
+
+      실측(워커 로그 24시간): 그렇게 버려진 `orchestrate` 실행이 **92회**,
+      주문 11건. 한 주문(`2bb4b651`)만 36회였다. 가설이 RUNNING 에 갇히면
+      회수(HYPOTHESIS_STALL_MIN=30분)가 풀어 줄 때까지 2분마다 한 번씩
+      같은 것을 만들었다 버린다 - 가설 하나당 약 14회다.
+
+      전이 가능 여부는 **색인 조회 한 번**이면 알 수 있다. 관문을 앞으로
+      옮기면 그 92회가 SELECT 92번이 된다.
+
+    ▶ 규칙을 여기서 다시 쓰지 않는다
+      판정은 계약(`preregistration.can_transition`)에 묻는다. 여기에 상태
+      목록을 베껴 두면 실행면과 워커가 언젠가 어긋나고, 어긋난 쪽이 조용히
+      이긴다.
+    """
+    st = str(status or "").strip().upper()
+    if not st:
+        # 상태를 못 읽은 것은 "못 간다" 가 아니다 - 돌려보고 실행면이 판정한다
+        return {"action": "RUN", "reason": "가설 상태를 못 읽었다 - 지어내지 않고 돌린다"}
     try:
-        with conn.cursor() as cur:
-            cur.execute("select status from quant.hypotheses "
-                        "where hypothesis_id = %s::uuid", (hypothesis_id,))
-            row = cur.fetchone()
-    except Exception:  # noqa: BLE001 - 못 물으면 종결로 몰지 않는다
-        return False
-    return bool(row) and str(row[0] or "").upper() in TERMINAL_HYPOTHESIS_STATUSES
+        from preregistration import can_transition
+    except Exception:  # noqa: BLE001 - 계약을 못 읽으면 막지 않는다(fail-open)
+        return {"action": "RUN", "reason": "계약 모듈을 못 읽었다 - 막지 않는다"}
+    if can_transition(st, "PREREGISTERED"):
+        return {"action": "RUN", "reason": f"{st} 에서 사전등록으로 갈 수 있다"}
+    if st in RESCUABLE_HYPOTHESIS_STATUSES:
+        return {"action": "RELEASE",
+                "reason": (f"가설이 {st} 이라 지금은 못 간다 - 회수가 "
+                           f"{HYPOTHESIS_STALL_MIN}분 정체 기준으로 PROPOSED 로 "
+                           f"되돌리면 그대로 돌 주문이다. 실패가 아니라 대기다")}
+    return {"action": "CANCEL",
+            "reason": (f"가설이 {st} 이라 사전등록으로 갈 수 없고, 회수도 발주도 "
+                       f"이 상태를 되돌리지 않는다 - 이 주문은 할 일이 없다. "
+                       f"재실험이 필요하면 리서치가 새 가설을 내는 것이 계약이다")}
+
+
+# ── 실행면 밖의 고장 ─────────────────────────────────────────────────────────
+#
+# ▶ **SQLSTATE 로 가른다. 메시지 문자열로 가르지 않는다.**
+#   문구로 가르면 벤더가 한 줄만 바꿔도 조용히 실패 쪽으로 넘어가고, 반대로
+#   우리 전략 코드가 우연히 같은 낱말을 쓰면 진짜 결함이 유예된다. SQLSTATE 는
+#   표준이라 안 흔들린다.
+#
+# ▶ **넓히지 않는다.** 여기 들어온 것은 재시도되므로, 실행면 결함을 하나라도
+#   섞으면 그 결함이 조용히 영원히 돈다 - 실패로 남는 것보다 나쁘다.
+#   그래서 "우리가 잘못 쓴 SQL"(42xxx 문법·컬럼, 23xxx 제약 위반)은 일부러 뺀다.
+TRANSIENT_SQLSTATES = {
+    # 풀러가 읽기전용 복제로 넘어갔다. 실측 최다 사유다
+    "25006": "DB 가 읽기전용이다(풀러가 복제로 넘어갔다) - 실험이 아니라 인프라다",
+    # 연결이 끊겼다 (class 08). 트랜잭션 풀러에서는 정상 동작이다
+    "08000": "DB 연결이 끊겼다", "08001": "DB 에 연결하지 못했다",
+    "08003": "연결이 이미 닫혀 있다", "08004": "DB 가 연결을 거부했다",
+    "08006": "DB 연결이 중간에 끊겼다", "08007": "커밋 도중 연결이 끊겼다",
+    # 서버가 내려가는 중 (class 57)
+    "57P01": "DB 가 재기동 중이다", "57P02": "DB 가 비정상 종료했다",
+    "57P03": "DB 가 아직 연결을 못 받는다",
+    # 서버 자원 고갈 (class 53)
+    "53100": "DB 디스크가 찼다", "53200": "DB 메모리가 모자랐다",
+    "53300": "DB 연결 수가 한도에 찼다",
+    # 동시성 - 다시 하면 통과한다 (class 40)
+    "40001": "직렬화 충돌이다", "40P01": "교착이 감지됐다",
+}
+
+# 호스트 자원 고갈. **메모리·디스크만** - 나머지 OSError(파일 없음 같은 것)는
+# 실행면 문제일 수 있으므로 유예하지 않는다.
+TRANSIENT_ERRNOS = {12: "호스트 메모리가 모자랐다(ENOMEM)",
+                    28: "호스트 디스크가 찼다(ENOSPC)"}
+
+
+def transient_infra_fault(exc) -> str:
+    """예외가 **실행면 밖의 고장**이면 사람이 읽을 사유, 아니면 빈 문자열.
+
+    ▶ 왜 사유 문자열로 돌려주나
+      참·거짓만으로는 원장에 아무것도 못 남긴다. 무엇 때문에 미뤘는지가
+      `failure_reason` 에 있어야 다음 사람이 "인프라였다" 를 안다.
+
+    ▶ 불확실하면 **유예하지 않는다**
+      유예는 재시도이므로, 판단이 애매한 것을 여기 넣으면 진짜 결함이 조용히
+      영원히 돈다. 여기 기울기는 `hypothesis_is_terminal` 과 반대다 - 저기는
+      "모르면 안 닫는다", 여기는 "모르면 안 미룬다".
+    """
+    code = str(getattr(exc, "pgcode", "") or "")
+    if code in TRANSIENT_SQLSTATES:
+        return TRANSIENT_SQLSTATES[code]
+    if isinstance(exc, MemoryError):
+        return "파이썬이 메모리를 더 못 잡았다(MemoryError)"
+    if isinstance(exc, OSError):
+        why = TRANSIENT_ERRNOS.get(getattr(exc, "errno", None))
+        if why:
+            return why
+    # 풀러가 유휴 연결을 끊으면 psycopg2 는 pgcode 없이 InterfaceError 를 낸다
+    # (`connection_is_usable` 참고 - 이미 정상 동작으로 다루고 있는 것이다)
+    if type(exc).__name__ == "InterfaceError":
+        return "DB 인터페이스가 닫혔다(풀러가 유휴 연결을 끊었다)"
+    return ""
 
 
 def run_one(conn, job: dict) -> dict:
     """작업 하나. **예외가 나도 반드시 종결한다.**"""
-    from experiment_orchestrator import orchestrate
     from job_queue import finish, release
 
     jid, hid = job["job_id"], job["hypothesis_id"]
+
+    # ▶ **전진할 수 없는 가설에 오케스트레이터를 붙이지 않는다** (2026-08-14)
+    #   관문이 `orchestrate` 안 맨 끝에 있어서, 못 갈 가설도 데이터 사상·
+    #   커버리지 실측·사전등록 지문을 다 만든 뒤에야 거부됐다. 24시간에 그렇게
+    #   버린 실행이 92회다(gate_for_status 참고). 조회 한 번으로 먼저 가른다.
+    gate = gate_for_status(hypothesis_status(conn, hid))
+    if gate["action"] == "CANCEL":
+        from job_queue import cancel  # 취소 경로에서만 필요하다
+
+        cancel(conn, jid, reason=gate["reason"])
+        return {"job_id": jid, "result": "CANCELLED", "reason": gate["reason"]}
+    if gate["action"] == "RELEASE":
+        release(conn, jid, reason=gate["reason"])
+        return {"job_id": jid, "result": "RELEASED", "reason": gate["reason"]}
+
+    from experiment_orchestrator import orchestrate
+
     try:
         rep = orchestrate(hid, conn=conn)
         exp = (rep.experiment_refs or {}).get("experiment_id")
@@ -113,11 +245,17 @@ def run_one(conn, job: dict) -> dict:
             #   실측: `805a81b5`·`17bd0213` 두 건이 INCONCLUSIVE 인 채 큐에
             #   앉아 그 고리를 돌고 있었다("INCONCLUSIVE -> PREREGISTERED").
             #   종결된 가설의 주문은 **할 일이 없다.** 사유를 남기고 닫는다.
+            #   앞의 관문이 이미 걸렀어야 하지만, 관문과 실행 사이에 가설이
+            #   종결될 수 있다(경합). 그 경우에도 같은 결론이다.
             if hypothesis_is_terminal(conn, hid):
                 done_reason = (f"{reason} | 가설이 이미 종결 상태다 - 회수도 "
                                f"발주도 이 주문을 되살리지 않으므로 닫는다")
-                finish(conn, jid, ok=False, reason=done_reason)
-                return {"job_id": jid, "result": "FAILED",
+                # **실패가 아니라 취소다.** 실행면은 멀쩡했고 다시 시도할 것도
+                # 없다 - 무의미해진 것뿐이다(job_queue.cancel 참고).
+                from job_queue import cancel  # noqa: PLC0415
+
+                cancel(conn, jid, reason=done_reason)
+                return {"job_id": jid, "result": "CANCELLED",
                         "reason": done_reason}
             release(conn, jid, reason=reason)
             return {"job_id": jid, "result": "RELEASED", "reason": reason}
@@ -126,6 +264,40 @@ def run_one(conn, job: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         # 집어간 것은 반드시 끝낸다 - 안 그러면 lease 만료까지 그 가설이 묶인다
         reason = f"{type(e).__name__}: {e}"[:400]
+
+        # ▶ **실행면 밖에서 난 고장은 이 실험의 실패가 아니다** (2026-08-14 실측)
+        #   읽기전용 풀러·호스트 OOM 으로 죽은 주문을 여태 `finish(ok=False)` 로
+        #   적었다. 최근 1일 되풀이 실패 59시도 중 27이 그것이고, 가설 20 자리가
+        #   자기 잘못이 아닌 실패 이력을 얻었다. 같은 사유 3건이면 `repeat_block`
+        #   이 재발주를 영구 차단한다 - 이미 네 쌍이 2건까지 와 있었다.
+        #   유예는 시도 예산을 되돌리고 사유를 남기되 실패로는 세지 않는다.
+        infra = transient_infra_fault(e)
+        if infra:
+            from job_queue import defer  # noqa: PLC0415 - 유예 경로에서만 필요하다
+
+            # 터진 트랜잭션을 안 물리면 다음 쓰기가 통째로 거부된다
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001, S110 - 이미 죽은 연결
+                pass
+            try:
+                d = defer(conn, jid, reason=f"{reason} | {infra}")
+            except Exception as e2:  # noqa: BLE001 - 유예조차 못 쓰면 실패로 둔다
+                # 여기서 조용히 넘어가면 주문이 집힌 채 lease 만료까지 묶인다
+                print(f"⚠ 유예 기록 실패 {jid}: {type(e2).__name__}: {e2}",
+                      file=sys.stderr)
+                d = {"action": "FAILED", "count": 0}
+            if d.get("action") == "DEFERRED":
+                print(f"⚠ 인프라 고장으로 유예 {jid} ({d.get('count')}회): "
+                      f"{infra} | {reason}", file=sys.stderr)
+                return {"job_id": jid, "result": "DEFERRED",
+                        "reason": f"{infra} - 유예 {d.get('count')}회",
+                        "defers": d.get("count")}
+            print(f"⚠ 인프라 고장이 계속된다 {jid}: {infra} | {reason}",
+                  file=sys.stderr)
+            return {"job_id": jid, "result": "FAILED",
+                    "reason": d.get("reason") or reason}
+
         try:
             finish(conn, jid, ok=False, reason=reason)
         except Exception:  # noqa: BLE001
@@ -547,14 +719,18 @@ def _check_terminal_hypothesis_job_is_closed_not_parked():
     orch = types.ModuleType("experiment_orchestrator")
     orch.orchestrate = lambda hid, conn=None: _Rep()
     sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+    mod.cancel = lambda conn, jid, *, reason: calls.append(("cancel", reason))
     try:
-        # 종결 상태 -> 닫는다
+        # 종결 상태 -> 닫는다. **실패가 아니라 취소로** 닫는다(2026-08-14):
+        # 실행면은 멀쩡했고 다시 시도할 것도 없다. 실패로 적으면 재발주 차단
+        # (`repeat_block`)·병목 인구조사·브리핑이 고칠 것 없는 일에 매 주기
+        # 사람을 부른다.
         for st in ("INCONCLUSIVE", "REJECTED", "ARCHIVED"):
             calls.clear()
             r = W.run_one(_StatusConn(st), {"job_id": "j1", "hypothesis_id": "h1"})
-            assert r["result"] == "FAILED", (st, r)
-            assert [c[0] for c in calls] == ["finish"], (st, calls)
-            assert "종결" in (calls[0][2] or ""), (st, calls)
+            assert r["result"] == "CANCELLED", (st, r)
+            assert [c[0] for c in calls] == ["cancel"], (st, calls)
+            assert st in (calls[0][1] or ""), (st, calls)
 
         # 아직 도는 상태 -> 놓아준다(예산 보존)
         calls.clear()
@@ -586,6 +762,351 @@ def _check_terminal_hypothesis_job_is_closed_not_parked():
                     return None
             return _C()
     assert W.hypothesis_is_terminal(_Missing(), "h1") is False
+
+
+def _check_gate_runs_before_the_orchestrator():
+    """**전진할 수 없는 가설에 오케스트레이터를 붙이지 않는다** (2026-08-14 실측).
+
+    카드 t_2a368463 항목 1 이 센 병목이다. 전이 관문이 `orchestrate` 의 맨 끝
+    (experiment_orchestrator:668)에 있어서, 못 갈 가설도 데이터 사상·커버리지
+    실측·실행가능성·사전등록 지문을 **다 만든 다음에야** 거부됐다.
+
+    실측(워커 로그 24시간): 그렇게 통째로 버려진 `orchestrate` 실행 92회 /
+    주문 11건. 한 주문(2bb4b651)만 36회다. 원장에도 같은 사유의 종결 16건이
+    남았다(누적 시도 29회).
+
+    여기서 고정하는 것 세 가지:
+      ① 전진 못 하는 가설이면 **오케스트레이터를 아예 안 부른다**
+      ② 되돌려 줄 데가 있는 상태(RUNNING)는 놓아주기 - 예산을 안 태운다
+      ③ 아무도 안 되돌리는 상태(종결)는 **취소**로 닫는다 - 실패가 아니다
+         (실패로 적으면 재발주 차단·병목 인구조사·브리핑이 고칠 것 없는 일에
+          매 주기 사람을 부른다)
+    """
+    import types
+
+    import experiment_worker as W
+
+    class _StatusConn:
+        """가설 상태만 돌려주는 가짜 연결."""
+
+        def __init__(self, status):
+            self._status = status
+
+        def cursor(self):
+            status = self._status
+
+            class _C:
+                def __enter__(self_):
+                    return self_
+                def __exit__(self_, *a):
+                    return False
+                def execute(self_, *a, **k):
+                    return None
+                def fetchone(self_):
+                    return (status,)
+            return _C()
+
+    calls = []
+    mod = types.ModuleType("job_queue")
+    mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
+        calls.append(("finish", ok, reason))
+    mod.release = lambda conn, jid, *, reason: calls.append(("release", reason))
+    mod.cancel = lambda conn, jid, *, reason: calls.append(("cancel", reason))
+
+    orch = types.ModuleType("experiment_orchestrator")
+
+    def _must_not_run(hid, conn=None):
+        raise AssertionError(
+            "전진할 수 없는 가설에 오케스트레이터를 붙였다 - 데이터 사상과 "
+            "사전등록 지문을 다 만든 뒤 버리게 된다(24시간 92회)")
+
+    orch.orchestrate = _must_not_run
+    sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+    try:
+        # ① 종결 가설 -> 오케스트레이터 없이 취소
+        for st in ("REJECTED", "INCONCLUSIVE", "ARCHIVED", "SUPPORTED"):
+            calls.clear()
+            r = W.run_one(_StatusConn(st), {"job_id": "j1",
+                                            "hypothesis_id": "h1"})
+            assert r["result"] == "CANCELLED", (st, r)
+            assert [c[0] for c in calls] == ["cancel"], (st, calls)
+            assert st in (calls[0][1] or ""), \
+                ("무엇 때문에 닫혔는지 사유가 말해야 한다", st, calls)
+
+        # ② RUNNING -> 오케스트레이터 없이 놓아주기(회수가 곧 풀어 준다)
+        calls.clear()
+        r2 = W.run_one(_StatusConn("RUNNING"), {"job_id": "j2",
+                                                "hypothesis_id": "h1"})
+        assert r2["result"] == "RELEASED", r2
+        assert [c[0] for c in calls] == ["release"], calls
+
+        # ③ **관문이 정상 주문을 막으면 안 된다** - 막으면 공장이 통째로 선다
+        ran = []
+        orch.orchestrate = lambda hid, conn=None: ran.append(hid) or _Ok()
+
+        class _Ok:
+            verdict = "RUNNABLE"
+            experiment_refs = {"experiment_id": "e1"}
+            backlog = []
+
+        for st in ("PROPOSED", "INTAKE"):
+            calls.clear(); ran.clear()
+            r3 = W.run_one(_StatusConn(st), {"job_id": "j3",
+                                             "hypothesis_id": "h1"})
+            assert ran == ["h1"], (st, "돌 수 있는 가설을 관문이 막았다", r3)
+            assert r3["result"] == "DONE", (st, r3)
+    finally:
+        sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
+
+
+def _check_gate_asks_the_contract_not_a_copy():
+    """**관문이 계약을 다시 베끼면 언젠가 어긋난다** (순수 함수).
+
+    상태 목록을 워커가 따로 들고 있으면 실행면(`preregistration`)이 바뀔 때
+    한쪽만 바뀌고, 어긋난 쪽이 조용히 이긴다.
+    """
+    import experiment_worker as W
+
+    from preregistration import can_transition
+
+    for st in ("PROPOSED", "INTAKE"):
+        assert W.gate_for_status(st)["action"] == "RUN", st
+        assert can_transition(st, "PREREGISTERED"), st
+    # 되돌려 주는 데가 있는 것만 대기다
+    assert W.gate_for_status("RUNNING")["action"] == "RELEASE"
+    assert W.RESCUABLE_HYPOTHESIS_STATUSES == frozenset({"RUNNING"}), \
+        "회수(_STALL_SQL)가 되돌리는 상태와 같아야 한다"
+    # 아무도 안 되돌리는 것은 대기가 아니라 취소다 - 아니면 큐에서 영원히 돈다
+    for st in ("REJECTED", "SUPPORTED", "INCONCLUSIVE", "ARCHIVED",
+               "PROMOTED", "PREREGISTERED", "NEEDS_DATA"):
+        assert W.gate_for_status(st)["action"] == "CANCEL", st
+        assert not can_transition(st, "PREREGISTERED"), st
+    # 못 읽은 것은 판정이 아니다 - 돌려보고 실행면이 판정하게 둔다
+    for st in ("", None, "   "):
+        assert W.gate_for_status(st)["action"] == "RUN", st
+
+
+def _check_infra_fault_is_not_an_experiment_failure():
+    """**실행면 밖에서 난 고장을 실험 실패로 적지 않는다** (2026-08-14 실측).
+
+    카드 t_b39bd6d0 항목 1(`작업 되풀이 실패`)이 세고 있는 것의 정체다. 원장
+    최근 1일 되풀이 실패 상위 두 종류가 **둘 다 인프라**였다:
+      · `OSError: [Errno 12] Cannot allocate memory`        시도 14 / 가설 10
+      · `ReadOnlySqlTransaction: cannot execute INSERT ...`  시도 13 / 가설 10
+    59 시도 중 27 이 여기다. 풀러가 읽기전용으로 넘어갔거나 호스트가 메모리를
+    못 준 것이지 **가설·전략·데이터는 아무 잘못이 없다.**
+
+    그런데 `run_one` 의 포괄 except 가 전부 `finish(ok=False)` 였다. 백테스트는
+    이미 다 돌았고(주문 수명 실측 10~30분) 마지막 INSERT 에서 죽은 것인데,
+    그 계산을 버리고 시도 예산까지 태운 뒤 **멀쩡한 가설에 실패 이력을 남긴다.**
+    같은 사유 3건이면 `repeat_block` 이 재발주를 영구 차단한다 - 실측으로 이미
+    네 쌍이 2건까지 와 있었다.
+
+    여기서 고정하는 것:
+      ① 일시적 인프라 고장이면 오케스트레이터가 아니라 **유예**(`defer`)로 간다
+      ② 실행면 고장(전략 코드가 터진 것)은 **여전히 실패**다 - 안 그러면 진짜
+         결함이 조용히 무한 재시도된다
+    """
+    import types
+
+    import experiment_worker as W
+
+    calls = []
+    mod = types.ModuleType("job_queue")
+    mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
+        calls.append(("finish", ok, reason))
+    mod.release = lambda conn, jid, *, reason: calls.append(("release", reason))
+    mod.cancel = lambda conn, jid, *, reason: calls.append(("cancel", reason))
+    mod.defer = lambda conn, jid, *, reason: (
+        calls.append(("defer", reason)) or {"action": "DEFERRED", "count": 1})
+
+    orch = types.ModuleType("experiment_orchestrator")
+    sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+
+    class _ReadOnly(Exception):
+        pgcode = "25006"
+
+    class _Enomem(OSError):
+        pass
+
+    try:
+        # ① 풀러가 읽기전용 - 실험이 실패한 게 아니다
+        def _readonly(hid, conn=None):
+            raise _ReadOnly("cannot execute INSERT in a read-only transaction")
+
+        orch.orchestrate = _readonly
+        calls.clear()
+        r = W.run_one(_FakeConn(), {"job_id": "j1", "hypothesis_id": "h1"})
+        assert r["result"] == "DEFERRED", ("읽기전용 풀러는 가설의 흠이 아니다", r)
+        assert [c[0] for c in calls] == ["defer"], calls
+
+        # ② 호스트 메모리 고갈 - 역시 실험의 흠이 아니다
+        def _oom(hid, conn=None):
+            raise _Enomem(12, "Cannot allocate memory")
+
+        orch.orchestrate = _oom
+        calls.clear()
+        r2 = W.run_one(_FakeConn(), {"job_id": "j2", "hypothesis_id": "h1"})
+        assert r2["result"] == "DEFERRED", ("호스트 OOM 은 가설의 흠이 아니다", r2)
+        assert [c[0] for c in calls] == ["defer"], calls
+
+        # ③ **실행면 고장은 여전히 실패다.** 여기까지 유예하면 진짜 결함이
+        #    조용히 영원히 재시도된다 - 그게 제일 나쁘다
+        def _bug(hid, conn=None):
+            raise KeyError("close")
+
+        orch.orchestrate = _bug
+        calls.clear()
+        r3 = W.run_one(_FakeConn(), {"job_id": "j3", "hypothesis_id": "h1"})
+        assert r3["result"] == "FAILED", ("전략 코드가 터진 것은 실패다", r3)
+        assert [c[0] for c in calls] == ["finish"], calls
+        assert calls[0][1] is False, calls
+
+        # ④ 유예가 상한을 넘겨 실패로 굳으면 워커도 실패로 보고한다
+        mod.defer = lambda conn, jid, *, reason: (
+            calls.append(("defer", reason)) or {"action": "FAILED", "count": 99})
+        orch.orchestrate = _readonly
+        calls.clear()
+        r4 = W.run_one(_FakeConn(), {"job_id": "j4", "hypothesis_id": "h1"})
+        assert r4["result"] == "FAILED", ("장애가 계속되면 사람이 봐야 한다", r4)
+    finally:
+        sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
+
+
+def _check_transient_classifier_reads_codes_not_prose():
+    """**분류는 SQLSTATE·errno 로 한다 - 메시지 문자열로 하지 않는다** (순수 함수).
+
+    문자열로 가르면 벤더가 문구 한 줄만 바꿔도 조용히 실패 쪽으로 넘어가고,
+    반대로 우리 전략 코드가 우연히 같은 낱말을 쓰면 진짜 결함이 유예된다.
+    코드는 표준이라 안 흔들린다.
+
+    ▶ **진짜 예외 클래스로 확인하려다 헛다리를 짚는 함정** (2026-08-14 실측)
+      `psycopg2.errors.ReadOnlySqlTransaction("boom")` 처럼 **손으로 만든**
+      인스턴스는 `pgcode` 가 None 이다 - 그 속성은 드라이버가 서버 응답에서
+      채우는 것이라 생성자로는 안 채워진다. 그래서 진짜 클래스로 확인하면
+      분류기가 고장난 것처럼 보인다. 아래가 `pgcode` 를 직접 심는 이유다.
+
+      그러니 이 검사만으로는 부족해서 실서버로 한 번 확인했다(로컬
+      timescaledb 직결 - **공용 풀러에 재현하지 않는다**):
+        set default_transaction_read_only=on 뒤 일반 테이블 INSERT
+        -> psycopg2.errors.ReadOnlySqlTransaction / pgcode='25006'
+        -> 메시지가 원장에 쌓인 사유와 같고, 분류기가 인프라로 가른다
+      (임시 테이블은 읽기전용 트랜잭션에서도 써지므로 재현이 안 된다)
+    """
+    import experiment_worker as W
+
+    class _E(Exception):
+        def __init__(self, code):
+            super().__init__("아무 말")
+            self.pgcode = code
+
+    # 풀러 장애·연결 끊김·서버 재기동·자원 고갈 = 실행면 밖
+    for code in ("25006", "08006", "08003", "57P01", "57P03", "53200", "40001"):
+        assert W.transient_infra_fault(_E(code)), code
+
+    # 우리 잘못인 SQL 은 유예 대상이 아니다 - 유예하면 영원히 돈다
+    for code in ("42703", "23505", "22P02", "23514"):
+        assert not W.transient_infra_fault(_E(code)), code
+
+    # 호스트 자원: 메모리·디스크만. 나머지 OSError 는 실행면 문제일 수 있다
+    assert W.transient_infra_fault(OSError(12, "Cannot allocate memory"))
+    assert W.transient_infra_fault(OSError(28, "No space left on device"))
+    assert W.transient_infra_fault(MemoryError())
+    assert not W.transient_infra_fault(OSError(2, "No such file or directory"))
+
+    # 평범한 버그는 절대 유예 대상이 아니다
+    for exc in (KeyError("close"), ValueError("알 수 없는 정책"),
+                RuntimeError("중복 실험"), ZeroDivisionError()):
+        assert not W.transient_infra_fault(exc), exc
+
+    # 사유는 사람이 읽을 문장이어야 한다 - True/False 만으로는 원장에 못 남긴다
+    why = W.transient_infra_fault(_E("25006"))
+    assert isinstance(why, str) and len(why) > 10, why
+
+
+def _check_broken_transaction_is_rolled_back_before_deferring():
+    """**유예하기 전에 터진 트랜잭션을 물린다** (실서버 실측 2026-08-14).
+
+    로컬 timescaledb 직결로 확인했다(공용 풀러에는 재현하지 않는다):
+      · `set default_transaction_read_only=on` 뒤 UPDATE
+        -> `ReadOnlySqlTransaction` / pgcode=`25006`  ← 원장에 쌓인 그 예외
+      · **rollback 없이** 다음 문장
+        -> `InFailedSqlTransaction` / pgcode=`25P02`
+           "current transaction is aborted, commands ignored until end of
+            transaction block"
+      · rollback 뒤에는 읽기가 다시 돈다
+
+    즉 `run_one` 의 `conn.rollback()` 한 줄이 유예 경로 전체를 떠받친다. 지우면
+    `defer` 의 첫 SELECT 가 25P02 로 죽고, 안쪽 except 가 그것을 삼켜 결국
+    **패치 이전과 똑같은 FAILED 로 조용히 되돌아간다.**
+
+    ▶ 왜 이 검사가 따로 필요한가
+      돌연변이 검사에서 이 줄만 지웠을 때 기존 18개 검사가 **하나도 안 울었다**
+      (다른 검사들은 `defer` 를 conn 을 안 건드리는 가짜로 바꿔치기하므로 터진
+      트랜잭션을 재현하지 못한다). 잡히지 않는 동작은 다음 정리 때 사라진다.
+    """
+    import types
+
+    import experiment_worker as W
+
+    calls = []
+
+    class _Aborted(Exception):
+        """psycopg2.errors.InFailedSqlTransaction 과 같은 자리의 것."""
+
+        pgcode = "25P02"
+
+    class _AbortedConn:
+        """터진 트랜잭션. **rollback 전에는 어떤 문장도 안 받는다** - 실서버와 같다."""
+
+        def __init__(self):
+            self.clean = False
+            self.rolled = 0
+
+        def rollback(self):
+            self.rolled += 1
+            self.clean = True
+            calls.append("rollback")
+
+    def _defer(conn, jid, *, reason):
+        if not getattr(conn, "clean", False):
+            raise _Aborted("current transaction is aborted, commands ignored "
+                           "until end of transaction block")
+        calls.append("defer")
+        return {"action": "DEFERRED", "count": 1}
+
+    mod = types.ModuleType("job_queue")
+    mod.finish = lambda conn, jid, *, ok, experiment_id=None, reason=None: \
+        calls.append("finish")
+    mod.release = lambda conn, jid, *, reason: calls.append("release")
+    mod.cancel = lambda conn, jid, *, reason: calls.append("cancel")
+    mod.defer = _defer
+
+    orch = types.ModuleType("experiment_orchestrator")
+
+    class _ReadOnly(Exception):
+        pgcode = "25006"
+
+    def _readonly(hid, conn=None):
+        raise _ReadOnly("cannot execute INSERT in a read-only transaction")
+
+    orch.orchestrate = _readonly
+    sys.modules["job_queue"], sys.modules["experiment_orchestrator"] = mod, orch
+    try:
+        conn = _AbortedConn()
+        r = W.run_one(conn, {"job_id": "j1", "hypothesis_id": "h1"})
+        assert conn.rolled, ("터진 트랜잭션을 안 물리면 defer 의 첫 문장이 "
+                             "25P02 로 죽는다 - 실서버에서 확인했다")
+        assert calls[:2] == ["rollback", "defer"], ("rollback 은 defer 보다 "
+                                                    "먼저다", calls)
+        assert r["result"] == "DEFERRED", ("rollback 이 빠지면 유예가 조용히 "
+                                           "패치 이전 FAILED 로 되돌아간다", r)
+        assert "finish" not in calls, calls
+    finally:
+        sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
 
 
 def _check_dead_connection_is_reconnected_not_fatal():
@@ -929,4 +1450,14 @@ if __name__ == "__main__":
     print("  정상 종료는 주문을 반납   OK")
     _check_terminal_hypothesis_job_is_closed_not_parked()
     print("  종결 가설 주문은 닫는다   OK")
-    print("실험 워커 14개 영역 통과. 상주 실행은 --serve")
+    _check_gate_asks_the_contract_not_a_copy()
+    print("  관문은 계약에 묻는다      OK")
+    _check_gate_runs_before_the_orchestrator()
+    print("  관문이 오케스트레이터 앞  OK")
+    _check_infra_fault_is_not_an_experiment_failure()
+    print("  인프라 고장 != 실험 실패  OK")
+    _check_transient_classifier_reads_codes_not_prose()
+    print("  분류는 코드로 본다        OK")
+    _check_broken_transaction_is_rolled_back_before_deferring()
+    print("  유예 전에 트랜잭션 물림   OK")
+    print("실험 워커 19개 영역 통과. 상주 실행은 --serve")

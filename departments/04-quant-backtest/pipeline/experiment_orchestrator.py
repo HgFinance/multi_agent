@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import gc
 import json
 import sys
 from dataclasses import dataclass, field
@@ -208,6 +209,43 @@ def feasibility(hypothesis: dict, existing_datasets: set,
 #   실제로 오늘 INCONCLUSIVE 를 코드에만 넣었다가 DB 제약에 없어 예산 초과가
 #   나는 순간 죽을 뻔했다(마이그레이션 20260804001000 으로 메웠다).
 #   **다음 작업에서 세 갈래를 하나로 합친다.**
+def walk_forward_efficiency(window_metrics: list, full_sharpe) -> float | None:
+    """**성적이 전 구간에 고르게 있었나, 한쪽에 몰렸나** (2026-08-14 조사).
+
+    ▶ 무엇을 재나
+      업계 관례의 Walk-Forward Efficiency 는 `OOS Sharpe / IS Sharpe` 이고
+      0.5~0.7 이 현실적 목표, 1.0 초과는 오히려 의심 신호다. 그런데 우리는
+      창마다 파라미터를 **최적화하지 않고** 고정값으로 돌리므로 그대로는 못
+      쓴다. 같은 질문에 답하는 우리 판은 이것이다:
+
+          창별 Sharpe 평균 / 전기간 Sharpe
+
+      전기간이 좋은데 창별 평균이 나쁘면 그 성적은 **특정 구간에 몰린 것**
+      이고, 둘이 비슷하면 구간을 가로질러 살아 있다는 뜻이다.
+
+    ▶ 왜 관문이 아니라 계측인가
+      지금 강건성은 `positive_window_ratio` 하나로 FRAGILE 만 찍고 **왜**
+      취약한지는 말하지 못한다(실측: 전체 판정의 87%가 fragility). 임계를
+      바꾸는 것은 합격선 변경이라 사전등록·결재 사안이고, 여기서는 다음
+      기획이 방향을 잡도록 **이유를 재서 환류에 실을 뿐**이다.
+
+    ▶ 못 재면 안 적는다
+      전기간 Sharpe 가 0 근처면 비율이 폭발한다 - 그건 진단이 아니라 잡음이다.
+      분모가 작으면 `None` 을 돌려주고 원장에 키를 만들지 않는다.
+    """
+    try:
+        denom = float(full_sharpe)
+    except (TypeError, ValueError):
+        return None
+    if not (abs(denom) >= 0.1):
+        return None
+    vals = [m.get("sharpe_rf0") for _, m in (window_metrics or [])]
+    nums = [float(v) for v in vals if isinstance(v, (int, float))]
+    if len(nums) < 2:
+        return None
+    return round((sum(nums) / len(nums)) / denom, 4)
+
+
 def experiment_did_not_trade(metrics: dict | None) -> bool:
     """**한 주도 못 샀으면 전략을 잰 것이 아니다** (2026-08-14 실측).
 
@@ -327,6 +365,12 @@ _OOS_KEYS = (
     "turnover_total", "turnover",
     "signal_ic", "signal_ic_t", "signal_ic_hit_rate", "signal_ic_periods",
     "signal_ic_breadth", "pnl_top1_share", "pnl_top3_share",
+    # 강건성 **이유** (2026-08-14) - 전체 판정의 87%가 fragility 인데 왜
+    # 취약한지는 원장이 말하지 못했다. 아래 넷은 판정 재료가 아니라 진단이다.
+    #   walk_forward_efficiency: 창별 Sharpe 평균 / 전기간 Sharpe (0.5~0.7 정상)
+    #   positive_window_ratio·worst_window_mdd·sharpe_std: 관문이 실제로 보는 값
+    "walk_forward_efficiency", "positive_window_ratio",
+    "worst_window_mdd", "sharpe_std",
 )
 
 
@@ -930,6 +974,12 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
 
     print(f"  config 바인딩: 가설 {binding.from_hypothesis or '-'} / "
           f"기본값 {binding.from_default or '-'}", flush=True)
+    # ▶ **받았지만 안 읽은 값은 실행 로그에도 남긴다** (2026-08-14, t_e9534028).
+    #   `walk_forward_window_days` 처럼 사전등록에만 남고 실험은 기본 창으로
+    #   도는 값이 있다. 거부가 아니라 조용한 무시라서, 여기서 안 찍으면
+    #   "등록한 가설과 실행한 실험이 다르다" 가 로그에 흔적을 안 남긴다.
+    if binding.ignored:
+        print(f"  ! 실행면이 안 읽은 값: {binding.ignored}", flush=True)
     # ▶ 시도 횟수를 넘긴다 - DSR 이 감가하려면 알아야 한다. **config 가 아니라
     #   인자로** 넘긴다(config 는 input_hash 에 들어가므로 넣으면 중복 가드가
     #   무력해진다).
@@ -959,6 +1009,28 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     try:
         _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
+        # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
+        #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와 `Market`
+        #   이 동시에 살아 있으면 같은 데이터를 두 벌 든다. 미시구조까지
+        #   더 실으면 그 자리에서 `OSError: Cannot allocate memory` 로
+        #   죽는다 - 실제로 OFI 첫 실험이 그렇게 실패했다. 위 두 줄 이후
+        #   `rows` 를 읽는 곳이 없으므로 즉시 놓는다.
+        del rows
+        gc.collect()
+        # ▶ **신호가 요구하면 미시구조를 붙인다** (2026-08-14)
+        #   호가·체결은 일봉과 다른 데이터셋이라 따로 실어야 한다. 요구는
+        #   가설이 아니라 **템플릿**이 선언하므로(`needs_micro`) 빠뜨릴 자리가
+        #   없다. 요구가 없으면 아무것도 안 하고 예전 경로 그대로다.
+        try:
+            from backtest_runner import attach_micro_if_needed  # noqa: PLC0415
+
+            _mn = attach_micro_if_needed(market, config, conn)
+            if _mn:
+                print(f"  미시구조 적재 {_mn:,}건 (호가·체결 일별 집계)",
+                      flush=True)
+        except Exception as e:  # noqa: BLE001 - 못 붙여도 실험은 돈다(신호가 빈다)
+            print(f"  ⚠ 미시구조 적재 실패: {type(e).__name__}: {str(e)[:110]}",
+                  flush=True)
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
         #   성적에 섞인다.
@@ -1011,6 +1083,16 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                               "krx-cost-v1"))
             conn.commit()
         summary, flags, verdict = fragility_summary(wm)
+        # ▶ **왜 취약한지를 같이 잰다** (2026-08-14). 판정(verdict)은 위에서
+        #   이미 끝났고 여기서 바뀌지 않는다 - 합격선을 건드리지 않고 이유만
+        #   원장에 남긴다. 실측으로 전체 판정의 87%가 fragility 인데, 그중
+        #   무엇이 구간 편중이고 무엇이 진짜 불안정인지 지금은 구분이 없다.
+        _wfe = walk_forward_efficiency(wm, (bt.get("metrics") or {}).get("sharpe_rf0"))
+        if _wfe is not None:
+            summary = dict(summary, walk_forward_efficiency=_wfe)
+            print(f"  창 효율(WFE) {_wfe:+.3f} "
+                  f"(창별 Sharpe 평균 / 전기간 Sharpe · 0.5~0.7 이 정상대)",
+                  flush=True)
         with conn.cursor() as cur:
             # ▶ **판정 근거도 같이 남긴다** (2026-08-14 실측)
             #   이 자리에서 요약을 `_summary` 로 버리고 있었다. 그래서 창별
@@ -1329,6 +1411,39 @@ def _check_orchestrate_paths():
     print("  거래 0 = 판정 불가        OK")
     _check_windows_are_persisted_incrementally()
     print("  창마다 적재(중단 견딤)    OK")
+    _check_wfe_measures_without_changing_the_gate()
+    print("  창 효율 계측(판정 불변)   OK")
+
+
+def _check_wfe_measures_without_changing_the_gate():
+    """**이유를 재되 합격선은 건드리지 않는다** (2026-08-14 조사).
+
+    업계는 WFE(0.5~0.7 정상대)와 파라미터 안정성으로 "왜 무너졌나" 를 가르는데
+    우리는 `positive_window_ratio` 하나로 FRAGILE 만 찍었다(전체 판정의 87%).
+    임계 변경은 사전등록·결재 사안이므로 여기서는 **계측만** 늘린다.
+    """
+    wm = [("2024H1", {"sharpe_rf0": 0.4}), ("2024H2", {"sharpe_rf0": 0.6}),
+          ("2025H1", {"sharpe_rf0": 0.5})]
+    # 창 평균 0.5 / 전기간 1.0 = 0.5 (정상대 하단)
+    assert walk_forward_efficiency(wm, 1.0) == 0.5
+    # 전기간이 좋은데 창별이 나쁘면 낮게 나온다 = 구간 편중
+    assert walk_forward_efficiency(wm, 2.5) == 0.2
+
+    # ▶ **못 재면 안 적는다.** 분모가 0 근처면 비율이 폭발한다 - 진단이 아니라
+    #   잡음이고, 그 잡음이 환류에 실리면 다음 기획이 엉뚱한 곳을 고친다.
+    for bad in (0.0, 0.05, -0.09, None, "n/a"):
+        assert walk_forward_efficiency(wm, bad) is None, bad
+    # 창이 한 개뿐이면 평균이 그 자신이라 아무것도 말하지 않는다
+    assert walk_forward_efficiency([("2024H1", {"sharpe_rf0": 0.4})], 1.0) is None
+    assert walk_forward_efficiency([], 1.0) is None
+    # 숫자가 아닌 창 값에 죽지 않는다(지어내지도 않는다)
+    assert walk_forward_efficiency(
+        [("a", {"sharpe_rf0": None}), ("b", {"sharpe_rf0": "x"})], 1.0) is None
+
+    # 관문은 이 값을 보지 않는다 - 계측이 합격선을 흔들면 사전등록이 무너진다
+    from walk_forward import FRAGILITY_RULES
+    assert "walk_forward_efficiency" not in FRAGILITY_RULES, FRAGILITY_RULES
+    assert "walk_forward_efficiency" in _OOS_KEYS, "환류에 안 실리면 아무도 못 본다"
 
 
 def _check_windows_are_persisted_incrementally():

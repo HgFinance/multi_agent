@@ -128,6 +128,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 서가가 낙폭을 최악값으로만 요약해 "관문을 넘은 적 있다" 를
                 # 감췄다. best_mdd·risk_controlled_runs 를 덧붙인다(select 전용)
                 "20260814100000_shelf_risk_control_visibility.sql",
+                # 데이터셋 거래대금·거래량 단위를 매니페스트가 직접 선언한다.
+                # 실행면의 단위 가정과 어긋나면 백테스트 전에 중단할 수 있다.
+                "20260814110000_dataset_manifest_units.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

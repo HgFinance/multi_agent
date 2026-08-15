@@ -47,7 +47,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "01-research" / "collectors"))
 
 BUILDER_VERSION = "quant-microstructure-builder-v1"
-FEATURE_SET_VERSION = "ms-daily-v1"
+# ▶ 판본 (2026-08-14). **옛 판본 행은 안 건드린다** - 그 판본으로 돈 실험의
+#   재현이 살아야 한다.
+#     v1 = 스프레드·잔량불균형·OFI·체결강도·실현변동성 (하루 하나로 평균)
+#     v2 = + 거래대금·체결수량
+#     v3 = + 일중 구간 피처(마감/개장 OFI · 구간 분산 · 종가/VWAP · 스프레드 수축)
+#   v3 의 근거: 하루 평균이 정보를 상쇄해 지운다. 2026-08-13 실측으로 마감 30분
+#   OFI 표준편차가 하루 전체의 1.74배(0.4424 vs 0.2538)이고 둘의 상관은 0.3713 이다.
+FEATURE_SET_VERSION = "ms-daily-v3"
 KST = timezone(timedelta(hours=9))
 
 # 정규장만 접는다. 시간외·프리마켓은 체결 규칙이 달라 같은 통계에 섞으면
@@ -69,6 +76,13 @@ with q as (
            avg(case when mid_price > 0 then spread / mid_price * 10000 end) spread_bps,
            avg(depth_imbalance) depth_imbalance,
            count(*) n_quotes,
+           -- ▶ **유동성의 일중 변화** (2026-08-14). 하루 평균 스프레드 하나로는
+           --   "개장에 벌어졌다 마감에 좁혀진 종목" 과 "종일 넓은 종목" 이
+           --   같은 값으로 찍힌다.
+           avg(case when mid_price > 0 and event_time >= %(t_close)s
+                    then spread / mid_price * 10000 end) spread_close,
+           avg(case when mid_price > 0 and event_time < %(t_open_end)s
+                    then spread / mid_price * 10000 end) spread_open,
            max(observed_at) obs_q,
            max(event_time) evt_q
       from market.market_quotes
@@ -90,6 +104,45 @@ with q as (
            stddev_samp(ln(nullif(price, 0)::float8)) * sqrt(count(*)) realized_vol,
            count(*) n_ticks,
            sum(quantity) vol,
+           -- ▶ **거래대금. 단위는 백만원** (2026-08-14, 재일님 지적)
+           --   원 단위로 담으면 유동성 필터가 1e6 배 어긋난 채 돈다 - 일봉
+           --   `notional` 과 같은 눈금이어야 같은 문턱을 쓸 수 있다.
+           --   `sum(quantity)` 는 예전부터 계산해 놓고 **출력에 안 실었다.**
+           sum(price * quantity)::float8 / 1e6 traded_value,
+           -- ▶ **일중 구간별 OFI** (2026-08-14 실측이 근거)
+           --   하루 전체 평균은 오전에 팔고 오후에 산 종목을 중립으로 찍는다.
+           --   2026-08-13 하루 대조: 마감 30분 OFI 표준편차 0.4424 vs 하루 전체
+           --   0.2538(1.74배), 둘의 상관 0.3713 - 서로 다른 것을 잰다.
+           sum(side*quantity) filter (where event_time >= %(t_close)s)::float8
+             / nullif(sum(quantity) filter (where event_time >= %(t_close)s),0)
+             ofi_close,
+           sum(side*quantity) filter (where event_time < %(t_open_end)s)::float8
+             / nullif(sum(quantity) filter (where event_time < %(t_open_end)s),0)
+             ofi_open,
+           -- 종가/VWAP - 1. 하루 내내 매수 압력이 있었으면 종가가 VWAP 위다.
+           (array_agg(price order by event_time desc, sequence_no desc))[1]::float8
+             / nullif(sum(price*quantity)::float8 / nullif(sum(quantity),0), 0)
+             - 1 close_vs_vwap,
+           -- ▶ **4구간 OFI 의 표본표준편차. 같은 스캔에서 낸다** (2026-08-14)
+           --   처음엔 별도 CTE 로 `market_ticks` 를 한 번 더 group by 했는데,
+           --   FDW 경로에서는 그것이 원천을 **두 번 끌어오는 것**이라 하루
+           --   1,900만 행이 두 배가 됐고 빌더가 죽었다. `filter` 로 네 값을
+           --   같은 스캔에서 내고 `unnest` 로 표준편차를 잰다 - `stddev_samp`
+           --   은 NULL 을 무시하므로 결과가 이전과 **정확히 같다**.
+           (select stddev_samp(v) from unnest(array[
+              sum(side*quantity) filter (where event_time < %(t_open_end)s)::float8
+                / nullif(sum(quantity) filter (where event_time < %(t_open_end)s),0),
+              sum(side*quantity) filter (where event_time >= %(t_open_end)s
+                                           and event_time < %(t_noon)s)::float8
+                / nullif(sum(quantity) filter (where event_time >= %(t_open_end)s
+                                                 and event_time < %(t_noon)s),0),
+              sum(side*quantity) filter (where event_time >= %(t_noon)s
+                                           and event_time < %(t_close)s)::float8
+                / nullif(sum(quantity) filter (where event_time >= %(t_noon)s
+                                                 and event_time < %(t_close)s),0),
+              sum(side*quantity) filter (where event_time >= %(t_close)s)::float8
+                / nullif(sum(quantity) filter (where event_time >= %(t_close)s),0)
+            ]) v) ofi_intraday_std,
            max(observed_at) obs_t,
            max(event_time) evt_t
       from market.market_ticks
@@ -100,6 +153,11 @@ with q as (
 select coalesce(q.instrument_id, t.instrument_id) instrument_id,
        q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
        coalesce(t.n_ticks, 0) n_ticks, coalesce(q.n_quotes, 0) n_quotes,
+       t.traded_value, t.vol traded_volume,
+       t.ofi_close, t.ofi_open, t.ofi_intraday_std, t.close_vs_vwap,
+       -- 개장 스프레드가 0 이거나 없으면 비율을 만들지 않는다(0 으로 안 채운다)
+       case when q.spread_open > 0 then q.spread_close / q.spread_open end
+         spread_close_ratio,
        -- ▶ 관측시각의 논리적 하한 (2026-08-13 실측): 실시간 수집분에서 원천의
        --   event_time 이 observed_at 보다 ~2초 앞서는 시계 스큐가 있었고,
        --   그대로 접으면 watermark > observed_at 이 되어 적재 제약
@@ -134,7 +192,11 @@ with q as (
            avg(case when (ask1 + bid1) > 0
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_bps,
            avg(bi::float8) depth_imbalance,
-           count(*) n_quotes
+           count(*) n_quotes,
+           avg(case when (ask1 + bid1) > 0 and ts >= %(t_close)s
+                    then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_close,
+           avg(case when (ask1 + bid1) > 0 and ts < %(t_open_end)s
+                    then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_open
       from public.quotes
      where ts >= %(lo)s and ts < %(hi)s
      group by symbol
@@ -146,22 +208,69 @@ with q as (
                 then count(*)::float8
                      / (extract(epoch from max(ts) - min(ts)) / 60.0) end trade_intensity,
            stddev_samp(ln(nullif(price, 0)::float8)) * sqrt(count(*)) realized_vol,
-           count(*) n_ticks
+           count(*) n_ticks,
+           -- 내부 경로와 **같은 정의·같은 단위**(백만원)여야 한다. 어긋나면
+           -- 같은 종목의 같은 날 값이 출처마다 달라진다.
+           sum(price::float8 * volume) / 1e6 traded_value,
+           sum(volume) vol,
+           sum(side*volume) filter (where ts >= %(t_close)s)::float8
+             / nullif(sum(volume) filter (where ts >= %(t_close)s),0) ofi_close,
+           sum(side*volume) filter (where ts < %(t_open_end)s)::float8
+             / nullif(sum(volume) filter (where ts < %(t_open_end)s),0) ofi_open,
+           (array_agg(price order by ts desc))[1]::float8
+             / nullif(sum(price::float8*volume) / nullif(sum(volume),0), 0)
+             - 1 close_vs_vwap,
+           -- 내부 경로와 같은 정의. **같은 스캔에서** 낸다 - 별도 CTE 로
+           -- 원천을 한 번 더 읽으면 FDW 로는 하루 1,900만 행이 두 배가 된다.
+           (select stddev_samp(v) from unnest(array[
+              sum(side*volume) filter (where ts < %(t_open_end)s)::float8
+                / nullif(sum(volume) filter (where ts < %(t_open_end)s),0),
+              sum(side*volume) filter (where ts >= %(t_open_end)s
+                                         and ts < %(t_noon)s)::float8
+                / nullif(sum(volume) filter (where ts >= %(t_open_end)s
+                                               and ts < %(t_noon)s),0),
+              sum(side*volume) filter (where ts >= %(t_noon)s
+                                         and ts < %(t_close)s)::float8
+                / nullif(sum(volume) filter (where ts >= %(t_noon)s
+                                               and ts < %(t_close)s),0),
+              sum(side*volume) filter (where ts >= %(t_close)s)::float8
+                / nullif(sum(volume) filter (where ts >= %(t_close)s),0)
+            ]) v) ofi_intraday_std
       from public.ticks
      where ts >= %(lo)s and ts < %(hi)s and price > 0
      group by symbol
 )
 select coalesce(q.symbol, t.symbol) symbol,
        q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
-       coalesce(t.n_ticks, 0), coalesce(q.n_quotes, 0)
+       coalesce(t.n_ticks, 0), coalesce(q.n_quotes, 0),
+       t.traded_value, t.vol traded_volume,
+       t.ofi_close, t.ofi_open, t.ofi_intraday_std, t.close_vs_vwap,
+       case when q.spread_open > 0 then q.spread_close / q.spread_open end
+         spread_close_ratio
   from q full outer join t on t.symbol = q.symbol
 """
+
+# ── 같은 집계를 **FDW 로** - 별도 커넥션도 자격증명도 없이 ────────────────
+#
+# ▶ 왜 (2026-08-14)
+#   `--external-dsn` 경로는 저쪽 DB 에 직접 붙어야 해서 자격증명을 손으로
+#   날라야 했다. 그런데 우리 DB 에는 이미 `ext_src` 스키마가 `trading_src`
+#   foreign server 로 걸려 있다(실측: ext_src.ticks 가 2026-05-17~08-14,
+#   11.29억 건). 같은 커넥션에서 읽을 수 있는데 자격증명을 다시 다룰 이유가 없다.
+#
+#   SQL 은 위 `_SQL_BUILD_EXTERNAL` 과 **글자 하나까지 같은 정의**여야 한다 -
+#   스키마 이름만 다르다. 자체점검이 둘을 대조한다(경로마다 값이 달라지면
+#   같은 종목의 같은 날이 출처에 따라 다른 값을 갖는다).
+_SQL_BUILD_FDW = _SQL_BUILD_EXTERNAL.replace("public.quotes", "ext_src.quotes") \
+                                    .replace("public.ticks", "ext_src.ticks")
 
 _SQL_INSERT = """
 insert into market.microstructure_features
   (event_time, observed_at, instrument_id, market, feature_set_version,
    realized_volatility, spread_bps, depth_imbalance, order_flow_imbalance,
-   trade_intensity, values, quality_status, input_watermark, input_hash)
+   trade_intensity, traded_value, traded_volume,
+   ofi_close, ofi_open, ofi_intraday_std, close_vs_vwap, spread_close_ratio,
+   values, quality_status, input_watermark, input_hash)
 values %s
 on conflict do nothing
 """
@@ -253,6 +362,31 @@ def quality_of(n_ticks: int, n_quotes: int) -> str:
     return "WARN"
 
 
+def missing_sources(rows) -> list[str]:
+    """그날 **원천 하나가 통째로 빈** 경우를 이름으로 돌려준다.
+
+    ▶ 왜 (2026-08-14 실측)
+      2026-08-10 에 `market.market_quotes` 가 **0행**이었다(체결은 1,348만건
+      정상, 저쪽 원본에는 1,851만건 있었다). 그런데:
+        · 종목마다 `quality_of` 가 WARN 을 찍고 그대로 적재됐다
+        · `market.feed_gaps` 는 **0행** - 감지표가 있는데 채우는 쪽이 없었다
+        · 그래서 스프레드를 읽는 신호는 그날 전 종목 미산출 = 조용히 거래 0
+      WARN 은 "이 종목의 표본이 얇다" 는 뜻이지 "원천이 통째로 없다" 가 아니다.
+      **한 종목의 문제와 하루 전체의 문제는 다른 사실**이라 다르게 말해야 한다.
+    """
+    if not rows:
+        return []
+    # 행 구조: (..., n_ticks, n_quotes, ...) - 인덱스 6,7 (내부/외부 경로 공통)
+    tot_t = sum(int(r[6] or 0) for r in rows)
+    tot_q = sum(int(r[7] or 0) for r in rows)
+    out = []
+    if tot_q == 0:
+        out.append("quotes")
+    if tot_t == 0:
+        out.append("ticks")
+    return out
+
+
 def input_hash(day: date, n_ticks: int, n_quotes: int) -> str:
     """어느 입력에서 나온 값인지. 원천이 바뀌면 해시가 바뀐다."""
     blob = f"{FEATURE_SET_VERSION}|{day.isoformat()}|{n_ticks}|{n_quotes}"
@@ -265,40 +399,98 @@ def session_bounds(day: date) -> tuple[str, str]:
             f"{day.isoformat()} {SESSION_END}+09")
 
 
+# ▶ 일중 구간 경계(KST). 개장 09:00-09:30 · 오전 -12:00 · 오후 -14:50 · 마감 -15:30.
+#   마감을 40분으로 잡은 것은 15:20 이후 동시호가에 체결이 몰리기 때문이다 -
+#   30분으로 자르면 그 물량이 통째로 빠진다.
+SEG_OPEN_END, SEG_NOON, SEG_CLOSE = "09:30", "12:00", "14:50"
+
+
+def session_params(day: date) -> dict:
+    """집계 SQL 이 받는 시각 파라미터 전부. **한 곳에서 만든다** - 두 경로가
+    다른 경계를 쓰면 같은 종목의 같은 날이 출처에 따라 다른 값을 갖는다."""
+    lo, hi = session_bounds(day)
+    d = day.isoformat()
+    return {"lo": lo, "hi": hi,
+            "t_open_end": f"{d} {SEG_OPEN_END}+09",
+            "t_noon":     f"{d} {SEG_NOON}+09",
+            "t_close":    f"{d} {SEG_CLOSE}+09"}
+
+
 def build_day(market_conn, day: date, *, dry_run: bool = False,
               replace: bool = False) -> dict:
     """하루를 접어 적재한다. 반환: 요약."""
     from psycopg2.extras import execute_values
 
-    lo, hi = session_bounds(day)
     with market_conn.cursor() as cur:
-        cur.execute(_SQL_BUILD, {"lo": lo, "hi": hi})
+        cur.execute(_SQL_BUILD, session_params(day))
         rows = cur.fetchall()
     if not rows:
         return {"day": day, "rows": 0, "note": "원천에 그날 행이 없다"}
 
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
+    # **원천 하나가 통째로 비었으면 행마다가 아니라 그 사실을 남긴다.**
+    miss = missing_sources(rows)
+    miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades = [], {"PASS": 0, "WARN": 0, "FAIL": 0}
     for (iid, spread, di, ofi, intensity, rvol,
-         n_ticks, n_quotes, observed_at, watermark) in rows:
+         n_ticks, n_quotes, tvalue, tvolume,
+         ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
+         observed_at, watermark) in rows:
         g = quality_of(int(n_ticks), int(n_quotes))
         grades[g] += 1
         payload.append((
             bucket, observed_at, iid, "KRX", FEATURE_SET_VERSION,
-            rvol, spread, di, ofi, intensity,
+            rvol, spread, di, ofi, intensity, tvalue, tvolume,
+            ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
             # values 에 표본 수를 남긴다 - 어떤 행이 얇은지 나중에 판단할 수 있어야 한다
-            f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)}}}',
+            f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)}{miss_tag}}}',
             g, watermark, input_hash(day, int(n_ticks), int(n_quotes))))
 
     if dry_run:
-        return {"day": day, "rows": len(payload), **grades, "dry_run": True}
+        return {"day": day, "rows": len(payload), **grades,
+                "missing": miss, "dry_run": True}
     gate = day_origin_guard(market_conn, day, "local", replace=replace)
     if gate != "insert":
         return {"day": day, "rows": 0, **grades, "note": _GATE_NOTE[gate]}
     with market_conn.cursor() as cur:
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
+    if miss:
+        record_feed_gap(market_conn, day, miss, len(payload))
     market_conn.commit()
-    return {"day": day, "rows": len(payload), **grades}
+    return {"day": day, "rows": len(payload), **grades, "missing": miss}
+
+
+# ▶ **결손을 표에 남긴다** (2026-08-14). `market.feed_gaps` 는 이 저장소가
+#   결손을 기록하라고 만들어 둔 표인데 **0행이었다** - 08-10 에 호가가 하루
+#   통째로 빠졌는데 아무 기록이 없었다. 감지표가 있어도 채우는 쪽이 없으면
+#   없는 것과 같다(같은 날 `VOID_NO_TRADE` 도 읽는 쪽이 없어 장식이었다).
+_SQL_FEED_GAP = """
+insert into market.feed_gaps
+  (provider, stream_type, detected_at, gap_start, gap_end, severity, status,
+   backfill_source, evidence)
+values (%s, %s, now(), %s, %s, %s, 'OPEN', %s, %s::jsonb)
+"""
+
+
+def record_feed_gap(conn, day: date, missing: list[str], n_rows: int) -> None:
+    """하루 전체가 빈 원천을 `market.feed_gaps` 에 남긴다. **실패해도 적재는 산다.**
+
+    복구원(`backfill_source`)까지 적는다 - 실측으로 저쪽 원본에는 그날 호가가
+    1,851만건 있었다. "없다" 가 아니라 "여기 있는데 우리가 못 받았다" 가 사실이다.
+    """
+    lo, hi = session_bounds(day)
+    for src in missing:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_SQL_FEED_GAP, (
+                    "KRX-COLLECTOR", src, lo, hi, "CRITICAL",
+                    f"ext_src.{src}",
+                    f'{{"day": "{day.isoformat()}", "rows_built": {n_rows},'
+                    f' "note": "정규장 전체가 0행 - 그날 이 원천에서 나오는 '
+                    f'피처는 전 종목 미산출이다"}}'))
+        except Exception as e:  # noqa: BLE001 - 기록 실패가 적재를 막지 않는다
+            print(f"    ⚠ feed_gaps 기록 실패({src}): {type(e).__name__}: "
+                  f"{str(e)[:90]}", flush=True)
 
 
 def build_day_external(market_conn, src_conn, day: date, *,
@@ -308,12 +500,16 @@ def build_day_external(market_conn, src_conn, day: date, *,
 
     종목 매핑은 우리 쪽 `market.symbol_map` 이 정본이다. 못 찾은 종목은
     **버리지 않고 센다** - 조용히 빠지면 유니버스가 왜 줄었는지 알 수 없다.
+
+    `src_conn` 이 None 이면 **FDW 경로**로 우리 커넥션에서 `ext_src.*` 를 읽는다
+    (자격증명을 따로 다루지 않는다). 집계 정의는 두 경로가 같다.
     """
     from psycopg2.extras import execute_values
 
-    lo, hi = session_bounds(day)
-    with src_conn.cursor() as cur:
-        cur.execute(_SQL_BUILD_EXTERNAL, {"lo": lo, "hi": hi})
+    read_conn = src_conn if src_conn is not None else market_conn
+    sql = _SQL_BUILD_EXTERNAL if src_conn is not None else _SQL_BUILD_FDW
+    with read_conn.cursor() as cur:
+        cur.execute(sql, session_params(day))
         rows = cur.fetchall()
     if not rows:
         return {"day": day, "rows": 0, "note": "저쪽 원천에 그날 행이 없다"}
@@ -323,8 +519,11 @@ def build_day_external(market_conn, src_conn, day: date, *,
         iid_of = dict(cur.fetchall())
 
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
+    miss = missing_sources(rows)
+    miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
-    for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes) in rows:
+    for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
+         tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio) in rows:
         iid = iid_of.get(str(sym).strip())
         if iid is None:
             unmapped += 1
@@ -336,22 +535,26 @@ def build_day_external(market_conn, src_conn, day: date, *,
             # 이관 구간과 같은 규칙: 관측 시각이 원본에 없으므로 자리 채움이고,
             # 그 사실은 market.pit_provenance 가 'NONE' 으로 못박는다.
             bucket, iid, "KRX", FEATURE_SET_VERSION,
-            rvol, spread, di, ofi, intensity,
+            rvol, spread, di, ofi, intensity, tvalue, tvolume,
+            ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
             f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)},'
-            f' "origin": "external"}}',
+            f' "origin": "external"{miss_tag}}}',
             g, bucket, input_hash(day, int(n_ticks), int(n_quotes))))
 
     if dry_run:
         return {"day": day, "rows": len(payload), "unmapped": unmapped,
-                **grades, "dry_run": True}
+                **grades, "missing": miss, "dry_run": True}
     gate = day_origin_guard(market_conn, day, "external", replace=replace)
     if gate != "insert":
         return {"day": day, "rows": 0, "unmapped": unmapped, **grades,
                 "note": _GATE_NOTE[gate]}
     with market_conn.cursor() as cur:
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
+    if miss:
+        record_feed_gap(market_conn, day, miss, len(payload))
     market_conn.commit()
-    return {"day": day, "rows": len(payload), "unmapped": unmapped, **grades}
+    return {"day": day, "rows": len(payload), "unmapped": unmapped,
+            **grades, "missing": miss}
 
 
 def pending_days(market_conn, *, since: date | None = None) -> list[date]:
@@ -548,6 +751,77 @@ def _check_build_paths_go_through_guard():
     print("  두 경로 모두 가드 통과   OK")
 
 
+def _check_fdw_path_is_the_same_aggregation():
+    """**FDW 경로가 외부 경로와 같은 집계여야 한다** (2026-08-14).
+
+    스키마 이름만 다르고 정의는 글자 하나까지 같아야 한다. 어긋나면 같은
+    종목의 같은 날이 **어느 경로로 접었느냐에 따라 다른 값**을 갖는다 -
+    그런 데이터로는 어떤 신호도 검증할 수 없다.
+    """
+    assert "ext_src.ticks" in _SQL_BUILD_FDW and "ext_src.quotes" in _SQL_BUILD_FDW
+    assert "public.ticks" not in _SQL_BUILD_FDW, "치환이 덜 됐다"
+    assert "public.quotes" not in _SQL_BUILD_FDW, "치환이 덜 됐다"
+    # 스키마만 되돌리면 완전히 같은 문자열이어야 한다
+    back = (_SQL_BUILD_FDW.replace("ext_src.quotes", "public.quotes")
+                          .replace("ext_src.ticks", "public.ticks"))
+    assert back == _SQL_BUILD_EXTERNAL, "두 경로의 집계 정의가 갈렸다"
+    # 거래대금은 **두 경로 모두** 백만원으로 접는다 - 단위가 갈리면 유동성
+    # 필터가 출처에 따라 다르게 판정한다
+    for sql in (_SQL_BUILD, _SQL_BUILD_EXTERNAL):
+        assert "/ 1e6" in sql, "거래대금을 원 단위로 담고 있다(백만원이어야 한다)"
+        assert "traded_value" in sql
+
+    # ▶ **원천을 두 번 읽지 않는다** (2026-08-14 사고)
+    #   일중 구간 표준편차를 별도 CTE 로 내면서 `market_ticks`/`public.ticks` 를
+    #   한 번 더 group by 했다. 로컬에서는 느릴 뿐이지만 **FDW 로는 하루
+    #   1,900만 행을 두 번 끌어오는 것**이라 빌더가 죽었다(v3 가 39일에서 멈춤).
+    #   `filter` + `unnest` 로 같은 스캔에서 내면 값은 그대로다.
+    for name, sql, tbl in (("내부", _SQL_BUILD, "market.market_ticks"),
+                           ("외부", _SQL_BUILD_EXTERNAL, "public.ticks")):
+        assert sql.count(f"from {tbl}") == 1, \
+            f"{name} 경로가 {tbl} 을 {sql.count(f'from {tbl}')}번 읽는다"
+        assert "ofi_intraday_std" in sql, name
+        assert "unnest(array[" in sql, f"{name} 경로가 구간 배열을 안 쓴다"
+    print("  FDW=외부 같은 집계       OK")
+
+
+def _check_whole_day_source_loss_is_not_a_row_grade():
+    """**하루 전체가 빈 것과 한 종목이 얇은 것은 다른 사실이다** (2026-08-14 실측).
+
+    2026-08-10 에 `market.market_quotes` 가 0행이었다(체결은 1,348만건 정상,
+    저쪽 원본에는 1,851만건 있었다). 그런데 보이는 것은 `WARN 2,473` 뿐이었고
+    `market.feed_gaps` 는 0행이었다 - **감지표가 있는데 채우는 쪽이 없었다.**
+    그날 스프레드를 읽는 신호는 전 종목 미산출 = 조용히 거래 0 이 된다.
+    """
+    # (…, n_ticks, n_quotes, …) 자리만 맞춘 최소 행
+    def row(nt, nq):
+        return (None,) * 6 + (nt, nq) + (None,) * 9
+
+    assert missing_sources([row(100, 50), row(80, 40)]) == []
+    assert missing_sources([row(100, 0), row(80, 0)]) == ["quotes"]
+    assert missing_sources([row(0, 50), row(0, 40)]) == ["ticks"]
+    assert missing_sources([row(0, 0)]) == ["quotes", "ticks"]
+    assert missing_sources([]) == []
+    # **일부 종목만 0 인 것은 결손이 아니다** - 그건 원래 WARN 이 할 일이다
+    assert missing_sources([row(100, 0), row(80, 30)]) == []
+
+    # 등급 규칙은 안 건드렸다 - 새 진단이 기존 판정을 바꾸면 재현이 깨진다
+    assert quality_of(100, 100) == "PASS"
+    assert quality_of(100, 0) == "WARN"
+    assert quality_of(0, 0) == "FAIL"
+
+    # 두 경로 모두 결손을 보고 기록해야 한다 - 한쪽만 하면 출처에 따라 놓친다
+    import inspect
+    for fn in (build_day, build_day_external):
+        src = inspect.getsource(fn)
+        assert "missing_sources(rows)" in src, f"{fn.__name__} 이 결손을 안 본다"
+        assert "record_feed_gap(" in src, f"{fn.__name__} 이 표에 안 남긴다"
+        assert "missing_source" in src, f"{fn.__name__} 이 행에 표시를 안 남긴다"
+    # 기록 실패가 적재를 막지 않는다 - 진단이 본작업을 죽이면 안 된다
+    assert "except Exception" in inspect.getsource(record_feed_gap)
+    print("  하루 전체 결손 = 별도 사실 OK")
+
+
 def _selfcheck() -> int:
     print(f"{BUILDER_VERSION} 자체 점검 (DB 없음)")
     _check_one_day_one_origin()
@@ -559,7 +833,9 @@ def _selfcheck() -> int:
     _check_sql_does_not_zero_fill()
     _check_full_outer_join_keeps_one_sided_days()
     _check_intensity_uses_observed_span()
-    print("마이크로구조 빌더 6개 영역 통과. 실행은 --build")
+    _check_fdw_path_is_the_same_aggregation()
+    _check_whole_day_source_loss_is_not_a_row_grade()
+    print("마이크로구조 빌더 8개 영역 통과. 실행은 --build")
     return 0
 
 
@@ -577,7 +853,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--external-dsn", default="",
                     help="Trading_bot ticks DB DSN. 주면 그쪽에서 집계한다")
     ap.add_argument("--days", type=int, default=0,
-                    help="--external-dsn 과 함께: 최근 N 거래일만")
+                    help="--external-dsn/--fdw 와 함께: 최근 N 거래일만")
+    # ▶ **자격증명 없이 저쪽을 읽는다** (2026-08-14). 우리 DB 에 `ext_src`
+    #   스키마가 `trading_src` foreign server 로 이미 걸려 있다 - DSN 을 손으로
+    #   나르는 대신 같은 커넥션에서 읽는다. 집계 정의는 두 경로가 같다.
+    ap.add_argument("--fdw", action="store_true",
+                    help="ext_src.* (foreign table)에서 집계한다. DSN 불필요")
     a = ap.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -593,12 +874,28 @@ def main(argv: list[str] | None = None) -> int:
     src = psycopg2.connect(a.external_dsn, connect_timeout=20) if a.external_dsn else None
     try:
         since = date.fromisoformat(a.since) if a.since else None
-        if src is not None:
+        external = src is not None or a.fdw
+        if external:
             # 저쪽이 가진 거래일을 기준으로 삼는다. 우리 원장의 청크를 기준으로
             # 하면 호가가 빈 날이 "이미 있다" 로 잡혀 그대로 넘어간다.
-            with src.cursor() as cur:
-                cur.execute("select distinct ts::date from public.ticks order by 1")
-                days = [r[0] for r in cur.fetchall()]
+            #
+            # ▶ **FDW 로는 `distinct ts::date` 를 묻지 않는다** (2026-08-14 실측)
+            #   postgres_fdw 는 DISTINCT 를 pushdown 하지 않는다 - 11.29억 행을
+            #   통째로 끌어온다. 같은 실수가 오늘 다른 자리에서 5시간 33분짜리
+            #   쿼리를 만들고 시장 API 를 3시간 넘게 세웠다.
+            #   저쪽이 가진 거래일은 **이미 접어 둔 피처의 날짜**로 안다 -
+            #   우리 테이블 조회라 즉시 끝나고, 그 날들이 곧 저쪽 원천의 날이다.
+            if src is not None:
+                with src.cursor() as cur:
+                    cur.execute("select distinct ts::date from public.ticks order by 1")
+                    days = [r[0] for r in cur.fetchall()]
+            else:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        select distinct (event_time at time zone 'Asia/Seoul')::date
+                          from market.microstructure_features
+                         order by 1""")
+                    days = [r[0] for r in cur.fetchall()]
             if since:
                 days = [d for d in days if d >= since]
             if a.days:
@@ -607,12 +904,13 @@ def main(argv: list[str] | None = None) -> int:
             days = pending_days(conn, since=since)
         print(f"{BUILDER_VERSION}: 접을 날 {len(days)}건"
               + (f" ({days[0]} ~ {days[-1]})" if days else "")
-              + ("  [외부 원천]" if src is not None else ""), flush=True)
+              + ("  [외부 원천 - FDW]" if a.fdw and src is None else
+                 "  [외부 원천]" if external else ""), flush=True)
         total, unmapped = 0, 0
         for i, d in enumerate(days, 1):
             r = (build_day_external(conn, src, d, dry_run=a.dry_run,
                                     replace=a.replace)
-                 if src is not None
+                 if external
                  else build_day(conn, d, dry_run=a.dry_run, replace=a.replace))
             total += r["rows"]
             unmapped += r.get("unmapped", 0)
@@ -620,6 +918,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"PASS {r.get('PASS', 0)} WARN {r.get('WARN', 0)} "
                   f"FAIL {r.get('FAIL', 0)}"
                   + (f" 미매핑 {r['unmapped']}" if r.get("unmapped") else "")
+                  # **원천 결손은 종목 등급과 다른 사실이다.** 08-10 에 호가가
+                  # 하루 통째로 빠졌는데 WARN 2,473 으로만 보여 지나갔다.
+                  + (f"  ★ 원천 결손: {'+'.join(r['missing'])} 이 0행 "
+                     f"- 그 원천에서 나오는 피처는 전 종목 미산출이다"
+                     if r.get("missing") else "")
                   + (f"  {r['note']}" if r.get("note") else ""),
                   flush=True)
         # 미매핑을 총계로도 남긴다 - 하루씩 보면 작아 보여도 쌓이면 유니버스가 준다

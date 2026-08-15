@@ -114,16 +114,27 @@ def _hyp_view(proposal: dict) -> dict:
 
 
 def _horizon_of(proposal: dict) -> int:
-    """기획안이 쓰겠다는 형성·보유 창(거래일). 못 읽으면 0(검사 생략)."""
+    """기획안이 쓰겠다는 창 중 **가장 긴 것**(거래일). 읽을 수 없으면 0(검사 생략).
+
+    ▶ 왜 첫 키가 아니라 최댓값인가 (2026-08-14, 카드 t_e9534028)
+      형성창과 보유창이 갈린 뒤로 기획안은 두 값을 같이 적는다. 아래 ①-d 는
+      "이 창이 표본에 들어가는가" 를 묻는 검사인데, 형성 250일·보유 5일짜리
+      기획안을 **보유창으로만 재면** 창이 넉넉하다고 통과시킨 뒤 walk-forward
+      에서 창 0개로 죽는다 - 이 검사가 막으라고 있는 바로 그 사고다.
+      긴 쪽으로 재면 통과하던 것이 막힐 수는 있어도 그 반대는 없다(개발원칙 9).
+    """
     sp = proposal.get("suggested_params") or {}
-    for k in ("horizon_days", "holding_horizon", "lookback_days"):
+    longest = 0
+    for k in ("signal_window_days", "horizon_days", "holding_horizon",
+              "lookback_days"):
         v = sp.get(k)
-        if v is not None:
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return 0
-    return 0
+        if v is None:
+            continue
+        try:
+            longest = max(longest, int(v))
+        except (TypeError, ValueError):
+            return 0            # 비수치는 바인딩이 사유를 만든다
+    return longest
 
 
 def gate0(proposal: dict, *, trials_used: int = 0,
@@ -167,9 +178,16 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #     무시하면 같은 실수를 반복한다.
     _, _dropped_params = expected_edge_for(proposal)
     if _dropped_params:
+        # ▶ 쓸 수 있는 키를 **손으로 적지 않는다** (2026-08-14, 카드 t_e9534028).
+        #   여기 "horizon_days·top_n" 이 박혀 있었는데 그 사이 실행면은 위험
+        #   손잡이·유동성·구성방식·형성창까지 열렸다. 안내문이 실행면보다 좁으면
+        #   리서치는 쓸 수 있는 손잡이를 안 쓴다 - 표를 넓혀도 안 쓰이면 안 넓힌
+        #   것과 같다. `EDGE_KEYS` 를 그대로 읽어 자동으로 따라오게 한다.
+        from config_binding import EDGE_KEYS as _EDGE_KEYS   # noqa: PLC0415
+        _usable = sorted(set(_EDGE_KEYS) - {"type", "universe_key"})
         r.warnings.append(
             f"SUGGESTED_PARAMS 의 {_dropped_params} 는 실행면이 읽지 않아 "
-            f"등록에서 빠진다 - 쓸 수 있는 키는 horizon_days·top_n 이다. "
+            f"등록에서 빠진다 - 쓸 수 있는 키: {_usable}. "
             f"EDGE_TYPE·UNIVERSE_KEY 는 전용 필드로만 정해진다")
 
     # ①-a-2 정체성 키를 파라미터 칸에 적으면 **반려한다** (2026-08-13)
@@ -249,7 +267,10 @@ def gate0(proposal: dict, *, trials_used: int = 0,
         from config_binding import LIMITS      # noqa: PLC0415 (실행면이 정본)
 
         for k, v in (proposal.get("suggested_params") or {}).items():
-            target = "lookback_days" if k == "horizon_days" else k
+            # 형성창·보유창 둘 다 lookback_days 자리의 한도를 받는다
+            # (2026-08-14: signal_window_days 개방, 카드 t_e9534028)
+            target = ("lookback_days"
+                      if k in ("horizon_days", "signal_window_days") else k)
             lo, hi = LIMITS.get(target, (None, None))
             if lo is None:
                 continue
@@ -266,6 +287,62 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                          + ". 자르지 않고 반려한다 - 값을 고쳐 다시 내라")
     except ImportError:                 # 검사 불능 != 접수 차단. 다만 조용히
         r.warn("config_binding 을 읽지 못해 파라미터 범위를 접수에서 못 봤다")
+
+    # ①-c2 **알파 수식(AST)은 접수에서 검증한다** (2026-08-14)
+    #   수식은 실행면이 신호로 삼는 것이라, 성립하지 않으면 그 기획안은
+    #   실험을 만들어 놓고 중간에 죽는다. 접수는 실행 가능성의 약속이므로
+    #   여기서 판정한다 - 연산자·필드·창·복잡도까지 `alpha_ast.parse` 가 본다.
+    _expr = (proposal.get("suggested_params") or {}).get("signal_expr")
+    if _expr is not None:
+        try:
+            from alpha_ast import check_alignment as _ca  # noqa: PLC0415
+            from alpha_ast import needs_micro as _nm
+            from alpha_ast import fields_of as _fo
+            from alpha_ast import parse as _pe
+
+            _parsed = _pe(_expr)
+            # 무엇을 읽는 수식인지 접수 기록에 남긴다 - 나중에 "이 알파가
+            # 어떤 데이터로 나왔나" 를 묻는 자리가 여기다.
+            r.warn(f"알파 수식 접수: 필드 {sorted(_fo(_parsed))}"
+                   f"{' · 미시구조 필요' if _nm(_parsed) else ''}")
+            if _nm(_parsed):
+                # ▶ **표본이 짧아진다는 사실을 접수에서 말한다** (2026-08-14)
+                #   미시구조는 일봉(2016~)보다 훨씬 짧다. 실행면이 표본을 그
+                #   커버리지로 자르므로(clip_to_micro_coverage), 형성·보유 창을
+                #   길게 잡으면 창이 몇 개 안 나온다. 첫 수식형 알파가 이 사실을
+                #   모른 채 10년 표본으로 돌아 초과 -102%p 를 냈다.
+                r.warn("미시구조 수식은 표본이 그 데이터 커버리지로 잘린다"
+                       "(일봉 2016~ 이 아니라 호가·체결이 있는 기간만). "
+                       "형성·보유 창을 짧게 잡아야 창이 나온다")
+
+            # ①-c3 **가설과 수식이 같은 이야기인가** (2026-08-14)
+            #   수식은 실행면이 그대로 쓰지만, 결과를 해석하는 것은 논리다.
+            #   둘이 다른 이야기면 실험이 무엇을 검증했는지 아무도 모른다 -
+            #   성적이 좋아도 그 논리의 증거가 아니고, 나빠도 그 논리의 반증이
+            #   아니다. 원장에는 "매수 압력 가설 REJECT" 로 남는데 실제로는
+            #   종가만 봤을 수 있다.
+            #
+            #   **결정론으로만 본다.** LLM 자기검증은 문헌상 성능을 떨어뜨리고
+            #   (self-critique 성능 붕괴), 자기선호 편향이 -38%~+90% 다 -
+            #   리서치가 자기 수식을 채점하면 통과율만 오른다. 그래서 기계가
+            #   확실히 아는 것만 본다: 읽는 필드가 논리에 등장하는가.
+            _align = _ca(_parsed, " ".join(str(proposal.get(k) or "") for k in
+                                           ("economic_rationale", "counterparty",
+                                            "hypothesis", "title")))
+            if not _align["ok"]:
+                r.reject("HYPOTHESIS_FACTOR_MISMATCH",
+                         f"{_align['note']}. 실험은 수식대로 돌지만 판정은 "
+                         f"논리 이름으로 원장에 남는다 - 둘이 다르면 그 결과는 "
+                         f"무엇의 증거도 아니다. 수식을 논리에 맞추거나, "
+                         f"논리를 수식이 실제로 재는 것으로 다시 써라")
+            elif _align["unmentioned"]:
+                r.warn(f"수식 정합 경고: {_align['note']}")
+        except ImportError:
+            r.warn("alpha_ast 를 읽지 못해 수식을 접수에서 못 봤다")
+        except Exception as _e:  # noqa: BLE001 - 사유를 그대로 싣는다
+            r.reject("SIGNAL_EXPR_INVALID",
+                     f"알파 수식이 성립하지 않는다: {_e}. 실행면이 신호로 삼는 "
+                     f"것이라 이대로 접수하면 실험이 중간에 죽는다 - 고쳐서 다시 내라")
 
     # ①-d 설계 실현 가능성. **돌리기 전에 알 수 있는 산수는 접수에서 한다.**
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
@@ -371,6 +448,11 @@ def expected_edge_for(proposal: dict) -> tuple[dict, list]:
       `667f0a45` 가 `signal_window_days`·`walk_forward_window_days` 로 죽었고,
       스톨 회수로 다시 발주해도 같은 자리에서 또 죽었다 - 가설이 만들어질 때
       이미 실행 불가로 태어난 것이다. 접수는 실행 가능성의 약속이어야 한다.
+
+      **후속(2026-08-14, 카드 t_e9534028)**: 그 두 키의 처분이 갈렸다.
+      `signal_window_days` 는 형성창으로 **실행면에 열렸고**(EDGE_KEYS),
+      `walk_forward_window_days` 는 창 분할 = 사전등록 정책이라 실행 손잡이가
+      되지 않았다(NON_EXECUTION_KEYS). 그래서 여기서 떨어지는 것은 후자뿐이다.
     """
     from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
 
@@ -584,6 +666,105 @@ def _checkable_regime_evidence(values) -> list:
            re.search(r"(?:window|기간|count|개수)\s*[:=]\s*[^,; ]+", text, re.I):
             out.append(text)
     return out
+
+
+def _check_signal_expr_is_gated_at_intake():
+    """**수식은 접수에서 판정한다** (2026-08-14).
+
+    실행면이 신호로 삼는 것이라, 성립하지 않는 수식을 접수하면 그 기획안은
+    실험을 만들어 놓고 중간에 죽는다 - 원장에 반쪽짜리 흔적이 남는다.
+    접수는 실행 가능성의 약속이어야 한다.
+    """
+    # 논리는 수식이 실제로 읽는 것을 말해야 한다(아래 ①-c3 정합 검사) - 예전
+    # 이 픽스처는 "x"/"y" 였고, 그래서 새 검사가 붙었는데도 이 점검은 통과했다.
+    base = {"edge_type": "momentum", "universe_key": "krx_all",
+            "economic_rationale": "호가 매수 압력이 크고 스프레드가 좁은 종목이 "
+                                  "이후 초과수익을 낸다",
+            "counterparty": "유동성을 급히 요구하는 청산 매매",
+            "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5}
+
+    ok_expr = {"op": "sub", "args": [
+        {"op": "rank", "arg": {"op": "ts_mean",
+                               "field": "order_flow_imbalance", "n": 3}},
+        {"op": "rank", "arg": {"op": "ts_mean", "field": "spread_bps", "n": 10}}]}
+    g = gate0(dict(base, suggested_params={"horizon_days": 2, "top_n": 200,
+                                           "signal_expr": ok_expr}))
+    assert g.ok, g.as_dict()          # codes 만 보면 다른 코드로 막힌 걸 놓친다
+    assert "SIGNAL_EXPR_INVALID" not in g.codes, g.as_dict()
+    # 무엇을 읽는지 접수 기록에 남는다
+    assert any("알파 수식 접수" in str(w) for w in (g.warnings or [])), g.as_dict()
+    assert any("미시구조" in str(w) for w in (g.warnings or [])), g.as_dict()
+
+    # 모르는 연산자·필드·범위 밖 창은 **접수에서** 막힌다
+    for bad in ({"op": "magic", "field": "close", "n": 5},
+                {"op": "ts_mean", "field": "pe_ratio", "n": 5},
+                {"op": "ts_mean", "field": "close", "n": 9999}):
+        gb = gate0(dict(base, suggested_params={"horizon_days": 2,
+                                                "signal_expr": bad}))
+        assert not gb.ok and "SIGNAL_EXPR_INVALID" in gb.codes, (bad, gb.as_dict())
+
+    # 수식이 없는 기획안은 예전 그대로 - 새 검사가 기존 접수를 막지 않는다
+    g2 = gate0(dict(base, suggested_params={"horizon_days": 20, "top_n": 20}))
+    assert "SIGNAL_EXPR_INVALID" not in g2.codes, g2.as_dict()
+
+    # 접수된 수식이 가설까지 그대로 간다 - 중간에 떨어지면 실행면이 못 본다
+    edge, dropped = expected_edge_for(
+        dict(base, suggested_params={"horizon_days": 2, "signal_expr": ok_expr}))
+    assert "signal_expr" in edge, (edge, dropped)
+
+
+def _check_hypothesis_and_factor_tell_the_same_story():
+    """**논리와 수식이 다른 이야기면 접수에서 되돌린다** (2026-08-14).
+
+    수식은 실행면이 그대로 쓰지만, 결과를 해석하는 것은 논리다. 둘이 다르면
+    원장에는 "매수 압력 가설 REJECT" 로 남는데 실제로 잰 것은 종가일 수 있다 -
+    그 판정은 무엇의 증거도 아니고, 다음 기획안이 그 교훈을 읽고 엉뚱한 곳을
+    고친다.
+
+    **결정론으로만 본다.** LLM 자기검증은 문헌상 성능을 떨어뜨리고 자기선호
+    편향이 -38%~+90% 라, 리서치가 자기 수식을 채점하면 통과율만 오른다.
+    """
+    ofi = {"op": "ts_mean", "field": "order_flow_imbalance", "n": 3}
+    base = {"edge_type": "momentum", "universe_key": "krx_all",
+            "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5,
+            "suggested_params": {"horizon_days": 2, "signal_expr": ofi}}
+
+    def _g(rationale, counterparty="유동성 수요자"):
+        return gate0(dict(base, economic_rationale=rationale,
+                          counterparty=counterparty))
+
+    # ① 같은 이야기면 통과한다
+    assert _g("호가 매수 압력이 이후 수익을 예측한다").ok
+
+    # ② 다른 이야기는 **막는다** - 이것이 이 검사의 존재 이유다
+    bad = _g("저PBR 종목이 장기적으로 초과수익을 낸다", "가치를 무시하는 투자자")
+    assert not bad.ok and "HYPOTHESIS_FACTOR_MISMATCH" in bad.codes, bad.as_dict()
+    # 사유에 무엇이 어긋났는지 남는다 - 고칠 수 없는 반려는 소음이다
+    assert any("order_flow_imbalance" in str(x) for x in (bad.reasons or [])), \
+        bad.as_dict()
+
+    # ③ 빈 논리로 수식만 던지는 것도 막는다
+    assert not _g("", "").ok
+
+    # ④ **표현 차이로 죽이지 않는다** - 좁은 어휘는 멀쩡한 가설을 막는다.
+    #    영어 논리, 그리고 필드 일부만 언급한 경우는 통과(경고)여야 한다.
+    assert _g("order flow imbalance predicts short-term returns").ok
+    two = {"op": "sub", "args": [
+        {"op": "rank", "arg": ofi},
+        {"op": "rank", "arg": {"op": "ts_mean", "field": "spread_bps", "n": 10}}]}
+    part = gate0(dict(base, economic_rationale="매수 압력이 크면 이후 오른다",
+                      counterparty="청산 매매",
+                      suggested_params={"horizon_days": 2, "signal_expr": two}))
+    assert part.ok, part.as_dict()
+    assert any("정합 경고" in str(w) for w in (part.warnings or [])), part.as_dict()
+
+    # ⑤ 수식 없는 기존 기획안은 이 검사를 통과할 필요가 없다 - 새 검사가
+    #    옛 접수 경로를 막으면 공장이 선다
+    assert gate0({"edge_type": "momentum", "universe_key": "krx_all",
+                  "economic_rationale": "장기 추세는 이어진다",
+                  "counterparty": "과소반응 투자자",
+                  "falsification_tests": ["IC t<2"], "trial_budget": 5,
+                  "suggested_params": {"horizon_days": 20, "top_n": 20}}).ok
 
 
 def _check_no_trade_does_not_teach_performance_lessons():
@@ -1204,15 +1385,20 @@ def _check_gate_approved_edge_type_wins():
     p["suggested_params"] = {"type": "short_term_reversal",
                              "universe_key": "몰래바꾸기",
                              "horizon_days": 20, "top_n": 20,
-                             "signal_window_days": 60}
+                             "signal_window_days": 60,
+                             "walk_forward_window_days": 252}
     edge, dropped = expected_edge_for(p)
     assert edge["type"] == p["edge_type"], edge
     assert edge["universe_key"] == p["universe_key"], edge
-    # 실행면이 읽는 키는 살아남는다
+    # 실행면이 읽는 키는 살아남는다. **`signal_window_days` 는 2026-08-14 에
+    # 형성창으로 열렸다**(카드 t_e9534028) - 이제 "안 읽는 키" 의 예시가 아니다.
     assert edge["horizon_days"] == 20 and edge["top_n"] == 20, edge
-    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다
-    assert "signal_window_days" not in edge, edge
-    assert dropped == ["signal_window_days", "type", "universe_key"], dropped
+    assert edge["signal_window_days"] == 60, edge
+    # 안 읽는 키는 빠지고, 무엇이 빠졌는지 알려 준다. 창 분할 사양
+    # (`walk_forward_window_days`)이 그 자리다 - 실행 손잡이가 아니라
+    # 사전등록 정책이라 접수에서 떨어뜨리고 알린다.
+    assert "walk_forward_window_days" not in edge, edge
+    assert dropped == ["type", "universe_key", "walk_forward_window_days"], dropped
     # 접수 단계에서 경고로 뜬다 - 세 주기 뒤 실행면에서 처음 알면 늦다
     g = gate0(p)
     assert any("SUGGESTED_PARAMS" in w for w in g.warnings), g.warnings
@@ -1507,10 +1693,14 @@ if __name__ == "__main__":
     _check_finalize_is_atomic();                print("  환류+전이 원자성         OK")
     _check_lessons_mapping_is_deterministic_baseline()
     print("  교훈 사상(에이전트 무관)  OK")
+    _check_signal_expr_is_gated_at_intake()
+    print("  수식은 접수에서 판정      OK")
+    _check_hypothesis_and_factor_tell_the_same_story()
+    print("  논리<->수식 정합(결정론)  OK")
     _check_no_trade_does_not_teach_performance_lessons()
     print("  거래 0 -> 성과 교훈 없음  OK")
     _check_gate0_is_deterministic();            print("  Gate 0 결정론            OK")
     _check_promotion_is_idempotent_and_records_rejection()
     _check_fetch_window_excludes_promoted()
     print("  승격분은 창에서 빠진다   OK")
-    print("공장 다리 21개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 23개 영역 통과. 루프가 닫혔다.")

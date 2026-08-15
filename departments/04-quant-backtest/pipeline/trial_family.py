@@ -122,6 +122,21 @@ THEMES = {
     "liquidity_shock_reversal": "거래마찰",
     "price_delay": "거래마찰",  # Hou-Moskowitz: 지연 프리미엄은 인지·거래 마찰의
                                # 대가 - 비유동성과 같은 군집 (카드 t_2334a259)
+    "order_flow_imbalance": "거래마찰",
+                               # Cont-Kukanov-Stoikov 2014: OFI 는 호가 갱신
+                               # 압력이 만드는 가격 충격이다. 재는 대상이
+                               # 유동성 공급의 대가라는 점에서 비유동성·지연과
+                               # 같은 군집이고, 다른 것은 관측 창(호가·체결)뿐이다.
+    "signal_composite": "복합",
+                               # ▶ **한 부모에게 수축시키지 않는다** (카드 t_fa233e6b).
+                               #   완제품 층(COMBO)은 위 부품 전체의 결합이라 그
+                               #   π₀ 가 구성 신호들의 혼합이고, 어느 단일 테마의
+                               #   사전확률로도 대표되지 않는다. 추세에 끼워 넣으면
+                               #   추세의 기각율이 결합의 성적으로 오염되고
+                               #   (역방향도 마찬가지), Bühlmann 수축이 결합을 틀린
+                               #   평균으로 끌어당긴다. 결합은 BR 이 다른 층이다
+                               #   (Grinold-Kahn) - 자기 테마를 갖는 것이 맞다.
+                               #   부품이 늘어도 이 한 칸은 그대로다.
 }
 
 
@@ -287,11 +302,19 @@ def _check_theme_is_a_lens_not_identity():
     테마가 정체성이면 분류 교정이 곧 계열 갈라짐(다중검정 분모 오염)이다.
     조회 층이면 교정이 공짜다. 그리고 어휘 전체에 테마가 있어야 파레토·
     π₀ 집계가 구멍 없이 돈다 - 단 모르는 유형은 '미분류'로 정직하게.
+
+    ▶ **거울 검사가 `strategy_templates` 쪽에도 있다** (카드 t_fa233e6b).
+      이 검사는 제 일을 했는데도 어휘가 두 번 넓어지는 동안(signal_composite ·
+      order_flow_imbalance) 아무도 못 봤다 - 어휘를 넓히는 사람은 이 파일을
+      열지 않기 때문이다. 넓히는 자리에서도 터지게 해 뒀으니 둘 중 아무 쪽을
+      돌려도 걸린다.
     """
     from strategy_templates import EDGE_VOCAB as _EV
 
     for e in _EV:
-        assert theme_of(e) != "미분류", f"어휘 {e} 에 테마가 없다"
+        assert theme_of(e) != "미분류", (
+            f"어휘 {e} 에 테마가 없다 - THEMES 에 넣어라. 없으면 이 계열이 "
+            f"테마별 집계에서 '미분류' 한 칸에 무관한 유형들과 섞인다")
     assert theme_of("듣도못한유형") == "미분류"
     assert theme_of(None) == "미분류"
     # 해시 불변: 테마 사전이 통째로 바뀌어도 family_id 는 같아야 한다

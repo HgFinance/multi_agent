@@ -198,9 +198,9 @@ _SQL_MANIFEST = """
 insert into quant.dataset_manifests
   (name, version, as_of, source_versions, feature_spec_versions, partitions,
    point_in_time_policy, quality_summary, object_path, content_hash,
-   row_count, schema_definition)
+   row_count, schema_definition, notional_unit)
 values (%s,%s, now(), %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
-        %s, %s, %s, %s::jsonb)
+        %s, %s, %s, %s::jsonb, %s)
 -- ▶ **레이아웃도 갱신한다** (2026-08-12)
 --   예전에는 `quality_summary` 만 갱신했다. 그런데 같은 내용을 **다른 파티션
 --   입도**로 다시 굳히면(월→일) 내용 해시는 같고 레이아웃만 바뀐다. 그때
@@ -222,7 +222,10 @@ on conflict (name, version) do update set
   row_count       = excluded.row_count,
   object_path     = excluded.object_path,
   content_hash    = excluded.content_hash,
-  source_versions = excluded.source_versions
+  source_versions = excluded.source_versions,
+  -- 단위 선언도 갱신한다. 명세가 정본이므로 여기 남은 옛 값이 이기면
+  -- 로더 대조가 명세와 어긋난 채로 통과한다.
+  notional_unit   = excluded.notional_unit
 returning dataset_id
 """
 
@@ -344,7 +347,10 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
                 (DATA_ROOT / f"{spec.name}-{spec.version}").relative_to(
                     DATA_ROOT.parent).as_posix(),
                 whole, len(back),
-                json.dumps({"columns": list(spec.columns)})))
+                json.dumps({"columns": list(spec.columns)}),
+                # 명세가 선언한 거래대금 단위. 로더가 이 값과 실행면 가정을
+                # 대조한다 - 없으면 대조가 있는데 대조할 것이 없는 상태다.
+                spec.notional_unit))
             dsid = cur.fetchone()[0]
             # ▶ **옛 파티션 행을 지우고 다시 넣는다** (2026-08-12)
             #   입도가 바뀌면 옛 키(월)와 새 키(일)가 **함께 남는다.** 실측에서
@@ -420,6 +426,22 @@ def _check_build_verifies_roundtrip_before_registering():
     assert "on conflict (name, version) do update" in m, m
     assert "content_hash    = excluded.content_hash" in _SQL_MANIFEST, \
         "해시를 안 갱신하면 원장이 파일 실재와 어긋난다"
+    # ▶ **명세가 선언한 거래대금 단위가 매니페스트까지 간다** (2026-08-14).
+    #   실행면은 로더 경계에서 이 값을 대조하는데(`assert_declared_units`),
+    #   spec 경로에는 심는 자리가 없어 매번 "선언이 없다" 로 지나갔다 -
+    #   대조가 있는데 대조할 것이 없는 상태였다.
+    assert "notional_unit" in _SQL_MANIFEST, "단위 선언을 매니페스트에 안 심는다"
+    assert "notional_unit   = excluded.notional_unit" in _SQL_MANIFEST, \
+        "재빌드 때 옛 단위가 남으면 명세와 어긋난 채 대조를 통과한다"
+    assert "spec.notional_unit" in src, "심는 값이 명세에서 안 온다"
+    # 실행면 가정과 같은 눈금이어야 한다 - 여기서 갈리면 유동성 필터가
+    # 1e6 배 어긋난 채 돌아 유니버스가 0 이 된다(2026-08-14 실측)
+    from strategy_templates import NOTIONAL_UNIT_KRW
+    v2 = SPECS.get("krx-microstructure-daily/v2")
+    if v2 is not None and v2.notional_unit:
+        from backtest_runner import UNIT_FACTOR_KRW
+        assert UNIT_FACTOR_KRW[v2.notional_unit] == NOTIONAL_UNIT_KRW, \
+            (v2.notional_unit, NOTIONAL_UNIT_KRW)
     print("  등재 전 왕복 검증        OK")
     if _check_closed_partition_is_not_rewritten() != "SKIPPED":
         print("  닫힌 파티션 불변         OK")

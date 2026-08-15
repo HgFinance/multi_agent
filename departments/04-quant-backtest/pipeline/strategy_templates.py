@@ -186,9 +186,41 @@ class PITView:
     def dates(self, n: int | None = None) -> list[date]:
         return list(self._idx if n is None else self._idx[-n:])
 
+    def _untraded(self, d: date, symbol: str) -> bool:
+        """그날 그 종목이 **거래되지 않았다**고 단정할 수 있는가.
+
+        거래대금이 **있는데 0** 일 때만 참이다. 거래대금 열 자체가 없는
+        데이터셋(옛 파티션·합성 시장)에서는 알 수 없고, **모르는 것을 무거래로
+        치면 유니버스가 통째로 비어** 전 종목 미산출이 된다 - 그건 측정이
+        아니라 사고다(`zero-fill` 사고와 같은 모양).
+
+        실측(2026-08-14, krx-basket-daily-v3 2024-01~2026-08 234만행):
+        `volume == 0` 인 봉의 **100.00%** 가 `notional == 0` 이다. 거래대금
+        하나로 무거래를 정확히 가릴 수 있다는 뜻이라 별도 열이 필요없다.
+        """
+        nv = self._m.notionals.get((d, symbol))
+        return nv is not None and float(nv) <= 0.0
+
     def closes(self, symbol: str, n: int) -> list[float]:
         """최근 n 거래일 종가(오름차순). **구멍이 있으면 짧게 돌려준다** -
         없는 값을 앞뒤로 채우면 그 자체가 지어낸 데이터다.
+
+        ▶ **거래정지일 종가는 관측이 아니다** (2026-08-14 실측)
+          거래정지일은 거래량·거래대금이 0 인데 종가는 전일이 이월된다. 그
+          이월값을 관측으로 세면 수익률이 0 으로 **만들어지고**, 그 0 이
+          표준편차를 깎아 정지가 잦은 종목이 '가장 안 흔들린 종목'이 된다.
+
+          실측이 그대로 나왔다 - 저변동성 신호가 뽑은 20종목의 창 내 무거래율이
+          **100.00%**(유니버스 5.46%, **18.3배**)였고, 그 20종목의 변동성은
+          전부 정확히 **0.00000** 이었다. 실제로 거래된 날만으로 다시 재면
+          같은 종목들이 일간 0.05~0.13 - 저변동성이 아니라 **최고 변동성**
+          구간이다. 즉 이 신호는 저변동성이 아니라 **정지 종목**을 고르고
+          있었다.
+
+          그래서 무거래일은 여기서 빠진다. 창을 못 채운 종목은 각 지표가
+          이미 None 을 내므로(변동성·수익률·ADV 공통 원칙), '못 잰 것'이
+          '0 이었던 것'으로 둔갑하는 경로가 닫힌다. **미관측과 무변동을
+          가르는 것이지, 값을 고치는 것이 아니다.**
 
         ▶ **미조정 액면분할·병합 앞에서 시계열을 끊는다** (2026-08-14 실측)
           일간 종가가 정확히 정수배로 뛴 곳이 21건(19종목) 있었다 - ×10.0000,
@@ -204,6 +236,8 @@ class PITView:
         """
         out = []
         for d in self._idx[-n:]:
+            if self._untraded(d, symbol):
+                continue            # 이월 종가 - 관측이 아니다
             v = self._m.closes.get((d, symbol))
             if v is not None:
                 out.append(float(v))
@@ -217,6 +251,35 @@ class PITView:
             if v is not None:
                 out.append(float(v))
         return out
+
+    def micro(self, symbol: str, feature: str, n: int = 1) -> list[float]:
+        """기준일까지의 미시구조 일별 피처. **없으면 빈 리스트**다.
+
+        미시구조 커버리지(2026-05-18~)는 일봉(2016~)보다 훨씬 짧다. 없는
+        구간을 0 으로 채우면 "호가가 없었다" 와 "불균형이 0이었다" 가 같아지고
+        그 순간 신호가 오염된다 - 없으면 없는 채로 둔다.
+
+        `quality_status` 는 문자열이라 여기서 걸러진다(수치 피처만 준다).
+        상태를 보고 거를지는 신호가 `quality` 로 따로 묻는다.
+        """
+        out = []
+        for d in self._idx[-n:]:
+            m = getattr(self._m, "micro", {}).get((d, symbol))
+            if not m:
+                continue
+            v = m.get(feature)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out.append(float(v))
+        return out
+
+    def micro_quality(self, symbol: str) -> str | None:
+        """기준일의 미시구조 품질 상태(PASS/WARN). 없으면 None."""
+        for d in reversed(self._idx):
+            m = getattr(self._m, "micro", {}).get((d, symbol))
+            if m:
+                q = m.get("quality_status")
+                return str(q) if q is not None else None
+        return None
 
     # ── 파생 재료 (직접 구현하면 실수하기 쉬운 것들) ─────────────────────────
     def total_return(self, symbol: str, lookback: int) -> float | None:
@@ -257,6 +320,8 @@ class PITView:
         if len(idx) < 2:
             return out
         for i in range(max(1, len(idx) - n), len(idx)):
+            if self._untraded(idx[i], symbol) or self._untraded(idx[i - 1], symbol):
+                continue            # 이월 종가로 만든 0 은 수익률이 아니다
             a = self._m.closes.get((idx[i - 1], symbol))
             b = self._m.closes.get((idx[i], symbol))
             if a is not None and b is not None and float(a) > 0:
@@ -313,6 +378,13 @@ class Template:
     min_history: Callable[[dict], int]
     claimed_edge: str         # 이 템플릿이 주장하는 엣지(실험이 검증한다)
     note: str
+    # ▶ **신호가 자기 데이터 요구를 선언한다** (2026-08-14)
+    #   미시구조(호가·체결 일별 집계)는 일봉과 다른 데이터셋이라 따로 실어야
+    #   한다. 가설이 `micro_dataset=...` 같은 키를 적게 하면 빠뜨린 가설이
+    #   조용히 미시구조 없이 돌고, 그 성적은 그 가설의 증거가 아니다 -
+    #   오늘 `trend_filter_days` 가 정확히 그렇게 무시됐다.
+    #   신호를 고르는 순간 요구가 따라오게 두면 빠뜨릴 자리가 없다.
+    needs_micro: bool = False
 
 
 def _p(params: dict, key: str, default: int) -> int:
@@ -635,6 +707,34 @@ def _composite_warmup(p: dict) -> int:
     return max(need) if need else 1
 
 
+def _sig_order_flow(v, params: dict) -> dict[str, float]:
+    """**호가 주문흐름 불균형(OFI)**. 매수 압력이 단기 수익을 예측한다.
+
+    ▶ 근거
+      Cont-Kukanov-Stoikov(2014): 최우선 호가의 주문흐름 불균형이 단기 가격
+      변화와 선형에 가까운 관계를 갖는다. 거래량이나 체결 불균형보다 **호가
+      갱신에서 오는 압력**이 설명력이 크다는 것이 그 논문의 요지다.
+
+    ▶ 우리 구현
+      `krx-microstructure-daily` 가 하루 단위로 이미 집계한
+      `order_flow_imbalance` 를 쓴다. 일별 값은 잡음이 크므로 `micro_window_days`
+      만큼 평균할 수 있게 열어 둔다(기본 5일) - 며칠을 볼지는 가설이 정한다.
+
+    ▶ 없으면 안 만든다
+      미시구조 커버리지(2026-05-18~)는 일봉보다 훨씬 짧다. 값이 없는 종목은
+      **점수를 내지 않는다** - 0 으로 채우면 "호가가 없었다" 가 "압력이
+      중립이었다" 로 둔갑해 그 종목이 순위 중앙에 조용히 들어온다.
+    """
+    win = _p(params, "micro_window_days", 5)
+    out: dict[str, float] = {}
+    for s in v.symbols:
+        vals = v.micro(s, "order_flow_imbalance", win)
+        if not vals:
+            continue
+        out[s] = sum(vals) / len(vals)
+    return out
+
+
 TEMPLATES: dict[str, Template] = {
     t.template_id: t for t in (
         Template("MOM", "momentum", "TOP", _sig_return,
@@ -698,6 +798,17 @@ TEMPLATES: dict[str, Template] = {
                  "약한 신호도 서로 독립이면 결합이 IR 을 √BR 배 키운다"
                  " - 부품이 아니라 결합된 북이 알파다(Grinold-Kahn)",
                  "전 신호 방향통일 z-랭크 평균 상위 균등"),
+        # ▶ **첫 미시구조 신호** (2026-08-14). 지금까지 어휘 13종이 전부
+        #   가격·거래량 파생이었고, 호가·체결은 원장에 쌓여만 있었다
+        #   (원본 3일치 4,600만 행 · 일별 집계 61거래일 × 2,489종목).
+        #   커버리지가 짧아 백테스트 관문은 어렵지만 횡단면 IC 는 잰다.
+        Template("OFI", "order_flow_imbalance", "TOP", _sig_order_flow,
+                 lambda p: _p(p, "micro_window_days", 5),
+                 "최우선 호가의 주문흐름 불균형이 단기 가격 변화를 예측한다"
+                 " - 체결량이 아니라 호가 갱신 압력이 설명력을 갖는다"
+                 "(Cont-Kukanov-Stoikov 2014)",
+                 "OFI N일 평균 상위 균등",
+                 needs_micro=True),
     )
 }
 
@@ -850,6 +961,40 @@ def _check_edge_vocab_is_unique_and_covers_templates():
     # 미구현 유형은 어휘에 없어야 한다 - 있으면 접수 후 실행 단계에서 죽는다
     assert not (EDGE_VOCAB & set(NOT_IMPLEMENTED)), \
         "미구현 유형이 통제 어휘에 섞였다"
+
+
+def _check_widening_the_vocab_widens_the_theme_table():
+    """**어휘를 넓히면 테마 표도 같이 넓어져야 한다** (카드 t_fa233e6b 실측).
+
+    `signal_composite`(2026-08-14 완제품 층)와 `order_flow_imbalance`(같은 날
+    첫 미시구조 신호)를 여기 어휘에 넣으면서 `trial_family.THEMES` 에는 안
+    넣었다. **한쪽만 넓힌 것**이고, 결과로 이웃 모듈의 자체 점검이 계속
+    빨간불이었다 - 항상 터지는 검사는 신호가 아니라 소음이 되고, 그 옆에서
+    새 결함이 그냥 지나간다.
+
+    검사는 `trial_family` 쪽에도 있다(`_check_theme_is_a_lens_not_identity`).
+    없어서 못 잡은 게 아니라 **어휘를 넓히는 사람이 그 파일을 열지 않아서**
+    못 봤다. 어휘를 소유한 이 모듈에서도 같이 터뜨려야 손이 닿는 자리에서
+    막힌다 - `config_binding` 이 `EDGE_KEYS` 옆에 착지 탐침 표를 두고 같이
+    검사하는 것과 같은 형태다.
+
+    테마는 조회 층이지 정체성이 아니므로(계열 해시에 안 들어간다) 여기서
+    강제해도 family_id 는 흔들리지 않는다.
+    """
+    from trial_family import THEMES, theme_of   # noqa: PLC0415 (테마는 조회층)
+
+    missing = sorted(e for e in EDGE_VOCAB if theme_of(e) == "미분류")
+    assert not missing, (
+        f"어휘에 넣고 테마를 안 적은 edge_type: {missing} - `trial_family.THEMES` "
+        f"에 함께 넣어라. 테마가 없으면 그 계열이 파레토·테마별 π₀ 집계에서 "
+        f"'미분류' 한 칸에 무관한 유형들과 뭉뚱그려져 **자기 사전확률을 못 "
+        f"갖는다**(TreeBH·GBH·Bühlmann 이 전부 이 층을 연료로 쓴다)")
+    # 반대 방향: 어휘에서 사라진 유형의 테마가 남아 있으면 이름 변경을 놓친 것이다.
+    # 미구현 유형은 예외 - 실행면에 열기 전에 테마를 미리 적어 둘 수 있다.
+    stale = sorted(set(THEMES) - set(EDGE_VOCAB) - set(NOT_IMPLEMENTED))
+    assert not stale, (
+        f"어휘에 없는 edge_type 의 테마가 남아 있다: {stale} - 이름을 바꿨다면 "
+        f"표도 같이 바꿔라(옛 이름이 남으면 집계가 조용히 빈 칸을 만든다)")
 
 
 def _check_resolve_accepts_parameterised_ids():
@@ -1006,6 +1151,63 @@ def _check_unadjusted_split_does_not_become_a_return():
     print("  미조정 분할 방어선        OK")
 
 
+def _check_halted_days_are_not_zero_returns():
+    """**거래정지일을 수익률 0 으로 세면 정지 종목이 저변동성 1등이 된다**
+    (2026-08-14 실측).
+
+    원장 census 가 센 것: 일봉 697만개 중 거래량 0 이 16.7만개(2.4%). 종가는
+    이월되므로 수익률 0 으로 계산되고 변동성이 깎인다.
+
+    실행면에서 재보니 census 보다 나빴다 - 저변동성 신호가 뽑은 20종목의 창 내
+    무거래율이 **100.00%**(유니버스 5.46%, 18.3배), 변동성은 전부 정확히
+    0.00000. 거래된 날만으로 다시 재면 0.05~0.13 로 **최고 변동성** 구간이다.
+
+    여기서 고정하는 것은 세 가지다:
+      · 창 내내 거래가 없던 종목은 변동성 **점수를 받지 못한다**(0 이 아니다)
+      · 이월 종가에서 수익률 0.0 을 만들어 내지 않는다
+      · 매일 거래된 종목들 사이의 판정은 하나도 바뀌지 않는다(과잉 차단 금지)
+    """
+    from datetime import timedelta
+
+    class _M: pass
+    m = _M(); d0 = date(2026, 1, 5)
+    m.dates = [d0 + timedelta(days=i) for i in range(40)]
+    m.symbols = ["CALM", "HALTED", "WILD"]
+    m.closes, m.notionals, m.opens = {}, {}, {}
+    for i, d in enumerate(m.dates):
+        m.closes[(d, "CALM")] = 1000.0 * (1.0 + 0.002 * (1 if i % 2 else -1))
+        m.closes[(d, "WILD")] = 1000.0 * (1.0 + 0.05 * (1 if i % 2 else -1))
+        m.notionals[(d, "CALM")] = m.notionals[(d, "WILD")] = 1e9
+        if i < 5:                      # 5일만 거래되고 이후 정지
+            m.closes[(d, "HALTED")] = 1000.0 * (1.0 + 0.08 * (1 if i % 2 else -1))
+            m.notionals[(d, "HALTED")] = 1e9
+        else:
+            m.closes[(d, "HALTED")] = m.closes[(m.dates[4], "HALTED")]  # 이월
+            m.notionals[(d, "HALTED")] = 0.0                            # 무거래
+
+    v = PITView(m, m.dates[-1])
+    sc = _sig_volatility(v, {"lookback_days": 20})
+    assert "HALTED" not in sc, (
+        f"정지 종목이 변동성 점수를 받았다: {sc.get('HALTED')} - 무거래일을 "
+        f"수익률 0 으로 세었다")
+    assert sc and min(sc, key=sc.get) != "HALTED", sc
+    r = v.daily_returns("HALTED", 20)
+    assert not any(x == 0.0 for x in r), (
+        f"이월 종가에서 수익률 0.0 을 만들어 냈다: {r}")
+    assert v.total_return("HALTED", 20) is None, v.total_return("HALTED", 20)
+    assert v.returns_by_date("HALTED", 20) == {}, v.returns_by_date("HALTED", 20)
+
+    # 과잉 차단 금지 - 매일 거래된 종목은 그대로 산출되고 순서도 그대로다
+    assert "CALM" in sc and "WILD" in sc, sc
+    assert sc["CALM"] < sc["WILD"], sc
+    # 거래대금 열이 아예 없는 시장에서는 아무것도 안 바뀐다(모르면 안 거른다)
+    m.notionals = {}
+    v2 = PITView(m, m.dates[-1])
+    assert "HALTED" in _sig_volatility(v2, {"lookback_days": 20}), \
+        "거래대금을 모르는데 무거래로 단정했다 - 유니버스가 비는 경로다"
+    print("  거래정지 != 무변동         OK")
+
+
 def _check_liquidity_filter_removes_untradable_names():
     """**살 수 없는 종목은 신호가 보지 못한다** (2026-08-14 실측).
 
@@ -1116,6 +1318,7 @@ if __name__ == "__main__":
 
     print(f"{MODULE_VERSION} 자체 점검 (DB 없음) - 템플릿 {len(TEMPLATES)}종")
     _check_unadjusted_split_does_not_become_a_return()
+    _check_halted_days_are_not_zero_returns()
     _check_liquidity_filter_removes_untradable_names()
     _check_composite_unifies_direction_and_is_deterministic()
     _check_pit_view_cannot_see_future();      print("  PIT: 미래 불가시           OK")
@@ -1127,6 +1330,8 @@ if __name__ == "__main__":
     _check_rank_directions_are_opposite();    print("  TOP/BOTTOM 반대 방향       OK")
     _check_edge_vocab_is_unique_and_covers_templates()
     print("  통제 어휘 유일·미구현 분리  OK")
+    _check_widening_the_vocab_widens_the_theme_table()
+    print("  어휘 넓히면 테마도 넓힌다   OK")
     _check_resolve_accepts_parameterised_ids()
     print("  동적 ID 해석(실측 버그)     OK")
     _check_matches_legacy_momentum();         print("  기존 모멘텀과 값 동일       OK")
