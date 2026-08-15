@@ -151,6 +151,7 @@ class Catalog:
 
     features: list = field(default_factory=list)
     horizon: int = 5
+    feature_set_version: str = ""
 
     def passing(self) -> list:
         return [f for f in self.features if f.verdict in ("통과", "역방향")]
@@ -162,7 +163,8 @@ class Catalog:
     def summary(self) -> str:
         if not self.features:
             return "피처 카탈로그: 잰 것이 없다"
-        lines = [f"[피처 카탈로그 h={self.horizon}일] "
+        version = f" {self.feature_set_version}" if self.feature_set_version else ""
+        lines = [f"[피처 카탈로그{version} h={self.horizon}일] "
                  f"검정 {len(self.features)}종 · 통과/역방향 {len(self.passing())}종 "
                  f"· 거래가능 {len(self.usable())}종"]
         for f in sorted(self.features, key=lambda x: -(x.t_stat or 0)):
@@ -238,6 +240,7 @@ _SQL_FEATURE = """
 select event_time::date d, instrument_id, {col}
   from market.microstructure_features
  where {col} is not null
+   and feature_set_version = %s
    and event_time::date = any(%s)
 """
 
@@ -255,9 +258,11 @@ select a.d, a.instrument_id, b.close / a.close - 1.0
 """
 
 
-def _dates(cur, horizon: int) -> list:
+def _dates(cur, horizon: int, feature_set_version: str) -> list:
     cur.execute("""select distinct event_time::date
-                     from market.microstructure_features order by 1""")
+                     from market.microstructure_features
+                    where feature_set_version = %s order by 1""",
+                (feature_set_version,))
     all_days = [r[0] for r in cur.fetchall()]
     # 겹치지 않게 h 간격으로 자른다. 마지막 h 일은 미래수익이 없으므로 뺀다.
     return all_days[:-horizon:horizon] if len(all_days) > horizon else []
@@ -331,11 +336,12 @@ def _pit_of(conn, cur, days) -> str:
     return str(kind) or "?"
 
 
-def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
+def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES,
+            feature_set_version: str = "ms-daily-v4") -> Catalog:
     """원장에 대고 피처를 하나씩 검정한다."""
-    cat = Catalog(horizon=horizon)
+    cat = Catalog(horizon=horizon, feature_set_version=feature_set_version)
     cur = conn.cursor()
-    days = _dates(cur, horizon)
+    days = _dates(cur, horizon, feature_set_version)
     if not days:
         return cat
     fwd = _forward_returns(cur, days, horizon)
@@ -343,7 +349,7 @@ def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
 
     for col, direction, mech in features:
         try:
-            cur.execute(_SQL_FEATURE.format(col=col), (days,))
+            cur.execute(_SQL_FEATURE.format(col=col), (feature_set_version, days))
             by_date: dict = {}
             for d, iid, v in cur.fetchall():
                 by_date.setdefault(d, {})[iid] = v
@@ -493,10 +499,12 @@ def _cli(argv) -> int:
     from source_registry import load_project_env  # noqa: PLC0415
 
     h = int(argv[argv.index("--horizon") + 1]) if "--horizon" in argv else 5
+    fsv = (argv[argv.index("--feature-set-version") + 1]
+           if "--feature-set-version" in argv else "ms-daily-v4")
     conn = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"],
                             connect_timeout=30)
     try:
-        print(measure(conn, horizon=h).summary())
+        print(measure(conn, horizon=h, feature_set_version=fsv).summary())
     finally:
         conn.close()
     return 0

@@ -9,6 +9,7 @@ sys.path.insert(0, str(PIPELINE))
 import alpha_ast  # noqa: E402
 import backtest_runner  # noqa: E402
 import dataset_spec  # noqa: E402
+import feature_catalog  # noqa: E402
 import microstructure_builder  # noqa: E402
 
 
@@ -134,3 +135,13 @@ def test_v4_bounds_reject_the_old_external_side_failure() -> None:
         assert "order_flow_imbalance" in str(exc)
     else:
         raise AssertionError("side=1/5 오염 OFI 를 허용했다")
+
+
+def test_feature_catalog_never_mixes_feature_set_versions() -> None:
+    assert "feature_set_version = %s" in feature_catalog._SQL_FEATURE
+    assert "ms-daily-v4" in feature_catalog.measure.__kwdefaults__.values()
+    summary = feature_catalog.Catalog(
+        horizon=2, feature_set_version="ms-daily-v4",
+        features=[feature_catalog.FeatureQuality("x", 2)],
+    ).summary()
+    assert "ms-daily-v4" in summary
