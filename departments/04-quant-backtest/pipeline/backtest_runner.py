@@ -306,10 +306,10 @@ def month_first_trading_days(dates: list[date]) -> set[date]:
 
 # 러너가 아는 리밸런스 정책. **`config_binding.REBALANCE_BY_HORIZON` 과 같은
 # 집합이어야 한다** - 바인더가 만드는 값을 러너가 모르면 그 가설은 실행 단계에서
-# 죽는다(2026-08-14 실측: horizon_days=2 -> `EVERY_TRADING_DAY` 로 사상됐는데
-# 러너 어휘에 없어 `ValueError` 로 실험이 통째로 실패했다). 자체점검이 대조한다.
+# 죽는다(2026-08-14 실측에서는 바인더가 만든 일별 정책이 러너 어휘에 없어
+# `ValueError` 로 실험이 통째로 실패했다). 자체점검이 대조한다.
 REBALANCE_POLICIES = ("MONTH_FIRST_TRADING_DAY", "EVERY_5_TRADING_DAYS",
-                      "EVERY_TRADING_DAY")
+                      "EVERY_2_TRADING_DAYS", "EVERY_TRADING_DAY")
 
 
 def rebalance_days(dates: list[date], config: dict) -> set[date]:
@@ -319,6 +319,11 @@ def rebalance_days(dates: list[date], config: dict) -> set[date]:
         return month_first_trading_days(dates)
     if policy == "EVERY_5_TRADING_DAYS":
         return set(dates[::5])
+    if policy == "EVERY_2_TRADING_DAYS":
+        # Two-day microstructure forecasts need a real execution calendar.  A
+        # free-form EVERY_N policy would enlarge the preregistration search
+        # space, so only the empirically requested two-day cadence is exposed.
+        return set(dates[::2])
     if policy == "EVERY_TRADING_DAY":
         # ▶ 매일 리밸런스. 단기 지평(<=3일) 가설이 여기로 온다 - 미시구조처럼
         #   신호 수명이 며칠인 전략은 월초 리밸런스로는 그 지평을 검증할 수
@@ -1020,16 +1025,22 @@ MICRO_FEATURES = ("spread_bps", "depth_imbalance", "order_flow_imbalance",
                   # v4 호가 공간축·체결크기축. legacy depth_imbalance 는 v4 에서
                   # L1 로 통일되며 L10 과 차이는 별도 필드로 보존한다.
                   "depth_imbalance_l1", "depth_imbalance_l10",
-                  "depth_imbalance_slope", "size_weighted_ofi")
+                  "depth_imbalance_slope", "size_weighted_ofi",
+                  # v5 절대 호가 수용력(가격×잔량, 백만원).
+                  "book_depth_notional_l1", "book_depth_notional_l10")
 
 # 기존 전략은 이미 굳은 v3 를 계속 읽는다. 새 공간/체결크기 필드를 실제로 읽는
 # AST 만 v4 를 요구한다. 이렇게 해야 v4 생성·등재와 무관한 기존 공장이 멈추지
 # 않으며, 새 필드를 v3 에서 조용히 미산출시키는 일도 없다.
 MICRO_DATASET = ("krx-microstructure-daily", "v3")
 MICRO_DATASET_V4 = ("krx-microstructure-daily", "v4")
+MICRO_DATASET_V5 = ("krx-microstructure-daily", "v5")
 MICRO_V4_FIELDS = frozenset({
     "depth_imbalance_l1", "depth_imbalance_l10", "depth_imbalance_slope",
     "size_weighted_ofi",
+})
+MICRO_V5_FIELDS = frozenset({
+    "book_depth_notional_l1", "book_depth_notional_l10",
 })
 
 
@@ -1040,6 +1051,8 @@ def micro_dataset_for(config: dict) -> tuple[str, str]:
     from alpha_ast import fields_of, parse  # noqa: PLC0415
 
     fields = fields_of(parse(expr))
+    if fields.intersection(MICRO_V5_FIELDS):
+        return MICRO_DATASET_V5
     return MICRO_DATASET_V4 if fields.intersection(MICRO_V4_FIELDS) else MICRO_DATASET
 
 
@@ -1056,6 +1069,43 @@ def required_micro_dataset(config: dict) -> tuple[str, str] | None:
     if tpl is None or not getattr(tpl, "needs_micro", False):
         return None
     return MICRO_DATASET
+
+
+def required_warmup_days(config: dict, *, legacy_floor: int = 30) -> int:
+    """Executable warm-up, derived from the signal and enabled risk controls.
+
+    The old fixed 30-day floor was useful for price-only templates, but it
+    consumed half of the current microstructure sample even when an AST only
+    needs a few observations.  Formula-driven micro signals therefore use
+    their declared requirements; legacy price strategies retain the historical
+    floor so their walk-forward construction does not silently change.
+    """
+    tpl = resolve(str(config.get("strategy") or ""))
+    needs: list[int] = []
+    expr = config.get("signal_expr")
+    is_formula_micro = False
+    if expr:
+        from alpha_ast import min_history, needs_micro, parse  # noqa: PLC0415
+
+        parsed = parse(expr)
+        needs.append(int(min_history(parsed)))
+        is_formula_micro = bool(needs_micro(parsed))
+    elif tpl is not None:
+        # signal_expr replaces the named template's score path; do not charge
+        # an unused template lookback to a formula-driven experiment.
+        needs.append(int(tpl.min_history(dict(config))))
+
+    # These controls need their own history before the first scored day.  A
+    # declared 60-day volatility estimate must not be evaluated after only the
+    # runner's minimum 20 observations.
+    if config.get("vol_target_annual") is not None:
+        needs.append(int(config.get("vol_lookback_days") or 60))
+    if config.get("trend_filter_days") is not None:
+        needs.append(int(config["trend_filter_days"]))
+
+    template_micro = bool(tpl is not None and getattr(tpl, "needs_micro", False))
+    floor = 1 if (is_formula_micro or template_micro) else max(1, int(legacy_floor))
+    return max([floor, *needs])
 
 
 def seal_micro_lineage(config: dict, conn) -> dict | None:
@@ -1529,21 +1579,34 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                 exp_id = str(got[0])
         conn.commit()
 
-        market = Market.from_rows(rows)
-        # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
-        #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와 `Market`
-        #   이 동시에 살아 있으면 같은 데이터를 두 벌 든다. 미시구조까지
-        #   더 실으면 그 자리에서 `OSError: Cannot allocate memory` 로
-        #   죽는다 - 실제로 OFI 첫 실험이 그렇게 실패했다. 위 두 줄 이후
-        #   `rows` 를 읽는 곳이 없으므로 즉시 놓는다.
-        del rows
-        gc.collect()
-        # ▶ 신호가 요구하면 미시구조를 붙인다(2026-08-14). 요구가 없으면
-        #   아무 일도 일어나지 않아 예전 실험의 재현이 그대로다.
-        _micro_n = attach_micro_if_needed(market, config, conn)
-        if _micro_n:
-            print(f"  미시구조 적재 {_micro_n:,}건 (호가·체결 일별 집계)",
-                  flush=True)
+        try:
+            market = Market.from_rows(rows)
+            # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
+            #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와
+            #   `Market` 이 동시에 살아 있으면 같은 데이터를 두 벌 든다.
+            del rows
+            gc.collect()
+            # ▶ 신호가 요구하면 미시구조를 붙인다(2026-08-14).
+            _micro_n = attach_micro_if_needed(market, config, conn)
+            if _micro_n:
+                print(f"  미시구조 적재 {_micro_n:,}건 (호가·체결 일별 집계)",
+                      flush=True)
+        except Exception:
+            # Experiment registration precedes auxiliary data materialization.
+            # If that preparation fails, leaving RUNNING makes the input-hash
+            # duplicate guard permanently seal a trial that produced no run or
+            # outcome. CANCELLED + zero runs is the explicit resumable-zombie
+            # signature above; it preserves the same experiment_id on retry.
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update quant.experiments set status='CANCELLED', ended_at=now() "
+                    "where experiment_id=%s and status='RUNNING' "
+                    "and not exists (select 1 from quant.backtest_runs r "
+                    "where r.experiment_id=quant.experiments.experiment_id)",
+                    (exp_id,))
+            conn.commit()
+            raise
         run_row_id = None
         try:
             result = run_backtest(market, config, trials=trials)
@@ -2017,7 +2080,7 @@ if __name__ == "__main__":
     def _check_rebalance_vocab_matches_binder():
         """**바인더가 만드는 정책을 러너가 다 알아야 한다** (2026-08-14 실측).
 
-        `horizon_days=2` 가 `EVERY_TRADING_DAY` 로 사상됐는데 러너 어휘에 없어
+        바인더가 만든 정책이 러너 어휘에 없어
         실험이 `ValueError` 로 통째로 실패했다. 두 표가 갈리면 그 조합의 가설은
         접수·바인딩을 다 통과하고 **실행 단계에서만** 죽는다 - 가장 늦게 발각되는
         자리다. 여기서 집합을 대조해 늘릴 때 같이 늘어나게 한다.
@@ -2035,6 +2098,7 @@ if __name__ == "__main__":
         # 실제로 동작하는지 - 이름만 맞고 산출이 비면 거래가 0 이 된다
         days = [date(2026, 1, d) for d in range(1, 21)]
         assert len(rebalance_days(days, {"rebalance": "EVERY_TRADING_DAY"})) == 20
+        assert len(rebalance_days(days, {"rebalance": "EVERY_2_TRADING_DAYS"})) == 10
         assert len(rebalance_days(days, {"rebalance": "EVERY_5_TRADING_DAYS"})) == 4
         try:
             rebalance_days(days, {"rebalance": "NOPE"})
@@ -2066,6 +2130,13 @@ if __name__ == "__main__":
                "signal_expr": _pe({"op": "ts_return", "field": "close", "n": 21})}
         got = select_targets(m, len(days) - 1, cfg)
         assert got == ["C", "B"], got
+        assert required_warmup_days(cfg) == 30, "price formula lost the legacy floor"
+
+        micro_expr = _pe({"op": "ts_mean", "field": "order_flow_imbalance", "n": 20})
+        micro_cfg = dict(cfg, strategy="OFI-5-20", signal_expr=micro_expr)
+        assert required_warmup_days(micro_cfg) == 20
+        assert required_warmup_days(dict(
+            micro_cfg, vol_target_annual=0.15, vol_lookback_days=60)) == 60
 
         # ② `neg` 로 방향을 뒤집으면 순서가 뒤집힌다 - 방향이 수식 안에 있다
         cfg_neg = dict(cfg, signal_expr=_pe(
@@ -2433,4 +2504,4 @@ if __name__ == "__main__":
     _check_micro_attach()
     _check_combo_short_sample_is_inconclusive()
     _check_sample_is_clipped_to_micro_coverage()
-    print("Backtest Runner 19개 영역 통과. 실행은 --run")
+    print("Backtest Runner 21개 영역 통과. 실행은 --run")

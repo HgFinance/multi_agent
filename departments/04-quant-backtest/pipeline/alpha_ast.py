@@ -95,7 +95,10 @@ MICRO_FIELDS = ("spread_bps", "depth_imbalance",
                 # v4: 출처별로 의미가 달랐던 depth_imbalance 를 명시적 공간축으로
                 # 분리하고, 큰 체결에 더 무게를 주는 흐름 축을 추가한다.
                 "depth_imbalance_l1", "depth_imbalance_l10",
-                "depth_imbalance_slope", "size_weighted_ofi")
+                "depth_imbalance_slope", "size_weighted_ofi",
+                # v5: 방향 없는 절대 호가 수용력. 가격×잔량의 백만원 단위라
+                # 종목 가격 차이를 보정하며 OFI/깊이 상호작용을 표현할 수 있다.
+                "book_depth_notional_l1", "book_depth_notional_l10")
 FIELDS = PRICE_FIELDS + MICRO_FIELDS
 
 # ── 연산자 ───────────────────────────────────────────────────────────────────
@@ -607,6 +610,12 @@ FIELD_CONCEPTS = {
     "size_weighted_ofi": ("대형 체결", "큰 체결", "체결 크기", "체결", "수급",
                           "압력", "large trade", "trade size", "size weighted",
                           "order flow", "ofi", "pressure"),
+    "book_depth_notional_l1": ("최우선", "1호가", "절대 깊이", "호가 수용력",
+                                "유동성 용량", "잔량 합계", "notional depth",
+                                "top of book", "l1 depth", "capacity", "liquidity"),
+    "book_depth_notional_l10": ("10호가", "다중호가", "절대 깊이", "호가 수용력",
+                                 "유동성 용량", "잔량 합계", "notional depth",
+                                 "multi-level", "l10 depth", "capacity", "liquidity"),
 }
 
 

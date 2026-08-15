@@ -164,7 +164,8 @@ TRANSIENT_SQLSTATES = {
 }
 
 # 호스트 자원 고갈. **메모리·디스크만** - 나머지 OSError(파일 없음 같은 것)는
-# 실행면 문제일 수 있으므로 유예하지 않는다.
+# 실행면 문제일 수 있으므로 유예하지 않는다. 단, 매니페스트가 지정한
+# quant-data 오브젝트 유실은 전략 결과가 아니라 데이터 배포면 고장이다.
 TRANSIENT_ERRNOS = {12: "호스트 메모리가 모자랐다(ENOMEM)",
                     28: "호스트 디스크가 찼다(ENOSPC)"}
 
@@ -186,6 +187,12 @@ def transient_infra_fault(exc) -> str:
         return TRANSIENT_SQLSTATES[code]
     if isinstance(exc, MemoryError):
         return "파이썬이 메모리를 더 못 잡았다(MemoryError)"
+    if isinstance(exc, FileNotFoundError):
+        missing = str(getattr(exc, "filename", "") or "").replace("\\", "/")
+        if "/quant-data/" in missing:
+            return (
+                "매니페스트 파티션이 Worker quant-data 마운트에 없다 - "
+                "실험이 아니라 데이터 배포면이다")
     if isinstance(exc, OSError):
         why = TRANSIENT_ERRNOS.get(getattr(exc, "errno", None))
         if why:
@@ -388,6 +395,37 @@ _SQL_CANCEL_ZOMBIES = """
                         where o.experiment_id = e.experiment_id::text)
 """
 
+_SQL_CANCEL_TERMINAL_ZOMBIES = """
+    update quant.experiments e
+       set status = 'CANCELLED', ended_at = now()
+      from quant.hypotheses h
+     where h.hypothesis_id = e.hypothesis_id
+       and h.status in ('REJECTED','SUPPORTED','INCONCLUSIVE','ARCHIVED','PROMOTED')
+       and e.status = 'RUNNING'
+       and e.ended_at is null
+       and e.started_at < now() - interval '30 minutes'
+       and not exists (select 1 from quant.backtest_runs r
+                        where r.experiment_id = e.experiment_id)
+       and not exists (select 1 from research.experiment_outcomes o
+                        where o.experiment_id = e.experiment_id::text)
+"""
+
+
+def cancel_terminal_zombies(conn) -> int:
+    """Close no-information RUNNING rows whose hypothesis already terminated.
+
+    Hypothesis reclaim only scans RUNNING hypotheses.  Without this companion
+    reconciliation, an experiment abandoned just before another trial settles
+    the hypothesis remains RUNNING forever and pollutes liveness/trial counts.
+    Results or outcomes make a row immutable; only empty stale rows are closed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_SQL_CANCEL_TERMINAL_ZOMBIES)
+        changed = int(cur.rowcount or 0)
+    if changed:
+        conn.commit()
+    return changed
+
 
 def reclaim_hypotheses(conn, *, now: datetime | None = None) -> dict:
     """RUNNING 에 갇힌 가설을 PROPOSED 로 되돌린다. 발주가 다시 집게 하려는 것."""
@@ -524,6 +562,7 @@ def tick(conn, *, worker: str) -> dict:
     from job_queue import lease, reclaim
 
     hyp = reclaim_hypotheses(conn)
+    terminal_zombies = cancel_terminal_zombies(conn)
     rec = reclaim(conn)
     orph = sweep_orphans(conn)
     jobs = lease(conn, worker=worker)
@@ -533,7 +572,8 @@ def tick(conn, *, worker: str) -> dict:
         results = [run_one(conn, j) for j in jobs]
     finally:
         _HELD["jobs"] = []
-    return {"hypotheses": hyp, "reclaimed": rec, "orphans": orph,
+    return {"hypotheses": hyp, "terminal_zombies": terminal_zombies,
+            "reclaimed": rec, "orphans": orph,
             "picked": len(jobs), "results": results}
 
 
@@ -590,6 +630,9 @@ def serve() -> None:
                           f"RUNNING {v['stalled_min']}분 -> PROPOSED "
                           f"| 좀비 실험 {v.get('cancelled_experiments', 0)}건 닫음 "
                           f"| 마지막 실패: {v['last_failure'][:90]}", flush=True)
+                if r.get("terminal_zombies"):
+                    print(f"  종결 가설의 유령 실험 {r['terminal_zombies']}건 닫음",
+                          flush=True)
                 o = r.get("orphans") or {}
                 if o.get("finalized") or o.get("failed") or o.get("error"):
                     # 완주한 것은 항상 드러낸다 - 조용한 환류는 검증 불가다
@@ -1014,6 +1057,10 @@ def _check_transient_classifier_reads_codes_not_prose():
     assert W.transient_infra_fault(OSError(28, "No space left on device"))
     assert W.transient_infra_fault(MemoryError())
     assert not W.transient_infra_fault(OSError(2, "No such file or directory"))
+    assert W.transient_infra_fault(FileNotFoundError(
+        2, "No such file or directory", "/app/quant-data/missing.parquet"))
+    assert not W.transient_infra_fault(FileNotFoundError(
+        2, "No such file or directory", "/app/strategy.py"))
 
     # 평범한 버그는 절대 유예 대상이 아니다
     for exc in (KeyError("close"), ValueError("알 수 없는 정책"),
@@ -1407,6 +1454,19 @@ def _check_reclaim_closes_abandoned_experiments():
     assert conn.commits == 1
 
 
+def _check_terminal_zombie_cleanup_is_guarded():
+    sql = " ".join(_SQL_CANCEL_TERMINAL_ZOMBIES.split())
+    for guard in (
+        "h.status in ('REJECTED','SUPPORTED','INCONCLUSIVE','ARCHIVED','PROMOTED')",
+        "e.status = 'RUNNING'",
+        "e.ended_at is null",
+        "interval '30 minutes'",
+        "not exists (select 1 from quant.backtest_runs",
+        "not exists (select 1 from research.experiment_outcomes",
+    ):
+        assert guard in sql, (guard, sql)
+
+
 def _check_orphan_sweep_is_throttled_and_isolated():
     """소탕은 주기로 돌고, 죽어도 순회를 못 죽인다 - 오류는 삼키되 드러낸다."""
     import experiment_worker as W
@@ -1436,6 +1496,8 @@ if __name__ == "__main__":
     _check_stalled_is_requeued_with_reason(); print("  스톨 회수 + 사유 표기   OK")
     _check_only_running_is_touched();       print("  종결 상태는 불가침       OK")
     _check_reclaim_closes_abandoned_experiments()
+    _check_terminal_zombie_cleanup_is_guarded()
+    print("  종결 가설 유령 실험 정리  OK")
     print("  회수가 좀비 실험도 닫음  OK")
     _check_orphan_sweep_is_throttled_and_isolated()
     print("  고아 소탕 격리+주기      OK")
@@ -1459,4 +1521,4 @@ if __name__ == "__main__":
     print("  분류는 코드로 본다        OK")
     _check_broken_transaction_is_rolled_back_before_deferring()
     print("  유예 전에 트랜잭션 물림   OK")
-    print("실험 워커 19개 영역 통과. 상주 실행은 --serve")
+    print("실험 워커 20개 영역 통과. 상주 실행은 --serve")

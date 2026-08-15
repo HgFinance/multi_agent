@@ -103,14 +103,15 @@ EDGE_KEYS = frozenset({
     # ── 리밸런스 주기 직접 지정 (2026-08-14 개방) ──────────────────────────
     # ▶ 왜 열었나 (첫 수식형 알파 `332fdec9` 실측)
     #   `rebalance` 는 `_rebalance_for(horizon)` 로 **자동 유도**만 됐다.
-    #   horizon<=3 이면 무조건 EVERY_TRADING_DAY 다. 그래서 짧은 신호를 낸
+    #   당시 horizon<=3 은 무조건 EVERY_TRADING_DAY 였다. 그래서 짧은 신호를 낸
     #   기획안은 매일 리밸런스가 강제됐고, 3개월 표본에서 회전 33배 ·
     #   수수료가 자본의 5.67%p 로 나왔다. IC 는 +0.012 로 **양수인데**
     #   순수익은 음수였다 - 비용이 신호를 먹은 것이지 신호가 없던 게 아니다.
     #
     #   그때 회전을 줄일 손잡이가 없었다. horizon 을 늘리면 신호 자체가
     #   바뀌어 다른 실험이 된다 - "같은 신호를 덜 자주 거래한다" 를 표현할
-    #   칸이 필요했다. 신호 지평과 거래 빈도는 원래 다른 개념이고, 러너는
+    #   칸이 필요했다. 이후 2일 지평에는 통제된 EVERY_2 정책도 추가했다.
+    #   신호 지평과 거래 빈도는 원래 다른 개념이고, 러너는
     #   처음부터 `rebalance` 를 따로 읽는다(REBALANCE_POLICIES).
     #
     # ▶ **안 주면 예전과 완전히 같다.** 없으면 `_rebalance_for(horizon)` 가
@@ -239,6 +240,7 @@ CHOICE_KEYS = {"portfolio_construction": CONSTRUCTION_VOCAB}
 REBALANCE_BY_HORIZON = {
     # 지평보다 자주 갈아타면 그 지평을 검증하는 것이 아니다
     1: "EVERY_TRADING_DAY",
+    2: "EVERY_2_TRADING_DAYS",
     5: "EVERY_5_TRADING_DAYS",
     20: "MONTH_FIRST_TRADING_DAY",
 }
@@ -1099,7 +1101,9 @@ def _check_rebalance_can_be_set_apart_from_horizon():
     #    만든 EVERY_TRADING_DAY 를 러너가 몰라 실험이 죽었다)
     from backtest_runner import REBALANCE_POLICIES as _RP
     assert set(REBALANCE_POLICIES) == set(_RP), (REBALANCE_POLICIES, _RP)
-    assert "EVERY_5_TRADING_DAYS" in _RP and "EVERY_TRADING_DAY" in _RP, _RP
+    assert {"EVERY_TRADING_DAY", "EVERY_2_TRADING_DAYS",
+            "EVERY_5_TRADING_DAYS"}.issubset(_RP), _RP
+    assert _rebalance_for(2) == "EVERY_2_TRADING_DAYS"
     print("  리밸런스 직접 지정        OK")
 
 

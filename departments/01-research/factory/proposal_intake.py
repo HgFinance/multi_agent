@@ -116,8 +116,10 @@ def _lessons_addressed(v: str) -> dict:
     text = str(v or "").strip()
     if not text:
         return out
-    # `CODE=` 가 나오는 자리에서만 자른다(값 안의 쉼표는 안 자른다)
-    parts = re.split(r",\s*(?=[A-Z][A-Z0-9_]{2,}\s*=)", text)
+    # `CODE=` 가 나오는 자리에서만 자른다(값 안의 쉼표·세미콜론은
+    # 안 자른다). LLM이 내는 `A=..., B=...`·`A=...; B=...`를 둘 다
+    # 받되, 다음 토큰이 통제 코드일 때만 경계로 본다.
+    parts = re.split(r"[,;]\s*(?=[A-Z][A-Z0-9_]{2,}\s*=)", text)
     for p in parts:
         if "=" not in p:
             continue
@@ -902,6 +904,17 @@ def _check_agent_can_answer_the_gate():
         "BEAR_FRAGILE=낙폭 정지를 -0.28 로 건다")
     assert set(got) == {"SINGLE_REGIME_ONLY", "BEAR_FRAGILE"}, got
     assert got["SINGLE_REGIME_ONLY"] == "국면 필터를 빼고, 전 기간을 쓴다", got
+    got2 = _lessons_addressed(
+        "BASELINE_NOT_BEATEN=공개 기준선을 OOS 비용 후 이긴다; "
+        "UNDERPOWERED_DATA=워밍업을 6일로 고정해 4창을 확보한다")
+    assert set(got2) == {"BASELINE_NOT_BEATEN", "UNDERPOWERED_DATA"}, got2
+    repeated = parse_blocks(
+        "TITLE: t\nLESSONS_ADDRESSED: BASELINE_NOT_BEATEN=기준선 대조\n"
+        "LESSONS_ADDRESSED: UNDERPOWERED_DATA=4창 확보\n", PLANNER_KEYS)
+    assert _lessons_addressed(repeated[0]["LESSONS_ADDRESSED"]) == {
+        "BASELINE_NOT_BEATEN": "기준선 대조",
+        "UNDERPOWERED_DATA": "4창 확보",
+    }, repeated
     assert _lessons_addressed("") == {} and _lessons_addressed("아무말") == {}
 
     # ③ 이력은 원장에서 오고 대응은 에이전트에게서 온다

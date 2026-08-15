@@ -67,6 +67,12 @@ STRUCTURE_NOT_IMPLEMENTED = {
 # walk-forward 창이 최소 몇 개는 나와야 강건성을 판정할 수 있다. 이보다 적으면
 # 실험을 돌려도 INCONCLUSIVE 로 끝난다 - 그건 접수에서 막아야 할 낭비다.
 MIN_WF_WINDOWS = 4
+# Keep these rulers aligned with walk_forward._short_sample_windows.  Gate 0
+# uses the same arithmetic before spending a trial on a sample that cannot
+# produce enough out-of-sample windows.
+SHORT_SAMPLE_MAX_DAYS = 120
+SHORT_MIN_TEST_DAYS = 10
+SHORT_TARGET_WINDOWS = 6
 
 
 @dataclass
@@ -114,7 +120,7 @@ def _hyp_view(proposal: dict) -> dict:
 
 
 def _horizon_of(proposal: dict) -> int:
-    """기획안이 쓰겠다는 창 중 **가장 긴 것**(거래일). 읽을 수 없으면 0(검사 생략).
+    """기획안이 요구하는 실행 워밍업 중 **가장 긴 것**(거래일).
 
     ▶ 왜 첫 키가 아니라 최댓값인가 (2026-08-14, 카드 t_e9534028)
       형성창과 보유창이 갈린 뒤로 기획안은 두 값을 같이 적는다. 아래 ①-d 는
@@ -126,7 +132,8 @@ def _horizon_of(proposal: dict) -> int:
     sp = proposal.get("suggested_params") or {}
     longest = 0
     for k in ("signal_window_days", "horizon_days", "holding_horizon",
-              "lookback_days"):
+              "lookback_days", "micro_window_days", "liquidity_window",
+              "trend_filter_days", "vol_lookback_days"):
         v = sp.get(k)
         if v is None:
             continue
@@ -134,7 +141,35 @@ def _horizon_of(proposal: dict) -> int:
             longest = max(longest, int(v))
         except (TypeError, ValueError):
             return 0            # 비수치는 바인딩이 사유를 만든다
+    req = proposal.get("data_requirements") or {}
+    if isinstance(req, dict) and req.get("min_history_days") is not None:
+        try:
+            longest = max(longest, int(req["min_history_days"]))
+        except (TypeError, ValueError):
+            return 0
+    expr = sp.get("signal_expr")
+    if expr is not None:
+        try:
+            from alpha_ast import min_history as _ast_history  # noqa: PLC0415
+            from alpha_ast import parse as _parse_ast
+
+            longest = max(longest, int(_ast_history(_parse_ast(expr))))
+        except Exception:  # invalid formula receives the specific Gate 0 reason below
+            pass
     return longest
+
+
+def _embargo_of(proposal: dict) -> int:
+    """Forecast/holding horizon that the walk-forward evaluator embargoes."""
+    sp = proposal.get("suggested_params") or {}
+    for key in ("horizon_days", "holding_horizon", "lookback_days"):
+        try:
+            value = int(sp.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            return value
+    return 0
 
 
 def gate0(proposal: dict, *, trials_used: int = 0,
@@ -291,7 +326,8 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     # ①-d-1 숫자 범위만으로는 실행 가능성을 보장하지 못한다. 선택형 어휘와
     # 손잡이 조합까지 실행면 자체에 묻는다. 2026-08-15 실측에서
     # rebalance=EVERY_2_TRADING_DAYS가 Gate 0를 통과해 가설로 승격된 뒤 발주
-    # 관문에서 처음 거부됐다. 같은 bind()를 접수 시점에 부르면 "등록됐지만
+    # 관문에서 처음 거부됐다(지금은 실제 실행 정책으로 구현). 같은 bind()를
+    # 접수 시점에 부르면 다른 미구현 주기도 "등록됐지만
     # 영원히 실행되지 않는 가설"을 만들지 않는다.
     try:
         from config_binding import rejection_reasons as _binding_rejections
@@ -373,10 +409,15 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     horizon = _horizon_of(proposal)
     avail = int(available_days or 0)
     if horizon and avail:
-        windows = (avail - horizon) // max(horizon, 1)
+        usable = max(0, avail - horizon)
+        if avail < SHORT_SAMPLE_MAX_DAYS:
+            test_span = SHORT_MIN_TEST_DAYS + _embargo_of(proposal)
+            windows = min(SHORT_TARGET_WINDOWS, usable // max(test_span, 1))
+        else:
+            windows = usable // max(horizon, 1)
         if windows < MIN_WF_WINDOWS:
             r.reject("UNDERPOWERED_DESIGN",
-                     f"형성·보유 {horizon}일을 표본 {avail}거래일에 태우면 "
+                     f"신호·위험관리 워밍업 {horizon}일을 표본 {avail}거래일에 태우면 "
                      f"walk-forward 창이 {max(windows, 0)}개다(최소 {MIN_WF_WINDOWS}) - "
                      f"돌려도 강건성을 못 재고 INCONCLUSIVE 로 끝난다. "
                      f"창을 줄이거나 더 긴 이력을 요구하라")
@@ -950,6 +991,59 @@ _SQL_ALREADY_PROMOTED = (
     "select proposal_id from quant.hypotheses "
     " where proposal_id = any(%s) and proposal_id is not null")
 
+_SQL_MICRO_AVAILABLE_DAYS = """
+select count(distinct p.partition_key)
+  from quant.dataset_manifests m
+  join quant.dataset_partitions p on p.dataset_id = m.dataset_id
+ where m.name = %s and m.version = %s
+"""
+
+
+def _uses_microstructure(proposal: dict) -> bool:
+    req = proposal.get("data_requirements") or {}
+    if isinstance(req, dict) and "microstructure_features" in set(req.get("tables") or []):
+        return True
+    expr = (proposal.get("suggested_params") or {}).get("signal_expr")
+    if expr is None:
+        return False
+    try:
+        from alpha_ast import needs_micro, parse  # noqa: PLC0415
+
+        return bool(needs_micro(parse(expr)))
+    except Exception:
+        return False
+
+
+def _micro_dataset_for_proposal(proposal: dict) -> tuple[str, str] | None:
+    """Return the exact immutable dataset version required by this AST."""
+    if not _uses_microstructure(proposal):
+        return None
+    expr = (proposal.get("suggested_params") or {}).get("signal_expr")
+    try:
+        from backtest_runner import micro_dataset_for  # noqa: PLC0415
+
+        return micro_dataset_for({"signal_expr": expr} if expr is not None else {})
+    except Exception:
+        # Invalid expressions receive a specific Gate 0 rejection.  For a
+        # legacy table-only request the execution surface has always used v3.
+        return "krx-microstructure-daily", "v3"
+
+
+def _available_days_for_proposal(conn, proposal: dict) -> int:
+    """Read the limiting sample from the ledger instead of trusting prose."""
+    if not _uses_microstructure(proposal):
+        return 0
+    dataset = _micro_dataset_for_proposal(proposal)
+    if dataset is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SQL_MICRO_AVAILABLE_DAYS, dataset)
+            row = cur.fetchone()
+        return int((row or (0,))[0] or 0)
+    except Exception:  # inability to measure is reported elsewhere; do not invent a count
+        return 0
+
 _SQL_INSERT_HYPOTHESIS = """
 insert into quant.hypotheses
   (title, rationale, expected_edge, falsification_criteria,
@@ -1017,9 +1111,11 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
         family_history = fetch_family_outcomes(conn, fam)
         exact_history = fetch_exact_ast_outcomes(
             conn, (p.get("suggested_params") or {}).get("signal_expr"))
+        available_days = _available_days_for_proposal(conn, p)
         gate = gate0(p, trials_used=count_family_trials(conn, fam),
-                     past_outcomes=_merge_outcome_evidence(
-                         family_history, exact_history))
+                      past_outcomes=_merge_outcome_evidence(
+                          family_history, exact_history),
+                      available_days=available_days)
         if not gate.ok or dry_run:
             out.append(Promotion(p["proposal_id"], gate.ok, gate=gate.as_dict()))
             continue
@@ -1044,9 +1140,12 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
 class _PromoConn:
     """승격 검증용 가짜 연결. 실행된 SQL 을 순서대로 들고 있는다."""
 
-    def __init__(self, published, already=(), family_trials=0, outcomes=()):
+    def __init__(self, published, already=(), family_trials=0, outcomes=(),
+                 micro_available_days=61):
         self.published, self.already = published, list(already)
         self.family_trials, self.outcomes = family_trials, list(outcomes)
+        self.micro_available_days = int(micro_available_days)
+        self.micro_dataset_queries: list[tuple] = []
         self.inserted: list[tuple] = []
         self.commits = 0
 
@@ -1089,6 +1188,9 @@ class _PromoCursor:
             self._rows = [(x,) for x in self.c.already]
         elif "count(*) from quant.experiments" in s:
             self._rows = [(self.c.family_trials,)]
+        elif "count(distinct p.partition_key)" in s:
+            self.c.micro_dataset_queries.append(tuple(params or ()))
+            self._rows = [(self.c.micro_available_days,)]
         elif "insert into quant.hypotheses" in s:
             self.c.inserted.append(params)
             self._rows = [("hyp-" + str(len(self.c.inserted)),)]
@@ -1560,14 +1662,44 @@ def _check_out_of_range_param_rejected_at_intake():
     assert g2.ok and "PARAM_OUT_OF_RANGE" not in g2.codes, g2.as_dict()
 
     # 선택형 값도 실행면과 같은 어휘로 접수에서 막힌다. 숫자 범위만 보면
-    # EVERY_2_TRADING_DAYS 같은 가설이 승격된 뒤 영구 PROPOSED로 남는다.
+    # 미구현 주기의 가설이 승격된 뒤 영구 PROPOSED로 남는다.
     p3 = _prop()
     p3["suggested_params"] = {
         "horizon_days": 2, "top_n": 100,
-        "rebalance": "EVERY_2_TRADING_DAYS"}
+        "rebalance": "EVERY_3_TRADING_DAYS"}
     g3 = gate0(p3)
     assert "EXECUTION_BINDING_REJECTED" in g3.codes, g3.as_dict()
-    assert any("EVERY_2_TRADING_DAYS" in x for x in g3.reasons), g3.reasons
+    assert any("EVERY_3_TRADING_DAYS" in x for x in g3.reasons), g3.reasons
+
+
+def _check_micro_coverage_is_used_before_promotion():
+    """A 61-day sample is availability, not a 61-day warm-up allowance."""
+    p = _prop()
+    p["suggested_params"] = {"horizon_days": 2, "top_n": 20}
+    p["data_requirements"] = {
+        "tables": ["market_bars", "microstructure_features"],
+        "min_history_days": 61,
+    }
+    conn = _PromoConn([p], micro_available_days=61)
+    assert _available_days_for_proposal(conn, p) == 61
+    assert conn.micro_dataset_queries[-1] == ("krx-microstructure-daily", "v3")
+    blocked = gate0(p, available_days=61)
+    assert "UNDERPOWERED_DESIGN" in blocked.codes, blocked.as_dict()
+
+    p["data_requirements"]["min_history_days"] = 3
+    viable = gate0(p, available_days=61)
+    assert "UNDERPOWERED_DESIGN" not in viable.codes, viable.as_dict()
+
+    p5 = _prop()
+    p5["suggested_params"] = {"signal_expr": {
+        "op": "div",
+        "args": [
+            {"op": "ts_last", "field": "ofi_close", "n": 1},
+            {"op": "ts_mean", "field": "book_depth_notional_l10", "n": 3},
+        ],
+    }}
+    assert _micro_dataset_for_proposal(p5) == (
+        "krx-microstructure-daily", "v5")
 
 
 def _check_outcome_requires_reason():
@@ -1794,6 +1926,8 @@ if __name__ == "__main__":
     _check_mapping_loss_is_stamped();           print("  번역 손실 각인           OK")
     _check_out_of_range_param_rejected_at_intake()
     print("  범위 밖 파라미터 접수 반려 OK")
+    _check_micro_coverage_is_used_before_promotion()
+    print("  미시표본·웜업 분리 판정   OK")
     _check_outcome_requires_reason();           print("  사유 없는 기각 거부      OK")
     _check_unmeasured_metrics_are_dropped_not_zeroed(); print("  미측정 != 0        OK")
     _check_outcome_id_is_idempotent();          print("  환류 멱등                OK")
@@ -1810,4 +1944,4 @@ if __name__ == "__main__":
     _check_promotion_is_idempotent_and_records_rejection()
     _check_fetch_window_excludes_promoted()
     print("  승격분은 창에서 빠진다   OK")
-    print("공장 다리 23개 영역 통과. 루프가 닫혔다.")
+    print("공장 다리 26개 영역 통과. 루프가 닫혔다.")

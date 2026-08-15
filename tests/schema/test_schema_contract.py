@@ -140,6 +140,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 공개 문헌 AST를 대조군으로 보존하고, 별도 메커니즘 파생 후보만
                 # 실험 기획에 노출한다. 기존 리드는 안전하게 직접복제로 분류한다.
                 "20260815120000_literature_derivation_policy.sql",
+                # 같은 출처의 다른 AST 해석은 원 행을 덮지 않고 결정론적 revision
+                # lead로 분기한다. 같은 해석 재수집만 mentions로 접는다.
+                "20260816120000_methodology_lead_revision_lineage.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

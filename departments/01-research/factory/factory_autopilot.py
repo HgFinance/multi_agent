@@ -98,7 +98,8 @@ LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
 DATA_TABLES: market_bars, microstructure_features
-MIN_HISTORY_DAYS: (현재 미시구조 표본 안의 정수. 짧다고 일봉으로 대체하지 마라)
+MIN_HISTORY_DAYS: (현재 표본 길이가 아니라 신호·AST·위험관리 계산에 실제로 필요한
+    워밍업 거래일. signal_expr의 최대 n, vol_lookback_days 등을 포함한 최댓값)
 SUGGESTED_PARAMS: {"horizon_days": 2, "top_n": 20, "signal_expr": {미시구조 필드를 포함한 AST}}
 SOURCE_REPORTED_EFFECT: {"sharpe": null}
 TRIAL_BUDGET: 5
@@ -544,11 +545,20 @@ def _vocab_block(conn=None) -> str:
     except Exception:  # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
         pass
     try:
-        from config_binding import EDGE_KEYS      # noqa: PLC0415
+        from config_binding import (              # noqa: PLC0415
+            CHOICE_KEYS,
+            EDGE_KEYS,
+            REBALANCE_POLICIES,
+        )
 
         params = ("\n  SUGGESTED_PARAMS 에 쓸 수 있는 키: "
                   f"{', '.join(sorted(EDGE_KEYS))}\n"
                   "    이 밖의 키는 실행면이 읽지 않아 거부된다.\n"
+                  "  선택형 값(뜻이 비슷한 자유어를 쓰지 말고 **아래 문자열 그대로**):\n"
+                  f"    portfolio_construction: {', '.join(CHOICE_KEYS['portfolio_construction'])}\n"
+                  "      TOP_N = 상위 N개 동일가중. `equal_weight`가 아니라 TOP_N이다.\n"
+                  "      EXCLUDE_BOTTOM = 하위 분위만 제외하고 나머지 동일가중.\n"
+                  f"    rebalance: {', '.join(REBALANCE_POLICIES)}\n"
                   "  ▶ 위험관리 손잡이(2026-08-12 개방). **엣지를 바꾸지 않고 낙폭을\n"
                   "    줄이는 길이다** - 지금까지 실행면은 완전투자 동일가중밖에\n"
                   "    표현하지 못했고, 그래서 알파가 있는 전략도 낙폭에서 죽었다.\n"
@@ -1009,6 +1019,26 @@ LEADS_LOW = 4
 LEADS_STALE_DAYS = 2
 
 
+def _executable_unused_count(conn) -> int:
+    """Return the exact producer/consumer queue depth used by Planner gating."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            select count(*)
+              from research.methodology_leads l
+             where l.status = 'COMPLETE'
+               and l.testability = 'RULE_EXPRESSIBLE'
+               and l.ast_contract->>'ast_readiness' = 'AST_READY'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+               and coalesce(
+                     (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                     false)
+               and not exists (
+                     select 1 from research.experiment_proposals p
+                      where l.lead_id = any(p.lead_ids))
+        """)
+        return int((cur.fetchone() or (0,))[0] or 0)
+
+
 def _lead_health(conn) -> str:
     """**재료가 남아 있나.** 마르면 스카우트가 먼저다.
 
@@ -1202,17 +1232,31 @@ def _alpha_expr_line(conn) -> str:
             "      depth_imbalance_l10   가용 1~10호가 누적 잔량 불균형",
             "      depth_imbalance_slope L1-L10. 표면과 깊은 장부가 반대인지 측정",
             "      size_weighted_ofi     수량 제곱 가중 체결 OFI. 큰 체결 방향을 강조",
+            "  ▶ **v5 는 방향과 절대 수용력을 분리한다.** v4 불균형은 얇은 장과",
+            "    두꺼운 장이 같은 +0.2일 수 있었다. 가격×잔량을 백만원으로 접어",
+            "    OFI 충격을 실제 흡수할 양방향 용량을 직접 표현한다:",
+            "      book_depth_notional_l1   최우선 양방향 가격×잔량. 즉시 흡수 용량",
+            "      book_depth_notional_l10  1~10호가 가격×잔량. 전체 흡수 용량",
+            "    단독 깊이는 방향 알파가 아니다. OFI와 div/mul로 상호작용시키거나",
+            "    저용량 상태 조건으로 쓰고 그 경제적 반대편을 명시하라.",
             "    공개식을 그대로 복제하지 말고, 예를 들어 L1 압력에서 L10 지지를 빼거나",
             "    일반 OFI와 대형체결 OFI의 불일치를 비용·스프레드와 결합해 메커니즘을 적어라.",
             "    이벤트 순번/거래량 버킷은 원천으로 계산 가능하지만 대규모 정렬 비용과",
             "    체결 지평 엔진이 아직 검증 전이므로 현재 AST 필드인 척 쓰지 마라.",
             "  ▶ 회전을 직접 정하려면 `suggested_params.rebalance` 를 적는다"
-            "(EVERY_TRADING_DAY /",
+            "(EVERY_TRADING_DAY / EVERY_2_TRADING_DAYS /",
             "    EVERY_5_TRADING_DAYS / MONTH_FIRST_TRADING_DAY). 안 적으면 "
             "horizon 에서 유도되고",
-            "    horizon<=3 은 매일이 된다. **horizon 을 늘리는 것과 다르다** - "
+            "    horizon=2 는 2거래일마다, horizon=1·3 은 매일이 된다. "
+            "**horizon 을 늘리는 것과 다르다** - "
             "그건 신호 자체를",
             "    바꿔 다른 실험이 되고, 이건 같은 신호를 덜 자주 거래하는 것이다.",
+            "  ▶ MIN_HISTORY_DAYS 는 현재 커버리지 숫자를 복사하는 칸이 아니다. "
+            "61일 표본의 2일 지평에서",
+            "    강건성 4창(유효 각 10일 + embargo 2일)을 만들려면 워밍업이 "
+            "13일 이하여야 한다. "
+            "60일 변동성 창을",
+            "    켜면 평가구간이 남지 않으므로 그 제안은 실행 전에 반려된다.",
         ]
     return "\n".join([
         "",
@@ -1595,7 +1639,7 @@ _EXEC_SURFACE = """
 # ── 카드 생성 ────────────────────────────────────────────────────────────────
 
 def _create_card(*, title: str, body: str, assignee: str, key: str,
-                 dry_run: bool) -> str | None:
+                 dry_run: bool, priority: int = 0) -> str | None:
     """칸반 카드 하나. **같은 주기에 두 번 돌아도 카드는 하나다**(idempotency-key).
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
@@ -1605,6 +1649,7 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
             "--assignee", assignee,
             "--idempotency-key", key,
             "--created-by", MODULE_VERSION,
+            "--priority", str(priority),
             "--body", body]
     if dry_run:
         print(f"  [dry-run] {assignee} <- {title}")
@@ -1701,6 +1746,56 @@ def _unresolved_card(owner: str, scope: str) -> str | None:
         status = row[1] if len(row) > 1 else "?"
         return f"{tid}({status})"
     return None
+
+
+def _active_card_by_key_prefix(prefix: str) -> str | None:
+    """Return one ready/running card whose idempotency key starts with *prefix*.
+
+    Time-bucket idempotency prevents duplicates inside one bucket, but it does
+    not protect a long-running card that crosses an hour boundary.  Scout work
+    is deliberately expensive and the research profile currently consumes one
+    card at a time, so a second active scout would only duplicate discovery
+    without increasing the executable-lead production rate.
+
+    Board-read failures are fail-open: the hourly idempotency key still bounds
+    duplication, while a transient read failure must not stop discovery.
+    """
+    try:
+        rows = _board_rows(
+            "select id, status, idempotency_key from tasks "
+            "where idempotency_key like ? "
+            "  and status in ('ready','running') "
+            "order by created_at asc limit 1",
+            (prefix + "%",),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  board lookup failed - active-card guard skipped "
+              f"({type(exc).__name__})", flush=True)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    return f"{row[0]}({row[1] if len(row) > 1 else '?'})"
+
+
+def _should_schedule_planner(research_brief: str,
+                             executable_unused: int | None) -> bool:
+    """Consume any executable lead, while discovery replenishes the buffer.
+
+    The research profile executes one card at a time.  Scheduling a planner
+    while there are zero executable unused leads makes
+    the planner run first (higher queue priority), spend a model turn rejecting
+    stale families, and then leaves the newly discovered leads waiting for the
+    next 30-minute planner bucket.  A low-watermark warning is *not* an empty
+    queue, however: Scout should refill in parallel while Planner consumes the
+    valid lead that already exists.  Conflating ``unused < LEADS_LOW`` with
+    ``unused == 0`` deadlocks the factory at one to three fresh leads.
+
+    ``None`` means the count could not be measured and is fail-closed.
+    """
+    return (bool(str(research_brief or "").strip())
+            and executable_unused is not None
+            and int(executable_unused) > 0)
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
@@ -1812,9 +1907,10 @@ DELIVERY_RULES = (
     "- 호출할 때 `planner_run` 에 **이 카드의 ID**(t_ 로 시작)를 그대로 넣어라. "
     "그래야 납품이 이 카드 몫으로 대조된다.\n"
     "- 제출 전에 `run_research_workers(proposal_draft=<기획자 초안>)` 를 호출하고 "
-    "`get_worker_job` 으로 COMPLETED 를 확인하라. 결과의 "
-    "`competing-explanation-worker` 요약을 SKEPTIC 블록으로 옮기고, 반환된 "
-    "**실제 job_id를 바꾸지 말고 `skeptic_run` 에 넣어라.** FAILED·DEGRADED면 "
+    "`get_worker_job` 으로 COMPLETED 를 확인하라. 결과의 typed "
+    "`skeptic_reviews`는 제출 도구가 직접 접수 블록으로 바꾼다 - 요약을 손으로 "
+    "옮기지 마라. 반환된 **실제 job_id를 바꾸지 말고 `skeptic_run` 에 넣어라.** "
+    "FAILED·DEGRADED면 "
     "제출하지 말고 차단 사유를 남겨라. 자기 서명(`#self`)이나 임의 실행명은 "
     "접수 경계에서 거부된다.\n"
     "- 반려를 받으면 사유가 도구 결과로 즉시 돌아온다 - 그 사유에 답해 **같은 "
@@ -2238,7 +2334,7 @@ def _feed_back_experiment_failures(conn, *, limit: int = 6) -> int:
 
 
 _DATASET_MARK = Path.home() / ".factory_autopilot_dataset_day"
-_MS_DATASET = "krx-microstructure-daily/v1"
+_MS_DATASET = "krx-microstructure-daily/v5"
 
 
 def _refresh_datasets(*, dry_run: bool = False) -> int:
@@ -2461,15 +2557,23 @@ def cycle(*, dry_run: bool = False) -> int:
     #     ChemOS: 프로듀서(후보 생성)와 컨슈머(실행)는 분리된 프로세스다.
     #     그래서 재료가 마르면 임무가 리드 수집 하나뿐인 카드를 따로 건다 -
     #     수집 강제가 아니다. 마른 렌즈는 "말랐다" 보고도 유효한 산출이다.
-    #   멱등키는 6시간 버킷 - 15분 주기마다 새 카드를 내면 그게 또 스팸이다.
+    #   멱등키는 1시간 버킷이고, 별도 active-card 가드가 시간 경계를 넘은
+    #   Scout도 중복 생성하지 않는다.
+    starving = ""
+    executable_unused: int | None = None
     try:
         _sc = _conn()
         try:
             starving = _lead_health(_sc)
+            # The refill low-watermark and the consumer empty-queue gate are
+            # deliberately separate.  One fresh lead is enough for Planner,
+            # even though Scout should concurrently refill toward LEADS_LOW.
+            executable_unused = _executable_unused_count(_sc)
             ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
-        if starving:
+        active_scout = _active_card_by_key_prefix("factory-scout-") if starving else None
+        if starving and not active_scout:
             _now = datetime.now(timezone.utc)
             _create_card(
                 title=f"공장 스카우트 소집: 리드 수집 {stamp}",
@@ -2503,9 +2607,14 @@ def cycle(*, dry_run: bool = False) -> int:
                 # consume the same exhausted leads before scouting could run.
                 key=f"factory-scout-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
+        elif active_scout:
+            print(f"  scout refill skipped - already active: {active_scout}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
               flush=True)
+        # 리드 상태를 못 쟀다는 것은 "실행 재료가 충분하다"는 뜻이 아니다.
+        # 빈 문자열로 두면 아래 planner 의존성이 fail-open 된다.
+        starving = "리드 상태 측정/보충 실패 - Planner를 보류한다"
         fails += 1
 
     # ── 리서치: 다음 기획안 ──
@@ -2518,7 +2627,7 @@ def cycle(*, dry_run: bool = False) -> int:
               f"{str(exc)[:180]}", flush=True)
         rb = ""
         fails += 1
-    if rb:
+    if _should_schedule_planner(rb, executable_unused):
         # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
@@ -2573,11 +2682,17 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            key=f"factory-planner-{pstamp}", dry_run=dry_run)
+            key=f"factory-planner-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
         # 검토한 척하게 된다. 기획자가 끝난 것을 보고 수확기가 건다.
+    elif rb and executable_unused == 0:
+        print("  planner deferred - executable lead queue is empty; "
+              "scout must replenish it first", flush=True)
+    elif rb and executable_unused is None:
+        print("  planner deferred - executable lead queue could not be measured",
+              flush=True)
 
     # ── 퀀트: 대기 중인 가설 실험 ──
     try:
@@ -3237,6 +3352,8 @@ def _selfcheck() -> int:
     assert "REGIME_ARTIFACT" not in v, "내가 지어낸 어휘가 아직 브리핑에 있다"
     for token in ("EDGE_TYPE", "UNIVERSE_KEY", "COMPETING_CODES", "DATA_TABLES"):
         assert token in v, f"통제 어휘에 {token} 이 빠졌다"
+    assert "`equal_weight`가 아니라 TOP_N" in v
+    assert "EVERY_2_TRADING_DAYS" in v
     # IR 구조 진단이 브리핑에 실려 있는가 - 진단이 원장·보고서에만 남으면
     # 기획자는 다음 주기에도 관례 top-20 으로 낸다(2026-08-13)
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
@@ -3259,9 +3376,10 @@ def _selfcheck() -> int:
     _check_delivery_is_the_tool_call_not_text()
     _check_improvement_cards_carry_acceptance()
     _check_unresolved_bottleneck_card_is_not_reminted()
+    _check_research_queue_prefers_consumption()
     _check_kind_scope_survives_instance_churn()
     _check_briefed_example_actually_passes_intake()
-    print("자동 조종 20개 영역 통과. 실행은 --once / --loop")
+    print("자동 조종 21개 영역 통과. 실행은 --once / --loop")
     return 0
 
 
@@ -3637,6 +3755,54 @@ def _check_design_gaps_and_scout_card():
     assert "factory-planner-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     print("  설계 공백·스카우트 소집   OK")
+
+
+def _check_research_queue_prefers_consumption():
+    """Discovery must precede planning when executable material is empty."""
+    import inspect
+
+    saved_rows = globals()["_board_rows"]
+    saved_run = subprocess.run
+    captured: list[str] = []
+    try:
+        globals()["_board_rows"] = lambda sql, params=(): [
+            ("t_scout", "running", "factory-scout-20260815T17")
+        ]
+        assert _active_card_by_key_prefix("factory-scout-") == "t_scout(running)"
+
+        globals()["_board_rows"] = lambda sql, params=(): []
+        assert _active_card_by_key_prefix("factory-scout-") is None
+
+        class _Result:
+            returncode = 0
+            stdout = "t_test"
+            stderr = ""
+
+        def _run(argv, **kwargs):
+            captured.extend(argv)
+            return _Result()
+
+        subprocess.run = _run
+        _create_card(title="test", body="body", assignee=RESEARCH_ASSIGNEE,
+                     key="queue-priority-selfcheck", dry_run=False, priority=1)
+    finally:
+        globals()["_board_rows"] = saved_rows
+        subprocess.run = saved_run
+
+    assert "--priority" in captured
+    assert captured[captured.index("--priority") + 1] == "1"
+    assert _should_schedule_planner("brief", 1) is True
+    assert _should_schedule_planner("brief", 3) is True, \
+        "low-watermark queue was mistaken for an empty queue"
+    assert _should_schedule_planner("brief", 0) is False
+    assert _should_schedule_planner("brief", None) is False
+    assert _should_schedule_planner("", 1) is False
+    cyc = inspect.getsource(cycle)
+    assert '_active_card_by_key_prefix("factory-scout-")' in cyc
+    assert "_should_schedule_planner(rb, executable_unused)" in cyc, \
+        "planner can still consume an empty executable-lead queue"
+    assert "priority=1" in cyc, "planner priority was lost after replenishment"
+    print("  research producer-before-consumer dependency OK")
 
 
 def _check_ast_memory_reaches_scout_and_planner():
