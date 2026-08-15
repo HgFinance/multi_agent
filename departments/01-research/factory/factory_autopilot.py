@@ -178,12 +178,12 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.testability, l.status,
        exists (select 1 from research.experiment_proposals p
                 where l.lead_id = any(p.lead_ids)) as used,
-       coalesce(l.refs->0->>'ast_readiness', 'LEGACY') as ast_readiness,
-       coalesce(l.refs->0->'observables', '[]'::jsonb) as observables,
-       l.refs->0->'candidate_signal_expr' as candidate_signal_expr
+       coalesce(l.ast_contract->>'ast_readiness', 'LEGACY') as ast_readiness,
+       coalesce(l.ast_contract->'observables', '[]'::jsonb) as observables,
+       l.ast_contract->'candidate_signal_expr' as candidate_signal_expr
   from research.methodology_leads l
  where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
-   and l.refs->0->>'ast_readiness' = 'AST_READY'
+   and l.ast_contract->>'ast_readiness' = 'AST_READY'
 order by used asc, l.created_at desc
 limit %s
 """

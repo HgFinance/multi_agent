@@ -384,14 +384,14 @@ def load_leads(conn, lead_ids) -> dict:
         return {}
     cur = conn.cursor()
     cur.execute("""
-        select lead_id, case_id, scout_lens, source_type, as_known_at, refs,
+        select lead_id, case_id, scout_lens, source_type, as_known_at, refs, ast_contract,
                claimed_edge, stated_mechanism, inferred, market_context,
                stated_failure_mode, independent_mentions, testability, status,
                model_version, prompt_version
           from research.methodology_leads where lead_id = any(%s)
     """, (list(lead_ids),))
     cols = ("lead_id", "case_id", "scout_lens", "source_type", "as_known_at",
-            "refs", "claimed_edge", "stated_mechanism", "inferred",
+            "refs", "ast_contract", "claimed_edge", "stated_mechanism", "inferred",
             "market_context", "stated_failure_mode", "independent_mentions",
             "testability", "status", "model_version", "prompt_version")
     out = {}
@@ -399,6 +399,8 @@ def load_leads(conn, lead_ids) -> dict:
         d = dict(zip(cols, row))
         if isinstance(d["refs"], str):
             d["refs"] = json.loads(d["refs"])
+        if isinstance(d["ast_contract"], str):
+            d["ast_contract"] = json.loads(d["ast_contract"])
         # ▶ **원장에 이미 계약을 넘는 값이 들어가 있다** (2026-08-12 실측)
         #   `lead_intake.to_lead` 가 EXCERPT 없을 때 MECHANISM 으로 대체하는데
         #   길이 규율이 없어 500자를 넘겼고, 그게 그대로 적재됐다. 그 뒤로 이

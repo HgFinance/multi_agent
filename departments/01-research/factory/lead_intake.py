@@ -246,7 +246,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
     # 우리 데이터로 어떻게 재현하는지 못 적었으면 규칙으로 못 옮긴다.
     readiness = _readiness_metadata(block, mech)
     ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
-           "excerpt": excerpt, **readiness}
+           "excerpt": excerpt}
 
     # v1 columns remain compatible; the source-specific verdict lives in refs JSON.
     readiness_value = readiness["ast_readiness"]
@@ -266,6 +266,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
         "source_type": source_type,
         "as_known_at": now,
         "refs": [ref],
+        "ast_contract": readiness,
         "claimed_edge": title,
         "stated_mechanism": mech,
         # 반대편을 소스가 밝히지 않았으면 스카우트의 추론이다 - 표시해 둔다.
@@ -311,17 +312,18 @@ def intake(text: str, *, lens: str, source_type: str, case_id: str,
 # ── 적재 ───────────────────────────────────────────────────────────────────
 _SQL_UPSERT = """
 insert into research.methodology_leads
-  (lead_id, case_id, scout_lens, source_type, as_known_at, refs, claimed_edge,
+  (lead_id, case_id, scout_lens, source_type, as_known_at, refs, ast_contract, claimed_edge,
    stated_mechanism, inferred, market_context, stated_failure_mode,
    independent_mentions, testability, status, model_version, prompt_version)
 values (%(lead_id)s, %(case_id)s, %(scout_lens)s, %(source_type)s,
-        %(as_known_at)s, %(refs)s, %(claimed_edge)s, %(stated_mechanism)s,
+        %(as_known_at)s, %(refs)s, %(ast_contract)s, %(claimed_edge)s, %(stated_mechanism)s,
         %(inferred)s, %(market_context)s, %(stated_failure_mode)s,
         %(independent_mentions)s, %(testability)s, %(status)s,
         %(model_version)s, %(prompt_version)s)
 on conflict (lead_id) do update set
   -- 같은 소스를 다시 주웠다. 새 리드가 아니라 **언급이 하나 는 것**이다.
   independent_mentions = research.methodology_leads.independent_mentions + 1,
+  ast_contract = excluded.ast_contract,
   as_known_at = excluded.as_known_at
 returning (xmax = 0) as inserted
 """
@@ -334,6 +336,7 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
     for lead in leads:
         payload = dict(lead)
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)
+        payload["ast_contract"] = json.dumps(lead["ast_contract"], ensure_ascii=False)
         cur.execute(_SQL_UPSERT, payload)
         row = cur.fetchone()
         if row and row[0]:
@@ -447,7 +450,7 @@ def _selfcheck() -> int:
         model_version="m", prompt_version="p")
     check("data-blocked is preserved", blocked["status"] == "BLOCKED")
     check("readiness metadata is auditable",
-          blocked["refs"][0]["ast_readiness"] == "DATA_BLOCKED")
+          blocked["ast_contract"]["ast_readiness"] == "DATA_BLOCKED")
 
     try:
         to_lead({"TITLE": "Bad fields", "URL": "http://x/4",

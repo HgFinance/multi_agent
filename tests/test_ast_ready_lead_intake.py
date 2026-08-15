@@ -12,6 +12,7 @@ sys.path.insert(0, str(RESEARCH))
 sys.path.insert(0, str(RESEARCH / "factory"))
 
 import lead_intake  # noqa: E402
+from factory_contracts import MethodologyLeadV1  # noqa: E402
 
 
 def _lead(block: dict) -> dict:
@@ -32,8 +33,9 @@ def test_ast_ready_persists_validated_expression_in_source_ref():
 
     assert lead["status"] == "COMPLETE"
     assert lead["testability"] == "RULE_EXPRESSIBLE"
-    assert lead["refs"][0]["ast_readiness"] == "AST_READY"
-    assert lead["refs"][0]["candidate_signal_expr"]["arg"]["n"] == 5
+    assert lead["ast_contract"]["ast_readiness"] == "AST_READY"
+    assert lead["ast_contract"]["candidate_signal_expr"]["arg"]["n"] == 5
+    assert MethodologyLeadV1.model_validate(lead).refs[0].url == lead["refs"][0]["url"]
 
 
 def test_ast_ready_rejects_observable_expression_disagreement():
@@ -71,4 +73,4 @@ def test_non_ready_leads_are_preserved_but_not_planner_ready(
     })
 
     assert lead["status"] == status
-    assert lead["refs"][0]["ast_readiness"] == readiness
+    assert lead["ast_contract"]["ast_readiness"] == readiness
