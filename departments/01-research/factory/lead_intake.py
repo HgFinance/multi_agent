@@ -65,15 +65,75 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v1"
+MODULE_VERSION = "research-lead-intake-v2"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
-REQUIRED = ("TITLE", "URL", "MECHANISM")
+REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
 OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
-            "MARKET_CONTEXT", "FAILURE_MODE")
+            "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
+            "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS")
 _FIELD_RE = re.compile(
-    r"^(TITLE|URL|MECHANISM|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
-    r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE)\s*:\s*(.*)$")
+    r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
+    r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
+    r"MISSING_DATA|MAPPING_LOSS)\s*:\s*(.*)$")
+
+AST_READY = "AST_READY"
+DATA_BLOCKED = "DATA_BLOCKED"
+SEMANTIC_MISMATCH = "SEMANTIC_MISMATCH"
+READINESS_VALUES = frozenset({AST_READY, DATA_BLOCKED, SEMANTIC_MISMATCH})
+
+
+def _alpha_ast():
+    """Load the container-neutral grammar shared with quant execution."""
+    from contracts import alpha_ast_surface  # noqa: PLC0415
+    return alpha_ast_surface
+
+
+def _as_text(value) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value or "").strip()
+
+
+def _readiness_metadata(block: dict, mechanism: str) -> dict:
+    """Validate whether a sourced idea can enter the current AST/data search space."""
+    readiness = _as_text(block.get("READINESS")).upper()
+    if readiness not in READINESS_VALUES:
+        raise ValueError("READINESS must be AST_READY, DATA_BLOCKED, or SEMANTIC_MISMATCH")
+
+    raw_observables = block.get("OBSERVABLES")
+    observable_items = (raw_observables if isinstance(raw_observables, (list, tuple, set))
+                        else _as_text(raw_observables).split(","))
+    observables = sorted({_as_text(x) for x in observable_items if _as_text(x)})
+    missing_data = _as_text(block.get("MISSING_DATA"))
+    mapping_loss = _as_text(block.get("MAPPING_LOSS"))
+    raw_expr = block.get("CANDIDATE_SIGNAL_EXPR")
+    candidate = None
+
+    if readiness == AST_READY:
+        if not observables or not _as_text(raw_expr):
+            raise ValueError("AST_READY requires OBSERVABLES and CANDIDATE_SIGNAL_EXPR")
+        try:
+            candidate = raw_expr if isinstance(raw_expr, dict) else json.loads(_as_text(raw_expr))
+            ast = _alpha_ast()
+            candidate = ast.parse(candidate)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"invalid CANDIDATE_SIGNAL_EXPR: {exc}") from exc
+        fields = sorted(ast.fields_of(candidate))
+        if observables != fields:
+            raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
+        alignment = ast.check_alignment(
+            candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
+        if not alignment["ok"]:
+            raise ValueError(f"SEMANTIC_MISMATCH: {alignment['note']}")
+    elif readiness == DATA_BLOCKED and not missing_data:
+        raise ValueError("DATA_BLOCKED requires MISSING_DATA")
+    elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
+        raise ValueError("SEMANTIC_MISMATCH requires MAPPING_LOSS")
+
+    return {"ast_readiness": readiness, "observables": observables,
+            "candidate_signal_expr": candidate, "missing_data": missing_data,
+            "mapping_loss": mapping_loss}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"
@@ -177,16 +237,22 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
     url, title = block["URL"].strip(), block["TITLE"].strip()
     # MECHANISM 대체분은 길이 규율이 없다 - 계약 상한으로 자른다(clip_excerpt 참고).
     excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
-    ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
-           "excerpt": excerpt}
-
     mech = (block.get("MECHANISM") or "").strip()
     reported = (block.get("REPORTED_EFFECT") or "").strip()
     testable = (block.get("TESTABLE_WITH") or "").strip()
     counterparty = (block.get("COUNTERPARTY") or "").strip()
 
     # 우리 데이터로 어떻게 재현하는지 못 적었으면 규칙으로 못 옮긴다.
-    testability = "RULE_EXPRESSIBLE" if testable else "VAGUE"
+    readiness = _readiness_metadata(block, mech)
+    ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
+           "excerpt": excerpt, **readiness}
+
+    # v1 columns remain compatible; the source-specific verdict lives in refs JSON.
+    readiness_value = readiness["ast_readiness"]
+    testability = {AST_READY: "RULE_EXPRESSIBLE", DATA_BLOCKED: "VAGUE",
+                   SEMANTIC_MISMATCH: "UNUSABLE"}[readiness_value]
+    status = {AST_READY: "COMPLETE", DATA_BLOCKED: "BLOCKED",
+              SEMANTIC_MISMATCH: "UNUSABLE"}[readiness_value]
 
     context = (block.get("MARKET_CONTEXT") or "").strip()
     if not context and reported and reported.upper() != "NONE":
@@ -207,7 +273,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
         "stated_failure_mode": (block.get("FAILURE_MODE") or "").strip(),
         "independent_mentions": 1,
         "testability": testability,
-        "status": "COMPLETE" if (mech and testable) else "PARTIAL",
+        "status": status,
         "model_version": model_version.strip(),
         "prompt_version": prompt_version.strip(),
     }
@@ -280,20 +346,24 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
 # ── 자체 점검 ──────────────────────────────────────────────────────────────
 _SAMPLE = """TITLE: Short-Term Reversal as Returns to Liquidity Provision
 URL: https://www.nber.org/system/files/working_papers/w17653/w17653.pdf
-MECHANISM: 유동성 공급자가 재고위험을 지고 일시적 가격압력의 반전에서
-보상을 얻는다.
-COUNTERPARTY: 즉시성이 필요한 비정보성 투자자가 가격양보를 지불한다.
-TESTABLE_WITH: t-1~t-5 시장조정 수익률을 횡단면 순위화해 롱숏.
-REPORTED_EFFECT: 미국 CRSP 1998~2010, 약 0.1%/일.
+MECHANISM: Lagged returns reverse because liquidity providers are compensated.
+COUNTERPARTY: Urgent liquidity demanders.
+TESTABLE_WITH: Rank the negative five-day mean of returns.
+READINESS: AST_READY
+OBSERVABLES: returns
+CANDIDATE_SIGNAL_EXPR: {"op":"neg","arg":{"op":"ts_mean","field":"returns","n":5}}
 
-TITLE: 메커니즘 없는 성과 자랑
+TITLE: Missing mechanism
 URL: https://example.com/backtest
-REPORTED_EFFECT: 연 40%
+READINESS: SEMANTIC_MISMATCH
+MAPPING_LOSS: no mechanism
 
-TITLE: 죽은 링크
+TITLE: Broken link
 URL: https://example.com/gone
-MECHANISM: 있긴 하다
-TESTABLE_WITH: 재현 가능
+MECHANISM: Some mechanism
+TESTABLE_WITH: measurable
+READINESS: DATA_BLOCKED
+MISSING_DATA: unavailable series
 """
 
 
@@ -334,7 +404,7 @@ def _selfcheck() -> int:
     check("재현법 있으면 RULE_EXPRESSIBLE",
           lead["testability"] == "RULE_EXPRESSIBLE")
     check("COMPLETE", lead["status"] == "COMPLETE")
-    check("여러 줄 이어붙임", "보상을 얻는다" in lead["stated_mechanism"])
+    check("mechanism retained", "liquidity providers" in lead["stated_mechanism"])
 
     # 계보 없이는 못 만든다
     try:
@@ -346,25 +416,63 @@ def _selfcheck() -> int:
         check("계보 없는 리드 차단", True)
 
     # 같은 소스는 같은 ID (중복 접기)
-    a = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m"},
+    a = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m",
+                 "READINESS": "DATA_BLOCKED", "MISSING_DATA": "x"},
                 lens="ACADEMIC", source_type="PAPER", case_id="c1",
                 model_version="m1", prompt_version="p1")
-    b = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m2"},
+    b = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m2",
+                 "READINESS": "DATA_BLOCKED", "MISSING_DATA": "x"},
                 lens="COMMUNITY", source_type="BLOG", case_id="c2",
                 model_version="m1", prompt_version="p1")
     check("같은 소스 = 같은 ID", a["lead_id"] == b["lead_id"])
 
     # JSON 입력도 받는다
-    j = json.dumps([{"TITLE": "J", "URL": "http://x/2", "MECHANISM": "m",
-                     "TESTABLE_WITH": "t"}], ensure_ascii=False)
+    j = json.dumps([{"TITLE": "J", "URL": "http://x/2",
+                     "MECHANISM": "returns reversal", "TESTABLE_WITH": "lagged returns",
+                     "READINESS": "AST_READY", "OBSERVABLES": ["returns"],
+                     "CANDIDATE_SIGNAL_EXPR": {"op": "neg", "arg": {
+                         "op": "ts_mean", "field": "returns", "n": 5}}}],
+                   ensure_ascii=False)
     rj = intake(j, lens="ACADEMIC", source_type="PAPER", case_id="c",
                 model_version="m", prompt_version="p",
                 opener=lambda u: 200)
     check("JSON 입력", len(rj.leads) == 1)
 
+    blocked = to_lead(
+        {"TITLE": "Needs borrow data", "URL": "http://x/3",
+         "MECHANISM": "borrow pressure predicts returns", "READINESS": "DATA_BLOCKED",
+         "MISSING_DATA": "point-in-time borrow fee"},
+        lens="ACADEMIC", source_type="PAPER", case_id="c",
+        model_version="m", prompt_version="p")
+    check("data-blocked is preserved", blocked["status"] == "BLOCKED")
+    check("readiness metadata is auditable",
+          blocked["refs"][0]["ast_readiness"] == "DATA_BLOCKED")
+
+    try:
+        to_lead({"TITLE": "Bad fields", "URL": "http://x/4",
+                 "MECHANISM": "returns reversal", "READINESS": "AST_READY",
+                 "OBSERVABLES": "close", "CANDIDATE_SIGNAL_EXPR": {
+                     "op": "ts_mean", "field": "returns", "n": 5}},
+                lens="ACADEMIC", source_type="PAPER", case_id="c",
+                model_version="m", prompt_version="p")
+        check("observable/AST mismatch rejected", False)
+    except ValueError:
+        check("observable/AST mismatch rejected", True)
+
+    try:
+        to_lead({"TITLE": "Proxy substitution", "URL": "http://x/5",
+                 "MECHANISM": "news sentiment predicts returns", "READINESS": "AST_READY",
+                 "OBSERVABLES": "spread_bps", "CANDIDATE_SIGNAL_EXPR": {
+                     "op": "ts_mean", "field": "spread_bps", "n": 5}},
+                lens="ACADEMIC", source_type="PAPER", case_id="c",
+                model_version="m", prompt_version="p")
+        check("semantic mismatch rejected", False)
+    except ValueError:
+        check("semantic mismatch rejected", True)
+
     for f in fails:
         print(f"  FAIL {f}")
-    total = 16
+    total = 20
     print(f"lead_intake 자체 점검: {total - len(fails)}/{total} 통과")
     return 1 if fails else 0
 
