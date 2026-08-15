@@ -148,13 +148,33 @@ def dataset_of(hyp: dict) -> tuple[str, str]:
     에 넣어 두므로 여기서는 그것을 읽기만 한다. 값이 없거나 모양이 이상하면
     모듈 상수로 떨어진다 - **조용히 다른 데이터로 돌지 않기 위해서**다.
     """
+    datasets: list[tuple[str, str]] = []
     for d in (hyp.get("required_data_products") or []):
         s = str(d)
         if "/" in s:
             name, _, ver = s.rpartition("/")
             if name and ver:
-                return name, ver
+                datasets.append((name, ver))
+    # The backtester always builds its execution market from daily OHLCV.
+    # Feature-only datasets (for example microstructure) are attached later.
+    # Prefer the price dataset even if resolution returned feature data first.
+    for name, ver in datasets:
+        if name == DATASET_NAME:
+            return name, ver
+    if datasets:
+        return datasets[0]
     return DATASET_NAME, DATASET_VERSION
+
+
+def execution_data_products(products) -> list:
+    """Add the daily price primitive required by every executable strategy."""
+    out = list(products or [])
+    has_bars = any(
+        str(product) == "market_bars"
+        or str(product).startswith(f"{DATASET_NAME}/")
+        for product in out
+    )
+    return out if has_bars else ["market_bars", *out]
 
 
 def feasibility(hypothesis: dict, existing_datasets: set,
@@ -598,12 +618,14 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             return OrchestratorReport(hypothesis_id="-", title="-",
                                       verdict="NO_HYPOTHESIS")
         hid, title, edge, data_products, _status = row
+        execution_products = execution_data_products(
+            _norm_data_products(data_products))
         hyp = {"expected_edge": edge if isinstance(edge, dict) else json.loads(edge or "{}"),
                # ▶ 세 모양을 다 받는다: 리스트(구 형식), dict(기획안의
                #   DataRequirement {tables, min_history_days}), JSON 문자열.
                #   기획안 경로가 dict 를 넣는데 리스트만 처리해 TypeError 로
                #   실험이 죽었다(2026-08-10 실측).
-               "required_data_products": _norm_data_products(data_products),
+               "required_data_products": execution_products,
                # ▶ status 를 언패킹만 하고 dict 에 안 넣어서 사전등록 관문이
                #   빈 문자열을 읽고 "순서를 건너뛴다" 로 막았다. 조회한 값을
                #   쓰지 않으면 조회하지 않은 것과 같다.
@@ -619,7 +641,8 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   이제 사상은 source_versions 에서 유도하고 커버리지는 로컬에서 잰다.
         from data_resolution import resolve as resolve_data
 
-        res = resolve_data(data_products, meta_conn=conn, market_conn=market_conn)
+        res = resolve_data(execution_products, meta_conn=conn,
+                           market_conn=market_conn)
         if not res.ok:
             return OrchestratorReport(
                 hypothesis_id=str(hid), title=title, verdict="NOT_RUNNABLE",
