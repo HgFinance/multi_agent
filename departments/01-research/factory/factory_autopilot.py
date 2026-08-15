@@ -158,10 +158,9 @@ select trial_family_id, count(*), max(trial_number)
 
 def _conn():
     from source_registry import load_project_env   # noqa: PLC0415
+    from db_writer import connect                  # noqa: PLC0415
 
-    import psycopg2                                # noqa: PLC0415
-
-    return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    return connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
 
 
 # ▶ **안 쓴 리드를 맨 앞에 둔다** (2026-08-12 실측)

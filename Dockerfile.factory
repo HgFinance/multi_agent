@@ -104,7 +104,16 @@ COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtim
 COPY departments/notion_markdown.py         ./departments/notion_markdown.py
 COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 
+# Seal the proposal -> AST -> experiment execution surface into the image.
+# A container-layer hotfix must become visible as unhealthy instead of letting
+# the autopilot and worker silently execute different field registries.
+COPY scripts/factory_runtime_contract.py ./scripts/factory_runtime_contract.py
+RUN python scripts/factory_runtime_contract.py write
+
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=1 \
+  CMD ["python", "scripts/factory_runtime_contract.py", "check"]
 
 # 기본은 자동 조종. compose 가 워커·감시자를 각각 command 로 지정한다.
 CMD ["python", "departments/01-research/factory/factory_autopilot.py", \

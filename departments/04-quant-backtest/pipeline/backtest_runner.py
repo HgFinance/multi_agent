@@ -1342,7 +1342,9 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
     from source_registry import load_project_env
 
     env = load_project_env()
-    conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+    from db_writer import connect as connect_writer
+
+    conn = connect_writer(env["DATABASE_URL"], connect_timeout=20)
     config = dict(config or DEFAULT_CONFIG)
     code_ver = code_version()
     trace = str(uuid.uuid4())
@@ -1411,6 +1413,12 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                              where r.experiment_id = e.experiment_id),
                            (select count(*) from research.experiment_outcomes o
                              where o.experiment_id = e.experiment_id::text)
+                           ,e.hypothesis_id::text
+                           ,(select r.result_summary
+                               from quant.backtest_runs r
+                              where r.experiment_id=e.experiment_id
+                                and r.status='COMPLETED'
+                              order by r.created_at desc limit 1)
                       from quant.experiments e where e.input_hash=%s""",
                              (ihash,))
                 prev = cur2.fetchone()
@@ -1430,6 +1438,25 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                                  " trace_id=%s where experiment_id=%s::uuid",
                                  (trace, exp_id))
                     conn.commit()
+                elif (prev and prev[1] == "COMPLETED" and int(prev[4]) > 0
+                      and int(prev[5]) == 0 and str(prev[6]) == str(hyp_id)
+                      and isinstance(prev[7], dict)):
+                    # The deterministic backtest committed, but infrastructure
+                    # failed during walk-forward/IC/finalization.  Reuse only
+                    # this same hypothesis and only while no outcome exists.
+                    # A judged experiment remains an immutable duplicate.
+                    summary = prev[7]
+                    print(f"완료 백테스트 후속 검증 재개({prev[0][:8]}…)",
+                          flush=True)
+                    return {
+                        "status": 0,
+                        "duplicate": False,
+                        "resumed": True,
+                        "input_hash": ihash,
+                        "experiment_id": str(prev[0]),
+                        "backtest_run_id": None,
+                        "metrics": dict(summary.get("metrics") or {}),
+                    }
                 else:
                     print(f"같은 input_hash 의 실험이 이미 있다({ihash[:16]}…) - "
                           f"재실행은 같은 결과라 등록하지 않는다 (재현성 계약)",
