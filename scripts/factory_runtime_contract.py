@@ -44,6 +44,10 @@ REQUIRED_AST_FIELDS = frozenset(
         "ofi_intraday_std",
         "close_vs_vwap",
         "spread_close_ratio",
+        "depth_imbalance_l1",
+        "depth_imbalance_l10",
+        "depth_imbalance_slope",
+        "size_weighted_ofi",
     }
 )
 

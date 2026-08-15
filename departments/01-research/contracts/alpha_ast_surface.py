@@ -17,6 +17,8 @@ MICRO_FIELDS = (
     "spread_bps", "depth_imbalance", "order_flow_imbalance", "trade_intensity",
     "realized_volatility", "traded_value", "traded_volume", "ofi_close", "ofi_open",
     "ofi_intraday_std", "close_vs_vwap", "spread_close_ratio",
+    "depth_imbalance_l1", "depth_imbalance_l10", "depth_imbalance_slope",
+    "size_weighted_ofi",
 )
 FIELDS = PRICE_FIELDS + MICRO_FIELDS
 

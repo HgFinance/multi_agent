@@ -279,6 +279,7 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
       `v1-20260813 > v1-20260812` 가 되어 최신 스냅샷이 자동으로 쓰인다.
     """
     import psycopg2
+    from db_writer import connect as connect_writer
     from source_registry import load_project_env
 
     spec = SPECS.get(key)
@@ -289,7 +290,10 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
     src = psycopg2.connect(
         env["TIMESCALE_DATABASE_URL"] if spec.db == "market" else env["DATABASE_URL"],
         connect_timeout=20)
-    meta = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+    # Supabase transaction pooler가 이전 세션의 read-only 기본값을 재사용할 수
+    # 있다. 메타 원장은 쓰기 경로이므로 매 트랜잭션을 READ WRITE로 봉인하는
+    # 공용 연결을 쓴다(raw psycopg2.connect로 v4 등재가 실제 실패했다).
+    meta = connect_writer(env["DATABASE_URL"], connect_timeout=20)
     try:
         rows = fetch(spec, src, start, end)
         print(f"{BUILDER_VERSION}: {key} 원천 {len(rows):,}행 ({start}~{end})",

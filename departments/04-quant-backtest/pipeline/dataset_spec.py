@@ -358,12 +358,77 @@ MICROSTRUCTURE_DAILY_V3 = DatasetSpec(
     notional_unit="KRW_MILLION",
 )
 
+# ── 마이크로구조 일별 피처 v4 - 호가 공간축·체결크기축 추가 ────────────────
+#
+# v3 까지 `depth_imbalance` 는 내부 원천에서 1~10호가 합계, 외부 이관 원천에서
+# 최우선호가(`bi`)였다. v4 는 legacy 열을 L1 로 통일하고 L1/L10/차이를 각각
+# 보존한다. `size_weighted_ofi` 는 큰 체결에 한 번 더 무게를 주며, 모든 새 값은
+# 기존 호가·체결 일별 스캔 안에서 만들어진다.
+MICROSTRUCTURE_DAILY_V4 = DatasetSpec(
+    name="krx-microstructure-daily",
+    version="v4",
+    db="market",
+    fetch_sql="""
+        select instrument_id::text,
+               (event_time at time zone 'Asia/Seoul')::date as trade_date,
+               spread_bps, depth_imbalance, order_flow_imbalance,
+               trade_intensity, realized_volatility,
+               traded_value, traded_volume,
+               ofi_close, ofi_open, ofi_intraday_std,
+               close_vs_vwap, spread_close_ratio,
+               depth_imbalance_l1, depth_imbalance_l10,
+               depth_imbalance_slope, size_weighted_ofi,
+               quality_status, observed_at
+          from market.microstructure_features
+         where feature_set_version = %(fsv)s
+           and event_time >= %(start)s and event_time < %(end)s
+    """,
+    columns=("instrument_id", "trade_date", "spread_bps", "depth_imbalance",
+             "order_flow_imbalance", "trade_intensity", "realized_volatility",
+             "traded_value", "traded_volume",
+             "ofi_close", "ofi_open", "ofi_intraday_std",
+             "close_vs_vwap", "spread_close_ratio",
+             "depth_imbalance_l1", "depth_imbalance_l10",
+             "depth_imbalance_slope", "size_weighted_ofi",
+             "quality_status", "observed_at"),
+    key_columns=("instrument_id", "trade_date"),
+    partition_column="trade_date",
+    canon={
+        "trade_date": lambda v: v.isoformat() if isinstance(v, date) else str(v),
+        **{name: canon_number for name in (
+            "spread_bps", "depth_imbalance", "order_flow_imbalance",
+            "trade_intensity", "realized_volatility", "traded_value",
+            "traded_volume", "ofi_close", "ofi_open", "ofi_intraday_std",
+            "close_vs_vwap", "spread_close_ratio", "depth_imbalance_l1",
+            "depth_imbalance_l10", "depth_imbalance_slope", "size_weighted_ofi",
+        )},
+        "observed_at": canon_time,
+    },
+    restore={
+        "trade_date": _date,
+        **{name: _f for name in (
+            "spread_bps", "depth_imbalance", "order_flow_imbalance",
+            "trade_intensity", "realized_volatility", "traded_value",
+            "traded_volume", "ofi_close", "ofi_open", "ofi_intraday_std",
+            "close_vs_vwap", "spread_close_ratio", "depth_imbalance_l1",
+            "depth_imbalance_l10", "depth_imbalance_slope", "size_weighted_ofi",
+        )},
+        "observed_at": _dt,
+    },
+    source_versions={"microstructure_features": "ms-daily-v4"},
+    point_in_time=dict(MICROSTRUCTURE_DAILY_V3.point_in_time),
+    partition_grain="day",
+    notional_unit="KRW_MILLION",
+)
+
 SPECS: dict[str, DatasetSpec] = {
     f"{MICROSTRUCTURE_DAILY.name}/{MICROSTRUCTURE_DAILY.version}": MICROSTRUCTURE_DAILY,
     f"{MICROSTRUCTURE_DAILY_V2.name}/{MICROSTRUCTURE_DAILY_V2.version}":
         MICROSTRUCTURE_DAILY_V2,
     f"{MICROSTRUCTURE_DAILY_V3.name}/{MICROSTRUCTURE_DAILY_V3.version}":
         MICROSTRUCTURE_DAILY_V3,
+    f"{MICROSTRUCTURE_DAILY_V4.name}/{MICROSTRUCTURE_DAILY_V4.version}":
+        MICROSTRUCTURE_DAILY_V4,
 }
 
 # 버전 스탬프. 빌더의 `--stamp` 가 `v1` 을 `v1-20260812` 로 찍는다.
@@ -501,6 +566,7 @@ def _check_stamped_version_still_finds_the_spec():
     assert spec_for(n, "v2") is not MICROSTRUCTURE_DAILY
     assert spec_for(n, "v2-20260814") is MICROSTRUCTURE_DAILY_V2, "v2 스탬프 실패"
     assert spec_for(n, "v3") is MICROSTRUCTURE_DAILY_V3
+    assert spec_for(n, "v4") is MICROSTRUCTURE_DAILY_V4
     assert spec_for(n, "v9") is None, "없는 버전을 아무 명세로나 읽었다"
     # **판본은 쌓인다. 옛 판본의 열은 안 늘어난다** - 늘면 그 재현이 깨진다.
     assert "traded_value" in MICROSTRUCTURE_DAILY_V2.columns
@@ -513,6 +579,12 @@ def _check_stamped_version_still_finds_the_spec():
     # 각 판본은 자기 원천 판본만 읽는다 - 섞이면 열이 빈 채로 굳는다
     assert MICROSTRUCTURE_DAILY_V3.source_versions == {
         "microstructure_features": "ms-daily-v3"}, MICROSTRUCTURE_DAILY_V3.source_versions
+    for f in ("depth_imbalance_l1", "depth_imbalance_l10",
+              "depth_imbalance_slope", "size_weighted_ofi"):
+        assert f in MICROSTRUCTURE_DAILY_V4.columns, f
+        assert f not in MICROSTRUCTURE_DAILY_V3.columns, (f, "v3 가 오염됐다")
+    assert MICROSTRUCTURE_DAILY_V4.source_versions == {
+        "microstructure_features": "ms-daily-v4"}, MICROSTRUCTURE_DAILY_V4.source_versions
     assert spec_for(n, "v1-2026081") is None, "8자리가 아닌 것을 스탬프로 봤다"
     assert spec_for(n, "v1-abc") is None
     # 이름이 다르면 못 찾는다 - 스탬프를 벗겼다고 남의 명세로 읽으면 안 된다

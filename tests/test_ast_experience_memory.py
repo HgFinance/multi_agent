@@ -29,11 +29,14 @@ def test_memory_distinguishes_exact_reuse_from_same_tuning_shape():
     ], [
         {"lead_id": "new-window", "signal_expr": OFI_5, "used": False},
         {"lead_id": "same-formula", "signal_expr": OFI_1, "used": False},
+        {"lead_id": "public-control", "signal_expr": OFI_1, "used": False,
+         "alpha_candidate_eligible": False, "source_baseline_expr": OFI_1},
     ])
 
     assert memory.duplicate_trials == 1
     assert memory.unused_novel_leads[0]["nearest_tested_similarity"] == 1.0
     assert memory.unused_recycled_leads[0]["lead_ids"] == ["same-formula"]
+    assert memory.public_baseline_controls[0]["lead_ids"] == ["public-control"]
     assert "traded_value" in memory.untested_micro_fields
 
 
