@@ -1,4 +1,5 @@
 from pathlib import Path
+import inspect
 import sys
 
 
@@ -11,6 +12,7 @@ import backtest_runner  # noqa: E402
 import dataset_spec  # noqa: E402
 import feature_catalog  # noqa: E402
 import microstructure_builder  # noqa: E402
+import spec_dataset_builder  # noqa: E402
 
 
 V4_FIELDS = {
@@ -145,3 +147,9 @@ def test_feature_catalog_never_mixes_feature_set_versions() -> None:
         features=[feature_catalog.FeatureQuality("x", 2)],
     ).summary()
     assert "ms-daily-v4" in summary
+
+
+def test_dataset_manifest_registration_uses_write_safe_connection() -> None:
+    source = inspect.getsource(spec_dataset_builder.build)
+    assert "connect_writer(env[\"DATABASE_URL\"]" in source
+    assert "meta = psycopg2.connect" not in source
