@@ -1016,9 +1016,73 @@ MICRO_FEATURES = ("spread_bps", "depth_imbalance", "order_flow_imbalance",
                   # 행이라 실행면 규약은 그대로다 - 하루를 평균으로 뭉개지
                   # 않을 뿐이다.
                   "ofi_close", "ofi_open", "ofi_intraday_std",
-                  "close_vs_vwap", "spread_close_ratio")
+                  "close_vs_vwap", "spread_close_ratio",
+                  # v4 호가 공간축·체결크기축. legacy depth_imbalance 는 v4 에서
+                  # L1 로 통일되며 L10 과 차이는 별도 필드로 보존한다.
+                  "depth_imbalance_l1", "depth_imbalance_l10",
+                  "depth_imbalance_slope", "size_weighted_ofi")
 
+# 기존 전략은 이미 굳은 v3 를 계속 읽는다. 새 공간/체결크기 필드를 실제로 읽는
+# AST 만 v4 를 요구한다. 이렇게 해야 v4 생성·등재와 무관한 기존 공장이 멈추지
+# 않으며, 새 필드를 v3 에서 조용히 미산출시키는 일도 없다.
 MICRO_DATASET = ("krx-microstructure-daily", "v3")
+MICRO_DATASET_V4 = ("krx-microstructure-daily", "v4")
+MICRO_V4_FIELDS = frozenset({
+    "depth_imbalance_l1", "depth_imbalance_l10", "depth_imbalance_slope",
+    "size_weighted_ofi",
+})
+
+
+def micro_dataset_for(config: dict) -> tuple[str, str]:
+    expr = config.get("signal_expr")
+    if not expr:
+        return MICRO_DATASET
+    from alpha_ast import fields_of, parse  # noqa: PLC0415
+
+    fields = fields_of(parse(expr))
+    return MICRO_DATASET_V4 if fields.intersection(MICRO_V4_FIELDS) else MICRO_DATASET
+
+
+def required_micro_dataset(config: dict) -> tuple[str, str] | None:
+    """실행할 신호가 실제로 요구하는 보조 미시구조 데이터셋."""
+    from strategy_templates import resolve  # noqa: PLC0415
+
+    expr = config.get("signal_expr")
+    if expr:
+        from alpha_ast import needs_micro, parse  # noqa: PLC0415
+
+        return micro_dataset_for(config) if needs_micro(parse(expr)) else None
+    tpl = resolve(str(config.get("strategy") or ""))
+    if tpl is None or not getattr(tpl, "needs_micro", False):
+        return None
+    return MICRO_DATASET
+
+
+def seal_micro_lineage(config: dict, conn) -> dict | None:
+    """보조 데이터셋의 실재를 config/input hash에 봉인한다.
+
+    실험 테이블은 본체 dataset_id 하나만 가지므로, 이 정보가 없으면 미시구조
+    파일이 바뀌어도 같은 input_hash가 된다. 행 전체를 두 번 읽지 않고 매니페스트
+    정체성만 먼저 고정하며, 실제 로더가 아래에서 content_hash를 다시 대조한다.
+    """
+    required = required_micro_dataset(config)
+    if required is None:
+        return None
+    name, version = required
+    with conn.cursor() as cur:
+        cur.execute(
+            "select dataset_id::text, content_hash, row_count "
+            "from quant.dataset_manifests where name=%s and version=%s",
+            (name, version))
+        row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(f"Manifest 없음: {name}/{version} - 먼저 --build")
+    lineage = {
+        "dataset_id": str(row[0]), "name": name, "version": version,
+        "content_hash": str(row[1]), "row_count": int(row[2]),
+    }
+    config["_resolved_auxiliary_datasets"] = [lineage]
+    return lineage
 
 
 def attach_micro(market: Market, rows: list[dict]) -> int:
@@ -1055,23 +1119,18 @@ def attach_micro_if_needed(market: Market, config: dict, conn) -> int:
     호출부가 로그로 구분해 준다 - 조용히 비면 신호가 전 종목 미산출로 죽는데
     그 이유가 안 보인다.
     """
-    from strategy_templates import resolve  # noqa: PLC0415
-
-    # ▶ 수식(AST)이면 **트리가 자기 요구를 말한다** - 가설이 따로 안 적어도
-    #   미시구조 필드를 읽으면 자동으로 실린다(alpha_ast.needs_micro).
-    expr = config.get("signal_expr")
-    if expr:
-        from alpha_ast import needs_micro as _expr_needs_micro  # noqa: PLC0415
-        from alpha_ast import parse as _parse_expr
-
-        if not _expr_needs_micro(_parse_expr(expr)):
-            return 0
-    else:
-        tpl = resolve(str(config.get("strategy") or ""))
-        if tpl is None or not getattr(tpl, "needs_micro", False):
-            return 0
-    name, ver = MICRO_DATASET
-    *_rest, mrows = load_dataset(conn, name, ver)
+    required = required_micro_dataset(config)
+    if required is None:
+        return 0
+    name, ver = required
+    _dataset_id, _universe_id, actual_hash, mrows = load_dataset(conn, name, ver)
+    sealed = config.get("_resolved_auxiliary_datasets") or []
+    expected = next((str(item.get("content_hash")) for item in sealed
+                     if item.get("name") == name and item.get("version") == ver), None)
+    if expected is not None and expected != actual_hash:
+        raise RuntimeError(
+            f"보조 데이터셋 해시 변경: {name}/{ver} "
+            f"(sealed {expected[:12]}… vs loaded {actual_hash[:12]}…)")
     n = attach_micro(market, mrows)
     # ▶ **붙인 즉시 표본을 그 커버리지로 자른다** - 아래 함수 주석 참조.
     #   붙이기와 자르기를 갈라 두면 한쪽만 부르는 자리가 생긴다(오늘 EDGE_KEYS
@@ -1350,6 +1409,9 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
     trace = str(uuid.uuid4())
     try:
         dataset_id, universe_id, dhash, rows = load_dataset(conn, name, version)
+        # 본체 일봉뿐 아니라 실제로 붙이는 미시구조 매니페스트도 실험 정체성에
+        # 포함한다. `config`에 봉인하므로 DB의 실험 기록에서도 출처를 복원한다.
+        seal_micro_lineage(config, conn)
         # ▶ trials 는 해시에 **안 들어간다**(중복 가드 보존).
         ihash = input_hash(dhash, config, code_ver, seed)
 

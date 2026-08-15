@@ -46,15 +46,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "01-research" / "collectors"))
 
-BUILDER_VERSION = "quant-microstructure-builder-v1"
+BUILDER_VERSION = "quant-microstructure-builder-v2"
 # ▶ 판본 (2026-08-14). **옛 판본 행은 안 건드린다** - 그 판본으로 돈 실험의
 #   재현이 살아야 한다.
 #     v1 = 스프레드·잔량불균형·OFI·체결강도·실현변동성 (하루 하나로 평균)
 #     v2 = + 거래대금·체결수량
 #     v3 = + 일중 구간 피처(마감/개장 OFI · 구간 분산 · 종가/VWAP · 스프레드 수축)
+#     v4 = + L1/L10 호가 공간축 · 깊이 기울기 · 체결크기 가중 OFI
+#          + 외부 side 코드(1=매수, 5=매도)를 ofi_contrib(±volume)로 정상화
 #   v3 의 근거: 하루 평균이 정보를 상쇄해 지운다. 2026-08-13 실측으로 마감 30분
 #   OFI 표준편차가 하루 전체의 1.74배(0.4424 vs 0.2538)이고 둘의 상관은 0.3713 이다.
-FEATURE_SET_VERSION = "ms-daily-v3"
+FEATURE_SET_VERSION = "ms-daily-v4"
 KST = timezone(timedelta(hours=9))
 
 # 정규장만 접는다. 시간외·프리마켓은 체결 규칙이 달라 같은 통계에 섞으면
@@ -74,7 +76,14 @@ _SQL_BUILD = """
 with q as (
     select instrument_id,
            avg(case when mid_price > 0 then spread / mid_price * 10000 end) spread_bps,
-           avg(depth_imbalance) depth_imbalance,
+           -- v3 까지는 이 한 컬럼이 내부에서는 L10, 외부에서는 L1 이었다.
+           -- v4 는 의미를 분리하고 legacy `depth_imbalance` 를 L1 로 통일한다.
+           avg(case when cardinality(bid_sizes) >= 1
+                          and cardinality(ask_sizes) >= 1
+                          and bid_sizes[1] + ask_sizes[1] > 0
+                    then (bid_sizes[1] - ask_sizes[1])::float8
+                         / (bid_sizes[1] + ask_sizes[1]) end) depth_imbalance_l1,
+           avg(depth_imbalance) depth_imbalance_l10,
            count(*) n_quotes,
            -- ▶ **유동성의 일중 변화** (2026-08-14). 하루 평균 스프레드 하나로는
            --   "개장에 벌어졌다 마감에 좁혀진 종목" 과 "종일 넓은 종목" 이
@@ -109,6 +118,11 @@ with q as (
            --   `notional` 과 같은 눈금이어야 같은 문턱을 쓸 수 있다.
            --   `sum(quantity)` 는 예전부터 계산해 놓고 **출력에 안 실었다.**
            sum(price * quantity)::float8 / 1e6 traded_value,
+           -- 체결량 OFI 와 달리 큰 체결에 한 번 더 무게를 준다. 별도 창/정렬 없이
+           -- 같은 스캔에서 계산되어 10억 행 FDW 경로의 비용을 폭증시키지 않는다.
+           case when sum(quantity * quantity) > 0
+                then sum(side * quantity * quantity)::float8
+                     / sum(quantity * quantity) end size_weighted_ofi,
            -- ▶ **일중 구간별 OFI** (2026-08-14 실측이 근거)
            --   하루 전체 평균은 오전에 팔고 오후에 산 종목을 중립으로 찍는다.
            --   2026-08-13 하루 대조: 마감 30분 OFI 표준편차 0.4424 vs 하루 전체
@@ -151,13 +165,16 @@ with q as (
      group by instrument_id
 )
 select coalesce(q.instrument_id, t.instrument_id) instrument_id,
-       q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
+       q.spread_bps, q.depth_imbalance_l1, t.ofi, t.trade_intensity, t.realized_vol,
        coalesce(t.n_ticks, 0) n_ticks, coalesce(q.n_quotes, 0) n_quotes,
        t.traded_value, t.vol traded_volume,
        t.ofi_close, t.ofi_open, t.ofi_intraday_std, t.close_vs_vwap,
        -- 개장 스프레드가 0 이거나 없으면 비율을 만들지 않는다(0 으로 안 채운다)
        case when q.spread_open > 0 then q.spread_close / q.spread_open end
          spread_close_ratio,
+       q.depth_imbalance_l1, q.depth_imbalance_l10,
+       q.depth_imbalance_l1 - q.depth_imbalance_l10 depth_imbalance_slope,
+       t.size_weighted_ofi,
        -- ▶ 관측시각의 논리적 하한 (2026-08-13 실측): 실시간 수집분에서 원천의
        --   event_time 이 observed_at 보다 ~2초 앞서는 시계 스큐가 있었고,
        --   그대로 접으면 watermark > observed_at 이 되어 적재 제약
@@ -183,7 +200,8 @@ select coalesce(q.instrument_id, t.instrument_id) instrument_id,
 #   백테스트가 실제로 읽는 계층만 갖는다.
 #
 # ▶ 저쪽 스키마는 이미 파생값을 갖고 있다
-#   quotes.spread(= ask1-bid1), quotes.bi(호가불균형), ticks.side/volume.
+#   quotes.spread(= ask1-bid1), quotes.bi(호가불균형),
+#   ticks.ofi_contrib(매수 +volume / 매도 -volume).
 #   같은 정의를 두 번 구현하지 않는다 - 우리 쪽 SQL 과 대응이 어긋나면
 #   같은 종목의 같은 날 값이 경로마다 달라진다.
 _SQL_BUILD_EXTERNAL = """
@@ -191,7 +209,19 @@ with q as (
     select symbol,
            avg(case when (ask1 + bid1) > 0
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_bps,
-           avg(bi::float8) depth_imbalance,
+           avg(bi::float8) depth_imbalance_l1,
+           avg(case when
+                 (bid_vol1+bid_vol2+bid_vol3+bid_vol4+bid_vol5+bid_vol6+bid_vol7+
+                  bid_vol8+bid_vol9+bid_vol10+ask_vol1+ask_vol2+ask_vol3+ask_vol4+
+                  ask_vol5+ask_vol6+ask_vol7+ask_vol8+ask_vol9+ask_vol10) > 0
+               then
+                 (bid_vol1+bid_vol2+bid_vol3+bid_vol4+bid_vol5+bid_vol6+bid_vol7+
+                  bid_vol8+bid_vol9+bid_vol10-ask_vol1-ask_vol2-ask_vol3-ask_vol4-
+                  ask_vol5-ask_vol6-ask_vol7-ask_vol8-ask_vol9-ask_vol10)::float8 /
+                 (bid_vol1+bid_vol2+bid_vol3+bid_vol4+bid_vol5+bid_vol6+bid_vol7+
+                  bid_vol8+bid_vol9+bid_vol10+ask_vol1+ask_vol2+ask_vol3+ask_vol4+
+                  ask_vol5+ask_vol6+ask_vol7+ask_vol8+ask_vol9+ask_vol10)
+               end) depth_imbalance_l10,
            count(*) n_quotes,
            avg(case when (ask1 + bid1) > 0 and ts >= %(t_close)s
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_close,
@@ -202,8 +232,10 @@ with q as (
      group by symbol
 ), t as (
     select symbol,
+           -- 외부 side 는 1=매수, 5=매도라 곱하면 [-1,1]을 벗어난다.
+           -- 수집기가 이미 정규화한 ofi_contrib(±volume)를 사용한다.
            case when sum(volume) > 0
-                then sum(side * volume)::float8 / sum(volume) end ofi,
+                then sum(ofi_contrib)::float8 / sum(volume) end ofi,
            case when max(ts) > min(ts)
                 then count(*)::float8
                      / (extract(epoch from max(ts) - min(ts)) / 60.0) end trade_intensity,
@@ -212,10 +244,13 @@ with q as (
            -- 내부 경로와 **같은 정의·같은 단위**(백만원)여야 한다. 어긋나면
            -- 같은 종목의 같은 날 값이 출처마다 달라진다.
            sum(price::float8 * volume) / 1e6 traded_value,
+           case when sum(volume::numeric * volume) > 0
+                then sum(ofi_contrib::numeric * volume)::float8
+                     / sum(volume::numeric * volume) end size_weighted_ofi,
            sum(volume) vol,
-           sum(side*volume) filter (where ts >= %(t_close)s)::float8
+           sum(ofi_contrib) filter (where ts >= %(t_close)s)::float8
              / nullif(sum(volume) filter (where ts >= %(t_close)s),0) ofi_close,
-           sum(side*volume) filter (where ts < %(t_open_end)s)::float8
+           sum(ofi_contrib) filter (where ts < %(t_open_end)s)::float8
              / nullif(sum(volume) filter (where ts < %(t_open_end)s),0) ofi_open,
            (array_agg(price order by ts desc))[1]::float8
              / nullif(sum(price::float8*volume) / nullif(sum(volume),0), 0)
@@ -223,17 +258,17 @@ with q as (
            -- 내부 경로와 같은 정의. **같은 스캔에서** 낸다 - 별도 CTE 로
            -- 원천을 한 번 더 읽으면 FDW 로는 하루 1,900만 행이 두 배가 된다.
            (select stddev_samp(v) from unnest(array[
-              sum(side*volume) filter (where ts < %(t_open_end)s)::float8
+              sum(ofi_contrib) filter (where ts < %(t_open_end)s)::float8
                 / nullif(sum(volume) filter (where ts < %(t_open_end)s),0),
-              sum(side*volume) filter (where ts >= %(t_open_end)s
+              sum(ofi_contrib) filter (where ts >= %(t_open_end)s
                                          and ts < %(t_noon)s)::float8
                 / nullif(sum(volume) filter (where ts >= %(t_open_end)s
                                                and ts < %(t_noon)s),0),
-              sum(side*volume) filter (where ts >= %(t_noon)s
+              sum(ofi_contrib) filter (where ts >= %(t_noon)s
                                          and ts < %(t_close)s)::float8
                 / nullif(sum(volume) filter (where ts >= %(t_noon)s
                                                and ts < %(t_close)s),0),
-              sum(side*volume) filter (where ts >= %(t_close)s)::float8
+              sum(ofi_contrib) filter (where ts >= %(t_close)s)::float8
                 / nullif(sum(volume) filter (where ts >= %(t_close)s),0)
             ]) v) ofi_intraday_std
       from public.ticks
@@ -241,12 +276,15 @@ with q as (
      group by symbol
 )
 select coalesce(q.symbol, t.symbol) symbol,
-       q.spread_bps, q.depth_imbalance, t.ofi, t.trade_intensity, t.realized_vol,
+       q.spread_bps, q.depth_imbalance_l1, t.ofi, t.trade_intensity, t.realized_vol,
        coalesce(t.n_ticks, 0), coalesce(q.n_quotes, 0),
        t.traded_value, t.vol traded_volume,
        t.ofi_close, t.ofi_open, t.ofi_intraday_std, t.close_vs_vwap,
        case when q.spread_open > 0 then q.spread_close / q.spread_open end
-         spread_close_ratio
+          spread_close_ratio,
+       q.depth_imbalance_l1, q.depth_imbalance_l10,
+       q.depth_imbalance_l1 - q.depth_imbalance_l10 depth_imbalance_slope,
+       t.size_weighted_ofi
   from q full outer join t on t.symbol = q.symbol
 """
 
@@ -270,6 +308,8 @@ insert into market.microstructure_features
    realized_volatility, spread_bps, depth_imbalance, order_flow_imbalance,
    trade_intensity, traded_value, traded_volume,
    ofi_close, ofi_open, ofi_intraday_std, close_vs_vwap, spread_close_ratio,
+   depth_imbalance_l1, depth_imbalance_l10, depth_imbalance_slope,
+   size_weighted_ofi,
    values, quality_status, input_watermark, input_hash)
 values %s
 on conflict do nothing
@@ -362,6 +402,22 @@ def quality_of(n_ticks: int, n_quotes: int) -> str:
     return "WARN"
 
 
+def assert_v4_bounds(**features) -> None:
+    """정의상 범위를 벗어난 피처를 원장에 넣지 않는다.
+
+    외부 side=1/5 를 ±1 로 오해한 과거 집계는 OFI=2.8 같은 값을 만들었지만
+    예외도 경고도 없었다. v4 는 값의 의미를 적재 경계에서 강제한다.
+    """
+    for name, value in features.items():
+        if value is None:
+            continue
+        low, high = (-2.0, 2.0) if name == "depth_imbalance_slope" else (-1.0, 1.0)
+        number = float(value)
+        if not (low - 1e-12 <= number <= high + 1e-12):
+            raise ValueError(
+                f"{FEATURE_SET_VERSION} {name}={number} outside [{low}, {high}]")
+
+
 def missing_sources(rows) -> list[str]:
     """그날 **원천 하나가 통째로 빈** 경우를 이름으로 돌려준다.
 
@@ -435,13 +491,19 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
     for (iid, spread, di, ofi, intensity, rvol,
          n_ticks, n_quotes, tvalue, tvolume,
          ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
+         depth_l1, depth_l10, depth_slope, size_ofi,
          observed_at, watermark) in rows:
+        assert_v4_bounds(
+            order_flow_imbalance=ofi, ofi_close=ofi_c, ofi_open=ofi_o,
+            depth_imbalance_l1=depth_l1, depth_imbalance_l10=depth_l10,
+            depth_imbalance_slope=depth_slope, size_weighted_ofi=size_ofi)
         g = quality_of(int(n_ticks), int(n_quotes))
         grades[g] += 1
         payload.append((
             bucket, observed_at, iid, "KRX", FEATURE_SET_VERSION,
             rvol, spread, di, ofi, intensity, tvalue, tvolume,
             ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
+            depth_l1, depth_l10, depth_slope, size_ofi,
             # values 에 표본 수를 남긴다 - 어떤 행이 얇은지 나중에 판단할 수 있어야 한다
             f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)}{miss_tag}}}',
             g, watermark, input_hash(day, int(n_ticks), int(n_quotes))))
@@ -523,7 +585,12 @@ def build_day_external(market_conn, src_conn, day: date, *,
     miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
     for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
-         tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio) in rows:
+         tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
+         depth_l1, depth_l10, depth_slope, size_ofi) in rows:
+        assert_v4_bounds(
+            order_flow_imbalance=ofi, ofi_close=ofi_c, ofi_open=ofi_o,
+            depth_imbalance_l1=depth_l1, depth_imbalance_l10=depth_l10,
+            depth_imbalance_slope=depth_slope, size_weighted_ofi=size_ofi)
         iid = iid_of.get(str(sym).strip())
         if iid is None:
             unmapped += 1
@@ -537,6 +604,7 @@ def build_day_external(market_conn, src_conn, day: date, *,
             bucket, iid, "KRX", FEATURE_SET_VERSION,
             rvol, spread, di, ofi, intensity, tvalue, tvolume,
             ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
+            depth_l1, depth_l10, depth_slope, size_ofi,
             f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)},'
             f' "origin": "external"{miss_tag}}}',
             g, bucket, input_hash(day, int(n_ticks), int(n_quotes))))
@@ -659,9 +727,12 @@ def _check_external_sql_matches_local_definitions():
 
     # 스프레드는 양쪽 다 bps(× 10000)다
     assert "* 10000" in ext and "* 10000" in loc, "스프레드 단위가 갈렸다"
-    # OFI 는 양쪽 다 부호 있는 체결량 / 총 체결량이고, 분모 0 이면 NULL
+    # OFI 는 양쪽 다 부호 있는 체결량 / 총 체결량이고, 분모 0 이면 NULL.
+    # 외부 side 는 1/5 코드이므로 반드시 수집기가 만든 ±volume 을 쓴다.
+    assert "sum(side * quantity)" in loc
+    assert "sum(ofi_contrib)" in ext
+    assert "sum(side * volume)" not in ext, "외부 1/5 side 코드를 부호처럼 곱했다"
     for s in (ext, loc):
-        assert "sum(side * volume)" in s or "sum(side * quantity)" in s, s[:80]
         assert "> 0 then" in s.replace("  ", " "), "분모 0 방어가 없다"
     # 체결강도는 양쪽 다 관측 폭 기준
     assert "max(ts) - min(ts)" in ext and "max(event_time) - min(event_time)" in loc
@@ -785,6 +856,40 @@ def _check_fdw_path_is_the_same_aggregation():
     print("  FDW=외부 같은 집계       OK")
 
 
+def _check_v4_depth_and_size_axes_are_explicit():
+    """출처마다 뜻이 달랐던 깊이를 다시 한 이름으로 뭉개지 않는가."""
+    local = " ".join(_SQL_BUILD.split())
+    external = " ".join(_SQL_BUILD_EXTERNAL.split())
+    for sql in (local, external):
+        for field in ("depth_imbalance_l1", "depth_imbalance_l10",
+                      "depth_imbalance_slope", "size_weighted_ofi"):
+            assert field in sql, (field, "v4 피처가 한 집계 경로에서 빠졌다")
+        assert sql.count("size_weighted_ofi") >= 2
+    assert "bid_sizes[1]" in local and "ask_sizes[1]" in local
+    assert "avg(depth_imbalance) depth_imbalance_l10" in local
+    assert "avg(bi::float8) depth_imbalance_l1" in external
+    assert "bid_vol10" in external and "ask_vol10" in external
+    assert "ofi_contrib::numeric * volume" in external
+    # 이벤트 순번 창을 섣불리 추가해 FDW 전체 정렬을 일으키지 않는다.
+    assert "row_number(" not in local.lower() and "row_number(" not in external.lower()
+    print("  L1/L10/체결크기 축 명시   OK")
+
+
+def _check_v4_bounds_fail_closed():
+    assert_v4_bounds(order_flow_imbalance=-1, size_weighted_ofi=1,
+                     depth_imbalance_slope=2)
+    for name, value in (("order_flow_imbalance", 2.8),
+                        ("depth_imbalance_l10", -1.1),
+                        ("depth_imbalance_slope", 2.1)):
+        try:
+            assert_v4_bounds(**{name: value})
+        except ValueError as exc:
+            assert name in str(exc) and "outside" in str(exc)
+        else:
+            raise AssertionError(f"범위 밖 {name} 을 적재 허용했다")
+    print("  v4 값 범위 fail-closed    OK")
+
+
 def _check_whole_day_source_loss_is_not_a_row_grade():
     """**하루 전체가 빈 것과 한 종목이 얇은 것은 다른 사실이다** (2026-08-14 실측).
 
@@ -834,8 +939,10 @@ def _selfcheck() -> int:
     _check_full_outer_join_keeps_one_sided_days()
     _check_intensity_uses_observed_span()
     _check_fdw_path_is_the_same_aggregation()
+    _check_v4_depth_and_size_axes_are_explicit()
+    _check_v4_bounds_fail_closed()
     _check_whole_day_source_loss_is_not_a_row_grade()
-    print("마이크로구조 빌더 8개 영역 통과. 실행은 --build")
+    print("마이크로구조 빌더 13개 영역 통과. 실행은 --build")
     return 0
 
 
@@ -848,6 +955,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--replace", action="store_true",
                     help="다른 출처가 있으면 그날을 지우고 교체한다")
     ap.add_argument("--from", dest="since", default="")
+    ap.add_argument("--through", dest="through", default="",
+                    help="마지막 거래일(포함). 병렬 백필을 겹치지 않게 나눌 때 사용")
     # 저쪽(Trading_bot) DB 에서 집계한다. 우리 원장의 호가 구멍을 원시 이관
     # 없이 메우는 경로다 - 3.9억 행 대신 15만 행만 움직인다.
     ap.add_argument("--external-dsn", default="",
@@ -874,6 +983,9 @@ def main(argv: list[str] | None = None) -> int:
     src = psycopg2.connect(a.external_dsn, connect_timeout=20) if a.external_dsn else None
     try:
         since = date.fromisoformat(a.since) if a.since else None
+        through = date.fromisoformat(a.through) if a.through else None
+        if since and through and since > through:
+            raise SystemExit("--from 은 --through 보다 늦을 수 없다")
         external = src is not None or a.fdw
         if external:
             # 저쪽이 가진 거래일을 기준으로 삼는다. 우리 원장의 청크를 기준으로
@@ -898,6 +1010,8 @@ def main(argv: list[str] | None = None) -> int:
                     days = [r[0] for r in cur.fetchall()]
             if since:
                 days = [d for d in days if d >= since]
+            if through:
+                days = [d for d in days if d <= through]
             if a.days:
                 days = days[-a.days:]
         else:

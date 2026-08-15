@@ -52,7 +52,7 @@ import math
 import sys
 from pathlib import Path
 
-MODULE_VERSION = "quant-alpha-ast-v1"
+MODULE_VERSION = "quant-alpha-ast-v2"
 
 # ── 입력 필드 ────────────────────────────────────────────────────────────────
 #
@@ -91,7 +91,11 @@ MICRO_FIELDS = ("spread_bps", "depth_imbalance",
                 "ofi_open",           # 09:00~09:30
                 "ofi_intraday_std",   # 4구간 OFI 의 표준편차(방향이 오락가락한 정도)
                 "close_vs_vwap",      # 종가/VWAP - 1
-                "spread_close_ratio")  # 마감 스프레드 / 개장 스프레드
+                "spread_close_ratio", # 마감 스프레드 / 개장 스프레드
+                # v4: 출처별로 의미가 달랐던 depth_imbalance 를 명시적 공간축으로
+                # 분리하고, 큰 체결에 더 무게를 주는 흐름 축을 추가한다.
+                "depth_imbalance_l1", "depth_imbalance_l10",
+                "depth_imbalance_slope", "size_weighted_ofi")
 FIELDS = PRICE_FIELDS + MICRO_FIELDS
 
 # ── 연산자 ───────────────────────────────────────────────────────────────────
@@ -593,7 +597,16 @@ FIELD_CONCEPTS = {
     "close_vs_vwap": ("vwap", "종가", "평균단가", "매수압력", "압력", "마감",
                       "close", "average price", "pressure"),
     "spread_close_ratio": ("스프레드", "호가", "유동성", "거래비용", "수축",
-                           "일중", "spread", "liquidity", "cost", "intraday"),
+                            "일중", "spread", "liquidity", "cost", "intraday"),
+    "depth_imbalance_l1": ("최우선", "1호가", "호가", "잔량", "깊이", "불균형",
+                           "top of book", "l1", "depth", "imbalance", "book"),
+    "depth_imbalance_l10": ("10호가", "다중호가", "깊은 호가", "호가", "잔량",
+                            "깊이", "l10", "multi-level", "depth", "imbalance"),
+    "depth_imbalance_slope": ("호가", "깊이", "기울기", "공간", "잔량", "불균형",
+                              "depth", "slope", "shape", "spatial", "imbalance"),
+    "size_weighted_ofi": ("대형 체결", "큰 체결", "체결 크기", "체결", "수급",
+                          "압력", "large trade", "trade size", "size weighted",
+                          "order flow", "ofi", "pressure"),
 }
 
 
