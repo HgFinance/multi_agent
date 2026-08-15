@@ -68,6 +68,11 @@ SESSION_START, SESSION_END = "09:00", "15:30"
 MIN_TICKS_FOR_PASS = 30
 MIN_QUOTES_FOR_PASS = 30
 
+# Detect a collector that silently loses a large shard of the symbol universe.
+# Per-row WARN grades alone make this look like ordinary illiquidity.
+PARTIAL_GAP_MIN_ROWS = 50
+PARTIAL_GAP_MIN_FRACTION = 0.10
+
 
 # ── 일별 피처 SQL ──────────────────────────────────────────────────────────
 #   호가와 체결을 각각 접고 종목 기준으로 붙인다. full outer join 인 이유:
@@ -443,6 +448,24 @@ def missing_sources(rows) -> list[str]:
     return out
 
 
+def partial_source_gaps(rows) -> list[dict]:
+    """Return material one-sided source loss hidden inside a live day."""
+    total = len(rows)
+    if not total:
+        return []
+    candidates = (
+        ("quotes", sum(int(r[6] or 0) > 0 and int(r[7] or 0) == 0 for r in rows)),
+        ("ticks", sum(int(r[7] or 0) > 0 and int(r[6] or 0) == 0 for r in rows)),
+    )
+    threshold = max(PARTIAL_GAP_MIN_ROWS,
+                    int(total * PARTIAL_GAP_MIN_FRACTION + 0.999999))
+    return [
+        {"source": source, "affected_rows": affected,
+         "total_rows": total, "affected_fraction": affected / total}
+        for source, affected in candidates if affected >= threshold
+    ]
+
+
 def input_hash(day: date, n_ticks: int, n_quotes: int) -> str:
     """어느 입력에서 나온 값인지. 원천이 바뀌면 해시가 바뀐다."""
     blob = f"{FEATURE_SET_VERSION}|{day.isoformat()}|{n_ticks}|{n_quotes}"
@@ -486,6 +509,7 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
     # **원천 하나가 통째로 비었으면 행마다가 아니라 그 사실을 남긴다.**
     miss = missing_sources(rows)
+    partial = partial_source_gaps(rows)
     miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades = [], {"PASS": 0, "WARN": 0, "FAIL": 0}
     for (iid, spread, di, ofi, intensity, rvol,
@@ -510,7 +534,7 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
 
     if dry_run:
         return {"day": day, "rows": len(payload), **grades,
-                "missing": miss, "dry_run": True}
+                "missing": miss, "partial": partial, "dry_run": True}
     gate = day_origin_guard(market_conn, day, "local", replace=replace)
     if gate != "insert":
         return {"day": day, "rows": 0, **grades, "note": _GATE_NOTE[gate]}
@@ -518,8 +542,11 @@ def build_day(market_conn, day: date, *, dry_run: bool = False,
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
     if miss:
         record_feed_gap(market_conn, day, miss, len(payload))
+    if partial:
+        record_partial_feed_gaps(market_conn, day, partial)
     market_conn.commit()
-    return {"day": day, "rows": len(payload), **grades, "missing": miss}
+    return {"day": day, "rows": len(payload), **grades,
+            "missing": miss, "partial": partial}
 
 
 # ▶ **결손을 표에 남긴다** (2026-08-14). `market.feed_gaps` 는 이 저장소가
@@ -533,6 +560,19 @@ insert into market.feed_gaps
 values (%s, %s, now(), %s, %s, %s, 'OPEN', %s, %s::jsonb)
 """
 
+_SQL_PARTIAL_FEED_GAP = """
+insert into market.feed_gaps
+  (provider, stream_type, detected_at, gap_start, gap_end, severity, status,
+   backfill_source, evidence)
+select %s, %s, now(), %s, %s, 'HIGH', 'OPEN', %s, %s::jsonb
+where not exists (
+  select 1 from market.feed_gaps
+   where provider = %s and stream_type = %s
+     and gap_start = %s and gap_end = %s and status = 'OPEN'
+     and evidence->>'kind' = 'partial_universe_loss'
+)
+"""
+
 
 def record_feed_gap(conn, day: date, missing: list[str], n_rows: int) -> None:
     """하루 전체가 빈 원천을 `market.feed_gaps` 에 남긴다. **실패해도 적재는 산다.**
@@ -542,17 +582,51 @@ def record_feed_gap(conn, day: date, missing: list[str], n_rows: int) -> None:
     """
     lo, hi = session_bounds(day)
     for src in missing:
-        try:
-            with conn.cursor() as cur:
+        with conn.cursor() as cur:
+            cur.execute("savepoint record_feed_gap")
+            try:
                 cur.execute(_SQL_FEED_GAP, (
                     "KRX-COLLECTOR", src, lo, hi, "CRITICAL",
                     f"ext_src.{src}",
                     f'{{"day": "{day.isoformat()}", "rows_built": {n_rows},'
                     f' "note": "정규장 전체가 0행 - 그날 이 원천에서 나오는 '
                     f'피처는 전 종목 미산출이다"}}'))
-        except Exception as e:  # noqa: BLE001 - 기록 실패가 적재를 막지 않는다
-            print(f"    ⚠ feed_gaps 기록 실패({src}): {type(e).__name__}: "
-                  f"{str(e)[:90]}", flush=True)
+            except Exception as e:  # noqa: BLE001 - 기록 실패가 적재를 막지 않는다
+                cur.execute("rollback to savepoint record_feed_gap")
+                print(f"    ⚠ feed_gaps 기록 실패({src}): {type(e).__name__}: "
+                      f"{str(e)[:90]}", flush=True)
+            finally:
+                cur.execute("release savepoint record_feed_gap")
+
+
+def record_partial_feed_gaps(conn, day: date, gaps: list[dict]) -> None:
+    """Persist large one-sided universe loss without blocking feature storage."""
+    import json
+
+    lo, hi = session_bounds(day)
+    for gap in gaps:
+        source = gap["source"]
+        evidence = json.dumps({
+            "kind": "partial_universe_loss",
+            "day": day.isoformat(),
+            "affected_rows": gap["affected_rows"],
+            "total_rows": gap["total_rows"],
+            "affected_fraction": round(gap["affected_fraction"], 6),
+            "threshold_rows": PARTIAL_GAP_MIN_ROWS,
+            "threshold_fraction": PARTIAL_GAP_MIN_FRACTION,
+        })
+        with conn.cursor() as cur:
+            cur.execute("savepoint record_partial_feed_gap")
+            try:
+                cur.execute(_SQL_PARTIAL_FEED_GAP, (
+                    "KRX-COLLECTOR", source, lo, hi, f"ext_src.{source}", evidence,
+                    "KRX-COLLECTOR", source, lo, hi))
+            except Exception as e:  # diagnostics must not destroy feature storage
+                cur.execute("rollback to savepoint record_partial_feed_gap")
+                print(f"    feed_gaps partial record failed ({source}): "
+                      f"{type(e).__name__}: {str(e)[:90]}", flush=True)
+            finally:
+                cur.execute("release savepoint record_partial_feed_gap")
 
 
 def build_day_external(market_conn, src_conn, day: date, *,
@@ -582,6 +656,7 @@ def build_day_external(market_conn, src_conn, day: date, *,
 
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
     miss = missing_sources(rows)
+    partial = partial_source_gaps(rows)
     miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
     for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
@@ -611,7 +686,7 @@ def build_day_external(market_conn, src_conn, day: date, *,
 
     if dry_run:
         return {"day": day, "rows": len(payload), "unmapped": unmapped,
-                **grades, "missing": miss, "dry_run": True}
+                **grades, "missing": miss, "partial": partial, "dry_run": True}
     gate = day_origin_guard(market_conn, day, "external", replace=replace)
     if gate != "insert":
         return {"day": day, "rows": 0, "unmapped": unmapped, **grades,
@@ -620,9 +695,11 @@ def build_day_external(market_conn, src_conn, day: date, *,
         execute_values(cur, _SQL_INSERT, payload, page_size=2000)
     if miss:
         record_feed_gap(market_conn, day, miss, len(payload))
+    if partial:
+        record_partial_feed_gaps(market_conn, day, partial)
     market_conn.commit()
     return {"day": day, "rows": len(payload), "unmapped": unmapped,
-            **grades, "missing": miss}
+            **grades, "missing": miss, "partial": partial}
 
 
 def pending_days(market_conn, *, since: date | None = None) -> list[date]:
@@ -927,6 +1004,21 @@ def _check_whole_day_source_loss_is_not_a_row_grade():
     print("  하루 전체 결손 = 별도 사실 OK")
 
 
+def _check_partial_universe_loss_is_reported():
+    def row(nt, nq):
+        return (None,) * 6 + (nt, nq) + (None,) * 9
+
+    normal = [row(100, 100)] * 95 + [row(100, 0)] * 5
+    assert partial_source_gaps(normal) == []
+    broken = [row(100, 100)] * 800 + [row(100, 0)] * 200
+    gaps = partial_source_gaps(broken)
+    assert len(gaps) == 1 and gaps[0]["source"] == "quotes"
+    assert gaps[0]["affected_rows"] == 200
+    # The absolute floor prevents tiny universes from raising an incident.
+    assert partial_source_gaps([row(100, 100)] * 8 + [row(100, 0)] * 2) == []
+    print("  partial universe source loss reporting OK")
+
+
 def _selfcheck() -> int:
     print(f"{BUILDER_VERSION} 자체 점검 (DB 없음)")
     _check_one_day_one_origin()
@@ -942,7 +1034,8 @@ def _selfcheck() -> int:
     _check_v4_depth_and_size_axes_are_explicit()
     _check_v4_bounds_fail_closed()
     _check_whole_day_source_loss_is_not_a_row_grade()
-    print("마이크로구조 빌더 13개 영역 통과. 실행은 --build")
+    _check_partial_universe_loss_is_reported()
+    print("마이크로구조 빌더 14개 영역 통과. 실행은 --build")
     return 0
 
 

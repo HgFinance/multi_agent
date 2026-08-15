@@ -142,6 +142,24 @@ def test_v4_bounds_reject_the_old_external_side_failure() -> None:
         raise AssertionError("side=1/5 오염 OFI 를 허용했다")
 
 
+def test_partial_universe_source_loss_is_not_hidden_as_row_warns() -> None:
+    def row(n_ticks, n_quotes):
+        return (None,) * 6 + (n_ticks, n_quotes) + (None,) * 9
+
+    healthy = [row(100, 100)] * 950 + [row(100, 0)] * 50
+    assert microstructure_builder.partial_source_gaps(healthy) == []
+
+    broken = [row(100, 100)] * 630 + [row(100, 0)] * 370
+    gaps = microstructure_builder.partial_source_gaps(broken)
+    assert gaps == [{
+        "source": "quotes",
+        "affected_rows": 370,
+        "total_rows": 1000,
+        "affected_fraction": 0.37,
+    }]
+    assert "partial_universe_loss" in microstructure_builder._SQL_PARTIAL_FEED_GAP
+
+
 def test_feature_catalog_never_mixes_feature_set_versions() -> None:
     assert "feature_set_version = %s" in feature_catalog._SQL_FEATURE
     assert "ms-daily-v4" in feature_catalog.measure.__kwdefaults__.values()
