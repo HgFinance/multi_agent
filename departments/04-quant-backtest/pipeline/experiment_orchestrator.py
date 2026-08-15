@@ -570,7 +570,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
         env = load_project_env()
         if own_conn:
-            conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+            from db_writer import connect as connect_writer
+
+            conn = connect_writer(env["DATABASE_URL"], connect_timeout=20)
         if own_market and env.get("TIMESCALE_DATABASE_URL"):
             market_conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"],
                                            connect_timeout=20)
@@ -1005,7 +1007,9 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                            f"수동 확인할 것 (자동 재판정은 결과 조작 여지가 있다)")
 
     # 강건성: 같은 config 로 창별 재실행 (walk_forward 조각 재사용)
-    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    from db_writer import connect as connect_writer
+
+    conn = connect_writer(load_project_env()["DATABASE_URL"], connect_timeout=20)
     try:
         _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
@@ -1140,8 +1144,8 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
             #   관문으로 승격할지 판정하는 자격 검사(IC↔판정 순위상관)가
             #   짝 0건으로 영영 미측정에 머문다. 짧은 단문 트랜잭션이라
             #   세션풀 부담도 없다.
-            _c2 = psycopg2.connect(load_project_env()["DATABASE_URL"],
-                                   connect_timeout=20)
+            _c2 = connect_writer(load_project_env()["DATABASE_URL"],
+                                 connect_timeout=20)
             try:
                 with _c2.cursor() as cur:
                     for name, val in (("signal_ic", _res.mean_ic),
@@ -1689,7 +1693,7 @@ def _check_signal_ic_is_recorded():
     # **자기 연결로 써야 한다** (2026-08-13 실측). 앞 구간이 닫은 conn 을
     # 재사용해 매 실험 InterfaceError 로 죽었고, IC 는 로그에만 남고 원장은
     # 0건이었다 - 측정되는데 저장이 죽으면 자격 검사가 영영 미측정이다.
-    assert "_c2 = psycopg2.connect" in body,         "IC 기록이 공유 conn 을 재사용한다 - 닫힌 연결이면 매번 죽는다"
+    assert "_c2 = connect_writer" in body,           "IC 기록이 공유 conn 을 재사용한다 - 닫힌 연결이면 매번 죽는다"
     # **격자가 읽는 이름과 같아야 한다** - 다르면 조용히 안 보인다(오늘 12번)
     import grid  # noqa: PLC0415
     assert "signal_ic_t" in grid._SQL, "격자가 읽는 지표 이름과 갈렸다"

@@ -430,6 +430,23 @@ def defer(conn, job_id: str, *, reason: str) -> dict:
                       attempts=greatest(attempts - 1, 0)
                 where job_id=%s::uuid and status='LEASED'""",
             (marked[:500], job_id))
+        # The orchestrator moves a hypothesis to RUNNING before the expensive
+        # work starts.  An infrastructure defer is not an experiment verdict;
+        # leaving RUNNING here makes every retry release itself for 30 minutes.
+        # Reset only when this hypothesis has no other leased worker.
+        cur.execute(
+            """update quant.hypotheses h
+                  set status='PROPOSED', status_changed_at=now()
+                where h.status='RUNNING'
+                  and h.hypothesis_id=(
+                        select hypothesis_id from quant.experiment_jobs
+                         where job_id=%s::uuid)
+                  and not exists (
+                        select 1 from quant.experiment_jobs other
+                         where other.hypothesis_id=h.hypothesis_id
+                           and other.status='LEASED')""",
+            (job_id,),
+        )
     conn.commit()
     return {"action": "DEFERRED", "count": n, "reason": marked}
 
@@ -797,22 +814,24 @@ def _check_infra_fault_is_deferred_not_failed():
     r1 = defer(c1, "j1", reason="ReadOnlySqlTransaction: 풀러가 읽기전용이다")
     assert r1["action"] == "DEFERRED", r1
     assert r1["count"] == 1, r1
-    upd = seen[-1]["sql"]
+    queued = next(x for x in seen if "status='QUEUED'" in x["sql"])
+    upd = queued["sql"]
     assert "status='QUEUED'" in upd, upd
     assert "FAILED" not in upd, ("인프라 고장이 실패로 적히면 재발주 차단·"
                                  "인구조사·브리핑이 그것을 고칠 것으로 읽는다", upd)
     assert "attempts - 1" in upd.replace("attempts-1", "attempts - 1"), \
         ("시도 예산을 안 돌려주면 인프라 장애 두 번에 가설이 소진된다", upd)
     # 몇 번째인지 사유에 남는다 - 안 남기면 조용한 무한 재시도와 구별이 안 된다
-    assert defer_count(seen[-1]["params"][0]) == 1, seen[-1]["params"]
+    assert defer_count(queued["params"][0]) == 1, queued["params"]
     assert c1.committed, "유예하고 커밋하지 않으면 주문이 집힌 채 남는다"
 
     # ② 이어지는 장애 -> 횟수가 누적된다(사유에서 읽어 온다)
-    prior = seen[-1]["params"][0]
+    prior = queued["params"][0]
     seen.clear()
     r2 = defer(_C(prior), "j1", reason="ReadOnlySqlTransaction: 또 읽기전용이다")
     assert r2["count"] == 2, r2
-    assert defer_count(seen[-1]["params"][0]) == 2, seen[-1]["params"]
+    queued = next(x for x in seen if "status='QUEUED'" in x["sql"])
+    assert defer_count(queued["params"][0]) == 2, queued["params"]
 
     # ③ **무한은 아니다.** 상한을 넘기면 실패로 굳혀 사람을 부른다
     seen.clear()

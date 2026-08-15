@@ -51,11 +51,10 @@ def worker_name() -> str:
 
 
 def _conn():
-    import psycopg2
+    from db_writer import connect
     from source_registry import load_project_env
 
-    return psycopg2.connect(load_project_env()["DATABASE_URL"],
-                            connect_timeout=20)
+    return connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
 
 
 # 가설이 여기 오면 이 주문은 다시 돌 이유가 없다. 회수(`RUNNING` 만 되돌림)도

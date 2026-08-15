@@ -1315,7 +1315,9 @@ services:
               "--serve"]
     depends_on:
       factory-autopilot:
-        condition: service_started
+        # The worker must not consume hypotheses from a factory whose AST
+        # registry or execution files differ from the sealed image contract.
+        condition: service_healthy
       timescaledb:
         condition: service_healthy
     environment:
