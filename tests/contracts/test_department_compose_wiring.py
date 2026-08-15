@@ -73,6 +73,9 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertIn("HERMES_HOME: /opt/data", service)
         self.assertIn("HERMES_KANBAN_HOME: /opt/data/shared-kanban", service)
         self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
+        self.assertIn(
+            "MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}", service
+        )
         self.assertIn("/home/ubuntu/.hermes:/opt/data", service)
 
         for compose_path in (
