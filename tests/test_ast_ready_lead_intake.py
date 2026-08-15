@@ -39,7 +39,32 @@ def test_ast_ready_persists_validated_microstructure_expression():
     assert lead["ast_contract"]["daily_data_role"] == (
         "EXECUTION_BENCHMARK_REGIME_AUXILIARY")
     assert lead["ast_contract"]["candidate_signal_expr"]["arg"]["n"] == 5
+    assert len(lead["ast_contract"]["ast_fingerprint"]) == 16
+    assert len(lead["ast_contract"]["ast_shape_fingerprint"]) == 16
     assert MethodologyLeadV1.model_validate(lead).refs[0].url == lead["refs"][0]["url"]
+
+
+def test_ast_identity_distinguishes_exact_formula_from_tuning_shape():
+    a = _lead({
+        "TITLE": "OFI one day", "URL": "https://example.test/ofi-1",
+        "MECHANISM": "order_flow_imbalance measures urgent liquidity pressure",
+        "TESTABLE_WITH": "rank one-day order_flow_imbalance",
+        "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+        "CANDIDATE_SIGNAL_EXPR": {"op": "rank", "arg": {
+            "op": "ts_mean", "field": "order_flow_imbalance", "n": 1}},
+    })
+    b = _lead({
+        "TITLE": "OFI five day", "URL": "https://example.test/ofi-5",
+        "MECHANISM": "order_flow_imbalance measures persistent liquidity pressure",
+        "TESTABLE_WITH": "rank five-day order_flow_imbalance",
+        "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+        "CANDIDATE_SIGNAL_EXPR": {"op": "rank", "arg": {
+            "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}},
+    })
+
+    assert a["ast_contract"]["ast_fingerprint"] != b["ast_contract"]["ast_fingerprint"]
+    assert (a["ast_contract"]["ast_shape_fingerprint"] ==
+            b["ast_contract"]["ast_shape_fingerprint"])
 
 
 def test_ast_ready_rejects_observable_expression_disagreement():
@@ -49,6 +74,18 @@ def test_ast_ready_rejects_observable_expression_disagreement():
             "MECHANISM": "returns reverse", "TESTABLE_WITH": "returns",
             "READINESS": "AST_READY", "OBSERVABLES": "close",
             "CANDIDATE_SIGNAL_EXPR": {"op": "ts_mean", "field": "returns", "n": 5},
+        })
+
+
+def test_ast_ready_rejects_unknown_window_key_instead_of_silently_using_one_day():
+    with pytest.raises(ValueError, match="unknown ts_mean key.*window"):
+        _lead({
+            "TITLE": "Misspelled window", "URL": "https://example.test/window",
+            "MECHANISM": "realized_volatility predicts a subsequent return premium",
+            "TESTABLE_WITH": "five-day realized_volatility predicts forward returns",
+            "READINESS": "AST_READY", "OBSERVABLES": "realized_volatility",
+            "CANDIDATE_SIGNAL_EXPR": {
+                "op": "ts_mean", "field": "realized_volatility", "window": 5},
         })
 
 

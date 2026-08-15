@@ -205,6 +205,10 @@ def _ast_scout_contract() -> str:
         f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
         f"  Supported operators ({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
         f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
+        '  JSON SCHEMA EXAMPLE: {"op":"ts_mean","field":"realized_volatility","n":5}.',
+        '  The window key is exactly "n"--never "window" or "lookback". ts_corr uses',
+        '  {"op":"ts_corr","field_a":"...","field_b":"...","n":5}; unary nodes',
+        '  use "arg" and binary nodes use exactly two "args". Unknown keys are rejected.',
         "  DATA REALITY: every supported quote/trade field above is already available as a",
         "  point-in-time Korean-equity DAILY AGGREGATE. AST windows therefore mean trading",
         "  days, not seconds or order-book events. The current microstructure history is short.",
@@ -216,6 +220,10 @@ def _ast_scout_contract() -> str:
         "  (for example queue position, cancellations, order lifetime, or event-time seconds).",
         "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
         "  mechanism/TESTABLE_WITH must explain those fields economically.",
+        "  AST_READY targets subsequent RETURN alpha. A volatility forecast, execution-cost",
+        "  forecast, or regime classifier alone is not alpha. It must cite and state the",
+        "  causal route/counterparty from the observable to subsequent return; otherwise",
+        "  submit SEMANTIC_MISMATCH with MAPPING_LOSS instead of inventing a return edge.",
         "  MICROSTRUCTURE IS PRIMARY: every AST_READY expression must use at least one",
         f"  quote/trade field: {', '.join(sorted(MICRO_FIELDS))}",
         "  close/notional/returns may only accompany microstructure as execution, benchmark,",
@@ -750,6 +758,49 @@ def research_brief() -> str:
         conn.close()      # WAL 을 남기지 않는다 - with 는 커밋만 하고 안 닫는다
 
 
+def _ast_experience_block(conn) -> str:
+    """Deterministic positive/negative AST memory for both scout and planner."""
+    try:
+        import ast_experience as AX                 # noqa: PLC0415
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select e.config->'signal_expr', coalesce(o.decision, ''),
+                       coalesce(o.lesson_codes, '{}'::text[]),
+                       coalesce(o.oos_summary, '{}'::jsonb), h.title
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join lateral (
+                    select decision, lesson_codes, oos_summary
+                      from research.experiment_outcomes x
+                     where x.experiment_id = e.experiment_id::text
+                     order by x.decided_at desc limit 1
+                  ) o on true
+                 where e.config ? 'signal_expr'
+                 order by e.created_at desc""")
+            experiments = [{
+                "signal_expr": row[0], "decision": row[1],
+                "lesson_codes": list(row[2] or []), "oos_summary": row[3] or {},
+                "title": row[4],
+            } for row in cur.fetchall()]
+            cur.execute("""
+                select l.lead_id, l.claimed_edge,
+                       l.ast_contract->'candidate_signal_expr',
+                       exists (select 1 from research.experiment_proposals p
+                                where l.lead_id = any(p.lead_ids)) as used
+                  from research.methodology_leads l
+                 where l.status = 'COMPLETE'
+                   and l.ast_contract->>'ast_readiness' = 'AST_READY'
+                   and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                 order by l.created_at desc""")
+            leads = [{"lead_id": row[0], "title": row[1],
+                      "signal_expr": row[2], "used": bool(row[3])}
+                     for row in cur.fetchall()]
+        return AX.render(AX.build(experiments, leads))
+    except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
+        return ""
+
+
 def _compose_research_brief(conn, brief, leads) -> str:
     """브리핑 본문. **연결이 살아 있는 동안** 조회 블록을 다 만든다."""
     out = [brief.as_prompt()]
@@ -794,6 +845,9 @@ def _compose_research_brief(conn, brief, leads) -> str:
     # 표현 수단은 격자 바로 뒤에 둔다 - "어디가 비었나" 다음에
     # "그것을 어떻게 적나" 가 와야 둘을 잇는다.
     out.append(_alpha_expr_line(conn))
+    # Formula identity and outcomes are a separate memory axis from edge-family
+    # history.  Without this block the same AST can be renamed and rediscovered.
+    out.append(_ast_experience_block(conn))
     # 근접 계열을 어휘 바로 뒤에 둔다 - 손잡이 목록을 읽은 직후에 "어디에
     # 쓸지" 가 나와야 한다. 멀리 떨어뜨리면 둘을 잇지 못한다.
     out.append(_near_miss(conn))
@@ -1883,7 +1937,9 @@ def harvest(*, dry_run: bool = False) -> int:
                               (b.get("EDGE_TYPE") or "").strip().lower(),
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
-                              baseline=(b.get("BASELINE") or "").strip()))
+                              baseline=(b.get("BASELINE") or "").strip(),
+                              signal_expr=PI._maybe_json(
+                                  b.get("SUGGESTED_PARAMS", "")).get("signal_expr")))
             pub = r.publishable
             if dry_run:
                 print(f"  [dry-run] {stamp}: 발행가능 {len(pub)}건 "
@@ -2359,6 +2415,7 @@ def cycle(*, dry_run: bool = False) -> int:
         _sc = _conn()
         try:
             starving = _lead_health(_sc)
+            ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
         if starving:
@@ -2367,7 +2424,7 @@ def cycle(*, dry_run: bool = False) -> int:
                 title=f"공장 스카우트 소집: 리드 수집 {stamp}",
                 body=("이 카드의 임무는 **리드 수집·납품 하나뿐이다** - 기획안을 "
                       "쓰지 마라(기획은 기획 카드 몫이다).\n"
-                      + starving + "\n" + _SCOUT_SURFACE + "\n\n"
+                      + starving + "\n" + ast_memory + "\n" + _SCOUT_SURFACE + "\n\n"
                       + _ast_scout_contract() + "\n\n"
                       "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSSDOMAIN)를 "
                       "순서대로 돌리고, 수집분은 `factory_submit_leads` **도구 "
@@ -3131,6 +3188,7 @@ def _selfcheck() -> int:
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
     _check_design_gaps_and_scout_card()
+    _check_ast_memory_reaches_scout_and_planner()
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()
     _check_brief_blocks_run_before_close()
@@ -3521,6 +3579,21 @@ def _check_design_gaps_and_scout_card():
     assert "factory-planner-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     print("  설계 공백·스카우트 소집   OK")
+
+
+def _check_ast_memory_reaches_scout_and_planner():
+    """Outcome memory must shape both literature search and proposal generation."""
+    import inspect
+
+    brief = inspect.getsource(_compose_research_brief)
+    cyc = inspect.getsource(cycle)
+    assert "_ast_experience_block(conn)" in brief, \
+        "기획자가 exact/near AST 이력과 성과를 못 본다"
+    assert "ast_memory = _ast_experience_block(_sc)" in cyc, \
+        "스카우트 검색이 과거 AST 경험을 못 본다"
+    assert "starving + \"\\n\" + ast_memory" in cyc, \
+        "메모리를 계산만 하고 스카우트 카드에 싣지 않는다"
+    print("  AST 경험 기억→검색·기획   OK")
 
 
 def _check_dataset_refresh_is_daily_and_ordered():

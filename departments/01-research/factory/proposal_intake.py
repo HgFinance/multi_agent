@@ -328,8 +328,9 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             seen = sorted(k for k in skeptics if k)
             out.rejected.append(Rejected(
                 title,
-                ("회의론자 검토도 COMPETING_EXPLANATION 도 없다 - 반대 가설을 "
-                 "사전에 적지 않은 기획안은 접수하지 않는다")
+                ("독립 worker의 회의론자 검토가 없다 - 반대 가설인 "
+                 "COMPETING_EXPLANATION을 기획자가 적었어도 독립 검증이 아니므로 "
+                 "접수하지 않는다")
                 if not seen else
                 (f"회의론자 블록은 {len(seen)}개 왔는데 이 기획안과 **제목이 "
                  f"맞지 않는다.** 기획자 제목={title!r} · 회의론자 제목={seen}. "
@@ -443,8 +444,13 @@ def _pair_skeptic(title: str, skeptics: dict, planners: list, sk_blocks: list):
 
 
 def load_past_outcomes(conn, edge_type: str, universe_key: str,
-                       *, label: str = "", baseline: str = "") -> list[dict]:
-    """같은 계열의 지난 판정. **승격 관문과 같은 경로로 센다.**
+                       *, label: str = "", baseline: str = "",
+                       signal_expr: dict | None = None) -> list[dict]:
+    """같은 계열 또는 exact AST의 지난 판정.
+
+    계열명은 LLM이 바꿀 수 있지만 실행된 수식의 지문은 바뀌지 않는다. 따라서
+    edge/universe 이력과 exact ``signal_expr`` 이력을 합쳐 보여 준다. 같은 outcome은
+    SQL의 OR 조건으로 한 번만 읽고, AST로 맞은 행에는 ``match_scope``를 각인한다.
 
     ▶ 여기가 `발주 0건` 의 실제 지점이었다 (2026-08-13 실측)
       두 가지가 겹쳐 있었다.
@@ -499,16 +505,30 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
                                   expected_edge->>'universe','')) = %s
         """, (edge, uni))
         hyp_ids = [r[0] for r in cur.fetchall()]
-        if not hyp_ids:
+        experiment_ids: list[str] = []
+        if signal_expr is not None:
+            # jsonb equality ignores object key order.  Invalid expressions are left
+            # to the canonical AST gate; history lookup must not silently repair one.
+            cur.execute("""
+                select experiment_id::text from quant.experiments
+                 where config->'signal_expr' = %s::jsonb
+            """, (json.dumps(signal_expr, sort_keys=True),))
+            experiment_ids = [r[0] for r in cur.fetchall()]
+        if not hyp_ids and not experiment_ids:
             return []
         cur.execute("""
-            select decision, lesson_codes, trial_family_id
+            select decision, lesson_codes, trial_family_id, experiment_id
               from research.experiment_outcomes
-             where hypothesis_id = any(%s)
+             where hypothesis_id = any(%s::text[])
+                or experiment_id = any(%s::text[])
              order by decided_at desc
-        """, (hyp_ids,))
+        """, (hyp_ids, experiment_ids))
+        exact = set(experiment_ids)
         return [{"decision": r[0], "lesson_codes": list(r[1] or []),
-                 "trial_family_id": r[2]} for r in cur.fetchall()]
+                 "trial_family_id": r[2],
+                 "match_scope": ("AST_EXACT" if r[3] in exact
+                                 else "EDGE_UNIVERSE")}
+                for r in cur.fetchall()]
 
 
 _SQL_INSERT = """

@@ -47,7 +47,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import sys
@@ -122,6 +121,7 @@ from alpha_ast_surface import (  # noqa: E402
     FIELDS as CONTRACT_FIELDS,
     MAX_DEPTH as CONTRACT_MAX_DEPTH,
     MAX_NODES as CONTRACT_MAX_NODES,
+    fingerprint as _contract_fingerprint,
 )
 if (FIELDS, ALL_OPS, MAX_DEPTH, MAX_NODES) != (
         CONTRACT_FIELDS, CONTRACT_ALL_OPS, CONTRACT_MAX_DEPTH, CONTRACT_MAX_NODES):
@@ -133,6 +133,13 @@ class AlphaExprError(ValueError):
 
 
 # ── 검증 ─────────────────────────────────────────────────────────────────────
+
+def _reject_unknown_keys(node: dict, allowed: set[str], kind: str) -> None:
+    unknown = sorted(set(node) - allowed)
+    if unknown:
+        raise AlphaExprError(
+            f"unknown {kind} key(s) {unknown}; allowed keys are {sorted(allowed)}")
+
 
 def validate(node, *, _depth: int = 1) -> dict:
     """수식 트리를 검사하고 정규화된 사본을 돌려준다.
@@ -148,6 +155,7 @@ def validate(node, *, _depth: int = 1) -> dict:
         raise AlphaExprError(f"노드는 dict 여야 한다: {node!r}")
 
     if "const" in node:
+        _reject_unknown_keys(node, {"const"}, "constant")
         v = node["const"]
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             raise AlphaExprError(f"상수가 수가 아니다: {v!r}")
@@ -164,11 +172,13 @@ def validate(node, *, _depth: int = 1) -> dict:
         return _validate_source(node, op)
 
     if op in UNARY_OPS:
+        _reject_unknown_keys(node, {"op", "arg"}, op)
         arg = node.get("arg")
         if arg is None:
             raise AlphaExprError(f"{op} 는 인자 하나가 필요하다")
         return {"op": op, "arg": validate(arg, _depth=_depth + 1)}
 
+    _reject_unknown_keys(node, {"op", "args"}, op)
     args = node.get("args")
     if not isinstance(args, (list, tuple)) or len(args) != 2:
         raise AlphaExprError(f"{op} 는 인자 둘이 필요하다: {args!r}")
@@ -178,6 +188,8 @@ def validate(node, *, _depth: int = 1) -> dict:
 def _validate_source(node: dict, op: str) -> dict:
     """소스 연산자 - 필드와 창을 검사한다."""
     if op == "ts_corr":
+        _reject_unknown_keys(node, {"op", "field_a", "field_b", "n"},
+                             "ts_corr")
         fa, fb = node.get("field_a"), node.get("field_b")
         for f in (fa, fb):
             if f not in FIELDS:
@@ -188,6 +200,7 @@ def _validate_source(node: dict, op: str) -> dict:
             raise AlphaExprError("같은 필드끼리의 상관은 항상 1 이다 - 신호가 아니다")
         return {"op": op, "field_a": fa, "field_b": fb, "n": n}
 
+    _reject_unknown_keys(node, {"op", "field", "n"}, op)
     field = node.get("field")
     if field not in FIELDS:
         raise AlphaExprError(
@@ -258,8 +271,9 @@ def _canonical(node: dict) -> dict:
 
 def fingerprint(expr: dict) -> str:
     """정규화 트리의 해시. **이것이 알파의 정체다.**"""
-    payload = json.dumps(_canonical(expr), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    # Research intake persists this identity before quant sees the lead.  Delegate
+    # to the shared surface so the two containers cannot assign different IDs.
+    return _contract_fingerprint(expr)
 
 
 def fields_of(expr: dict) -> set:
@@ -645,6 +659,8 @@ def _check_validate_rejects_nonsense():
     """**모르는 것을 추측해서 돌리지 않는다.**"""
     for bad in ({"op": "magic", "field": "close", "n": 5},
                 {"op": "ts_mean", "field": "pe_ratio", "n": 5},
+                {"op": "ts_mean", "field": "close", "window": 5},
+                {"const": 1, "ignored": "payload"},
                 {"op": "ts_mean", "field": "close", "n": 0},
                 {"op": "ts_mean", "field": "close", "n": 9999},
                 {"op": "ts_std", "field": "close", "n": 1},

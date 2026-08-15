@@ -410,7 +410,8 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     prior = proposal.get("prior_check") or {}
     answered = set((prior.get("lessons_addressed") or {}).keys())
     missing = sorted(needed - answered)
-    if missing and r.trials_used > 0:
+    exact_ast_reuse = any(o.get("match_scope") == "AST_EXACT" for o in past)
+    if missing and (r.trials_used > 0 or exact_ast_reuse):
         # ▶ **"대응이 없다" 가 사실이 아닐 수 있다** (2026-08-13 실측)
         #   `prop_5682` 는 교훈 5개를 이름으로 짚어 대응을 적었다 - 다만 카드가
         #   `ECONOMIC_RATIONALE 에 적어라` 라고 시켜서 거기 적었고, 계약은
@@ -432,9 +433,12 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                      + (f". 본문에도 없는 것: {sorted(set(missing) - set(in_body))}"
                         if set(missing) - set(in_body) else ""))
         else:
-            r.reject("DUPLICATE_UNADDRESSED",
-                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다 - "
-                     f"그 교훈에 대응이 없다: {missing}")
+            scope = ("동일 AST가 다른 이름·계열을 포함해 이미 실행되고 부정 종결됐다"
+                     if exact_ast_reuse and r.trials_used == 0 else
+                     f"이 계열에서 이미 {r.trials_used}회 실행하고 기각됐다")
+            r.reject("AST_DUPLICATE_UNADDRESSED" if exact_ast_reuse
+                     else "DUPLICATE_UNADDRESSED",
+                     f"{scope} - 그 교훈에 대응이 없다: {missing}")
     elif missing:
         # 실행 0인데 기각 교훈이 있다 = 원장이 어긋났다는 신호다(다른 계열의
         # 결과가 섞였거나 정리가 덜 됐다). **막지 않고 알린다** - 여기서 막으면
@@ -623,6 +627,16 @@ _SQL_FAMILY_OUTCOMES = """
       from research.experiment_outcomes
      where trial_family_id = %s
      order by decided_at desc
+"""
+
+_SQL_EXACT_AST_OUTCOMES = """
+    select o.decision, o.lesson_codes
+      from research.experiment_outcomes o
+     where o.experiment_id = any(
+           select e.experiment_id::text
+             from quant.experiments e
+            where e.config->'signal_expr' = %s::jsonb)
+     order by o.decided_at desc
 """
 
 # ▶ **한 실험에는 판정 하나** (2026-08-14 실측). outcome_id 는
@@ -902,6 +916,36 @@ def fetch_family_outcomes(conn, trial_family_id: str) -> list[dict]:
                 for d, lc in cur.fetchall()]
 
 
+def fetch_exact_ast_outcomes(conn, signal_expr) -> list[dict]:
+    """Negative/positive history follows executable formula identity, not its name."""
+    if signal_expr is None:
+        return []
+    try:
+        from alpha_ast import parse as _parse  # noqa: PLC0415
+        normalized = _parse(signal_expr)
+    except Exception:  # gate0 owns the human-readable invalid-AST rejection
+        return []
+    with conn.cursor() as cur:
+        cur.execute(_SQL_EXACT_AST_OUTCOMES,
+                    (json.dumps(normalized, sort_keys=True),))
+        return [{"decision": d, "lesson_codes": list(lc or []),
+                 "match_scope": "AST_EXACT"}
+                for d, lc in cur.fetchall()]
+
+
+def _merge_outcome_evidence(*groups) -> list[dict]:
+    """Union lessons without double-counting an outcome found through both indexes."""
+    merged: dict[tuple, dict] = {}
+    for group in groups:
+        for row in group or ():
+            key = (str(row.get("decision") or ""),
+                   tuple(sorted(str(x) for x in (row.get("lesson_codes") or ()))))
+            prior = merged.get(key)
+            if prior is None or row.get("match_scope") == "AST_EXACT":
+                merged[key] = dict(row)
+    return list(merged.values())
+
+
 _SQL_ALREADY_PROMOTED = (
     "select proposal_id from quant.hypotheses "
     " where proposal_id = any(%s) and proposal_id is not null")
@@ -970,8 +1014,12 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
         # 다른 수를 넘겨 같은 기획안이 다른 판정을 받는다.
         probe = gate0(p, trials_used=0, past_outcomes=[])
         fam = probe.trial_family_id
+        family_history = fetch_family_outcomes(conn, fam)
+        exact_history = fetch_exact_ast_outcomes(
+            conn, (p.get("suggested_params") or {}).get("signal_expr"))
         gate = gate0(p, trials_used=count_family_trials(conn, fam),
-                     past_outcomes=fetch_family_outcomes(conn, fam))
+                     past_outcomes=_merge_outcome_evidence(
+                         family_history, exact_history))
         if not gate.ok or dry_run:
             out.append(Promotion(p["proposal_id"], gate.ok, gate=gate.as_dict()))
             continue
@@ -1292,6 +1340,23 @@ def _check_never_run_family_is_not_blocked_by_lessons():
     assert "DUPLICATE_UNADDRESSED" not in g.codes, g.as_dict()
     # 조용히 통과시키지는 않는다 - 원장이 어긋났다는 신호이므로 경고로 남긴다.
     assert g.warnings and "실행 기록은 0" in g.warnings[-1], g.as_dict()
+
+
+def _check_exact_ast_history_cannot_be_renamed_away():
+    """A new edge label must not erase the negative memory of the same formula."""
+    ast_history = [{"decision": "GATE_HOLD",
+                    "lesson_codes": ["UNDERPOWERED_DATA"],
+                    "match_scope": "AST_EXACT"}]
+    blocked = gate0(_prop(edge_type="momentum"), trials_used=0,
+                    past_outcomes=ast_history)
+    assert not blocked.ok, blocked.as_dict()
+    assert "AST_DUPLICATE_UNADDRESSED" in blocked.codes, blocked.as_dict()
+    addressed = gate0(_prop(
+        edge_type="momentum",
+        prior_check={"lessons_addressed": {
+            "UNDERPOWERED_DATA": "longer PIT microstructure history acquired"}}),
+        trials_used=0, past_outcomes=ast_history)
+    assert addressed.ok, addressed.as_dict()
 
 
 def _check_answer_in_wrong_field_says_where_to_move_it():
@@ -1716,6 +1781,8 @@ if __name__ == "__main__":
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")
     _check_never_run_family_is_not_blocked_by_lessons()
+    _check_exact_ast_history_cannot_be_renamed_away()
+    print("  동일 AST 이름 우회 차단    OK")
     _check_answer_in_wrong_field_says_where_to_move_it()
     _check_reject_never_closes_without_corrective_action()
     _check_unrunnable_falsification_is_disclosed(); print("  실행 0 계열은 안 막음    OK")
