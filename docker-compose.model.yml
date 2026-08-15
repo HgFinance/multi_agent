@@ -84,11 +84,9 @@ services:
       start_period: 600s
     stop_grace_period: 60s
 
-  # ── research-mcp 에 Worker 모델 배선을 주입한다 ──────────────────────────
-  # 이미지(빌드 컨텍스트 departments/01-research)에는 상위 폴더의 공용 런타임이
-  # 없다 - employee_worker_runtime.py / worker_model_gateway.py / orchestration/
-  # 을 마운트로 보충한다. 마운트가 빠지면 run_research_workers job 이
-  # ImportError 로 FAILED 가 되고, 그 사유가 get_worker_job 에 그대로 남는다.
+  # ── research-mcp 에 Worker 모델 좌표만 주입한다 ──────────────────────────
+  # 공용 Worker 소스 마운트는 기본 compose에 있다. 그래야 이 오버레이가 없는
+  # 로컬 Ollama 경로도 독립 회의론자 Worker를 똑같이 실행할 수 있다.
   research-mcp:
     environment:
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
@@ -96,12 +94,3 @@ services:
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
       WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
-    volumes:
-      - ./departments/employee_worker_runtime.py:/app/departments/employee_worker_runtime.py:ro
-      - ./departments/worker_model_gateway.py:/app/departments/worker_model_gateway.py:ro
-      - ./departments/01-research/employee_workers.py:/app/departments/01-research/employee_workers.py:ro
-      # record_llm_call(계측) - import 시점은 표준 라이브러리만 쓴다
-      - ./orchestration:/app/orchestration:ro
-      # registry 파일이 든 config (기본 compose 에도 있지만 오버레이 단독
-      # 검증을 위해 명시한다 - 같은 대상 경로라 중복이 아니라 대체다)
-      - ./departments/01-research/config:/app/departments/01-research/config:ro

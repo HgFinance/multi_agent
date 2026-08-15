@@ -31,7 +31,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -57,6 +59,7 @@ MAX_JOBS_KEPT = 50
 # 모양이 다르다(Packet 은 subprocess tail 파싱, Worker 는 registry 결과 dict).
 _WORKER_JOBS: dict[str, dict] = {}
 _WORKER_JOBS_LOCK = threading.Lock()
+_TASK_ID_RE = re.compile(r"^(t_[0-9A-Za-z]+)(?:$|[-:#/])")
 
 
 def _writer_connection(dsn: str, *, connector=None):
@@ -180,13 +183,24 @@ def finish_job(job_id: str, *, exit_code: int, tail: str, now: datetime) -> dict
         return dict(j)
 
 
+def _text_digest(value: str) -> str:
+    """Stable fingerprint for binding a review job to the submitted draft."""
+    normalized = str(value or "").replace("\r\n", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def register_worker_job(payload_fields: list[str], *, now: datetime,
-                        symbol: str = "") -> str:
+                        symbol: str = "", proposal_draft: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     with _WORKER_JOBS_LOCK:
         _WORKER_JOBS[job_id] = {
             "job_id": job_id, "kind": "employee_workers",
             "payload_fields": payload_fields, "symbol": symbol or None,
+            # Keep only a digest: enough for causal validation without copying a
+            # potentially long unpublished proposal into the job status surface.
+            "proposal_draft_sha256": (
+                _text_digest(proposal_draft)
+                if "proposal_draft" in payload_fields else None),
             "status": "RUNNING",
             "started_at": now.isoformat(), "ended_at": None,
             "result": None, "model_plane": None, "evidence": None, "error": None,
@@ -222,6 +236,53 @@ def finish_worker_job(job_id: str, *, result: dict | None,
         j["evidence"] = evidence
         j["error"] = error
         return dict(j)
+
+
+def planner_task_id(planner_run: str) -> str | None:
+    """Return the causal board task id, ignoring an agent-added run label."""
+    match = _TASK_ID_RE.match(str(planner_run or "").strip())
+    return match.group(1) if match else None
+
+
+def skeptic_job_error(skeptic_run: str, planner_text: str) -> str:
+    """Validate that a separate completed critic worker produced the review.
+
+    A caller-provided label is not a signature.  The worker job is created and
+    retained by this MCP process, so the proposal boundary can verify the
+    actual execution, its trigger input, and its structured output before
+    allowing the id to enter the ledger as ``skeptic_sign``.
+    """
+    job_id = str(skeptic_run or "").strip()
+    if not job_id:
+        return "skeptic_run is required and must be a run_research_workers job_id"
+    with _WORKER_JOBS_LOCK:
+        job = _WORKER_JOBS.get(job_id)
+        if job is not None:
+            job = dict(job)
+    if job is None:
+        return "skeptic_run does not identify a worker job in this MCP process"
+    if job.get("status") != "COMPLETED":
+        return f"skeptic worker is not completed: {job.get('status')}"
+    if "proposal_draft" not in (job.get("payload_fields") or []):
+        return "skeptic worker did not review a proposal_draft"
+    if job.get("proposal_draft_sha256") != _text_digest(planner_text):
+        return "skeptic worker reviewed a different proposal_draft"
+    result = job.get("result") or {}
+    if result.get("degraded"):
+        return "skeptic worker completed in degraded mode"
+    if "competing-explanation-worker" not in (result.get("executed") or []):
+        return "competing-explanation-worker did not complete"
+    report = next(
+        (item for item in (result.get("workers") or [])
+         if item.get("worker_id") == "competing-explanation-worker"),
+        None,
+    )
+    output = (report or {}).get("output") or {}
+    if ((report or {}).get("status") != "COMPLETED"
+            or output.get("schema_valid") is not True
+            or not str(output.get("summary") or "").strip()):
+        return "skeptic worker output is missing or schema-invalid"
+    return ""
 
 
 def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
@@ -602,8 +663,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             sym = normalize_symbol(symbol) if str(symbol or "").strip() else ""
         except ValueError as e:
             return {"ok": False, "error": str(e)}
-        job_id = register_worker_job(sorted(payload), now=datetime.now(KST),
-                                     symbol=sym)
+        job_id = register_worker_job(
+            sorted(payload), now=datetime.now(KST), symbol=sym,
+            proposal_draft=payload.get("proposal_draft", ""))
 
         def _run():
             # try 밖에서 초기화한다 - 근거를 모은 뒤 Worker 단계에서 죽어도
@@ -865,8 +927,11 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         description="기획안을 발행 게이트에 제출한다. **이 호출이 곧 납품이다** - "
                     "카드 텍스트·요약은 납품으로 세지 않는다. `planner_run` 에 "
                     "지금 작업 중인 칸반 카드 ID(t_ 로 시작)를 넣으면 납품이 그 "
-                    "카드 몫으로 대조된다. 기획자 산출과 **독립 회의론자** 산출을 "
-                    "함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. 근거 "
+                    "카드 몫으로 대조된다. 먼저 run_research_workers에 "
+                    "proposal_draft를 주고 get_worker_job에서 COMPLETED·비-degraded "
+                    "결과를 확인하라. competing-explanation-worker의 산출을 "
+                    "skeptic_text에 옮기고, 반환된 실제 job_id를 skeptic_run에 "
+                    "넣어야 한다. 자기 서명이나 임의 실행명은 거부된다. 근거 "
                     "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
                     "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
                     "카드 안에서 다시 제출하라. `llm_model_id` 와 "
@@ -881,7 +946,24 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         _factory_path()
         import proposal_intake as PI
 
-        from datetime import datetime as _dt, timezone as _tz
+        task_id = planner_task_id(planner_run)
+        if task_id is None:
+            return {
+                "ok": False, "published": 0, "already_present": 0,
+                "unknown_lead_ids": [], "gate": [],
+                "rejected": [{
+                    "title": "(submission)",
+                    "why": "planner_run must start with the current kanban task id (t_...)"
+                }],
+            }
+        critic_error = skeptic_job_error(skeptic_run, planner_text)
+        if critic_error:
+            return {
+                "ok": False, "published": 0, "already_present": 0,
+                "unknown_lead_ids": [], "gate": [],
+                "rejected": [{"title": "(independent skeptic)",
+                              "why": critic_error}],
+            }
 
         conn = _db()
         try:
@@ -899,10 +981,8 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             #   찍는다. 수확기 `_mcp_deliveries` 가 이 각인으로 "이 카드가
             #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
             #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
-            _pr = str(planner_run or "").strip()
             r = PI.intake(planner_text, skeptic_text,
-                          case_id=(f"card-{_pr[:40]}" if _pr.startswith("t_")
-                                   else f"plan-{_dt.now(_tz.utc):%Y%m%d}"),
+                          case_id=f"card-{task_id}",
                           planner_run=planner_run, skeptic_run=skeptic_run,
                           leads=leads,
                           outcomes_for=lambda b: PI.load_past_outcomes(
@@ -1110,6 +1190,34 @@ def _check_worker_job_lifecycle():
     fail = finish_worker_job(jid2, result=None, model_plane=None,
                              error="ImportError: worker_model_gateway", now=now)
     assert fail["status"] == "FAILED" and "ImportError" in fail["error"]
+    assert skeptic_job_error(jid2, "draft-x"), \
+        "failed critic was accepted as a signature"
+
+    jid3 = register_worker_job(["proposal_draft"], now=now,
+                               proposal_draft="draft-x")
+    critic = {
+        "executed": ["competing-explanation-worker"],
+        "degraded": False,
+        "workers": [{
+            "worker_id": "competing-explanation-worker",
+            "status": "COMPLETED",
+            "output": {
+                "summary": "The effect may be a liquidity premium.",
+                "confidence": 0.7,
+                "evidence_refs": [],
+                "escalate": False,
+                "schema_valid": True,
+            },
+        }],
+    }
+    finish_worker_job(jid3, result=critic, model_plane={"provider": "test"},
+                      error=None, now=now)
+    assert skeptic_job_error(jid3, "draft-x") == ""
+    assert "different proposal_draft" in skeptic_job_error(jid3, "draft-y")
+    assert skeptic_job_error("invented-label", "draft-x"), \
+        "unverifiable label was accepted"
+    assert planner_task_id("t_59e3616a-planner-20260815-10a") == "t_59e3616a"
+    assert planner_task_id("planner-20260815") is None
     assert finish_worker_job("없는아이디", result=None, model_plane=None,
                              error=None, now=now) == {}
     print("  Worker 작업 수명주기     OK")
