@@ -40,6 +40,11 @@ from contracts.factory_contracts import (  # noqa: E402
     MethodologyLeadV1,
     Testability,
 )
+from contracts.alpha_ast_surface import (  # noqa: E402
+    MICRO_FIELDS,
+    fields_of as ast_fields_of,
+    parse as parse_ast,
+)
 
 MODULE_VERSION = "research-publish-gate-v1"
 
@@ -102,8 +107,37 @@ def check_leads(proposal: ExperimentProposalV1,
             out.append(
                 f"리드 {lid} 는 testability={lead.testability.value} 다 - "
                 f"규칙으로 서술할 수 없는 주장을 기획안 근거로 쓰지 않는다")
+        if (lead.ast_contract or {}).get("primary_data_plane") != "MICROSTRUCTURE":
+            out.append(
+                f"리드 {lid} 는 미시구조 우선 계약으로 검증되지 않았다 - "
+                "짧은 호가·체결 표본을 일봉 대리변수로 바꾸지 않는다")
         if not lead.refs:
             out.append(f"리드 {lid} 에 출처가 없다")
+    return out
+
+
+def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
+    """Signal discovery is microstructure-first; daily data only executes/scores it."""
+    out = []
+    raw = (proposal.suggested_params or {}).get("signal_expr")
+    if not isinstance(raw, dict):
+        return [
+            "SUGGESTED_PARAMS.signal_expr 가 없다 - 새 전략은 호가·체결 AST로 "
+            "사전등록하고 일봉은 실행가격·벤치마크·레짐 보조로만 쓴다"]
+    try:
+        fields = ast_fields_of(parse_ast(raw))
+    except (TypeError, ValueError) as exc:
+        return [f"signal_expr가 실행 가능한 AST가 아니다: {exc}"]
+    micro = sorted(fields & set(MICRO_FIELDS))
+    if not micro:
+        out.append(
+            "signal_expr에 호가·체결 미시구조 필드가 없다 - close/notional/returns "
+            "단독 신호는 이 공장의 핵심 탐색 대상으로 발행하지 않는다")
+    tables = set(proposal.data_requirements.tables)
+    if "microstructure_features" not in tables:
+        out.append(
+            "DATA_TABLES에 microstructure_features가 없다 - 짧은 표본도 직접 "
+            "검증하며 market_bars는 체결·벤치마크 보조로 함께 둔다")
     return out
 
 
@@ -162,6 +196,11 @@ def evaluate(proposal: ExperimentProposalV1, *,
     for why in check_leads(proposal, leads or {}):
         r.block("LEAD_UNUSABLE", why)
 
+    # ④ 탐색 데이터 우선순위. 짧은 표본은 불확실성으로 판정하며 일봉으로
+    #    대체하지 않는다.
+    for why in check_microstructure_primary(proposal):
+        r.block("MICROSTRUCTURE_PRIMARY_REQUIRED", why)
+
     # ④ 기각 이력 대응 (중복 실험 방지)
     for why in check_prior_art(proposal, past_outcomes or []):
         code = "OVER_BUDGET" if "예산 소진" in why else "DUPLICATE_UNADDRESSED"
@@ -190,6 +229,9 @@ def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
         lead_id=lead_id or lead_id_for(list(refs)), case_id="rc_1",
         scout_lens=ScoutLens.ACADEMIC, source_type=SourceType.PAPER,
         as_known_at=datetime(2026, 8, 10, tzinfo=timezone.utc), refs=refs,
+        ast_contract={"ast_readiness": "AST_READY",
+                      "primary_data_plane": "MICROSTRUCTURE",
+                      "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY"},
         claimed_edge="모멘텀 붕괴는 변동성으로 예측된다", testability=testability)
 
 
@@ -210,7 +252,10 @@ def _mk_proposal(**kw):
         skeptic_sign="worker_run_42",
         edge_type="liquidity_shock_reversal", universe_key="krx_all",
         falsification_tests=("하락장 초과수익이 0 미만이면 기각",),
-        data_requirements=DataRequirement(tables=("market_bars",), min_history_days=750),
+        data_requirements=DataRequirement(
+            tables=("market_bars", "microstructure_features"), min_history_days=58),
+        suggested_params={"signal_expr": {
+            "op": "ts_mean", "field": "order_flow_imbalance", "n": 3}},
         prior_check=PriorCheck(),
     )
     base.update(kw)
@@ -243,6 +288,16 @@ def _check_unusable_lead_is_blocked():
     p, _ = _mk_proposal(lead_ids=(lead.lead_id,))
     r = evaluate(p, leads={lead.lead_id: lead})
     assert not r.ok and any("testability=UNUSABLE" in b for b in r.blockers), r.as_dict()
+
+
+def _check_daily_only_signal_is_blocked():
+    p, leads = _mk_proposal(
+        data_requirements={"tables": ["market_bars"], "min_history_days": 58},
+        suggested_params={"signal_expr": {
+            "op": "ts_mean", "field": "returns", "n": 5}})
+    r = evaluate(p, leads=leads)
+    assert not r.ok
+    assert any("MICROSTRUCTURE_PRIMARY_REQUIRED" in b for b in r.blockers), r.as_dict()
 
 
 def _check_unaddressed_rejection_is_blocked():
@@ -325,6 +380,7 @@ if __name__ == "__main__":
     _check_performance_only_rationale_is_blocked(); print("  성과 서술만 = 거부      OK")
     _check_missing_lead_is_blocked();           print("  끊어진 리드 참조 거부    OK")
     _check_unusable_lead_is_blocked();          print("  UNUSABLE 리드 거부       OK")
+    _check_daily_only_signal_is_blocked();      print("  일봉 단독 신호 거부      OK")
     _check_unaddressed_rejection_is_blocked();  print("  기각 교훈 미대응 거부    OK")
     _check_addressed_rejection_passes();        print("  대응하면 재도전 허용     OK")
     _check_budget_exhaustion_is_blocked();      print("  예산 소진 차단           OK")
@@ -332,4 +388,4 @@ if __name__ == "__main__":
     _check_deterministic();                     print("  결정론                   OK")
     _check_warnings_do_not_block();             print("  경고 != 차단             OK")
     _check_lesson_vocabulary_is_shared();       print("  교훈 어휘 공유           OK")
-    print("발행 게이트 11개 영역 통과.")
+    print("발행 게이트 12개 영역 통과.")

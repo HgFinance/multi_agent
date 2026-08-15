@@ -21,19 +21,23 @@ def _lead(block: dict) -> dict:
         model_version="test-model", prompt_version="ast-ready-v2")
 
 
-def test_ast_ready_persists_validated_expression_in_source_ref():
+def test_ast_ready_persists_validated_microstructure_expression():
     lead = _lead({
-        "TITLE": "Return reversal", "URL": "https://example.test/paper",
-        "MECHANISM": "Lagged returns reverse after liquidity-demand pressure.",
-        "TESTABLE_WITH": "Rank the negative five-day mean of returns.",
-        "READINESS": "AST_READY", "OBSERVABLES": ["returns"],
+        "TITLE": "Order-flow reversal", "URL": "https://example.test/paper",
+        "MECHANISM": "Order flow imbalance reveals urgent liquidity-demand pressure.",
+        "TESTABLE_WITH": "Rank the negative five-day mean of order_flow_imbalance.",
+        "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
         "CANDIDATE_SIGNAL_EXPR": {
-            "op": "neg", "arg": {"op": "ts_mean", "field": "returns", "n": 5}},
+            "op": "neg", "arg": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}},
     })
 
     assert lead["status"] == "COMPLETE"
     assert lead["testability"] == "RULE_EXPRESSIBLE"
     assert lead["ast_contract"]["ast_readiness"] == "AST_READY"
+    assert lead["ast_contract"]["primary_data_plane"] == "MICROSTRUCTURE"
+    assert lead["ast_contract"]["daily_data_role"] == (
+        "EXECUTION_BENCHMARK_REGIME_AUXILIARY")
     assert lead["ast_contract"]["candidate_signal_expr"]["arg"]["n"] == 5
     assert MethodologyLeadV1.model_validate(lead).refs[0].url == lead["refs"][0]["url"]
 
@@ -57,6 +61,39 @@ def test_ast_ready_rejects_semantic_proxy_substitution():
             "READINESS": "AST_READY", "OBSERVABLES": "spread_bps",
             "CANDIDATE_SIGNAL_EXPR": {"op": "ts_mean", "field": "spread_bps", "n": 5},
         })
+
+
+def test_ast_ready_rejects_daily_only_expression_even_for_liquidity_story():
+    with pytest.raises(ValueError, match="MICROSTRUCTURE_PRIMARY_REQUIRED"):
+        _lead({
+            "TITLE": "Return-only liquidity proxy",
+            "URL": "https://example.test/daily-proxy",
+            "MECHANISM": "Liquidity demand creates short-term return reversal.",
+            "TESTABLE_WITH": "Rank negative lagged returns.",
+            "READINESS": "AST_READY", "OBSERVABLES": "returns",
+            "CANDIDATE_SIGNAL_EXPR": {
+                "op": "neg", "arg": {
+                    "op": "ts_mean", "field": "returns", "n": 5}},
+        })
+
+
+def test_ast_ready_allows_daily_fields_only_as_microstructure_auxiliaries():
+    lead = _lead({
+        "TITLE": "Order flow conditioned reversal",
+        "URL": "https://example.test/mixed",
+        "MECHANISM": "Order flow imbalance and returns identify urgent liquidity demand.",
+        "TESTABLE_WITH": "Subtract ranked returns from ranked order_flow_imbalance.",
+        "READINESS": "AST_READY",
+        "OBSERVABLES": ["order_flow_imbalance", "returns"],
+        "CANDIDATE_SIGNAL_EXPR": {"op": "sub", "args": [
+            {"op": "rank", "arg": {
+                "op": "ts_mean", "field": "order_flow_imbalance", "n": 3}},
+            {"op": "rank", "arg": {
+                "op": "ts_mean", "field": "returns", "n": 3}},
+        ]},
+    })
+
+    assert lead["ast_contract"]["primary_data_plane"] == "MICROSTRUCTURE"
 
 
 @pytest.mark.parametrize(
