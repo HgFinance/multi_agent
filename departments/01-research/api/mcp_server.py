@@ -335,6 +335,54 @@ def render_skeptic_reviews(reviews: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
+                            case_id: str, planner_run: str,
+                            skeptic_run: str, known_lead_ids: set[str]) -> int:
+    """Persist causally verified reviews even when STOP blocks publication."""
+    import proposal_intake as PI
+
+    blocks = PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
+    if not blocks or not reviews:
+        return 0
+    by_title = {str(r.get("title") or "").strip(): r for r in reviews}
+    singleton = reviews[0] if len(blocks) == len(reviews) == 1 else None
+    draft_digest = _text_digest(planner_text)
+    written = 0
+    with conn.cursor() as cur:
+        for block in blocks:
+            title = str(block.get("TITLE") or "").strip()
+            review = by_title.get(title) or singleton
+            if not title or review is None:
+                continue
+            lead_ids = sorted(
+                lead_id for lead_id in PI._split(block.get("LEAD_IDS", ""))
+                if lead_id in known_lead_ids
+            )
+            if not lead_ids:
+                continue
+            review_id = "review_" + hashlib.sha256(
+                f"{draft_digest}|{title}".encode("utf-8")
+            ).hexdigest()[:16]
+            cur.execute("""
+                insert into research.proposal_review_outcomes
+                  (review_id, case_id, lead_ids, title, proposal_draft_sha256,
+                   verdict, competing_explanation, competing_codes,
+                   falsification_test, planner_run, skeptic_run)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (proposal_draft_sha256, title) do nothing
+                returning review_id
+            """, (
+                review_id, case_id, lead_ids, title, draft_digest,
+                str(review["verdict"]).upper(),
+                str(review["competing_explanation"]),
+                list(review["competing_codes"]),
+                str(review["falsification_test"]), planner_run, skeptic_run,
+            ))
+            written += int(cur.fetchone() is not None)
+    conn.commit()
+    return written
+
+
 def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
                          portfolio_state: str = "", news: str = "") -> dict:
     """Worker 트리거 payload. 빈 인자는 싣지 않는다.
@@ -1044,6 +1092,11 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
             #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
             canonical_skeptic_text = render_skeptic_reviews(skeptic_reviews)
+            review_records = persist_skeptic_reviews(
+                conn, planner_text, skeptic_reviews,
+                case_id=f"card-{task_id}", planner_run=planner_run,
+                skeptic_run=skeptic_run, known_lead_ids=set(leads),
+            )
             r = PI.intake(planner_text, canonical_skeptic_text,
                           case_id=f"card-{task_id}",
                           planner_run=planner_run, skeptic_run=skeptic_run,
@@ -1082,6 +1135,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     conn.commit()
             return {
                 "ok": bool(pub), "published": new, "already_present": dup,
+                "review_records": review_records,
                 "unknown_lead_ids": missing,
                 "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
                 "gate": [{"proposal_id": p.proposal_id, "passed": g.ok,
@@ -1305,6 +1359,66 @@ def _check_worker_job_lifecycle():
     assert finish_worker_job("없는아이디", result=None, model_plane=None,
                              error=None, now=now) == {}
     print("  Worker 작업 수명주기     OK")
+
+
+def _check_skeptic_review_persistence():
+    """STOP is durable even though it correctly publishes no proposal."""
+    sys.path.insert(0, str(_BASE / "factory"))
+
+    class _Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchone(self):
+            return ("review_test",)
+
+    class _Conn:
+        def __init__(self):
+            self.cur = _Cursor()
+            self.commits = 0
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            self.commits += 1
+
+    conn = _Conn()
+    draft = "TITLE: Event OFI\nLEAD_IDS: lead_event_1"
+    reviews = [{
+        "title": "Event OFI",
+        "competing_explanation": "The signal may only proxy spread costs.",
+        "competing_codes": ["COST_UNACCOUNTED"],
+        "verdict": "STOP",
+        "falsification_test": "Condition on spread and require net markout.",
+    }]
+    assert persist_skeptic_reviews(
+        conn, draft, reviews, case_id="card-t_test",
+        planner_run="t_test-planner", skeptic_run="job_test",
+        known_lead_ids={"lead_event_1"},
+    ) == 1
+    assert conn.commits == 1
+    sql, params = conn.cur.calls[0]
+    assert "proposal_review_outcomes" in sql
+    assert params[2] == ["lead_event_1"] and params[5] == "STOP"
+
+    unknown = _Conn()
+    assert persist_skeptic_reviews(
+        unknown, draft, reviews, case_id="card-t_test",
+        planner_run="t_test-planner", skeptic_run="job_test",
+        known_lead_ids=set(),
+    ) == 0
+    assert not unknown.cur.calls, "unknown lead id was persisted as reviewed"
+    print("  스켑틱 심사 영구기억      OK")
 
 
 def _check_holdings_evidence():
@@ -1544,8 +1658,9 @@ if __name__ == "__main__":
     _check_job_lifecycle()
     _check_worker_payload()
     _check_worker_job_lifecycle()
+    _check_skeptic_review_persistence()
     _check_holdings_evidence()
     _check_health_summary()
     _check_tool_surface()
     _check_liaison_surface()
-    print("리서치 MCP 10개 영역 통과. 서버는 --serve")
+    print("리서치 MCP 11개 영역 통과. 서버는 --serve")
