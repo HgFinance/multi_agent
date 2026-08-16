@@ -190,7 +190,7 @@ purged walk-forward joint model이 함께 포함된다.
   단일 메커니즘 편집, 서로 다른 조각 재결합 중 하나를 명시해야 한다.
 - Hermes/LLM은 숫자를 OOS 결과에 맞추는 optimizer가 아니라 금융수학적 equation
   skeleton과 경제적 prior의 제안자다. 모든 신규 `INTRADAY_EVENT/AST_READY` 리드는
-  `FORMULA_THESIS`에 목표(`MID_MARKOUT_BPS`/`TAKER_NET_PNL`/`PASSIVE_NET_PNL`), 함수형태,
+  `FORMULA_THESIS`에 목표(`MIDPRICE_MARKOUT`/`TAKER_NET_PNL`/`PASSIVE_FILL_ADJUSTED_PNL`), 함수형태,
   예상 부호, 계수 정책, AST 각 field의 경제적 역할, 반증 가능한 식별 예측을 적는다.
   결정론 validator는 target과 semantic output의 일치, AST의 단위·복잡도와 함께
   `STATE_CONDITIONAL`의 `where`, `CROSS_SCALE`의 복수 clock, `DEPTH_DIVERGENCE`의
