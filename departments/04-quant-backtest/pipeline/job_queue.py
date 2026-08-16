@@ -30,10 +30,12 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-MODULE_VERSION = "quant-job-queue-v1"
+MODULE_VERSION = "quant-job-queue-v2"
 
 # 워커가 집어간 뒤 이 시간을 넘기면 죽은 것으로 보고 회수한다.
-# 백테스트가 실측 3~5분이므로 30분이면 정상 실행을 뺏지 않는다.
+# 전 종목 intraday replay는 이보다 길 수 있으므로 experiment_worker가 60초
+# heartbeat로 leased_at을 갱신한다. 이 값은 최대 실행시간이 아니라 **무응답
+# 경계**다. heartbeat 없는 장기 실행은 정상이어도 다른 worker에게 뺏긴다.
 LEASE_TIMEOUT_MIN = 30
 
 # 한 번에 집어가는 작업 수. 기본 1 - 워커가 죽으면 잡고 있던 것이 전부 회수
@@ -262,6 +264,35 @@ def lease(conn, *, worker: str, batch: int = BATCH) -> list[dict]:
                         "attempts": att})
     conn.commit()
     return out
+
+
+def renew_lease(conn, job_id: str, *, worker: str) -> bool:
+    """Refresh a live job lease, fenced by its current worker identity.
+
+    Intraday full-universe replays routinely exceed the 30-minute stale
+    boundary.  Merely setting ``leased_at`` when the job is picked lets a
+    second worker reclaim and cancel a healthy experiment mid-replay.  The
+    owner refreshes the timestamp from a separate connection while the
+    orchestrator is busy.
+
+    The ``leased_by`` predicate is the minimum ownership fence: a late
+    heartbeat from an old worker must not revive a job already re-leased to a
+    new worker.  ``False`` therefore means ownership was lost or the job is
+    already terminal; callers must not claim that they renewed it.
+    """
+    if not worker:
+        raise ValueError("lease heartbeat에는 worker 식별자가 필요하다")
+    with conn.cursor() as cur:
+        cur.execute(
+            """update quant.experiment_jobs
+                  set leased_at=now(), updated_at=now()
+                where job_id=%s::uuid and status='LEASED' and leased_by=%s
+                returning job_id""",
+            (job_id, worker),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return row is not None
 
 
 def finish(conn, job_id: str, *, ok: bool, experiment_id: str | None = None,
@@ -500,6 +531,33 @@ def _check_fresh_lease_is_kept():
     """정상 실행을 뺏지 않는다 - 백테스트는 몇 분 걸린다."""
     d = reclaim_decision(_job(), now=_NOW)
     assert d["action"] == "KEEP", d
+
+
+def _check_heartbeat_is_owner_fenced():
+    """A live owner stays fresh; an old worker cannot revive a stolen lease."""
+    seen = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            seen["sql"], seen["params"] = " ".join(sql.split()), params
+        def fetchone(self):
+            return ("j1",)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+        def commit(self):
+            seen["committed"] = True
+
+    assert renew_lease(_Conn(), "j1", worker="host:123") is True
+    assert "status='LEASED'" in seen["sql"], seen["sql"]
+    assert "leased_by=%s" in seen["sql"], seen["sql"]
+    assert seen["params"] == ("j1", "host:123"), seen["params"]
+    assert seen.get("committed"), "heartbeat가 커밋되지 않으면 다른 reaper가 못 본다"
 
 
 def _check_expired_lease_requeues():
@@ -873,6 +931,7 @@ if __name__ == "__main__":
     _check_repeat_block_stops_reissue();     print("  되풀이 실패 재발행 차단  OK")
     _check_replay_is_deliberate_not_automatic(); print("  고친 뒤 의도적 재생만   OK")
     _check_fresh_lease_is_kept();            print("  정상 실행 유지          OK")
+    _check_heartbeat_is_owner_fenced();      print("  장기 실행 lease heartbeat OK")
     _check_expired_lease_requeues();         print("  만료 -> 재대기          OK")
     _check_exhausted_fails_not_loops();      print("  소진 -> 실패(무한X)     OK")
     _check_missing_lease_time_is_not_expired(); print("  시각 미상 != 만료      OK")
@@ -885,4 +944,4 @@ if __name__ == "__main__":
     print("  취소 != 실패            OK")
     _check_infra_fault_is_deferred_not_failed()
     print("  인프라 고장 != 실패     OK")
-    print("작업 큐 12개 영역 통과.")
+    print("작업 큐 13개 영역 통과.")

@@ -25,12 +25,13 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-WORKER_VERSION = "quant-experiment-worker-v1"
+WORKER_VERSION = "quant-experiment-worker-v2"
 
 # 가설이 RUNNING 에 갇혀 있다고 보는 시간. lease 만료(30분)보다 짧으면 아직
 # 큐에서 도는 작업을 뺏게 되므로 같은 값을 쓴다.
@@ -43,6 +44,12 @@ sys.path.insert(0, str(_HERE.parent.parent / "01-research" / "collectors"))
 
 # 큐가 비었을 때 쉬는 시간. 짧으면 DB 를 계속 두드리고, 길면 주문이 오래 대기한다.
 IDLE_SLEEP_SEC = 15
+
+# Full-universe event replay is measured in tens of minutes.  Keep this far
+# below job_queue.LEASE_TIMEOUT_MIN (30m) so a healthy worker cannot look
+# stale even if one heartbeat is delayed by the pooler.
+LEASE_HEARTBEAT_SEC = max(
+    15, int(os.getenv("QUANT_EXPERIMENT_LEASE_HEARTBEAT_SEC", "60")))
 
 
 def worker_name() -> str:
@@ -267,6 +274,8 @@ def run_one(conn, job: dict) -> dict:
             return {"job_id": jid, "result": "RELEASED", "reason": reason}
         finish(conn, jid, ok=False, reason=reason)
         return {"job_id": jid, "result": "FAILED", "reason": reason}
+
+
     except Exception as e:  # noqa: BLE001
         # 집어간 것은 반드시 끝낸다 - 안 그러면 lease 만료까지 그 가설이 묶인다
         reason = f"{type(e).__name__}: {e}"[:400]
@@ -311,6 +320,62 @@ def run_one(conn, job: dict) -> dict:
         print(f"⚠ 작업 실패 {jid}: {reason}", file=sys.stderr)
         traceback.print_exc()
         return {"job_id": jid, "result": "FAILED", "reason": reason}
+
+
+def run_with_lease_heartbeat(conn, job: dict, *, worker: str,
+                             runner=None, connect=None, heartbeat_fn=None,
+                             interval_sec: float | None = None) -> dict:
+    """Run one blocking experiment while proving that its worker is alive.
+
+    The orchestration connection cannot be shared with a heartbeat thread:
+    it may be inside a transaction or waiting on a long market-data replay.
+    Each heartbeat therefore uses a short, separate metadata connection.
+    Failure to emit one heartbeat is visible but does not abort the experiment;
+    the next interval can recover from a transient pooler disconnect.
+    """
+    runner = runner or run_one
+    connect = connect or _conn
+    if heartbeat_fn is None:
+        from job_queue import renew_lease  # noqa: PLC0415
+
+        heartbeat_fn = renew_lease
+    interval = float(LEASE_HEARTBEAT_SEC if interval_sec is None
+                     else interval_sec)
+    if interval <= 0:
+        raise ValueError("lease heartbeat interval은 0보다 커야 한다")
+
+    stop = threading.Event()
+    jid = str(job["job_id"])
+
+    def _beat() -> None:
+        while not stop.wait(interval):
+            heartbeat_conn = None
+            try:
+                heartbeat_conn = connect()
+                owned = heartbeat_fn(heartbeat_conn, jid, worker=worker)
+                if not owned:
+                    print(f"⚠ lease heartbeat 소유권 상실 {jid[:8]} worker={worker}",
+                          file=sys.stderr, flush=True)
+                    return
+            except Exception as exc:  # noqa: BLE001 - 다음 heartbeat가 복구한다
+                print(f"⚠ lease heartbeat 실패 {jid[:8]}: "
+                      f"{type(exc).__name__}: {exc}",
+                      file=sys.stderr, flush=True)
+            finally:
+                if heartbeat_conn is not None:
+                    try:
+                        heartbeat_conn.close()
+                    except Exception:  # noqa: BLE001, S110 - short-lived conn
+                        pass
+
+    thread = threading.Thread(
+        target=_beat, name=f"lease-heartbeat-{jid[:8]}", daemon=True)
+    thread.start()
+    try:
+        return runner(conn, job)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 # ── 가설 스톨 회수 ───────────────────────────────────────────────────────────
@@ -569,7 +634,8 @@ def tick(conn, *, worker: str) -> dict:
     # 집는 순간부터 반납 대상이다 - 실행 중에 신호가 와도 놓아줄 수 있어야 한다
     _HELD["jobs"] = [str(j["job_id"]) for j in jobs]
     try:
-        results = [run_one(conn, j) for j in jobs]
+        results = [run_with_lease_heartbeat(conn, j, worker=worker)
+                   for j in jobs]
     finally:
         _HELD["jobs"] = []
     return {"hypotheses": hyp, "terminal_zombies": terminal_zombies,
@@ -675,6 +741,33 @@ def _check_worker_name_is_traceable():
     """여럿 띄웠을 때 누가 집었는지 모르면 회수를 못 한다."""
     n = worker_name()
     assert ":" in n and n.split(":")[-1].isdigit(), n
+
+
+def _check_long_job_renews_lease():
+    """A blocking runner emits heartbeats over a separate connection."""
+    beat_seen = threading.Event()
+    calls, closed = [], []
+
+    class _HeartbeatConn:
+        def close(self):
+            closed.append(True)
+
+    def _renew(conn, jid, *, worker):
+        calls.append((conn, jid, worker))
+        beat_seen.set()
+        return True
+
+    def _runner(conn, job):
+        assert beat_seen.wait(0.5), "긴 실험 중 lease heartbeat가 한 번도 안 왔다"
+        return {"job_id": job["job_id"], "result": "DONE"}
+
+    result = run_with_lease_heartbeat(
+        _FakeConn(), {"job_id": "job-heartbeat", "hypothesis_id": "h1"},
+        worker="host:123", runner=_runner, connect=_HeartbeatConn,
+        heartbeat_fn=_renew, interval_sec=0.01)
+    assert result["result"] == "DONE", result
+    assert calls and calls[0][1:] == ("job-heartbeat", "host:123"), calls
+    assert closed, "heartbeat 전용 연결을 닫지 않으면 풀러 연결이 누적된다"
 
 
 def _check_failure_always_finishes(monkey=None):
@@ -1489,6 +1582,7 @@ if __name__ == "__main__":
 
     print(f"{WORKER_VERSION} 자체 점검 (DB 없음)")
     _check_worker_name_is_traceable();      print("  워커 식별 가능          OK")
+    _check_long_job_renews_lease();         print("  장기 실험 lease 갱신    OK")
     _check_failure_always_finishes();       print("  예외에도 반드시 종결     OK")
     _check_ran_but_no_experiment_is_failure(); print("  결과 없음 = 실패        OK")
     _check_running_job_is_not_stolen();     print("  도는 작업은 안 뺏는다    OK")
@@ -1521,4 +1615,4 @@ if __name__ == "__main__":
     print("  분류는 코드로 본다        OK")
     _check_broken_transaction_is_rolled_back_before_deferring()
     print("  유예 전에 트랜잭션 물림   OK")
-    print("실험 워커 20개 영역 통과. 상주 실행은 --serve")
+    print("실험 워커 21개 영역 통과. 상주 실행은 --serve")
