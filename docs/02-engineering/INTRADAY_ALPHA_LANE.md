@@ -144,8 +144,10 @@ purged walk-forward joint model이 함께 포함된다.
 - Gate 0는 이야기의 event/context와 수식의 실제 관측 필드를 대조한다. 예를 들어
   `ORDER_FLOW` 가설을 microprice-only 수식으로 제출하거나 `TIGHT_SPREAD` 조건을
   spread 필드 없이 구현하면 실험 예산을 쓰기 전에 거부된다.
-- 숫자 horizon·threshold 변경은 새 idea family가 아니다. semantic fingerprint가
-  trial family를 정하고 AST shape/fingerprint가 정확·근접 중복을 구분한다.
+- 숫자 horizon·threshold 변경은 새 idea family가 아니다. semantic fingerprint와
+  AST shape fingerprint가 함께 trial family를 정한다. 따라서 같은 실행 목표라도
+  경제적으로 다른 수식 구조는 남의 시도 예산을 물려받지 않고, 같은 구조의 창·상수
+  튜닝은 한 family로 합산된다. exact fingerprint는 과거의 동일 수식 재사용을 막는다.
 - `intraday_experiment_runner.py`는 평가 직전 최대 5개 보정 세션에 인과적으로 유효한
   quote와 trade가 함께 존재한 `krx_all` 전 종목을 고정하고 그 다음 세션들만 평가한다.
   수익률이나 quote-event 수로 top-N을 고르지 않는다. 종목은 메모리를 제한하는 내부

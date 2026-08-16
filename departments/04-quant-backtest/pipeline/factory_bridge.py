@@ -137,12 +137,16 @@ def _hyp_view(proposal: dict) -> dict:
             semantic_fingerprint = semantic_fp(semantic_plan)
         except (ImportError, ValueError):
             pass
+    params = proposal.get("suggested_params") or {}
     return hypothesis_view(edge_type=proposal.get("edge_type"),
                            universe_key=proposal.get("universe_key"),
                            label=proposal.get("label"),
                            baseline=proposal.get("baseline"),
                            research_lane=proposal.get("research_lane"),
-                           semantic_fingerprint=semantic_fingerprint)
+                           semantic_fingerprint=semantic_fingerprint,
+                           signal_expr=params.get("signal_expr"),
+                           intraday_signal_expr=params.get(
+                               "intraday_signal_expr"))
 
 
 def _horizon_of(proposal: dict) -> int:
@@ -824,14 +828,45 @@ def fetch_published_proposals(conn, limit: int = 20) -> list[dict]:
 
 
 _SQL_FAMILY_TRIALS = "select count(*) from quant.experiments where trial_family_id = %s"
+_SQL_FAMILY_OR_EXACT_TRIALS = """
+select count(*)
+  from quant.experiments
+ where trial_family_id = %s
+    or config->'signal_expr' = %s::jsonb
+    or config->'intraday_signal_expr' = %s::jsonb
+"""
 
 
-def count_family_trials(conn, trial_family_id: str) -> int:
-    """이 Family 에서 **실제로 실행된** 실험 수. 예산과 DSR 이 같은 값을 본다."""
-    if not trial_family_id:
+def _normalized_formula(signal_expr):
+    """Normalize either daily or intraday AST without repairing invalid input."""
+    if signal_expr is None:
+        return None
+    for module_name in ("alpha_ast", "intraday_alpha_ast"):
+        try:
+            module = __import__(module_name, fromlist=["parse"])
+            return module.parse(signal_expr)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def count_family_trials(conn, trial_family_id: str, signal_expr=None) -> int:
+    """Count executable trials by shape-family plus exact historical formula.
+
+    The exact-formula arm carries pre-upgrade intraday trials into the new
+    formula-shaped family without importing unrelated formulas that happened to
+    share a broad edge label and semantic clock.
+    """
+    normalized = _normalized_formula(signal_expr)
+    if not trial_family_id and normalized is None:
         return 0
     with conn.cursor() as cur:
-        cur.execute(_SQL_FAMILY_TRIALS, (trial_family_id,))
+        if normalized is None:
+            cur.execute(_SQL_FAMILY_TRIALS, (trial_family_id,))
+        else:
+            encoded = json.dumps(normalized, sort_keys=True)
+            cur.execute(_SQL_FAMILY_OR_EXACT_TRIALS,
+                        (trial_family_id, encoded, encoded))
         return int(cur.fetchone()[0])
 
 
@@ -1075,12 +1110,8 @@ def fetch_family_outcomes(conn, trial_family_id: str) -> list[dict]:
 
 def fetch_exact_ast_outcomes(conn, signal_expr) -> list[dict]:
     """Negative/positive history follows executable formula identity, not its name."""
-    if signal_expr is None:
-        return []
-    try:
-        from alpha_ast import parse as _parse  # noqa: PLC0415
-        normalized = _parse(signal_expr)
-    except Exception:  # gate0 owns the human-readable invalid-AST rejection
+    normalized = _normalized_formula(signal_expr)
+    if normalized is None:  # gate0 owns the human-readable invalid-AST rejection
         return []
     with conn.cursor() as cur:
         encoded = json.dumps(normalized, sort_keys=True)
@@ -1224,12 +1255,14 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
         # 다른 수를 넘겨 같은 기획안이 다른 판정을 받는다.
         probe = gate0(p, trials_used=0, past_outcomes=[])
         fam = probe.trial_family_id
+        signal_expr = ((p.get("suggested_params") or {}).get("signal_expr") or
+                       (p.get("suggested_params") or {}).get(
+                           "intraday_signal_expr"))
         family_history = fetch_family_outcomes(conn, fam)
-        exact_history = fetch_exact_ast_outcomes(
-            conn, ((p.get("suggested_params") or {}).get("signal_expr") or
-                   (p.get("suggested_params") or {}).get("intraday_signal_expr")))
+        exact_history = fetch_exact_ast_outcomes(conn, signal_expr)
         available_days = _available_days_for_proposal(conn, p)
-        gate = gate0(p, trials_used=count_family_trials(conn, fam),
+        gate = gate0(p, trials_used=count_family_trials(
+                          conn, fam, signal_expr),
                       past_outcomes=_merge_outcome_evidence(
                           family_history, exact_history),
                       available_days=available_days)
@@ -1950,11 +1983,16 @@ def intake_published(conn, *, limit: int = 20, available_days: int = 0) -> list[
     out: list[dict] = []
     for prop in fetch_published_proposals(conn, limit=limit):
         fam = family_id(_hyp_view(prop))
+        signal_expr = ((prop.get("suggested_params") or {}).get("signal_expr") or
+                       (prop.get("suggested_params") or {}).get(
+                           "intraday_signal_expr"))
         # ▶ 표본 일수를 접수에 넘긴다. 없으면 설계 검사가 조용히 생략되므로
         #   못 잰 경우 0 을 넘겨 검사를 건너뛰되, 잰 경우엔 반드시 쓴다.
         gate = gate0(prop,
-                     trials_used=count_family_trials(conn, fam),
-                     past_outcomes=fetch_family_outcomes(conn, fam),
+                     trials_used=count_family_trials(conn, fam, signal_expr),
+                     past_outcomes=_merge_outcome_evidence(
+                         fetch_family_outcomes(conn, fam),
+                         fetch_exact_ast_outcomes(conn, signal_expr)),
                      available_days=available_days)
         rec = {"proposal_id": prop.get("proposal_id"), "gate": gate,
                "hypothesis_id": None}

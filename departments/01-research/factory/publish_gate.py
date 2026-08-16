@@ -180,7 +180,19 @@ def check_prior_art(proposal: ExperimentProposalV1,
     기획안은 회사가 이미 산 실험을 다시 사자는 제안이다.
     """
     out = []
-    rejected = [o for o in past_outcomes
+    has_formula = bool(
+        (proposal.suggested_params or {}).get("signal_expr") is not None
+        or (proposal.suggested_params or {}).get("intraday_signal_expr") is not None
+    )
+    # A broad EDGE_TYPE/universe label is a prior, not formula identity.  Treating
+    # every formula under e.g. order_flow_imbalance as one hard budget made a
+    # never-tested cross-scale AST inherit five unrelated trials and die before
+    # Quant could assign its formula-shaped trial family.  Exact AST history stays
+    # a hard blocker; broad-family history is surfaced as a warning in evaluate().
+    hard_outcomes = ([o for o in past_outcomes
+                      if str(o.get("match_scope") or "") == "AST_EXACT"]
+                     if has_formula else list(past_outcomes))
+    rejected = [o for o in hard_outcomes
                 if str(o.get("decision")) in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
     if not rejected:
         return out
@@ -197,7 +209,8 @@ def check_prior_art(proposal: ExperimentProposalV1,
             f"대응 없는 재도전은 회사가 이미 산 실험을 다시 사는 것이다")
 
     # 예산은 Gate 0 이 최종 판정하지만, 여기서 미리 알려 기획 비용을 아낀다
-    used = len([o for o in past_outcomes if str(o.get("decision")) != "BLOCKED"])
+    used = len([o for o in hard_outcomes
+                if str(o.get("decision")) != "BLOCKED"])
     if used >= proposal.trial_budget:
         out.append(
             f"시도 예산 소진: 이 계열에서 이미 {used}회 시도했다"
@@ -235,6 +248,19 @@ def evaluate(proposal: ExperimentProposalV1, *,
     for why in check_prior_art(proposal, past_outcomes or []):
         code = "OVER_BUDGET" if "예산 소진" in why else "DUPLICATE_UNADDRESSED"
         r.block(code, why)
+
+    if ((proposal.suggested_params or {}).get("signal_expr") is not None
+            or (proposal.suggested_params or {}).get(
+                "intraday_signal_expr") is not None):
+        broad_negative = [o for o in (past_outcomes or [])
+                          if str(o.get("match_scope") or "") == "EDGE_UNIVERSE"
+                          and str(o.get("decision") or "") in
+                          ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
+        broad_lessons = sorted({str(code) for outcome in broad_negative
+                                for code in (outcome.get("lesson_codes") or [])})
+        if broad_lessons:
+            r.warn("같은 edge/universe의 부정 선행 결과(새 수식의 시도 예산에는 "
+                   f"합산하지 않음): {broad_lessons}")
 
     # ⑤ 경고: 막지는 않지만 퀀트가 알아야 하는 것
     if not proposal.source_reported_effect:
@@ -374,7 +400,8 @@ def _check_unaddressed_rejection_is_blocked():
     """**회사가 이미 산 실험을 다시 사지 않는다.**"""
     p, leads = _mk_proposal()
     past = [{"outcome_id": "out_1", "decision": "REJECT",
-             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"]}]
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok
     assert any("DUPLICATE_UNADDRESSED" in b for b in r.blockers), r.as_dict()
@@ -389,7 +416,8 @@ def _check_addressed_rejection_passes():
         lessons_addressed={"BEAR_FRAGILE": "하락장 표본을 2창에서 5창으로 늘린다",
                            "OVERFIT_PBO": "변형 수를 줄이고 사전에 파라미터를 고정한다"}))
     past = [{"outcome_id": "out_1", "decision": "REJECT",
-             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"]}]
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert r.ok, r.as_dict()
 
@@ -399,10 +427,23 @@ def _check_budget_exhaustion_is_blocked():
     p, leads = _mk_proposal(trial_budget=2, prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=2, past_outcomes=("o1", "o2"),
         lessons_addressed={"OVERFIT_PBO": "파라미터 고정"}))
-    past = [{"outcome_id": "o1", "decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]},
-            {"outcome_id": "o2", "decision": "REVISE", "lesson_codes": []}]
+    past = [{"outcome_id": "o1", "decision": "REJECT",
+             "lesson_codes": ["OVERFIT_PBO"], "match_scope": "AST_EXACT"},
+            {"outcome_id": "o2", "decision": "REVISE", "lesson_codes": [],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok and any("OVER_BUDGET" in b for b in r.blockers), r.as_dict()
+
+
+def _check_broad_family_does_not_spend_new_formula_budget():
+    """A new AST gets its own trial budget even under a familiar edge label."""
+    p, leads = _mk_proposal(trial_budget=1)
+    broad = [{"decision": "GATE_HOLD", "lesson_codes": ["BASELINE_NOT_BEATEN"],
+              "match_scope": "EDGE_UNIVERSE"} for _ in range(5)]
+    r = evaluate(p, leads=leads, past_outcomes=broad)
+    assert r.ok, r.as_dict()
+    assert any("새 수식의 시도 예산에는 합산하지 않음" in warning
+               for warning in r.warnings), r.as_dict()
 
 
 def _check_success_history_does_not_block():
@@ -434,7 +475,8 @@ def _check_lesson_vocabulary_is_shared():
     """게이트가 대조하는 교훈 코드는 계약의 통제 어휘와 같은 집합이어야 한다."""
     p, leads = _mk_proposal()
     past = [{"outcome_id": "o1", "decision": "REJECT",
-             "lesson_codes": [c.value for c in LessonCode]}]
+             "lesson_codes": [c.value for c in LessonCode],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok
     for c in LessonCode:
@@ -456,8 +498,9 @@ if __name__ == "__main__":
     _check_unaddressed_rejection_is_blocked();  print("  기각 교훈 미대응 거부    OK")
     _check_addressed_rejection_passes();        print("  대응하면 재도전 허용     OK")
     _check_budget_exhaustion_is_blocked();      print("  예산 소진 차단           OK")
+    _check_broad_family_does_not_spend_new_formula_budget(); print("  새 수식 독립 예산        OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_deterministic();                     print("  결정론                   OK")
     _check_warnings_do_not_block();             print("  경고 != 차단             OK")
     _check_lesson_vocabulary_is_shared();       print("  교훈 어휘 공유           OK")
-    print("발행 게이트 12개 영역 통과.")
+    print("발행 게이트 13개 영역 통과.")

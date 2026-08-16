@@ -161,12 +161,25 @@ def family_key(hyp: dict) -> dict:
         key["research_lane"] = "INTRADAY_EVENT"
         key["semantic_fingerprint"] = str(
             edge.get("semantic_fingerprint") or "").strip().lower()
+        expr = edge.get("intraday_signal_expr")
+        if expr is not None:
+            # Different executable equation structures are different economic
+            # trials even when they share an execution target/clock.  Constants
+            # and windows remain tuning dimensions, so identity uses the shape
+            # fingerprint rather than the exact formula fingerprint.
+            from intraday_alpha_ast import shape_fingerprint
+            key["formula_shape_fingerprint"] = shape_fingerprint(expr)
+    elif edge.get("signal_expr") is not None:
+        from alpha_ast_surface import shape_fingerprint
+        key["formula_shape_fingerprint"] = shape_fingerprint(
+            edge["signal_expr"])
     return key
 
 
 def hypothesis_view(*, edge_type=None, universe_key=None, universe=None,
                     label=None, baseline=None, research_lane=None,
-                    semantic_fingerprint=None) -> dict:
+                    semantic_fingerprint=None, signal_expr=None,
+                    intraday_signal_expr=None) -> dict:
     """Family 계산 입력의 **정본**. 접수(Gate 0)와 실행면이 이 함수를 함께 쓴다.
 
     양쪽이 각자 dict 를 만들면 기본값이 갈리고, 갈리면 같은 컨셉이 두 개의
@@ -177,7 +190,10 @@ def hypothesis_view(*, edge_type=None, universe_key=None, universe=None,
             "universe": universe}
     if str(research_lane or "").upper() == "INTRADAY_EVENT":
         edge.update({"research_lane": "INTRADAY_EVENT",
-                     "semantic_fingerprint": semantic_fingerprint})
+                     "semantic_fingerprint": semantic_fingerprint,
+                     "intraday_signal_expr": intraday_signal_expr})
+    elif signal_expr is not None:
+        edge["signal_expr"] = signal_expr
     return {
         "expected_edge": edge,
         "label": label or DEFAULT_LABEL,
@@ -200,7 +216,9 @@ def family_of_hypothesis_row(row: dict) -> str:
         label=row.get("label") or edge.get("label"),
         baseline=row.get("baseline"),
         research_lane=edge.get("research_lane"),
-        semantic_fingerprint=edge.get("semantic_fingerprint")))
+        semantic_fingerprint=edge.get("semantic_fingerprint"),
+        signal_expr=edge.get("signal_expr"),
+        intraday_signal_expr=edge.get("intraday_signal_expr")))
 
 
 def family_id(hyp: dict) -> str:
