@@ -945,6 +945,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "AST_READY 수식은 반드시 호가·체결 미시구조 필드를 하나 이상 "
                     "사용해야 한다. 짧은 미시구조 표본을 returns/close 일봉 대리식으로 "
                     "바꾸지 말고, 일봉은 실행가격·벤치마크·레짐 보조로만 사용한다. "
+                    "INTRADAY_EVENT 노드는 field={'op':'field','field':'필드명'}이고 "
+                    "temporal={'op':'rolling_mean','arg':field,'seconds':300}이다. "
+                    "'name' 키는 금지다. OBSERVABLES는 AST가 실제 쓴 필드와 정확히 "
+                    "같아야 하며, 상태 조건을 SEMANTIC_PLAN에 선언했으면 AST의 where로 "
+                    "구현한다. DERIVATION_TRANSFORMS의 대괄호를 쓰려면 문자열을 인용한 "
+                    "유효 JSON이어야 한다. "
                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
     def factory_submit_leads(text: str, lens: str = "ACADEMIC",
                              source_type: str = "PAPER",
