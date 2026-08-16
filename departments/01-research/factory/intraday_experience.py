@@ -124,7 +124,11 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
     No backtest result is invented for an unevaluated lead. Quality here means
     research-contract quality; empirical quality belongs to the causal backtest.
     """
-    tested_fps = {row["ast_fingerprint"] for row in tested}
+    # Screening evidence informs novelty and breeding, but is deliberately not
+    # independent confirmation.  Keep the corresponding lead eligible for a
+    # later primary preregistration instead of falsely marking it recycled.
+    tested_fps = {row["ast_fingerprint"] for row in tested
+                  if row.get("evidence_tier") != "SCREENING_ONLY"}
     references = [(row["expr"], row["plan"]) for row in tested]
     candidates, recycled = [], []
     for lead in leads:
@@ -276,11 +280,13 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             continue
         fields, operators, clocks = set(), set(), set()
         _walk(expr, fields, operators, clocks)
+        evidence_tier = str(row.get("evidence_tier") or "PRIMARY").upper()
         item = {**row, "plan": plan, "expr": formula.parse(expr),
                 "ast_fingerprint": formula.fingerprint(expr),
                 "semantic_fingerprint": fingerprint(plan),
                 "shape_fingerprint": _shape_fp(expr), "fields": sorted(fields),
-                "operators": sorted(operators), "clocks": sorted(clocks)}
+                "operators": sorted(operators), "clocks": sorted(clocks),
+                "evidence_tier": evidence_tier}
         parsed.append(item)
         used_events.add(plan["event"])
         used_contexts.update(plan["context"])
@@ -298,7 +304,13 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         groups[(row["semantic_fingerprint"], row["shape_fingerprint"])].append(row)
     history = []
     for (semantic_fp, shape_fp), group in groups.items():
-        best = max(group, key=lambda row: (
+        independent = [row for row in group
+                       if row["evidence_tier"] != "SCREENING_ONLY"]
+        # Once an exact formula has an independent primary run, screening
+        # evidence must never replace its promotion authority merely because the
+        # selected sidecar happened to print a larger number.
+        best_pool = independent or group
+        best = max(best_pool, key=lambda row: (
             _number(row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
             if _number(row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
             is not None else float("-inf")))
@@ -313,6 +325,8 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "niche": _niche(best["plan"]),
             "operators": best["operators"], "clocks_seconds": best["clocks"],
             "trials": len(group),
+            "evidence_tiers": sorted({row["evidence_tier"] for row in group}),
+            "best_evidence_tier": best["evidence_tier"],
             "decisions": sorted({str(row.get("decision") or "UNDECIDED") for row in group}),
             "lesson_codes": sorted({str(code) for row in group
                                     for code in (row.get("lesson_codes") or [])}),
@@ -344,7 +358,13 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     for niche, group in by_tested_niche.items():
         parent = max(group, key=lambda row: row["best_net_bps"])
         parent = dict(parent)
-        if (set(parent["decisions"]) & {"SUBMIT_TO_QA", "PROMOTED"}
+        if (parent["best_evidence_tier"] == "SCREENING_ONLY"
+                and parent["best_net_bps"] > 0):
+            parent["breeding_role"] = "SCREEN_SURVIVOR"
+            parent["allowed_child_operators"] = [
+                "STATE_CONDITION", "MECHANISM_INTERACTION",
+                "CROSS_SCALE_DISAGREEMENT", "EXECUTION_AWARE"]
+        elif (set(parent["decisions"]) & {"SUBMIT_TO_QA", "PROMOTED"}
                 and parent["best_net_bps"] > 0):
             parent["breeding_role"] = "NET_SURVIVOR"
             parent["allowed_child_operators"] = [
@@ -361,7 +381,8 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         breeding_rows.append(parent)
     breeding = tuple(sorted(
         breeding_rows,
-        key=lambda row: (row["breeding_role"] != "NET_SURVIVOR",
+        key=lambda row: ({"NET_SURVIVOR": 0, "SCREEN_SURVIVOR": 1}.get(
+                             row["breeding_role"], 2),
                          -row["best_net_bps"], row["niche"])))
     return IntradayMemory(
         experiments=len(parsed), semantic_families=len({row["semantic_fingerprint"]
@@ -399,6 +420,7 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"{row['event']} {row['direction']} context={row['context']} "
             f"quality={row['qualities']} fields={row['fields']} clocks={row['clocks_seconds']} "
             f"trials={row['trials']} decisions={row['decisions']} "
+            f"evidence={row['evidence_tiers']} "
             f"gross={row['best_gross_bps']}bps "
             f"implementation_drag={row['best_implementation_drag_bps']}bps "
             f"net={row['best_net_bps']}bps fill={row['best_fill_rate']} "
@@ -433,7 +455,8 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
                 f"niche={'/'.join(row['niche'])}")
     lines.append(
         f"  [breeding parents] measured niche elites={len(memory.breeding_parents)}; "
-        "only NET_SURVIVOR is alpha-like, other roles are controlled stepping stones")
+        "only NET_SURVIVOR is alpha-like; SCREEN_SURVIVOR still needs an "
+        "independent primary run, and other roles are controlled stepping stones")
     for row in memory.breeding_parents[:5]:
         lines.append(
             f"    parent={row['ast_fingerprint']} role={row['breeding_role']} "

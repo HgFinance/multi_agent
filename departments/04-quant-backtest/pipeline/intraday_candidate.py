@@ -23,7 +23,7 @@ from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_caus
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v4"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v5"
 KST = ZoneInfo("Asia/Seoul")
 ENTRY_POLICIES = frozenset({
     "POSITIVE_SCORE",
@@ -280,11 +280,22 @@ class CandidateAccumulator:
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
         """Consume one instrument/session slice and immediately release its rows."""
         instrument_id = str(instrument_id)
-        self.requested_instruments.add(instrument_id)
         ordered = sorted(samples, key=lambda row: row.decision_time)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match sample instrument")
         audit = audit_causality(ordered, self.spec)
+        self._add_prepared(instrument_id, ordered, audit)
+
+    def _add_prepared(self, instrument_id: str,
+                      ordered: list[IntradaySample], audit: dict) -> None:
+        """Consume an already sorted/audited slice shared by a population.
+
+        This is deliberately private: callers that have not established the
+        common lane specification must use :meth:`add`.  The population wrapper
+        below performs the validation once, then fans the immutable samples out
+        to independent sufficient-statistic accumulators.
+        """
+        self.requested_instruments.add(instrument_id)
         self.causality.append({"instrument_id": instrument_id, **audit})
         if ordered:
             self.sampled_instruments.add(instrument_id)
@@ -459,6 +470,37 @@ class CandidateAccumulator:
             "not_a_promotion": (
                 "SUBMIT_TO_QA is a review request; Risk, QA, and CEO retain promotion authority"),
         }
+
+
+class CandidatePopulationAccumulator:
+    """Evaluate several preregistered ASTs from one causal sample replay.
+
+    Every candidate retains independent observations, capital normalization,
+    costs and statistical gates.  Only the expensive raw-event-to-sample pass,
+    ordering and causality audit are shared.
+    """
+
+    def __init__(self, candidates: dict[str, CandidateAccumulator]):
+        if not candidates:
+            raise ValueError("candidate population must not be empty")
+        self.candidates = dict(candidates)
+        specs = {candidate.spec for candidate in self.candidates.values()}
+        if len(specs) != 1:
+            raise ValueError("candidate population must share one lane specification")
+        self.spec = next(iter(specs))
+
+    def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
+        instrument_id = str(instrument_id)
+        ordered = sorted(samples, key=lambda row: row.decision_time)
+        if any(row.instrument_id != instrument_id for row in ordered):
+            raise ValueError("instrument key does not match sample instrument")
+        audit = audit_causality(ordered, self.spec)
+        for candidate in self.candidates.values():
+            candidate._add_prepared(instrument_id, ordered, audit)
+
+    def finish(self) -> dict[str, dict]:
+        return {key: candidate.finish()
+                for key, candidate in self.candidates.items()}
 
 
 def evaluate_candidate_stream(instrument_samples, *, expr: dict,

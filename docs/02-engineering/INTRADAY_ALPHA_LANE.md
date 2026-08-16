@@ -198,6 +198,44 @@ purged walk-forward joint model이 함께 포함된다.
   fitting은 허용하지 않으며, 12개 population·ablation·실패 기억을 통한 구조 탐색만 한다.
   quality-diversity 점수는 어떤 후보를 먼저 시험할지 정할 뿐 성과나 승격 판정이 아니다.
 
+### 공유 재생 진화 평가 v5
+
+수식 생성량보다 원시 호가·체결 재생 시간이 훨씬 큰 현재 병목에서는 12개 초안을 각각
+독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v2 리드를 한
+Proposal에 2~8개까지 연결하고, 그중 하나만 주 수식으로 사전등록한다. 접수기는 나머지
+정확한 lead AST와 명시된 lineage parent를 최대 7개의 `SCREENING_ONLY` sidecar로
+자동 부착한다. 에이전트가 sidecar 본문을 직접 쓰거나 출처·fingerprint를 바꾸면
+`SCREENING_POPULATION_INVALID`로 거부한다.
+
+런타임은 모든 후보가 요구하는 clock과 horizon의 합집합으로 lane spec을 한 번 만들고,
+passive 후보가 하나라도 있으면 passive label까지 포함한 상위집합을 한 번 생성한다.
+각 instrument/session 표본은 한 번 정렬·인과성 감사된 뒤 후보별 독립 누산기로 전달된다.
+후보마다 기회, 비용 후 net, gross markout, fill, coverage, session bootstrap, DSR은 따로
+계산되며 원장 metric에는 `screening_candidate=<ast_fingerprint>` 차원을 붙인다. 주 결과를
+읽는 Orchestrator·복구기·실험 카드는 이 차원을 명시적으로 제외한다.
+
+선별 후보는 net/gross/coverage/주 수식 대비 구조 novelty/복잡도의 비지배 순위를 받지만
+결정은 항상 `SCREENING_ONLY`다. 양의 net 또는 Pareto 1위여도 production이나 QA로
+승격할 수 없고, 다음 주기의 독립 주 실험 후보(`SCREEN_SURVIVOR`)가 될 뿐이다. 반대로
+그 측정치는 실패·성공 기억과 다음 세대 번식에는 사용한다. sidecar 노출은 공짜 탐색이
+아니므로 현재 DSR trial 수와 이후 exact-formula trial 조회에 포함한다. sidecar의 source
+lead id는 소비하지 않아 독립 확인 경로를 남기되, 반복 선별도 장부에서 누적된다.
+
+이 구조는 희소한 최종 보상 하나보다 구조·신규성 피드백을 쓰는
+[AlphaSAGE](https://arxiv.org/abs/2509.25055), 성공·실패를 다음 생성에 증류하는
+[FactorMiner](https://arxiv.org/abs/2602.14670), 항별 영향도를 탐색 신호로 쓰는
+[IGSR](https://arxiv.org/abs/2605.29184), 다양성 archive를 보존하는
+[MAP-Elites](https://www.frontiersin.org/journals/robotics-and-ai/articles/10.3389/frobt.2016.00040/full),
+저비용 단계에서 후보를 넓게 비교하고 생존자에 자원을 집중하는
+[Hyperband](https://www.jmlr.org/papers/v18/16-558.html)의 공통 원칙을 현재 PIT·비용·승격
+경계 안에 제한적으로 옮긴 것이다. 수식을 잘 찍는 것만으로 충분하지 않다는 지역별
+실증 경고도 반영했다. 중국의
+[칭화대 GP 팩터 연구](https://newetds.lib.tsinghua.edu.cn/qh/paper/summary?dbCode=ETDQH&sysId=294427)는
+감쇠·과적합·거래 규칙과 비용을, 일본의
+[호가장 GP 일중 전략 연구](https://www.jstage.jst.go.jp/article/iscie1988/21/12/21_12_400/_article/-char/ja/)는
+호가 정보와 거래 규칙의 공동 평가를 다룬다. 이 문헌의 보고 수익을 우리 성과로
+간주하지 않고 생성기와 검증기의 결합 방식만 참고한다.
+
 운영 전제는 `20260816150000_intraday_alpha_factory.sql` 적용과
 `krx-intraday-events/v1` manifest 존재다. 원천에 `received_at`이 없으면 해당 행은
 증거에서 제외한다. 가용 세션이 60개 미만이어도 10세션 이상이면 측정은 수행하되,

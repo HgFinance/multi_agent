@@ -12,14 +12,19 @@ import hashlib
 import json
 from zoneinfo import ZoneInfo
 
-from intraday_alpha_ast import parse as parse_expr, unit_of
-from intraday_candidate import CandidateAccumulator, EVALUATOR_VERSION
+from intraday_alpha_ast import (clocks_of, count_nodes, fingerprint,
+                                parse as parse_expr, structural_similarity,
+                                unit_of)
+from alpha_semantics import validate as validate_semantic_plan
+from intraday_candidate import (CandidateAccumulator,
+                                CandidatePopulationAccumulator,
+                                EVALUATOR_VERSION)
 from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v4"
+RUNNER_VERSION = "intraday-experiment-runner-v5"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -115,9 +120,10 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     if str(edge.get("universe_key") or "krx_all").lower() != "krx_all":
         raise ValueError("intraday runner currently requires universe_key=krx_all")
     expression = parse_expr(edge.get("intraday_signal_expr"))
-    output = str((edge.get("semantic_plan") or {}).get("output") or "").upper()
+    semantic_plan = validate_semantic_plan(edge.get("semantic_plan") or {})
+    output = str(semantic_plan.get("output") or "").upper()
     entry_policy = str(edge.get("entry_policy") or "").upper()
-    if output in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}:
+    if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
         if unit_of(expression) != "BPS":
             raise ValueError(
                 "net-PnL intraday formulas must predict markout in BPS before "
@@ -129,24 +135,84 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     elif not entry_policy:
         entry_policy = "POSITIVE_SCORE"
     horizon = _bounded_int(edge, "horizon_seconds", 5, 1, 3600)
+    if int(semantic_plan["horizon_seconds"]) != horizon:
+        raise ValueError("semantic_plan horizon must match horizon_seconds")
     execution = str(edge.get("execution") or "TAKER").upper()
     if execution not in {"TAKER", "PASSIVE_FIFO_LOWER_BOUND"}:
         raise ValueError(f"unsupported execution={execution!r}")
+    if str(semantic_plan["execution"]).upper() != execution:
+        raise ValueError("semantic_plan execution must match execution")
     position_mode = str(edge.get("position_mode") or "LONG_ONLY").upper()
     if position_mode != "LONG_ONLY":
         raise ValueError(
             "position_mode must be LONG_ONLY until point-in-time borrow availability, "
             "borrow fees, and short-sale execution constraints are available")
+    sample_interval = _bounded_int(
+        edge, "sample_interval_seconds", 5, 1, 300)
+    requested_lookback = _bounded_int(
+        edge, "feature_lookback_seconds", 30, 1, 3600)
+    screening = edge.get("screening_population") or []
+    if not isinstance(screening, list) or len(screening) > 7:
+        raise ValueError("screening_population must contain at most seven candidates")
+    parsed_screening = []
+    known = {fingerprint(expression)}
+    all_clocks = set(clocks_of(expression))
+    all_horizons = {horizon}
+    executions = {execution}
+    for index, raw in enumerate(screening):
+        if not isinstance(raw, dict):
+            raise ValueError(f"screening_population[{index}] must be an object")
+        candidate_expr = parse_expr(raw.get("intraday_signal_expr"))
+        candidate_fp = fingerprint(candidate_expr)
+        if candidate_fp in known:
+            raise ValueError(
+                f"screening_population[{index}] duplicates another candidate")
+        if raw.get("ast_fingerprint") not in (None, "", candidate_fp):
+            raise ValueError(
+                f"screening_population[{index}] fingerprint does not match AST")
+        known.add(candidate_fp)
+        plan = validate_semantic_plan(raw.get("semantic_plan") or {})
+        candidate_horizon = int(plan["horizon_seconds"])
+        candidate_execution = str(plan["execution"]).upper()
+        candidate_output = str(plan["output"]).upper()
+        policy = str(raw.get("entry_policy") or "").upper()
+        if candidate_output in {
+                "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
+            if unit_of(candidate_expr) != "BPS":
+                raise ValueError(
+                    f"screening_population[{index}] net-PnL AST must output BPS")
+            if policy != "PREDICTED_MARKOUT_CLEARS_COST":
+                raise ValueError(
+                    f"screening_population[{index}] lacks the cost hurdle")
+        elif not policy:
+            policy = "POSITIVE_SCORE"
+        all_horizons.add(candidate_horizon)
+        executions.add(candidate_execution)
+        all_clocks.update(clocks_of(candidate_expr))
+        parsed_screening.append({
+            **raw,
+            "ast_fingerprint": candidate_fp,
+            "intraday_signal_expr": candidate_expr,
+            "semantic_plan": plan,
+            "horizon_seconds": candidate_horizon,
+            "execution": candidate_execution,
+            "entry_policy": policy,
+            "screening_only": True,
+        })
+    feature_lookback = max([requested_lookback, *all_clocks])
+    if feature_lookback > 3600:
+        raise ValueError("population feature lookback exceeds 3600 seconds")
+    population_execution = (
+        "PASSIVE_FIFO_LOWER_BOUND"
+        if "PASSIVE_FIFO_LOWER_BOUND" in executions else "TAKER")
     config = {
         "research_lane": "INTRADAY_EVENT",
-        "semantic_plan": edge.get("semantic_plan") or {},
+        "semantic_plan": semantic_plan,
         "semantic_fingerprint": edge.get("semantic_fingerprint"),
         "intraday_signal_expr": expression,
         "horizon_seconds": horizon,
-        "sample_interval_seconds": _bounded_int(
-            edge, "sample_interval_seconds", 5, 1, 300),
-        "feature_lookback_seconds": _bounded_int(
-            edge, "feature_lookback_seconds", 30, 1, 3600),
+        "sample_interval_seconds": sample_interval,
+        "feature_lookback_seconds": feature_lookback,
         "order_latency_ms": _bounded_int(edge, "order_latency_ms", 250, 0, 10_000),
         "max_quote_age_seconds": _bounded_float(
             edge, "max_quote_age_seconds", 5.0, 0.001, 60.0),
@@ -168,13 +234,18 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "universe_mode": "ALL_CAUSALLY_COLLECTED",
         "instrument_shard_size": _bounded_int(
             edge, "instrument_shard_size", 8, 2, 64),
+        "screening_population": parsed_screening,
+        "screening_cohort_version": edge.get("screening_cohort_version"),
+        "screening_trial_exposure": len(parsed_screening),
+        "population_execution_model": population_execution,
     }
     if edge.get("instrument_count") is not None:
         config["legacy_instrument_count_ignored"] = int(edge["instrument_count"])
     spec = IntradayLaneSpec(
         sample_interval_seconds=config["sample_interval_seconds"],
         feature_lookback_seconds=config["feature_lookback_seconds"],
-        horizons_seconds=(horizon,), order_latency_ms=config["order_latency_ms"],
+        horizons_seconds=tuple(sorted(all_horizons)),
+        order_latency_ms=config["order_latency_ms"],
         max_quote_age_seconds=config["max_quote_age_seconds"],
         fee_bps_per_side=config["fee_bps_per_side"],
         maker_fee_bps_per_side=config["maker_fee_bps_per_side"],
@@ -383,6 +454,141 @@ def _as_json(value):
     return value or {}
 
 
+def _candidate_accumulators(config: dict, spec: IntradayLaneSpec, *, trials: int
+                            ) -> dict[str, CandidateAccumulator]:
+    """Build independent statistics engines for one shared replay cohort."""
+    effective_trials = max(1, int(trials)) + len(config["screening_population"])
+
+    def build(row: dict) -> CandidateAccumulator:
+        return CandidateAccumulator(
+            expr=row["intraday_signal_expr"], spec=spec,
+            horizon_seconds=row["horizon_seconds"], execution=row["execution"],
+            position_mode=config["position_mode"], threshold=config["threshold"],
+            entry_policy=row["entry_policy"],
+            minimum_predicted_edge_bps=config["minimum_predicted_edge_bps"],
+            trials=effective_trials, family_pbo=None,
+            semantic_plan=row["semantic_plan"])
+
+    primary = {
+        "intraday_signal_expr": config["intraday_signal_expr"],
+        "horizon_seconds": config["horizon_seconds"],
+        "execution": config["execution"],
+        "entry_policy": config["entry_policy"],
+        "semantic_plan": config["semantic_plan"],
+    }
+    out = {"PRIMARY": build(primary)}
+    for row in config["screening_population"]:
+        out[row["ast_fingerprint"]] = build(row)
+    return out
+
+
+def _pareto_ranks(rows: list[dict]) -> dict[str, int]:
+    """Non-dominated ranks over net/gross/coverage/novelty and complexity."""
+    remaining = {row["key"]: row for row in rows}
+    ranks: dict[str, int] = {}
+    rank = 1
+
+    def vector(row):
+        summary = row["report"].get("summary") or {}
+        missing = float("-inf")
+        return (
+            summary.get("mean_net_bps_per_opportunity")
+            if summary.get("mean_net_bps_per_opportunity") is not None else missing,
+            summary.get("mean_mid_markout_bps")
+            if summary.get("mean_mid_markout_bps") is not None else missing,
+            summary.get("instrument_coverage")
+            if summary.get("instrument_coverage") is not None else missing,
+            row["novelty"],
+            -row["complexity"],
+        )
+
+    while remaining:
+        frontier = []
+        for key, row in remaining.items():
+            values = vector(row)
+            dominated = False
+            for other_key, other in remaining.items():
+                if other_key == key:
+                    continue
+                rival = vector(other)
+                if all(left >= right for left, right in zip(rival, values)) and \
+                        any(left > right for left, right in zip(rival, values)):
+                    dominated = True
+                    break
+            if not dominated:
+                frontier.append(key)
+        for key in frontier:
+            ranks[key] = rank
+            remaining.pop(key)
+        rank += 1
+    return ranks
+
+
+def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
+    """Label screen evidence without granting it promotion authority."""
+    primary = reports["PRIMARY"]
+    primary_expr = config["intraday_signal_expr"]
+    metadata = {row["ast_fingerprint"]: row
+                for row in config["screening_population"]}
+    ranking_rows = [{
+        "key": "PRIMARY", "report": primary, "novelty": 0.0,
+        "complexity": count_nodes(primary_expr),
+    }]
+    for key, report in reports.items():
+        if key == "PRIMARY":
+            continue
+        expression = metadata[key]["intraday_signal_expr"]
+        ranking_rows.append({
+            "key": key, "report": report,
+            "novelty": 1.0 - structural_similarity(primary_expr, expression),
+            "complexity": count_nodes(expression),
+        })
+    ranks = _pareto_ranks(ranking_rows)
+    screening_reports = []
+    for row in ranking_rows[1:]:
+        key, report = row["key"], row["report"]
+        source = metadata[key]
+        gate_decision = report.get("decision")
+        report.update({
+            "screening_only": True,
+            "evidence_tier": "SCREENING_ONLY",
+            "screening_gate_decision": gate_decision,
+            "decision": "SCREENING_ONLY",
+            "candidate_role": source.get("candidate_role"),
+            "source_lead_ids": list(source.get("source_lead_ids") or []),
+            "title": source.get("title"),
+            "evolution_role": source.get("evolution_role"),
+            "parent_ast_fingerprint": source.get("parent_ast_fingerprint"),
+            "parent_of_ast_fingerprint": source.get(
+                "parent_of_ast_fingerprint"),
+            "novelty_vs_primary": row["novelty"],
+            "complexity_nodes": row["complexity"],
+            "pareto_rank": ranks[key],
+            "pareto_front": ranks[key] == 1,
+            "not_a_promotion": (
+                "SCREENING_ONLY evidence may nominate an independent "
+                "confirmatory primary experiment; it cannot promote alpha"),
+        })
+        screening_reports.append(report)
+    primary["screening_population"] = screening_reports
+    primary["population_evaluation"] = {
+        "shared_raw_replay": True,
+        "candidate_count": 1 + len(screening_reports),
+        "selection_adjusted_trials": primary["summary"].get("trials"),
+        "selection_rule": "cost-net/coverage/novelty/complexity Pareto screen",
+        "promotion_authority": "PRIMARY_ONLY",
+    }
+    primary["summary"].update({
+        "screening_candidates": len(screening_reports),
+        "screening_pareto_survivors": sum(
+            bool(row["pareto_front"]) for row in screening_reports),
+        "screening_positive_net": sum(
+            ((row.get("summary") or {}).get("mean_net_bps_per_opportunity")
+             or 0.0) > 0 for row in screening_reports),
+    })
+    return primary
+
+
 def _load_completed_report(meta_conn, experiment_id: str) -> dict:
     """Rehydrate enough immutable evidence for an idempotent orchestrator retry."""
     with meta_conn.cursor() as cur:
@@ -397,18 +603,37 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         """, (experiment_id,))
         rows = cur.fetchall()
     summary, folds = {}, {}
+    screening_summaries: dict[str, dict] = {}
+    screening_folds: dict[str, dict[int, dict]] = {}
+    screening_meta: dict[str, dict] = {}
     final_dimensions = None
     pre_dimensions = None
     for metric, value, raw_dimensions in rows:
         dimensions = _as_json(raw_dimensions)
-        if dimensions.get("summary") is True:
+        screening_key = dimensions.get("screening_candidate")
+        if dimensions.get("summary") is True and not screening_key:
             summary[metric] = float(value)
-        if metric == "fold_mean_net_bps" and "fold" in dimensions:
+        elif dimensions.get("summary") is True and screening_key:
+            screening_summaries.setdefault(str(screening_key), {})[metric] = \
+                float(value)
+        if (metric == "fold_mean_net_bps" and "fold" in dimensions
+                and not screening_key):
             fold = int(dimensions["fold"])
             folds.setdefault(fold, {"fold": fold,
                                     "start_session": dimensions.get("start_session"),
                                     "end_session": dimensions.get("end_session")})
             folds[fold]["mean_net_bps"] = float(value)
+        elif (metric == "fold_mean_net_bps" and "fold" in dimensions
+              and screening_key):
+            fold = int(dimensions["fold"])
+            target = screening_folds.setdefault(str(screening_key), {})
+            target.setdefault(fold, {
+                "fold": fold,
+                "start_session": dimensions.get("start_session"),
+                "end_session": dimensions.get("end_session"),
+            })["mean_net_bps"] = float(value)
+        if metric == "intraday_screening_result" and screening_key:
+            screening_meta[str(screening_key)] = dimensions
         if metric == "intraday_pre_pbo_gate_pass":
             pre_dimensions = dimensions
         elif metric == "intraday_gate_pass":
@@ -418,6 +643,29 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
     parsed = parse_expr(expression)
     from intraday_alpha_ast import fields_of, fingerprint, shape_fingerprint
 
+    screening_reports = []
+    for candidate in config.get("screening_population") or []:
+        key = str(candidate.get("ast_fingerprint") or "")
+        meta = screening_meta.get(key, {})
+        screening_reports.append({
+            "evaluator_version": EVALUATOR_VERSION,
+            "ast_fingerprint": key,
+            "summary": screening_summaries.get(key, {}),
+            "folds": [screening_folds.get(key, {})[fold]
+                      for fold in sorted(screening_folds.get(key, {}))],
+            "decision": "SCREENING_ONLY",
+            "screening_only": True,
+            "evidence_tier": "SCREENING_ONLY",
+            "screening_gate_decision": meta.get("screening_gate_decision"),
+            "failed_criteria": list(meta.get("failed_criteria") or []),
+            "candidate_role": candidate.get("candidate_role"),
+            "source_lead_ids": list(candidate.get("source_lead_ids") or []),
+            "pareto_rank": meta.get("pareto_rank"),
+            "pareto_front": meta.get("pareto_front"),
+            "novelty_vs_primary": meta.get("novelty_vs_primary"),
+            "complexity_nodes": meta.get("complexity_nodes"),
+            "idempotent_replay": True,
+        })
     return {
         "evaluator_version": EVALUATOR_VERSION,
         "ast_fingerprint": fingerprint(parsed),
@@ -428,6 +676,12 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         "folds": [folds[key] for key in sorted(folds)],
         "session_returns_bps": {},
         "summary": summary,
+        "screening_population": screening_reports,
+        "population_evaluation": {
+            "shared_raw_replay": True,
+            "candidate_count": 1 + len(screening_reports),
+            "promotion_authority": "PRIMARY_ONLY",
+        },
         "failed_criteria": list(gate.get("failed_criteria") or []),
         "decision": gate.get("decision") or "HOLD",
         "not_a_promotion": (
@@ -451,6 +705,37 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                          {"window": f"INTRADAY_FOLD_{fold['fold']}",
                           "start_session": fold["start_session"],
                           "end_session": fold["end_session"]}))
+    for candidate in report.get("screening_population") or []:
+        key = candidate["ast_fingerprint"]
+        candidate_summary = candidate.get("summary") or {}
+        for metric, value in candidate_summary.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                rows.append((metric, value, {
+                    "summary": True, "screening_candidate": key}))
+        for fold in candidate.get("folds") or []:
+            if isinstance(fold.get("mean_net_bps"), (int, float)):
+                rows.append(("fold_mean_net_bps", fold["mean_net_bps"], {
+                    "screening_candidate": key,
+                    "fold": fold["fold"],
+                    "start_session": fold["start_session"],
+                    "end_session": fold["end_session"],
+                }))
+        rows.append(("intraday_screening_result",
+                     1 if candidate.get("pareto_front") else 0, {
+                         "screening_candidate": key,
+                         "screening_only": True,
+                         "screening_gate_decision": candidate.get(
+                             "screening_gate_decision"),
+                         "failed_criteria": candidate.get(
+                             "failed_criteria") or [],
+                         "pareto_rank": candidate.get("pareto_rank"),
+                         "pareto_front": bool(candidate.get("pareto_front")),
+                         "novelty_vs_primary": candidate.get(
+                             "novelty_vs_primary"),
+                         "complexity_nodes": candidate.get("complexity_nodes"),
+                         "source_lead_ids": candidate.get(
+                             "source_lead_ids") or [],
+                     }))
     rows.append(("intraday_pre_pbo_gate_pass",
                  1 if report.get("decision") == "SUBMIT_TO_QA" else 0,
                  {"decision": report.get("decision"),
@@ -526,14 +811,8 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     "mean_net_bps_per_opportunity")},
             "intraday_report": report, "research_lane": "INTRADAY_EVENT"}
 
-    accumulator = CandidateAccumulator(
-        expr=config["intraday_signal_expr"], spec=spec,
-        horizon_seconds=config["horizon_seconds"], execution=config["execution"],
-        position_mode=config["position_mode"], threshold=config["threshold"],
-        entry_policy=config["entry_policy"],
-        minimum_predicted_edge_bps=config["minimum_predicted_edge_bps"],
-        trials=int(hyp.get("_trials") or 1), family_pbo=None,
-        semantic_plan=config["semantic_plan"])
+    population = CandidatePopulationAccumulator(_candidate_accumulators(
+        config, spec, trials=int(hyp.get("_trials") or 1)))
     shard_size = config["instrument_shard_size"]
     shards = [selected["instruments"][index:index + shard_size]
               for index in range(0, len(selected["instruments"]), shard_size)]
@@ -568,9 +847,9 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     quotes, trades = events[instrument]
                     samples = build_samples(
                         quotes, trades, spec, start=start, end=end,
-                        execution_model=config["execution"])
+                        execution_model=config["population_execution_model"])
                     shard_samples += len(samples)
-                    accumulator.add(instrument, samples)
+                    population.add(instrument, samples)
             shard_reports.append({
                 "shard": shard_number,
                 "instrument_count": len(instruments),
@@ -578,7 +857,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                 "instrument_fingerprint": hashlib.sha256(
                     "|".join(instruments).encode()).hexdigest()[:16],
             })
-        report = accumulator.finish()
+        report = _annotate_population(config, population.finish())
         report["source_quality"] = {
             "counts_by_status": quality_counts,
             "totals": quality_totals,

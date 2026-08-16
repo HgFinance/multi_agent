@@ -46,6 +46,8 @@ from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v1"
+INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v1"
+MAX_INTRADAY_COHORT = 8
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
@@ -298,6 +300,107 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
     )
 
 
+def _attach_intraday_screening_cohort(
+        proposal: ExperimentProposalV1,
+        leads: dict[str, MethodologyLeadV1]) -> ExperimentProposalV1:
+    """Turn linked typed leads into a provenance-checked shared-replay cohort.
+
+    Only the formula copied into ``SUGGESTED_PARAMS`` remains a preregistered
+    primary lead.  Other linked formulas are screening sidecars: they share the
+    expensive raw-event replay but cannot be promoted from that evidence.  Their
+    lead ids therefore stay unused and can later receive an independent
+    confirmatory experiment.
+    """
+    if proposal.research_lane.value != "INTRADAY_EVENT":
+        return proposal
+
+    from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
+
+    params = dict(proposal.suggested_params or {})
+    primary = parse(params.get("intraday_signal_expr"))
+    primary_fp = fingerprint(primary)
+    candidates: dict[str, dict] = {}
+
+    for lead_id in proposal.lead_ids:
+        lead = leads.get(str(lead_id))
+        if lead is None:
+            continue
+        contract = dict(lead.ast_contract or {})
+        if (contract.get("formula_discovery_version") != "formula-discovery-v2"
+                or not contract.get("formula_contract_complete")
+                or contract.get("alpha_candidate_eligible") is not True
+                or contract.get("research_lane") != "INTRADAY_EVENT"):
+            continue
+        try:
+            expr = parse(contract.get("candidate_signal_expr"))
+        except (TypeError, ValueError):
+            continue
+        fp = fingerprint(expr)
+        thesis = dict(contract.get("formula_thesis") or {})
+        row = candidates.setdefault(fp, {
+            "candidate_role": "LINKED_CANDIDATE",
+            "source_lead_ids": [],
+            "title": str(lead.claimed_edge),
+            "ast_fingerprint": fp,
+            "intraday_signal_expr": expr,
+            "semantic_plan": dict(contract.get("semantic_plan") or {}),
+            "entry_policy": str(thesis.get("decision_rule") or ""),
+            "evolution_role": str(contract.get("evolution_role") or "SEED"),
+            "parent_ast_fingerprint": str(
+                contract.get("parent_ast_fingerprint") or ""),
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+            "_parent_signal_expr": contract.get("parent_signal_expr"),
+        })
+        row["source_lead_ids"].append(str(lead_id))
+
+    if primary_fp not in candidates:
+        raise ValueError(
+            "INTRADAY_EVENT primary formula must exactly match one linked "
+            "formula-discovery-v2 lead")
+
+    primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
+    sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
+
+    # An explicit BPS parent is a valuable within-replay ablation.  It receives
+    # the child's semantic/execution contract and remains SCREENING_ONLY.
+    known_fps = set(candidates)
+    for child in list(candidates.values()):
+        parent_raw = child.pop("_parent_signal_expr", None)
+        if parent_raw in (None, ""):
+            continue
+        try:
+            parent = parse(parent_raw)
+            parent_fp = fingerprint(parent)
+            if unit_of(parent) != "BPS" or parent_fp in known_fps:
+                continue
+        except (TypeError, ValueError):
+            continue
+        known_fps.add(parent_fp)
+        sidecars.append({
+            "candidate_role": "LINEAGE_PARENT",
+            "source_lead_ids": list(child["source_lead_ids"]),
+            "title": f"parent of {child['title']}",
+            "ast_fingerprint": parent_fp,
+            "intraday_signal_expr": parent,
+            "semantic_plan": dict(child["semantic_plan"]),
+            "entry_policy": child["entry_policy"],
+            "evolution_role": "PARENT_ABLATION",
+            "parent_of_ast_fingerprint": child["ast_fingerprint"],
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+        })
+
+    for row in sidecars:
+        row.pop("_parent_signal_expr", None)
+    params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
+    params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
+    return proposal.model_copy(update={
+        "proposal_id": proposal_id_for(
+            primary_lead_ids, proposal.edge_type, proposal.universe_key),
+        "lead_ids": primary_lead_ids,
+        "suggested_params": params,
+    })
+
+
 def intake(planner_text: str, skeptic_text: str, *, case_id: str,
            planner_run: str, skeptic_run: str,
            leads: dict | None = None, past_outcomes: list | None = None,
@@ -364,6 +467,7 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             prop = build(p, s, case_id=case_id, planner_run=planner_run,
                          skeptic_run=skeptic_run, as_known_at=as_known_at,
                          past_outcomes=past)
+            prop = _attach_intraday_screening_cohort(prop, leads or {})
         except Exception as e:          # 계약 위반·독립성 위반 모두 여기로
             out.rejected.append(Rejected(title, str(e)))
             continue
@@ -1010,6 +1114,75 @@ def _check_lane_isolated_history_lookup():
     assert rows == []
 
 
+def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
+    """Linked v2 formulas become exact sidecars, not silently consumed leads."""
+    from contracts.factory_contracts import SourceRef, lead_id_for
+    from publish_gate import check_intraday_screening_population
+
+    now = datetime(2026, 8, 16, tzinfo=timezone.utc)
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "REVERT",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    primary_expr = {"op": "field", "field": "microprice_offset_bps"}
+    side_expr = {"op": "rolling_mean", "seconds": 30,
+                 "arg": primary_expr}
+
+    def make_lead(label: str, expr: dict) -> MethodologyLeadV1:
+        ref = SourceRef(url=f"https://example.com/{label}", title=label,
+                        accessed_at=now, excerpt="bounded excerpt")
+        return MethodologyLeadV1(
+            lead_id=lead_id_for([ref]), case_id="cohort-check",
+            scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
+            refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
+            ast_contract={
+                "formula_discovery_version": "formula-discovery-v2",
+                "formula_contract_complete": True,
+                "alpha_candidate_eligible": True,
+                "research_lane": "INTRADAY_EVENT",
+                "candidate_signal_expr": expr, "semantic_plan": plan,
+                "formula_thesis": {
+                    "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST"},
+                "evolution_role": "SEED",
+            })
+
+    primary_lead = make_lead("primary", primary_expr)
+    side_lead = make_lead("side", side_expr)
+    leads = {row.lead_id: row for row in (primary_lead, side_lead)}
+    proposal = ExperimentProposalV1(
+        proposal_id="before", case_id="cohort-check", as_known_at=now,
+        lead_ids=(primary_lead.lead_id, side_lead.lead_id),
+        economic_rationale="quote dislocation meets urgent liquidity demand",
+        counterparty="urgent liquidity taker",
+        competing_explanation="data mining",
+        competing_explanation_codes=(CompetingExplanation.DATA_MINING,),
+        skeptic_sign="independent-worker", edge_type="order_flow_imbalance",
+        universe_key="krx_all", falsification_tests=("net <= 0",),
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=60),
+        suggested_params={
+            "intraday_signal_expr": primary_expr, "horizon_seconds": 5,
+            "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+        research_lane="INTRADAY_EVENT", semantic_plan=plan)
+    attached = _attach_intraday_screening_cohort(proposal, leads)
+    assert attached.lead_ids == (primary_lead.lead_id,)
+    population = attached.suggested_params["screening_population"]
+    assert len(population) == 1
+    assert population[0]["source_lead_ids"] == [side_lead.lead_id]
+    assert check_intraday_screening_population(attached, leads) == []
+
+    corrupt = dict(population[0])
+    corrupt["ast_fingerprint"] = "wrong"
+    tampered = attached.model_copy(update={
+        "suggested_params": {**attached.suggested_params,
+                             "screening_population": [corrupt]}})
+    assert any("fingerprint" in error for error in
+               check_intraday_screening_population(tampered, leads))
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         if hasattr(sys.stdout, "reconfigure"):
@@ -1021,5 +1194,7 @@ if __name__ == "__main__":
         print("  코드 뒤 산문이 기획안을 안 죽인다  OK")
         _check_agent_can_answer_the_gate()
         _check_lane_isolated_history_lookup()
+        _check_intraday_screening_cohort_is_sourced_and_non_promoting()
+        print("  공유 재생 cohort 출처·비승격 계약  OK")
         raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

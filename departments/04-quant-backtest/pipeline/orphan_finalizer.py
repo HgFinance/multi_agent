@@ -82,6 +82,7 @@ _SQL_SUMMARY_METRICS = """
      where experiment_id = %s
        and coalesce(dimensions->>'window','') in ('','SUMMARY')
        and dimensions->>'regime' is null
+       and dimensions->>'screening_candidate' is null
 """
 
 _WINDOW_KEYS = ("total_return", "sharpe_rf0", "max_drawdown")
@@ -389,6 +390,8 @@ def _check_orphan_predicate_matches_census():
                  "o.outcome_id is null",
                  "e.ended_at < now() - interval '30 minutes'"):
         assert frag in " ".join(_SQL_ORPHANS.split()), frag
+    assert "dimensions->>'screening_candidate' is null" in \
+        _SQL_SUMMARY_METRICS, "screening-only 지표가 고아 실험 판정을 덮으면 안 된다"
 
 
 def _selfcheck() -> None:

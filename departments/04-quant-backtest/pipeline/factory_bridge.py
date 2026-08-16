@@ -89,6 +89,7 @@ INTRADAY_EDGE_KEYS = frozenset({
     "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
     "entry_policy", "minimum_predicted_edge_bps",
     "evaluation_days", "instrument_shard_size", "position_mode",
+    "screening_population", "screening_cohort_version",
 })
 
 
@@ -835,6 +836,14 @@ select count(*)
  where trial_family_id = %s
     or config->'signal_expr' = %s::jsonb
     or config->'intraday_signal_expr' = %s::jsonb
+    or exists (
+         select 1
+           from jsonb_array_elements(
+                  case when jsonb_typeof(config->'screening_population') = 'array'
+                       then config->'screening_population'
+                       else '[]'::jsonb end) candidate
+          where candidate->'intraday_signal_expr' = %s::jsonb
+       )
 """
 
 
@@ -867,7 +876,7 @@ def count_family_trials(conn, trial_family_id: str, signal_expr=None) -> int:
         else:
             encoded = json.dumps(normalized, sort_keys=True)
             cur.execute(_SQL_FAMILY_OR_EXACT_TRIALS,
-                        (trial_family_id, encoded, encoded))
+                        (trial_family_id, encoded, encoded, encoded))
         return int(cur.fetchone()[0])
 
 

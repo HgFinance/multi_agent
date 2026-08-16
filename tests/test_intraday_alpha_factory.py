@@ -17,15 +17,19 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
 
 import alpha_semantics as semantics
 import formula_discovery
+import intraday_candidate as candidate_module
 import intraday_experience
 import lead_intake
 from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
+                                CandidatePopulationAccumulator,
                                 evaluate_candidate)
-from factory_bridge import _normalized_formula, expected_edge_for, gate0
+from factory_bridge import (_SQL_FAMILY_OR_EXACT_TRIALS, _normalized_formula,
+                            count_family_trials, expected_edge_for, gate0)
 from factory_bridge import lessons_from
-from intraday_experiment_runner import (_input_hash, config_from_edge,
+from intraday_experiment_runner import (_annotate_population, _input_hash,
+                                        _load_completed_report, config_from_edge,
                                         record_data_feasibility, select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
                                       IntradaySample)
@@ -233,6 +237,36 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     assert not gate.ok and "INTRADAY_CONTRACT_INVALID" in gate.codes
 
 
+def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> None:
+    proposal = _intraday_proposal()
+    edge, _ = expected_edge_for(proposal)
+    passive_plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "REVERT",
+        "output": "PASSIVE_FILL_ADJUSTED_PNL",
+        "execution": "PASSIVE_FIFO_LOWER_BOUND", "horizon_seconds": 30,
+    }
+    sidecar_expr = {"op": "rolling_mean", "seconds": 90,
+                    "arg": {"op": "field",
+                            "field": "microprice_offset_bps"}}
+    edge["screening_population"] = [{
+        "candidate_role": "LINKED_CANDIDATE",
+        "source_lead_ids": ["lead-passive"],
+        "ast_fingerprint": candidate_module.fingerprint(sidecar_expr),
+        "intraday_signal_expr": sidecar_expr,
+        "semantic_plan": passive_plan,
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+    }]
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
+
+    config, spec = config_from_edge(edge)
+    assert spec.horizons_seconds == (5, 30)
+    assert spec.feature_lookback_seconds == 90
+    assert config["population_execution_model"] == "PASSIVE_FIFO_LOWER_BOUND"
+    assert config["screening_trial_exposure"] == 1
+    assert config["screening_population"][0]["screening_only"] is True
+
+
 def test_intraday_family_is_semantic_not_numeric_tuning() -> None:
     proposal = _intraday_proposal()
     first, _ = expected_edge_for(proposal)
@@ -396,6 +430,78 @@ def test_intraday_input_identity_ignores_wall_clock_but_tracks_lineage() -> None
     assert _input_hash("H1", base) != _input_hash("H1", late_data)
 
 
+def test_screening_exposure_counts_as_an_exact_formula_trial() -> None:
+    class Cursor:
+        def __init__(self, conn): self.conn = conn
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params): self.conn.executed = (sql, params)
+        def fetchone(self): return (4,)
+
+    class Conn:
+        def __init__(self): self.executed = None
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    expr = {"op": "field", "field": "microprice_offset_bps"}
+    assert count_family_trials(conn, "family", expr) == 4
+    sql, params = conn.executed
+    assert sql == _SQL_FAMILY_OR_EXACT_TRIALS
+    assert "jsonb_array_elements" in sql
+    assert "screening_population" in sql
+    assert len(params) == 4 and params[1] == params[2] == params[3]
+
+
+def test_idempotent_replay_keeps_screening_metrics_out_of_primary_summary() -> None:
+    primary = {"op": "field", "field": "microprice_offset_bps"}
+    side = {"op": "neg", "arg": primary}
+    config = {
+        "intraday_signal_expr": primary,
+        "screening_population": [{
+            "ast_fingerprint": "side-fp", "intraday_signal_expr": side,
+            "candidate_role": "LINKED_CANDIDATE",
+            "source_lead_ids": ["lead-side"],
+        }],
+    }
+    rows = [
+        ("mean_net_bps_per_opportunity", 1.0, {"summary": True}),
+        ("mean_net_bps_per_opportunity", 99.0,
+         {"summary": True, "screening_candidate": "side-fp"}),
+        ("intraday_gate_pass", 0.0,
+         {"decision": "HOLD", "failed_criteria": ["OVERFIT_DSR"]}),
+        ("intraday_screening_result", 1.0, {
+            "screening_candidate": "side-fp", "screening_only": True,
+            "screening_gate_decision": "SUBMIT_TO_QA", "pareto_rank": 1,
+            "pareto_front": True, "failed_criteria": [],
+        }),
+    ]
+
+    class Cursor:
+        def __init__(self): self.sql = ""
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, _params): self.sql = sql
+        def fetchone(self): return (config,)
+        def fetchall(self): return rows
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    report = _load_completed_report(Conn(), "experiment")
+    assert report["summary"]["mean_net_bps_per_opportunity"] == 1.0
+    assert report["screening_population"][0]["summary"][
+        "mean_net_bps_per_opportunity"] == 99.0
+    assert report["decision"] == "HOLD"
+    assert report["screening_population"][0]["decision"] == "SCREENING_ONLY"
+
+    for relative in (
+            "departments/04-quant-backtest/pipeline/experiment_orchestrator.py",
+            "departments/04-quant-backtest/pipeline/experiment_card.py",
+            "departments/04-quant-backtest/pipeline/orphan_finalizer.py"):
+        assert "dimensions->>'screening_candidate' is null" in \
+            (ROOT / relative).read_text(encoding="utf-8")
+
+
 def test_session_discovery_is_partition_bounded_and_cutoff_reproducible() -> None:
     class Cursor:
         def __init__(self, conn):
@@ -504,6 +610,59 @@ def test_streaming_shards_equal_single_pass_and_cover_requested_universe() -> No
     assert actual["summary"]["max_concurrent_opportunities"] == 2
     assert actual["lane_manifest"]["portfolio_capital_model"].startswith(
         "EXACT_PORTFOLIO")
+
+
+def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
+        monkeypatch) -> None:
+    spec = IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0,
+                            fee_bps_per_side=1)
+    primary_expr = {"op": "field", "field": "microprice_offset_bps"}
+    side_expr = {"op": "neg", "arg": primary_expr}
+    rules = {"min_sessions": 1, "min_instruments": 1,
+             "min_opportunities": 1, "min_deflated_sharpe": -100,
+             "min_positive_session_ratio": 0}
+    candidates = {
+        "PRIMARY": CandidateAccumulator(
+            expr=primary_expr, spec=spec, horizon_seconds=5,
+            execution="TAKER", family_pbo=0.2, trials=3, criteria=rules),
+        "side": CandidateAccumulator(
+            expr=side_expr, spec=spec, horizon_seconds=5,
+            execution="TAKER", family_pbo=0.2, trials=3, criteria=rules),
+    }
+    calls = 0
+    original = candidate_module.audit_causality
+
+    def counted(samples, lane_spec):
+        nonlocal calls
+        calls += 1
+        return original(samples, lane_spec)
+
+    monkeypatch.setattr(candidate_module, "audit_causality", counted)
+    base = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    samples = [_sample("A", base + timedelta(seconds=offset * 10),
+                       signal=1.0, net=2.0) for offset in range(3)]
+    population = CandidatePopulationAccumulator(candidates)
+    population.add("A", list(reversed(samples)))
+    reports = population.finish()
+
+    assert calls == 1
+    assert reports["PRIMARY"]["summary"]["opportunities"] == 3
+    assert reports["side"]["summary"]["opportunities"] == 0
+    assert reports["side"]["decision"] == "NO_EVIDENCE"
+
+    annotated = _annotate_population({
+        "intraday_signal_expr": primary_expr,
+        "screening_population": [{
+            "ast_fingerprint": "side", "intraday_signal_expr": side_expr,
+            "candidate_role": "LINKED_CANDIDATE",
+            "source_lead_ids": ["lead-side"], "title": "inverse",
+        }],
+    }, reports)
+    screened = annotated["screening_population"][0]
+    assert screened["decision"] == "SCREENING_ONLY"
+    assert screened["screening_gate_decision"] == "NO_EVIDENCE"
+    assert annotated["population_evaluation"]["promotion_authority"] == \
+        "PRIMARY_ONLY"
 
 
 def test_cost_hurdle_abstains_until_predicted_markout_clears_execution() -> None:
@@ -837,3 +996,34 @@ def test_measured_negative_elites_become_controlled_stepping_stones() -> None:
         "FAILURE_MODE_INVERSION"]
     assert all(row["breeding_role"] != "NET_SURVIVOR"
                for row in memory.breeding_parents)
+
+
+def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> None:
+    expr = {"op": "field", "field": "microprice_offset_bps"}
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "REVERT",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    screened = [{
+        "intraday_signal_expr": expr, "semantic_plan": plan,
+        "decision": "SCREENING_ONLY", "evidence_tier": "SCREENING_ONLY",
+        "lesson_codes": [],
+        "oos_summary": {"mean_mid_markout_bps": 25.0,
+                        "mean_net_bps_per_opportunity": 2.0,
+                        "sessions": 60},
+    }]
+    lead = {
+        "lead_id": "confirm-me", "intraday_signal_expr": expr,
+        "semantic_plan": plan, "used": False,
+        "alpha_candidate_eligible": True,
+        "formula_discovery_version": "formula-discovery-v2",
+        "formula_contract_complete": True,
+    }
+    memory = intraday_experience.build(screened, [lead])
+
+    assert not memory.recycled_candidates
+    assert [row["lead_id"] for row in memory.niche_elites] == ["confirm-me"]
+    assert memory.breeding_parents[0]["breeding_role"] == "SCREEN_SURVIVOR"
+    assert "SCREEN_SURVIVOR still needs" in intraday_experience.render(memory)
