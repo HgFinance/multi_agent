@@ -1044,7 +1044,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                      "키를 가진 FORMULA_THESIS JSON도 필수다. target은 SEMANTIC_PLAN "
                      "output과 같고 terms는 AST의 모든 field를 경제적 역할에 정확히 "
                      "한 번씩 사상해야 한다. OOS 결과에 계수를 맞추지 않는다. "
-                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
+                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라. "
+                     "성공 응답의 lead_ids는 revision 라우팅까지 끝난 실제 원장 ID다. "
+                     "후속 factory_submit_proposal에는 이 ID만 사용하라.")
     def factory_submit_leads(text: str, lens: str = "ACADEMIC",
                              source_type: str = "PAPER",
                              model_version: str = "", prompt_version: str = "") -> dict:
@@ -1064,14 +1066,17 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                                case_id=case_id, model_version=model_version,
                                prompt_version=prompt_version)
         new = dup = 0
+        lead_ids: list[str] = []
         if r.leads:
             conn = _db()
             try:
-                new, dup = lead_intake.persist(conn, r.leads)
+                new, dup, lead_ids = lead_intake.persist(
+                    conn, r.leads, return_ids=True)
             finally:
                 conn.close()
         return {"ok": bool(r.leads), "accepted": len(r.leads),
                 "new": new, "merged_as_mention": dup,
+                "lead_ids": lead_ids,
                 "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
                 "link_checks": r.link_notes}
 

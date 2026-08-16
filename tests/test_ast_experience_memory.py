@@ -49,6 +49,64 @@ def test_same_source_new_ast_gets_deterministic_revision_lineage():
     assert revised != lead_intake.revision_lead_id(base, blocked)
 
 
+class _PersistCursor:
+    def __init__(self, existing_contract=None):
+        self.existing_contract = existing_contract
+        self.phase = ""
+
+    def execute(self, sql, _params):
+        if sql == lead_intake._SQL_LOCK_SOURCE:
+            self.phase = "lock"
+        elif sql == lead_intake._SQL_EXISTING_CONTRACT:
+            self.phase = "existing"
+        else:
+            self.phase = "upsert"
+
+    def fetchone(self):
+        if self.phase == "existing":
+            return ((self.existing_contract,) if self.existing_contract is not None
+                    else None)
+        if self.phase == "upsert":
+            return (True,)
+        return None
+
+
+class _PersistConn:
+    def __init__(self, existing_contract=None):
+        self.cur = _PersistCursor(existing_contract)
+        self.commits = 0
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_persist_can_return_actual_routed_ids_without_breaking_old_callers():
+    source_id = "lead_0123456789abcdef"
+    original = {"ast_readiness": "DATA_BLOCKED", "missing_data": "depth"}
+    revised = {"ast_readiness": "AST_READY", "candidate_signal_expr": OFI_1}
+    lead = {"lead_id": source_id, "refs": [{"url": "https://example.org/p"}],
+            "ast_contract": revised}
+
+    old_conn = _PersistConn()
+    assert lead_intake.persist(old_conn, [lead]) == (1, 0)
+    assert old_conn.commits == 1
+
+    api_conn = _PersistConn(existing_contract=original)
+    new, dup, lead_ids = lead_intake.persist(
+        api_conn, [lead], return_ids=True)
+    assert (new, dup) == (1, 0)
+    assert lead_ids == [lead_intake.revision_lead_id(source_id, revised)]
+    assert api_conn.commits == 1
+
+    mcp_source = (ROOT / "departments" / "01-research" / "api" /
+                  "mcp_server.py").read_text(encoding="utf-8")
+    assert '"lead_ids": lead_ids' in mcp_source
+    assert "return_ids=True" in mcp_source
+
+
 def test_memory_distinguishes_exact_reuse_from_same_tuning_shape():
     memory = ast_experience.build([
         {"signal_expr": OFI_1, "decision": "GATE_HOLD",

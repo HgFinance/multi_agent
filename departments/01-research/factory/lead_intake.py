@@ -69,7 +69,7 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v3"
+MODULE_VERSION = "research-lead-intake-v4"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
@@ -553,10 +553,18 @@ def routed_lead_id(source_lead_id: str, existing_contract: dict | str | None,
     return revision_lead_id(source_lead_id, candidate_contract)
 
 
-def persist(conn, leads: list[dict]) -> tuple[int, int]:
-    """(신규, 중복접힘). 커밋은 한 번에 - 반쯤 적재된 스카우트 회차를 남기지 않는다."""
+def persist(conn, leads: list[dict], *, return_ids: bool = False
+            ) -> tuple[int, int] | tuple[int, int, list[str]]:
+    """리드를 한 트랜잭션으로 적재한다.
+
+    기본 반환값 ``(신규, 중복접힘)`` 은 기존 CLI/호출자와 호환된다. 쓰기 API처럼
+    이어서 proposal을 만들어야 하는 호출자는 ``return_ids=True`` 로 요청해
+    ``(신규, 중복접힘, 실제_리드_ID들)`` 을 받는다. 같은 출처에서 AST 해석이
+    갈려 revision ID로 라우팅된 경우에도 원래 ID가 아니라 실제 저장 ID를 준다.
+    """
     cur = conn.cursor()
     new = dup = 0
+    persisted_ids: list[str] = []
     for lead in leads:
         payload = dict(lead)
         source_lead_id = str(payload["lead_id"])
@@ -570,6 +578,8 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
         payload["lead_id"] = routed_lead_id(
             source_lead_id, existing[0] if existing else None,
             lead["ast_contract"])
+        if payload["lead_id"] not in persisted_ids:
+            persisted_ids.append(payload["lead_id"])
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)
         payload["ast_contract"] = json.dumps(lead["ast_contract"], ensure_ascii=False)
         cur.execute(_SQL_UPSERT, payload)
@@ -579,6 +589,8 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
         else:
             dup += 1
     conn.commit()
+    if return_ids:
+        return new, dup, persisted_ids
     return new, dup
 
 

@@ -3002,6 +3002,14 @@ def cycle(*, dry_run: bool = False) -> int:
                   "  메커니즘 설명은 ECONOMIC_RATIONALE 에 그대로 쓰되, "
                   "**대응 자체는 반드시 위 칸에도 적어라** - 계약은 그 칸만 "
                   "읽으므로 본문에만 있으면 '대응 없음' 으로 막힌다.\n"
+                  "- 이 카드는 **Planner**다. `factory_submit_leads`를 호출하거나 "
+                  "새 문헌·새 리드를 조사하지 마라. 위 `쓸 수 있는 리드` 목록에 "
+                  "이미 적재된 재료만 `factory_submit_proposal`로 소비하라.\n"
+                  "- 목록에 `formula_contract_complete=true`인 미사용 "
+                  "`INTRADAY_EVENT` typed 수식이 있으면 그것이 최우선이다. 목록 "
+                  "순서대로 첫 계약 유효 수식을 기획하고, `OVER_BUDGET`이면 새 "
+                  "리드를 만들지 말고 같은 카드의 다음 미사용 typed 수식을 "
+                  "시도하라.\n"
                   # ▶ 다중 블록 제출 (2026-08-13). 접수 파서(parse_blocks)는
                   #   원래 여러 블록을 읽는다 - 카드당 1건은 관례였지 계약이
                   #   아니었다. 공급 병목(실행 6분 vs 공급 1건/시간)의 나머지
@@ -3030,9 +3038,9 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            # v3 allows the first single-block intraday planner to run in a
-            # half-hour where older mixed-lane planners already completed.
-            key=f"factory-planner-v3-{pstamp}", dry_run=dry_run, priority=1)
+            # v4 separates Planner from Scout and consumes the queued typed
+            # formula frontier before researching replacement leads.
+            key=f"factory-planner-v4-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -4168,12 +4176,16 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v3-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v4-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
     assert "일봉 블록을 함께 넣지 마라" in cyc, \
         "mixed-lane batch failure가 인트라데이 제안을 인질로 잡는다"
+    assert "factory_submit_leads`를 호출하거나" in cyc, \
+        "Planner가 기존 리드를 두고 다시 Scout 역할로 샌다"
+    assert "formula_contract_complete=true" in cyc and "다음 미사용 typed 수식" in cyc, \
+        "typed 수식 우선순위와 예산 초과 fallback이 빠졌다"
     print("  설계 공백·스카우트 소집   OK")
 
 
