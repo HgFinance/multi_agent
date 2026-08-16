@@ -1048,8 +1048,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
                               baseline=(b.get("BASELINE") or "").strip(),
-                              signal_expr=PI._maybe_json(
-                                  b.get("SUGGESTED_PARAMS", "")).get("signal_expr")))
+                              signal_expr=PI.signal_expr_from_block(b)))
             for prop, _g in r.proposals:
                 setattr(prop, "_planner_prompt", planner_prompt)
                 setattr(prop, "_skeptic_prompt", skeptic_prompt)

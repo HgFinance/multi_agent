@@ -76,12 +76,14 @@ REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
 OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
             "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
+            "RESEARCH_LANE", "SEMANTIC_PLAN",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
             "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE")
 _FIELD_RE = re.compile(
     r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
     r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
-    r"MISSING_DATA|MAPPING_LOSS|DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
+    r"MISSING_DATA|MAPPING_LOSS|RESEARCH_LANE|SEMANTIC_PLAN|"
+    r"DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
     r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE)\s*:\s*(.*)$")
 
 AST_READY = "AST_READY"
@@ -94,6 +96,12 @@ def _alpha_ast():
     """Load the container-neutral grammar shared with quant execution."""
     import alpha_ast_surface  # noqa: PLC0415
     return alpha_ast_surface
+
+
+def _intraday_ast():
+    """Load the exact event-time grammar used by the quant worker."""
+    import intraday_ast_contract  # noqa: PLC0415
+    return intraday_ast_contract
 
 
 def _literature_derivation():
@@ -121,6 +129,17 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
     missing_data = _as_text(block.get("MISSING_DATA"))
     mapping_loss = _as_text(block.get("MAPPING_LOSS"))
     raw_expr = block.get("CANDIDATE_SIGNAL_EXPR")
+    lane = _as_text(block.get("RESEARCH_LANE") or "DAILY_CROSS_SECTIONAL").upper()
+    if lane not in {"DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}:
+        raise ValueError("RESEARCH_LANE must be DAILY_CROSS_SECTIONAL or INTRADAY_EVENT")
+    raw_plan = block.get("SEMANTIC_PLAN")
+    semantic_plan = {}
+    if raw_plan not in (None, ""):
+        try:
+            semantic_plan = (raw_plan if isinstance(raw_plan, dict)
+                             else json.loads(_as_text(raw_plan)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid SEMANTIC_PLAN: {exc}") from exc
     candidate = None
 
     if readiness == AST_READY:
@@ -128,23 +147,36 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             raise ValueError("AST_READY requires OBSERVABLES and CANDIDATE_SIGNAL_EXPR")
         try:
             candidate = raw_expr if isinstance(raw_expr, dict) else json.loads(_as_text(raw_expr))
-            ast = _alpha_ast()
+            ast = _intraday_ast() if lane == "INTRADAY_EVENT" else _alpha_ast()
             candidate = ast.parse(candidate)
         except (ValueError, TypeError) as exc:
             raise ValueError(f"invalid CANDIDATE_SIGNAL_EXPR: {exc}") from exc
         fields = sorted(ast.fields_of(candidate))
         if observables != fields:
             raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
-        micro_fields = sorted(set(fields) & set(ast.MICRO_FIELDS))
-        if not micro_fields:
-            raise ValueError(
-                "MICROSTRUCTURE_PRIMARY_REQUIRED: AST_READY must use at least one "
-                "quote/trade microstructure field; daily close/notional/returns are "
-                "auxiliary execution, benchmark, and regime inputs only")
-        alignment = ast.check_alignment(
-            candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
-        if not alignment["ok"]:
-            raise ValueError(f"SEMANTIC_MISMATCH: {alignment['note']}")
+        if lane == "INTRADAY_EVENT":
+            if not semantic_plan:
+                raise ValueError("INTRADAY_EVENT AST_READY requires SEMANTIC_PLAN")
+            from alpha_semantics import check_observables, validate  # noqa: PLC0415
+            plan = validate(semantic_plan)
+            alignment = check_observables(
+                plan, fields, operators=ast.operators_of(candidate),
+                conditional_fields=ast.conditional_fields_of(candidate))
+            if not alignment["ok"]:
+                raise ValueError(
+                    "SEMANTIC_MISMATCH: " + "; ".join(alignment["missing"]))
+            semantic_plan = plan
+        else:
+            micro_fields = sorted(set(fields) & set(ast.MICRO_FIELDS))
+            if not micro_fields:
+                raise ValueError(
+                    "MICROSTRUCTURE_PRIMARY_REQUIRED: AST_READY must use at least one "
+                    "quote/trade microstructure field; daily close/notional/returns are "
+                    "auxiliary execution, benchmark, and regime inputs only")
+            alignment = ast.check_alignment(
+                candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
+            if not alignment["ok"]:
+                raise ValueError(f"SEMANTIC_MISMATCH: {alignment['note']}")
         # The source identity (lead_id) and formula identity are different things.
         # Persist both so independent papers supporting the same executable formula
         # can be consolidated instead of masquerading as novel experiments.
@@ -168,6 +200,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             source_baseline=raw_baseline,
             transforms=raw_transforms,
             novelty_rationale=block.get("NOVELTY_RATIONALE") or "",
+            ast_module=ast,
         )
     else:
         ast_fingerprint = ""
@@ -192,6 +225,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
     return {"ast_readiness": readiness, "observables": observables,
             "candidate_signal_expr": candidate, "missing_data": missing_data,
             "mapping_loss": mapping_loss,
+            "research_lane": lane, "semantic_plan": semantic_plan,
             "ast_fingerprint": ast_fingerprint,
             "ast_shape_fingerprint": ast_shape_fingerprint,
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY

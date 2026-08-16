@@ -49,6 +49,7 @@ MODULE_VERSION = "research-proposal-intake-v1"
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
+                "RESEARCH_LANE", "SEMANTIC_PLAN",
                 "FALSIFICATION_TESTS", "DATA_TABLES", "MIN_HISTORY_DAYS",
                 "SUGGESTED_PARAMS", "SOURCE_REPORTED_EFFECT", "TRIAL_BUDGET",
                 # ▶ **여기 없으면 앞 필드가 오염된다** (2026-08-13 실측)
@@ -137,6 +138,12 @@ def _maybe_json(v: str) -> dict:
         return d if isinstance(d, dict) else {}
     except ValueError:
         return {}
+
+
+def signal_expr_from_block(block: dict):
+    """Return the executable AST regardless of its research clock."""
+    params = _maybe_json(block.get("SUGGESTED_PARAMS", ""))
+    return params.get("signal_expr") or params.get("intraday_signal_expr")
 
 
 def _trial_budget(v) -> int:
@@ -275,6 +282,9 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         data_requirements=DataRequirement(tables=list(tables),
                                           min_history_days=min_days),
         suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
+        research_lane=(planner.get("RESEARCH_LANE") or
+                       "DAILY_CROSS_SECTIONAL").strip().upper(),
+        semantic_plan=_maybe_json(planner.get("SEMANTIC_PLAN", "")),
         trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
         # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
         #   몇 번 돌았는지·무엇으로 기각됐는지는 사실이라 우리가 채운다.
@@ -514,7 +524,9 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
             cur.execute("""
                 select experiment_id::text from quant.experiments
                  where config->'signal_expr' = %s::jsonb
-            """, (json.dumps(signal_expr, sort_keys=True),))
+                    or config->'intraday_signal_expr' = %s::jsonb
+            """, (json.dumps(signal_expr, sort_keys=True),
+                  json.dumps(signal_expr, sort_keys=True)))
             experiment_ids = [r[0] for r in cur.fetchall()]
         if not hyp_ids and not experiment_ids:
             return []
@@ -539,9 +551,10 @@ insert into research.experiment_proposals
    counterparty, competing_explanation, competing_explanation_codes,
    skeptic_sign, edge_type, universe_key, label, baseline,
    falsification_tests, data_requirements, suggested_params,
+   research_lane, semantic_plan,
    trial_budget, prior_check, source_reported_effect,
    planner_prompt_version, skeptic_prompt_version, status)
-values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
+values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
 on conflict (proposal_id) do nothing
 returning proposal_id
 """
@@ -559,7 +572,8 @@ def persist(conn, proposals) -> tuple[int, int]:
             p.edge_type, p.universe_key, p.label, p.baseline,
             list(p.falsification_tests),
             json.dumps(p.data_requirements.model_dump(mode="json")),
-            json.dumps(p.suggested_params), p.trial_budget,
+            json.dumps(p.suggested_params), p.research_lane.value,
+            json.dumps(p.semantic_plan), p.trial_budget,
             json.dumps(p.prior_check.model_dump(mode="json")),
             json.dumps(p.source_reported_effect),
             getattr(p, "_planner_prompt", ""), getattr(p, "_skeptic_prompt", "")))

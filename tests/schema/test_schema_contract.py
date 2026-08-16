@@ -143,6 +143,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # 같은 출처의 다른 AST 해석은 원 행을 덮지 않고 결정론적 revision
                 # lead로 분기한다. 같은 해석 재수집만 mentions로 접는다.
                 "20260816120000_methodology_lead_revision_lineage.sql",
+                # Typed research lane + governed raw quote/trade dataset contract.
+                "20260816150000_intraday_alpha_factory.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

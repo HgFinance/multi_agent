@@ -48,9 +48,10 @@ def _items(value) -> tuple[str, ...]:
 
 
 def assess(*, candidate: dict, mode: str, source_baseline=None,
-           transforms=(), novelty_rationale: str = "") -> dict:
+           transforms=(), novelty_rationale: str = "", ast_module=None) -> dict:
     """Validate and describe the derivation from public method to local candidate."""
-    candidate = ast.parse(candidate)
+    grammar = ast_module or ast
+    candidate = grammar.parse(candidate)
     mode = str(mode or "").strip().upper()
     if mode not in DERIVATION_MODES:
         raise ValueError(
@@ -64,13 +65,13 @@ def assess(*, candidate: dict, mode: str, source_baseline=None,
 
     baseline = None
     if source_baseline not in (None, ""):
-        baseline = ast.parse(source_baseline)
+        baseline = grammar.parse(source_baseline)
 
-    candidate_fp = ast.fingerprint(candidate)
-    candidate_shape = ast.shape_fingerprint(candidate)
-    baseline_fp = ast.fingerprint(baseline) if baseline else ""
-    baseline_shape = ast.shape_fingerprint(baseline) if baseline else ""
-    similarity = (ast.structural_similarity(candidate, baseline)
+    candidate_fp = grammar.fingerprint(candidate)
+    candidate_shape = grammar.shape_fingerprint(candidate)
+    baseline_fp = grammar.fingerprint(baseline) if baseline else ""
+    baseline_shape = grammar.shape_fingerprint(baseline) if baseline else ""
+    similarity = (grammar.structural_similarity(candidate, baseline)
                   if baseline is not None else None)
     rationale = str(novelty_rationale or "").strip()
 

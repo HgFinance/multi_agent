@@ -406,6 +406,9 @@ Gate 0의 가용 거래일도 이름 전체를 합산하지 않고 AST 필드가
 **intraday microstructure lane**으로 열어야 한다. 일봉 워크포워드와 세션 내 초단기
 예측을 한 성적표로 섞지 않는다.
 
+구현된 causal clock·markout·체결 하한 계약과 실데이터 acceptance 결과는
+[Intraday Microstructure Alpha Lane](INTRADAY_ALPHA_LANE.md)을 따른다.
+
 ### 6.4 `ExperimentProposalV1`
 
 리서치본부의 정본 산출물이다. 종목 견해가 아니라 **퀀트가 사전 등록할 수 있는 실험**이다.

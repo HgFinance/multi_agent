@@ -94,6 +94,11 @@ ECONOMIC_RATIONALE: (왜 이 초과수익이 존재할 수 있는가 - 메커니
 COUNTERPARTY: (누가 반대편에서 손해를 보는가. 이게 없으면 공짜 점심 주장이다)
 EDGE_TYPE: (아래 통제 어휘 중 하나)
 UNIVERSE_KEY: (아래 통제 어휘 중 하나)
+RESEARCH_LANE: DAILY_CROSS_SECTIONAL 또는 INTRADAY_EVENT
+SEMANTIC_PLAN: (Event/Context/Qualities/Direction/Output JSON. intraday는 필수.
+    예: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],
+    "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",
+    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30})
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
@@ -123,6 +128,36 @@ LESSONS_ADDRESSED: (이 계열이 전에 기각됐다면 **교훈코드=이번�
 COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 미리 안 적으면
 나중에 어떤 결과가 나와도 설명이 붙는다 - 그 순간 실험은 검증이 아니라 서사가
 된다. '과적합일 수 있다' 같은 일반론은 아무것도 막지 못하므로 구체적으로 써라."""
+
+# Intraday proposals use a different clock and therefore a different AST.  Keeping
+# this next to the planner contract prevents the agent from putting second-based
+# windows into the daily ``signal_expr`` field.
+INTRADAY_PLANNER_NOTE = """
+[INTRADAY_EVENT 추가 계약]
+DATA_TABLES: market_quotes, market_ticks
+MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미만은
+  UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
+SUGGESTED_PARAMS JSON 필수 키:
+  intraday_signal_expr, horizon_seconds, sample_interval_seconds,
+  feature_lookback_seconds, order_latency_ms, execution
+position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
+point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
+비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
+fee_bps_per_side=11.5, maker_fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서
+거부한다. 더 높은 실제 계좌 비용을 알면 반드시 그 값으로 올려 적는다.
+intraday_signal_expr 연산자:
+  field; lag/rolling_mean/rolling_std/rolling_sum/delta/ewma/rolling_zscore
+  (모두 seconds 명시); neg/abs/sign/log1p_abs/sqrt_abs;
+  add/sub/mul/div/min/max/gt/lt/and/or/where
+필드:
+  queue_imbalance_l1, queue_imbalance_l10, microprice_offset_bps,
+  trade_flow_imbalance, quote_event_ofi, normalized_quote_ofi, spread_bps,
+  bid_depth_l1, ask_depth_l1, book_depth_l1, book_depth_l10,
+  trade_count, quote_count, trade_intensity, realized_volatility_bps, quote_age_ms
+상수는 {"const":2,"unit":"BPS"}처럼 단위를 쓴다. 서로 다른 단위의 add/sub,
+미래시각, 3600초 초과 창은 접수에서 거부된다. 공개 논문 수식을 그대로 복제하지
+말고 상태조건·L1/L10 차이·다중시간창·실패모드 역전 중 메커니즘에 맞는 변형을 낸다.
+"""
 
 SKEPTIC_FORMAT = """\
 [산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
@@ -185,7 +220,9 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        coalesce(l.ast_contract->>'derivation_mode', 'UNCLASSIFIED') as derivation_mode,
        coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb) as derivation_transforms,
        l.ast_contract->>'candidate_vs_source_similarity' as source_similarity,
-       coalesce(l.ast_contract->>'novelty_rationale', '') as novelty_rationale
+       coalesce(l.ast_contract->>'novelty_rationale', '') as novelty_rationale,
+       coalesce(l.ast_contract->>'research_lane', 'DAILY_CROSS_SECTIONAL') as research_lane,
+       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb) as semantic_plan
   from research.methodology_leads l
  where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
@@ -201,6 +238,10 @@ def _ast_scout_contract() -> str:
     sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
     from alpha_ast import (  # noqa: PLC0415
         ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES, MICRO_FIELDS,
+    )
+    from intraday_alpha_ast import (  # noqa: PLC0415
+        ALL_OPS as INTRADAY_OPS, FIELDS as INTRADAY_FIELDS,
+        MAX_DEPTH as INTRADAY_MAX_DEPTH, MAX_NODES as INTRADAY_MAX_NODES,
     )
     return "\n".join([
         "[AST-ready literature contract]",
@@ -249,6 +290,19 @@ def _ast_scout_contract() -> str:
         "  or regime auxiliaries. Short microstructure history is accepted and must not be",
         "  replaced with a price-only daily proxy; report the uncertainty honestly.",
         "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
+        "  RAW EVENT-TIME LANE IS NOW EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
+        "  and include a typed SEMANTIC_PLAN whenever the mechanism lives at seconds/ticks.",
+        "  Event-time fields: " + ", ".join(sorted(INTRADAY_FIELDS)),
+        "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
+        f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
+        "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
+        "  SEMANTIC_PLAN uses Event/Context/Qualities/Direction/Output, for example:",
+        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
+        '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
+        '   "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":5}.',
+        "  State contexts must be implemented in a where-condition; declared qualities",
+        "  must be visible in the AST. Queue position, cancellations and order lifetime",
+        "  remain DATA_BLOCKED; raw quote/trade event time itself is no longer blocked.",
     ])
 
 
@@ -790,6 +844,7 @@ def _ast_experience_block(conn) -> str:
     """Deterministic positive/negative AST memory for both scout and planner."""
     try:
         import ast_experience as AX                 # noqa: PLC0415
+        import intraday_experience as IX            # noqa: PLC0415
 
         with conn.cursor() as cur:
             cur.execute("""
@@ -833,7 +888,29 @@ def _ast_experience_block(conn) -> str:
                       "derivation_transforms": row[6] or [],
                       "source_baseline_expr": row[7]}
                      for row in cur.fetchall()]
-        return AX.render(AX.build(experiments, leads))
+            cur.execute("""
+                select e.config->'intraday_signal_expr',
+                       e.config->'semantic_plan',
+                       coalesce(o.decision, ''),
+                       coalesce(o.lesson_codes, '{}'::text[]),
+                       coalesce(o.oos_summary, '{}'::jsonb), h.title
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join lateral (
+                    select decision, lesson_codes, oos_summary
+                      from research.experiment_outcomes x
+                     where x.experiment_id = e.experiment_id::text
+                     order by x.decided_at desc limit 1
+                  ) o on true
+                 where e.config ? 'intraday_signal_expr'
+                 order by e.created_at desc""")
+            intraday = [{
+                "intraday_signal_expr": row[0], "semantic_plan": row[1] or {},
+                "decision": row[2], "lesson_codes": list(row[3] or []),
+                "oos_summary": row[4] or {}, "title": row[5],
+            } for row in cur.fetchall()]
+        return (AX.render(AX.build(experiments, leads)) +
+                IX.render(IX.build(intraday)))
     except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
         return ""
 
@@ -853,6 +930,8 @@ def _compose_research_brief(conn, brief, leads) -> str:
             transforms = row[11] if len(row) > 11 else []
             source_similarity = row[12] if len(row) > 12 else None
             novelty_rationale = str(row[13]) if len(row) > 13 else ""
+            research_lane = str(row[14]) if len(row) > 14 else "DAILY_CROSS_SECTIONAL"
+            semantic_plan = row[15] if len(row) > 15 else {}
             # **쓴 것과 안 쓴 것을 눈에 보이게 가른다.** 안 가르면 이미
             # 기각된 계열을 다시 내게 된다(2026-08-12 실측으로 공장이 멈췄다)
             tag = "이미 씀" if used else "**미사용**"
@@ -862,8 +941,14 @@ def _compose_research_brief(conn, brief, leads) -> str:
             if observables:
                 out.append(f"      관측변수: {observables}")
             if candidate:
-                out.append("      후보 signal_expr: " + json.dumps(
+                expr_label = ("intraday_signal_expr" if research_lane == "INTRADAY_EVENT"
+                              else "signal_expr")
+                out.append(f"      후보 {expr_label}: " + json.dumps(
                     candidate, ensure_ascii=False, separators=(",", ":")))
+            out.append(f"      연구 lane: {research_lane}")
+            if semantic_plan:
+                out.append("      semantic_plan: " + json.dumps(
+                    semantic_plan, ensure_ascii=False, separators=(",", ":")))
             out.append(
                 f"      문헌 파생: {derivation_mode} transforms={transforms} "
                 f"source_similarity={source_similarity or 'n/a'}")
@@ -2085,8 +2170,7 @@ def harvest(*, dry_run: bool = False) -> int:
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
                               baseline=(b.get("BASELINE") or "").strip(),
-                              signal_expr=PI._maybe_json(
-                                  b.get("SUGGESTED_PARAMS", "")).get("signal_expr")))
+                              signal_expr=PI.signal_expr_from_block(b)))
             pub = r.publishable
             if dry_run:
                 print(f"  [dry-run] {stamp}: 발행가능 {len(pub)}건 "
@@ -2594,11 +2678,10 @@ def cycle(*, dry_run: bool = False) -> int:
                   "MECHANISM_MUTATION 또는 CROSS_DOMAIN_TRANSFER로 파생하라. 창·상수만 "
                   "바꾼 식은 신규성이 없어서 접수에서 거부된다. "
                   "소스 자체에 데이터셋·한국 표본·OOS 결과가 없다는 이유만으로 "
-                  "DATA_BLOCKED라 하지 마라 - 위 지원 필드는 우리 PIT 일별 집계에 "
-                  "이미 있다. `daily cross-sectional order flow imbalance`, "
-                  "`daily liquidity pressure next-day returns`처럼 **일별 집계로 "
-                  "옮겨도 같은 메커니즘인 문헌**을 먼저 찾아라. 반대로 초·틱·큐 "
-                  "위치·취소 수명이 핵심이면 정직하게 차단하라. "
+                  "DATA_BLOCKED라 하지 마라. 일별 메커니즘은 DAILY_CROSS_SECTIONAL, "
+                  "초·틱 메커니즘은 INTRADAY_EVENT로 적는다. raw quote/trade event는 "
+                  "이미 실행 가능하다. 다만 큐 위치·취소 수명처럼 스냅샷으로 복원할 "
+                  "수 없는 관측이 핵심이면 정직하게 차단하라. "
                   "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
                   "CROSS_DOMAIN 우물을 우선하라."),
                 assignee="research-department",
@@ -2641,7 +2724,8 @@ def cycle(*, dry_run: bool = False) -> int:
         pstamp = f"{_pnow:%Y%m%dT%H}{'a' if _pnow.minute < 30 else 'b'}"
         _create_card(
             title=f"공장 주기 [기획자]: 다음 실험 기획안 {pstamp}",
-            body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n"
+            body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n" +
+                  INTRADAY_PLANNER_NOTE + "\n\n"
                   + DELIVERY_RULES + "\n"
                   "[규칙]\n"
                   # ▶ **칸 이름을 바로잡았다** (2026-08-13 실측)

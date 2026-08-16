@@ -79,6 +79,7 @@ walk-forward·DSR·PBO·국면·릴리스 관문)은 **이미 `pipeline/`의 결
 | `pipeline/pit_dataset.py` | Universe·Available Time을 보존한 Dataset Manifest·Partition | 자체 점검 3개 통과, 실제 Dataset 1개 |
 | `pipeline/backtest_runner.py` | t-1 Signal, FIFO 손익, 비용과 재현 Hash | 자체 점검 5개 통과, 실제 Run 3개 |
 | `pipeline/walk_forward.py` | 겹치지 않는 Window와 Fragility 판정 | 자체 점검 6개 통과 |
+| `pipeline/intraday_microstructure.py` | 수신시각 기준 호가·체결 동기화, 복수 horizon markout, taker 및 보수적 passive FIFO 평가 | `tests/test_intraday_microstructure_lane.py` |
 | `pipeline/experiment_orchestrator.py` | 데이터·전략 가능성 Gate와 상태 전이 | 자체 점검 3개 통과, 실제 Experiment 4개 |
 | `hermes/` | 본부장 Profile, 직원 Persona와 Strategy Research Workflow | Runtime 통합 전 |
 

@@ -148,7 +148,7 @@ def theme_of(edge_type: str) -> str:
 def family_key(hyp: dict) -> dict:
     """가설 -> Family 를 정하는 재료. **튜닝 값·자유 서술은 안 들어간다.**"""
     edge = hyp.get("expected_edge") or {}
-    return {
+    key = {
         "edge_type": str(edge.get("type") or "").strip().lower(),
         # 구조화된 키가 있으면 그것을, 없으면 서술에서 사상한다
         "universe_key": (str(edge.get("universe_key") or "").strip().lower()
@@ -157,20 +157,29 @@ def family_key(hyp: dict) -> dict:
         "label": _norm_text(hyp.get("label") or edge.get("label")),
         "baseline": _norm_text(hyp.get("baseline")),
     }
+    if str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT":
+        key["research_lane"] = "INTRADAY_EVENT"
+        key["semantic_fingerprint"] = str(
+            edge.get("semantic_fingerprint") or "").strip().lower()
+    return key
 
 
 def hypothesis_view(*, edge_type=None, universe_key=None, universe=None,
-                    label=None, baseline=None) -> dict:
+                    label=None, baseline=None, research_lane=None,
+                    semantic_fingerprint=None) -> dict:
     """Family 계산 입력의 **정본**. 접수(Gate 0)와 실행면이 이 함수를 함께 쓴다.
 
     양쪽이 각자 dict 를 만들면 기본값이 갈리고, 갈리면 같은 컨셉이 두 개의
     Family 로 쪼개져 **한쪽이 세는 계열에 다른 쪽이 아무것도 각인하지 않는다.**
     실제로 그렇게 됐다(모듈 상단 주석). 만드는 곳을 하나로 둔다.
     """
+    edge = {"type": edge_type, "universe_key": universe_key,
+            "universe": universe}
+    if str(research_lane or "").upper() == "INTRADAY_EVENT":
+        edge.update({"research_lane": "INTRADAY_EVENT",
+                     "semantic_fingerprint": semantic_fingerprint})
     return {
-        "expected_edge": {"type": edge_type,
-                          "universe_key": universe_key,
-                          "universe": universe},
+        "expected_edge": edge,
         "label": label or DEFAULT_LABEL,
         "baseline": baseline or DEFAULT_BASELINE,
     }
@@ -189,7 +198,9 @@ def family_of_hypothesis_row(row: dict) -> str:
         universe_key=edge.get("universe_key"),
         universe=edge.get("universe") or row.get("universe"),
         label=row.get("label") or edge.get("label"),
-        baseline=row.get("baseline")))
+        baseline=row.get("baseline"),
+        research_lane=edge.get("research_lane"),
+        semantic_fingerprint=edge.get("semantic_fingerprint")))
 
 
 def family_id(hyp: dict) -> str:
