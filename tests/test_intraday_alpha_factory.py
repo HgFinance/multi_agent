@@ -529,7 +529,7 @@ URL: https://example.test/tight-spread
     assert block["FORMULA_THESIS"].endswith("locked costs.\"}")
 
     lead = lead_intake.to_lead(
-        block, lens="PRACTITIONER", source_type="PRACTITIONER",
+        block, lens="PRACTITIONER", source_type="BLOG",
         case_id="case-parser-regression", model_version="test-model",
         prompt_version="scout-parser-v5")
     contract = lead["ast_contract"]
@@ -539,6 +539,12 @@ URL: https://example.test/tight-spread
     assert lead["claimed_edge"].startswith("Signed quote pressure")
     assert lead["refs"][0]["source_published"] == "2026-04-04"
     assert lead["refs"][0]["declared_accessed"] == "2026-08-17"
+
+    with pytest.raises(ValueError, match="source medium.*not the Scout lens"):
+        lead_intake.to_lead(
+            block, lens="PRACTITIONER", source_type="PRACTITIONER",
+            case_id="case-source-type-regression", model_version="test-model",
+            prompt_version="scout-parser-v5")
 
 
 def test_intraday_gate_rejects_story_formula_mismatch() -> None:
