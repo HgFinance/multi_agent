@@ -2409,6 +2409,16 @@ select h.hypothesis_id::text, left(h.title, 60)
    and not exists (select 1 from quant.experiment_jobs j
                     where j.hypothesis_id = h.hypothesis_id
                       and j.status in ('QUEUED','LEASED'))
+   -- A blocked coverage probe is not a failed experiment. Recheck hourly so a
+   -- newly arriving causal session automatically unblocks the candidate while
+   -- avoiding a tight queue/retry loop.
+   and not exists (
+         select 1
+           from quant.data_feasibility_checks f
+          where f.hypothesis_id = h.hypothesis_id
+            and f.status = 'NEEDS_DATA'
+            and f.last_checked_at >= now() - interval '1 hour'
+       )
  order by h.created_at
  limit %s
 """

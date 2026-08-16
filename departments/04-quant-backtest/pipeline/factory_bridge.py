@@ -1028,6 +1028,18 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
             out.append("BASELINE_NOT_BEATEN")
         if (oos.get("max_drawdown_pct") or 0) < -30 or (oos.get("max_drawdown") or 0) < -0.30:
             out.append("BEAR_FRAGILE")
+        # Intraday feedback must distinguish a bad economic signal from an
+        # implementation-cost failure. Optimising execution cannot rescue a
+        # negative gross markout; conversely, discarding a positive gross
+        # mechanism because spread/fees flipped net P&L loses useful structure.
+        try:
+            gross = float(oos["mean_mid_markout_bps"])
+            net = float(oos["mean_net_bps_per_opportunity"])
+        except (KeyError, TypeError, ValueError):
+            gross = net = None
+        if net is not None and net <= 0:
+            out.append("COST_SENSITIVE" if gross > 0 else
+                       "BASELINE_NOT_BEATEN")
 
     if str(fragility).upper() == "INSUFFICIENT":
         # 창이 0개라 강건성을 재지 못했다. "전략이 나쁘다" 가 아니라 **표본이

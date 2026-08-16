@@ -19,7 +19,7 @@ from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       source_quality)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v1"
+RUNNER_VERSION = "intraday-experiment-runner-v2"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -34,8 +34,8 @@ _SESSION_DATES_SQL = """
 select distinct (event_time at time zone 'Asia/Seoul')::date as session_date
   from market.market_quotes
  where received_at is not null
-   and observed_at >= %s
-   and observed_at <= %s
+   and event_time >= %s
+   and greatest(received_at, observed_at) <= %s
    and event_time < (
          date_trunc('day', %s at time zone 'Asia/Seoul')
          at time zone 'Asia/Seoul'
@@ -48,7 +48,8 @@ _LIQUID_UNIVERSE_SQL = """
 select instrument_id::text, count(*) as quote_events
   from market.market_quotes
  where event_time >= %s and event_time < %s
-   and observed_at <= %s and received_at is not null
+   and received_at is not null
+   and greatest(received_at, observed_at) <= %s
    and bid_prices[1] > 0 and ask_prices[1] >= bid_prices[1]
  group by instrument_id
  order by quote_events desc, instrument_id::text
@@ -57,16 +58,20 @@ select instrument_id::text, count(*) as quote_events
 
 _LINEAGE_SQL = """
 select 'market_quotes' as source, count(*)::bigint,
-       min(event_time), max(event_time), max(observed_at)
+       min(event_time), max(event_time), max(observed_at),
+       max(greatest(received_at, observed_at))
   from market.market_quotes
  where instrument_id::text = any(%s) and event_time >= %s and event_time < %s
-   and observed_at <= %s
+   and received_at is not null
+   and greatest(received_at, observed_at) <= %s
 union all
 select 'market_ticks' as source, count(*)::bigint,
-       min(event_time), max(event_time), max(observed_at)
+       min(event_time), max(event_time), max(observed_at),
+       max(greatest(received_at, observed_at))
   from market.market_ticks
  where instrument_id::text = any(%s) and event_time >= %s and event_time < %s
-   and observed_at <= %s
+   and received_at is not null
+   and greatest(received_at, observed_at) <= %s
 order by source
 """
 
@@ -148,7 +153,13 @@ def _session_bounds(day) -> tuple[datetime, datetime]:
 
 
 def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
-    """Choose instruments only from sessions preceding the evaluation slice."""
+    """Choose a causal calibration universe strictly before the OOS slice.
+
+    Five calibration sessions are preferred, not required.  A newly started
+    live feed can therefore produce an explicitly underpowered diagnostic as
+    soon as two causal sessions exist.  Statistical promotion thresholds stay
+    unchanged in ``evaluate_candidate``.
+    """
     calibration_days = 5
     # A LIMIT after DISTINCT/ORDER BY does not bound a hypertable scan: without
     # a lower partition-key predicate Timescale must visit every compressed
@@ -163,13 +174,23 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
                     (oldest_possible, cutoff, cutoff,
                      config["evaluation_days"] + calibration_days))
         days = sorted(row[0] for row in cur.fetchall())
-    if len(days) <= calibration_days:
-        return {"status": "INSUFFICIENT_SESSIONS", "sessions": days,
-                "instruments": []}
-    eval_days = days[-config["evaluation_days"]:]
-    calibration = days[:-len(eval_days)]
-    if not calibration:
-        calibration = [eval_days.pop(0)]
+    common = {
+        "causal_sessions_available": len(days),
+        "requested_evaluation_sessions": config["evaluation_days"],
+    }
+    if len(days) < 2:
+        return {"status": "INSUFFICIENT_SESSIONS", "sessions": [],
+                "instruments": [], "calibration_sessions": [],
+                "statistical_readiness": "NEEDS_DATA", **common}
+
+    # Retain at least one earlier session for a point-in-time universe.  With
+    # enough history this is exactly five calibration + N requested OOS days;
+    # with short live history it becomes one calibration + the remaining OOS
+    # days instead of fabricating arrival timestamps for legacy backfills.
+    evaluation_count = min(config["evaluation_days"], len(days) - 1)
+    eval_days = days[-evaluation_count:]
+    preceding = days[:-evaluation_count]
+    calibration = preceding[-calibration_days:]
     calibration_start, _ = _session_bounds(calibration[0])
     _, calibration_end = _session_bounds(calibration[-1])
     with market_conn.cursor() as cur:
@@ -177,10 +198,15 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
                     (calibration_start, calibration_end + timedelta(hours=1),
                      cutoff, config["instrument_count"]))
         instruments = [row[0] for row in cur.fetchall()]
+    readiness = ("FULL" if evaluation_count >= config["evaluation_days"]
+                 else "SHORT_DIAGNOSTIC")
     return {"status": "PASS" if len(instruments) >= 2 else "INSUFFICIENT_INSTRUMENTS",
-            "selection_rule": "top quote-event count in five pre-evaluation sessions",
+            "selection_rule": "top quote-event count in up to five pre-evaluation sessions",
             "calibration_sessions": [str(day) for day in calibration],
-            "sessions": eval_days, "instruments": instruments}
+            "calibration_session_count": len(calibration),
+            "evaluation_session_count": len(eval_days),
+            "statistical_readiness": readiness,
+            "sessions": eval_days, "instruments": instruments, **common}
 
 
 def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
@@ -195,7 +221,8 @@ def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
     return [{"source": row[0], "rows": int(row[1]),
              "min_event_time": row[2].isoformat() if row[2] else None,
              "max_event_time": row[3].isoformat() if row[3] else None,
-             "max_observed_at": row[4].isoformat() if row[4] else None}
+             "max_observed_at": row[4].isoformat() if row[4] else None,
+             "max_available_at": row[5].isoformat() if row[5] else None}
             for row in rows]
 
 
@@ -205,9 +232,59 @@ def _input_hash(hypothesis_id: str, config: dict) -> str:
     # data inside the evaluated slice changes, so retries are idempotent without
     # hiding late-arriving observations.
     identity = {key: value for key, value in config.items() if key != "cutoff"}
-    payload = json.dumps({"hypothesis_id": hypothesis_id, **identity},
+    payload = json.dumps({"hypothesis_id": hypothesis_id,
+                          "runner_version": RUNNER_VERSION,
+                          "evaluator_version": EVALUATOR_VERSION,
+                          "cost_model_version": COST_MODEL_VERSION,
+                          **identity},
                          sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def prepare(hyp: dict, *, market_conn,
+            cutoff: datetime | None = None) -> dict:
+    """Freeze the causal slice before preregistration or trial allocation."""
+    edge = hyp.get("expected_edge") or {}
+    config, spec = config_from_edge(edge)
+    frozen_cutoff = cutoff or datetime.now(timezone.utc)
+    selected = select_slice(market_conn, config, cutoff=frozen_cutoff)
+    return {"config": config, "spec": spec, "cutoff": frozen_cutoff,
+            "selected": selected}
+
+
+def record_data_feasibility(meta_conn, hypothesis_id: str,
+                            prepared: dict) -> dict:
+    """Persist a coverage probe without creating an experiment/trial row."""
+    selected = prepared["selected"]
+    status = "PASS" if selected.get("status") == "PASS" else "NEEDS_DATA"
+    details = {
+        "runner_version": RUNNER_VERSION,
+        "research_lane": "INTRADAY_EVENT",
+        "slice": {**selected,
+                  "sessions": [str(day) for day in selected.get("sessions", [])]},
+    }
+    blob = json.dumps(details, sort_keys=True, separators=(",", ":"),
+                      default=str)
+    coverage_fingerprint = hashlib.sha256(blob.encode()).hexdigest()
+    cutoff = prepared["cutoff"]
+    with meta_conn.cursor() as cur:
+        cur.execute("""
+            insert into quant.data_feasibility_checks
+              (hypothesis_id, research_lane, cutoff, coverage_fingerprint,
+               status, details, first_checked_at, last_checked_at)
+            values (%s,'INTRADAY_EVENT',%s,%s,%s,%s::jsonb,now(),now())
+            on conflict (hypothesis_id, coverage_fingerprint) do update set
+              cutoff=excluded.cutoff,
+              status=excluded.status,
+              details=excluded.details,
+              last_checked_at=now()
+            returning check_id::text
+        """, (hypothesis_id, cutoff, coverage_fingerprint, status, blob))
+        check_id = cur.fetchone()[0]
+    meta_conn.commit()
+    return {"check_id": check_id, "status": status,
+            "coverage_fingerprint": coverage_fingerprint,
+            "details": details}
 
 
 def _register(meta_conn, hypothesis_id: str, config: dict) -> tuple[str, bool]:
@@ -378,10 +455,16 @@ def persist_final_gate(meta_conn, experiment_id: str, report: dict) -> None:
 
 
 def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
-    edge = hyp.get("expected_edge") or {}
-    config, spec = config_from_edge(edge)
-    cutoff = datetime.now(timezone.utc)
-    selected = select_slice(market_conn, config, cutoff=cutoff)
+    prepared = hyp.get("_intraday_preflight") or prepare(
+        hyp, market_conn=market_conn)
+    config = prepared["config"]
+    spec = prepared["spec"]
+    cutoff = prepared["cutoff"]
+    selected = prepared["selected"]
+    if selected.get("status") != "PASS":
+        raise RuntimeError(
+            "intraday run called with non-executable feasibility slice: "
+            f"{selected.get('status')}")
     lineage = _lineage(market_conn, selected, cutoff)
     persisted = {**config, "cutoff": cutoff.isoformat(),
                  "slice": {**selected,

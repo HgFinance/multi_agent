@@ -147,6 +147,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260816150000_intraday_alpha_factory.sql",
                 # Independent skeptic STOP/PROCEED artifacts survive MCP restarts.
                 "20260816170000_proposal_review_outcomes.sql",
+                # Intraday causal coverage probes stay outside experiment trials.
+                "20260816180000_intraday_data_feasibility.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -256,7 +258,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "execution": 14,
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
-            "quant": 13,
+            # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리
+            "quant": 14,
             "reference": 9,
             # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측

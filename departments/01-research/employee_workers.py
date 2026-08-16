@@ -95,6 +95,40 @@ def _validate_skeptic_reviews_against_input(value: Any,
         raise ValueError("proposal_draft must contain at least one TITLE line")
     reviews = list(value) if isinstance(value, list) else []
 
+    def _merge_single_proposal(items: list[Any]) -> list[dict]:
+        """Conservatively fold over-generation into one independent review.
+
+        A small model often emits several alternative attacks on one proposal.
+        Dropping all of them wastes a valid skeptic run; selecting one weakens
+        it arbitrarily. Unioning codes/tests and letting STOP dominate retains
+        every objection without granting any additional authority.
+        """
+        validated = [_validate_skeptic_review(item) for item in items]
+        if not validated:
+            raise ValueError("skeptic_reviews must contain exactly 1 item")
+
+        def unique_text(key: str) -> str:
+            seen, parts = set(), []
+            for item in validated:
+                text = str(item[key]).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    parts.append(text)
+            return "; ".join(parts)
+
+        allowed = ("BETA_EXPOSURE", "LIQUIDITY_PREMIUM", "DATA_MINING",
+                   "COST_UNACCOUNTED")
+        present = {code for item in validated
+                   for code in item["competing_codes"]}
+        return [{
+            "title": titles[0],
+            "competing_explanation": unique_text("competing_explanation"),
+            "competing_codes": [code for code in allowed if code in present],
+            "verdict": ("STOP" if any(item["verdict"] == "STOP"
+                                       for item in validated) else "PROCEED"),
+            "falsification_test": unique_text("falsification_test"),
+        }]
+
     # Small reviewer models occasionally echo reviews for proposals that were
     # present in retrieved context even though proposal_draft contains only one
     # active block.  Do not let those unrelated, explicitly named artifacts
@@ -112,6 +146,8 @@ def _validate_skeptic_reviews_against_input(value: Any,
                 and len(set(exact_titles)) == len(titles)
                 and set(exact_titles) == title_set):
             reviews = exact
+    if len(titles) == 1 and len(reviews) != 1:
+        reviews = _merge_single_proposal(reviews)
     if len(reviews) != len(titles):
         raise ValueError(
             f"skeptic_reviews must contain exactly {len(titles)} item(s), one for "
@@ -159,7 +195,9 @@ WORKER_SPECS = (
             "array\"}. Choose one or more allowed competing_codes yourself; do not omit "
             "that key. PROCEED means the proposal is testable after recording that "
             "challenge; STOP means it is too vague or invalid to spend a trial. Do not "
-            "soften the review to make it pass."
+            "soften the review to make it pass. Even when you identify several attacks "
+            "on one proposal, combine them inside that proposal's single review item; "
+            "never emit alternative review items for the same TITLE."
         ),
         structured_artifact=StructuredArtifactSpec(
             key="skeptic_reviews",

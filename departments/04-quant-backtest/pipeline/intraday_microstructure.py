@@ -715,7 +715,7 @@ select event_time, received_at, observed_at, instrument_id::text,
  where instrument_id = %s
    and event_time >= %s and event_time < %s
    and received_at is not null
-   and observed_at <= %s
+   and greatest(received_at, observed_at) <= %s
    and bid_prices[1] > 0 and ask_prices[1] > 0
    and ask_prices[1] >= bid_prices[1]
  order by event_time, source_event_id
@@ -728,7 +728,7 @@ select event_time, received_at, observed_at, instrument_id::text,
  where instrument_id = %s
    and event_time >= %s and event_time < %s
    and received_at is not null
-   and observed_at <= %s
+   and greatest(received_at, observed_at) <= %s
  order by event_time, source_event_id
 """
 
@@ -743,7 +743,7 @@ select count(*) as total_quotes,
   from market.market_quotes
  where instrument_id = %s
    and event_time >= %s and event_time < %s
-   and observed_at <= %s
+   and greatest(received_at, observed_at) <= %s
 """
 
 

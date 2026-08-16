@@ -22,8 +22,9 @@ from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import evaluate_candidate
 from factory_bridge import expected_edge_for, gate0
+from factory_bridge import lessons_from
 from intraday_experiment_runner import (_input_hash, config_from_edge,
-                                        select_slice)
+                                        record_data_feasibility, select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
                                       IntradaySample)
 from trial_family import family_id, hypothesis_view
@@ -135,6 +136,7 @@ def test_candidate_requires_session_level_evidence_and_can_submit_only_to_qa() -
     assert report["decision"] == "SUBMIT_TO_QA"
     assert report["summary"]["sessions"] == 70
     assert report["summary"]["opportunities"] == 280
+    assert report["summary"]["mean_implementation_drag_bps"] == pytest.approx(1.0)
     assert report["failed_criteria"] == []
     assert "not_a_promotion" in report
 
@@ -292,10 +294,7 @@ def test_session_discovery_is_partition_bounded_and_cutoff_reproducible() -> Non
             self.conn.executed.append((sql, params))
 
         def fetchall(self):
-            # Not enough calibration sessions: select_slice returns before the
-            # universe query, keeping this regression focused on discovery.
-            return [(date(2026, 8, 12),), (date(2026, 8, 13),),
-                    (date(2026, 8, 14),)]
+            return [(date(2026, 8, 14),)]
 
     class Conn:
         def __init__(self): self.executed = []
@@ -307,9 +306,92 @@ def test_session_discovery_is_partition_bounded_and_cutoff_reproducible() -> Non
         conn, {"evaluation_days": 60, "instrument_count": 2}, cutoff=cutoff)
     sql, params = conn.executed[0]
     assert selected["status"] == "INSUFFICIENT_SESSIONS"
-    assert "observed_at >= %s" in sql
+    assert selected["causal_sessions_available"] == 1
+    assert selected["sessions"] == []  # the only day is reserved for calibration
+    assert "event_time >= %s" in sql
+    assert "greatest(received_at, observed_at) <= %s" in sql
     assert "now()" not in sql
     assert params == (cutoff - timedelta(days=180), cutoff, cutoff, 65)
+
+
+def test_short_live_history_runs_one_calibration_and_two_oos_sessions() -> None:
+    class Cursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+        def execute(self, sql, params):
+            self.conn.executed.append((sql, params))
+
+        def fetchall(self):
+            if len(self.conn.executed) == 1:
+                return [(date(2026, 8, 14),), (date(2026, 8, 13),),
+                        (date(2026, 8, 12),)]
+            return [("instrument-a", 33_000), ("instrument-b", 29_000)]
+
+    class Conn:
+        def __init__(self): self.executed = []
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    cutoff = datetime(2026, 8, 16, 3, 0, tzinfo=timezone.utc)
+    selected = select_slice(
+        conn, {"evaluation_days": 60, "instrument_count": 2}, cutoff=cutoff)
+
+    assert selected["status"] == "PASS"
+    assert selected["statistical_readiness"] == "SHORT_DIAGNOSTIC"
+    assert selected["calibration_sessions"] == ["2026-08-12"]
+    assert selected["sessions"] == [date(2026, 8, 13), date(2026, 8, 14)]
+    assert selected["evaluation_session_count"] == 2
+    assert selected["instruments"] == ["instrument-a", "instrument-b"]
+    universe_sql, universe_params = conn.executed[1]
+    assert "greatest(received_at, observed_at) <= %s" in universe_sql
+    assert universe_params[2] == cutoff
+
+
+def test_data_feasibility_probe_is_persisted_outside_experiment_ledger() -> None:
+    class Cursor:
+        def __init__(self, conn): self.conn = conn
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params): self.conn.executed.append((sql, params))
+        def fetchone(self): return ("check-1",)
+
+    class Conn:
+        def __init__(self): self.executed, self.commits = [], 0
+        def cursor(self): return Cursor(self)
+        def commit(self): self.commits += 1
+
+    conn = Conn()
+    result = record_data_feasibility(conn, "hyp-1", {
+        "cutoff": datetime(2026, 8, 16, tzinfo=timezone.utc),
+        "selected": {
+            "status": "INSUFFICIENT_SESSIONS", "sessions": [],
+            "instruments": [], "causal_sessions_available": 1,
+        },
+    })
+
+    sql, params = conn.executed[0]
+    assert result["status"] == "NEEDS_DATA"
+    assert "quant.data_feasibility_checks" in sql
+    assert "quant.experiments" not in sql
+    assert len(params[2]) == 64
+    assert conn.commits == 1
+
+
+def test_feasibility_schema_and_autopilot_retry_do_not_spend_trials() -> None:
+    migration = (ROOT / "supabase" / "migrations" /
+                 "20260816180000_intraday_data_feasibility.sql").read_text(
+                     encoding="utf-8")
+    autopilot = (ROOT / "departments" / "01-research" / "factory" /
+                 "factory_autopilot.py").read_text(encoding="utf-8")
+    assert "quant.data_feasibility_checks" in migration
+    assert "references quant.experiments" not in migration
+    assert "must not count toward trial pressure, DSR, or PBO" in migration
+    assert "f.status = 'NEEDS_DATA'" in autopilot
+    assert "interval '1 hour'" in autopilot
 
 
 def test_intraday_outcomes_become_creative_search_memory() -> None:
@@ -325,7 +407,22 @@ def test_intraday_outcomes_become_creative_search_memory() -> None:
     assert memory.experiments == 1 and memory.semantic_families == 1
     assert "COST_SENSITIVE" in text
     assert "underexplored events" in text
+    assert "implementation_drag=" in text
     assert "숫자 horizon만 바꾼 것은 새 아이디어가 아니다" in text
+
+
+def test_intraday_feedback_separates_bad_signal_from_cost_flip() -> None:
+    bad_signal = lessons_from(
+        failed_criteria=["NET_EDGE_NOT_POSITIVE"],
+        oos_summary={"mean_mid_markout_bps": -1.4,
+                     "mean_net_bps_per_opportunity": -40.5})
+    cost_flip = lessons_from(
+        failed_criteria=["NET_EDGE_NOT_POSITIVE"],
+        oos_summary={"mean_mid_markout_bps": 2.0,
+                     "mean_net_bps_per_opportunity": -1.0})
+    assert "BASELINE_NOT_BEATEN" in bad_signal
+    assert "COST_SENSITIVE" not in bad_signal
+    assert "COST_SENSITIVE" in cost_flip
 
 
 def test_scout_can_submit_raw_event_time_literature_lead() -> None:

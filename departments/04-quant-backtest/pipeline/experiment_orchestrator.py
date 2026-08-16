@@ -98,6 +98,7 @@ class OrchestratorReport:
     # 종결됐는데 이 값이 없으면 그 교훈은 다음 기획안에 닿지 못한다.
     feedback: dict = field(default_factory=dict)
     regime_evidence: list = field(default_factory=list)
+    data_feasibility: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +415,7 @@ _OOS_KEYS = (
     "worst_window_mdd", "sharpe_std",
     # Intraday event-time lane.  Session counts, not overlapping ticks, are the
     # independent evidence unit.
+    "mean_mid_markout_bps", "mean_implementation_drag_bps",
     "mean_net_bps_per_opportunity", "fill_rate", "sessions", "instruments",
     "positive_fold_ratio", "session_net_ci_low_bps", "session_net_ci_high_bps",
     "mean_capacity_shares_l1", "p10_capacity_shares_l1",
@@ -562,7 +564,7 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
         failed_criteria=failed,
         regime_concerns=regime_evidence if regime_evidence is not None else
                         getattr(report, "regime_evidence", ()),
-        fragility=fragility)
+        fragility=fragility, oos_summary=oos)
     decision = _STATUS_TO_DECISION.get(new_status, "GATE_HOLD")
 
     outcome = build_outcome(
@@ -684,6 +686,35 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                     missing=missing, backlog=backlog)
         if not ok:
             return report          # PROPOSED 유지 - 수단 부족은 가설의 죄가 아니다
+
+        # Intraday source coverage is a pre-trial concern. Probe and persist it
+        # before preregistration, experiment registration, or family pressure is
+        # calculated. Short-but-executable history proceeds to an explicitly
+        # underpowered diagnostic; a truly non-executable slice is retried later
+        # without polluting DSR/PBO trial accounting.
+        edge = hyp.get("expected_edge") or {}
+        intraday_lane = (
+            str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT")
+        if intraday_lane:
+            if market_conn is None:
+                report.verdict = "NOT_RUNNABLE"
+                report.missing.append("data:TIMESCALE_CONNECTION")
+                return report
+            from intraday_experiment_runner import prepare as prepare_intraday
+            from intraday_experiment_runner import record_data_feasibility
+
+            prepared = prepare_intraday(hyp, market_conn=market_conn)
+            report.data_feasibility = record_data_feasibility(
+                conn, str(hid), prepared)
+            if report.data_feasibility["status"] != "PASS":
+                selected = prepared["selected"]
+                report.verdict = "NEEDS_DATA"
+                report.missing.append(f"intraday_slice:{selected.get('status')}")
+                report.backlog.append(
+                    "Wait for at least two causal sessions and two liquid instruments; "
+                    "the factory will recheck this coverage without consuming a trial.")
+                return report
+            hyp["_intraday_preflight"] = prepared
 
         # 실행 가능 - TESTING 전이 후 체인 실행 (전이는 증거와 함께만 전진)
         # ── 사전등록 관문 ────────────────────────────────────────────────
