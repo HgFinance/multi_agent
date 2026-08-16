@@ -1056,6 +1056,53 @@ def _ast_experience_block(conn) -> str:
                 "decision": row[2], "lesson_codes": list(row[3] or []),
                 "oos_summary": row[4] or {}, "title": row[5],
             } for row in cur.fetchall()]
+            # Shared-replay candidates are useful measured memory, but they are
+            # not independent confirmations.  Read their candidate-scoped
+            # metrics separately so they cannot overwrite the primary outcome.
+            cur.execute("""
+                select e.experiment_id::text,
+                       coalesce(e.config->'screening_population', '[]'::jsonb),
+                       h.title, m.metric, m.value, m.dimensions
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join quant.experiment_metrics m
+                    on m.experiment_id = e.experiment_id
+                   and m.dimensions->>'screening_candidate' is not null
+                 where e.config ? 'screening_population'
+                 order by e.created_at desc, m.metric""")
+            screened: dict[tuple[str, str], dict] = {}
+            for experiment_id, population, title, metric, value, dimensions in \
+                    cur.fetchall():
+                dimensions = dimensions or {}
+                by_fp = {str(candidate.get("ast_fingerprint") or ""): candidate
+                         for candidate in (population or [])
+                         if isinstance(candidate, dict)}
+                for candidate_fp, candidate in by_fp.items():
+                    key = (experiment_id, candidate_fp)
+                    screened.setdefault(key, {
+                        "intraday_signal_expr": candidate.get(
+                            "intraday_signal_expr"),
+                        "semantic_plan": candidate.get("semantic_plan") or {},
+                        "decision": "SCREENING_ONLY",
+                        "lesson_codes": [], "oos_summary": {},
+                        "title": f"{title} [screen {candidate_fp[:8]}]",
+                        "evidence_tier": "SCREENING_ONLY",
+                        "source_lead_ids": list(
+                            candidate.get("source_lead_ids") or []),
+                    })
+                metric_fp = str(dimensions.get("screening_candidate") or "")
+                target = screened.get((experiment_id, metric_fp))
+                if target is None or metric is None:
+                    continue
+                if dimensions.get("summary") is True:
+                    target["oos_summary"][metric] = float(value)
+                elif metric == "intraday_screening_result":
+                    target["lesson_codes"] = list(
+                        dimensions.get("failed_criteria") or [])
+                    target["screening_gate_decision"] = dimensions.get(
+                        "screening_gate_decision")
+                    target["pareto_rank"] = dimensions.get("pareto_rank")
+            intraday.extend(screened.values())
             cur.execute("""
                 select lead_ids, title, verdict, competing_codes,
                        competing_explanation, falsification_test
@@ -3045,9 +3092,15 @@ def cycle(*, dry_run: bool = False) -> int:
                   "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
-                  "- 미사용 `INTRADAY_EVENT` 리드가 목록에 하나라도 있으면 이번 "
-                  "`factory_submit_proposal` 호출에는 **그 리드만 사용한 정확히 한 "
-                  "블록**을 넣는다. 일봉 블록을 함께 넣지 마라 - 다른 블록의 오류가 "
+                  "- 미사용 formula-discovery-v2 `INTRADAY_EVENT` 리드가 있으면 "
+                  "경제 니치가 다른 유효 수식을 가능하면 **2~8개 LEAD_IDS로 묶되**, "
+                  "SUGGESTED_PARAMS의 `intraday_signal_expr`에는 그중 독립 확인할 "
+                  "**주 수식 하나를 정확히 복사**한다. 접수기가 나머지를 승격 불가 "
+                  "`SCREENING_ONLY` 공유재생 cohort로 자동 부착한다. "
+                  "`screening_population`을 직접 작성하지 마라. 양의 선별 결과도 "
+                  "다음 주기의 독립 주 실험을 통과하기 전에는 알파가 아니다. "
+                  "이번 호출에는 이 인트라데이 **정확히 한 블록**만 넣고 "
+                  "**일봉 블록을 함께 넣지 마라** - 다른 블록의 오류가 "
                   "원자적 배치 전체를 막는다. 성공한 뒤 다음 주기에 일봉을 처리한다. "
                   "계약상 기획할 수 없다면 다른 레인만 발행하지 말고 그 인트라데이 "
                   "리드의 정확한 차단 사유를 남겨라.\n"
@@ -3064,9 +3117,8 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            # v4 separates Planner from Scout and consumes the queued typed
-            # formula frontier before researching replacement leads.
-            key=f"factory-planner-v4-{pstamp}", dry_run=dry_run, priority=1)
+            # v5 consumes a bounded typed cohort in one shared event replay.
+            key=f"factory-planner-v5-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -4209,7 +4261,7 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v4-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v5-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"

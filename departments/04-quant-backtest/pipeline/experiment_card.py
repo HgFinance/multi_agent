@@ -200,7 +200,8 @@ def load_row(conn, experiment_id: str) -> tuple[dict, dict, int]:
             """select metric, value from quant.experiment_metrics
                where experiment_id = %s
                  and coalesce(dimensions->>'window', '') in ('', 'SUMMARY')
-                 and dimensions->>'regime' is null""",
+                 and dimensions->>'regime' is null
+                 and dimensions->>'screening_candidate' is null""",
             (experiment_id,))
         metrics = {m: float(v) for m, v in cur.fetchall()}
         cur.execute(
@@ -339,6 +340,8 @@ def _check_regime_rows_do_not_leak_into_oos():
     src = Path(__file__).read_text(encoding="utf-8")
     body = src.split("# ── 자체 점검")[0]
     assert "dimensions->>'regime' is null" in body,         "load_row 의 지표 조회가 국면 행을 제외해야 한다"
+    assert "dimensions->>'screening_candidate' is null" in body, \
+        "screening-only 후보 지표가 주 실험 총계로 새면 안 된다"
     # 국면 값은 regime_breakdown 으로만 간다
     reg = {"BULL": {"total_return": 0.5, "n_windows": 3.0}}
     p2 = build_payload(_ROW, {"sharpe": 0.6}, n_windows=5, decision="REVISE",

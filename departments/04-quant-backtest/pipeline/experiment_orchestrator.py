@@ -527,7 +527,9 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
         cur.execute("""select metric, value from quant.experiment_metrics
                         where experiment_id = %s
                           and coalesce(dimensions->>'window','') in ('','SUMMARY')
-                          and dimensions->>'regime' is null""", (exp_id,))
+                          and dimensions->>'regime' is null
+                          and dimensions->>'screening_candidate' is null""",
+                    (exp_id,))
         # (metric, value) 2-튜플이 아닌 행은 지표 행이 아니다 - 조용히 건너뛴다
         found = {r[0]: float(r[1]) for r in (cur.fetchall() or [])
                  if isinstance(r, (list, tuple)) and len(r) == 2}

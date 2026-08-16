@@ -191,6 +191,102 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
     return out
 
 
+def check_intraday_screening_population(
+        proposal: ExperimentProposalV1,
+        leads: dict[str, MethodologyLeadV1]) -> list[str]:
+    """Verify that shared-replay sidecars are exact, sourced v2 formulas."""
+    if proposal.research_lane != ResearchLane.INTRADAY_EVENT:
+        return []
+    population = (proposal.suggested_params or {}).get(
+        "screening_population") or []
+    if not isinstance(population, list):
+        return ["screening_population must be a JSON list"]
+    if len(population) > 7:
+        return ["screening_population exceeds the bounded seven-sidecar limit"]
+
+    from contracts.alpha_semantics import validate as validate_plan
+    from contracts.intraday_ast_contract import fingerprint, parse, unit_of
+
+    out: list[str] = []
+    try:
+        primary_fp = fingerprint(parse(
+            (proposal.suggested_params or {}).get("intraday_signal_expr")))
+    except (TypeError, ValueError):
+        return []  # the primary formula gate reports the precise parse error
+    seen = {primary_fp}
+    for index, row in enumerate(population):
+        prefix = f"screening_population[{index}]"
+        if not isinstance(row, dict):
+            out.append(f"{prefix} must be an object")
+            continue
+        try:
+            expr = parse(row.get("intraday_signal_expr"))
+            fp = fingerprint(expr)
+            plan = validate_plan(row.get("semantic_plan") or {})
+        except (TypeError, ValueError) as exc:
+            out.append(f"{prefix} is not executable: {exc}")
+            continue
+        if fp in seen:
+            out.append(f"{prefix} duplicates the primary or another sidecar")
+        seen.add(fp)
+        if str(row.get("ast_fingerprint") or "") != fp:
+            out.append(f"{prefix}.ast_fingerprint does not match its AST")
+        output = str(plan.get("output") or "").upper()
+        if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
+            if unit_of(expr) != "BPS":
+                out.append(f"{prefix} net-PnL AST must output BPS")
+            if str(row.get("entry_policy") or "").upper() != \
+                    "PREDICTED_MARKOUT_CLEARS_COST":
+                out.append(f"{prefix} lacks the executable cost hurdle")
+
+        source_ids = [str(value) for value in row.get("source_lead_ids") or []]
+        if not source_ids:
+            out.append(f"{prefix} has no source_lead_ids")
+            continue
+        role = str(row.get("candidate_role") or "")
+        sourced = False
+        for lead_id in source_ids:
+            lead = leads.get(lead_id)
+            if lead is None:
+                out.append(f"{prefix} source lead {lead_id} is unavailable")
+                continue
+            contract = lead.ast_contract or {}
+            if (contract.get("formula_discovery_version") !=
+                    "formula-discovery-v2"):
+                out.append(f"{prefix} source lead {lead_id} is not v2")
+                continue
+            if (not contract.get("formula_contract_complete")
+                    or contract.get("research_lane") != "INTRADAY_EVENT"):
+                out.append(f"{prefix} source lead {lead_id} is not contract-complete")
+                continue
+            try:
+                source_plan = validate_plan(contract.get("semantic_plan") or {})
+                source_policy = str((contract.get("formula_thesis") or {}).get(
+                    "decision_rule") or "")
+                if role == "LINKED_CANDIDATE":
+                    source_expr = parse(contract.get("candidate_signal_expr"))
+                    match = (contract.get("alpha_candidate_eligible") is True
+                             and fingerprint(source_expr) == fp
+                             and source_plan == plan
+                             and source_policy == str(
+                                 row.get("entry_policy") or ""))
+                elif role == "LINEAGE_PARENT":
+                    source_expr = parse(contract.get("parent_signal_expr"))
+                    match = (fingerprint(source_expr) == fp
+                             and source_plan == plan
+                             and source_policy == str(
+                                 row.get("entry_policy") or ""))
+                else:
+                    out.append(f"{prefix} has unknown candidate_role={role!r}")
+                    break
+            except (TypeError, ValueError):
+                match = False
+            sourced = sourced or match
+        if not sourced:
+            out.append(f"{prefix} does not match its cited lead contract")
+    return out
+
+
 def check_prior_art(proposal: ExperimentProposalV1,
                     past_outcomes: list[dict]) -> list[str]:
     """같은 시도 계열의 기각 이력에 **대응이 있는가.**
@@ -263,6 +359,9 @@ def evaluate(proposal: ExperimentProposalV1, *,
     #    대체하지 않는다.
     for why in check_microstructure_primary(proposal):
         r.block("MICROSTRUCTURE_PRIMARY_REQUIRED", why)
+
+    for why in check_intraday_screening_population(proposal, leads or {}):
+        r.block("SCREENING_POPULATION_INVALID", why)
 
     # ④ 기각 이력 대응 (중복 실험 방지)
     for why in check_prior_art(proposal, past_outcomes or []):
