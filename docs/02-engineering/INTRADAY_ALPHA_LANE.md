@@ -1,5 +1,28 @@
 # Intraday Microstructure Alpha Lane
 
+## Formula discovery v5: structure first, scale second
+
+`STRUCTURE_ONLY` is the default discovery path. Hermes proposes a signed
+economic structure in its natural unit (for example, an OFI ratio or an L1-L10
+divergence); it does not manufacture a BPS value by multiplying the score by
+spread or volatility. Before any evaluation session is consumed, runner v7
+replays the strictly earlier calibration sessions over the same causally
+collected universe and locks exactly one mapping:
+
+```text
+predicted_markout_bps = max(0, sum(score * future_mid_markout)
+                               / (1.10 * sum(score^2))) * score
+```
+
+The origin is fixed, so an AST state gate that emits zero remains an abstention.
+The coefficient is constrained positive, so a wrong-direction formula is
+reported as `NON_POSITIVE_DIRECTIONAL_RELATION` instead of being silently
+reversed. At least 1,000 calibration observations, 100 non-zero scores, and two
+instruments are required. Evaluation data never updates the coefficient. Direct
+BPS equations remain available only through an explicitly fixed or
+preregistered coefficient policy; all paths still trade only when the locked
+prediction clears current spread, fees, taxes, and the safety margin.
+
 > 구현 기준: `krx-intraday-causal-v1`  
 > 목적: 일봉으로 압축되던 호가·체결 가설을, 실제로 주문 가능한 시간축에서 검증한다.
 
@@ -161,7 +184,7 @@ purged walk-forward joint model이 함께 포함된다.
   인정한다. 따라서 경쟁 worker의 stale reaper가 정상 실행을 `CANCELLED`로 닫지 못한다.
   Hermes 퀀트 카드는 상주 `experiment_worker.py --serve`를 띄우지 않고 단발
   orchestrator만 실행하며, 잘못된 daemon 호출은 4시간 카드 runtime cap으로 회수한다.
-- 실행 시점에도 populated screening cohort가 `intraday-screening-cohort-v2`인지 다시
+- 실행 시점에도 populated screening cohort가 `intraday-screening-cohort-v3`인지 다시
   확인한다. 이미 PROPOSED에 들어간 v1 가설은 새 worker가 자동으로 최신 계약을 얻지
   않으므로, 그대로 돌리면 방향성 없는 옛 sidecar가 몇 시간짜리 replay를 선점한다.
   버전이 낡았거나 없으면 원시 데이터를 읽기 전에 fail closed하고 현재 v4 수식·구조적
@@ -235,7 +258,7 @@ purged walk-forward joint model이 함께 포함된다.
   숫자 값 경로에서 `PRESSURE`로 사용해야 한다. 거래량·호가 수·spread·depth·실현변동성
   수준은 상태와 크기를 설명하지만 상승·하락 방향을 단독으로 식별하지 못한다. 이 unsigned
   변수만으로 만든 `high activity -> always long` 식과 signed field를 gate에만 장식한 식은
-  formula-discovery-v4에서 백테스트 전에 거부한다.
+  formula-discovery-v5에서 백테스트 전에 거부한다.
 
 - 단위가 맞는 것만으로도 충분하지 않다. 수식 접수기는 각 field가 값 경로(`VALUE`)나
   명시적 상태 분기(`GATE`)에 실제로 영향을 주는지 구조적으로 감사한다. 항상 음이 아닌

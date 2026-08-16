@@ -139,12 +139,18 @@ MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미�
   UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
 SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
-  feature_lookback_seconds, order_latency_ms, execution, entry_policy
-Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Their AST
-must output a predicted future mid-markout in BPS, not a dimensionless direction
-score. The evaluator enters only when predicted BPS exceeds the current spread,
-the governed round-trip charges, and minimum_predicted_edge_bps. Never use a
-bare OFI/imbalance score with threshold=0 as an executable strategy.
+  feature_lookback_seconds, order_latency_ms, execution, entry_policy,
+  coefficient_policy
+Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Prefer
+coefficient_policy=STRUCTURE_ONLY: the AST expresses a signed economic score and
+the runtime fits exactly one positive, origin-anchored, shrunken score-to-BPS
+coefficient on calibration sessions strictly before OOS. Zero must remain zero,
+and a negative calibration relation is a failed hypothesis, never an automatic
+sign flip. Use FIXED_FROM_SOURCE or PREREGISTERED_NO_OOS_FIT only when the BPS
+scale is genuinely identified before the experiment. Never multiply by spread or
+volatility merely to manufacture BPS units. The evaluator enters only when the
+locked predicted BPS exceeds the current spread, governed round-trip charges,
+and minimum_predicted_edge_bps.
 position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
 point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
 비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
@@ -245,7 +251,7 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and (coalesce(l.ast_contract->>'research_lane',
                  'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
         or l.ast_contract->>'formula_discovery_version' =
-           'formula-discovery-v4')
+           'formula-discovery-v5')
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -323,8 +329,12 @@ def _ast_scout_contract() -> str:
         "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
         "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
         "  STRUCTURE_ONLY. Net-PnL decision_rule must be",
-        "  PREDICTED_MARKOUT_CLEARS_COST and the AST output unit must be BPS. The runtime",
-        "  abstains unless predicted markout clears live spread, statutory round-trip",
+        "  PREDICTED_MARKOUT_CLEARS_COST. STRUCTURE_ONLY is preferred and may emit a",
+        "  signed numeric score in its natural unit; deterministic code maps it to BPS",
+        "  with one positive, origin-anchored, shrunken coefficient fitted only on",
+        "  calibration sessions preceding OOS. Fixed/preregistered policies must emit",
+        "  BPS directly. Never attach spread/volatility only to satisfy units. The runtime",
+        "  abstains unless locked predicted markout clears live spread, statutory round-trip",
         "  charges, and the preregistered safety margin. A dimensionless OFI sign is a",
         "  feature, not an executable PnL equation. terms maps every AST field exactly once",
         "  to PRESSURE, LIQUIDITY,",
@@ -333,7 +343,12 @@ def _ast_scout_contract() -> str:
         "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
         "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
         "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
-        "  BPS EQUATION SKELETONS (adapt the mechanism; do not copy mechanically):",
+        "  STRUCTURE-FIRST SKELETONS (adapt the mechanism; do not copy mechanically):",
+        '  SCORE_OFI={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
+        '"field":"normalized_quote_ofi"}}',
+        '  SCORE_DEPTH_DIVERGENCE={"op":"sub","args":[{"op":"field",'
+        '"field":"queue_imbalance_l1"},{"op":"field","field":'
+        '"queue_imbalance_l10"}]}',
         '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
         '  BPS_SCALED={"op":"mul","args":[{"op":"div","args":['
         '{"op":"field","field":"quote_event_ofi"},{"op":"field","field":'
@@ -1067,7 +1082,8 @@ def _ast_experience_block(conn) -> str:
                        e.config->'semantic_plan',
                        coalesce(o.decision, ''),
                        coalesce(o.lesson_codes, '{}'::text[]),
-                       coalesce(o.oos_summary, '{}'::jsonb), h.title
+                       coalesce(o.oos_summary, '{}'::jsonb), h.title,
+                       coalesce(c.dimensions, '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
                   left join lateral (
@@ -1076,12 +1092,21 @@ def _ast_experience_block(conn) -> str:
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
                   ) o on true
+                  left join lateral (
+                    select dimensions
+                      from quant.experiment_metrics m
+                     where m.experiment_id = e.experiment_id
+                       and m.metric = 'intraday_score_calibration'
+                       and m.dimensions->>'screening_candidate' is null
+                     order by m.experiment_metric_id limit 1
+                  ) c on true
                  where e.config ? 'intraday_signal_expr'
                  order by e.created_at desc""")
             intraday = [{
                 "intraday_signal_expr": row[0], "semantic_plan": row[1] or {},
                 "decision": row[2], "lesson_codes": list(row[3] or []),
                 "oos_summary": row[4] or {}, "title": row[5],
+                "score_calibration": row[6] or {},
             } for row in cur.fetchall()]
             # Shared-replay candidates are useful measured memory, but they are
             # not independent confirmations.  Read their candidate-scoped
@@ -1137,6 +1162,8 @@ def _ast_experience_block(conn) -> str:
                     target["pareto_rank"] = dimensions.get("pareto_rank")
                     target["empirical_influence"] = dimensions.get(
                         "empirical_influence")
+                elif metric == "intraday_score_calibration":
+                    target["score_calibration"] = dimensions
             intraday.extend(screened.values())
             cur.execute("""
                 select lead_ids, title, verdict, competing_codes,
@@ -1387,7 +1414,7 @@ def _executable_unused_count(conn) -> int:
                and (coalesce(l.ast_contract->>'research_lane',
                              'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
                     or l.ast_contract->>'formula_discovery_version' =
-                       'formula-discovery-v4')
+                       'formula-discovery-v5')
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids))
@@ -1417,7 +1444,7 @@ def _intraday_formula_unused_count(conn) -> int:
                and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'formula_discovery_version' =
-                   'formula-discovery-v4'
+                   'formula-discovery-v5'
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
                      false)
@@ -1491,7 +1518,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v4'
+                               'formula-discovery-v5'
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -1509,7 +1536,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v4'
+                               'formula-discovery-v5'
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -3179,7 +3206,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
-                  "- 미사용 formula-discovery-v4 `INTRADAY_EVENT` 리드가 있으면 "
+                  "- 미사용 formula-discovery-v5 `INTRADAY_EVENT` 리드가 있으면 "
                   "경제 니치가 다른 유효 수식을 가능하면 **2~8개 LEAD_IDS로 묶되**, "
                   "SUGGESTED_PARAMS의 `intraday_signal_expr`에는 그중 독립 확인할 "
                   "**주 수식 하나를 정확히 복사**한다. 접수기가 나머지를 승격 불가 "
@@ -3214,7 +3241,7 @@ def cycle(*, dry_run: bool = False) -> int:
         print("  planner deferred - executable lead queue is empty; "
               "scout must replenish it first", flush=True)
     elif rb and intraday_formula_unused == 0:
-        print("  planner deferred - formula-discovery-v4 intraday queue is empty; "
+        print("  planner deferred - formula-discovery-v5 intraday queue is empty; "
               "scout must replenish the primary lane first", flush=True)
     elif rb and executable_unused is None:
         print("  planner deferred - executable lead queue could not be measured",
@@ -4260,7 +4287,7 @@ def _check_lead_health_is_surfaced():
     assert "별도 기준 2" in intraday_empty, intraday_empty
 
     # Legacy AST-ready event-time leads must not mask starvation of the new
-    # directional, cost-aware contract required by formula-discovery-v4.
+    # directional, cost-aware contract required by formula-discovery-v5.
     formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
     assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
         formula_empty

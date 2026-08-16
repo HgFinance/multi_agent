@@ -218,7 +218,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict],
         if lead.get("used") or lead.get("alpha_candidate_eligible") is False:
             continue
         if lead.get("formula_discovery_version") not in (
-                None, "", "formula-discovery-v4"):
+                None, "", "formula-discovery-v5"):
             # Keep legacy outcomes as negative/positive history, but do not let a
             # dimensionally invalid v1 lead occupy a live evolutionary niche.
             continue
@@ -250,7 +250,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict],
             and lead.get("ablations"))
         formula_complete = bool(
             lead.get("formula_contract_complete")
-            and lead.get("formula_discovery_version") == "formula-discovery-v4")
+            and lead.get("formula_discovery_version") == "formula-discovery-v5")
         losing_overlap = sorted(
             set(_subtree_shapes(expr)) & losing_subtree_fps)
         losing_penalty = min(0.12, 0.04 * len(losing_overlap))
@@ -425,6 +425,14 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "best_net_bps": _number(summary, "mean_net_bps_per_opportunity"),
             "best_fill_rate": _number(summary, "fill_rate"),
             "best_sessions": _number(summary, "sessions"),
+            "score_calibration_status": str(
+                (best.get("score_calibration") or {}).get("status") or
+                "NOT_RECORDED"),
+            "score_calibration_beta": _number(
+                best.get("score_calibration") or {},
+                "beta_bps_per_score_unit"),
+            "score_calibration_observations": _number(
+                best.get("score_calibration") or {}, "observations"),
         })
     history.sort(key=lambda row: (row["best_net_bps"] is not None,
                                   row["best_net_bps"] or float("-inf")), reverse=True)
@@ -542,7 +550,11 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"gross={row['best_gross_bps']}bps "
             f"implementation_drag={row['best_implementation_drag_bps']}bps "
             f"net={row['best_net_bps']}bps fill={row['best_fill_rate']} "
-            f"sessions={row['best_sessions']} lessons={row['lesson_codes']}")
+            f"sessions={row['best_sessions']} "
+            f"calibration={row['score_calibration_status']} "
+            f"beta={row['score_calibration_beta']} "
+            f"calibration_n={row['score_calibration_observations']} "
+            f"lessons={row['lesson_codes']}")
     lines.extend([
         f"  positive-associated components (causal claim 아님): {list(memory.positive_components)}",
         f"  negative-associated components (재사용 시 교훈 대응 필수): {list(memory.negative_components)}",

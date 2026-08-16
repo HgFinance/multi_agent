@@ -125,6 +125,15 @@ def test_structural_ablations_are_deterministic_simpler_bps_controls() -> None:
     assert all(intraday_grammar.count_nodes(row["intraday_signal_expr"])
                < intraday_grammar.count_nodes(expr) for row in controls)
 
+    ratio_expr = {"op": "sub", "args": [
+        {"op": "field", "field": "queue_imbalance_l1"},
+        {"op": "field", "field": "queue_imbalance_l10"},
+    ]}
+    ratio_controls = intraday_ablation.generate(ratio_expr)
+    assert ratio_controls
+    assert all(intraday_grammar.unit_of(row["intraday_signal_expr"]) == "RATIO"
+               for row in ratio_controls)
+
 
 def test_temporal_ast_never_reads_future_samples() -> None:
     base = datetime(2026, 8, 14, 0, 0, tzinfo=timezone.utc)
@@ -168,6 +177,58 @@ def test_candidate_requires_session_level_evidence_and_can_submit_only_to_qa() -
     assert short["decision"] == "HOLD"
     assert "SESSIONS_BELOW_MINIMUM" in short["failed_criteria"]
     assert "PBO_UNMEASURED" in short["failed_criteria"]
+
+
+def test_structure_only_score_is_scaled_on_prior_sessions_then_frozen() -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    spec = IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0,
+                            fee_bps_per_side=11.5)
+    accumulator = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=spec, horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY", family_pbo=0.2,
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1})
+    for instrument in ("A", "B"):
+        calibration = [
+            _sample(instrument, base + timedelta(seconds=index),
+                    signal=1.0, net=39.0)
+            for index in range(500)
+        ]
+        accumulator.calibrate(instrument, calibration)
+    frozen = accumulator.freeze_calibration()
+    assert frozen["status"] == "PASS"
+    assert frozen["observations"] == 1_000
+    assert frozen["instruments"] == 2
+    assert frozen["beta_bps_per_score_unit"] == pytest.approx(40.0 / 1.1)
+
+    accumulator.add("A", [_sample(
+        "A", base + timedelta(days=1), signal=1.0, net=5.0)])
+    report = accumulator.finish()
+    assert report["summary"]["opportunities"] == 1
+    calibration_report = report["lane_manifest"]["score_calibration"]
+    assert calibration_report["status"] == "PASS"
+    assert calibration_report["oos_fit_forbidden"] is True
+
+
+def test_structure_only_negative_relation_is_not_silently_flipped() -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    accumulator = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY")
+    for instrument in ("A", "B"):
+        accumulator.calibrate(instrument, [
+            _sample(instrument, base + timedelta(seconds=index),
+                    signal=1.0, net=-41.0)
+            for index in range(500)
+        ])
+    frozen = accumulator.freeze_calibration()
+    assert frozen["status"] == "NON_POSITIVE_DIRECTIONAL_RELATION"
+    assert frozen["beta_bps_per_score_unit"] == 0.0
 
 
 def test_semantic_time_context_filters_observations_not_ast_history() -> None:
@@ -273,7 +334,7 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
         "semantic_plan": passive_plan,
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
     }]
-    edge["screening_cohort_version"] = "intraday-screening-cohort-v2"
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v3"
 
     config, spec = config_from_edge(edge)
     assert spec.horizons_seconds == (5, 30)
@@ -281,6 +342,22 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
     assert config["population_execution_model"] == "PASSIVE_FIFO_LOWER_BOUND"
     assert config["screening_trial_exposure"] == 1
     assert config["screening_population"][0]["screening_only"] is True
+
+
+def test_runner_accepts_structure_only_score_but_not_unscaled_fixed_score() -> None:
+    edge, _ = expected_edge_for(_intraday_proposal())
+    edge["intraday_signal_expr"] = {
+        "op": "rolling_mean", "seconds": 30,
+        "arg": {"op": "field", "field": "normalized_quote_ofi"},
+    }
+    edge["coefficient_policy"] = "STRUCTURE_ONLY"
+    config, _ = config_from_edge(edge)
+    assert config["coefficient_policy"] == "STRUCTURE_ONLY"
+    assert intraday_grammar.unit_of(config["intraday_signal_expr"]) == "RATIO"
+
+    edge["coefficient_policy"] = "PREREGISTERED_NO_OOS_FIT"
+    with pytest.raises(ValueError, match="must predict BPS"):
+        config_from_edge(edge)
 
 
 def test_stale_populated_screening_cohort_is_rejected_before_replay() -> None:
@@ -294,7 +371,7 @@ def test_stale_populated_screening_cohort_is_rejected_before_replay() -> None:
     }]
     edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
     with pytest.raises(StaleIntradayCohortError,
-                       match="intraday-screening-cohort-v2"):
+                       match="intraday-screening-cohort-v3"):
         config_from_edge(edge)
 
 
@@ -357,7 +434,7 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         thesis, candidate=expr, semantic_plan=plan,
         grammar=lead_intake._intraday_ast())
     assert result["formula_contract_complete"]
-    assert result["formula_discovery_version"] == "formula-discovery-v4"
+    assert result["formula_discovery_version"] == "formula-discovery-v5"
     assert result["formula_math_profile"]["directional_pressure_fields"] == [
         "trade_flow_imbalance"]
     assert result["formula_math_profile"]["complexity_nodes"] > 1
@@ -379,10 +456,18 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         "functional_form": "MONOTONE",
         "terms": {"trade_flow_imbalance": "PRESSURE"},
     }
-    with pytest.raises(ValueError, match="AST output unit must be BPS"):
+    with pytest.raises(ValueError, match="must output BPS"):
         formula_discovery.assess(
             dimensionless_thesis, candidate=dimensionless,
             semantic_plan=plan, grammar=lead_intake._intraday_ast())
+
+    structure = formula_discovery.assess(
+        {**dimensionless_thesis, "coefficient_policy": "STRUCTURE_ONLY"},
+        candidate=dimensionless, semantic_plan=plan,
+        grammar=lead_intake._intraday_ast())
+    assert structure["formula_math_profile"]["output_unit"] == "RATIO"
+    assert structure["formula_math_profile"]["score_calibration"] == \
+        "ORIGIN_ANCHORED_POSITIVE_SHRINKAGE_V1"
 
 
 def test_formula_discovery_rejects_decorative_nonnegative_sign_term() -> None:
@@ -896,6 +981,32 @@ def test_empirical_term_influence_reaches_next_generation_memory() -> None:
     assert "primary-minus-control net=0.7bps" in rendered
 
 
+def test_score_calibration_result_reaches_next_generation_memory() -> None:
+    memory = intraday_experience.build([{
+        "intraday_signal_expr": {
+            "op": "field", "field": "normalized_quote_ofi"},
+        "semantic_plan": {
+            "event": "ORDER_FLOW", "context": ["ALL"],
+            "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+            "output": "TAKER_NET_PNL", "execution": "TAKER",
+            "horizon_seconds": 5,
+        },
+        "decision": "GATE_HOLD",
+        "oos_summary": {"mean_net_bps_per_opportunity": -2.0},
+        "score_calibration": {
+            "status": "NON_POSITIVE_DIRECTIONAL_RELATION",
+            "beta_bps_per_score_unit": 0.0,
+            "observations": 1200,
+        },
+    }])
+    history = memory.history[0]
+    assert history["score_calibration_status"] == \
+        "NON_POSITIVE_DIRECTIONAL_RELATION"
+    assert history["score_calibration_observations"] == 1200
+    rendered = intraday_experience.render(memory)
+    assert "calibration=NON_POSITIVE_DIRECTIONAL_RELATION" in rendered
+
+
 def test_cost_hurdle_abstains_until_predicted_markout_clears_execution() -> None:
     base = datetime(2026, 1, 2, tzinfo=timezone.utc)
     samples = [
@@ -1330,7 +1441,7 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
         "lead_id": "confirm-me", "intraday_signal_expr": expr,
         "semantic_plan": plan, "used": False,
         "alpha_candidate_eligible": True,
-        "formula_discovery_version": "formula-discovery-v4",
+        "formula_discovery_version": "formula-discovery-v5",
         "formula_contract_complete": True,
     }
     memory = intraday_experience.build(screened, [lead])
