@@ -226,6 +226,9 @@ purged walk-forward joint model이 함께 포함된다.
   `FORMULA_THESIS`나 AST에 붙이지 않는다. JSON 배열형 `OBSERVABLES`는 배열로 해석한 뒤
   AST field 집합과 비교한다. 따라서 형식 손상은 fail closed하되 정상 중첩 JSON은 그대로
   접수되고, 출판일·스카우트가 주장한 edge·대응한 과거 교훈도 계보에 보존된다.
+  `lens`는 탐색 관점이고 `source_type`은 자료 매체이므로 둘도 분리한다. 자료형은
+  `PAPER/BLOG/VIDEO/COMMUNITY/INVESTOR_LETTER/INTERNAL_FAILURE`만 허용하며,
+  `PRACTITIONER` 같은 렌즈를 자료형 자리에 쓰면 DB INSERT 전에 명시적으로 반려한다.
 
 - 모든 가격 markout 식은 `queue_imbalance_l1/l10`, `microprice_offset_bps`,
   `trade_flow_imbalance`, `quote_event_ofi`, `normalized_quote_ofi` 중 적어도 하나를

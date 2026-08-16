@@ -44,6 +44,8 @@ sys.path.insert(0, str(_RESEARCH / "contracts"))
 
 from factory_contracts import (  # noqa: E402
     MAX_EXCERPT_CHARS,
+    ScoutLens,
+    SourceType,
     lead_id_for,
 )
 
@@ -464,9 +466,22 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
 
     now = as_known_at or datetime.now(timezone.utc)
     url, title = block["URL"].strip(), block["TITLE"].strip()
-    lens_value = str(lens).strip().upper().replace("-", "_")
+    lens_value = str(getattr(lens, "value", lens)).strip().upper().replace("-", "_")
     if lens_value == "CROSSDOMAIN":
         lens_value = "CROSS_DOMAIN"
+    try:
+        lens_value = ScoutLens(lens_value).value
+    except ValueError as exc:
+        allowed = [item.value for item in ScoutLens]
+        raise ValueError(f"lens must be one of {allowed}") from exc
+    source_value = str(getattr(source_type, "value", source_type)).strip().upper()
+    try:
+        source_value = SourceType(source_value).value
+    except ValueError as exc:
+        allowed = [item.value for item in SourceType]
+        raise ValueError(
+            f"source_type={source_type!r} is invalid; choose the source medium "
+            f"from {allowed}, not the Scout lens") from exc
     # MECHANISM 대체분은 길이 규율이 없다 - 계약 상한으로 자른다(clip_excerpt 참고).
     excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
     mech = (block.get("MECHANISM") or "").strip()
@@ -505,7 +520,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
         "lead_id": lead_id_for([ref]),
         "case_id": case_id,
         "scout_lens": lens_value,
-        "source_type": source_type,
+        "source_type": source_value,
         "as_known_at": now,
         "refs": [ref],
         "ast_contract": readiness,
