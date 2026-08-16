@@ -1,0 +1,774 @@
+#!/usr/bin/env python3
+"""Causal intraday microstructure feature and execution-label lane.
+
+The daily alpha factory intentionally compresses one trading session into one
+row.  That is useful for daily portfolio selection but destroys the clock on
+which order-book signals live.  This module is a separate lane with three hard
+rules:
+
+1. a feature may use only events whose ``available_at`` is no later than the
+   decision time;
+2. an order enters only after the preregistered latency; and
+3. a candidate is scored on an executable round trip, not only a future
+   mid-price classification label.
+
+The implementation is deliberately deterministic and dependency-free.  It is
+small enough to audit, while the database loader streams one instrument/day at
+a time so it never materialises the full tick store in memory.
+"""
+
+from __future__ import annotations
+
+from bisect import bisect_right
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+import math
+from statistics import fmean, pstdev
+from typing import Callable, Iterable, Sequence
+
+
+UTC = timezone.utc
+LANE_VERSION = "krx-intraday-causal-v1"
+NUMERIC_FEATURES = frozenset({
+    "quote_age_ms", "spread_bps", "queue_imbalance_l1",
+    "queue_imbalance_l10", "microprice_offset_bps", "trade_flow_imbalance",
+    "quote_event_ofi", "trade_count", "quote_count", "entry_bid",
+    "entry_ask", "entry_mid",
+})
+
+
+def _aware(value: datetime, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError(f"{name} must be a timezone-aware datetime")
+    return value.astimezone(UTC)
+
+
+def _positive(value: float, name: str) -> float:
+    out = float(value)
+    if not math.isfinite(out) or out <= 0:
+        raise ValueError(f"{name} must be finite and positive")
+    return out
+
+
+@dataclass(frozen=True)
+class QuoteEvent:
+    event_time: datetime
+    received_at: datetime
+    observed_at: datetime
+    instrument_id: str
+    bid_prices: tuple[float, ...]
+    bid_sizes: tuple[float, ...]
+    ask_prices: tuple[float, ...]
+    ask_sizes: tuple[float, ...]
+    source_event_id: str = ""
+
+    def __post_init__(self) -> None:
+        event = _aware(self.event_time, "event_time")
+        received = _aware(self.received_at, "received_at")
+        observed = _aware(self.observed_at, "observed_at")
+        object.__setattr__(self, "event_time", event)
+        object.__setattr__(self, "received_at", received)
+        object.__setattr__(self, "observed_at", observed)
+        if observed < received:
+            raise ValueError("observed_at precedes received_at")
+        if not self.instrument_id:
+            raise ValueError("instrument_id is required")
+        sizes = (len(self.bid_prices), len(self.bid_sizes),
+                 len(self.ask_prices), len(self.ask_sizes))
+        if min(sizes) < 1 or sizes[0] != sizes[1] or sizes[2] != sizes[3]:
+            raise ValueError("quote price/size ladders must be non-empty and aligned")
+        if any(float(v) < 0 or not math.isfinite(float(v))
+               for v in (*self.bid_sizes, *self.ask_sizes)):
+            raise ValueError("quote sizes must be finite and non-negative")
+        bid = _positive(self.bid_prices[0], "best bid")
+        ask = _positive(self.ask_prices[0], "best ask")
+        if ask < bid:
+            raise ValueError("crossed quote is not eligible for the causal lane")
+
+    @property
+    def available_at(self) -> datetime:
+        return max(self.received_at, self.observed_at)
+
+    @property
+    def best_bid(self) -> float:
+        return float(self.bid_prices[0])
+
+    @property
+    def best_ask(self) -> float:
+        return float(self.ask_prices[0])
+
+    @property
+    def mid(self) -> float:
+        return (self.best_bid + self.best_ask) / 2.0
+
+
+@dataclass(frozen=True)
+class TradeEvent:
+    event_time: datetime
+    received_at: datetime
+    observed_at: datetime
+    instrument_id: str
+    price: float
+    quantity: float
+    side: int
+    source_event_id: str = ""
+
+    def __post_init__(self) -> None:
+        event = _aware(self.event_time, "event_time")
+        received = _aware(self.received_at, "received_at")
+        observed = _aware(self.observed_at, "observed_at")
+        object.__setattr__(self, "event_time", event)
+        object.__setattr__(self, "received_at", received)
+        object.__setattr__(self, "observed_at", observed)
+        if observed < received:
+            raise ValueError("observed_at precedes received_at")
+        if not self.instrument_id:
+            raise ValueError("instrument_id is required")
+        _positive(self.price, "trade price")
+        if float(self.quantity) < 0 or not math.isfinite(float(self.quantity)):
+            raise ValueError("trade quantity must be finite and non-negative")
+        if self.side not in (-1, 0, 1):
+            raise ValueError("trade side must be -1, 0, or 1")
+
+    @property
+    def available_at(self) -> datetime:
+        return max(self.received_at, self.observed_at)
+
+
+@dataclass(frozen=True)
+class IntradayLaneSpec:
+    sample_interval_seconds: int = 5
+    feature_lookback_seconds: int = 30
+    horizons_seconds: tuple[int, ...] = (5, 30, 300)
+    order_latency_ms: int = 250
+    max_quote_age_seconds: float = 5.0
+    fee_bps_per_side: float = 0.0
+    maker_fee_bps_per_side: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.sample_interval_seconds < 1:
+            raise ValueError("sample_interval_seconds must be positive")
+        if self.feature_lookback_seconds < 1:
+            raise ValueError("feature_lookback_seconds must be positive")
+        horizons = tuple(sorted(set(int(v) for v in self.horizons_seconds)))
+        if not horizons or horizons[0] < 1:
+            raise ValueError("horizons_seconds must contain positive values")
+        object.__setattr__(self, "horizons_seconds", horizons)
+        if self.order_latency_ms < 0:
+            raise ValueError("order_latency_ms must be non-negative")
+        if self.max_quote_age_seconds <= 0:
+            raise ValueError("max_quote_age_seconds must be positive")
+        if self.fee_bps_per_side < 0:
+            raise ValueError("fee_bps_per_side must be non-negative")
+        if self.maker_fee_bps_per_side < 0:
+            raise ValueError("maker_fee_bps_per_side must be non-negative")
+
+    @property
+    def purge_gap(self) -> timedelta:
+        """Minimum event-time purge/embargo between train and test samples."""
+        return timedelta(seconds=max(self.horizons_seconds),
+                         milliseconds=self.order_latency_ms)
+
+
+@dataclass(frozen=True)
+class HorizonLabel:
+    horizon_seconds: int
+    exit_time: datetime
+    future_mid: float
+    long_mid_markout_bps: float
+    short_mid_markout_bps: float
+    long_taker_net_bps: float
+    short_taker_net_bps: float
+    long_passive_filled: bool
+    short_passive_filled: bool
+    long_passive_fill_time: datetime | None
+    short_passive_fill_time: datetime | None
+    long_passive_net_bps: float | None
+    short_passive_net_bps: float | None
+
+
+@dataclass(frozen=True)
+class IntradaySample:
+    instrument_id: str
+    decision_time: datetime
+    entry_time: datetime
+    source_quote_event_time: datetime
+    quote_age_ms: float
+    spread_bps: float
+    queue_imbalance_l1: float
+    queue_imbalance_l10: float
+    microprice_offset_bps: float
+    trade_flow_imbalance: float | None
+    quote_event_ofi: float | None
+    trade_count: int
+    quote_count: int
+    entry_bid: float
+    entry_ask: float
+    entry_mid: float
+    labels: tuple[HorizonLabel, ...]
+
+    def feature_dict(self) -> dict[str, float | int | None]:
+        return {
+            "spread_bps": self.spread_bps,
+            "queue_imbalance_l1": self.queue_imbalance_l1,
+            "queue_imbalance_l10": self.queue_imbalance_l10,
+            "microprice_offset_bps": self.microprice_offset_bps,
+            "trade_flow_imbalance": self.trade_flow_imbalance,
+            "quote_event_ofi": self.quote_event_ofi,
+            "trade_count": self.trade_count,
+            "quote_count": self.quote_count,
+            "quote_age_ms": self.quote_age_ms,
+        }
+
+
+def _imbalance(bid_sizes: Sequence[float], ask_sizes: Sequence[float],
+               levels: int) -> float:
+    bid = sum(float(v) for v in bid_sizes[:levels])
+    ask = sum(float(v) for v in ask_sizes[:levels])
+    total = bid + ask
+    return (bid - ask) / total if total > 0 else 0.0
+
+
+def _microprice(quote: QuoteEvent) -> float:
+    bid_size = float(quote.bid_sizes[0])
+    ask_size = float(quote.ask_sizes[0])
+    total = bid_size + ask_size
+    if total <= 0:
+        return quote.mid
+    return ((quote.best_ask * bid_size) +
+            (quote.best_bid * ask_size)) / total
+
+
+def _quote_ofi(events: Sequence[QuoteEvent]) -> float | None:
+    """Cont-Kukanov-Stoikov L1 order-flow imbalance over quote updates."""
+    if len(events) < 2:
+        return None
+    total = 0.0
+    for previous, current in zip(events, events[1:]):
+        pb, cb = previous.best_bid, current.best_bid
+        pa, ca = previous.best_ask, current.best_ask
+        pbs, cbs = float(previous.bid_sizes[0]), float(current.bid_sizes[0])
+        pas, cas = float(previous.ask_sizes[0]), float(current.ask_sizes[0])
+        total += ((cbs if cb >= pb else 0.0) -
+                  (pbs if cb <= pb else 0.0) -
+                  (cas if ca <= pa else 0.0) +
+                  (pas if ca >= pa else 0.0))
+    return total
+
+
+def _passive_fill(events: Sequence[TradeEvent], *, side: int, limit_price: float,
+                  queue_ahead: float) -> datetime | None:
+    """Conservative FIFO fill: printed opposing volume must clear queue ahead.
+
+    Snapshot data cannot identify cancellations or exact order IDs.  We give no
+    cancellation credit, so this is a lower-bound replay rather than a claim of
+    exchange-exact queue position.
+    """
+    remaining = max(0.0, float(queue_ahead))
+    for trade_event in events:
+        crosses = ((side > 0 and trade_event.side < 0 and
+                    float(trade_event.price) <= limit_price) or
+                   (side < 0 and trade_event.side > 0 and
+                    float(trade_event.price) >= limit_price))
+        if not crosses:
+            continue
+        remaining -= float(trade_event.quantity)
+        if remaining <= 0:
+            return trade_event.available_at
+    return None
+
+
+def _last_known(events: Sequence, available_times: Sequence[datetime],
+                at: datetime):
+    index = bisect_right(available_times, at) - 1
+    # Some feeds round exchange timestamps and can make a newly received event
+    # appear slightly newer than the decision clock.  Walk backwards to the
+    # latest *eligible* event; returning None immediately would incorrectly
+    # discard an older quote that really was known.
+    while index >= 0:
+        event = events[index]
+        if event.event_time <= at:
+            return event
+        index -= 1
+    return None
+
+
+def _fixed_grid(start: datetime, end: datetime, step_seconds: int) -> Iterable[datetime]:
+    start = _aware(start, "start")
+    end = _aware(end, "end")
+    if end <= start:
+        return
+    epoch = int(start.timestamp())
+    first = epoch + ((step_seconds - epoch % step_seconds) % step_seconds)
+    current = datetime.fromtimestamp(first, tz=UTC)
+    while current < end:
+        yield current
+        current += timedelta(seconds=step_seconds)
+
+
+def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
+                  spec: IntradayLaneSpec, *, start: datetime,
+                  end: datetime) -> list[IntradaySample]:
+    """Build point-in-time features and multi-horizon executable labels."""
+    if not quotes:
+        return []
+    quote_instruments = {q.instrument_id for q in quotes}
+    trade_instruments = {t.instrument_id for t in trades}
+    if len(quote_instruments) != 1 or (trade_instruments - quote_instruments):
+        raise ValueError("one instrument per build_samples call is required")
+
+    qs = sorted(quotes, key=lambda q: (q.available_at, q.event_time,
+                                       q.source_event_id))
+    ts = sorted(trades, key=lambda t: (t.available_at, t.event_time,
+                                       t.source_event_id))
+    qa = [q.available_at for q in qs]
+    ta = [t.available_at for t in ts]
+    latency = timedelta(milliseconds=spec.order_latency_ms)
+    lookback = timedelta(seconds=spec.feature_lookback_seconds)
+    samples: list[IntradaySample] = []
+
+    for decision in _fixed_grid(start, end, spec.sample_interval_seconds):
+        entry_time = decision + latency
+        entry_quote = _last_known(qs, qa, entry_time)
+        if entry_quote is None:
+            continue
+        age = (entry_time - entry_quote.available_at).total_seconds()
+        if age < 0 or age > spec.max_quote_age_seconds:
+            continue
+
+        window_start = decision - lookback
+        qlo = bisect_right(qa, window_start)
+        qhi = bisect_right(qa, decision)
+        visible_quotes = [q for q in qs[qlo:qhi] if q.event_time <= decision]
+        tlo = bisect_right(ta, window_start)
+        thi = bisect_right(ta, decision)
+        visible_trades = [t for t in ts[tlo:thi] if t.event_time <= decision]
+
+        signed = sum(float(t.side) * float(t.quantity) for t in visible_trades)
+        volume = sum(float(t.quantity) for t in visible_trades if t.side != 0)
+        trade_flow = signed / volume if volume > 0 else None
+        midpoint = entry_quote.mid
+        spread_bps = ((entry_quote.best_ask - entry_quote.best_bid) /
+                      midpoint * 10_000.0)
+        microprice_offset = (_microprice(entry_quote) / midpoint - 1.0) * 10_000.0
+
+        labels: list[HorizonLabel] = []
+        for horizon in spec.horizons_seconds:
+            exit_time = entry_time + timedelta(seconds=horizon)
+            exit_quote = _last_known(qs, qa, exit_time)
+            if exit_quote is None:
+                continue
+            exit_age = (exit_time - exit_quote.available_at).total_seconds()
+            if exit_age < 0 or exit_age > spec.max_quote_age_seconds:
+                continue
+            future_mid = exit_quote.mid
+            long_mid = (future_mid / midpoint - 1.0) * 10_000.0
+            short_mid = (midpoint / future_mid - 1.0) * 10_000.0
+            fees = 2.0 * spec.fee_bps_per_side
+            # Conservative taker round trip: cross at entry and again at exit.
+            long_net = (exit_quote.best_bid / entry_quote.best_ask - 1.0) * 10_000.0 - fees
+            short_net = (entry_quote.best_bid / exit_quote.best_ask - 1.0) * 10_000.0 - fees
+            future_lo = bisect_right(ta, entry_time)
+            future_hi = bisect_right(ta, exit_time)
+            future_trades = [t for t in ts[future_lo:future_hi]
+                             if entry_time < t.event_time <= exit_time]
+            long_fill = _passive_fill(
+                future_trades, side=1, limit_price=entry_quote.best_bid,
+                queue_ahead=float(entry_quote.bid_sizes[0]))
+            short_fill = _passive_fill(
+                future_trades, side=-1, limit_price=entry_quote.best_ask,
+                queue_ahead=float(entry_quote.ask_sizes[0]))
+            passive_fees = (spec.maker_fee_bps_per_side +
+                            spec.fee_bps_per_side)
+            long_passive_net = (
+                (exit_quote.best_bid / entry_quote.best_bid - 1.0) * 10_000.0 -
+                passive_fees if long_fill is not None else None)
+            short_passive_net = (
+                (entry_quote.best_ask / exit_quote.best_ask - 1.0) * 10_000.0 -
+                passive_fees if short_fill is not None else None)
+            labels.append(HorizonLabel(
+                horizon_seconds=horizon,
+                exit_time=exit_time,
+                future_mid=future_mid,
+                long_mid_markout_bps=long_mid,
+                short_mid_markout_bps=short_mid,
+                long_taker_net_bps=long_net,
+                short_taker_net_bps=short_net,
+                long_passive_filled=long_fill is not None,
+                short_passive_filled=short_fill is not None,
+                long_passive_fill_time=long_fill,
+                short_passive_fill_time=short_fill,
+                long_passive_net_bps=long_passive_net,
+                short_passive_net_bps=short_passive_net,
+            ))
+        if not labels:
+            continue
+        samples.append(IntradaySample(
+            instrument_id=entry_quote.instrument_id,
+            decision_time=decision,
+            entry_time=entry_time,
+            source_quote_event_time=entry_quote.event_time,
+            quote_age_ms=age * 1000.0,
+            spread_bps=spread_bps,
+            queue_imbalance_l1=_imbalance(entry_quote.bid_sizes,
+                                          entry_quote.ask_sizes, 1),
+            queue_imbalance_l10=_imbalance(entry_quote.bid_sizes,
+                                           entry_quote.ask_sizes, 10),
+            microprice_offset_bps=microprice_offset,
+            trade_flow_imbalance=trade_flow,
+            quote_event_ofi=_quote_ofi(visible_quotes),
+            trade_count=len(visible_trades),
+            quote_count=len(visible_quotes),
+            entry_bid=entry_quote.best_bid,
+            entry_ask=entry_quote.best_ask,
+            entry_mid=midpoint,
+            labels=tuple(labels),
+        ))
+    return samples
+
+
+def audit_causality(samples: Sequence[IntradaySample],
+                    spec: IntradayLaneSpec) -> dict:
+    findings: list[str] = []
+    for sample in samples:
+        if sample.source_quote_event_time > sample.entry_time:
+            findings.append(f"future entry quote at {sample.decision_time.isoformat()}")
+        if sample.entry_time < sample.decision_time:
+            findings.append(f"negative latency at {sample.decision_time.isoformat()}")
+        if sample.quote_age_ms > spec.max_quote_age_seconds * 1000.0:
+            findings.append(f"stale quote at {sample.decision_time.isoformat()}")
+        for label in sample.labels:
+            if label.exit_time <= sample.entry_time:
+                findings.append(f"non-forward label at {sample.decision_time.isoformat()}")
+    return {
+        "lane_version": LANE_VERSION,
+        "status": ("NO_EVIDENCE" if not samples else
+                   "PASS" if not findings else "FAIL"),
+        "sample_count": len(samples),
+        "findings": findings,
+        "purge_gap_seconds": spec.purge_gap.total_seconds(),
+    }
+
+
+def score_signal(samples: Sequence[IntradaySample],
+                 signal: Callable[[IntradaySample], float | None], *,
+                 horizon_seconds: int, threshold: float = 0.0,
+                 execution: str = "TAKER") -> dict:
+    """Score a signed signal on mid markout and conservative taker P&L."""
+    execution = str(execution).upper()
+    if execution not in {"TAKER", "PASSIVE_FIFO_LOWER_BOUND"}:
+        raise ValueError(f"unsupported execution mode: {execution}")
+    mid_values: list[float] = []
+    filled_mid_values: list[float] = []
+    net_values: list[float] = []
+    long_count = short_count = opportunities = 0
+    for sample in samples:
+        raw = signal(sample)
+        if raw is None or not math.isfinite(float(raw)):
+            continue
+        value = float(raw)
+        side = 1 if value > threshold else -1 if value < -threshold else 0
+        if side == 0:
+            continue
+        label = next((v for v in sample.labels
+                      if v.horizon_seconds == horizon_seconds), None)
+        if label is None:
+            continue
+        opportunities += 1
+        if side > 0:
+            long_count += 1
+            mid_values.append(label.long_mid_markout_bps)
+            net = (label.long_taker_net_bps if execution == "TAKER"
+                   else label.long_passive_net_bps)
+        else:
+            short_count += 1
+            mid_values.append(label.short_mid_markout_bps)
+            net = (label.short_taker_net_bps if execution == "TAKER"
+                   else label.short_passive_net_bps)
+        if net is not None:
+            net_values.append(net)
+            filled_mid_values.append(mid_values[-1])
+
+    count = len(net_values)
+    mean = fmean(net_values) if count else None
+    deviation = pstdev(net_values) if count > 1 else None
+    return {
+        "lane_version": LANE_VERSION,
+        "horizon_seconds": horizon_seconds,
+        "execution": execution,
+        "opportunities": opportunities,
+        "trades": count,
+        "long_trades": long_count,
+        "short_trades": short_count,
+        "mean_mid_markout_bps": fmean(filled_mid_values) if count else None,
+        "mean_mid_markout_all_opportunities_bps": (
+            fmean(mid_values) if opportunities else None),
+        "mean_taker_net_bps": mean,
+        "mean_net_bps_per_fill": mean,
+        "mean_net_bps_per_opportunity": (
+            sum(net_values) / opportunities if opportunities else None),
+        "fill_rate": count / opportunities if opportunities else None,
+        "taker_hit_rate": (sum(v > 0 for v in net_values) / count if count else None),
+        "net_hit_rate": (sum(v > 0 for v in net_values) / count if count else None),
+        "taker_information_ratio": (
+            mean / deviation if mean is not None and deviation not in (None, 0.0)
+            else None),
+        "decision": "PROMISING" if mean is not None and mean > 0 else "REJECT",
+    }
+
+
+def _solve_linear(system: list[list[float]], target: list[float]) -> list[float]:
+    """Solve a small dense linear system with pivoted Gauss-Jordan elimination."""
+    n = len(target)
+    augmented = [list(map(float, system[row])) + [float(target[row])]
+                 for row in range(n)]
+    for column in range(n):
+        pivot = max(range(column, n), key=lambda row: abs(augmented[row][column]))
+        if abs(augmented[pivot][column]) < 1e-12:
+            raise ValueError("singular regression system")
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(n):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor:
+                augmented[row] = [left - factor * right for left, right in
+                                  zip(augmented[row], augmented[column])]
+    return [augmented[row][-1] for row in range(n)]
+
+
+def walk_forward_linear_score(
+        samples: Sequence[IntradaySample], *, feature_names: Sequence[str],
+        horizon_seconds: int, spec: IntradayLaneSpec, n_splits: int = 3,
+        initial_train_fraction: float = 0.4, ridge: float = 1e-3,
+        minimum_predicted_edge_bps: float = 0.0) -> dict:
+    """Expanding purged walk-forward fit with an executable abstention gate.
+
+    The model predicts future mid-price markout.  It trades only when the
+    predicted absolute move clears the *current full spread*, round-trip fees,
+    and an optional safety margin.  Thus a classifier that merely guesses the
+    next direction cannot earn a false alpha verdict.
+    """
+    names = tuple(str(v) for v in feature_names)
+    if not names or any(name not in NUMERIC_FEATURES for name in names):
+        raise ValueError(f"unknown or empty feature_names: {names}")
+    if n_splits < 1:
+        raise ValueError("n_splits must be positive")
+    if not 0.1 <= initial_train_fraction < 0.9:
+        raise ValueError("initial_train_fraction must be in [0.1, 0.9)")
+    if ridge < 0 or minimum_predicted_edge_bps < 0:
+        raise ValueError("ridge and minimum_predicted_edge_bps must be non-negative")
+
+    rows = []
+    for sample in sorted(samples, key=lambda row: row.decision_time):
+        label = next((value for value in sample.labels
+                      if value.horizon_seconds == horizon_seconds), None)
+        values = [getattr(sample, name) for name in names]
+        if label is None or any(value is None or not math.isfinite(float(value))
+                                for value in values):
+            continue
+        rows.append((sample, label, [float(value) for value in values]))
+    n_rows = len(rows)
+    initial = max(2, int(n_rows * initial_train_fraction))
+    remaining = n_rows - initial
+    test_size = max(1, remaining // n_splits) if remaining > 0 else 0
+    predictions: list[tuple[IntradaySample, HorizonLabel, float, int]] = []
+    fold_reports: list[dict] = []
+
+    for fold in range(n_splits):
+        test_lo = initial + fold * test_size
+        test_hi = n_rows if fold == n_splits - 1 else min(n_rows, test_lo + test_size)
+        if test_lo >= n_rows or test_lo >= test_hi:
+            continue
+        test_start = rows[test_lo][0].decision_time
+        train = [row for row in rows[:test_lo]
+                 if row[0].entry_time + spec.purge_gap <= test_start]
+        test = rows[test_lo:test_hi]
+        if len(train) < max(10, len(names) + 2):
+            fold_reports.append({
+                "fold": fold + 1, "status": "SKIP_INSUFFICIENT_PURGED_TRAIN",
+                "train": len(train), "test": len(test),
+            })
+            continue
+
+        x_train = [row[2] for row in train]
+        y_train = [row[1].long_mid_markout_bps for row in train]
+        mean_x = [fmean(row[column] for row in x_train)
+                  for column in range(len(names))]
+        scale_x = []
+        for column, mean_value in enumerate(mean_x):
+            variance = fmean((row[column] - mean_value) ** 2 for row in x_train)
+            scale_x.append(math.sqrt(variance) if variance > 0 else 1.0)
+        design = [[1.0] + [(value - mean_x[column]) / scale_x[column]
+                            for column, value in enumerate(row)]
+                  for row in x_train]
+        width = len(names) + 1
+        gram = [[sum(row[left] * row[right] for row in design)
+                 for right in range(width)] for left in range(width)]
+        for diagonal in range(1, width):
+            gram[diagonal][diagonal] += ridge
+        rhs = [sum(row[column] * target for row, target in zip(design, y_train))
+               for column in range(width)]
+        beta = _solve_linear(gram, rhs)
+        for sample, label, values in test:
+            z_test = [(value - mean_x[column]) / scale_x[column]
+                      for column, value in enumerate(values)]
+            predicted = beta[0] + sum(weight * value for weight, value
+                                      in zip(beta[1:], z_test))
+            threshold = (sample.spread_bps + 2.0 * spec.fee_bps_per_side +
+                         minimum_predicted_edge_bps)
+            side = 1 if predicted > threshold else -1 if predicted < -threshold else 0
+            predictions.append((sample, label, predicted, side))
+        fold_reports.append({
+            "fold": fold + 1, "status": "PASS", "train": len(train),
+            "test": len(test), "test_start": test_start.isoformat(),
+        })
+
+    mid_values: list[float] = []
+    net_values: list[float] = []
+    predicted_values: list[float] = []
+    for _, label, predicted, side in predictions:
+        if side == 0:
+            continue
+        predicted_values.append(predicted)
+        if side > 0:
+            mid_values.append(label.long_mid_markout_bps)
+            net_values.append(label.long_taker_net_bps)
+        else:
+            mid_values.append(label.short_mid_markout_bps)
+            net_values.append(label.short_taker_net_bps)
+    count = len(net_values)
+    mean_net = fmean(net_values) if count else None
+    return {
+        "lane_version": LANE_VERSION,
+        "model": "PURGED_EXPANDING_RIDGE_WITH_SPREAD_ABSTENTION",
+        "features": list(names),
+        "horizon_seconds": horizon_seconds,
+        "purge_gap_seconds": spec.purge_gap.total_seconds(),
+        "eligible_oos_samples": len(predictions),
+        "trades": count,
+        "coverage": count / len(predictions) if predictions else 0.0,
+        "mean_predicted_mid_bps": (
+            fmean(abs(v) for v in predicted_values) if count else None),
+        "mean_mid_markout_bps": fmean(mid_values) if count else None,
+        "mean_taker_net_bps": mean_net,
+        "taker_hit_rate": sum(v > 0 for v in net_values) / count if count else None,
+        "decision": "PROMISING" if mean_net is not None and mean_net > 0 else "REJECT",
+        "folds": fold_reports,
+    }
+
+
+_QUOTE_SQL = """
+select event_time, received_at, observed_at, instrument_id::text,
+       bid_prices, bid_sizes, ask_prices, ask_sizes, source_event_id
+  from market.market_quotes
+ where instrument_id = %s
+   and event_time >= %s and event_time < %s
+   and received_at is not null
+   and observed_at <= %s
+   and bid_prices[1] > 0 and ask_prices[1] > 0
+   and ask_prices[1] >= bid_prices[1]
+ order by event_time, source_event_id
+"""
+
+_TRADE_SQL = """
+select event_time, received_at, observed_at, instrument_id::text,
+       price, quantity, side, source_event_id
+  from market.market_ticks
+ where instrument_id = %s
+   and event_time >= %s and event_time < %s
+   and received_at is not null
+   and observed_at <= %s
+ order by event_time, source_event_id
+"""
+
+_SOURCE_QUALITY_SQL = """
+select count(*) as total_quotes,
+       count(*) filter (where received_at is null) as quotes_without_received_at,
+       count(*) filter (where bid_prices[1] <= 0 or ask_prices[1] <= 0) as nonpositive_quotes,
+       count(*) filter (where ask_prices[1] < bid_prices[1]) as crossed_quotes,
+       count(*) filter (where received_at is not null
+                         and bid_prices[1] > 0 and ask_prices[1] > 0
+                         and ask_prices[1] >= bid_prices[1]) as eligible_quotes
+  from market.market_quotes
+ where instrument_id = %s
+   and event_time >= %s and event_time < %s
+   and observed_at <= %s
+"""
+
+
+def load_instrument_events(conn, *, instrument_id: str, start: datetime,
+                           end: datetime, as_known_at: datetime
+                           ) -> tuple[list[QuoteEvent], list[TradeEvent]]:
+    """Read one bounded instrument slice with an explicit knowledge cutoff."""
+    start = _aware(start, "start")
+    end = _aware(end, "end")
+    cutoff = _aware(as_known_at, "as_known_at")
+    if cutoff < end:
+        raise ValueError("as_known_at must cover the requested event-time interval")
+    params = (instrument_id, start, end, cutoff)
+    with conn.cursor() as cursor:
+        cursor.execute(_QUOTE_SQL, params)
+        quotes = [QuoteEvent(
+            event_time=row[0], received_at=row[1], observed_at=row[2],
+            instrument_id=row[3],
+            bid_prices=tuple(float(v) for v in row[4]),
+            bid_sizes=tuple(float(v) for v in row[5]),
+            ask_prices=tuple(float(v) for v in row[6]),
+            ask_sizes=tuple(float(v) for v in row[7]),
+            source_event_id=row[8],
+        ) for row in cursor.fetchall()]
+        cursor.execute(_TRADE_SQL, params)
+        trades = [TradeEvent(
+            event_time=row[0], received_at=row[1], observed_at=row[2],
+            instrument_id=row[3], price=float(row[4]), quantity=float(row[5]),
+            side=int(row[6]), source_event_id=row[7],
+        ) for row in cursor.fetchall()]
+    return quotes, trades
+
+
+def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
+                   as_known_at: datetime) -> dict:
+    """Count source rows rejected before object construction."""
+    start = _aware(start, "start")
+    end = _aware(end, "end")
+    cutoff = _aware(as_known_at, "as_known_at")
+    with conn.cursor() as cursor:
+        cursor.execute(_SOURCE_QUALITY_SQL,
+                       (instrument_id, start, end, cutoff))
+        total, missing_clock, nonpositive, crossed, eligible = cursor.fetchone()
+    rejected = int(missing_clock) + int(nonpositive) + int(crossed)
+    # Categories can overlap.  This sum is a diagnostic upper bound, while the
+    # exact eligible count is reported by the loader.
+    status = ("NO_DATA" if int(total) == 0 else
+              "FAIL" if int(eligible) == 0 else
+              "WARN" if rejected else "PASS")
+    return {
+        "total_quotes": int(total),
+        "eligible_quotes": int(eligible),
+        "quotes_without_received_at": int(missing_clock),
+        "nonpositive_quotes": int(nonpositive),
+        "crossed_quotes": int(crossed),
+        "rejected_category_count_upper_bound": rejected,
+        "status": status,
+    }
+
+
+def manifest(spec: IntradayLaneSpec) -> dict:
+    """Serializable contract persisted with every intraday experiment."""
+    payload = asdict(spec)
+    payload.update({
+        "lane_version": LANE_VERSION,
+        "clock": "AVAILABLE_AT=max(received_at,observed_at)",
+        "feature_cutoff": "event_time<=decision_time and available_at<=decision_time",
+        "entry_rule": "latest visible quote at decision_time+order_latency",
+        "label_rule": "latest visible quote at entry_time+horizon",
+        "execution_model": "TAKER_BOTH_SIDES",
+        "passive_execution_model": "FIFO_NO_CANCELLATION_CREDIT_LOWER_BOUND",
+        "passive_exact_queue_supported": False,
+        "passive_exact_queue_blocker": "snapshot L10 has no order IDs/MBO queue",
+        "purge_gap_seconds": spec.purge_gap.total_seconds(),
+    })
+    return payload
